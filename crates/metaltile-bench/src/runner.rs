@@ -26,6 +26,12 @@ pub struct GpuRunner {
     pub device_name: String,
     #[cfg(target_os = "macos")]
     inner: MacosRunner,
+    /// Pre-compiled kernel and scratch buffer for SLC cache-flush.
+    /// Writing 128 MB (> M4 Max's 64 MB SLC) evicts any cached benchmark data.
+    #[cfg(target_os = "macos")]
+    slc_kernel: CompiledKernel,
+    #[cfg(target_os = "macos")]
+    slc_buf: GpuBuffer,
 }
 
 pub struct CompiledKernel {
@@ -223,8 +229,22 @@ impl GpuRunner {
     pub fn new() -> Result<Self, String> {
         #[cfg(target_os = "macos")]
         {
+            const SLC_FLUSH_MSL: &str = concat!(
+                "#include <metal_stdlib>\nusing namespace metal;\n",
+                "kernel void _mt_slc_flush(",
+                "device uint* buf [[buffer(0)]],",
+                "uint gid [[thread_position_in_grid]]",
+                ") { buf[gid] = gid; }"
+            );
+            const SLC_BYTES: usize = 128 * 1024 * 1024; // 128 MB > M4 Max 64 MB SLC
+
             let (name, inner) = MacosRunner::new()?;
-            return Ok(GpuRunner { device_name: name, inner });
+            let slc_pso = inner
+                .compile(SLC_FLUSH_MSL, "_mt_slc_flush")
+                .map_err(|e| format!("SLC flush compile: {e}"))?;
+            let slc_kernel = CompiledKernel { inner: slc_pso };
+            let slc_buf = GpuBuffer { size_bytes: SLC_BYTES, inner: inner.alloc_zeros(SLC_BYTES) };
+            return Ok(GpuRunner { device_name: name, inner, slc_kernel, slc_buf });
         }
         #[cfg(not(target_os = "macos"))]
         Err("Metal not available on this platform".into())
@@ -379,6 +399,27 @@ impl GpuRunner {
         iters: usize,
     ) -> BenchStats {
         BenchStats::from_samples(self.measure(kernel, buffers, tgs, tpg, warmup, iters))
+    }
+
+    /// Write 128 MB to a scratch buffer to evict the System Level Cache (SLC).
+    ///
+    /// Call this before each timed benchmark run so that both the reference and
+    /// MetalTile kernels start from the same cold-cache state, eliminating the
+    /// measurement noise that arises when the working set fits inside the SLC.
+    pub fn flush_slc(&self) {
+        #[cfg(target_os = "macos")]
+        {
+            const N_ELEM: usize = 128 * 1024 * 1024 / 4; // 32 M uint32 elements
+            const TPG: usize = 256;
+            self.inner.measure(
+                &self.slc_kernel.inner,
+                &[&self.slc_buf.inner],
+                [N_ELEM / TPG, 1, 1],
+                [TPG, 1, 1],
+                0,
+                1,
+            );
+        }
     }
 
     /// Returns true if the device supports simdgroup matrix operations (M3+ / Apple GPU family 9+).
