@@ -16,7 +16,6 @@ use metaltile_bench::{
         set_result_reporter,
         validate_results,
     },
-    roofline::lookup_chip,
     runner::GpuRunner,
     spec::BenchSpec,
     term::{Color, Style, paint_stderr, paint_stdout},
@@ -38,8 +37,6 @@ fn main() {
             return;
         },
     };
-
-    let chip = lookup_chip(&runner.device_name);
 
     println!(
         "{}",
@@ -67,36 +64,10 @@ fn main() {
         paint_stdout("Device:", Style::new().fg(Color::BrightBlack).bold()),
         paint_stdout(&runner.device_name, Style::new().fg(Color::BrightWhite).bold())
     );
-    if let Some(c) = &chip {
-        println!(
-            "{} {}  {} {}  {} {}",
-            paint_stdout("Peak fp16:", Style::new().fg(Color::BrightBlack).bold()),
-            paint_stdout(
-                &format!("{:.0} TFLOPS", c.peak_tflops_fp16),
-                Style::new().fg(Color::Cyan).bold()
-            ),
-            paint_stdout("Peak BW:", Style::new().fg(Color::BrightBlack).bold()),
-            paint_stdout(
-                &format!("{:.0} GB/s", c.peak_bw_gbps),
-                Style::new().fg(Color::Cyan).bold()
-            ),
-            paint_stdout("Ridge:", Style::new().fg(Color::BrightBlack).bold()),
-            paint_stdout(
-                &format!("{:.0} FLOPS/B", c.ridge_point_fp16()),
-                Style::new().fg(Color::Cyan).bold()
-            )
-        );
-    }
 
     // Run all ops, optionally narrowed to a single substring filter.
     let mut all: Vec<OpResult> = Vec::new();
-    let mut printer = {
-        let mut p = SuitePrinter::new(true);
-        if let Some(c) = &chip {
-            p = p.with_peak_gbps(c.peak_bw_gbps);
-        }
-        p
-    };
+    let mut printer = SuitePrinter::new(true);
     {
         let mut report = |result: &OpResult| {
             if matches_filter(filter.as_deref(), result.op()) {

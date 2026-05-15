@@ -477,27 +477,11 @@ pub struct SuitePrinter {
     show_correctness: bool,
     started: bool,
     last_op: Option<&'static str>,
-    /// DRAM bandwidth ceiling for the current device (GB/s).  When set,
-    /// any GB/s value that exceeds this ceiling is flagged with `~`.
-    peak_gbps: Option<f64>,
-    any_above_peak: bool,
 }
 
 impl SuitePrinter {
     pub fn new(show_correctness: bool) -> Self {
-        Self {
-            show_correctness,
-            started: false,
-            last_op: None,
-            peak_gbps: None,
-            any_above_peak: false,
-        }
-    }
-
-    /// Set the DRAM bandwidth ceiling so values above it are flagged with `~`.
-    pub fn with_peak_gbps(mut self, peak: f64) -> Self {
-        self.peak_gbps = Some(peak);
-        self
+        Self { show_correctness, started: false, last_op: None }
     }
 
     pub fn print_batch(&mut self, results: &[OpResult]) {
@@ -513,17 +497,7 @@ impl SuitePrinter {
                 println!();
             }
             self.last_op = Some(result.op());
-            // Track whether any perf value exceeds the DRAM ceiling.
-            if let Some(peak) = self.peak_gbps {
-                if result.metric() == "GB/s" {
-                    let over = result.ref_perf().map_or(false, |v| v > peak)
-                        || result.mt_perf().map_or(false, |v| v > peak);
-                    if over {
-                        self.any_above_peak = true;
-                    }
-                }
-            }
-            println!("{}", format_row(result, self.show_correctness, self.peak_gbps));
+            println!("{}", format_row(result, self.show_correctness));
         }
         self.flush();
     }
@@ -533,12 +507,6 @@ impl SuitePrinter {
             return;
         }
         println!("  {}", separator(separator_width(self.show_correctness)));
-        if self.any_above_peak {
-            println!(
-                "  {} GB/s exceeds DRAM peak — cache-resident working set or compute-bound; metric counts application bytes only",
-                paint_stdout("~", Style::new().fg(Color::BrightBlack))
-            );
-        }
         self.flush();
     }
 
@@ -583,20 +551,16 @@ fn report_result(result: &OpResult) {
     });
 }
 
-fn fmt_perf(v: Option<f64>, metric: &str, fallback: &str, peak_gbps: Option<f64>) -> String {
+fn fmt_perf(v: Option<f64>, metric: &str, fallback: &str) -> String {
     match v {
         None => fallback.into(),
-        Some(x) => {
-            let flag =
-                if metric == "GB/s" && peak_gbps.map_or(false, |p| x > p) { "~" } else { "" };
-            format!("{flag}{x:.1} {metric}")
-        },
+        Some(x) => format!("{x:.1} {metric}"),
     }
 }
 
-fn format_row(result: &OpResult, show_correctness: bool, peak_gbps: Option<f64>) -> String {
-    let ref_s = fmt_perf(result.ref_perf(), result.metric(), "—", peak_gbps);
-    let mt_s = fmt_perf(result.mt_perf(), result.metric(), "NYI", peak_gbps);
+fn format_row(result: &OpResult, show_correctness: bool) -> String {
+    let ref_s = fmt_perf(result.ref_perf(), result.metric(), "—");
+    let mt_s = fmt_perf(result.mt_perf(), result.metric(), "NYI");
     let pct_s = result.pct().map(|p| format!("{:.0}%", p)).unwrap_or_else(|| "—".into());
     let ref_cell = style_reference(&ref_s, result.ref_perf());
     let mt_cell = style_metaltile(&mt_s, result);
