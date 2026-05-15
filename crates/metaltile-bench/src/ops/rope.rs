@@ -26,7 +26,7 @@ use metaltile_codegen::msl::MslGenerator;
 use metaltile_core::ir::KernelMode;
 
 use crate::{
-    ops::{OpBench, OpResult, check_equiv, run_f16_once_as_f32, to_gbps},
+    ops::{OpBench, OpResult, bench_gbps, check_equiv, run_f16_once_as_f32},
     runner::GpuRunner,
 };
 
@@ -139,27 +139,13 @@ pub fn bench_rope(runner: &GpuRunner) -> Vec<OpResult> {
     // Reference kernel dispatch: [GX, GY, GZ] × [1,1,1]
     let ref_out = runner.buffer_zeros(n_elems * 2); // f16
     let ref_perf = rk.as_ref().and_then(|rk| {
-        let st = runner.bench(
-            rk,
-            &[
-                &inp,
-                &ref_out,
-                &offset_arr,
-                &scale_buf,
-                &strides_buf,
-                &strides_buf, // out_strides same as in_strides
-                &offset_stride_buf,
-                &n_head_buf,
-                &dummy,    // slot 8
-                &dummy,    // slot 9
-                &base_buf, // slot 10
-            ],
-            [GX, GY, GZ],
-            [1, 1, 1],
-            3,
-            10,
-        );
-        to_gbps(&st, bytes)
+        bench_gbps(runner, rk, &[
+            &inp, &ref_out,
+            &offset_arr, &scale_buf,
+            &strides_buf, &strides_buf, // out_strides same as in_strides
+            &offset_stride_buf, &n_head_buf,
+            &dummy, &dummy, &base_buf,
+        ], [GX, GY, GZ], [1, 1, 1], bytes)
     });
 
     // MT kernel buffers: (inp, out, h_stride, seq_stride, grid_x, base)
@@ -225,23 +211,11 @@ pub fn bench_rope(runner: &GpuRunner) -> Vec<OpResult> {
     // MT performance on full input
     let mt_out = runner.buffer_zeros(n_elems * 2);
     let mt_perf = mk.as_ref().and_then(|mk| {
-        let st = runner.bench(
-            mk,
-            &[&inp, &mt_out, &mt_h_stride, &mt_seq_stride, &mt_grid_x, &mt_base],
-            [GX, GY, GZ],
-            [1, 1, 1],
-            3,
-            10,
-        );
-        to_gbps(&st, bytes)
+        bench_gbps(runner, mk, &[&inp, &mt_out, &mt_h_stride, &mt_seq_stride, &mt_grid_x, &mt_base], [GX, GY, GZ], [1, 1, 1], bytes)
     });
 
     let shape = format!("B{B}H{H}L{L}D{D}");
-    if let Some(mt_perf) = mt_perf {
-        vec![BENCH.implemented(shape, ref_perf, mt_perf, equiv.expect("mk and rk both Some"))]
-    } else {
-        vec![BENCH.nyi(shape, ref_perf)]
-    }
+    vec![BENCH.result(shape, ref_perf, mt_perf, equiv)]
 }
 
 /// Convert f32 to f16 bits (simple approximation for test data).
@@ -284,4 +258,36 @@ mod tests {
             .compile(&msl, "mt_rope_f16")
             .unwrap_or_else(|e| panic!("mt_rope_f16 compile error: {e}\nMSL:\n{msl}"));
     }
+}
+
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![
+        KernelSpec {
+            op: "rope",
+            mt_kernel: "mt_rope_f16".into(),
+            metal_file: "rope.metal",
+            ref_spec: RefSpec::Literal("rope_float16"),
+            dtypes: &["f16"],
+        },
+        KernelSpec {
+            op: "rope",
+            mt_kernel: "mt_rope_f32".into(),
+            metal_file: "rope.metal",
+            ref_spec: RefSpec::None(
+                "f32 rope not yet in MT bench; MLX rope_float32 exists",
+            ),
+            dtypes: &["f32"],
+        },
+        KernelSpec {
+            op: "rope",
+            mt_kernel: "mt_rope_bf16".into(),
+            metal_file: "rope.metal",
+            ref_spec: RefSpec::None(
+                "bf16 rope not yet in MT bench; MLX rope_bfloat16 exists",
+            ),
+            dtypes: &["bf16"],
+        },
+    ]
 }

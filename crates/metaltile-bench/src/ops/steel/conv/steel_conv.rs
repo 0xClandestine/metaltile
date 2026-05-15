@@ -13,3 +13,15 @@ use crate::{ops::OpResult, runner::GpuRunner};
 static _SRC: &str = include_str!("../../../metal/steel/conv/steel_conv.metal");
 
 pub fn bench_conv2d(_runner: &GpuRunner) -> Vec<OpResult> { vec![] }
+
+use crate::ops::{KernelSpec, RefSpec};
+
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![KernelSpec {
+        op: "steel/conv/steel_conv",
+        mt_kernel: "—".into(),
+        metal_file: "steel/conv/steel_conv.metal",
+        ref_spec: RefSpec::None("2D implicit GEMM convolution not yet in MT bench"),
+        dtypes: &[],
+    }]
+}

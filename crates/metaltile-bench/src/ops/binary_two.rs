@@ -10,22 +10,20 @@
 //!   KernelMode::Elementwise
 
 use metaltile::kernel;
-use metaltile_codegen::msl::MslGenerator;
 
 use crate::{
     ops::{
         DType,
-        FLOAT_DTYPES,
+        DtypeCtx,
         OpBench,
         OpResult,
+        bench_all_dtypes,
         buffer_typed,
         check_equiv,
-        dtype_label,
-        dtype_tol,
-        elem_bytes,
+        generate_elementwise_msl,
         quantize_roundtrip,
+        bench_gbps,
         run_typed_once,
-        to_gbps,
         zeros_typed,
     },
     runner::GpuRunner,
@@ -48,20 +46,19 @@ pub fn mt_binary_two<T>(a: Tensor<T>, b: Tensor<T>, mut c: Tensor<T>, mut d: Ten
     store(d[idx], x * y);
 }
 
-pub fn bench_binary_two_f32(runner: &GpuRunner) -> Vec<OpResult> {
-    FLOAT_DTYPES.iter().flat_map(|&dt| bench_binary_two_for(runner, dt)).collect()
+fn binary_two_msl_for(dt: DType) -> String {
+    generate_elementwise_msl(|| mt_binary_two::kernel_ir_for(dt), "binary_two")
+}
+
+pub fn bench_binary_two(runner: &GpuRunner) -> Vec<OpResult> {
+    bench_all_dtypes(runner, bench_binary_two_for)
 }
 
 fn bench_binary_two_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
-    let dlabel = dtype_label(dt);
-    let eb = elem_bytes(dt);
-    let tol = dtype_tol(dt);
+    let ctx = DtypeCtx::elementwise(dt);
+    let (dlabel, eb, tol) = (ctx.label, ctx.eb, ctx.tol);
 
-    let msl =
-        MslGenerator::default().generate(&mt_binary_two::kernel_ir_for(dt)).unwrap_or_else(|e| {
-            eprintln!("[binary_two {dlabel}]: {e}");
-            String::new()
-        });
+    let msl = binary_two_msl_for(dt);
     let mk = runner.compile(&msl, "mt_binary_two").ok();
 
     // Keep inputs in [-1, 0.5] so products stay < 1: avoids f16/bf16 ULP issues at
@@ -115,42 +112,25 @@ fn bench_binary_two_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
     let d = zeros_typed(runner, N_ELEM, dt);
     let bytes = (N_ELEM * eb * 4) as f64; // 2 reads + 2 writes
     let mt_perf = mk.as_ref().and_then(|mk| {
-        to_gbps(
-            &runner.bench(mk, &[&a, &b, &c, &d], [N_ELEM.div_ceil(TPG), 1, 1], [TPG, 1, 1], 3, 10),
-            bytes,
-        )
+        bench_gbps(runner, mk, &[&a, &b, &c, &d], [N_ELEM.div_ceil(TPG), 1, 1], [TPG, 1, 1], bytes)
     });
 
     let shape = format!("N={N_ELEM} {dlabel}");
-    vec![match mt_perf {
-        Some(p) => BENCH.implemented(shape, None, p, equiv.expect("mk Some → equiv Some")),
-        None => BENCH.nyi(shape, None),
-    }]
+    vec![BENCH.result(shape, None, mt_perf, equiv)]
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+crate::bench_tests!(msl_fn: binary_two_msl_for, kernel_name: "mt_binary_two");
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
 
-    #[test]
-    fn msl_generates_for_all_dtypes() {
-        for &dt in FLOAT_DTYPES {
-            let msl = MslGenerator::default().generate(&mt_binary_two::kernel_ir_for(dt)).unwrap();
-            assert!(!msl.trim().is_empty());
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn kernels_compile() {
-        let Ok(runner) = GpuRunner::new() else {
-            return;
-        };
-        for &dt in FLOAT_DTYPES {
-            let msl = MslGenerator::default().generate(&mt_binary_two::kernel_ir_for(dt)).unwrap();
-            runner.compile(&msl, "mt_binary_two").unwrap();
-        }
-    }
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![KernelSpec {
+        op: "binary_two",
+        mt_kernel: "mt_binary_two".into(),
+        metal_file: "binary_two.metal",
+        ref_spec: RefSpec::None(
+            "no MLX equivalent — MT benchmarks 2-output fused pass that MLX doesn't expose",
+        ),
+        dtypes: FLOAT_DTYPE_STRS,
+    }]
 }

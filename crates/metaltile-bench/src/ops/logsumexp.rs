@@ -12,23 +12,20 @@
 //! MetalTile: mt_logsumexp — same algorithm via #[kernel] DSL.
 //!   KernelMode::Reduction
 
-use metaltile::{core::ir::KernelMode, kernel};
-use metaltile_codegen::msl::MslGenerator;
+use metaltile::kernel;
 
 use crate::{
     ops::{
         DType,
-        FLOAT_DTYPES,
+        DtypeCtx,
         OpBench,
         OpResult,
+        bench_all_dtypes,
         buffer_typed,
         check_equiv,
-        dtype_label,
-        dtype_tol_reduce,
-        elem_bytes,
-        mlx_tname,
+        generate_reduction_msl,
+        bench_gbps,
         run_typed_once,
-        to_gbps,
         zeros_typed,
     },
     runner::GpuRunner,
@@ -58,23 +55,16 @@ pub fn mt_logsumexp<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
 }
 
 fn logsumexp_msl_for(dt: DType) -> String {
-    let mut k = mt_logsumexp::kernel_ir_for(dt);
-    k.mode = KernelMode::Reduction;
-    MslGenerator::default().generate(&k).unwrap_or_else(|e| {
-        eprintln!("[logsumexp {dt:?}]: {e}");
-        String::new()
-    })
+    generate_reduction_msl(|| mt_logsumexp::kernel_ir_for(dt), "logsumexp")
 }
 
 pub fn bench_logsumexp(runner: &GpuRunner) -> Vec<OpResult> {
-    FLOAT_DTYPES.iter().flat_map(|&dt| bench_logsumexp_for(runner, dt)).collect()
+    bench_all_dtypes(runner, bench_logsumexp_for)
 }
 
 fn bench_logsumexp_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
-    let tn = mlx_tname(dt);
-    let dlabel = dtype_label(dt);
-    let eb = elem_bytes(dt);
-    let tol = dtype_tol_reduce(dt);
+    let ctx = DtypeCtx::reduce(dt);
+    let (tn, dlabel, eb, tol) = (ctx.tn, ctx.label, ctx.eb, ctx.tol);
 
     let msl = logsumexp_msl_for(dt);
     let mk = runner.compile(&msl, "mt_logsumexp").ok();
@@ -133,48 +123,28 @@ fn bench_logsumexp_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
         let ref_perf = rk.as_ref().and_then(|r| {
             let out = zeros_typed(runner, b, dt);
-            let st = runner.bench(r, &[&inp, &out, &ref_n], [b, 1, 1], [256, 1, 1], 3, 10);
-            to_gbps(&st, bytes)
+            bench_gbps(runner, r, &[&inp, &out, &ref_n], [b, 1, 1], [256, 1, 1], bytes)
         });
         let mt_perf = mk.as_ref().and_then(|m| {
             let out = zeros_typed(runner, b, dt);
-            let st = runner.bench(m, &[&inp, &out, &mt_n], [b, 1, 1], [256, 1, 1], 3, 10);
-            to_gbps(&st, bytes)
+            bench_gbps(runner, m, &[&inp, &out, &mt_n], [b, 1, 1], [256, 1, 1], bytes)
         });
         let shape = format!("B={b} N={n} {dlabel}");
-        let result = if let Some(mt_perf) = mt_perf {
-            BENCH.implemented(shape, ref_perf, mt_perf, equiv.clone())
-        } else {
-            BENCH.nyi(shape, ref_perf)
-        };
-        results.push(result);
+        results.push(BENCH.result(shape, ref_perf, mt_perf, Some(equiv)));
     }
     results
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+crate::bench_tests!(msl_fn: logsumexp_msl_for, kernel_name: "mt_logsumexp");
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
 
-    #[test]
-    fn msl_generates_for_all_dtypes() {
-        for &dt in FLOAT_DTYPES {
-            let msl = logsumexp_msl_for(dt);
-            assert!(!msl.trim().is_empty(), "MSL empty for {dt:?}");
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn kernels_compile() {
-        let Ok(runner) = GpuRunner::new() else {
-            return;
-        };
-        for &dt in FLOAT_DTYPES {
-            let msl = logsumexp_msl_for(dt);
-            runner.compile(&msl, "mt_logsumexp").unwrap();
-        }
-    }
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![KernelSpec {
+        op: "logsumexp",
+        mt_kernel: "mt_logsumexp".into(),
+        metal_file: "logsumexp.metal",
+        ref_spec: RefSpec::Format("looped_logsumexp_{tn}"),
+        dtypes: FLOAT_DTYPE_STRS,
+    }]
 }

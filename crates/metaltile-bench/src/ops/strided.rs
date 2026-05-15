@@ -17,17 +17,14 @@ use metaltile_codegen::msl::MslGenerator;
 use crate::{
     ops::{
         DType,
-        FLOAT_DTYPES,
+        DtypeCtx,
         OpBench,
         OpResult,
+        bench_all_dtypes,
         buffer_typed,
         check_equiv,
-        dtype_label,
-        dtype_tol,
-        elem_bytes,
-        mlx_tname,
+        bench_gbps,
         run_typed_once,
-        to_gbps,
         zeros_typed,
     },
     runner::GpuRunner,
@@ -63,14 +60,12 @@ fn strided_copy_msl_for(dt: DType) -> String {
 }
 
 pub fn bench_strided(runner: &GpuRunner) -> Vec<OpResult> {
-    FLOAT_DTYPES.iter().flat_map(|&dt| bench_strided_for(runner, dt)).collect()
+    bench_all_dtypes(runner, bench_strided_for)
 }
 
 fn bench_strided_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
-    let dlabel = dtype_label(dt);
-    let tn = mlx_tname(dt);
-    let eb = elem_bytes(dt);
-    let tol = dtype_tol(dt);
+    let ctx = DtypeCtx::elementwise(dt);
+    let (tn, dlabel, eb, tol) = (ctx.tn, ctx.label, ctx.eb, ctx.tol);
 
     let msl = strided_copy_msl_for(dt);
     let mk = runner.compile(&msl, "mt_strided_copy").ok();
@@ -167,51 +162,28 @@ fn bench_strided_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
     let ref_perf = rk.as_ref().and_then(|rk| {
         let out = zeros_typed(runner, M * N, dt);
-        let st = runner.bench(
-            rk,
-            &[&full_src_buf, &out, &full_strides],
-            [N, M, 1],
-            [TPG, TPG, 1],
-            3,
-            10,
-        );
-        to_gbps(&st, bytes)
+        bench_gbps(runner, rk, &[&full_src_buf, &out, &full_strides], [N, M, 1], [TPG, TPG, 1], bytes)
     });
 
     let mt_perf = mk.as_ref().and_then(|mk| {
         let out = zeros_typed(runner, M * N, dt);
-        let st = runner.bench(mk, &[&full_src_buf, &out, &full_cols], [M, N, 1], [1, 1, 1], 3, 10);
-        to_gbps(&st, bytes)
+        bench_gbps(runner, mk, &[&full_src_buf, &out, &full_cols], [M, N, 1], [1, 1, 1], bytes)
     });
 
     let shape = format!("M={M} N={N}+{PAD} {dlabel}");
-    vec![match mt_perf {
-        Some(p) => BENCH.implemented(shape, ref_perf, p, equiv),
-        None => BENCH.nyi(shape, ref_perf),
-    }]
+    vec![BENCH.result(shape, ref_perf, mt_perf, Some(equiv))]
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+crate::bench_tests!(msl_fn: strided_copy_msl_for, kernel_name: "mt_strided_copy");
 
-    #[test]
-    fn msl_generates_for_all_dtypes() {
-        for &dt in FLOAT_DTYPES {
-            let msl = strided_copy_msl_for(dt);
-            assert!(!msl.trim().is_empty(), "MSL empty for {dt:?}");
-        }
-    }
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn kernels_compile() {
-        let Ok(runner) = GpuRunner::new() else {
-            return;
-        };
-        for &dt in FLOAT_DTYPES {
-            let msl = strided_copy_msl_for(dt);
-            runner.compile(&msl, "mt_strided_copy").unwrap();
-        }
-    }
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![KernelSpec {
+        op: "strided",
+        mt_kernel: "mt_strided_copy".into(),
+        metal_file: "copy.metal",
+        ref_spec: RefSpec::Format("copy_g_nd2{tn}{tn}"),
+        dtypes: FLOAT_DTYPE_STRS,
+    }]
 }

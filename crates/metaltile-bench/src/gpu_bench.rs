@@ -7,9 +7,9 @@ use metaltile_bench::{
     ops::{
         OpResult,
         SuitePrinter,
-        bench_elementwise_f32,
-        bench_rms_norm_f32,
-        bench_softmax_f32,
+        bench_elementwise,
+        bench_rms_norm,
+        bench_softmax,
         set_result_reporter,
         validate_results,
     },
@@ -39,9 +39,9 @@ fn main() {
     {
         let mut report = |result: &OpResult| printer.print_batch(std::slice::from_ref(result));
         let _reporter = set_result_reporter(&mut report);
-        all.extend(bench_elementwise_f32(&runner));
-        all.extend(bench_softmax_f32(&runner));
-        all.extend(bench_rms_norm_f32(&runner));
+        all.extend(bench_elementwise(&runner));
+        all.extend(bench_softmax(&runner));
+        all.extend(bench_rms_norm(&runner));
     }
     validate_results(&all).unwrap_or_else(|err| panic!("{err}"));
     printer.finish();

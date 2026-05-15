@@ -19,3 +19,17 @@ use crate::{ops::OpResult, runner::GpuRunner};
 static _SRC: &str = include_str!("../../../metal/steel/attn/steel_attention.metal");
 
 pub fn bench_steel_attention(_runner: &GpuRunner) -> Vec<OpResult> { vec![] }
+
+use crate::ops::{KernelSpec, RefSpec};
+
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![KernelSpec {
+        op: "steel/attn/steel_attention",
+        mt_kernel: "—".into(),
+        metal_file: "steel/attn/steel_attention.metal",
+        ref_spec: RefSpec::None(
+            "prefill flash-attention requires online softmax with per-tile rescaling              and tiled Q/K/V staging; not yet in DSL",
+        ),
+        dtypes: &[],
+    }]
+}

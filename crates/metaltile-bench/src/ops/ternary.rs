@@ -10,23 +10,20 @@
 //!   KernelMode::Elementwise
 
 use metaltile::kernel;
-use metaltile_codegen::msl::MslGenerator;
 
 use crate::{
     ops::{
         DType,
-        FLOAT_DTYPES,
+        DtypeCtx,
         OpBench,
         OpResult,
+        bench_all_dtypes,
         buffer_typed,
         check_equiv,
-        dtype_label,
-        dtype_tol,
-        elem_bytes,
-        mlx_tname,
+        generate_elementwise_msl,
         quantize_roundtrip,
+        bench_gbps,
         run_typed_once,
-        to_gbps,
         zeros_typed,
     },
     runner::GpuRunner,
@@ -50,20 +47,19 @@ pub fn mt_select<T>(cond: Tensor<T>, on_true: Tensor<T>, on_false: Tensor<T>, ou
     store(out[idx], select(c, t, f));
 }
 
-pub fn bench_select_f32(runner: &GpuRunner) -> Vec<OpResult> {
-    FLOAT_DTYPES.iter().flat_map(|&dt| bench_select_for(runner, dt)).collect()
+fn select_msl_for(dt: DType) -> String {
+    generate_elementwise_msl(|| mt_select::kernel_ir_for(dt), "select")
+}
+
+pub fn bench_select(runner: &GpuRunner) -> Vec<OpResult> {
+    bench_all_dtypes(runner, bench_select_for)
 }
 
 fn bench_select_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
-    let tn = mlx_tname(dt);
-    let dlabel = dtype_label(dt);
-    let eb = elem_bytes(dt);
-    let tol = dtype_tol(dt);
+    let ctx = DtypeCtx::elementwise(dt);
+    let (tn, dlabel, eb, tol) = (ctx.tn, ctx.label, ctx.eb, ctx.tol);
 
-    let msl = MslGenerator::default().generate(&mt_select::kernel_ir_for(dt)).unwrap_or_else(|e| {
-        eprintln!("[select {dlabel}]: {e}");
-        String::new()
-    });
+    let msl = select_msl_for(dt);
     let mk = runner.compile(&msl, "mt_select").ok();
     let rk = runner.compile(SRC, &format!("v_Select{tn}")).ok();
 
@@ -135,15 +131,7 @@ fn bench_select_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
     let ref_perf = rk.as_ref().and_then(|rk| {
         let out = zeros_typed(runner, N_ELEM, dt);
-        let st = runner.bench(
-            rk,
-            &[&ref_cond_perf, &true_perf, &false_perf, &out, &ref_size_perf],
-            [N_ELEM.div_ceil(TPG), 1, 1],
-            [TPG, 1, 1],
-            3,
-            10,
-        );
-        to_gbps(&st, bytes)
+        bench_gbps(runner, rk, &[&ref_cond_perf, &true_perf, &false_perf, &out, &ref_size_perf], [N_ELEM.div_ceil(TPG), 1, 1], [TPG, 1, 1], bytes)
     });
 
     let mt_cond_perf = buffer_typed(
@@ -153,49 +141,23 @@ fn bench_select_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
     );
     let mt_perf = mk.as_ref().and_then(|mk| {
         let out = zeros_typed(runner, N_ELEM, dt);
-        let st = runner.bench(
-            mk,
-            &[&mt_cond_perf, &true_perf, &false_perf, &out],
-            [N_ELEM.div_ceil(TPG), 1, 1],
-            [TPG, 1, 1],
-            3,
-            10,
-        );
-        to_gbps(&st, bytes)
+        bench_gbps(runner, mk, &[&mt_cond_perf, &true_perf, &false_perf, &out], [N_ELEM.div_ceil(TPG), 1, 1], [TPG, 1, 1], bytes)
     });
 
     let shape = format!("N={N_ELEM} {dlabel}");
-    let result = if let Some(mt_perf) = mt_perf {
-        BENCH.implemented(shape, ref_perf, mt_perf, equiv)
-    } else {
-        BENCH.nyi(shape, ref_perf)
-    };
-    vec![result]
+    vec![BENCH.result(shape, ref_perf, mt_perf, Some(equiv))]
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+crate::bench_tests!(msl_fn: select_msl_for, kernel_name: "mt_select");
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
 
-    #[test]
-    fn msl_generates_for_all_dtypes() {
-        for &dt in FLOAT_DTYPES {
-            let msl = MslGenerator::default().generate(&mt_select::kernel_ir_for(dt)).unwrap();
-            assert!(!msl.trim().is_empty());
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn kernels_compile() {
-        let Ok(runner) = GpuRunner::new() else {
-            return;
-        };
-        for &dt in FLOAT_DTYPES {
-            let msl = MslGenerator::default().generate(&mt_select::kernel_ir_for(dt)).unwrap();
-            runner.compile(&msl, "mt_select").unwrap();
-        }
-    }
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![KernelSpec {
+        op: "ternary",
+        mt_kernel: "mt_select".into(),
+        metal_file: "ternary.metal",
+        ref_spec: RefSpec::Format("v_Select{tn}"),
+        dtypes: FLOAT_DTYPE_STRS,
+    }]
 }

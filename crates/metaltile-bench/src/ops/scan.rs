@@ -21,7 +21,7 @@ use metaltile::{core::ir::KernelMode, kernel};
 use metaltile_codegen::msl::MslGenerator;
 
 use crate::{
-    ops::{OpBench, OpResult, check_equiv, run_f32_once, to_gbps},
+    ops::{OpBench, OpResult, bench_gbps, check_equiv, run_f32_once},
     runner::GpuRunner,
 };
 
@@ -155,25 +155,16 @@ pub fn bench_scan(runner: &GpuRunner) -> Vec<OpResult> {
 
         let ref_out = runner.buffer_zeros(rows * n * 4);
         let ref_perf = rk.as_ref().and_then(|rk| {
-            let st =
-                runner.bench(rk, &[&inp_buf, &ref_out, &ns_u64], [1, rows, 1], [TPG, 1, 1], 3, 10);
-            to_gbps(&st, bytes)
+            bench_gbps(runner, rk, &[&inp_buf, &ref_out, &ns_u64], [1, rows, 1], [TPG, 1, 1], bytes)
         });
 
         let mt_out = runner.buffer_zeros(rows * n * 4);
         let mt_perf = mk.as_ref().and_then(|mk| {
-            let st =
-                runner.bench(mk, &[&inp_buf, &mt_out, &ns_u32], [1, rows, 1], [TPG, 1, 1], 3, 10);
-            to_gbps(&st, bytes)
+            bench_gbps(runner, mk, &[&inp_buf, &mt_out, &ns_u32], [1, rows, 1], [TPG, 1, 1], bytes)
         });
 
         let shape = format!("B={rows} N={n} f32");
-        let result = if let Some(mt_perf) = mt_perf {
-            BENCH.implemented(shape, ref_perf, mt_perf, equiv.expect("mk Some → equiv Some"))
-        } else {
-            BENCH.nyi(shape, ref_perf)
-        };
-        results.push(result);
+        results.push(BENCH.result(shape, ref_perf, mt_perf, equiv));
     }
     results
 }
@@ -203,4 +194,36 @@ mod tests {
             .compile(&msl, "mt_scan_f32")
             .unwrap_or_else(|e| panic!("mt_scan_f32 compile error: {e}\nMSL:\n{msl}"));
     }
+}
+
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![
+        KernelSpec {
+            op: "scan",
+            mt_kernel: "mt_scan_f32".into(),
+            metal_file: "scan.metal",
+            ref_spec: RefSpec::Literal("contig_scan_inclusive_sum_float32_float32"),
+            dtypes: &["f32"],
+        },
+        KernelSpec {
+            op: "scan",
+            mt_kernel: "mt_scan_f16".into(),
+            metal_file: "scan.metal",
+            ref_spec: RefSpec::None(
+                "f16/bf16 scan not yet in MT bench;                  MLX contig_scan_inclusive_sum_float16_float16 exists",
+            ),
+            dtypes: &["f16"],
+        },
+        KernelSpec {
+            op: "scan",
+            mt_kernel: "mt_scan_bf16".into(),
+            metal_file: "scan.metal",
+            ref_spec: RefSpec::None(
+                "f16/bf16 scan not yet in MT bench;                  MLX contig_scan_inclusive_sum_bfloat16_bfloat16 exists",
+            ),
+            dtypes: &["bf16"],
+        },
+    ]
 }

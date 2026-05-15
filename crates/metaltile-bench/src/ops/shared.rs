@@ -1,6 +1,8 @@
 use std::{cell::RefCell, io::Write, ptr::NonNull};
 
 pub use metaltile::core::dtype::DType;
+use metaltile::core::ir::{Kernel, KernelMode};
+use metaltile_codegen::msl::MslGenerator;
 
 use crate::{
     runner::{CompiledKernel, GpuBuffer, GpuRunner},
@@ -11,6 +13,8 @@ use crate::{
 
 /// All floating-point dtypes to iterate over in multi-variant benches.
 pub const FLOAT_DTYPES: &[DType] = &[DType::F32, DType::F16, DType::BF16];
+/// Short names for the three floating-point dtypes, matching MLX convention.
+pub const FLOAT_DTYPE_STRS: &[&str] = &["f32", "f16", "bf16"];
 /// Integer dtypes supported by MLX elementwise and copy kernels.
 pub const INTEGER_DTYPES: &[DType] = &[DType::I32, DType::U32, DType::I8, DType::U8];
 
@@ -201,7 +205,7 @@ thread_local! {
 pub const DEFAULT_MIN_COSINE_SIM: f32 = 0.999;
 
 /// Result of a numerical equivalence check between the reference and MT kernels.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct EquivResult {
     /// Number of elements compared.
     pub n_checked: usize,
@@ -295,6 +299,7 @@ pub struct OpBench {
 
 impl OpBench {
     pub const fn new(op: &'static str, metric: &'static str) -> Self { Self { op, metric } }
+    pub const fn op(&self) -> &'static str { self.op }
 
     pub fn result(
         &self,
@@ -687,6 +692,184 @@ pub(crate) fn to_gflops(st: &crate::stats::BenchStats, flops: f64) -> Option<f64
 
 pub(crate) fn to_gbps(st: &crate::stats::BenchStats, bytes: f64) -> Option<f64> {
     st.is_valid().then(|| bytes / (st.mean_us * 1e-6) / 1e9)
+}
+
+/// Run `kernel` for performance measurement and return throughput in GB/s.
+///
+/// Uses the standard 3-warmup / 10-iteration schedule. Returns `None` if the
+/// benchmark produced no valid timing samples (e.g. on non-macOS).
+pub fn bench_gbps(
+    runner: &GpuRunner,
+    kernel: &CompiledKernel,
+    buffers: &[&GpuBuffer],
+    grid: [usize; 3],
+    tpg: [usize; 3],
+    bytes: f64,
+) -> Option<f64> {
+    to_gbps(&runner.bench(kernel, buffers, grid, tpg, 3, 10), bytes)
+}
+
+// ── Shared bench abstractions ─────────────────────────────────────────────────
+
+/// Generate MSL for an elementwise kernel IR produced by `make_ir`.
+///
+/// Uses default `KernelMode::Elementwise`. `label` is used only in the error message.
+pub fn generate_elementwise_msl<F>(make_ir: F, label: &str) -> String
+where F: Fn() -> Kernel {
+    MslGenerator::default().generate(&make_ir()).unwrap_or_else(|e| {
+        eprintln!("[{label}]: {e}");
+        String::new()
+    })
+}
+
+/// Generate MSL for a reduction kernel IR produced by `make_ir`, setting `Reduction` mode.
+///
+/// `label` is used only in the error message when code generation fails.
+pub fn generate_reduction_msl<F>(make_ir: F, label: &str) -> String
+where F: Fn() -> Kernel {
+    let mut k = make_ir();
+    k.mode = KernelMode::Reduction;
+    MslGenerator::default().generate(&k).unwrap_or_else(|e| {
+        eprintln!("[{label}]: {e}");
+        String::new()
+    })
+}
+
+/// Per-dtype context bundled at the top of every bench function.
+pub struct DtypeCtx {
+    pub dt: DType,
+    /// MLX template-name suffix (e.g. `"float32"`).
+    pub tn: &'static str,
+    /// Short label used in shape strings (e.g. `"f32"`).
+    pub label: &'static str,
+    /// Bytes per element.
+    pub eb: usize,
+    /// Absolute-error tolerance for correctness checks.
+    pub tol: f32,
+}
+
+impl DtypeCtx {
+    /// Context for reduction ops — uses `dtype_tol_reduce`.
+    pub fn reduce(dt: DType) -> Self {
+        Self {
+            dt,
+            tn: mlx_tname(dt),
+            label: dtype_label(dt),
+            eb: elem_bytes(dt),
+            tol: dtype_tol_reduce(dt),
+        }
+    }
+
+    /// Context for elementwise ops — uses `dtype_tol`.
+    pub fn elementwise(dt: DType) -> Self {
+        Self {
+            dt,
+            tn: mlx_tname(dt),
+            label: dtype_label(dt),
+            eb: elem_bytes(dt),
+            tol: dtype_tol(dt),
+        }
+    }
+}
+
+/// Run `f` for each dtype in `FLOAT_DTYPES` and collect all results.
+pub fn bench_all_dtypes<F>(runner: &GpuRunner, f: F) -> Vec<OpResult>
+where F: Fn(&GpuRunner, DType) -> Vec<OpResult> {
+    FLOAT_DTYPES.iter().flat_map(|&dt| f(runner, dt)).collect()
+}
+
+/// Emit the standard two-test block for a reduction op.
+///
+/// Generates:
+/// - `msl_generates_for_all_dtypes` — calls `$msl_fn(dt)` for each float dtype
+/// - `kernels_compile` (macos only) — compiles the generated MSL
+///
+/// Usage:
+/// ```ignore
+/// bench_tests!(msl_fn: layer_norm_msl_for, kernel_name: "mt_layer_norm");
+/// ```
+#[macro_export]
+macro_rules! bench_tests {
+    (msl_fn: $msl_fn:ident, kernel_name: $name:expr) => {
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+
+            #[test]
+            fn msl_generates_for_all_dtypes() {
+                for &dt in $crate::ops::FLOAT_DTYPES {
+                    let msl = $msl_fn(dt);
+                    assert!(!msl.trim().is_empty(), "MSL empty for {dt:?}");
+                }
+            }
+
+            #[cfg(target_os = "macos")]
+            #[test]
+            fn kernels_compile() {
+                let Ok(runner) = $crate::runner::GpuRunner::new() else {
+                    return;
+                };
+                for &dt in $crate::ops::FLOAT_DTYPES {
+                    runner.compile(&$msl_fn(dt), $name).unwrap();
+                }
+            }
+        }
+    };
+}
+
+// ── Kernel coverage types ─────────────────────────────────────────────────────
+
+/// How a MetalTile bench maps to an MLX reference Metal kernel.
+#[derive(Debug, Clone)]
+pub enum RefSpec {
+    /// A fixed kernel name with no dtype substitution.
+    Literal(&'static str),
+    /// Pattern with `{tn}` substituted for the MLX dtype token
+    /// (`float32`, `float16`, `bfloat16`).
+    Format(&'static str),
+    /// MLX unary pattern: `v_{Op}{tn}{tn}`.
+    UnaryV(&'static str),
+    /// No MLX reference kernel; string contains the reason.
+    None(&'static str),
+}
+
+impl RefSpec {
+    /// Resolve to a concrete kernel name for the given short dtype
+    /// (`"f32"`, `"f16"`, `"bf16"`). Returns `None` for `RefSpec::None`.
+    pub fn resolve(&self, dtype: &str) -> Option<String> {
+        let tn = match dtype {
+            "f32" => "float32",
+            "f16" => "float16",
+            "bf16" => "bfloat16",
+            other => other,
+        };
+        match self {
+            RefSpec::Literal(s) => Some(s.to_string()),
+            RefSpec::Format(tpl) => Some(tpl.replace("{tn}", tn)),
+            RefSpec::UnaryV(op) => Some(format!("v_{op}{tn}{tn}")),
+            RefSpec::None(_) => None,
+        }
+    }
+
+    /// Returns the reason string if this is `RefSpec::None`, otherwise `None`.
+    pub fn reason(&self) -> Option<&'static str> {
+        if let RefSpec::None(r) = self { Some(r) } else { None }
+    }
+}
+
+/// Single entry in the MT vs MLX reference coverage table.
+pub struct KernelSpec {
+    /// Logical op group (e.g. `"unary"`, `"binary"`, `"steel/gemm/steel_gemm_fused"`).
+    pub op: &'static str,
+    /// MetalTile kernel function name (e.g. `"mt_exp"`), or `"—"` for NYI.
+    pub mt_kernel: String,
+    /// Metal source file path relative to `src/metal/`.
+    pub metal_file: &'static str,
+    /// How to find the MLX reference kernel for this entry.
+    pub ref_spec: RefSpec,
+    /// Short dtype names this entry covers (`"f32"`, `"f16"`, `"bf16"`).
+    /// Empty slice means dtype-agnostic (single table row).
+    pub dtypes: &'static [&'static str],
 }
 
 #[cfg(test)]

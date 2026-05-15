@@ -18,7 +18,7 @@ use metaltile::kernel;
 use metaltile_codegen::msl::MslGenerator;
 
 use crate::{
-    ops::{EquivResult, EquivTolerance, OpBench, OpResult, check_equiv_with, to_gbps},
+    ops::{EquivResult, EquivTolerance, OpBench, OpResult, bench_gbps, check_equiv_with},
     runner::GpuRunner,
 };
 
@@ -128,8 +128,7 @@ pub fn bench_fp_quantized(runner: &GpuRunner) -> Vec<OpResult> {
 
     let ref_perf = rk.as_ref().and_then(|rk| {
         let out = runner.buffer_zeros(N * 4);
-        let st = runner.bench(rk, &[&inp, &out], [1, N / 32, 1], [32, 1, 1], 3, 10);
-        to_gbps(&st, bytes)
+        bench_gbps(runner, rk, &[&inp, &out], [1, N / 32, 1], [32, 1, 1], bytes)
     });
 
     let mt_msl = fp4_msl().ok();
@@ -159,8 +158,7 @@ pub fn bench_fp_quantized(runner: &GpuRunner) -> Vec<OpResult> {
     let n_buf = runner.buffer_u32(N as u32);
     let mt_perf = mk.as_ref().and_then(|mk| {
         let out = runner.buffer_zeros(N * 4);
-        let st = runner.bench(mk, &[&inp, &out, &n_buf], [N / TPG, 1, 1], [TPG, 1, 1], 3, 10);
-        to_gbps(&st, bytes)
+        bench_gbps(runner, mk, &[&inp, &out, &n_buf], [N / TPG, 1, 1], [TPG, 1, 1], bytes)
     });
 
     let shape = format!("N={}M f32 gs32", N / (1024 * 1024));
@@ -230,4 +228,16 @@ mod tests {
             assert!((r - m).abs() < 0.5, "fp4 mismatch[{i}]: ref={r} mt={m}");
         }
     }
+}
+
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![KernelSpec {
+        op: "fp_quantized",
+        mt_kernel: "mt_fp4_quant_dequant".into(),
+        metal_file: "fp_quantized.metal",
+        ref_spec: RefSpec::Literal(REF_NAME),
+        dtypes: &[],
+    }]
 }

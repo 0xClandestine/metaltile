@@ -21,7 +21,7 @@ use metaltile::{core::ir::KernelMode, kernel};
 use metaltile_codegen::msl::MslGenerator;
 
 use crate::{
-    ops::{OpBench, OpResult, check_equiv, run_f32_once, to_gbps},
+    ops::{OpBench, OpResult, bench_gbps, check_equiv, run_f32_once},
     runner::GpuRunner,
 };
 
@@ -266,15 +266,7 @@ pub fn bench_arg_reduce(runner: &GpuRunner) -> Vec<OpResult> {
     let ref_out = runner.buffer_zeros(4);
 
     let ref_perf = rk.as_ref().and_then(|rk| {
-        let st = runner.bench(
-            rk,
-            &[&inp_buf, &ref_out, &dummy, &dummy, &dummy, &ndim, &ax_stride, &ax_size],
-            [TPG, 1, 1],
-            [TPG, 1, 1],
-            3,
-            10,
-        );
-        to_gbps(&st, bytes)
+        bench_gbps(runner, rk, &[&inp_buf, &ref_out, &dummy, &dummy, &dummy, &ndim, &ax_stride, &ax_size], [TPG, 1, 1], [TPG, 1, 1], bytes)
     });
 
     let equiv = mk.as_ref().map(|mk| {
@@ -292,17 +284,11 @@ pub fn bench_arg_reduce(runner: &GpuRunner) -> Vec<OpResult> {
     let mt_out = runner.buffer_zeros(4);
 
     let mt_perf = mk.as_ref().and_then(|mk| {
-        let st = runner.bench(mk, &[&inp_buf, &mt_out, &ns_u32], [1, 1, 1], [TPG, 1, 1], 3, 10);
-        to_gbps(&st, bytes)
+        bench_gbps(runner, mk, &[&inp_buf, &mt_out, &ns_u32], [1, 1, 1], [TPG, 1, 1], bytes)
     });
 
     let shape = format!("N={N} f32");
-    let result = if let Some(mt_perf) = mt_perf {
-        BENCH.implemented(shape, ref_perf, mt_perf, equiv.expect("mk Some → equiv Some"))
-    } else {
-        BENCH.nyi(shape, ref_perf)
-    };
-    vec![result]
+    vec![BENCH.result(shape, ref_perf, mt_perf, equiv)]
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -329,4 +315,36 @@ mod tests {
             .compile(&msl, "mt_argmax_f32")
             .unwrap_or_else(|e| panic!("mt_argmax_f32 compile error: {e}\nMSL:\n{msl}"));
     }
+}
+
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![
+        KernelSpec {
+            op: "arg_reduce",
+            mt_kernel: "mt_argmax_f32".into(),
+            metal_file: "arg_reduce.metal",
+            ref_spec: RefSpec::Literal("argmax_float32"),
+            dtypes: &["f32"],
+        },
+        KernelSpec {
+            op: "arg_reduce",
+            mt_kernel: "mt_argmax_f16".into(),
+            metal_file: "arg_reduce.metal",
+            ref_spec: RefSpec::None(
+                "f16/bf16 argmax not yet in MT bench; MLX argmax_float16 exists",
+            ),
+            dtypes: &["f16"],
+        },
+        KernelSpec {
+            op: "arg_reduce",
+            mt_kernel: "mt_argmax_bf16".into(),
+            metal_file: "arg_reduce.metal",
+            ref_spec: RefSpec::None(
+                "f16/bf16 argmax not yet in MT bench; MLX argmax_bfloat16 exists",
+            ),
+            dtypes: &["bf16"],
+        },
+    ]
 }

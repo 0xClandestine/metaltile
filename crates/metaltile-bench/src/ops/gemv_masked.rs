@@ -7,23 +7,21 @@
 //! MetalTile: mt_gemv_masked — per-row reduction with mask multiply via #[kernel] DSL.
 //!   KernelMode::Reduction
 
-use metaltile::{core::ir::KernelMode, kernel};
-use metaltile_codegen::msl::MslGenerator;
+use metaltile::kernel;
 
 use crate::{
     ops::{
         DType,
-        FLOAT_DTYPES,
+        DtypeCtx,
         OpBench,
         OpResult,
+        bench_all_dtypes,
         buffer_typed,
         check_equiv,
-        dtype_label,
-        dtype_tol,
-        elem_bytes,
+        generate_reduction_msl,
         quantize_roundtrip,
+        bench_gbps,
         run_typed_once,
-        to_gbps,
         zeros_typed,
     },
     runner::GpuRunner,
@@ -63,12 +61,7 @@ pub fn mt_gemv_masked<T>(
 // ── Bench ─────────────────────────────────────────────────────────────────────
 
 fn gemv_masked_msl_for(dt: DType) -> String {
-    let mut k = mt_gemv_masked::kernel_ir_for(dt);
-    k.mode = KernelMode::Reduction;
-    MslGenerator::default().generate(&k).unwrap_or_else(|e| {
-        eprintln!("[gemv_masked {dt:?}]: {e}");
-        String::new()
-    })
+    generate_reduction_msl(|| mt_gemv_masked::kernel_ir_for(dt), "gemv_masked")
 }
 
 fn cpu_gemv_masked(mat: &[f32], vec: &[f32], mask: &[f32], m: usize, k: usize) -> Vec<f32> {
@@ -82,13 +75,13 @@ fn cpu_gemv_masked(mat: &[f32], vec: &[f32], mask: &[f32], m: usize, k: usize) -
 }
 
 pub fn bench_gemv_masked(runner: &GpuRunner) -> Vec<OpResult> {
-    FLOAT_DTYPES.iter().flat_map(|&dt| bench_gemv_masked_for(runner, dt)).collect()
+    bench_all_dtypes(runner, bench_gemv_masked_for)
 }
 
 fn bench_gemv_masked_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
-    let dlabel = dtype_label(dt);
-    let eb = elem_bytes(dt);
-    let tol = dtype_tol(dt).max(1e-2);
+    let ctx = DtypeCtx::elementwise(dt);
+    let (dlabel, eb) = (ctx.label, ctx.eb);
+    let tol = ctx.tol.max(1e-2);
 
     let msl = gemv_masked_msl_for(dt);
     let mk = runner.compile(&msl, "mt_gemv_masked").ok();
@@ -143,49 +136,27 @@ fn bench_gemv_masked_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
         let mt_out = zeros_typed(runner, m, dt);
         let mt_perf = mk.as_ref().and_then(|mk| {
-            let st = runner.bench(
-                mk,
-                &[&mat_buf, &vec_buf, &mask_buf, &mt_out, &k_buf],
-                [m, 1, 1],
-                [TPG, 1, 1],
-                3,
-                10,
-            );
-            to_gbps(&st, bytes)
+            bench_gbps(runner, mk, &[&mat_buf, &vec_buf, &mask_buf, &mt_out, &k_buf], [m, 1, 1], [TPG, 1, 1], bytes)
         });
 
         let shape = format!("M={m} K={k} {dlabel}");
-        results.push(match mt_perf {
-            Some(p) => BENCH.implemented(shape, ref_perf, p, equiv.expect("mk Some → equiv Some")),
-            None => BENCH.nyi(shape, ref_perf),
-        });
+        results.push(BENCH.result(shape, ref_perf, mt_perf, equiv));
     }
     results
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+crate::bench_tests!(msl_fn: gemv_masked_msl_for, kernel_name: "mt_gemv_masked");
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
 
-    #[test]
-    fn msl_generates_for_all_dtypes() {
-        for &dt in FLOAT_DTYPES {
-            let msl = gemv_masked_msl_for(dt);
-            assert!(!msl.trim().is_empty(), "MSL empty for {dt:?}");
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn kernels_compile() {
-        let Ok(runner) = GpuRunner::new() else {
-            return;
-        };
-        for &dt in FLOAT_DTYPES {
-            let msl = gemv_masked_msl_for(dt);
-            runner.compile(&msl, "mt_gemv_masked").unwrap();
-        }
-    }
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![KernelSpec {
+        op: "gemv_masked",
+        mt_kernel: "mt_gemv_masked".into(),
+        metal_file: "gemv_masked.metal",
+        ref_spec: RefSpec::None(
+            "no nomask/nomask variant in instantiate_gemv_base;              all MLX variants require explicit mask buffers",
+        ),
+        dtypes: FLOAT_DTYPE_STRS,
+    }]
 }

@@ -17,3 +17,17 @@ use crate::{ops::OpResult, runner::GpuRunner};
 static _SRC: &str = include_str!("../metal/fence.metal");
 
 pub fn bench_fence(_runner: &GpuRunner) -> Vec<OpResult> { vec![] }
+
+use crate::ops::{KernelSpec, RefSpec};
+
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![KernelSpec {
+        op: "fence",
+        mt_kernel: "—".into(),
+        metal_file: "fence.metal",
+        ref_spec: RefSpec::None(
+            "GPU memory barrier — handled by Metal command encoder; no MT kernel needed",
+        ),
+        dtypes: &[],
+    }]
+}

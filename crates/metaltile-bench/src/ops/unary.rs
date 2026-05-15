@@ -15,18 +15,15 @@ use metaltile_codegen::msl::MslGenerator;
 use crate::{
     ops::{
         DType,
-        FLOAT_DTYPES,
+        DtypeCtx,
         OpBench,
         OpResult,
+        bench_all_dtypes,
         buffer_typed,
         check_equiv,
-        dtype_label,
-        dtype_tol,
-        elem_bytes,
-        mlx_tname,
         quantize_roundtrip,
+        bench_gbps,
         run_typed_once,
-        to_gbps,
         zeros_typed,
     },
     runner::GpuRunner,
@@ -263,7 +260,8 @@ const UNARY_SPECS: &[UnarySpec] = &[
 ];
 
 fn make_unary_entries(dt: DType) -> Vec<UnaryEntry> {
-    let tn = mlx_tname(dt);
+    let ctx = DtypeCtx::elementwise(dt);
+    let (tn, base_tol) = (ctx.tn, ctx.tol);
     UNARY_SPECS
         .iter()
         .filter_map(|&(name, mlx_op, cpu, check_input, _base_tol)| {
@@ -307,20 +305,20 @@ fn make_unary_entries(dt: DType) -> Vec<UnaryEntry> {
                 ref_fn: mlx_op.map(|op| format!("v_{op}{tn}{tn}")),
                 cpu,
                 check_input,
-                tolerance: dtype_tol(dt).max(effective_base_tol),
+                tolerance: base_tol.max(effective_base_tol),
             })
         })
         .collect()
 }
 
 pub fn bench_all_unary(runner: &GpuRunner) -> Vec<OpResult> {
-    FLOAT_DTYPES.iter().flat_map(|&dt| bench_unary_for(runner, dt)).collect()
+    bench_all_dtypes(runner, bench_unary_for)
 }
 
 fn bench_unary_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
+    let ctx = DtypeCtx::elementwise(dt);
+    let (dlabel, eb) = (ctx.label, ctx.eb);
     let entries = make_unary_entries(dt);
-    let dlabel = dtype_label(dt);
-    let eb = elem_bytes(dt);
 
     let mut results = Vec::new();
     let inp_bench = buffer_typed(runner, &vec![0.5f32; N_ELEM], dt);
@@ -353,22 +351,18 @@ fn bench_unary_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
         // --- performance: MT ---
         let mt_out = zeros_typed(runner, N_ELEM, dt);
-        let mt_perf = to_gbps(&runner.bench(&mk, &[&inp_bench, &mt_out], tgs, tpg, 3, 10), bytes);
+        let mt_perf = bench_gbps(runner, &mk, &[&inp_bench, &mt_out], tgs, tpg, bytes);
 
         // --- performance: MLX reference (if available) ---
         let ref_perf = entry.ref_fn.as_ref().and_then(|fn_name| {
             let rk = runner.compile(SRC, fn_name).ok()?;
             let ref_out = zeros_typed(runner, N_ELEM, dt);
             let ref_size = runner.buffer_u32(N_ELEM as u32);
-            let st = runner.bench(&rk, &[&inp_bench, &ref_out, &ref_size], tgs, tpg, 3, 10);
-            to_gbps(&st, bytes)
+            bench_gbps(runner, &rk, &[&inp_bench, &ref_out, &ref_size], tgs, tpg, bytes)
         });
 
         let shape = format!("N={N_ELEM} {} {dlabel}", entry.name);
-        results.push(match mt_perf {
-            Some(p) => BENCH.implemented(shape, ref_perf, p, equiv),
-            None => BENCH.nyi(shape, ref_perf),
-        });
+        results.push(BENCH.result(shape, ref_perf, mt_perf, Some(equiv)));
     }
     results
 }
@@ -378,6 +372,7 @@ fn bench_unary_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ops::FLOAT_DTYPES;
 
     #[test]
     fn msl_generates_for_all_dtypes() {
@@ -403,4 +398,30 @@ mod tests {
             }
         }
     }
+}
+
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    UNARY_SPECS
+        .iter()
+        .map(|&(name, mlx_op, _, _, _)| {
+            let ref_spec = match (name, mlx_op) {
+                (_, Some(op)) => RefSpec::UnaryV(op),
+                ("silu",  None) => RefSpec::None("MLX computes as x·sigmoid(x), no standalone unary kernel"),
+                ("gelu",  None) => RefSpec::None("MLX uses composite poly, no standalone unary kernel"),
+                ("relu",  None) => RefSpec::None("MLX uses vvn_Maximum with scalar 0, not a unary op"),
+                ("exp2",  None) => RefSpec::None("not in instantiate_unary_float; MLX uses exp(x·ln2)"),
+                ("recip", None) => RefSpec::None("not in unary.metal; MLX uses binary divide kernel"),
+                _ => RefSpec::None("no standalone MLX kernel"),
+            };
+            KernelSpec {
+                op: "unary",
+                mt_kernel: format!("mt_{name}"),
+                metal_file: "unary.metal",
+                ref_spec,
+                dtypes: FLOAT_DTYPE_STRS,
+            }
+        })
+        .collect()
 }

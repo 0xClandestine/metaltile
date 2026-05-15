@@ -33,8 +33,8 @@ use crate::{
         OpBench,
         OpResult,
         check_equiv_with,
+        bench_gbps,
         dtype_tol,
-        to_gbps,
     },
     runner::{CompiledKernel, GpuBuffer, GpuRunner},
 };
@@ -276,37 +276,16 @@ pub fn bench_sdpa_vector(runner: &GpuRunner) -> Vec<OpResult> {
 
         let ref_perf = rk.as_ref().and_then(|rk| {
             let out_b = runner.buffer_zeros(h * d * 4);
-            let st = runner.bench(
-                rk,
-                &[&q_buf, &k_buf, &v_buf, &out_b, &gqa, &n_i32, &khs, &kss, &vhs, &vss, &sc_buf],
-                [h, 1, 1],
-                [1024, 1, 1],
-                3,
-                10,
-            );
-            to_gbps(&st, bytes)
+            bench_gbps(runner, rk, &[&q_buf, &k_buf, &v_buf, &out_b, &gqa, &n_i32, &khs, &kss, &vhs, &vss, &sc_buf], [h, 1, 1], [1024, 1, 1], bytes)
         });
 
         let mt_perf = mk.as_ref().and_then(|mk| {
             let out_b = runner.buffer_zeros(h * d * 4);
-            let st = runner.bench(
-                mk,
-                &[&q_buf, &k_buf, &v_buf, &out_b, &n_buf, &sc_buf],
-                [h, 1, 1],
-                [MT_TPG, 1, 1],
-                3,
-                10,
-            );
-            to_gbps(&st, bytes)
+            bench_gbps(runner, mk, &[&q_buf, &k_buf, &v_buf, &out_b, &n_buf, &sc_buf], [h, 1, 1], [MT_TPG, 1, 1], bytes)
         });
 
         let shape = format!("H={h} N={n} D={d} f32");
-        let result = if let Some(mt_perf) = mt_perf {
-            BENCH.implemented(shape, ref_perf, mt_perf, equiv.expect("mk Some → equiv Some"))
-        } else {
-            BENCH.nyi(shape, ref_perf)
-        };
-        results.push(result);
+        results.push(BENCH.result(shape, ref_perf, mt_perf, equiv));
     }
     results
 }
@@ -392,37 +371,16 @@ pub fn bench_sdpa_vector_f16(runner: &GpuRunner) -> Vec<OpResult> {
 
         let ref_perf = rk.as_ref().and_then(|rk| {
             let out_b = runner.buffer_zeros(h * d * 2);
-            let st = runner.bench(
-                rk,
-                &[&q_buf, &k_buf, &v_buf, &out_b, &gqa, &n_i32, &khs, &kss, &vhs, &vss, &sc_buf],
-                [h, 1, 1],
-                [1024, 1, 1],
-                3,
-                10,
-            );
-            to_gbps(&st, bytes)
+            bench_gbps(runner, rk, &[&q_buf, &k_buf, &v_buf, &out_b, &gqa, &n_i32, &khs, &kss, &vhs, &vss, &sc_buf], [h, 1, 1], [1024, 1, 1], bytes)
         });
 
         let mt_perf = mk.as_ref().and_then(|mk| {
             let out_b = runner.buffer_zeros(h * d * 2);
-            let st = runner.bench(
-                mk,
-                &[&q_buf, &k_buf, &v_buf, &out_b, &n_buf, &sc_buf],
-                [h, 1, 1],
-                [MT_TPG, 1, 1],
-                3,
-                10,
-            );
-            to_gbps(&st, bytes)
+            bench_gbps(runner, mk, &[&q_buf, &k_buf, &v_buf, &out_b, &n_buf, &sc_buf], [h, 1, 1], [MT_TPG, 1, 1], bytes)
         });
 
         let shape = format!("H={h} N={n} D={d} f16");
-        let result = if let Some(mt_perf) = mt_perf {
-            BENCH_F16.implemented(shape, ref_perf, mt_perf, equiv.expect("mk Some → equiv Some"))
-        } else {
-            BENCH_F16.nyi(shape, ref_perf)
-        };
-        results.push(result);
+        results.push(BENCH_F16.result(shape, ref_perf, mt_perf, equiv));
     }
     results
 }
@@ -516,4 +474,32 @@ mod tests {
             assert!((r - m).abs() < 1e-3, "mismatch[{i}]: ref={r} mt={m}");
         }
     }
+}
+
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![
+        KernelSpec {
+            op: "scaled_dot_product_attention",
+            mt_kernel: "mt_sdpa".into(),
+            metal_file: "scaled_dot_product_attention.metal",
+            ref_spec: RefSpec::Literal(REF_NAME),
+            dtypes: &["f32"],
+        },
+        KernelSpec {
+            op: "scaled_dot_product_attention",
+            mt_kernel: "mt_sdpa".into(),
+            metal_file: "scaled_dot_product_attention.metal",
+            ref_spec: RefSpec::Literal(REF_NAME_F16),
+            dtypes: &["f16"],
+        },
+        KernelSpec {
+            op: "scaled_dot_product_attention",
+            mt_kernel: "—".into(),
+            metal_file: "scaled_dot_product_attention.metal",
+            ref_spec: RefSpec::None("bf16 SDPA not yet implemented in MT bench"),
+            dtypes: &["bf16"],
+        },
+    ]
 }

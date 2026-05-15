@@ -54,6 +54,10 @@ path = "src/gpu_bench.rs"
 name = "dump_msl"
 path = "src/dump_msl.rs"
 
+[[bin]]
+name = "kernel_table"
+path = "src/kernel_table.rs"
+
 [[bench]]
 name = "kernels"
 harness = false

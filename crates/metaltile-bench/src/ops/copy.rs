@@ -10,22 +10,20 @@
 //!   KernelMode::Elementwise
 
 use metaltile::kernel;
-use metaltile_codegen::msl::MslGenerator;
 
 use crate::{
     ops::{
         DType,
-        FLOAT_DTYPES,
+        DtypeCtx,
         OpBench,
         OpResult,
+        bench_all_dtypes,
         buffer_typed,
         check_equiv,
-        dtype_label,
-        dtype_tol,
-        elem_bytes,
-        mlx_tname,
+        generate_elementwise_msl,
+        quantize_roundtrip,
+        bench_gbps,
         run_typed_once,
-        to_gbps,
         zeros_typed,
     },
     runner::GpuRunner,
@@ -46,20 +44,17 @@ pub fn mt_copy<T>(a: Tensor<T>, out: Tensor<T>) {
     store(out[idx], load(a[idx]));
 }
 
-pub fn bench_copy_f32(runner: &GpuRunner) -> Vec<OpResult> {
-    FLOAT_DTYPES.iter().flat_map(|&dt| bench_copy_for(runner, dt)).collect()
+fn copy_msl_for(dt: DType) -> String {
+    generate_elementwise_msl(|| mt_copy::kernel_ir_for(dt), "copy")
 }
 
-fn bench_copy_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
-    let tn = mlx_tname(dt);
-    let dlabel = dtype_label(dt);
-    let eb = elem_bytes(dt);
-    let tol = dtype_tol(dt);
+pub fn bench_copy(runner: &GpuRunner) -> Vec<OpResult> { bench_all_dtypes(runner, bench_copy_for) }
 
-    let msl = MslGenerator::default().generate(&mt_copy::kernel_ir_for(dt)).unwrap_or_else(|e| {
-        eprintln!("[copy {dlabel}]: {e}");
-        String::new()
-    });
+fn bench_copy_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
+    let ctx = DtypeCtx::elementwise(dt);
+    let (tn, dlabel, eb, tol) = (ctx.tn, ctx.label, ctx.eb, ctx.tol);
+
+    let msl = copy_msl_for(dt);
     let mk = runner.compile(&msl, "mt_copy").ok();
     let rk = runner.compile(SRC, &format!("v_copy{tn}{tn}")).ok();
 
@@ -104,7 +99,6 @@ fn bench_copy_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
         check_equiv(&ref_check, &mt_check, tol)
     } else if !mt_check.is_empty() {
         // No MLX ref — MT output should equal quantize_roundtrip of input
-        use crate::ops::quantize_roundtrip;
         let expected = quantize_roundtrip(&vals, dt);
         check_equiv(&expected, &mt_check, tol)
     } else {
@@ -117,55 +111,27 @@ fn bench_copy_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
     let ref_perf = rk.as_ref().and_then(|rk| {
         let ref_out = zeros_typed(runner, N_ELEM, dt);
-        let st = runner.bench(
-            rk,
-            &[&src, &ref_out, &ref_size_perf],
-            [N_ELEM.div_ceil(TPG), 1, 1],
-            [TPG, 1, 1],
-            3,
-            10,
-        );
-        to_gbps(&st, bytes)
+        bench_gbps(runner, rk, &[&src, &ref_out, &ref_size_perf], [N_ELEM.div_ceil(TPG), 1, 1], [TPG, 1, 1], bytes)
     });
     let mt_perf = mk.as_ref().and_then(|mk| {
         let mt_out = zeros_typed(runner, N_ELEM, dt);
-        let st =
-            runner.bench(mk, &[&src, &mt_out], [N_ELEM.div_ceil(TPG), 1, 1], [TPG, 1, 1], 3, 10);
-        to_gbps(&st, bytes)
+        bench_gbps(runner, mk, &[&src, &mt_out], [N_ELEM.div_ceil(TPG), 1, 1], [TPG, 1, 1], bytes)
     });
 
     let shape = format!("N={N_ELEM} {dlabel}");
-    let result = if let Some(mt_perf) = mt_perf {
-        BENCH.implemented(shape, ref_perf, mt_perf, equiv)
-    } else {
-        BENCH.nyi(shape, ref_perf)
-    };
-    vec![result]
+    vec![BENCH.result(shape, ref_perf, mt_perf, Some(equiv))]
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+crate::bench_tests!(msl_fn: copy_msl_for, kernel_name: "mt_copy");
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
 
-    #[test]
-    fn msl_generates_for_all_dtypes() {
-        for &dt in FLOAT_DTYPES {
-            let msl = MslGenerator::default().generate(&mt_copy::kernel_ir_for(dt)).unwrap();
-            assert!(!msl.trim().is_empty());
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn kernels_compile() {
-        let Ok(runner) = GpuRunner::new() else {
-            return;
-        };
-        for &dt in FLOAT_DTYPES {
-            let msl = MslGenerator::default().generate(&mt_copy::kernel_ir_for(dt)).unwrap();
-            runner.compile(&msl, "mt_copy").unwrap();
-        }
-    }
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![KernelSpec {
+        op: "copy",
+        mt_kernel: "mt_copy".into(),
+        metal_file: "copy.metal",
+        ref_spec: RefSpec::Format("v_copy{tn}{tn}"),
+        dtypes: FLOAT_DTYPE_STRS,
+    }]
 }

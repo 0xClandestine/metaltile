@@ -17,3 +17,17 @@ use crate::{ops::OpResult, runner::GpuRunner};
 static _SRC: &str = include_str!("../../../metal/steel/gemm/steel_gemm_splitk.metal");
 
 pub fn bench_matmul_splitk(_runner: &GpuRunner) -> Vec<OpResult> { vec![] }
+
+use crate::ops::{KernelSpec, RefSpec};
+
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![KernelSpec {
+        op: "steel/gemm/steel_gemm_splitk",
+        mt_kernel: "—".into(),
+        metal_file: "steel/gemm/steel_gemm_splitk.metal",
+        ref_spec: RefSpec::None(
+            "split-K GEMM requires two-kernel pipeline (compute + accumulate pass);              DSL has no support for cross-kernel scratch buffers",
+        ),
+        dtypes: &[],
+    }]
+}

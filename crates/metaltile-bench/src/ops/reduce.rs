@@ -14,23 +14,20 @@
 //! MetalTile: mt_all_reduce_sum / mt_row_reduce_sum — same algorithms via #[kernel] DSL.
 //!   KernelMode::Reduction
 
-use metaltile::{core::ir::KernelMode, kernel};
-use metaltile_codegen::msl::MslGenerator;
+use metaltile::kernel;
 
 use crate::{
     ops::{
         DType,
-        FLOAT_DTYPES,
+        DtypeCtx,
         OpBench,
         OpResult,
+        bench_all_dtypes,
         buffer_typed,
         check_equiv,
-        dtype_label,
-        dtype_tol_reduce,
-        elem_bytes,
-        mlx_tname,
+        generate_reduction_msl,
+        bench_gbps,
         run_typed_once,
-        to_gbps,
         zeros_typed,
     },
     runner::GpuRunner,
@@ -102,43 +99,32 @@ pub fn mt_row_reduce_min<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32)
     store(out[row], result);
 }
 
-fn msl_for_reduce<F: Fn() -> metaltile::core::ir::Kernel>(make_ir: F, label: &str) -> String {
-    let mut k = make_ir();
-    k.mode = KernelMode::Reduction;
-    MslGenerator::default().generate(&k).unwrap_or_else(|e| {
-        eprintln!("[{label}]: {e}");
-        String::new()
-    })
-}
-
 fn all_reduce_msl_for(dt: DType) -> String {
-    msl_for_reduce(|| mt_all_reduce::kernel_ir_for(dt), "all_reduce")
+    generate_reduction_msl(|| mt_all_reduce::kernel_ir_for(dt), "all_reduce")
 }
 fn all_reduce_max_msl_for(dt: DType) -> String {
-    msl_for_reduce(|| mt_all_reduce_max::kernel_ir_for(dt), "all_reduce_max")
+    generate_reduction_msl(|| mt_all_reduce_max::kernel_ir_for(dt), "all_reduce_max")
 }
 fn all_reduce_min_msl_for(dt: DType) -> String {
-    msl_for_reduce(|| mt_all_reduce_min::kernel_ir_for(dt), "all_reduce_min")
+    generate_reduction_msl(|| mt_all_reduce_min::kernel_ir_for(dt), "all_reduce_min")
 }
 fn row_reduce_msl_for(dt: DType) -> String {
-    msl_for_reduce(|| mt_row_reduce::kernel_ir_for(dt), "row_reduce")
+    generate_reduction_msl(|| mt_row_reduce::kernel_ir_for(dt), "row_reduce")
 }
 fn row_reduce_max_msl_for(dt: DType) -> String {
-    msl_for_reduce(|| mt_row_reduce_max::kernel_ir_for(dt), "row_reduce_max")
+    generate_reduction_msl(|| mt_row_reduce_max::kernel_ir_for(dt), "row_reduce_max")
 }
 fn row_reduce_min_msl_for(dt: DType) -> String {
-    msl_for_reduce(|| mt_row_reduce_min::kernel_ir_for(dt), "row_reduce_min")
+    generate_reduction_msl(|| mt_row_reduce_min::kernel_ir_for(dt), "row_reduce_min")
 }
 
 pub fn bench_reduce(runner: &GpuRunner) -> Vec<OpResult> {
-    FLOAT_DTYPES.iter().flat_map(|&dt| bench_reduce_for(runner, dt)).collect()
+    bench_all_dtypes(runner, bench_reduce_for)
 }
 
 fn bench_reduce_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
-    let tn = mlx_tname(dt);
-    let dlabel = dtype_label(dt);
-    let eb = elem_bytes(dt);
-    let tol = dtype_tol_reduce(dt);
+    let ctx = DtypeCtx::reduce(dt);
+    let (tn, dlabel, eb, tol) = (ctx.tn, ctx.label, ctx.eb, ctx.tol);
 
     // Compile kernels for all three ops.
     let ops: &[(&str, &str, &str, &str)] = &[
@@ -226,29 +212,15 @@ fn bench_reduce_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
             let ref_row_sz = runner.buffer_u64(ALL_N as u64);
             let ref_perf = ar_ref.as_ref().and_then(|k| {
                 let out = zeros_typed(runner, 1, dt);
-                to_gbps(
-                    &runner.bench(
-                        k,
-                        &[&inp, &out, &ref_in_sz, &ref_row_sz],
-                        [1, 1, 1],
-                        [256, 1, 1],
-                        3,
-                        10,
-                    ),
-                    bytes,
-                )
+                bench_gbps(runner, k, &[&inp, &out, &ref_in_sz, &ref_row_sz], [1, 1, 1], [256, 1, 1], bytes)
             });
             let ns = runner.buffer_u32(ALL_N as u32);
             let mt_perf = ar_kernel.as_ref().and_then(|k| {
                 let out = zeros_typed(runner, 1, dt);
-                to_gbps(&runner.bench(k, &[&inp, &out, &ns], [1, 1, 1], [256, 1, 1], 3, 10), bytes)
+                bench_gbps(runner, k, &[&inp, &out, &ns], [1, 1, 1], [256, 1, 1], bytes)
             });
             let shape = format!("N={}M {op_name} {dlabel}", ALL_N / 1_000_000);
-            results.push(if let Some(p) = mt_perf {
-                ALL_REDUCE_BENCH.implemented(shape, ref_perf, p, equiv)
-            } else {
-                ALL_REDUCE_BENCH.nyi(shape, ref_perf)
-            });
+            results.push(ALL_REDUCE_BENCH.result(shape, ref_perf, mt_perf, Some(equiv)));
         }
 
         // ── row_reduce ───────────────────────────────────────────────────────
@@ -304,29 +276,15 @@ fn bench_reduce_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
             let rref_osz = runner.buffer_i64(b as i64);
             let ref_perf = rr_ref.as_ref().and_then(|k| {
                 let out = zeros_typed(runner, b, dt);
-                to_gbps(
-                    &runner.bench(
-                        k,
-                        &[&inp, &out, &rref_red, &rref_osz],
-                        [1, b, 1],
-                        [256, 1, 1],
-                        3,
-                        10,
-                    ),
-                    bytes,
-                )
+                bench_gbps(runner, k, &[&inp, &out, &rref_red, &rref_osz], [1, b, 1], [256, 1, 1], bytes)
             });
             let ns = runner.buffer_u32(n as u32);
             let mt_perf = rr_kernel.as_ref().and_then(|k| {
                 let out = zeros_typed(runner, b, dt);
-                to_gbps(&runner.bench(k, &[&inp, &out, &ns], [b, 1, 1], [256, 1, 1], 3, 10), bytes)
+                bench_gbps(runner, k, &[&inp, &out, &ns], [b, 1, 1], [256, 1, 1], bytes)
             });
             let shape = format!("B={b} N={n} {op_name} {dlabel}");
-            results.push(if let Some(p) = mt_perf {
-                ROW_REDUCE_BENCH.implemented(shape, ref_perf, p, equiv)
-            } else {
-                ROW_REDUCE_BENCH.nyi(shape, ref_perf)
-            });
+            results.push(ROW_REDUCE_BENCH.result(shape, ref_perf, mt_perf, Some(equiv)));
         }
     }
 
@@ -338,6 +296,7 @@ fn bench_reduce_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ops::FLOAT_DTYPES;
 
     #[test]
     fn msl_generates_for_all_dtypes() {
@@ -370,4 +329,29 @@ mod tests {
             runner.compile(&row_reduce_min_msl_for(dt), "mt_row_reduce_min").unwrap();
         }
     }
+}
+
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+
+/// Reference kernel name templates for all 6 reduce variants.
+static REDUCE_SPECS: &[(&str, &str, &str)] = &[
+    ("mt_all_reduce",     "all_reduce",     "all_reduce_sum{tn}"),
+    ("mt_all_reduce_max", "all_reduce",     "all_reduce_max{tn}"),
+    ("mt_all_reduce_min", "all_reduce",     "all_reduce_min{tn}"),
+    ("mt_row_reduce",     "row_reduce",     "row_reduce_simple_sum{tn}"),
+    ("mt_row_reduce_max", "row_reduce",     "row_reduce_simple_max{tn}"),
+    ("mt_row_reduce_min", "row_reduce",     "row_reduce_simple_min{tn}"),
+];
+
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    REDUCE_SPECS
+        .iter()
+        .map(|&(mt_kernel, _op_group, pat)| KernelSpec {
+            op: "reduce",
+            mt_kernel: mt_kernel.into(),
+            metal_file: "reduce.metal",
+            ref_spec: RefSpec::Format(pat),
+            dtypes: FLOAT_DTYPE_STRS,
+        })
+        .collect()
 }

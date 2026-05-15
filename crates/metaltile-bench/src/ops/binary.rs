@@ -13,18 +13,15 @@ use metaltile_codegen::msl::MslGenerator;
 use crate::{
     ops::{
         DType,
-        FLOAT_DTYPES,
+        DtypeCtx,
         OpBench,
         OpResult,
+        bench_all_dtypes,
         buffer_typed,
         check_equiv,
-        dtype_label,
-        dtype_tol,
-        elem_bytes,
-        mlx_tname,
         quantize_roundtrip,
+        bench_gbps,
         run_typed_once,
-        to_gbps,
         zeros_typed,
     },
     runner::GpuRunner,
@@ -107,7 +104,7 @@ struct BinaryEntry {
 }
 
 fn make_entries(dt: DType) -> Vec<BinaryEntry> {
-    let tn = mlx_tname(dt);
+    let tn = DtypeCtx::elementwise(dt).tn;
     vec![
         BinaryEntry {
             bench: &BENCH_ADD,
@@ -170,22 +167,18 @@ fn make_entries(dt: DType) -> Vec<BinaryEntry> {
 
 // ── Bench ─────────────────────────────────────────────────────────────────────
 
-pub fn bench_elementwise_f32(runner: &GpuRunner) -> Vec<OpResult> {
-    // Keep legacy entry for backwards compat with filter "elementwise".
-    bench_binary_ops_f32(runner)
-}
+pub fn bench_elementwise(runner: &GpuRunner) -> Vec<OpResult> { bench_binary_ops(runner) }
 
-pub fn bench_binary_ops_f32(runner: &GpuRunner) -> Vec<OpResult> {
-    FLOAT_DTYPES.iter().flat_map(|&dt| bench_binary_ops_for(runner, dt)).collect()
+pub fn bench_binary_ops(runner: &GpuRunner) -> Vec<OpResult> {
+    bench_all_dtypes(runner, bench_binary_ops_for)
 }
 
 fn bench_binary_ops_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
+    let ctx = DtypeCtx::elementwise(dt);
+    let (dlabel, eb, tol) = (ctx.label, ctx.eb, ctx.tol);
     let entries = make_entries(dt);
     let tpg = [TPG, 1, 1];
-    let eb = elem_bytes(dt);
     let bytes = (N_ELEM * eb * 3) as f64; // 2 reads + 1 write
-    let dlabel = dtype_label(dt);
-    let tol = dtype_tol(dt);
 
     // Shared typed input buffers for perf
     let a_vals: Vec<f32> = (0..N_ELEM).map(|i| 1.0 + i as f32 * 1e-6).collect();
@@ -226,39 +219,16 @@ fn bench_binary_ops_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
         let ref_perf = runner.compile(SRC, &entry.ref_fn).ok().and_then(|rk| {
             let out_ref = zeros_typed(runner, N_ELEM, dt);
             let size = runner.buffer_u32(N_ELEM as u32);
-            to_gbps(
-                &runner.bench(
-                    &rk,
-                    &[&a_buf, &b_buf, &out_ref, &size],
-                    [N_ELEM / (N_PER_THREAD * TPG), 1, 1],
-                    tpg,
-                    3,
-                    10,
-                ),
-                bytes,
-            )
+            bench_gbps(runner, &rk, &[&a_buf, &b_buf, &out_ref, &size], [N_ELEM / (N_PER_THREAD * TPG), 1, 1], tpg, bytes)
         });
 
         // MT perf
         let out_mt = zeros_typed(runner, N_ELEM, dt);
         let n_perf = runner.buffer_u32(N_ELEM as u32);
-        let mt_perf = to_gbps(
-            &runner.bench(
-                &mk,
-                &[&a_buf, &b_buf, &out_mt, &n_perf],
-                [N_ELEM.div_ceil(TPG), 1, 1],
-                tpg,
-                3,
-                10,
-            ),
-            bytes,
-        );
+        let mt_perf = bench_gbps(runner, &mk, &[&a_buf, &b_buf, &out_mt, &n_perf], [N_ELEM.div_ceil(TPG), 1, 1], tpg, bytes);
 
         let shape = format!("N={N_ELEM} {dlabel}");
-        results.push(match mt_perf {
-            Some(p) => entry.bench.implemented(shape, ref_perf, p, equiv),
-            None => entry.bench.nyi(shape, ref_perf),
-        });
+        results.push(entry.bench.result(shape, ref_perf, mt_perf, Some(equiv)));
     }
 
     results
@@ -267,6 +237,7 @@ fn bench_binary_ops_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ops::FLOAT_DTYPES;
 
     #[test]
     fn msl_generates_for_all_dtypes() {
@@ -295,4 +266,31 @@ mod tests {
             }
         }
     }
+}
+
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+
+/// Reference kernel name templates — mirrors the patterns in `make_entries()`.
+static BINARY_REF_PATTERNS: &[(&str, &str)] = &[
+    ("vector_add",   "vvn_Add{tn}"),
+    ("mt_mul",       "vvn_Multiply{tn}"),
+    ("mt_sub",       "vvn_Subtract{tn}"),
+    ("mt_div",       "vvn_Divide{tn}"),
+    ("mt_max_elem",  "vvn_Maximum{tn}"),
+    ("mt_min_elem",  "vvn_Minimum{tn}"),
+    ("mt_pow",       "vvn_Power{tn}"),
+    ("mt_logaddexp", "vvn_LogAddExp{tn}"),
+];
+
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    BINARY_REF_PATTERNS
+        .iter()
+        .map(|&(mt_kernel, pat)| KernelSpec {
+            op: "binary",
+            mt_kernel: mt_kernel.into(),
+            metal_file: "binary.metal",
+            ref_spec: RefSpec::Format(pat),
+            dtypes: FLOAT_DTYPE_STRS,
+        })
+        .collect()
 }

@@ -9,24 +9,21 @@
 //! MetalTile: mt_gemv — per-row reduction via strided_reduce_dot, #[kernel] DSL.
 //!   KernelMode::Reduction
 
-use metaltile::{core::ir::KernelMode, kernel};
-use metaltile_codegen::msl::MslGenerator;
+use metaltile::kernel;
 
 use crate::{
     ops::{
         DType,
-        FLOAT_DTYPES,
+        DtypeCtx,
         OpBench,
         OpResult,
+        bench_all_dtypes,
         buffer_typed,
         check_equiv,
-        dtype_label,
-        dtype_tol,
-        elem_bytes,
-        mlx_tname,
+        generate_reduction_msl,
         quantize_roundtrip,
+        bench_gbps,
         run_typed_once,
-        to_gbps,
         zeros_typed,
     },
     runner::GpuRunner,
@@ -56,12 +53,7 @@ pub fn mt_gemv<T>(mat: Tensor<T>, vec: Tensor<T>, out: Tensor<T>, #[constexpr] k
 }
 
 fn gemv_msl_for(dt: DType) -> String {
-    let mut k = mt_gemv::kernel_ir_for(dt);
-    k.mode = KernelMode::Reduction;
-    MslGenerator::default().generate(&k).unwrap_or_else(|e| {
-        eprintln!("[mt_gemv {dt:?}]: {e}");
-        String::new()
-    })
+    generate_reduction_msl(|| mt_gemv::kernel_ir_for(dt), "mt_gemv")
 }
 
 fn cpu_gemv(mat: &[f32], vec: &[f32], m: usize, k: usize) -> Vec<f32> {
@@ -73,14 +65,12 @@ fn cpu_gemv(mat: &[f32], vec: &[f32], m: usize, k: usize) -> Vec<f32> {
     out
 }
 
-pub fn bench_gemv(runner: &GpuRunner) -> Vec<OpResult> {
-    FLOAT_DTYPES.iter().flat_map(|&dt| bench_gemv_for(runner, dt)).collect()
-}
+pub fn bench_gemv(runner: &GpuRunner) -> Vec<OpResult> { bench_all_dtypes(runner, bench_gemv_for) }
 
 fn bench_gemv_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
-    let dlabel = dtype_label(dt);
-    let eb = elem_bytes(dt);
-    let tol = dtype_tol(dt).max(1e-2);
+    let ctx = DtypeCtx::elementwise(dt);
+    let (tn, dlabel, eb) = (ctx.tn, ctx.label, ctx.eb);
+    let tol = ctx.tol.max(1e-2);
 
     let msl = gemv_msl_for(dt);
     let mk = runner.compile(&msl, "mt_gemv").ok();
@@ -119,10 +109,8 @@ fn bench_gemv_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
         let k_buf = runner.buffer_u32(k as u32);
         let bytes = (m * k * eb + k * eb + m * eb) as f64;
 
-        let ref_name = format!(
-            "gemv_{}_bm{REF_BM}_bn{REF_BN}_sm1_sn32_tm{REF_TM}_tn4_nc0_axpby0",
-            mlx_tname(dt)
-        );
+        let ref_name =
+            format!("gemv_{tn}_bm{REF_BM}_bn{REF_BN}_sm1_sn32_tm{REF_TM}_tn4_nc0_axpby0");
         let rk = runner.compile(SRC, &ref_name).ok();
         let ref_perf = rk.as_ref().and_then(|rk| {
             let out_r = runner.buffer_zeros(m * eb);
@@ -135,79 +123,40 @@ fn bench_gemv_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
             let beta = runner.buffer_f32_scalar(0.0f32);
             let batch_ndim = runner.buffer_i32(0i32);
             let bias_stride = runner.buffer_i32(1i32);
-            // tgs: [M/(BM*TM), 1, 1], tpg: [BM*BN*32, 1, 1]
             let ref_tgs = [m / (REF_BM * REF_TM), 1, 1];
             let ref_tpg = [REF_BM * REF_BN * 32, 1, 1];
-            let st = runner.bench(
-                rk,
-                &[
-                    &mat_buf,
-                    &vec_buf,
-                    &bias_r,
-                    &out_r,
-                    &in_vec_size,
-                    &out_vec_size,
-                    &mat_ld,
-                    &alpha,
-                    &beta,
-                    &batch_ndim,
-                    &zero_buf,
-                    &zero_buf,
-                    &zero_buf,
-                    &zero_buf,
-                    &bias_stride,
-                ],
-                ref_tgs,
-                ref_tpg,
-                3,
-                10,
-            );
-            to_gbps(&st, bytes)
+            bench_gbps(runner, rk, &[
+                &mat_buf, &vec_buf, &bias_r, &out_r,
+                &in_vec_size, &out_vec_size, &mat_ld,
+                &alpha, &beta, &batch_ndim,
+                &zero_buf, &zero_buf, &zero_buf, &zero_buf,
+                &bias_stride,
+            ], ref_tgs, ref_tpg, bytes)
         });
 
         let mt_perf = mk.as_ref().and_then(|mk| {
             let out_buf = zeros_typed(runner, m, dt);
-            let st = runner.bench(
-                mk,
-                &[&mat_buf, &vec_buf, &out_buf, &k_buf],
-                [m, 1, 1],
-                [TPG, 1, 1],
-                3,
-                10,
-            );
-            to_gbps(&st, bytes)
+            bench_gbps(runner, mk, &[&mat_buf, &vec_buf, &out_buf, &k_buf], [m, 1, 1], [TPG, 1, 1], bytes)
         });
 
         let shape = format!("M={m} K={k} {dlabel}");
-        results.push(match mt_perf {
-            Some(p) => BENCH.implemented(shape, ref_perf, p, equiv.expect("mk Some → equiv Some")),
-            None => BENCH.nyi(shape, ref_perf),
-        });
+        results.push(BENCH.result(shape, ref_perf, mt_perf, equiv));
     }
     results
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+crate::bench_tests!(msl_fn: gemv_msl_for, kernel_name: "mt_gemv");
 
-    #[test]
-    fn msl_generates_for_all_dtypes() {
-        for &dt in FLOAT_DTYPES {
-            let msl = gemv_msl_for(dt);
-            assert!(!msl.trim().is_empty(), "MSL empty for {dt:?}");
-        }
-    }
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn kernels_compile() {
-        let Ok(runner) = GpuRunner::new() else {
-            return;
-        };
-        for &dt in FLOAT_DTYPES {
-            let msl = gemv_msl_for(dt);
-            runner.compile(&msl, "mt_gemv").unwrap();
-        }
-    }
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![KernelSpec {
+        op: "gemv",
+        mt_kernel: "mt_gemv".into(),
+        metal_file: "gemv.metal",
+        ref_spec: RefSpec::Format(
+            "gemv_{tn}_bm4_bn1_sm1_sn32_tm4_tn4_nc0_axpby0",
+        ),
+        dtypes: FLOAT_DTYPE_STRS,
+    }]
 }

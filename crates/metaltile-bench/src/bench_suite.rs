@@ -13,11 +13,11 @@ use metaltile_bench::{
         OpResult,
         SuitePrinter,
         bench_all_unary,
-        bench_arange_f32,
+        bench_arange,
         bench_arg_reduce,
-        bench_binary_ops_f32,
-        bench_binary_two_f32,
-        bench_copy_f32,
+        bench_binary_ops,
+        bench_binary_two,
+        bench_copy,
         bench_fp_quantized,
         bench_gemv,
         bench_gemv_masked,
@@ -27,13 +27,13 @@ use metaltile_bench::{
         bench_quantized,
         bench_random,
         bench_reduce,
-        bench_rms_norm_f32,
+        bench_rms_norm,
         bench_rope,
         bench_scan,
         bench_sdpa_vector,
         bench_sdpa_vector_f16,
-        bench_select_f32,
-        bench_softmax_f32,
+        bench_select,
+        bench_softmax,
         bench_sort,
         bench_strided,
         set_result_reporter,
@@ -120,33 +120,37 @@ fn main() {
         p
     };
     {
-        let mut report = |result: &OpResult| printer.print_batch(std::slice::from_ref(result));
+        let mut report = |result: &OpResult| {
+            if matches_filter(filter.as_deref(), result.op()) {
+                printer.print_batch(std::slice::from_ref(result));
+            }
+        };
         let _reporter = set_result_reporter(&mut report);
 
-        extend_if_selected(&mut all, &runner, &filter, "matmul", bench_matmul_fp16);
-        extend_if_selected(&mut all, &runner, &filter, "gemv", bench_gemv);
-        extend_if_selected(&mut all, &runner, &filter, "gemv_masked", bench_gemv_masked);
-        extend_if_selected(&mut all, &runner, &filter, "softmax", bench_softmax_f32);
-        extend_if_selected(&mut all, &runner, &filter, "rms", bench_rms_norm_f32);
-        extend_if_selected(&mut all, &runner, &filter, "binary", bench_binary_ops_f32);
-        extend_if_selected(&mut all, &runner, &filter, "layer_norm", bench_layer_norm);
-        extend_if_selected(&mut all, &runner, &filter, "logsumexp", bench_logsumexp);
-        extend_if_selected(&mut all, &runner, &filter, "reduce", bench_reduce);
-        extend_if_selected(&mut all, &runner, &filter, "rope", bench_rope);
-        extend_if_selected(&mut all, &runner, &filter, "unary", bench_all_unary);
-        extend_if_selected(&mut all, &runner, &filter, "copy", bench_copy_f32);
-        extend_if_selected(&mut all, &runner, &filter, "arange", bench_arange_f32);
-        extend_if_selected(&mut all, &runner, &filter, "select", bench_select_f32);
-        extend_if_selected(&mut all, &runner, &filter, "binary_two", bench_binary_two_f32);
-        extend_if_selected(&mut all, &runner, &filter, "scan", bench_scan);
-        extend_if_selected(&mut all, &runner, &filter, "sdpa", bench_sdpa_vector);
-        extend_if_selected(&mut all, &runner, &filter, "sdpa", bench_sdpa_vector_f16);
-        extend_if_selected(&mut all, &runner, &filter, "quantized", bench_quantized);
-        extend_if_selected(&mut all, &runner, &filter, "sort", bench_sort);
-        extend_if_selected(&mut all, &runner, &filter, "random", bench_random);
-        extend_if_selected(&mut all, &runner, &filter, "fp_quantized", bench_fp_quantized);
-        extend_if_selected(&mut all, &runner, &filter, "arg_reduce", bench_arg_reduce);
-        extend_if_selected(&mut all, &runner, &filter, "strided", bench_strided);
+        extend_if_selected(&mut all, &runner, &filter, bench_matmul_fp16);
+        extend_if_selected(&mut all, &runner, &filter, bench_gemv);
+        extend_if_selected(&mut all, &runner, &filter, bench_gemv_masked);
+        extend_if_selected(&mut all, &runner, &filter, bench_softmax);
+        extend_if_selected(&mut all, &runner, &filter, bench_rms_norm);
+        extend_if_selected(&mut all, &runner, &filter, bench_binary_ops);
+        extend_if_selected(&mut all, &runner, &filter, bench_layer_norm);
+        extend_if_selected(&mut all, &runner, &filter, bench_logsumexp);
+        extend_if_selected(&mut all, &runner, &filter, bench_reduce);
+        extend_if_selected(&mut all, &runner, &filter, bench_rope);
+        extend_if_selected(&mut all, &runner, &filter, bench_all_unary);
+        extend_if_selected(&mut all, &runner, &filter, bench_copy);
+        extend_if_selected(&mut all, &runner, &filter, bench_arange);
+        extend_if_selected(&mut all, &runner, &filter, bench_select);
+        extend_if_selected(&mut all, &runner, &filter, bench_binary_two);
+        extend_if_selected(&mut all, &runner, &filter, bench_scan);
+        extend_if_selected(&mut all, &runner, &filter, bench_sdpa_vector);
+        extend_if_selected(&mut all, &runner, &filter, bench_sdpa_vector_f16);
+        extend_if_selected(&mut all, &runner, &filter, bench_quantized);
+        extend_if_selected(&mut all, &runner, &filter, bench_sort);
+        extend_if_selected(&mut all, &runner, &filter, bench_random);
+        extend_if_selected(&mut all, &runner, &filter, bench_fp_quantized);
+        extend_if_selected(&mut all, &runner, &filter, bench_arg_reduce);
+        extend_if_selected(&mut all, &runner, &filter, bench_strided);
     }
 
     if all.is_empty() {
@@ -288,12 +292,9 @@ fn extend_if_selected(
     all: &mut Vec<OpResult>,
     runner: &GpuRunner,
     filter: &Option<String>,
-    label: &str,
     run: fn(&GpuRunner) -> Vec<OpResult>,
 ) {
-    if matches_filter(filter.as_deref(), label) {
-        all.extend(run(runner));
-    }
+    all.extend(run(runner).into_iter().filter(|r| matches_filter(filter.as_deref(), r.op())));
 }
 
 fn matches_filter(filter: Option<&str>, label: &str) -> bool {

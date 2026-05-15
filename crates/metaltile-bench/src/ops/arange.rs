@@ -9,23 +9,20 @@
 //!   KernelMode::Elementwise
 
 use metaltile::kernel;
-use metaltile_codegen::msl::MslGenerator;
 
 use crate::{
     ops::{
         DType,
-        FLOAT_DTYPES,
+        DtypeCtx,
         OpBench,
         OpResult,
+        bench_all_dtypes,
         buffer_typed,
         check_equiv,
-        dtype_label,
-        dtype_tol,
-        elem_bytes,
-        mlx_tname,
+        generate_elementwise_msl,
         quantize_roundtrip,
+        bench_gbps,
         run_typed_once,
-        to_gbps,
         zeros_typed,
     },
     runner::GpuRunner,
@@ -52,25 +49,25 @@ pub fn mt_arange<T>(out: Tensor<T>, start: Tensor<T>, step: Tensor<T>, #[constex
     store(out[idx], s + idx.cast::<T>() * st);
 }
 
+fn arange_msl_for(dt: DType) -> String {
+    generate_elementwise_msl(|| mt_arange::kernel_ir_for(dt), "arange")
+}
+
 // ── Bench ─────────────────────────────────────────────────────────────────────
 
-pub fn bench_arange_f32(runner: &GpuRunner) -> Vec<OpResult> {
-    FLOAT_DTYPES.iter().flat_map(|&dt| bench_arange_for(runner, dt)).collect()
+pub fn bench_arange(runner: &GpuRunner) -> Vec<OpResult> {
+    bench_all_dtypes(runner, bench_arange_for)
 }
 
 fn bench_arange_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
-    let dlabel = dtype_label(dt);
-    let eb = elem_bytes(dt);
-    let tol = dtype_tol(dt);
+    let ctx = DtypeCtx::elementwise(dt);
+    let (tn, dlabel, eb, tol) = (ctx.tn, ctx.label, ctx.eb, ctx.tol);
 
-    let msl = MslGenerator::default().generate(&mt_arange::kernel_ir_for(dt)).unwrap_or_else(|e| {
-        eprintln!("[arange {dlabel}]: {e}");
-        String::new()
-    });
+    let msl = arange_msl_for(dt);
     let mk = runner.compile(&msl, "mt_arange").ok();
 
     // MLX ref (may not exist for all dtypes — silently skip)
-    let ref_name = format!("arange{}", mlx_tname(dt));
+    let ref_name = format!("arange{tn}");
     let rk = runner.compile(SRC, &ref_name).ok();
 
     let start = 0.0f32;
@@ -105,15 +102,7 @@ fn bench_arange_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
         let ref_start = runner.buffer_f32_scalar(start);
         let ref_step = runner.buffer_f32_scalar(step);
         let ref_out = runner.buffer_zeros(N_ELEM * 4);
-        let st = runner.bench(
-            rk,
-            &[&ref_start, &ref_step, &ref_out],
-            [N_ELEM.div_ceil(TPG), 1, 1],
-            [TPG, 1, 1],
-            3,
-            10,
-        );
-        to_gbps(&st, bytes)
+        bench_gbps(runner, rk, &[&ref_start, &ref_step, &ref_out], [N_ELEM.div_ceil(TPG), 1, 1], [TPG, 1, 1], bytes)
     });
 
     // MT perf
@@ -122,47 +111,23 @@ fn bench_arange_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
     let mt_out = zeros_typed(runner, N_ELEM, dt);
     let mt_n = runner.buffer_u32(N_ELEM as u32);
     let mt_perf = mk.as_ref().and_then(|mk| {
-        let st = runner.bench(
-            mk,
-            &[&mt_out, &mt_start, &mt_step, &mt_n],
-            [N_ELEM.div_ceil(TPG), 1, 1],
-            [TPG, 1, 1],
-            3,
-            10,
-        );
-        to_gbps(&st, bytes)
+        bench_gbps(runner, mk, &[&mt_out, &mt_start, &mt_step, &mt_n], [N_ELEM.div_ceil(TPG), 1, 1], [TPG, 1, 1], bytes)
     });
 
     let shape = format!("N={N_ELEM} {dlabel}");
-    vec![match mt_perf {
-        Some(p) => BENCH.implemented(shape, ref_perf, p, equiv.expect("mk Some → equiv Some")),
-        None => BENCH.nyi(shape, ref_perf),
-    }]
+    vec![BENCH.result(shape, ref_perf, mt_perf, equiv)]
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+crate::bench_tests!(msl_fn: arange_msl_for, kernel_name: "mt_arange");
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
 
-    #[test]
-    fn msl_generates_for_all_dtypes() {
-        for &dt in FLOAT_DTYPES {
-            let msl = MslGenerator::default().generate(&mt_arange::kernel_ir_for(dt)).unwrap();
-            assert!(!msl.trim().is_empty());
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn kernels_compile() {
-        let Ok(runner) = GpuRunner::new() else {
-            return;
-        };
-        for &dt in FLOAT_DTYPES {
-            let msl = MslGenerator::default().generate(&mt_arange::kernel_ir_for(dt)).unwrap();
-            runner.compile(&msl, "mt_arange").unwrap();
-        }
-    }
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![KernelSpec {
+        op: "arange",
+        mt_kernel: "mt_arange".into(),
+        metal_file: "arange.metal",
+        ref_spec: RefSpec::Format("arange{tn}"),
+        dtypes: FLOAT_DTYPE_STRS,
+    }]
 }

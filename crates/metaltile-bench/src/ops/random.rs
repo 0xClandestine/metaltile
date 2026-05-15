@@ -16,7 +16,7 @@ use metaltile::kernel;
 use metaltile_codegen::msl::MslGenerator;
 
 use crate::{
-    ops::{EquivResult, OpBench, OpResult, to_gbps},
+    ops::{EquivResult, OpBench, OpResult, bench_gbps},
     runner::GpuRunner,
 };
 
@@ -83,15 +83,7 @@ pub fn bench_random(runner: &GpuRunner) -> Vec<OpResult> {
     let bytes = (TOTAL_FLOATS * 4) as f64;
 
     let ref_perf = rk.as_ref().and_then(|rk| {
-        let st = runner.bench(
-            rk,
-            &[&keys_buf, &ref_out_buf, &odd_buf, &bpk_buf],
-            [NUM_KEYS, 1, 1],
-            [1, HALF_SIZE, 1],
-            3,
-            10,
-        );
-        to_gbps(&st, bytes)
+        bench_gbps(runner, rk, &[&keys_buf, &ref_out_buf, &odd_buf, &bpk_buf], [NUM_KEYS, 1, 1], [1, HALF_SIZE, 1], bytes)
     });
 
     let mt_msl = random_msl().ok();
@@ -119,24 +111,11 @@ pub fn bench_random(runner: &GpuRunner) -> Vec<OpResult> {
     let mt_out_buf = runner.buffer_zeros(TOTAL_FLOATS * 4);
     let n_buf = runner.buffer_u32(TOTAL_FLOATS as u32);
     let mt_perf = mk.as_ref().and_then(|mk| {
-        let st = runner.bench(
-            mk,
-            &[&mt_out_buf, &n_buf],
-            [TOTAL_FLOATS.div_ceil(TPG), 1, 1],
-            [TPG, 1, 1],
-            3,
-            10,
-        );
-        to_gbps(&st, bytes)
+        bench_gbps(runner, mk, &[&mt_out_buf, &n_buf], [TOTAL_FLOATS.div_ceil(TPG), 1, 1], [TPG, 1, 1], bytes)
     });
 
     let shape = format!("{}M f32", TOTAL_FLOATS / (1024 * 1024));
-    let result = if let Some(mt_perf) = mt_perf {
-        BENCH.implemented(shape, ref_perf, mt_perf, equiv.unwrap())
-    } else {
-        BENCH.nyi(shape, ref_perf)
-    };
-    vec![result]
+    vec![BENCH.result(shape, ref_perf, mt_perf, equiv)]
 }
 
 #[cfg(test)]
@@ -194,4 +173,16 @@ mod tests {
             assert_eq!(r, m, "xorshift mismatch at {i}: ref={r} mt={m}");
         }
     }
+}
+
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![KernelSpec {
+        op: "random",
+        mt_kernel: "mt_random_hash".into(),
+        metal_file: "random.metal",
+        ref_spec: RefSpec::Literal(REF_NAME),
+        dtypes: &[],
+    }]
 }

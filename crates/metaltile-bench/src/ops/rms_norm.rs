@@ -10,23 +10,20 @@
 //! MetalTile: mt_rms_norm — stride-reduce sum-of-squares + N_READS=4 write-back.
 //!   KernelMode::Reduction
 
-use metaltile::{core::ir::KernelMode, kernel};
-use metaltile_codegen::msl::MslGenerator;
+use metaltile::kernel;
 
 use crate::{
     ops::{
         DType,
-        FLOAT_DTYPES,
+        DtypeCtx,
         OpBench,
         OpResult,
+        bench_all_dtypes,
         buffer_typed,
         check_equiv,
-        dtype_label,
-        dtype_tol_reduce,
-        elem_bytes,
-        mlx_tname,
+        generate_reduction_msl,
+        bench_gbps,
         run_typed_once,
-        to_gbps,
         zeros_typed,
     },
     runner::GpuRunner,
@@ -80,23 +77,16 @@ pub fn mt_rms_norm<T>(
 }
 
 fn rms_norm_msl_for(dt: DType) -> String {
-    let mut k = mt_rms_norm::kernel_ir_for(dt);
-    k.mode = KernelMode::Reduction;
-    MslGenerator::default().generate(&k).unwrap_or_else(|e| {
-        eprintln!("[rms_norm {dt:?}]: {e}");
-        String::new()
-    })
+    generate_reduction_msl(|| mt_rms_norm::kernel_ir_for(dt), "rms_norm")
 }
 
-pub fn bench_rms_norm_f32(runner: &GpuRunner) -> Vec<OpResult> {
-    FLOAT_DTYPES.iter().flat_map(|&dt| bench_rms_norm_for(runner, dt)).collect()
+pub fn bench_rms_norm(runner: &GpuRunner) -> Vec<OpResult> {
+    bench_all_dtypes(runner, bench_rms_norm_for)
 }
 
 fn bench_rms_norm_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
-    let tn = mlx_tname(dt);
-    let dlabel = dtype_label(dt);
-    let eb = elem_bytes(dt);
-    let tol = dtype_tol_reduce(dt);
+    let ctx = DtypeCtx::reduce(dt);
+    let (tn, dlabel, eb, tol) = (ctx.tn, ctx.label, ctx.eb, ctx.tol);
 
     let mt_msl = rms_norm_msl_for(dt);
     let mk = runner.compile(&mt_msl, "mt_rms_norm").ok();
@@ -166,56 +156,28 @@ fn bench_rms_norm_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
         let ref_perf = rk.as_ref().and_then(|r| {
             let out = zeros_typed(runner, b * n, dt);
-            let st = runner.bench(
-                r,
-                &[&xp, &wp, &out, &eps_p, &ns_p, &ref_w_stride],
-                [b, 1, 1],
-                [1024, 1, 1],
-                3,
-                10,
-            );
-            to_gbps(&st, bytes)
+            bench_gbps(runner, r, &[&xp, &wp, &out, &eps_p, &ns_p, &ref_w_stride], [b, 1, 1], [1024, 1, 1], bytes)
         });
         let mt_perf = mk.as_ref().and_then(|m| {
             let out = zeros_typed(runner, b * n, dt);
-            let st =
-                runner.bench(m, &[&xp, &wp, &out, &eps_p, &ns_p], [b, 1, 1], [256, 1, 1], 3, 10);
-            to_gbps(&st, bytes)
+            bench_gbps(runner, m, &[&xp, &wp, &out, &eps_p, &ns_p], [b, 1, 1], [256, 1, 1], bytes)
         });
         let shape = format!("B={b} N={n} {dlabel}");
-        let result = if let Some(mt_perf) = mt_perf {
-            BENCH.implemented(shape, ref_perf, mt_perf, equiv.clone())
-        } else {
-            BENCH.nyi(shape, ref_perf)
-        };
-        results.push(result);
+        results.push(BENCH.result(shape, ref_perf, mt_perf, Some(equiv)));
     }
     results
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+crate::bench_tests!(msl_fn: rms_norm_msl_for, kernel_name: "mt_rms_norm");
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
 
-    #[test]
-    fn msl_generates_for_all_dtypes() {
-        for &dt in FLOAT_DTYPES {
-            let msl = rms_norm_msl_for(dt);
-            assert!(!msl.trim().is_empty(), "MSL empty for {dt:?}");
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn kernels_compile() {
-        let Ok(runner) = GpuRunner::new() else {
-            return;
-        };
-        for &dt in FLOAT_DTYPES {
-            let msl = rms_norm_msl_for(dt);
-            runner.compile(&msl, "mt_rms_norm").unwrap();
-        }
-    }
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![KernelSpec {
+        op: "rms_norm",
+        mt_kernel: "mt_rms_norm".into(),
+        metal_file: "rms_norm.metal",
+        ref_spec: RefSpec::Format("rms{tn}"),
+        dtypes: FLOAT_DTYPE_STRS,
+    }]
 }

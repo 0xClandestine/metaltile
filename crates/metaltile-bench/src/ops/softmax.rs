@@ -11,24 +11,21 @@
 //! MetalTile: mt_softmax — 2-pass online softmax (N_READS=4, pure DSL) for f32/f16/bf16.
 //!   KernelMode::Reduction
 
-use metaltile::{core::ir::KernelMode, kernel};
-use metaltile_codegen::msl::MslGenerator;
+use metaltile::kernel;
 
 use crate::{
     ops::{
         DType,
-        FLOAT_DTYPES,
+        DtypeCtx,
         OpBench,
         OpResult,
+        bench_all_dtypes,
         buffer_typed,
         check_equiv,
-        dtype_label,
-        dtype_tol_reduce,
-        elem_bytes,
-        mlx_tname,
+        generate_reduction_msl,
         quantize_roundtrip,
+        bench_gbps,
         run_typed_once,
-        to_gbps,
         zeros_typed,
     },
     runner::GpuRunner,
@@ -101,19 +98,8 @@ pub fn mt_softmax<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
     }
 }
 
-fn softmax_msl_for(dt: DType) -> Result<String, String> {
-    let mut k = mt_softmax::kernel_ir_for(dt);
-    k.mode = KernelMode::Reduction;
-    MslGenerator::default()
-        .generate(&k)
-        .map_err(|e| format!("softmax codegen failed: {e}"))
-        .and_then(|msl| {
-            if msl.trim().is_empty() {
-                Err("softmax codegen returned empty MSL".into())
-            } else {
-                Ok(msl)
-            }
-        })
+fn softmax_msl_for(dt: DType) -> String {
+    generate_reduction_msl(|| mt_softmax::kernel_ir_for(dt), "softmax")
 }
 
 fn cpu_softmax(inp: &[f32], rows: usize, cols: usize) -> Vec<f32> {
@@ -130,31 +116,17 @@ fn cpu_softmax(inp: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     out
 }
 
-pub fn bench_softmax_f32(runner: &GpuRunner) -> Vec<OpResult> {
-    FLOAT_DTYPES.iter().flat_map(|&dt| bench_softmax_for(runner, dt)).collect()
+pub fn bench_softmax(runner: &GpuRunner) -> Vec<OpResult> {
+    bench_all_dtypes(runner, bench_softmax_for)
 }
 
 fn bench_softmax_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
-    let tn = mlx_tname(dt);
-    let dlabel = dtype_label(dt);
-    let eb = elem_bytes(dt);
-    let tol = dtype_tol_reduce(dt);
+    let ctx = DtypeCtx::reduce(dt);
+    let (tn, dlabel, eb, tol) = (ctx.tn, ctx.label, ctx.eb, ctx.tol);
 
-    let msl = match softmax_msl_for(dt) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("[softmax {dlabel}]: {e}");
-            return vec![];
-        },
-    };
+    let msl = softmax_msl_for(dt);
     let rk = runner.compile(SRC, &format!("looped_softmax_{tn}")).ok();
-    let mk = match runner.compile(&msl, "mt_softmax") {
-        Ok(k) => k,
-        Err(e) => {
-            eprintln!("[softmax {dlabel}] compile: {e}");
-            return vec![];
-        },
-    };
+    let mk = runner.compile(&msl, "mt_softmax").ok();
 
     let equiv = {
         let inp_vals: Vec<f32> =
@@ -164,9 +136,10 @@ fn bench_softmax_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
         let inp = buffer_typed(runner, &inp_vals, dt);
         let ns = runner.buffer_u32(N_CHECK as u32);
         let mt_out = zeros_typed(runner, B_CHECK * N_CHECK, dt);
+        let Some(mk_ref) = mk.as_ref() else { return vec![] };
         let mt_vals = run_typed_once(
             runner,
-            &mk,
+            mk_ref,
             &[&inp, &mt_out, &ns],
             &mt_out,
             B_CHECK * N_CHECK,
@@ -184,44 +157,28 @@ fn bench_softmax_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
         let bytes = (b * n * eb * 2) as f64;
         let ref_perf = rk.as_ref().and_then(|r| {
             let out = zeros_typed(runner, b * n, dt);
-            let st = runner.bench(r, &[&inp, &out, &ns], [b, 1, 1], [256, 1, 1], 3, 10);
-            to_gbps(&st, bytes)
+            bench_gbps(runner, r, &[&inp, &out, &ns], [b, 1, 1], [256, 1, 1], bytes)
         });
         let mt_out = zeros_typed(runner, b * n, dt);
-        let mt_perf = {
-            let st = runner.bench(&mk, &[&inp, &mt_out, &ns], [b, 1, 1], [256, 1, 1], 3, 10);
-            to_gbps(&st, bytes)
-        };
-        let shape = format!("B={b} N={n} {dlabel}");
-        results.push(match mt_perf {
-            Some(p) => BENCH.implemented(shape, ref_perf, p, equiv.clone()),
-            None => BENCH.nyi(shape, ref_perf),
+        let mt_perf = mk.as_ref().and_then(|m| {
+            bench_gbps(runner, m, &[&inp, &mt_out, &ns], [b, 1, 1], [256, 1, 1], bytes)
         });
+        let shape = format!("B={b} N={n} {dlabel}");
+        results.push(BENCH.result(shape, ref_perf, mt_perf, Some(equiv)));
     }
     results
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+crate::bench_tests!(msl_fn: softmax_msl_for, kernel_name: "mt_softmax");
 
-    #[test]
-    fn msl_generates_for_all_dtypes() {
-        for &dt in FLOAT_DTYPES {
-            let msl = softmax_msl_for(dt).expect("softmax MSL gen");
-            assert!(!msl.trim().is_empty());
-        }
-    }
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn kernels_compile() {
-        let Ok(runner) = GpuRunner::new() else {
-            return;
-        };
-        for &dt in FLOAT_DTYPES {
-            let msl = softmax_msl_for(dt).expect("softmax MSL gen");
-            runner.compile(&msl, "mt_softmax").unwrap();
-        }
-    }
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![KernelSpec {
+        op: "softmax",
+        mt_kernel: "mt_softmax".into(),
+        metal_file: "softmax.metal",
+        ref_spec: RefSpec::Format("looped_softmax_{tn}"),
+        dtypes: FLOAT_DTYPE_STRS,
+    }]
 }

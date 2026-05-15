@@ -15,7 +15,7 @@ use metaltile::kernel;
 use metaltile_codegen::msl::MslGenerator;
 
 use crate::{
-    ops::{EquivResult, OpBench, OpResult, to_gbps},
+    ops::{EquivResult, OpBench, OpResult, bench_gbps},
     runner::GpuRunner,
 };
 
@@ -109,15 +109,7 @@ pub fn bench_sort(runner: &GpuRunner) -> Vec<OpResult> {
 
     let ref_perf = rk.as_ref().and_then(|rk| {
         let out = runner.buffer_zeros(B * N * 4);
-        let st = runner.bench(
-            rk,
-            &[&inp, &out, &size, &stride1, &stride1, &strideN, &strideN],
-            [B, 1, 1],
-            [256, 1, 1],
-            3,
-            10,
-        );
-        to_gbps(&st, bytes)
+        bench_gbps(runner, rk, &[&inp, &out, &size, &stride1, &stride1, &strideN, &strideN], [B, 1, 1], [256, 1, 1], bytes)
     });
 
     let mt_msl = sort_msl().ok();
@@ -145,17 +137,11 @@ pub fn bench_sort(runner: &GpuRunner) -> Vec<OpResult> {
     let n_buf = runner.buffer_u32(N as u32);
     let mt_perf = mk.as_ref().and_then(|mk| {
         let out = runner.buffer_zeros(B * N * 4);
-        let st = runner.bench(mk, &[&inp, &out, &n_buf], [B, 1, 1], [256, 1, 1], 3, 10);
-        to_gbps(&st, bytes)
+        bench_gbps(runner, mk, &[&inp, &out, &n_buf], [B, 1, 1], [256, 1, 1], bytes)
     });
 
     let shape = format!("B={B} N={N} f32");
-    let result = if let Some(mt_perf) = mt_perf {
-        BENCH.implemented(shape, ref_perf, mt_perf, equiv.unwrap())
-    } else {
-        BENCH.nyi(shape, ref_perf)
-    };
-    vec![result]
+    vec![BENCH.result(shape, ref_perf, mt_perf, equiv)]
 }
 
 /// CPU reference: sort each array of size `n` independently.
@@ -232,4 +218,36 @@ mod tests {
             assert_eq!(r, m, "sort mismatch at {i}: ref={r} mt={m}");
         }
     }
+}
+
+use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![
+        KernelSpec {
+            op: "sort",
+            mt_kernel: "mt_sort_f32".into(),
+            metal_file: "sort.metal",
+            ref_spec: RefSpec::Literal(REF_NAME),
+            dtypes: &["f32"],
+        },
+        KernelSpec {
+            op: "sort",
+            mt_kernel: "mt_sort_f16".into(),
+            metal_file: "sort.metal",
+            ref_spec: RefSpec::None(
+                "f16/bf16 sort not yet in MT bench;                  MLX c_block_sort_float16_float16_* exists",
+            ),
+            dtypes: &["f16"],
+        },
+        KernelSpec {
+            op: "sort",
+            mt_kernel: "mt_sort_bf16".into(),
+            metal_file: "sort.metal",
+            ref_spec: RefSpec::None(
+                "f16/bf16 sort not yet in MT bench;                  MLX c_block_sort_bfloat16_bfloat16_* exists",
+            ),
+            dtypes: &["bf16"],
+        },
+    ]
 }

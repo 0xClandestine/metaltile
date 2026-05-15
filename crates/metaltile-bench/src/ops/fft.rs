@@ -22,3 +22,15 @@ use crate::{ops::OpResult, runner::GpuRunner};
 static _SRC: &str = include_str!("../metal/fft.metal");
 
 pub fn bench_fft(_runner: &GpuRunner) -> Vec<OpResult> { vec![] }
+
+use crate::ops::{KernelSpec, RefSpec};
+
+pub fn kernel_specs() -> Vec<KernelSpec> {
+    vec![KernelSpec {
+        op: "fft",
+        mt_kernel: "—".into(),
+        metal_file: "fft.metal",
+        ref_spec: RefSpec::None("FFT not yet implemented in MT"),
+        dtypes: &[],
+    }]
+}
