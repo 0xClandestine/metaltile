@@ -93,10 +93,11 @@ fn gather_row<T>(
     store(out[idx], load(table[src]));
 }
 
-// Naive matrix-vector multiply. weight is [out_dim, in_dim] row-major;
-// input is [in_dim]; output is [out_dim]. One thread per output row;
-// inner loop over in_dim. Slow but correct; replace with the bench
-// strided_reduce_dot version once Phase 5 lands the autotuner.
+// Cooperative-thread matrix-vector multiply. Reduction-mode kernel:
+// one threadgroup per output row, threads cooperate on the dot-product
+// reduction via strided_reduce_dot + reduce_sum. Ported from
+// metaltile-bench/src/ops/gemv.rs (which gets ~100% of MLX throughput
+// on M-series). weight is [out_dim, in_dim] row-major; input is [in_dim].
 #[kernel]
 fn gemv_naive<T>(
     weight: Tensor<T>,
@@ -105,12 +106,11 @@ fn gemv_naive<T>(
     #[constexpr] in_dim: u32,
 ) {
     let row = program_id::<0>();
-    let mut acc = 0.0f32;
-    for j in range(0u32, in_dim, 1u32) {
-        acc = acc + load(weight[row * in_dim + j]).cast::<f32>()
-                  * load(input[j]).cast::<f32>();
-    }
-    store(output[row], acc.cast::<T>());
+    let rs = row * in_dim;
+    let re = rs + in_dim;
+    let acc = strided_reduce_dot(weight, input, rs, rs, re);
+    let result = reduce_sum(acc);
+    store(output[row], result);
 }
 
 // Llama-style RoPE (HuggingFace half-rotated convention) with optional
@@ -187,6 +187,136 @@ fn rope_llama<T>(
 
     store(out[i1], o1.cast::<T>());
     store(out[i2], o2.cast::<T>());
+}
+
+// Argmax over a 1D tensor — Reduction-mode kernel, 256-thread
+// cooperative tree reduction. Adapted from
+// metaltile-bench/src/ops/arg_reduce.rs but generic over input dtype.
+// Inputs cast to f32 for comparison; output is u32 index.
+//
+// Tie-breaking: strict > keeps the smallest matching index.
+#[kernel]
+fn argmax<T>(inp: Tensor<T>, out: Tensor<u32>, #[constexpr] n: u32) {
+    let lid = tid;
+    let mut best_val = neg_infinity();
+    let mut best_idx = lid - lid;
+    threadgroup_alloc("tg_vals", 256);
+    threadgroup_alloc("tg_idxs", 256);
+    let n_iters = (n + lsize - 1u32) / lsize;
+    for _r in range(0u32, n_iters, 1u32) {
+        let pos = _r * lsize + lid;
+        if pos < n {
+            let v = load(inp[pos]).cast::<f32>();
+            let better = v > best_val;
+            if better {
+                best_val = v;
+                best_idx = pos;
+            }
+        }
+    }
+    threadgroup_store("tg_vals", lid, best_val);
+    threadgroup_store("tg_idxs", lid, best_idx);
+    threadgroup_barrier();
+
+    // Tree reduction: stride 128, 64, 32, 16, 8, 4, 2, 1
+    if lid < 128u32 {
+        let ov = threadgroup_load("tg_vals", lid + 128u32);
+        let oi = threadgroup_load("tg_idxs", lid + 128u32);
+        let tv = threadgroup_load("tg_vals", lid);
+        let ti = threadgroup_load("tg_idxs", lid);
+        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
+        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
+        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
+    }
+    threadgroup_barrier();
+    if lid < 64u32 {
+        let ov = threadgroup_load("tg_vals", lid + 64u32);
+        let oi = threadgroup_load("tg_idxs", lid + 64u32);
+        let tv = threadgroup_load("tg_vals", lid);
+        let ti = threadgroup_load("tg_idxs", lid);
+        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
+        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
+        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
+    }
+    threadgroup_barrier();
+    if lid < 32u32 {
+        let ov = threadgroup_load("tg_vals", lid + 32u32);
+        let oi = threadgroup_load("tg_idxs", lid + 32u32);
+        let tv = threadgroup_load("tg_vals", lid);
+        let ti = threadgroup_load("tg_idxs", lid);
+        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
+        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
+        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
+    }
+    threadgroup_barrier();
+    if lid < 16u32 {
+        let ov = threadgroup_load("tg_vals", lid + 16u32);
+        let oi = threadgroup_load("tg_idxs", lid + 16u32);
+        let tv = threadgroup_load("tg_vals", lid);
+        let ti = threadgroup_load("tg_idxs", lid);
+        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
+        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
+        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
+    }
+    threadgroup_barrier();
+    if lid < 8u32 {
+        let ov = threadgroup_load("tg_vals", lid + 8u32);
+        let oi = threadgroup_load("tg_idxs", lid + 8u32);
+        let tv = threadgroup_load("tg_vals", lid);
+        let ti = threadgroup_load("tg_idxs", lid);
+        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
+        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
+        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
+    }
+    threadgroup_barrier();
+    if lid < 4u32 {
+        let ov = threadgroup_load("tg_vals", lid + 4u32);
+        let oi = threadgroup_load("tg_idxs", lid + 4u32);
+        let tv = threadgroup_load("tg_vals", lid);
+        let ti = threadgroup_load("tg_idxs", lid);
+        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
+        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
+        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
+    }
+    threadgroup_barrier();
+    if lid < 2u32 {
+        let ov = threadgroup_load("tg_vals", lid + 2u32);
+        let oi = threadgroup_load("tg_idxs", lid + 2u32);
+        let tv = threadgroup_load("tg_vals", lid);
+        let ti = threadgroup_load("tg_idxs", lid);
+        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
+        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
+        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
+    }
+    threadgroup_barrier();
+    if lid == 0u32 {
+        let ov = threadgroup_load("tg_vals", 1u32);
+        let oi = threadgroup_load("tg_idxs", 1u32);
+        let tv = threadgroup_load("tg_vals", 0u32);
+        let ti = threadgroup_load("tg_idxs", 0u32);
+        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
+        let final_idx = select(bet, oi, ti);
+        store(out[0], final_idx);
+    }
+}
+
+// KV cache update — write a one-token K (or V) slice into the
+// per-head cache slot at `position`. Source layout: [n_kv_heads, head_dim].
+// Dest layout: [n_kv_heads, max_seq, head_dim]. One thread per output
+// element (n_kv_heads * head_dim total threads).
+#[kernel]
+fn kv_cache_update<T>(
+    src: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] head_dim: u32,
+    #[constexpr] max_seq: u32,
+    #[constexpr] position: u32,
+) {
+    let idx = program_id::<0>();
+    let h = idx / head_dim;
+    let d = idx - h * head_dim;
+    let dst_idx = h * max_seq * head_dim + position * head_dim + d;
+    store(out[dst_idx], load(src[idx]));
 }
 
 // Naive single-Q SDPA decode with online softmax. Each thread owns one
@@ -314,25 +444,17 @@ fn dequant_gather_int4<T>(
     store(out[idx], w_real.cast::<T>());
 }
 
-// MLX-format int4 dequantizing GEMV. Weight is packed uint32 (each
-// uint32 packs 8 4-bit values, low nibble first). For each group of
-// `group_size` weights along the in_dim axis, scales[row, group] and
-// biases[row, group] dequantize via:
-//
-//     w_real = q * scale + bias
-//
-// where q is the unpacked 4-bit value. Fused with the gemv accumulator
-// so we never materialize the full weight matrix.
-//
-// One thread per output row; inner loop walks groups, then unrolls the
-// 8 4-bit lanes per packed uint32.
+// MLX-format int4 dequantizing GEMV — cooperative-thread version.
+// Reduction-mode kernel; one threadgroup per output row. Threads
+// stride across groups; per-thread acc reduced across the threadgroup
+// at the end.
 //
 // Layouts:
-//   weight  [out_dim, in_dim / 8]  uint32
-//   scales  [out_dim, in_dim / group_size]  T (f16/bf16)
-//   biases  [out_dim, in_dim / group_size]  T (f16/bf16)
-//   input   [in_dim]                       T
-//   output  [out_dim]                      T
+//   weight  [out_dim, in_dim / 8]            uint32
+//   scales  [out_dim, in_dim / group_size]   T
+//   biases  [out_dim, in_dim / group_size]   T
+//   input   [in_dim]                         T
+//   output  [out_dim]                        T
 #[kernel]
 fn dequant_gemv_int4<T>(
     weight: Tensor<u32>,
@@ -346,46 +468,50 @@ fn dequant_gemv_int4<T>(
     let row = program_id::<0>();
     let n_groups = in_dim / group_size;
     let n_packed_per_row = in_dim / 8u32;
-    let groups_per_pack = 8u32 / group_size;  // 0 if group_size > 8
     let packs_per_group = group_size / 8u32;
     let row_pack_off = row * n_packed_per_row;
     let row_group_off = row * n_groups;
 
     let mut acc = 0.0f32;
 
-    for g in range(0u32, n_groups, 1u32) {
-        let scale = load(scales[row_group_off + g]).cast::<f32>();
-        let bias = load(biases[row_group_off + g]).cast::<f32>();
-        let g_start = g * group_size;
+    // Each thread strides over groups: tid, tid+lsize, tid+2*lsize, ...
+    let g_iters = (n_groups + lsize - 1u32) / lsize;
+    for g_iter in range(0u32, g_iters, 1u32) {
+        let g = g_iter * lsize + tid;
+        if g < n_groups {
+            let scale = load(scales[row_group_off + g]).cast::<f32>();
+            let bias = load(biases[row_group_off + g]).cast::<f32>();
+            let g_start = g * group_size;
 
-        for p in range(0u32, packs_per_group, 1u32) {
-            let packed = load(weight[row_pack_off + g_start / 8u32 + p]);
-            let p_off = g_start + p * 8u32;
+            for p in range(0u32, packs_per_group, 1u32) {
+                let packed = load(weight[row_pack_off + g_start / 8u32 + p]);
+                let p_off = g_start + p * 8u32;
 
-            let q0 = (packed >> 0u32) & 15u32;
-            let q1 = (packed >> 4u32) & 15u32;
-            let q2 = (packed >> 8u32) & 15u32;
-            let q3 = (packed >> 12u32) & 15u32;
-            let q4 = (packed >> 16u32) & 15u32;
-            let q5 = (packed >> 20u32) & 15u32;
-            let q6 = (packed >> 24u32) & 15u32;
-            let q7 = (packed >> 28u32) & 15u32;
+                let q0 = (packed >> 0u32) & 15u32;
+                let q1 = (packed >> 4u32) & 15u32;
+                let q2 = (packed >> 8u32) & 15u32;
+                let q3 = (packed >> 12u32) & 15u32;
+                let q4 = (packed >> 16u32) & 15u32;
+                let q5 = (packed >> 20u32) & 15u32;
+                let q6 = (packed >> 24u32) & 15u32;
+                let q7 = (packed >> 28u32) & 15u32;
 
-            acc = acc + (q0.cast::<f32>() * scale + bias) * load(input[p_off + 0u32]).cast::<f32>();
-            acc = acc + (q1.cast::<f32>() * scale + bias) * load(input[p_off + 1u32]).cast::<f32>();
-            acc = acc + (q2.cast::<f32>() * scale + bias) * load(input[p_off + 2u32]).cast::<f32>();
-            acc = acc + (q3.cast::<f32>() * scale + bias) * load(input[p_off + 3u32]).cast::<f32>();
-            acc = acc + (q4.cast::<f32>() * scale + bias) * load(input[p_off + 4u32]).cast::<f32>();
-            acc = acc + (q5.cast::<f32>() * scale + bias) * load(input[p_off + 5u32]).cast::<f32>();
-            acc = acc + (q6.cast::<f32>() * scale + bias) * load(input[p_off + 6u32]).cast::<f32>();
-            acc = acc + (q7.cast::<f32>() * scale + bias) * load(input[p_off + 7u32]).cast::<f32>();
+                acc = acc + (q0.cast::<f32>() * scale + bias) * load(input[p_off + 0u32]).cast::<f32>();
+                acc = acc + (q1.cast::<f32>() * scale + bias) * load(input[p_off + 1u32]).cast::<f32>();
+                acc = acc + (q2.cast::<f32>() * scale + bias) * load(input[p_off + 2u32]).cast::<f32>();
+                acc = acc + (q3.cast::<f32>() * scale + bias) * load(input[p_off + 3u32]).cast::<f32>();
+                acc = acc + (q4.cast::<f32>() * scale + bias) * load(input[p_off + 4u32]).cast::<f32>();
+                acc = acc + (q5.cast::<f32>() * scale + bias) * load(input[p_off + 5u32]).cast::<f32>();
+                acc = acc + (q6.cast::<f32>() * scale + bias) * load(input[p_off + 6u32]).cast::<f32>();
+                acc = acc + (q7.cast::<f32>() * scale + bias) * load(input[p_off + 7u32]).cast::<f32>();
+            }
         }
-        // groups_per_pack is set so the divide above is exact (group_size
-        // is always a multiple of 8 for MLX quants — 32 / 64 / 128).
-        let _ = groups_per_pack;
     }
 
-    store(output[row], acc.cast::<T>());
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[row], total.cast::<T>());
+    }
 }
 
 // MLX-format int3 dequantizing GEMV. 3-bit values: 8 values in 3 bytes
@@ -411,7 +537,10 @@ fn dequant_gemv_int3<T>(
 
     let mut acc = 0.0f32;
 
-    for g in range(0u32, n_groups, 1u32) {
+    let g_iters = (n_groups + lsize - 1u32) / lsize;
+    for g_iter in range(0u32, g_iters, 1u32) {
+      let g = g_iter * lsize + tid;
+      if g < n_groups {
         let scale = load(scales[row_group_off + g]).cast::<f32>();
         let bias = load(biases[row_group_off + g]).cast::<f32>();
         let g_start = g * group_size;
@@ -497,9 +626,13 @@ fn dequant_gemv_int3<T>(
             acc = acc + (v30.cast::<f32>() * scale + bias) * load(input[xo + 30u32]).cast::<f32>();
             acc = acc + (v31.cast::<f32>() * scale + bias) * load(input[xo + 31u32]).cast::<f32>();
         }
+      }
     }
 
-    store(output[row], acc.cast::<T>());
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[row], total.cast::<T>());
+    }
 }
 
 // MLX-format int3 dequantizing gather. Per output element: bit-extract
@@ -592,7 +725,10 @@ fn dequant_gemv_int5<T>(
 
     let mut acc = 0.0f32;
 
-    for g in range(0u32, n_groups, 1u32) {
+    let g_iters = (n_groups + lsize - 1u32) / lsize;
+    for g_iter in range(0u32, g_iters, 1u32) {
+      let g = g_iter * lsize + tid;
+      if g < n_groups {
         let scale = load(scales[row_group_off + g]).cast::<f32>();
         let bias = load(biases[row_group_off + g]).cast::<f32>();
         let g_start = g * group_size;
@@ -680,9 +816,13 @@ fn dequant_gemv_int5<T>(
             acc = acc + (y6.cast::<f32>() * scale + bias) * load(input[xo + 30u32]).cast::<f32>();
             acc = acc + (y7.cast::<f32>() * scale + bias) * load(input[xo + 31u32]).cast::<f32>();
         }
+      }
     }
 
-    store(output[row], acc.cast::<T>());
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[row], total.cast::<T>());
+    }
 }
 
 // MLX-format int5 dequantizing gather. Per output element: extract 5
@@ -856,67 +996,75 @@ fn dequant_gemv_int6<T>(
 
     let mut acc = 0.0f32;
 
-    for g in range(0u32, n_groups, 1u32) {
-        let scale = load(scales[row_group_off + g]).cast::<f32>();
-        let bias = load(biases[row_group_off + g]).cast::<f32>();
-        let g_start = g * group_size;
-        let g_u32_off = row_u32_off + g * u32_per_group;
-        let chunks = group_size / 16u32;
+    let g_iters = (n_groups + lsize - 1u32) / lsize;
+    for g_iter in range(0u32, g_iters, 1u32) {
+        let g = g_iter * lsize + tid;
+        if g < n_groups {
+            let scale = load(scales[row_group_off + g]).cast::<f32>();
+            let bias = load(biases[row_group_off + g]).cast::<f32>();
+            let g_start = g * group_size;
+            let g_u32_off = row_u32_off + g * u32_per_group;
+            let chunks = group_size / 16u32;
 
-        for c in range(0u32, chunks, 1u32) {
-            let chunk_off = g_u32_off + c * 3u32;
-            let u0 = load(weight[chunk_off]);
-            let u1 = load(weight[chunk_off + 1u32]);
-            let u2 = load(weight[chunk_off + 2u32]);
-            let xo = g_start + c * 16u32;
+            for c in range(0u32, chunks, 1u32) {
+                let chunk_off = g_u32_off + c * 3u32;
+                let u0 = load(weight[chunk_off]);
+                let u1 = load(weight[chunk_off + 1u32]);
+                let u2 = load(weight[chunk_off + 2u32]);
+                let xo = g_start + c * 16u32;
 
-            // Pack 0 — bytes 0,1,2 of u0
-            let p0v0 = u0 & 63u32;
-            let p0v1 = ((u0 >> 6u32) & 3u32) | (((u0 >> 8u32) & 15u32) << 2u32);
-            let p0v2 = ((u0 >> 12u32) & 15u32) | (((u0 >> 16u32) & 3u32) << 4u32);
-            let p0v3 = (u0 >> 18u32) & 63u32;
-            acc = acc + (p0v0.cast::<f32>() * scale + bias) * load(input[xo + 0u32]).cast::<f32>();
-            acc = acc + (p0v1.cast::<f32>() * scale + bias) * load(input[xo + 1u32]).cast::<f32>();
-            acc = acc + (p0v2.cast::<f32>() * scale + bias) * load(input[xo + 2u32]).cast::<f32>();
-            acc = acc + (p0v3.cast::<f32>() * scale + bias) * load(input[xo + 3u32]).cast::<f32>();
+                // Pack 0 — bytes 0,1,2 of u0
+                let p0v0 = u0 & 63u32;
+                let p0v1 = ((u0 >> 6u32) & 3u32) | (((u0 >> 8u32) & 15u32) << 2u32);
+                let p0v2 = ((u0 >> 12u32) & 15u32) | (((u0 >> 16u32) & 3u32) << 4u32);
+                let p0v3 = (u0 >> 18u32) & 63u32;
+                acc = acc + (p0v0.cast::<f32>() * scale + bias) * load(input[xo + 0u32]).cast::<f32>();
+                acc = acc + (p0v1.cast::<f32>() * scale + bias) * load(input[xo + 1u32]).cast::<f32>();
+                acc = acc + (p0v2.cast::<f32>() * scale + bias) * load(input[xo + 2u32]).cast::<f32>();
+                acc = acc + (p0v3.cast::<f32>() * scale + bias) * load(input[xo + 3u32]).cast::<f32>();
 
-            // Pack 1 — byte 3 of u0, bytes 0,1 of u1
-            let p1v0 = (u0 >> 24u32) & 63u32;
-            let p1v1 = ((u0 >> 30u32) & 3u32) | ((u1 & 15u32) << 2u32);
-            let p1v2 = ((u1 >> 4u32) & 15u32) | (((u1 >> 8u32) & 3u32) << 4u32);
-            let p1v3 = (u1 >> 10u32) & 63u32;
-            acc = acc + (p1v0.cast::<f32>() * scale + bias) * load(input[xo + 4u32]).cast::<f32>();
-            acc = acc + (p1v1.cast::<f32>() * scale + bias) * load(input[xo + 5u32]).cast::<f32>();
-            acc = acc + (p1v2.cast::<f32>() * scale + bias) * load(input[xo + 6u32]).cast::<f32>();
-            acc = acc + (p1v3.cast::<f32>() * scale + bias) * load(input[xo + 7u32]).cast::<f32>();
+                // Pack 1 — byte 3 of u0, bytes 0,1 of u1
+                let p1v0 = (u0 >> 24u32) & 63u32;
+                let p1v1 = ((u0 >> 30u32) & 3u32) | ((u1 & 15u32) << 2u32);
+                let p1v2 = ((u1 >> 4u32) & 15u32) | (((u1 >> 8u32) & 3u32) << 4u32);
+                let p1v3 = (u1 >> 10u32) & 63u32;
+                acc = acc + (p1v0.cast::<f32>() * scale + bias) * load(input[xo + 4u32]).cast::<f32>();
+                acc = acc + (p1v1.cast::<f32>() * scale + bias) * load(input[xo + 5u32]).cast::<f32>();
+                acc = acc + (p1v2.cast::<f32>() * scale + bias) * load(input[xo + 6u32]).cast::<f32>();
+                acc = acc + (p1v3.cast::<f32>() * scale + bias) * load(input[xo + 7u32]).cast::<f32>();
 
-            // Pack 2 — bytes 2,3 of u1, byte 0 of u2
-            let p2v0 = (u1 >> 16u32) & 63u32;
-            let p2v1 = ((u1 >> 22u32) & 3u32) | (((u1 >> 24u32) & 15u32) << 2u32);
-            let p2v2 = ((u1 >> 28u32) & 15u32) | ((u2 & 3u32) << 4u32);
-            let p2v3 = (u2 >> 2u32) & 63u32;
-            acc = acc + (p2v0.cast::<f32>() * scale + bias) * load(input[xo + 8u32]).cast::<f32>();
-            acc = acc + (p2v1.cast::<f32>() * scale + bias) * load(input[xo + 9u32]).cast::<f32>();
-            acc = acc + (p2v2.cast::<f32>() * scale + bias) * load(input[xo + 10u32]).cast::<f32>();
-            acc = acc + (p2v3.cast::<f32>() * scale + bias) * load(input[xo + 11u32]).cast::<f32>();
+                // Pack 2 — bytes 2,3 of u1, byte 0 of u2
+                let p2v0 = (u1 >> 16u32) & 63u32;
+                let p2v1 = ((u1 >> 22u32) & 3u32) | (((u1 >> 24u32) & 15u32) << 2u32);
+                let p2v2 = ((u1 >> 28u32) & 15u32) | ((u2 & 3u32) << 4u32);
+                let p2v3 = (u2 >> 2u32) & 63u32;
+                acc = acc + (p2v0.cast::<f32>() * scale + bias) * load(input[xo + 8u32]).cast::<f32>();
+                acc = acc + (p2v1.cast::<f32>() * scale + bias) * load(input[xo + 9u32]).cast::<f32>();
+                acc = acc + (p2v2.cast::<f32>() * scale + bias) * load(input[xo + 10u32]).cast::<f32>();
+                acc = acc + (p2v3.cast::<f32>() * scale + bias) * load(input[xo + 11u32]).cast::<f32>();
 
-            // Pack 3 — bytes 1,2,3 of u2
-            let p3v0 = (u2 >> 8u32) & 63u32;
-            let p3v1 = ((u2 >> 14u32) & 3u32) | (((u2 >> 16u32) & 15u32) << 2u32);
-            let p3v2 = ((u2 >> 20u32) & 15u32) | (((u2 >> 24u32) & 3u32) << 4u32);
-            let p3v3 = (u2 >> 26u32) & 63u32;
-            acc = acc + (p3v0.cast::<f32>() * scale + bias) * load(input[xo + 12u32]).cast::<f32>();
-            acc = acc + (p3v1.cast::<f32>() * scale + bias) * load(input[xo + 13u32]).cast::<f32>();
-            acc = acc + (p3v2.cast::<f32>() * scale + bias) * load(input[xo + 14u32]).cast::<f32>();
-            acc = acc + (p3v3.cast::<f32>() * scale + bias) * load(input[xo + 15u32]).cast::<f32>();
+                // Pack 3 — bytes 1,2,3 of u2
+                let p3v0 = (u2 >> 8u32) & 63u32;
+                let p3v1 = ((u2 >> 14u32) & 3u32) | (((u2 >> 16u32) & 15u32) << 2u32);
+                let p3v2 = ((u2 >> 20u32) & 15u32) | (((u2 >> 24u32) & 3u32) << 4u32);
+                let p3v3 = (u2 >> 26u32) & 63u32;
+                acc = acc + (p3v0.cast::<f32>() * scale + bias) * load(input[xo + 12u32]).cast::<f32>();
+                acc = acc + (p3v1.cast::<f32>() * scale + bias) * load(input[xo + 13u32]).cast::<f32>();
+                acc = acc + (p3v2.cast::<f32>() * scale + bias) * load(input[xo + 14u32]).cast::<f32>();
+                acc = acc + (p3v3.cast::<f32>() * scale + bias) * load(input[xo + 15u32]).cast::<f32>();
+            }
         }
     }
 
-    store(output[row], acc.cast::<T>());
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[row], total.cast::<T>());
+    }
 }
 
-// MLX-format int8 dequantizing GEMV. Same structure as the int4 variant
-// but packs 4 8-bit values per uint32 (bits 0-7, 8-15, 16-23, 24-31).
+// MLX-format int8 dequantizing GEMV — cooperative-thread version.
+// Same structure as the int4 variant but packs 4 8-bit values per
+// uint32. One threadgroup per output row; threads stride across groups.
 #[kernel]
 fn dequant_gemv_int8<T>(
     weight: Tensor<u32>,
@@ -936,28 +1084,35 @@ fn dequant_gemv_int8<T>(
 
     let mut acc = 0.0f32;
 
-    for g in range(0u32, n_groups, 1u32) {
-        let scale = load(scales[row_group_off + g]).cast::<f32>();
-        let bias = load(biases[row_group_off + g]).cast::<f32>();
-        let g_start = g * group_size;
+    let g_iters = (n_groups + lsize - 1u32) / lsize;
+    for g_iter in range(0u32, g_iters, 1u32) {
+        let g = g_iter * lsize + tid;
+        if g < n_groups {
+            let scale = load(scales[row_group_off + g]).cast::<f32>();
+            let bias = load(biases[row_group_off + g]).cast::<f32>();
+            let g_start = g * group_size;
 
-        for p in range(0u32, packs_per_group, 1u32) {
-            let packed = load(weight[row_pack_off + g_start / 4u32 + p]);
-            let p_off = g_start + p * 4u32;
+            for p in range(0u32, packs_per_group, 1u32) {
+                let packed = load(weight[row_pack_off + g_start / 4u32 + p]);
+                let p_off = g_start + p * 4u32;
 
-            let q0 = (packed >> 0u32) & 255u32;
-            let q1 = (packed >> 8u32) & 255u32;
-            let q2 = (packed >> 16u32) & 255u32;
-            let q3 = (packed >> 24u32) & 255u32;
+                let q0 = (packed >> 0u32) & 255u32;
+                let q1 = (packed >> 8u32) & 255u32;
+                let q2 = (packed >> 16u32) & 255u32;
+                let q3 = (packed >> 24u32) & 255u32;
 
-            acc = acc + (q0.cast::<f32>() * scale + bias) * load(input[p_off + 0u32]).cast::<f32>();
-            acc = acc + (q1.cast::<f32>() * scale + bias) * load(input[p_off + 1u32]).cast::<f32>();
-            acc = acc + (q2.cast::<f32>() * scale + bias) * load(input[p_off + 2u32]).cast::<f32>();
-            acc = acc + (q3.cast::<f32>() * scale + bias) * load(input[p_off + 3u32]).cast::<f32>();
+                acc = acc + (q0.cast::<f32>() * scale + bias) * load(input[p_off + 0u32]).cast::<f32>();
+                acc = acc + (q1.cast::<f32>() * scale + bias) * load(input[p_off + 1u32]).cast::<f32>();
+                acc = acc + (q2.cast::<f32>() * scale + bias) * load(input[p_off + 2u32]).cast::<f32>();
+                acc = acc + (q3.cast::<f32>() * scale + bias) * load(input[p_off + 3u32]).cast::<f32>();
+            }
         }
     }
 
-    store(output[row], acc.cast::<T>());
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[row], total.cast::<T>());
+    }
 }
 
 // MLX-format int8 dequantizing gather. One thread per output element.
@@ -1016,6 +1171,7 @@ fn register_kernels() -> Vec<Kernel> {
 
         let mut k = gemv_naive::kernel_ir_for(dt);
         k.name = format!("gemv_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Reduction;
         kernels.push(k);
     }
 
@@ -1045,55 +1201,64 @@ fn register_kernels() -> Vec<Kernel> {
         kernels.push(k);
     }
 
-    // ─── int4 dequant gemv + gather (Elementwise) ────────────────────
-    // T parameterizes scales/biases/input/output dtype; weight is always u32.
+    // ─── kv cache update (Elementwise) ───────────────────────────────
+    for &dt in &dtypes {
+        let mut k = kv_cache_update::kernel_ir_for(dt);
+        k.name = format!("kv_cache_update_{}", dtype_suffix(dt));
+        kernels.push(k);
+    }
+
+    // ─── argmax (Reduction) ──────────────────────────────────────────
+    for &dt in &dtypes {
+        let mut k = argmax::kernel_ir_for(dt);
+        k.name = format!("argmax_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Reduction;
+        kernels.push(k);
+    }
+
+    // ─── dequant gemv (Reduction) + gather (Elementwise) ─────────────
+    // dequant_gemv_*: cooperative-thread (one threadgroup per output row).
+    // dequant_gather_*: one thread per output element.
     for &dt in &dtypes {
         let mut k = dequant_gemv_int4::kernel_ir_for(dt);
         k.name = format!("dequant_gemv_int4_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Reduction;
         kernels.push(k);
 
         let mut k = dequant_gather_int4::kernel_ir_for(dt);
         k.name = format!("dequant_gather_int4_{}", dtype_suffix(dt));
         kernels.push(k);
-    }
 
-    // ─── int8 dequant gemv + gather (Elementwise) ────────────────────
-    for &dt in &dtypes {
         let mut k = dequant_gemv_int8::kernel_ir_for(dt);
         k.name = format!("dequant_gemv_int8_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Reduction;
         kernels.push(k);
 
         let mut k = dequant_gather_int8::kernel_ir_for(dt);
         k.name = format!("dequant_gather_int8_{}", dtype_suffix(dt));
         kernels.push(k);
-    }
 
-    // ─── int6 dequant gemv + gather (Elementwise) ────────────────────
-    for &dt in &dtypes {
         let mut k = dequant_gemv_int6::kernel_ir_for(dt);
         k.name = format!("dequant_gemv_int6_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Reduction;
         kernels.push(k);
 
         let mut k = dequant_gather_int6::kernel_ir_for(dt);
         k.name = format!("dequant_gather_int6_{}", dtype_suffix(dt));
         kernels.push(k);
-    }
 
-    // ─── int3 dequant gemv + gather (Elementwise) ────────────────────
-    for &dt in &dtypes {
         let mut k = dequant_gemv_int3::kernel_ir_for(dt);
         k.name = format!("dequant_gemv_int3_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Reduction;
         kernels.push(k);
 
         let mut k = dequant_gather_int3::kernel_ir_for(dt);
         k.name = format!("dequant_gather_int3_{}", dtype_suffix(dt));
         kernels.push(k);
-    }
 
-    // ─── int5 dequant gemv + gather (Elementwise) ────────────────────
-    for &dt in &dtypes {
         let mut k = dequant_gemv_int5::kernel_ir_for(dt);
         k.name = format!("dequant_gemv_int5_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Reduction;
         kernels.push(k);
 
         let mut k = dequant_gather_int5::kernel_ir_for(dt);
