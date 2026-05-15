@@ -64,23 +64,6 @@ pub mod strided;
 pub mod ternary;
 pub mod unary;
 
-pub use arange::bench_arange;
-pub use arg_reduce::bench_arg_reduce;
-pub use binary::{bench_binary_ops, bench_elementwise};
-pub use binary_two::bench_binary_two;
-pub use copy::bench_copy;
-pub use fp_quantized::bench_fp_quantized;
-pub use gemv::bench_gemv;
-pub use gemv_masked::bench_gemv_masked;
-pub use layer_norm::bench_layer_norm;
-pub use logsumexp::bench_logsumexp;
-pub use quantized::bench_quantized;
-pub use random::bench_random;
-pub use reduce::bench_reduce;
-pub use rms_norm::bench_rms_norm;
-pub use rope::bench_rope;
-pub use scaled_dot_product_attention::{bench_sdpa_vector, bench_sdpa_vector_f16};
-pub use scan::bench_scan;
 pub use shared::{
     CorrectnessStatus,
     DEFAULT_MIN_COSINE_SIM,
@@ -115,47 +98,57 @@ pub use shared::{
     validate_results,
     zeros_typed,
 };
-pub(crate) use shared::{run_f16_once_as_f32, run_f32_once, run_typed_once, to_gflops};
-pub use softmax::bench_softmax;
-pub use sort::bench_sort;
+pub(crate) use shared::{run_f16_once_as_f32, run_typed_once, to_gflops};
 pub use steel::gemm::{
     bench_matmul_fp16,
     bench_matmul_gather,
     bench_matmul_masked,
     bench_matmul_segmented,
 };
-pub use strided::bench_strided;
-pub use ternary::bench_select;
-pub use unary::bench_all_unary;
-
 /// Collect coverage specs from every op module.
 ///
 /// Used by the `kernel_table` binary to cross-reference MetalTile kernels
 /// against their MLX Metal reference counterparts without requiring a GPU.
 pub fn all_kernel_specs() -> Vec<KernelSpec> {
     let mut specs = Vec::new();
-    specs.extend(unary::kernel_specs());
-    specs.extend(binary::kernel_specs());
-    specs.extend(binary_two::kernel_specs());
-    specs.extend(copy::kernel_specs());
-    specs.extend(arange::kernel_specs());
-    specs.extend(ternary::kernel_specs());
-    specs.extend(softmax::kernel_specs());
-    specs.extend(rms_norm::kernel_specs());
-    specs.extend(layer_norm::kernel_specs());
-    specs.extend(logsumexp::kernel_specs());
-    specs.extend(reduce::kernel_specs());
-    specs.extend(gemv::kernel_specs());
-    specs.extend(gemv_masked::kernel_specs());
-    specs.extend(rope::kernel_specs());
-    specs.extend(scaled_dot_product_attention::kernel_specs());
-    specs.extend(scan::kernel_specs());
-    specs.extend(arg_reduce::kernel_specs());
-    specs.extend(sort::kernel_specs());
-    specs.extend(random::kernel_specs());
-    specs.extend(fp_quantized::kernel_specs());
-    specs.extend(quantized::kernel_specs());
-    specs.extend(strided::kernel_specs());
+
+    // Inventory-registered ops (ported to #[bench_kernel]) — derive coverage
+    // from the macro annotations so op files need no kernel_specs() function.
+    for spec in ::inventory::iter::<crate::spec::BenchSpec> {
+        let Some(metal_file) = spec.metal_file else { continue };
+        let ref_spec = match &spec.class {
+            crate::spec::BenchClass::Unary { mlx_pattern, .. }
+            | crate::spec::BenchClass::Binary { mlx_pattern, .. }
+            | crate::spec::BenchClass::AllReduce { mlx_pattern, .. }
+            | crate::spec::BenchClass::RowReduce { mlx_pattern, .. }
+            | crate::spec::BenchClass::Arange { mlx_pattern, .. }
+            | crate::spec::BenchClass::Select { mlx_pattern, .. }
+            | crate::spec::BenchClass::Sort { mlx_pattern, .. }
+            | crate::spec::BenchClass::Scan { mlx_pattern, .. }
+            | crate::spec::BenchClass::ArgReduce { mlx_pattern, .. }
+            | crate::spec::BenchClass::Random { mlx_pattern, .. }
+            | crate::spec::BenchClass::FpQuantized { mlx_pattern, .. }
+            | crate::spec::BenchClass::MatVec { mlx_pattern, .. }
+            | crate::spec::BenchClass::QuantizedMatVec { mlx_pattern, .. }
+            | crate::spec::BenchClass::StridedCopy { mlx_pattern, .. }
+            | crate::spec::BenchClass::RowNorm { mlx_pattern, .. } => match mlx_pattern {
+                Some(p) => RefSpec::Format(p),
+                None => RefSpec::None("no MLX reference"),
+            },
+            crate::spec::BenchClass::BinaryTwo { .. }
+            | crate::spec::BenchClass::MatVecMasked { .. } => RefSpec::None("no MLX equivalent"),
+            crate::spec::BenchClass::Rope { .. } => RefSpec::Literal("rope_float16"),
+            crate::spec::BenchClass::Attention { .. } =>
+                RefSpec::Literal("sdpa_vector_float_128_128"),
+        };
+        specs.push(KernelSpec {
+            op: spec.op,
+            mt_kernel: spec.kernel_name.into(),
+            metal_file,
+            ref_spec,
+            dtypes: FLOAT_DTYPE_STRS,
+        });
+    }
     specs.extend(steel::gemm::steel_gemm_fused::kernel_specs());
     specs.extend(steel::gemm::steel_gemm_gather::kernel_specs());
     specs.extend(steel::gemm::steel_gemm_masked::kernel_specs());

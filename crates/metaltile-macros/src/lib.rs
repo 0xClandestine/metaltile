@@ -654,15 +654,16 @@ pub fn bench_kernel(attr: TokenStream, item: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error().into(),
     };
 
-    let fn_name = {
+    let (fn_name, is_generic) = {
         let f = match syn::parse::<syn::ItemFn>(item.clone()) {
             Ok(f) => f,
             Err(e) => return e.to_compile_error().into(),
         };
-        f.sig.ident.clone()
+        let generic = !f.sig.generics.params.is_empty();
+        (f.sig.ident.clone(), generic)
     };
 
-    let submit = generate_submit(&fn_name, &args);
+    let submit = generate_submit(&fn_name, &args, is_generic);
     let item_ts: proc_macro2::TokenStream = item.into();
     quote! { #item_ts  #submit }.into()
 }
@@ -674,6 +675,7 @@ mod bench_impl {
         Expr,
         Ident,
         LitFloat,
+        LitInt,
         LitStr,
         Token,
         parse::{Parse, ParseStream},
@@ -684,7 +686,23 @@ mod bench_impl {
         Binary,
         AllReduce,
         RowReduce,
+        Arange,
+        BinaryTwo,
+        Select,
+        RowNorm,
+        Sort,
+        Scan,
+        ArgReduce,
+        Random,
+        FpQuantized,
+        MatVec,
+        MatVecMasked,
+        QuantizedMatVec,
+        Rope,
+        Attention,
+        StridedCopy,
     }
+
     pub enum InputKind {
         Signed,
         Positive,
@@ -696,14 +714,34 @@ mod bench_impl {
         pub op: LitStr,
         pub subop: LitStr,
         pub class: ClassKind,
-        pub cpu: Expr,
         pub input: InputKind,
         pub input_a: InputKind,
         pub input_b: InputKind,
         pub tol: LitFloat,
+        pub start: Option<LitFloat>,
+        pub step: Option<LitFloat>,
         pub mlx_src: Option<Expr>,
         pub mlx: Option<LitStr>,
+        pub mlx_extra_slots: Option<LitInt>,
         pub dtypes: Option<Expr>,
+        pub metal_file: Option<LitStr>,
+        // RowNorm-specific
+        pub shapes: Option<Expr>,
+        pub extra: Option<Expr>,
+        pub reads: Option<LitInt>,
+        pub out_elements: Option<LitInt>,
+        pub tpg: Option<LitInt>,
+        // Phase 4-6 specific fields
+        pub n: Option<LitInt>,
+        pub check_n: Option<LitInt>,
+        pub b: Option<LitInt>,
+        pub group_size: Option<LitInt>,
+        pub h: Option<LitInt>,
+        pub l: Option<LitInt>,
+        pub d: Option<LitInt>,
+        pub n_per_group: Option<LitInt>,
+        pub m: Option<LitInt>,
+        pub pad: Option<LitInt>,
     }
 
     fn parse_input(s: &str, span: proc_macro2::Span) -> syn::Result<InputKind> {
@@ -724,14 +762,32 @@ mod bench_impl {
             let mut op: Option<LitStr> = None;
             let mut subop: Option<LitStr> = None;
             let mut class: Option<ClassKind> = None;
-            let mut cpu: Option<Expr> = None;
             let mut inp: Option<InputKind> = None;
             let mut inp_a: Option<InputKind> = None;
             let mut inp_b: Option<InputKind> = None;
             let mut tol: Option<LitFloat> = None;
+            let mut start: Option<LitFloat> = None;
+            let mut step: Option<LitFloat> = None;
             let mut mlx_src: Option<Expr> = None;
             let mut mlx: Option<LitStr> = None;
             let mut dtypes: Option<Expr> = None;
+            let mut metal_file: Option<LitStr> = None;
+            let mut mlx_extra_slots: Option<LitInt> = None;
+            let mut shapes: Option<Expr> = None;
+            let mut extra: Option<Expr> = None;
+            let mut reads: Option<LitInt> = None;
+            let mut out_elements: Option<LitInt> = None;
+            let mut tpg_field: Option<LitInt> = None;
+            let mut n_field: Option<LitInt> = None;
+            let mut check_n_field: Option<LitInt> = None;
+            let mut b_field: Option<LitInt> = None;
+            let mut group_size_field: Option<LitInt> = None;
+            let mut h_field: Option<LitInt> = None;
+            let mut l_field: Option<LitInt> = None;
+            let mut d_field: Option<LitInt> = None;
+            let mut n_per_group_field: Option<LitInt> = None;
+            let mut m_field: Option<LitInt> = None;
+            let mut pad_field: Option<LitInt> = None;
 
             while !input.is_empty() {
                 let key: Ident = input.parse()?;
@@ -746,6 +802,21 @@ mod bench_impl {
                             "Binary" => ClassKind::Binary,
                             "AllReduce" => ClassKind::AllReduce,
                             "RowReduce" => ClassKind::RowReduce,
+                            "Arange" => ClassKind::Arange,
+                            "BinaryTwo" => ClassKind::BinaryTwo,
+                            "Select" => ClassKind::Select,
+                            "RowNorm" => ClassKind::RowNorm,
+                            "Sort" => ClassKind::Sort,
+                            "Scan" => ClassKind::Scan,
+                            "ArgReduce" => ClassKind::ArgReduce,
+                            "Random" => ClassKind::Random,
+                            "FpQuantized" => ClassKind::FpQuantized,
+                            "MatVec" => ClassKind::MatVec,
+                            "MatVecMasked" => ClassKind::MatVecMasked,
+                            "QuantizedMatVec" => ClassKind::QuantizedMatVec,
+                            "Rope" => ClassKind::Rope,
+                            "Attention" => ClassKind::Attention,
+                            "StridedCopy" => ClassKind::StridedCopy,
                             o =>
                                 return Err(syn::Error::new(
                                     id.span(),
@@ -753,7 +824,10 @@ mod bench_impl {
                                 )),
                         });
                     },
-                    "cpu" => cpu = Some(input.parse()?),
+                    "cpu" | "cpu_c" | "cpu_d" => {
+                        // No-op — correctness is via interpreter, not cpu functions.
+                        let _: Expr = input.parse()?;
+                    },
                     "input" => {
                         let id: Ident = input.parse()?;
                         inp = Some(parse_input(&id.to_string(), id.span())?);
@@ -767,9 +841,28 @@ mod bench_impl {
                         inp_b = Some(parse_input(&id.to_string(), id.span())?);
                     },
                     "tol" => tol = Some(input.parse()?),
+                    "start" => start = Some(input.parse()?),
+                    "step" => step = Some(input.parse()?),
                     "mlx_src" => mlx_src = Some(input.parse()?),
                     "mlx" => mlx = Some(input.parse()?),
                     "dtypes" => dtypes = Some(input.parse()?),
+                    "metal_file" => metal_file = Some(input.parse()?),
+                    "mlx_extra_slots" => mlx_extra_slots = Some(input.parse()?),
+                    "shapes" => shapes = Some(input.parse()?),
+                    "extra" => extra = Some(input.parse()?),
+                    "reads" => reads = Some(input.parse()?),
+                    "out_elements" => out_elements = Some(input.parse()?),
+                    "tpg" => tpg_field = Some(input.parse()?),
+                    "n" => n_field = Some(input.parse()?),
+                    "check_n" => check_n_field = Some(input.parse()?),
+                    "b" => b_field = Some(input.parse()?),
+                    "group_size" => group_size_field = Some(input.parse()?),
+                    "h" => h_field = Some(input.parse()?),
+                    "l" => l_field = Some(input.parse()?),
+                    "d" => d_field = Some(input.parse()?),
+                    "n_per_group" => n_per_group_field = Some(input.parse()?),
+                    "m" => m_field = Some(input.parse()?),
+                    "pad" => pad_field = Some(input.parse()?),
                     o =>
                         return Err(syn::Error::new(
                             key.span(),
@@ -785,14 +878,32 @@ mod bench_impl {
                 op: op.ok_or_else(|| input.error("missing `op`"))?,
                 subop: subop.ok_or_else(|| input.error("missing `subop`"))?,
                 class: class.ok_or_else(|| input.error("missing `class`"))?,
-                cpu: cpu.ok_or_else(|| input.error("missing `cpu`"))?,
                 tol: tol.ok_or_else(|| input.error("missing `tol`"))?,
+                start,
+                step,
                 input: inp.unwrap_or(InputKind::Half),
                 input_a: inp_a.unwrap_or(InputKind::Half),
                 input_b: inp_b.unwrap_or(InputKind::Half),
                 mlx_src,
                 mlx,
+                mlx_extra_slots,
                 dtypes,
+                metal_file,
+                shapes,
+                extra,
+                reads,
+                out_elements,
+                tpg: tpg_field,
+                n: n_field,
+                check_n: check_n_field,
+                b: b_field,
+                group_size: group_size_field,
+                h: h_field,
+                l: l_field,
+                d: d_field,
+                n_per_group: n_per_group_field,
+                m: m_field,
+                pad: pad_field,
             })
         }
     }
@@ -819,24 +930,32 @@ mod bench_impl {
         }
     }
 
-    pub fn generate_submit(fn_name: &syn::Ident, a: &BenchArgs) -> TokenStream {
+    pub fn generate_submit(fn_name: &syn::Ident, a: &BenchArgs, is_generic: bool) -> TokenStream {
         let op = &a.op;
         let subop = &a.subop;
         let fn_str = fn_name.to_string();
-        let cpu = &a.cpu;
         let tol = &a.tol;
         let mlx_src = opt_expr(&a.mlx_src);
         let mlx_pat = opt_str(&a.mlx);
+        let metal_file = opt_str(&a.metal_file);
         let dtypes = match &a.dtypes {
             Some(e) => quote! {#e},
             None => quote! {crate::ops::FLOAT_DTYPES},
+        };
+
+        // Non-generic kernels have `kernel_ir_for() -> Kernel` (no args).
+        // BenchSpec.kernel_ir is `fn(DType) -> Kernel`, so we wrap in a lambda.
+        let kernel_ir_expr = if is_generic {
+            quote! { #fn_name::kernel_ir_for }
+        } else {
+            quote! { |_: metaltile_core::dtype::DType| #fn_name::kernel_ir_for() }
         };
 
         let class_ts = match &a.class {
             ClassKind::Unary => {
                 let inp = input_ts(&a.input);
                 quote! {crate::spec::BenchClass::Unary {
-                    cpu: #cpu, inputs: #inp,
+                    inputs: #inp,
                     mlx_src: #mlx_src, mlx_pattern: #mlx_pat,
                 }}
             },
@@ -844,20 +963,209 @@ mod bench_impl {
                 let ia = input_ts(&a.input_a);
                 let ib = input_ts(&a.input_b);
                 quote! {crate::spec::BenchClass::Binary {
-                    cpu: #cpu, inputs_a: #ia, inputs_b: #ib,
+                    inputs_a: #ia, inputs_b: #ib,
                     ref_n_per_thread: crate::spec::BINARY_N_PER_THREAD,
                     mlx_src: #mlx_src, mlx_pattern: #mlx_pat,
                 }}
             },
             ClassKind::AllReduce => quote! {
                 crate::spec::BenchClass::AllReduce {
-                    cpu: #cpu, mlx_src: #mlx_src, mlx_pattern: #mlx_pat,
+                    mlx_src: #mlx_src, mlx_pattern: #mlx_pat,
                 }
             },
             ClassKind::RowReduce => quote! {
                 crate::spec::BenchClass::RowReduce {
                     shapes: crate::spec::ROW_REDUCE_SHAPES,
-                    cpu: #cpu, mlx_src: #mlx_src, mlx_pattern: #mlx_pat,
+                    mlx_src: #mlx_src, mlx_pattern: #mlx_pat,
+                }
+            },
+            ClassKind::Arange => {
+                let s = a.start.as_ref().map(|f| quote! {#f as f32}).unwrap_or(quote! {0.0f32});
+                let st = a.step.as_ref().map(|f| quote! {#f as f32}).unwrap_or(quote! {1.0f32});
+                quote! {
+                    crate::spec::BenchClass::Arange {
+                        start: #s, step: #st, mlx_src: #mlx_src, mlx_pattern: #mlx_pat,
+                    }
+                }
+            },
+            ClassKind::BinaryTwo => {
+                let ia = input_ts(&a.input_a);
+                let ib = input_ts(&a.input_b);
+                quote! {
+                    crate::spec::BenchClass::BinaryTwo {
+                        inputs_a: #ia, inputs_b: #ib,
+                    }
+                }
+            },
+            ClassKind::Select => quote! {
+                crate::spec::BenchClass::Select {
+                    mlx_src: #mlx_src, mlx_pattern: #mlx_pat,
+                }
+            },
+            ClassKind::RowNorm => {
+                let sh = a.shapes.as_ref().expect("RowNorm requires shapes");
+                let ex = a.extra.as_ref().expect("RowNorm requires extra");
+                let reads_val = a.reads.as_ref().expect("RowNorm requires reads");
+                let out_elem = a.out_elements.as_ref().expect("RowNorm requires out_elements");
+                let tpg_val = a.tpg.as_ref().expect("RowNorm requires tpg");
+                let mxs = a
+                    .mlx_extra_slots
+                    .as_ref()
+                    .map(|i| quote! {#i as usize})
+                    .unwrap_or(quote! {0usize});
+                quote! {
+                    crate::spec::BenchClass::RowNorm {
+                        shapes: #sh,
+                        tpg: #tpg_val as usize,
+                        reads: #reads_val as usize,
+                        out_elements: #out_elem as usize,
+                        extra: #ex,
+                        mlx_src: #mlx_src,
+                        mlx_pattern: #mlx_pat,
+                        mlx_extra_slots: #mxs,
+                    }
+                }
+            },
+            ClassKind::Sort => {
+                let b_val = a.b.as_ref().expect("Sort requires b");
+                let n_val = a.n.as_ref().expect("Sort requires n");
+                let tpg_val = a.tpg.as_ref().expect("Sort requires tpg");
+                quote! {
+                    crate::spec::BenchClass::Sort {
+                        b: #b_val as usize,
+                        n: #n_val as usize,
+                        tpg: #tpg_val as usize,
+                        mlx_src: #mlx_src,
+                        mlx_pattern: #mlx_pat,
+                    }
+                }
+            },
+            ClassKind::Scan => {
+                let sh = a.shapes.as_ref().expect("Scan requires shapes");
+                let tpg_val = a.tpg.as_ref().expect("Scan requires tpg");
+                quote! {
+                    crate::spec::BenchClass::Scan {
+                        shapes: #sh,
+                        tpg: #tpg_val as usize,
+                        mlx_src: #mlx_src,
+                        mlx_pattern: #mlx_pat,
+                    }
+                }
+            },
+            ClassKind::ArgReduce => {
+                let n_val = a.n.as_ref().expect("ArgReduce requires n");
+                let cn_val = a.check_n.as_ref().expect("ArgReduce requires check_n");
+                let tpg_val = a.tpg.as_ref().expect("ArgReduce requires tpg");
+                quote! {
+                    crate::spec::BenchClass::ArgReduce {
+                        n: #n_val as usize,
+                        check_n: #cn_val as usize,
+                        tpg: #tpg_val as usize,
+                        mlx_src: #mlx_src,
+                        mlx_pattern: #mlx_pat,
+                    }
+                }
+            },
+            ClassKind::Random => {
+                let n_val = a.n.as_ref().expect("Random requires n");
+                let tpg_val = a.tpg.as_ref().expect("Random requires tpg");
+                quote! {
+                    crate::spec::BenchClass::Random {
+                        n: #n_val as usize,
+                        tpg: #tpg_val as usize,
+                        mlx_src: #mlx_src,
+                        mlx_pattern: #mlx_pat,
+                    }
+                }
+            },
+            ClassKind::FpQuantized => {
+                let n_val = a.n.as_ref().expect("FpQuantized requires n");
+                let tpg_val = a.tpg.as_ref().expect("FpQuantized requires tpg");
+                quote! {
+                    crate::spec::BenchClass::FpQuantized {
+                        n: #n_val as usize,
+                        tpg: #tpg_val as usize,
+                        mlx_src: #mlx_src,
+                        mlx_pattern: #mlx_pat,
+                    }
+                }
+            },
+            ClassKind::MatVec => {
+                let sh = a.shapes.as_ref().expect("MatVec requires shapes");
+                let tpg_val = a.tpg.as_ref().expect("MatVec requires tpg");
+                quote! {
+                    crate::spec::BenchClass::MatVec {
+                        shapes: #sh,
+                        tpg: #tpg_val as usize,
+                        mlx_src: #mlx_src,
+                        mlx_pattern: #mlx_pat,
+                    }
+                }
+            },
+            ClassKind::MatVecMasked => {
+                let sh = a.shapes.as_ref().expect("MatVecMasked requires shapes");
+                let tpg_val = a.tpg.as_ref().expect("MatVecMasked requires tpg");
+                quote! {
+                    crate::spec::BenchClass::MatVecMasked {
+                        shapes: #sh,
+                        tpg: #tpg_val as usize,
+                    }
+                }
+            },
+            ClassKind::QuantizedMatVec => {
+                let sh = a.shapes.as_ref().expect("QuantizedMatVec requires shapes");
+                let gs = a.group_size.as_ref().expect("QuantizedMatVec requires group_size");
+                let tpg_val = a.tpg.as_ref().expect("QuantizedMatVec requires tpg");
+                quote! {
+                    crate::spec::BenchClass::QuantizedMatVec {
+                        shapes: #sh,
+                        group_size: #gs as usize,
+                        tpg: #tpg_val as usize,
+                        mlx_src: #mlx_src,
+                        mlx_pattern: #mlx_pat,
+                    }
+                }
+            },
+            ClassKind::Rope => {
+                let b_val = a.b.as_ref().expect("Rope requires b");
+                let h_val = a.h.as_ref().expect("Rope requires h");
+                let l_val = a.l.as_ref().expect("Rope requires l");
+                let d_val = a.d.as_ref().expect("Rope requires d");
+                let npg = a.n_per_group.as_ref().expect("Rope requires n_per_group");
+                quote! {
+                    crate::spec::BenchClass::Rope {
+                        b: #b_val as usize,
+                        h: #h_val as usize,
+                        l: #l_val as usize,
+                        d: #d_val as usize,
+                        n_per_group: #npg as usize,
+                        mlx_src: #mlx_src,
+                    }
+                }
+            },
+            ClassKind::Attention => {
+                let sh = a.shapes.as_ref().expect("Attention requires shapes");
+                let tpg_val = a.tpg.as_ref().expect("Attention requires tpg");
+                quote! {
+                    crate::spec::BenchClass::Attention {
+                        shapes: #sh,
+                        tpg: #tpg_val as usize,
+                        mlx_src: #mlx_src,
+                    }
+                }
+            },
+            ClassKind::StridedCopy => {
+                let m_val = a.m.as_ref().expect("StridedCopy requires m");
+                let n_val = a.n.as_ref().expect("StridedCopy requires n");
+                let pad_val = a.pad.as_ref().expect("StridedCopy requires pad");
+                quote! {
+                    crate::spec::BenchClass::StridedCopy {
+                        m: #m_val as usize,
+                        n: #n_val as usize,
+                        pad: #pad_val as usize,
+                        mlx_src: #mlx_src,
+                        mlx_pattern: #mlx_pat,
+                    }
                 }
             },
         };
@@ -868,10 +1176,11 @@ mod bench_impl {
                     op:          #op,
                     subop:       #subop,
                     kernel_name: #fn_str,
-                    kernel_ir:   #fn_name::kernel_ir_for,
+                    kernel_ir:   #kernel_ir_expr,
                     dtypes:      #dtypes,
                     tol:         #tol as f32,
                     class:       #class_ts,
+                    metal_file:  #metal_file,
                 }
             }
         }

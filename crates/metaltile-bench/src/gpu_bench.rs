@@ -4,16 +4,9 @@
 //! Runs individual op benchmarks with verbose output.
 
 use metaltile_bench::{
-    ops::{
-        OpResult,
-        SuitePrinter,
-        bench_elementwise,
-        bench_rms_norm,
-        bench_softmax,
-        set_result_reporter,
-        validate_results,
-    },
+    ops::{OpResult, SuitePrinter, set_result_reporter, validate_results},
     runner::GpuRunner,
+    spec::BenchSpec,
     term::{Color, Style, paint_stdout},
 };
 
@@ -39,9 +32,13 @@ fn main() {
     {
         let mut report = |result: &OpResult| printer.print_batch(std::slice::from_ref(result));
         let _reporter = set_result_reporter(&mut report);
-        all.extend(bench_elementwise(&runner));
-        all.extend(bench_softmax(&runner));
-        all.extend(bench_rms_norm(&runner));
+        for spec in inventory::iter::<BenchSpec> {
+            if spec.op == "binary" || spec.op == "unary" {
+                for &dt in spec.dtypes {
+                    all.extend(spec.run(&runner, dt));
+                }
+            }
+        }
     }
     validate_results(&all).unwrap_or_else(|err| panic!("{err}"));
     printer.finish();

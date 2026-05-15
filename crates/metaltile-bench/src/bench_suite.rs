@@ -12,35 +12,13 @@ use metaltile_bench::{
         CorrectnessStatus,
         OpResult,
         SuitePrinter,
-        bench_all_unary,
-        bench_arange,
-        bench_arg_reduce,
-        bench_binary_ops,
-        bench_binary_two,
-        bench_copy,
-        bench_fp_quantized,
-        bench_gemv,
-        bench_gemv_masked,
-        bench_layer_norm,
-        bench_logsumexp,
         bench_matmul_fp16,
-        bench_quantized,
-        bench_random,
-        bench_reduce,
-        bench_rms_norm,
-        bench_rope,
-        bench_scan,
-        bench_sdpa_vector,
-        bench_sdpa_vector_f16,
-        bench_select,
-        bench_softmax,
-        bench_sort,
-        bench_strided,
         set_result_reporter,
         validate_results,
     },
     roofline::lookup_chip,
     runner::GpuRunner,
+    spec::BenchSpec,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
@@ -129,37 +107,19 @@ fn main() {
 
         // Matrix multiply
         extend_if_selected(&mut all, &runner, &filter, bench_matmul_fp16);
-        // Vector / quantized matrix-vector
-        extend_if_selected(&mut all, &runner, &filter, bench_gemv);
-        extend_if_selected(&mut all, &runner, &filter, bench_gemv_masked);
-        extend_if_selected(&mut all, &runner, &filter, bench_quantized);
-        // Normalisation
-        extend_if_selected(&mut all, &runner, &filter, bench_softmax);
-        extend_if_selected(&mut all, &runner, &filter, bench_rms_norm);
-        extend_if_selected(&mut all, &runner, &filter, bench_layer_norm);
-        extend_if_selected(&mut all, &runner, &filter, bench_logsumexp);
-        // Reduction
-        extend_if_selected(&mut all, &runner, &filter, bench_reduce);
-        // Attention
-        extend_if_selected(&mut all, &runner, &filter, bench_sdpa_vector);
-        extend_if_selected(&mut all, &runner, &filter, bench_sdpa_vector_f16);
-        // Positional encoding
-        extend_if_selected(&mut all, &runner, &filter, bench_rope);
-        // Elementwise
-        extend_if_selected(&mut all, &runner, &filter, bench_all_unary);
-        extend_if_selected(&mut all, &runner, &filter, bench_binary_ops);
-        extend_if_selected(&mut all, &runner, &filter, bench_binary_two);
-        extend_if_selected(&mut all, &runner, &filter, bench_copy);
-        extend_if_selected(&mut all, &runner, &filter, bench_arange);
-        extend_if_selected(&mut all, &runner, &filter, bench_select);
-        // Sequence / scan
-        extend_if_selected(&mut all, &runner, &filter, bench_scan);
-        extend_if_selected(&mut all, &runner, &filter, bench_sort);
-        extend_if_selected(&mut all, &runner, &filter, bench_arg_reduce);
-        // Misc
-        extend_if_selected(&mut all, &runner, &filter, bench_random);
-        extend_if_selected(&mut all, &runner, &filter, bench_fp_quantized);
-        extend_if_selected(&mut all, &runner, &filter, bench_strided);
+        // All other ops — inventory-registered via #[bench_kernel]
+        {
+            let mut specs: Vec<&BenchSpec> = inventory::iter::<BenchSpec>.into_iter().collect();
+            specs.sort_unstable_by_key(|s| (s.op, s.subop));
+            for spec in specs {
+                if matches_filter(filter.as_deref(), spec.op) {
+                    for &dt in spec.dtypes {
+                        runner.flush_slc();
+                        all.extend(spec.run(&runner, dt));
+                    }
+                }
+            }
+        }
     }
 
     if all.is_empty() {

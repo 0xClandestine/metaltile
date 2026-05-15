@@ -5,7 +5,9 @@
 //! iterates `inventory::iter::<BenchSpec>`, sorts by `(op, subop)` for
 //! subop-primary display order, then calls `spec.run(runner, dt)` per dtype.
 //!
-//! Canonical sizes — override inside `BenchClass` variants when needed.
+//! Correctness is provided by `metaltile_interp::Interpreter` — the kernel IR
+//! is executed on CPU and compared against GPU output. No hand-written cpu
+//! reference functions needed.
 
 use metaltile_core::{dtype::DType, ir::Kernel};
 
@@ -16,7 +18,7 @@ pub const ELEMENTWISE_N_CHECK: usize = 2_048;
 pub const ELEMENTWISE_TPG: usize = 256;
 
 pub const BINARY_TPG: usize = 1_024;
-pub const BINARY_N_PER_THREAD: usize = 2; // MLX processes 2 elements per thread
+pub const BINARY_N_PER_THREAD: usize = 2;
 
 pub const ALL_REDUCE_N: usize = 64 * 1024 * 1024;
 pub const ALL_REDUCE_N_CHECK: usize = 16_384;
@@ -27,18 +29,26 @@ pub const ROW_REDUCE_CHECK_B: usize = 8;
 pub const ROW_REDUCE_CHECK_N: usize = 512;
 pub const ROW_REDUCE_TPG: usize = 256;
 
+pub const ARANGE_N: usize = 64 * 1024 * 1024;
+pub const ARANGE_N_CHECK: usize = 4_096;
+pub const ARANGE_TPG: usize = 1_024;
+
+pub const BINARY_TWO_TPG: usize = 1_024;
+
+pub const SELECT_TPG: usize = 256;
+
+// ── Single-dtype shorthands ───────────────────────────────────────────────────
+
+pub const F32_ONLY: &[DType] = &[DType::F32];
+pub const F16_ONLY: &[DType] = &[DType::F16];
+
 // ── InputGen ──────────────────────────────────────────────────────────────────
 
-/// How to generate f32 inputs for correctness checks and warm-up.
 #[derive(Clone, Copy)]
 pub enum InputGen {
-    /// Cycling: -3, -1.5, -0.5, 0, 0.25, 0.75, 1.5, 3 — covers negative values.
     Signed,
-    /// 0.25 + (i % 16) × 0.25 — strictly positive (for log, sqrt, etc.).
     Positive,
-    /// Constant 0.5 — safe for all ops.
     Half,
-    /// Constant 1.0.
     Unit,
 }
 
@@ -64,39 +74,136 @@ impl InputGen {
     }
 }
 
+// ── ExtraInput ───────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy)]
+pub enum ExtraInput {
+    WeightPerCol { val: f32 },
+    BiasPerCol { val: f32 },
+    ScalarF32 { val: f32 },
+}
+
 // ── BenchClass ────────────────────────────────────────────────────────────────
 
 /// Execution class — drives dispatch geometry, buffer layout, and bytes/s calc.
+/// No cpu reference functions; correctness comes from the interpreter.
 pub enum BenchClass {
-    /// Single-input elementwise: `out[i] = f(a[i])`.
     Unary {
-        cpu: fn(f32) -> f32,
         inputs: InputGen,
         mlx_src: Option<&'static str>,
-        /// Kernel name pattern; `{tn}` is replaced with the MLX type name
-        /// (e.g. `"v_Exp{tn}{tn}"` → `"v_Expfloat32float32"`).
         mlx_pattern: Option<&'static str>,
     },
-    /// Two-input elementwise: `out[i] = f(a[i], b[i])`.
     Binary {
-        cpu: fn(f32, f32) -> f32,
         inputs_a: InputGen,
         inputs_b: InputGen,
-        /// MLX dispatches `N_PER_THREAD=2` elements per thread; used for ref grid.
         ref_n_per_thread: usize,
         mlx_src: Option<&'static str>,
         mlx_pattern: Option<&'static str>,
     },
-    /// Reduce entire flat array to a single scalar.
     AllReduce {
-        cpu: fn(&[f32]) -> f32,
         mlx_src: Option<&'static str>,
         mlx_pattern: Option<&'static str>,
     },
-    /// Reduce each row of a 2-D tensor independently.
     RowReduce {
-        shapes: &'static [(usize, usize)], // (B, N) pairs
-        cpu: fn(&[f32]) -> f32,
+        shapes: &'static [(usize, usize)],
+        mlx_src: Option<&'static str>,
+        mlx_pattern: Option<&'static str>,
+    },
+    Arange {
+        start: f32,
+        step: f32,
+        mlx_src: Option<&'static str>,
+        mlx_pattern: Option<&'static str>,
+    },
+    BinaryTwo {
+        inputs_a: InputGen,
+        inputs_b: InputGen,
+    },
+    Select {
+        mlx_src: Option<&'static str>,
+        mlx_pattern: Option<&'static str>,
+    },
+    RowNorm {
+        shapes: &'static [(usize, usize)],
+        tpg: usize,
+        reads: usize,
+        out_elements: usize,
+        extra: &'static [ExtraInput],
+        mlx_src: Option<&'static str>,
+        mlx_pattern: Option<&'static str>,
+        mlx_extra_slots: usize,
+    },
+    // ── Phase 4-6 classes ──────────────────────────────────────────────────
+    Sort {
+        b: usize,
+        n: usize,
+        tpg: usize,
+        mlx_src: Option<&'static str>,
+        mlx_pattern: Option<&'static str>,
+    },
+    Scan {
+        shapes: &'static [(usize, usize)],
+        tpg: usize,
+        mlx_src: Option<&'static str>,
+        mlx_pattern: Option<&'static str>,
+    },
+    ArgReduce {
+        n: usize,
+        check_n: usize,
+        tpg: usize,
+        mlx_src: Option<&'static str>,
+        mlx_pattern: Option<&'static str>,
+    },
+    Random {
+        n: usize,
+        tpg: usize,
+        mlx_src: Option<&'static str>,
+        mlx_pattern: Option<&'static str>,
+    },
+    FpQuantized {
+        n: usize,
+        tpg: usize,
+        mlx_src: Option<&'static str>,
+        mlx_pattern: Option<&'static str>,
+    },
+    MatVec {
+        shapes: &'static [(usize, usize)],
+        tpg: usize,
+        mlx_src: Option<&'static str>,
+        mlx_pattern: Option<&'static str>,
+    },
+    MatVecMasked {
+        shapes: &'static [(usize, usize)],
+        tpg: usize,
+    },
+    QuantizedMatVec {
+        shapes: &'static [(usize, usize)],
+        group_size: usize,
+        tpg: usize,
+        mlx_src: Option<&'static str>,
+        mlx_pattern: Option<&'static str>,
+    },
+    /// RoPE rotation — f16 only, Grid3D dispatch.
+    /// MLX ref name is hardcoded in spec_runner (needs bool function constants).
+    Rope {
+        b: usize,
+        h: usize,
+        l: usize,
+        d: usize,
+        n_per_group: usize,
+        mlx_src: Option<&'static str>,
+    },
+    /// Scaled dot-product attention — f32/f16, Reduction dispatch.
+    /// MLX ref names are hardcoded in spec_runner (needs bool function constants).
+    Attention {
+        shapes: &'static [(usize, usize, usize)],
+        tpg: usize,
+        mlx_src: Option<&'static str>,
+    },
+    StridedCopy {
+        m: usize,
+        n: usize,
+        pad: usize,
         mlx_src: Option<&'static str>,
         mlx_pattern: Option<&'static str>,
     },
@@ -104,26 +211,15 @@ pub enum BenchClass {
 
 // ── BenchSpec ─────────────────────────────────────────────────────────────────
 
-/// Fully describes how to benchmark one MetalTile kernel.
-///
-/// Register via `#[bench_kernel(...)]` (generates `inventory::submit!`) or
-/// manually with `inventory::submit! { BenchSpec { ... } }`.
 pub struct BenchSpec {
-    /// Op group name — used for blank-line grouping in the table (e.g. `"unary"`).
     pub op: &'static str,
-    /// Sub-operation label — displayed as `"op (subop)"` (e.g. `"exp"`).
     pub subop: &'static str,
-    /// Metal kernel name as it appears in the compiled library (e.g. `"mt_exp"`).
     pub kernel_name: &'static str,
-    /// Returns the kernel IR for a given dtype. Points to the generated
-    /// `mt_exp::kernel_ir_for` function from `#[kernel]`.
     pub kernel_ir: fn(DType) -> Kernel,
-    /// Dtypes to benchmark (usually `FLOAT_DTYPES`).
     pub dtypes: &'static [DType],
-    /// Maximum absolute error for correctness check.
     pub tol: f32,
-    /// Execution class — drives how the kernel is dispatched and measured.
     pub class: BenchClass,
+    pub metal_file: Option<&'static str>,
 }
 
 inventory::collect!(BenchSpec);
