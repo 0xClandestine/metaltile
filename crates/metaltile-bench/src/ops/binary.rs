@@ -1,314 +1,146 @@
-//! elementwise binary ops — #[kernel] DSL vs MLX.
+//! Elementwise binary ops — #[kernel] DSL vs MLX metal/binary.metal
 //!
-//! Reference: metal/binary.metal  (MLX, Apache-2.0)
-//! Kernel pattern: vvn_{Op}float32  (binary_vv, N=2, f32×f32→f32)
+//! MLX kernel pattern: vvn_{Op}{tname}  (binary_vv, N_PER_THREAD=2)
+//!   e.g. vvn_Addfloat32
+//!   Params: (in0: device T*, in1: device T*, out: device T*, size: constant uint&)
+//!   Grid: [N/(N_PER_THREAD*TPG), 1, 1] × [1024, 1, 1]
 //!
-//! Algorithm: out[i] = a[i] op b[i]
-//! Dispatch (ref): [N/(N_PER_THREAD*TPG), 1, 1] x [TPG, 1, 1]
-//! Dispatch (MT):  [ceil(N/TPG), 1, 1] x [TPG, 1, 1]
+//! MetalTile: [ceil(N/TPG), 1, 1] × [1024, 1, 1] — 1:1 threads
 
-use metaltile::kernel;
-use metaltile_codegen::msl::MslGenerator;
+use metaltile::{bench_kernel, kernel};
 
-use crate::{
-    ops::{
-        DType,
-        DtypeCtx,
-        FLOAT_DTYPES,
-        OpBench,
-        OpResult,
-        bench_gbps,
-        buffer_typed,
-        check_equiv,
-        quantize_roundtrip,
-        run_typed_once,
-        zeros_typed,
-    },
-    runner::GpuRunner,
-};
-
-static SRC: &str = include_str!("../metal/binary.metal");
+static BINARY_SRC: &str = include_str!("../metal/binary.metal");
 
 pub const N_ELEM: usize = 64 * 1024 * 1024;
-const N_PER_THREAD: usize = 2;
-const TPG: usize = 1_024;
-const N_CHECK: usize = 2_048;
 
-// ── Kernels ──────────────────────────────────────────────────────────────────
+// ── CPU references ────────────────────────────────────────────────────────────
 
+pub fn cpu_add(a: f32, b: f32) -> f32 { a + b }
+pub fn cpu_mul(a: f32, b: f32) -> f32 { a * b }
+pub fn cpu_sub(a: f32, b: f32) -> f32 { a - b }
+pub fn cpu_div(a: f32, b: f32) -> f32 { a / b }
+pub fn cpu_maximum(a: f32, b: f32) -> f32 { a.max(b) }
+pub fn cpu_minimum(a: f32, b: f32) -> f32 { a.min(b) }
+pub fn cpu_pow(a: f32, b: f32) -> f32 { a.powf(b) }
+pub fn cpu_logaddexp(a: f32, b: f32) -> f32 { (a.exp() + b.exp()).ln() }
+
+// ── Input generators for bench ────────────────────────────────────────────────
+// Defined as statics so the ramp behaviour is encoded in InputGen variants.
+// a: 1.0 + i*1e-6   b: 0.5 + i*1e-6  (always positive — safe for pow/div)
+// We use Unit/Half as close approximations; exact ramp perf difference is negligible.
+
+// ── Kernels + registrations ───────────────────────────────────────────────────
+
+#[bench_kernel(op="binary", subop="add", class=Binary, cpu=cpu_add,
+               input_a=Unit, input_b=Half, tol=1e-6,
+               mlx_src=BINARY_SRC, mlx="vvn_Add{tn}")]
 #[kernel]
 pub fn vector_add<T>(a: Tensor<T>, b: Tensor<T>, c: Tensor<T>) {
     let idx = program_id(0);
     store(c[idx], load(a[idx]) + load(b[idx]));
 }
 
+#[bench_kernel(op="binary", subop="mul", class=Binary, cpu=cpu_mul,
+               input_a=Unit, input_b=Half, tol=1e-6,
+               mlx_src=BINARY_SRC, mlx="vvn_Multiply{tn}")]
 #[kernel]
 pub fn mt_mul<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
     store(out[idx], load(a[idx]) * load(b[idx]));
 }
 
+#[bench_kernel(op="binary", subop="sub", class=Binary, cpu=cpu_sub,
+               input_a=Unit, input_b=Half, tol=1e-6,
+               mlx_src=BINARY_SRC, mlx="vvn_Subtract{tn}")]
 #[kernel]
 pub fn mt_sub<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
     store(out[idx], load(a[idx]) - load(b[idx]));
 }
 
+#[bench_kernel(op="binary", subop="div", class=Binary, cpu=cpu_div,
+               input_a=Unit, input_b=Half, tol=1e-6,
+               mlx_src=BINARY_SRC, mlx="vvn_Divide{tn}")]
 #[kernel]
 pub fn mt_div<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
     store(out[idx], load(a[idx]) / load(b[idx]));
 }
 
+#[bench_kernel(op="binary", subop="maximum", class=Binary, cpu=cpu_maximum,
+               input_a=Unit, input_b=Half, tol=1e-6,
+               mlx_src=BINARY_SRC, mlx="vvn_Maximum{tn}")]
 #[kernel]
 pub fn mt_max_elem<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
     store(out[idx], max(load(a[idx]), load(b[idx])));
 }
 
+#[bench_kernel(op="binary", subop="minimum", class=Binary, cpu=cpu_minimum,
+               input_a=Unit, input_b=Half, tol=1e-6,
+               mlx_src=BINARY_SRC, mlx="vvn_Minimum{tn}")]
 #[kernel]
 pub fn mt_min_elem<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
     store(out[idx], min(load(a[idx]), load(b[idx])));
 }
 
+#[bench_kernel(op="binary", subop="pow", class=Binary, cpu=cpu_pow,
+               input_a=Unit, input_b=Half, tol=1e-4,
+               mlx_src=BINARY_SRC, mlx="vvn_Power{tn}")]
 #[kernel]
 pub fn mt_pow<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
     store(out[idx], pow(load(a[idx]), load(b[idx])));
 }
 
+#[bench_kernel(op="binary", subop="logaddexp", class=Binary, cpu=cpu_logaddexp,
+               input_a=Signed, input_b=Signed, tol=1e-4,
+               mlx_src=BINARY_SRC, mlx="vvn_LogAddExp{tn}")]
 #[kernel]
 pub fn mt_logaddexp<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
     store(out[idx], log(exp(load(a[idx])) + exp(load(b[idx]))));
 }
 
-// ── Entry table ──────────────────────────────────────────────────────────────
+// ── Legacy bench entry point ──────────────────────────────────────────────────
 
-static BENCH_BINARY: OpBench = OpBench::new("binary", "GB/s");
-
-struct BinaryEntry {
-    variant: &'static str,
-    ref_fn: String,
-    mt_name: &'static str,
-    msl: String,
-    cpu: fn(f32, f32) -> f32,
+pub fn bench_elementwise(runner: &crate::runner::GpuRunner) -> Vec<crate::ops::OpResult> {
+    bench_binary_ops(runner)
 }
 
-fn make_entries(dt: DType) -> Vec<BinaryEntry> {
-    let tn = DtypeCtx::elementwise(dt).tn;
-    vec![
-        BinaryEntry {
-            variant: "add",
-            ref_fn: format!("vvn_Add{tn}"),
-            mt_name: "vector_add",
-            msl: MslGenerator::default().generate(&vector_add::kernel_ir_for(dt)).unwrap(),
-            cpu: |a, b| a + b,
-        },
-        BinaryEntry {
-            variant: "mul",
-            ref_fn: format!("vvn_Multiply{tn}"),
-            mt_name: "mt_mul",
-            msl: MslGenerator::default().generate(&mt_mul::kernel_ir_for(dt)).unwrap(),
-            cpu: |a, b| a * b,
-        },
-        BinaryEntry {
-            variant: "sub",
-            ref_fn: format!("vvn_Subtract{tn}"),
-            mt_name: "mt_sub",
-            msl: MslGenerator::default().generate(&mt_sub::kernel_ir_for(dt)).unwrap(),
-            cpu: |a, b| a - b,
-        },
-        BinaryEntry {
-            variant: "div",
-            ref_fn: format!("vvn_Divide{tn}"),
-            mt_name: "mt_div",
-            msl: MslGenerator::default().generate(&mt_div::kernel_ir_for(dt)).unwrap(),
-            cpu: |a, b| a / b,
-        },
-        BinaryEntry {
-            variant: "maximum",
-            ref_fn: format!("vvn_Maximum{tn}"),
-            mt_name: "mt_max_elem",
-            msl: MslGenerator::default().generate(&mt_max_elem::kernel_ir_for(dt)).unwrap(),
-            cpu: |a, b| a.max(b),
-        },
-        BinaryEntry {
-            variant: "minimum",
-            ref_fn: format!("vvn_Minimum{tn}"),
-            mt_name: "mt_min_elem",
-            msl: MslGenerator::default().generate(&mt_min_elem::kernel_ir_for(dt)).unwrap(),
-            cpu: |a, b| a.min(b),
-        },
-        BinaryEntry {
-            variant: "pow",
-            ref_fn: format!("vvn_Power{tn}"),
-            mt_name: "mt_pow",
-            msl: MslGenerator::default().generate(&mt_pow::kernel_ir_for(dt)).unwrap(),
-            cpu: |a, b| a.powf(b),
-        },
-        BinaryEntry {
-            variant: "logaddexp",
-            ref_fn: format!("vvn_LogAddExp{tn}"),
-            mt_name: "mt_logaddexp",
-            msl: MslGenerator::default().generate(&mt_logaddexp::kernel_ir_for(dt)).unwrap(),
-            cpu: |a, b| (a.exp() + b.exp()).ln(),
-        },
-    ]
-}
-
-// ── Bench ─────────────────────────────────────────────────────────────────────
-
-pub fn bench_elementwise(runner: &GpuRunner) -> Vec<OpResult> { bench_binary_ops(runner) }
-
-pub fn bench_binary_ops(runner: &GpuRunner) -> Vec<OpResult> {
-    // Subop-primary ordering: outer=variant, inner=dtype.
-    let variants = ["add", "mul", "sub", "div", "maximum", "minimum", "pow", "logaddexp"];
+pub fn bench_binary_ops(runner: &crate::runner::GpuRunner) -> Vec<crate::ops::OpResult> {
+    use crate::ops::FLOAT_DTYPES;
+    let mut specs: Vec<&crate::spec::BenchSpec> = ::inventory::iter::<crate::spec::BenchSpec>
+        .into_iter()
+        .filter(|s| s.op == "binary")
+        .collect();
+    specs.sort_by_key(|s| s.subop);
     let mut results = Vec::new();
-    for variant in variants {
+    for spec in specs {
         for &dt in FLOAT_DTYPES {
-            results.extend(bench_binary_ops_for(runner, dt, variant));
+            results.extend(spec.run(runner, dt));
         }
     }
     results
 }
 
-fn bench_binary_ops_for(runner: &GpuRunner, dt: DType, variant: &str) -> Vec<OpResult> {
-    let ctx = DtypeCtx::elementwise(dt);
-    let (dlabel, eb, tol) = (ctx.label, ctx.eb, ctx.tol);
-    let tpg = [TPG, 1, 1];
-    let bytes = (N_ELEM * eb * 3) as f64; // 2 reads + 1 write
-
-    let entries = make_entries(dt);
-    let entry = match entries.iter().find(|e| e.variant == variant) {
-        Some(e) => e,
-        None => return Vec::new(),
-    };
-
-    let Some(mk) = runner.compile(&entry.msl, entry.mt_name).ok() else {
-        return Vec::new();
-    };
-
-    // Shared typed input buffers for perf
-    let a_vals: Vec<f32> = (0..N_ELEM).map(|i| 1.0 + i as f32 * 1e-6).collect();
-    let b_vals: Vec<f32> = (0..N_ELEM).map(|i| 0.5 + i as f32 * 1e-6).collect();
-    let a_buf = buffer_typed(runner, &a_vals, dt);
-    let b_buf = buffer_typed(runner, &b_vals, dt);
-
-    // Correctness: use quantize-roundtrip inputs so tolerance is tight
-    let a_check_f32: Vec<f32> = (0..N_CHECK).map(|i| 1.0 + i as f32 * 0.001).collect();
-    let b_check_f32: Vec<f32> = (0..N_CHECK).map(|i| 0.5 + i as f32 * 0.001).collect();
-    let a_q = quantize_roundtrip(&a_check_f32, dt);
-    let b_q = quantize_roundtrip(&b_check_f32, dt);
-    let cpu_ref: Vec<f32> = a_q.iter().zip(&b_q).map(|(&a, &b)| (entry.cpu)(a, b)).collect();
-    let a_s = buffer_typed(runner, &a_check_f32, dt);
-    let b_s = buffer_typed(runner, &b_check_f32, dt);
-    let mt_out = zeros_typed(runner, N_CHECK, dt);
-    let n_buf = runner.buffer_u32(N_CHECK as u32);
-    let mt_vals = run_typed_once(
-        runner,
-        &mk,
-        &[&a_s, &b_s, &mt_out, &n_buf],
-        &mt_out,
-        N_CHECK,
-        [N_CHECK.div_ceil(TPG), 1, 1],
-        tpg,
-        dt,
-    );
-    let equiv = check_equiv(&cpu_ref, &mt_vals, tol);
-
-    // Ref perf
-    let ref_perf = runner.compile(SRC, &entry.ref_fn).ok().and_then(|rk| {
-        let out_ref = zeros_typed(runner, N_ELEM, dt);
-        let size = runner.buffer_u32(N_ELEM as u32);
-        bench_gbps(
-            runner,
-            &rk,
-            &[&a_buf, &b_buf, &out_ref, &size],
-            [N_ELEM / (N_PER_THREAD * TPG), 1, 1],
-            tpg,
-            bytes,
-        )
-    });
-
-    // MT perf
-    let out_mt = zeros_typed(runner, N_ELEM, dt);
-    let n_perf = runner.buffer_u32(N_ELEM as u32);
-    let mt_perf = bench_gbps(
-        runner,
-        &mk,
-        &[&a_buf, &b_buf, &out_mt, &n_perf],
-        [N_ELEM.div_ceil(TPG), 1, 1],
-        tpg,
-        bytes,
-    );
-
-    vec![BENCH_BINARY.result_sub(
-        Some(entry.variant),
-        format!("N={N_ELEM} {dlabel}"),
-        ref_perf,
-        mt_perf,
-        Some(equiv),
-    )]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ops::FLOAT_DTYPES;
-
-    #[test]
-    fn msl_generates_for_all_dtypes() {
-        for &dt in FLOAT_DTYPES {
-            let entries = make_entries(dt);
-            for entry in &entries {
-                assert!(
-                    !entry.msl.trim().is_empty(),
-                    "MSL empty for op {} dtype {dt:?}",
-                    entry.mt_name
-                );
-            }
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn kernels_compile() {
-        let Ok(runner) = GpuRunner::new() else {
-            return;
-        };
-        for &dt in FLOAT_DTYPES {
-            let entries = make_entries(dt);
-            for entry in &entries {
-                runner.compile(&entry.msl, entry.mt_name).unwrap();
-            }
-        }
-    }
-}
+// ── KernelSpec ────────────────────────────────────────────────────────────────
 
 use crate::ops::{FLOAT_DTYPE_STRS, KernelSpec, RefSpec};
 
-/// Reference kernel name templates — mirrors the patterns in `make_entries()`.
-static BINARY_REF_PATTERNS: &[(&str, &str)] = &[
-    ("vector_add", "vvn_Add{tn}"),
-    ("mt_mul", "vvn_Multiply{tn}"),
-    ("mt_sub", "vvn_Subtract{tn}"),
-    ("mt_div", "vvn_Divide{tn}"),
-    ("mt_max_elem", "vvn_Maximum{tn}"),
-    ("mt_min_elem", "vvn_Minimum{tn}"),
-    ("mt_pow", "vvn_Power{tn}"),
-    ("mt_logaddexp", "vvn_LogAddExp{tn}"),
-];
-
 pub fn kernel_specs() -> Vec<KernelSpec> {
-    BINARY_REF_PATTERNS
-        .iter()
-        .map(|&(mt_kernel, pat)| KernelSpec {
+    ::inventory::iter::<crate::spec::BenchSpec>
+        .into_iter()
+        .filter(|s| s.op == "binary")
+        .map(|s| KernelSpec {
             op: "binary",
-            mt_kernel: mt_kernel.into(),
+            mt_kernel: s.kernel_name.into(),
             metal_file: "binary.metal",
-            ref_spec: RefSpec::Format(pat),
+            ref_spec: match &s.class {
+                crate::spec::BenchClass::Binary { mlx_pattern: Some(p), .. } => RefSpec::Format(p),
+                _ => RefSpec::None("no MLX reference"),
+            },
             dtypes: FLOAT_DTYPE_STRS,
         })
         .collect()

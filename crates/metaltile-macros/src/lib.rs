@@ -610,3 +610,270 @@ mod tests {
         assert!(tokens.contains(&needle), "missing `{needle}` in `{tokens}`");
     }
 }
+
+// ---------------------------------------------------------------------------
+// #[bench_kernel] — declarative benchmark registration
+// ---------------------------------------------------------------------------
+
+/// Registers a `#[kernel]` function for automatic benchmarking.
+///
+/// Must be placed **before** `#[kernel]` so it sees the original function
+/// signature. Generates an `inventory::submit! { BenchSpec { ... } }` alongside
+/// the kernel, which the bench suite collects via `inventory::iter::<BenchSpec>`.
+///
+/// # Required args
+/// - `op    = "group"` — bench table group (e.g. `"unary"`)
+/// - `subop = "name"`  — sub-operation label (e.g. `"exp"`)
+/// - `class = Unary | Binary | AllReduce | RowReduce`
+/// - `cpu   = fn_ptr`  — CPU reference (named fn, not closure)
+/// - `tol   = 1e-4`    — maximum absolute correctness error
+///
+/// # Optional args
+/// - `input = Signed|Positive|Half|Unit` (Unary default: `Half`)
+/// - `input_a / input_b` (Binary, default: `Half`)
+/// - `mlx_src = IDENT` — `&'static str` with Metal source
+/// - `mlx = "pattern"` — kernel name pattern; `{tn}` → MLX type name
+/// - `dtypes = IDENT`  — `&'static [DType]` (default: `FLOAT_DTYPES`)
+///
+/// # Example
+/// ```ignore
+/// fn cpu_exp(x: f32) -> f32 { x.exp() }
+/// static UNARY_SRC: &str = include_str!("../metal/unary.metal");
+///
+/// #[bench_kernel(op="unary", subop="exp", class=Unary, cpu=cpu_exp,
+///                input=Signed, tol=1e-4, mlx_src=UNARY_SRC, mlx="v_Exp{tn}{tn}")]
+/// #[kernel]
+/// pub fn mt_exp<T>(a: Tensor<T>, out: Tensor<T>) { … }
+/// ```
+#[proc_macro_attribute]
+pub fn bench_kernel(attr: TokenStream, item: TokenStream) -> TokenStream {
+    use bench_impl::{BenchArgs, generate_submit};
+
+    let args = match syn::parse::<BenchArgs>(attr) {
+        Ok(a) => a,
+        Err(e) => return e.to_compile_error().into(),
+    };
+
+    let fn_name = {
+        let f = match syn::parse::<syn::ItemFn>(item.clone()) {
+            Ok(f) => f,
+            Err(e) => return e.to_compile_error().into(),
+        };
+        f.sig.ident.clone()
+    };
+
+    let submit = generate_submit(&fn_name, &args);
+    let item_ts: proc_macro2::TokenStream = item.into();
+    quote! { #item_ts  #submit }.into()
+}
+
+mod bench_impl {
+    use proc_macro2::TokenStream;
+    use quote::quote;
+    use syn::{
+        Expr,
+        Ident,
+        LitFloat,
+        LitStr,
+        Token,
+        parse::{Parse, ParseStream},
+    };
+
+    pub enum ClassKind {
+        Unary,
+        Binary,
+        AllReduce,
+        RowReduce,
+    }
+    pub enum InputKind {
+        Signed,
+        Positive,
+        Half,
+        Unit,
+    }
+
+    pub struct BenchArgs {
+        pub op: LitStr,
+        pub subop: LitStr,
+        pub class: ClassKind,
+        pub cpu: Expr,
+        pub input: InputKind,
+        pub input_a: InputKind,
+        pub input_b: InputKind,
+        pub tol: LitFloat,
+        pub mlx_src: Option<Expr>,
+        pub mlx: Option<LitStr>,
+        pub dtypes: Option<Expr>,
+    }
+
+    fn parse_input(s: &str, span: proc_macro2::Span) -> syn::Result<InputKind> {
+        match s {
+            "Signed" => Ok(InputKind::Signed),
+            "Positive" => Ok(InputKind::Positive),
+            "Half" => Ok(InputKind::Half),
+            "Unit" => Ok(InputKind::Unit),
+            o => Err(syn::Error::new(
+                span,
+                format!("input must be Signed|Positive|Half|Unit, got `{o}`"),
+            )),
+        }
+    }
+
+    impl Parse for BenchArgs {
+        fn parse(input: ParseStream) -> syn::Result<Self> {
+            let mut op: Option<LitStr> = None;
+            let mut subop: Option<LitStr> = None;
+            let mut class: Option<ClassKind> = None;
+            let mut cpu: Option<Expr> = None;
+            let mut inp: Option<InputKind> = None;
+            let mut inp_a: Option<InputKind> = None;
+            let mut inp_b: Option<InputKind> = None;
+            let mut tol: Option<LitFloat> = None;
+            let mut mlx_src: Option<Expr> = None;
+            let mut mlx: Option<LitStr> = None;
+            let mut dtypes: Option<Expr> = None;
+
+            while !input.is_empty() {
+                let key: Ident = input.parse()?;
+                input.parse::<Token![=]>()?;
+                match key.to_string().as_str() {
+                    "op" => op = Some(input.parse()?),
+                    "subop" => subop = Some(input.parse()?),
+                    "class" => {
+                        let id: Ident = input.parse()?;
+                        class = Some(match id.to_string().as_str() {
+                            "Unary" => ClassKind::Unary,
+                            "Binary" => ClassKind::Binary,
+                            "AllReduce" => ClassKind::AllReduce,
+                            "RowReduce" => ClassKind::RowReduce,
+                            o =>
+                                return Err(syn::Error::new(
+                                    id.span(),
+                                    format!("unknown class `{o}`"),
+                                )),
+                        });
+                    },
+                    "cpu" => cpu = Some(input.parse()?),
+                    "input" => {
+                        let id: Ident = input.parse()?;
+                        inp = Some(parse_input(&id.to_string(), id.span())?);
+                    },
+                    "input_a" => {
+                        let id: Ident = input.parse()?;
+                        inp_a = Some(parse_input(&id.to_string(), id.span())?);
+                    },
+                    "input_b" => {
+                        let id: Ident = input.parse()?;
+                        inp_b = Some(parse_input(&id.to_string(), id.span())?);
+                    },
+                    "tol" => tol = Some(input.parse()?),
+                    "mlx_src" => mlx_src = Some(input.parse()?),
+                    "mlx" => mlx = Some(input.parse()?),
+                    "dtypes" => dtypes = Some(input.parse()?),
+                    o =>
+                        return Err(syn::Error::new(
+                            key.span(),
+                            format!("unknown bench_kernel arg: `{o}`"),
+                        )),
+                }
+                if input.peek(Token![,]) {
+                    input.parse::<Token![,]>()?;
+                }
+            }
+
+            Ok(BenchArgs {
+                op: op.ok_or_else(|| input.error("missing `op`"))?,
+                subop: subop.ok_or_else(|| input.error("missing `subop`"))?,
+                class: class.ok_or_else(|| input.error("missing `class`"))?,
+                cpu: cpu.ok_or_else(|| input.error("missing `cpu`"))?,
+                tol: tol.ok_or_else(|| input.error("missing `tol`"))?,
+                input: inp.unwrap_or(InputKind::Half),
+                input_a: inp_a.unwrap_or(InputKind::Half),
+                input_b: inp_b.unwrap_or(InputKind::Half),
+                mlx_src,
+                mlx,
+                dtypes,
+            })
+        }
+    }
+
+    fn input_ts(k: &InputKind) -> TokenStream {
+        match k {
+            InputKind::Signed => quote! {crate::spec::InputGen::Signed},
+            InputKind::Positive => quote! {crate::spec::InputGen::Positive},
+            InputKind::Half => quote! {crate::spec::InputGen::Half},
+            InputKind::Unit => quote! {crate::spec::InputGen::Unit},
+        }
+    }
+
+    fn opt_str(v: &Option<LitStr>) -> TokenStream {
+        match v {
+            Some(s) => quote! {Some(#s)},
+            None => quote! {None},
+        }
+    }
+    fn opt_expr(v: &Option<Expr>) -> TokenStream {
+        match v {
+            Some(e) => quote! {Some(#e)},
+            None => quote! {None},
+        }
+    }
+
+    pub fn generate_submit(fn_name: &syn::Ident, a: &BenchArgs) -> TokenStream {
+        let op = &a.op;
+        let subop = &a.subop;
+        let fn_str = fn_name.to_string();
+        let cpu = &a.cpu;
+        let tol = &a.tol;
+        let mlx_src = opt_expr(&a.mlx_src);
+        let mlx_pat = opt_str(&a.mlx);
+        let dtypes = match &a.dtypes {
+            Some(e) => quote! {#e},
+            None => quote! {crate::ops::FLOAT_DTYPES},
+        };
+
+        let class_ts = match &a.class {
+            ClassKind::Unary => {
+                let inp = input_ts(&a.input);
+                quote! {crate::spec::BenchClass::Unary {
+                    cpu: #cpu, inputs: #inp,
+                    mlx_src: #mlx_src, mlx_pattern: #mlx_pat,
+                }}
+            },
+            ClassKind::Binary => {
+                let ia = input_ts(&a.input_a);
+                let ib = input_ts(&a.input_b);
+                quote! {crate::spec::BenchClass::Binary {
+                    cpu: #cpu, inputs_a: #ia, inputs_b: #ib,
+                    ref_n_per_thread: crate::spec::BINARY_N_PER_THREAD,
+                    mlx_src: #mlx_src, mlx_pattern: #mlx_pat,
+                }}
+            },
+            ClassKind::AllReduce => quote! {
+                crate::spec::BenchClass::AllReduce {
+                    cpu: #cpu, mlx_src: #mlx_src, mlx_pattern: #mlx_pat,
+                }
+            },
+            ClassKind::RowReduce => quote! {
+                crate::spec::BenchClass::RowReduce {
+                    shapes: crate::spec::ROW_REDUCE_SHAPES,
+                    cpu: #cpu, mlx_src: #mlx_src, mlx_pattern: #mlx_pat,
+                }
+            },
+        };
+
+        quote! {
+            ::inventory::submit! {
+                crate::spec::BenchSpec {
+                    op:          #op,
+                    subop:       #subop,
+                    kernel_name: #fn_str,
+                    kernel_ir:   #fn_name::kernel_ir_for,
+                    dtypes:      #dtypes,
+                    tol:         #tol as f32,
+                    class:       #class_ts,
+                }
+            }
+        }
+    }
+}

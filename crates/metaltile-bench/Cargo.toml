@@ -25,6 +25,7 @@ metaltile-interp.workspace = true
 metaltile-runtime.workspace = true
 metaltile-macros.workspace = true
 criterion = { workspace = true, features = ["html_reports"] }
+inventory.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

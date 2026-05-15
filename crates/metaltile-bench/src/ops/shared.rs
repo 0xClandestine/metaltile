@@ -928,6 +928,7 @@ mod tests {
     fn correctness_status_distinguishes_unchecked_from_unavailable() {
         let unchecked = OpResult {
             op: "sample",
+            subop: None,
             shape: "shape".into(),
             metric: "GB/s",
             ref_perf: Some(1.0),
@@ -984,6 +985,7 @@ mod tests {
     fn validation_reports_unchecked_rows() {
         let unchecked = OpResult {
             op: "sample",
+            subop: None,
             shape: "shape".into(),
             metric: "GB/s",
             ref_perf: Some(1.0),
