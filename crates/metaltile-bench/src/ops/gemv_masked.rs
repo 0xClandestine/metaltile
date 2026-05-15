@@ -2,10 +2,8 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static GEMV_MASKED_SHAPES: &[(usize, usize)] = &[(4096, 4096)];
-
 #[bench_kernel(op="gemv_masked", subop="gemv_masked", class=MatVecMasked,
-               shapes=&GEMV_MASKED_SHAPES, tpg=256, tol=1e-2)]
+               b=4096, n=4096, tpg=256, tol=1e-2)]
 #[kernel]
 pub fn mt_gemv_masked<T>(
     mat: Tensor<T>,

@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use metaltile_codegen::msl::MslGenerator;
-use metaltile_core::{constexpr::ConstExprValues, ir::KernelMode};
+use metaltile_core::{constexpr::ConstExprValues, ir::{Kernel, KernelMode, Op}};
 use metaltile_interp::{Interpreter, TensorData};
 
 use crate::{
@@ -21,118 +21,39 @@ use crate::{
         buffer_typed,
         check_equiv,
         check_equiv_with,
-        quantize_roundtrip,
         run_typed_once,
         zeros_typed,
     },
     runner::{GpuBuffer, GpuRunner},
-    spec::{
-        ALL_REDUCE_N,
-        ALL_REDUCE_N_CHECK,
-        ALL_REDUCE_TPG,
-        ARANGE_N,
-        ARANGE_N_CHECK,
-        ARANGE_TPG,
-        BINARY_TPG,
-        BINARY_TWO_TPG,
-        BenchClass,
-        BenchSpec,
-        ELEMENTWISE_N_BENCH,
-        ELEMENTWISE_N_CHECK,
-        ELEMENTWISE_TPG,
-        ExtraInput,
-        InputGen,
-        ROW_REDUCE_CHECK_B,
-        ROW_REDUCE_CHECK_N,
-        ROW_REDUCE_TPG,
-        SELECT_TPG,
-    },
+    spec::{BenchDispatch, BenchSpec, MlxArg, ScalarBufSpec, ShapeSpec},
 };
 
 impl BenchSpec {
     pub fn run(&self, runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
         let bench = OpBench::new(self.op, "GB/s");
-        match &self.class {
-            BenchClass::Unary { inputs, mlx_src, mlx_pattern } =>
-                self.run_unary(runner, dt, &bench, *inputs, mlx_src, mlx_pattern),
-            BenchClass::Binary { inputs_a, inputs_b, ref_n_per_thread, mlx_src, mlx_pattern } =>
-                self.run_binary(
-                    runner,
-                    dt,
-                    &bench,
-                    *inputs_a,
-                    *inputs_b,
-                    *ref_n_per_thread,
-                    mlx_src,
-                    mlx_pattern,
-                ),
-            BenchClass::AllReduce { mlx_src, mlx_pattern } =>
-                self.run_all_reduce(runner, dt, &bench, mlx_src, mlx_pattern),
-            BenchClass::RowReduce { shapes, mlx_src, mlx_pattern } =>
-                self.run_row_reduce(runner, dt, &bench, shapes, mlx_src, mlx_pattern),
-            BenchClass::Arange { start, step, mlx_src, mlx_pattern } =>
-                self.run_arange(runner, dt, &bench, *start, *step, mlx_src, mlx_pattern),
-            BenchClass::BinaryTwo { inputs_a, inputs_b } =>
-                self.run_binary_two(runner, dt, &bench, *inputs_a, *inputs_b),
-            BenchClass::Select { mlx_src, mlx_pattern } =>
-                self.run_select(runner, dt, &bench, mlx_src, mlx_pattern),
-            BenchClass::RowNorm {
-                shapes,
-                tpg,
-                reads,
-                out_elements,
-                extra,
-                mlx_src,
-                mlx_pattern,
-                mlx_extra_slots,
-            } => self.run_row_norm(
-                runner,
-                dt,
-                &bench,
-                shapes,
-                *tpg,
-                *reads,
-                *out_elements,
-                extra,
-                mlx_src,
-                mlx_pattern,
-                *mlx_extra_slots,
-            ),
-            BenchClass::Sort { b, n, tpg, mlx_src, mlx_pattern } =>
-                self.run_sort(runner, dt, &bench, *b, *n, *tpg, mlx_src, mlx_pattern),
-            BenchClass::Scan { shapes, tpg, mlx_src, mlx_pattern } =>
-                self.run_scan(runner, dt, &bench, shapes, *tpg, mlx_src, mlx_pattern),
-            BenchClass::ArgReduce { n, check_n, tpg, mlx_src, mlx_pattern } =>
-                self.run_arg_reduce(runner, dt, &bench, *n, *check_n, *tpg, mlx_src, mlx_pattern),
-            BenchClass::Random { n, tpg, mlx_src, mlx_pattern } =>
-                self.run_random(runner, dt, &bench, *n, *tpg, mlx_src, mlx_pattern),
-            BenchClass::FpQuantized { n, tpg, mlx_src, mlx_pattern } =>
-                self.run_fp_quantized(runner, dt, &bench, *n, *tpg, mlx_src, mlx_pattern),
-            BenchClass::MatVec { shapes, tpg, mlx_src, mlx_pattern } =>
-                self.run_mat_vec(runner, dt, &bench, shapes, *tpg, mlx_src, mlx_pattern),
-            BenchClass::MatVecMasked { shapes, tpg } =>
-                self.run_mat_vec_masked(runner, dt, &bench, shapes, *tpg),
-            BenchClass::QuantizedMatVec { shapes, group_size, tpg, mlx_src, mlx_pattern } => self
-                .run_quantized_mat_vec(
-                    runner,
-                    dt,
-                    &bench,
-                    shapes,
-                    *group_size,
-                    *tpg,
-                    mlx_src,
-                    mlx_pattern,
-                ),
-            BenchClass::Rope { b, h, l, d, n_per_group, mlx_src } =>
-                self.run_rope(runner, dt, &bench, *b, *h, *l, *d, *n_per_group, mlx_src),
-            BenchClass::Attention { shapes, tpg, mlx_src } =>
-                self.run_attention(runner, dt, &bench, shapes, *tpg, mlx_src),
-            BenchClass::StridedCopy { m, n, pad, mlx_src, mlx_pattern } =>
-                self.run_strided_copy(runner, dt, &bench, *m, *n, *pad, mlx_src, mlx_pattern),
+        match &self.dispatch {
+            BenchDispatch::Generic => self.run_generic(runner, dt, &bench),
+            BenchDispatch::Sort { b, n, tpg } =>
+                self.run_sort(runner, dt, &bench, *b, *n, *tpg),
+            BenchDispatch::Scan { shapes, tpg } =>
+                self.run_scan(runner, dt, &bench, shapes, *tpg),
+            BenchDispatch::ArgReduce { n, check_n, tpg } =>
+                self.run_arg_reduce(runner, dt, &bench, *n, *check_n, *tpg),
+            BenchDispatch::Random { n, tpg } => self.run_random(runner, dt, &bench, *n, *tpg),
+            BenchDispatch::FpQuantized { n, tpg } =>
+                self.run_fp_quantized(runner, dt, &bench, *n, *tpg),
+            BenchDispatch::QuantizedMatVec { shapes, group_size, tpg } =>
+                self.run_quantized_mat_vec(runner, dt, &bench, shapes, *group_size, *tpg),
+            BenchDispatch::Rope { b, h, l, d, n_per_group } =>
+                self.run_rope(runner, dt, &bench, *b, *h, *l, *d, *n_per_group),
+            BenchDispatch::Attention { shapes, tpg } =>
+                self.run_attention(runner, dt, &bench, shapes, *tpg),
+            BenchDispatch::StridedCopy { m, n, pad } =>
+                self.run_strided_copy(runner, dt, &bench, *m, *n, *pad),
         }
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // ── MSL generation ────────────────────────────────────────────────────────
 
     fn msl_elementwise(&self, dt: DType) -> Option<String> {
         MslGenerator::default().generate(&(self.kernel_ir)(dt)).ok()
@@ -147,6 +68,16 @@ impl BenchSpec {
         k.mode = KernelMode::Grid3D;
         MslGenerator::default().generate(&k).ok()
     }
+    fn msl_for_mode(&self, dt: DType, mode: KernelMode) -> Option<String> {
+        match mode {
+            KernelMode::Elementwise => self.msl_elementwise(dt),
+            KernelMode::Reduction | KernelMode::Tile2D => self.msl_reduction(dt),
+            KernelMode::Grid3D => self.msl_grid3d(dt),
+        }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
     fn mlx_name(pat: &str, tn: &str) -> String { pat.replace("{tn}", tn) }
     fn compile_mt(
         runner: &GpuRunner,
@@ -157,12 +88,12 @@ impl BenchSpec {
     }
     fn compile_mlx(
         runner: &GpuRunner,
-        src: &Option<&str>,
-        pat: &Option<&str>,
+        src: Option<&str>,
+        pat: Option<&str>,
         tn: &str,
     ) -> Option<crate::runner::CompiledKernel> {
-        let src = (*src)?;
-        let pat = (*pat)?;
+        let src = src?;
+        let pat = pat?;
         runner.compile(src, &Self::mlx_name(pat, tn)).ok()
     }
     fn td(dt: DType, shape: &[usize], data: &[f32]) -> TensorData {
@@ -179,6 +110,34 @@ impl BenchSpec {
         }
         cv
     }
+    /// Walk all IR blocks and inject float-literal sources into `inp_map`.
+    ///
+    /// Float literals are encoded as `Op::Load { src: "0.0f", indices: [] }` by the
+    /// body parser. The interpreter needs them as 1-element scalar tensors.
+    fn inject_float_literals(kernel: &Kernel, inp_map: &mut BTreeMap<String, TensorData>) {
+        let mut srcs: Vec<String> = Vec::new();
+        // Walk body and all sub-blocks.
+        for block in std::iter::once(&kernel.body).chain(kernel.blocks.values()) {
+            for op in &block.ops {
+                if let Op::Load { src, indices, .. } = op {
+                    if indices.is_empty() {
+                        srcs.push(src.clone());
+                    }
+                }
+            }
+        }
+        for src in srcs {
+            if inp_map.contains_key(&src) {
+                continue;
+            }
+            // Float literals end with 'f' and the prefix is a valid f64.
+            if let Some(prefix) = src.strip_suffix('f') {
+                if let Ok(v) = prefix.parse::<f64>() {
+                    inp_map.insert(src, Self::td(DType::F32, &[1], &[v as f32]));
+                }
+            }
+        }
+    }
     fn interp(
         kernel: &metaltile_core::ir::Kernel,
         inputs: BTreeMap<String, TensorData>,
@@ -190,8 +149,11 @@ impl BenchSpec {
             InterpMode::Elementwise(n) => interp.run_grid(kernel, n),
             InterpMode::Reduction(rows) => interp.run_grid_reduction(kernel, rows),
             InterpMode::Grid3D(x, y, z) => interp.run_grid_3d(kernel, x, y, z),
-        }
-        .ok()?;
+        };
+        let result = match result {
+            Ok(r) => r,
+            Err(_) => return None,
+        };
         let mut out = BTreeMap::new();
         for (name, td) in &result.outputs {
             out.insert(
@@ -202,821 +164,157 @@ impl BenchSpec {
         Some(out)
     }
 
-    // ── Unary ─────────────────────────────────────────────────────────────────
+    // ── Generic runner ────────────────────────────────────────────────────────
+    //
+    // Handles all BenchDispatch::Generic specs data-driven via ShapeSpec.
+    // Correctness via interpreter; perf via GPU.
 
-    fn run_unary(
-        &self,
-        runner: &GpuRunner,
-        dt: DType,
-        bench: &OpBench,
-        inputs: InputGen,
-        mlx_src: &Option<&str>,
-        mlx_pattern: &Option<&str>,
-    ) -> Vec<OpResult> {
-        let ctx = DtypeCtx::elementwise(dt);
-        let tpg = [ELEMENTWISE_TPG, 1, 1];
-        let nb = ELEMENTWISE_N_BENCH;
-        let bytes = (nb * ctx.eb * 2) as f64;
-
-        let msl = match self.msl_elementwise(dt) {
-            Some(s) => s,
-            None => return vec![],
-        };
-        let mk = match Self::compile_mt(runner, &msl, self.kernel_name) {
-            Some(k) => k,
-            None => return vec![],
-        };
-
-        // Correctness via interpreter
-        let nc = ELEMENTWISE_N_CHECK;
-        let kernel = (self.kernel_ir)(dt);
-        let check_in = inputs.generate(nc);
-        let inp_name = match kernel.params.iter().find(|p| !p.is_output) {
-            Some(p) => p.name.clone(),
-            None => return vec![],
-        };
-        let out_name = match kernel.params.iter().find(|p| p.is_output) {
-            Some(p) => p.name.clone(),
-            None => return vec![],
-        };
-        let cv = Self::constexprs(&[]);
-        let mut inp_map = BTreeMap::new();
-        inp_map.insert(inp_name.clone(), Self::td(dt, &[nc], &check_in));
-        inp_map.insert(out_name.clone(), TensorData::zeros(&[nc], dt));
-        let interp_out = match Self::interp(&kernel, inp_map, cv, InterpMode::Elementwise(nc)) {
-            Some(o) => o,
-            None => return vec![],
-        };
-        let interp_vals = match interp_out.get(&out_name) {
-            Some(v) => v,
-            None => return vec![],
-        };
-
-        let in_buf = buffer_typed(runner, &check_in, dt);
-        let out_buf = zeros_typed(runner, nc, dt);
-        let mt_vals = run_typed_once(
-            runner,
-            &mk,
-            &[&in_buf, &out_buf],
-            &out_buf,
-            nc,
-            [nc.div_ceil(ELEMENTWISE_TPG), 1, 1],
-            tpg,
-            dt,
-        );
-        let equiv = check_equiv(interp_vals, &mt_vals, self.tol);
-
-        let inp = buffer_typed(runner, &InputGen::Half.generate(nb), dt);
-        let out_mt = zeros_typed(runner, nb, dt);
-        let tgs = [nb.div_ceil(ELEMENTWISE_TPG), 1, 1];
-        let mt_perf = bench_gbps(runner, &mk, &[&inp, &out_mt], tgs, tpg, bytes);
-        let ref_perf = Self::compile_mlx(runner, mlx_src, mlx_pattern, ctx.tn).and_then(|rk| {
-            let out_ref = zeros_typed(runner, nb, dt);
-            let sz = runner.buffer_u32(nb as u32);
-            bench_gbps(runner, &rk, &[&inp, &out_ref, &sz], tgs, tpg, bytes)
-        });
-        vec![bench.result_sub(
-            Some(self.subop),
-            format!("N={nb} {}", ctx.label),
-            ref_perf,
-            mt_perf,
-            Some(equiv),
-        )]
-    }
-
-    // ── Binary ────────────────────────────────────────────────────────────────
-
-    fn run_binary(
-        &self,
-        runner: &GpuRunner,
-        dt: DType,
-        bench: &OpBench,
-        inputs_a: InputGen,
-        inputs_b: InputGen,
-        ref_n_per_thread: usize,
-        mlx_src: &Option<&str>,
-        mlx_pattern: &Option<&str>,
-    ) -> Vec<OpResult> {
-        let ctx = DtypeCtx::elementwise(dt);
-        let tpg = [BINARY_TPG, 1, 1];
-        let nb = ELEMENTWISE_N_BENCH;
-        let bytes = (nb * ctx.eb * 3) as f64;
-
-        let msl = match self.msl_elementwise(dt) {
-            Some(s) => s,
-            None => return vec![],
-        };
-        let mk = match Self::compile_mt(runner, &msl, self.kernel_name) {
-            Some(k) => k,
-            None => return vec![],
-        };
-
-        let nc = ELEMENTWISE_N_CHECK;
-        let kernel = (self.kernel_ir)(dt);
-        let a_in = inputs_a.generate(nc);
-        let b_in = inputs_b.generate(nc);
-        let inp_params: Vec<_> = kernel.params.iter().filter(|p| !p.is_output).collect();
-        let out_name = match kernel.params.iter().find(|p| p.is_output) {
-            Some(p) => p.name.clone(),
-            None => return vec![],
-        };
-        let cv = Self::constexprs(&[]);
-        let mut inp_map = BTreeMap::new();
-        if inp_params.len() >= 2 {
-            inp_map.insert(inp_params[0].name.clone(), Self::td(dt, &[nc], &a_in));
-            inp_map.insert(inp_params[1].name.clone(), Self::td(dt, &[nc], &b_in));
-        }
-        inp_map.insert(out_name.clone(), TensorData::zeros(&[nc], dt));
-        let interp_out = match Self::interp(&kernel, inp_map, cv, InterpMode::Elementwise(nc)) {
-            Some(o) => o,
-            None => return vec![],
-        };
-        let interp_vals = match interp_out.get(&out_name) {
-            Some(v) => v,
-            None => return vec![],
-        };
-
-        let a_buf = buffer_typed(runner, &a_in, dt);
-        let b_buf = buffer_typed(runner, &b_in, dt);
-        let o_buf = zeros_typed(runner, nc, dt);
-        let n_buf = runner.buffer_u32(nc as u32);
-        let mt_vals = run_typed_once(
-            runner,
-            &mk,
-            &[&a_buf, &b_buf, &o_buf, &n_buf],
-            &o_buf,
-            nc,
-            [nc.div_ceil(BINARY_TPG), 1, 1],
-            tpg,
-            dt,
-        );
-        let equiv = check_equiv(interp_vals, &mt_vals, self.tol);
-
-        let a_lb = buffer_typed(runner, &inputs_a.generate(nb), dt);
-        let b_lb = buffer_typed(runner, &inputs_b.generate(nb), dt);
-        let out_mt = zeros_typed(runner, nb, dt);
-        let n_perf = runner.buffer_u32(nb as u32);
-        let mt_perf = bench_gbps(
-            runner,
-            &mk,
-            &[&a_lb, &b_lb, &out_mt, &n_perf],
-            [nb.div_ceil(BINARY_TPG), 1, 1],
-            tpg,
-            bytes,
-        );
-        let ref_perf = Self::compile_mlx(runner, mlx_src, mlx_pattern, ctx.tn).and_then(|rk| {
-            let out_ref = zeros_typed(runner, nb, dt);
-            let sz = runner.buffer_u32(nb as u32);
-            bench_gbps(
-                runner,
-                &rk,
-                &[&a_lb, &b_lb, &out_ref, &sz],
-                [nb / (ref_n_per_thread * BINARY_TPG), 1, 1],
-                tpg,
-                bytes,
-            )
-        });
-        vec![bench.result_sub(
-            Some(self.subop),
-            format!("N={nb} {}", ctx.label),
-            ref_perf,
-            mt_perf,
-            Some(equiv),
-        )]
-    }
-
-    // ── AllReduce ─────────────────────────────────────────────────────────────
-
-    fn run_all_reduce(
-        &self,
-        runner: &GpuRunner,
-        dt: DType,
-        bench: &OpBench,
-        mlx_src: &Option<&str>,
-        mlx_pattern: &Option<&str>,
-    ) -> Vec<OpResult> {
-        let ctx = DtypeCtx::reduce(dt);
-        let tpg = [ALL_REDUCE_TPG, 1, 1];
-        let nb = ALL_REDUCE_N;
-        let bytes = (nb * ctx.eb) as f64;
-
-        let msl = match self.msl_reduction(dt) {
-            Some(s) => s,
-            None => return vec![],
-        };
-        let mk = match Self::compile_mt(runner, &msl, self.kernel_name) {
-            Some(k) => k,
-            None => return vec![],
-        };
-
-        let nc = ALL_REDUCE_N_CHECK;
-        let kernel = (self.kernel_ir)(dt);
-        let inp_vals: Vec<f32> = (0..nc).map(|i| 0.25 + (i % 19) as f32 * 0.03125).collect();
-        let inp_name = match kernel.params.iter().find(|p| !p.is_output) {
-            Some(p) => p.name.clone(),
-            None => return vec![],
-        };
-        let out_name = match kernel.params.iter().find(|p| p.is_output) {
-            Some(p) => p.name.clone(),
-            None => return vec![],
-        };
-        let cv = Self::constexprs(&[("n", nc)]);
-        let mut inp_map = BTreeMap::new();
-        inp_map.insert(inp_name.clone(), Self::td(dt, &[nc], &inp_vals));
-        inp_map.insert(out_name.clone(), TensorData::zeros(&[1], dt));
-        let interp_out = match Self::interp(&kernel, inp_map, cv, InterpMode::Reduction(1)) {
-            Some(o) => o,
-            None => return vec![],
-        };
-        let interp_vals = match interp_out.get(&out_name) {
-            Some(v) => v,
-            None => return vec![],
-        };
-
-        let inp_chk = buffer_typed(runner, &inp_vals, dt);
-        let mt_ns = runner.buffer_u32(nc as u32);
-        let chk_out = zeros_typed(runner, 1, dt);
-        let mt_chk = run_typed_once(
-            runner,
-            &mk,
-            &[&inp_chk, &chk_out, &mt_ns],
-            &chk_out,
-            1,
-            [1, 1, 1],
-            tpg,
-            dt,
-        );
-        let equiv = check_equiv(interp_vals, &mt_chk, self.tol);
-
-        let inp = buffer_typed(runner, &vec![1.0f32 / nb as f32; nb], dt);
-        let ns = runner.buffer_u32(nb as u32);
-        let out_mt = zeros_typed(runner, 1, dt);
-        let mt_perf = bench_gbps(runner, &mk, &[&inp, &out_mt, &ns], [1, 1, 1], tpg, bytes);
-        let ref_perf = Self::compile_mlx(runner, mlx_src, mlx_pattern, ctx.tn).and_then(|rk| {
-            let ri = runner.buffer_u64(nb as u64);
-            let rr = runner.buffer_u64(nb as u64);
-            let out = zeros_typed(runner, 1, dt);
-            bench_gbps(runner, &rk, &[&inp, &out, &ri, &rr], [1, 1, 1], tpg, bytes)
-        });
-        vec![bench.result_sub(
-            Some(self.subop),
-            format!("N={}M {}", nb / 1_000_000, ctx.label),
-            ref_perf,
-            mt_perf,
-            Some(equiv),
-        )]
-    }
-
-    // ── RowReduce ─────────────────────────────────────────────────────────────
-
-    fn run_row_reduce(
-        &self,
-        runner: &GpuRunner,
-        dt: DType,
-        bench: &OpBench,
-        shapes: &[(usize, usize)],
-        mlx_src: &Option<&str>,
-        mlx_pattern: &Option<&str>,
-    ) -> Vec<OpResult> {
-        let ctx = DtypeCtx::reduce(dt);
-        let tpg = [ROW_REDUCE_TPG, 1, 1];
-        let msl = match self.msl_reduction(dt) {
-            Some(s) => s,
-            None => return vec![],
-        };
-        let mk = match Self::compile_mt(runner, &msl, self.kernel_name) {
-            Some(k) => k,
-            None => return vec![],
-        };
-        let ref_kernel = Self::compile_mlx(runner, mlx_src, mlx_pattern, ctx.tn);
+    fn run_generic(&self, runner: &GpuRunner, dt: DType, bench: &OpBench) -> Vec<OpResult> {
         let mut results = Vec::new();
-        for &(b, n) in shapes {
-            let cb = ROW_REDUCE_CHECK_B;
-            let cn = ROW_REDUCE_CHECK_N;
-            let kernel = (self.kernel_ir)(dt);
-            let inp_vals: Vec<f32> = (0..cb * cn)
-                .map(|i| 0.25 + (i / cn) as f32 * 0.0625 + (i % 13) as f32 * 0.03125)
-                .collect();
-            let inp_name = match kernel.params.iter().find(|p| !p.is_output) {
-                Some(p) => p.name.clone(),
-                None => return vec![],
+        for shape in self.shapes {
+            let ctx = match shape.mode {
+                KernelMode::Reduction | KernelMode::Tile2D => DtypeCtx::reduce(dt),
+                _ => DtypeCtx::elementwise(dt),
             };
-            let out_name = match kernel.params.iter().find(|p| p.is_output) {
-                Some(p) => p.name.clone(),
-                None => return vec![],
+            let msl = match self.msl_for_mode(dt, shape.mode) {
+                Some(s) => s,
+                None => continue,
             };
-            let cv = Self::constexprs(&[("n", cn)]);
-            let mut inp_map = BTreeMap::new();
-            inp_map.insert(inp_name.clone(), Self::td(dt, &[cb * cn], &inp_vals));
-            inp_map.insert(out_name.clone(), TensorData::zeros(&[cb], dt));
-            let interp_out = match Self::interp(&kernel, inp_map, cv, InterpMode::Reduction(cb)) {
-                Some(o) => o,
-                None => return vec![],
-            };
-            let interp_vals = match interp_out.get(&out_name) {
-                Some(v) => v,
-                None => return vec![],
+            let mk = match Self::compile_mt(runner, &msl, self.kernel_name) {
+                Some(k) => k,
+                None => continue,
             };
 
-            let inp_chk = buffer_typed(runner, &inp_vals, dt);
-            let mt_ns = runner.buffer_u32(cn as u32);
-            let chk_out = zeros_typed(runner, cb, dt);
-            let mt_chk = run_typed_once(
+            let kernel = (self.kernel_ir)(dt);
+            let params: Vec<_> = kernel.params.iter().collect();
+            let check_n = shape.check_n;
+            // Reduction-mode kernels: use a single row for correctness checks.
+            // strided_reduce_dot uses ValueId(0) as an implicit-lsize sentinel;
+            // program_id::<0>() also lands in ValueId(0). For rows ≥ 2, pid > 0
+            // corrupts the stride. With check_b=1, pid is always 0, stride = max(0,1) = 1.
+            let check_b = match shape.mode {
+                KernelMode::Reduction | KernelMode::Tile2D => 1,
+                _ => shape.check_b,
+            };
+
+            // Build interpreter inputs
+            let mut inp_map = BTreeMap::new();
+            for (i, buf_spec) in shape.tensor_bufs.iter().enumerate() {
+                let Some(param) = params.get(i) else { break };
+                let count = buf_spec.count.resolve(check_n, check_b);
+                let init_data = buf_spec.init.generate(count);
+                let param_dt = buf_spec.dtype_override.unwrap_or(dt);
+                inp_map.insert(param.name.clone(), Self::td(param_dt, &[count], &init_data));
+            }
+            let cv_pairs: Vec<(&str, usize)> = shape
+                .cexprs
+                .iter()
+                .map(|(k, d)| (*k, d.resolve(check_n, check_b)))
+                .collect();
+            let cv = Self::constexprs(&cv_pairs);
+            // Constexpr params are loaded via Op::Load { src: name } in the IR,
+            // so they must also appear in inp_map as 1-element scalar tensors.
+            for (name, val) in &cv_pairs {
+                inp_map.insert(name.to_string(), Self::td(DType::F32, &[1], &[*val as f32]));
+            }
+            // GPU built-ins and MSL special constants used as Op::Load { src: name, indices:[] }.
+            // In single-threaded CPU interpretation: 1 thread per threadgroup.
+            for (name, val) in [
+                ("tid", 0.0f32), ("lsize", 1.0), ("tgid_x", 0.0), ("tgid_y", 0.0),
+                ("simd_lane", 0.0), ("simd_id", 0.0), ("n_simd", 1.0),
+                ("-INFINITY", f32::NEG_INFINITY), ("INFINITY", f32::INFINITY),
+            ] {
+                inp_map.entry(name.to_string()).or_insert_with(|| Self::td(DType::F32, &[1], &[val]));
+            }
+            // Float literals are compiled to Op::Load { src: "0.0f" } etc.
+            // Walk all kernel blocks to find any such src values and inject them.
+            Self::inject_float_literals(&kernel, &mut inp_map);
+            let interp_mode = match shape.mode {
+                KernelMode::Elementwise | KernelMode::Grid3D => InterpMode::Elementwise(check_n),
+                _ => InterpMode::Reduction(check_b.max(1)),
+            };
+            let interp_out = match Self::interp(&kernel, inp_map, cv, interp_mode) {
+                Some(o) => o,
+                None => continue,
+            };
+            let primary_out_idx = params.iter().position(|p| p.is_output);
+            let primary_out_name = match primary_out_idx.and_then(|i| params.get(i)) {
+                Some(p) => p.name.clone(),
+                None => continue,
+            };
+            let interp_vals = match interp_out.get(&primary_out_name) {
+                Some(v) => v.clone(),
+                None => continue,
+            };
+
+            // Build GPU check buffers
+            let mut check_bufs: Vec<GpuBuffer> = Vec::new();
+            for buf_spec in shape.tensor_bufs {
+                let count = buf_spec.count.resolve(check_n, check_b);
+                let init_data = buf_spec.init.generate(count);
+                let param_dt = buf_spec.dtype_override.unwrap_or(dt);
+                check_bufs.push(buffer_typed(runner, &init_data, param_dt));
+            }
+            for &sb in shape.scalar_bufs {
+                check_bufs.push(self.scalar_buf(runner, sb, check_n, check_b));
+            }
+
+            let out_idx = primary_out_idx.unwrap_or(0);
+            let out_count_check = shape.out_elems.resolve(check_n, check_b).max(1);
+            let check_grid = shape.grid.eval(check_n, check_b, shape.tpg);
+            let check_refs: Vec<&GpuBuffer> = check_bufs.iter().collect();
+            let mt_vals = run_typed_once(
                 runner,
                 &mk,
-                &[&inp_chk, &chk_out, &mt_ns],
-                &chk_out,
-                cb,
-                [cb, 1, 1],
-                tpg,
+                &check_refs,
+                &check_bufs[out_idx],
+                out_count_check,
+                check_grid,
+                [shape.tpg, 1, 1],
                 dt,
             );
-            let equiv = check_equiv(interp_vals, &mt_chk, self.tol);
+            let equiv = check_equiv(&interp_vals, &mt_vals, self.tol);
 
-            let inp = buffer_typed(runner, &vec![1.0f32 / n as f32; b * n], dt);
-            let bytes = (b * n * ctx.eb) as f64;
-            let ns = runner.buffer_u32(n as u32);
-            let out_mt = zeros_typed(runner, b, dt);
-            let mt_perf = bench_gbps(runner, &mk, &[&inp, &out_mt, &ns], [b, 1, 1], tpg, bytes);
-            let ref_perf = ref_kernel.as_ref().and_then(|rk| {
-                let rr = runner.buffer_u64(n as u64);
-                let ro = runner.buffer_i64(b as i64);
-                let out = zeros_typed(runner, b, dt);
-                bench_gbps(runner, rk, &[&inp, &out, &rr, &ro], [1, b, 1], tpg, bytes)
-            });
-            results.push(bench.result_sub(
-                Some(self.subop),
-                format!("B={b} N={n} {}", ctx.label),
-                ref_perf,
-                mt_perf,
-                Some(equiv),
-            ));
-        }
-        results
-    }
-
-    // ── Arange ────────────────────────────────────────────────────────────────
-
-    fn run_arange(
-        &self,
-        runner: &GpuRunner,
-        dt: DType,
-        bench: &OpBench,
-        start: f32,
-        step: f32,
-        mlx_src: &Option<&str>,
-        mlx_pattern: &Option<&str>,
-    ) -> Vec<OpResult> {
-        let ctx = DtypeCtx::elementwise(dt);
-        let tpg = [ARANGE_TPG, 1, 1];
-        let nb = ARANGE_N;
-        let bytes = (nb * ctx.eb) as f64;
-
-        let msl = match self.msl_elementwise(dt) {
-            Some(s) => s,
-            None => return vec![],
-        };
-        let mk = match Self::compile_mt(runner, &msl, self.kernel_name) {
-            Some(k) => k,
-            None => return vec![],
-        };
-
-        let nc = ARANGE_N_CHECK;
-        let kernel = (self.kernel_ir)(dt);
-        let out_name = match kernel.params.iter().find(|p| p.is_output) {
-            Some(p) => p.name.clone(),
-            None => return vec![],
-        };
-        let start_name = kernel
-            .params
-            .iter()
-            .find(|p| !p.is_output && p.name.contains("start"))
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| "start".into());
-        let step_name = kernel
-            .params
-            .iter()
-            .find(|p| !p.is_output && p.name.contains("step"))
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| "step".into());
-        let cv = Self::constexprs(&[("n", nc)]);
-        let mut inp_map = BTreeMap::new();
-        inp_map.insert(start_name.clone(), Self::td(dt, &[1], &[start]));
-        if step_name != start_name {
-            // avoid duplicate key (arange kernel may have start==step tensor name? unlikely)
-            inp_map.entry(step_name).or_insert_with(|| Self::td(dt, &[1], &[step]));
-        }
-        inp_map.insert(out_name.clone(), TensorData::zeros(&[nc], dt));
-        let interp_out = match Self::interp(&kernel, inp_map, cv, InterpMode::Elementwise(nc)) {
-            Some(o) => o,
-            None => return vec![],
-        };
-        let interp_vals = match interp_out.get(&out_name) {
-            Some(v) => v,
-            None => return vec![],
-        };
-
-        let s_buf = buffer_typed(runner, &[start], dt);
-        let st_buf = buffer_typed(runner, &[step], dt);
-        let out_buf = zeros_typed(runner, nc, dt);
-        let n_buf = runner.buffer_u32(nc as u32);
-        let mt_vals = run_typed_once(
-            runner,
-            &mk,
-            &[&out_buf, &s_buf, &st_buf, &n_buf],
-            &out_buf,
-            nc,
-            [nc.div_ceil(ARANGE_TPG), 1, 1],
-            tpg,
-            dt,
-        );
-        let equiv = check_equiv(interp_vals, &mt_vals, self.tol);
-
-        let ref_perf = Self::compile_mlx(runner, mlx_src, mlx_pattern, ctx.tn).and_then(|rk| {
-            let rs = runner.buffer_f32_scalar(start);
-            let rst = runner.buffer_f32_scalar(step);
-            let ro = runner.buffer_zeros(nb * 4);
-            bench_gbps(runner, &rk, &[&rs, &rst, &ro], [nb.div_ceil(ARANGE_TPG), 1, 1], tpg, bytes)
-        });
-        let mt_start = buffer_typed(runner, &[start], dt);
-        let mt_step = buffer_typed(runner, &[step], dt);
-        let mt_out = zeros_typed(runner, nb, dt);
-        let mt_n = runner.buffer_u32(nb as u32);
-        let mt_perf = bench_gbps(
-            runner,
-            &mk,
-            &[&mt_out, &mt_start, &mt_step, &mt_n],
-            [nb.div_ceil(ARANGE_TPG), 1, 1],
-            tpg,
-            bytes,
-        );
-        vec![bench.result_sub(
-            Some(self.subop),
-            format!("N={} {}", nb, ctx.label),
-            ref_perf,
-            mt_perf,
-            Some(equiv),
-        )]
-    }
-
-    // ── BinaryTwo ─────────────────────────────────────────────────────────────
-
-    fn run_binary_two(
-        &self,
-        runner: &GpuRunner,
-        dt: DType,
-        bench: &OpBench,
-        inputs_a: InputGen,
-        inputs_b: InputGen,
-    ) -> Vec<OpResult> {
-        let ctx = DtypeCtx::elementwise(dt);
-        let tpg = [BINARY_TWO_TPG, 1, 1];
-        let nb = ELEMENTWISE_N_BENCH;
-        let bytes = (nb * ctx.eb * 4) as f64;
-
-        let msl = match self.msl_elementwise(dt) {
-            Some(s) => s,
-            None => return vec![],
-        };
-        let mk = match Self::compile_mt(runner, &msl, self.kernel_name) {
-            Some(k) => k,
-            None => return vec![],
-        };
-
-        let nc = ELEMENTWISE_N_CHECK;
-        let kernel = (self.kernel_ir)(dt);
-        let a_f32 = inputs_a.generate(nc);
-        let b_f32 = inputs_b.generate(nc);
-        let inp_params: Vec<_> = kernel.params.iter().filter(|p| !p.is_output).collect();
-        let out_params: Vec<_> = kernel.params.iter().filter(|p| p.is_output).collect();
-        let cv = Self::constexprs(&[]);
-        let mut inp_map = BTreeMap::new();
-        if inp_params.len() >= 2 {
-            inp_map.insert(inp_params[0].name.clone(), Self::td(dt, &[nc], &a_f32));
-            inp_map.insert(inp_params[1].name.clone(), Self::td(dt, &[nc], &b_f32));
-        }
-        for op in &out_params {
-            inp_map.insert(op.name.clone(), TensorData::zeros(&[nc], dt));
-        }
-        let interp_out = match Self::interp(&kernel, inp_map, cv, InterpMode::Elementwise(nc)) {
-            Some(o) => o,
-            None => return vec![],
-        };
-
-        let a_buf = buffer_typed(runner, &a_f32, dt);
-        let b_buf = buffer_typed(runner, &b_f32, dt);
-        let c_buf = zeros_typed(runner, nc, dt);
-        let d_buf = zeros_typed(runner, nc, dt);
-        let mt_c = run_typed_once(
-            runner,
-            &mk,
-            &[&a_buf, &b_buf, &c_buf, &d_buf],
-            &c_buf,
-            nc,
-            [nc.div_ceil(BINARY_TWO_TPG), 1, 1],
-            tpg,
-            dt,
-        );
-        let mt_d = run_typed_once(
-            runner,
-            &mk,
-            &[&a_buf, &b_buf, &c_buf, &d_buf],
-            &d_buf,
-            nc,
-            [nc.div_ceil(BINARY_TWO_TPG), 1, 1],
-            tpg,
-            dt,
-        );
-        let name0 = out_params.first().map(|p| &p.name);
-        let name1 = out_params.get(1).map(|p| &p.name);
-        let eq_c = name0.and_then(|n| interp_out.get(n)).map(|v| check_equiv(v, &mt_c, self.tol));
-        let eq_d = name1
-            .or(name0)
-            .and_then(|n| interp_out.get(n))
-            .map(|v| check_equiv(v, &mt_d, self.tol));
-        let equiv = match (eq_c, eq_d) {
-            (Some(c), Some(d)) =>
-                if c.max_abs_err > d.max_abs_err {
-                    c
-                } else {
-                    d
-                },
-            (Some(c), _) => c,
-            (_, Some(d)) => d,
-            _ => return vec![],
-        };
-
-        let a_lb = buffer_typed(runner, &inputs_a.generate(nb), dt);
-        let b_lb = buffer_typed(runner, &inputs_b.generate(nb), dt);
-        let c_lb = zeros_typed(runner, nb, dt);
-        let d_lb = zeros_typed(runner, nb, dt);
-        let mt_perf = bench_gbps(
-            runner,
-            &mk,
-            &[&a_lb, &b_lb, &c_lb, &d_lb],
-            [nb.div_ceil(BINARY_TWO_TPG), 1, 1],
-            tpg,
-            bytes,
-        );
-        vec![bench.result_sub(
-            Some(self.subop),
-            format!("N={} {}", nb, ctx.label),
-            None,
-            mt_perf,
-            Some(equiv),
-        )]
-    }
-
-    // ── Select ────────────────────────────────────────────────────────────────
-
-    fn run_select(
-        &self,
-        runner: &GpuRunner,
-        dt: DType,
-        bench: &OpBench,
-        mlx_src: &Option<&str>,
-        mlx_pattern: &Option<&str>,
-    ) -> Vec<OpResult> {
-        let ctx = DtypeCtx::elementwise(dt);
-        let tpg = [SELECT_TPG, 1, 1];
-        let nb = ELEMENTWISE_N_BENCH;
-        let bytes = (nb * ctx.eb * 4) as f64;
-
-        let msl = match self.msl_elementwise(dt) {
-            Some(s) => s,
-            None => return vec![],
-        };
-        let mk = match Self::compile_mt(runner, &msl, self.kernel_name) {
-            Some(k) => k,
-            None => return vec![],
-        };
-
-        let nc = ELEMENTWISE_N_CHECK;
-        let kernel = (self.kernel_ir)(dt);
-        let cond_f32: Vec<f32> = (0..nc).map(|i| if i % 3 == 0 { 0.0 } else { 1.0 }).collect();
-        let true_f32: Vec<f32> = (0..nc).map(|i| 1.0 + i as f32 * 0.01).collect();
-        let false_f32: Vec<f32> = (0..nc).map(|i| -2.0 - i as f32 * 0.02).collect();
-        let inp_params: Vec<_> = kernel.params.iter().filter(|p| !p.is_output).collect();
-        let out_name = match kernel.params.iter().find(|p| p.is_output) {
-            Some(p) => p.name.clone(),
-            None => return vec![],
-        };
-        let cv = Self::constexprs(&[]);
-        let mut inp_map = BTreeMap::new();
-        if inp_params.len() >= 3 {
-            inp_map.insert(inp_params[0].name.clone(), Self::td(dt, &[nc], &cond_f32));
-            inp_map.insert(inp_params[1].name.clone(), Self::td(dt, &[nc], &true_f32));
-            inp_map.insert(inp_params[2].name.clone(), Self::td(dt, &[nc], &false_f32));
-        }
-        inp_map.insert(out_name.clone(), TensorData::zeros(&[nc], dt));
-        let interp_out = match Self::interp(&kernel, inp_map, cv, InterpMode::Elementwise(nc)) {
-            Some(o) => o,
-            None => return vec![],
-        };
-        let interp_vals = match interp_out.get(&out_name) {
-            Some(v) => v,
-            None => return vec![],
-        };
-
-        let mt_cond = buffer_typed(runner, &cond_f32, dt);
-        let mt_true = buffer_typed(runner, &true_f32, dt);
-        let mt_false = buffer_typed(runner, &false_f32, dt);
-        let mt_out = zeros_typed(runner, nc, dt);
-        let mt_chk = run_typed_once(
-            runner,
-            &mk,
-            &[&mt_cond, &mt_true, &mt_false, &mt_out],
-            &mt_out,
-            nc,
-            [nc.div_ceil(SELECT_TPG), 1, 1],
-            tpg,
-            dt,
-        );
-        let equiv = check_equiv(interp_vals, &mt_chk, self.tol);
-
-        let cond_bool_perf: Vec<u8> = (0..nb).map(|i| if i % 2 == 0 { 1u8 } else { 0u8 }).collect();
-        let true_perf = buffer_typed(runner, &vec![1.0f32; nb], dt);
-        let false_perf = buffer_typed(runner, &vec![-1.0f32; nb], dt);
-        let ref_perf = Self::compile_mlx(runner, mlx_src, mlx_pattern, ctx.tn).and_then(|rk| {
-            let rc = runner.buffer_bytes(&cond_bool_perf);
-            let rs = runner.buffer_u32(nb as u32);
-            let out = zeros_typed(runner, nb, dt);
-            bench_gbps(
-                runner,
-                &rk,
-                &[&rc, &true_perf, &false_perf, &out, &rs],
-                [nb.div_ceil(SELECT_TPG), 1, 1],
-                tpg,
-                bytes,
-            )
-        });
-        let mt_cond_perf = buffer_typed(
-            runner,
-            &(0..nb).map(|i| if i % 2 == 0 { 1.0f32 } else { 0.0f32 }).collect::<Vec<_>>(),
-            dt,
-        );
-        let mt_perf = {
-            let out = zeros_typed(runner, nb, dt);
-            bench_gbps(
-                runner,
-                &mk,
-                &[&mt_cond_perf, &true_perf, &false_perf, &out],
-                [nb.div_ceil(SELECT_TPG), 1, 1],
-                tpg,
-                bytes,
-            )
-        };
-        vec![bench.result_sub(
-            Some(self.subop),
-            format!("N={} {}", nb, ctx.label),
-            ref_perf,
-            mt_perf,
-            Some(equiv),
-        )]
-    }
-
-    // ── RowNorm ──────────────────────────────────────────────────────────────
-
-    fn run_row_norm(
-        &self,
-        runner: &GpuRunner,
-        dt: DType,
-        bench: &OpBench,
-        shapes: &[(usize, usize)],
-        tpg: usize,
-        reads: usize,
-        out_elements: usize,
-        extra: &[ExtraInput],
-        mlx_src: &Option<&str>,
-        mlx_pattern: &Option<&str>,
-        mlx_extra_slots: usize,
-    ) -> Vec<OpResult> {
-        let ctx = DtypeCtx::reduce(dt);
-        let tpg_arr = [tpg, 1, 1];
-        let msl = match self.msl_reduction(dt) {
-            Some(s) => s,
-            None => return vec![],
-        };
-        let mk = match Self::compile_mt(runner, &msl, self.kernel_name) {
-            Some(k) => k,
-            None => return vec![],
-        };
-        let ref_kernel = Self::compile_mlx(runner, mlx_src, mlx_pattern, ctx.tn);
-
-        let mut results = Vec::new();
-        for &(b, n) in shapes {
-            let kernel = (self.kernel_ir)(dt);
-            let inp_vals: Vec<f32> = (0..b * n)
-                .map(|i| 0.25 + (i / n) as f32 * 0.0625 + (i % 13) as f32 * 0.03125)
-                .collect();
-            let out_size = b * out_elements;
-            let cv = Self::constexprs(&[("n", n)]);
-            let inp_name = match kernel.params.iter().find(|p| {
-                !p.is_output
-                    && !p.name.contains('w')
-                    && !p.name.contains('b')
-                    && !p.name.contains("eps")
-            }) {
-                Some(p) => p.name.clone(),
-                None => return vec![],
-            };
-            let out_name = match kernel.params.iter().find(|p| p.is_output) {
-                Some(p) => p.name.clone(),
-                None => return vec![],
-            };
-            let mut inp_map = BTreeMap::new();
-            inp_map.insert(inp_name.clone(), Self::td(dt, &[b * n], &inp_vals));
-            for e in extra {
-                match e {
-                    ExtraInput::WeightPerCol { val } => {
-                        if let Some(wn) = kernel
-                            .params
-                            .iter()
-                            .find(|p| p.name.contains('w'))
-                            .map(|p| p.name.clone())
-                        {
-                            inp_map.entry(wn).or_insert_with(|| Self::td(dt, &[n], &vec![*val; n]));
-                        }
-                    },
-                    ExtraInput::BiasPerCol { val } => {
-                        if let Some(bn) = kernel
-                            .params
-                            .iter()
-                            .find(|p| p.name.contains('b') && !p.name.contains("eps"))
-                            .map(|p| p.name.clone())
-                        {
-                            inp_map.entry(bn).or_insert_with(|| Self::td(dt, &[n], &vec![*val; n]));
-                        }
-                    },
-                    ExtraInput::ScalarF32 { val } => {
-                        if let Some(en) = kernel
-                            .params
-                            .iter()
-                            .find(|p| p.name.contains("eps"))
-                            .map(|p| p.name.clone())
-                        {
-                            inp_map
-                                .entry(en)
-                                .or_insert_with(|| Self::td(DType::F32, &[1], &[*val]));
-                        }
-                    },
-                }
+            // Build GPU perf buffers
+            let n = shape.n;
+            let b = shape.b;
+            let mut perf_bufs: Vec<GpuBuffer> = Vec::new();
+            for buf_spec in shape.tensor_bufs {
+                let count = buf_spec.count.resolve(n, b);
+                let init_data = buf_spec.init.generate(count);
+                let param_dt = buf_spec.dtype_override.unwrap_or(dt);
+                perf_bufs.push(buffer_typed(runner, &init_data, param_dt));
             }
-            inp_map.entry(out_name.clone()).or_insert_with(|| TensorData::zeros(&[out_size], dt));
-            let interp_out = match Self::interp(&kernel, inp_map, cv, InterpMode::Reduction(b)) {
-                Some(o) => o,
-                None => return vec![],
-            };
-            let interp_vals = match interp_out.get(&out_name) {
-                Some(v) => v,
-                None => return vec![],
+            for &sb in shape.scalar_bufs {
+                perf_bufs.push(self.scalar_buf(runner, sb, n, b));
+            }
+
+            let perf_grid = shape.grid.eval(n, b, shape.tpg);
+            let out_count_perf = shape.out_elems.resolve(n, b).max(1);
+            let bytes = (shape.bytes_fn)(n, b, shape.reads, out_count_perf, ctx.eb) as f64;
+            let perf_refs: Vec<&GpuBuffer> = perf_bufs.iter().collect();
+            let mt_perf =
+                bench_gbps(runner, &mk, &perf_refs, perf_grid, [shape.tpg, 1, 1], bytes);
+
+            // MLX ref (optional)
+            let ref_perf = if let Some(mlx_args) = shape.mlx_args {
+                let mlx_tpg = if shape.mlx_tpg > 0 { shape.mlx_tpg } else { shape.tpg };
+                let mlx_grid = shape.mlx_grid.unwrap_or(shape.grid).eval(n, b, mlx_tpg);
+                Self::compile_mlx(runner, self.mlx_src, self.mlx_pattern, ctx.tn).and_then(|rk| {
+                    let mlx_bufs: Vec<GpuBuffer> = mlx_args
+                        .iter()
+                        .map(|arg| self.mlx_buf(runner, arg, shape, n, b, dt))
+                        .collect();
+                    let mlx_refs: Vec<&GpuBuffer> = mlx_bufs.iter().collect();
+                    bench_gbps(runner, &rk, &mlx_refs, mlx_grid, [mlx_tpg, 1, 1], bytes)
+                })
+            } else {
+                None
             };
 
-            let build_extras = |runner: &GpuRunner, n: usize, dt: DType| -> Vec<GpuBuffer> {
-                extra
-                    .iter()
-                    .map(|e| match e {
-                        ExtraInput::WeightPerCol { val } =>
-                            buffer_typed(runner, &vec![*val; n], dt),
-                        ExtraInput::BiasPerCol { val } => buffer_typed(runner, &vec![*val; n], dt),
-                        ExtraInput::ScalarF32 { val } => runner.buffer_f32_scalar(*val),
-                    })
-                    .collect()
-            };
-
-            let inp = buffer_typed(runner, &inp_vals, dt);
-            let out_mt = zeros_typed(runner, out_size, dt);
-            let mt_n = runner.buffer_u32(n as u32);
-            let extra_bufs = build_extras(runner, n, dt);
-            let mut mt_bufs: Vec<&GpuBuffer> = vec![&inp, &out_mt, &mt_n];
-            mt_bufs.extend(extra_bufs.iter());
-            let mt_chk =
-                run_typed_once(runner, &mk, &mt_bufs, &out_mt, out_size, [b, 1, 1], tpg_arr, dt);
-            let equiv = check_equiv(interp_vals, &mt_chk, self.tol);
-
-            let inp_perf = buffer_typed(runner, &vec![1.0f32 / n as f32; b * n], dt);
-            let out_mt_perf = zeros_typed(runner, out_size, dt);
-            let extra_perf = build_extras(runner, n, dt);
-            let bytes = (b * n * ctx.eb * reads + out_size * ctx.eb) as f64;
-            let mt_perf = {
-                let mut bufs: Vec<&GpuBuffer> = vec![&inp_perf, &out_mt_perf, &mt_n];
-                bufs.extend(extra_perf.iter());
-                bench_gbps(runner, &mk, &bufs, [b, 1, 1], tpg_arr, bytes)
-            };
-            let ref_perf = ref_kernel.as_ref().and_then(|rk| {
-                let out = zeros_typed(runner, out_size, dt);
-                let rn = runner.buffer_u64(n as u64);
-                let ro = runner.buffer_i64(b as i64);
-                let mut bufs: Vec<&GpuBuffer> = vec![&inp_perf, &out, &rn, &ro];
-                let dummy: Vec<GpuBuffer> =
-                    (0..mlx_extra_slots).map(|_| runner.buffer_u64(0)).collect();
-                bufs.extend(dummy.iter());
-                bufs.extend(extra_perf.iter());
-                bench_gbps(runner, rk, &bufs, [b, 1, 1], tpg_arr, bytes)
-            });
             results.push(bench.result_sub(
                 Some(self.subop),
-                format!("B={b} N={n} {}", ctx.label),
+                format!("{} {}", shape.label, ctx.label),
                 ref_perf,
                 mt_perf,
                 Some(equiv),
@@ -1024,6 +322,52 @@ impl BenchSpec {
         }
         results
     }
+
+    fn scalar_buf(&self, runner: &GpuRunner, sb: ScalarBufSpec, n: usize, b: usize) -> GpuBuffer {
+        match sb {
+            ScalarBufSpec::U32N => runner.buffer_u32(n as u32),
+            ScalarBufSpec::U32B => runner.buffer_u32(b as u32),
+            ScalarBufSpec::U64N => runner.buffer_u64(n as u64),
+            ScalarBufSpec::U64B => runner.buffer_u64(b as u64),
+            ScalarBufSpec::I64B => runner.buffer_i64(b as i64),
+        }
+    }
+
+    fn mlx_buf(
+        &self,
+        runner: &GpuRunner,
+        arg: &MlxArg,
+        shape: &ShapeSpec,
+        n: usize,
+        b: usize,
+        dt: DType,
+    ) -> GpuBuffer {
+        match arg {
+            MlxArg::TensorBuf(i) => {
+                let spec = &shape.tensor_bufs[*i];
+                let count = spec.count.resolve(n, b);
+                let init_data = spec.init.generate(count);
+                let param_dt = spec.dtype_override.unwrap_or(dt);
+                buffer_typed(runner, &init_data, param_dt)
+            },
+            MlxArg::FreshOut(i) => {
+                let spec = &shape.tensor_bufs[*i];
+                let count = spec.count.resolve(n, b);
+                let param_dt = spec.dtype_override.unwrap_or(dt);
+                zeros_typed(runner, count, param_dt)
+            },
+            MlxArg::U32N => runner.buffer_u32(n as u32),
+            MlxArg::U64N => runner.buffer_u64(n as u64),
+            MlxArg::U64B => runner.buffer_u64(b as u64),
+            MlxArg::I64B => runner.buffer_i64(b as i64),
+            MlxArg::Zeros8 => runner.buffer_zeros(8),
+            MlxArg::BoolAltN => runner.buffer_bytes(
+                &(0..n).map(|i| if i % 2 == 0 { 1u8 } else { 0u8 }).collect::<Vec<_>>(),
+            ),
+            MlxArg::U32V(v) => runner.buffer_u32(*v),
+        }
+    }
+
     // ── Sort ──────────────────────────────────────────────────────────────────
 
     fn run_sort(
@@ -1034,8 +378,6 @@ impl BenchSpec {
         b: usize,
         n: usize,
         tpg: usize,
-        mlx_src: &Option<&str>,
-        mlx_pattern: &Option<&str>,
     ) -> Vec<OpResult> {
         let msl = match self.msl_reduction(DType::F32) {
             Some(s) => s,
@@ -1045,7 +387,7 @@ impl BenchSpec {
             Some(k) => k,
             None => return vec![],
         };
-        let ref_kernel = Self::compile_mlx(runner, mlx_src, mlx_pattern, "float32");
+        let ref_kernel = Self::compile_mlx(runner, self.mlx_src, self.mlx_pattern, "float32");
 
         let check_b = 4usize;
         let check_data: Vec<f32> = (0..check_b * n).map(|i| (check_b * n - i) as f32).collect();
@@ -1118,8 +460,6 @@ impl BenchSpec {
         bench: &OpBench,
         shapes: &[(usize, usize)],
         tpg: usize,
-        mlx_src: &Option<&str>,
-        mlx_pattern: &Option<&str>,
     ) -> Vec<OpResult> {
         let msl = match self.msl_reduction(DType::F32) {
             Some(s) => s,
@@ -1129,7 +469,7 @@ impl BenchSpec {
             Some(k) => k,
             None => return vec![],
         };
-        let ref_kernel = Self::compile_mlx(runner, mlx_src, mlx_pattern, "float32");
+        let ref_kernel = Self::compile_mlx(runner, self.mlx_src, self.mlx_pattern, "float32");
 
         let mut results = Vec::new();
         for &(rows, n) in shapes {
@@ -1203,8 +543,6 @@ impl BenchSpec {
         n: usize,
         check_n: usize,
         tpg: usize,
-        mlx_src: &Option<&str>,
-        mlx_pattern: &Option<&str>,
     ) -> Vec<OpResult> {
         let msl = match self.msl_reduction(DType::F32) {
             Some(s) => s,
@@ -1214,7 +552,7 @@ impl BenchSpec {
             Some(k) => k,
             None => return vec![],
         };
-        let ref_kernel = Self::compile_mlx(runner, mlx_src, mlx_pattern, "float32");
+        let ref_kernel = Self::compile_mlx(runner, self.mlx_src, self.mlx_pattern, "float32");
 
         let check_vals: Vec<f32> = (0..check_n).map(|i| ((i * 7 + 3) % 97) as f32 * 0.1).collect();
         let expected: f32 = {
@@ -1282,8 +620,6 @@ impl BenchSpec {
         bench: &OpBench,
         n: usize,
         tpg: usize,
-        mlx_src: &Option<&str>,
-        mlx_pattern: &Option<&str>,
     ) -> Vec<OpResult> {
         let msl = match self.msl_elementwise(DType::F32) {
             Some(s) => s,
@@ -1341,21 +677,22 @@ impl BenchSpec {
         let bytes_per_key = 4096usize;
         let half_size = bytes_per_key / 8;
         let total = num_keys * bytes_per_key / 4;
-        let ref_perf = Self::compile_mlx(runner, mlx_src, mlx_pattern, "").and_then(|rk| {
-            let key_data: Vec<u8> = (0..num_keys * 2 * 4).map(|i| i as u8).collect();
-            let keys_buf = runner.buffer_bytes(&key_data);
-            let ref_out_buf = runner.buffer_zeros(num_keys * bytes_per_key);
-            let odd_buf = runner.buffer_bytes(std::slice::from_ref(&(false as u8)));
-            let bpk_buf = runner.buffer_bytes(&(bytes_per_key as u32).to_le_bytes());
-            bench_gbps(
-                runner,
-                &rk,
-                &[&keys_buf, &ref_out_buf, &odd_buf, &bpk_buf],
-                [num_keys, 1, 1],
-                [1, half_size, 1],
-                (total * 4) as f64,
-            )
-        });
+        let ref_perf =
+            Self::compile_mlx(runner, self.mlx_src, self.mlx_pattern, "").and_then(|rk| {
+                let key_data: Vec<u8> = (0..num_keys * 2 * 4).map(|i| i as u8).collect();
+                let keys_buf = runner.buffer_bytes(&key_data);
+                let ref_out_buf = runner.buffer_zeros(num_keys * bytes_per_key);
+                let odd_buf = runner.buffer_bytes(std::slice::from_ref(&(false as u8)));
+                let bpk_buf = runner.buffer_bytes(&(bytes_per_key as u32).to_le_bytes());
+                bench_gbps(
+                    runner,
+                    &rk,
+                    &[&keys_buf, &ref_out_buf, &odd_buf, &bpk_buf],
+                    [num_keys, 1, 1],
+                    [1, half_size, 1],
+                    (total * 4) as f64,
+                )
+            });
         vec![bench.result_sub(
             Some(self.subop),
             format!("{}M u32", n / (1024 * 1024)),
@@ -1374,8 +711,6 @@ impl BenchSpec {
         bench: &OpBench,
         n: usize,
         tpg: usize,
-        mlx_src: &Option<&str>,
-        mlx_pattern: &Option<&str>,
     ) -> Vec<OpResult> {
         let msl = match self.msl_elementwise(DType::F32) {
             Some(s) => s,
@@ -1428,10 +763,11 @@ impl BenchSpec {
         let inp = buffer_typed(runner, &data, DType::F32);
         let n_buf = runner.buffer_u32(n as u32);
         let bytes = (n * 4 * 2) as f64;
-        let ref_perf = Self::compile_mlx(runner, mlx_src, mlx_pattern, "").and_then(|rk| {
-            let out = zeros_typed(runner, n, DType::F32);
-            bench_gbps(runner, &rk, &[&inp, &out], [1, n / 32, 1], [32, 1, 1], bytes)
-        });
+        let ref_perf =
+            Self::compile_mlx(runner, self.mlx_src, self.mlx_pattern, "").and_then(|rk| {
+                let out = zeros_typed(runner, n, DType::F32);
+                bench_gbps(runner, &rk, &[&inp, &out], [1, n / 32, 1], [32, 1, 1], bytes)
+            });
         let mt_perf = {
             let out = zeros_typed(runner, n, DType::F32);
             bench_gbps(runner, &mk, &[&inp, &out, &n_buf], [n / tpg, 1, 1], [tpg, 1, 1], bytes)
@@ -1445,209 +781,6 @@ impl BenchSpec {
         )]
     }
 
-    // ── MatVec ────────────────────────────────────────────────────────────────
-
-    fn run_mat_vec(
-        &self,
-        runner: &GpuRunner,
-        dt: DType,
-        bench: &OpBench,
-        shapes: &[(usize, usize)],
-        tpg: usize,
-        mlx_src: &Option<&str>,
-        mlx_pattern: &Option<&str>,
-    ) -> Vec<OpResult> {
-        let ctx = DtypeCtx::elementwise(dt);
-        let tol = self.tol.max(1e-2f32);
-        let msl = match self.msl_reduction(dt) {
-            Some(s) => s,
-            None => return vec![],
-        };
-        let mk = match Self::compile_mt(runner, &msl, self.kernel_name) {
-            Some(k) => k,
-            None => return vec![],
-        };
-        let ref_kernel = Self::compile_mlx(runner, mlx_src, mlx_pattern, ctx.tn);
-        let mut results = Vec::new();
-        for &(m, k) in shapes {
-            let cm = 64usize;
-            let ck = 256usize;
-            let sm: Vec<f32> = (0..cm * ck).map(|i| (i % 16) as f32 * 0.01).collect();
-            let sv: Vec<f32> = (0..ck).map(|i| (i % 8) as f32 * 0.01).collect();
-            let sm_q = quantize_roundtrip(&sm, dt);
-            let sv_q = quantize_roundtrip(&sv, dt);
-            let ref_out: Vec<f32> = (0..cm)
-                .map(|row| (0..ck).map(|col| sm_q[row * ck + col] * sv_q[col]).sum())
-                .collect();
-            let mat_b = buffer_typed(runner, &sm, dt);
-            let vec_b = buffer_typed(runner, &sv, dt);
-            let out_b = zeros_typed(runner, cm, dt);
-            let k_b = runner.buffer_u32(ck as u32);
-            let mt_vals = run_typed_once(
-                runner,
-                &mk,
-                &[&mat_b, &vec_b, &out_b, &k_b],
-                &out_b,
-                cm,
-                [cm, 1, 1],
-                [tpg, 1, 1],
-                dt,
-            );
-            let equiv = check_equiv(&ref_out, &mt_vals, tol);
-
-            let mat_vals: Vec<f32> = (0..m * k).map(|i| (i % 16) as f32 * 0.01).collect();
-            let vec_vals: Vec<f32> = (0..k).map(|i| (i % 8) as f32 * 0.01).collect();
-            let mat_buf = buffer_typed(runner, &mat_vals, dt);
-            let vec_buf = buffer_typed(runner, &vec_vals, dt);
-            let k_buf = runner.buffer_u32(k as u32);
-            let bytes = (m * k * ctx.eb + k * ctx.eb + m * ctx.eb) as f64;
-
-            // MLX gemv ref has 15 params: mat, vec, bias, out, in_vec_size, out_vec_size, mat_ld,
-            // alpha, beta, batch_ndim, <4 empty batching ptrs>, bias_stride
-            const REF_BM: usize = 4;
-            const REF_TM: usize = 4;
-            let ref_perf = ref_kernel.as_ref().and_then(|rk| {
-                let out_r = runner.buffer_zeros(m * ctx.eb);
-                let bias_r = runner.buffer_zeros(m * ctx.eb);
-                let zero_buf = runner.buffer_zeros(8);
-                let in_vec_size = runner.buffer_i32(k as i32);
-                let out_vec_size = runner.buffer_i32(m as i32);
-                let mat_ld = runner.buffer_i32(k as i32);
-                let alpha = runner.buffer_f32_scalar(1.0f32);
-                let beta = runner.buffer_f32_scalar(0.0f32);
-                let batch_ndim = runner.buffer_i32(0i32);
-                let bias_stride = runner.buffer_i32(1i32);
-                bench_gbps(
-                    runner,
-                    rk,
-                    &[
-                        &mat_buf,
-                        &vec_buf,
-                        &bias_r,
-                        &out_r,
-                        &in_vec_size,
-                        &out_vec_size,
-                        &mat_ld,
-                        &alpha,
-                        &beta,
-                        &batch_ndim,
-                        &zero_buf,
-                        &zero_buf,
-                        &zero_buf,
-                        &zero_buf,
-                        &bias_stride,
-                    ],
-                    [m / (REF_BM * REF_TM), 1, 1],
-                    [REF_BM * 32, 1, 1],
-                    bytes,
-                )
-            });
-            let mt_perf = {
-                let out_buf = zeros_typed(runner, m, dt);
-                bench_gbps(
-                    runner,
-                    &mk,
-                    &[&mat_buf, &vec_buf, &out_buf, &k_buf],
-                    [m, 1, 1],
-                    [tpg, 1, 1],
-                    bytes,
-                )
-            };
-            results.push(bench.result_sub(
-                Some(self.subop),
-                format!("M={m} K={k} {}", ctx.label),
-                ref_perf,
-                mt_perf,
-                Some(equiv),
-            ));
-        }
-        results
-    }
-
-    // ── MatVecMasked ──────────────────────────────────────────────────────────
-
-    fn run_mat_vec_masked(
-        &self,
-        runner: &GpuRunner,
-        dt: DType,
-        bench: &OpBench,
-        shapes: &[(usize, usize)],
-        tpg: usize,
-    ) -> Vec<OpResult> {
-        let ctx = DtypeCtx::elementwise(dt);
-        let tol = self.tol.max(1e-2f32);
-        let msl = match self.msl_reduction(dt) {
-            Some(s) => s,
-            None => return vec![],
-        };
-        let mk = match Self::compile_mt(runner, &msl, self.kernel_name) {
-            Some(k) => k,
-            None => return vec![],
-        };
-        let mut results = Vec::new();
-        for &(m, k) in shapes {
-            let cm = 64usize;
-            let ck = 256usize;
-            let sm: Vec<f32> = (0..cm * ck).map(|i| (i % 13) as f32 * 0.01).collect();
-            let sv: Vec<f32> = (0..ck).map(|i| (i % 7) as f32 * 0.01).collect();
-            let mask_vals: Vec<f32> = (0..ck).map(|i| if i % 3 == 0 { 0.0 } else { 1.0 }).collect();
-            let sm_q = quantize_roundtrip(&sm, dt);
-            let sv_q = quantize_roundtrip(&sv, dt);
-            let ref_out: Vec<f32> = (0..cm)
-                .map(|row| {
-                    (0..ck)
-                        .filter(|&col| mask_vals[col] != 0.0)
-                        .map(|col| sm_q[row * ck + col] * sv_q[col])
-                        .sum()
-                })
-                .collect();
-            let mat_b = buffer_typed(runner, &sm, dt);
-            let vec_b = buffer_typed(runner, &sv, dt);
-            let mask_b = buffer_typed(runner, &mask_vals, dt);
-            let out_b = zeros_typed(runner, cm, dt);
-            let k_b = runner.buffer_u32(ck as u32);
-            let mt_vals = run_typed_once(
-                runner,
-                &mk,
-                &[&mat_b, &vec_b, &mask_b, &out_b, &k_b],
-                &out_b,
-                cm,
-                [cm, 1, 1],
-                [tpg, 1, 1],
-                dt,
-            );
-            let equiv = check_equiv(&ref_out, &mt_vals, tol);
-
-            let mat_vals: Vec<f32> = (0..m * k).map(|i| (i % 13) as f32 * 0.01).collect();
-            let vec_vals: Vec<f32> = (0..k).map(|i| (i % 7) as f32 * 0.01).collect();
-            let mask_perf: Vec<f32> = (0..k).map(|i| if i % 3 == 0 { 0.0 } else { 1.0 }).collect();
-            let mat_buf = buffer_typed(runner, &mat_vals, dt);
-            let vec_buf = buffer_typed(runner, &vec_vals, dt);
-            let mask_buf = buffer_typed(runner, &mask_perf, dt);
-            let k_buf = runner.buffer_u32(k as u32);
-            let bytes = (m * k * ctx.eb + k * ctx.eb * 2 + m * ctx.eb) as f64;
-            let mt_perf = {
-                let out = zeros_typed(runner, m, dt);
-                bench_gbps(
-                    runner,
-                    &mk,
-                    &[&mat_buf, &vec_buf, &mask_buf, &out, &k_buf],
-                    [m, 1, 1],
-                    [tpg, 1, 1],
-                    bytes,
-                )
-            };
-            results.push(bench.result_sub(
-                Some(self.subop),
-                format!("M={m} K={k} {}", ctx.label),
-                None,
-                mt_perf,
-                Some(equiv),
-            ));
-        }
-        results
-    }
-
     // ── QuantizedMatVec ───────────────────────────────────────────────────────
 
     fn run_quantized_mat_vec(
@@ -1658,8 +791,6 @@ impl BenchSpec {
         shapes: &[(usize, usize)],
         group_size: usize,
         tpg: usize,
-        mlx_src: &Option<&str>,
-        mlx_pattern: &Option<&str>,
     ) -> Vec<OpResult> {
         let msl = match self.msl_reduction(DType::F32) {
             Some(s) => s,
@@ -1669,7 +800,7 @@ impl BenchSpec {
             Some(k) => k,
             None => return vec![],
         };
-        let ref_kernel = Self::compile_mlx(runner, mlx_src, mlx_pattern, "");
+        let ref_kernel = Self::compile_mlx(runner, self.mlx_src, self.mlx_pattern, "");
         let mut results = Vec::new();
         for &(m, k) in shapes {
             let w_elems = m * k / 8;
@@ -1821,7 +952,6 @@ impl BenchSpec {
         l: usize,
         d: usize,
         n_per_group: usize,
-        mlx_src: &Option<&str>,
     ) -> Vec<OpResult> {
         let msl = match self.msl_grid3d(DType::F16) {
             Some(s) => s,
@@ -1831,7 +961,7 @@ impl BenchSpec {
             Some(k) => k,
             None => return vec![],
         };
-        let rk = mlx_src.and_then(|src| {
+        let rk = self.mlx_src.and_then(|src| {
             runner
                 .compile_with_bool_constants(src, "rope_float16", &[
                     (1, true),
@@ -1982,7 +1112,6 @@ impl BenchSpec {
         bench: &OpBench,
         shapes: &[(usize, usize, usize)],
         tpg: usize,
-        mlx_src: &Option<&str>,
     ) -> Vec<OpResult> {
         let ctx = DtypeCtx::elementwise(dt);
         let msl = match self.msl_reduction(dt) {
@@ -2000,8 +1129,9 @@ impl BenchSpec {
             DType::F16 => "sdpa_vector_float16_t_128_128",
             _ => return vec![],
         };
-        let rk =
-            mlx_src.and_then(|src| runner.compile_with_bool_constants(src, ref_name, REF_FCS).ok());
+        let rk = self.mlx_src.and_then(|src| {
+            runner.compile_with_bool_constants(src, ref_name, REF_FCS).ok()
+        });
         let mut results = Vec::new();
         for &(h, n_kv, d) in shapes {
             let scale = 1.0_f32 / (d as f32).sqrt();
@@ -2181,8 +1311,6 @@ impl BenchSpec {
         m: usize,
         n: usize,
         pad: usize,
-        mlx_src: &Option<&str>,
-        mlx_pattern: &Option<&str>,
     ) -> Vec<OpResult> {
         let ctx = DtypeCtx::elementwise(dt);
         let msl = match self.msl_grid3d(dt) {
@@ -2193,7 +1321,7 @@ impl BenchSpec {
             Some(k) => k,
             None => return vec![],
         };
-        let ref_kernel = Self::compile_mlx(runner, mlx_src, mlx_pattern, ctx.tn);
+        let ref_kernel = Self::compile_mlx(runner, self.mlx_src, self.mlx_pattern, ctx.tn);
 
         // Correctness: 8×16 copy from 8×(16+4) source
         let cm = 8usize;
@@ -2276,6 +1404,7 @@ impl BenchSpec {
     }
 }
 
+#[allow(dead_code)]
 enum InterpMode {
     Elementwise(usize),
     Reduction(usize),

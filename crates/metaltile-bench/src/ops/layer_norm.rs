@@ -2,20 +2,13 @@
 
 use metaltile::{bench_kernel, kernel};
 
-use crate::spec::ExtraInput;
-
 static SRC: &str = include_str!("../metal/layer_norm.metal");
-static LN_SHAPES: &[(usize, usize)] = &[(1_024, 4_096)];
-static LN_EXTRAS: &[ExtraInput] = &[
-    ExtraInput::WeightPerCol { val: 1.0 },
-    ExtraInput::BiasPerCol { val: 0.0 },
-    ExtraInput::ScalarF32 { val: 1e-5 },
-];
 
 #[bench_kernel(op="layer_norm", subop="layer_norm", class=RowNorm,
-               shapes=&LN_SHAPES, tpg=1024, reads=2, out_elements=4096, extra=&LN_EXTRAS,
+               b=1024, n=4096, tpg=1024, reads=2,
+               pre_weight=1.0, pre_bias=0.0, post_eps=1e-5,
                tol=1e-4,
-               mlx_src=SRC, mlx="layer_norm_looped{tn}", mlx_extra_slots=3,
+               mlx_src=SRC, mlx="layer_norm_looped{tn}",
                metal_file="layer_norm.metal")]
 #[kernel]
 pub fn mt_layer_norm<T>(

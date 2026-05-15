@@ -2,17 +2,13 @@
 
 use metaltile::{bench_kernel, kernel};
 
-use crate::spec::ExtraInput;
-
 static SRC: &str = include_str!("../metal/rms_norm.metal");
-static RMS_SHAPES: &[(usize, usize)] = &[(1_024, 4_096)];
-static RMS_EXTRAS: &[ExtraInput] =
-    &[ExtraInput::WeightPerCol { val: 1.0 }, ExtraInput::ScalarF32 { val: 1e-5 }];
 
 #[bench_kernel(op="rms_norm", subop="rms_norm", class=RowNorm,
-               shapes=&RMS_SHAPES, tpg=1024, reads=2, out_elements=4096, extra=&RMS_EXTRAS,
+               b=1024, n=4096, tpg=1024, reads=2,
+               pre_weight=1.0, post_eps=1e-5,
                tol=1e-4,
-               mlx_src=SRC, mlx="rms{tn}", mlx_extra_slots=2,
+               mlx_src=SRC, mlx="rms{tn}",
                metal_file="rms_norm.metal")]
 #[kernel]
 pub fn mt_rms_norm<T>(

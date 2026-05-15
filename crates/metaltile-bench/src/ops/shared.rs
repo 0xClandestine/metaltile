@@ -649,6 +649,7 @@ fn style_correctness(text: &str, status: CorrectnessStatus) -> String {
     paint_stdout(&pad_right(text, 28), style)
 }
 
+#[allow(dead_code)]
 pub(crate) fn run_f32_once(
     runner: &GpuRunner,
     kernel: &CompiledKernel,

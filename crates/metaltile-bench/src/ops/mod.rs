@@ -116,30 +116,15 @@ pub fn all_kernel_specs() -> Vec<KernelSpec> {
     // from the macro annotations so op files need no kernel_specs() function.
     for spec in ::inventory::iter::<crate::spec::BenchSpec> {
         let Some(metal_file) = spec.metal_file else { continue };
-        let ref_spec = match &spec.class {
-            crate::spec::BenchClass::Unary { mlx_pattern, .. }
-            | crate::spec::BenchClass::Binary { mlx_pattern, .. }
-            | crate::spec::BenchClass::AllReduce { mlx_pattern, .. }
-            | crate::spec::BenchClass::RowReduce { mlx_pattern, .. }
-            | crate::spec::BenchClass::Arange { mlx_pattern, .. }
-            | crate::spec::BenchClass::Select { mlx_pattern, .. }
-            | crate::spec::BenchClass::Sort { mlx_pattern, .. }
-            | crate::spec::BenchClass::Scan { mlx_pattern, .. }
-            | crate::spec::BenchClass::ArgReduce { mlx_pattern, .. }
-            | crate::spec::BenchClass::Random { mlx_pattern, .. }
-            | crate::spec::BenchClass::FpQuantized { mlx_pattern, .. }
-            | crate::spec::BenchClass::MatVec { mlx_pattern, .. }
-            | crate::spec::BenchClass::QuantizedMatVec { mlx_pattern, .. }
-            | crate::spec::BenchClass::StridedCopy { mlx_pattern, .. }
-            | crate::spec::BenchClass::RowNorm { mlx_pattern, .. } => match mlx_pattern {
-                Some(p) => RefSpec::Format(p),
-                None => RefSpec::None("no MLX reference"),
-            },
-            crate::spec::BenchClass::BinaryTwo { .. }
-            | crate::spec::BenchClass::MatVecMasked { .. } => RefSpec::None("no MLX equivalent"),
-            crate::spec::BenchClass::Rope { .. } => RefSpec::Literal("rope_float16"),
-            crate::spec::BenchClass::Attention { .. } =>
-                RefSpec::Literal("sdpa_vector_float_128_128"),
+        let ref_spec = if let Some(p) = spec.mlx_pattern {
+            RefSpec::Format(p)
+        } else {
+            match &spec.dispatch {
+                crate::spec::BenchDispatch::Rope { .. } => RefSpec::Literal("rope_float16"),
+                crate::spec::BenchDispatch::Attention { .. } =>
+                    RefSpec::Literal("sdpa_vector_float_128_128"),
+                _ => RefSpec::None("no MLX reference"),
+            }
         };
         specs.push(KernelSpec {
             op: spec.op,

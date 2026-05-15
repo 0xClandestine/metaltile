@@ -3,10 +3,9 @@
 use metaltile::{bench_kernel, kernel};
 
 static SRC: &str = include_str!("../metal/gemv.metal");
-static GEMV_SHAPES: &[(usize, usize)] = &[(4096, 4096)];
 
 #[bench_kernel(op="gemv", subop="gemv", class=MatVec,
-               shapes=&GEMV_SHAPES, tpg=256, tol=1e-2,
+               b=4096, n=4096, tpg=256, tol=1e-2,
                mlx_src=SRC, mlx="gemv_{tn}_bm4_bn1_sm1_sn32_tm4_tn4_nc0_axpby0",
                metal_file="gemv.metal")]
 #[kernel]

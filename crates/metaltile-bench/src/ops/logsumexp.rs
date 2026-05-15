@@ -2,16 +2,11 @@
 
 use metaltile::{bench_kernel, kernel};
 
-use crate::spec::ExtraInput;
-
 static SRC: &str = include_str!("../metal/logsumexp.metal");
-static LSE_SHAPES: &[(usize, usize)] = &[(1_024, 4_096)];
-static NO_EXTRAS: &[ExtraInput] = &[];
 
 #[bench_kernel(op="logsumexp", subop="logsumexp", class=RowNorm,
-               shapes=&LSE_SHAPES, tpg=256, reads=1, out_elements=1, extra=&NO_EXTRAS,
-               tol=1e-4,
-               mlx_src=SRC, mlx="looped_logsumexp_{tn}", mlx_extra_slots=0,
+               b=1024, n=4096, tpg=256, reads=1, out_elements=1, tol=1e-4,
+               mlx_src=SRC, mlx="looped_logsumexp_{tn}",
                metal_file="logsumexp.metal")]
 #[kernel]
 pub fn mt_logsumexp<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {

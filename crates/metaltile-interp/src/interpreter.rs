@@ -563,12 +563,24 @@ impl Interpreter {
             Op::ThreadgroupAlloc { .. }
             | Op::ThreadgroupLoad { .. }
             | Op::ThreadgroupStore { .. }
-            | Op::Barrier
-            | Op::DeclareLocal { .. }
-            | Op::SetLocal { .. } =>
+            | Op::Barrier =>
                 if let Some(rid) = result {
                     self.registers.insert(rid, RegisterValue::Scalar(0.0));
                 },
+            // Mutable locals: DeclareLocal stores bare name (e.g. "lm");
+            // reads use Op::Load { src: "__ml_lm" }, so insert with "__ml_" prefix.
+            Op::DeclareLocal { name, value } => {
+                let v = self.get_scalar(*value);
+                let mut td = TensorData::zeros(&[1], DType::F32);
+                td.write_scalar(0, v);
+                self.inputs.insert(format!("__ml_{name}"), td);
+            },
+            Op::SetLocal { name, value } => {
+                let v = self.get_scalar(*value);
+                let mut td = TensorData::zeros(&[1], DType::F32);
+                td.write_scalar(0, v);
+                self.inputs.insert(format!("__ml_{name}"), td);
+            },
             Op::ArgReduce { value, op, .. } => {
                 // Return index 0 as placeholder (tensor-level argreduce not implemented yet)
                 let _ = (value, op);

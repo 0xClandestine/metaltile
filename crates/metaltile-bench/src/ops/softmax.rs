@@ -2,16 +2,11 @@
 
 use metaltile::{bench_kernel, kernel};
 
-use crate::spec::ExtraInput;
-
 static SRC: &str = include_str!("../metal/softmax.metal");
-static SOFTMAX_SHAPES: &[(usize, usize)] = &[(1_024, 4_096)];
-static NO_EXTRAS: &[ExtraInput] = &[];
 
 #[bench_kernel(op="softmax", subop="softmax", class=RowNorm,
-               shapes=&SOFTMAX_SHAPES, tpg=256, reads=2, out_elements=4096, extra=&NO_EXTRAS,
-               tol=1e-4,
-               mlx_src=SRC, mlx="looped_softmax_{tn}", mlx_extra_slots=0,
+               b=1024, n=4096, tpg=256, reads=2, tol=1e-4,
+               mlx_src=SRC, mlx="looped_softmax_{tn}",
                metal_file="softmax.metal")]
 #[kernel]
 pub fn mt_softmax<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
@@ -45,8 +40,8 @@ pub fn mt_softmax<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
     }
     let rm = reduce_max(lm);
     let rsl = ls * exp(lm - rm);
-    let rs = reduce_sum(rsl);
-    let is = recip(rs);
+    let rs_sum = reduce_sum(rsl);
+    let is = recip(rs_sum);
     for _r in range(0u32, nf, 1u32) {
         let base = rs + (_r * lsize + tid) * 4u32;
         let f0 = exp(load(inp[base]).cast::<f32>() - rm) * is;
