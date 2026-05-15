@@ -53,10 +53,200 @@ struct Cli {
 //   2. Register it in `register_kernels()` below
 //   3. Re-run `cargo run -p metaltile-emit -- --out <dir>`
 
+// Generic elementwise add. c[i] = a[i] + b[i]. Works for f32 / f16 / bf16.
 #[kernel]
-fn vector_add(a: Tensor<f32>, b: Tensor<f32>, c: Tensor<f32>) {
+fn add_elem<T>(a: Tensor<T>, b: Tensor<T>, c: Tensor<T>) {
     let idx = program_id::<0>();
     store(c[idx], load(a[idx]) + load(b[idx]));
+}
+
+// Generic elementwise multiply. c[i] = a[i] * b[i]. Used for SwiGLU's gate*up.
+#[kernel]
+fn mul_elem<T>(a: Tensor<T>, b: Tensor<T>, c: Tensor<T>) {
+    let idx = program_id::<0>();
+    store(c[idx], load(a[idx]) * load(b[idx]));
+}
+
+// SiLU activation: out[i] = x[i] / (1 + exp(-x[i])). Elementwise.
+#[kernel]
+fn silu_elem<T>(a: Tensor<T>, out: Tensor<T>) {
+    let idx = program_id::<0>();
+    let x = load(a[idx]).cast::<f32>();
+    let y = x / (1.0f32 + exp(-x));
+    store(out[idx], y.cast::<T>());
+}
+
+// Embedding lookup. For each output element (token, d), copy
+// table[indices[token], d]. One thread per output element.
+#[kernel]
+fn gather_row<T>(
+    table: Tensor<T>,
+    indices: Tensor<u32>,
+    out: Tensor<T>,
+    #[constexpr] dim: u32,
+) {
+    let idx = program_id::<0>();
+    let token = idx / dim;
+    let d = idx - token * dim;
+    let token_id = load(indices[token]);
+    let src = token_id * dim + d;
+    store(out[idx], load(table[src]));
+}
+
+// Naive matrix-vector multiply. weight is [out_dim, in_dim] row-major;
+// input is [in_dim]; output is [out_dim]. One thread per output row;
+// inner loop over in_dim. Slow but correct; replace with the bench
+// strided_reduce_dot version once Phase 5 lands the autotuner.
+#[kernel]
+fn gemv_naive<T>(
+    weight: Tensor<T>,
+    input: Tensor<T>,
+    output: Tensor<T>,
+    #[constexpr] in_dim: u32,
+) {
+    let row = program_id::<0>();
+    let mut acc = 0.0f32;
+    for j in range(0u32, in_dim, 1u32) {
+        acc = acc + load(weight[row * in_dim + j]).cast::<f32>()
+                  * load(input[j]).cast::<f32>();
+    }
+    store(output[row], acc.cast::<T>());
+}
+
+// Llama-style RoPE (HuggingFace half-rotated convention) with optional
+// Llama-3 frequency-band scaling. For each (head, i in 0..head_dim/2):
+//
+//   base inv_freq = 1 / theta_base^(2i / head_dim)
+//   wavelen       = 2*pi / inv_freq
+//   if wavelen > low_freq_wavelen:        inv_freq /= scale_factor      (low-freq band)
+//   else if wavelen < high_freq_wavelen:  inv_freq                       (high-freq band)
+//   else (medium band):                   smoothed interpolation
+//
+// To turn scaling OFF, pass scale_factor=1, low_freq_factor=1,
+// high_freq_factor=1, original_max_position=very_large (e.g. 1e9).
+//
+// Wavelength bands:
+//   low_freq_wavelen  = original_max_position / low_freq_factor
+//   high_freq_wavelen = original_max_position / high_freq_factor
+//
+// Smoothed = (1 - s) * (inv_freq_base / scale_factor) + s * inv_freq_base
+//   where s = (original_max_position / wavelen - low_freq_factor)
+//             / (high_freq_factor - low_freq_factor)
+#[kernel]
+fn rope_llama<T>(
+    qk: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] head_dim: u32,
+    #[constexpr] half_dim: u32,
+    #[constexpr] position: u32,
+    #[constexpr] theta_base: f32,
+    #[constexpr] scale_factor: f32,
+    #[constexpr] low_freq_factor: f32,
+    #[constexpr] high_freq_factor: f32,
+    #[constexpr] original_max_position: f32,
+) {
+    let head = program_id::<0>();
+    let i = program_id::<1>();
+
+    let i_f = i.cast::<f32>();
+    let half_f = half_dim.cast::<f32>();
+    let inv_freq_base = exp2(-i_f * log2(theta_base) / half_f);
+
+    let two_pi = 6.283185307179586f32;
+    let wavelen = two_pi / inv_freq_base;
+    let low_freq_wavelen = original_max_position / low_freq_factor;
+    let high_freq_wavelen = original_max_position / high_freq_factor;
+
+    let scaled = inv_freq_base / scale_factor;
+    let smooth_num = original_max_position / wavelen - low_freq_factor;
+    let smooth_den = high_freq_factor - low_freq_factor;
+    let s = smooth_num / smooth_den;
+    let smoothed = (1.0f32 - s) * scaled + s * inv_freq_base;
+
+    let is_low_freq = wavelen > low_freq_wavelen;
+    let is_high_freq = wavelen < high_freq_wavelen;
+    let inv_freq = select(
+        is_low_freq,
+        scaled,
+        select(is_high_freq, inv_freq_base, smoothed),
+    );
+
+    let pos_f = position.cast::<f32>();
+    let theta = pos_f * inv_freq;
+    let cos_t = cos(theta);
+    let sin_t = sin(theta);
+
+    let base = head * head_dim;
+    let i1 = base + i;
+    let i2 = base + i + half_dim;
+
+    let x1 = load(qk[i1]).cast::<f32>();
+    let x2 = load(qk[i2]).cast::<f32>();
+    let o1 = x1 * cos_t - x2 * sin_t;
+    let o2 = x1 * sin_t + x2 * cos_t;
+
+    store(out[i1], o1.cast::<T>());
+    store(out[i2], o2.cast::<T>());
+}
+
+// Naive single-Q SDPA decode with online softmax. Each thread owns one
+// output element (q_head, d). Walks all KV positions; for each, computes
+// the full dot(q[q_head], k[kv_head, t]) (recomputed per thread — wasteful
+// but trivially correct). Maintains per-thread (max, sum, output_d) state.
+//
+// K and V cache layout: [n_kv_heads, kv_stride, head_dim] where kv_stride
+// is the physical capacity (maxSeq) and n_kv is the number of currently
+// filled positions (the loop bound). Decoupling the two lets the cache
+// be pre-allocated to maxSeq while only attending to filled positions.
+//
+// GQA: kv_head = q_head / heads_per_group.
+//
+// Dispatch: one thread per (q_head, d). Total threads = n_q_heads * head_dim.
+#[kernel]
+fn sdpa_decode_naive<T>(
+    q: Tensor<T>,
+    k: Tensor<T>,
+    v: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] head_dim: u32,
+    #[constexpr] n_kv: u32,
+    #[constexpr] kv_stride: u32,
+    #[constexpr] heads_per_group: u32,
+    #[constexpr] scale: f32,
+) {
+    let idx = program_id::<0>();
+    let q_head = idx / head_dim;
+    let d = idx - q_head * head_dim;
+    let kv_head = q_head / heads_per_group;
+    let q_off = q_head * head_dim;
+    let head_slab = kv_head * kv_stride * head_dim;
+
+    let mut m = neg_infinity();
+    let mut s = 0.0f32;
+    let mut o = 0.0f32;
+
+    for _t in range(0u32, n_kv, 1u32) {
+        let k_base = head_slab + _t * head_dim;
+        let mut score = 0.0f32;
+        for j in range(0u32, head_dim, 1u32) {
+            score = score
+                + load(q[q_off + j]).cast::<f32>()
+                * load(k[k_base + j]).cast::<f32>();
+        }
+        score = score * scale;
+
+        let new_m = select(score > m, score, m);
+        let factor = exp(m - new_m);
+        let weight = exp(score - new_m);
+        s = s * factor + weight;
+
+        let v_idx = k_base + d;
+        o = o * factor + weight * load(v[v_idx]).cast::<f32>();
+        m = new_m;
+    }
+
+    let final_out = o / s;
+    store(out[idx], final_out.cast::<T>());
 }
 
 #[kernel]
@@ -99,18 +289,54 @@ fn mt_rms_norm<T>(
 /// for codegen.
 fn register_kernels() -> Vec<Kernel> {
     let mut kernels: Vec<Kernel> = Vec::new();
+    let dtypes = [DType::F32, DType::F16, DType::BF16];
 
-    // vector_add — single dtype (f32), no generics.
-    kernels.push(vector_add::kernel_ir());
+    // ─── elementwise (Elementwise mode = default) ────────────────────
+    for &dt in &dtypes {
+        let mut k = add_elem::kernel_ir_for(dt);
+        k.name = format!("add_{}", dtype_suffix(dt));
+        kernels.push(k);
 
-    // rms_norm — generic over T, specialize for f32 / f16 / bf16. Rename
-    // each instantiation so MSL function names don't collide. Reduction
-    // mode is required so the codegen emits `lsize`/`tid`/`tgid` aliases
-    // used inside the kernel body.
-    for &dt in &[DType::F32, DType::F16, DType::BF16] {
+        let mut k = mul_elem::kernel_ir_for(dt);
+        k.name = format!("mul_{}", dtype_suffix(dt));
+        kernels.push(k);
+
+        let mut k = silu_elem::kernel_ir_for(dt);
+        k.name = format!("silu_{}", dtype_suffix(dt));
+        kernels.push(k);
+
+        let mut k = gather_row::kernel_ir_for(dt);
+        k.name = format!("gather_{}", dtype_suffix(dt));
+        kernels.push(k);
+
+        let mut k = gemv_naive::kernel_ir_for(dt);
+        k.name = format!("gemv_{}", dtype_suffix(dt));
+        kernels.push(k);
+    }
+
+    // ─── rms_norm (Reduction mode) ───────────────────────────────────
+    // Reduction mode is required so the codegen emits `lsize`/`tid`/`tgid`
+    // aliases used inside the kernel body.
+    for &dt in &dtypes {
         let mut k = mt_rms_norm::kernel_ir_for(dt);
         k.name = format!("rms_norm_{}", dtype_suffix(dt));
         k.mode = KernelMode::Reduction;
+        kernels.push(k);
+    }
+
+    // ─── rope (Grid3D — uses program_id<0> for head and program_id<1>
+    //     for half-pair index)
+    for &dt in &dtypes {
+        let mut k = rope_llama::kernel_ir_for(dt);
+        k.name = format!("rope_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Grid3D;
+        kernels.push(k);
+    }
+
+    // ─── sdpa decode (Elementwise) ───────────────────────────────────
+    for &dt in &dtypes {
+        let mut k = sdpa_decode_naive::kernel_ir_for(dt);
+        k.name = format!("sdpa_decode_{}", dtype_suffix(dt));
         kernels.push(k);
     }
 
@@ -365,9 +591,12 @@ fn emit_swift_wrapper(out: &mut String, k: &KernelManifest) {
         .ok();
         slot += 1;
     }
+        // dispatchThreads (in threads, not threadgroups) so out-of-bound
+        // threads aren't created and the kernel doesn't need bounds checks.
+        // Requires Metal 2.0 non-uniform threadgroup support (M-series ✓).
     writeln!(
         out,
-        "        enc.dispatchThreadgroups(gridSize, threadsPerThreadgroup: threadgroupSize)"
+        "        enc.dispatchThreads(gridSize, threadsPerThreadgroup: threadgroupSize)"
     )
     .ok();
     writeln!(out, "        enc.endEncoding()").ok();
