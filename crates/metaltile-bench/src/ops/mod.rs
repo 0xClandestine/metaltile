@@ -88,8 +88,8 @@ pub use shared::{
     DtypeCtx,
     EquivResult,
     EquivTolerance,
-    FLOAT_DTYPES,
     FLOAT_DTYPE_STRS,
+    FLOAT_DTYPES,
     INTEGER_DTYPES,
     KernelSpec,
     OpBench,
@@ -97,6 +97,7 @@ pub use shared::{
     RefSpec,
     SuitePrinter,
     bench_all_dtypes,
+    bench_gbps,
     buffer_typed,
     check_equiv,
     check_equiv_with,
@@ -104,7 +105,6 @@ pub use shared::{
     dtype_tol,
     dtype_tol_reduce,
     elem_bytes,
-    bench_gbps,
     generate_elementwise_msl,
     generate_reduction_msl,
     mlx_tname,
@@ -115,7 +115,7 @@ pub use shared::{
     validate_results,
     zeros_typed,
 };
-pub(crate) use shared::{run_f16_once_as_f32, run_f32_once, run_typed_once, to_gbps, to_gflops};
+pub(crate) use shared::{run_f16_once_as_f32, run_f32_once, run_typed_once, to_gflops};
 pub use softmax::bench_softmax;
 pub use sort::bench_sort;
 pub use steel::gemm::{

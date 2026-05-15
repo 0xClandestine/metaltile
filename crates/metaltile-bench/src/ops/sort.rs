@@ -24,7 +24,7 @@ static SRC: &str = include_str!("../metal/sort.metal");
 const REF_NAME: &str = "c_block_sort_float32_float32_bn256_tn4";
 const N: usize = 1024; // elements per array (must be a power of 2, ≤ 1024)
 const B: usize = 1024; // number of independent arrays
-const BENCH: OpBench = OpBench::new("sort_f32", "GB/s");
+const BENCH: OpBench = OpBench::new("sort", "GB/s");
 
 // ── DSL kernel ───────────────────────────────────────────────────────────────
 
@@ -109,7 +109,14 @@ pub fn bench_sort(runner: &GpuRunner) -> Vec<OpResult> {
 
     let ref_perf = rk.as_ref().and_then(|rk| {
         let out = runner.buffer_zeros(B * N * 4);
-        bench_gbps(runner, rk, &[&inp, &out, &size, &stride1, &stride1, &strideN, &strideN], [B, 1, 1], [256, 1, 1], bytes)
+        bench_gbps(
+            runner,
+            rk,
+            &[&inp, &out, &size, &stride1, &stride1, &strideN, &strideN],
+            [B, 1, 1],
+            [256, 1, 1],
+            bytes,
+        )
     });
 
     let mt_msl = sort_msl().ok();
@@ -220,7 +227,7 @@ mod tests {
     }
 }
 
-use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+use crate::ops::{KernelSpec, RefSpec};
 
 pub fn kernel_specs() -> Vec<KernelSpec> {
     vec![

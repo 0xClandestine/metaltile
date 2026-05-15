@@ -20,13 +20,13 @@ use crate::{
     ops::{
         DType,
         DtypeCtx,
+        FLOAT_DTYPES,
         OpBench,
         OpResult,
-        bench_all_dtypes,
+        bench_gbps,
         buffer_typed,
         check_equiv,
         generate_reduction_msl,
-        bench_gbps,
         run_typed_once,
         zeros_typed,
     },
@@ -119,111 +119,135 @@ fn row_reduce_min_msl_for(dt: DType) -> String {
 }
 
 pub fn bench_reduce(runner: &GpuRunner) -> Vec<OpResult> {
-    bench_all_dtypes(runner, bench_reduce_for)
+    // Subop-primary ordering: outer=subop, inner=dtype.
+    // Results fire the live reporter on creation, so loop order = display order.
+    let mut results = Vec::new();
+    for subop in ["sum", "max", "min"] {
+        for &dt in FLOAT_DTYPES {
+            results.extend(bench_all_reduce_for(runner, dt, subop));
+        }
+    }
+    for subop in ["sum", "max", "min"] {
+        for &dt in FLOAT_DTYPES {
+            results.extend(bench_row_reduce_for(runner, dt, subop));
+        }
+    }
+    results
 }
 
-fn bench_reduce_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
+fn bench_all_reduce_for(runner: &GpuRunner, dt: DType, subop: &str) -> Vec<OpResult> {
     let ctx = DtypeCtx::reduce(dt);
     let (tn, dlabel, eb, tol) = (ctx.tn, ctx.label, ctx.eb, ctx.tol);
 
-    // Compile kernels for all three ops.
-    let ops: &[(&str, &str, &str, &str)] = &[
-        ("sum", "mt_all_reduce", "mt_row_reduce", &format!("all_reduce_sum{tn}")),
-        ("max", "mt_all_reduce_max", "mt_row_reduce_max", &format!("all_reduce_max{tn}")),
-        ("min", "mt_all_reduce_min", "mt_row_reduce_min", &format!("all_reduce_min{tn}")),
+    let ops: &[(&str, &str, &str)] = &[
+        ("sum", "mt_all_reduce", &format!("all_reduce_sum{tn}")),
+        ("max", "mt_all_reduce_max", &format!("all_reduce_max{tn}")),
+        ("min", "mt_all_reduce_min", &format!("all_reduce_min{tn}")),
     ];
 
     let mut results = Vec::new();
-
-    for &(op_name, ar_mt_name, rr_mt_name, ar_ref_name) in ops {
-        let rr_ref_name = format!("row_reduce_simple_{op_name}{tn}");
-
-        let ar_msl = match op_name {
+    for &(op_name, mt_name, ref_name) in ops.iter().filter(|o| o.0 == subop) {
+        let msl = match op_name {
             "sum" => all_reduce_msl_for(dt),
             "max" => all_reduce_max_msl_for(dt),
             _ => all_reduce_min_msl_for(dt),
         };
-        let rr_msl = match op_name {
+        let mt_kernel = runner.compile(&msl, mt_name).ok();
+        let ref_kernel = runner.compile(SRC, ref_name).ok();
+        let cpu_fn: Box<dyn Fn(&[f32]) -> f32> = match op_name {
+            "max" => Box::new(|v: &[f32]| v.iter().cloned().fold(f32::NEG_INFINITY, f32::max)),
+            "min" => Box::new(|v: &[f32]| v.iter().cloned().fold(f32::INFINITY, f32::min)),
+            _ => Box::new(|v: &[f32]| v.iter().sum()),
+        };
+
+        let inp_vals: Vec<f32> =
+            (0..CHECK_ALL_N).map(|i| 0.25 + (i % 19) as f32 * 0.03125).collect();
+        let inp_check = buffer_typed(runner, &inp_vals, dt);
+        let mt_ns = runner.buffer_u32(CHECK_ALL_N as u32);
+        let ref_in_sz = runner.buffer_u64(CHECK_ALL_N as u64);
+        let ref_row_sz = runner.buffer_u64(CHECK_ALL_N as u64);
+
+        let ref_check = ref_kernel.as_ref().map(|rk| {
+            let out = zeros_typed(runner, 1, dt);
+            run_typed_once(
+                runner,
+                rk,
+                &[&inp_check, &out, &ref_in_sz, &ref_row_sz],
+                &out,
+                1,
+                [1, 1, 1],
+                [TPG, 1, 1],
+                dt,
+            )
+        });
+        let mt_check = mt_kernel.as_ref().map(|mk| {
+            let out = zeros_typed(runner, 1, dt);
+            run_typed_once(
+                runner,
+                mk,
+                &[&inp_check, &out, &mt_ns],
+                &out,
+                1,
+                [1, 1, 1],
+                [TPG, 1, 1],
+                dt,
+            )
+        });
+        let equiv = match (ref_check, mt_check) {
+            (Some(r), Some(m)) => check_equiv(&r, &m, tol),
+            (None, Some(m)) => check_equiv(&[cpu_fn(&inp_vals)], &m, tol),
+            _ => continue,
+        };
+
+        let inp = buffer_typed(runner, &vec![1.0f32 / ALL_N as f32; ALL_N], dt);
+        let bytes = (ALL_N * eb) as f64;
+        let ri_sz = runner.buffer_u64(ALL_N as u64);
+        let rr_sz = runner.buffer_u64(ALL_N as u64);
+        let ref_perf = ref_kernel.as_ref().and_then(|k| {
+            let out = zeros_typed(runner, 1, dt);
+            bench_gbps(runner, k, &[&inp, &out, &ri_sz, &rr_sz], [1, 1, 1], [256, 1, 1], bytes)
+        });
+        let ns = runner.buffer_u32(ALL_N as u32);
+        let mt_perf = mt_kernel.as_ref().and_then(|k| {
+            let out = zeros_typed(runner, 1, dt);
+            bench_gbps(runner, k, &[&inp, &out, &ns], [1, 1, 1], [256, 1, 1], bytes)
+        });
+        results.push(ALL_REDUCE_BENCH.result_sub(
+            Some(op_name),
+            format!("N={}M {dlabel}", ALL_N / 1_000_000),
+            ref_perf,
+            mt_perf,
+            Some(equiv),
+        ));
+    }
+    results
+}
+
+fn bench_row_reduce_for(runner: &GpuRunner, dt: DType, subop: &str) -> Vec<OpResult> {
+    let ctx = DtypeCtx::reduce(dt);
+    let (tn, dlabel, eb, tol) = (ctx.tn, ctx.label, ctx.eb, ctx.tol);
+
+    let ops: &[(&str, &str, &str)] = &[
+        ("sum", "mt_row_reduce", &format!("row_reduce_simple_sum{tn}")),
+        ("max", "mt_row_reduce_max", &format!("row_reduce_simple_max{tn}")),
+        ("min", "mt_row_reduce_min", &format!("row_reduce_simple_min{tn}")),
+    ];
+
+    let mut results = Vec::new();
+    for &(op_name, mt_name, ref_name) in ops.iter().filter(|o| o.0 == subop) {
+        let msl = match op_name {
             "sum" => row_reduce_msl_for(dt),
             "max" => row_reduce_max_msl_for(dt),
             _ => row_reduce_min_msl_for(dt),
         };
-        let ar_kernel = runner.compile(&ar_msl, ar_mt_name).ok();
-        let rr_kernel = runner.compile(&rr_msl, rr_mt_name).ok();
-        let ar_ref = runner.compile(SRC, ar_ref_name).ok();
-        let rr_ref = runner.compile(SRC, &rr_ref_name).ok();
-
-        // CPU reference functions for correctness (when MLX ref unavailable).
-        let cpu_all: Box<dyn Fn(&[f32]) -> f32> = match op_name {
-            "max" => Box::new(|v: &[f32]| v.iter().cloned().fold(f32::NEG_INFINITY, f32::max)),
-            "min" => Box::new(|v: &[f32]| v.iter().cloned().fold(f32::INFINITY, f32::min)),
-            _ => Box::new(|v: &[f32]| v.iter().sum()),
-        };
-        let cpu_row: Box<dyn Fn(&[f32]) -> f32> = match op_name {
+        let mt_kernel = runner.compile(&msl, mt_name).ok();
+        let ref_kernel = runner.compile(SRC, ref_name).ok();
+        let cpu_fn: Box<dyn Fn(&[f32]) -> f32> = match op_name {
             "max" => Box::new(|v: &[f32]| v.iter().cloned().fold(f32::NEG_INFINITY, f32::max)),
             "min" => Box::new(|v: &[f32]| v.iter().cloned().fold(f32::INFINITY, f32::min)),
             _ => Box::new(|v: &[f32]| v.iter().sum()),
         };
 
-        // ── all_reduce ───────────────────────────────────────────────────────
-        {
-            let inp_vals: Vec<f32> =
-                (0..CHECK_ALL_N).map(|i| 0.25 + (i % 19) as f32 * 0.03125).collect();
-            let inp_check = buffer_typed(runner, &inp_vals, dt);
-            let mt_ns = runner.buffer_u32(CHECK_ALL_N as u32);
-            let ref_in_size = runner.buffer_u64(CHECK_ALL_N as u64);
-            let ref_row_size = runner.buffer_u64(CHECK_ALL_N as u64);
-
-            let ref_check = ar_ref.as_ref().map(|rk| {
-                let out = zeros_typed(runner, 1, dt);
-                run_typed_once(
-                    runner,
-                    rk,
-                    &[&inp_check, &out, &ref_in_size, &ref_row_size],
-                    &out,
-                    1,
-                    [1, 1, 1],
-                    [TPG, 1, 1],
-                    dt,
-                )
-            });
-            let mt_check = ar_kernel.as_ref().map(|mk| {
-                let out = zeros_typed(runner, 1, dt);
-                run_typed_once(
-                    runner,
-                    mk,
-                    &[&inp_check, &out, &mt_ns],
-                    &out,
-                    1,
-                    [1, 1, 1],
-                    [TPG, 1, 1],
-                    dt,
-                )
-            });
-            let equiv = match (ref_check, mt_check) {
-                (Some(r), Some(m)) => check_equiv(&r, &m, tol),
-                (None, Some(m)) => check_equiv(&[cpu_all(&inp_vals)], &m, tol),
-                _ => continue,
-            };
-
-            let inp = buffer_typed(runner, &vec![1.0f32 / ALL_N as f32; ALL_N], dt);
-            let bytes = (ALL_N * eb) as f64;
-            let ref_in_sz = runner.buffer_u64(ALL_N as u64);
-            let ref_row_sz = runner.buffer_u64(ALL_N as u64);
-            let ref_perf = ar_ref.as_ref().and_then(|k| {
-                let out = zeros_typed(runner, 1, dt);
-                bench_gbps(runner, k, &[&inp, &out, &ref_in_sz, &ref_row_sz], [1, 1, 1], [256, 1, 1], bytes)
-            });
-            let ns = runner.buffer_u32(ALL_N as u32);
-            let mt_perf = ar_kernel.as_ref().and_then(|k| {
-                let out = zeros_typed(runner, 1, dt);
-                bench_gbps(runner, k, &[&inp, &out, &ns], [1, 1, 1], [256, 1, 1], bytes)
-            });
-            let shape = format!("N={}M {op_name} {dlabel}", ALL_N / 1_000_000);
-            results.push(ALL_REDUCE_BENCH.result(shape, ref_perf, mt_perf, Some(equiv)));
-        }
-
-        // ── row_reduce ───────────────────────────────────────────────────────
         for &(b, n) in SHAPES {
             let inp_vals: Vec<f32> = (0..CHECK_ROW_B * CHECK_ROW_N)
                 .map(|i| 0.25 + (i / CHECK_ROW_N) as f32 * 0.0625 + (i % 13) as f32 * 0.03125)
@@ -233,7 +257,7 @@ fn bench_reduce_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
             let ref_red = runner.buffer_u64(CHECK_ROW_N as u64);
             let ref_osz = runner.buffer_i64(CHECK_ROW_B as i64);
 
-            let ref_check = rr_ref.as_ref().map(|rk| {
+            let ref_check = ref_kernel.as_ref().map(|rk| {
                 let out = zeros_typed(runner, CHECK_ROW_B, dt);
                 run_typed_once(
                     runner,
@@ -246,7 +270,7 @@ fn bench_reduce_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
                     dt,
                 )
             });
-            let mt_check = rr_kernel.as_ref().map(|mk| {
+            let mt_check = mt_kernel.as_ref().map(|mk| {
                 let out = zeros_typed(runner, CHECK_ROW_B, dt);
                 run_typed_once(
                     runner,
@@ -263,7 +287,7 @@ fn bench_reduce_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
                 (Some(r), Some(m)) => check_equiv(&r, &m, tol),
                 (None, Some(m)) => {
                     let cpu: Vec<f32> = (0..CHECK_ROW_B)
-                        .map(|row| cpu_row(&inp_vals[row * CHECK_ROW_N..(row + 1) * CHECK_ROW_N]))
+                        .map(|row| cpu_fn(&inp_vals[row * CHECK_ROW_N..(row + 1) * CHECK_ROW_N]))
                         .collect();
                     check_equiv(&cpu, &m, tol)
                 },
@@ -274,20 +298,31 @@ fn bench_reduce_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
             let bytes = (b * n * eb) as f64;
             let rref_red = runner.buffer_u64(n as u64);
             let rref_osz = runner.buffer_i64(b as i64);
-            let ref_perf = rr_ref.as_ref().and_then(|k| {
+            let ref_perf = ref_kernel.as_ref().and_then(|k| {
                 let out = zeros_typed(runner, b, dt);
-                bench_gbps(runner, k, &[&inp, &out, &rref_red, &rref_osz], [1, b, 1], [256, 1, 1], bytes)
+                bench_gbps(
+                    runner,
+                    k,
+                    &[&inp, &out, &rref_red, &rref_osz],
+                    [1, b, 1],
+                    [256, 1, 1],
+                    bytes,
+                )
             });
             let ns = runner.buffer_u32(n as u32);
-            let mt_perf = rr_kernel.as_ref().and_then(|k| {
+            let mt_perf = mt_kernel.as_ref().and_then(|k| {
                 let out = zeros_typed(runner, b, dt);
                 bench_gbps(runner, k, &[&inp, &out, &ns], [b, 1, 1], [256, 1, 1], bytes)
             });
-            let shape = format!("B={b} N={n} {op_name} {dlabel}");
-            results.push(ROW_REDUCE_BENCH.result(shape, ref_perf, mt_perf, Some(equiv)));
+            results.push(ROW_REDUCE_BENCH.result_sub(
+                Some(op_name),
+                format!("B={b} N={n} {dlabel}"),
+                ref_perf,
+                mt_perf,
+                Some(equiv),
+            ));
         }
     }
-
     results
 }
 
@@ -331,16 +366,16 @@ mod tests {
     }
 }
 
-use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+use crate::ops::{FLOAT_DTYPE_STRS, KernelSpec, RefSpec};
 
 /// Reference kernel name templates for all 6 reduce variants.
 static REDUCE_SPECS: &[(&str, &str, &str)] = &[
-    ("mt_all_reduce",     "all_reduce",     "all_reduce_sum{tn}"),
-    ("mt_all_reduce_max", "all_reduce",     "all_reduce_max{tn}"),
-    ("mt_all_reduce_min", "all_reduce",     "all_reduce_min{tn}"),
-    ("mt_row_reduce",     "row_reduce",     "row_reduce_simple_sum{tn}"),
-    ("mt_row_reduce_max", "row_reduce",     "row_reduce_simple_max{tn}"),
-    ("mt_row_reduce_min", "row_reduce",     "row_reduce_simple_min{tn}"),
+    ("mt_all_reduce", "all_reduce", "all_reduce_sum{tn}"),
+    ("mt_all_reduce_max", "all_reduce", "all_reduce_max{tn}"),
+    ("mt_all_reduce_min", "all_reduce", "all_reduce_min{tn}"),
+    ("mt_row_reduce", "row_reduce", "row_reduce_simple_sum{tn}"),
+    ("mt_row_reduce_max", "row_reduce", "row_reduce_simple_max{tn}"),
+    ("mt_row_reduce_min", "row_reduce", "row_reduce_simple_min{tn}"),
 ];
 
 pub fn kernel_specs() -> Vec<KernelSpec> {

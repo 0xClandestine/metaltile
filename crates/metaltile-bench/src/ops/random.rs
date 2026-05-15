@@ -29,7 +29,7 @@ const HALF_SIZE: usize = BYTES_PER_KEY / 8;
 const TOTAL_FLOATS: usize = NUM_KEYS * BYTES_PER_KEY / 4;
 const TPG: usize = 1024;
 
-const BENCH: OpBench = OpBench::new("random_f32", "GB/s");
+const BENCH: OpBench = OpBench::new("random", "GB/s");
 
 // ── DSL kernel ───────────────────────────────────────────────────────────────
 
@@ -83,7 +83,14 @@ pub fn bench_random(runner: &GpuRunner) -> Vec<OpResult> {
     let bytes = (TOTAL_FLOATS * 4) as f64;
 
     let ref_perf = rk.as_ref().and_then(|rk| {
-        bench_gbps(runner, rk, &[&keys_buf, &ref_out_buf, &odd_buf, &bpk_buf], [NUM_KEYS, 1, 1], [1, HALF_SIZE, 1], bytes)
+        bench_gbps(
+            runner,
+            rk,
+            &[&keys_buf, &ref_out_buf, &odd_buf, &bpk_buf],
+            [NUM_KEYS, 1, 1],
+            [1, HALF_SIZE, 1],
+            bytes,
+        )
     });
 
     let mt_msl = random_msl().ok();
@@ -111,7 +118,14 @@ pub fn bench_random(runner: &GpuRunner) -> Vec<OpResult> {
     let mt_out_buf = runner.buffer_zeros(TOTAL_FLOATS * 4);
     let n_buf = runner.buffer_u32(TOTAL_FLOATS as u32);
     let mt_perf = mk.as_ref().and_then(|mk| {
-        bench_gbps(runner, mk, &[&mt_out_buf, &n_buf], [TOTAL_FLOATS.div_ceil(TPG), 1, 1], [TPG, 1, 1], bytes)
+        bench_gbps(
+            runner,
+            mk,
+            &[&mt_out_buf, &n_buf],
+            [TOTAL_FLOATS.div_ceil(TPG), 1, 1],
+            [TPG, 1, 1],
+            bytes,
+        )
     });
 
     let shape = format!("{}M f32", TOTAL_FLOATS / (1024 * 1024));
@@ -175,7 +189,7 @@ mod tests {
     }
 }
 
-use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+use crate::ops::{KernelSpec, RefSpec};
 
 pub fn kernel_specs() -> Vec<KernelSpec> {
     vec![KernelSpec {

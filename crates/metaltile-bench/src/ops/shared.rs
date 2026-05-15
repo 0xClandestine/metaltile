@@ -308,11 +308,31 @@ impl OpBench {
         mt_perf: Option<f64>,
         equiv: Option<EquivResult>,
     ) -> OpResult {
+        self.result_sub(None::<&str>, shape, ref_perf, mt_perf, equiv)
+    }
+
+    /// Like `result()` but with a sub-operation label displayed as "op (subop)".
+    pub fn result_sub(
+        &self,
+        subop: Option<impl Into<String>>,
+        shape: impl Into<String>,
+        ref_perf: Option<f64>,
+        mt_perf: Option<f64>,
+        equiv: Option<EquivResult>,
+    ) -> OpResult {
         let shape = shape.into();
         if mt_perf.is_some() && equiv.is_none() {
             panic!("implemented benchmark '{}' [{}] is missing correctness", self.op, shape);
         }
-        let result = OpResult { op: self.op, shape, metric: self.metric, ref_perf, mt_perf, equiv };
+        let result = OpResult {
+            op: self.op,
+            subop: subop.map(|s| s.into()),
+            shape,
+            metric: self.metric,
+            ref_perf,
+            mt_perf,
+            equiv,
+        };
         report_result(&result);
         result
     }
@@ -334,6 +354,9 @@ impl OpBench {
 
 pub struct OpResult {
     op: &'static str,
+    /// Optional sub-operation displayed as "op (subop)" in the Op column.
+    /// Does not affect blank-line grouping — that still uses `op`.
+    subop: Option<String>,
     shape: String,
     /// "GFLOPS" or "GB/s"
     metric: &'static str,
@@ -347,6 +370,14 @@ pub struct OpResult {
 
 impl OpResult {
     pub fn op(&self) -> &'static str { self.op }
+
+    /// Rendered op name: "op (subop)" if subop is set, else "op".
+    pub fn op_display(&self) -> String {
+        match &self.subop {
+            Some(s) => format!("{} ({})", self.op, s),
+            None => self.op.to_string(),
+        }
+    }
 
     pub fn shape(&self) -> &str { &self.shape }
 
@@ -513,23 +544,24 @@ impl SuitePrinter {
 
     fn print_header(&self) {
         println!();
+        let sep = col_sep();
         if self.show_correctness {
             println!(
-                "  {} {} {}  {}  {}  {}",
+                "  {} {sep} {} {sep} {} {sep} {} {sep} {} {sep} {}",
                 header_cell("Op", 28, false),
-                header_cell("Shape", 18, false),
-                header_cell("Reference", 13, true),
-                header_cell("MetalTile", 13, true),
+                header_cell("Shape", 26, false),
+                header_cell("Reference", 14, true),
+                header_cell("MetalTile", 14, true),
                 header_cell("MT%", 6, true),
                 header_cell("Correct", 28, true),
             );
         } else {
             println!(
-                "  {} {} {}  {}  {}",
+                "  {} {sep} {} {sep} {} {sep} {} {sep} {}",
                 header_cell("Op", 28, false),
-                header_cell("Shape", 18, false),
-                header_cell("Reference", 13, true),
-                header_cell("MetalTile", 13, true),
+                header_cell("Shape", 26, false),
+                header_cell("Reference", 14, true),
+                header_cell("MetalTile", 14, true),
                 header_cell("MT%", 6, true),
             );
         }
@@ -569,12 +601,15 @@ fn format_row(result: &OpResult, show_correctness: bool, peak_gbps: Option<f64>)
     let ref_cell = style_reference(&ref_s, result.ref_perf());
     let mt_cell = style_metaltile(&mt_s, result);
     let pct_cell = style_pct(&pct_s, result);
+    let sep = col_sep();
+    let op_col =
+        paint_stdout(&pad_left(&result.op_display(), 28), Style::new().fg(Color::Cyan).bold());
     if show_correctness {
         let eq_s = result.correctness_cell();
         format!(
-            "  {} {} {}  {}  {}  {}",
-            paint_stdout(&pad_left(result.op(), 28), Style::new().fg(Color::Cyan).bold()),
-            paint_stdout(&pad_left(result.shape(), 18), Style::new().fg(Color::BrightWhite)),
+            "  {} {sep} {} {sep} {} {sep} {} {sep} {} {sep} {}",
+            op_col,
+            paint_stdout(&pad_left(result.shape(), 26), Style::new().fg(Color::BrightWhite)),
             ref_cell,
             mt_cell,
             pct_cell,
@@ -582,9 +617,9 @@ fn format_row(result: &OpResult, show_correctness: bool, peak_gbps: Option<f64>)
         )
     } else {
         format!(
-            "  {} {} {}  {}  {}",
-            paint_stdout(&pad_left(result.op(), 28), Style::new().fg(Color::Cyan).bold()),
-            paint_stdout(&pad_left(result.shape(), 18), Style::new().fg(Color::BrightWhite)),
+            "  {} {sep} {} {sep} {} {sep} {} {sep} {}",
+            op_col,
+            paint_stdout(&pad_left(result.shape(), 26), Style::new().fg(Color::BrightWhite)),
             ref_cell,
             mt_cell,
             pct_cell,
@@ -592,12 +627,16 @@ fn format_row(result: &OpResult, show_correctness: bool, peak_gbps: Option<f64>)
     }
 }
 
-fn separator_width(show_correctness: bool) -> usize { if show_correctness { 115 } else { 82 } }
+// Visible widths: 2 prefix + 28 op + 3 sep + 26 shape + 3 sep + 14 ref + 3 sep + 14 mt
+//                + 3 sep + 6 pct [+ 3 sep + 28 correct]
+fn separator_width(show_correctness: bool) -> usize { if show_correctness { 133 } else { 99 } }
 
 fn header_cell(label: &str, width: usize, right_align: bool) -> String {
     let cell = if right_align { pad_right(label, width) } else { pad_left(label, width) };
     paint_stdout(&cell, Style::new().fg(Color::BrightWhite).bold())
 }
+
+fn col_sep() -> String { paint_stdout("│", Style::new().fg(Color::BrightBlack).dim()) }
 
 fn separator(width: usize) -> String {
     paint_stdout(&"─".repeat(width), Style::new().fg(Color::BrightBlack).dim())
@@ -613,7 +652,7 @@ fn style_reference(text: &str, value: Option<f64>) -> String {
     } else {
         Style::new().fg(Color::Red).bold()
     };
-    paint_stdout(&pad_right(text, 13), style)
+    paint_stdout(&pad_right(text, 14), style)
 }
 
 fn style_metaltile(text: &str, result: &OpResult) -> String {
@@ -622,7 +661,7 @@ fn style_metaltile(text: &str, result: &OpResult) -> String {
         (Some(_), _) => Style::new().fg(Color::BrightWhite).bold(),
         (None, _) => Style::new().fg(Color::Yellow).bold(),
     };
-    paint_stdout(&pad_right(text, 13), style)
+    paint_stdout(&pad_right(text, 14), style)
 }
 
 fn style_pct(text: &str, result: &OpResult) -> String {
@@ -696,6 +735,10 @@ pub(crate) fn to_gbps(st: &crate::stats::BenchStats, bytes: f64) -> Option<f64> 
 
 /// Run `kernel` for performance measurement and return throughput in GB/s.
 ///
+/// Flushes the System Level Cache (SLC) before timing so that both reference and
+/// MetalTile measurements start from the same cold-cache state. This eliminates the
+/// noise caused by working sets that fit in the 64 MB SLC (M4 Max).
+///
 /// Uses the standard 3-warmup / 10-iteration schedule. Returns `None` if the
 /// benchmark produced no valid timing samples (e.g. on non-macOS).
 pub fn bench_gbps(
@@ -706,6 +749,7 @@ pub fn bench_gbps(
     tpg: [usize; 3],
     bytes: f64,
 ) -> Option<f64> {
+    runner.flush_slc();
     to_gbps(&runner.bench(kernel, buffers, grid, tpg, 3, 10), bytes)
 }
 

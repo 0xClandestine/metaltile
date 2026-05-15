@@ -16,11 +16,11 @@ use crate::{
         OpBench,
         OpResult,
         bench_all_dtypes,
+        bench_gbps,
         buffer_typed,
         check_equiv,
         generate_reduction_msl,
         quantize_roundtrip,
-        bench_gbps,
         run_typed_once,
         zeros_typed,
     },
@@ -136,7 +136,14 @@ fn bench_gemv_masked_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
         let mt_out = zeros_typed(runner, m, dt);
         let mt_perf = mk.as_ref().and_then(|mk| {
-            bench_gbps(runner, mk, &[&mat_buf, &vec_buf, &mask_buf, &mt_out, &k_buf], [m, 1, 1], [TPG, 1, 1], bytes)
+            bench_gbps(
+                runner,
+                mk,
+                &[&mat_buf, &vec_buf, &mask_buf, &mt_out, &k_buf],
+                [m, 1, 1],
+                [TPG, 1, 1],
+                bytes,
+            )
         });
 
         let shape = format!("M={m} K={k} {dlabel}");
@@ -147,7 +154,7 @@ fn bench_gemv_masked_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
 crate::bench_tests!(msl_fn: gemv_masked_msl_for, kernel_name: "mt_gemv_masked");
 
-use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+use crate::ops::{FLOAT_DTYPE_STRS, KernelSpec, RefSpec};
 
 pub fn kernel_specs() -> Vec<KernelSpec> {
     vec![KernelSpec {

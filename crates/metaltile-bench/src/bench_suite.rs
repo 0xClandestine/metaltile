@@ -127,29 +127,38 @@ fn main() {
         };
         let _reporter = set_result_reporter(&mut report);
 
+        // Matrix multiply
         extend_if_selected(&mut all, &runner, &filter, bench_matmul_fp16);
+        // Vector / quantized matrix-vector
         extend_if_selected(&mut all, &runner, &filter, bench_gemv);
         extend_if_selected(&mut all, &runner, &filter, bench_gemv_masked);
+        extend_if_selected(&mut all, &runner, &filter, bench_quantized);
+        // Normalisation
         extend_if_selected(&mut all, &runner, &filter, bench_softmax);
         extend_if_selected(&mut all, &runner, &filter, bench_rms_norm);
-        extend_if_selected(&mut all, &runner, &filter, bench_binary_ops);
         extend_if_selected(&mut all, &runner, &filter, bench_layer_norm);
         extend_if_selected(&mut all, &runner, &filter, bench_logsumexp);
+        // Reduction
         extend_if_selected(&mut all, &runner, &filter, bench_reduce);
+        // Attention
+        extend_if_selected(&mut all, &runner, &filter, bench_sdpa_vector);
+        extend_if_selected(&mut all, &runner, &filter, bench_sdpa_vector_f16);
+        // Positional encoding
         extend_if_selected(&mut all, &runner, &filter, bench_rope);
+        // Elementwise
         extend_if_selected(&mut all, &runner, &filter, bench_all_unary);
+        extend_if_selected(&mut all, &runner, &filter, bench_binary_ops);
+        extend_if_selected(&mut all, &runner, &filter, bench_binary_two);
         extend_if_selected(&mut all, &runner, &filter, bench_copy);
         extend_if_selected(&mut all, &runner, &filter, bench_arange);
         extend_if_selected(&mut all, &runner, &filter, bench_select);
-        extend_if_selected(&mut all, &runner, &filter, bench_binary_two);
+        // Sequence / scan
         extend_if_selected(&mut all, &runner, &filter, bench_scan);
-        extend_if_selected(&mut all, &runner, &filter, bench_sdpa_vector);
-        extend_if_selected(&mut all, &runner, &filter, bench_sdpa_vector_f16);
-        extend_if_selected(&mut all, &runner, &filter, bench_quantized);
         extend_if_selected(&mut all, &runner, &filter, bench_sort);
+        extend_if_selected(&mut all, &runner, &filter, bench_arg_reduce);
+        // Misc
         extend_if_selected(&mut all, &runner, &filter, bench_random);
         extend_if_selected(&mut all, &runner, &filter, bench_fp_quantized);
-        extend_if_selected(&mut all, &runner, &filter, bench_arg_reduce);
         extend_if_selected(&mut all, &runner, &filter, bench_strided);
     }
 

@@ -28,7 +28,7 @@ const SHAPES: &[(usize, usize)] = &[(4096, 4096)];
 const ROWS_PER_TG: usize = 8;
 const TPG: usize = GROUP_SIZE; // one thread per group
 
-const BENCH: OpBench = OpBench::new("qmv_f32_gs64_b4", "GB/s");
+const BENCH: OpBench = OpBench::new("qmv", "GB/s");
 
 // ── DSL kernel ────────────────────────────────────────────────────────────────
 
@@ -151,11 +151,30 @@ pub fn bench_quantized(runner: &GpuRunner) -> Vec<OpResult> {
 
         let ref_perf = rk.as_ref().and_then(|rk| {
             let y_buf = runner.buffer_zeros(m * 2);
-            bench_gbps(runner, rk, &[
-                &w_buf, &scales_f16_buf, &biases_f16_buf, &x_f16_buf, &y_buf,
-                &in_size, &out_size, &batch_zero,
-                &zero, &zero, &batch_zero, &zero, &zero, &zero, &zero,
-            ], [1, m / ROWS_PER_TG, 1], [64, 1, 1], bytes_f16)
+            bench_gbps(
+                runner,
+                rk,
+                &[
+                    &w_buf,
+                    &scales_f16_buf,
+                    &biases_f16_buf,
+                    &x_f16_buf,
+                    &y_buf,
+                    &in_size,
+                    &out_size,
+                    &batch_zero,
+                    &zero,
+                    &zero,
+                    &batch_zero,
+                    &zero,
+                    &zero,
+                    &zero,
+                    &zero,
+                ],
+                [1, m / ROWS_PER_TG, 1],
+                [64, 1, 1],
+                bytes_f16,
+            )
         });
 
         // ── MT (f32) data ──────────────────────────────────────────────────────
@@ -222,7 +241,14 @@ pub fn bench_quantized(runner: &GpuRunner) -> Vec<OpResult> {
 
         let mt_perf = mk.as_ref().and_then(|mk| {
             let out_buf = runner.buffer_zeros(m * 4);
-            bench_gbps(runner, mk, &[&w_mt_buf, &s_mt_buf, &b_mt_buf, &x_mt_buf, &out_buf, &k_buf, &gpr_buf], [m, 1, 1], [TPG, 1, 1], bytes_mt)
+            bench_gbps(
+                runner,
+                mk,
+                &[&w_mt_buf, &s_mt_buf, &b_mt_buf, &x_mt_buf, &out_buf, &k_buf, &gpr_buf],
+                [m, 1, 1],
+                [TPG, 1, 1],
+                bytes_mt,
+            )
         });
 
         let shape = format!("M={m} K={k} f32 gs{GROUP_SIZE} b4");
@@ -334,7 +360,7 @@ mod tests {
     }
 }
 
-use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+use crate::ops::{KernelSpec, RefSpec};
 
 pub fn kernel_specs() -> Vec<KernelSpec> {
     vec![KernelSpec {

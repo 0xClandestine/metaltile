@@ -58,6 +58,3 @@ path = "src/dump_msl.rs"
 name = "kernel_table"
 path = "src/kernel_table.rs"
 
-[[bench]]
-name = "kernels"
-harness = false

@@ -17,11 +17,11 @@ use crate::{
         OpBench,
         OpResult,
         bench_all_dtypes,
+        bench_gbps,
         buffer_typed,
         check_equiv,
         generate_elementwise_msl,
         quantize_roundtrip,
-        bench_gbps,
         run_typed_once,
         zeros_typed,
     },
@@ -102,7 +102,14 @@ fn bench_arange_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
         let ref_start = runner.buffer_f32_scalar(start);
         let ref_step = runner.buffer_f32_scalar(step);
         let ref_out = runner.buffer_zeros(N_ELEM * 4);
-        bench_gbps(runner, rk, &[&ref_start, &ref_step, &ref_out], [N_ELEM.div_ceil(TPG), 1, 1], [TPG, 1, 1], bytes)
+        bench_gbps(
+            runner,
+            rk,
+            &[&ref_start, &ref_step, &ref_out],
+            [N_ELEM.div_ceil(TPG), 1, 1],
+            [TPG, 1, 1],
+            bytes,
+        )
     });
 
     // MT perf
@@ -111,7 +118,14 @@ fn bench_arange_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
     let mt_out = zeros_typed(runner, N_ELEM, dt);
     let mt_n = runner.buffer_u32(N_ELEM as u32);
     let mt_perf = mk.as_ref().and_then(|mk| {
-        bench_gbps(runner, mk, &[&mt_out, &mt_start, &mt_step, &mt_n], [N_ELEM.div_ceil(TPG), 1, 1], [TPG, 1, 1], bytes)
+        bench_gbps(
+            runner,
+            mk,
+            &[&mt_out, &mt_start, &mt_step, &mt_n],
+            [N_ELEM.div_ceil(TPG), 1, 1],
+            [TPG, 1, 1],
+            bytes,
+        )
     });
 
     let shape = format!("N={N_ELEM} {dlabel}");
@@ -120,7 +134,7 @@ fn bench_arange_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
 crate::bench_tests!(msl_fn: arange_msl_for, kernel_name: "mt_arange");
 
-use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+use crate::ops::{FLOAT_DTYPE_STRS, KernelSpec, RefSpec};
 
 pub fn kernel_specs() -> Vec<KernelSpec> {
     vec![KernelSpec {

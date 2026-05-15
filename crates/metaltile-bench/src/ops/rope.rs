@@ -38,7 +38,7 @@ const H: usize = 32;
 const L: usize = 512;
 const D: usize = 128;
 const N_HEADS_PER_GROUP: usize = 4; // N in MLX template
-const BENCH: OpBench = OpBench::new("rope_f16", "GB/s");
+const BENCH: OpBench = OpBench::new("rope", "GB/s");
 
 // Grid dimensions derived from shape (used when rope is implemented).
 #[allow(dead_code)]
@@ -139,13 +139,26 @@ pub fn bench_rope(runner: &GpuRunner) -> Vec<OpResult> {
     // Reference kernel dispatch: [GX, GY, GZ] × [1,1,1]
     let ref_out = runner.buffer_zeros(n_elems * 2); // f16
     let ref_perf = rk.as_ref().and_then(|rk| {
-        bench_gbps(runner, rk, &[
-            &inp, &ref_out,
-            &offset_arr, &scale_buf,
-            &strides_buf, &strides_buf, // out_strides same as in_strides
-            &offset_stride_buf, &n_head_buf,
-            &dummy, &dummy, &base_buf,
-        ], [GX, GY, GZ], [1, 1, 1], bytes)
+        bench_gbps(
+            runner,
+            rk,
+            &[
+                &inp,
+                &ref_out,
+                &offset_arr,
+                &scale_buf,
+                &strides_buf,
+                &strides_buf, // out_strides same as in_strides
+                &offset_stride_buf,
+                &n_head_buf,
+                &dummy,
+                &dummy,
+                &base_buf,
+            ],
+            [GX, GY, GZ],
+            [1, 1, 1],
+            bytes,
+        )
     });
 
     // MT kernel buffers: (inp, out, h_stride, seq_stride, grid_x, base)
@@ -211,10 +224,17 @@ pub fn bench_rope(runner: &GpuRunner) -> Vec<OpResult> {
     // MT performance on full input
     let mt_out = runner.buffer_zeros(n_elems * 2);
     let mt_perf = mk.as_ref().and_then(|mk| {
-        bench_gbps(runner, mk, &[&inp, &mt_out, &mt_h_stride, &mt_seq_stride, &mt_grid_x, &mt_base], [GX, GY, GZ], [1, 1, 1], bytes)
+        bench_gbps(
+            runner,
+            mk,
+            &[&inp, &mt_out, &mt_h_stride, &mt_seq_stride, &mt_grid_x, &mt_base],
+            [GX, GY, GZ],
+            [1, 1, 1],
+            bytes,
+        )
     });
 
-    let shape = format!("B{B}H{H}L{L}D{D}");
+    let shape = format!("B{B}H{H}L{L}D{D} f16");
     vec![BENCH.result(shape, ref_perf, mt_perf, equiv)]
 }
 
@@ -260,7 +280,7 @@ mod tests {
     }
 }
 
-use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+use crate::ops::{KernelSpec, RefSpec};
 
 pub fn kernel_specs() -> Vec<KernelSpec> {
     vec![
@@ -275,18 +295,14 @@ pub fn kernel_specs() -> Vec<KernelSpec> {
             op: "rope",
             mt_kernel: "mt_rope_f32".into(),
             metal_file: "rope.metal",
-            ref_spec: RefSpec::None(
-                "f32 rope not yet in MT bench; MLX rope_float32 exists",
-            ),
+            ref_spec: RefSpec::None("f32 rope not yet in MT bench; MLX rope_float32 exists"),
             dtypes: &["f32"],
         },
         KernelSpec {
             op: "rope",
             mt_kernel: "mt_rope_bf16".into(),
             metal_file: "rope.metal",
-            ref_spec: RefSpec::None(
-                "bf16 rope not yet in MT bench; MLX rope_bfloat16 exists",
-            ),
+            ref_spec: RefSpec::None("bf16 rope not yet in MT bench; MLX rope_bfloat16 exists"),
             dtypes: &["bf16"],
         },
     ]

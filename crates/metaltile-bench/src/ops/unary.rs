@@ -16,13 +16,13 @@ use crate::{
     ops::{
         DType,
         DtypeCtx,
+        FLOAT_DTYPES,
         OpBench,
         OpResult,
-        bench_all_dtypes,
+        bench_gbps,
         buffer_typed,
         check_equiv,
         quantize_roundtrip,
-        bench_gbps,
         run_typed_once,
         zeros_typed,
     },
@@ -217,7 +217,20 @@ fn cpu_sign(x: f32) -> f32 {
         0.0
     }
 }
-fn cpu_round(x: f32) -> f32 { x.round() }
+fn cpu_round(x: f32) -> f32 {
+    // Match Metal rint() semantics: round-half-to-even (IEEE 754 default rounding mode).
+    // Metal's round() uses round-half-away-from-zero (slower software path for bfloat).
+    let fl = x.floor();
+    let diff = x - fl;
+    if diff < 0.5 {
+        fl
+    } else if diff > 0.5 {
+        fl + 1.0
+    } else {
+        // exactly 0.5: round to even
+        if fl % 2.0 == 0.0 { fl } else { fl + 1.0 }
+    }
+}
 fn cpu_square(x: f32) -> f32 { x * x }
 fn cpu_sigmoid(x: f32) -> f32 { 1.0 / (1.0 + (-x).exp()) }
 fn cpu_log1p(x: f32) -> f32 { x.ln_1p() }
@@ -312,59 +325,72 @@ fn make_unary_entries(dt: DType) -> Vec<UnaryEntry> {
 }
 
 pub fn bench_all_unary(runner: &GpuRunner) -> Vec<OpResult> {
-    bench_all_dtypes(runner, bench_unary_for)
-}
-
-fn bench_unary_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
-    let ctx = DtypeCtx::elementwise(dt);
-    let (dlabel, eb) = (ctx.label, ctx.eb);
-    let entries = make_unary_entries(dt);
-
+    // Subop-primary ordering: outer=variant (UNARY_SPECS order), inner=dtype.
     let mut results = Vec::new();
-    let inp_bench = buffer_typed(runner, &vec![0.5f32; N_ELEM], dt);
-    let bytes = (N_ELEM * eb * 2) as f64; // 1 read + 1 write
-    let tgs = [N_ELEM.div_ceil(TPG), 1, 1];
-    let tpg = [TPG, 1, 1];
-
-    for entry in &entries {
-        let Some(mk) = runner.compile(&entry.msl, &format!("mt_{}", entry.name)).ok() else {
-            continue;
-        };
-
-        // --- correctness: compare MT vs CPU reference ---
-        let check_in_vals: Vec<f32> = (0..N_CHECK).map(entry.check_input).collect();
-        let check_in_q = quantize_roundtrip(&check_in_vals, dt);
-        let cpu_ref: Vec<f32> = check_in_q.iter().copied().map(entry.cpu).collect();
-        let check_in = buffer_typed(runner, &check_in_vals, dt);
-        let check_out = zeros_typed(runner, N_CHECK, dt);
-        let mt_check = run_typed_once(
-            runner,
-            &mk,
-            &[&check_in, &check_out],
-            &check_out,
-            N_CHECK,
-            [N_CHECK.div_ceil(TPG), 1, 1],
-            tpg,
-            dt,
-        );
-        let equiv = check_equiv(&cpu_ref, &mt_check, entry.tolerance);
-
-        // --- performance: MT ---
-        let mt_out = zeros_typed(runner, N_ELEM, dt);
-        let mt_perf = bench_gbps(runner, &mk, &[&inp_bench, &mt_out], tgs, tpg, bytes);
-
-        // --- performance: MLX reference (if available) ---
-        let ref_perf = entry.ref_fn.as_ref().and_then(|fn_name| {
-            let rk = runner.compile(SRC, fn_name).ok()?;
-            let ref_out = zeros_typed(runner, N_ELEM, dt);
-            let ref_size = runner.buffer_u32(N_ELEM as u32);
-            bench_gbps(runner, &rk, &[&inp_bench, &ref_out, &ref_size], tgs, tpg, bytes)
-        });
-
-        let shape = format!("N={N_ELEM} {} {dlabel}", entry.name);
-        results.push(BENCH.result(shape, ref_perf, mt_perf, Some(equiv)));
+    for &(name, ..) in UNARY_SPECS {
+        for &dt in FLOAT_DTYPES {
+            results.extend(bench_unary_for(runner, dt, name));
+        }
     }
     results
+}
+
+fn bench_unary_for(runner: &GpuRunner, dt: DType, variant: &str) -> Vec<OpResult> {
+    let ctx = DtypeCtx::elementwise(dt);
+    let (dlabel, eb) = (ctx.label, ctx.eb);
+    let tpg = [TPG, 1, 1];
+    let bytes = (N_ELEM * eb * 2) as f64; // 1 read + 1 write
+    let tgs = [N_ELEM.div_ceil(TPG), 1, 1];
+
+    let entries = make_unary_entries(dt);
+    let entry = match entries.iter().find(|e| e.name == variant) {
+        Some(e) => e,
+        None => return Vec::new(),
+    };
+
+    let Some(mk) = runner.compile(&entry.msl, &format!("mt_{}", entry.name)).ok() else {
+        return Vec::new();
+    };
+
+    let inp_bench = buffer_typed(runner, &vec![0.5f32; N_ELEM], dt);
+
+    // --- correctness: compare MT vs CPU reference ---
+    let check_in_vals: Vec<f32> = (0..N_CHECK).map(entry.check_input).collect();
+    let check_in_q = quantize_roundtrip(&check_in_vals, dt);
+    let cpu_ref: Vec<f32> = check_in_q.iter().copied().map(entry.cpu).collect();
+    let check_in = buffer_typed(runner, &check_in_vals, dt);
+    let check_out = zeros_typed(runner, N_CHECK, dt);
+    let mt_check = run_typed_once(
+        runner,
+        &mk,
+        &[&check_in, &check_out],
+        &check_out,
+        N_CHECK,
+        [N_CHECK.div_ceil(TPG), 1, 1],
+        tpg,
+        dt,
+    );
+    let equiv = check_equiv(&cpu_ref, &mt_check, entry.tolerance);
+
+    // --- performance: MT ---
+    let mt_out = zeros_typed(runner, N_ELEM, dt);
+    let mt_perf = bench_gbps(runner, &mk, &[&inp_bench, &mt_out], tgs, tpg, bytes);
+
+    // --- performance: MLX reference (if available) ---
+    let ref_perf = entry.ref_fn.as_ref().and_then(|fn_name| {
+        let rk = runner.compile(SRC, fn_name).ok()?;
+        let ref_out = zeros_typed(runner, N_ELEM, dt);
+        let ref_size = runner.buffer_u32(N_ELEM as u32);
+        bench_gbps(runner, &rk, &[&inp_bench, &ref_out, &ref_size], tgs, tpg, bytes)
+    });
+
+    vec![BENCH.result_sub(
+        Some(entry.name),
+        format!("N={N_ELEM} {dlabel}"),
+        ref_perf,
+        mt_perf,
+        Some(equiv),
+    )]
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -400,19 +426,24 @@ mod tests {
     }
 }
 
-use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+use crate::ops::{FLOAT_DTYPE_STRS, KernelSpec, RefSpec};
 
 pub fn kernel_specs() -> Vec<KernelSpec> {
     UNARY_SPECS
         .iter()
-        .map(|&(name, mlx_op, _, _, _)| {
+        .map(|&(name, mlx_op, ..)| {
             let ref_spec = match (name, mlx_op) {
                 (_, Some(op)) => RefSpec::UnaryV(op),
-                ("silu",  None) => RefSpec::None("MLX computes as x·sigmoid(x), no standalone unary kernel"),
-                ("gelu",  None) => RefSpec::None("MLX uses composite poly, no standalone unary kernel"),
-                ("relu",  None) => RefSpec::None("MLX uses vvn_Maximum with scalar 0, not a unary op"),
-                ("exp2",  None) => RefSpec::None("not in instantiate_unary_float; MLX uses exp(x·ln2)"),
-                ("recip", None) => RefSpec::None("not in unary.metal; MLX uses binary divide kernel"),
+                ("silu", None) =>
+                    RefSpec::None("MLX computes as x·sigmoid(x), no standalone unary kernel"),
+                ("gelu", None) =>
+                    RefSpec::None("MLX uses composite poly, no standalone unary kernel"),
+                ("relu", None) =>
+                    RefSpec::None("MLX uses vvn_Maximum with scalar 0, not a unary op"),
+                ("exp2", None) =>
+                    RefSpec::None("not in instantiate_unary_float; MLX uses exp(x·ln2)"),
+                ("recip", None) =>
+                    RefSpec::None("not in unary.metal; MLX uses binary divide kernel"),
                 _ => RefSpec::None("no standalone MLX kernel"),
             };
             KernelSpec {

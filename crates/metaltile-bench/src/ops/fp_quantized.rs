@@ -27,7 +27,7 @@ static SRC: &str = include_str!("../metal/fp_quantized.metal");
 const REF_NAME: &str = "nvfp4_quantize_dequantize_float_gs_16_b_4";
 const N: usize = 1024 * 1024;
 const TPG: usize = 32; // one simdgroup per threadgroup
-const BENCH: OpBench = OpBench::new("fp_quant_f32", "GB/s");
+const BENCH: OpBench = OpBench::new("fp_quant", "GB/s");
 
 // ── DSL kernel ───────────────────────────────────────────────────────────────
 
@@ -230,7 +230,7 @@ mod tests {
     }
 }
 
-use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+use crate::ops::{KernelSpec, RefSpec};
 
 pub fn kernel_specs() -> Vec<KernelSpec> {
     vec![KernelSpec {

@@ -9,9 +9,11 @@
 //!   cargo run --bin kernel_table [-- --metal-dir <path>]
 //!   cargo run --bin kernel_table -- --metal-dir crates/metaltile-bench/src/metal
 
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    process::Command,
+};
 
 use metaltile_bench::ops::{KernelSpec, RefSpec, all_kernel_specs};
 
@@ -19,8 +21,7 @@ const DEFAULT_METAL_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/metal"
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let metal_dir = flag_val(&args, "--metal-dir")
-        .unwrap_or_else(|| DEFAULT_METAL_DIR.to_string());
+    let metal_dir = flag_val(&args, "--metal-dir").unwrap_or_else(|| DEFAULT_METAL_DIR.to_string());
 
     eprintln!("Preprocessing Metal files from {metal_dir}…");
     let metal_files = collect_metal_files(&metal_dir);
@@ -54,10 +55,7 @@ fn collect_recursive(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
             collect_recursive(root, &path, out);
         } else if path.extension().and_then(|e| e.to_str()) == Some("metal") {
             let rel = path.strip_prefix(root).unwrap_or(&path);
-            out.push((
-                rel.to_string_lossy().into_owned(),
-                path.to_string_lossy().into_owned(),
-            ));
+            out.push((rel.to_string_lossy().into_owned(), path.to_string_lossy().into_owned()));
         }
     }
 }
@@ -74,7 +72,7 @@ fn extract_kernels(metal_file: &str) -> HashSet<String> {
         Err(e) => {
             eprintln!("[warn] xcrun failed for {metal_file}: {e}");
             return HashSet::new();
-        }
+        },
     };
 
     let mut names = HashSet::new();
@@ -86,12 +84,8 @@ fn extract_kernels(metal_file: &str) -> HashSet<String> {
         if let Some(end) = text[start..].find(')') {
             let inner = &text[start..start + end];
             // String literals separated by whitespace: "a" "b" → "ab"
-            let name: String = inner
-                .split('"')
-                .enumerate()
-                .filter(|(i, _)| i % 2 == 1)
-                .map(|(_, s)| s)
-                .collect();
+            let name: String =
+                inner.split('"').enumerate().filter(|(i, _)| i % 2 == 1).map(|(_, s)| s).collect();
             if !name.is_empty() {
                 names.insert(name);
             }
@@ -139,20 +133,14 @@ fn print_report(specs: &[KernelSpec], kernel_map: &HashMap<String, HashSet<Strin
 
     let mut prev_op = "";
     for spec in specs {
-        let dtypes: Vec<&str> = if spec.dtypes.is_empty() {
-            vec![""]
-        } else {
-            spec.dtypes.iter().copied().collect()
-        };
+        let dtypes: Vec<&str> =
+            if spec.dtypes.is_empty() { vec![""] } else { spec.dtypes.iter().copied().collect() };
 
         for &dtype in &dtypes {
             let ref_name = spec.ref_spec.resolve(dtype);
 
             let (ref_display, status) = match &spec.ref_spec {
-                RefSpec::None(reason) => (
-                    format!("*{reason}*"),
-                    "—".to_string(),
-                ),
+                RefSpec::None(reason) => (format!("*{reason}*"), "—".to_string()),
                 _ => {
                     let name = ref_name.as_deref().unwrap_or("?");
                     let found = kernel_map
@@ -170,7 +158,7 @@ fn print_report(specs: &[KernelSpec], kernel_map: &HashMap<String, HashSet<Strin
                     } else {
                         (format!("`{name}`"), "❌".to_string())
                     }
-                }
+                },
             };
 
             let op_label = if spec.op != prev_op { spec.op } else { "" };
@@ -187,13 +175,9 @@ fn print_report(specs: &[KernelSpec], kernel_map: &HashMap<String, HashSet<Strin
     lines.push(String::new());
     lines.push("## Metal File Coverage".into());
     lines.push(String::new());
-    lines.push(
-        "How many of each Metal file's instantiated kernels are used as references.".into(),
-    );
+    lines.push("How many of each Metal file's instantiated kernels are used as references.".into());
     lines.push(String::new());
-    lines.push(
-        "| Metal File | Total kernels | Benchmarked | % | Unbenchmarked examples |".into(),
-    );
+    lines.push("| Metal File | Total kernels | Benchmarked | % | Unbenchmarked examples |".into());
     lines.push("|---|---|---|---|---|".into());
 
     let mut grand_total = 0usize;
@@ -225,7 +209,13 @@ fn print_report(specs: &[KernelSpec], kernel_map: &HashMap<String, HashSet<Strin
             if parts.is_empty() { "—".to_string() } else { parts.join(", ") }
         };
 
-        let icon = if pct == 100 { "✅" } else if pct > 0 { "⚠️" } else { "❌" };
+        let icon = if pct == 100 {
+            "✅"
+        } else if pct > 0 {
+            "⚠️"
+        } else {
+            "❌"
+        };
         lines.push(format!(
             "| `{rel}` | {} | {} | {icon} {pct}% | {examples} |",
             all_k.len(),
