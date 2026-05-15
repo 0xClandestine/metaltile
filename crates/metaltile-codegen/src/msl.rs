@@ -1443,8 +1443,8 @@ impl MslGenerator {
             && axis == 0;
         if use_threadgroup {
             let tg_name = format!("{result_var}_sg");
-            // 256 threads / 32 per SIMD = 8 SIMD groups max.
-            hoists.push(format!("threadgroup float {tg_name}[8];"));
+            // 1024 threads / 32 per SIMD = 32 SIMD groups max.
+            hoists.push(format!("threadgroup float {tg_name}[32];"));
 
             let (simd_fn, pad_val) = match kind {
                 ReduceKind::Sum | ReduceKind::Mean => ("simd_sum", "0.0f"),

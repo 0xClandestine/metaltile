@@ -95,11 +95,17 @@ fn bench_strided_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
     let expected: Vec<f32> = (0..CM * CN).map(|i| (i as f32 + 1.0)).collect();
 
     let src_buf = buffer_typed(runner, &src_vals, dt);
+    // MLX ref uses int64_t strides; MT kernel uses uint strides (slot 1=shape, slot 2=strides)
     let strides_buf = runner.buffer_bytes(
         &[src_stride as i64, 1i64].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>(),
     );
+    let src_shape_check = runner.buffer_bytes(
+        &[CM as u32, CN as u32].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>(),
+    );
+    let src_strides_check = runner.buffer_bytes(
+        &[src_stride as u32, 1u32].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>(),
+    );
     let cols_buf = runner.buffer_u32(CN as u32);
-    let cols_constexpr = runner.buffer_u32(CN as u32);
 
     let ref_equiv = rk.as_ref().map(|rk| {
         let out = zeros_typed(runner, CM * CN, dt);
@@ -114,26 +120,14 @@ fn bench_strided_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
             dt,
         )
     });
-    let mt_equiv = mk.as_ref().map(|mk| {
-        let out = zeros_typed(runner, CM * CN, dt);
-        run_typed_once(
-            runner,
-            mk,
-            &[&src_buf, &out, &cols_constexpr],
-            &out,
-            CM * CN,
-            [M, N, 1],
-            [TPG, TPG, 1],
-            dt,
-        )
-    });
 
+    // MT kernel slot layout: [src, src_shape, src_strides, out, cols]
     let mt_check_small = mk.as_ref().map(|mk| {
         let out = zeros_typed(runner, CM * CN, dt);
         run_typed_once(
             runner,
             mk,
-            &[&src_buf, &out, &cols_buf],
+            &[&src_buf, &src_shape_check, &src_strides_check, &out, &cols_buf],
             &out,
             CM * CN,
             [CM, CN, 1],
@@ -148,7 +142,7 @@ fn bench_strided_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
             return vec![BENCH.nyi(format!("M={M} N={N}+{PAD} {dlabel}"), None)];
         },
     };
-    let _ = (ref_equiv, mt_equiv); // suppress unused warnings
+    let _ = ref_equiv; // suppress unused warning
 
     // ── Throughput ───────────────────────────────────────────────────────────
     // Full M×N copy from a M×(N+PAD) source.
@@ -156,6 +150,12 @@ fn bench_strided_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
     let full_src_buf = buffer_typed(runner, &full_src, dt);
     let full_strides = runner.buffer_bytes(
         &[(N + PAD) as i64, 1i64].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>(),
+    );
+    let full_src_shape = runner.buffer_bytes(
+        &[M as u32, N as u32].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>(),
+    );
+    let full_src_strides = runner.buffer_bytes(
+        &[(N + PAD) as u32, 1u32].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>(),
     );
     let full_cols = runner.buffer_u32(N as u32);
     let bytes = (M * N * eb * 2) as f64; // 1 read + 1 write
@@ -167,7 +167,7 @@ fn bench_strided_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
     let mt_perf = mk.as_ref().and_then(|mk| {
         let out = zeros_typed(runner, M * N, dt);
-        bench_gbps(runner, mk, &[&full_src_buf, &out, &full_cols], [M, N, 1], [1, 1, 1], bytes)
+        bench_gbps(runner, mk, &[&full_src_buf, &full_src_shape, &full_src_strides, &out, &full_cols], [M, N, 1], [1, 1, 1], bytes)
     });
 
     let shape = format!("M={M} N={N}+{PAD} {dlabel}");

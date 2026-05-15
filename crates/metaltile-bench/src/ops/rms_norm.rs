@@ -35,13 +35,13 @@ const BENCH: OpBench = OpBench::new("rms_norm", "GB/s");
 const CHECK_B: usize = 4;
 const CHECK_N: usize = 4_096;
 const REF_TPG: usize = 1_024;
-const MT_TPG: usize = 256;
+const MT_TPG: usize = 1024;
 
 /// RMS norm with N_READS=4 write-back:
 ///   sum-of-squares via stride-reduce (N_READS=4) → reduce → rsqrt(mean_sq + eps)
 ///   write-back: N_READS=4 loop reads x + w, writes out.
 ///
-/// Dispatch: [B, 1, 1] x [256, 1, 1]
+/// Dispatch: [B, 1, 1] x [1024, 1, 1]  — matches MLX REF_TPG for max parallelism
 #[kernel]
 pub fn mt_rms_norm<T>(
     x: Tensor<T>,

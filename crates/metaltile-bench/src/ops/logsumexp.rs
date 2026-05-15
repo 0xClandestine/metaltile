@@ -9,8 +9,8 @@
 //!              threadgroup merge across SIMD groups. Thread 0 writes
 //!              log(sum(exp(row))) = row_max + log(row_sum).
 //!
-//! MetalTile: mt_logsumexp — same algorithm via #[kernel] DSL.
-//!   KernelMode::Reduction
+//! MetalTile: mt_logsumexp — single-pass online Welford (matches logsumexp_looped).
+//!   KernelMode::Reduction. Reads input once; N_READS=4 + remainder loop.
 
 use metaltile::kernel;
 
@@ -39,19 +39,52 @@ const CHECK_B: usize = 8;
 const CHECK_N: usize = 512;
 const TPG: usize = 256;
 
-/// log(sum(exp(x[i]))) computed as log_max + log(sum(exp(x[i] - max)))
+/// LogSumExp: single-pass online Welford merge (matches MLX logsumexp_looped).
+/// Each thread accumulates (local_max, normalizer) in one N_READS=4 loop,
+/// then two-level reduce: simd_max/sum then threadgroup merge.
+/// Reads input once (same as MLX); thread 0 writes log(normalizer) + global_max.
 /// Dispatch: [B, 1, 1] x [256, 1, 1]
 #[kernel]
 pub fn mt_logsumexp<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
     let row = program_id::<0>();
     let rs = row * n;
     let re = rs + n;
-    let acc_max = strided_reduce(inp, rs, re, max);
-    let row_max = reduce_max(acc_max);
-    let acc_sum = strided_reduce_exp_sub(inp, rs, re, row_max);
-    let row_sum = reduce_sum(acc_sum);
-    let lse = row_max + log(row_sum);
-    store(out[row], lse);
+    let n_full = n / (lsize * 4u32);
+    let mut local_max = neg_infinity();
+    let mut normalizer = 0.0f32;
+    // N_READS=4 main loop
+    for _r in range(0u32, n_full, 1u32) {
+        let base = rs + (_r * lsize + tid) * 4u32;
+        let v0 = load(inp[base]).cast::<f32>();
+        let v1 = load(inp[base + 1u32]).cast::<f32>();
+        let v2 = load(inp[base + 2u32]).cast::<f32>();
+        let v3 = load(inp[base + 3u32]).cast::<f32>();
+        let chunk_max = max(max(v0, v1), max(v2, v3));
+        let prev_max = local_max;
+        let new_max = max(prev_max, chunk_max);
+        normalizer = normalizer * exp(prev_max - new_max)
+            + exp(v0 - new_max)
+            + exp(v1 - new_max)
+            + exp(v2 - new_max)
+            + exp(v3 - new_max);
+        local_max = new_max;
+    }
+    // Remainder loop
+    for _i in range(rs + n_full * lsize * 4u32 + tid, re, lsize) {
+        let xi = load(inp[_i]).cast::<f32>();
+        let prev_max = local_max;
+        let new_max = max(prev_max, xi);
+        normalizer = normalizer * exp(prev_max - new_max) + exp(xi - new_max);
+        local_max = new_max;
+    }
+    // Cross-threadgroup reduce: global max, then rescale normalizers, then sum
+    let global_max = reduce_max(local_max);
+    let rescaled = normalizer * exp(local_max - global_max);
+    let global_sum = reduce_sum(rescaled);
+    // Only tid==0 writes (same as MLX lid==0 check)
+    if tid == 0 {
+        store(out[row], (global_max + log(global_sum)).cast::<T>());
+    }
 }
 
 fn logsumexp_msl_for(dt: DType) -> String {

@@ -13,13 +13,13 @@
 //!   Algorithm: Online softmax over all N_kv tokens; SIMD-group inter-merge via
 //!              threadgroup memory. Each lane holds EPT=4 Q/K/V elements (D=128).
 //!
-//! MetalTile: mt_sdpa — single-simdgroup (32 threads) decode SDPA.
+//! MetalTile: mt_sdpa — 32-simdgroup (1024 threads) decode SDPA.
 //!   Generic over T (f32/f16/bf16); intermediate math always in f32.
 //!   Grid: [H, 1, 1] × [MT_TPG, 1, 1]
 //!   KernelMode::Reduction
 //!
-//! Note: MT uses 8 simdgroups per head (256 threads) vs MLX's 32 simdgroups per
-//! head (1024 threads). Fewer groups = less parallelism but simpler merge.
+//! MT uses 32 simdgroups per head (1024 threads) — matches MLX's dispatch for
+//! full KV-cache bandwidth utilization. tg_out requires 1024 slots (32*32).
 
 use metaltile::{core::ir::KernelMode, kernel};
 use metaltile_codegen::msl::MslGenerator;
@@ -45,7 +45,7 @@ const BENCH: OpBench = OpBench::new("sdpa_f32", "GB/s");
 const BENCH_F16: OpBench = OpBench::new("sdpa_f16", "GB/s");
 // (H, N_kv, D)  —  D must be 128 (4 elements/lane × 32 lanes)
 const SHAPES: &[(usize, usize, usize)] = &[(8, 2048, 128), (32, 4096, 128)];
-const MT_TPG: usize = 256;
+const MT_TPG: usize = 1024;
 const REF_NAME: &str = "sdpa_vector_float_128_128";
 const REF_NAME_F16: &str = "sdpa_vector_float16_t_128_128";
 // function constants: 20=has_mask 21=query_transposed 22=do_causal
@@ -62,7 +62,8 @@ const REF_FCS: &[(usize, bool)] =
 /// Online softmax per-group, then cross-group merge via threadgroup memory
 /// (each group writes per-lane partial outputs, sg=0 sums them per lane).
 ///
-/// Dispatch: [H, 1, 1] × [256, 1, 1]  (8 simdgroups × 32 lanes per head)
+/// Dispatch: [H, 1, 1] × [1024, 1, 1]  (32 simdgroups × 32 lanes per head)
+/// Matches MLX's 1024-thread-per-head dispatch for full KV-cache bandwidth.
 #[kernel]
 pub fn mt_sdpa<T>(
     q: Tensor<T>,
@@ -79,12 +80,13 @@ pub fn mt_sdpa<T>(
 
     // Threadgroup storage: per-group (max, sum) + per-lane×per-group outputs
     // layout: tg_max[ns], tg_sum[ns], tg_out[lane * ns + sg][4 elems]
-    threadgroup_alloc("tg_max", 8);
-    threadgroup_alloc("tg_sum", 8);
-    threadgroup_alloc("tg_out0", 256);
-    threadgroup_alloc("tg_out1", 256);
-    threadgroup_alloc("tg_out2", 256);
-    threadgroup_alloc("tg_out3", 256);
+    // With 1024 threads: ns=32, so tg_out needs 32*32=1024 slots (~16 KB total)
+    threadgroup_alloc("tg_max", 32);
+    threadgroup_alloc("tg_sum", 32);
+    threadgroup_alloc("tg_out0", 1024);
+    threadgroup_alloc("tg_out1", 1024);
+    threadgroup_alloc("tg_out2", 1024);
+    threadgroup_alloc("tg_out3", 1024);
 
     // base offsets (D = 128, EPT = 4 elements per lane)
     let q_off = head * 128u32;
