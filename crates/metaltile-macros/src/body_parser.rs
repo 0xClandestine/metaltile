@@ -73,6 +73,7 @@ pub struct DslBodyParser {
 
 impl DslBodyParser {
     /// Parse a function body and return token streams for IR construction.
+    #[allow(dead_code)]
     pub fn parse(body: &Block, param_names: &[String], constexpr_names: &[String]) -> TokenStream {
         Self::parse_with_type_vars(body, param_names, constexpr_names, &Default::default())
     }
