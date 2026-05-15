@@ -283,6 +283,111 @@ fn mt_rms_norm<T>(
     }
 }
 
+// MLX-format int4 dequantizing gather. For each output element (token, d),
+// look up packed_w[token_id, d/8], extract the right nibble, then
+// dequantize via w_real = q * scale + bias (scale/bias for the group d
+// belongs to). One thread per output element.
+#[kernel]
+fn dequant_gather_int4<T>(
+    weight: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    indices: Tensor<u32>,
+    out: Tensor<T>,
+    #[constexpr] hidden: u32,
+    #[constexpr] group_size: u32,
+) {
+    let idx = program_id::<0>();
+    let token = idx / hidden;
+    let d = idx - token * hidden;
+    let token_id = load(indices[token]);
+    let packs_per_row = hidden / 8u32;
+    let groups_per_row = hidden / group_size;
+    let g = d / group_size;
+    let pack_idx = token_id * packs_per_row + d / 8u32;
+    let nibble = d & 7u32;
+    let packed = load(weight[pack_idx]);
+    let q = (packed >> (nibble * 4u32)) & 15u32;
+    let scale = load(scales[token_id * groups_per_row + g]).cast::<f32>();
+    let bias = load(biases[token_id * groups_per_row + g]).cast::<f32>();
+    let w_real = q.cast::<f32>() * scale + bias;
+    store(out[idx], w_real.cast::<T>());
+}
+
+// MLX-format int4 dequantizing GEMV. Weight is packed uint32 (each
+// uint32 packs 8 4-bit values, low nibble first). For each group of
+// `group_size` weights along the in_dim axis, scales[row, group] and
+// biases[row, group] dequantize via:
+//
+//     w_real = q * scale + bias
+//
+// where q is the unpacked 4-bit value. Fused with the gemv accumulator
+// so we never materialize the full weight matrix.
+//
+// One thread per output row; inner loop walks groups, then unrolls the
+// 8 4-bit lanes per packed uint32.
+//
+// Layouts:
+//   weight  [out_dim, in_dim / 8]  uint32
+//   scales  [out_dim, in_dim / group_size]  T (f16/bf16)
+//   biases  [out_dim, in_dim / group_size]  T (f16/bf16)
+//   input   [in_dim]                       T
+//   output  [out_dim]                      T
+#[kernel]
+fn dequant_gemv_int4<T>(
+    weight: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    input: Tensor<T>,
+    output: Tensor<T>,
+    #[constexpr] in_dim: u32,
+    #[constexpr] group_size: u32,
+) {
+    let row = program_id::<0>();
+    let n_groups = in_dim / group_size;
+    let n_packed_per_row = in_dim / 8u32;
+    let groups_per_pack = 8u32 / group_size;  // 0 if group_size > 8
+    let packs_per_group = group_size / 8u32;
+    let row_pack_off = row * n_packed_per_row;
+    let row_group_off = row * n_groups;
+
+    let mut acc = 0.0f32;
+
+    for g in range(0u32, n_groups, 1u32) {
+        let scale = load(scales[row_group_off + g]).cast::<f32>();
+        let bias = load(biases[row_group_off + g]).cast::<f32>();
+        let g_start = g * group_size;
+
+        for p in range(0u32, packs_per_group, 1u32) {
+            let packed = load(weight[row_pack_off + g_start / 8u32 + p]);
+            let p_off = g_start + p * 8u32;
+
+            let q0 = (packed >> 0u32) & 15u32;
+            let q1 = (packed >> 4u32) & 15u32;
+            let q2 = (packed >> 8u32) & 15u32;
+            let q3 = (packed >> 12u32) & 15u32;
+            let q4 = (packed >> 16u32) & 15u32;
+            let q5 = (packed >> 20u32) & 15u32;
+            let q6 = (packed >> 24u32) & 15u32;
+            let q7 = (packed >> 28u32) & 15u32;
+
+            acc = acc + (q0.cast::<f32>() * scale + bias) * load(input[p_off + 0u32]).cast::<f32>();
+            acc = acc + (q1.cast::<f32>() * scale + bias) * load(input[p_off + 1u32]).cast::<f32>();
+            acc = acc + (q2.cast::<f32>() * scale + bias) * load(input[p_off + 2u32]).cast::<f32>();
+            acc = acc + (q3.cast::<f32>() * scale + bias) * load(input[p_off + 3u32]).cast::<f32>();
+            acc = acc + (q4.cast::<f32>() * scale + bias) * load(input[p_off + 4u32]).cast::<f32>();
+            acc = acc + (q5.cast::<f32>() * scale + bias) * load(input[p_off + 5u32]).cast::<f32>();
+            acc = acc + (q6.cast::<f32>() * scale + bias) * load(input[p_off + 6u32]).cast::<f32>();
+            acc = acc + (q7.cast::<f32>() * scale + bias) * load(input[p_off + 7u32]).cast::<f32>();
+        }
+        // groups_per_pack is set so the divide above is exact (group_size
+        // is always a multiple of 8 for MLX quants — 32 / 64 / 128).
+        let _ = groups_per_pack;
+    }
+
+    store(output[row], acc.cast::<T>());
+}
+
 // ─── Registry ─────────────────────────────────────────────────────────────
 
 /// Build the list of kernels to emit. Each entry is a fully-named IR ready
@@ -337,6 +442,18 @@ fn register_kernels() -> Vec<Kernel> {
     for &dt in &dtypes {
         let mut k = sdpa_decode_naive::kernel_ir_for(dt);
         k.name = format!("sdpa_decode_{}", dtype_suffix(dt));
+        kernels.push(k);
+    }
+
+    // ─── int4 dequant gemv + gather (Elementwise) ────────────────────
+    // T parameterizes scales/biases/input/output dtype; weight is always u32.
+    for &dt in &dtypes {
+        let mut k = dequant_gemv_int4::kernel_ir_for(dt);
+        k.name = format!("dequant_gemv_int4_{}", dtype_suffix(dt));
+        kernels.push(k);
+
+        let mut k = dequant_gather_int4::kernel_ir_for(dt);
+        k.name = format!("dequant_gather_int4_{}", dtype_suffix(dt));
         kernels.push(k);
     }
 
