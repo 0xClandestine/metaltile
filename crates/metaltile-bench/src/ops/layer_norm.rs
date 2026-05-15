@@ -19,10 +19,10 @@ use crate::{
         OpBench,
         OpResult,
         bench_all_dtypes,
+        bench_gbps,
         buffer_typed,
         check_equiv,
         generate_reduction_msl,
-        bench_gbps,
         run_typed_once,
         zeros_typed,
     },
@@ -34,7 +34,8 @@ const SHAPES: &[(usize, usize)] = &[(1_024, 4_096)];
 const BENCH: OpBench = OpBench::new("layer_norm", "GB/s");
 const CHECK_B: usize = 2;
 const CHECK_N: usize = 512;
-const TPG: usize = 256;
+const REF_TPG: usize = 256;
+const MT_TPG: usize = 1024; // more parallelism; threadgroup buf supports 32 simdgroups
 
 /// Layer norm: single-pass stats (reads x once), N_READS=4 write-back.
 ///   mean = sum(x) / n,  variance = E[x²] − E[x]²
@@ -169,7 +170,7 @@ fn bench_layer_norm_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
             &out,
             CHECK_B * CHECK_N,
             [CHECK_B, 1, 1],
-            [TPG, 1, 1],
+            [REF_TPG, 1, 1],
             dt,
         )
     });
@@ -182,7 +183,7 @@ fn bench_layer_norm_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
             &out,
             CHECK_B * CHECK_N,
             [CHECK_B, 1, 1],
-            [TPG, 1, 1],
+            [MT_TPG, 1, 1],
             dt,
         )
     });
@@ -203,11 +204,25 @@ fn bench_layer_norm_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
         let ref_perf = rk.as_ref().and_then(|r| {
             let out = zeros_typed(runner, b * n, dt);
-            bench_gbps(runner, r, &[&x, &w, &bi, &out, &eps_p, &ns_p, &ref_stride, &ref_stride], [b, 1, 1], [256, 1, 1], bytes)
+            bench_gbps(
+                runner,
+                r,
+                &[&x, &w, &bi, &out, &eps_p, &ns_p, &ref_stride, &ref_stride],
+                [b, 1, 1],
+                [REF_TPG, 1, 1],
+                bytes,
+            )
         });
         let mt_perf = mk.as_ref().and_then(|m| {
             let out = zeros_typed(runner, b * n, dt);
-            bench_gbps(runner, m, &[&x, &w, &bi, &out, &eps_p, &ns_p], [b, 1, 1], [256, 1, 1], bytes)
+            bench_gbps(
+                runner,
+                m,
+                &[&x, &w, &bi, &out, &eps_p, &ns_p],
+                [b, 1, 1],
+                [MT_TPG, 1, 1],
+                bytes,
+            )
         });
         let shape = format!("B={b} N={n} {dlabel}");
         results.push(BENCH.result(shape, ref_perf, mt_perf, Some(equiv)));
@@ -217,7 +232,7 @@ fn bench_layer_norm_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
 crate::bench_tests!(msl_fn: layer_norm_msl_for, kernel_name: "mt_layer_norm");
 
-use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+use crate::ops::{FLOAT_DTYPE_STRS, KernelSpec, RefSpec};
 
 pub fn kernel_specs() -> Vec<KernelSpec> {
     vec![KernelSpec {

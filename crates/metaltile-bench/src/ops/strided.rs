@@ -21,9 +21,9 @@ use crate::{
         OpBench,
         OpResult,
         bench_all_dtypes,
+        bench_gbps,
         buffer_typed,
         check_equiv,
-        bench_gbps,
         run_typed_once,
         zeros_typed,
     },
@@ -92,7 +92,7 @@ fn bench_strided_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
         .collect();
 
     // Expected output: row-major CM×CN block.
-    let expected: Vec<f32> = (0..CM * CN).map(|i| (i as f32 + 1.0)).collect();
+    let expected: Vec<f32> = (0..CM * CN).map(|i| i as f32 + 1.0).collect();
 
     let src_buf = buffer_typed(runner, &src_vals, dt);
     // MLX ref uses int64_t strides; MT kernel uses uint strides (slot 1=shape, slot 2=strides)
@@ -162,12 +162,26 @@ fn bench_strided_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
     let ref_perf = rk.as_ref().and_then(|rk| {
         let out = zeros_typed(runner, M * N, dt);
-        bench_gbps(runner, rk, &[&full_src_buf, &out, &full_strides], [N, M, 1], [TPG, TPG, 1], bytes)
+        bench_gbps(
+            runner,
+            rk,
+            &[&full_src_buf, &out, &full_strides],
+            [N, M, 1],
+            [TPG, TPG, 1],
+            bytes,
+        )
     });
 
     let mt_perf = mk.as_ref().and_then(|mk| {
         let out = zeros_typed(runner, M * N, dt);
-        bench_gbps(runner, mk, &[&full_src_buf, &full_src_shape, &full_src_strides, &out, &full_cols], [M, N, 1], [1, 1, 1], bytes)
+        bench_gbps(
+            runner,
+            mk,
+            &[&full_src_buf, &full_src_shape, &full_src_strides, &out, &full_cols],
+            [M, N, 1],
+            [1, 1, 1],
+            bytes,
+        )
     });
 
     let shape = format!("M={M} N={N}+{PAD} {dlabel}");
@@ -176,7 +190,7 @@ fn bench_strided_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
 crate::bench_tests!(msl_fn: strided_copy_msl_for, kernel_name: "mt_strided_copy");
 
-use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+use crate::ops::{FLOAT_DTYPE_STRS, KernelSpec, RefSpec};
 
 pub fn kernel_specs() -> Vec<KernelSpec> {
     vec![KernelSpec {

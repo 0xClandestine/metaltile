@@ -27,7 +27,7 @@ use crate::{
 
 static SRC: &str = include_str!("../metal/arg_reduce.metal");
 
-const BENCH: OpBench = OpBench::new("argmax_f32", "GB/s");
+const BENCH: OpBench = OpBench::new("argmax", "GB/s");
 const N: usize = 4_096 * 256; // ~1 M elements
 const CHECK_N: usize = 4_096;
 const TPG: usize = 256;
@@ -36,7 +36,11 @@ const TPG: usize = 256;
 
 /// Parallel argmax: per-thread mutable best + threadgroup binary-tree reduction.
 ///
-/// N_READS=1: each thread processes one element per outer loop iteration.
+/// N_READS=4: each thread processes 4 elements per outer loop iteration
+/// at positions base, base+lsize, base+2*lsize, base+3*lsize.
+/// This reduces outer iterations 4× (vs N_READS=1) and enables better
+/// instruction-level parallelism with branchless select updates.
+///
 /// `tg_vals[256]` / `tg_idxs[256]`: threadgroup scratch (float; indices stored
 /// as float since IEEE-754 f32 represents integers exactly up to 2^24 ≈ 16 M).
 ///
@@ -53,17 +57,32 @@ pub fn mt_argmax_f32(inp: Tensor<f32>, out: Tensor<f32>, #[constexpr] n: u32) {
     let mut best_idx = lid - lid;
     threadgroup_alloc("tg_vals", 256);
     threadgroup_alloc("tg_idxs", 256);
-    let n_iters = (n + lsize - 1) / lsize;
+    // N_READS=4: 4 elements per thread per iteration, spaced lsize apart.
+    let chunk = lsize * 4u32;
+    let n_iters = (n + chunk - 1u32) / chunk;
     for _r in range(0, n_iters, 1) {
-        let pos = _r * lsize + lid;
-        if pos < n {
-            let v = load(inp[pos]);
-            let better = v > best_val;
-            if better {
-                best_val = v;
-                best_idx = pos;
-            }
-        }
+        let base = _r * chunk + lid;
+        let p0 = base;
+        let p1 = base + lsize;
+        let p2 = base + lsize * 2u32;
+        let p3 = base + lsize * 3u32;
+        let v0 = select(p0 < n, load(inp[p0]), neg_infinity());
+        let v1 = select(p1 < n, load(inp[p1]), neg_infinity());
+        let v2 = select(p2 < n, load(inp[p2]), neg_infinity());
+        let v3 = select(p3 < n, load(inp[p3]), neg_infinity());
+        // Branchless update: strict > keeps smallest index on ties (processes in order).
+        let b0 = v0 > best_val;
+        best_val = select(b0, v0, best_val);
+        best_idx = select(b0, p0, best_idx);
+        let b1 = v1 > best_val;
+        best_val = select(b1, v1, best_val);
+        best_idx = select(b1, p1, best_idx);
+        let b2 = v2 > best_val;
+        best_val = select(b2, v2, best_val);
+        best_idx = select(b2, p2, best_idx);
+        let b3 = v3 > best_val;
+        best_val = select(b3, v3, best_val);
+        best_idx = select(b3, p3, best_idx);
     }
     threadgroup_store("tg_vals", lid, best_val);
     threadgroup_store("tg_idxs", lid, best_idx);
@@ -266,7 +285,14 @@ pub fn bench_arg_reduce(runner: &GpuRunner) -> Vec<OpResult> {
     let ref_out = runner.buffer_zeros(4);
 
     let ref_perf = rk.as_ref().and_then(|rk| {
-        bench_gbps(runner, rk, &[&inp_buf, &ref_out, &dummy, &dummy, &dummy, &ndim, &ax_stride, &ax_size], [TPG, 1, 1], [TPG, 1, 1], bytes)
+        bench_gbps(
+            runner,
+            rk,
+            &[&inp_buf, &ref_out, &dummy, &dummy, &dummy, &ndim, &ax_stride, &ax_size],
+            [TPG, 1, 1],
+            [TPG, 1, 1],
+            bytes,
+        )
     });
 
     let equiv = mk.as_ref().map(|mk| {
@@ -317,7 +343,7 @@ mod tests {
     }
 }
 
-use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+use crate::ops::{KernelSpec, RefSpec};
 
 pub fn kernel_specs() -> Vec<KernelSpec> {
     vec![

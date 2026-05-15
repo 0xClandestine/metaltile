@@ -21,10 +21,10 @@ use crate::{
         OpBench,
         OpResult,
         bench_all_dtypes,
+        bench_gbps,
         buffer_typed,
         check_equiv,
         generate_reduction_msl,
-        bench_gbps,
         run_typed_once,
         zeros_typed,
     },
@@ -170,7 +170,7 @@ fn bench_logsumexp_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
 crate::bench_tests!(msl_fn: logsumexp_msl_for, kernel_name: "mt_logsumexp");
 
-use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+use crate::ops::{FLOAT_DTYPE_STRS, KernelSpec, RefSpec};
 
 pub fn kernel_specs() -> Vec<KernelSpec> {
     vec![KernelSpec {

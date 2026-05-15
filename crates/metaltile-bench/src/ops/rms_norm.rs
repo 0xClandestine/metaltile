@@ -19,10 +19,10 @@ use crate::{
         OpBench,
         OpResult,
         bench_all_dtypes,
+        bench_gbps,
         buffer_typed,
         check_equiv,
         generate_reduction_msl,
-        bench_gbps,
         run_typed_once,
         zeros_typed,
     },
@@ -156,7 +156,14 @@ fn bench_rms_norm_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
         let ref_perf = rk.as_ref().and_then(|r| {
             let out = zeros_typed(runner, b * n, dt);
-            bench_gbps(runner, r, &[&xp, &wp, &out, &eps_p, &ns_p, &ref_w_stride], [b, 1, 1], [1024, 1, 1], bytes)
+            bench_gbps(
+                runner,
+                r,
+                &[&xp, &wp, &out, &eps_p, &ns_p, &ref_w_stride],
+                [b, 1, 1],
+                [1024, 1, 1],
+                bytes,
+            )
         });
         let mt_perf = mk.as_ref().and_then(|m| {
             let out = zeros_typed(runner, b * n, dt);
@@ -170,7 +177,7 @@ fn bench_rms_norm_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
 crate::bench_tests!(msl_fn: rms_norm_msl_for, kernel_name: "mt_rms_norm");
 
-use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+use crate::ops::{FLOAT_DTYPE_STRS, KernelSpec, RefSpec};
 
 pub fn kernel_specs() -> Vec<KernelSpec> {
     vec![KernelSpec {

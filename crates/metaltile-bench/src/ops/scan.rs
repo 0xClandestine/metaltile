@@ -27,7 +27,7 @@ use crate::{
 
 static SRC: &str = include_str!("../metal/scan.metal");
 
-const BENCH: OpBench = OpBench::new("scan_f32", "GB/s");
+const BENCH: OpBench = OpBench::new("scan", "GB/s");
 const SHAPES: &[(usize, usize)] = &[(1_024, 4_096)]; // (rows, cols)
 const CHECK_ROWS: usize = 4;
 const CHECK_N: usize = 256;
@@ -35,39 +35,59 @@ const TPG: usize = 256;
 
 // ── Kernel ────────────────────────────────────────────────────────────────────
 
-/// Parallel inclusive prefix-sum over a row using two-phase SIMD scan.
+/// Parallel inclusive prefix-sum over a row using two-phase SIMD scan, N_READS=4.
 ///
-/// `sgs[9]`: slots 0..n_simd-1 hold per-warp exclusive prefixes after phase 3;
+/// Each thread processes 4 consecutive elements per outer iteration.
+/// `sgs[9]`: slots 0..n_simd-1 hold per-warp exclusive prefixes;
 ///            slot n_simd holds the running prefix across outer iterations.
 ///
-/// Grid: [1, rows, 1] × [256, 1, 1]  (`program_id::<1>()` == row index)
+/// Algorithm per iteration:
+///   1. Load 4 values; compute per-thread inclusive prefix sum (s1,s2,s3).
+///   2. SIMD exclusive scan on thread totals (s3).
+///   3. barrier + lane-31 writes warp total to sgs[sg].
+///   4. barrier + warp-0 exclusive-scans warp totals in sgs.
+///   5. Combine: out[i] = running_prefix + warp_excl + thread_excl + per_thread_cumsum[i].
+///   6. barrier + last thread updates running prefix + barrier.
+///
+/// Total barriers: 4 × ceil(N/1024) + 1 init  (vs 4 × ceil(N/256) + 1 for N_READS=1).
+/// For N=4096, lsize=256: 4×4+1=17 barriers  (vs 4×16+1=65 for N_READS=1).
+///
+/// Grid: [1, rows, 1] × [256, 1, 1]
 #[kernel]
 pub fn mt_scan_f32(inp: Tensor<f32>, out: Tensor<f32>, #[constexpr] n: u32) {
     let row = program_id::<1>();
     let lid = tid;
     let lane = simd_lane;
     let sg = simd_id;
-    let ns = n_simd; // = lsize / 32
+    let ns = n_simd; // = lsize / 32 = 8 for lsize=256
     let row_off = row * n;
-    // 8 warp slots + 1 running-prefix slot (supports lsize=256, n_simd=8)
+    // 8 warp slots (indices 0..7) + 1 running-prefix slot (index ns=8).
     threadgroup_alloc("sgs", 9);
     if lid == 0 {
         threadgroup_store("sgs", ns, 0);
     }
     threadgroup_barrier();
-    // Read back 0 as float — used as the zero-pad value for OOB threads.
+    // Read back 0 as float — used as the zero-pad for OOB elements.
     let zero_f = threadgroup_load("sgs", ns);
-    let n_iters = (n + lsize - 1) / lsize;
+    // N_READS=4: process 4 elements per thread per outer iteration.
+    let chunk = lsize * 4u32;
+    let n_iters = (n + chunk - 1u32) / chunk;
     for _r in range(0, n_iters, 1) {
-        let pos = _r * lsize + lid;
-        // OOB threads contribute 0 so they don't inflate the prefix.
-        let val = select(pos < n, load(inp[row_off + pos]), zero_f);
-        // Phase 1: SIMD exclusive scan; inclusive = exclusive + val.
-        let excl = simd_scan_exclusive(val);
-        let val_incl = excl + val;
-        // Phase 2: lane 31 holds the warp's inclusive sum (== warp total).
+        let base = _r * chunk + lid * 4u32;
+        // Load 4 consecutive elements (OOB → 0 to avoid affecting the prefix).
+        let v0 = select(base < n, load(inp[row_off + base]), zero_f);
+        let v1 = select(base + 1u32 < n, load(inp[row_off + base + 1u32]), zero_f);
+        let v2 = select(base + 2u32 < n, load(inp[row_off + base + 2u32]), zero_f);
+        let v3 = select(base + 3u32 < n, load(inp[row_off + base + 3u32]), zero_f);
+        // Per-thread inclusive prefix: s1=v0+v1, s2=v0+v1+v2, s3=total.
+        let s1 = v0 + v1;
+        let s2 = s1 + v2;
+        let s3 = s2 + v3;
+        // Phase 1: SIMD exclusive scan on per-thread totals.
+        let thread_excl = simd_scan_exclusive(s3);
+        // Phase 2: lane 31 writes the warp's inclusive total to sgs[sg].
         if lane == 31 {
-            threadgroup_store("sgs", sg, val_incl);
+            threadgroup_store("sgs", sg, thread_excl + s3);
         }
         threadgroup_barrier();
         // Phase 3: first warp exclusive-scans the n_simd warp totals.
@@ -79,18 +99,28 @@ pub fn mt_scan_f32(inp: Tensor<f32>, out: Tensor<f32>, #[constexpr] n: u32) {
             }
         }
         threadgroup_barrier();
-        // Phase 4: combine.
+        // Phase 4: combine and write 4 outputs.
+        // base_prefix = running_prefix + warp_excl + thread_excl (exclusive prefix for this thread).
         let cur_prefix = threadgroup_load("sgs", ns);
         let warp_excl = threadgroup_load("sgs", sg);
-        let out_val = cur_prefix + warp_excl + val_incl;
-        if pos < n {
-            store(out[row_off + pos], out_val);
+        let base_prefix = cur_prefix + warp_excl + thread_excl;
+        // Each element's inclusive sum = base_prefix + per-thread cumsum up to that element.
+        if base < n {
+            store(out[row_off + base], base_prefix + v0);
+        }
+        if base + 1u32 < n {
+            store(out[row_off + base + 1u32], base_prefix + s1);
+        }
+        if base + 2u32 < n {
+            store(out[row_off + base + 2u32], base_prefix + s2);
+        }
+        if base + 3u32 < n {
+            store(out[row_off + base + 3u32], base_prefix + s3);
         }
         // Phase 5: last thread updates running prefix for next iteration.
         threadgroup_barrier();
-        let last = lsize - 1;
-        if lid == last {
-            threadgroup_store("sgs", ns, out_val);
+        if lid == lsize - 1 {
+            threadgroup_store("sgs", ns, base_prefix + s3);
         }
         threadgroup_barrier();
     }
@@ -196,7 +226,7 @@ mod tests {
     }
 }
 
-use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+use crate::ops::{KernelSpec, RefSpec};
 
 pub fn kernel_specs() -> Vec<KernelSpec> {
     vec![

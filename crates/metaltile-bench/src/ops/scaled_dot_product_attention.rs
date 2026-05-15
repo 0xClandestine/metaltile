@@ -32,8 +32,8 @@ use crate::{
         EquivTolerance,
         OpBench,
         OpResult,
-        check_equiv_with,
         bench_gbps,
+        check_equiv_with,
         dtype_tol,
     },
     runner::{CompiledKernel, GpuBuffer, GpuRunner},
@@ -41,8 +41,8 @@ use crate::{
 
 static SRC: &str = include_str!("../metal/scaled_dot_product_attention.metal");
 
-const BENCH: OpBench = OpBench::new("sdpa_f32", "GB/s");
-const BENCH_F16: OpBench = OpBench::new("sdpa_f16", "GB/s");
+const BENCH: OpBench = OpBench::new("sdpa", "GB/s");
+const BENCH_F16: OpBench = OpBench::new("sdpa", "GB/s");
 // (H, N_kv, D)  —  D must be 128 (4 elements/lane × 32 lanes)
 const SHAPES: &[(usize, usize, usize)] = &[(8, 2048, 128), (32, 4096, 128)];
 const MT_TPG: usize = 1024;
@@ -278,12 +278,26 @@ pub fn bench_sdpa_vector(runner: &GpuRunner) -> Vec<OpResult> {
 
         let ref_perf = rk.as_ref().and_then(|rk| {
             let out_b = runner.buffer_zeros(h * d * 4);
-            bench_gbps(runner, rk, &[&q_buf, &k_buf, &v_buf, &out_b, &gqa, &n_i32, &khs, &kss, &vhs, &vss, &sc_buf], [h, 1, 1], [1024, 1, 1], bytes)
+            bench_gbps(
+                runner,
+                rk,
+                &[&q_buf, &k_buf, &v_buf, &out_b, &gqa, &n_i32, &khs, &kss, &vhs, &vss, &sc_buf],
+                [h, 1, 1],
+                [1024, 1, 1],
+                bytes,
+            )
         });
 
         let mt_perf = mk.as_ref().and_then(|mk| {
             let out_b = runner.buffer_zeros(h * d * 4);
-            bench_gbps(runner, mk, &[&q_buf, &k_buf, &v_buf, &out_b, &n_buf, &sc_buf], [h, 1, 1], [MT_TPG, 1, 1], bytes)
+            bench_gbps(
+                runner,
+                mk,
+                &[&q_buf, &k_buf, &v_buf, &out_b, &n_buf, &sc_buf],
+                [h, 1, 1],
+                [MT_TPG, 1, 1],
+                bytes,
+            )
         });
 
         let shape = format!("H={h} N={n} D={d} f32");
@@ -373,12 +387,26 @@ pub fn bench_sdpa_vector_f16(runner: &GpuRunner) -> Vec<OpResult> {
 
         let ref_perf = rk.as_ref().and_then(|rk| {
             let out_b = runner.buffer_zeros(h * d * 2);
-            bench_gbps(runner, rk, &[&q_buf, &k_buf, &v_buf, &out_b, &gqa, &n_i32, &khs, &kss, &vhs, &vss, &sc_buf], [h, 1, 1], [1024, 1, 1], bytes)
+            bench_gbps(
+                runner,
+                rk,
+                &[&q_buf, &k_buf, &v_buf, &out_b, &gqa, &n_i32, &khs, &kss, &vhs, &vss, &sc_buf],
+                [h, 1, 1],
+                [1024, 1, 1],
+                bytes,
+            )
         });
 
         let mt_perf = mk.as_ref().and_then(|mk| {
             let out_b = runner.buffer_zeros(h * d * 2);
-            bench_gbps(runner, mk, &[&q_buf, &k_buf, &v_buf, &out_b, &n_buf, &sc_buf], [h, 1, 1], [MT_TPG, 1, 1], bytes)
+            bench_gbps(
+                runner,
+                mk,
+                &[&q_buf, &k_buf, &v_buf, &out_b, &n_buf, &sc_buf],
+                [h, 1, 1],
+                [MT_TPG, 1, 1],
+                bytes,
+            )
         });
 
         let shape = format!("H={h} N={n} D={d} f16");
@@ -478,7 +506,7 @@ mod tests {
     }
 }
 
-use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+use crate::ops::{KernelSpec, RefSpec};
 
 pub fn kernel_specs() -> Vec<KernelSpec> {
     vec![

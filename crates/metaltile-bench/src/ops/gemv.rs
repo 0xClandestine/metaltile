@@ -18,11 +18,11 @@ use crate::{
         OpBench,
         OpResult,
         bench_all_dtypes,
+        bench_gbps,
         buffer_typed,
         check_equiv,
         generate_reduction_msl,
         quantize_roundtrip,
-        bench_gbps,
         run_typed_once,
         zeros_typed,
     },
@@ -125,18 +125,42 @@ fn bench_gemv_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
             let bias_stride = runner.buffer_i32(1i32);
             let ref_tgs = [m / (REF_BM * REF_TM), 1, 1];
             let ref_tpg = [REF_BM * REF_BN * 32, 1, 1];
-            bench_gbps(runner, rk, &[
-                &mat_buf, &vec_buf, &bias_r, &out_r,
-                &in_vec_size, &out_vec_size, &mat_ld,
-                &alpha, &beta, &batch_ndim,
-                &zero_buf, &zero_buf, &zero_buf, &zero_buf,
-                &bias_stride,
-            ], ref_tgs, ref_tpg, bytes)
+            bench_gbps(
+                runner,
+                rk,
+                &[
+                    &mat_buf,
+                    &vec_buf,
+                    &bias_r,
+                    &out_r,
+                    &in_vec_size,
+                    &out_vec_size,
+                    &mat_ld,
+                    &alpha,
+                    &beta,
+                    &batch_ndim,
+                    &zero_buf,
+                    &zero_buf,
+                    &zero_buf,
+                    &zero_buf,
+                    &bias_stride,
+                ],
+                ref_tgs,
+                ref_tpg,
+                bytes,
+            )
         });
 
         let mt_perf = mk.as_ref().and_then(|mk| {
             let out_buf = zeros_typed(runner, m, dt);
-            bench_gbps(runner, mk, &[&mat_buf, &vec_buf, &out_buf, &k_buf], [m, 1, 1], [TPG, 1, 1], bytes)
+            bench_gbps(
+                runner,
+                mk,
+                &[&mat_buf, &vec_buf, &out_buf, &k_buf],
+                [m, 1, 1],
+                [TPG, 1, 1],
+                bytes,
+            )
         });
 
         let shape = format!("M={m} K={k} {dlabel}");
@@ -147,16 +171,14 @@ fn bench_gemv_for(runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
 crate::bench_tests!(msl_fn: gemv_msl_for, kernel_name: "mt_gemv");
 
-use crate::ops::{KernelSpec, RefSpec, FLOAT_DTYPE_STRS};
+use crate::ops::{FLOAT_DTYPE_STRS, KernelSpec, RefSpec};
 
 pub fn kernel_specs() -> Vec<KernelSpec> {
     vec![KernelSpec {
         op: "gemv",
         mt_kernel: "mt_gemv".into(),
         metal_file: "gemv.metal",
-        ref_spec: RefSpec::Format(
-            "gemv_{tn}_bm4_bn1_sm1_sn32_tm4_tn4_nc0_axpby0",
-        ),
+        ref_spec: RefSpec::Format("gemv_{tn}_bm4_bn1_sm1_sn32_tm4_tn4_nc0_axpby0"),
         dtypes: FLOAT_DTYPE_STRS,
     }]
 }
