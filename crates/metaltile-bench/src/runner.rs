@@ -381,12 +381,15 @@ impl GpuRunner {
         BenchStats::from_samples(self.measure(kernel, buffers, tgs, tpg, warmup, iters))
     }
 
-    /// Returns true if the device supports simdgroup matrix operations (M3+ / Apple GPU family 9+).
+    /// Returns true if the device supports simdgroup matrix operations (M2+ / Apple GPU family 8+).
     pub fn supports_simd_matrix(&self) -> bool {
         #[cfg(target_os = "macos")]
         {
             use objc2_metal::{MTLDevice, MTLGPUFamily};
-            return self.inner.device.supportsFamily(MTLGPUFamily::Apple9);
+            let dev = &self.inner.device;
+            return dev.supportsFamily(MTLGPUFamily::Apple9)
+                || dev.supportsFamily(MTLGPUFamily::Apple8)
+                || dev.supportsFamily(MTLGPUFamily::Apple7);
         }
         #[cfg(not(target_os = "macos"))]
         false

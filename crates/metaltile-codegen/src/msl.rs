@@ -1777,6 +1777,7 @@ impl MslGenerator {
         wl!(out, "{pad}    }}");
         wl!(out);
         wl!(out, "{pad}    // MMA on current tile.");
+        wl!(out, "{pad}    #pragma clang loop unroll(full)");
         wl!(out, "{pad}    for (uint kk = 0; kk < {TK}; kk += 8) {{");
 
         // Load all SGN b_frags once per kk step (named variables so compiler keeps them in regs).
@@ -1811,11 +1812,9 @@ impl MslGenerator {
         wl!(out, "{pad}}}");
         wl!(out);
 
-        // Write fp32 accumulators via per-simdgroup scratch to global half.
-        // simdgroup_store with stride 8 places lane l's elements at flat positions l and l+32
-        // in the 64-element buffer.  Each lane reads its own 2 positions directly — no loop.
-        wl!(out, "{pad}threadgroup float sg_scratch[4 * 64];");
-        wl!(out, "{pad}const uint sg_idx = sg_y * {SG_COLS} + sg_x;");
+        // Write fp32 accumulators directly to global half.
+        // M1 Max simdgroup_float8x8 layout: lane l's elements are at
+        //   row = ((l/2)%4) + (l/16)*4,  cols = (l%2)*2 + ((l/8)%2)*4  and  +1
         wl!(out, "{pad}const uint row_base = tgid.y * {TM}, col_base = tgid.x * {TN};");
         let sgm8 = SGM * 8; // simdgroup row span = 32
         let sgn8 = SGN * 8; // simdgroup col span = 32
@@ -1824,20 +1823,21 @@ impl MslGenerator {
                 let idx = fi * SGN + fj;
                 let fi8 = fi * 8;
                 let fj8 = fj * 8;
+                wl!(out, "{pad}{{");
                 wl!(
                     out,
-                    "{pad}simdgroup_store(c{idx}, sg_scratch + sg_idx*64, 8, ulong2(0,0), false);"
+                    "{pad}    thread float2& c{idx}_e = (thread float2&)c{idx}.thread_elements();"
                 );
-                wl!(out, "{pad}{{");
-                wl!(out, "{pad}    float s0 = sg_scratch[sg_idx*64 + simd_lane];");
-                wl!(out, "{pad}    float s1 = sg_scratch[sg_idx*64 + simd_lane + 32];");
-                // simdgroup origin within tile + fragment offset + per-lane offset
-                wl!(out, "{pad}    uint gr0 = row_base + sg_y*{sgm8} + {fi8} + simd_lane/8;");
-                wl!(out, "{pad}    uint gc0 = col_base + sg_x*{sgn8} + {fj8} + simd_lane%8;");
-                wl!(out, "{pad}    uint gr1 = row_base + sg_y*{sgm8} + {fi8} + (simd_lane+32)/8;");
-                wl!(out, "{pad}    uint gc1 = col_base + sg_x*{sgn8} + {fj8} + (simd_lane+32)%8;");
-                wl!(out, "{pad}    if (gr0 < {m} && gc0 < {n}) {c}[gr0*{n}+gc0] = half(s0);");
-                wl!(out, "{pad}    if (gr1 < {m} && gc1 < {n}) {c}[gr1*{n}+gc1] = half(s1);");
+                wl!(out, "{pad}    uint pair = simd_lane >> 1;");
+                wl!(out, "{pad}    uint row_in_frag = (pair & 3u) + ((simd_lane >> 4) << 2);");
+                wl!(out, "{pad}    uint col0 = ((simd_lane & 1u) << 1) + (((simd_lane >> 3) & 1u) << 2);");
+                wl!(out, "{pad}    uint gr = row_base + sg_y*{sgm8} + {fi8} + row_in_frag;");
+                wl!(out, "{pad}    uint gc = col_base + sg_x*{sgn8} + {fj8} + col0;");
+                wl!(out, "{pad}    if (gr < {m} && gc + 1 < {n}) {{");
+                wl!(out, "{pad}        *((device half2*)({c} + gr*{n} + gc)) = half2(half(c{idx}_e.x), half(c{idx}_e.y));");
+                wl!(out, "{pad}    }} else if (gr < {m} && gc < {n}) {{");
+                wl!(out, "{pad}        {c}[gr*{n}+gc] = half(c{idx}_e.x);");
+                wl!(out, "{pad}    }}");
                 wl!(out, "{pad}}}");
             }
         }
