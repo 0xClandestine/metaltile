@@ -48,10 +48,6 @@ name = "bench_regress"
 path = "src/bench_regress.rs"
 
 [[bin]]
-name = "gpu_bench"
-path = "src/gpu_bench.rs"
-
-[[bin]]
 name = "dump_msl"
 path = "src/dump_msl.rs"
 
