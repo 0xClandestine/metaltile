@@ -2,7 +2,7 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static SRC: &str = include_str!("../metal/softmax.metal");
+static SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/softmax.metal"));
 
 #[bench_kernel(op="softmax", subop="softmax", class=RowNorm,
                b=1024, n=4096, tpg=256, reads=2, tol=1e-4,

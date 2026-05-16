@@ -2,7 +2,7 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static BINARY_SRC: &str = include_str!("../metal/binary.metal");
+static BINARY_SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/binary.metal"));
 
 #[bench_kernel(op="binary", subop="add", class=Binary,
                input_a=Unit, input_b=Half, tol=1e-6,

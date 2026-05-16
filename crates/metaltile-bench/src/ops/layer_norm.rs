@@ -2,7 +2,7 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static SRC: &str = include_str!("../metal/layer_norm.metal");
+static SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/layer_norm.metal"));
 
 #[bench_kernel(op="layer_norm", subop="layer_norm", class=RowNorm,
                b=1024, n=4096, tpg=1024, reads=2,

@@ -2,7 +2,7 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static SRC: &str = include_str!("../metal/random.metal");
+static SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/random.metal"));
 
 #[bench_kernel(op="random", subop="random_hash", class=Random,
                n=1048576, tpg=1024, tol=0.0,

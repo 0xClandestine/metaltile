@@ -11,7 +11,7 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static SRC: &str = include_str!("../metal/ternary.metal");
+static SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/ternary.metal"));
 
 #[bench_kernel(op="select", subop="select", class=Select,
                tol=1e-4, mlx_src=SRC, mlx="v_Select{tn}", metal_file="ternary.metal")]

@@ -2,7 +2,7 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static SRC: &str = include_str!("../metal/rope.metal");
+static SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/rope.metal"));
 
 #[bench_kernel(op="rope", subop="rope", class=Rope,
                b=1, h=32, l=512, d=128, n_per_group=4, tol=0.01,

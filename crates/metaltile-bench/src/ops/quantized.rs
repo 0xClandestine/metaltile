@@ -2,7 +2,7 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static SRC: &str = include_str!("../metal/quantized.metal");
+static SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/quantized.metal"));
 static QUANTIZED_SHAPES: &[(usize, usize)] = &[(4096, 4096)];
 
 #[bench_kernel(op="quantized", subop="qmv", class=QuantizedMatVec,

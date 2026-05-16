@@ -2,7 +2,7 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static SRC: &str = include_str!("../metal/arg_reduce.metal");
+static SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/arg_reduce.metal"));
 
 #[bench_kernel(op="arg_reduce", subop="argmax", class=ArgReduce,
                n=1048576, check_n=4096, tpg=256, tol=0.5,

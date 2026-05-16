@@ -2,7 +2,8 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static SRC: &str = include_str!("../metal/scaled_dot_product_attention.metal");
+static SRC: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/metal/scaled_dot_product_attention.metal"));
 static ATTENTION_SHAPES: &[(usize, usize, usize)] = &[(8, 2048, 128), (32, 4096, 128)];
 
 #[bench_kernel(op="sdpa", subop="sdpa", class=Attention,

@@ -2,7 +2,7 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static SRC: &str = include_str!("../metal/sort.metal");
+static SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/sort.metal"));
 
 #[bench_kernel(op="sort", subop="sort", class=Sort,
                b=1024, n=1024, tpg=256, tol=0.0,

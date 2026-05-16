@@ -2,7 +2,7 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static UNARY_SRC: &str = include_str!("../metal/unary.metal");
+static UNARY_SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/unary.metal"));
 
 #[bench_kernel(op="unary", subop="exp", class=Unary,
                input=Signed, tol=1e-4, mlx_src=UNARY_SRC, mlx="v_Exp{tn}{tn}", metal_file="unary.metal")]

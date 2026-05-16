@@ -2,7 +2,7 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static SRC: &str = include_str!("../metal/gemv.metal");
+static SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/gemv.metal"));
 
 #[bench_kernel(op="gemv", subop="gemv", class=MatVec,
                b=4096, n=4096, tpg=256, tol=1e-2,

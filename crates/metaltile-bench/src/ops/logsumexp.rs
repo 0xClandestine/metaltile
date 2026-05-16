@@ -2,7 +2,7 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static SRC: &str = include_str!("../metal/logsumexp.metal");
+static SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/logsumexp.metal"));
 
 #[bench_kernel(op="logsumexp", subop="logsumexp", class=RowNorm,
                b=1024, n=4096, tpg=256, reads=1, out_elements=1, tol=1e-4,

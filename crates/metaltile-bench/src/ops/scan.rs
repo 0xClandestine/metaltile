@@ -2,7 +2,7 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static SRC: &str = include_str!("../metal/scan.metal");
+static SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/scan.metal"));
 static SCAN_SHAPES: &[(usize, usize)] = &[(1_024, 4_096)];
 
 #[bench_kernel(op="scan", subop="scan", class=Scan,

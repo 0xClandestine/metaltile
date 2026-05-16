@@ -2,7 +2,7 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static SRC: &str = include_str!("../metal/reduce.metal");
+static SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/reduce.metal"));
 
 #[bench_kernel(op="all_reduce", subop="sum", class=AllReduce,
                tol=128.0, mlx_src=SRC, mlx="all_reduce_sum{tn}", metal_file="reduce.metal")]

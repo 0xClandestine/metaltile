@@ -10,7 +10,7 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static SRC: &str = include_str!("../metal/arange.metal");
+static SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/arange.metal"));
 
 #[bench_kernel(op="arange", subop="arange", class=Arange,
                start=0.0, step=1.0, tol=1.0,
