@@ -256,15 +256,3 @@ mod tests {
         }
     }
 }
-
-use crate::ops::{KernelSpec, RefSpec};
-
-pub fn kernel_specs() -> Vec<KernelSpec> {
-    vec![KernelSpec {
-        op: "steel/gemm/steel_gemm_segmented",
-        mt_kernel: "mt_matmul".into(),
-        metal_file: "steel/gemm/steel_gemm_segmented.metal",
-        ref_spec: RefSpec::Literal(FN),
-        dtypes: &[],
-    }]
-}

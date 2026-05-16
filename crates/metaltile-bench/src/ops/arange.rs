@@ -10,11 +10,8 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/arange.metal"));
-
 #[bench_kernel(op="arange", subop="arange", class=Arange,
-               start=0.0, step=1.0, tol=1.0,
-               mlx_src=SRC, mlx="arange{tn}", metal_file="arange.metal")]
+               start=0.0, step=1.0, tol=1.0, mlx="arange{tn}", metal_file="arange.metal")]
 #[kernel]
 pub fn mt_arange<T>(out: Tensor<T>, start: Tensor<T>, step: Tensor<T>, #[constexpr] n: u32) {
     let idx = program_id(0);

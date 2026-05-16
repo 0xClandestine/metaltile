@@ -2,13 +2,10 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/rms_norm.metal"));
-
 #[bench_kernel(op="rms_norm", subop="rms_norm", class=RowNorm,
                b=1024, n=4096, tpg=1024, reads=2,
                pre_weight=1.0, post_eps=1e-5,
-               tol=1e-4,
-               mlx_src=SRC, mlx="rms{tn}",
+               tol=1e-4, mlx="rms{tn}",
                metal_file="rms_norm.metal")]
 #[kernel]
 pub fn mt_rms_norm<T>(

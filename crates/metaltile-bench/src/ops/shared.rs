@@ -826,61 +826,6 @@ macro_rules! bench_tests {
     };
 }
 
-// ── Kernel coverage types ─────────────────────────────────────────────────────
-
-/// How a MetalTile bench maps to an MLX reference Metal kernel.
-#[derive(Debug, Clone)]
-pub enum RefSpec {
-    /// A fixed kernel name with no dtype substitution.
-    Literal(&'static str),
-    /// Pattern with `{tn}` substituted for the MLX dtype token
-    /// (`float32`, `float16`, `bfloat16`).
-    Format(&'static str),
-    /// MLX unary pattern: `v_{Op}{tn}{tn}`.
-    UnaryV(&'static str),
-    /// No MLX reference kernel; string contains the reason.
-    None(&'static str),
-}
-
-impl RefSpec {
-    /// Resolve to a concrete kernel name for the given short dtype
-    /// (`"f32"`, `"f16"`, `"bf16"`). Returns `None` for `RefSpec::None`.
-    pub fn resolve(&self, dtype: &str) -> Option<String> {
-        let tn = match dtype {
-            "f32" => "float32",
-            "f16" => "float16",
-            "bf16" => "bfloat16",
-            other => other,
-        };
-        match self {
-            RefSpec::Literal(s) => Some(s.to_string()),
-            RefSpec::Format(tpl) => Some(tpl.replace("{tn}", tn)),
-            RefSpec::UnaryV(op) => Some(format!("v_{op}{tn}{tn}")),
-            RefSpec::None(_) => None,
-        }
-    }
-
-    /// Returns the reason string if this is `RefSpec::None`, otherwise `None`.
-    pub fn reason(&self) -> Option<&'static str> {
-        if let RefSpec::None(r) = self { Some(r) } else { None }
-    }
-}
-
-/// Single entry in the MT vs MLX reference coverage table.
-pub struct KernelSpec {
-    /// Logical op group (e.g. `"unary"`, `"binary"`, `"steel/gemm/steel_gemm_fused"`).
-    pub op: &'static str,
-    /// MetalTile kernel function name (e.g. `"mt_exp"`), or `"—"` for NYI.
-    pub mt_kernel: String,
-    /// Metal source file path relative to `src/metal/`.
-    pub metal_file: &'static str,
-    /// How to find the MLX reference kernel for this entry.
-    pub ref_spec: RefSpec,
-    /// Short dtype names this entry covers (`"f32"`, `"f16"`, `"bf16"`).
-    /// Empty slice means dtype-agnostic (single table row).
-    pub dtypes: &'static [&'static str],
-}
-
 #[cfg(test)]
 mod tests {
     use super::{CorrectnessStatus, EquivResult, OpBench, OpResult, check_equiv, validate_results};

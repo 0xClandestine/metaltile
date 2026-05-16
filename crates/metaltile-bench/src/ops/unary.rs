@@ -2,10 +2,8 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static UNARY_SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/unary.metal"));
-
 #[bench_kernel(op="unary", subop="exp", class=Unary,
-               input=Signed, tol=1e-4, mlx_src=UNARY_SRC, mlx="v_Exp{tn}{tn}", metal_file="unary.metal")]
+               input=Signed, tol=1e-4, mlx="v_Exp{tn}{tn}", metal_file="unary.metal")]
 #[kernel]
 pub fn mt_exp<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
@@ -13,7 +11,7 @@ pub fn mt_exp<T>(a: Tensor<T>, out: Tensor<T>) {
 }
 
 #[bench_kernel(op="unary", subop="log", class=Unary,
-               input=Positive, tol=1e-4, mlx_src=UNARY_SRC, mlx="v_Log{tn}{tn}", metal_file="unary.metal")]
+               input=Positive, tol=1e-4, mlx="v_Log{tn}{tn}", metal_file="unary.metal")]
 #[kernel]
 pub fn mt_log<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
@@ -21,7 +19,7 @@ pub fn mt_log<T>(a: Tensor<T>, out: Tensor<T>) {
 }
 
 #[bench_kernel(op="unary", subop="sqrt", class=Unary,
-               input=Positive, tol=1e-4, mlx_src=UNARY_SRC, mlx="v_Sqrt{tn}{tn}", metal_file="unary.metal")]
+               input=Positive, tol=1e-4, mlx="v_Sqrt{tn}{tn}", metal_file="unary.metal")]
 #[kernel]
 pub fn mt_sqrt<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
@@ -29,7 +27,7 @@ pub fn mt_sqrt<T>(a: Tensor<T>, out: Tensor<T>) {
 }
 
 #[bench_kernel(op="unary", subop="rsqrt", class=Unary,
-               input=Positive, tol=1e-4, mlx_src=UNARY_SRC, mlx="v_Rsqrt{tn}{tn}", metal_file="unary.metal")]
+               input=Positive, tol=1e-4, mlx="v_Rsqrt{tn}{tn}", metal_file="unary.metal")]
 #[kernel]
 pub fn mt_rsqrt<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
@@ -37,7 +35,7 @@ pub fn mt_rsqrt<T>(a: Tensor<T>, out: Tensor<T>) {
 }
 
 #[bench_kernel(op="unary", subop="abs", class=Unary,
-               input=Signed, tol=1e-6, mlx_src=UNARY_SRC, mlx="v_Abs{tn}{tn}", metal_file="unary.metal")]
+               input=Signed, tol=1e-6, mlx="v_Abs{tn}{tn}", metal_file="unary.metal")]
 #[kernel]
 pub fn mt_abs<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
@@ -66,7 +64,7 @@ pub fn mt_relu<T>(a: Tensor<T>, out: Tensor<T>) {
 }
 
 #[bench_kernel(op="unary", subop="cos", class=Unary,
-               input=Signed, tol=1e-4, mlx_src=UNARY_SRC, mlx="v_Cos{tn}{tn}", metal_file="unary.metal")]
+               input=Signed, tol=1e-4, mlx="v_Cos{tn}{tn}", metal_file="unary.metal")]
 #[kernel]
 pub fn mt_cos<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
@@ -74,7 +72,7 @@ pub fn mt_cos<T>(a: Tensor<T>, out: Tensor<T>) {
 }
 
 #[bench_kernel(op="unary", subop="sin", class=Unary,
-               input=Signed, tol=1e-4, mlx_src=UNARY_SRC, mlx="v_Sin{tn}{tn}", metal_file="unary.metal")]
+               input=Signed, tol=1e-4, mlx="v_Sin{tn}{tn}", metal_file="unary.metal")]
 #[kernel]
 pub fn mt_sin<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
@@ -82,7 +80,7 @@ pub fn mt_sin<T>(a: Tensor<T>, out: Tensor<T>) {
 }
 
 #[bench_kernel(op="unary", subop="ceil", class=Unary,
-               input=Signed, tol=1e-6, mlx_src=UNARY_SRC, mlx="v_Ceil{tn}{tn}", metal_file="unary.metal")]
+               input=Signed, tol=1e-6, mlx="v_Ceil{tn}{tn}", metal_file="unary.metal")]
 #[kernel]
 pub fn mt_ceil<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
@@ -90,7 +88,7 @@ pub fn mt_ceil<T>(a: Tensor<T>, out: Tensor<T>) {
 }
 
 #[bench_kernel(op="unary", subop="floor", class=Unary,
-               input=Signed, tol=1e-6, mlx_src=UNARY_SRC, mlx="v_Floor{tn}{tn}", metal_file="unary.metal")]
+               input=Signed, tol=1e-6, mlx="v_Floor{tn}{tn}", metal_file="unary.metal")]
 #[kernel]
 pub fn mt_floor<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
@@ -98,7 +96,7 @@ pub fn mt_floor<T>(a: Tensor<T>, out: Tensor<T>) {
 }
 
 #[bench_kernel(op="unary", subop="erf", class=Unary,
-               input=Signed, tol=1e-3, mlx_src=UNARY_SRC, mlx="v_Erf{tn}{tn}", metal_file="unary.metal")]
+               input=Signed, tol=1e-3, mlx="v_Erf{tn}{tn}", metal_file="unary.metal")]
 #[kernel]
 pub fn mt_erf<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
@@ -113,7 +111,7 @@ pub fn mt_exp2<T>(a: Tensor<T>, out: Tensor<T>) {
 }
 
 #[bench_kernel(op="unary", subop="log2", class=Unary,
-               input=Positive, tol=1e-4, mlx_src=UNARY_SRC, mlx="v_Log2{tn}{tn}", metal_file="unary.metal")]
+               input=Positive, tol=1e-4, mlx="v_Log2{tn}{tn}", metal_file="unary.metal")]
 #[kernel]
 pub fn mt_log2<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
@@ -121,7 +119,7 @@ pub fn mt_log2<T>(a: Tensor<T>, out: Tensor<T>) {
 }
 
 #[bench_kernel(op="unary", subop="sign", class=Unary,
-               input=Signed, tol=0.0, mlx_src=UNARY_SRC, mlx="v_Sign{tn}{tn}", metal_file="unary.metal")]
+               input=Signed, tol=0.0, mlx="v_Sign{tn}{tn}", metal_file="unary.metal")]
 #[kernel]
 pub fn mt_sign<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
@@ -129,7 +127,7 @@ pub fn mt_sign<T>(a: Tensor<T>, out: Tensor<T>) {
 }
 
 #[bench_kernel(op="unary", subop="round", class=Unary,
-               input=Signed, tol=0.0, mlx_src=UNARY_SRC, mlx="v_Round{tn}{tn}", metal_file="unary.metal")]
+               input=Signed, tol=0.0, mlx="v_Round{tn}{tn}", metal_file="unary.metal")]
 #[kernel]
 pub fn mt_round<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
@@ -137,7 +135,7 @@ pub fn mt_round<T>(a: Tensor<T>, out: Tensor<T>) {
 }
 
 #[bench_kernel(op="unary", subop="neg", class=Unary,
-               input=Signed, tol=1e-6, mlx_src=UNARY_SRC, mlx="v_Negative{tn}{tn}", metal_file="unary.metal")]
+               input=Signed, tol=1e-6, mlx="v_Negative{tn}{tn}", metal_file="unary.metal")]
 #[kernel]
 pub fn mt_neg<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
@@ -152,7 +150,7 @@ pub fn mt_recip<T>(a: Tensor<T>, out: Tensor<T>) {
 }
 
 #[bench_kernel(op="unary", subop="square", class=Unary,
-               input=Signed, tol=1e-4, mlx_src=UNARY_SRC, mlx="v_Square{tn}{tn}", metal_file="unary.metal")]
+               input=Signed, tol=1e-4, mlx="v_Square{tn}{tn}", metal_file="unary.metal")]
 #[kernel]
 pub fn mt_square<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
@@ -161,7 +159,7 @@ pub fn mt_square<T>(a: Tensor<T>, out: Tensor<T>) {
 }
 
 #[bench_kernel(op="unary", subop="sigmoid", class=Unary,
-               input=Signed, tol=1e-4, mlx_src=UNARY_SRC, mlx="v_Sigmoid{tn}{tn}", metal_file="unary.metal")]
+               input=Signed, tol=1e-4, mlx="v_Sigmoid{tn}{tn}", metal_file="unary.metal")]
 #[kernel]
 pub fn mt_sigmoid<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
@@ -170,7 +168,7 @@ pub fn mt_sigmoid<T>(a: Tensor<T>, out: Tensor<T>) {
 }
 
 #[bench_kernel(op="unary", subop="log1p", class=Unary,
-               input=Positive, tol=1e-4, mlx_src=UNARY_SRC, mlx="v_Log1p{tn}{tn}", metal_file="unary.metal")]
+               input=Positive, tol=1e-4, mlx="v_Log1p{tn}{tn}", metal_file="unary.metal")]
 #[kernel]
 pub fn mt_log1p<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);

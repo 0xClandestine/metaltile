@@ -2,11 +2,8 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/arg_reduce.metal"));
-
 #[bench_kernel(op="arg_reduce", subop="argmax", class=ArgReduce,
-               n=1048576, check_n=4096, tpg=256, tol=0.5,
-               mlx_src=SRC, mlx="argmax_float32",
+               n=1048576, check_n=4096, tpg=256, tol=0.5, mlx="argmax_float32",
                metal_file="arg_reduce.metal", dtypes=crate::spec::F32_ONLY)]
 #[kernel]
 pub fn mt_argmax_f32(inp: Tensor<f32>, out: Tensor<f32>, #[constexpr] n: u32) {

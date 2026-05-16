@@ -316,7 +316,6 @@ pub struct BenchSpec {
     pub kernel_ir: fn(DType) -> Kernel,
     pub dtypes: &'static [DType],
     pub tol: f32,
-    pub metal_file: Option<&'static str>,
     /// MLX Metal source (used by both Generic and complex dispatches).
     pub mlx_src: Option<&'static str>,
     /// MLX kernel name pattern; `{tn}` → MLX type name.

@@ -631,17 +631,16 @@ mod tests {
 /// # Optional args
 /// - `input = Signed|Positive|Half|Unit` (Unary default: `Half`)
 /// - `input_a / input_b` (Binary, default: `Half`)
-/// - `mlx_src = IDENT` — `&'static str` with Metal source
+/// - `metal_file = "foo.metal"` — MLX reference source file (loaded via `include_str!` at compile time)
 /// - `mlx = "pattern"` — kernel name pattern; `{tn}` → MLX type name
 /// - `dtypes = IDENT`  — `&'static [DType]` (default: `FLOAT_DTYPES`)
 ///
 /// # Example
 /// ```ignore
 /// fn cpu_exp(x: f32) -> f32 { x.exp() }
-/// static UNARY_SRC: &str = include_str!("../metal/unary.metal");
 ///
 /// #[bench_kernel(op="unary", subop="exp", class=Unary, cpu=cpu_exp,
-///                input=Signed, tol=1e-4, mlx_src=UNARY_SRC, mlx="v_Exp{tn}{tn}")]
+///                input=Signed, tol=1e-4, metal_file="unary.metal", mlx="v_Exp{tn}{tn}")]
 /// #[kernel]
 /// pub fn mt_exp<T>(a: Tensor<T>, out: Tensor<T>) { … }
 /// ```
@@ -720,7 +719,6 @@ mod bench_impl {
         pub tol: LitFloat,
         pub start: Option<LitFloat>,
         pub step: Option<LitFloat>,
-        pub mlx_src: Option<Expr>,
         pub mlx: Option<LitStr>,
         pub dtypes: Option<Expr>,
         pub metal_file: Option<LitStr>,
@@ -769,7 +767,6 @@ mod bench_impl {
             let mut tol: Option<LitFloat> = None;
             let mut start: Option<LitFloat> = None;
             let mut step: Option<LitFloat> = None;
-            let mut mlx_src: Option<Expr> = None;
             let mut mlx: Option<LitStr> = None;
             let mut dtypes: Option<Expr> = None;
             let mut metal_file: Option<LitStr> = None;
@@ -845,7 +842,6 @@ mod bench_impl {
                     "tol" => tol = Some(input.parse()?),
                     "start" => start = Some(input.parse()?),
                     "step" => step = Some(input.parse()?),
-                    "mlx_src" => mlx_src = Some(input.parse()?),
                     "mlx" => mlx = Some(input.parse()?),
                     "dtypes" => dtypes = Some(input.parse()?),
                     "metal_file" => metal_file = Some(input.parse()?),
@@ -887,7 +883,6 @@ mod bench_impl {
                 input: inp.unwrap_or(InputKind::Half),
                 input_a: inp_a.unwrap_or(InputKind::Half),
                 input_b: inp_b.unwrap_or(InputKind::Half),
-                mlx_src,
                 mlx,
                 dtypes,
                 metal_file,
@@ -927,21 +922,19 @@ mod bench_impl {
             None => quote! {None},
         }
     }
-    fn opt_expr(v: &Option<Expr>) -> TokenStream {
-        match v {
-            Some(e) => quote! {Some(#e)},
-            None => quote! {None},
-        }
-    }
-
     pub fn generate_submit(fn_name: &syn::Ident, a: &BenchArgs, is_generic: bool) -> TokenStream {
         let op = &a.op;
         let subop = &a.subop;
         let fn_str = fn_name.to_string();
         let tol = &a.tol;
-        let mlx_src = opt_expr(&a.mlx_src);
         let mlx_pat = opt_str(&a.mlx);
-        let metal_file = opt_str(&a.metal_file);
+        let mlx_src = match &a.metal_file {
+            Some(f) => {
+                let path = f.value();
+                quote! { Some(include_str!(concat!(env!("OUT_DIR"), "/metal/", #path))) }
+            },
+            None => quote! { None },
+        };
         let dtypes = match &a.dtypes {
             Some(e) => quote! {#e},
             None => quote! {crate::ops::FLOAT_DTYPES},
@@ -1421,7 +1414,6 @@ mod bench_impl {
                     kernel_ir:   #kernel_ir_expr,
                     dtypes:      #dtypes,
                     tol:         #tol as f32,
-                    metal_file:  #metal_file,
                     mlx_src:     #mlx_src,
                     mlx_pattern: #mlx_pat,
                     shapes:      #shapes_ts,

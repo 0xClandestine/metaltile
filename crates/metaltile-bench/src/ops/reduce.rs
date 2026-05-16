@@ -2,10 +2,8 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/reduce.metal"));
-
 #[bench_kernel(op="all_reduce", subop="sum", class=AllReduce,
-               tol=128.0, mlx_src=SRC, mlx="all_reduce_sum{tn}", metal_file="reduce.metal")]
+               tol=128.0, mlx="all_reduce_sum{tn}", metal_file="reduce.metal")]
 #[kernel]
 pub fn mt_all_reduce<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
     let zero = 0;
@@ -15,7 +13,7 @@ pub fn mt_all_reduce<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
 }
 
 #[bench_kernel(op="all_reduce", subop="max", class=AllReduce,
-               tol=0.0, mlx_src=SRC, mlx="all_reduce_max{tn}", metal_file="reduce.metal")]
+               tol=0.0, mlx="all_reduce_max{tn}", metal_file="reduce.metal")]
 #[kernel]
 pub fn mt_all_reduce_max<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
     let zero = 0;
@@ -25,7 +23,7 @@ pub fn mt_all_reduce_max<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32)
 }
 
 #[bench_kernel(op="all_reduce", subop="min", class=AllReduce,
-               tol=0.0, mlx_src=SRC, mlx="all_reduce_min{tn}", metal_file="reduce.metal")]
+               tol=0.0, mlx="all_reduce_min{tn}", metal_file="reduce.metal")]
 #[kernel]
 pub fn mt_all_reduce_min<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
     let zero = 0;
@@ -35,7 +33,7 @@ pub fn mt_all_reduce_min<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32)
 }
 
 #[bench_kernel(op="row_reduce", subop="sum", class=RowReduce,
-               tol=128.0, mlx_src=SRC, mlx="row_reduce_simple_sum{tn}", metal_file="reduce.metal")]
+               tol=128.0, mlx="row_reduce_simple_sum{tn}", metal_file="reduce.metal")]
 #[kernel]
 pub fn mt_row_reduce<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
     let row = program_id::<0>();
@@ -47,7 +45,7 @@ pub fn mt_row_reduce<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
 }
 
 #[bench_kernel(op="row_reduce", subop="max", class=RowReduce,
-               tol=0.0, mlx_src=SRC, mlx="row_reduce_simple_max{tn}", metal_file="reduce.metal")]
+               tol=0.0, mlx="row_reduce_simple_max{tn}", metal_file="reduce.metal")]
 #[kernel]
 pub fn mt_row_reduce_max<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
     let row = program_id::<0>();
@@ -59,7 +57,7 @@ pub fn mt_row_reduce_max<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32)
 }
 
 #[bench_kernel(op="row_reduce", subop="min", class=RowReduce,
-               tol=0.0, mlx_src=SRC, mlx="row_reduce_simple_min{tn}", metal_file="reduce.metal")]
+               tol=0.0, mlx="row_reduce_simple_min{tn}", metal_file="reduce.metal")]
 #[kernel]
 pub fn mt_row_reduce_min<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
     let row = program_id::<0>();

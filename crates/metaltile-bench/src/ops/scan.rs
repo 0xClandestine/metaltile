@@ -1,13 +1,10 @@
 //! Scan benchmark — #[kernel] DSL vs MLX metal/scan.metal
 
 use metaltile::{bench_kernel, kernel};
-
-static SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/scan.metal"));
 static SCAN_SHAPES: &[(usize, usize)] = &[(1_024, 4_096)];
 
 #[bench_kernel(op="scan", subop="scan", class=Scan,
-               shapes=&SCAN_SHAPES, tpg=256, tol=1e-3,
-               mlx_src=SRC, mlx="contig_scan_inclusive_sum_float32_float32",
+               shapes=&SCAN_SHAPES, tpg=256, tol=1e-3, mlx="contig_scan_inclusive_sum_float32_float32",
                metal_file="scan.metal", dtypes=crate::spec::F32_ONLY)]
 #[kernel]
 pub fn mt_scan_f32(inp: Tensor<f32>, out: Tensor<f32>, #[constexpr] n: u32) {

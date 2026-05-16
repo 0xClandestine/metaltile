@@ -2,11 +2,8 @@
 
 use metaltile::{bench_kernel, kernel};
 
-static SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/copy.metal"));
-
 #[bench_kernel(op="strided_copy", subop="strided_copy", class=StridedCopy,
-               m=1024, n=4096, pad=128, tol=0.0,
-               mlx_src=SRC, mlx="copy_g_nd2{tn}{tn}",
+               m=1024, n=4096, pad=128, tol=0.0, mlx="copy_g_nd2{tn}{tn}",
                metal_file="copy.metal")]
 #[kernel]
 pub fn mt_strided_copy<T>(#[strided] src: Tensor<T>, out: Tensor<T>, #[constexpr] cols: u32) {

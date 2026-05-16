@@ -74,10 +74,8 @@ pub use shared::{
     FLOAT_DTYPE_STRS,
     FLOAT_DTYPES,
     INTEGER_DTYPES,
-    KernelSpec,
     OpBench,
     OpResult,
-    RefSpec,
     SuitePrinter,
     bench_all_dtypes,
     bench_gbps,
@@ -105,46 +103,3 @@ pub use steel::gemm::{
     bench_matmul_masked,
     bench_matmul_segmented,
 };
-/// Collect coverage specs from every op module.
-///
-/// Used by the `kernel_table` binary to cross-reference MetalTile kernels
-/// against their MLX Metal reference counterparts without requiring a GPU.
-pub fn all_kernel_specs() -> Vec<KernelSpec> {
-    let mut specs = Vec::new();
-
-    // Inventory-registered ops (ported to #[bench_kernel]) — derive coverage
-    // from the macro annotations so op files need no kernel_specs() function.
-    for spec in ::inventory::iter::<crate::spec::BenchSpec> {
-        let Some(metal_file) = spec.metal_file else { continue };
-        let ref_spec = if let Some(p) = spec.mlx_pattern {
-            RefSpec::Format(p)
-        } else {
-            match &spec.dispatch {
-                crate::spec::BenchDispatch::Rope { .. } => RefSpec::Literal("rope_float16"),
-                crate::spec::BenchDispatch::Attention { .. } =>
-                    RefSpec::Literal("sdpa_vector_float_128_128"),
-                _ => RefSpec::None("no MLX reference"),
-            }
-        };
-        specs.push(KernelSpec {
-            op: spec.op,
-            mt_kernel: spec.kernel_name.into(),
-            metal_file,
-            ref_spec,
-            dtypes: FLOAT_DTYPE_STRS,
-        });
-    }
-    specs.extend(steel::gemm::steel_gemm_fused::kernel_specs());
-    specs.extend(steel::gemm::steel_gemm_gather::kernel_specs());
-    specs.extend(steel::gemm::steel_gemm_masked::kernel_specs());
-    specs.extend(steel::gemm::steel_gemm_segmented::kernel_specs());
-    specs.extend(steel::gemm::steel_gemm_splitk::kernel_specs());
-    specs.extend(steel::attn::steel_attention::kernel_specs());
-    specs.extend(steel::conv::steel_conv::kernel_specs());
-    specs.extend(steel::conv::steel_conv_3d::kernel_specs());
-    specs.extend(steel::conv::steel_conv_general::kernel_specs());
-    specs.extend(conv::kernel_specs());
-    specs.extend(fft::kernel_specs());
-    specs.extend(fence::kernel_specs());
-    specs
-}
