@@ -409,16 +409,18 @@ impl OpResult {
 
     pub fn correctness_cell(&self) -> String {
         match self.correctness_status() {
-            CorrectnessStatus::Passed { max_abs_err, .. } => {
-                if max_abs_err < 1e-5 { "✓".into() } else { format!("✓ {max_abs_err:.2e}") }
-            },
-            CorrectnessStatus::Failed { max_abs_err, cosine_sim } => {
+            CorrectnessStatus::Passed { max_abs_err, .. } =>
+                if max_abs_err < 1e-5 {
+                    "✓".into()
+                } else {
+                    format!("✓ {max_abs_err:.2e}")
+                },
+            CorrectnessStatus::Failed { max_abs_err, cosine_sim } =>
                 if cosine_sim < 0.999 {
                     format!("✗ {max_abs_err:.2e} cos={cosine_sim:.3}")
                 } else {
                     format!("✗ {max_abs_err:.2e}")
-                }
-            },
+                },
             CorrectnessStatus::Unchecked => "! missing-check".into(),
             CorrectnessStatus::Unavailable => "—".into(),
         }
@@ -472,8 +474,7 @@ pub fn set_result_reporter(reporter: &mut dyn FnMut(&OpResult)) -> ResultReporte
     // the reference could become dangling.
     let reporter: NonNull<dyn FnMut(&OpResult)> =
         unsafe { std::mem::transmute(NonNull::from(reporter)) };
-    let previous =
-        RESULT_REPORTER.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), Some(reporter)));
+    let previous = RESULT_REPORTER.with(|slot| (*slot.borrow_mut()).replace(reporter));
     ResultReporterGuard { previous }
 }
 
@@ -603,18 +604,17 @@ fn build_shape_cell(shape: &str, last_base: Option<&str>) -> (String, Option<Str
                 let pad_w = W.saturating_sub(dtype.len());
                 let cell = format!(
                     "{}{}",
-                    paint_stdout(&pad_left(&prefix, pad_w), Style::new().fg(Color::BrightBlack)),
+                    paint_stdout(pad_left(&prefix, pad_w), Style::new().fg(Color::BrightBlack)),
                     paint_stdout(dtype, Style::new().fg(Color::BrightWhite)),
                 );
                 return (cell, Some(base.to_string()));
             } else {
-                let cell =
-                    paint_stdout(&pad_left(shape, W), Style::new().fg(Color::BrightWhite));
+                let cell = paint_stdout(pad_left(shape, W), Style::new().fg(Color::BrightWhite));
                 return (cell, Some(base.to_string()));
             }
         }
     }
-    (paint_stdout(&pad_left(shape, W), Style::new().fg(Color::BrightWhite)), None)
+    (paint_stdout(pad_left(shape, W), Style::new().fg(Color::BrightWhite)), None)
 }
 
 fn format_row(
@@ -630,7 +630,7 @@ fn format_row(
     let mt_cell = style_metaltile(&mt_s, result);
     let pct_cell = style_pct(&pct_s, result);
     let sep = col_sep();
-    let op_col = paint_stdout(&pad_left(shown_op, 28), Style::new().fg(Color::Cyan).bold());
+    let op_col = paint_stdout(pad_left(shown_op, 28), Style::new().fg(Color::Cyan).bold());
     if show_correctness {
         let eq_s = result.correctness_cell();
         format!(
@@ -645,11 +645,7 @@ fn format_row(
     } else {
         format!(
             "  {} {sep} {} {sep} {} {sep} {} {sep} {}",
-            op_col,
-            shape_cell,
-            ref_cell,
-            mt_cell,
-            pct_cell,
+            op_col, shape_cell, ref_cell, mt_cell, pct_cell,
         )
     }
 }
@@ -666,7 +662,7 @@ fn header_cell(label: &str, width: usize, right_align: bool) -> String {
 fn col_sep() -> String { paint_stdout("│", Style::new().fg(Color::BrightBlack).dim()) }
 
 fn separator(width: usize) -> String {
-    paint_stdout(&"─".repeat(width), Style::new().fg(Color::BrightBlack).dim())
+    paint_stdout("─".repeat(width), Style::new().fg(Color::BrightBlack).dim())
 }
 
 fn pad_left(text: &str, width: usize) -> String { format!("{text:<width$}") }
@@ -679,7 +675,7 @@ fn style_reference(text: &str, value: Option<f64>) -> String {
     } else {
         Style::new().fg(Color::Red).bold()
     };
-    paint_stdout(&pad_right(text, 14), style)
+    paint_stdout(pad_right(text, 14), style)
 }
 
 fn style_metaltile(text: &str, result: &OpResult) -> String {
@@ -688,7 +684,7 @@ fn style_metaltile(text: &str, result: &OpResult) -> String {
         (Some(_), _) => Style::new().fg(Color::BrightWhite).bold(),
         (None, _) => Style::new().fg(Color::Yellow).bold(),
     };
-    paint_stdout(&pad_right(text, 14), style)
+    paint_stdout(pad_right(text, 14), style)
 }
 
 fn style_pct(text: &str, result: &OpResult) -> String {
@@ -699,7 +695,7 @@ fn style_pct(text: &str, result: &OpResult) -> String {
         (Some(_), _) => Style::new().fg(Color::Red).bold(),
         (None, _) => Style::new().fg(Color::Yellow).bold(),
     };
-    paint_stdout(&pad_right(text, 6), style)
+    paint_stdout(pad_right(text, 6), style)
 }
 
 fn style_correctness(text: &str, status: CorrectnessStatus) -> String {
@@ -709,7 +705,7 @@ fn style_correctness(text: &str, status: CorrectnessStatus) -> String {
         CorrectnessStatus::Unchecked => Style::new().fg(Color::Yellow).bold(),
         CorrectnessStatus::Unavailable => Style::new().fg(Color::BrightBlack).dim(),
     };
-    paint_stdout(&pad_right(text, 14), style)
+    paint_stdout(pad_right(text, 14), style)
 }
 
 #[allow(dead_code)]

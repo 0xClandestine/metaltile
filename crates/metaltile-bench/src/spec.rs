@@ -486,14 +486,12 @@ impl BenchSpec {
             let mut srcs = Vec::new();
             for block in std::iter::once(&kernel.body).chain(kernel.blocks.values()) {
                 for op in &block.ops {
-                    if let Op::Load { src, indices, .. } = op {
-                        if indices.is_empty() {
-                            if let Some(prefix) = src.strip_suffix('f') {
-                                if let Ok(v) = prefix.parse::<f64>() {
-                                    srcs.push((src.clone(), v as f32));
-                                }
-                            }
-                        }
+                    if let Op::Load { src, indices, .. } = op
+                        && indices.is_empty()
+                        && let Some(prefix) = src.strip_suffix('f')
+                        && let Ok(v) = prefix.parse::<f64>()
+                    {
+                        srcs.push((src.clone(), v as f32));
                     }
                 }
             }
@@ -603,7 +601,7 @@ impl BenchSpec {
             let check_refs: Vec<&GpuBuffer> = check_bufs.iter().collect();
             let mt_vals = run_typed_once(
                 runner,
-                &mk,
+                mk,
                 &check_refs,
                 &check_bufs[out_idx],
                 out_count_check,
@@ -631,7 +629,7 @@ impl BenchSpec {
             let out_count_perf = shape.out_elems.resolve(n, b).max(1);
             let bytes = (shape.bytes_fn)(n, b, shape.reads, out_count_perf, ctx.eb) as f64;
             let perf_refs: Vec<&GpuBuffer> = perf_bufs.iter().collect();
-            let mt_perf = bench_gbps(runner, &mk, &perf_refs, perf_grid, [shape.tpg, 1, 1], bytes);
+            let mt_perf = bench_gbps(runner, mk, &perf_refs, perf_grid, [shape.tpg, 1, 1], bytes);
 
             // MLX ref (optional)
             let ref_perf = if let Some(mlx_args) = shape.mlx_args {
@@ -1162,8 +1160,8 @@ impl BenchSpec {
                 .map(|row| {
                     let mut acc = 0.0f32;
                     for g in 0..1usize {
-                        let s = s_check[row * 1 + g];
-                        let bias = b_check[row * 1 + g];
+                        let s = s_check[row + g];
+                        let bias = b_check[row + g];
                         for p in 0..8usize {
                             let packed = w_check[row * ck / 8 + g * 8 + p];
                             for bit in 0..8u32 {

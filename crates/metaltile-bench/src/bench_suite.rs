@@ -99,7 +99,7 @@ fn main() {
                 "{} {}",
                 paint_stderr("[warn]", Style::new().fg(Color::Yellow).bold()),
                 paint_stderr(
-                    &format!("No benchmarks matched --filter {pattern:?}"),
+                    format!("No benchmarks matched --filter {pattern:?}"),
                     Style::new().fg(Color::BrightWhite)
                 )
             );
@@ -173,14 +173,14 @@ fn main() {
         println!(
             "  {} {}",
             paint_stdout("Correctness failures:", Style::new().fg(Color::BrightBlack).bold()),
-            paint_stdout(&equiv_fail.to_string(), Style::new().fg(Color::Red).bold())
+            paint_stdout(equiv_fail.to_string(), Style::new().fg(Color::Red).bold())
         );
     }
     if !unchecked.is_empty() {
         println!(
             "  {} {}",
             paint_stdout("Unchecked MT results:", Style::new().fg(Color::BrightBlack).bold()),
-            paint_stdout(&unchecked.join(", "), Style::new().fg(Color::Yellow).bold())
+            paint_stdout(unchecked.join(", "), Style::new().fg(Color::Yellow).bold())
         );
     }
     println!();

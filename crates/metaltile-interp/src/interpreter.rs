@@ -123,10 +123,10 @@ impl Interpreter {
 
         let mut outputs = BTreeMap::new();
         for param in &kernel.params {
-            if param.is_output {
-                if let Some(tensor) = self.inputs.get(&param.name) {
-                    outputs.insert(param.name.clone(), tensor.clone());
-                }
+            if param.is_output
+                && let Some(tensor) = self.inputs.get(&param.name)
+            {
+                outputs.insert(param.name.clone(), tensor.clone());
             }
         }
 
@@ -150,10 +150,10 @@ impl Interpreter {
 
         let mut outputs = BTreeMap::new();
         for param in &kernel.params {
-            if param.is_output {
-                if let Some(tensor) = self.inputs.get(&param.name) {
-                    outputs.insert(param.name.clone(), tensor.clone());
-                }
+            if param.is_output
+                && let Some(tensor) = self.inputs.get(&param.name)
+            {
+                outputs.insert(param.name.clone(), tensor.clone());
             }
         }
         Ok(InterpResult { outputs })
@@ -182,10 +182,10 @@ impl Interpreter {
 
         let mut outputs = BTreeMap::new();
         for param in &kernel.params {
-            if param.is_output {
-                if let Some(tensor) = self.inputs.get(&param.name) {
-                    outputs.insert(param.name.clone(), tensor.clone());
-                }
+            if param.is_output
+                && let Some(tensor) = self.inputs.get(&param.name)
+            {
+                outputs.insert(param.name.clone(), tensor.clone());
             }
         }
         Ok(InterpResult { outputs })
@@ -209,10 +209,10 @@ impl Interpreter {
 
         let mut outputs = BTreeMap::new();
         for param in &kernel.params {
-            if param.is_output {
-                if let Some(tensor) = self.inputs.get(&param.name) {
-                    outputs.insert(param.name.clone(), tensor.clone());
-                }
+            if param.is_output
+                && let Some(tensor) = self.inputs.get(&param.name)
+            {
+                outputs.insert(param.name.clone(), tensor.clone());
             }
         }
         Ok(InterpResult { outputs })
@@ -257,7 +257,7 @@ impl Interpreter {
                     // arange on CPU returns the full range as a 1D tensor
                     let mut data = TensorData::zeros(&[n], DType::F32);
                     for i in 0..n {
-                        data.write_scalar(i, (s0 + i as f64 * ds) as f64);
+                        data.write_scalar(i, s0 + i as f64 * ds);
                     }
                     self.registers.insert(rid, RegisterValue::Tensor(data));
                 }
@@ -390,10 +390,10 @@ impl Interpreter {
             Op::If { cond, then_block, else_block } => {
                 let selected =
                     if self.get_scalar(*cond) != 0.0 { Some(*then_block) } else { *else_block };
-                if let Some(block_id) = selected {
-                    if let Some(block) = all_blocks.get(&block_id) {
-                        self.execute_block(block, all_blocks)?;
-                    }
+                if let Some(block_id) = selected
+                    && let Some(block) = all_blocks.get(&block_id)
+                {
+                    self.execute_block(block, all_blocks)?;
                 }
             },
 
@@ -451,10 +451,10 @@ impl Interpreter {
             },
 
             Op::Slice { value, ranges: _ranges } => {
-                if let Some(reg_val) = self.registers.get(value).cloned() {
-                    if let Some(rid) = result {
-                        self.registers.insert(rid, reg_val);
-                    }
+                if let Some(reg_val) = self.registers.get(value).cloned()
+                    && let Some(rid) = result
+                {
+                    self.registers.insert(rid, reg_val);
                 }
             },
 
@@ -806,7 +806,7 @@ impl Interpreter {
         }
 
         if let Some(idx) = infer_dim {
-            if known_product == 0 || num_elems % known_product != 0 {
+            if known_product == 0 || !num_elems.is_multiple_of(known_product) {
                 return Err(metaltile_core::error::Error::ShapeMismatch {
                     expected: shape.to_string(),
                     actual: format!("{num_elems} elements"),

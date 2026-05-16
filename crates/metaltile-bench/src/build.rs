@@ -99,7 +99,7 @@ fn process_dir(dir: &Path, kernels_dir: &Path, out_metal: &Path, mlx_root: &Path
         let path = entry.path();
         if path.is_dir() {
             process_dir(&path, kernels_dir, out_metal, mlx_root);
-        } else if path.extension().map_or(false, |e| e == "metal") {
+        } else if path.extension().is_some_and(|e| e == "metal") {
             let relative = path.strip_prefix(kernels_dir).unwrap();
             // MLX steel files live under steel/*/kernels/foo.metal; strip the inner
             // `kernels/` component to match the layout the ops/*.rs files expect.

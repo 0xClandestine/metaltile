@@ -215,40 +215,40 @@ fn parse_kernel_params_generic(
     let use_explicit_outputs = sig.inputs.iter().any(has_mutable_tensor_param);
 
     for input in &sig.inputs {
-        if let syn::FnArg::Typed(pat_type) = input {
-            if let syn::Pat::Ident(pat_ident) = &*pat_type.pat {
-                let param_name = pat_ident.ident.to_string();
-                let ty = &pat_type.ty;
+        if let syn::FnArg::Typed(pat_type) = input
+            && let syn::Pat::Ident(pat_ident) = &*pat_type.pat
+        {
+            let param_name = pat_ident.ident.to_string();
+            let ty = &pat_type.ty;
 
-                if !is_tensor_type(ty) {
-                    continue;
-                }
-
-                let is_output = if use_explicit_outputs {
-                    pat_ident.mutability.is_some()
-                } else {
-                    is_legacy_output_name(&param_name)
-                };
-                let (dtype, shape, _shape_ces) = parse_tensor_type_generic(ty, type_vars);
-
-                let kind = if has_attr(pat_type, "scalar") {
-                    quote! { ParamKind::Scalar }
-                } else if has_attr(pat_type, "strided") {
-                    quote! { ParamKind::Strided }
-                } else {
-                    quote! { Default::default() }
-                };
-
-                param_builders.push(quote! {
-                    kernel.params.push(Param {
-                        name: #param_name.to_string(),
-                        dtype: #dtype,
-                        shape: #shape,
-                        is_output: #is_output,
-                        kind: #kind,
-                    });
-                });
+            if !is_tensor_type(ty) {
+                continue;
             }
+
+            let is_output = if use_explicit_outputs {
+                pat_ident.mutability.is_some()
+            } else {
+                is_legacy_output_name(&param_name)
+            };
+            let (dtype, shape, _shape_ces) = parse_tensor_type_generic(ty, type_vars);
+
+            let kind = if has_attr(pat_type, "scalar") {
+                quote! { ParamKind::Scalar }
+            } else if has_attr(pat_type, "strided") {
+                quote! { ParamKind::Strided }
+            } else {
+                quote! { Default::default() }
+            };
+
+            param_builders.push(quote! {
+                kernel.params.push(Param {
+                    name: #param_name.to_string(),
+                    dtype: #dtype,
+                    shape: #shape,
+                    is_output: #is_output,
+                    kind: #kind,
+                });
+            });
         }
     }
 
@@ -273,10 +273,10 @@ fn is_legacy_output_name(name: &str) -> bool { matches!(name, "out" | "c" | "out
 fn extract_param_names(sig: &syn::Signature) -> Vec<String> {
     let mut names = Vec::new();
     for input in &sig.inputs {
-        if let syn::FnArg::Typed(pat_type) = input {
-            if let syn::Pat::Ident(pat_ident) = &*pat_type.pat {
-                names.push(pat_ident.ident.to_string());
-            }
+        if let syn::FnArg::Typed(pat_type) = input
+            && let syn::Pat::Ident(pat_ident) = &*pat_type.pat
+        {
+            names.push(pat_ident.ident.to_string());
         }
     }
     names
@@ -308,17 +308,17 @@ fn parse_tensor_type_generic(
 
     if let syn::Type::Path(type_path) = ty {
         for seg in &type_path.path.segments {
-            if seg.ident == "Tensor" {
-                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                    let mut iter = args.args.iter();
-                    if let Some(syn::GenericArgument::Type(dtype_ty)) = iter.next() {
-                        dtype_tokens = parse_dtype_generic(dtype_ty, type_vars);
-                    }
-                    if let Some(arg) = iter.next() {
-                        let (tokens, ces) = parse_shape_arg(arg);
-                        shape_tokens = tokens;
-                        shape_ces = ces;
-                    }
+            if seg.ident == "Tensor"
+                && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+            {
+                let mut iter = args.args.iter();
+                if let Some(syn::GenericArgument::Type(dtype_ty)) = iter.next() {
+                    dtype_tokens = parse_dtype_generic(dtype_ty, type_vars);
+                }
+                if let Some(arg) = iter.next() {
+                    let (tokens, ces) = parse_shape_arg(arg);
+                    shape_tokens = tokens;
+                    shape_ces = ces;
                 }
             }
         }
@@ -339,37 +339,34 @@ fn parse_shape_arg(arg: &syn::GenericArgument) -> (proc_macro2::TokenStream, Vec
     let inner = str.trim();
     let mut ces = Vec::new();
 
-    if let Some(start) = inner.find('(') {
-        if let Some(end) = inner.rfind(')') {
-            let content = &inner[start + 1..end];
-            let dims: Vec<_> = content
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
+    if let Some(start) = inner.find('(')
+        && let Some(end) = inner.rfind(')')
+    {
+        let content = &inner[start + 1..end];
+        let dims: Vec<_> =
+            content.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+
+        if !dims.is_empty() {
+            let dim_tokens: Vec<_> = dims
+                .iter()
+                .map(|d| {
+                    if let Ok(n) = d.parse::<usize>() {
+                        quote! { Dim::Known(#n) }
+                    } else {
+                        ces.push(d.clone());
+                        let ident = syn::Ident::new(d, proc_macro2::Span::call_site());
+                        quote! { Dim::ConstExpr(ConstExpr::new(stringify!(#ident))) }
+                    }
+                })
                 .collect();
 
-            if !dims.is_empty() {
-                let dim_tokens: Vec<_> = dims
-                    .iter()
-                    .map(|d| {
-                        if let Ok(n) = d.parse::<usize>() {
-                            quote! { Dim::Known(#n) }
-                        } else {
-                            ces.push(d.clone());
-                            let ident = syn::Ident::new(d, proc_macro2::Span::call_site());
-                            quote! { Dim::ConstExpr(ConstExpr::new(stringify!(#ident))) }
-                        }
-                    })
-                    .collect();
-
-                return (
-                    quote! {
-                        { use metaltile_core::shape::Shape; use metaltile_core::shape::Dim; use metaltile_core::constexpr::ConstExpr;
-                        Shape::new([#(#dim_tokens),*]) }
-                    },
-                    ces,
-                );
-            }
+            return (
+                quote! {
+                    { use metaltile_core::shape::Shape; use metaltile_core::shape::Dim; use metaltile_core::constexpr::ConstExpr;
+                    Shape::new([#(#dim_tokens),*]) }
+                },
+                ces,
+            );
         }
     }
     (quote! { Shape::scalar() }, ces)
@@ -413,12 +410,12 @@ fn extract_constexprs_typed(sig: &syn::Signature) -> Vec<(String, proc_macro2::T
 
     for input in &sig.inputs {
         if let syn::FnArg::Typed(pat_type) = input {
-            if pat_type.attrs.iter().any(|a| a.path().is_ident("constexpr")) {
-                if let syn::Pat::Ident(pat_ident) = &*pat_type.pat {
-                    let name = pat_ident.ident.to_string();
-                    let dtype = rust_type_to_dtype_tokens(&pat_type.ty);
-                    push_unique_typed(&mut entries, &mut seen, name, dtype);
-                }
+            if pat_type.attrs.iter().any(|a| a.path().is_ident("constexpr"))
+                && let syn::Pat::Ident(pat_ident) = &*pat_type.pat
+            {
+                let name = pat_ident.ident.to_string();
+                let dtype = rust_type_to_dtype_tokens(&pat_type.ty);
+                push_unique_typed(&mut entries, &mut seen, name, dtype);
             }
 
             if is_tensor_type(&pat_type.ty) {
@@ -435,18 +432,18 @@ fn extract_constexprs_typed(sig: &syn::Signature) -> Vec<(String, proc_macro2::T
 
 /// Map a Rust scalar type path to a `DType::*` token stream.
 fn rust_type_to_dtype_tokens(ty: &syn::Type) -> proc_macro2::TokenStream {
-    if let syn::Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
-            return match seg.ident.to_string().as_str() {
-                "f32" => quote! { DType::F32 },
-                "f16" | "half" => quote! { DType::F16 },
-                "f64" => quote! { DType::F64 },
-                "i32" => quote! { DType::I32 },
-                "i64" => quote! { DType::I64 },
-                "u64" => quote! { DType::U64 },
-                _ => quote! { DType::U32 },
-            };
-        }
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+    {
+        return match seg.ident.to_string().as_str() {
+            "f32" => quote! { DType::F32 },
+            "f16" | "half" => quote! { DType::F16 },
+            "f64" => quote! { DType::F64 },
+            "i32" => quote! { DType::I32 },
+            "i64" => quote! { DType::I64 },
+            "u64" => quote! { DType::U64 },
+            _ => quote! { DType::U32 },
+        };
     }
     quote! { DType::U32 }
 }
