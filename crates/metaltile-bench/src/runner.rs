@@ -250,6 +250,7 @@ impl GpuRunner {
         Err("Metal not available on this platform".into())
     }
 
+    #[allow(unused_variables)]
     pub fn compile(&self, source: &str, fn_name: &str) -> Result<CompiledKernel, String> {
         #[cfg(target_os = "macos")]
         {
@@ -261,6 +262,7 @@ impl GpuRunner {
 
     /// Compile a kernel with boolean function constants. `bool_constants` is a list of
     /// (function_constant_index, value) pairs.
+    #[allow(unused_variables)]
     pub fn compile_with_bool_constants(
         &self,
         source: &str,
@@ -313,6 +315,7 @@ impl GpuRunner {
     // ── Readback ─────────────────────────────────────────────────────────────
 
     /// Read `n_bytes` raw bytes back from a GPU buffer.
+    #[allow(unused_variables)]
     pub fn read_bytes(&self, buf: &GpuBuffer, n_bytes: usize) -> Vec<u8> {
         #[cfg(target_os = "macos")]
         {
@@ -324,6 +327,7 @@ impl GpuRunner {
 
     /// Read `n` f32 values back from a GPU buffer allocated with buffer_zeros / buffer_f32.
     /// The buffer must use StorageModeShared (all buffers created by GpuRunner do).
+    #[allow(unused_variables)]
     pub fn read_f32_slice(&self, buf: &GpuBuffer, n: usize) -> Vec<f32> {
         #[cfg(target_os = "macos")]
         {
@@ -336,6 +340,7 @@ impl GpuRunner {
 
     /// Read `n` bfloat16 values back from a GPU buffer, returned as f32.
     /// BF16 is just the top 16 bits of a float32 representation.
+    #[allow(unused_variables)]
     pub fn read_bf16_slice(&self, buf: &GpuBuffer, n: usize) -> Vec<f32> {
         #[cfg(target_os = "macos")]
         {
@@ -353,6 +358,7 @@ impl GpuRunner {
     }
 
     /// Read `n` f16 values back from a GPU buffer, returned as f32.
+    #[allow(unused_variables)]
     pub fn read_f16_slice(&self, buf: &GpuBuffer, n: usize) -> Vec<f32> {
         #[cfg(target_os = "macos")]
         {
@@ -368,6 +374,7 @@ impl GpuRunner {
 
     // ── Dispatch ─────────────────────────────────────────────────────────────
 
+    #[allow(unused_variables)]
     pub fn measure(
         &self,
         kernel: &CompiledKernel,
@@ -386,6 +393,7 @@ impl GpuRunner {
         vec![0.0; iters]
     }
 
+    #[allow(unused_variables)]
     pub fn bench(
         &self,
         kernel: &CompiledKernel,
