@@ -45,10 +45,6 @@ name = "bench_suite"
 path = "src/bench_suite.rs"
 
 [[bin]]
-name = "bench_regress"
-path = "src/bench_regress.rs"
-
-[[bin]]
 name = "dump_msl"
 path = "src/dump_msl.rs"
 
