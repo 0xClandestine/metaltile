@@ -9,6 +9,7 @@ description = "Benchmark suite comparing MetalTile-generated kernels against MLX
 keywords = ["metal", "gpu", "apple-silicon", "benchmark", "mlx"]
 categories = ["hardware-support", "development-tools"]
 publish = false
+build = "src/build.rs"
 
 [features]
 # Enable NAX (non-Apple-Silicon) kernel variants. Not needed on M1+.
