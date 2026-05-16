@@ -8,9 +8,7 @@
 
 mod cmd;
 
-use metaltile_bench::term::{
-    Color, Style, paint_stderr, paint_stdout,
-};
+use metaltile_bench::term::{Color, Style, paint_stderr, paint_stdout};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -26,6 +24,9 @@ fn main() {
         "build" => cmd::build::run(rest),
         "inspect" => cmd::inspect::run(rest),
         "device" => cmd::device::run(rest),
+        "test" => cmd::test::run(rest),
+        "snap" => cmd::snap::run(rest),
+        "diff" => cmd::diff::run(rest),
         "--help" | "-h" => print_usage_and_exit(&args[0]),
         _ => {
             eprintln!(
@@ -84,16 +85,37 @@ fn print_usage_and_exit(program: &str) {
     eprintln!(
         "  {}  {}",
         paint_stdout("inspect", Style::new().fg(Color::Cyan).bold()),
-        paint_stdout(
-            "Print IR and/or MSL for one kernel",
-            Style::new().fg(Color::BrightWhite),
-        ),
+        paint_stdout("Print IR and/or MSL for one kernel", Style::new().fg(Color::BrightWhite),),
     );
     eprintln!(
         "  {}  {}",
         paint_stdout("device", Style::new().fg(Color::Cyan).bold()),
         paint_stdout(
             "Show GPU device info and supported features",
+            Style::new().fg(Color::BrightWhite),
+        ),
+    );
+    eprintln!(
+        "  {}  {}",
+        paint_stdout("test", Style::new().fg(Color::Cyan).bold()),
+        paint_stdout(
+            "Run correctness checks: interpreter ↔ GPU",
+            Style::new().fg(Color::BrightWhite),
+        ),
+    );
+    eprintln!(
+        "  {}  {}",
+        paint_stdout("snap", Style::new().fg(Color::Cyan).bold()),
+        paint_stdout(
+            "Save bench results as a regression baseline",
+            Style::new().fg(Color::BrightWhite),
+        ),
+    );
+    eprintln!(
+        "  {}  {}",
+        paint_stdout("diff", Style::new().fg(Color::Cyan).bold()),
+        paint_stdout(
+            "Compare bench results to a saved baseline",
             Style::new().fg(Color::BrightWhite),
         ),
     );
@@ -112,9 +134,7 @@ pub(crate) fn flag_val(args: &[String], name: &str) -> Option<String> {
 }
 
 /// Check if `--flag` is present (boolean flag).
-pub(crate) fn flag_present(args: &[String], name: &str) -> bool {
-    args.iter().any(|a| a == name)
-}
+pub(crate) fn flag_present(args: &[String], name: &str) -> bool { args.iter().any(|a| a == name) }
 
 /// Return the first positional argument that doesn't start with `-`.
 pub(crate) fn positional(args: &[String]) -> Option<String> {

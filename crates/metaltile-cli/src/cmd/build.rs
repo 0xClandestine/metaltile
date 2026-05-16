@@ -10,8 +10,8 @@ use metaltile_bench::{
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 use metaltile_codegen::{
-    msl::{MslConfig, MslGenerator},
     TileSchedule,
+    msl::{MslConfig, MslGenerator},
 };
 use metaltile_core::ir::KernelMode;
 
@@ -45,8 +45,7 @@ pub fn run(args: &[String]) {
         }
     }
 
-    let mut sorted: Vec<(&str, (&BenchSpec, Vec<DType>))> =
-        kernels.into_iter().collect();
+    let mut sorted: Vec<(&str, (&BenchSpec, Vec<DType>))> = kernels.into_iter().collect();
     sorted.sort_unstable_by_key(|(name, _)| *name);
 
     let mut ok = 0u32;
@@ -86,12 +85,7 @@ pub fn run(args: &[String]) {
                 Ok(msl) => {
                     dtypes_ok.push(dt);
                     if verbose {
-                        println!(
-                            "// ══ {} {} ══\n{}",
-                            name,
-                            dtype_label(dt),
-                            msl,
-                        );
+                        println!("// ══ {} {} ══\n{}", name, dtype_label(dt), msl,);
                     }
                 },
                 Err(e) => {
@@ -118,11 +112,8 @@ pub fn run(args: &[String]) {
             }
         } else if !dtypes_ok.is_empty() {
             ok += 1;
-            let dtype_str = dtypes_ok
-                .iter()
-                .map(|dt| dtype_label(*dt))
-                .collect::<Vec<_>>()
-                .join("/");
+            let dtype_str =
+                dtypes_ok.iter().map(|dt| dtype_label(*dt)).collect::<Vec<_>>().join("/");
             eprintln!(
                 "  {}  {}   {}",
                 paint_stdout(format!("{name:<20}"), Style::new().fg(Color::Cyan).bold()),
@@ -139,22 +130,21 @@ pub fn run(args: &[String]) {
         eprintln!(
             "  {} {sep} {}",
             paint_stdout(format!("{ok} ok"), Style::new().fg(Color::Green).bold()),
-            paint_stderr(format!("{errors} error{}", if errors == 1 { "" } else { "s" }), Style::new().fg(Color::Red).bold()),
+            paint_stderr(
+                format!("{errors} error{}", if errors == 1 { "" } else { "s" }),
+                Style::new().fg(Color::Red).bold()
+            ),
         );
         std::process::exit(1);
     } else {
-        eprintln!(
-            "  {}",
-            paint_stdout(format!("{ok} ok"), Style::new().fg(Color::Green).bold()),
-        );
+        eprintln!("  {}", paint_stdout(format!("{ok} ok"), Style::new().fg(Color::Green).bold()),);
     }
 }
 
 fn first_mode(spec: &BenchSpec, _dtypes: &[DType]) -> KernelMode {
     match &spec.dispatch {
-        metaltile_bench::spec::BenchDispatch::Generic => {
-            spec.shapes.first().map(|s| s.mode).unwrap_or(KernelMode::Elementwise)
-        },
+        metaltile_bench::spec::BenchDispatch::Generic =>
+            spec.shapes.first().map(|s| s.mode).unwrap_or(KernelMode::Elementwise),
         metaltile_bench::spec::BenchDispatch::Sort { .. }
         | metaltile_bench::spec::BenchDispatch::Scan { .. }
         | metaltile_bench::spec::BenchDispatch::ArgReduce { .. }

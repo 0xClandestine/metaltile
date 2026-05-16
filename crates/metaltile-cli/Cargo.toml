@@ -22,4 +22,5 @@ metaltile-interp.workspace = true
 metaltile-runtime.workspace = true
 metaltile-bench = { path = "../metaltile-bench" }
 inventory.workspace = true
+serde.workspace = true
 serde_json.workspace = true

@@ -61,13 +61,7 @@ pub fn run(args: &[String]) {
         paint_stdout(format!("{:<16}", "GPU family"), label_style),
         paint_stdout(gpu_family, Style::new().fg(Color::BrightWhite)),
     );
-    println!(
-        "  {}",
-        paint_stdout(
-            "─".repeat(42),
-            Style::new().fg(Color::BrightBlack).dim(),
-        ),
-    );
+    println!("  {}", paint_stdout("─".repeat(42), Style::new().fg(Color::BrightBlack).dim(),),);
 
     // Feature flags
     let check = |label: &str, supported: bool, note: &str| {
@@ -87,13 +81,7 @@ pub fn run(args: &[String]) {
     check("simdgroup_hw", simd, "simdgroup matrix multiply");
     check("async_copy", simd, "async threadgroup copy (M3+)");
 
-    println!(
-        "  {}",
-        paint_stdout(
-            "─".repeat(42),
-            Style::new().fg(Color::BrightBlack).dim(),
-        ),
-    );
+    println!("  {}", paint_stdout("─".repeat(42), Style::new().fg(Color::BrightBlack).dim(),),);
 
     println!(
         "  {}  {}",

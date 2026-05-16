@@ -724,7 +724,7 @@ pub(crate) fn run_f32_once(
     runner.read_f32_slice(out, n)
 }
 
-pub(crate) fn run_typed_once(
+pub fn run_typed_once(
     runner: &GpuRunner,
     kernel: &CompiledKernel,
     buffers: &[&GpuBuffer],
@@ -738,7 +738,7 @@ pub(crate) fn run_typed_once(
     read_typed(runner, out, n, dt)
 }
 
-pub(crate) fn run_f16_once_as_f32(
+pub fn run_f16_once_as_f32(
     runner: &GpuRunner,
     kernel: &CompiledKernel,
     buffers: &[&GpuBuffer],
@@ -751,7 +751,7 @@ pub(crate) fn run_f16_once_as_f32(
     runner.read_f16_slice(out, n)
 }
 
-pub(crate) fn to_gflops(st: &crate::stats::BenchStats, flops: f64) -> Option<f64> {
+pub fn to_gflops(st: &crate::stats::BenchStats, flops: f64) -> Option<f64> {
     st.is_valid().then(|| flops / (st.mean_us * 1e-6) / 1e9)
 }
 

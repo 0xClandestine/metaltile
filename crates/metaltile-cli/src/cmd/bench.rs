@@ -130,11 +130,7 @@ pub fn run(args: &[String]) {
         .collect();
     let avg_pct: Option<f64> = {
         let valid: Vec<f64> = all.iter().filter_map(|r| r.pct()).collect();
-        if valid.is_empty() {
-            None
-        } else {
-            Some(valid.iter().sum::<f64>() / valid.len() as f64)
-        }
+        if valid.is_empty() { None } else { Some(valid.iter().sum::<f64>() / valid.len() as f64) }
     };
 
     let mut summary = vec![
@@ -244,9 +240,7 @@ fn summary_item(label: &str, value: &str, value_style: Style) -> String {
     )
 }
 
-fn summary_sep() -> String {
-    paint_stdout("|", Style::new().fg(Color::BrightBlack).dim())
-}
+fn summary_sep() -> String { paint_stdout("|", Style::new().fg(Color::BrightBlack).dim()) }
 
 fn pct_style(pct: f64) -> Style {
     if pct >= 90.0 {

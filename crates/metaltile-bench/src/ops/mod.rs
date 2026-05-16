@@ -92,11 +92,13 @@ pub use shared::{
     print_suite,
     quantize_roundtrip,
     read_typed,
+    run_f16_once_as_f32,
+    run_typed_once,
     set_result_reporter,
+    to_gflops,
     validate_results,
     zeros_typed,
 };
-pub(crate) use shared::{run_f16_once_as_f32, run_typed_once, to_gflops};
 pub use steel::gemm::{
     bench_matmul_fp16,
     bench_matmul_gather,
