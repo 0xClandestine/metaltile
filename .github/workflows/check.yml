@@ -16,17 +16,21 @@ jobs:
     name: Typos
     runs-on: ubuntu-latest
     steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
-        with:
-          egress-policy: block
-          allowed-endpoints: >
-            github.com:443
-            release-assets.githubusercontent.com:443
-            objects.githubusercontent.com:443
-            release-assets.githubusercontent.com:443
-
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - uses: crate-ci/typos@717cd03663352cbd05e4d28c01366e571ff5f2ed
+      - uses: actions/checkout@v4
+      - uses: crate-ci/typos@latest
         with:
           config: .github/configs/typos-cli.toml
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
