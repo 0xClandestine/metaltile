@@ -25,7 +25,7 @@ jobs:
             objects.githubusercontent.com:443
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - uses: crate-ci/typos@717cd03663352cbd05e4d28c01366e571ff5f2ed
+      - uses: crate-ci/typos@v1
         with:
           config: .github/configs/typos-cli.toml
 
@@ -45,7 +45,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@1d53c7f51173e497c5c61c2aa85cbb6163c40013 # v2.7.8
+      - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --all-targets --all-features -- -D warnings

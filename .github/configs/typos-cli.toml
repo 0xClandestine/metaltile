@@ -20,6 +20,9 @@ extend-ignore-words-re = []
 extend-ignore-re = []
 
 [default.extend-identifiers]
+
+# Weird syntax, but this how you ignore corrections for certain words.
+[default.extend-words]
 # DSL / IR op names
 arange = "arange"
 Arange = "Arange"
@@ -30,9 +33,6 @@ NAX = "NAX"
 # Strided kernel suffix (e.g. copy_g_nd2)
 nd = "nd"
 Nd = "Nd"
-
-# Weird syntax, but this how you ignore corrections for certain words.
-[default.extend-words]
 # strat = "strat"
 # froms = "froms"
 
