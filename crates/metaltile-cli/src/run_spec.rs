@@ -7,7 +7,7 @@ use metaltile_codegen::msl::MslGenerator;
 use metaltile_core::{
     constexpr::ConstExprValues,
     dtype::DType,
-    ir::{Kernel, KernelMode, Op},
+    ir::{KernelMode, Op},
 };
 use metaltile_interp::{Interpreter, TensorData};
 use metaltile_std::{
@@ -19,16 +19,13 @@ use metaltile_std::{
         OpResult,
         check_equiv,
         check_equiv_with,
-        dtype_tol,
     },
     spec::{
         BenchDispatch,
         BenchSpec,
-        DispatchGrid,
         MlxArg,
         ScalarBufSpec,
         ShapeSpec,
-        TensorBufSpec,
     },
 };
 
@@ -338,7 +335,7 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
 }
 
 fn scalar_buf(
-    spec: &BenchSpec,
+    _spec: &BenchSpec,
     runner: &GpuRunner,
     sb: ScalarBufSpec,
     n: usize,
@@ -354,7 +351,7 @@ fn scalar_buf(
 }
 
 fn mlx_buf(
-    spec: &BenchSpec,
+    _spec: &BenchSpec,
     runner: &GpuRunner,
     arg: &MlxArg,
     shape: &ShapeSpec,
@@ -930,6 +927,7 @@ fn run_quantized_mat_vec(
 
 // ── Rope ──────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn run_rope(
     spec: &BenchSpec,
     runner: &GpuRunner,

@@ -206,9 +206,7 @@ fn chrono_like_now() -> String {
 fn is_leap(y: i64) -> bool { (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0) }
 
 fn gpu_family_from_name(name: &str) -> Option<&'static str> {
-    if name.contains("M4") {
-        Some("Apple9")
-    } else if name.contains("M3") {
+    if name.contains("M4") || name.contains("M3") {
         Some("Apple9")
     } else if name.contains("M2") {
         Some("Apple8")

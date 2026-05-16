@@ -809,7 +809,7 @@ impl Op {
                 write!(f, "Arange(start={s}, step={st}, len={len:?})")
             },
             Op::Load { src, indices, mask, other } => {
-                let idx_str: Vec<String> = indices.iter().map(|i| fmt_index(i)).collect();
+                let idx_str: Vec<String> = indices.iter().map(fmt_index).collect();
                 write!(f, "Load({src}, [{}]", idx_str.join(", "))?;
                 if let Some(m) = mask {
                     write!(f, ", mask=v{}", m.as_u32())?;
@@ -820,7 +820,7 @@ impl Op {
                 write!(f, ")")
             },
             Op::Store { dst, indices, value, mask } => {
-                let idx_str: Vec<String> = indices.iter().map(|i| fmt_index(i)).collect();
+                let idx_str: Vec<String> = indices.iter().map(fmt_index).collect();
                 write!(f, "Store({dst}, v{}, [{}]", value.as_u32(), idx_str.join(", "))?;
                 if let Some(m) = mask {
                     write!(f, ", mask=v{}", m.as_u32())?;

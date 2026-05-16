@@ -94,6 +94,7 @@ pub fn read_typed(runner: &GpuRunner, buf: &GpuBuffer, n: usize, dt: DType) -> V
 
 // ── Single-run dispatch ──────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_typed_once(
     runner: &GpuRunner,
     kernel: &CompiledKernel,
