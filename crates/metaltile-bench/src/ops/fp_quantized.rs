@@ -2,9 +2,17 @@
 
 use metaltile::{bench_kernel, kernel};
 
-#[bench_kernel(op="fp_quantized", subop="fp4_quant_dequant", class=FpQuantized,
-               n=1048576, tpg=32, tol=0.5, mlx="nvfp4_quantize_dequantize_float_gs_16_b_4",
-               metal_file="fp_quantized.metal", dtypes=crate::spec::F32_ONLY)]
+#[bench_kernel(
+    op="fp_quantized",
+    subop="fp4_quant_dequant",
+    class=FpQuantized,
+    n=1048576,
+    tpg=32,
+    tol=0.5,
+    mlx="nvfp4_quantize_dequantize_float_gs_16_b_4",
+    metal_file="fp_quantized.metal",
+    dtypes=crate::spec::F32_ONLY,
+)]
 #[kernel]
 pub fn mt_fp4_quant_dequant(inp: Tensor<f32>, out: Tensor<f32>, #[constexpr] n: u32) {
     let gid = program_id::<0>();

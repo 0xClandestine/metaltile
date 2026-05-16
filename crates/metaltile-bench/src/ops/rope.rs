@@ -2,9 +2,19 @@
 
 use metaltile::{bench_kernel, kernel};
 
-#[bench_kernel(op="rope", subop="rope", class=Rope,
-               b=1, h=32, l=512, d=128, n_per_group=4, tol=0.01, metal_file="rope.metal",
-               dtypes=crate::spec::F16_ONLY)]
+#[bench_kernel(
+    op="rope",
+    subop="rope",
+    class=Rope,
+    b=1,
+    h=32,
+    l=512,
+    d=128,
+    n_per_group=4,
+    tol=0.01,
+    metal_file="rope.metal",
+    dtypes=crate::spec::F16_ONLY,
+)]
 #[kernel]
 pub fn mt_rope_f16(
     inp: Tensor<f16>,

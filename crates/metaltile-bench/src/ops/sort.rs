@@ -2,9 +2,18 @@
 
 use metaltile::{bench_kernel, kernel};
 
-#[bench_kernel(op="sort", subop="sort", class=Sort,
-               b=1024, n=1024, tpg=256, tol=0.0, mlx="c_block_sort_float32_float32_bn256_tn4",
-               metal_file="sort.metal", dtypes=crate::spec::F32_ONLY)]
+#[bench_kernel(
+    op="sort",
+    subop="sort",
+    class=Sort,
+    b=1024,
+    n=1024,
+    tpg=256,
+    tol=0.0,
+    mlx="c_block_sort_float32_float32_bn256_tn4",
+    metal_file="sort.metal",
+    dtypes=crate::spec::F32_ONLY,
+)]
 #[kernel]
 pub fn mt_sort_f32(inp: Tensor<f32>, out: Tensor<f32>, #[constexpr] n: u32) {
     let block_id = program_id::<0>();

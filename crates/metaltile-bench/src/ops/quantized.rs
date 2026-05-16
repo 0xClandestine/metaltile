@@ -3,9 +3,18 @@
 use metaltile::{bench_kernel, kernel};
 static QUANTIZED_SHAPES: &[(usize, usize)] = &[(4096, 4096)];
 
-#[bench_kernel(op="quantized", subop="qmv", class=QuantizedMatVec,
-               shapes=&QUANTIZED_SHAPES, group_size=64, tpg=64, tol=1e-3, mlx="affine_qmv_fast_float16_t_gs_64_b_4_batch_0",
-               metal_file="quantized.metal", dtypes=crate::spec::F32_ONLY)]
+#[bench_kernel(
+    op="quantized",
+    subop="qmv",
+    class=QuantizedMatVec,
+    shapes=&QUANTIZED_SHAPES,
+    group_size=64,
+    tpg=64,
+    tol=1e-3,
+    mlx="affine_qmv_fast_float16_t_gs_64_b_4_batch_0",
+    metal_file="quantized.metal",
+    dtypes=crate::spec::F32_ONLY,
+)]
 #[kernel]
 pub fn mt_qmv_f32(
     w: Tensor<u32>,
