@@ -8,10 +8,14 @@ pub struct IdCounter {
 
 impl IdCounter {
     pub fn new() -> Self { IdCounter { next: 0 } }
+}
 
-    pub fn next(&mut self) -> u32 {
+impl Iterator for IdCounter {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<u32> {
         let id = self.next;
         self.next += 1;
-        id
+        Some(id)
     }
 }

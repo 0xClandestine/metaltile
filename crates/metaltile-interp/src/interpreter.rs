@@ -1119,8 +1119,7 @@ impl Interpreter {
         for outer_idx in 0..outer_total {
             let outer_coords = coords_from_linear(&outer_shape, outer_idx);
             let mut acc = reduce_identity(op);
-            let mut count = 0usize;
-            for axis_idx in 0..axis_len {
+            for (count, axis_idx) in (0..axis_len).enumerate() {
                 let mut coords = outer_coords.clone();
                 coords.insert(axis, axis_idx);
                 let value = tensor.read_scalar(tensor.linear_index(&coords));
@@ -1146,7 +1145,6 @@ impl Interpreter {
                 let out_linear = out.linear_index(&coords);
                 out.write_scalar(out_linear, out_value);
                 acc = reduce_combine(op, acc, value);
-                count += 1;
             }
         }
 
@@ -1270,7 +1268,7 @@ mod tests {
         (0..t.num_elements()).map(|idx| read_f32(t, idx)).collect()
     }
 
-    fn register_tensor<'a>(interp: &'a Interpreter, id: u32) -> &'a TensorData {
+    fn register_tensor(interp: &Interpreter, id: u32) -> &TensorData {
         match interp.registers.get(&ValueId::new(id)) {
             Some(RegisterValue::Tensor(tensor)) => tensor,
             Some(RegisterValue::Scalar(_)) => panic!("expected tensor register {id}"),

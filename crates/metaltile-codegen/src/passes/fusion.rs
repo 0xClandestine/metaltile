@@ -28,16 +28,12 @@ impl super::Pass for FusionPass {
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
         // Build a map: ValueId → the BlockId that defines (produces) it.
         let mut def_block: BTreeMap<ValueId, BlockId> = BTreeMap::new();
-        for result in &kernel.body.results {
-            if let Some(vid) = result {
-                def_block.insert(*vid, kernel.body.id);
-            }
+        for vid in kernel.body.results.iter().flatten() {
+            def_block.insert(*vid, kernel.body.id);
         }
         for (bid, block) in &kernel.blocks {
-            for result in &block.results {
-                if let Some(vid) = result {
-                    def_block.insert(*vid, *bid);
-                }
+            for vid in block.results.iter().flatten() {
+                def_block.insert(*vid, *bid);
             }
         }
 
@@ -122,11 +118,7 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
         let mut chain: Vec<usize> = vec![i];
         let mut cursor = i;
 
-        loop {
-            // Find the immediate producer of cursor's first value input.
-            let Some(prev_result) = first_value_input(&block.ops[cursor]) else {
-                break;
-            };
+        while let Some(prev_result) = first_value_input(&block.ops[cursor]) {
             // Find which op in this block produced prev_result.
             let Some(prev_idx) = block.results.iter().position(|r| *r == Some(prev_result)) else {
                 break;
@@ -135,13 +127,10 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
             // - Be fusible
             // - Produce a value used ONLY by cursor (single-use)
             // - Come before cursor in the block
-            if prev_idx >= cursor {
-                break;
-            }
-            if !is_fusible(&block.ops[prev_idx]) {
-                break;
-            }
-            if fused.contains(&prev_idx) {
+            if prev_idx >= cursor
+                || !is_fusible(&block.ops[prev_idx])
+                || fused.contains(&prev_idx)
+            {
                 break;
             }
             let use_count = uses.get(&prev_result).map(|v| v.len()).unwrap_or(0);
@@ -159,7 +148,7 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
             // FusedElementwise typed by type_env, which may disagree with the Metal
             // compiler's type deduction (e.g., uint arithmetic typed as float).
             let terminal_vid = block.results.get(chain[0]).and_then(|r| *r);
-            if terminal_vid.map_or(false, |v| pinned.contains(&v)) {
+            if terminal_vid.is_some_and(|v| pinned.contains(&v)) {
                 continue;
             }
             // Reverse so ops are in execution order (producer first).
@@ -496,10 +485,9 @@ fn build_fused_sub_op(
         // encode it as an internal reference.
         if let Some(producer_pos) =
             chain.iter().position(|&c| c < old_results.len() && old_results[c] == Some(*v))
+            && producer_pos < pos_in_chain
         {
-            if producer_pos < pos_in_chain {
-                *v = sub_op_ref(producer_pos);
-            }
+            *v = sub_op_ref(producer_pos);
         }
     };
 

@@ -143,7 +143,7 @@ impl MslGenerator {
             }
         }
         self.analyze_block(&kernel.body, &mut feat);
-        for (_, block) in &kernel.blocks {
+        for block in kernel.blocks.values() {
             self.analyze_block(block, &mut feat);
         }
         let tensor_2d = kernel.params.iter().filter(|p| p.shape.rank() == 2).count();
@@ -168,14 +168,12 @@ impl MslGenerator {
                         feat.needs_simd_group = true;
                     }
                 },
-                Op::Zeros { dtype, .. } | Op::Splat { dtype, .. } =>
-                    if *dtype == DType::BF16 {
-                        feat.needs_bf16_struct = true;
-                    },
-                Op::Cast { dtype, .. } =>
-                    if *dtype == DType::BF16 {
-                        feat.needs_bf16_struct = true;
-                    },
+                Op::Zeros { dtype, .. } | Op::Splat { dtype, .. } if *dtype == DType::BF16 => {
+                    feat.needs_bf16_struct = true;
+                },
+                Op::Cast { dtype, .. } if *dtype == DType::BF16 => {
+                    feat.needs_bf16_struct = true;
+                },
                 Op::Activation { kind, .. } => match kind {
                     ActKind::Silu => feat.needs_silu = true,
                     ActKind::Gelu => feat.needs_gelu = true,
@@ -1252,9 +1250,10 @@ impl MslGenerator {
 
     /// Build a single MSL expression for a fused elementwise chain.
     /// Recursively composes expressions without intermediate variables.
+    #[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)]
     fn emit_fused_expr(
         &self,
-        out: &mut String,
+        _out: &mut String,
         _pad: &str,
         ops: &[Op],
         block: &Block,
@@ -1273,7 +1272,7 @@ impl MslGenerator {
                 // Internal reference to a previous sub-op.
                 let sub_idx = (v.as_u32() & !Self::SUB_OP_FLAG) as usize;
                 self.emit_fused_expr(
-                    out,
+                    _out,
                     _pad,
                     ops,
                     block,
@@ -1319,7 +1318,7 @@ impl MslGenerator {
             },
             Op::Splat { value, dtype, .. } => fmt_float(*value, dtype),
             Op::Broadcast { value, .. } => sub_val(value),
-            _ => format!("/* unhandled fused sub-op */ 0"),
+            _ => "/* unhandled fused sub-op */ 0".to_string(),
         }
     }
 
@@ -1442,6 +1441,7 @@ impl MslGenerator {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Emit a reduction: simd_sum/max/min across the SIMD group for scalar inputs.
     fn emit_reduce(
         &self,
@@ -1568,7 +1568,7 @@ impl MslGenerator {
     }
 
     /// Scalar GEMM path (M1/M2): each thread computes RPT×CPT outputs via a scalar inner loop.
-    #[allow(non_snake_case)]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
     fn emit_tiled_scalar(
         &self,
         out: &mut String,
@@ -1644,7 +1644,7 @@ impl MslGenerator {
 
     /// Simdgroup matrix multiply path (M3+): 8×8 half-precision hardware matmul.
     /// Each 32-thread simdgroup owns one `simdgroup_half8x8` fragment of C.
-    #[allow(non_snake_case)]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
     fn emit_tiled_simdgroup(
         &self,
         out: &mut String,

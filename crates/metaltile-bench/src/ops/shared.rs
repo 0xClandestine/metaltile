@@ -198,8 +198,10 @@ pub fn quantize_roundtrip(vals: &[f32], dt: DType) -> Vec<f32> {
     }
 }
 
+type ResultReporterFn = NonNull<dyn FnMut(&OpResult)>;
+
 thread_local! {
-    static RESULT_REPORTER: RefCell<Option<NonNull<dyn FnMut(&OpResult)>>> = RefCell::new(None);
+    static RESULT_REPORTER: RefCell<Option<ResultReporterFn>> = RefCell::new(None);
 }
 
 pub const DEFAULT_MIN_COSINE_SIM: f32 = 0.999;
@@ -455,7 +457,7 @@ pub fn print_suite(results: &[OpResult]) {
 }
 
 pub struct ResultReporterGuard {
-    previous: Option<NonNull<dyn FnMut(&OpResult)>>,
+    previous: Option<ResultReporterFn>,
 }
 
 impl Drop for ResultReporterGuard {

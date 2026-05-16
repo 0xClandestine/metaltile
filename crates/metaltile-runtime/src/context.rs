@@ -131,10 +131,12 @@ fn row_major_strides(name: &str, dims: &[u32]) -> Result<Vec<u32>, MetalTileErro
     Ok(strides)
 }
 
+type StridedMetadata<'a> = (Cow<'a, [u8]>, Cow<'a, [u8]>);
+
 fn resolve_strided_metadata<'a>(
     param: &Param,
     buffers: &'a BTreeMap<String, Vec<u8>>,
-) -> Result<(Cow<'a, [u8]>, Cow<'a, [u8]>), MetalTileError> {
+) -> Result<StridedMetadata<'a>, MetalTileError> {
     let expected_len = param.shape.rank() * std::mem::size_of::<u32>();
     let defaults = known_shape_dims(param)?
         .map(|dims| {
@@ -377,8 +379,8 @@ impl Context {
             let data = buffers.get(&param.name).map(Vec::as_slice);
             if param.is_output {
                 let elem_bytes = param.dtype.size_bytes();
-                if elem_bytes > 0 {
-                    n_threads = n_threads.max(binding.data_len / elem_bytes);
+                if let Some(quot) = binding.data_len.checked_div(elem_bytes) {
+                    n_threads = n_threads.max(quot);
                 }
             }
             metal_bufs.push(alloc_buf(data, binding.data_len)?);

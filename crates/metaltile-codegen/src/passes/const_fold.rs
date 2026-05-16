@@ -72,11 +72,11 @@ fn fold_block(block: &mut Block) {
             let rv = find_const(block, *rhs);
 
             // Literal-literal folding.
-            if let (Some(a), Some(b)) = (lv, rv) {
-                if let Some(result) = eval_binop(*op, a, b) {
-                    const_overwrites.push((i, result));
-                    continue;
-                }
+            if let (Some(a), Some(b)) = (lv, rv)
+                && let Some(result) = eval_binop(*op, a, b)
+            {
+                const_overwrites.push((i, result));
+                continue;
             }
 
             // Identity / absorbing-element folding.
@@ -151,10 +151,10 @@ fn eval_binop(op: BinOpKind, a: i64, b: i64) -> Option<i64> {
 
 fn find_const(block: &Block, vid: ValueId) -> Option<i64> {
     for (i, op) in block.ops.iter().enumerate() {
-        if block.results.get(i) == Some(&Some(vid)) {
-            if let Op::Const { value } = op {
-                return Some(*value);
-            }
+        if block.results.get(i) == Some(&Some(vid))
+            && let Op::Const { value } = op
+        {
+            return Some(*value);
         }
     }
     None
@@ -306,8 +306,8 @@ fn dce_block(block: &mut Block, cross_block_refs: &BTreeSet<ValueId>) {
 
     let n = block.ops.len();
     let mut keep = vec![false; n];
-    for i in 0..n {
-        keep[i] = match block.results.get(i) {
+    for (i, keep_entry) in keep.iter_mut().enumerate().take(n) {
+        *keep_entry = match block.results.get(i) {
             Some(&Some(vid)) => used.contains(&vid),
             Some(&None) | None => true, // no-result ops always kept
         };

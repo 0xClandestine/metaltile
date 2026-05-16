@@ -115,12 +115,11 @@ fn check_op(op: &Op, kernel: &Kernel, env: &TypeEnv) -> Result<()> {
             }
         },
 
-        Op::Reduce { axis, .. } =>
-            if *axis > 3 {
-                return Err(Error::Validation(format!(
-                    "Op::Reduce: axis {axis} > 3 is implausible"
-                )));
-            },
+        Op::Reduce { axis, .. } if *axis > 3 => {
+            return Err(Error::Validation(format!(
+                "Op::Reduce: axis {axis} > 3 is implausible"
+            )));
+        },
 
         Op::StrideReduce { src, offset, stride, end, secondary_src, secondary_base, .. } => {
             require_param(kernel, src)?;
@@ -365,7 +364,7 @@ pub type TypeEnv = BTreeMap<ValueId, TypedValue>;
 pub fn infer_types(kernel: &Kernel) -> Result<TypeEnv> {
     let mut env = TypeEnv::new();
     infer_block(&kernel.body, kernel, &kernel.blocks, &mut env)?;
-    for (_bid, block) in &kernel.blocks {
+    for block in kernel.blocks.values() {
         // Don't re-infer the body block (bid 0).
         if block.id != kernel.body.id {
             infer_block(block, kernel, &kernel.blocks, &mut env)?;

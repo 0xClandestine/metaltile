@@ -1483,11 +1483,11 @@ impl BenchSpec {
                     let kv_base = head * cn * d;
                     let mut scores = vec![0.0f32; cn];
                     let mut max_score = f32::NEG_INFINITY;
-                    for t in 0..cn {
+                    for (t, score) in scores.iter_mut().enumerate().take(cn) {
                         let base = kv_base + t * d;
                         let qk: f32 =
                             (0..d).map(|e| cq[q_base + e] * ck_[base + e]).sum::<f32>() * scale;
-                        scores[t] = qk;
+                        *score = qk;
                         max_score = max_score.max(qk);
                     }
                     let mut sum = 0.0f32;
