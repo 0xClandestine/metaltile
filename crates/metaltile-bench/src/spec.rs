@@ -55,10 +55,10 @@ pub const F16_ONLY: &[DType] = &[DType::F16];
 /// `b` is the row/batch count; `n` is the column/width count.
 #[derive(Clone, Copy, Debug)]
 pub enum Dim {
-    N,    // n
-    B,    // b
-    BxN,  // b * n
-    One,  // 1
+    N,   // n
+    B,   // b
+    BxN, // b * n
+    One, // 1
 }
 
 impl Dim {
@@ -77,12 +77,12 @@ impl Dim {
 #[derive(Clone, Copy, Debug)]
 pub enum BufInit {
     Zeros,
-    Half,         // 0.5 repeating
-    Signed,       // [-3, -1.5, -0.5, 0, 0.25, 0.75, 1.5, 3] cycling
-    Positive,     // 0.25, 0.5, … 4.0 cycling
-    Unit,         // all 1.0
-    Fill(f32),    // constant value (e.g. Fill(1e-5) for eps)
-    AltZeroOne,   // alternating 0.0 / 1.0 (Select condition)
+    Half,       // 0.5 repeating
+    Signed,     // [-3, -1.5, -0.5, 0, 0.25, 0.75, 1.5, 3] cycling
+    Positive,   // 0.25, 0.5, … 4.0 cycling
+    Unit,       // all 1.0
+    Fill(f32),  // constant value (e.g. Fill(1e-5) for eps)
+    AltZeroOne, // alternating 0.0 / 1.0 (Select condition)
 }
 
 impl BufInit {
@@ -131,22 +131,22 @@ pub struct TensorBufSpec {
 /// These are appended after tensor param buffers in dispatch order.
 #[derive(Clone, Copy, Debug)]
 pub enum ScalarBufSpec {
-    U32N,  // runner.buffer_u32(n as u32)
-    U32B,  // runner.buffer_u32(b as u32)
-    U64N,  // runner.buffer_u64(n as u64)
-    U64B,  // runner.buffer_u64(b as u64)
-    I64B,  // runner.buffer_i64(b as i64)
+    U32N, // runner.buffer_u32(n as u32)
+    U32B, // runner.buffer_u32(b as u32)
+    U64N, // runner.buffer_u64(n as u64)
+    U64B, // runner.buffer_u64(b as u64)
+    I64B, // runner.buffer_i64(b as i64)
 }
 
 // ── DispatchGrid: how to compute [gx, gy, gz] from n/b/tpg ──────────────────
 
 #[derive(Clone, Copy, Debug)]
 pub enum DispatchGrid {
-    DivCeilN,   // [n.div_ceil(tpg), 1, 1]
-    DivCeilN2,  // [n.div_ceil(tpg*2), 1, 1]  — Binary MLX N_PER_THREAD=2
-    RowsB,      // [b, 1, 1]
-    RowsBY,     // [1, b, 1]  — RowReduce MLX
-    Single,     // [1, 1, 1]
+    DivCeilN,  // [n.div_ceil(tpg), 1, 1]
+    DivCeilN2, // [n.div_ceil(tpg*2), 1, 1]  — Binary MLX N_PER_THREAD=2
+    RowsB,     // [b, 1, 1]
+    RowsBY,    // [1, b, 1]  — RowReduce MLX
+    Single,    // [1, 1, 1]
 }
 
 impl DispatchGrid {
@@ -193,7 +193,7 @@ pub struct ShapeSpec {
 
     // ── Bench dimensions ────────────────────────────────────────────────────
     pub n: usize,
-    pub b: usize,  // rows (or 1 for elementwise)
+    pub b: usize, // rows (or 1 for elementwise)
 
     // ── Check dimensions (smaller for speed) ────────────────────────────────
     pub check_n: usize,
@@ -240,15 +240,49 @@ pub enum BenchDispatch {
     /// Generic data-driven runner using `BenchSpec.shapes`.
     Generic,
     // Complex ops with specialized runners:
-    Sort { b: usize, n: usize, tpg: usize },
-    Scan { shapes: &'static [(usize, usize)], tpg: usize },
-    ArgReduce { n: usize, check_n: usize, tpg: usize },
-    Random { n: usize, tpg: usize },
-    FpQuantized { n: usize, tpg: usize },
-    QuantizedMatVec { shapes: &'static [(usize, usize)], group_size: usize, tpg: usize },
-    Rope { b: usize, h: usize, l: usize, d: usize, n_per_group: usize },
-    Attention { shapes: &'static [(usize, usize, usize)], tpg: usize },
-    StridedCopy { m: usize, n: usize, pad: usize },
+    Sort {
+        b: usize,
+        n: usize,
+        tpg: usize,
+    },
+    Scan {
+        shapes: &'static [(usize, usize)],
+        tpg: usize,
+    },
+    ArgReduce {
+        n: usize,
+        check_n: usize,
+        tpg: usize,
+    },
+    Random {
+        n: usize,
+        tpg: usize,
+    },
+    FpQuantized {
+        n: usize,
+        tpg: usize,
+    },
+    QuantizedMatVec {
+        shapes: &'static [(usize, usize)],
+        group_size: usize,
+        tpg: usize,
+    },
+    Rope {
+        b: usize,
+        h: usize,
+        l: usize,
+        d: usize,
+        n_per_group: usize,
+    },
+    Attention {
+        shapes: &'static [(usize, usize, usize)],
+        tpg: usize,
+    },
+    StridedCopy {
+        m: usize,
+        n: usize,
+        pad: usize,
+    },
 }
 
 // ── BenchSpec ─────────────────────────────────────────────────────────────────

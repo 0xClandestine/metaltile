@@ -6,7 +6,10 @@
 use std::collections::BTreeMap;
 
 use metaltile_codegen::msl::MslGenerator;
-use metaltile_core::{constexpr::ConstExprValues, ir::{Kernel, KernelMode, Op}};
+use metaltile_core::{
+    constexpr::ConstExprValues,
+    ir::{KernelMode, Op},
+};
 use metaltile_interp::{Interpreter, TensorData};
 
 use crate::{
@@ -33,10 +36,8 @@ impl BenchSpec {
         let bench = OpBench::new(self.op, "GB/s");
         match &self.dispatch {
             BenchDispatch::Generic => self.run_generic(runner, dt, &bench),
-            BenchDispatch::Sort { b, n, tpg } =>
-                self.run_sort(runner, dt, &bench, *b, *n, *tpg),
-            BenchDispatch::Scan { shapes, tpg } =>
-                self.run_scan(runner, dt, &bench, shapes, *tpg),
+            BenchDispatch::Sort { b, n, tpg } => self.run_sort(runner, dt, &bench, *b, *n, *tpg),
+            BenchDispatch::Scan { shapes, tpg } => self.run_scan(runner, dt, &bench, shapes, *tpg),
             BenchDispatch::ArgReduce { n, check_n, tpg } =>
                 self.run_arg_reduce(runner, dt, &bench, *n, *check_n, *tpg),
             BenchDispatch::Random { n, tpg } => self.run_random(runner, dt, &bench, *n, *tpg),
@@ -110,34 +111,6 @@ impl BenchSpec {
         }
         cv
     }
-    /// Walk all IR blocks and inject float-literal sources into `inp_map`.
-    ///
-    /// Float literals are encoded as `Op::Load { src: "0.0f", indices: [] }` by the
-    /// body parser. The interpreter needs them as 1-element scalar tensors.
-    fn inject_float_literals(kernel: &Kernel, inp_map: &mut BTreeMap<String, TensorData>) {
-        let mut srcs: Vec<String> = Vec::new();
-        // Walk body and all sub-blocks.
-        for block in std::iter::once(&kernel.body).chain(kernel.blocks.values()) {
-            for op in &block.ops {
-                if let Op::Load { src, indices, .. } = op {
-                    if indices.is_empty() {
-                        srcs.push(src.clone());
-                    }
-                }
-            }
-        }
-        for src in srcs {
-            if inp_map.contains_key(&src) {
-                continue;
-            }
-            // Float literals end with 'f' and the prefix is a valid f64.
-            if let Some(prefix) = src.strip_suffix('f') {
-                if let Ok(v) = prefix.parse::<f64>() {
-                    inp_map.insert(src, Self::td(DType::F32, &[1], &[v as f32]));
-                }
-            }
-        }
-    }
     fn interp(
         kernel: &metaltile_core::ir::Kernel,
         inputs: BTreeMap<String, TensorData>,
@@ -170,22 +143,61 @@ impl BenchSpec {
     // Correctness via interpreter; perf via GPU.
 
     fn run_generic(&self, runner: &GpuRunner, dt: DType, bench: &OpBench) -> Vec<OpResult> {
+        // Cache compiled kernels by mode — MSL is identical for all shapes with the same
+        // (dt, mode), so compile once instead of once-per-shape.
+        let mut compiled: std::collections::HashMap<u8, crate::runner::CompiledKernel> =
+            std::collections::HashMap::new();
+        let mode_key = |m: KernelMode| match m {
+            KernelMode::Elementwise => 0u8,
+            KernelMode::Reduction | KernelMode::Tile2D => 1,
+            KernelMode::Grid3D => 2,
+        };
+
         let mut results = Vec::new();
+        // Build the kernel IR once (same for all shapes at a given dt).
+        let kernel = (self.kernel_ir)(dt);
+        // Pre-compile MLX ref kernel once (same MSL/function for all shapes).
+        let mlx_compiled: Option<crate::runner::CompiledKernel> = {
+            let ctx0 = DtypeCtx::reduce(dt); // tn is dtype-only, not shape-dependent
+            Self::compile_mlx(runner, self.mlx_src, self.mlx_pattern, ctx0.tn)
+        };
+        // Pre-collect float literals from IR (same for all shapes at a given dt).
+        let float_literal_pairs: Vec<(String, f32)> = {
+            let mut srcs = Vec::new();
+            for block in std::iter::once(&kernel.body).chain(kernel.blocks.values()) {
+                for op in &block.ops {
+                    if let Op::Load { src, indices, .. } = op {
+                        if indices.is_empty() {
+                            if let Some(prefix) = src.strip_suffix('f') {
+                                if let Ok(v) = prefix.parse::<f64>() {
+                                    srcs.push((src.clone(), v as f32));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            srcs
+        };
+
         for shape in self.shapes {
             let ctx = match shape.mode {
                 KernelMode::Reduction | KernelMode::Tile2D => DtypeCtx::reduce(dt),
                 _ => DtypeCtx::elementwise(dt),
             };
-            let msl = match self.msl_for_mode(dt, shape.mode) {
-                Some(s) => s,
-                None => continue,
+            let mk = match compiled.entry(mode_key(shape.mode)) {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    let msl = match self.msl_for_mode(dt, shape.mode) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    match Self::compile_mt(runner, &msl, self.kernel_name) {
+                        Some(k) => e.insert(k),
+                        None => continue,
+                    }
+                },
             };
-            let mk = match Self::compile_mt(runner, &msl, self.kernel_name) {
-                Some(k) => k,
-                None => continue,
-            };
-
-            let kernel = (self.kernel_ir)(dt);
             let params: Vec<_> = kernel.params.iter().collect();
             let check_n = shape.check_n;
             // Reduction-mode kernels: use a single row for correctness checks.
@@ -206,11 +218,8 @@ impl BenchSpec {
                 let param_dt = buf_spec.dtype_override.unwrap_or(dt);
                 inp_map.insert(param.name.clone(), Self::td(param_dt, &[count], &init_data));
             }
-            let cv_pairs: Vec<(&str, usize)> = shape
-                .cexprs
-                .iter()
-                .map(|(k, d)| (*k, d.resolve(check_n, check_b)))
-                .collect();
+            let cv_pairs: Vec<(&str, usize)> =
+                shape.cexprs.iter().map(|(k, d)| (*k, d.resolve(check_n, check_b))).collect();
             let cv = Self::constexprs(&cv_pairs);
             // Constexpr params are loaded via Op::Load { src: name } in the IR,
             // so they must also appear in inp_map as 1-element scalar tensors.
@@ -220,15 +229,24 @@ impl BenchSpec {
             // GPU built-ins and MSL special constants used as Op::Load { src: name, indices:[] }.
             // In single-threaded CPU interpretation: 1 thread per threadgroup.
             for (name, val) in [
-                ("tid", 0.0f32), ("lsize", 1.0), ("tgid_x", 0.0), ("tgid_y", 0.0),
-                ("simd_lane", 0.0), ("simd_id", 0.0), ("n_simd", 1.0),
-                ("-INFINITY", f32::NEG_INFINITY), ("INFINITY", f32::INFINITY),
+                ("tid", 0.0f32),
+                ("lsize", 1.0),
+                ("tgid_x", 0.0),
+                ("tgid_y", 0.0),
+                ("simd_lane", 0.0),
+                ("simd_id", 0.0),
+                ("n_simd", 1.0),
+                ("-INFINITY", f32::NEG_INFINITY),
+                ("INFINITY", f32::INFINITY),
             ] {
-                inp_map.entry(name.to_string()).or_insert_with(|| Self::td(DType::F32, &[1], &[val]));
+                inp_map
+                    .entry(name.to_string())
+                    .or_insert_with(|| Self::td(DType::F32, &[1], &[val]));
             }
-            // Float literals are compiled to Op::Load { src: "0.0f" } etc.
-            // Walk all kernel blocks to find any such src values and inject them.
-            Self::inject_float_literals(&kernel, &mut inp_map);
+            // Inject float literals collected from IR before the loop.
+            for (src, val) in &float_literal_pairs {
+                inp_map.entry(src.clone()).or_insert_with(|| Self::td(DType::F32, &[1], &[*val]));
+            }
             let interp_mode = match shape.mode {
                 KernelMode::Elementwise | KernelMode::Grid3D => InterpMode::Elementwise(check_n),
                 _ => InterpMode::Reduction(check_b.max(1)),
@@ -293,20 +311,19 @@ impl BenchSpec {
             let out_count_perf = shape.out_elems.resolve(n, b).max(1);
             let bytes = (shape.bytes_fn)(n, b, shape.reads, out_count_perf, ctx.eb) as f64;
             let perf_refs: Vec<&GpuBuffer> = perf_bufs.iter().collect();
-            let mt_perf =
-                bench_gbps(runner, &mk, &perf_refs, perf_grid, [shape.tpg, 1, 1], bytes);
+            let mt_perf = bench_gbps(runner, &mk, &perf_refs, perf_grid, [shape.tpg, 1, 1], bytes);
 
             // MLX ref (optional)
             let ref_perf = if let Some(mlx_args) = shape.mlx_args {
                 let mlx_tpg = if shape.mlx_tpg > 0 { shape.mlx_tpg } else { shape.tpg };
                 let mlx_grid = shape.mlx_grid.unwrap_or(shape.grid).eval(n, b, mlx_tpg);
-                Self::compile_mlx(runner, self.mlx_src, self.mlx_pattern, ctx.tn).and_then(|rk| {
+                mlx_compiled.as_ref().and_then(|rk| {
                     let mlx_bufs: Vec<GpuBuffer> = mlx_args
                         .iter()
                         .map(|arg| self.mlx_buf(runner, arg, shape, n, b, dt))
                         .collect();
                     let mlx_refs: Vec<&GpuBuffer> = mlx_bufs.iter().collect();
-                    bench_gbps(runner, &rk, &mlx_refs, mlx_grid, [mlx_tpg, 1, 1], bytes)
+                    bench_gbps(runner, rk, &mlx_refs, mlx_grid, [mlx_tpg, 1, 1], bytes)
                 })
             } else {
                 None
@@ -1129,9 +1146,9 @@ impl BenchSpec {
             DType::F16 => "sdpa_vector_float16_t_128_128",
             _ => return vec![],
         };
-        let rk = self.mlx_src.and_then(|src| {
-            runner.compile_with_bool_constants(src, ref_name, REF_FCS).ok()
-        });
+        let rk = self
+            .mlx_src
+            .and_then(|src| runner.compile_with_bool_constants(src, ref_name, REF_FCS).ok());
         let mut results = Vec::new();
         for &(h, n_kv, d) in shapes {
             let scale = 1.0_f32 / (d as f32).sqrt();

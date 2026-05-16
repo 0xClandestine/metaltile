@@ -1080,10 +1080,8 @@ mod bench_impl {
             },
             // ── Generic: Arange ──────────────────────────────────────────────
             ClassKind::Arange => {
-                let s_val =
-                    a.start.as_ref().map(|f| quote! {#f as f32}).unwrap_or(quote! {0.0f32});
-                let st_val =
-                    a.step.as_ref().map(|f| quote! {#f as f32}).unwrap_or(quote! {1.0f32});
+                let s_val = a.start.as_ref().map(|f| quote! {#f as f32}).unwrap_or(quote! {0.0f32});
+                let st_val = a.step.as_ref().map(|f| quote! {#f as f32}).unwrap_or(quote! {1.0f32});
                 let sh = quote! { &[crate::spec::ShapeSpec {
                     label: "N=64M",
                     n: crate::spec::ARANGE_N, b: 1usize,
@@ -1189,9 +1187,11 @@ mod bench_impl {
                     .and_then(|e| e.base10_parse::<usize>().ok())
                     .map(|v| v == 1)
                     .unwrap_or(false);
-                let out_dim_ts =
-                    if out_per_row { quote! { crate::spec::Dim::B } }
-                    else { quote! { crate::spec::Dim::BxN } };
+                let out_dim_ts = if out_per_row {
+                    quote! { crate::spec::Dim::B }
+                } else {
+                    quote! { crate::spec::Dim::BxN }
+                };
 
                 let has_weight = a.pre_weight.is_some();
                 let has_bias = a.pre_bias.is_some();
@@ -1238,7 +1238,7 @@ mod bench_impl {
                 let sh = quote! { &[crate::spec::ShapeSpec {
                     label: #label,
                     n: #n_val as usize, b: #b_val as usize,
-                    check_n: #n_val as usize, check_b: 4usize,
+                    check_n: crate::spec::ROW_REDUCE_CHECK_N, check_b: 4usize,
                     mode: metaltile_core::ir::KernelMode::Reduction,
                     tpg: #tpg_val as usize,
                     grid: crate::spec::DispatchGrid::RowsB,
