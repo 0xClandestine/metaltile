@@ -60,6 +60,10 @@ fn static_buffer_len(param: &Param) -> Result<Option<usize>, MetalTileError> {
         .map(Some)
 }
 
+#[cfg_attr(
+    not(any(target_os = "macos", test)),
+    allow(dead_code)
+)]
 fn planned_data_len(
     param: &Param,
     buffers: &BTreeMap<String, Vec<u8>>,
@@ -83,6 +87,10 @@ fn planned_data_len(
     Ok(provided_len)
 }
 
+#[cfg_attr(
+    not(any(target_os = "macos", test)),
+    allow(dead_code)
+)]
 fn build_param_buffer_plans(
     kernel: &Kernel,
     buffers: &BTreeMap<String, Vec<u8>>,
@@ -99,10 +107,12 @@ fn build_param_buffer_plans(
     Ok(plans)
 }
 
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn encode_u32s(values: &[u32]) -> Vec<u8> {
     values.iter().flat_map(|value| value.to_le_bytes()).collect()
 }
 
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn known_shape_dims(param: &Param) -> Result<Option<Vec<u32>>, MetalTileError> {
     let mut dims = Vec::with_capacity(param.shape.rank());
     for dim in param.shape.iter() {
@@ -119,6 +129,7 @@ fn known_shape_dims(param: &Param) -> Result<Option<Vec<u32>>, MetalTileError> {
     Ok(Some(dims))
 }
 
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn row_major_strides(name: &str, dims: &[u32]) -> Result<Vec<u32>, MetalTileError> {
     let mut strides = vec![1u32; dims.len()];
     let mut stride = 1u32;
@@ -131,8 +142,13 @@ fn row_major_strides(name: &str, dims: &[u32]) -> Result<Vec<u32>, MetalTileErro
     Ok(strides)
 }
 
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 type StridedMetadata<'a> = (Cow<'a, [u8]>, Cow<'a, [u8]>);
 
+#[cfg_attr(
+    not(any(target_os = "macos", test)),
+    allow(dead_code)
+)]
 fn resolve_strided_metadata<'a>(
     param: &Param,
     buffers: &'a BTreeMap<String, Vec<u8>>,
