@@ -26,4 +26,3 @@
 - [ ] `cargo clippy --all-targets --all-features -- -D warnings` clean
 - [ ] `cargo test --workspace` passes
 - [ ] Typos clean (`typos`)
-- [ ] New ops have an MSL emit stub, interp stub, and body\_parser case
