@@ -6,6 +6,7 @@
 use crate::stats::BenchStats;
 
 /// Convert IEEE 754 half-float bits to f32.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn f16_bits_to_f32(bits: u16) -> f32 {
     let sign = ((bits as u32) >> 15) << 31;
     let exp5 = ((bits as u32) >> 10) & 0x1f;
@@ -34,6 +35,7 @@ pub struct GpuRunner {
     slc_buf: GpuBuffer,
 }
 
+#[allow(clippy::manual_non_exhaustive)]
 pub struct CompiledKernel {
     #[cfg(target_os = "macos")]
     inner: MacosPipeline,
@@ -41,6 +43,7 @@ pub struct CompiledKernel {
     _priv: (),
 }
 
+#[allow(clippy::manual_non_exhaustive)]
 pub struct GpuBuffer {
     pub size_bytes: usize,
     #[cfg(target_os = "macos")]
