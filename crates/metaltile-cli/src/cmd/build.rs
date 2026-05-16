@@ -4,18 +4,18 @@
 
 use std::collections::BTreeMap;
 
-use metaltile_bench::{
-    ops::DType,
-    spec::BenchSpec,
-    term::{Color, Style, paint_stderr, paint_stdout},
-};
 use metaltile_codegen::{
     TileSchedule,
     msl::{MslConfig, MslGenerator},
 };
 use metaltile_core::ir::KernelMode;
+use metaltile_std::{bench_types::DType, spec::BenchSpec};
 
-use crate::{flag_val, matches_filter};
+use crate::{
+    flag_val,
+    matches_filter,
+    term::{Color, Style, paint_stderr, paint_stdout},
+};
 
 pub fn run(args: &[String]) {
     let filter = flag_val(args, "--filter").or_else(|| flag_val(args, "-f"));
@@ -143,17 +143,17 @@ pub fn run(args: &[String]) {
 
 fn first_mode(spec: &BenchSpec, _dtypes: &[DType]) -> KernelMode {
     match &spec.dispatch {
-        metaltile_bench::spec::BenchDispatch::Generic =>
+        metaltile_std::spec::BenchDispatch::Generic =>
             spec.shapes.first().map(|s| s.mode).unwrap_or(KernelMode::Elementwise),
-        metaltile_bench::spec::BenchDispatch::Sort { .. }
-        | metaltile_bench::spec::BenchDispatch::Scan { .. }
-        | metaltile_bench::spec::BenchDispatch::ArgReduce { .. }
-        | metaltile_bench::spec::BenchDispatch::QuantizedMatVec { .. }
-        | metaltile_bench::spec::BenchDispatch::Attention { .. } => KernelMode::Reduction,
-        metaltile_bench::spec::BenchDispatch::Random { .. }
-        | metaltile_bench::spec::BenchDispatch::FpQuantized { .. } => KernelMode::Elementwise,
-        metaltile_bench::spec::BenchDispatch::Rope { .. }
-        | metaltile_bench::spec::BenchDispatch::StridedCopy { .. } => KernelMode::Grid3D,
+        metaltile_std::spec::BenchDispatch::Sort { .. }
+        | metaltile_std::spec::BenchDispatch::Scan { .. }
+        | metaltile_std::spec::BenchDispatch::ArgReduce { .. }
+        | metaltile_std::spec::BenchDispatch::QuantizedMatVec { .. }
+        | metaltile_std::spec::BenchDispatch::Attention { .. } => KernelMode::Reduction,
+        metaltile_std::spec::BenchDispatch::Random { .. }
+        | metaltile_std::spec::BenchDispatch::FpQuantized { .. } => KernelMode::Elementwise,
+        metaltile_std::spec::BenchDispatch::Rope { .. }
+        | metaltile_std::spec::BenchDispatch::StridedCopy { .. } => KernelMode::Grid3D,
     }
 }
 

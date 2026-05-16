@@ -10,7 +10,7 @@ const MLX_URL: &str = "https://github.com/ml-explore/mlx.git";
 
 fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    // crates/metaltile-bench → crates/ → repo root
+    // crates/metaltile-cli → crates/ → repo root
     let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
     let cache_dir = repo_root.join(".cache/mlx");
 

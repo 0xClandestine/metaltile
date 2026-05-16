@@ -33,28 +33,28 @@ use crate::{
         EquivTolerance,
         OpBench,
         OpResult,
-        check_equiv_with,
-        run_f16_once_as_f32,
-        to_gflops,
+// (GPU helper imports moved to metaltile-cli)
+// (GPU helper imports moved to metaltile-cli)
+// (GPU helper imports moved to metaltile-cli)
     },
-    runner::{CompiledKernel, GpuBuffer, GpuRunner},
+// (GPU imports moved to metaltile-cli)
 };
 
-static SRC: &str =
+pub(crate) static SRC: &str =
     include_str!(concat!(env!("OUT_DIR"), "/metal/steel/gemm/steel_gemm_fused.metal"));
-const FN: &str = "steel_gemm_fused_nn_float16_float16_bm64_bn64_bk16_wm2_wn2";
+pub(crate) const FN: &str = "steel_gemm_fused_nn_float16_float16_bm64_bn64_bk16_wm2_wn2";
 
-const BM: usize = 64;
-const BN: usize = 64;
-const BK: usize = 16;
+pub(crate) const BM: usize = 64;
+pub(crate) const BN: usize = 64;
+pub(crate) const BK: usize = 16;
 
-const SHAPES: &[(usize, usize, usize)] = &[(1_024, 1_024, 1_024), (4_096, 4_096, 4_096)];
+pub(crate) const SHAPES: &[(usize, usize, usize)] = &[(1_024, 1_024, 1_024), (4_096, 4_096, 4_096)];
 const BENCH: OpBench = OpBench::new("matmul", "GFLOPS");
 const MATMUL_TOLERANCE: EquivTolerance = EquivTolerance::new(1.0, 0.999);
 
 /// Replace [[function_constant(N)]] declarations with compile-time constants
 /// and strip conditional buffer annotations so all slots are always bound.
-fn specialise(src: &str) -> String {
+pub(crate) fn specialise(src: &str) -> String {
     src.replace(
         "constant bool has_batch [[function_constant(10)]];",
         "constant bool has_batch = false;",
@@ -135,7 +135,7 @@ fn mt_dispatch(use_simd: bool, m: usize, n: usize) -> ([usize; 3], [usize; 3]) {
 }
 
 fn run_ref_matmul_once(
-    runner: &GpuRunner,
+// (GPU imports moved to metaltile-cli)
     kernel: &CompiledKernel,
     a: &GpuBuffer,
     b: &GpuBuffer,
@@ -148,7 +148,7 @@ fn run_ref_matmul_once(
     n: usize,
 ) -> Vec<f32> {
     let (tgs, tpg) = ref_dispatch(m, n);
-    run_f16_once_as_f32(
+// (GPU helper imports moved to metaltile-cli)
         runner,
         kernel,
         &[a, b, dummy4, out, params, dummy24, dummy4, dummy8],
@@ -160,7 +160,7 @@ fn run_ref_matmul_once(
 }
 
 fn run_mt_matmul_once(
-    runner: &GpuRunner,
+// (GPU imports moved to metaltile-cli)
     kernel: &CompiledKernel,
     a: &GpuBuffer,
     b: &GpuBuffer,
@@ -175,7 +175,7 @@ fn run_mt_matmul_once(
     let k_b = runner.buffer_u32(k as u32);
     let n_b = runner.buffer_u32(n as u32);
     let (tgs, tpg) = mt_dispatch(use_simd, m, n);
-    run_f16_once_as_f32(runner, kernel, &[a, b, out, &m_b, &k_b, &n_b], out, m * n, tgs, tpg)
+// (GPU helper imports moved to metaltile-cli)
 }
 
 fn patterned_f16(len: usize, seed: usize) -> Vec<u16> {
@@ -201,86 +201,9 @@ fn fp32_to_f16(v: f32) -> u16 {
     }
 }
 
-pub fn bench_matmul_fp16(runner: &GpuRunner) -> Vec<OpResult> {
-    let src = specialise(SRC);
-    let ref_kernel =
-        runner.compile(&src, FN).inspect_err(|e| eprintln!("[{FN}] compile error: {e}"));
-
-    let use_simd = runner.supports_simd_matrix();
-    let mt_msl = {
-        let mut k = mt_matmul::kernel_ir();
-        k.mode = KernelMode::Tile2D;
-        let cfg = MslConfig {
-            tile_schedule: TileSchedule::default(),
-            use_simd_matrix: use_simd,
-            ..MslConfig::default()
-        };
-        MslGenerator::new(cfg).generate(&k).unwrap()
-    };
-    let mt_kernel = runner
-        .compile(&mt_msl, "mt_matmul")
-        .inspect_err(|e| eprintln!("[mt_matmul] compile error: {e}"))
-        .ok();
-
-    let dummy4 = runner.buffer_zeros(4);
-    let dummy8 = runner.buffer_zeros(8);
-    let dummy24 = runner.buffer_zeros(24);
-
-    SHAPES
-        .iter()
-        .map(|&(m, n, k)| {
-            let shape = format!("{m}×{n}×{k} f16");
-            let a = runner.buffer_f16(&patterned_f16(m * k, 1));
-            let b = runner.buffer_f16(&patterned_f16(k * n, 7));
-            let params = runner.buffer_bytes(&params_bytes(m, n, k));
-            let flops = 2.0 * m as f64 * n as f64 * k as f64;
-            let ref_out = runner.buffer_zeros(m * n * 2);
-
-            // A[0] B[1] C[2](dummy) D[3] params[4] addmm[5](dummy) bshape[6](dummy) bstrides[7](dummy)
-            let ref_perf = ref_kernel.as_ref().ok().and_then(|rk| {
-                let (tgs, tpg) = ref_dispatch(m, n);
-                let st = runner.bench(
-                    rk,
-                    &[&a, &b, &dummy4, &ref_out, &params, &dummy24, &dummy4, &dummy8],
-                    tgs,
-                    tpg,
-                    3,
-                    10,
-                );
-                to_gflops(&st, flops)
-            });
-
-            let equiv: Option<EquivResult> = ref_kernel.as_ref().ok().and_then(|rk| {
-                mt_kernel.as_ref().map(|mk| {
-                    let ref_vals = run_ref_matmul_once(
-                        runner, rk, &a, &b, &ref_out, &params, &dummy4, &dummy8, &dummy24, m, n,
-                    );
-                    let mt_out = runner.buffer_zeros(m * n * 2);
-                    let mt_vals =
-                        run_mt_matmul_once(runner, mk, &a, &b, &mt_out, use_simd, m, n, k);
-                    check_equiv_with(&ref_vals, &mt_vals, MATMUL_TOLERANCE)
-                })
-            });
-
-            let mt_perf = equiv.as_ref().and_then(|_| {
-                mt_kernel.as_ref().and_then(|mk| {
-                    let m_b = runner.buffer_u32(m as u32);
-                    let k_b = runner.buffer_u32(k as u32);
-                    let n_b = runner.buffer_u32(n as u32);
-                    let mt_out = runner.buffer_zeros(m * n * 2);
-                    let (tgs, tpg) = mt_dispatch(use_simd, m, n);
-                    let st =
-                        runner.bench(mk, &[&a, &b, &mt_out, &m_b, &k_b, &n_b], tgs, tpg, 3, 10);
-                    to_gflops(&st, flops)
-                })
-            });
-
-            match (mt_perf, equiv) {
-                (Some(mt_perf), Some(equiv)) => BENCH.implemented(shape, ref_perf, mt_perf, equiv),
-                _ => BENCH.nyi(shape, ref_perf),
-            }
-        })
-        .collect()
+// (GPU imports moved to metaltile-cli)
+    // TODO: GPU bench code moved to metaltile-cli/src/ops/
+    vec![]
 }
 
 #[kernel]

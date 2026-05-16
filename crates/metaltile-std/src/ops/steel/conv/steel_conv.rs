@@ -7,9 +7,3 @@
 //!   tiled matmul using SIMD matrix instructions. This requires
 //!   indirect strided memory access and runtime-shape-dependent
 //!   tiling that are not expressible in the current DSL primitives.
-
-use crate::{ops::OpResult, runner::GpuRunner};
-
-static _SRC: &str = include_str!(concat!(env!("OUT_DIR"), "/metal/steel/conv/steel_conv.metal"));
-
-pub fn bench_conv2d(_runner: &GpuRunner) -> Vec<OpResult> { vec![] }

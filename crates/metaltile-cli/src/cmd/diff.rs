@@ -8,10 +8,14 @@
 
 use std::{collections::HashMap, process::Command};
 
-use metaltile_bench::term::{Color, Style, paint_stderr, paint_stdout};
 use serde_json::Value;
 
-use crate::{flag_val, matches_filter, positional};
+use crate::{
+    flag_val,
+    matches_filter,
+    positional,
+    term::{Color, Style, paint_stderr, paint_stdout},
+};
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct RowKey {

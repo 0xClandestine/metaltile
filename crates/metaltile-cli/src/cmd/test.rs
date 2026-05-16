@@ -10,24 +10,20 @@ use metaltile::core::{
     dtype::DType,
     ir::{KernelMode, Op},
 };
-use metaltile_bench::{
-    ops::{
-        EquivResult,
-        EquivTolerance,
-        buffer_typed,
-        check_equiv_with,
-        dtype_tol,
-        dtype_tol_reduce,
-        run_typed_once,
-    },
-    runner::GpuRunner,
-    spec::BenchSpec,
-    term::{Color, Style, paint_stderr, paint_stdout},
-};
 use metaltile_codegen::msl::MslGenerator;
 use metaltile_interp::{Interpreter, TensorData};
+use metaltile_std::{
+    bench_types::{EquivResult, EquivTolerance, check_equiv_with, dtype_tol, dtype_tol_reduce},
+    spec::BenchSpec,
+};
 
-use crate::{flag_val, matches_filter};
+use crate::{
+    flag_val,
+    matches_filter,
+    measure::{buffer_typed, run_typed_once},
+    runner::GpuRunner,
+    term::{Color, Style, paint_stderr, paint_stdout},
+};
 
 pub fn run(args: &[String]) {
     let filter = flag_val(args, "--filter").or_else(|| flag_val(args, "-f"));
@@ -177,17 +173,17 @@ fn collect_unique_names(specs: &[&BenchSpec]) -> BTreeMap<&'static str, (KernelM
 
 fn first_mode(spec: &BenchSpec) -> KernelMode {
     match &spec.dispatch {
-        metaltile_bench::spec::BenchDispatch::Generic =>
+        metaltile_std::spec::BenchDispatch::Generic =>
             spec.shapes.first().map(|s| s.mode).unwrap_or(KernelMode::Elementwise),
-        metaltile_bench::spec::BenchDispatch::Sort { .. }
-        | metaltile_bench::spec::BenchDispatch::Scan { .. }
-        | metaltile_bench::spec::BenchDispatch::ArgReduce { .. }
-        | metaltile_bench::spec::BenchDispatch::QuantizedMatVec { .. }
-        | metaltile_bench::spec::BenchDispatch::Attention { .. } => KernelMode::Reduction,
-        metaltile_bench::spec::BenchDispatch::Random { .. }
-        | metaltile_bench::spec::BenchDispatch::FpQuantized { .. } => KernelMode::Elementwise,
-        metaltile_bench::spec::BenchDispatch::Rope { .. }
-        | metaltile_bench::spec::BenchDispatch::StridedCopy { .. } => KernelMode::Grid3D,
+        metaltile_std::spec::BenchDispatch::Sort { .. }
+        | metaltile_std::spec::BenchDispatch::Scan { .. }
+        | metaltile_std::spec::BenchDispatch::ArgReduce { .. }
+        | metaltile_std::spec::BenchDispatch::QuantizedMatVec { .. }
+        | metaltile_std::spec::BenchDispatch::Attention { .. } => KernelMode::Reduction,
+        metaltile_std::spec::BenchDispatch::Random { .. }
+        | metaltile_std::spec::BenchDispatch::FpQuantized { .. } => KernelMode::Elementwise,
+        metaltile_std::spec::BenchDispatch::Rope { .. }
+        | metaltile_std::spec::BenchDispatch::StridedCopy { .. } => KernelMode::Grid3D,
     }
 }
 
@@ -209,13 +205,13 @@ fn test_one_kernel(
     mode: KernelMode,
 ) -> Result<EquivResult, String> {
     match &spec.dispatch {
-        metaltile_bench::spec::BenchDispatch::Generic => test_generic(spec, runner, dt, mode),
+        metaltile_std::spec::BenchDispatch::Generic => test_generic(spec, runner, dt, mode),
         // Complex dispatches: run the full benchmark path but just extract the equiv result.
         // This is less efficient than a correctness-only path but avoids duplicating
         // hundreds of lines of kernel-specific setup code.
         _ => {
             // Run the full spec — but only once, grab the equiv result.
-            let results = spec.run(runner, dt);
+            let results = crate::run_spec::run(spec, runner, dt);
             let equiv = results
                 .first()
                 .and_then(|r| r.equiv().copied())
@@ -336,7 +332,7 @@ fn test_generic(
     let out_idx = primary_out_idx.unwrap_or(0);
     let out_count = shape.out_elems.resolve(check_n, check_b).max(1);
     let grid = shape.grid.eval(check_n, check_b, shape.tpg);
-    let refs: Vec<&metaltile_bench::runner::GpuBuffer> = check_bufs.iter().collect();
+    let refs: Vec<&crate::runner::GpuBuffer> = check_bufs.iter().collect();
     let mt_vals = run_typed_once(
         runner,
         &compiled,
@@ -377,15 +373,15 @@ fn constexprs(vals: &[(&str, usize)]) -> ConstExprValues {
 
 fn scalar_buf(
     runner: &GpuRunner,
-    sb: metaltile_bench::spec::ScalarBufSpec,
+    sb: metaltile_std::spec::ScalarBufSpec,
     n: usize,
     b: usize,
-) -> metaltile_bench::runner::GpuBuffer {
+) -> crate::runner::GpuBuffer {
     match sb {
-        metaltile_bench::spec::ScalarBufSpec::U32N => runner.buffer_u32(n as u32),
-        metaltile_bench::spec::ScalarBufSpec::U32B => runner.buffer_u32(b as u32),
-        metaltile_bench::spec::ScalarBufSpec::U64N => runner.buffer_u64(n as u64),
-        metaltile_bench::spec::ScalarBufSpec::U64B => runner.buffer_u64(b as u64),
-        metaltile_bench::spec::ScalarBufSpec::I64B => runner.buffer_i64(b as i64),
+        metaltile_std::spec::ScalarBufSpec::U32N => runner.buffer_u32(n as u32),
+        metaltile_std::spec::ScalarBufSpec::U32B => runner.buffer_u32(b as u32),
+        metaltile_std::spec::ScalarBufSpec::U64N => runner.buffer_u64(n as u64),
+        metaltile_std::spec::ScalarBufSpec::U64B => runner.buffer_u64(b as u64),
+        metaltile_std::spec::ScalarBufSpec::I64B => runner.buffer_i64(b as i64),
     }
 }

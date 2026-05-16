@@ -7,8 +7,13 @@
 //!   device    Show GPU device info and supported features
 
 mod cmd;
+pub mod measure;
+pub mod run_spec;
+pub mod runner;
+pub mod stats;
+pub mod term;
 
-use metaltile_bench::term::{Color, Style, paint_stderr, paint_stdout};
+use crate::term::{Color, Style, paint_stderr, paint_stdout};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

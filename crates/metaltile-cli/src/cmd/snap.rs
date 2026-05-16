@@ -8,11 +8,13 @@
 
 use std::process::Command;
 
-use metaltile_bench::term::{Color, Style, paint_stderr, paint_stdout};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::flag_val;
+use crate::{
+    flag_val,
+    term::{Color, Style, paint_stderr, paint_stdout},
+};
 
 #[derive(Serialize)]
 struct Snapshot {

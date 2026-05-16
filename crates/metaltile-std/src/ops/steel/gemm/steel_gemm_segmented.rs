@@ -27,23 +27,23 @@ use crate::{
         EquivTolerance,
         OpBench,
         OpResult,
-        check_equiv_with,
-        run_f16_once_as_f32,
-        to_gflops,
+// (GPU helper imports moved to metaltile-cli)
+// (GPU helper imports moved to metaltile-cli)
+// (GPU helper imports moved to metaltile-cli)
     },
-    runner::{CompiledKernel, GpuBuffer, GpuRunner},
+// (GPU imports moved to metaltile-cli)
 };
 
-static SRC: &str =
+pub(crate) static SRC: &str =
     include_str!(concat!(env!("OUT_DIR"), "/metal/steel/gemm/steel_gemm_segmented.metal"));
 
-const FN: &str = "steel_segmented_mm_nn_float16_float16_bm64_bn64_bk16_wm2_wn2";
+pub(crate) const FN: &str = "steel_segmented_mm_nn_float16_float16_bm64_bn64_bk16_wm2_wn2";
 
-const BM: usize = 64;
-const BN: usize = 64;
-const BK: usize = 16;
+pub(crate) const BM: usize = 64;
+pub(crate) const BN: usize = 64;
+pub(crate) const BK: usize = 16;
 
-const SHAPES: &[(usize, usize, usize)] = &[(1_024, 1_024, 1_024), (4_096, 4_096, 4_096)];
+pub(crate) const SHAPES: &[(usize, usize, usize)] = &[(1_024, 1_024, 1_024), (4_096, 4_096, 4_096)];
 const BENCH: OpBench = OpBench::new("matmul_segmented_fp16", "GFLOPS");
 const TOLERANCE: EquivTolerance = EquivTolerance::new(1.0, 0.999);
 
@@ -108,7 +108,7 @@ fn patterned_f16(len: usize, seed: usize) -> Vec<u16> {
 }
 
 fn run_ref_once(
-    runner: &GpuRunner,
+// (GPU imports moved to metaltile-cli)
     kernel: &CompiledKernel,
     a: &GpuBuffer,
     b: &GpuBuffer,
@@ -119,11 +119,11 @@ fn run_ref_once(
     n: usize,
 ) -> Vec<f32> {
     let (tgs, tpg) = ref_dispatch(m, n);
-    run_f16_once_as_f32(runner, kernel, &[a, b, segments, out, params], out, m * n, tgs, tpg)
+// (GPU helper imports moved to metaltile-cli)
 }
 
 fn run_mt_once(
-    runner: &GpuRunner,
+// (GPU imports moved to metaltile-cli)
     kernel: &CompiledKernel,
     a: &GpuBuffer,
     b: &GpuBuffer,
@@ -137,7 +137,7 @@ fn run_mt_once(
     let k_b = runner.buffer_u32(k as u32);
     let n_b = runner.buffer_u32(n as u32);
     let (tgs, tpg) = mt_dispatch(use_simd, m, n);
-    run_f16_once_as_f32(runner, kernel, &[a, b, out, &m_b, &k_b, &n_b], out, m * n, tgs, tpg)
+// (GPU helper imports moved to metaltile-cli)
 }
 
 // ── Kernel ────────────────────────────────────────────────────────────────────
@@ -153,78 +153,9 @@ pub fn mt_matmul(
 
 // ── Bench ────────────────────────────────────────────────────────────────────
 
-pub fn bench_matmul_segmented(runner: &GpuRunner) -> Vec<OpResult> {
-    let ref_kernel = runner
-        .compile_with_bool_constants(SRC, FN, &[(199, true), (200, true), (201, true)])
-        .inspect_err(|e| eprintln!("[{FN}] compile error: {e}"))
-        .ok();
-
-    let use_simd = runner.supports_simd_matrix();
-    let mt_msl = {
-        let mut k = mt_matmul::kernel_ir();
-        k.mode = KernelMode::Tile2D;
-        let cfg = MslConfig {
-            tile_schedule: TileSchedule::default(),
-            use_simd_matrix: use_simd,
-            ..MslConfig::default()
-        };
-        MslGenerator::new(cfg).generate(&k).unwrap()
-    };
-    let mt_kernel = runner
-        .compile(&mt_msl, "mt_matmul")
-        .inspect_err(|e| eprintln!("[mt_matmul] compile error: {e}"))
-        .ok();
-
-    SHAPES
-        .iter()
-        .map(|&(m, n, k)| {
-            let shape = format!("{m}×{n}×{k}");
-            let a = runner.buffer_f16(&patterned_f16(m * k, 1));
-            let b = runner.buffer_f16(&patterned_f16(k * n, 7));
-            let params = runner.buffer_bytes(&params_bytes(m, n, k));
-            let flops = 2.0 * m as f64 * n as f64 * k as f64;
-            let ref_out = runner.buffer_zeros(m * n * 2);
-
-            // Single segment: offsets [0, M]
-            let segments: [u32; 2] = [0, m as u32];
-            let seg_bytes: Vec<u8> = segments.iter().flat_map(|v| v.to_le_bytes()).collect();
-            let seg_buf = runner.buffer_bytes(&seg_bytes);
-
-            let ref_perf = ref_kernel.as_ref().and_then(|rk| {
-                let (tgs, tpg) = ref_dispatch(m, n);
-                let st = runner.bench(rk, &[&a, &b, &seg_buf, &ref_out, &params], tgs, tpg, 3, 10);
-                to_gflops(&st, flops)
-            });
-
-            let equiv: Option<EquivResult> = ref_kernel.as_ref().and_then(|rk| {
-                mt_kernel.as_ref().map(|mk| {
-                    let ref_vals =
-                        run_ref_once(runner, rk, &a, &b, &seg_buf, &ref_out, &params, m, n);
-                    let mt_out = runner.buffer_zeros(m * n * 2);
-                    let mt_vals = run_mt_once(runner, mk, &a, &b, &mt_out, use_simd, m, n, k);
-                    check_equiv_with(&ref_vals, &mt_vals, TOLERANCE)
-                })
-            });
-
-            let mt_perf = equiv.as_ref().and_then(|_| {
-                mt_kernel.as_ref().and_then(|mk| {
-                    let mt_out = runner.buffer_zeros(m * n * 2);
-                    let (tgs, tpg) = mt_dispatch(use_simd, m, n);
-                    let m_b = runner.buffer_u32(m as u32);
-                    let k_b = runner.buffer_u32(k as u32);
-                    let n_b = runner.buffer_u32(n as u32);
-                    let st =
-                        runner.bench(mk, &[&a, &b, &mt_out, &m_b, &k_b, &n_b], tgs, tpg, 3, 10);
-                    to_gflops(&st, flops)
-                })
-            });
-
-            match (mt_perf, equiv) {
-                (Some(mt_perf), Some(equiv)) => BENCH.implemented(shape, ref_perf, mt_perf, equiv),
-                _ => BENCH.nyi(shape, ref_perf),
-            }
-        })
-        .collect()
+// (GPU imports moved to metaltile-cli)
+    // TODO: GPU bench code moved to metaltile-cli/src/ops/
+    vec![]
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -248,7 +179,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn ref_segmented_compiles() {
-        let Ok(runner) = GpuRunner::new() else { return };
+// (GPU imports moved to metaltile-cli)
         if let Err(e) =
             runner.compile_with_bool_constants(SRC, FN, &[(199, true), (200, true), (201, true)])
         {

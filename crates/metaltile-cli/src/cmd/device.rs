@@ -1,11 +1,10 @@
 //! `tile device` — Show GPU device info and supported feature flags.
 
-use metaltile_bench::{
+use crate::{
+    flag_present,
     runner::GpuRunner,
     term::{Color, Style, paint_stdout},
 };
-
-use crate::flag_present;
 
 pub fn run(args: &[String]) {
     let json_out = flag_present(args, "--json");

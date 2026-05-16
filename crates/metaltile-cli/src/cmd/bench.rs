@@ -1,20 +1,23 @@
 //! `tile bench` — Benchmark suite: MetalTile vs MLX reference.
 
-use metaltile_bench::{
-    ops::{
+use metaltile_std::{
+    bench_types::{
         CorrectnessStatus,
         OpResult,
         SuitePrinter,
-        bench_matmul_fp16,
         set_result_reporter,
         validate_results,
     },
-    runner::GpuRunner,
     spec::BenchSpec,
-    term::{Color, Style, paint_stderr, paint_stdout},
 };
 
-use crate::{flag_val, matches_filter};
+use crate::{
+    flag_val,
+    matches_filter,
+    run_spec::run as run_spec,
+    runner::GpuRunner,
+    term::{Color, Style, paint_stderr, paint_stdout},
+};
 
 pub fn run(args: &[String]) {
     let json_out = flag_val(args, "--json").or_else(|| flag_val(args, "-o"));
@@ -71,9 +74,7 @@ pub fn run(args: &[String]) {
         };
         let _reporter = set_result_reporter(&mut report);
 
-        // Matrix multiply
-        extend_if_selected(&mut all, &runner, &filter, bench_matmul_fp16);
-        // All other ops — inventory-registered via #[bench_kernel]
+        // All ops — inventory-registered via #[bench_kernel]
         {
             let mut specs: Vec<&BenchSpec> = inventory::iter::<BenchSpec>.into_iter().collect();
             specs.sort_unstable_by_key(|s| (s.op, s.subop));
@@ -81,7 +82,7 @@ pub fn run(args: &[String]) {
                 if matches_filter(filter.as_deref(), spec.op) {
                     for &dt in spec.dtypes {
                         runner.flush_slc();
-                        all.extend(spec.run(&runner, dt));
+                        all.extend(run_spec(spec, &runner, dt));
                     }
                 }
             }
@@ -221,15 +222,6 @@ fn save_json(device: &str, results: &[OpResult], path: &str) {
 
 fn json_f(v: Option<f64>) -> String {
     v.map(|x| format!("{x:.3}")).unwrap_or_else(|| "null".into())
-}
-
-fn extend_if_selected(
-    all: &mut Vec<OpResult>,
-    runner: &GpuRunner,
-    filter: &Option<String>,
-    run: fn(&GpuRunner) -> Vec<OpResult>,
-) {
-    all.extend(run(runner).into_iter().filter(|r| matches_filter(filter.as_deref(), r.op())));
 }
 
 fn summary_item(label: &str, value: &str, value_style: Style) -> String {

@@ -13,10 +13,3 @@
 //!   implements single-query decode attention as hand-written MSL —
 //!   a decode-mode DSL kernel for Steel attention may be feasible
 //!   once online-softmax primitives are added to the IR.
-
-use crate::{ops::OpResult, runner::GpuRunner};
-
-static _SRC: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/metal/steel/attn/steel_attention.metal"));
-
-pub fn bench_steel_attention(_runner: &GpuRunner) -> Vec<OpResult> { vec![] }
