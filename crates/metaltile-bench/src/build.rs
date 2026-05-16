@@ -97,6 +97,7 @@ fn preprocess_dir(dir: &Path, kernels_dir: &Path, out_metal: &Path, mlx_root: &P
 
             let output = Command::new("xcrun")
                 .args(["-sdk", "macosx", "metal", "-E",
+                       "-fno-modules",  // force textual expansion; runtime compiler can't handle #pragma clang module import
                        "-I", mlx_root.to_str().unwrap(),
                        path.to_str().unwrap()])
                 .output()
