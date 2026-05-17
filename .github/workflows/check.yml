@@ -90,3 +90,27 @@ jobs:
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           REPO: ${{ github.repository }}
         run: python3 .github/scripts/commit_hygiene.py
+
+  metal:
+    name: Metal runtime & kernel correctness (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      # rust-toolchain.toml pins nightly (edition=2024); the action installs
+      # default but cargo will pick up the toml override automatically.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Workspace tests (includes Metal runtime tests)
+        run: cargo test --workspace
+
+      - name: Compile all kernels
+        run: cargo run --release -p metaltile-cli -- build
+
+      - name: Kernel correctness — interpreter vs GPU
+        run: cargo run --release -p metaltile-cli -- test
