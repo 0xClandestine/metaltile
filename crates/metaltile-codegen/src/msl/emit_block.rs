@@ -6,8 +6,7 @@ use std::{collections::BTreeMap, fmt::Write};
 
 use metaltile_core::{
     dtype::DType,
-    ir::{BinOpKind, Block, BlockId, IndexExpr, Kernel, KernelMode, Op, ReduceKind, ValueId},
-    shape::Shape,
+    ir::{BinOpKind, Block, BlockId, Kernel, KernelMode, Op, ReduceKind, ValueId},
 };
 
 use super::{
