@@ -2,11 +2,13 @@ name: Check
 
 on:
   push:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
   workflow_dispatch: {}
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
 
 env:
   CLICOLOR: 1
@@ -72,3 +74,19 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --workspace
+
+  commit-hygiene:
+    name: Commit Hygiene
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Run hygiene check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+        run: python3 .github/scripts/commit_hygiene.py
