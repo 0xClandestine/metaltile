@@ -18,6 +18,18 @@ use crate::{
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
+pub fn help() {
+    eprintln!("tile build — Compile all registered kernels to MSL and report errors");
+    eprintln!();
+    eprintln!("USAGE:");
+    eprintln!("  tile build [options]");
+    eprintln!();
+    eprintln!("OPTIONS:");
+    eprintln!("  --filter, -f <name>     Only build kernels whose name contains <name>");
+    eprintln!("  --dtypes <f32,f16,bf16> Comma-separated list of dtypes to build");
+    eprintln!("  -v                      Print generated MSL for each kernel");
+}
+
 pub fn run(args: &[String]) {
     let filter = flag_val(args, "--filter").or_else(|| flag_val(args, "-f"));
     let dtypes_arg = flag_val(args, "--dtypes");

@@ -6,6 +6,7 @@
 //!   tile inspect                           # list all registered kernels
 //!   tile inspect <kernel>                  # print final MSL (default)
 //!   tile inspect <kernel> --ir             # print raw IR
+//!   tile inspect <kernel> --stats          # print per-pass op-count table
 //!   tile inspect <kernel> -o /tmp/out      # write .metal file
 //!   tile inspect --all -o /tmp/out         # dump every kernel to disk
 
@@ -27,11 +28,32 @@ use crate::{
     term::{Color, Style, paint_stdout},
 };
 
+pub fn help() {
+    eprintln!("tile inspect — Print IR and/or MSL for registered kernels");
+    eprintln!();
+    eprintln!("USAGE:");
+    eprintln!("  tile inspect                    List all registered kernels");
+    eprintln!("  tile inspect <kernel>           Print final MSL (default)");
+    eprintln!("  tile inspect <kernel> --ir      Print raw IR before any passes");
+    eprintln!("  tile inspect <kernel> --stats   Print per-pass op-count table");
+    eprintln!("  tile inspect <kernel> --pass <name|all>  Print IR after a specific pass");
+    eprintln!("  tile inspect --all -o <dir>     Dump all kernels to .metal files");
+    eprintln!();
+    eprintln!("OPTIONS:");
+    eprintln!("  --ir               Print raw IR");
+    eprintln!("  --stats            Print per-pass op-count reduction table");
+    eprintln!("  --pass <name>      Print IR after named pass; use 'all' for every stage");
+    eprintln!("  --all              Process all kernels");
+    eprintln!("  --dir, -o <path>   Write output files to <path> instead of stdout");
+    eprintln!("  --filter <name>    Filter kernels by name substring");
+}
+
 pub fn run(args: &[String]) {
     let dir = flag_val(args, "--dir").or_else(|| flag_val(args, "-o"));
     let filter = flag_val(args, "--filter").or_else(|| positional(args));
     let all_flag = flag_present(args, "--all");
     let ir_flag = flag_present(args, "--ir");
+    let stats_flag = flag_present(args, "--stats");
     let pass_arg = flag_val(args, "--pass");
 
     // Collect all specs and group by kernel_name.
@@ -154,6 +176,14 @@ pub fn run(args: &[String]) {
             } else {
                 println!("{k}");
             }
+        } else if stats_flag {
+            let mut k = (spec.kernel_ir)(dt);
+            k.mode = first_mode(spec);
+            let generator = make_generator(first_mode(spec));
+            match generator.generate_with_stats(&k) {
+                Ok((_, stats)) => print_stats_table(&stats),
+                Err(e) => eprintln!("error: {e}"),
+            }
         } else if let Some(pass) = &pass_arg {
             // --pass flag: print IR after a specific pass (or 'all' for every stage)
             let mut k = (spec.kernel_ir)(dt);
@@ -241,13 +271,8 @@ fn mode_label(mode: KernelMode) -> &'static str {
     }
 }
 
-fn generate_msl(spec: &BenchSpec, dtypes: &[DType]) -> String {
-    let dt = dtypes.first().copied().unwrap_or(DType::F32);
-    let mut k = (spec.kernel_ir)(dt);
-    let mode = first_mode(spec);
-    k.mode = mode;
-
-    let generator: MslGenerator = if matches!(mode, KernelMode::Tile2D) {
+fn make_generator(mode: KernelMode) -> MslGenerator {
+    if matches!(mode, KernelMode::Tile2D) {
         MslGenerator::new(MslConfig {
             tile_schedule: TileSchedule::default(),
             use_simd_matrix: true,
@@ -255,7 +280,30 @@ fn generate_msl(spec: &BenchSpec, dtypes: &[DType]) -> String {
         })
     } else {
         MslGenerator::default()
-    };
+    }
+}
 
-    generator.generate(&k).unwrap_or_else(|e| format!("// ERROR: {e}\n"))
+fn generate_msl(spec: &BenchSpec, dtypes: &[DType]) -> String {
+    let dt = dtypes.first().copied().unwrap_or(DType::F32);
+    let mut k = (spec.kernel_ir)(dt);
+    let mode = first_mode(spec);
+    k.mode = mode;
+    make_generator(mode).generate(&k).unwrap_or_else(|e| format!("// ERROR: {e}\n"))
+}
+
+fn print_stats_table(stats: &[metaltile_codegen::passes::PassStats]) {
+    println!("{:<20}  {:>10}  {:>9}  {:>6}  {:>7}", "pass", "ops_before", "ops_after", "delta", "time_us");
+    println!("{:-<20}  {:->10}  {:->9}  {:->6}  {:->7}", "", "", "", "", "");
+    for s in stats {
+        let delta = s.ops_after as isize - s.ops_before as isize;
+        let delta_str = if delta == 0 {
+            "  +0".to_string()
+        } else {
+            format!("{:>+4}", delta)
+        };
+        println!(
+            "{:<20}  {:>10}  {:>9}  {:>6}  {:>7}",
+            s.name, s.ops_before, s.ops_after, delta_str, s.wall_us
+        );
+    }
 }

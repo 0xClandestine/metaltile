@@ -27,6 +27,19 @@ use crate::{
     term::{Color, Style, paint_stdout},
 };
 
+pub fn help() {
+    eprintln!("tile profile — Estimate GPU occupancy and register pressure");
+    eprintln!();
+    eprintln!("USAGE:");
+    eprintln!("  tile profile                    Profile all kernels, compact table");
+    eprintln!("  tile profile <kernel>           Profile one kernel, verbose output");
+    eprintln!("  tile profile <kernel> --sweep   Show full per-threadgroup-size sweep");
+    eprintln!();
+    eprintln!("OPTIONS:");
+    eprintln!("  --filter <name>   Filter kernels by name substring");
+    eprintln!("  --sweep           Show occupancy at every threadgroup size");
+}
+
 /// Threadgroup sizes to sweep (total threads).
 const TG_SWEEP: &[u32] = &[64, 128, 256, 512, 1024];
 

@@ -19,6 +19,17 @@ use crate::{
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
+pub fn help() {
+    eprintln!("tile bench — Benchmark suite: MetalTile vs MLX reference");
+    eprintln!();
+    eprintln!("USAGE:");
+    eprintln!("  tile bench [options]");
+    eprintln!();
+    eprintln!("OPTIONS:");
+    eprintln!("  --filter, -f <name>   Only run kernels whose name contains <name>");
+    eprintln!("  --json, -o <file>     Write results as JSON to <file>");
+}
+
 pub fn run(args: &[String]) {
     let json_out = flag_val(args, "--json").or_else(|| flag_val(args, "-o"));
     let filter = flag_val(args, "--filter").or_else(|| flag_val(args, "-f"));

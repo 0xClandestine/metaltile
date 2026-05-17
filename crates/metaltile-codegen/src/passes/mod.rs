@@ -54,13 +54,11 @@ pub struct PassStats {
 }
 
 /// Run a sequence of passes on a kernel, collecting statistics.
-/// When `METALTILE_PASS_DEBUG=1` is set, prints a summary table.
 pub fn run_passes_with_stats(
     kernel: &mut Kernel,
     passes: &[Box<dyn Pass>],
 ) -> metaltile_core::error::Result<Vec<PassStats>> {
     let mut stats = Vec::with_capacity(passes.len());
-    let debug = std::env::var("METALTILE_PASS_DEBUG").as_deref() == Ok("1");
 
     for pass in passes {
         let ops_before = count_total_ops(kernel);
@@ -74,18 +72,6 @@ pub fn run_passes_with_stats(
             ops_after,
             wall_us: elapsed.as_micros() as u64,
         });
-    }
-
-    if debug {
-        eprintln!("pass          ops_before  ops_after  delta  time_us");
-        eprintln!("-----------   ----------  ---------  -----  -------");
-        for s in &stats {
-            let delta = s.ops_after as isize - s.ops_before as isize;
-            eprintln!(
-                "{:<12}  {:>10}  {:>9}  {:>+5}  {:>7}",
-                s.name, s.ops_before, s.ops_after, delta, s.wall_us
-            );
-        }
     }
 
     Ok(stats)

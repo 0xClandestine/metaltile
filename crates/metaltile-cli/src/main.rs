@@ -26,16 +26,26 @@ fn main() {
     let subcommand = &args[1];
     let rest = &args[2..];
 
+    let wants_help = rest.iter().any(|a| a == "--help" || a == "-h");
+
     match subcommand.as_str() {
-        "bench" => cmd::bench::run(rest),
-        "build" => cmd::build::run(rest),
-        "inspect" => cmd::inspect::run(rest),
-        "device" => cmd::device::run(rest),
-        "test" => cmd::test::run(rest),
-        "profile" => cmd::profile::run(rest),
-        "snap" => cmd::snap::run(rest),
-        "diff" => cmd::diff::run(rest),
         "--help" | "-h" => print_usage_and_exit(&args[0]),
+        "bench" if wants_help => cmd::bench::help(),
+        "bench" => cmd::bench::run(rest),
+        "build" if wants_help => cmd::build::help(),
+        "build" => cmd::build::run(rest),
+        "inspect" if wants_help => cmd::inspect::help(),
+        "inspect" => cmd::inspect::run(rest),
+        "device" if wants_help => cmd::device::help(),
+        "device" => cmd::device::run(rest),
+        "test" if wants_help => cmd::test::help(),
+        "test" => cmd::test::run(rest),
+        "profile" if wants_help => cmd::profile::help(),
+        "profile" => cmd::profile::run(rest),
+        "snap" if wants_help => cmd::snap::help(),
+        "snap" => cmd::snap::run(rest),
+        "diff" if wants_help => cmd::diff::help(),
+        "diff" => cmd::diff::run(rest),
         _ => {
             eprintln!(
                 "{} {}",

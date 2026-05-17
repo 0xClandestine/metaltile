@@ -62,6 +62,19 @@ fn positionals(args: &[String]) -> Vec<String> {
     result
 }
 
+pub fn help() {
+    eprintln!("tile diff — Compare bench results against a saved baseline");
+    eprintln!();
+    eprintln!("USAGE:");
+    eprintln!("  tile diff <baseline.json>              Run bench, then diff against baseline");
+    eprintln!("  tile diff <baseline.json> <run.json>   Diff two saved result files");
+    eprintln!();
+    eprintln!("OPTIONS:");
+    eprintln!("  --filter, -f <name>   Only show kernels whose name contains <name>");
+    eprintln!("  --threshold <n>       Highlight regressions larger than n% (default: 5)");
+    eprintln!("  --sort <field>        Sort by: name, delta, pct (default: name)");
+}
+
 pub fn run(args: &[String]) {
     let pos = positionals(args);
     let baseline_path = pos.first().cloned();
