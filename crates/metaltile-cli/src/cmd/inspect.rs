@@ -176,8 +176,7 @@ pub fn run(args: &[String]) {
                         "copy_prop" => Box::new(passes::copy_prop::CopyPropPass),
                         "cse" => Box::new(passes::cse::CsePass),
                         "licm" => Box::new(passes::licm::LicmPass),
-                        "if_conversion" =>
-                            Box::new(passes::if_conversion::IfConversionPass),
+                        "if_conversion" => Box::new(passes::if_conversion::IfConversionPass),
                         "value_sink" => Box::new(passes::value_sink::ValueSinkPass),
                         "tile_lowering" =>
                             Box::new(passes::tile_lowering::TileLoweringPass::default()),
@@ -185,8 +184,7 @@ pub fn run(args: &[String]) {
                         "unroll" => Box::new(passes::unroll::UnrollPass::default()),
                         "schedule" => Box::new(passes::schedule::SchedulePass::default()),
                         "vectorize" => Box::new(passes::vectorize::VectorizePass),
-                        "dead_store_elim" =>
-                            Box::new(passes::dead_store_elim::DeadStoreElimPass),
+                        "dead_store_elim" => Box::new(passes::dead_store_elim::DeadStoreElimPass),
                         _ => {
                             eprintln!(
                                 "Unknown pass: {name}. Valid: type_check, const_fold, algebraic_simplify, copy_prop, cse, licm, if_conversion, value_sink, tile_lowering, fusion, unroll, schedule, vectorize, dead_store_elim, all"
