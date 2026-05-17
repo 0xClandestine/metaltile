@@ -147,16 +147,16 @@ pub fn run(args: &[String]) {
 
     // Per-output collectors for the emit step.
     let kernels_dir = out_root.as_ref().map(|r| r.join("Resources").join("kernels"));
-    if let Some(dir) = &kernels_dir {
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            eprintln!(
-                "  {} create {}: {}",
-                paint_stderr("error:", Style::new().fg(Color::Red).bold()),
-                dir.display(),
-                e
-            );
-            std::process::exit(1);
-        }
+    if let Some(dir) = &kernels_dir
+        && let Err(e) = std::fs::create_dir_all(dir)
+    {
+        eprintln!(
+            "  {} create {}: {}",
+            paint_stderr("error:", Style::new().fg(Color::Red).bold()),
+            dir.display(),
+            e
+        );
+        std::process::exit(1);
     }
     let mut emitted_kernels: Vec<Kernel> = Vec::new();
     let mut emitted_paths: Vec<PathBuf> = Vec::new();
@@ -223,10 +223,10 @@ pub fn run(args: &[String]) {
                 emitted_kernels.push(k.clone());
             }
 
-            if verbose {
-                if let Ok(msl) = generator.generate(&k) {
-                    println!("// ══ {} {} ══\n{}", k.name, dtype_label(dt), msl);
-                }
+            if verbose
+                && let Ok(msl) = generator.generate(&k)
+            {
+                println!("// ══ {} {} ══\n{}", k.name, dtype_label(dt), msl);
             }
         }
 
