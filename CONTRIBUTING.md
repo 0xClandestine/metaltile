@@ -43,7 +43,7 @@ Include `BREAKING CHANGE` in the PR body for details.
 ```bash
 git clone git@github.com:0xClandestine/metaltile.git
 cd metaltile
-./scripts/setup-dev.sh
+./.github/scripts/setup-dev.sh
 ```
 
 This verifies:
