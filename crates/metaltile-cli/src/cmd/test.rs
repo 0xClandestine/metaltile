@@ -85,8 +85,7 @@ pub fn run(args: &[String]) {
         // `inventory::submit!` with empty `shapes`) have no benchmark
         // dimensions to test against the interpreter. `tile build` still
         // compiles their MSL; `tile test` skips them.
-        let has_shapes =
-            specs.iter().any(|s| s.kernel_name == *name && !s.shapes.is_empty());
+        let has_shapes = specs.iter().any(|s| s.kernel_name == *name && !s.shapes.is_empty());
         if !has_shapes {
             skipped += 1;
             eprintln!(

@@ -25,14 +25,7 @@ use std::{
 
 use metaltile_codegen::{
     TileSchedule,
-    emit::{
-        self,
-        compile_metallib,
-        dtype_suffix,
-        write_manifest,
-        write_msl,
-        write_swift_wrappers,
-    },
+    emit::{self, compile_metallib, dtype_suffix, write_manifest, write_msl, write_swift_wrappers},
     msl::{MslConfig, MslGenerator},
 };
 use metaltile_core::ir::{Kernel, KernelMode};
@@ -238,9 +231,7 @@ pub fn run(args: &[String]) {
                 emitted_kernels.push(k.clone());
             }
 
-            if verbose
-                && let Ok(msl) = generator.generate(&k)
-            {
+            if verbose && let Ok(msl) = generator.generate(&k) {
                 println!("// ══ {} {} ══\n{}", k.name, dtype_label(dt), msl);
             }
         }

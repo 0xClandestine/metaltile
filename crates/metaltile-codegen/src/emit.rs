@@ -105,9 +105,7 @@ type Result<T> = std::result::Result<T, EmitError>;
 /// kernels can opt into `use_simd_matrix` without coupling the emit
 /// helpers to a single config.
 pub fn write_msl(kernel: &Kernel, dir: &Path, generator: &MslGenerator) -> Result<PathBuf> {
-    let msl = generator
-        .generate(kernel)
-        .map_err(|e| EmitError::Codegen(format!("{e:?}")))?;
+    let msl = generator.generate(kernel).map_err(|e| EmitError::Codegen(format!("{e:?}")))?;
     let path = dir.join(format!("{}.metal", kernel.name));
     std::fs::write(&path, msl)?;
     Ok(path)
@@ -151,10 +149,7 @@ fn param_to_manifest(p: &Param) -> ParamManifest {
 }
 
 fn constexpr_to_manifest(c: &ConstExprDecl) -> ConstExprManifest {
-    ConstExprManifest {
-        name: c.name.name().to_string(),
-        dtype: dtype_suffix(c.dtype).to_string(),
-    }
+    ConstExprManifest { name: c.name.name().to_string(), dtype: dtype_suffix(c.dtype).to_string() }
 }
 
 // ─── Swift dispatch wrappers ─────────────────────────────────────────
@@ -208,12 +203,7 @@ fn emit_swift_wrapper(out: &mut String, k: &Kernel) {
     writeln!(out, "        threadgroupSize: MTLSize,").ok();
     writeln!(out, "        on commandBuffer: MTLCommandBuffer").ok();
     writeln!(out, "    ) {{").ok();
-    writeln!(
-        out,
-        "        let pso = PSOCache.shared.pipelineState(for: \"{}\")",
-        k.name
-    )
-    .ok();
+    writeln!(out, "        let pso = PSOCache.shared.pipelineState(for: \"{}\")", k.name).ok();
     writeln!(
         out,
         "        guard let enc = commandBuffer.makeComputeCommandEncoder() else {{ return }}"
@@ -224,32 +214,21 @@ fn emit_swift_wrapper(out: &mut String, k: &Kernel) {
     let mut slot = 0usize;
     for p in &k.params {
         let label = swift_safe_name(&p.name);
-        writeln!(
-            out,
-            "        enc.setBuffer({label}, offset: {label}Offset, index: {slot})"
-        )
-        .ok();
+        writeln!(out, "        enc.setBuffer({label}, offset: {label}Offset, index: {slot})").ok();
         slot += 1;
     }
     for c in &k.constexprs {
         let label = swift_safe_name(c.name.name());
         let len = swift_scalar_size(dtype_suffix(c.dtype));
         writeln!(out, "        var {label}_v = {label}").ok();
-        writeln!(
-            out,
-            "        enc.setBytes(&{label}_v, length: {len}, index: {slot})"
-        )
-        .ok();
+        writeln!(out, "        enc.setBytes(&{label}_v, length: {len}, index: {slot})").ok();
         slot += 1;
     }
     // dispatchThreads (in threads, not threadgroups) so out-of-bound
     // threads aren't created and the kernel doesn't need bounds checks.
     // Requires Metal 2.0 non-uniform threadgroup support (M-series ✓).
-    writeln!(
-        out,
-        "        enc.dispatchThreads(gridSize, threadsPerThreadgroup: threadgroupSize)"
-    )
-    .ok();
+    writeln!(out, "        enc.dispatchThreads(gridSize, threadsPerThreadgroup: threadgroupSize)")
+        .ok();
     writeln!(out, "        enc.endEncoding()").ok();
     writeln!(out, "    }}\n").ok();
 }
@@ -276,10 +255,9 @@ pub fn compile_metallib(
 
     let mut air_files: Vec<PathBuf> = Vec::with_capacity(metal_files.len());
     for metal in metal_files {
-        let stem = metal
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| EmitError::MetalToolchain(format!("bad filename: {}", metal.display())))?;
+        let stem = metal.file_stem().and_then(|s| s.to_str()).ok_or_else(|| {
+            EmitError::MetalToolchain(format!("bad filename: {}", metal.display()))
+        })?;
         let air = air_dir.join(format!("{stem}.air"));
         let status = Command::new("xcrun")
             .args(["-sdk", sdk, "metal", "-c"])
@@ -288,7 +266,10 @@ pub fn compile_metallib(
             .arg(&air)
             .status()
             .map_err(|e| {
-                EmitError::MetalToolchain(format!("invoke xcrun metal for {}: {e}", metal.display()))
+                EmitError::MetalToolchain(format!(
+                    "invoke xcrun metal for {}: {e}",
+                    metal.display()
+                ))
             })?;
         if !status.success() {
             return Err(EmitError::MetalToolchain(format!(
