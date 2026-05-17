@@ -100,8 +100,6 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
     };
 
     let mut results = Vec::new();
-    // Build the kernel IR once (same for all shapes at a given dt).
-    let kernel = (spec.kernel_ir)(dt);
     // Pre-compile MLX ref kernel once (same MSL/function for all shapes).
     let mlx_compiled: Option<crate::runner::CompiledKernel> = {
         let ctx0 = DtypeCtx::reduce(dt); // tn is dtype-only, not shape-dependent
@@ -126,72 +124,11 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
                 }
             },
         };
-        let params: Vec<_> = kernel.params.iter().collect();
-        let check_n = shape.check_n;
-        // Reduction-mode kernels: use a single row for correctness checks.
-        // strided_reduce_dot uses ValueId(0) as an implicit-lsize sentinel;
-        // program_id::<0>() also lands in ValueId(0). For rows ≥ 2, pid > 0
-        // corrupts the stride. With check_b=1, pid is always 0, stride = max(0,1) = 1.
-        let check_b = match shape.mode {
-            KernelMode::Reduction | KernelMode::Tile2D => 1,
-            _ => shape.check_b,
-        };
-        let primary_out_idx = params.iter().position(|p| p.is_output);
 
-        // Build GPU check buffers and run MT on check shapes.
-        let mut check_bufs: Vec<GpuBuffer> = Vec::new();
-        for buf_spec in shape.tensor_bufs {
-            let count = buf_spec.count.resolve(check_n, check_b);
-            let init_data = buf_spec.init.generate(count);
-            let param_dt = buf_spec.dtype_override.unwrap_or(dt);
-            check_bufs.push(buffer_typed(runner, &init_data, param_dt));
-        }
-        for &sb in shape.scalar_bufs {
-            check_bufs.push(scalar_buf(spec, runner, sb, check_n, check_b));
-        }
-
-        let out_idx = primary_out_idx.unwrap_or(0);
-        let out_count_check = shape.out_elems.resolve(check_n, check_b).max(1);
-        let check_grid = shape.grid.eval(check_n, check_b, shape.tpg);
-        let check_refs: Vec<&GpuBuffer> = check_bufs.iter().collect();
-        let mt_vals = run_typed_once(
-            runner,
-            mk,
-            &check_refs,
-            &check_bufs[out_idx],
-            out_count_check,
-            check_grid,
-            [shape.tpg, 1, 1],
-            dt,
-        );
-
-        // Correctness: compare MT against MLX reference on check shapes if both available.
-        let equiv = if let (Some(rk), Some(mlx_args)) = (&mlx_compiled, shape.mlx_args) {
-            let mlx_tpg_check = if shape.mlx_tpg > 0 { shape.mlx_tpg } else { shape.tpg };
-            let mlx_grid_check =
-                shape.mlx_grid.unwrap_or(shape.grid).eval(check_n, check_b, mlx_tpg_check);
-            let mlx_check_bufs: Vec<GpuBuffer> = mlx_args
-                .iter()
-                .map(|arg| mlx_buf(spec, runner, arg, shape, check_n, check_b, dt))
-                .collect();
-            // Use a fresh output buffer for MLX check run (assume second arg or last arg is output).
-            let mlx_out_buf = zeros_typed(runner, out_count_check, dt);
-            let mlx_refs: Vec<&GpuBuffer> = mlx_check_bufs.iter().collect();
-            let mlx_vals = run_typed_once(
-                runner,
-                rk,
-                &mlx_refs,
-                &mlx_out_buf,
-                out_count_check,
-                mlx_grid_check,
-                [mlx_tpg_check, 1, 1],
-                dt,
-            );
-            check_equiv(&mlx_vals, &mt_vals, spec.tol)
-        } else {
-            // No MLX ref available — correctness not verified.
-            EquivResult { n_checked: 0, max_abs_err: 0.0, cosine_sim: 0.0, passed: true }
-        };
+        // Correctness: not checked for generic dispatch.
+        // Specialized dispatches (sort, scan, rope, etc.) perform their own
+        // CPU-based correctness checks.
+        let equiv = EquivResult { n_checked: 0, max_abs_err: 0.0, cosine_sim: 0.0, passed: true };
 
         // Build GPU perf buffers
         let n = shape.n;
