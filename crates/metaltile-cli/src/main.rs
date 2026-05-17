@@ -68,7 +68,7 @@ fn print_usage_and_exit(program: &str) {
     eprintln!(
         "{}",
         paint_stderr(
-            "MetalTile CLI — benchmark, test, and inspect GPU kernels",
+            "MetalTile CLI — benchmark and inspect GPU kernels",
             Style::new().fg(Color::BrightWhite).bold(),
         ),
     );
