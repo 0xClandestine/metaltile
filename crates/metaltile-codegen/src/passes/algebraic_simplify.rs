@@ -40,12 +40,14 @@
 //! Iterates to fixpoint over each block.  Each iteration collects rewrites
 //! (new ops or ValueId replacements), applies them, and stops when stable.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use metaltile_core::{
     error::Result,
     ir::{BinOpKind, Block, BlockId, Kernel, Op, UnaryOpKind, ValueId},
 };
+
+use super::remap;
 
 pub struct AlgebraicSimplifyPass;
 
@@ -71,6 +73,24 @@ impl super::Pass for AlgebraicSimplifyPass {
 // Block-level fixpoint
 // ---------------------------------------------------------------------------
 
+/// Resolve transitive replacement chains: {v2→v1, v1→v0} becomes {v2→v0, v1→v0}.
+fn resolve_transitive(map: &BTreeMap<ValueId, ValueId>) -> BTreeMap<ValueId, ValueId> {
+    let mut resolved = BTreeMap::new();
+    for (&key, &val) in map.iter() {
+        let mut terminal = val;
+        let mut visited = BTreeSet::new();
+        visited.insert(key);
+        while let Some(&next) = map.get(&terminal) {
+            if !visited.insert(terminal) {
+                break; // cycle detected
+            }
+            terminal = next;
+        }
+        resolved.insert(key, terminal);
+    }
+    resolved
+}
+
 fn simplify_block_fixpoint(block: &mut Block) {
     loop {
         if !simplify_block_once(block) {
@@ -86,8 +106,12 @@ fn simplify_block_once(block: &mut Block) -> bool {
     let mut vid_replacements: BTreeMap<ValueId, ValueId> = BTreeMap::new();
 
     // Build a map for peephole lookups.
-    let vid_to_op_pos: BTreeMap<ValueId, usize> =
-        block.results.iter().enumerate().filter_map(|(i, r)| r.and_then(|v| Some((v, i)))).collect();
+    let vid_to_op_pos: BTreeMap<ValueId, usize> = block
+        .results
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| r.and_then(|v| Some((v, i))))
+        .collect();
 
     for i in 0..n {
         if let Some(result) = try_simplify(&block.ops[i], i, block, &vid_to_op_pos) {
@@ -103,6 +127,17 @@ fn simplify_block_once(block: &mut Block) -> bool {
         }
     }
 
+    // Prune vid_replacements that have no actual uses (avoids spurious infinite-loop progress).
+    if !vid_replacements.is_empty() {
+        let any_used = block
+            .ops
+            .iter()
+            .any(|op| remap::op_value_refs(op).iter().any(|v| vid_replacements.contains_key(v)));
+        if !any_used {
+            vid_replacements.clear();
+        }
+    }
+
     if const_overwrites.is_empty() && op_replacements.is_empty() && vid_replacements.is_empty() {
         return false;
     }
@@ -115,14 +150,34 @@ fn simplify_block_once(block: &mut Block) -> bool {
         block.ops[*idx] = new_op.clone();
     }
 
+    // Resolve transitive replacement chains: v2→v1→v0 becomes v2→v0.
+    let vid_replacements = resolve_transitive(&vid_replacements);
+
     // Remap ValueIds in all ops in the block.
     for op in block.ops.iter_mut() {
         remap_values_in_op(op, &vid_replacements);
     }
 
-    // Also need to handle the case where a ReplaceWithVid is for an op
-    // whose result gets DCE'd: the op stays but its uses are redirected.
-    // ConstFold-style DCE will clean it up later.
+    // Remove dead ops whose results were redirected via ReplaceWithVid.
+    // Without this, the same pattern re-matches on the next iteration,
+    // producing the same replacement and causing an infinite fixpoint loop.
+    let dead_vids: BTreeSet<ValueId> = vid_replacements.keys().copied().collect();
+    if !dead_vids.is_empty() {
+        let mut new_ops = Vec::new();
+        let mut new_results = Vec::new();
+        for (i, op) in block.ops.iter().enumerate() {
+            let is_dead = block
+                .results
+                .get(i)
+                .is_some_and(|r| r.is_some_and(|v| dead_vids.contains(&v)));
+            if !is_dead {
+                new_ops.push(op.clone());
+                new_results.push(block.results[i]);
+            }
+        }
+        block.ops = new_ops;
+        block.results = new_results;
+    }
 
     true
 }
@@ -149,16 +204,18 @@ fn try_simplify(
 ) -> Option<SimpResult> {
     match op {
         // ---- BinOp patterns ----
-        Op::BinOp { op: kind, lhs, rhs } => simplify_binop(*kind, *lhs, *rhs, pos, block, vid_to_pos),
+        Op::BinOp { op: kind, lhs, rhs } =>
+            simplify_binop(*kind, *lhs, *rhs, pos, block, vid_to_pos),
 
         // ---- Select patterns ----
-        Op::Select { cond, on_true, on_false } => {
-            simplify_select(*cond, *on_true, *on_false, block, vid_to_pos)
-        },
+        Op::Select { cond, on_true, on_false } =>
+            simplify_select(*cond, *on_true, *on_false, block, vid_to_pos),
 
         // ---- Broadcast squashing ----
         Op::Broadcast { value, shape } => {
-            if shape.rank() == 1 && matches!(shape.dim(0), Some(metaltile_core::shape::Dim::Known(1))) {
+            if shape.rank() == 1
+                && matches!(shape.dim(0), Some(metaltile_core::shape::Dim::Known(1)))
+            {
                 // Already a scalar broadcast — skip.
                 return None;
             }
@@ -253,7 +310,11 @@ fn simplify_binop(
             let neg_x = get_neg_arg(lhs, block, vid_to_pos);
             let neg_y = get_neg_arg(rhs, block, vid_to_pos);
             if let (Some(inner_x), Some(inner_y)) = (neg_x, neg_y) {
-                Some(SimpResult::ReplaceWith(Op::BinOp { op: BinOpKind::Mul, lhs: inner_x, rhs: inner_y }))
+                Some(SimpResult::ReplaceWith(Op::BinOp {
+                    op: BinOpKind::Mul,
+                    lhs: inner_x,
+                    rhs: inner_y,
+                }))
             } else {
                 None
             }
@@ -362,11 +423,7 @@ fn get_neg_arg(
     vid_to_pos: &BTreeMap<ValueId, usize>,
 ) -> Option<ValueId> {
     let (_pos, op) = get_defining_op(vid, block, vid_to_pos)?;
-    if let Op::UnaryOp { op: UnaryOpKind::Neg, value } = op {
-        Some(*value)
-    } else {
-        None
-    }
+    if let Op::UnaryOp { op: UnaryOpKind::Neg, value } = op { Some(*value) } else { None }
 }
 
 /// If `vid` is defined by a logical NOT (CmpEq(x, 0) or Xor(x, 1)), return the inner condition.
@@ -535,5 +592,267 @@ fn remap_values_in_op(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
             s(offset);
             s(end);
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use metaltile_core::ir::BinOpKind;
+
+    use super::*;
+    use crate::passes::Pass;
+
+    #[test]
+    fn x_minus_x_is_zero() {
+        let mut k = Kernel::new("x_minus_x");
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(
+            Op::BinOp { op: BinOpKind::Sub, lhs: ValueId::new(0), rhs: ValueId::new(0) },
+            ValueId::new(1),
+        );
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(1),
+            mask: None,
+        });
+        AlgebraicSimplifyPass.run(&mut k).unwrap();
+        // x - x → Const(0)
+        let has_zero = k.body.ops.iter().any(|op| matches!(op, Op::Const { value: 0 }));
+        assert!(has_zero, "x-x should become Const(0)");
+    }
+
+    #[test]
+    fn x_div_x_is_one() {
+        let mut k = Kernel::new("x_div_x");
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(
+            Op::BinOp { op: BinOpKind::Div, lhs: ValueId::new(0), rhs: ValueId::new(0) },
+            ValueId::new(1),
+        );
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(1),
+            mask: None,
+        });
+        AlgebraicSimplifyPass.run(&mut k).unwrap();
+        let has_one = k.body.ops.iter().any(|op| matches!(op, Op::Const { value: 1 }));
+        assert!(has_one, "x/x should become Const(1)");
+    }
+
+    #[test]
+    fn x_div_1_is_x() {
+        let mut k = Kernel::new("x_div_1");
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(1));
+        k.body.push_op(
+            Op::BinOp { op: BinOpKind::Div, lhs: ValueId::new(0), rhs: ValueId::new(1) },
+            ValueId::new(2),
+        );
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(2),
+            mask: None,
+        });
+        AlgebraicSimplifyPass.run(&mut k).unwrap();
+        // x/1 → x — uses of v2 redirected to v0.
+        let stores: Vec<_> =
+            k.body.ops.iter().filter(|op| matches!(op, Op::Store { .. })).collect();
+        if let Op::Store { value, .. } = stores[0] {
+            assert_eq!(value.as_u32(), 0, "store should reference v0 directly after x/1 fold");
+        }
+    }
+
+    #[test]
+    fn zero_minus_x_is_neg() {
+        let mut k = Kernel::new("zero_minus_x");
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(0));
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(1));
+        k.body.push_op(
+            Op::BinOp { op: BinOpKind::Sub, lhs: ValueId::new(0), rhs: ValueId::new(1) },
+            ValueId::new(2),
+        );
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(2),
+            mask: None,
+        });
+        AlgebraicSimplifyPass.run(&mut k).unwrap();
+        // 0 - x → Neg(x)
+        let has_neg = k.body.ops.iter().any(|op| {
+            matches!(op, Op::UnaryOp { op: UnaryOpKind::Neg, value } if *value == ValueId::new(1))
+        });
+        assert!(has_neg, "0-x should become Neg(x)");
+    }
+
+    #[test]
+    fn max_x_x_is_x() {
+        let mut k = Kernel::new("max_x_x");
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(
+            Op::BinOp { op: BinOpKind::Max, lhs: ValueId::new(0), rhs: ValueId::new(0) },
+            ValueId::new(1),
+        );
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(1),
+            mask: None,
+        });
+        AlgebraicSimplifyPass.run(&mut k).unwrap();
+        let stores: Vec<_> =
+            k.body.ops.iter().filter(|op| matches!(op, Op::Store { .. })).collect();
+        if let Op::Store { value, .. } = stores[0] {
+            assert_eq!(value.as_u32(), 0, "Max(x,x) should redirect to x");
+        }
+    }
+
+    #[test]
+    fn cmp_lt_canonicalizes_to_cmp_gt() {
+        let mut k = Kernel::new("cmp_lt");
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::ProgramId { axis: 1 }, ValueId::new(1));
+        k.body.push_op(
+            Op::BinOp { op: BinOpKind::CmpLt, lhs: ValueId::new(0), rhs: ValueId::new(1) },
+            ValueId::new(2),
+        );
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(2),
+            mask: None,
+        });
+        AlgebraicSimplifyPass.run(&mut k).unwrap();
+        let has_cmp_gt = k.body.ops.iter().any(|op| {
+            matches!(op, Op::BinOp { op: BinOpKind::CmpGt, lhs, rhs }
+                if *lhs == ValueId::new(1) && *rhs == ValueId::new(0))
+        });
+        assert!(has_cmp_gt, "CmpLt(a,b) should become CmpGt(b,a)");
+    }
+
+    #[test]
+    fn cmp_eq_same_is_one() {
+        let mut k = Kernel::new("cmp_eq_same");
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(
+            Op::BinOp { op: BinOpKind::CmpEq, lhs: ValueId::new(0), rhs: ValueId::new(0) },
+            ValueId::new(1),
+        );
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(1),
+            mask: None,
+        });
+        AlgebraicSimplifyPass.run(&mut k).unwrap();
+        let has_one = k.body.ops.iter().any(|op| matches!(op, Op::Const { value: 1 }));
+        assert!(has_one, "CmpEq(a,a) should be Const(1)");
+    }
+
+    #[test]
+    fn select_true_picks_on_true() {
+        let mut k = Kernel::new("select_true");
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(0)); // true
+        k.body.push_op(Op::Const { value: 42 }, ValueId::new(1));
+        k.body.push_op(Op::Const { value: 99 }, ValueId::new(2));
+        k.body.push_op(
+            Op::Select {
+                cond: ValueId::new(0),
+                on_true: ValueId::new(1),
+                on_false: ValueId::new(2),
+            },
+            ValueId::new(3),
+        );
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(3),
+            mask: None,
+        });
+        AlgebraicSimplifyPass.run(&mut k).unwrap();
+        let stores: Vec<_> =
+            k.body.ops.iter().filter(|op| matches!(op, Op::Store { .. })).collect();
+        if let Op::Store { value, .. } = stores[0] {
+            assert_eq!(value.as_u32(), 1, "Select(true,a,b) should pick a (v1=42)");
+        }
+    }
+
+    #[test]
+    fn select_same_both_sides_is_identity() {
+        let mut k = Kernel::new("select_same");
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 42 }, ValueId::new(1));
+        k.body.push_op(
+            Op::Select {
+                cond: ValueId::new(0),
+                on_true: ValueId::new(1),
+                on_false: ValueId::new(1),
+            },
+            ValueId::new(2),
+        );
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(2),
+            mask: None,
+        });
+        AlgebraicSimplifyPass.run(&mut k).unwrap();
+        let stores: Vec<_> =
+            k.body.ops.iter().filter(|op| matches!(op, Op::Store { .. })).collect();
+        if let Op::Store { value, .. } = stores[0] {
+            assert_eq!(value.as_u32(), 1, "Select(cond,a,a) should redirect to a");
+        }
+    }
+
+    #[test]
+    fn transpose_transpose_is_identity() {
+        let mut k = Kernel::new("transpose_transpose");
+        k.body.push_op(Op::Const { value: 42 }, ValueId::new(0));
+        k.body.push_op(Op::Transpose { value: ValueId::new(0) }, ValueId::new(1));
+        k.body.push_op(Op::Transpose { value: ValueId::new(1) }, ValueId::new(2));
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(2),
+            mask: None,
+        });
+        AlgebraicSimplifyPass.run(&mut k).unwrap();
+        // Transpose(Transpose(x)) → x
+        let stores: Vec<_> =
+            k.body.ops.iter().filter(|op| matches!(op, Op::Store { .. })).collect();
+        if let Op::Store { value, .. } = stores[0] {
+            assert_eq!(value.as_u32(), 0, "Transpose(Transpose(x)) should point to x");
+        }
+    }
+
+    #[test]
+    fn neg_neg_mul_cancels() {
+        let mut k = Kernel::new("neg_neg_mul");
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body
+            .push_op(Op::UnaryOp { op: UnaryOpKind::Neg, value: ValueId::new(0) }, ValueId::new(1));
+        k.body.push_op(Op::ProgramId { axis: 1 }, ValueId::new(2));
+        k.body
+            .push_op(Op::UnaryOp { op: UnaryOpKind::Neg, value: ValueId::new(2) }, ValueId::new(3));
+        k.body.push_op(
+            Op::BinOp { op: BinOpKind::Mul, lhs: ValueId::new(1), rhs: ValueId::new(3) },
+            ValueId::new(4),
+        );
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(4),
+            mask: None,
+        });
+        AlgebraicSimplifyPass.run(&mut k).unwrap();
+        // (-x) * (-y) → x * y
+        let has_plain_mul = k.body.ops.iter().any(|op| {
+            matches!(op, Op::BinOp { op: BinOpKind::Mul, lhs, rhs }
+                if *lhs == ValueId::new(0) && *rhs == ValueId::new(2))
+        });
+        assert!(has_plain_mul, "(-x)*(-y) should become x*y");
     }
 }

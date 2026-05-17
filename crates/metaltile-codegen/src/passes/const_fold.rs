@@ -454,3 +454,131 @@ fn collect_uses(op: &Op, used: &mut BTreeSet<ValueId>) {
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use metaltile_core::ir::{BinOpKind, VarId};
+
+    use super::*;
+    use crate::passes::Pass;
+
+    // Helper: run const_fold on ops in a loop body block and return the block.
+    // Use VIDs >= 100 in tests to avoid collision with the body's VIDs 0,1,2.
+    fn fold_in_block(mut ops: Vec<Op>, mut results: Vec<Option<ValueId>>, used_vid: ValueId) -> Block {
+        // Append an op that references `used_vid` to prevent DCE from removing it.
+        let ref_vid = ValueId::new(results.iter().filter_map(|r| r.map(|v| v.as_u32())).max().unwrap_or(99) + 1);
+        ops.push(Op::BinOp { op: BinOpKind::Add, lhs: used_vid, rhs: used_vid });
+        results.push(Some(ref_vid));
+
+        let mut k = Kernel::new("test");
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(1));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(2));
+        let mut body = Block::new(BlockId::new(1));
+        body.ops = ops;
+        body.results = results;
+        let body_id = k.add_block(body);
+        k.body.push_op_no_result(Op::Loop {
+            var: VarId::new(0), start: ValueId::new(0),
+            end: ValueId::new(1), step: ValueId::new(2), body: body_id,
+        });
+        ConstFoldPass.run(&mut k).unwrap();
+        k.blocks.remove(&body_id).unwrap()
+    }
+
+    #[test]
+    fn folds_literal_add() {
+        let ops = vec![
+            Op::Const { value: 3 },
+            Op::Const { value: 4 },
+            Op::BinOp { op: BinOpKind::Add, lhs: ValueId::new(100), rhs: ValueId::new(101) },
+        ];
+        let results = vec![Some(ValueId::new(100)), Some(ValueId::new(101)), Some(ValueId::new(102))];
+        let block = fold_in_block(ops, results, ValueId::new(102));
+        let has_const_7 = block.ops.iter().any(|op| matches!(op, Op::Const { value: 7 }));
+        assert!(has_const_7, "3+4 should fold to Const(7)");
+    }
+
+    #[test]
+    fn dce_removes_unused_const() {
+        let ops = vec![
+            Op::Const { value: 42 },
+            Op::Const { value: 99 },
+            Op::UnaryOp { op: metaltile_core::ir::UnaryOpKind::Neg, value: ValueId::new(101) },
+        ];
+        let results = vec![Some(ValueId::new(100)), Some(ValueId::new(101)), Some(ValueId::new(102))];
+        let block = fold_in_block(ops, results, ValueId::new(102));
+        let has_v42 = block.ops.iter().any(|op| matches!(op, Op::Const { value: 42 }));
+        assert!(!has_v42, "unused Const(42) should be DCE'd");
+    }
+
+    #[test]
+    fn folds_in_loop_body() {
+        let ops = vec![
+            Op::Const { value: 0 },
+            Op::Const { value: 1 },
+            Op::BinOp { op: BinOpKind::Add, lhs: ValueId::new(100), rhs: ValueId::new(101) },
+        ];
+        let results = vec![Some(ValueId::new(100)), Some(ValueId::new(101)), Some(ValueId::new(102))];
+        let block = fold_in_block(ops, results, ValueId::new(102));
+        let has_folded = block.ops.iter().any(|op| matches!(op, Op::Const { value: 1 }));
+        assert!(has_folded, "0+1 in loop body should fold to Const(1)");
+    }
+
+    #[test]
+    fn preserves_nonfoldable_ops() {
+        let ops = vec![
+            Op::ProgramId { axis: 0 },
+            Op::ProgramId { axis: 1 },
+            Op::BinOp { op: BinOpKind::Add, lhs: ValueId::new(100), rhs: ValueId::new(101) },
+        ];
+        let results = vec![Some(ValueId::new(100)), Some(ValueId::new(101)), Some(ValueId::new(102))];
+        let block = fold_in_block(ops, results, ValueId::new(102));
+        let has_add =
+            block.ops.iter().any(|op| matches!(op, Op::BinOp { op: BinOpKind::Add, .. }));
+        assert!(has_add, "non-constant add should not be folded");
+    }
+
+    #[test]
+    fn folds_x_plus_0_to_x() {
+        // x + 0 → x: the Add BinOp should be replaced by redirecting uses.
+        let ops = vec![
+            Op::ProgramId { axis: 0 },
+            Op::Const { value: 0 },
+            Op::BinOp { op: BinOpKind::Add, lhs: ValueId::new(100), rhs: ValueId::new(101) },
+        ];
+        let results = vec![Some(ValueId::new(100)), Some(ValueId::new(101)), Some(ValueId::new(102))];
+        let block = fold_in_block(ops, results, ValueId::new(102));
+        let has_add =
+            block.ops.iter().any(|op| matches!(op, Op::BinOp { op: BinOpKind::Add, .. }));
+        assert!(!has_add, "x+0 should be folded away");
+    }
+
+    #[test]
+    fn folds_x_mul_1_to_x() {
+        // 7 * 1 → literal fold to Const(7).
+        let ops = vec![
+            Op::Const { value: 7 },
+            Op::Const { value: 1 },
+            Op::BinOp { op: BinOpKind::Mul, lhs: ValueId::new(100), rhs: ValueId::new(101) },
+        ];
+        let results = vec![Some(ValueId::new(100)), Some(ValueId::new(101)), Some(ValueId::new(102))];
+        let block = fold_in_block(ops, results, ValueId::new(102));
+        let has_const_7 = block.ops.iter().any(|op| matches!(op, Op::Const { value: 7 }));
+        assert!(has_const_7, "7*1 should fold to Const(7)");
+    }
+
+    #[test]
+    fn folds_x_mul_0_to_zero() {
+        // Any value * 0 → Const(0).
+        let ops = vec![
+            Op::ProgramId { axis: 0 },
+            Op::Const { value: 0 },
+            Op::BinOp { op: BinOpKind::Mul, lhs: ValueId::new(100), rhs: ValueId::new(101) },
+        ];
+        let results = vec![Some(ValueId::new(100)), Some(ValueId::new(101)), Some(ValueId::new(102))];
+        let block = fold_in_block(ops, results, ValueId::new(102));
+        let has_const_zero = block.ops.iter().any(|op| matches!(op, Op::Const { value: 0 }));
+        assert!(has_const_zero, "x*0 should become Const(0)");
+    }
+}

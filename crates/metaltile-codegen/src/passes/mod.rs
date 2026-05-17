@@ -1,15 +1,22 @@
 //! Pass infrastructure and optimization passes.
 
 pub mod algebraic_simplify;
+pub mod block_util;
 pub mod const_fold;
 pub mod copy_prop;
 pub mod cse;
+pub mod dead_store_elim;
 pub mod fusion;
+pub mod if_conversion;
 pub mod licm;
+pub mod occupancy;
+pub mod register_estimate;
+pub mod remap;
 pub mod schedule;
 pub mod tile_lowering;
 pub mod type_check;
 pub mod unroll;
+pub mod value_sink;
 pub mod vectorize;
 
 use std::time::Instant;
@@ -99,9 +106,11 @@ pub struct PipelineBuilder {
 }
 
 impl PipelineBuilder {
-    /// Create a builder with the standard 12-pass pipeline:
+    /// Create a builder with the standard 16-pass pipeline:
     ///
-    /// TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM → TileLowering → Fusion → Unroll → Schedule → Vectorize
+    /// TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM
+    ///   → IfConversion → ValueSink → TileLowering → Fusion → Unroll
+    ///   → Schedule → Vectorize → DeadStoreElim
     pub fn standard() -> Self {
         PipelineBuilder {
             passes: vec![
@@ -111,11 +120,14 @@ impl PipelineBuilder {
                 Box::new(copy_prop::CopyPropPass),
                 Box::new(cse::CsePass),
                 Box::new(licm::LicmPass),
+                Box::new(if_conversion::IfConversionPass),
+                Box::new(value_sink::ValueSinkPass),
                 Box::new(tile_lowering::TileLoweringPass::default()),
                 Box::new(fusion::FusionPass),
                 Box::new(unroll::UnrollPass::default()),
                 Box::new(schedule::SchedulePass::default()),
                 Box::new(vectorize::VectorizePass),
+                Box::new(dead_store_elim::DeadStoreElimPass),
             ],
         }
     }
@@ -145,6 +157,8 @@ impl PipelineBuilder {
 
 /// Standard optimization pipeline.
 ///
-/// Order (CODEGEN_OVERHAUL.md §3):
-///   TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM → TileLowering → Fusion → Unroll → Schedule → Vectorize
+/// Order:
+///   TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM
+///     → IfConversion → ValueSink → TileLowering → Fusion → Unroll
+///     → Schedule → Vectorize → DeadStoreElim
 pub fn standard_pipeline() -> Vec<Box<dyn Pass>> { PipelineBuilder::standard().build() }

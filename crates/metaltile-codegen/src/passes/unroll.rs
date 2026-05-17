@@ -23,8 +23,10 @@ use std::collections::BTreeMap;
 
 use metaltile_core::{
     error::Result,
-    ir::{Block, BlockId, IndexExpr, Kernel, Op, ValueId},
+    ir::{Block, BlockId, Kernel, Op, ValueId},
 };
+
+use super::remap;
 
 const MAX_UNROLL_TRIP: i64 = 8;
 
@@ -44,7 +46,7 @@ impl super::Pass for UnrollPass {
     fn name(&self) -> &str { "unroll" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
-        let max_vid = find_max_vid(kernel);
+        let max_vid = remap::find_max_vid(kernel);
         let mut next_vid = (max_vid + 1).max(10_000);
 
         unroll_block(&mut kernel.body, &mut kernel.blocks, &mut next_vid, self.factor);
@@ -63,27 +65,6 @@ impl super::Pass for UnrollPass {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
-
-fn find_max_vid(kernel: &Kernel) -> u32 {
-    let mut m = 0u32;
-    for op in &kernel.body.ops {
-        m = m.max(max_vid_in_op(op));
-    }
-    for block in kernel.blocks.values() {
-        for op in &block.ops {
-            m = m.max(max_vid_in_op(op));
-        }
-    }
-    for vid in kernel.body.results.iter().flatten() {
-        m = m.max(vid.as_u32());
-    }
-    for block in kernel.blocks.values() {
-        for vid in block.results.iter().flatten() {
-            m = m.max(vid.as_u32());
-        }
-    }
-    m
-}
 
 fn has_nested_loop_or_barrier(block: &Block) -> bool {
     block.ops.iter().any(|op| matches!(op, Op::Loop { .. } | Op::Barrier))
@@ -199,7 +180,7 @@ fn unroll_block(
             // ---- clone and remap each body op -----------------------------
             for j in 0..body_n {
                 let mut new_op = body.ops[j].clone();
-                remap_value_ids(&mut new_op, &vid_map);
+                remap::remap_value_ids(&mut new_op, &vid_map);
 
                 let new_vid = body.results[j].map(|_| vid_map[&body.results[j].unwrap()]);
                 inlined.push((new_op, new_vid));
@@ -233,252 +214,161 @@ fn unroll_block(
     }
 }
 
-// ---------------------------------------------------------------------------
-// value-id remapping (covers every Op variant)
-// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
 
-fn remap_value_ids(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
-    let s = |v: &mut ValueId| {
-        if let Some(&nv) = map.get(v) {
-            *v = nv;
+    use metaltile_core::ir::VarId;
+
+    use super::*;
+    use crate::passes::Pass;
+
+    #[test]
+    fn unrolls_trip_count_4_loop() {
+        let mut k = Kernel::new("unroll_4");
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(0)); // start
+        k.body.push_op(Op::Const { value: 4 }, ValueId::new(1)); // end
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(2)); // step
+
+        // Loop body: a single Const (uses the IV).
+        let mut loop_body = Block::new(BlockId::new(1));
+        loop_body.push_op(Op::Const { value: 0 }, ValueId::new(100));
+        let body_id = k.add_block(loop_body);
+
+        k.body.push_op_no_result(Op::Loop {
+            var: VarId::new(0),
+            start: ValueId::new(0),
+            end: ValueId::new(1),
+            step: ValueId::new(2),
+            body: body_id,
+        });
+
+        UnrollPass::default().run(&mut k).unwrap();
+
+        // Loop should be gone, body should be removed from blocks.
+        let has_loop = k.body.ops.iter().any(|op| matches!(op, Op::Loop { .. }));
+        assert!(!has_loop, "Loop should be unrolled and removed");
+        assert!(!k.blocks.contains_key(&body_id), "loop body block should be removed");
+
+        // Unrolled body: for trip_count=4, we get: IV Const(0), body clone(0),
+        // IV Const(1), body clone(1), IV Const(2), body clone(2), IV Const(3), body clone(3).
+        // That's 8 ops (4 IV consts + 4 body clones).
+        let iv_consts: Vec<_> =
+            k.body.ops.iter().filter(|op| matches!(op, Op::Const { .. })).collect();
+        // Original 3 consts (start, end, step) + new 4 IV consts = 7, plus 4 body consts = 11 total
+        assert!(iv_consts.len() >= 7, "should have start/end/step consts + 4 IV consts");
+    }
+
+    #[test]
+    fn does_not_unroll_loop_with_barrier() {
+        let mut k = Kernel::new("unroll_barrier");
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 2 }, ValueId::new(1));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(2));
+
+        let mut loop_body = Block::new(BlockId::new(1));
+        loop_body.push_op(Op::Barrier, ValueId::new(100)); // Barrier prevents unrolling
+        let body_id = k.add_block(loop_body);
+
+        k.body.push_op_no_result(Op::Loop {
+            var: VarId::new(0),
+            start: ValueId::new(0),
+            end: ValueId::new(1),
+            step: ValueId::new(2),
+            body: body_id,
+        });
+
+        UnrollPass::default().run(&mut k).unwrap();
+
+        // Loop should still be present.
+        let has_loop = k.body.ops.iter().any(|op| matches!(op, Op::Loop { .. }));
+        assert!(has_loop, "Loop with Barrier should not be unrolled");
+    }
+
+    #[test]
+    fn does_not_unroll_large_trip_count() {
+        let mut k = Kernel::new("unroll_large");
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 100 }, ValueId::new(1)); // trip = 100 > factor(4)
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(2));
+
+        let mut loop_body = Block::new(BlockId::new(1));
+        loop_body.push_op(Op::Const { value: 0 }, ValueId::new(100));
+        let body_id = k.add_block(loop_body);
+
+        k.body.push_op_no_result(Op::Loop {
+            var: VarId::new(0),
+            start: ValueId::new(0),
+            end: ValueId::new(1),
+            step: ValueId::new(2),
+            body: body_id,
+        });
+
+        UnrollPass::default().run(&mut k).unwrap();
+
+        // Loop should remain because trip_count 100 > default factor 4.
+        let has_loop = k.body.ops.iter().any(|op| matches!(op, Op::Loop { .. }));
+        assert!(has_loop, "Large trip count loop should not be unrolled");
+    }
+
+    #[test]
+    fn respects_custom_unroll_factor() {
+        let mut k = Kernel::new("unroll_factor_8");
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 8 }, ValueId::new(1)); // trip = 8
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(2));
+
+        let mut loop_body = Block::new(BlockId::new(1));
+        loop_body.push_op(Op::Const { value: 0 }, ValueId::new(100));
+        let body_id = k.add_block(loop_body);
+
+        k.body.push_op_no_result(Op::Loop {
+            var: VarId::new(0),
+            start: ValueId::new(0),
+            end: ValueId::new(1),
+            step: ValueId::new(2),
+            body: body_id,
+        });
+
+        // Default factor 4 won't unroll 8; use factor 8.
+        UnrollPass::new(8).run(&mut k).unwrap();
+
+        let has_loop = k.body.ops.iter().any(|op| matches!(op, Op::Loop { .. }));
+        assert!(!has_loop, "Trip count 8 should be unrolled with factor 8");
+    }
+
+    #[test]
+    fn alpha_renames_body_values() {
+        // Verify that body values get fresh ValueIds to avoid conflicts.
+        let mut k = Kernel::new("unroll_alpha");
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 2 }, ValueId::new(1));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(2));
+
+        let mut loop_body = Block::new(BlockId::new(1));
+        loop_body.push_op(Op::Const { value: 42 }, ValueId::new(10));
+        let body_id = k.add_block(loop_body);
+
+        k.body.push_op_no_result(Op::Loop {
+            var: VarId::new(0),
+            start: ValueId::new(0),
+            end: ValueId::new(1),
+            step: ValueId::new(2),
+            body: body_id,
+        });
+
+        UnrollPass::default().run(&mut k).unwrap();
+        // Check that we have more ops now (unrolled) and they use fresh VIDs.
+        assert!(k.body.ops.len() > 4, "should have more ops after unrolling");
+
+        // All result VIDs should be unique.
+        let mut seen = BTreeSet::new();
+        for vid in k.body.results.iter().flatten() {
+            assert!(
+                seen.insert(vid.as_u32()),
+                "duplicate ValueId {} after unrolling",
+                vid.as_u32()
+            );
         }
-    };
-    match op {
-        Op::BinOp { lhs, rhs, .. } => {
-            s(lhs);
-            s(rhs);
-        },
-        Op::UnaryOp { value, .. }
-        | Op::Activation { value, .. }
-        | Op::Cast { value, .. }
-        | Op::Reduce { value, .. }
-        | Op::Transpose { value }
-        | Op::Slice { value, .. }
-        | Op::Broadcast { value, .. } => s(value),
-        Op::Select { cond, on_true, on_false } => {
-            s(cond);
-            s(on_true);
-            s(on_false);
-        },
-        Op::Dot { a, b } => {
-            s(a);
-            s(b);
-        },
-        Op::Store { value, indices, .. } => {
-            s(value);
-            for ix in indices.iter_mut() {
-                if let IndexExpr::Value(v) | IndexExpr::Range(v, _) = ix {
-                    s(v);
-                }
-            }
-        },
-        Op::Loop { start, end, step, .. } => {
-            s(start);
-            s(end);
-            s(step);
-        },
-        Op::Load { indices, .. } =>
-            for ix in indices.iter_mut() {
-                if let IndexExpr::Value(v) | IndexExpr::Range(v, _) = ix {
-                    s(v);
-                }
-            },
-        Op::InlineMsl { inputs, .. } =>
-            for v in inputs {
-                s(v);
-            },
-        Op::FlashAttention { q, k, v, .. } => {
-            s(q);
-            s(k);
-            s(v);
-        },
-        Op::SlidingWindowAttention { q, k, v, .. } => {
-            s(q);
-            s(k);
-            s(v);
-        },
-        Op::RmsNorm { x, scale, .. } => {
-            s(x);
-            s(scale);
-        },
-        Op::GatedMlp { x, gate_proj, up_proj, down_proj } => {
-            s(x);
-            s(gate_proj);
-            s(up_proj);
-            s(down_proj);
-        },
-        Op::FusedElementwise { ops } =>
-            for o in ops {
-                remap_value_ids(o, map);
-            },
-        Op::VectorLoad { byte_offset, .. } => s(byte_offset),
-        Op::VectorStore { byte_offset, value, .. } => {
-            s(byte_offset);
-            s(value);
-        },
-        Op::StrideReduce { offset, stride, end, .. } => {
-            s(offset);
-            s(stride);
-            s(end);
-        },
-        Op::If { cond, .. } => s(cond),
-        Op::ExpandDims { value, .. } | Op::Reshape { value, .. } => s(value),
-        Op::Cat { values, .. } =>
-            for v in values {
-                s(v);
-            },
-        Op::Gather { indices, .. } => s(indices),
-        Op::Scatter { indices, value, .. } => {
-            s(indices);
-            s(value);
-        },
-        Op::Atomic { index, value, .. } => {
-            s(index);
-            s(value);
-        },
-        Op::Scan { value, .. } => s(value),
-        Op::StrideScan { offset, end, .. } | Op::StrideArgReduce { offset, end, .. } => {
-            s(offset);
-            s(end);
-        },
-        Op::StrideStore { offset, end, scalar, .. } => {
-            s(offset);
-            s(end);
-            s(scalar);
-        },
-        Op::Dequantize { .. } => {},
-        Op::SimdReduce { value, .. } | Op::ArgReduce { value, .. } => s(value),
-        Op::ThreadgroupLoad { index, .. } => s(index),
-        Op::ThreadgroupStore { index, value, .. } => {
-            s(index);
-            s(value);
-        },
-        Op::ThreadgroupAlloc { .. } | Op::Barrier => {},
-        Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => s(value),
-        _ => {},
     }
-}
-
-// ---------------------------------------------------------------------------
-// max ValueId in an op
-// ---------------------------------------------------------------------------
-
-fn max_vid_in_op(op: &Op) -> u32 {
-    let mut m = 0;
-    let mut push = |v: ValueId| m = m.max(v.as_u32());
-    match op {
-        Op::BinOp { lhs, rhs, .. } => {
-            push(*lhs);
-            push(*rhs);
-        },
-        Op::UnaryOp { value, .. }
-        | Op::Activation { value, .. }
-        | Op::Cast { value, .. }
-        | Op::Reduce { value, .. }
-        | Op::Transpose { value }
-        | Op::Slice { value, .. }
-        | Op::Broadcast { value, .. } => push(*value),
-        Op::Select { cond, on_true, on_false } => {
-            push(*cond);
-            push(*on_true);
-            push(*on_false);
-        },
-        Op::Dot { a, b } => {
-            push(*a);
-            push(*b);
-        },
-        Op::Store { value, indices, .. } => {
-            push(*value);
-            for ix in indices {
-                if let IndexExpr::Value(v) | IndexExpr::Range(v, _) = ix {
-                    push(*v);
-                }
-            }
-        },
-        Op::Loop { start, end, step, .. } => {
-            push(*start);
-            push(*end);
-            push(*step);
-        },
-        Op::Load { indices, .. } =>
-            for ix in indices {
-                if let IndexExpr::Value(v) | IndexExpr::Range(v, _) = ix {
-                    push(*v);
-                }
-            },
-        Op::InlineMsl { inputs, .. } =>
-            for v in inputs {
-                push(*v);
-            },
-        Op::FlashAttention { q, k, v, .. } => {
-            push(*q);
-            push(*k);
-            push(*v);
-        },
-        Op::SlidingWindowAttention { q, k, v, .. } => {
-            push(*q);
-            push(*k);
-            push(*v);
-        },
-        Op::RmsNorm { x, scale, .. } => {
-            push(*x);
-            push(*scale);
-        },
-        Op::GatedMlp { x, gate_proj, up_proj, down_proj } => {
-            push(*x);
-            push(*gate_proj);
-            push(*up_proj);
-            push(*down_proj);
-        },
-        Op::FusedElementwise { ops } =>
-            for o in ops {
-                m = m.max(max_vid_in_op(o));
-            },
-        Op::VectorLoad { byte_offset, .. } => push(*byte_offset),
-        Op::VectorStore { byte_offset, value, .. } => {
-            push(*byte_offset);
-            push(*value);
-        },
-        Op::StrideReduce { offset, stride, end, .. } => {
-            push(*offset);
-            push(*stride);
-            push(*end);
-        },
-        Op::If { cond, .. } => push(*cond),
-        Op::ExpandDims { value, .. } | Op::Reshape { value, .. } => push(*value),
-        Op::Cat { values, .. } =>
-            for v in values {
-                push(*v);
-            },
-        Op::Gather { indices, .. } => push(*indices),
-        Op::Scatter { indices, value, .. } => {
-            push(*indices);
-            push(*value);
-        },
-        Op::Atomic { index, value, .. } => {
-            push(*index);
-            push(*value);
-        },
-        Op::Scan { value, .. } => push(*value),
-        Op::StrideScan { offset, end, .. } | Op::StrideArgReduce { offset, end, .. } => {
-            push(*offset);
-            push(*end);
-        },
-        Op::StrideStore { offset, end, scalar, .. } => {
-            push(*offset);
-            push(*end);
-            push(*scalar);
-        },
-        Op::Dequantize { .. } => {},
-        Op::SimdReduce { value, .. } | Op::ArgReduce { value, .. } => push(*value),
-        Op::ThreadgroupLoad { index, .. } => push(*index),
-        Op::ThreadgroupStore { index, value, .. } => {
-            push(*index);
-            push(*value);
-        },
-        Op::ThreadgroupAlloc { .. } | Op::Barrier => {},
-        Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => push(*value),
-        _ => {},
-    }
-    m
 }

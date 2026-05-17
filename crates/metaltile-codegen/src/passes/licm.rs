@@ -28,8 +28,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use metaltile_core::{
     error::Result,
-    ir::{Block, BlockId, IndexExpr, Kernel, Op, ParamKind, ValueId},
+    ir::{Block, BlockId, Kernel, Op, ParamKind, ValueId},
 };
+
+use super::remap;
 
 pub struct LicmPass;
 
@@ -120,7 +122,7 @@ fn licm_block(
             }
             // Also include values from other blocks (ancestors) referenced by the loop.
             for op in &loop_body.ops {
-                for vid in op_value_refs(op) {
+                for vid in remap::op_value_refs(op) {
                     if let Some(&def_bid) = def_block.get(&vid)
                         && def_bid != *body
                     {
@@ -142,7 +144,7 @@ fn licm_block(
                     if !is_pure_op(op, read_only) {
                         continue;
                     }
-                    let op_refs = op_value_refs(op);
+                    let op_refs = remap::op_value_refs(op);
                     if op_refs.iter().all(|v| invariant.contains(v))
                         && let Some(Some(vid)) = loop_body.results.get(j)
                     {
@@ -294,150 +296,194 @@ fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
     }
 }
 
-/// Return all ValueId references used by an op.
-fn op_value_refs(op: &Op) -> Vec<ValueId> {
-    let mut refs = Vec::new();
-    match op {
-        Op::BinOp { lhs, rhs, .. } => {
-            refs.push(*lhs);
-            refs.push(*rhs);
-        },
-        Op::UnaryOp { value, .. }
-        | Op::Activation { value, .. }
-        | Op::Cast { value, .. }
-        | Op::Reduce { value, .. }
-        | Op::Transpose { value }
-        | Op::Slice { value, .. }
-        | Op::Broadcast { value, .. } => {
-            refs.push(*value);
-        },
-        Op::Select { cond, on_true, on_false } => {
-            refs.push(*cond);
-            refs.push(*on_true);
-            refs.push(*on_false);
-        },
-        Op::Dot { a, b } => {
-            refs.push(*a);
-            refs.push(*b);
-        },
-        Op::Load { indices, mask, .. } => {
-            for ix in indices {
-                if let IndexExpr::Value(v) | IndexExpr::Range(v, _) = ix {
-                    refs.push(*v);
-                }
-            }
-            if let Some(m) = mask {
-                refs.push(*m);
-            }
-        },
-        Op::Store { indices, value, mask, .. } => {
-            for ix in indices {
-                if let IndexExpr::Value(v) | IndexExpr::Range(v, _) = ix {
-                    refs.push(*v);
-                }
-            }
-            refs.push(*value);
-            if let Some(m) = mask {
-                refs.push(*m);
-            }
-        },
-        Op::Loop { start, end, step, .. } => {
-            refs.push(*start);
-            refs.push(*end);
-            refs.push(*step);
-        },
-        Op::InlineMsl { inputs, .. } => {
-            refs.extend(inputs);
-        },
-        Op::FlashAttention { q, k, v, .. } => {
-            refs.push(*q);
-            refs.push(*k);
-            refs.push(*v);
-        },
-        Op::SlidingWindowAttention { q, k, v, .. } => {
-            refs.push(*q);
-            refs.push(*k);
-            refs.push(*v);
-        },
-        Op::RmsNorm { x, scale, .. } => {
-            refs.push(*x);
-            refs.push(*scale);
-        },
-        Op::GatedMlp { x, gate_proj, up_proj, down_proj } => {
-            refs.push(*x);
-            refs.push(*gate_proj);
-            refs.push(*up_proj);
-            refs.push(*down_proj);
-        },
-        Op::FusedElementwise { ops } =>
-            for sub in ops {
-                refs.extend(op_value_refs(sub));
-            },
-        Op::VectorLoad { byte_offset, .. } => {
-            refs.push(*byte_offset);
-        },
-        Op::VectorStore { byte_offset, value, .. } => {
-            refs.push(*byte_offset);
-            refs.push(*value);
-        },
-        Op::StrideReduce { offset, stride, end, .. } => {
-            refs.push(*offset);
-            refs.push(*stride);
-            refs.push(*end);
-        },
-        Op::If { cond, .. } => {
-            refs.push(*cond);
-        },
-        Op::ExpandDims { value, .. } => {
-            refs.push(*value);
-        },
-        Op::Reshape { value, .. } => {
-            refs.push(*value);
-        },
-        Op::Cat { values, .. } => {
-            refs.extend(values);
-        },
-        Op::Gather { indices, .. } => {
-            refs.push(*indices);
-        },
-        Op::Scatter { indices, value, .. } => {
-            refs.push(*indices);
-            refs.push(*value);
-        },
-        Op::Atomic { index, value, .. } => {
-            refs.push(*index);
-            refs.push(*value);
-        },
-        Op::Scan { value, .. } => {
-            refs.push(*value);
-        },
-        Op::StrideScan { offset, end, .. } => {
-            refs.push(*offset);
-            refs.push(*end);
-        },
-        Op::StrideArgReduce { offset, end, .. } => {
-            refs.push(*offset);
-            refs.push(*end);
-        },
-        Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => {
-            refs.push(*value);
-        },
-        Op::StrideStore { offset, end, scalar, .. } => {
-            refs.push(*offset);
-            refs.push(*end);
-            refs.push(*scalar);
-        },
-        Op::ThreadgroupLoad { index, .. } => {
-            refs.push(*index);
-        },
-        Op::ThreadgroupStore { index, value, .. } => {
-            refs.push(*index);
-            refs.push(*value);
-        },
-        Op::SimdReduce { value, .. } | Op::ArgReduce { value, .. } => {
-            refs.push(*value);
-        },
-        _ => {},
+#[cfg(test)]
+mod tests {
+    use metaltile_core::{
+        dtype::DType,
+        ir::{BinOpKind, IndexExpr, Param, ParamKind, VarId},
+        shape::Shape,
+    };
+
+    use super::*;
+    use crate::passes::Pass;
+
+    #[test]
+    fn hoists_loop_invariant_add() {
+        let mut k = Kernel::new("licm_add");
+        // Parent block: define invariant values.
+        k.body.push_op(Op::Const { value: 10 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 20 }, ValueId::new(1));
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(2)); // loop start
+        k.body.push_op(Op::Const { value: 4 }, ValueId::new(3)); // loop end
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(4)); // loop step
+
+        // Loop body: the add is invariant because both operands are outside the loop.
+        let mut loop_body = Block::new(BlockId::new(1));
+        loop_body.push_op(
+            Op::BinOp { op: BinOpKind::Add, lhs: ValueId::new(0), rhs: ValueId::new(1) },
+            ValueId::new(100),
+        );
+        let body_id = k.add_block(loop_body);
+
+        k.body.push_op_no_result(Op::Loop {
+            var: VarId::new(0),
+            start: ValueId::new(2),
+            end: ValueId::new(3),
+            step: ValueId::new(4),
+            body: body_id,
+        });
+
+        LicmPass.run(&mut k).unwrap();
+
+        // The add should be hoisted before the Loop in the parent block.
+        let loop_pos = k.body.ops.iter().position(|op| matches!(op, Op::Loop { .. })).unwrap();
+        let op_before_loop = &k.body.ops[loop_pos - 1];
+        assert!(
+            matches!(op_before_loop, Op::BinOp { op: BinOpKind::Add, .. }),
+            "invariant add should be hoisted before loop"
+        );
     }
-    refs
+
+    #[test]
+    fn does_not_hoist_store() {
+        let mut k = Kernel::new("licm_store");
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(1));
+        k.body.push_op(Op::Const { value: 4 }, ValueId::new(2));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(3));
+
+        let mut loop_body = Block::new(BlockId::new(1));
+        loop_body.push_op(Op::Const { value: 42 }, ValueId::new(100));
+        // Store has side effects — must NOT be hoisted.
+        loop_body.push_op_no_result(Op::Store {
+            dst: "buf".into(),
+            indices: vec![],
+            value: ValueId::new(100),
+            mask: None,
+        });
+        let body_id = k.add_block(loop_body);
+
+        k.body.push_op_no_result(Op::Loop {
+            var: VarId::new(0),
+            start: ValueId::new(0),
+            end: ValueId::new(2),
+            step: ValueId::new(3),
+            body: body_id,
+        });
+        LicmPass.run(&mut k).unwrap();
+
+        // Store should still be in the loop body.
+        let body = k.blocks.get(&body_id).unwrap();
+        let has_store = body.ops.iter().any(|op| matches!(op, Op::Store { .. }));
+        assert!(has_store, "Store must not be hoisted from loop");
+    }
+
+    #[test]
+    fn hoists_const_from_loop() {
+        let mut k = Kernel::new("licm_const");
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 4 }, ValueId::new(1));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(2));
+
+        let mut loop_body = Block::new(BlockId::new(1));
+        // Const in loop body — pure and invariant.
+        loop_body.push_op(Op::Const { value: 7 }, ValueId::new(100));
+        let body_id = k.add_block(loop_body);
+
+        k.body.push_op_no_result(Op::Loop {
+            var: VarId::new(0),
+            start: ValueId::new(0),
+            end: ValueId::new(1),
+            step: ValueId::new(2),
+            body: body_id,
+        });
+        LicmPass.run(&mut k).unwrap();
+
+        // Const should be hoisted.
+        let body = k.blocks.get(&body_id).unwrap();
+        let has_const = body.ops.iter().any(|op| matches!(op, Op::Const { .. }));
+        assert!(!has_const, "loop-invariant Const should be hoisted");
+    }
+
+    #[test]
+    fn does_not_hoist_load_from_mutable_param() {
+        let mut k = Kernel::new("licm_mutable_load");
+        k.params.push(Param {
+            name: "buf".into(),
+            dtype: DType::F32,
+            shape: Shape::scalar(),
+            is_output: true, // mutable
+            kind: ParamKind::Tensor,
+        });
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 4 }, ValueId::new(1));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(2));
+
+        let mut loop_body = Block::new(BlockId::new(1));
+        loop_body.push_op(
+            Op::Load {
+                src: "buf".into(),
+                indices: vec![IndexExpr::Value(ValueId::new(0))],
+                mask: None,
+                other: None,
+            },
+            ValueId::new(100),
+        );
+        let body_id = k.add_block(loop_body);
+
+        k.body.push_op_no_result(Op::Loop {
+            var: VarId::new(0),
+            start: ValueId::new(0),
+            end: ValueId::new(1),
+            step: ValueId::new(2),
+            body: body_id,
+        });
+        LicmPass.run(&mut k).unwrap();
+
+        // Load from mutable param should NOT be hoisted.
+        let body = k.blocks.get(&body_id).unwrap();
+        let has_load = body.ops.iter().any(|op| matches!(op, Op::Load { .. }));
+        assert!(has_load, "Load from mutable param must not be hoisted");
+    }
+
+    #[test]
+    fn hoists_read_only_load() {
+        let mut k = Kernel::new("licm_readonly_load");
+        k.params.push(Param {
+            name: "weights".into(),
+            dtype: DType::F32,
+            shape: Shape::scalar(),
+            is_output: false,
+            kind: ParamKind::Tensor, // read-only
+        });
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 4 }, ValueId::new(1));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(2));
+
+        let mut loop_body = Block::new(BlockId::new(1));
+        loop_body.push_op(
+            Op::Load {
+                src: "weights".into(),
+                indices: vec![IndexExpr::Value(ValueId::new(0))],
+                mask: None,
+                other: None,
+            },
+            ValueId::new(100),
+        );
+        let body_id = k.add_block(loop_body);
+
+        k.body.push_op_no_result(Op::Loop {
+            var: VarId::new(0),
+            start: ValueId::new(0),
+            end: ValueId::new(1),
+            step: ValueId::new(2),
+            body: body_id,
+        });
+        LicmPass.run(&mut k).unwrap();
+
+        // Load from read-only param should be hoisted.
+        let body = k.blocks.get(&body_id).unwrap();
+        let has_load = body.ops.iter().any(|op| matches!(op, Op::Load { .. }));
+        assert!(!has_load, "Load from read-only param should be hoisted");
+    }
 }

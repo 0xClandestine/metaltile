@@ -307,3 +307,179 @@ fn replace_values(op: &mut Op, map: &HashMap<ValueId, ValueId>) {
         Op::ArgReduce { value, .. } => s(value),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use metaltile_core::{
+        dtype::DType,
+        ir::{BinOpKind, IndexExpr, Param, ParamKind},
+        shape::Shape,
+    };
+
+    use super::*;
+    use crate::passes::Pass;
+
+    fn read_only_param(name: &str) -> Param {
+        Param {
+            name: name.into(),
+            dtype: DType::F32,
+            shape: Shape::scalar(),
+            is_output: false,
+            kind: ParamKind::Tensor,
+        }
+    }
+
+    #[test]
+    fn eliminates_duplicate_binop() {
+        let mut k = Kernel::new("cse_binop");
+        k.body.push_op(Op::Const { value: 3 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 4 }, ValueId::new(1));
+        // First 3+4
+        k.body.push_op(
+            Op::BinOp { op: BinOpKind::Add, lhs: ValueId::new(0), rhs: ValueId::new(1) },
+            ValueId::new(2),
+        );
+        // Second 3+4 (duplicate)
+        k.body.push_op(
+            Op::BinOp { op: BinOpKind::Add, lhs: ValueId::new(0), rhs: ValueId::new(1) },
+            ValueId::new(3),
+        );
+        // Both used in a final store to keep alive.
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(3),
+            mask: None,
+        });
+        CsePass.run(&mut k).unwrap();
+        // Only one BinOp should remain.
+        let adds: Vec<_> = k
+            .body
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::BinOp { op: BinOpKind::Add, .. }))
+            .collect();
+        assert_eq!(adds.len(), 1, "duplicate BinOp should be CSE'd");
+    }
+
+    #[test]
+    fn canonicalizes_commutative_binop() {
+        let mut k = Kernel::new("cse_commute");
+        k.body.push_op(Op::Const { value: 3 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 4 }, ValueId::new(1));
+        // 3+4
+        k.body.push_op(
+            Op::BinOp { op: BinOpKind::Add, lhs: ValueId::new(0), rhs: ValueId::new(1) },
+            ValueId::new(2),
+        );
+        // 4+3 (commuted duplicate)
+        k.body.push_op(
+            Op::BinOp { op: BinOpKind::Add, lhs: ValueId::new(1), rhs: ValueId::new(0) },
+            ValueId::new(3),
+        );
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(3),
+            mask: None,
+        });
+        CsePass.run(&mut k).unwrap();
+        let adds: Vec<_> = k
+            .body
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::BinOp { op: BinOpKind::Add, .. }))
+            .collect();
+        assert_eq!(adds.len(), 1, "commutative duplicate should be CSE'd");
+    }
+
+    #[test]
+    fn eliminates_duplicate_cast() {
+        let mut k = Kernel::new("cse_cast");
+        k.body.push_op(Op::Const { value: 5 }, ValueId::new(0));
+        k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::F32 }, ValueId::new(1));
+        k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::F32 }, ValueId::new(2));
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(2),
+            mask: None,
+        });
+        CsePass.run(&mut k).unwrap();
+        let casts: Vec<_> = k.body.ops.iter().filter(|op| matches!(op, Op::Cast { .. })).collect();
+        assert_eq!(casts.len(), 1, "duplicate Cast should be CSE'd");
+    }
+
+    #[test]
+    fn cse_read_only_load() {
+        let mut k = Kernel::new("cse_load");
+        k.params.push(read_only_param("weights"));
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(0));
+        let idx = IndexExpr::Value(ValueId::new(0));
+        k.body.push_op(
+            Op::Load { src: "weights".into(), indices: vec![idx.clone()], mask: None, other: None },
+            ValueId::new(1),
+        );
+        k.body.push_op(
+            Op::Load { src: "weights".into(), indices: vec![idx], mask: None, other: None },
+            ValueId::new(2),
+        );
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(2),
+            mask: None,
+        });
+        CsePass.run(&mut k).unwrap();
+        let loads: Vec<_> = k.body.ops.iter().filter(|op| matches!(op, Op::Load { .. })).collect();
+        assert_eq!(loads.len(), 1, "duplicate read-only Load should be CSE'd");
+    }
+
+    #[test]
+    fn does_not_cse_side_effecting_ops() {
+        let mut k = Kernel::new("cse_noside");
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
+        // Two Stores — should NOT be CSE'd (side effects).
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(0),
+            mask: None,
+        });
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(0),
+            mask: None,
+        });
+        CsePass.run(&mut k).unwrap();
+        let stores: Vec<_> =
+            k.body.ops.iter().filter(|op| matches!(op, Op::Store { .. })).collect();
+        assert_eq!(stores.len(), 2, "Stores should not be CSE'd");
+    }
+
+    #[test]
+    fn different_binops_not_csed() {
+        let mut k = Kernel::new("cse_diff");
+        k.body.push_op(Op::Const { value: 3 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 4 }, ValueId::new(1));
+        k.body.push_op(
+            Op::BinOp { op: BinOpKind::Add, lhs: ValueId::new(0), rhs: ValueId::new(1) },
+            ValueId::new(2),
+        );
+        k.body.push_op(
+            Op::BinOp { op: BinOpKind::Mul, lhs: ValueId::new(0), rhs: ValueId::new(1) },
+            ValueId::new(3),
+        );
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(3),
+            mask: None,
+        });
+        CsePass.run(&mut k).unwrap();
+        let binops: Vec<_> =
+            k.body.ops.iter().filter(|op| matches!(op, Op::BinOp { .. })).collect();
+        assert_eq!(binops.len(), 2, "different binops should not be CSE'd");
+    }
+}

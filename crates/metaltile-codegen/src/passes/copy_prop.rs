@@ -20,13 +20,15 @@
 //! 2. Replace all uses of the identity result with the source ValueId.
 //! 3. DCE cleans up the dead identity ops (ran after this pass).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use metaltile_core::{
     dtype::DType,
     error::Result,
-    ir::{Block, BlockId, IndexExpr, Kernel, Op, ValueId},
+    ir::{Block, BlockId, Kernel, Op, ValueId},
 };
+
+use super::remap;
 
 pub struct CopyPropPass;
 
@@ -48,6 +50,24 @@ impl super::Pass for CopyPropPass {
     }
 }
 
+/// Resolve transitive replacement chains: {v2→v1, v1→v0} becomes {v2→v0, v1→v0}.
+fn resolve_transitive(map: &BTreeMap<ValueId, ValueId>) -> BTreeMap<ValueId, ValueId> {
+    let mut resolved = BTreeMap::new();
+    for (&key, &val) in map.iter() {
+        let mut terminal = val;
+        let mut visited = BTreeSet::new();
+        visited.insert(key);
+        while let Some(&next) = map.get(&terminal) {
+            if !visited.insert(terminal) {
+                break; // cycle detected
+            }
+            terminal = next;
+        }
+        resolved.insert(key, terminal);
+    }
+    resolved
+}
+
 fn copy_prop_block_fixpoint(block: &mut Block) {
     loop {
         if !copy_prop_block_once(block) {
@@ -62,10 +82,10 @@ fn copy_prop_block_once(block: &mut Block) -> bool {
 
     for i in 0..n {
         let op = &block.ops[i];
-        if let Some(source_vid) = is_identity(op, block) {
-            if let Some(Some(result_vid)) = block.results.get(i) {
-                vid_replacements.insert(*result_vid, source_vid);
-            }
+        if let Some(source_vid) = is_identity(op, block)
+            && let Some(Some(result_vid)) = block.results.get(i)
+        {
+            vid_replacements.insert(*result_vid, source_vid);
         }
     }
 
@@ -73,9 +93,33 @@ fn copy_prop_block_once(block: &mut Block) -> bool {
         return false;
     }
 
+    // Resolve transitive replacement chains: v2→v1→v0 becomes v2→v0.
+    let vid_replacements = resolve_transitive(&vid_replacements);
+
     // Remap ValueIds in all ops.
     for op in block.ops.iter_mut() {
-        remap_values_in_op(op, &vid_replacements);
+        remap::remap_value_ids(op, &vid_replacements);
+    }
+
+    // Remove dead ops whose results were redirected via identity propagation.
+    // Without this, the same identity pattern re-matches on the next iteration,
+    // producing the same replacement and causing an infinite fixpoint loop.
+    let dead_vids: BTreeSet<ValueId> = vid_replacements.keys().copied().collect();
+    if !dead_vids.is_empty() {
+        let mut new_ops = Vec::new();
+        let mut new_results = Vec::new();
+        for (i, op) in block.ops.iter().enumerate() {
+            let is_dead = block
+                .results
+                .get(i)
+                .is_some_and(|r| r.is_some_and(|v| dead_vids.contains(&v)));
+            if !is_dead {
+                new_ops.push(op.clone());
+                new_results.push(block.results[i]);
+            }
+        }
+        block.ops = new_ops;
+        block.results = new_results;
     }
 
     true
@@ -87,11 +131,7 @@ fn is_identity(op: &Op, _block: &Block) -> Option<ValueId> {
         // Cast(float, x) → x  when x is already float
         Op::Cast { value, dtype } => {
             let inferred = infer_value_dtype(*value, _block);
-            if inferred == Some(*dtype) {
-                Some(*value)
-            } else {
-                None
-            }
+            if inferred == Some(*dtype) { Some(*value) } else { None }
         },
 
         // Broadcast(x, [1]) → x  — broadcasting a scalar by shape [1] is a no-op
@@ -119,17 +159,15 @@ fn is_identity(op: &Op, _block: &Block) -> Option<ValueId> {
         },
 
         // Select(cond, x, x) → x  — same value both sides
-        Op::Select { on_true, on_false, .. } => {
+        Op::Select { on_true, on_false, .. } =>
             if on_true == on_false {
                 Some(*on_true)
             } else {
                 None
-            }
-        },
+            },
 
         // ExpandDims with shape [1] is effectively an identity for a scalar
         // (handled by Reshape already; but cover base case)
-
         _ => None,
     }
 }
@@ -143,7 +181,7 @@ fn infer_value_dtype(vid: ValueId, block: &Block) -> Option<DType> {
         match op {
             Op::Cast { dtype, .. } => return Some(*dtype),
             Op::Const { .. } =>
-                // Constants are integers; they'll be cast to target dtype at use.
+            // Constants are integers; they'll be cast to target dtype at use.
                 return None,
             Op::Zeros { dtype, .. } | Op::Splat { dtype, .. } => return Some(*dtype),
             Op::Load { .. } => return None, // dtype comes from param
@@ -153,135 +191,121 @@ fn infer_value_dtype(vid: ValueId, block: &Block) -> Option<DType> {
     None
 }
 
-/// Remap all ValueId references in an op.
-fn remap_values_in_op(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
-    let s = |v: &mut ValueId| {
-        if let Some(&nv) = map.get(v) {
-            *v = nv;
-        }
+#[cfg(test)]
+mod tests {
+    use metaltile_core::{
+        dtype::DType,
+        shape::{Dim, Shape},
     };
-    match op {
-        Op::BinOp { lhs, rhs, .. } => {
-            s(lhs);
-            s(rhs);
-        },
-        Op::UnaryOp { value, .. }
-        | Op::Activation { value, .. }
-        | Op::Cast { value, .. }
-        | Op::Reduce { value, .. }
-        | Op::Transpose { value }
-        | Op::Slice { value, .. }
-        | Op::Broadcast { value, .. } => s(value),
-        Op::Select { cond, on_true, on_false } => {
-            s(cond);
-            s(on_true);
-            s(on_false);
-        },
-        Op::Dot { a, b } => {
-            s(a);
-            s(b);
-        },
-        Op::Store { value, indices, .. } => {
-            s(value);
-            for idx in indices.iter_mut() {
-                if let IndexExpr::Value(v) | IndexExpr::Range(v, _) = idx {
-                    s(v);
-                }
-            }
-        },
-        Op::Loop { start, end, step, .. } => {
-            s(start);
-            s(end);
-            s(step);
-        },
-        Op::Load { indices, .. } =>
-            for idx in indices.iter_mut() {
-                if let IndexExpr::Value(v) | IndexExpr::Range(v, _) = idx {
-                    s(v);
-                }
+
+    use super::*;
+    use crate::passes::Pass;
+
+    #[test]
+    fn eliminates_cast_of_same_dtype() {
+        let mut k = Kernel::new("cast_id");
+        // Create a float-producing op
+        k.body.push_op(Op::Zeros { dtype: DType::F32, shape: Shape::scalar() }, ValueId::new(0));
+        k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::F32 }, ValueId::new(1));
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(1),
+            mask: None,
+        });
+        CopyPropPass.run(&mut k).unwrap();
+        // Cast(f32, f32_val) → f32_val; uses of v1 redirected to v0.
+        let stores: Vec<_> =
+            k.body.ops.iter().filter(|op| matches!(op, Op::Store { .. })).collect();
+        if let Op::Store { value, .. } = stores[0] {
+            assert_eq!(value.as_u32(), 0, "Cast(f32, f32) should redirect to original");
+        }
+    }
+
+    #[test]
+    fn eliminates_broadcast_scalar_shape1() {
+        let mut k = Kernel::new("broadcast_id");
+        k.body.push_op(Op::Const { value: 5 }, ValueId::new(0));
+        k.body.push_op(
+            Op::Broadcast { value: ValueId::new(0), shape: Shape::new([Dim::Known(1)]) },
+            ValueId::new(1),
+        );
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(1),
+            mask: None,
+        });
+        CopyPropPass.run(&mut k).unwrap();
+        let stores: Vec<_> =
+            k.body.ops.iter().filter(|op| matches!(op, Op::Store { .. })).collect();
+        if let Op::Store { value, .. } = stores[0] {
+            assert_eq!(value.as_u32(), 0, "Broadcast(x, [1]) should redirect to x");
+        }
+    }
+
+    #[test]
+    fn eliminates_select_with_same_branches() {
+        let mut k = Kernel::new("select_id");
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 42 }, ValueId::new(1));
+        k.body.push_op(
+            Op::Select {
+                cond: ValueId::new(0),
+                on_true: ValueId::new(1),
+                on_false: ValueId::new(1),
             },
-        Op::InlineMsl { inputs, .. } =>
-            for v in inputs.iter_mut() {
-                s(v);
-            },
-        Op::FlashAttention { q, k, v, .. } => {
-            s(q);
-            s(k);
-            s(v);
-        },
-        Op::SlidingWindowAttention { q, k, v, .. } => {
-            s(q);
-            s(k);
-            s(v);
-        },
-        Op::RmsNorm { x, scale, .. } => {
-            s(x);
-            s(scale);
-        },
-        Op::GatedMlp { x, gate_proj, up_proj, down_proj } => {
-            s(x);
-            s(gate_proj);
-            s(up_proj);
-            s(down_proj);
-        },
-        Op::ProgramId { .. }
-        | Op::Const { .. }
-        | Op::Arange { .. }
-        | Op::Zeros { .. }
-        | Op::Splat { .. } => {},
-        Op::FusedElementwise { ops } =>
-            for sub_op in ops.iter_mut() {
-                remap_values_in_op(sub_op, map);
-            },
-        Op::VectorLoad { byte_offset, .. } => s(byte_offset),
-        Op::VectorStore { byte_offset, value, .. } => {
-            s(byte_offset);
-            s(value);
-        },
-        Op::StrideReduce { offset, stride, end, .. } => {
-            s(offset);
-            s(stride);
-            s(end);
-        },
-        Op::If { cond, .. } => s(cond),
-        Op::ExpandDims { value, .. } => s(value),
-        Op::Reshape { value, .. } => s(value),
-        Op::Cat { values, .. } =>
-            for v in values.iter_mut() {
-                s(v);
-            },
-        Op::Gather { indices, .. } => s(indices),
-        Op::Scatter { indices, value, .. } => {
-            s(indices);
-            s(value);
-        },
-        Op::Atomic { index, value, .. } => {
-            s(index);
-            s(value);
-        },
-        Op::Scan { value, .. } => s(value),
-        Op::StrideStore { offset, end, scalar, .. } => {
-            s(offset);
-            s(end);
-            s(scalar);
-        },
-        Op::Dequantize { .. } => {},
-        Op::SimdReduce { value, .. } => s(value),
-        Op::ThreadgroupLoad { index, .. } => s(index),
-        Op::ThreadgroupStore { index, value, .. } => {
-            s(index);
-            s(value);
-        },
-        Op::ThreadgroupAlloc { .. } | Op::Barrier => {},
-        Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => s(value),
-        Op::ArgReduce { value, .. } => s(value),
-        Op::StrideScan { offset, end, .. } => {
-            s(offset);
-            s(end);
-        },
-        Op::StrideArgReduce { offset, end, .. } => {
-            s(offset);
-            s(end);
-        },
+            ValueId::new(2),
+        );
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(2),
+            mask: None,
+        });
+        CopyPropPass.run(&mut k).unwrap();
+        let stores: Vec<_> =
+            k.body.ops.iter().filter(|op| matches!(op, Op::Store { .. })).collect();
+        if let Op::Store { value, .. } = stores[0] {
+            assert_eq!(value.as_u32(), 1, "Select(cond,a,a) should redirect to a");
+        }
+    }
+
+    #[test]
+    fn preserves_non_identity_cast() {
+        let mut k = Kernel::new("cast_real");
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(0)); // i32
+        k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::F32 }, ValueId::new(1));
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(1),
+            mask: None,
+        });
+        CopyPropPass.run(&mut k).unwrap();
+        // Cast(i32→f32) is NOT an identity (dtype inferred from Const is None), should be kept.
+        let has_cast = k.body.ops.iter().any(|op| matches!(op, Op::Cast { .. }));
+        assert!(has_cast, "Cast to different dtype should be preserved");
+    }
+
+    #[test]
+    fn fixpoint_propagates_through_chain() {
+        let mut k = Kernel::new("copy_chain");
+        k.body.push_op(Op::Zeros { dtype: DType::F32, shape: Shape::scalar() }, ValueId::new(0));
+        k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::F32 }, ValueId::new(1));
+        k.body.push_op(Op::Cast { value: ValueId::new(1), dtype: DType::F32 }, ValueId::new(2));
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(2),
+            mask: None,
+        });
+        CopyPropPass.run(&mut k).unwrap();
+        // Both Casts are identities → all redirect to v0.
+        let stores: Vec<_> =
+            k.body.ops.iter().filter(|op| matches!(op, Op::Store { .. })).collect();
+        if let Op::Store { value, .. } = stores[0] {
+            assert_eq!(value.as_u32(), 0, "chain of identity casts should propagate to source");
+        }
     }
 }
