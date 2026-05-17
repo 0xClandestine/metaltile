@@ -93,6 +93,14 @@ pub struct MslGenerator {
     config: MslConfig,
 }
 
+/// Return `true` if any op in the kernel (body + all child blocks) is
+/// `Op::ProgramId { axis }` for the given axis value.
+fn kernel_uses_program_id_axis(kernel: &Kernel, axis: u32) -> bool {
+    let check =
+        |ops: &[Op]| ops.iter().any(|op| matches!(op, Op::ProgramId { axis: a } if *a == axis));
+    check(&kernel.body.ops) || kernel.blocks.values().any(|b| check(&b.ops))
+}
+
 impl MslGenerator {
     pub fn new(config: MslConfig) -> Self { MslGenerator { config } }
 
@@ -395,10 +403,14 @@ impl MslGenerator {
 
         // Inject scalar aliases for the Reduction mode so the body can use
         // `tid`, `tgid_x`, `tgid_y`, `lsize`, and `n_simd` directly.
+        // `tgid_y` is only emitted when the kernel actually references
+        // program_id::<1>(), avoiding -Wunused-variable on single-axis kernels.
         if kernel.mode == KernelMode::Reduction {
             wl!(out, "    uint tid    = _tid3.x;");
             wl!(out, "    uint tgid_x = _tgid3.x;");
-            wl!(out, "    uint tgid_y = _tgid3.y;");
+            if kernel_uses_program_id_axis(kernel, 1) {
+                wl!(out, "    uint tgid_y = _tgid3.y;");
+            }
             wl!(out, "    uint lsize  = _lsize3.x;");
             if feat.needs_simd_group {
                 wl!(out, "    uint n_simd = lsize / 32u;");
@@ -492,7 +504,15 @@ impl MslGenerator {
 
                 Op::Const { value } => {
                     let v = self.vname(vid, block, extra_names);
-                    wl!(out, "{pad}int {v} = {value};");
+                    // Non-negative constants are emitted as `uint` to avoid
+                    // -Wsign-compare warnings when used alongside uint operands
+                    // (e.g. ProgramId, Arange, loop counters). Negative constants
+                    // remain `int` since they require a signed type.
+                    if *value >= 0 {
+                        wl!(out, "{pad}uint {v} = {value}u;");
+                    } else {
+                        wl!(out, "{pad}int {v} = {value};");
+                    }
                 },
 
                 Op::Arange { start, step, len } => {
@@ -1973,11 +1993,19 @@ mod tests {
     }
 
     #[test]
-    fn const_op_emits_int_literal() {
+    fn const_op_emits_uint_for_nonneg() {
         let mut k = Kernel::new("const_test");
         k.body.push_op(Op::Const { value: 42 }, ValueId::new(0));
         let msl = MslGenerator::default().generate(&k).unwrap();
-        assert!(msl.contains("int v0 = 42"), "Const op should emit int literal");
+        assert!(msl.contains("uint v0 = 42u"), "non-negative Const should emit as uint");
+    }
+
+    #[test]
+    fn const_op_emits_int_for_negative() {
+        let mut k = Kernel::new("const_neg_test");
+        k.body.push_op(Op::Const { value: -7 }, ValueId::new(0));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(msl.contains("int v0 = -7"), "negative Const should emit as int");
     }
 
     #[test]
@@ -2182,5 +2210,27 @@ mod tests {
         );
         assert!(!msl.contains("v1 = "), "no separate declaration for v1");
         assert!(!msl.contains("v2 = "), "no separate declaration for v2");
+    }
+
+    #[test]
+    fn reduction_preamble_omits_tgid_y_when_unused() {
+        use metaltile_core::ir::KernelMode;
+        let mut k = Kernel::new("reduction_no_y");
+        k.mode = KernelMode::Reduction;
+        // axis-0 only → tgid_y should NOT be emitted
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(!msl.contains("tgid_y"), "tgid_y must be omitted when program_id axis 1 is unused");
+    }
+
+    #[test]
+    fn reduction_preamble_emits_tgid_y_when_used() {
+        use metaltile_core::ir::KernelMode;
+        let mut k = Kernel::new("reduction_with_y");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::ProgramId { axis: 1 }, ValueId::new(1));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(msl.contains("tgid_y"), "tgid_y must be emitted when program_id axis 1 is used");
     }
 }
