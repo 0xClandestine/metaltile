@@ -80,7 +80,15 @@ impl MslGenerator {
 
                 Op::Const { value } => {
                     let v = self.vname(vid, block, extra_names);
-                    wl!(out, "{pad}int {v} = {value};");
+                    // Non-negative constants are emitted as `uint` to avoid
+                    // -Wsign-compare warnings when used alongside uint operands
+                    // (e.g. ProgramId, Arange, loop counters). Negative
+                    // constants remain `int` since they require a signed type.
+                    if *value >= 0 {
+                        wl!(out, "{pad}uint {v} = {value}u;");
+                    } else {
+                        wl!(out, "{pad}int {v} = {value};");
+                    }
                 },
 
                 Op::Arange { start, step, len } => {
