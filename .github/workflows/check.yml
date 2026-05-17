@@ -55,7 +55,7 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
-    name: Test
+    name: Tests
     runs-on: ubuntu-latest
     steps:
       - uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
@@ -76,7 +76,7 @@ jobs:
       - run: cargo test --workspace
 
   commit-hygiene:
-    name: Commit Hygiene
+    name: Commits
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
@@ -92,7 +92,7 @@ jobs:
         run: python3 .github/scripts/commit_hygiene.py
 
   metal:
-    name: Metal runtime & kernel correctness (macOS)
+    name: Kernels
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -106,11 +106,8 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Workspace tests (includes Metal runtime tests)
-        run: cargo test --workspace
-
-      - name: Compile all kernels
+      - name: Tile Build
         run: cargo run --release -p metaltile-cli -- build
 
-      - name: Kernel correctness — interpreter vs GPU
+      - name: Tile Test
         run: cargo run --release -p metaltile-cli -- test
