@@ -110,5 +110,5 @@ jobs:
       - name: Tile Build
         run: cargo run --release -p metaltile-cli -- build
 
-      - name: Tile Test
-        run: cargo run --release -p metaltile-cli -- test
+      - name: Tile Bench
+        run: cargo run --release -p metaltile-cli -- bench
