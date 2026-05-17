@@ -1,8 +1,20 @@
-//! Tile lowering pass: expands high-level tile ops into thread-mapped MSL.
+//! Tile Lowering — validate and annotate the IR for tiled matmul.
 //!
-//! Phase 2: Op::Dot → full tiled matmul.
-//! The actual lowering happens in the MSL generator (msl.rs::emit_tiled).
-//! This pass validates and annotates the IR for tile operations.
+//! Phase 2 of the tiling pipeline: `Op::Dot` → full tiled matrix multiply.
+//! The actual lowering happens in the MSL generator (`msl.rs::emit_tiled`).
+//! This pass validates the IR and attaches tile schedule metadata to the kernel.
+//!
+//! The tile schedule specifies: tile dimensions (M, N, K), threadgroup shape,
+//! and per-thread work distribution (rows_per_thread, cols_per_thread).
+//!
+//! ## References
+//! - Chen, Moreau, Jiang et al. (2018), "TVM: An Automated End-to-End
+//!   Optimizing Compiler for Deep Learning", OSDI 2018.
+//!   Tile-based schedule primitives for GPU code generation.
+//!   https://arxiv.org/abs/1802.04799
+//! - Bacon, Graham & Sharp (1994), "Compiler Transformations for High-
+//!   Performance Computing", ACM Computing Surveys 26(4):345–420.
+//!   Foundational survey of tiling transformations.
 
 use metaltile_core::{error::Result, ir::Kernel};
 

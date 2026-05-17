@@ -6,6 +6,16 @@ use crate::{
     term::{Color, Style, paint_stdout},
 };
 
+pub fn help() {
+    eprintln!("tile device — Show GPU device info and supported feature flags");
+    eprintln!();
+    eprintln!("USAGE:");
+    eprintln!("  tile device [options]");
+    eprintln!();
+    eprintln!("OPTIONS:");
+    eprintln!("  --json   Output as JSON");
+}
+
 pub fn run(args: &[String]) {
     let json_out = flag_present(args, "--json");
 

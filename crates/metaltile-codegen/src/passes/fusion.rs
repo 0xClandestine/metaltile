@@ -1,10 +1,37 @@
-//! Fusion pass: merge adjacent elementwise operations into a single FusedElementwise op.
+//! Operator Fusion — merge adjacent elementwise operations into FusedElementwise.
 //!
-//! Algorithm:
+//! Fuses chains of elementwise ops (arithmetic, activation, cast) where each
+//! intermediate result has exactly one consumer.  The fused chain is emitted as
+//! a single Metal Shading Language expression, avoiding intermediate register
+//! spills and reducing launch overhead.
+//!
+//! This is an instance of the producer-consumer fusion pattern common in
+//! stencil and deep-learning compilers (Halide, TVM, XLA).
+//!
+//! ## Algorithm
 //! 1. Build def-use graph: for each ValueId, which op indices use it?
 //! 2. Find chains where each op produces a value used only by the next op.
 //! 3. Create an `Op::FusedElementwise` containing the whole chain.
 //! 4. Replace the original ops; the MSL emitter then emits a single expression.
+//!
+//! ## Limitations
+//! - Only elementwise ops are fused; reductions, loads, and stores are excluded.
+//! - Fused chains are limited to `MAX_FUSED_OPS` (default 8) to keep MSL
+//!   expressions debuggable.
+//! - Does not fuse across block boundaries or loop iterations.
+//!
+//! ## References
+//! - Ragan-Kelley, Barnes, Adams, Paris, Durand & Amarasinghe (2013),
+//!   "Halide: A Language and Compiler for Optimizing Parallelism, Locality,
+//!   and Recomputation in Image Processing Pipelines", PLDI 2013.
+//!   Introduced the schedule-separated operator fusion model.
+//! - Chen, Moreau, Jiang et al. (2018), "TVM: An Automated End-to-End
+//!   Optimizing Compiler for Deep Learning", OSDI 2018.  Operator fusion
+//!   in the deep-learning compiler context.
+//!   https://arxiv.org/abs/1802.04799
+//! - Google (2017), "XLA: Optimizing Compiler for Machine Learning",
+//!   TensorFlow blog.  Production operator fusion for ML workloads.
+//!   https://developers.googleblog.com/xla-tensorflow-compiled/
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -513,4 +540,166 @@ fn build_fused_sub_op(
     }
 
     new_op
+}
+
+#[cfg(test)]
+mod tests {
+    use metaltile_core::{
+        dtype::DType,
+        ir::{ActKind, BinOpKind, UnaryOpKind},
+        shape::Shape,
+    };
+
+    use super::*;
+    use crate::passes::Pass;
+
+    #[test]
+    fn fuses_exp_into_activation() {
+        // UnaryOp(Exp) → Activation(Silu): should fuse into FusedElementwise.
+        let mut k = Kernel::new("fuse_exp_silu");
+        k.body.push_op(
+            Op::Splat { value: 1.0, dtype: DType::F32, shape: Shape::scalar() },
+            ValueId::new(0),
+        );
+        k.body
+            .push_op(Op::UnaryOp { op: UnaryOpKind::Exp, value: ValueId::new(0) }, ValueId::new(1));
+        k.body.push_op(Op::Cast { value: ValueId::new(1), dtype: DType::F32 }, ValueId::new(2));
+        k.body.push_op(
+            Op::Activation { kind: ActKind::Silu, value: ValueId::new(2) },
+            ValueId::new(3),
+        );
+        // Store the result so the chain isn't DCE'd.
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(3),
+            mask: None,
+        });
+        FusionPass.run(&mut k).unwrap();
+        let has_fused = k.body.ops.iter().any(|op| matches!(op, Op::FusedElementwise { .. }));
+        assert!(has_fused, "exp → cast → silu chain should fuse into FusedElementwise");
+    }
+
+    #[test]
+    fn fuses_cast_unary_chain() {
+        let mut k = Kernel::new("fuse_cast_neg");
+        k.body.push_op(
+            Op::Splat { value: 2.0, dtype: DType::F32, shape: Shape::scalar() },
+            ValueId::new(0),
+        );
+        k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::F16 }, ValueId::new(1));
+        k.body
+            .push_op(Op::UnaryOp { op: UnaryOpKind::Neg, value: ValueId::new(1) }, ValueId::new(2));
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(2),
+            mask: None,
+        });
+        FusionPass.run(&mut k).unwrap();
+        let has_fused = k.body.ops.iter().any(|op| matches!(op, Op::FusedElementwise { .. }));
+        assert!(has_fused, "cast → neg chain should fuse");
+    }
+
+    #[test]
+    fn multi_use_breaks_chain() {
+        // When an intermediate value has two users, chain breaks.
+        let mut k = Kernel::new("fuse_multiuse");
+        k.body.push_op(
+            Op::Splat { value: 1.0, dtype: DType::F32, shape: Shape::scalar() },
+            ValueId::new(0),
+        );
+        k.body
+            .push_op(Op::UnaryOp { op: UnaryOpKind::Exp, value: ValueId::new(0) }, ValueId::new(1));
+        // v1 has two users: activation AND a separate add.
+        k.body.push_op(
+            Op::Activation { kind: ActKind::Silu, value: ValueId::new(1) },
+            ValueId::new(2),
+        );
+        k.body.push_op(
+            Op::BinOp { op: BinOpKind::Add, lhs: ValueId::new(1), rhs: ValueId::new(1) },
+            ValueId::new(3),
+        );
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(2),
+            mask: None,
+        });
+        k.body.push_op_no_result(Op::Store {
+            dst: "out2".into(),
+            indices: vec![],
+            value: ValueId::new(3),
+            mask: None,
+        });
+        FusionPass.run(&mut k).unwrap();
+        // Splat+Exp may fuse into one FusedElementwise (v0→v1 is single-use).
+        // But Silu should NOT be fused into the same chain because v1 is multi-use.
+        let has_silu =
+            k.body.ops.iter().any(|op| matches!(op, Op::Activation { kind: ActKind::Silu, .. }));
+        assert!(has_silu, "Silu with multi-use input should not be fused");
+        let has_add =
+            k.body.ops.iter().any(|op| matches!(op, Op::BinOp { op: BinOpKind::Add, .. }));
+        assert!(has_add, "Add should not be fused");
+    }
+
+    #[test]
+    fn non_fusible_op_breaks_chain() {
+        // A Load in the middle should prevent fusion.
+        let mut k = Kernel::new("fuse_load_break");
+        // Note: Load needs a param. But for simplicity, test with non-fusible ops.
+        k.body.push_op(
+            Op::Splat { value: 1.0, dtype: DType::F32, shape: Shape::scalar() },
+            ValueId::new(0),
+        );
+        k.body
+            .push_op(Op::UnaryOp { op: UnaryOpKind::Exp, value: ValueId::new(0) }, ValueId::new(1));
+        // Transpose is not fusible, breaks chain.
+        k.body.push_op(Op::Transpose { value: ValueId::new(1) }, ValueId::new(2));
+        k.body
+            .push_op(Op::UnaryOp { op: UnaryOpKind::Neg, value: ValueId::new(2) }, ValueId::new(3));
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(3),
+            mask: None,
+        });
+        FusionPass.run(&mut k).unwrap();
+        // Exp should not fuse with Neg because Transpose is in between.
+        let has_transpose = k.body.ops.iter().any(|op| matches!(op, Op::Transpose { .. }));
+        assert!(has_transpose, "Transpose should remain as its own op");
+    }
+
+    #[test]
+    fn fuses_select_chain() {
+        let mut k = Kernel::new("fuse_select");
+        k.body.push_op(
+            Op::Splat { value: 1.0, dtype: DType::F32, shape: Shape::scalar() },
+            ValueId::new(0),
+        );
+        k.body.push_op(
+            Op::Splat { value: 2.0, dtype: DType::F32, shape: Shape::scalar() },
+            ValueId::new(1),
+        );
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(2));
+        k.body.push_op(
+            Op::Select {
+                cond: ValueId::new(2),
+                on_true: ValueId::new(0),
+                on_false: ValueId::new(1),
+            },
+            ValueId::new(3),
+        );
+        k.body
+            .push_op(Op::UnaryOp { op: UnaryOpKind::Abs, value: ValueId::new(3) }, ValueId::new(4));
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(4),
+            mask: None,
+        });
+        FusionPass.run(&mut k).unwrap();
+        let has_fused = k.body.ops.iter().any(|op| matches!(op, Op::FusedElementwise { .. }));
+        assert!(has_fused, "select → abs chain should fuse");
+    }
 }

@@ -1,14 +1,18 @@
-//! Type & Shape checking pass.
+//! Type & Shape Checking — validate IR before MSL emission.
 //!
-//! Validates IR before MSL emission:
+//! Validates that the IR is well-formed before code generation:
 //! - Dot operands must be 2D with matching K dimension
 //! - Load index count must equal the tensor's rank
 //! - Reduce axis must be plausible (≤ 3)
 //! - Slice lengths must be positive and offsets non-negative
 //! - Store target must be an output parameter
 //!
-//! Also performs forward type inference: produces a `TypeEnv` mapping every
-//! `ValueId` to its `(DType, Shape)` so the MSL emitter can emit correct code.
+//! Also performs forward type inference: produces a [`TypeEnv`] mapping every
+//! [`ValueId`] to its `(DType, Shape)` so the MSL emitter can emit correct
+//! declarations and casts.
+//!
+//! This is a verification pass — it catches IR bugs early with clear error
+//! messages rather than letting them manifest as invalid MSL or GPU crashes.
 
 use std::collections::BTreeMap;
 

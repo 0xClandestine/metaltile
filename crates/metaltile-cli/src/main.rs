@@ -4,6 +4,7 @@
 //!   bench     Benchmark suite: MetalTile vs MLX reference
 //!   build     Compile all kernels to MSL and report errors
 //!   inspect   Print IR and/or MSL for one kernel
+//!   profile   Estimate GPU occupancy and register pressure
 //!   device    Show GPU device info and supported features
 
 mod cmd;
@@ -25,15 +26,26 @@ fn main() {
     let subcommand = &args[1];
     let rest = &args[2..];
 
+    let wants_help = rest.iter().any(|a| a == "--help" || a == "-h");
+
     match subcommand.as_str() {
-        "bench" => cmd::bench::run(rest),
-        "build" => cmd::build::run(rest),
-        "inspect" => cmd::inspect::run(rest),
-        "device" => cmd::device::run(rest),
-        "test" => cmd::test::run(rest),
-        "snap" => cmd::snap::run(rest),
-        "diff" => cmd::diff::run(rest),
         "--help" | "-h" => print_usage_and_exit(&args[0]),
+        "bench" if wants_help => cmd::bench::help(),
+        "bench" => cmd::bench::run(rest),
+        "build" if wants_help => cmd::build::help(),
+        "build" => cmd::build::run(rest),
+        "inspect" if wants_help => cmd::inspect::help(),
+        "inspect" => cmd::inspect::run(rest),
+        "device" if wants_help => cmd::device::help(),
+        "device" => cmd::device::run(rest),
+        "test" if wants_help => cmd::test::help(),
+        "test" => cmd::test::run(rest),
+        "profile" if wants_help => cmd::profile::help(),
+        "profile" => cmd::profile::run(rest),
+        "snap" if wants_help => cmd::snap::help(),
+        "snap" => cmd::snap::run(rest),
+        "diff" if wants_help => cmd::diff::help(),
+        "diff" => cmd::diff::run(rest),
         _ => {
             eprintln!(
                 "{} {}",
@@ -92,6 +104,14 @@ fn print_usage_and_exit(program: &str) {
         "  {}  {}",
         paint_stdout("inspect", Style::new().fg(Color::Cyan).bold()),
         paint_stdout("Print IR and/or MSL for one kernel", Style::new().fg(Color::BrightWhite),),
+    );
+    eprintln!(
+        "  {}  {}",
+        paint_stdout("profile", Style::new().fg(Color::Cyan).bold()),
+        paint_stdout(
+            "Estimate GPU occupancy and register pressure",
+            Style::new().fg(Color::BrightWhite),
+        ),
     );
     eprintln!(
         "  {}  {}",

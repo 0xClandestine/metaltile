@@ -84,10 +84,7 @@ fn ensure_mlx(cache_dir: &Path) {
 
 fn cache_is_valid(cache_dir: &Path, marker: &Path) -> bool {
     cache_dir.exists()
-        && std::fs::read_to_string(marker)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .as_deref()
+        && std::fs::read_to_string(marker).ok().map(|s| s.trim().to_string()).as_deref()
             == Some(MLX_COMMIT)
 }
 

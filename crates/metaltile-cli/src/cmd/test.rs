@@ -26,6 +26,19 @@ use crate::{
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
+pub fn help() {
+    eprintln!("tile test — Run correctness checks: interpreter vs GPU");
+    eprintln!();
+    eprintln!("USAGE:");
+    eprintln!("  tile test [options]");
+    eprintln!();
+    eprintln!("OPTIONS:");
+    eprintln!("  --filter, -f <name>     Only test kernels whose name contains <name>");
+    eprintln!("  --dtypes <f32,f16,bf16> Comma-separated list of dtypes to test");
+    eprintln!("  -v                      Verbose: print pass/fail for each case");
+    eprintln!("  --fail-fast             Stop on first failure");
+}
+
 pub fn run(args: &[String]) {
     let filter = flag_val(args, "--filter").or_else(|| flag_val(args, "-f"));
     let dtypes_arg = flag_val(args, "--dtypes");

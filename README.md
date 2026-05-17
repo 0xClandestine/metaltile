@@ -135,6 +135,8 @@ tile bench                      # full benchmark suite vs MLX
 tile bench --filter softmax     # narrow to one op
 tile build                      # compile all kernels, report errors
 tile inspect --kernel mt_rms_norm  # print IR and generated MSL
+tile profile                     # occupancy & register analysis for all kernels
+tile profile <kernel> --sweep    # per-threadgroup-size breakdown
 tile device                     # show GPU info and supported features
 tile test                       # correctness checks: interpreter ↔ GPU
 tile snap -o baseline.json      # save bench results as a regression baseline
