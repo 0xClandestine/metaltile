@@ -630,7 +630,7 @@ pub fn has_side_effects(op: &Op) -> bool {
 }
 
 /// True if the op cannot appear inside predicated code (Barrier, Atomic, Loop, etc.).
-pub fn is_unpredicable(op: &Op) -> bool {
+pub fn is_unpredictable(op: &Op) -> bool {
     matches!(
         op,
         Op::Barrier

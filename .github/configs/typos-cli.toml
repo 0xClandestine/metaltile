@@ -35,6 +35,8 @@ nd = "nd"
 Nd = "Nd"
 # strat = "strat"
 # froms = "froms"
+thr = "thr"
+THR = "THR"
 
 [type.go]
 extend-glob = []

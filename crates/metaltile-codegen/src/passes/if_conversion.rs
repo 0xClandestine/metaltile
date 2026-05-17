@@ -13,7 +13,7 @@
 //! ## Algorithm
 //!
 //! 1. Classify the CFG shape: Diamond (both arms) or Triangle (one arm empty).
-//! 2. Safety check: reject arms containing unpredicable ops (Barrier, Atomic,
+//! 2. Safety check: reject arms containing unpredictable ops (Barrier, Atomic,
 //!    Loop, SetLocal, DeclareLocal, ThreadgroupAlloc, nested If, StrideScan,
 //!    StrideArgReduce).
 //! 3. Profitability check: Diamond ≤ 8 total ops, Triangle ≤ 5 ops.
@@ -28,7 +28,7 @@
 //! - Only handles Diamond shapes (both arms). Triangle shapes (no else_block)
 //!   require liveness analysis to determine passthrough values — deferred.
 //! - Does not handle extended diamonds (multi-block chains in arms).
-//! - Conservatively rejects any arm with unpredicable ops.
+//! - Conservatively rejects any arm with unpredictable ops.
 
 use std::collections::BTreeMap;
 
@@ -92,10 +92,10 @@ fn classify(op: &Op) -> CfgShape {
 // ---------------------------------------------------------------------------
 
 /// Ops that cannot appear inside predicated code.
-fn is_unpredicable(op: &Op) -> bool { remap::is_unpredicable(op) }
+fn is_unpredictable(op: &Op) -> bool { remap::is_unpredictable(op) }
 
-/// Any unpredicable op in the block?
-fn has_unpredicable(block: &Block) -> bool { block.ops.iter().any(is_unpredicable) }
+/// Any unpredictable op in the block?
+fn has_unpredictable(block: &Block) -> bool { block.ops.iter().any(is_unpredictable) }
 
 // ---------------------------------------------------------------------------
 // profitability
@@ -103,7 +103,7 @@ fn has_unpredicable(block: &Block) -> bool { block.ops.iter().any(is_unpredicabl
 
 /// Count of ops in a block (excluding no-side-effect structural ops).
 fn predicable_op_count(block: &Block) -> usize {
-    block.ops.iter().filter(|op| !is_unpredicable(op)).count()
+    block.ops.iter().filter(|op| !is_unpredictable(op)).count()
 }
 
 fn is_profitable(shape: CfgShape, then_block: &Block, else_block: Option<&Block>) -> bool {
@@ -137,11 +137,11 @@ fn if_convert_block(block: &mut Block, blocks: &mut BTreeMap<BlockId, Block>) {
             let else_block = else_id.and_then(|eid| blocks.get(&eid));
 
             // Safety check.
-            if has_unpredicable(then_block) {
+            if has_unpredictable(then_block) {
                 continue;
             }
             if let Some(eb) = else_block
-                && has_unpredicable(eb)
+                && has_unpredictable(eb)
             {
                 continue;
             }
