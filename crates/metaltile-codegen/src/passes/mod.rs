@@ -101,6 +101,87 @@ pub fn count_total_ops(kernel: &Kernel) -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// PassRegistry — canonical pass list and name lookup
+// ---------------------------------------------------------------------------
+
+/// Registry of all available passes.
+///
+/// The canonical pass list lives here.  Consumers that need the full pipeline,
+/// a pass-by-name lookup, or a named walk use [`PassRegistry`] instead of
+/// hand-rolling their own list.  Adding a new pass only requires updating this
+/// registry (and the `pub mod` declaration above).
+pub struct PassRegistry;
+
+impl PassRegistry {
+    /// The standard pass order (names, in pipeline sequence).
+    ///
+    /// TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM
+    ///   → IfConversion → ValueSink → TileLowering → Fusion → Unroll
+    ///   → Schedule → Vectorize → DeadStoreElim
+    pub fn order() -> &'static [&'static str] {
+        &[
+            "type_check",
+            "const_fold",
+            "algebraic_simplify",
+            "copy_prop",
+            "cse",
+            "licm",
+            "if_conversion",
+            "value_sink",
+            "tile_lowering",
+            "fusion",
+            "unroll",
+            "schedule",
+            "vectorize",
+            "dead_store_elim",
+        ]
+    }
+
+    /// Look up a pass by name.  Returns `None` for unknown names.
+    pub fn get(name: &str) -> Option<Box<dyn Pass>> {
+        match name {
+            "type_check" => Some(Box::new(type_check::TypeCheckPass)),
+            "const_fold" => Some(Box::new(const_fold::ConstFoldPass::new())),
+            "algebraic_simplify" =>
+                Some(Box::new(algebraic_simplify::AlgebraicSimplifyPass)),
+            "copy_prop" => Some(Box::new(copy_prop::CopyPropPass)),
+            "cse" => Some(Box::new(cse::CsePass)),
+            "licm" => Some(Box::new(licm::LicmPass)),
+            "if_conversion" => Some(Box::new(if_conversion::IfConversionPass)),
+            "value_sink" => Some(Box::new(value_sink::ValueSinkPass)),
+            "tile_lowering" =>
+                Some(Box::new(tile_lowering::TileLoweringPass::default())),
+            "fusion" => Some(Box::new(fusion::FusionPass)),
+            "unroll" => Some(Box::new(unroll::UnrollPass::default())),
+            "schedule" => Some(Box::new(schedule::SchedulePass::default())),
+            "vectorize" => Some(Box::new(vectorize::VectorizePass)),
+            "dead_store_elim" => Some(Box::new(dead_store_elim::DeadStoreElimPass)),
+            _ => None,
+        }
+    }
+
+    /// Build the standard pipeline (all passes, in canonical order).
+    pub fn standard_pipeline() -> Vec<Box<dyn Pass>> {
+        Self::order().iter().filter_map(|&n| Self::get(n)).collect()
+    }
+
+    /// Return the standard pipeline with names attached (for debug/inspect).
+    pub fn standard_with_names() -> Vec<(&'static str, Box<dyn Pass>)> {
+        Self::order()
+            .iter()
+            .filter_map(|&n| Some((n, Self::get(n)?)))
+            .collect()
+    }
+
+    /// Return sorted pass names (for usage / error messages).
+    pub fn names() -> Vec<&'static str> {
+        let mut n: Vec<_> = Self::order().to_vec();
+        n.sort_unstable();
+        n
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PipelineBuilder
 // ---------------------------------------------------------------------------
 
@@ -110,30 +191,9 @@ pub struct PipelineBuilder {
 }
 
 impl PipelineBuilder {
-    /// Create a builder with the standard 16-pass pipeline:
-    ///
-    /// TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM
-    ///   → IfConversion → ValueSink → TileLowering → Fusion → Unroll
-    ///   → Schedule → Vectorize → DeadStoreElim
+    /// Create a builder with the standard pipeline from [`PassRegistry`].
     pub fn standard() -> Self {
-        PipelineBuilder {
-            passes: vec![
-                Box::new(type_check::TypeCheckPass),
-                Box::new(const_fold::ConstFoldPass::new()),
-                Box::new(algebraic_simplify::AlgebraicSimplifyPass),
-                Box::new(copy_prop::CopyPropPass),
-                Box::new(cse::CsePass),
-                Box::new(licm::LicmPass),
-                Box::new(if_conversion::IfConversionPass),
-                Box::new(value_sink::ValueSinkPass),
-                Box::new(tile_lowering::TileLoweringPass::default()),
-                Box::new(fusion::FusionPass),
-                Box::new(unroll::UnrollPass::default()),
-                Box::new(schedule::SchedulePass::default()),
-                Box::new(vectorize::VectorizePass),
-                Box::new(dead_store_elim::DeadStoreElimPass),
-            ],
-        }
+        PipelineBuilder { passes: PassRegistry::standard_pipeline() }
     }
 
     /// Remove a pass by name from the pipeline.
@@ -145,7 +205,6 @@ impl PipelineBuilder {
     /// Override the unroll factor.
     pub fn with_unroll_factor(self, factor: u32) -> Self {
         let mut passes = self.passes;
-        // Replace the UnrollPass with a new one at the specified factor.
         for p in passes.iter_mut() {
             if p.name() == "unroll" {
                 *p = Box::new(unroll::UnrollPass::new(factor));
@@ -161,8 +220,5 @@ impl PipelineBuilder {
 
 /// Standard optimization pipeline.
 ///
-/// Order:
-///   TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM
-///     → IfConversion → ValueSink → TileLowering → Fusion → Unroll
-///     → Schedule → Vectorize → DeadStoreElim
-pub fn standard_pipeline() -> Vec<Box<dyn Pass>> { PipelineBuilder::standard().build() }
+/// Convenience wrapper around [`PassRegistry::standard_pipeline`].
+pub fn standard_pipeline() -> Vec<Box<dyn Pass>> { PassRegistry::standard_pipeline() }

@@ -14,7 +14,6 @@ use std::collections::BTreeMap;
 use metaltile_codegen::{
     TileSchedule,
     msl::{MslConfig, MslGenerator},
-    passes::{self, Pass},
 };
 use metaltile_core::ir::KernelMode;
 use metaltile_std::{bench_types::DType, spec::BenchSpec};
@@ -167,37 +166,23 @@ pub fn run(args: &[String]) {
                     println!("{k}");
                     run_all_passes_and_print(&mut k);
                 },
-                name => {
-                    let pass_obj: Box<dyn Pass> = match name {
-                        "type_check" => Box::new(passes::type_check::TypeCheckPass),
-                        "const_fold" => Box::new(passes::const_fold::ConstFoldPass::new()),
-                        "algebraic_simplify" =>
-                            Box::new(passes::algebraic_simplify::AlgebraicSimplifyPass),
-                        "copy_prop" => Box::new(passes::copy_prop::CopyPropPass),
-                        "cse" => Box::new(passes::cse::CsePass),
-                        "licm" => Box::new(passes::licm::LicmPass),
-                        "if_conversion" => Box::new(passes::if_conversion::IfConversionPass),
-                        "value_sink" => Box::new(passes::value_sink::ValueSinkPass),
-                        "tile_lowering" =>
-                            Box::new(passes::tile_lowering::TileLoweringPass::default()),
-                        "fusion" => Box::new(passes::fusion::FusionPass),
-                        "unroll" => Box::new(passes::unroll::UnrollPass::default()),
-                        "schedule" => Box::new(passes::schedule::SchedulePass::default()),
-                        "vectorize" => Box::new(passes::vectorize::VectorizePass),
-                        "dead_store_elim" => Box::new(passes::dead_store_elim::DeadStoreElimPass),
-                        _ => {
-                            eprintln!(
-                                "Unknown pass: {name}. Valid: type_check, const_fold, algebraic_simplify, copy_prop, cse, licm, if_conversion, value_sink, tile_lowering, fusion, unroll, schedule, vectorize, dead_store_elim, all"
-                            );
+                name => match metaltile_codegen::passes::PassRegistry::get(name) {
+                    Some(pass_obj) => {
+                        if let Err(e) = pass_obj.run(&mut k) {
+                            eprintln!("Pass {name} failed: {e}");
                             return;
-                        },
-                    };
-                    if let Err(e) = pass_obj.run(&mut k) {
-                        eprintln!("Pass {name} failed: {e}");
+                        }
+                        println!("// ── AFTER {name} ────────────────────────");
+                        println!("{k}");
+                    },
+                    None => {
+                        let valid: Vec<_> = metaltile_codegen::passes::PassRegistry::names();
+                        eprintln!(
+                            "Unknown pass: {name}. Valid: {} all",
+                            valid.join(", ")
+                        );
                         return;
-                    }
-                    println!("// ── AFTER {name} ────────────────────────");
-                    println!("{k}");
+                    },
                 },
             }
         } else {
@@ -221,22 +206,7 @@ pub fn run(args: &[String]) {
 
 /// Run all compilation passes and print IR after each stage.
 fn run_all_passes_and_print(k: &mut metaltile_core::ir::Kernel) {
-    let passes: Vec<(&str, Box<dyn Pass>)> = vec![
-        ("type_check", Box::new(passes::type_check::TypeCheckPass)),
-        ("const_fold", Box::new(passes::const_fold::ConstFoldPass::new())),
-        ("algebraic_simplify", Box::new(passes::algebraic_simplify::AlgebraicSimplifyPass)),
-        ("copy_prop", Box::new(passes::copy_prop::CopyPropPass)),
-        ("cse", Box::new(passes::cse::CsePass)),
-        ("licm", Box::new(passes::licm::LicmPass)),
-        ("if_conversion", Box::new(passes::if_conversion::IfConversionPass)),
-        ("value_sink", Box::new(passes::value_sink::ValueSinkPass)),
-        ("tile_lowering", Box::new(passes::tile_lowering::TileLoweringPass::default())),
-        ("fusion", Box::new(passes::fusion::FusionPass)),
-        ("unroll", Box::new(passes::unroll::UnrollPass::default())),
-        ("schedule", Box::new(passes::schedule::SchedulePass::default())),
-        ("vectorize", Box::new(passes::vectorize::VectorizePass)),
-        ("dead_store_elim", Box::new(passes::dead_store_elim::DeadStoreElimPass)),
-    ];
+    let passes = metaltile_codegen::passes::PassRegistry::standard_with_names();
 
     for (name, pass) in &passes {
         if let Err(e) = pass.run(k) {
