@@ -4,6 +4,7 @@
 //!   bench     Benchmark suite: MetalTile vs MLX reference
 //!   build     Compile all kernels to MSL and report errors
 //!   inspect   Print IR and/or MSL for one kernel
+//!   profile   Estimate GPU occupancy and register pressure
 //!   device    Show GPU device info and supported features
 
 mod cmd;
@@ -31,6 +32,7 @@ fn main() {
         "inspect" => cmd::inspect::run(rest),
         "device" => cmd::device::run(rest),
         "test" => cmd::test::run(rest),
+        "profile" => cmd::profile::run(rest),
         "snap" => cmd::snap::run(rest),
         "diff" => cmd::diff::run(rest),
         "--help" | "-h" => print_usage_and_exit(&args[0]),
@@ -92,6 +94,14 @@ fn print_usage_and_exit(program: &str) {
         "  {}  {}",
         paint_stdout("inspect", Style::new().fg(Color::Cyan).bold()),
         paint_stdout("Print IR and/or MSL for one kernel", Style::new().fg(Color::BrightWhite),),
+    );
+    eprintln!(
+        "  {}  {}",
+        paint_stdout("profile", Style::new().fg(Color::Cyan).bold()),
+        paint_stdout(
+            "Estimate GPU occupancy and register pressure",
+            Style::new().fg(Color::BrightWhite),
+        ),
     );
     eprintln!(
         "  {}  {}",

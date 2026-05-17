@@ -166,10 +166,8 @@ fn simplify_block_once(block: &mut Block) -> bool {
         let mut new_ops = Vec::new();
         let mut new_results = Vec::new();
         for (i, op) in block.ops.iter().enumerate() {
-            let is_dead = block
-                .results
-                .get(i)
-                .is_some_and(|r| r.is_some_and(|v| dead_vids.contains(&v)));
+            let is_dead =
+                block.results.get(i).is_some_and(|r| r.is_some_and(|v| dead_vids.contains(&v)));
             if !is_dead {
                 new_ops.push(op.clone());
                 new_results.push(block.results[i]);
