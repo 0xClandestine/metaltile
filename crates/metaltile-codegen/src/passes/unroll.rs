@@ -19,7 +19,7 @@
 //! clone's fresh IDs; operands pointing **outside** the body pass through
 //! unchanged.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use metaltile_core::{
     error::Result,
@@ -139,7 +139,7 @@ fn unroll_block(
                 continue;
             };
             let tc = (end_val - start_val) / step_val;
-            if tc <= 0 || tc > MAX_UNROLL_TRIP {
+            if tc <= 0 || tc > factor as i64 {
                 continue;
             };
             if has_nested_loop_or_barrier(body_block) {
@@ -147,7 +147,7 @@ fn unroll_block(
             };
             plans.push(Plan {
                 loop_idx: i,
-                trip_count: tc.min(factor as i64),
+                trip_count: tc,
                 start_val,
                 step_val,
                 var_id: var.as_u32(),
@@ -170,9 +170,6 @@ fn unroll_block(
     for plan in &plans {
         let body = blocks.get(&plan.body_id).unwrap();
         let body_n = body.ops.len();
-
-        // ValueIds defined inside the loop body.
-        let _body_vids: BTreeSet<ValueId> = body.results.iter().flatten().copied().collect();
 
         // IV ValueId (convention: var_id + 1000).
         let iv_vid = ValueId::new(plan.var_id + 1000);

@@ -90,7 +90,7 @@ impl MslGenerator {
     pub fn generate(&self, kernel: &Kernel) -> Result<String> {
         // Run the optimization pipeline on a clone before emitting.
         let mut k = kernel.clone();
-        passes::run_passes(&mut k, &passes::standard_pipeline())?;
+        passes::run_passes_with_stats(&mut k, &passes::standard_pipeline())?;
 
         let type_env = infer_types(&k)?;
         let feat = self.analyze(&k);

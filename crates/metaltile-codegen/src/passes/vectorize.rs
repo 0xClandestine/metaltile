@@ -175,8 +175,8 @@ fn vectorize_block(block: &mut Block, params: &[Param]) {
     let mut old_ops = std::mem::take(&mut block.ops);
     let old_results = std::mem::take(&mut block.results);
 
-    // result_remap: old op index → replacement ValueId (vectorized results).
-    let mut result_remap: BTreeMap<usize, ValueId> = BTreeMap::new();
+    // result_remap: skipped scalar load ValueId → replacement VectorLoad ValueId.
+    let mut result_remap: BTreeMap<ValueId, ValueId> = BTreeMap::new();
     let mut new_ops: Vec<Op> = Vec::new();
     let mut new_results: Vec<Option<ValueId>> = Vec::new();
 
@@ -194,7 +194,9 @@ fn vectorize_block(block: &mut Block, params: &[Param]) {
             let first_vid = old_results[i].unwrap_or(ValueId::new(0));
             for k in 1..vlen {
                 // The i+k load results are now subsumed by the VectorLoad result.
-                result_remap.insert(i + k, first_vid);
+                if let Some(Some(skipped_vid)) = old_results.get(i + k) {
+                    result_remap.insert(*skipped_vid, first_vid);
+                }
             }
         }
 
@@ -249,13 +251,10 @@ fn find_const_in_block(block: &Block, vid: ValueId) -> Option<i64> {
 /// (bfloat2, bfloat4 are valid MSL vector types).
 fn is_vectorizable(dtype: DType) -> bool { matches!(dtype, DType::F16 | DType::F32 | DType::BF16) }
 
-fn remap_values_in_op(op: &mut Op, remap: &BTreeMap<usize, ValueId>) {
+fn remap_values_in_op(op: &mut Op, remap: &BTreeMap<ValueId, ValueId>) {
     let s = |v: &mut ValueId| {
-        for (&old_idx, &new_vid) in remap {
-            if v.as_u32() == old_idx as u32 {
-                *v = new_vid;
-                return;
-            }
+        if let Some(&new_vid) = remap.get(v) {
+            *v = new_vid;
         }
     };
     match op {
