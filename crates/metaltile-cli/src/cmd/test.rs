@@ -73,10 +73,30 @@ pub fn run(args: &[String]) {
 
     let mut passed = 0u32;
     let mut failed = 0u32;
+    let mut skipped = 0u32;
     let names = collect_unique_names(&specs);
 
     for (name, (mode, dtypes_available)) in &names {
         if !matches_filter(filter.as_deref(), name) {
+            continue;
+        }
+
+        // Codegen-only kernels (production kernels registered via
+        // `inventory::submit!` with empty `shapes`) have no benchmark
+        // dimensions to test against the interpreter. `tile build` still
+        // compiles their MSL; `tile test` skips them.
+        let has_shapes =
+            specs.iter().any(|s| s.kernel_name == *name && !s.shapes.is_empty());
+        if !has_shapes {
+            skipped += 1;
+            eprintln!(
+                "  {}   {}",
+                paint_stdout(format!("{name:<20}"), Style::new().fg(Color::Cyan).bold()),
+                paint_stdout(
+                    "⊘ skipped (codegen-only, no shapes)",
+                    Style::new().fg(Color::BrightBlack),
+                ),
+            );
             continue;
         }
 
@@ -154,18 +174,28 @@ pub fn run(args: &[String]) {
 
     // Summary
     eprintln!();
+    let skip_str = if skipped > 0 {
+        format!(
+            "  ·  {}",
+            paint_stdout(format!("{skipped} skipped"), Style::new().fg(Color::BrightBlack).bold()),
+        )
+    } else {
+        String::new()
+    };
     if failed > 0 {
         eprintln!(
-            "  {} {}  ·  {}",
+            "  {} {}  ·  {}{}",
             paint_stdout(format!("{passed} passed"), Style::new().fg(Color::Green).bold()),
             paint_stdout("·", Style::new().fg(Color::BrightBlack).dim()),
             paint_stderr(format!("{failed} failed"), Style::new().fg(Color::Red).bold()),
+            skip_str,
         );
         std::process::exit(1);
     } else {
         eprintln!(
-            "  {}",
+            "  {}{}",
             paint_stdout(format!("{passed} passed"), Style::new().fg(Color::Green).bold()),
+            skip_str,
         );
     }
 }
@@ -174,7 +204,9 @@ pub fn run(args: &[String]) {
 fn collect_unique_names(specs: &[&BenchSpec]) -> BTreeMap<&'static str, (KernelMode, Vec<DType>)> {
     let mut map: BTreeMap<&str, (KernelMode, Vec<DType>)> = BTreeMap::new();
     for spec in specs {
-        let mode = first_mode(spec);
+        // Honor explicit kernel_mode override (e.g. Reduction kernels that need
+        // lsize/tid declared in the MSL header); fall back to inferring from ops.
+        let mode = spec.kernel_mode.unwrap_or_else(|| first_mode(spec));
         let entry = map.entry(spec.kernel_name).or_insert_with(|| (mode, Vec::new()));
         for &dt in spec.dtypes {
             if !entry.1.contains(&dt) {
