@@ -5,7 +5,6 @@
 
 use std::fmt::Write;
 
-
 use super::features::KernelFeatures;
 use crate::wl;
 
