@@ -86,8 +86,6 @@ pub use metaltile_codegen as codegen;
 pub use metaltile_codegen::error::Error as CodegenError;
 /// Core IR, dtype, shape, and constexpr definitions.
 pub use metaltile_core as core;
-/// CPU interpreter for running IR without Metal.
-pub use metaltile_interp as interp;
 /// Proc macros and helper macros used by kernel definitions.
 pub use metaltile_macros::{bench_kernel, constexpr, kernel, shape, tile};
 /// Runtime context, dispatch result, and top-level runtime error.

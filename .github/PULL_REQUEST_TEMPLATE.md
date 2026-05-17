@@ -9,7 +9,6 @@ relevant issue with `#<issue-number>`.
 - [ ] `metaltile-core` (IR types, ops)
 - [ ] `metaltile-macros` (proc macros, body parser)
 - [ ] `metaltile-codegen` (MSL lowering, passes)
-- [ ] `metaltile-interp` (CPU reference interpreter)
 - [ ] `metaltile-runtime` (Metal dispatch)
 - [ ] `metaltile-std` (kernel stdlib, op files)
 - [ ] `metaltile-cli` (`tile` binary)

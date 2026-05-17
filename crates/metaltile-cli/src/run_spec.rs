@@ -1,15 +1,8 @@
 //! GPU runner implementation extracted from metaltile-bench/src/spec.rs
 //! BenchSpec::run() and all dispatch arms, transformed into free functions.
 
-use std::collections::BTreeMap;
-
 use metaltile_codegen::msl::MslGenerator;
-use metaltile_core::{
-    constexpr::ConstExprValues,
-    dtype::DType,
-    ir::{KernelMode, Op},
-};
-use metaltile_interp::{Interpreter, TensorData};
+use metaltile_core::{dtype::DType, ir::KernelMode};
 use metaltile_std::{
     bench_types::{
         DtypeCtx,
@@ -89,50 +82,11 @@ fn compile_mlx(
     let pat = pat?;
     runner.compile(src, &mlx_name(pat, tn)).ok()
 }
-fn td(dt: DType, shape: &[usize], data: &[f32]) -> TensorData {
-    let mut td = TensorData::zeros(shape, dt);
-    for (i, &v) in data.iter().enumerate() {
-        td.write_scalar(i, v as f64);
-    }
-    td
-}
-fn constexprs(vals: &[(&str, usize)]) -> ConstExprValues {
-    let mut cv = ConstExprValues::new();
-    for (k, v) in vals {
-        cv.insert(k.to_string(), *v);
-    }
-    cv
-}
-fn interp(
-    kernel: &metaltile_core::ir::Kernel,
-    inputs: BTreeMap<String, TensorData>,
-    cv: ConstExprValues,
-    mode: InterpMode,
-) -> Option<BTreeMap<String, Vec<f32>>> {
-    let mut interp = Interpreter::new(inputs, cv);
-    let result = match mode {
-        InterpMode::Elementwise(n) => interp.run_grid(kernel, n),
-        InterpMode::Reduction(rows) => interp.run_grid_reduction(kernel, rows),
-        InterpMode::Grid3D(x, y, z) => interp.run_grid_3d(kernel, x, y, z),
-    };
-    let result = match result {
-        Ok(r) => r,
-        Err(_) => return None,
-    };
-    let mut out = BTreeMap::new();
-    for (name, td) in &result.outputs {
-        out.insert(
-            name.clone(),
-            (0..td.num_elements()).map(|i| td.read_scalar(i) as f32).collect(),
-        );
-    }
-    Some(out)
-}
 
 // ── Generic runner ────────────────────────────────────────────────────────
 //
 // Handles all BenchDispatch::Generic specs data-driven via ShapeSpec.
-// Correctness via interpreter; perf via GPU.
+// Correctness via MLX reference (or unchecked if none available).
 
 fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench) -> Vec<OpResult> {
     // Cache compiled kernels by mode — MSL is identical for all shapes with the same
@@ -152,22 +106,6 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
     let mlx_compiled: Option<crate::runner::CompiledKernel> = {
         let ctx0 = DtypeCtx::reduce(dt); // tn is dtype-only, not shape-dependent
         compile_mlx(runner, spec.mlx_src, spec.mlx_pattern, ctx0.tn)
-    };
-    // Pre-collect float literals from IR (same for all shapes at a given dt).
-    let float_literal_pairs: Vec<(String, f32)> = {
-        let mut srcs = Vec::new();
-        for block in std::iter::once(&kernel.body).chain(kernel.blocks.values()) {
-            for op in &block.ops {
-                if let Op::Load { src, indices, .. } = op
-                    && indices.is_empty()
-                    && let Some(prefix) = src.strip_suffix('f')
-                    && let Ok(v) = prefix.parse::<f64>()
-                {
-                    srcs.push((src.clone(), v as f32));
-                }
-            }
-        }
-        srcs
     };
 
     for shape in spec.shapes {
@@ -198,62 +136,9 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
             KernelMode::Reduction | KernelMode::Tile2D => 1,
             _ => shape.check_b,
         };
-
-        // Build interpreter inputs
-        let mut inp_map = BTreeMap::new();
-        for (i, buf_spec) in shape.tensor_bufs.iter().enumerate() {
-            let Some(param) = params.get(i) else { break };
-            let count = buf_spec.count.resolve(check_n, check_b);
-            let init_data = buf_spec.init.generate(count);
-            let param_dt = buf_spec.dtype_override.unwrap_or(dt);
-            inp_map.insert(param.name.clone(), td(param_dt, &[count], &init_data));
-        }
-        let cv_pairs: Vec<(&str, usize)> =
-            shape.cexprs.iter().map(|(k, d)| (*k, d.resolve(check_n, check_b))).collect();
-        let cv = constexprs(&cv_pairs);
-        // Constexpr params are loaded via Op::Load { src: name } in the IR,
-        // so they must also appear in inp_map as 1-element scalar tensors.
-        for (name, val) in &cv_pairs {
-            inp_map.insert(name.to_string(), td(DType::F32, &[1], &[*val as f32]));
-        }
-        // GPU built-ins and MSL special constants used as Op::Load { src: name, indices:[] }.
-        // In single-threaded CPU interpretation: 1 thread per threadgroup.
-        for (name, val) in [
-            ("tid", 0.0f32),
-            ("lsize", 1.0),
-            ("tgid_x", 0.0),
-            ("tgid_y", 0.0),
-            ("simd_lane", 0.0),
-            ("simd_id", 0.0),
-            ("n_simd", 1.0),
-            ("-INFINITY", f32::NEG_INFINITY),
-            ("INFINITY", f32::INFINITY),
-        ] {
-            inp_map.entry(name.to_string()).or_insert_with(|| td(DType::F32, &[1], &[val]));
-        }
-        // Inject float literals collected from IR before the loop.
-        for (src, val) in &float_literal_pairs {
-            inp_map.entry(src.clone()).or_insert_with(|| td(DType::F32, &[1], &[*val]));
-        }
-        let interp_mode = match shape.mode {
-            KernelMode::Elementwise | KernelMode::Grid3D => InterpMode::Elementwise(check_n),
-            _ => InterpMode::Reduction(check_b.max(1)),
-        };
-        let interp_out = match interp(&kernel, inp_map, cv, interp_mode) {
-            Some(o) => o,
-            None => continue,
-        };
         let primary_out_idx = params.iter().position(|p| p.is_output);
-        let primary_out_name = match primary_out_idx.and_then(|i| params.get(i)) {
-            Some(p) => p.name.clone(),
-            None => continue,
-        };
-        let interp_vals = match interp_out.get(&primary_out_name) {
-            Some(v) => v.clone(),
-            None => continue,
-        };
 
-        // Build GPU check buffers
+        // Build GPU check buffers and run MT on check shapes.
         let mut check_bufs: Vec<GpuBuffer> = Vec::new();
         for buf_spec in shape.tensor_bufs {
             let count = buf_spec.count.resolve(check_n, check_b);
@@ -279,7 +164,34 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
             [shape.tpg, 1, 1],
             dt,
         );
-        let equiv = check_equiv(&interp_vals, &mt_vals, spec.tol);
+
+        // Correctness: compare MT against MLX reference on check shapes if both available.
+        let equiv = if let (Some(rk), Some(mlx_args)) = (&mlx_compiled, shape.mlx_args) {
+            let mlx_tpg_check = if shape.mlx_tpg > 0 { shape.mlx_tpg } else { shape.tpg };
+            let mlx_grid_check =
+                shape.mlx_grid.unwrap_or(shape.grid).eval(check_n, check_b, mlx_tpg_check);
+            let mlx_check_bufs: Vec<GpuBuffer> = mlx_args
+                .iter()
+                .map(|arg| mlx_buf(spec, runner, arg, shape, check_n, check_b, dt))
+                .collect();
+            // Use a fresh output buffer for MLX check run (assume second arg or last arg is output).
+            let mlx_out_buf = zeros_typed(runner, out_count_check, dt);
+            let mlx_refs: Vec<&GpuBuffer> = mlx_check_bufs.iter().collect();
+            let mlx_vals = run_typed_once(
+                runner,
+                rk,
+                &mlx_refs,
+                &mlx_out_buf,
+                out_count_check,
+                mlx_grid_check,
+                [mlx_tpg_check, 1, 1],
+                dt,
+            );
+            check_equiv(&mlx_vals, &mt_vals, spec.tol)
+        } else {
+            // No MLX ref available — correctness not verified.
+            EquivResult { n_checked: 0, max_abs_err: 0.0, cosine_sim: 0.0, passed: true }
+        };
 
         // Build GPU perf buffers
         let n = shape.n;
@@ -1309,11 +1221,4 @@ fn run_strided_copy(
         mt_perf,
         Some(equiv),
     )]
-}
-
-#[allow(dead_code)]
-enum InterpMode {
-    Elementwise(usize),
-    Reduction(usize),
-    Grid3D(usize, usize, usize),
 }

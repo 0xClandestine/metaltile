@@ -25,7 +25,6 @@ Describe any alternative solutions or features you've considered.
 - [ ] `metaltile-core`
 - [ ] `metaltile-macros`
 - [ ] `metaltile-codegen`
-- [ ] `metaltile-interp`
 - [ ] `metaltile-runtime`
 - [ ] `metaltile-std`
 - [ ] `metaltile-cli`

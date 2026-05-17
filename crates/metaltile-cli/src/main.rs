@@ -38,8 +38,6 @@ fn main() {
         "inspect" => cmd::inspect::run(rest),
         "device" if wants_help => cmd::device::help(),
         "device" => cmd::device::run(rest),
-        "test" if wants_help => cmd::test::help(),
-        "test" => cmd::test::run(rest),
         "profile" if wants_help => cmd::profile::help(),
         "profile" => cmd::profile::run(rest),
         "snap" if wants_help => cmd::snap::help(),
@@ -118,14 +116,6 @@ fn print_usage_and_exit(program: &str) {
         paint_stdout("device", Style::new().fg(Color::Cyan).bold()),
         paint_stdout(
             "Show GPU device info and supported features",
-            Style::new().fg(Color::BrightWhite),
-        ),
-    );
-    eprintln!(
-        "  {}  {}",
-        paint_stdout("test", Style::new().fg(Color::Cyan).bold()),
-        paint_stdout(
-            "Run correctness checks: interpreter ↔ GPU",
             Style::new().fg(Color::BrightWhite),
         ),
     );
