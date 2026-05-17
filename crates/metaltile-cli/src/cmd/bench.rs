@@ -195,6 +195,10 @@ pub fn run(args: &[String]) {
     if let Some(path) = json_out {
         save_json(&runner.device_name, &all, &path);
     }
+
+    if equiv_fail > 0 {
+        std::process::exit(1);
+    }
 }
 
 fn save_json(device: &str, results: &[OpResult], path: &str) {

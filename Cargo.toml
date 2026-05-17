@@ -4,7 +4,6 @@ members = [
   "crates/metaltile-core",
   "crates/metaltile-macros",
   "crates/metaltile-codegen",
-  "crates/metaltile-interp",
   "crates/metaltile-runtime",
   "crates/metaltile",
   "crates/metaltile-cli",
@@ -25,7 +24,6 @@ metaltile = { path = "crates/metaltile" }
 metaltile-core = { path = "crates/metaltile-core" }
 metaltile-macros = { path = "crates/metaltile-macros" }
 metaltile-codegen = { path = "crates/metaltile-codegen" }
-metaltile-interp = { path = "crates/metaltile-interp" }
 metaltile-runtime = { path = "crates/metaltile-runtime" }
 metaltile-std = { path = "crates/metaltile-std" }
 

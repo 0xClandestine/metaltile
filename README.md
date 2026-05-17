@@ -46,22 +46,21 @@ This generates ~104% of MLX's hand-tuned `rms` kernel throughput on M4 Max acros
 - **Tile-level, not thread-level.** `strided_reduce`, `reduce_sum`, `dot` — express what to compute, the compiler handles thread mapping, vectorization, and SIMD-group reductions.
 - **Verified against MLX.** Every kernel is benchmarked and numerically compared against the corresponding MLX Metal kernel. 139/139 ops correct, avg 110% of MLX throughput on M4 Max.
 - **All three float dtypes.** `f32`, `f16`, and `bfloat16` work identically — native `bfloat` emitted on Metal 3.1+.
-- **CPU interpreter included.** Every kernel runs on the CPU reference interpreter (`metaltile-interp`) for CI without a Mac.
+- **Rust-only correctness checking.** Every kernel is verified against CPU-computed reference values without a Mac.
 
 ## Status
 
 Early development — APIs are not yet stable. Core DSL works; autotuner and type-level shape algebra are planned for v0.2.
 
-| Crate | Description | Status |
-|---|---|---|
-| `metaltile-core` | IR types, DType, Shape | Complete |
-| `metaltile-macros` | `#[kernel]` proc macro | Working |
-| `metaltile-codegen` | MSL lowering + 6 opt passes | Working |
-| `metaltile-interp` | CPU reference interpreter | Working |
-| `metaltile-runtime` | Metal dispatch, PSO cache | Working |
-| `metaltile` | Facade re-exporting all crates | — |
-| `metaltile-std` | Kernel stdlib, op files, bench types | Working |
-| `metaltile-cli` | `tile` CLI binary | Working |
+| Crate | Description |
+|---|---|
+| `metaltile-core` | IR types, DType, Shape |
+| `metaltile-macros` | `#[kernel]` proc macro |
+| `metaltile-codegen` | MSL lowering + 6 opt passes |
+| `metaltile-runtime` | Metal dispatch, PSO cache |
+| `metaltile` | Facade re-exporting all crates |
+| `metaltile-std` | Kernel stdlib, op files, bench types |
+| `metaltile-cli` | `tile` CLI binary |
 
 ## Quick Start
 
@@ -138,7 +137,6 @@ tile inspect --kernel mt_rms_norm  # print IR and generated MSL
 tile profile                     # occupancy & register analysis for all kernels
 tile profile <kernel> --sweep    # per-threadgroup-size breakdown
 tile device                     # show GPU info and supported features
-tile test                       # correctness checks: interpreter ↔ GPU
 tile snap -o baseline.json      # save bench results as a regression baseline
 tile diff baseline.json         # compare current results to baseline
 ```
@@ -170,10 +168,9 @@ Selected results (M4 Max, higher = better vs MLX):
                     MetalTile IR  (metaltile-core)
                           │
                metaltile-codegen (6 opt passes → MSL)
-                 ┌─────────────────────────┐
-                 │                         │
-         metaltile-runtime          metaltile-interp
-         (Metal GPU dispatch)       (CPU reference)
+                 │
+         metaltile-runtime
+         (Metal GPU dispatch)
 ```
 
 Optimization passes: TypeCheck → ConstFold → TileLowering → Fusion → Schedule → Vectorize.

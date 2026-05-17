@@ -30,7 +30,7 @@ feat: add softmax vector path for small N
 fix(codegen): correct version gate for half2 stores
 perf(runtime): cache PSO lookups by function signature
 docs: update CLI install instructions
-test(interp): add scan correctness test
+test(core): add scan correctness test
 chore: bump nightly toolchain
 ci: add release-notes auto-label workflow
 ```
