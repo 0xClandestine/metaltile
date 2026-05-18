@@ -3,7 +3,7 @@
 
 use metaltile_codegen::msl::MslGenerator;
 use metaltile_core::{dtype::DType, ir::KernelMode};
-use metaltile_std::{
+use crate::{
     bench_types::{
         DtypeCtx,
         EquivResult,
@@ -115,15 +115,7 @@ fn compile_mt(runner: &GpuRunner, msl: &str, name: &str) -> Option<crate::runner
     match runner.compile(msl, name) {
         Ok(k) => Some(k),
         Err(e) => {
-            eprintln!(
-                "{} compile '{}': {}",
-                crate::term::paint_stderr(
-                    "[error]",
-                    crate::term::Style::new().fg(crate::term::Color::Red).bold(),
-                ),
-                name,
-                e,
-            );
+            eprintln!("[error] compile '{}': {}", name, e);
             None
         },
     }

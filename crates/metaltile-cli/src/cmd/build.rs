@@ -32,10 +32,10 @@ use metaltile_std::{bench_types::DType, spec::BenchSpec};
 
 use crate::{
     BuildArgs,
-    kernel_utils::effective_mode,
     matches_filter,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
+use metaltile_std::kernel_utils::effective_mode;
 
 pub fn run(args: &BuildArgs) {
     let filter = &args.filter;

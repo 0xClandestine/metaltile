@@ -17,10 +17,10 @@ use metaltile_std::{bench_types::DType, spec::BenchSpec};
 
 use crate::{
     InspectArgs,
-    kernel_utils::effective_mode,
     matches_filter,
     term::{Color, Style, paint_stdout},
 };
+use metaltile_std::kernel_utils::effective_mode;
 
 pub fn run(args: &InspectArgs) {
     let dir = &args.dir;

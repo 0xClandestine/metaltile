@@ -9,10 +9,6 @@
 //!   diff      Compare bench results to a saved baseline
 
 mod cmd;
-pub mod kernel_utils;
-pub mod measure;
-pub mod run_spec;
-pub mod runner;
 pub mod suite_printer;
 pub mod term;
 

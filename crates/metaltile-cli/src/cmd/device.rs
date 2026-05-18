@@ -4,9 +4,9 @@ use metaltile_core::GpuFamily;
 
 use crate::{
     DeviceArgs,
-    runner::GpuRunner,
     term::{Color, Style, paint_stdout},
 };
+use metaltile_std::runner::GpuRunner;
 
 pub fn run(args: &DeviceArgs) {
     let json_out = args.json;

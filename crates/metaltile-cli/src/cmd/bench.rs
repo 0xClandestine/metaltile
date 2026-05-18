@@ -18,9 +18,11 @@ use crate::{
     suite_printer::{ProfileRow, SuitePrinter},
     BenchArgs,
     matches_filter,
+    term::{Color, Style, paint_stderr, paint_stdout},
+};
+use metaltile_std::{
     run_spec::run as run_spec,
     runner::GpuRunner,
-    term::{Color, Style, paint_stderr, paint_stdout},
 };
 
 pub fn run(args: &BenchArgs) {

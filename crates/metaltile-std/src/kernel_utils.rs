@@ -1,6 +1,6 @@
 //! Shared kernel utilities used by `build`, `inspect`, `profile`, and `bench` subcommands.
 
-use metaltile_std::spec::BenchSpec;
+use crate::spec::BenchSpec;
 
 /// The mode to actually use for codegen / display: prefer the spec's
 /// explicit `kernel_mode` override, otherwise fall back to

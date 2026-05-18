@@ -3,9 +3,9 @@
 //! Moved from `metaltile-bench/src/ops/shared.rs` during Phase 3 refactor.
 //! Pure types like `OpResult`, `EquivResult`, `DtypeCtx` live in `metaltile-std::bench_types`.
 
-use metaltile_std::bench_types::{DType, OpResult, elem_bytes};
+use crate::bench_types::{DType, OpResult, elem_bytes};
 
-use metaltile_std::stats::BenchStats;
+use crate::stats::BenchStats;
 
 use crate::runner::{CompiledKernel, GpuBuffer, GpuRunner};
 
@@ -163,5 +163,5 @@ pub fn bench_gbps_only(
 
 pub fn bench_all_dtypes<F>(runner: &GpuRunner, f: F) -> Vec<OpResult>
 where F: Fn(&GpuRunner, DType) -> Vec<OpResult> {
-    metaltile_std::bench_types::FLOAT_DTYPES.iter().flat_map(|&dt| f(runner, dt)).collect()
+    crate::bench_types::FLOAT_DTYPES.iter().flat_map(|&dt| f(runner, dt)).collect()
 }

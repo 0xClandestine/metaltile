@@ -5,6 +5,10 @@
 
 pub mod bench_types;
 pub mod ffai;
+pub mod kernel_utils;
+pub mod measure;
 pub mod mlx;
+pub mod run_spec;
+pub mod runner;
 pub mod spec;
 pub mod stats;
