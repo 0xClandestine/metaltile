@@ -103,10 +103,47 @@ Before requesting review:
 - `clippy` — lint with `-D warnings`
 - `cargo test --workspace`
 
+`.github/workflows/coverage.yml` runs on every push that touches `crates/`,
+`Cargo.{toml,lock}`, `rust-toolchain.toml`, or `codecov.yml`:
+- `cargo llvm-cov --workspace --codecov` on macOS
+- uploads to Codecov via the PR's flag carryforward
+
 `.github/workflows/pr.yml` validates the PR title format.
 
 `.github/workflows/auto-label.yml` applies release-notes labels based on
 the conventional-commit prefix in the PR title.
+
+## Test coverage
+
+`make coverage` (or `./scripts/coverage.sh`) produces an HTML report at
+`target/llvm-cov/html/index.html`. `./scripts/coverage.sh summary` prints
+the same per-file table the CI job emits, and `./scripts/coverage.sh lcov`
+writes `lcov.info` for editor integrations.
+
+The CI job and the local script share an `--ignore-filename-regex` so the
+numbers match. Excluded from the line-coverage denominator:
+
+- `crates/metaltile/src/{lib,prelude}.rs` — facade re-exports, no logic.
+- `crates/metaltile-std/src/{ffai,mlx}/**` — kernel-body files. The
+  `#[kernel]` proc-macro consumes the body at compile time and emits
+  MSL; the Rust body never executes, so line coverage on these files is
+  structurally meaningless. Kernel correctness is validated end-to-end
+  via `tile bench` (numerical equivalence vs MLX reference, gated in
+  the `Kernels` CI job).
+- `tests/`, `benches/`, `build.rs` everywhere.
+
+Per-crate floors are declared in `codecov.yml` (`flag_management`) —
+currently informational while the test suite ramps. Targets:
+
+| crate | floor |
+|---|---|
+| `metaltile-codegen` | 90% |
+| `metaltile-core` | 90% |
+| `metaltile-macros` | 92% |
+| `metaltile-runtime` | 85% |
+| `metaltile-cli` | 80% |
+| `metaltile-std` | line-coverage exempt — gated by bench-correctness |
+| `metaltile` (facade) | excluded |
 
 ## What we don't do (yet)
 

@@ -14,6 +14,12 @@ pub struct MslConfig {
     pub native_bfloat: bool,
     /// Emit `async_copy` prefetch (requires Metal 3 / M2+).
     pub async_copy: bool,
+    /// Target Apple GPU family level (7 = M1, 8 = M2, 9 = M3/M4, 10 = M5),
+    /// when known. `None` leaves codegen in its conservative mode and is
+    /// the default. Kernels that have family-specific fast paths read this
+    /// to pick between variants — e.g. on `Some(10)` the SDPA path can
+    /// route around the M5 Neural Accelerator's bf16-disabled fallback.
+    pub apple_family: Option<u32>,
     pub tile_schedule: TileSchedule,
 }
 
@@ -25,7 +31,27 @@ impl Default for MslConfig {
             debug_comments: false,
             native_bfloat: true,
             async_copy: false,
+            apple_family: None,
             tile_schedule: TileSchedule::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_apple_family_is_none() {
+        assert!(MslConfig::default().apple_family.is_none());
+    }
+
+    #[test]
+    fn apple_family_round_trips() {
+        let cfg = MslConfig { apple_family: Some(10), ..MslConfig::default() };
+        assert_eq!(cfg.apple_family, Some(10));
+        // Other fields retain their defaults.
+        assert!(cfg.native_bfloat);
+        assert!(!cfg.use_simd_matrix);
     }
 }
