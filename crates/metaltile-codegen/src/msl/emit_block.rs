@@ -850,6 +850,13 @@ impl MslGenerator {
                     wl!(out, "{pad}auto {v} = simd_shuffle_xor({rv}, {mask}u);");
                 },
 
+                Op::SimdBroadcast { value, lane } => {
+                    let v = self.vname(vid, block, extra_names);
+                    let rv = self.vname(Some(*value), block, extra_names);
+                    let rl = self.vname(Some(*lane), block, extra_names);
+                    wl!(out, "{pad}auto {v} = simd_broadcast({rv}, {rl});");
+                },
+
                 Op::ThreadgroupAlloc { dtype, size, name } => {
                     let t = self.msl_type_name(*dtype);
                     hoists.push(format!("threadgroup {t} {name}[{size}];"));

@@ -189,6 +189,10 @@ pub fn remap_value_ids(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
             s(data);
         },
         Op::SimdgroupAlloc { .. } | Op::SimdgroupMatMul { .. } => {},
+        Op::SimdBroadcast { value, lane } => {
+            s(value);
+            s(lane);
+        },
         Op::ThreadgroupLoad { index, .. } => {
             s(index);
         },
@@ -389,6 +393,10 @@ pub fn op_value_refs(op: &Op) -> SmallVec<[ValueId; 4]> {
             refs.push(*data);
         },
         Op::SimdgroupAlloc { .. } | Op::SimdgroupMatMul { .. } => {},
+        Op::SimdBroadcast { value, lane } => {
+            refs.push(*value);
+            refs.push(*lane);
+        },
         Op::ThreadgroupLoad { index, .. } => {
             refs.push(*index);
         },
@@ -609,6 +617,10 @@ pub fn max_vid_in_op(op: &Op) -> u32 {
             push(data);
         },
         Op::SimdgroupAlloc { .. } | Op::SimdgroupMatMul { .. } => {},
+        Op::SimdBroadcast { value, lane } => {
+            push(value);
+            push(lane);
+        },
         Op::ThreadgroupLoad { index, .. } => {
             push(index);
         },

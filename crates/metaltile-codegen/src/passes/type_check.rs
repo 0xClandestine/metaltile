@@ -297,6 +297,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::Dequantize { .. } => "Dequantize",
         Op::SimdReduce { .. } => "SimdReduce",
         Op::SimdShuffleXor { .. } => "SimdShuffleXor",
+        Op::SimdBroadcast { .. } => "SimdBroadcast",
         Op::ThreadgroupAlloc { .. } => "ThreadgroupAlloc",
         Op::ThreadgroupLoad { .. } => "ThreadgroupLoad",
         Op::ThreadgroupStore { .. } => "ThreadgroupStore",
@@ -605,6 +606,15 @@ fn infer_block(
 
             Op::SimdReduce { value, .. } | Op::SimdShuffleXor { value, .. } => {
                 // Same type as input
+                if let Some(tv) = env.get(value).cloned() {
+                    env.insert(vid, tv);
+                } else {
+                    env.insert(vid, TypedValue { dtype: DType::F32, shape: Shape::scalar() });
+                }
+            },
+            Op::SimdBroadcast { value, .. } => {
+                // Same scalar type as the input value; the cross-lane broadcast
+                // doesn't change dtype or shape.
                 if let Some(tv) = env.get(value).cloned() {
                     env.insert(vid, tv);
                 } else {
