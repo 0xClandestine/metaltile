@@ -5,10 +5,9 @@
 
 use metaltile_std::bench_types::{DType, OpResult, elem_bytes};
 
-use crate::{
-    runner::{CompiledKernel, GpuBuffer, GpuRunner},
-    stats::BenchStats,
-};
+use metaltile_std::stats::BenchStats;
+
+use crate::runner::{CompiledKernel, GpuBuffer, GpuRunner};
 
 // ── Dtype ↔ GPU buffer helpers ────────────────────────────────────────────────
 
