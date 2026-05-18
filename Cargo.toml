@@ -49,6 +49,7 @@ inventory = "0.3"
 
 # Test-only
 trybuild = "1"
+insta = { version = "1.43", default-features = false }
 
 [profile.release]
 lto = "fat"
