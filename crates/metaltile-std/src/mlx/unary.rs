@@ -9,7 +9,6 @@ use metaltile::{bench_kernel, kernel};
     input=Signed,
     tol=1e-4,
     mlx="v_Exp{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_exp<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -24,7 +23,6 @@ pub fn mt_exp<T>(a: Tensor<T>, out: Tensor<T>) {
     input=Positive,
     tol=1e-4,
     mlx="v_Log{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_log<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -39,7 +37,6 @@ pub fn mt_log<T>(a: Tensor<T>, out: Tensor<T>) {
     input=Positive,
     tol=1e-4,
     mlx="v_Sqrt{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_sqrt<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -54,7 +51,6 @@ pub fn mt_sqrt<T>(a: Tensor<T>, out: Tensor<T>) {
     input=Positive,
     tol=1e-4,
     mlx="v_Rsqrt{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_rsqrt<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -69,7 +65,6 @@ pub fn mt_rsqrt<T>(a: Tensor<T>, out: Tensor<T>) {
     input=Signed,
     tol=1e-6,
     mlx="v_Abs{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_abs<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -126,7 +121,6 @@ pub fn mt_relu<T>(a: Tensor<T>, out: Tensor<T>) {
     // of the f16 mantissa differently). f32 stays comfortably below.
     tol=1e-3,
     mlx="v_Cos{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_cos<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -142,7 +136,6 @@ pub fn mt_cos<T>(a: Tensor<T>, out: Tensor<T>) {
     // tol=1e-3 — f16 sin drifts by ~4.9e-4 (see mt_cos comment).
     tol=1e-3,
     mlx="v_Sin{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_sin<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -157,7 +150,6 @@ pub fn mt_sin<T>(a: Tensor<T>, out: Tensor<T>) {
     input=Signed,
     tol=1e-6,
     mlx="v_Ceil{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_ceil<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -172,7 +164,6 @@ pub fn mt_ceil<T>(a: Tensor<T>, out: Tensor<T>) {
     input=Signed,
     tol=1e-6,
     mlx="v_Floor{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_floor<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -187,7 +178,6 @@ pub fn mt_floor<T>(a: Tensor<T>, out: Tensor<T>) {
     input=Signed,
     tol=1e-3,
     mlx="v_Erf{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_erf<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -215,7 +205,6 @@ pub fn mt_exp2<T>(a: Tensor<T>, out: Tensor<T>) {
     input=Positive,
     tol=1e-4,
     mlx="v_Log2{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_log2<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -230,7 +219,6 @@ pub fn mt_log2<T>(a: Tensor<T>, out: Tensor<T>) {
     input=Signed,
     tol=0.0,
     mlx="v_Sign{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_sign<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -245,7 +233,6 @@ pub fn mt_sign<T>(a: Tensor<T>, out: Tensor<T>) {
     input=Signed,
     tol=0.0,
     mlx="v_Round{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_round<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -260,7 +247,6 @@ pub fn mt_round<T>(a: Tensor<T>, out: Tensor<T>) {
     input=Signed,
     tol=1e-6,
     mlx="v_Negative{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_neg<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -288,7 +274,6 @@ pub fn mt_recip<T>(a: Tensor<T>, out: Tensor<T>) {
     input=Signed,
     tol=1e-4,
     mlx="v_Square{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_square<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -306,7 +291,6 @@ pub fn mt_square<T>(a: Tensor<T>, out: Tensor<T>) {
     // pick up ULP-level error, compounds across them).
     tol=1e-3,
     mlx="v_Sigmoid{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_sigmoid<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -324,7 +308,6 @@ pub fn mt_sigmoid<T>(a: Tensor<T>, out: Tensor<T>) {
     input=Positive,
     tol=1e-4,
     mlx="v_Log1p{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_log1p<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -344,7 +327,6 @@ pub fn mt_log1p<T>(a: Tensor<T>, out: Tensor<T>) {
     input=Signed,
     tol=1e-4,
     mlx="v_Sinh{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_sinh<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -359,7 +341,6 @@ pub fn mt_sinh<T>(a: Tensor<T>, out: Tensor<T>) {
     input=Signed,
     tol=1e-4,
     mlx="v_Cosh{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_cosh<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -376,7 +357,6 @@ pub fn mt_cosh<T>(a: Tensor<T>, out: Tensor<T>) {
     // even on moderate inputs (~1.0) the f16 ULP drift is ~5e-4.
     tol=1e-3,
     mlx="v_Tan{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_tan<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -392,7 +372,6 @@ pub fn mt_tan<T>(a: Tensor<T>, out: Tensor<T>) {
     // tol=1e-3 — f16 tanh compounds exp and div; worst-case drift ~4e-4.
     tol=1e-3,
     mlx="v_Tanh{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_tanh_op<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -409,7 +388,6 @@ pub fn mt_tanh_op<T>(a: Tensor<T>, out: Tensor<T>) {
     // the Unit shape generator, so no pole-induced blowup.
     tol=1e-4,
     mlx="v_ArcSin{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_asin<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -425,7 +403,6 @@ pub fn mt_asin<T>(a: Tensor<T>, out: Tensor<T>) {
     // tol=1e-3 — f16 atan drifts ~3e-4 on large-magnitude inputs.
     tol=1e-3,
     mlx="v_ArcTan{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_atan<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -440,7 +417,6 @@ pub fn mt_atan<T>(a: Tensor<T>, out: Tensor<T>) {
     input=Signed,
     tol=1e-4,
     mlx="v_ArcSinh{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_asinh<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -456,7 +432,6 @@ pub fn mt_asinh<T>(a: Tensor<T>, out: Tensor<T>) {
     // acos has domain [-1, 1]; Unit input clamps to [-1+ε, 1-ε].
     tol=1e-4,
     mlx="v_ArcCos{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_acos<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -486,7 +461,6 @@ pub fn mt_trunc<T>(a: Tensor<T>, out: Tensor<T>) {
     // input=Positive ensures x ≥ 1e-6, safely inside the domain x ≥ 1.
     tol=1e-4,
     mlx="v_ArcCosh{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_acosh<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -502,7 +476,6 @@ pub fn mt_acosh<T>(a: Tensor<T>, out: Tensor<T>) {
     // atanh has poles at ±1; Unit input clamps to [-1+ε, 1-ε].
     tol=1e-4,
     mlx="v_ArcTanh{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_atanh<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -519,7 +492,6 @@ pub fn mt_atanh<T>(a: Tensor<T>, out: Tensor<T>) {
     // by ~1e-4 in f32 and ~4e-3 in bf16 (half-ULP at that magnitude).
     tol=5e-3,
     mlx="v_Expm1{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_expm1<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -534,7 +506,6 @@ pub fn mt_expm1<T>(a: Tensor<T>, out: Tensor<T>) {
     input=Positive,
     tol=1e-4,
     mlx="v_Log10{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_log10<T>(a: Tensor<T>, out: Tensor<T>) {
@@ -551,7 +522,6 @@ pub fn mt_log10<T>(a: Tensor<T>, out: Tensor<T>) {
     // f16 compounds ~1e-3 ULP error per FMA (×9 ≈ 1e-2 in worst case).
     tol=1e-2,
     mlx="v_ErfInv{tn}{tn}",
-    metal_file="unary.metal",
 )]
 #[kernel]
 pub fn mt_erfinv<T>(a: Tensor<T>, out: Tensor<T>) {

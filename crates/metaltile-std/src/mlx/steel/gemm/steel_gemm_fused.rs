@@ -5,7 +5,26 @@
 //! across K steps.
 
 use metaltile::kernel;
+use metaltile::bench_kernel;
 
+#[bench_kernel(
+    op = "steel_gemm_fused",
+    subop = "bm64_bn64_bk16_wm2_wn2",
+    class = SteelGemm,
+    m = 4096,
+    n = 4096,
+    k = 4096,
+    check_m = 64,
+    check_n = 64,
+    check_k = 16,
+    bm = 64,
+    bn = 64,
+    tpg = 128,
+    tol = 1e-2,
+    mlx = "steel_gemm_fused_nn_{tn}_{tn}_bm64_bn64_bk16_wm2_wn2",
+    metal_file = "steel/gemm/steel_gemm_fused.metal",
+    dtypes = crate::bench_types::FLOAT_DTYPES,
+)]
 #[kernel]
 pub fn mt_steel_gemm_64x64x16_2x2<T>(
     a: Tensor<T>,
@@ -75,16 +94,3 @@ pub fn mt_steel_gemm_64x64x16_2x2<T>(
     }
 }
 
-inventory::submit! { crate::spec::BenchSpec {
-    op: "steel_gemm_fused", subop: "bm64_bn64_bk16_wm2_wn2",
-    kernel_name: "mt_steel_gemm_64x64x16_2x2",
-    kernel_ir: mt_steel_gemm_64x64x16_2x2::kernel_ir_for,
-    dtypes: crate::bench_types::FLOAT_DTYPES, tol: 1e-2f32,
-    mlx_src: Some(include_str!(concat!(env!("OUT_DIR"), "/metal/steel/gemm/steel_gemm_fused.metal"))),
-    mlx_pattern: Some("steel_gemm_fused_nn_{tn}_{tn}_bm64_bn64_bk16_wm2_wn2"),
-    shapes: &[],
-    dispatch: crate::spec::BenchDispatch::SteelGemm {
-        m: 4096, n: 4096, k: 4096, check_m: 64, check_n: 64, check_k: 16, bm: 64, bn: 64, tpg: 128,
-    },
-    kernel_mode: Some(metaltile_core::ir::KernelMode::SimdGroup2D),
-}}

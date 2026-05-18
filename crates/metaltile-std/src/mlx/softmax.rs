@@ -12,7 +12,6 @@ use metaltile::{bench_kernel, kernel};
     reads=2,
     tol=1e-4,
     mlx="looped_softmax_{tn}",
-    metal_file="softmax.metal",
 )]
 #[kernel]
 pub fn mt_softmax<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {

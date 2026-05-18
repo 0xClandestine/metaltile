@@ -37,5 +37,7 @@ inventory::submit! {
         shapes: &[],
         dispatch: BenchDispatch::Generic,
         kernel_mode: Some(KernelMode::Grid3D),
+        mlx_compile_fn: None,
+        check_fn: None,
     }
 }

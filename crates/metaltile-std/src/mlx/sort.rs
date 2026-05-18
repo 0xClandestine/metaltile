@@ -11,7 +11,6 @@ use metaltile::{bench_kernel, kernel};
     tpg=256,
     tol=0.0,
     mlx="c_block_sort_{tn}_{tn}_bn256_tn4",
-    metal_file="sort.metal",
 )]
 #[kernel]
 pub fn mt_sort<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {

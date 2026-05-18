@@ -10,7 +10,6 @@ use metaltile::{bench_kernel, kernel};
     tpg=32,
     tol=0.5,
     mlx="nvfp4_quantize_dequantize_float_gs_16_b_4",
-    metal_file="fp_quantized.metal",
     dtypes=crate::spec::F32_ONLY,
 )]
 #[kernel]

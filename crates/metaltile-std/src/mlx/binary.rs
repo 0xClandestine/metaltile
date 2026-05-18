@@ -10,7 +10,6 @@ use metaltile::{bench_kernel, kernel};
     input_b=Half,
     tol=1e-6,
     mlx="vvn_Add{tn}",
-    metal_file="binary.metal",
 )]
 #[kernel]
 pub fn vector_add<T>(a: Tensor<T>, b: Tensor<T>, c: Tensor<T>) {
@@ -26,7 +25,6 @@ pub fn vector_add<T>(a: Tensor<T>, b: Tensor<T>, c: Tensor<T>) {
     input_b=Half,
     tol=1e-6,
     mlx="vvn_Multiply{tn}",
-    metal_file="binary.metal",
 )]
 #[kernel]
 pub fn mt_mul<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
@@ -42,7 +40,6 @@ pub fn mt_mul<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
     input_b=Half,
     tol=1e-6,
     mlx="vvn_Subtract{tn}",
-    metal_file="binary.metal",
 )]
 #[kernel]
 pub fn mt_sub<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
@@ -58,7 +55,6 @@ pub fn mt_sub<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
     input_b=Half,
     tol=1e-6,
     mlx="vvn_Divide{tn}",
-    metal_file="binary.metal",
 )]
 #[kernel]
 pub fn mt_div<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
@@ -74,7 +70,6 @@ pub fn mt_div<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
     input_b=Half,
     tol=1e-6,
     mlx="vvn_Maximum{tn}",
-    metal_file="binary.metal",
 )]
 #[kernel]
 pub fn mt_max_elem<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
@@ -90,7 +85,6 @@ pub fn mt_max_elem<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
     input_b=Half,
     tol=1e-6,
     mlx="vvn_Minimum{tn}",
-    metal_file="binary.metal",
 )]
 #[kernel]
 pub fn mt_min_elem<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
@@ -106,7 +100,6 @@ pub fn mt_min_elem<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
     input_b=Half,
     tol=1e-4,
     mlx="vvn_Power{tn}",
-    metal_file="binary.metal",
 )]
 #[kernel]
 pub fn mt_pow<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
@@ -123,7 +116,6 @@ pub fn mt_pow<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
     // tol=1e-3 — f16 atan2 compounds two-input ULP drift (~3e-4).
     tol=1e-3,
     mlx="vvn_ArcTan2{tn}",
-    metal_file="binary.metal",
 )]
 #[kernel]
 pub fn mt_atan2<T>(y: Tensor<T>, x: Tensor<T>, out: Tensor<T>) {
@@ -140,7 +132,6 @@ pub fn mt_atan2<T>(y: Tensor<T>, x: Tensor<T>, out: Tensor<T>) {
     // tol=1e-4 — f16 fmod(dividend, divisor) stays within ULP of MLX.
     tol=1e-4,
     mlx="vvn_Remainder{tn}",
-    metal_file="binary.metal",
 )]
 #[kernel]
 pub fn mt_remainder<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
@@ -159,7 +150,6 @@ pub fn mt_remainder<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
     // transcendentals so half/bfloat ULP drift accumulates.
     tol=1e-2,
     mlx="vvn_LogAddExp{tn}",
-    metal_file="binary.metal",
 )]
 #[kernel]
 pub fn mt_logaddexp<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {

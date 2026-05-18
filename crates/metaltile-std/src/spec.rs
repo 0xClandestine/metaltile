@@ -18,6 +18,11 @@ use metaltile_core::{
     ir::{Kernel, KernelMode},
 };
 
+use crate::{
+    bench_types::EquivResult,
+    runner::{CompiledKernel, GpuBuffer, GpuRunner},
+};
+
 // ── Default sizes ───────────────────────────────────────────────────────
 
 pub const ELEMENTWISE_N_BENCH: usize = 64 * 1024 * 1024;
@@ -187,6 +192,36 @@ pub struct ShapeSpec {
     pub mlx_args: Option<&'static [MlxArg]>,
     pub mlx_grid: Option<DispatchGrid>,
     pub mlx_tpg: usize,
+
+    // ── fn-pointer hooks (None = use static data path) ───────────────────
+
+    /// Extra class-specific shape dims (e.g. rope: `[l, n_per_group, …]`).
+    /// Access by per-class stable index convention.
+    pub extra: [usize; 8],
+
+    /// Build MT buffers.  When `Some`, replaces `tensor_bufs`+`scalar_bufs`.
+    /// `is_bench=false` → check sizes; `is_bench=true` → perf sizes.
+    pub mt_bufs_fn: Option<fn(&GpuRunner, &ShapeSpec, bool, DType) -> Vec<GpuBuffer>>,
+
+    /// Index of the output buffer in the `mt_bufs_fn` result.
+    /// When `None`, falls back to the first `is_output` param.
+    pub mt_out_idx: Option<usize>,
+
+    /// Custom MT dispatch grid.  `fn(shape, is_bench, tpg) → [x, y, z]`
+    pub mt_grid_fn: Option<fn(&ShapeSpec, bool, usize) -> [usize; 3]>,
+
+    /// Build MLX buffers.  When `Some`, replaces `mlx_args`.
+    pub mlx_bufs_fn: Option<fn(&GpuRunner, &ShapeSpec, bool, DType) -> Vec<GpuBuffer>>,
+
+    /// Index of the output buffer in the `mlx_bufs_fn` result.
+    pub mlx_out_idx: usize,
+
+    /// Custom MLX dispatch grid.  `fn(shape, is_bench, tpg) → [x, y, z]`
+    pub mlx_grid_fn: Option<fn(&ShapeSpec, bool, usize) -> [usize; 3]>,
+
+    /// Number of output elements to read back.
+    /// When `Some`, overrides the `out_elems.resolve()` calculation.
+    pub out_n_fn: Option<fn(&ShapeSpec, bool) -> usize>,
 }
 
 // ── BenchDispatch ────────────────────────────────────────────────────────
@@ -275,11 +310,6 @@ pub enum BenchDispatch {
         batch: usize,
         tpg: usize,
     },
-    /// Two-pass decode SDPA. Mirrors `sdpa_decode_2pass_pass1` +
-    /// `sdpa_decode_2pass_pass2`. The `BenchSpec` carries pass1; this
-    /// variant carries pass2's name + IR getter so a single
-    /// `inventory::submit!` describes the whole chained dispatch.
-    /// MLX reference is single-pass `sdpa_vector` at the same shape.
     SdpaVector2Pass {
         head_dim: usize,
         n_kv: usize,
@@ -351,6 +381,16 @@ pub struct BenchSpec {
     /// mode — e.g. Reduction-mode dequant GEMV kernels that rely on
     /// `lsize`/`tid` aliases the Elementwise mode doesn't provide.
     pub kernel_mode: Option<KernelMode>,
+
+    /// Custom MLX compile fn.  `fn(runner, src, dt) → Option<CompiledKernel>`
+    /// When `Some`, replaces the standard `compile(src, mlx_pattern)` call.
+    /// Use for bool-constants (rope, attention) or dynamic kernel names.
+    pub mlx_compile_fn: Option<fn(&GpuRunner, &str, DType) -> Option<CompiledKernel>>,
+
+    /// Custom correctness check.  `fn(ref_vals, mt_vals, tol) → EquivResult`
+    /// When `None`, uses `check_equiv` (element-wise abs error + cosine sim).
+    /// Use for sort ("is sorted?"), random (bit-exact vs CPU), etc.
+    pub check_fn: Option<fn(&[f32], &[f32], f32) -> EquivResult>,
 }
 
 inventory::collect!(BenchSpec);

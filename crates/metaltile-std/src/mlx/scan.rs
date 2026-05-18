@@ -11,7 +11,6 @@ static SCAN_SHAPES: &[(usize, usize)] = &[(1_024, 4_096)];
     tpg=256,
     tol=1e-3,
     mlx="contig_scan_inclusive_sum_{tn}_{tn}",
-    metal_file="scan.metal",
 )]
 #[kernel]
 pub fn mt_scan<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {

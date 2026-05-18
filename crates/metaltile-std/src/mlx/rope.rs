@@ -13,7 +13,6 @@ use metaltile::{bench_kernel, kernel};
     n_per_group=4,
     tol=0.01,
     mlx="rope_{tn}",
-    metal_file="rope.metal",
 )]
 #[kernel]
 pub fn mt_rope<T>(

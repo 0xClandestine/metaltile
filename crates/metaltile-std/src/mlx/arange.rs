@@ -18,7 +18,6 @@ use metaltile::{bench_kernel, kernel};
     step=1.0,
     tol=1.0,
     mlx="arange{tn}",
-    metal_file="arange.metal",
 )]
 #[kernel]
 pub fn mt_arange<T>(out: Tensor<T>, start: Tensor<T>, step: Tensor<T>, #[constexpr] n: u32) {

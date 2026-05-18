@@ -14,7 +14,6 @@ use metaltile::{bench_kernel, kernel};
     post_eps=1e-5,
     tol=1e-4,
     mlx="rms{tn}",
-    metal_file="rms_norm.metal",
 )]
 #[kernel]
 pub fn mt_rms_norm<T>(

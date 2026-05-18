@@ -12,7 +12,6 @@ static QUANTIZED_SHAPES: &[(usize, usize)] = &[(4096, 4096)];
     tpg=64,
     tol=1e-3,
     mlx="affine_qmv_fast_float16_t_gs_64_b_4_batch_0",
-    metal_file="quantized.metal",
     dtypes=crate::spec::F32_ONLY,
 )]
 #[kernel]

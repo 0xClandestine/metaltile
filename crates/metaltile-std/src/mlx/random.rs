@@ -10,7 +10,6 @@ use metaltile::{bench_kernel, kernel};
     tpg=1024,
     tol=0.0,
     mlx="rbitsc",
-    metal_file="random.metal",
     dtypes=crate::spec::F32_ONLY,
 )]
 #[kernel]

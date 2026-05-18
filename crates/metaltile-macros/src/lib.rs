@@ -215,40 +215,40 @@ fn parse_kernel_params_generic(
     let use_explicit_outputs = sig.inputs.iter().any(has_mutable_tensor_param);
 
     for input in &sig.inputs {
-        if let syn::FnArg::Typed(pat_type) = input
-            && let syn::Pat::Ident(pat_ident) = &*pat_type.pat
-        {
-            let param_name = pat_ident.ident.to_string();
-            let ty = &pat_type.ty;
+        if let syn::FnArg::Typed(pat_type) = input {
+            if let syn::Pat::Ident(pat_ident) = &*pat_type.pat {
+                let param_name = pat_ident.ident.to_string();
+                let ty = &pat_type.ty;
 
-            if !is_tensor_type(ty) {
-                continue;
-            }
+                if !is_tensor_type(ty) {
+                    continue;
+                }
 
-            let is_output = if use_explicit_outputs {
-                pat_ident.mutability.is_some()
-            } else {
-                is_legacy_output_name(&param_name)
-            };
-            let (dtype, shape, _shape_ces) = parse_tensor_type_generic(ty, type_vars);
+                let is_output = if use_explicit_outputs {
+                    pat_ident.mutability.is_some()
+                } else {
+                    is_legacy_output_name(&param_name)
+                };
+                let (dtype, shape, _shape_ces) = parse_tensor_type_generic(ty, type_vars);
 
-            let kind = if has_attr(pat_type, "scalar") {
-                quote! { ParamKind::Scalar }
-            } else if has_attr(pat_type, "strided") {
-                quote! { ParamKind::Strided }
-            } else {
-                quote! { Default::default() }
-            };
+                let kind = if has_attr(pat_type, "scalar") {
+                    quote! { ParamKind::Scalar }
+                } else if has_attr(pat_type, "strided") {
+                    quote! { ParamKind::Strided }
+                } else {
+                    quote! { Default::default() }
+                };
 
-            param_builders.push(quote! {
-                kernel.params.push(Param {
-                    name: #param_name.to_string(),
-                    dtype: #dtype,
-                    shape: #shape,
-                    is_output: #is_output,
-                    kind: #kind,
+                param_builders.push(quote! {
+                    kernel.params.push(Param {
+                        name: #param_name.to_string(),
+                        dtype: #dtype,
+                        shape: #shape,
+                        is_output: #is_output,
+                        kind: #kind,
+                    });
                 });
-            });
+            }
         }
     }
 
@@ -273,10 +273,10 @@ fn is_legacy_output_name(name: &str) -> bool { matches!(name, "out" | "c" | "out
 fn extract_param_names(sig: &syn::Signature) -> Vec<String> {
     let mut names = Vec::new();
     for input in &sig.inputs {
-        if let syn::FnArg::Typed(pat_type) = input
-            && let syn::Pat::Ident(pat_ident) = &*pat_type.pat
-        {
-            names.push(pat_ident.ident.to_string());
+        if let syn::FnArg::Typed(pat_type) = input {
+            if let syn::Pat::Ident(pat_ident) = &*pat_type.pat {
+                names.push(pat_ident.ident.to_string());
+            }
         }
     }
     names
@@ -308,17 +308,17 @@ fn parse_tensor_type_generic(
 
     if let syn::Type::Path(type_path) = ty {
         for seg in &type_path.path.segments {
-            if seg.ident == "Tensor"
-                && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-            {
-                let mut iter = args.args.iter();
-                if let Some(syn::GenericArgument::Type(dtype_ty)) = iter.next() {
-                    dtype_tokens = parse_dtype_generic(dtype_ty, type_vars);
-                }
-                if let Some(arg) = iter.next() {
-                    let (tokens, ces) = parse_shape_arg(arg);
-                    shape_tokens = tokens;
-                    shape_ces = ces;
+            if seg.ident == "Tensor" {
+                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                    let mut iter = args.args.iter();
+                    if let Some(syn::GenericArgument::Type(dtype_ty)) = iter.next() {
+                        dtype_tokens = parse_dtype_generic(dtype_ty, type_vars);
+                    }
+                    if let Some(arg) = iter.next() {
+                        let (tokens, ces) = parse_shape_arg(arg);
+                        shape_tokens = tokens;
+                        shape_ces = ces;
+                    }
                 }
             }
         }
@@ -339,34 +339,37 @@ fn parse_shape_arg(arg: &syn::GenericArgument) -> (proc_macro2::TokenStream, Vec
     let inner = str.trim();
     let mut ces = Vec::new();
 
-    if let Some(start) = inner.find('(')
-        && let Some(end) = inner.rfind(')')
-    {
-        let content = &inner[start + 1..end];
-        let dims: Vec<_> =
-            content.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-
-        if !dims.is_empty() {
-            let dim_tokens: Vec<_> = dims
-                .iter()
-                .map(|d| {
-                    if let Ok(n) = d.parse::<usize>() {
-                        quote! { Dim::Known(#n) }
-                    } else {
-                        ces.push(d.clone());
-                        let ident = syn::Ident::new(d, proc_macro2::Span::call_site());
-                        quote! { Dim::ConstExpr(ConstExpr::new(stringify!(#ident))) }
-                    }
-                })
+    if let Some(start) = inner.find('(') {
+        if let Some(end) = inner.rfind(')') {
+            let content = &inner[start + 1..end];
+            let dims: Vec<_> = content
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
                 .collect();
 
-            return (
-                quote! {
-                    { use metaltile_core::shape::Shape; use metaltile_core::shape::Dim; use metaltile_core::constexpr::ConstExpr;
-                    Shape::new([#(#dim_tokens),*]) }
-                },
-                ces,
-            );
+            if !dims.is_empty() {
+                let dim_tokens: Vec<_> = dims
+                    .iter()
+                    .map(|d| {
+                        if let Ok(n) = d.parse::<usize>() {
+                            quote! { Dim::Known(#n) }
+                        } else {
+                            ces.push(d.clone());
+                            let ident = syn::Ident::new(d, proc_macro2::Span::call_site());
+                            quote! { Dim::ConstExpr(ConstExpr::new(stringify!(#ident))) }
+                        }
+                    })
+                    .collect();
+
+                return (
+                    quote! {
+                        { use metaltile_core::shape::Shape; use metaltile_core::shape::Dim; use metaltile_core::constexpr::ConstExpr;
+                        Shape::new([#(#dim_tokens),*]) }
+                    },
+                    ces,
+                );
+            }
         }
     }
     (quote! { Shape::scalar() }, ces)
@@ -390,7 +393,6 @@ fn parse_dtype_generic(
             "i32" => quote! { DType::I32 },
             "u32" => quote! { DType::U32 },
             "i8" => quote! { DType::I8 },
-            "u8" => quote! { DType::U8 },
             "bool" => quote! { DType::Bool },
             _ => quote! { DType::F32 },
         };
@@ -411,12 +413,12 @@ fn extract_constexprs_typed(sig: &syn::Signature) -> Vec<(String, proc_macro2::T
 
     for input in &sig.inputs {
         if let syn::FnArg::Typed(pat_type) = input {
-            if pat_type.attrs.iter().any(|a| a.path().is_ident("constexpr"))
-                && let syn::Pat::Ident(pat_ident) = &*pat_type.pat
-            {
-                let name = pat_ident.ident.to_string();
-                let dtype = rust_type_to_dtype_tokens(&pat_type.ty);
-                push_unique_typed(&mut entries, &mut seen, name, dtype);
+            if pat_type.attrs.iter().any(|a| a.path().is_ident("constexpr")) {
+                if let syn::Pat::Ident(pat_ident) = &*pat_type.pat {
+                    let name = pat_ident.ident.to_string();
+                    let dtype = rust_type_to_dtype_tokens(&pat_type.ty);
+                    push_unique_typed(&mut entries, &mut seen, name, dtype);
+                }
             }
 
             if is_tensor_type(&pat_type.ty) {
@@ -433,18 +435,18 @@ fn extract_constexprs_typed(sig: &syn::Signature) -> Vec<(String, proc_macro2::T
 
 /// Map a Rust scalar type path to a `DType::*` token stream.
 fn rust_type_to_dtype_tokens(ty: &syn::Type) -> proc_macro2::TokenStream {
-    if let syn::Type::Path(tp) = ty
-        && let Some(seg) = tp.path.segments.last()
-    {
-        return match seg.ident.to_string().as_str() {
-            "f32" => quote! { DType::F32 },
-            "f16" | "half" => quote! { DType::F16 },
-            "f64" => quote! { DType::F64 },
-            "i32" => quote! { DType::I32 },
-            "i64" => quote! { DType::I64 },
-            "u64" => quote! { DType::U64 },
-            _ => quote! { DType::U32 },
-        };
+    if let syn::Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            return match seg.ident.to_string().as_str() {
+                "f32" => quote! { DType::F32 },
+                "f16" | "half" => quote! { DType::F16 },
+                "f64" => quote! { DType::F64 },
+                "i32" => quote! { DType::I32 },
+                "i64" => quote! { DType::I64 },
+                "u64" => quote! { DType::U64 },
+                _ => quote! { DType::U32 },
+            };
+        }
     }
     quote! { DType::U32 }
 }
@@ -701,6 +703,7 @@ mod bench_impl {
         AffineDequantize,
         AffineQuantize,
         SdpaVector,
+        SteelGemm,
     }
 
     pub enum InputKind {
@@ -750,6 +753,12 @@ mod bench_impl {
         pub n_kv: Option<LitInt>,
         pub n_heads: Option<LitInt>,
         pub gqa_factor: Option<LitInt>,
+        // SteelGemm
+        pub k: Option<LitInt>,
+        pub check_m: Option<LitInt>,
+        pub check_k: Option<LitInt>,
+        pub bm: Option<LitInt>,
+        pub bn: Option<LitInt>,
     }
 
     fn parse_input(s: &str, span: proc_macro2::Span) -> syn::Result<InputKind> {
@@ -802,6 +811,11 @@ mod bench_impl {
             let mut n_kv_field: Option<LitInt> = None;
             let mut n_heads_field: Option<LitInt> = None;
             let mut gqa_factor_field: Option<LitInt> = None;
+            let mut k_field: Option<LitInt> = None;
+            let mut check_m_field: Option<LitInt> = None;
+            let mut check_k_field: Option<LitInt> = None;
+            let mut bm_field: Option<LitInt> = None;
+            let mut bn_field: Option<LitInt> = None;
 
             while !input.is_empty() {
                 let key: Ident = input.parse()?;
@@ -834,6 +848,7 @@ mod bench_impl {
                             "AffineDequantize" => ClassKind::AffineDequantize,
                             "AffineQuantize" => ClassKind::AffineQuantize,
                             "SdpaVector" => ClassKind::SdpaVector,
+                            "SteelGemm" => ClassKind::SteelGemm,
                             o => {
                                 return Err(syn::Error::new(
                                     id.span(),
@@ -887,6 +902,11 @@ mod bench_impl {
                     "n_kv" => n_kv_field = Some(input.parse()?),
                     "n_heads" => n_heads_field = Some(input.parse()?),
                     "gqa_factor" => gqa_factor_field = Some(input.parse()?),
+                    "k" => k_field = Some(input.parse()?),
+                    "check_m" => check_m_field = Some(input.parse()?),
+                    "check_k" => check_k_field = Some(input.parse()?),
+                    "bm" => bm_field = Some(input.parse()?),
+                    "bn" => bn_field = Some(input.parse()?),
                     o => {
                         return Err(syn::Error::new(
                             key.span(),
@@ -935,6 +955,11 @@ mod bench_impl {
                 n_kv: n_kv_field,
                 n_heads: n_heads_field,
                 gqa_factor: gqa_factor_field,
+                k: k_field,
+                check_m: check_m_field,
+                check_k: check_k_field,
+                bm: bm_field,
+                bn: bn_field,
             })
         }
     }
@@ -965,7 +990,17 @@ mod bench_impl {
                 let path = f.value();
                 quote! { Some(include_str!(concat!(env!("OUT_DIR"), "/metal/", #path))) }
             },
-            None => quote! { None },
+            None => {
+                // Auto-derive metal file from op name when mlx pattern is set.
+                // e.g. op="rms_norm" → "rms_norm.metal"
+                // Override with explicit metal_file= when the op name doesn't match.
+                if a.mlx.is_some() {
+                    let path = format!("{}.metal", a.op.value());
+                    quote! { Some(include_str!(concat!(env!("OUT_DIR"), "/metal/", #path))) }
+                } else {
+                    quote! { None }
+                }
+            },
         };
         let dtypes = match &a.dtypes {
             Some(e) => quote! {#e},
@@ -1009,6 +1044,14 @@ mod bench_impl {
                     ]),
                     mlx_grid: None,
                     mlx_tpg: 0usize,
+                    extra: [0usize; 8],
+                    mt_bufs_fn: None,
+                    mt_out_idx: None,
+                    mt_grid_fn: None,
+                    mlx_bufs_fn: None,
+                    mlx_out_idx: 1usize,
+                    mlx_grid_fn: None,
+                    out_n_fn: None,
                 }] };
                 (sh, quote! { crate::spec::BenchDispatch::Generic })
             },
@@ -1042,6 +1085,14 @@ mod bench_impl {
                     ]),
                     mlx_grid: Some(crate::spec::DispatchGrid::DivCeilN2),
                     mlx_tpg: 0usize,
+                    extra: [0usize; 8],
+                    mt_bufs_fn: None,
+                    mt_out_idx: None,
+                    mt_grid_fn: None,
+                    mlx_bufs_fn: None,
+                    mlx_out_idx: 1usize,
+                    mlx_grid_fn: None,
+                    out_n_fn: None,
                 }] };
                 (sh, quote! { crate::spec::BenchDispatch::Generic })
             },
@@ -1071,6 +1122,14 @@ mod bench_impl {
                     ]),
                     mlx_grid: Some(crate::spec::DispatchGrid::Single),
                     mlx_tpg: 0usize,
+                    extra: [0usize; 8],
+                    mt_bufs_fn: None,
+                    mt_out_idx: None,
+                    mt_grid_fn: None,
+                    mlx_bufs_fn: None,
+                    mlx_out_idx: 1usize,
+                    mlx_grid_fn: None,
+                    out_n_fn: None,
                 }] };
                 (sh, quote! { crate::spec::BenchDispatch::Generic })
             },
@@ -1100,6 +1159,14 @@ mod bench_impl {
                     ]),
                     mlx_grid: Some(crate::spec::DispatchGrid::RowsBY),
                     mlx_tpg: 0usize,
+                    extra: [0usize; 8],
+                    mt_bufs_fn: None,
+                    mt_out_idx: None,
+                    mt_grid_fn: None,
+                    mlx_bufs_fn: None,
+                    mlx_out_idx: 1usize,
+                    mlx_grid_fn: None,
+                    out_n_fn: None,
                 }] };
                 (sh, quote! { crate::spec::BenchDispatch::Generic })
             },
@@ -1131,6 +1198,14 @@ mod bench_impl {
                     ]),
                     mlx_grid: None,
                     mlx_tpg: 0usize,
+                    extra: [0usize; 8],
+                    mt_bufs_fn: None,
+                    mt_out_idx: None,
+                    mt_grid_fn: None,
+                    mlx_bufs_fn: None,
+                    mlx_out_idx: 1usize,
+                    mlx_grid_fn: None,
+                    out_n_fn: None,
                 }] };
                 (sh, quote! { crate::spec::BenchDispatch::Generic })
             },
@@ -1159,6 +1234,14 @@ mod bench_impl {
                     mlx_args: None,
                     mlx_grid: None,
                     mlx_tpg: 0usize,
+                    extra: [0usize; 8],
+                    mt_bufs_fn: None,
+                    mt_out_idx: None,
+                    mt_grid_fn: None,
+                    mlx_bufs_fn: None,
+                    mlx_out_idx: 1usize,
+                    mlx_grid_fn: None,
+                    out_n_fn: None,
                 }] };
                 (sh, quote! { crate::spec::BenchDispatch::Generic })
             },
@@ -1191,6 +1274,14 @@ mod bench_impl {
                     ]),
                     mlx_grid: None,
                     mlx_tpg: 0usize,
+                    extra: [0usize; 8],
+                    mt_bufs_fn: None,
+                    mt_out_idx: None,
+                    mt_grid_fn: None,
+                    mlx_bufs_fn: None,
+                    mlx_out_idx: 1usize,
+                    mlx_grid_fn: None,
+                    out_n_fn: None,
                 }] };
                 (sh, quote! { crate::spec::BenchDispatch::Generic })
             },
@@ -1290,6 +1381,14 @@ mod bench_impl {
                     // zero-init their threadgroup arrays explicitly and
                     // are unaffected by a larger MLX tpg.
                     mlx_tpg: 1024usize,
+                    extra: [0usize; 8],
+                    mt_bufs_fn: None,
+                    mt_out_idx: None,
+                    mt_grid_fn: None,
+                    mlx_bufs_fn: None,
+                    mlx_out_idx: 1usize,
+                    mlx_grid_fn: None,
+                    out_n_fn: None,
                 }] };
                 (sh, quote! { crate::spec::BenchDispatch::Generic })
             },
@@ -1321,6 +1420,14 @@ mod bench_impl {
                     mlx_args: None,
                     mlx_grid: None,
                     mlx_tpg: 0usize,
+                    extra: [0usize; 8],
+                    mt_bufs_fn: None,
+                    mt_out_idx: None,
+                    mt_grid_fn: None,
+                    mlx_bufs_fn: None,
+                    mlx_out_idx: 1usize,
+                    mlx_grid_fn: None,
+                    out_n_fn: None,
                 }] };
                 (sh, quote! { crate::spec::BenchDispatch::Generic })
             },
@@ -1353,6 +1460,14 @@ mod bench_impl {
                     mlx_args: None,
                     mlx_grid: None,
                     mlx_tpg: 0usize,
+                    extra: [0usize; 8],
+                    mt_bufs_fn: None,
+                    mt_out_idx: None,
+                    mt_grid_fn: None,
+                    mlx_bufs_fn: None,
+                    mlx_out_idx: 1usize,
+                    mlx_grid_fn: None,
+                    out_n_fn: None,
                 }] };
                 (sh, quote! { crate::spec::BenchDispatch::Generic })
             },
@@ -1502,22 +1617,55 @@ mod bench_impl {
                     }
                 })
             },
+            ClassKind::SteelGemm => {
+                let m_val = a.m.as_ref().expect("SteelGemm requires m");
+                let n_val = a.n.as_ref().expect("SteelGemm requires n");
+                let k_val = a.k.as_ref().expect("SteelGemm requires k");
+                let check_m_val = a.check_m.as_ref().expect("SteelGemm requires check_m");
+                let check_n_val = a.check_n.as_ref().expect("SteelGemm requires check_n");
+                let check_k_val = a.check_k.as_ref().expect("SteelGemm requires check_k");
+                let bm_val = a.bm.as_ref().expect("SteelGemm requires bm");
+                let bn_val = a.bn.as_ref().expect("SteelGemm requires bn");
+                let tpg_val = a.tpg.as_ref().expect("SteelGemm requires tpg");
+                (quote! { &[] }, quote! {
+                    crate::spec::BenchDispatch::SteelGemm {
+                        m: #m_val as usize,
+                        n: #n_val as usize,
+                        k: #k_val as usize,
+                        check_m: #check_m_val as usize,
+                        check_n: #check_n_val as usize,
+                        check_k: #check_k_val as usize,
+                        bm: #bm_val as usize,
+                        bn: #bn_val as usize,
+                        tpg: #tpg_val as usize,
+                    }
+                })
+            },
+        };
+
+        let kernel_mode_ts = match &a.class {
+            ClassKind::SteelGemm => {
+                quote! { Some(metaltile_core::ir::KernelMode::SimdGroup2D) }
+            },
+            _ => quote! { None },
         };
 
         quote! {
             ::inventory::submit! {
                 crate::spec::BenchSpec {
-                    op:          #op,
-                    subop:       #subop,
-                    kernel_name: #fn_str,
-                    kernel_ir:   #kernel_ir_expr,
-                    dtypes:      #dtypes,
-                    tol:         #tol as f32,
-                    mlx_src:     #mlx_src,
-                    mlx_pattern: #mlx_pat,
-                    shapes:      #shapes_ts,
-                    dispatch:    #dispatch_ts,
-                    kernel_mode: None,
+                    op:             #op,
+                    subop:          #subop,
+                    kernel_name:    #fn_str,
+                    kernel_ir:      #kernel_ir_expr,
+                    dtypes:         #dtypes,
+                    tol:            #tol as f32,
+                    mlx_src:        #mlx_src,
+                    mlx_pattern:    #mlx_pat,
+                    shapes:         #shapes_ts,
+                    dispatch:       #dispatch_ts,
+                    kernel_mode:    #kernel_mode_ts,
+                    mlx_compile_fn: None,
+                    check_fn:       None,
                 }
             }
         }

@@ -318,5 +318,7 @@ inventory::submit! {
             pass2_kernel_ir: sdpa_decode_2pass_pass2::kernel_ir_for,
         },
         kernel_mode: Some(KernelMode::Reduction),
+        mlx_compile_fn: None,
+        check_fn: None,
     }
 }

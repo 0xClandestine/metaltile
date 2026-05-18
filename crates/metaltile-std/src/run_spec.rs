@@ -2,10 +2,7 @@
 //! BenchSpec::run() and all dispatch arms, transformed into free functions.
 
 use metaltile_codegen::msl::MslGenerator;
-use metaltile_core::{
-    dtype::DType,
-    ir::{Kernel, KernelMode},
-};
+use metaltile_core::{dtype::DType, ir::KernelMode, Kernel};
 
 use crate::{
     bench_types::{
@@ -181,7 +178,11 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
 
     let mut results = Vec::new();
     // Pre-compile MLX ref kernel once (same MSL/function for all shapes).
-    let mlx_compiled: Option<crate::runner::CompiledKernel> = {
+    let mlx_compiled: Option<crate::runner::CompiledKernel> = if let Some(cfn) =
+        spec.mlx_compile_fn
+    {
+        spec.mlx_src.and_then(|src| cfn(runner, src, dt))
+    } else {
         let ctx0 = DtypeCtx::reduce(dt); // tn is dtype-only, not shape-dependent
         compile_mlx(runner, spec.mlx_src, spec.mlx_pattern, ctx0.tn)
     };
@@ -221,20 +222,32 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
         let primary_out_idx = params.iter().position(|p| p.is_output);
 
         // Build GPU check buffers and run MT on check shapes.
-        let mut check_bufs: Vec<GpuBuffer> = Vec::new();
-        for buf_spec in shape.tensor_bufs {
-            let count = buf_spec.count.resolve(check_n, check_b);
-            let init_data = buf_spec.init.generate(count);
-            let param_dt = buf_spec.dtype_override.unwrap_or(dt);
-            check_bufs.push(buffer_typed(runner, &init_data, param_dt));
-        }
-        for &sb in shape.scalar_bufs {
-            check_bufs.push(scalar_buf(spec, runner, sb, check_n, check_b));
-        }
+        let check_bufs: Vec<GpuBuffer> = if let Some(f) = shape.mt_bufs_fn {
+            f(runner, shape, false, dt)
+        } else {
+            let mut bufs = Vec::new();
+            for buf_spec in shape.tensor_bufs {
+                let count = buf_spec.count.resolve(check_n, check_b);
+                let init_data = buf_spec.init.generate(count);
+                let param_dt = buf_spec.dtype_override.unwrap_or(dt);
+                bufs.push(buffer_typed(runner, &init_data, param_dt));
+            }
+            for &sb in shape.scalar_bufs {
+                bufs.push(scalar_buf(spec, runner, sb, check_n, check_b));
+            }
+            bufs
+        };
 
-        let out_idx = primary_out_idx.unwrap_or(0);
-        let out_count_check = shape.out_elems.resolve(check_n, check_b).max(1);
-        let check_grid = shape.grid.eval(check_n, check_b, shape.tpg);
+        let out_idx =
+            shape.mt_out_idx.unwrap_or_else(|| primary_out_idx.unwrap_or(0));
+        let out_count_check = shape
+            .out_n_fn
+            .map(|f| f(shape, false))
+            .unwrap_or_else(|| shape.out_elems.resolve(check_n, check_b).max(1));
+        let check_grid = shape
+            .mt_grid_fn
+            .map(|f| f(shape, false, shape.tpg))
+            .unwrap_or_else(|| shape.grid.eval(check_n, check_b, shape.tpg));
         let check_refs: Vec<&GpuBuffer> = check_bufs.iter().collect();
         let mt_vals = run_typed_once(
             runner,
@@ -248,51 +261,86 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
         );
 
         // Correctness: compare MT against MLX reference on check shapes if both available.
-        let equiv = if let (Some(rk), Some(mlx_args)) = (&mlx_compiled, shape.mlx_args) {
-            let mlx_tpg_check = if shape.mlx_tpg > 0 { shape.mlx_tpg } else { shape.tpg };
-            let mlx_grid_check =
-                shape.mlx_grid.unwrap_or(shape.grid).eval(check_n, check_b, mlx_tpg_check);
-            let mlx_check_bufs: Vec<GpuBuffer> = mlx_args
-                .iter()
-                .map(|arg| mlx_buf(spec, runner, arg, shape, check_n, check_b, dt))
-                .collect();
-            // Find the FreshOut buffer index — MLX writes its output there.
-            let mlx_out_idx =
-                mlx_args.iter().position(|arg| matches!(arg, MlxArg::FreshOut(_))).unwrap_or(1);
-            let mlx_out_buf = &mlx_check_bufs[mlx_out_idx];
-            let mlx_refs: Vec<&GpuBuffer> = mlx_check_bufs.iter().collect();
-            let mlx_vals = run_typed_once(
-                runner,
-                rk,
-                &mlx_refs,
-                mlx_out_buf,
-                out_count_check,
-                mlx_grid_check,
-                [mlx_tpg_check, 1, 1],
-                dt,
-            );
-            check_equiv(&mlx_vals, &mt_vals, spec.tol)
+        let has_mlx_bufs = shape.mlx_bufs_fn.is_some() || shape.mlx_args.is_some();
+        let equiv = if has_mlx_bufs {
+            if let Some(rk) = &mlx_compiled {
+                let mlx_tpg_check =
+                    if shape.mlx_tpg > 0 { shape.mlx_tpg } else { shape.tpg };
+                let (mlx_check_bufs, mlx_out_idx_c) = if let Some(f) = shape.mlx_bufs_fn {
+                    (f(runner, shape, false, dt), shape.mlx_out_idx)
+                } else {
+                    let mlx_args = shape.mlx_args.unwrap();
+                    let bufs = mlx_args
+                        .iter()
+                        .map(|arg| mlx_buf(spec, runner, arg, shape, check_n, check_b, dt))
+                        .collect();
+                    let idx = mlx_args
+                        .iter()
+                        .position(|arg| matches!(arg, MlxArg::FreshOut(_)))
+                        .unwrap_or(1);
+                    (bufs, idx)
+                };
+                let mlx_grid_check = shape
+                    .mlx_grid_fn
+                    .map(|f| f(shape, false, mlx_tpg_check))
+                    .unwrap_or_else(|| {
+                        shape.mlx_grid.unwrap_or(shape.grid).eval(
+                            check_n,
+                            check_b,
+                            mlx_tpg_check,
+                        )
+                    });
+                let mlx_out_buf = &mlx_check_bufs[mlx_out_idx_c];
+                let mlx_refs: Vec<&GpuBuffer> = mlx_check_bufs.iter().collect();
+                let mlx_vals = run_typed_once(
+                    runner,
+                    rk,
+                    &mlx_refs,
+                    mlx_out_buf,
+                    out_count_check,
+                    mlx_grid_check,
+                    [mlx_tpg_check, 1, 1],
+                    dt,
+                );
+                spec.check_fn
+                    .map(|f| f(&mlx_vals, &mt_vals, spec.tol))
+                    .unwrap_or_else(|| check_equiv(&mlx_vals, &mt_vals, spec.tol))
+            } else {
+                // No MLX ref available — correctness not verified.
+                EquivResult { n_checked: 0, max_abs_err: 0.0, cosine_sim: 0.0, passed: true }
+            }
         } else {
-            // No MLX ref available — correctness not verified.
+            // No MLX buffers configured.
             EquivResult { n_checked: 0, max_abs_err: 0.0, cosine_sim: 0.0, passed: true }
         };
 
         // Build GPU perf buffers
         let n = shape.n;
         let b = shape.b;
-        let mut perf_bufs: Vec<GpuBuffer> = Vec::new();
-        for buf_spec in shape.tensor_bufs {
-            let count = buf_spec.count.resolve(n, b);
-            let init_data = buf_spec.init.generate(count);
-            let param_dt = buf_spec.dtype_override.unwrap_or(dt);
-            perf_bufs.push(buffer_typed(runner, &init_data, param_dt));
-        }
-        for &sb in shape.scalar_bufs {
-            perf_bufs.push(scalar_buf(spec, runner, sb, n, b));
-        }
+        let perf_bufs: Vec<GpuBuffer> = if let Some(f) = shape.mt_bufs_fn {
+            f(runner, shape, true, dt)
+        } else {
+            let mut bufs = Vec::new();
+            for buf_spec in shape.tensor_bufs {
+                let count = buf_spec.count.resolve(n, b);
+                let init_data = buf_spec.init.generate(count);
+                let param_dt = buf_spec.dtype_override.unwrap_or(dt);
+                bufs.push(buffer_typed(runner, &init_data, param_dt));
+            }
+            for &sb in shape.scalar_bufs {
+                bufs.push(scalar_buf(spec, runner, sb, n, b));
+            }
+            bufs
+        };
 
-        let perf_grid = shape.grid.eval(n, b, shape.tpg);
-        let out_count_perf = shape.out_elems.resolve(n, b).max(1);
+        let perf_grid = shape
+            .mt_grid_fn
+            .map(|f| f(shape, true, shape.tpg))
+            .unwrap_or_else(|| shape.grid.eval(n, b, shape.tpg));
+        let out_count_perf = shape
+            .out_n_fn
+            .map(|f| f(shape, true))
+            .unwrap_or_else(|| shape.out_elems.resolve(n, b).max(1));
         let bytes = (shape.bytes_fn)(n, b, shape.reads, out_count_perf, ctx.eb) as f64;
         let perf_refs: Vec<&GpuBuffer> = perf_bufs.iter().collect();
         let (mt_perf_val, mt_stats) =
@@ -302,16 +350,26 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
             };
 
         // MLX ref (optional)
-        let (ref_perf_val, ref_stats) = if let Some(mlx_args) = shape.mlx_args {
+        let has_mlx_perf = shape.mlx_bufs_fn.is_some() || shape.mlx_args.is_some();
+        let (ref_perf_val, ref_stats) = if has_mlx_perf {
             let mlx_tpg = if shape.mlx_tpg > 0 { shape.mlx_tpg } else { shape.tpg };
-            let mlx_grid = shape.mlx_grid.unwrap_or(shape.grid).eval(n, b, mlx_tpg);
+            let mlx_grid = shape
+                .mlx_grid_fn
+                .map(|f| f(shape, true, mlx_tpg))
+                .unwrap_or_else(|| shape.mlx_grid.unwrap_or(shape.grid).eval(n, b, mlx_tpg));
             mlx_compiled
                 .as_ref()
                 .map(|rk| {
-                    let mlx_bufs: Vec<GpuBuffer> = mlx_args
-                        .iter()
-                        .map(|arg| mlx_buf(spec, runner, arg, shape, n, b, dt))
-                        .collect();
+                    let mlx_bufs: Vec<GpuBuffer> = if let Some(f) = shape.mlx_bufs_fn {
+                        f(runner, shape, true, dt)
+                    } else {
+                        shape
+                            .mlx_args
+                            .unwrap()
+                            .iter()
+                            .map(|arg| mlx_buf(spec, runner, arg, shape, n, b, dt))
+                            .collect()
+                    };
                     let mlx_refs: Vec<&GpuBuffer> = mlx_bufs.iter().collect();
                     match bench_gbps(runner, rk, &mlx_refs, mlx_grid, [mlx_tpg, 1, 1], bytes) {
                         Some((p, t)) => (Some(p), Some(t)),

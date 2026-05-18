@@ -9,7 +9,6 @@ use metaltile::{bench_kernel, kernel};
     input=Signed,
     tol=1e-6,
     mlx="v_copy{tn}{tn}",
-    metal_file="copy.metal",
 )]
 #[kernel]
 pub fn mt_copy<T>(a: Tensor<T>, out: Tensor<T>) {

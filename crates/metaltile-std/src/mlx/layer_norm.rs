@@ -15,7 +15,6 @@ use metaltile::{bench_kernel, kernel};
     post_eps=1e-5,
     tol=1e-4,
     mlx="layer_norm_looped{tn}",
-    metal_file="layer_norm.metal",
 )]
 #[kernel]
 pub fn mt_layer_norm<T>(

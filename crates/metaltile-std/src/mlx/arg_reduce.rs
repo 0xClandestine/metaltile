@@ -11,7 +11,6 @@ use metaltile::{bench_kernel, kernel};
     tpg=256,
     tol=0.5,
     mlx="argmax_float32",
-    metal_file="arg_reduce.metal",
     dtypes=crate::spec::F32_ONLY,
 )]
 #[kernel]
