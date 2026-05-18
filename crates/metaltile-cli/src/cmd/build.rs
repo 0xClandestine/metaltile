@@ -39,6 +39,20 @@ use crate::{
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
+// ── Table helpers ────────────────────────────────────────────────────
+
+fn col_sep() -> String {
+    paint_stdout("│", Style::new().fg(Color::BrightBlack).dim())
+}
+
+fn pad_left(text: &str, width: usize) -> String {
+    format!("{text:<width$}")
+}
+
+fn pad_right(text: &str, width: usize) -> String {
+    format!("{text:>width$}")
+}
+
 pub fn run(args: &BuildArgs) {
     let filter = &args.filter;
     let dtypes_arg = &args.dtypes;
@@ -96,7 +110,39 @@ pub fn run(args: &BuildArgs) {
     sorted.sort_unstable_by_key(|(name, _)| *name);
 
     // Header.
-    eprintln!("{}", paint_stdout("tile build", Style::new().fg(Color::Cyan).bold()),);
+    println!(
+        "{} {}",
+        paint_stdout("tile build", Style::new().fg(Color::Cyan).bold()),
+        paint_stdout(format!("· {} kernels", sorted.len()), Style::new().fg(Color::BrightBlack)),
+    );
+
+    // Compute column widths.
+    let name_w = sorted.iter().map(|(n, _)| n.len()).max().unwrap_or(20).clamp(8, 48);
+    let dt_w = sorted
+        .iter()
+        .map(|(_, (_, dtypes))| {
+            dtypes.iter().map(|dt| dt.label()).collect::<Vec<_>>().join("/").len()
+        })
+        .max()
+        .unwrap_or(12)
+        .clamp(8, 24);
+    let ck_w = 2usize;
+
+    let sep = col_sep();
+    let bold = Style::new().fg(Color::BrightWhite).bold();
+    let hdr = format!(
+        "  {} {} {} {} {}",
+        paint_stdout(pad_left("Kernel", name_w), bold),
+        sep,
+        paint_stdout(pad_left("Dtypes", dt_w), bold),
+        sep,
+        paint_stdout(pad_right("ok", ck_w), bold),
+    );
+    println!("{hdr}");
+
+    let total_w = 4 + name_w + 3 + dt_w + 3 + ck_w;
+    let sep_line = paint_stdout("─".repeat(total_w), Style::new().fg(Color::BrightBlack).dim());
+    println!("  {sep_line}");
 
     // Per-output collectors for the emit step.
     let kernels_dir = out_root.as_ref().map(|r| r.join("Resources").join("kernels"));
@@ -192,29 +238,32 @@ pub fn run(args: &BuildArgs) {
         }
 
         if !dtypes_err.is_empty() {
+            let kernel_cell = paint_stdout(
+                pad_left(name, name_w),
+                Style::new().fg(Color::Cyan).bold(),
+            );
+            let dt_str: String = dtypes_err.iter().map(|(dt, _)| dt.label()).collect::<Vec<_>>().join("/");
+            let dt_cell = paint_stdout(pad_left(&dt_str, dt_w), Style::new().fg(Color::Blue).bold());
+            let ck_cell = paint_stderr("✗", Style::new().fg(Color::Red).bold());
+            println!("  {kernel_cell} {sep} {dt_cell} {sep}  {ck_cell}");
             for (dt, err_msg) in &dtypes_err {
+                let label = format!("{}:", dt.label());
                 eprintln!(
-                    "  {}  {}   {}",
-                    paint_stdout(format!("{name:<20}"), Style::new().fg(Color::Cyan).bold()),
-                    paint_stdout(dt.label(), Style::new().fg(Color::Blue).bold()),
-                    paint_stderr("✗", Style::new().fg(Color::Red).bold()),
+                    "    {} {}",
+                    paint_stdout(pad_right(&label, dt_w + 2), Style::new().fg(Color::BrightBlack)),
+                    paint_stderr(err_msg.lines().next().unwrap_or(err_msg), Style::new().fg(Color::BrightWhite)),
                 );
-                for line in err_msg.lines() {
-                    eprintln!(
-                        "                       {}",
-                        paint_stderr(line, Style::new().fg(Color::BrightWhite)),
-                    );
-                }
             }
         } else if !dtypes_ok.is_empty() {
             ok += 1;
-            let dtype_str = dtypes_ok.iter().map(|dt| dt.label()).collect::<Vec<_>>().join("/");
-            eprintln!(
-                "  {}  {}   {}",
-                paint_stdout(format!("{name:<20}"), Style::new().fg(Color::Cyan).bold()),
-                paint_stdout(&dtype_str, Style::new().fg(Color::Blue).bold()),
-                paint_stdout("✓", Style::new().fg(Color::Green).bold()),
+            let kernel_cell = paint_stdout(
+                pad_left(name, name_w),
+                Style::new().fg(Color::Cyan).bold(),
             );
+            let dtype_str = dtypes_ok.iter().map(|dt| dt.label()).collect::<Vec<_>>().join("/");
+            let dt_cell = paint_stdout(pad_left(&dtype_str, dt_w), Style::new().fg(Color::Blue).bold());
+            let ck_cell = paint_stdout("✓", Style::new().fg(Color::Green).bold());
+            println!("  {kernel_cell} {sep} {dt_cell} {sep}  {ck_cell}");
         }
     }
 
@@ -224,11 +273,10 @@ pub fn run(args: &BuildArgs) {
     }
 
     // Summary
-    eprintln!();
-    let sep = paint_stdout("·", Style::new().fg(Color::BrightBlack).dim());
+    println!();
     if errors > 0 {
-        eprintln!(
-            "  {} {sep} {}",
+        println!(
+            "  {}  {}",
             paint_stdout(format!("{ok} ok"), Style::new().fg(Color::Green).bold()),
             paint_stderr(
                 format!("{errors} error{}", if errors == 1 { "" } else { "s" }),
@@ -237,7 +285,7 @@ pub fn run(args: &BuildArgs) {
         );
         std::process::exit(1);
     } else {
-        eprintln!("  {}", paint_stdout(format!("{ok} ok"), Style::new().fg(Color::Green).bold()),);
+        println!("  {}", paint_stdout(format!("{ok} ok"), Style::new().fg(Color::Green).bold()));
     }
 }
 
