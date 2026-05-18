@@ -105,7 +105,7 @@ inventory::submit! {
         subop: "bm64_bn64_bk16_wm2_wn2",
         kernel_name: "mt_steel_gemm_64x64x16_2x2",
         kernel_ir: mt_steel_gemm_64x64x16_2x2::kernel_ir_for,
-        dtypes: crate::spec::F16_ONLY,
+        dtypes: crate::bench_types::FLOAT_DTYPES,
         tol: 1e-2f32,
         mlx_src: None,
         mlx_pattern: None,
