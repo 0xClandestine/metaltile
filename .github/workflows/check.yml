@@ -32,6 +32,26 @@ jobs:
         with:
           config: .github/configs/typos-cli.toml
 
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            static.crates.io:443
+            crates.io:443
+            index.crates.io:443
+            static.rust-lang.org:443
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check --all
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
@@ -110,5 +130,5 @@ jobs:
       - name: Tile Build
         run: cargo run --release -p metaltile-cli -- build
 
-      - name: Tile Bench
-        run: cargo run --release -p metaltile-cli -- bench
+      - name: Tile Bench (verbose)
+        run: cargo run --release -p metaltile-cli -- bench -vv

@@ -41,17 +41,11 @@ use crate::{
 
 // ── Table helpers ────────────────────────────────────────────────────
 
-fn col_sep() -> String {
-    paint_stdout("│", Style::new().fg(Color::BrightBlack).dim())
-}
+fn col_sep() -> String { paint_stdout("│", Style::new().fg(Color::BrightBlack).dim()) }
 
-fn pad_left(text: &str, width: usize) -> String {
-    format!("{text:<width$}")
-}
+fn pad_left(text: &str, width: usize) -> String { format!("{text:<width$}") }
 
-fn pad_right(text: &str, width: usize) -> String {
-    format!("{text:>width$}")
-}
+fn pad_right(text: &str, width: usize) -> String { format!("{text:>width$}") }
 
 pub fn run(args: &BuildArgs) {
     let filter = &args.filter;
@@ -238,12 +232,12 @@ pub fn run(args: &BuildArgs) {
         }
 
         if !dtypes_err.is_empty() {
-            let kernel_cell = paint_stdout(
-                pad_left(name, name_w),
-                Style::new().fg(Color::Cyan).bold(),
-            );
-            let dt_str: String = dtypes_err.iter().map(|(dt, _)| dt.label()).collect::<Vec<_>>().join("/");
-            let dt_cell = paint_stdout(pad_left(&dt_str, dt_w), Style::new().fg(Color::Blue).bold());
+            let kernel_cell =
+                paint_stdout(pad_left(name, name_w), Style::new().fg(Color::Cyan).bold());
+            let dt_str: String =
+                dtypes_err.iter().map(|(dt, _)| dt.label()).collect::<Vec<_>>().join("/");
+            let dt_cell =
+                paint_stdout(pad_left(&dt_str, dt_w), Style::new().fg(Color::Blue).bold());
             let ck_cell = paint_stderr("✗", Style::new().fg(Color::Red).bold());
             println!("  {kernel_cell} {sep} {dt_cell} {sep}  {ck_cell}");
             for (dt, err_msg) in &dtypes_err {
@@ -251,17 +245,19 @@ pub fn run(args: &BuildArgs) {
                 eprintln!(
                     "    {} {}",
                     paint_stdout(pad_right(&label, dt_w + 2), Style::new().fg(Color::BrightBlack)),
-                    paint_stderr(err_msg.lines().next().unwrap_or(err_msg), Style::new().fg(Color::BrightWhite)),
+                    paint_stderr(
+                        err_msg.lines().next().unwrap_or(err_msg),
+                        Style::new().fg(Color::BrightWhite)
+                    ),
                 );
             }
         } else if !dtypes_ok.is_empty() {
             ok += 1;
-            let kernel_cell = paint_stdout(
-                pad_left(name, name_w),
-                Style::new().fg(Color::Cyan).bold(),
-            );
+            let kernel_cell =
+                paint_stdout(pad_left(name, name_w), Style::new().fg(Color::Cyan).bold());
             let dtype_str = dtypes_ok.iter().map(|dt| dt.label()).collect::<Vec<_>>().join("/");
-            let dt_cell = paint_stdout(pad_left(&dtype_str, dt_w), Style::new().fg(Color::Blue).bold());
+            let dt_cell =
+                paint_stdout(pad_left(&dtype_str, dt_w), Style::new().fg(Color::Blue).bold());
             let ck_cell = paint_stdout("✓", Style::new().fg(Color::Green).bold());
             println!("  {kernel_cell} {sep} {dt_cell} {sep}  {ck_cell}");
         }
