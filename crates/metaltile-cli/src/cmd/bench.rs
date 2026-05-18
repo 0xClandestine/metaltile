@@ -12,9 +12,12 @@ use metaltile_std::{
     runner::GpuRunner,
     spec::BenchSpec,
 };
+use serde_json::Value;
 
 use crate::{
     BenchArgs,
+    cmd::diff as diff_cmd,
+    git,
     matches_filter,
     suite_printer::{ProfileRow, SuitePrinter},
     term::{Color, Style, paint_stderr, paint_stdout},
@@ -24,6 +27,48 @@ pub fn run(args: &BenchArgs) {
     let json_out = &args.json;
     let filter = &args.filter;
     let verbose = args.verbose;
+
+    // Refuse to bench on a dirty tree: a stale `target/` binary against
+    // a dirty source tree silently decouples the numbers from any
+    // commit SHA we'd record in a snapshot. `working_tree_dirty()`
+    // returns None outside a repo — skip the check there.
+    if !args.allow_dirty
+        && let Some(true) = git::working_tree_dirty()
+    {
+        let files = git::list_dirty_files();
+        eprintln!(
+            "{} {}",
+            paint_stderr("Error:", Style::new().fg(Color::Red).bold()),
+            paint_stderr(
+                "working tree has uncommitted changes; bench numbers \
+                 would not tie back to a clean commit.",
+                Style::new().fg(Color::BrightWhite),
+            ),
+        );
+        if !files.is_empty() {
+            let preview: Vec<&str> = files.iter().take(8).map(String::as_str).collect();
+            let overflow = if files.len() > 8 {
+                format!(" (+{} more)", files.len() - 8)
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "  {} {}{}",
+                paint_stderr("Dirty:", Style::new().fg(Color::Yellow).bold()),
+                paint_stderr(preview.join(", "), Style::new().fg(Color::BrightWhite)),
+                overflow,
+            );
+        }
+        eprintln!(
+            "  {} {}",
+            paint_stderr("Override:", Style::new().fg(Color::BrightBlack).bold()),
+            paint_stderr(
+                "re-run with --allow-dirty to bench anyway.",
+                Style::new().fg(Color::BrightBlack),
+            ),
+        );
+        std::process::exit(1);
+    }
 
     let runner = match GpuRunner::new() {
         Ok(r) => r,
@@ -192,6 +237,10 @@ pub fn run(args: &BenchArgs) {
     }
     println!();
 
+    if !args.no_diff {
+        try_auto_diff(&runner.device_name, &all, args.baseline_ref.as_deref());
+    }
+
     if let Some(path) = json_out {
         save_json(&runner.device_name, &all, path);
     }
@@ -199,6 +248,111 @@ pub fn run(args: &BenchArgs) {
     if equiv_fail > 0 {
         std::process::exit(1);
     }
+}
+
+/// Resolve a baseline file from the target branch and diff the
+/// just-finished bench against it. Best-effort: any failure (no git
+/// repo, no resolved ref, no baseline file at that ref, etc.) logs a
+/// one-line skip note and returns. Never aborts the bench.
+fn try_auto_diff(device: &str, results: &[OpResult], baseline_ref_override: Option<&str>) {
+    let slug = chip_slug(device);
+    let baseline_path = format!("baselines/{slug}.json");
+
+    let candidates: Vec<&str> = match baseline_ref_override {
+        Some(r) => vec![r],
+        None => vec!["origin/dev", "upstream/dev", "dev"],
+    };
+    let Some(reference) = git::resolve_baseline_ref(&candidates) else {
+        log_skip(&format!(
+            "baseline auto-diff: no target-branch ref ({}) — skipping",
+            candidates.join("/")
+        ));
+        return;
+    };
+    let Some(sha) = git::merge_base_with(&reference) else {
+        log_skip(&format!("baseline auto-diff: merge-base HEAD..{reference} failed — skipping"));
+        return;
+    };
+    let Some(content) = git::show_file_at(&sha, &baseline_path) else {
+        log_skip(&format!(
+            "baseline auto-diff: no {baseline_path} at {reference} ({}…) — skipping",
+            sha.chars().take(7).collect::<String>()
+        ));
+        return;
+    };
+
+    let baseline_json: Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            log_skip(&format!(
+                "baseline auto-diff: {baseline_path} at {reference} is not valid JSON ({e}) — skipping"
+            ));
+            return;
+        },
+    };
+    let Some(baseline_rows) = baseline_json.get("results").and_then(|v| v.as_array()).cloned()
+    else {
+        log_skip(&format!(
+            "baseline auto-diff: {baseline_path} at {reference} has no 'results' array — skipping"
+        ));
+        return;
+    };
+
+    let current_rows: Vec<Value> = results.iter().map(result_to_value).collect();
+
+    let short_sha: String = sha.chars().take(7).collect();
+    let heading = format!("tile bench · diff vs {reference} @ {short_sha} ({baseline_path})");
+    let opts = diff_cmd::RenderOpts {
+        heading: Some(&heading),
+        sort: "regression",
+        ..diff_cmd::RenderOpts::default()
+    };
+    let outcome = diff_cmd::render(&baseline_rows, &current_rows, &opts);
+    if outcome.total_rows == 0 {
+        log_skip(&format!(
+            "baseline auto-diff: no overlapping rows with {baseline_path} at {reference}"
+        ));
+    }
+}
+
+/// Lowercase + collapse whitespace runs into a single dash, dropping
+/// any character that isn't alphanumeric or `-`. Yields slugs like
+/// `apple-m5-max` from `Apple M5 Max`, matching the naming convention
+/// established by `baselines/apple-m5-max.json`.
+fn chip_slug(device: &str) -> String {
+    let mut out = String::with_capacity(device.len());
+    let mut prev_dash = false;
+    for ch in device.chars() {
+        let lowered = ch.to_ascii_lowercase();
+        if lowered.is_ascii_alphanumeric() {
+            out.push(lowered);
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
+fn result_to_value(r: &OpResult) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("op".into(), Value::from(r.op()));
+    if let Some(sub) = r.subop() {
+        obj.insert("subop".into(), Value::from(sub));
+    }
+    obj.insert("shape".into(), Value::from(r.shape()));
+    obj.insert("metric".into(), Value::from(r.metric()));
+    obj.insert("ref".into(), r.ref_perf().map(Value::from).unwrap_or(Value::Null));
+    obj.insert("mt".into(), r.mt_perf().map(Value::from).unwrap_or(Value::Null));
+    Value::Object(obj)
+}
+
+fn log_skip(msg: &str) {
+    eprintln!("  {}", paint_stderr(msg, Style::new().fg(Color::BrightBlack)));
 }
 
 fn save_json(device: &str, results: &[OpResult], path: &str) {
@@ -459,5 +613,46 @@ mod tests {
         let row = format_result_row("foo", None, "k=2 (warm)", "GB/s", Some(1.0), Some(2.0));
         let parsed: serde_json::Value = serde_json::from_str(&row).expect("row must be valid JSON");
         assert_eq!(parsed["shape"], "k=2 (warm)");
+    }
+
+    // The slug must match the filenames committed under `baselines/`
+    // (e.g. `apple-m5-max.json`) so auto-diff can find them.
+    #[test]
+    fn chip_slug_matches_apple_m5_max_filename() {
+        assert_eq!(chip_slug("Apple M5 Max"), "apple-m5-max");
+    }
+
+    #[test]
+    fn chip_slug_collapses_runs_of_punctuation() {
+        // Hypothetical messy device string — make sure we don't emit
+        // double dashes or trailing dashes.
+        assert_eq!(chip_slug("  Apple  --M1 (Pro)  "), "apple-m1-pro");
+        assert_eq!(chip_slug("Apple_M2_Max!"), "apple-m2-max");
+    }
+
+    #[test]
+    fn result_to_value_emits_legacy_schema() {
+        let b = OpBench::new("rms_norm", "GB/s");
+        let r = b.result("B=1024 N=4096 f32", Some(323.9), Some(325.6), Some(pass_equiv()));
+        let v = result_to_value(&r);
+        assert_eq!(v["op"], "rms_norm");
+        assert_eq!(v["shape"], "B=1024 N=4096 f32");
+        assert_eq!(v["metric"], "GB/s");
+        assert_eq!(v["ref"], 323.9);
+        assert_eq!(v["mt"], 325.6);
+        // No subop here, so the field should be absent (matches save_json).
+        assert!(v.get("subop").is_none());
+    }
+
+    #[test]
+    fn result_to_value_null_perfs_round_trip_through_diff() {
+        // NYI result — both perfs are None. The diff `build_result_map`
+        // pulls f64::unwrap_or(0.0), so the row goes in as zeros which
+        // is the established contract.
+        let b = OpBench::new("sdpa", "GB/s");
+        let r = b.nyi("H=8 N=2048", None);
+        let v = result_to_value(&r);
+        assert!(v["ref"].is_null());
+        assert!(v["mt"].is_null());
     }
 }
