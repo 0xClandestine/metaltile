@@ -330,3 +330,8 @@ pub fn bytes_mat_vec(n: usize, b: usize, _reads: usize, out: usize, eb: usize) -
 pub fn bytes_mat_vec_masked(n: usize, b: usize, _reads: usize, out: usize, eb: usize) -> usize {
     (b * n + 2 * n + out) * eb
 }
+
+/// Select: cond is always 1-byte bool (matching MLX v_Select{T} interface).
+pub fn bytes_select(n: usize, _b: usize, _reads: usize, _out: usize, eb: usize) -> usize {
+    n + 3 * n * eb // cond(1 byte) + on_true(eb) + on_false(eb) + out(eb)
+}

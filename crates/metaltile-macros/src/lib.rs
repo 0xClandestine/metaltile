@@ -390,6 +390,7 @@ fn parse_dtype_generic(
             "i32" => quote! { DType::I32 },
             "u32" => quote! { DType::U32 },
             "i8" => quote! { DType::I8 },
+            "u8" => quote! { DType::U8 },
             "bool" => quote! { DType::Bool },
             _ => quote! { DType::F32 },
         };
@@ -1171,7 +1172,7 @@ mod bench_impl {
                     tpg: crate::spec::SELECT_TPG,
                     grid: crate::spec::DispatchGrid::DivCeilN,
                     tensor_bufs: &[
-                        crate::spec::TensorBufSpec { count: crate::spec::Dim::N, init: crate::spec::BufInit::AltZeroOne, dtype_override: None },
+                        crate::spec::TensorBufSpec { count: crate::spec::Dim::N, init: crate::spec::BufInit::AltZeroOne, dtype_override: Some(metaltile_core::DType::U8) },
                         crate::spec::TensorBufSpec { count: crate::spec::Dim::N, init: crate::spec::BufInit::Half, dtype_override: None },
                         crate::spec::TensorBufSpec { count: crate::spec::Dim::N, init: crate::spec::BufInit::Half, dtype_override: None },
                         crate::spec::TensorBufSpec { count: crate::spec::Dim::N, init: crate::spec::BufInit::Zeros, dtype_override: None },
@@ -1180,7 +1181,7 @@ mod bench_impl {
                     cexprs: &[],
                     out_elems: crate::spec::Dim::N,
                     reads: 3usize,
-                    bytes_fn: crate::spec::bytes_elementwise,
+                    bytes_fn: crate::spec::bytes_select,
                     mlx_args: Some(&[
                         crate::spec::MlxArg::BoolAltN,
                         crate::spec::MlxArg::TensorBuf(1),
@@ -1262,7 +1263,7 @@ mod bench_impl {
                 let sh = quote! { &[crate::spec::ShapeSpec {
                     label: #label,
                     n: #n_val as usize, b: #b_val as usize,
-                    check_n: crate::spec::ROW_REDUCE_CHECK_N, check_b: 4usize,
+                    check_n: #n_val as usize, check_b: 4usize,
                     mode: metaltile_core::ir::KernelMode::Reduction,
                     tpg: #tpg_val as usize,
                     grid: crate::spec::DispatchGrid::RowsB,

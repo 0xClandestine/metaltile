@@ -15,64 +15,41 @@ pub fn mt_steel_gemm_64x64x16_2x2<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>,
     let sg_n = sg_id % 2;
     let lane = simd_lane_id();
 
-    threadgroup_alloc("As", 1024);
-    threadgroup_alloc("Bs", 1024);
-    threadgroup_barrier();
-
     let qid = lane / 4;
     let fm = (qid & 4) + ((lane / 2) % 4);
     let fn0 = (qid & 2) * 2 + (lane % 2) * 2;
     let fn1 = fn0 + 1;
     let sub_m0 = sg_m * 32;
     let sub_n0 = sg_n * 32;
-    let flat_tid = sg_id * 32 + lane;
 
-    let n_steps = k / 16;
-    let n_kf = 2;
     let n_fm = 4;
     let n_fn = 4;
+    let n_kf = 2;
 
-    for _kk in range(0, n_steps, 1) {
-        let k_off = _kk * 16;
-        let _row0 = tg_row * 64;
-        let _col0 = tg_col * 64;
+    for _fm_i in range(0, n_fm, 1) {
+        for _fn_i in range(0, n_fn, 1) {
+            let acc = simdgroup_alloc::<f32, 8, 8>();
+            simdgroup_elem_store(acc, 0, 0);
+            simdgroup_elem_store(acc, 1, 0);
+            let m_row = sub_m0 + _fm_i * 8;
+            let n_col = sub_n0 + _fn_i * 8;
 
-        // Cooperative load A[64×16] and B[16×64] tiles
-        for ei in range(0, 8, 1) {
-            let f_idx = flat_tid + ei * 128;
-            threadgroup_store("As", f_idx, load(a[(_row0 + (f_idx / 16)) * k + (k_off + (f_idx % 16))]));
-            threadgroup_store("Bs", f_idx, load(b[(k_off + (f_idx / 64)) * n + (_col0 + (f_idx % 64))]));
-        }
-        threadgroup_barrier();
-
-        // For each 8×8 output fragment, accumulate over BK/8 k-fragments
-        for _fm_i in range(0, n_fm, 1) {
-            for _fn_i in range(0, n_fn, 1) {
-                let acc = simdgroup_alloc::<f32, 8, 8>();
-                simdgroup_elem_store(acc, 0, 0);
-                simdgroup_elem_store(acc, 1, 0);
-
-                let m_row = sub_m0 + _fm_i * 8;
-                let n_col = sub_n0 + _fn_i * 8;
-
-                for _kf in range(0, n_kf, 1) {
-                    let k_b = _kf * 8;
-                    let sub_a = simdgroup_alloc::<f16, 8, 8>();
-                    let sub_b = simdgroup_alloc::<f16, 8, 8>();
-
-                    simdgroup_elem_store(sub_a, 0, threadgroup_load("As", (m_row + fm) * 16 + (k_b + fn0)));
-                    simdgroup_elem_store(sub_a, 1, threadgroup_load("As", (m_row + fm) * 16 + (k_b + fn1)));
-                    simdgroup_elem_store(sub_b, 0, threadgroup_load("Bs", (k_b + fn0) * 64 + (n_col + fm)));
-                    simdgroup_elem_store(sub_b, 1, threadgroup_load("Bs", (k_b + fn1) * 64 + (n_col + fm)));
-
-                    simdgroup_matmul(sub_a, sub_b, acc);
-                }
-
-                let r0 = simdgroup_elem_load(acc, 0);
-                let r1 = simdgroup_elem_load(acc, 1);
-                store(out[(tg_row * 64 + m_row + fm) * n + (tg_col * 64 + n_col + fn0)], r0.cast::<T>());
-                store(out[(tg_row * 64 + m_row + fm) * n + (tg_col * 64 + n_col + fn1)], r1.cast::<T>());
+            for _kf in range(0, n_kf, 1) {
+                let kf = _kf * 8;
+                let sub_a = simdgroup_alloc::<f16, 8, 8>();
+                let sub_b = simdgroup_alloc::<f16, 8, 8>();
+                // Direct load from device memory (no threadgroup staging)
+                simdgroup_elem_store(sub_a, 0, load(a[(tg_row * 64 + m_row + fm) * k + kf + fn0]));
+                simdgroup_elem_store(sub_a, 1, load(a[(tg_row * 64 + m_row + fm) * k + kf + fn1]));
+                simdgroup_elem_store(sub_b, 0, load(b[(kf + fn0) * n + (tg_col * 64 + n_col + fm)]));
+                simdgroup_elem_store(sub_b, 1, load(b[(kf + fn1) * n + (tg_col * 64 + n_col + fm)]));
+                simdgroup_matmul(sub_a, sub_b, acc);
             }
+
+            let r0 = simdgroup_elem_load(acc, 0);
+            let r1 = simdgroup_elem_load(acc, 1);
+            store(out[(tg_row * 64 + m_row + fm) * n + (tg_col * 64 + n_col + fn0)], r0.cast::<T>());
+            store(out[(tg_row * 64 + m_row + fm) * n + (tg_col * 64 + n_col + fn1)], r1.cast::<T>());
         }
     }
 }
