@@ -4,7 +4,6 @@
 //!   bench     Benchmark suite: MetalTile vs MLX reference
 //!   build     Compile all kernels to MSL and report errors
 //!   inspect   Print IR and/or MSL for one kernel
-//!   profile   Estimate GPU occupancy and register pressure
 //!   device    Show GPU device info and supported features
 //!   snap      Save bench results as a regression baseline
 //!   diff      Compare bench results to a saved baseline
@@ -45,8 +44,6 @@ enum Command {
     Build(BuildArgs),
     /// Print IR and/or MSL for registered kernels
     Inspect(InspectArgs),
-    /// Estimate GPU occupancy and register pressure
-    Profile(ProfileArgs),
     /// Show GPU device info and supported feature flags
     Device(DeviceArgs),
     /// Save bench results as a regression baseline
@@ -123,20 +120,6 @@ struct InspectArgs {
     dir: Option<String>,
 }
 
-// ── Profile ──────────────────────────────────────────────────────────────
-
-#[derive(clap::Args)]
-struct ProfileArgs {
-    /// Kernel name to profile in detail
-    kernel: Option<String>,
-    /// Filter kernels by name substring
-    #[arg(long = "filter")]
-    filter: Option<String>,
-    /// Show occupancy at every threadgroup size
-    #[arg(long = "sweep")]
-    sweep: bool,
-}
-
 // ── Device ───────────────────────────────────────────────────────────────
 
 #[derive(clap::Args)]
@@ -198,7 +181,6 @@ fn main() {
         Command::Bench(args) => cmd::bench::run(&args),
         Command::Build(args) => cmd::build::run(&args),
         Command::Inspect(args) => cmd::inspect::run(&args),
-        Command::Profile(args) => cmd::profile::run(&args),
         Command::Device(args) => cmd::device::run(&args),
         Command::Snap(args) => cmd::snap::run(&args),
         Command::Diff(args) => cmd::diff::run(&args),
