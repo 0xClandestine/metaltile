@@ -400,6 +400,18 @@ pub fn print_suite(results: &[OpResult]) {
     printer.finish();
 }
 
+fn report_result(result: &OpResult) {
+    RESULT_REPORTER.with(|slot| {
+        if let Some(mut reporter) = *slot.borrow() {
+            // Safety: the pointer is installed by `set_result_reporter` and restored by its
+            // guard before the captured closure can go out of scope.
+            unsafe {
+                reporter.as_mut()(result);
+            }
+        }
+    });
+}
+
 pub struct ResultReporterGuard {
     previous: Option<ResultReporterFn>,
 }
@@ -424,14 +436,12 @@ pub fn set_result_reporter(reporter: &mut dyn FnMut(&OpResult)) -> ResultReporte
     ResultReporterGuard { previous }
 }
 
+
 pub struct SuitePrinter {
     show_correctness: bool,
-    verbose: bool,
     started: bool,
     last_op: Option<&'static str>,
-    last_shape_base: Option<String>,
     term_width: usize,
-    /// Current metric heading (updated when metric changes).
     cur_metric: Option<&'static str>,
 }
 
@@ -439,243 +449,127 @@ impl SuitePrinter {
     pub fn new(show_correctness: bool) -> Self {
         Self {
             show_correctness,
-            verbose: false,
             started: false,
             last_op: None,
-            last_shape_base: None,
             term_width: term_width(),
             cur_metric: None,
         }
     }
 
-    /// Enable verbose mode: wider layout, full correctness detail, prettier separators.
-    pub fn set_verbose(&mut self, v: bool) { self.verbose = v; }
+    pub fn set_verbose(&mut self, v: bool) { let _ = v; }
 
-    /// Override terminal width detection.
     pub fn set_term_width(&mut self, w: usize) { self.term_width = w.clamp(60, 200); }
 
     pub fn print_batch(&mut self, results: &[OpResult]) {
-        if results.is_empty() {
-            return;
-        }
-        if !self.started {
-            self.print_header(results);
-            self.started = true;
-        }
+        if results.is_empty() { return; }
+        if !self.started { self.started = true; }
+
         for result in results {
-            // New op group — print group header row (op name, shape, optional metric).
             let new_group = self.last_op != Some(result.op());
             if new_group {
-                // Update metric heading if it changed.
                 if self.cur_metric != Some(result.metric()) {
                     self.cur_metric = Some(result.metric());
                 }
-                self.print_group_header(result);
-                self.last_shape_base = None;
+                if self.last_op.is_some() { println!(); }
+                self.print_op_header(result);
             }
             self.last_op = Some(result.op());
-
-            // Determine dtype label and shape base.
-            let (dtype_label_str, shape_base) =
-                extract_dtype(result.shape(), self.last_shape_base.as_deref());
-            self.last_shape_base = shape_base;
-
-            // Sub-row: indented dtype, then values.
-            println!(
-                "{}",
-                format_sub_row(
-                    result,
-                    self.show_correctness,
-                    &dtype_label_str,
-                    self.term_width,
-                    self.verbose
-                )
-            );
+            self.print_data_row(result);
         }
         self.flush();
     }
 
     pub fn finish(&mut self) {
-        if !self.started {
-            return;
-        }
-        let w = self.term_width.saturating_sub(2);
-        let sep = paint_stdout("─".repeat(w), Style::new().fg(Color::BrightBlack).dim());
-        println!("  {sep}");
+        if !self.started { return; }
+        println!();
         self.flush();
     }
 
-    fn print_header(&mut self, first_batch: &[OpResult]) {
-        // Pick up the metric from the first result for the column heading.
-        self.cur_metric = first_batch.first().map(|r| r.metric());
+    fn print_op_header(&self, result: &OpResult) {
         let metric = self.cur_metric.unwrap_or("perf");
+        let (shape_w, ref_w, mt_w, pct_w, ck_w) =
+            sub_table_widths(self.term_width, metric, self.show_correctness);
 
-        let (col_widths, _) = layout(self.term_width, self.cur_metric, self.verbose);
-        let [op_w, shape_w, ref_w, mt_w, pct_w, corr_w] = col_widths;
+        let op = paint_stdout(&result.op_display(), Style::new().fg(Color::Cyan).bold());
+        let sep = col_sep();
+        let bold = Style::new().fg(Color::BrightWhite).bold();
 
-        // Column headers
-        let headers: Vec<String> = vec![
-            pad_left("Op", op_w),
-            pad_left("Shape", shape_w),
-            pad_right(&format!("Ref ({metric})"), ref_w),
-            pad_right(&format!("MT ({metric})"), mt_w),
-            pad_right("MT%", pct_w),
-        ];
-        let mut header_parts = vec![
-            paint_stdout(&headers[0], Style::new().fg(Color::BrightWhite).bold()),
-            paint_stdout(&headers[1], Style::new().fg(Color::BrightWhite).bold()),
-            paint_stdout(&headers[2], Style::new().fg(Color::BrightWhite).bold()),
-            paint_stdout(&headers[3], Style::new().fg(Color::BrightWhite).bold()),
-            paint_stdout(&headers[4], Style::new().fg(Color::BrightWhite).bold()),
-        ];
+        let mut hdr = format!(
+            "  {}  {} {} {} {} {} {}",
+            paint_stdout(&pad_left("Shape", shape_w), bold),
+            sep,
+            paint_stdout(&pad_right(&format!("Ref({})", metric), ref_w), bold),
+            sep,
+            paint_stdout(&pad_right(&format!("MT({})", metric), mt_w), bold),
+            sep,
+            paint_stdout(&pad_right("MT%", pct_w), bold),
+        );
         if self.show_correctness {
-            header_parts.push(paint_stdout(
-                &pad_right("Ck", corr_w),
-                Style::new().fg(Color::BrightWhite).bold(),
+            hdr.push_str(&format!(
+                " {} {}",
+                sep,
+                paint_stdout(&pad_right("Ck", ck_w), bold),
             ));
         }
+        println!("  {op}");
+        println!("{hdr}");
 
-        let sep = col_sep();
-        println!("  {}", header_parts.join(&format!(" {sep} ")));
-
-        // Separator line.
-        let total_w = op_w
-            + shape_w
-            + ref_w
-            + mt_w
-            + pct_w
-            + if self.show_correctness { corr_w } else { 0 }
-            + (3 + header_parts.len().saturating_sub(1)) * 3; // col_sep padding
-        let total_w = total_w.min(self.term_width.saturating_sub(2));
-        println!(
-            "  {}",
-            paint_stdout("─".repeat(total_w), Style::new().fg(Color::BrightBlack).dim())
-        );
-
-        self.flush();
+        let n_cols: usize = if self.show_correctness { 5 } else { 4 };
+        let gaps = (n_cols.saturating_sub(1)) * 3;
+        let total_w = 4 + shape_w + gaps + ref_w + mt_w + pct_w + if self.show_correctness { ck_w } else { 0 };
+        let sep_line = paint_stdout("─".repeat(total_w), Style::new().fg(Color::BrightBlack).dim());
+        println!("  {sep_line}");
     }
 
-    /// Print the op-group header: "op_name     Shape" on one line.
-    fn print_group_header(&mut self, result: &OpResult) {
-        let (col_widths, _) = layout(self.term_width, self.cur_metric, self.verbose);
-        let [op_w, shape_w, ref_w, mt_w, pct_w, corr_w] = col_widths;
-        let _ = (ref_w, mt_w, pct_w, corr_w);
+    fn print_data_row(&self, result: &OpResult) {
+        let metric = self.cur_metric.unwrap_or("perf");
+        let (shape_w, ref_w, mt_w, pct_w, ck_w) =
+            sub_table_widths(self.term_width, metric, self.show_correctness);
 
-        let op_display = result.op_display();
-        let op = paint_stdout(pad_left(&op_display, op_w), Style::new().fg(Color::Cyan).bold());
+        let shape = paint_stdout(&pad_left(result.shape(), shape_w), Style::new().fg(Color::BrightWhite));
+        let ref_s = fmt_perf(result.ref_perf(), metric, "—");
+        let mt_s = fmt_perf(result.mt_perf(), metric, "NYI");
+        let pct_s = result.pct().map(|p| format!("{p:.0}%")).unwrap_or_else(|| "—".into());
 
-        // Shape: strip the dtype suffix.
-        let (_, shape_base) = extract_dtype(result.shape(), None);
-        let shape_str = shape_base.unwrap_or_else(|| result.shape().to_string());
-        let shape =
-            paint_stdout(pad_left(&shape_str, shape_w), Style::new().fg(Color::BrightWhite));
+        let ref_cell = style_reference(&pad_right(&ref_s, ref_w), result.ref_perf());
+        let mt_cell = style_metaltile(&pad_right(&mt_s, mt_w), result);
+        let pct_cell = style_pct(&pad_right(&pct_s, pct_w), result);
+        let sep = col_sep();
 
-        println!("  {op}  {shape}");
-        self.flush();
+        if self.show_correctness {
+            let ck_icon = correctness_icon(&result.correctness_status());
+            let ck_cell = style_correctness(&pad_right(&ck_icon, ck_w), result.correctness_status());
+            println!("  {shape} {sep} {ref_cell} {sep} {mt_cell} {sep} {pct_cell} {sep} {ck_cell}");
+        } else {
+            println!("  {shape} {sep} {ref_cell} {sep} {mt_cell} {sep} {pct_cell}");
+        }
     }
 
     fn flush(&self) { let _ = std::io::stdout().flush(); }
 }
 
-fn report_result(result: &OpResult) {
-    RESULT_REPORTER.with(|slot| {
-        if let Some(mut reporter) = *slot.borrow() {
-            // Safety: the pointer is installed by `set_result_reporter` and restored by its
-            // guard before the captured closure can go out of scope.
-            unsafe {
-                reporter.as_mut()(result);
-            }
-        }
-    });
-}
-
-// ── Layout & helpers ─────────────────────────────────────────────────────
-
-/// Detect terminal width from COLUMNS or standard fallback.
 fn term_width() -> usize {
-    std::env::var("COLUMNS").ok().and_then(|s| s.parse().ok()).unwrap_or(80).clamp(60, 200)
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(80)
+        .clamp(60, 200)
 }
 
-/// Compute column widths for [op, shape, ref, mt, pct, corr].
-fn layout(term_width: usize, metric: Option<&str>, _verbose: bool) -> ([usize; 6], bool) {
+fn sub_table_widths(term_width: usize, metric: &str, show_ck: bool) -> (usize, usize, usize, usize, usize) {
     let avail = term_width.saturating_sub(2);
-
-    let min_op = 10;
-    let min_shape = 10;
-    let gaps: usize = 5 * 3;
-
-    let metric_len = metric.map(|m| m.len()).unwrap_or(4);
-    let ref_header = 4 + 1 + metric_len;
-    let mt_header = 3 + 1 + metric_len;
-
-    let (op_w, shape_w, ref_w, mt_w, pct_w, corr_w, compact) = if avail < 60 {
-        (8, 5, 7, 7, 4, 3, true)
-    } else if avail < 80 {
-        let fixed = min_op + min_shape + gaps + ref_header.max(8) + mt_header.max(8) + 5 + 3;
-        let slack = avail.saturating_sub(fixed);
-        let op_w = min_op + slack / 3;
-        let shape_w = min_shape + slack / 3;
-        (op_w, shape_w, ref_header.max(8), mt_header.max(8), 5, 3, true)
-    } else {
-        let fixed_rhs = ref_header.max(10) + mt_header.max(10) + 6 + 3 + gaps;
-        let lhs = avail.saturating_sub(fixed_rhs);
-        let op_w = (lhs * 55 / 100).max(min_op);
-        let shape_w = lhs.saturating_sub(op_w).max(min_shape);
-        (op_w, shape_w, ref_header.max(10), mt_header.max(10), 6, 3, false)
-    };
-
-    ([op_w, shape_w, ref_w, mt_w, pct_w, corr_w], compact)
+    let ref_w = 4 + metric.len() + 2;
+    let mt_w = 3 + metric.len() + 2;
+    let pct_w = 5;
+    let ck_w = if show_ck { 3 } else { 0 };
+    let rhs = ref_w + mt_w + pct_w + ck_w;
+    let n_cols: usize = if show_ck { 5 } else { 4 };
+    let gaps = (n_cols.saturating_sub(1)) * 3;
+    let shape_w = avail.saturating_sub(rhs + gaps + 2);
+    let shape_w = shape_w.clamp(8, 42);
+    (shape_w, ref_w, mt_w, pct_w, ck_w)
 }
 
-/// Extract dtype suffix and shape base from "N=64M f32" → ("f32", Some("N=64M")).
-fn extract_dtype(shape: &str, _last_base: Option<&str>) -> (String, Option<String>) {
-    const DTYPES: &[&str] = &["bf16", "f16", "f32", "i32", "u32", "i8", "u8"];
-    for &dtype in DTYPES {
-        if let Some(base) = shape.strip_suffix(&format!(" {dtype}")) {
-            return (dtype.to_string(), Some(base.to_string()));
-        }
-    }
-    (shape.to_string(), None)
-}
-
-/// Format a single sub-row: indented dtype + metric values.
-fn format_sub_row(
-    result: &OpResult,
-    show_correctness: bool,
-    dtype_label: &str,
-    term_width: usize,
-    verbose: bool,
-) -> String {
-    let (col_widths, _) = layout(term_width, Some(result.metric()), verbose);
-    let [op_w, shape_w, ref_w, mt_w, pct_w, corr_w] = col_widths;
-
-    let metric = result.metric();
-    let ref_s = fmt_perf(result.ref_perf(), metric, "—");
-    let mt_s = fmt_perf(result.mt_perf(), metric, "NYI");
-    let pct_s = result.pct().map(|p| format!("{p:.0}%")).unwrap_or_else(|| "—".into());
-
-    let dtype = paint_stdout(pad_left(dtype_label, shape_w), Style::new().fg(Color::BrightWhite));
-    let ref_cell = style_reference(&pad_right(&ref_s, ref_w), result.ref_perf());
-    let mt_cell = style_metaltile(&pad_right(&mt_s, mt_w), result);
-    let pct_cell = style_pct(&pad_right(&pct_s, pct_w), result);
-
-    let sep = col_sep();
-    let indent = " ".repeat(op_w + 2);
-
-    if show_correctness {
-        let corr_s = if verbose {
-            result.correctness_cell()
-        } else {
-            correctness_icon(&result.correctness_status())
-        };
-        let corr_cell = style_correctness(&pad_right(&corr_s, corr_w), result.correctness_status());
-        format!("{indent}{dtype} {sep} {ref_cell} {sep} {mt_cell} {sep} {pct_cell} {sep} {corr_cell}")
-    } else {
-        format!("{indent}{dtype} {sep} {ref_cell} {sep} {mt_cell} {sep} {pct_cell}")
-    }
-}
-
-/// Single-character correctness icon.
 fn correctness_icon(status: &CorrectnessStatus) -> String {
     match status {
         CorrectnessStatus::Passed { .. } => "✓".into(),
@@ -692,11 +586,17 @@ fn fmt_perf(v: Option<f64>, _metric: &str, fallback: &str) -> String {
     }
 }
 
-fn col_sep() -> String { paint_stdout("│", Style::new().fg(Color::BrightBlack).dim()) }
+fn col_sep() -> String {
+    paint_stdout("│", Style::new().fg(Color::BrightBlack).dim())
+}
 
-fn pad_left(text: &str, width: usize) -> String { format!("{text:<width$}") }
+fn pad_left(text: &str, width: usize) -> String {
+    format!("{text:<width$}")
+}
 
-fn pad_right(text: &str, width: usize) -> String { format!("{text:>width$}") }
+fn pad_right(text: &str, width: usize) -> String {
+    format!("{text:>width$}")
+}
 
 fn style_reference(text: &str, value: Option<f64>) -> String {
     let style = if value.is_some() {
@@ -736,7 +636,6 @@ fn style_correctness(text: &str, status: CorrectnessStatus) -> String {
     };
     paint_stdout(text, style)
 }
-
 // ── Shared bench abstractions ─────────────────────────────────────────────────
 
 /// Generate MSL for an elementwise kernel IR produced by `make_ir`.

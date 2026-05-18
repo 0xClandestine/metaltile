@@ -36,7 +36,7 @@ pub fn run(args: &BenchArgs) {
     };
 
     // Banner — single compact line.
-    eprintln!(
+    println!(
         "{} {}",
         paint_stdout("tile bench", Style::new().fg(Color::Cyan).bold()),
         paint_stdout(format!("· {}", &runner.device_name), Style::new().fg(Color::BrightBlack)),
@@ -166,17 +166,17 @@ pub fn run(args: &BenchArgs) {
         ));
     }
 
-    eprintln!("\n  {}", parts.join(&sep));
+    println!("\n  {}", parts.join(&sep));
 
     if equiv_fail > 0 {
-        eprintln!(
+        println!(
             "  {} {}",
             paint_stdout("Failures:", Style::new().fg(Color::Red).bold()),
             paint_stdout(equiv_fail.to_string(), Style::new().fg(Color::Red).bold()),
         );
     }
     if !unchecked.is_empty() {
-        eprintln!(
+        println!(
             "  {} {}",
             paint_stdout("Unchecked:", Style::new().fg(Color::BrightBlack).bold()),
             paint_stdout(unchecked.join(", "), Style::new().fg(Color::Yellow).bold()),
