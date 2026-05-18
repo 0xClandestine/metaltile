@@ -1184,24 +1184,28 @@ fn run_attention(
         let v_buf = buffer_typed(runner, &vals[..h * n_kv * d], dt);
         let n_buf = runner.buffer_u32(n_kv as u32);
         let sc_buf = runner.buffer_f32_scalar(scale);
-        let ref_perf = rk.as_ref().and_then(|rk| {
-            let gqa = runner.buffer_i32(1i32);
-            let n_i32 = runner.buffer_i32(n_kv as i32);
-            let khs = runner.buffer_u64((n_kv * d) as u64);
-            let kss = runner.buffer_u64(d as u64);
+        let (ref_perf, ref_timing) = rk
+            .as_ref()
+            .and_then(|rk| {
+                let gqa = runner.buffer_i32(1i32);
+                let n_i32 = runner.buffer_i32(n_kv as i32);
+                let khs = runner.buffer_u64((n_kv * d) as u64);
+                let kss = runner.buffer_u64(d as u64);
+                let out = zeros_typed(runner, h * d, dt);
+                bench_gbps(
+                    runner,
+                    rk,
+                    &[&q_buf, &k_buf, &v_buf, &out, &gqa, &n_i32, &khs, &kss, &khs, &kss, &sc_buf],
+                    [h, 1, 1],
+                    [1024, 1, 1],
+                    bytes,
+                )
+            })
+            .map(|(p, t)| (Some(p), Some(t)))
+            .unwrap_or((None, None));
+        let (mt_perf, mt_timing) = {
             let out = zeros_typed(runner, h * d, dt);
-            bench_gbps_only(
-                runner,
-                rk,
-                &[&q_buf, &k_buf, &v_buf, &out, &gqa, &n_i32, &khs, &kss, &khs, &kss, &sc_buf],
-                [h, 1, 1],
-                [1024, 1, 1],
-                bytes,
-            )
-        });
-        let mt_perf = {
-            let out = zeros_typed(runner, h * d, dt);
-            bench_gbps_only(
+            bench_gbps(
                 runner,
                 &mk,
                 &[&q_buf, &k_buf, &v_buf, &out, &n_buf, &sc_buf],
@@ -1209,13 +1213,17 @@ fn run_attention(
                 [tpg, 1, 1],
                 bytes,
             )
+            .map(|(p, t)| (Some(p), Some(t)))
+            .unwrap_or((None, None))
         };
-        results.push(bench.result_sub(
+        results.push(bench.result_sub_timed(
             Some(spec.subop),
             format!("H={h} N={n_kv} D={d} {}", ctx.label),
             ref_perf,
             mt_perf,
             Some(equiv),
+            mt_timing,
+            ref_timing,
         ));
     }
     results
@@ -1693,16 +1701,19 @@ fn run_sdpa_vector(
     // not n_q_heads.
     let bytes = ((n_q_heads * head_dim + 2 * n_kv_heads * n_kv * head_dim + n_q_heads * head_dim)
         * ctx.eb) as f64;
-    let mt_perf = bench_gbps_only(runner, &mk, &mt_bufs, [n_q_heads, 1, 1], [tpg, 1, 1], bytes);
-    let ref_perf = rk
+    let (mt_perf, mt_timing) =
+        bench_gbps(runner, &mk, &mt_bufs, [n_q_heads, 1, 1], [tpg, 1, 1], bytes)
+            .map(|(p, t)| (Some(p), Some(t)))
+            .unwrap_or((None, None));
+    let (ref_perf, ref_timing) = rk
         .as_ref()
-        .map(|rk| {
+        .and_then(|rk| {
             let gqa = runner.buffer_i32(gqa_factor as i32);
             let n_i32 = runner.buffer_i32(n_kv as i32);
             let khs = runner.buffer_u64((n_kv * head_dim) as u64);
             let kss = runner.buffer_u64(head_dim as u64);
             let out = zeros_typed(runner, n_q_heads * head_dim, dt);
-            bench_gbps_only(
+            bench_gbps(
                 runner,
                 rk,
                 &[&q_buf, &k_buf, &v_buf, &out, &gqa, &n_i32, &khs, &kss, &khs, &kss, &sc_buf],
@@ -1711,10 +1722,19 @@ fn run_sdpa_vector(
                 bytes,
             )
         })
-        .unwrap_or(None);
+        .map(|(p, t)| (Some(p), Some(t)))
+        .unwrap_or((None, None));
 
     let label = format!("H={n_q_heads} N={n_kv} D={head_dim} gqa={gqa_factor} {}", ctx.label);
-    vec![bench.result_sub(Some(spec.subop), label, ref_perf, mt_perf, equiv)]
+    vec![bench.result_sub_timed(
+        Some(spec.subop),
+        label,
+        ref_perf,
+        mt_perf,
+        equiv,
+        mt_timing,
+        ref_timing,
+    )]
 }
 
 // ── SteelGemm (simdgroup tiled GEMM) ────────────────────────────────────
