@@ -34,7 +34,7 @@ use common::{
 };
 use metaltile_core::{dtype::DType, ir::KernelMode};
 use metaltile_runtime::Context;
-use metaltile_std::ffai::sdpa_decode::sdpa_decode;
+use metaltile_std::ffai::sdpa_decode::ffai_sdpa_decode;
 
 fn f32_slice_to_bytes(vals: &[f32]) -> Vec<u8> { pack_bytes(vals, Dt::F32) }
 fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> { unpack_bytes(bytes, Dt::F32) }
@@ -116,7 +116,7 @@ fn sdpa_decode_matches_naive_cpu_reference_f32() {
     // `kernel_ir_for` returns the kernel with its default
     // `KernelMode::Elementwise`; sdpa_decode needs Reduction-mode
     // codegen (mirrors what `tile bench` does for its SDPA path).
-    let mut kernel = sdpa_decode::kernel_ir_for(DType::F32);
+    let mut kernel = ffai_sdpa_decode::kernel_ir_for(DType::F32);
     kernel.mode = KernelMode::Reduction;
 
     // Dense path: sink_end = 0, window_start = 0 → the sink loop body
@@ -267,11 +267,11 @@ fn sdpa_decode_perf_bench_f32() {
     ];
 
     let ctx = Context::new().expect("Context::new should succeed on macOS");
-    let mut kernel = sdpa_decode::kernel_ir_for(DType::F32);
+    let mut kernel = ffai_sdpa_decode::kernel_ir_for(DType::F32);
     kernel.mode = KernelMode::Reduction;
 
     println!();
-    println!("sdpa_decode f32 perf — Apple M5 Max (median of 100 iters)");
+    println!("ffai_sdpa_decode f32 perf — Apple M5 Max (median of 100 iters)");
     println!("  {:>4} {:>4} {:>6}  {:>10}  {:>9}", "nQH", "nKVH", "n_kv", "GPU µs", "GB/s");
     for (n_q_heads, n_kv_heads, n_kv) in shapes {
         let kv_stride = n_kv;
