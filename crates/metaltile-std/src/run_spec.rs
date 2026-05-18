@@ -818,9 +818,11 @@ fn run_quantized_mat_vec(
         let w_elems = m * k / 8;
         let sb_elems = m * k / group_size;
         let gs_per_row = k / group_size;
-        // Correctness check: M=4 rows, K=group_size (one group per row)
-        let cm = 4usize;
-        let ck = group_size;
+        // Correctness check: M=8 rows × K=512 (one TG = 2 SG × 4 rows × 8 groups).
+        // mt_qmv_f32 requires K%512==0 (block_size = 16 X × 32 lanes).
+        let cm = 8usize;
+        let ck = 512usize;
+        let cgs_per_row = ck / group_size;
         let w_check: Vec<u32> = (0..cm * ck / 8)
             .map(|i| {
                 let mut v = 0u32;
@@ -830,20 +832,21 @@ fn run_quantized_mat_vec(
                 v
             })
             .collect();
-        let s_check = vec![0.1f32; cm];
-        let b_check = vec![0.0f32; cm];
-        let x_check = vec![1.0f32; ck];
+        let s_check: Vec<f32> = (0..cm * cgs_per_row).map(|i| 0.1 + (i as f32) * 0.001).collect();
+        let b_check = vec![0.0f32; cm * cgs_per_row];
+        let x_check: Vec<f32> = (0..ck).map(|i| 1.0 + (i as f32) * 0.001).collect();
         let ref_out: Vec<f32> = (0..cm)
             .map(|row| {
                 let mut acc = 0.0f32;
-                for g in 0..1usize {
-                    let s = s_check[row + g];
-                    let bias = b_check[row + g];
+                for g in 0..cgs_per_row {
+                    let s = s_check[row * cgs_per_row + g];
+                    let bias = b_check[row * cgs_per_row + g];
                     for p in 0..8usize {
                         let packed = w_check[row * ck / 8 + g * 8 + p];
                         for bit in 0..8u32 {
                             let int4_val = ((packed >> (bit * 4)) & 0xF) as f32;
-                            acc += (s * int4_val + bias) * x_check[g * ck + p * 8 + bit as usize];
+                            acc += (s * int4_val + bias)
+                                * x_check[g * group_size + p * 8 + bit as usize];
                         }
                     }
                 }
@@ -857,11 +860,13 @@ fn run_quantized_mat_vec(
         let x_buf_c = runner.buffer_f32(&x_check);
         let out_c = runner.buffer_zeros(cm * 4);
         let k_buf_c = runner.buffer_u32(ck as u32);
-        let gpr_buf_c = runner.buffer_u32(1u32);
+        let gpr_buf_c = runner.buffer_u32(cgs_per_row as u32);
+        // mt_qmv_f32 processes 8 output rows per TG (2 SG × 4 rows).
+        const ROWS_PER_TG: usize = 8;
         runner.measure(
             &mk,
             &[&w_buf_c, &s_buf_c, &b_buf_c, &x_buf_c, &out_c, &k_buf_c, &gpr_buf_c],
-            [cm, 1, 1],
+            [cm / ROWS_PER_TG, 1, 1],
             [tpg, 1, 1],
             0,
             1,
@@ -893,13 +898,13 @@ fn run_quantized_mat_vec(
                 runner,
                 &mk,
                 &[&w_mt_buf, &s_mt_buf, &b_mt_buf, &x_mt_buf, &out_buf, &k_buf, &gpr_buf],
-                [m, 1, 1],
+                [m / ROWS_PER_TG, 1, 1],
                 [tpg, 1, 1],
                 bytes_mt,
             )
         };
-        // MLX ref uses f16 data (different dtype)
-        const ROWS_PER_TG: usize = 8;
+        // MLX ref uses f16 data (different dtype) and 8 rows per TG.
+        const MLX_ROWS_PER_TG: usize = 8;
         let ref_perf = ref_kernel.as_ref().and_then(|rk| {
             let scale_f16: Vec<u8> =
                 (0..sb_elems * 2).map(|i| if i % 2 == 0 { 0x66 } else { 0x2E }).collect();
@@ -934,7 +939,7 @@ fn run_quantized_mat_vec(
                     &zero,
                     &zero,
                 ],
-                [1, m / ROWS_PER_TG, 1],
+                [1, m / MLX_ROWS_PER_TG, 1],
                 [64, 1, 1],
                 bytes_f16,
             )
