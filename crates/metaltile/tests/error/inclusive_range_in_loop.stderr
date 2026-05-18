@@ -1,0 +1,5 @@
+error: inclusive ranges are not supported in MetalTile loops; use `start..end`
+ --> tests/error/inclusive_range_in_loop.rs:9:15
+  |
+9 |     for _i in 0u32..=8u32 {
+  |               ^^^^^^^^^^^
