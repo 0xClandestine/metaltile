@@ -48,5 +48,5 @@ jobs:
       - name: Tile Build
         run: cargo run --release -p metaltile-cli -- build
 
-      - name: Tile Bench
-        run: cargo run --release -p metaltile-cli -- bench
+      - name: Tile Bench (verbose)
+        run: cargo run --release -p metaltile-cli -- bench -vv
