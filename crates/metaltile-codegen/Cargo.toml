@@ -17,3 +17,6 @@ rustc-hash.workspace = true
 half.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
