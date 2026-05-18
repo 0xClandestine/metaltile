@@ -316,6 +316,12 @@ fn replace_value_in_op(op: &mut Op, old: ValueId, new: ValueId) {
             s(data);
         },
         Op::SimdScan { value, .. } => s(value),
+        Op::StackLoad { index, .. } => s(index),
+        Op::StackStore { index, value, .. } => {
+            s(index);
+            s(value);
+        },
+        Op::StackAlloc { .. } => {},
         Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => s(value),
         Op::ArgReduce { value, .. } => s(value),
         Op::StrideScan { offset, end, .. } => {
@@ -495,6 +501,12 @@ fn collect_uses(op: &Op, used: &mut BTreeSet<ValueId>) {
             add(*data);
         },
         Op::SimdScan { value, .. } => add(*value),
+        Op::StackLoad { index, .. } => add(*index),
+        Op::StackStore { index, value, .. } => {
+            add(*index);
+            add(*value);
+        },
+        Op::StackAlloc { .. } => {},
         Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => add(*value),
         Op::ArgReduce { value, .. } => add(*value),
         Op::StrideScan { offset, end, .. } => {

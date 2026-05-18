@@ -831,6 +831,47 @@ mod tests {
         );
     }
 
+    /// `Op::StackAlloc { dtype: F32, size: 4, name: "o" }` must emit a
+    /// per-thread `float o[4];` (no `threadgroup` qualifier).  Subsequent
+    /// `Op::StackLoad` / `Op::StackStore` must emit the same indexed
+    /// access shape as the threadgroup variants — only the alloc qualifier
+    /// distinguishes them.  AURA flash kernels need this for the per-lane
+    /// `q_vals[DIMS_PER_LANE]` / `o[DIMS_PER_LANE]` arrays.
+    #[test]
+    fn stack_array_emits_per_thread_buffer() {
+        let mut k = Kernel::new("stack_smoke");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 3 }, ValueId::new(1));
+        k.body.push_op_no_result(Op::StackAlloc {
+            dtype: DType::F32,
+            size: 4,
+            name: "o".to_string(),
+        });
+        k.body.push_op(
+            Op::StackLoad { name: "o".to_string(), index: ValueId::new(1) },
+            ValueId::new(2),
+        );
+        k.body.push_op_no_result(Op::StackStore {
+            name: "o".to_string(),
+            index: ValueId::new(1),
+            value: ValueId::new(2),
+        });
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("float o[4];"),
+            "stack array must emit unqualified `float o[4];` (no threadgroup): {msl}"
+        );
+        assert!(
+            !msl.contains("threadgroup float o["),
+            "stack array must NOT carry the threadgroup qualifier: {msl}"
+        );
+        assert!(
+            msl.contains("o[v_v1]") || msl.contains("o["),
+            "stack store/load must use plain `name[idx]` shape: {msl}"
+        );
+    }
+
     /// Sanity: device-scope atomics keep the unchanged `<dst> + <idx>` form.
     #[test]
     fn atomic_device_emits_buffer_offset_form() {
