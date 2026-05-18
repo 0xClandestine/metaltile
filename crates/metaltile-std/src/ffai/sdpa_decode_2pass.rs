@@ -277,34 +277,36 @@ pub fn sdpa_decode_2pass_pass2<T>(
     }
 }
 
+// Single registration covering the chained pass1+pass2 pair. Pass 1 is
+// the `kernel_name`/`kernel_ir` on the spec; pass 2 is carried inside
+// the `SdpaVector2Pass` dispatch variant. MLX reference is single-pass
+// `sdpa_vector` at the same shape (MLX's `sdpa_vector_2pass` doesn't
+// have a name-stable callable surface in our ref MSL); single-pass is
+// the fair head-to-head for the long-N regime this kernel targets.
 inventory::submit! {
     BenchSpec {
         op: "sdpa",
-        subop: "sdpa_decode_2pass_p1",
+        subop: "sdpa_decode_2pass",
         kernel_name: "sdpa_decode_2pass_pass1",
         kernel_ir: sdpa_decode_2pass_pass1::kernel_ir_for,
         dtypes: &[DType::F32, DType::F16, DType::BF16],
         tol: 1e-3,
-        mlx_src: None,
-        mlx_pattern: None,
+        mlx_src: Some(include_str!(concat!(
+            env!("OUT_DIR"),
+            "/metal/scaled_dot_product_attention.metal"
+        ))),
+        mlx_pattern: Some("sdpa_vector_{tn}_128_128"),
         shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Reduction),
-    }
-}
-
-inventory::submit! {
-    BenchSpec {
-        op: "sdpa",
-        subop: "sdpa_decode_2pass_p2",
-        kernel_name: "sdpa_decode_2pass_pass2",
-        kernel_ir: sdpa_decode_2pass_pass2::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 1e-3,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
+        dispatch: BenchDispatch::SdpaVector2Pass {
+            head_dim: 128,
+            n_kv: 4096,
+            n_q_heads: 32,
+            gqa_factor: 4,
+            batch: 1,
+            blocks: 32,
+            pass2_kernel_name: "sdpa_decode_2pass_pass2",
+            pass2_kernel_ir: sdpa_decode_2pass_pass2::kernel_ir_for,
+        },
         kernel_mode: Some(KernelMode::Reduction),
     }
 }
