@@ -18,10 +18,21 @@ pub mod stats;
 pub mod term;
 
 use clap::Parser;
+use clap::builder::Styles;
+use anstyle::AnsiColor;
+
+const CLAP_STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Cyan.on_default().bold())
+    .usage(AnsiColor::Cyan.on_default())
+    .literal(AnsiColor::Green.on_default())
+    .placeholder(AnsiColor::BrightBlack.on_default())
+    .error(AnsiColor::Red.on_default().bold())
+    .valid(AnsiColor::Green.on_default())
+    .invalid(AnsiColor::Red.on_default());
 
 /// MetalTile CLI — benchmark and inspect GPU kernels on Apple Silicon.
 #[derive(Parser)]
-#[command(name = "tile", version, about)]
+#[command(name = "tile", version, about, styles = CLAP_STYLES)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
