@@ -20,7 +20,7 @@ use crate::{
     matches_filter,
     term::{Color, Style, paint_stdout},
 };
-use metaltile_std::kernel_utils::effective_mode;
+use metaltile_std::spec::effective_mode;
 
 pub fn run(args: &InspectArgs) {
     let dir = &args.dir;

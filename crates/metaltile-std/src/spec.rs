@@ -361,3 +361,7 @@ pub fn bytes_mat_vec_masked(n: usize, b: usize, _reads: usize, out: usize, eb: u
 pub fn bytes_select(n: usize, _b: usize, _reads: usize, _out: usize, eb: usize) -> usize {
     n + 3 * n * eb // cond(1 byte) + on_true(eb) + on_false(eb) + out(eb)
 }
+
+pub fn effective_mode(spec: &BenchSpec) -> metaltile_core::ir::KernelMode {
+    spec.kernel_mode.unwrap_or_else(|| spec.dispatch.default_mode(spec.shapes))
+}
