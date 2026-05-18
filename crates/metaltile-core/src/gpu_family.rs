@@ -31,9 +31,7 @@ impl GpuFamily {
         // "M4" doesn't shadow the broader M5 substring on future strings.
         if name.contains("M5") {
             GpuFamily::Apple10
-        } else if name.contains("M4") {
-            GpuFamily::Apple9
-        } else if name.contains("M3") {
+        } else if name.contains("M4") || name.contains("M3") {
             GpuFamily::Apple9
         } else if name.contains("M2") {
             GpuFamily::Apple8

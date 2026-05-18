@@ -385,4 +385,3 @@ mod tests {
         assert_eq!(parsed["shape"], "k=2 (warm)");
     }
 }
-}
