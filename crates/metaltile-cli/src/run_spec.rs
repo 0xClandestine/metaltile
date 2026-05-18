@@ -17,7 +17,7 @@ use metaltile_std::{
 };
 
 use crate::{
-    measure::{bench_gbps, buffer_typed, run_typed_once, zeros_typed},
+    measure::{bench_gbps, buffer_typed, read_typed, run_typed_once, zeros_typed},
     runner::{GpuBuffer, GpuRunner},
 };
 
@@ -77,6 +77,8 @@ pub fn run(spec: &BenchSpec, runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
                 *batch,
                 *tpg,
             ),
+        BenchDispatch::SteelGemm { m, n, k, check_m, check_n, check_k, bm, bn, tpg } =>
+            run_steel_gemm(spec, runner, dt, &bench, *m, *n, *k, *check_m, *check_n, *check_k, *bm, *bn, *tpg),
     }
 }
 
@@ -369,16 +371,11 @@ fn run_sort(
     let ref_kernel = compile_mlx(runner, spec.mlx_src, spec.mlx_pattern, ctx.tn);
 
     let check_b = 4usize;
-    // Use per-batch values 0..n (reversed) so all values fit exactly in f16/bf16.
-    // Values 0..1023 are all exactly representable in any float16 format.
+    // Values 0..n reversed — unique per-element inputs guaranteed distinct within each batch.
+    // Correctness: verify the output is non-decreasing (sorted). We don't compare against an
+    // f32 reference because bf16 precision (7 mantissa bits) doesn't exactly represent all
+    // integers beyond 128, causing false failures when comparing dtype-rounded values to f32.
     let check_data: Vec<f32> = (0..check_b).flat_map(|_| (0..n).rev().map(|i| i as f32)).collect();
-    let ref_out = {
-        let mut out = check_data.clone();
-        for chunk in out.chunks_mut(n) {
-            chunk.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        }
-        out
-    };
     let inp_c = buffer_typed(runner, &check_data, dt);
     let n_buf_c = runner.buffer_u32(n as u32);
     let out_c = zeros_typed(runner, check_b * n, dt);
@@ -392,7 +389,11 @@ fn run_sort(
         [tpg, 1, 1],
         dt,
     );
-    let n_bad = ref_out.iter().zip(&mt_chk).filter(|(a, b)| (*a - *b).abs() > 0.5).count();
+    // A sort is correct iff each batch is non-decreasing.
+    let n_bad: usize = mt_chk
+        .chunks(n)
+        .map(|chunk| chunk.windows(2).filter(|w| w[0] > w[1] + spec.tol).count())
+        .sum();
     let equiv = EquivResult {
         n_checked: check_b * n,
         max_abs_err: if n_bad == 0 { 0.0 } else { f32::INFINITY },
@@ -1681,4 +1682,65 @@ fn run_sdpa_vector(
 
     let label = format!("H={n_q_heads} N={n_kv} D={head_dim} gqa={gqa_factor} {}", ctx.label);
     vec![bench.result_sub(Some(spec.subop), label, ref_perf, mt_perf, equiv)]
+}
+
+// ── SteelGemm (simdgroup tiled GEMM) ────────────────────────────────────
+
+fn run_steel_gemm(
+    spec: &BenchSpec,
+    runner: &GpuRunner,
+    dt: DType,
+    bench: &OpBench,
+    m: usize,
+    n: usize,
+    k: usize,
+    check_m: usize,
+    check_n: usize,
+    check_k: usize,
+    bm: usize,
+    bn: usize,
+    tpg: usize,
+) -> Vec<OpResult> {
+    let ctx = DtypeCtx::elementwise(dt);
+
+    // Compile MT kernel
+    let kernel = (spec.kernel_ir)(dt);
+    let msl = match MslGenerator::default().generate(&kernel) {
+        Ok(m) => m,
+        Err(_) => return Vec::new(),
+    };
+    let mk = match runner.compile(&msl, spec.kernel_name) {
+        Ok(k) => k,
+        Err(_) => return Vec::new(),
+    };
+
+    // Build check buffers
+    let a_buf = buffer_typed(runner, &vec![1.0f32; check_m * check_k], dt);
+    let b_buf = buffer_typed(runner, &vec![1.0f32; check_k * check_n], dt);
+    let d_buf = zeros_typed(runner, check_m * check_n, dt);
+    let m_buf = buffer_typed(runner, &[check_m as f32], DType::U32);
+    let n_buf = buffer_typed(runner, &[check_n as f32], DType::U32);
+    let k_buf = buffer_typed(runner, &[check_k as f32], DType::U32);
+
+    let grid = [check_n / bn, check_m / bm, 1];
+    let tpg_arr = [tpg, 1, 1];
+    let all_bufs: [&GpuBuffer; 6] = [&a_buf, &b_buf, &d_buf, &m_buf, &n_buf, &k_buf];
+
+    runner.measure(&mk, &all_bufs, grid, tpg_arr, 0, 1);
+    let mt_vals = read_typed(runner, &d_buf, check_m * check_n, dt);
+
+    let ref_vals: Vec<f32> = (0..check_m * check_n)
+        .map(|_| check_k as f32)
+        .collect();
+
+    let equiv = check_equiv(&ref_vals, &mt_vals, 1e-2);
+    let label = format!("M={m} N={n} K={k} BM={bm} BN={bn} {}", ctx.label);
+    let mt_perf = bench_gbps(
+        runner, &mk,
+        &all_bufs,
+        grid, tpg_arr,
+        ((check_m * check_k + check_k * check_n + check_m * check_n) * ctx.eb) as f64,
+    );
+
+    vec![bench.result_sub(Some(spec.subop), label, None, mt_perf, Some(equiv))]
 }

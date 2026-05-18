@@ -101,7 +101,7 @@ impl BufInit {
                 })
                 .collect(),
             BufInit::Positive => (0..n).map(|i| 0.25 + (i % 16) as f32 * 0.25).collect(),
-            BufInit::Unit => vec![1.0; n],
+            BufInit::Unit => (0..n).map(|i| [-0.9f32, -0.5, -0.1, 0.0, 0.1, 0.5, 0.9][i % 7]).collect(),
             BufInit::Fill(v) => vec![v; n],
             BufInit::AltZeroOne => (0..n).map(|i| if i % 2 == 0 { 0.0 } else { 1.0 }).collect(),
         }
@@ -272,6 +272,18 @@ pub enum BenchDispatch {
         n_q_heads: usize,
         gqa_factor: usize,
         batch: usize,
+        tpg: usize,
+    },
+    /// Tiled simdgroup GEMM (steel_gemm_fused).
+    SteelGemm {
+        m: usize,
+        n: usize,
+        k: usize,
+        check_m: usize,
+        check_n: usize,
+        check_k: usize,
+        bm: usize,
+        bn: usize,
         tpg: usize,
     },
 }

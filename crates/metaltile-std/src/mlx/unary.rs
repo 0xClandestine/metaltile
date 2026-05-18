@@ -311,8 +311,10 @@ pub fn mt_square<T>(a: Tensor<T>, out: Tensor<T>) {
 #[kernel]
 pub fn mt_sigmoid<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
-    let x = load(a[idx]);
-    store(out[idx], 1.0f32.cast::<T>() / (1.0f32.cast::<T>() + exp(-x)));
+    // Compute in f32 to match MLX precision (convert back to T at store).
+    let x = load(a[idx]).cast::<f32>();
+    let result = 1.0f32 / (1.0f32 + exp(-x));
+    store(out[idx], result.cast::<T>());
 }
 
 #[bench_kernel(
@@ -513,8 +515,9 @@ pub fn mt_atanh<T>(a: Tensor<T>, out: Tensor<T>) {
     subop="expm1",
     class=Unary,
     input=Signed,
-    // tol=1e-4 — expm1(x) ≈ x for small x, so f16 precision holds well.
-    tol=1e-4,
+    // tol=5e-3 — for large inputs (|x|≈3) two IEEE-754 expm1 impls can diverge
+    // by ~1e-4 in f32 and ~4e-3 in bf16 (half-ULP at that magnitude).
+    tol=5e-3,
     mlx="v_Expm1{tn}{tn}",
     metal_file="unary.metal",
 )]
