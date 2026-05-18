@@ -8,6 +8,7 @@
 
 use std::process::Command;
 
+use metaltile_core::GpuFamily;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -133,7 +134,7 @@ pub fn run(args: &SnapArgs) {
         });
 
     // GPU family heuristic
-    let gpu_family = gpu_family_from_name(&device).map(|s| s.to_string());
+    let gpu_family = GpuFamily::from_device_name(&device).code().map(|s| s.to_string());
 
     // Timestamp
     let timestamp = chrono_like_now();
@@ -206,24 +207,6 @@ fn unix_secs_to_iso(secs: u64) -> String {
 }
 
 fn is_leap(y: i64) -> bool { (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0) }
-
-fn gpu_family_from_name(name: &str) -> Option<&'static str> {
-    if name.contains("M4") || name.contains("M3") {
-        Some("Apple9")
-    } else if name.contains("M2") {
-        Some("Apple8")
-    } else if name.contains("M1") {
-        Some("Apple7")
-    } else if name.contains("A18") || name.contains("A17") {
-        Some("Apple9")
-    } else if name.contains("A16") || name.contains("A15") {
-        Some("Apple8")
-    } else if name.contains("A14") {
-        Some("Apple7")
-    } else {
-        None
-    }
-}
 
 #[cfg(test)]
 mod tests {

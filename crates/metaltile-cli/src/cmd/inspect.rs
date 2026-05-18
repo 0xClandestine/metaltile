@@ -10,18 +10,14 @@
 //!   tile inspect <kernel> -o /tmp/out      # write .metal file
 //!   tile inspect --all -o /tmp/out         # dump every kernel to disk
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, str::FromStr};
 
-use metaltile_codegen::{
-    TileSchedule,
-    msl::{MslConfig, MslGenerator},
-};
-use metaltile_core::ir::KernelMode;
+use metaltile_codegen::generator_for_mode;
 use metaltile_std::{bench_types::DType, spec::BenchSpec};
 
 use crate::{
     InspectArgs,
-    kernel_utils::{dtype_label, effective_mode},
+    kernel_utils::effective_mode,
     matches_filter,
     term::{Color, Style, paint_stdout},
 };
@@ -34,14 +30,7 @@ pub fn run(args: &InspectArgs) {
     let ir_flag = args.ir;
     let stats_flag = args.stats;
     let pass_arg = &args.pass;
-    let dtype_override: Option<DType> = args.dtype.as_deref().and_then(|s| match s {
-        "f32" => Some(DType::F32),
-        "f16" => Some(DType::F16),
-        "bf16" => Some(DType::BF16),
-        "i32" => Some(DType::I32),
-        "u32" => Some(DType::U32),
-        _ => None,
-    });
+    let dtype_override: Option<DType> = args.dtype.as_deref().and_then(|s| DType::from_str(s).ok());
 
     // Collect all specs and group by kernel_name.
     let mut kernels: BTreeMap<&str, (&BenchSpec, Vec<DType>)> = BTreeMap::new();
@@ -84,7 +73,7 @@ pub fn run(args: &InspectArgs) {
                     std::fs::write(&path, &msl).expect("write failed");
                     println!("wrote {path}");
                 } else {
-                    let mode_str = mode_label(effective_mode(spec));
+                    let mode_str = effective_mode(spec).to_string();
                     println!("// ═══════════════════════════════════════════════════════");
                     println!("// kernel: {}  mode: {}", name, mode_str);
                     println!("// ═══════════════════════════════════════════════════════");
@@ -103,8 +92,8 @@ pub fn run(args: &InspectArgs) {
         );
         println!();
         for (name, (spec, dtypes)) in &sorted {
-            let dtype_str = dtypes.iter().map(|dt| dtype_label(*dt)).collect::<Vec<_>>().join("/");
-            let mode_str = mode_label(effective_mode(spec));
+            let dtype_str = dtypes.iter().map(|dt| dt.label()).collect::<Vec<_>>().join("/");
+            let mode_str = effective_mode(spec).to_string();
             println!(
                 "  {}   {}   {dtype_str}",
                 paint_stdout(format!("{name:<20}"), Style::new().fg(Color::Cyan).bold()),
@@ -166,7 +155,7 @@ pub fn run(args: &InspectArgs) {
         } else if stats_flag {
             let mut k = (spec.kernel_ir)(dt);
             k.mode = effective_mode(spec);
-            let generator = make_generator(effective_mode(spec));
+            let generator = generator_for_mode(effective_mode(spec));
             match generator.generate_with_stats(&k) {
                 Ok((_, stats)) => print_stats_table(&stats),
                 Err(e) => eprintln!("error: {e}"),
@@ -210,7 +199,7 @@ pub fn run(args: &InspectArgs) {
                 std::fs::write(&path, &msl).expect("write failed");
                 println!("wrote {path}");
             } else {
-                let mode_str = mode_label(effective_mode(spec));
+                let mode_str = effective_mode(spec).to_string();
                 println!("// ═══════════════════════════════════════════════════════");
                 println!("// kernel: {}  mode: {}", name, mode_str);
                 println!("// ═══════════════════════════════════════════════════════");
@@ -222,6 +211,8 @@ pub fn run(args: &InspectArgs) {
 
 /// Run all compilation passes and print IR after each stage.
 fn run_all_passes_and_print(k: &mut metaltile_core::ir::Kernel) {
+    use metaltile_codegen::msl::MslGenerator;
+
     let passes = metaltile_codegen::passes::PassRegistry::standard_with_names();
 
     for (name, pass) in &passes {
@@ -248,28 +239,6 @@ fn run_all_passes_and_print(k: &mut metaltile_core::ir::Kernel) {
     }
 }
 
-fn mode_label(mode: KernelMode) -> &'static str {
-    match mode {
-        KernelMode::Elementwise => "Elementwise",
-        KernelMode::Reduction => "Reduction",
-        KernelMode::Tile2D => "Tile2D",
-        KernelMode::SimdGroup2D => "SimdGroup",
-        KernelMode::Grid3D => "Grid3D",
-    }
-}
-
-fn make_generator(mode: KernelMode) -> MslGenerator {
-    if matches!(mode, KernelMode::Tile2D) {
-        MslGenerator::new(MslConfig {
-            tile_schedule: TileSchedule::default(),
-            use_simd_matrix: true,
-            ..MslConfig::default()
-        })
-    } else {
-        MslGenerator::default()
-    }
-}
-
 fn generate_msl(spec: &BenchSpec, dtypes: &[DType]) -> String {
     generate_msl_dt(spec, dtypes.first().copied().unwrap_or(DType::F32))
 }
@@ -278,7 +247,7 @@ fn generate_msl_dt(spec: &BenchSpec, dt: DType) -> String {
     let mut k = (spec.kernel_ir)(dt);
     let mode = effective_mode(spec);
     k.mode = mode;
-    make_generator(mode).generate(&k).unwrap_or_else(|e| format!("// ERROR: {e}\n"))
+    generator_for_mode(mode).generate(&k).unwrap_or_else(|e| format!("// ERROR: {e}\n"))
 }
 
 fn print_stats_table(stats: &[metaltile_codegen::passes::PassStats]) {

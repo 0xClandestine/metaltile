@@ -289,6 +289,32 @@ pub enum BenchDispatch {
     },
 }
 
+impl BenchDispatch {
+    /// The default [`KernelMode`] inferred from the dispatch variant.
+    ///
+    /// For `Generic` dispatch, returns the mode of the first shape
+    /// (or `Elementwise` if there are no shapes). All other variants
+    /// map to a fixed mode.
+    pub fn default_mode(&self, shapes: &[ShapeSpec]) -> KernelMode {
+        match self {
+            BenchDispatch::Generic =>
+                shapes.first().map(|s| s.mode).unwrap_or(KernelMode::Elementwise),
+            BenchDispatch::Sort { .. }
+            | BenchDispatch::Scan { .. }
+            | BenchDispatch::ArgReduce { .. }
+            | BenchDispatch::QuantizedMatVec { .. }
+            | BenchDispatch::Attention { .. }
+            | BenchDispatch::AffineQuantize { .. }
+            | BenchDispatch::SdpaVector { .. } => KernelMode::Reduction,
+            BenchDispatch::Random { .. }
+            | BenchDispatch::FpQuantized { .. }
+            | BenchDispatch::AffineDequantize { .. } => KernelMode::Elementwise,
+            BenchDispatch::Rope { .. } | BenchDispatch::StridedCopy { .. } => KernelMode::Grid3D,
+            BenchDispatch::SteelGemm { .. } => KernelMode::SimdGroup2D,
+        }
+    }
+}
+
 // ── BenchSpec ───────────────────────────────────────────────────────────
 
 pub struct BenchSpec {

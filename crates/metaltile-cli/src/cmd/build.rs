@@ -24,16 +24,15 @@ use std::{
 };
 
 use metaltile_codegen::{
-    TileSchedule,
     emit::{self, compile_metallib, dtype_suffix, write_manifest, write_msl, write_swift_wrappers},
-    msl::{MslConfig, MslGenerator},
+    generator_for_mode,
 };
-use metaltile_core::ir::{Kernel, KernelMode};
+use metaltile_core::ir::Kernel;
 use metaltile_std::{bench_types::DType, spec::BenchSpec};
 
 use crate::{
     BuildArgs,
-    kernel_utils::{dtype_label, effective_mode},
+    kernel_utils::effective_mode,
     matches_filter,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
@@ -76,16 +75,9 @@ pub fn run(args: &BuildArgs) {
     };
 
     // Parse --dtypes list
-    let dtypes_filter: Option<Vec<DType>> = dtypes_arg.as_ref().map(|s| {
-        s.split(',')
-            .filter_map(|t| match t.trim() {
-                "f32" => Some(DType::F32),
-                "f16" => Some(DType::F16),
-                "bf16" => Some(DType::BF16),
-                _ => None,
-            })
-            .collect()
-    });
+    let dtypes_filter: Option<Vec<DType>> = dtypes_arg
+        .as_ref()
+        .map(|s| s.split(',').filter_map(|t| t.trim().parse::<DType>().ok()).collect());
 
     // Collect unique kernel specs.
     let mut kernels: BTreeMap<&str, (&BenchSpec, Vec<DType>)> = BTreeMap::new();
@@ -143,7 +135,7 @@ pub fn run(args: &BuildArgs) {
             // unless the spec is already dtype-specialized (e.g. `mt_argmax_f32`).
             k.name = monomorphized_name(spec.kernel_name, dt, dtypes.len());
 
-            let generator = msl_generator_for(mode);
+            let generator = generator_for_mode(mode);
 
             // Compile-check via generate.
             let msl_result = generator.generate(&k);
@@ -190,7 +182,7 @@ pub fn run(args: &BuildArgs) {
             }
 
             if verbose && let Ok(msl) = generator.generate(&k) {
-                println!("// ══ {} {} ══\n{}", k.name, dtype_label(dt), msl);
+                println!("// ══ {} {} ══\n{}", k.name, dt.label(), msl);
             }
         }
 
@@ -199,7 +191,7 @@ pub fn run(args: &BuildArgs) {
                 eprintln!(
                     "  {}  {}   {}",
                     paint_stdout(format!("{name:<20}"), Style::new().fg(Color::Cyan).bold()),
-                    paint_stdout(dtype_label(*dt), Style::new().fg(Color::Blue).bold()),
+                    paint_stdout(dt.label(), Style::new().fg(Color::Blue).bold()),
                     paint_stderr("✗", Style::new().fg(Color::Red).bold()),
                 );
                 for line in err_msg.lines() {
@@ -211,8 +203,7 @@ pub fn run(args: &BuildArgs) {
             }
         } else if !dtypes_ok.is_empty() {
             ok += 1;
-            let dtype_str =
-                dtypes_ok.iter().map(|dt| dtype_label(*dt)).collect::<Vec<_>>().join("/");
+            let dtype_str = dtypes_ok.iter().map(|dt| dt.label()).collect::<Vec<_>>().join("/");
             eprintln!(
                 "  {}  {}   {}",
                 paint_stdout(format!("{name:<20}"), Style::new().fg(Color::Cyan).bold()),
@@ -294,18 +285,6 @@ fn monomorphized_name(base: &str, dt: DType, n_dtypes: usize) -> String {
         base.to_string()
     } else {
         format!("{base}_{suffix}")
-    }
-}
-
-fn msl_generator_for(mode: KernelMode) -> MslGenerator {
-    if matches!(mode, KernelMode::Tile2D | KernelMode::SimdGroup2D) {
-        MslGenerator::new(MslConfig {
-            tile_schedule: TileSchedule::default(),
-            use_simd_matrix: true,
-            ..MslConfig::default()
-        })
-    } else {
-        MslGenerator::default()
     }
 }
 

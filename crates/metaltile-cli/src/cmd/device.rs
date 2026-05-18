@@ -1,5 +1,7 @@
 //! `tile device` — Show GPU device info and supported feature flags.
 
+use metaltile_core::GpuFamily;
+
 use crate::{
     DeviceArgs,
     runner::GpuRunner,
@@ -28,23 +30,25 @@ pub fn run(args: &DeviceArgs) {
     let device_name = &runner.device_name;
     let simd = runner.supports_simd_matrix();
 
-    // Heuristic GPU family string based on device name.
-    let gpu_family = gpu_family_from_name(device_name);
+    let gpu_family = GpuFamily::from_device_name(device_name);
 
     // Native bfloat (Metal 3.1 `bfloat` type) and async threadgroup copy both
     // require Apple9 (M3 / A17) or later, independent of SIMD matrix support.
-    let apple9_or_later = gpu_family.contains("Apple9");
-    let native_bfloat = apple9_or_later;
-    let async_copy = apple9_or_later;
+    let apple9_or_later = gpu_family.is_apple9_or_later();
 
-    // Threadgroup memory is inferred from GPU family.
-    let tpg_mem = tpg_memory_from_family(gpu_family);
-    let max_tpg = max_threads_per_threadgroup(gpu_family);
+    // Threadgroup memory and max TPG are constant across Apple7-9.
+    let tpg_mem = gpu_family.threadgroup_mem_kb();
+    let max_tpg = gpu_family.max_threads_per_threadgroup();
 
     if json_out {
         println!(
             "{{\"device\":{:?},\"gpu_family\":{:?},\"simdgroup_hw\":{},\"native_bfloat\":{},\"threadgroup_mem_kb\":{},\"max_tpg\":{}}}",
-            device_name, gpu_family, simd, native_bfloat, tpg_mem, max_tpg
+            device_name,
+            gpu_family.code().unwrap_or("unknown"),
+            simd,
+            apple9_or_later,
+            tpg_mem,
+            max_tpg,
         );
         return;
     }
@@ -60,7 +64,7 @@ pub fn run(args: &DeviceArgs) {
     println!(
         "  {}  {}",
         paint_stdout(format!("{:<16}", "GPU family"), label_style),
-        paint_stdout(gpu_family, Style::new().fg(Color::BrightWhite)),
+        paint_stdout(gpu_family.display_label(), Style::new().fg(Color::BrightWhite)),
     );
     println!("  {}", paint_stdout("─".repeat(42), Style::new().fg(Color::BrightBlack).dim(),),);
 
@@ -78,9 +82,9 @@ pub fn run(args: &DeviceArgs) {
         );
     };
 
-    check("native_bfloat", native_bfloat, "Metal 3.1+ bfloat type");
+    check("native_bfloat", apple9_or_later, "Metal 3.1+ bfloat type");
     check("simdgroup_hw", simd, "simdgroup matrix multiply");
-    check("async_copy", async_copy, "async threadgroup copy (M3+)");
+    check("async_copy", apple9_or_later, "async threadgroup copy (M3+)");
 
     println!("  {}", paint_stdout("─".repeat(42), Style::new().fg(Color::BrightBlack).dim(),),);
 
@@ -97,58 +101,7 @@ pub fn run(args: &DeviceArgs) {
     println!(
         "  {}  {}",
         paint_stdout(format!("{:<16}", "SLC"), label_style),
-        paint_stdout(slc_size_from_name(device_name), Style::new().fg(Color::BrightWhite)),
+        paint_stdout(GpuFamily::slc_label(device_name), Style::new().fg(Color::BrightWhite)),
     );
     println!();
-}
-
-/// Heuristic GPU family based on device name substring.
-/// M-series checked before A-series since "M1 Pro" etc. contain neither A-chip name.
-fn gpu_family_from_name(name: &str) -> &'static str {
-    if name.contains("M4") {
-        "Apple9 (M4)"
-    } else if name.contains("M3") {
-        "Apple9 (M3)"
-    } else if name.contains("M2") {
-        "Apple8 (M2)"
-    } else if name.contains("M1") {
-        "Apple7 (M1)"
-    } else if name.contains("A18") || name.contains("A17") {
-        "Apple9 (A17+)"
-    } else if name.contains("A16") || name.contains("A15") {
-        "Apple8 (A15+)"
-    } else if name.contains("A14") {
-        "Apple7 (A14)"
-    } else {
-        "unknown"
-    }
-}
-
-/// Known SLC sizes per chip tier. Returns "varies" when the tier is not recognised.
-fn slc_size_from_name(name: &str) -> &'static str {
-    if name.contains("Ultra") {
-        "~96 MB"
-    } else if name.contains("Max") && name.contains("M4") {
-        "~64 MB"
-    } else if name.contains("Max") {
-        "~48 MB"
-    } else {
-        "varies"
-    }
-}
-
-fn tpg_memory_from_family(family: &str) -> u32 {
-    match family {
-        "Apple9 (M4)" | "Apple9 (M3+)" | "Apple9 (A17+)" => 32,
-        "Apple8 (M2)" | "Apple8 (A16)" => 32,
-        "Apple7 (M1)" | "Apple7 (A15)" => 32,
-        _ => 32,
-    }
-}
-
-fn max_threads_per_threadgroup(family: &str) -> u32 {
-    match family {
-        "Apple9 (M4)" | "Apple9 (M3+)" | "Apple9 (A17+)" => 1024,
-        _ => 1024,
-    }
 }

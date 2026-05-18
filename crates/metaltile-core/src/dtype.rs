@@ -1,6 +1,6 @@
 //! Numeric types supported in MetalTile kernels.
 
-use std::fmt;
+use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
@@ -91,19 +91,47 @@ impl DType {
 }
 
 impl fmt::Display for DType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(self.label()) }
+}
+
+impl DType {
+    /// Short label string ("f32", "f16", etc.).
+    pub const fn label(self) -> &'static str {
         match self {
-            DType::F32 => write!(f, "f32"),
-            DType::F16 => write!(f, "f16"),
-            DType::BF16 => write!(f, "bf16"),
-            DType::I32 => write!(f, "i32"),
-            DType::I8 => write!(f, "i8"),
-            DType::I4 => write!(f, "i4"),
-            DType::U8 => write!(f, "u8"),
-            DType::U32 => write!(f, "u32"),
-            DType::U64 => write!(f, "u64"),
-            DType::I64 => write!(f, "i64"),
-            DType::Bool => write!(f, "bool"),
+            DType::F32 => "f32",
+            DType::F16 => "f16",
+            DType::BF16 => "bf16",
+            DType::I32 => "i32",
+            DType::I8 => "i8",
+            DType::I4 => "i4",
+            DType::U8 => "u8",
+            DType::U32 => "u32",
+            DType::U64 => "u64",
+            DType::I64 => "i64",
+            DType::Bool => "bool",
+        }
+    }
+}
+
+impl FromStr for DType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "f32" => Ok(DType::F32),
+            "f16" => Ok(DType::F16),
+            "bf16" => Ok(DType::BF16),
+            "i32" => Ok(DType::I32),
+            "i8" => Ok(DType::I8),
+            "i4" => Ok(DType::I4),
+            "u8" => Ok(DType::U8),
+            "u32" => Ok(DType::U32),
+            "u64" => Ok(DType::U64),
+            "i64" => Ok(DType::I64),
+            "bool" => Ok(DType::Bool),
+            _ => Err(format!(
+                "unknown dtype '{s}'. Valid: f32,f16,bf16,i32,i8,i4,u8,u32,u64,i64,bool"
+            )),
         }
     }
 }

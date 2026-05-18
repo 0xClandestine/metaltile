@@ -20,7 +20,6 @@ use metaltile_std::{bench_types::DType, spec::BenchSpec};
 
 use crate::{
     ProfileArgs,
-    kernel_utils::first_mode,
     matches_filter,
     term::{Color, Style, paint_stdout},
 };
@@ -91,7 +90,7 @@ pub fn run(args: &ProfileArgs) {
         let (name, (spec, dtypes)) = matched[0];
         let dt = dtypes.first().copied().unwrap_or(DType::F32);
         let mut k = (spec.kernel_ir)(dt);
-        k.mode = first_mode(spec);
+        k.mode = spec.dispatch.default_mode(spec.shapes);
 
         // Run the pipeline.
         if let Err(e) = passes::run_passes(&mut k, &passes::standard_pipeline()) {
@@ -160,7 +159,7 @@ pub fn run(args: &ProfileArgs) {
         for (name, (spec, dtypes)) in &matched {
             let dt = dtypes.first().copied().unwrap_or(DType::F32);
             let mut k = (spec.kernel_ir)(dt);
-            k.mode = first_mode(spec);
+            k.mode = spec.dispatch.default_mode(spec.shapes);
 
             if let Err(e) = passes::run_passes(&mut k, &passes::standard_pipeline()) {
                 println!(
@@ -226,14 +225,11 @@ pub fn run(args: &ProfileArgs) {
 }
 
 fn bottle_label(bn: Bottleneck) -> String {
-    match bn {
-        Bottleneck::RegisterLimited =>
-            paint_stdout("register-limited", Style::new().fg(Color::Yellow)).to_string(),
-        Bottleneck::MemoryLimited =>
-            paint_stdout("memory-limited", Style::new().fg(Color::Magenta)).to_string(),
-        Bottleneck::CachePressure =>
-            paint_stdout("cache-pressure", Style::new().fg(Color::Magenta)).to_string(),
-        Bottleneck::ThreadLimited =>
-            paint_stdout("thread-limited", Style::new().fg(Color::Green)).to_string(),
-    }
+    let style = match bn {
+        Bottleneck::RegisterLimited => Style::new().fg(Color::Yellow),
+        Bottleneck::MemoryLimited => Style::new().fg(Color::Magenta),
+        Bottleneck::CachePressure => Style::new().fg(Color::Magenta),
+        Bottleneck::ThreadLimited => Style::new().fg(Color::Green),
+    };
+    paint_stdout(bn.to_string(), style).to_string()
 }
