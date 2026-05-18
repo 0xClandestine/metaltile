@@ -21,6 +21,31 @@ use crate::{
     spec::{BenchDispatch, BenchSpec},
 };
 
+// ── threadgroup argmax tree-reduction helper ─────────────────────────────
+//
+// Each step of the binary tree merges two halves of the threadgroup
+// arrays `tg_vals` / `tg_idxs`.  The combine rule: take the higher
+// value; on ties take the smaller index (matches NumPy argmax semantics).
+//
+// Used for strides 128 → 2 (7 invocations).  The final stride-1 step
+// writes directly to `out[0]` and is kept inline below.
+
+#[allow(unused_macros)]
+macro_rules! argmax_step {
+    ($lid:expr, $stride:expr) => {
+        if $lid < $stride {
+            let ov = threadgroup_load("tg_vals", $lid + $stride);
+            let oi = threadgroup_load("tg_idxs", $lid + $stride);
+            let tv = threadgroup_load("tg_vals", $lid);
+            let ti = threadgroup_load("tg_idxs", $lid);
+            let bet = (ov > tv) | ((ov == tv) & (oi < ti));
+            threadgroup_store("tg_vals", $lid, select(bet, ov, tv));
+            threadgroup_store("tg_idxs", $lid, select(bet, oi, ti));
+        }
+        threadgroup_barrier();
+    };
+}
+
 #[kernel]
 pub fn argmax<T>(inp: Tensor<T>, out: Tensor<u32>, #[constexpr] n: u32) {
     let lid = tid;
@@ -44,77 +69,15 @@ pub fn argmax<T>(inp: Tensor<T>, out: Tensor<u32>, #[constexpr] n: u32) {
     threadgroup_store("tg_idxs", lid, best_idx);
     threadgroup_barrier();
 
-    // Tree reduction: stride 128, 64, 32, 16, 8, 4, 2, 1
-    if lid < 128u32 {
-        let ov = threadgroup_load("tg_vals", lid + 128u32);
-        let oi = threadgroup_load("tg_idxs", lid + 128u32);
-        let tv = threadgroup_load("tg_vals", lid);
-        let ti = threadgroup_load("tg_idxs", lid);
-        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
-        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
-        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
-    }
-    threadgroup_barrier();
-    if lid < 64u32 {
-        let ov = threadgroup_load("tg_vals", lid + 64u32);
-        let oi = threadgroup_load("tg_idxs", lid + 64u32);
-        let tv = threadgroup_load("tg_vals", lid);
-        let ti = threadgroup_load("tg_idxs", lid);
-        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
-        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
-        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
-    }
-    threadgroup_barrier();
-    if lid < 32u32 {
-        let ov = threadgroup_load("tg_vals", lid + 32u32);
-        let oi = threadgroup_load("tg_idxs", lid + 32u32);
-        let tv = threadgroup_load("tg_vals", lid);
-        let ti = threadgroup_load("tg_idxs", lid);
-        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
-        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
-        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
-    }
-    threadgroup_barrier();
-    if lid < 16u32 {
-        let ov = threadgroup_load("tg_vals", lid + 16u32);
-        let oi = threadgroup_load("tg_idxs", lid + 16u32);
-        let tv = threadgroup_load("tg_vals", lid);
-        let ti = threadgroup_load("tg_idxs", lid);
-        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
-        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
-        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
-    }
-    threadgroup_barrier();
-    if lid < 8u32 {
-        let ov = threadgroup_load("tg_vals", lid + 8u32);
-        let oi = threadgroup_load("tg_idxs", lid + 8u32);
-        let tv = threadgroup_load("tg_vals", lid);
-        let ti = threadgroup_load("tg_idxs", lid);
-        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
-        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
-        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
-    }
-    threadgroup_barrier();
-    if lid < 4u32 {
-        let ov = threadgroup_load("tg_vals", lid + 4u32);
-        let oi = threadgroup_load("tg_idxs", lid + 4u32);
-        let tv = threadgroup_load("tg_vals", lid);
-        let ti = threadgroup_load("tg_idxs", lid);
-        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
-        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
-        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
-    }
-    threadgroup_barrier();
-    if lid < 2u32 {
-        let ov = threadgroup_load("tg_vals", lid + 2u32);
-        let oi = threadgroup_load("tg_idxs", lid + 2u32);
-        let tv = threadgroup_load("tg_vals", lid);
-        let ti = threadgroup_load("tg_idxs", lid);
-        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
-        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
-        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
-    }
-    threadgroup_barrier();
+    argmax_step!(lid, 128u32);
+    argmax_step!(lid, 64u32);
+    argmax_step!(lid, 32u32);
+    argmax_step!(lid, 16u32);
+    argmax_step!(lid, 8u32);
+    argmax_step!(lid, 4u32);
+    argmax_step!(lid, 2u32);
+
+    // Final step writes result directly to output.
     if lid == 0u32 {
         let ov = threadgroup_load("tg_vals", 1u32);
         let oi = threadgroup_load("tg_idxs", 1u32);

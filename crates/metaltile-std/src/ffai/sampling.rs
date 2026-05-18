@@ -13,6 +13,40 @@ use crate::{
     spec::{BenchDispatch, BenchSpec},
 };
 
+// ── threadgroup tree-reduction helpers ───────────────────────────────────
+//
+// Both the max-pass and sum-pass reduce 256 threadgroup slots to 1 value.
+// The 8-stage binary tree (strides 128 → 1) is identical except for the
+// combine operation.  Extract one macro per operation so the kernel body
+// reads as two terse calls instead of 48 lines of boilerplate.
+//
+// Each macro includes the trailing `threadgroup_barrier()`, matching the
+// original line-for-line.
+
+#[allow(unused_macros)]
+macro_rules! tg_max_step {
+    ($tg:expr, $lid:expr, $stride:expr) => {
+        if $lid < $stride {
+            let ov = threadgroup_load($tg, $lid + $stride);
+            let tv = threadgroup_load($tg, $lid);
+            threadgroup_store($tg, $lid, select(ov > tv, ov, tv));
+        }
+        threadgroup_barrier();
+    };
+}
+
+#[allow(unused_macros)]
+macro_rules! tg_sum_step {
+    ($tg:expr, $lid:expr, $stride:expr) => {
+        if $lid < $stride {
+            let ov = threadgroup_load($tg, $lid + $stride);
+            let tv = threadgroup_load($tg, $lid);
+            threadgroup_store($tg, $lid, ov + tv);
+        }
+        threadgroup_barrier();
+    };
+}
+
 // Softmax + categorical sample over a 1D logits tensor. Cooperative
 // reduction (256 threads) for max + sum-exp; single-thread inverse
 // CDF walk for the categorical pick.
@@ -54,54 +88,15 @@ pub fn softmax_categorical_sample<T>(
     threadgroup_store("tg_max", lid, local_max);
     threadgroup_barrier();
 
-    if lid < 128u32 {
-        let ov = threadgroup_load("tg_max", lid + 128u32);
-        let tv = threadgroup_load("tg_max", lid);
-        threadgroup_store("tg_max", lid, select(ov > tv, ov, tv));
-    }
-    threadgroup_barrier();
-    if lid < 64u32 {
-        let ov = threadgroup_load("tg_max", lid + 64u32);
-        let tv = threadgroup_load("tg_max", lid);
-        threadgroup_store("tg_max", lid, select(ov > tv, ov, tv));
-    }
-    threadgroup_barrier();
-    if lid < 32u32 {
-        let ov = threadgroup_load("tg_max", lid + 32u32);
-        let tv = threadgroup_load("tg_max", lid);
-        threadgroup_store("tg_max", lid, select(ov > tv, ov, tv));
-    }
-    threadgroup_barrier();
-    if lid < 16u32 {
-        let ov = threadgroup_load("tg_max", lid + 16u32);
-        let tv = threadgroup_load("tg_max", lid);
-        threadgroup_store("tg_max", lid, select(ov > tv, ov, tv));
-    }
-    threadgroup_barrier();
-    if lid < 8u32 {
-        let ov = threadgroup_load("tg_max", lid + 8u32);
-        let tv = threadgroup_load("tg_max", lid);
-        threadgroup_store("tg_max", lid, select(ov > tv, ov, tv));
-    }
-    threadgroup_barrier();
-    if lid < 4u32 {
-        let ov = threadgroup_load("tg_max", lid + 4u32);
-        let tv = threadgroup_load("tg_max", lid);
-        threadgroup_store("tg_max", lid, select(ov > tv, ov, tv));
-    }
-    threadgroup_barrier();
-    if lid < 2u32 {
-        let ov = threadgroup_load("tg_max", lid + 2u32);
-        let tv = threadgroup_load("tg_max", lid);
-        threadgroup_store("tg_max", lid, select(ov > tv, ov, tv));
-    }
-    threadgroup_barrier();
-    if lid == 0u32 {
-        let ov = threadgroup_load("tg_max", 1u32);
-        let tv = threadgroup_load("tg_max", 0u32);
-        threadgroup_store("tg_max", 0u32, select(ov > tv, ov, tv));
-    }
-    threadgroup_barrier();
+    tg_max_step!("tg_max", lid, 128u32);
+    tg_max_step!("tg_max", lid, 64u32);
+    tg_max_step!("tg_max", lid, 32u32);
+    tg_max_step!("tg_max", lid, 16u32);
+    tg_max_step!("tg_max", lid, 8u32);
+    tg_max_step!("tg_max", lid, 4u32);
+    tg_max_step!("tg_max", lid, 2u32);
+    tg_max_step!("tg_max", lid, 1u32);
+
     let max_val = threadgroup_load("tg_max", 0u32);
 
     // ─── Pass 2: cooperative sum-exp reduce ─────────────────────────
@@ -117,54 +112,15 @@ pub fn softmax_categorical_sample<T>(
     threadgroup_store("tg_sum", lid, local_sum);
     threadgroup_barrier();
 
-    if lid < 128u32 {
-        let ov = threadgroup_load("tg_sum", lid + 128u32);
-        let tv = threadgroup_load("tg_sum", lid);
-        threadgroup_store("tg_sum", lid, ov + tv);
-    }
-    threadgroup_barrier();
-    if lid < 64u32 {
-        let ov = threadgroup_load("tg_sum", lid + 64u32);
-        let tv = threadgroup_load("tg_sum", lid);
-        threadgroup_store("tg_sum", lid, ov + tv);
-    }
-    threadgroup_barrier();
-    if lid < 32u32 {
-        let ov = threadgroup_load("tg_sum", lid + 32u32);
-        let tv = threadgroup_load("tg_sum", lid);
-        threadgroup_store("tg_sum", lid, ov + tv);
-    }
-    threadgroup_barrier();
-    if lid < 16u32 {
-        let ov = threadgroup_load("tg_sum", lid + 16u32);
-        let tv = threadgroup_load("tg_sum", lid);
-        threadgroup_store("tg_sum", lid, ov + tv);
-    }
-    threadgroup_barrier();
-    if lid < 8u32 {
-        let ov = threadgroup_load("tg_sum", lid + 8u32);
-        let tv = threadgroup_load("tg_sum", lid);
-        threadgroup_store("tg_sum", lid, ov + tv);
-    }
-    threadgroup_barrier();
-    if lid < 4u32 {
-        let ov = threadgroup_load("tg_sum", lid + 4u32);
-        let tv = threadgroup_load("tg_sum", lid);
-        threadgroup_store("tg_sum", lid, ov + tv);
-    }
-    threadgroup_barrier();
-    if lid < 2u32 {
-        let ov = threadgroup_load("tg_sum", lid + 2u32);
-        let tv = threadgroup_load("tg_sum", lid);
-        threadgroup_store("tg_sum", lid, ov + tv);
-    }
-    threadgroup_barrier();
-    if lid == 0u32 {
-        let ov = threadgroup_load("tg_sum", 1u32);
-        let tv = threadgroup_load("tg_sum", 0u32);
-        threadgroup_store("tg_sum", 0u32, ov + tv);
-    }
-    threadgroup_barrier();
+    tg_sum_step!("tg_sum", lid, 128u32);
+    tg_sum_step!("tg_sum", lid, 64u32);
+    tg_sum_step!("tg_sum", lid, 32u32);
+    tg_sum_step!("tg_sum", lid, 16u32);
+    tg_sum_step!("tg_sum", lid, 8u32);
+    tg_sum_step!("tg_sum", lid, 4u32);
+    tg_sum_step!("tg_sum", lid, 2u32);
+    tg_sum_step!("tg_sum", lid, 1u32);
+
     let total = threadgroup_load("tg_sum", 0u32);
 
     // ─── Pass 3: single-thread inverse CDF walk ─────────────────────

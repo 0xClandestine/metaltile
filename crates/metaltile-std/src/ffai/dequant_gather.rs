@@ -10,13 +10,27 @@
 //!   indices  [n_tokens]               u32
 //!   out      [n_tokens, H]            T
 //!
-//! One thread per output element. Bit-packing per variant matches
-//! mlx-format exactly.
+//! One thread per output element.  All bit widths share one formula:
+//! element `d` occupies bits `[d*bits, (d+1)*bits)` in the row's bit stream,
+//! spanning at most two adjacent u32 words.
 //!
-//! Codegen-only — these wrap a quantized gather pattern that mainline
-//! MLX has no template for (the MLX gather kernels work on raw tensors,
-//! not quantized embeddings). Correctness lives in FFAI integration
-//! tests.
+//! ```text
+//!   bit_off  = d * bits
+//!   word_idx = bit_off / 32
+//!   bit_in_w = bit_off & 31
+//!   lo_bits  = min(bits, 32 - bit_in_w)        ← bits from word 0
+//!   spill    = bits - lo_bits                   ← bits from word 1
+//!   lo       = (w0 >> bit_in_w) & ((1 << lo_bits) - 1)
+//!   hi       = (w1 & ((1 << spill) - 1)) << lo_bits
+//!   q        = lo | hi
+//! ```
+//!
+//! When `spill == 0`, `w1` loads from `word_idx` (same as w0) so the address
+//! is always in-bounds; the `(1 << 0) - 1 == 0` mask zeroes `hi` regardless.
+//!
+//! Each `#[kernel]` below bakes `bits` in as a literal so Metal constant-folds
+//! the arithmetic at PSO creation.  The five functions share identical logic —
+//! only the `bits` value differs.
 
 use metaltile::kernel;
 use metaltile_core::ir::KernelMode;
@@ -48,6 +62,47 @@ macro_rules! register_dequant_gather {
     };
 }
 
+// ── shared bit-extraction body ────────────────────────────────────────────
+//
+// All five kernels below expand this identical body.  `bits` is a u32
+// literal in each call site so the compiler sees it as a constant.
+
+#[allow(unused_macros)]
+macro_rules! dequant_gather_body {
+    ($bits:expr) => {
+        let idx = program_id::<0>();
+        let token = idx / hidden;
+        let d = idx - token * hidden;
+        let token_id = load(indices[token]);
+
+        let groups_per_row = hidden / group_size;
+        let g = d / group_size;
+        let u32_per_row = hidden * $bits / 32u32;
+        let row_off = token_id * u32_per_row;
+
+        let bit_off = d * $bits;
+        let word_idx = bit_off / 32u32;
+        let bit_in_w = bit_off & 31u32;
+
+        let bits_in_w0 = 32u32 - bit_in_w;
+        let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+        let spill = $bits - lo_bits;
+
+        let w0 = load(weight[row_off + word_idx]);
+        let w1_idx = select(spill > 0u32, word_idx + 1u32, word_idx);
+        let w1 = load(weight[row_off + w1_idx]);
+
+        let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+        let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+        let q = lo | hi;
+
+        let scale = load(scales[token_id * groups_per_row + g]).cast::<f32>();
+        let bias  = load(biases[token_id * groups_per_row + g]).cast::<f32>();
+        let w_real = q.cast::<f32>() * scale + bias;
+        store(out[idx], w_real.cast::<T>());
+    };
+}
+
 // ─── int4 ────────────────────────────────────────────────────────────
 
 #[kernel]
@@ -60,23 +115,25 @@ pub fn dequant_gather_int4<T>(
     #[constexpr] hidden: u32,
     #[constexpr] group_size: u32,
 ) {
-    let idx = program_id::<0>();
-    let token = idx / hidden;
-    let d = idx - token * hidden;
-    let token_id = load(indices[token]);
-    let packs_per_row = hidden / 8u32;
-    let groups_per_row = hidden / group_size;
-    let g = d / group_size;
-    let pack_idx = token_id * packs_per_row + d / 8u32;
-    let nibble = d & 7u32;
-    let packed = load(weight[pack_idx]);
-    let q = (packed >> (nibble * 4u32)) & 15u32;
-    let scale = load(scales[token_id * groups_per_row + g]).cast::<f32>();
-    let bias = load(biases[token_id * groups_per_row + g]).cast::<f32>();
-    let w_real = q.cast::<f32>() * scale + bias;
-    store(out[idx], w_real.cast::<T>());
+    dequant_gather_body!(4u32);
 }
 register_dequant_gather!("int4", dequant_gather_int4);
+
+// ─── int8 ────────────────────────────────────────────────────────────
+
+#[kernel]
+pub fn dequant_gather_int8<T>(
+    weight: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    indices: Tensor<u32>,
+    out: Tensor<T>,
+    #[constexpr] hidden: u32,
+    #[constexpr] group_size: u32,
+) {
+    dequant_gather_body!(8u32);
+}
+register_dequant_gather!("int8", dequant_gather_int8);
 
 // ─── int3 ────────────────────────────────────────────────────────────
 
@@ -90,54 +147,7 @@ pub fn dequant_gather_int3<T>(
     #[constexpr] hidden: u32,
     #[constexpr] group_size: u32,
 ) {
-    let idx = program_id::<0>();
-    let token = idx / hidden;
-    let d = idx - token * hidden;
-    let token_id = load(indices[token]);
-    let u32_per_row = hidden * 3u32 / 32u32;
-    let groups_per_row = hidden / group_size;
-    let g = d / group_size;
-    let row_u32_off = token_id * u32_per_row;
-
-    let chunk_idx = d / 8u32;
-    let intra = d & 7u32;
-    let byte_off = chunk_idx * 3u32;
-
-    let u_idx0 = byte_off / 4u32;
-    let u0 = load(weight[row_u32_off + u_idx0]);
-    let u1 = load(weight[row_u32_off + u_idx0 + 1u32]);
-
-    let s0 = byte_off & 3u32;
-    let s1 = (byte_off + 1u32) & 3u32;
-    let s2 = (byte_off + 2u32) & 3u32;
-    let in0_0 = (byte_off + 0u32) / 4u32 == u_idx0;
-    let in0_1 = (byte_off + 1u32) / 4u32 == u_idx0;
-    let in0_2 = (byte_off + 2u32) / 4u32 == u_idx0;
-    let b0 = (select(in0_0, u0, u1) >> (s0 * 8u32)) & 255u32;
-    let b1 = (select(in0_1, u0, u1) >> (s1 * 8u32)) & 255u32;
-    let b2 = (select(in0_2, u0, u1) >> (s2 * 8u32)) & 255u32;
-
-    let v0 = b0 & 7u32;
-    let v1 = (b0 >> 3u32) & 7u32;
-    let v2 = ((b0 >> 6u32) & 3u32) | ((b1 & 1u32) << 2u32);
-    let v3 = (b1 >> 1u32) & 7u32;
-    let v4 = (b1 >> 4u32) & 7u32;
-    let v5 = ((b1 >> 7u32) & 1u32) | ((b2 & 3u32) << 1u32);
-    let v6 = (b2 >> 2u32) & 7u32;
-    let v7 = (b2 >> 5u32) & 7u32;
-
-    let s01 = select(intra == 0u32, v0, v1);
-    let s23 = select(intra == 2u32, v2, v3);
-    let s45 = select(intra == 4u32, v4, v5);
-    let s67 = select(intra == 6u32, v6, v7);
-    let s0123 = select(intra < 2u32, s01, s23);
-    let s4567 = select(intra < 6u32, s45, s67);
-    let q = select(intra < 4u32, s0123, s4567);
-
-    let scale = load(scales[token_id * groups_per_row + g]).cast::<f32>();
-    let bias = load(biases[token_id * groups_per_row + g]).cast::<f32>();
-    let w_real = q.cast::<f32>() * scale + bias;
-    store(out[idx], w_real.cast::<T>());
+    dequant_gather_body!(3u32);
 }
 register_dequant_gather!("int3", dequant_gather_int3);
 
@@ -153,60 +163,7 @@ pub fn dequant_gather_int5<T>(
     #[constexpr] hidden: u32,
     #[constexpr] group_size: u32,
 ) {
-    let idx = program_id::<0>();
-    let token = idx / hidden;
-    let d = idx - token * hidden;
-    let token_id = load(indices[token]);
-    let u32_per_row = hidden * 5u32 / 32u32;
-    let groups_per_row = hidden / group_size;
-    let g = d / group_size;
-    let row_u32_off = token_id * u32_per_row;
-
-    let chunk_idx = d / 8u32;
-    let intra = d & 7u32;
-    let byte_off = chunk_idx * 5u32;
-
-    let u_idx0 = byte_off / 4u32;
-    let u0 = load(weight[row_u32_off + u_idx0]);
-    let u1 = load(weight[row_u32_off + u_idx0 + 1u32]);
-
-    let s0 = byte_off & 3u32;
-    let s1 = (byte_off + 1u32) & 3u32;
-    let s2 = (byte_off + 2u32) & 3u32;
-    let s3 = (byte_off + 3u32) & 3u32;
-    let s4 = (byte_off + 4u32) & 3u32;
-    let in0_0 = (byte_off + 0u32) / 4u32 == u_idx0;
-    let in0_1 = (byte_off + 1u32) / 4u32 == u_idx0;
-    let in0_2 = (byte_off + 2u32) / 4u32 == u_idx0;
-    let in0_3 = (byte_off + 3u32) / 4u32 == u_idx0;
-    let in0_4 = (byte_off + 4u32) / 4u32 == u_idx0;
-    let b0 = (select(in0_0, u0, u1) >> (s0 * 8u32)) & 255u32;
-    let b1 = (select(in0_1, u0, u1) >> (s1 * 8u32)) & 255u32;
-    let b2 = (select(in0_2, u0, u1) >> (s2 * 8u32)) & 255u32;
-    let b3 = (select(in0_3, u0, u1) >> (s3 * 8u32)) & 255u32;
-    let b4 = (select(in0_4, u0, u1) >> (s4 * 8u32)) & 255u32;
-
-    let v0 = b0 & 31u32;
-    let v1 = ((b0 >> 5u32) & 7u32) | ((b1 & 3u32) << 3u32);
-    let v2 = (b1 >> 2u32) & 31u32;
-    let v3 = ((b1 >> 7u32) & 1u32) | ((b2 & 15u32) << 1u32);
-    let v4 = ((b2 >> 4u32) & 15u32) | ((b3 & 1u32) << 4u32);
-    let v5 = (b3 >> 1u32) & 31u32;
-    let v6 = ((b3 >> 6u32) & 3u32) | ((b4 & 7u32) << 2u32);
-    let v7 = (b4 >> 3u32) & 31u32;
-
-    let s01 = select(intra == 0u32, v0, v1);
-    let s23 = select(intra == 2u32, v2, v3);
-    let s45 = select(intra == 4u32, v4, v5);
-    let s67 = select(intra == 6u32, v6, v7);
-    let s0123 = select(intra < 2u32, s01, s23);
-    let s4567 = select(intra < 6u32, s45, s67);
-    let q = select(intra < 4u32, s0123, s4567);
-
-    let scale = load(scales[token_id * groups_per_row + g]).cast::<f32>();
-    let bias = load(biases[token_id * groups_per_row + g]).cast::<f32>();
-    let w_real = q.cast::<f32>() * scale + bias;
-    store(out[idx], w_real.cast::<T>());
+    dequant_gather_body!(5u32);
 }
 register_dequant_gather!("int5", dequant_gather_int5);
 
@@ -222,75 +179,6 @@ pub fn dequant_gather_int6<T>(
     #[constexpr] hidden: u32,
     #[constexpr] group_size: u32,
 ) {
-    let idx = program_id::<0>();
-    let token = idx / hidden;
-    let d = idx - token * hidden;
-    let token_id = load(indices[token]);
-    let u32_per_row = hidden * 3u32 / 16u32;
-    let groups_per_row = hidden / group_size;
-    let g = d / group_size;
-    let row_u32_off = token_id * u32_per_row;
-
-    let pack_idx = d / 4u32;
-    let intra = d & 3u32;
-    let byte_off = pack_idx * 3u32;
-
-    let u_idx0 = byte_off / 4u32;
-    let u0 = load(weight[row_u32_off + u_idx0]);
-    let u1 = load(weight[row_u32_off + u_idx0 + 1u32]);
-
-    let s0 = byte_off & 3u32;
-    let s1 = (byte_off + 1u32) & 3u32;
-    let s2 = (byte_off + 2u32) & 3u32;
-    let in0_0 = (byte_off + 0u32) / 4u32 == u_idx0;
-    let in0_1 = (byte_off + 1u32) / 4u32 == u_idx0;
-    let in0_2 = (byte_off + 2u32) / 4u32 == u_idx0;
-    let b0 = (select(in0_0, u0, u1) >> (s0 * 8u32)) & 255u32;
-    let b1 = (select(in0_1, u0, u1) >> (s1 * 8u32)) & 255u32;
-    let b2 = (select(in0_2, u0, u1) >> (s2 * 8u32)) & 255u32;
-
-    let v0 = b0 & 63u32;
-    let v1 = ((b0 >> 6u32) & 3u32) | ((b1 & 15u32) << 2u32);
-    let v2 = ((b1 >> 4u32) & 15u32) | ((b2 & 3u32) << 4u32);
-    let v3 = (b2 >> 2u32) & 63u32;
-
-    let vsel0 = select(intra == 0u32, v0, v1);
-    let vsel1 = select(intra == 2u32, v2, v3);
-    let q = select(intra < 2u32, vsel0, vsel1);
-
-    let scale = load(scales[token_id * groups_per_row + g]).cast::<f32>();
-    let bias = load(biases[token_id * groups_per_row + g]).cast::<f32>();
-    let w_real = q.cast::<f32>() * scale + bias;
-    store(out[idx], w_real.cast::<T>());
+    dequant_gather_body!(6u32);
 }
 register_dequant_gather!("int6", dequant_gather_int6);
-
-// ─── int8 ────────────────────────────────────────────────────────────
-
-#[kernel]
-pub fn dequant_gather_int8<T>(
-    weight: Tensor<u32>,
-    scales: Tensor<T>,
-    biases: Tensor<T>,
-    indices: Tensor<u32>,
-    out: Tensor<T>,
-    #[constexpr] hidden: u32,
-    #[constexpr] group_size: u32,
-) {
-    let idx = program_id::<0>();
-    let token = idx / hidden;
-    let d = idx - token * hidden;
-    let token_id = load(indices[token]);
-    let packs_per_row = hidden / 4u32;
-    let groups_per_row = hidden / group_size;
-    let g = d / group_size;
-    let pack_idx = token_id * packs_per_row + d / 4u32;
-    let byte = d & 3u32;
-    let packed = load(weight[pack_idx]);
-    let q = (packed >> (byte * 8u32)) & 255u32;
-    let scale = load(scales[token_id * groups_per_row + g]).cast::<f32>();
-    let bias = load(biases[token_id * groups_per_row + g]).cast::<f32>();
-    let w_real = q.cast::<f32>() * scale + bias;
-    store(out[idx], w_real.cast::<T>());
-}
-register_dequant_gather!("int8", dequant_gather_int8);
