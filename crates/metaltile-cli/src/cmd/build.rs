@@ -28,14 +28,16 @@ use metaltile_codegen::{
     generator_for_mode,
 };
 use metaltile_core::ir::Kernel;
-use metaltile_std::{bench_types::DType, spec::BenchSpec};
+use metaltile_std::{
+    bench_types::DType,
+    spec::{BenchSpec, effective_mode},
+};
 
 use crate::{
     BuildArgs,
     matches_filter,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
-use metaltile_std::spec::effective_mode;
 
 pub fn run(args: &BuildArgs) {
     let filter = &args.filter;
@@ -94,10 +96,7 @@ pub fn run(args: &BuildArgs) {
     sorted.sort_unstable_by_key(|(name, _)| *name);
 
     // Header.
-    eprintln!(
-        "{}",
-        paint_stdout("tile build", Style::new().fg(Color::Cyan).bold()),
-    );
+    eprintln!("{}", paint_stdout("tile build", Style::new().fg(Color::Cyan).bold()),);
 
     // Per-output collectors for the emit step.
     let kernels_dir = out_root.as_ref().map(|r| r.join("Resources").join("kernels"));

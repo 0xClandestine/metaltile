@@ -3,6 +3,7 @@
 
 use metaltile_codegen::msl::MslGenerator;
 use metaltile_core::{dtype::DType, ir::KernelMode};
+
 use crate::{
     bench_types::{
         DtypeCtx,
@@ -13,11 +14,17 @@ use crate::{
         check_equiv,
         check_equiv_with,
     },
+    runner::{
+        GpuBuffer,
+        GpuRunner,
+        bench_gbps,
+        bench_gbps_only,
+        buffer_typed,
+        read_typed,
+        run_typed_once,
+        zeros_typed,
+    },
     spec::{BenchDispatch, BenchSpec, MlxArg, ScalarBufSpec, ShapeSpec},
-};
-
-use crate::{
-    runner::{bench_gbps, bench_gbps_only, buffer_typed, read_typed, run_typed_once, zeros_typed, GpuBuffer, GpuRunner},
 };
 
 pub fn run(spec: &BenchSpec, runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
@@ -262,27 +269,30 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
         let out_count_perf = shape.out_elems.resolve(n, b).max(1);
         let bytes = (shape.bytes_fn)(n, b, shape.reads, out_count_perf, ctx.eb) as f64;
         let perf_refs: Vec<&GpuBuffer> = perf_bufs.iter().collect();
-        let (mt_perf_val, mt_stats) = match bench_gbps(runner, mk, &perf_refs, perf_grid, [shape.tpg, 1, 1], bytes) {
-            Some((p, t)) => (Some(p), Some(t)),
-            None => (None, None),
-        };
+        let (mt_perf_val, mt_stats) =
+            match bench_gbps(runner, mk, &perf_refs, perf_grid, [shape.tpg, 1, 1], bytes) {
+                Some((p, t)) => (Some(p), Some(t)),
+                None => (None, None),
+            };
 
         // MLX ref (optional)
         let (ref_perf_val, ref_stats) = if let Some(mlx_args) = shape.mlx_args {
             let mlx_tpg = if shape.mlx_tpg > 0 { shape.mlx_tpg } else { shape.tpg };
             let mlx_grid = shape.mlx_grid.unwrap_or(shape.grid).eval(n, b, mlx_tpg);
-            mlx_compiled.as_ref().map(|rk| {
-                let mlx_bufs: Vec<GpuBuffer> = mlx_args
-                    .iter()
-                    .map(|arg| mlx_buf(spec, runner, arg, shape, n, b, dt))
-                    .collect();
-                let mlx_refs: Vec<&GpuBuffer> = mlx_bufs.iter().collect();
-                match bench_gbps(runner, rk, &mlx_refs, mlx_grid, [mlx_tpg, 1, 1], bytes) {
-                    Some((p, t)) => (Some(p), Some(t)),
-                    None => (None, None),
-                }
-            })
-            .unwrap_or((None, None))
+            mlx_compiled
+                .as_ref()
+                .map(|rk| {
+                    let mlx_bufs: Vec<GpuBuffer> = mlx_args
+                        .iter()
+                        .map(|arg| mlx_buf(spec, runner, arg, shape, n, b, dt))
+                        .collect();
+                    let mlx_refs: Vec<&GpuBuffer> = mlx_bufs.iter().collect();
+                    match bench_gbps(runner, rk, &mlx_refs, mlx_grid, [mlx_tpg, 1, 1], bytes) {
+                        Some((p, t)) => (Some(p), Some(t)),
+                        None => (None, None),
+                    }
+                })
+                .unwrap_or((None, None))
         } else {
             (None, None)
         };
@@ -492,11 +502,25 @@ fn run_scan(
         let ns_u32 = runner.buffer_u32(n as u32);
         let ref_perf = ref_kernel.as_ref().and_then(|rk| {
             let out = zeros_typed(runner, rows * n, DType::F32);
-            bench_gbps_only(runner, rk, &[&inp_buf, &out, &ns_u64], [1, rows, 1], [tpg, 1, 1], bytes)
+            bench_gbps_only(
+                runner,
+                rk,
+                &[&inp_buf, &out, &ns_u64],
+                [1, rows, 1],
+                [tpg, 1, 1],
+                bytes,
+            )
         });
         let mt_perf = {
             let out = zeros_typed(runner, rows * n, DType::F32);
-            bench_gbps_only(runner, &mk, &[&inp_buf, &out, &ns_u32], [1, rows, 1], [tpg, 1, 1], bytes)
+            bench_gbps_only(
+                runner,
+                &mk,
+                &[&inp_buf, &out, &ns_u32],
+                [1, rows, 1],
+                [tpg, 1, 1],
+                bytes,
+            )
         };
         results.push(bench.result_sub(
             Some(spec.subop),
@@ -577,7 +601,8 @@ fn run_arg_reduce(
         )
     });
     let mt_out = zeros_typed(runner, 1, DType::F32);
-    let mt_perf = bench_gbps_only(runner, &mk, &[&inp, &mt_out, &ns], [1, 1, 1], [tpg, 1, 1], bytes);
+    let mt_perf =
+        bench_gbps_only(runner, &mk, &[&inp, &mt_out, &ns], [1, 1, 1], [tpg, 1, 1], bytes);
     vec![bench.result_sub(Some(spec.subop), format!("N={n} f32"), ref_perf, mt_perf, Some(equiv))]
 }
 
@@ -626,8 +651,14 @@ fn run_random(
     let bytes = (n * 4) as f64;
     let n_buf = runner.buffer_u32(n as u32);
     let mt_out = runner.buffer_zeros(n * 4);
-    let mt_perf =
-        bench_gbps_only(runner, &mk, &[&mt_out, &n_buf], [n.div_ceil(tpg), 1, 1], [tpg, 1, 1], bytes);
+    let mt_perf = bench_gbps_only(
+        runner,
+        &mk,
+        &[&mt_out, &n_buf],
+        [n.div_ceil(tpg), 1, 1],
+        [tpg, 1, 1],
+        bytes,
+    );
 
     // MLX rbitsc uses completely different PRNG and dispatch, just measure if available
     let num_keys = 1024usize;

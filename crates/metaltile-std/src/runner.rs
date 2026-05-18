@@ -3,8 +3,10 @@
 //! All Metal-specific code is gated with `#[cfg(target_os = "macos")]`.
 //! On other platforms every method returns `Err` or a zero-filled stub.
 
-use crate::bench_types::{DType, OpResult, elem_bytes};
-use crate::stats::BenchStats;
+use crate::{
+    bench_types::{DType, OpResult, elem_bytes},
+    stats::BenchStats,
+};
 
 /// Convert IEEE 754 half-float bits to f32.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]

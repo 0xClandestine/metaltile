@@ -178,10 +178,7 @@ pub fn run(args: &DiffArgs) {
     }
 
     // Header.
-    eprintln!(
-        "{}",
-        paint_stdout("tile diff", Style::new().fg(Color::Cyan).bold()),
-    );
+    eprintln!("{}", paint_stdout("tile diff", Style::new().fg(Color::Cyan).bold()),);
 
     // Print diff table
     eprintln!();

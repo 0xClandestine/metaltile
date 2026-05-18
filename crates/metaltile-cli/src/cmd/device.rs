@@ -1,12 +1,12 @@
 //! `tile device` — Show GPU device info and supported feature flags.
 
 use metaltile_core::GpuFamily;
+use metaltile_std::runner::GpuRunner;
 
 use crate::{
     DeviceArgs,
     term::{Color, Style, paint_stdout},
 };
-use metaltile_std::runner::GpuRunner;
 
 pub fn run(args: &DeviceArgs) {
     let json_out = args.json;
@@ -55,10 +55,7 @@ pub fn run(args: &DeviceArgs) {
 
     let label_style = Style::new().fg(Color::BrightBlack).bold();
 
-    eprintln!(
-        "{}",
-        paint_stdout("tile device", Style::new().fg(Color::Cyan).bold()),
-    );
+    eprintln!("{}", paint_stdout("tile device", Style::new().fg(Color::Cyan).bold()),);
     eprintln!();
     eprintln!(
         "  {}  {}",
@@ -109,4 +106,3 @@ pub fn run(args: &DeviceArgs) {
     );
     println!();
 }
-

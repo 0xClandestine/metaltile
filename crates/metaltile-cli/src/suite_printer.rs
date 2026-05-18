@@ -9,7 +9,6 @@ use metaltile_std::bench_types::{CorrectnessStatus, OpResult};
 
 use crate::term::{Color, Style, paint_stdout};
 
-
 // ── SuitePrinter ──────────────────────────────────────────────────────────
 
 pub struct SuitePrinter {
@@ -19,7 +18,7 @@ pub struct SuitePrinter {
     term_width: usize,
     cur_metric: Option<&'static str>,
     /// Shows profile info (occ%, regs, bottleneck) in op headers when Some.
-    profile_map: Option<std::collections::HashMap<String, ProfileRow>>,
+    profile_map: Option<std::collections::HashMap<(String, String), ProfileRow>>,
     /// Shows timing columns (p95, p99, cv%) when > 0 and results carry timing.
     verbose: u8,
 }
@@ -47,15 +46,19 @@ impl SuitePrinter {
 
     pub fn set_verbose(&mut self, v: u8) { self.verbose = v; }
 
-    pub fn set_profile_map(&mut self, m: std::collections::HashMap<String, ProfileRow>) {
+    pub fn set_profile_map(&mut self, m: std::collections::HashMap<(String, String), ProfileRow>) {
         self.profile_map = Some(m);
     }
 
     pub fn set_term_width(&mut self, w: usize) { self.term_width = w.clamp(60, 200); }
 
     pub fn print_batch(&mut self, results: &[OpResult]) {
-        if results.is_empty() { return; }
-        if !self.started { self.started = true; }
+        if results.is_empty() {
+            return;
+        }
+        if !self.started {
+            self.started = true;
+        }
 
         for result in results {
             let new_group = self.last_op_display.as_deref() != Some(&result.op_display());
@@ -63,7 +66,9 @@ impl SuitePrinter {
                 if self.cur_metric != Some(result.metric()) {
                     self.cur_metric = Some(result.metric());
                 }
-                if self.last_op_display.is_some() { println!(); }
+                if self.last_op_display.is_some() {
+                    println!();
+                }
                 self.print_op_header(result);
             }
             self.last_op_display = Some(result.op_display());
@@ -73,7 +78,9 @@ impl SuitePrinter {
     }
 
     pub fn finish(&mut self) {
-        if !self.started { return; }
+        if !self.started {
+            return;
+        }
         println!();
         self.flush();
     }
@@ -97,16 +104,13 @@ impl SuitePrinter {
             paint_stdout(pad_right("MT%", pct_w), bold),
         );
         if self.show_correctness {
-            hdr.push_str(&format!(
-                " {} {}",
-                sep,
-                paint_stdout(pad_right("ok", ck_w), bold),
-            ));
+            hdr.push_str(&format!(" {} {}", sep, paint_stdout(pad_right("ok", ck_w), bold),));
         }
+        // -vv: scaling distribution columns
         if self.verbose >= 2 {
-            let pw = 5;  // p95
-            let qw = 5;  // p99
-            let cw = 5;  // cv%
+            let pw = 5;
+            let qw = 5;
+            let cw = 5;
             hdr.push_str(&format!(
                 " {} {} {} {} {} {}",
                 sep,
@@ -117,32 +121,40 @@ impl SuitePrinter {
                 paint_stdout(pad_right("cv%", cw), bold),
             ));
         }
-
-        // Op line: name [profile if available]
-        let op = paint_stdout(result.op_display(), Style::new().fg(Color::Cyan).bold());
-        if let Some(ref map) = self.profile_map {
-            if let Some(p) = map.get(&result.op_display()) {
-                let occ_color = if p.occ_pct >= 100.0 { Color::Green }
-                    else if p.occ_pct >= 60.0 { Color::Yellow }
-                    else { Color::Red };
-                let occ = paint_stdout(format!("{:.1}%", p.occ_pct), Style::new().fg(occ_color).bold());
-                let regs = paint_stdout(format!("{}r", p.regs_per_thread), Style::new().fg(Color::BrightWhite));
-                let bn = paint_stdout(p.bottleneck, Style::new().fg(Color::BrightBlack).dim());
-                println!("  {op} · occ={occ} · regs={regs} · {bn}");
-            } else {
-                println!("  {op}");
-            }
-        } else {
-            println!("  {op}");
+        // -v/-vv: profile columns
+        if self.verbose >= 1 {
+            let ow = 5;
+            let rw = 4;
+            let bw = 17;
+            hdr.push_str(&format!(
+                " {} {} {} {} {} {}",
+                sep,
+                paint_stdout(pad_right("occ%", ow), bold),
+                sep,
+                paint_stdout(pad_right("regs", rw), bold),
+                sep,
+                paint_stdout(pad_right("bottleneck", bw), bold),
+            ));
         }
+
+        // Op line — just the name, no profile
+        let op = paint_stdout(result.op_display(), Style::new().fg(Color::Cyan).bold());
+        println!("  {op}");
         println!("{hdr}");
 
         let n_cols: usize = if self.show_correctness { 5 } else { 4 };
         let gaps = (n_cols.saturating_sub(1)) * 3;
-        let extra_cols = if self.verbose >= 2 { 5 + 3 + 5 + 3 + 5 + 3 } else { 0 }; // p95 + gap + p99 + gap + cv% + gap
-        let total_w = 4 + shape_w + gaps + ref_w + mt_w + pct_w
+        let timing_cols = if self.verbose >= 2 { 5 + 3 + 5 + 3 + 5 + 3 } else { 0 };
+        let profile_cols = if self.verbose >= 1 { 5 + 3 + 4 + 3 + 17 + 3 } else { 0 };
+        let total_w = 4
+            + shape_w
+            + gaps
+            + ref_w
+            + mt_w
+            + pct_w
             + if self.show_correctness { ck_w } else { 0 }
-            + extra_cols;
+            + timing_cols
+            + profile_cols;
         let sep_line = paint_stdout("─".repeat(total_w), Style::new().fg(Color::BrightBlack).dim());
         println!("  {sep_line}");
     }
@@ -152,7 +164,8 @@ impl SuitePrinter {
         let (shape_w, ref_w, mt_w, pct_w, ck_w) =
             sub_table_widths(self.term_width, metric, self.show_correctness);
 
-        let shape = paint_stdout(pad_left(result.shape(), shape_w), Style::new().fg(Color::BrightWhite));
+        let shape =
+            paint_stdout(pad_left(result.shape(), shape_w), Style::new().fg(Color::BrightWhite));
         let ref_s = fmt_perf(result.ref_perf(), metric, "—");
         let mt_s = fmt_perf(result.mt_perf(), metric, "NYI");
         let pct_s = result.pct().map(|p| format!("{p:.0}%")).unwrap_or_else(|| "—".into());
@@ -162,40 +175,38 @@ impl SuitePrinter {
         let pct_cell = style_pct(&pad_right(&pct_s, pct_w), result);
         let sep = col_sep();
 
+        let mut row = format!("  {shape} {sep} {ref_cell} {sep} {mt_cell} {sep} {pct_cell}");
         if self.show_correctness {
             let ck_icon = correctness_icon(&result.correctness_status());
-            let ck_cell = style_correctness(&pad_right(&ck_icon, ck_w), result.correctness_status());
-            if self.verbose >= 2 {
-                let t = fmt_timing(result);
-                println!("  {shape} {sep} {ref_cell} {sep} {mt_cell} {sep} {pct_cell} {sep} {ck_cell} {sep} {t}");
-            } else {
-                println!("  {shape} {sep} {ref_cell} {sep} {mt_cell} {sep} {pct_cell} {sep} {ck_cell}");
-            }
-        } else {
-            if self.verbose >= 2 {
-                let t = fmt_timing(result);
-                println!("  {shape} {sep} {ref_cell} {sep} {mt_cell} {sep} {pct_cell} {sep} {t}");
-            } else {
-                println!("  {shape} {sep} {ref_cell} {sep} {mt_cell} {sep} {pct_cell}");
-            }
+            let ck_cell =
+                style_correctness(&pad_right(&ck_icon, ck_w), result.correctness_status());
+            row.push_str(&format!(" {sep} {ck_cell}"));
         }
+        if self.verbose >= 2 {
+            let t = fmt_timing(result);
+            row.push_str(&format!(" {sep} {t}"));
+        }
+        if self.verbose >= 1 {
+            let p = fmt_profile(result, &self.profile_map);
+            row.push_str(&format!(" {sep} {p}"));
+        }
+        println!("{row}");
     }
 
     fn flush(&self) { let _ = std::io::stdout().flush(); }
 }
 
-
 // ── Table layout helpers ──────────────────────────────────────────────────
 
 fn term_width() -> usize {
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(80)
-        .clamp(60, 200)
+    std::env::var("COLUMNS").ok().and_then(|s| s.parse().ok()).unwrap_or(80).clamp(60, 200)
 }
 
-fn sub_table_widths(term_width: usize, metric: &str, show_ck: bool) -> (usize, usize, usize, usize, usize) {
+fn sub_table_widths(
+    term_width: usize,
+    metric: &str,
+    show_ck: bool,
+) -> (usize, usize, usize, usize, usize) {
     let avail = term_width.saturating_sub(2);
     let ref_w = 4 + metric.len() + 2;
     let mt_w = 3 + metric.len() + 2;
@@ -225,17 +236,11 @@ fn fmt_perf(v: Option<f64>, _metric: &str, fallback: &str) -> String {
     }
 }
 
-fn col_sep() -> String {
-    paint_stdout("│", Style::new().fg(Color::BrightBlack).dim())
-}
+fn col_sep() -> String { paint_stdout("│", Style::new().fg(Color::BrightBlack).dim()) }
 
-fn pad_left(text: &str, width: usize) -> String {
-    format!("{text:<width$}")
-}
+fn pad_left(text: &str, width: usize) -> String { format!("{text:<width$}") }
 
-fn pad_right(text: &str, width: usize) -> String {
-    format!("{text:>width$}")
-}
+fn pad_right(text: &str, width: usize) -> String { format!("{text:>width$}") }
 
 fn style_reference(text: &str, value: Option<f64>) -> String {
     let style = if value.is_some() {
@@ -282,20 +287,62 @@ fn fmt_timing(result: &OpResult) -> String {
     let dim = Style::new().fg(Color::BrightBlack).dim();
     match result.mt_timing {
         Some(ref t) if t.is_valid() => {
-            let p95 = paint_stdout(format!("{:>5.1}", t.p95_us), Style::new().fg(Color::BrightWhite));
-            let p99 = paint_stdout(format!("{:>5.1}", t.p99_us), Style::new().fg(Color::BrightWhite));
+            let p95 =
+                paint_stdout(format!("{:>5.1}", t.p95_us), Style::new().fg(Color::BrightWhite));
+            let p99 =
+                paint_stdout(format!("{:>5.1}", t.p99_us), Style::new().fg(Color::BrightWhite));
             let cv_str = if t.cv_pct > 5.0 {
                 paint_stdout(format!("{:>4.1}%", t.cv_pct), Style::new().fg(Color::Yellow).bold())
             } else {
                 paint_stdout(format!("{:>4.1}%", t.cv_pct), Style::new().fg(Color::Green))
             };
             format!("{p95} {} {p99} {} {cv_str}", sep, sep)
-        }
+        },
         _ => {
             let dash = paint_stdout("   —", dim);
             let dash2 = paint_stdout("   —", dim);
             let dash3 = paint_stdout("   —", dim);
             format!("{dash} {} {dash2} {} {dash3}", sep, sep)
-        }
+        },
     }
+}
+
+/// Format profile columns for a result row. Returns "occ% │ regs │ bottleneck" or "   — │   — │ —".
+fn fmt_profile(
+    result: &OpResult,
+    profile_map: &Option<std::collections::HashMap<(String, String), ProfileRow>>,
+) -> String {
+    let sep = col_sep();
+    let dim = Style::new().fg(Color::BrightBlack).dim();
+    let dash_occ = paint_stdout("   —", dim);
+    let dash_regs = paint_stdout("   —", dim);
+    let dash_bn = paint_stdout(" —", dim);
+    let not_available = format!("{dash_occ} {sep} {dash_regs} {sep} {dash_bn}");
+
+    let map = match profile_map {
+        Some(m) => m,
+        None => return not_available,
+    };
+
+    // Parse dtype label from shape string (last word).
+    let dtype_label = result.shape().rsplit_once(' ').map(|(_, last)| last).unwrap_or("f32");
+    let key = (result.op_display(), dtype_label.to_string());
+    let p = match map.get(&key) {
+        Some(p) => p,
+        None => return not_available,
+    };
+
+    let occ_color = if p.occ_pct >= 100.0 {
+        Color::Green
+    } else if p.occ_pct >= 60.0 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
+    let occ = paint_stdout(format!("{:>4.0}%", p.occ_pct), Style::new().fg(occ_color).bold());
+    let regs =
+        paint_stdout(format!("{:>3}r", p.regs_per_thread), Style::new().fg(Color::BrightWhite));
+    let bn =
+        paint_stdout(format!("{:>17}", p.bottleneck), Style::new().fg(Color::BrightBlack).dim());
+    format!("{occ} {sep} {regs} {sep} {bn}")
 }

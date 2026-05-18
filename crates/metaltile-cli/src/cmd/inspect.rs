@@ -13,14 +13,16 @@
 use std::{collections::BTreeMap, str::FromStr};
 
 use metaltile_codegen::generator_for_mode;
-use metaltile_std::{bench_types::DType, spec::BenchSpec};
+use metaltile_std::{
+    bench_types::DType,
+    spec::{BenchSpec, effective_mode},
+};
 
 use crate::{
     InspectArgs,
     matches_filter,
     term::{Color, Style, paint_stdout},
 };
-use metaltile_std::spec::effective_mode;
 
 pub fn run(args: &InspectArgs) {
     let dir = &args.dir;
@@ -86,10 +88,7 @@ pub fn run(args: &InspectArgs) {
 
     // No filter: list all kernels
     let Some(filter) = filter else {
-        eprintln!(
-            "{}",
-            paint_stdout("tile inspect", Style::new().fg(Color::Cyan).bold()),
-        );
+        eprintln!("{}", paint_stdout("tile inspect", Style::new().fg(Color::Cyan).bold()),);
         eprintln!();
         for (name, (spec, dtypes)) in &sorted {
             let dtype_str = dtypes.iter().map(|dt| dt.label()).collect::<Vec<_>>().join("/");

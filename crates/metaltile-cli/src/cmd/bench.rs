@@ -2,27 +2,22 @@
 
 use std::collections::HashMap;
 
-use metaltile_codegen::passes::{self, occupancy::{self, Bottleneck}};
+use metaltile_codegen::passes::{
+    self,
+    occupancy::{self, Bottleneck},
+};
 use metaltile_std::{
-    bench_types::{
-        CorrectnessStatus,
-        DType,
-        OpResult,
-        set_result_reporter,
-        validate_results,
-    },
+    bench_types::{CorrectnessStatus, OpResult, set_result_reporter, validate_results},
+    run_spec::run as run_spec,
+    runner::GpuRunner,
     spec::BenchSpec,
 };
 
 use crate::{
-    suite_printer::{ProfileRow, SuitePrinter},
     BenchArgs,
     matches_filter,
+    suite_printer::{ProfileRow, SuitePrinter},
     term::{Color, Style, paint_stderr, paint_stdout},
-};
-use metaltile_std::{
-    run_spec::run as run_spec,
-    runner::GpuRunner,
 };
 
 pub fn run(args: &BenchArgs) {
@@ -53,16 +48,15 @@ pub fn run(args: &BenchArgs) {
     let mut all: Vec<OpResult> = Vec::new();
     let mut matched_filter = false;
 
-    // When -v, compute occupancy/register profile for each op (CPU-only, fast).
-    let profile_map: Option<HashMap<String, ProfileRow>> = if verbose > 0 {
-        Some(compute_profiles(filter.as_deref()))
-    } else {
-        None
-    };
+    // When -v, compute occupancy/register profile for each op+dtype (CPU-only, fast).
+    let profile_map: Option<HashMap<(String, String), ProfileRow>> =
+        if verbose > 0 { Some(compute_profiles(filter.as_deref())) } else { None };
 
     let mut printer = SuitePrinter::new(true);
     printer.set_verbose(verbose);
-    if let Some(m) = &profile_map { printer.set_profile_map((*m).clone()); }
+    if let Some(m) = &profile_map {
+        printer.set_profile_map(m.clone());
+    }
     {
         let mut report = |result: &OpResult| {
             if matches_filter(filter.as_deref(), result.op()) {
@@ -160,10 +154,7 @@ pub fn run(args: &BenchArgs) {
         ));
     }
     if let Some(p) = avg_pct {
-        parts.push(format!(
-            "avg {}",
-            paint_stdout(format!("{p:.0}% MT"), pct_style(p)),
-        ));
+        parts.push(format!("avg {}", paint_stdout(format!("{p:.0}% MT"), pct_style(p)),));
     }
     if checked_count > 0 {
         let corr_style = if equiv_fail == 0 {
@@ -290,43 +281,48 @@ fn pct_style(pct: f64) -> Style {
 
 /// Compile-time profile for each op (first dtypes entry, usually f32).
 /// Runs the standard optimization pipeline + liveness + occupancy estimate.
-fn compute_profiles(filter: Option<&str>) -> HashMap<String, ProfileRow> {
+fn compute_profiles(filter: Option<&str>) -> HashMap<(String, String), ProfileRow> {
+    // Key: (op_display, dtype_label), e.g. ("unary (acos)", "f32")
     let mut map = HashMap::new();
     let mut specs: Vec<&BenchSpec> = inventory::iter::<BenchSpec>.into_iter().collect();
     specs.sort_unstable_by_key(|s| (s.op, s.subop));
     for spec in specs {
-        if !matches_filter(filter, spec.op) { continue; }
-        let dt = spec.dtypes.first().copied().unwrap_or(DType::F32);
-        let mut k = (spec.kernel_ir)(dt);
-        k.mode = spec.dispatch.default_mode(spec.shapes);
-        if passes::run_passes(&mut k, &passes::standard_pipeline()).is_err() {
+        if !matches_filter(filter, spec.op) {
             continue;
         }
-        let reg_est = passes::register_estimate::estimate_registers(&k);
-        let candidates: Vec<(u32, Option<u32>)> =
-            [64u32, 128, 256, 512, 1024].iter().map(|&s| (s, None)).collect();
-        let (occ_pct, bottleneck) =
-            if let Some((_tg, est)) = occupancy::best_threadgroup_size(&k, &candidates) {
-                (est.occupancy_pct, est.bottleneck)
-            } else {
-                continue;
-            };
-        let bottleneck_label = match bottleneck {
-            Bottleneck::ThreadLimited => "thread-limited",
-            Bottleneck::RegisterLimited => "register-limited",
-            Bottleneck::MemoryLimited => "tgmem-limited",
-            _ => "unknown",
-        };
         let op_display = if spec.subop.is_empty() {
             spec.op.to_string()
         } else {
             format!("{} ({})", spec.op, spec.subop)
         };
-        map.insert(op_display, ProfileRow {
-            occ_pct,
-            regs_per_thread: reg_est.regs_per_thread,
-            bottleneck: bottleneck_label,
-        });
+        for &dt in spec.dtypes {
+            let mut k = (spec.kernel_ir)(dt);
+            k.mode = spec.dispatch.default_mode(spec.shapes);
+            if passes::run_passes(&mut k, &passes::standard_pipeline()).is_err() {
+                continue;
+            }
+            let reg_est = passes::register_estimate::estimate_registers(&k);
+            let candidates: Vec<(u32, Option<u32>)> =
+                [64u32, 128, 256, 512, 1024].iter().map(|&s| (s, None)).collect();
+            let (occ_pct, bottleneck) =
+                if let Some((_tg, est)) = occupancy::best_threadgroup_size(&k, &candidates) {
+                    (est.occupancy_pct, est.bottleneck)
+                } else {
+                    continue;
+                };
+            let bottleneck_label = match bottleneck {
+                Bottleneck::ThreadLimited => "thread-limited",
+                Bottleneck::RegisterLimited => "register-limited",
+                Bottleneck::MemoryLimited => "tgmem-limited",
+                _ => "unknown",
+            };
+            let dtype_label = metaltile_std::bench_types::dtype_label(dt).to_string();
+            map.insert((op_display.clone(), dtype_label), ProfileRow {
+                occ_pct,
+                regs_per_thread: reg_est.regs_per_thread,
+                bottleneck: bottleneck_label,
+            });
+        }
     }
     map
 }
@@ -345,8 +341,14 @@ mod tests {
     #[test]
     fn row_without_subop_matches_legacy_schema() {
         // Pre-existing consumers rely on this exact key set + ordering.
-        let row =
-            format_result_row("rms_norm", None, "B=1024 N=4096 f32", "GB/s", Some(323.9), Some(325.6));
+        let row = format_result_row(
+            "rms_norm",
+            None,
+            "B=1024 N=4096 f32",
+            "GB/s",
+            Some(323.9),
+            Some(325.6),
+        );
         assert_eq!(
             row,
             r#"{"op":"rms_norm","shape":"B=1024 N=4096 f32","metric":"GB/s","ref":323.900,"mt":325.600}"#,
@@ -380,8 +382,7 @@ mod tests {
         // Shape strings sometimes embed `=`, spaces, and parens; ensure they
         // round-trip via Debug-quoting so the row is valid JSON.
         let row = format_result_row("foo", None, "k=2 (warm)", "GB/s", Some(1.0), Some(2.0));
-        let parsed: serde_json::Value =
-            serde_json::from_str(&row).expect("row must be valid JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&row).expect("row must be valid JSON");
         assert_eq!(parsed["shape"], "k=2 (warm)");
     }
 }
