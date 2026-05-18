@@ -65,9 +65,16 @@ impl super::Pass for UnrollPass {
 
         unroll_block(&mut kernel.body, &mut kernel.blocks, &mut next_vid, self.factor);
 
+        // Iterate nested blocks. `unroll_block` removes inlined loop
+        // bodies from `kernel.blocks` (see line ~226), so a BlockId we
+        // captured before the body's parent ran may no longer exist by
+        // the time we get to it — use `.remove(...)` + `if let Some(...)`
+        // rather than `.unwrap()` so the pass tolerates that race.
         let block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
         for bid in &block_ids {
-            let mut block = kernel.blocks.remove(bid).unwrap();
+            let Some(mut block) = kernel.blocks.remove(bid) else {
+                continue;
+            };
             unroll_block(&mut block, &mut kernel.blocks, &mut next_vid, self.factor);
             kernel.blocks.insert(*bid, block);
         }
@@ -384,5 +391,47 @@ mod tests {
                 vid.as_u32()
             );
         }
+    }
+
+    #[test]
+    fn tolerates_stale_block_id_snapshot() {
+        // The nested-block iteration in `run()` snapshots
+        // `kernel.blocks.keys()` once, then iterates. Inside the loop,
+        // `unroll_block` may remove a body block from `kernel.blocks`
+        // (line ~226 — `blocks.remove(&plan.body_id)`). If the removed
+        // ID is a body of a block we haven't processed yet, the next
+        // iteration's `kernel.blocks.remove(bid)` finds nothing.
+        //
+        // The old code used `.unwrap()` there and panicked. Regression
+        // test for `mt_affine_quantize_int8` / `mt_rope_f16`: build a
+        // kernel where block `b1` contains a loop whose body is `b2`,
+        // so unrolling `b1` removes `b2` before the loop reaches it.
+        let mut k = Kernel::new("nested_block_unroll");
+        // b0 (kernel body): trivial.
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(0));
+
+        // b2: leaf body — a single trivial op.
+        let mut b2 = Block::new(BlockId::new(2));
+        b2.push_op(Op::Const { value: 99 }, ValueId::new(99));
+        let b2_id = k.add_block(b2);
+
+        // b1: contains a unrollable loop over b2, plus the start/end/step
+        // consts so unroll can read the trip count from b1 itself.
+        let mut b1 = Block::new(BlockId::new(1));
+        b1.push_op(Op::Const { value: 0 }, ValueId::new(50));
+        b1.push_op(Op::Const { value: 2 }, ValueId::new(51));
+        b1.push_op(Op::Const { value: 1 }, ValueId::new(52));
+        b1.push_op_no_result(Op::Loop {
+            var: VarId::new(1),
+            start: ValueId::new(50),
+            end: ValueId::new(51),
+            step: ValueId::new(52),
+            body: b2_id,
+        });
+        k.add_block(b1);
+
+        // Before the fix, this panicked with `Option::unwrap` on `None`
+        // when the loop reached b2 after b1's unroll removed it.
+        UnrollPass::default().run(&mut k).expect("unroll must not panic on stale snapshot");
     }
 }

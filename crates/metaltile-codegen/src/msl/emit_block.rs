@@ -655,7 +655,7 @@ impl MslGenerator {
                 // hierarchical-scan pattern depended on the exclusive sum
                 // and was producing garbage on GPU dispatch. Min/Max scans
                 // aren't shipped by Metal as built-ins; emit a placeholder
-                // for them rather than silently mis-compile and add a
+                // for them rather than silently miscompile and add a
                 // TODO so callers know to lower to a butterfly shuffle if
                 // they need them.
                 Op::Scan { value, axis: _, op: rk, exclusive } => {
