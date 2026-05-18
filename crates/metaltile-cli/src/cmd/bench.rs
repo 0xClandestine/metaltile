@@ -370,17 +370,15 @@ mod tests {
     #[test]
     fn summary_counts_per_category() {
         let b = OpBench::new("op_a", "GB/s");
-        let implemented_correct =
-            b.result("shape_a", Some(100.0), Some(95.0), Some(pass_equiv()));
-        let implemented_wrong =
-            b.result("shape_b", Some(100.0), Some(40.0), Some(fail_equiv()));
+        let implemented_correct = b.result("shape_a", Some(100.0), Some(95.0), Some(pass_equiv()));
+        let implemented_wrong = b.result("shape_b", Some(100.0), Some(40.0), Some(fail_equiv()));
         let nyi = b.result("shape_c", Some(100.0), None, None);
 
         let s = summarize(&[implemented_correct, implemented_wrong, nyi]);
         assert_eq!(s.total, 3);
-        assert_eq!(s.implemented, 2);  // _correct + _wrong
-        assert_eq!(s.correct, 1);      // only _correct
-        assert_eq!(s.unchecked, 0);    // both implemented rows had equiv
+        assert_eq!(s.implemented, 2); // _correct + _wrong
+        assert_eq!(s.correct, 1); // only _correct
+        assert_eq!(s.unchecked, 0); // both implemented rows had equiv
     }
 
     #[test]

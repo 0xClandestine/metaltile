@@ -141,9 +141,16 @@ mod tests {
     use super::*;
 
     const ALL: &[DType] = &[
-        DType::F32, DType::F16, DType::BF16,
-        DType::I32, DType::I8, DType::I4,
-        DType::U8, DType::U32, DType::U64, DType::I64,
+        DType::F32,
+        DType::F16,
+        DType::BF16,
+        DType::I32,
+        DType::I8,
+        DType::I4,
+        DType::U8,
+        DType::U32,
+        DType::U64,
+        DType::I64,
         DType::Bool,
     ];
 
@@ -167,16 +174,27 @@ mod tests {
         assert!(DType::F32.is_float());
         assert!(DType::F16.is_float());
         assert!(DType::BF16.is_float());
-        for &dt in [DType::I32, DType::I8, DType::I4, DType::U8, DType::U32,
-                    DType::U64, DType::I64, DType::Bool].iter() {
+        for &dt in [
+            DType::I32,
+            DType::I8,
+            DType::I4,
+            DType::U8,
+            DType::U32,
+            DType::U64,
+            DType::I64,
+            DType::Bool,
+        ]
+        .iter()
+        {
             assert!(!dt.is_float(), "{dt:?} should not be float");
         }
     }
 
     #[test]
     fn is_integer_classification() {
-        for &dt in [DType::I32, DType::I8, DType::I4, DType::U8, DType::U32,
-                    DType::U64, DType::I64].iter() {
+        for &dt in
+            [DType::I32, DType::I8, DType::I4, DType::U8, DType::U32, DType::U64, DType::I64].iter()
+        {
             assert!(dt.is_integer(), "{dt:?} should be integer");
         }
         // Floats and Bool are not classified as integer.

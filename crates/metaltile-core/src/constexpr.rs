@@ -157,9 +157,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "constexpr 'MISSING' not resolved")]
-    fn values_get_panics_on_unresolved_non_numeric() {
-        ConstExprValues::new().get("MISSING");
-    }
+    fn values_get_panics_on_unresolved_non_numeric() { ConstExprValues::new().get("MISSING"); }
 
     #[test]
     fn values_iter_yields_inserted_pairs() {
