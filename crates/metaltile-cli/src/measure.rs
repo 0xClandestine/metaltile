@@ -143,11 +143,22 @@ pub fn bench_gbps(
     grid: [usize; 3],
     tpg: [usize; 3],
     bytes: f64,
+) -> Option<(f64, BenchStats)> {
+    runner.flush_slc();
+    let stats = runner.bench(kernel, buffers, grid, tpg, 5, 20);
+    to_gbps(&stats, bytes).map(|x| (x, stats))
+}
+
+/// Like bench_gbps but discards timing stats (used when not needed).
+pub fn bench_gbps_only(
+    runner: &GpuRunner,
+    kernel: &CompiledKernel,
+    buffers: &[&GpuBuffer],
+    grid: [usize; 3],
+    tpg: [usize; 3],
+    bytes: f64,
 ) -> Option<f64> {
     runner.flush_slc();
-    // 5 warmup iterations ensure the working set is fully resident in SLC
-    // before any measurements are taken; 20 measurement iterations give a
-    // stable distribution from which the median is drawn.
     to_gbps(&runner.bench(kernel, buffers, grid, tpg, 5, 20), bytes)
 }
 

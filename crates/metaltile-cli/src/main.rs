@@ -62,6 +62,9 @@ struct BenchArgs {
     /// Only run kernels whose name contains this text
     #[arg(long = "filter", short = 'f')]
     filter: Option<String>,
+    /// Show occupancy and register profile (-v) and GPU timing stats (-vv).
+    #[arg(short = 'v', action = clap::ArgAction::Count)]
+    verbose: u8,
     /// Write results as JSON to this file
     #[arg(long = "json", short = 'o')]
     json: Option<String>,

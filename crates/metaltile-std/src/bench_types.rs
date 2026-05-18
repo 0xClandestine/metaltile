@@ -4,6 +4,7 @@ use metaltile_codegen::msl::MslGenerator;
 pub use metaltile_core::dtype::DType;
 use metaltile_core::ir::{Kernel, KernelMode};
 
+use crate::stats::BenchStats;
 use crate::term::{Color, Style, paint_stdout};
 
 // ── Dtype variant helpers ─────────────────────────────────────────────────────
@@ -266,6 +267,21 @@ impl OpBench {
         mt_perf: Option<f64>,
         equiv: Option<EquivResult>,
     ) -> OpResult {
+        self.result_sub_timed(subop, shape, ref_perf, mt_perf, equiv, None, None)
+    }
+
+    /// Like `result_sub()` but with optional GPU timing stats for -vv output.
+    #[allow(clippy::too_many_arguments)]
+    pub fn result_sub_timed(
+        &self,
+        subop: Option<impl Into<String>>,
+        shape: impl Into<String>,
+        ref_perf: Option<f64>,
+        mt_perf: Option<f64>,
+        equiv: Option<EquivResult>,
+        mt_timing: Option<BenchStats>,
+        ref_timing: Option<BenchStats>,
+    ) -> OpResult {
         let shape = shape.into();
         if mt_perf.is_some() && equiv.is_none() {
             panic!("implemented benchmark '{}' [{}] is missing correctness", self.op, shape);
@@ -278,6 +294,8 @@ impl OpBench {
             ref_perf,
             mt_perf,
             equiv,
+            mt_timing,
+            ref_timing,
         };
         report_result(&result);
         result
@@ -312,6 +330,10 @@ pub struct OpResult {
     mt_perf: Option<f64>,
     /// Numerical equivalence check result.
     equiv: Option<EquivResult>,
+    /// GPU timing stats for MetalTile (-vv mode only).
+    pub mt_timing: Option<BenchStats>,
+    /// GPU timing stats for reference (-vv mode only).
+    pub ref_timing: Option<BenchStats>,
 }
 
 impl OpResult {
@@ -443,6 +465,18 @@ pub struct SuitePrinter {
     last_op_display: Option<String>,
     term_width: usize,
     cur_metric: Option<&'static str>,
+    /// Shows profile info (occ%, regs, bottleneck) in op headers when Some.
+    profile_map: Option<std::collections::HashMap<String, ProfileRow>>,
+    /// Shows timing columns (p95μs, cv%) when > 0 and results carry timing.
+    verbose: u8,
+}
+
+/// Compile-time profile snippet for one kernel (used by bench -v).
+#[derive(Clone)]
+pub struct ProfileRow {
+    pub occ_pct: f64,
+    pub regs_per_thread: usize,
+    pub bottleneck: &'static str,
 }
 
 impl SuitePrinter {
@@ -453,10 +487,16 @@ impl SuitePrinter {
             last_op_display: None,
             term_width: term_width(),
             cur_metric: None,
+            profile_map: None,
+            verbose: 0,
         }
     }
 
-    pub fn set_verbose(&mut self, v: bool) { let _ = v; }
+    pub fn set_verbose(&mut self, v: u8) { self.verbose = v; }
+
+    pub fn set_profile_map(&mut self, m: std::collections::HashMap<String, ProfileRow>) {
+        self.profile_map = Some(m);
+    }
 
     pub fn set_term_width(&mut self, w: usize) { self.term_width = w.clamp(60, 200); }
 
@@ -490,7 +530,6 @@ impl SuitePrinter {
         let (shape_w, ref_w, mt_w, pct_w, ck_w) =
             sub_table_widths(self.term_width, metric, self.show_correctness);
 
-        let op = paint_stdout(&result.op_display(), Style::new().fg(Color::Cyan).bold());
         let sep = col_sep();
         let bold = Style::new().fg(Color::BrightWhite).bold();
 
@@ -511,12 +550,43 @@ impl SuitePrinter {
                 paint_stdout(&pad_right("Ck", ck_w), bold),
             ));
         }
-        println!("  {op}");
+        if self.verbose >= 2 {
+            let tw = 7;  // p95μs
+            let cw = 5;  // cv%
+            hdr.push_str(&format!(
+                " {} {} {} {}",
+                sep,
+                paint_stdout(&pad_right("p95μs", tw), bold),
+                sep,
+                paint_stdout(&pad_right(" cv%", cw), bold),
+            ));
+        }
+
+        // Op line: name [profile if available]
+        let op = paint_stdout(&result.op_display(), Style::new().fg(Color::Cyan).bold());
+        if let Some(ref map) = self.profile_map {
+            if let Some(p) = map.get(&result.op_display()) {
+                let occ_color = if p.occ_pct >= 100.0 { Color::Green }
+                    else if p.occ_pct >= 60.0 { Color::Yellow }
+                    else { Color::Red };
+                let occ = paint_stdout(format!("{:.1}%", p.occ_pct), Style::new().fg(occ_color).bold());
+                let regs = paint_stdout(format!("{}r", p.regs_per_thread), Style::new().fg(Color::BrightWhite));
+                let bn = paint_stdout(p.bottleneck, Style::new().fg(Color::BrightBlack).dim());
+                println!("  {op} · occ={occ} · regs={regs} · {bn}");
+            } else {
+                println!("  {op}");
+            }
+        } else {
+            println!("  {op}");
+        }
         println!("{hdr}");
 
         let n_cols: usize = if self.show_correctness { 5 } else { 4 };
         let gaps = (n_cols.saturating_sub(1)) * 3;
-        let total_w = 4 + shape_w + gaps + ref_w + mt_w + pct_w + if self.show_correctness { ck_w } else { 0 };
+        let extra_cols = if self.verbose >= 2 { 7 + 3 + 5 + 3 } else { 0 }; // p95μs + gaps + cv% + gaps
+        let total_w = 4 + shape_w + gaps + ref_w + mt_w + pct_w
+            + if self.show_correctness { ck_w } else { 0 }
+            + extra_cols;
         let sep_line = paint_stdout("─".repeat(total_w), Style::new().fg(Color::BrightBlack).dim());
         println!("  {sep_line}");
     }
@@ -539,9 +609,19 @@ impl SuitePrinter {
         if self.show_correctness {
             let ck_icon = correctness_icon(&result.correctness_status());
             let ck_cell = style_correctness(&pad_right(&ck_icon, ck_w), result.correctness_status());
-            println!("  {shape} {sep} {ref_cell} {sep} {mt_cell} {sep} {pct_cell} {sep} {ck_cell}");
+            if self.verbose >= 2 {
+                let t = fmt_timing(result);
+                println!("  {shape} {sep} {ref_cell} {sep} {mt_cell} {sep} {pct_cell} {sep} {ck_cell} {sep} {t}");
+            } else {
+                println!("  {shape} {sep} {ref_cell} {sep} {mt_cell} {sep} {pct_cell} {sep} {ck_cell}");
+            }
         } else {
-            println!("  {shape} {sep} {ref_cell} {sep} {mt_cell} {sep} {pct_cell}");
+            if self.verbose >= 2 {
+                let t = fmt_timing(result);
+                println!("  {shape} {sep} {ref_cell} {sep} {mt_cell} {sep} {pct_cell} {sep} {t}");
+            } else {
+                println!("  {shape} {sep} {ref_cell} {sep} {mt_cell} {sep} {pct_cell}");
+            }
         }
     }
 
@@ -636,6 +716,29 @@ fn style_correctness(text: &str, status: CorrectnessStatus) -> String {
     };
     paint_stdout(text, style)
 }
+
+/// Format timing columns for a result row. Returns "p95μs │ cv%" or "    — │   —".
+fn fmt_timing(result: &OpResult) -> String {
+    let sep = col_sep();
+    let dim = Style::new().fg(Color::BrightBlack).dim();
+    match result.mt_timing {
+        Some(ref t) if t.is_valid() => {
+            let p95 = paint_stdout(format!("{:>6.1}", t.p95_us), Style::new().fg(Color::BrightWhite));
+            let cv_str = if t.cv_pct > 5.0 {
+                paint_stdout(format!("{:>4.1}%", t.cv_pct), Style::new().fg(Color::Yellow).bold())
+            } else {
+                paint_stdout(format!("{:>4.1}%", t.cv_pct), Style::new().fg(Color::Green))
+            };
+            format!("{p95} {} {cv_str}", sep)
+        }
+        _ => {
+            let dash = paint_stdout("    —", dim);
+            let dash2 = paint_stdout("   —", dim);
+            format!("{dash} {} {dash2}", sep)
+        }
+    }
+}
+
 // ── Shared bench abstractions ─────────────────────────────────────────────────
 
 /// Generate MSL for an elementwise kernel IR produced by `make_ir`.
@@ -753,6 +856,8 @@ mod tests {
             ref_perf: Some(1.0),
             mt_perf: Some(2.0),
             equiv: None,
+            mt_timing: None,
+            ref_timing: None,
         };
         let unavailable = sample_result(None, None);
         assert_eq!(unchecked.correctness_status(), CorrectnessStatus::Unchecked);
@@ -810,6 +915,8 @@ mod tests {
             ref_perf: Some(1.0),
             mt_perf: Some(2.0),
             equiv: None,
+            mt_timing: None,
+            ref_timing: None,
         };
         let err = validate_results(&[unchecked]).expect_err("unchecked rows should fail");
         assert!(err.contains("sample [shape]"));

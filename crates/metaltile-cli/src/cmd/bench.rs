@@ -1,9 +1,14 @@
 //! `tile bench` — Benchmark suite: MetalTile vs MLX reference.
 
+use std::collections::HashMap;
+
+use metaltile_codegen::passes::{self, occupancy::{self, Bottleneck}};
 use metaltile_std::{
     bench_types::{
         CorrectnessStatus,
+        DType,
         OpResult,
+        ProfileRow,
         SuitePrinter,
         set_result_reporter,
         validate_results,
@@ -22,6 +27,7 @@ use crate::{
 pub fn run(args: &BenchArgs) {
     let json_out = &args.json;
     let filter = &args.filter;
+    let verbose = args.verbose;
 
     let runner = match GpuRunner::new() {
         Ok(r) => r,
@@ -45,7 +51,17 @@ pub fn run(args: &BenchArgs) {
     // Run all ops, optionally narrowed to a single substring filter.
     let mut all: Vec<OpResult> = Vec::new();
     let mut matched_filter = false;
+
+    // When -v, compute occupancy/register profile for each op (CPU-only, fast).
+    let profile_map: Option<HashMap<String, ProfileRow>> = if verbose > 0 {
+        Some(compute_profiles(filter.as_deref()))
+    } else {
+        None
+    };
+
     let mut printer = SuitePrinter::new(true);
+    printer.set_verbose(verbose);
+    if let Some(m) = &profile_map { printer.set_profile_map((*m).clone()); }
     {
         let mut report = |result: &OpResult| {
             if matches_filter(filter.as_deref(), result.op()) {
@@ -239,4 +255,49 @@ fn pct_style(pct: f64) -> Style {
     } else {
         Style::new().fg(Color::Red).bold()
     }
+}
+
+// ── Profile helper for -v / -vv ───────────────────────────────────────
+
+/// Compile-time profile for each op (first dtypes entry, usually f32).
+/// Runs the standard optimization pipeline + liveness + occupancy estimate.
+fn compute_profiles(filter: Option<&str>) -> HashMap<String, ProfileRow> {
+    let mut map = HashMap::new();
+    let mut specs: Vec<&BenchSpec> = inventory::iter::<BenchSpec>.into_iter().collect();
+    specs.sort_unstable_by_key(|s| (s.op, s.subop));
+    for spec in specs {
+        if !matches_filter(filter, spec.op) { continue; }
+        let dt = spec.dtypes.first().copied().unwrap_or(DType::F32);
+        let mut k = (spec.kernel_ir)(dt);
+        k.mode = spec.dispatch.default_mode(spec.shapes);
+        if let Err(_) = passes::run_passes(&mut k, &passes::standard_pipeline()) {
+            continue;
+        }
+        let reg_est = passes::register_estimate::estimate_registers(&k);
+        let candidates: Vec<(u32, Option<u32>)> =
+            [64u32, 128, 256, 512, 1024].iter().map(|&s| (s, None)).collect();
+        let (occ_pct, bottleneck) =
+            if let Some((_tg, est)) = occupancy::best_threadgroup_size(&k, &candidates) {
+                (est.occupancy_pct, est.bottleneck)
+            } else {
+                continue;
+            };
+        let bottleneck_label = match bottleneck {
+            Bottleneck::ThreadLimited => "thread-limited",
+            Bottleneck::RegisterLimited => "register-limited",
+            Bottleneck::MemoryLimited => "tgmem-limited",
+            _ => "unknown",
+        };
+        let op_display = if spec.subop.is_empty() {
+            spec.op.to_string()
+        } else {
+            format!("{} ({})", spec.op, spec.subop)
+        };
+        map.insert(op_display, ProfileRow {
+            occ_pct,
+            regs_per_thread: reg_est.regs_per_thread,
+            bottleneck: bottleneck_label,
+        });
+    }
+    map
 }
