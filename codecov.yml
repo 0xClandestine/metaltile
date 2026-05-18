@@ -14,9 +14,13 @@ coverage:
         threshold: 1%
         if_ci_failed: success
 
-# Per-crate floors. All `informational: true` for now so PRs stay green while
-# the test-coverage arc (Phase 1+ in the coverage plan) lands. Flip to false
-# once a crate consistently sits above its floor.
+# Per-crate gates. Each crate ratchets against its own current % via
+# `target: auto`, so coverage can only go up. Aspirational floors stay
+# documented in CONTRIBUTING.md `Test coverage` section but aren't
+# enforced as numeric targets here — that just produced noisy red checks
+# while crates were still ramping. The ratchet is the real teeth: any
+# PR that drops a crate's coverage by more than `threshold: 0.5%` fails
+# its flag check.
 flag_management:
   default_rules:
     carryforward: true
@@ -26,46 +30,41 @@ flag_management:
         - crates/metaltile-codegen/
       statuses:
         - type: project
-          target: 90%
-          threshold: 0%
+          target: auto
+          threshold: 0.5%
           if_ci_failed: success
-          informational: true
     - name: core
       paths:
         - crates/metaltile-core/
       statuses:
         - type: project
-          target: 90%
-          threshold: 0%
+          target: auto
+          threshold: 0.5%
           if_ci_failed: success
-          informational: true
     - name: macros
       paths:
         - crates/metaltile-macros/
       statuses:
         - type: project
-          target: 92%
-          threshold: 0%
+          target: auto
+          threshold: 0.5%
           if_ci_failed: success
-          informational: true
     - name: runtime
       paths:
         - crates/metaltile-runtime/
       statuses:
         - type: project
-          target: 85%
-          threshold: 0%
+          target: auto
+          threshold: 0.5%
           if_ci_failed: success
-          informational: true
     - name: cli
       paths:
         - crates/metaltile-cli/
       statuses:
         - type: project
-          target: 80%
-          threshold: 0%
+          target: auto
+          threshold: 0.5%
           if_ci_failed: success
-          informational: true
 
 # Files excluded from the line-coverage denominator:
 #   - facade re-exports (no logic)
