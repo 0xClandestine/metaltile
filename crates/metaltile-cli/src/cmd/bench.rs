@@ -227,12 +227,8 @@ fn save_json(device: &str, results: &[OpResult], path: &str) {
     for (i, r) in results.iter().enumerate() {
         let comma = if i + 1 < results.len() { "," } else { "" };
         out.push_str(&format!(
-            "  {{\"op\":{:?},\"shape\":{:?},\"metric\":{:?},\"ref\":{},\"mt\":{}}}{}\n",
-            r.op(),
-            r.shape(),
-            r.metric(),
-            json_f(r.ref_perf()),
-            json_f(r.mt_perf()),
+            "  {}{}\n",
+            format_result_row(r.op(), r.subop(), r.shape(), r.metric(), r.ref_perf(), r.mt_perf()),
             comma
         ));
     }
@@ -273,6 +269,38 @@ fn summarize(results: &[OpResult]) -> Summary {
             .filter(|r| matches!(r.correctness_status(), CorrectnessStatus::Passed { .. }))
             .count(),
         unchecked: results.iter().filter(|r| r.is_unchecked()).count(),
+    }
+}
+
+/// Format one bench result as a single-line JSON object. The `subop` field is
+/// emitted only when present, keeping the schema additive — existing consumers
+/// that only read `op`/`shape`/`metric`/`ref`/`mt` are unaffected.
+fn format_result_row(
+    op: &str,
+    subop: Option<&str>,
+    shape: &str,
+    metric: &str,
+    ref_perf: Option<f64>,
+    mt_perf: Option<f64>,
+) -> String {
+    match subop {
+        Some(s) => format!(
+            "{{\"op\":{:?},\"subop\":{:?},\"shape\":{:?},\"metric\":{:?},\"ref\":{},\"mt\":{}}}",
+            op,
+            s,
+            shape,
+            metric,
+            json_f(ref_perf),
+            json_f(mt_perf),
+        ),
+        None => format!(
+            "{{\"op\":{:?},\"shape\":{:?},\"metric\":{:?},\"ref\":{},\"mt\":{}}}",
+            op,
+            shape,
+            metric,
+            json_f(ref_perf),
+            json_f(mt_perf),
+        ),
     }
 }
 
@@ -353,5 +381,55 @@ mod tests {
         assert_eq!(s.implemented, 0);
         assert_eq!(s.correct, 0);
         assert_eq!(s.unchecked, 0);
+    }
+
+    #[test]
+    fn json_f_formats_finite_and_none() {
+        assert_eq!(json_f(Some(12.345)), "12.345");
+        assert_eq!(json_f(Some(0.0)), "0.000");
+        assert_eq!(json_f(None), "null");
+    }
+
+    #[test]
+    fn row_without_subop_matches_legacy_schema() {
+        // Pre-existing consumers rely on this exact key set + ordering.
+        let row =
+            format_result_row("rms_norm", None, "B=1024 N=4096 f32", "GB/s", Some(323.9), Some(325.6));
+        assert_eq!(
+            row,
+            r#"{"op":"rms_norm","shape":"B=1024 N=4096 f32","metric":"GB/s","ref":323.900,"mt":325.600}"#,
+        );
+        assert!(!row.contains("\"subop\""));
+    }
+
+    #[test]
+    fn row_with_subop_emits_disambiguated_field() {
+        // The motivating bug: many `unary` subops collapse to identical
+        // (op, shape) tuples in the legacy schema. The `subop` field
+        // disambiguates them without breaking schema additively.
+        let row =
+            format_result_row("unary", Some("sin"), "N=64M f32", "GB/s", Some(544.8), Some(114.5));
+        assert_eq!(
+            row,
+            r#"{"op":"unary","subop":"sin","shape":"N=64M f32","metric":"GB/s","ref":544.800,"mt":114.500}"#,
+        );
+    }
+
+    #[test]
+    fn row_handles_missing_perf_values() {
+        let row = format_result_row("sdpa", Some("sdpa_vector"), "H=8 N=2048", "GB/s", None, None);
+        assert!(row.contains(r#""ref":null"#));
+        assert!(row.contains(r#""mt":null"#));
+        assert!(row.contains(r#""subop":"sdpa_vector""#));
+    }
+
+    #[test]
+    fn row_quotes_strings_containing_special_chars() {
+        // Shape strings sometimes embed `=`, spaces, and parens; ensure they
+        // round-trip via Debug-quoting so the row is valid JSON.
+        let row = format_result_row("foo", None, "k=2 (warm)", "GB/s", Some(1.0), Some(2.0));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&row).expect("row must be valid JSON");
+        assert_eq!(parsed["shape"], "k=2 (warm)");
     }
 }
