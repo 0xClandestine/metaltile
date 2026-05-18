@@ -2,7 +2,7 @@
 //! decode step and the depthwise causal-conv streaming step.
 //!
 //! `mt_ssm_step` is a faithful port of MLX's `ssm_step<T, Dh, Ds, H, G>`
-//! from Eric's `mlx` fork (`alpha` branch) — semantically MLX-aligned
+//! from ekryski's `mlx` fork (`alpha` branch) — semantically MLX-aligned
 //! but mainline MLX (pinned by `metaltile-std/build.rs`) doesn't ship
 //! the `ssm.metal` source yet, so there's no side-by-side comparison
 //! today. When the pin moves to a commit that ships `ssm.metal`, this

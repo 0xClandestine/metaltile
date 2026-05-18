@@ -1,6 +1,6 @@
 //! FFAI / model-specific kernels.
 //!
-//! Kernels here are ports from FFAI / mlx-swift-lm / Eric's `mlx` fork
+//! Kernels here are ports from FFAI / mlx-swift-lm / ekryski's `mlx` fork
 //! that don't have a matching template in mainline MLX at the pinned
 //! commit (see `metaltile-std/build.rs` — `MLX_COMMIT`). They register
 //! a `BenchSpec` so `tile build` / `tile inspect` can find them, but
