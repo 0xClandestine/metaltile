@@ -1435,30 +1435,65 @@ impl DslBodyParser {
         0
     }
 
-    /// `threadgroup_alloc("name", size)` → Op::ThreadgroupAlloc (no result).
-    /// Optional third argument: `T` uses kernel's generic type, any other type
-    /// name (`f32`, `f16`, etc.) uses that specific dtype. Defaults to F32.
+    /// `threadgroup_alloc("name", size [, dtype])` → Op::ThreadgroupAlloc.
+    ///
+    /// `dtype` is an optional 3rd argument and accepts either form:
+    ///   * **Type-path form**: `T` (resolves to the kernel's generic
+    ///     type), or `f32` / `f16` / `bf16` / `u32` / `i32` (specific
+    ///     dtype). Used by `mlx/sort.rs` etc.
+    ///   * **String-literal form**: `"f32"` / `"f16"` / `"bf16"` /
+    ///     `"u32"` / `"i32"`. Used by AURA encode for `"u32"` so the
+    ///     threadgroup pack buffer can be reinterpreted as `atomic_uint`
+    ///     by the threadgroup-scoped atomic ops.
+    /// Defaults to F32 if omitted.
     fn parse_threadgroup_alloc(&mut self, call: &ExprCall) -> u32 {
         let args: Vec<_> = call.args.iter().collect();
         let name = string_lit_from_expr(args.first().unwrap_or(&&*call.func));
         let size: usize = usize_lit_from_expr(args.get(1).copied());
         let size_u32 = size as u32;
-        let dtype_ts = if let Some(ty_arg) = args.get(2) {
-            // Explicit dtype: `T` resolves to kernel generic type.
-            let ty_str = quote! { #ty_arg }.to_string();
-            match ty_str.trim() {
-                "T" =>
-                    if let Some(tok) = self.type_vars.get("T") {
-                        tok.clone()
-                    } else {
+        let dtype_ts = if let Some(arg) = args.get(2) {
+            // Try string-literal form first (`"u32"`, `"f32"`, ...).
+            // macro_rules!-substituted args show up wrapped in
+            // Expr::Group; unwrap to peek through.
+            let unwrapped: &syn::Expr = match arg {
+                syn::Expr::Group(g) => &g.expr,
+                other => *other,
+            };
+            if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = unwrapped {
+                match s.value().as_str() {
+                    "f32" => quote! { DType::F32 },
+                    "f16" => quote! { DType::F16 },
+                    "bf16" => quote! { DType::BF16 },
+                    "u32" => quote! { DType::U32 },
+                    "i32" => quote! { DType::I32 },
+                    other => {
+                        self.push_error(syn::Error::new_spanned(
+                            arg,
+                            format!(
+                                "threadgroup_alloc dtype must be one of \
+                                 f32/f16/bf16/u32/i32 (got {other:?})"
+                            ),
+                        ));
                         quote! { DType::F32 }
                     },
-                "f32" => quote! { DType::F32 },
-                "f16" => quote! { DType::F16 },
-                "bf16" => quote! { DType::BF16 },
-                "i32" => quote! { DType::I32 },
-                "u32" => quote! { DType::U32 },
-                _ => quote! { DType::F32 },
+                }
+            } else {
+                // Fall back to type-path form (`T`, `f32`, `f16`, ...).
+                let ty_str = quote! { #arg }.to_string();
+                match ty_str.trim() {
+                    "T" =>
+                        if let Some(tok) = self.type_vars.get("T") {
+                            tok.clone()
+                        } else {
+                            quote! { DType::F32 }
+                        },
+                    "f32" => quote! { DType::F32 },
+                    "f16" => quote! { DType::F16 },
+                    "bf16" => quote! { DType::BF16 },
+                    "i32" => quote! { DType::I32 },
+                    "u32" => quote! { DType::U32 },
+                    _ => quote! { DType::F32 },
+                }
             }
         } else {
             quote! { DType::F32 }

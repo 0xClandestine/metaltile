@@ -770,4 +770,25 @@ mod tests {
             "kernel must emit a simd_broadcast call: {msl}"
         );
     }
+
+    /// `Op::ThreadgroupAlloc { dtype: U32, .. }` must emit
+    /// `threadgroup uint <name>[<size>];`.  AURA encode's pack stage needs
+    /// a `uint` threadgroup buffer so subsequent `atomic_fetch_or_explicit`
+    /// can reinterpret it as `threadgroup atomic_uint*`.
+    #[test]
+    fn threadgroup_alloc_emits_u32_buffer() {
+        let mut k = Kernel::new("tg_u32_alloc");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op_no_result(Op::ThreadgroupAlloc {
+            dtype: DType::U32,
+            size: 128,
+            name: "shared_packed".to_string(),
+        });
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("threadgroup uint shared_packed[128];"),
+            "expected `threadgroup uint shared_packed[128];` for U32 alloc: {msl}"
+        );
+    }
 }
