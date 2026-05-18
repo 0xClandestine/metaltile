@@ -928,7 +928,7 @@ mod tests {
 
     use metaltile_core::{
         dtype::DType,
-        ir::{ActKind, AtomicKind, AttnParams, ReduceKind, UnaryOpKind},
+        ir::{ActKind, AtomicKind, AtomicScope, AttnParams, ReduceKind, UnaryOpKind},
         shape::Shape,
     };
 
@@ -1058,6 +1058,7 @@ mod tests {
         check_op(
             Op::Atomic {
                 op: AtomicKind::Add,
+                scope: AtomicScope::Device,
                 dst: "z".into(),
                 index: ValueId::new(28),
                 value: ValueId::new(29),
@@ -1226,6 +1227,7 @@ mod tests {
 
         let atomic = Op::Atomic {
             op: AtomicKind::Add,
+            scope: AtomicScope::Device,
             dst: "x".into(),
             index: ValueId::new(0),
             value: ValueId::new(1),

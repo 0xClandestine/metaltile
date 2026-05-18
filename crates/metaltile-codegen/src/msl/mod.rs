@@ -791,4 +791,65 @@ mod tests {
             "expected `threadgroup uint shared_packed[128];` for U32 alloc: {msl}"
         );
     }
+
+    /// `Op::Atomic { scope: AtomicScope::Threadgroup, .. }` must emit
+    /// the cast form `atomic_fetch_or_explicit((threadgroup atomic_uint*)&<dst>[<idx>], …)`.
+    /// `Device` scope keeps the existing `dst + idx` form.
+    #[test]
+    fn atomic_threadgroup_emits_cast_form() {
+        use metaltile_core::ir::{AtomicKind, AtomicScope};
+
+        let mut k = Kernel::new("atomic_tg_smoke");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(1));
+        k.body.push_op_no_result(Op::ThreadgroupAlloc {
+            dtype: DType::U32,
+            size: 128,
+            name: "shared_packed".to_string(),
+        });
+        k.body.push_op_no_result(Op::Atomic {
+            op: AtomicKind::Or,
+            scope: AtomicScope::Threadgroup,
+            dst: "shared_packed".to_string(),
+            index: ValueId::new(0),
+            value: ValueId::new(1),
+        });
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("(threadgroup atomic_uint*)&shared_packed["),
+            "threadgroup-scope atomic must reinterpret-cast the threadgroup slot: {msl}"
+        );
+        assert!(
+            msl.contains("atomic_fetch_or_explicit"),
+            "threadgroup atomic_or must still emit the OR intrinsic: {msl}"
+        );
+    }
+
+    /// Sanity: device-scope atomics keep the unchanged `<dst> + <idx>` form.
+    #[test]
+    fn atomic_device_emits_buffer_offset_form() {
+        use metaltile_core::ir::{AtomicKind, AtomicScope};
+
+        let mut k = Kernel::new("atomic_dev_smoke");
+        k.mode = KernelMode::Elementwise;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(1));
+        k.body.push_op_no_result(Op::Atomic {
+            op: AtomicKind::Add,
+            scope: AtomicScope::Device,
+            dst: "counter".to_string(),
+            index: ValueId::new(0),
+            value: ValueId::new(1),
+        });
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("atomic_fetch_add_explicit(counter +"),
+            "device-scope atomic must keep buffer-offset form: {msl}"
+        );
+        assert!(
+            !msl.contains("(threadgroup"),
+            "device-scope atomic must NOT emit a threadgroup cast: {msl}"
+        );
+    }
 }

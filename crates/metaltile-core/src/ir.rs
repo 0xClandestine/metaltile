@@ -342,6 +342,23 @@ pub enum AtomicKind {
     Xor,
 }
 
+/// Memory scope for an atomic op.  Drives whether the MSL emitter
+/// treats `dst` as a device-memory buffer (typical kernel param) or a
+/// threadgroup-allocated array (needs reinterpret-cast to
+/// `threadgroup atomic_uint*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AtomicScope {
+    /// Device memory — `dst` is a kernel buffer parameter.  Emits
+    /// `atomic_fetch_<op>_explicit(dst + idx, val, memory_order_relaxed)`.
+    #[default]
+    Device,
+    /// Threadgroup memory — `dst` is a `threadgroup_alloc`'d array.
+    /// Emits `atomic_fetch_<op>_explicit((threadgroup atomic_uint*)&dst[idx], …)`.
+    /// AURA encode's pack stage uses this so threads racing on the same
+    /// u32 word are properly serialised.
+    Threadgroup,
+}
+
 impl AtomicKind {
     pub fn msl_fn(self) -> &'static str {
         match self {
@@ -554,7 +571,7 @@ pub enum Op {
     Scatter { dst: String, indices: ValueId, value: ValueId, axis: u32 },
 
     /// Atomic operation on device memory.
-    Atomic { op: AtomicKind, dst: String, index: ValueId, value: ValueId },
+    Atomic { op: AtomicKind, scope: AtomicScope, dst: String, index: ValueId, value: ValueId },
 
     /// Prefix scan along an axis (inclusive or exclusive).
     Scan { value: ValueId, axis: u32, op: ReduceKind, exclusive: bool },
@@ -1151,8 +1168,13 @@ impl Op {
             Op::Scatter { dst, indices, value, axis } => {
                 write!(f, "Scatter({dst}, v{}, v{}, axis={axis})", indices.as_u32(), value.as_u32())
             },
-            Op::Atomic { op, dst, index, value } => {
-                write!(f, "Atomic({op:?}, {dst}, v{}, v{})", index.as_u32(), value.as_u32())
+            Op::Atomic { op, scope, dst, index, value } => {
+                write!(
+                    f,
+                    "Atomic({op:?}, scope={scope:?}, {dst}, v{}, v{})",
+                    index.as_u32(),
+                    value.as_u32()
+                )
             },
             Op::Scan { value, axis, op, exclusive } => {
                 write!(
