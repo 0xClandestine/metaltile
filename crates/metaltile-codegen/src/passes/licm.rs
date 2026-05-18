@@ -327,6 +327,7 @@ fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
         | Op::SimdReduce { .. }
         | Op::SimdShuffleXor { .. }
         | Op::SimdScan { .. }
+        | Op::SimdBroadcast { .. }
         | Op::ArgReduce { .. }
         | Op::FusedElementwise { .. }
         | Op::VectorLoad { .. }
