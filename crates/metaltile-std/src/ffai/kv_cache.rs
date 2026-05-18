@@ -69,6 +69,7 @@ inventory::submit! {
 // `$bits` (4 or 8) is a literal; all pack-size expressions are
 // constant-folded by Metal at PSO creation.
 
+#[allow(unused_macros)]
 macro_rules! quantize_kv_body {
     ($bits:expr) => {
         let vals_per_pack = 32u32 / $bits;
@@ -182,6 +183,7 @@ inventory::submit! {
 // extracts one quantized value from the packed word, dequantizes.
 // Output layout matches raw KVCache: [n_kv_heads, max_seq, head_dim].
 
+#[allow(unused_macros)]
 macro_rules! bulk_dequant_kv_body {
     ($bits:expr) => {
         let vals_per_pack = 32u32 / $bits;

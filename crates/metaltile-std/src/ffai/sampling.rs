@@ -23,6 +23,7 @@ use crate::{
 // Each macro includes the trailing `threadgroup_barrier()`, matching the
 // original line-for-line.
 
+#[allow(unused_macros)]
 macro_rules! tg_max_step {
     ($tg:expr, $lid:expr, $stride:expr) => {
         if $lid < $stride {
@@ -34,6 +35,7 @@ macro_rules! tg_max_step {
     };
 }
 
+#[allow(unused_macros)]
 macro_rules! tg_sum_step {
     ($tg:expr, $lid:expr, $stride:expr) => {
         if $lid < $stride {

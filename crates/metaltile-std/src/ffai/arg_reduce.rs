@@ -30,6 +30,7 @@ use crate::{
 // Used for strides 128 → 2 (7 invocations).  The final stride-1 step
 // writes directly to `out[0]` and is kept inline below.
 
+#[allow(unused_macros)]
 macro_rules! argmax_step {
     ($lid:expr, $stride:expr) => {
         if $lid < $stride {

@@ -67,6 +67,7 @@ macro_rules! register_dequant_gather {
 // All five kernels below expand this identical body.  `bits` is a u32
 // literal in each call site so the compiler sees it as a constant.
 
+#[allow(unused_macros)]
 macro_rules! dequant_gather_body {
     ($bits:expr) => {
         let idx = program_id::<0>();

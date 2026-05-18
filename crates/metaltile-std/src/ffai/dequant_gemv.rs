@@ -65,6 +65,7 @@ macro_rules! register_dequant_gemv {
 // No extra bit-arithmetic — just shift+mask — matching the original kernels.
 // `$bits` must divide 32 evenly (i.e. 4 or 8).
 
+#[allow(unused_macros)]
 macro_rules! dequant_gemv_pow2_body {
     ($bits:expr) => {
         let vals_per_pack = 32u32 / $bits;
@@ -110,6 +111,7 @@ macro_rules! dequant_gemv_pow2_body {
 // old group-strided approach (where threads past n_groups sat idle).
 // Adjacent threads access adjacent elements → same u32 words → L1 multicast.
 
+#[allow(unused_macros)]
 macro_rules! dequant_gemv_odd_body {
     ($bits:expr) => {
         let row = program_id::<0>();
