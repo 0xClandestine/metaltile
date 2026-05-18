@@ -204,6 +204,14 @@ pub fn remap_value_ids(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
             s(index);
             s(value);
         },
+        Op::StackLoad { index, .. } => {
+            s(index);
+        },
+        Op::StackStore { index, value, .. } => {
+            s(index);
+            s(value);
+        },
+        Op::StackAlloc { .. } => {},
 
         // ── locals ───────────────────────────────────────────────────────
         Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => {
@@ -412,6 +420,14 @@ pub fn op_value_refs(op: &Op) -> SmallVec<[ValueId; 4]> {
             refs.push(*index);
             refs.push(*value);
         },
+        Op::StackLoad { index, .. } => {
+            refs.push(*index);
+        },
+        Op::StackStore { index, value, .. } => {
+            refs.push(*index);
+            refs.push(*value);
+        },
+        Op::StackAlloc { .. } => {},
 
         // ── locals ───────────────────────────────────────────────────────
         Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => {
@@ -640,6 +656,14 @@ pub fn max_vid_in_op(op: &Op) -> u32 {
             push(index);
             push(value);
         },
+        Op::StackLoad { index, .. } => {
+            push(index);
+        },
+        Op::StackStore { index, value, .. } => {
+            push(index);
+            push(value);
+        },
+        Op::StackAlloc { .. } => {},
 
         // ── locals ───────────────────────────────────────────────────────
         Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => {
@@ -742,6 +766,8 @@ pub fn has_side_effects(op: &Op) -> bool {
             | Op::SetLocal { .. }
             | Op::ThreadgroupStore { .. }
             | Op::ThreadgroupAlloc { .. }
+            | Op::StackStore { .. }
+            | Op::StackAlloc { .. }
             | Op::StrideStore { .. }
             | Op::Scatter { .. }
     )

@@ -630,6 +630,14 @@ impl DslBodyParser {
             "threadgroup_alloc" => self.parse_threadgroup_alloc(call),
             "threadgroup_load" => self.parse_threadgroup_load(call),
             "threadgroup_store" => self.parse_threadgroup_store(call),
+            // Per-thread stack arrays.  Mirror the threadgroup_* shape but
+            // emit an unqualified `T name[size];` so Metal places the
+            // array in per-thread registers / thread-local memory.  AURA
+            // flash kernels need this for `q_vals[DIMS_PER_LANE]`,
+            // `o[DIMS_PER_LANE]`, and the per-thread codebook cache.
+            "stack_alloc" => self.parse_stack_alloc(call),
+            "stack_load" => self.parse_stack_load(call),
+            "stack_store" => self.parse_stack_store(call),
             "simd_scan_inclusive" => self.parse_simd_scan(call, false),
             "simd_scan_exclusive" => self.parse_simd_scan(call, true),
             "simdgroup_alloc" => self.parse_simdgroup_alloc(call),
@@ -1557,6 +1565,96 @@ impl DslBodyParser {
         let val_vid = args.get(2).map(|a| self.parse_expr(a)).unwrap_or(0);
         self.push_op_no_result(quote! {
             Op::ThreadgroupStore {
+                name: #name.to_string(),
+                index: ValueId::new(#idx_vid),
+                value: ValueId::new(#val_vid),
+            }
+        });
+        0
+    }
+
+    /// `stack_alloc("name", size [, dtype])` → Op::StackAlloc.
+    ///
+    /// Per-thread stack-resident array.  `dtype` is an optional 3rd
+    /// argument as a string literal (`"f32"` / `"f16"` / `"bf16"` /
+    /// `"u32"` / `"i32"`); defaults to `f32`.  Metal places small
+    /// fixed-size local arrays in registers; AURA flash kernels use
+    /// this for the per-lane `q_vals[]`, `o[]`, and codebook caches.
+    fn parse_stack_alloc(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<_> = call.args.iter().collect();
+        let name = string_lit_from_expr(args.first().unwrap_or(&&*call.func));
+        let size: usize = usize_lit_from_expr(args.get(1).copied());
+        let size_u32 = size as u32;
+
+        let dtype_tokens = if let Some(arg) = args.get(2) {
+            let unwrapped: &syn::Expr = match arg {
+                syn::Expr::Group(g) => &g.expr,
+                other => *other,
+            };
+            if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = unwrapped {
+                match s.value().as_str() {
+                    "f32" => quote! { DType::F32 },
+                    "f16" => quote! { DType::F16 },
+                    "bf16" => quote! { DType::BF16 },
+                    "u32" => quote! { DType::U32 },
+                    "i32" => quote! { DType::I32 },
+                    other => {
+                        self.push_error(syn::Error::new_spanned(
+                            arg,
+                            format!(
+                                "stack_alloc dtype must be one of f32/f16/bf16/u32/i32 (got {other:?})"
+                            ),
+                        ));
+                        quote! { DType::F32 }
+                    },
+                }
+            } else {
+                self.push_error(syn::Error::new_spanned(
+                    arg,
+                    "stack_alloc dtype must be a string literal",
+                ));
+                quote! { DType::F32 }
+            }
+        } else {
+            quote! { DType::F32 }
+        };
+
+        self.push_op_no_result(quote! {
+            Op::StackAlloc {
+                dtype: #dtype_tokens,
+                size: #size_u32,
+                name: #name.to_string(),
+            }
+        });
+        0
+    }
+
+    /// `stack_load("name", idx)` → Op::StackLoad.
+    fn parse_stack_load(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<_> = call.args.iter().collect();
+        let name = string_lit_from_expr(args.first().unwrap_or(&&*call.func));
+        let idx_vid = args.get(1).map(|a| self.parse_expr(a)).unwrap_or(0);
+        let result = self.alloc_vid();
+        self.push_op(
+            quote! {
+                Op::StackLoad {
+                    name: #name.to_string(),
+                    index: ValueId::new(#idx_vid),
+                }
+            },
+            result,
+        );
+        result
+    }
+
+    /// `stack_store("name", idx, val)` → Op::StackStore (no result).
+    fn parse_stack_store(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<_> = call.args.iter().collect();
+        let name = string_lit_from_expr(args.first().unwrap_or(&&*call.func));
+        let idx_vid = args.get(1).map(|a| self.parse_expr(a)).unwrap_or(0);
+        let val_vid = args.get(2).map(|a| self.parse_expr(a)).unwrap_or(0);
+        self.push_op_no_result(quote! {
+            Op::StackStore {
                 name: #name.to_string(),
                 index: ValueId::new(#idx_vid),
                 value: ValueId::new(#val_vid),

@@ -322,6 +322,9 @@ fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
         | Op::Scatter { .. }
         | Op::ThreadgroupLoad { .. }
         | Op::ThreadgroupAlloc { .. }
+        | Op::StackLoad { .. }
+        | Op::StackStore { .. }
+        | Op::StackAlloc { .. }
         | Op::StrideStore { .. }
         | Op::Dequantize { .. }
         | Op::SimdReduce { .. }

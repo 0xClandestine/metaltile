@@ -693,6 +693,26 @@ pub enum Op {
     /// Store one element to a named threadgroup array: `name[index] = value`.
     ThreadgroupStore { name: String, index: ValueId, value: ValueId },
 
+    /// Allocate a per-thread stack-resident array.  Emits `T name[size];`
+    /// inside the kernel body (no `threadgroup` qualifier — each thread
+    /// gets its own copy).  Metal keeps small fixed-size stack arrays in
+    /// registers; AURA flash kernels need this for `q_vals[DIMS_PER_LANE]`,
+    /// `o[DIMS_PER_LANE]`, and the per-thread codebook cache that
+    /// amortises lookup across the dim-strided inner loop.
+    StackAlloc {
+        dtype: DType,
+        size: u32,
+        name: String,
+    },
+
+    /// Load one element from a per-thread stack array: `val = name[index]`.
+    /// Identical emission to `ThreadgroupLoad`; kept distinct in the IR so
+    /// liveness / scoping passes know the buffer is thread-private.
+    StackLoad { name: String, index: ValueId },
+
+    /// Store one element to a per-thread stack array: `name[index] = value`.
+    StackStore { name: String, index: ValueId, value: ValueId },
+
     /// Threadgroup barrier: `threadgroup_barrier(mem_flags::mem_threadgroup)`.
     /// Ensures all prior threadgroup stores are visible to all threads before
     /// any subsequent threadgroup loads.
@@ -1221,6 +1241,15 @@ impl Op {
             },
             Op::SimdBroadcast { value, lane } => {
                 write!(f, "SimdBroadcast(v{}, lane=v{})", value.as_u32(), lane.as_u32())
+            },
+            Op::StackAlloc { dtype, size, name } => {
+                write!(f, "StackAlloc({dtype:?}, {size}, {name})")
+            },
+            Op::StackLoad { name, index } => {
+                write!(f, "StackLoad({name}, v{})", index.as_u32())
+            },
+            Op::StackStore { name, index, value } => {
+                write!(f, "StackStore({name}, v{}, v{})", index.as_u32(), value.as_u32())
             },
             Op::ThreadgroupAlloc { dtype, size, name } => {
                 write!(f, "ThreadgroupAlloc({dtype:?}, {size}, {name})")

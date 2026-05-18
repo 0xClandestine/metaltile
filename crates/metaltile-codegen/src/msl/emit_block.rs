@@ -892,6 +892,27 @@ impl MslGenerator {
                     wl!(out, "{pad}{name}[{iv}] = {rv};");
                 },
 
+                // ---- per-thread stack arrays ----------------------------
+                Op::StackAlloc { dtype, size, name } => {
+                    let t = self.msl_type_name(*dtype);
+                    // No `threadgroup` qualifier — Metal places small
+                    // fixed-size local arrays in per-thread registers
+                    // (with spill to thread-local memory if they don't fit).
+                    hoists.push(format!("{t} {name}[{size}];"));
+                },
+
+                Op::StackLoad { name, index } => {
+                    let v = self.vname(vid, block, extra_names);
+                    let iv = self.vname(Some(*index), block, extra_names);
+                    wl!(out, "{pad}auto {v} = {name}[{iv}];");
+                },
+
+                Op::StackStore { name, index, value } => {
+                    let iv = self.vname(Some(*index), block, extra_names);
+                    let rv = self.vname(Some(*value), block, extra_names);
+                    wl!(out, "{pad}{name}[{iv}] = {rv};");
+                },
+
                 Op::Barrier => {
                     wl!(out, "{pad}threadgroup_barrier(mem_flags::mem_threadgroup);");
                 },
