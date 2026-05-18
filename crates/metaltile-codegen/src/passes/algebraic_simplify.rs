@@ -613,6 +613,12 @@ fn remap_values_in_op(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
             s(data);
         },
         Op::SimdScan { value, .. } => s(value),
+        Op::StackLoad { index, .. } => s(index),
+        Op::StackStore { index, value, .. } => {
+            s(index);
+            s(value);
+        },
+        Op::StackAlloc { .. } => {},
         Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => s(value),
         Op::ArgReduce { value, .. } => s(value),
         Op::StrideScan { offset, end, .. } => {
