@@ -5,13 +5,7 @@ use metaltile_codegen::msl::MslGenerator;
 use metaltile_core::{dtype::DType, ir::KernelMode};
 use metaltile_std::{
     bench_types::{
-        DtypeCtx,
-        EquivResult,
-        EquivTolerance,
-        OpBench,
-        OpResult,
-        check_equiv,
-        check_equiv_with,
+        DtypeCtx, EquivResult, EquivTolerance, OpBench, OpResult, check_equiv, check_equiv_with,
     },
     spec::{BenchDispatch, BenchSpec, MlxArg, ScalarBufSpec, ShapeSpec},
 };
@@ -27,19 +21,65 @@ pub fn run(spec: &BenchSpec, runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
         BenchDispatch::Generic => run_generic(spec, runner, dt, &bench),
         BenchDispatch::Sort { b, n, tpg } => run_sort(spec, runner, dt, &bench, *b, *n, *tpg),
         BenchDispatch::Scan { shapes, tpg } => run_scan(spec, runner, dt, &bench, shapes, *tpg),
-        BenchDispatch::ArgReduce { n, check_n, tpg } =>
-            run_arg_reduce(spec, runner, dt, &bench, *n, *check_n, *tpg),
+        BenchDispatch::ArgReduce { n, check_n, tpg } => {
+            run_arg_reduce(spec, runner, dt, &bench, *n, *check_n, *tpg)
+        },
         BenchDispatch::Random { n, tpg } => run_random(spec, runner, dt, &bench, *n, *tpg),
-        BenchDispatch::FpQuantized { n, tpg } =>
-            run_fp_quantized(spec, runner, dt, &bench, *n, *tpg),
-        BenchDispatch::QuantizedMatVec { shapes, group_size, tpg } =>
-            run_quantized_mat_vec(spec, runner, dt, &bench, shapes, *group_size, *tpg),
-        BenchDispatch::Rope { b, h, l, d, n_per_group } =>
-            run_rope(spec, runner, dt, &bench, *b, *h, *l, *d, *n_per_group),
-        BenchDispatch::Attention { shapes, tpg } =>
-            run_attention(spec, runner, dt, &bench, shapes, *tpg),
-        BenchDispatch::StridedCopy { m, n, pad } =>
-            run_strided_copy(spec, runner, dt, &bench, *m, *n, *pad),
+        BenchDispatch::FpQuantized { n, tpg } => {
+            run_fp_quantized(spec, runner, dt, &bench, *n, *tpg)
+        },
+        BenchDispatch::QuantizedMatVec { shapes, group_size, tpg } => {
+            run_quantized_mat_vec(spec, runner, dt, &bench, shapes, *group_size, *tpg)
+        },
+        BenchDispatch::Rope { b, h, l, d, n_per_group } => {
+            run_rope(spec, runner, dt, &bench, *b, *h, *l, *d, *n_per_group)
+        },
+        BenchDispatch::Attention { shapes, tpg } => {
+            run_attention(spec, runner, dt, &bench, shapes, *tpg)
+        },
+        BenchDispatch::StridedCopy { m, n, pad } => {
+            run_strided_copy(spec, runner, dt, &bench, *m, *n, *pad)
+        },
+        BenchDispatch::AffineDequantize { bits, group_size, n_groups, batch, tpg } => {
+            run_affine_dequantize(
+                spec,
+                runner,
+                dt,
+                &bench,
+                *bits,
+                *group_size,
+                *n_groups,
+                *batch,
+                *tpg,
+            )
+        },
+        BenchDispatch::AffineQuantize { bits, group_size, n_groups, batch, tpg } => {
+            run_affine_quantize(
+                spec,
+                runner,
+                dt,
+                &bench,
+                *bits,
+                *group_size,
+                *n_groups,
+                *batch,
+                *tpg,
+            )
+        },
+        BenchDispatch::SdpaVector { head_dim, n_kv, n_q_heads, gqa_factor, batch, tpg } => {
+            run_sdpa_vector(
+                spec,
+                runner,
+                dt,
+                &bench,
+                *head_dim,
+                *n_kv,
+                *n_q_heads,
+                *gqa_factor,
+                *batch,
+                *tpg,
+            )
+        },
     }
 }
 
@@ -68,7 +108,9 @@ fn msl_for_mode(spec: &BenchSpec, dt: DType, mode: KernelMode) -> Option<String>
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-fn mlx_name(pat: &str, tn: &str) -> String { pat.replace("{tn}", tn) }
+fn mlx_name(pat: &str, tn: &str) -> String {
+    pat.replace("{tn}", tn)
+}
 fn compile_mt(runner: &GpuRunner, msl: &str, name: &str) -> Option<crate::runner::CompiledKernel> {
     runner.compile(msl, name).ok()
 }
@@ -1231,4 +1273,398 @@ fn run_strided_copy(
         mt_perf,
         Some(equiv),
     )]
+}
+
+// ── AffineDequantize / AffineQuantize / SdpaVector ───────────────────────
+//
+// MLX-compared runners. Correctness reference is MLX itself: the bench
+// dispatches MT and MLX on the same buffers and compares the outputs. If
+// MLX isn't available at the pinned commit (e.g. dtype/template not
+// shipped), the bench falls back to MT-only perf with no correctness
+// check — FFAI integration tests are the production verification path.
+
+/// MLX's quantized template instantiation uses `float` / `float16_t` /
+/// `bfloat16_t` (with the `_t` suffix on half/bfloat) rather than the
+/// elementwise naming `float32` / `float16` / `bfloat16` from
+/// `mlx_tname`. Returns `None` for non-float dtypes.
+fn mlx_qtname(dt: DType) -> Option<&'static str> {
+    match dt {
+        DType::F32 => Some("float"),
+        DType::F16 => Some("float16_t"),
+        DType::BF16 => Some("bfloat16_t"),
+        _ => None,
+    }
+}
+
+fn affine_pack_factor(bits: usize) -> usize {
+    match bits {
+        3..=5 => 8,
+        6 | 8 => 4,
+        _ => panic!("affine_pack_factor: unsupported bits={bits}"),
+    }
+}
+
+fn affine_bytes_per_pack(bits: usize) -> usize {
+    match bits {
+        3 => 3,
+        4 => 4,
+        5 => 5,
+        6 => 3,
+        8 => 4,
+        _ => panic!("affine_bytes_per_pack: unsupported bits={bits}"),
+    }
+}
+
+/// MLX's `get_pack_factor<bits, 8>()` from `quantized.h` — values per
+/// byte. Different from our `affine_pack_factor` (per uint32) for the
+/// power-of-2 bit widths: MLX int4 packs 2 values/byte and dispatches
+/// 4× more threads than our int4 kernel (per uint32); MLX int8 packs 1
+/// value/byte and also dispatches 4× more.
+fn affine_mlx_pack_factor(bits: usize) -> usize {
+    match bits {
+        3 => 8, // hardcoded
+        4 => 2, // 8/4
+        5 => 8, // hardcoded
+        6 => 4, // hardcoded
+        8 => 1, // 8/8
+        _ => panic!("affine_mlx_pack_factor: unsupported bits={bits}"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_affine_dequantize(
+    spec: &BenchSpec,
+    runner: &GpuRunner,
+    dt: DType,
+    bench: &OpBench,
+    bits: usize,
+    group_size: usize,
+    n_groups: usize,
+    batch: usize,
+    tpg: usize,
+) -> Vec<OpResult> {
+    let ctx = DtypeCtx::elementwise(dt);
+    let msl = match msl_elementwise(spec, dt) {
+        Some(s) => s,
+        None => return vec![],
+    };
+    let mk = match compile_mt(runner, &msl, spec.kernel_name) {
+        Some(k) => k,
+        None => return vec![],
+    };
+    let rk = spec.mlx_src.and_then(|src| {
+        let name = format!("affine_dequantize_{}_gs_{}_b_{}", mlx_qtname(dt)?, group_size, bits);
+        runner.compile(src, &name).ok()
+    });
+
+    let pack_factor = affine_pack_factor(bits);
+    let bytes_per_pack = affine_bytes_per_pack(bits);
+    let n_total_groups = n_groups * batch;
+    let n_elem = n_total_groups * group_size;
+    let n_packs = n_elem / pack_factor;
+
+    // Weight bytes sized in uint32s with a one-uint32 sentinel because
+    // the byte-stream kernels (int3/5/6) read two adjacent uint32s at the
+    // pack boundary and may over-read by up to 3 bytes on the last pack.
+    let weight_bytes_needed = n_packs * bytes_per_pack;
+    let weight_u32s = weight_bytes_needed.div_ceil(4) + 1;
+    let w_bytes: Vec<u8> =
+        (0..weight_u32s * 4).map(|i| ((i as u32).wrapping_mul(0x0103_5b1d) ^ 0xa5) as u8).collect();
+    let scales_f32: Vec<f32> = (0..n_total_groups).map(|i| 0.01 + (i % 7) as f32 * 0.005).collect();
+    let biases_f32: Vec<f32> = (0..n_total_groups).map(|i| -0.1 + (i % 5) as f32 * 0.02).collect();
+
+    // GPU buffers shared between MT + MLX dispatches.
+    let w_buf = runner.buffer_bytes(&w_bytes);
+    let scales_buf = buffer_typed(runner, &scales_f32, dt);
+    let biases_buf = buffer_typed(runner, &biases_f32, dt);
+    let mt_out_buf = zeros_typed(runner, n_elem, dt);
+    let gs_buf = runner.buffer_u32(group_size as u32);
+    let mt_bufs: Vec<&GpuBuffer> = vec![&w_buf, &scales_buf, &biases_buf, &mt_out_buf, &gs_buf];
+
+    let mt_grid = [n_packs.div_ceil(tpg), 1, 1];
+
+    // Run MT once for correctness; capture output.
+    runner.measure(&mk, &mt_bufs, mt_grid, [tpg, 1, 1], 0, 1);
+    let mt_out = crate::measure::read_typed(runner, &mt_out_buf, n_elem, dt);
+
+    // MLX dispatches one thread per byte-pack (`affine_mlx_pack_factor`
+    // values per thread), which is 4× more threads than our per-uint32
+    // dispatch for int4/int8 (matches us for int3/5/6). Same byte stream
+    // → same output, so we can compare bit-for-bit if we dispatch each
+    // kernel with its own thread count.
+    let mlx_pf = affine_mlx_pack_factor(bits);
+    let mlx_n_packs = n_elem / mlx_pf;
+    let mlx_grid = [mlx_n_packs.div_ceil(tpg), 1, 1];
+
+    let equiv = rk.as_ref().map(|rk| {
+        let mlx_out_buf = zeros_typed(runner, n_elem, dt);
+        let mlx_bufs: Vec<&GpuBuffer> = vec![&w_buf, &scales_buf, &biases_buf, &mlx_out_buf];
+        runner.measure(rk, &mlx_bufs, mlx_grid, [tpg, 1, 1], 0, 1);
+        let ref_out = crate::measure::read_typed(runner, &mlx_out_buf, n_elem, dt);
+        check_equiv(&ref_out, &mt_out, spec.tol)
+    });
+
+    let elem_bytes = match dt {
+        DType::F32 => 4,
+        DType::F16 | DType::BF16 => 2,
+        _ => 4,
+    };
+    let bytes =
+        (weight_bytes_needed + (n_total_groups * elem_bytes * 2) + (n_elem * elem_bytes)) as f64;
+    let mt_perf = bench_gbps(runner, &mk, &mt_bufs, mt_grid, [tpg, 1, 1], bytes);
+    let ref_perf = rk
+        .as_ref()
+        .map(|rk| {
+            let mlx_bufs: Vec<&GpuBuffer> = vec![&w_buf, &scales_buf, &biases_buf, &mt_out_buf];
+            bench_gbps(runner, rk, &mlx_bufs, mlx_grid, [tpg, 1, 1], bytes)
+        })
+        .unwrap_or(None);
+
+    vec![bench.result_sub(
+        Some(spec.subop),
+        format!("bits={bits} gs={group_size} n_groups={n_groups} {}", ctx.label),
+        ref_perf,
+        mt_perf,
+        equiv,
+    )]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_affine_quantize(
+    spec: &BenchSpec,
+    runner: &GpuRunner,
+    dt: DType,
+    bench: &OpBench,
+    bits: usize,
+    group_size: usize,
+    n_groups: usize,
+    batch: usize,
+    tpg: usize,
+) -> Vec<OpResult> {
+    let ctx = DtypeCtx::reduce(dt);
+    let msl = match msl_reduction(spec, dt) {
+        Some(s) => s,
+        None => return vec![],
+    };
+    let mk = match compile_mt(runner, &msl, spec.kernel_name) {
+        Some(k) => k,
+        None => return vec![],
+    };
+    let rk = spec.mlx_src.and_then(|src| {
+        let name = format!("affine_quantize_{}_gs_{}_b_{}", mlx_qtname(dt)?, group_size, bits);
+        runner.compile(src, &name).ok()
+    });
+
+    let pack_factor = 32 / bits;
+    let n_total_groups = n_groups * batch;
+    let n_elem = n_total_groups * group_size;
+    let n_packs = n_elem / pack_factor;
+
+    let w_f32: Vec<f32> = (0..n_elem).map(|i| ((i % 23) as f32 - 11.0) * 0.05).collect();
+
+    // GPU dispatch — MT.
+    let w_buf = buffer_typed(runner, &w_f32, dt);
+    let mt_packed_buf = runner.buffer_zeros(n_packs * 4);
+    let mt_scales_buf = zeros_typed(runner, n_total_groups, dt);
+    let mt_biases_buf = zeros_typed(runner, n_total_groups, dt);
+    let gs_buf = runner.buffer_u32(group_size as u32);
+    let mt_bufs: Vec<&GpuBuffer> =
+        vec![&w_buf, &mt_packed_buf, &mt_scales_buf, &mt_biases_buf, &gs_buf];
+
+    // MT: one threadgroup per group, tpg=32 threads (one simdgroup).
+    let grid = [n_total_groups, 1, 1];
+    runner.measure(&mk, &mt_bufs, grid, [tpg, 1, 1], 0, 1);
+    let mt_packed_bytes = runner.read_bytes(&mt_packed_buf, n_packs * 4);
+    let mt_packed: Vec<u32> = mt_packed_bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    let mt_scales = crate::measure::read_typed(runner, &mt_scales_buf, n_total_groups, dt);
+    let mt_biases = crate::measure::read_typed(runner, &mt_biases_buf, n_total_groups, dt);
+
+    // MLX reference: same kernel signature but separate output buffers
+    // so we can compare bit-for-bit (packed) and float-for-float
+    // (scales + biases). MLX dispatches one threadgroup per group, 32
+    // threads per group (one simdgroup).
+    let equiv = rk.as_ref().map(|rk| {
+        let mlx_packed_buf = runner.buffer_zeros(n_packs * 4);
+        let mlx_scales_buf = zeros_typed(runner, n_total_groups, dt);
+        let mlx_biases_buf = zeros_typed(runner, n_total_groups, dt);
+        let mlx_bufs: Vec<&GpuBuffer> =
+            vec![&w_buf, &mlx_packed_buf, &mlx_scales_buf, &mlx_biases_buf];
+        runner.measure(rk, &mlx_bufs, [n_total_groups, 1, 1], [32, 1, 1], 0, 1);
+        let ref_packed_bytes = runner.read_bytes(&mlx_packed_buf, n_packs * 4);
+        let ref_packed: Vec<u32> = ref_packed_bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        let ref_scales = crate::measure::read_typed(runner, &mlx_scales_buf, n_total_groups, dt);
+        let ref_biases = crate::measure::read_typed(runner, &mlx_biases_buf, n_total_groups, dt);
+
+        // Compare in dequantized space so ±1-ULP packed disagreement
+        // maps to ±scale absolute error matching `spec.tol`.
+        let dequant = |packed: &[u32], scales: &[f32], biases: &[f32]| -> Vec<f32> {
+            let mut out = vec![0.0f32; n_elem];
+            for g in 0..n_total_groups {
+                let packs_per_group = group_size / pack_factor;
+                let pack_base = g * packs_per_group;
+                for p in 0..packs_per_group {
+                    let val = packed[pack_base + p];
+                    for k in 0..pack_factor {
+                        let shift = (k * bits) as u32;
+                        let mask = (1u32 << bits) - 1;
+                        let q = (val >> shift) & mask;
+                        out[g * group_size + p * pack_factor + k] =
+                            scales[g] * q as f32 + biases[g];
+                    }
+                }
+            }
+            out
+        };
+        let ref_dequant = dequant(&ref_packed, &ref_scales, &ref_biases);
+        let mt_dequant = dequant(&mt_packed, &mt_scales, &mt_biases);
+        // Cosine floor 0.99 — quantization rounding in f16/bf16 can flip
+        // ±1 nibble on a small fraction of elements (depresses cosine
+        // slightly below the default 0.999).
+        check_equiv_with(&ref_dequant, &mt_dequant, EquivTolerance::new(spec.tol, 0.99))
+    });
+
+    let elem_bytes = match dt {
+        DType::F32 => 4,
+        DType::F16 | DType::BF16 => 2,
+        _ => 4,
+    };
+    let bytes = ((n_elem * elem_bytes) + (n_packs * 4) + (n_total_groups * elem_bytes * 2)) as f64;
+    let mt_perf = bench_gbps(runner, &mk, &mt_bufs, grid, [tpg, 1, 1], bytes);
+    let ref_perf = rk
+        .as_ref()
+        .map(|rk| {
+            let mlx_bufs: Vec<&GpuBuffer> =
+                vec![&w_buf, &mt_packed_buf, &mt_scales_buf, &mt_biases_buf];
+            bench_gbps(runner, rk, &mlx_bufs, [n_total_groups, 1, 1], [32, 1, 1], bytes)
+        })
+        .unwrap_or(None);
+
+    vec![bench.result_sub(
+        Some(spec.subop),
+        format!("bits={bits} gs={group_size} n_groups={n_groups} {}", ctx.label),
+        ref_perf,
+        mt_perf,
+        equiv,
+    )]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_sdpa_vector(
+    spec: &BenchSpec,
+    runner: &GpuRunner,
+    dt: DType,
+    bench: &OpBench,
+    head_dim: usize,
+    n_kv: usize,
+    n_q_heads: usize,
+    gqa_factor: usize,
+    _batch: usize,
+    tpg: usize,
+) -> Vec<OpResult> {
+    assert_eq!(head_dim, 128, "mt_sdpa_vector hardcodes head_dim=128");
+    assert_eq!(tpg, 1024, "mt_sdpa_vector uses BN × BD = 32 × 32 = 1024 threads");
+    assert!(n_q_heads.is_multiple_of(gqa_factor), "n_q_heads must be divisible by gqa_factor");
+    let n_kv_heads = n_q_heads / gqa_factor;
+
+    let ctx = DtypeCtx::elementwise(dt);
+    let msl = match msl_reduction(spec, dt) {
+        Some(s) => s,
+        None => return vec![],
+    };
+    let mk = match compile_mt(runner, &msl, spec.kernel_name) {
+        Some(k) => k,
+        None => return vec![],
+    };
+
+    // MLX `sdpa_vector` function constants — all off (no mask, no
+    // sinks, no causal, no query-transposed). Indices match
+    // sdpa_vector.h:7-13.
+    const REF_FCS: &[(usize, bool)] = &[
+        (20, false), // has_mask
+        (21, false), // query_transposed
+        (22, false), // do_causal
+        (23, false), // bool_mask
+        (24, false), // float_mask
+        (25, false), // has_sinks
+    ];
+    let ref_name: Option<String> = match dt {
+        DType::F32 => Some(format!("sdpa_vector_float_{head_dim}_{head_dim}")),
+        DType::F16 => Some(format!("sdpa_vector_float16_t_{head_dim}_{head_dim}")),
+        DType::BF16 => Some(format!("sdpa_vector_bfloat16_t_{head_dim}_{head_dim}")),
+        _ => None,
+    };
+    let rk = ref_name.as_ref().and_then(|name| {
+        spec.mlx_src.and_then(|src| runner.compile_with_bool_constants(src, name, REF_FCS).ok())
+    });
+
+    let scale = 1.0_f32 / (head_dim as f32).sqrt();
+    let max_n = (n_kv_heads * n_kv * head_dim).max(n_q_heads * head_dim);
+    let vals: Vec<f32> = (0..max_n).map(|i| ((i % 17) as f32 - 8.0) * 0.05).collect();
+
+    let q_buf = buffer_typed(runner, &vals[..n_q_heads * head_dim], dt);
+    let k_buf = buffer_typed(runner, &vals[..n_kv_heads * n_kv * head_dim], dt);
+    let v_buf = buffer_typed(runner, &vals[..n_kv_heads * n_kv * head_dim], dt);
+    let mt_out_buf = zeros_typed(runner, n_q_heads * head_dim, dt);
+    let hd_buf = runner.buffer_u32(head_dim as u32);
+    let n_buf = runner.buffer_u32(n_kv as u32);
+    let gqa_buf = runner.buffer_u32(gqa_factor as u32);
+    let sc_buf = runner.buffer_f32_scalar(scale);
+
+    // MT dispatch — one threadgroup per Q head, 32 threads each.
+    let mt_bufs: Vec<&GpuBuffer> =
+        vec![&q_buf, &k_buf, &v_buf, &mt_out_buf, &hd_buf, &n_buf, &gqa_buf, &sc_buf];
+    runner.measure(&mk, &mt_bufs, [n_q_heads, 1, 1], [tpg, 1, 1], 0, 1);
+    let mt_out = crate::measure::read_typed(runner, &mt_out_buf, n_q_heads * head_dim, dt);
+
+    // MLX reference dispatch + correctness compare.
+    let equiv = rk.as_ref().map(|rk| {
+        let gqa = runner.buffer_i32(gqa_factor as i32);
+        let n_i32 = runner.buffer_i32(n_kv as i32);
+        let khs = runner.buffer_u64((n_kv * head_dim) as u64);
+        let kss = runner.buffer_u64(head_dim as u64);
+        let mlx_out_buf = zeros_typed(runner, n_q_heads * head_dim, dt);
+        runner.measure(
+            rk,
+            &[&q_buf, &k_buf, &v_buf, &mlx_out_buf, &gqa, &n_i32, &khs, &kss, &khs, &kss, &sc_buf],
+            [n_q_heads, 1, 1],
+            [1024, 1, 1], // BD * BN = 32 * 32 (MLX's parallel simdgroup grid)
+            0,
+            1,
+        );
+        let ref_out = crate::measure::read_typed(runner, &mlx_out_buf, n_q_heads * head_dim, dt);
+        check_equiv_with(&ref_out, &mt_out, EquivTolerance::new(spec.tol, 0.999))
+    });
+
+    // Perf: read q + k + v + write out. K/V sized by n_kv_heads (GQA),
+    // not n_q_heads.
+    let bytes = ((n_q_heads * head_dim + 2 * n_kv_heads * n_kv * head_dim + n_q_heads * head_dim)
+        * ctx.eb) as f64;
+    let mt_perf = bench_gbps(runner, &mk, &mt_bufs, [n_q_heads, 1, 1], [tpg, 1, 1], bytes);
+    let ref_perf = rk
+        .as_ref()
+        .map(|rk| {
+            let gqa = runner.buffer_i32(gqa_factor as i32);
+            let n_i32 = runner.buffer_i32(n_kv as i32);
+            let khs = runner.buffer_u64((n_kv * head_dim) as u64);
+            let kss = runner.buffer_u64(head_dim as u64);
+            let out = zeros_typed(runner, n_q_heads * head_dim, dt);
+            bench_gbps(
+                runner,
+                rk,
+                &[&q_buf, &k_buf, &v_buf, &out, &gqa, &n_i32, &khs, &kss, &khs, &kss, &sc_buf],
+                [n_q_heads, 1, 1],
+                [1024, 1, 1],
+                bytes,
+            )
+        })
+        .unwrap_or(None);
+
+    let label = format!("H={n_q_heads} N={n_kv} D={head_dim} gqa={gqa_factor} {}", ctx.label);
+    vec![bench.result_sub(Some(spec.subop), label, ref_perf, mt_perf, equiv)]
 }

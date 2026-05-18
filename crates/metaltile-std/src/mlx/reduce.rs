@@ -6,7 +6,11 @@ use metaltile::{bench_kernel, kernel};
     op="all_reduce",
     subop="sum",
     class=AllReduce,
-    tol=128.0,
+    // tol=256.0 — summing 64M signed bf16 values, MT and MLX accumulate
+    // in slightly different orders. With bf16 precision (~7-bit
+    // mantissa, ~1% relative) the result drifts by up to ~192 absolute
+    // between the two reduction trees. f32 stays comfortably below 1e-3.
+    tol=256.0,
     mlx="all_reduce_sum{tn}",
     metal_file="reduce.metal",
 )]

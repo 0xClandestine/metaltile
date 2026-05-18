@@ -192,15 +192,88 @@ pub struct ShapeSpec {
 
 pub enum BenchDispatch {
     Generic,
-    Sort { b: usize, n: usize, tpg: usize },
-    Scan { shapes: &'static [(usize, usize)], tpg: usize },
-    ArgReduce { n: usize, check_n: usize, tpg: usize },
-    Random { n: usize, tpg: usize },
-    FpQuantized { n: usize, tpg: usize },
-    QuantizedMatVec { shapes: &'static [(usize, usize)], group_size: usize, tpg: usize },
-    Rope { b: usize, h: usize, l: usize, d: usize, n_per_group: usize },
-    Attention { shapes: &'static [(usize, usize, usize)], tpg: usize },
-    StridedCopy { m: usize, n: usize, pad: usize },
+    Sort {
+        b: usize,
+        n: usize,
+        tpg: usize,
+    },
+    Scan {
+        shapes: &'static [(usize, usize)],
+        tpg: usize,
+    },
+    ArgReduce {
+        n: usize,
+        check_n: usize,
+        tpg: usize,
+    },
+    Random {
+        n: usize,
+        tpg: usize,
+    },
+    FpQuantized {
+        n: usize,
+        tpg: usize,
+    },
+    QuantizedMatVec {
+        shapes: &'static [(usize, usize)],
+        group_size: usize,
+        tpg: usize,
+    },
+    Rope {
+        b: usize,
+        h: usize,
+        l: usize,
+        d: usize,
+        n_per_group: usize,
+    },
+    Attention {
+        shapes: &'static [(usize, usize, usize)],
+        tpg: usize,
+    },
+    StridedCopy {
+        m: usize,
+        n: usize,
+        pad: usize,
+    },
+    /// Affine dequantize one packed weight tensor into floats. Mirrors
+    /// MLX `affine_dequantize<T, group_size, bits>`. One thread per pack
+    /// (each pack holds `pack_factor = 32 / bits` quantized values in
+    /// one uint32 for power-of-2 bits, or `bytes_per_pack` bytes for
+    /// the byte-stream variants). `n_groups * batch` total groups; each
+    /// group covers `group_size` output elements.
+    AffineDequantize {
+        bits: usize,
+        group_size: usize,
+        n_groups: usize,
+        batch: usize,
+        tpg: usize,
+    },
+    /// Affine quantize floats into packed weights + per-group scale +
+    /// bias. Mirrors MLX `affine_quantize<T, group_size, bits>`. One
+    /// threadgroup of 32 threads (one simd-group) per group; each lane
+    /// handles `group_size / 32` input values, reduces min/max via
+    /// `simd_min`/`simd_max`, then packs nibbles cooperatively.
+    AffineQuantize {
+        bits: usize,
+        group_size: usize,
+        n_groups: usize,
+        batch: usize,
+        tpg: usize,
+    },
+    /// Decode-form scaled dot-product attention. Mirrors MLX
+    /// `sdpa_vector<T, D, V=D>`. One threadgroup per `(q_head, q_seq)`
+    /// output position; `tpg` threads (one simdgroup) cooperatively
+    /// reduce the dot product across `head_dim`, serial over `n_kv`
+    /// positions for the online softmax. GQA via `gqa_factor` (number
+    /// of Q heads per KV head).
+    SdpaVector {
+        head_dim: usize,
+        n_kv: usize,
+        n_q_heads: usize,
+        gqa_factor: usize,
+        batch: usize,
+        tpg: usize,
+    },
 }
 
 // ── BenchSpec ───────────────────────────────────────────────────────────

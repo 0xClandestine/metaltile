@@ -121,7 +121,10 @@ pub fn mt_relu<T>(a: Tensor<T>, out: Tensor<T>) {
     subop="cos",
     class=Unary,
     input=Signed,
-    tol=1e-4,
+    // tol=1e-3 — f16 cos drifts by ~2.4e-4 between MT and MLX on
+    // adversarial inputs (Apple GPU fast-math handles the last few ULPs
+    // of the f16 mantissa differently). f32 stays comfortably below.
+    tol=1e-3,
     mlx="v_Cos{tn}{tn}",
     metal_file="unary.metal",
 )]
@@ -136,7 +139,8 @@ pub fn mt_cos<T>(a: Tensor<T>, out: Tensor<T>) {
     subop="sin",
     class=Unary,
     input=Signed,
-    tol=1e-4,
+    // tol=1e-3 — f16 sin drifts by ~4.9e-4 (see mt_cos comment).
+    tol=1e-3,
     mlx="v_Sin{tn}{tn}",
     metal_file="unary.metal",
 )]
@@ -298,7 +302,9 @@ pub fn mt_square<T>(a: Tensor<T>, out: Tensor<T>) {
     subop="sigmoid",
     class=Unary,
     input=Signed,
-    tol=1e-4,
+    // tol=1e-3 — f16 sigmoid drifts by ~4.9e-4 (exp + reciprocal each
+    // pick up ULP-level error, compounds across them).
+    tol=1e-3,
     mlx="v_Sigmoid{tn}{tn}",
     metal_file="unary.metal",
 )]

@@ -396,10 +396,31 @@ pub fn op_value_refs(op: &Op) -> Vec<ValueId> {
 // max_vid_in_op — highest ValueId in an Op
 // ---------------------------------------------------------------------------
 
-/// Return the maximum `ValueId` referenced by `op`.
+/// Return the maximum *real* `ValueId` referenced by `op`.
+///
+/// `FusedElementwise` sub-ops encode references to siblings within the
+/// fused chain by setting the top bit of the `ValueId` (see
+/// `passes::fusion::SUB_OP_FLAG = 0x8000_0000`). Those encoded refs are
+/// NOT real ValueIds in the kernel-wide namespace — they're chain-local
+/// position indices that happen to share the `ValueId` type. Including
+/// them when allocating fresh IDs (`next_vid = max_vid + 1` in the
+/// unroll pass) would push `next_vid` past `0x8000_0000`, and the newly
+/// minted IDs would collide with the sub-op-ref encoding, causing the
+/// MSL emitter to interpret them as bogus sub-op refs and emit
+/// `0 /* bad sub-op ref */` placeholders. We mask them out here.
 pub fn max_vid_in_op(op: &Op) -> u32 {
+    /// Top bit reserved by `passes::fusion::SUB_OP_FLAG` to mark
+    /// chain-internal references in `FusedElementwise` sub-ops.
+    const SUB_OP_FLAG: u32 = 0x8000_0000;
     let mut m = 0u32;
-    let mut push = |v: &ValueId| m = m.max(v.as_u32());
+    let mut push = |v: &ValueId| {
+        let raw = v.as_u32();
+        // Skip sub-op refs — they're not real ValueIds in the
+        // kernel-wide namespace, just chain-local position indices.
+        if raw & SUB_OP_FLAG == 0 && raw > m {
+            m = raw;
+        }
+    };
 
     match op {
         // ── arithmetic / logic ────────────────────────────────────────────
@@ -581,8 +602,17 @@ pub fn max_vid_in_op(op: &Op) -> u32 {
 // find_max_vid — maximum ValueId across a whole Kernel
 // ---------------------------------------------------------------------------
 
-/// Find the maximum `ValueId` across all ops and results in `kernel`.
+/// Find the maximum *real* `ValueId` across all ops and results in
+/// `kernel`. Ignores `FusedElementwise` sub-op refs (top-bit-set
+/// chain-internal indices); see [`max_vid_in_op`] for why.
 pub fn find_max_vid(kernel: &Kernel) -> u32 {
+    /// Top bit reserved by `passes::fusion::SUB_OP_FLAG`.
+    const SUB_OP_FLAG: u32 = 0x8000_0000;
+    let real_vid = |vid: &ValueId| -> Option<u32> {
+        let raw = vid.as_u32();
+        if raw & SUB_OP_FLAG == 0 { Some(raw) } else { None }
+    };
+
     let mut m = 0u32;
 
     // Body ops and results
@@ -590,7 +620,9 @@ pub fn find_max_vid(kernel: &Kernel) -> u32 {
         m = m.max(max_vid_in_op(op));
     }
     for vid in kernel.body.results.iter().flatten() {
-        m = m.max(vid.as_u32());
+        if let Some(raw) = real_vid(vid) {
+            m = m.max(raw);
+        }
     }
 
     // Nested blocks
@@ -599,7 +631,9 @@ pub fn find_max_vid(kernel: &Kernel) -> u32 {
             m = m.max(max_vid_in_op(op));
         }
         for vid in block.results.iter().flatten() {
-            m = m.max(vid.as_u32());
+            if let Some(raw) = real_vid(vid) {
+                m = m.max(raw);
+            }
         }
     }
 
@@ -739,6 +773,54 @@ mod tests {
         assert_eq!(op_value_refs(&Op::Barrier).len(), 0);
         assert_eq!(op_value_refs(&Op::Const { value: 42 }).len(), 0);
         assert_eq!(max_vid_in_op(&Op::Barrier), 0);
+    }
+
+    #[test]
+    fn max_vid_ignores_sub_op_refs() {
+        // FusedElementwise sub-ops encode chain-internal references by
+        // setting the top bit of the ValueId (`SUB_OP_FLAG = 0x8000_0000`).
+        // `max_vid_in_op` / `find_max_vid` must skip those — otherwise
+        // the unroll pass's `next_vid = max_vid + 1` allocation collides
+        // with the sub-op-ref encoding namespace and the MSL emitter
+        // produces `0 /* bad sub-op ref */` placeholders. Regression
+        // test for the `mt_rope_f16` / `mt_affine_quantize_int8`
+        // miscompiles.
+        const SUB_OP_FLAG: u32 = 0x8000_0000;
+        let sub_op_ref_0 = ValueId::new(SUB_OP_FLAG); // chain position 0
+        let real_vid = ValueId::new(42);
+
+        // Single-op test: a fused chain that contains a sub-op ref.
+        let op = Op::FusedElementwise {
+            ops: vec![Op::BinOp {
+                op: BinOpKind::Add,
+                lhs: sub_op_ref_0,
+                rhs: real_vid,
+            }],
+        };
+        assert_eq!(max_vid_in_op(&op), 42, "sub-op refs must not bump max_vid");
+
+        // Whole-kernel test mirrors the rope path: real ValueIds up to
+        // 100, plus a fused op with a sub-op ref far above SUB_OP_FLAG.
+        let mut k = Kernel::new("max_vid_ignores_sub_op_refs");
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(100));
+        k.body.push_op(
+            Op::FusedElementwise {
+                ops: vec![
+                    Op::Cast { value: ValueId::new(100), dtype: metaltile_core::dtype::DType::F32 },
+                    Op::UnaryOp {
+                        op: metaltile_core::ir::UnaryOpKind::Neg,
+                        value: sub_op_ref_0,
+                    },
+                ],
+            },
+            ValueId::new(101),
+        );
+        assert_eq!(
+            find_max_vid(&k),
+            101,
+            "find_max_vid must ignore sub-op refs (else unroll's next_vid space \
+             collides with the SUB_OP_FLAG namespace)"
+        );
     }
 
     #[test]
