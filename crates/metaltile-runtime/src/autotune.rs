@@ -247,11 +247,9 @@ mod tests {
     #[test]
     fn autotuner_get_or_tune_disabled_returns_default_config() {
         let dir = scratch_dir();
-        let tuner = Autotuner::new(dir, false);
+        let mut tuner = Autotuner::new(dir, false);
         let ce = ConstExprValues::new();
-        // `get_or_tune` borrows mutably, so reassign through a binding.
-        let mut t = tuner;
-        let cfg = t.get_or_tune("any_kernel", &ce).expect("disabled tuner returns default");
+        let cfg = tuner.get_or_tune("any_kernel", &ce).expect("disabled tuner returns default");
         assert_eq!(cfg.tile_dims, vec![32, 32, 32]);
         assert_eq!(cfg.threads, (256, 1, 1));
         assert!(cfg.use_simd_matrix);
