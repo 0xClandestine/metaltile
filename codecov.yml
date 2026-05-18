@@ -1,0 +1,92 @@
+coverage:
+  precision: 1
+  round: down
+  status:
+    project:
+      default:
+        # Workspace floor — never regress, target lifts as new tests land.
+        target: auto
+        threshold: 0.5%
+        if_ci_failed: error
+    patch:
+      default:
+        target: 80%
+        threshold: 1%
+        if_ci_failed: success
+
+# Per-crate floors. All `informational: true` for now so PRs stay green while
+# the test-coverage arc (Phase 1+ in the coverage plan) lands. Flip to false
+# once a crate consistently sits above its floor.
+flag_management:
+  default_rules:
+    carryforward: true
+  individual_flags:
+    - name: codegen
+      paths:
+        - crates/metaltile-codegen/
+      statuses:
+        - type: project
+          target: 90%
+          threshold: 0%
+          if_ci_failed: success
+          informational: true
+    - name: core
+      paths:
+        - crates/metaltile-core/
+      statuses:
+        - type: project
+          target: 90%
+          threshold: 0%
+          if_ci_failed: success
+          informational: true
+    - name: macros
+      paths:
+        - crates/metaltile-macros/
+      statuses:
+        - type: project
+          target: 92%
+          threshold: 0%
+          if_ci_failed: success
+          informational: true
+    - name: runtime
+      paths:
+        - crates/metaltile-runtime/
+      statuses:
+        - type: project
+          target: 85%
+          threshold: 0%
+          if_ci_failed: success
+          informational: true
+    - name: cli
+      paths:
+        - crates/metaltile-cli/
+      statuses:
+        - type: project
+          target: 80%
+          threshold: 0%
+          if_ci_failed: success
+          informational: true
+
+# Files excluded from the line-coverage denominator:
+#   - facade re-exports (no logic)
+#   - kernel-body files (`#[kernel]` proc-macro consumes the body; the Rust
+#     body never executes, so line coverage is meaningless — correctness is
+#     validated end-to-end via `tile bench` numerical-equiv vs MLX)
+#   - tests, benches, build scripts
+ignore:
+  - "crates/metaltile/src/lib.rs"
+  - "crates/metaltile/src/prelude.rs"
+  - "crates/metaltile-std/src/ffai/**"
+  - "crates/metaltile-std/src/mlx/**"
+  - "**/tests/**"
+  - "**/benches/**"
+  - "**/build.rs"
+  - "target/**"
+
+comment:
+  layout: "header, flags, files, footer"
+  require_changes: true
+  show_carryforward_flags: true
+
+github_checks:
+  annotations: true
