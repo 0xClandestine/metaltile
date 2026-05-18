@@ -704,6 +704,10 @@ mod bench_impl {
         AffineQuantize,
         SdpaVector,
         SteelGemm,
+        /// Codegen-only kernel: no MLX reference, no shapes.
+        Codegen,
+        /// Two-pass SDPA decode: pass1+pass2 chained dispatch.
+        SdpaVector2Pass,
     }
 
     pub enum InputKind {
@@ -849,6 +853,8 @@ mod bench_impl {
                             "AffineQuantize" => ClassKind::AffineQuantize,
                             "SdpaVector" => ClassKind::SdpaVector,
                             "SteelGemm" => ClassKind::SteelGemm,
+                            "Codegen" => ClassKind::Codegen,
+                            "SdpaVector2Pass" => ClassKind::SdpaVector2Pass,
                             o => {
                                 return Err(syn::Error::new(
                                     id.span(),
@@ -1017,7 +1023,7 @@ mod bench_impl {
 
         // For Generic dispatch: produce (shapes_ts, BenchDispatch::Generic).
         // For complex dispatch: produce (&[], BenchDispatch::Foo{...}).
-        let (shapes_ts, dispatch_ts) = match &a.class {
+        let (shapes_ts, dispatch_ts, check_fn_ts, mlx_compile_fn_ts) = match &a.class {
             // ── Generic: Unary ───────────────────────────────────────────────
             ClassKind::Unary => {
                 let inp = input_buf_init_ts(&a.input);
@@ -1053,7 +1059,7 @@ mod bench_impl {
                     mlx_grid_fn: None,
                     out_n_fn: None,
                 }] };
-                (sh, quote! { crate::spec::BenchDispatch::Generic })
+                (sh, quote! { crate::spec::BenchDispatch::Generic }, quote! { None }, quote! { None })
             },
             // ── Generic: Binary ──────────────────────────────────────────────
             ClassKind::Binary => {
@@ -1094,7 +1100,7 @@ mod bench_impl {
                     mlx_grid_fn: None,
                     out_n_fn: None,
                 }] };
-                (sh, quote! { crate::spec::BenchDispatch::Generic })
+                (sh, quote! { crate::spec::BenchDispatch::Generic }, quote! { None }, quote! { None })
             },
             // ── Generic: AllReduce ───────────────────────────────────────────
             ClassKind::AllReduce => {
@@ -1131,7 +1137,7 @@ mod bench_impl {
                     mlx_grid_fn: None,
                     out_n_fn: None,
                 }] };
-                (sh, quote! { crate::spec::BenchDispatch::Generic })
+                (sh, quote! { crate::spec::BenchDispatch::Generic }, quote! { None }, quote! { None })
             },
             // ── Generic: RowReduce ───────────────────────────────────────────
             ClassKind::RowReduce => {
@@ -1168,7 +1174,7 @@ mod bench_impl {
                     mlx_grid_fn: None,
                     out_n_fn: None,
                 }] };
-                (sh, quote! { crate::spec::BenchDispatch::Generic })
+                (sh, quote! { crate::spec::BenchDispatch::Generic }, quote! { None }, quote! { None })
             },
             // ── Generic: Arange ──────────────────────────────────────────────
             ClassKind::Arange => {
@@ -1207,7 +1213,7 @@ mod bench_impl {
                     mlx_grid_fn: None,
                     out_n_fn: None,
                 }] };
-                (sh, quote! { crate::spec::BenchDispatch::Generic })
+                (sh, quote! { crate::spec::BenchDispatch::Generic }, quote! { None }, quote! { None })
             },
             // ── Generic: BinaryTwo ───────────────────────────────────────────
             ClassKind::BinaryTwo => {
@@ -1243,7 +1249,7 @@ mod bench_impl {
                     mlx_grid_fn: None,
                     out_n_fn: None,
                 }] };
-                (sh, quote! { crate::spec::BenchDispatch::Generic })
+                (sh, quote! { crate::spec::BenchDispatch::Generic }, quote! { None }, quote! { None })
             },
             // ── Generic: Select ──────────────────────────────────────────────
             ClassKind::Select => {
@@ -1283,7 +1289,7 @@ mod bench_impl {
                     mlx_grid_fn: None,
                     out_n_fn: None,
                 }] };
-                (sh, quote! { crate::spec::BenchDispatch::Generic })
+                (sh, quote! { crate::spec::BenchDispatch::Generic }, quote! { None }, quote! { None })
             },
             // ── Generic: RowNorm (softmax, rms_norm, layer_norm, logsumexp) ──
             ClassKind::RowNorm => {
@@ -1390,7 +1396,7 @@ mod bench_impl {
                     mlx_grid_fn: None,
                     out_n_fn: None,
                 }] };
-                (sh, quote! { crate::spec::BenchDispatch::Generic })
+                (sh, quote! { crate::spec::BenchDispatch::Generic }, quote! { None }, quote! { None })
             },
             // ── Generic: MatVec ──────────────────────────────────────────────
             ClassKind::MatVec => {
@@ -1429,7 +1435,7 @@ mod bench_impl {
                     mlx_grid_fn: None,
                     out_n_fn: None,
                 }] };
-                (sh, quote! { crate::spec::BenchDispatch::Generic })
+                (sh, quote! { crate::spec::BenchDispatch::Generic }, quote! { None }, quote! { None })
             },
             // ── Generic: MatVecMasked ────────────────────────────────────────
             ClassKind::MatVecMasked => {
@@ -1469,57 +1475,156 @@ mod bench_impl {
                     mlx_grid_fn: None,
                     out_n_fn: None,
                 }] };
-                (sh, quote! { crate::spec::BenchDispatch::Generic })
+                (sh, quote! { crate::spec::BenchDispatch::Generic }, quote! { None }, quote! { None })
             },
-            // ── Complex: Sort ────────────────────────────────────────────────
+            // ── Complex: Sort (fn-pointers) ────────────────────────────────
             ClassKind::Sort => {
                 let b_val = a.b.as_ref().expect("Sort requires b");
                 let n_val = a.n.as_ref().expect("Sort requires n");
                 let tpg_val = a.tpg.as_ref().expect("Sort requires tpg");
-                (quote! { &[] }, quote! {
-                    crate::spec::BenchDispatch::Sort {
-                        b: #b_val as usize, n: #n_val as usize, tpg: #tpg_val as usize,
-                    }
-                })
+                let b_u: usize = b_val.base10_parse().unwrap_or(1024);
+                let n_u: usize = n_val.base10_parse().unwrap_or(1024);
+                let label = format!("B={b_u} N={n_u}");
+                let sh = quote! { &[crate::spec::ShapeSpec {
+                    label: #label,
+                    n: #n_val as usize, b: #b_val as usize,
+                    check_n: #n_val as usize, check_b: 4usize,
+                    mode: metaltile_core::ir::KernelMode::Reduction,
+                    tpg: #tpg_val as usize,
+                    grid: crate::spec::DispatchGrid::RowsB,
+                    tensor_bufs: &[],
+                    scalar_bufs: &[],
+                    cexprs: &[],
+                    out_elems: crate::spec::Dim::BxN,
+                    reads: 2usize,
+                    bytes_fn: crate::spec::bytes_elementwise,
+                    mlx_args: None,
+                    mlx_grid: Some(crate::spec::DispatchGrid::RowsB),
+                    mlx_tpg: 0usize,
+                    extra: [0usize; 8],
+                    mt_bufs_fn: Some(crate::run_spec::sort_mt_bufs),
+                    mt_out_idx: Some(1usize),
+                    mt_grid_fn: Some(crate::run_spec::sort_mt_grid),
+                    mlx_bufs_fn: Some(crate::run_spec::sort_mlx_bufs),
+                    mlx_out_idx: 1usize,
+                    mlx_grid_fn: None,
+                    out_n_fn: None,
+                }] };
+                (sh, quote! { crate::spec::BenchDispatch::Generic },
+                 quote! { Some(crate::run_spec::sort_check_fn) }, quote! { None })
             },
-            // ── Complex: Scan ────────────────────────────────────────────────
+            // ── Complex: Scan (BenchDispatch shapes) ───────────────────
             ClassKind::Scan => {
                 let sh = a.shapes.as_ref().expect("Scan requires shapes");
                 let tpg_val = a.tpg.as_ref().expect("Scan requires tpg");
                 (quote! { &[] }, quote! {
                     crate::spec::BenchDispatch::Scan { shapes: #sh, tpg: #tpg_val as usize }
-                })
+                }, quote! { None }, quote! { None })
             },
-            // ── Complex: ArgReduce ───────────────────────────────────────────
+            // ── Complex: ArgReduce (fn-pointers) ────────────────────────
             ClassKind::ArgReduce => {
                 let n_val = a.n.as_ref().expect("ArgReduce requires n");
                 let cn_val = a.check_n.as_ref().expect("ArgReduce requires check_n");
                 let tpg_val = a.tpg.as_ref().expect("ArgReduce requires tpg");
-                (quote! { &[] }, quote! {
-                    crate::spec::BenchDispatch::ArgReduce {
-                        n: #n_val as usize, check_n: #cn_val as usize, tpg: #tpg_val as usize,
-                    }
-                })
+                let n_u: usize = n_val.base10_parse().unwrap_or(0);
+                let label = format!("N={n_u}");
+                let sh = quote! { &[crate::spec::ShapeSpec {
+                    label: #label,
+                    n: #n_val as usize, b: 1usize,
+                    check_n: #cn_val as usize, check_b: 1usize,
+                    mode: metaltile_core::ir::KernelMode::Reduction,
+                    tpg: #tpg_val as usize,
+                    grid: crate::spec::DispatchGrid::Single,
+                    tensor_bufs: &[],
+                    scalar_bufs: &[],
+                    cexprs: &[],
+                    out_elems: crate::spec::Dim::One,
+                    reads: 1usize,
+                    bytes_fn: crate::run_spec::bytes_single,
+                    mlx_args: None,
+                    mlx_grid: Some(crate::spec::DispatchGrid::Single),
+                    mlx_tpg: 0usize,
+                    extra: [0usize; 8],
+                    mt_bufs_fn: None,
+                    mt_out_idx: None,
+                    mt_grid_fn: None,
+                    mlx_bufs_fn: Some(crate::run_spec::arg_reduce_mlx_bufs),
+                    mlx_out_idx: 1usize,
+                    mlx_grid_fn: Some(crate::run_spec::arg_reduce_mlx_grid),
+                    out_n_fn: None,
+                }] };
+                (sh, quote! { crate::spec::BenchDispatch::Generic },
+                 quote! { None }, quote! { None })
             },
-            // ── Complex: Random ──────────────────────────────────────────────
+            // ── Complex: Random (fn-pointers) ───────────────────────────
             ClassKind::Random => {
                 let n_val = a.n.as_ref().expect("Random requires n");
                 let tpg_val = a.tpg.as_ref().expect("Random requires tpg");
-                (quote! { &[] }, quote! {
-                    crate::spec::BenchDispatch::Random { n: #n_val as usize, tpg: #tpg_val as usize }
-                })
+                let n_u: usize = n_val.base10_parse().unwrap_or(1048576);
+                let label = format!("{}M u32", n_u / (1024 * 1024));
+                let sh = quote! { &[crate::spec::ShapeSpec {
+                    label: #label,
+                    n: #n_val as usize, b: 1usize,
+                    check_n: 1024usize, check_b: 1usize,
+                    mode: metaltile_core::ir::KernelMode::Elementwise,
+                    tpg: #tpg_val as usize,
+                    grid: crate::spec::DispatchGrid::DivCeilN,
+                    tensor_bufs: &[],
+                    scalar_bufs: &[],
+                    cexprs: &[],
+                    out_elems: crate::spec::Dim::N,
+                    reads: 0usize,
+                    bytes_fn: crate::run_spec::bytes_single,
+                    mlx_args: None,
+                    mlx_grid: None,
+                    mlx_tpg: 0usize,
+                    extra: [0usize; 8],
+                    mt_bufs_fn: Some(crate::run_spec::random_mt_bufs),
+                    mt_out_idx: Some(0usize),
+                    mt_grid_fn: None,
+                    mlx_bufs_fn: None,
+                    mlx_out_idx: 0usize,
+                    mlx_grid_fn: None,
+                    out_n_fn: None,
+                }] };
+                (sh, quote! { crate::spec::BenchDispatch::Generic },
+                 quote! { Some(crate::run_spec::random_check_fn) }, quote! { None })
             },
-            // ── Complex: FpQuantized ─────────────────────────────────────────
+            // ── Complex: FpQuantized (fn-pointers) ─────────────────────
             ClassKind::FpQuantized => {
                 let n_val = a.n.as_ref().expect("FpQuantized requires n");
                 let tpg_val = a.tpg.as_ref().expect("FpQuantized requires tpg");
-                (quote! { &[] }, quote! {
-                    crate::spec::BenchDispatch::FpQuantized {
-                        n: #n_val as usize, tpg: #tpg_val as usize,
-                    }
-                })
+                let n_u: usize = n_val.base10_parse().unwrap_or(1048576);
+                let label = format!("N={}M f32 gs32", n_u / (1024 * 1024));
+                let sh = quote! { &[crate::spec::ShapeSpec {
+                    label: #label,
+                    n: #n_val as usize, b: 1usize,
+                    check_n: 1024usize, check_b: 1usize,
+                    mode: metaltile_core::ir::KernelMode::Elementwise,
+                    tpg: #tpg_val as usize,
+                    grid: crate::spec::DispatchGrid::DivCeilN,
+                    tensor_bufs: &[],
+                    scalar_bufs: &[],
+                    cexprs: &[],
+                    out_elems: crate::spec::Dim::N,
+                    reads: 1usize,
+                    bytes_fn: crate::run_spec::bytes_double,
+                    mlx_args: None,
+                    mlx_grid: None,
+                    mlx_tpg: 0usize,
+                    extra: [0usize; 8],
+                    mt_bufs_fn: None,
+                    mt_out_idx: None,
+                    mt_grid_fn: None,
+                    mlx_bufs_fn: Some(crate::run_spec::fp_quantized_mlx_bufs),
+                    mlx_out_idx: 1usize,
+                    mlx_grid_fn: Some(crate::run_spec::fp_quantized_mlx_grid),
+                    out_n_fn: None,
+                }] };
+                (sh, quote! { crate::spec::BenchDispatch::Generic },
+                 quote! { None }, quote! { None })
             },
-            // ── Complex: QuantizedMatVec ─────────────────────────────────────
+            // ── Complex: QuantizedMatVec (BenchDispatch shapes) ────────
             ClassKind::QuantizedMatVec => {
                 let sh = a.shapes.as_ref().expect("QuantizedMatVec requires shapes");
                 let gs = a.group_size.as_ref().expect("QuantizedMatVec requires group_size");
@@ -1528,95 +1633,200 @@ mod bench_impl {
                     crate::spec::BenchDispatch::QuantizedMatVec {
                         shapes: #sh, group_size: #gs as usize, tpg: #tpg_val as usize,
                     }
-                })
+                }, quote! { None }, quote! { None })
             },
-            // ── Complex: Rope ────────────────────────────────────────────────
+            // ── Complex: Rope (fn-pointers) ────────────────────────────
             ClassKind::Rope => {
                 let b_val = a.b.as_ref().expect("Rope requires b");
                 let h_val = a.h.as_ref().expect("Rope requires h");
                 let l_val = a.l.as_ref().expect("Rope requires l");
                 let d_val = a.d.as_ref().expect("Rope requires d");
                 let npg = a.n_per_group.as_ref().expect("Rope requires n_per_group");
-                (quote! { &[] }, quote! {
-                    crate::spec::BenchDispatch::Rope {
-                        b: #b_val as usize, h: #h_val as usize,
-                        l: #l_val as usize, d: #d_val as usize,
-                        n_per_group: #npg as usize,
-                    }
-                })
+                let b_u: usize = b_val.base10_parse().unwrap_or(0);
+                let h_u: usize = h_val.base10_parse().unwrap_or(0);
+                let l_u: usize = l_val.base10_parse().unwrap_or(0);
+                let d_u: usize = d_val.base10_parse().unwrap_or(0);
+                let label = format!("B{b_u}H{h_u}L{l_u}D{d_u} f16");
+                let sh = quote! { &[crate::spec::ShapeSpec {
+                    label: #label,
+                    n: #d_val as usize, b: #h_val as usize,
+                    check_n: #d_val as usize, check_b: #h_val as usize,
+                    mode: metaltile_core::ir::KernelMode::Grid3D,
+                    tpg: 1usize,
+                    grid: crate::spec::DispatchGrid::Single,
+                    tensor_bufs: &[],
+                    scalar_bufs: &[],
+                    cexprs: &[],
+                    out_elems: crate::spec::Dim::One,
+                    reads: 2usize,
+                    bytes_fn: crate::run_spec::bytes_io,
+                    mlx_args: None,
+                    mlx_grid: None,
+                    mlx_tpg: 1usize,
+                    extra: [#l_val as usize, #npg as usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize],
+                    mt_bufs_fn: Some(crate::run_spec::rope_mt_bufs),
+                    mt_out_idx: Some(1usize),
+                    mt_grid_fn: Some(crate::run_spec::rope_mt_grid),
+                    mlx_bufs_fn: Some(crate::run_spec::rope_mlx_bufs),
+                    mlx_out_idx: 1usize,
+                    mlx_grid_fn: Some(crate::run_spec::rope_mlx_grid),
+                    out_n_fn: Some(crate::run_spec::rope_out_n),
+                }] };
+                (sh, quote! { crate::spec::BenchDispatch::Generic },
+                 quote! { None }, quote! { Some(crate::run_spec::rope_mlx_compile) })
             },
-            // ── Complex: Attention ───────────────────────────────────────────
+            // ── Complex: Attention (BenchDispatch shapes) ──────────────
             ClassKind::Attention => {
                 let sh = a.shapes.as_ref().expect("Attention requires shapes");
                 let tpg_val = a.tpg.as_ref().expect("Attention requires tpg");
                 (quote! { &[] }, quote! {
                     crate::spec::BenchDispatch::Attention { shapes: #sh, tpg: #tpg_val as usize }
-                })
+                }, quote! { None }, quote! { None })
             },
-            // ── Complex: StridedCopy ─────────────────────────────────────────
+            // ── Complex: StridedCopy (fn-pointers) ──────────────────────
             ClassKind::StridedCopy => {
                 let m_val = a.m.as_ref().expect("StridedCopy requires m");
                 let n_val = a.n.as_ref().expect("StridedCopy requires n");
                 let pad_val = a.pad.as_ref().expect("StridedCopy requires pad");
-                (quote! { &[] }, quote! {
-                    crate::spec::BenchDispatch::StridedCopy {
-                        m: #m_val as usize, n: #n_val as usize, pad: #pad_val as usize,
-                    }
-                })
+                let m_u: usize = m_val.base10_parse().unwrap_or(0);
+                let n_u: usize = n_val.base10_parse().unwrap_or(0);
+                let pad_u: usize = pad_val.base10_parse().unwrap_or(0);
+                let label = format!("M={m_u} N={n_u}+{pad_u}");
+                let sh = quote! { &[crate::spec::ShapeSpec {
+                    label: #label,
+                    n: #m_val as usize, b: #n_val as usize,
+                    check_n: #m_val as usize, check_b: #n_val as usize,
+                    mode: metaltile_core::ir::KernelMode::Grid3D,
+                    tpg: 1usize,
+                    grid: crate::spec::DispatchGrid::Single,
+                    tensor_bufs: &[],
+                    scalar_bufs: &[],
+                    cexprs: &[],
+                    out_elems: crate::spec::Dim::BxN,
+                    reads: 2usize,
+                    bytes_fn: crate::run_spec::bytes_io,
+                    mlx_args: None,
+                    mlx_grid: None,
+                    mlx_tpg: 0usize,
+                    extra: [#pad_val as usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize],
+                    mt_bufs_fn: Some(crate::run_spec::strided_copy_mt_bufs),
+                    mt_out_idx: Some(3usize),
+                    mt_grid_fn: Some(crate::run_spec::strided_copy_mt_grid),
+                    mlx_bufs_fn: Some(crate::run_spec::strided_copy_mlx_bufs),
+                    mlx_out_idx: 1usize,
+                    mlx_grid_fn: Some(crate::run_spec::strided_copy_mlx_grid),
+                    out_n_fn: None,
+                }] };
+                (sh, quote! { crate::spec::BenchDispatch::Generic },
+                 quote! { None }, quote! { None })
             },
-            // ── Complex: AffineDequantize ────────────────────────────────────
+            // ── Complex: AffineDequantize (fn-pointers) ─────────────────
             ClassKind::AffineDequantize => {
                 let bits_val = a.bits.as_ref().expect("AffineDequantize requires bits");
                 let gs = a.group_size.as_ref().expect("AffineDequantize requires group_size");
                 let ng = a.n_groups.as_ref().expect("AffineDequantize requires n_groups");
                 let batch = a.batch.as_ref().expect("AffineDequantize requires batch");
                 let tpg_val = a.tpg.as_ref().expect("AffineDequantize requires tpg");
-                (quote! { &[] }, quote! {
-                    crate::spec::BenchDispatch::AffineDequantize {
-                        bits: #bits_val as usize,
-                        group_size: #gs as usize,
-                        n_groups: #ng as usize,
-                        batch: #batch as usize,
-                        tpg: #tpg_val as usize,
-                    }
-                })
+                let sh = quote! { &[crate::spec::ShapeSpec {
+                    label: "",
+                    n: #ng as usize, b: #batch as usize,
+                    check_n: 4usize, check_b: 1usize,
+                    mode: metaltile_core::ir::KernelMode::Elementwise,
+                    tpg: #tpg_val as usize,
+                    grid: crate::spec::DispatchGrid::DivCeilN,
+                    tensor_bufs: &[],
+                    scalar_bufs: &[],
+                    cexprs: &[],
+                    out_elems: crate::spec::Dim::BxN,
+                    reads: 1usize,
+                    bytes_fn: crate::spec::bytes_elementwise,
+                    mlx_args: None,
+                    mlx_grid: None,
+                    mlx_tpg: 0usize,
+                    extra: [#bits_val as usize, #gs as usize, #ng as usize, #batch as usize, 0usize, 0usize, 0usize, 0usize],
+                    mt_bufs_fn: None,
+                    mt_out_idx: None,
+                    mt_grid_fn: None,
+                    mlx_bufs_fn: Some(crate::run_spec::affine_dequantize_mlx_bufs),
+                    mlx_out_idx: 3usize,
+                    mlx_grid_fn: Some(crate::run_spec::affine_dequantize_mlx_grid),
+                    out_n_fn: None,
+                }] };
+                (sh, quote! { crate::spec::BenchDispatch::Generic },
+                 quote! { None }, quote! { None })
             },
-            // ── Complex: AffineQuantize ──────────────────────────────────────
+            // ── Complex: AffineQuantize (fn-pointers) ──────────────────
             ClassKind::AffineQuantize => {
                 let bits_val = a.bits.as_ref().expect("AffineQuantize requires bits");
                 let gs = a.group_size.as_ref().expect("AffineQuantize requires group_size");
                 let ng = a.n_groups.as_ref().expect("AffineQuantize requires n_groups");
                 let batch = a.batch.as_ref().expect("AffineQuantize requires batch");
                 let tpg_val = a.tpg.as_ref().expect("AffineQuantize requires tpg");
-                (quote! { &[] }, quote! {
-                    crate::spec::BenchDispatch::AffineQuantize {
-                        bits: #bits_val as usize,
-                        group_size: #gs as usize,
-                        n_groups: #ng as usize,
-                        batch: #batch as usize,
-                        tpg: #tpg_val as usize,
-                    }
-                })
+                let sh = quote! { &[crate::spec::ShapeSpec {
+                    label: "",
+                    n: #ng as usize, b: #batch as usize,
+                    check_n: 4usize, check_b: 1usize,
+                    mode: metaltile_core::ir::KernelMode::Reduction,
+                    tpg: #tpg_val as usize,
+                    grid: crate::spec::DispatchGrid::DivCeilN,
+                    tensor_bufs: &[],
+                    scalar_bufs: &[],
+                    cexprs: &[],
+                    out_elems: crate::spec::Dim::BxN,
+                    reads: 1usize,
+                    bytes_fn: crate::spec::bytes_elementwise,
+                    mlx_args: None,
+                    mlx_grid: None,
+                    mlx_tpg: 0usize,
+                    extra: [#bits_val as usize, #gs as usize, #ng as usize, #batch as usize, 0usize, 0usize, 0usize, 0usize],
+                    mt_bufs_fn: None,
+                    mt_out_idx: None,
+                    mt_grid_fn: Some(crate::run_spec::affine_quantize_mt_grid),
+                    mlx_bufs_fn: Some(crate::run_spec::affine_quantize_mlx_bufs),
+                    mlx_out_idx: 1usize,
+                    mlx_grid_fn: Some(crate::run_spec::affine_quantize_mlx_grid),
+                    out_n_fn: None,
+                }] };
+                (sh, quote! { crate::spec::BenchDispatch::Generic },
+                 quote! { None }, quote! { None })
             },
-            // ── Complex: SdpaVector (decode-form SDPA) ───────────────────────
+            // ── Complex: SdpaVector (fn-pointers) ──────────────────────
             ClassKind::SdpaVector => {
                 let hd = a.h.as_ref().expect("SdpaVector requires h (head_dim)");
                 let nkv = a.n_kv.as_ref().expect("SdpaVector requires n_kv");
                 let nh = a.n_heads.as_ref().expect("SdpaVector requires n_heads (Q heads)");
-                let gqa = a.gqa_factor.as_ref().expect("SdpaVector requires gqa_factor (Q-per-KV)");
-                let batch = a.batch.as_ref().expect("SdpaVector requires batch");
+                let gqa = a.gqa_factor.as_ref().expect("SdpaVector requires gqa_factor");
+                let _batch = a.batch.as_ref().expect("SdpaVector requires batch");
                 let tpg_val = a.tpg.as_ref().expect("SdpaVector requires tpg");
-                (quote! { &[] }, quote! {
-                    crate::spec::BenchDispatch::SdpaVector {
-                        head_dim: #hd as usize,
-                        n_kv: #nkv as usize,
-                        n_q_heads: #nh as usize,
-                        gqa_factor: #gqa as usize,
-                        batch: #batch as usize,
-                        tpg: #tpg_val as usize,
-                    }
-                })
+                let sh = quote! { &[crate::spec::ShapeSpec {
+                    label: "",
+                    n: #nh as usize, b: #nkv as usize,
+                    check_n: #nh as usize, check_b: #nkv as usize,
+                    mode: metaltile_core::ir::KernelMode::Reduction,
+                    tpg: #tpg_val as usize,
+                    grid: crate::spec::DispatchGrid::RowsB,
+                    tensor_bufs: &[],
+                    scalar_bufs: &[],
+                    cexprs: &[],
+                    out_elems: crate::spec::Dim::BxN,
+                    reads: 2usize,
+                    bytes_fn: crate::run_spec::bytes_io,
+                    mlx_args: None,
+                    mlx_grid: None,
+                    mlx_tpg: 0usize,
+                    extra: [#hd as usize, #gqa as usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize],
+                    mt_bufs_fn: Some(crate::run_spec::sdpa_vector_mt_bufs),
+                    mt_out_idx: Some(3usize),
+                    mt_grid_fn: None,
+                    mlx_bufs_fn: Some(crate::run_spec::sdpa_vector_mlx_bufs),
+                    mlx_out_idx: 3usize,
+                    mlx_grid_fn: None,
+                    out_n_fn: None,
+                }] };
+                (sh, quote! { crate::spec::BenchDispatch::Generic },
+                 quote! { None }, quote! { Some(crate::run_spec::sdpa_vector_mlx_compile) })
             },
+            // ── Complex: SteelGemm (fn-pointers) ───────────────────────
             ClassKind::SteelGemm => {
                 let m_val = a.m.as_ref().expect("SteelGemm requires m");
                 let n_val = a.n.as_ref().expect("SteelGemm requires n");
@@ -1627,19 +1837,43 @@ mod bench_impl {
                 let bm_val = a.bm.as_ref().expect("SteelGemm requires bm");
                 let bn_val = a.bn.as_ref().expect("SteelGemm requires bn");
                 let tpg_val = a.tpg.as_ref().expect("SteelGemm requires tpg");
-                (quote! { &[] }, quote! {
-                    crate::spec::BenchDispatch::SteelGemm {
-                        m: #m_val as usize,
-                        n: #n_val as usize,
-                        k: #k_val as usize,
-                        check_m: #check_m_val as usize,
-                        check_n: #check_n_val as usize,
-                        check_k: #check_k_val as usize,
-                        bm: #bm_val as usize,
-                        bn: #bn_val as usize,
-                        tpg: #tpg_val as usize,
-                    }
-                })
+                let sh = quote! { &[crate::spec::ShapeSpec {
+                    label: "",
+                    n: #m_val as usize, b: #n_val as usize,
+                    check_n: #check_m_val as usize, check_b: #check_n_val as usize,
+                    mode: metaltile_core::ir::KernelMode::SimdGroup2D,
+                    tpg: #tpg_val as usize,
+                    grid: crate::spec::DispatchGrid::DivCeilN,
+                    tensor_bufs: &[],
+                    scalar_bufs: &[],
+                    cexprs: &[],
+                    out_elems: crate::spec::Dim::BxN,
+                    reads: 2usize,
+                    bytes_fn: crate::run_spec::bytes_io,
+                    mlx_args: None,
+                    mlx_grid: None,
+                    mlx_tpg: 0usize,
+                    extra: [#bm_val as usize, #bn_val as usize, #k_val as usize, #check_k_val as usize, 0usize, 0usize, 0usize, 0usize],
+                    mt_bufs_fn: None,
+                    mt_out_idx: None,
+                    mt_grid_fn: None,
+                    mlx_bufs_fn: Some(crate::run_spec::steel_gemm_mlx_bufs),
+                    mlx_out_idx: 2usize,
+                    mlx_grid_fn: None,
+                    out_n_fn: None,
+                }] };
+                (sh, quote! { crate::spec::BenchDispatch::Generic },
+                 quote! { None }, quote! { Some(crate::run_spec::steel_gemm_mlx_compile) })
+            },
+            // ── Codegen-only: no shapes, no benchmarks ─────────────────
+            ClassKind::Codegen => {
+                (quote! { &[] }, quote! { crate::spec::BenchDispatch::Generic },
+                 quote! { None }, quote! { None })
+            },
+            // ── SdpaVector2Pass: kept as legacy BenchDispatch variant ──
+            ClassKind::SdpaVector2Pass => {
+                (quote! { &[] }, quote! { crate::spec::BenchDispatch::Generic },
+                 quote! { None }, quote! { None })
             },
         };
 
@@ -1664,8 +1898,8 @@ mod bench_impl {
                     shapes:         #shapes_ts,
                     dispatch:       #dispatch_ts,
                     kernel_mode:    #kernel_mode_ts,
-                    mlx_compile_fn: None,
-                    check_fn:       None,
+                    mlx_compile_fn: #mlx_compile_fn_ts,
+                    check_fn:       #check_fn_ts,
                 }
             }
         }

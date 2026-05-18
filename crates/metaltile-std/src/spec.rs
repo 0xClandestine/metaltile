@@ -3,15 +3,12 @@
 //! Each `#[bench_kernel(...)]` annotation on a `#[kernel]` fn generates one
 //! `BenchSpec` and registers it via `inventory::submit!`. The bench runner
 //! iterates `inventory::iter::<BenchSpec>`, sorts by `(op, subop)`, then calls
-//! `run_spec(spec, runner, dt)` per dtype (run_spec lives in metaltile-cli).
+//! `run_spec(spec, runner, dt)` per dtype.
 //!
-//! For the 10 "simple" class types (Unary, Binary, AllReduce, RowReduce,
-//! Arange, BinaryTwo, Select, RowNorm, MatVec, MatVecMasked), the macro
-//! generates a `ShapeSpec` and sets `dispatch = BenchDispatch::Generic`.
-//! The generic runner handles all of these uniformly.
-//!
-//! The 9 "complex" class types (Sort, Scan, ArgReduce, Random, FpQuantized,
-//! QuantizedMatVec, Rope, Attention, StridedCopy) keep specialized runners.
+//! All ops flow through the single `run_generic` runner. Complex ops (rope,
+//! sort, attention, …) express their custom logic through fn-pointer fields
+//! in `ShapeSpec` / `BenchSpec`. The `#[bench_kernel]` macro wires up
+//! class-level fn helpers based on the `class` attribute.
 
 use metaltile_core::{
     dtype::DType,
@@ -225,91 +222,19 @@ pub struct ShapeSpec {
 }
 
 // ── BenchDispatch ────────────────────────────────────────────────────────
+// All ops use the Generic runner. Complex ops provide fn-pointers in
+// ShapeSpec/BenchSpec set by the #[bench_kernel] macro.
+//
+// Scan, Attention, QuantizedMatVec still carry shapes data because
+// they iterate over compile-time shapes arrays. They will migrate
+// to fn-pointers in a follow-up.
 
 pub enum BenchDispatch {
     Generic,
-    Sort {
-        b: usize,
-        n: usize,
-        tpg: usize,
-    },
-    Scan {
-        shapes: &'static [(usize, usize)],
-        tpg: usize,
-    },
-    ArgReduce {
-        n: usize,
-        check_n: usize,
-        tpg: usize,
-    },
-    Random {
-        n: usize,
-        tpg: usize,
-    },
-    FpQuantized {
-        n: usize,
-        tpg: usize,
-    },
-    QuantizedMatVec {
-        shapes: &'static [(usize, usize)],
-        group_size: usize,
-        tpg: usize,
-    },
-    Rope {
-        b: usize,
-        h: usize,
-        l: usize,
-        d: usize,
-        n_per_group: usize,
-    },
-    Attention {
-        shapes: &'static [(usize, usize, usize)],
-        tpg: usize,
-    },
-    StridedCopy {
-        m: usize,
-        n: usize,
-        pad: usize,
-    },
-    /// Affine dequantize one packed weight tensor into floats. Mirrors
-    /// MLX `affine_dequantize<T, group_size, bits>`. One thread per pack
-    /// (each pack holds `pack_factor = 32 / bits` quantized values in
-    /// one uint32 for power-of-2 bits, or `bytes_per_pack` bytes for
-    /// the byte-stream variants). `n_groups * batch` total groups; each
-    /// group covers `group_size` output elements.
-    AffineDequantize {
-        bits: usize,
-        group_size: usize,
-        n_groups: usize,
-        batch: usize,
-        tpg: usize,
-    },
-    /// Affine quantize floats into packed weights + per-group scale +
-    /// bias. Mirrors MLX `affine_quantize<T, group_size, bits>`. One
-    /// threadgroup of 32 threads (one simd-group) per group; each lane
-    /// handles `group_size / 32` input values, reduces min/max via
-    /// `simd_min`/`simd_max`, then packs nibbles cooperatively.
-    AffineQuantize {
-        bits: usize,
-        group_size: usize,
-        n_groups: usize,
-        batch: usize,
-        tpg: usize,
-    },
-    /// Decode-form scaled dot-product attention. Mirrors MLX
-    /// `sdpa_vector<T, D, V=D>`. One threadgroup per `(q_head, q_seq)`
-    /// output position; `tpg` threads (one simdgroup) cooperatively
-    /// reduce the dot product across `head_dim`, serial over `n_kv`
-    /// positions for the online softmax. GQA via `gqa_factor` (number
-    /// of Q heads per KV head).
-    SdpaVector {
-        head_dim: usize,
-        n_kv: usize,
-        n_q_heads: usize,
-        gqa_factor: usize,
-        batch: usize,
-        tpg: usize,
-    },
+    Scan { shapes: &'static [(usize, usize)], tpg: usize },
+    Attention { shapes: &'static [(usize, usize, usize)], tpg: usize },
+    QuantizedMatVec { shapes: &'static [(usize, usize)], group_size: usize, tpg: usize },
+    /// Two-pass SDPA decode: pass1+pass2 chained dispatch.
     SdpaVector2Pass {
         head_dim: usize,
         n_kv: usize,
@@ -320,43 +245,17 @@ pub enum BenchDispatch {
         pass2_kernel_name: &'static str,
         pass2_kernel_ir: fn(DType) -> Kernel,
     },
-    /// Tiled simdgroup GEMM (steel_gemm_fused).
-    SteelGemm {
-        m: usize,
-        n: usize,
-        k: usize,
-        check_m: usize,
-        check_n: usize,
-        check_k: usize,
-        bm: usize,
-        bn: usize,
-        tpg: usize,
-    },
 }
 
 impl BenchDispatch {
-    /// The default [`KernelMode`] inferred from the dispatch variant.
-    ///
-    /// For `Generic` dispatch, returns the mode of the first shape
-    /// (or `Elementwise` if there are no shapes). All other variants
-    /// map to a fixed mode.
     pub fn default_mode(&self, shapes: &[ShapeSpec]) -> KernelMode {
         match self {
             BenchDispatch::Generic =>
                 shapes.first().map(|s| s.mode).unwrap_or(KernelMode::Elementwise),
-            BenchDispatch::Sort { .. }
-            | BenchDispatch::Scan { .. }
-            | BenchDispatch::ArgReduce { .. }
-            | BenchDispatch::QuantizedMatVec { .. }
+            BenchDispatch::Scan { .. }
             | BenchDispatch::Attention { .. }
-            | BenchDispatch::AffineQuantize { .. }
-            | BenchDispatch::SdpaVector { .. }
+            | BenchDispatch::QuantizedMatVec { .. }
             | BenchDispatch::SdpaVector2Pass { .. } => KernelMode::Reduction,
-            BenchDispatch::Random { .. }
-            | BenchDispatch::FpQuantized { .. }
-            | BenchDispatch::AffineDequantize { .. } => KernelMode::Elementwise,
-            BenchDispatch::Rope { .. } | BenchDispatch::StridedCopy { .. } => KernelMode::Grid3D,
-            BenchDispatch::SteelGemm { .. } => KernelMode::SimdGroup2D,
         }
     }
 }
@@ -374,23 +273,17 @@ pub struct BenchSpec {
     pub mlx_pattern: Option<&'static str>,
     pub shapes: &'static [ShapeSpec],
     pub dispatch: BenchDispatch,
-    /// Optional explicit kernel mode override. When `None`, downstream
-    /// tooling (e.g. `tile build`) infers the mode from `dispatch`/
-    /// `shapes` via `first_mode(spec)`. Used by codegen-only kernels
-    /// (empty `shapes`, `dispatch: Generic`) that need a non-default
-    /// mode — e.g. Reduction-mode dequant GEMV kernels that rely on
-    /// `lsize`/`tid` aliases the Elementwise mode doesn't provide.
+    /// Optional explicit kernel mode override.
     pub kernel_mode: Option<KernelMode>,
 
     /// Custom MLX compile fn.  `fn(runner, src, dt) → Option<CompiledKernel>`
     /// When `Some`, replaces the standard `compile(src, mlx_pattern)` call.
-    /// Use for bool-constants (rope, attention) or dynamic kernel names.
     pub mlx_compile_fn: Option<fn(&GpuRunner, &str, DType) -> Option<CompiledKernel>>,
 
-    /// Custom correctness check.  `fn(ref_vals, mt_vals, tol) → EquivResult`
+    /// Custom correctness check.  `fn(ref_vals, mt_vals, tol, chunk_n) → EquivResult`
+    /// `chunk_n` = shape.check_n — useful for sort (chunk size) and ignored otherwise.
     /// When `None`, uses `check_equiv` (element-wise abs error + cosine sim).
-    /// Use for sort ("is sorted?"), random (bit-exact vs CPU), etc.
-    pub check_fn: Option<fn(&[f32], &[f32], f32) -> EquivResult>,
+    pub check_fn: Option<fn(&[f32], &[f32], f32, usize) -> EquivResult>,
 }
 
 inventory::collect!(BenchSpec);
