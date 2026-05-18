@@ -299,7 +299,8 @@ fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
         | Op::Reshape { .. }
         | Op::Slice { .. }
         | Op::SimdLaneId
-        | Op::SimdGroupId => true,
+        | Op::SimdGroupId
+        | Op::Pack { .. } => true,
 
         // Load from a read-only (const) param is pure.
         Op::Load { src, .. } => read_only.contains(src.as_str()),

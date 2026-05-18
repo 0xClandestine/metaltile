@@ -584,7 +584,6 @@ impl MslGenerator {
                     let vec_t: String = match (*len, param_dtype) {
                         (4, DType::F16) => "half4".into(),
                         (4, DType::F32) => "float4".into(),
-                        (8, DType::F16) => "half8".into(),
                         (4, DType::BF16) if self.config.native_bfloat => "bfloat4".into(),
                         (2, DType::BF16) if self.config.native_bfloat => "bfloat2".into(),
                         (2, _) => format!("{}2", scalar_t),
@@ -610,7 +609,6 @@ impl MslGenerator {
                     let vec_t: String = match (*len, param_dtype) {
                         (4, DType::F16) => "half4".into(),
                         (4, DType::F32) => "float4".into(),
-                        (8, DType::F16) => "half8".into(),
                         (4, DType::BF16) if self.config.native_bfloat => "bfloat4".into(),
                         (2, DType::BF16) if self.config.native_bfloat => "bfloat2".into(),
                         (2, _) => format!("{}2", scalar_t),
@@ -621,6 +619,24 @@ impl MslGenerator {
                         out,
                         "{pad}*((device {vec_t}*)((device {scalar_t}*){dst} + {bo})) = {vec_t}({rv});"
                     );
+                },
+
+                // ---- vector pack --------------------------------------
+                Op::Pack { dtype, elements } => {
+                    let v = self.vname(vid, block, extra_names);
+                    let args: Vec<String> =
+                        elements.iter().map(|e| self.vname(Some(*e), block, extra_names)).collect();
+                    let args_str = args.join(", ");
+                    let vec_t: String = match (elements.len() as u32, *dtype) {
+                        (4, DType::F16) => "half4".into(),
+                        (4, DType::F32) => "float4".into(),
+                        (4, DType::BF16) if self.config.native_bfloat => "bfloat4".into(),
+                        (2, DType::BF16) if self.config.native_bfloat => "bfloat2".into(),
+                        (2, _) => format!("{}2", dtype.msl_name()),
+                        (4, _) => format!("{}4", dtype.msl_name()),
+                        _ => format!("{}4", dtype.msl_name()),
+                    };
+                    wl!(out, "{pad}{vec_t} {v} = {vec_t}({args_str});");
                 },
 
                 // ---- conditional branch ----------------------------------

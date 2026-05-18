@@ -254,6 +254,10 @@ fn replace_values(op: &mut Op, map: &FxHashMap<ValueId, ValueId>) {
             s(end);
             s(step);
         },
+        Op::Pack { elements, .. } =>
+            for e in elements.iter_mut() {
+                s(e);
+            },
         Op::Load { indices, .. } =>
             for idx in indices.iter_mut() {
                 if let IndexExpr::Value(v) | IndexExpr::Range(v, _) = idx {

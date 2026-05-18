@@ -243,6 +243,10 @@ fn replace_value_in_op(op: &mut Op, old: ValueId, new: ValueId) {
             s(end);
             s(step);
         },
+        Op::Pack { elements, .. } =>
+            for e in elements.iter_mut() {
+                s(e);
+            },
         Op::Load { indices, .. } =>
             for idx in indices.iter_mut() {
                 if let IndexExpr::Value(v) | IndexExpr::Range(v, _) = idx {
@@ -432,6 +436,10 @@ fn collect_uses(op: &Op, used: &mut BTreeSet<ValueId>) {
             add(*end);
             add(*step);
         },
+        Op::Pack { elements, .. } =>
+            for e in elements {
+                add(*e);
+            },
         Op::Load { indices, .. } =>
             for idx in indices {
                 if let IndexExpr::Value(v) | IndexExpr::Range(v, _) = idx {

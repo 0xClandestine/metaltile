@@ -330,6 +330,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::ArgReduce { .. } => "ArgReduce",
         Op::StrideScan { .. } => "StrideScan",
         Op::StrideArgReduce { .. } => "StrideArgReduce",
+        Op::Pack { .. } => "Pack",
     }
 }
 
@@ -707,6 +708,11 @@ fn infer_block(
             | Op::SimdgroupElemStore { .. }
             | Op::SimdgroupLoad { .. } => {
                 // No output value to type (or side-effect-only op).
+            },
+            Op::Pack { .. } => {
+                // Pack produces a vector value — type is inferred from context
+                // (the VectorStore it feeds).  Default to scalar for safety.
+                env.insert(vid, TypedValue { dtype: DType::F32, shape: Shape::scalar() });
             },
             Op::SimdgroupAlloc { .. } | Op::SimdgroupElemLoad { .. } | Op::SimdScan { .. } => {
                 env.insert(vid, TypedValue { dtype: DType::F32, shape: Shape::scalar() });
