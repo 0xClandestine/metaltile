@@ -17,9 +17,8 @@ pub mod runner;
 pub mod stats;
 pub mod term;
 
-use clap::Parser;
-use clap::builder::Styles;
 use anstyle::AnsiColor;
+use clap::{Parser, builder::Styles};
 
 const CLAP_STYLES: Styles = Styles::styled()
     .header(AnsiColor::Cyan.on_default().bold())

@@ -73,16 +73,12 @@ pub fn run(args: &ProfileArgs) {
 
     // Header.
     if !sweep_flag || single {
-        println!();
-        println!(
-            "{}",
-            paint_stdout("MetalTile Occupancy Profile", Style::new().fg(Color::BrightWhite).bold(),),
+        eprintln!(
+            "{}  {}",
+            paint_stdout("tile profile", Style::new().fg(Color::Cyan).bold()),
+            paint_stdout("max-tg=1024  tg-mem=32KB", Style::new().fg(Color::BrightBlack)),
         );
-        println!(
-            "{}  max-threads/tg=1024  tg-mem=32KB  regs-guide=128 (soft; M3+ dynamic)",
-            paint_stdout("GPU limits:", Style::new().fg(Color::BrightBlack),),
-        );
-        println!();
+        eprintln!();
     }
 
     if single {
@@ -196,30 +192,14 @@ pub fn run(args: &ProfileArgs) {
             );
         }
 
-        println!();
-        println!(
-            "  {}",
-            paint_stdout(
-                format!("{} kernels profiled", matched.len()),
-                Style::new().fg(Color::BrightBlack),
-            ),
+        let sep = paint_stdout("·", Style::new().fg(Color::BrightBlack).dim());
+        eprintln!();
+        eprintln!(
+            "  {} {sep} {} {sep} {}",
+            paint_stdout(format!("{} kernels", matched.len()), Style::new().fg(Color::BrightBlack)),
+            paint_stdout("'tile profile <kernel>' for detail", Style::new().fg(Color::BrightBlack)),
+            paint_stdout("--sweep for breakdown", Style::new().fg(Color::BrightBlack)),
         );
-        println!(
-            "  {}",
-            paint_stdout(
-                "'tile profile <kernel>' for detailed view.",
-                Style::new().fg(Color::BrightBlack),
-            ),
-        );
-        if !sweep_flag {
-            println!(
-                "  {}",
-                paint_stdout(
-                    "'tile profile <kernel> --sweep' for per-tg-size breakdown.",
-                    Style::new().fg(Color::BrightBlack),
-                ),
-            );
-        }
     }
     println!();
 }

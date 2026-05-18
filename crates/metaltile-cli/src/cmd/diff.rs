@@ -170,12 +170,18 @@ pub fn run(args: &DiffArgs) {
     }
 
     if diff_rows.is_empty() {
-        println!(
+        eprintln!(
             "  {}",
             paint_stdout("No matching results to diff.", Style::new().fg(Color::BrightBlack)),
         );
         return;
     }
+
+    // Header.
+    eprintln!(
+        "{}",
+        paint_stdout("tile diff", Style::new().fg(Color::Cyan).bold()),
+    );
 
     // Print diff table
     eprintln!();

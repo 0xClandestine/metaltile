@@ -55,8 +55,12 @@ pub fn run(args: &DeviceArgs) {
 
     let label_style = Style::new().fg(Color::BrightBlack).bold();
 
-    println!();
-    println!(
+    eprintln!(
+        "{}",
+        paint_stdout("tile device", Style::new().fg(Color::Cyan).bold()),
+    );
+    eprintln!();
+    eprintln!(
         "  {}  {}",
         paint_stdout(format!("{:<16}", "Device"), label_style),
         paint_stdout(device_name, Style::new().fg(Color::BrightWhite)),

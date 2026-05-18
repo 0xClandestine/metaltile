@@ -4,12 +4,9 @@
 //! while delegating color management and TTY detection to the clap ecosystem crates
 //! already in the dependency tree.
 
-use std::{
-    sync::OnceLock,
-};
+use std::sync::OnceLock;
 
 // ── Public types ─────────────────────────────────────────────────────────
-
 /// Re-export of `anstyle::AnsiColor` — drop-in replacement for our old
 /// `Color` enum.  Variant names are identical: `Red`, `Green`, etc.
 pub use anstyle::AnsiColor as Color;

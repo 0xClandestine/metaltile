@@ -35,32 +35,11 @@ pub fn run(args: &BenchArgs) {
         },
     };
 
-    // Banner
-    println!(
-        "{}",
-        paint_stdout(
-            "╔═══════════════════════════════════════════════════════════════════════════════╗",
-            Style::new().fg(Color::Cyan).bold(),
-        )
-    );
-    println!(
-        "{}",
-        paint_stdout(
-            "║  MetalTile Benchmark Suite                                                  ║",
-            Style::new().fg(Color::BrightWhite).bold(),
-        )
-    );
-    println!(
-        "{}",
-        paint_stdout(
-            "╚═══════════════════════════════════════════════════════════════════════════════╝",
-            Style::new().fg(Color::Cyan).bold(),
-        )
-    );
-    println!(
-        "\n{} {}",
-        paint_stdout("Device:", Style::new().fg(Color::BrightBlack).bold()),
-        paint_stdout(&runner.device_name, Style::new().fg(Color::BrightWhite).bold()),
+    // Banner — single compact line.
+    eprintln!(
+        "{} {}",
+        paint_stdout("tile bench", Style::new().fg(Color::Cyan).bold()),
+        paint_stdout(format!("· {}", &runner.device_name), Style::new().fg(Color::BrightBlack)),
     );
 
     // Run all ops, optionally narrowed to a single substring filter.
@@ -127,7 +106,7 @@ pub fn run(args: &BenchArgs) {
     validate_results(&all).unwrap_or_else(|err| panic!("{err}"));
     printer.finish();
 
-    // Summary
+    // Counters.
     let impl_count = all.iter().filter(|r| r.mt_perf().is_some()).count();
     let nyi_count = all.iter().filter(|r| r.mt_perf().is_none()).count();
     let checked_count = all.iter().filter(|r| r.equiv().is_some()).count();
@@ -149,48 +128,57 @@ pub fn run(args: &BenchArgs) {
         if valid.is_empty() { None } else { Some(valid.iter().sum::<f64>() / valid.len() as f64) }
     };
 
-    let mut summary = vec![
-        summary_item(
-            "Implemented",
-            &format!("{impl_count}/{}", all.len()),
-            Style::new().fg(Color::Green).bold(),
-        ),
-        summary_item("NYI", &nyi_count.to_string(), Style::new().fg(Color::Yellow).bold()),
-    ];
+    // Summary — compact single line (or two if unchecked).
+    let mut parts: Vec<String> = Vec::new();
+    let sep = format!("  {}  ", paint_stdout("·", Style::new().fg(Color::BrightBlack).dim()));
+
+    parts.push(format!(
+        "{} impl",
+        paint_stdout(impl_count.to_string(), Style::new().fg(Color::Green).bold()),
+    ));
+    if nyi_count > 0 {
+        parts.push(format!(
+            "{} NYI",
+            paint_stdout(nyi_count.to_string(), Style::new().fg(Color::Yellow).bold()),
+        ));
+    }
     if let Some(p) = avg_pct {
-        summary.push(summary_item("Avg MT%", &format!("{p:.0}%"), pct_style(p)));
+        parts.push(format!(
+            "avg {}",
+            paint_stdout(format!("{p:.0}% MT"), pct_style(p)),
+        ));
     }
     if checked_count > 0 {
-        summary.push(summary_item(
-            "Correct",
-            &format!("{equiv_pass}/{checked_count}"),
-            if equiv_fail == 0 {
-                Style::new().fg(Color::Green).bold()
-            } else {
-                Style::new().fg(Color::Yellow).bold()
-            },
+        let corr_style = if equiv_fail == 0 {
+            Style::new().fg(Color::Green).bold()
+        } else {
+            Style::new().fg(Color::Yellow).bold()
+        };
+        parts.push(format!(
+            "{} correct",
+            paint_stdout(format!("{equiv_pass}/{checked_count}"), corr_style),
         ));
     }
     if !unchecked.is_empty() {
-        summary.push(summary_item(
-            "Unchecked",
-            &unchecked.len().to_string(),
-            Style::new().fg(Color::Yellow).bold(),
+        parts.push(format!(
+            "{} unchecked",
+            paint_stdout(unchecked.len().to_string(), Style::new().fg(Color::Yellow).bold()),
         ));
     }
-    let summary_sep = format!(" {} ", summary_sep());
-    println!("  {}", summary.join(&summary_sep));
+
+    eprintln!("\n  {}", parts.join(&sep));
+
     if equiv_fail > 0 {
-        println!(
+        eprintln!(
             "  {} {}",
-            paint_stdout("Correctness failures:", Style::new().fg(Color::BrightBlack).bold()),
+            paint_stdout("Failures:", Style::new().fg(Color::Red).bold()),
             paint_stdout(equiv_fail.to_string(), Style::new().fg(Color::Red).bold()),
         );
     }
     if !unchecked.is_empty() {
-        println!(
+        eprintln!(
             "  {} {}",
-            paint_stdout("Unchecked MT results:", Style::new().fg(Color::BrightBlack).bold()),
+            paint_stdout("Unchecked:", Style::new().fg(Color::BrightBlack).bold()),
             paint_stdout(unchecked.join(", "), Style::new().fg(Color::Yellow).bold()),
         );
     }
@@ -242,16 +230,6 @@ fn save_json(device: &str, results: &[OpResult], path: &str) {
 fn json_f(v: Option<f64>) -> String {
     v.map(|x| format!("{x:.3}")).unwrap_or_else(|| "null".into())
 }
-
-fn summary_item(label: &str, value: &str, value_style: Style) -> String {
-    format!(
-        "{} {}",
-        paint_stdout(label, Style::new().fg(Color::BrightBlack).bold()),
-        paint_stdout(value, value_style),
-    )
-}
-
-fn summary_sep() -> String { paint_stdout("|", Style::new().fg(Color::BrightBlack).dim()) }
 
 fn pct_style(pct: f64) -> Style {
     if pct >= 90.0 {

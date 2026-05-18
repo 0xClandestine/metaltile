@@ -86,30 +86,26 @@ pub fn run(args: &InspectArgs) {
 
     // No filter: list all kernels
     let Some(filter) = filter else {
-        println!(
+        eprintln!(
             "{}",
-            paint_stdout("Kernels registered:", Style::new().fg(Color::BrightBlack).bold()),
+            paint_stdout("tile inspect", Style::new().fg(Color::Cyan).bold()),
         );
-        println!();
+        eprintln!();
         for (name, (spec, dtypes)) in &sorted {
             let dtype_str = dtypes.iter().map(|dt| dt.label()).collect::<Vec<_>>().join("/");
             let mode_str = effective_mode(spec).to_string();
-            println!(
+            eprintln!(
                 "  {}   {}   {dtype_str}",
                 paint_stdout(format!("{name:<20}"), Style::new().fg(Color::Cyan).bold()),
                 paint_stdout(mode_str, Style::new().fg(Color::BrightBlack)),
             );
         }
-        println!(
-            "\n  {}",
-            paint_stdout(format!("{} kernels", sorted.len()), Style::new().fg(Color::BrightBlack),),
-        );
-        println!(
-            "  {}",
-            paint_stdout(
-                "Run 'tile inspect <kernel>' to see MSL.",
-                Style::new().fg(Color::BrightBlack),
-            ),
+        let sep = paint_stdout("·", Style::new().fg(Color::BrightBlack).dim());
+        eprintln!();
+        eprintln!(
+            "  {} {sep} {}",
+            paint_stdout(format!("{} kernels", sorted.len()), Style::new().fg(Color::BrightBlack)),
+            paint_stdout("<kernel> for MSL", Style::new().fg(Color::BrightBlack)),
         );
         return;
     };

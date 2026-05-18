@@ -93,6 +93,12 @@ pub fn run(args: &BuildArgs) {
     let mut sorted: Vec<(&str, (&BenchSpec, Vec<DType>))> = kernels.into_iter().collect();
     sorted.sort_unstable_by_key(|(name, _)| *name);
 
+    // Header.
+    eprintln!(
+        "{}",
+        paint_stdout("tile build", Style::new().fg(Color::Cyan).bold()),
+    );
+
     // Per-output collectors for the emit step.
     let kernels_dir = out_root.as_ref().map(|r| r.join("Resources").join("kernels"));
     if let Some(dir) = &kernels_dir
