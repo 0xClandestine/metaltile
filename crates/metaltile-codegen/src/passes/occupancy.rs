@@ -41,6 +41,8 @@
 //!   ACM TOPLAS 21(5):895–913.  Foundation for the linear-scan liveness
 //!   model used in [`register_estimate`].
 
+use std::fmt;
+
 use metaltile_core::ir::Kernel;
 
 use super::register_estimate;
@@ -80,6 +82,17 @@ pub enum Bottleneck {
     /// The OMU may throttle occupancy to prevent L1 thrashing.
     /// (Set by the autotuner when tile dims are known; not computed in estimate_occupancy.)
     CachePressure,
+}
+
+impl fmt::Display for Bottleneck {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Bottleneck::RegisterLimited => "register-limited",
+            Bottleneck::MemoryLimited => "memory-limited",
+            Bottleneck::ThreadLimited => "thread-limited",
+            Bottleneck::CachePressure => "cache-pressure",
+        })
+    }
 }
 
 /// Occupancy estimate for a kernel with a given threadgroup size.

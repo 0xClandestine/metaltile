@@ -1,66 +1,67 @@
-use std::{
-    io::{IsTerminal, stderr, stdout},
-    sync::OnceLock,
-};
+//! Terminal styling backed by `anstyle` + `anstream`.
+//!
+//! Thin wrapper that provides the same builder API (`Style::new().fg(Color::Cyan).bold()`)
+//! while delegating color management and TTY detection to the clap ecosystem crates
+//! already in the dependency tree.
 
-#[derive(Clone, Copy)]
-pub enum Stream {
-    Stdout,
-    Stderr,
-}
+use std::sync::OnceLock;
 
-#[derive(Clone, Copy)]
-pub enum Color {
-    Red,
-    Green,
-    Yellow,
-    Blue,
-    Magenta,
-    Cyan,
-    BrightBlack,
-    BrightWhite,
-}
+// ── Public types ─────────────────────────────────────────────────────────
+/// Re-export of `anstyle::AnsiColor` — drop-in replacement for our old
+/// `Color` enum.  Variant names are identical: `Red`, `Green`, etc.
+pub use anstyle::AnsiColor as Color;
 
-impl Color {
-    fn code(self) -> &'static str {
-        match self {
-            Self::Red => "31",
-            Self::Green => "32",
-            Self::Yellow => "33",
-            Self::Blue => "34",
-            Self::Magenta => "35",
-            Self::Cyan => "36",
-            Self::BrightBlack => "90",
-            Self::BrightWhite => "97",
-        }
-    }
-}
-
+/// ANSI text style backed by `anstyle::Style`.
 #[derive(Clone, Copy, Default)]
-pub struct Style {
-    fg: Option<Color>,
-    bold: bool,
-    dim: bool,
-}
+pub struct Style(anstyle::Style);
 
 impl Style {
     pub fn new() -> Self { Self::default() }
 
     pub fn fg(mut self, color: Color) -> Self {
-        self.fg = Some(color);
+        self.0 = self.0.fg_color(Some(anstyle::Color::Ansi(color)));
         self
     }
 
     pub fn bold(mut self) -> Self {
-        self.bold = true;
+        self.0 = self.0.bold();
         self
     }
 
     pub fn dim(mut self) -> Self {
-        self.dim = true;
+        self.0 = self.0.dimmed();
         self
     }
 }
+
+// ── TTY detection (delegated to anstream) ───────────────────────────────
+
+fn is_term(stream: Stream) -> bool {
+    static STDOUT_TERM: OnceLock<bool> = OnceLock::new();
+    static STDERR_TERM: OnceLock<bool> = OnceLock::new();
+
+    let cell = match stream {
+        Stream::Stdout => &STDOUT_TERM,
+        Stream::Stderr => &STDERR_TERM,
+    };
+    *cell.get_or_init(|| {
+        // anstream::AutoStream::choice checks NO_COLOR, CLICOLOR_FORCE,
+        // CLICOLOR, TERM=dumb, and IsTerminal — same logic we had by hand.
+        let choice = match stream {
+            Stream::Stdout => anstream::AutoStream::choice(&std::io::stdout()),
+            Stream::Stderr => anstream::AutoStream::choice(&std::io::stderr()),
+        };
+        choice != anstream::ColorChoice::Never
+    })
+}
+
+#[derive(Clone, Copy)]
+enum Stream {
+    Stdout,
+    Stderr,
+}
+
+// ── Paint helpers ────────────────────────────────────────────────────────
 
 pub fn paint_stdout(text: impl AsRef<str>, style: Style) -> String {
     paint(Stream::Stdout, text.as_ref(), style)
@@ -71,52 +72,8 @@ pub fn paint_stderr(text: impl AsRef<str>, style: Style) -> String {
 }
 
 fn paint(stream: Stream, text: &str, style: Style) -> String {
-    if text.is_empty() || !enabled(stream) {
+    if text.is_empty() || !is_term(stream) {
         return text.to_owned();
     }
-
-    let mut codes = Vec::with_capacity(3);
-    if style.bold {
-        codes.push("1");
-    }
-    if style.dim {
-        codes.push("2");
-    }
-    if let Some(color) = style.fg {
-        codes.push(color.code());
-    }
-    if codes.is_empty() {
-        return text.to_owned();
-    }
-    format!("\x1b[{}m{text}\x1b[0m", codes.join(";"))
-}
-
-fn enabled(stream: Stream) -> bool {
-    static STDOUT_ENABLED: OnceLock<bool> = OnceLock::new();
-    static STDERR_ENABLED: OnceLock<bool> = OnceLock::new();
-
-    match stream {
-        Stream::Stdout => *STDOUT_ENABLED.get_or_init(|| detect(Stream::Stdout)),
-        Stream::Stderr => *STDERR_ENABLED.get_or_init(|| detect(Stream::Stderr)),
-    }
-}
-
-fn detect(stream: Stream) -> bool {
-    if matches!(std::env::var("CLICOLOR_FORCE").as_deref(), Ok(v) if v != "0") {
-        return true;
-    }
-    if std::env::var_os("NO_COLOR").is_some() {
-        return false;
-    }
-    if matches!(std::env::var("CLICOLOR").as_deref(), Ok("0")) {
-        return false;
-    }
-    if matches!(std::env::var("TERM").as_deref(), Ok("dumb")) {
-        return false;
-    }
-
-    match stream {
-        Stream::Stdout => stdout().is_terminal(),
-        Stream::Stderr => stderr().is_terminal(),
-    }
+    format!("{}{text}{}", style.0, anstyle::Reset)
 }

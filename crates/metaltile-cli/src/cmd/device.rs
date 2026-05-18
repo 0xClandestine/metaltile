@@ -1,23 +1,15 @@
 //! `tile device` — Show GPU device info and supported feature flags.
 
+use metaltile_core::GpuFamily;
+use metaltile_std::runner::GpuRunner;
+
 use crate::{
-    flag_present,
-    runner::GpuRunner,
+    DeviceArgs,
     term::{Color, Style, paint_stdout},
 };
 
-pub fn help() {
-    eprintln!("tile device — Show GPU device info and supported feature flags");
-    eprintln!();
-    eprintln!("USAGE:");
-    eprintln!("  tile device [options]");
-    eprintln!();
-    eprintln!("OPTIONS:");
-    eprintln!("  --json   Output as JSON");
-}
-
-pub fn run(args: &[String]) {
-    let json_out = flag_present(args, "--json");
+pub fn run(args: &DeviceArgs) {
+    let json_out = args.json;
 
     let runner = match GpuRunner::new() {
         Ok(r) => r,
@@ -38,31 +30,34 @@ pub fn run(args: &[String]) {
     let device_name = &runner.device_name;
     let simd = runner.supports_simd_matrix();
 
-    // Heuristic GPU family string based on device name.
-    let gpu_family = gpu_family_from_name(device_name);
+    let gpu_family = GpuFamily::from_device_name(device_name);
 
     // Native bfloat (Metal 3.1 `bfloat` type) and async threadgroup copy both
     // require Apple9 (M3 / A17) or later, independent of SIMD matrix support.
-    let apple9_or_later = apple_family_level(gpu_family).is_some_and(|l| l >= 9);
-    let native_bfloat = apple9_or_later;
-    let async_copy = apple9_or_later;
+    let apple9_or_later = gpu_family.is_apple9_or_later();
 
-    // Threadgroup memory is inferred from GPU family.
-    let tpg_mem = tpg_memory_from_family(gpu_family);
-    let max_tpg = max_threads_per_threadgroup(gpu_family);
+    // Threadgroup memory and max TPG are constant across Apple7-9.
+    let tpg_mem = gpu_family.threadgroup_mem_kb();
+    let max_tpg = gpu_family.max_threads_per_threadgroup();
 
     if json_out {
         println!(
             "{{\"device\":{:?},\"gpu_family\":{:?},\"simdgroup_hw\":{},\"native_bfloat\":{},\"threadgroup_mem_kb\":{},\"max_tpg\":{}}}",
-            device_name, gpu_family, simd, native_bfloat, tpg_mem, max_tpg
+            device_name,
+            gpu_family.code().unwrap_or("unknown"),
+            simd,
+            apple9_or_later,
+            tpg_mem,
+            max_tpg,
         );
         return;
     }
 
     let label_style = Style::new().fg(Color::BrightBlack).bold();
 
-    println!();
-    println!(
+    eprintln!("{}", paint_stdout("tile device", Style::new().fg(Color::Cyan).bold()),);
+    eprintln!();
+    eprintln!(
         "  {}  {}",
         paint_stdout(format!("{:<16}", "Device"), label_style),
         paint_stdout(device_name, Style::new().fg(Color::BrightWhite)),
@@ -70,7 +65,7 @@ pub fn run(args: &[String]) {
     println!(
         "  {}  {}",
         paint_stdout(format!("{:<16}", "GPU family"), label_style),
-        paint_stdout(gpu_family, Style::new().fg(Color::BrightWhite)),
+        paint_stdout(gpu_family.display_label(), Style::new().fg(Color::BrightWhite)),
     );
     println!("  {}", paint_stdout("─".repeat(42), Style::new().fg(Color::BrightBlack).dim(),),);
 
@@ -88,9 +83,9 @@ pub fn run(args: &[String]) {
         );
     };
 
-    check("native_bfloat", native_bfloat, "Metal 3.1+ bfloat type");
+    check("native_bfloat", apple9_or_later, "Metal 3.1+ bfloat type");
     check("simdgroup_hw", simd, "simdgroup matrix multiply");
-    check("async_copy", async_copy, "async threadgroup copy (M3+)");
+    check("async_copy", apple9_or_later, "async threadgroup copy (M3+)");
 
     println!("  {}", paint_stdout("─".repeat(42), Style::new().fg(Color::BrightBlack).dim(),),);
 
@@ -107,129 +102,7 @@ pub fn run(args: &[String]) {
     println!(
         "  {}  {}",
         paint_stdout(format!("{:<16}", "SLC"), label_style),
-        paint_stdout(slc_size_from_name(device_name), Style::new().fg(Color::BrightWhite)),
+        paint_stdout(GpuFamily::slc_label(device_name), Style::new().fg(Color::BrightWhite)),
     );
     println!();
-}
-
-/// Heuristic GPU family based on device name substring.
-/// M-series checked before A-series since "M1 Pro" etc. contain neither A-chip name.
-/// Newer M-chips checked first so "M1"/"M2" don't shadow the broader substring on
-/// future model strings.
-fn gpu_family_from_name(name: &str) -> &'static str {
-    if name.contains("M5") {
-        "Apple10 (M5)"
-    } else if name.contains("M4") {
-        "Apple9 (M4)"
-    } else if name.contains("M3") {
-        "Apple9 (M3)"
-    } else if name.contains("M2") {
-        "Apple8 (M2)"
-    } else if name.contains("M1") {
-        "Apple7 (M1)"
-    } else if name.contains("A18") || name.contains("A17") {
-        "Apple9 (A17+)"
-    } else if name.contains("A16") || name.contains("A15") {
-        "Apple8 (A15+)"
-    } else if name.contains("A14") {
-        "Apple7 (A14)"
-    } else {
-        "unknown"
-    }
-}
-
-/// Parsed Apple GPU family level from the `gpu_family_from_name` string.
-/// Returns `None` for "unknown" (or any string not starting with "AppleN").
-/// Used to gate feature flags by family level without enumerating every chip.
-fn apple_family_level(gpu_family: &str) -> Option<u32> {
-    let rest = gpu_family.strip_prefix("Apple")?;
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    digits.parse().ok()
-}
-
-/// Known SLC sizes per chip tier. Returns "varies" when the tier is not recognised.
-fn slc_size_from_name(name: &str) -> &'static str {
-    if name.contains("Ultra") {
-        "~96 MB"
-    } else if name.contains("Max") && (name.contains("M5") || name.contains("M4")) {
-        // M4/M5 Max share the ~64 MB SLC tier; revisit when Apple publishes M5 specs.
-        "~64 MB"
-    } else if name.contains("Max") {
-        "~48 MB"
-    } else {
-        "varies"
-    }
-}
-
-fn tpg_memory_from_family(family: &str) -> u32 {
-    match family {
-        "Apple10 (M5)" => 32,
-        "Apple9 (M4)" | "Apple9 (M3+)" | "Apple9 (A17+)" => 32,
-        "Apple8 (M2)" | "Apple8 (A16)" => 32,
-        "Apple7 (M1)" | "Apple7 (A15)" => 32,
-        _ => 32,
-    }
-}
-
-fn max_threads_per_threadgroup(family: &str) -> u32 {
-    match family {
-        "Apple10 (M5)" => 1024,
-        "Apple9 (M4)" | "Apple9 (M3+)" | "Apple9 (A17+)" => 1024,
-        _ => 1024,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        apple_family_level,
-        gpu_family_from_name,
-        max_threads_per_threadgroup,
-        slc_size_from_name,
-        tpg_memory_from_family,
-    };
-
-    #[test]
-    fn family_from_name_covers_known_chips() {
-        assert_eq!(gpu_family_from_name("Apple M1 Pro"), "Apple7 (M1)");
-        assert_eq!(gpu_family_from_name("Apple M2"), "Apple8 (M2)");
-        assert_eq!(gpu_family_from_name("Apple M3 Max"), "Apple9 (M3)");
-        assert_eq!(gpu_family_from_name("Apple M4 Max"), "Apple9 (M4)");
-        assert_eq!(gpu_family_from_name("Apple M5 Max"), "Apple10 (M5)");
-        assert_eq!(gpu_family_from_name("Apple A14 Bionic"), "Apple7 (A14)");
-        assert_eq!(gpu_family_from_name("Apple A17 Pro"), "Apple9 (A17+)");
-        assert_eq!(gpu_family_from_name("Apple A18 Pro"), "Apple9 (A17+)");
-        assert_eq!(gpu_family_from_name("Mystery GPU"), "unknown");
-    }
-
-    #[test]
-    fn newer_chips_take_precedence() {
-        // Future-proofing: an "M5 Pro" string should resolve to Apple10, not Apple9.
-        assert_eq!(gpu_family_from_name("Apple M5 Pro"), "Apple10 (M5)");
-    }
-
-    #[test]
-    fn apple_family_level_parses_each_tier() {
-        assert_eq!(apple_family_level("Apple7 (M1)"), Some(7));
-        assert_eq!(apple_family_level("Apple8 (M2)"), Some(8));
-        assert_eq!(apple_family_level("Apple9 (M4)"), Some(9));
-        assert_eq!(apple_family_level("Apple10 (M5)"), Some(10));
-        assert_eq!(apple_family_level("unknown"), None);
-        assert_eq!(apple_family_level(""), None);
-    }
-
-    #[test]
-    fn slc_size_includes_m5_max_tier() {
-        assert_eq!(slc_size_from_name("Apple M1 Ultra"), "~96 MB");
-        assert_eq!(slc_size_from_name("Apple M4 Max"), "~64 MB");
-        assert_eq!(slc_size_from_name("Apple M5 Max"), "~64 MB");
-        assert_eq!(slc_size_from_name("Apple M3 Max"), "~48 MB");
-        assert_eq!(slc_size_from_name("Apple M2"), "varies");
-    }
-
-    #[test]
-    fn tpg_memory_and_max_tpg_known_for_m5() {
-        assert_eq!(tpg_memory_from_family("Apple10 (M5)"), 32);
-        assert_eq!(max_threads_per_threadgroup("Apple10 (M5)"), 1024);
-    }
 }

@@ -18,7 +18,7 @@
 //! The schedule IR (in `metaltile-codegen`) annotates ops with *how* to compute it:
 //! thread mapping, tile sizes, unroll factors, pipelining.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use crate::{constexpr::ConstExpr, dtype::DType, shape::Shape};
 
@@ -689,6 +689,18 @@ pub enum KernelMode {
     /// `uint simd_lane` + `uint simd_group`.
     /// Used for tiled simdgroup-matmul kernels (steel GEMM).
     SimdGroup2D,
+}
+
+impl fmt::Display for KernelMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            KernelMode::Elementwise => "Elementwise",
+            KernelMode::Reduction => "Reduction",
+            KernelMode::Grid3D => "Grid3D",
+            KernelMode::Tile2D => "Tile2D",
+            KernelMode::SimdGroup2D => "SimdGroup",
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------

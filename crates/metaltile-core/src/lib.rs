@@ -9,6 +9,7 @@
 pub mod constexpr;
 pub mod dtype;
 pub mod error;
+pub mod gpu_family;
 pub mod ir;
 pub mod shape;
 pub mod utils;
@@ -16,6 +17,7 @@ pub mod utils;
 pub use constexpr::ConstExpr;
 pub use dtype::DType;
 pub use error::{Error, Result};
+pub use gpu_family::GpuFamily;
 pub use ir::{
     ActKind,
     Block,

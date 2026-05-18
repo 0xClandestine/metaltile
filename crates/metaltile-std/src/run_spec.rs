@@ -3,7 +3,8 @@
 
 use metaltile_codegen::msl::MslGenerator;
 use metaltile_core::{dtype::DType, ir::KernelMode};
-use metaltile_std::{
+
+use crate::{
     bench_types::{
         DtypeCtx,
         EquivResult,
@@ -13,12 +14,17 @@ use metaltile_std::{
         check_equiv,
         check_equiv_with,
     },
+    runner::{
+        GpuBuffer,
+        GpuRunner,
+        bench_gbps,
+        bench_gbps_only,
+        buffer_typed,
+        read_typed,
+        run_typed_once,
+        zeros_typed,
+    },
     spec::{BenchDispatch, BenchSpec, MlxArg, ScalarBufSpec, ShapeSpec},
-};
-
-use crate::{
-    measure::{bench_gbps, buffer_typed, read_typed, run_typed_once, zeros_typed},
-    runner::{GpuBuffer, GpuRunner},
 };
 
 pub fn run(spec: &BenchSpec, runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
@@ -115,15 +121,7 @@ fn compile_mt(runner: &GpuRunner, msl: &str, name: &str) -> Option<crate::runner
     match runner.compile(msl, name) {
         Ok(k) => Some(k),
         Err(e) => {
-            eprintln!(
-                "{} compile '{}': {}",
-                crate::term::paint_stderr(
-                    "[error]",
-                    crate::term::Style::new().fg(crate::term::Color::Red).bold(),
-                ),
-                name,
-                e,
-            );
+            eprintln!("[error] compile '{}': {}", name, e);
             None
         },
     }
@@ -271,30 +269,42 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
         let out_count_perf = shape.out_elems.resolve(n, b).max(1);
         let bytes = (shape.bytes_fn)(n, b, shape.reads, out_count_perf, ctx.eb) as f64;
         let perf_refs: Vec<&GpuBuffer> = perf_bufs.iter().collect();
-        let mt_perf = bench_gbps(runner, mk, &perf_refs, perf_grid, [shape.tpg, 1, 1], bytes);
+        let (mt_perf_val, mt_stats) =
+            match bench_gbps(runner, mk, &perf_refs, perf_grid, [shape.tpg, 1, 1], bytes) {
+                Some((p, t)) => (Some(p), Some(t)),
+                None => (None, None),
+            };
 
         // MLX ref (optional)
-        let ref_perf = if let Some(mlx_args) = shape.mlx_args {
+        let (ref_perf_val, ref_stats) = if let Some(mlx_args) = shape.mlx_args {
             let mlx_tpg = if shape.mlx_tpg > 0 { shape.mlx_tpg } else { shape.tpg };
             let mlx_grid = shape.mlx_grid.unwrap_or(shape.grid).eval(n, b, mlx_tpg);
-            mlx_compiled.as_ref().and_then(|rk| {
-                let mlx_bufs: Vec<GpuBuffer> = mlx_args
-                    .iter()
-                    .map(|arg| mlx_buf(spec, runner, arg, shape, n, b, dt))
-                    .collect();
-                let mlx_refs: Vec<&GpuBuffer> = mlx_bufs.iter().collect();
-                bench_gbps(runner, rk, &mlx_refs, mlx_grid, [mlx_tpg, 1, 1], bytes)
-            })
+            mlx_compiled
+                .as_ref()
+                .map(|rk| {
+                    let mlx_bufs: Vec<GpuBuffer> = mlx_args
+                        .iter()
+                        .map(|arg| mlx_buf(spec, runner, arg, shape, n, b, dt))
+                        .collect();
+                    let mlx_refs: Vec<&GpuBuffer> = mlx_bufs.iter().collect();
+                    match bench_gbps(runner, rk, &mlx_refs, mlx_grid, [mlx_tpg, 1, 1], bytes) {
+                        Some((p, t)) => (Some(p), Some(t)),
+                        None => (None, None),
+                    }
+                })
+                .unwrap_or((None, None))
         } else {
-            None
+            (None, None)
         };
 
-        results.push(bench.result_sub(
+        results.push(bench.result_sub_timed(
             Some(spec.subop),
             format!("{} {}", shape.label, ctx.label),
-            ref_perf,
-            mt_perf,
+            ref_perf_val,
+            mt_perf_val,
             Some(equiv),
+            mt_stats,
+            ref_stats,
         ));
     }
     results
@@ -413,7 +423,7 @@ fn run_sort(
         let size = runner.buffer_i32(n as i32);
         let stride1 = runner.buffer_i32(1i32);
         let stride_n = runner.buffer_i32(n as i32);
-        bench_gbps(
+        bench_gbps_only(
             runner,
             rk,
             &[&inp, &out, &size, &stride1, &stride1, &stride_n, &stride_n],
@@ -424,7 +434,7 @@ fn run_sort(
     });
     let mt_perf = {
         let out = zeros_typed(runner, b * n, dt);
-        bench_gbps(runner, &mk, &[&inp, &out, &n_buf], [b, 1, 1], [tpg, 1, 1], bytes)
+        bench_gbps_only(runner, &mk, &[&inp, &out, &n_buf], [b, 1, 1], [tpg, 1, 1], bytes)
     };
     vec![bench.result_sub(
         Some(spec.subop),
@@ -492,11 +502,25 @@ fn run_scan(
         let ns_u32 = runner.buffer_u32(n as u32);
         let ref_perf = ref_kernel.as_ref().and_then(|rk| {
             let out = zeros_typed(runner, rows * n, DType::F32);
-            bench_gbps(runner, rk, &[&inp_buf, &out, &ns_u64], [1, rows, 1], [tpg, 1, 1], bytes)
+            bench_gbps_only(
+                runner,
+                rk,
+                &[&inp_buf, &out, &ns_u64],
+                [1, rows, 1],
+                [tpg, 1, 1],
+                bytes,
+            )
         });
         let mt_perf = {
             let out = zeros_typed(runner, rows * n, DType::F32);
-            bench_gbps(runner, &mk, &[&inp_buf, &out, &ns_u32], [1, rows, 1], [tpg, 1, 1], bytes)
+            bench_gbps_only(
+                runner,
+                &mk,
+                &[&inp_buf, &out, &ns_u32],
+                [1, rows, 1],
+                [tpg, 1, 1],
+                bytes,
+            )
         };
         results.push(bench.result_sub(
             Some(spec.subop),
@@ -567,7 +591,7 @@ fn run_arg_reduce(
         let ndim = runner.buffer_u64(0u64);
         let ax_stride = runner.buffer_i64(1i64);
         let ax_size = runner.buffer_u64(n as u64);
-        bench_gbps(
+        bench_gbps_only(
             runner,
             rk,
             &[&inp, &out, &dummy, &dummy, &dummy, &ndim, &ax_stride, &ax_size],
@@ -577,7 +601,8 @@ fn run_arg_reduce(
         )
     });
     let mt_out = zeros_typed(runner, 1, DType::F32);
-    let mt_perf = bench_gbps(runner, &mk, &[&inp, &mt_out, &ns], [1, 1, 1], [tpg, 1, 1], bytes);
+    let mt_perf =
+        bench_gbps_only(runner, &mk, &[&inp, &mt_out, &ns], [1, 1, 1], [tpg, 1, 1], bytes);
     vec![bench.result_sub(Some(spec.subop), format!("N={n} f32"), ref_perf, mt_perf, Some(equiv))]
 }
 
@@ -626,8 +651,14 @@ fn run_random(
     let bytes = (n * 4) as f64;
     let n_buf = runner.buffer_u32(n as u32);
     let mt_out = runner.buffer_zeros(n * 4);
-    let mt_perf =
-        bench_gbps(runner, &mk, &[&mt_out, &n_buf], [n.div_ceil(tpg), 1, 1], [tpg, 1, 1], bytes);
+    let mt_perf = bench_gbps_only(
+        runner,
+        &mk,
+        &[&mt_out, &n_buf],
+        [n.div_ceil(tpg), 1, 1],
+        [tpg, 1, 1],
+        bytes,
+    );
 
     // MLX rbitsc uses completely different PRNG and dispatch, just measure if available
     let num_keys = 1024usize;
@@ -640,7 +671,7 @@ fn run_random(
         let ref_out_buf = runner.buffer_zeros(num_keys * bytes_per_key);
         let odd_buf = runner.buffer_bytes(std::slice::from_ref(&(false as u8)));
         let bpk_buf = runner.buffer_bytes(&(bytes_per_key as u32).to_le_bytes());
-        bench_gbps(
+        bench_gbps_only(
             runner,
             &rk,
             &[&keys_buf, &ref_out_buf, &odd_buf, &bpk_buf],
@@ -721,11 +752,11 @@ fn run_fp_quantized(
     let bytes = (n * 4 * 2) as f64;
     let ref_perf = compile_mlx(runner, spec.mlx_src, spec.mlx_pattern, "").and_then(|rk| {
         let out = zeros_typed(runner, n, DType::F32);
-        bench_gbps(runner, &rk, &[&inp, &out], [1, n / 32, 1], [32, 1, 1], bytes)
+        bench_gbps_only(runner, &rk, &[&inp, &out], [1, n / 32, 1], [32, 1, 1], bytes)
     });
     let mt_perf = {
         let out = zeros_typed(runner, n, DType::F32);
-        bench_gbps(runner, &mk, &[&inp, &out, &n_buf], [n / tpg, 1, 1], [tpg, 1, 1], bytes)
+        bench_gbps_only(runner, &mk, &[&inp, &out, &n_buf], [n / tpg, 1, 1], [tpg, 1, 1], bytes)
     };
     vec![bench.result_sub(
         Some(spec.subop),
@@ -832,7 +863,7 @@ fn run_quantized_mat_vec(
         let bytes_mt = (m * k / 2 + sb_elems * 4 * 2 + k * 4 + m * 4) as f64;
         let mt_perf = {
             let out_buf = runner.buffer_zeros(m * 4);
-            bench_gbps(
+            bench_gbps_only(
                 runner,
                 &mk,
                 &[&w_mt_buf, &s_mt_buf, &b_mt_buf, &x_mt_buf, &out_buf, &k_buf, &gpr_buf],
@@ -857,7 +888,7 @@ fn run_quantized_mat_vec(
             let zero = runner.buffer_zeros(8);
             let y_buf = runner.buffer_zeros(m * 2);
             let bytes_f16 = (m * k / 2 + sb_elems * 2 * 2 + k * 2 + m * 2) as f64;
-            bench_gbps(
+            bench_gbps_only(
                 runner,
                 rk,
                 &[
@@ -1026,7 +1057,7 @@ fn run_rope(
 
     let ref_perf = rk.as_ref().and_then(|rk| {
         let out = runner.buffer_zeros(n_elems * 2);
-        bench_gbps(
+        bench_gbps_only(
             runner,
             rk,
             &[
@@ -1048,7 +1079,7 @@ fn run_rope(
         )
     });
     let mt_out = runner.buffer_zeros(n_elems * 2);
-    let mt_perf = bench_gbps(
+    let mt_perf = bench_gbps_only(
         runner,
         &mk,
         &[&inp, &mt_out, &mt_h_stride, &mt_seq_stride, &mt_grid_x, &mt_base],
@@ -1143,7 +1174,7 @@ fn run_attention(
             0,
             1,
         );
-        let mt_chk = crate::measure::read_typed(runner, &out_b, ch * d, dt);
+        let mt_chk = crate::runner::read_typed(runner, &out_b, ch * d, dt);
         let equiv = check_equiv_with(&ref_out, &mt_chk, EquivTolerance::new(spec.tol, 0.999));
 
         let vals: Vec<f32> = (0..h * n_kv * d).map(|i| ((i % 17) as f32 - 8.0) * 0.05).collect();
@@ -1159,7 +1190,7 @@ fn run_attention(
             let khs = runner.buffer_u64((n_kv * d) as u64);
             let kss = runner.buffer_u64(d as u64);
             let out = zeros_typed(runner, h * d, dt);
-            bench_gbps(
+            bench_gbps_only(
                 runner,
                 rk,
                 &[&q_buf, &k_buf, &v_buf, &out, &gqa, &n_i32, &khs, &kss, &khs, &kss, &sc_buf],
@@ -1170,7 +1201,7 @@ fn run_attention(
         });
         let mt_perf = {
             let out = zeros_typed(runner, h * d, dt);
-            bench_gbps(
+            bench_gbps_only(
                 runner,
                 &mk,
                 &[&q_buf, &k_buf, &v_buf, &out, &n_buf, &sc_buf],
@@ -1263,7 +1294,7 @@ fn run_strided_copy(
 
     let ref_perf = ref_kernel.as_ref().and_then(|rk| {
         let out = zeros_typed(runner, m * n, dt);
-        bench_gbps(
+        bench_gbps_only(
             runner,
             rk,
             &[&full_src_buf, &out, &full_strides_i64],
@@ -1274,7 +1305,7 @@ fn run_strided_copy(
     });
     let mt_perf = {
         let out = zeros_typed(runner, m * n, dt);
-        bench_gbps(
+        bench_gbps_only(
             runner,
             &mk,
             &[&full_src_buf, &full_src_shape, &full_src_strides, &out, &full_cols],
@@ -1402,7 +1433,7 @@ fn run_affine_dequantize(
 
     // Run MT once for correctness; capture output.
     runner.measure(&mk, &mt_bufs, mt_grid, [tpg, 1, 1], 0, 1);
-    let mt_out = crate::measure::read_typed(runner, &mt_out_buf, n_elem, dt);
+    let mt_out = crate::runner::read_typed(runner, &mt_out_buf, n_elem, dt);
 
     // MLX dispatches one thread per byte-pack (`affine_mlx_pack_factor`
     // values per thread), which is 4× more threads than our per-uint32
@@ -1417,7 +1448,7 @@ fn run_affine_dequantize(
         let mlx_out_buf = zeros_typed(runner, n_elem, dt);
         let mlx_bufs: Vec<&GpuBuffer> = vec![&w_buf, &scales_buf, &biases_buf, &mlx_out_buf];
         runner.measure(rk, &mlx_bufs, mlx_grid, [tpg, 1, 1], 0, 1);
-        let ref_out = crate::measure::read_typed(runner, &mlx_out_buf, n_elem, dt);
+        let ref_out = crate::runner::read_typed(runner, &mlx_out_buf, n_elem, dt);
         check_equiv(&ref_out, &mt_out, spec.tol)
     });
 
@@ -1428,12 +1459,12 @@ fn run_affine_dequantize(
     };
     let bytes =
         (weight_bytes_needed + (n_total_groups * elem_bytes * 2) + (n_elem * elem_bytes)) as f64;
-    let mt_perf = bench_gbps(runner, &mk, &mt_bufs, mt_grid, [tpg, 1, 1], bytes);
+    let mt_perf = bench_gbps_only(runner, &mk, &mt_bufs, mt_grid, [tpg, 1, 1], bytes);
     let ref_perf = rk
         .as_ref()
         .map(|rk| {
             let mlx_bufs: Vec<&GpuBuffer> = vec![&w_buf, &scales_buf, &biases_buf, &mt_out_buf];
-            bench_gbps(runner, rk, &mlx_bufs, mlx_grid, [tpg, 1, 1], bytes)
+            bench_gbps_only(runner, rk, &mlx_bufs, mlx_grid, [tpg, 1, 1], bytes)
         })
         .unwrap_or(None);
 
@@ -1496,8 +1527,8 @@ fn run_affine_quantize(
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
         .collect();
-    let mt_scales = crate::measure::read_typed(runner, &mt_scales_buf, n_total_groups, dt);
-    let mt_biases = crate::measure::read_typed(runner, &mt_biases_buf, n_total_groups, dt);
+    let mt_scales = crate::runner::read_typed(runner, &mt_scales_buf, n_total_groups, dt);
+    let mt_biases = crate::runner::read_typed(runner, &mt_biases_buf, n_total_groups, dt);
 
     // MLX reference: same kernel signature but separate output buffers
     // so we can compare bit-for-bit (packed) and float-for-float
@@ -1515,8 +1546,8 @@ fn run_affine_quantize(
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
             .collect();
-        let ref_scales = crate::measure::read_typed(runner, &mlx_scales_buf, n_total_groups, dt);
-        let ref_biases = crate::measure::read_typed(runner, &mlx_biases_buf, n_total_groups, dt);
+        let ref_scales = crate::runner::read_typed(runner, &mlx_scales_buf, n_total_groups, dt);
+        let ref_biases = crate::runner::read_typed(runner, &mlx_biases_buf, n_total_groups, dt);
 
         // Compare in dequantized space so ±1-ULP packed disagreement
         // maps to ±scale absolute error matching `spec.tol`.
@@ -1552,13 +1583,13 @@ fn run_affine_quantize(
         _ => 4,
     };
     let bytes = ((n_elem * elem_bytes) + (n_packs * 4) + (n_total_groups * elem_bytes * 2)) as f64;
-    let mt_perf = bench_gbps(runner, &mk, &mt_bufs, grid, [tpg, 1, 1], bytes);
+    let mt_perf = bench_gbps_only(runner, &mk, &mt_bufs, grid, [tpg, 1, 1], bytes);
     let ref_perf = rk
         .as_ref()
         .map(|rk| {
             let mlx_bufs: Vec<&GpuBuffer> =
                 vec![&w_buf, &mt_packed_buf, &mt_scales_buf, &mt_biases_buf];
-            bench_gbps(runner, rk, &mlx_bufs, [n_total_groups, 1, 1], [32, 1, 1], bytes)
+            bench_gbps_only(runner, rk, &mlx_bufs, [n_total_groups, 1, 1], [32, 1, 1], bytes)
         })
         .unwrap_or(None);
 
@@ -1637,7 +1668,7 @@ fn run_sdpa_vector(
     let mt_bufs: Vec<&GpuBuffer> =
         vec![&q_buf, &k_buf, &v_buf, &mt_out_buf, &hd_buf, &n_buf, &gqa_buf, &sc_buf];
     runner.measure(&mk, &mt_bufs, [n_q_heads, 1, 1], [tpg, 1, 1], 0, 1);
-    let mt_out = crate::measure::read_typed(runner, &mt_out_buf, n_q_heads * head_dim, dt);
+    let mt_out = crate::runner::read_typed(runner, &mt_out_buf, n_q_heads * head_dim, dt);
 
     // MLX reference dispatch + correctness compare.
     let equiv = rk.as_ref().map(|rk| {
@@ -1654,7 +1685,7 @@ fn run_sdpa_vector(
             0,
             1,
         );
-        let ref_out = crate::measure::read_typed(runner, &mlx_out_buf, n_q_heads * head_dim, dt);
+        let ref_out = crate::runner::read_typed(runner, &mlx_out_buf, n_q_heads * head_dim, dt);
         check_equiv_with(&ref_out, &mt_out, EquivTolerance::new(spec.tol, 0.999))
     });
 
@@ -1662,7 +1693,7 @@ fn run_sdpa_vector(
     // not n_q_heads.
     let bytes = ((n_q_heads * head_dim + 2 * n_kv_heads * n_kv * head_dim + n_q_heads * head_dim)
         * ctx.eb) as f64;
-    let mt_perf = bench_gbps(runner, &mk, &mt_bufs, [n_q_heads, 1, 1], [tpg, 1, 1], bytes);
+    let mt_perf = bench_gbps_only(runner, &mk, &mt_bufs, [n_q_heads, 1, 1], [tpg, 1, 1], bytes);
     let ref_perf = rk
         .as_ref()
         .map(|rk| {
@@ -1671,7 +1702,7 @@ fn run_sdpa_vector(
             let khs = runner.buffer_u64((n_kv * head_dim) as u64);
             let kss = runner.buffer_u64(head_dim as u64);
             let out = zeros_typed(runner, n_q_heads * head_dim, dt);
-            bench_gbps(
+            bench_gbps_only(
                 runner,
                 rk,
                 &[&q_buf, &k_buf, &v_buf, &out, &gqa, &n_i32, &khs, &kss, &khs, &kss, &sc_buf],
@@ -1725,10 +1756,16 @@ fn run_steel_gemm(
             let name = pat.replace("{tn}", DtypeCtx::elementwise(dt).tn);
             // has_batch(10)=false, use_out_source(100)=false, do_axpby(110)=false,
             // align_M(200)=true, align_N(201)=true, align_K(202)=true
-            runner.compile_with_bool_constants(
-                src, &name,
-                &[(10, false), (100, false), (110, false), (200, true), (201, true), (202, true)],
-            ).ok()
+            runner
+                .compile_with_bool_constants(src, &name, &[
+                    (10, false),
+                    (100, false),
+                    (110, false),
+                    (200, true),
+                    (201, true),
+                    (202, true),
+                ])
+                .ok()
         })
     });
 
@@ -1752,21 +1789,21 @@ fn run_steel_gemm(
     let ldd = check_n as i32;
     let params_bytes: Vec<u8> = {
         let mut v = Vec::with_capacity(72);
-        v.extend_from_slice(&(check_m as i32).to_le_bytes());  // M
-        v.extend_from_slice(&(check_n as i32).to_le_bytes());  // N
-        v.extend_from_slice(&(check_k as i32).to_le_bytes());  // K
-        v.extend_from_slice(&lda.to_le_bytes());                // lda
-        v.extend_from_slice(&ldb.to_le_bytes());                // ldb
-        v.extend_from_slice(&ldd.to_le_bytes());                // ldd
+        v.extend_from_slice(&(check_m as i32).to_le_bytes()); // M
+        v.extend_from_slice(&(check_n as i32).to_le_bytes()); // N
+        v.extend_from_slice(&(check_k as i32).to_le_bytes()); // K
+        v.extend_from_slice(&lda.to_le_bytes()); // lda
+        v.extend_from_slice(&ldb.to_le_bytes()); // ldb
+        v.extend_from_slice(&ldd.to_le_bytes()); // ldd
         v.extend_from_slice(&((check_n / bn) as i32).to_le_bytes()); // tiles_n
         v.extend_from_slice(&((check_m / bm) as i32).to_le_bytes()); // tiles_m
         // No padding: offset 32 is already 8-byte aligned
-        v.extend_from_slice(&0i64.to_le_bytes());               // batch_stride_a
-        v.extend_from_slice(&0i64.to_le_bytes());               // batch_stride_b
-        v.extend_from_slice(&0i64.to_le_bytes());               // batch_stride_d
-        v.extend_from_slice(&0i32.to_le_bytes());               // swizzle_log
+        v.extend_from_slice(&0i64.to_le_bytes()); // batch_stride_a
+        v.extend_from_slice(&0i64.to_le_bytes()); // batch_stride_b
+        v.extend_from_slice(&0i64.to_le_bytes()); // batch_stride_d
+        v.extend_from_slice(&0i32.to_le_bytes()); // swizzle_log
         v.extend_from_slice(&((check_k / 16) as i32).to_le_bytes()); // gemm_k_iterations_aligned
-        v.extend_from_slice(&0i32.to_le_bytes());               // batch_ndim
+        v.extend_from_slice(&0i32.to_le_bytes()); // batch_ndim
         v
     };
     let params_buf = runner.buffer_bytes(&params_bytes);
@@ -1777,14 +1814,33 @@ fn run_steel_gemm(
     let grid = [check_n / bn, check_m / bm, 1];
     let tpg_arr = [tpg, 1, 1];
     let all_bufs: [&GpuBuffer; 6] = [&a_buf, &b_buf, &d_buf, &m_buf, &n_buf, &k_buf];
-    let mlx_bufs: [&GpuBuffer; 8] = [&a_buf, &b_buf, &mlx_d_buf, &mlx_d_buf, &params_buf, &addmm_buf, &batch_shape_buf, &batch_strides_buf];
+    let mlx_bufs: [&GpuBuffer; 8] = [
+        &a_buf,
+        &b_buf,
+        &mlx_d_buf,
+        &mlx_d_buf,
+        &params_buf,
+        &addmm_buf,
+        &batch_shape_buf,
+        &batch_strides_buf,
+    ];
 
     // Run MLX reference
     let ref_perf = mlx_k.as_ref().and_then(|rk| {
         runner.measure(rk, &mlx_bufs, grid, tpg_arr, 0, 1);
-        bench_gbps(runner, rk, &mlx_bufs, grid, tpg_arr, ((check_m * check_k + check_k * check_n + check_m * check_n) * ctx.eb) as f64)
+        bench_gbps_only(
+            runner,
+            rk,
+            &mlx_bufs,
+            grid,
+            tpg_arr,
+            ((check_m * check_k + check_k * check_n + check_m * check_n) * ctx.eb) as f64,
+        )
     });
-    let ref_vals: Vec<f32> = mlx_k.as_ref().map(|_| read_typed(runner, &mlx_d_buf, check_m * check_n, dt)).unwrap_or_else(|| (0..check_m * check_n).map(|_| check_k as f32).collect());
+    let ref_vals: Vec<f32> = mlx_k
+        .as_ref()
+        .map(|_| read_typed(runner, &mlx_d_buf, check_m * check_n, dt))
+        .unwrap_or_else(|| (0..check_m * check_n).map(|_| check_k as f32).collect());
 
     // Run MT
     runner.measure(&mk, &all_bufs, grid, tpg_arr, 0, 1);
@@ -1792,8 +1848,12 @@ fn run_steel_gemm(
 
     let equiv = check_equiv(&ref_vals, &mt_vals, 1e-2);
     let label = format!("M={m} N={n} K={k} BM={bm} BN={bn} {}", ctx.label);
-    let mt_perf = bench_gbps(
-        runner, &mk, &all_bufs, grid, tpg_arr,
+    let mt_perf = bench_gbps_only(
+        runner,
+        &mk,
+        &all_bufs,
+        grid,
+        tpg_arr,
         ((check_m * check_k + check_k * check_n + check_m * check_n) * ctx.eb) as f64,
     );
 

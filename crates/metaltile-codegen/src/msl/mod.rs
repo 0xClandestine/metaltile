@@ -21,7 +21,7 @@ use metaltile_core::{
     ir::{Kernel, KernelMode, Op, ParamKind, ValueId},
 };
 
-use crate::{error::Result, passes, passes::type_check::infer_types};
+use crate::{TileSchedule, error::Result, passes, passes::type_check::infer_types};
 
 #[macro_export]
 macro_rules! wl {
@@ -253,6 +253,22 @@ impl MslGenerator {
 
         wl!(out, "}}");
         Ok(())
+    }
+}
+
+/// Create a generator configured for the given kernel mode.
+///
+/// Tile2D and SimdGroup2D modes enable simdgroup matrix intrinsics;
+/// all other modes use the default config.
+pub fn generator_for_mode(mode: KernelMode) -> MslGenerator {
+    if matches!(mode, KernelMode::Tile2D | KernelMode::SimdGroup2D) {
+        MslGenerator::new(MslConfig {
+            tile_schedule: TileSchedule::default(),
+            use_simd_matrix: true,
+            ..MslConfig::default()
+        })
+    } else {
+        MslGenerator::default()
     }
 }
 

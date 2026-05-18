@@ -24,79 +24,36 @@ use std::{
 };
 
 use metaltile_codegen::{
-    TileSchedule,
     emit::{self, compile_metallib, dtype_suffix, write_manifest, write_msl, write_swift_wrappers},
-    msl::{MslConfig, MslGenerator},
+    generator_for_mode,
 };
-use metaltile_core::ir::{Kernel, KernelMode};
-use metaltile_std::{bench_types::DType, spec::BenchSpec};
+use metaltile_core::ir::Kernel;
+use metaltile_std::{
+    bench_types::DType,
+    spec::{BenchSpec, effective_mode},
+};
 
 use crate::{
-    flag_val,
-    kernel_utils::{dtype_label, effective_mode},
+    BuildArgs,
     matches_filter,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
-pub fn help() {
-    eprintln!("tile build — Compile all registered kernels to MSL and report errors");
-    eprintln!();
-    eprintln!("USAGE:");
-    eprintln!("  tile build [options]");
-    eprintln!();
-    eprintln!("OPTIONS:");
-    eprintln!("  --filter, -f <name>     Only build kernels whose name contains <name>");
-    eprintln!("  --dtypes <f32,f16,bf16> Comma-separated list of dtypes to build");
-    eprintln!("  -v                      Print generated MSL for each kernel");
-    eprintln!("  --emit <kinds>          Comma-separated: msl,metallib,swift,ir,all");
-    eprintln!("  --out, -o <dir>         Output directory (required when --emit is set)");
-    eprintln!("  --sdk <sdk>             xcrun SDK (default: macosx)");
-}
+// ── Table helpers ────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum EmitKind {
-    Msl,
-    Metallib,
-    Swift,
-    Ir,
-}
+fn col_sep() -> String { paint_stdout("│", Style::new().fg(Color::BrightBlack).dim()) }
 
-fn parse_emit_list(raw: &str) -> Result<BTreeSet<EmitKind>, String> {
-    let mut kinds = BTreeSet::new();
-    for tok in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        match tok {
-            "msl" => {
-                kinds.insert(EmitKind::Msl);
-            },
-            "metallib" => {
-                kinds.insert(EmitKind::Metallib);
-                kinds.insert(EmitKind::Msl); // metallib needs the .metal source files on disk
-            },
-            "swift" => {
-                kinds.insert(EmitKind::Swift);
-            },
-            "ir" => {
-                kinds.insert(EmitKind::Ir);
-            },
-            "all" => {
-                kinds.insert(EmitKind::Msl);
-                kinds.insert(EmitKind::Metallib);
-                kinds.insert(EmitKind::Swift);
-                kinds.insert(EmitKind::Ir);
-            },
-            other => return Err(format!("unknown --emit kind '{other}'")),
-        }
-    }
-    Ok(kinds)
-}
+fn pad_left(text: &str, width: usize) -> String { format!("{text:<width$}") }
 
-pub fn run(args: &[String]) {
-    let filter = flag_val(args, "--filter").or_else(|| flag_val(args, "-f"));
-    let dtypes_arg = flag_val(args, "--dtypes");
-    let verbose = args.iter().any(|a| a == "-v" || a == "-vv");
-    let emit_arg = flag_val(args, "--emit");
-    let out_arg = flag_val(args, "--out").or_else(|| flag_val(args, "-o"));
-    let sdk = flag_val(args, "--sdk").unwrap_or_else(|| "macosx".to_string());
+fn pad_right(text: &str, width: usize) -> String { format!("{text:>width$}") }
+
+pub fn run(args: &BuildArgs) {
+    let filter = &args.filter;
+    let dtypes_arg = &args.dtypes;
+    let verbose = args.verbose > 0;
+    let emit_arg = &args.emit;
+    let out_arg = &args.out;
+    let sdk = &args.sdk;
 
     let emit_kinds: BTreeSet<EmitKind> = match emit_arg.as_deref() {
         None => BTreeSet::new(),
@@ -128,16 +85,9 @@ pub fn run(args: &[String]) {
     };
 
     // Parse --dtypes list
-    let dtypes_filter: Option<Vec<DType>> = dtypes_arg.as_ref().map(|s| {
-        s.split(',')
-            .filter_map(|t| match t.trim() {
-                "f32" => Some(DType::F32),
-                "f16" => Some(DType::F16),
-                "bf16" => Some(DType::BF16),
-                _ => None,
-            })
-            .collect()
-    });
+    let dtypes_filter: Option<Vec<DType>> = dtypes_arg
+        .as_ref()
+        .map(|s| s.split(',').filter_map(|t| t.trim().parse::<DType>().ok()).collect());
 
     // Collect unique kernel specs.
     let mut kernels: BTreeMap<&str, (&BenchSpec, Vec<DType>)> = BTreeMap::new();
@@ -152,6 +102,41 @@ pub fn run(args: &[String]) {
 
     let mut sorted: Vec<(&str, (&BenchSpec, Vec<DType>))> = kernels.into_iter().collect();
     sorted.sort_unstable_by_key(|(name, _)| *name);
+
+    // Header.
+    println!(
+        "{} {}",
+        paint_stdout("tile build", Style::new().fg(Color::Cyan).bold()),
+        paint_stdout(format!("· {} kernels", sorted.len()), Style::new().fg(Color::BrightBlack)),
+    );
+
+    // Compute column widths.
+    let name_w = sorted.iter().map(|(n, _)| n.len()).max().unwrap_or(20).clamp(8, 48);
+    let dt_w = sorted
+        .iter()
+        .map(|(_, (_, dtypes))| {
+            dtypes.iter().map(|dt| dt.label()).collect::<Vec<_>>().join("/").len()
+        })
+        .max()
+        .unwrap_or(12)
+        .clamp(8, 24);
+    let ck_w = 2usize;
+
+    let sep = col_sep();
+    let bold = Style::new().fg(Color::BrightWhite).bold();
+    let hdr = format!(
+        "  {} {} {} {} {}",
+        paint_stdout(pad_left("Kernel", name_w), bold),
+        sep,
+        paint_stdout(pad_left("Dtypes", dt_w), bold),
+        sep,
+        paint_stdout(pad_right("ok", ck_w), bold),
+    );
+    println!("{hdr}");
+
+    let total_w = 4 + name_w + 3 + dt_w + 3 + ck_w;
+    let sep_line = paint_stdout("─".repeat(total_w), Style::new().fg(Color::BrightBlack).dim());
+    println!("  {sep_line}");
 
     // Per-output collectors for the emit step.
     let kernels_dir = out_root.as_ref().map(|r| r.join("Resources").join("kernels"));
@@ -195,7 +180,7 @@ pub fn run(args: &[String]) {
             // unless the spec is already dtype-specialized (e.g. `mt_argmax_f32`).
             k.name = monomorphized_name(spec.kernel_name, dt, dtypes.len());
 
-            let generator = msl_generator_for(mode);
+            let generator = generator_for_mode(mode);
 
             // Compile-check via generate.
             let msl_result = generator.generate(&k);
@@ -242,49 +227,52 @@ pub fn run(args: &[String]) {
             }
 
             if verbose && let Ok(msl) = generator.generate(&k) {
-                println!("// ══ {} {} ══\n{}", k.name, dtype_label(dt), msl);
+                println!("// ══ {} {} ══\n{}", k.name, dt.label(), msl);
             }
         }
 
         if !dtypes_err.is_empty() {
+            let kernel_cell =
+                paint_stdout(pad_left(name, name_w), Style::new().fg(Color::Cyan).bold());
+            let dt_str: String =
+                dtypes_err.iter().map(|(dt, _)| dt.label()).collect::<Vec<_>>().join("/");
+            let dt_cell =
+                paint_stdout(pad_left(&dt_str, dt_w), Style::new().fg(Color::Blue).bold());
+            let ck_cell = paint_stderr("✗", Style::new().fg(Color::Red).bold());
+            println!("  {kernel_cell} {sep} {dt_cell} {sep}  {ck_cell}");
             for (dt, err_msg) in &dtypes_err {
+                let label = format!("{}:", dt.label());
                 eprintln!(
-                    "  {}  {}   {}",
-                    paint_stdout(format!("{name:<20}"), Style::new().fg(Color::Cyan).bold()),
-                    paint_stdout(dtype_label(*dt), Style::new().fg(Color::Blue).bold()),
-                    paint_stderr("✗", Style::new().fg(Color::Red).bold()),
+                    "    {} {}",
+                    paint_stdout(pad_right(&label, dt_w + 2), Style::new().fg(Color::BrightBlack)),
+                    paint_stderr(
+                        err_msg.lines().next().unwrap_or(err_msg),
+                        Style::new().fg(Color::BrightWhite)
+                    ),
                 );
-                for line in err_msg.lines() {
-                    eprintln!(
-                        "                       {}",
-                        paint_stderr(line, Style::new().fg(Color::BrightWhite)),
-                    );
-                }
             }
         } else if !dtypes_ok.is_empty() {
             ok += 1;
-            let dtype_str =
-                dtypes_ok.iter().map(|dt| dtype_label(*dt)).collect::<Vec<_>>().join("/");
-            eprintln!(
-                "  {}  {}   {}",
-                paint_stdout(format!("{name:<20}"), Style::new().fg(Color::Cyan).bold()),
-                paint_stdout(&dtype_str, Style::new().fg(Color::Blue).bold()),
-                paint_stdout("✓", Style::new().fg(Color::Green).bold()),
-            );
+            let kernel_cell =
+                paint_stdout(pad_left(name, name_w), Style::new().fg(Color::Cyan).bold());
+            let dtype_str = dtypes_ok.iter().map(|dt| dt.label()).collect::<Vec<_>>().join("/");
+            let dt_cell =
+                paint_stdout(pad_left(&dtype_str, dt_w), Style::new().fg(Color::Blue).bold());
+            let ck_cell = paint_stdout("✓", Style::new().fg(Color::Green).bold());
+            println!("  {kernel_cell} {sep} {dt_cell} {sep}  {ck_cell}");
         }
     }
 
     // ─── Emit pass (manifest, Swift wrappers, metallib) ─────────────────
     if let Some(out) = &out_root {
-        emit_artifacts(out, &emit_kinds, &emitted_kernels, &emitted_paths, &sdk);
+        emit_artifacts(out, &emit_kinds, &emitted_kernels, &emitted_paths, sdk);
     }
 
     // Summary
-    eprintln!();
-    let sep = paint_stdout("·", Style::new().fg(Color::BrightBlack).dim());
+    println!();
     if errors > 0 {
-        eprintln!(
-            "  {} {sep} {}",
+        println!(
+            "  {}  {}",
             paint_stdout(format!("{ok} ok"), Style::new().fg(Color::Green).bold()),
             paint_stderr(
                 format!("{errors} error{}", if errors == 1 { "" } else { "s" }),
@@ -293,8 +281,47 @@ pub fn run(args: &[String]) {
         );
         std::process::exit(1);
     } else {
-        eprintln!("  {}", paint_stdout(format!("{ok} ok"), Style::new().fg(Color::Green).bold()),);
+        println!("  {}", paint_stdout(format!("{ok} ok"), Style::new().fg(Color::Green).bold()));
     }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum EmitKind {
+    Msl,
+    Metallib,
+    Swift,
+    Ir,
+}
+
+fn parse_emit_list(raw: &str) -> Result<BTreeSet<EmitKind>, String> {
+    let mut kinds = BTreeSet::new();
+    for tok in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        match tok {
+            "msl" => {
+                kinds.insert(EmitKind::Msl);
+            },
+            "metallib" => {
+                kinds.insert(EmitKind::Metallib);
+                kinds.insert(EmitKind::Msl); // metallib needs the .metal source files on disk
+            },
+            "swift" => {
+                kinds.insert(EmitKind::Swift);
+            },
+            "ir" => {
+                kinds.insert(EmitKind::Ir);
+            },
+            "all" => {
+                kinds.insert(EmitKind::Msl);
+                kinds.insert(EmitKind::Metallib);
+                kinds.insert(EmitKind::Swift);
+                kinds.insert(EmitKind::Ir);
+            },
+            other => return Err(format!("unknown --emit kind '{other}'")),
+        }
+    }
+    Ok(kinds)
 }
 
 /// Build the per-dtype monomorphized kernel symbol name.
@@ -307,18 +334,6 @@ fn monomorphized_name(base: &str, dt: DType, n_dtypes: usize) -> String {
         base.to_string()
     } else {
         format!("{base}_{suffix}")
-    }
-}
-
-fn msl_generator_for(mode: KernelMode) -> MslGenerator {
-    if matches!(mode, KernelMode::Tile2D | KernelMode::SimdGroup2D) {
-        MslGenerator::new(MslConfig {
-            tile_schedule: TileSchedule::default(),
-            use_simd_matrix: true,
-            ..MslConfig::default()
-        })
-    } else {
-        MslGenerator::default()
     }
 }
 

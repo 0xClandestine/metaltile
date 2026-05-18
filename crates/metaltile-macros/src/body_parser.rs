@@ -1261,13 +1261,12 @@ impl DslBodyParser {
             // Explicit dtype: `T` resolves to kernel generic type.
             let ty_str = quote! { #ty_arg }.to_string();
             match ty_str.trim() {
-                "T" => {
+                "T" =>
                     if let Some(tok) = self.type_vars.get("T") {
                         tok.clone()
                     } else {
                         quote! { DType::F32 }
-                    }
-                },
+                    },
                 "f32" => quote! { DType::F32 },
                 "f16" => quote! { DType::F16 },
                 "bf16" => quote! { DType::BF16 },

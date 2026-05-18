@@ -11,101 +11,25 @@ use std::{collections::HashMap, process::Command};
 use serde_json::Value;
 
 use crate::{
-    flag_val,
+    DiffArgs,
     matches_filter,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
-#[derive(Debug, PartialEq, Eq, Hash)]
-struct RowKey {
-    op: String,
-    shape: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum DeltaKind {
-    Regression,
-    Improvement,
-    Unchanged,
-    New,
-    Removed,
-}
-
-#[derive(Debug)]
-struct DiffRow {
-    op: String,
-    shape: String,
-    baseline_pct: Option<f64>,
-    current_pct: Option<f64>,
-    delta_pct: Option<f64>,
-    kind: DeltaKind,
-}
-
-/// Collect positional arguments, skipping flag names and their values.
-fn positionals(args: &[String]) -> Vec<String> {
-    const VALUE_FLAGS: &[&str] = &["--filter", "-f", "--threshold", "--sort", "--json", "-o"];
-    let mut result = Vec::new();
-    let mut skip_next = false;
-    for arg in args {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        if arg.starts_with('-') {
-            if VALUE_FLAGS.contains(&arg.as_str()) {
-                skip_next = true;
-            }
-        } else {
-            result.push(arg.clone());
-        }
-    }
-    result
-}
-
-pub fn help() {
-    eprintln!("tile diff — Compare bench results against a saved baseline");
-    eprintln!();
-    eprintln!("USAGE:");
-    eprintln!("  tile diff <baseline.json>              Run bench, then diff against baseline");
-    eprintln!("  tile diff <baseline.json> <run.json>   Diff two saved result files");
-    eprintln!();
-    eprintln!("OPTIONS:");
-    eprintln!("  --filter, -f <name>   Only show kernels whose name contains <name>");
-    eprintln!("  --threshold <n>       Highlight regressions larger than n% (default: 5)");
-    eprintln!("  --sort <field>        Sort by: name, delta, pct (default: name)");
-}
-
-pub fn run(args: &[String]) {
-    let pos = positionals(args);
-    let baseline_path = pos.first().cloned();
-    let current_path = pos.get(1).cloned();
-    let filter = flag_val(args, "--filter").or_else(|| flag_val(args, "-f"));
-    let threshold_str = flag_val(args, "--threshold");
-    let threshold: f64 = threshold_str.as_deref().and_then(|s| s.parse().ok()).unwrap_or(5.0);
-    let sort = flag_val(args, "--sort").unwrap_or_else(|| "name".to_string());
-    let only_regressions = args.iter().any(|a| a == "--only-regressions");
-    let only_improvements = args.iter().any(|a| a == "--only-improvements");
-
-    let baseline_path = match baseline_path {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "{} {}",
-                paint_stderr("Error:", Style::new().fg(Color::Red).bold()),
-                paint_stderr(
-                    "usage: tile diff <baseline> [current]",
-                    Style::new().fg(Color::BrightWhite),
-                ),
-            );
-            std::process::exit(1);
-        },
-    };
+pub fn run(args: &DiffArgs) {
+    let baseline_path = &args.baseline;
+    let current_path = &args.current;
+    let filter = &args.filter;
+    let threshold = args.threshold;
+    let sort = &args.sort;
+    let only_regressions = args.only_regressions;
+    let only_improvements = args.only_improvements;
 
     // Load baseline
-    let baseline = load_results(&baseline_path, "baseline");
+    let baseline = load_results(baseline_path, "baseline");
 
     // Load or generate current
-    let current = if let Some(ref path) = current_path {
+    let current = if let Some(path) = current_path {
         load_results(path, "current")
     } else {
         eprintln!(
@@ -246,12 +170,15 @@ pub fn run(args: &[String]) {
     }
 
     if diff_rows.is_empty() {
-        println!(
+        eprintln!(
             "  {}",
             paint_stdout("No matching results to diff.", Style::new().fg(Color::BrightBlack)),
         );
         return;
     }
+
+    // Header.
+    eprintln!("{}", paint_stdout("tile diff", Style::new().fg(Color::Cyan).bold()),);
 
     // Print diff table
     eprintln!();
@@ -359,6 +286,35 @@ pub fn run(args: &[String]) {
         std::process::exit(1);
     }
 }
+
+// ── Data types ───────────────────────────────────────────────────────────
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct RowKey {
+    op: String,
+    shape: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DeltaKind {
+    Regression,
+    Improvement,
+    Unchanged,
+    New,
+    Removed,
+}
+
+#[derive(Debug)]
+struct DiffRow {
+    op: String,
+    shape: String,
+    baseline_pct: Option<f64>,
+    current_pct: Option<f64>,
+    delta_pct: Option<f64>,
+    kind: DeltaKind,
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────
 
 fn load_results(path: &str, label: &str) -> Vec<Value> {
     let content = std::fs::read_to_string(path).unwrap_or_else(|e| {

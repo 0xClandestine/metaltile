@@ -1,10 +1,10 @@
-use std::{cell::RefCell, io::Write, ptr::NonNull};
+use std::{cell::RefCell, ptr::NonNull};
 
 use metaltile_codegen::msl::MslGenerator;
 pub use metaltile_core::dtype::DType;
 use metaltile_core::ir::{Kernel, KernelMode};
 
-use crate::term::{Color, Style, paint_stdout};
+use crate::stats::BenchStats;
 
 // ── Dtype variant helpers ─────────────────────────────────────────────────────
 
@@ -266,6 +266,21 @@ impl OpBench {
         mt_perf: Option<f64>,
         equiv: Option<EquivResult>,
     ) -> OpResult {
+        self.result_sub_timed(subop, shape, ref_perf, mt_perf, equiv, None, None)
+    }
+
+    /// Like `result_sub()` but with optional GPU timing stats for -vv output.
+    #[allow(clippy::too_many_arguments)]
+    pub fn result_sub_timed(
+        &self,
+        subop: Option<impl Into<String>>,
+        shape: impl Into<String>,
+        ref_perf: Option<f64>,
+        mt_perf: Option<f64>,
+        equiv: Option<EquivResult>,
+        mt_timing: Option<BenchStats>,
+        ref_timing: Option<BenchStats>,
+    ) -> OpResult {
         let shape = shape.into();
         if mt_perf.is_some() && equiv.is_none() {
             panic!("implemented benchmark '{}' [{}] is missing correctness", self.op, shape);
@@ -278,6 +293,8 @@ impl OpBench {
             ref_perf,
             mt_perf,
             equiv,
+            mt_timing,
+            ref_timing,
         };
         report_result(&result);
         result
@@ -312,6 +329,10 @@ pub struct OpResult {
     mt_perf: Option<f64>,
     /// Numerical equivalence check result.
     equiv: Option<EquivResult>,
+    /// GPU timing stats for MetalTile (-vv mode only).
+    pub mt_timing: Option<BenchStats>,
+    /// GPU timing stats for reference (-vv mode only).
+    pub ref_timing: Option<BenchStats>,
 }
 
 impl OpResult {
@@ -394,14 +415,16 @@ pub fn validate_results(results: &[OpResult]) -> Result<(), String> {
     }
 }
 
-pub fn print_suite(results: &[OpResult]) {
-    validate_results(results).unwrap_or_else(|err| panic!("{err}"));
-
-    let mut printer = SuitePrinter::new(
-        results.iter().any(|r| !matches!(r.correctness_status(), CorrectnessStatus::Unavailable)),
-    );
-    printer.print_batch(results);
-    printer.finish();
+fn report_result(result: &OpResult) {
+    RESULT_REPORTER.with(|slot| {
+        if let Some(mut reporter) = *slot.borrow() {
+            // Safety: the pointer is installed by `set_result_reporter` and restored by its
+            // guard before the captured closure can go out of scope.
+            unsafe {
+                reporter.as_mut()(result);
+            }
+        }
+    });
 }
 
 pub struct ResultReporterGuard {
@@ -426,236 +449,6 @@ pub fn set_result_reporter(reporter: &mut dyn FnMut(&OpResult)) -> ResultReporte
         unsafe { std::mem::transmute(NonNull::from(reporter)) };
     let previous = RESULT_REPORTER.with(|slot| (*slot.borrow_mut()).replace(reporter));
     ResultReporterGuard { previous }
-}
-
-pub struct SuitePrinter {
-    show_correctness: bool,
-    started: bool,
-    last_op: Option<&'static str>,
-    last_op_display: Option<String>,
-    last_shape_base: Option<String>,
-}
-
-impl SuitePrinter {
-    pub fn new(show_correctness: bool) -> Self {
-        Self {
-            show_correctness,
-            started: false,
-            last_op: None,
-            last_op_display: None,
-            last_shape_base: None,
-        }
-    }
-
-    pub fn print_batch(&mut self, results: &[OpResult]) {
-        if results.is_empty() {
-            return;
-        }
-        if !self.started {
-            self.print_header();
-            self.started = true;
-        }
-        for result in results {
-            // Blank line between top-level op groups.
-            let new_group = self.last_op.is_some() && self.last_op != Some(result.op());
-            if new_group {
-                println!();
-                self.last_shape_base = None;
-            }
-            self.last_op = Some(result.op());
-
-            // Blank repeated op_display within a group; reset shape tracking on change.
-            let op_display = result.op_display();
-            let show_op = Some(&op_display) != self.last_op_display.as_ref();
-            if show_op {
-                self.last_shape_base = None;
-            }
-            self.last_op_display = Some(op_display.clone());
-            let shown_op = if show_op { &op_display } else { "" };
-
-            // Dim repeated shape base (e.g. "N=64M") when only the dtype changes.
-            let (shape_cell, new_base) =
-                build_shape_cell(result.shape(), self.last_shape_base.as_deref());
-            self.last_shape_base = new_base;
-
-            println!("{}", format_row(result, self.show_correctness, shown_op, &shape_cell));
-        }
-        self.flush();
-    }
-
-    pub fn finish(&mut self) {
-        if !self.started {
-            return;
-        }
-        println!("  {}", separator(separator_width(self.show_correctness)));
-        self.flush();
-    }
-
-    fn print_header(&self) {
-        println!();
-        let sep = col_sep();
-        if self.show_correctness {
-            println!(
-                "  {} {sep} {} {sep} {} {sep} {} {sep} {} {sep} {}",
-                header_cell("Op", 28, false),
-                header_cell("Shape", 26, false),
-                header_cell("Reference", 14, true),
-                header_cell("MetalTile", 14, true),
-                header_cell("MT%", 6, true),
-                header_cell("Correct", 14, true),
-            );
-        } else {
-            println!(
-                "  {} {sep} {} {sep} {} {sep} {} {sep} {}",
-                header_cell("Op", 28, false),
-                header_cell("Shape", 26, false),
-                header_cell("Reference", 14, true),
-                header_cell("MetalTile", 14, true),
-                header_cell("MT%", 6, true),
-            );
-        }
-        println!("  {}", separator(separator_width(self.show_correctness)));
-    }
-
-    fn flush(&self) { let _ = std::io::stdout().flush(); }
-}
-
-fn report_result(result: &OpResult) {
-    RESULT_REPORTER.with(|slot| {
-        if let Some(mut reporter) = *slot.borrow() {
-            // Safety: the pointer is installed by `set_result_reporter` and restored by its
-            // guard before the captured closure can go out of scope.
-            unsafe {
-                reporter.as_mut()(result);
-            }
-        }
-    });
-}
-
-fn fmt_perf(v: Option<f64>, metric: &str, fallback: &str) -> String {
-    match v {
-        None => fallback.into(),
-        Some(x) => format!("{x:.1} {metric}"),
-    }
-}
-
-/// Returns (painted_shape_cell, new_last_base).
-/// When the shape ends with a known dtype token and the base matches `last_base`,
-/// the base is dimmed and only the dtype is bright, reducing visual noise for
-/// consecutive rows that differ only in dtype (e.g. "N=64M f32" / f16 / bf16).
-fn build_shape_cell(shape: &str, last_base: Option<&str>) -> (String, Option<String>) {
-    const DTYPES: &[&str] = &["bf16", "f16", "f32", "i32", "u32", "i8", "u8"];
-    const W: usize = 26;
-    for &dtype in DTYPES {
-        if let Some(base) = shape.strip_suffix(&format!(" {dtype}")) {
-            if Some(base) == last_base {
-                // Dim the repeated base, highlight just the dtype.
-                let prefix = format!("{base} ");
-                let pad_w = W.saturating_sub(dtype.len());
-                let cell = format!(
-                    "{}{}",
-                    paint_stdout(pad_left(&prefix, pad_w), Style::new().fg(Color::BrightBlack)),
-                    paint_stdout(dtype, Style::new().fg(Color::BrightWhite)),
-                );
-                return (cell, Some(base.to_string()));
-            } else {
-                let cell = paint_stdout(pad_left(shape, W), Style::new().fg(Color::BrightWhite));
-                return (cell, Some(base.to_string()));
-            }
-        }
-    }
-    (paint_stdout(pad_left(shape, W), Style::new().fg(Color::BrightWhite)), None)
-}
-
-fn format_row(
-    result: &OpResult,
-    show_correctness: bool,
-    shown_op: &str,
-    shape_cell: &str,
-) -> String {
-    let ref_s = fmt_perf(result.ref_perf(), result.metric(), "—");
-    let mt_s = fmt_perf(result.mt_perf(), result.metric(), "NYI");
-    let pct_s = result.pct().map(|p| format!("{:.0}%", p)).unwrap_or_else(|| "—".into());
-    let ref_cell = style_reference(&ref_s, result.ref_perf());
-    let mt_cell = style_metaltile(&mt_s, result);
-    let pct_cell = style_pct(&pct_s, result);
-    let sep = col_sep();
-    let op_col = paint_stdout(pad_left(shown_op, 28), Style::new().fg(Color::Cyan).bold());
-    if show_correctness {
-        let eq_s = result.correctness_cell();
-        format!(
-            "  {} {sep} {} {sep} {} {sep} {} {sep} {} {sep} {}",
-            op_col,
-            shape_cell,
-            ref_cell,
-            mt_cell,
-            pct_cell,
-            style_correctness(&eq_s, result.correctness_status()),
-        )
-    } else {
-        format!(
-            "  {} {sep} {} {sep} {} {sep} {} {sep} {}",
-            op_col, shape_cell, ref_cell, mt_cell, pct_cell,
-        )
-    }
-}
-
-// Visible widths: 2 prefix + 28 op + 3 sep + 26 shape + 3 sep + 14 ref + 3 sep + 14 mt
-//                + 3 sep + 6 pct [+ 3 sep + 14 correct]
-fn separator_width(show_correctness: bool) -> usize { if show_correctness { 119 } else { 99 } }
-
-fn header_cell(label: &str, width: usize, right_align: bool) -> String {
-    let cell = if right_align { pad_right(label, width) } else { pad_left(label, width) };
-    paint_stdout(&cell, Style::new().fg(Color::BrightWhite).bold())
-}
-
-fn col_sep() -> String { paint_stdout("│", Style::new().fg(Color::BrightBlack).dim()) }
-
-fn separator(width: usize) -> String {
-    paint_stdout("─".repeat(width), Style::new().fg(Color::BrightBlack).dim())
-}
-
-fn pad_left(text: &str, width: usize) -> String { format!("{text:<width$}") }
-
-fn pad_right(text: &str, width: usize) -> String { format!("{text:>width$}") }
-
-fn style_reference(text: &str, value: Option<f64>) -> String {
-    let style = if value.is_some() {
-        Style::new().fg(Color::BrightWhite)
-    } else {
-        Style::new().fg(Color::Red).bold()
-    };
-    paint_stdout(pad_right(text, 14), style)
-}
-
-fn style_metaltile(text: &str, result: &OpResult) -> String {
-    let style = match (result.mt_perf(), result.correctness_status()) {
-        (Some(_), CorrectnessStatus::Failed { .. }) => Style::new().fg(Color::Red).bold(),
-        (Some(_), _) => Style::new().fg(Color::BrightWhite).bold(),
-        (None, _) => Style::new().fg(Color::Yellow).bold(),
-    };
-    paint_stdout(pad_right(text, 14), style)
-}
-
-fn style_pct(text: &str, result: &OpResult) -> String {
-    let style = match (result.pct(), result.correctness_status()) {
-        (_, CorrectnessStatus::Failed { .. }) => Style::new().fg(Color::Red).bold(),
-        (Some(p), _) if p >= 90.0 => Style::new().fg(Color::Green).bold(),
-        (Some(p), _) if p >= 60.0 => Style::new().fg(Color::Yellow).bold(),
-        (Some(_), _) => Style::new().fg(Color::Red).bold(),
-        (None, _) => Style::new().fg(Color::Yellow).bold(),
-    };
-    paint_stdout(pad_right(text, 6), style)
-}
-
-fn style_correctness(text: &str, status: CorrectnessStatus) -> String {
-    let style = match status {
-        CorrectnessStatus::Passed { .. } => Style::new().fg(Color::Green).bold(),
-        CorrectnessStatus::Failed { .. } => Style::new().fg(Color::Red).bold(),
-        CorrectnessStatus::Unchecked => Style::new().fg(Color::Yellow).bold(),
-        CorrectnessStatus::Unavailable => Style::new().fg(Color::BrightBlack).dim(),
-    };
-    paint_stdout(pad_right(text, 14), style)
 }
 
 // ── Shared bench abstractions ─────────────────────────────────────────────────
@@ -775,6 +568,8 @@ mod tests {
             ref_perf: Some(1.0),
             mt_perf: Some(2.0),
             equiv: None,
+            mt_timing: None,
+            ref_timing: None,
         };
         let unavailable = sample_result(None, None);
         assert_eq!(unchecked.correctness_status(), CorrectnessStatus::Unchecked);
@@ -832,6 +627,8 @@ mod tests {
             ref_perf: Some(1.0),
             mt_perf: Some(2.0),
             equiv: None,
+            mt_timing: None,
+            ref_timing: None,
         };
         let err = validate_results(&[unchecked]).expect_err("unchecked rows should fail");
         assert!(err.contains("sample [shape]"));

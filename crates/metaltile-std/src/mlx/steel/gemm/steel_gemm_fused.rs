@@ -7,7 +7,14 @@
 use metaltile::kernel;
 
 #[kernel]
-pub fn mt_steel_gemm_64x64x16_2x2<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>, #[constexpr] m: u32, #[constexpr] n: u32, #[constexpr] k: u32) {
+pub fn mt_steel_gemm_64x64x16_2x2<T>(
+    a: Tensor<T>,
+    b: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] m: u32,
+    #[constexpr] n: u32,
+    #[constexpr] k: u32,
+) {
     let tg_col = program_id::<0>();
     let tg_row = program_id::<1>();
     let sg_id = simd_group_id();
@@ -41,15 +48,29 @@ pub fn mt_steel_gemm_64x64x16_2x2<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>,
                 // Direct load from device memory (no threadgroup staging)
                 simdgroup_elem_store(sub_a, 0, load(a[(tg_row * 64 + m_row + fm) * k + kf + fn0]));
                 simdgroup_elem_store(sub_a, 1, load(a[(tg_row * 64 + m_row + fm) * k + kf + fn1]));
-                simdgroup_elem_store(sub_b, 0, load(b[(kf + fn0) * n + (tg_col * 64 + n_col + fm)]));
-                simdgroup_elem_store(sub_b, 1, load(b[(kf + fn1) * n + (tg_col * 64 + n_col + fm)]));
+                simdgroup_elem_store(
+                    sub_b,
+                    0,
+                    load(b[(kf + fn0) * n + (tg_col * 64 + n_col + fm)]),
+                );
+                simdgroup_elem_store(
+                    sub_b,
+                    1,
+                    load(b[(kf + fn1) * n + (tg_col * 64 + n_col + fm)]),
+                );
                 simdgroup_matmul(sub_a, sub_b, acc);
             }
 
             let r0 = simdgroup_elem_load(acc, 0);
             let r1 = simdgroup_elem_load(acc, 1);
-            store(out[(tg_row * 64 + m_row + fm) * n + (tg_col * 64 + n_col + fn0)], r0.cast::<T>());
-            store(out[(tg_row * 64 + m_row + fm) * n + (tg_col * 64 + n_col + fn1)], r1.cast::<T>());
+            store(
+                out[(tg_row * 64 + m_row + fm) * n + (tg_col * 64 + n_col + fn0)],
+                r0.cast::<T>(),
+            );
+            store(
+                out[(tg_row * 64 + m_row + fm) * n + (tg_col * 64 + n_col + fn1)],
+                r1.cast::<T>(),
+            );
         }
     }
 }

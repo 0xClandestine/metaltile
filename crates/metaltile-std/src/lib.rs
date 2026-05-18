@@ -6,5 +6,7 @@
 pub mod bench_types;
 pub mod ffai;
 pub mod mlx;
+pub mod run_spec;
+pub mod runner;
 pub mod spec;
-pub mod term;
+pub mod stats;

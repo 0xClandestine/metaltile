@@ -8,11 +8,12 @@
 
 use std::process::Command;
 
+use metaltile_core::GpuFamily;
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
-    flag_val,
+    SnapArgs,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
@@ -29,34 +30,23 @@ struct Snapshot {
     results: Vec<Value>,
 }
 
-pub fn help() {
-    eprintln!("tile snap — Save current bench results as a regression baseline");
-    eprintln!();
-    eprintln!("USAGE:");
-    eprintln!("  tile snap [options]");
-    eprintln!();
-    eprintln!("OPTIONS:");
-    eprintln!(
-        "  --out, -o <file>    Write snapshot to <file> (default: .tile-snapshots/<sha>.json)"
-    );
-    eprintln!("  --from <file>       Promote an existing JSON file instead of re-running bench");
-    eprintln!("  --note <text>       Attach a note to the snapshot");
-    eprintln!("  --filter, -f <name> Only include kernels whose name contains <name>");
-}
+pub fn run(args: &SnapArgs) {
+    let out_path = args.out.as_deref();
+    let from_path = args.from.as_deref();
+    let note = &args.note;
+    let filter = &args.filter;
 
-pub fn run(args: &[String]) {
-    let out_path = flag_val(args, "--out").or_else(|| flag_val(args, "-o"));
-    let from_path = flag_val(args, "--from");
-    let note = flag_val(args, "--note");
-    let filter = flag_val(args, "--filter").or_else(|| flag_val(args, "-f"));
+    let out_path: String = match out_path {
+        Some(p) => p.to_string(),
+        None => {
+            let date = chrono_like_now();
+            format!(".tile-snapshots/{}.json", date)
+        },
+    };
 
-    // Default output path
-    let out_path = out_path.unwrap_or_else(|| {
-        let date = chrono_like_now();
-        format!(".tile-snapshots/{}.json", date)
-    });
+    let out_path = &out_path;
 
-    let results_json: Value = if let Some(ref from) = from_path {
+    let results_json: Value = if let Some(from) = from_path {
         // Load existing JSON
         let content = std::fs::read_to_string(from).unwrap_or_else(|e| {
             eprintln!(
@@ -123,7 +113,7 @@ pub fn run(args: &[String]) {
         results_json.get("results").and_then(|v| v.as_array()).cloned().unwrap_or_default();
 
     // Apply filter
-    if let Some(ref f) = filter {
+    if let Some(f) = filter {
         let f_lower = f.to_ascii_lowercase();
         results.retain(|r| {
             r.get("op")
@@ -144,14 +134,14 @@ pub fn run(args: &[String]) {
         });
 
     // GPU family heuristic
-    let gpu_family = gpu_family_from_name(&device).map(|s| s.to_string());
+    let gpu_family = GpuFamily::from_device_name(&device).code().map(|s| s.to_string());
 
     // Timestamp
     let timestamp = chrono_like_now();
     let result_count = results.len();
     let note_suffix = note.as_ref().map(|n| format!(", \"{n}\"")).unwrap_or_default();
 
-    let snapshot = Snapshot { device, gpu_family, git_sha, timestamp, note, results };
+    let snapshot = Snapshot { device, gpu_family, git_sha, timestamp, note: note.clone(), results };
 
     // Write snapshot
     let dir = std::path::Path::new(&out_path).parent().unwrap_or(".".as_ref());
@@ -161,7 +151,7 @@ pub fn run(args: &[String]) {
     });
 
     let json = serde_json::to_string_pretty(&snapshot).unwrap();
-    std::fs::write(&out_path, &json).unwrap_or_else(|e| {
+    std::fs::write(out_path, &json).unwrap_or_else(|e| {
         eprintln!("cannot write snapshot: {e}");
         std::process::exit(1);
     });
@@ -169,7 +159,7 @@ pub fn run(args: &[String]) {
     println!(
         "  {} {}  ({} results{})",
         paint_stdout("Saved →", Style::new().fg(Color::Cyan).bold()),
-        paint_stdout(&out_path, Style::new().fg(Color::BrightWhite)),
+        paint_stdout(out_path, Style::new().fg(Color::BrightWhite)),
         result_count,
         note_suffix,
     );
@@ -217,24 +207,6 @@ fn unix_secs_to_iso(secs: u64) -> String {
 }
 
 fn is_leap(y: i64) -> bool { (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0) }
-
-fn gpu_family_from_name(name: &str) -> Option<&'static str> {
-    if name.contains("M4") || name.contains("M3") {
-        Some("Apple9")
-    } else if name.contains("M2") {
-        Some("Apple8")
-    } else if name.contains("M1") {
-        Some("Apple7")
-    } else if name.contains("A18") || name.contains("A17") {
-        Some("Apple9")
-    } else if name.contains("A16") || name.contains("A15") {
-        Some("Apple8")
-    } else if name.contains("A14") {
-        Some("Apple7")
-    } else {
-        None
-    }
-}
 
 #[cfg(test)]
 mod tests {

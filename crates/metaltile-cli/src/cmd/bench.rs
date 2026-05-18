@@ -1,38 +1,29 @@
 //! `tile bench` — Benchmark suite: MetalTile vs MLX reference.
 
+use std::collections::HashMap;
+
+use metaltile_codegen::passes::{
+    self,
+    occupancy::{self, Bottleneck},
+};
 use metaltile_std::{
-    bench_types::{
-        CorrectnessStatus,
-        OpResult,
-        SuitePrinter,
-        set_result_reporter,
-        validate_results,
-    },
+    bench_types::{CorrectnessStatus, OpResult, set_result_reporter, validate_results},
+    run_spec::run as run_spec,
+    runner::GpuRunner,
     spec::BenchSpec,
 };
 
 use crate::{
-    flag_val,
+    BenchArgs,
     matches_filter,
-    run_spec::run as run_spec,
-    runner::GpuRunner,
+    suite_printer::{ProfileRow, SuitePrinter},
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
-pub fn help() {
-    eprintln!("tile bench — Benchmark suite: MetalTile vs MLX reference");
-    eprintln!();
-    eprintln!("USAGE:");
-    eprintln!("  tile bench [options]");
-    eprintln!();
-    eprintln!("OPTIONS:");
-    eprintln!("  --filter, -f <name>   Only run kernels whose name contains <name>");
-    eprintln!("  --json, -o <file>     Write results as JSON to <file>");
-}
-
-pub fn run(args: &[String]) {
-    let json_out = flag_val(args, "--json").or_else(|| flag_val(args, "-o"));
-    let filter = flag_val(args, "--filter").or_else(|| flag_val(args, "-f"));
+pub fn run(args: &BenchArgs) {
+    let json_out = &args.json;
+    let filter = &args.filter;
+    let verbose = args.verbose;
 
     let runner = match GpuRunner::new() {
         Ok(r) => r,
@@ -46,38 +37,26 @@ pub fn run(args: &[String]) {
         },
     };
 
-    // Banner
+    // Banner — single compact line.
     println!(
-        "{}",
-        paint_stdout(
-            "╔═══════════════════════════════════════════════════════════════════════════════╗",
-            Style::new().fg(Color::Cyan).bold(),
-        )
-    );
-    println!(
-        "{}",
-        paint_stdout(
-            "║  MetalTile Benchmark Suite                                                  ║",
-            Style::new().fg(Color::BrightWhite).bold(),
-        )
-    );
-    println!(
-        "{}",
-        paint_stdout(
-            "╚═══════════════════════════════════════════════════════════════════════════════╝",
-            Style::new().fg(Color::Cyan).bold(),
-        )
-    );
-    println!(
-        "\n{} {}",
-        paint_stdout("Device:", Style::new().fg(Color::BrightBlack).bold()),
-        paint_stdout(&runner.device_name, Style::new().fg(Color::BrightWhite).bold()),
+        "{} {}",
+        paint_stdout("tile bench", Style::new().fg(Color::Cyan).bold()),
+        paint_stdout(format!("· {}", runner.device_name), Style::new().fg(Color::BrightBlack)),
     );
 
     // Run all ops, optionally narrowed to a single substring filter.
     let mut all: Vec<OpResult> = Vec::new();
     let mut matched_filter = false;
+
+    // When -v, compute occupancy/register profile for each op+dtype (CPU-only, fast).
+    let profile_map: Option<HashMap<(String, String), ProfileRow>> =
+        if verbose > 0 { Some(compute_profiles(filter.as_deref())) } else { None };
+
     let mut printer = SuitePrinter::new(true);
+    printer.set_verbose(verbose);
+    if let Some(m) = &profile_map {
+        printer.set_profile_map(m.clone());
+    }
     {
         let mut report = |result: &OpResult| {
             if matches_filter(filter.as_deref(), result.op()) {
@@ -138,7 +117,7 @@ pub fn run(args: &[String]) {
     validate_results(&all).unwrap_or_else(|err| panic!("{err}"));
     printer.finish();
 
-    // Summary
+    // Counters.
     let impl_count = all.iter().filter(|r| r.mt_perf().is_some()).count();
     let nyi_count = all.iter().filter(|r| r.mt_perf().is_none()).count();
     let checked_count = all.iter().filter(|r| r.equiv().is_some()).count();
@@ -160,55 +139,61 @@ pub fn run(args: &[String]) {
         if valid.is_empty() { None } else { Some(valid.iter().sum::<f64>() / valid.len() as f64) }
     };
 
-    let mut summary = vec![
-        summary_item(
-            "Implemented",
-            &format!("{impl_count}/{}", all.len()),
-            Style::new().fg(Color::Green).bold(),
-        ),
-        summary_item("NYI", &nyi_count.to_string(), Style::new().fg(Color::Yellow).bold()),
-    ];
+    // Summary — compact single line (or two if unchecked).
+    let mut parts: Vec<String> = Vec::new();
+    let sep = format!("  {}  ", paint_stdout("·", Style::new().fg(Color::BrightBlack).dim()));
+
+    parts.push(format!(
+        "{} impl",
+        paint_stdout(impl_count.to_string(), Style::new().fg(Color::Green).bold()),
+    ));
+    if nyi_count > 0 {
+        parts.push(format!(
+            "{} NYI",
+            paint_stdout(nyi_count.to_string(), Style::new().fg(Color::Yellow).bold()),
+        ));
+    }
     if let Some(p) = avg_pct {
-        summary.push(summary_item("Avg MT%", &format!("{p:.0}%"), pct_style(p)));
+        parts.push(format!("avg {}", paint_stdout(format!("{p:.0}% MT"), pct_style(p)),));
     }
     if checked_count > 0 {
-        summary.push(summary_item(
-            "Correct",
-            &format!("{equiv_pass}/{checked_count}"),
-            if equiv_fail == 0 {
-                Style::new().fg(Color::Green).bold()
-            } else {
-                Style::new().fg(Color::Yellow).bold()
-            },
+        let corr_style = if equiv_fail == 0 {
+            Style::new().fg(Color::Green).bold()
+        } else {
+            Style::new().fg(Color::Yellow).bold()
+        };
+        parts.push(format!(
+            "{} correct",
+            paint_stdout(format!("{equiv_pass}/{checked_count}"), corr_style),
         ));
     }
     if !unchecked.is_empty() {
-        summary.push(summary_item(
-            "Unchecked",
-            &unchecked.len().to_string(),
-            Style::new().fg(Color::Yellow).bold(),
+        parts.push(format!(
+            "{} unchecked",
+            paint_stdout(unchecked.len().to_string(), Style::new().fg(Color::Yellow).bold()),
         ));
     }
-    let summary_sep = format!(" {} ", summary_sep());
-    println!("  {}", summary.join(&summary_sep));
+
+    println!("\n  {}", parts.join(&sep));
+
     if equiv_fail > 0 {
         println!(
             "  {} {}",
-            paint_stdout("Correctness failures:", Style::new().fg(Color::BrightBlack).bold()),
+            paint_stdout("Failures:", Style::new().fg(Color::Red).bold()),
             paint_stdout(equiv_fail.to_string(), Style::new().fg(Color::Red).bold()),
         );
     }
     if !unchecked.is_empty() {
         println!(
             "  {} {}",
-            paint_stdout("Unchecked MT results:", Style::new().fg(Color::BrightBlack).bold()),
+            paint_stdout("Unchecked:", Style::new().fg(Color::BrightBlack).bold()),
             paint_stdout(unchecked.join(", "), Style::new().fg(Color::Yellow).bold()),
         );
     }
     println!();
 
     if let Some(path) = json_out {
-        save_json(&runner.device_name, &all, &path);
+        save_json(&runner.device_name, &all, path);
     }
 
     if equiv_fail > 0 {
@@ -308,16 +293,6 @@ fn json_f(v: Option<f64>) -> String {
     v.map(|x| format!("{x:.3}")).unwrap_or_else(|| "null".into())
 }
 
-fn summary_item(label: &str, value: &str, value_style: Style) -> String {
-    format!(
-        "{} {}",
-        paint_stdout(label, Style::new().fg(Color::BrightBlack).bold()),
-        paint_stdout(value, value_style),
-    )
-}
-
-fn summary_sep() -> String { paint_stdout("|", Style::new().fg(Color::BrightBlack).dim()) }
-
 fn pct_style(pct: f64) -> Style {
     if pct >= 90.0 {
         Style::new().fg(Color::Green).bold()
@@ -326,6 +301,56 @@ fn pct_style(pct: f64) -> Style {
     } else {
         Style::new().fg(Color::Red).bold()
     }
+}
+
+// ── Profile helper for -v / -vv ───────────────────────────────────────
+
+/// Compile-time profile for each op (first dtypes entry, usually f32).
+/// Runs the standard optimization pipeline + liveness + occupancy estimate.
+fn compute_profiles(filter: Option<&str>) -> HashMap<(String, String), ProfileRow> {
+    // Key: (op_display, dtype_label), e.g. ("unary (acos)", "f32")
+    let mut map = HashMap::new();
+    let mut specs: Vec<&BenchSpec> = inventory::iter::<BenchSpec>.into_iter().collect();
+    specs.sort_unstable_by_key(|s| (s.op, s.subop));
+    for spec in specs {
+        if !matches_filter(filter, spec.op) {
+            continue;
+        }
+        let op_display = if spec.subop.is_empty() {
+            spec.op.to_string()
+        } else {
+            format!("{} ({})", spec.op, spec.subop)
+        };
+        for &dt in spec.dtypes {
+            let mut k = (spec.kernel_ir)(dt);
+            k.mode = spec.dispatch.default_mode(spec.shapes);
+            if passes::run_passes(&mut k, &passes::standard_pipeline()).is_err() {
+                continue;
+            }
+            let reg_est = passes::register_estimate::estimate_registers(&k);
+            let candidates: Vec<(u32, Option<u32>)> =
+                [64u32, 128, 256, 512, 1024].iter().map(|&s| (s, None)).collect();
+            let (occ_pct, bottleneck) =
+                if let Some((_tg, est)) = occupancy::best_threadgroup_size(&k, &candidates) {
+                    (est.occupancy_pct, est.bottleneck)
+                } else {
+                    continue;
+                };
+            let bottleneck_label = match bottleneck {
+                Bottleneck::ThreadLimited => "thread-limited",
+                Bottleneck::RegisterLimited => "register-limited",
+                Bottleneck::MemoryLimited => "tgmem-limited",
+                _ => "unknown",
+            };
+            let dtype_label = metaltile_std::bench_types::dtype_label(dt).to_string();
+            map.insert((op_display.clone(), dtype_label), ProfileRow {
+                occ_pct,
+                regs_per_thread: reg_est.regs_per_thread,
+                bottleneck: bottleneck_label,
+            });
+        }
+    }
+    map
 }
 
 #[cfg(test)]
@@ -345,17 +370,15 @@ mod tests {
     #[test]
     fn summary_counts_per_category() {
         let b = OpBench::new("op_a", "GB/s");
-        let implemented_correct =
-            b.result("shape_a", Some(100.0), Some(95.0), Some(pass_equiv()));
-        let implemented_wrong =
-            b.result("shape_b", Some(100.0), Some(40.0), Some(fail_equiv()));
+        let implemented_correct = b.result("shape_a", Some(100.0), Some(95.0), Some(pass_equiv()));
+        let implemented_wrong = b.result("shape_b", Some(100.0), Some(40.0), Some(fail_equiv()));
         let nyi = b.result("shape_c", Some(100.0), None, None);
 
         let s = summarize(&[implemented_correct, implemented_wrong, nyi]);
         assert_eq!(s.total, 3);
-        assert_eq!(s.implemented, 2);  // _correct + _wrong
-        assert_eq!(s.correct, 1);      // only _correct
-        assert_eq!(s.unchecked, 0);    // both implemented rows had equiv
+        assert_eq!(s.implemented, 2); // _correct + _wrong
+        assert_eq!(s.correct, 1); // only _correct
+        assert_eq!(s.unchecked, 0); // both implemented rows had equiv
     }
 
     #[test]
@@ -393,8 +416,14 @@ mod tests {
     #[test]
     fn row_without_subop_matches_legacy_schema() {
         // Pre-existing consumers rely on this exact key set + ordering.
-        let row =
-            format_result_row("rms_norm", None, "B=1024 N=4096 f32", "GB/s", Some(323.9), Some(325.6));
+        let row = format_result_row(
+            "rms_norm",
+            None,
+            "B=1024 N=4096 f32",
+            "GB/s",
+            Some(323.9),
+            Some(325.6),
+        );
         assert_eq!(
             row,
             r#"{"op":"rms_norm","shape":"B=1024 N=4096 f32","metric":"GB/s","ref":323.900,"mt":325.600}"#,
@@ -428,8 +457,7 @@ mod tests {
         // Shape strings sometimes embed `=`, spaces, and parens; ensure they
         // round-trip via Debug-quoting so the row is valid JSON.
         let row = format_result_row("foo", None, "k=2 (warm)", "GB/s", Some(1.0), Some(2.0));
-        let parsed: serde_json::Value =
-            serde_json::from_str(&row).expect("row must be valid JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&row).expect("row must be valid JSON");
         assert_eq!(parsed["shape"], "k=2 (warm)");
     }
 }

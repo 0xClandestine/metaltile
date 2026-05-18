@@ -180,9 +180,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "expected known dimension")]
-    fn dim_as_known_panics_on_dynamic() {
-        Dim::Any.as_known();
-    }
+    fn dim_as_known_panics_on_dynamic() { Dim::Any.as_known(); }
 
     #[test]
     fn dim_from_conversions() {
@@ -208,7 +206,10 @@ mod tests {
         assert_eq!(format!("{}", DimExpr::Const(7)), "7");
         assert_eq!(format!("{}", DimExpr::Var(m.clone())), "M");
         assert_eq!(
-            format!("{}", DimExpr::Add(Box::new(DimExpr::Const(1)), Box::new(DimExpr::Var(m.clone())))),
+            format!(
+                "{}",
+                DimExpr::Add(Box::new(DimExpr::Const(1)), Box::new(DimExpr::Var(m.clone())))
+            ),
             "(1 + M)",
         );
         assert_eq!(format!("{}", DimExpr::Range(m, 0, 16)), "M[0..16)");

@@ -289,6 +289,32 @@ pub enum BenchDispatch {
     },
 }
 
+impl BenchDispatch {
+    /// The default [`KernelMode`] inferred from the dispatch variant.
+    ///
+    /// For `Generic` dispatch, returns the mode of the first shape
+    /// (or `Elementwise` if there are no shapes). All other variants
+    /// map to a fixed mode.
+    pub fn default_mode(&self, shapes: &[ShapeSpec]) -> KernelMode {
+        match self {
+            BenchDispatch::Generic =>
+                shapes.first().map(|s| s.mode).unwrap_or(KernelMode::Elementwise),
+            BenchDispatch::Sort { .. }
+            | BenchDispatch::Scan { .. }
+            | BenchDispatch::ArgReduce { .. }
+            | BenchDispatch::QuantizedMatVec { .. }
+            | BenchDispatch::Attention { .. }
+            | BenchDispatch::AffineQuantize { .. }
+            | BenchDispatch::SdpaVector { .. } => KernelMode::Reduction,
+            BenchDispatch::Random { .. }
+            | BenchDispatch::FpQuantized { .. }
+            | BenchDispatch::AffineDequantize { .. } => KernelMode::Elementwise,
+            BenchDispatch::Rope { .. } | BenchDispatch::StridedCopy { .. } => KernelMode::Grid3D,
+            BenchDispatch::SteelGemm { .. } => KernelMode::SimdGroup2D,
+        }
+    }
+}
+
 // ── BenchSpec ───────────────────────────────────────────────────────────
 
 pub struct BenchSpec {
@@ -334,4 +360,8 @@ pub fn bytes_mat_vec_masked(n: usize, b: usize, _reads: usize, out: usize, eb: u
 /// Select: cond is always 1-byte bool (matching MLX v_Select{T} interface).
 pub fn bytes_select(n: usize, _b: usize, _reads: usize, _out: usize, eb: usize) -> usize {
     n + 3 * n * eb // cond(1 byte) + on_true(eb) + on_false(eb) + out(eb)
+}
+
+pub fn effective_mode(spec: &BenchSpec) -> metaltile_core::ir::KernelMode {
+    spec.kernel_mode.unwrap_or_else(|| spec.dispatch.default_mode(spec.shapes))
 }
