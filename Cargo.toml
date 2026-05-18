@@ -28,6 +28,7 @@ metaltile-runtime = { path = "crates/metaltile-runtime" }
 metaltile-std = { path = "crates/metaltile-std" }
 
 # External
+clap = { version = "4.6", features = ["derive"] }
 syn = { version = "2", features = ["full", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"

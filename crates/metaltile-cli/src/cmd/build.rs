@@ -32,71 +32,19 @@ use metaltile_core::ir::{Kernel, KernelMode};
 use metaltile_std::{bench_types::DType, spec::BenchSpec};
 
 use crate::{
-    flag_val,
+    BuildArgs,
     kernel_utils::{dtype_label, effective_mode},
     matches_filter,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
-pub fn help() {
-    eprintln!("tile build — Compile all registered kernels to MSL and report errors");
-    eprintln!();
-    eprintln!("USAGE:");
-    eprintln!("  tile build [options]");
-    eprintln!();
-    eprintln!("OPTIONS:");
-    eprintln!("  --filter, -f <name>     Only build kernels whose name contains <name>");
-    eprintln!("  --dtypes <f32,f16,bf16> Comma-separated list of dtypes to build");
-    eprintln!("  -v                      Print generated MSL for each kernel");
-    eprintln!("  --emit <kinds>          Comma-separated: msl,metallib,swift,ir,all");
-    eprintln!("  --out, -o <dir>         Output directory (required when --emit is set)");
-    eprintln!("  --sdk <sdk>             xcrun SDK (default: macosx)");
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum EmitKind {
-    Msl,
-    Metallib,
-    Swift,
-    Ir,
-}
-
-fn parse_emit_list(raw: &str) -> Result<BTreeSet<EmitKind>, String> {
-    let mut kinds = BTreeSet::new();
-    for tok in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        match tok {
-            "msl" => {
-                kinds.insert(EmitKind::Msl);
-            },
-            "metallib" => {
-                kinds.insert(EmitKind::Metallib);
-                kinds.insert(EmitKind::Msl); // metallib needs the .metal source files on disk
-            },
-            "swift" => {
-                kinds.insert(EmitKind::Swift);
-            },
-            "ir" => {
-                kinds.insert(EmitKind::Ir);
-            },
-            "all" => {
-                kinds.insert(EmitKind::Msl);
-                kinds.insert(EmitKind::Metallib);
-                kinds.insert(EmitKind::Swift);
-                kinds.insert(EmitKind::Ir);
-            },
-            other => return Err(format!("unknown --emit kind '{other}'")),
-        }
-    }
-    Ok(kinds)
-}
-
-pub fn run(args: &[String]) {
-    let filter = flag_val(args, "--filter").or_else(|| flag_val(args, "-f"));
-    let dtypes_arg = flag_val(args, "--dtypes");
-    let verbose = args.iter().any(|a| a == "-v" || a == "-vv");
-    let emit_arg = flag_val(args, "--emit");
-    let out_arg = flag_val(args, "--out").or_else(|| flag_val(args, "-o"));
-    let sdk = flag_val(args, "--sdk").unwrap_or_else(|| "macosx".to_string());
+pub fn run(args: &BuildArgs) {
+    let filter = &args.filter;
+    let dtypes_arg = &args.dtypes;
+    let verbose = args.verbose > 0;
+    let emit_arg = &args.emit;
+    let out_arg = &args.out;
+    let sdk = &args.sdk;
 
     let emit_kinds: BTreeSet<EmitKind> = match emit_arg.as_deref() {
         None => BTreeSet::new(),
@@ -276,7 +224,7 @@ pub fn run(args: &[String]) {
 
     // ─── Emit pass (manifest, Swift wrappers, metallib) ─────────────────
     if let Some(out) = &out_root {
-        emit_artifacts(out, &emit_kinds, &emitted_kernels, &emitted_paths, &sdk);
+        emit_artifacts(out, &emit_kinds, &emitted_kernels, &emitted_paths, sdk);
     }
 
     // Summary
@@ -295,6 +243,45 @@ pub fn run(args: &[String]) {
     } else {
         eprintln!("  {}", paint_stdout(format!("{ok} ok"), Style::new().fg(Color::Green).bold()),);
     }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum EmitKind {
+    Msl,
+    Metallib,
+    Swift,
+    Ir,
+}
+
+fn parse_emit_list(raw: &str) -> Result<BTreeSet<EmitKind>, String> {
+    let mut kinds = BTreeSet::new();
+    for tok in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        match tok {
+            "msl" => {
+                kinds.insert(EmitKind::Msl);
+            },
+            "metallib" => {
+                kinds.insert(EmitKind::Metallib);
+                kinds.insert(EmitKind::Msl); // metallib needs the .metal source files on disk
+            },
+            "swift" => {
+                kinds.insert(EmitKind::Swift);
+            },
+            "ir" => {
+                kinds.insert(EmitKind::Ir);
+            },
+            "all" => {
+                kinds.insert(EmitKind::Msl);
+                kinds.insert(EmitKind::Metallib);
+                kinds.insert(EmitKind::Swift);
+                kinds.insert(EmitKind::Ir);
+            },
+            other => return Err(format!("unknown --emit kind '{other}'")),
+        }
+    }
+    Ok(kinds)
 }
 
 /// Build the per-dtype monomorphized kernel symbol name.

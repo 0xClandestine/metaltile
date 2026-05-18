@@ -6,6 +6,8 @@
 //!   inspect   Print IR and/or MSL for one kernel
 //!   profile   Estimate GPU occupancy and register pressure
 //!   device    Show GPU device info and supported features
+//!   snap      Save bench results as a regression baseline
+//!   diff      Compare bench results to a saved baseline
 
 mod cmd;
 pub mod kernel_utils;
@@ -15,146 +17,179 @@ pub mod runner;
 pub mod stats;
 pub mod term;
 
-use crate::term::{Color, Style, paint_stderr, paint_stdout};
+use clap::Parser;
+
+/// MetalTile CLI — benchmark and inspect GPU kernels on Apple Silicon.
+#[derive(Parser)]
+#[command(name = "tile", version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Benchmark suite: MetalTile vs MLX reference
+    Bench(BenchArgs),
+    /// Compile all kernels to MSL and report errors
+    Build(BuildArgs),
+    /// Print IR and/or MSL for registered kernels
+    Inspect(InspectArgs),
+    /// Estimate GPU occupancy and register pressure
+    Profile(ProfileArgs),
+    /// Show GPU device info and supported feature flags
+    Device(DeviceArgs),
+    /// Save bench results as a regression baseline
+    Snap(SnapArgs),
+    /// Compare bench results against a saved baseline
+    Diff(DiffArgs),
+}
+
+// ── Bench ────────────────────────────────────────────────────────────────
+
+#[derive(clap::Args)]
+struct BenchArgs {
+    /// Only run kernels whose name contains this text
+    #[arg(long = "filter", short = 'f')]
+    filter: Option<String>,
+    /// Write results as JSON to this file
+    #[arg(long = "json", short = 'o')]
+    json: Option<String>,
+}
+
+// ── Build ────────────────────────────────────────────────────────────────
+
+#[derive(clap::Args)]
+struct BuildArgs {
+    /// Only build kernels whose name contains this text
+    #[arg(long = "filter", short = 'f')]
+    filter: Option<String>,
+    /// Comma-separated list of dtypes to build (f32,f16,bf16)
+    #[arg(long = "dtypes")]
+    dtypes: Option<String>,
+    /// Print generated MSL for each kernel (-v for verbose)
+    #[arg(short = 'v', action = clap::ArgAction::Count)]
+    verbose: u8,
+    /// Comma-separated: msl,metallib,swift,ir,all
+    #[arg(long = "emit")]
+    emit: Option<String>,
+    /// Output directory (required when --emit is set)
+    #[arg(long = "out", short = 'o')]
+    out: Option<String>,
+    /// xcrun SDK (default: macosx)
+    #[arg(long = "sdk", default_value = "macosx")]
+    sdk: String,
+}
+
+// ── Inspect ──────────────────────────────────────────────────────────────
+
+#[derive(clap::Args)]
+struct InspectArgs {
+    /// Kernel name to inspect (list all if omitted)
+    kernel: Option<String>,
+    /// Filter kernels by name substring
+    #[arg(long = "filter")]
+    filter: Option<String>,
+    /// Process all kernels
+    #[arg(long = "all")]
+    all: bool,
+    /// Print raw IR before any passes
+    #[arg(long = "ir")]
+    ir: bool,
+    /// Print per-pass op-count reduction table
+    #[arg(long = "stats")]
+    stats: bool,
+    /// Print IR after a specific pass name (or 'all' for every stage)
+    #[arg(long = "pass")]
+    pass: Option<String>,
+    /// Dtype override (f32, f16, bf16, i32, u32)
+    #[arg(long = "dtype")]
+    dtype: Option<String>,
+    /// Write output files to <path> instead of stdout
+    #[arg(long = "dir", short = 'o')]
+    dir: Option<String>,
+}
+
+// ── Profile ──────────────────────────────────────────────────────────────
+
+#[derive(clap::Args)]
+struct ProfileArgs {
+    /// Kernel name to profile in detail
+    kernel: Option<String>,
+    /// Filter kernels by name substring
+    #[arg(long = "filter")]
+    filter: Option<String>,
+    /// Show occupancy at every threadgroup size
+    #[arg(long = "sweep")]
+    sweep: bool,
+}
+
+// ── Device ───────────────────────────────────────────────────────────────
+
+#[derive(clap::Args)]
+struct DeviceArgs {
+    /// Output as JSON
+    #[arg(long = "json")]
+    json: bool,
+}
+
+// ── Snap ─────────────────────────────────────────────────────────────────
+
+#[derive(clap::Args)]
+struct SnapArgs {
+    /// Write snapshot to <file> (default: .tile-snapshots/<sha>.json)
+    #[arg(long = "out", short = 'o')]
+    out: Option<String>,
+    /// Promote an existing JSON file instead of re-running bench
+    #[arg(long = "from")]
+    from: Option<String>,
+    /// Attach a note to the snapshot
+    #[arg(long = "note")]
+    note: Option<String>,
+    /// Only include kernels whose name contains this text
+    #[arg(long = "filter", short = 'f')]
+    filter: Option<String>,
+}
+
+// ── Diff ─────────────────────────────────────────────────────────────────
+
+#[derive(clap::Args)]
+struct DiffArgs {
+    /// Baseline JSON file
+    baseline: String,
+    /// Current JSON file (runs bench if omitted)
+    current: Option<String>,
+    /// Only show kernels whose name contains this text
+    #[arg(long = "filter", short = 'f')]
+    filter: Option<String>,
+    /// Highlight regressions larger than this percentage (default: 5)
+    #[arg(long = "threshold", default_value = "5.0")]
+    threshold: f64,
+    /// Sort by: name, delta, pct (default: name)
+    #[arg(long = "sort", default_value = "name")]
+    sort: String,
+    /// Only show regressions
+    #[arg(long = "only-regressions")]
+    only_regressions: bool,
+    /// Only show improvements
+    #[arg(long = "only-improvements")]
+    only_improvements: bool,
+}
+
+// ── Dispatch ─────────────────────────────────────────────────────────────
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        print_usage_and_exit(&args[0]);
+    let cli = Cli::parse();
+
+    match cli.command {
+        Command::Bench(args) => cmd::bench::run(&args),
+        Command::Build(args) => cmd::build::run(&args),
+        Command::Inspect(args) => cmd::inspect::run(&args),
+        Command::Profile(args) => cmd::profile::run(&args),
+        Command::Device(args) => cmd::device::run(&args),
+        Command::Snap(args) => cmd::snap::run(&args),
+        Command::Diff(args) => cmd::diff::run(&args),
     }
-
-    let subcommand = &args[1];
-    let rest = &args[2..];
-
-    let wants_help = rest.iter().any(|a| a == "--help" || a == "-h");
-
-    match subcommand.as_str() {
-        "--help" | "-h" => print_usage_and_exit(&args[0]),
-        "bench" if wants_help => cmd::bench::help(),
-        "bench" => cmd::bench::run(rest),
-        "build" if wants_help => cmd::build::help(),
-        "build" => cmd::build::run(rest),
-        "inspect" if wants_help => cmd::inspect::help(),
-        "inspect" => cmd::inspect::run(rest),
-        "device" if wants_help => cmd::device::help(),
-        "device" => cmd::device::run(rest),
-        "profile" if wants_help => cmd::profile::help(),
-        "profile" => cmd::profile::run(rest),
-        "snap" if wants_help => cmd::snap::help(),
-        "snap" => cmd::snap::run(rest),
-        "diff" if wants_help => cmd::diff::help(),
-        "diff" => cmd::diff::run(rest),
-        _ => {
-            eprintln!(
-                "{} {}",
-                paint_stderr("error:", Style::new().fg(Color::Red).bold()),
-                paint_stderr(
-                    format!("unknown subcommand '{}'", subcommand),
-                    Style::new().fg(Color::BrightWhite),
-                ),
-            );
-            eprintln!();
-            print_usage_and_exit(&args[0]);
-            std::process::exit(1);
-        },
-    }
-}
-
-fn print_usage_and_exit(program: &str) {
-    let name = std::path::Path::new(program)
-        .file_name()
-        .map(|s| s.to_string_lossy())
-        .unwrap_or_else(|| "tile".into());
-    eprintln!(
-        "{}",
-        paint_stderr(
-            "MetalTile CLI — benchmark and inspect GPU kernels",
-            Style::new().fg(Color::BrightWhite).bold(),
-        ),
-    );
-    eprintln!();
-    eprintln!(
-        "{}",
-        paint_stderr(
-            format!("Usage: {name} <subcommand> [options]"),
-            Style::new().fg(Color::BrightWhite),
-        ),
-    );
-    eprintln!();
-    eprintln!("Subcommands:");
-    eprintln!(
-        "  {}  {}",
-        paint_stdout("bench", Style::new().fg(Color::Cyan).bold()),
-        paint_stdout(
-            "Benchmark suite: MetalTile vs MLX reference",
-            Style::new().fg(Color::BrightWhite),
-        ),
-    );
-    eprintln!(
-        "  {}  {}",
-        paint_stdout("build", Style::new().fg(Color::Cyan).bold()),
-        paint_stdout(
-            "Compile all kernels to MSL and report errors",
-            Style::new().fg(Color::BrightWhite),
-        ),
-    );
-    eprintln!(
-        "  {}  {}",
-        paint_stdout("inspect", Style::new().fg(Color::Cyan).bold()),
-        paint_stdout("Print IR and/or MSL for one kernel", Style::new().fg(Color::BrightWhite),),
-    );
-    eprintln!(
-        "  {}  {}",
-        paint_stdout("profile", Style::new().fg(Color::Cyan).bold()),
-        paint_stdout(
-            "Estimate GPU occupancy and register pressure",
-            Style::new().fg(Color::BrightWhite),
-        ),
-    );
-    eprintln!(
-        "  {}  {}",
-        paint_stdout("device", Style::new().fg(Color::Cyan).bold()),
-        paint_stdout(
-            "Show GPU device info and supported features",
-            Style::new().fg(Color::BrightWhite),
-        ),
-    );
-    eprintln!(
-        "  {}  {}",
-        paint_stdout("snap", Style::new().fg(Color::Cyan).bold()),
-        paint_stdout(
-            "Save bench results as a regression baseline",
-            Style::new().fg(Color::BrightWhite),
-        ),
-    );
-    eprintln!(
-        "  {}  {}",
-        paint_stdout("diff", Style::new().fg(Color::Cyan).bold()),
-        paint_stdout(
-            "Compare bench results to a saved baseline",
-            Style::new().fg(Color::BrightWhite),
-        ),
-    );
-    eprintln!();
-    eprintln!(
-        "Run '{}' for subcommand-specific options.",
-        paint_stdout(format!("{name} <sub> --help"), Style::new().fg(Color::BrightBlack)),
-    );
-
-    std::process::exit(1);
-}
-
-/// Parse a `--flag <value>` pair from args.
-pub(crate) fn flag_val(args: &[String], name: &str) -> Option<String> {
-    args.windows(2).find(|w| w[0] == name).map(|w| w[1].clone())
-}
-
-/// Check if `--flag` is present (boolean flag).
-pub(crate) fn flag_present(args: &[String], name: &str) -> bool { args.iter().any(|a| a == name) }
-
-/// Return the first positional argument that doesn't start with `-`.
-pub(crate) fn positional(args: &[String]) -> Option<String> {
-    args.iter().find(|a| !a.starts_with('-')).cloned()
 }
 
 /// Filter helper: case-insensitive substring match.

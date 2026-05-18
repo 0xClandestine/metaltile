@@ -20,42 +20,21 @@ use metaltile_core::ir::KernelMode;
 use metaltile_std::{bench_types::DType, spec::BenchSpec};
 
 use crate::{
-    flag_present,
-    flag_val,
+    InspectArgs,
     kernel_utils::{dtype_label, effective_mode},
     matches_filter,
-    positional,
     term::{Color, Style, paint_stdout},
 };
 
-pub fn help() {
-    eprintln!("tile inspect — Print IR and/or MSL for registered kernels");
-    eprintln!();
-    eprintln!("USAGE:");
-    eprintln!("  tile inspect                    List all registered kernels");
-    eprintln!("  tile inspect <kernel>           Print final MSL (default)");
-    eprintln!("  tile inspect <kernel> --ir      Print raw IR before any passes");
-    eprintln!("  tile inspect <kernel> --stats   Print per-pass op-count table");
-    eprintln!("  tile inspect <kernel> --pass <name|all>  Print IR after a specific pass");
-    eprintln!("  tile inspect --all -o <dir>     Dump all kernels to .metal files");
-    eprintln!();
-    eprintln!("OPTIONS:");
-    eprintln!("  --ir               Print raw IR");
-    eprintln!("  --stats            Print per-pass op-count reduction table");
-    eprintln!("  --pass <name>      Print IR after named pass; use 'all' for every stage");
-    eprintln!("  --all              Process all kernels");
-    eprintln!("  --dir, -o <path>   Write output files to <path> instead of stdout");
-    eprintln!("  --filter <name>    Filter kernels by name substring");
-}
-
-pub fn run(args: &[String]) {
-    let dir = flag_val(args, "--dir").or_else(|| flag_val(args, "-o"));
-    let filter = flag_val(args, "--filter").or_else(|| positional(args));
-    let all_flag = flag_present(args, "--all");
-    let ir_flag = flag_present(args, "--ir");
-    let stats_flag = flag_present(args, "--stats");
-    let pass_arg = flag_val(args, "--pass");
-    let dtype_override: Option<DType> = flag_val(args, "--dtype").and_then(|s| match s.as_str() {
+pub fn run(args: &InspectArgs) {
+    let dir = &args.dir;
+    // filter is either --filter flag or the positional kernel name
+    let filter = args.filter.as_ref().or(args.kernel.as_ref());
+    let all_flag = args.all;
+    let ir_flag = args.ir;
+    let stats_flag = args.stats;
+    let pass_arg = &args.pass;
+    let dtype_override: Option<DType> = args.dtype.as_deref().and_then(|s| match s {
         "f32" => Some(DType::F32),
         "f16" => Some(DType::F16),
         "bf16" => Some(DType::BF16),
@@ -89,7 +68,7 @@ pub fn run(args: &[String]) {
             let dt = dtypes.first().copied().unwrap_or(DType::F32);
             if ir_flag {
                 let k = (spec.kernel_ir)(dt);
-                if let Some(ref d) = dir {
+                if let Some(d) = dir {
                     let path = format!("{}/{}.ir", d, name);
                     std::fs::create_dir_all(d).expect("failed to create output directory");
                     std::fs::write(&path, format!("{k}")).expect("write failed");
@@ -99,7 +78,7 @@ pub fn run(args: &[String]) {
                 }
             } else {
                 let msl = generate_msl(spec, dtypes);
-                if let Some(ref d) = dir {
+                if let Some(d) = dir {
                     let path = format!("{}/{}.metal", d, name);
                     std::fs::create_dir_all(d).expect("failed to create output directory");
                     std::fs::write(&path, &msl).expect("write failed");
@@ -117,7 +96,7 @@ pub fn run(args: &[String]) {
     }
 
     // No filter: list all kernels
-    let Some(filter) = &filter else {
+    let Some(filter) = filter else {
         println!(
             "{}",
             paint_stdout("Kernels registered:", Style::new().fg(Color::BrightBlack).bold()),
@@ -176,7 +155,7 @@ pub fn run(args: &[String]) {
         if ir_flag {
             // Print raw IR via Display impl
             let k = (spec.kernel_ir)(dt);
-            if let Some(ref d) = dir {
+            if let Some(d) = dir {
                 let path = format!("{}/{}.ir", d, name);
                 std::fs::create_dir_all(d).expect("failed to create output directory");
                 std::fs::write(&path, format!("{k}")).expect("write failed");
@@ -192,7 +171,7 @@ pub fn run(args: &[String]) {
                 Ok((_, stats)) => print_stats_table(&stats),
                 Err(e) => eprintln!("error: {e}"),
             }
-        } else if let Some(pass) = &pass_arg {
+        } else if let Some(pass) = pass_arg {
             // --pass flag: print IR after a specific pass (or 'all' for every stage)
             let mut k = (spec.kernel_ir)(dt);
             let mode = effective_mode(spec);
@@ -225,7 +204,7 @@ pub fn run(args: &[String]) {
             let eff_dt =
                 dtype_override.unwrap_or_else(|| dtypes.first().copied().unwrap_or(DType::F32));
             let msl = generate_msl_dt(spec, eff_dt);
-            if let Some(ref d) = dir {
+            if let Some(d) = dir {
                 let path = format!("{}/{}.metal", d, name);
                 std::fs::create_dir_all(d).expect("failed to create output directory");
                 std::fs::write(&path, &msl).expect("write failed");

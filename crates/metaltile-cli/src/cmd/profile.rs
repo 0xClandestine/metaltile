@@ -19,33 +19,18 @@ use metaltile_codegen::passes::{
 use metaltile_std::{bench_types::DType, spec::BenchSpec};
 
 use crate::{
-    flag_present,
-    flag_val,
+    ProfileArgs,
     kernel_utils::first_mode,
     matches_filter,
-    positional,
     term::{Color, Style, paint_stdout},
 };
-
-pub fn help() {
-    eprintln!("tile profile — Estimate GPU occupancy and register pressure");
-    eprintln!();
-    eprintln!("USAGE:");
-    eprintln!("  tile profile                    Profile all kernels, compact table");
-    eprintln!("  tile profile <kernel>           Profile one kernel, verbose output");
-    eprintln!("  tile profile <kernel> --sweep   Show full per-threadgroup-size sweep");
-    eprintln!();
-    eprintln!("OPTIONS:");
-    eprintln!("  --filter <name>   Filter kernels by name substring");
-    eprintln!("  --sweep           Show occupancy at every threadgroup size");
-}
 
 /// Threadgroup sizes to sweep (total threads).
 const TG_SWEEP: &[u32] = &[64, 128, 256, 512, 1024];
 
-pub fn run(args: &[String]) {
-    let filter = flag_val(args, "--filter").or_else(|| positional(args));
-    let sweep_flag = flag_present(args, "--sweep");
+pub fn run(args: &ProfileArgs) {
+    let filter = args.filter.as_ref().or(args.kernel.as_ref());
+    let sweep_flag = args.sweep;
 
     // Collect all specs.
     let mut kernels: BTreeMap<&str, (&BenchSpec, Vec<DType>)> = BTreeMap::new();
@@ -67,7 +52,7 @@ pub fn run(args: &[String]) {
     sorted.sort_unstable_by_key(|(name, _)| *name);
 
     // Apply filter if given.
-    let matched: Vec<_> = if let Some(ref f) = filter {
+    let matched: Vec<_> = if let Some(f) = filter {
         sorted.iter().filter(|(name, _)| matches_filter(Some(f), name)).collect()
     } else {
         sorted.iter().collect()
@@ -78,7 +63,7 @@ pub fn run(args: &[String]) {
             "{} {}",
             paint_stdout("error:", Style::new().fg(Color::Red).bold()),
             paint_stdout(
-                format!("no kernel matched '{}'", filter.as_deref().unwrap_or("")),
+                format!("no kernel matched '{}'", filter.map_or("", |v| v)),
                 Style::new().fg(Color::BrightWhite),
             ),
         );

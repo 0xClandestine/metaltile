@@ -12,27 +12,16 @@ use metaltile_std::{
 };
 
 use crate::{
-    flag_val,
+    BenchArgs,
     matches_filter,
     run_spec::run as run_spec,
     runner::GpuRunner,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
-pub fn help() {
-    eprintln!("tile bench — Benchmark suite: MetalTile vs MLX reference");
-    eprintln!();
-    eprintln!("USAGE:");
-    eprintln!("  tile bench [options]");
-    eprintln!();
-    eprintln!("OPTIONS:");
-    eprintln!("  --filter, -f <name>   Only run kernels whose name contains <name>");
-    eprintln!("  --json, -o <file>     Write results as JSON to <file>");
-}
-
-pub fn run(args: &[String]) {
-    let json_out = flag_val(args, "--json").or_else(|| flag_val(args, "-o"));
-    let filter = flag_val(args, "--filter").or_else(|| flag_val(args, "-f"));
+pub fn run(args: &BenchArgs) {
+    let json_out = &args.json;
+    let filter = &args.filter;
 
     let runner = match GpuRunner::new() {
         Ok(r) => r,
@@ -208,7 +197,7 @@ pub fn run(args: &[String]) {
     println!();
 
     if let Some(path) = json_out {
-        save_json(&runner.device_name, &all, &path);
+        save_json(&runner.device_name, &all, path);
     }
 
     if equiv_fail > 0 {

@@ -1,23 +1,13 @@
 //! `tile device` — Show GPU device info and supported feature flags.
 
 use crate::{
-    flag_present,
+    DeviceArgs,
     runner::GpuRunner,
     term::{Color, Style, paint_stdout},
 };
 
-pub fn help() {
-    eprintln!("tile device — Show GPU device info and supported feature flags");
-    eprintln!();
-    eprintln!("USAGE:");
-    eprintln!("  tile device [options]");
-    eprintln!();
-    eprintln!("OPTIONS:");
-    eprintln!("  --json   Output as JSON");
-}
-
-pub fn run(args: &[String]) {
-    let json_out = flag_present(args, "--json");
+pub fn run(args: &DeviceArgs) {
+    let json_out = args.json;
 
     let runner = match GpuRunner::new() {
         Ok(r) => r,
