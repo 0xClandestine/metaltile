@@ -86,15 +86,34 @@ pub struct ResidentBuffer {
 type BufRc =
     std::rc::Rc<objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>>>;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn fnv1a_extend(h: &mut u64, bytes: &[u8]) {
     for &b in bytes {
         *h ^= b as u64;
         *h = h.wrapping_mul(0x0100_0000_01b3);
     }
+}
+
+/// PSO / MSL cache key for a dispatch_chain pass: kernel name +
+/// first-param dtype size + sorted fn_consts. The MSL source is fully
+/// determined by this tuple, so hashing the source string per pass is
+/// pure waste (5–50 KB → ~10–30 µs vs ~16 ns for this key).
+#[cfg(any(target_os = "macos", test))]
+fn pso_cache_key(kernel: &Kernel, fn_consts: &BTreeMap<String, u32>) -> u64 {
+    let mut h = FNV_OFFSET;
+    fnv1a_extend(&mut h, kernel.name.as_bytes());
+    fnv1a_extend(&mut h, b":");
+    if let Some(p) = kernel.params.first() {
+        fnv1a_extend(&mut h, &(p.dtype.size_bytes() as u64).to_le_bytes());
+    }
+    for (n, v) in fn_consts {
+        fnv1a_extend(&mut h, n.as_bytes());
+        fnv1a_extend(&mut h, &v.to_le_bytes());
+    }
+    h
 }
 #[cfg(target_os = "macos")]
 type PoolKey = (usize, u64);
@@ -801,17 +820,7 @@ impl Context {
         static MSL_CACHE: OnceLock<Mutex<FxHashMap<u64, String>>> = OnceLock::new();
         let msl_cache = MSL_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
         for spec in specs {
-            let mut h = FNV_OFFSET;
-            fnv1a_extend(&mut h, spec.kernel.name.as_bytes());
-            fnv1a_extend(&mut h, b":");
-            // First tensor param's dtype distinguishes f32/f16/bf16 specializations.
-            if let Some(p) = spec.kernel.params.first() {
-                fnv1a_extend(&mut h, &(p.dtype.size_bytes() as u64).to_le_bytes());
-            }
-            for (n, v) in spec.fn_consts {
-                fnv1a_extend(&mut h, n.as_bytes());
-                fnv1a_extend(&mut h, &v.to_le_bytes());
-            }
+            let h = pso_cache_key(spec.kernel, spec.fn_consts);
             // Drop the read guard BEFORE the match — parking_lot::Mutex isn't
             // reentrant, and temporaries in a match scrutinee live until the
             // end of the match body (RFC 66), so writing back inside None
@@ -845,22 +854,7 @@ impl Context {
 
         let mut pipes: Vec<Retained<Pso>> = Vec::with_capacity(specs.len());
         for (spec, msl) in specs.iter().zip(msl_sources.iter()) {
-            // Mirror MSL_CACHE key shape: (name, first-param dtype, fn_consts).
-            // MSL source is deterministic per that key, so re-hashing the
-            // 5–50 KB source string per dispatch is pure waste (~10–30 µs).
-            let cache_key = {
-                let mut h = FNV_OFFSET;
-                fnv1a_extend(&mut h, spec.kernel.name.as_bytes());
-                fnv1a_extend(&mut h, b":");
-                if let Some(p) = spec.kernel.params.first() {
-                    fnv1a_extend(&mut h, &(p.dtype.size_bytes() as u64).to_le_bytes());
-                }
-                for (n, v) in spec.fn_consts {
-                    fnv1a_extend(&mut h, n.as_bytes());
-                    fnv1a_extend(&mut h, &v.to_le_bytes());
-                }
-                h
-            };
+            let cache_key = pso_cache_key(spec.kernel, spec.fn_consts);
             let pipe: Retained<Pso> = {
                 let mut lock = cache.lock();
                 if let Some(p) = lock.get(&cache_key) {
@@ -1153,27 +1147,67 @@ mod tests {
     // name. Pre-change (`format!("{}_shape", …)` + `format!("{}_strides", …)`)
     // allocates two Strings per call; post-change reuses a single pre-sized
     // String via in-place suffix rewrite.
+    fn key_kernel(name: &str, dtype: DType) -> Kernel {
+        let mut k = Kernel::new(name);
+        k.params = vec![tensor_param("input", dtype, &[4], false, ParamKind::Tensor)];
+        k
+    }
+
+    #[test]
+    fn pso_cache_key_is_stable_and_discriminates_inputs() {
+        let k = key_kernel("sdpa_decode", DType::F32);
+        let mut consts = BTreeMap::new();
+        consts.insert("gqa".to_string(), 4u32);
+        consts.insert("head_dim".to_string(), 128u32);
+        let baseline = pso_cache_key(&k, &consts);
+        assert_eq!(baseline, pso_cache_key(&k, &consts), "key must be deterministic");
+
+        // Kernel name change → different key.
+        let k_other_name = key_kernel("sdpa_prefill", DType::F32);
+        assert_ne!(baseline, pso_cache_key(&k_other_name, &consts));
+
+        // First-param dtype change → different key (f32 vs f16 specializations).
+        let k_other_dtype = key_kernel("sdpa_decode", DType::F16);
+        assert_ne!(baseline, pso_cache_key(&k_other_dtype, &consts));
+
+        // fn_const value change → different key.
+        let mut consts_other_val = consts.clone();
+        consts_other_val.insert("gqa".to_string(), 8u32);
+        assert_ne!(baseline, pso_cache_key(&k, &consts_other_val));
+
+        // fn_const name change → different key.
+        let mut consts_other_name = BTreeMap::new();
+        consts_other_name.insert("kv_heads".to_string(), 4u32);
+        consts_other_name.insert("head_dim".to_string(), 128u32);
+        assert_ne!(baseline, pso_cache_key(&k, &consts_other_name));
+
+        // Empty fn_consts and empty params are both well-defined.
+        let empty_consts = BTreeMap::new();
+        assert_ne!(baseline, pso_cache_key(&k, &empty_consts));
+        let mut k_empty = Kernel::new("noop");
+        k_empty.params = vec![];
+        let _ = pso_cache_key(&k_empty, &empty_consts);
+    }
+
     // Perf microbench — run with:
     //   cargo test --release -p metaltile-runtime perf_dispatch_chain_pso_key \
     //     -- --ignored --nocapture
     //
     // Times the per-pass PSO cache key computation in `dispatch_chain_metal`.
     // Pre-fix: FNV-1a over the full MSL source string (5–50 KB per pass).
-    // Post-fix: FNV-1a over the kernel name + first-param dtype size + sorted
-    // fn_consts (~30–60 bytes). The actual fix is a one-line edit in the hot
-    // loop; this bench just times the underlying FNV cost on the two payload
-    // sizes so the savings are visible without a GPU.
+    // Post-fix: `pso_cache_key` over the kernel name + first-param dtype size
+    // + sorted fn_consts (~30–60 bytes). Demonstrates the savings without a
+    // GPU; the fix itself is the helper call inside `dispatch_chain_metal`.
     #[test]
     #[ignore = "perf microbench"]
     fn perf_dispatch_chain_pso_key() {
         // Representative MSL source size for a real metaltile kernel:
         // sdpa_decode_2pass_pass1 generates ~12 KB; sdpa_vector ~6 KB. Use a
-        // mid-size 10 KB blob for the comparison.
+        // mid-size 10 KB blob for the pre-fix comparison.
         let msl_bytes: Vec<u8> = (0..10_240).map(|i| (i as u8).wrapping_add(0x42)).collect();
-        // Post-fix payload: kernel name (~24 bytes) + dtype-size discriminator
-        // (8 bytes) + a handful of fn_const name/value pairs (~20 bytes).
-        let small_bytes: Vec<u8> =
-            b"sdpa_decode_2pass_pass1\0\x04\0\0\0\0\0\0\0gqa\0\x04\0\0\0".to_vec();
+        let kernel = key_kernel("sdpa_decode_2pass_pass1", DType::F32);
+        let mut consts = BTreeMap::new();
+        consts.insert("gqa".to_string(), 4u32);
 
         const ITERS: usize = 1_000_000;
         // Warmup.
@@ -1193,9 +1227,10 @@ mod tests {
 
         let start = std::time::Instant::now();
         for _ in 0..ITERS {
-            let mut h = FNV_OFFSET;
-            fnv1a_extend(&mut h, std::hint::black_box(&small_bytes));
-            std::hint::black_box(h);
+            std::hint::black_box(pso_cache_key(
+                std::hint::black_box(&kernel),
+                std::hint::black_box(&consts),
+            ));
         }
         let post = start.elapsed();
 
@@ -1204,7 +1239,7 @@ mod tests {
         let saved_ns = pre_ns - post_ns;
         println!(
             "pre-fix  (FNV over 10 KB MSL):  {pre:?}  ({pre_ns:.0} ns/call)\n\
-             post-fix (FNV over ~50 B key):  {post:?}  ({post_ns:.0} ns/call)\n\
+             post-fix (pso_cache_key call):  {post:?}  ({post_ns:.0} ns/call)\n\
              saved per dispatch_chain pass:  {saved_ns:.0} ns",
         );
     }
