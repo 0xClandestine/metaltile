@@ -118,9 +118,14 @@ pub fn mt_affine_dequantize_int4<T>(
 //
 // MLX's `affine_quantize` uses a 32-thread simd-group cooperative reduce
 // across `group_size` elements; we use the same shape (one threadgroup
-// of 32 threads per group) and reduce via `simd_min` / `simd_max`. After
-// the reduction lane 0 writes the scale + bias and packs the nibbles
-// (serial per lane but small — `group_size / 8` packs per group).
+// of 32 threads per group) and reduce via `simd_min` / `simd_max`.
+//
+// Packing: `packs_per_group = group_size / pack_factor = 64 / 8 = 8`
+// nibble-packs per group. Lanes 0..7 each pack one uint32 in parallel
+// — they re-read the 8 input values for their pack from device memory
+// (cheap; the data is already cached after the min/max reduction's
+// first load). Eliminating the lane-0 serial loop is the main perf
+// difference vs the original implementation.
 //
 // Restriction: hardcodes group_size=64 and bits=4 in the unrolling
 // (`group_size / 32 = 2` values per thread, 8 nibbles per uint32).
@@ -164,26 +169,72 @@ pub fn mt_affine_quantize_int4<T>(
     let inv_scale = 1.0f32 / scale;
     let bias = w_min;
 
-    // Lane 0 packs serially. `simd_or` isn't exposed in the DSL today,
-    // so we trade a tiny amount of parallelism for codegen simplicity —
-    // packing cost is negligible against the cooperative reduction above.
     if lane == 0u32 {
         store(scales[g_idx], scale.cast::<T>());
         store(biases[g_idx], bias.cast::<T>());
+    }
 
-        let packs_per_group = group_size / 8u32;
-        let out_base = g_idx * packs_per_group;
-        for p in range(0u32, packs_per_group, 1u32) {
-            let mut acc = 0u32;
-            for k in range(0u32, 8u32, 1u32) {
-                let v = load(w[in_base + p * 8u32 + k]).cast::<f32>();
-                let q_f = (v - bias) * inv_scale + 0.5f32;
-                let q_c = select(q_f > 15.0f32, 15.0f32, select(q_f < 0.0f32, 0.0f32, q_f));
-                let q = q_c.cast::<u32>();
-                acc = acc | (q << (k * 4u32));
-            }
-            store(out[out_base + p], acc);
-        }
+    // Packs in parallel: lanes 0..packs_per_group each pack one uint32.
+    // For group_size=64 → packs_per_group=8, so 8 lanes work in parallel
+    // vs the previous lane-0 serial loop over all 8 packs.
+    //
+    // Inner 8-iteration loop is hand-unrolled — the codegen unroll pass
+    // doesn't expand it (its trip count exceeds the default factor)
+    // and leaving it rolled costs ~30% perf vs MLX on the per-lane
+    // pack pipeline.
+    let packs_per_group = group_size / 8u32;
+    if lane < packs_per_group {
+        let pack_in_base = in_base + lane * 8u32;
+
+        let v0 = load(w[pack_in_base]).cast::<f32>();
+        let q0_f = (v0 - bias) * inv_scale + 0.5f32;
+        let q0_c = select(q0_f > 15.0f32, 15.0f32, select(q0_f < 0.0f32, 0.0f32, q0_f));
+        let q0 = q0_c.cast::<u32>();
+
+        let v1 = load(w[pack_in_base + 1u32]).cast::<f32>();
+        let q1_f = (v1 - bias) * inv_scale + 0.5f32;
+        let q1_c = select(q1_f > 15.0f32, 15.0f32, select(q1_f < 0.0f32, 0.0f32, q1_f));
+        let q1 = q1_c.cast::<u32>();
+
+        let v2 = load(w[pack_in_base + 2u32]).cast::<f32>();
+        let q2_f = (v2 - bias) * inv_scale + 0.5f32;
+        let q2_c = select(q2_f > 15.0f32, 15.0f32, select(q2_f < 0.0f32, 0.0f32, q2_f));
+        let q2 = q2_c.cast::<u32>();
+
+        let v3 = load(w[pack_in_base + 3u32]).cast::<f32>();
+        let q3_f = (v3 - bias) * inv_scale + 0.5f32;
+        let q3_c = select(q3_f > 15.0f32, 15.0f32, select(q3_f < 0.0f32, 0.0f32, q3_f));
+        let q3 = q3_c.cast::<u32>();
+
+        let v4 = load(w[pack_in_base + 4u32]).cast::<f32>();
+        let q4_f = (v4 - bias) * inv_scale + 0.5f32;
+        let q4_c = select(q4_f > 15.0f32, 15.0f32, select(q4_f < 0.0f32, 0.0f32, q4_f));
+        let q4 = q4_c.cast::<u32>();
+
+        let v5 = load(w[pack_in_base + 5u32]).cast::<f32>();
+        let q5_f = (v5 - bias) * inv_scale + 0.5f32;
+        let q5_c = select(q5_f > 15.0f32, 15.0f32, select(q5_f < 0.0f32, 0.0f32, q5_f));
+        let q5 = q5_c.cast::<u32>();
+
+        let v6 = load(w[pack_in_base + 6u32]).cast::<f32>();
+        let q6_f = (v6 - bias) * inv_scale + 0.5f32;
+        let q6_c = select(q6_f > 15.0f32, 15.0f32, select(q6_f < 0.0f32, 0.0f32, q6_f));
+        let q6 = q6_c.cast::<u32>();
+
+        let v7 = load(w[pack_in_base + 7u32]).cast::<f32>();
+        let q7_f = (v7 - bias) * inv_scale + 0.5f32;
+        let q7_c = select(q7_f > 15.0f32, 15.0f32, select(q7_f < 0.0f32, 0.0f32, q7_f));
+        let q7 = q7_c.cast::<u32>();
+
+        let acc = q0
+            | (q1 << 4u32)
+            | (q2 << 8u32)
+            | (q3 << 12u32)
+            | (q4 << 16u32)
+            | (q5 << 20u32)
+            | (q6 << 24u32)
+            | (q7 << 28u32);
+        store(out[g_idx * packs_per_group + lane], acc);
     }
 }
 
@@ -278,20 +329,45 @@ pub fn mt_affine_quantize_int8<T>(
     if lane == 0u32 {
         store(scales[g_idx], scale.cast::<T>());
         store(biases[g_idx], bias.cast::<T>());
+    }
 
-        let packs_per_group = group_size / 4u32;
-        let out_base = g_idx * packs_per_group;
-        for p in range(0u32, packs_per_group, 1u32) {
-            let mut acc = 0u32;
-            for k in range(0u32, 4u32, 1u32) {
-                let v = load(w[in_base + p * 4u32 + k]).cast::<f32>();
-                let q_f = (v - bias) * inv_scale + 0.5f32;
-                let q_c = select(q_f > 255.0f32, 255.0f32, select(q_f < 0.0f32, 0.0f32, q_f));
-                let q = q_c.cast::<u32>();
-                acc = acc | (q << (k * 8u32));
-            }
-            store(out[out_base + p], acc);
-        }
+    // Packs in parallel: lanes 0..packs_per_group each pack one uint32.
+    // For group_size=64, pack_factor=4 → packs_per_group=16, so 16
+    // lanes pack in parallel vs the previous lane-0 serial loop.
+    //
+    // The inner pack loop is unrolled by hand (4 iterations) — the
+    // codegen unroll pass has a pre-existing bug with nested loops in
+    // conditional blocks (`unroll.rs:70` panics on stale BlockId
+    // snapshot), and the manual unroll sidesteps it cleanly. The
+    // int4 variant escapes the bug because its inner-loop trip count
+    // (8) is too large to unroll under the default factor — int8's
+    // trip count of 4 lands inside the unroll-eligible range.
+    let packs_per_group = group_size / 4u32;
+    if lane < packs_per_group {
+        let pack_in_base = in_base + lane * 4u32;
+
+        let v0 = load(w[pack_in_base]).cast::<f32>();
+        let q0_f = (v0 - bias) * inv_scale + 0.5f32;
+        let q0_c = select(q0_f > 255.0f32, 255.0f32, select(q0_f < 0.0f32, 0.0f32, q0_f));
+        let q0 = q0_c.cast::<u32>();
+
+        let v1 = load(w[pack_in_base + 1u32]).cast::<f32>();
+        let q1_f = (v1 - bias) * inv_scale + 0.5f32;
+        let q1_c = select(q1_f > 255.0f32, 255.0f32, select(q1_f < 0.0f32, 0.0f32, q1_f));
+        let q1 = q1_c.cast::<u32>();
+
+        let v2 = load(w[pack_in_base + 2u32]).cast::<f32>();
+        let q2_f = (v2 - bias) * inv_scale + 0.5f32;
+        let q2_c = select(q2_f > 255.0f32, 255.0f32, select(q2_f < 0.0f32, 0.0f32, q2_f));
+        let q2 = q2_c.cast::<u32>();
+
+        let v3 = load(w[pack_in_base + 3u32]).cast::<f32>();
+        let q3_f = (v3 - bias) * inv_scale + 0.5f32;
+        let q3_c = select(q3_f > 255.0f32, 255.0f32, select(q3_f < 0.0f32, 0.0f32, q3_f));
+        let q3 = q3_c.cast::<u32>();
+
+        let acc = q0 | (q1 << 8u32) | (q2 << 16u32) | (q3 << 24u32);
+        store(out[g_idx * packs_per_group + lane], acc);
     }
 }
 

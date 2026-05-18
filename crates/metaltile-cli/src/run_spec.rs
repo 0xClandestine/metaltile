@@ -1568,7 +1568,7 @@ fn run_sdpa_vector(
     tpg: usize,
 ) -> Vec<OpResult> {
     assert_eq!(head_dim, 128, "mt_sdpa_vector hardcodes head_dim=128");
-    assert_eq!(tpg, 32, "mt_sdpa_vector uses one simdgroup (32 threads)");
+    assert_eq!(tpg, 1024, "mt_sdpa_vector uses BN × BD = 32 × 32 = 1024 threads");
     assert!(n_q_heads.is_multiple_of(gqa_factor), "n_q_heads must be divisible by gqa_factor");
     let n_kv_heads = n_q_heads / gqa_factor;
 
