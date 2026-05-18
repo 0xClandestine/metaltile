@@ -447,13 +447,11 @@ impl Context {
             },
             // SimdGroup2D: tiled matmul. Threadgroup = WM×WN×32.
             // For bench dispatch: one threadgroup, full threadgroup size.
-            KernelMode::SimdGroup2D => {
-                (MTLSize { width: 1, height: 1, depth: 1 }, MTLSize {
-                    width: tpg_w,
-                    height: 1,
-                    depth: 1,
-                })
-            },
+            KernelMode::SimdGroup2D => (MTLSize { width: 1, height: 1, depth: 1 }, MTLSize {
+                width: tpg_w,
+                height: 1,
+                depth: 1,
+            }),
         };
         enc.dispatchThreadgroups_threadsPerThreadgroup(tgs, tpg);
         (*enc).endEncoding();

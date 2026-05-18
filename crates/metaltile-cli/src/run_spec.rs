@@ -98,7 +98,8 @@ fn msl_grid3d(spec: &BenchSpec, dt: DType) -> Option<String> {
 fn msl_for_mode(spec: &BenchSpec, dt: DType, mode: KernelMode) -> Option<String> {
     match mode {
         KernelMode::Elementwise => msl_elementwise(spec, dt),
-        KernelMode::Reduction | KernelMode::Tile2D | KernelMode::SimdGroup2D => msl_reduction(spec, dt),
+        KernelMode::Reduction | KernelMode::Tile2D | KernelMode::SimdGroup2D =>
+            msl_reduction(spec, dt),
         KernelMode::Grid3D => msl_grid3d(spec, dt),
     }
 }
@@ -159,7 +160,8 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
 
     for shape in spec.shapes {
         let ctx = match shape.mode {
-            KernelMode::Reduction | KernelMode::Tile2D | KernelMode::SimdGroup2D => DtypeCtx::reduce(dt),
+            KernelMode::Reduction | KernelMode::Tile2D | KernelMode::SimdGroup2D =>
+                DtypeCtx::reduce(dt),
             _ => DtypeCtx::elementwise(dt),
         };
         let mk = match compiled.entry(mode_key(shape.mode)) {
@@ -349,13 +351,14 @@ fn mlx_buf(
 fn run_sort(
     spec: &BenchSpec,
     runner: &GpuRunner,
-    _dt: DType,
+    dt: DType,
     bench: &OpBench,
     b: usize,
     n: usize,
     tpg: usize,
 ) -> Vec<OpResult> {
-    let msl = match msl_reduction(spec, DType::F32) {
+    let ctx = DtypeCtx::reduce(dt);
+    let msl = match msl_reduction(spec, dt) {
         Some(s) => s,
         None => return vec![],
     };
@@ -363,10 +366,12 @@ fn run_sort(
         Some(k) => k,
         None => return vec![],
     };
-    let ref_kernel = compile_mlx(runner, spec.mlx_src, spec.mlx_pattern, "float32");
+    let ref_kernel = compile_mlx(runner, spec.mlx_src, spec.mlx_pattern, ctx.tn);
 
     let check_b = 4usize;
-    let check_data: Vec<f32> = (0..check_b * n).map(|i| (check_b * n - i) as f32).collect();
+    // Use per-batch values 0..n (reversed) so all values fit exactly in f16/bf16.
+    // Values 0..1023 are all exactly representable in any float16 format.
+    let check_data: Vec<f32> = (0..check_b).flat_map(|_| (0..n).rev().map(|i| i as f32)).collect();
     let ref_out = {
         let mut out = check_data.clone();
         for chunk in out.chunks_mut(n) {
@@ -374,9 +379,9 @@ fn run_sort(
         }
         out
     };
-    let inp_c = buffer_typed(runner, &check_data, DType::F32);
+    let inp_c = buffer_typed(runner, &check_data, dt);
     let n_buf_c = runner.buffer_u32(n as u32);
-    let out_c = zeros_typed(runner, check_b * n, DType::F32);
+    let out_c = zeros_typed(runner, check_b * n, dt);
     let mt_chk = run_typed_once(
         runner,
         &mk,
@@ -385,9 +390,9 @@ fn run_sort(
         check_b * n,
         [check_b, 1, 1],
         [tpg, 1, 1],
-        DType::F32,
+        dt,
     );
-    let n_bad = ref_out.iter().zip(&mt_chk).filter(|(a, b)| a != b).count();
+    let n_bad = ref_out.iter().zip(&mt_chk).filter(|(a, b)| (*a - *b).abs() > 0.5).count();
     let equiv = EquivResult {
         n_checked: check_b * n,
         max_abs_err: if n_bad == 0 { 0.0 } else { f32::INFINITY },
@@ -396,12 +401,12 @@ fn run_sort(
     };
 
     let data: Vec<f32> = (0..b * n).map(|i| (b * n - i) as f32).collect();
-    let inp = buffer_typed(runner, &data, DType::F32);
-    let bytes = (b * n * 4 * 2) as f64;
+    let inp = buffer_typed(runner, &data, dt);
+    let bytes = (b * n * ctx.eb * 2) as f64;
     let n_buf = runner.buffer_u32(n as u32);
 
     let ref_perf = ref_kernel.as_ref().and_then(|rk| {
-        let out = zeros_typed(runner, b * n, DType::F32);
+        let out = zeros_typed(runner, b * n, dt);
         let size = runner.buffer_i32(n as i32);
         let stride1 = runner.buffer_i32(1i32);
         let stride_n = runner.buffer_i32(n as i32);
@@ -415,12 +420,12 @@ fn run_sort(
         )
     });
     let mt_perf = {
-        let out = zeros_typed(runner, b * n, DType::F32);
+        let out = zeros_typed(runner, b * n, dt);
         bench_gbps(runner, &mk, &[&inp, &out, &n_buf], [b, 1, 1], [tpg, 1, 1], bytes)
     };
     vec![bench.result_sub(
         Some(spec.subop),
-        format!("B={b} N={n} f32"),
+        format!("B={b} N={n} {}", ctx.label),
         ref_perf,
         mt_perf,
         Some(equiv),

@@ -103,7 +103,10 @@ impl super::Pass for CsePass {
 
 /// Run CSE on `block` and return the `old → new` ValueId remap that was applied,
 /// so callers can propagate eliminations to sibling / child blocks.
-fn cse_block(block: &mut Block, read_only: &std::collections::BTreeSet<String>) -> HashMap<ValueId, ValueId> {
+fn cse_block(
+    block: &mut Block,
+    read_only: &std::collections::BTreeSet<String>,
+) -> HashMap<ValueId, ValueId> {
     let n = block.ops.len();
 
     // Phase 1: find duplicates and build old_vid -> replacement_vid map.

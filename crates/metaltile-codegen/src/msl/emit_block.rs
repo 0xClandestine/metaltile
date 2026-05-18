@@ -121,8 +121,7 @@ impl MslGenerator {
                     // `simd_id` is a DSL alias for the simdgroup index; the
                     // Metal kernel parameter is named `simd_group`.
                     let src = if src.as_str() == "simd_id" { "simd_group" } else { src.as_str() };
-                    let src_dtype =
-                        kernel.params.iter().find(|p| p.name == src).map(|p| p.dtype);
+                    let src_dtype = kernel.params.iter().find(|p| p.name == src).map(|p| p.dtype);
                     let promote_bf16 = self.config.native_bfloat
                         && src_dtype == Some(DType::BF16)
                         && kernel.mode == KernelMode::Elementwise;
