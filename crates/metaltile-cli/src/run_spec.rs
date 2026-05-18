@@ -1705,8 +1705,10 @@ fn run_steel_gemm(
 ) -> Vec<OpResult> {
     let ctx = DtypeCtx::elementwise(dt);
 
-    // Compile MT kernel
-    let kernel = (spec.kernel_ir)(dt);
+    // Compile MT kernel — must use SimdGroup2D so program_id axes map to
+    // threadgroup indices (tid.x/tid.y) rather than the global thread index.
+    let mut kernel = (spec.kernel_ir)(dt);
+    kernel.mode = KernelMode::SimdGroup2D;
     let msl = match MslGenerator::default().generate(&kernel) {
         Ok(m) => m,
         Err(_) => return Vec::new(),

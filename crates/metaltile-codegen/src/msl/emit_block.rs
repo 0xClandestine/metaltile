@@ -124,7 +124,10 @@ impl MslGenerator {
                     let src_dtype = kernel.params.iter().find(|p| p.name == src).map(|p| p.dtype);
                     let promote_bf16 = self.config.native_bfloat
                         && src_dtype == Some(DType::BF16)
-                        && kernel.mode == KernelMode::Elementwise;
+                        && matches!(
+                            kernel.mode,
+                            KernelMode::Elementwise | KernelMode::SimdGroup2D
+                        );
                     if indices.is_empty() {
                         if promote_bf16 {
                             wl!(out, "{pad}float {v} = float({src});");
