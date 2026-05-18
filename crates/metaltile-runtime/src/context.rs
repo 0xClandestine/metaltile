@@ -64,13 +64,13 @@ pub struct DispatchSpec<'a> {
 /// [`Context::upload_resident`]; pass via [`DispatchSpec::resident`]
 /// to bind without per-call alloc + host memcpy.
 ///
-/// Cloning is cheap (Arc::clone) and shares the underlying Metal
+/// Cloning is cheap (Rc::clone) and shares the underlying Metal
 /// buffer. The buffer returns to the dispatch buffer pool when the
 /// last clone drops.
 #[derive(Clone)]
 pub struct ResidentBuffer {
     #[cfg(target_os = "macos")]
-    inner: std::sync::Arc<
+    inner: std::rc::Rc<
         objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>>,
     >,
     #[cfg(not(target_os = "macos"))]
@@ -78,9 +78,8 @@ pub struct ResidentBuffer {
 }
 
 #[cfg(target_os = "macos")]
-type BufArc = std::sync::Arc<
-    objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>>,
->;
+type BufRc =
+    std::rc::Rc<objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>>>;
 
 #[cfg(target_os = "macos")]
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -96,14 +95,14 @@ fn fnv1a_extend(h: &mut u64, bytes: &[u8]) {
 type PoolKey = (usize, u64);
 
 // Thread-local Metal buffer pool. Bucketed by (next_pow_of_two(size),
-// storage_mode); each bucket holds Arc-wrapped buffers. `acquire`
+// storage_mode); each bucket holds Rc-wrapped buffers. `acquire`
 // returns one whose strong_count == 1 (only pool owns it), else
 // allocates. thread_local because Retained<MTLBuffer> isn't Send.
 #[cfg(target_os = "macos")]
 std::thread_local! {
     // FxHashMap over HashMap because PoolKey is (usize, u64) — already
     // densely numeric, SipHash would just shuffle bits that don't need it.
-    static BUF_POOL: std::cell::RefCell<rustc_hash::FxHashMap<PoolKey, Vec<BufArc>>>
+    static BUF_POOL: std::cell::RefCell<rustc_hash::FxHashMap<PoolKey, Vec<BufRc>>>
         = std::cell::RefCell::new(rustc_hash::FxHashMap::default());
 }
 
@@ -112,7 +111,7 @@ fn pool_acquire(
     dev: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDevice>,
     len: usize,
     opts: objc2_metal::MTLResourceOptions,
-) -> Result<BufArc, MetalTileError> {
+) -> Result<BufRc, MetalTileError> {
     use objc2_metal::MTLDevice;
     let bucket = len.max(4).next_power_of_two();
     let key: PoolKey = (bucket, opts.0 as u64);
@@ -120,13 +119,12 @@ fn pool_acquire(
         let mut p = cell.borrow_mut();
         let slot = p.entry(key).or_default();
         for buf in slot.iter() {
-            if std::sync::Arc::strong_count(buf) == 1 {
+            if std::rc::Rc::strong_count(buf) == 1 {
                 return Ok(buf.clone());
             }
         }
-        let new = std::sync::Arc::new(
-            dev.newBufferWithLength_options(bucket, opts)
-                .ok_or(MetalTileError::NoDevice)?,
+        let new = std::rc::Rc::new(
+            dev.newBufferWithLength_options(bucket, opts).ok_or(MetalTileError::NoDevice)?,
         );
         slot.push(new.clone());
         Ok(new)
@@ -380,8 +378,6 @@ impl Context {
 
         use objc2::{rc::Retained, runtime::ProtocolObject};
         use objc2_foundation::NSString;
-        use parking_lot::Mutex;
-        use rustc_hash::FxHashMap;
         use objc2_metal::{
             MTLCommandBuffer,
             MTLCommandEncoder,
@@ -396,6 +392,8 @@ impl Context {
             MTLResourceOptions,
             MTLSize,
         };
+        use parking_lot::Mutex;
+        use rustc_hash::FxHashMap;
 
         type Dev = ProtocolObject<dyn objc2_metal::MTLDevice>;
         type Pso = ProtocolObject<dyn MTLComputePipelineState>;
@@ -545,52 +543,54 @@ impl Context {
         let n_threads = n_threads.max(1);
         let tpg_w = pipe.maxTotalThreadsPerThreadgroup().min(256);
         let (tgs, tpg) = match grid_override {
-            Some((g, t)) => (
-                MTLSize { width: g[0], height: g[1], depth: g[2] },
-                MTLSize { width: t[0], height: t[1], depth: t[2] },
-            ),
-            None => match kernel.mode {
-            KernelMode::Reduction => {
-                let rows = n_threads.max(1);
-                (MTLSize { width: rows, height: 1, depth: 1 }, MTLSize {
-                    width: tpg_w,
-                    height: 1,
-                    depth: 1,
-                })
-            },
-            KernelMode::Grid3D => {
-                let groups = n_threads.div_ceil(tpg_w);
-                (MTLSize { width: groups, height: 1, depth: 1 }, MTLSize {
-                    width: tpg_w,
-                    height: 1,
-                    depth: 1,
-                })
-            },
-            KernelMode::Tile2D => {
-                let tpg_dim = (tpg_w as f64).sqrt() as usize;
-                let groups = n_threads.div_ceil(tpg_dim * tpg_dim);
-                (MTLSize { width: groups, height: 1, depth: 1 }, MTLSize {
-                    width: tpg_dim,
-                    height: tpg_dim,
-                    depth: 1,
-                })
-            },
-            KernelMode::Elementwise => {
-                let groups = n_threads.div_ceil(tpg_w);
-                (MTLSize { width: groups, height: 1, depth: 1 }, MTLSize {
-                    width: tpg_w,
-                    height: 1,
-                    depth: 1,
-                })
-            },
-            // SimdGroup2D: tiled matmul. Threadgroup = WM×WN×32.
-            // For bench dispatch: one threadgroup, full threadgroup size.
-            KernelMode::SimdGroup2D => (MTLSize { width: 1, height: 1, depth: 1 }, MTLSize {
-                width: tpg_w,
-                height: 1,
-                depth: 1,
+            Some((g, t)) => (MTLSize { width: g[0], height: g[1], depth: g[2] }, MTLSize {
+                width: t[0],
+                height: t[1],
+                depth: t[2],
             }),
-        } };
+            None => match kernel.mode {
+                KernelMode::Reduction => {
+                    let rows = n_threads.max(1);
+                    (MTLSize { width: rows, height: 1, depth: 1 }, MTLSize {
+                        width: tpg_w,
+                        height: 1,
+                        depth: 1,
+                    })
+                },
+                KernelMode::Grid3D => {
+                    let groups = n_threads.div_ceil(tpg_w);
+                    (MTLSize { width: groups, height: 1, depth: 1 }, MTLSize {
+                        width: tpg_w,
+                        height: 1,
+                        depth: 1,
+                    })
+                },
+                KernelMode::Tile2D => {
+                    let tpg_dim = (tpg_w as f64).sqrt() as usize;
+                    let groups = n_threads.div_ceil(tpg_dim * tpg_dim);
+                    (MTLSize { width: groups, height: 1, depth: 1 }, MTLSize {
+                        width: tpg_dim,
+                        height: tpg_dim,
+                        depth: 1,
+                    })
+                },
+                KernelMode::Elementwise => {
+                    let groups = n_threads.div_ceil(tpg_w);
+                    (MTLSize { width: groups, height: 1, depth: 1 }, MTLSize {
+                        width: tpg_w,
+                        height: 1,
+                        depth: 1,
+                    })
+                },
+                // SimdGroup2D: tiled matmul. Threadgroup = WM×WN×32.
+                // For bench dispatch: one threadgroup, full threadgroup size.
+                KernelMode::SimdGroup2D => (MTLSize { width: 1, height: 1, depth: 1 }, MTLSize {
+                    width: tpg_w,
+                    height: 1,
+                    depth: 1,
+                }),
+            },
+        };
         enc.dispatchThreadgroups_threadsPerThreadgroup(tgs, tpg);
         (*enc).endEncoding();
         (*cb).commit();
@@ -640,9 +640,15 @@ impl Context {
             if !self.has_metal {
                 return Err(MetalTileError::NoDevice);
             }
-            use objc2::{rc::Retained, runtime::ProtocolObject};
-            use objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
             use std::sync::OnceLock;
+
+            use objc2::{rc::Retained, runtime::ProtocolObject};
+            use objc2_metal::{
+                MTLBuffer,
+                MTLCreateSystemDefaultDevice,
+                MTLDevice,
+                MTLResourceOptions,
+            };
             type Dev = ProtocolObject<dyn MTLDevice>;
             static DEV: OnceLock<Retained<Dev>> = OnceLock::new();
             let dev = DEV.get_or_init(|| {
@@ -689,11 +695,7 @@ impl Context {
         }
         Ok(specs
             .iter()
-            .map(|_| DispatchResult {
-                elapsed_us: 0.0,
-                gflops: 0.0,
-                outputs: BTreeMap::new(),
-            })
+            .map(|_| DispatchResult { elapsed_us: 0.0, gflops: 0.0, outputs: BTreeMap::new() })
             .collect())
     }
 
@@ -702,16 +704,10 @@ impl Context {
         &self,
         specs: &[DispatchSpec<'_>],
     ) -> Result<Vec<DispatchResult>, MetalTileError> {
-        use std::{
-            collections::HashSet,
-            ptr::NonNull,
-            sync::OnceLock,
-        };
+        use std::{collections::HashSet, ptr::NonNull, sync::OnceLock};
 
         use objc2::{rc::Retained, runtime::ProtocolObject};
         use objc2_foundation::NSString;
-        use parking_lot::Mutex;
-        use rustc_hash::FxHashMap;
         use objc2_metal::{
             MTLBarrierScope,
             MTLBuffer,
@@ -728,6 +724,8 @@ impl Context {
             MTLResourceOptions,
             MTLSize,
         };
+        use parking_lot::Mutex;
+        use rustc_hash::FxHashMap;
 
         type Dev = ProtocolObject<dyn objc2_metal::MTLDevice>;
         type Pso = ProtocolObject<dyn MTLComputePipelineState>;
@@ -743,7 +741,7 @@ impl Context {
         let cache = PSO_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
         let queue = QUEUE.get_or_init(|| dev.newCommandQueue().expect("newCommandQueue failed"));
 
-        let acquire_shared = |bytes: Option<&[u8]>, len: usize| -> Result<BufArc, MetalTileError> {
+        let acquire_shared = |bytes: Option<&[u8]>, len: usize| -> Result<BufRc, MetalTileError> {
             let opts = MTLResourceOptions::StorageModeShared
                 | MTLResourceOptions::HazardTrackingModeUntracked;
             let buf = pool_acquire(dev, len, opts)?;
@@ -761,7 +759,7 @@ impl Context {
             }
             Ok(buf)
         };
-        let acquire_private = |len: usize| -> Result<BufArc, MetalTileError> {
+        let acquire_private = |len: usize| -> Result<BufRc, MetalTileError> {
             pool_acquire(
                 dev,
                 len,
@@ -824,7 +822,7 @@ impl Context {
 
         // Persistent name→buffer map: outputs from earlier specs go here
         // (private storage) so later specs find them by name and skip alloc.
-        let mut alias_pool: FxHashMap<String, BufArc> = FxHashMap::default();
+        let mut alias_pool: FxHashMap<String, BufRc> = FxHashMap::default();
 
         let mut pipes: Vec<Retained<Pso>> = Vec::with_capacity(specs.len());
         for (spec, msl) in specs.iter().zip(msl_sources.iter()) {
@@ -867,9 +865,8 @@ impl Context {
                                 );
                             }
                         }
-                        lib.newFunctionWithName_constantValues_error(&fn_name, &consts).map_err(
-                            |e| MetalTileError::Compilation(format!("{e:?}")),
-                        )?
+                        lib.newFunctionWithName_constantValues_error(&fn_name, &consts)
+                            .map_err(|e| MetalTileError::Compilation(format!("{e:?}")))?
                     };
                     let desc = MTLComputePipelineDescriptor::new();
                     desc.setComputeFunction(Some(&fun));
@@ -891,9 +888,9 @@ impl Context {
 
         // Per-spec buffer slots kept so true outputs (not consumed by later
         // specs) can be read back at the end.
-        let mut per_spec_bufs: Vec<Vec<BufArc>> = Vec::with_capacity(specs.len());
+        let mut per_spec_bufs: Vec<Vec<BufRc>> = Vec::with_capacity(specs.len());
 
-        let push_strided = |bufs: &mut Vec<BufArc>,
+        let push_strided = |bufs: &mut Vec<BufRc>,
                             param: &Param,
                             src: &BTreeMap<String, Vec<u8>>|
          -> Result<(), MetalTileError> {
@@ -906,7 +903,7 @@ impl Context {
         };
 
         for (i, spec) in specs.iter().enumerate() {
-            let mut bufs: Vec<BufArc> = Vec::with_capacity(spec.kernel.params.len() * 2);
+            let mut bufs: Vec<BufRc> = Vec::with_capacity(spec.kernel.params.len() * 2);
 
             for (param, plan) in spec.kernel.params.iter().zip(&binding_plans[i]) {
                 // Inputs: resident-pre-uploaded > aliased from earlier spec.
@@ -1002,10 +999,9 @@ impl Context {
                 let Some(buf) = per_spec_bufs[i].get(plan.data_binding_index) else { continue };
                 use objc2_metal::MTLBuffer as _;
                 let ptr = buf.contents();
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(ptr.as_ptr() as *const u8, plan.data_len)
-                }
-                .to_vec();
+                let bytes =
+                    unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const u8, plan.data_len) }
+                        .to_vec();
                 outputs.insert(param.name.clone(), bytes);
             }
             // Attribute the entire chain's GPU time to the first result;

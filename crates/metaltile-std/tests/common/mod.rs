@@ -30,27 +30,17 @@ impl Dt {
 pub fn pack_bytes(vals: &[f32], dt: Dt) -> Vec<u8> {
     match dt {
         Dt::F32 => vals.iter().flat_map(|v| v.to_le_bytes()).collect(),
-        Dt::F16 => vals
-            .iter()
-            .flat_map(|v| half::f16::from_f32(*v).to_le_bytes())
-            .collect(),
-        Dt::Bf16 => vals
-            .iter()
-            .flat_map(|v| half::bf16::from_f32(*v).to_le_bytes())
-            .collect(),
+        Dt::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+        Dt::Bf16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
     }
 }
 
 pub fn unpack_bytes(bytes: &[u8], dt: Dt) -> Vec<f32> {
     match dt {
-        Dt::F32 => bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect(),
-        Dt::F16 => bytes
-            .chunks_exact(2)
-            .map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32())
-            .collect(),
+        Dt::F32 =>
+            bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect(),
+        Dt::F16 =>
+            bytes.chunks_exact(2).map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32()).collect(),
         Dt::Bf16 => bytes
             .chunks_exact(2)
             .map(|c| half::bf16::from_le_bytes([c[0], c[1]]).to_f32())
@@ -110,8 +100,5 @@ pub fn ramp(n: usize, modulus: usize, offset: f32) -> Vec<f32> {
 }
 
 pub fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x - y).abs())
-        .fold(0.0_f32, f32::max)
+    a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max)
 }

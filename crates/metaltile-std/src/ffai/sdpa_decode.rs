@@ -243,10 +243,10 @@ mod tests {
         // lost cross-simdgroup ordering guarantees.
         let src = msl_for(DType::F32);
         for tok in &[
-            "simd_group",                       // emitted from DSL `simd_id`
+            "simd_group", // emitted from DSL `simd_id`
             "simd_lane",
             "threadgroup_barrier",
-            "mem_threadgroup",                   // barrier must include threadgroup-memory scope
+            "mem_threadgroup", // barrier must include threadgroup-memory scope
             "simd_sum",
             "simd_max",
         ] {

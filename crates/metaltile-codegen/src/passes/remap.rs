@@ -88,7 +88,7 @@ pub fn remap_value_ids(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
         Op::VectorLoad { byte_offset, .. } => {
             s(byte_offset);
         },
-        Op::VectorExtract { .. } => {}
+        Op::VectorExtract { .. } => {},
         Op::VectorStore { byte_offset, value, .. } => {
             s(byte_offset);
             s(value);
@@ -281,7 +281,7 @@ pub fn op_value_refs(op: &Op) -> Vec<ValueId> {
         Op::VectorLoad { byte_offset, .. } => {
             refs.push(*byte_offset);
         },
-        Op::VectorExtract { .. } => {}
+        Op::VectorExtract { .. } => {},
         Op::VectorStore { byte_offset, value, .. } => {
             refs.push(*byte_offset);
             refs.push(*value);
@@ -496,7 +496,7 @@ pub fn max_vid_in_op(op: &Op) -> u32 {
         Op::VectorLoad { byte_offset, .. } => {
             push(byte_offset);
         },
-        Op::VectorExtract { .. } => {}
+        Op::VectorExtract { .. } => {},
         Op::VectorStore { byte_offset, value, .. } => {
             push(byte_offset);
             push(value);
@@ -944,39 +944,26 @@ mod tests {
             3,
             9,
         );
-        check_op(
-            Op::Slice { value: ValueId::new(11), ranges: vec![(0, 0, 4)] },
-            1,
-            11,
-        );
+        check_op(Op::Slice { value: ValueId::new(11), ranges: vec![(0, 0, 4)] }, 1, 11);
         check_op(Op::Broadcast { value: ValueId::new(12), shape: shape.clone() }, 1, 12);
         check_op(Op::Splat { value: 1.0, dtype: DType::F32, shape }, 0, 0);
     }
 
     #[test]
     fn reduce_and_scan_variants() {
+        check_op(Op::Reduce { value: ValueId::new(13), axis: 0, op: ReduceKind::Sum }, 1, 13);
         check_op(
-            Op::Reduce { value: ValueId::new(13), axis: 0, op: ReduceKind::Sum },
-            1,
-            13,
-        );
-        check_op(
-            Op::Scan {
-                value: ValueId::new(14),
-                axis: 0,
-                op: ReduceKind::Max,
-                exclusive: false,
-            },
+            Op::Scan { value: ValueId::new(14), axis: 0, op: ReduceKind::Max, exclusive: false },
             1,
             14,
         );
-        check_op(
-            Op::ArgReduce { value: ValueId::new(15), axis: 0, op: ReduceKind::Max },
-            1,
-            15,
-        );
+        check_op(Op::ArgReduce { value: ValueId::new(15), axis: 0, op: ReduceKind::Max }, 1, 15);
         check_op(Op::SimdReduce { value: ValueId::new(16), op: ReduceKind::Sum }, 1, 16);
-        check_op(Op::SimdScan { value: ValueId::new(17), op: ReduceKind::Sum, exclusive: true }, 1, 17);
+        check_op(
+            Op::SimdScan { value: ValueId::new(17), op: ReduceKind::Sum, exclusive: true },
+            1,
+            17,
+        );
         check_op(
             Op::StrideScan {
                 src: "x".into(),
@@ -1014,11 +1001,7 @@ mod tests {
 
     #[test]
     fn indexed_memory_variants() {
-        check_op(
-            Op::Gather { src: "x".into(), indices: ValueId::new(25), axis: 0 },
-            1,
-            25,
-        );
+        check_op(Op::Gather { src: "x".into(), indices: ValueId::new(25), axis: 0 }, 1, 25);
         check_op(
             Op::Scatter {
                 dst: "y".into(),
@@ -1039,11 +1022,7 @@ mod tests {
             2,
             29,
         );
-        check_op(
-            Op::VectorLoad { src: "x".into(), byte_offset: ValueId::new(30), len: 4 },
-            1,
-            30,
-        );
+        check_op(Op::VectorLoad { src: "x".into(), byte_offset: ValueId::new(30), len: 4 }, 1, 30);
         check_op(
             Op::VectorStore {
                 dst: "y".into(),
@@ -1078,11 +1057,7 @@ mod tests {
             3,
             38,
         );
-        check_op(
-            Op::RmsNorm { x: ValueId::new(39), scale: ValueId::new(40), eps: 1e-5 },
-            2,
-            40,
-        );
+        check_op(Op::RmsNorm { x: ValueId::new(39), scale: ValueId::new(40), eps: 1e-5 }, 2, 40);
         check_op(
             Op::GatedMlp {
                 x: ValueId::new(41),
@@ -1097,11 +1072,7 @@ mod tests {
 
     #[test]
     fn threadgroup_and_local_variants() {
-        check_op(
-            Op::ThreadgroupLoad { name: "tg".into(), index: ValueId::new(45) },
-            1,
-            45,
-        );
+        check_op(Op::ThreadgroupLoad { name: "tg".into(), index: ValueId::new(45) }, 1, 45);
         check_op(
             Op::ThreadgroupStore {
                 name: "tg".into(),
@@ -1112,11 +1083,7 @@ mod tests {
             47,
         );
         check_op(Op::Barrier, 0, 0);
-        check_op(
-            Op::DeclareLocal { name: "l".into(), value: ValueId::new(48) },
-            1,
-            48,
-        );
+        check_op(Op::DeclareLocal { name: "l".into(), value: ValueId::new(48) }, 1, 48);
         check_op(Op::SetLocal { name: "l".into(), value: ValueId::new(49) }, 1, 49);
     }
 
@@ -1132,11 +1099,7 @@ mod tests {
         // SimdgroupMatMul / SimdgroupAlloc reference named simdgroup slots
         // (not SSA ValueIds), so remap treats them as having no refs.
         check_op(
-            Op::SimdgroupMatMul {
-                a: ValueId::new(53),
-                b: ValueId::new(54),
-                c: ValueId::new(55),
-            },
+            Op::SimdgroupMatMul { a: ValueId::new(53), b: ValueId::new(54), c: ValueId::new(55) },
             0,
             0,
         );
@@ -1232,8 +1195,7 @@ mod tests {
     fn predicate_cheap_alu() {
         // BinOp / UnaryOp / Const / Cast all qualify as cheap ALU and can
         // be rematerialized or sunk by value_sink / LICM.
-        let binop =
-            Op::BinOp { op: BinOpKind::Add, lhs: ValueId::new(0), rhs: ValueId::new(1) };
+        let binop = Op::BinOp { op: BinOpKind::Add, lhs: ValueId::new(0), rhs: ValueId::new(1) };
         assert!(is_cheap_alu(&binop));
         assert!(!has_side_effects(&binop));
 

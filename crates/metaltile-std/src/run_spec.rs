@@ -1824,15 +1824,24 @@ fn run_sdpa_vector_2pass(
     //   q, k, v, partial_o, partial_m, partial_l,
     //   head_dim, n_kv, kv_stride, gqa_factor, blocks, scale.
     let p1_bufs: Vec<&GpuBuffer> = vec![
-        &q_buf, &k_buf, &v_buf, &partial_o, &partial_max, &partial_sum,
-        &hd_buf, &n_buf, &kvs_buf, &gqa_buf, &blocks_buf, &sc_buf,
+        &q_buf,
+        &k_buf,
+        &v_buf,
+        &partial_o,
+        &partial_max,
+        &partial_sum,
+        &hd_buf,
+        &n_buf,
+        &kvs_buf,
+        &gqa_buf,
+        &blocks_buf,
+        &sc_buf,
     ];
     let p1_grid = [n_kv_heads, blocks, 1];
     let p1_tpg = [32, gqa_factor_u, 1];
     // Pass 2: grid (n_q_heads, 1, 1), TG (1024, 1, 1).
-    let p2_bufs: Vec<&GpuBuffer> = vec![
-        &partial_o, &partial_max, &partial_sum, &mt_out_buf, &hd_buf, &blocks_buf,
-    ];
+    let p2_bufs: Vec<&GpuBuffer> =
+        vec![&partial_o, &partial_max, &partial_sum, &mt_out_buf, &hd_buf, &blocks_buf];
     let p2_grid = [n_q_heads, 1, 1];
     let p2_tpg = [1024, 1, 1];
 
@@ -1842,9 +1851,8 @@ fn run_sdpa_vector_2pass(
     let mt_out = crate::runner::read_typed(runner, &mt_out_buf, n_q_heads * head_dim, dt);
 
     // MLX single-pass `sdpa_vector` reference at the same shape.
-    const REF_FCS: &[(usize, bool)] = &[
-        (20, false), (21, false), (22, false), (23, false), (24, false), (25, false),
-    ];
+    const REF_FCS: &[(usize, bool)] =
+        &[(20, false), (21, false), (22, false), (23, false), (24, false), (25, false)];
     let ref_name: Option<String> = match dt {
         DType::F32 => Some(format!("sdpa_vector_float_{head_dim}_{head_dim}")),
         DType::F16 => Some(format!("sdpa_vector_float16_t_{head_dim}_{head_dim}")),

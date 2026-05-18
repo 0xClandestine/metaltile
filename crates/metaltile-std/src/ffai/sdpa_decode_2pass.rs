@@ -7,7 +7,7 @@
 //!   in the GQA group, sharing K/V loads via L1
 //! - pass 1 grid `(n_kv_heads, blocks, 1)` — `block_idx = tgid_y`
 //!   (MLX uses tid.z; metaltile's DSL doesn't expose tgid_z, so we
-//!    collapse batch into y — single-decode is batch=1 anyway)
+//!   collapse batch into y — single-decode is batch=1 anyway)
 //! - pass 1 stride: `for i = block_idx; i < N; i += blocks` so adjacent
 //!   TGs read adjacent K rows in the same wave (coalesced)
 //! - pass 2 TG `(1024, 1, 1)` = 32 sg × 32 lanes, one TG per Q head
@@ -50,8 +50,8 @@ pub fn recommended_blocks_m5_max(n_kv: u32, n_simds: u32) -> u32 {
     }
     match n_kv {
         ..=8_192 => 128,
-        ..=32_768 => 256,
-        ..=65_536 => 512,
+        8_193..=32_768 => 256,
+        32_769..=65_536 => 512,
         _ => 1024,
     }
 }

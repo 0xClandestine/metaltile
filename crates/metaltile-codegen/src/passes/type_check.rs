@@ -601,7 +601,7 @@ fn infer_block(
             | Op::Store { .. }
             | Op::VectorLoad { .. }
             | Op::VectorStore { .. }
-        | Op::VectorExtract { .. }
+            | Op::VectorExtract { .. }
             | Op::If { .. }
             | Op::ExpandDims { .. }
             | Op::Reshape { .. }

@@ -30,7 +30,6 @@ use metaltile_std::ffai::sdpa_decode::sdpa_decode;
 fn f32_slice_to_bytes(vals: &[f32]) -> Vec<u8> { pack_bytes(vals, Dt::F32) }
 fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> { unpack_bytes(bytes, Dt::F32) }
 
-
 #[test]
 fn sdpa_decode_matches_naive_cpu_reference_f32() {
     let n_q_heads = 2usize;
@@ -130,10 +129,10 @@ fn sdpa_decode_perf_bench_f32() {
     let scale = 1.0_f32 / (head_dim as f32).sqrt();
     // (n_q_heads, n_kv_heads, n_kv) — Qwen3-class GQA shapes.
     let shapes = [
-        (32, 8, 128usize),    // short context
-        (32, 8, 1024),         // medium
-        (32, 8, 4096),         // common decode
-        (32, 8, 16384),        // long context
+        (32, 8, 128usize), // short context
+        (32, 8, 1024),     // medium
+        (32, 8, 4096),     // common decode
+        (32, 8, 16384),    // long context
     ];
 
     let ctx = Context::new().expect("Context::new should succeed on macOS");
@@ -165,13 +164,9 @@ fn sdpa_decode_perf_bench_f32() {
         let mut samples = Vec::with_capacity(100);
         for i in 0..120 {
             let r = ctx
-                .dispatch_with_grid(
-                    &kernel,
-                    &buffers,
-                    &BTreeMap::new(),
-                    [n_q_heads, 1, 1],
-                    [1024, 1, 1],
-                )
+                .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [n_q_heads, 1, 1], [
+                    1024, 1, 1,
+                ])
                 .expect("dispatch_with_grid should succeed");
             if i >= 20 {
                 samples.push(r.elapsed_us);
@@ -180,8 +175,8 @@ fn sdpa_decode_perf_bench_f32() {
         samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let median_us = samples[samples.len() / 2];
 
-        let bytes = (n_q_heads * head_dim + 2 * n_kv_heads * n_kv * head_dim + n_q_heads * head_dim)
-            * 4;
+        let bytes =
+            (n_q_heads * head_dim + 2 * n_kv_heads * n_kv * head_dim + n_q_heads * head_dim) * 4;
         let gbps = (bytes as f64) / (median_us * 1e-6) / 1e9;
 
         println!(
