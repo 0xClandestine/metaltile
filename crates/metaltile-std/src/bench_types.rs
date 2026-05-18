@@ -547,18 +547,21 @@ impl SuitePrinter {
             hdr.push_str(&format!(
                 " {} {}",
                 sep,
-                paint_stdout(&pad_right("Ck", ck_w), bold),
+                paint_stdout(&pad_right("ok", ck_w), bold),
             ));
         }
         if self.verbose >= 2 {
-            let tw = 7;  // p95μs
+            let pw = 5;  // p95
+            let qw = 5;  // p99
             let cw = 5;  // cv%
             hdr.push_str(&format!(
-                " {} {} {} {}",
+                " {} {} {} {} {} {}",
                 sep,
-                paint_stdout(&pad_right("p95μs", tw), bold),
+                paint_stdout(&pad_right("p95", pw), bold),
                 sep,
-                paint_stdout(&pad_right(" cv%", cw), bold),
+                paint_stdout(&pad_right("p99", qw), bold),
+                sep,
+                paint_stdout(&pad_right("cv%", cw), bold),
             ));
         }
 
@@ -583,7 +586,7 @@ impl SuitePrinter {
 
         let n_cols: usize = if self.show_correctness { 5 } else { 4 };
         let gaps = (n_cols.saturating_sub(1)) * 3;
-        let extra_cols = if self.verbose >= 2 { 7 + 3 + 5 + 3 } else { 0 }; // p95μs + gaps + cv% + gaps
+        let extra_cols = if self.verbose >= 2 { 5 + 3 + 5 + 3 + 5 + 3 } else { 0 }; // p95 + gap + p99 + gap + cv% + gap
         let total_w = 4 + shape_w + gaps + ref_w + mt_w + pct_w
             + if self.show_correctness { ck_w } else { 0 }
             + extra_cols;
@@ -717,24 +720,26 @@ fn style_correctness(text: &str, status: CorrectnessStatus) -> String {
     paint_stdout(text, style)
 }
 
-/// Format timing columns for a result row. Returns "p95μs │ cv%" or "    — │   —".
+/// Format timing columns for a result row. Returns "p95 │ p99 │ cv%" or "   — │   — │   —".
 fn fmt_timing(result: &OpResult) -> String {
     let sep = col_sep();
     let dim = Style::new().fg(Color::BrightBlack).dim();
     match result.mt_timing {
         Some(ref t) if t.is_valid() => {
-            let p95 = paint_stdout(format!("{:>6.1}", t.p95_us), Style::new().fg(Color::BrightWhite));
+            let p95 = paint_stdout(format!("{:>5.1}", t.p95_us), Style::new().fg(Color::BrightWhite));
+            let p99 = paint_stdout(format!("{:>5.1}", t.p99_us), Style::new().fg(Color::BrightWhite));
             let cv_str = if t.cv_pct > 5.0 {
                 paint_stdout(format!("{:>4.1}%", t.cv_pct), Style::new().fg(Color::Yellow).bold())
             } else {
                 paint_stdout(format!("{:>4.1}%", t.cv_pct), Style::new().fg(Color::Green))
             };
-            format!("{p95} {} {cv_str}", sep)
+            format!("{p95} {} {p99} {} {cv_str}", sep, sep)
         }
         _ => {
-            let dash = paint_stdout("    —", dim);
+            let dash = paint_stdout("   —", dim);
             let dash2 = paint_stdout("   —", dim);
-            format!("{dash} {} {dash2}", sep)
+            let dash3 = paint_stdout("   —", dim);
+            format!("{dash} {} {dash2} {} {dash3}", sep, sep)
         }
     }
 }
