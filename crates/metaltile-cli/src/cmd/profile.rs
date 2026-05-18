@@ -159,12 +159,20 @@ fn print_single_kernel(name: &str, k: &metaltile_core::ir::Kernel, show_sweep: b
     }
 }
 
+/// Wraps a profile result for a single kernel in multi-kernel mode.
+struct ProfileRow<'a> {
+    name: &'a str,
+    best_tg: u32,
+    occ_pct: f64,
+    regs_per_thread: usize,
+    bottleneck: Bottleneck,
+}
+
 // ── Multi-kernel (compact) mode ──────────────────────────────────────
 
 fn print_multi_kernel(matched: &[&(&str, (&BenchSpec, Vec<DType>))]) {
     let dim = Style::new().fg(Color::BrightBlack).dim();
     let bold = Style::new().fg(Color::BrightWhite).bold();
-    let sep = paint_stdout("│", dim);
 
     // Banner.
     println!(
@@ -174,25 +182,16 @@ fn print_multi_kernel(matched: &[&(&str, (&BenchSpec, Vec<DType>))]) {
     );
     println!();
 
-    let mut first = true;
+    // Collect all rows, skip pipeline failures.
+    let mut rows: Vec<ProfileRow> = Vec::new();
+    let mut errors: usize = 0;
     for (name, (spec, dtypes)) in matched {
         let dt = dtypes.first().copied().unwrap_or(DType::F32);
         let mut k = (spec.kernel_ir)(dt);
         k.mode = spec.dispatch.default_mode(spec.shapes);
 
-        if !first {
-            println!();
-        }
-        first = false;
-
-        // Kernel title.
-        println!("  {}", paint_stdout(*name, Style::new().fg(Color::Cyan).bold()));
-
-        if let Err(e) = passes::run_passes(&mut k, &passes::standard_pipeline()) {
-            println!(
-                "    {}",
-                paint_stdout(format!("pipeline error: {e}"), Style::new().fg(Color::Red)),
-            );
+        if let Err(_e) = passes::run_passes(&mut k, &passes::standard_pipeline()) {
+            errors += 1;
             continue;
         }
 
@@ -201,39 +200,78 @@ fn print_multi_kernel(matched: &[&(&str, (&BenchSpec, Vec<DType>))]) {
         let (best_tg, best_est) = occupancy::best_threadgroup_size(&k, &candidates)
             .unwrap_or((0, occupancy::estimate_occupancy(&k, 256, None)));
 
-        // Column headers.
-        println!(
-            "    {}  {} {} {} {} {} {}",
-            paint_stdout("tg_size", bold),
-            sep,
-            paint_stdout(" occ%", bold),
-            sep,
-            paint_stdout("regs/th", bold),
-            sep,
-            paint_stdout("bottleneck", bold),
-        );
-        // Separator.
-        println!("    {}", paint_stdout("───────  ─────  ───────  ─────────", dim));
+        rows.push(ProfileRow {
+            name,
+            best_tg,
+            occ_pct: best_est.occupancy_pct,
+            regs_per_thread: reg_est.regs_per_thread,
+            bottleneck: best_est.bottleneck,
+        });
+    }
 
-        // Data row (best).
-        let pct = paint_stdout(format!("{:5.1}", best_est.occupancy_pct), occ_color(best_est.occupancy_pct));
-        let regs = paint_stdout(format!("{:>7}", reg_est.regs_per_thread), bold);
-        let bn = bottle_label(best_est.bottleneck);
-        println!("    {best_tg:>7}  {sep}  {pct}  {sep}  {regs}  {sep}  {bn}");
+    // Compute column widths.
+    let name_w = rows.iter().map(|r| r.name.len()).max().unwrap_or(6).max(12);
+    let sep = paint_stdout("│", dim);
+
+    // Column headers.
+    println!(
+        "  {}  {} {} {} {} {} {} {} {}",
+        paint_stdout(&pad_right("kernel", name_w), bold),
+        sep,
+        paint_stdout("tg_size", bold),
+        sep,
+        paint_stdout(" occ%", bold),
+        sep,
+        paint_stdout("regs/th", bold),
+        sep,
+        paint_stdout("bottleneck", bold),
+    );
+
+    // Separator.
+    let tg_w = 7;
+    let occ_w = 6;
+    let reg_w = 7;
+    let bn_w = 22;
+    let total = 2 + name_w + 2 + tg_w + 3 + occ_w + 3 + reg_w + 3 + bn_w;
+    println!("  {}", paint_stdout("─".repeat(total), dim));
+
+    // Data rows.
+    for row in &rows {
+        let name_cell = paint_stdout(&pad_right(row.name, name_w), Style::new().fg(Color::Cyan));
+        let tg_cell = format!("{:>7}", row.best_tg);
+        let occ_cell = paint_stdout(format!("{:>6.1}", row.occ_pct), occ_color(row.occ_pct));
+        let reg_cell = paint_stdout(format!("{:>7}", row.regs_per_thread), bold);
+        let bn_cell = bottle_label(row.bottleneck);
+        println!("  {name_cell}  {sep}  {tg_cell}  {sep}  {occ_cell}  {sep}  {reg_cell}  {sep}  {bn_cell}");
     }
 
     // Footer.
     let dot = paint_stdout("·", dim);
     println!();
-    println!(
-        "  {} {dot} {} {dot} {}",
-        paint_stdout(format!("{} kernels", matched.len()), dim),
-        paint_stdout("'tile profile <kernel>' for detail", dim),
-        paint_stdout("--sweep for breakdown", dim),
-    );
+    let tot = rows.len();
+    if errors > 0 {
+        println!(
+            "  {} {dot} {} {dot} {} {dot} {}",
+            paint_stdout(format!("{tot} kernels"), dim),
+            paint_stdout(format!("{errors} errors"), Style::new().fg(Color::Red)),
+            paint_stdout("'tile profile <kernel>' for detail", dim),
+            paint_stdout("--sweep for breakdown", dim),
+        );
+    } else {
+        println!(
+            "  {} {dot} {} {dot} {}",
+            paint_stdout(format!("{tot} kernels"), dim),
+            paint_stdout("'tile profile <kernel>' for detail", dim),
+            paint_stdout("--sweep for breakdown", dim),
+        );
+    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
+
+fn pad_right(text: &str, width: usize) -> String {
+    format!("{text:<width$}")
+}
 
 fn occ_color(pct: f64) -> Style {
     if pct >= 80.0 {
