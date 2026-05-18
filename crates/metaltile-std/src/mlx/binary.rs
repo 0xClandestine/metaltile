@@ -120,7 +120,10 @@ pub fn mt_pow<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
     class=Binary,
     input_a=Signed,
     input_b=Signed,
-    tol=1e-4,
+    // tol=1e-2 — f16 drifts ~1.2e-4 and bf16 drifts ~7.8e-3 on signed
+    // input. `logaddexp(a, b) = log(exp(a) + exp(b))` compounds three
+    // transcendentals so half/bfloat ULP drift accumulates.
+    tol=1e-2,
     mlx="vvn_LogAddExp{tn}",
     metal_file="binary.metal",
 )]

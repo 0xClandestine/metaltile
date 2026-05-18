@@ -1271,7 +1271,21 @@ mod bench_impl {
                     bytes_fn: crate::spec::bytes_row_op,
                     mlx_args: #mlx_args_ts,
                     mlx_grid: None,
-                    mlx_tpg: 0usize,
+                    // MLX `looped_softmax_*` and `looped_logsumexp_*` use
+                    // `threadgroup AccT local_max[SIMD_SIZE=32]` (and
+                    // `local_normalizer[32]`) without zero-initialising the
+                    // slots past `simd_group_id`. The subsequent
+                    // `simd_max(local_max[simd_lane_id])` reads all 32 slots
+                    // — when MLX dispatches these it does so at
+                    // `kernel->maxTotalThreadsPerThreadgroup() == 1024`, so
+                    // `n_simd == 32` and every slot is initialised. We
+                    // dispatch with `tpg=256` for MT-side cooperative
+                    // reductions, which would leave 24 slots holding
+                    // garbage and produces NaN outputs. Pin MLX dispatch to
+                    // 1024 to sidestep it; `rms_*` and `layer_norm_looped*`
+                    // zero-init their threadgroup arrays explicitly and
+                    // are unaffected by a larger MLX tpg.
+                    mlx_tpg: 1024usize,
                 }] };
                 (sh, quote! { crate::spec::BenchDispatch::Generic })
             },

@@ -646,15 +646,45 @@ impl MslGenerator {
                 },
 
                 // ---- scan operations --------------------------------------
-                Op::Scan { value, axis: _, op: rk, exclusive: _ } => {
+                //
+                // Maps `simd_scan_{inclusive,exclusive}` to Metal's
+                // `simd_prefix_{inclusive,exclusive}_{sum,product}` simdgroup
+                // intrinsics. The codegen previously emitted a `value + init`
+                // placeholder which silently returned the wrong result (no
+                // cross-lane communication at all) — `mt_scan_f32`'s
+                // hierarchical-scan pattern depended on the exclusive sum
+                // and was producing garbage on GPU dispatch. Min/Max scans
+                // aren't shipped by Metal as built-ins; emit a placeholder
+                // for them rather than silently mis-compile and add a
+                // TODO so callers know to lower to a butterfly shuffle if
+                // they need them.
+                Op::Scan { value, axis: _, op: rk, exclusive } => {
                     let v = self.vname(vid, block, extra_names);
                     let rv = self.vname(Some(*value), block, extra_names);
-                    let init = match rk {
-                        ReduceKind::Sum | ReduceKind::Mean => "0.0f",
-                        ReduceKind::Max => "-INFINITY",
-                        ReduceKind::Min => "INFINITY",
+                    let fn_name = match (rk, *exclusive) {
+                        (ReduceKind::Sum | ReduceKind::Mean, true) =>
+                            Some("simd_prefix_exclusive_sum"),
+                        (ReduceKind::Sum | ReduceKind::Mean, false) =>
+                            Some("simd_prefix_inclusive_sum"),
+                        _ => None,
                     };
-                    wl!(out, "{pad}float {v} = {rv} + {init}; // Scan placeholder");
+                    match fn_name {
+                        Some(f) => wl!(out, "{pad}float {v} = {f}({rv});"),
+                        None => {
+                            let init = match rk {
+                                ReduceKind::Max => "-INFINITY",
+                                ReduceKind::Min => "INFINITY",
+                                _ => "0.0f",
+                            };
+                            // TODO: lower min/max scans via simd_shuffle_xor
+                            // butterfly. No kernel hits this today.
+                            wl!(
+                                out,
+                                "{pad}float {v} = {rv} + {init}; // TODO: simd \
+                                 scan min/max not implemented"
+                            );
+                        },
+                    }
                 },
 
                 Op::StrideScan { dst, offset, end, .. } => {
