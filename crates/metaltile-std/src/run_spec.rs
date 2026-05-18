@@ -271,15 +271,15 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
         let (ref_perf_val, ref_stats) = if let Some(mlx_args) = shape.mlx_args {
             let mlx_tpg = if shape.mlx_tpg > 0 { shape.mlx_tpg } else { shape.tpg };
             let mlx_grid = shape.mlx_grid.unwrap_or(shape.grid).eval(n, b, mlx_tpg);
-            mlx_compiled.as_ref().and_then(|rk| {
+            mlx_compiled.as_ref().map(|rk| {
                 let mlx_bufs: Vec<GpuBuffer> = mlx_args
                     .iter()
                     .map(|arg| mlx_buf(spec, runner, arg, shape, n, b, dt))
                     .collect();
                 let mlx_refs: Vec<&GpuBuffer> = mlx_bufs.iter().collect();
                 match bench_gbps(runner, rk, &mlx_refs, mlx_grid, [mlx_tpg, 1, 1], bytes) {
-                    Some((p, t)) => Some((Some(p), Some(t))),
-                    None => Some((None, None)),
+                    Some((p, t)) => (Some(p), Some(t)),
+                    None => (None, None),
                 }
             })
             .unwrap_or((None, None))

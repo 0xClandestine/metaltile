@@ -88,19 +88,19 @@ impl SuitePrinter {
 
         let mut hdr = format!(
             "  {}  {} {} {} {} {} {}",
-            paint_stdout(&pad_left("Shape", shape_w), bold),
+            paint_stdout(pad_left("Shape", shape_w), bold),
             sep,
-            paint_stdout(&pad_right(&format!("Ref({})", metric), ref_w), bold),
+            paint_stdout(pad_right(&format!("Ref({})", metric), ref_w), bold),
             sep,
-            paint_stdout(&pad_right(&format!("MT({})", metric), mt_w), bold),
+            paint_stdout(pad_right(&format!("MT({})", metric), mt_w), bold),
             sep,
-            paint_stdout(&pad_right("MT%", pct_w), bold),
+            paint_stdout(pad_right("MT%", pct_w), bold),
         );
         if self.show_correctness {
             hdr.push_str(&format!(
                 " {} {}",
                 sep,
-                paint_stdout(&pad_right("ok", ck_w), bold),
+                paint_stdout(pad_right("ok", ck_w), bold),
             ));
         }
         if self.verbose >= 2 {
@@ -110,16 +110,16 @@ impl SuitePrinter {
             hdr.push_str(&format!(
                 " {} {} {} {} {} {}",
                 sep,
-                paint_stdout(&pad_right("p95", pw), bold),
+                paint_stdout(pad_right("p95", pw), bold),
                 sep,
-                paint_stdout(&pad_right("p99", qw), bold),
+                paint_stdout(pad_right("p99", qw), bold),
                 sep,
-                paint_stdout(&pad_right("cv%", cw), bold),
+                paint_stdout(pad_right("cv%", cw), bold),
             ));
         }
 
         // Op line: name [profile if available]
-        let op = paint_stdout(&result.op_display(), Style::new().fg(Color::Cyan).bold());
+        let op = paint_stdout(result.op_display(), Style::new().fg(Color::Cyan).bold());
         if let Some(ref map) = self.profile_map {
             if let Some(p) = map.get(&result.op_display()) {
                 let occ_color = if p.occ_pct >= 100.0 { Color::Green }
@@ -152,7 +152,7 @@ impl SuitePrinter {
         let (shape_w, ref_w, mt_w, pct_w, ck_w) =
             sub_table_widths(self.term_width, metric, self.show_correctness);
 
-        let shape = paint_stdout(&pad_left(result.shape(), shape_w), Style::new().fg(Color::BrightWhite));
+        let shape = paint_stdout(pad_left(result.shape(), shape_w), Style::new().fg(Color::BrightWhite));
         let ref_s = fmt_perf(result.ref_perf(), metric, "—");
         let mt_s = fmt_perf(result.mt_perf(), metric, "NYI");
         let pct_s = result.pct().map(|p| format!("{p:.0}%")).unwrap_or_else(|| "—".into());

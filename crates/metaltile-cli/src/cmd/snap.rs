@@ -151,7 +151,7 @@ pub fn run(args: &SnapArgs) {
     });
 
     let json = serde_json::to_string_pretty(&snapshot).unwrap();
-    std::fs::write(&out_path, &json).unwrap_or_else(|e| {
+    std::fs::write(out_path, &json).unwrap_or_else(|e| {
         eprintln!("cannot write snapshot: {e}");
         std::process::exit(1);
     });
@@ -159,7 +159,7 @@ pub fn run(args: &SnapArgs) {
     println!(
         "  {} {}  ({} results{})",
         paint_stdout("Saved →", Style::new().fg(Color::Cyan).bold()),
-        paint_stdout(&out_path, Style::new().fg(Color::BrightWhite)),
+        paint_stdout(out_path, Style::new().fg(Color::BrightWhite)),
         result_count,
         note_suffix,
     );

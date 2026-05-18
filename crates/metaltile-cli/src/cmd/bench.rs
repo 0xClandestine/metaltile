@@ -299,7 +299,7 @@ fn compute_profiles(filter: Option<&str>) -> HashMap<String, ProfileRow> {
         let dt = spec.dtypes.first().copied().unwrap_or(DType::F32);
         let mut k = (spec.kernel_ir)(dt);
         k.mode = spec.dispatch.default_mode(spec.shapes);
-        if let Err(_) = passes::run_passes(&mut k, &passes::standard_pipeline()) {
+        if passes::run_passes(&mut k, &passes::standard_pipeline()).is_err() {
             continue;
         }
         let reg_est = passes::register_estimate::estimate_registers(&k);
