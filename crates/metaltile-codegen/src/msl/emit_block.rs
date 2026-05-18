@@ -818,6 +818,59 @@ impl MslGenerator {
                     wl!(out, "{pad}threadgroup_barrier(mem_flags::mem_threadgroup);");
                 },
 
+                // ---- simdgroup matrix ops ---------------------------------
+                Op::SimdLaneId => {
+                    let v = self.vname(vid, block, extra_names);
+                    wl!(out, "{pad}uint {v} = simd_lane;");
+                },
+
+                Op::SimdGroupId => {
+                    let v = self.vname(vid, block, extra_names);
+                    wl!(out, "{pad}uint {v} = simd_group;");
+                },
+
+                Op::SimdgroupAlloc { dtype, m, n } => {
+                    let t = self.msl_type_name(*dtype);
+                    let v = self.vname(vid, block, extra_names);
+                    hoists.push(format!("simdgroup_matrix<{t}, {m}, {n}> {v};"));
+                },
+
+                Op::SimdgroupElemLoad { value, index } => {
+                    let v = self.vname(vid, block, extra_names);
+                    let sv = self.vname(Some(*value), block, extra_names);
+                    wl!(out, "{pad}auto {v} = {sv}.thread_elements()[{index}];");
+                },
+
+                Op::SimdgroupElemStore { value, index, data } => {
+                    let sv = self.vname(Some(*value), block, extra_names);
+                    let dv = self.vname(Some(*data), block, extra_names);
+                    wl!(out, "{pad}{sv}.thread_elements()[{index}] = {dv};");
+                },
+
+                Op::SimdgroupMatMul { a, b, c } => {
+                    let av = self.vname(Some(*a), block, extra_names);
+                    let bv = self.vname(Some(*b), block, extra_names);
+                    let cv = self.vname(Some(*c), block, extra_names);
+                    wl!(out, "{pad}simdgroup_multiply_accumulate({av}, {bv}, {cv});");
+                },
+
+                // ---- simd prefix scan -------------------------------------
+                Op::SimdScan { value, op: rk, exclusive } => {
+                    let v = self.vname(vid, block, extra_names);
+                    let rv = self.vname(Some(*value), block, extra_names);
+                    let prefix = if *exclusive { "exclusive" } else { "inclusive" };
+                    match rk {
+                        ReduceKind::Sum | ReduceKind::Mean =>
+                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_sum({rv});"),
+                        ReduceKind::Product =>
+                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_product({rv});"),
+                        ReduceKind::Max =>
+                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_max({rv});"),
+                        ReduceKind::Min =>
+                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_min({rv});"),
+                    }
+                },
+
                 // ---- mutable local variables ----------------------------
                 Op::DeclareLocal { name, value } => {
                     let rv = self.vname(Some(*value), block, extra_names);

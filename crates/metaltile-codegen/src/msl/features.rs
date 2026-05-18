@@ -80,7 +80,7 @@ impl MslGenerator {
                     if src == "simd_lane" {
                         feat.needs_simd_lane = true;
                     }
-                    if src == "simd_id" {
+                    if src == "simd_group" || src == "simd_id" {
                         feat.needs_simd_group = true;
                     }
                 },
@@ -99,6 +99,24 @@ impl MslGenerator {
                 },
                 Op::UnaryOp { op: UnaryOpKind::Erf, .. } => feat.needs_erf = true,
                 Op::UnaryOp { op: UnaryOpKind::ErfInv, .. } => feat.needs_erfinv = true,
+                // simdgroup matrix ops need both simd_lane and simd_group built-ins
+                Op::SimdgroupAlloc { .. }
+                | Op::SimdgroupElemLoad { .. }
+                | Op::SimdgroupElemStore { .. }
+                | Op::SimdgroupMatMul { .. } => {
+                    feat.needs_simd_lane = true;
+                    feat.needs_simd_group = true;
+                },
+                Op::SimdLaneId => feat.needs_simd_lane = true,
+                Op::SimdGroupId => feat.needs_simd_group = true,
+                Op::SimdReduce { .. } => {
+                    feat.needs_simd_lane = true;
+                    feat.needs_simd_group = true;
+                },
+                Op::SimdScan { .. } => {
+                    feat.needs_simd_lane = true;
+                    feat.needs_simd_group = true;
+                },
                 _ => {},
             }
         }

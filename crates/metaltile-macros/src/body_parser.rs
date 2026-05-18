@@ -493,12 +493,14 @@ impl DslBodyParser {
             "erf" => self.parse_unary_call(call, "erf"),
             "sign" => self.parse_unary_call(call, "sign"),
             "round" => self.parse_unary_call(call, "round"),
+            "trunc" => self.parse_unary_call(call, "trunc"),
             "sinh" => self.parse_unary_call(call, "sinh"),
             "cosh" => self.parse_unary_call(call, "cosh"),
             "tan" => self.parse_unary_call(call, "tan"),
             "asin" => self.parse_unary_call(call, "asin"),
             "atan" => self.parse_unary_call(call, "atan"),
             "asinh" => self.parse_unary_call(call, "asinh"),
+            "acos" => self.parse_unary_call(call, "acos"),
             "acosh" => self.parse_unary_call(call, "acosh"),
             "atanh" => self.parse_unary_call(call, "atanh"),
             "expm1" => self.parse_unary_call(call, "expm1"),
@@ -520,6 +522,12 @@ impl DslBodyParser {
             "threadgroup_store" => self.parse_threadgroup_store(call),
             "simd_scan_inclusive" => self.parse_simd_scan(call, false),
             "simd_scan_exclusive" => self.parse_simd_scan(call, true),
+            "simdgroup_alloc" => self.parse_simdgroup_alloc(call),
+            "simdgroup_elem_load" => self.parse_simdgroup_elem_load(call),
+            "simdgroup_elem_store" => self.parse_simdgroup_elem_store(call),
+            "simdgroup_matmul" => self.parse_simdgroup_matmul(call),
+            "simd_lane_id" => self.parse_simd_lane_id(call),
+            "simd_group_id" => self.parse_simd_group_id(call),
             "neg_infinity" => self.parse_special_const(call, "-INFINITY"),
             "infinity" => self.parse_special_const(call, "INFINITY"),
             "strided_reduce" => self.parse_strided_reduce(call),
@@ -622,8 +630,8 @@ impl DslBodyParser {
         let result = self.alloc_vid();
         match fn_name {
             "exp" | "exp2" | "log" | "log2" | "sqrt" | "rsqrt" | "abs" | "sin" | "cos" | "ceil"
-            | "floor" | "recip" | "erf" | "sign" | "round" 
-            | "sinh" | "cosh" | "tan" | "asin" | "atan" | "asinh" | "acosh" | "atanh" | "expm1" | "log10" | "erfinv" => {
+            | "floor" | "recip" | "erf" | "sign" | "round" | "trunc"
+            | "sinh" | "cosh" | "tan" | "asin" | "acos" | "atan" | "asinh" | "acosh" | "atanh" | "expm1" | "log10" | "erfinv" => {
                 let op_tokens = match fn_name {
                     "exp" => quote! { UnaryOpKind::Exp },
                     "exp2" => quote! { UnaryOpKind::Exp2 },
@@ -646,6 +654,8 @@ impl DslBodyParser {
                     "asin" => quote! { UnaryOpKind::Asin },
                     "atan" => quote! { UnaryOpKind::Atan },
                     "asinh" => quote! { UnaryOpKind::Asinh },
+                    "trunc" => quote! { UnaryOpKind::Trunc },
+                    "acos" => quote! { UnaryOpKind::Acos },
                     "acosh" => quote! { UnaryOpKind::Acosh },
                     "atanh" => quote! { UnaryOpKind::Atanh },
                     "expm1" => quote! { UnaryOpKind::Expm1 },
@@ -1287,22 +1297,103 @@ impl DslBodyParser {
         0
     }
 
-    /// `simd_scan_inclusive(x)` / `simd_scan_exclusive(x)` → Op::Scan
+    /// `simd_scan_inclusive(x)` / `simd_scan_exclusive(x)` → Op::SimdScan
     fn parse_simd_scan(&mut self, call: &ExprCall, exclusive: bool) -> u32 {
         let args: Vec<_> = call.args.iter().collect();
         let val_vid = args.first().map(|a| self.parse_expr(a)).unwrap_or(0);
         let result = self.alloc_vid();
         self.push_op(
             quote! {
-                Op::Scan {
+                Op::SimdScan {
                     value: ValueId::new(#val_vid),
                     op: ReduceKind::Sum,
                     exclusive: #exclusive,
-                    axis: 0,
                 }
             },
             result,
         );
+        result
+    }
+
+    /// `simdgroup_alloc::<T, M, N>()` → Op::SimdgroupAlloc
+    fn parse_simdgroup_alloc(&mut self, call: &ExprCall) -> u32 {
+        let result = self.alloc_vid();
+        let dtype_tokens = extract_turbofish_dtype_and_mn(&call.func)
+            .map(|(d, _, _)| d)
+            .unwrap_or_else(|| quote! { DType::F16 });
+        let m_val = extract_turbofish_dtype_and_mn(&call.func)
+            .map(|(_, m, _)| m)
+            .unwrap_or(8u32);
+        let n_val = extract_turbofish_dtype_and_mn(&call.func)
+            .map(|(_, _, n)| n)
+            .unwrap_or(8u32);
+        self.push_op(
+            quote! {
+                Op::SimdgroupAlloc { dtype: #dtype_tokens, m: #m_val, n: #n_val }
+            },
+            result,
+        );
+        result
+    }
+
+    /// `simdgroup_elem_load(sm, index)` → Op::SimdgroupElemLoad
+    fn parse_simdgroup_elem_load(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<_> = call.args.iter().collect();
+        let sm_vid = args.first().map(|a| self.parse_expr(a)).unwrap_or(0);
+        let idx = args.get(1).map(|a| self.parse_expr(a)).unwrap_or(0);
+        let result = self.alloc_vid();
+        self.push_op(
+            quote! {
+                Op::SimdgroupElemLoad { value: ValueId::new(#sm_vid), index: #idx as u32 }
+            },
+            result,
+        );
+        result
+    }
+
+    /// `simdgroup_elem_store(sm, index, data)` → Op::SimdgroupElemStore (no result)
+    fn parse_simdgroup_elem_store(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<_> = call.args.iter().collect();
+        let sm_vid = args.first().map(|a| self.parse_expr(a)).unwrap_or(0);
+        let idx = args.get(1).map(|a| self.parse_expr(a)).unwrap_or(0);
+        let data_vid = args.get(2).map(|a| self.parse_expr(a)).unwrap_or(0);
+        self.push_op_no_result(quote! {
+            Op::SimdgroupElemStore {
+                value: ValueId::new(#sm_vid),
+                index: #idx as u32,
+                data: ValueId::new(#data_vid),
+            }
+        });
+        0
+    }
+
+    /// `simdgroup_matmul(a, b, c)` → Op::SimdgroupMatMul (c = a * b + c, no result)
+    fn parse_simdgroup_matmul(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<_> = call.args.iter().collect();
+        let a_vid = args.first().map(|a| self.parse_expr(a)).unwrap_or(0);
+        let b_vid = args.get(1).map(|a| self.parse_expr(a)).unwrap_or(0);
+        let c_vid = args.get(2).map(|a| self.parse_expr(a)).unwrap_or(0);
+        self.push_op_no_result(quote! {
+            Op::SimdgroupMatMul {
+                a: ValueId::new(#a_vid),
+                b: ValueId::new(#b_vid),
+                c: ValueId::new(#c_vid),
+            }
+        });
+        0
+    }
+
+    /// `simd_lane_id()` → Op::SimdLaneId
+    fn parse_simd_lane_id(&mut self, _call: &ExprCall) -> u32 {
+        let result = self.alloc_vid();
+        self.push_op(quote! { Op::SimdLaneId }, result);
+        result
+    }
+
+    /// `simd_group_id()` → Op::SimdGroupId
+    fn parse_simd_group_id(&mut self, _call: &ExprCall) -> u32 {
+        let result = self.alloc_vid();
+        self.push_op(quote! { Op::SimdGroupId }, result);
         result
     }
 
@@ -1384,6 +1475,53 @@ fn dtype_tokens_for_name(name: &str) -> proc_macro2::TokenStream {
         "i32" | "int" => quote! { DType::I32 },
         _ => quote! { DType::F32 },
     }
+}
+
+/// Extract (dtype_tokens, M, N) from a turbofish like `::<f16, 8, 8>`.
+/// Used by `simdgroup_alloc::<dtype, M, N>()`.
+fn extract_turbofish_dtype_and_mn(
+    expr: &Expr,
+) -> Option<(proc_macro2::TokenStream, u32, u32)> {
+    if let Expr::Path(path) = expr {
+        for seg in &path.path.segments {
+            if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                let mut iter = args.args.iter();
+                let dtype = iter.next().and_then(|arg| {
+                    if let syn::GenericArgument::Type(syn::Type::Path(tp)) = arg
+                        && let Some(last) = tp.path.segments.last()
+                    {
+                        Some(dtype_tokens_for_name(&last.ident.to_string()))
+                    } else {
+                        None
+                    }
+                });
+                let m = iter.next().and_then(|arg| {
+                    if let syn::GenericArgument::Const(syn::Expr::Lit(lit)) = arg
+                        && let syn::Lit::Int(n) = &lit.lit
+                        && let Ok(val) = n.base10_parse::<u32>()
+                    {
+                        Some(val)
+                    } else {
+                        None
+                    }
+                });
+                let n = iter.next().and_then(|arg| {
+                    if let syn::GenericArgument::Const(syn::Expr::Lit(lit)) = arg
+                        && let syn::Lit::Int(n) = &lit.lit
+                        && let Ok(val) = n.base10_parse::<u32>()
+                    {
+                        Some(val)
+                    } else {
+                        None
+                    }
+                });
+                if let (Some(dt), Some(mm), Some(nn)) = (dtype, m, n) {
+                    return Some((dt, mm, nn));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Extract a string literal from an expression like `"my_name"`.

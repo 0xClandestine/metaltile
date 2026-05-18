@@ -46,10 +46,10 @@ impl super::MslGenerator {
             wl!(out, "{pad}{{");
             wl!(out, "{pad}    float _sv = {simd_fn}(float({input_var}));");
             // Phase 2: lane 0 of each SIMD group writes its total.
-            wl!(out, "{pad}    if (simd_lane == 0) {tg_name}[simd_id] = _sv;");
+            wl!(out, "{pad}    if (simd_lane == 0) {tg_name}[simd_group] = _sv;");
             wl!(out, "{pad}    threadgroup_barrier(mem_flags::mem_threadgroup);");
             // Phase 3: first SIMD group reduces warp totals and broadcasts via [0].
-            wl!(out, "{pad}    if (simd_id == 0) {{");
+            wl!(out, "{pad}    if (simd_group == 0) {{");
             wl!(
                 out,
                 "{pad}        float _wv = simd_lane < n_simd ? {tg_name}[simd_lane] : {pad_val};"

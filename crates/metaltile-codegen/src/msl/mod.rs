@@ -181,12 +181,8 @@ impl MslGenerator {
         if feat.needs_simd_lane {
             write!(out, ",\n    uint simd_lane [[thread_index_in_simdgroup]]").unwrap();
         }
-        if feat.needs_simd_group && !feat.is_matmul {
-            write!(out, ",\n    uint simd_id [[simdgroup_index_in_threadgroup]]").unwrap();
-        }
-        if self.config.use_simd_matrix && feat.is_matmul {
+        if feat.needs_simd_group {
             write!(out, ",\n    uint simd_group [[simdgroup_index_in_threadgroup]]").unwrap();
-            write!(out, ",\n    uint simd_lane [[thread_index_in_simdgroup]]").unwrap();
         }
 
         wl!(out, "\n) {{");

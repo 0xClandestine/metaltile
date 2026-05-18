@@ -270,7 +270,9 @@ fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
         | Op::Transpose { .. }
         | Op::ExpandDims { .. }
         | Op::Reshape { .. }
-        | Op::Slice { .. } => true,
+        | Op::Slice { .. }
+        | Op::SimdgroupElemLoad { .. }
+        | Op::SimdScan { .. } => true,
 
         // Load from a read-only (const) param is pure.
         Op::Load { src, .. } => read_only.contains(src.as_str()),
@@ -279,6 +281,7 @@ fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
         Op::Store { .. }
         | Op::Atomic { .. }
         | Op::Barrier
+        | Op::SimdgroupAlloc { .. }
         | Op::ThreadgroupStore { .. }
         | Op::SetLocal { .. }
         | Op::DeclareLocal { .. }
@@ -306,7 +309,11 @@ fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
         | Op::FlashAttention { .. }
         | Op::SlidingWindowAttention { .. }
         | Op::RmsNorm { .. }
-        | Op::GatedMlp { .. } => false,
+        | Op::GatedMlp { .. }
+        | Op::SimdgroupMatMul { .. }
+        | Op::SimdgroupElemStore { .. }
+        | Op::SimdLaneId
+        | Op::SimdGroupId => false,
     }
 }
 

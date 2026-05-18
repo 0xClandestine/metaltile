@@ -448,6 +448,36 @@ pub fn mt_asinh<T>(a: Tensor<T>, out: Tensor<T>) {
 
 #[bench_kernel(
     op="unary",
+    subop="acos",
+    class=Unary,
+    input=Unit,
+    // acos has domain [-1, 1]; Unit input clamps to [-1+ε, 1-ε].
+    tol=1e-4,
+    mlx="v_ArcCos{tn}{tn}",
+    metal_file="unary.metal",
+)]
+#[kernel]
+pub fn mt_acos<T>(a: Tensor<T>, out: Tensor<T>) {
+    let idx = program_id(0);
+    store(out[idx], acos(load(a[idx])));
+}
+
+#[bench_kernel(
+    op="unary",
+    subop="trunc",
+    class=Unary,
+    input=Signed,
+    // trunc is exact (sets the integer-part bits to zero).
+    tol=1e-6,
+)]
+#[kernel]
+pub fn mt_trunc<T>(a: Tensor<T>, out: Tensor<T>) {
+    let idx = program_id(0);
+    store(out[idx], trunc(load(a[idx])));
+}
+
+#[bench_kernel(
+    op="unary",
     subop="acosh",
     class=Unary,
     input=Positive,

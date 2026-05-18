@@ -145,6 +145,8 @@ pub enum UnaryOpKind {
     Atan,
     /// Inverse hyperbolic sine: `asinh(x)`.
     Asinh,
+    /// Arc cosine: `acos(x)`.
+    Acos,
     /// Inverse hyperbolic cosine: `acosh(x)`.
     Acosh,
     /// Inverse hyperbolic tangent: `atanh(x)`.
@@ -187,6 +189,7 @@ impl UnaryOpKind {
             UnaryOpKind::Asin => format!("asin({arg})"),
             UnaryOpKind::Atan => format!("atan({arg})"),
             UnaryOpKind::Asinh => format!("asinh({arg})"),
+            UnaryOpKind::Acos => format!("acos({arg})"),
             UnaryOpKind::Acosh => format!("acosh({arg})"),
             UnaryOpKind::Atanh => format!("atanh({arg})"),
             UnaryOpKind::Expm1 => format!("expm1({arg})"),
@@ -593,6 +596,32 @@ pub enum Op {
     /// SIMD-group reduction: reduce all lanes within the SIMD group.
     /// Maps to `simd_sum(v)`, `simd_max(v)`, `simd_min(v)` (Metal 2.1+).
     SimdReduce { value: ValueId, op: ReduceKind },
+
+    /// Allocate a simdgroup matrix of shape M×N with given element type.
+    /// Emits `simdgroup_matrix<T, M, N> name;` in MSL.
+    SimdgroupAlloc { dtype: DType, m: u32, n: u32 },
+
+    /// Load one element from a simdgroup matrix: `result = name.thread_elements()[index]`.
+    /// Produces a scalar value.
+    SimdgroupElemLoad { value: ValueId, index: u32 },
+
+    /// Store one element into a simdgroup matrix: `name.thread_elements()[index] = data`.
+    /// No result (side-effecting).
+    SimdgroupElemStore { value: ValueId, index: u32, data: ValueId },
+
+    /// simdgroup multiply-accumulate: `C = A * B + C`.
+    /// All three operands must be simdgroup matrices of compatible shapes.
+    SimdgroupMatMul { a: ValueId, b: ValueId, c: ValueId },
+
+    /// Built-in: returns the SIMD lane index (thread_index_in_simdgroup).
+    SimdLaneId,
+
+    /// Built-in: returns the SIMD group index (simdgroup_index_in_threadgroup).
+    SimdGroupId,
+
+    /// SIMD-group inclusive prefix scan.
+    /// Maps to `simd_scan_inclusive_<op>(v)` (Metal 3.0+).
+    SimdScan { value: ValueId, op: ReduceKind, exclusive: bool },
 
     /// Allocate a named threadgroup (shared) memory array.
     /// Emits `threadgroup T name[size]` in the kernel body.
@@ -1085,6 +1114,23 @@ impl Op {
             },
             Op::ArgReduce { value, axis, op } => {
                 write!(f, "ArgReduce(v{}, axis={axis}, {op:?})", value.as_u32())
+            },
+            Op::SimdgroupAlloc { dtype, m, n } => {
+                write!(f, "SimdgroupAlloc({dtype:?}, {m}×{n})")
+            },
+            Op::SimdgroupElemLoad { value, index } => {
+                write!(f, "SimdgroupElemLoad(v{}, [{index}])", value.as_u32())
+            },
+            Op::SimdgroupElemStore { value, index, data } => {
+                write!(f, "SimdgroupElemStore(v{}, [{index}], v{})", value.as_u32(), data.as_u32())
+            },
+            Op::SimdgroupMatMul { a, b, c } => {
+                write!(f, "SimdgroupMatMul(v{}, v{}, v{})", a.as_u32(), b.as_u32(), c.as_u32())
+            },
+            Op::SimdLaneId => write!(f, "SimdLaneId"),
+            Op::SimdGroupId => write!(f, "SimdGroupId"),
+            Op::SimdScan { value, op, exclusive } => {
+                write!(f, "SimdScan(v{}, {op:?}, exclusive={exclusive})", value.as_u32())
             },
         }
     }
