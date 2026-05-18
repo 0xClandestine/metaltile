@@ -20,9 +20,11 @@ use metaltile_core::ir::KernelMode;
 use metaltile_std::{bench_types::DType, spec::BenchSpec};
 
 use crate::{
-    flag_present, flag_val,
+    flag_present,
+    flag_val,
     kernel_utils::{dtype_label, effective_mode},
-    matches_filter, positional,
+    matches_filter,
+    positional,
     term::{Color, Style, paint_stdout},
 };
 

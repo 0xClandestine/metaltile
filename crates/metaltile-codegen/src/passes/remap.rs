@@ -821,11 +821,7 @@ mod tests {
 
         // Single-op test: a fused chain that contains a sub-op ref.
         let op = Op::FusedElementwise {
-            ops: vec![Op::BinOp {
-                op: BinOpKind::Add,
-                lhs: sub_op_ref_0,
-                rhs: real_vid,
-            }],
+            ops: vec![Op::BinOp { op: BinOpKind::Add, lhs: sub_op_ref_0, rhs: real_vid }],
         };
         assert_eq!(max_vid_in_op(&op), 42, "sub-op refs must not bump max_vid");
 
@@ -837,10 +833,7 @@ mod tests {
             Op::FusedElementwise {
                 ops: vec![
                     Op::Cast { value: ValueId::new(100), dtype: metaltile_core::dtype::DType::F32 },
-                    Op::UnaryOp {
-                        op: metaltile_core::ir::UnaryOpKind::Neg,
-                        value: sub_op_ref_0,
-                    },
+                    Op::UnaryOp { op: metaltile_core::ir::UnaryOpKind::Neg, value: sub_op_ref_0 },
                 ],
             },
             ValueId::new(101),

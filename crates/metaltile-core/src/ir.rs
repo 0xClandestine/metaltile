@@ -311,7 +311,10 @@ impl BinOpKind {
 
     /// Whether this op is emitted as `fn(a, b)` rather than infix `a op b`.
     pub fn is_fn_call(self) -> bool {
-        matches!(self, BinOpKind::Max | BinOpKind::Min | BinOpKind::Pow | BinOpKind::ATan2 | BinOpKind::Rem)
+        matches!(
+            self,
+            BinOpKind::Max | BinOpKind::Min | BinOpKind::Pow | BinOpKind::ATan2 | BinOpKind::Rem
+        )
     }
 }
 

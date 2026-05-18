@@ -630,8 +630,9 @@ impl DslBodyParser {
         let result = self.alloc_vid();
         match fn_name {
             "exp" | "exp2" | "log" | "log2" | "sqrt" | "rsqrt" | "abs" | "sin" | "cos" | "ceil"
-            | "floor" | "recip" | "erf" | "sign" | "round" | "trunc"
-            | "sinh" | "cosh" | "tan" | "asin" | "acos" | "atan" | "asinh" | "acosh" | "atanh" | "expm1" | "log10" | "erfinv" => {
+            | "floor" | "recip" | "erf" | "sign" | "round" | "trunc" | "sinh" | "cosh" | "tan"
+            | "asin" | "acos" | "atan" | "asinh" | "acosh" | "atanh" | "expm1" | "log10"
+            | "erfinv" => {
                 let op_tokens = match fn_name {
                     "exp" => quote! { UnaryOpKind::Exp },
                     "exp2" => quote! { UnaryOpKind::Exp2 },
@@ -1319,14 +1320,10 @@ impl DslBodyParser {
     fn parse_simdgroup_alloc(&mut self, call: &ExprCall) -> u32 {
         let result = self.alloc_vid();
         let dtype_tokens = extract_turbofish_dtype_and_mn(&call.func)
-            .map(|(d, _, _)| d)
+            .map(|(d, ..)| d)
             .unwrap_or_else(|| quote! { DType::F16 });
-        let m_val = extract_turbofish_dtype_and_mn(&call.func)
-            .map(|(_, m, _)| m)
-            .unwrap_or(8u32);
-        let n_val = extract_turbofish_dtype_and_mn(&call.func)
-            .map(|(_, _, n)| n)
-            .unwrap_or(8u32);
+        let m_val = extract_turbofish_dtype_and_mn(&call.func).map(|(_, m, _)| m).unwrap_or(8u32);
+        let n_val = extract_turbofish_dtype_and_mn(&call.func).map(|(_, _, n)| n).unwrap_or(8u32);
         self.push_op(
             quote! {
                 Op::SimdgroupAlloc { dtype: #dtype_tokens, m: #m_val, n: #n_val }
@@ -1479,9 +1476,7 @@ fn dtype_tokens_for_name(name: &str) -> proc_macro2::TokenStream {
 
 /// Extract (dtype_tokens, M, N) from a turbofish like `::<f16, 8, 8>`.
 /// Used by `simdgroup_alloc::<dtype, M, N>()`.
-fn extract_turbofish_dtype_and_mn(
-    expr: &Expr,
-) -> Option<(proc_macro2::TokenStream, u32, u32)> {
+fn extract_turbofish_dtype_and_mn(expr: &Expr) -> Option<(proc_macro2::TokenStream, u32, u32)> {
     if let Expr::Path(path) = expr {
         for seg in &path.path.segments {
             if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {

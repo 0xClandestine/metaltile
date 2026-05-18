@@ -5,7 +5,13 @@ use metaltile_codegen::msl::MslGenerator;
 use metaltile_core::{dtype::DType, ir::KernelMode};
 use metaltile_std::{
     bench_types::{
-        DtypeCtx, EquivResult, EquivTolerance, OpBench, OpResult, check_equiv, check_equiv_with,
+        DtypeCtx,
+        EquivResult,
+        EquivTolerance,
+        OpBench,
+        OpResult,
+        check_equiv,
+        check_equiv_with,
     },
     spec::{BenchDispatch, BenchSpec, MlxArg, ScalarBufSpec, ShapeSpec},
 };
@@ -21,26 +27,20 @@ pub fn run(spec: &BenchSpec, runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
         BenchDispatch::Generic => run_generic(spec, runner, dt, &bench),
         BenchDispatch::Sort { b, n, tpg } => run_sort(spec, runner, dt, &bench, *b, *n, *tpg),
         BenchDispatch::Scan { shapes, tpg } => run_scan(spec, runner, dt, &bench, shapes, *tpg),
-        BenchDispatch::ArgReduce { n, check_n, tpg } => {
-            run_arg_reduce(spec, runner, dt, &bench, *n, *check_n, *tpg)
-        },
+        BenchDispatch::ArgReduce { n, check_n, tpg } =>
+            run_arg_reduce(spec, runner, dt, &bench, *n, *check_n, *tpg),
         BenchDispatch::Random { n, tpg } => run_random(spec, runner, dt, &bench, *n, *tpg),
-        BenchDispatch::FpQuantized { n, tpg } => {
-            run_fp_quantized(spec, runner, dt, &bench, *n, *tpg)
-        },
-        BenchDispatch::QuantizedMatVec { shapes, group_size, tpg } => {
-            run_quantized_mat_vec(spec, runner, dt, &bench, shapes, *group_size, *tpg)
-        },
-        BenchDispatch::Rope { b, h, l, d, n_per_group } => {
-            run_rope(spec, runner, dt, &bench, *b, *h, *l, *d, *n_per_group)
-        },
-        BenchDispatch::Attention { shapes, tpg } => {
-            run_attention(spec, runner, dt, &bench, shapes, *tpg)
-        },
-        BenchDispatch::StridedCopy { m, n, pad } => {
-            run_strided_copy(spec, runner, dt, &bench, *m, *n, *pad)
-        },
-        BenchDispatch::AffineDequantize { bits, group_size, n_groups, batch, tpg } => {
+        BenchDispatch::FpQuantized { n, tpg } =>
+            run_fp_quantized(spec, runner, dt, &bench, *n, *tpg),
+        BenchDispatch::QuantizedMatVec { shapes, group_size, tpg } =>
+            run_quantized_mat_vec(spec, runner, dt, &bench, shapes, *group_size, *tpg),
+        BenchDispatch::Rope { b, h, l, d, n_per_group } =>
+            run_rope(spec, runner, dt, &bench, *b, *h, *l, *d, *n_per_group),
+        BenchDispatch::Attention { shapes, tpg } =>
+            run_attention(spec, runner, dt, &bench, shapes, *tpg),
+        BenchDispatch::StridedCopy { m, n, pad } =>
+            run_strided_copy(spec, runner, dt, &bench, *m, *n, *pad),
+        BenchDispatch::AffineDequantize { bits, group_size, n_groups, batch, tpg } =>
             run_affine_dequantize(
                 spec,
                 runner,
@@ -51,9 +51,8 @@ pub fn run(spec: &BenchSpec, runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
                 *n_groups,
                 *batch,
                 *tpg,
-            )
-        },
-        BenchDispatch::AffineQuantize { bits, group_size, n_groups, batch, tpg } => {
+            ),
+        BenchDispatch::AffineQuantize { bits, group_size, n_groups, batch, tpg } =>
             run_affine_quantize(
                 spec,
                 runner,
@@ -64,9 +63,8 @@ pub fn run(spec: &BenchSpec, runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
                 *n_groups,
                 *batch,
                 *tpg,
-            )
-        },
-        BenchDispatch::SdpaVector { head_dim, n_kv, n_q_heads, gqa_factor, batch, tpg } => {
+            ),
+        BenchDispatch::SdpaVector { head_dim, n_kv, n_q_heads, gqa_factor, batch, tpg } =>
             run_sdpa_vector(
                 spec,
                 runner,
@@ -78,8 +76,7 @@ pub fn run(spec: &BenchSpec, runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
                 *gqa_factor,
                 *batch,
                 *tpg,
-            )
-        },
+            ),
     }
 }
 
@@ -108,9 +105,7 @@ fn msl_for_mode(spec: &BenchSpec, dt: DType, mode: KernelMode) -> Option<String>
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-fn mlx_name(pat: &str, tn: &str) -> String {
-    pat.replace("{tn}", tn)
-}
+fn mlx_name(pat: &str, tn: &str) -> String { pat.replace("{tn}", tn) }
 fn compile_mt(runner: &GpuRunner, msl: &str, name: &str) -> Option<crate::runner::CompiledKernel> {
     runner.compile(msl, name).ok()
 }

@@ -106,7 +106,7 @@ impl super::MslGenerator {
             wl!(out, "        p = metal::fma(p, t, -2.64646143e-1f);");
             wl!(out, "        p = metal::fma(p, t,  8.40016484e-1f);");
             wl!(out, "    }} else {{");
-            wl!(out, "        p =  5.43877832e-9f;");  // 0x1.75c000p-28
+            wl!(out, "        p =  5.43877832e-9f;"); // 0x1.75c000p-28
             wl!(out, "        p = metal::fma(p, t,  1.43285448e-7f);");
             wl!(out, "        p = metal::fma(p, t,  1.22774793e-6f);");
             wl!(out, "        p = metal::fma(p, t,  1.12963626e-7f);");

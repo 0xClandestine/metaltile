@@ -246,8 +246,11 @@ impl MslGenerator {
                         .map(|tv| matches!(tv.dtype, DType::F32 | DType::F16 | DType::BF16))
                         .unwrap_or(false);
                     match op {
-                        BinOpKind::Max | BinOpKind::Min | BinOpKind::Pow
-                        | BinOpKind::ATan2 | BinOpKind::Rem => {
+                        BinOpKind::Max
+                        | BinOpKind::Min
+                        | BinOpKind::Pow
+                        | BinOpKind::ATan2
+                        | BinOpKind::Rem => {
                             wl!(out, "{pad}auto {v} = {}({l}, {r});", op.msl_symbol())
                         },
                         BinOpKind::And => wl!(out, "{pad}auto {v} = ({l} && {r});"),
@@ -793,7 +796,8 @@ impl MslGenerator {
                             wl!(out, "{pad}float {v} = simd_sum(float({rv}));"),
                         ReduceKind::Max => wl!(out, "{pad}float {v} = simd_max(float({rv}));"),
                         ReduceKind::Min => wl!(out, "{pad}float {v} = simd_min(float({rv}));"),
-                        ReduceKind::Product => wl!(out, "{pad}float {v} = __mt_simd_product(float({rv}));"),
+                        ReduceKind::Product =>
+                            wl!(out, "{pad}float {v} = __mt_simd_product(float({rv}));"),
                     }
                 },
 
