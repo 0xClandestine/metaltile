@@ -608,12 +608,23 @@ impl DslBodyParser {
             "simd_min" => self.parse_simd_reduce(call, "Min"),
             "simd_shuffle_xor" => self.parse_simd_shuffle_xor(call),
             "simd_broadcast" => self.parse_simd_broadcast(call),
-            "atomic_add" => self.parse_atomic(call, "Add"),
-            "atomic_max" => self.parse_atomic(call, "Max"),
-            "atomic_min" => self.parse_atomic(call, "Min"),
-            "atomic_and" => self.parse_atomic(call, "And"),
-            "atomic_or" => self.parse_atomic(call, "Or"),
-            "atomic_xor" => self.parse_atomic(call, "Xor"),
+            // Device-scope atomics — target a kernel buffer parameter.
+            "atomic_add" => self.parse_atomic(call, "Add", "Device"),
+            "atomic_max" => self.parse_atomic(call, "Max", "Device"),
+            "atomic_min" => self.parse_atomic(call, "Min", "Device"),
+            "atomic_and" => self.parse_atomic(call, "And", "Device"),
+            "atomic_or" => self.parse_atomic(call, "Or", "Device"),
+            "atomic_xor" => self.parse_atomic(call, "Xor", "Device"),
+            // Threadgroup-scope atomics — target a `threadgroup_alloc`'d
+            // uint array.  Codegen reinterprets each slot as
+            // `threadgroup atomic_uint*` for the call.  AURA encode's
+            // pack stage races on shared u32 words with these.
+            "atomic_add_tg" => self.parse_atomic(call, "Add", "Threadgroup"),
+            "atomic_max_tg" => self.parse_atomic(call, "Max", "Threadgroup"),
+            "atomic_min_tg" => self.parse_atomic(call, "Min", "Threadgroup"),
+            "atomic_and_tg" => self.parse_atomic(call, "And", "Threadgroup"),
+            "atomic_or_tg" => self.parse_atomic(call, "Or", "Threadgroup"),
+            "atomic_xor_tg" => self.parse_atomic(call, "Xor", "Threadgroup"),
             "threadgroup_barrier" => self.parse_barrier(call),
             "simdgroup_barrier_mem_none" => self.parse_simdgroup_barrier(call),
             "threadgroup_alloc" => self.parse_threadgroup_alloc(call),
@@ -1382,10 +1393,16 @@ impl DslBodyParser {
         result
     }
 
-    /// `atomic_<op>(dst, index, value)` → Op::Atomic. `dst` must be a string
-    /// literal (kernel param name); `index` and `value` are SSA expressions.
-    /// No result — the atomic is a side-effecting store.
-    fn parse_atomic(&mut self, call: &ExprCall, op_str: &str) -> u32 {
+    /// `atomic_<op>(dst, index, value)` → `Op::Atomic`.  `dst` must be a
+    /// string literal:
+    ///   * Device scope (default `atomic_<op>(…)`): a kernel buffer
+    ///     parameter name.
+    ///   * Threadgroup scope (`atomic_<op>_tg(…)`): a name that was
+    ///     declared via `threadgroup_alloc(name, size, "u32")` earlier in
+    ///     the kernel.
+    /// `index` and `value` are SSA expressions.  No result — atomics are
+    /// side-effecting stores.
+    fn parse_atomic(&mut self, call: &ExprCall, op_str: &str, scope_str: &str) -> u32 {
         let args: Vec<_> = call.args.iter().collect();
         let dst = if let Some(syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. })) =
             args.first().map(|a| match a {
@@ -1411,9 +1428,14 @@ impl DslBodyParser {
             "Xor" => quote! { AtomicKind::Xor },
             _ => quote! { AtomicKind::Add },
         };
+        let scope_tokens = match scope_str {
+            "Threadgroup" => quote! { AtomicScope::Threadgroup },
+            _ => quote! { AtomicScope::Device },
+        };
         self.push_op_no_result(quote! {
             Op::Atomic {
                 op: #op_tokens,
+                scope: #scope_tokens,
                 dst: #dst.to_string(),
                 index: ValueId::new(#index),
                 value: ValueId::new(#value),
