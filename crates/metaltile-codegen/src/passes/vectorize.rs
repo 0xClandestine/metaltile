@@ -56,7 +56,12 @@ impl super::Pass for VectorizePass {
             .filter_map(|r| r.map(|v| v.as_u32()))
             .max()
             .unwrap_or(0);
-        let mut next_vid = max_vid + 1;
+        // Loop-var aliases in the MSL emitter use `var.as_u32() + 1000`
+        // (see `msl/emit_block.rs` `Op::Loop` handler). Start vectorize-
+        // allocated vids comfortably past that range so dense inner loops
+        // can't steal a loop variable's name and emit `float4 i_0 = …`
+        // that shadows the surrounding `for (uint i_0 = …)`.
+        let mut next_vid = (max_vid + 1).max(2000);
         // Snapshot kernel.body so child blocks (loop bodies) can find
         // loop-invariant Const ops hoisted there by LICM. Without this,
         // decompose_index falls back to (vid, 0) for index expressions
@@ -74,6 +79,12 @@ impl super::Pass for VectorizePass {
 
 /// Maximum vector width to try (2, 4, or 8).
 const MAX_VEC_LEN: usize = 8;
+
+/// Cap run collection at vector widths the MSL emitter + Apple Metal driver
+/// actually handle correctly. `half8` exists in the MSL spec but on M2 Pro it
+/// silently returns zero on `*((device half8*)ptr)` loads even when correctly
+/// aligned, so cap F16 at 4 too.
+fn max_vec_for(_dtype: DType) -> usize { 4 }
 
 #[allow(clippy::needless_range_loop)]
 fn vectorize_block(
@@ -117,10 +128,19 @@ fn vectorize_block(
             // Use structural analysis: find the (invariant_base, const_offset) for this index.
             let (inv_base, offset) = decompose_index(block, base_vid, parent);
 
-            // Collect a run of loads with same src, same invariant_base, and consecutive offsets.
+            // Collect a run of loads with same src, same invariant_base, and consecutive
+            // offsets. Look past intermediate non-Load ops (e.g. index BinOps left over
+            // from the schedule pass interleaving load addressing with their consumers);
+            // those stay in place during the Phase 3 rebuild — only the matched Loads
+            // are skipped and become VectorExtract.
+            let max_vlen = max_vec_for(param.dtype);
             let mut run_indices: Vec<usize> = vec![i];
-            for j in (i + 1)..n.min(i + MAX_VEC_LEN) {
+            let window = n.min(i + 1 + 2 * MAX_VEC_LEN);
+            for j in (i + 1)..window {
                 if skip[j] {
+                    continue;
+                }
+                if run_indices.len() >= max_vlen {
                     break;
                 }
                 match &block.ops[j] {
@@ -130,13 +150,17 @@ fn vectorize_block(
                             _ => break,
                         };
                         let (next_inv, next_off) = decompose_index(block, next_base, parent);
-                        if next_inv == inv_base && next_off == offset + (j - i) as i64 {
+                        if index_eq(block, next_inv, inv_base)
+                            && next_off == offset + run_indices.len() as i64
+                        {
                             run_indices.push(j);
                         } else {
                             break;
                         }
                     },
-                    _ => break,
+                    // Skip past intermediate non-matching ops (BinOp/Const/Cast left in
+                    // place by schedule). They don't depend on the in-progress Load run.
+                    _ => continue,
                 }
             }
 
@@ -193,9 +217,14 @@ fn vectorize_block(
 
             let (inv_base, offset) = decompose_index(block, base_vid, parent);
 
+            let max_vlen = max_vec_for(param.dtype);
             let mut run_indices: Vec<usize> = vec![i];
-            for j in (i + 1)..n.min(i + MAX_VEC_LEN) {
+            let window = n.min(i + 1 + 2 * MAX_VEC_LEN);
+            for j in (i + 1)..window {
                 if skip[j] {
+                    continue;
+                }
+                if run_indices.len() >= max_vlen {
                     break;
                 }
                 match &block.ops[j] {
@@ -205,17 +234,37 @@ fn vectorize_block(
                             _ => break,
                         };
                         let (next_inv, next_off) = decompose_index(block, next_base, parent);
-                        if next_inv == inv_base && next_off == offset + (j - i) as i64 {
+                        if index_eq(block, next_inv, inv_base)
+                            && next_off == offset + run_indices.len() as i64
+                        {
                             run_indices.push(j);
                         } else {
                             break;
                         }
                     },
-                    _ => break,
+                    _ => continue,
                 }
             }
 
             if run_indices.len() >= 2 {
+                // VectorStore writes ONE value to all `len` slots — only safe
+                // when every store in the run writes the same ValueId (i.e. a
+                // genuine store-broadcast pattern). When the values differ
+                // (the normal case for SIMD reductions writing distinct
+                // per-lane outputs), fusing would silently drop N-1 values
+                // and broadcast the first. Skip fusion in that case.
+                let same_value = run_indices.iter().all(|&j| {
+                    matches!(&block.ops[j], Op::Store { value, .. } if {
+                        let first = match &block.ops[run_indices[0]] {
+                            Op::Store { value, .. } => *value,
+                            _ => return false,
+                        };
+                        *value == first
+                    })
+                });
+                if !same_value {
+                    continue;
+                }
                 let vlen = run_indices.len() as u32;
                 let first_value = match &block.ops[i] {
                     Op::Store { value, .. } => *value,
@@ -313,6 +362,35 @@ fn decompose_index(block: &Block, vid: ValueId, parent: Option<&Block>) -> (Valu
     (vid, 0)
 }
 
+/// Structural equality on index ValueIds — two `Add(x, y)` ops with identical
+/// operands are treated as equal even if scheduling re-introduced the duplicate
+/// after CSE. Without this, consecutive scalar Loads whose base address gets
+/// re-emitted per-Load (instead of CSE-shared) fail to vectorize.
+fn index_eq(block: &Block, a: ValueId, b: ValueId) -> bool {
+    if a == b {
+        return true;
+    }
+    let op_a = find_op(block, a);
+    let op_b = find_op(block, b);
+    match (op_a, op_b) {
+        (Some(Op::BinOp { op: oa, lhs: la, rhs: ra }), Some(Op::BinOp { op: ob, lhs: lb, rhs: rb }))
+            if oa == ob =>
+        {
+            (la == lb && ra == rb) || (la == rb && ra == lb)
+        },
+        _ => false,
+    }
+}
+
+fn find_op(block: &Block, vid: ValueId) -> Option<&Op> {
+    for (i, op) in block.ops.iter().enumerate() {
+        if block.results.get(i) == Some(&Some(vid)) {
+            return Some(op);
+        }
+    }
+    None
+}
+
 /// Find an Op::Const for `vid` — current block first, then `parent`.
 fn find_const(block: &Block, parent: Option<&Block>, vid: ValueId) -> Option<i64> {
     find_const_in_block(block, vid).or_else(|| parent.and_then(|p| find_const_in_block(p, vid)))
@@ -331,7 +409,10 @@ fn find_const_in_block(block: &Block, vid: ValueId) -> Option<i64> {
 }
 
 /// Whether a dtype supports vectorization. BF16 is vectorizable on Metal 3.1+
-/// (bfloat2, bfloat4 are valid MSL vector types).
+/// (bfloat2, bfloat4 are valid MSL vector types). Integer dtypes intentionally
+/// excluded — `uint2` weight loads in qmv regressed perf on M2 Pro because the
+/// scalar form already coalesces in L2 and the extra extract ops cost more than
+/// the load consolidation saves.
 fn is_vectorizable(dtype: DType) -> bool { matches!(dtype, DType::F16 | DType::F32 | DType::BF16) }
 
 fn remap_values_in_op(op: &mut Op, remap: &BTreeMap<ValueId, ValueId>) {
