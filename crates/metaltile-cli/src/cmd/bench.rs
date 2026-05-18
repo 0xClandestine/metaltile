@@ -8,8 +8,6 @@ use metaltile_std::{
         CorrectnessStatus,
         DType,
         OpResult,
-        ProfileRow,
-        SuitePrinter,
         set_result_reporter,
         validate_results,
     },
@@ -17,6 +15,7 @@ use metaltile_std::{
 };
 
 use crate::{
+    suite_printer::{ProfileRow, SuitePrinter},
     BenchArgs,
     matches_filter,
     run_spec::run as run_spec,

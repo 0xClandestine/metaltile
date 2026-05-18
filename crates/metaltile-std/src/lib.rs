@@ -8,4 +8,3 @@ pub mod ffai;
 pub mod mlx;
 pub mod spec;
 pub mod stats;
-pub mod term;
