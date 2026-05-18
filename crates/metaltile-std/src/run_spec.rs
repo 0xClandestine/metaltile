@@ -2778,7 +2778,7 @@ fn run_sdpa_batched_decode_form(
     // `tpg=1024` matches the rebased `sdpa_decode` kernel's design
     // threadgroup size (32 simdgroups × 32 lanes).
     let single_tpg = 1024usize;
-    let mut single_kernel = crate::ffai::sdpa_decode::sdpa_decode::kernel_ir_for(dt);
+    let mut single_kernel = crate::ffai::sdpa_decode::ffai_sdpa_decode::kernel_ir_for(dt);
     single_kernel.mode = KernelMode::Reduction;
     let single_msl =
         match MslGenerator::new(msl_cfg_for(Some(single_tpg as u32))).generate(&single_kernel) {
@@ -3126,7 +3126,7 @@ fn run_sdpa_batched_decode_prefill_tile(
     // shape for the K-independent baseline. The dispatch is dense-path
     // (sink_end = 0, window_start = 0).
     let single_tpg = 1024usize;
-    let mut single_kernel = crate::ffai::sdpa_decode::sdpa_decode::kernel_ir_for(dt);
+    let mut single_kernel = crate::ffai::sdpa_decode::ffai_sdpa_decode::kernel_ir_for(dt);
     single_kernel.mode = KernelMode::Reduction;
     let (ref_perf, ref_timing) = match MslGenerator::new(msl_cfg_for(Some(single_tpg as u32)))
         .generate(&single_kernel)
