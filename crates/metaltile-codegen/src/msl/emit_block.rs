@@ -689,10 +689,28 @@ impl MslGenerator {
                 },
 
                 // ---- atomics ----------------------------------------------
-                Op::Atomic { op: ak, dst, index, value } => {
+                Op::Atomic { op: ak, scope, dst, index, value } => {
                     let iv = self.vname(Some(*index), block, extra_names);
                     let rv = self.vname(Some(*value), block, extra_names);
-                    wl!(out, "{pad}{}({dst} + {iv}, {rv}, memory_order_relaxed);", ak.msl_fn());
+                    match scope {
+                        metaltile_core::ir::AtomicScope::Device => {
+                            wl!(
+                                out,
+                                "{pad}{}({dst} + {iv}, {rv}, memory_order_relaxed);",
+                                ak.msl_fn(),
+                            );
+                        },
+                        metaltile_core::ir::AtomicScope::Threadgroup => {
+                            // `dst` is a `threadgroup_alloc`'d uint array.
+                            // Reinterpret the slot as `threadgroup atomic_uint*`
+                            // — same form MLX uses (turbo_quant.metal).
+                            wl!(
+                                out,
+                                "{pad}{}((threadgroup atomic_uint*)&{dst}[{iv}], {rv}, memory_order_relaxed);",
+                                ak.msl_fn(),
+                            );
+                        },
+                    }
                 },
 
                 // ---- scan operations --------------------------------------
