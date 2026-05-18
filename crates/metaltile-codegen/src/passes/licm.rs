@@ -234,6 +234,21 @@ fn licm_block(
 
     block.ops = new_ops;
     block.results = new_results;
+
+    // Transfer names for hoisted values from loop bodies to parent block.
+    // Without this, hoisted variables become unnamed (v_a_idx0 vs v82 mismatch)
+    // and nested blocks can't resolve them into inner_names.
+    for plan in &plans {
+        if let Some(loop_body) = blocks.get(&plan.body_id) {
+            for result in &plan.hoisted_results {
+                if let Some(vid) = result {
+                    if let Some(name) = loop_body.names.get(vid) {
+                        block.names.insert(*vid, name.clone());
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Remove ops at given indices from a block. Indices must be sorted ascending.

@@ -98,7 +98,7 @@ fn msl_grid3d(spec: &BenchSpec, dt: DType) -> Option<String> {
 fn msl_for_mode(spec: &BenchSpec, dt: DType, mode: KernelMode) -> Option<String> {
     match mode {
         KernelMode::Elementwise => msl_elementwise(spec, dt),
-        KernelMode::Reduction | KernelMode::Tile2D => msl_reduction(spec, dt),
+        KernelMode::Reduction | KernelMode::Tile2D | KernelMode::SimdGroup2D => msl_reduction(spec, dt),
         KernelMode::Grid3D => msl_grid3d(spec, dt),
     }
 }
@@ -146,7 +146,7 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
         std::collections::HashMap::new();
     let mode_key = |m: KernelMode| match m {
         KernelMode::Elementwise => 0u8,
-        KernelMode::Reduction | KernelMode::Tile2D => 1,
+        KernelMode::Reduction | KernelMode::Tile2D | KernelMode::SimdGroup2D => 1,
         KernelMode::Grid3D => 2,
     };
 
@@ -159,7 +159,7 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
 
     for shape in spec.shapes {
         let ctx = match shape.mode {
-            KernelMode::Reduction | KernelMode::Tile2D => DtypeCtx::reduce(dt),
+            KernelMode::Reduction | KernelMode::Tile2D | KernelMode::SimdGroup2D => DtypeCtx::reduce(dt),
             _ => DtypeCtx::elementwise(dt),
         };
         let mk = match compiled.entry(mode_key(shape.mode)) {
@@ -185,7 +185,7 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
         // program_id::<0>() also lands in ValueId(0). For rows ≥ 2, pid > 0
         // corrupts the stride. With check_b=1, pid is always 0, stride = max(0,1) = 1.
         let check_b = match shape.mode {
-            KernelMode::Reduction | KernelMode::Tile2D => 1,
+            KernelMode::Reduction | KernelMode::Tile2D | KernelMode::SimdGroup2D => 1,
             _ => shape.check_b,
         };
         let primary_out_idx = params.iter().position(|p| p.is_output);

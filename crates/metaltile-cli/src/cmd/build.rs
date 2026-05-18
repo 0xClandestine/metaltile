@@ -311,7 +311,7 @@ fn monomorphized_name(base: &str, dt: DType, n_dtypes: usize) -> String {
 }
 
 fn msl_generator_for(mode: KernelMode) -> MslGenerator {
-    if matches!(mode, KernelMode::Tile2D) {
+    if matches!(mode, KernelMode::Tile2D | KernelMode::SimdGroup2D) {
         MslGenerator::new(MslConfig {
             tile_schedule: TileSchedule::default(),
             use_simd_matrix: true,

@@ -264,6 +264,7 @@ fn mode_label(mode: KernelMode) -> &'static str {
         KernelMode::Elementwise => "Elementwise",
         KernelMode::Reduction => "Reduction",
         KernelMode::Tile2D => "Tile2D",
+        KernelMode::SimdGroup2D => "SimdGroup",
         KernelMode::Grid3D => "Grid3D",
     }
 }
