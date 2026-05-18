@@ -440,7 +440,7 @@ pub fn set_result_reporter(reporter: &mut dyn FnMut(&OpResult)) -> ResultReporte
 pub struct SuitePrinter {
     show_correctness: bool,
     started: bool,
-    last_op: Option<&'static str>,
+    last_op_display: Option<String>,
     term_width: usize,
     cur_metric: Option<&'static str>,
 }
@@ -450,7 +450,7 @@ impl SuitePrinter {
         Self {
             show_correctness,
             started: false,
-            last_op: None,
+            last_op_display: None,
             term_width: term_width(),
             cur_metric: None,
         }
@@ -465,15 +465,15 @@ impl SuitePrinter {
         if !self.started { self.started = true; }
 
         for result in results {
-            let new_group = self.last_op != Some(result.op());
+            let new_group = self.last_op_display.as_deref() != Some(&result.op_display());
             if new_group {
                 if self.cur_metric != Some(result.metric()) {
                     self.cur_metric = Some(result.metric());
                 }
-                if self.last_op.is_some() { println!(); }
+                if self.last_op_display.is_some() { println!(); }
                 self.print_op_header(result);
             }
-            self.last_op = Some(result.op());
+            self.last_op_display = Some(result.op_display());
             self.print_data_row(result);
         }
         self.flush();
