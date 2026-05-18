@@ -16,6 +16,8 @@ pub enum GpuFamily {
     Apple8,
     /// M3 / M4 / A17 / A18 — Apple GPU Family 9
     Apple9,
+    /// M5 — Apple GPU Family 10
+    Apple10,
     /// Unrecognised device name.
     Unknown,
 }
@@ -25,8 +27,11 @@ impl GpuFamily {
     /// (e.g. `"Apple M4 Max"`, `"Apple M1 Pro"`).
     pub fn from_device_name(name: &str) -> Self {
         // M-series checked before A-series since "M1 Pro" etc.
-        // contain no A-chip substring.
-        if name.contains("M4") {
+        // contain no A-chip substring. Newer chips checked first so
+        // "M4" doesn't shadow the broader M5 substring on future strings.
+        if name.contains("M5") {
+            GpuFamily::Apple10
+        } else if name.contains("M4") {
             GpuFamily::Apple9
         } else if name.contains("M3") {
             GpuFamily::Apple9
@@ -51,6 +56,7 @@ impl GpuFamily {
             GpuFamily::Apple7 => "Apple7 (M1/A14)",
             GpuFamily::Apple8 => "Apple8 (M2/A15+)",
             GpuFamily::Apple9 => "Apple9 (M3+)",
+            GpuFamily::Apple10 => "Apple10 (M5)",
             GpuFamily::Unknown => "unknown",
         }
     }
@@ -61,12 +67,15 @@ impl GpuFamily {
             GpuFamily::Apple7 => Some("Apple7"),
             GpuFamily::Apple8 => Some("Apple8"),
             GpuFamily::Apple9 => Some("Apple9"),
+            GpuFamily::Apple10 => Some("Apple10"),
             GpuFamily::Unknown => None,
         }
     }
 
-    /// True for Apple9+ (M3, M4, A17, A18).
-    pub const fn is_apple9_or_later(self) -> bool { matches!(self, GpuFamily::Apple9) }
+    /// True for Apple9+ (M3, M4, M5, A17, A18).
+    pub const fn is_apple9_or_later(self) -> bool {
+        matches!(self, GpuFamily::Apple9 | GpuFamily::Apple10)
+    }
 
     /// Threadgroup memory in KB. All Apple7-9 GPUs have 32 KB.
     pub const fn threadgroup_mem_kb(self) -> u32 { 32 }
@@ -79,7 +88,10 @@ impl GpuFamily {
     pub fn slc_label(device_name: &str) -> &'static str {
         if device_name.contains("Ultra") {
             "~96 MB"
-        } else if device_name.contains("Max") && device_name.contains("M4") {
+        } else if device_name.contains("Max")
+            && (device_name.contains("M5") || device_name.contains("M4"))
+        {
+            // M4/M5 Max share the ~64 MB SLC tier; revisit if M5 specs differ.
             "~64 MB"
         } else if device_name.contains("Max") {
             "~48 MB"

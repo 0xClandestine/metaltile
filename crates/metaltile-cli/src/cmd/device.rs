@@ -109,3 +109,4 @@ pub fn run(args: &DeviceArgs) {
     );
     println!();
 }
+
