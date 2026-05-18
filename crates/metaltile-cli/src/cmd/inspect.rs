@@ -20,11 +20,9 @@ use metaltile_core::ir::KernelMode;
 use metaltile_std::{bench_types::DType, spec::BenchSpec};
 
 use crate::{
-    flag_present,
-    flag_val,
-    kernel_utils::{dtype_label, first_mode},
-    matches_filter,
-    positional,
+    flag_present, flag_val,
+    kernel_utils::{dtype_label, effective_mode},
+    matches_filter, positional,
     term::{Color, Style, paint_stdout},
 };
 
@@ -97,7 +95,7 @@ pub fn run(args: &[String]) {
                     std::fs::write(&path, &msl).expect("write failed");
                     println!("wrote {path}");
                 } else {
-                    let mode_str = mode_label(first_mode(spec));
+                    let mode_str = mode_label(effective_mode(spec));
                     println!("// ═══════════════════════════════════════════════════════");
                     println!("// kernel: {}  mode: {}", name, mode_str);
                     println!("// ═══════════════════════════════════════════════════════");
@@ -117,7 +115,7 @@ pub fn run(args: &[String]) {
         println!();
         for (name, (spec, dtypes)) in &sorted {
             let dtype_str = dtypes.iter().map(|dt| dtype_label(*dt)).collect::<Vec<_>>().join("/");
-            let mode_str = mode_label(first_mode(spec));
+            let mode_str = mode_label(effective_mode(spec));
             println!(
                 "  {}   {}   {dtype_str}",
                 paint_stdout(format!("{name:<20}"), Style::new().fg(Color::Cyan).bold()),
@@ -178,8 +176,8 @@ pub fn run(args: &[String]) {
             }
         } else if stats_flag {
             let mut k = (spec.kernel_ir)(dt);
-            k.mode = first_mode(spec);
-            let generator = make_generator(first_mode(spec));
+            k.mode = effective_mode(spec);
+            let generator = make_generator(effective_mode(spec));
             match generator.generate_with_stats(&k) {
                 Ok((_, stats)) => print_stats_table(&stats),
                 Err(e) => eprintln!("error: {e}"),
@@ -187,7 +185,7 @@ pub fn run(args: &[String]) {
         } else if let Some(pass) = &pass_arg {
             // --pass flag: print IR after a specific pass (or 'all' for every stage)
             let mut k = (spec.kernel_ir)(dt);
-            let mode = first_mode(spec);
+            let mode = effective_mode(spec);
             k.mode = mode;
 
             match pass.as_str() {
@@ -221,7 +219,7 @@ pub fn run(args: &[String]) {
                 std::fs::write(&path, &msl).expect("write failed");
                 println!("wrote {path}");
             } else {
-                let mode_str = mode_label(first_mode(spec));
+                let mode_str = mode_label(effective_mode(spec));
                 println!("// ═══════════════════════════════════════════════════════");
                 println!("// kernel: {}  mode: {}", name, mode_str);
                 println!("// ═══════════════════════════════════════════════════════");
@@ -283,7 +281,7 @@ fn make_generator(mode: KernelMode) -> MslGenerator {
 fn generate_msl(spec: &BenchSpec, dtypes: &[DType]) -> String {
     let dt = dtypes.first().copied().unwrap_or(DType::F32);
     let mut k = (spec.kernel_ir)(dt);
-    let mode = first_mode(spec);
+    let mode = effective_mode(spec);
     k.mode = mode;
     make_generator(mode).generate(&k).unwrap_or_else(|e| format!("// ERROR: {e}\n"))
 }

@@ -33,7 +33,7 @@ use metaltile_std::{bench_types::DType, spec::BenchSpec};
 
 use crate::{
     flag_val,
-    kernel_utils::{dtype_label, first_mode},
+    kernel_utils::{dtype_label, effective_mode},
     matches_filter,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
@@ -184,7 +184,7 @@ pub fn run(args: &[String]) {
         };
 
         // Determine the kernel mode. Explicit override beats inference.
-        let mode = spec.kernel_mode.unwrap_or_else(|| first_mode(spec));
+        let mode = effective_mode(spec);
 
         let mut dtypes_ok = Vec::new();
         let mut dtypes_err = Vec::new();
