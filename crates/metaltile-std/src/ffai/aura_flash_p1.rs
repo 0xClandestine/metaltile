@@ -48,6 +48,19 @@
 //! Today's instantiation: `(key_bits=4, value_bits=2, dim=128)` — the
 //! `aura4v2` scheme on a Qwen3-style head_dim=128.  Extend the
 //! invocations at the bottom of the file for new (kb, vb, dim) combos.
+//!
+//! ## Bounds checking the per-lane dim slots
+//!
+//! Each inner loop walks dim slots via
+//! `for i in 0..dims_per_lane { let d = lane + i*32; … }`.  When dim
+//! isn't a multiple of 32 (e.g. dim=80 with `dims_per_lane=3` and
+//! `max_d = 31 + 2*32 = 95 > 80`), the trailing lanes must skip the
+//! out-of-range dim slots.  An earlier version of this kernel dropped
+//! the `if d < dim { … }` guard to work around a metaltile unroll-pass
+//! bug (nested `Op::If` bodies weren't being cloned + SSA-remapped
+//! per iteration), but that limited us to multiple-of-32 dims.  The
+//! unroll-pass fix landed alongside this kernel, so the guards are
+//! back in.
 
 use metaltile::kernel;
 use metaltile_core::ir::KernelMode;
@@ -114,7 +127,9 @@ macro_rules! aura_flash_p1_kernel {
             }
 
             // ── Per-lane slice of the rotated query vector — held in
-            // stack registers, loaded once.
+            // stack registers, loaded once.  Trailing lanes whose
+            // `d >= dim` get zero so the dot product treats them as a
+            // no-op.
             stack_alloc("q_vals", $dims_per_lane, "f32");
             for i in range(0u32, $dims_per_lane, 1u32) {
                 let d = lane + i * 32u32;

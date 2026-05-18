@@ -62,8 +62,17 @@ impl super::Pass for UnrollPass {
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
         let max_vid = remap::find_max_vid(kernel);
         let mut next_vid = (max_vid + 1).max(10_000);
+        let max_block_id =
+            kernel.blocks.keys().map(|b| b.as_u32()).max().unwrap_or(0);
+        let mut next_block_id = max_block_id + 1;
 
-        unroll_block(&mut kernel.body, &mut kernel.blocks, &mut next_vid, self.factor);
+        unroll_block(
+            &mut kernel.body,
+            &mut kernel.blocks,
+            &mut next_vid,
+            &mut next_block_id,
+            self.factor,
+        );
 
         // Iterate nested blocks. `unroll_block` removes inlined loop
         // bodies from `kernel.blocks` (see line ~226), so a BlockId we
@@ -75,7 +84,13 @@ impl super::Pass for UnrollPass {
             let Some(mut block) = kernel.blocks.remove(bid) else {
                 continue;
             };
-            unroll_block(&mut block, &mut kernel.blocks, &mut next_vid, self.factor);
+            unroll_block(
+                &mut block,
+                &mut kernel.blocks,
+                &mut next_vid,
+                &mut next_block_id,
+                self.factor,
+            );
             kernel.blocks.insert(*bid, block);
         }
 
@@ -110,6 +125,7 @@ fn unroll_block(
     block: &mut Block,
     blocks: &mut BTreeMap<BlockId, Block>,
     next_vid: &mut u32,
+    next_block_id: &mut u32,
     factor: u32,
 ) {
     let n = block.ops.len();
@@ -170,7 +186,11 @@ fn unroll_block(
     let mut inline_at: BTreeMap<usize, Vec<(Op, Option<ValueId>)>> = BTreeMap::new();
 
     for plan in &plans {
-        let body = blocks.get(&plan.body_id).unwrap();
+        // Clone the loop body up-front so we can release the immutable
+        // borrow on `blocks` — later in this iteration we mutate the map
+        // by inserting fresh clones for any nested `Op::If` / `Op::Loop`
+        // body blocks (so each unrolled iteration gets its own copy).
+        let body = blocks.get(&plan.body_id).cloned().unwrap();
         let body_n = body.ops.len();
 
         // IV ValueId (convention: var_id + 0x4000_0000).
@@ -199,9 +219,91 @@ fn unroll_block(
             }
 
             // ---- clone and remap each body op -----------------------------
+            // For each `Op::If` / nested `Op::Loop` op we hit, the
+            // referenced `then_block` / `else_block` / loop `body` lives
+            // in `blocks` and its contents reference SSA values from the
+            // loop body (e.g. the loop iv).  Each unrolled iteration
+            // needs a FRESH copy of that nested block with the iteration's
+            // `vid_map` applied — otherwise every cloned `Op::If` points
+            // at the same shared block whose ops still reference the
+            // pre-remap value IDs, producing dangling `o[v1007]` /
+            // `partial_base + v191` references in the emitted MSL.
+            let pending_clones: Vec<(BlockId, BlockId)> = body
+                .ops
+                .iter()
+                .flat_map(|op| match op {
+                    Op::If { then_block, else_block, .. } => {
+                        let mut v = vec![*then_block];
+                        if let Some(eb) = else_block {
+                            v.push(*eb);
+                        }
+                        v
+                    },
+                    Op::Loop { body, .. } => vec![*body],
+                    _ => Vec::new(),
+                })
+                .map(|old_id| {
+                    let new_id = BlockId::new(*next_block_id);
+                    *next_block_id += 1;
+                    (old_id, new_id)
+                })
+                .collect();
+
+            let mut block_map: BTreeMap<BlockId, BlockId> = BTreeMap::new();
+            for (old_id, new_id) in &pending_clones {
+                let Some(src_block) = blocks.get(old_id).cloned() else { continue };
+                block_map.insert(*old_id, *new_id);
+
+                // For each op in the source block, also allocate fresh
+                // ValueIds for its results so cross-iteration writes to
+                // shared state stay distinct.
+                let mut nested_vid_map = vid_map.clone();
+                for r in &src_block.results {
+                    if let Some(old_v) = r {
+                        let new_v = ValueId::new(*next_vid);
+                        *next_vid += 1;
+                        nested_vid_map.insert(*old_v, new_v);
+                    }
+                }
+
+                let mut cloned = Block::new(*new_id);
+                cloned.names = src_block.names.clone();
+                for (idx, src_op) in src_block.ops.iter().enumerate() {
+                    let mut new_op = src_op.clone();
+                    remap::remap_value_ids(&mut new_op, &nested_vid_map);
+                    let new_result = src_block.results[idx].map(|old_v| {
+                        nested_vid_map.get(&old_v).copied().unwrap_or(old_v)
+                    });
+                    cloned.ops.push(new_op);
+                    cloned.results.push(new_result);
+                }
+                blocks.insert(*new_id, cloned);
+            }
+
             for j in 0..body_n {
                 let mut new_op = body.ops[j].clone();
                 remap::remap_value_ids(&mut new_op, &vid_map);
+
+                // Rewrite the cloned op's nested-block references to
+                // point at the fresh clones we just inserted.
+                match &mut new_op {
+                    Op::If { then_block, else_block, .. } => {
+                        if let Some(new_id) = block_map.get(then_block) {
+                            *then_block = *new_id;
+                        }
+                        if let Some(eb) = else_block.as_mut()
+                            && let Some(new_id) = block_map.get(eb)
+                        {
+                            *eb = *new_id;
+                        }
+                    },
+                    Op::Loop { body, .. } => {
+                        if let Some(new_id) = block_map.get(body) {
+                            *body = *new_id;
+                        }
+                    },
+                    _ => {},
+                }
 
                 let new_vid = body.results[j].map(|_| vid_map[&body.results[j].unwrap()]);
                 inlined.push((new_op, new_vid));
