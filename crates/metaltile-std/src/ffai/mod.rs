@@ -15,6 +15,7 @@
 //! `mlx/`.
 
 pub mod arg_reduce;
+pub mod aura_dequant_rotated;
 pub mod dequant_gather;
 pub mod dequant_gemv;
 pub mod gather;
