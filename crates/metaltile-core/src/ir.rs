@@ -319,6 +319,7 @@ pub enum ReduceKind {
     Max,
     Min,
     Mean,
+    Product,
 }
 
 /// Atomic operation kind.

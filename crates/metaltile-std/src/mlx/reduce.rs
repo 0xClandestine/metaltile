@@ -34,8 +34,8 @@ pub fn mt_all_reduce<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
 )]
 #[kernel]
 pub fn mt_all_reduce_prod<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
-    let one = 1;
-    let acc = strided_reduce(inp, one, n, product);
+    let off = 0;
+    let acc = strided_reduce(inp, off, n, product);
     let result = reduce_product(acc);
     store(out[0], result);
 }
@@ -103,8 +103,7 @@ pub fn mt_row_reduce_prod<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32
     let row = program_id::<0>();
     let rs = row * n;
     let re = rs + n;
-    let one = 1;
-    let acc = strided_reduce(inp, one, rs, re, product);
+    let acc = strided_reduce(inp, rs, re, product);
     let result = reduce_product(acc);
     store(out[row], result);
 }

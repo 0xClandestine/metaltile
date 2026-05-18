@@ -38,6 +38,7 @@ impl super::MslGenerator {
                 ReduceKind::Sum | ReduceKind::Mean => ("simd_sum", "0.0f"),
                 ReduceKind::Max => ("simd_max", "-INFINITY"),
                 ReduceKind::Min => ("simd_min", "INFINITY"),
+                ReduceKind::Product => ("__mt_simd_product", "1.0f"),
             };
 
             // Phase 1: intra-warp reduction via simd_sum/max/min.
@@ -70,6 +71,7 @@ impl super::MslGenerator {
             ReduceKind::Sum => wl!(out, "{pad}float {result_var} = simd_sum(float({input_var}));"),
             ReduceKind::Max => wl!(out, "{pad}float {result_var} = simd_max(float({input_var}));"),
             ReduceKind::Min => wl!(out, "{pad}float {result_var} = simd_min(float({input_var}));"),
+            ReduceKind::Product => wl!(out, "{pad}float {result_var} = __mt_simd_product(float({input_var}));"),
             ReduceKind::Mean => {
                 wl!(
                     out,

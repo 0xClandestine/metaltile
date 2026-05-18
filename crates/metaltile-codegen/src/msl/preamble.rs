@@ -122,5 +122,15 @@ impl super::MslGenerator {
             wl!(out, "template<typename T>");
             wl!(out, "inline T mt_erfinv_impl(T x) {{ return T(mt_erfinv_impl(float(x))); }}");
         }
+        if feat.needs_simd_product {
+            wl!(out);
+            wl!(out, "// Manual SIMD-group product reduction (Metal lacks simd_product).");
+            wl!(out, "inline float __mt_simd_product(float v) {{");
+            wl!(out, "    for (int i = simd_size / 2; i > 0; i >>= 1) {{");
+            wl!(out, "        v *= simd_shuffle_down(v, i);");
+            wl!(out, "    }}");
+            wl!(out, "    return v;");
+            wl!(out, "}}");
+        }
     }
 }

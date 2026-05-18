@@ -26,6 +26,7 @@ pub(super) struct KernelFeatures {
     pub needs_sigmoid: bool,
     pub needs_erf: bool,
     pub needs_erfinv: bool,
+    pub needs_simd_product: bool,
 }
 
 impl MslGenerator {
@@ -42,6 +43,7 @@ impl MslGenerator {
             needs_sigmoid: false,
             needs_erf: false,
             needs_erfinv: false,
+            needs_simd_product: false,
         };
         for p in &kernel.params {
             if p.dtype == DType::BF16 {
@@ -62,9 +64,17 @@ impl MslGenerator {
         for op in &block.ops {
             match op {
                 Op::Dot { .. } => feat.has_tile = true,
-                Op::Reduce { .. } | Op::Scan { .. } => {
+                Op::Reduce { op: reduce_kind, .. } | Op::Scan { op: reduce_kind, .. } => {
                     feat.needs_simd_lane = true;
                     feat.needs_simd_group = true;
+                    if matches!(reduce_kind, metaltile_core::ir::ReduceKind::Product) {
+                        feat.needs_simd_product = true;
+                    }
+                },
+                Op::StrideReduce { op: reduce_kind, .. } => {
+                    if matches!(reduce_kind, metaltile_core::ir::ReduceKind::Product) {
+                        feat.needs_simd_product = true;
+                    }
                 },
                 Op::Load { src, indices, .. } if indices.is_empty() => {
                     if src == "simd_lane" {

@@ -353,6 +353,7 @@ impl MslGenerator {
                         ReduceKind::Sum | ReduceKind::Mean => "0.0f",
                         ReduceKind::Max => "-INFINITY",
                         ReduceKind::Min => "INFINITY",
+                        ReduceKind::Product => "1.0f",
                     };
                     let base_elem = if let Some(sec_src) = secondary_src {
                         let base_v = self.vname(*secondary_base, block, extra_names);
@@ -392,6 +393,7 @@ impl MslGenerator {
                             ReduceKind::Sum | ReduceKind::Mean => format!("{v} += {elem_expr};"),
                             ReduceKind::Max => format!("{v} = max({v}, {elem_expr});"),
                             ReduceKind::Min => format!("{v} = min({v}, {elem_expr});"),
+                            ReduceKind::Product => format!("{v} *= {elem_expr};"),
                         };
                         wl!(out, "{pad}float {v} = {init};");
                         wl!(out, "{pad}{{");
@@ -422,6 +424,7 @@ impl MslGenerator {
                             ReduceKind::Sum | ReduceKind::Mean => format!("{v} += {elem_expr};"),
                             ReduceKind::Max => format!("{v} = max({v}, {elem_expr});"),
                             ReduceKind::Min => format!("{v} = min({v}, {elem_expr});"),
+                            ReduceKind::Product => format!("{v} *= {elem_expr};"),
                         };
                         wl!(out, "{pad}float {v} = {init};");
                         wl!(out, "{pad}for (uint _i = {off}; _i < {en}; _i += {st}) {{");
@@ -675,6 +678,7 @@ impl MslGenerator {
                             let init = match rk {
                                 ReduceKind::Max => "-INFINITY",
                                 ReduceKind::Min => "INFINITY",
+                                ReduceKind::Product => "1.0f",
                                 _ => "0.0f",
                             };
                             // TODO: lower min/max scans via simd_shuffle_xor
@@ -789,6 +793,7 @@ impl MslGenerator {
                             wl!(out, "{pad}float {v} = simd_sum(float({rv}));"),
                         ReduceKind::Max => wl!(out, "{pad}float {v} = simd_max(float({rv}));"),
                         ReduceKind::Min => wl!(out, "{pad}float {v} = simd_min(float({rv}));"),
+                        ReduceKind::Product => wl!(out, "{pad}float {v} = __mt_simd_product(float({rv}));"),
                     }
                 },
 

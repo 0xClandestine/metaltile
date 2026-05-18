@@ -489,6 +489,7 @@ impl DslBodyParser {
             "reduce_max" => self.parse_unary_call(call, "reduce_max"),
             "reduce_sum" => self.parse_unary_call(call, "reduce_sum"),
             "reduce_min" => self.parse_unary_call(call, "reduce_min"),
+            "reduce_product" => self.parse_unary_call(call, "reduce_product"),
             "erf" => self.parse_unary_call(call, "erf"),
             "sign" => self.parse_unary_call(call, "sign"),
             "round" => self.parse_unary_call(call, "round"),
@@ -675,11 +676,12 @@ impl DslBodyParser {
                     result,
                 );
             },
-            "reduce_sum" | "reduce_max" | "reduce_min" => {
+            "reduce_sum" | "reduce_max" | "reduce_min" | "reduce_product" => {
                 let op = match fn_name {
                     "reduce_sum" => quote! { ReduceKind::Sum },
                     "reduce_max" => quote! { ReduceKind::Max },
                     "reduce_min" => quote! { ReduceKind::Min },
+                    "reduce_product" => quote! { ReduceKind::Product },
                     _ => quote! { ReduceKind::Sum },
                 };
                 self.push_op(
@@ -772,6 +774,7 @@ impl DslBodyParser {
             "sum" => quote! { ReduceKind::Sum },
             "max" => quote! { ReduceKind::Max },
             "min" => quote! { ReduceKind::Min },
+            "product" => quote! { ReduceKind::Product },
             _ => quote! { ReduceKind::Sum },
         };
         let result = self.alloc_vid();
