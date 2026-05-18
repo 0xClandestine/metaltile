@@ -17,6 +17,7 @@
 pub mod arg_reduce;
 pub mod aura_dequant_rotated;
 pub mod aura_encode;
+pub mod aura_flash_p1;
 pub mod aura_flash_pass2;
 pub mod aura_score;
 pub mod aura_value;
