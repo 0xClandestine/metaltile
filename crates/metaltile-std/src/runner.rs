@@ -31,7 +31,11 @@ pub struct GpuRunner {
     #[cfg(target_os = "macos")]
     inner: MacosRunner,
     /// Pre-compiled kernel and scratch buffer for SLC cache-flush.
-    /// Writing 128 MB (> M4 Max's 64 MB SLC) evicts any cached benchmark data.
+    /// The 128 MB scratch comfortably exceeds the SLC of every current
+    /// Apple Silicon variant, so a single write evicts any cached benchmark
+    /// data; when dispatched repeatedly the same kernel also serves as the
+    /// full-occupancy workload that keeps DVFS pinned at peak clock through
+    /// the upcoming bench window.
     #[cfg(target_os = "macos")]
     slc_kernel: CompiledKernel,
     #[cfg(target_os = "macos")]
@@ -231,6 +235,18 @@ use metal_impl::{MacosBuffer, MacosPipeline, MacosRunner};
 
 // ── GpuRunner ────────────────────────────────────────────────────────────────
 
+/// Number of SLC-kernel dispatches done by `flush_slc` before each bench.
+/// One dispatch (~0.6 ms on M-series) is enough to evict the SLC; the rest
+/// keep the GPU clock at peak so the kernel under test doesn't measure
+/// part of the DVFS ramp.
+#[cfg(target_os = "macos")]
+const SLC_FLUSH_DISPATCHES: usize = 16;
+
+/// One-shot dispatch count at process start; sized to comfortably exceed the
+/// DVFS ramp regardless of system idle state.
+#[cfg(target_os = "macos")]
+const WAKE_DISPATCHES: usize = 64;
+
 impl GpuRunner {
     pub fn new() -> Result<Self, String> {
         #[cfg(target_os = "macos")]
@@ -240,9 +256,9 @@ impl GpuRunner {
                 "kernel void _mt_slc_flush(",
                 "device uint* buf [[buffer(0)]],",
                 "uint gid [[thread_position_in_grid]]",
-                ") { buf[gid] = gid; }"
+                ") { buf[gid] = buf[gid] + gid; }"
             );
-            const SLC_BYTES: usize = 128 * 1024 * 1024; // 128 MB > M4 Max 64 MB SLC
+            const SLC_BYTES: usize = 128 * 1024 * 1024; // > SLC of every current Apple Silicon variant
 
             let (name, inner) = MacosRunner::new()?;
             let slc_pso = inner
@@ -250,11 +266,20 @@ impl GpuRunner {
                 .map_err(|e| format!("SLC flush compile: {e}"))?;
             let slc_kernel = CompiledKernel { inner: slc_pso };
             let slc_buf = GpuBuffer { size_bytes: SLC_BYTES, inner: inner.alloc_zeros(SLC_BYTES) };
-            Ok(GpuRunner { device_name: name, inner, slc_kernel, slc_buf })
+
+            let runner = GpuRunner { device_name: name, inner, slc_kernel, slc_buf };
+            runner.wake_dvfs();
+            Ok(runner)
         }
         #[cfg(not(target_os = "macos"))]
         Err("Metal not available on this platform".into())
     }
+
+    /// One-shot at process start: pull DVFS up to peak so the first bench
+    /// doesn't measure a partially-ramped GPU. Subsequent benches are kept
+    /// hot by [`flush_slc`].
+    #[cfg(target_os = "macos")]
+    fn wake_dvfs(&self) { self.run_slc(WAKE_DISPATCHES); }
 
     #[allow(unused_variables)]
     pub fn compile(&self, source: &str, fn_name: &str) -> Result<CompiledKernel, String> {
@@ -412,16 +437,28 @@ impl GpuRunner {
         BenchStats::from_samples(self.measure(kernel, buffers, tgs, tpg, warmup, iters))
     }
 
-    /// Write 128 MB to a scratch buffer to evict the System Level Cache (SLC).
+    /// Write 128 MB to a scratch buffer to evict the System Level Cache, and
+    /// repeat the dispatch enough times to leave the GPU clock pinned at peak
+    /// when the next bench dispatch starts.
     ///
-    /// Call this before each timed benchmark run so that both the reference and
-    /// MetalTile kernels start from the same cold-cache state, eliminating the
-    /// measurement noise that arises when the working set fits inside the SLC.
+    /// One dispatch alone (~0.6 ms on M-series) evicts the SLC but is too
+    /// short to keep DVFS at peak: between flush_slc returning and the bench
+    /// kernel's first warmup iteration there's enough CPU-side setup that the
+    /// clock can fall back to idle, and small kernels (low core occupancy)
+    /// can then stay stuck in the slow regime for the whole timed window.
+    /// Repeating the dispatch turns flush_slc into the sustained, full-grid
+    /// workload that DVFS treats as "stay at peak".
     pub fn flush_slc(&self) {
         #[cfg(target_os = "macos")]
-        {
-            const N_ELEM: usize = 128 * 1024 * 1024 / 4; // 32 M uint32 elements
-            const TPG: usize = 256;
+        self.run_slc(SLC_FLUSH_DISPATCHES);
+    }
+
+    /// Internal: dispatch the SLC kernel `n` times back-to-back.
+    #[cfg(target_os = "macos")]
+    fn run_slc(&self, n: usize) {
+        const N_ELEM: usize = 128 * 1024 * 1024 / 4; // 32 M uint32 elements
+        const TPG: usize = 256;
+        for _ in 0..n {
             self.inner.measure(
                 &self.slc_kernel.inner,
                 &[&self.slc_buf.inner],
@@ -570,13 +607,27 @@ pub fn run_f16_once_as_f32(
 // ── Throughput ───────────────────────────────────────────────────────────────
 
 pub fn to_gflops(st: &BenchStats, flops: f64) -> Option<f64> {
-    st.is_valid().then(|| flops / (st.mean_us * 1e-6) / 1e9)
+    st.is_valid().then(|| flops / (st.min_us * 1e-6) / 1e9)
 }
 
 pub fn to_gbps(st: &BenchStats, bytes: f64) -> Option<f64> {
-    // Use median to reject outlier iterations (JIT stalls, OS scheduler spikes).
-    st.is_valid().then(|| bytes / (st.median_us * 1e-6) / 1e9)
+    // Use min to report steady-state throughput. Slow tail samples are usually
+    // leftover DVFS ramp or scheduler noise rather than the kernel's true
+    // wall-clock cost; min is also stable across bimodal warmup-boundary splits
+    // where median can flip wildly on a 1-sample shift. The p95/p99/cv% columns
+    // surface variance separately when warmup wasn't enough.
+    st.is_valid().then(|| bytes / (st.min_us * 1e-6) / 1e9)
 }
+
+/// Default warmup / timed iteration counts for the bench helpers.
+///
+/// DVFS ramp is handled by [`GpuRunner::flush_slc`] (which dispatches the SLC
+/// kernel repeatedly at full grid occupancy before each bench), so warmup here
+/// only has to absorb per-kernel first-touch effects (page residency, JIT
+/// dispatch state). 15 iterations is comfortably past that boundary for every
+/// kernel currently in the suite.
+const BENCH_WARMUP: usize = 15;
+const BENCH_ITERS: usize = 10;
 
 pub fn bench_gbps(
     runner: &GpuRunner,
@@ -587,7 +638,7 @@ pub fn bench_gbps(
     bytes: f64,
 ) -> Option<(f64, BenchStats)> {
     runner.flush_slc();
-    let stats = runner.bench(kernel, buffers, grid, tpg, 5, 20);
+    let stats = runner.bench(kernel, buffers, grid, tpg, BENCH_WARMUP, BENCH_ITERS);
     to_gbps(&stats, bytes).map(|x| (x, stats))
 }
 
@@ -601,7 +652,7 @@ pub fn bench_gbps_only(
     bytes: f64,
 ) -> Option<f64> {
     runner.flush_slc();
-    to_gbps(&runner.bench(kernel, buffers, grid, tpg, 5, 20), bytes)
+    to_gbps(&runner.bench(kernel, buffers, grid, tpg, BENCH_WARMUP, BENCH_ITERS), bytes)
 }
 
 pub fn bench_all_dtypes<F>(runner: &GpuRunner, f: F) -> Vec<OpResult>

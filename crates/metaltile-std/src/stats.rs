@@ -1,6 +1,10 @@
 /// Summary statistics for a set of GPU timing measurements.
 #[derive(Debug, Clone)]
 pub struct BenchStats {
+    /// Minimum (best) GPU execution time in microseconds. Represents the
+    /// steady-state runtime once DVFS has settled; preferred for throughput
+    /// reporting because slow tail samples are leftover ramp / scheduler noise.
+    pub min_us: f64,
     /// Mean GPU execution time in microseconds.
     pub mean_us: f64,
     /// Median (p50) GPU execution time in microseconds.
@@ -20,6 +24,7 @@ impl BenchStats {
         assert!(!samples.is_empty());
         samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let n = samples.len();
+        let min = samples[0];
         let mean = samples.iter().sum::<f64>() / n as f64;
         let median = samples[n / 2];
         let p95 = samples[(n * 95 / 100).min(n - 1)];
@@ -28,6 +33,7 @@ impl BenchStats {
         let stddev = variance.sqrt();
         let cv_pct = if mean > 0.0 { stddev / mean * 100.0 } else { 0.0 };
         BenchStats {
+            min_us: min,
             mean_us: mean,
             median_us: median,
             p95_us: p95,
@@ -48,9 +54,30 @@ mod tests {
     #[test]
     fn computes_median_and_tail_percentiles() {
         let st = BenchStats::from_samples(vec![1.0, 2.0, 3.0, 4.0, 10.0]);
+        assert_eq!(st.min_us, 1.0);
         assert_eq!(st.median_us, 3.0);
         assert_eq!(st.p95_us, 10.0);
         assert_eq!(st.p99_us, 10.0);
         assert!(st.stddev_us > 0.0);
+    }
+
+    /// The bimodal case that motivates min-based throughput reporting: the
+    /// first half of the timed window is still in DVFS ramp (slow), and the
+    /// second half has settled (fast). Median lands on the slow side and a
+    /// 1-sample shift in the split flips it to the fast side; min is stable.
+    #[test]
+    fn min_is_stable_under_bimodal_split() {
+        // 5 slow + 5 fast → median is on the slow side.
+        let slow_half = BenchStats::from_samples(vec![
+            250.0, 250.0, 250.0, 250.0, 250.0, 120.0, 120.0, 120.0, 120.0, 120.0,
+        ]);
+        // 4 slow + 6 fast → median flips to the fast side.
+        let fast_half = BenchStats::from_samples(vec![
+            250.0, 250.0, 250.0, 250.0, 120.0, 120.0, 120.0, 120.0, 120.0, 120.0,
+        ]);
+        assert!(slow_half.median_us - fast_half.median_us >= 100.0);
+        // Min is identical regardless of the split.
+        assert_eq!(slow_half.min_us, 120.0);
+        assert_eq!(fast_half.min_us, 120.0);
     }
 }
