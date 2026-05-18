@@ -125,8 +125,22 @@ pub fn mt_qmv<T>(
         let x13_raw = load(x[xi13]).cast::<f32>();
         let x14_raw = load(x[xi14]).cast::<f32>();
         let x15_raw = load(x[xi15]).cast::<f32>();
-        let xs = x0 + x1_raw + x2_raw + x3_raw + x4 + x5_raw + x6_raw + x7_raw
-            + x8 + x9_raw + x10_raw + x11_raw + x12 + x13_raw + x14_raw + x15_raw;
+        let xs = x0
+            + x1_raw
+            + x2_raw
+            + x3_raw
+            + x4
+            + x5_raw
+            + x6_raw
+            + x7_raw
+            + x8
+            + x9_raw
+            + x10_raw
+            + x11_raw
+            + x12
+            + x13_raw
+            + x14_raw
+            + x15_raw;
         let x1 = x1_raw * s_16;
         let x2 = x2_raw * s_256;
         let x3 = x3_raw * s_4096;

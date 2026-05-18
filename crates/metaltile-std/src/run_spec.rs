@@ -814,19 +814,19 @@ fn run_quantized_mat_vec(
     };
     let ref_kernel = compile_mlx(runner, spec.mlx_src, spec.mlx_pattern, "");
     let mut results = Vec::new();
-    let dtype_bytes: usize = match dt {
-        DType::F16 => 2,
-        _ => 4,
-    };
-    let dtype_label = match dt {
-        DType::F16 => "f16",
-        _ => "f32",
-    };
-    let f32_to_dtype = |v: f32| -> Vec<u8> {
-        match dt {
-            DType::F16 => half::f16::from_f32(v).to_bits().to_le_bytes().to_vec(),
-            _ => v.to_le_bytes().to_vec(),
-        }
+    let dtype_bytes = dt.size_bytes();
+    let dtype_label = dt.label();
+    // Round through the kernel dtype so the correctness oracle and MT output
+    // agree to within f16 precision (no-op for f32).
+    let round =
+        |v: f32| -> f32 { if dt == DType::F16 { half::f16::from_f32(v).to_f32() } else { v } };
+    let make_buf = |runner: &GpuRunner, data: &[f32]| -> GpuBuffer {
+        let bytes: Vec<u8> = match dt {
+            DType::F16 =>
+                data.iter().flat_map(|&v| half::f16::from_f32(v).to_bits().to_le_bytes()).collect(),
+            _ => data.iter().flat_map(|&v| v.to_le_bytes()).collect(),
+        };
+        runner.buffer_bytes(&bytes)
     };
     let read_mt_out = |runner: &GpuRunner, buf: &GpuBuffer, n: usize| -> Vec<f32> {
         match dt {
@@ -837,10 +837,6 @@ fn run_quantized_mat_vec(
                 .collect(),
             _ => runner.read_f32_slice(buf, n),
         }
-    };
-    let make_buf = |runner: &GpuRunner, data: &[f32]| -> GpuBuffer {
-        let bytes: Vec<u8> = data.iter().flat_map(|&v| f32_to_dtype(v)).collect();
-        runner.buffer_bytes(&bytes)
     };
     for &(m, k) in shapes {
         let w_elems = m * k / 8;
@@ -863,38 +859,11 @@ fn run_quantized_mat_vec(
         let s_check: Vec<f32> = (0..cm * cgs_per_row).map(|i| 0.1 + (i as f32) * 0.001).collect();
         let b_check = vec![0.0f32; cm * cgs_per_row];
         let x_check: Vec<f32> = (0..ck).map(|i| 1.0 + (i as f32) * 0.001).collect();
-        // Compute ref through the kernel dtype's rounding so f16 doesn't fail equiv
-        // against an f32-perfect oracle.
-        let s_dt: Vec<f32> = s_check
-            .iter()
-            .map(|&v| {
-                if dt == DType::F16 {
-                    half::f16::from_f32(v).to_f32()
-                } else {
-                    v
-                }
-            })
-            .collect();
-        let b_dt: Vec<f32> = b_check
-            .iter()
-            .map(|&v| {
-                if dt == DType::F16 {
-                    half::f16::from_f32(v).to_f32()
-                } else {
-                    v
-                }
-            })
-            .collect();
-        let x_dt: Vec<f32> = x_check
-            .iter()
-            .map(|&v| {
-                if dt == DType::F16 {
-                    half::f16::from_f32(v).to_f32()
-                } else {
-                    v
-                }
-            })
-            .collect();
+        // Re-round inputs through the kernel dtype so the oracle doesn't outrun
+        // f16 precision (no-op for f32).
+        let s_dt: Vec<f32> = s_check.iter().map(|&v| round(v)).collect();
+        let b_dt: Vec<f32> = b_check.iter().map(|&v| round(v)).collect();
+        let x_dt: Vec<f32> = x_check.iter().map(|&v| round(v)).collect();
         let ref_out: Vec<f32> = (0..cm)
             .map(|row| {
                 let mut acc = 0.0f32;
@@ -905,8 +874,8 @@ fn run_quantized_mat_vec(
                         let packed = w_check[row * ck / 8 + g * 8 + p];
                         for bit in 0..8u32 {
                             let int4_val = ((packed >> (bit * 4)) & 0xF) as f32;
-                            acc += (s * int4_val + bias)
-                                * x_dt[g * group_size + p * 8 + bit as usize];
+                            acc +=
+                                (s * int4_val + bias) * x_dt[g * group_size + p * 8 + bit as usize];
                         }
                     }
                 }

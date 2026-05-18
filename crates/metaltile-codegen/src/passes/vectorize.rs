@@ -77,14 +77,14 @@ impl super::Pass for VectorizePass {
     }
 }
 
-/// Maximum vector width to try (2, 4, or 8).
-const MAX_VEC_LEN: usize = 8;
-
-/// Cap run collection at vector widths the MSL emitter + Apple Metal driver
-/// actually handle correctly. `half8` exists in the MSL spec but on M2 Pro it
-/// silently returns zero on `*((device half8*)ptr)` loads even when correctly
-/// aligned, so cap F16 at 4 too.
-fn max_vec_for(_dtype: DType) -> usize { 4 }
+/// Run width to collect into one VectorLoad/Store. MSL has native `float4`,
+/// `half4`, `bfloat4` but `half8` silently returns zero on M2 Pro and the MSL
+/// emitter has no general `*8` fallback — cap at 4 universally.
+const MAX_VEC_RUN: usize = 4;
+/// Forward-scan window: tolerate up to one intermediate non-Load op between
+/// each pair of Loads (schedule pass interleaves index BinOps with their
+/// consuming Loads) — `2 × MAX_VEC_RUN` gives just enough headroom.
+const VEC_SCAN_WINDOW: usize = 2 * MAX_VEC_RUN;
 
 #[allow(clippy::needless_range_loop)]
 fn vectorize_block(
@@ -133,14 +133,13 @@ fn vectorize_block(
             // from the schedule pass interleaving load addressing with their consumers);
             // those stay in place during the Phase 3 rebuild — only the matched Loads
             // are skipped and become VectorExtract.
-            let max_vlen = max_vec_for(param.dtype);
             let mut run_indices: Vec<usize> = vec![i];
-            let window = n.min(i + 1 + 2 * MAX_VEC_LEN);
+            let window = n.min(i + 1 + VEC_SCAN_WINDOW);
             for j in (i + 1)..window {
                 if skip[j] {
                     continue;
                 }
-                if run_indices.len() >= max_vlen {
+                if run_indices.len() >= MAX_VEC_RUN {
                     break;
                 }
                 match &block.ops[j] {
@@ -217,14 +216,13 @@ fn vectorize_block(
 
             let (inv_base, offset) = decompose_index(block, base_vid, parent);
 
-            let max_vlen = max_vec_for(param.dtype);
             let mut run_indices: Vec<usize> = vec![i];
-            let window = n.min(i + 1 + 2 * MAX_VEC_LEN);
+            let window = n.min(i + 1 + VEC_SCAN_WINDOW);
             for j in (i + 1)..window {
                 if skip[j] {
                     continue;
                 }
-                if run_indices.len() >= max_vlen {
+                if run_indices.len() >= MAX_VEC_RUN {
                     break;
                 }
                 match &block.ops[j] {
@@ -373,11 +371,10 @@ fn index_eq(block: &Block, a: ValueId, b: ValueId) -> bool {
     let op_a = find_op(block, a);
     let op_b = find_op(block, b);
     match (op_a, op_b) {
-        (Some(Op::BinOp { op: oa, lhs: la, rhs: ra }), Some(Op::BinOp { op: ob, lhs: lb, rhs: rb }))
-            if oa == ob =>
-        {
-            (la == lb && ra == rb) || (la == rb && ra == lb)
-        },
+        (
+            Some(Op::BinOp { op: oa, lhs: la, rhs: ra }),
+            Some(Op::BinOp { op: ob, lhs: lb, rhs: rb }),
+        ) if oa == ob => (la == lb && ra == rb) || (la == rb && ra == lb),
         _ => false,
     }
 }
