@@ -92,23 +92,6 @@ jobs:
           REPO: ${{ github.repository }}
         run: python3 .github/scripts/commit_hygiene.py
 
-  metal:
-    name: Kernels
-    runs-on: macos-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      # rust-toolchain.toml pins nightly (edition=2024); the action installs
-      # default but cargo will pick up the toml override automatically.
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt,clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Tile Build
-        run: cargo run --release -p metaltile-cli -- build
-
-      - name: Tile Bench
-        run: cargo run --release -p metaltile-cli -- bench
+# The Kernels (macOS `tile build` + `tile bench`) job lives in
+# `.github/workflows/kernels.yml` so it can be path-filtered to skip
+# docs-only PRs without affecting the fast Ubuntu jobs above.

@@ -1,0 +1,52 @@
+name: Kernels
+
+# Slow macOS job: `tile build` + `tile bench` together take ~5-6 min
+# on the GitHub-hosted runner. Skip on PRs that can't affect kernel
+# emission, dispatch, or measurement — docs-only PRs, baseline-JSON
+# additions, README/CONTRIBUTING patches.
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/kernels.yml'
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/kernels.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CLICOLOR: 1
+
+jobs:
+  metal:
+    name: Kernels
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5.0.0
+      # rust-toolchain.toml pins nightly (edition=2024); the action installs
+      # default but cargo will pick up the toml override automatically.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Tile Build
+        run: cargo run --release -p metaltile-cli -- build
+
+      - name: Tile Bench
+        run: cargo run --release -p metaltile-cli -- bench
