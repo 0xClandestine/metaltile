@@ -42,3 +42,6 @@ serde_json = "1"
 bitvec = "1"
 criterion = { version = "0.8", features = ["html_reports"] }
 inventory = "0.3"
+
+# Test-only
+trybuild = "1"
