@@ -40,22 +40,14 @@
 
 #![cfg(target_os = "macos")]
 
-use std::{
-    collections::BTreeMap,
-    sync::{Mutex, MutexGuard, OnceLock},
-};
+use std::collections::BTreeMap;
 
+mod common;
+
+use common::gpu_lock;
 use metaltile_core::dtype::DType;
 use metaltile_runtime::Context;
 use metaltile_std::mlx::rms_norm::mt_rms_norm;
-
-/// Serialise GPU dispatches across the tests in this file. Same race
-/// pattern other gpu integration suites in this crate hit when cargo
-/// runs them in parallel.
-fn gpu_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
-}
 
 fn cpu_rms_norm_reference(x: &[f32], w: &[f32], rows: usize, n: usize, eps: f32) -> Vec<f32> {
     let mut out = vec![0.0f32; rows * n];

@@ -19,27 +19,14 @@
 
 #![cfg(target_os = "macos")]
 
-use std::{
-    collections::BTreeMap,
-    sync::{Mutex, MutexGuard, OnceLock},
-};
+use std::collections::BTreeMap;
 
+mod common;
+
+use common::gpu_lock;
 use metaltile_core::dtype::DType;
 use metaltile_runtime::Context;
 use metaltile_std::mlx::quantized::mt_qmm;
-
-/// Serialise GPU dispatches across the tests in this file. cargo runs
-/// integration tests in parallel by default; concurrent dispatches on
-/// the shared Metal pipeline race the PSO cache + library compilation
-/// path and surface as cross-test numeric corruption (caught when the
-/// f16 test ran after the f32 test in a single `cargo test` invocation
-/// and produced output ≈ 0.45× the expected magnitude). Same pattern
-/// other gpu integration suites in this crate use; lighter than
-/// requiring `--test-threads=1` at the command line.
-fn gpu_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
-}
 
 #[allow(clippy::too_many_arguments)]
 fn run_qmm(
