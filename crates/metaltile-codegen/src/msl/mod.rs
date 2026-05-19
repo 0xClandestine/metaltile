@@ -488,6 +488,29 @@ mod tests {
     }
 
     #[test]
+    fn bf16_cast_defaults_to_rounding_constructor() {
+        // Default config must NOT enable the reinterpret peephole — it
+        // truncates lower 16 bits of fp32 instead of round-to-nearest-even,
+        // drifting up to 1 ULP per cast. Tight-tolerance kernels (e.g.
+        // rms_norm) fail Tile Bench quality with reinterpret on. Opt in
+        // per kernel only where the drift is provably tolerable.
+        // Regression: PR #47 CI rms_norm bf16 ✗ at B=1024 N=4096.
+        let mut k = Kernel::new("default_bf16_cast");
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
+        k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::F32 }, ValueId::new(1));
+        k.body.push_op(Op::Cast { value: ValueId::new(1), dtype: DType::BF16 }, ValueId::new(2));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            !msl.contains("as_type<bfloat2>("),
+            "default config must not emit truncating reinterpret on f32→bf16:\n{msl}"
+        );
+        assert!(
+            msl.contains("v2 = bfloat("),
+            "default config must emit rounding constructor:\n{msl}"
+        );
+    }
+
+    #[test]
     fn bf16_cast_from_int_uses_rounding_constructor() {
         // Int→bf16 reinterpret would read upper-half int bits as bf16
         // (e.g. `as_type<bfloat2>(123)[1]` = 0 because the upper 16 bits
