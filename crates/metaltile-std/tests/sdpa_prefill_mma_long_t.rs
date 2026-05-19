@@ -87,6 +87,7 @@ fn run_sdpa_prefill(
     q_bytes: &[u8],
     k_bytes: &[u8],
     v_bytes: &[u8],
+    batch: usize,
     n_heads: usize,
     n_kv_heads: usize,
     t: usize,
@@ -99,7 +100,7 @@ fn run_sdpa_prefill(
     buffers.insert("q".into(), q_bytes.to_vec());
     buffers.insert("k".into(), k_bytes.to_vec());
     buffers.insert("v".into(), v_bytes.to_vec());
-    buffers.insert("out".into(), vec![0u8; n_heads * t * head_dim * dt_bytes]);
+    buffers.insert("out".into(), vec![0u8; batch * n_heads * t * head_dim * dt_bytes]);
     buffers.insert("q_len".into(), (t as u32).to_le_bytes().to_vec());
     buffers.insert("k_len".into(), (t as u32).to_le_bytes().to_vec());
     buffers.insert("gqa_factor".into(), ((n_heads / n_kv_heads) as u32).to_le_bytes().to_vec());
@@ -114,9 +115,11 @@ fn run_sdpa_prefill(
     // directly — only SimdGroup2D maps `uint3 tid
     // [[threadgroup_position_in_grid]]` so the three axes resolve.
     kernel.mode = metaltile_core::ir::KernelMode::SimdGroup2D;
-    // Grid: (q_len / BQ=32, n_heads, batch=1). 128 threads = 4 SGs.
+    // Grid: (q_len / BQ=32, n_heads, batch). 128 threads = 4 SGs.
     let result = ctx
-        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [t / 32, n_heads, 1], [128, 1, 1])
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [t / 32, n_heads, batch], [
+            128, 1, 1,
+        ])
         .expect("dispatch_with_grid should succeed");
     let out_bytes = result.outputs.get("out").expect("`out` buffer in dispatch result");
     unpack_bytes(out_bytes, dt)
@@ -144,8 +147,19 @@ fn mt_sdpa_prefill_mma_matches_cpu_reference_t2048_f32() {
     let q_b = pack_bytes(&q, Dt::F32);
     let k_b = pack_bytes(&k, Dt::F32);
     let v_b = pack_bytes(&v, Dt::F32);
-    let actual =
-        run_sdpa_prefill(&ctx, &q_b, &k_b, &v_b, n_heads, n_kv_heads, t, head_dim, scale, Dt::F32);
+    let actual = run_sdpa_prefill(
+        &ctx,
+        &q_b,
+        &k_b,
+        &v_b,
+        1,
+        n_heads,
+        n_kv_heads,
+        t,
+        head_dim,
+        scale,
+        Dt::F32,
+    );
 
     assert_eq!(actual.len(), expected.len());
 
@@ -246,6 +260,7 @@ fn mt_sdpa_prefill_mma_b2_via_head_flatten_t1024_f32() {
         &q_b,
         &k_b,
         &v_b,
+        1, // batch=1 via head-flatten layout; real batches are folded into flat_n_heads
         flat_n_heads,
         flat_n_kv_heads,
         t,
@@ -271,44 +286,6 @@ fn mt_sdpa_prefill_mma_b2_via_head_flatten_t1024_f32() {
         expected[max_at],
         actual[max_at],
     );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_sdpa_prefill_batched(
-    ctx: &Context,
-    q_bytes: &[u8],
-    k_bytes: &[u8],
-    v_bytes: &[u8],
-    batch: usize,
-    n_q_heads: usize,
-    n_kv_heads: usize,
-    t: usize,
-    head_dim: usize,
-    scale: f32,
-    dt: Dt,
-) -> Vec<f32> {
-    let dt_bytes = dt.bytes();
-    let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    buffers.insert("q".into(), q_bytes.to_vec());
-    buffers.insert("k".into(), k_bytes.to_vec());
-    buffers.insert("v".into(), v_bytes.to_vec());
-    buffers.insert("out".into(), vec![0u8; batch * n_q_heads * t * head_dim * dt_bytes]);
-    buffers.insert("q_len".into(), (t as u32).to_le_bytes().to_vec());
-    buffers.insert("k_len".into(), (t as u32).to_le_bytes().to_vec());
-    buffers.insert("gqa_factor".into(), ((n_q_heads / n_kv_heads) as u32).to_le_bytes().to_vec());
-    buffers.insert("n_q_heads".into(), (n_q_heads as u32).to_le_bytes().to_vec());
-    buffers.insert("n_kv_heads".into(), (n_kv_heads as u32).to_le_bytes().to_vec());
-    buffers.insert("scale".into(), scale.to_le_bytes().to_vec());
-
-    let mut kernel = mt_sdpa_prefill_mma::kernel_ir_for(dt.to_dtype());
-    kernel.mode = metaltile_core::ir::KernelMode::SimdGroup2D;
-    let result = ctx
-        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [t / 32, n_q_heads, batch], [
-            128, 1, 1,
-        ])
-        .expect("dispatch_with_grid should succeed");
-    let out_bytes = result.outputs.get("out").expect("`out` buffer in dispatch result");
-    unpack_bytes(out_bytes, dt)
 }
 
 #[test]
@@ -369,7 +346,7 @@ fn mt_sdpa_prefill_mma_kernel_side_b2_t1024_f32() {
     let q_b = pack_bytes(&q, Dt::F32);
     let k_b = pack_bytes(&k, Dt::F32);
     let v_b = pack_bytes(&v, Dt::F32);
-    let actual = run_sdpa_prefill_batched(
+    let actual = run_sdpa_prefill(
         &ctx,
         &q_b,
         &k_b,
@@ -456,7 +433,7 @@ fn mt_sdpa_prefill_mma_kernel_side_b4_t512_f32() {
     let q_b = pack_bytes(&q, Dt::F32);
     let k_b = pack_bytes(&k, Dt::F32);
     let v_b = pack_bytes(&v, Dt::F32);
-    let actual = run_sdpa_prefill_batched(
+    let actual = run_sdpa_prefill(
         &ctx,
         &q_b,
         &k_b,
@@ -509,8 +486,19 @@ fn mt_sdpa_prefill_mma_matches_cpu_reference_t4096_f32() {
     let q_b = pack_bytes(&q, Dt::F32);
     let k_b = pack_bytes(&k, Dt::F32);
     let v_b = pack_bytes(&v, Dt::F32);
-    let actual =
-        run_sdpa_prefill(&ctx, &q_b, &k_b, &v_b, n_heads, n_kv_heads, t, head_dim, scale, Dt::F32);
+    let actual = run_sdpa_prefill(
+        &ctx,
+        &q_b,
+        &k_b,
+        &v_b,
+        1,
+        n_heads,
+        n_kv_heads,
+        t,
+        head_dim,
+        scale,
+        Dt::F32,
+    );
 
     assert_eq!(actual.len(), expected.len());
 
