@@ -339,6 +339,72 @@ pub fn mt_qmv<T>(
     }
 }
 
+// ─── mt_qmm ─────────────────────────────────────────────────────────────
+//
+// Quantized matmul (B>1 / prefill). Same int4 weight layout as `mt_qmv`
+// extended along the M axis (token count). One thread per output
+// element `(m_row, n_col)`; each thread walks the K dimension in groups
+// of `group_size = 64` and accumulates `acc += s_g · Σ q·x + bias_g · Σ x`,
+// the same algebraic split used by `qdot` in MLX `quantized.h:235`.
+//
+// Layouts:
+//   w       [n, k/8]               u32   — int4 nibbles (8 per uint32)
+//   scales  [n, gs_per_row]        T
+//   biases  [n, gs_per_row]        T
+//   x       [m, k]                 T
+//   out     [m, n]                 T
+//
+// v1 is the naive elementwise form: no threadgroup tiling, no simdgroup
+// matrix. It exists to (a) plant the kernel + bench/test surface in
+// tree, (b) anchor correctness against the same CPU reference the qmv
+// path uses. v2 lifts the tile-blocking + cooperative loads (see MLX
+// `qmm_t_impl` in `quantized.h:1094`); v3 swaps the inner dot for
+// `simdgroup_multiply_accumulate` on the BlockMMA pattern used by
+// `mt_steel_gemm_64x64x16_2x2`.
+#[kernel]
+pub fn mt_qmm<T>(
+    w: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    x: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] k: u32,
+    #[constexpr] n: u32,
+    #[constexpr] gs_per_row: u32,
+) {
+    let mn = program_id::<0>();
+    let m_row = mn / n;
+    let n_col = mn - m_row * n;
+
+    let packs_per_row = k / 8u32;
+    let w_base = n_col * packs_per_row;
+    let sb_base = n_col * gs_per_row;
+    let x_base = m_row * k;
+
+    let mut acc = 0.0f32;
+    for _g in range(0u32, gs_per_row, 1u32) {
+        let s = load(scales[sb_base + _g]).cast::<f32>();
+        let bias = load(biases[sb_base + _g]).cast::<f32>();
+        let g_w_base = w_base + _g * 8u32;
+        let g_x_base = x_base + _g * 64u32;
+        let mut q_dot = 0.0f32;
+        let mut x_sum = 0.0f32;
+        for _p in range(0u32, 8u32, 1u32) {
+            let packed = load(w[g_w_base + _p]);
+            let xb = g_x_base + _p * 8u32;
+            for _i in range(0u32, 8u32, 1u32) {
+                let shift = _i * 4u32;
+                let q = ((packed >> shift) & 15u32).cast::<f32>();
+                let xv = load(x[xb + _i]).cast::<f32>();
+                q_dot = q_dot + q * xv;
+                x_sum = x_sum + xv;
+            }
+        }
+        acc = acc + s * q_dot + bias * x_sum;
+    }
+    store(out[m_row * n + n_col], acc.cast::<T>());
+}
+
 // ─── mt_affine_dequantize_int4 ─────────────────────────────────────────
 //
 // One thread per pack (8 nibbles in one uint32). For each output i in
