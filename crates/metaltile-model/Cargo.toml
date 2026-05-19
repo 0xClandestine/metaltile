@@ -1,0 +1,29 @@
+[package]
+name = "metaltile-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+
+[dependencies]
+metaltile-core = { workspace = true }
+metaltile-std = { workspace = true }
+metaltile-runtime = { workspace = true }
+# metaltile-codegen — only needed for MSL generation in validation tests;
+# kept optional so the model crate compiles standalone on non-macOS.
+metaltile-codegen = { workspace = true, optional = true }
+
+serde = { workspace = true }
+toml = "0.8"
+indexmap = { version = "2", features = ["serde"] }
+thiserror = { workspace = true }
+inventory = { workspace = true }
+
+[dev-dependencies]
+metaltile-codegen = { workspace = true }
+
+[features]
+default = []
+msl-validate = ["metaltile-codegen"]
