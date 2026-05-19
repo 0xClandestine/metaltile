@@ -25,7 +25,7 @@ mod common;
 
 use common::gpu_lock;
 use metaltile_core::dtype::DType;
-use metaltile_runtime::Context;
+use metaltile_runtime::{Context, DispatchSpec, ResidentBuffer};
 use metaltile_std::mlx::quantized::mt_qmm;
 
 #[allow(clippy::too_many_arguments)]
@@ -534,9 +534,21 @@ fn mt_qmm_perf_bench_qwen3_shapes_f16_m_sweep() {
     // expose where the per-M-row TG dispatch starts losing to W
     // bandwidth saturation (the v3 BM-tile W-reuse rationale).
     //
-    // M=2 mini is the canonical perf measurement target for this
-    // repo (see `feedback_metaltile_bench_on_m2_mini`); this bench
-    // surfaces the same numbers on the dev host for iteration.
+    // Canonical perf measurement target is M2 mini (see
+    // `feedback_metaltile_bench_on_m2_mini`); this bench surfaces the
+    // same numbers on the dev host for iteration.
+    //
+    // ## Resident-buffer pattern
+    //
+    // `w`, `scales`, `biases` are static across all iterations within
+    // a shape (only `x` / `out` vary per-M, and only the kernel runs
+    // per-iter). Upload them once per shape via
+    // `Context::upload_resident` and bind through
+    // `DispatchSpec::resident` — the dispatch skips the host→GPU
+    // memcpy + per-iter buffer-pool allocation that would otherwise
+    // re-stream ~70 MB of q4 weights at the largest Qwen3 shape
+    // (27648 × 5120 / 2) every dispatch. Same pattern used by
+    // `tests/sdpa_decode_2pass_gpu.rs:171-172` for K/V residency.
     let _g = gpu_lock();
     let ctx = Context::new().expect("Context::new should succeed on macOS");
     let group_size = 64usize;
@@ -549,49 +561,72 @@ fn mt_qmm_perf_bench_qwen3_shapes_f16_m_sweep() {
         "shape (n × k)", "M", "µs", "GB/s"
     );
 
+    let mut kernel = mt_qmm::kernel_ir_for(DType::F16);
+    kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+    let empty_fn_consts: BTreeMap<String, u32> = BTreeMap::new();
+
     for &(n, k, label) in QWEN3_SHAPES {
         let gs_per_row = k / group_size;
         let w: Vec<u32> = (0..n * k / 8).map(|i| (i as u32).wrapping_mul(2654435761u32)).collect();
         let scales: Vec<f32> =
             (0..n * gs_per_row).map(|i| 0.01 + (i % 13) as f32 * 0.001).collect();
         let biases: Vec<f32> = (0..n * gs_per_row).map(|i| (i % 7) as f32 * 0.0001).collect();
+
         let w_bytes_vec: Vec<u8> = w.iter().flat_map(|v| v.to_le_bytes()).collect();
         let scales_bytes: Vec<u8> =
             scales.iter().flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes()).collect();
         let biases_bytes: Vec<u8> =
             biases.iter().flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes()).collect();
 
+        // Upload the per-shape static buffers ONCE. ResidentBuffer
+        // holds an Rc to a Metal buffer in private storage mode; the
+        // dispatch skips the per-call host→GPU memcpy + buffer-pool
+        // alloc for these inputs.
+        let w_res = ctx.upload_resident(&w_bytes_vec).expect("upload w");
+        let scales_res = ctx.upload_resident(&scales_bytes).expect("upload scales");
+        let biases_res = ctx.upload_resident(&biases_bytes).expect("upload biases");
+        let mut residents: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
+        residents.insert("w".into(), w_res);
+        residents.insert("scales".into(), scales_res);
+        residents.insert("biases".into(), biases_res);
+
         for &m in &[1usize, 4, 8, 32] {
             let x: Vec<f32> = (0..m * k).map(|i| 0.1 + ((i % 31) as f32) * 0.01).collect();
             let x_bytes: Vec<u8> =
                 x.iter().flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes()).collect();
 
+            // Per-iter buffers: only the live-data ones (x + out) and
+            // the constexpr scalars. Static weights / scales / biases
+            // stay GPU-resident via the `residents` map above.
             let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-            buffers.insert("w".into(), w_bytes_vec.clone());
-            buffers.insert("scales".into(), scales_bytes.clone());
-            buffers.insert("biases".into(), biases_bytes.clone());
             buffers.insert("x".into(), x_bytes);
             buffers.insert("out".into(), vec![0u8; m * n * 2]);
             buffers.insert("k".into(), (k as u32).to_le_bytes().to_vec());
             buffers.insert("n".into(), (n as u32).to_le_bytes().to_vec());
             buffers.insert("gs_per_row".into(), (gs_per_row as u32).to_le_bytes().to_vec());
 
-            let mut kernel = mt_qmm::kernel_ir_for(DType::F16);
-            kernel.mode = metaltile_core::ir::KernelMode::Reduction;
-
             let mut samples = Vec::with_capacity(ITERS);
             for i in 0..(WARMUP + ITERS) {
                 let r = ctx
-                    .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [n / 8, m, 1], [
-                        64, 1, 1,
-                    ])
+                    .dispatch_chain(&[DispatchSpec {
+                        kernel: &kernel,
+                        buffers: &buffers,
+                        fn_consts: &empty_fn_consts,
+                        grid_groups: [n / 8, m, 1],
+                        threads_per_group: [64, 1, 1],
+                        resident: &residents,
+                    }])
                     .expect("dispatch");
                 if i >= WARMUP {
-                    samples.push(r.elapsed_us);
+                    samples.push(r[0].elapsed_us);
                 }
             }
-            samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let median_us = samples[samples.len() / 2];
+            // O(n) median via `select_nth_unstable_by` — same pattern
+            // `tests/sdpa_decode_2pass_gpu.rs` uses; we don't need a
+            // fully sorted samples vector, only the midpoint.
+            let mid = samples.len() / 2;
+            samples.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap());
+            let median_us = samples[mid];
 
             // Bytes touched per kernel: W (q4) + scales + biases + X + Y.
             // q4 weights: n × k / 2 bytes. Scales/biases: 2 bytes each
