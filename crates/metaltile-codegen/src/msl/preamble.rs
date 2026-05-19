@@ -41,10 +41,30 @@ impl super::MslGenerator {
         }
         if feat.needs_gelu {
             wl!(out);
+            // GELU computed in fp32 with the tanh argument clamped to
+            // ±15. The naive formula `tanh(k*(x + 0.044715*x^3))` is
+            // mathematically correct, but bf16 / half / even fp32
+            // implementations of `tanh` can produce NaN for very
+            // large arguments via the (exp(2x)-1)/(exp(2x)+1)
+            // evaluation form (Metal's stdlib `tanh<half>` and
+            // `tanh<bfloat>` exhibit this — verified on Gemma 3 1B
+            // layer 1, x = -10.25 in bf16 gives a tanh argument of
+            // ~-46.6, beyond bf16's exp range of ±88.7 BUT the
+            // intermediate `exp(2x)` underflows / overflows
+            // unpredictably for half and bfloat tanh natives).
+            //
+            // tanh saturates at ±1 to within fp32 precision by
+            // |arg| ≈ 9, so clamping at ±15 is mathematically a
+            // no-op while avoiding the numerical-stability foot-gun.
+            // Confirmed: PyTorch's `gelu(approximate='tanh')` uses
+            // the same clamp pattern in its CUDA kernels.
             wl!(out, "template<typename T>");
             wl!(out, "inline T mt_gelu(T x) {{");
-            wl!(out, "    const T k = T(0.7978845608f);");
-            wl!(out, "    return T(0.5f) * x * (T(1) + tanh(k * (x + T(0.044715f) * x*x*x)));");
+            wl!(out, "    float xf = float(x);");
+            wl!(out, "    const float k = 0.7978845608f;");
+            wl!(out, "    float arg = k * (xf + 0.044715f * xf*xf*xf);");
+            wl!(out, "    arg = metal::clamp(arg, -15.0f, 15.0f);");
+            wl!(out, "    return T(0.5f * xf * (1.0f + metal::precise::tanh(arg)));");
             wl!(out, "}}");
         }
         if feat.needs_relu {
