@@ -342,10 +342,22 @@ pub fn mt_qmv<T>(
 // ─── mt_qmm ─────────────────────────────────────────────────────────────
 //
 // Quantized matmul (B>1 / prefill). Same int4 weight layout as `mt_qmv`
-// extended along the M axis (token count). One thread per output
-// element `(m_row, n_col)`; each thread walks the K dimension in groups
-// of `group_size = 64` and accumulates `acc += s_g · Σ q·x + bias_g · Σ x`,
-// the same algebraic split used by `qdot` in MLX `quantized.h:235`.
+// extended along the M axis (token count). Each threadgroup owns 8
+// consecutive output columns at one M-row — `mt_qmv`'s 2 SG × 4 N-row
+// tile lifted into M via an outer grid axis (`tgid_y = m_row`). The
+// inner K-walk is bit-identical to `mt_qmv`: each lane caches 16 X
+// values per 512-wide K-block and reuses them across all 4 N-rows in
+// its simdgroup, using the same mask-without-shift trick (X
+// pre-scaled by inverse nibble position, weight mask returns
+// nibble × position-power) + algebraic-split accumulator
+// `acc += s_g · Σ q·x + bias_g · Σ x` that mirrors MLX `qdot` in
+// `quantized.h:235-244`.
+//
+// Geometry:
+//   tpg = 64 = 2 simdgroups × 32 lanes
+//   8 outputs per TG (each SG owns 4 N-rows, indexed by simd_id)
+//   Block = 16 X × 32 lanes = 512 K elements per outer iter
+//   Grid: [n / 8, m, 1]
 //
 // Layouts:
 //   w       [n, k/8]               u32   — int4 nibbles (8 per uint32)
@@ -354,13 +366,11 @@ pub fn mt_qmv<T>(
 //   x       [m, k]                 T
 //   out     [m, n]                 T
 //
-// v1 is the naive elementwise form: no threadgroup tiling, no simdgroup
-// matrix. It exists to (a) plant the kernel + bench/test surface in
-// tree, (b) anchor correctness against the same CPU reference the qmv
-// path uses. v2 lifts the tile-blocking + cooperative loads (see MLX
-// `qmm_t_impl` in `quantized.h:1094`); v3 swaps the inner dot for
-// `simdgroup_multiply_accumulate` on the BlockMMA pattern used by
-// `mt_steel_gemm_64x64x16_2x2`.
+// At M = 1 this is byte-identical to `mt_qmv`. At M > 1 each M-row
+// runs as a fully independent threadgroup grid axis — no W reuse
+// across M-rows (W is loaded fresh per (M-row, N-tile) pair). The
+// natural v3 step is a BM × BN output tile with W cached in TG
+// memory and amortised across BM M-rows.
 #[kernel]
 pub fn mt_qmm<T>(
     w: Tensor<u32>,
@@ -372,37 +382,286 @@ pub fn mt_qmm<T>(
     #[constexpr] n: u32,
     #[constexpr] gs_per_row: u32,
 ) {
-    let mn = program_id::<0>();
-    let m_row = mn / n;
-    let n_col = mn - m_row * n;
+    let tg = tgid_x;
+    let m_row = tgid_y;
+    let sg = simd_id;
+    let lane = simd_lane;
+    let row0 = tg * 8u32 + sg * 4u32;
+    let row1 = row0 + 1u32;
+    let row2 = row0 + 2u32;
+    let row3 = row0 + 3u32;
 
     let packs_per_row = k / 8u32;
-    let w_base = n_col * packs_per_row;
-    let sb_base = n_col * gs_per_row;
-    let x_base = m_row * k;
+    let w_base0 = row0 * packs_per_row;
+    let w_base1 = row1 * packs_per_row;
+    let w_base2 = row2 * packs_per_row;
+    let w_base3 = row3 * packs_per_row;
 
-    let mut acc = 0.0f32;
-    for _g in range(0u32, gs_per_row, 1u32) {
-        let s = load(scales[sb_base + _g]).cast::<f32>();
-        let bias = load(biases[sb_base + _g]).cast::<f32>();
-        let g_w_base = w_base + _g * 8u32;
-        let g_x_base = x_base + _g * 64u32;
-        let mut q_dot = 0.0f32;
-        let mut x_sum = 0.0f32;
-        for _p in range(0u32, 8u32, 1u32) {
-            let packed = load(w[g_w_base + _p]);
-            let xb = g_x_base + _p * 8u32;
-            for _i in range(0u32, 8u32, 1u32) {
-                let shift = _i * 4u32;
-                let q = ((packed >> shift) & 15u32).cast::<f32>();
-                let xv = load(x[xb + _i]).cast::<f32>();
-                q_dot = q_dot + q * xv;
-                x_sum = x_sum + xv;
-            }
-        }
-        acc = acc + s * q_dot + bias * x_sum;
+    let sb_base0 = row0 * gs_per_row;
+    let sb_base1 = row1 * gs_per_row;
+    let sb_base2 = row2 * gs_per_row;
+    let sb_base3 = row3 * gs_per_row;
+
+    let x_row_base = m_row * k;
+
+    let mut acc0 = 0.0f32;
+    let mut acc1 = 0.0f32;
+    let mut acc2 = 0.0f32;
+    let mut acc3 = 0.0f32;
+
+    let lane_x_off = lane * 16u32;
+    let lane_pack_off = lane * 2u32;
+
+    for _b in range(0u32, k, 512u32) {
+        // 16 X loads — consecutive in IR for vectorize fusion.
+        let xb = x_row_base + _b + lane_x_off;
+        let xi0 = xb;
+        let xi1 = xb + 1u32;
+        let xi2 = xb + 2u32;
+        let xi3 = xb + 3u32;
+        let xi4 = xb + 4u32;
+        let xi5 = xb + 5u32;
+        let xi6 = xb + 6u32;
+        let xi7 = xb + 7u32;
+        let xi8 = xb + 8u32;
+        let xi9 = xb + 9u32;
+        let xi10 = xb + 10u32;
+        let xi11 = xb + 11u32;
+        let xi12 = xb + 12u32;
+        let xi13 = xb + 13u32;
+        let xi14 = xb + 14u32;
+        let xi15 = xb + 15u32;
+        // Mask-without-shift constants. Same as mt_qmv.
+        let s_16 = 0.0625f32;
+        let s_256 = 0.00390625f32;
+        let s_4096 = 0.000244140625f32;
+        let x0 = load(x[xi0]).cast::<f32>();
+        let x1_raw = load(x[xi1]).cast::<f32>();
+        let x2_raw = load(x[xi2]).cast::<f32>();
+        let x3_raw = load(x[xi3]).cast::<f32>();
+        let x4 = load(x[xi4]).cast::<f32>();
+        let x5_raw = load(x[xi5]).cast::<f32>();
+        let x6_raw = load(x[xi6]).cast::<f32>();
+        let x7_raw = load(x[xi7]).cast::<f32>();
+        let x8 = load(x[xi8]).cast::<f32>();
+        let x9_raw = load(x[xi9]).cast::<f32>();
+        let x10_raw = load(x[xi10]).cast::<f32>();
+        let x11_raw = load(x[xi11]).cast::<f32>();
+        let x12 = load(x[xi12]).cast::<f32>();
+        let x13_raw = load(x[xi13]).cast::<f32>();
+        let x14_raw = load(x[xi14]).cast::<f32>();
+        let x15_raw = load(x[xi15]).cast::<f32>();
+        let xs = x0
+            + x1_raw
+            + x2_raw
+            + x3_raw
+            + x4
+            + x5_raw
+            + x6_raw
+            + x7_raw
+            + x8
+            + x9_raw
+            + x10_raw
+            + x11_raw
+            + x12
+            + x13_raw
+            + x14_raw
+            + x15_raw;
+        let x1 = x1_raw * s_16;
+        let x2 = x2_raw * s_256;
+        let x3 = x3_raw * s_4096;
+        let x5 = x5_raw * s_16;
+        let x6 = x6_raw * s_256;
+        let x7 = x7_raw * s_4096;
+        let x9 = x9_raw * s_16;
+        let x10 = x10_raw * s_256;
+        let x11 = x11_raw * s_4096;
+        let x13 = x13_raw * s_16;
+        let x14 = x14_raw * s_256;
+        let x15 = x15_raw * s_4096;
+
+        // Group index within this row's K dimension. mt_qmv uses
+        // `xb / 64` because there `xb` is already a K-position; here
+        // `xb` includes the `x_row_base = m_row * k` offset, so we
+        // recompute against the K-local base.
+        let g = (_b + lane_x_off) / 64u32;
+        let pack_off = _b / 8u32 + lane_pack_off;
+
+        // ── Row 0 ──
+        let p00 = load(w[w_base0 + pack_off]);
+        let p01 = load(w[w_base0 + pack_off + 1u32]);
+        let p00_hi = p00 >> 16u32;
+        let p01_hi = p01 >> 16u32;
+        let s0 = load(scales[sb_base0 + g]).cast::<f32>();
+        let bi0 = load(biases[sb_base0 + g]).cast::<f32>();
+        let q00 = (p00 & 15u32).cast::<f32>();
+        let q01 = (p00 & 240u32).cast::<f32>();
+        let q02 = (p00 & 3840u32).cast::<f32>();
+        let q03 = (p00 & 61440u32).cast::<f32>();
+        let q04 = (p00_hi & 15u32).cast::<f32>();
+        let q05 = (p00_hi & 240u32).cast::<f32>();
+        let q06 = (p00_hi & 3840u32).cast::<f32>();
+        let q07 = (p00_hi & 61440u32).cast::<f32>();
+        let q08 = (p01 & 15u32).cast::<f32>();
+        let q09 = (p01 & 240u32).cast::<f32>();
+        let q010 = (p01 & 3840u32).cast::<f32>();
+        let q011 = (p01 & 61440u32).cast::<f32>();
+        let q012 = (p01_hi & 15u32).cast::<f32>();
+        let q013 = (p01_hi & 240u32).cast::<f32>();
+        let q014 = (p01_hi & 3840u32).cast::<f32>();
+        let q015 = (p01_hi & 61440u32).cast::<f32>();
+        let qd0 = q00 * x0
+            + q01 * x1
+            + q02 * x2
+            + q03 * x3
+            + q04 * x4
+            + q05 * x5
+            + q06 * x6
+            + q07 * x7
+            + q08 * x8
+            + q09 * x9
+            + q010 * x10
+            + q011 * x11
+            + q012 * x12
+            + q013 * x13
+            + q014 * x14
+            + q015 * x15;
+        acc0 = acc0 + s0 * qd0 + bi0 * xs;
+
+        // ── Row 1 ──
+        let p10 = load(w[w_base1 + pack_off]);
+        let p11 = load(w[w_base1 + pack_off + 1u32]);
+        let p10_hi = p10 >> 16u32;
+        let p11_hi = p11 >> 16u32;
+        let s1 = load(scales[sb_base1 + g]).cast::<f32>();
+        let bi1 = load(biases[sb_base1 + g]).cast::<f32>();
+        let q10 = (p10 & 15u32).cast::<f32>();
+        let q11 = (p10 & 240u32).cast::<f32>();
+        let q12 = (p10 & 3840u32).cast::<f32>();
+        let q13 = (p10 & 61440u32).cast::<f32>();
+        let q14 = (p10_hi & 15u32).cast::<f32>();
+        let q15 = (p10_hi & 240u32).cast::<f32>();
+        let q16 = (p10_hi & 3840u32).cast::<f32>();
+        let q17 = (p10_hi & 61440u32).cast::<f32>();
+        let q18 = (p11 & 15u32).cast::<f32>();
+        let q19 = (p11 & 240u32).cast::<f32>();
+        let q110 = (p11 & 3840u32).cast::<f32>();
+        let q111 = (p11 & 61440u32).cast::<f32>();
+        let q112 = (p11_hi & 15u32).cast::<f32>();
+        let q113 = (p11_hi & 240u32).cast::<f32>();
+        let q114 = (p11_hi & 3840u32).cast::<f32>();
+        let q115 = (p11_hi & 61440u32).cast::<f32>();
+        let qd1 = q10 * x0
+            + q11 * x1
+            + q12 * x2
+            + q13 * x3
+            + q14 * x4
+            + q15 * x5
+            + q16 * x6
+            + q17 * x7
+            + q18 * x8
+            + q19 * x9
+            + q110 * x10
+            + q111 * x11
+            + q112 * x12
+            + q113 * x13
+            + q114 * x14
+            + q115 * x15;
+        acc1 = acc1 + s1 * qd1 + bi1 * xs;
+
+        // ── Row 2 ──
+        let p20 = load(w[w_base2 + pack_off]);
+        let p21 = load(w[w_base2 + pack_off + 1u32]);
+        let p20_hi = p20 >> 16u32;
+        let p21_hi = p21 >> 16u32;
+        let s2 = load(scales[sb_base2 + g]).cast::<f32>();
+        let bi2 = load(biases[sb_base2 + g]).cast::<f32>();
+        let q20 = (p20 & 15u32).cast::<f32>();
+        let q21 = (p20 & 240u32).cast::<f32>();
+        let q22 = (p20 & 3840u32).cast::<f32>();
+        let q23 = (p20 & 61440u32).cast::<f32>();
+        let q24 = (p20_hi & 15u32).cast::<f32>();
+        let q25 = (p20_hi & 240u32).cast::<f32>();
+        let q26 = (p20_hi & 3840u32).cast::<f32>();
+        let q27 = (p20_hi & 61440u32).cast::<f32>();
+        let q28 = (p21 & 15u32).cast::<f32>();
+        let q29 = (p21 & 240u32).cast::<f32>();
+        let q210 = (p21 & 3840u32).cast::<f32>();
+        let q211 = (p21 & 61440u32).cast::<f32>();
+        let q212 = (p21_hi & 15u32).cast::<f32>();
+        let q213 = (p21_hi & 240u32).cast::<f32>();
+        let q214 = (p21_hi & 3840u32).cast::<f32>();
+        let q215 = (p21_hi & 61440u32).cast::<f32>();
+        let qd2 = q20 * x0
+            + q21 * x1
+            + q22 * x2
+            + q23 * x3
+            + q24 * x4
+            + q25 * x5
+            + q26 * x6
+            + q27 * x7
+            + q28 * x8
+            + q29 * x9
+            + q210 * x10
+            + q211 * x11
+            + q212 * x12
+            + q213 * x13
+            + q214 * x14
+            + q215 * x15;
+        acc2 = acc2 + s2 * qd2 + bi2 * xs;
+
+        // ── Row 3 ──
+        let p30 = load(w[w_base3 + pack_off]);
+        let p31 = load(w[w_base3 + pack_off + 1u32]);
+        let p30_hi = p30 >> 16u32;
+        let p31_hi = p31 >> 16u32;
+        let s3 = load(scales[sb_base3 + g]).cast::<f32>();
+        let bi3 = load(biases[sb_base3 + g]).cast::<f32>();
+        let q30 = (p30 & 15u32).cast::<f32>();
+        let q31 = (p30 & 240u32).cast::<f32>();
+        let q32 = (p30 & 3840u32).cast::<f32>();
+        let q33 = (p30 & 61440u32).cast::<f32>();
+        let q34 = (p30_hi & 15u32).cast::<f32>();
+        let q35 = (p30_hi & 240u32).cast::<f32>();
+        let q36 = (p30_hi & 3840u32).cast::<f32>();
+        let q37 = (p30_hi & 61440u32).cast::<f32>();
+        let q38 = (p31 & 15u32).cast::<f32>();
+        let q39 = (p31 & 240u32).cast::<f32>();
+        let q310 = (p31 & 3840u32).cast::<f32>();
+        let q311 = (p31 & 61440u32).cast::<f32>();
+        let q312 = (p31_hi & 15u32).cast::<f32>();
+        let q313 = (p31_hi & 240u32).cast::<f32>();
+        let q314 = (p31_hi & 3840u32).cast::<f32>();
+        let q315 = (p31_hi & 61440u32).cast::<f32>();
+        let qd3 = q30 * x0
+            + q31 * x1
+            + q32 * x2
+            + q33 * x3
+            + q34 * x4
+            + q35 * x5
+            + q36 * x6
+            + q37 * x7
+            + q38 * x8
+            + q39 * x9
+            + q310 * x10
+            + q311 * x11
+            + q312 * x12
+            + q313 * x13
+            + q314 * x14
+            + q315 * x15;
+        acc3 = acc3 + s3 * qd3 + bi3 * xs;
     }
-    store(out[m_row * n + n_col], acc.cast::<T>());
+
+    let r0 = simd_sum(acc0);
+    let r1 = simd_sum(acc1);
+    let r2 = simd_sum(acc2);
+    let r3 = simd_sum(acc3);
+    if lane == 0u32 {
+        store(out[m_row * n + row0], r0.cast::<T>());
+        store(out[m_row * n + row1], r1.cast::<T>());
+        store(out[m_row * n + row2], r2.cast::<T>());
+        store(out[m_row * n + row3], r3.cast::<T>());
+    }
 }
 
 // ─── mt_affine_dequantize_int4 ─────────────────────────────────────────

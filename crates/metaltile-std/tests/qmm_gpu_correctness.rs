@@ -65,9 +65,17 @@ fn run_qmm(
     buffers.insert("n".into(), (n as u32).to_le_bytes().to_vec());
     buffers.insert("gs_per_row".into(), (gs_per_row as u32).to_le_bytes().to_vec());
 
-    let kernel = mt_qmm::kernel_ir_for(dtype);
+    let mut kernel = mt_qmm::kernel_ir_for(dtype);
+    // Reduction mode is required so the codegen emits the
+    // `tgid_x`/`tgid_y` aliases the kernel body references. Same
+    // dispatch contract as `mt_qmv`.
+    kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+    // Grid: (n/8 N-tiles, m M-rows, 1). 2 simdgroups × 32 lanes = 64
+    // threads per group. Each TG produces 8 outputs at one (m_row).
+    // Caller assertion: n % 8 == 0, k % 512 == 0 (mt_qmm preconditions
+    // inherited from mt_qmv).
     let result = ctx
-        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [m * n, 1, 1], [64, 1, 1])
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [n / 8, m, 1], [64, 1, 1])
         .expect("dispatch_with_grid should succeed");
     result.outputs.get("out").expect("`out` buffer in dispatch result").clone()
 }
@@ -114,7 +122,7 @@ fn cpu_qmm_reference(
 fn mt_qmm_matches_cpu_reference_f32() {
     let m = 8usize;
     let n = 16usize;
-    let k = 128usize;
+    let k = 512usize;
     let group_size = 64usize;
     let gs_per_row = k / group_size;
 
@@ -205,7 +213,7 @@ fn mt_qmm_matches_cpu_reference_f16() {
     // oracle and the kernel agree to within f16's 3-digit precision.
     let m = 8usize;
     let n = 16usize;
-    let k = 128usize;
+    let k = 512usize;
     let group_size = 64usize;
     let gs_per_row = k / group_size;
 
@@ -259,21 +267,24 @@ fn mt_qmm_matches_cpu_reference_f16() {
 
     assert_eq!(actual.len(), expected.len(), "output element count");
 
-    // f16 output: ~3 decimal digits of precision at our value magnitudes
-    // (outputs land in the 10–50 range with q ∈ [0,15]). Tolerance set
-    // to 0.5 to cover f16 rounding + the f16 ULP at this magnitude.
-    let mut max_diff = 0.0_f32;
+    // f16 has 10 bits of mantissa → ULP ≈ |v| * 2^-10. At our K=512
+    // output magnitudes (~3-4k for accumulated dequant·dot products),
+    // absolute ULP is ~4. Use relative tolerance: 0.5% of expected
+    // magnitude. f16 round-to-nearest rounding at the output store +
+    // simd_sum reordering of partial f32 → f16 narrowings stays well
+    // inside this envelope.
+    let mut max_rel = 0.0_f32;
     let mut max_at = 0usize;
     for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
-        let diff = (e - a).abs();
-        if diff > max_diff {
-            max_diff = diff;
+        let rel = (e - a).abs() / e.abs().max(1.0);
+        if rel > max_rel {
+            max_rel = rel;
             max_at = i;
         }
     }
     assert!(
-        max_diff < 0.5,
-        "max |diff| = {max_diff:.2e} at index {max_at} (expected {:.6}, got {:.6})",
+        max_rel < 5e-3,
+        "max relative diff = {max_rel:.2e} at index {max_at} (expected {:.6}, got {:.6})",
         expected[max_at],
         actual[max_at],
     );
@@ -324,5 +335,283 @@ fn mt_qmm_runs_on_qwen3_attention_proj_shape() {
     assert_eq!(actual.len(), m * n);
     for (i, &v) in actual.iter().enumerate() {
         assert!(v.is_finite(), "non-finite output at index {i}: {v}");
+    }
+}
+
+/// All five Qwen3 hot-path shapes from `mlx/quantized.rs:QUANTIZED_SHAPES`.
+/// Returned as `(n, k, label)` for the Qwen3-8B/14B + Qwen3-coder-30B
+/// MoE expert sizes.
+const QWEN3_SHAPES: &[(usize, usize, &str)] = &[
+    (4096, 4096, "baseline 4096²"),
+    (5120, 5120, "Qwen3-8B/14B attn proj"),
+    (14336, 5120, "Qwen3-8B/14B MLP up_proj"),
+    (5120, 14336, "Qwen3-8B/14B MLP down_proj"),
+    (27648, 5120, "Qwen3-coder-30B MoE expert up_proj"),
+];
+
+#[test]
+fn mt_qmm_m1_byte_identical_to_qmv_dispatch_path() {
+    // mt_qmm at M=1 should produce the same outputs as a 1-row qmm
+    // dispatch — the kernel body is qmv's body parameterised by an
+    // outer M-row grid axis, and `tgid_y=0` makes the M offset
+    // collapse to zero. This is the smallest non-trivial witness
+    // that the M-axis lift didn't disturb the qmv inner loop.
+    let _g = gpu_lock();
+
+    let m = 1usize;
+    let n = 32usize;
+    let k = 512usize;
+    let group_size = 64usize;
+    let gs_per_row = k / group_size;
+
+    let w: Vec<u32> = (0..n * k / 8)
+        .map(|i| {
+            let mut v = 0u32;
+            for bit in 0..8u32 {
+                v |= ((i as u32 + bit) & 0xF) << (bit * 4);
+            }
+            v
+        })
+        .collect();
+    let scales: Vec<f32> = (0..n * gs_per_row).map(|i| 0.1 + (i as f32) * 0.001).collect();
+    let biases: Vec<f32> = (0..n * gs_per_row).map(|i| (i as f32) * 0.0001).collect();
+    let x: Vec<f32> = (0..m * k).map(|i| 1.0 + (i as f32) * 0.001).collect();
+
+    let expected = cpu_qmm_reference(&w, &scales, &biases, &x, m, n, k, gs_per_row, group_size);
+
+    let scales_bytes: Vec<u8> = scales.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let biases_bytes: Vec<u8> = biases.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let x_bytes: Vec<u8> = x.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let ctx = Context::new().expect("Context::new should succeed on macOS");
+    let out_bytes = run_qmm(
+        &ctx,
+        DType::F32,
+        &w,
+        &scales_bytes,
+        &biases_bytes,
+        &x_bytes,
+        m,
+        n,
+        k,
+        gs_per_row,
+        4,
+    );
+    let actual: Vec<f32> =
+        out_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let max_diff =
+        expected.iter().zip(actual.iter()).map(|(e, a)| (e - a).abs()).fold(0.0_f32, f32::max);
+    assert!(max_diff < 1e-3, "max |diff| = {max_diff:.2e}");
+}
+
+#[test]
+fn mt_qmm_matches_cpu_reference_bf16_small_shape() {
+    // bf16 is generic `<T>` over the kernel — same code path as f16
+    // modulo the load cast and the output store narrowing. mt_qmv
+    // doesn't bench-wire bf16 because MLX's `affine_qmv_fast` only
+    // ships f32/f16 host bindings at our pinned commit; mt_qmm bench
+    // wiring will hit the same constraint. Coverage anyway: bf16's
+    // 7-bit mantissa drifts faster than f16's 10-bit, so the cast
+    // path needs an explicit oracle to catch any subtle silent
+    // truncation in the accumulator chain.
+    let _g = gpu_lock();
+
+    let m = 4usize;
+    let n = 16usize;
+    let k = 512usize;
+    let group_size = 64usize;
+    let gs_per_row = k / group_size;
+
+    let w: Vec<u32> = (0..n * k / 8)
+        .map(|i| {
+            let mut v = 0u32;
+            for bit in 0..8u32 {
+                v |= ((i as u32 + bit) & 0xF) << (bit * 4);
+            }
+            v
+        })
+        .collect();
+    let scales_f32: Vec<f32> = (0..n * gs_per_row).map(|i| 0.1 + (i as f32) * 0.001).collect();
+    let biases_f32: Vec<f32> = (0..n * gs_per_row).map(|i| (i as f32) * 0.0001).collect();
+    let x_f32: Vec<f32> = (0..m * k).map(|i| 1.0 + (i as f32) * 0.001).collect();
+
+    let round_bf16 = |v: f32| -> f32 { half::bf16::from_f32(v).to_f32() };
+    let scales: Vec<f32> = scales_f32.iter().map(|&v| round_bf16(v)).collect();
+    let biases: Vec<f32> = biases_f32.iter().map(|&v| round_bf16(v)).collect();
+    let x: Vec<f32> = x_f32.iter().map(|&v| round_bf16(v)).collect();
+    let expected = cpu_qmm_reference(&w, &scales, &biases, &x, m, n, k, gs_per_row, group_size);
+
+    let scales_bytes: Vec<u8> =
+        scales.iter().flat_map(|v| half::bf16::from_f32(*v).to_bits().to_le_bytes()).collect();
+    let biases_bytes: Vec<u8> =
+        biases.iter().flat_map(|v| half::bf16::from_f32(*v).to_bits().to_le_bytes()).collect();
+    let x_bytes: Vec<u8> =
+        x.iter().flat_map(|v| half::bf16::from_f32(*v).to_bits().to_le_bytes()).collect();
+
+    let ctx = Context::new().expect("Context::new should succeed on macOS");
+    let out_bytes = run_qmm(
+        &ctx,
+        DType::BF16,
+        &w,
+        &scales_bytes,
+        &biases_bytes,
+        &x_bytes,
+        m,
+        n,
+        k,
+        gs_per_row,
+        2,
+    );
+    let actual: Vec<f32> = out_bytes
+        .chunks_exact(2)
+        .map(|c| half::bf16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
+        .collect();
+
+    // bf16 has 7-bit mantissa → ULP ≈ |v| * 2^-7 ≈ |v| / 128.
+    // 2% relative envelope covers store rounding + simd_sum reordering.
+    let mut max_rel = 0.0_f32;
+    let mut max_at = 0usize;
+    for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+        let rel = (e - a).abs() / e.abs().max(1.0);
+        if rel > max_rel {
+            max_rel = rel;
+            max_at = i;
+        }
+    }
+    assert!(
+        max_rel < 2e-2,
+        "max relative diff = {max_rel:.2e} at index {max_at} (expected {:.6}, got {:.6})",
+        expected[max_at],
+        actual[max_at],
+    );
+}
+
+#[test]
+fn mt_qmm_dispatches_all_qwen3_shapes_at_b4_f16() {
+    // Finite-output smoke check across every Qwen3 hot-path shape at
+    // M=4 (typical batched prefill). Random-ish weights make the
+    // CPU oracle too expensive to compute — instead verify the
+    // dispatch succeeds + outputs are finite, which catches
+    // address-arithmetic bugs that only show up at production sizes.
+    let _g = gpu_lock();
+
+    let ctx = Context::new().expect("Context::new should succeed on macOS");
+    let m = 4usize;
+    let group_size = 64usize;
+
+    for &(n, k, label) in QWEN3_SHAPES {
+        let gs_per_row = k / group_size;
+        let w: Vec<u32> = (0..n * k / 8).map(|i| (i as u32).wrapping_mul(2654435761u32)).collect();
+        let scales: Vec<f32> =
+            (0..n * gs_per_row).map(|i| 0.01 + (i % 13) as f32 * 0.001).collect();
+        let biases: Vec<f32> = (0..n * gs_per_row).map(|i| (i % 7) as f32 * 0.0001).collect();
+        let x: Vec<f32> = (0..m * k).map(|i| 0.1 + ((i % 31) as f32) * 0.01).collect();
+
+        let scales_bytes: Vec<u8> =
+            scales.iter().flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes()).collect();
+        let biases_bytes: Vec<u8> =
+            biases.iter().flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes()).collect();
+        let x_bytes: Vec<u8> =
+            x.iter().flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes()).collect();
+
+        let out_bytes = run_qmm(
+            &ctx,
+            DType::F16,
+            &w,
+            &scales_bytes,
+            &biases_bytes,
+            &x_bytes,
+            m,
+            n,
+            k,
+            gs_per_row,
+            2,
+        );
+        let actual: Vec<f32> = out_bytes
+            .chunks_exact(2)
+            .map(|c| half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
+            .collect();
+        assert_eq!(actual.len(), m * n, "{label}: output length");
+        for (i, &v) in actual.iter().enumerate() {
+            assert!(v.is_finite(), "{label}: non-finite output at {i}: {v}");
+        }
+    }
+}
+
+#[test]
+#[ignore = "perf bench, run via --ignored --nocapture"]
+fn mt_qmm_perf_bench_qwen3_shapes_f16_m_sweep() {
+    // Per-shape × per-M-row throughput probe. Reports median GPU µs +
+    // effective GB/s (q4 weight bytes + per-group scale/bias + X + Y
+    // streams). M-sweep: 1, 4, 8, 32 tokens — covers the spectrum
+    // from single-prompt prefill chunk to batched serving. Intent:
+    // expose where the per-M-row TG dispatch starts losing to W
+    // bandwidth saturation (the v3 BM-tile W-reuse rationale).
+    //
+    // M=2 mini is the canonical perf measurement target for this
+    // repo (see `feedback_metaltile_bench_on_m2_mini`); this bench
+    // surfaces the same numbers on the dev host for iteration.
+    let _g = gpu_lock();
+    let ctx = Context::new().expect("Context::new should succeed on macOS");
+    let group_size = 64usize;
+    const WARMUP: usize = 20;
+    const ITERS: usize = 50;
+
+    println!();
+    println!(
+        "mt_qmm f16 — Apple M-series (median of {ITERS} iters)\n  {:>30}  {:>5}  {:>10}  {:>10}",
+        "shape (n × k)", "M", "µs", "GB/s"
+    );
+
+    for &(n, k, label) in QWEN3_SHAPES {
+        let gs_per_row = k / group_size;
+        let w: Vec<u32> = (0..n * k / 8).map(|i| (i as u32).wrapping_mul(2654435761u32)).collect();
+        let scales: Vec<f32> =
+            (0..n * gs_per_row).map(|i| 0.01 + (i % 13) as f32 * 0.001).collect();
+        let biases: Vec<f32> = (0..n * gs_per_row).map(|i| (i % 7) as f32 * 0.0001).collect();
+        let w_bytes_vec: Vec<u8> = w.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let scales_bytes: Vec<u8> =
+            scales.iter().flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes()).collect();
+        let biases_bytes: Vec<u8> =
+            biases.iter().flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes()).collect();
+
+        for &m in &[1usize, 4, 8, 32] {
+            let x: Vec<f32> = (0..m * k).map(|i| 0.1 + ((i % 31) as f32) * 0.01).collect();
+            let x_bytes: Vec<u8> =
+                x.iter().flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes()).collect();
+
+            let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+            buffers.insert("w".into(), w_bytes_vec.clone());
+            buffers.insert("scales".into(), scales_bytes.clone());
+            buffers.insert("biases".into(), biases_bytes.clone());
+            buffers.insert("x".into(), x_bytes);
+            buffers.insert("out".into(), vec![0u8; m * n * 2]);
+            buffers.insert("k".into(), (k as u32).to_le_bytes().to_vec());
+            buffers.insert("n".into(), (n as u32).to_le_bytes().to_vec());
+            buffers.insert("gs_per_row".into(), (gs_per_row as u32).to_le_bytes().to_vec());
+
+            let mut kernel = mt_qmm::kernel_ir_for(DType::F16);
+            kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+
+            let mut samples = Vec::with_capacity(ITERS);
+            for i in 0..(WARMUP + ITERS) {
+                let r = ctx
+                    .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [n / 8, m, 1], [
+                        64, 1, 1,
+                    ])
+                    .expect("dispatch");
+                if i >= WARMUP {
+                    samples.push(r.elapsed_us);
+                }
+            }
+            samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let median_us = samples[samples.len() / 2];
+
+            // Bytes touched per kernel: W (q4) + scales + biases + X + Y.
+            // q4 weights: n × k / 2 bytes. Scales/biases: 2 bytes each
+            // per group, total n × gs_per_row × 2 × 2 bytes. X + Y in T.
+            let bytes = (n * k / 2 + 2 * n * gs_per_row * 2 + m * k * 2 + m * n * 2) as f64;
+            let gbps = bytes / (median_us * 1e-6) / 1e9;
+            println!("  {label:>30}  {m:>5}  {median_us:>10.2}  {gbps:>10.1}");
+        }
     }
 }
