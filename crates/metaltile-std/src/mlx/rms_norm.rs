@@ -1,4 +1,14 @@
 //! RMS normalization benchmark — #[kernel] DSL vs MLX metal/rms_norm.metal
+//!
+//! The kernel is generic over `N = tpg * 4` — each thread owns 4
+//! consecutive elements, the partial sum-of-squares reduces across
+//! the threadgroup. The bench wires `n=4096, tpg=1024` for the
+//! hidden-axis case. For per-head normalisation (Qwen3-style q_norm
+//! / k_norm pre-RoPE), the same kernel is dispatched as one
+//! threadgroup per `(batch*token*n_heads)` row at `tpg = head_dim/4`
+//! with the per-head_dim weight broadcast across all rows. The
+//! per-head contract is pinned by
+//! `tests/rms_norm_per_head_gpu.rs`.
 
 use metaltile::{bench_kernel, kernel};
 
