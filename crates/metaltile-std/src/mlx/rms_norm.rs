@@ -9,6 +9,15 @@
 //! with the per-head_dim weight broadcast across all rows. The
 //! per-head contract is pinned by
 //! `tests/rms_norm_per_head_gpu.rs`.
+//!
+//! ## Dispatch constraint: tpg ≥ 32 (i.e. N ≥ 128)
+//!
+//! `reduce_sum(partial_ssq)` lowers to `simd_sum`, which sums across
+//! the full 32-lane simdgroup. At tpg < 32 the inactive lanes
+//! (positions ≥ tpg) contribute undefined `partial_ssq` and the ssq
+//! blows up by orders of magnitude. Per-head dispatch at head_dim=64
+//! (older 7B-class architectures) needs a separate kernel variant or a
+//! tpg=32 layout with 2 elements per thread.
 
 use metaltile::{bench_kernel, kernel};
 
