@@ -26,12 +26,17 @@ use metaltile_core::{dtype::DType, ir::Kernel};
 ///
 /// | Machine | dtype | Selected | MT% MLX |
 /// |---------|-------|----------|--------:|
-/// | M2 mini | f32   | mma       | 131% |
-/// | M2 mini | f16   | mma       |  98% |
+/// | M2 mini | f32   | mma       | 127% |
+/// | M2 mini | f16   | mma       |  99% |
 /// | M2 mini | bf16  | mma_bf16  |  99% |
-/// | M5 Max  | f32   | mma       | 114% |
-/// | M5 Max  | f16   | mma       | 106% |
-/// | M5 Max  | bf16  | mma       | 106% |
+/// | M5 Max  | f32   | mma       | 116% |
+/// | M5 Max  | f16   | mma       | 107% |
+/// | M5 Max  | bf16  | mma       | 107% |
+///
+/// M2 mini f16 closed the 93% gap to 99% via the `kv_ld = 136` bank-skew
+/// re-tune (was 132 — tuned for bf16 8-byte loads; f16's 4-byte loads
+/// prefer +8 pad over +4 to dodge a different bank pattern). M5 Max
+/// gained +1-2pts across all dtypes as a side benefit; no regression.
 ///
 /// # Untested hardware
 ///
