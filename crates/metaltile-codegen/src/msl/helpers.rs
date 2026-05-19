@@ -43,9 +43,18 @@ impl MslGenerator {
         src_dtype: Option<DType>,
         value: &str,
     ) -> String {
+        // Reinterpret is only valid when the SRC bit pattern is already a
+        // float — bf16 is literally the upper 16 bits of an fp32. For
+        // integer sources (i32/u32) the bit pattern represents the integer
+        // value, not a float, so `as_type<bfloat2>(int)[1]` reads
+        // upper-half int bits which has no relationship to bf16(value)
+        // (e.g. `bf16(123)` ≈ 123.0 but `as_type<bfloat2>(123)[1]` = 0
+        // because the upper 16 bits of the int are zero). Limit strictly
+        // to f32 → bf16. Caught by Tile Bench: `arange` at bf16 (sequential
+        // int → bf16 cast) produced all-zero outputs under the old guard.
         if self.config.bfloat_reinterpret_cast
             && dst_dtype == DType::BF16
-            && matches!(src_dtype, Some(DType::F32) | Some(DType::I32) | Some(DType::U32))
+            && src_dtype == Some(DType::F32)
         {
             format!("as_type<bfloat2>({value})[1]")
         } else {

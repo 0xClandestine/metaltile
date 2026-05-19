@@ -98,16 +98,25 @@ fn fnv1a_extend(h: &mut u64, bytes: &[u8]) {
 }
 
 /// PSO / MSL cache key for a dispatch_chain pass: kernel name +
-/// first-param dtype size + sorted fn_consts. The MSL source is fully
+/// first-param dtype label + sorted fn_consts. The MSL source is fully
 /// determined by this tuple, so hashing the source string per pass is
 /// pure waste (5–50 KB → ~10–30 µs vs ~16 ns for this key).
+///
+/// We hash the dtype's stable string label (`"f16"`, `"bf16"`, ...)
+/// rather than `size_bytes`: f16 and bf16 both have a 2-byte footprint
+/// but compile to distinct MSL bodies (`half` vs `bfloat` cast paths),
+/// so hashing by size collides across the two dtypes and the cached
+/// PSO produces wrong results for the second dtype to dispatch. This
+/// was caught by `matches_cpu_reference_f16_chained_resident_gqa`
+/// failing only when run after the bf16 sibling test (which seeded
+/// the cache slot with the bf16 PSO).
 #[cfg(any(target_os = "macos", test))]
 fn pso_cache_key(kernel: &Kernel, fn_consts: &BTreeMap<String, u32>) -> u64 {
     let mut h = FNV_OFFSET;
     fnv1a_extend(&mut h, kernel.name.as_bytes());
     fnv1a_extend(&mut h, b":");
     if let Some(p) = kernel.params.first() {
-        fnv1a_extend(&mut h, &(p.dtype.size_bytes() as u64).to_le_bytes());
+        fnv1a_extend(&mut h, p.dtype.label().as_bytes());
     }
     for (n, v) in fn_consts {
         fnv1a_extend(&mut h, n.as_bytes());
@@ -1272,19 +1281,23 @@ mod tests {
     }
 
     #[test]
-    fn pso_cache_key_dtype_size_collision_groups_match() {
-        // Only the first param's dtype *size* is folded in (not the dtype
-        // discriminant). f32 and i32 share size_bytes()==4, so kernels with
-        // identical names + fn_consts that differ only between two
-        // same-size dtypes are intentionally aliased — this documents the
-        // behaviour and pins it for future refactors.
+    fn pso_cache_key_distinguishes_same_size_dtypes() {
+        // Regression: the cache key used to fold in `dtype.size_bytes()`,
+        // which made f16 and bf16 (both 2 bytes) — and f32 and i32 (both 4)
+        // — hash to the same slot. That collision swapped the bf16 PSO into
+        // the f16 dispatch on the second test to run in
+        // `sdpa_decode_2pass_gpu::matches_cpu_reference_*_chained_resident_gqa`,
+        // producing max |diff| in the hundreds of millis at f16 and a
+        // codecov-only CI flake. The fix folds in `dtype.label()` instead
+        // — each dtype must hash to a distinct slot.
+        let consts = BTreeMap::new();
         let k_f32 = key_kernel("noop", DType::F32);
         let k_i32 = key_kernel("noop", DType::I32);
-        let consts = BTreeMap::new();
-        assert_eq!(pso_cache_key(&k_f32, &consts), pso_cache_key(&k_i32, &consts));
-
-        // …but a different *size* (f16 = 2 bytes) must still discriminate.
         let k_f16 = key_kernel("noop", DType::F16);
+        let k_bf16 = key_kernel("noop", DType::BF16);
+
+        assert_ne!(pso_cache_key(&k_f32, &consts), pso_cache_key(&k_i32, &consts));
+        assert_ne!(pso_cache_key(&k_f16, &consts), pso_cache_key(&k_bf16, &consts));
         assert_ne!(pso_cache_key(&k_f32, &consts), pso_cache_key(&k_f16, &consts));
     }
 
@@ -1400,10 +1413,10 @@ mod tests {
         // accidental aliasing (e.g. dropping the const name in favour of
         // value-only hashing) would surface here as a duplicate.
         let kernels = ["sdpa_decode", "sdpa_prefill", "rmsnorm", "matmul_4bit"];
-        // Use dtypes with distinct size_bytes() — F16/BF16 both fold to 2,
-        // so the test would self-collide. The dtype-size alias is
-        // intentional (and pinned by `pso_cache_key_dtype_size_collision_groups_match`).
-        let dtypes = [DType::F32, DType::F16];
+        // All dtypes the runtime monomorphises over — f16 and bf16 must
+        // be distinct slots (the cache key folds in `dtype.label()`, not
+        // `size_bytes()`; see `pso_cache_key_distinguishes_same_size_dtypes`).
+        let dtypes = [DType::F32, DType::F16, DType::BF16];
         let gqas = [1u32, 4, 8];
         let head_dims = [64u32, 128];
 

@@ -462,8 +462,40 @@ mod tests {
     }
 
     #[test]
-    fn bf16_cast_uses_reinterpret_when_flag_enabled() {
+    fn bf16_cast_uses_reinterpret_when_flag_enabled_and_src_is_f32() {
+        // The reinterpret peephole only fires for f32→bf16; integer sources
+        // fall back to the rounding constructor (see
+        // `bf16_cast_from_int_uses_rounding_constructor`).
         let mut k = Kernel::new("reinterpret_bf16_cast");
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
+        k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::F32 }, ValueId::new(1));
+        k.body.push_op(Op::Cast { value: ValueId::new(1), dtype: DType::BF16 }, ValueId::new(2));
+        let msl = MslGenerator::new(MslConfig {
+            native_bfloat: true,
+            bfloat_reinterpret_cast: true,
+            ..MslConfig::default()
+        })
+        .generate(&k)
+        .unwrap();
+        assert!(
+            msl.contains("as_type<bfloat2>(") && msl.contains(")[1];"),
+            "reinterpret mode bypasses the slow IEEE bfloat() builtin on f32→bf16:\n{msl}"
+        );
+        assert!(
+            !msl.contains("v2 = bfloat("),
+            "should not emit the rounding constructor when reinterpret applies:\n{msl}"
+        );
+    }
+
+    #[test]
+    fn bf16_cast_from_int_uses_rounding_constructor() {
+        // Int→bf16 reinterpret would read upper-half int bits as bf16
+        // (e.g. `as_type<bfloat2>(123)[1]` = 0 because the upper 16 bits
+        // of int 123 are zero). The peephole must not fire here — fall
+        // back to `bfloat(value)` which performs the actual integer →
+        // float → bf16 rounding chain. Regression: caught by Tile Bench's
+        // `arange` kernel emitting all-zero output at bf16.
+        let mut k = Kernel::new("int_to_bf16");
         k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
         k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::BF16 }, ValueId::new(1));
         let msl = MslGenerator::new(MslConfig {
@@ -474,9 +506,10 @@ mod tests {
         .generate(&k)
         .unwrap();
         assert!(
-            msl.contains("bfloat v1 = as_type<bfloat2>(v0)[1];"),
-            "reinterpret mode bypasses the slow IEEE bfloat() builtin"
+            msl.contains("bfloat v1 = bfloat(v0);"),
+            "int→bf16 must use rounding ctor, not reinterpret:\n{msl}"
         );
+        assert!(!msl.contains("as_type<bfloat2>(v0)"), "reinterpret must not fire on int source");
     }
 
     #[test]
