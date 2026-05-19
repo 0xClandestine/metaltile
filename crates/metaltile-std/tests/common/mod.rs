@@ -175,3 +175,116 @@ pub fn ramp(n: usize, modulus: usize, offset: f32) -> Vec<f32> {
 pub fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max)
 }
+
+/// Naive RMSNorm reference: `out = x * w / sqrt(mean(x²) + eps)`.
+/// Used by `rms_norm_gpu_correctness.rs`. f32 throughout.
+pub fn naive_rms_norm_f32(x: &[f32], w: &[f32], n: usize, eps: f32) -> Vec<f32> {
+    assert_eq!(x.len() % n, 0, "x len must be multiple of row width n");
+    assert_eq!(w.len(), n, "w length must equal row width n");
+    let rows = x.len() / n;
+    let mut out = vec![0.0_f32; x.len()];
+    for r in 0..rows {
+        let base = r * n;
+        let ssq: f32 = x[base..base + n].iter().map(|v| v * v).sum();
+        let rms = (ssq / (n as f32) + eps).sqrt().recip();
+        for d in 0..n {
+            out[base + d] = x[base + d] * rms * w[d];
+        }
+    }
+    out
+}
+
+/// Naive AURA encode reference (single bit-width, identity rotation
+/// or caller-supplied dense rotation). Mirrors the GPU pipeline:
+///   1. r        = ||x||_2
+///   2. u        = x / r
+///   3. y        = rotation @ u
+///   4. indices  = quantise(y) against `boundaries` (Lloyd-Max)
+///   5. packed   = bitpack(indices, bits)
+///   6. r̂        = ||codebook[indices]||_2
+///   7. corrected = r / r̂  (or r if r̂ near zero)
+///
+/// `dim` must match rotation row/col count. `packed_width = ceil(dim * bits / 32)`.
+/// `boundaries` has `2^bits - 1` entries; `codebook` has `2^bits`.
+///
+/// Returns `(packed_out [rows * packed_width], norms_out [rows])`.
+pub fn naive_aura_encode_f32(
+    input: &[f32],
+    rotation: &[f32],
+    boundaries: &[f32],
+    codebook: &[f32],
+    rows: usize,
+    dim: usize,
+    bits: usize,
+) -> (Vec<u32>, Vec<f32>) {
+    let levels = 1usize << bits;
+    assert_eq!(boundaries.len(), levels - 1, "boundaries must have 2^bits-1 entries");
+    assert_eq!(codebook.len(), levels, "codebook must have 2^bits entries");
+    assert_eq!(rotation.len(), dim * dim, "rotation must be [dim, dim]");
+    assert_eq!(input.len(), rows * dim, "input must be [rows, dim]");
+
+    // packed_width = ceil(dim * bits / 32). Mirrors what the kernel
+    // uses via its `packed_width` constexpr argument; the caller in
+    // FFAI also computes it this way.
+    let packed_width = (dim * bits).div_ceil(32);
+
+    let mut packed_out = vec![0u32; rows * packed_width];
+    let mut norms_out = vec![0.0_f32; rows];
+
+    for r in 0..rows {
+        let row_base = r * dim;
+
+        // Step 1: r = ||x||_2
+        let r_norm: f32 = input[row_base..row_base + dim].iter().map(|v| v * v).sum::<f32>().sqrt();
+        let inv = if r_norm > 1e-8 { 1.0 / r_norm } else { 0.0 };
+
+        // Step 2 + 3: y = rotation @ (x / r)
+        let mut y = vec![0.0_f32; dim];
+        for d in 0..dim {
+            let mut acc = 0.0_f32;
+            for j in 0..dim {
+                acc += rotation[d * dim + j] * input[row_base + j] * inv;
+            }
+            y[d] = acc;
+        }
+
+        // Step 4: per-coord Lloyd-Max quantisation. idx = count of
+        // boundaries the rotated value strictly exceeds (matches the
+        // kernel's `idx + (rotated > boundaries[b]).cast::<u32>()`).
+        let mut indices = vec![0u32; dim];
+        for d in 0..dim {
+            let mut idx = 0u32;
+            for b in 0..levels - 1 {
+                if y[d] > boundaries[b] {
+                    idx += 1;
+                }
+            }
+            indices[d] = idx;
+        }
+
+        // Step 5: bitpack. Mirrors the kernel's `bit_offset = d*bits`,
+        // `word_idx = bit_offset/32`, `shift = bit_offset & 31`, plus
+        // cross-word spill for non-aligned widths (int3, int5).
+        for (d, &idx) in indices.iter().enumerate() {
+            let bit_offset = d * bits;
+            let word_idx = bit_offset / 32;
+            let shift = bit_offset & 31;
+            let masked = idx & ((1u32 << bits) - 1);
+            packed_out[r * packed_width + word_idx] |= masked << shift;
+            let spill_bits = (shift + bits) as i32 - 32;
+            if spill_bits > 0 {
+                let spill = spill_bits as u32;
+                packed_out[r * packed_width + word_idx + 1] |= masked >> (bits as u32 - spill);
+            }
+        }
+
+        // Steps 6 + 7: r̂ from codebook, corrected = r / r̂.
+        let recon_sq: f32 =
+            indices.iter().map(|&i| codebook[i as usize].powi(2)).sum();
+        let recon_norm = recon_sq.sqrt();
+        let corrected = if recon_norm > 1e-8 { r_norm / recon_norm } else { r_norm };
+        norms_out[r] = corrected;
+    }
+
+    (packed_out, norms_out)
+}
