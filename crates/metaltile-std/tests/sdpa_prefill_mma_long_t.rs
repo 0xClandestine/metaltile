@@ -21,21 +21,13 @@
 
 #![cfg(target_os = "macos")]
 
-use std::{
-    collections::BTreeMap,
-    sync::{Mutex, MutexGuard, OnceLock},
-};
+use std::collections::BTreeMap;
 
 mod common;
 
-use common::{Dt, pack_bytes, ramp, unpack_bytes};
+use common::{Dt, gpu_lock, pack_bytes, ramp, unpack_bytes};
 use metaltile_runtime::Context;
 use metaltile_std::mlx::steel::attn::steel_attention_mma::mt_sdpa_prefill_mma;
-
-fn gpu_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
-}
 
 /// Naive SDPA prefill (single batch, full causal). Q/K/V are
 /// `[n_heads_or_kv * T * D]` row-major; output is `[n_heads * T * D]`.
