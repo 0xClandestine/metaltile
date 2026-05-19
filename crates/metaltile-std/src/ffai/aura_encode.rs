@@ -243,4 +243,5 @@ macro_rules! aura_encode_kernel {
 aura_encode_kernel!(aura_encode_int2, 2u32, 4u32, "encode_int2");
 aura_encode_kernel!(aura_encode_int3, 3u32, 8u32, "encode_int3");
 aura_encode_kernel!(aura_encode_int4, 4u32, 16u32, "encode_int4");
+aura_encode_kernel!(aura_encode_int6, 6u32, 64u32, "encode_int6");
 aura_encode_kernel!(aura_encode_int8, 8u32, 256u32, "encode_int8");
