@@ -122,10 +122,12 @@ pub fn sdpa_decode<T>(
     //
     // Sink-token pass: walks `[0, sink_end)`. When `sink_end == 0` the
     // loop bound collapses to `range(sg, 0, ns)`, no iterations emit.
-    // The body is intentionally a copy of the window pass — the DSL
-    // does not lower inline helpers, so factoring this would require
-    // a proc-macro pass we don't have. Keep the two bodies bit-
-    // identical and rely on the simdgroup-stride-walk invariant: each
+    // The body is intentionally a copy of the window pass — the
+    // `#[kernel]` proc-macro does not expand `macro_rules!`
+    // invocations inside the function body (the AST handed to the
+    // body parser keeps the `!` call opaque), so a shared-body macro
+    // produces an empty MSL kernel. Keep the two bodies bit-identical
+    // by hand and rely on the simdgroup-stride-walk invariant: each
     // visited KV position contributes once across both passes as long
     // as the caller honors `window_start >= sink_end`.
     for _t in range(sg, sink_end, ns) {
