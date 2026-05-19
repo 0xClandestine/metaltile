@@ -37,6 +37,29 @@
 //! - `packed_width` — `ceil(dim * bits / 32)`.
 //! - `levels`       — `1 << bits`.
 //!
+//! ## DISPATCH INVARIANTS
+//!
+//! This kernel is reduction-mode and has STRICT threadgroup-geometry
+//! requirements. Violating any of these silently miscomputes the
+//! encoded output (best case) or pins the GPU in an infinite loop
+//! (worst case — see FFAI post-mortem 2026-05-19). Consumers MUST
+//! encode these as preconditions in their wrappers.
+//!
+//! - **TPG = `dim`.** One thread per rotated coordinate. Each thread's
+//!   slot in `shared_unit` is `tid`; loads/stores are unconditional.
+//! - **`dim` must be a multiple of 32** (one full Apple simdgroup).
+//!   The L2-norm `simd_sum` is only well-defined over full simdgroups;
+//!   `dim < 32` produces undefined behaviour across lanes.
+//! - **`dim ≤ 1024`** (Apple's max-threads-per-threadgroup cap, and
+//!   matches the static `threadgroup_alloc("shared_unit", 1024)`).
+//! - **`shared_norm[16]`** holds one partial per simdgroup. Adequate
+//!   for `dim ≤ 16 * 32 = 512`; dims 513..1024 would overflow this
+//!   buffer (currently bench-only — production AURA dims are 64/96/
+//!   128/192/256).
+//! - **Grid: 1 threadgroup per row.** Wrapper uses
+//!   `grid = (dim, rows, 1)`, `tg = (dim, 1, 1)` so Metal slices that
+//!   into `rows` threadgroups of `dim` threads.
+//!
 //! ## Macro structure
 //!
 //! `aura_encode_kernel!` wraps a single `#[kernel] pub fn …` + its
@@ -134,9 +157,24 @@ macro_rules! aura_encode_kernel {
             atomic_or_tg("shared_packed", word_idx, masked << shift);
             // Cross-word spill — write the high bits into the next u32
             // if the index straddles a word boundary.
-            let spill_bits = (shift + $bits).cast::<i32>() - 32i32;
-            if spill_bits > 0i32 {
-                let spill_u = spill_bits.cast::<u32>();
+            //
+            // Use unsigned-only arithmetic.  The original formulation
+            // `(shift + bits).cast::<i32>() - 32i32 > 0i32` lost its
+            // signedness in codegen (lowered to `int v_spill_bits =
+            // (int)(shift + bits) - 32; bool = v_spill_bits > 0u`),
+            // making the comparison int-vs-uint.  C/MSL promotes the
+            // int to uint, so -28 becomes ~4e9 and the spill branch
+            // ran for EVERY thread, polluting `shared_packed[word+1]`
+            // with garbage shifted by `masked >> 32` (which Apple
+            // Silicon evaluates as `masked >> 0 = masked`).  Symptom:
+            // low nibbles of subsequent words OR'd with unrelated dim
+            // indices.  Caught by the aura_encode GPU correctness
+            // test.  See FFAI post-mortem 2026-05-19 — a metaltile
+            // codegen follow-up should emit i32 comparisons
+            // faithfully when the DSL requests them.
+            let total_bits = shift + $bits;
+            if total_bits > 32u32 {
+                let spill_u = total_bits - 32u32;
                 atomic_or_tg(
                     "shared_packed",
                     word_idx + 1u32,
