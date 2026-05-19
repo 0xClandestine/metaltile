@@ -76,13 +76,17 @@ use crate::{
     spec::{BenchDispatch, BenchSpec},
 };
 
-const F32_ONLY: &[DType] = &[DType::F32];
+const ALL_FLOAT_DTYPES: &[DType] = &[DType::F32, DType::F16, DType::BF16];
 
 macro_rules! aura_encode_kernel {
     ($name:ident, $bits:literal, $levels:literal, $subop:literal) => {
+        // `input` is the model-dtype K or V row (typically bf16/f16 in
+        // production, f32 in tests). All internal math runs in f32 —
+        // we cast at the load. Everything else stays f32-only because
+        // rotation, codebook, and norm-correction need the precision.
         #[kernel]
         pub fn $name<T>(
-            input: Tensor<f32>,
+            input: Tensor<T>,
             rotation: Tensor<f32>,
             boundaries: Tensor<f32>,
             codebook: Tensor<f32>,
@@ -97,7 +101,7 @@ macro_rules! aura_encode_kernel {
             // ── Stage 1: per-thread L2 norm via simd_sum + cross-simdgroup
             // reduction through threadgroup memory.  `shared_norm[16]`
             // holds one partial per simdgroup (16 is enough for dim ≤ 512).
-            let val = load(input[row * dim + d]);
+            let val = load(input[row * dim + d]).cast::<f32>();
             let sq = val * val;
             let simd_norm_sq = simd_sum(sq);
             threadgroup_alloc("shared_norm", 16);
@@ -224,7 +228,7 @@ macro_rules! aura_encode_kernel {
                 subop: $subop,
                 kernel_name: stringify!($name),
                 kernel_ir: $name::kernel_ir_for,
-                dtypes: F32_ONLY,
+                dtypes: ALL_FLOAT_DTYPES,
                 tol: 0.0,
                 mlx_src: None,
                 mlx_pattern: None,
