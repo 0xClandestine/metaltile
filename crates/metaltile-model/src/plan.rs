@@ -30,6 +30,18 @@ pub struct ExecutionPlan {
     pub n_layers: usize,
 }
 
+// ── ConstexprValue ────────────────────────────────────────────────────
+
+/// A constexpr value that may be static (resolved at compile time)
+/// or dynamic (resolved per-token from runtime state).
+#[derive(Debug, Clone)]
+pub enum ConstexprValue {
+    /// Resolved at graph-compile time.
+    Static(u32),
+    /// Resolved per-dispatch from state map key.
+    State(String),
+}
+
 // ── DispatchNode ───────────────────────────────────────────────────────
 
 /// A single kernel dispatch within the plan.
@@ -49,8 +61,9 @@ pub struct DispatchNode {
     pub mode: KernelMode,
     /// Buffer parameter bindings: param name → slot/weight/state ref.
     pub bindings: Vec<(String, SlotRef)>,
-    /// Constexpr values bound at graph-compile time.
-    pub cexprs: Vec<(String, u32)>,
+    /// Constexpr values bound at graph-compile time (Static) or
+    /// resolved per-dispatch from runtime state (State).
+    pub cexprs: Vec<(String, ConstexprValue)>,
     /// Grid sizing, computed from constexprs at compile time.
     pub grid: GridSpec,
     /// Dtype for this node (typically inherits model activation dtype).

@@ -17,8 +17,9 @@ use metaltile_runtime::context::GridSpec;
 use metaltile_std::spec::{BenchSpec, effective_mode};
 
 use crate::{
+    ConstexprValue,
     error::ModelError,
-    expr::{eval_constexpr, eval_float_expr, resolve_tensor_ref},
+    expr::{eval_constexpr_fallible, eval_float_expr, resolve_tensor_ref},
     liveness::assign_slots,
     plan::{DispatchNode, ExecutionPlan, SlotRef},
     registry::KernelRegistry,
@@ -127,7 +128,10 @@ pub fn compile(
         let kernel = (spec.kernel_ir)(p.activation_dtype);
 
         // 2c. Resolve constexpr expressions.
-        let mut cexprs: Vec<(String, u32)> = Vec::new();
+        // Static params are looked up in resolved_params.
+        // Unknown params (like $position) become State references
+        // resolved per-dispatch from the runtime state map.
+        let mut cexprs: Vec<(String, ConstexprValue)> = Vec::new();
         if let Some(ref ce_map) = raw.node.constexpr {
             for (name, expr) in ce_map {
                 // Check if it's a float constexpr (check kernel signature).
@@ -135,21 +139,28 @@ pub fn compile(
                     .constexprs
                     .iter()
                     .any(|decl| decl.name.name() == name && decl.dtype.is_float());
-                let val = if is_float {
-                    eval_float_expr(
-                        expr,
-                        &resolved_params,
-                        &resolved_float_params,
-                    )?
-                    .to_bits()
+
+                if is_float {
+                    match eval_float_expr(expr, &resolved_params, &resolved_float_params) {
+                        Ok(val) => cexprs.push((name.clone(), ConstexprValue::Static(val.to_bits()))),
+                        Err(ModelError::UnknownParam { .. }) => {
+                            // Float runtime state — stored as State reference.
+                            // Extract the var name from the expression.
+                            let var = expr.trim().strip_prefix('$').unwrap_or(expr);
+                            cexprs.push((name.clone(), ConstexprValue::State(var.to_string())));
+                        },
+                        Err(e) => return Err(e),
+                    }
                 } else {
-                    eval_constexpr(
-                        expr,
-                        &resolved_params,
-                        &resolved_float_params,
-                    )?
-                };
-                cexprs.push((name.clone(), val));
+                    match eval_constexpr_fallible(expr, &resolved_params, &resolved_float_params)? {
+                        Some(val) => cexprs.push((name.clone(), ConstexprValue::Static(val))),
+                        None => {
+                            // Unknown variable → runtime state.
+                            let var = expr.trim().strip_prefix('$').unwrap_or(expr);
+                            cexprs.push((name.clone(), ConstexprValue::State(var.to_string())));
+                        },
+                    }
+                }
             }
         }
 
@@ -298,12 +309,16 @@ fn compute_grid(
     _spec: &BenchSpec,
     mode: &KernelMode,
     _params: &HashMap<String, u32>,
-    cexprs: &[(String, u32)],
+    cexprs: &[(String, ConstexprValue)],
 ) -> Result<GridSpec, ModelError> {
     // Build a map from constexpr name → value for quick lookup.
+    // Only Static values are used for grid computation.
     let ce_map: HashMap<&str, u32> = cexprs
         .iter()
-        .map(|(k, v)| (k.as_str(), *v))
+        .filter_map(|(k, v)| match v {
+            ConstexprValue::Static(val) => Some((k.as_str(), *val)),
+            ConstexprValue::State(_) => None,
+        })
         .collect();
 
     match mode {
@@ -487,5 +502,72 @@ outputs = {}
         assert!(result.is_err(), "unknown op should fail");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("nonexistent_kernel"), "error should mention the bad op: {err}");
+    }
+
+    #[test]
+    fn llama_decode_toml_parses_and_compiles() {
+        let src = include_str!("../../../models/llama_decode.toml");
+        let def: ModelDef = toml::from_str(src).expect("parse llama_decode.toml");
+        assert_eq!(def.model.name, "llama-decode");
+
+        let reg = make_registry();
+
+        // Verify all ops in the layer exist in the registry.
+        if let Some(ref layer) = def.layer {
+            for kn in &layer.kernel {
+                assert!(
+                    reg.get(&kn.op).is_some(),
+                    "layer op '{}' not found in kernel registry",
+                    kn.op
+                );
+            }
+        }
+
+        // Verify all post-layer ops exist.
+        for kn in &def.kernel {
+            assert!(
+                reg.get(&kn.op).is_some(),
+                "post op '{}' not found in kernel registry",
+                kn.op
+            );
+        }
+
+        // Try compiling.
+        let params = CompileParams {
+            params: {
+                let mut m = HashMap::new();
+                m.insert("n_layers".into(), 4);
+                m.insert("n_heads".into(), 32);
+                m.insert("n_kv_heads".into(), 8);
+                m.insert("head_dim".into(), 128);
+                m.insert("hidden_dim".into(), 4096);
+                m.insert("ffn_dim".into(), 14336);
+                m.insert("vocab_size".into(), 128256);
+                m.insert("max_seq_len".into(), 8192);
+                m
+            },
+            float_params: HashMap::new(),
+            activation_dtype: DType::F32,
+            n_layers: 4,
+        };
+
+        let plan = compile(&def, &params, &reg).expect("compile llama_decode");
+        assert_eq!(plan.n_layers, 4);
+
+        // Llama decode: ~20 kernels per layer + 3 post-layer.
+        let per_layer = def.layer.as_ref().unwrap().kernel.len();
+        let post = def.kernel.len();
+        let expected_nodes = per_layer * 4 + post;
+        assert_eq!(
+            plan.nodes.len(),
+            expected_nodes,
+            "{per_layer} kernels/layer × 4 layers + {post} post = {expected_nodes} nodes"
+        );
+
+        // Each node should have a valid kernel_ir and grid.
+        for node in &plan.nodes {
+            assert!(!node.label.is_empty(), "node must have a label");
+            assert!(!node.bindings.is_empty(), "node must have buffer bindings");
+        }
     }
 }

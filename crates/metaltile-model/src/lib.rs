@@ -45,6 +45,6 @@ pub mod schema;
 pub use compiler::{compile, CompileParams};
 pub use error::ModelError;
 pub use executor::{execute_plan, WeightMap, StateMap};
-pub use plan::{BufferSlot, DispatchNode, ExecutionPlan, SlotRef};
+pub use plan::{BufferSlot, ConstexprValue, DispatchNode, ExecutionPlan, SlotRef};
 pub use registry::KernelRegistry;
 pub use schema::{KernelNode, LayerDef, ModelDef, ModelMeta, TensorDecl};

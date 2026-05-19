@@ -1,0 +1,239 @@
+# ── Llama 3.x decoder-only transformer (decode path) ──────────────────
+#
+# This TOML describes a single-token autoregressive forward pass:
+#   1. Embed token
+#   2. For each layer: RMS norm → Q/K/V proj → RoPE → KV cache update →
+#      SDPA decode → output proj → residual add → RMS norm → gate+up →
+#      SiLU → multiply → down → residual add
+#   3. Output norm → LM head → sampling
+#
+# Op names use the "op/subop" form (matching BenchSpec registry keys)
+# to disambiguate when multiple kernels share an op name.
+#
+# ── Weight tensor naming convention ─────────────────────────────────────
+#
+# Weights match standard HuggingFace / GGUF key names so a checkpoint
+# loader can pass them as `HashMap<String, Vec<u8>>` directly:
+#   tok_embeddings       → embedding table [vocab_size, hidden_dim]
+#   layers.N.attn_norm   → RMS norm weight [hidden_dim]
+#   layers.N.attn.q_proj → Q projection [n_heads * head_dim, hidden_dim]
+#   layers.N.attn.k_proj → K projection [n_kv_heads * head_dim, hidden_dim]
+#   layers.N.attn.v_proj → V projection [n_kv_heads * head_dim, hidden_dim]
+#   layers.N.attn.o_proj → output projection [hidden_dim, n_heads * head_dim]
+#   layers.N.ffn_norm     → FFN RMS norm weight [hidden_dim]
+#   layers.N.mlp.gate_proj → gate projection [ffn_dim, hidden_dim]
+#   layers.N.mlp.up_proj   → up projection [ffn_dim, hidden_dim]
+#   layers.N.mlp.down_proj → down projection [hidden_dim, ffn_dim]
+#   output_norm → final RMS norm weight [hidden_dim]
+#   lm_head     → language model head [vocab_size, hidden_dim]
+#
+# ── Runtime state convention ────────────────────────────────────────────
+#   kv_cache.N.k  → K cache buffer (pre-allocated to max_seq_len)
+#   kv_cache.N.v  → V cache buffer
+#   position      → current token position (u32 scalar buffer)
+#   temperature   → sampling temperature (f32 scalar buffer, default 1.0)
+#   rms_eps       → RMS norm epsilon (f32 scalar buffer, default 1e-5)
+#
+# ── Intermediate buffer convention ──────────────────────────────────────
+#   _normed, _q, _k_new, _v_new, _q_rope, _k_rope, _attn_out, _o_proj,
+#   _post_attn, _ffn_normed, _gate, _gated, _up, _combined, _ffn_out,
+#   _final_normed
+
+[model]
+name = "llama-decode"
+description = "Standard Llama 3 decoder-only transformer — single-token decode path"
+
+[params]
+n_layers = "$n_layers"
+n_heads = "$n_heads"
+n_kv_heads = "$n_kv_heads"
+head_dim = "$head_dim"
+hidden_dim = "$hidden_dim"
+ffn_dim = "$ffn_dim"
+vocab_size = "$vocab_size"
+max_seq_len = "$max_seq_len"
+
+# ── Per-layer kernel sequence (unrolled n_layers times) ────────────────
+# Each [[layer.kernel]] entry runs once per layer with $idx = 0..n_layers-1.
+
+[layer]
+name = "transformer_layer"
+
+# ── Pre-attention RMS norm ─────────────────────────────────────────────
+# Kernel: mt_rms_norm in mlx/rms_norm.rs
+# Params: x (input), w (weight), out (output), eps_buf (f32 scalar), n (constexpr)
+
+[[layer.kernel]]
+op = "rms_norm"
+inputs = { x = "$residual", w = "$layers.$idx.attn_norm", eps_buf = "rms_eps" }
+outputs = { out = "_normed" }
+constexpr = { n = "$hidden_dim" }
+
+# ── Self-attention: Q projection ───────────────────────────────────────
+# Kernel: mt_gemv in mlx/gemv.rs
+# Params: mat (weight), vec (input), out (output), k=in_dim (constexpr)
+
+[[layer.kernel]]
+op = "gemv"
+inputs = { mat = "$layers.$idx.attn.q_proj", vec = "_normed" }
+outputs = { out = "_q" }
+constexpr = { k = "$hidden_dim" }
+
+# ── Self-attention: K projection ───────────────────────────────────────
+
+[[layer.kernel]]
+op = "gemv"
+inputs = { mat = "$layers.$idx.attn.k_proj", vec = "_normed" }
+outputs = { out = "_k_new" }
+constexpr = { k = "$hidden_dim" }
+
+# ── Self-attention: V projection ───────────────────────────────────────
+
+[[layer.kernel]]
+op = "gemv"
+inputs = { mat = "$layers.$idx.attn.v_proj", vec = "_normed" }
+outputs = { out = "_v_new" }
+constexpr = { k = "$hidden_dim" }
+
+# ── RoPE: apply rotary embeddings to Q and K ───────────────────────────
+# Kernel: rope_llama in ffai/rope_llama.rs
+# Params: qk (input/output pair), out (output), head_dim (constexpr)
+# Note: uses op="rope/rope_llama" to pick the FFAI variant over the MLX one.
+
+[[layer.kernel]]
+op = "rope/rope_llama"
+inputs = { qk = "_q" }
+outputs = { out = "_q_rope" }
+constexpr = { head_dim = "$head_dim" }
+
+[[layer.kernel]]
+op = "rope/rope_llama"
+inputs = { qk = "_k_new" }
+outputs = { out = "_k_rope" }
+constexpr = { head_dim = "$head_dim" }
+
+# ── KV cache update: store K and V at current position ─────────────────
+# Kernel: kv_cache_update in ffai/kv_cache.rs
+# Params: src (new K/V row), out (cache buffer), head_dim (constexpr)
+
+[[layer.kernel]]
+op = "kv_cache/update"
+inputs = { src = "_k_rope" }
+outputs = { out = "$kv_cache.$idx.k" }
+constexpr = { head_dim = "$head_dim" }
+
+[[layer.kernel]]
+op = "kv_cache/update"
+inputs = { src = "_v_new" }
+outputs = { out = "$kv_cache.$idx.v" }
+constexpr = { head_dim = "$head_dim" }
+
+# ── Scaled dot-product attention (decode) ──────────────────────────────
+# Kernel: mt_sdpa_vector in mlx/sdpa_vector.rs
+# Params: q, k, v, out + constexprs: head_dim, n_kv, kv_stride,
+#         heads_per_group, scale
+
+[[layer.kernel]]
+op = "sdpa/sdpa_vector"
+inputs = { q = "_q_rope", k = "$kv_cache.$idx.k", v = "$kv_cache.$idx.v" }
+outputs = { out = "_attn_out" }
+constexpr = { head_dim = "$head_dim", n_kv = "$position", kv_stride = "$max_seq_len", heads_per_group = "$n_heads / $n_kv_heads", scale = "1.0 / sqrt($head_dim)" }
+
+# ── Attention output projection ────────────────────────────────────────
+
+[[layer.kernel]]
+op = "gemv"
+inputs = { mat = "$layers.$idx.attn.o_proj", vec = "_attn_out" }
+outputs = { out = "_o_proj" }
+constexpr = { k = "$n_heads * $head_dim" }
+
+# ── Residual add (attn output + residual stream) ───────────────────────
+# Kernel: vector_add in mlx/binary.rs (op="binary/add")
+# Params: a, b, c (output)
+
+[[layer.kernel]]
+op = "binary/add"
+inputs = { a = "_o_proj", b = "$residual" }
+outputs = { c = "_post_attn" }
+
+# ── Pre-FFN RMS norm ───────────────────────────────────────────────────
+
+[[layer.kernel]]
+op = "rms_norm"
+inputs = { x = "_post_attn", w = "$layers.$idx.ffn_norm", eps_buf = "rms_eps" }
+outputs = { out = "_ffn_normed" }
+constexpr = { n = "$hidden_dim" }
+
+# ── MLP: gate projection ───────────────────────────────────────────────
+
+[[layer.kernel]]
+op = "gemv"
+inputs = { mat = "$layers.$idx.mlp.gate_proj", vec = "_ffn_normed" }
+outputs = { out = "_gate" }
+constexpr = { k = "$hidden_dim" }
+
+# ── MLP: SiLU activation ───────────────────────────────────────────────
+# Kernel: mt_silu in mlx/unary.rs (op="unary/silu")
+# Params: a (input), out (output)
+
+[[layer.kernel]]
+op = "unary/silu"
+inputs = { a = "_gate" }
+outputs = { out = "_gated" }
+
+# ── MLP: up projection ─────────────────────────────────────────────────
+
+[[layer.kernel]]
+op = "gemv"
+inputs = { mat = "$layers.$idx.mlp.up_proj", vec = "_ffn_normed" }
+outputs = { out = "_up" }
+constexpr = { k = "$hidden_dim" }
+
+# ── MLP: elementwise multiply (gated * up) ─────────────────────────────
+# Kernel: mt_mul in mlx/binary.rs (op="binary/mul")
+# Params: a, b, out
+
+[[layer.kernel]]
+op = "binary/mul"
+inputs = { a = "_gated", b = "_up" }
+outputs = { out = "_combined" }
+
+# ── MLP: down projection ───────────────────────────────────────────────
+
+[[layer.kernel]]
+op = "gemv"
+inputs = { mat = "$layers.$idx.mlp.down_proj", vec = "_combined" }
+outputs = { out = "_ffn_out" }
+constexpr = { k = "$ffn_dim" }
+
+# ── Residual add (FFN output + post-attn) → new residual stream ────────
+
+[[layer.kernel]]
+op = "binary/add"
+inputs = { a = "_ffn_out", b = "_post_attn" }
+outputs = { c = "$residual" }
+
+# ── Post-layer: output norm ────────────────────────────────────────────
+
+[[kernel]]
+op = "rms_norm"
+inputs = { x = "$residual", w = "$output_norm", eps_buf = "rms_eps" }
+outputs = { out = "_final_normed" }
+constexpr = { n = "$hidden_dim" }
+
+# ── Post-layer: LM head ────────────────────────────────────────────────
+
+[[kernel]]
+op = "gemv"
+inputs = { mat = "$lm_head", vec = "_final_normed" }
+outputs = { out = "logits" }
+constexpr = { k = "$hidden_dim" }
+
+# ── Post-layer: sampling (greedy default, fallback to softmax) ─────────
+# Kernel: softmax_categorical_sample in ffai/sampling.rs (op="sampling")
+# Params: inp (logits), out (next_token u32), temperature_in (f32 scalar)
+
+[[kernel]]
+op = "sampling"
+inputs = { inp = "logits", temperature_in = "temperature" }
+outputs = { out = "next_token" }

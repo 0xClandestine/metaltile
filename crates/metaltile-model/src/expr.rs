@@ -338,31 +338,60 @@ impl Parser {
 
 // ── Public API ─────────────────────────────────────────────────────────
 
+/// Evaluate a constexpr that may reference runtime state variables.
+///
+/// Returns `Ok(Some(value))` if the expression resolves statically.
+/// Returns `Ok(None)` if the expression references unknown variables
+/// (likely runtime state). Returns `Err` on syntax errors or arithmetic
+/// errors.
+pub fn eval_constexpr_fallible(
+    expr: &str,
+    params: &HashMap<String, u32>,
+    float_params: &HashMap<String, f64>,
+) -> Result<Option<u32>, ModelError> {
+    let tokens = tokenize(expr)?;
+    let mut parser = Parser::new(tokens);
+    match parser.eval_expr(params, float_params, None) {
+        Ok(val) => {
+            if val < 0.0 || val > u32::MAX as f64 {
+                return Err(ModelError::InvalidConstExpr {
+                    expr: expr.to_string(),
+                    detail: format!("value {val} out of u32 range"),
+                });
+            }
+            let rounded = val.round();
+            if (rounded - val).abs() > 0.001 {
+                return Err(ModelError::InvalidConstExpr {
+                    expr: expr.to_string(),
+                    detail: format!("expected integer, got {val}"),
+                });
+            }
+            Ok(Some(rounded as u32))
+        },
+        Err(ModelError::UnknownParam { .. }) => {
+            // Unknown param → likely runtime state, defer to dispatch time.
+            Ok(None)
+        },
+        Err(e) => Err(e),
+    }
+}
+
 /// Evaluate an expression that should produce a `u32` value.
 ///
-/// Used for constexpr fields and shape dimensions.
+/// Used for constexpr fields and shape dimensions. Unlike
+/// `eval_constexpr_fallible`, this requires all variables to be
+/// resolvable at compile time.
 pub fn eval_constexpr(
     expr: &str,
     params: &HashMap<String, u32>,
     float_params: &HashMap<String, f64>,
 ) -> Result<u32, ModelError> {
-    let tokens = tokenize(expr)?;
-    let mut parser = Parser::new(tokens);
-    let val = parser.eval_expr(params, float_params, None)?;
-    if val < 0.0 || val > u32::MAX as f64 {
-        return Err(ModelError::InvalidConstExpr {
+    eval_constexpr_fallible(expr, params, float_params)?.ok_or_else(|| {
+        ModelError::InvalidConstExpr {
             expr: expr.to_string(),
-            detail: format!("value {val} out of u32 range"),
-        });
-    }
-    let rounded = val.round();
-    if (rounded - val).abs() > 0.001 {
-        return Err(ModelError::InvalidConstExpr {
-            expr: expr.to_string(),
-            detail: format!("expected integer, got {val}"),
-        });
-    }
-    Ok(rounded as u32)
+            detail: "unresolved runtime variable".into(),
+        }
+    })
 }
 
 /// Evaluate an expression that should produce an `f32` value.

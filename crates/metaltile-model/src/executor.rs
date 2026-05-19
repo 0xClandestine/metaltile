@@ -16,7 +16,7 @@ use metaltile_runtime::context::GridSpec;
 
 use crate::{
     error::ModelError,
-    plan::{ExecutionPlan, SlotRef},
+    plan::{ConstexprValue, ExecutionPlan, SlotRef},
 };
 
 /// GPU buffer storage keyed by tensor name.
@@ -57,8 +57,24 @@ pub fn execute_plan(
             };
             buf_map.insert(param_name.clone(), bytes);
         }
-        let fc: BTreeMap<String, u32> =
-            node.cexprs.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        let fc: BTreeMap<String, u32> = node
+            .cexprs
+            .iter()
+            .map(|(k, v)| {
+                let val = match v {
+                    ConstexprValue::Static(val) => *val,
+                    ConstexprValue::State(state_key) => {
+                        let bytes = state.get(state_key).cloned().unwrap_or_default();
+                        if bytes.len() >= 4 {
+                            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+                        } else {
+                            1
+                        }
+                    },
+                };
+                (k.clone(), val)
+            })
+            .collect();
         buffers.push(buf_map);
         fn_consts.push(fc);
         kernels.push(kernel);
