@@ -12,29 +12,27 @@
 //! `n = head_dim, tpg = head_dim/4` with the per-head_dim weight
 //! broadcast across all `(batch*token*n_heads)` rows.
 //!
-//! This file pins that dispatch contract at the head_dim values
-//! production Qwen3 / Gemma models use:
+//! This file pins that dispatch contract at every head_dim value
+//! current production LLMs use:
 //!
-//! | head_dim | tpg | Models                                  |
-//! |----------|-----|-----------------------------------------|
-//! | 128      | 32  | Qwen3-8B / 14B / 32B, Qwen3-class |
-//! | 256      | 64  | Gemma-2/3 (E2B, 9B), Phi-3-medium      |
+//! | head_dim | kernel               | tpg | Models                                  |
+//! |----------|----------------------|-----|-----------------------------------------|
+//! | 64       | `mt_rms_norm_small`  | 32  | older 7B-class architectures                  |
+//! | 128      | `mt_rms_norm`        | 32  | Qwen3-8B/14B/32B, Qwen3-class |
+//! | 256      | `mt_rms_norm`        | 64  | Gemma-2/3 (E2B, 9B), Phi-3-medium       |
 //!
-//! Each row covered at f32, f16, and bf16 — the per-load `.cast::<f32>()`
-//! into the f32 accumulator chain is dtype-agnostic but the output
-//! store rounds through T, and bf16's 7-bit mantissa drifts faster
-//! than f16's 10-bit at typical normalised-value magnitudes.
+//! `mt_rms_norm` owns 4 consecutive elements per thread (better ILP
+//! at large head_dim). `mt_rms_norm_small` owns 2 elements per thread
+//! so head_dim=64 still hits the tpg=32 single-simdgroup minimum
+//! that the 4-element variant misses (sub-simdgroup `simd_sum` reads
+//! undefined inactive-lane partials → 600× output magnitude blowup
+//! that this file catches if anyone regresses the dispatcher).
 //!
-//! ## head_dim < 128 limitation
-//!
-//! `mt_rms_norm`'s tile invariant is 4 consecutive elements per thread,
-//! so `tpg = head_dim / 4`. At head_dim < 128 → tpg < 32 (sub-simdgroup),
-//! `reduce_sum` lowers to `simd_sum` which always sums across the
-//! full 32-lane simdgroup — the inactive lanes (positions ≥ tpg)
-//! contribute undefined `partial_ssq` values and the ssq blows up
-//! by orders of magnitude. older 7B-class architectures and friends
-//! (head_dim=64) need a separate kernel variant (or a tpg=32 layout
-//! with 2 elements per thread); tracked as a follow-up.
+//! Each row covered at f32, f16, and bf16 — the per-load
+//! `.cast::<f32>()` into the f32 accumulator chain is dtype-agnostic
+//! but the output store rounds through T, and bf16's 7-bit mantissa
+//! drifts faster than f16's 10-bit at typical normalised-value
+//! magnitudes.
 //!
 //! macOS-gated.
 
@@ -47,7 +45,7 @@ mod common;
 use common::gpu_lock;
 use metaltile_core::dtype::DType;
 use metaltile_runtime::Context;
-use metaltile_std::mlx::rms_norm::mt_rms_norm;
+use metaltile_std::mlx::rms_norm::{mt_rms_norm, mt_rms_norm_small};
 
 fn cpu_rms_norm_reference(x: &[f32], w: &[f32], rows: usize, n: usize, eps: f32) -> Vec<f32> {
     let mut out = vec![0.0f32; rows * n];
@@ -146,16 +144,21 @@ fn run_and_check(head_dim: usize, rows: usize, dtype: Dtype, tol_abs: f32) {
     buffers.insert("n".into(), (head_dim as u32).to_le_bytes().to_vec());
 
     let ctx = Context::new().expect("Context::new should succeed on macOS");
-    let mut kernel = mt_rms_norm::kernel_ir_for(dtype.to_dtype());
+    // Choose kernel by head_dim:
+    //   head_dim ≥ 128 → mt_rms_norm  (4 elems/thread, tpg=head_dim/4)
+    //   head_dim < 128 → mt_rms_norm_small  (2 elems/thread,
+    //                                        tpg=head_dim/2 ≥ 32)
+    // The 4-element variant has better ILP per lane but needs tpg≥32,
+    // which only holds when head_dim ≥ 128. The 2-element variant
+    // covers the head_dim=64 case (older 7B-class architectures) at
+    // tpg=32 — the single-simdgroup minimum.
+    let (mut kernel, tpg) = if head_dim >= 128 {
+        (mt_rms_norm::kernel_ir_for(dtype.to_dtype()), head_dim / 4)
+    } else {
+        (mt_rms_norm_small::kernel_ir_for(dtype.to_dtype()), head_dim / 2)
+    };
     kernel.mode = metaltile_core::ir::KernelMode::Reduction;
 
-    // tpg = head_dim/4 — each thread owns 4 consecutive head_dim
-    // elements (the kernel's tile invariant). head_dim=128 →
-    // tpg=32 (single simdgroup), head_dim=256 → tpg=64 (2
-    // simdgroups). reduce_sum handles both single-SG and multi-SG.
-    // head_dim < 128 hits the limitation documented in the file
-    // header.
-    let tpg = head_dim / 4;
     let result = ctx
         .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [rows, 1, 1], [tpg, 1, 1])
         .expect("dispatch_with_grid should succeed");
@@ -182,6 +185,23 @@ fn run_and_check(head_dim: usize, rows: usize, dtype: Dtype, tol_abs: f32) {
         actual[max_at],
     );
 }
+
+// ── head_dim = 64 (older 7B-class architectures — uses mt_rms_norm_small) ─
+
+#[test]
+fn mt_rms_norm_per_head_small_head_dim_f32() {
+    // older 7B-class architectures q_norm-like dispatch — head_dim=64
+    // routes to `mt_rms_norm_small` (2 elems/thread, tpg=32 hits
+    // the single-simdgroup minimum). 512 rows = enough to exercise
+    // multi-TG grid without blowing up the CPU reference cost.
+    run_and_check(64, 512, Dtype::F32, 1e-4);
+}
+
+#[test]
+fn mt_rms_norm_per_head_small_head_dim_f16() { run_and_check(64, 512, Dtype::F16, 5e-3); }
+
+#[test]
+fn mt_rms_norm_per_head_small_head_dim_bf16() { run_and_check(64, 512, Dtype::Bf16, 5e-2); }
 
 // ── head_dim = 128 (Qwen3-class) ─────────────────────────────────────
 
