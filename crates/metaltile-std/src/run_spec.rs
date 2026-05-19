@@ -113,6 +113,35 @@ pub fn run(spec: &BenchSpec, runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
             run_steel_gemm(
                 spec, runner, dt, &bench, *m, *n, *k, *check_m, *check_n, *check_k, *bm, *bn, *tpg,
             ),
+        BenchDispatch::SdpaPrefill {
+            head_dim,
+            n_q_heads,
+            gqa_factor,
+            batch,
+            q_len,
+            k_len,
+            bq,
+            bk,
+            wm,
+            wn,
+            tpg,
+        } => run_sdpa_prefill(
+            spec,
+            runner,
+            dt,
+            &bench,
+            *head_dim,
+            *n_q_heads,
+            *gqa_factor,
+            *batch,
+            *q_len,
+            *k_len,
+            *bq,
+            *bk,
+            *wm,
+            *wn,
+            *tpg,
+        ),
     }
 }
 
@@ -1795,6 +1824,282 @@ fn run_sdpa_vector(
         ref_perf,
         mt_perf,
         equiv,
+        mt_timing,
+        ref_timing,
+    )]
+}
+
+// ── SdpaPrefill — Flash-Attention 2 tile, MLX steel_attention as ref ────
+//
+// Self-attention prefill: one TG per (q-tile, q_head, batch) processes
+// `bq` Q rows × full head_dim, loops over `bk`-wide K/V blocks with online
+// softmax in registers. Causal mask trims K-block range per Q-tile.
+//
+// First pass: stub `mt_sdpa_prefill` that compiles + runs but reports low
+// MT% (a basic working kernel; the Flash-Attention 2 tile follows in
+// later commits on this PR).
+#[allow(clippy::too_many_arguments)]
+fn run_sdpa_prefill(
+    spec: &BenchSpec,
+    runner: &GpuRunner,
+    dt: DType,
+    bench: &OpBench,
+    head_dim: usize,
+    n_q_heads: usize,
+    gqa_factor: usize,
+    batch: usize,
+    q_len: usize,
+    k_len: usize,
+    bq: usize,
+    _bk: usize,
+    wm: usize,
+    wn: usize,
+    tpg: usize,
+) -> Vec<OpResult> {
+    assert_eq!(head_dim, 128, "mt_sdpa_prefill hardcodes head_dim=128");
+    assert!(n_q_heads.is_multiple_of(gqa_factor), "n_q_heads must be divisible by gqa_factor");
+    assert!(q_len.is_multiple_of(bq), "q_len must be multiple of bq for aligned-only first cut");
+    let n_kv_heads = n_q_heads / gqa_factor;
+
+    let ctx = DtypeCtx::elementwise(dt);
+    // SdpaPrefill uses one threadgroup per (q_tile, q_head, batch) and
+    // reads `tgid_{x,y,z}` directly, so it must be emitted in SimdGroup2D
+    // mode. The reduction preamble has only scalar `tgid_x`/`tgid_y`
+    // aliases and no `tgid_z`, which compiles inspect output but breaks
+    // the benchmark path.
+    let mut kernel = (spec.kernel_ir)(dt);
+    kernel.mode = KernelMode::SimdGroup2D;
+    // SDPA-prefill MMA family opts in to the MFA-style f32→bf16
+    // reinterpret cast (codegen default is off — kept that way so
+    // tight-tolerance kernels like rms_norm don't drift). The MMA
+    // kernels accumulate in f32 throughout and emit one narrowing
+    // cast per output store; the ≤1 ULP truncation stays well
+    // inside the bench's `tol=2e-2`. Mirrors what
+    // `sdpa_prefill_mma_for` (the runtime selector) sets for inference.
+    kernel.bfloat_reinterpret_cast = true;
+    let msl = match MslGenerator::default().generate(&kernel) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    let mk = match compile_mt(runner, &msl, spec.kernel_name) {
+        Some(k) => k,
+        None => return vec![],
+    };
+
+    // Kernel pre-multiplies scale by log2(e) so its inner softmax uses exp2
+    // (~1 cycle on Apple GPU vs ~16 for exp). Oracle must do the same so the
+    // bit-equivalence holds — without this, f16/bf16 cosine drifts ~5e-3 on
+    // a kernel that's actually correct.
+    let scale = 1.0_f32 / (head_dim as f32).sqrt();
+    let scale_log2 = scale * std::f32::consts::LOG2_E;
+    let qsz = batch * n_q_heads * q_len * head_dim;
+    let kvsz = batch * n_kv_heads * k_len * head_dim;
+    let vals: Vec<f32> = (0..qsz.max(kvsz)).map(|i| ((i % 17) as f32 - 8.0) * 0.05).collect();
+    let q_buf = buffer_typed(runner, &vals[..qsz], dt);
+    let k_buf = buffer_typed(runner, &vals[..kvsz], dt);
+    let v_buf = buffer_typed(runner, &vals[..kvsz], dt);
+    let mt_out_buf = zeros_typed(runner, qsz, dt);
+    let q_len_buf = runner.buffer_u32(q_len as u32);
+    let k_len_buf = runner.buffer_u32(k_len as u32);
+    let gqa_buf = runner.buffer_u32(gqa_factor as u32);
+    let sc_buf = runner.buffer_f32_scalar(scale);
+
+    let mt_bufs: Vec<&GpuBuffer> =
+        vec![&q_buf, &k_buf, &v_buf, &mt_out_buf, &q_len_buf, &k_len_buf, &gqa_buf, &sc_buf];
+    // Grid = (q_tiles, n_q_heads, batch); one TG per Q-tile × head × batch.
+    let q_tiles = q_len / bq;
+    runner.measure(&mk, &mt_bufs, [q_tiles, n_q_heads, batch], [tpg, 1, 1], 0, 1);
+    let mt_out = crate::runner::read_typed(runner, &mt_out_buf, qsz, dt);
+
+    // ── MLX reference: steel_attention_* (Flash-Attention 2 tile) ──
+    // bq=32, bk=16, bd=128, wm=4, wn=1, mask type = Q type when no mask
+    // (mirrors MLX's `type_to_name(has_mask ? *mask : q)` rule).
+    let bd = head_dim;
+    let mlx_bk: usize = if bd < 128 { 32 } else { 16 };
+    // MLX uses the *iname* (friendly) for host_name, not the MSL type name:
+    // f32 → "float32" (not "float"), f16 → "float16" (not "float16_t"),
+    // bf16 → "bfloat16" (not "bfloat16_t"). See `instantiate_attn_mask_helper`
+    // calls at the bottom of steel_attention.metal.
+    let type_name = match dt {
+        DType::F32 => "float32",
+        DType::F16 => "float16",
+        DType::BF16 => "bfloat16",
+        _ => "float32",
+    };
+    // MLX only ships bq=32 instantiations (`instantiate_attn_shapes_helper`).
+    // Our MT kernel's BQ is a separate tuning knob; the MLX dispatch uses
+    // its fixed bq=32 tile regardless of our BQ.
+    let mlx_bq: usize = 32;
+    let mlx_kname = format!(
+        "steel_attention_{type_name}_bq{mlx_bq}_bk{mlx_bk}_bd{bd}_wm{wm}_wn{wn}_mask{type_name}"
+    );
+    let mlx_fcs: &[(usize, bool)] = &[
+        (200, q_len.is_multiple_of(bq)),     // align_Q
+        (201, k_len.is_multiple_of(mlx_bk)), // align_K
+        (300, false),                        // has_mask
+        (301, true),                         // do_causal
+        (302, false),                        // has_sinks
+    ];
+    let rk = spec.mlx_src.and_then(|src| {
+        match runner.compile_with_bool_constants(src, &mlx_kname, mlx_fcs) {
+            Ok(k) => Some(k),
+            Err(e) => {
+                eprintln!("[mlx steel_attention compile] {}: {}", mlx_kname, e);
+                None
+            },
+        }
+    });
+
+    // AttnParams struct (mlx/backend/metal/kernels/steel/attn/params.h, 152 bytes):
+    //   B, H, D, qL, kL, gqa_factor, scale, NQ, NK, NQ_aligned, NK_aligned,
+    //   qL_rem, kL_rem, qL_off (14 × i32 = 56 bytes),
+    //   Q/K/V/O strides (12 × i64 = 96 bytes).
+    let nq = q_len.div_ceil(mlx_bq);
+    let nk = k_len.div_ceil(mlx_bk);
+    let nq_aligned = q_len / mlx_bq;
+    let nk_aligned = k_len / mlx_bk;
+    let q_len_off = (k_len - q_len) as i32;
+    let elem_size = dt.size_bytes() as i64;
+    let mut params = Vec::<u8>::with_capacity(152);
+    let push_i32 = |v: i32, p: &mut Vec<u8>| p.extend_from_slice(&v.to_le_bytes());
+    let push_i64 = |v: i64, p: &mut Vec<u8>| p.extend_from_slice(&v.to_le_bytes());
+    push_i32(batch as i32, &mut params);
+    push_i32(n_q_heads as i32, &mut params);
+    push_i32(head_dim as i32, &mut params);
+    push_i32(q_len as i32, &mut params);
+    push_i32(k_len as i32, &mut params);
+    push_i32(gqa_factor as i32, &mut params);
+    params.extend_from_slice(&scale.to_le_bytes());
+    push_i32(nq as i32, &mut params);
+    push_i32(nk as i32, &mut params);
+    push_i32(nq_aligned as i32, &mut params);
+    push_i32(nk_aligned as i32, &mut params);
+    push_i32((q_len - nq_aligned * mlx_bq) as i32, &mut params);
+    push_i32((k_len - nk_aligned * mlx_bk) as i32, &mut params);
+    push_i32(q_len_off, &mut params);
+    // Q strides (B=0, H, T, D=1 elements) — in element units.
+    let q_d_stride = elem_size;
+    let q_t_stride = head_dim as i64 * q_d_stride;
+    let q_h_stride = q_len as i64 * q_t_stride;
+    let q_b_stride = n_q_heads as i64 * q_h_stride;
+    push_i64(q_b_stride / elem_size, &mut params);
+    push_i64(q_h_stride / elem_size, &mut params);
+    push_i64(q_t_stride / elem_size, &mut params);
+    let kv_t_stride = head_dim as i64;
+    let kv_h_stride = k_len as i64 * kv_t_stride;
+    let kv_b_stride = n_kv_heads as i64 * kv_h_stride;
+    push_i64(kv_b_stride, &mut params);
+    push_i64(kv_h_stride, &mut params);
+    push_i64(kv_t_stride, &mut params);
+    push_i64(kv_b_stride, &mut params);
+    push_i64(kv_h_stride, &mut params);
+    push_i64(kv_t_stride, &mut params);
+    let o_b_stride = q_b_stride / elem_size;
+    let o_h_stride = q_h_stride / elem_size;
+    let o_t_stride = q_t_stride / elem_size;
+    push_i64(o_b_stride, &mut params);
+    push_i64(o_h_stride, &mut params);
+    push_i64(o_t_stride, &mut params);
+    let params_buf = runner.buffer_bytes(&params);
+
+    let ref_perf = rk.as_ref().and_then(|rk| {
+        let mlx_out = zeros_typed(runner, qsz, dt);
+        let mlx_bytes = ((qsz + 2 * kvsz + qsz) * ctx.eb) as f64;
+        bench_gbps(
+            runner,
+            rk,
+            &[&q_buf, &k_buf, &v_buf, &mlx_out, &params_buf],
+            [nq, n_q_heads, batch],
+            [32, wm, wn],
+            mlx_bytes,
+        )
+    });
+    let (ref_perf_val, ref_timing) =
+        ref_perf.map(|(p, t)| (Some(p), Some(t))).unwrap_or((None, None));
+
+    // CPU reference: naive O(T²·D) causal SDPA. Slow but deterministic;
+    // good enough for correctness gating on the small shape sweep until
+    // the MLX `steel_attention_*` dispatch wiring lands. We only check
+    // the FIRST head's output to keep this under a second for T≥1024.
+    let h_check = 0usize;
+    let kv_h_check = h_check / gqa_factor;
+    let q_len_off = k_len - q_len;
+    let mut ref_out = vec![0.0f32; q_len * head_dim];
+    for t in 0..q_len {
+        let q_abs = t + q_len_off;
+        let mut scores = vec![f32::NEG_INFINITY; k_len];
+        let mut row_max = f32::NEG_INFINITY;
+        for kp in 0..=q_abs.min(k_len - 1) {
+            let mut s = 0.0f32;
+            for d in 0..head_dim {
+                s += vals[h_check * q_len * head_dim + t * head_dim + d]
+                    * vals[kv_h_check * k_len * head_dim + kp * head_dim + d];
+            }
+            scores[kp] = s * scale_log2;
+            if scores[kp] > row_max {
+                row_max = scores[kp];
+            }
+        }
+        let mut sum = 0.0f32;
+        for s in scores.iter_mut() {
+            *s = (*s - row_max).exp2();
+            sum += *s;
+        }
+        for d in 0..head_dim {
+            let mut o = 0.0f32;
+            for kp in 0..k_len {
+                o += scores[kp] * vals[kv_h_check * k_len * head_dim + kp * head_dim + d];
+            }
+            ref_out[t * head_dim + d] = o / sum;
+        }
+    }
+    let mt_head_slice = &mt_out[h_check * q_len * head_dim..(h_check + 1) * q_len * head_dim];
+    // Per-dtype tolerance — kernel uses `exp2` with `scale * log2(e)` baked
+    // in, so f32 cosine is bit-equivalent (~1e-7); f16 / bf16 carry storage
+    // quantization (worst observed ~1.4e-3 on bf16 at T=512).
+    let abs_tol: f32 = match dt {
+        DType::F32 => 1e-3,
+        DType::F16 => 5e-3,
+        DType::BF16 => 5e-2,
+        _ => 1e-3,
+    };
+    let equiv = check_equiv_with(&ref_out, mt_head_slice, EquivTolerance::new(abs_tol, 0.99));
+    if !equiv.passed && std::env::var("MT_DBG_DIFF").is_ok() {
+        eprintln!(
+            "[MT_DBG_DIFF] {} {} max_abs={:.3e} cosine={:.4}",
+            spec.subop, ctx.label, equiv.max_abs_err, equiv.cosine_sim
+        );
+        let n_show = 64.min(ref_out.len());
+        for i in 0..n_show {
+            let r = ref_out[i];
+            let m = mt_head_slice[i];
+            eprintln!(
+                "  [{}] q_row={} d={} ref={:+.4e} mt={:+.4e} diff={:+.4e}",
+                i,
+                i / head_dim,
+                i % head_dim,
+                r,
+                m,
+                m - r
+            );
+        }
+    }
+
+    let bytes = ((qsz + 2 * kvsz + qsz) * ctx.eb) as f64;
+    let (mt_perf, mt_timing) =
+        bench_gbps(runner, &mk, &mt_bufs, [q_tiles, n_q_heads, batch], [tpg, 1, 1], bytes)
+            .map(|(p, t)| (Some(p), Some(t)))
+            .unwrap_or((None, None));
+    let label = format!(
+        "B={batch} H={n_q_heads} T={q_len}/{k_len} D={head_dim} gqa={gqa_factor} {}",
+        ctx.label
+    );
+    vec![bench.result_sub_timed(
+        Some(spec.subop),
+        label,
+        ref_perf_val,
+        mt_perf,
+        Some(equiv),
         mt_timing,
         ref_timing,
     )]

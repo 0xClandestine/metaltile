@@ -29,6 +29,39 @@ impl MslGenerator {
         }
     }
 
+    /// Variant of [`emit_cast_expr`] that knows the source dtype.
+    ///
+    /// When `bfloat_reinterpret_cast` is enabled and the cast is f32/i32/u32
+    /// → bf16, emits the MFA-style raw upper-16-bit reinterpret
+    /// `as_type<bfloat2>(val)[1]` — bypasses Metal's IEEE-compliant
+    /// `__bf16_to_f32` builtin which is slow on M2 (Apple gen-8 lacks the
+    /// M3+ tensor unit). Source size MUST be 32 bits for the reinterpret to
+    /// be type-compatible.
+    pub(crate) fn emit_cast_expr_with_src(
+        &self,
+        dst_dtype: DType,
+        src_dtype: Option<DType>,
+        value: &str,
+    ) -> String {
+        // Reinterpret is only valid when the SRC bit pattern is already a
+        // float — bf16 is literally the upper 16 bits of an fp32. For
+        // integer sources (i32/u32) the bit pattern represents the integer
+        // value, not a float, so `as_type<bfloat2>(int)[1]` reads
+        // upper-half int bits which has no relationship to bf16(value)
+        // (e.g. `bf16(123)` ≈ 123.0 but `as_type<bfloat2>(123)[1]` = 0
+        // because the upper 16 bits of the int are zero). Limit strictly
+        // to f32 → bf16. Caught by Tile Bench: `arange` at bf16 (sequential
+        // int → bf16 cast) produced all-zero outputs under the old guard.
+        if self.config.bfloat_reinterpret_cast
+            && dst_dtype == DType::BF16
+            && src_dtype == Some(DType::F32)
+        {
+            format!("as_type<bfloat2>({value})[1]")
+        } else {
+            self.emit_cast_expr(dst_dtype, value)
+        }
+    }
+
     /// Resolve a `ValueId` to its MSL variable name string.
     pub(super) fn vname(
         &self,

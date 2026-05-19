@@ -15,12 +15,26 @@
 
 mod common;
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::{Mutex, MutexGuard, OnceLock},
+};
 
 use common::{Dt, SdpaShape, max_abs_diff, naive_sdpa_f32, pack_bytes, ramp, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::{Context, DispatchSpec, ResidentBuffer, start_gpu_trace, stop_gpu_trace};
 use metaltile_std::ffai::sdpa_decode_2pass::{sdpa_decode_2pass_pass1, sdpa_decode_2pass_pass2};
+
+/// Serialise GPU dispatches across tests in this file. Cargo runs `#[test]`
+/// functions concurrently by default; under `cargo llvm-cov` the
+/// instrumented binary is slow enough that concurrent dispatches on the
+/// same `MTLDevice` race the `ChainedResident` chained-buffer path and
+/// produce garbage output (max |diff| in the hundreds of millis at f16).
+/// One global mutex; ~1s total overhead.
+fn gpu_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+}
 
 #[derive(Clone, Copy)]
 enum ChainMode {
@@ -158,6 +172,7 @@ fn check_matches_cpu(
     tol: f32,
     msg: &str,
 ) {
+    let _lock = gpu_lock();
     let (n_q_heads, n_kv_heads, head_dim, n_kv, kv_stride, blocks) = shape;
     let scale = 1.0_f32 / (head_dim as f32).sqrt();
     let q = ramp(n_q_heads * head_dim, 19, 9.0);

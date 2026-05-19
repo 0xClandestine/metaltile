@@ -175,7 +175,10 @@ pub fn remap_value_ids(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
         },
 
         // ── SIMD / threadgroup ────────────────────────────────────────────
-        Op::SimdReduce { value, .. } | Op::ArgReduce { value, .. } | Op::SimdScan { value, .. } => {
+        Op::SimdReduce { value, .. }
+        | Op::SimdShuffleXor { value, .. }
+        | Op::ArgReduce { value, .. }
+        | Op::SimdScan { value, .. } => {
             s(value);
         },
         Op::SimdgroupElemLoad { value, .. } => {
@@ -215,6 +218,7 @@ pub fn remap_value_ids(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
         | Op::Zeros { .. }
         | Op::Splat { .. }
         | Op::Barrier
+        | Op::SimdgroupBarrier
         | Op::ThreadgroupAlloc { .. }
         | Op::Dequantize { .. }
         | Op::SimdLaneId
@@ -371,7 +375,10 @@ pub fn op_value_refs(op: &Op) -> SmallVec<[ValueId; 4]> {
         },
 
         // ── SIMD / threadgroup ────────────────────────────────────────────
-        Op::SimdReduce { value, .. } | Op::ArgReduce { value, .. } | Op::SimdScan { value, .. } => {
+        Op::SimdReduce { value, .. }
+        | Op::SimdShuffleXor { value, .. }
+        | Op::ArgReduce { value, .. }
+        | Op::SimdScan { value, .. } => {
             refs.push(*value);
         },
         Op::SimdgroupElemLoad { value, .. } => {
@@ -410,6 +417,7 @@ pub fn op_value_refs(op: &Op) -> SmallVec<[ValueId; 4]> {
         | Op::Zeros { .. }
         | Op::Splat { .. }
         | Op::Barrier
+        | Op::SimdgroupBarrier
         | Op::ThreadgroupAlloc { .. }
         | Op::Dequantize { .. }
         | Op::SimdLaneId
@@ -587,7 +595,10 @@ pub fn max_vid_in_op(op: &Op) -> u32 {
         },
 
         // ── SIMD / threadgroup ────────────────────────────────────────────
-        Op::SimdReduce { value, .. } | Op::ArgReduce { value, .. } | Op::SimdScan { value, .. } => {
+        Op::SimdReduce { value, .. }
+        | Op::SimdShuffleXor { value, .. }
+        | Op::ArgReduce { value, .. }
+        | Op::SimdScan { value, .. } => {
             push(value);
         },
         Op::SimdgroupElemLoad { value, .. } => {
@@ -627,6 +638,7 @@ pub fn max_vid_in_op(op: &Op) -> u32 {
         | Op::Zeros { .. }
         | Op::Splat { .. }
         | Op::Barrier
+        | Op::SimdgroupBarrier
         | Op::ThreadgroupAlloc { .. }
         | Op::Dequantize { .. }
         | Op::SimdLaneId
@@ -702,6 +714,7 @@ pub fn has_side_effects(op: &Op) -> bool {
             | Op::VectorStore { .. }
             | Op::Atomic { .. }
             | Op::Barrier
+            | Op::SimdgroupBarrier
             | Op::SetLocal { .. }
             | Op::ThreadgroupStore { .. }
             | Op::ThreadgroupAlloc { .. }
@@ -714,7 +727,7 @@ pub fn has_side_effects(op: &Op) -> bool {
 pub fn is_unpredictable(op: &Op) -> bool {
     matches!(
         op,
-        Op::Barrier
+        Op::Barrier | Op::SimdgroupBarrier
             | Op::Atomic { .. }
             | Op::Loop { .. }
             | Op::SetLocal { .. }
@@ -750,7 +763,7 @@ pub fn is_store(op: &Op) -> bool {
 }
 
 /// True if the op contains a barrier.
-pub fn is_barrier(op: &Op) -> bool { matches!(op, Op::Barrier) }
+pub fn is_barrier(op: &Op) -> bool { matches!(op, Op::Barrier | Op::SimdgroupBarrier) }
 
 #[cfg(test)]
 mod tests {
@@ -964,10 +977,11 @@ mod tests {
         );
         check_op(Op::ArgReduce { value: ValueId::new(15), axis: 0, op: ReduceKind::Max }, 1, 15);
         check_op(Op::SimdReduce { value: ValueId::new(16), op: ReduceKind::Sum }, 1, 16);
+        check_op(Op::SimdShuffleXor { value: ValueId::new(17), mask: 8 }, 1, 17);
         check_op(
-            Op::SimdScan { value: ValueId::new(17), op: ReduceKind::Sum, exclusive: true },
+            Op::SimdScan { value: ValueId::new(18), op: ReduceKind::Sum, exclusive: true },
             1,
-            17,
+            18,
         );
         check_op(
             Op::StrideScan {

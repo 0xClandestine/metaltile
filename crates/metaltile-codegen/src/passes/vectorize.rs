@@ -56,11 +56,11 @@ impl super::Pass for VectorizePass {
             .filter_map(|r| r.map(|v| v.as_u32()))
             .max()
             .unwrap_or(0);
-        // Loop-var aliases in the MSL emitter use `var.as_u32() + 1000`
-        // (see `msl/emit_block.rs` `Op::Loop` handler). Start vectorize-
-        // allocated vids comfortably past that range so dense inner loops
-        // can't steal a loop variable's name and emit `float4 i_0 = …`
-        // that shadows the surrounding `for (uint i_0 = …)`.
+        // Loop-var aliases in the MSL emitter use `var.as_u32() + 0x4000_0000`
+        // (see `msl/emit_block.rs` `Op::Loop` handler). That range starts
+        // ~1 GiB above any realistic max_vid so collision isn't a concern.
+        // The `.max(2000)` floor is a holdover from the old `+ 1000` encoding;
+        // kept to preserve stable value-id allocation for MSL snapshot tests.
         let mut next_vid = (max_vid + 1).max(2000);
         // Snapshot kernel.body so child blocks (loop bodies) can find
         // loop-invariant Const ops hoisted there by LICM. Without this,

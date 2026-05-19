@@ -701,6 +701,7 @@ mod bench_impl {
         AffineDequantize,
         AffineQuantize,
         SdpaVector,
+        SdpaPrefill,
     }
 
     pub enum InputKind {
@@ -750,6 +751,13 @@ mod bench_impl {
         pub n_kv: Option<LitInt>,
         pub n_heads: Option<LitInt>,
         pub gqa_factor: Option<LitInt>,
+        // SDPA prefill (steel_attention tile geometry)
+        pub q_len: Option<LitInt>,
+        pub k_len: Option<LitInt>,
+        pub bq: Option<LitInt>,
+        pub bk: Option<LitInt>,
+        pub wm: Option<LitInt>,
+        pub wn: Option<LitInt>,
     }
 
     fn parse_input(s: &str, span: proc_macro2::Span) -> syn::Result<InputKind> {
@@ -802,6 +810,12 @@ mod bench_impl {
             let mut n_kv_field: Option<LitInt> = None;
             let mut n_heads_field: Option<LitInt> = None;
             let mut gqa_factor_field: Option<LitInt> = None;
+            let mut q_len_field: Option<LitInt> = None;
+            let mut k_len_field: Option<LitInt> = None;
+            let mut bq_field: Option<LitInt> = None;
+            let mut bk_field: Option<LitInt> = None;
+            let mut wm_field: Option<LitInt> = None;
+            let mut wn_field: Option<LitInt> = None;
 
             while !input.is_empty() {
                 let key: Ident = input.parse()?;
@@ -834,6 +848,7 @@ mod bench_impl {
                             "AffineDequantize" => ClassKind::AffineDequantize,
                             "AffineQuantize" => ClassKind::AffineQuantize,
                             "SdpaVector" => ClassKind::SdpaVector,
+                            "SdpaPrefill" => ClassKind::SdpaPrefill,
                             o => {
                                 return Err(syn::Error::new(
                                     id.span(),
@@ -887,6 +902,12 @@ mod bench_impl {
                     "n_kv" => n_kv_field = Some(input.parse()?),
                     "n_heads" => n_heads_field = Some(input.parse()?),
                     "gqa_factor" => gqa_factor_field = Some(input.parse()?),
+                    "q_len" => q_len_field = Some(input.parse()?),
+                    "k_len" => k_len_field = Some(input.parse()?),
+                    "bq" => bq_field = Some(input.parse()?),
+                    "bk" => bk_field = Some(input.parse()?),
+                    "wm" => wm_field = Some(input.parse()?),
+                    "wn" => wn_field = Some(input.parse()?),
                     o => {
                         return Err(syn::Error::new(
                             key.span(),
@@ -935,6 +956,12 @@ mod bench_impl {
                 n_kv: n_kv_field,
                 n_heads: n_heads_field,
                 gqa_factor: gqa_factor_field,
+                q_len: q_len_field,
+                k_len: k_len_field,
+                bq: bq_field,
+                bk: bk_field,
+                wm: wm_field,
+                wn: wn_field,
             })
         }
     }
@@ -1498,6 +1525,37 @@ mod bench_impl {
                         n_q_heads: #nh as usize,
                         gqa_factor: #gqa as usize,
                         batch: #batch as usize,
+                        tpg: #tpg_val as usize,
+                    }
+                })
+            },
+            // ── Complex: SdpaPrefill (steel_attention Flash-Attention 2 tile) ─
+            ClassKind::SdpaPrefill => {
+                let hd = a.h.as_ref().expect("SdpaPrefill requires h (head_dim)");
+                let nh = a.n_heads.as_ref().expect("SdpaPrefill requires n_heads (Q heads)");
+                let gqa =
+                    a.gqa_factor.as_ref().expect("SdpaPrefill requires gqa_factor (Q-per-KV)");
+                let batch = a.batch.as_ref().expect("SdpaPrefill requires batch");
+                let qlen = a.q_len.as_ref().expect("SdpaPrefill requires q_len");
+                let klen = a.k_len.as_ref().expect("SdpaPrefill requires k_len");
+                let bq_val = a.bq.as_ref().expect("SdpaPrefill requires bq");
+                let bk_val = a.bk.as_ref().expect("SdpaPrefill requires bk");
+                let wm_val = a.wm.as_ref().expect("SdpaPrefill requires wm");
+                let wn_val = a.wn.as_ref().expect("SdpaPrefill requires wn");
+                let shapes_ts = a.shapes.as_ref().map(|s| quote! { #s }).unwrap_or(quote! { &[] });
+                let tpg_val = a.tpg.as_ref().expect("SdpaPrefill requires tpg");
+                (quote! { #shapes_ts }, quote! {
+                    crate::spec::BenchDispatch::SdpaPrefill {
+                        head_dim: #hd as usize,
+                        n_q_heads: #nh as usize,
+                        gqa_factor: #gqa as usize,
+                        batch: #batch as usize,
+                        q_len: #qlen as usize,
+                        k_len: #klen as usize,
+                        bq: #bq_val as usize,
+                        bk: #bk_val as usize,
+                        wm: #wm_val as usize,
+                        wn: #wn_val as usize,
                         tpg: #tpg_val as usize,
                     }
                 })

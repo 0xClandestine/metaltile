@@ -5,10 +5,36 @@
 
 use std::collections::BTreeMap;
 
-use metaltile_core::ir::{BinOpKind, Block, Kernel, Op, ValueId};
+use metaltile_core::{
+    dtype::DType,
+    ir::{BinOpKind, Block, Kernel, Op, ValueId},
+};
 
 use super::MslGenerator;
 use crate::passes::{fusion::SUB_OP_FLAG, type_check::TypeEnv};
+
+/// Recover the dtype of a fused sub-op's result. Walks the fused chain when
+/// the operand ValueId points to another sub-op (marked by `SUB_OP_FLAG`),
+/// falls back to the global `type_env` for cross-op operands. Returns `None`
+/// when the dtype can't be determined locally — caller should treat that as
+/// "don't apply dtype-dependent peepholes."
+fn infer_fused_op_dtype(vid: ValueId, fused_ops: &[Op], type_env: &TypeEnv) -> Option<DType> {
+    let raw = vid.as_u32();
+    if raw & SUB_OP_FLAG != 0 {
+        let idx = (raw & !SUB_OP_FLAG) as usize;
+        let op = fused_ops.get(idx)?;
+        match op {
+            Op::Cast { dtype, .. } => Some(*dtype),
+            Op::BinOp { lhs, .. } => infer_fused_op_dtype(*lhs, fused_ops, type_env),
+            Op::UnaryOp { value, .. } | Op::Activation { value, .. } =>
+                infer_fused_op_dtype(*value, fused_ops, type_env),
+            Op::Select { on_true, .. } => infer_fused_op_dtype(*on_true, fused_ops, type_env),
+            _ => None,
+        }
+    } else {
+        type_env.get(&vid).map(|tv| tv.dtype)
+    }
+}
 
 impl MslGenerator {
     /// Emit a fused expression rooted at `fused_ops[idx]`, returning the MSL expression string.
@@ -108,7 +134,11 @@ impl MslGenerator {
                     extra_names,
                     resolved_vid,
                 );
-                self.emit_cast_expr(*dtype, &v)
+                // Inside a fused chain the operand may be a sub-op without a
+                // type_env entry. Walk the fused chain to infer the source
+                // dtype — falls back to type_env lookup for cross-op operands.
+                let src_dtype = infer_fused_op_dtype(*value, fused_ops, type_env);
+                self.emit_cast_expr_with_src(*dtype, src_dtype, &v)
             },
             Op::Select { cond, on_true, on_false } => {
                 let c = self.fused_operand(

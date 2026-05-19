@@ -118,25 +118,35 @@ impl MslGenerator {
                 // ---- memory --------------------------------------------
                 Op::Load { src, indices, .. } => {
                     let v = self.vname(vid, block, extra_names);
-                    // `simd_id` is a DSL alias for the simdgroup index; the
-                    // Metal kernel parameter is named `simd_group`.
-                    let src = if src.as_str() == "simd_id" { "simd_group" } else { src.as_str() };
-                    let src_dtype = kernel.params.iter().find(|p| p.name == src).map(|p| p.dtype);
+                    let src_name = match (src.as_str(), kernel.mode) {
+                        // DSL aliases for Metal builtins whose emitted
+                        // parameter names differ by kernel mode.
+                        ("simd_id", _) => "simd_group",
+                        ("tgid_x", KernelMode::SimdGroup2D) => "tid.x",
+                        ("tgid_y", KernelMode::SimdGroup2D) => "tid.y",
+                        ("tgid_z", KernelMode::SimdGroup2D) => "tid.z",
+                        ("tid_x", KernelMode::SimdGroup2D) => "lid.x",
+                        ("tid_y", KernelMode::SimdGroup2D) => "lid.y",
+                        ("tid_z", KernelMode::SimdGroup2D) => "lid.z",
+                        _ => src.as_str(),
+                    };
+                    let src_dtype =
+                        kernel.params.iter().find(|p| p.name == src_name).map(|p| p.dtype);
                     let promote_bf16 = self.config.native_bfloat
                         && src_dtype == Some(DType::BF16)
                         && matches!(kernel.mode, KernelMode::Elementwise | KernelMode::SimdGroup2D);
                     if indices.is_empty() {
                         if promote_bf16 {
-                            wl!(out, "{pad}float {v} = float({src});");
+                            wl!(out, "{pad}float {v} = float({src_name});");
                         } else {
-                            wl!(out, "{pad}auto {v} = {src};");
+                            wl!(out, "{pad}auto {v} = {src_name};");
                         }
                     } else {
-                        let idx = self.emit_idx(indices, block, extra_names, kernel, src);
+                        let idx = self.emit_idx(indices, block, extra_names, kernel, src_name);
                         if promote_bf16 {
-                            wl!(out, "{pad}float {v} = float({src}[{idx}]);");
+                            wl!(out, "{pad}float {v} = float({src_name}[{idx}]);");
                         } else {
-                            wl!(out, "{pad}auto {v} = {src}[{idx}];");
+                            wl!(out, "{pad}auto {v} = {src_name}[{idx}];");
                         }
                     }
                 },
@@ -250,10 +260,19 @@ impl MslGenerator {
                     let v = self.vname(vid, block, extra_names);
                     let l = self.vname(Some(*lhs), block, extra_names);
                     let r = self.vname(Some(*rhs), block, extra_names);
-                    let result_is_float = vid
-                        .and_then(|id| type_env.get(&id))
-                        .map(|tv| matches!(tv.dtype, DType::F32 | DType::F16 | DType::BF16))
-                        .unwrap_or(false);
+                    let is_float = |id: ValueId| -> bool {
+                        type_env
+                            .get(&id)
+                            .map(|tv| matches!(tv.dtype, DType::F32 | DType::F16 | DType::BF16))
+                            .unwrap_or(false)
+                    };
+                    let result_is_float = vid.map(is_float).unwrap_or(false);
+                    // FMA fusion needs ALL operands float (Metal has no
+                    // integer fma overload). Result-only check is unsafe
+                    // because type inference can propagate float from an
+                    // outer Load result back through the index BinOp tree.
+                    let operands_all_float = is_float(*lhs) && is_float(*rhs);
+                    let fma_ok = result_is_float && operands_all_float;
                     match op {
                         BinOpKind::Max
                         | BinOpKind::Min
@@ -273,11 +292,7 @@ impl MslGenerator {
                         BinOpKind::Mod => wl!(out, "{pad}auto {v} = ({l} % {r});"),
                         BinOpKind::Add => {
                             // FMA recognition: Mul + Add → fma() (floats only)
-                            match (
-                                result_is_float,
-                                try_get_mul(*lhs, block),
-                                try_get_mul(*rhs, block),
-                            ) {
+                            match (fma_ok, try_get_mul(*lhs, block), try_get_mul(*rhs, block)) {
                                 (true, Some((ml, mr)), None) => wl!(
                                     out,
                                     "{pad}auto {v} = fma({ml}, {mr}, {r});",
@@ -295,7 +310,7 @@ impl MslGenerator {
                         },
                         BinOpKind::Sub => {
                             // FMA recognition: Mul - X → fma() (floats only)
-                            match (result_is_float, try_get_mul(*lhs, block)) {
+                            match (fma_ok, try_get_mul(*lhs, block)) {
                                 (true, Some((ml, mr))) => wl!(
                                     out,
                                     "{pad}auto {v} = fma({ml}, {mr}, -{r});",
@@ -456,7 +471,12 @@ impl MslGenerator {
                     let v = self.vname(vid, block, extra_names);
                     let rv = self.vname(Some(*value), block, extra_names);
                     let type_decl = self.msl_type_name(*dtype);
-                    wl!(out, "{pad}{type_decl} {v} = {};", self.emit_cast_expr(*dtype, &rv));
+                    let src_dtype = type_env.get(value).map(|tv| tv.dtype);
+                    wl!(
+                        out,
+                        "{pad}{type_decl} {v} = {};",
+                        self.emit_cast_expr_with_src(*dtype, src_dtype, &rv)
+                    );
                 },
 
                 // ---- control flow --------------------------------------
@@ -472,7 +492,7 @@ impl MslGenerator {
                             block.names.iter().map(|(&k, v)| (k, format!("v_{v}"))).collect();
                         inner_names.extend(extra_names.iter().map(|(&k, v)| (k, v.clone())));
                         inner_names.insert(loop_var_vid, vn.clone());
-                        inner_names.insert(ValueId::new(var.as_u32() + 1000), vn.clone());
+                        inner_names.insert(ValueId::new(var.as_u32() + 0x4000_0000), vn.clone());
                         self.emit_block(
                             bb,
                             all_blocks,
@@ -526,7 +546,12 @@ impl MslGenerator {
                             .map(|tv| tv.dtype == DType::BF16)
                             .unwrap_or(false);
                         if self.config.native_bfloat && result_is_bf16 {
-                            wl!(out, "{pad}bfloat {v} = bfloat({expr});");
+                            if expr.starts_with("bfloat(") || expr.starts_with("as_type<bfloat2>(")
+                            {
+                                wl!(out, "{pad}bfloat {v} = {expr};");
+                            } else {
+                                wl!(out, "{pad}bfloat {v} = bfloat({expr});");
+                            }
                         } else if result_is_bf16 {
                             let bf_type = self.msl_type_name(DType::BF16);
                             wl!(out, "{pad}{bf_type} {v} = {expr};");
@@ -819,6 +844,12 @@ impl MslGenerator {
                     }
                 },
 
+                Op::SimdShuffleXor { value, mask } => {
+                    let v = self.vname(vid, block, extra_names);
+                    let rv = self.vname(Some(*value), block, extra_names);
+                    wl!(out, "{pad}auto {v} = simd_shuffle_xor({rv}, {mask}u);");
+                },
+
                 Op::ThreadgroupAlloc { dtype, size, name } => {
                     let t = self.msl_type_name(*dtype);
                     hoists.push(format!("threadgroup {t} {name}[{size}];"));
@@ -838,6 +869,10 @@ impl MslGenerator {
 
                 Op::Barrier => {
                     wl!(out, "{pad}threadgroup_barrier(mem_flags::mem_threadgroup);");
+                },
+
+                Op::SimdgroupBarrier => {
+                    wl!(out, "{pad}simdgroup_barrier(mem_flags::mem_none);");
                 },
 
                 // ---- simdgroup matrix ops ---------------------------------

@@ -326,13 +326,17 @@ fn replace_values(op: &mut Op, map: &FxHashMap<ValueId, ValueId>) {
             s(scalar);
         },
         Op::Dequantize { .. } => {},
-        Op::SimdReduce { value, .. } => s(value),
+        Op::SimdReduce { value, .. } | Op::SimdShuffleXor { value, .. } => s(value),
         Op::ThreadgroupLoad { index, .. } => s(index),
         Op::ThreadgroupStore { index, value, .. } => {
             s(index);
             s(value);
         },
-        Op::ThreadgroupAlloc { .. } | Op::Barrier | Op::SimdLaneId | Op::SimdGroupId => {},
+        Op::ThreadgroupAlloc { .. }
+        | Op::Barrier
+        | Op::SimdgroupBarrier
+        | Op::SimdLaneId
+        | Op::SimdGroupId => {},
         Op::SimdgroupAlloc { .. } | Op::SimdgroupMatMul { .. } => {},
         Op::SimdgroupElemLoad { value, .. } => s(value),
         Op::SimdgroupElemStore { value, data, .. } => {

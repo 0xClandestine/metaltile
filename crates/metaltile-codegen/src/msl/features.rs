@@ -119,6 +119,10 @@ impl MslGenerator {
                     feat.needs_simd_lane = true;
                     feat.needs_simd_group = true;
                 },
+                Op::SimdShuffleXor { .. } => {
+                    feat.needs_simd_lane = true;
+                    feat.needs_simd_group = true;
+                },
                 Op::SimdScan { .. } => {
                     feat.needs_simd_lane = true;
                     feat.needs_simd_group = true;

@@ -152,10 +152,10 @@ fn licm_block(
             }
 
             // Mark loop iteration variable as variant (NOT invariant).
-            // The loop variable is synthesized with ValueId(var.as_u32() + 1000)
+            // The loop variable is synthesized with ValueId(var.as_u32() + 0x4000_0000)
             // or ValueId(0xC000_0000 | var.as_u32()) by the codegen.
             // Anything that depends on it must stay in the loop body.
-            let loop_vid_a = ValueId::new(var.as_u32() + 1000);
+            let loop_vid_a = ValueId::new(var.as_u32() + 0x4000_0000);
             let loop_vid_b = ValueId::new(0xC000_0000 | var.as_u32());
             invariant.remove(&loop_vid_a);
             invariant.remove(&loop_vid_b);
@@ -299,8 +299,8 @@ fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
         | Op::ExpandDims { .. }
         | Op::Reshape { .. }
         | Op::Slice { .. }
-        | Op::SimdgroupElemLoad { .. }
-        | Op::SimdScan { .. } => true,
+        | Op::SimdLaneId
+        | Op::SimdGroupId => true,
 
         // Load from a read-only (const) param is pure.
         Op::Load { src, .. } => read_only.contains(src.as_str()),
@@ -309,6 +309,7 @@ fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
         Op::Store { .. }
         | Op::Atomic { .. }
         | Op::Barrier
+        | Op::SimdgroupBarrier
         | Op::SimdgroupAlloc { .. }
         | Op::ThreadgroupStore { .. }
         | Op::SetLocal { .. }
@@ -324,6 +325,8 @@ fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
         | Op::StrideStore { .. }
         | Op::Dequantize { .. }
         | Op::SimdReduce { .. }
+        | Op::SimdShuffleXor { .. }
+        | Op::SimdScan { .. }
         | Op::ArgReduce { .. }
         | Op::FusedElementwise { .. }
         | Op::VectorLoad { .. }
@@ -340,9 +343,8 @@ fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
         | Op::RmsNorm { .. }
         | Op::GatedMlp { .. }
         | Op::SimdgroupMatMul { .. }
-        | Op::SimdgroupElemStore { .. }
-        | Op::SimdLaneId
-        | Op::SimdGroupId => false,
+        | Op::SimdgroupElemLoad { .. }
+        | Op::SimdgroupElemStore { .. } => false,
     }
 }
 
@@ -535,5 +537,68 @@ mod tests {
         let body = k.blocks.get(&body_id).unwrap();
         let has_load = body.ops.iter().any(|op| matches!(op, Op::Load { .. }));
         assert!(!has_load, "Load from read-only param should be hoisted");
+    }
+
+    /// Regression test for the bug that broke `mt_sdpa_prefill_mma`'s
+    /// accumulator chain: `SimdgroupElemLoad` reads from a per-thread
+    /// `simdgroup_matrix` register that gets MUTATED inside the loop by
+    /// `SimdgroupMatMul`. If LICM hoists the load, the in-loop scale
+    /// step (`o = elem_load(o, i) * factor → elem_store(o, i, …)`)
+    /// reads a stale outside-loop value and overwrites the previous
+    /// iter's matmul output.
+    #[test]
+    fn does_not_hoist_simdgroup_elem_load_with_inloop_matmul() {
+        let mut k = Kernel::new("licm_simdgroup_elem_load");
+        // Function-scope simdgroup matrices: A, B, accumulator C.
+        k.body.push_op(Op::SimdgroupAlloc { dtype: DType::F32, m: 8, n: 8 }, ValueId::new(10));
+        k.body.push_op(Op::SimdgroupAlloc { dtype: DType::F32, m: 8, n: 8 }, ValueId::new(11));
+        k.body.push_op(Op::SimdgroupAlloc { dtype: DType::F32, m: 8, n: 8 }, ValueId::new(12));
+        // Loop bounds.
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 8 }, ValueId::new(1));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(2));
+        // Scale factor (loop-invariant scalar).
+        k.body.push_op(Op::Const { value: 2 }, ValueId::new(3));
+
+        let mut loop_body = Block::new(BlockId::new(1));
+        // Read C.elem[0] → multiply by factor → write back to C.elem[0].
+        // This is the o-scale pattern from the SDPA flash kernel.
+        loop_body.push_op(
+            Op::SimdgroupElemLoad { value: ValueId::new(12), index: 0 },
+            ValueId::new(100),
+        );
+        loop_body.push_op(
+            Op::BinOp { op: BinOpKind::Mul, lhs: ValueId::new(100), rhs: ValueId::new(3) },
+            ValueId::new(101),
+        );
+        loop_body.push_op_no_result(Op::SimdgroupElemStore {
+            value: ValueId::new(12),
+            index: 0,
+            data: ValueId::new(101),
+        });
+        // Matmul C += A * B mutates C in the same iteration.
+        loop_body.push_op_no_result(Op::SimdgroupMatMul {
+            a: ValueId::new(10),
+            b: ValueId::new(11),
+            c: ValueId::new(12),
+        });
+        let body_id = k.add_block(loop_body);
+
+        k.body.push_op_no_result(Op::Loop {
+            var: VarId::new(0),
+            start: ValueId::new(0),
+            end: ValueId::new(1),
+            step: ValueId::new(2),
+            body: body_id,
+        });
+        LicmPass.run(&mut k).unwrap();
+
+        let body = k.blocks.get(&body_id).unwrap();
+        let has_elem_load = body.ops.iter().any(|op| matches!(op, Op::SimdgroupElemLoad { .. }));
+        assert!(
+            has_elem_load,
+            "SimdgroupElemLoad must stay in the loop body — it reads a per-thread \
+             simdgroup_matrix register that the in-loop SimdgroupMatMul mutates."
+        );
     }
 }

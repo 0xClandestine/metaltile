@@ -296,10 +296,12 @@ fn op_name(op: &Op) -> &'static str {
         Op::StrideStore { .. } => "StrideStore",
         Op::Dequantize { .. } => "Dequantize",
         Op::SimdReduce { .. } => "SimdReduce",
+        Op::SimdShuffleXor { .. } => "SimdShuffleXor",
         Op::ThreadgroupAlloc { .. } => "ThreadgroupAlloc",
         Op::ThreadgroupLoad { .. } => "ThreadgroupLoad",
         Op::ThreadgroupStore { .. } => "ThreadgroupStore",
         Op::Barrier => "Barrier",
+        Op::SimdgroupBarrier => "SimdgroupBarrier",
         Op::SimdgroupAlloc { .. } => "SimdgroupAlloc",
         Op::SimdgroupElemLoad { .. } => "SimdgroupElemLoad",
         Op::SimdgroupElemStore { .. } => "SimdgroupElemStore",
@@ -415,6 +417,24 @@ fn infer_block(
     all_blocks: &BTreeMap<BlockId, Block>,
     env: &mut TypeEnv,
 ) -> Result<()> {
+    // Scan the entry body + child blocks for threadgroup_alloc dtypes by
+    // name so ThreadgroupLoad can recover the underlying buffer dtype instead
+    // of falling back to F32. tg_alloc usually lives in the entry block;
+    // loads happen in nested loop bodies — both must be scanned.
+    let mut tg_dtypes: std::collections::BTreeMap<String, DType> =
+        std::collections::BTreeMap::new();
+    let scan = |ops: &[Op], dtypes: &mut std::collections::BTreeMap<String, DType>| {
+        for op in ops {
+            if let Op::ThreadgroupAlloc { dtype, name, .. } = op {
+                dtypes.insert(name.clone(), *dtype);
+            }
+        }
+    };
+    scan(&kernel.body.ops, &mut tg_dtypes);
+    for bb in all_blocks.values() {
+        scan(&bb.ops, &mut tg_dtypes);
+    }
+
     for (op_idx, op) in block.ops.iter().enumerate() {
         let Some(vid) = block.results.get(op_idx).and_then(|x| *x) else {
             continue;
@@ -442,6 +462,28 @@ fn infer_block(
                 } else if kernel.constexprs.iter().any(|ce| ce.name.name() == src.as_str()) {
                     // Constexpr parameters are `constant uint` scalars.
                     env.insert(vid, TypedValue { dtype: DType::U32, shape: Shape::scalar() });
+                } else {
+                    // Builtin uint scalars (Apple Metal thread/group position attrs).
+                    let is_uint_builtin = matches!(
+                        src.as_str(),
+                        "simd_lane"
+                            | "simd_id"
+                            | "n_simd"
+                            | "lsize"
+                            | "tgid_x"
+                            | "tgid_y"
+                            | "tgid_z"
+                            | "tid"
+                            | "tid_x"
+                            | "tid_y"
+                            | "tid_z"
+                            | "gid_x"
+                            | "gid_y"
+                            | "gid_z"
+                    );
+                    if is_uint_builtin {
+                        env.insert(vid, TypedValue { dtype: DType::U32, shape: Shape::scalar() });
+                    }
                 }
             },
 
@@ -541,7 +583,7 @@ fn infer_block(
                 // Register the loop variable as uint before processing the loop body
                 // so that index arithmetic like `_r * lsize + lid` infers as uint.
                 // The body_parser encodes the loop variable as VarId(N)+1000.
-                let loop_var_vid = ValueId::new(var.as_u32() + 1000);
+                let loop_var_vid = ValueId::new(var.as_u32() + 0x4000_0000);
                 env.insert(loop_var_vid, TypedValue { dtype: DType::U32, shape: Shape::scalar() });
                 // Recurse into the loop body.
                 if let Some(loop_block) = all_blocks.get(bid) {
@@ -561,7 +603,7 @@ fn infer_block(
                 env.insert(vid, TypedValue { dtype: DType::F16, shape: Shape::scalar() });
             },
 
-            Op::SimdReduce { value, .. } => {
+            Op::SimdReduce { value, .. } | Op::SimdShuffleXor { value, .. } => {
                 // Same type as input
                 if let Some(tv) = env.get(value).cloned() {
                     env.insert(vid, tv);
@@ -585,8 +627,9 @@ fn infer_block(
                 } else {
                     env.insert(vid, TypedValue { dtype: DType::F32, shape: Shape::scalar() });
                 },
-            Op::ThreadgroupLoad { .. } => {
-                env.insert(vid, TypedValue { dtype: DType::F32, shape: Shape::scalar() });
+            Op::ThreadgroupLoad { name, .. } => {
+                let dtype = tg_dtypes.get(name).copied().unwrap_or(DType::F32);
+                env.insert(vid, TypedValue { dtype, shape: Shape::scalar() });
             },
             Op::ArgReduce { .. } | Op::StrideArgReduce { .. } => {
                 env.insert(vid, TypedValue { dtype: DType::U32, shape: Shape::scalar() });
@@ -603,8 +646,6 @@ fn infer_block(
             | Op::VectorStore { .. }
             | Op::VectorExtract { .. }
             | Op::If { .. }
-            | Op::ExpandDims { .. }
-            | Op::Reshape { .. }
             | Op::Cat { .. }
             | Op::Scatter { .. }
             | Op::Atomic { .. }
@@ -612,6 +653,7 @@ fn infer_block(
             | Op::ThreadgroupAlloc { .. }
             | Op::ThreadgroupStore { .. }
             | Op::Barrier
+            | Op::SimdgroupBarrier
             | Op::DeclareLocal { .. }
             | Op::SetLocal { .. }
             | Op::SimdgroupMatMul { .. }
@@ -620,6 +662,14 @@ fn infer_block(
             },
             Op::SimdgroupAlloc { .. } | Op::SimdgroupElemLoad { .. } | Op::SimdScan { .. } => {
                 env.insert(vid, TypedValue { dtype: DType::F32, shape: Shape::scalar() });
+            },
+            // ExpandDims/Reshape emit `auto v = rv;` (emit_block.rs aliases the input
+            // value), so downstream BinOps must see the input dtype — without this,
+            // any chain off a reshape inherits no dtype and trips the fma-int guard.
+            Op::ExpandDims { value, .. } | Op::Reshape { value, .. } => {
+                if let Some(tv) = env.get(value).cloned() {
+                    env.insert(vid, tv);
+                }
             },
             Op::SimdLaneId | Op::SimdGroupId => {
                 env.insert(vid, TypedValue { dtype: DType::U32, shape: Shape::scalar() });
@@ -851,5 +901,28 @@ mod tests {
         let scan = env.get(&ValueId::new(5)).unwrap();
         assert_eq!(scan.dtype, DType::F16);
         assert_eq!(scan.shape, Shape::scalar());
+    }
+
+    #[test]
+    fn threadgroup_load_inherits_dtype_from_threadgroup_alloc() {
+        // Regression: previously `Op::ThreadgroupLoad` always inferred F32,
+        // hiding the real dtype of the TG buffer. The `bfloat_reinterpret_cast`
+        // peephole relies on the source dtype being correct — when tg_alloc
+        // is bf16 and a downstream Cast(BF16, threadgroup_load(...)) fires,
+        // the peephole must NOT apply (source is already bf16, not f32).
+        let mut k = Kernel::new("tg_load_dtype");
+        k.body.push_op(
+            Op::ThreadgroupAlloc { dtype: DType::BF16, size: 64, name: "tg_buf".into() },
+            ValueId::new(0),
+        );
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(1));
+        k.body.push_op(
+            Op::ThreadgroupLoad { name: "tg_buf".into(), index: ValueId::new(1) },
+            ValueId::new(2),
+        );
+
+        let env = infer_types(&k).unwrap();
+        let load = env.get(&ValueId::new(2)).unwrap();
+        assert_eq!(load.dtype, DType::BF16, "ThreadgroupLoad should match alloc dtype");
     }
 }

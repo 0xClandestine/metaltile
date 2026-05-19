@@ -607,6 +607,11 @@ pub enum Op {
     /// Maps to `simd_sum(v)`, `simd_max(v)`, `simd_min(v)` (Metal 2.1+).
     SimdReduce { value: ValueId, op: ReduceKind },
 
+    /// SIMD-group butterfly shuffle: `simd_shuffle_xor(value, mask)`.
+    /// Used by Steel attention row reductions, where lanes sharing the same
+    /// MMA row exchange values through fixed xor masks (for example 1 and 8).
+    SimdShuffleXor { value: ValueId, mask: u32 },
+
     /// Allocate a simdgroup matrix of shape M×N with given element type.
     /// Emits `simdgroup_matrix<T, M, N> name;` in MSL.
     SimdgroupAlloc { dtype: DType, m: u32, n: u32 },
@@ -653,6 +658,14 @@ pub enum Op {
     /// Ensures all prior threadgroup stores are visible to all threads before
     /// any subsequent threadgroup loads.
     Barrier,
+
+    /// Compiler-only simdgroup barrier: `simdgroup_barrier(mem_flags::mem_none)`.
+    /// Zero-cost at runtime — pins instruction ordering across the simdgroup
+    /// so the compiler can't hoist a subsequent matmul/load past a prior one.
+    /// Apple MLX uses these around V-tile loads when BD≥128
+    /// (`steel_attention.h:431-443`) to keep `simdgroup_load → simdgroup_mma`
+    /// ordering stable through aggressive scheduling.
+    SimdgroupBarrier,
 
     /// Declare a mutable register-local scalar variable.
     /// Emits: `auto __ml_{name} = {init_value};`
@@ -768,6 +781,16 @@ pub struct Kernel {
     /// Tile schedule annotations set by SchedulePass.
     /// Keys are ValueId of Dot ops; values are (tile_m, tile_n, tile_k).
     pub tile_annotations: BTreeMap<ValueId, (u32, u32, u32)>,
+    /// Per-kernel opt-in for the MFA-style f32→bf16 reinterpret cast.
+    /// Overrides `MslConfig::bfloat_reinterpret_cast` when set true:
+    /// the codegen emits `as_type<bfloat2>(fp32)[1]` (truncation, fast)
+    /// instead of `bfloat(fp32)` (round-to-nearest, IEEE-correct). Off
+    /// by default — kernels that can prove the ≤1 ULP truncation drift
+    /// is acceptable for their numeric profile (heavy-tailed attention
+    /// mass, accumulated dot products with limited final-cast count)
+    /// opt in via the kernel module's wrapper. Currently used by the
+    /// SDPA-prefill MMA family on M2 where it buys ~2pts bf16.
+    pub bfloat_reinterpret_cast: bool,
 }
 
 impl Kernel {
@@ -785,6 +808,7 @@ impl Kernel {
             blocks,
             return_shapes: Vec::new(),
             tile_annotations: BTreeMap::new(),
+            bfloat_reinterpret_cast: false,
         }
     }
 
@@ -832,6 +856,7 @@ impl Clone for Kernel {
             blocks,
             return_shapes: self.return_shapes.clone(),
             tile_annotations: self.tile_annotations.clone(),
+            bfloat_reinterpret_cast: self.bfloat_reinterpret_cast,
         }
     }
 }
@@ -1126,6 +1151,9 @@ impl Op {
                 write!(f, "Dequantize({weights}, gs={group_size}, bits={bits})")
             },
             Op::SimdReduce { value, op } => write!(f, "SimdReduce(v{}, {op:?})", value.as_u32()),
+            Op::SimdShuffleXor { value, mask } => {
+                write!(f, "SimdShuffleXor(v{}, mask={mask})", value.as_u32())
+            },
             Op::ThreadgroupAlloc { dtype, size, name } => {
                 write!(f, "ThreadgroupAlloc({dtype:?}, {size}, {name})")
             },
@@ -1136,6 +1164,7 @@ impl Op {
                 write!(f, "ThreadgroupStore({name}, v{}, v{})", index.as_u32(), value.as_u32())
             },
             Op::Barrier => write!(f, "Barrier"),
+            Op::SimdgroupBarrier => write!(f, "SimdgroupBarrier"),
             Op::DeclareLocal { name, value } => {
                 write!(f, "DeclareLocal({name}, v{})", value.as_u32())
             },

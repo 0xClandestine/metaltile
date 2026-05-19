@@ -290,6 +290,26 @@ pub enum BenchDispatch {
         pass2_kernel_name: &'static str,
         pass2_kernel_ir: fn(DType) -> Kernel,
     },
+    /// Prefill-form scaled dot-product attention (Flash-Attention 2 tile).
+    /// Mirrors MLX `steel_attention_{tname}_bq{BQ}_bk{BK}_bd{BD}_wm{WM}_wn{WN}_mask{mname}`.
+    /// Per-TG tiles `BQ` Q rows × full `head_dim`, looping over `BK`-wide K/V
+    /// blocks with online softmax in registers; causal mask trims the K-block
+    /// range. GQA via `gqa_factor`. `q_len`/`k_len` carry the prompt geometry
+    /// (self-attn = equal; chunked-prefill = `q_len < k_len` with `qL_off`
+    /// shift in the causal mask).
+    SdpaPrefill {
+        head_dim: usize,
+        n_q_heads: usize,
+        gqa_factor: usize,
+        batch: usize,
+        q_len: usize,
+        k_len: usize,
+        bq: usize,
+        bk: usize,
+        wm: usize,
+        wn: usize,
+        tpg: usize,
+    },
     /// Tiled simdgroup GEMM (steel_gemm_fused).
     SteelGemm {
         m: usize,
@@ -327,6 +347,7 @@ impl BenchDispatch {
             | BenchDispatch::AffineDequantize { .. } => KernelMode::Elementwise,
             BenchDispatch::Rope { .. } | BenchDispatch::StridedCopy { .. } => KernelMode::Grid3D,
             BenchDispatch::SteelGemm { .. } => KernelMode::SimdGroup2D,
+            BenchDispatch::SdpaPrefill { .. } => KernelMode::SimdGroup2D,
         }
     }
 }

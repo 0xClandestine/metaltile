@@ -58,6 +58,7 @@ fn kernel_uses_program_id_axis(kernel: &Kernel, axis: u32) -> bool {
 // Generator
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct MslGenerator {
     config: MslConfig,
 }
@@ -77,6 +78,16 @@ impl MslGenerator {
         // Run the optimization pipeline on a clone before emitting.
         let mut k = kernel.clone();
         passes::run_passes_with_stats(&mut k, &passes::standard_pipeline())?;
+        // Per-kernel opt-in overrides the default-off
+        // `bfloat_reinterpret_cast` config. See the field doc on
+        // `Kernel` for why this is opt-in (truncation vs rounding
+        // trade-off — safe for SDPA-prefill MMA, unsafe for tight-
+        // tolerance kernels like rms_norm).
+        if k.bfloat_reinterpret_cast && !self.config.bfloat_reinterpret_cast {
+            let mut opt_in = self.clone();
+            opt_in.config.bfloat_reinterpret_cast = true;
+            return opt_in.emit_msl(&k);
+        }
         self.emit_msl(&k)
     }
 
@@ -425,9 +436,13 @@ mod tests {
         let mut k = Kernel::new("compat_bf16_cast");
         k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
         k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::BF16 }, ValueId::new(1));
-        let msl = MslGenerator::new(MslConfig { native_bfloat: false, ..MslConfig::default() })
-            .generate(&k)
-            .unwrap();
+        let msl = MslGenerator::new(MslConfig {
+            native_bfloat: false,
+            bfloat_reinterpret_cast: false,
+            ..MslConfig::default()
+        })
+        .generate(&k)
+        .unwrap();
         assert!(msl.contains("struct bfloat16_t"), "compat mode should emit the bfloat16_t helper");
         assert!(
             msl.contains("bfloat16_t v1 = bfloat16_t(v0);"),
@@ -440,9 +455,13 @@ mod tests {
         let mut k = Kernel::new("native_bf16_cast");
         k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
         k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::BF16 }, ValueId::new(1));
-        let msl = MslGenerator::new(MslConfig { native_bfloat: true, ..MslConfig::default() })
-            .generate(&k)
-            .unwrap();
+        let msl = MslGenerator::new(MslConfig {
+            native_bfloat: true,
+            bfloat_reinterpret_cast: false,
+            ..MslConfig::default()
+        })
+        .generate(&k)
+        .unwrap();
         assert!(
             !msl.contains("struct bfloat16_t"),
             "native mode should not emit the compatibility helper"
@@ -451,6 +470,80 @@ mod tests {
             msl.contains("bfloat v1 = bfloat(v0);"),
             "native mode should cast directly to bfloat via constructor"
         );
+    }
+
+    #[test]
+    fn bf16_cast_uses_reinterpret_when_flag_enabled_and_src_is_f32() {
+        // The reinterpret peephole only fires for f32→bf16; integer sources
+        // fall back to the rounding constructor (see
+        // `bf16_cast_from_int_uses_rounding_constructor`).
+        let mut k = Kernel::new("reinterpret_bf16_cast");
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
+        k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::F32 }, ValueId::new(1));
+        k.body.push_op(Op::Cast { value: ValueId::new(1), dtype: DType::BF16 }, ValueId::new(2));
+        let msl = MslGenerator::new(MslConfig {
+            native_bfloat: true,
+            bfloat_reinterpret_cast: true,
+            ..MslConfig::default()
+        })
+        .generate(&k)
+        .unwrap();
+        assert!(
+            msl.contains("as_type<bfloat2>(") && msl.contains(")[1];"),
+            "reinterpret mode bypasses the slow IEEE bfloat() builtin on f32→bf16:\n{msl}"
+        );
+        assert!(
+            !msl.contains("v2 = bfloat("),
+            "should not emit the rounding constructor when reinterpret applies:\n{msl}"
+        );
+    }
+
+    #[test]
+    fn bf16_cast_defaults_to_rounding_constructor() {
+        // Default config must NOT enable the reinterpret peephole — it
+        // truncates lower 16 bits of fp32 instead of round-to-nearest-even,
+        // drifting up to 1 ULP per cast. Tight-tolerance kernels (e.g.
+        // rms_norm) fail Tile Bench quality with reinterpret on. Opt in
+        // per kernel only where the drift is provably tolerable.
+        // Regression: PR #47 CI rms_norm bf16 ✗ at B=1024 N=4096.
+        let mut k = Kernel::new("default_bf16_cast");
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
+        k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::F32 }, ValueId::new(1));
+        k.body.push_op(Op::Cast { value: ValueId::new(1), dtype: DType::BF16 }, ValueId::new(2));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            !msl.contains("as_type<bfloat2>("),
+            "default config must not emit truncating reinterpret on f32→bf16:\n{msl}"
+        );
+        assert!(
+            msl.contains("v2 = bfloat("),
+            "default config must emit rounding constructor:\n{msl}"
+        );
+    }
+
+    #[test]
+    fn bf16_cast_from_int_uses_rounding_constructor() {
+        // Int→bf16 reinterpret would read upper-half int bits as bf16
+        // (e.g. `as_type<bfloat2>(123)[1]` = 0 because the upper 16 bits
+        // of int 123 are zero). The peephole must not fire here — fall
+        // back to `bfloat(value)` which performs the actual integer →
+        // float → bf16 rounding chain. Regression: caught by Tile Bench's
+        // `arange` kernel emitting all-zero output at bf16.
+        let mut k = Kernel::new("int_to_bf16");
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
+        k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::BF16 }, ValueId::new(1));
+        let msl = MslGenerator::new(MslConfig {
+            native_bfloat: true,
+            bfloat_reinterpret_cast: true,
+            ..MslConfig::default()
+        })
+        .generate(&k)
+        .unwrap();
+        assert!(
+            msl.contains("bfloat v1 = bfloat(v0);"),
+            "int→bf16 must use rounding ctor, not reinterpret:\n{msl}"
+        );
+        assert!(!msl.contains("as_type<bfloat2>(v0)"), "reinterpret must not fire on int source");
     }
 
     #[test]

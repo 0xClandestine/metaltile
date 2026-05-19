@@ -12,6 +12,21 @@ pub struct MslConfig {
     pub debug_comments: bool,
     /// Use native `bfloat` type (Metal 3.1+, M3+). When false, uses `bfloat16_t` struct.
     pub native_bfloat: bool,
+    /// MFA-style raw upper-16-bit reinterpret for f32→bf16 casts
+    /// (`as_type<bfloat2>(fp32)[1]`). Bypasses Metal's IEEE-compliant
+    /// `__bf16_to_f32` builtin which is slow on M2 (gen-8 lacks the M3+
+    /// tensor unit).
+    ///
+    /// **Trades numeric correctness for speed:** the reinterpret is a
+    /// straight truncation of the lower 16 bits of fp32, NOT round-to-
+    /// nearest-even. Drift is ≤ 1 ULP per cast (≈0.4% relative for bf16).
+    /// Tolerable for SDPA-style kernels with heavy-tailed attention mass;
+    /// fails tight-tolerance quality checks on kernels that store many
+    /// small post-normalised values (e.g. `rms_norm`).
+    ///
+    /// Default is **off** — opt in per kernel/MslGenerator when the cast
+    /// site can prove the 1 ULP drift is acceptable.
+    pub bfloat_reinterpret_cast: bool,
     /// Emit `async_copy` prefetch (requires Metal 3 / M2+).
     pub async_copy: bool,
     /// Target Apple GPU family level (7 = M1, 8 = M2, 9 = M3/M4, 10 = M5),
@@ -30,6 +45,7 @@ impl Default for MslConfig {
             use_simd_matrix: false,
             debug_comments: false,
             native_bfloat: true,
+            bfloat_reinterpret_cast: false,
             async_copy: false,
             apple_family: None,
             tile_schedule: TileSchedule::default(),

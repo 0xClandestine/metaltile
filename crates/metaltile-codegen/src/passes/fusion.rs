@@ -282,7 +282,9 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
                 remap_value(index, chain_map, old_results);
                 remap_value(value, chain_map, old_results);
             },
-            Op::SimdReduce { value, .. } | Op::ArgReduce { value, .. } => {
+            Op::SimdReduce { value, .. }
+            | Op::SimdShuffleXor { value, .. }
+            | Op::ArgReduce { value, .. } => {
                 remap_value(value, chain_map, old_results);
             },
             _ => {},

@@ -190,3 +190,113 @@ fn bf16_param_only_compat_emits_preamble() {
     let msl = MslGenerator::new(cfg).generate(&bf16_param_only()).unwrap();
     assert_snapshot!(msl);
 }
+
+// ── Regression tests: codegen bug fixes from the SDPA prefill PR ────────────
+
+/// Kernel that computes a uint index `simd_lane * 128 + tgid_x` and stores
+/// `1.0` at that offset. The emitted MSL must NOT contain `fma(...)`: Metal's
+/// `fma` overload set is float-only, and the prior fma-fusion check looked
+/// only at result type — for an index chain whose operands are uint, the
+/// integer mul+add must lower to `*` and `+`, not `fma`.
+///
+/// Regression for: codegen bug "fma fusion fires on integer operands"
+/// (fixed in this PR, see `emit_block.rs::BinOp::Add` arm).
+fn uint_index_chain_no_fma() -> Kernel {
+    let mut k = Kernel::new("uint_index_chain");
+    k.params.push(Param {
+        name: "out".into(),
+        dtype: DType::F32,
+        shape: Shape::scalar(),
+        is_output: true,
+        kind: Default::default(),
+    });
+    // tgid_x (uint builtin) — typed via the type_check builtin-uint table.
+    k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+    k.body.name_value(ValueId::new(0), "tg");
+    k.body.push_op(
+        Op::Load { src: "simd_lane".into(), mask: None, other: None, indices: vec![] },
+        ValueId::new(1),
+    );
+    k.body.name_value(ValueId::new(1), "lane");
+    k.body.push_op(Op::Const { value: 128 }, ValueId::new(2));
+    // idx = lane * 128 + tg  — mul then add, both uint.
+    k.body.push_op(
+        Op::BinOp { op: BinOpKind::Mul, lhs: ValueId::new(1), rhs: ValueId::new(2) },
+        ValueId::new(3),
+    );
+    k.body.push_op(
+        Op::BinOp { op: BinOpKind::Add, lhs: ValueId::new(3), rhs: ValueId::new(0) },
+        ValueId::new(4),
+    );
+    k.body.name_value(ValueId::new(4), "idx");
+    k.body.push_op(Op::Const { value: 1 }, ValueId::new(5));
+    k.body.push_op(Op::Cast { value: ValueId::new(5), dtype: DType::F32 }, ValueId::new(6));
+    k.body.push_op_no_result(Op::Store {
+        mask: None,
+        dst: "out".into(),
+        indices: vec![IndexExpr::Value(ValueId::new(4))],
+        value: ValueId::new(6),
+    });
+    k
+}
+
+#[test]
+fn uint_index_chain_does_not_emit_fma() {
+    let msl = MslGenerator::default().generate(&uint_index_chain_no_fma()).unwrap();
+    assert!(
+        !msl.contains("fma("),
+        "uint index chain must not lower to fma(); Metal has no int fma overload.\n{msl}"
+    );
+}
+
+/// Kernel that produces `simd_shuffle_xor(value, 8)` against a loaded f32.
+/// Asserts the MSL emits the exact intrinsic call. Regression for the new
+/// `Op::SimdShuffleXor` DSL primitive added in this PR.
+fn simd_shuffle_xor_kernel() -> Kernel {
+    let mut k = Kernel::new("simd_shuffle_xor_smoke");
+    k.params.push(Param {
+        name: "a".into(),
+        dtype: DType::F32,
+        shape: Shape::scalar(),
+        is_output: false,
+        kind: Default::default(),
+    });
+    k.params.push(Param {
+        name: "out".into(),
+        dtype: DType::F32,
+        shape: Shape::scalar(),
+        is_output: true,
+        kind: Default::default(),
+    });
+    k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+    k.body.push_op(
+        Op::Load {
+            src: "a".into(),
+            mask: None,
+            other: None,
+            indices: vec![IndexExpr::Value(ValueId::new(0))],
+        },
+        ValueId::new(1),
+    );
+    k.body.push_op(Op::SimdShuffleXor { value: ValueId::new(1), mask: 8 }, ValueId::new(2));
+    k.body.push_op_no_result(Op::Store {
+        mask: None,
+        dst: "out".into(),
+        indices: vec![IndexExpr::Value(ValueId::new(0))],
+        value: ValueId::new(2),
+    });
+    k
+}
+
+#[test]
+fn simd_shuffle_xor_lowers_to_intrinsic() {
+    let msl = MslGenerator::default().generate(&simd_shuffle_xor_kernel()).unwrap();
+    assert!(
+        msl.contains("simd_shuffle_xor("),
+        "Op::SimdShuffleXor must lower to `simd_shuffle_xor(v, mask)` in MSL.\n{msl}"
+    );
+    assert!(
+        msl.contains("simd_shuffle_xor(v1, 8"),
+        "shuffle mask 8 must appear as the second arg to simd_shuffle_xor.\n{msl}"
+    );
+}

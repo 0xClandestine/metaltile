@@ -8,7 +8,7 @@
 //! ## Induction variable
 //!
 //! The DSL parser binds loop variables with the convention
-//! `ValueId::new(var_id + 1000)`.  Inside the body the variable appears as a
+//! `ValueId::new(var_id + 0x4000_0000)`.  Inside the body the variable appears as a
 //! direct ValueId reference rather than a Load op.  For each iteration *k* we
 //! emit `Op::Const { value: start + k*step }` and remap the IV ValueId to that
 //! Const's result.
@@ -88,7 +88,7 @@ impl super::Pass for UnrollPass {
 // ---------------------------------------------------------------------------
 
 fn has_nested_loop_or_barrier(block: &Block) -> bool {
-    block.ops.iter().any(|op| matches!(op, Op::Loop { .. } | Op::Barrier))
+    block.ops.iter().any(|op| matches!(op, Op::Loop { .. } | Op::Barrier | Op::SimdgroupBarrier))
 }
 
 fn find_const_in_block(block: &Block, vid: ValueId) -> Option<i64> {
@@ -173,8 +173,8 @@ fn unroll_block(
         let body = blocks.get(&plan.body_id).unwrap();
         let body_n = body.ops.len();
 
-        // IV ValueId (convention: var_id + 1000).
-        let iv_vid = ValueId::new(plan.var_id + 1000);
+        // IV ValueId (convention: var_id + 0x4000_0000).
+        let iv_vid = ValueId::new(plan.var_id + 0x4000_0000);
 
         let mut inlined: Vec<(Op, Option<ValueId>)> = Vec::new();
 
