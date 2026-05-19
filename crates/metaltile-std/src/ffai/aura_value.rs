@@ -110,4 +110,5 @@ macro_rules! aura_value_kernel {
 aura_value_kernel!(aura_value_int2, 2u32, "value_int2");
 aura_value_kernel!(aura_value_int3, 3u32, "value_int3");
 aura_value_kernel!(aura_value_int4, 4u32, "value_int4");
+aura_value_kernel!(aura_value_int6, 6u32, "value_int6");
 aura_value_kernel!(aura_value_int8, 8u32, "value_int8");

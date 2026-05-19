@@ -139,4 +139,5 @@ macro_rules! aura_score_kernel {
 aura_score_kernel!(aura_score_int2, 2u32, "score_int2");
 aura_score_kernel!(aura_score_int3, 3u32, "score_int3");
 aura_score_kernel!(aura_score_int4, 4u32, "score_int4");
+aura_score_kernel!(aura_score_int6, 6u32, "score_int6");
 aura_score_kernel!(aura_score_int8, 8u32, "score_int8");
