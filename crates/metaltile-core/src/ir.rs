@@ -781,6 +781,16 @@ pub struct Kernel {
     /// Tile schedule annotations set by SchedulePass.
     /// Keys are ValueId of Dot ops; values are (tile_m, tile_n, tile_k).
     pub tile_annotations: BTreeMap<ValueId, (u32, u32, u32)>,
+    /// Per-kernel opt-in for the MFA-style f32→bf16 reinterpret cast.
+    /// Overrides `MslConfig::bfloat_reinterpret_cast` when set true:
+    /// the codegen emits `as_type<bfloat2>(fp32)[1]` (truncation, fast)
+    /// instead of `bfloat(fp32)` (round-to-nearest, IEEE-correct). Off
+    /// by default — kernels that can prove the ≤1 ULP truncation drift
+    /// is acceptable for their numeric profile (heavy-tailed attention
+    /// mass, accumulated dot products with limited final-cast count)
+    /// opt in via the kernel module's wrapper. Currently used by the
+    /// SDPA-prefill MMA family on M2 where it buys ~2pts bf16.
+    pub bfloat_reinterpret_cast: bool,
 }
 
 impl Kernel {
@@ -798,6 +808,7 @@ impl Kernel {
             blocks,
             return_shapes: Vec::new(),
             tile_annotations: BTreeMap::new(),
+            bfloat_reinterpret_cast: false,
         }
     }
 
@@ -845,6 +856,7 @@ impl Clone for Kernel {
             blocks,
             return_shapes: self.return_shapes.clone(),
             tile_annotations: self.tile_annotations.clone(),
+            bfloat_reinterpret_cast: self.bfloat_reinterpret_cast,
         }
     }
 }

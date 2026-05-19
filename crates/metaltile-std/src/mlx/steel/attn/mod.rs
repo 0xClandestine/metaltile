@@ -54,11 +54,20 @@ use metaltile_core::{dtype::DType, ir::Kernel};
 /// bf16 regresses or if M3/M4 bf16 prefers `mma_bf16`.
 pub fn sdpa_prefill_mma_for(dtype: DType, family: Option<u32>) -> Kernel {
     let is_pre_m3_bf16 = dtype == DType::BF16 && matches!(family, Some(f) if f <= 8);
-    if is_pre_m3_bf16 {
+    let mut k = if is_pre_m3_bf16 {
         steel_attention_mma_bf16::mt_sdpa_prefill_mma_bf16::kernel_ir_for(dtype)
     } else {
         steel_attention_mma::mt_sdpa_prefill_mma::kernel_ir_for(dtype)
-    }
+    };
+    // Opt in to the MFA-style f32→bf16 reinterpret cast. The MMA
+    // kernels accumulate in f32 throughout and emit a single
+    // narrowing cast at output store; the ≤1 ULP truncation drift is
+    // absorbed by SDPA's heavy-tailed attention mass and stays
+    // inside the `tol=2e-2` bench envelope. The codegen default is
+    // off (rms_norm / arange would fail their tighter tolerances);
+    // see the `Kernel::bfloat_reinterpret_cast` field doc.
+    k.bfloat_reinterpret_cast = true;
+    k
 }
 
 #[cfg(test)]
@@ -83,6 +92,25 @@ mod tests {
             for dt in [DType::F32, DType::F16] {
                 let k = sdpa_prefill_mma_for(dt, family);
                 assert_eq!(k.name, "mt_sdpa_prefill_mma", "dt={dt:?} family={family:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn auto_select_opts_in_to_bfloat_reinterpret_cast() {
+        // The MMA prefill kernels accumulate in f32 and only narrow
+        // at the output store; the MFA-style reinterpret-cast
+        // truncation is bench-tolerable for them. Codegen default is
+        // off (rms_norm / arange need round-to-nearest), so the
+        // selector explicitly opts in. Every selected kernel must
+        // have the flag set regardless of dtype × family.
+        for family in [None, Some(7), Some(8), Some(9), Some(10)] {
+            for dt in [DType::F32, DType::F16, DType::BF16] {
+                let k = sdpa_prefill_mma_for(dt, family);
+                assert!(
+                    k.bfloat_reinterpret_cast,
+                    "kernel-side bfloat_reinterpret_cast must be set for dt={dt:?} family={family:?}",
+                );
             }
         }
     }

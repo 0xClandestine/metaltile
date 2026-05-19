@@ -1869,6 +1869,14 @@ fn run_sdpa_prefill(
     // the benchmark path.
     let mut kernel = (spec.kernel_ir)(dt);
     kernel.mode = KernelMode::SimdGroup2D;
+    // SDPA-prefill MMA family opts in to the MFA-style f32→bf16
+    // reinterpret cast (codegen default is off — kept that way so
+    // tight-tolerance kernels like rms_norm don't drift). The MMA
+    // kernels accumulate in f32 throughout and emit one narrowing
+    // cast per output store; the ≤1 ULP truncation stays well
+    // inside the bench's `tol=2e-2`. Mirrors what
+    // `sdpa_prefill_mma_for` (the runtime selector) sets for inference.
+    kernel.bfloat_reinterpret_cast = true;
     let msl = match MslGenerator::default().generate(&kernel) {
         Ok(s) => s,
         Err(_) => return vec![],

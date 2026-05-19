@@ -58,6 +58,7 @@ fn kernel_uses_program_id_axis(kernel: &Kernel, axis: u32) -> bool {
 // Generator
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct MslGenerator {
     config: MslConfig,
 }
@@ -77,6 +78,16 @@ impl MslGenerator {
         // Run the optimization pipeline on a clone before emitting.
         let mut k = kernel.clone();
         passes::run_passes_with_stats(&mut k, &passes::standard_pipeline())?;
+        // Per-kernel opt-in overrides the default-off
+        // `bfloat_reinterpret_cast` config. See the field doc on
+        // `Kernel` for why this is opt-in (truncation vs rounding
+        // trade-off — safe for SDPA-prefill MMA, unsafe for tight-
+        // tolerance kernels like rms_norm).
+        if k.bfloat_reinterpret_cast && !self.config.bfloat_reinterpret_cast {
+            let mut opt_in = self.clone();
+            opt_in.config.bfloat_reinterpret_cast = true;
+            return opt_in.emit_msl(&k);
+        }
         self.emit_msl(&k)
     }
 
