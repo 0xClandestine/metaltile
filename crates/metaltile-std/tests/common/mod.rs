@@ -60,7 +60,10 @@ impl Dt {
 
 pub fn pack_bytes(vals: &[f32], dt: Dt) -> Vec<u8> {
     match dt {
-        Dt::F32 => vals.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        // Host is little-endian on all current Metal targets — single
+        // memcpy beats `flat_map(to_le_bytes)`'s per-element iter churn.
+        // Noticeable on the SWA perf bench's 4M-element K/V ramps.
+        Dt::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
         Dt::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
         Dt::Bf16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
     }
@@ -68,8 +71,7 @@ pub fn pack_bytes(vals: &[f32], dt: Dt) -> Vec<u8> {
 
 pub fn unpack_bytes(bytes: &[u8], dt: Dt) -> Vec<f32> {
     match dt {
-        Dt::F32 =>
-            bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect(),
+        Dt::F32 => bytemuck::cast_slice::<u8, f32>(bytes).to_vec(),
         Dt::F16 =>
             bytes.chunks_exact(2).map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32()).collect(),
         Dt::Bf16 => bytes

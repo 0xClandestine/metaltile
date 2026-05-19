@@ -22,7 +22,16 @@
 //! 1024 threads (32 simdgroups × 32 lanes).
 //!
 //! The dispatch + walk pattern mirrors `mlx/sdpa_vector.rs`
-//! (mt_sdpa_vector). The differences are FFAI-specific:
+//! (mt_sdpa_vector). The two kernels are intentionally kept separate
+//! rather than unified: `mt_sdpa_vector` is a faithful port of MLX's
+//! `sdpa_vector` template, instantiated against MLX's source as the
+//! `tile bench` reference. Adding FFAI-specific surface area
+//! (`kv_stride`, `heads_per_group`, `sink_end`, `window_start`) to it
+//! would break that 1:1 charter and the per-shape MSL diffing
+//! invariant the bench harness relies on. Edits to either kernel must
+//! stay aware of the other — bandwidth fixes on `mt_sdpa_vector`
+//! (e.g. the `tg_out` occupancy collapse in PR #43) should be ported
+//! here too, and vice versa. The differences are FFAI-specific:
 //!
 //! * `kv_stride` decoupled from `n_kv` (cache pre-allocated to
 //!   `maxSeq`; loop bound is the filled prefix `n_kv`).
