@@ -19,7 +19,7 @@ use insta::assert_snapshot;
 use metaltile_codegen::{MslGenerator, msl::MslConfig};
 use metaltile_core::{
     dtype::DType,
-    ir::{BinOpKind, IndexExpr, Kernel, Op, Param, ValueId},
+    ir::{BinOpKind, IndexExpr, Kernel, KernelMode, Op, Param, ReduceKind, ValueId},
     shape::Shape,
 };
 
@@ -299,4 +299,141 @@ fn simd_shuffle_xor_lowers_to_intrinsic() {
         msl.contains("simd_shuffle_xor(v1, 8"),
         "shuffle mask 8 must appear as the second arg to simd_shuffle_xor.\n{msl}"
     );
+}
+
+// ── Reduction-mode single-simdgroup specialization ─────────────────────────
+
+/// Minimal Reduction-mode kernel that loads one element and reduces it.
+/// Exercises `emit_reduce`'s threadgroup-scope path so we can pin the
+/// per-`expected_tpg` specialization (fast / slow / default-safe).
+fn reduction_kernel(kind: ReduceKind) -> Kernel {
+    let mut k = Kernel::new("reduction_smoke");
+    k.mode = KernelMode::Reduction;
+    k.params.push(Param {
+        name: "x".into(),
+        dtype: DType::F32,
+        shape: Shape::scalar(),
+        is_output: false,
+        kind: Default::default(),
+    });
+    k.params.push(Param {
+        name: "out".into(),
+        dtype: DType::F32,
+        shape: Shape::scalar(),
+        is_output: true,
+        kind: Default::default(),
+    });
+    k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+    k.body.push_op(
+        Op::Load {
+            src: "x".into(),
+            mask: None,
+            other: None,
+            indices: vec![IndexExpr::Value(ValueId::new(0))],
+        },
+        ValueId::new(1),
+    );
+    k.body.push_op(Op::Reduce { value: ValueId::new(1), axis: 0, op: kind }, ValueId::new(2));
+    k.body.push_op_no_result(Op::Store {
+        mask: None,
+        dst: "out".into(),
+        indices: vec![IndexExpr::Value(ValueId::new(0))],
+        value: ValueId::new(2),
+    });
+    k
+}
+
+/// `expected_tpg = Some(32)` (or any value ≤ simd_size) emits only the
+/// fast path: a single `simd_*(value)` call, no threadgroup buffer, no
+/// barriers, no runtime `lsize` branch left behind.
+#[test]
+fn reduction_with_small_tpg_emits_only_fast_path() {
+    let cfg = MslConfig { expected_tpg: Some(32), ..MslConfig::default() };
+    let msl = MslGenerator::new(cfg).generate(&reduction_kernel(ReduceKind::Sum)).unwrap();
+    assert!(msl.contains("simd_sum(float(v1))"), "fast path must call simd_sum directly:\n{msl}");
+    assert!(
+        !msl.contains("threadgroup float"),
+        "fast path must not declare the 32-slot tg buffer:\n{msl}"
+    );
+    assert!(
+        !msl.contains("threadgroup_barrier"),
+        "fast path must not emit any threadgroup barriers:\n{msl}"
+    );
+    assert!(
+        !msl.contains("if (lsize"),
+        "compile-time spec must not leave a runtime branch behind:\n{msl}"
+    );
+}
+
+/// `expected_tpg = Some(256)` (above simd_size) emits only the slow path:
+/// full two-level threadgroup reduction with both barriers.
+#[test]
+fn reduction_with_large_tpg_emits_only_slow_path() {
+    let cfg = MslConfig { expected_tpg: Some(256), ..MslConfig::default() };
+    let msl = MslGenerator::new(cfg).generate(&reduction_kernel(ReduceKind::Sum)).unwrap();
+    assert!(
+        msl.contains("threadgroup float v2_sg[32]"),
+        "slow path must declare the 32-slot tg buffer:\n{msl}"
+    );
+    assert_eq!(
+        msl.matches("threadgroup_barrier(mem_flags::mem_threadgroup)").count(),
+        2,
+        "slow path emits exactly two barriers (post-write, post-broadcast):\n{msl}"
+    );
+    assert!(
+        !msl.contains("if (lsize"),
+        "compile-time spec must not leave a runtime branch behind:\n{msl}"
+    );
+}
+
+/// `expected_tpg = None` (the default) falls back to the slow path — the
+/// only choice that's correct at any TPG without runtime information.
+#[test]
+fn reduction_with_unknown_tpg_defaults_to_slow_path() {
+    let msl = MslGenerator::default().generate(&reduction_kernel(ReduceKind::Sum)).unwrap();
+    assert!(msl.contains("threadgroup float v2_sg[32]"), "default must emit slow path:\n{msl}");
+    assert_eq!(
+        msl.matches("threadgroup_barrier(mem_flags::mem_threadgroup)").count(),
+        2,
+        "default must keep both slow-path barriers:\n{msl}"
+    );
+}
+
+/// Max in the fast path uses `simd_max` with no slow-path padding.
+#[test]
+fn reduction_max_small_tpg_emits_simd_max_only() {
+    let cfg = MslConfig { expected_tpg: Some(32), ..MslConfig::default() };
+    let msl = MslGenerator::new(cfg).generate(&reduction_kernel(ReduceKind::Max)).unwrap();
+    assert!(msl.contains("simd_max(float(v1))"), "fast-path max must call simd_max:\n{msl}");
+    assert!(
+        !msl.contains("-INFINITY"),
+        "fast path needs no `-INFINITY` lane-pad (no slow-path code emitted):\n{msl}"
+    );
+}
+
+/// Mean divides by `lsize` in whichever path is emitted.
+#[test]
+fn reduction_mean_divides_by_lsize_in_both_specializations() {
+    let small = MslGenerator::new(MslConfig { expected_tpg: Some(32), ..MslConfig::default() })
+        .generate(&reduction_kernel(ReduceKind::Mean))
+        .unwrap();
+    assert!(small.contains("/ float(lsize)"), "fast-path mean must divide by lsize:\n{small}");
+
+    let large = MslGenerator::new(MslConfig { expected_tpg: Some(256), ..MslConfig::default() })
+        .generate(&reduction_kernel(ReduceKind::Mean))
+        .unwrap();
+    assert!(large.contains("/ float(lsize)"), "slow-path mean must divide by lsize:\n{large}");
+}
+
+#[test]
+fn reduction_sum_snapshot_default() {
+    let msl = MslGenerator::default().generate(&reduction_kernel(ReduceKind::Sum)).unwrap();
+    assert_snapshot!(msl);
+}
+
+#[test]
+fn reduction_sum_snapshot_small_tpg() {
+    let cfg = MslConfig { expected_tpg: Some(32), ..MslConfig::default() };
+    let msl = MslGenerator::new(cfg).generate(&reduction_kernel(ReduceKind::Sum)).unwrap();
+    assert_snapshot!(msl);
 }

@@ -35,6 +35,16 @@ pub struct MslConfig {
     /// to pick between variants — e.g. on `Some(10)` the SDPA path can
     /// route around the M5 Neural Accelerator's bf16-disabled fallback.
     pub apple_family: Option<u32>,
+    /// Expected threadgroup size at dispatch (in threads). When known, the
+    /// codegen specializes paths that depend on `lsize` — most notably the
+    /// Reduction-mode `Op::Reduce` emit, which collapses to a single
+    /// `simd_*(value)` call when `expected_tpg <= simd_size` (one simdgroup,
+    /// no second-level reduction needed) and emits the full two-level
+    /// threadgroup path otherwise. `None` leaves codegen in the conservative
+    /// two-level path that is correct at any TPG ≥ 32. Bench dispatch sets
+    /// this from `ShapeSpec.tpg` so each (kernel × dtype × tpg-bucket)
+    /// compiles to optimal MSL.
+    pub expected_tpg: Option<u32>,
     pub tile_schedule: TileSchedule,
 }
 
@@ -48,6 +58,7 @@ impl Default for MslConfig {
             bfloat_reinterpret_cast: false,
             async_copy: false,
             apple_family: None,
+            expected_tpg: None,
             tile_schedule: TileSchedule::default(),
         }
     }

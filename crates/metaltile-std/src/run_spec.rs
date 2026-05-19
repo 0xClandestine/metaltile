@@ -149,25 +149,43 @@ pub fn run(spec: &BenchSpec, runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
 
 // ── MSL generation ────────────────────────────────────────────────────────
 
-fn msl_elementwise(spec: &BenchSpec, dt: DType) -> Option<String> {
-    MslGenerator::default().generate(&(spec.kernel_ir)(dt)).ok()
+/// Build an `MslConfig` that pins `expected_tpg`. The codegen uses this to
+/// pick between compile-time-specialized paths — the Reduction-mode
+/// `Op::Reduce` emit, for example, drops to a single `simd_*(value)` call
+/// when `tpg ≤ simd_size` and emits the full two-level path otherwise. Call
+/// sites that don't know the dispatch TPG pass `None`, which leaves the
+/// codegen in its conservative default (correct at any TPG ≥ 32). See
+/// `metaltile-codegen/src/msl/reduce.rs`.
+fn msl_cfg_for(tpg: Option<u32>) -> metaltile_codegen::msl::MslConfig {
+    metaltile_codegen::msl::MslConfig {
+        expected_tpg: tpg,
+        ..metaltile_codegen::msl::MslConfig::default()
+    }
 }
-fn msl_reduction(spec: &BenchSpec, dt: DType) -> Option<String> {
+fn msl_elementwise(spec: &BenchSpec, dt: DType, tpg: Option<u32>) -> Option<String> {
+    MslGenerator::new(msl_cfg_for(tpg)).generate(&(spec.kernel_ir)(dt)).ok()
+}
+fn msl_reduction(spec: &BenchSpec, dt: DType, tpg: Option<u32>) -> Option<String> {
     let mut k = (spec.kernel_ir)(dt);
     k.mode = KernelMode::Reduction;
-    MslGenerator::default().generate(&k).ok()
+    MslGenerator::new(msl_cfg_for(tpg)).generate(&k).ok()
 }
-fn msl_grid3d(spec: &BenchSpec, dt: DType) -> Option<String> {
+fn msl_grid3d(spec: &BenchSpec, dt: DType, tpg: Option<u32>) -> Option<String> {
     let mut k = (spec.kernel_ir)(dt);
     k.mode = KernelMode::Grid3D;
-    MslGenerator::default().generate(&k).ok()
+    MslGenerator::new(msl_cfg_for(tpg)).generate(&k).ok()
 }
-fn msl_for_mode(spec: &BenchSpec, dt: DType, mode: KernelMode) -> Option<String> {
+fn msl_for_mode(
+    spec: &BenchSpec,
+    dt: DType,
+    mode: KernelMode,
+    tpg: Option<u32>,
+) -> Option<String> {
     match mode {
-        KernelMode::Elementwise => msl_elementwise(spec, dt),
+        KernelMode::Elementwise => msl_elementwise(spec, dt, tpg),
         KernelMode::Reduction | KernelMode::Tile2D | KernelMode::SimdGroup2D =>
-            msl_reduction(spec, dt),
-        KernelMode::Grid3D => msl_grid3d(spec, dt),
+            msl_reduction(spec, dt, tpg),
+        KernelMode::Grid3D => msl_grid3d(spec, dt, tpg),
     }
 }
 
@@ -200,15 +218,22 @@ fn compile_mlx(
 // Correctness via MLX reference (or unchecked if none available).
 
 fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench) -> Vec<OpResult> {
-    // Cache compiled kernels by mode — MSL is identical for all shapes with the same
-    // (dt, mode), so compile once instead of once-per-shape.
-    let mut compiled: std::collections::HashMap<u8, crate::runner::CompiledKernel> =
+    // Cache compiled kernels by (mode, tpg-bucket) — MSL is identical for all
+    // shapes with the same (dt, mode, tpg-bucket), so compile once instead of
+    // once-per-shape. The tpg-bucket axis is the `expected_tpg` codegen
+    // specialization: kernels dispatched at `tpg ≤ simd_size` (single
+    // simdgroup) emit a different MSL than those at larger TPGs (see
+    // `metaltile-codegen/src/msl/reduce.rs`), so they need distinct PSOs.
+    let mut compiled: std::collections::HashMap<u16, crate::runner::CompiledKernel> =
         std::collections::HashMap::new();
     let mode_key = |m: KernelMode| match m {
-        KernelMode::Elementwise => 0u8,
+        KernelMode::Elementwise => 0u16,
         KernelMode::Reduction | KernelMode::Tile2D | KernelMode::SimdGroup2D => 1,
         KernelMode::Grid3D => 2,
     };
+    // simd_size is fixed at 32 on Apple GPUs (matches `MslConfig::default().simd_size`).
+    let tpg_bucket = |tpg: usize| if tpg <= 32 { 0u16 } else { 1u16 };
+    let cache_key = |m: KernelMode, tpg: usize| (mode_key(m) << 1) | tpg_bucket(tpg);
 
     let mut results = Vec::new();
     // Pre-compile MLX ref kernel once (same MSL/function for all shapes).
@@ -223,10 +248,10 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
                 DtypeCtx::reduce(dt),
             _ => DtypeCtx::elementwise(dt),
         };
-        let mk = match compiled.entry(mode_key(shape.mode)) {
+        let mk = match compiled.entry(cache_key(shape.mode, shape.tpg)) {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::hash_map::Entry::Vacant(e) => {
-                let msl = match msl_for_mode(spec, dt, shape.mode) {
+                let msl = match msl_for_mode(spec, dt, shape.mode, Some(shape.tpg as u32)) {
                     Some(s) => s,
                     None => continue,
                 };
@@ -429,7 +454,7 @@ fn run_sort(
     tpg: usize,
 ) -> Vec<OpResult> {
     let ctx = DtypeCtx::reduce(dt);
-    let msl = match msl_reduction(spec, dt) {
+    let msl = match msl_reduction(spec, dt, Some(tpg as u32)) {
         Some(s) => s,
         None => return vec![],
     };
@@ -512,7 +537,7 @@ fn run_scan(
     shapes: &[(usize, usize)],
     tpg: usize,
 ) -> Vec<OpResult> {
-    let msl = match msl_reduction(spec, DType::F32) {
+    let msl = match msl_reduction(spec, DType::F32, Some(tpg as u32)) {
         Some(s) => s,
         None => return vec![],
     };
@@ -601,7 +626,7 @@ fn run_arg_reduce(
     check_n: usize,
     tpg: usize,
 ) -> Vec<OpResult> {
-    let msl = match msl_reduction(spec, DType::F32) {
+    let msl = match msl_reduction(spec, DType::F32, Some(tpg as u32)) {
         Some(s) => s,
         None => return vec![],
     };
@@ -673,7 +698,7 @@ fn run_random(
     n: usize,
     tpg: usize,
 ) -> Vec<OpResult> {
-    let msl = match msl_elementwise(spec, DType::F32) {
+    let msl = match msl_elementwise(spec, DType::F32, Some(tpg as u32)) {
         Some(s) => s,
         None => return vec![],
     };
@@ -756,7 +781,7 @@ fn run_fp_quantized(
     n: usize,
     tpg: usize,
 ) -> Vec<OpResult> {
-    let msl = match msl_elementwise(spec, DType::F32) {
+    let msl = match msl_elementwise(spec, DType::F32, Some(tpg as u32)) {
         Some(s) => s,
         None => return vec![],
     };
@@ -835,7 +860,7 @@ fn run_quantized_mat_vec(
     group_size: usize,
     tpg: usize,
 ) -> Vec<OpResult> {
-    let msl = match msl_reduction(spec, dt) {
+    let msl = match msl_reduction(spec, dt, Some(tpg as u32)) {
         Some(s) => s,
         None => return vec![],
     };
@@ -1031,7 +1056,7 @@ fn run_quantized_mat_mul(
     group_size: usize,
     tpg: usize,
 ) -> Vec<OpResult> {
-    let msl = match msl_reduction(spec, dt) {
+    let msl = match msl_reduction(spec, dt, Some(tpg as u32)) {
         Some(s) => s,
         None => return vec![],
     };
@@ -1192,7 +1217,7 @@ fn run_rope(
     d: usize,
     n_per_group: usize,
 ) -> Vec<OpResult> {
-    let msl = match msl_grid3d(spec, DType::F16) {
+    let msl = match msl_grid3d(spec, DType::F16, None) {
         Some(s) => s,
         None => return vec![],
     };
@@ -1356,7 +1381,7 @@ fn run_attention(
     tpg: usize,
 ) -> Vec<OpResult> {
     let ctx = DtypeCtx::elementwise(dt);
-    let msl = match msl_reduction(spec, dt) {
+    let msl = match msl_reduction(spec, dt, Some(tpg as u32)) {
         Some(s) => s,
         None => return vec![],
     };
@@ -1495,7 +1520,7 @@ fn run_strided_copy(
     pad: usize,
 ) -> Vec<OpResult> {
     let ctx = DtypeCtx::elementwise(dt);
-    let msl = match msl_grid3d(spec, dt) {
+    let msl = match msl_grid3d(spec, dt, None) {
         Some(s) => s,
         None => return vec![],
     };
@@ -1654,7 +1679,7 @@ fn run_affine_dequantize(
     tpg: usize,
 ) -> Vec<OpResult> {
     let ctx = DtypeCtx::elementwise(dt);
-    let msl = match msl_elementwise(spec, dt) {
+    let msl = match msl_elementwise(spec, dt, Some(tpg as u32)) {
         Some(s) => s,
         None => return vec![],
     };
@@ -1752,7 +1777,7 @@ fn run_affine_quantize(
     tpg: usize,
 ) -> Vec<OpResult> {
     let ctx = DtypeCtx::reduce(dt);
-    let msl = match msl_reduction(spec, dt) {
+    let msl = match msl_reduction(spec, dt, Some(tpg as u32)) {
         Some(s) => s,
         None => return vec![],
     };
@@ -1883,7 +1908,7 @@ fn run_sdpa_vector(
     let n_kv_heads = n_q_heads / gqa_factor;
 
     let ctx = DtypeCtx::elementwise(dt);
-    let msl = match msl_reduction(spec, dt) {
+    let msl = match msl_reduction(spec, dt, Some(tpg as u32)) {
         Some(s) => s,
         None => return vec![],
     };
@@ -2315,7 +2340,9 @@ fn run_sdpa_vector_2pass(
     let gqa_factor_u = gqa_factor;
     let ctx = DtypeCtx::elementwise(dt);
 
-    let p1_msl = match msl_reduction(spec, dt) {
+    // sdpa_decode pass 1 dispatches at TPG=1024 (per its DISPATCH INVARIANTS).
+    // The slow path is correct there; no compile-time spec needed.
+    let p1_msl = match msl_reduction(spec, dt, None) {
         Some(s) => s,
         None => return vec![],
     };
