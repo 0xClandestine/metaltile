@@ -35,7 +35,7 @@ use std::collections::BTreeMap;
 use common::{Dt, pack_bytes, ramp};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::{Context, DispatchSpec, ResidentBuffer};
-use metaltile_std::ffai::sdpa_decode::sdpa_decode;
+use metaltile_std::ffai::sdpa_decode::ffai_sdpa_decode as sdpa_decode;
 
 // (n_q_heads, n_kv_heads, n_kv, window_size, sink_tokens). Qwen3-class
 // GQA shape (32 Q heads / 8 KV heads) at the long-context regimes where
