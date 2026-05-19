@@ -173,7 +173,7 @@ fn sdpa_decode_swa_matches_naive_cpu_reference_f32() {
     let expected = naive_sdpa_swa_f32(&q, &k, &v, &shape, sink_end, window_start);
 
     let ctx = Context::new().expect("Context::new should succeed on macOS");
-    let mut kernel = sdpa_decode::kernel_ir_for(DType::F32);
+    let mut kernel = ffai_sdpa_decode::kernel_ir_for(DType::F32);
     kernel.mode = KernelMode::Reduction;
 
     let actual = run_sdpa_decode_f32(
@@ -219,7 +219,7 @@ fn sdpa_decode_swa_no_sinks_matches_cpu_f32() {
     let expected = naive_sdpa_swa_f32(&q, &k, &v, &shape, sink_end, window_start);
 
     let ctx = Context::new().expect("Context::new should succeed on macOS");
-    let mut kernel = sdpa_decode::kernel_ir_for(DType::F32);
+    let mut kernel = ffai_sdpa_decode::kernel_ir_for(DType::F32);
     kernel.mode = KernelMode::Reduction;
 
     let actual = run_sdpa_decode_f32(
