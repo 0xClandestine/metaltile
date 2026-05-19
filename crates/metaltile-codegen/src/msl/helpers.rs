@@ -29,6 +29,30 @@ impl MslGenerator {
         }
     }
 
+    /// Variant of [`emit_cast_expr`] that knows the source dtype.
+    ///
+    /// When `bfloat_reinterpret_cast` is enabled and the cast is f32/i32/u32
+    /// → bf16, emits the MFA-style raw upper-16-bit reinterpret
+    /// `as_type<bfloat2>(val)[1]` — bypasses Metal's IEEE-compliant
+    /// `__bf16_to_f32` builtin which is slow on M2 (Apple gen-8 lacks the
+    /// M3+ tensor unit). Source size MUST be 32 bits for the reinterpret to
+    /// be type-compatible.
+    pub(crate) fn emit_cast_expr_with_src(
+        &self,
+        dst_dtype: DType,
+        src_dtype: Option<DType>,
+        value: &str,
+    ) -> String {
+        if self.config.bfloat_reinterpret_cast
+            && dst_dtype == DType::BF16
+            && matches!(src_dtype, Some(DType::F32) | Some(DType::I32) | Some(DType::U32))
+        {
+            format!("as_type<bfloat2>({value})[1]")
+        } else {
+            self.emit_cast_expr(dst_dtype, value)
+        }
+    }
+
     /// Resolve a `ValueId` to its MSL variable name string.
     pub(super) fn vname(
         &self,

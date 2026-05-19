@@ -425,9 +425,13 @@ mod tests {
         let mut k = Kernel::new("compat_bf16_cast");
         k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
         k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::BF16 }, ValueId::new(1));
-        let msl = MslGenerator::new(MslConfig { native_bfloat: false, ..MslConfig::default() })
-            .generate(&k)
-            .unwrap();
+        let msl = MslGenerator::new(MslConfig {
+            native_bfloat: false,
+            bfloat_reinterpret_cast: false,
+            ..MslConfig::default()
+        })
+        .generate(&k)
+        .unwrap();
         assert!(msl.contains("struct bfloat16_t"), "compat mode should emit the bfloat16_t helper");
         assert!(
             msl.contains("bfloat16_t v1 = bfloat16_t(v0);"),
@@ -440,9 +444,13 @@ mod tests {
         let mut k = Kernel::new("native_bf16_cast");
         k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
         k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::BF16 }, ValueId::new(1));
-        let msl = MslGenerator::new(MslConfig { native_bfloat: true, ..MslConfig::default() })
-            .generate(&k)
-            .unwrap();
+        let msl = MslGenerator::new(MslConfig {
+            native_bfloat: true,
+            bfloat_reinterpret_cast: false,
+            ..MslConfig::default()
+        })
+        .generate(&k)
+        .unwrap();
         assert!(
             !msl.contains("struct bfloat16_t"),
             "native mode should not emit the compatibility helper"
@@ -450,6 +458,24 @@ mod tests {
         assert!(
             msl.contains("bfloat v1 = bfloat(v0);"),
             "native mode should cast directly to bfloat via constructor"
+        );
+    }
+
+    #[test]
+    fn bf16_cast_uses_reinterpret_when_flag_enabled() {
+        let mut k = Kernel::new("reinterpret_bf16_cast");
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
+        k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::BF16 }, ValueId::new(1));
+        let msl = MslGenerator::new(MslConfig {
+            native_bfloat: true,
+            bfloat_reinterpret_cast: true,
+            ..MslConfig::default()
+        })
+        .generate(&k)
+        .unwrap();
+        assert!(
+            msl.contains("bfloat v1 = as_type<bfloat2>(v0)[1];"),
+            "reinterpret mode bypasses the slow IEEE bfloat() builtin"
         );
     }
 

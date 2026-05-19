@@ -519,6 +519,7 @@ impl DslBodyParser {
             "simd_min" => self.parse_simd_reduce(call, "Min"),
             "simd_shuffle_xor" => self.parse_simd_shuffle_xor(call),
             "threadgroup_barrier" => self.parse_barrier(call),
+            "simdgroup_barrier_mem_none" => self.parse_simdgroup_barrier(call),
             "threadgroup_alloc" => self.parse_threadgroup_alloc(call),
             "threadgroup_load" => self.parse_threadgroup_load(call),
             "threadgroup_store" => self.parse_threadgroup_store(call),
@@ -1268,6 +1269,13 @@ impl DslBodyParser {
         0
     }
 
+    /// `simdgroup_barrier_mem_none()` → Op::SimdgroupBarrier — compiler-only
+    /// reordering hint, zero runtime cost. Emits `simdgroup_barrier(mem_flags::mem_none)`.
+    fn parse_simdgroup_barrier(&mut self, _call: &ExprCall) -> u32 {
+        self.push_op_no_result(quote! { Op::SimdgroupBarrier });
+        0
+    }
+
     /// `threadgroup_alloc("name", size)` → Op::ThreadgroupAlloc (no result).
     /// Optional third argument: `T` uses kernel's generic type, any other type
     /// name (`f32`, `f16`, etc.) uses that specific dtype. Defaults to F32.
@@ -1358,14 +1366,29 @@ impl DslBodyParser {
         result
     }
 
-    /// `simdgroup_alloc::<T, M, N>()` → Op::SimdgroupAlloc
+    /// `simdgroup_alloc::<T, M, N>()` → Op::SimdgroupAlloc.
+    /// Accepts concrete dtype names (`f32`, `f16`, `bf16`, …) or a kernel
+    /// generic type-var name (e.g. `T`) which is resolved against the
+    /// instantiated dtype via `type_vars`.
     fn parse_simdgroup_alloc(&mut self, call: &ExprCall) -> u32 {
         let result = self.alloc_vid();
-        let dtype_tokens = extract_turbofish_dtype_and_mn(&call.func)
-            .map(|(d, ..)| d)
-            .unwrap_or_else(|| quote! { DType::F16 });
-        let m_val = extract_turbofish_dtype_and_mn(&call.func).map(|(_, m, _)| m).unwrap_or(8u32);
-        let n_val = extract_turbofish_dtype_and_mn(&call.func).map(|(_, _, n)| n).unwrap_or(8u32);
+        let raw = extract_turbofish_name_and_mn(&call.func);
+        let dtype_tokens = match raw.as_ref().map(|(n, ..)| n.as_str()) {
+            Some("f32") | Some("float") => quote! { DType::F32 },
+            Some("f16") | Some("half") => quote! { DType::F16 },
+            Some("bf16") | Some("bfloat") => quote! { DType::BF16 },
+            Some("u32") | Some("uint") => quote! { DType::U32 },
+            Some("i32") | Some("int") => quote! { DType::I32 },
+            Some(other) =>
+                if let Some(ts) = self.type_vars.get(other) {
+                    ts.clone()
+                } else {
+                    quote! { DType::F32 }
+                },
+            None => quote! { DType::F16 },
+        };
+        let m_val = raw.as_ref().map(|(_, m, _)| *m).unwrap_or(8u32);
+        let n_val = raw.as_ref().map(|(_, _, n)| *n).unwrap_or(8u32);
         self.push_op(
             quote! {
                 Op::SimdgroupAlloc { dtype: #dtype_tokens, m: #m_val, n: #n_val }
@@ -1516,8 +1539,56 @@ fn dtype_tokens_for_name(name: &str) -> proc_macro2::TokenStream {
     }
 }
 
+/// Extract (raw_dtype_name, M, N) from a turbofish like `::<T, 8, 8>`.
+/// Used by `simdgroup_alloc::<T, M, N>()` where T may be a concrete dtype
+/// keyword (`f32`, `f16`, …) or a kernel generic type-var name resolved
+/// at call site via the parser's `type_vars` table.
+fn extract_turbofish_name_and_mn(expr: &Expr) -> Option<(String, u32, u32)> {
+    if let Expr::Path(path) = expr {
+        for seg in &path.path.segments {
+            if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                let mut iter = args.args.iter();
+                let dtype_name = iter.next().and_then(|arg| {
+                    if let syn::GenericArgument::Type(syn::Type::Path(tp)) = arg
+                        && let Some(last) = tp.path.segments.last()
+                    {
+                        Some(last.ident.to_string())
+                    } else {
+                        None
+                    }
+                });
+                let m = iter.next().and_then(|arg| {
+                    if let syn::GenericArgument::Const(syn::Expr::Lit(lit)) = arg
+                        && let syn::Lit::Int(n) = &lit.lit
+                        && let Ok(val) = n.base10_parse::<u32>()
+                    {
+                        Some(val)
+                    } else {
+                        None
+                    }
+                });
+                let n = iter.next().and_then(|arg| {
+                    if let syn::GenericArgument::Const(syn::Expr::Lit(lit)) = arg
+                        && let syn::Lit::Int(n) = &lit.lit
+                        && let Ok(val) = n.base10_parse::<u32>()
+                    {
+                        Some(val)
+                    } else {
+                        None
+                    }
+                });
+                if let (Some(name), Some(mm), Some(nn)) = (dtype_name, m, n) {
+                    return Some((name, mm, nn));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Extract (dtype_tokens, M, N) from a turbofish like `::<f16, 8, 8>`.
 /// Used by `simdgroup_alloc::<dtype, M, N>()`.
+#[allow(dead_code)]
 fn extract_turbofish_dtype_and_mn(expr: &Expr) -> Option<(proc_macro2::TokenStream, u32, u32)> {
     if let Expr::Path(path) = expr {
         for seg in &path.path.segments {

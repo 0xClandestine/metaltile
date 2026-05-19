@@ -659,6 +659,14 @@ pub enum Op {
     /// any subsequent threadgroup loads.
     Barrier,
 
+    /// Compiler-only simdgroup barrier: `simdgroup_barrier(mem_flags::mem_none)`.
+    /// Zero-cost at runtime — pins instruction ordering across the simdgroup
+    /// so the compiler can't hoist a subsequent matmul/load past a prior one.
+    /// Apple MLX uses these around V-tile loads when BD≥128
+    /// (`steel_attention.h:431-443`) to keep `simdgroup_load → simdgroup_mma`
+    /// ordering stable through aggressive scheduling.
+    SimdgroupBarrier,
+
     /// Declare a mutable register-local scalar variable.
     /// Emits: `auto __ml_{name} = {init_value};`
     /// Used for loop-carried state (running prefix, best_val/best_idx, etc.).
@@ -1144,6 +1152,7 @@ impl Op {
                 write!(f, "ThreadgroupStore({name}, v{}, v{})", index.as_u32(), value.as_u32())
             },
             Op::Barrier => write!(f, "Barrier"),
+            Op::SimdgroupBarrier => write!(f, "SimdgroupBarrier"),
             Op::DeclareLocal { name, value } => {
                 write!(f, "DeclareLocal({name}, v{})", value.as_u32())
             },

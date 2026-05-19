@@ -309,6 +309,7 @@ fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
         Op::Store { .. }
         | Op::Atomic { .. }
         | Op::Barrier
+        | Op::SimdgroupBarrier
         | Op::SimdgroupAlloc { .. }
         | Op::ThreadgroupStore { .. }
         | Op::SetLocal { .. }

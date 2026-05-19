@@ -300,7 +300,11 @@ fn replace_value_in_op(op: &mut Op, old: ValueId, new: ValueId) {
             s(index);
             s(value);
         },
-        Op::ThreadgroupAlloc { .. } | Op::Barrier | Op::SimdLaneId | Op::SimdGroupId => {},
+        Op::ThreadgroupAlloc { .. }
+        | Op::Barrier
+        | Op::SimdgroupBarrier
+        | Op::SimdLaneId
+        | Op::SimdGroupId => {},
         Op::SimdgroupAlloc { .. } | Op::SimdgroupMatMul { .. } => {},
         Op::SimdgroupElemLoad { value, .. } => s(value),
         Op::SimdgroupElemStore { value, data, .. } => {
@@ -471,7 +475,11 @@ fn collect_uses(op: &Op, used: &mut BTreeSet<ValueId>) {
             add(*index);
             add(*value);
         },
-        Op::ThreadgroupAlloc { .. } | Op::Barrier | Op::SimdLaneId | Op::SimdGroupId => {},
+        Op::ThreadgroupAlloc { .. }
+        | Op::Barrier
+        | Op::SimdgroupBarrier
+        | Op::SimdLaneId
+        | Op::SimdGroupId => {},
         Op::SimdgroupAlloc { .. } | Op::SimdgroupMatMul { .. } => {},
         Op::SimdgroupElemLoad { value, .. } => add(*value),
         Op::SimdgroupElemStore { value, data, .. } => {

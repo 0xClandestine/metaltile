@@ -301,6 +301,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::ThreadgroupLoad { .. } => "ThreadgroupLoad",
         Op::ThreadgroupStore { .. } => "ThreadgroupStore",
         Op::Barrier => "Barrier",
+        Op::SimdgroupBarrier => "SimdgroupBarrier",
         Op::SimdgroupAlloc { .. } => "SimdgroupAlloc",
         Op::SimdgroupElemLoad { .. } => "SimdgroupElemLoad",
         Op::SimdgroupElemStore { .. } => "SimdgroupElemStore",
@@ -416,6 +417,24 @@ fn infer_block(
     all_blocks: &BTreeMap<BlockId, Block>,
     env: &mut TypeEnv,
 ) -> Result<()> {
+    // Scan the entry body + child blocks for threadgroup_alloc dtypes by
+    // name so ThreadgroupLoad can recover the underlying buffer dtype instead
+    // of falling back to F32. tg_alloc usually lives in the entry block;
+    // loads happen in nested loop bodies — both must be scanned.
+    let mut tg_dtypes: std::collections::BTreeMap<String, DType> =
+        std::collections::BTreeMap::new();
+    let scan = |ops: &[Op], dtypes: &mut std::collections::BTreeMap<String, DType>| {
+        for op in ops {
+            if let Op::ThreadgroupAlloc { dtype, name, .. } = op {
+                dtypes.insert(name.clone(), *dtype);
+            }
+        }
+    };
+    scan(&kernel.body.ops, &mut tg_dtypes);
+    for bb in all_blocks.values() {
+        scan(&bb.ops, &mut tg_dtypes);
+    }
+
     for (op_idx, op) in block.ops.iter().enumerate() {
         let Some(vid) = block.results.get(op_idx).and_then(|x| *x) else {
             continue;
@@ -608,8 +627,9 @@ fn infer_block(
                 } else {
                     env.insert(vid, TypedValue { dtype: DType::F32, shape: Shape::scalar() });
                 },
-            Op::ThreadgroupLoad { .. } => {
-                env.insert(vid, TypedValue { dtype: DType::F32, shape: Shape::scalar() });
+            Op::ThreadgroupLoad { name, .. } => {
+                let dtype = tg_dtypes.get(name).copied().unwrap_or(DType::F32);
+                env.insert(vid, TypedValue { dtype, shape: Shape::scalar() });
             },
             Op::ArgReduce { .. } | Op::StrideArgReduce { .. } => {
                 env.insert(vid, TypedValue { dtype: DType::U32, shape: Shape::scalar() });
@@ -633,6 +653,7 @@ fn infer_block(
             | Op::ThreadgroupAlloc { .. }
             | Op::ThreadgroupStore { .. }
             | Op::Barrier
+            | Op::SimdgroupBarrier
             | Op::DeclareLocal { .. }
             | Op::SetLocal { .. }
             | Op::SimdgroupMatMul { .. }
@@ -880,5 +901,28 @@ mod tests {
         let scan = env.get(&ValueId::new(5)).unwrap();
         assert_eq!(scan.dtype, DType::F16);
         assert_eq!(scan.shape, Shape::scalar());
+    }
+
+    #[test]
+    fn threadgroup_load_inherits_dtype_from_threadgroup_alloc() {
+        // Regression: previously `Op::ThreadgroupLoad` always inferred F32,
+        // hiding the real dtype of the TG buffer. The `bfloat_reinterpret_cast`
+        // peephole relies on the source dtype being correct — when tg_alloc
+        // is bf16 and a downstream Cast(BF16, threadgroup_load(...)) fires,
+        // the peephole must NOT apply (source is already bf16, not f32).
+        let mut k = Kernel::new("tg_load_dtype");
+        k.body.push_op(
+            Op::ThreadgroupAlloc { dtype: DType::BF16, size: 64, name: "tg_buf".into() },
+            ValueId::new(0),
+        );
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(1));
+        k.body.push_op(
+            Op::ThreadgroupLoad { name: "tg_buf".into(), index: ValueId::new(1) },
+            ValueId::new(2),
+        );
+
+        let env = infer_types(&k).unwrap();
+        let load = env.get(&ValueId::new(2)).unwrap();
+        assert_eq!(load.dtype, DType::BF16, "ThreadgroupLoad should match alloc dtype");
     }
 }

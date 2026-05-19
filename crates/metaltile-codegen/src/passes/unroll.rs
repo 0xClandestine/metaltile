@@ -88,7 +88,7 @@ impl super::Pass for UnrollPass {
 // ---------------------------------------------------------------------------
 
 fn has_nested_loop_or_barrier(block: &Block) -> bool {
-    block.ops.iter().any(|op| matches!(op, Op::Loop { .. } | Op::Barrier))
+    block.ops.iter().any(|op| matches!(op, Op::Loop { .. } | Op::Barrier | Op::SimdgroupBarrier))
 }
 
 fn find_const_in_block(block: &Block, vid: ValueId) -> Option<i64> {

@@ -332,7 +332,11 @@ fn replace_values(op: &mut Op, map: &FxHashMap<ValueId, ValueId>) {
             s(index);
             s(value);
         },
-        Op::ThreadgroupAlloc { .. } | Op::Barrier | Op::SimdLaneId | Op::SimdGroupId => {},
+        Op::ThreadgroupAlloc { .. }
+        | Op::Barrier
+        | Op::SimdgroupBarrier
+        | Op::SimdLaneId
+        | Op::SimdGroupId => {},
         Op::SimdgroupAlloc { .. } | Op::SimdgroupMatMul { .. } => {},
         Op::SimdgroupElemLoad { value, .. } => s(value),
         Op::SimdgroupElemStore { value, data, .. } => {

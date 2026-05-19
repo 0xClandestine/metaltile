@@ -81,7 +81,7 @@ impl super::Pass for ValueSinkPass {
 fn is_sinkable(op: &Op) -> bool { remap::is_cheap_alu(op) && !remap::has_side_effects(op) }
 
 /// Ops that block sinking across them (Barrier).
-fn is_sink_barrier(op: &Op) -> bool { matches!(op, Op::Barrier) }
+fn is_sink_barrier(op: &Op) -> bool { matches!(op, Op::Barrier | Op::SimdgroupBarrier) }
 
 // ---------------------------------------------------------------------------
 // data structures

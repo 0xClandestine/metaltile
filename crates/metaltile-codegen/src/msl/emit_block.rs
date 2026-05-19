@@ -471,7 +471,12 @@ impl MslGenerator {
                     let v = self.vname(vid, block, extra_names);
                     let rv = self.vname(Some(*value), block, extra_names);
                     let type_decl = self.msl_type_name(*dtype);
-                    wl!(out, "{pad}{type_decl} {v} = {};", self.emit_cast_expr(*dtype, &rv));
+                    let src_dtype = type_env.get(value).map(|tv| tv.dtype);
+                    wl!(
+                        out,
+                        "{pad}{type_decl} {v} = {};",
+                        self.emit_cast_expr_with_src(*dtype, src_dtype, &rv)
+                    );
                 },
 
                 // ---- control flow --------------------------------------
@@ -541,7 +546,12 @@ impl MslGenerator {
                             .map(|tv| tv.dtype == DType::BF16)
                             .unwrap_or(false);
                         if self.config.native_bfloat && result_is_bf16 {
-                            wl!(out, "{pad}bfloat {v} = bfloat({expr});");
+                            if expr.starts_with("bfloat(") || expr.starts_with("as_type<bfloat2>(")
+                            {
+                                wl!(out, "{pad}bfloat {v} = {expr};");
+                            } else {
+                                wl!(out, "{pad}bfloat {v} = bfloat({expr});");
+                            }
                         } else if result_is_bf16 {
                             let bf_type = self.msl_type_name(DType::BF16);
                             wl!(out, "{pad}{bf_type} {v} = {expr};");
@@ -859,6 +869,10 @@ impl MslGenerator {
 
                 Op::Barrier => {
                     wl!(out, "{pad}threadgroup_barrier(mem_flags::mem_threadgroup);");
+                },
+
+                Op::SimdgroupBarrier => {
+                    wl!(out, "{pad}simdgroup_barrier(mem_flags::mem_none);");
                 },
 
                 // ---- simdgroup matrix ops ---------------------------------
