@@ -42,8 +42,7 @@ use std::collections::BTreeMap;
 
 mod common;
 
-use common::gpu_lock;
-use metaltile_core::dtype::DType;
+use common::{Dt, gpu_lock, pack_bytes, unpack_bytes};
 use metaltile_runtime::Context;
 use metaltile_std::mlx::rms_norm::{mt_rms_norm, mt_rms_norm_small};
 
@@ -60,67 +59,10 @@ fn cpu_rms_norm_reference(x: &[f32], w: &[f32], rows: usize, n: usize, eps: f32)
     out
 }
 
-#[derive(Clone, Copy)]
-enum Dtype {
-    F32,
-    F16,
-    Bf16,
-}
-
-impl Dtype {
-    fn bytes(self) -> usize {
-        match self {
-            Dtype::F32 => 4,
-            Dtype::F16 | Dtype::Bf16 => 2,
-        }
-    }
-    fn to_dtype(self) -> DType {
-        match self {
-            Dtype::F32 => DType::F32,
-            Dtype::F16 => DType::F16,
-            Dtype::Bf16 => DType::BF16,
-        }
-    }
-    /// Round-trip a value through this dtype so the oracle reflects
-    /// what the kernel reads post-load-cast.
-    fn round(self, v: f32) -> f32 {
-        match self {
-            Dtype::F32 => v,
-            Dtype::F16 => half::f16::from_f32(v).to_f32(),
-            Dtype::Bf16 => half::bf16::from_f32(v).to_f32(),
-        }
-    }
-    fn pack(self, vals: &[f32]) -> Vec<u8> {
-        match self {
-            Dtype::F32 => vals.iter().flat_map(|v| v.to_le_bytes()).collect(),
-            Dtype::F16 =>
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes()).collect(),
-            Dtype::Bf16 =>
-                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_bits().to_le_bytes()).collect(),
-        }
-    }
-    fn unpack(self, bytes: &[u8]) -> Vec<f32> {
-        match self {
-            Dtype::F32 => bytes
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect(),
-            Dtype::F16 => bytes
-                .chunks_exact(2)
-                .map(|c| half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
-                .collect(),
-            Dtype::Bf16 => bytes
-                .chunks_exact(2)
-                .map(|c| half::bf16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
-                .collect(),
-        }
-    }
-}
-
 /// Run mt_rms_norm at (head_dim, rows, dtype) and compare against a
 /// CPU naive reference. `tol_abs` is the absolute max-diff envelope;
 /// the caller picks it per dtype (f32 ≈ 1e-4, f16 ≈ 5e-3, bf16 ≈ 5e-2).
-fn run_and_check(head_dim: usize, rows: usize, dtype: Dtype, tol_abs: f32) {
+fn run_and_check(head_dim: usize, rows: usize, dtype: Dt, tol_abs: f32) {
     let _g = gpu_lock();
 
     let eps = 1e-6_f32;
@@ -137,8 +79,8 @@ fn run_and_check(head_dim: usize, rows: usize, dtype: Dtype, tol_abs: f32) {
     let expected = cpu_rms_norm_reference(&x, &w, rows, head_dim, eps);
 
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    buffers.insert("x".into(), dtype.pack(&x));
-    buffers.insert("w".into(), dtype.pack(&w));
+    buffers.insert("x".into(), pack_bytes(&x, dtype));
+    buffers.insert("w".into(), pack_bytes(&w, dtype));
     buffers.insert("out".into(), vec![0u8; rows * head_dim * dtype.bytes()]);
     buffers.insert("eps_buf".into(), eps.to_le_bytes().to_vec());
     buffers.insert("n".into(), (head_dim as u32).to_le_bytes().to_vec());
@@ -164,7 +106,7 @@ fn run_and_check(head_dim: usize, rows: usize, dtype: Dtype, tol_abs: f32) {
         .expect("dispatch_with_grid should succeed");
 
     let out_bytes = result.outputs.get("out").expect("`out` buffer in dispatch result");
-    let actual = dtype.unpack(out_bytes);
+    let actual = unpack_bytes(out_bytes, dtype);
     assert_eq!(actual.len(), expected.len(), "output element count");
 
     let mut max_diff = 0.0_f32;
@@ -194,14 +136,14 @@ fn mt_rms_norm_per_head_small_head_dim_f32() {
     // routes to `mt_rms_norm_small` (2 elems/thread, tpg=32 hits
     // the single-simdgroup minimum). 512 rows = enough to exercise
     // multi-TG grid without blowing up the CPU reference cost.
-    run_and_check(64, 512, Dtype::F32, 1e-4);
+    run_and_check(64, 512, Dt::F32, 1e-4);
 }
 
 #[test]
-fn mt_rms_norm_per_head_small_head_dim_f16() { run_and_check(64, 512, Dtype::F16, 5e-3); }
+fn mt_rms_norm_per_head_small_head_dim_f16() { run_and_check(64, 512, Dt::F16, 5e-3); }
 
 #[test]
-fn mt_rms_norm_per_head_small_head_dim_bf16() { run_and_check(64, 512, Dtype::Bf16, 5e-2); }
+fn mt_rms_norm_per_head_small_head_dim_bf16() { run_and_check(64, 512, Dt::Bf16, 5e-2); }
 
 // ── head_dim = 128 (Qwen3-class) ─────────────────────────────────────
 
@@ -211,17 +153,17 @@ fn mt_rms_norm_per_head_qwen3_shape_f32() {
     // × 32 heads = 1024 rows. Same shape the bench-runner uses for
     // hidden RMSNorm at n=4096 — exercises multi-TG grid + full
     // simdgroup reduce.
-    run_and_check(128, 1024, Dtype::F32, 1e-4);
+    run_and_check(128, 1024, Dt::F32, 1e-4);
 }
 
 #[test]
-fn mt_rms_norm_per_head_qwen3_shape_f16() { run_and_check(128, 1024, Dtype::F16, 5e-3); }
+fn mt_rms_norm_per_head_qwen3_shape_f16() { run_and_check(128, 1024, Dt::F16, 5e-3); }
 
 #[test]
 fn mt_rms_norm_per_head_qwen3_shape_bf16() {
     // bf16's 7-bit mantissa drifts faster than f16's 10-bit; envelope
     // 5e-2 ≈ 1 ULP at the normalised value magnitudes here.
-    run_and_check(128, 1024, Dtype::Bf16, 5e-2);
+    run_and_check(128, 1024, Dt::Bf16, 5e-2);
 }
 
 // ── head_dim = 256 (Gemma-2 / Gemma-3, Phi-3-medium) ─────────────────
@@ -232,11 +174,11 @@ fn mt_rms_norm_per_head_gemma_head_dim_f32() {
     // so reduce_sum needs to cross-simdgroup-reduce (not just
     // simd_sum). This is the path that breaks if the codegen
     // regresses the multi-SG reduce.
-    run_and_check(256, 256, Dtype::F32, 1e-4);
+    run_and_check(256, 256, Dt::F32, 1e-4);
 }
 
 #[test]
-fn mt_rms_norm_per_head_gemma_head_dim_f16() { run_and_check(256, 256, Dtype::F16, 5e-3); }
+fn mt_rms_norm_per_head_gemma_head_dim_f16() { run_and_check(256, 256, Dt::F16, 5e-3); }
 
 #[test]
-fn mt_rms_norm_per_head_gemma_head_dim_bf16() { run_and_check(256, 256, Dtype::Bf16, 5e-2); }
+fn mt_rms_norm_per_head_gemma_head_dim_bf16() { run_and_check(256, 256, Dt::Bf16, 5e-2); }

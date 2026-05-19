@@ -45,6 +45,17 @@ impl Dt {
             Dt::Bf16 => DType::BF16,
         }
     }
+    /// Round-trip a value through this dtype's precision. Used by
+    /// per-dtype correctness oracles so the CPU reference sees the
+    /// same load-cast quantisation the kernel does (no-op for f32,
+    /// 10-bit mantissa for f16, 7-bit for bf16).
+    pub fn round(self, v: f32) -> f32 {
+        match self {
+            Dt::F32 => v,
+            Dt::F16 => half::f16::from_f32(v).to_f32(),
+            Dt::Bf16 => half::bf16::from_f32(v).to_f32(),
+        }
+    }
 }
 
 pub fn pack_bytes(vals: &[f32], dt: Dt) -> Vec<u8> {
