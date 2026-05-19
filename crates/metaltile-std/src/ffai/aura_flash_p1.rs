@@ -238,14 +238,36 @@ macro_rules! aura_flash_p1_kernel {
     };
 }
 
-// Initial instantiation: aura4v2 (4-bit K, 2-bit V) at dim=128 — the
-// default AURA scheme on Qwen3-style head_dim=128.
+// Production (kb, vb, dim) instantiations. The macro is parametric;
+// adding a row generates one more dispatchable kernel.
 //
-// (key_bits=4, value_bits=2)
-//   key_levels   = 16
-//   value_levels = 4
-//   dims_per_lane(dim=128) = 4
+//   dims_per_lane = ceil(dim / 32)
+//   {kb,vb}_levels = 2^{kb,vb}
+//
+// Coverage today:
+//   - head_dim=128: covers Qwen3, Llama 3.2 3B+, GPT-OSS full-attn layers
+//   - head_dim=64:  covers Llama 3.2 1B and GPT-OSS sliding-window layers
+//
+// Symmetric (kb=vb=4) is the AURAScheme.default (aura4v4) — stability-
+// first. Asymmetric kb=4 vb=2 is the production recipe aura4v2 — ~5×
+// compression vs fp16 per `papers/aura-compression-algorithm.md` §2.5.
+//
+// Other dims (80, 96, 192, 256) + other recipes (aura8, aura3) queued
+// behind a real consumer — adding more variants now is `make
+// emit-all` weight bloat without a use site.
 aura_flash_p1_kernel!(
     aura_flash_p1_kb4_vb2_d128, 4u32, 2u32, 16u32, 4u32, 4u32,
     "flash_p1_kb4_vb2_d128"
+);
+aura_flash_p1_kernel!(
+    aura_flash_p1_kb4_vb4_d128, 4u32, 4u32, 16u32, 16u32, 4u32,
+    "flash_p1_kb4_vb4_d128"
+);
+aura_flash_p1_kernel!(
+    aura_flash_p1_kb4_vb2_d64, 4u32, 2u32, 16u32, 4u32, 2u32,
+    "flash_p1_kb4_vb2_d64"
+);
+aura_flash_p1_kernel!(
+    aura_flash_p1_kb4_vb4_d64, 4u32, 4u32, 16u32, 16u32, 2u32,
+    "flash_p1_kb4_vb4_d64"
 );
