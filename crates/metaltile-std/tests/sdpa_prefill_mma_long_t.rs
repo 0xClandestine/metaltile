@@ -1,19 +1,21 @@
-//! Long-context coverage for `mt_sdpa_prefill_mma`.
+//! Long-context + batched coverage for `mt_sdpa_prefill_mma`.
 //!
 //! The kernel is bench-wired at B=1, T=512 in
 //! `mlx/steel/attn/steel_attention_mma.rs`. The dispatch geometry
-//! itself (BQ=32 walked over the T axis via `tgid_x`, BK=16 walked
-//! over the K axis inside the body) supports any T that's a multiple
-//! of BQ — this file pins that contract at production prefill lengths
-//! (T = 2048 and T = 4096) by dispatching the real kernel and
-//! comparing against a CPU naive SDPA reference.
+//! (BQ=32 walked over T via `tgid_x`, BK=16 walked over K inside the
+//! body, batch via `tgid_z` folded into the slab offsets via the
+//! `n_q_heads` + `n_kv_heads` constexprs) supports any (B, T) where
+//! T is a multiple of BQ. This file pins:
 //!
-//! Scope: single batch (B=1). The kernel currently `let _ = batch;`s
-//! the Z grid dim — Q/K/V offsets don't include a batch stride, so
-//! true B>1 dispatch needs a separate change (either a kernel update
-//! to fold batch into the slab offsets, or a caller-side reshape to
-//! `[B*n_heads, T, D]` and dispatch with `tgid_y = batch * n_heads +
-//! q_head`). That follow-up is tracked alongside this file.
+//! * single-batch correctness at T ∈ {2048, 4096} (production
+//!   prefill lengths),
+//! * kernel-side B>1 correctness at (B=2, T=1024) and (B=4, T=512),
+//! * legacy `[B*n_heads, T, D]` head-flatten callers still work at
+//!   `tgid_z = 0` (B=2 test) — useful for any consumer that shipped
+//!   against the pre-B>1 kernel API.
+//!
+//! All shapes compare against a CPU naive SDPA reference. Tolerance
+//! is `2e-2` (same as the bench's `tol=2e-2` for sdpa_prefill_mma).
 //!
 //! macOS-gated.
 
@@ -109,6 +111,8 @@ fn run_sdpa_prefill(
     buffers.insert("q_len".into(), (t as u32).to_le_bytes().to_vec());
     buffers.insert("k_len".into(), (t as u32).to_le_bytes().to_vec());
     buffers.insert("gqa_factor".into(), ((n_heads / n_kv_heads) as u32).to_le_bytes().to_vec());
+    buffers.insert("n_q_heads".into(), (n_heads as u32).to_le_bytes().to_vec());
+    buffers.insert("n_kv_heads".into(), (n_kv_heads as u32).to_le_bytes().to_vec());
     buffers.insert("scale".into(), scale.to_le_bytes().to_vec());
 
     let mut kernel = mt_sdpa_prefill_mma::kernel_ir_for(dt.to_dtype());
@@ -180,20 +184,12 @@ fn mt_sdpa_prefill_mma_matches_cpu_reference_t2048_f32() {
 fn mt_sdpa_prefill_mma_b2_via_head_flatten_t1024_f32() {
     let _g = gpu_lock();
 
-    // The kernel currently `let _ = batch;`s the Z grid dim — Q/K/V
-    // offsets don't include a per-batch slab stride. The caller-side
-    // workaround: lay Q out as `[B * n_q_heads, T, D]` and K/V as
-    // `[B * n_kv_heads, T, D]`, then dispatch with `tgid_y` ranging
-    // over `[0, B * n_q_heads)`. The kernel's existing
-    // `kv_head = q_head / gqa_factor` then maps a flat
-    // `(batch * n_q_heads + head)` to the matching flat
-    // `(batch * n_kv_heads + kv_head)` slot — bit-identical to the
-    // per-batch slab indexing a true B>1 kernel would do.
-    //
-    // This pins the contract that callers can run B>1 prefill today
-    // by flattening, without a kernel-side patch. A future kernel
-    // update that adds an explicit batch stride should leave this
-    // test passing.
+    // Backwards-compat pin: callers that flatten Q/K/V to the
+    // `[B * n_heads, T, D]` layout and dispatch with `tgid_y`
+    // ranging over `[0, B * n_q_heads)` and `tgid_z = 0` (effective
+    // batch=1) should still produce the same per-batch outputs as
+    // the true B>1 dispatch below. Useful for early adopters that
+    // already shipped against the pre-B>1 kernel.
     let batch = 2usize;
     let n_heads = 4usize;
     let n_kv_heads = 1usize;
@@ -260,6 +256,222 @@ fn mt_sdpa_prefill_mma_b2_via_head_flatten_t1024_f32() {
         &v_b,
         flat_n_heads,
         flat_n_kv_heads,
+        t,
+        head_dim,
+        scale,
+        Dt::F32,
+    );
+
+    assert_eq!(actual.len(), expected.len());
+
+    let mut max_diff = 0.0_f32;
+    let mut max_at = 0usize;
+    for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+        let diff = (e - a).abs();
+        if diff > max_diff {
+            max_diff = diff;
+            max_at = i;
+        }
+    }
+    assert!(
+        max_diff < 2e-2,
+        "max |diff| = {max_diff:.2e} at index {max_at} (expected {:.6}, got {:.6})",
+        expected[max_at],
+        actual[max_at],
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_sdpa_prefill_batched(
+    ctx: &Context,
+    q_bytes: &[u8],
+    k_bytes: &[u8],
+    v_bytes: &[u8],
+    batch: usize,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    t: usize,
+    head_dim: usize,
+    scale: f32,
+    dt: Dt,
+) -> Vec<f32> {
+    let dt_bytes = dt.bytes();
+    let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    buffers.insert("q".into(), q_bytes.to_vec());
+    buffers.insert("k".into(), k_bytes.to_vec());
+    buffers.insert("v".into(), v_bytes.to_vec());
+    buffers.insert("out".into(), vec![0u8; batch * n_q_heads * t * head_dim * dt_bytes]);
+    buffers.insert("q_len".into(), (t as u32).to_le_bytes().to_vec());
+    buffers.insert("k_len".into(), (t as u32).to_le_bytes().to_vec());
+    buffers.insert("gqa_factor".into(), ((n_q_heads / n_kv_heads) as u32).to_le_bytes().to_vec());
+    buffers.insert("n_q_heads".into(), (n_q_heads as u32).to_le_bytes().to_vec());
+    buffers.insert("n_kv_heads".into(), (n_kv_heads as u32).to_le_bytes().to_vec());
+    buffers.insert("scale".into(), scale.to_le_bytes().to_vec());
+
+    let mut kernel = mt_sdpa_prefill_mma::kernel_ir_for(dt.to_dtype());
+    kernel.mode = metaltile_core::ir::KernelMode::SimdGroup2D;
+    let result = ctx
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [t / 32, n_q_heads, batch], [
+            128, 1, 1,
+        ])
+        .expect("dispatch_with_grid should succeed");
+    let out_bytes = result.outputs.get("out").expect("`out` buffer in dispatch result");
+    unpack_bytes(out_bytes, dt)
+}
+
+#[test]
+fn mt_sdpa_prefill_mma_kernel_side_b2_t1024_f32() {
+    let _g = gpu_lock();
+
+    // True B>1 dispatch: kernel reads `batch = tgid_z` and folds it
+    // into Q/K/V/O slab offsets via the `n_q_heads` + `n_kv_heads`
+    // constexprs. Q/K/V are laid out as `[B, n_*_heads, T, D]`
+    // (per-batch slab) and the grid spans all 3 axes.
+    let batch = 2usize;
+    let n_q_heads = 4usize;
+    let n_kv_heads = 1usize;
+    let t = 1024usize;
+    let head_dim = 128usize;
+    let scale = 1.0_f32 / (head_dim as f32).sqrt();
+
+    // Per-batch buffers: distinct ramps so a missed batch offset
+    // would surface as a magnitude mismatch.
+    let q: Vec<f32> = (0..batch * n_q_heads * t * head_dim)
+        .map(|i| {
+            let bh = i / (t * head_dim);
+            let b = bh / n_q_heads;
+            let rest = i - bh * t * head_dim;
+            (rest % 17) as f32 * 0.05 - 0.4 + (b as f32) * 0.13
+        })
+        .collect();
+    let k: Vec<f32> = (0..batch * n_kv_heads * t * head_dim)
+        .map(|i| {
+            let bh = i / (t * head_dim);
+            let b = bh / n_kv_heads;
+            let rest = i - bh * t * head_dim;
+            (rest % 13) as f32 * 0.05 - 0.3 + (b as f32) * 0.11
+        })
+        .collect();
+    let v: Vec<f32> = (0..batch * n_kv_heads * t * head_dim)
+        .map(|i| {
+            let bh = i / (t * head_dim);
+            let b = bh / n_kv_heads;
+            let rest = i - bh * t * head_dim;
+            (rest % 11) as f32 * 0.05 - 0.25 + (b as f32) * 0.17
+        })
+        .collect();
+
+    // CPU reference: naive prefill independently per batch.
+    let mut expected = vec![0.0f32; batch * n_q_heads * t * head_dim];
+    for b in 0..batch {
+        let q_b = &q[b * n_q_heads * t * head_dim..(b + 1) * n_q_heads * t * head_dim];
+        let k_b = &k[b * n_kv_heads * t * head_dim..(b + 1) * n_kv_heads * t * head_dim];
+        let v_b = &v[b * n_kv_heads * t * head_dim..(b + 1) * n_kv_heads * t * head_dim];
+        let out_b =
+            naive_sdpa_prefill_f32(q_b, k_b, v_b, n_q_heads, n_kv_heads, t, head_dim, scale);
+        let dst = &mut expected[b * n_q_heads * t * head_dim..(b + 1) * n_q_heads * t * head_dim];
+        dst.copy_from_slice(&out_b);
+    }
+
+    let ctx = Context::new().expect("Context::new should succeed on macOS");
+    let q_b = pack_bytes(&q, Dt::F32);
+    let k_b = pack_bytes(&k, Dt::F32);
+    let v_b = pack_bytes(&v, Dt::F32);
+    let actual = run_sdpa_prefill_batched(
+        &ctx,
+        &q_b,
+        &k_b,
+        &v_b,
+        batch,
+        n_q_heads,
+        n_kv_heads,
+        t,
+        head_dim,
+        scale,
+        Dt::F32,
+    );
+
+    assert_eq!(actual.len(), expected.len());
+
+    let mut max_diff = 0.0_f32;
+    let mut max_at = 0usize;
+    for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+        let diff = (e - a).abs();
+        if diff > max_diff {
+            max_diff = diff;
+            max_at = i;
+        }
+    }
+    assert!(
+        max_diff < 2e-2,
+        "max |diff| = {max_diff:.2e} at index {max_at} (expected {:.6}, got {:.6})",
+        expected[max_at],
+        actual[max_at],
+    );
+}
+
+#[test]
+fn mt_sdpa_prefill_mma_kernel_side_b4_t512_f32() {
+    let _g = gpu_lock();
+
+    // Tighter-batch (B=4) coverage at T=512: catches per-batch
+    // stride bugs that B=2 might cover up if the bug only shows
+    // up at batch ≥ 3 (e.g., truncated shift constants).
+    let batch = 4usize;
+    let n_q_heads = 2usize;
+    let n_kv_heads = 1usize;
+    let t = 512usize;
+    let head_dim = 128usize;
+    let scale = 1.0_f32 / (head_dim as f32).sqrt();
+
+    let q: Vec<f32> = (0..batch * n_q_heads * t * head_dim)
+        .map(|i| {
+            let bh = i / (t * head_dim);
+            let b = bh / n_q_heads;
+            let rest = i - bh * t * head_dim;
+            (rest % 19) as f32 * 0.04 - 0.35 + (b as f32) * 0.09
+        })
+        .collect();
+    let k: Vec<f32> = (0..batch * n_kv_heads * t * head_dim)
+        .map(|i| {
+            let bh = i / (t * head_dim);
+            let b = bh / n_kv_heads;
+            let rest = i - bh * t * head_dim;
+            (rest % 13) as f32 * 0.04 - 0.25 + (b as f32) * 0.07
+        })
+        .collect();
+    let v: Vec<f32> = (0..batch * n_kv_heads * t * head_dim)
+        .map(|i| {
+            let bh = i / (t * head_dim);
+            let b = bh / n_kv_heads;
+            let rest = i - bh * t * head_dim;
+            (rest % 11) as f32 * 0.04 - 0.2 + (b as f32) * 0.13
+        })
+        .collect();
+
+    let mut expected = vec![0.0f32; batch * n_q_heads * t * head_dim];
+    for b in 0..batch {
+        let q_b = &q[b * n_q_heads * t * head_dim..(b + 1) * n_q_heads * t * head_dim];
+        let k_b = &k[b * n_kv_heads * t * head_dim..(b + 1) * n_kv_heads * t * head_dim];
+        let v_b = &v[b * n_kv_heads * t * head_dim..(b + 1) * n_kv_heads * t * head_dim];
+        let out_b =
+            naive_sdpa_prefill_f32(q_b, k_b, v_b, n_q_heads, n_kv_heads, t, head_dim, scale);
+        let dst = &mut expected[b * n_q_heads * t * head_dim..(b + 1) * n_q_heads * t * head_dim];
+        dst.copy_from_slice(&out_b);
+    }
+
+    let ctx = Context::new().expect("Context::new should succeed on macOS");
+    let q_b = pack_bytes(&q, Dt::F32);
+    let k_b = pack_bytes(&k, Dt::F32);
+    let v_b = pack_bytes(&v, Dt::F32);
+    let actual = run_sdpa_prefill_batched(
+        &ctx,
+        &q_b,
+        &k_b,
+        &v_b,
+        batch,
+        n_q_heads,
+        n_kv_heads,
         t,
         head_dim,
         scale,
