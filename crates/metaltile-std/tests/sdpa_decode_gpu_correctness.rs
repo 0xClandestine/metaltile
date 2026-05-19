@@ -22,7 +22,7 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use common::{Dt, SdpaShape, naive_sdpa_f32, pack_bytes, ramp, unpack_bytes};
+use common::{Dt, SdpaShape, gpu_lock, naive_sdpa_f32, pack_bytes, ramp, unpack_bytes};
 use metaltile_core::{dtype::DType, ir::KernelMode};
 use metaltile_runtime::Context;
 use metaltile_std::ffai::sdpa_decode::sdpa_decode;
@@ -32,6 +32,7 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> { unpack_bytes(bytes, Dt::F32) }
 
 #[test]
 fn sdpa_decode_matches_naive_cpu_reference_f32() {
+    let _g = gpu_lock();
     let n_q_heads = 2usize;
     let n_kv_heads = 1usize;
     let head_dim = 128usize;

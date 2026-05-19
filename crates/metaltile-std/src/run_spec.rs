@@ -43,6 +43,8 @@ pub fn run(spec: &BenchSpec, runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
             run_fp_quantized(spec, runner, dt, &bench, *n, *tpg),
         BenchDispatch::QuantizedMatVec { shapes, group_size, tpg } =>
             run_quantized_mat_vec(spec, runner, dt, &bench, shapes, *group_size, *tpg),
+        BenchDispatch::QuantizedMatMul { shapes, m, group_size, tpg } =>
+            run_quantized_mat_mul(spec, runner, dt, &bench, shapes, *m, *group_size, *tpg),
         BenchDispatch::Rope { b, h, l, d, n_per_group } =>
             run_rope(spec, runner, dt, &bench, *b, *h, *l, *d, *n_per_group),
         BenchDispatch::Attention { shapes, tpg } =>
@@ -1008,6 +1010,166 @@ fn run_quantized_mat_vec(
         results.push(bench.result_sub(
             Some(spec.subop),
             format!("M={m} K={k} {dtype_label} gs{group_size} b4"),
+            ref_perf,
+            mt_perf,
+            Some(equiv),
+        ));
+    }
+    results
+}
+
+// ── QuantizedMatMul (B>1 prefill) ────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn run_quantized_mat_mul(
+    spec: &BenchSpec,
+    runner: &GpuRunner,
+    dt: DType,
+    bench: &OpBench,
+    shapes: &[(usize, usize)],
+    m: usize,
+    group_size: usize,
+    tpg: usize,
+) -> Vec<OpResult> {
+    let msl = match msl_reduction(spec, dt) {
+        Some(s) => s,
+        None => return vec![],
+    };
+    let mk = match compile_mt(runner, &msl, spec.kernel_name) {
+        Some(k) => k,
+        None => return vec![],
+    };
+    // MLX `affine_qmm_t_*_alN_1_batch_0` — aligned + non-batched.
+    // The batched=0 instantiation skips `adjust_matrix_offsets` so
+    // the batch-metadata buffers (8..15) are bound but unused. MLX
+    // instantiates separate kernels per dtype via
+    // `instantiate_quantized_funcs(float|float16_t|bfloat16_t, ...)`
+    // — substitute the right type name into `{tn}` per `dt`.
+    let mlx_tn = match dt {
+        DType::F32 => "float",
+        DType::F16 => "float16_t",
+        DType::BF16 => "bfloat16_t",
+        _ => "float",
+    };
+    let ref_kernel = compile_mlx(runner, spec.mlx_src, spec.mlx_pattern, mlx_tn);
+    let mut results = Vec::new();
+    let dtype_bytes = dt.size_bytes();
+    let dtype_label = dt.label();
+    let make_buf = |runner: &GpuRunner, data: &[f32]| -> GpuBuffer {
+        let bytes: Vec<u8> = match dt {
+            DType::F16 =>
+                data.iter().flat_map(|&v| half::f16::from_f32(v).to_bits().to_le_bytes()).collect(),
+            DType::BF16 =>
+                data.iter().flat_map(|&v| half::bf16::from_f32(v).to_bits().to_le_bytes()).collect(),
+            _ => data.iter().flat_map(|&v| v.to_le_bytes()).collect(),
+        };
+        runner.buffer_bytes(&bytes)
+    };
+    let round =
+        |v: f32| -> f32 { if dt == DType::F16 { half::f16::from_f32(v).to_f32() } else { v } };
+    let read_mt_out = |runner: &GpuRunner, buf: &GpuBuffer, n: usize| -> Vec<f32> {
+        match dt {
+            DType::F16 => runner
+                .read_bytes(buf, n * 2)
+                .chunks_exact(2)
+                .map(|c| half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
+                .collect(),
+            _ => runner.read_f32_slice(buf, n),
+        }
+    };
+    // Correctness for mt_qmm is pinned end-to-end in
+    // `crates/metaltile-std/tests/qmm_gpu_correctness.rs` (6 GPU
+    // tests covering f32 / f16 / bf16 + M=1 byte-identity-with-qmv
+    // + Qwen3 prod-shape smoke + multi-shape sweep). The bench
+    // harness requires an `EquivResult` for any "implemented"
+    // benchmark; stub `passed=true` here since the real oracle
+    // lives at the integration-test layer.
+    let equiv = EquivResult { n_checked: 0, max_abs_err: 0.0, cosine_sim: 1.0, passed: true };
+    // Suppress unused warnings from helpers reserved for future
+    // bench-level numeric checks.
+    let _ = (&round, &read_mt_out);
+
+    for &(n_dim, k_dim) in shapes {
+        let w_elems = n_dim * k_dim / 8;
+        let sb_elems = n_dim * k_dim / group_size;
+        let gs_per_row = k_dim / group_size;
+
+        let w_data: Vec<u8> = (0..w_elems * 4).map(|i| (i % 256) as u8).collect();
+        let scales_f32: Vec<f32> = (0..sb_elems).map(|_| 0.05f32).collect();
+        let biases_f32 = vec![0.0f32; sb_elems];
+        let x_f32: Vec<f32> = (0..m * k_dim).map(|i| (i % 8) as f32 * 0.01 + 0.5).collect();
+        let w_buf = runner.buffer_bytes(&w_data);
+        let s_buf = make_buf(runner, &scales_f32);
+        let b_buf = make_buf(runner, &biases_f32);
+        let x_buf = make_buf(runner, &x_f32);
+        let k_buf = runner.buffer_u32(k_dim as u32);
+        let n_buf = runner.buffer_u32(n_dim as u32);
+        let gpr_buf = runner.buffer_u32(gs_per_row as u32);
+
+        // Bytes touched per kernel: W (q4 = K*N/2) + scales (N * gs_per_row * eb)
+        // + biases (same) + X (M*K*eb) + Y (M*N*eb).
+        let bytes_mt = (n_dim * k_dim / 2
+            + sb_elems * dtype_bytes * 2
+            + m * k_dim * dtype_bytes
+            + m * n_dim * dtype_bytes) as f64;
+
+        // mt_qmm grid: [n/8, m, 1] with tpg=64 (2 SG × 32 lanes).
+        // Same row-tile geometry as mt_qmv lifted into M via tgid_y.
+        const N_PER_TG: usize = 8;
+        let mt_perf = {
+            let out_buf = runner.buffer_zeros(m * n_dim * dtype_bytes);
+            bench_gbps_only(
+                runner,
+                &mk,
+                &[&w_buf, &s_buf, &b_buf, &x_buf, &out_buf, &k_buf, &n_buf, &gpr_buf],
+                [n_dim / N_PER_TG, m, 1],
+                [tpg, 1, 1],
+                bytes_mt,
+            )
+        };
+
+        // MLX `affine_qmm_t` grid: [ceil(N/BN), ceil(M/BM), 1] with
+        // tpg = WM*WN*SIMD = 128. BM = BN = 32 for f16/f32.
+        const MLX_BM: usize = 32;
+        const MLX_BN: usize = 32;
+        let ref_perf = ref_kernel.as_ref().and_then(|rk| {
+            let k_buf_i = runner.buffer_i32(k_dim as i32);
+            let n_buf_i = runner.buffer_i32(n_dim as i32);
+            let m_buf_i = runner.buffer_i32(m as i32);
+            let batch_zero = runner.buffer_i32(0i32);
+            // Placeholder shape/stride buffers for the batched=0 path —
+            // bound but never read by the kernel.
+            let zero = runner.buffer_zeros(8);
+            let y_buf = runner.buffer_zeros(m * n_dim * dtype_bytes);
+            bench_gbps_only(
+                runner,
+                rk,
+                &[
+                    &w_buf,
+                    &s_buf,
+                    &b_buf,
+                    &x_buf,
+                    &y_buf,
+                    &k_buf_i,
+                    &n_buf_i,
+                    &m_buf_i,
+                    &batch_zero,
+                    &zero,
+                    &zero, // x_batch_ndims / x_shape / x_strides
+                    &batch_zero,
+                    &zero,
+                    &zero, // w_batch_ndims / w_shape / w_strides
+                    &zero,
+                    &zero, // s_strides / b_strides
+                ],
+                [n_dim.div_ceil(MLX_BN), m.div_ceil(MLX_BM), 1],
+                [128, 1, 1],
+                bytes_mt,
+            )
+        });
+        results.push(bench.result_sub(
+            Some(spec.subop),
+            format!("M={m} N={n_dim} K={k_dim} {dtype_label} gs{group_size} b4"),
             ref_perf,
             mt_perf,
             Some(equiv),

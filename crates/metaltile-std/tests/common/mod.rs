@@ -1,8 +1,28 @@
-//! Shared test helpers for SDPA decode integration tests.
+//! Shared test helpers for metaltile-std GPU integration tests.
 
 #![allow(dead_code)]
 
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
 use metaltile_core::dtype::DType;
+
+/// Serialise GPU dispatches across all integration tests that pull in
+/// this module. cargo runs integration tests in parallel by default;
+/// concurrent dispatches on the shared Metal pipeline race the PSO
+/// cache + library compilation path and surface as cross-test numeric
+/// corruption (caught e.g. when an f16 test ran after an f32 test in
+/// a single `cargo test` invocation and produced output ≈ 0.45× the
+/// expected magnitude). Lighter than requiring `--test-threads=1` at
+/// the command line.
+///
+/// Tests that grab this lock at the top of their body serialise across
+/// the entire integration-test binary they're linked into. Mutex
+/// poisoning unwraps to `into_inner()` so a panic in one test still
+/// lets the others run.
+pub fn gpu_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+}
 
 #[derive(Clone, Copy)]
 pub enum Dt {
@@ -23,6 +43,17 @@ impl Dt {
             Dt::F32 => DType::F32,
             Dt::F16 => DType::F16,
             Dt::Bf16 => DType::BF16,
+        }
+    }
+    /// Round-trip a value through this dtype's precision. Used by
+    /// per-dtype correctness oracles so the CPU reference sees the
+    /// same load-cast quantisation the kernel does (no-op for f32,
+    /// 10-bit mantissa for f16, 7-bit for bf16).
+    pub fn round(self, v: f32) -> f32 {
+        match self {
+            Dt::F32 => v,
+            Dt::F16 => half::f16::from_f32(v).to_f32(),
+            Dt::Bf16 => half::bf16::from_f32(v).to_f32(),
         }
     }
 }

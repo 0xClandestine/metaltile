@@ -220,6 +220,17 @@ pub enum BenchDispatch {
         group_size: usize,
         tpg: usize,
     },
+    /// Quantized matmul (B>1 / prefill path). `shapes` is the same
+    /// `(out_dim, in_dim)` list `QuantizedMatVec` uses; `m` is the
+    /// fixed token count the kernel dispatches with (1 collapses to
+    /// matvec). Compared against MLX `affine_qmm_t` with `batched=0`
+    /// — see `run_quantized_mat_mul` for the reference dispatch.
+    QuantizedMatMul {
+        shapes: &'static [(usize, usize)],
+        m: usize,
+        group_size: usize,
+        tpg: usize,
+    },
     Rope {
         b: usize,
         h: usize,
@@ -338,6 +349,7 @@ impl BenchDispatch {
             | BenchDispatch::Scan { .. }
             | BenchDispatch::ArgReduce { .. }
             | BenchDispatch::QuantizedMatVec { .. }
+            | BenchDispatch::QuantizedMatMul { .. }
             | BenchDispatch::Attention { .. }
             | BenchDispatch::AffineQuantize { .. }
             | BenchDispatch::SdpaVector { .. }

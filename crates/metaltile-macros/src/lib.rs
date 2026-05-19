@@ -695,6 +695,7 @@ mod bench_impl {
         MatVec,
         MatVecMasked,
         QuantizedMatVec,
+        QuantizedMatMul,
         Rope,
         Attention,
         StridedCopy,
@@ -842,6 +843,7 @@ mod bench_impl {
                             "MatVec" => ClassKind::MatVec,
                             "MatVecMasked" => ClassKind::MatVecMasked,
                             "QuantizedMatVec" => ClassKind::QuantizedMatVec,
+                            "QuantizedMatMul" => ClassKind::QuantizedMatMul,
                             "Rope" => ClassKind::Rope,
                             "Attention" => ClassKind::Attention,
                             "StridedCopy" => ClassKind::StridedCopy,
@@ -1439,6 +1441,21 @@ mod bench_impl {
                 (quote! { &[] }, quote! {
                     crate::spec::BenchDispatch::QuantizedMatVec {
                         shapes: #sh, group_size: #gs as usize, tpg: #tpg_val as usize,
+                    }
+                })
+            },
+            // ── Complex: QuantizedMatMul (B>1 / prefill) ─────────────────────
+            ClassKind::QuantizedMatMul => {
+                let sh = a.shapes.as_ref().expect("QuantizedMatMul requires shapes");
+                let gs = a.group_size.as_ref().expect("QuantizedMatMul requires group_size");
+                let tpg_val = a.tpg.as_ref().expect("QuantizedMatMul requires tpg");
+                let m_val = a.m.as_ref().expect("QuantizedMatMul requires m (token count)");
+                (quote! { &[] }, quote! {
+                    crate::spec::BenchDispatch::QuantizedMatMul {
+                        shapes: #sh,
+                        m: #m_val as usize,
+                        group_size: #gs as usize,
+                        tpg: #tpg_val as usize,
                     }
                 })
             },

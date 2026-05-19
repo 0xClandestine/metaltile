@@ -687,6 +687,25 @@ pub enum Op {
 /// Controls which Metal built-in position attributes are emitted in the
 /// kernel signature.  All built-in attributes **must** share the same vector
 /// width (Metal constraint), so each mode is self-contained.
+///
+/// ## Which mode emits which alias
+///
+/// Kernel bodies refer to position aliases by name (`tid`, `tgid_x`,
+/// `tgid_y`, `tgid_z`, `lsize`, `simd_lane`, `simd_group`, `n_simd`).
+/// Each mode emits a different subset of those:
+///
+/// | mode         | tid | tgid_x | tgid_y | tgid_z | lsize | simd_lane | simd_group |
+/// |--------------|:---:|:------:|:------:|:------:|:-----:|:---------:|:----------:|
+/// | Elementwise  |  ✓  |        |        |        |       |           |            |
+/// | Reduction    |  ✓  |   ✓    |   ✓ †  |        |   ✓   |           |            |
+/// | Grid3D       |  ✓  |        |        |        |       |           |            |
+/// | Tile2D       |  ✓  |   ✓    |   ✓    |        |       |           |            |
+/// | SimdGroup2D  |     |   ✓    |   ✓    |   ✓    |       |     ✓     |     ✓      |
+///
+/// † Reduction emits `tgid_y` only when the kernel actually references
+/// axis 1 (avoids `-Wunused-variable`). Reduction does **not** emit
+/// `tgid_z` — kernels needing 3-axis grid + simdgroup primitives must
+/// use SimdGroup2D.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KernelMode {
     /// `uint tid [[thread_position_in_grid]]`
@@ -704,7 +723,9 @@ pub enum KernelMode {
     Tile2D,
     /// `uint3 tid [[threadgroup_position_in_grid]]` + `uint3 lid` +
     /// `uint simd_lane` + `uint simd_group`.
-    /// Used for tiled simdgroup-matmul kernels (steel GEMM).
+    /// Used for tiled simdgroup-matmul kernels (steel GEMM) and
+    /// any 3-axis kernel that needs `tgid_z` (e.g. batched SDPA
+    /// prefill).
     SimdGroup2D,
 }
 
