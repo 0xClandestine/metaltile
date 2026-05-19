@@ -2,24 +2,39 @@
 //! cross-simdgroup online-softmax reduction — FFAI's production decode
 //! kernel.
 //!
-//! Layout assumptions:
-//!   * `head_dim == 128` (one threadgroup is 32 simdgroups × 32 lanes;
-//!     each lane owns 4 consecutive Q/K/V elements). Other head dims
-//!     are queued for follow-up specializations — common targets
-//!     include 64 (smaller Qwen/Llama variants) and 256 (some Gemma
-//!     configurations). The right shape for each is the same pattern
-//!     with `head_dim / 32` elements per lane.
-//!   * K/V cache shape `[n_kv_heads, kv_stride, head_dim]` where
-//!     `kv_stride` is the pre-allocated maxSeq capacity and `n_kv` is
-//!     the currently-filled prefix. The kernel walks `[0, sink_end)`
-//!     and `[window_start, n_kv)`; for the dense path set
-//!     `sink_end = 0, window_start = 0` (both loops collapse to the
-//!     original full-range walk).
-//!   * GQA: `kv_head = q_head / heads_per_group`. Set
-//!     `heads_per_group = 1` to disable GQA.
+//! ## DISPATCH INVARIANTS
 //!
-//! Dispatch: one threadgroup per Q head (1D grid, tgid_x = q_head),
-//! 1024 threads (32 simdgroups × 32 lanes).
+//! This kernel is reduction-mode and has STRICT threadgroup-geometry
+//! requirements. Violating any of these silently miscomputes the
+//! attention output (best case) or pins the GPU in an infinite loop
+//! (worst case — this was the trigger for FFAI post-mortem
+//! 2026-05-19). Consumers MUST encode these as preconditions in
+//! their wrappers.
+//!
+//! - **TPG = 1024 threads** (32 simdgroups × 32 lanes). Hard.
+//!   Smaller TPG produces `n_simd = TPG / 32 = 0` for `TPG < 32`,
+//!   making the per-token K walk `for _t in range(sg, n_kv, 0)` an
+//!   infinite GPU loop. This is the freeze mode that took down the
+//!   dev machine.
+//! - **`head_dim == 128`.** Each lane owns 4 consecutive Q/K/V
+//!   elements (128 / 32 = 4) and indexes them unconditionally at
+//!   `lane * 4 + {0..3}`. Other head dims OOB-read. Specializations
+//!   for 64 (smaller Qwen/Llama) and 256 (Gemma) are queued — same
+//!   pattern with `head_dim / 32` elements per lane.
+//! - **Grid: 1 threadgroup per q_head** (1D grid, `tgid_x = q_head`).
+//!   Wrapper uses `grid = (nQHeads * 1024, 1, 1)`, `tg = (1024, 1, 1)`.
+//! - **`nQHeads % nKVHeads == 0`** so GQA fan-out is integer.
+//! - **`n_kv ≤ kv_stride`.** Cache is pre-allocated to `kv_stride`
+//!   (maxSeq); the kernel walks `[0, n_kv)` only — passing
+//!   `n_kv > kv_stride` reads past the cache.
+//!
+//! ## Layout
+//!
+//! K/V cache shape `[n_kv_heads, kv_stride, head_dim]` where
+//! `kv_stride` is the pre-allocated maxSeq capacity and `n_kv` is
+//! the currently-filled prefix. The kernel walks `[0, n_kv)` only.
+//! GQA: `kv_head = q_head / heads_per_group`. Set
+//! `heads_per_group = 1` to disable GQA.
 //!
 //! The dispatch + walk pattern mirrors `mlx/sdpa_vector.rs`
 //! (mt_sdpa_vector). The two kernels are intentionally kept separate
