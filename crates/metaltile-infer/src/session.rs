@@ -36,10 +36,10 @@ pub struct GenerateOutput {
     pub tokens_generated: usize,
     /// Number of prompt tokens processed during prefill.
     pub prompt_tokens: usize,
-    /// GPU time spent on prefill (prompt processing) in seconds.
-    pub prefill_gpu_secs: f64,
-    /// GPU time spent on decode (token generation) in seconds.
-    pub decode_gpu_secs: f64,
+    /// Wall-clock time spent on prefill (prompt processing) in seconds.
+    pub prefill_secs: f64,
+    /// Wall-clock time spent on decode (token generation) in seconds.
+    pub decode_secs: f64,
     /// Tokens per second during decode phase (decode only, excludes prefill).
     pub decode_tok_per_sec: f64,
 }
@@ -178,18 +178,18 @@ impl Session {
 
         // ── Prefill ───────────────────────────────────────────────
         // Feed each prompt token through the model to populate KV cache.
-        let mut prefill_gpu_secs = 0.0f64;
+        let mut prefill_secs = 0.0f64;
         let mut last_token_id = 0u32;
         for &token_id in &prompt_ids {
-            let (tid, gpu_secs) = self.step(token_id, temperature)?;
+            let (tid, secs) = self.step(token_id, temperature)?;
             last_token_id = tid;
-            prefill_gpu_secs += gpu_secs;
+            prefill_secs += secs;
         }
 
         // ── Decode ────────────────────────────────────────────────
         let mut output_ids = Vec::new();
         let mut token_id = last_token_id;
-        let mut decode_gpu_secs = 0.0f64;
+        let mut decode_secs = 0.0f64;
         for _ in 0..max_tokens {
             if token_id == self.eos_token_id {
                 break;
@@ -200,14 +200,14 @@ impl Session {
                 .decode(&[token_id], true)
                 .map_err(|e| InferError::Tokenizer(e.to_string()))?;
             on_token(&piece);
-            let (tid, gpu_secs) = self.step(token_id, temperature)?;
+            let (tid, secs) = self.step(token_id, temperature)?;
             token_id = tid;
-            decode_gpu_secs += gpu_secs;
+            decode_secs += secs;
         }
 
         let tokens_generated = output_ids.len();
-        let decode_tok_per_sec = if decode_gpu_secs > 0.0 {
-            tokens_generated as f64 / decode_gpu_secs
+        let decode_tok_per_sec = if decode_secs > 0.0 {
+            tokens_generated as f64 / decode_secs
         } else {
             0.0
         };
@@ -221,8 +221,8 @@ impl Session {
             text: generated,
             tokens_generated,
             prompt_tokens,
-            prefill_gpu_secs,
-            decode_gpu_secs,
+            prefill_secs,
+            decode_secs,
             decode_tok_per_sec,
         })
     }
@@ -244,14 +244,19 @@ impl Session {
         let uniform: f32 = pseudo_uniform(token_id, pos);
         self.state.insert("uniform".to_string(), uniform.to_le_bytes().to_vec());
 
-        // Execute plan — returns (output_bytes, gpu_microseconds).
-        let (out_bytes, gpu_us) = execute_plan(
+        // Execute plan — wall-clock time captures both GPU compute and
+        // CPU dispatch overhead (command-buffer creation, submission,
+        // waitUntilCompleted). This reflects the real end-to-end cost per
+        // token and shows the benefit of kernel fusion (fewer cmd buffers).
+        let t0 = std::time::Instant::now();
+        let (out_bytes, _gpu_us) = execute_plan(
             &self.ctx,
             &self.plan,
             &WeightMap::new(), // all weights are GPU-resident
             &mut self.state,
             &self.resident,
         )?;
+        let wall_secs = t0.elapsed().as_secs_f64();
 
         // Advance position
         self.state.insert("position".to_string(), (pos + 1).to_le_bytes().to_vec());
@@ -261,7 +266,7 @@ impl Session {
             return Err(InferError::Other("plan output too short".to_string()));
         }
         let next_id = u32::from_le_bytes([out_bytes[0], out_bytes[1], out_bytes[2], out_bytes[3]]);
-        Ok((next_id, gpu_us / 1_000_000.0))
+        Ok((next_id, wall_secs))
     }
 
     /// Reset KV cache and position counter (start a new conversation).

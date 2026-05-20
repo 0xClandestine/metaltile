@@ -120,23 +120,23 @@ async fn run_async(args: &InferArgs) -> Result<(), metaltile_infer::InferError> 
     println!();
 
     // ── Timing ─────────────────────────────────────────────────────────
-    let total_gpu = output.prefill_gpu_secs + output.decode_gpu_secs;
+    let total_secs = output.prefill_secs + output.decode_secs;
     eprintln!(
-        "\n{pretok} prompt tokens processed in {prefill:.2}s GPU",
+        "\n{pretok} prompt tokens processed in {prefill:.2}s",
         pretok = output.prompt_tokens,
-        prefill = output.prefill_gpu_secs,
+        prefill = output.prefill_secs,
     );
-    if output.prompt_tokens > 0 && output.prefill_gpu_secs > 0.0 {
-        let prefill_tps = output.prompt_tokens as f64 / output.prefill_gpu_secs;
-        eprintln!("  prefill:  {prefill_tps:.1} tok/s GPU");
+    if output.prompt_tokens > 0 && output.prefill_secs > 0.0 {
+        let prefill_tps = output.prompt_tokens as f64 / output.prefill_secs;
+        eprintln!("  prefill:  {prefill_tps:.1} tok/s");
     }
     eprintln!(
-        "{gentok} tokens generated in {decode:.2}s GPU  ({tps:.1} tok/s)",
+        "{gentok} tokens generated in {decode:.2}s  ({tps:.1} tok/s)",
         gentok = output.tokens_generated,
-        decode = output.decode_gpu_secs,
+        decode = output.decode_secs,
         tps = output.decode_tok_per_sec,
     );
-    eprintln!("  total GPU time: {total:.2}s", total = total_gpu);
+    eprintln!("  total: {total:.2}s", total = total_secs);
 
     Ok(())
 }

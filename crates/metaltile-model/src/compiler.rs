@@ -272,17 +272,40 @@ pub fn compile(
         FusionMode::TomlDriven => {
             validate_fuse_groups(&raw_nodes)?;
             assign_toml_fuse_groups(&mut nodes, &raw_nodes);
-        },
-        FusionMode::GraphDriven => {
-            let (n_fused_groups, n_unfused) = fuse_dispatch_nodes(&mut nodes);
-            // Log fusion stats if there were any fused groups.
-            if n_fused_groups > 0 {
+            let total = nodes.len();
+            let fused_count = nodes.iter().filter(|n| n.fuse_group.is_some()).count();
+            let n_groups = nodes.iter().filter_map(|n| n.fuse_group).max().map_or(0, |m| m + 1);
+            let dispatches = n_groups + (total - fused_count);
+            if n_groups > 0 {
                 eprintln!(
-                    "[compiler] graph fusion: {n_fused_groups} groups, {n_unfused} standalone nodes"
+                    "[compiler] TOML fusion: {total} nodes → {dispatches} dispatches \
+                     ({n_groups} fused groups, {} standalone)",
+                    total - fused_count
+                );
+            } else {
+                eprintln!(
+                    "[compiler] no TOML fuse tags: {total} nodes → {total} dispatches"
                 );
             }
         },
-        FusionMode::None => { /* no fusion */ },
+        FusionMode::GraphDriven => {
+            let total = nodes.len();
+            let (n_fused_groups, n_unfused) = fuse_dispatch_nodes(&mut nodes);
+            let dispatches = n_fused_groups + n_unfused;
+            if n_fused_groups > 0 {
+                eprintln!(
+                    "[compiler] graph fusion: {total} nodes → {dispatches} dispatches \
+                     ({n_fused_groups} fused groups, {n_unfused} standalone)"
+                );
+            }
+        },
+        FusionMode::None => {
+            eprintln!(
+                "[compiler] no fusion: {} nodes → {} dispatches",
+                nodes.len(),
+                nodes.len()
+            );
+        },
     }
 
     // ── Step 3: Liveness analysis → slot assignment ────────────────
