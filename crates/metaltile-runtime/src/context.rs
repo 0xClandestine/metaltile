@@ -795,13 +795,14 @@ impl Context {
     pub fn dispatch_chain(
         &self,
         specs: &[DispatchSpec<'_>],
+        barriers_after: &[bool],
     ) -> Result<Vec<DispatchResult>, MetalTileError> {
         if specs.is_empty() {
             return Ok(Vec::new());
         }
         #[cfg(target_os = "macos")]
         if self.has_metal {
-            return self.dispatch_chain_metal(specs);
+            return self.dispatch_chain_metal(specs, barriers_after);
         }
         Ok(specs
             .iter()
@@ -813,6 +814,7 @@ impl Context {
     fn dispatch_chain_metal(
         &self,
         specs: &[DispatchSpec<'_>],
+        barriers_after: &[bool],
     ) -> Result<Vec<DispatchResult>, MetalTileError> {
         use std::{collections::HashSet, ptr::NonNull, sync::OnceLock};
 
@@ -829,6 +831,7 @@ impl Context {
             MTLComputePipelineState,
             MTLCreateSystemDefaultDevice,
             MTLDevice,
+            MTLDispatchType,
             MTLLibrary,
             MTLPipelineOption,
             MTLResourceOptions,
@@ -992,6 +995,8 @@ impl Context {
             Ok(())
         };
 
+        let mut enc: Option<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>> = None;
+
         for (i, spec) in specs.iter().enumerate() {
             let mut bufs: Vec<BufRc> = Vec::with_capacity(spec.kernel.params.len() * 2);
 
@@ -1034,10 +1039,21 @@ impl Context {
             // bind via setBytes starting here — no MTLBuffer alloc.
             let tensor_binding_count = bufs.len();
 
-            let enc = (*cb).computeCommandEncoder().ok_or(MetalTileError::NoDevice)?;
-            enc.setComputePipelineState(&pipes[i]);
+            if i == 0 {
+                // ── First pass: create a concurrent encoder ──
+                // Concurrent dispatch lets Metal overlap independent
+                // kernel dispatches; barriers only between dependent specs.
+                enc = (*cb)
+                    .computeCommandEncoderWithDispatchType(
+                        MTLDispatchType::Concurrent,
+                    )
+                    .map(Some)
+                    .ok_or(MetalTileError::NoDevice)?;
+            }
+            let enc_ref = enc.as_ref().unwrap();
+            enc_ref.setComputePipelineState(&pipes[i]);
             for (idx, buf) in bufs.iter().enumerate() {
-                unsafe { enc.setBuffer_offset_atIndex(Some(buf.as_ref()), 0, idx) };
+                unsafe { enc_ref.setBuffer_offset_atIndex(Some(buf.as_ref()), 0, idx) };
             }
             // Inline constexpr scalars via setBytes (Apple-recommended
             // path for <4KB constants — skips the allocator + binding
@@ -1048,13 +1064,11 @@ impl Context {
                 let key = decl.name.name();
                 let elem = decl.dtype.size_bytes().max(4);
                 let bytes = spec.buffers.get(key).map(Vec::as_slice).unwrap_or(&[]);
-                // Pad to elem if caller supplied fewer bytes (legacy
-                // alloc_shared zeroed beyond elem too).
                 let mut staged = [0u8; 16];
                 let n = bytes.len().min(elem).min(staged.len());
                 staged[..n].copy_from_slice(&bytes[..n]);
                 unsafe {
-                    enc.setBytes_length_atIndex(
+                    enc_ref.setBytes_length_atIndex(
                         NonNull::new(staged.as_ptr() as *mut _)
                             .ok_or_else(|| MetalTileError::Buffer("setBytes null".into()))?,
                         elem,
@@ -1063,18 +1077,19 @@ impl Context {
                 }
             }
             let (g, t) = (spec.grid_groups, spec.threads_per_group);
-            enc.dispatchThreadgroups_threadsPerThreadgroup(
+            enc_ref.dispatchThreadgroups_threadsPerThreadgroup(
                 MTLSize { width: g[0], height: g[1], depth: g[2] },
                 MTLSize { width: t[0], height: t[1], depth: t[2] },
             );
-            // Barrier between consecutive passes — staging buffers go
-            // private + untracked, so the driver doesn't auto-track
-            // dependencies. We insert an explicit buffer-scope barrier.
-            if i + 1 < specs.len() {
-                enc.memoryBarrierWithScope(MTLBarrierScope::Buffers);
+            if i + 1 < specs.len() && barriers_after[i] {
+                enc_ref.memoryBarrierWithScope(MTLBarrierScope::Buffers);
             }
-            (*enc).endEncoding();
             per_spec_bufs.push(bufs);
+        }
+
+        // ── End the single encoder ─────────────────────────────────
+        if let Some(e) = enc {
+            (*e).endEncoding();
         }
 
         (*cb).commit();

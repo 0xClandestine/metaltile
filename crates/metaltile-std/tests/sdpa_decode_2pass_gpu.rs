@@ -159,7 +159,7 @@ fn run_2pass(
                     output_resident: &no_output_resident,
                 },
             ];
-            let r = a.ctx.dispatch_chain(&specs).expect("chain");
+            let r = a.ctx.dispatch_chain(&specs, &[true]).expect("chain");
             let out = unpack_bytes(r[1].outputs.get("out").expect("out"), dt);
             (out, r[0].elapsed_us, None)
         },

@@ -617,7 +617,7 @@ fn mt_qmm_perf_bench_qwen3_shapes_f16_m_sweep() {
                         threads_per_group: [64, 1, 1],
                         resident: &residents,
                         output_resident: &no_output_resident,
-                    }])
+                    }], &[])
                     .expect("dispatch");
                 if i >= WARMUP {
                     samples.push(r[0].elapsed_us);
