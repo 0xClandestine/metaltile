@@ -57,12 +57,12 @@ Prefer `make` over raw `cargo` — it centralises flags and always passes `--wor
 | Hook | When | Checks | Time |
 |---|---|---|---|
 | `pre-commit` | every `git commit` | `make fmt-check` + `make typos` | ~2-5s |
-| `commit-msg` | every `git commit` | banned-term scan (`llama`/`mistral`/`grok`/AI-tool names) + Git-trailer-shape scan (`Co-Authored-By:` and `Word:\s` lookalikes) | ~50ms |
+| `commit-msg` | every `git commit` | AI-attribution scan — `Co-Authored-By:` & other trailer keys, `🤖 Generated with …` footers — + Git-trailer-shape scan (`Word:\s` lookalikes). Naming files like `CLAUDE.md` / `.cursor/`, or disclosing AI use in prose, is fine. | ~50ms |
 | `pre-push` | every `git push` | `make clippy` + `cargo test … --test kernel_registry_consistency` | ~30-90s |
 
 Run `make hooks` once after cloning. Bypass an individual hook with `--no-verify` (e.g. `git commit --no-verify`) when you know what you're doing. Uninstall with `make hooks-uninstall`.
 
-**What's caught locally**: the cheap wins — formatting, common typos, banned commit-message terms, trailer-shape lookalikes, clippy warnings, and the `#[kernel] pub fn` → `inventory::submit!` consistency check.
+**What's caught locally**: the cheap wins — formatting, common typos, AI-attribution trailers / footers in commit messages, trailer-shape lookalikes, clippy warnings, and the `#[kernel] pub fn` → `inventory::submit!` consistency check.
 
 **What still only runs in CI**: the GPU correctness suite (needs Metal), `cargo test --workspace` (full test matrix), `tile build --emit all` (multi-minute), and the full bench harness. Pre-push handles the part of CI that fails most often without GPU.
 

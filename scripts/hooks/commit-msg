@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 #
-# commit-msg — runs the same hygiene regex CI uses, against the local
-# commit message BEFORE the commit lands. Mirrors the rules in
-# .github/scripts/commit_hygiene.py:
+# commit-msg — local mirror of .github/scripts/commit_hygiene.py.
 #
-#   1. Reject AI-tool / LLM model names anywhere in the message
-#      (claude, anthropic, codex, openai, chatgpt, gpt-N, antigravity,
-#       gemini, bard, copilot, cursor, sourcegraph, cody, devin, aider,
-#       windsurf, tabnine, llama, mistral, grok, perplexity, replit,
-#       ghostwriter, pieces). Word-boundary case-insensitive.
+# Guards AI *attribution* pollution, not bare mentions:
 #
-#   2. Reject Git-trailer-shaped lines (^Word: ) in the trailing
-#      paragraph after a blank line — Co-Authored-By + friends.
-#      The CI also matches plain `Tests:` / `Tolerance:` style summary
-#      lines, so phrase those as `Test results —` / `Tolerance —` in
-#      the message body.
+#   (K) explicit attribution-trailer keys anywhere — Co-Authored-By:,
+#       Signed-off-by:, Reviewed-by:, Generated-by:, … (the lines a
+#       `git commit --trailer …` plants).
+#   (P) AI-attribution phrases — the `🤖` footer emoji, or an
+#       attribution verb (generated / co-authored / created / …) joined
+#       by `by`/`with`/`using` to a known AI tool name on the same line
+#       (`🤖 Generated with Claude Code`, `created with Cursor`, …).
+#   (T) any Git-trailer-shaped line (`^Word: …`) in the trailing
+#       paragraph — CI rejects all of them, so phrase summaries as
+#       `Test results — 7/7` rather than `Tests: 7/7`.
+#
+# What is FINE (not flagged): naming files/dirs like CLAUDE.md,
+# .claude/, .cursor/, AGENTS.md; disclosing AI assistance in prose
+# (CONTRIBUTING.md asks for it); kernels named after models (llama…).
 #
 # Bypass with `git commit --no-verify` if you know what you're doing.
 
@@ -26,53 +29,77 @@ MSG_FILE="$1"
 # Strip comment lines (`#` is the comment prefix in Git commit messages).
 BODY="$(grep -v '^#' "$MSG_FILE" || true)"
 
-# ─── 1. Banned-term scan ─────────────────────────────────────────────
-BANNED_REGEX='\b(claude|anthropic|codex|openai|chatgpt|gpt[- ]?[0-9]|antigravity|gemini|bard|copilot|cursor|sourcegraph|cody|devin|aider|windsurf|tabnine|llama|mistral|grok|perplexity|replit|ghostwriter|pieces)\b'
-
-if echo "$BODY" | grep -iE "$BANNED_REGEX" >/dev/null; then
-    echo "✗ commit-msg: banned AI/LLM term in commit message"
+# ─── (K) attribution-trailer keys, anywhere in the message ───────────
+ATTRIB_KEYS='^[[:space:]]*(co-?authored-by|signed-off-by|reviewed-by|tested-by|acked-by|assisted-by|generated-by|created-by|authored-by|helped-by|suggested-by|reported-by|written-by)[[:space:]]*:'
+if echo "$BODY" | grep -iE "$ATTRIB_KEYS" >/dev/null; then
+    echo "✗ commit-msg: AI/co-author attribution trailer"
     echo
     echo "  Matched lines:"
-    echo "$BODY" | grep -iEn "$BANNED_REGEX" | head -5 | sed 's/^/    /'
+    echo "$BODY" | grep -iEn "$ATTRIB_KEYS" | head -5 | sed 's/^/    /'
     echo
-    echo "  Strip the term or rephrase. Bypass with --no-verify."
+    echo "  Drop the trailer. Disclosing AI use in prose is fine; crediting"
+    echo "  it as a co-author is not. Bypass with --no-verify."
     exit 1
 fi
 
-# ─── 2. Trailer-shaped tail scan ─────────────────────────────────────
-# Walk lines from the bottom up; if the trailing block (separated from
-# the body by a blank line) contains any `Word:\s` lines, those CI
-# treats as trailers — fail the commit.
+# ─── (P) AI-attribution phrase — 🤖 footer, or verb + tool name ──────
+ATTRIB_VERB='(co-?authored|generated|created|authored|written|produced|powered|assisted|made|built|crafted).{0,30}(by|with|using)'
+AI_NAMES='(claude|anthropic|codex|openai|chatgpt|gpt[- ]?[0-9]|antigravity|gemini|bard|copilot|cursor|sourcegraph|cody|devin|aider|windsurf|tabnine|llama|mistral|grok|perplexity|replit|ghostwriter)'
+ROBOT_HITS="$(echo "$BODY" | grep -Fn '🤖' || true)"
+PHRASE_HITS="$(echo "$BODY" | grep -iEn "$ATTRIB_VERB" | grep -iE "$AI_NAMES" || true)"
+if [ -n "$ROBOT_HITS" ] || [ -n "$PHRASE_HITS" ]; then
+    echo "✗ commit-msg: AI-attribution line"
+    echo
+    echo "  Matched lines:"
+    [ -n "$ROBOT_HITS" ] && echo "$ROBOT_HITS" | head -3 | sed 's/^/    /'
+    [ -n "$PHRASE_HITS" ] && echo "$PHRASE_HITS" | head -3 | sed 's/^/    /'
+    echo
+    echo "  Drop the '🤖 Generated with …' / 'created with <tool>' line."
+    echo "  Bypass with --no-verify."
+    exit 1
+fi
+
+# ─── (T) Trailer-shaped tail scan ────────────────────────────────────
+# A run of `Word: …` lines forming the final paragraph — i.e. sitting
+# below a blank line, so a real body exists above them — is what CI
+# treats as a trailer block. The preceding-blank check is load-bearing:
+# a one-line conventional-commit subject (`feat: …`) is `Word:`-shaped
+# too, so without it every single-line commit would be rejected.
 
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
-echo "$BODY" > "$TMP"
+printf '%s\n' "$BODY" > "$TMP"
+total_lines=$(wc -l < "$TMP" | tr -d ' ')
 
-# Strip trailing blank lines so we look at real content first.
-sed -i.bak -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}' "$TMP" 2>/dev/null || true
+# Index of the last non-blank line (ignore trailing blank lines).
+last=0
+for i in $(seq 1 "$total_lines"); do
+    [ -n "$(sed -n "${i}p" "$TMP" | tr -d '[:space:]')" ] && last=$i
+done
 
-# Walk backward — collect consecutive trailer-shaped lines until a
-# blank line OR a non-trailer line.
+# Walk up from `last`, counting trailer-shaped lines; stop at the first
+# blank or non-trailer line and remember which stopped us.
 trailers_in_tail=0
-in_tail_block=1
-total_lines=$(wc -l < "$TMP")
-for i in $(seq "$total_lines" -1 1); do
+stopped_on_blank=0
+i=$last
+while [ "$i" -ge 1 ]; do
     line=$(sed -n "${i}p" "$TMP")
-    if [ -z "${line// }" ]; then
-        # Blank line — stop walking up. If we were in the tail block
-        # and saw trailer-shaped lines, that's the "trailer paragraph"
-        # CI rejects.
+    if [ -z "$(printf '%s' "$line" | tr -d '[:space:]')" ]; then
+        stopped_on_blank=1
         break
     fi
-    if [ "$in_tail_block" = "1" ] && echo "$line" | grep -E '^[A-Za-z][A-Za-z0-9-]*:[[:space:]]' >/dev/null; then
+    if printf '%s' "$line" | grep -qE '^[A-Za-z][A-Za-z0-9-]*:[[:space:]]'; then
         trailers_in_tail=$((trailers_in_tail + 1))
+        i=$((i - 1))
     else
-        # Not trailer-shaped — we're past the trailer block.
-        in_tail_block=0
+        break
     fi
 done
 
-if [ "$trailers_in_tail" -gt 0 ]; then
+# Flag only a real trailing trailer paragraph: trailer-shaped lines
+# below a blank line. A bare subject breaks the walk by running off the
+# top of the message, not on a blank — so it is left alone.
+if [ "$trailers_in_tail" -gt 0 ] && [ "$stopped_on_blank" -eq 1 ]; then
     echo "✗ commit-msg: $trailers_in_tail Git-trailer-shaped line(s) in trailing paragraph"
     echo
     echo "  CI's hygiene check treats trailing 'Word:\s...' lines as Co-Authored-By-"
