@@ -106,6 +106,10 @@ pub fn mt_gated_delta_wy_chunk<T>(
     // Sizes (4 bytes each): state 1024 + q/k 512+512 + v 512 + kkt 256
     // + bigG/g/beta 16+16+16 + p 512 + uv 512 + qkt 256 = 4144 floats = 17 KB.
     threadgroup_alloc("tg_state", 1024u32, f32); // up to 32*32
+    // Double-buffer state writes — avoids the read/write race in the chunk-end
+    // update where lane A reads tg_state[*] for its s0p computation while
+    // lane B has already written its slot in an earlier loop iteration.
+    threadgroup_alloc("tg_state_new", 1024u32, f32);
     threadgroup_alloc("tg_q", 512u32, f32); // C × Dk
     threadgroup_alloc("tg_k", 512u32, f32);
     threadgroup_alloc("tg_v", 512u32, f32); // C × Dv
@@ -326,8 +330,15 @@ pub fn mt_gated_delta_wy_chunk<T>(
                 u_end = u_end + rw * uv_jv * k_jd;
             }
 
-            // Write back to TG state for next chunk.
-            threadgroup_store("tg_state", d_v * dk + d_k, s_through + u_end);
+            // Write to the staging buffer; flip into tg_state after barrier.
+            threadgroup_store("tg_state_new", d_v * dk + d_k, s_through + u_end);
+        }
+        threadgroup_barrier();
+
+        // Flip staging → live state for the next chunk's reads.
+        for ii in range(lane, total_state, 32u32) {
+            let s_new = threadgroup_load("tg_state_new", ii);
+            threadgroup_store("tg_state", ii, s_new);
         }
         threadgroup_barrier();
     }
