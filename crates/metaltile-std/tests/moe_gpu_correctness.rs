@@ -518,3 +518,77 @@ fn mt_moe_router_topk_bf16() {
         assert!(rel < 2e-2, "bf16 weight[{i}]: rel {rel:.2e}");
     }
 }
+
+#[test]
+fn mt_moe_router_topk_nan_inf_clamp_f32() {
+    // Regression: NaN/Inf in router_logits can produce duplicate expert
+    // IDs because `NaN > x` is always false → the chosen-mask check
+    // doesn't fire and the same expert can be selected twice. Mirrors
+    // vLLM's test_fused_topk_nan_inf_clamp (test_fused_topk.py:140-204).
+    //
+    // Mitigation in our kernel: the per-lane local argmax uses strict
+    // `>` so NaN propagates as "never wins" — the lane's best_val stays
+    // at its initial neg_infinity OR the most recent non-NaN candidate.
+    // This test pins that behavior.
+    let n_rows = 4usize;
+    let n_experts = 16usize;
+    let k = 4usize;
+
+    // Row 0: one NaN at expert 5
+    // Row 1: +Inf at expert 7 (should be picked first)
+    // Row 2: -Inf at expert 3
+    // Row 3: mix of NaN + +Inf
+    let mut logits = vec![0.0f32; n_rows * n_experts];
+    for j in 0..n_experts {
+        logits[0 * n_experts + j] = j as f32 * 0.1;
+        logits[1 * n_experts + j] = j as f32 * 0.1;
+        logits[2 * n_experts + j] = j as f32 * 0.1;
+        logits[3 * n_experts + j] = j as f32 * 0.1;
+    }
+    logits[0 * n_experts + 5] = f32::NAN;
+    logits[1 * n_experts + 7] = f32::INFINITY;
+    logits[2 * n_experts + 3] = f32::NEG_INFINITY;
+    logits[3 * n_experts + 2] = f32::NAN;
+    logits[3 * n_experts + 11] = f32::INFINITY;
+
+    let logits_bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let _g = gpu_lock();
+    let ctx = Context::new().unwrap();
+    let (gpu_idx, _) = run_topk(&ctx, DType::F32, &logits_bytes, n_rows, n_experts, k, 1, 4);
+
+    // INVARIANT 1: no row has a duplicate expert ID in its top-k slice.
+    for row in 0..n_rows {
+        let slice = &gpu_idx[row * k..(row + 1) * k];
+        let mut sorted = slice.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), k, "row {row}: duplicate expert in top-k slice {slice:?}",);
+    }
+
+    // INVARIANT 2: row 1 picks +Inf at index 7 as the top entry.
+    assert_eq!(gpu_idx[1 * k], 7, "row 1: +Inf should be top-1, got {:?}", &gpu_idx[k..2 * k]);
+
+    // INVARIANT 3: row 2 does NOT pick -Inf at index 3 (it's worse than 0.0).
+    let row2_slice = &gpu_idx[2 * k..3 * k];
+    assert!(
+        !row2_slice.contains(&3u32),
+        "row 2: -Inf at idx 3 should not be chosen, got {row2_slice:?}"
+    );
+
+    // INVARIANT 4: row 3 picks +Inf at index 11 as top-1.
+    assert_eq!(gpu_idx[3 * k], 11, "row 3: +Inf at 11 should be top-1");
+
+    // INVARIANT 5: NaN expert (index 5 in row 0; index 2 in row 3) is NOT
+    // in the top-k slice — NaN should never compare as "better than"
+    // any finite candidate.
+    let row0_slice = &gpu_idx[0..k];
+    assert!(
+        !row0_slice.contains(&5u32),
+        "row 0: NaN at idx 5 should not be chosen, got {row0_slice:?}"
+    );
+    let row3_slice = &gpu_idx[3 * k..4 * k];
+    assert!(
+        !row3_slice.contains(&2u32),
+        "row 3: NaN at idx 2 should not be chosen, got {row3_slice:?}"
+    );
+}
