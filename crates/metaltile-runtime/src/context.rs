@@ -421,7 +421,10 @@ impl Context {
         // When `Some`, overrides the auto-derived grid: `(groups, threads_per_group)`.
         grid_override: Option<([usize; 3], [usize; 3])>,
     ) -> Result<DispatchResult, MetalTileError> {
-        use std::{ptr::NonNull, sync::OnceLock};
+        use std::{
+            ptr::NonNull,
+            sync::{Mutex, OnceLock},
+        };
 
         use objc2::{rc::Retained, runtime::ProtocolObject};
         use objc2_foundation::NSString;
@@ -439,7 +442,6 @@ impl Context {
             MTLResourceOptions,
             MTLSize,
         };
-        use std::sync::Mutex;
         use rustc_hash::FxHashMap;
 
         type Dev = ProtocolObject<dyn objc2_metal::MTLDevice>;
@@ -751,7 +753,11 @@ impl Context {
         &self,
         specs: &[DispatchSpec<'_>],
     ) -> Result<Vec<DispatchResult>, MetalTileError> {
-        use std::{collections::HashSet, ptr::NonNull, sync::OnceLock};
+        use std::{
+            collections::HashSet,
+            ptr::NonNull,
+            sync::{Mutex, OnceLock},
+        };
 
         use objc2::{rc::Retained, runtime::ProtocolObject};
         use objc2_foundation::NSString;
@@ -771,7 +777,6 @@ impl Context {
             MTLResourceOptions,
             MTLSize,
         };
-        use std::sync::Mutex;
         use rustc_hash::FxHashMap;
 
         type Dev = ProtocolObject<dyn objc2_metal::MTLDevice>;
