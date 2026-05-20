@@ -19,7 +19,11 @@ use std::collections::BTreeMap;
 use common::{Dt, gpu_lock, pack_bytes, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
-use metaltile_std::ffai::moe::{mt_moe_gather_qmm_int4, mt_moe_gather_qmm_int4_m8};
+use metaltile_std::ffai::moe::{
+    mt_moe_gather_qmm_int4,
+    mt_moe_gather_qmm_int4_m8,
+    mt_moe_gather_qmm_mma_int4,
+};
 
 /// Pack a row of int4 weights into uint32s (8 per uint, LSB-first per nibble).
 fn pack_int4_row(weights: &[u32]) -> Vec<u32> {
@@ -367,4 +371,205 @@ fn moe_gather_qmm_int4_m8_matches_m1_qwen36_shape_f32() {
 
     let max_diff = y_m1.iter().zip(&y_m8).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
     assert!(max_diff < 5e-4, "m8 vs m1 max diff = {max_diff:.2e}");
+}
+
+/// MMA variant — single expert (gather logic becomes trivial). Pins
+/// the inner MMA / dequant path independently of expert resolution.
+#[test]
+fn moe_gather_qmm_mma_int4_single_expert() {
+    let _g = gpu_lock();
+    let n_experts = 1usize;
+    let k_in = 32usize;
+    let n_out = 32usize;
+    let group_size = 32usize;
+    let t_rows = 32usize;
+
+    let indices: Vec<u32> = vec![0; t_rows];
+    let total_weights = n_experts * n_out * k_in;
+    let weight_unpacked: Vec<u32> =
+        (0..total_weights).map(|i| ((i as u32) * 7 + 3) & 0xf).collect();
+    let weight_packed: Vec<u32> =
+        weight_unpacked.chunks_exact(k_in).flat_map(pack_int4_row).collect();
+    let groups_total = n_experts * n_out * (k_in / group_size);
+    let scales: Vec<f32> =
+        (0..groups_total).map(|i| 0.005 + 0.001 * (i as f32 * 0.03).sin()).collect();
+    let biases: Vec<f32> =
+        (0..groups_total).map(|i| -0.02 + 0.005 * (i as f32 * 0.07).cos()).collect();
+    let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * (i as f32 * 0.013).sin()).collect();
+
+    let expert_offsets: Vec<u32> = vec![0, t_rows as u32];
+    let y_m1 = {
+        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        buffers.insert("x".into(), pack_bytes(&x, Dt::F32));
+        buffers.insert(
+            "weight_packed".into(),
+            weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        );
+        buffers.insert("scales".into(), pack_bytes(&scales, Dt::F32));
+        buffers.insert("biases".into(), pack_bytes(&biases, Dt::F32));
+        buffers.insert(
+            "expert_offsets".into(),
+            expert_offsets.iter().flat_map(|o| o.to_le_bytes()).collect(),
+        );
+        buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * n_out], Dt::F32));
+        buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+        buffers.insert("m_out".into(), (n_out as u32).to_le_bytes().to_vec());
+        buffers.insert("n_experts".into(), (n_experts as u32).to_le_bytes().to_vec());
+        buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+        let ctx = Context::new().unwrap();
+        let mut k = mt_moe_gather_qmm_int4::kernel_ir_for(Dt::F32.to_dtype());
+        k.mode = KernelMode::Reduction;
+        let r = ctx
+            .dispatch_with_grid(&k, &buffers, &BTreeMap::new(), [n_out, t_rows, 1], [32, 1, 1])
+            .unwrap();
+        unpack_bytes(r.outputs.get("out").unwrap(), Dt::F32)
+    };
+
+    let y_mma = {
+        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        buffers.insert("x".into(), pack_bytes(&x, Dt::F32));
+        buffers.insert("w".into(), weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect());
+        buffers.insert("scales".into(), pack_bytes(&scales, Dt::F32));
+        buffers.insert("biases".into(), pack_bytes(&biases, Dt::F32));
+        buffers.insert("indices".into(), indices.iter().flat_map(|i| i.to_le_bytes()).collect());
+        buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * n_out], Dt::F32));
+        buffers.insert("m_total".into(), (t_rows as u32).to_le_bytes().to_vec());
+        buffers.insert("n_out".into(), (n_out as u32).to_le_bytes().to_vec());
+        buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+        buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+        let ctx = Context::new().unwrap();
+        let mut k = mt_moe_gather_qmm_mma_int4::kernel_ir_for(Dt::F32.to_dtype());
+        k.mode = KernelMode::Reduction;
+        let r = ctx
+            .dispatch_with_grid(
+                &k,
+                &buffers,
+                &BTreeMap::new(),
+                [n_out / 32, t_rows.div_ceil(32), 1],
+                [128, 1, 1],
+            )
+            .unwrap();
+        unpack_bytes(r.outputs.get("out").unwrap(), Dt::F32)
+    };
+
+    let mut dot = 0.0_f64;
+    let mut na = 0.0_f64;
+    let mut nb = 0.0_f64;
+    for (a, b) in y_m1.iter().zip(&y_mma) {
+        dot += (*a as f64) * (*b as f64);
+        na += (*a as f64) * (*a as f64);
+        nb += (*b as f64) * (*b as f64);
+    }
+    let cos = dot / (na.sqrt() * nb.sqrt() + 1e-12);
+    eprintln!("y_m1[0..8] = {:?}", &y_m1[..8]);
+    eprintln!("y_mma[0..8] = {:?}", &y_mma[..8]);
+    assert!(cos >= 0.999, "single-expert MMA vs m1 cosine = {cos:.6} (want ≥ 0.999)");
+}
+
+/// MMA variant correctness: matches scalar m1 at a clean shape.
+/// Tile contract: T must be multiple of 32, N multiple of 32, K multiple of 32.
+#[test]
+fn moe_gather_qmm_mma_int4_matches_m1_clean_tile() {
+    let _g = gpu_lock();
+    let n_experts = 4usize;
+    let k_in = 64usize; // mult of 32
+    let n_out = 64usize; // mult of 32 (=2 n-tiles of BN=32)
+    let group_size = 32usize;
+    let t_rows = 64usize; // mult of 32 (=2 m-tiles of BM=32)
+
+    // Per-row expert indices, sorted: rows 0..16 → e0, 16..32 → e1, 32..48 → e2, 48..64 → e3.
+    let indices: Vec<u32> = (0..t_rows).map(|r| (r / (t_rows / n_experts)) as u32).collect();
+
+    let total_weights = n_experts * n_out * k_in;
+    let weight_unpacked: Vec<u32> =
+        (0..total_weights).map(|i| ((i as u32) * 7 + 3) & 0xf).collect();
+    let weight_packed: Vec<u32> =
+        weight_unpacked.chunks_exact(k_in).flat_map(pack_int4_row).collect();
+    let groups_total = n_experts * n_out * (k_in / group_size);
+    let scales: Vec<f32> =
+        (0..groups_total).map(|i| 0.005 + 0.001 * (i as f32 * 0.03).sin()).collect();
+    let biases: Vec<f32> =
+        (0..groups_total).map(|i| -0.02 + 0.005 * (i as f32 * 0.07).cos()).collect();
+    let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * (i as f32 * 0.013).sin()).collect();
+
+    // Reference: m1 (already validated against CPU oracle). Build the
+    // expert_offsets array m1 needs from the per-row indices.
+    let mut expert_offsets: Vec<u32> = vec![0; n_experts + 1];
+    for (e_idx, off) in expert_offsets.iter_mut().enumerate().take(n_experts + 1) {
+        *off = indices
+            .iter()
+            .position(|&e| e as usize >= e_idx)
+            .map(|p| p as u32)
+            .unwrap_or(t_rows as u32);
+    }
+    expert_offsets[n_experts] = t_rows as u32;
+
+    // Run m1 (uses expert_offsets).
+    let y_m1 = {
+        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        buffers.insert("x".into(), pack_bytes(&x, Dt::F32));
+        buffers.insert(
+            "weight_packed".into(),
+            weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        );
+        buffers.insert("scales".into(), pack_bytes(&scales, Dt::F32));
+        buffers.insert("biases".into(), pack_bytes(&biases, Dt::F32));
+        buffers.insert(
+            "expert_offsets".into(),
+            expert_offsets.iter().flat_map(|o| o.to_le_bytes()).collect(),
+        );
+        buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * n_out], Dt::F32));
+        buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+        buffers.insert("m_out".into(), (n_out as u32).to_le_bytes().to_vec());
+        buffers.insert("n_experts".into(), (n_experts as u32).to_le_bytes().to_vec());
+        buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+        let ctx = Context::new().unwrap();
+        let mut k = mt_moe_gather_qmm_int4::kernel_ir_for(Dt::F32.to_dtype());
+        k.mode = KernelMode::Reduction;
+        let r = ctx
+            .dispatch_with_grid(&k, &buffers, &BTreeMap::new(), [n_out, t_rows, 1], [32, 1, 1])
+            .unwrap();
+        unpack_bytes(r.outputs.get("out").unwrap(), Dt::F32)
+    };
+
+    // Run MMA (uses per-row indices).
+    let y_mma = {
+        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        buffers.insert("x".into(), pack_bytes(&x, Dt::F32));
+        buffers.insert("w".into(), weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect());
+        buffers.insert("scales".into(), pack_bytes(&scales, Dt::F32));
+        buffers.insert("biases".into(), pack_bytes(&biases, Dt::F32));
+        buffers.insert("indices".into(), indices.iter().flat_map(|i| i.to_le_bytes()).collect());
+        buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * n_out], Dt::F32));
+        buffers.insert("m_total".into(), (t_rows as u32).to_le_bytes().to_vec());
+        buffers.insert("n_out".into(), (n_out as u32).to_le_bytes().to_vec());
+        buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+        buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+        let ctx = Context::new().unwrap();
+        let mut k = mt_moe_gather_qmm_mma_int4::kernel_ir_for(Dt::F32.to_dtype());
+        k.mode = KernelMode::Reduction;
+        // Grid: [N/32, ceil(T/32), 1], TG: [128, 1, 1] (4 SGs)
+        let r = ctx
+            .dispatch_with_grid(
+                &k,
+                &buffers,
+                &BTreeMap::new(),
+                [n_out / 32, t_rows.div_ceil(32), 1],
+                [128, 1, 1],
+            )
+            .unwrap();
+        unpack_bytes(r.outputs.get("out").unwrap(), Dt::F32)
+    };
+
+    // MMA tiled vs scalar reduction — fp accumulation order differs. Use cosine.
+    let mut dot = 0.0_f64;
+    let mut na = 0.0_f64;
+    let mut nb = 0.0_f64;
+    for (a, b) in y_m1.iter().zip(&y_mma) {
+        dot += (*a as f64) * (*b as f64);
+        na += (*a as f64) * (*a as f64);
+        nb += (*b as f64) * (*b as f64);
+    }
+    let cos = dot / (na.sqrt() * nb.sqrt() + 1e-12);
+    assert!(cos >= 0.999, "MMA vs m1 cosine = {cos:.6} (want ≥ 0.999)");
 }

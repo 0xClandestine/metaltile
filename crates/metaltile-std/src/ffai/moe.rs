@@ -834,3 +834,361 @@ inventory::submit! {
         kernel_mode: Some(KernelMode::Reduction),
     }
 }
+
+// ── mt_moe_gather_qmm_mma_int4 ────────────────────────────────────────────
+//
+// Tiled-MMA grouped quantized matmul. Mirrors MLX's
+// `affine_gather_qmm_rhs_nt` (BM=16, BN=32, BK=32, WM=1, WN=2) — the
+// kernel mlx-lm prefill actually dispatches at long context. Designed to
+// close the 5.5× prefill gap measured on Qwen3.6-35B-A3B 32K against the
+// scalar m8 variant.
+//
+// Key MLX trick replicated here: when a BM=16 TG-row span crosses
+// expert boundaries, the kernel walks `indices[y_row..y_row+16]` and
+// emits MULTIPLE matmuls per TG — one per contiguous expert run. No row
+// padding required.
+//
+// Inputs (signature matches MLX gather_qmm semantics):
+//   x        — [T, K]            f32/f16/bf16 activations (sorted-by-expert)
+//   w        — [E, N, K/8]       uint32 packed int4 (bits=4, transpose=true)
+//   scales   — [E, N, K/group]   T
+//   biases   — [E, N, K/group]   T
+//   indices  — [T]               uint32 per-row expert id (rhs_indices)
+//   out      — [T, N]            T
+//
+// Constexpr:
+//   m_total    — T (total rows after permute)
+//   n_out      — N (per-expert output dim)
+//   k_in       — K
+//   group_size — quant group size
+//
+// DISPATCH INVARIANTS
+//   - Mode: Reduction (4 SGs per TG → 128 threads)
+//   - Grid: [n_out / 32, ceil(m_total / 16), 1]
+//   - TG: [128, 1, 1]
+//   - K must be multiple of 32 (Qwen3.6: 2048 / 256, both fit)
+//   - N must be multiple of 32 (Qwen3.6: 256 / 2048, both fit)
+//   - group_size must divide K
+//   - bits = 4 only
+//
+// We use 4 SGs (vs MLX's 2) because the existing mt_qmm_mma proves the
+// 4-SG 2×2 warp grid hits ~95% of MLX throughput on the same 8×8 frag
+// path. MoE inherits that geometry.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_moe_gather_qmm_mma_int4<T>(
+    x: Tensor<T>,
+    w: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    indices: Tensor<u32>,
+    mut out: Tensor<T>,
+    #[constexpr] m_total: u32,
+    #[constexpr] n_out: u32,
+    #[constexpr] k_in: u32,
+    #[constexpr] group_size: u32,
+) {
+    let n_tile = tgid_x;
+    let m_tile = tgid_y;
+    let lane = simd_lane;
+    let sg = simd_group_id();
+    // 4 SGs in 2×2 warp grid (matches mt_qmm_mma).
+    let sm = sg / 2u32;
+    let sn = sg & 1u32;
+    let lane_in_tg = sg * 32u32 + lane;
+
+    // 8×8 frag lane mapping (Apple steel_gemm layout).
+    let qid = lane / 4u32;
+    let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
+    let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
+    let fn1 = fn0 + 1u32;
+
+    // TG memory: X tile [BM=32 × BK=32] and dequant W tile [BN=32 × BK=32].
+    // Skew = +4 on BK for bank-conflict avoidance (see mt_qmm_mma).
+    threadgroup_alloc("xs", 1152, T);
+    threadgroup_alloc("ws", 1152, T);
+
+    // 4 output frags per SG (16×16 sub-tile inside the 32×32 output tile).
+    let c_f00 = simdgroup_alloc::<f32, 8, 8>();
+    let c_f01 = simdgroup_alloc::<f32, 8, 8>();
+    let c_f10 = simdgroup_alloc::<f32, 8, 8>();
+    let c_f11 = simdgroup_alloc::<f32, 8, 8>();
+
+    // Reused per k_inner.
+    let a_f0 = simdgroup_alloc::<T, 8, 8>();
+    let a_f1 = simdgroup_alloc::<T, 8, 8>();
+    let b_f0 = simdgroup_alloc::<T, 8, 8>();
+    let b_f1 = simdgroup_alloc::<T, 8, 8>();
+
+    let w_row_in_tg = lane_in_tg / 4u32;
+    let pack_in_row = lane_in_tg & 3u32;
+    let x_m_row = lane_in_tg / 4u32;
+    let x_k_quad = lane_in_tg & 3u32;
+    let x_k_base = x_k_quad * 8u32;
+
+    let xs_ld = 36u32;
+    let ws_ld = 36u32;
+
+    let m_tile_base = m_tile * 32u32; // first M-row this TG handles
+    let n_tile_base = n_tile * 32u32;
+    let packs_per_row = k_in / 8u32;
+    let groups_per_row = k_in / group_size;
+
+    // Walk the TG's BM=32 rows in contiguous expert runs. Up to 32
+    // sub-runs (one per row worst case); typically 1-2.
+    //
+    // No TG broadcast — every lane reads indices[m_tile_base + i] directly.
+    // Reads are uniform across lanes (Apple GPU L1 caches small index
+    // buffers), so the second-and-later reads are free.
+    let mut sub_offset = 0u32;
+    for _sub_iter in range(0u32, 32u32, 1u32) {
+        // Read this run's starting expert with an out-of-range sentinel.
+        let cur_row = m_tile_base + sub_offset;
+        let cur_in_range = (sub_offset < 32u32) & (cur_row < m_total);
+        let cur_expert = select(cur_in_range, load(indices[cur_row]), 4294967295u32);
+
+        // Find the run end (first row in [sub_offset+1..32) whose expert differs).
+        let mut sub_end = 32u32;
+        let mut found = 0u32;
+        for _ii in range(0u32, 32u32, 1u32) {
+            let probe = sub_offset + 1u32 + _ii;
+            let probe_row = m_tile_base + probe;
+            let probe_in_range = (probe < 32u32) & (probe_row < m_total);
+            if probe_in_range & (found == 0u32) {
+                let e = load(indices[probe_row]);
+                if e != cur_expert {
+                    sub_end = probe;
+                    found = 1u32;
+                }
+            }
+            // Also stop at sentinel-equivalent: out-of-range rows.
+            if (probe < 32u32) & (probe_row >= m_total) & (found == 0u32) {
+                sub_end = probe;
+                found = 1u32;
+            }
+        }
+
+        // Skip sentinel runs (out-of-range rows) AND past-end iterations.
+        let cur_valid = (cur_expert != 4294967295u32) & (sub_offset < 32u32);
+        if cur_valid {
+            // Per-expert weight + scale/bias base.
+            let w_expert_base = cur_expert * n_out * packs_per_row;
+            let sb_expert_base = cur_expert * n_out * groups_per_row;
+            // For this TG (n_tile), w_n_base is the expert's slab + n column offset.
+            let sb_base = sb_expert_base + (n_tile_base + w_row_in_tg) * groups_per_row;
+            let w_pack_row_base = w_expert_base + (n_tile_base + w_row_in_tg) * packs_per_row;
+
+            // Reset output frags for this sub-run.
+            simdgroup_elem_store(c_f00, 0, 0.0f32);
+            simdgroup_elem_store(c_f00, 1, 0.0f32);
+            simdgroup_elem_store(c_f01, 0, 0.0f32);
+            simdgroup_elem_store(c_f01, 1, 0.0f32);
+            simdgroup_elem_store(c_f10, 0, 0.0f32);
+            simdgroup_elem_store(c_f10, 1, 0.0f32);
+            simdgroup_elem_store(c_f11, 0, 0.0f32);
+            simdgroup_elem_store(c_f11, 1, 0.0f32);
+
+            // Inner GEMM over K. Each iteration loads a 32×32 X tile + 32×32 W tile,
+            // does 4 k_inner × 4 frags = 16 MMAs.
+            for kb in range(0u32, k_in, 32u32) {
+                // Coop X load — 128 lanes × 8 contiguous K elements each.
+                // x_m_row ∈ 0..32 is the TILE-LOCAL row (NOT sub-run-relative).
+                // Only load real x for rows in [sub_offset, sub_end); zero else.
+                let tile_row = x_m_row;
+                let global_row = m_tile_base + tile_row;
+                let x_in_run =
+                    (tile_row >= sub_offset) & (tile_row < sub_end) & (global_row < m_total);
+                let x_row_dev_base = global_row * k_in + kb + x_k_base;
+                let x_ws_base = tile_row * xs_ld + x_k_base;
+                let xv0 = select(x_in_run, load(x[x_row_dev_base]).cast::<T>(), 0.0f32.cast::<T>());
+                let xv1 = select(
+                    x_in_run,
+                    load(x[x_row_dev_base + 1u32]).cast::<T>(),
+                    0.0f32.cast::<T>(),
+                );
+                let xv2 = select(
+                    x_in_run,
+                    load(x[x_row_dev_base + 2u32]).cast::<T>(),
+                    0.0f32.cast::<T>(),
+                );
+                let xv3 = select(
+                    x_in_run,
+                    load(x[x_row_dev_base + 3u32]).cast::<T>(),
+                    0.0f32.cast::<T>(),
+                );
+                let xv4 = select(
+                    x_in_run,
+                    load(x[x_row_dev_base + 4u32]).cast::<T>(),
+                    0.0f32.cast::<T>(),
+                );
+                let xv5 = select(
+                    x_in_run,
+                    load(x[x_row_dev_base + 5u32]).cast::<T>(),
+                    0.0f32.cast::<T>(),
+                );
+                let xv6 = select(
+                    x_in_run,
+                    load(x[x_row_dev_base + 6u32]).cast::<T>(),
+                    0.0f32.cast::<T>(),
+                );
+                let xv7 = select(
+                    x_in_run,
+                    load(x[x_row_dev_base + 7u32]).cast::<T>(),
+                    0.0f32.cast::<T>(),
+                );
+                threadgroup_store("xs", x_ws_base, xv0);
+                threadgroup_store("xs", x_ws_base + 1u32, xv1);
+                threadgroup_store("xs", x_ws_base + 2u32, xv2);
+                threadgroup_store("xs", x_ws_base + 3u32, xv3);
+                threadgroup_store("xs", x_ws_base + 4u32, xv4);
+                threadgroup_store("xs", x_ws_base + 5u32, xv5);
+                threadgroup_store("xs", x_ws_base + 6u32, xv6);
+                threadgroup_store("xs", x_ws_base + 7u32, xv7);
+
+                // Coop W dequant — 128 lanes × 1 pack × 8 nibbles.
+                let pack_k_off = kb / 8u32 + pack_in_row;
+                let pack = load(w[w_pack_row_base + pack_k_off]);
+                let k_off = kb + pack_in_row * 8u32;
+                let g = k_off / group_size;
+                let s = load(scales[sb_base + g]).cast::<f32>();
+                let b = load(biases[sb_base + g]).cast::<f32>();
+                let s_16 = 0.0625f32;
+                let s_256 = 0.00390625f32;
+                let s_4096 = 0.000244140625f32;
+                let pack_hi = pack >> 16u32;
+                let q0 = (pack & 15u32).cast::<f32>();
+                let q1 = (pack & 240u32).cast::<f32>() * s_16;
+                let q2 = (pack & 3840u32).cast::<f32>() * s_256;
+                let q3 = (pack & 61440u32).cast::<f32>() * s_4096;
+                let q4 = (pack_hi & 15u32).cast::<f32>();
+                let q5 = (pack_hi & 240u32).cast::<f32>() * s_16;
+                let q6 = (pack_hi & 3840u32).cast::<f32>() * s_256;
+                let q7 = (pack_hi & 61440u32).cast::<f32>() * s_4096;
+                let ws_base = w_row_in_tg * ws_ld + pack_in_row * 8u32;
+                threadgroup_store("ws", ws_base, (s * q0 + b).cast::<T>());
+                threadgroup_store("ws", ws_base + 1u32, (s * q1 + b).cast::<T>());
+                threadgroup_store("ws", ws_base + 2u32, (s * q2 + b).cast::<T>());
+                threadgroup_store("ws", ws_base + 3u32, (s * q3 + b).cast::<T>());
+                threadgroup_store("ws", ws_base + 4u32, (s * q4 + b).cast::<T>());
+                threadgroup_store("ws", ws_base + 5u32, (s * q5 + b).cast::<T>());
+                threadgroup_store("ws", ws_base + 6u32, (s * q6 + b).cast::<T>());
+                threadgroup_store("ws", ws_base + 7u32, (s * q7 + b).cast::<T>());
+
+                threadgroup_barrier();
+
+                // MMA inner loop — 4 frags × 4 k_inner = 16 MMAs per SG.
+                let row_a0 = sm * 16u32 + fm;
+                let row_a1 = sm * 16u32 + 8u32 + fm;
+                let col_b0 = sn * 16u32;
+                let col_b1 = sn * 16u32 + 8u32;
+
+                for k_inner in range(0u32, 4u32, 1u32) {
+                    let ki_off = k_inner * 8u32;
+                    simdgroup_elem_store(
+                        a_f0,
+                        0,
+                        threadgroup_load("xs", row_a0 * xs_ld + ki_off + fn0),
+                    );
+                    simdgroup_elem_store(
+                        a_f0,
+                        1,
+                        threadgroup_load("xs", row_a0 * xs_ld + ki_off + fn1),
+                    );
+                    simdgroup_elem_store(
+                        a_f1,
+                        0,
+                        threadgroup_load("xs", row_a1 * xs_ld + ki_off + fn0),
+                    );
+                    simdgroup_elem_store(
+                        a_f1,
+                        1,
+                        threadgroup_load("xs", row_a1 * xs_ld + ki_off + fn1),
+                    );
+                    simdgroup_barrier_mem_none();
+                    simdgroup_elem_store(
+                        b_f0,
+                        0,
+                        threadgroup_load("ws", (col_b0 + fn0) * ws_ld + ki_off + fm),
+                    );
+                    simdgroup_elem_store(
+                        b_f0,
+                        1,
+                        threadgroup_load("ws", (col_b0 + fn1) * ws_ld + ki_off + fm),
+                    );
+                    simdgroup_elem_store(
+                        b_f1,
+                        0,
+                        threadgroup_load("ws", (col_b1 + fn0) * ws_ld + ki_off + fm),
+                    );
+                    simdgroup_elem_store(
+                        b_f1,
+                        1,
+                        threadgroup_load("ws", (col_b1 + fn1) * ws_ld + ki_off + fm),
+                    );
+                    simdgroup_barrier_mem_none();
+                    simdgroup_matmul(a_f0, b_f0, c_f00);
+                    simdgroup_matmul(a_f0, b_f1, c_f01);
+                    simdgroup_matmul(a_f1, b_f1, c_f11);
+                    simdgroup_matmul(a_f1, b_f0, c_f10);
+                    simdgroup_barrier_mem_none();
+                }
+                threadgroup_barrier();
+            }
+
+            // Store the 32×32 output tile back to device memory, masked
+            // to [sub_offset, sub_end). 4 lanes per output row (sm * 16 + fm
+            // for rows, sn * 16 + fn0/fn1 for cols).
+            let out_row_a0 = sm * 16u32 + fm;
+            let out_row_a1 = sm * 16u32 + 8u32 + fm;
+            let out_col_00 = sn * 16u32 + fn0;
+            let out_col_01 = sn * 16u32 + fn1;
+            let out_col_10 = sn * 16u32 + 8u32 + fn0;
+            let out_col_11 = sn * 16u32 + 8u32 + fn1;
+
+            let r00_0 = simdgroup_elem_load(c_f00, 0);
+            let r00_1 = simdgroup_elem_load(c_f00, 1);
+            let r01_0 = simdgroup_elem_load(c_f01, 0);
+            let r01_1 = simdgroup_elem_load(c_f01, 1);
+            let r10_0 = simdgroup_elem_load(c_f10, 0);
+            let r10_1 = simdgroup_elem_load(c_f10, 1);
+            let r11_0 = simdgroup_elem_load(c_f11, 0);
+            let r11_1 = simdgroup_elem_load(c_f11, 1);
+
+            // Output rows are tile-local (0..32). Write only if the frag's row
+            // falls in this sub-run AND inside the global m bound.
+            let r0_g = m_tile_base + out_row_a0;
+            let r0_valid = (out_row_a0 >= sub_offset) & (out_row_a0 < sub_end) & (r0_g < m_total);
+            if r0_valid {
+                store(out[r0_g * n_out + n_tile_base + out_col_00], r00_0.cast::<T>());
+                store(out[r0_g * n_out + n_tile_base + out_col_01], r00_1.cast::<T>());
+                store(out[r0_g * n_out + n_tile_base + out_col_10], r01_0.cast::<T>());
+                store(out[r0_g * n_out + n_tile_base + out_col_11], r01_1.cast::<T>());
+            }
+            let r1_g = m_tile_base + out_row_a1;
+            let r1_valid = (out_row_a1 >= sub_offset) & (out_row_a1 < sub_end) & (r1_g < m_total);
+            if r1_valid {
+                store(out[r1_g * n_out + n_tile_base + out_col_00], r10_0.cast::<T>());
+                store(out[r1_g * n_out + n_tile_base + out_col_01], r10_1.cast::<T>());
+                store(out[r1_g * n_out + n_tile_base + out_col_10], r11_0.cast::<T>());
+                store(out[r1_g * n_out + n_tile_base + out_col_11], r11_1.cast::<T>());
+            }
+        }
+        sub_offset = sub_end;
+    }
+}
+
+inventory::submit! {
+    BenchSpec {
+        op: "moe",
+        subop: "gather_qmm_mma_int4",
+        kernel_name: "mt_moe_gather_qmm_mma_int4",
+        kernel_ir: mt_moe_gather_qmm_mma_int4::kernel_ir_for,
+        dtypes: &[DType::F32, DType::F16, DType::BF16],
+        tol: 5e-2,
+        mlx_src: None,
+        mlx_pattern: None,
+        shapes: &[],
+        dispatch: BenchDispatch::Generic,
+        kernel_mode: Some(KernelMode::Reduction),
+    }
+}
