@@ -638,6 +638,21 @@ fn assign_toml_fuse_groups(nodes: &mut [DispatchNode], raw_nodes: &[RawNode]) {
     }
 }
 
+/// Convert a `GridSpec` to `(grid_groups, threads_per_group)` dimensions.
+/// Called once per node at compile time; result is stored in `DispatchNode.grid_dims`.
+pub(crate) fn grid_to_dims(grid: &GridSpec) -> ([usize; 3], [usize; 3]) {
+    match grid {
+        GridSpec::Elementwise { n } => {
+            let tpg = 256usize;
+            ([n.div_ceil(tpg), 1, 1], [tpg, 1, 1])
+        },
+        GridSpec::Reduction { num_rows, threads_per_group } =>
+            ([*num_rows, 1, 1], [*threads_per_group, 1, 1]),
+        GridSpec::Grid3D { x, y, z, threads_per_group } =>
+            ([*x, *y, *z], [*threads_per_group, 1, 1]),
+    }
+}
+
 
 // ── Dispatch hint evaluation ───────────────────────────────────────────
 

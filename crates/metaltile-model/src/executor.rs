@@ -23,7 +23,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use metaltile_runtime::{Context, DispatchSpec, ResidentBuffer, context::GridSpec};
+use metaltile_runtime::{Context, DispatchSpec, ResidentBuffer};
 
 use crate::{
     error::ModelError,
@@ -82,11 +82,10 @@ pub fn execute_plan(
     let mut all_buffers: Vec<BTreeMap<String, Vec<u8>>> = Vec::with_capacity(n);
     let mut all_resident: Vec<BTreeMap<String, ResidentBuffer>> = Vec::with_capacity(n);
     let mut all_output_resident: Vec<BTreeMap<String, ResidentBuffer>> = Vec::with_capacity(n);
-    let mut all_grid: Vec<([usize; 3], [usize; 3])> = Vec::with_capacity(n);
 
     for (idx, node) in plan.nodes.iter().enumerate() {
-        let mut kernel = plan.cached_kernels[idx].clone();
-        kernel.mode = node.mode;
+        // kernel.mode is pre-set at compile time (cached_kernels already has mode).
+        let kernel = plan.cached_kernels[idx].clone();
         let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         let mut spec_resident: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
         let mut spec_output_resident: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
@@ -184,18 +183,16 @@ pub fn execute_plan(
         all_buffers.push(buffers);
         all_resident.push(spec_resident);
         all_output_resident.push(spec_output_resident);
-        all_grid.push(grid_to_dims(&node.grid));
     }
 
     // ── Dispatch ───────────────────────────────────────────────────────
-    // When fusion is active (any node has a fuse_group), the entire forward
-    // pass is one MTLCommandBuffer — one waitUntilCompleted, maximum GPU
-    // utilisation.  When --no-fuse is set no fuse_groups are assigned, so
-    // we fall back to one command buffer per node: useful for debugging
-    // (you can bisect failures node-by-node) but ~292× slower.
+    // single_dispatch=true (TomlDriven/GraphDriven): entire forward pass in
+    // one MTLCommandBuffer — one waitUntilCompleted per token.
+    // single_dispatch=false (--no-fuse): one command buffer per node —
+    // useful for debugging but ~10× slower.
     let all_specs: Vec<DispatchSpec<'_>> = (0..n)
         .map(|i| {
-            let (grid_groups, threads_per_group) = all_grid[i];
+            let (grid_groups, threads_per_group) = plan.nodes[i].grid_dims;
             DispatchSpec {
                 kernel: &kernels[i],
                 buffers: &all_buffers[i],
@@ -270,46 +267,3 @@ pub fn execute_plan(
     Ok((slot_data[plan.output_slot].read_bytes(final_size), total_gpu_us))
 }
 
-/// Convert a `GridSpec` to `(grid_groups: [usize; 3], threads_per_group: [usize; 3])`.
-fn grid_to_dims(grid: &GridSpec) -> ([usize; 3], [usize; 3]) {
-    match grid {
-        GridSpec::Elementwise { n } => {
-            let tpg = 256usize;
-            let groups = n.div_ceil(tpg);
-            ([groups, 1, 1], [tpg, 1, 1])
-        },
-        GridSpec::Reduction { num_rows, threads_per_group } =>
-            ([*num_rows, 1, 1], [*threads_per_group, 1, 1]),
-        GridSpec::Grid3D { x, y, z, threads_per_group } =>
-            ([*x, *y, *z], [*threads_per_group, 1, 1]),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn grid_to_dims_elementwise() {
-        let grid = GridSpec::Elementwise { n: 4096 };
-        let (groups, tpg) = grid_to_dims(&grid);
-        assert_eq!(groups, [16, 1, 1]); // 4096 / 256
-        assert_eq!(tpg, [256, 1, 1]);
-    }
-
-    #[test]
-    fn grid_to_dims_reduction() {
-        let grid = GridSpec::Reduction { num_rows: 32, threads_per_group: 1024 };
-        let (groups, tpg) = grid_to_dims(&grid);
-        assert_eq!(groups, [32, 1, 1]);
-        assert_eq!(tpg, [1024, 1, 1]);
-    }
-
-    #[test]
-    fn grid_to_dims_grid3d() {
-        let grid = GridSpec::Grid3D { x: 32, y: 64, z: 1, threads_per_group: 1 };
-        let (groups, tpg) = grid_to_dims(&grid);
-        assert_eq!(groups, [32, 64, 1]);
-        assert_eq!(tpg, [1, 1, 1]);
-    }
-}
