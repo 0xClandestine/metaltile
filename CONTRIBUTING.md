@@ -21,9 +21,11 @@ AGENTS — read this before touching code. This block is intentionally an HTML c
 
 5. Keep the diff scoped to one logical change. If it touches three unrelated things, that is three PRs.
 
-6. A PR ships with its tests. Behavior changes — new kernels, codegen passes, runtime paths — land with the tests that cover them, in the same PR; "tests in a follow-up" is not accepted.
+6. Do not add external dependencies without justification. Before reaching for a crate, check whether std or an already-present dependency can do the job. If you do add one, explain in the PR body what it is used for, why existing deps cannot cover it, and include the output of `cargo tree -p <new-crate>`. See the "Dependency policy" section in the rendered CONTRIBUTING.md.
 
-7. Keep the docs honest. If your change affects anything documented — a page under docs/, the README.md, the supported-operations table, the CLI reference, or an architecture diagram — you MUST update it in the same PR. Stale documentation is a defect, not a deferred chore: a doc that describes code that no longer exists is worse than no doc. After an architecture- or pipeline-level change, re-read README.md "Architecture" and docs/developing.md and confirm they still match the code.
+7. A PR ships with its tests. Behavior changes — new kernels, codegen passes, runtime paths — land with the tests that cover them, in the same PR; "tests in a follow-up" is not accepted.
+
+8. Keep the docs honest. If your change affects anything documented — a page under docs/, the README.md, the supported-operations table, the CLI reference, or an architecture diagram — you MUST update it in the same PR. Stale documentation is a defect, not a deferred chore: a doc that describes code that no longer exists is worse than no doc. After an architecture- or pipeline-level change, re-read README.md "Architecture" and docs/developing.md and confirm they still match the code.
 ─────────────────────────────────────────────────────────────────────────────
 -->
 
@@ -55,6 +57,22 @@ The [`docs/`](docs/README.md) tree is the real reference. At minimum:
 - [ ] Docs updated — if the change touches anything in `docs/`, `README.md`, the supported-operations table, or an architecture diagram, that update is in this PR.
 - [ ] PR body explains **what** and **why**; links issues with `#<num>`.
 - [ ] If bench numbers changed, relevant rows pasted in the PR body.
+
+## Dependency policy
+
+MetalTile keeps its dependency tree small on purpose. Every external crate is a potential supply-chain attack vector — a compromised or malicious publish can execute arbitrary code during your build or at runtime. Before adding a dependency, ask:
+
+1. **Can std do it?** `std::sync::Mutex`, `std::collections::HashMap`, manual `Display`/`Error` impls, and raw ANSI escape codes replace a surprising number of popular crates with zero cost.
+2. **How large is the transitive tree?** Run `cargo tree -p <crate>` and count what comes along for the ride. A crate that adds five transitive deps for a two-line abstraction is usually not worth it.
+3. **Is the crate well-audited and widely used?** High-traffic, single-maintainer crates with broad `unsafe` usage are the most common compromise targets. Prefer crates with multiple maintainers, a track record, and a narrow API surface.
+4. **Is it a proc macro?** Proc macros execute arbitrary code at compile time. They deserve extra scrutiny — only add one if it replaces genuinely complex, error-prone boilerplate.
+
+If a new dependency clears those questions, add it to `[workspace.dependencies]` and reference it with `.workspace = true` in the crate that needs it. Do not add a dep to more crates than necessary.
+
+PRs that add a new external dependency must include in the PR body:
+- what the dep is used for
+- why std or existing deps cannot cover it
+- the output of `cargo tree -p <new-crate>` (transitive count)
 
 ## Agentic contributions
 
