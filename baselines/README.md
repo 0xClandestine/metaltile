@@ -24,7 +24,28 @@ default codegen flags unless the `note` says otherwise.
 
 Naming: `baselines/<chip-slug>.json`. One canonical file per chip;
 overwrite on update (the file metadata carries the SHA + timestamp,
-git history preserves the older snapshots).
+git history preserves the older snapshots). The slug is derived from
+`tile device`'s reported name — lowercase, non-alphanumeric runs
+collapsed to a single dash — so `Apple M5 Max` ↔ `apple-m5-max.json`.
+
+## Dirty-tree guard and auto-diff
+
+`tile bench` refuses to run when `git diff HEAD` is non-empty: bench
+numbers from a stale `target/` against a modified source tree don't
+tie back to any commit. Override with `--allow-dirty` when you're
+intentionally measuring uncommitted work.
+
+On success, bench also runs a diff against the target-branch baseline
+without being asked. It picks the file `baselines/<your-chip>.json`
+out of the first ref of `origin/dev`, `upstream/dev`, `dev` that
+resolves, at the merge-base with `HEAD` — so the comparison stays
+honest even on a PR that already updated its own baseline. Override
+the ref with `--baseline-ref <ref>`, or skip the diff with `--no-diff`.
+
+In CI (`.github/workflows/kernels.yml`), the same diff is rendered
+against the in-tree baseline matching the runner chip and posted as a
+PR comment. The runner chip rarely matches any committed slug, so
+that step is informational only — it never gates the job.
 
 ## Current baselines
 
@@ -84,6 +105,9 @@ optimal block size differs from M3/M4.
 git checkout 0cb0a85           # the SHA this baseline was captured against
 cargo build --release -p metaltile-cli
 ./target/release/tile device   # confirm "Apple M5 Max" / "Apple10 (M5)"
+# Auto-diffs against the merge-base baseline on success; emits JSON
+# at /tmp/bench.json for snap/diff round-trips.
 ./target/release/tile bench --json /tmp/bench.json
-./target/release/tile diff baselines/apple-m5-max.json   # compare
+# Or run the diff explicitly against the committed baseline:
+./target/release/tile diff baselines/apple-m5-max.json /tmp/bench.json
 ```

@@ -9,6 +9,7 @@
 //!   diff      Compare bench results to a saved baseline
 
 mod cmd;
+pub mod git;
 pub mod suite_printer;
 pub mod term;
 
@@ -61,6 +62,18 @@ struct BenchArgs {
     /// Write results as JSON to this file
     #[arg(long = "json", short = 'o')]
     json: Option<String>,
+    /// Run even if the working tree has tracked-file modifications.
+    /// Without this flag, bench refuses to run on a dirty tree so the
+    /// numbers always tie back to a clean commit SHA.
+    #[arg(long = "allow-dirty")]
+    allow_dirty: bool,
+    /// Skip the post-bench diff against the target-branch baseline.
+    #[arg(long = "no-diff")]
+    no_diff: bool,
+    /// Git ref whose `baselines/<chip>.json` to diff against (default:
+    /// first of `origin/dev`, `upstream/dev`, `dev` that resolves).
+    #[arg(long = "baseline-ref")]
+    baseline_ref: Option<String>,
 }
 
 // ── Build ────────────────────────────────────────────────────────────────
