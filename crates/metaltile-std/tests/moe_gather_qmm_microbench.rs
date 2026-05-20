@@ -93,6 +93,7 @@ fn time_gather_qmm_v(
     buffers.insert("m_out".into(), (m_out as u32).to_le_bytes().to_vec());
     buffers.insert("n_experts".into(), (n_experts as u32).to_le_bytes().to_vec());
     buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+    buffers.insert("t_total".into(), (t_rows as u32).to_le_bytes().to_vec());
 
     let mut kernel = match variant {
         Variant::M1 => mt_moe_gather_qmm_int4::kernel_ir_for(Dt::F32.to_dtype()),
@@ -130,7 +131,7 @@ fn bench_qwen36_a3b_moe_layer_shape() {
     //   down_proj:  moe_intermediate=256 → hidden=2048
     //
     // At T=1024 (a moderate-prefill window) × topk=8 = 8192 routed tokens.
-    let t_rows = 8192; // typical T*topk after permute
+    let t_rows = 1024; // matches MLX bench script (T*topk after permute)
     let n_experts = 128;
     let group_size = 64;
     let iters = 3;
@@ -145,8 +146,9 @@ fn bench_qwen36_a3b_moe_layer_shape() {
         let gf_m8 = flops / us_m8 / 1e3;
         eprintln!(
             "Qwen3.6-A3B {label:>8} K={k_in} M={m_out} T={t_rows}: \
-             m1={us_m1:>8.0}us ({gf_m1:>5.0} GF)  m8={us_m8:>8.0}us ({gf_m8:>5.0} GF)  \
-             speedup={:.2}×",
+             m1={us_m1:>7.0}us ({gf_m1:>5.0} GF) \
+             m8={us_m8:>7.0}us ({gf_m8:>5.0} GF) \
+             m8-vs-m1={:.2}×",
             us_m1 / us_m8
         );
     }
