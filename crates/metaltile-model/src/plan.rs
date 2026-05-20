@@ -6,6 +6,8 @@
 //! assigned, grid dimensions computed. It can be dispatched repeatedly
 //! (once per token for autoregressive inference).
 
+use std::collections::HashMap;
+
 use metaltile_core::{
     dtype::DType,
     ir::{Kernel, KernelMode},
@@ -28,6 +30,13 @@ pub struct ExecutionPlan {
     pub output_slot: usize,
     /// The total number of layers (unroll count).
     pub n_layers: usize,
+    /// Byte sizes for intra-fuse-group intermediate buffers, keyed by
+    /// intermediate name.  These are transient tensors whose lifetimes fit
+    /// entirely within a single `dispatch_chain` call and therefore have no
+    /// persistent `BufferSlot`.  The executor allocates them on demand using
+    /// the sizes stored here (computed accurately at compile time from the
+    /// `dispatch` hints) rather than relying on a heuristic estimate.
+    pub intra_group_sizes: HashMap<String, usize>,
 }
 
 // ── ConstexprValue ────────────────────────────────────────────────────

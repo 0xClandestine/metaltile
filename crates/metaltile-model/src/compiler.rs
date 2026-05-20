@@ -293,7 +293,7 @@ pub fn compile(
     // Filter out intra-fuse-group intermediates — they're handled by
     // dispatch_chain's private-memory aliasing and don't need persistent
     // BufferSlots.
-    let (filtered_outputs, filtered_inputs) =
+    let (filtered_outputs, filtered_inputs, intra_group_sizes) =
         filter_intra_group_intermediates(&nodes, &intermediate_outputs, &intermediate_inputs);
 
     let (slots, name_to_slot) =
@@ -319,7 +319,7 @@ pub fn compile(
         .and_then(|(_, sr)| if let SlotRef::Slot(idx) = sr { Some(*idx) } else { None })
         .unwrap_or(0);
 
-    Ok(ExecutionPlan { nodes, slots, output_slot, n_layers })
+    Ok(ExecutionPlan { nodes, slots, output_slot, n_layers, intra_group_sizes })
 }
 
 // ── Graph-level kernel fusion ──────────────────────────────────────────
@@ -614,11 +614,15 @@ fn assign_toml_fuse_groups(nodes: &mut [DispatchNode], raw_nodes: &[RawNode]) {
 /// Uses local-scope analysis: an intermediate instance (between a write
 /// and the next write to the same name) is intra-group-only if ALL its
 /// readers share the same `fuse_group` as the writer.
+///
+/// Also returns a `HashMap<name, size_bytes>` for every intra-group
+/// intermediate so the executor can allocate correctly-sized chain buffers
+/// without guessing.
 fn filter_intra_group_intermediates(
     nodes: &[DispatchNode],
     intermediate_outputs: &[Vec<(String, usize)>],
     intermediate_inputs: &[Vec<String>],
-) -> (Vec<Vec<(String, usize)>>, Vec<Vec<String>>) {
+) -> (Vec<Vec<(String, usize)>>, Vec<Vec<String>>, HashMap<String, usize>) {
     let n = nodes.len();
 
     // Build ordered write/read positions per intermediate name.
@@ -678,7 +682,22 @@ fn filter_intra_group_intermediates(
     }
 
     if intra_group_instances.is_empty() {
-        return (intermediate_outputs.to_vec(), intermediate_inputs.to_vec());
+        return (intermediate_outputs.to_vec(), intermediate_inputs.to_vec(), HashMap::new());
+    }
+
+    // Build size map: name → max size_bytes across all intra-group instances.
+    // Taking the max guards against the unlikely case of different sizes for
+    // the same name in different layers (should not occur with fixed dims, but
+    // is a safe fallback).
+    let mut intra_group_sizes: HashMap<String, usize> = HashMap::new();
+    for (name, write_pos) in &intra_group_instances {
+        if let Some(size) = intermediate_outputs[*write_pos]
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, s)| *s)
+        {
+            intra_group_sizes.entry(name.clone()).and_modify(|e| *e = (*e).max(size)).or_insert(size);
+        }
     }
 
     // Build filtered lists: for each node, skip (name, _) entries where
@@ -721,7 +740,7 @@ fn filter_intra_group_intermediates(
         })
         .collect();
 
-    (filtered_outputs, filtered_inputs)
+    (filtered_outputs, filtered_inputs, intra_group_sizes)
 }
 
 // ── Dispatch hint evaluation ───────────────────────────────────────────

@@ -169,7 +169,11 @@ pub fn execute_plan(
                         SlotRef::Weight(tensor_name)
                             if tensor_name.starts_with('_') =>
                         {
-                            let size = estimate_intermediate_size(node);
+                            let size = plan
+                                .intra_group_sizes
+                                .get(tensor_name.as_str())
+                                .copied()
+                                .unwrap_or_else(|| estimate_intermediate_size(node));
                             if size > 0 {
                                 let rb = ctx
                                     .alloc_resident(size)
