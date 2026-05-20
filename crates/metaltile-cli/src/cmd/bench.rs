@@ -245,6 +245,8 @@ pub fn run(args: &BenchArgs) {
         save_json(&runner.device_name, &all, path);
     }
 
+    runner.save_metallib_cache();
+
     if equiv_fail > 0 {
         std::process::exit(1);
     }

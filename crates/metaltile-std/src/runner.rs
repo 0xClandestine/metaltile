@@ -8,6 +8,24 @@ use crate::{
     stats::BenchStats,
 };
 
+use std::path::PathBuf;
+
+#[cfg(target_os = "macos")]
+use objc2::{rc::Retained, runtime::ProtocolObject};
+#[cfg(target_os = "macos")]
+use objc2_metal::{MTLDevice, MTLLibrary};
+
+/// SHA-256 hex digest of `source + "\0" + fn_name`.
+#[cfg(target_os = "macos")]
+fn metallib_cache_key(source: &str, fn_name: &str) -> String {
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(source.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(fn_name.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 /// Convert IEEE 754 half-float bits to f32.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn f16_bits_to_f32(bits: u16) -> f32 {
@@ -40,6 +58,15 @@ pub struct GpuRunner {
     slc_kernel: CompiledKernel,
     #[cfg(target_os = "macos")]
     slc_buf: GpuBuffer,
+    /// Directory for cached `.metallib` files.
+    #[cfg(target_os = "macos")]
+    metallib_cache_dir: PathBuf,
+    /// Already-loaded `.metallib` libraries keyed by cache hash.
+    #[cfg(target_os = "macos")]
+    loaded_metallibs: std::cell::RefCell<std::collections::HashMap<String, Retained<ProtocolObject<dyn MTLLibrary>>>>,
+    /// Kernels compiled from source this run that should be cached to disk.
+    #[cfg(target_os = "macos")]
+    pending_cache: std::cell::RefCell<Vec<(String /* hash */, String /* source */, String /* fn_name */)>>,
 }
 
 #[allow(clippy::manual_non_exhaustive)]
@@ -64,7 +91,7 @@ pub struct GpuBuffer {
 #[cfg(target_os = "macos")]
 mod metal_impl {
     use objc2::{rc::Retained, runtime::ProtocolObject};
-    use objc2_foundation::NSString;
+    use objc2_foundation::{NSString, NSURL};
     use objc2_metal::{
         MTLBuffer,
         MTLCommandBuffer,
@@ -79,6 +106,7 @@ mod metal_impl {
         MTLLibrary,
         MTLResourceOptions,
     };
+    use std::path::Path;
 
     pub struct MacosRunner {
         pub device: Retained<ProtocolObject<dyn MTLDevice>>,
@@ -163,6 +191,69 @@ mod metal_impl {
             Ok(MacosPipeline { pso })
         }
 
+        /// Load a pre-compiled `.metallib` from disk and create a PSO for `fn_name`.
+        pub fn load_metallib(&self, path: &Path, fn_name: &str) -> Result<MacosPipeline, String> {
+            let path_str = NSString::from_str(path.to_str().ok_or("bad path")?);
+            let url = NSURL::fileURLWithPath(&path_str);
+            let lib = self
+                .device
+                .newLibraryWithURL_error(&url)
+                .map_err(|e| format!("load metallib '{}': {e}", path.display()))?;
+            let fname = NSString::from_str(fn_name);
+            let func = lib
+                .newFunctionWithName(&fname)
+                .ok_or_else(|| format!("no function '{fn_name}' in cached metallib"))?;
+            let desc = MTLComputePipelineDescriptor::new();
+            desc.setComputeFunction(Some(&func));
+            let pso = self
+                .device
+                .newComputePipelineStateWithDescriptor_options_reflection_error(
+                    &desc,
+                    objc2_metal::MTLPipelineOption::empty(),
+                    None,
+                )
+                .map_err(|e| format!("pipeline '{fn_name}' from cache: {e}"))?;
+            Ok(MacosPipeline { pso })
+        }
+
+        /// Load a pre-compiled `.metallib` from disk and create a PSO with bool constants.
+        pub fn load_metallib_with_bool_constants(
+            &self,
+            path: &Path,
+            fn_name: &str,
+            bool_constants: &[(usize, bool)],
+        ) -> Result<MacosPipeline, String> {
+            let path_str = NSString::from_str(path.to_str().ok_or("bad path")?);
+            let url = NSURL::fileURLWithPath(&path_str);
+            let lib = self
+                .device
+                .newLibraryWithURL_error(&url)
+                .map_err(|e| format!("load metallib '{}': {e}", path.display()))?;
+            let cv = MTLFunctionConstantValues::new();
+            for &(idx, val) in bool_constants {
+                let val_ptr =
+                    std::ptr::NonNull::new(&val as *const bool as *mut std::ffi::c_void).unwrap();
+                unsafe {
+                    cv.setConstantValue_type_atIndex(val_ptr, MTLDataType::Bool, idx);
+                }
+            }
+            let fname = NSString::from_str(fn_name);
+            let func = lib
+                .newFunctionWithName_constantValues_error(&fname, &cv)
+                .map_err(|e| format!("specialize '{fn_name}' from cache: {e}"))?;
+            let desc = MTLComputePipelineDescriptor::new();
+            desc.setComputeFunction(Some(&func));
+            let pso = self
+                .device
+                .newComputePipelineStateWithDescriptor_options_reflection_error(
+                    &desc,
+                    objc2_metal::MTLPipelineOption::empty(),
+                    None,
+                )
+                .map_err(|e| format!("pipeline '{fn_name}' from cache: {e}"))?;
+            Ok(MacosPipeline { pso })
+        }
+
         pub fn alloc_bytes(&self, data: &[u8]) -> MacosBuffer {
             use std::ptr::NonNull;
             let len = data.len().max(4);
@@ -232,6 +323,8 @@ mod metal_impl {
 
 #[cfg(target_os = "macos")]
 use metal_impl::{MacosBuffer, MacosPipeline, MacosRunner};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSString, NSURL};
 
 // ── GpuRunner ────────────────────────────────────────────────────────────────
 
@@ -267,7 +360,17 @@ impl GpuRunner {
             let slc_kernel = CompiledKernel { inner: slc_pso };
             let slc_buf = GpuBuffer { size_bytes: SLC_BYTES, inner: inner.alloc_zeros(SLC_BYTES) };
 
-            let runner = GpuRunner { device_name: name, inner, slc_kernel, slc_buf };
+            let cache_dir = PathBuf::from(".cache/metaltile/metallibs");
+            let _ = std::fs::create_dir_all(&cache_dir);
+            let runner = GpuRunner {
+                device_name: name,
+                inner,
+                slc_kernel,
+                slc_buf,
+                metallib_cache_dir: cache_dir,
+                loaded_metallibs: std::cell::RefCell::new(std::collections::HashMap::new()),
+                pending_cache: std::cell::RefCell::new(Vec::new()),
+            };
             runner.wake_dvfs();
             Ok(runner)
         }
@@ -285,7 +388,47 @@ impl GpuRunner {
     pub fn compile(&self, source: &str, fn_name: &str) -> Result<CompiledKernel, String> {
         #[cfg(target_os = "macos")]
         {
-            Ok(CompiledKernel { inner: self.inner.compile(source, fn_name)? })
+            let key = metallib_cache_key(source, fn_name);
+            let cache_path = self.metallib_cache_dir.join(format!("{key}.metallib"));
+
+            // Try disk cache first.
+            if cache_path.exists() {
+                let mut libs = self.loaded_metallibs.borrow_mut();
+                if let Some(lib) = libs.get(&key) {
+                    let fname = NSString::from_str(fn_name);
+                    let func = lib.newFunctionWithName(&fname)
+                        .ok_or_else(|| format!("no function '{fn_name}' in cached metallib"))?;
+                    let desc = objc2_metal::MTLComputePipelineDescriptor::new();
+                    desc.setComputeFunction(Some(&func));
+                    let pso = self.inner.device
+                        .newComputePipelineStateWithDescriptor_options_reflection_error(
+                            &desc,
+                            objc2_metal::MTLPipelineOption::empty(),
+                            None,
+                        )
+                        .map_err(|e| format!("pipeline '{fn_name}' from cache: {e}"))?;
+                    return Ok(CompiledKernel { inner: MacosPipeline { pso } });
+                }
+                // Load from disk and cache the library in memory.
+                match self.inner.load_metallib(&cache_path, fn_name) {
+                    Ok(pipeline) => {
+                        let path_str = NSString::from_str(cache_path.to_str().unwrap());
+                        let url = NSURL::fileURLWithPath(&path_str);
+                        if let Ok(lib) = self.inner.device.newLibraryWithURL_error(&url) {
+                            libs.insert(key.clone(), lib);
+                        }
+                        return Ok(CompiledKernel { inner: pipeline });
+                    }
+                    Err(e) => {
+                        eprintln!("  [cache] miss (load failed): {e}");
+                    }
+                }
+            }
+
+            // Cache miss — compile from source.
+            let pso = self.inner.compile(source, fn_name)?;
+            self.pending_cache.borrow_mut().push((key, source.to_string(), fn_name.to_string()));
+            Ok(CompiledKernel { inner: pso })
         }
         #[cfg(not(target_os = "macos"))]
         Err("not macOS".into())
@@ -302,9 +445,21 @@ impl GpuRunner {
     ) -> Result<CompiledKernel, String> {
         #[cfg(target_os = "macos")]
         {
-            Ok(CompiledKernel {
-                inner: self.inner.compile_with_bool_constants(source, fn_name, bool_constants)?,
-            })
+            let key = metallib_cache_key(source, fn_name);
+            let cache_path = self.metallib_cache_dir.join(format!("{key}.metallib"));
+
+            if cache_path.exists() {
+                match self.inner.load_metallib_with_bool_constants(&cache_path, fn_name, bool_constants) {
+                    Ok(pipeline) => return Ok(CompiledKernel { inner: pipeline }),
+                    Err(e) => {
+                        eprintln!("  [cache] miss (load failed): {e}");
+                    }
+                }
+            }
+
+            let pso = self.inner.compile_with_bool_constants(source, fn_name, bool_constants)?;
+            self.pending_cache.borrow_mut().push((key, source.to_string(), fn_name.to_string()));
+            Ok(CompiledKernel { inner: pso })
         }
         #[cfg(not(target_os = "macos"))]
         Err("not macOS".into())
@@ -488,6 +643,102 @@ impl GpuRunner {
         }
         #[cfg(not(target_os = "macos"))]
         false
+    }
+
+    /// Compile any pending kernels to `.metallib` files on disk so the next
+    /// bench run can load them instantly via `newLibraryWithURL`. Best-effort:
+    /// any `xcrun` failure is silently ignored — the next run just falls back
+    /// to source compilation.
+    pub fn save_metallib_cache(&self) {
+        #[cfg(target_os = "macos")]
+        {
+            let pending = self.pending_cache.borrow();
+            if pending.is_empty() {
+                return;
+            }
+            // Deduplicate by hash.
+            let mut seen = std::collections::HashSet::new();
+            let unique: Vec<_> = pending
+                .iter()
+                .filter(|(h, _, _)| seen.insert(h.clone()))
+                .cloned()
+                .collect();
+            drop(pending);
+
+            let msl_dir = self.metallib_cache_dir.join("msl");
+            let _ = std::fs::create_dir_all(&msl_dir);
+
+            println!(
+                "  Caching {} kernels to .metallib …",
+                unique.len()
+            );
+
+            let num_workers = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .min(8);
+            let queue = std::sync::Arc::new(unique);
+            let idx = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let cache_dir = self.metallib_cache_dir.clone();
+            let msl_dir = msl_dir.clone();
+
+            std::thread::scope(|s| {
+                for _ in 0..num_workers {
+                    let queue = std::sync::Arc::clone(&queue);
+                    let idx = std::sync::Arc::clone(&idx);
+                    let cache_dir = cache_dir.clone();
+                    let msl_dir = msl_dir.clone();
+                    s.spawn(move || {
+                        loop {
+                            let i = idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if i >= queue.len() {
+                                break;
+                            }
+                            let (hash, source, _fn_name) = &queue[i];
+                            let metal_path = msl_dir.join(format!("{hash}.metal"));
+                            let air_path = msl_dir.join(format!("{hash}.air"));
+                            let metallib_path = cache_dir.join(format!("{hash}.metallib"));
+
+                            // Skip if already cached from a previous run.
+                            if metallib_path.exists() {
+                                continue;
+                            }
+                            if std::fs::write(&metal_path, source).is_err() {
+                                continue;
+                            }
+                            let status = std::process::Command::new("xcrun")
+                                .args(["-sdk", "macosx", "metal", "-Os", "-c"])
+                                .arg(&metal_path)
+                                .arg("-o")
+                                .arg(&air_path)
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .status();
+                            let Ok(status) = status else { continue };
+                            if !status.success() {
+                                let _ = std::fs::remove_file(&metal_path);
+                                continue;
+                            }
+                            let status = std::process::Command::new("xcrun")
+                                .args(["-sdk", "macosx", "metallib"])
+                                .arg(&air_path)
+                                .arg("-o")
+                                .arg(&metallib_path)
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .status();
+                            let _ = std::fs::remove_file(&air_path);
+                            let _ = std::fs::remove_file(&metal_path);
+                            if let Ok(status) = status {
+                                if !status.success() {
+                                    let _ = std::fs::remove_file(&metallib_path);
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+        }
     }
 }
 
