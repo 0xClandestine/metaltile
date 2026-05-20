@@ -16,6 +16,7 @@ metaltile-codegen.workspace = true
 metaltile-runtime.workspace = true
 inventory.workspace = true
 half.workspace = true
+bytemuck.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
