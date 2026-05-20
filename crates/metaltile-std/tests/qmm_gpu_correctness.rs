@@ -2035,3 +2035,286 @@ fn mt_qmm_v2_vs_bm2_head_to_head_f16_m_sweep() {
     println!();
     println!("legend: bm2/v2 < 1.0 ⇒ bm2 faster than v2 at that cell");
 }
+
+// ── Extended coverage — bf16 dtype + production-shape full oracles ──────
+//
+// PR #56/#57/#60 bar-raising additions. Each new qmm kernel (bm2, bm4,
+// mma, mma_m16) gets:
+//   - bf16 dtype correctness pin (round-trip oracle)
+//   - Production Qwen3 shape (n=k=5120) with full CPU oracle (not just
+//     "non-NaN" smoke). Catches numerical bugs at scale that small
+//     shapes hide.
+
+fn f32_to_bf16_bits(v: f32) -> u16 { half::bf16::from_f32(v).to_bits() }
+fn bf16_bits_to_f32(b: u16) -> f32 { half::bf16::from_bits(b).to_f32() }
+
+fn build_bf16_inputs(
+    n: usize,
+    k: usize,
+    gs_per_row: usize,
+    m: usize,
+) -> (Vec<u32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<u8>, Vec<u8>, Vec<u8>) {
+    let w: Vec<u32> = (0..n * k / 8)
+        .map(|i| {
+            let mut v = 0u32;
+            for bit in 0..8u32 {
+                v |= ((i as u32 + bit) & 0xF) << (bit * 4);
+            }
+            v
+        })
+        .collect();
+    let scales_f32: Vec<f32> = (0..n * gs_per_row).map(|i| 0.1 + (i as f32) * 0.001).collect();
+    let biases_f32: Vec<f32> = (0..n * gs_per_row).map(|i| (i as f32) * 0.0001).collect();
+    let x_f32: Vec<f32> = (0..m * k).map(|i| 1.0 + (i as f32) * 0.001).collect();
+    let scales: Vec<f32> =
+        scales_f32.iter().map(|&v| bf16_bits_to_f32(f32_to_bf16_bits(v))).collect();
+    let biases: Vec<f32> =
+        biases_f32.iter().map(|&v| bf16_bits_to_f32(f32_to_bf16_bits(v))).collect();
+    let x: Vec<f32> = x_f32.iter().map(|&v| bf16_bits_to_f32(f32_to_bf16_bits(v))).collect();
+    let scales_bytes: Vec<u8> =
+        scales_f32.iter().flat_map(|v| f32_to_bf16_bits(*v).to_le_bytes()).collect();
+    let biases_bytes: Vec<u8> =
+        biases_f32.iter().flat_map(|v| f32_to_bf16_bits(*v).to_le_bytes()).collect();
+    let x_bytes: Vec<u8> = x_f32.iter().flat_map(|v| f32_to_bf16_bits(*v).to_le_bytes()).collect();
+    (w, scales, biases, x, scales_bytes, biases_bytes, x_bytes)
+}
+
+fn check_bf16_outputs(out_bytes: &[u8], expected: &[f32], tol_rel: f32) {
+    let actual: Vec<f32> = out_bytes
+        .chunks_exact(2)
+        .map(|c| bf16_bits_to_f32(u16::from_le_bytes([c[0], c[1]])))
+        .collect();
+    assert_eq!(actual.len(), expected.len(), "output element count");
+    let mut max_rel = 0.0_f32;
+    let mut max_at = 0usize;
+    for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+        let rel = (e - a).abs() / e.abs().max(1.0);
+        if rel > max_rel {
+            max_rel = rel;
+            max_at = i;
+        }
+    }
+    assert!(
+        max_rel < tol_rel,
+        "max rel diff = {max_rel:.2e} at index {max_at} (expected {:.6}, got {:.6})",
+        expected[max_at],
+        actual[max_at],
+    );
+}
+
+#[test]
+fn mt_qmm_bm2_matches_cpu_reference_bf16() {
+    let m = 8usize;
+    let n = 16usize;
+    let k = 512usize;
+    let group_size = 64usize;
+    let gs_per_row = k / group_size;
+    let (w, scales, biases, x, scales_bytes, biases_bytes, x_bytes) =
+        build_bf16_inputs(n, k, gs_per_row, m);
+    let expected = cpu_qmm_reference(&w, &scales, &biases, &x, m, n, k, gs_per_row, group_size);
+
+    let _g = gpu_lock();
+    let ctx = Context::new().unwrap();
+    let out_bytes = run_qmm_bm2(
+        &ctx,
+        DType::BF16,
+        &w,
+        &scales_bytes,
+        &biases_bytes,
+        &x_bytes,
+        m,
+        n,
+        k,
+        gs_per_row,
+        2,
+    );
+    // bf16 has 7-bit mantissa + same expo range as fp32. Wider rel tolerance.
+    check_bf16_outputs(&out_bytes, &expected, 5e-2);
+}
+
+#[test]
+fn mt_qmm_bm4_matches_cpu_reference_bf16() {
+    let m = 8usize;
+    let n = 16usize;
+    let k = 512usize;
+    let group_size = 64usize;
+    let gs_per_row = k / group_size;
+    let (w, scales, biases, x, scales_bytes, biases_bytes, x_bytes) =
+        build_bf16_inputs(n, k, gs_per_row, m);
+    let expected = cpu_qmm_reference(&w, &scales, &biases, &x, m, n, k, gs_per_row, group_size);
+    let _g = gpu_lock();
+    let ctx = Context::new().unwrap();
+    let out_bytes = run_qmm_bm4(
+        &ctx,
+        DType::BF16,
+        &w,
+        &scales_bytes,
+        &biases_bytes,
+        &x_bytes,
+        m,
+        n,
+        k,
+        gs_per_row,
+        2,
+    );
+    check_bf16_outputs(&out_bytes, &expected, 5e-2);
+}
+
+#[test]
+fn mt_qmm_mma_matches_cpu_reference_bf16() {
+    let m = 32usize;
+    let n = 32usize;
+    let k = 512usize;
+    let group_size = 64usize;
+    let gs_per_row = k / group_size;
+    let (w, scales, biases, x, scales_bytes, biases_bytes, x_bytes) =
+        build_bf16_inputs(n, k, gs_per_row, m);
+    let expected = cpu_qmm_reference(&w, &scales, &biases, &x, m, n, k, gs_per_row, group_size);
+    let _g = gpu_lock();
+    let ctx = Context::new().unwrap();
+    let out_bytes = run_qmm_mma(
+        &ctx,
+        DType::BF16,
+        &w,
+        &scales_bytes,
+        &biases_bytes,
+        &x_bytes,
+        m,
+        n,
+        k,
+        gs_per_row,
+        2,
+    );
+    check_bf16_outputs(&out_bytes, &expected, 5e-2);
+}
+
+#[test]
+fn mt_qmm_mma_m16_matches_cpu_reference_bf16() {
+    let m = 16usize;
+    let n = 32usize;
+    let k = 512usize;
+    let group_size = 64usize;
+    let gs_per_row = k / group_size;
+    let (w, scales, biases, x, scales_bytes, biases_bytes, x_bytes) =
+        build_bf16_inputs(n, k, gs_per_row, m);
+    let expected = cpu_qmm_reference(&w, &scales, &biases, &x, m, n, k, gs_per_row, group_size);
+    let _g = gpu_lock();
+    let ctx = Context::new().unwrap();
+    let out_bytes = run_qmm_mma_m16(
+        &ctx,
+        DType::BF16,
+        &w,
+        &scales_bytes,
+        &biases_bytes,
+        &x_bytes,
+        m,
+        n,
+        k,
+        gs_per_row,
+        2,
+    );
+    check_bf16_outputs(&out_bytes, &expected, 5e-2);
+}
+
+#[test]
+fn mt_qmm_mma_matches_cpu_reference_f32_qwen3_shape_full_oracle() {
+    // Production cell with FULL CPU oracle (not smoke). M=32, n=k=5120
+    // — Qwen3 attention projection size at the M=32 prefill cell where
+    // mma is the routed kernel.
+    let m = 32usize;
+    let n = 5120usize;
+    let k = 5120usize;
+    let group_size = 64usize;
+    let gs_per_row = k / group_size;
+
+    // Smaller deterministic ranges to keep CPU oracle reasonable (~1.3M ops).
+    let w: Vec<u32> =
+        (0..n * k / 8).map(|i| ((i as u32) % 17).wrapping_mul(0xDEADBEEFu32)).collect();
+    let scales: Vec<f32> = (0..n * gs_per_row).map(|i| 0.005 + (i % 7) as f32 * 0.0007).collect();
+    let biases: Vec<f32> = (0..n * gs_per_row).map(|i| (i % 5) as f32 * 0.00005).collect();
+    let x: Vec<f32> = (0..m * k).map(|i| 0.05 + ((i % 23) as f32) * 0.003).collect();
+    let expected = cpu_qmm_reference(&w, &scales, &biases, &x, m, n, k, gs_per_row, group_size);
+
+    let scales_bytes: Vec<u8> = scales.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let biases_bytes: Vec<u8> = biases.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let x_bytes: Vec<u8> = x.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let _g = gpu_lock();
+    let ctx = Context::new().unwrap();
+    let out_bytes = run_qmm_mma(
+        &ctx,
+        DType::F32,
+        &w,
+        &scales_bytes,
+        &biases_bytes,
+        &x_bytes,
+        m,
+        n,
+        k,
+        gs_per_row,
+        4,
+    );
+    let actual: Vec<f32> =
+        out_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    assert_eq!(actual.len(), expected.len());
+    let mut max_diff = 0.0f32;
+    for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+        let d = (e - a).abs();
+        // K=5120 = 10 groups → accumulation can drift ~10 ULPs in fp32.
+        // Allow 5e-3 absolute (output magnitudes ~10-1000 at this shape).
+        if d > max_diff {
+            max_diff = d;
+            assert!(
+                d < 5e-3,
+                "production-shape mma divergence at [{i}]: {a:.6} vs {e:.6} (diff {d:.2e})"
+            );
+        }
+    }
+}
+
+#[test]
+fn mt_qmm_mma_m16_at_qwen3_shape_full_oracle_f32() {
+    // M=16 production cell with FULL CPU oracle. n=k=5120.
+    let m = 16usize;
+    let n = 5120usize;
+    let k = 5120usize;
+    let group_size = 64usize;
+    let gs_per_row = k / group_size;
+
+    let w: Vec<u32> =
+        (0..n * k / 8).map(|i| ((i as u32) % 13).wrapping_mul(0xC0FFEE00u32)).collect();
+    let scales: Vec<f32> = (0..n * gs_per_row).map(|i| 0.003 + (i % 11) as f32 * 0.0005).collect();
+    let biases: Vec<f32> = (0..n * gs_per_row).map(|i| (i % 9) as f32 * 0.00003).collect();
+    let x: Vec<f32> = (0..m * k).map(|i| 0.07 + ((i % 19) as f32) * 0.002).collect();
+    let expected = cpu_qmm_reference(&w, &scales, &biases, &x, m, n, k, gs_per_row, group_size);
+
+    let scales_bytes: Vec<u8> = scales.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let biases_bytes: Vec<u8> = biases.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let x_bytes: Vec<u8> = x.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let _g = gpu_lock();
+    let ctx = Context::new().unwrap();
+    let out_bytes = run_qmm_mma_m16(
+        &ctx,
+        DType::F32,
+        &w,
+        &scales_bytes,
+        &biases_bytes,
+        &x_bytes,
+        m,
+        n,
+        k,
+        gs_per_row,
+        4,
+    );
+    let actual: Vec<f32> =
+        out_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let mut max_diff = 0.0f32;
+    for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+        let d = (e - a).abs();
+        if d > max_diff {
+            max_diff = d;
+            assert!(d < 5e-3, "production-shape mma_m16 divergence at [{i}]: {a:.6} vs {e:.6}");
+        }
+    }
+}
