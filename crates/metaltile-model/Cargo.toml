@@ -20,6 +20,7 @@ toml = "0.8"
 indexmap = { version = "2", features = ["serde"] }
 thiserror = { workspace = true }
 inventory = { workspace = true }
+half = { workspace = true }
 
 [dev-dependencies]
 metaltile-codegen = { workspace = true }

@@ -215,6 +215,7 @@ pub fn execute_plan(
 
         for (param_name, slot_ref) in &node.output_bindings {
             let Some(bytes) = result.outputs.get(param_name) else { continue };
+
             match slot_ref {
                 SlotRef::Slot(idx) =>
                     if let Some(slot) = slot_data.get_mut(*idx) {
@@ -231,6 +232,7 @@ pub fn execute_plan(
     // Return the bytes of the plan's designated output slot.
     Ok(slot_data.get(plan.output_slot).cloned().unwrap_or_default())
 }
+
 
 /// Convert a `GridSpec` to `(grid_groups: [usize; 3], threads_per_group: [usize; 3])`.
 fn grid_to_dims(grid: &GridSpec) -> ([usize; 3], [usize; 3]) {

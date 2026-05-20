@@ -155,12 +155,9 @@ impl Session {
         // Prefill: feed each prompt token through the model to populate KV cache.
         // For simplicity we run one token at a time (decode path).
         // In a production system you'd want a separate prefill kernel.
-        eprintln!("[session] prompt_ids: {prompt_ids:?}");
-        eprintln!("[session] eos_token_id: {}", self.eos_token_id);
         let mut last_token_id = 0u32;
         for &token_id in &prompt_ids {
             last_token_id = self.step(token_id, temperature)?;
-            eprintln!("[session] after prefill token {token_id}, next={last_token_id}");
         }
 
         // Generate
