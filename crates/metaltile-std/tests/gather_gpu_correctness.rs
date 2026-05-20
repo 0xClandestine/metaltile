@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
-use metaltile_std::ffai::gather::gather;
+use metaltile_std::ffai::gather::ffai_gather;
 
 fn run_gather(table: &[f32], indices: &[u32], dt: Dt, n_tokens: usize, dim: usize) -> Vec<f32> {
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -36,7 +36,7 @@ fn run_gather(table: &[f32], indices: &[u32], dt: Dt, n_tokens: usize, dim: usiz
     buffers.insert("dim".into(), (dim as u32).to_le_bytes().to_vec());
 
     let ctx = Context::new().expect("Context::new on macOS");
-    let mut kernel = gather::kernel_ir_for(dt.to_dtype());
+    let mut kernel = ffai_gather::kernel_ir_for(dt.to_dtype());
     kernel.mode = KernelMode::Grid3D;
 
     // Grid3D: program_id::<0>() = thread index. Total threads = n_tokens * dim.
