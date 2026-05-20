@@ -124,7 +124,7 @@ fn aura_encode_int4_matches_naive_cpu_reference_f32() {
 fn aura_encode_int4_minimum_dim_f32() {
     // dim = 32 = exactly one Apple simdgroup. Smallest legal dim;
     // pins the n_simd = 1 path where `shared_norm` only holds one
-    // partial. Anything smaller (dim = 16) would silently mis-reduce.
+    // partial. Anything smaller (dim = 16) would silently reduce wrong.
     let dim = 32usize;
     let bits = 4usize;
     let rows = 1usize;
