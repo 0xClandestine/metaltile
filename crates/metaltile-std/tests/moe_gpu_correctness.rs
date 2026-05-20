@@ -25,18 +25,21 @@ fn run_topk(
     n_rows: usize,
     n_experts: usize,
     k: usize,
+    norm_topk_prob: u32,
     out_w_bytes_per_elem: usize,
 ) -> (Vec<u32>, Vec<u8>) {
+    assert!(k <= 32, "kernel pins k ≤ 32 (tg_chosen_* allocs are 32 slots)");
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     buffers.insert("router_logits".into(), router_logits_bytes.to_vec());
     buffers.insert("indices_out".into(), vec![0u8; n_rows * k * 4]);
     buffers.insert("weights_out".into(), vec![0u8; n_rows * k * out_w_bytes_per_elem]);
     buffers.insert("n_experts".into(), (n_experts as u32).to_le_bytes().to_vec());
     buffers.insert("k".into(), (k as u32).to_le_bytes().to_vec());
+    buffers.insert("norm_topk_prob".into(), norm_topk_prob.to_le_bytes().to_vec());
 
     let mut kernel = mt_moe_router_topk::kernel_ir_for(dtype);
     kernel.mode = metaltile_core::ir::KernelMode::Reduction;
-    // Grid: one TG per token row. tpg=32 (single simdgroup).
+    // Grid: one TG per token row. tpg=32 (single simdgroup) — kernel invariant.
     let result = ctx
         .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [n_rows, 1, 1], [32, 1, 1])
         .expect("dispatch_with_grid should succeed");
@@ -106,7 +109,8 @@ fn mt_moe_router_topk_matches_cpu_reference_f32() {
 
     let _g = gpu_lock();
     let ctx = Context::new().expect("Context::new on macOS");
-    let (gpu_idx, gpu_w_bytes) = run_topk(&ctx, DType::F32, &logits_bytes, n_rows, n_experts, k, 4);
+    let (gpu_idx, gpu_w_bytes) =
+        run_topk(&ctx, DType::F32, &logits_bytes, n_rows, n_experts, k, 1, 4);
     let gpu_w: Vec<f32> =
         gpu_w_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
 
@@ -234,7 +238,8 @@ fn mt_moe_router_topk_qwen3_moe_shape_f32() {
     let logits_bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
     let _g = gpu_lock();
     let ctx = Context::new().unwrap();
-    let (gpu_idx, gpu_w_bytes) = run_topk(&ctx, DType::F32, &logits_bytes, n_rows, n_experts, k, 4);
+    let (gpu_idx, gpu_w_bytes) =
+        run_topk(&ctx, DType::F32, &logits_bytes, n_rows, n_experts, k, 1, 4);
     let gpu_w: Vec<f32> =
         gpu_w_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
 
@@ -263,7 +268,8 @@ fn mt_moe_router_topk_f16() {
 
     let _g = gpu_lock();
     let ctx = Context::new().unwrap();
-    let (gpu_idx, gpu_w_bytes) = run_topk(&ctx, DType::F16, &logits_bytes, n_rows, n_experts, k, 2);
+    let (gpu_idx, gpu_w_bytes) =
+        run_topk(&ctx, DType::F16, &logits_bytes, n_rows, n_experts, k, 1, 2);
     let gpu_w: Vec<f32> = gpu_w_bytes
         .chunks_exact(2)
         .map(|c| f16_bits_to_f32(u16::from_le_bytes([c[0], c[1]])))
@@ -295,7 +301,8 @@ fn mt_moe_router_topk_k_equals_1() {
     let logits_bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
     let _g = gpu_lock();
     let ctx = Context::new().unwrap();
-    let (gpu_idx, gpu_w_bytes) = run_topk(&ctx, DType::F32, &logits_bytes, n_rows, n_experts, k, 4);
+    let (gpu_idx, gpu_w_bytes) =
+        run_topk(&ctx, DType::F32, &logits_bytes, n_rows, n_experts, k, 1, 4);
     let gpu_w: Vec<f32> =
         gpu_w_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
     assert_eq!(gpu_idx, ref_idx);
@@ -321,7 +328,7 @@ fn mt_moe_router_topk_tie_breaks_to_smaller_idx() {
     let logits_bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
     let _g = gpu_lock();
     let ctx = Context::new().unwrap();
-    let (gpu_idx, _) = run_topk(&ctx, DType::F32, &logits_bytes, n_rows, n_experts, k, 4);
+    let (gpu_idx, _) = run_topk(&ctx, DType::F32, &logits_bytes, n_rows, n_experts, k, 1, 4);
     assert_eq!(gpu_idx, vec![2u32, 5u32], "Tie-break: should pick 2 first then 5, not (5,2)");
 }
 
@@ -427,4 +434,87 @@ fn mt_moe_unpermute_qwen3_moe_shape_f16() {
     }
     // f16 + 8-way weighted-sum: relative tolerance ~1% covers k cumulative ULP drifts.
     assert!(max_rel < 1e-2, "Qwen3-MoE f16 unpermute max rel diff {max_rel:.2e}");
+}
+
+#[test]
+fn mt_moe_router_topk_qwen3_next_mode_f32() {
+    // norm_topk_prob=0 (Qwen3-Next semantics):
+    //   weight_i = exp(z_i) / Σ_j∈all exp(z_j)
+    // Returned probs sum to < 1.0 since the renormalize step is skipped.
+    let n_rows = 4usize;
+    let n_experts = 32usize;
+    let k = 4usize;
+    let logits: Vec<f32> =
+        (0..n_rows * n_experts).map(|i| ((i as f32 * 0.31) % 9.0) - 4.5).collect();
+
+    // CPU reference for Qwen3-Next: full softmax then take chosen probs.
+    let mut ref_idx = vec![0u32; n_rows * k];
+    let mut ref_w = vec![0.0f32; n_rows * k];
+    for row in 0..n_rows {
+        let row_logits = &logits[row * n_experts..(row + 1) * n_experts];
+        let max_v = row_logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let exp_vec: Vec<f32> = row_logits.iter().map(|&v| (v - max_v).exp()).collect();
+        let sum_all: f32 = exp_vec.iter().sum();
+        let probs: Vec<f32> = exp_vec.iter().map(|&e| e / sum_all).collect();
+
+        // Argpartition top-k.
+        let mut order: Vec<usize> = (0..n_experts).collect();
+        order.sort_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap());
+        for j in 0..k {
+            ref_idx[row * k + j] = order[j] as u32;
+            ref_w[row * k + j] = probs[order[j]];
+        }
+    }
+
+    let logits_bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let _g = gpu_lock();
+    let ctx = Context::new().unwrap();
+    let (gpu_idx, gpu_w_bytes) =
+        run_topk(&ctx, DType::F32, &logits_bytes, n_rows, n_experts, k, 0, 4);
+    let gpu_w: Vec<f32> =
+        gpu_w_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+
+    assert_eq!(gpu_idx, ref_idx, "Qwen3-Next: indices diverge");
+    for (i, (g, r)) in gpu_w.iter().zip(ref_w.iter()).enumerate() {
+        assert!((g - r).abs() < 1e-5, "Qwen3-Next weight[{i}]: gpu={g:.6} ref={r:.6}");
+    }
+
+    // Sanity: per-row weight sum should be < 1.0 (not renormalized).
+    for row in 0..n_rows {
+        let s: f32 = gpu_w[row * k..(row + 1) * k].iter().sum();
+        assert!(s < 1.0, "Qwen3-Next mode: row {row} sum is {s:.6}, should be < 1.0");
+    }
+}
+
+#[test]
+fn mt_moe_router_topk_bf16() {
+    let n_rows = 4usize;
+    let n_experts = 32usize;
+    let k = 4usize;
+    let logits_f32: Vec<f32> =
+        (0..n_rows * n_experts).map(|i| ((i as f32 * 0.21) % 5.0) - 2.5).collect();
+    // Round through bf16 (top 16 bits of fp32 representation).
+    let to_bf16_bits = |v: f32| -> u16 { (v.to_bits() >> 16) as u16 };
+    let from_bf16_bits = |b: u16| -> f32 { f32::from_bits((b as u32) << 16) };
+    let logits_round: Vec<f32> =
+        logits_f32.iter().map(|&v| from_bf16_bits(to_bf16_bits(v))).collect();
+    let (ref_idx, ref_w) = cpu_topk_reference(&logits_round, n_rows, n_experts, k);
+    let logits_bytes: Vec<u8> =
+        logits_f32.iter().flat_map(|v| to_bf16_bits(*v).to_le_bytes()).collect();
+
+    let _g = gpu_lock();
+    let ctx = Context::new().unwrap();
+    let (gpu_idx, gpu_w_bytes) =
+        run_topk(&ctx, DType::BF16, &logits_bytes, n_rows, n_experts, k, 1, 2);
+    let gpu_w: Vec<f32> = gpu_w_bytes
+        .chunks_exact(2)
+        .map(|c| from_bf16_bits(u16::from_le_bytes([c[0], c[1]])))
+        .collect();
+
+    assert_eq!(gpu_idx, ref_idx, "bf16: indices diverge");
+    // bf16 has ~7-bit mantissa — wider tolerance.
+    for (i, (g, r)) in gpu_w.iter().zip(ref_w.iter()).enumerate() {
+        let rel = (g - r).abs() / r.abs().max(1e-3);
+        assert!(rel < 2e-2, "bf16 weight[{i}]: rel {rel:.2e}");
+    }
 }

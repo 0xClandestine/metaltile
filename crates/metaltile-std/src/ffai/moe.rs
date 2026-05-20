@@ -73,15 +73,64 @@ pub fn mt_moe_router_topk<T>(
     mut weights_out: Tensor<T>,
     #[constexpr] n_experts: u32,
     #[constexpr] k: u32,
+    // 1 = Qwen3-MoE style (softmax over chosen-k, sum-to-1 — `norm_topk_prob=True`)
+    // 0 = Qwen3-Next style (softmax over ALL n_experts, return chosen probs
+    //     un-renormalized — `norm_topk_prob=False`)
+    // Mathematically equivalent at mode 1: softmax-over-chosen-k is the
+    // same as (softmax-over-all → renormalize-over-chosen). Mode 0
+    // returns probs that sum to < 1 across the chosen k, matching MLX's
+    // qwen3_next.py:334-341.
+    //
+    // INVARIANT: this kernel pins tpg=32 (one simdgroup per token row).
+    // The `simdgroup_barrier_mem_none()` below is correct only at tpg=32.
+    // Caller must dispatch with `[n_rows, 1, 1] × [32, 1, 1]`.
+    #[constexpr] norm_topk_prob: u32,
 ) {
     let row = tgid_x;
     let lane = tid;
     let row_base = row * n_experts;
 
     // TG scratch: chosen indices + values from each of the k argmax passes.
-    // 32 slots covers any reasonable k (typical 6-8).
+    // 32 slots covers any reasonable k (typical 6-8). Kernel assumes
+    // k ≤ 32 — caller MUST enforce this in the host-side dispatcher
+    // (no GPU-side check, would silently scribble into adjacent TG mem).
     threadgroup_alloc("tg_chosen_idx", 32u32);
     threadgroup_alloc("tg_chosen_val", 32u32);
+    // Cache the all-experts-softmax sum for Qwen3-Next mode (mode 0).
+    // 1 slot, written by lane 0 in the prepass.
+    threadgroup_alloc("tg_full_sum", 1u32);
+    threadgroup_alloc("tg_full_max", 1u32);
+
+    // ── Pre-pass: compute softmax denominator over ALL n_experts ─────
+    // Needed only for norm_topk_prob=0 (Qwen3-Next), but the cost is
+    // trivial (one simd_max + simd_sum) and emitting it unconditionally
+    // keeps the codegen tight (the codegen DCE will drop the dead path
+    // when the constexpr branch is unreachable).
+    let mut local_max_all = neg_infinity();
+    let n_per_lane_pre = (n_experts + 31u32) / 32u32;
+    for r in range(0u32, n_per_lane_pre, 1u32) {
+        let j = r * 32u32 + lane;
+        if j < n_experts {
+            let v = load(router_logits[row_base + j]).cast::<f32>();
+            let better = v > local_max_all;
+            local_max_all = select(better, v, local_max_all);
+        }
+    }
+    let row_max_all = simd_max(local_max_all);
+    let mut local_sum_all = 0.0f32;
+    for r in range(0u32, n_per_lane_pre, 1u32) {
+        let j = r * 32u32 + lane;
+        if j < n_experts {
+            let v = load(router_logits[row_base + j]).cast::<f32>();
+            local_sum_all = local_sum_all + exp(v - row_max_all);
+        }
+    }
+    let row_sum_all = simd_sum(local_sum_all);
+    if lane == 0u32 {
+        threadgroup_store("tg_full_max", 0u32, row_max_all);
+        threadgroup_store("tg_full_sum", 0u32, row_sum_all);
+    }
+    simdgroup_barrier_mem_none();
 
     // ── k argmax passes with chosen-mask ─────────────────────────────
     for it in range(0u32, k, 1u32) {
@@ -124,14 +173,26 @@ pub fn mt_moe_router_topk<T>(
         simdgroup_barrier_mem_none();
     }
 
-    // ── Softmax over the chosen k values ────────────────────────────
-    // Lanes 0..k-1 each hold one chosen value.  Stream + simd reduce.
+    // ── Softmax / weight emit per `norm_topk_prob` ──────────────────
+    // Mode 1 (Qwen3-MoE, default): softmax over chosen-k (sum-to-1).
+    //   numerator   = exp(z_i - max_chosen);  divisor = Σ_j∈chosen
+    //   == exp(z_i - max_all) · const / Σ_j∈chosen exp(z_j - max_all) · const
+    //   so we can use the SAME numerator as mode 0 (exp(z - max_all)) and
+    //   just swap the divisor.  Avoids needing a Rust `if`-expression
+    //   which the DSL doesn't unify across arms.
+    // Mode 0 (Qwen3-Next): un-normalized chosen probs (sum < 1).
+    //   weight_i = exp(z_i - max_all) / Σ_j∈all exp(z_j - max_all)
     let my_val = select(lane < k, threadgroup_load("tg_chosen_val", lane), neg_infinity());
-    let row_max = simd_max(my_val);
-    let exp_val = exp(my_val - row_max);
+    let row_max_full = threadgroup_load("tg_full_max", 0u32);
+    let row_sum_full = threadgroup_load("tg_full_sum", 0u32);
+    let exp_val = exp(my_val - row_max_full);
     let masked_exp = select(lane < k, exp_val, 0.0f32);
-    let sum_exp = simd_sum(masked_exp);
-    let weight = masked_exp / sum_exp;
+    let sum_chosen = simd_sum(masked_exp);
+    // Pick divisor: chosen-k sum for renormalized (mode 1) or all-experts
+    // sum for raw probs (mode 0). select() forces both to be live; codegen
+    // const-folds when `norm_topk_prob` bakes in.
+    let divisor = select(norm_topk_prob == 1u32, sum_chosen, row_sum_full);
+    let weight = masked_exp / divisor;
 
     // ── Write outputs ───────────────────────────────────────────────
     if lane < k {
