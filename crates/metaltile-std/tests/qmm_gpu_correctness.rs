@@ -2048,6 +2048,7 @@ fn mt_qmm_v2_vs_bm2_head_to_head_f16_m_sweep() {
 fn f32_to_bf16_bits(v: f32) -> u16 { half::bf16::from_f32(v).to_bits() }
 fn bf16_bits_to_f32(b: u16) -> f32 { half::bf16::from_bits(b).to_f32() }
 
+#[allow(clippy::type_complexity)]
 fn build_bf16_inputs(
     n: usize,
     k: usize,
