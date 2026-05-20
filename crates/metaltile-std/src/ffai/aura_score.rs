@@ -31,7 +31,7 @@
 //! - `dim`             — vector length.
 //! - `packed_width`    — `ceil(dim * bits / 32)`.
 //! - `repeat_count`    — GQA repeat factor (`n_q_heads / n_kv_heads`).
-//!                       When 1 (MHA), `kv_idx == q_idx`.
+//!   When 1 (MHA), `kv_idx == q_idx`.
 //!
 //! ## Tradeoff vs the MLX upstream
 //!
