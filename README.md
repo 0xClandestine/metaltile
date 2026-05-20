@@ -53,9 +53,10 @@ across f32 / f16 / bfloat16.
   compared against the corresponding MLX Metal kernel.
 - **All three float dtypes.** `f32`, `f16`, and `bfloat16` work identically —
   native `bfloat` emitted on Metal 3.1+.
-- **Rust-only correctness checking.** Every kernel is also verified against
-  CPU-computed reference values via the interpreter — no Mac required for that
-  layer.
+- **Layered correctness.** Codegen passes and the `#[kernel]` proc-macro have
+  unit + golden-MSL-snapshot coverage that runs on any platform; kernels are
+  verified end-to-end by GPU correctness tests against naive CPU references
+  and by the MLX side-by-side bench.
 
 ## Status
 
@@ -68,7 +69,6 @@ and type-level shape algebra are planned.
 | [`metaltile-macros`](crates/metaltile-macros/README.md) | `#[kernel]` proc macro |
 | [`metaltile-codegen`](crates/metaltile-codegen/README.md) | MSL lowering + optimization passes |
 | [`metaltile-runtime`](crates/metaltile-runtime/README.md) | Metal dispatch, PSO cache |
-| [`metaltile-interp`](crates/metaltile-interp) | CPU reference interpreter |
 | [`metaltile`](crates/metaltile/README.md) | facade re-exporting all crates |
 | [`metaltile-std`](crates/metaltile-std/README.md) | kernel stdlib, op files, bench types |
 | [`metaltile-cli`](crates/metaltile-cli/README.md) | the `tile` CLI binary |

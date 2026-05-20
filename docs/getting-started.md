@@ -8,7 +8,7 @@ Get a MetalTile checkout building, tested, and emitting a kernel.
   `rustfmt` features; the toolchain is pinned in `rust-toolchain.toml`, so
   `rustup` installs the right nightly automatically on first build.
 - **macOS + Metal** — only needed to *run* kernels on the GPU (`tile bench`,
-  GPU correctness tests). The DSL, codegen, and the CPU interpreter build and
+  GPU correctness tests). The DSL, codegen passes, and MSL emission build and
   test on any platform; non-Mac CI exercises everything except GPU dispatch.
 - **Xcode command-line tools** (`xcrun metal`) on macOS — the codegen smoke
   step compiles emitted MSL with the Metal toolchain.
@@ -28,7 +28,7 @@ components, and the optional `typos-cli` / `cargo-llvm-cov` tools.
 
 ```bash
 make build      # debug build of the whole workspace
-make test       # workspace tests — interpreter + codegen + GPU (if on a Mac)
+make test       # workspace tests — codegen, runtime, GPU correctness (GPU on a Mac)
 ```
 
 `make` is the canonical entry point — it centralises flags and always passes

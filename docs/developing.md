@@ -12,7 +12,6 @@ section, read [Kernel-authoring hazards](#kernel-authoring-hazards).
 | [`metaltile-macros`](../crates/metaltile-macros/README.md) | the `#[kernel]` proc-macro + body parser |
 | [`metaltile-codegen`](../crates/metaltile-codegen/README.md) | MSL lowering + optimization passes |
 | [`metaltile-runtime`](../crates/metaltile-runtime/README.md) | Metal dispatch, PSO cache |
-| [`metaltile-interp`](../crates/metaltile-interp) | CPU reference interpreter |
 | [`metaltile`](../crates/metaltile/README.md) | facade re-exporting all crates |
 | [`metaltile-std`](../crates/metaltile-std/README.md) | kernel stdlib, op files, bench types |
 | [`metaltile-cli`](../crates/metaltile-cli/README.md) | the `tile` CLI binary |
@@ -25,7 +24,7 @@ The compile pipeline: `#[kernel] fn` → `metaltile-macros` parses the body into
 
 ```bash
 make build       # debug build
-make test        # workspace tests (interpreter + codegen + GPU if on a Mac)
+make test        # workspace tests — codegen, runtime, GPU correctness (GPU on a Mac)
 make clippy      # lint with -D warnings
 make fmt         # format
 make fmt-check   # check formatting without writing

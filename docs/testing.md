@@ -23,7 +23,7 @@ syntax. **GPU correctness tests are the floor** — see the gaps section below.
 ## Running tests — what runs where
 
 ```bash
-make test        # whole workspace: interpreter + codegen + GPU tests (on a Mac)
+make test        # whole workspace: codegen, runtime, GPU correctness (GPU on a Mac)
 make clippy      # lint, -D warnings
 make fmt-check   # formatting
 make typos       # spell-check
