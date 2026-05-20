@@ -8,11 +8,12 @@
 //! ```no_run
 //! use metaltile_infer::{Session, ModelConfig};
 //! use metaltile_core::dtype::DType;
+//! use metaltile_model::FusionMode;
 //!
 //! # async fn run() -> Result<(), metaltile_infer::InferError> {
 //! let config = ModelConfig::from_file("/path/to/model/config.json")?;
 //! let toml_src = std::fs::read_to_string("models/llama_decode.toml")?;
-//! let mut session = Session::new("/path/to/model", &toml_src, config, DType::F16)?;
+//! let mut session = Session::new("/path/to/model", &toml_src, config, DType::F16, FusionMode::None)?;
 //! let out = session.generate("Hello, world!", 100, 0.8, |tok| print!("{tok}"))?;
 //! # Ok(())
 //! # }
@@ -29,4 +30,5 @@ pub use checkpoint::{
 };
 pub use config::ModelConfig;
 pub use error::InferError;
+pub use metaltile_model::FusionMode;
 pub use session::{GenerateOutput, Session};

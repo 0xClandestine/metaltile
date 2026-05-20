@@ -42,7 +42,7 @@ pub mod registry;
 pub mod schema;
 
 // Re-export the main types for convenience.
-pub use compiler::{CompileParams, compile};
+pub use compiler::{CompileParams, FusionMode, compile};
 pub use error::ModelError;
 pub use executor::{StateMap, WeightMap, execute_plan};
 pub use plan::{BufferSlot, ConstexprValue, DispatchNode, ExecutionPlan, SlotRef};

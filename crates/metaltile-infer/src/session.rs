@@ -14,6 +14,7 @@ use std::{collections::BTreeMap, path::Path};
 use metaltile_core::dtype::DType;
 use metaltile_model::{
     CompileParams,
+    FusionMode,
     KernelRegistry,
     ModelDef,
     StateMap,
@@ -64,11 +65,13 @@ impl Session {
     ///
     /// `toml_src` is the TOML model definition (e.g. contents of
     /// `models/llama_decode.toml`). `config` is the parsed `config.json`.
+    /// `fusion_mode` controls whether kernel fusion is applied.
     pub fn new(
         model_dir: impl AsRef<Path>,
         toml_src: &str,
         config: ModelConfig,
         dtype: DType,
+        fusion_mode: FusionMode,
     ) -> Result<Self, InferError> {
         let model_dir = model_dir.as_ref();
 
@@ -134,7 +137,7 @@ impl Session {
         }
 
         let params = build_compile_params(&config, dtype, all_state_keys);
-        let plan = compile(&def, &params, &reg)?;
+        let plan = compile(&def, &params, &reg, fusion_mode)?;
 
         // ── Initial state ──────────────────────────────────────────────
         let mut state = StateMap::new();

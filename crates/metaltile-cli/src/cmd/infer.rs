@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use metaltile_core::dtype::DType;
-use metaltile_infer::{ModelConfig, Session};
+use metaltile_infer::{FusionMode, ModelConfig, Session};
 
 /// Args for `tile infer`.
 #[derive(clap::Args)]
@@ -39,6 +39,17 @@ pub struct InferArgs {
     /// Cap max_seq_len (KV cache size). Defaults to 2048 to avoid huge allocations.
     #[arg(long = "max-seq-len", default_value = "2048")]
     pub max_seq_len: usize,
+
+    /// Enable graph-level kernel fusion. When set, the compiler automatically
+    /// fuses adjacent dispatch nodes, ignoring any TOML fuse annotations.
+    /// Without this flag, TOML fuse tags are honored but no automatic fusion
+    /// is performed. Use --no-fuse to disable all fusion.
+    #[arg(long = "fuse", default_value_t = false, conflicts_with = "no_fuse")]
+    pub fuse: bool,
+
+    /// Disable all kernel fusion, including TOML fuse tags.
+    #[arg(long = "no-fuse", default_value_t = false, conflicts_with = "fuse")]
+    pub no_fuse: bool,
 }
 
 pub fn run(args: &InferArgs) {
@@ -84,9 +95,18 @@ async fn run_async(args: &InferArgs) -> Result<(), metaltile_infer::InferError> 
         },
     };
 
+    // ── Fusion mode ──────────────────────────────────────────────────
+    let fusion_mode = if args.no_fuse {
+        FusionMode::None
+    } else if args.fuse {
+        FusionMode::GraphDriven
+    } else {
+        FusionMode::TomlDriven
+    };
+
     // ── Build session ──────────────────────────────────────────────────
     eprintln!("Loading weights and uploading to GPU…");
-    let mut session = Session::new(&model_dir, &toml_src, config, dtype)?;
+    let mut session = Session::new(&model_dir, &toml_src, config, dtype, fusion_mode)?;
 
     // ── Generate ───────────────────────────────────────────────────────
     eprintln!("\n--- generating ---");

@@ -117,6 +117,13 @@ pub struct KernelNode {
     /// NOT forwarded to the GPU as kernel constexprs.
     #[serde(default)]
     pub dispatch: Option<IndexMap<String, String>>,
+    /// Optional fusion group tag. Contiguous kernels with matching
+    /// `fuse` values are dispatched through a single `dispatch_chain`
+    /// call with private-memory aliasing between passes.
+    /// Ignored when the `--fuse` CLI flag is passed (graph compiler
+    /// takes full control).
+    #[serde(default)]
+    pub fuse: Option<String>,
 }
 
 // ── Validation helpers ──────────────────────────────────────────────────

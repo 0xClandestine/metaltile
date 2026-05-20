@@ -7,7 +7,7 @@
 //! Compilation is pure CPU-side — no Metal device needed. The resulting
 //! `ExecutionPlan` can be dispatched later via the executor.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use metaltile_core::{dtype::DType, ir::KernelMode};
 use metaltile_runtime::context::GridSpec;
@@ -20,8 +20,30 @@ use crate::{
     liveness::assign_slots,
     plan::{DispatchNode, ExecutionPlan, SlotRef},
     registry::KernelRegistry,
-    schema::ModelDef,
+    schema::{KernelNode, ModelDef},
 };
+
+/// An un-compiled node from the TOML, before op resolution and grid
+/// computation.
+#[derive(Debug)]
+struct RawNode {
+    label: String,
+    node: KernelNode,
+    layer_idx: Option<usize>,
+}
+
+/// Controls how kernel fusion is applied during compilation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FusionMode {
+    /// No fusion — dispatch every kernel individually.
+    None,
+    /// Honor TOML `fuse = "..."` tags. Contiguous kernels with the same
+    /// tag are dispatched through a single `dispatch_chain` call.
+    TomlDriven,
+    /// Run the automatic graph-level fusion pass — identifies
+    /// producer-consumer chains and fuses them. Ignores TOML fuse tags.
+    GraphDriven,
+}
 
 /// Parameters resolved from a checkpoint, passed to the compiler.
 #[derive(Debug, Clone)]
@@ -52,12 +74,15 @@ impl CompileParams {
 /// 2. Unroll pre_kernel + layer loop + post kernels.
 /// 3. For each node: validate op in registry, evaluate constexprs,
 ///    resolve tensor references to `SlotRef`s, compute grid.
-/// 4. Run liveness analysis on intermediate buffers, assign `BufferSlot`s.
-/// 5. Return the fully resolved `ExecutionPlan`.
+/// 4. Run graph-level fusion or apply TOML fuse tags (depending on
+///    `fusion_mode`).
+/// 5. Run liveness analysis on intermediate buffers, assign `BufferSlot`s.
+/// 6. Return the fully resolved `ExecutionPlan`.
 pub fn compile(
     def: &ModelDef,
     p: &CompileParams,
     reg: &KernelRegistry,
+    fusion_mode: FusionMode,
 ) -> Result<ExecutionPlan, ModelError> {
     // ── Step 0: Merge def.params with CompileParams.params ──────────
     let resolved_params: HashMap<String, u32> = def
@@ -78,13 +103,6 @@ pub fn compile(
 
     // ── Step 1: Build the unrolled node list ────────────────────────
     let n_layers = p.n_layers;
-
-    #[derive(Debug)]
-    struct RawNode {
-        label: String,
-        node: crate::schema::KernelNode,
-        layer_idx: Option<usize>,
-    }
 
     let mut raw_nodes: Vec<RawNode> = Vec::new();
 
@@ -245,15 +263,41 @@ pub fn compile(
             cexprs,
             grid,
             dtype: p.activation_dtype,
+            fuse_group: None,
         });
+    }
+
+    // ── Step 2.5: Graph-level fusion or TOML fuse groups ─────────
+    match fusion_mode {
+        FusionMode::TomlDriven => {
+            validate_fuse_groups(&raw_nodes)?;
+            assign_toml_fuse_groups(&mut nodes, &raw_nodes);
+        },
+        FusionMode::GraphDriven => {
+            let (n_fused_groups, n_unfused) = fuse_dispatch_nodes(&mut nodes);
+            // Log fusion stats if there were any fused groups.
+            if n_fused_groups > 0 {
+                eprintln!(
+                    "[compiler] graph fusion: {n_fused_groups} groups, {n_unfused} standalone nodes"
+                );
+            }
+        },
+        FusionMode::None => { /* no fusion */ },
     }
 
     // ── Step 3: Liveness analysis → slot assignment ────────────────
     // name_to_slot is the canonical map built during assignment — it preserves
     // all tenant names even when slots are reused (slot.name is overwritten on
     // reuse, so rebuilding from the slot vector would lose earlier tenant names).
+
+    // Filter out intra-fuse-group intermediates — they're handled by
+    // dispatch_chain's private-memory aliasing and don't need persistent
+    // BufferSlots.
+    let (filtered_outputs, filtered_inputs) =
+        filter_intra_group_intermediates(&nodes, &intermediate_outputs, &intermediate_inputs);
+
     let (slots, name_to_slot) =
-        assign_slots(nodes.len(), &intermediate_outputs, &intermediate_inputs);
+        assign_slots(nodes.len(), &filtered_outputs, &filtered_inputs);
 
     // Replace Weight("_name") placeholders with Slot(idx).
     for node in &mut nodes {
@@ -276,6 +320,408 @@ pub fn compile(
         .unwrap_or(0);
 
     Ok(ExecutionPlan { nodes, slots, output_slot, n_layers })
+}
+
+// ── Graph-level kernel fusion ──────────────────────────────────────────
+
+/// Maximum number of nodes that can be fused into one `dispatch_chain` call.
+const MAX_FUSED_PER_CHAIN: usize = 8;
+
+/// Intermediate name prefix — tensors with this prefix are transient
+/// (local to the layer) and can participate in fusion.
+const INTERMEDIATE_PREFIX: char = '_';
+
+/// Fuse adjacent `DispatchNode`s whose intermediate outputs have a single
+/// consumer within their local scope.  Returns `(n_fused_groups, n_unfused_nodes)`.
+///
+/// Algorithm (inspired by the IR-level `fuse_block` in `passes/fusion.rs`):
+/// 1. Build ordered write/read position lists per intermediate name.
+///    Because intermediate names are reused across layers (e.g. `_gate`
+///    appears in every layer), we track per-instance scoping: an
+///    intermediate is single-use only if, between its write and the next
+///    write to the same name, there is exactly one reader — and that
+///    reader is the adjacent node.
+/// 2. Walk nodes in reverse, finding maximal fusible chains.
+/// 3. Assign sequential `fuse_group` IDs to each chain.
+fn fuse_dispatch_nodes(nodes: &mut [DispatchNode]) -> (usize, usize) {
+    let n = nodes.len();
+    if n < 2 {
+        return (0, n);
+    }
+
+    // ── Phase 1: Build ordered position lists ──────────────────
+    // writes[name] = sorted node indices that write `name`.
+    // reads[name]  = sorted node indices that read `name`.
+    // defs[i]       = intermediate names written by node `i`.
+    let mut writes: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut reads: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut defs: Vec<Vec<String>> = vec![Vec::new(); n];
+
+    for (i, node) in nodes.iter().enumerate() {
+        for (_, slot_ref) in &node.input_bindings {
+            if let SlotRef::Weight(name) = slot_ref
+                && name.starts_with(INTERMEDIATE_PREFIX)
+            {
+                reads.entry(name.clone()).or_default().push(i);
+            }
+        }
+        for (_, slot_ref) in &node.output_bindings {
+            if let SlotRef::Weight(name) = slot_ref
+                && name.starts_with(INTERMEDIATE_PREFIX)
+            {
+                writes.entry(name.clone()).or_default().push(i);
+                defs[i].push(name.clone());
+            }
+        }
+    }
+
+    // Sort positions (they're inserted in order already, but be safe).
+    for v in writes.values_mut() { v.sort_unstable(); }
+    for v in reads.values_mut() { v.sort_unstable(); }
+
+    // ── Phase 2: Find maximal fusible chains (backward scan) ─────
+    let mut fused: HashSet<usize> = HashSet::default();
+    let mut chains: Vec<Vec<usize>> = Vec::new();
+
+    for i in (0..n).rev() {
+        if fused.contains(&i) {
+            continue;
+        }
+
+        let mut chain: Vec<usize> = vec![i];
+        let mut cursor = i;
+
+        loop {
+            let Some(pred) =
+                find_single_use_producer_local(cursor, nodes, &writes, &reads, &defs)
+            else {
+                break;
+            };
+            if fused.contains(&pred)
+                || !is_fusible_local(nodes, pred, cursor, &writes, &reads)
+            {
+                break;
+            }
+            if chain.len() >= MAX_FUSED_PER_CHAIN {
+                break;
+            }
+            chain.push(pred);
+            cursor = pred;
+        }
+
+        if chain.len() >= 2 {
+            chain.reverse();
+            for &idx in &chain {
+                fused.insert(idx);
+            }
+            chains.push(chain);
+        }
+    }
+
+    // ── Phase 3: Assign sequential fuse_group IDs ────────────────
+    let total_fused: usize = chains.iter().map(|c| c.len()).sum();
+    let n_unfused = n - total_fused;
+
+    for (group_id, chain) in chains.iter().enumerate() {
+        for &node_idx in chain {
+            nodes[node_idx].fuse_group = Some(group_id);
+        }
+    }
+
+    (chains.len(), n_unfused)
+}
+
+/// Check whether `name` written at `producer_idx` has a single consumer
+/// in its local scope (between this write and the next write to `name`).
+/// Returns `true` when exactly one reader exists and it is at
+/// `producer_idx + 1`.
+fn is_local_single_use(
+    name: &str,
+    producer_idx: usize,
+    writes: &HashMap<String, Vec<usize>>,
+    reads: &HashMap<String, Vec<usize>>,
+) -> bool {
+    let Some(write_list) = writes.get(name) else { return false };
+    let Some(read_list) = reads.get(name) else { return false };
+
+    // Find this write's position in the ordered write list.
+    let Ok(write_pos) = write_list.binary_search(&producer_idx) else { return false };
+    let next_write = write_list.get(write_pos + 1).copied();
+
+    // Find the first reader at or after producer_idx.
+    let read_start = match read_list.binary_search(&producer_idx) {
+        Ok(pos) => pos + 1, // skip the write itself if it happens to also read
+        Err(pos) => pos,
+    };
+    // Find the first reader at or after the next write (exclusive bound).
+    let read_end = match next_write {
+        Some(nw) => match read_list.binary_search(&nw) {
+            Ok(pos) => pos,
+            Err(pos) => pos,
+        },
+        None => read_list.len(),
+    };
+
+    let local_readers = &read_list[read_start..read_end];
+    local_readers.len() == 1 && local_readers[0] == producer_idx + 1
+}
+
+/// Find the immediate predecessor of `cursor` that writes an intermediate
+/// which `cursor` reads and which is single-use in its local scope.
+fn find_single_use_producer_local(
+    cursor: usize,
+    nodes: &[DispatchNode],
+    writes: &HashMap<String, Vec<usize>>,
+    reads: &HashMap<String, Vec<usize>>,
+    defs: &[Vec<String>],
+) -> Option<usize> {
+    let pred = cursor.checked_sub(1)?;
+
+    // All intermediates written by pred that cursor also reads.
+    for name in &defs[pred] {
+        let cursor_reads = nodes[cursor]
+            .input_bindings
+            .iter()
+            .any(|(_, sr)| matches!(sr, SlotRef::Weight(n) if n == name));
+        if cursor_reads && is_local_single_use(name, pred, writes, reads) {
+            return Some(pred);
+        }
+    }
+    None
+}
+
+/// Predicate: can node `producer` and `consumer` be fused?
+/// Uses local-scope single-use semantics (respects intermediate name reuse
+/// across layers).
+fn is_fusible_local(
+    nodes: &[DispatchNode],
+    producer: usize,
+    consumer: usize,
+    writes: &HashMap<String, Vec<usize>>,
+    reads: &HashMap<String, Vec<usize>>,
+) -> bool {
+    if consumer != producer + 1 {
+        return false;
+    }
+
+    let mut has_shared = false;
+    for (_, slot_ref) in &nodes[producer].output_bindings {
+        if let SlotRef::Weight(name) = slot_ref
+            && name.starts_with(INTERMEDIATE_PREFIX)
+        {
+            // Check if consumer reads this name.
+            let read_by_consumer = nodes[consumer]
+                .input_bindings
+                .iter()
+                .any(|(_, sr)| matches!(sr, SlotRef::Weight(n) if n == name));
+
+            if !read_by_consumer {
+                // Producer writes this name, but consumer doesn't read it.
+                // That's fine — but we must NOT penalize multi-use here.
+                // Only check local single-use for names the consumer DOES read.
+                continue;
+            }
+
+            // Consumer reads this name — now verify local single-use.
+            if !is_local_single_use(name, producer, writes, reads) {
+                return false;
+            }
+            has_shared = true;
+        }
+    }
+    has_shared
+}
+
+// ── TOML fuse tag handling ─────────────────────────────────────────────
+
+/// Validate that TOML `fuse` tags are contiguous.
+fn validate_fuse_groups(raw_nodes: &[RawNode]) -> Result<(), ModelError> {
+    let mut seen: HashMap<&str, usize> = HashMap::default();
+    let mut in_group: Option<&str> = None;
+
+    for (i, raw) in raw_nodes.iter().enumerate() {
+        let tag = raw.node.fuse.as_deref();
+        match (in_group, tag) {
+            (Some(cur), Some(tag)) if cur == tag => {
+                // Still in same group.
+            },
+            (Some(_), Some(tag)) => {
+                // Switching to a different group.
+                if seen.contains_key(tag) {
+                    return Err(ModelError::NonContiguousFuseGroup {
+                        tag: tag.to_string(),
+                        first_instance: seen[tag],
+                        second_start: i,
+                    });
+                }
+                seen.entry(tag).or_insert(i);
+                in_group = Some(tag);
+            },
+            (Some(_), None) => {
+                in_group = None;
+            },
+            (None, Some(tag)) => {
+                if seen.contains_key(tag) {
+                    return Err(ModelError::NonContiguousFuseGroup {
+                        tag: tag.to_string(),
+                        first_instance: seen[tag],
+                        second_start: i,
+                    });
+                }
+                seen.entry(tag).or_insert(i);
+                in_group = Some(tag);
+            },
+            (None, None) => { /* no group */ },
+        }
+    }
+
+    Ok(())
+}
+
+/// Assign `fuse_group` IDs from TOML `fuse` annotations.
+/// Contiguous nodes with matching `fuse` tags get the same group ID.
+fn assign_toml_fuse_groups(nodes: &mut [DispatchNode], raw_nodes: &[RawNode]) {
+    let mut current_tag: Option<&str> = None;
+    let mut next_group_id: usize = 0;
+
+    for (i, node) in nodes.iter_mut().enumerate() {
+        let tag = raw_nodes[i].node.fuse.as_deref();
+        match (current_tag, tag) {
+            (None, Some(tag)) => {
+                current_tag = Some(tag);
+                node.fuse_group = Some(next_group_id);
+            },
+            (Some(cur), Some(tag)) if cur == tag => {
+                node.fuse_group = Some(next_group_id);
+            },
+            (Some(_), maybe_tag) => {
+                // Tag changed or ended.
+                next_group_id += 1;
+                current_tag = maybe_tag;
+                if maybe_tag.is_some() {
+                    node.fuse_group = Some(next_group_id);
+                }
+            },
+            (None, None) => { /* no group */ },
+        }
+    }
+}
+
+/// Filter out intermediates that are both written and read entirely within
+/// a single fuse group. These are handled by `dispatch_chain`'s
+/// private-memory aliasing and don't need a persistent `BufferSlot`.
+///
+/// Uses local-scope analysis: an intermediate instance (between a write
+/// and the next write to the same name) is intra-group-only if ALL its
+/// readers share the same `fuse_group` as the writer.
+fn filter_intra_group_intermediates(
+    nodes: &[DispatchNode],
+    intermediate_outputs: &[Vec<(String, usize)>],
+    intermediate_inputs: &[Vec<String>],
+) -> (Vec<Vec<(String, usize)>>, Vec<Vec<String>>) {
+    let n = nodes.len();
+
+    // Build ordered write/read positions per intermediate name.
+    let mut writes: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut reads: HashMap<String, Vec<usize>> = HashMap::new();
+
+    for i in 0..n {
+        for (name, _) in &intermediate_outputs[i] {
+            writes.entry(name.clone()).or_default().push(i);
+        }
+        for name in &intermediate_inputs[i] {
+            reads.entry(name.clone()).or_default().push(i);
+        }
+    }
+
+    // For each name, for each write instance, check if all local readers
+    // share the same fuse_group as the writer. If so, the name AT THAT
+    // WRITE INSTANCE is intra-group-only and can be skipped from liveness.
+    // We track this as a set of (name, write_position) pairs.
+    let mut intra_group_instances: HashSet<(String, usize)> = HashSet::new();
+
+    for (name, write_list) in &writes {
+        let Some(read_list) = reads.get(name) else { continue };
+
+        for (wi, &write_pos) in write_list.iter().enumerate() {
+            let writer_group = nodes[write_pos].fuse_group;
+            let Some(writer_group) = writer_group else { continue };
+
+            let next_write = write_list.get(wi + 1).copied();
+
+            // Find readers between write_pos and next_write.
+            let read_start = match read_list.binary_search(&write_pos) {
+                Ok(pos) => pos + 1,
+                Err(pos) => pos,
+            };
+            let read_end = match next_write {
+                Some(nw) => match read_list.binary_search(&nw) {
+                    Ok(pos) => pos,
+                    Err(pos) => pos,
+                },
+                None => read_list.len(),
+            };
+
+            let local_readers = &read_list[read_start..read_end];
+
+            // All local readers must be in the same fuse_group as the writer.
+            if local_readers.is_empty() {
+                continue;
+            }
+            if local_readers
+                .iter()
+                .all(|&r| nodes[r].fuse_group == Some(writer_group))
+            {
+                intra_group_instances.insert((name.clone(), write_pos));
+            }
+        }
+    }
+
+    if intra_group_instances.is_empty() {
+        return (intermediate_outputs.to_vec(), intermediate_inputs.to_vec());
+    }
+
+    // Build filtered lists: for each node, skip (name, _) entries where
+    // (name, node_index) is in intra_group_instances.
+    let filtered_outputs: Vec<Vec<(String, usize)>> = intermediate_outputs
+        .iter()
+        .enumerate()
+        .map(|(i, outs)| {
+            outs.iter()
+                .filter(|(name, _)| !intra_group_instances.contains(&(name.clone(), i)))
+                .cloned()
+                .collect()
+        })
+        .collect();
+
+    let filtered_inputs: Vec<Vec<String>> = intermediate_inputs
+        .iter()
+        .enumerate()
+        .map(|(i, ins)| {
+            ins.iter()
+                .filter(|name| {
+                    // Keep this input if its name+producer pair is NOT intra-group.
+                    // We need to find the producer of this name for cursor i.
+                    // The producer is the most recent write before i.
+                    let producer = writes
+                        .get(*name)
+                        .and_then(|wl| {
+                            match wl.binary_search(&i) {
+                                Ok(pos) => wl.get(pos),
+                                Err(pos) => wl.get(pos.checked_sub(1)?),
+                            }
+                        });
+                    match producer {
+                        Some(&p) => !intra_group_instances.contains(&((*name).clone(), p)),
+                        None => true,
+                    }
+                })
+                .cloned()
+                .collect()
+        })
+        .collect();
+
+    (filtered_outputs, filtered_inputs)
 }
 
 // ── Dispatch hint evaluation ───────────────────────────────────────────
@@ -470,7 +916,7 @@ dispatch = { rows = "1", tpg = "1024", out_elems = "$hidden_dim" }
             state_keys: vec![],
         };
 
-        let plan = compile(&def, &params, &reg).expect("compile");
+        let plan = compile(&def, &params, &reg, FusionMode::None).expect("compile");
         assert_eq!(plan.nodes.len(), 1, "one layer × one kernel = 1 node");
         assert_eq!(plan.n_layers, 1);
     }
@@ -492,7 +938,7 @@ dispatch = { rows = "1", tpg = "1024", out_elems = "$hidden_dim" }
             state_keys: vec![],
         };
 
-        let plan = compile(&def, &params, &reg).expect("compile");
+        let plan = compile(&def, &params, &reg, FusionMode::None).expect("compile");
         assert_eq!(plan.nodes.len(), 4, "4 layers × 1 kernel = 4 nodes");
         assert_eq!(plan.n_layers, 4);
 
@@ -523,7 +969,7 @@ outputs = {}
             state_keys: vec![],
         };
 
-        let result = compile(&def, &params, &reg);
+        let result = compile(&def, &params, &reg, FusionMode::None);
         assert!(result.is_err(), "unknown op should fail");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("nonexistent_kernel"), "error should mention the bad op: {err}");
@@ -578,7 +1024,7 @@ outputs = {}
             state_keys: base_state_keys(),
         };
 
-        let plan = compile(&def, &params, &reg).expect("compile llama_decode");
+        let plan = compile(&def, &params, &reg, FusionMode::None).expect("compile llama_decode");
         assert_eq!(plan.n_layers, 4);
 
         let pre = def.pre_kernel.len();
@@ -594,5 +1040,329 @@ outputs = {}
         for node in &plan.nodes {
             assert!(!node.label.is_empty(), "node must have a label");
         }
+    }
+
+    // ── Fusion pass tests ─────────────────────────────────────────
+
+    /// A minimal two-node MLP (gemv→silu) that should fuse.
+    fn fusion_toml_gate_silu() -> &'static str {
+        r#"
+[model]
+name = "fusion_test"
+
+[params]
+hidden_dim = "$hidden_dim"
+ffn_dim = "$ffn_dim"
+
+[model.layer]
+name = "test"
+
+[[layer.kernel]]
+op = "gemv"
+inputs = { mat = "_weight", vec = "_input" }
+outputs = { out = "_gate" }
+constexpr = { k = "$hidden_dim" }
+dispatch = { rows = "$ffn_dim", tpg = "256", out_elems = "$ffn_dim" }
+
+[[layer.kernel]]
+op = "unary/silu"
+inputs = { a = "_gate" }
+outputs = { out = "_gated" }
+dispatch = { n = "$ffn_dim", out_elems = "$ffn_dim" }
+"#
+    }
+
+    #[test]
+    fn graph_fusion_fuses_gate_silu() {
+        let def: ModelDef = toml::from_str(fusion_toml_gate_silu()).expect("parse TOML");
+        let reg = make_registry();
+        let params = CompileParams {
+            params: {
+                let mut m = HashMap::new();
+                m.insert("hidden_dim".into(), 4096);
+                m.insert("ffn_dim".into(), 14336);
+                m.insert("n_layers".into(), 1);
+                m
+            },
+            float_params: HashMap::new(),
+            activation_dtype: DType::F32,
+            n_layers: 1,
+            state_keys: vec![],
+        };
+
+        let plan = compile(&def, &params, &reg, FusionMode::GraphDriven).expect("compile");
+        assert_eq!(plan.nodes.len(), 2);
+
+        // Both nodes should share the same fuse_group.
+        let g0 = plan.nodes[0].fuse_group;
+        let g1 = plan.nodes[1].fuse_group;
+        assert!(g0.is_some(), "gemv should be in a fused group");
+        assert_eq!(g0, g1, "gemv and silu should share the same fuse group");
+    }
+
+    #[test]
+    fn no_fusion_mode_skips_fusion() {
+        let def: ModelDef = toml::from_str(fusion_toml_gate_silu()).expect("parse TOML");
+        let reg = make_registry();
+        let params = CompileParams {
+            params: {
+                let mut m = HashMap::new();
+                m.insert("hidden_dim".into(), 4096);
+                m.insert("ffn_dim".into(), 14336);
+                m.insert("n_layers".into(), 1);
+                m
+            },
+            float_params: HashMap::new(),
+            activation_dtype: DType::F32,
+            n_layers: 1,
+            state_keys: vec![],
+        };
+
+        let plan = compile(&def, &params, &reg, FusionMode::None).expect("compile");
+        assert_eq!(plan.nodes.len(), 2);
+        assert!(
+            plan.nodes.iter().all(|n| n.fuse_group.is_none()),
+            "FusionMode::None should leave fuse_group as None"
+        );
+    }
+
+    /// A three-node MLP where fan-out prevents full fusion.
+    /// gate → silu → mul, but _ffn_normed feeds both gate and up gemv.
+    /// The graph fusion pass should detect that gate and silu are fusible
+    /// (single-use _gate), but silu and mul are not adjacent.
+    fn fusion_toml_fanout() -> &'static str {
+        r#"
+[model]
+name = "fusion_fanout"
+
+[params]
+hidden_dim = "$hidden_dim"
+ffn_dim = "$ffn_dim"
+
+[model.layer]
+name = "test"
+
+[[layer.kernel]]
+op = "gemv"
+inputs = { mat = "_w_gate", vec = "_normed" }
+outputs = { out = "_gate" }
+constexpr = { k = "$hidden_dim" }
+dispatch = { rows = "$ffn_dim", tpg = "256", out_elems = "$ffn_dim" }
+
+[[layer.kernel]]
+op = "unary/silu"
+inputs = { a = "_gate" }
+outputs = { out = "_gated" }
+dispatch = { n = "$ffn_dim", out_elems = "$ffn_dim" }
+
+[[layer.kernel]]
+op = "gemv"
+inputs = { mat = "_w_up", vec = "_normed" }
+outputs = { out = "_up" }
+constexpr = { k = "$hidden_dim" }
+dispatch = { rows = "$ffn_dim", tpg = "256", out_elems = "$ffn_dim" }
+"#
+    }
+
+    #[test]
+    fn graph_fusion_handles_fanout() {
+        let def: ModelDef = toml::from_str(fusion_toml_fanout()).expect("parse TOML");
+        let reg = make_registry();
+        let params = CompileParams {
+            params: {
+                let mut m = HashMap::new();
+                m.insert("hidden_dim".into(), 4096);
+                m.insert("ffn_dim".into(), 14336);
+                m.insert("n_layers".into(), 1);
+                m
+            },
+            float_params: HashMap::new(),
+            activation_dtype: DType::F32,
+            n_layers: 1,
+            state_keys: vec![],
+        };
+
+        let plan = compile(&def, &params, &reg, FusionMode::GraphDriven).expect("compile");
+        assert_eq!(plan.nodes.len(), 3);
+
+        // gate (node 0) → silu (node 1) should be fused (single-use _gate).
+        assert!(
+            plan.nodes[0].fuse_group.is_some(),
+            "gate gemv should be fused with silu"
+        );
+        assert_eq!(
+            plan.nodes[0].fuse_group, plan.nodes[1].fuse_group,
+            "gate and silu should share same group"
+        );
+
+        // up gemv (node 2) reads _normed (fan-out), so it's NOT fused with
+        // silu — node 1 does NOT consume _up.
+        // The graph fusion should leave node 2 unfused.
+        assert!(
+            plan.nodes[2].fuse_group.is_none(),
+            "up gemv should NOT be fused (no shared intermediate with silu)"
+        );
+    }
+
+    /// TOML-driven fusion: two nodes with matching `fuse` tags should
+    /// get the same fuse_group.
+    #[test]
+    fn toml_fuse_tag_groups_contiguous_nodes() {
+        let toml_src = r#"
+[model]
+name = "toml_fuse"
+
+[params]
+hidden_dim = "$hidden_dim"
+
+[model.layer]
+name = "test"
+
+[[layer.kernel]]
+op = "unary/silu"
+inputs = { a = "_in" }
+outputs = { out = "_mid" }
+dispatch = { n = "$hidden_dim", out_elems = "$hidden_dim" }
+fuse = "my_group"
+
+[[layer.kernel]]
+op = "unary/silu"
+inputs = { a = "_mid" }
+outputs = { out = "_out" }
+dispatch = { n = "$hidden_dim", out_elems = "$hidden_dim" }
+fuse = "my_group"
+"#;
+
+        let def: ModelDef = toml::from_str(toml_src).expect("parse TOML");
+        let reg = make_registry();
+        let params = CompileParams {
+            params: {
+                let mut m = HashMap::new();
+                m.insert("hidden_dim".into(), 128);
+                m.insert("n_layers".into(), 1);
+                m
+            },
+            float_params: HashMap::new(),
+            activation_dtype: DType::F32,
+            n_layers: 1,
+            state_keys: vec![],
+        };
+
+        let plan =
+            compile(&def, &params, &reg, FusionMode::TomlDriven).expect("compile");
+        assert_eq!(plan.nodes.len(), 2);
+
+        let g0 = plan.nodes[0].fuse_group;
+        let g1 = plan.nodes[1].fuse_group;
+        assert!(g0.is_some(), "first node should be in a fused group");
+        assert_eq!(g0, g1, "matching fuse tags should share group ID");
+    }
+
+    /// TOML-driven: non-contiguous matching tags should error.
+    #[test]
+    fn toml_fuse_non_contiguous_is_error() {
+        let toml_src = r#"
+[model]
+name = "bad_fuse"
+
+[params]
+hidden_dim = "$hidden_dim"
+
+[model.layer]
+name = "test"
+
+[[layer.kernel]]
+op = "unary/silu"
+inputs = { a = "_in" }
+outputs = { out = "_mid" }
+dispatch = { n = "$hidden_dim", out_elems = "$hidden_dim" }
+fuse = "my_group"
+
+[[layer.kernel]]
+op = "unary/silu"
+inputs = { a = "_mid" }
+outputs = { out = "_out" }
+dispatch = { n = "$hidden_dim", out_elems = "$hidden_dim" }
+
+[[layer.kernel]]
+op = "unary/silu"
+inputs = { a = "_out" }
+outputs = { out = "_final" }
+dispatch = { n = "$hidden_dim", out_elems = "$hidden_dim" }
+fuse = "my_group"
+"#;
+
+        let def: ModelDef = toml::from_str(toml_src).expect("parse TOML");
+        let reg = make_registry();
+        let params = CompileParams {
+            params: {
+                let mut m = HashMap::new();
+                m.insert("hidden_dim".into(), 128);
+                m.insert("n_layers".into(), 1);
+                m
+            },
+            float_params: HashMap::new(),
+            activation_dtype: DType::F32,
+            n_layers: 1,
+            state_keys: vec![],
+        };
+
+        let result = compile(&def, &params, &reg, FusionMode::TomlDriven);
+        assert!(result.is_err(), "non-contiguous fuse tags should error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("non-contiguous"),
+            "error should mention non-contiguous: {err}"
+        );
+    }
+
+    /// GraphDriven mode ignores TOML fuse tags.
+    #[test]
+    fn graph_driven_ignores_toml_fuse_tags() {
+        let toml_src = r#"
+[model]
+name = "ignore_tags"
+
+[params]
+hidden_dim = "$hidden_dim"
+
+[model.layer]
+name = "test"
+
+[[layer.kernel]]
+op = "unary/silu"
+inputs = { a = "_in" }
+outputs = { out = "_mid" }
+dispatch = { n = "$hidden_dim", out_elems = "$hidden_dim" }
+fuse = "ignored"
+
+[[layer.kernel]]
+op = "unary/silu"
+inputs = { a = "_mid" }
+outputs = { out = "_out" }
+dispatch = { n = "$hidden_dim", out_elems = "$hidden_dim" }
+"#;
+
+        let def: ModelDef = toml::from_str(toml_src).expect("parse TOML");
+        let reg = make_registry();
+        let params = CompileParams {
+            params: {
+                let mut m = HashMap::new();
+                m.insert("hidden_dim".into(), 128);
+                m.insert("n_layers".into(), 1);
+                m
+            },
+            float_params: HashMap::new(),
+            activation_dtype: DType::F32,
+            n_layers: 1,
+            state_keys: vec![],
+        };
+
+        // GraphDriven should succeed and apply its own fusion rules,
+        // ignoring the `fuse = "ignored"` tags.
+        let plan = compile(&def, &params, &reg, FusionMode::GraphDriven).expect("compile");
+        assert_eq!(plan.nodes.len(), 2);
+        // The graph pass may fuse these (silu→silu with single-use _mid).
+        // Either way, it should not error on the TOML tags.
     }
 }

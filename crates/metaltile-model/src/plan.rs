@@ -70,6 +70,11 @@ pub struct DispatchNode {
     pub grid: GridSpec,
     /// Dtype for this node (typically inherits model activation dtype).
     pub dtype: DType,
+    /// When `Some(n)`, this node belongs to fused group `n`.
+    /// All adjacent nodes with the same group ID are dispatched
+    /// together in a single `dispatch_chain(&[...])` call.
+    /// Set to `None` after compilation if no fusion happens.
+    pub fuse_group: Option<usize>,
 }
 
 // ── SlotRef ────────────────────────────────────────────────────────────
