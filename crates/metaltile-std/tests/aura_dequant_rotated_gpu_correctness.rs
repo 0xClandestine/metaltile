@@ -76,12 +76,10 @@ fn aura_dequant_rotated_int4_matches_naive_reference_f32() {
     let tokens = 3usize;
 
     // 16-level symmetric codebook in [-1, 1].
-    let codebook: Vec<f32> =
-        (0..16).map(|i| -1.0 + 2.0 * i as f32 / 15.0).collect();
+    let codebook: Vec<f32> = (0..16).map(|i| -1.0 + 2.0 * i as f32 / 15.0).collect();
 
     // Pseudo-random indices in [0, 16).
-    let indices: Vec<u32> =
-        (0..bh * tokens * dim).map(|i| ((i * 7 + 3) % 16) as u32).collect();
+    let indices: Vec<u32> = (0..bh * tokens * dim).map(|i| ((i * 7 + 3) % 16) as u32).collect();
     let packed = pack_int4_indices(&indices, bh, tokens, dim);
     let norms: Vec<f32> = (0..bh * tokens).map(|i| 0.5 + 0.1 * i as f32).collect();
 
@@ -107,13 +105,11 @@ fn aura_dequant_rotated_int4_matches_naive_reference_f32() {
     // = N_x² × N_y × N_z threads previously passed only by virtue of
     // the kernel's `if d < dim` guard skipping illegitimate writes.)
     let result = ctx
-        .dispatch_with_grid(
-            &kernel,
-            &buffers,
-            &BTreeMap::new(),
-            [1, tokens, bh],
-            [packed_width, 1, 1],
-        )
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [1, tokens, bh], [
+            packed_width,
+            1,
+            1,
+        ])
         .expect("dispatch_with_grid should succeed");
 
     let out_bytes = result.outputs.get("out").expect("`out` buffer in dispatch result");

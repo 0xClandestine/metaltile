@@ -83,13 +83,7 @@ fn run_conv_step(
     // (each illegitimate thread races against legitimate writes via OOB
     // reads). Caught by the state diff = max(x) magnitude failure.
     let result = ctx
-        .dispatch_with_grid(
-            &kernel,
-            &buffers,
-            &BTreeMap::new(),
-            [1, 1, 1],
-            [n_channels, 1, 1],
-        )
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [1, 1, 1], [n_channels, 1, 1])
         .expect("dispatch_with_grid should succeed");
 
     let y = bytes_to_f32_vec(result.outputs.get("y").expect("y"));
@@ -106,18 +100,15 @@ fn conv1d_causal_step_matches_naive_reference_f32() {
     let kernel_size = 4usize;
 
     let x: Vec<f32> = (0..n_channels).map(|i| (i as f32 % 7.0) * 0.1).collect();
-    let w: Vec<f32> = (0..kernel_size * n_channels)
-        .map(|i| (((i * 13) % 11) as f32 - 5.0) * 0.05)
-        .collect();
+    let w: Vec<f32> =
+        (0..kernel_size * n_channels).map(|i| (((i * 13) % 11) as f32 - 5.0) * 0.05).collect();
     let b: Vec<f32> = (0..n_channels).map(|i| (i as f32 % 3.0) * 0.01).collect();
-    let state: Vec<f32> = (0..(kernel_size - 1) * n_channels)
-        .map(|i| (((i * 17) % 9) as f32 - 4.0) * 0.02)
-        .collect();
+    let state: Vec<f32> =
+        (0..(kernel_size - 1) * n_channels).map(|i| (((i * 17) % 9) as f32 - 4.0) * 0.02).collect();
     let mut state_cpu = state.clone();
 
     let expected = naive_conv_step(&x, &w, &b, &mut state_cpu, n_channels, kernel_size);
-    let (actual_y, actual_state) =
-        run_conv_step(&x, &w, &b, &state, n_channels, kernel_size);
+    let (actual_y, actual_state) = run_conv_step(&x, &w, &b, &state, n_channels, kernel_size);
 
     let y_diff = max_abs_diff(&expected, &actual_y);
     let state_diff = max_abs_diff(&state_cpu, &actual_state);

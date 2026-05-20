@@ -19,8 +19,10 @@ use std::collections::BTreeMap;
 use common::{Dt, max_abs_diff, pack_bytes, pack_u32_bytes, unpack_bytes};
 use metaltile_core::{dtype::DType, ir::KernelMode};
 use metaltile_runtime::Context;
-use metaltile_std::ffai::aura_flash_p1::aura_flash_p1_kb4_vb2_d128;
-use metaltile_std::ffai::aura_flash_pass2::aura_flash_pass2_d128;
+use metaltile_std::ffai::{
+    aura_flash_p1::aura_flash_p1_kb4_vb2_d128,
+    aura_flash_pass2::aura_flash_pass2_d128,
+};
 
 fn f32_slice_to_bytes(vals: &[f32]) -> Vec<u8> { pack_bytes(vals, Dt::F32) }
 fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> { unpack_bytes(bytes, Dt::F32) }
@@ -60,6 +62,7 @@ fn pack_int_indices(
 /// End-to-end CPU reference for the AURA flash pair: dot scores in the
 /// compressed domain, softmax, then accumulate V centroids weighted by
 /// the softmax weights + per-token V norm. Final divide by Σ weights.
+#[allow(clippy::too_many_arguments)]
 fn naive_aura_flash(
     q_rot: &[f32],
     key_indices: &[u32],
@@ -118,30 +121,22 @@ fn aura_flash_pair_matches_naive_reference_kb4_vb2_d128() {
     let num_blocks = tokens.div_ceil(block_size); // 2
 
     // Codebooks.
-    let key_codebook: Vec<f32> =
-        (0..16).map(|i| -1.0 + 2.0 * i as f32 / 15.0).collect();
+    let key_codebook: Vec<f32> = (0..16).map(|i| -1.0 + 2.0 * i as f32 / 15.0).collect();
     let val_codebook: Vec<f32> = (0..4).map(|i| -1.0 + 2.0 * i as f32 / 3.0).collect();
 
     // Pseudo-random indices.
-    let key_indices: Vec<u32> = (0..kv_heads * tokens * dim)
-        .map(|i| ((i * 7 + 3) % 16) as u32)
-        .collect();
-    let val_indices: Vec<u32> = (0..kv_heads * tokens * dim)
-        .map(|i| ((i * 11 + 5) % 4) as u32)
-        .collect();
-    let key_packed =
-        pack_int_indices(&key_indices, kv_heads, tokens, dim, key_bits);
-    let val_packed =
-        pack_int_indices(&val_indices, kv_heads, tokens, dim, value_bits);
+    let key_indices: Vec<u32> =
+        (0..kv_heads * tokens * dim).map(|i| ((i * 7 + 3) % 16) as u32).collect();
+    let val_indices: Vec<u32> =
+        (0..kv_heads * tokens * dim).map(|i| ((i * 11 + 5) % 4) as u32).collect();
+    let key_packed = pack_int_indices(&key_indices, kv_heads, tokens, dim, key_bits);
+    let val_packed = pack_int_indices(&val_indices, kv_heads, tokens, dim, value_bits);
 
-    let key_norms: Vec<f32> =
-        (0..kv_heads * tokens).map(|i| 0.5 + 0.05 * i as f32).collect();
-    let val_norms: Vec<f32> =
-        (0..kv_heads * tokens).map(|i| 0.3 + 0.07 * i as f32).collect();
+    let key_norms: Vec<f32> = (0..kv_heads * tokens).map(|i| 0.5 + 0.05 * i as f32).collect();
+    let val_norms: Vec<f32> = (0..kv_heads * tokens).map(|i| 0.3 + 0.07 * i as f32).collect();
 
-    let q_rot: Vec<f32> = (0..q_heads * dim)
-        .map(|i| (((i * 13) % 19) as f32 - 9.0) * 0.02)
-        .collect();
+    let q_rot: Vec<f32> =
+        (0..q_heads * dim).map(|i| (((i * 13) % 19) as f32 - 9.0) * 0.02).collect();
 
     let expected = naive_aura_flash(
         &q_rot,
@@ -168,21 +163,13 @@ fn aura_flash_pair_matches_naive_reference_kb4_vb2_d128() {
     p1_buffers.insert("val_packed".into(), pack_u32_bytes(&val_packed));
     p1_buffers.insert("val_norms".into(), f32_slice_to_bytes(&val_norms));
     p1_buffers.insert("val_codebook".into(), f32_slice_to_bytes(&val_codebook));
-    p1_buffers.insert(
-        "o_partials".into(),
-        vec![0u8; q_heads * num_blocks * dim * 4],
-    );
+    p1_buffers.insert("o_partials".into(), vec![0u8; q_heads * num_blocks * dim * 4]);
     p1_buffers.insert("m_partials".into(), vec![0u8; q_heads * num_blocks * 4]);
     p1_buffers.insert("l_partials".into(), vec![0u8; q_heads * num_blocks * 4]);
     p1_buffers.insert("dim".into(), (dim as u32).to_le_bytes().to_vec());
-    p1_buffers.insert(
-        "key_packed_width".into(),
-        (key_packed_width as u32).to_le_bytes().to_vec(),
-    );
-    p1_buffers.insert(
-        "value_packed_width".into(),
-        (value_packed_width as u32).to_le_bytes().to_vec(),
-    );
+    p1_buffers.insert("key_packed_width".into(), (key_packed_width as u32).to_le_bytes().to_vec());
+    p1_buffers
+        .insert("value_packed_width".into(), (value_packed_width as u32).to_le_bytes().to_vec());
     p1_buffers.insert("tokens".into(), (tokens as u32).to_le_bytes().to_vec());
     p1_buffers.insert("repeat_count".into(), (repeat as u32).to_le_bytes().to_vec());
     p1_buffers.insert("num_blocks".into(), (num_blocks as u32).to_le_bytes().to_vec());
@@ -198,21 +185,14 @@ fn aura_flash_pair_matches_naive_reference_kb4_vb2_d128() {
     // the kernel's `simd_sum(dot_partial)` reduction). y/z axes carry
     // the (q_head, block_idx) extent via grid_groups since tg.y/z=1.
     let p1_result = ctx
-        .dispatch_with_grid(
-            &p1_kernel,
-            &p1_buffers,
-            &BTreeMap::new(),
-            [1, q_heads, num_blocks],
-            [32, 1, 1],
-        )
+        .dispatch_with_grid(&p1_kernel, &p1_buffers, &BTreeMap::new(), [1, q_heads, num_blocks], [
+            32, 1, 1,
+        ])
         .expect("flash_p1 dispatch should succeed");
 
-    let o_partials_bytes =
-        p1_result.outputs.get("o_partials").expect("`o_partials` buffer");
-    let m_partials_bytes =
-        p1_result.outputs.get("m_partials").expect("`m_partials` buffer");
-    let l_partials_bytes =
-        p1_result.outputs.get("l_partials").expect("`l_partials` buffer");
+    let o_partials_bytes = p1_result.outputs.get("o_partials").expect("`o_partials` buffer");
+    let m_partials_bytes = p1_result.outputs.get("m_partials").expect("`m_partials` buffer");
+    let l_partials_bytes = p1_result.outputs.get("l_partials").expect("`l_partials` buffer");
     let _o_p = bytes_to_f32_vec(o_partials_bytes);
     let _m_p = bytes_to_f32_vec(m_partials_bytes);
     let _l_p = bytes_to_f32_vec(l_partials_bytes);
@@ -231,13 +211,7 @@ fn aura_flash_pair_matches_naive_reference_kb4_vb2_d128() {
 
     // One TG per q_idx, 32 threads/TG (1 simdgroup).
     let p2_result = ctx
-        .dispatch_with_grid(
-            &p2_kernel,
-            &p2_buffers,
-            &BTreeMap::new(),
-            [q_heads, 1, 1],
-            [32, 1, 1],
-        )
+        .dispatch_with_grid(&p2_kernel, &p2_buffers, &BTreeMap::new(), [q_heads, 1, 1], [32, 1, 1])
         .expect("flash_pass2 dispatch should succeed");
 
     let output_bytes = p2_result.outputs.get("output").expect("`output` buffer");
@@ -248,8 +222,5 @@ fn aura_flash_pair_matches_naive_reference_kb4_vb2_d128() {
     // absolute tolerance has to be generous; 5e-2 is comfortable but
     // catches any real shape bug.
     let diff = max_abs_diff(&expected, &actual);
-    assert!(
-        diff < 5e-2,
-        "aura_flash kb4 vb2 d128: max |diff| = {diff:.2e} (expected < 5e-2)",
-    );
+    assert!(diff < 5e-2, "aura_flash kb4 vb2 d128: max |diff| = {diff:.2e} (expected < 5e-2)",);
 }

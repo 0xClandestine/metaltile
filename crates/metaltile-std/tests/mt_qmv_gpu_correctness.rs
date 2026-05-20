@@ -31,10 +31,7 @@ use metaltile_std::mlx::quantized::mt_qmv;
 fn f32_slice_to_bytes(vals: &[f32]) -> Vec<u8> { pack_bytes(vals, Dt::F32) }
 fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> { unpack_bytes(bytes, Dt::F32) }
 
-fn quantize_int4_per_group(
-    row: &[f32],
-    group_size: usize,
-) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
+fn quantize_int4_per_group(row: &[f32], group_size: usize) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
     let k = row.len();
     let n_groups = k / group_size;
     let mut packed = vec![0u32; k / 8];
@@ -101,17 +98,14 @@ fn mt_qmv_matches_naive_cpu_reference_f32() {
     let mut scales: Vec<f32> = Vec::with_capacity(m * n_groups_per_row);
     let mut biases: Vec<f32> = Vec::with_capacity(m * n_groups_per_row);
     for i in 0..m {
-        let row: Vec<f32> = (0..k)
-            .map(|j| (((i * 7 + j) % 23) as f32 - 11.0) * 0.02)
-            .collect();
+        let row: Vec<f32> = (0..k).map(|j| (((i * 7 + j) % 23) as f32 - 11.0) * 0.02).collect();
         let (pk, sc, bs) = quantize_int4_per_group(&row, group_size);
         packed_rows.push(pk);
         scales.extend(sc);
         biases.extend(bs);
     }
     let packed: Vec<u32> = packed_rows.into_iter().flatten().collect();
-    let x: Vec<f32> =
-        (0..k).map(|j| (((j * 13) % 11) as f32 - 5.0) * 0.05).collect();
+    let x: Vec<f32> = (0..k).map(|j| (((j * 13) % 11) as f32 - 5.0) * 0.05).collect();
 
     let expected = naive_qmv_f32(&packed, &scales, &biases, &x, m, k, group_size);
 
@@ -131,13 +125,7 @@ fn mt_qmv_matches_naive_cpu_reference_f32() {
     // m/8 threadgroups (8-row tile per TG), 64 threads per TG
     // (2 simdgroups × 32 lanes — kernel's `tpg=64`).
     let result = ctx
-        .dispatch_with_grid(
-            &kernel,
-            &buffers,
-            &BTreeMap::new(),
-            [m / 8, 1, 1],
-            [64, 1, 1],
-        )
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [m / 8, 1, 1], [64, 1, 1])
         .expect("dispatch_with_grid should succeed");
 
     let out_bytes = result.outputs.get("out").expect("`out` buffer in dispatch result");
@@ -146,8 +134,5 @@ fn mt_qmv_matches_naive_cpu_reference_f32() {
     let diff = max_abs_diff(&expected, &actual);
     // Looser tol — qmv runs an 8-row × 512-block × 16-lane reduction
     // tree, more reordering than plain mt_gemv.
-    assert!(
-        diff < 5e-3,
-        "mt_qmv f32: max |diff| = {diff:.2e} (expected < 5e-3)",
-    );
+    assert!(diff < 5e-3, "mt_qmv f32: max |diff| = {diff:.2e} (expected < 5e-3)",);
 }

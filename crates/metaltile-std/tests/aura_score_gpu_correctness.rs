@@ -41,6 +41,7 @@ fn pack_int4_indices(indices: &[u32], kv_heads: usize, tokens: usize, dim: usize
     packed
 }
 
+#[allow(clippy::too_many_arguments)]
 fn naive_aura_score(
     q_rot: &[f32],
     indices: &[u32],
@@ -83,15 +84,12 @@ fn aura_score_int4_matches_naive_reference_f32() {
     let indices: Vec<u32> =
         (0..kv_heads * tokens * dim).map(|i| ((i * 11 + 7) % 16) as u32).collect();
     let packed = pack_int4_indices(&indices, kv_heads, tokens, dim);
-    let norms: Vec<f32> =
-        (0..kv_heads * tokens).map(|i| 0.3 + 0.05 * i as f32).collect();
-    let q_rot: Vec<f32> = (0..q_heads * dim)
-        .map(|i| (((i * 13) % 21) as f32 - 10.0) * 0.02)
-        .collect();
+    let norms: Vec<f32> = (0..kv_heads * tokens).map(|i| 0.3 + 0.05 * i as f32).collect();
+    let q_rot: Vec<f32> =
+        (0..q_heads * dim).map(|i| (((i * 13) % 21) as f32 - 10.0) * 0.02).collect();
 
-    let expected = naive_aura_score(
-        &q_rot, &indices, &norms, &codebook, q_heads, kv_heads, tokens, dim,
-    );
+    let expected =
+        naive_aura_score(&q_rot, &indices, &norms, &codebook, q_heads, kv_heads, tokens, dim);
 
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     buffers.insert("q_rot".into(), f32_slice_to_bytes(&q_rot));
@@ -110,13 +108,7 @@ fn aura_score_int4_matches_naive_reference_f32() {
 
     // One TG per (q_head, k_token) pair, 32 threads per TG.
     let result = ctx
-        .dispatch_with_grid(
-            &kernel,
-            &buffers,
-            &BTreeMap::new(),
-            [q_heads, tokens, 1],
-            [32, 1, 1],
-        )
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [q_heads, tokens, 1], [32, 1, 1])
         .expect("dispatch_with_grid should succeed");
 
     let out_bytes = result.outputs.get("scores").expect("`scores` buffer");
