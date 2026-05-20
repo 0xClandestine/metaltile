@@ -27,6 +27,22 @@ make test       # workspace tests — codegen, runtime, GPU correctness (GPU on 
 
 `make` is the canonical entry point — it centralises flags and always passes `--workspace`. See [Developing](developing.md) for the full dev loop and [the CLI reference](cli.md) for the `tile` binary.
 
+## Crate layout
+
+The workspace is seven crates:
+
+| Crate | Description |
+|---|---|
+| [`metaltile-core`](../crates/metaltile-core/README.md) | IR types, `DType`, `Shape` |
+| [`metaltile-macros`](../crates/metaltile-macros/README.md) | the `#[kernel]` proc-macro + body parser |
+| [`metaltile-codegen`](../crates/metaltile-codegen/README.md) | MSL lowering + optimization passes |
+| [`metaltile-runtime`](../crates/metaltile-runtime/README.md) | Metal dispatch, PSO cache |
+| [`metaltile`](../crates/metaltile/README.md) | facade re-exporting all crates |
+| [`metaltile-std`](../crates/metaltile-std/README.md) | kernel stdlib, op files, bench types |
+| [`metaltile-cli`](../crates/metaltile-cli/README.md) | the `tile` CLI binary |
+
+The compile pipeline: `#[kernel] fn` → `metaltile-macros` parses the body into **MetalTile IR** → `metaltile-codegen` runs the optimization passes and emits **MSL** → `metaltile-runtime` dispatches it on the GPU.
+
 ## Your first kernel
 
 A kernel is a Rust function annotated with `#[kernel]`. The proc-macro parses the body into MetalTile IR; the codegen lowers it to Metal Shading Language.

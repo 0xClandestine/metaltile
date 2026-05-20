@@ -4,17 +4,7 @@ Repo layout, the dev loop, and — most importantly — the **kernel-authoring h
 
 ## Repo layout
 
-| Crate | Description |
-|---|---|
-| [`metaltile-core`](../crates/metaltile-core/README.md) | IR types, `DType`, `Shape` |
-| [`metaltile-macros`](../crates/metaltile-macros/README.md) | the `#[kernel]` proc-macro + body parser |
-| [`metaltile-codegen`](../crates/metaltile-codegen/README.md) | MSL lowering + optimization passes |
-| [`metaltile-runtime`](../crates/metaltile-runtime/README.md) | Metal dispatch, PSO cache |
-| [`metaltile`](../crates/metaltile/README.md) | facade re-exporting all crates |
-| [`metaltile-std`](../crates/metaltile-std/README.md) | kernel stdlib, op files, bench types |
-| [`metaltile-cli`](../crates/metaltile-cli/README.md) | the `tile` CLI binary |
-
-The compile pipeline: `#[kernel] fn` → `metaltile-macros` parses the body into **MetalTile IR** → `metaltile-codegen` runs the optimization passes and emits **MSL** → `metaltile-runtime` dispatches it on the GPU.
+The workspace is seven crates — see [Getting started → crate layout](getting-started.md#crate-layout) for the table. The compile pipeline: `#[kernel] fn` → `metaltile-macros` parses the body into **MetalTile IR** → `metaltile-codegen` runs the optimization passes and emits **MSL** → `metaltile-runtime` dispatches it on the GPU.
 
 ## Dev loop
 

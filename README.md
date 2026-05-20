@@ -1,73 +1,78 @@
 # MetalTile
 
-A Rust-embedded DSL for writing Apple Metal GPU kernels. Write tile-level algorithms in Rust, get optimized Metal Shading Language out.
+A Rust-embedded DSL for writing Apple Metal GPU kernels. Write tile-level algorithms in Rust, get optimized Metal Shading Language out — verified against, and frequently faster than, hand-tuned MLX.
+
+<!-- TODO(image): replace this HTML table with a side-by-side graphic of the DSL ↔ MSL. -->
+<table>
+<tr>
+<th>Rust DSL — what you write</th>
+<th>Metal Shading Language — what you get</th>
+</tr>
+<tr>
+<td>
 
 ```rust
 #[kernel]
-pub fn mt_rms_norm<T>(
-    x: Tensor<T>,
-    w: Tensor<T>,
+pub fn mt_exp<T>(
+    a: Tensor<T>,
     out: Tensor<T>,
-    eps_buf: Tensor<f32>,
-    #[constexpr] n: u32,
 ) {
-    let row = program_id::<0>();
-    let rs = row * n;
-    let re = rs + n;
-    let ssq = strided_reduce_dot(x, x, rs, 0, re);
-    let tg_ssq = reduce_sum(ssq);
-    let eps = load(eps_buf[0]);
-    let rms = rsqrt(tg_ssq / n + eps);
-    let n_full = n / (lsize * 4u32);
-    for _r in range(0u32, n_full, 1u32) {
-        let base = rs + (_r * lsize + tid) * 4u32;
-        let col = base - rs;
-        let n0 = load(x[base]).cast::<f32>() * rms * load(w[col]).cast::<f32>();
-        let n1 = load(x[base + 1u32]).cast::<f32>() * rms * load(w[col + 1u32]).cast::<f32>();
-        let n2 = load(x[base + 2u32]).cast::<f32>() * rms * load(w[col + 2u32]).cast::<f32>();
-        let n3 = load(x[base + 3u32]).cast::<f32>() * rms * load(w[col + 3u32]).cast::<f32>();
-        store(out[base], n0.cast::<T>());
-        store(out[base + 1u32], n1.cast::<T>());
-        store(out[base + 2u32], n2.cast::<T>());
-        store(out[base + 3u32], n3.cast::<T>());
-    }
-    for _i in range(rs + n_full * lsize * 4u32 + tid, re, lsize) {
-        let ni = load(x[_i]).cast::<f32>() * rms * load(w[_i - rs]).cast::<f32>();
-        store(out[_i], ni.cast::<T>());
-    }
+    let idx = program_id(0);
+    store(out[idx], exp(load(a[idx])));
 }
 ```
 
-This generates ~104% of MLX's hand-tuned `rms` kernel throughput on M4 Max across f32 / f16 / bfloat16.
+</td>
+<td>
+
+```cpp
+kernel void mt_exp(
+    const device float *a [[buffer(0)]],
+    device float *out [[buffer(1)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    uint v_idx = tid;
+    auto v1 = a[v_idx];
+    auto v2 = exp(v1);
+    out[v_idx] = v2;
+}
+```
+
+</td>
+</tr>
+</table>
+
+One generic `#[kernel]` fn becomes a monomorphised `f32` / `f16` / `bfloat16` Metal kernel — the compiler handles thread indexing, dtype lowering, and Metal idioms. Bigger kernels lean on tile-level primitives (`reduce_sum`, `strided_reduce`, `dot`); the codegen emits the simdgroup and threadgroup machinery for you.
 
 ## Why MetalTile
 
-- **Write once in Rust, run fast on Apple Silicon.** No raw MSL, no thread-position arithmetic.
-- **Tile-level, not thread-level.** `strided_reduce`, `reduce_sum`, `dot` — express *what* to compute; the compiler handles thread mapping, vectorization, and SIMD-group reductions.
-- **Verified against MLX.** Every kernel is benchmarked and numerically compared against the corresponding MLX Metal kernel.
-- **All three float dtypes.** `f32`, `f16`, and `bfloat16` work identically — native `bfloat` emitted on Metal 3.1+.
-- **Layered correctness.** Codegen passes and the `#[kernel]` proc-macro have unit + golden-MSL-snapshot coverage that runs on any platform; kernels are verified end-to-end by GPU correctness tests against naive CPU references and by the MLX side-by-side bench.
+| Functionality | Description | Status |
+|---|---|---|
+| **Write kernels in Rust** | A real `#[kernel]` proc-macro — no raw MSL, no hand-written thread-position arithmetic. | ✅ |
+| **Tile-level primitives** | `reduce_sum`, `strided_reduce`, `dot` — say *what* to compute; codegen emits the simdgroup + threadgroup reduction. | ✅ |
+| **One source, three dtypes** | Generic `<T>` kernels lower to `f32`, `f16`, and `bfloat16` — native `bfloat` on Metal 3.1+. | ✅ |
+| **Optimizing compiler** | A 14-pass pipeline — const-folding, CSE, LICM, fusion, vectorization, and more — sits between the IR and the emitted MSL. | ✅ |
+| **Verified against MLX** | Every benched kernel runs side-by-side against the hand-tuned MLX Metal kernel and must match it numerically. | ✅ |
+| **Frequently faster than MLX** | A meaningful slice of ops — argmax, small-N RMSNorm, quantized matmul — land 3×+ over MLX on M4 Max. | ✅ |
+| **`tile` CLI** | `bench` / `build` / `inspect` / `device` / `snap` / `diff` — one binary for the whole dev loop. | ✅ |
+| **Cross-hardware baselines** | Committed `tile bench` snapshots per chip; CI diffs every PR against them. | ✅ |
+| **Autotuner** | Per-shape kernel tuning so no performance is left on the table. | 🚧 Planned |
+| **Type-level shape algebra** | Tensor shapes checked at compile time. | 🚧 Planned |
 
 ## Status
 
-Early development — APIs are not yet stable. The core DSL works; an autotuner and type-level shape algebra are planned.
-
-| Crate | Description |
-|---|---|
-| [`metaltile-core`](crates/metaltile-core/README.md) | IR types, `DType`, `Shape` |
-| [`metaltile-macros`](crates/metaltile-macros/README.md) | `#[kernel]` proc macro |
-| [`metaltile-codegen`](crates/metaltile-codegen/README.md) | MSL lowering + optimization passes |
-| [`metaltile-runtime`](crates/metaltile-runtime/README.md) | Metal dispatch, PSO cache |
-| [`metaltile`](crates/metaltile/README.md) | facade re-exporting all crates |
-| [`metaltile-std`](crates/metaltile-std/README.md) | kernel stdlib, op files, bench types |
-| [`metaltile-cli`](crates/metaltile-cli/README.md) | the `tile` CLI binary |
+Early development — APIs are not yet stable. The core DSL, codegen, and runtime work today; the autotuner and type-level shape algebra are planned. See [`docs/getting-started.md`](docs/getting-started.md) for the crate layout.
 
 ## Quick Start
+
+Add the crate:
 
 ```toml
 [dependencies]
 metaltile = "0.1"
 ```
+
+Write a kernel, dispatch it, read the result:
 
 ```rust
 use metaltile::prelude::*;
@@ -100,34 +105,92 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Full walkthrough: [`docs/getting-started.md`](docs/getting-started.md).
+A real kernel is barely longer. This is `mt_rms_norm_small` — RMSNorm for small head dims, the whole thing:
+
+```rust
+#[kernel]
+pub fn mt_rms_norm_small<T>(
+    x: Tensor<T>,
+    w: Tensor<T>,
+    out: Tensor<T>,
+    eps_buf: Tensor<f32>,
+    #[constexpr] n: u32,
+) {
+    let row = program_id::<0>();
+    let rs = row * n;
+    let base = rs + tid * 2u32;
+    let col = tid * 2u32;
+    let x0 = load(x[base]).cast::<f32>();
+    let x1 = load(x[base + 1u32]).cast::<f32>();
+    let partial_ssq = x0 * x0 + x1 * x1;
+    let tg_ssq = reduce_sum(partial_ssq);          // ← tile-level: the codegen emits the simdgroup reduction
+    let eps = load(eps_buf[0]);
+    let rms = rsqrt(tg_ssq / n + eps);
+    store(out[base], (x0 * rms * load(w[col]).cast::<f32>()).cast::<T>());
+    store(out[base + 1u32], (x1 * rms * load(w[col + 1u32]).cast::<f32>()).cast::<T>());
+}
+```
+
+That single `reduce_sum` lowers to a full two-level simdgroup + threadgroup reduction. The result runs at **354% of MLX's hand-tuned `rms` kernel** on an Apple M4 Max (`B=1024 N=64`, f32 — see [`baselines/`](baselines/)).
+
+Full walkthrough and crate layout: [`docs/getting-started.md`](docs/getting-started.md).
+
+## CLI
+
+`tile` drives benchmarking, building, and inspecting kernels:
+
+| Command | What it does |
+|---|---|
+| `tile bench` | Benchmark every kernel against its MLX reference; reports throughput + a correctness check |
+| `tile build` | Compile all kernels to MSL and report errors; `--emit` writes `.metal` / `.metallib` / Swift / IR |
+| `tile inspect <kernel>` | Print a kernel's IR and generated MSL (`--ir`, `--pass`, `--stats` for codegen debugging) |
+| `tile device` | Show the GPU device, Metal version, and supported feature flags |
+| `tile snap` | Save bench results as a regression baseline |
+| `tile diff` | Compare bench results against a saved baseline |
+
+**Running it today:** there is no published binary yet — clone the repo and run `cargo run -p metaltile-cli -- <command>`, or `cargo install --path crates/metaltile-cli` for a local `tile`. An installable release will ship once the APIs stabilise. Full flag reference: [`docs/cli.md`](docs/cli.md).
 
 ## Supported Operations
 
-Operation categories benchmarked against MLX:
+| Operation | Status |
+|---|---|
+| Unary elementwise — `exp`, `log`, `sqrt`, trig/hyperbolic, `erf`, `gelu`, `silu`, `sigmoid`, `relu`, … (40+) | ✅ |
+| Binary elementwise — `add`, `sub`, `mul`, `div`, `max`, `min`, `pow`, `logaddexp`, `atan2`, `remainder` | ✅ |
+| Fused binary (add+mul), ternary `select`, `copy`, strided copy, `arange` | ✅ |
+| Reductions — all-reduce & row-reduce (sum / max / min / prod) | ✅ |
+| `softmax`, `logsumexp` | ✅ |
+| `rms_norm` (+ small-N variant), `layer_norm` | ✅ |
+| `rope` — rotary position embedding | ✅ |
+| `argmax`, `scan` (parallel prefix sum), `sort` (bitonic) | ✅ |
+| `random` — xorshift / key-hash | ✅ |
+| GEMV — dense and masked | ✅ |
+| Quantized GEMV / GEMM (`qmv`, `qmm`, int4) | ✅ |
+| Affine quantize / dequantize — int3 / 4 / 5 / 6 / 8 | ✅ |
+| FP4 quantize / dequantize | ✅ |
+| SDPA — vector decode (GQA), two-pass decode | ✅ |
+| SDPA — Flash-Attention-2 prefill, incl. simdgroup-MMA fragments | ✅ |
+| Tiled GEMM — general matmul (`steel_gemm`) | 🚧 Planned |
+| Convolution — 1D / 2D / general | 🚧 Planned |
+| FFT | 🚧 Planned |
+| Scatter / gather-indexing family | 🚧 Planned |
+| FP8 quantization | 🚧 Planned |
 
-**Elementwise** — unary (exp, log, sqrt, sin, cos, erf, sigmoid, silu, gelu, relu, …), binary (add, mul, sub, div, max, min, pow, logaddexp), fused add+mul, ternary select, copy, arange.
-
-**Reductions** — all-reduce sum/max/min, row-reduce sum/max/min, logsumexp, softmax, rms-norm, layer-norm.
-
-**Matrix** — GEMV, masked GEMV, SDPA (vector decode + prefill).
-
-**Misc** — RoPE, scan (parallel prefix sum), arg-reduce, sort (bitonic), random (xorshift32), quantized GEMV / GEMM, fp4 quantize/dequantize, strided copy.
+Survey of the codebase as of the current `dev`; see [`docs/developing.md`](docs/developing.md) for how kernels are organised.
 
 ## Benchmarks
 
-`tile bench` runs every kernel against its MLX Metal reference on identical buffers and reports throughput + a correctness check. Selected results (M4 Max, higher = better vs MLX):
+`tile bench` dispatches every MetalTile kernel and its MLX Metal reference on identical buffers, then reports throughput and a numerical-equivalence check. Run the whole suite, or narrow with `--filter`:
 
-| Op | MT % of MLX |
-|---|---|
-| softmax f32 | ~105% |
-| rms_norm f16 | ~104% |
-| all_reduce f32 | ~100% |
-| gemv f16 | ~100% |
-| argmax f32 | **206%** |
-| scan f32 | ~104% |
+```sh
+tile bench                   # full suite
+tile bench --filter softmax  # one op
+```
 
-See [`docs/cli.md`](docs/cli.md) for the full `tile` reference.
+<!-- TODO(image): screenshot of a `tile bench` run table goes here. -->
+
+See [`docs/cli.md`](docs/cli.md) for `-v` / `-vv` profiling, JSON output, and the `snap` / `diff` regression workflow.
+
+📊 **Full cross-hardware results live in [`baselines/`](baselines/)** — committed `tile bench` snapshots, one canonical file per chip, refreshed as new hardware is benched. CI diffs every PR against the matching baseline.
 
 ## Architecture
 
@@ -147,7 +210,7 @@ Optimization passes run in order: TypeCheck → ConstFold → AlgebraicSimplify 
 
 Full docs live in [`docs/`](docs/README.md):
 
-- [Getting started](docs/getting-started.md) — toolchain, build, first kernel.
+- [Getting started](docs/getting-started.md) — toolchain, crate layout, build, first kernel.
 - [Developing](docs/developing.md) — repo layout, dev loop, and the **kernel-authoring hazards** (a wrong dispatch can freeze the machine).
 - [Testing](docs/testing.md) — test layers, CI, and test-infra gaps.
 - [CLI](docs/cli.md) — the `tile` binary.
