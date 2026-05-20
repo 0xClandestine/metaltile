@@ -30,6 +30,7 @@ pub mod logits_min_p;
 pub mod logits_processors;
 pub mod logits_top_p;
 pub mod logits_topk;
+pub mod rms_norm_qgemv;
 pub mod rms_norm_residual;
 pub mod rms_norm_rope;
 pub mod rope_llama;
