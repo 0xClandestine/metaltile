@@ -150,7 +150,8 @@ pub fn run(args: &InspectArgs) {
         } else if stats_flag {
             let mut k = (spec.kernel_ir)(dt);
             k.mode = effective_mode(spec);
-            let expected_tpg = spec.shapes.first().map(|s| s.tpg as u32);
+            let expected_tpg =
+                spec.shapes.first().map(|s| s.tpg as u32).or_else(|| spec.dispatch.tpg_hint());
             let generator = generator_for_mode(effective_mode(spec), expected_tpg);
             match generator.generate_with_stats(&k) {
                 Ok((_, stats)) => print_stats_table(&stats),
@@ -243,7 +244,8 @@ fn generate_msl_dt(spec: &BenchSpec, dt: DType) -> String {
     let mut k = (spec.kernel_ir)(dt);
     let mode = effective_mode(spec);
     k.mode = mode;
-    let expected_tpg = spec.shapes.first().map(|s| s.tpg as u32);
+    let expected_tpg =
+        spec.shapes.first().map(|s| s.tpg as u32).or_else(|| spec.dispatch.tpg_hint());
     generator_for_mode(mode, expected_tpg)
         .generate(&k)
         .unwrap_or_else(|e| format!("// ERROR: {e}\n"))

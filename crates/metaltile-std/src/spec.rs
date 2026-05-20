@@ -362,6 +362,40 @@ impl BenchDispatch {
             BenchDispatch::SdpaPrefill { .. } => KernelMode::SimdGroup2D,
         }
     }
+
+    /// The dispatch threadgroup size this variant uses, when one is fixed
+    /// at the bench/dispatch layer. `cmd/build.rs` reads this so the MSL
+    /// emitted by `tile build --emit all` matches the MSL `tile bench`
+    /// measures — both feed the same value into `MslConfig::expected_tpg`.
+    ///
+    /// Returns `None` for `Generic` (the caller falls back to
+    /// `spec.shapes.first().map(|s| s.tpg)` instead, since `Generic`'s TPG
+    /// lives on `ShapeSpec`), and for variants without a single fixed TPG
+    /// (`Rope`, `StridedCopy` — Grid3D/Elementwise modes that don't use
+    /// the Reduction-mode `Op::Reduce` emit; `SdpaVector2Pass` — pass1
+    /// dispatches at the kernel's design TPG of 1024 with no spec-level
+    /// override).
+    pub fn tpg_hint(&self) -> Option<u32> {
+        match self {
+            BenchDispatch::Generic
+            | BenchDispatch::Rope { .. }
+            | BenchDispatch::StridedCopy { .. }
+            | BenchDispatch::SdpaVector2Pass { .. } => None,
+            BenchDispatch::Sort { tpg, .. }
+            | BenchDispatch::Scan { tpg, .. }
+            | BenchDispatch::ArgReduce { tpg, .. }
+            | BenchDispatch::Random { tpg, .. }
+            | BenchDispatch::FpQuantized { tpg, .. }
+            | BenchDispatch::QuantizedMatVec { tpg, .. }
+            | BenchDispatch::QuantizedMatMul { tpg, .. }
+            | BenchDispatch::Attention { tpg, .. }
+            | BenchDispatch::AffineDequantize { tpg, .. }
+            | BenchDispatch::AffineQuantize { tpg, .. }
+            | BenchDispatch::SdpaVector { tpg, .. }
+            | BenchDispatch::SdpaPrefill { tpg, .. }
+            | BenchDispatch::SteelGemm { tpg, .. } => Some(*tpg as u32),
+        }
+    }
 }
 
 // ── BenchSpec ───────────────────────────────────────────────────────────
