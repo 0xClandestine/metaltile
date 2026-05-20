@@ -175,12 +175,7 @@ fn msl_grid3d(spec: &BenchSpec, dt: DType, tpg: Option<u32>) -> Option<String> {
     k.mode = KernelMode::Grid3D;
     MslGenerator::new(msl_cfg_for(tpg)).generate(&k).ok()
 }
-fn msl_for_mode(
-    spec: &BenchSpec,
-    dt: DType,
-    mode: KernelMode,
-    tpg: Option<u32>,
-) -> Option<String> {
+fn msl_for_mode(spec: &BenchSpec, dt: DType, mode: KernelMode, tpg: Option<u32>) -> Option<String> {
     match mode {
         KernelMode::Elementwise => msl_elementwise(spec, dt, tpg),
         KernelMode::Reduction | KernelMode::Tile2D | KernelMode::SimdGroup2D =>
