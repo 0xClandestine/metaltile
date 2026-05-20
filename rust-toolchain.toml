@@ -1,3 +1,9 @@
+# Pinned to a dated nightly so rustfmt/clippy are reproducible across
+# every clone and CI run. A bare `channel = "nightly"` floats: each
+# machine resolves it to whatever nightly is latest that day, so clippy
+# silently drifts and `make clippy` starts flagging files nobody
+# touched. Bump this date deliberately (its own commit) when you want
+# the newer lints — never let it float.
 [toolchain]
-channel = "nightly"
+channel = "nightly-2026-05-15"
 components = ["rustfmt", "clippy"]
