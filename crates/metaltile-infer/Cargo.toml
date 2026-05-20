@@ -18,8 +18,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 half = { workspace = true }
 
-safetensors = "0.4"
+safetensors = "0.7"
 toml = "0.8"
-tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
-hf-hub = { version = "0.3", features = ["tokio"] }
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+hf-hub = { version = "0.5", features = ["tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
