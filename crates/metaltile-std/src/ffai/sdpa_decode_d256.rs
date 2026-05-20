@@ -102,8 +102,7 @@ pub fn ffai_sdpa_decode_d256<T>(
         let k5 = load(k[kv0 + 5u32]).cast::<f32>();
         let k6 = load(k[kv0 + 6u32]).cast::<f32>();
         let k7 = load(k[kv0 + 7u32]).cast::<f32>();
-        let partial = q0 * k0 + q1 * k1 + q2 * k2 + q3 * k3
-                    + q4 * k4 + q5 * k5 + q6 * k6 + q7 * k7;
+        let partial = q0 * k0 + q1 * k1 + q2 * k2 + q3 * k3 + q4 * k4 + q5 * k5 + q6 * k6 + q7 * k7;
         let score = simd_sum(partial);
         let new_max = select(score > run_max, score, run_max);
         let factor = exp(run_max - new_max);
@@ -233,9 +232,7 @@ mod tests {
     fn msl_for(dt: DType) -> String {
         let mut k = ffai_sdpa_decode_d256::kernel_ir_for(dt);
         k.mode = KernelMode::Reduction;
-        MslGenerator::default()
-            .generate(&k)
-            .expect("ffai_sdpa_decode_d256 codegen succeeds")
+        MslGenerator::default().generate(&k).expect("ffai_sdpa_decode_d256 codegen succeeds")
     }
 
     #[test]
