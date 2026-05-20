@@ -187,7 +187,12 @@ pub fn execute_plan(
         all_grid.push(grid_to_dims(&node.grid));
     }
 
-    // ── Single dispatch for the entire forward pass ────────────────────
+    // ── Dispatch ───────────────────────────────────────────────────────
+    // When fusion is active (any node has a fuse_group), the entire forward
+    // pass is one MTLCommandBuffer — one waitUntilCompleted, maximum GPU
+    // utilisation.  When --no-fuse is set no fuse_groups are assigned, so
+    // we fall back to one command buffer per node: useful for debugging
+    // (you can bisect failures node-by-node) but ~292× slower.
     let all_specs: Vec<DispatchSpec<'_>> = (0..n)
         .map(|i| {
             let (grid_groups, threads_per_group) = all_grid[i];
@@ -204,18 +209,41 @@ pub fn execute_plan(
         .collect();
 
     let start = Instant::now();
-    let results = ctx
-        .dispatch_chain(&all_specs)
-        .map_err(|e| ModelError::Other(e.to_string()))?;
+    let fused = plan.nodes.iter().any(|nd| nd.fuse_group.is_some());
 
-    if start.elapsed() > Duration::from_secs(GPU_WATCHDOG_SECS) {
-        eprintln!(
-            "\n[executor] WATCHDOG: forward pass exceeded {}s — \
-             killing process to prevent system freeze",
-            GPU_WATCHDOG_SECS
-        );
-        std::process::exit(1);
-    }
+    let results = if fused {
+        // ── Fused: entire pass in one command buffer ────────────────
+        let results = ctx
+            .dispatch_chain(&all_specs)
+            .map_err(|e| ModelError::Other(e.to_string()))?;
+        if start.elapsed() > Duration::from_secs(GPU_WATCHDOG_SECS) {
+            eprintln!(
+                "\n[executor] WATCHDOG: forward pass exceeded {}s — \
+                 killing process to prevent system freeze",
+                GPU_WATCHDOG_SECS
+            );
+            std::process::exit(1);
+        }
+        results
+    } else {
+        // ── Unfused: one command buffer per node (--no-fuse) ────────
+        let mut all_results = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut res = ctx
+                .dispatch_chain(&all_specs[i..i + 1])
+                .map_err(|e| ModelError::Other(e.to_string()))?;
+            all_results.append(&mut res);
+            if start.elapsed() > Duration::from_secs(GPU_WATCHDOG_SECS) {
+                eprintln!(
+                    "\n[executor] WATCHDOG: forward pass exceeded {}s at node {} — \
+                     killing process to prevent system freeze",
+                    GPU_WATCHDOG_SECS, i
+                );
+                std::process::exit(1);
+            }
+        }
+        all_results
+    };
 
     let total_gpu_us = results.first().map(|r| r.elapsed_us).unwrap_or(0.0);
 

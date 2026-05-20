@@ -40,15 +40,12 @@ pub struct InferArgs {
     #[arg(long = "max-seq-len", default_value = "2048")]
     pub max_seq_len: usize,
 
-    /// Enable graph-level kernel fusion. When set, the compiler automatically
-    /// fuses adjacent dispatch nodes, ignoring any TOML fuse annotations.
-    /// Without this flag, TOML fuse tags are honored but no automatic fusion
-    /// is performed. Use --no-fuse to disable all fusion.
-    #[arg(long = "fuse", default_value_t = false, conflicts_with = "no_fuse")]
-    pub fuse: bool,
-
-    /// Disable all kernel fusion, including TOML fuse tags.
-    #[arg(long = "no-fuse", default_value_t = false, conflicts_with = "fuse")]
+    /// Disable graph-level kernel fusion. By default, the compiler
+    /// automatically fuses adjacent dispatch nodes into a single
+    /// MTLCommandBuffer (one waitUntilCompleted per token). Pass this
+    /// flag to dispatch each kernel individually — useful for debugging
+    /// but ~10× slower.
+    #[arg(long = "no-fuse", default_value_t = false)]
     pub no_fuse: bool,
 }
 
@@ -98,10 +95,8 @@ async fn run_async(args: &InferArgs) -> Result<(), metaltile_infer::InferError> 
     // ── Fusion mode ──────────────────────────────────────────────────
     let fusion_mode = if args.no_fuse {
         FusionMode::None
-    } else if args.fuse {
-        FusionMode::GraphDriven
     } else {
-        FusionMode::TomlDriven
+        FusionMode::GraphDriven
     };
 
     // ── Build session ──────────────────────────────────────────────────
