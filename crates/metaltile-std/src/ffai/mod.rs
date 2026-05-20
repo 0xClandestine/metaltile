@@ -47,6 +47,7 @@ pub mod sdpa_decode_2pass;
 pub mod sdpa_decode_batched;
 pub mod sdpa_decode_batched_prefill;
 pub mod sdpa_decode_d256;
+pub mod sdpa_decode_d512;
 pub mod sdpa_decode_d64;
 pub mod sdpa_multi;
 pub mod ssm;
