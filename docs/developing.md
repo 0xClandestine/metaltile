@@ -52,7 +52,7 @@ Prefer `make` over raw `cargo` — it centralises flags and always passes `--wor
 
 ## Pre-push hooks
 
-`make hooks` installs three git hooks (under `scripts/hooks/`, opt-in per clone via `git config core.hooksPath`) that mirror the CI checks locally so the slow round-trip to GitHub doesn't surface trivially-catchable failures:
+`make hooks` installs three git hooks (under `.github/scripts/hooks/`, opt-in per clone via `git config core.hooksPath`) that mirror the CI checks locally so the slow round-trip to GitHub doesn't surface trivially-catchable failures:
 
 | Hook | When | Checks | Time |
 |---|---|---|---|

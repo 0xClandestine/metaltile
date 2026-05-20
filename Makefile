@@ -21,7 +21,7 @@ setup: ## one-time dev environment setup (toolchains, deps, first build)
 
 .PHONY: hooks
 hooks: ## install git hooks (pre-commit, commit-msg, pre-push)
-	./scripts/install-hooks.sh
+	./.github/scripts/install-hooks.sh
 
 .PHONY: hooks-uninstall
 hooks-uninstall: ## remove git hook installation
