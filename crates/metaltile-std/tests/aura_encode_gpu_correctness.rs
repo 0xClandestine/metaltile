@@ -24,7 +24,13 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{
-    Dt, max_abs_diff, naive_aura_encode_f32, pack_bytes, pack_u32_bytes, ramp, unpack_bytes,
+    Dt,
+    max_abs_diff,
+    naive_aura_encode_f32,
+    pack_bytes,
+    pack_u32_bytes,
+    ramp,
+    unpack_bytes,
     unpack_u32_bytes,
 };
 use metaltile_core::{dtype::DType, ir::KernelMode};
@@ -92,13 +98,7 @@ fn aura_encode_int4_matches_naive_cpu_reference_f32() {
     // 1 threadgroup per row, `dim` threads per group (the kernel's
     // design TPG). For dim=128 that's 128 threads = 4 simdgroups.
     let result = ctx
-        .dispatch_with_grid(
-            &kernel,
-            &buffers,
-            &BTreeMap::new(),
-            [rows, 1, 1],
-            [dim, 1, 1],
-        )
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [rows, 1, 1], [dim, 1, 1])
         .expect("dispatch_with_grid should succeed");
 
     let packed_bytes =
@@ -111,19 +111,13 @@ fn aura_encode_int4_matches_naive_cpu_reference_f32() {
     // packed_out: bit-exact match. The quantisation is deterministic
     // boundary counting and the identity rotation removes any
     // matmul reordering noise, so there's no slack to give.
-    assert_eq!(
-        actual_packed, expected_packed,
-        "packed_out mismatch — quantisation indices differ",
-    );
+    assert_eq!(actual_packed, expected_packed, "packed_out mismatch — quantisation indices differ",);
 
     // norms_out: fp32 tolerance. `simd_sum` reorders the partials
     // relative to the CPU's left-fold, so a few ulp of drift is
     // expected at these magnitudes.
     let diff = max_abs_diff(&expected_norms, &actual_norms);
-    assert!(
-        diff < 1e-4,
-        "norms_out diverges from CPU reference: max |diff| = {diff:.2e}",
-    );
+    assert!(diff < 1e-4, "norms_out diverges from CPU reference: max |diff| = {diff:.2e}",);
 }
 
 #[test]
@@ -158,13 +152,7 @@ fn aura_encode_int4_minimum_dim_f32() {
     kernel.mode = KernelMode::Reduction;
 
     let result = ctx
-        .dispatch_with_grid(
-            &kernel,
-            &buffers,
-            &BTreeMap::new(),
-            [rows, 1, 1],
-            [dim, 1, 1],
-        )
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [rows, 1, 1], [dim, 1, 1])
         .expect("dispatch_with_grid should succeed");
 
     let packed_bytes =

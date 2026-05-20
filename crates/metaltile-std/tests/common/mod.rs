@@ -321,8 +321,8 @@ pub fn naive_aura_encode_f32(
         let mut indices = vec![0u32; dim];
         for d in 0..dim {
             let mut idx = 0u32;
-            for b in 0..levels - 1 {
-                if y[d] > boundaries[b] {
+            for &bound in boundaries.iter().take(levels - 1) {
+                if y[d] > bound {
                     idx += 1;
                 }
             }
@@ -346,8 +346,7 @@ pub fn naive_aura_encode_f32(
         }
 
         // Steps 6 + 7: r̂ from codebook, corrected = r / r̂.
-        let recon_sq: f32 =
-            indices.iter().map(|&i| codebook[i as usize].powi(2)).sum();
+        let recon_sq: f32 = indices.iter().map(|&i| codebook[i as usize].powi(2)).sum();
         let recon_norm = recon_sq.sqrt();
         let corrected = if recon_norm > 1e-8 { r_norm / recon_norm } else { r_norm };
         norms_out[r] = corrected;

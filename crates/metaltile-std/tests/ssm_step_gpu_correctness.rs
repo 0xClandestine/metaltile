@@ -28,6 +28,7 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> { unpack_bytes(bytes, Dt::F32) }
 
 /// CPU reference matching the kernel's per-(h, d) recurrence + the
 /// in-place state update + y projection.
+#[allow(clippy::too_many_arguments)]
 fn naive_ssm_step(
     x: &[f32],
     a: &[f32],
@@ -68,19 +69,16 @@ fn ssm_step_matches_naive_reference_f32() {
     let state_dim = 16usize;
 
     // Small ramps so the recurrence stays well-behaved (no exp blow-up).
-    let x: Vec<f32> =
-        (0..n_heads * head_dim).map(|i| ((i % 11) as f32 - 5.0) * 0.02).collect();
+    let x: Vec<f32> = (0..n_heads * head_dim).map(|i| ((i % 11) as f32 - 5.0) * 0.02).collect();
     // a < 0 keeps `decay = exp(a*dt) < 1` (stable recurrence).
     let a: Vec<f32> = (0..n_heads).map(|i| -0.1 * (i + 1) as f32).collect();
     let b: Vec<f32> = (0..state_dim).map(|i| ((i % 5) as f32 - 2.0) * 0.05).collect();
     let c: Vec<f32> = (0..state_dim).map(|i| ((i % 7) as f32 - 3.0) * 0.03).collect();
     let dt: Vec<f32> = (0..n_heads).map(|i| 0.1 + 0.05 * i as f32).collect();
-    let h: Vec<f32> = (0..n_heads * state_dim * head_dim)
-        .map(|i| ((i % 13) as f32 - 6.0) * 0.01)
-        .collect();
+    let h: Vec<f32> =
+        (0..n_heads * state_dim * head_dim).map(|i| ((i % 13) as f32 - 6.0) * 0.01).collect();
     let mut h_cpu = h.clone();
-    let expected_y =
-        naive_ssm_step(&x, &a, &b, &c, &dt, &mut h_cpu, n_heads, head_dim, state_dim);
+    let expected_y = naive_ssm_step(&x, &a, &b, &c, &dt, &mut h_cpu, n_heads, head_dim, state_dim);
 
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     buffers.insert("x".into(), f32_slice_to_bytes(&x));
@@ -101,13 +99,7 @@ fn ssm_step_matches_naive_reference_f32() {
     // threads dispatch [1,1,1]/[N,1,1] — see conv1d test header.
     let total = n_heads * head_dim;
     let result = ctx
-        .dispatch_with_grid(
-            &kernel,
-            &buffers,
-            &BTreeMap::new(),
-            [1, 1, 1],
-            [total, 1, 1],
-        )
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [1, 1, 1], [total, 1, 1])
         .expect("dispatch_with_grid should succeed");
 
     let actual_y = bytes_to_f32_vec(result.outputs.get("y").expect("y"));

@@ -32,7 +32,7 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> { unpack_bytes(bytes, Dt::F32) }
 
 fn run_rms_norm(x: &[f32], w: &[f32], n: usize, rows: usize, eps: f32) -> Vec<f32> {
     let tpg = n / 4; // N = TPG * 4 invariant.
-    assert!(n % 128 == 0, "n must be multiple of 128 (kernel invariant)");
+    assert!(n.is_multiple_of(128), "n must be multiple of 128 (kernel invariant)");
     assert!(tpg <= 1024, "n / 4 must fit in 1024 (Apple TPG cap)");
 
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -51,13 +51,7 @@ fn run_rms_norm(x: &[f32], w: &[f32], n: usize, rows: usize, eps: f32) -> Vec<f3
 
     // 1 threadgroup per row, `tpg` threads per group.
     let result = ctx
-        .dispatch_with_grid(
-            &kernel,
-            &buffers,
-            &BTreeMap::new(),
-            [rows, 1, 1],
-            [tpg, 1, 1],
-        )
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [rows, 1, 1], [tpg, 1, 1])
         .expect("dispatch_with_grid should succeed");
 
     let out_bytes = result.outputs.get("out").expect("`out` buffer in dispatch result");
@@ -80,10 +74,7 @@ fn rms_norm_matches_naive_cpu_reference_f32_minimum_n() {
     let actual = run_rms_norm(&x, &w, n, rows, eps);
 
     let diff = max_abs_diff(&expected, &actual);
-    assert!(
-        diff < 1e-4,
-        "rms_norm n={n} rows={rows} max |diff| = {diff:.2e} (expected < 1e-4)",
-    );
+    assert!(diff < 1e-4, "rms_norm n={n} rows={rows} max |diff| = {diff:.2e} (expected < 1e-4)",);
 }
 
 #[test]
@@ -101,10 +92,7 @@ fn rms_norm_matches_naive_cpu_reference_f32_multi_row() {
     let actual = run_rms_norm(&x, &w, n, rows, eps);
 
     let diff = max_abs_diff(&expected, &actual);
-    assert!(
-        diff < 1e-4,
-        "rms_norm n={n} rows={rows} max |diff| = {diff:.2e} (expected < 1e-4)",
-    );
+    assert!(diff < 1e-4, "rms_norm n={n} rows={rows} max |diff| = {diff:.2e} (expected < 1e-4)",);
 }
 
 #[test]
@@ -123,8 +111,5 @@ fn rms_norm_matches_naive_cpu_reference_f32_max_n() {
     let diff = max_abs_diff(&expected, &actual);
     // Slightly looser tolerance at n=4096 — more partial-sums means
     // more fp32 reordering noise from `reduce_sum`.
-    assert!(
-        diff < 5e-4,
-        "rms_norm n={n} rows={rows} max |diff| = {diff:.2e} (expected < 5e-4)",
-    );
+    assert!(diff < 5e-4, "rms_norm n={n} rows={rows} max |diff| = {diff:.2e} (expected < 5e-4)",);
 }

@@ -63,8 +63,7 @@ fn gemv_matches_naive_cpu_reference_f32_small() {
     // 16 × 256 — fits one TPG with no inner-loop iteration.
     let m = 16usize;
     let k = 256usize;
-    let mat: Vec<f32> =
-        (0..m * k).map(|i| ((i as f32 % 13.0) - 6.0) * 0.01).collect();
+    let mat: Vec<f32> = (0..m * k).map(|i| ((i as f32 % 13.0) - 6.0) * 0.01).collect();
     let vec: Vec<f32> = (0..k).map(|j| ((j as f32 % 7.0) - 3.0) * 0.02).collect();
     let expected = naive_matvec_f32(&mat, &vec, m, k);
     let actual = run_gemv(&mat, &vec, m, k);
@@ -80,8 +79,7 @@ fn gemv_matches_naive_cpu_reference_f32_production_size() {
     let k = 4096usize;
     let mat: Vec<f32> =
         (0..m * k).map(|i| (((i * 31 + 17) % 200) as f32 - 100.0) * 0.001).collect();
-    let vec: Vec<f32> =
-        (0..k).map(|j| (((j * 13 + 5) % 100) as f32 - 50.0) * 0.002).collect();
+    let vec: Vec<f32> = (0..k).map(|j| (((j * 13 + 5) % 100) as f32 - 50.0) * 0.002).collect();
     let expected = naive_matvec_f32(&mat, &vec, m, k);
     let actual = run_gemv(&mat, &vec, m, k);
     let diff = max_abs_diff(&expected, &actual);
