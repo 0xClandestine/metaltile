@@ -19,6 +19,7 @@ pub mod dequant_gather;
 pub mod dequant_gemv;
 pub mod gather;
 pub mod kv_cache;
+pub mod logits_processors;
 pub mod rope_llama;
 pub mod sampling;
 pub mod sdpa_decode;
