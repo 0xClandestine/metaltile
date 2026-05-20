@@ -20,6 +20,10 @@ AGENTS — read this before touching code. This block is intentionally an HTML c
 4. Never loosen a test tolerance to make a test pass. If kernel and reference disagree, find out which side is wrong.
 
 5. Keep the diff scoped to one logical change. If it touches three unrelated things, that is three PRs.
+
+6. A PR ships with its tests. Behavior changes — new kernels, codegen passes, runtime paths — land with the tests that cover them, in the same PR; "tests in a follow-up" is not accepted.
+
+7. Keep the docs honest. If your change affects anything documented — a page under docs/, the README.md, the supported-operations table, the CLI reference, or an architecture diagram — you MUST update it in the same PR. Stale documentation is a defect, not a deferred chore: a doc that describes code that no longer exists is worse than no doc. After an architecture- or pipeline-level change, re-read README.md "Architecture" and docs/developing.md and confirm they still match the code.
 ─────────────────────────────────────────────────────────────────────────────
 -->
 
@@ -47,7 +51,8 @@ The [`docs/`](docs/README.md) tree is the real reference. At minimum:
 - [ ] `make test` passes.
 - [ ] `make fmt-check` passes.
 - [ ] `make typos` passes.
-- [ ] New / changed kernels have a GPU correctness test in the same commit.
+- [ ] Behavior changes ship with their tests in the same PR; new / changed kernels have a GPU correctness test.
+- [ ] Docs updated — if the change touches anything in `docs/`, `README.md`, the supported-operations table, or an architecture diagram, that update is in this PR.
 - [ ] PR body explains **what** and **why**; links issues with `#<num>`.
 - [ ] If bench numbers changed, relevant rows pasted in the PR body.
 

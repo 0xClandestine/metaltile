@@ -156,6 +156,20 @@ macro_rules! body { ($bits:literal) => { /* … */ }; }
 
 Canonical reference: `crates/metaltile-std/src/ffai/dequant_gather.rs`. For hand-unrolled tree reductions, replace `*_step!` macros with a DSL `for` loop over the halving strides — identical MSL, survives the proc-macro.
 
+### ⚠️ The body parser silently drops `while`, `return`, and other unsupported constructs
+
+The `#[kernel]` body parser understands a specific subset of Rust. Anything outside it falls into a catch-all that allocates a value but emits **no IR** — the construct simply vanishes from the generated kernel, with no error. Known silent-drops:
+
+- **`while` loops** emit nothing — only the surrounding `let` bindings survive. A `while` reduction loop produces a kernel that does zero reduction steps. Use a DSL `for _ in range(start, end, step)` loop instead.
+- **`return`** emits nothing; execution falls through into whatever follows, overwriting the output you thought you'd returned. Use `if` / `else` branching instead of an early return.
+- **`loop`, `match`, closures** hit the same catch-all with the same result.
+
+`macro_rules!` calls are dropped the same way, but those now fail *loudly* — the proc-macro errors on `Stmt::Macro` / `Expr::Macro` (see the hazard above). `while`, `return`, and the rest are **not** guarded; they fail silently and ship a clean-compiling kernel with the wrong behavior — the same failure mode as empty-body MSL. Stick to `let` bindings, `if` / `else`, DSL `for` / `range` loops, and the DSL intrinsics; when in doubt, `tile inspect <kernel>` and read the emitted MSL before trusting it.
+
+### ⚠️ `threadgroup_alloc` is hoisted to function scope — names must be globally unique
+
+Every `threadgroup_alloc("name", …)` call is lifted to a single function-scope declaration, regardless of which branch it sits in. Two branches that each call `threadgroup_alloc("tg_max", …)` therefore collide into a duplicate `threadgroup float tg_max[…]` — a Metal compile error. This one at least fails loudly, but the fix is non-obvious: give every threadgroup buffer a name unique across the *whole* kernel, not just within its branch (e.g. a greedy path's scratch is `tg_gmax`, the sampling path's is `tg_max`).
+
 ### ⚠️ Empty-body MSL also slips through pass ordering
 
 The macro trap above is one way the codegen emits a kernel with a valid function/loop *header* but no *body*. The other is **pass ordering**: a pass eliminates a loop body but leaves the loop header, or a `Const` a later pass needs is still rolled inside a `BinOp` so the trip count is invisible. The result is `for (…) { }` — an empty loop — and again the kernel ships all-zeros output that `xcrun metal` accepts.
