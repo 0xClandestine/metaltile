@@ -1192,3 +1192,366 @@ inventory::submit! {
         kernel_mode: Some(KernelMode::Reduction),
     }
 }
+
+// ── mt_moe_gather_qmm_mma_int4_bm16 ────────────────────────────────────────
+//
+// Half-height MMA grouped quantized matmul — BM=16 variant of
+// `mt_moe_gather_qmm_mma_int4`. Matches MLX's `affine_gather_qmm_rhs_nt`
+// at WM=1 WN=2 (2 SGs, 64 tpg).
+//
+// Rationale: at Qwen3.6-A3B prefill T=1024 × 128 experts, rows_per_expert
+// = 8. BM=32 wastes 75% of each MMA tile on zeroed rows (4 sub-runs per
+// TG, each padding to BM=32). BM=16 halves the waste to 50% (2 sub-runs
+// per TG) AND doubles m-tile parallelism (32→64 m-tiles).
+//
+// Geometry:
+//   tpg = 64 = 2 SG × 32 lanes (WM=1, WN=2 — sm=0, sn=sg)
+//   BM = 16, BN = 32, BK = 32 → 16×32 output tile (512 outputs/TG)
+//   Grid: [N/32, ceil(M/16), 1]
+//   Per SG per K-block: 4 frags × 4 k_inner = 16 MMAs (32 across TG)
+//
+// Inputs / outputs match the BM=32 sibling — same signature.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_moe_gather_qmm_mma_int4_bm16<T>(
+    x: Tensor<T>,
+    w: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    indices: Tensor<u32>,
+    mut out: Tensor<T>,
+    #[constexpr] m_total: u32,
+    #[constexpr] n_out: u32,
+    #[constexpr] k_in: u32,
+    #[constexpr] group_size: u32,
+) {
+    let n_tile = tgid_x;
+    let m_tile = tgid_y;
+    let lane = simd_lane;
+    let sg = simd_group_id();
+    // 2 SGs in 1×2 warp grid (WM=1, WN=2).
+    let sm = 0u32;
+    let sn = sg & 1u32;
+    let lane_in_tg = sg * 32u32 + lane;
+
+    // 8×8 frag lane mapping (Apple steel_gemm layout).
+    let qid = lane / 4u32;
+    let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
+    let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
+    let fn1 = fn0 + 1u32;
+
+    // TG memory: X tile [BM=16 × (BK=32 +8)] and W tile [BN=32 × (BK=32 +8)].
+    // BK_padded = 40 (= BK + 16/sizeof(T) at f16) matches MLX's
+    // affine_gather_qmm_rhs_nt padding — breaks the bank-conflict that
+    // the +4 skew leaves for fp16 MMA fragment column reads. Cost: a few
+    // hundred extra T per TG. Free at our occupancy.
+    threadgroup_alloc("xs", 640, T);
+    threadgroup_alloc("ws", 1280, T);
+
+    // 4 output frags per SG (16 rows × 16 cols of the 16×32 output tile).
+    let c_f00 = simdgroup_alloc::<f32, 8, 8>();
+    let c_f01 = simdgroup_alloc::<f32, 8, 8>();
+    let c_f10 = simdgroup_alloc::<f32, 8, 8>();
+    let c_f11 = simdgroup_alloc::<f32, 8, 8>();
+
+    let a_f0 = simdgroup_alloc::<T, 8, 8>();
+    let a_f1 = simdgroup_alloc::<T, 8, 8>();
+    let b_f0 = simdgroup_alloc::<T, 8, 8>();
+    let b_f1 = simdgroup_alloc::<T, 8, 8>();
+
+    // Coop-load lane assignments — X tile is 16×32 = 512 elements,
+    // 64 lanes × 8 strides each (= matches mt_qmm_mma_m16).
+    // W tile is 32×32 = 1024 elements / 8 nibbles per pack = 128 packs,
+    // 64 lanes × 2 packs each.
+    let w_row_in_tg = lane_in_tg / 4u32;
+    let pack_in_row = lane_in_tg & 3u32;
+    // For 2-pack-per-lane W load: pack at lane+64 (second half).
+    let w_row_2nd = (64u32 + lane_in_tg) / 4u32;
+    let pack_in_row_2nd = (64u32 + lane_in_tg) & 3u32;
+
+    // BK_padded = 40 (= BK + 16/sizeof(T) at f16) matches MLX's
+    // affine_gather_qmm_rhs_nt skew — breaks the bank-conflict that the
+    // +4 skew leaves for fp16 MMA fragment column reads.
+    let xs_ld = 40u32;
+    let ws_ld = 40u32;
+
+    let m_tile_base = m_tile * 16u32;
+    let n_tile_base = n_tile * 32u32;
+    let packs_per_row = k_in / 8u32;
+    let groups_per_row = k_in / group_size;
+
+    // Walk the TG's BM=16 rows in contiguous expert runs. Up to 16
+    // sub-runs (one per row worst case); typical 1-2 at production
+    // T*topk shapes.
+    let mut sub_offset = 0u32;
+    for _sub_iter in range(0u32, 16u32, 1u32) {
+        // Skip the entire body once we've finished the BM=16 span.
+        // Saves 14+ wasted outer iters per TG and their 16×16=256
+        // indices probes when only 1-2 sub-runs are needed (production
+        // shape T=1024 × 128 experts ≈ 8 rows/expert = 2 sub-runs).
+        let mut sub_end = sub_offset;
+        let mut cur_expert = 4294967295u32;
+        if sub_offset < 16u32 {
+            let cur_row = m_tile_base + sub_offset;
+            let cur_in_range = cur_row < m_total;
+            cur_expert = select(cur_in_range, load(indices[cur_row]), 4294967295u32);
+
+            sub_end = 16u32;
+            let mut found = 0u32;
+            for _ii in range(0u32, 16u32, 1u32) {
+                let probe = sub_offset + 1u32 + _ii;
+                let probe_row = m_tile_base + probe;
+                let probe_in_range = (probe < 16u32) & (probe_row < m_total);
+                if probe_in_range & (found == 0u32) {
+                    let e = load(indices[probe_row]);
+                    if e != cur_expert {
+                        sub_end = probe;
+                        found = 1u32;
+                    }
+                }
+                if (probe < 16u32) & (probe_row >= m_total) & (found == 0u32) {
+                    sub_end = probe;
+                    found = 1u32;
+                }
+            }
+        }
+
+        let cur_valid = (cur_expert != 4294967295u32) & (sub_offset < 16u32);
+        if cur_valid {
+            let w_expert_base = cur_expert * n_out * packs_per_row;
+            let sb_expert_base = cur_expert * n_out * groups_per_row;
+
+            // Reset 4 frags.
+            simdgroup_elem_store(c_f00, 0, 0.0f32);
+            simdgroup_elem_store(c_f00, 1, 0.0f32);
+            simdgroup_elem_store(c_f01, 0, 0.0f32);
+            simdgroup_elem_store(c_f01, 1, 0.0f32);
+            simdgroup_elem_store(c_f10, 0, 0.0f32);
+            simdgroup_elem_store(c_f10, 1, 0.0f32);
+            simdgroup_elem_store(c_f11, 0, 0.0f32);
+            simdgroup_elem_store(c_f11, 1, 0.0f32);
+
+            for kb in range(0u32, k_in, 32u32) {
+                // X load — 64 lanes × 8 contiguous K elements each (flat
+                // index covers all 512 elems of the 16×32 tile).
+                let flat0 = lane_in_tg;
+                let flat1 = 64u32 + lane_in_tg;
+                let flat2 = 128u32 + lane_in_tg;
+                let flat3 = 192u32 + lane_in_tg;
+                let flat4 = 256u32 + lane_in_tg;
+                let flat5 = 320u32 + lane_in_tg;
+                let flat6 = 384u32 + lane_in_tg;
+                let flat7 = 448u32 + lane_in_tg;
+                let mr0 = flat0 / 32u32;
+                let mr1 = flat1 / 32u32;
+                let mr2 = flat2 / 32u32;
+                let mr3 = flat3 / 32u32;
+                let mr4 = flat4 / 32u32;
+                let mr5 = flat5 / 32u32;
+                let mr6 = flat6 / 32u32;
+                let mr7 = flat7 / 32u32;
+                let kc0 = flat0 & 31u32;
+                let kc1 = flat1 & 31u32;
+                let kc2 = flat2 & 31u32;
+                let kc3 = flat3 & 31u32;
+                let kc4 = flat4 & 31u32;
+                let kc5 = flat5 & 31u32;
+                let kc6 = flat6 & 31u32;
+                let kc7 = flat7 & 31u32;
+                // Mask-hoist: bare loads in a contiguous run so the
+                // Vectorize codegen pass can fuse 4 consecutive Loads
+                // into vec4 device loads. Select between {0, load} would
+                // insert Cast/Select/Const between Loads and bust the
+                // ≤8-op scan window. Mask is applied post-load via
+                // multiply (xv * mask_t). The OOB guard uses select on
+                // the INDEX (clamp to row 0) so the Load itself is
+                // unconditional; row 0 is always in bounds for any
+                // m_total >= 1.
+                let g0 = select(mr0 + m_tile_base < m_total, mr0 + m_tile_base, 0u32);
+                let g1 = select(mr1 + m_tile_base < m_total, mr1 + m_tile_base, 0u32);
+                let g2 = select(mr2 + m_tile_base < m_total, mr2 + m_tile_base, 0u32);
+                let g3 = select(mr3 + m_tile_base < m_total, mr3 + m_tile_base, 0u32);
+                let g4 = select(mr4 + m_tile_base < m_total, mr4 + m_tile_base, 0u32);
+                let g5 = select(mr5 + m_tile_base < m_total, mr5 + m_tile_base, 0u32);
+                let g6 = select(mr6 + m_tile_base < m_total, mr6 + m_tile_base, 0u32);
+                let g7 = select(mr7 + m_tile_base < m_total, mr7 + m_tile_base, 0u32);
+                let xv0 = load(x[g0 * k_in + kb + kc0]).cast::<T>();
+                let xv1 = load(x[g1 * k_in + kb + kc1]).cast::<T>();
+                let xv2 = load(x[g2 * k_in + kb + kc2]).cast::<T>();
+                let xv3 = load(x[g3 * k_in + kb + kc3]).cast::<T>();
+                let xv4 = load(x[g4 * k_in + kb + kc4]).cast::<T>();
+                let xv5 = load(x[g5 * k_in + kb + kc5]).cast::<T>();
+                let xv6 = load(x[g6 * k_in + kb + kc6]).cast::<T>();
+                let xv7 = load(x[g7 * k_in + kb + kc7]).cast::<T>();
+                // Per-row mask: in [sub_offset, sub_end) AND global row valid.
+                let g0r = m_tile_base + mr0;
+                let g1r = m_tile_base + mr1;
+                let g2r = m_tile_base + mr2;
+                let g3r = m_tile_base + mr3;
+                let g4r = m_tile_base + mr4;
+                let g5r = m_tile_base + mr5;
+                let g6r = m_tile_base + mr6;
+                let g7r = m_tile_base + mr7;
+                let m0 = select((mr0 >= sub_offset) & (mr0 < sub_end) & (g0r < m_total), 1.0f32, 0.0f32).cast::<T>();
+                let m1 = select((mr1 >= sub_offset) & (mr1 < sub_end) & (g1r < m_total), 1.0f32, 0.0f32).cast::<T>();
+                let m2 = select((mr2 >= sub_offset) & (mr2 < sub_end) & (g2r < m_total), 1.0f32, 0.0f32).cast::<T>();
+                let m3 = select((mr3 >= sub_offset) & (mr3 < sub_end) & (g3r < m_total), 1.0f32, 0.0f32).cast::<T>();
+                let m4 = select((mr4 >= sub_offset) & (mr4 < sub_end) & (g4r < m_total), 1.0f32, 0.0f32).cast::<T>();
+                let m5 = select((mr5 >= sub_offset) & (mr5 < sub_end) & (g5r < m_total), 1.0f32, 0.0f32).cast::<T>();
+                let m6 = select((mr6 >= sub_offset) & (mr6 < sub_end) & (g6r < m_total), 1.0f32, 0.0f32).cast::<T>();
+                let m7 = select((mr7 >= sub_offset) & (mr7 < sub_end) & (g7r < m_total), 1.0f32, 0.0f32).cast::<T>();
+                threadgroup_store("xs", mr0 * xs_ld + kc0, xv0 * m0);
+                threadgroup_store("xs", mr1 * xs_ld + kc1, xv1 * m1);
+                threadgroup_store("xs", mr2 * xs_ld + kc2, xv2 * m2);
+                threadgroup_store("xs", mr3 * xs_ld + kc3, xv3 * m3);
+                threadgroup_store("xs", mr4 * xs_ld + kc4, xv4 * m4);
+                threadgroup_store("xs", mr5 * xs_ld + kc5, xv5 * m5);
+                threadgroup_store("xs", mr6 * xs_ld + kc6, xv6 * m6);
+                threadgroup_store("xs", mr7 * xs_ld + kc7, xv7 * m7);
+
+                // W dequant — 64 lanes × 2 packs each.
+                let s_16 = 0.0625f32;
+                let s_256 = 0.00390625f32;
+                let s_4096 = 0.000244140625f32;
+
+                // Pack 0 — lanes 0..63.
+                let pack_row_0 = n_tile_base + w_row_in_tg;
+                let pack_dev_0 =
+                    w_expert_base + pack_row_0 * packs_per_row + kb / 8u32 + pack_in_row;
+                let p0 = load(w[pack_dev_0]);
+                let k_off_0 = kb + pack_in_row * 8u32;
+                let g_0 = k_off_0 / group_size;
+                let sb_base_0 = sb_expert_base + pack_row_0 * groups_per_row;
+                let s_0 = load(scales[sb_base_0 + g_0]).cast::<f32>();
+                let b_0 = load(biases[sb_base_0 + g_0]).cast::<f32>();
+                let hi_0 = p0 >> 16u32;
+                let q0_0 = (p0 & 15u32).cast::<f32>();
+                let q1_0 = (p0 & 240u32).cast::<f32>() * s_16;
+                let q2_0 = (p0 & 3840u32).cast::<f32>() * s_256;
+                let q3_0 = (p0 & 61440u32).cast::<f32>() * s_4096;
+                let q4_0 = (hi_0 & 15u32).cast::<f32>();
+                let q5_0 = (hi_0 & 240u32).cast::<f32>() * s_16;
+                let q6_0 = (hi_0 & 3840u32).cast::<f32>() * s_256;
+                let q7_0 = (hi_0 & 61440u32).cast::<f32>() * s_4096;
+                let wb_0 = w_row_in_tg * ws_ld + pack_in_row * 8u32;
+                threadgroup_store("ws", wb_0, (s_0 * q0_0 + b_0).cast::<T>());
+                threadgroup_store("ws", wb_0 + 1u32, (s_0 * q1_0 + b_0).cast::<T>());
+                threadgroup_store("ws", wb_0 + 2u32, (s_0 * q2_0 + b_0).cast::<T>());
+                threadgroup_store("ws", wb_0 + 3u32, (s_0 * q3_0 + b_0).cast::<T>());
+                threadgroup_store("ws", wb_0 + 4u32, (s_0 * q4_0 + b_0).cast::<T>());
+                threadgroup_store("ws", wb_0 + 5u32, (s_0 * q5_0 + b_0).cast::<T>());
+                threadgroup_store("ws", wb_0 + 6u32, (s_0 * q6_0 + b_0).cast::<T>());
+                threadgroup_store("ws", wb_0 + 7u32, (s_0 * q7_0 + b_0).cast::<T>());
+
+                // Pack 1 — lanes 64..127 (second half of 32 rows).
+                let pack_row_1 = n_tile_base + w_row_2nd;
+                let pack_dev_1 =
+                    w_expert_base + pack_row_1 * packs_per_row + kb / 8u32 + pack_in_row_2nd;
+                let p1 = load(w[pack_dev_1]);
+                let k_off_1 = kb + pack_in_row_2nd * 8u32;
+                let g_1 = k_off_1 / group_size;
+                let sb_base_1 = sb_expert_base + pack_row_1 * groups_per_row;
+                let s_1 = load(scales[sb_base_1 + g_1]).cast::<f32>();
+                let b_1 = load(biases[sb_base_1 + g_1]).cast::<f32>();
+                let hi_1 = p1 >> 16u32;
+                let q0_1 = (p1 & 15u32).cast::<f32>();
+                let q1_1 = (p1 & 240u32).cast::<f32>() * s_16;
+                let q2_1 = (p1 & 3840u32).cast::<f32>() * s_256;
+                let q3_1 = (p1 & 61440u32).cast::<f32>() * s_4096;
+                let q4_1 = (hi_1 & 15u32).cast::<f32>();
+                let q5_1 = (hi_1 & 240u32).cast::<f32>() * s_16;
+                let q6_1 = (hi_1 & 3840u32).cast::<f32>() * s_256;
+                let q7_1 = (hi_1 & 61440u32).cast::<f32>() * s_4096;
+                let wb_1 = w_row_2nd * ws_ld + pack_in_row_2nd * 8u32;
+                threadgroup_store("ws", wb_1, (s_1 * q0_1 + b_1).cast::<T>());
+                threadgroup_store("ws", wb_1 + 1u32, (s_1 * q1_1 + b_1).cast::<T>());
+                threadgroup_store("ws", wb_1 + 2u32, (s_1 * q2_1 + b_1).cast::<T>());
+                threadgroup_store("ws", wb_1 + 3u32, (s_1 * q3_1 + b_1).cast::<T>());
+                threadgroup_store("ws", wb_1 + 4u32, (s_1 * q4_1 + b_1).cast::<T>());
+                threadgroup_store("ws", wb_1 + 5u32, (s_1 * q5_1 + b_1).cast::<T>());
+                threadgroup_store("ws", wb_1 + 6u32, (s_1 * q6_1 + b_1).cast::<T>());
+                threadgroup_store("ws", wb_1 + 7u32, (s_1 * q7_1 + b_1).cast::<T>());
+
+                threadgroup_barrier();
+
+                // MMA inner — 4 frags × 4 k_inner = 16 MMAs per SG.
+                // sm=0 (WM=1 → both SGs share rows 0..15).
+                let row_a0 = sm * 16u32 + fm;
+                let row_a1 = sm * 16u32 + 8u32 + fm;
+                let col_b0 = sn * 16u32;
+                let col_b1 = sn * 16u32 + 8u32;
+
+                for k_inner in range(0u32, 4u32, 1u32) {
+                    let ki_off = k_inner * 8u32;
+                    simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + ki_off + fn0));
+                    simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + ki_off + fn1));
+                    simdgroup_elem_store(a_f1, 0, threadgroup_load("xs", row_a1 * xs_ld + ki_off + fn0));
+                    simdgroup_elem_store(a_f1, 1, threadgroup_load("xs", row_a1 * xs_ld + ki_off + fn1));
+                    simdgroup_barrier_mem_none();
+                    simdgroup_elem_store(b_f0, 0, threadgroup_load("ws", (col_b0 + fn0) * ws_ld + ki_off + fm));
+                    simdgroup_elem_store(b_f0, 1, threadgroup_load("ws", (col_b0 + fn1) * ws_ld + ki_off + fm));
+                    simdgroup_elem_store(b_f1, 0, threadgroup_load("ws", (col_b1 + fn0) * ws_ld + ki_off + fm));
+                    simdgroup_elem_store(b_f1, 1, threadgroup_load("ws", (col_b1 + fn1) * ws_ld + ki_off + fm));
+                    simdgroup_barrier_mem_none();
+                    simdgroup_matmul(a_f0, b_f0, c_f00);
+                    simdgroup_matmul(a_f0, b_f1, c_f01);
+                    simdgroup_matmul(a_f1, b_f1, c_f11);
+                    simdgroup_matmul(a_f1, b_f0, c_f10);
+                    simdgroup_barrier_mem_none();
+                }
+                threadgroup_barrier();
+            }
+
+            // Write 4 frags. Mask each row to [sub_offset, sub_end) ∩ m_total.
+            let out_row_a0 = sm * 16u32 + fm;
+            let out_row_a1 = sm * 16u32 + 8u32 + fm;
+            let out_col_00 = sn * 16u32 + fn0;
+            let out_col_01 = sn * 16u32 + fn1;
+            let out_col_10 = sn * 16u32 + 8u32 + fn0;
+            let out_col_11 = sn * 16u32 + 8u32 + fn1;
+
+            let r00_0 = simdgroup_elem_load(c_f00, 0);
+            let r00_1 = simdgroup_elem_load(c_f00, 1);
+            let r01_0 = simdgroup_elem_load(c_f01, 0);
+            let r01_1 = simdgroup_elem_load(c_f01, 1);
+            let r10_0 = simdgroup_elem_load(c_f10, 0);
+            let r10_1 = simdgroup_elem_load(c_f10, 1);
+            let r11_0 = simdgroup_elem_load(c_f11, 0);
+            let r11_1 = simdgroup_elem_load(c_f11, 1);
+
+            let r0_g = m_tile_base + out_row_a0;
+            let r0_valid = (out_row_a0 >= sub_offset) & (out_row_a0 < sub_end) & (r0_g < m_total);
+            if r0_valid {
+                store(out[r0_g * n_out + n_tile_base + out_col_00], r00_0.cast::<T>());
+                store(out[r0_g * n_out + n_tile_base + out_col_01], r00_1.cast::<T>());
+                store(out[r0_g * n_out + n_tile_base + out_col_10], r01_0.cast::<T>());
+                store(out[r0_g * n_out + n_tile_base + out_col_11], r01_1.cast::<T>());
+            }
+            let r1_g = m_tile_base + out_row_a1;
+            let r1_valid = (out_row_a1 >= sub_offset) & (out_row_a1 < sub_end) & (r1_g < m_total);
+            if r1_valid {
+                store(out[r1_g * n_out + n_tile_base + out_col_00], r10_0.cast::<T>());
+                store(out[r1_g * n_out + n_tile_base + out_col_01], r10_1.cast::<T>());
+                store(out[r1_g * n_out + n_tile_base + out_col_10], r11_0.cast::<T>());
+                store(out[r1_g * n_out + n_tile_base + out_col_11], r11_1.cast::<T>());
+            }
+        }
+        sub_offset = sub_end;
+    }
+}
+
+inventory::submit! {
+    BenchSpec {
+        op: "moe",
+        subop: "gather_qmm_mma_int4_bm16",
+        kernel_name: "mt_moe_gather_qmm_mma_int4_bm16",
+        kernel_ir: mt_moe_gather_qmm_mma_int4_bm16::kernel_ir_for,
+        dtypes: &[DType::F32, DType::F16, DType::BF16],
+        tol: 5e-2,
+        mlx_src: None,
+        mlx_pattern: None,
+        shapes: &[],
+        dispatch: BenchDispatch::Generic,
+        kernel_mode: Some(KernelMode::Reduction),
+    }
+}
