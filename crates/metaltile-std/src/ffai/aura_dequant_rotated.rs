@@ -15,9 +15,8 @@
 //!
 //! Output:
 //! - `out  [B*H, T, dim]`            T    — fp16 / bf16 / fp32 in rotated
-//!                                          codec space; caller applies
-//!                                          the inverse rotation (e.g. via
-//!                                          flash-SDPA p2-with-fused-rot).
+//!   codec space; caller applies the inverse rotation (e.g. via
+//!   flash-SDPA p2-with-fused-rot).
 //!
 //! ## Bit-extract paths
 //!
