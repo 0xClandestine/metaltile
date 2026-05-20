@@ -684,11 +684,7 @@ pub enum Op {
     /// registers; AURA flash kernels need this for `q_vals[DIMS_PER_LANE]`,
     /// `o[DIMS_PER_LANE]`, and the per-thread codebook cache that
     /// amortises lookup across the dim-strided inner loop.
-    StackAlloc {
-        dtype: DType,
-        size: u32,
-        name: String,
-    },
+    StackAlloc { dtype: DType, size: u32, name: String },
 
     /// Load one element from a per-thread stack array: `val = name[index]`.
     /// Identical emission to `ThreadgroupLoad`; kept distinct in the IR so
