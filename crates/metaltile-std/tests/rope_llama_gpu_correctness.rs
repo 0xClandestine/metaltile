@@ -42,7 +42,7 @@ use std::collections::BTreeMap;
 use common::{Dt, gpu_lock, pack_bytes, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
-use metaltile_std::ffai::rope_llama::rope_llama;
+use metaltile_std::ffai::rope_llama::ffai_rope_llama as rope_llama;
 
 /// CPU oracle. Matches the kernel's exact arithmetic — banding logic
 /// (low/medium/high), exp2/log2 form of the inverse-frequency, fused
