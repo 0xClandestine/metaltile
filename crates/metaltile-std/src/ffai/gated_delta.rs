@@ -86,19 +86,24 @@ pub fn mt_gated_delta_step<T>(
 
     // ─── Phase 1: decay + kv_mem reduction ─────────────────────────────
     //
-    // Compute decayed state locally per element + contribute to kv_mem,
-    // then DISCARD. Phase 2 re-reads `state_in` and re-applies `g_val` to
-    // reconstruct the decayed state — one extra global load per element
-    // in exchange for zero TG-memory traffic and zero TG allocation.
+    // Per-lane register cache for the decayed state (`decayed`) and the
+    // key slice (`k_cache`) — Metal places small fixed-size local arrays
+    // in registers, so the inner loops in phase 1 + phase 2 read from
+    // registers, not global memory. Replaces the prior "re-read state_in
+    // and re-load k twice" pattern.
     //
-    // The second read hits Apple GPU's L1 / global cache (same address
-    // accessed ~50 cycles earlier in phase 1), so the perf cost is
-    // negligible compared to the saved TG store + load + barrier.
+    // Cap = 8 (n_per_t at the max supported Dk = 256). Smaller Dk just
+    // under-utilises the upper slots.
+    stack_alloc("decayed", 8u32, "f32");
+    stack_alloc("k_cache", 8u32, "f32");
+
     let mut kv_mem = 0.0f32;
     for i in range(0u32, n_per_t, 1u32) {
         let s_idx = n_per_t * dk_idx + i;
         let s_decayed = load(state_in[state_base + s_idx]).cast::<f32>() * g_val;
         let k_val = load(k[qk_base + s_idx]).cast::<f32>();
+        stack_store("decayed", i, s_decayed);
+        stack_store("k_cache", i, k_val);
         kv_mem = kv_mem + s_decayed * k_val;
     }
     let kv_mem_sum = simd_sum(kv_mem);
@@ -107,14 +112,15 @@ pub fn mt_gated_delta_step<T>(
 
     // ─── Phase 2: rank-1 update + output projection ────────────────────
     //
-    // Re-read state_in (cache hit), re-apply g_val to reconstruct the
-    // decayed state, then state_new = decayed + k*delta. Both k and q
-    // are loaded once per phase — same pattern MLX-LM's reference uses.
+    // Read decayed + k from the per-lane register caches (no global
+    // load), apply the rank-1 update, store new state, accumulate
+    // output against q. Matches MLX-LM's `float state[n_per_t]`
+    // register-array pattern from `mlx_lm/models/gated_delta.py`.
     let mut out = 0.0f32;
     for i in range(0u32, n_per_t, 1u32) {
         let s_idx = n_per_t * dk_idx + i;
-        let s_decayed = load(state_in[state_base + s_idx]).cast::<f32>() * g_val;
-        let k_val = load(k[qk_base + s_idx]).cast::<f32>();
+        let s_decayed = stack_load("decayed", i);
+        let k_val = stack_load("k_cache", i);
         let s_new = s_decayed + k_val * delta;
         store(state_out[state_base + s_idx], s_new.cast::<T>());
         let q_val = load(q[qk_base + s_idx]).cast::<f32>();
