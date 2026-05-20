@@ -34,6 +34,7 @@ pub mod rope;
 pub mod scaled_dot_product_attention;
 pub mod scan;
 pub mod sdpa_vector;
+pub mod sgload_smoke;
 pub mod softmax;
 pub mod sort;
 pub mod steel;
