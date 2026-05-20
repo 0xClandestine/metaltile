@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use metaltile_core::{dtype::DType, ir::KernelMode};
+use metaltile_core::{dtype::DType, ir::{Kernel, KernelMode}};
 use metaltile_runtime::context::GridSpec;
 use metaltile_std::spec::effective_mode;
 
@@ -139,6 +139,7 @@ pub fn compile(
 
     // ── Step 2: Compile each RawNode → DispatchNode ────────────────
     let mut nodes: Vec<DispatchNode> = Vec::with_capacity(raw_nodes.len());
+    let mut cached_kernels: Vec<Kernel> = Vec::with_capacity(raw_nodes.len());
     let mut intermediate_outputs: Vec<Vec<(String, usize)>> = Vec::with_capacity(raw_nodes.len());
     let mut intermediate_inputs: Vec<Vec<String>> = Vec::with_capacity(raw_nodes.len());
 
@@ -265,6 +266,7 @@ pub fn compile(
             dtype: p.activation_dtype,
             fuse_group: None,
         });
+        cached_kernels.push(kernel);
     }
 
     // ── Step 2.5: Graph-level fusion or TOML fuse groups ─────────
@@ -312,15 +314,13 @@ pub fn compile(
     // name_to_slot is the canonical map built during assignment — it preserves
     // all tenant names even when slots are reused (slot.name is overwritten on
     // reuse, so rebuilding from the slot vector would lose earlier tenant names).
-
-    // Filter out intra-fuse-group intermediates — they're handled by
-    // dispatch_chain's private-memory aliasing and don't need persistent
-    // BufferSlots.
-    let (filtered_outputs, filtered_inputs, intra_group_sizes) =
-        filter_intra_group_intermediates(&nodes, &intermediate_outputs, &intermediate_inputs);
-
+    //
+    // All intermediates go through liveness + slot_data, even those within
+    // fused groups.  Fusion reduces dispatch_chain calls but doesn't bypass
+    // the proven slot_data dataflow — this avoids correctness issues from
+    // external buffer aliasing across Metal barriers.
     let (slots, name_to_slot) =
-        assign_slots(nodes.len(), &filtered_outputs, &filtered_inputs);
+        assign_slots(nodes.len(), &intermediate_outputs, &intermediate_inputs);
 
     // Replace Weight("_name") placeholders with Slot(idx).
     for node in &mut nodes {
@@ -342,7 +342,7 @@ pub fn compile(
         .and_then(|(_, sr)| if let SlotRef::Slot(idx) = sr { Some(*idx) } else { None })
         .unwrap_or(0);
 
-    Ok(ExecutionPlan { nodes, slots, output_slot, n_layers, intra_group_sizes })
+    Ok(ExecutionPlan { nodes, slots, output_slot, n_layers, cached_kernels })
 }
 
 // ── Graph-level kernel fusion ──────────────────────────────────────────
@@ -630,141 +630,6 @@ fn assign_toml_fuse_groups(nodes: &mut [DispatchNode], raw_nodes: &[RawNode]) {
     }
 }
 
-/// Filter out intermediates that are both written and read entirely within
-/// a single fuse group. These are handled by `dispatch_chain`'s
-/// private-memory aliasing and don't need a persistent `BufferSlot`.
-///
-/// Uses local-scope analysis: an intermediate instance (between a write
-/// and the next write to the same name) is intra-group-only if ALL its
-/// readers share the same `fuse_group` as the writer.
-///
-/// Also returns a `HashMap<name, size_bytes>` for every intra-group
-/// intermediate so the executor can allocate correctly-sized chain buffers
-/// without guessing.
-fn filter_intra_group_intermediates(
-    nodes: &[DispatchNode],
-    intermediate_outputs: &[Vec<(String, usize)>],
-    intermediate_inputs: &[Vec<String>],
-) -> (Vec<Vec<(String, usize)>>, Vec<Vec<String>>, HashMap<String, usize>) {
-    let n = nodes.len();
-
-    // Build ordered write/read positions per intermediate name.
-    let mut writes: HashMap<String, Vec<usize>> = HashMap::new();
-    let mut reads: HashMap<String, Vec<usize>> = HashMap::new();
-
-    for i in 0..n {
-        for (name, _) in &intermediate_outputs[i] {
-            writes.entry(name.clone()).or_default().push(i);
-        }
-        for name in &intermediate_inputs[i] {
-            reads.entry(name.clone()).or_default().push(i);
-        }
-    }
-
-    // For each name, for each write instance, check if all local readers
-    // share the same fuse_group as the writer. If so, the name AT THAT
-    // WRITE INSTANCE is intra-group-only and can be skipped from liveness.
-    // We track this as a set of (name, write_position) pairs.
-    let mut intra_group_instances: HashSet<(String, usize)> = HashSet::new();
-
-    for (name, write_list) in &writes {
-        let Some(read_list) = reads.get(name) else { continue };
-
-        for (wi, &write_pos) in write_list.iter().enumerate() {
-            let writer_group = nodes[write_pos].fuse_group;
-            let Some(writer_group) = writer_group else { continue };
-
-            let next_write = write_list.get(wi + 1).copied();
-
-            // Find readers between write_pos and next_write.
-            let read_start = match read_list.binary_search(&write_pos) {
-                Ok(pos) => pos + 1,
-                Err(pos) => pos,
-            };
-            let read_end = match next_write {
-                Some(nw) => match read_list.binary_search(&nw) {
-                    Ok(pos) => pos,
-                    Err(pos) => pos,
-                },
-                None => read_list.len(),
-            };
-
-            let local_readers = &read_list[read_start..read_end];
-
-            // All local readers must be in the same fuse_group as the writer.
-            if local_readers.is_empty() {
-                continue;
-            }
-            if local_readers
-                .iter()
-                .all(|&r| nodes[r].fuse_group == Some(writer_group))
-            {
-                intra_group_instances.insert((name.clone(), write_pos));
-            }
-        }
-    }
-
-    if intra_group_instances.is_empty() {
-        return (intermediate_outputs.to_vec(), intermediate_inputs.to_vec(), HashMap::new());
-    }
-
-    // Build size map: name → max size_bytes across all intra-group instances.
-    // Taking the max guards against the unlikely case of different sizes for
-    // the same name in different layers (should not occur with fixed dims, but
-    // is a safe fallback).
-    let mut intra_group_sizes: HashMap<String, usize> = HashMap::new();
-    for (name, write_pos) in &intra_group_instances {
-        if let Some(size) = intermediate_outputs[*write_pos]
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, s)| *s)
-        {
-            intra_group_sizes.entry(name.clone()).and_modify(|e| *e = (*e).max(size)).or_insert(size);
-        }
-    }
-
-    // Build filtered lists: for each node, skip (name, _) entries where
-    // (name, node_index) is in intra_group_instances.
-    let filtered_outputs: Vec<Vec<(String, usize)>> = intermediate_outputs
-        .iter()
-        .enumerate()
-        .map(|(i, outs)| {
-            outs.iter()
-                .filter(|(name, _)| !intra_group_instances.contains(&(name.clone(), i)))
-                .cloned()
-                .collect()
-        })
-        .collect();
-
-    let filtered_inputs: Vec<Vec<String>> = intermediate_inputs
-        .iter()
-        .enumerate()
-        .map(|(i, ins)| {
-            ins.iter()
-                .filter(|name| {
-                    // Keep this input if its name+producer pair is NOT intra-group.
-                    // We need to find the producer of this name for cursor i.
-                    // The producer is the most recent write before i.
-                    let producer = writes
-                        .get(*name)
-                        .and_then(|wl| {
-                            match wl.binary_search(&i) {
-                                Ok(pos) => wl.get(pos),
-                                Err(pos) => wl.get(pos.checked_sub(1)?),
-                            }
-                        });
-                    match producer {
-                        Some(&p) => !intra_group_instances.contains(&((*name).clone(), p)),
-                        None => true,
-                    }
-                })
-                .cloned()
-                .collect()
-        })
-        .collect();
-
-    (filtered_outputs, filtered_inputs, intra_group_sizes)
-}
 
 // ── Dispatch hint evaluation ───────────────────────────────────────────
 
