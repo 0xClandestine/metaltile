@@ -1139,8 +1139,12 @@ fn run_quantized_mat_mul(
         // mt_qmm_bm4 packs BM=4 → 32 outputs (grid Y / 4). v2 keeps unit BM.
         // mt_qmm_mma packs BM=BN=32 → 1024 outputs (grid Y / 32, grid X / 32);
         // matches MLX's 32×32 tile geometry with 4 SG × 32 lanes = 128 tpg.
+        // mt_qmm_mma_m16 packs BM=16, BN=32 → 512 outputs (grid Y / 16,
+        // grid X / 32); half-height MMA for the M=16 cell, WM=1 × WN=2 ×
+        // 32 lanes = 64 tpg.
         let (n_per_tg, bm) = match spec.kernel_name {
             "mt_qmm_mma" => (32usize, 32usize),
+            "mt_qmm_mma_m16" => (32usize, 16usize),
             "mt_qmm_bm4" => (8usize, 4usize),
             "mt_qmm_bm2" => (8usize, 2usize),
             _ => (8usize, 1usize),
