@@ -26,7 +26,7 @@ mod common;
 use common::gpu_lock;
 use metaltile_core::dtype::DType;
 use metaltile_runtime::{Context, DispatchSpec, ResidentBuffer};
-use metaltile_std::mlx::quantized::mt_qmm;
+use metaltile_std::mlx::quantized::{mt_qmm, mt_qmm_bm2};
 
 #[allow(clippy::too_many_arguments)]
 fn run_qmm(
@@ -636,4 +636,516 @@ fn mt_qmm_perf_bench_qwen3_shapes_f16_m_sweep() {
             println!("  {label:>30}  {m:>5}  {median_us:>10.2}  {gbps:>10.1}");
         }
     }
+}
+
+// ── mt_qmm_bm2 (BM=2 W-reuse variant) ──────────────────────────────────
+//
+// Same dispatch contract as mt_qmm but each TG owns 2 M-rows → grid
+// Y halves. Mirrors the v2 correctness suite to pin the doubled
+// inner-loop math + 8-store epilogue against the same CPU oracle.
+
+#[allow(clippy::too_many_arguments)]
+fn run_qmm_bm2(
+    ctx: &Context,
+    dtype: DType,
+    w: &[u32],
+    scales_bytes: &[u8],
+    biases_bytes: &[u8],
+    x_bytes: &[u8],
+    m: usize,
+    n: usize,
+    k: usize,
+    gs_per_row: usize,
+    out_bytes_per_elem: usize,
+) -> Vec<u8> {
+    assert!(m.is_multiple_of(2), "mt_qmm_bm2 requires m %% 2 == 0 (BM=2 tile)");
+    let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    buffers.insert("w".into(), w.iter().flat_map(|v| v.to_le_bytes()).collect());
+    buffers.insert("scales".into(), scales_bytes.to_vec());
+    buffers.insert("biases".into(), biases_bytes.to_vec());
+    buffers.insert("x".into(), x_bytes.to_vec());
+    buffers.insert("out".into(), vec![0u8; m * n * out_bytes_per_elem]);
+    buffers.insert("k".into(), (k as u32).to_le_bytes().to_vec());
+    buffers.insert("n".into(), (n as u32).to_le_bytes().to_vec());
+    buffers.insert("gs_per_row".into(), (gs_per_row as u32).to_le_bytes().to_vec());
+
+    let mut kernel = mt_qmm_bm2::kernel_ir_for(dtype);
+    kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+    let result = ctx
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [n / 8, m / 2, 1], [64, 1, 1])
+        .expect("dispatch_with_grid should succeed");
+    result.outputs.get("out").expect("`out` buffer in dispatch result").clone()
+}
+
+#[test]
+fn mt_qmm_bm2_matches_cpu_reference_f32() {
+    let m = 8usize;
+    let n = 16usize;
+    let k = 512usize;
+    let group_size = 64usize;
+    let gs_per_row = k / group_size;
+
+    let w: Vec<u32> = (0..n * k / 8)
+        .map(|i| {
+            let mut v = 0u32;
+            for bit in 0..8u32 {
+                v |= ((i as u32 + bit) & 0xF) << (bit * 4);
+            }
+            v
+        })
+        .collect();
+    let scales: Vec<f32> = (0..n * gs_per_row).map(|i| 0.1 + (i as f32) * 0.001).collect();
+    let biases: Vec<f32> = (0..n * gs_per_row).map(|i| (i as f32) * 0.0001).collect();
+    let x: Vec<f32> = (0..m * k).map(|i| 1.0 + (i as f32) * 0.001).collect();
+    let expected = cpu_qmm_reference(&w, &scales, &biases, &x, m, n, k, gs_per_row, group_size);
+
+    let scales_bytes: Vec<u8> = scales.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let biases_bytes: Vec<u8> = biases.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let x_bytes: Vec<u8> = x.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let _g = gpu_lock();
+    let ctx = Context::new().expect("Context::new should succeed on macOS");
+    let out_bytes = run_qmm_bm2(
+        &ctx,
+        DType::F32,
+        &w,
+        &scales_bytes,
+        &biases_bytes,
+        &x_bytes,
+        m,
+        n,
+        k,
+        gs_per_row,
+        4,
+    );
+    let actual: Vec<f32> =
+        out_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    assert_eq!(actual.len(), expected.len(), "output element count");
+
+    let mut max_diff = 0.0_f32;
+    let mut max_at = 0usize;
+    for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+        let diff = (e - a).abs();
+        if diff > max_diff {
+            max_diff = diff;
+            max_at = i;
+        }
+    }
+    assert!(
+        max_diff < 1e-3,
+        "max |diff| = {max_diff:.2e} at index {max_at} (expected {:.6}, got {:.6})",
+        expected[max_at],
+        actual[max_at],
+    );
+}
+
+#[test]
+fn mt_qmm_bm2_matches_cpu_reference_f16() {
+    let m = 8usize;
+    let n = 16usize;
+    let k = 512usize;
+    let group_size = 64usize;
+    let gs_per_row = k / group_size;
+
+    let w: Vec<u32> = (0..n * k / 8)
+        .map(|i| {
+            let mut v = 0u32;
+            for bit in 0..8u32 {
+                v |= ((i as u32 + bit) & 0xF) << (bit * 4);
+            }
+            v
+        })
+        .collect();
+    let scales_f32: Vec<f32> = (0..n * gs_per_row).map(|i| 0.1 + (i as f32) * 0.001).collect();
+    let biases_f32: Vec<f32> = (0..n * gs_per_row).map(|i| (i as f32) * 0.0001).collect();
+    let x_f32: Vec<f32> = (0..m * k).map(|i| 1.0 + (i as f32) * 0.001).collect();
+
+    let round_f16 = |v: f32| -> f32 { half::f16::from_f32(v).to_f32() };
+    let scales: Vec<f32> = scales_f32.iter().map(|&v| round_f16(v)).collect();
+    let biases: Vec<f32> = biases_f32.iter().map(|&v| round_f16(v)).collect();
+    let x: Vec<f32> = x_f32.iter().map(|&v| round_f16(v)).collect();
+    let expected = cpu_qmm_reference(&w, &scales, &biases, &x, m, n, k, gs_per_row, group_size);
+
+    let scales_bytes: Vec<u8> =
+        scales.iter().flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes()).collect();
+    let biases_bytes: Vec<u8> =
+        biases.iter().flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes()).collect();
+    let x_bytes: Vec<u8> =
+        x.iter().flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes()).collect();
+
+    let _g = gpu_lock();
+    let ctx = Context::new().expect("Context::new should succeed on macOS");
+    let out_bytes = run_qmm_bm2(
+        &ctx,
+        DType::F16,
+        &w,
+        &scales_bytes,
+        &biases_bytes,
+        &x_bytes,
+        m,
+        n,
+        k,
+        gs_per_row,
+        2,
+    );
+    let actual: Vec<f32> = out_bytes
+        .chunks_exact(2)
+        .map(|c| half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
+        .collect();
+    assert_eq!(actual.len(), expected.len(), "output element count");
+
+    let mut max_rel = 0.0_f32;
+    let mut max_at = 0usize;
+    for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+        let rel = (e - a).abs() / e.abs().max(1.0);
+        if rel > max_rel {
+            max_rel = rel;
+            max_at = i;
+        }
+    }
+    assert!(
+        max_rel < 5e-3,
+        "max relative diff = {max_rel:.2e} at index {max_at} (expected {:.6}, got {:.6})",
+        expected[max_at],
+        actual[max_at],
+    );
+}
+
+#[test]
+fn mt_qmm_bm2_matches_mt_qmm_at_same_shape_f32() {
+    // Strongest practical pin on the BM=2 hand-unroll: numeric
+    // agreement with the v2 BM=1 kernel at the same shape. Strict
+    // bit-equivalence isn't reachable — the BM=2 body inlines two
+    // qdot accumulators per N-row in alternation, and fp32 add isn't
+    // associative so the per-K-block FMAs sequence differently.
+    // Observed reorder noise on Apple M-series is ≤ 2 ULP at our
+    // output magnitudes (~2-3k → ulp ≈ 2.5e-4). Cap at 1e-3 to match
+    // the v2 oracle tolerance; anything larger means an actual bug.
+    let m = 8usize;
+    let n = 16usize;
+    let k = 512usize;
+    let group_size = 64usize;
+    let gs_per_row = k / group_size;
+
+    let w: Vec<u32> = (0..n * k / 8)
+        .map(|i| {
+            let mut v = 0u32;
+            for bit in 0..8u32 {
+                v |= ((i as u32 + bit) & 0xF) << (bit * 4);
+            }
+            v
+        })
+        .collect();
+    let scales: Vec<f32> = (0..n * gs_per_row).map(|i| 0.1 + (i as f32) * 0.001).collect();
+    let biases: Vec<f32> = (0..n * gs_per_row).map(|i| (i as f32) * 0.0001).collect();
+    let x: Vec<f32> = (0..m * k).map(|i| 1.0 + (i as f32) * 0.001).collect();
+    let scales_bytes: Vec<u8> = scales.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let biases_bytes: Vec<u8> = biases.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let x_bytes: Vec<u8> = x.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let _g = gpu_lock();
+    let ctx = Context::new().expect("Context::new should succeed on macOS");
+    let out_v2 = run_qmm(
+        &ctx,
+        DType::F32,
+        &w,
+        &scales_bytes,
+        &biases_bytes,
+        &x_bytes,
+        m,
+        n,
+        k,
+        gs_per_row,
+        4,
+    );
+    let out_bm2 = run_qmm_bm2(
+        &ctx,
+        DType::F32,
+        &w,
+        &scales_bytes,
+        &biases_bytes,
+        &x_bytes,
+        m,
+        n,
+        k,
+        gs_per_row,
+        4,
+    );
+    let a_v2: Vec<f32> =
+        out_v2.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let a_bm2: Vec<f32> =
+        out_bm2.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+
+    let mut max_diff = 0.0_f32;
+    let mut max_at = 0usize;
+    for (i, (v2, b)) in a_v2.iter().zip(a_bm2.iter()).enumerate() {
+        let d = (v2 - b).abs();
+        if d > max_diff {
+            max_diff = d;
+            max_at = i;
+        }
+    }
+    assert!(
+        max_diff < 1e-3,
+        "v2 vs bm2 diverge: max |diff| = {max_diff:.2e} at index {max_at} (v2 {:.6}, bm2 {:.6})",
+        a_v2[max_at],
+        a_bm2[max_at],
+    );
+}
+
+#[test]
+fn mt_qmm_bm2_runs_on_qwen3_attention_proj_shape() {
+    // Same prod shape as the v2 smoke (n=k=5120) but at m=8 so we
+    // exercise 4 BM=2 tiles in Y. Goal: dispatch + index math hold
+    // at production-scale shape.
+    let m = 8usize;
+    let n = 5120usize;
+    let k = 5120usize;
+    let group_size = 64usize;
+    let gs_per_row = k / group_size;
+
+    let w: Vec<u32> = (0..n * k / 8).map(|i| (i as u32).wrapping_mul(2654435761u32)).collect();
+    let scales: Vec<f32> = (0..n * gs_per_row).map(|i| 0.01 + (i % 13) as f32 * 0.001).collect();
+    let biases: Vec<f32> = (0..n * gs_per_row).map(|i| (i % 7) as f32 * 0.0001).collect();
+    let x: Vec<f32> = (0..m * k).map(|i| 0.1 + ((i % 31) as f32) * 0.01).collect();
+    let scales_bytes: Vec<u8> = scales.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let biases_bytes: Vec<u8> = biases.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let x_bytes: Vec<u8> = x.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let _g = gpu_lock();
+    let ctx = Context::new().expect("Context::new should succeed on macOS");
+    let out_bytes = run_qmm_bm2(
+        &ctx,
+        DType::F32,
+        &w,
+        &scales_bytes,
+        &biases_bytes,
+        &x_bytes,
+        m,
+        n,
+        k,
+        gs_per_row,
+        4,
+    );
+    let actual: Vec<f32> =
+        out_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    for (i, v) in actual.iter().enumerate() {
+        assert!(v.is_finite(), "non-finite output at index {i}: {v}");
+    }
+}
+
+#[test]
+#[ignore = "perf bench, run via --ignored --nocapture"]
+fn mt_qmm_v2_vs_bm2_head_to_head_f16_m_sweep() {
+    // Head-to-head v2 (`mt_qmm`) vs BM=2 W-reuse (`mt_qmm_bm2`) across
+    // the Qwen3 hot-path shapes and the M-rows the selector
+    // `mt_qmm_for` discriminates on. Goal: prove the selector's
+    // `(4..=12).contains(&m)` route actually corresponds to where bm2
+    // wins, and that v2 still beats bm2 at M ∈ {1, 2, 16, 32}.
+    //
+    // Bench mechanics mirror `mt_qmm_perf_bench_qwen3_shapes_f16_m_sweep`:
+    //   * resident-buffer pattern for w / scales / biases (uploaded
+    //     once per shape, kept GPU-resident across the M-sweep so the
+    //     v2 vs bm2 comparison sees identical memory residency)
+    //   * WARMUP = 20, ITERS = 50 (one median per kernel per cell)
+    //   * O(n) median via `select_nth_unstable_by` at the midpoint
+    //
+    // BM=2 grid is `[n/8, m/2, 1]` — requires `m % 2 == 0`. M=1 is v2
+    // only (bm2 would assert at run_qmm_bm2 anyway).
+    //
+    // Output is two tables per shape (v2 first, bm2 second) plus a
+    // per-shape join with `bm2/v2 speedup` column, then a closing
+    // selector-route accuracy summary. Numbers are stable enough for
+    // ratio reads at 1 dp; for variance across reruns, drive the
+    // outer `cargo test` invocation 5 times back-to-back (see test
+    // doc-comment in commit body).
+    let _g = gpu_lock();
+    let ctx = Context::new().expect("Context::new should succeed on macOS");
+    let group_size = 64usize;
+    const WARMUP: usize = 20;
+    const ITERS: usize = 50;
+    const M_SWEEP: &[usize] = &[1, 2, 4, 6, 8, 12, 16, 32];
+
+    println!();
+    println!(
+        "mt_qmm v2 vs mt_qmm_bm2 head-to-head — f16, Apple M-series (median of {ITERS} iters)"
+    );
+
+    let mut kernel_v2 = mt_qmm::kernel_ir_for(DType::F16);
+    kernel_v2.mode = metaltile_core::ir::KernelMode::Reduction;
+    let mut kernel_bm2 = mt_qmm_bm2::kernel_ir_for(DType::F16);
+    kernel_bm2.mode = metaltile_core::ir::KernelMode::Reduction;
+    let empty_fn_consts: BTreeMap<String, u32> = BTreeMap::new();
+
+    // Track per-M aggregate winners across all shapes — used for the
+    // closing selector-accuracy table.
+    #[derive(Default, Clone, Copy)]
+    struct CellAgg {
+        bm2_wins: u32,
+        v2_wins: u32,
+        ratio_sum: f64, // Σ bm2_us / v2_us  (bm2 faster ⇒ <1)
+        ratio_n: u32,
+    }
+    let mut per_m: BTreeMap<usize, CellAgg> = BTreeMap::new();
+    for &m in M_SWEEP {
+        per_m.insert(m, CellAgg::default());
+    }
+
+    for &(n, k, label) in QWEN3_SHAPES {
+        let gs_per_row = k / group_size;
+        let w: Vec<u32> = (0..n * k / 8).map(|i| (i as u32).wrapping_mul(2654435761u32)).collect();
+        let scales: Vec<f32> =
+            (0..n * gs_per_row).map(|i| 0.01 + (i % 13) as f32 * 0.001).collect();
+        let biases: Vec<f32> = (0..n * gs_per_row).map(|i| (i % 7) as f32 * 0.0001).collect();
+
+        let w_bytes_vec: Vec<u8> = w.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let scales_bytes: Vec<u8> =
+            scales.iter().flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes()).collect();
+        let biases_bytes: Vec<u8> =
+            biases.iter().flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes()).collect();
+
+        // Upload static buffers once per shape. Both kernels read the
+        // same w/scales/biases — sharing the resident map makes the
+        // comparison see identical GPU memory residency.
+        let w_res = ctx.upload_resident(&w_bytes_vec).expect("upload w");
+        let scales_res = ctx.upload_resident(&scales_bytes).expect("upload scales");
+        let biases_res = ctx.upload_resident(&biases_bytes).expect("upload biases");
+        let mut residents: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
+        residents.insert("w".into(), w_res);
+        residents.insert("scales".into(), scales_res);
+        residents.insert("biases".into(), biases_res);
+
+        println!();
+        println!("  shape = {label}  (n={n}, k={k})");
+        println!(
+            "    {:>5}  {:>10}  {:>10}  {:>10}  {:>10}  {:>10}",
+            "M", "v2 µs", "v2 GB/s", "bm2 µs", "bm2 GB/s", "bm2/v2"
+        );
+
+        for &m in M_SWEEP {
+            let x: Vec<f32> = (0..m * k).map(|i| 0.1 + ((i % 31) as f32) * 0.01).collect();
+            let x_bytes: Vec<u8> =
+                x.iter().flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes()).collect();
+
+            // Per-iter buffer set — same for both kernels (same scalars,
+            // same x, same out shape). Cloned per dispatch so each
+            // kernel sees a fresh `out`.
+            let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+            buffers.insert("x".into(), x_bytes);
+            buffers.insert("out".into(), vec![0u8; m * n * 2]);
+            buffers.insert("k".into(), (k as u32).to_le_bytes().to_vec());
+            buffers.insert("n".into(), (n as u32).to_le_bytes().to_vec());
+            buffers.insert("gs_per_row".into(), (gs_per_row as u32).to_le_bytes().to_vec());
+
+            // ── v2 (mt_qmm): grid [n/8, m, 1] ──
+            let mut samples_v2 = Vec::with_capacity(ITERS);
+            for i in 0..(WARMUP + ITERS) {
+                let r = ctx
+                    .dispatch_chain(&[DispatchSpec {
+                        kernel: &kernel_v2,
+                        buffers: &buffers,
+                        fn_consts: &empty_fn_consts,
+                        grid_groups: [n / 8, m, 1],
+                        threads_per_group: [64, 1, 1],
+                        resident: &residents,
+                    }])
+                    .expect("dispatch v2");
+                if i >= WARMUP {
+                    samples_v2.push(r[0].elapsed_us);
+                }
+            }
+            let mid = samples_v2.len() / 2;
+            samples_v2.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap());
+            let v2_us = samples_v2[mid];
+
+            // Bytes touched: same memory traffic model the existing
+            // single-kernel bench uses (W + scales + biases + X + Y).
+            let bytes = (n * k / 2 + 2 * n * gs_per_row * 2 + m * k * 2 + m * n * 2) as f64;
+            let v2_gbps = bytes / (v2_us * 1e-6) / 1e9;
+
+            // ── bm2 (mt_qmm_bm2): grid [n/8, m/2, 1], requires m % 2 == 0 ──
+            let bm2_cell: Option<(f64, f64, f64)> = if m % 2 == 0 {
+                let mut samples_bm2 = Vec::with_capacity(ITERS);
+                for i in 0..(WARMUP + ITERS) {
+                    let r = ctx
+                        .dispatch_chain(&[DispatchSpec {
+                            kernel: &kernel_bm2,
+                            buffers: &buffers,
+                            fn_consts: &empty_fn_consts,
+                            grid_groups: [n / 8, m / 2, 1],
+                            threads_per_group: [64, 1, 1],
+                            resident: &residents,
+                        }])
+                        .expect("dispatch bm2");
+                    if i >= WARMUP {
+                        samples_bm2.push(r[0].elapsed_us);
+                    }
+                }
+                let mid_b = samples_bm2.len() / 2;
+                samples_bm2.select_nth_unstable_by(mid_b, |a, b| a.partial_cmp(b).unwrap());
+                let bm2_us = samples_bm2[mid_b];
+                let bm2_gbps = bytes / (bm2_us * 1e-6) / 1e9;
+                let ratio = bm2_us / v2_us; // <1 ⇒ bm2 faster
+                Some((bm2_us, bm2_gbps, ratio))
+            } else {
+                None
+            };
+
+            match bm2_cell {
+                Some((bm2_us, bm2_gbps, ratio)) => {
+                    println!(
+                        "    {m:>5}  {v2_us:>10.2}  {v2_gbps:>10.1}  {bm2_us:>10.2}  \
+                         {bm2_gbps:>10.1}  {ratio:>10.3}"
+                    );
+                    let agg = per_m.get_mut(&m).unwrap();
+                    if ratio < 1.0 {
+                        agg.bm2_wins += 1;
+                    } else {
+                        agg.v2_wins += 1;
+                    }
+                    agg.ratio_sum += ratio;
+                    agg.ratio_n += 1;
+                },
+                None => {
+                    println!(
+                        "    {m:>5}  {v2_us:>10.2}  {v2_gbps:>10.1}  {:>10}  {:>10}  {:>10}",
+                        "n/a", "n/a", "skip"
+                    );
+                },
+            }
+        }
+    }
+
+    // ── selector-route accuracy summary ──
+    println!();
+    println!("selector-route accuracy (across all {} shapes)", QWEN3_SHAPES.len());
+    println!(
+        "  {:>5}  {:>10}  {:>10}  {:>14}  {:>14}  {:>10}",
+        "M", "bm2_wins", "v2_wins", "mean bm2/v2", "selector→", "matches?"
+    );
+    for &m in M_SWEEP {
+        let agg = per_m[&m];
+        let mean_ratio =
+            if agg.ratio_n > 0 { agg.ratio_sum / agg.ratio_n as f64 } else { f64::NAN };
+        let selector_route = if (4..=12).contains(&(m as u32)) { "bm2" } else { "v2" };
+        // Selector route matches data when:
+        //   * route = bm2 AND bm2 wins majority of shapes
+        //   * route = v2 AND v2 wins majority of shapes (or bm2 cell skipped at M=1)
+        let data_winner = if agg.ratio_n == 0 {
+            "v2"
+        } else if agg.bm2_wins > agg.v2_wins {
+            "bm2"
+        } else {
+            "v2"
+        };
+        let matches = if selector_route == data_winner { "YES" } else { "NO" };
+        let mean_disp =
+            if mean_ratio.is_nan() { "n/a".to_string() } else { format!("{mean_ratio:.3}") };
+        println!(
+            "  {m:>5}  {:>10}  {:>10}  {:>14}  {:>14}  {:>10}",
+            agg.bm2_wins, agg.v2_wins, mean_disp, selector_route, matches
+        );
+    }
+    println!();
+    println!("legend: bm2/v2 < 1.0 ⇒ bm2 faster than v2 at that cell");
 }
