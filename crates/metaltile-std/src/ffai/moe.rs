@@ -361,3 +361,160 @@ inventory::submit! {
         kernel_mode: Some(KernelMode::Reduction),
     }
 }
+
+// ── mt_moe_gather_qmm_int4 ────────────────────────────────────────────────
+//
+// Grouped quantized matmul for MoE. Matches MLX's `gatherQuantizedMM`
+// (called by SwitchLinear → SwitchGLU → Qwen35SparseMoeBlock):
+//
+//     y[t, m] = Σ_k x[t, k] · W[E(t), m, k]
+//
+// where E(t) is the expert assigned to row t. Pre-permuted layout (caller
+// passes `sortedIndices=true` upstream): consecutive rows share an expert,
+// and `expert_offsets` is a CSR row-offset array — expert `e` owns rows
+// `[expert_offsets[e] .. expert_offsets[e+1])`.
+//
+// One dispatch → all experts × M_out × T rows. Vs MLX's N separate qmm
+// dispatches (128 experts × 40 layers × 3 projections = 15360 launches at
+// Qwen3.6-35B-A3B), folding into one kernel saves ~1.5 s of host-side
+// launch overhead per forward. Decode benefits most (every step pays it);
+// prefill saves a smaller fraction since each per-expert matmul is fatter.
+//
+// Inputs:
+//   x               — [T, K_in]                 f32/f16/bf16 (sorted-by-expert)
+//   weight_packed   — [E, M_out, K_in/8]        uint32 (int4 packed, 8 per uint)
+//   scales          — [E, M_out, K_in/group]    T  per-group quant scale
+//   biases          — [E, M_out, K_in/group]    T  per-group quant bias
+//   expert_offsets  — [E + 1]                   uint32  CSR row offsets
+//   out             — [T, M_out]                T
+//
+// Constexpr:
+//   k_in       — fused input dim (e.g. 2048 for Qwen3.6-35B-A3B hidden)
+//   m_out      — per-expert output dim (e.g. 256 for moe_intermediate)
+//   n_experts  — typically 128
+//   group_size — quant group size (typically 64)
+//
+// DISPATCH INVARIANTS
+//   - **Mode: Reduction.** Uses `simd_sum` for the per-row dot product.
+//   - **Grid: `[m_out, T, 1]`** — one TG per (output column m, row t).
+//   - **TG: `[32, 1, 1]`** — one simdgroup. Each lane handles
+//     `k_in / 32` packed uint32s × 8 weights each = `k_in / 32` weights.
+//   - `k_in` must be a multiple of 32 (every Qwen3 / Qwen3.6 satisfies).
+//   - `group_size` must divide `k_in`.
+//   - int4 only (MLX's MoE quantization default). Wider precision is a
+//     follow-up.
+//
+// Algorithm — scalar foundation; MMA tiling lands in a follow-up commit.
+//
+//   1. Resolve expert: linear walk over `expert_offsets`. With N_experts
+//      ≤ 256 this is cheap (~256 reads on lane 0 + broadcast via TG mem).
+//
+//   2. Per-lane dot product over `k_in / 32` packed uint32s. Each uint32
+//      packs 8 int4 weights → unpack 8 weights, dequant per-group, FMA.
+//
+//   3. `simd_sum` reduces 32 partial sums → one output value per TG.
+//
+// Mirrors the per-thread pattern in `dequant_gemv_int4`.
+#[kernel]
+pub fn mt_moe_gather_qmm_int4<T>(
+    x: Tensor<T>,
+    weight_packed: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    expert_offsets: Tensor<u32>,
+    mut out: Tensor<T>,
+    #[constexpr] k_in: u32,
+    #[constexpr] m_out: u32,
+    #[constexpr] n_experts: u32,
+    #[constexpr] group_size: u32,
+) {
+    let m = tgid_x;
+    let row = tgid_y;
+    let lane = tid;
+
+    // Resolve expert — linear walk on EVERY lane (cheap, ≤ 256 reads from
+    // a small uniform buffer) so the result lives in a per-lane u32 register
+    // and never round-trips through float-typed TG memory.
+    let mut expert = 0u32;
+    let mut found = 0u32;
+    for ee in range(0u32, n_experts, 1u32) {
+        let end = load(expert_offsets[ee + 1u32]);
+        let inside_bool = row < end;
+        let inside = select(inside_bool, 1u32, 0u32);
+        let take = inside * (1u32 - found);
+        expert = select(take == 1u32, ee, expert);
+        found = select(take == 1u32, 1u32, found);
+    }
+
+    // Stride-by-32 over packs: each lane handles packs at positions
+    // lane, lane+32, lane+64, ... up to k_in/8. Correct for both small
+    // (k_in=32 → 4 packs, only lanes 0..3 work) and large (k_in=2048 →
+    // 256 packs, 8 packs/lane) inputs.
+    let total_packs = k_in / 8u32;
+    let weight_stride_m = total_packs;
+    let weight_row_base = expert * m_out * weight_stride_m + m * weight_stride_m;
+
+    let groups_per_row = k_in / group_size;
+    let scale_row_base = expert * m_out * groups_per_row + m * groups_per_row;
+
+    let x_row_base = row * k_in;
+
+    let mut acc = 0.0f32;
+    for pack_idx in range(lane, total_packs, 32u32) {
+        let packed = load(weight_packed[weight_row_base + pack_idx]);
+        let k_first = pack_idx * 8u32;
+        let g = k_first / group_size;
+        let scale = load(scales[scale_row_base + g]).cast::<f32>();
+        let bias = load(biases[scale_row_base + g]).cast::<f32>();
+
+        let q0 = (packed >> 0u32) & 15u32;
+        let q1 = (packed >> 4u32) & 15u32;
+        let q2 = (packed >> 8u32) & 15u32;
+        let q3 = (packed >> 12u32) & 15u32;
+        let q4 = (packed >> 16u32) & 15u32;
+        let q5 = (packed >> 20u32) & 15u32;
+        let q6 = (packed >> 24u32) & 15u32;
+        let q7 = (packed >> 28u32) & 15u32;
+
+        let w0 = q0.cast::<f32>() * scale + bias;
+        let w1 = q1.cast::<f32>() * scale + bias;
+        let w2 = q2.cast::<f32>() * scale + bias;
+        let w3 = q3.cast::<f32>() * scale + bias;
+        let w4 = q4.cast::<f32>() * scale + bias;
+        let w5 = q5.cast::<f32>() * scale + bias;
+        let w6 = q6.cast::<f32>() * scale + bias;
+        let w7 = q7.cast::<f32>() * scale + bias;
+
+        let x0 = load(x[x_row_base + k_first + 0u32]).cast::<f32>();
+        let x1 = load(x[x_row_base + k_first + 1u32]).cast::<f32>();
+        let x2 = load(x[x_row_base + k_first + 2u32]).cast::<f32>();
+        let x3 = load(x[x_row_base + k_first + 3u32]).cast::<f32>();
+        let x4 = load(x[x_row_base + k_first + 4u32]).cast::<f32>();
+        let x5 = load(x[x_row_base + k_first + 5u32]).cast::<f32>();
+        let x6 = load(x[x_row_base + k_first + 6u32]).cast::<f32>();
+        let x7 = load(x[x_row_base + k_first + 7u32]).cast::<f32>();
+
+        acc = acc + w0 * x0 + w1 * x1 + w2 * x2 + w3 * x3 + w4 * x4 + w5 * x5 + w6 * x6 + w7 * x7;
+    }
+
+    let total = simd_sum(acc);
+    if lane == 0u32 {
+        store(out[row * m_out + m], total.cast::<T>());
+    }
+}
+
+inventory::submit! {
+    BenchSpec {
+        op: "moe",
+        subop: "gather_qmm_int4",
+        kernel_name: "mt_moe_gather_qmm_int4",
+        kernel_ir: mt_moe_gather_qmm_int4::kernel_ir_for,
+        dtypes: &[DType::F32, DType::F16, DType::BF16],
+        tol: 5e-2, // int4 quant — wide tolerance vs full-precision oracle
+        mlx_src: None,
+        mlx_pattern: None,
+        shapes: &[],
+        dispatch: BenchDispatch::Generic,
+        kernel_mode: Some(KernelMode::Reduction),
+    }
+}
