@@ -44,6 +44,12 @@ pub struct MslConfig {
     /// two-level path that is correct at any TPG ≥ 32. Bench dispatch sets
     /// this from `ShapeSpec.tpg` so each (kernel × dtype × tpg-bucket)
     /// compiles to optimal MSL.
+    ///
+    /// The compiled-kernel cache in `run_generic` (`metaltile-std`) keys on
+    /// a 1-bit bucket of this value: `None` and `Some(n > simd_size)` share
+    /// the slow-path PSO slot; `Some(n <= simd_size)` gets its own. Two
+    /// shapes that differ only in TPG-bucket therefore compile separately
+    /// instead of colliding on one PSO.
     pub expected_tpg: Option<u32>,
     pub tile_schedule: TileSchedule,
 }
