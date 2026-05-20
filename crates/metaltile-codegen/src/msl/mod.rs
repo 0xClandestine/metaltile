@@ -233,6 +233,9 @@ impl MslGenerator {
             if kernel_uses_program_id_axis(kernel, 1) {
                 wl!(out, "    uint tgid_y = _tgid3.y;");
             }
+            if kernel_uses_program_id_axis(kernel, 2) {
+                wl!(out, "    uint tgid_z = _tgid3.z;");
+            }
             wl!(out, "    uint lsize  = _lsize3.x;");
             if feat.needs_simd_group {
                 wl!(out, "    uint n_simd = lsize / 32u;");
@@ -772,6 +775,23 @@ mod tests {
         k.body.push_op(Op::ProgramId { axis: 1 }, ValueId::new(1));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(msl.contains("tgid_y"), "tgid_y must be emitted when program_id axis 1 is used");
+    }
+
+    #[test]
+    fn reduction_program_id_axis_2_lowers_to_tgid_z() {
+        // A reduction kernel using the z grid axis (e.g. batched_qkv_qgemv,
+        // where program_id::<2>() selects the Q/K/V matrix) must lower
+        // axis 2 to `tgid_z` and declare the alias — not fold it to 0.
+        let mut k = Kernel::new("reduction_with_z");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::ProgramId { axis: 2 }, ValueId::new(1));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("uint tgid_z = _tgid3.z;"),
+            "preamble must declare tgid_z when program_id axis 2 is used: {msl}"
+        );
+        assert!(msl.contains("= tgid_z;"), "axis 2 must lower to tgid_z, not a constant: {msl}");
     }
 
     /// Regression: `ssm_step` and similar kernels reference `tgid_y` via the
