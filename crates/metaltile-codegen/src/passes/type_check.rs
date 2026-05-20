@@ -297,9 +297,13 @@ fn op_name(op: &Op) -> &'static str {
         Op::Dequantize { .. } => "Dequantize",
         Op::SimdReduce { .. } => "SimdReduce",
         Op::SimdShuffleXor { .. } => "SimdShuffleXor",
+        Op::SimdBroadcast { .. } => "SimdBroadcast",
         Op::ThreadgroupAlloc { .. } => "ThreadgroupAlloc",
         Op::ThreadgroupLoad { .. } => "ThreadgroupLoad",
         Op::ThreadgroupStore { .. } => "ThreadgroupStore",
+        Op::StackAlloc { .. } => "StackAlloc",
+        Op::StackLoad { .. } => "StackLoad",
+        Op::StackStore { .. } => "StackStore",
         Op::Barrier => "Barrier",
         Op::SimdgroupBarrier => "SimdgroupBarrier",
         Op::SimdgroupAlloc { .. } => "SimdgroupAlloc",
@@ -424,16 +428,26 @@ fn infer_block(
     // loads happen in nested loop bodies — both must be scanned.
     let mut tg_dtypes: std::collections::BTreeMap<String, DType> =
         std::collections::BTreeMap::new();
-    let scan = |ops: &[Op], dtypes: &mut std::collections::BTreeMap<String, DType>| {
+    let mut stack_dtypes: std::collections::BTreeMap<String, DType> =
+        std::collections::BTreeMap::new();
+    let scan = |ops: &[Op],
+                tg: &mut std::collections::BTreeMap<String, DType>,
+                st: &mut std::collections::BTreeMap<String, DType>| {
         for op in ops {
-            if let Op::ThreadgroupAlloc { dtype, name, .. } = op {
-                dtypes.insert(name.clone(), *dtype);
+            match op {
+                Op::ThreadgroupAlloc { dtype, name, .. } => {
+                    tg.insert(name.clone(), *dtype);
+                },
+                Op::StackAlloc { dtype, name, .. } => {
+                    st.insert(name.clone(), *dtype);
+                },
+                _ => {},
             }
         }
     };
-    scan(&kernel.body.ops, &mut tg_dtypes);
+    scan(&kernel.body.ops, &mut tg_dtypes, &mut stack_dtypes);
     for bb in all_blocks.values() {
-        scan(&bb.ops, &mut tg_dtypes);
+        scan(&bb.ops, &mut tg_dtypes, &mut stack_dtypes);
     }
 
     for (op_idx, op) in block.ops.iter().enumerate() {
@@ -612,6 +626,15 @@ fn infer_block(
                     env.insert(vid, TypedValue { dtype: DType::F32, shape: Shape::scalar() });
                 }
             },
+            Op::SimdBroadcast { value, .. } => {
+                // Same scalar type as the input value; the cross-lane broadcast
+                // doesn't change dtype or shape.
+                if let Some(tv) = env.get(value).cloned() {
+                    env.insert(vid, tv);
+                } else {
+                    env.insert(vid, TypedValue { dtype: DType::F32, shape: Shape::scalar() });
+                }
+            },
             Op::Gather { src, indices, .. } => {
                 let dtype = kernel
                     .params
@@ -630,6 +653,10 @@ fn infer_block(
                 },
             Op::ThreadgroupLoad { name, .. } => {
                 let dtype = tg_dtypes.get(name).copied().unwrap_or(DType::F32);
+                env.insert(vid, TypedValue { dtype, shape: Shape::scalar() });
+            },
+            Op::StackLoad { name, .. } => {
+                let dtype = stack_dtypes.get(name).copied().unwrap_or(DType::F32);
                 env.insert(vid, TypedValue { dtype, shape: Shape::scalar() });
             },
             Op::ArgReduce { .. } | Op::StrideArgReduce { .. } => {
@@ -653,6 +680,8 @@ fn infer_block(
             | Op::StrideStore { .. }
             | Op::ThreadgroupAlloc { .. }
             | Op::ThreadgroupStore { .. }
+            | Op::StackAlloc { .. }
+            | Op::StackStore { .. }
             | Op::Barrier
             | Op::SimdgroupBarrier
             | Op::DeclareLocal { .. }

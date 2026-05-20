@@ -732,4 +732,159 @@ mod tests {
             "preamble must declare tgid_y when used via direct identifier: {msl}"
         );
     }
+
+    /// `Op::SimdShuffleXor { value, mask }` must emit `simd_shuffle_xor(v, mask)`
+    /// — the Metal 2.1+ butterfly shuffle used by AURA's FWHT inner loop and
+    /// Steel attention row reductions. `mask` is a compile-time u32 literal.
+    #[test]
+    fn simd_shuffle_xor_emits_metal_builtin() {
+        let mut k = Kernel::new("simd_xor_smoke");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::SimdShuffleXor { value: ValueId::new(0), mask: 1 }, ValueId::new(1));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("simd_shuffle_xor("),
+            "kernel must emit a simd_shuffle_xor call: {msl}"
+        );
+    }
+
+    /// `Op::SimdBroadcast { value, lane }` must emit `simd_broadcast(v, lane)`
+    /// — the Metal 2.1+ cross-lane broadcast used by AURA's codebook hoist.
+    #[test]
+    fn simd_broadcast_emits_metal_builtin() {
+        let mut k = Kernel::new("simd_bcast_smoke");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(1));
+        k.body.push_op(
+            Op::SimdBroadcast { value: ValueId::new(0), lane: ValueId::new(1) },
+            ValueId::new(2),
+        );
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(msl.contains("simd_broadcast("), "kernel must emit a simd_broadcast call: {msl}");
+    }
+
+    /// `Op::ThreadgroupAlloc { dtype: U32, .. }` must emit
+    /// `threadgroup uint <name>[<size>];`.  AURA encode's pack stage needs
+    /// a `uint` threadgroup buffer so subsequent `atomic_fetch_or_explicit`
+    /// can reinterpret it as `threadgroup atomic_uint*`.
+    #[test]
+    fn threadgroup_alloc_emits_u32_buffer() {
+        let mut k = Kernel::new("tg_u32_alloc");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op_no_result(Op::ThreadgroupAlloc {
+            dtype: DType::U32,
+            size: 128,
+            name: "shared_packed".to_string(),
+        });
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("threadgroup uint shared_packed[128];"),
+            "expected `threadgroup uint shared_packed[128];` for U32 alloc: {msl}"
+        );
+    }
+
+    /// `Op::Atomic { scope: AtomicScope::Threadgroup, .. }` must emit
+    /// the cast form `atomic_fetch_or_explicit((threadgroup atomic_uint*)&<dst>[<idx>], …)`.
+    /// `Device` scope keeps the existing `dst + idx` form.
+    #[test]
+    fn atomic_threadgroup_emits_cast_form() {
+        use metaltile_core::ir::{AtomicKind, AtomicScope};
+
+        let mut k = Kernel::new("atomic_tg_smoke");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(1));
+        k.body.push_op_no_result(Op::ThreadgroupAlloc {
+            dtype: DType::U32,
+            size: 128,
+            name: "shared_packed".to_string(),
+        });
+        k.body.push_op_no_result(Op::Atomic {
+            op: AtomicKind::Or,
+            scope: AtomicScope::Threadgroup,
+            dst: "shared_packed".to_string(),
+            index: ValueId::new(0),
+            value: ValueId::new(1),
+        });
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("(threadgroup atomic_uint*)&shared_packed["),
+            "threadgroup-scope atomic must reinterpret-cast the threadgroup slot: {msl}"
+        );
+        assert!(
+            msl.contains("atomic_fetch_or_explicit"),
+            "threadgroup atomic_or must still emit the OR intrinsic: {msl}"
+        );
+    }
+
+    /// `Op::StackAlloc { dtype: F32, size: 4, name: "o" }` must emit a
+    /// per-thread `float o[4];` (no `threadgroup` qualifier).  Subsequent
+    /// `Op::StackLoad` / `Op::StackStore` must emit the same indexed
+    /// access shape as the threadgroup variants — only the alloc qualifier
+    /// distinguishes them.  AURA flash kernels need this for the per-lane
+    /// `q_vals[DIMS_PER_LANE]` / `o[DIMS_PER_LANE]` arrays.
+    #[test]
+    fn stack_array_emits_per_thread_buffer() {
+        let mut k = Kernel::new("stack_smoke");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 3 }, ValueId::new(1));
+        k.body.push_op_no_result(Op::StackAlloc {
+            dtype: DType::F32,
+            size: 4,
+            name: "o".to_string(),
+        });
+        k.body.push_op(
+            Op::StackLoad { name: "o".to_string(), index: ValueId::new(1) },
+            ValueId::new(2),
+        );
+        k.body.push_op_no_result(Op::StackStore {
+            name: "o".to_string(),
+            index: ValueId::new(1),
+            value: ValueId::new(2),
+        });
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("float o[4];"),
+            "stack array must emit unqualified `float o[4];` (no threadgroup): {msl}"
+        );
+        assert!(
+            !msl.contains("threadgroup float o["),
+            "stack array must NOT carry the threadgroup qualifier: {msl}"
+        );
+        assert!(
+            msl.contains("o[v_v1]") || msl.contains("o["),
+            "stack store/load must use plain `name[idx]` shape: {msl}"
+        );
+    }
+
+    /// Sanity: device-scope atomics keep the unchanged `<dst> + <idx>` form.
+    #[test]
+    fn atomic_device_emits_buffer_offset_form() {
+        use metaltile_core::ir::{AtomicKind, AtomicScope};
+
+        let mut k = Kernel::new("atomic_dev_smoke");
+        k.mode = KernelMode::Elementwise;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(1));
+        k.body.push_op_no_result(Op::Atomic {
+            op: AtomicKind::Add,
+            scope: AtomicScope::Device,
+            dst: "counter".to_string(),
+            index: ValueId::new(0),
+            value: ValueId::new(1),
+        });
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("atomic_fetch_add_explicit(counter +"),
+            "device-scope atomic must keep buffer-offset form: {msl}"
+        );
+        assert!(
+            !msl.contains("(threadgroup"),
+            "device-scope atomic must NOT emit a threadgroup cast: {msl}"
+        );
+    }
 }

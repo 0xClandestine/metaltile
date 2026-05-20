@@ -318,6 +318,10 @@ fn replace_value_in_op(op: &mut Op, old: ValueId, new: ValueId) {
         },
         Op::Dequantize { .. } => {},
         Op::SimdReduce { value, .. } | Op::SimdShuffleXor { value, .. } => s(value),
+        Op::SimdBroadcast { value, lane } => {
+            s(value);
+            s(lane);
+        },
         Op::ThreadgroupLoad { index, .. } => s(index),
         Op::ThreadgroupStore { index, value, .. } => {
             s(index);
@@ -339,6 +343,12 @@ fn replace_value_in_op(op: &mut Op, old: ValueId, new: ValueId) {
             s(offset);
         },
         Op::SimdScan { value, .. } => s(value),
+        Op::StackLoad { index, .. } => s(index),
+        Op::StackStore { index, value, .. } => {
+            s(index);
+            s(value);
+        },
+        Op::StackAlloc { .. } => {},
         Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => s(value),
         Op::ArgReduce { value, .. } => s(value),
         Op::StrideScan { offset, end, .. } => {
@@ -497,6 +507,10 @@ fn collect_uses(op: &Op, used: &mut BTreeSet<ValueId>) {
         },
         Op::Dequantize { .. } => {},
         Op::SimdReduce { value, .. } | Op::SimdShuffleXor { value, .. } => add(*value),
+        Op::SimdBroadcast { value, lane } => {
+            add(*value);
+            add(*lane);
+        },
         Op::ThreadgroupLoad { index, .. } => add(*index),
         Op::ThreadgroupStore { index, value, .. } => {
             add(*index);
@@ -518,6 +532,12 @@ fn collect_uses(op: &Op, used: &mut BTreeSet<ValueId>) {
             add(*offset);
         },
         Op::SimdScan { value, .. } => add(*value),
+        Op::StackLoad { index, .. } => add(*index),
+        Op::StackStore { index, value, .. } => {
+            add(*index);
+            add(*value);
+        },
+        Op::StackAlloc { .. } => {},
         Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => add(*value),
         Op::ArgReduce { value, .. } => add(*value),
         Op::StrideScan { offset, end, .. } => {

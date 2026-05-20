@@ -335,6 +335,10 @@ fn replace_values(op: &mut Op, map: &FxHashMap<ValueId, ValueId>) {
         },
         Op::Dequantize { .. } => {},
         Op::SimdReduce { value, .. } | Op::SimdShuffleXor { value, .. } => s(value),
+        Op::SimdBroadcast { value, lane } => {
+            s(value);
+            s(lane);
+        },
         Op::ThreadgroupLoad { index, .. } => s(index),
         Op::ThreadgroupStore { index, value, .. } => {
             s(index);
@@ -356,6 +360,12 @@ fn replace_values(op: &mut Op, map: &FxHashMap<ValueId, ValueId>) {
             s(offset);
         },
         Op::SimdScan { value, .. } => s(value),
+        Op::StackLoad { index, .. } => s(index),
+        Op::StackStore { index, value, .. } => {
+            s(index);
+            s(value);
+        },
+        Op::StackAlloc { .. } => {},
         Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => s(value),
         Op::ArgReduce { value, .. } => s(value),
     }

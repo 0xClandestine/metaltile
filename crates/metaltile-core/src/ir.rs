@@ -342,6 +342,23 @@ pub enum AtomicKind {
     Xor,
 }
 
+/// Memory scope for an atomic op.  Drives whether the MSL emitter
+/// treats `dst` as a device-memory buffer (typical kernel param) or a
+/// threadgroup-allocated array (needs reinterpret-cast to
+/// `threadgroup atomic_uint*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AtomicScope {
+    /// Device memory — `dst` is a kernel buffer parameter.  Emits
+    /// `atomic_fetch_<op>_explicit(dst + idx, val, memory_order_relaxed)`.
+    #[default]
+    Device,
+    /// Threadgroup memory — `dst` is a `threadgroup_alloc`'d array.
+    /// Emits `atomic_fetch_<op>_explicit((threadgroup atomic_uint*)&dst[idx], …)`.
+    /// AURA encode's pack stage uses this so threads racing on the same
+    /// u32 word are properly serialised.
+    Threadgroup,
+}
+
 impl AtomicKind {
     pub fn msl_fn(self) -> &'static str {
         match self {
@@ -554,7 +571,7 @@ pub enum Op {
     Scatter { dst: String, indices: ValueId, value: ValueId, axis: u32 },
 
     /// Atomic operation on device memory.
-    Atomic { op: AtomicKind, dst: String, index: ValueId, value: ValueId },
+    Atomic { op: AtomicKind, scope: AtomicScope, dst: String, index: ValueId, value: ValueId },
 
     /// Prefix scan along an axis (inclusive or exclusive).
     Scan { value: ValueId, axis: u32, op: ReduceKind, exclusive: bool },
@@ -653,6 +670,13 @@ pub enum Op {
     /// Maps to `simd_scan_inclusive_<op>(v)` (Metal 3.0+).
     SimdScan { value: ValueId, op: ReduceKind, exclusive: bool },
 
+    /// SIMD-group broadcast: every lane receives the value held by the
+    /// specified `lane` (a u32 index 0..simd_size). Maps to
+    /// `simd_broadcast(v, lane)` (Metal 2.1+). Cooperative codebook hoist
+    /// in AURA score/value kernels uses this to share one lane's loaded
+    /// codebook word across the group.
+    SimdBroadcast { value: ValueId, lane: ValueId },
+
     /// Allocate a named threadgroup (shared) memory array.
     /// Emits `threadgroup T name[size]` in the kernel body.
     ThreadgroupAlloc {
@@ -668,6 +692,22 @@ pub enum Op {
 
     /// Store one element to a named threadgroup array: `name[index] = value`.
     ThreadgroupStore { name: String, index: ValueId, value: ValueId },
+
+    /// Allocate a per-thread stack-resident array.  Emits `T name[size];`
+    /// inside the kernel body (no `threadgroup` qualifier — each thread
+    /// gets its own copy).  Metal keeps small fixed-size stack arrays in
+    /// registers; AURA flash kernels need this for `q_vals[DIMS_PER_LANE]`,
+    /// `o[DIMS_PER_LANE]`, and the per-thread codebook cache that
+    /// amortises lookup across the dim-strided inner loop.
+    StackAlloc { dtype: DType, size: u32, name: String },
+
+    /// Load one element from a per-thread stack array: `val = name[index]`.
+    /// Identical emission to `ThreadgroupLoad`; kept distinct in the IR so
+    /// liveness / scoping passes know the buffer is thread-private.
+    StackLoad { name: String, index: ValueId },
+
+    /// Store one element to a per-thread stack array: `name[index] = value`.
+    StackStore { name: String, index: ValueId, value: ValueId },
 
     /// Threadgroup barrier: `threadgroup_barrier(mem_flags::mem_threadgroup)`.
     /// Ensures all prior threadgroup stores are visible to all threads before
@@ -1144,8 +1184,13 @@ impl Op {
             Op::Scatter { dst, indices, value, axis } => {
                 write!(f, "Scatter({dst}, v{}, v{}, axis={axis})", indices.as_u32(), value.as_u32())
             },
-            Op::Atomic { op, dst, index, value } => {
-                write!(f, "Atomic({op:?}, {dst}, v{}, v{})", index.as_u32(), value.as_u32())
+            Op::Atomic { op, scope, dst, index, value } => {
+                write!(
+                    f,
+                    "Atomic({op:?}, scope={scope:?}, {dst}, v{}, v{})",
+                    index.as_u32(),
+                    value.as_u32()
+                )
             },
             Op::Scan { value, axis, op, exclusive } => {
                 write!(
@@ -1189,6 +1234,18 @@ impl Op {
             Op::SimdReduce { value, op } => write!(f, "SimdReduce(v{}, {op:?})", value.as_u32()),
             Op::SimdShuffleXor { value, mask } => {
                 write!(f, "SimdShuffleXor(v{}, mask={mask})", value.as_u32())
+            },
+            Op::SimdBroadcast { value, lane } => {
+                write!(f, "SimdBroadcast(v{}, lane=v{})", value.as_u32(), lane.as_u32())
+            },
+            Op::StackAlloc { dtype, size, name } => {
+                write!(f, "StackAlloc({dtype:?}, {size}, {name})")
+            },
+            Op::StackLoad { name, index } => {
+                write!(f, "StackLoad({name}, v{})", index.as_u32())
+            },
+            Op::StackStore { name, index, value } => {
+                write!(f, "StackStore({name}, v{}, v{})", index.as_u32(), value.as_u32())
             },
             Op::ThreadgroupAlloc { dtype, size, name } => {
                 write!(f, "ThreadgroupAlloc({dtype:?}, {size}, {name})")

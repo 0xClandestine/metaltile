@@ -689,10 +689,28 @@ impl MslGenerator {
                 },
 
                 // ---- atomics ----------------------------------------------
-                Op::Atomic { op: ak, dst, index, value } => {
+                Op::Atomic { op: ak, scope, dst, index, value } => {
                     let iv = self.vname(Some(*index), block, extra_names);
                     let rv = self.vname(Some(*value), block, extra_names);
-                    wl!(out, "{pad}{}({dst} + {iv}, {rv}, memory_order_relaxed);", ak.msl_fn());
+                    match scope {
+                        metaltile_core::ir::AtomicScope::Device => {
+                            wl!(
+                                out,
+                                "{pad}{}({dst} + {iv}, {rv}, memory_order_relaxed);",
+                                ak.msl_fn(),
+                            );
+                        },
+                        metaltile_core::ir::AtomicScope::Threadgroup => {
+                            // `dst` is a `threadgroup_alloc`'d uint array.
+                            // Reinterpret the slot as `threadgroup atomic_uint*`
+                            // — same form MLX uses (turbo_quant.metal).
+                            wl!(
+                                out,
+                                "{pad}{}((threadgroup atomic_uint*)&{dst}[{iv}], {rv}, memory_order_relaxed);",
+                                ak.msl_fn(),
+                            );
+                        },
+                    }
                 },
 
                 // ---- scan operations --------------------------------------
@@ -850,6 +868,13 @@ impl MslGenerator {
                     wl!(out, "{pad}auto {v} = simd_shuffle_xor({rv}, {mask}u);");
                 },
 
+                Op::SimdBroadcast { value, lane } => {
+                    let v = self.vname(vid, block, extra_names);
+                    let rv = self.vname(Some(*value), block, extra_names);
+                    let rl = self.vname(Some(*lane), block, extra_names);
+                    wl!(out, "{pad}auto {v} = simd_broadcast({rv}, {rl});");
+                },
+
                 Op::ThreadgroupAlloc { dtype, size, name } => {
                     let t = self.msl_type_name(*dtype);
                     hoists.push(format!("threadgroup {t} {name}[{size}];"));
@@ -862,6 +887,27 @@ impl MslGenerator {
                 },
 
                 Op::ThreadgroupStore { name, index, value } => {
+                    let iv = self.vname(Some(*index), block, extra_names);
+                    let rv = self.vname(Some(*value), block, extra_names);
+                    wl!(out, "{pad}{name}[{iv}] = {rv};");
+                },
+
+                // ---- per-thread stack arrays ----------------------------
+                Op::StackAlloc { dtype, size, name } => {
+                    let t = self.msl_type_name(*dtype);
+                    // No `threadgroup` qualifier — Metal places small
+                    // fixed-size local arrays in per-thread registers
+                    // (with spill to thread-local memory if they don't fit).
+                    hoists.push(format!("{t} {name}[{size}];"));
+                },
+
+                Op::StackLoad { name, index } => {
+                    let v = self.vname(vid, block, extra_names);
+                    let iv = self.vname(Some(*index), block, extra_names);
+                    wl!(out, "{pad}auto {v} = {name}[{iv}];");
+                },
+
+                Op::StackStore { name, index, value } => {
                     let iv = self.vname(Some(*index), block, extra_names);
                     let rv = self.vname(Some(*value), block, extra_names);
                     wl!(out, "{pad}{name}[{iv}] = {rv};");
