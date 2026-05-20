@@ -1409,6 +1409,7 @@ impl DslBodyParser {
     ///   * Threadgroup scope (`atomic_<op>_tg(…)`): a name that was
     ///     declared via `threadgroup_alloc(name, size, "u32")` earlier in
     ///     the kernel.
+    ///
     /// `index` and `value` are SSA expressions.  No result — atomics are
     /// side-effecting stores.
     fn parse_atomic(&mut self, call: &ExprCall, op_str: &str, scope_str: &str) -> u32 {
@@ -1476,6 +1477,7 @@ impl DslBodyParser {
     ///     `"u32"` / `"i32"`. Used by AURA encode for `"u32"` so the
     ///     threadgroup pack buffer can be reinterpreted as `atomic_uint`
     ///     by the threadgroup-scoped atomic ops.
+    ///
     /// Defaults to F32 if omitted.
     fn parse_threadgroup_alloc(&mut self, call: &ExprCall) -> u32 {
         let args: Vec<_> = call.args.iter().collect();
@@ -1488,7 +1490,7 @@ impl DslBodyParser {
             // Expr::Group; unwrap to peek through.
             let unwrapped: &syn::Expr = match arg {
                 syn::Expr::Group(g) => &g.expr,
-                other => *other,
+                other => other,
             };
             if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = unwrapped {
                 match s.value().as_str() {
@@ -1589,7 +1591,7 @@ impl DslBodyParser {
         let dtype_tokens = if let Some(arg) = args.get(2) {
             let unwrapped: &syn::Expr = match arg {
                 syn::Expr::Group(g) => &g.expr,
-                other => *other,
+                other => other,
             };
             if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = unwrapped {
                 match s.value().as_str() {

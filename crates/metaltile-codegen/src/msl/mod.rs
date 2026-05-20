@@ -741,10 +741,7 @@ mod tests {
         let mut k = Kernel::new("simd_xor_smoke");
         k.mode = KernelMode::Reduction;
         k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
-        k.body.push_op(
-            Op::SimdShuffleXor { value: ValueId::new(0), mask: 1 },
-            ValueId::new(1),
-        );
+        k.body.push_op(Op::SimdShuffleXor { value: ValueId::new(0), mask: 1 }, ValueId::new(1));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(
             msl.contains("simd_shuffle_xor("),
@@ -765,10 +762,7 @@ mod tests {
             ValueId::new(2),
         );
         let msl = MslGenerator::default().generate(&k).unwrap();
-        assert!(
-            msl.contains("simd_broadcast("),
-            "kernel must emit a simd_broadcast call: {msl}"
-        );
+        assert!(msl.contains("simd_broadcast("), "kernel must emit a simd_broadcast call: {msl}");
     }
 
     /// `Op::ThreadgroupAlloc { dtype: U32, .. }` must emit
