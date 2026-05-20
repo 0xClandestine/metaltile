@@ -230,7 +230,7 @@ pub fn compile(
         intermediate_inputs.push(node_intermediate_inputs);
 
         // 2f. Compute grid dimensions from dispatch hints.
-        let grid = compute_grid(&mode, &dispatch_hints)?;
+        let grid = compute_grid(&raw.node.op, &mode, &dispatch_hints)?;
 
         let kernel_name: &'static str = spec.kernel_name;
         let kernel_ir = spec.kernel_ir;
@@ -249,11 +249,11 @@ pub fn compile(
     }
 
     // ── Step 3: Liveness analysis → slot assignment ────────────────
-    let slots = assign_slots(nodes.len(), &intermediate_outputs, &intermediate_inputs);
-
-    // Build name → slot index map.
-    let name_to_slot: HashMap<String, usize> =
-        slots.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
+    // name_to_slot is the canonical map built during assignment — it preserves
+    // all tenant names even when slots are reused (slot.name is overwritten on
+    // reuse, so rebuilding from the slot vector would lose earlier tenant names).
+    let (slots, name_to_slot) =
+        assign_slots(nodes.len(), &intermediate_outputs, &intermediate_inputs);
 
     // Replace Weight("_name") placeholders with Slot(idx).
     for node in &mut nodes {
@@ -303,9 +303,61 @@ fn eval_dispatch_hints(
 
 // ── Grid computation ───────────────────────────────────────────────────
 
+/// Maximum threads-per-group allowed by the Metal hardware on all supported
+/// Apple Silicon targets. Dispatching more threads causes a Metal error.
+const METAL_MAX_THREADS_PER_GROUP: usize = 1024;
+
 /// Compute the `GridSpec` for a kernel dispatch from its mode and
 /// resolved dispatch hints.
-fn compute_grid(mode: &KernelMode, hints: &HashMap<String, u32>) -> Result<GridSpec, ModelError> {
+///
+/// Validates `tpg` against Metal hardware limits before returning:
+/// - `tpg == 0`        → error (would dispatch 0 threads, no useful work)
+/// - `tpg > 1024`      → error (exceeds Metal hardware limit)
+///
+/// The op name is included in error messages for easy diagnosis.
+fn compute_grid(
+    op: &str,
+    mode: &KernelMode,
+    hints: &HashMap<String, u32>,
+) -> Result<GridSpec, ModelError> {
+    // Shared tpg validation for modes that use it.
+    let validate_tpg = |tpg: usize| -> Result<(), ModelError> {
+        if tpg == 0 {
+            return Err(ModelError::UnsafeDispatch {
+                op: op.to_string(),
+                detail: "tpg=0 would dispatch 0 threads per group".into(),
+            });
+        }
+        if tpg > METAL_MAX_THREADS_PER_GROUP {
+            return Err(ModelError::UnsafeDispatch {
+                op: op.to_string(),
+                detail: format!(
+                    "tpg={tpg} exceeds Metal limit of {METAL_MAX_THREADS_PER_GROUP}; \
+                     reduce tpg or use a larger-grain kernel"
+                ),
+            });
+        }
+        Ok(())
+    };
+
+    // Minimum TPG for kernels that use simdgroup operations (n_simd = tpg/32).
+    // tpg < 32 produces n_simd = 0 and an infinite GPU loop.
+    const MIN_SIMD_TPG: usize = 32;
+
+    let validate_simd_tpg = |tpg: usize| -> Result<(), ModelError> {
+        if tpg < MIN_SIMD_TPG {
+            return Err(ModelError::UnsafeDispatch {
+                op: op.to_string(),
+                detail: format!(
+                    "tpg={tpg} < {MIN_SIMD_TPG} for reduction kernel — \
+                     n_simd=tpg/32=0 would cause an infinite GPU loop; \
+                     minimum safe TPG is {MIN_SIMD_TPG}"
+                ),
+            });
+        }
+        Ok(())
+    };
+
     match mode {
         KernelMode::Elementwise => {
             let n = hints.get("n").copied().unwrap_or(1) as usize;
@@ -314,6 +366,8 @@ fn compute_grid(mode: &KernelMode, hints: &HashMap<String, u32>) -> Result<GridS
         KernelMode::Reduction => {
             let rows = hints.get("rows").copied().unwrap_or(1) as usize;
             let tpg = hints.get("tpg").copied().unwrap_or(256) as usize;
+            validate_tpg(tpg)?;
+            validate_simd_tpg(tpg)?;
             Ok(GridSpec::Reduction { num_rows: rows, threads_per_group: tpg })
         },
         KernelMode::Grid3D => {
@@ -321,6 +375,7 @@ fn compute_grid(mode: &KernelMode, hints: &HashMap<String, u32>) -> Result<GridS
             let y = hints.get("grid_y").copied().unwrap_or(1) as usize;
             let z = hints.get("grid_z").copied().unwrap_or(1) as usize;
             let tpg = hints.get("tpg").copied().unwrap_or(1) as usize;
+            validate_tpg(tpg)?;
             Ok(GridSpec::Grid3D { x, y, z, threads_per_group: tpg })
         },
         KernelMode::Tile2D => {
@@ -330,6 +385,8 @@ fn compute_grid(mode: &KernelMode, hints: &HashMap<String, u32>) -> Result<GridS
         KernelMode::SimdGroup2D => {
             let rows = hints.get("rows").copied().unwrap_or(1) as usize;
             let tpg = hints.get("tpg").copied().unwrap_or(1024) as usize;
+            validate_tpg(tpg)?;
+            validate_simd_tpg(tpg)?;
             Ok(GridSpec::Reduction { num_rows: rows, threads_per_group: tpg })
         },
     }
@@ -339,14 +396,18 @@ fn compute_grid(mode: &KernelMode, hints: &HashMap<String, u32>) -> Result<GridS
 
 /// Compute the size in bytes for an intermediate output buffer.
 ///
-/// Uses the `out_elems` dispatch hint (number of output elements).
-/// Falls back to `hidden_dim * dtype.size_bytes()` if not specified.
+/// Priority:
+/// 1. `out_bytes` hint — explicit byte count (use for u32/fixed-dtype outputs).
+/// 2. `out_elems` × `dtype.size_bytes()` — element count scaled by activation dtype.
+/// 3. Conservative fallback: 4096 × dtype.size_bytes().
 fn compute_buffer_size(hints: &HashMap<String, u32>, dtype: DType) -> usize {
+    if let Some(bytes) = hints.get("out_bytes").copied() {
+        return bytes as usize;
+    }
     let elems = hints.get("out_elems").copied().unwrap_or(0) as usize;
     if elems > 0 {
         elems * dtype.size_bytes()
     } else {
-        // Conservative fallback — should be overridden via dispatch hints.
         4096 * dtype.size_bytes()
     }
 }
@@ -362,6 +423,7 @@ mod tests {
         vec![
             "token_id".into(),
             "position".into(),
+            "n_kv".into(),
             "rms_eps".into(),
             "temperature".into(),
             "uniform".into(),

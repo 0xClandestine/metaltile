@@ -15,7 +15,14 @@
 //! back to the mutable `state` map after each dispatch that produces
 //! a state output.
 
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use metaltile_runtime::{Context, DispatchSpec, ResidentBuffer, context::GridSpec};
 
@@ -23,6 +30,10 @@ use crate::{
     error::ModelError,
     plan::{ConstexprValue, ExecutionPlan, SlotRef},
 };
+
+/// Watchdog timeout: if a single dispatch_chain call takes longer than this,
+/// the process is killed to prevent an indefinite GPU hang from freezing macOS.
+const GPU_WATCHDOG_SECS: u64 = 20;
 
 /// GPU buffer storage keyed by tensor name.
 pub type WeightMap = HashMap<String, Vec<u8>>;
@@ -58,7 +69,8 @@ pub fn execute_plan(
     let mut slot_data: Vec<Vec<u8>> = plan.slots.iter().map(|s| vec![0u8; s.size_bytes]).collect();
 
     for node in &plan.nodes {
-        let kernel = (node.kernel_ir)(node.dtype);
+        let mut kernel = (node.kernel_ir)(node.dtype);
+        kernel.mode = node.mode;
         let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
         // ── Input bindings ────────────────────────────────────────
@@ -125,17 +137,66 @@ pub fn execute_plan(
         for (name, cv) in &node.cexprs {
             let bits: u32 = match cv {
                 ConstexprValue::Static(val) => *val,
-                ConstexprValue::State(state_key) => state
-                    .get(state_key)
-                    .and_then(|b| b.get(..4))
-                    .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                    .unwrap_or(0),
+                ConstexprValue::State(state_key) => {
+                    let bytes = state
+                        .get(state_key)
+                        .and_then(|b| b.get(..4))
+                        .ok_or_else(|| ModelError::UnsafeDispatch {
+                            op: node.label.clone(),
+                            detail: format!(
+                                "runtime state '{state_key}' not found — \
+                                 ensure it is set in the state map before the forward pass"
+                            ),
+                        })?;
+                    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+                },
             };
             buffers.insert(name.clone(), bits.to_le_bytes().to_vec());
         }
 
-        // ── Dispatch ──────────────────────────────────────────────
+        // ── Pre-dispatch safety checks ────────────────────────────
+        // Check 1: all non-output kernel params must have data bound.
+        // A missing input buffer means the kernel reads uninitialised/null
+        // memory → undefined behaviour → potential GPU hang.
+        for param in kernel.params.iter().filter(|p| !p.is_output) {
+            let in_resident = spec_resident.contains_key(&param.name);
+            let in_buffers = buffers.get(&param.name).is_some_and(|b| !b.is_empty());
+            if !in_resident && !in_buffers {
+                return Err(ModelError::UnsafeDispatch {
+                    op: node.label.clone(),
+                    detail: format!(
+                        "input '{}' has no data — weight missing from checkpoint \
+                         or weight-name mismatch; refusing GPU dispatch",
+                        param.name
+                    ),
+                });
+            }
+        }
+
         let (grid_groups, threads_per_group) = grid_to_dims(&node.grid);
+
+        // ── Watchdog ──────────────────────────────────────────────
+        // Arm a watchdog thread before the GPU dispatch.  If dispatch_chain
+        // does not return within GPU_WATCHDOG_SECS, the process self-terminates
+        // so macOS can reclaim the GPU rather than freezing the machine.
+        let done_flag = Arc::new(AtomicBool::new(false));
+        {
+            let flag = done_flag.clone();
+            let label = node.label.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(GPU_WATCHDOG_SECS));
+                if !flag.load(Ordering::Acquire) {
+                    eprintln!(
+                        "\n[executor] WATCHDOG: dispatch '{}' exceeded {}s — \
+                         killing process to prevent system freeze",
+                        label, GPU_WATCHDOG_SECS
+                    );
+                    std::process::exit(1);
+                }
+            });
+        }
+
+        // ── Dispatch ──────────────────────────────────────────────
         let spec = DispatchSpec {
             kernel: &kernel,
             buffers: &buffers,
@@ -147,12 +208,22 @@ pub fn execute_plan(
         };
 
         let results = ctx.dispatch_chain(&[spec]).map_err(|e| ModelError::Other(e.to_string()))?;
+        done_flag.store(true, Ordering::Release); // disarm watchdog
 
         // ── Output readback ───────────────────────────────────────
         let Some(result) = results.into_iter().next() else { continue };
 
         for (param_name, slot_ref) in &node.output_bindings {
             let Some(bytes) = result.outputs.get(param_name) else { continue };
+            // Debug: print first 4 f32/bf16 values of each slot output.
+            if bytes.len() >= 8 {
+                let v0 = bf16_bytes_to_f32(&bytes[0..2]);
+                let v1 = bf16_bytes_to_f32(&bytes[2..4]);
+                let v2 = bf16_bytes_to_f32(&bytes[4..6]);
+                let v3 = bf16_bytes_to_f32(&bytes[6..8]);
+                eprintln!("[executor] {} → {}[0..4] = [{:.4}, {:.4}, {:.4}, {:.4}]",
+                    node.label, param_name, v0, v1, v2, v3);
+            }
             match slot_ref {
                 SlotRef::Slot(idx) =>
                     if let Some(slot) = slot_data.get_mut(*idx) {
@@ -168,6 +239,12 @@ pub fn execute_plan(
 
     // Return the bytes of the plan's designated output slot.
     Ok(slot_data.get(plan.output_slot).cloned().unwrap_or_default())
+}
+
+/// Decode two little-endian bytes as a bfloat16 value (returning f32).
+fn bf16_bytes_to_f32(b: &[u8]) -> f32 {
+    let bits = u16::from_le_bytes([b[0], b[1]]) as u32;
+    f32::from_bits(bits << 16)
 }
 
 /// Convert a `GridSpec` to `(grid_groups: [usize; 3], threads_per_group: [usize; 3])`.
