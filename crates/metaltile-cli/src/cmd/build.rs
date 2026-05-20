@@ -186,7 +186,14 @@ pub fn run(args: &BuildArgs) {
             // unless the spec is already dtype-specialized (e.g. `mt_argmax_f32`).
             k.name = monomorphized_name(spec.kernel_name, dt, dtypes.len());
 
-            let generator = generator_for_mode(mode);
+            // Use the bench's first-shape TPG as the codegen hint so the
+            // emitted MSL matches exactly what `tile bench` measures (and
+            // what production callers will dispatch at, per the kernel's
+            // DISPATCH INVARIANTS). Drop to `None` (safe slow path) when
+            // the spec has no shapes — those kernels aren't in the bench
+            // matrix and codegen has no TPG signal to specialize on.
+            let expected_tpg = spec.shapes.first().map(|s| s.tpg as u32);
+            let generator = generator_for_mode(mode, expected_tpg);
 
             // Compile-check via generate.
             let msl_result = generator.generate(&k);
