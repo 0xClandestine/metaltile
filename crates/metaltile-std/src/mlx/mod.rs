@@ -22,6 +22,7 @@ pub mod fp_quantized;
 pub mod fp_quantized_nax;
 pub mod gemv;
 pub mod gemv_masked;
+pub mod hadamard;
 pub mod layer_norm;
 pub mod logsumexp;
 pub mod quantized;

@@ -73,7 +73,7 @@ Sources surveyed:
 | fp_quantized_nax | ✓ | ✓ | ✗ | Module file present but empty (no `#[kernel]` defs). NAX-gated. |
 | quantized_nax | ✓ | ✓ | ✗ | Module file present but empty (no `#[kernel]` defs). NAX-gated. |
 | fft (radix + readwrite) | ✓ | ✓ | ✗ | Stub file in repo, not declared. No DSL port. |
-| hadamard (hadamard_n + hadamard_m) | ✓ | ✓ | ✗ | Not ported. Used by Walsh-Hadamard quant path; could matter for AURA rotations longer-term. |
+| hadamard (hadamard_n + hadamard_m) | ✓ | ✓ | ~ | `mlx/hadamard.rs` → `mt_hadamard_n{64,128,256,512,1024}<T>`. Power-of-2 FWHT via log2(N) butterfly passes. The non-power-of-2 `hadamard_m` factor (M ∈ {12,20,28}) is a follow-up. |
 | fence | ✓ | ✓ | ✗ | Stub file in repo, not declared. Synchronization primitive. |
 | gather (bare-tensor embedding lookup) | ✓ (via indexing/) | ✓ | ✓ | `ffai/gather.rs` → `ffai_gather<T>`. FFAI's embedding-table gather. |
 | indexing (scatter, scatter_axis, gather_axis, gather_front, masked_scatter) | ✓ | ✓ | ✗ | Header-only family in MLX; metaltile only covers bare gather today. scatter/scatter_axis/masked_scatter all absent. |
