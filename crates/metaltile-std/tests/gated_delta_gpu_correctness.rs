@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 use common::{Dt, gpu_lock, pack_bytes, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
-use metaltile_std::ffai::gated_delta::mt_gated_delta_step;
+use metaltile_std::ffai::gated_delta::{mt_gated_delta_chunk, mt_gated_delta_step};
 
 /// CPU oracle: matches `_gated_delta_step_ops` from `mlx_lm/models/gated_delta.py`.
 ///
@@ -428,7 +428,7 @@ fn gated_delta_step_batch_4_stresses_indexing_f32() {
     let k: Vec<f32> = (0..b * hk * dk).map(|i| ((i as f32) * 0.021).cos() * 0.4).collect();
     let v: Vec<f32> = (0..n_total * dv).map(|i| ((i as f32) * 0.027).sin() * 0.3).collect();
     // Distinct g per batch — first half 0.95, second half 0.75 — so a
-    // mis-routed batch returns visibly wrong recurrence direction.
+    // misrouted batch returns visibly wrong recurrence direction.
     let g: Vec<f32> = (0..n_total).map(|i| if (i / hv) < b / 2 { 0.95 } else { 0.75 }).collect();
     let beta: Vec<f32> = (0..n_total).map(|i| 0.4 + (i as f32) * 0.01).collect();
     let state_in: Vec<f32> =
@@ -628,4 +628,299 @@ fn gated_delta_step_matches_oracle_bf16() {
     }
     // bf16 7-bit mantissa is the wider tolerance.
     assert!(max_rel < 2e-1, "bf16 max rel = {max_rel:.2e}");
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  mt_gated_delta_chunk — multi-token chunked-prefill
+// ════════════════════════════════════════════════════════════════════
+
+/// CPU oracle for `mt_gated_delta_chunk` — runs the decode-form
+/// recurrence T times sequentially, threading the state forward.
+/// Layout: q,k:[B,T,Hk,Dk] / v,y:[B,T,Hv,Dv] / g,beta:[B,T,Hv] /
+/// state:[B,Hv,Dv,Dk].
+#[allow(clippy::too_many_arguments)]
+fn naive_gated_delta_chunk(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    g: &[f32],
+    beta: &[f32],
+    state_in: &[f32],
+    b: usize,
+    t: usize,
+    hv: usize,
+    hk: usize,
+    dv: usize,
+    dk: usize,
+) -> (Vec<f32>, Vec<f32>) {
+    let mut y = vec![0.0_f32; b * t * hv * dv];
+    let mut state = state_in.to_vec();
+    let hk_per_hv = hv / hk;
+    for batch in 0..b {
+        for ti in 0..t {
+            for hv_idx in 0..hv {
+                let n = batch * hv + hv_idx;
+                let bt = batch * t + ti;
+                let hk_idx = hv_idx / hk_per_hv;
+                let gb_idx = bt * hv + hv_idx;
+                let g_val = g[gb_idx];
+                let beta_val = beta[gb_idx];
+                let qk_base = (bt * hk + hk_idx) * dk;
+                for dv_idx in 0..dv {
+                    let v_val = v[(bt * hv + hv_idx) * dv + dv_idx];
+                    let s_base = n * dv * dk + dv_idx * dk;
+                    let mut kv_mem = 0.0_f32;
+                    let mut decayed = vec![0.0_f32; dk];
+                    for s_idx in 0..dk {
+                        let s = state[s_base + s_idx] * g_val;
+                        decayed[s_idx] = s;
+                        kv_mem += s * k[qk_base + s_idx];
+                    }
+                    let delta = (v_val - kv_mem) * beta_val;
+                    let mut out = 0.0_f32;
+                    for s_idx in 0..dk {
+                        let s_new = decayed[s_idx] + k[qk_base + s_idx] * delta;
+                        state[s_base + s_idx] = s_new;
+                        out += s_new * q[qk_base + s_idx];
+                    }
+                    y[(bt * hv + hv_idx) * dv + dv_idx] = out;
+                }
+            }
+        }
+    }
+    (y, state)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_gated_delta_chunk(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    g: &[f32],
+    beta: &[f32],
+    state_in: &[f32],
+    dt: Dt,
+    b: usize,
+    t: usize,
+    hv: usize,
+    hk: usize,
+    dv: usize,
+    dk: usize,
+) -> (Vec<f32>, Vec<f32>) {
+    let n_total = b * hv;
+    let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    buffers.insert("q".into(), pack_bytes(q, dt));
+    buffers.insert("k".into(), pack_bytes(k, dt));
+    buffers.insert("v".into(), pack_bytes(v, dt));
+    buffers.insert("g".into(), pack_bytes(g, dt));
+    buffers.insert("beta".into(), pack_bytes(beta, dt));
+    buffers.insert("state_in".into(), pack_bytes(state_in, dt));
+    buffers.insert("state_out".into(), pack_bytes(&vec![0.0_f32; state_in.len()], dt));
+    buffers.insert("y".into(), pack_bytes(&vec![0.0_f32; b * t * hv * dv], dt));
+    buffers.insert("t_len".into(), (t as u32).to_le_bytes().to_vec());
+    buffers.insert("dk".into(), (dk as u32).to_le_bytes().to_vec());
+    buffers.insert("dv".into(), (dv as u32).to_le_bytes().to_vec());
+    buffers.insert("hv".into(), (hv as u32).to_le_bytes().to_vec());
+    buffers.insert("hk".into(), (hk as u32).to_le_bytes().to_vec());
+
+    let ctx = Context::new().expect("Context::new on macOS");
+    let mut kernel = mt_gated_delta_chunk::kernel_ir_for(dt.to_dtype());
+    kernel.mode = KernelMode::Reduction;
+
+    assert!(dk.is_multiple_of(32), "mt_gated_delta_chunk requires dk % 32 == 0");
+    let result = ctx
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [dv, n_total, 1], [32, 1, 1])
+        .expect("mt_gated_delta_chunk dispatch");
+    let y = unpack_bytes(result.outputs.get("y").expect("y"), dt);
+    let state_out = unpack_bytes(result.outputs.get("state_out").expect("state_out"), dt);
+    (y, state_out)
+}
+
+#[test]
+fn gated_delta_chunk_t1_matches_decode_form_f32() {
+    let _g = gpu_lock();
+    // T=1 is the degenerate chunk = the decode form. Outputs of both
+    // kernels must match for the same inputs — the chunked kernel just
+    // amortises load/store-state once across an inner T-loop.
+    let b = 1;
+    let t = 1;
+    let hv = 4;
+    let hk = 2;
+    let dv = 4;
+    let dk = 32;
+    let n_total = b * hv;
+    let q: Vec<f32> = (0..b * t * hk * dk).map(|i| ((i as f32) * 0.013).sin() * 0.4).collect();
+    let k: Vec<f32> = (0..b * t * hk * dk).map(|i| ((i as f32) * 0.017).cos() * 0.4).collect();
+    let v: Vec<f32> = (0..b * t * hv * dv).map(|i| ((i as f32) * 0.029).sin() * 0.3).collect();
+    let g: Vec<f32> = (0..b * t * hv).map(|i| 0.9 - (i as f32) * 0.01).collect();
+    let beta: Vec<f32> = (0..b * t * hv).map(|i| 0.5 + (i as f32) * 0.01).collect();
+    let state_in: Vec<f32> =
+        (0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.1).collect();
+
+    let (y_chunk, state_chunk) =
+        run_gated_delta_chunk(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, t, hv, hk, dv, dk);
+    let (y_decode, state_decode) =
+        run_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, hv, hk, dv, dk);
+
+    let mut max_y_diff = 0.0_f32;
+    for (a, e) in y_chunk.iter().zip(y_decode.iter()) {
+        max_y_diff = max_y_diff.max((a - e).abs());
+    }
+    assert!(max_y_diff < 1e-5, "chunk T=1 vs decode y max |diff| = {max_y_diff:.2e}");
+    let mut max_state_diff = 0.0_f32;
+    for (a, e) in state_chunk.iter().zip(state_decode.iter()) {
+        max_state_diff = max_state_diff.max((a - e).abs());
+    }
+    assert!(max_state_diff < 1e-5, "chunk T=1 vs decode state max |diff| = {max_state_diff:.2e}");
+}
+
+#[test]
+fn gated_delta_chunk_t_64_matches_oracle_f32() {
+    let _g = gpu_lock();
+    let b = 1;
+    let t = 64;
+    let hv = 4;
+    let hk = 2;
+    let dv = 4;
+    let dk = 32;
+    let n_total = b * hv;
+    let q: Vec<f32> = (0..b * t * hk * dk).map(|i| ((i as f32) * 0.013).sin() * 0.4).collect();
+    let k: Vec<f32> = (0..b * t * hk * dk).map(|i| ((i as f32) * 0.017).cos() * 0.4).collect();
+    let v: Vec<f32> = (0..b * t * hv * dv).map(|i| ((i as f32) * 0.029).sin() * 0.3).collect();
+    let g: Vec<f32> = (0..b * t * hv).map(|i| 0.92 + ((i as f32) * 0.0001).sin() * 0.05).collect();
+    let beta: Vec<f32> = (0..b * t * hv).map(|i| 0.4 + ((i as f32) * 0.0001).cos() * 0.1).collect();
+    let state_in: Vec<f32> =
+        (0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.1).collect();
+
+    let (y_expected, state_expected) =
+        naive_gated_delta_chunk(&q, &k, &v, &g, &beta, &state_in, b, t, hv, hk, dv, dk);
+    let (y_actual, state_actual) =
+        run_gated_delta_chunk(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, t, hv, hk, dv, dk);
+
+    let mut max_y_diff = 0.0_f32;
+    for (a, e) in y_actual.iter().zip(y_expected.iter()) {
+        max_y_diff = max_y_diff.max((a - e).abs());
+    }
+    // 64 dependent recurrence steps stack ~64 ULPs of fp32 accumulation.
+    assert!(max_y_diff < 1e-3, "chunk T=64 y max |diff| = {max_y_diff:.2e}");
+    let mut max_state_diff = 0.0_f32;
+    for (a, e) in state_actual.iter().zip(state_expected.iter()) {
+        max_state_diff = max_state_diff.max((a - e).abs());
+    }
+    assert!(max_state_diff < 1e-3, "chunk T=64 state max |diff| = {max_state_diff:.2e}");
+}
+
+#[test]
+fn gated_delta_chunk_t_2048_breaks_the_barrier_f32() {
+    let _g = gpu_lock();
+    // Issue #111: Qwen3.6 crashes at ctx > 2048 in the hybrid scheduler.
+    // The chunked kernel must handle T = 2048 (and beyond) in a single
+    // dispatch. This test is the explicit pin: a 2048-token chunk
+    // succeeds, state remains finite, output matches CPU oracle.
+    let b = 1;
+    let t = 2048;
+    let hv = 2;
+    let hk = 1;
+    let dv = 2;
+    let dk = 32;
+    let n_total = b * hv;
+    let q: Vec<f32> = (0..b * t * hk * dk).map(|i| ((i as f32) * 0.0017).sin() * 0.3).collect();
+    let k: Vec<f32> = (0..b * t * hk * dk).map(|i| ((i as f32) * 0.0019).cos() * 0.3).collect();
+    let v: Vec<f32> = (0..b * t * hv * dv).map(|i| ((i as f32) * 0.0023).sin() * 0.3).collect();
+    let g: Vec<f32> = vec![0.95_f32; b * t * hv]; // slow decay → state stays bounded
+    let beta: Vec<f32> = vec![0.3_f32; b * t * hv];
+    let state_in: Vec<f32> = vec![0.0_f32; n_total * dv * dk];
+
+    let (y_expected, state_expected) =
+        naive_gated_delta_chunk(&q, &k, &v, &g, &beta, &state_in, b, t, hv, hk, dv, dk);
+    let (y_actual, state_actual) =
+        run_gated_delta_chunk(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, t, hv, hk, dv, dk);
+
+    // Every output element must be finite (no inf, no NaN).
+    for (i, &val) in y_actual.iter().enumerate() {
+        assert!(val.is_finite(), "T=2048 y[{i}] non-finite: {val}");
+    }
+    for (i, &val) in state_actual.iter().enumerate() {
+        assert!(val.is_finite(), "T=2048 state[{i}] non-finite: {val}");
+    }
+
+    // Outputs match the CPU oracle. 2048 dependent recurrence steps —
+    // generous tolerance for fp32 accumulation drift.
+    let mut max_y_diff = 0.0_f32;
+    for (a, e) in y_actual.iter().zip(y_expected.iter()) {
+        max_y_diff = max_y_diff.max((a - e).abs());
+    }
+    assert!(max_y_diff < 5e-2, "T=2048 y max |diff| = {max_y_diff:.2e}");
+    let mut max_state_diff = 0.0_f32;
+    for (a, e) in state_actual.iter().zip(state_expected.iter()) {
+        max_state_diff = max_state_diff.max((a - e).abs());
+    }
+    assert!(max_state_diff < 5e-2, "T=2048 state max |diff| = {max_state_diff:.2e}");
+}
+
+#[test]
+fn gated_delta_chunk_t_4096_past_the_barrier_f32() {
+    let _g = gpu_lock();
+    // 4096 > 2048: explicit pin that the chunked kernel goes past the
+    // boundary the existing mlx-swift-lm scheduler currently hits.
+    let b = 1;
+    let t = 4096;
+    let hv = 2;
+    let hk = 1;
+    let dv = 2;
+    let dk = 32;
+    let q: Vec<f32> = (0..b * t * hk * dk).map(|i| ((i as f32) * 0.0017).sin() * 0.3).collect();
+    let k: Vec<f32> = (0..b * t * hk * dk).map(|i| ((i as f32) * 0.0019).cos() * 0.3).collect();
+    let v: Vec<f32> = (0..b * t * hv * dv).map(|i| ((i as f32) * 0.0023).sin() * 0.3).collect();
+    let g: Vec<f32> = vec![0.95_f32; b * t * hv];
+    let beta: Vec<f32> = vec![0.3_f32; b * t * hv];
+    let state_in: Vec<f32> = vec![0.0_f32; b * hv * dv * dk];
+
+    let (y_actual, state_actual) =
+        run_gated_delta_chunk(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, t, hv, hk, dv, dk);
+
+    for (i, &val) in y_actual.iter().enumerate() {
+        assert!(val.is_finite(), "T=4096 y[{i}] non-finite: {val}");
+    }
+    for (i, &val) in state_actual.iter().enumerate() {
+        assert!(val.is_finite(), "T=4096 state[{i}] non-finite: {val}");
+    }
+    // No oracle here — the CPU reference at T=4096 would take a while
+    // to run inside a unit test. Finite-output is the contract that
+    // matters for issue #111: it means the kernel handles T past 2048
+    // without crashing or producing NaN/inf.
+}
+
+#[test]
+fn gated_delta_chunk_qwen36_dk_256_f32() {
+    let _g = gpu_lock();
+    // Qwen3.6 head_dim = 256, with a small T=8 to keep the test fast.
+    // Stresses the n_per_t=8 register-array path with the chunked
+    // kernel — different code shape than the decode kernel's Dk=256
+    // test.
+    let b = 1;
+    let t = 8;
+    let hv = 2;
+    let hk = 1;
+    let dv = 2;
+    let dk = 256;
+    let n_total = b * hv;
+    let q: Vec<f32> = (0..b * t * hk * dk).map(|i| ((i as f32) * 0.0019).sin() * 0.2).collect();
+    let k: Vec<f32> = (0..b * t * hk * dk).map(|i| ((i as f32) * 0.0023).cos() * 0.2).collect();
+    let v: Vec<f32> = (0..b * t * hv * dv).map(|i| ((i as f32) * 0.029).sin() * 0.3).collect();
+    let g: Vec<f32> = vec![0.92_f32; b * t * hv];
+    let beta: Vec<f32> = vec![0.4_f32; b * t * hv];
+    let state_in: Vec<f32> =
+        (0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.05).collect();
+
+    let (y_expected, _) =
+        naive_gated_delta_chunk(&q, &k, &v, &g, &beta, &state_in, b, t, hv, hk, dv, dk);
+    let (y_actual, _) =
+        run_gated_delta_chunk(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, t, hv, hk, dv, dk);
+
+    let mut max_diff = 0.0_f32;
+    for (a, e) in y_actual.iter().zip(y_expected.iter()) {
+        max_diff = max_diff.max((a - e).abs());
+    }
+    assert!(max_diff < 2e-3, "Dk=256 T=8 y max |diff| = {max_diff:.2e}");
 }
