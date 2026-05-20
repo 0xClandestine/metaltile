@@ -51,6 +51,9 @@ pub struct ModelDef {
     /// Weight tensor declarations (names and shapes).
     #[serde(default)]
     pub tensors: Vec<TensorDecl>,
+    /// Pre-layer kernels (run once before the layer loop: e.g. token embedding).
+    #[serde(default)]
+    pub pre_kernel: Vec<KernelNode>,
     /// Per-layer kernel sequence. Unrolled `n_layers` times.
     pub layer: Option<LayerDef>,
     /// Post-layer kernels (output norm, lm head, sampling).
@@ -108,6 +111,12 @@ pub struct KernelNode {
     /// Override dtype for this node. Default: inherits model activation dtype.
     #[serde(default)]
     pub dtype: Option<String>,
+    /// Dispatch hints consumed by the compiler for grid sizing.
+    /// Keys: `rows`, `tpg`, `n`, `grid_x`, `grid_y`, `grid_z`, `out_elems`.
+    /// Values are arithmetic expressions over `$var` references.
+    /// NOT forwarded to the GPU as kernel constexprs.
+    #[serde(default)]
+    pub dispatch: Option<IndexMap<String, String>>,
 }
 
 // ── Validation helpers ──────────────────────────────────────────────────
@@ -115,8 +124,9 @@ pub struct KernelNode {
 impl ModelDef {
     /// Total kernel count after unrolling (validation-only, not compile).
     pub fn total_kernel_count(&self, n_layers: usize) -> usize {
+        let pre = self.pre_kernel.len();
         let per_layer = self.layer.as_ref().map_or(0, |l| l.kernel.len());
         let post = self.kernel.len();
-        per_layer * n_layers + post
+        pre + per_layer * n_layers + post
     }
 }

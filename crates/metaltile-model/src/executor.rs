@@ -1,16 +1,22 @@
 //! Execution plan executor: dispatches an `ExecutionPlan` on the GPU.
 //!
-//! Maps `DispatchNode` → `DispatchSpec` and calls `Context::dispatch_chain`
-//! to encode a single command buffer with automatic pass-to-pass buffer
-//! aliasing and barrier insertion.
+//! Each `DispatchNode` is dispatched individually via a single-spec
+//! `Context::dispatch_chain` call. Intermediate tensors are tracked in
+//! `slot_data` (host-side `Vec<Vec<u8>>`). Weights live in the caller-
+//! provided `resident` map (pre-uploaded GPU buffers) or fall back to
+//! `weights` for CPU→GPU upload per dispatch.
 //!
-//! Intermediate buffers (those with `SlotRef::Slot`) are provided as
-//! empty byte vectors — `dispatch_chain` allocates them in private storage
-//! and aliases them where lifetimes don't overlap.
+//! Constexpr values are placed in `spec.buffers` (as 4-byte LE scalars)
+//! so `dispatch_chain` binds them via `setBytes`. The `fn_consts` field
+//! is always empty — MetalTile's `#[constexpr]` params use the buffer
+//! binding path, not Metal function constants.
+//!
+//! State tensors (kv_cache, position, etc.) are read from and written
+//! back to the mutable `state` map after each dispatch that produces
+//! a state output.
 
 use std::collections::{BTreeMap, HashMap};
 
-use metaltile_core::ir::Kernel;
 use metaltile_runtime::{Context, DispatchSpec, ResidentBuffer};
 use metaltile_runtime::context::GridSpec;
 
@@ -25,94 +31,146 @@ pub type WeightMap = HashMap<String, Vec<u8>>;
 /// Runtime state buffers (kv_cache, position counters, etc.).
 pub type StateMap = HashMap<String, Vec<u8>>;
 
+/// Static empty function-constants map (shared across all dispatches).
+static EMPTY_FN_CONSTS: std::sync::OnceLock<BTreeMap<String, u32>> =
+    std::sync::OnceLock::new();
+
 /// Execute a plan on the GPU and read back the final output buffer.
 ///
-/// This is the primary entry point for inference. It:
-/// 1. Builds `DispatchSpec`s from the plan + weights + state.
-/// 2. Calls `ctx.dispatch_chain`.
-/// 3. Reads back the output buffer from the final node's result.
+/// This is the primary entry point for inference. Each `DispatchNode`
+/// is dispatched individually:
+/// 1. Build a `BTreeMap<String, Vec<u8>>` with input bytes (slot/weight/state)
+///    and correctly-sized zero output buffers.
+/// 2. Add constexpr values to the same map (4-byte LE scalars).
+/// 3. Call `ctx.dispatch_chain(&[spec])` with a single spec.
+/// 4. Read output param bytes from `DispatchResult.outputs`.
+/// 5. Write slot outputs to `slot_data`, state outputs to `state`.
 ///
-/// Returns the output bytes (typically `vocab_size * sizeof(f32)` logits).
+/// Returns the output bytes of the plan's final output slot.
 pub fn execute_plan(
     ctx: &Context,
     plan: &ExecutionPlan,
     weights: &WeightMap,
-    state: &StateMap,
+    state: &mut StateMap,
     resident: &BTreeMap<String, ResidentBuffer>,
 ) -> Result<Vec<u8>, ModelError> {
-    // Build storage for the chained dispatch.
-    let mut kernels: Vec<Kernel> = Vec::with_capacity(plan.nodes.len());
-    let mut buffers: Vec<BTreeMap<String, Vec<u8>>> = Vec::with_capacity(plan.nodes.len());
-    let mut fn_consts: Vec<BTreeMap<String, u32>> = Vec::with_capacity(plan.nodes.len());
-    let mut specs: Vec<DispatchSpec<'_>> = Vec::with_capacity(plan.nodes.len());
+    let fn_consts = EMPTY_FN_CONSTS.get_or_init(BTreeMap::new);
+
+    // Pre-allocate slot data with correct sizes from the liveness analysis.
+    let mut slot_data: Vec<Vec<u8>> = plan
+        .slots
+        .iter()
+        .map(|s| vec![0u8; s.size_bytes])
+        .collect();
 
     for node in &plan.nodes {
         let kernel = (node.kernel_ir)(node.dtype);
-        let mut buf_map: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-        for (param_name, slot_ref) in &node.bindings {
-            let bytes = match slot_ref {
-                SlotRef::Slot(_) => Vec::new(),
-                SlotRef::Weight(name) => weights.get(name).cloned().unwrap_or_default(),
-                SlotRef::State(name) => state.get(name).cloned().unwrap_or_default(),
-            };
-            buf_map.insert(param_name.clone(), bytes);
-        }
-        let fc: BTreeMap<String, u32> = node
-            .cexprs
-            .iter()
-            .map(|(k, v)| {
-                let val = match v {
-                    ConstexprValue::Static(val) => *val,
-                    ConstexprValue::State(state_key) => {
-                        let bytes = state.get(state_key).cloned().unwrap_or_default();
-                        if bytes.len() >= 4 {
-                            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
-                        } else {
-                            1
-                        }
-                    },
-                };
-                (k.clone(), val)
-            })
-            .collect();
-        buffers.push(buf_map);
-        fn_consts.push(fc);
-        kernels.push(kernel);
-    }
+        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
-    // Now that all storage vecs are populated, build DispatchSpecs.
-    for i in 0..plan.nodes.len() {
-        let node = &plan.nodes[i];
+        // ── Input bindings ────────────────────────────────────────
+        // Weights accessed via `spec.resident` (keyed by kernel param name)
+        // skip buffers entirely. Others go into buffers.
+        let mut spec_resident: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
+
+        for (param_name, slot_ref) in &node.input_bindings {
+            match slot_ref {
+                SlotRef::Slot(idx) => {
+                    buffers.insert(
+                        param_name.clone(),
+                        slot_data.get(*idx).cloned().unwrap_or_default(),
+                    );
+                },
+                SlotRef::Weight(tensor_name) => {
+                    // Try resident (GPU-uploaded) first.
+                    if let Some(rb) = resident.get(tensor_name) {
+                        spec_resident.insert(param_name.clone(), rb.clone());
+                    } else if let Some(bytes) = weights.get(tensor_name) {
+                        buffers.insert(param_name.clone(), bytes.clone());
+                    }
+                    // If neither, leave unbound (kernel may handle absent params).
+                },
+                SlotRef::State(key) => {
+                    if let Some(bytes) = state.get(key) {
+                        buffers.insert(param_name.clone(), bytes.clone());
+                    }
+                },
+            }
+        }
+
+        // ── Output bindings ───────────────────────────────────────
+        // Pass correctly-sized zero buffers so dispatch_chain allocates
+        // the right amount of GPU memory for output params.
+        for (param_name, slot_ref) in &node.output_bindings {
+            let size = match slot_ref {
+                SlotRef::Slot(idx) => {
+                    plan.slots.get(*idx).map(|s| s.size_bytes).unwrap_or(0)
+                },
+                SlotRef::State(key) => {
+                    state.get(key).map(|v| v.len()).unwrap_or(0)
+                },
+                SlotRef::Weight(_) => 0,
+            };
+            if size > 0 {
+                buffers.insert(param_name.clone(), vec![0u8; size]);
+            }
+        }
+
+        // ── Constexpr values ──────────────────────────────────────
+        // Constexpr params are bound via `setBytes` using values from
+        // `spec.buffers[constexpr_name]`. Put 4-byte LE scalars here.
+        for (name, cv) in &node.cexprs {
+            let bits: u32 = match cv {
+                ConstexprValue::Static(val) => *val,
+                ConstexprValue::State(state_key) => {
+                    state
+                        .get(state_key)
+                        .and_then(|b| b.get(..4))
+                        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                        .unwrap_or(0)
+                },
+            };
+            buffers.insert(name.clone(), bits.to_le_bytes().to_vec());
+        }
+
+        // ── Dispatch ──────────────────────────────────────────────
         let (grid_groups, threads_per_group) = grid_to_dims(&node.grid);
-        // SAFETY: the index i is valid because we just pushed into these vecs.
-        specs.push(DispatchSpec {
-            kernel: &kernels[i],
-            buffers: &buffers[i],
-            fn_consts: &fn_consts[i],
+        let spec = DispatchSpec {
+            kernel: &kernel,
+            buffers: &buffers,
+            fn_consts,
             grid_groups,
             threads_per_group,
-            resident,
-        });
-    }
+            resident: &spec_resident,
+        };
 
-    let results = ctx
-        .dispatch_chain(&specs)
-        .map_err(|e| ModelError::Other(e.to_string()))?;
+        let results = ctx
+            .dispatch_chain(&[spec])
+            .map_err(|e| ModelError::Other(e.to_string()))?;
 
-    // Collect outputs from the last spec's result.
-    if let Some(last) = results.last() {
-        if let Some((_, bytes)) = last.outputs.last_key_value() {
-            return Ok(bytes.clone());
-        }
-        // Fallback: try "out" or "logits" key.
-        for key in &["logits", "out"] {
-            if let Some(bytes) = last.outputs.get(*key) {
-                return Ok(bytes.clone());
+        // ── Output readback ───────────────────────────────────────
+        let Some(result) = results.into_iter().next() else { continue };
+
+        for (param_name, slot_ref) in &node.output_bindings {
+            let Some(bytes) = result.outputs.get(param_name) else { continue };
+            match slot_ref {
+                SlotRef::Slot(idx) => {
+                    if let Some(slot) = slot_data.get_mut(*idx) {
+                        *slot = bytes.clone();
+                    }
+                },
+                SlotRef::State(key) => {
+                    state.insert(key.clone(), bytes.clone());
+                },
+                SlotRef::Weight(_) => {},
             }
         }
     }
 
-    Ok(Vec::new())
+    // Return the bytes of the plan's designated output slot.
+    Ok(slot_data
+        .get(plan.output_slot)
+        .cloned()
+        .unwrap_or_default())
 }
 
 /// Convert a `GridSpec` to `(grid_groups: [usize; 3], threads_per_group: [usize; 3])`.

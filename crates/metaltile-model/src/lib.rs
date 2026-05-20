@@ -42,9 +42,10 @@ pub mod registry;
 pub mod schema;
 
 // Re-export the main types for convenience.
-pub use compiler::{compile, CompileParams};
+pub use compiler::compile;
 pub use error::ModelError;
 pub use executor::{execute_plan, WeightMap, StateMap};
+pub use compiler::CompileParams;
 pub use plan::{BufferSlot, ConstexprValue, DispatchNode, ExecutionPlan, SlotRef};
 pub use registry::KernelRegistry;
 pub use schema::{KernelNode, LayerDef, ModelDef, ModelMeta, TensorDecl};

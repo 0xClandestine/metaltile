@@ -59,8 +59,10 @@ pub struct DispatchNode {
     pub kernel_ir: fn(DType) -> Kernel,
     /// KernelMode for this dispatch (sets Metal built-in attributes).
     pub mode: KernelMode,
-    /// Buffer parameter bindings: param name → slot/weight/state ref.
-    pub bindings: Vec<(String, SlotRef)>,
+    /// Input buffer bindings: param name → slot/weight/state ref (read-only).
+    pub input_bindings: Vec<(String, SlotRef)>,
+    /// Output buffer bindings: param name → slot/state ref (written by kernel).
+    pub output_bindings: Vec<(String, SlotRef)>,
     /// Constexpr values bound at graph-compile time (Static) or
     /// resolved per-dispatch from runtime state (State).
     pub cexprs: Vec<(String, ConstexprValue)>,
