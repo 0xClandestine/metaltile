@@ -2758,52 +2758,48 @@ pub fn mt_affine_dequantize_int6<T>(
 /// kernel IR ready to dispatch. Caller still owns grid sizing — see
 /// the table in the docstring for the per-route grid shape.
 ///
-/// Routing — anywhere `m % 4 == 0`, bm4 wins; even M between bm4
-/// cells (m=2, 6, 10, ...) routes to bm2; odd M and M=1 fall back
-/// to v2. The K-block=256 variant (vs the original 512) closes the
-/// M2 register-pressure cliff that limited an earlier bm4 prototype
-/// — net cell-wise no rig regresses at any M.
+/// Routing by M parity (post mma + mma_m16 wiring):
 ///
-/// Head-to-head bm2/v2 speedup (median of 5 reruns × 5 Qwen3
-/// production shapes = 25 cells per M; WARMUP=20 + ITERS=50 per
-/// kernel per cell; resident-buffer harness; clean shell sessions;
-/// `mt_qmm_v2_vs_bm2_head_to_head_f16_m_sweep`):
+/// | M condition          | Route       | Why                                                |
+/// |----------------------|-------------|----------------------------------------------------|
+/// | `m % 32 == 0`        | `mma`       | Full BM=BN=BK=32 simdgroup-matrix tile             |
+/// | `m == 16`            | `mma_m16`   | Half-height MMA (BM=16, BN=32) — beats bm4 here   |
+/// | `m >= 4 && m%4==0`   | `bm4`       | BM=4 hand-unroll, K=256 (M=8, 12, 20, 24, 28)     |
+/// | `m >= 2 && m%2==0`   | `bm2`       | BM=2 hand-unroll (M=2, 6, 10, 14, 18, 22, 26, 30) |
+/// | M=1 / odd M          | `mt_qmm`    | v2 (any M, including 1)                            |
 ///
-/// | M  | M5 Max speedup | M5 wins | M2 mini speedup | M2 wins |
-/// |---:|---------------:|:-------:|----------------:|:-------:|
-/// |  2 | 1.09×          | 25/25   | 1.11×           | 25/25   |
-/// |  4 | 1.21×          | 25/25   | 1.26×           | 25/25   |
-/// |  6 | 1.22×          | 25/25   | 1.27×           | 25/25   |
-/// |  8 | 1.22×          | 25/25   | 1.28×           | 25/25   |
-/// | 12 | 1.23×          | 25/25   | 1.29×           | 25/25   |
-/// | 16 | 1.23×          | 25/25   | 1.29×           | 25/25   |
-/// | 32 | 1.24×          | 25/25   | 1.30×           | 25/25   |
+/// Per-cell wins vs MLX `affine_qmm_t` (5-run median, both rigs):
 ///
-/// 350/350 cells went to bm2 (175 per rig). No shape or M cell on
-/// either rig has v2 beating bm2. Cell-to-cell variance is tight
-/// (median min/max within ~2% on M ≥ 8; ~10-20% on M ≤ 6 where
-/// individual cells occasionally see lucky outliers).
+/// | M  | M5 f32       | M5 f16       | M2 f32       | M2 f16       | Route   |
+/// |---:|-------------:|-------------:|-------------:|-------------:|---------|
+/// |  8 | 182-225%     | 211-264%     | 146-190%     | 161-202%     | bm4     |
+/// | 16 | 145-176%     | 145-176%     | 119-167%     | 119-167%     | mma_m16 |
+/// | 32 | 97-100%      | 84-91%       | 92-95%       | 92-96%       | mma     |
 ///
-/// Both kernels still trail MLX `affine_qmm_t` at M ≥ 16 (MLX's
-/// BM=BN=32 simdgroup-matrix tile dominates at large M); the bm2
-/// route just gives us the better of our two kernels everywhere.
-/// Closing the MLX gap at M ≥ 16 needs the BM=4/BM=8 follow-up.
+/// At M=32, mma f32 essentially at MLX parity; f16 remains 9-16pt
+/// below MLX (open follow-up — 4 layered tweaks identified by the
+/// MLX archaeology study at `/tmp/mlx_archaeology.md`).
 pub fn mt_qmm_for(dtype: metaltile_core::dtype::DType, m: u32) -> metaltile_core::ir::Kernel {
     use metaltile_core::ir::KernelMode;
-    let mut k = if m >= 4 && m.is_multiple_of(4) {
-        // BM=4 path with K-block=256 — 4× W-reuse vs v2 + half the X
-        // cache per K-iter. Works on M2 and M3+ alike (no register
-        // cliff). Needs m % 4 == 0 (BM=4 tile).
+    let mut k = if m >= 32 && m.is_multiple_of(32) {
+        // Full simdgroup-matrix MMA path (M=32, 64, 96, ...).
+        mt_qmm_mma::kernel_ir_for(dtype)
+    } else if m == 16 {
+        // Half-height MMA — half tpg → 2× occupancy. Wins M=16 cell
+        // on both rigs (119-176% MT MLX vs bm4's 76-146%).
+        mt_qmm_mma_m16::kernel_ir_for(dtype)
+    } else if m >= 4 && m.is_multiple_of(4) {
+        // BM=4 K=256 — M=8, 12, 20, 24, 28.
         mt_qmm_bm4::kernel_ir_for(dtype)
     } else if m >= 2 && m.is_multiple_of(2) {
-        // BM=2 path — even M between bm4 cells (m=2, 6, 10, 14, ...).
+        // BM=2 — M=2, 6, 10, 14, 18, 22, 26, 30.
         mt_qmm_bm2::kernel_ir_for(dtype)
     } else {
-        // M=1 + odd M — bm2/bm4 undefined (require even M).
+        // M=1 + odd M ≥ 3 — bm2/bm4/mma* undefined (need even M).
         mt_qmm::kernel_ir_for(dtype)
     };
-    // Reduction mode required for the `tgid_x`/`tgid_y` aliases
-    // all three kernels reference. Same dispatch contract as `mt_qmv`.
+    // Reduction mode required for the `tgid_x`/`tgid_y` aliases all
+    // kernels reference. Same dispatch contract as `mt_qmv`.
     k.mode = KernelMode::Reduction;
     k
 }
@@ -2815,19 +2811,32 @@ mod qmm_selector_tests {
     use super::*;
 
     #[test]
-    fn selector_picks_bm4_at_m_multiple_of_4() {
-        // M % 4 == 0 → bm4. K=256 variant has no register cliff so this
-        // applies to every Apple GPU family.
-        for m in [4u32, 8, 12, 16, 20, 24, 28, 32, 64] {
+    fn selector_picks_mma_at_m_multiple_of_32() {
+        // M % 32 == 0 → full simdgroup-matrix MMA tile.
+        for m in [32u32, 64, 96, 128] {
             let k = mt_qmm_for(DType::F32, m);
-            assert_eq!(k.name, "mt_qmm_bm4", "m={m}: multiple of 4 should route to bm4");
+            assert_eq!(k.name, "mt_qmm_mma", "m={m}: multiple of 32 should route to mma");
+        }
+    }
+
+    #[test]
+    fn selector_picks_mma_m16_at_m_16() {
+        // M = 16 → half-height MMA (mma_m16 beats bm4 + full mma there).
+        let k = mt_qmm_for(DType::F32, 16);
+        assert_eq!(k.name, "mt_qmm_mma_m16");
+    }
+
+    #[test]
+    fn selector_picks_bm4_at_m_8_12_20_24_28() {
+        // M % 4 == 0 cells NOT routed to mma/mma_m16 — bm4 covers them.
+        for m in [4u32, 8, 12, 20, 24, 28, 36, 60] {
+            let k = mt_qmm_for(DType::F32, m);
+            assert_eq!(k.name, "mt_qmm_bm4", "m={m}: m%4==0 not mma should route to bm4");
         }
     }
 
     #[test]
     fn selector_picks_bm2_at_even_m_not_multiple_of_4() {
-        // M ∈ {2, 6, 10, ...} — even but not a multiple of 4. bm4
-        // tile doesn't fit; bm2 wins.
         for m in [2u32, 6, 10, 14, 18, 22, 26, 30] {
             let k = mt_qmm_for(DType::F32, m);
             assert_eq!(k.name, "mt_qmm_bm2", "m={m}: even-not-mod-4 should route to bm2");
