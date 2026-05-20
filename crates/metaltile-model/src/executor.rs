@@ -209,7 +209,7 @@ pub fn execute_plan(
         .collect();
 
     let start = Instant::now();
-    let fused = plan.nodes.iter().any(|nd| nd.fuse_group.is_some());
+    let fused = plan.single_dispatch;
 
     let results = if fused {
         // ── Fused: entire pass in one command buffer ────────────────

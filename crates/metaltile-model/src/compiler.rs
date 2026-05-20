@@ -254,6 +254,12 @@ pub fn compile(
         let kernel_name: &'static str = spec.kernel_name;
         let kernel_ir = spec.kernel_ir;
 
+        // Pre-compute grid_dims and set kernel mode at compile time
+        // so the executor can use the cached kernel by reference.
+        let grid_dims = grid_to_dims(&grid);
+        let mut kernel = kernel;
+        kernel.mode = mode;
+
         nodes.push(DispatchNode {
             label: raw.label.clone(),
             kernel_name,
@@ -264,6 +270,7 @@ pub fn compile(
             cexprs,
             grid,
             dtype: p.activation_dtype,
+            grid_dims,
             fuse_group: None,
         });
         cached_kernels.push(kernel);
@@ -342,7 +349,8 @@ pub fn compile(
         .and_then(|(_, sr)| if let SlotRef::Slot(idx) = sr { Some(*idx) } else { None })
         .unwrap_or(0);
 
-    Ok(ExecutionPlan { nodes, slots, output_slot, n_layers, cached_kernels })
+    let single_dispatch = fusion_mode != FusionMode::None;
+    Ok(ExecutionPlan { nodes, slots, output_slot, n_layers, cached_kernels, single_dispatch })
 }
 
 // ── Graph-level kernel fusion ──────────────────────────────────────────

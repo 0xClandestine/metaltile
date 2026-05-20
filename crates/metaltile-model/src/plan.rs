@@ -32,6 +32,11 @@ pub struct ExecutionPlan {
     /// at compile time so the executor doesn't call `kernel_ir` on every
     /// token.  The executor clones these and sets `.mode` before dispatch.
     pub cached_kernels: Vec<Kernel>,
+    /// When `true` (default for TomlDriven and GraphDriven), the executor
+    /// encodes the entire forward pass into a single `dispatch_chain` call —
+    /// one `waitUntilCompleted` per token.  When `false` (`FusionMode::None`),
+    /// each node gets its own command buffer (slow; useful for debugging).
+    pub single_dispatch: bool,
 }
 
 // ── ConstexprValue ────────────────────────────────────────────────────
@@ -74,6 +79,9 @@ pub struct DispatchNode {
     pub grid: GridSpec,
     /// Dtype for this node (typically inherits model activation dtype).
     pub dtype: DType,
+    /// Pre-computed grid dimensions `(grid_groups, threads_per_group)`,
+    /// resolved at compile time so the executor skips `grid_to_dims`.
+    pub grid_dims: ([usize; 3], [usize; 3]),
     /// When `Some(n)`, this node belongs to fused group `n`.
     /// All adjacent nodes with the same group ID are dispatched
     /// together in a single `dispatch_chain(&[...])` call.
