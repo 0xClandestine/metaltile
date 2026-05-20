@@ -558,6 +558,78 @@ fn mt_ssm_step_matches_oracle_f32() {
 }
 
 #[test]
+fn mt_ssm_step_matches_oracle_ds_128_f32() {
+    // The kernel computes `n_per_t = ds / 32` and loops `n_per_t`
+    // times per lane. At `ds = 32` that's exactly one iteration —
+    // the multi-iter `s_idx = n_per_t * ds_idx + i` index math
+    // is not exercised. At `ds = 128`, `n_per_t = 4`, so each lane
+    // walks 4 contiguous state elements; a wrong index formula in
+    // the inner loop surfaces here but not at ds=32.
+    let _g = gpu_lock();
+    let n_heads = 4usize;
+    let heads_per_group = 2usize;
+    let batch = 1usize;
+    let n_total = n_heads * batch;
+    let dh = 4usize;
+    let ds = 128usize; // n_per_t = 4 per lane
+    let groups = n_total / heads_per_group;
+
+    let x: Vec<f32> = (0..n_total * dh).map(|i| ((i as f32) * 0.017).sin() * 0.3).collect();
+    let a_log: Vec<f32> = (0..n_heads).map(|i| -1.0 + (i as f32) * 0.2).collect();
+    let b_mat: Vec<f32> = (0..groups * ds).map(|i| 0.05 + (i as f32) * 0.003).collect();
+    let c_mat: Vec<f32> = (0..groups * ds).map(|i| 0.1 - (i as f32) * 0.001).collect();
+    let d_skip: Vec<f32> = (0..n_heads).map(|i| 0.05 + (i as f32) * 0.01).collect();
+    let dt_in: Vec<f32> = (0..n_total).map(|i| 0.02 + (i as f32) * 0.005).collect();
+    let state_in: Vec<f32> =
+        (0..n_total * dh * ds).map(|i| ((i as f32) * 0.009).cos() * 0.2).collect();
+
+    let (state_expected, out_expected) = naive_mt_ssm_step(
+        &x,
+        &a_log,
+        &b_mat,
+        &c_mat,
+        &d_skip,
+        &dt_in,
+        &state_in,
+        n_total,
+        dh,
+        ds,
+        n_heads,
+        heads_per_group,
+    );
+    let (state_actual, out_actual) = run_mt_ssm_step(
+        &x,
+        &a_log,
+        &b_mat,
+        &c_mat,
+        &d_skip,
+        &dt_in,
+        &state_in,
+        Dt::F32,
+        n_total,
+        dh,
+        ds,
+        n_heads,
+        heads_per_group,
+    );
+
+    let mut max_state_diff = 0.0_f32;
+    for (a, e) in state_actual.iter().zip(state_expected.iter()) {
+        max_state_diff = max_state_diff.max((a - e).abs());
+    }
+    assert!(max_state_diff < 1e-5, "ds=128 state max |diff| = {max_state_diff:.2e}");
+
+    let mut max_out_diff = 0.0_f32;
+    for (a, e) in out_actual.iter().zip(out_expected.iter()) {
+        max_out_diff = max_out_diff.max((a - e).abs());
+    }
+    // simd_sum over 32 lanes with n_per_t=4 iterations per lane =
+    // 128 multiply-add accumulations before the sum; slightly looser
+    // tolerance than the ds=32 case (1e-4 vs 5e-5).
+    assert!(max_out_diff < 1e-4, "ds=128 out max |diff| = {max_out_diff:.2e}");
+}
+
+#[test]
 fn mt_ssm_step_matches_oracle_bf16() {
     let _g = gpu_lock();
     let n_heads = 4usize;

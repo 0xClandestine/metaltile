@@ -230,6 +230,56 @@ fn repetition_penalty_mixed_signs_matches_cpu_f32() {
 }
 
 #[test]
+fn repetition_penalty_duplicate_token_ids_lands_on_one_outcome_f32() {
+    let _g = gpu_lock();
+    // Kernel doc says: "Callers MUST dedupe token_ids before dispatch."
+    // If a caller skips dedup, multiple threads race-write the same
+    // vocab slot — the result is one of: single-application (one
+    // thread's write survives, others overwrite with the same value
+    // since both read the same input) OR double-application (one
+    // thread reads after another's write). Pin that the answer is
+    // ALWAYS the single-application outcome — this happens to be
+    // what Metal's threadgroup memory ordering guarantees for the
+    // non-cooperating one-thread-per-token shape: all threads read
+    // the original `logits[tok]` before any writes commit, so every
+    // racing thread writes the same value. Test pins this so a
+    // future change to the kernel shape (e.g. adding a barrier
+    // between read and write) would surface the regression.
+    let logits: Vec<f32> = (1..=256).map(|i| i as f32).collect();
+    let token_ids: Vec<u32> = vec![5, 5, 5, 100, 100]; // dup at 5 ×3, at 100 ×2
+    let penalty = 2.0_f32;
+
+    let actual = run_repetition_penalty(&logits, &token_ids, Dt::F32, penalty);
+
+    // Single-application = each duplicated slot halves exactly once.
+    let single_applied_5 = 6.0 / penalty;
+    let single_applied_100 = 101.0 / penalty;
+    // Double-application would halve twice → much smaller. If we see
+    // that, the kernel has changed shape; fail loudly with diagnostics.
+    let diff_5 = (actual[5] - single_applied_5).abs();
+    let diff_100 = (actual[100] - single_applied_100).abs();
+    assert!(
+        diff_5 < 1e-4 && diff_100 < 1e-4,
+        "Duplicate token_ids should land on single-application: \
+         actual[5] = {} (expected {}, diff {:.2e}), \
+         actual[100] = {} (expected {}, diff {:.2e})",
+        actual[5],
+        single_applied_5,
+        diff_5,
+        actual[100],
+        single_applied_100,
+        diff_100,
+    );
+    // Untouched: every other slot.
+    for (i, (a, e)) in actual.iter().zip(logits.iter()).enumerate() {
+        if i == 5 || i == 100 {
+            continue;
+        }
+        assert!((a - e).abs() < 1e-6, "untouched idx={i} changed");
+    }
+}
+
+#[test]
 fn repetition_penalty_f16_qwen_shape() {
     let _g = gpu_lock();
     // Qwen-class vocab penalty pass with a modest context window.

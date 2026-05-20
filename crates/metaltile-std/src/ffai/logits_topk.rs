@@ -21,6 +21,17 @@
 //!     filtered tokens contribute zero probability).
 //!
 //! Generic over T. Grid3D one-thread-per-vocab-position.
+//!
+//! ## DISPATCH INVARIANTS
+//!
+//! - **Mode: Grid3D.** One thread per vocab position.
+//! - **Grid: `[ceil(n / TPG), 1, 1]`, TG: `[TPG, 1, 1]`** (TPG = 256 is the
+//!   tested geometry; the kernel is pure elementwise so any TPG works).
+//! - **`n = grid.x * tg.x`** — caller sizes the dispatch so the total
+//!   thread count exactly matches the vocab length. Threads past `n`
+//!   would read/write out of bounds; the runtime should not overshoot.
+//! - **No `threadgroup_*` / `simd_*` cooperation** — every thread is
+//!   independent. The only invariant is the threshold semantic above.
 
 use metaltile::kernel;
 use metaltile_core::ir::KernelMode;

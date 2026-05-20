@@ -170,9 +170,46 @@ fn topk_mask_bf16() {
 
     let actual = run_topk_mask(&logits, Dt::Bf16, threshold);
 
+    // The exact kept-count varies with bf16 tie density at the threshold.
+    // Tolerance derived from first principles below; the underlying
+    // *correctness* invariant — the dominance property — is checked
+    // unconditionally below the count check.
     let kept = actual.iter().filter(|&&v| !v.is_infinite()).count();
-    // bf16 has 7-bit mantissa → many threshold ties. Empirically the
-    // round-trip can collapse ~13 distinct f32 values into the same
-    // bf16 at vocab=1024 / range=±5. Tolerance widened to ±20.
-    assert!(kept.abs_diff(k) <= 20, "bf16 K=50 kept {kept}, expected {k} (±20)");
+
+    // bf16 step at magnitude v ≈ v / 128 (7-bit mantissa). For sin
+    // scaled to ±5, the K=50 threshold lands near v ≈ 4.7 (top 5%
+    // of a sin distribution), so step ≈ 0.037.
+    // The sin distribution is non-uniform — density near extrema
+    // scales as 1/sqrt(1 - (v/5)^2). At v=4.7 the density factor is
+    // ~2.9× uniform. Combining: in a ±step window around threshold,
+    // expected tied-value count =
+    //   2 * step * (n / range) * density_factor
+    //   = 2 * 0.037 * (1024 / 10) * 2.9 ≈ 22
+    // Tolerance of ±30 leaves safety margin for the discrete-sampling
+    // variance on top of the analytic estimate.
+    assert!(
+        kept.abs_diff(k) <= 30,
+        "bf16 K=50 kept {kept}, expected {k} (±30 from bf16 tie density at threshold)",
+    );
+
+    // Stronger correctness invariant: every kept value must be >= every
+    // dropped value's pre-mask source value (after bf16 round-trip).
+    // This is the actual top-K-set property; it holds regardless of how
+    // many values tie at the threshold.
+    let mut max_dropped = f32::NEG_INFINITY;
+    let mut min_kept = f32::INFINITY;
+    for (i, &a) in actual.iter().enumerate() {
+        let src = logits[i];
+        if a.is_infinite() {
+            max_dropped = max_dropped.max(src);
+        } else {
+            min_kept = min_kept.min(src);
+            // Kept value must equal the source (no scaling).
+            assert!((a - src).abs() < 1e-3, "kept idx={i}: a={a} src={src}");
+        }
+    }
+    assert!(
+        min_kept >= max_dropped,
+        "bf16 top-K dominance violated: min_kept = {min_kept}, max_dropped = {max_dropped}",
+    );
 }

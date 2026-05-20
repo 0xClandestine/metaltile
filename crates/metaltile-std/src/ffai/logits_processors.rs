@@ -44,6 +44,17 @@ use crate::{
 // Caller contract: `temperature > 0`. A zero or negative temperature
 // produces inf / sign-flipped logits — callers should clamp before
 // dispatch (`max(temperature, 1e-5)` is the standard guard).
+//
+// ## DISPATCH INVARIANTS
+//
+// - **Mode: Grid3D.** One thread per vocab position.
+// - **Grid: `[ceil(n / TPG), 1, 1]`, TG: `[TPG, 1, 1]`** (TPG = 256 is the
+//   tested geometry; any value works since the kernel is pure elementwise
+//   and uses no `threadgroup_*` / `simd_*` cooperation).
+// - **`n = grid.x * tg.x`** — the caller is responsible for `n` covering
+//   the full logits length. Threads with `program_id::<0>() >= n` would
+//   read/write out of bounds; the runtime should size the dispatch so the
+//   total thread count exactly matches the logits length.
 #[kernel]
 pub fn logits_temperature<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] temperature: f32) {
     let i = program_id::<0>();
@@ -88,6 +99,15 @@ inventory::submit! {
 // vocab slot pick a write order. Callers MUST dedupe `token_ids` before
 // dispatch (or accept the last-writer-wins semantics, which matches
 // what a sequential CPU pass produces *only* on a deduped input).
+//
+// ## DISPATCH INVARIANTS
+//
+// - **Mode: Grid3D.** One thread per `token_ids` entry.
+// - **Grid / TG: `grid.x * tg.x == token_ids.len()`** — caller must size
+//   the dispatch to exactly the token-id count. TPG = 256 (or smaller for
+//   small contexts) is the tested geometry.
+// - **No `threadgroup_*` / `simd_*` cooperation** — every thread is
+//   independent. The only invariant is the dedupe contract above.
 #[kernel]
 pub fn logits_repetition_penalty<T>(
     mut logits: Tensor<T>,

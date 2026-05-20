@@ -39,7 +39,13 @@ use std::collections::BTreeMap;
 use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
-use metaltile_std::ffai::dequant_gemv::{dequant_gemv_int4, dequant_gemv_int6, dequant_gemv_int8};
+use metaltile_std::ffai::dequant_gemv::{
+    dequant_gemv_int3,
+    dequant_gemv_int4,
+    dequant_gemv_int5,
+    dequant_gemv_int6,
+    dequant_gemv_int8,
+};
 
 // ── Quantize helpers ──────────────────────────────────────────────────────
 
@@ -160,10 +166,12 @@ fn run_dequant_gemv(
 
     let ctx = Context::new().expect("Context::new on macOS");
     let mut kernel = match kernel_kind {
+        3 => dequant_gemv_int3::kernel_ir_for(dt.to_dtype()),
         4 => dequant_gemv_int4::kernel_ir_for(dt.to_dtype()),
-        8 => dequant_gemv_int8::kernel_ir_for(dt.to_dtype()),
+        5 => dequant_gemv_int5::kernel_ir_for(dt.to_dtype()),
         6 => dequant_gemv_int6::kernel_ir_for(dt.to_dtype()),
-        _ => unreachable!("test only covers int4 / int8 / int6"),
+        8 => dequant_gemv_int8::kernel_ir_for(dt.to_dtype()),
+        _ => unreachable!("test covers int3 / int4 / int5 / int6 / int8"),
     };
     kernel.mode = KernelMode::Reduction;
 
@@ -312,3 +320,30 @@ fn dequant_gemv_int6_word_spill_path_f32() {
 
 #[test]
 fn dequant_gemv_int6_word_spill_path_f16() { run_one_test(6, Dt::F16, 64, 32, 4, 1e-2); }
+
+// ── int3 / int5 odd-width pin (BenchSpec registration + bit-stream decode) ──
+//
+// int3 and int5 share the same element-strided word-spill codepath as int6,
+// but each registers its own `BenchSpec` (kernel_name, kernel_ir reference).
+// A registration regression — e.g. a typo in `kernel_name` or pointing
+// `kernel_ir` at the wrong function — wouldn't surface from the int6 test.
+// One cell each pins the registration surface and exercises the same
+// bit-stream `lo | hi` decode at a different bit-width parameter.
+//
+// Shape constraints:
+//   - int3: in_dim * 3 must be a u32-aligned bit count → 64 * 3 = 192 = 6 u32
+//   - int5: in_dim * 5 must be a u32-aligned bit count → 64 * 5 = 320 = 10 u32
+// Both use group_size=32 (in_dim / group_size = 2 groups per row).
+
+#[test]
+fn dequant_gemv_int3_word_spill_path_f32() {
+    // int3: quant step = 4 / 7 ≈ 0.57; in_dim=64 dot → tolerance widens
+    // vs higher bit-widths (only 7 levels of quantization).
+    run_one_test(3, Dt::F32, 64, 32, 4, 2e-2);
+}
+
+#[test]
+fn dequant_gemv_int5_word_spill_path_f32() {
+    // int5: quant step = 4 / 31 ≈ 0.129; tighter than int3 + int6.
+    run_one_test(5, Dt::F32, 64, 32, 4, 8e-3);
+}
