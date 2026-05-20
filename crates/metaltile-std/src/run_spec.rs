@@ -27,7 +27,7 @@ use crate::{
         run_typed_once,
         zeros_typed,
     },
-    spec::{BenchDispatch, BenchSpec, MlxArg, ScalarBufSpec, ShapeSpec},
+    spec::{BatchedDecodeVariant, BenchDispatch, BenchSpec, MlxArg, ScalarBufSpec, ShapeSpec},
 };
 
 pub fn run(spec: &BenchSpec, runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
@@ -142,6 +142,27 @@ pub fn run(spec: &BenchSpec, runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
             *bk,
             *wm,
             *wn,
+            *tpg,
+        ),
+        BenchDispatch::SdpaBatchedDecode {
+            head_dim,
+            n_kv,
+            n_q_heads,
+            gqa_factor,
+            batch_q,
+            variant,
+            tpg,
+        } => run_sdpa_batched_decode(
+            spec,
+            runner,
+            dt,
+            &bench,
+            *head_dim,
+            *n_kv,
+            *n_q_heads,
+            *gqa_factor,
+            *batch_q,
+            variant,
             *tpg,
         ),
     }
@@ -2647,4 +2668,529 @@ fn run_steel_gemm(
     );
 
     vec![bench.result_sub(Some(spec.subop), label, ref_perf, mt_perf, Some(equiv))]
+}
+
+// ── SdpaBatchedDecode — M7 speculative-decode batched-Q ───────────────────
+//
+// Stub for Phase 0 scaffolding (task M7-2). Kernel implementations land in
+// the follow-up tasks (M7-3 for K=2/4 decode-form, M7-4 for K=8/16 prefill-
+// tile reuse). The stub returns an empty result vector so that
+// `inventory::submit!` rows can reference the dispatch variant without
+// crashing `tile bench --list` while the kernels are in flight.
+
+#[allow(clippy::too_many_arguments)]
+fn run_sdpa_batched_decode(
+    spec: &BenchSpec,
+    runner: &GpuRunner,
+    dt: DType,
+    bench: &OpBench,
+    head_dim: usize,
+    n_kv: usize,
+    n_q_heads: usize,
+    gqa_factor: usize,
+    batch_q: usize,
+    variant: &BatchedDecodeVariant,
+    tpg: usize,
+) -> Vec<OpResult> {
+    match variant {
+        BatchedDecodeVariant::Decode => run_sdpa_batched_decode_form(
+            spec, runner, dt, bench, head_dim, n_kv, n_q_heads, gqa_factor, batch_q, tpg,
+        ),
+        BatchedDecodeVariant::PrefillTile { bq, bk, wm, wn } =>
+            run_sdpa_batched_decode_prefill_tile(
+                spec, runner, dt, bench, head_dim, n_kv, n_q_heads, gqa_factor, batch_q, *bq, *bk,
+                *wm, *wn, tpg,
+            ),
+    }
+}
+
+// ── Decode variant — K=2/4 batched-Q decode-form bench runner ────────────
+//
+// Compiles the M7 batched kernel (`sdpa_decode_batched_q{batch_q}` —
+// the inventory submit's `kernel_ir`) and the single-Q `sdpa_decode`
+// reference at the same shape. Reports:
+//
+//   mt_perf  = M7_bytes / T_m7                    (real M7 throughput)
+//   ref_perf = M7_bytes / (batch_q × T_single)   (effective baseline
+//                                                  throughput if the
+//                                                  K independent
+//                                                  sdpa_decode calls
+//                                                  shared one M7_bytes
+//                                                  bandwidth budget)
+//
+// `mt_perf / ref_perf` then equals the wall-clock speedup
+// `(batch_q × T_single) / T_m7` — the metric that matches what
+// consumers actually see when they swap K independent decode dispatches
+// for one batched call. Single-Q decode time at the same shape scales
+// linearly across the K independent calls (same kernel, same KV cache;
+// the dispatches are independent).
+//
+// Correctness check: M7's batched output's row `qi` (for `qi in
+// 0..batch_q`) must match the single-Q `sdpa_decode` output at the
+// same shape, fed Q[qi]. We round-trip the first Q slot only — same
+// pattern as `run_sdpa_vector`'s MLX-correctness check (one shape per
+// run, no need to gate on every slot).
+
+#[allow(clippy::too_many_arguments)]
+fn run_sdpa_batched_decode_form(
+    spec: &BenchSpec,
+    runner: &GpuRunner,
+    dt: DType,
+    bench: &OpBench,
+    head_dim: usize,
+    n_kv: usize,
+    n_q_heads: usize,
+    gqa_factor: usize,
+    batch_q: usize,
+    tpg: usize,
+) -> Vec<OpResult> {
+    assert_eq!(head_dim, 128, "sdpa_decode_batched hardcodes head_dim=128");
+    assert!(
+        matches!(batch_q, 2 | 4),
+        "Decode variant ships K∈{{2,4}} specializations; got K={batch_q}",
+    );
+    // K=4 register pressure caps Metal's `maxTotalThreadsPerThreadgroup`
+    // at 768 on M1 Max; dispatching past that silently produces all-zero
+    // outputs (see DISPATCH INVARIANTS doc on `sdpa_decode_batched.rs`).
+    // K=2 has no such cap, so any TPG = 1024 dispatch is fine there.
+    assert!(
+        tpg <= 768 || batch_q < 4,
+        "sdpa_decode_batched_q{batch_q} cannot dispatch at tpg={tpg}: \
+         K=4 requires tpg ≤ 768 (M1 Max maxTotalThreadsPerThreadgroup \
+         cap at this register pressure; dispatching past the cap \
+         silently writes all-zero outputs). Use tpg=512.",
+    );
+    assert!(n_q_heads.is_multiple_of(gqa_factor), "n_q_heads must be divisible by gqa_factor");
+    let n_kv_heads = n_q_heads / gqa_factor;
+    let ctx = DtypeCtx::elementwise(dt);
+
+    // Compile the M7 batched kernel.
+    let msl = match msl_reduction(spec, dt, Some(tpg as u32)) {
+        Some(s) => s,
+        None => return vec![],
+    };
+    let mk = match compile_mt(runner, &msl, spec.kernel_name) {
+        Some(k) => k,
+        None => return vec![],
+    };
+
+    // Compile `sdpa_decode` (the single-Q reference) at the same shape.
+    // `tpg=1024` matches the rebased `sdpa_decode` kernel's design
+    // threadgroup size (32 simdgroups × 32 lanes).
+    let single_tpg = 1024usize;
+    let mut single_kernel = crate::ffai::sdpa_decode::sdpa_decode::kernel_ir_for(dt);
+    single_kernel.mode = KernelMode::Reduction;
+    let single_msl =
+        match MslGenerator::new(msl_cfg_for(Some(single_tpg as u32))).generate(&single_kernel) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+    let single_compiled = match compile_mt(runner, &single_msl, "sdpa_decode") {
+        Some(k) => k,
+        None => return vec![],
+    };
+
+    // Buffer setup — Q `[n_q_heads, batch_q, head_dim]`, K/V
+    // `[n_kv_heads, n_kv, head_dim]`, out matches Q. `kv_stride == n_kv`
+    // for the bench (no slack capacity).
+    let scale = 1.0_f32 / (head_dim as f32).sqrt();
+    let max_n = (n_kv_heads * n_kv * head_dim).max(n_q_heads * batch_q * head_dim);
+    let vals: Vec<f32> = (0..max_n).map(|i| ((i % 17) as f32 - 8.0) * 0.05).collect();
+
+    let q_buf = buffer_typed(runner, &vals[..n_q_heads * batch_q * head_dim], dt);
+    let k_buf = buffer_typed(runner, &vals[..n_kv_heads * n_kv * head_dim], dt);
+    let v_buf = buffer_typed(runner, &vals[..n_kv_heads * n_kv * head_dim], dt);
+    let mt_out_buf = zeros_typed(runner, n_q_heads * batch_q * head_dim, dt);
+    let hd_buf = runner.buffer_u32(head_dim as u32);
+    let n_buf = runner.buffer_u32(n_kv as u32);
+    let kv_stride_buf = runner.buffer_u32(n_kv as u32);
+    let hpg_buf = runner.buffer_u32(gqa_factor as u32);
+    let sc_buf = runner.buffer_f32_scalar(scale);
+
+    let mt_bufs: Vec<&GpuBuffer> = vec![
+        &q_buf,
+        &k_buf,
+        &v_buf,
+        &mt_out_buf,
+        &hd_buf,
+        &n_buf,
+        &kv_stride_buf,
+        &hpg_buf,
+        &sc_buf,
+    ];
+
+    // M7 batched dispatch — one TG per Q head.
+    runner.measure(&mk, &mt_bufs, [n_q_heads, 1, 1], [tpg, 1, 1], 0, 1);
+    let mt_out = read_typed(runner, &mt_out_buf, n_q_heads * batch_q * head_dim, dt);
+
+    // Single-Q reference — gather Q[h, 0, :] for all h, dispatch
+    // `sdpa_decode` once, compare against M7's row qi=0 across all heads.
+    // sdpa_decode picks up the post-#50 signature:
+    // q, k, v, out, head_dim, n_kv, kv_stride, heads_per_group,
+    // sink_end, window_start, scale.
+    let mut q_first: Vec<f32> = vec![0.0; n_q_heads * head_dim];
+    for h in 0..n_q_heads {
+        let src = (h * batch_q) * head_dim;
+        let dst = h * head_dim;
+        q_first[dst..dst + head_dim].copy_from_slice(&vals[src..src + head_dim]);
+    }
+    let single_q_buf = buffer_typed(runner, &q_first, dt);
+    let single_out_buf = zeros_typed(runner, n_q_heads * head_dim, dt);
+    let sink_buf = runner.buffer_u32(0);
+    let window_buf = runner.buffer_u32(0);
+    let single_bufs: Vec<&GpuBuffer> = vec![
+        &single_q_buf,
+        &k_buf,
+        &v_buf,
+        &single_out_buf,
+        &hd_buf,
+        &n_buf,
+        &kv_stride_buf,
+        &hpg_buf,
+        &sink_buf,
+        &window_buf,
+        &sc_buf,
+    ];
+    runner.measure(&single_compiled, &single_bufs, [n_q_heads, 1, 1], [single_tpg, 1, 1], 0, 1);
+    let single_out = read_typed(runner, &single_out_buf, n_q_heads * head_dim, dt);
+
+    // Correctness: M7 row qi=0 vs single-Q reference. Extract row 0
+    // from every head (stride batch_q). This bench-time check covers
+    // only qi=0 across all heads — sufficient to flag a regression in
+    // the kernel's per-head dispatch shape or the Q[0] addressing, but
+    // qi=1..K-1 are not checked here. The
+    // `sdpa_decode_batched_gpu_correctness.rs` integration tests
+    // cover all K slots (interleaved-Q comparison + identical-Qs
+    // sanity check + tpg=1024 divergence regression test).
+    let mut mt_row0: Vec<f32> = vec![0.0; n_q_heads * head_dim];
+    for h in 0..n_q_heads {
+        let src = (h * batch_q) * head_dim;
+        mt_row0[h * head_dim..(h + 1) * head_dim].copy_from_slice(&mt_out[src..src + head_dim]);
+    }
+    let equiv = check_equiv_with(&single_out, &mt_row0, EquivTolerance::new(spec.tol, 0.999));
+
+    // Perf — M7 throughput at M7_bytes (real); reference throughput
+    // scaled to "M7_bytes / (batch_q × T_single)" so the displayed
+    // ratio == wall-clock speedup vs K independent single-Q decodes.
+    let m7_bytes = ((n_q_heads * batch_q * head_dim
+        + 2 * n_kv_heads * n_kv * head_dim
+        + n_q_heads * batch_q * head_dim)
+        * ctx.eb) as f64;
+    let (mt_perf, mt_timing) =
+        bench_gbps(runner, &mk, &mt_bufs, [n_q_heads, 1, 1], [tpg, 1, 1], m7_bytes)
+            .map(|(p, t)| (Some(p), Some(t)))
+            .unwrap_or((None, None));
+    // Feeding `m7_bytes / batch_q` as the bench_gbps `bytes` for the
+    // single-Q call gives us `(m7_bytes / batch_q) / T_single =
+    // m7_bytes / (batch_q × T_single)` — the effective baseline
+    // throughput that makes `mt_perf / ref_perf` equal the wall-clock
+    // speedup. Independent of how the single-Q call's "real" bytes
+    // are accounted; we're constructing the comparison metric we
+    // actually want to display.
+    let ref_bytes_scaled = m7_bytes / (batch_q as f64);
+    let (ref_perf, ref_timing) = bench_gbps(
+        runner,
+        &single_compiled,
+        &single_bufs,
+        [n_q_heads, 1, 1],
+        [single_tpg, 1, 1],
+        ref_bytes_scaled,
+    )
+    .map(|(p, t)| (Some(p), Some(t)))
+    .unwrap_or((None, None));
+
+    let label =
+        format!("K={batch_q} H={n_q_heads} N={n_kv} D={head_dim} gqa={gqa_factor} {}", ctx.label,);
+    vec![bench.result_sub_timed(
+        Some(spec.subop),
+        label,
+        ref_perf,
+        mt_perf,
+        Some(equiv),
+        mt_timing,
+        ref_timing,
+    )]
+}
+
+// ── PrefillTile variant — K=8/16 via mt_sdpa_prefill_mma reuse ───────────
+//
+// No new MSL: the FA-2 simdgroup-matrix prefill tile from PR #47/#52
+// already implements the KV-reuse pattern at BQ × BK with online softmax,
+// which is structurally identical to dflash-mlx's `verify_qmm`. The
+// runner pads Q up to BQ=32 rows (real K rows + zeros) and pads K/V up
+// to k_len = n_kv + BQ slots; the kernel's hardcoded causal mask then
+// gives Q[i] for i in 0..K the speculative-decode-verify semantics
+// `attended = [0, n_kv + i + 1)` (prefix + candidates [0..i]).
+//
+// Wasted work scales with (BQ - K)/BQ — 50% at K=16, 75% at K=8.
+// Acceptable tradeoff vs. writing a new BQ=8 / BQ=16 MMA kernel; if the
+// bench shows the waste killing the amortization win, a hand-rolled
+// BQ=K variant lands in a follow-up.
+//
+// Phase 1 of M7's PrefillTile arm runs correctness-only — no MLX
+// reference comparison, no perf measurement. Bench numbers land
+// alongside the Decode-variant runner wiring.
+
+#[allow(clippy::too_many_arguments)]
+fn run_sdpa_batched_decode_prefill_tile(
+    spec: &BenchSpec,
+    runner: &GpuRunner,
+    dt: DType,
+    bench: &OpBench,
+    head_dim: usize,
+    n_kv: usize,
+    n_q_heads: usize,
+    gqa_factor: usize,
+    batch_q: usize,
+    bq: usize,
+    _bk: usize,
+    _wm: usize,
+    _wn: usize,
+    tpg: usize,
+) -> Vec<OpResult> {
+    assert_eq!(head_dim, 128, "PrefillTile arm hardcodes head_dim=128 (mt_sdpa_prefill_mma)");
+    assert_eq!(bq, 32, "PrefillTile arm requires BQ=32 (the prefill kernel's hardcoded tile)");
+    assert!(batch_q <= bq, "batch_q ({batch_q}) must fit inside a single BQ={bq} tile",);
+    assert!(n_q_heads.is_multiple_of(gqa_factor), "n_q_heads must be divisible by gqa_factor");
+    let n_kv_heads = n_q_heads / gqa_factor;
+    let q_len_padded = bq;
+    let k_len_padded = n_kv + bq;
+
+    // Kernel compile — Reduction codegen mode + bfloat reinterpret cast,
+    // mirrors `run_sdpa_prefill`. The prefill MMA kernel accumulates in
+    // f32 throughout and emits one narrowing cast per output store.
+    let mut kernel = (spec.kernel_ir)(dt);
+    kernel.mode = KernelMode::SimdGroup2D;
+    kernel.bfloat_reinterpret_cast = true;
+    let msl = match MslGenerator::default().generate(&kernel) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    let mk = match compile_mt(runner, &msl, spec.kernel_name) {
+        Some(k) => k,
+        None => return vec![],
+    };
+
+    // Allocate padded buffers — first K rows of Q hold the candidate Q
+    // vectors; the rest are zeros. K/V hold `n_kv` real positions plus
+    // `bq` padding slots whose values don't matter (the causal mask
+    // gates all KV positions > q_abs[i] for the real rows i in 0..K).
+    let qsz_padded = n_q_heads * q_len_padded * head_dim;
+    let kvsz_padded = n_kv_heads * k_len_padded * head_dim;
+    let vals: Vec<f32> =
+        (0..qsz_padded.max(kvsz_padded)).map(|i| ((i % 17) as f32 - 8.0) * 0.05).collect();
+
+    // Q: first K rows of each head are the deterministic ramp; the
+    // padding rows (K..BQ) are zero so they don't contribute meaningful
+    // dot products. The kernel still computes attention for them — the
+    // output positions are simply discarded.
+    let mut q_padded = vec![0.0f32; qsz_padded];
+    for h in 0..n_q_heads {
+        for qi in 0..batch_q {
+            let src_off = (h * batch_q + qi) * head_dim;
+            let dst_off = (h * q_len_padded + qi) * head_dim;
+            // Source the candidate Q values from `vals` — same
+            // deterministic ramp the prefill bench uses.
+            q_padded[dst_off..dst_off + head_dim]
+                .copy_from_slice(&vals[src_off..src_off + head_dim]);
+        }
+    }
+
+    // K/V: real prefix at positions [0, n_kv); padding slots
+    // [n_kv, n_kv + bq) hold zeros. The causal mask hides them from
+    // the real Q rows we read out.
+    let mut k_padded = vec![0.0f32; kvsz_padded];
+    let mut v_padded = vec![0.0f32; kvsz_padded];
+    for h in 0..n_kv_heads {
+        let real_size = n_kv * head_dim;
+        let src_off = h * n_kv * head_dim;
+        let dst_off = h * k_len_padded * head_dim;
+        // The same deterministic ramp populates both K and V (they
+        // differ by which slice of `vals` they start at — but for the
+        // bench we don't care, we just need correctness vs the CPU
+        // reference).
+        k_padded[dst_off..dst_off + real_size]
+            .copy_from_slice(&vals[..real_size.min(vals.len() - src_off)][..real_size]);
+        v_padded[dst_off..dst_off + real_size]
+            .copy_from_slice(&vals[..real_size.min(vals.len() - src_off)][..real_size]);
+    }
+
+    let scale = 1.0_f32 / (head_dim as f32).sqrt();
+    let q_buf = buffer_typed(runner, &q_padded, dt);
+    let k_buf = buffer_typed(runner, &k_padded, dt);
+    let v_buf = buffer_typed(runner, &v_padded, dt);
+    let mt_out_buf = zeros_typed(runner, qsz_padded, dt);
+    let q_len_buf = runner.buffer_u32(q_len_padded as u32);
+    let k_len_buf = runner.buffer_u32(k_len_padded as u32);
+    let gqa_buf = runner.buffer_u32(gqa_factor as u32);
+    let n_q_heads_buf = runner.buffer_u32(n_q_heads as u32);
+    let n_kv_heads_buf = runner.buffer_u32(n_kv_heads as u32);
+    let sc_buf = runner.buffer_f32_scalar(scale);
+
+    let mt_bufs: Vec<&GpuBuffer> = vec![
+        &q_buf,
+        &k_buf,
+        &v_buf,
+        &mt_out_buf,
+        &q_len_buf,
+        &k_len_buf,
+        &gqa_buf,
+        &n_q_heads_buf,
+        &n_kv_heads_buf,
+        &sc_buf,
+    ];
+
+    // Grid: (q_tiles=1, n_q_heads, batch=1) — q_len_padded == bq so
+    // exactly one Q tile per head. The kernel's tpg=128 stays the same.
+    runner.measure(&mk, &mt_bufs, [1, n_q_heads, 1], [tpg, 1, 1], 0, 1);
+    let mt_out = read_typed(runner, &mt_out_buf, qsz_padded, dt);
+
+    // ── Correctness — inline causal-prefix reference on head 0, real K
+    //    rows only. Tiny CPU check (~1 ms at K=16, n_kv=4096) that pins
+    //    the kernel against the same mask the
+    //    `sdpa_decode_batched_prefill_gpu_correctness` integration
+    //    tests use, but kept in-bench so `result_sub_timed`'s
+    //    `mt_perf.is_some() && equiv.is_none()` panic guard is
+    //    satisfied — and so regressions in the prefill-MMA kernel
+    //    that affect this dispatch path get caught at `make bench`
+    //    time, not only in the integration suite.
+    //
+    // q_len_off = k_len_padded - q_len_padded = n_kv. For Q row qi in
+    // 0..batch_q, attended KV range = [0, n_kv + qi + 1).
+    let head_for_check = 0usize;
+    let kv_head_for_check = head_for_check / (n_q_heads / n_kv_heads);
+    let kv_slab_base = kv_head_for_check * k_len_padded * head_dim;
+    let mut expected_head0: Vec<f32> = vec![0.0; batch_q * head_dim];
+    for qi in 0..batch_q {
+        let q_off = (head_for_check * q_len_padded + qi) * head_dim;
+        let mut scores = vec![f32::NEG_INFINITY; k_len_padded];
+        let attended_end = (n_kv + qi + 1).min(k_len_padded);
+        for (t, score) in scores.iter_mut().enumerate().take(attended_end) {
+            let k_off = kv_slab_base + t * head_dim;
+            let mut dot = 0.0f32;
+            for d in 0..head_dim {
+                dot += q_padded[q_off + d] * k_padded[k_off + d];
+            }
+            *score = dot * scale;
+        }
+        let m = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let mut sum = 0.0f32;
+        for s in scores.iter_mut() {
+            if s.is_finite() {
+                *s = (*s - m).exp();
+                sum += *s;
+            } else {
+                *s = 0.0;
+            }
+        }
+        let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+        for d in 0..head_dim {
+            let mut acc = 0.0f32;
+            for (t, &s) in scores.iter().enumerate() {
+                acc += s * inv * v_padded[kv_slab_base + t * head_dim + d];
+            }
+            expected_head0[qi * head_dim + d] = acc;
+        }
+    }
+    // Extract head 0's real-K-row slice from the GPU output.
+    let mut actual_head0: Vec<f32> = Vec::with_capacity(batch_q * head_dim);
+    for qi in 0..batch_q {
+        let src = (head_for_check * q_len_padded + qi) * head_dim;
+        actual_head0.extend_from_slice(&mt_out[src..src + head_dim]);
+    }
+    let equiv =
+        check_equiv_with(&expected_head0, &actual_head0, EquivTolerance::new(spec.tol, 0.999));
+
+    // ── Perf measurement (M7-batched-via-prefill-tile vs K independent
+    //    single-Q `sdpa_decode` calls). Same speedup-as-displayed-ratio
+    //    convention as the Decode variant: feed `m7_bytes / batch_q`
+    //    to the single-Q `bench_gbps` so `mt_perf / ref_perf` equals
+    //    the wall-clock speedup vs the K-independent decode pattern.
+    //
+    // Correctness inside the bench is skipped — the K=8/16 prefill-
+    // tile arm produces **causal** outputs (Q[i] sees prefix + own
+    // predecessors) while single-Q `sdpa_decode` produces **flat**
+    // outputs (each Q sees the full prefix), so a per-row equiv check
+    // would fail by construction. The
+    // `tests/sdpa_decode_batched_prefill_gpu_correctness.rs`
+    // integration tests verify against the matching
+    // `naive_sdpa_causal_prefix_f32` reference.
+    let ctx = DtypeCtx::elementwise(dt);
+    let m7_bytes = ((qsz_padded + 2 * kvsz_padded + qsz_padded) * ctx.eb) as f64;
+    let (mt_perf, mt_timing) =
+        bench_gbps(runner, &mk, &mt_bufs, [1, n_q_heads, 1], [tpg, 1, 1], m7_bytes)
+            .map(|(p, t)| (Some(p), Some(t)))
+            .unwrap_or((None, None));
+
+    // Compile + dispatch single-Q `sdpa_decode` once at the matching
+    // shape for the K-independent baseline. The dispatch is dense-path
+    // (sink_end = 0, window_start = 0).
+    let single_tpg = 1024usize;
+    let mut single_kernel = crate::ffai::sdpa_decode::sdpa_decode::kernel_ir_for(dt);
+    single_kernel.mode = KernelMode::Reduction;
+    let (ref_perf, ref_timing) = match MslGenerator::new(msl_cfg_for(Some(single_tpg as u32)))
+        .generate(&single_kernel)
+        .ok()
+        .and_then(|s| compile_mt(runner, &s, "sdpa_decode"))
+    {
+        Some(single_compiled) => {
+            let mut q_first: Vec<f32> = vec![0.0; n_q_heads * head_dim];
+            for h in 0..n_q_heads {
+                let src = (h * batch_q) * head_dim;
+                q_first[h * head_dim..(h + 1) * head_dim]
+                    .copy_from_slice(&vals[src..src + head_dim]);
+            }
+            let single_q_buf = buffer_typed(runner, &q_first, dt);
+            // Single-Q reference can use the un-padded KV cache.
+            let k_real_size = n_kv_heads * n_kv * head_dim;
+            let k_single_buf = buffer_typed(runner, &vals[..k_real_size.min(vals.len())], dt);
+            let v_single_buf = buffer_typed(runner, &vals[..k_real_size.min(vals.len())], dt);
+            let single_out_buf = zeros_typed(runner, n_q_heads * head_dim, dt);
+            let single_hd_buf = runner.buffer_u32(head_dim as u32);
+            let single_n_buf = runner.buffer_u32(n_kv as u32);
+            let single_kv_stride_buf = runner.buffer_u32(n_kv as u32);
+            let single_hpg_buf = runner.buffer_u32(gqa_factor as u32);
+            let sink_buf = runner.buffer_u32(0);
+            let window_buf = runner.buffer_u32(0);
+            let single_bufs: Vec<&GpuBuffer> = vec![
+                &single_q_buf,
+                &k_single_buf,
+                &v_single_buf,
+                &single_out_buf,
+                &single_hd_buf,
+                &single_n_buf,
+                &single_kv_stride_buf,
+                &single_hpg_buf,
+                &sink_buf,
+                &window_buf,
+                &sc_buf,
+            ];
+            let ref_bytes_scaled = m7_bytes / (batch_q as f64);
+            bench_gbps(
+                runner,
+                &single_compiled,
+                &single_bufs,
+                [n_q_heads, 1, 1],
+                [single_tpg, 1, 1],
+                ref_bytes_scaled,
+            )
+            .map(|(p, t)| (Some(p), Some(t)))
+            .unwrap_or((None, None))
+        },
+        None => (None, None),
+    };
+
+    let label = format!(
+        "K={batch_q} H={n_q_heads} N={n_kv} D={head_dim} gqa={gqa_factor} causal {}",
+        ctx.label,
+    );
+    vec![bench.result_sub_timed(
+        Some(spec.subop),
+        label,
+        ref_perf,
+        mt_perf,
+        Some(equiv),
+        mt_timing,
+        ref_timing,
+    )]
 }

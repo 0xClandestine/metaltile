@@ -28,4 +28,6 @@ pub mod rope_llama;
 pub mod sampling;
 pub mod sdpa_decode;
 pub mod sdpa_decode_2pass;
+pub mod sdpa_decode_batched;
+pub mod sdpa_decode_batched_prefill;
 pub mod ssm;

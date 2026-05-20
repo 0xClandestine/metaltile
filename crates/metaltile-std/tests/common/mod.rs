@@ -166,6 +166,73 @@ pub fn naive_sdpa_swa_f32(
     out
 }
 
+/// Causal-prefix SDPA reference for batched-Q decode (M7 prefill-tile arm).
+///
+/// Q layout `[n_q_heads, q_len, head_dim]`, K/V `[n_kv_heads, k_len, head_dim]`,
+/// out `[n_q_heads, q_len, head_dim]`. For each Q row `qi` in `0..q_len`, the
+/// attended KV range is `[0, q_len_off + qi + 1)` — the same mask the
+/// `mt_sdpa_prefill_mma` kernel applies via
+/// `q_abs = q_tile_first + fm + q_len_off`. With `q_len_off = k_len - q_len`,
+/// this is the standard chunked-prefill / speculative-decode-verify pattern.
+/// GQA via `kv_head = q_head / (n_q_heads / n_kv_heads)`.
+#[allow(clippy::too_many_arguments)]
+pub fn naive_sdpa_causal_prefix_f32(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    q_len: usize,
+    k_len: usize,
+    head_dim: usize,
+    q_len_off: usize,
+    scale: f32,
+) -> Vec<f32> {
+    assert!(n_q_heads.is_multiple_of(n_kv_heads));
+    assert_eq!(q.len(), n_q_heads * q_len * head_dim);
+    assert_eq!(k.len(), n_kv_heads * k_len * head_dim);
+    assert_eq!(v.len(), n_kv_heads * k_len * head_dim);
+    let gqa = n_q_heads / n_kv_heads;
+    let mut out = vec![0.0f32; n_q_heads * q_len * head_dim];
+    for qh in 0..n_q_heads {
+        let kvh = qh / gqa;
+        let kv_slab = kvh * k_len * head_dim;
+        let q_head_off = qh * q_len * head_dim;
+        for qi in 0..q_len {
+            let q_off = q_head_off + qi * head_dim;
+            let visible_end = (q_len_off + qi + 1).min(k_len);
+            let mut scores = vec![f32::NEG_INFINITY; k_len];
+            for (t, score) in scores.iter_mut().enumerate().take(visible_end) {
+                let k_off = kv_slab + t * head_dim;
+                let mut dot = 0.0f32;
+                for d in 0..head_dim {
+                    dot += q[q_off + d] * k[k_off + d];
+                }
+                *score = dot * scale;
+            }
+            let m = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut sum = 0.0f32;
+            for score in scores.iter_mut() {
+                if score.is_finite() {
+                    *score = (*score - m).exp();
+                    sum += *score;
+                } else {
+                    *score = 0.0;
+                }
+            }
+            let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+            for d in 0..head_dim {
+                let mut acc = 0.0f32;
+                for (t, score) in scores.iter().enumerate() {
+                    acc += *score * inv * v[kv_slab + t * head_dim + d];
+                }
+                out[q_off + d] = acc;
+            }
+        }
+    }
+    out
+}
+
 /// Deterministic init pattern — small repeating modulus avoids both
 /// degenerate all-zero softmax and uniform-value short-circuits.
 pub fn ramp(n: usize, modulus: usize, offset: f32) -> Vec<f32> {
