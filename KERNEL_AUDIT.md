@@ -91,7 +91,7 @@ Sources surveyed:
 | conv1d_causal_step (depthwise SSM conv stream) | ✗ | partial (subset of SSM toolchain) | ✓ | `ffai/ssm.rs` → `conv1d_causal_step<T>`. fp32 state recurrence. |
 | ssm_replay (sequential tape capture + replay) | ✗ | ✓ (`ssm_replay.metal`) | ✗ | NOT PORTED. Spec 040 — Mamba/Mamba2 state replay for speculative decoding. |
 | fused_gate_activation (silu/gelu × up gate) | ✗ | ✓ (`fused_gate_activation.metal`) | ✓ | `ffai/fused_gate_activation.rs` → `ffai_fused_gate_{silu,gelu,swiglu}<T>`. Grid3D elementwise, generic dtype; replaces split+act+mul (≥2 dispatches → 1). The MLX single-row/looped split is unneeded — one Grid3D kernel + the codegen vectorize pass covers any `hidden`. |
-| rms_norm_residual (RMSNorm + residual add fused) | ✗ | ✓ (`rms_norm_residual.metal`) | ✗ | NOT PORTED. ~90 saved dispatches/token on Gemma4-30 type configs. |
+| rms_norm_residual (RMSNorm + residual add fused) | ✗ | ✓ (`rms_norm_residual.metal`) | ✓ | `ffai/rms_norm_residual.rs` → `ffai_rms_norm_residual<T>`. Reduction-mode, `N = TPG*4`; mirrors `mt_rms_norm` + a residual-add input. ~90 saved dispatches/token on Gemma4-30 type configs. |
 | rms_norm_rope (RMSNorm + RoPE fused) | ✗ | ✓ (`rms_norm_rope.metal`) | ✗ | NOT PORTED. Q/K post-projection norm+rope in one dispatch. |
 | rms_norm_qgemv (RMSNorm + 4-bit quantized GEMV fused) | ✗ | ✓ (`rms_norm_qgemv.metal`) | ✗ | NOT PORTED. Eliminates global RT between norm and qmatmul. |
 | batched_qkv_qgemv (Q/K/V 4-bit qGEMV → 1 dispatch) | ✗ | ✓ (`batched_qkv_qgemv.metal`) | ✗ | NOT PORTED. Decode-form fused QKV projection over int4 weights. |
