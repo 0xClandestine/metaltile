@@ -284,6 +284,38 @@ fn wy_vs_step_bench_t512_dk32_dv32_c16() {
 
 #[ignore]
 #[test]
+fn wy_vs_chunk_t2048() {
+    let _g = gpu_lock();
+    let ctx = Context::new().expect("Context::new on macOS");
+    let (b, t, hk, hv, dk, dv, c) = (1, 2048, 1, 1, 32, 32, 16);
+
+    let iters = 3;
+    let wy_us = time_wy_chunk(&ctx, b, t, hk, hv, dk, dv, c, iters);
+    let chunk_us = time_chunk_kernel(&ctx, b, t, hk, hv, dk, dv, iters);
+    let speedup_vs_chunk = chunk_us / wy_us;
+    eprintln!(
+        "T={t} Dk={dk} Dv={dv} C={c}: WY={wy_us:.1}us  chunk={chunk_us:.1}us  WY/chunk={speedup_vs_chunk:.2}×"
+    );
+}
+
+#[ignore]
+#[test]
+fn wy_vs_chunk_t4096() {
+    let _g = gpu_lock();
+    let ctx = Context::new().expect("Context::new on macOS");
+    let (b, t, hk, hv, dk, dv, c) = (1, 4096, 1, 1, 32, 32, 16);
+
+    let iters = 3;
+    let wy_us = time_wy_chunk(&ctx, b, t, hk, hv, dk, dv, c, iters);
+    let chunk_us = time_chunk_kernel(&ctx, b, t, hk, hv, dk, dv, iters);
+    let speedup_vs_chunk = chunk_us / wy_us;
+    eprintln!(
+        "T={t} Dk={dk} Dv={dv} C={c}: WY={wy_us:.1}us  chunk={chunk_us:.1}us  WY/chunk={speedup_vs_chunk:.2}×"
+    );
+}
+
+#[ignore]
+#[test]
 fn wy_vs_step_bench_t1024_b4_hv4() {
     // Multi-slot test: B=1 Hv=4 (typical Qwen3.6 linear-attn layer), T=1024.
     let _g = gpu_lock();

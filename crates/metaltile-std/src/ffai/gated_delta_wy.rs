@@ -120,6 +120,10 @@ pub fn mt_gated_delta_wy_chunk<T>(
     threadgroup_alloc("tg_p", 512u32, f32);
     threadgroup_alloc("tg_uv", 512u32, f32);
     threadgroup_alloc("tg_qkt", 256u32, f32);
+    // S0_p[d_v, i] = Σ_d state[d_v, d] · p[i, d]  ∈ R^{Dv × C}
+    // Precomputed once per chunk; both y_pass and S_end reuse it.
+    // Eliminates ~256K redundant TG state reads per chunk at Dv=32 C=16.
+    threadgroup_alloc("tg_s0p", 512u32, f32); // Dv × C, max 32 × 16 = 512
 
     // ── State init: load [Dv, Dk] from state_in[n] ────────────────────
     let state_base = n * dv * dk;
@@ -243,10 +247,26 @@ pub fn mt_gated_delta_wy_chunk<T>(
         }
         threadgroup_barrier();
 
+        // Precompute S0_p[d_v, i] = Σ_d state[d_v, d] · p[i, d] (∈ R^{Dv × C}).
+        // Reused by both the y_pass correction term AND the chunk-end state
+        // update. Lane-parallel over (d_v, i) pairs.
+        for vi in range(lane, dv * c, 32u32) {
+            let d_v = vi / c;
+            let i = vi % c;
+            let mut acc = 0.0f32;
+            for d in range(0u32, dk, 1u32) {
+                let st = threadgroup_load("tg_state", d_v * dk + d);
+                let pi = threadgroup_load("tg_p", i * dk + d);
+                acc = acc + st * pi;
+            }
+            threadgroup_store("tg_s0p", d_v * c + i, acc);
+        }
+        threadgroup_barrier();
+
         // Steps 6–8: per (t, d_v) compute y[t, d_v] = y_pass + y_local.
         //   y_local[t, dv]  = Σ_{j≤t} Γ[t,j] · QKT[t,j] · u^v[j, dv]
         //   S0_q[t, dv]     = Σ_d  state[dv, d] · q[t, d]
-        //   y_pass_corr     = Σ_{i≤t} β_i · QKT[t, i] · Σ_d state[dv, d] · p[i, d]
+        //   y_pass_corr     = Σ_{i≤t} β_i · QKT[t, i] · S0_p[dv, i]
         //   y[t, dv]        = big_g[t] · (S0_q - y_pass_corr) + y_local
         for tdv in range(lane, c * dv, 32u32) {
             let t = tdv / dv;
@@ -271,19 +291,13 @@ pub fn mt_gated_delta_wy_chunk<T>(
                 s0q = s0q + st * qt;
             }
 
-            // correction = Σ_{i≤t} β_i · QKT[t,i] · (Σ_d state[dv, d] · p[i, d])
+            // correction = Σ_{i≤t} β_i · QKT[t,i] · S0_p[d_v, i]
             let mut corr = 0.0f32;
             for i in range(0u32, t + 1u32, 1u32) {
                 let beta_i = threadgroup_load("tg_beta", i);
                 let qkt_ti = threadgroup_load("tg_qkt", t * c + i);
-                let w = beta_i * qkt_ti;
-                let mut s0p = 0.0f32;
-                for d in range(0u32, dk, 1u32) {
-                    let st = threadgroup_load("tg_state", d_v * dk + d);
-                    let pi = threadgroup_load("tg_p", i * dk + d);
-                    s0p = s0p + st * pi;
-                }
-                corr = corr + w * s0p;
+                let s0p_vi = threadgroup_load("tg_s0p", d_v * c + i);
+                corr = corr + beta_i * qkt_ti * s0p_vi;
             }
 
             let y_pass = big_g_t * (s0q - corr);
@@ -302,21 +316,16 @@ pub fn mt_gated_delta_wy_chunk<T>(
             let d_v = vd / dk;
             let d_k = vd % dk;
 
-            // Σ_d state[d_v, d] · p[i, d]   — store per-i below
             let s0_old = threadgroup_load("tg_state", d_v * dk + d_k);
 
-            // S0_bp_t_K [d_v, d_k] = Σ_i β_i · p[i, d_k] · (state[d_v] · p[i])
+            // S0_bp_t_K [d_v, d_k] = Σ_i β_i · p[i, d_k] · S0_p[d_v, i]
+            // S0_p was precomputed before y_pass — reuse it here.
             let mut s_corr = 0.0f32;
             for i in range(0u32, c, 1u32) {
                 let beta_i = threadgroup_load("tg_beta", i);
                 let p_ik = threadgroup_load("tg_p", i * dk + d_k);
-                let mut s0p = 0.0f32;
-                for d in range(0u32, dk, 1u32) {
-                    let st = threadgroup_load("tg_state", d_v * dk + d);
-                    let pid = threadgroup_load("tg_p", i * dk + d);
-                    s0p = s0p + st * pid;
-                }
-                s_corr = s_corr + beta_i * p_ik * s0p;
+                let s0p_vi = threadgroup_load("tg_s0p", d_v * c + i);
+                s_corr = s_corr + beta_i * p_ik * s0p_vi;
             }
             let s_through = big_g_c * (s0_old - s_corr);
 
