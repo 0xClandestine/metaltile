@@ -89,7 +89,7 @@ fn run_gated_delta_wy_chunk(
     dv: usize,
     c: usize,
 ) -> (Vec<f32>, Vec<f32>) {
-    assert!(t_total % c == 0, "t_total must be a multiple of c");
+    assert!(t_total.is_multiple_of(c), "t_total must be a multiple of c");
     let n_total = b * hv;
 
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();

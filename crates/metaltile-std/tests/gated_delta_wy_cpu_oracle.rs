@@ -347,13 +347,9 @@ pub fn chunked_wy_gdn(
 //  Equivalence tests — sequential vs chunked-WY (CPU only)
 // ────────────────────────────────────────────────────────────────────
 
-fn synthetic_inputs(
-    t_total: usize,
-    hk: usize,
-    hv: usize,
-    dk: usize,
-    dv: usize,
-) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+type SyntheticInputs = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
+
+fn synthetic_inputs(t_total: usize, hk: usize, hv: usize, dk: usize, dv: usize) -> SyntheticInputs {
     // Scale q, k so that ‖k‖² ≈ 1 regardless of Dk — otherwise the
     // β·(k·k^T) Householder reflector grows with Dk and the recurrence
     // becomes unstable (state explodes), and any f32 comparison becomes
@@ -457,7 +453,7 @@ fn sequential_gdn_f64(
 }
 
 #[test]
-fn wy_debug_scaling_T() {
+fn wy_debug_scaling_t() {
     // Walk T from 2 -> 32 with one chunk to find where blowup begins.
     // Use f64 EVERYWHERE so f32 precision noise is factored out.
     for t in [2usize, 4, 8, 16, 32, 64, 128] {
