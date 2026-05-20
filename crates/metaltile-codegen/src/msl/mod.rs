@@ -267,20 +267,34 @@ impl MslGenerator {
     }
 }
 
-/// Create a generator configured for the given kernel mode.
+/// Create a generator configured for the given kernel mode and the
+/// kernel's expected dispatch threadgroup size.
 ///
-/// Tile2D and SimdGroup2D modes enable simdgroup matrix intrinsics;
-/// all other modes use the default config.
-pub fn generator_for_mode(mode: KernelMode) -> MslGenerator {
-    if matches!(mode, KernelMode::Tile2D | KernelMode::SimdGroup2D) {
-        MslGenerator::new(MslConfig {
+/// Tile2D and SimdGroup2D modes enable simdgroup matrix intrinsics; all
+/// other modes use the default config. `expected_tpg` is forwarded to
+/// `MslConfig::expected_tpg` so codegen paths that depend on `lsize`
+/// (notably the Reduction-mode `Op::Reduce` emit — single `simd_*(value)`
+/// at `tpg ≤ simd_size`, two-level threadgroup reduction otherwise) pick
+/// the right specialization. Pass `None` when the dispatch TPG isn't
+/// known at codegen time (caller falls back to the conservative slow path).
+///
+/// **Why `tile build` callers should pass this:** the bench harness sets
+/// `expected_tpg` from `ShapeSpec.tpg`. If `tile build --emit all`
+/// dropped the TPG and produced different MSL than `tile bench` measured,
+/// the bench numbers would describe a kernel nobody actually runs in
+/// production. `cmd/build.rs` reads `spec.shapes[0].tpg` so the emitted
+/// `.metal` files match exactly what bench measured.
+pub fn generator_for_mode(mode: KernelMode, expected_tpg: Option<u32>) -> MslGenerator {
+    let base = if matches!(mode, KernelMode::Tile2D | KernelMode::SimdGroup2D) {
+        MslConfig {
             tile_schedule: TileSchedule::default(),
             use_simd_matrix: true,
             ..MslConfig::default()
-        })
+        }
     } else {
-        MslGenerator::default()
-    }
+        MslConfig::default()
+    };
+    MslGenerator::new(MslConfig { expected_tpg, ..base })
 }
 
 impl Default for MslGenerator {

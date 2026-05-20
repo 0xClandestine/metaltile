@@ -69,6 +69,15 @@ pub fn pack_bytes(vals: &[f32], dt: Dt) -> Vec<u8> {
     }
 }
 
+/// u32 vec → LE bytes — for packed-quantized-weight buffers (the
+/// `weight` input of `dequant_gather` / `dequant_gemv`).
+pub fn pack_u32_bytes(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
+
+/// LE bytes → u32 vec (output readback for u32-typed kernel outputs).
+pub fn unpack_u32_bytes(bytes: &[u8]) -> Vec<u32> {
+    bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+}
+
 pub fn unpack_bytes(bytes: &[u8], dt: Dt) -> Vec<f32> {
     match dt {
         Dt::F32 => bytemuck::cast_slice::<u8, f32>(bytes).to_vec(),

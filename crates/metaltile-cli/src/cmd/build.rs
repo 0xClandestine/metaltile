@@ -186,7 +186,18 @@ pub fn run(args: &BuildArgs) {
             // unless the spec is already dtype-specialized (e.g. `mt_argmax_f32`).
             k.name = monomorphized_name(spec.kernel_name, dt, dtypes.len());
 
-            let generator = generator_for_mode(mode);
+            // Codegen hint so the emitted MSL matches exactly what `tile
+            // bench` measures (and what production callers will dispatch
+            // at, per the kernel's DISPATCH INVARIANTS):
+            //   1. `Generic` dispatch carries TPG on `ShapeSpec`; prefer that.
+            //   2. Other variants (`Sort`, `SdpaVector`, `Attention`, …) carry
+            //      TPG on the `BenchDispatch` variant itself.
+            //   3. `None` (a few Grid3D/Elementwise variants with no fixed
+            //      TPG) → safe slow path. Reduction-mode kernels with no TPG
+            //      signal anywhere fall through to the conservative emit.
+            let expected_tpg =
+                spec.shapes.first().map(|s| s.tpg as u32).or_else(|| spec.dispatch.tpg_hint());
+            let generator = generator_for_mode(mode, expected_tpg);
 
             // Compile-check via generate.
             let msl_result = generator.generate(&k);
