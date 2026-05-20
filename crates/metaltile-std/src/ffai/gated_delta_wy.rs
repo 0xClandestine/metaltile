@@ -106,10 +106,11 @@ pub fn mt_gated_delta_wy_chunk<T>(
     // Sizes (4 bytes each): state 1024 + q/k 512+512 + v 512 + kkt 256
     // + bigG/g/beta 16+16+16 + p 512 + uv 512 + qkt 256 = 4144 floats = 17 KB.
     threadgroup_alloc("tg_state", 1024u32, f32); // up to 32*32
-    // Double-buffer state writes — avoids the read/write race in the chunk-end
-    // update where lane A reads tg_state[*] for its s0p computation while
-    // lane B has already written its slot in an earlier loop iteration.
-    threadgroup_alloc("tg_state_new", 1024u32, f32);
+    // Per-lane stack staging for the chunk-end state update — replaces the
+    // tg_state_new TG buffer (saved 4 KB). Each lane handles (dv*dk/32)
+    // iterations; stash new values here, barrier once, then write back.
+    // 128 supports Dv*Dk ≤ 4096 (e.g. 64×64).
+    stack_alloc("new_state", 128u32, "f32");
     threadgroup_alloc("tg_q", 512u32, f32); // C × Dk
     threadgroup_alloc("tg_k", 512u32, f32);
     threadgroup_alloc("tg_v", 512u32, f32); // C × Dv
@@ -312,6 +313,8 @@ pub fn mt_gated_delta_wy_chunk<T>(
         //   U_end[v, d]     = Σ_j (G_C/G_j) · u^v[j, v] · k[j, d]
         //   S_end[v, d]     = S_through + U_end
         let big_g_c = threadgroup_load("tg_bigG", c - 1u32);
+        // Per-lane iteration counter for stack staging (0..(dv*dk/32)).
+        let mut iter_idx = 0u32;
         for vd in range(lane, dv * dk, 32u32) {
             let d_v = vd / dk;
             let d_k = vd % dk;
@@ -339,15 +342,17 @@ pub fn mt_gated_delta_wy_chunk<T>(
                 u_end = u_end + rw * uv_jv * k_jd;
             }
 
-            // Write to the staging buffer; flip into tg_state after barrier.
-            threadgroup_store("tg_state_new", d_v * dk + d_k, s_through + u_end);
+            // Stash in per-lane stack; flush to tg_state after a barrier.
+            stack_store("new_state", iter_idx, s_through + u_end);
+            iter_idx = iter_idx + 1u32;
         }
         threadgroup_barrier();
 
-        // Flip staging → live state for the next chunk's reads.
-        for ii in range(lane, total_state, 32u32) {
-            let s_new = threadgroup_load("tg_state_new", ii);
-            threadgroup_store("tg_state", ii, s_new);
+        // Flush staged values back into tg_state for the next chunk's reads.
+        let mut flush_idx = 0u32;
+        for vd in range(lane, dv * dk, 32u32) {
+            threadgroup_store("tg_state", vd, stack_load("new_state", flush_idx));
+            flush_idx = flush_idx + 1u32;
         }
         threadgroup_barrier();
     }
