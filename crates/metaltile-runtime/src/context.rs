@@ -439,7 +439,7 @@ impl Context {
             MTLResourceOptions,
             MTLSize,
         };
-        use parking_lot::Mutex;
+        use std::sync::Mutex;
         use rustc_hash::FxHashMap;
 
         type Dev = ProtocolObject<dyn objc2_metal::MTLDevice>;
@@ -475,7 +475,7 @@ impl Context {
         };
 
         let pipe: Retained<Pso> = {
-            let mut lock = cache.lock();
+            let mut lock = cache.lock().unwrap();
             if let Some(cached) = lock.get(&cache_key) {
                 cached.clone()
             } else {
@@ -771,7 +771,7 @@ impl Context {
             MTLResourceOptions,
             MTLSize,
         };
-        use parking_lot::Mutex;
+        use std::sync::Mutex;
         use rustc_hash::FxHashMap;
 
         type Dev = ProtocolObject<dyn objc2_metal::MTLDevice>;
@@ -830,16 +830,16 @@ impl Context {
         let msl_cache = MSL_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
         for spec in specs {
             let h = pso_cache_key(spec.kernel, spec.fn_consts);
-            // Drop the read guard BEFORE the match — parking_lot::Mutex isn't
-            // reentrant, and temporaries in a match scrutinee live until the
-            // end of the match body (RFC 66), so writing back inside None
-            // would deadlock against the still-held read guard.
-            let cached = msl_cache.lock().get(&h).cloned();
+            // Drop the guard BEFORE the match — Mutex isn't reentrant, and
+            // temporaries in a match scrutinee live until the end of the match
+            // body (RFC 66), so writing back inside None would deadlock against
+            // the still-held guard.
+            let cached = msl_cache.lock().unwrap().get(&h).cloned();
             let msl = match cached {
                 Some(m) => m,
                 None => {
                     let generated = MslGenerator::default().generate(spec.kernel)?;
-                    msl_cache.lock().insert(h, generated.clone());
+                    msl_cache.lock().unwrap().insert(h, generated.clone());
                     generated
                 },
             };
@@ -865,7 +865,7 @@ impl Context {
         for (spec, msl) in specs.iter().zip(msl_sources.iter()) {
             let cache_key = pso_cache_key(spec.kernel, spec.fn_consts);
             let pipe: Retained<Pso> = {
-                let mut lock = cache.lock();
+                let mut lock = cache.lock().unwrap();
                 if let Some(p) = lock.get(&cache_key) {
                     p.clone()
                 } else {

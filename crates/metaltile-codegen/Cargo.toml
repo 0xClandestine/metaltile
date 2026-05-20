@@ -14,7 +14,6 @@ metaltile-core.workspace = true
 thiserror.workspace = true
 smallvec.workspace = true
 rustc-hash.workspace = true
-half.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
