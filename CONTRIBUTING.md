@@ -56,11 +56,23 @@ The [`docs/`](docs/README.md) tree is the real reference. At minimum:
 AI-assisted contributions are welcome — and often produce tighter descriptions and better test coverage than hand-written ones. Two rules:
 
 1. **Disclose.** Note in the PR body how AI was used (research, ideation, implementation, testing). This is transparency, not gatekeeping.
-2. **Curate before opening.** An AI-assisted PR should read no differently from a hand-written one: tight description, scoped diff, tests, docs. Don't paste raw assistant output — if the diff sprawls or the description rambles, tighten it first.
+2. **Curate before opening.** An AI-assisted PR should read no differently from a hand-written one: tight description, scoped diff, tests, docs. Don't paste raw assistant output — if the diff sprawls or the description rambles, tighten it first. The same applies to issues: if your assistant produces a 2000-word writeup, condense it to what's actually relevant before filing.
+
+### Writing the PR description
+
+A PR description is read by humans *and* by review agents — write it so either can reconstruct the change without reading the diff first. Aim for cohesive and comprehensive, not long.
+
+- **Open with a one-paragraph summary** — what changed and *why*, in plain prose. A reviewer should get the gist in about 30 seconds.
+- **Then the detail, organized** — what changed, why this approach over the alternatives, and how it was verified (tests run, bench rows, manual checks). Short paragraphs, headings, or a small table — whatever keeps it scannable.
+- **Be concrete** — name files, functions, and commands in `backticks`; link issues with `#<num>`; paste the bench rows that moved rather than describing them.
+- **Cut the padding** — don't restate the diff line by line, don't paste raw assistant output, don't narrate how you arrived at the change. If a sentence doesn't help the reviewer decide, drop it.
+- **Flag the risk surface** — call out anything you're unsure of, follow-ups you deliberately deferred, and any blast radius worth a second look.
+
+The test: a reviewer — human or agent — should be able to read the description, predict what the diff does, and know what to scrutinize. Cohesive and comprehensive; never verbose.
 
 ## Code of conduct
 
-The usual: no spam, no harassment, no back-seat-driving on closed issues. Maintainer discretion on what counts.
+Be decent. No spam, no off-topic noise, no harassment, and no back-seat-driving on closed issues or merged PRs. Maintainer discretion on what counts — repeated violations mean losing access to the org and its repositories.
 
 ## License
 
