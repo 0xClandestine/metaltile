@@ -130,8 +130,8 @@ macro_rules! aura_encode_kernel {
             threadgroup_barrier();
             let mut rotated = 0.0f32;
             for j in range(0u32, dim, 1u32) {
-                rotated = rotated + load(rotation[d * dim + j])
-                                   * threadgroup_load("shared_unit", j);
+                rotated =
+                    rotated + load(rotation[d * dim + j]) * threadgroup_load("shared_unit", j);
             }
 
             // ── Stage 3: branchless boundary comparison → codebook
@@ -179,19 +179,12 @@ macro_rules! aura_encode_kernel {
             let total_bits = shift + $bits;
             if total_bits > 32u32 {
                 let spill_u = total_bits - 32u32;
-                atomic_or_tg(
-                    "shared_packed",
-                    word_idx + 1u32,
-                    masked >> ($bits - spill_u),
-                );
+                atomic_or_tg("shared_packed", word_idx + 1u32, masked >> ($bits - spill_u));
             }
             threadgroup_barrier();
 
             if d < packed_width {
-                store(
-                    packed_out[row * packed_width + d],
-                    threadgroup_load("shared_packed", d),
-                );
+                store(packed_out[row * packed_width + d], threadgroup_load("shared_packed", d));
             }
 
             // ── Stage 5: norm correction.  Re-run the reduction over
@@ -211,11 +204,7 @@ macro_rules! aura_encode_kernel {
                 total_recon_sq = total_recon_sq + threadgroup_load("shared_norm", i);
             }
             let recon_norm = sqrt(total_recon_sq);
-            let corrected_norm = select(
-                recon_norm > 1.0e-8f32,
-                norm_val / recon_norm,
-                norm_val,
-            );
+            let corrected_norm = select(recon_norm > 1.0e-8f32, norm_val / recon_norm, norm_val);
 
             if d == 0u32 {
                 store(norms_out[row], corrected_norm);
