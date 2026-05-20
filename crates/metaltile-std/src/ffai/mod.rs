@@ -21,6 +21,7 @@ pub mod aura_flash_p1;
 pub mod aura_flash_pass2;
 pub mod aura_score;
 pub mod aura_value;
+pub mod batched_qkv_qgemv;
 pub mod dequant_gather;
 pub mod dequant_gemv;
 pub mod fused_gate_activation;
