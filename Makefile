@@ -19,6 +19,15 @@ help: ## show this help
 setup: ## one-time dev environment setup (toolchains, deps, first build)
 	./scripts/setup-dev.sh
 
+.PHONY: hooks
+hooks: ## install git hooks (pre-commit, commit-msg, pre-push)
+	./scripts/install-hooks.sh
+
+.PHONY: hooks-uninstall
+hooks-uninstall: ## remove git hook installation
+	git config --unset core.hooksPath || true
+	@echo "✓ Uninstalled hooks (core.hooksPath cleared)"
+
 # ─── Build ────────────────────────────────────────────────────────────
 .PHONY: build
 build: ## cargo build (debug)
