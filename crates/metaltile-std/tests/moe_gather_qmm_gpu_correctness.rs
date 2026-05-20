@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use common::{Dt, gpu_lock, pack_bytes, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
-use metaltile_std::ffai::moe::mt_moe_gather_qmm_int4;
+use metaltile_std::ffai::moe::{mt_moe_gather_qmm_int4, mt_moe_gather_qmm_int4_m8};
 
 /// Pack a row of int4 weights into uint32s (8 per uint, LSB-first per nibble).
 fn pack_int4_row(weights: &[u32]) -> Vec<u32> {
@@ -255,4 +255,116 @@ fn moe_gather_qmm_int4_qwen36_shape_f32() {
     }
     let cos = dot / (nc.sqrt() * ng.sqrt() + 1e-12);
     assert!(cos >= 0.999, "cosine vs CPU oracle = {cos:.6} (want ≥ 0.999)");
+}
+
+/// m8 variant matches m1 (the original scalar) at Qwen3.6 shape.
+/// Both implement the same dot product so output should agree to fp noise.
+#[test]
+fn moe_gather_qmm_int4_m8_matches_m1_qwen36_shape_f32() {
+    let _g = gpu_lock();
+    let n_experts = 128usize;
+    let k_in = 2048usize;
+    let m_out = 256usize;
+    let group_size = 64usize;
+    let t_rows = 4usize;
+
+    let mut expert_offsets: Vec<u32> = vec![0; n_experts + 1];
+    for e in 0..=n_experts {
+        let off = if e <= 7 {
+            0
+        } else if e <= 42 {
+            2
+        } else if e <= 100 {
+            3
+        } else {
+            t_rows as u32
+        };
+        expert_offsets[e] = off;
+    }
+
+    let total_weights = n_experts * m_out * k_in;
+    let weight_unpacked: Vec<u32> =
+        (0..total_weights).map(|i| ((i as u32) * 7 + 3) & 0xf).collect();
+    let weight_packed: Vec<u32> =
+        weight_unpacked.chunks_exact(k_in).flat_map(pack_int4_row).collect();
+    let groups_total = n_experts * m_out * (k_in / group_size);
+    let scales: Vec<f32> =
+        (0..groups_total).map(|i| 0.005 + 0.0001 * ((i as f32 * 0.03).sin())).collect();
+    let biases: Vec<f32> =
+        (0..groups_total).map(|i| -0.02 + 0.0005 * ((i as f32 * 0.07).cos())).collect();
+    let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * ((i as f32 * 0.013).sin())).collect();
+
+    fn run(
+        kernel_ir: impl FnOnce(metaltile_core::dtype::DType) -> metaltile_core::ir::Kernel,
+        grid_x: usize,
+        x: &[f32],
+        weight_packed: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        expert_offsets: &[u32],
+        t_rows: usize,
+        k_in: usize,
+        m_out: usize,
+        n_experts: usize,
+        group_size: usize,
+    ) -> Vec<f32> {
+        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        buffers.insert("x".into(), pack_bytes(x, Dt::F32));
+        buffers.insert(
+            "weight_packed".into(),
+            weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        );
+        buffers.insert("scales".into(), pack_bytes(scales, Dt::F32));
+        buffers.insert("biases".into(), pack_bytes(biases, Dt::F32));
+        buffers.insert(
+            "expert_offsets".into(),
+            expert_offsets.iter().flat_map(|o| o.to_le_bytes()).collect(),
+        );
+        buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * m_out], Dt::F32));
+        buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+        buffers.insert("m_out".into(), (m_out as u32).to_le_bytes().to_vec());
+        buffers.insert("n_experts".into(), (n_experts as u32).to_le_bytes().to_vec());
+        buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+        let ctx = Context::new().expect("Context::new on macOS");
+        let mut kernel = kernel_ir(Dt::F32.to_dtype());
+        kernel.mode = KernelMode::Reduction;
+        let result = ctx
+            .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [grid_x, t_rows, 1], [
+                32, 1, 1,
+            ])
+            .expect("dispatch");
+        unpack_bytes(result.outputs.get("out").expect("out"), Dt::F32)
+    }
+
+    let y_m1 = run(
+        mt_moe_gather_qmm_int4::kernel_ir_for,
+        m_out,
+        &x,
+        &weight_packed,
+        &scales,
+        &biases,
+        &expert_offsets,
+        t_rows,
+        k_in,
+        m_out,
+        n_experts,
+        group_size,
+    );
+    let y_m8 = run(
+        mt_moe_gather_qmm_int4_m8::kernel_ir_for,
+        m_out / 8,
+        &x,
+        &weight_packed,
+        &scales,
+        &biases,
+        &expert_offsets,
+        t_rows,
+        k_in,
+        m_out,
+        n_experts,
+        group_size,
+    );
+
+    let max_diff = y_m1.iter().zip(&y_m8).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+    assert!(max_diff < 5e-4, "m8 vs m1 max diff = {max_diff:.2e}");
 }

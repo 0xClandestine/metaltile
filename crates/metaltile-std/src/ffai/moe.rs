@@ -518,3 +518,319 @@ inventory::submit! {
         kernel_mode: Some(KernelMode::Reduction),
     }
 }
+
+// ── mt_moe_gather_qmm_int4_m8 ────────────────────────────────────────────
+//
+// Same recurrence as `mt_moe_gather_qmm_int4`, but each TG produces 8
+// adjacent `m_out` cells per row. Three wins over the m=1 variant:
+//
+//   1. 8× fewer TGs → 8× less dispatch + scheduler overhead. At
+//      Qwen3.6-A3B down-proj (M=2048, T=8192) the m=1 variant fires 17M
+//      TGs; m8 fires 2M.
+//   2. `x[row, k]` reads serve 8 dot products instead of 1 → 8× weight-
+//      relative-to-x bandwidth ratio.
+//   3. Scale/bias loads (already grouped to 1 per `group_size`) are shared
+//      across 8 cells too.
+//
+// DISPATCH:
+//   Grid = [m_out / 8, T_rows, 1]   (m_out must be a multiple of 8)
+//   TG   = [32, 1, 1]
+//
+// Per-lane work per TG:
+//   - Outer: stride-by-32 over `k_in / 8` packs (same as the m=1 variant).
+//   - Inner: 8 m-cells × 8 nibbles = 64 FMAs per pack.
+//   - 8 accumulators per lane, simd_sum'd at the end → 8 outputs per TG.
+//
+// Memory traffic (per TG):
+//   - x  : k_in floats (loaded once, used 8 times)
+//   - W  : 8 × (k_in / 8) uint32s = k_in uint32s of weight
+//   - s/b: 8 × (k_in / group_size) × 2 floats
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_moe_gather_qmm_int4_m8<T>(
+    x: Tensor<T>,
+    weight_packed: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    expert_offsets: Tensor<u32>,
+    mut out: Tensor<T>,
+    #[constexpr] k_in: u32,
+    #[constexpr] m_out: u32,
+    #[constexpr] n_experts: u32,
+    #[constexpr] group_size: u32,
+) {
+    let m_chunk = tgid_x;
+    let row = tgid_y;
+    let lane = tid;
+    let m_base = m_chunk * 8u32;
+
+    // Resolve expert — same linear walk as the m=1 variant.
+    let mut expert = 0u32;
+    let mut found = 0u32;
+    for ee in range(0u32, n_experts, 1u32) {
+        let end = load(expert_offsets[ee + 1u32]);
+        let inside_bool = row < end;
+        let inside = select(inside_bool, 1u32, 0u32);
+        let take = inside * (1u32 - found);
+        expert = select(take == 1u32, ee, expert);
+        found = select(take == 1u32, 1u32, found);
+    }
+
+    let total_packs = k_in / 8u32;
+    let groups_per_row = k_in / group_size;
+
+    let weight_expert_base = expert * m_out * total_packs;
+    let scale_expert_base = expert * m_out * groups_per_row;
+
+    let x_row_base = row * k_in;
+
+    // 8 separate accumulators, one per m-cell in the chunk.
+    let mut acc0 = 0.0f32;
+    let mut acc1 = 0.0f32;
+    let mut acc2 = 0.0f32;
+    let mut acc3 = 0.0f32;
+    let mut acc4 = 0.0f32;
+    let mut acc5 = 0.0f32;
+    let mut acc6 = 0.0f32;
+    let mut acc7 = 0.0f32;
+
+    for pack_idx in range(lane, total_packs, 32u32) {
+        let k_first = pack_idx * 8u32;
+        let g = k_first / group_size;
+
+        // Load 8 input values once — reused across 8 m-cells.
+        let x0 = load(x[x_row_base + k_first + 0u32]).cast::<f32>();
+        let x1 = load(x[x_row_base + k_first + 1u32]).cast::<f32>();
+        let x2 = load(x[x_row_base + k_first + 2u32]).cast::<f32>();
+        let x3 = load(x[x_row_base + k_first + 3u32]).cast::<f32>();
+        let x4 = load(x[x_row_base + k_first + 4u32]).cast::<f32>();
+        let x5 = load(x[x_row_base + k_first + 5u32]).cast::<f32>();
+        let x6 = load(x[x_row_base + k_first + 6u32]).cast::<f32>();
+        let x7 = load(x[x_row_base + k_first + 7u32]).cast::<f32>();
+
+        // 8 hand-unrolled m-cells: each block computes one dot product and
+        // adds directly to its accumulator — no select, no branch.
+        //
+        // Common per-m work: weight row base, scale row base, packed read,
+        // scale + bias, 8-way nibble unpack, FMA into local dot.
+        let wrb0 = weight_expert_base + (m_base + 0u32) * total_packs;
+        let srb0 = scale_expert_base + (m_base + 0u32) * groups_per_row;
+        let p0 = load(weight_packed[wrb0 + pack_idx]);
+        let s0 = load(scales[srb0 + g]).cast::<f32>();
+        let b0 = load(biases[srb0 + g]).cast::<f32>();
+        let dot0 = ((p0 >> 0u32) & 15u32).cast::<f32>() * s0 * x0
+            + b0 * x0
+            + ((p0 >> 4u32) & 15u32).cast::<f32>() * s0 * x1
+            + b0 * x1
+            + ((p0 >> 8u32) & 15u32).cast::<f32>() * s0 * x2
+            + b0 * x2
+            + ((p0 >> 12u32) & 15u32).cast::<f32>() * s0 * x3
+            + b0 * x3
+            + ((p0 >> 16u32) & 15u32).cast::<f32>() * s0 * x4
+            + b0 * x4
+            + ((p0 >> 20u32) & 15u32).cast::<f32>() * s0 * x5
+            + b0 * x5
+            + ((p0 >> 24u32) & 15u32).cast::<f32>() * s0 * x6
+            + b0 * x6
+            + ((p0 >> 28u32) & 15u32).cast::<f32>() * s0 * x7
+            + b0 * x7;
+        acc0 = acc0 + dot0;
+
+        let wrb1 = weight_expert_base + (m_base + 1u32) * total_packs;
+        let srb1 = scale_expert_base + (m_base + 1u32) * groups_per_row;
+        let p1 = load(weight_packed[wrb1 + pack_idx]);
+        let s1 = load(scales[srb1 + g]).cast::<f32>();
+        let b1 = load(biases[srb1 + g]).cast::<f32>();
+        let dot1 = ((p1 >> 0u32) & 15u32).cast::<f32>() * s1 * x0
+            + b1 * x0
+            + ((p1 >> 4u32) & 15u32).cast::<f32>() * s1 * x1
+            + b1 * x1
+            + ((p1 >> 8u32) & 15u32).cast::<f32>() * s1 * x2
+            + b1 * x2
+            + ((p1 >> 12u32) & 15u32).cast::<f32>() * s1 * x3
+            + b1 * x3
+            + ((p1 >> 16u32) & 15u32).cast::<f32>() * s1 * x4
+            + b1 * x4
+            + ((p1 >> 20u32) & 15u32).cast::<f32>() * s1 * x5
+            + b1 * x5
+            + ((p1 >> 24u32) & 15u32).cast::<f32>() * s1 * x6
+            + b1 * x6
+            + ((p1 >> 28u32) & 15u32).cast::<f32>() * s1 * x7
+            + b1 * x7;
+        acc1 = acc1 + dot1;
+
+        let wrb2 = weight_expert_base + (m_base + 2u32) * total_packs;
+        let srb2 = scale_expert_base + (m_base + 2u32) * groups_per_row;
+        let p2 = load(weight_packed[wrb2 + pack_idx]);
+        let s2 = load(scales[srb2 + g]).cast::<f32>();
+        let b2 = load(biases[srb2 + g]).cast::<f32>();
+        let dot2 = ((p2 >> 0u32) & 15u32).cast::<f32>() * s2 * x0
+            + b2 * x0
+            + ((p2 >> 4u32) & 15u32).cast::<f32>() * s2 * x1
+            + b2 * x1
+            + ((p2 >> 8u32) & 15u32).cast::<f32>() * s2 * x2
+            + b2 * x2
+            + ((p2 >> 12u32) & 15u32).cast::<f32>() * s2 * x3
+            + b2 * x3
+            + ((p2 >> 16u32) & 15u32).cast::<f32>() * s2 * x4
+            + b2 * x4
+            + ((p2 >> 20u32) & 15u32).cast::<f32>() * s2 * x5
+            + b2 * x5
+            + ((p2 >> 24u32) & 15u32).cast::<f32>() * s2 * x6
+            + b2 * x6
+            + ((p2 >> 28u32) & 15u32).cast::<f32>() * s2 * x7
+            + b2 * x7;
+        acc2 = acc2 + dot2;
+
+        let wrb3 = weight_expert_base + (m_base + 3u32) * total_packs;
+        let srb3 = scale_expert_base + (m_base + 3u32) * groups_per_row;
+        let p3 = load(weight_packed[wrb3 + pack_idx]);
+        let s3 = load(scales[srb3 + g]).cast::<f32>();
+        let b3 = load(biases[srb3 + g]).cast::<f32>();
+        let dot3 = ((p3 >> 0u32) & 15u32).cast::<f32>() * s3 * x0
+            + b3 * x0
+            + ((p3 >> 4u32) & 15u32).cast::<f32>() * s3 * x1
+            + b3 * x1
+            + ((p3 >> 8u32) & 15u32).cast::<f32>() * s3 * x2
+            + b3 * x2
+            + ((p3 >> 12u32) & 15u32).cast::<f32>() * s3 * x3
+            + b3 * x3
+            + ((p3 >> 16u32) & 15u32).cast::<f32>() * s3 * x4
+            + b3 * x4
+            + ((p3 >> 20u32) & 15u32).cast::<f32>() * s3 * x5
+            + b3 * x5
+            + ((p3 >> 24u32) & 15u32).cast::<f32>() * s3 * x6
+            + b3 * x6
+            + ((p3 >> 28u32) & 15u32).cast::<f32>() * s3 * x7
+            + b3 * x7;
+        acc3 = acc3 + dot3;
+
+        let wrb4 = weight_expert_base + (m_base + 4u32) * total_packs;
+        let srb4 = scale_expert_base + (m_base + 4u32) * groups_per_row;
+        let p4 = load(weight_packed[wrb4 + pack_idx]);
+        let s4 = load(scales[srb4 + g]).cast::<f32>();
+        let b4 = load(biases[srb4 + g]).cast::<f32>();
+        let dot4 = ((p4 >> 0u32) & 15u32).cast::<f32>() * s4 * x0
+            + b4 * x0
+            + ((p4 >> 4u32) & 15u32).cast::<f32>() * s4 * x1
+            + b4 * x1
+            + ((p4 >> 8u32) & 15u32).cast::<f32>() * s4 * x2
+            + b4 * x2
+            + ((p4 >> 12u32) & 15u32).cast::<f32>() * s4 * x3
+            + b4 * x3
+            + ((p4 >> 16u32) & 15u32).cast::<f32>() * s4 * x4
+            + b4 * x4
+            + ((p4 >> 20u32) & 15u32).cast::<f32>() * s4 * x5
+            + b4 * x5
+            + ((p4 >> 24u32) & 15u32).cast::<f32>() * s4 * x6
+            + b4 * x6
+            + ((p4 >> 28u32) & 15u32).cast::<f32>() * s4 * x7
+            + b4 * x7;
+        acc4 = acc4 + dot4;
+
+        let wrb5 = weight_expert_base + (m_base + 5u32) * total_packs;
+        let srb5 = scale_expert_base + (m_base + 5u32) * groups_per_row;
+        let p5 = load(weight_packed[wrb5 + pack_idx]);
+        let s5 = load(scales[srb5 + g]).cast::<f32>();
+        let b5 = load(biases[srb5 + g]).cast::<f32>();
+        let dot5 = ((p5 >> 0u32) & 15u32).cast::<f32>() * s5 * x0
+            + b5 * x0
+            + ((p5 >> 4u32) & 15u32).cast::<f32>() * s5 * x1
+            + b5 * x1
+            + ((p5 >> 8u32) & 15u32).cast::<f32>() * s5 * x2
+            + b5 * x2
+            + ((p5 >> 12u32) & 15u32).cast::<f32>() * s5 * x3
+            + b5 * x3
+            + ((p5 >> 16u32) & 15u32).cast::<f32>() * s5 * x4
+            + b5 * x4
+            + ((p5 >> 20u32) & 15u32).cast::<f32>() * s5 * x5
+            + b5 * x5
+            + ((p5 >> 24u32) & 15u32).cast::<f32>() * s5 * x6
+            + b5 * x6
+            + ((p5 >> 28u32) & 15u32).cast::<f32>() * s5 * x7
+            + b5 * x7;
+        acc5 = acc5 + dot5;
+
+        let wrb6 = weight_expert_base + (m_base + 6u32) * total_packs;
+        let srb6 = scale_expert_base + (m_base + 6u32) * groups_per_row;
+        let p6 = load(weight_packed[wrb6 + pack_idx]);
+        let s6 = load(scales[srb6 + g]).cast::<f32>();
+        let b6 = load(biases[srb6 + g]).cast::<f32>();
+        let dot6 = ((p6 >> 0u32) & 15u32).cast::<f32>() * s6 * x0
+            + b6 * x0
+            + ((p6 >> 4u32) & 15u32).cast::<f32>() * s6 * x1
+            + b6 * x1
+            + ((p6 >> 8u32) & 15u32).cast::<f32>() * s6 * x2
+            + b6 * x2
+            + ((p6 >> 12u32) & 15u32).cast::<f32>() * s6 * x3
+            + b6 * x3
+            + ((p6 >> 16u32) & 15u32).cast::<f32>() * s6 * x4
+            + b6 * x4
+            + ((p6 >> 20u32) & 15u32).cast::<f32>() * s6 * x5
+            + b6 * x5
+            + ((p6 >> 24u32) & 15u32).cast::<f32>() * s6 * x6
+            + b6 * x6
+            + ((p6 >> 28u32) & 15u32).cast::<f32>() * s6 * x7
+            + b6 * x7;
+        acc6 = acc6 + dot6;
+
+        let wrb7 = weight_expert_base + (m_base + 7u32) * total_packs;
+        let srb7 = scale_expert_base + (m_base + 7u32) * groups_per_row;
+        let p7 = load(weight_packed[wrb7 + pack_idx]);
+        let s7 = load(scales[srb7 + g]).cast::<f32>();
+        let b7 = load(biases[srb7 + g]).cast::<f32>();
+        let dot7 = ((p7 >> 0u32) & 15u32).cast::<f32>() * s7 * x0
+            + b7 * x0
+            + ((p7 >> 4u32) & 15u32).cast::<f32>() * s7 * x1
+            + b7 * x1
+            + ((p7 >> 8u32) & 15u32).cast::<f32>() * s7 * x2
+            + b7 * x2
+            + ((p7 >> 12u32) & 15u32).cast::<f32>() * s7 * x3
+            + b7 * x3
+            + ((p7 >> 16u32) & 15u32).cast::<f32>() * s7 * x4
+            + b7 * x4
+            + ((p7 >> 20u32) & 15u32).cast::<f32>() * s7 * x5
+            + b7 * x5
+            + ((p7 >> 24u32) & 15u32).cast::<f32>() * s7 * x6
+            + b7 * x6
+            + ((p7 >> 28u32) & 15u32).cast::<f32>() * s7 * x7
+            + b7 * x7;
+        acc7 = acc7 + dot7;
+    }
+
+    let t0 = simd_sum(acc0);
+    let t1 = simd_sum(acc1);
+    let t2 = simd_sum(acc2);
+    let t3 = simd_sum(acc3);
+    let t4 = simd_sum(acc4);
+    let t5 = simd_sum(acc5);
+    let t6 = simd_sum(acc6);
+    let t7 = simd_sum(acc7);
+
+    if lane == 0u32 {
+        store(out[row * m_out + m_base + 0u32], t0.cast::<T>());
+        store(out[row * m_out + m_base + 1u32], t1.cast::<T>());
+        store(out[row * m_out + m_base + 2u32], t2.cast::<T>());
+        store(out[row * m_out + m_base + 3u32], t3.cast::<T>());
+        store(out[row * m_out + m_base + 4u32], t4.cast::<T>());
+        store(out[row * m_out + m_base + 5u32], t5.cast::<T>());
+        store(out[row * m_out + m_base + 6u32], t6.cast::<T>());
+        store(out[row * m_out + m_base + 7u32], t7.cast::<T>());
+    }
+}
+
+inventory::submit! {
+    BenchSpec {
+        op: "moe",
+        subop: "gather_qmm_int4_m8",
+        kernel_name: "mt_moe_gather_qmm_int4_m8",
+        kernel_ir: mt_moe_gather_qmm_int4_m8::kernel_ir_for,
+        dtypes: &[DType::F32, DType::F16, DType::BF16],
+        tol: 5e-2,
+        mlx_src: None,
+        mlx_pattern: None,
+        shapes: &[],
+        dispatch: BenchDispatch::Generic,
+        kernel_mode: Some(KernelMode::Reduction),
+    }
+}
