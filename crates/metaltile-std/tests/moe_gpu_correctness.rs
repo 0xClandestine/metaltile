@@ -211,3 +211,220 @@ fn mt_moe_unpermute_matches_cpu_reference_f32() {
     }
     assert!(max_diff < 1e-4, "unpermute mismatch at [{max_at}]: max |diff| = {max_diff:.2e}",);
 }
+
+// ── extended coverage ────────────────────────────────────────────────────
+
+fn f32_to_f16_bits(v: f32) -> u16 { half::f16::from_f32(v).to_bits() }
+fn f16_bits_to_f32(b: u16) -> f32 { half::f16::from_bits(b).to_f32() }
+
+#[test]
+fn mt_moe_router_topk_qwen3_moe_shape_f32() {
+    // Production cell: Qwen3-MoE = 128 experts, top-8, B*T per layer.
+    // Use n_rows=16 to keep test fast while exercising the full
+    // n_experts/32 = 4 entries-per-lane scan + k=8 mask iters.
+    let n_rows = 16usize;
+    let n_experts = 128usize;
+    let k = 8usize;
+
+    let logits: Vec<f32> = (0..n_rows * n_experts)
+        .map(|i| ((i as f32 * 0.0173) % 13.0) - 6.5 + (i as f32 * 0.0001))
+        .collect();
+    let (ref_idx, ref_w) = cpu_topk_reference(&logits, n_rows, n_experts, k);
+
+    let logits_bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let _g = gpu_lock();
+    let ctx = Context::new().unwrap();
+    let (gpu_idx, gpu_w_bytes) = run_topk(&ctx, DType::F32, &logits_bytes, n_rows, n_experts, k, 4);
+    let gpu_w: Vec<f32> =
+        gpu_w_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+
+    assert_eq!(gpu_idx, ref_idx, "Qwen3-MoE shape: indices diverge");
+    for (i, (g, r)) in gpu_w.iter().zip(ref_w.iter()).enumerate() {
+        assert!((g - r).abs() < 1e-5, "Qwen3-MoE weight[{i}] diverges: {g} vs {r}");
+    }
+}
+
+#[test]
+fn mt_moe_router_topk_f16() {
+    let n_rows = 8usize;
+    let n_experts = 64usize;
+    let k = 4usize;
+
+    let logits_f32: Vec<f32> = (0..n_rows * n_experts)
+        .map(|i| ((i as f32 * 0.13) % 7.0) - 3.5 + (i as f32 * 0.001))
+        .collect();
+    // Round-trip through f16 so the oracle sees what the kernel sees.
+    let logits_f16_to_f32: Vec<f32> =
+        logits_f32.iter().map(|&v| f16_bits_to_f32(f32_to_f16_bits(v))).collect();
+    let (ref_idx, ref_w) = cpu_topk_reference(&logits_f16_to_f32, n_rows, n_experts, k);
+
+    let logits_bytes: Vec<u8> =
+        logits_f32.iter().flat_map(|v| f32_to_f16_bits(*v).to_le_bytes()).collect();
+
+    let _g = gpu_lock();
+    let ctx = Context::new().unwrap();
+    let (gpu_idx, gpu_w_bytes) = run_topk(&ctx, DType::F16, &logits_bytes, n_rows, n_experts, k, 2);
+    let gpu_w: Vec<f32> = gpu_w_bytes
+        .chunks_exact(2)
+        .map(|c| f16_bits_to_f32(u16::from_le_bytes([c[0], c[1]])))
+        .collect();
+
+    assert_eq!(gpu_idx, ref_idx, "f16: indices diverge");
+    // f16 softmax has ~10-bit mantissa precision — widen tolerance.
+    for (i, (g, r)) in gpu_w.iter().zip(ref_w.iter()).enumerate() {
+        let rel = (g - r).abs() / r.abs().max(1e-3);
+        assert!(rel < 5e-3, "f16 weight[{i}] diverges: rel {rel:.2e}");
+    }
+}
+
+#[test]
+fn mt_moe_router_topk_k_equals_1() {
+    // Degenerate case — top-k where k=1 reduces to argmax.
+    let n_rows = 4usize;
+    let n_experts = 32usize;
+    let k = 1usize;
+    let logits: Vec<f32> = (0..n_rows * n_experts)
+        .map(|i| ((i as f32 * 0.7) % 5.0) - 2.5 + (i as f32 * 0.01))
+        .collect();
+    let (ref_idx, ref_w) = cpu_topk_reference(&logits, n_rows, n_experts, k);
+    // Softmax over one element = 1.0
+    for &w in &ref_w {
+        assert!((w - 1.0).abs() < 1e-6, "ref softmax(1)={w}");
+    }
+
+    let logits_bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let _g = gpu_lock();
+    let ctx = Context::new().unwrap();
+    let (gpu_idx, gpu_w_bytes) = run_topk(&ctx, DType::F32, &logits_bytes, n_rows, n_experts, k, 4);
+    let gpu_w: Vec<f32> =
+        gpu_w_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    assert_eq!(gpu_idx, ref_idx);
+    for &w in &gpu_w {
+        assert!((w - 1.0).abs() < 1e-6, "k=1 weight should be 1.0, got {w}");
+    }
+}
+
+#[test]
+fn mt_moe_router_topk_tie_breaks_to_smaller_idx() {
+    // Two experts with identical logit values — convention: lower
+    // index wins. Our kernel uses simd_min on (idx | sentinel) which
+    // matches that convention.
+    let n_rows = 1usize;
+    let n_experts = 8usize;
+    let k = 2usize;
+    let mut logits = vec![0.0f32; n_experts];
+    // Logits descending except indices 2 and 5 tie at the top.
+    logits[2] = 10.0;
+    logits[5] = 10.0; // tie with [2]
+    logits[3] = 8.0;
+    // Top-2 should pick (2, 3) — smaller-idx wins the tie.
+    let logits_bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let _g = gpu_lock();
+    let ctx = Context::new().unwrap();
+    let (gpu_idx, _) = run_topk(&ctx, DType::F32, &logits_bytes, n_rows, n_experts, k, 4);
+    assert_eq!(gpu_idx, vec![2u32, 5u32], "Tie-break: should pick 2 first then 5, not (5,2)");
+}
+
+#[test]
+fn mt_moe_unpermute_shuffled_inv_perm_f32() {
+    // Non-identity inv_perm — verifies the gather pattern with real
+    // shuffled positions (the identity case in the base test would
+    // hide a bug in the indexing math).
+    let n_rows = 4usize;
+    let hidden = 128usize;
+    let k = 4usize;
+    let total = n_rows * k;
+
+    let expert_outputs: Vec<f32> =
+        (0..total * hidden).map(|i| ((i as f32 * 0.11) % 9.0) - 4.5).collect();
+    // Deterministic shuffled permutation.
+    let inv_perm: Vec<u32> = (0..total as u32).map(|i| (total as u32 - 1 - i)).collect();
+    let raw_weights: Vec<f32> = (0..n_rows * k).map(|i| 0.5 + (i as f32 * 0.07)).collect();
+    let mut weights = vec![0.0f32; n_rows * k];
+    for row in 0..n_rows {
+        let s: f32 = raw_weights[row * k..(row + 1) * k].iter().sum();
+        for j in 0..k {
+            weights[row * k + j] = raw_weights[row * k + j] / s;
+        }
+    }
+    let mut ref_out = vec![0.0f32; n_rows * hidden];
+    for token in 0..n_rows {
+        for h in 0..hidden {
+            let mut acc = 0.0f32;
+            for j in 0..k {
+                let pos = inv_perm[token * k + j] as usize;
+                acc += weights[token * k + j] * expert_outputs[pos * hidden + h];
+            }
+            ref_out[token * hidden + h] = acc;
+        }
+    }
+    let exp_bytes: Vec<u8> = expert_outputs.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let w_bytes: Vec<u8> = weights.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let _g = gpu_lock();
+    let ctx = Context::new().unwrap();
+    let out_bytes =
+        run_unpermute(&ctx, DType::F32, &exp_bytes, &inv_perm, &w_bytes, n_rows, hidden, k, 4);
+    let gpu_out: Vec<f32> =
+        out_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    for (i, (g, r)) in gpu_out.iter().zip(ref_out.iter()).enumerate() {
+        assert!((g - r).abs() < 1e-4, "shuffled inv_perm[{i}]: {g} vs {r}");
+    }
+}
+
+#[test]
+fn mt_moe_unpermute_qwen3_moe_shape_f16() {
+    // Production cell: Qwen3-MoE hidden=2048, k=8.
+    let n_rows = 8usize;
+    let hidden = 2048usize;
+    let k = 8usize;
+    let total = n_rows * k;
+
+    let expert_outputs_f32: Vec<f32> =
+        (0..total * hidden).map(|i| ((i as f32 * 0.0091) % 6.0) - 3.0).collect();
+    let inv_perm: Vec<u32> = (0..total as u32).map(|i| (i * 7 + 3) % total as u32).collect();
+    let raw_weights: Vec<f32> = (0..n_rows * k).map(|i| 0.4 + (i as f32 * 0.013)).collect();
+    let mut weights_f32 = vec![0.0f32; n_rows * k];
+    for row in 0..n_rows {
+        let s: f32 = raw_weights[row * k..(row + 1) * k].iter().sum();
+        for j in 0..k {
+            weights_f32[row * k + j] = raw_weights[row * k + j] / s;
+        }
+    }
+    // Round through f16 for the oracle.
+    let ef16: Vec<f32> =
+        expert_outputs_f32.iter().map(|&v| f16_bits_to_f32(f32_to_f16_bits(v))).collect();
+    let wf16: Vec<f32> = weights_f32.iter().map(|&v| f16_bits_to_f32(f32_to_f16_bits(v))).collect();
+    let mut ref_out = vec![0.0f32; n_rows * hidden];
+    for token in 0..n_rows {
+        for h in 0..hidden {
+            let mut acc = 0.0f32;
+            for j in 0..k {
+                let pos = inv_perm[token * k + j] as usize;
+                acc += wf16[token * k + j] * ef16[pos * hidden + h];
+            }
+            ref_out[token * hidden + h] = acc;
+        }
+    }
+
+    let exp_bytes: Vec<u8> =
+        expert_outputs_f32.iter().flat_map(|v| f32_to_f16_bits(*v).to_le_bytes()).collect();
+    let w_bytes: Vec<u8> =
+        weights_f32.iter().flat_map(|v| f32_to_f16_bits(*v).to_le_bytes()).collect();
+    let _g = gpu_lock();
+    let ctx = Context::new().unwrap();
+    let out_bytes =
+        run_unpermute(&ctx, DType::F16, &exp_bytes, &inv_perm, &w_bytes, n_rows, hidden, k, 2);
+    let gpu_out: Vec<f32> = out_bytes
+        .chunks_exact(2)
+        .map(|c| f16_bits_to_f32(u16::from_le_bytes([c[0], c[1]])))
+        .collect();
+    let mut max_rel = 0.0f32;
+    for (g, r) in gpu_out.iter().zip(ref_out.iter()) {
+        let rel = (g - r).abs() / r.abs().max(1e-3);
+        if rel > max_rel {
+            max_rel = rel;
+        }
+    }
+    // f16 + 8-way weighted-sum: relative tolerance ~1% covers k cumulative ULP drifts.
+    assert!(max_rel < 1e-2, "Qwen3-MoE f16 unpermute max rel diff {max_rel:.2e}");
+}
