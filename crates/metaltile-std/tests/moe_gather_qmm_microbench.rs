@@ -12,7 +12,11 @@ use std::{collections::BTreeMap, time::Instant};
 use common::{Dt, gpu_lock, pack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
-use metaltile_std::ffai::moe::{mt_moe_gather_qmm_int4, mt_moe_gather_qmm_int4_m8};
+use metaltile_std::ffai::moe::{
+    mt_moe_gather_qmm_int4,
+    mt_moe_gather_qmm_int4_m8,
+    mt_moe_gather_qmm_mma_int4,
+};
 
 fn pack_int4_row(weights: &[u32]) -> Vec<u32> {
     weights
@@ -31,6 +35,7 @@ fn pack_int4_row(weights: &[u32]) -> Vec<u32> {
 enum Variant {
     M1,
     M8,
+    Mma,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -76,43 +81,57 @@ fn time_gather_qmm_v(
         (0..groups_total).map(|i| -0.02 + 0.0005 * ((i as f32 * 0.07).cos())).collect();
     let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * ((i as f32 * 0.013).sin())).collect();
 
+    // Per-row indices (for MMA kernel which uses rhs_indices). Built from the
+    // CSR-style expert_offsets the m1/m8 kernels consume.
+    let mut indices: Vec<u32> = Vec::with_capacity(t_rows);
+    for e in 0..n_experts {
+        let s = expert_offsets[e];
+        let e_end = expert_offsets[e + 1];
+        for _ in s..e_end {
+            indices.push(e as u32);
+        }
+    }
+
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     buffers.insert("x".into(), pack_bytes(&x, Dt::F32));
-    buffers.insert(
-        "weight_packed".into(),
-        weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect(),
-    );
+    let w_bytes: Vec<u8> = weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect();
+    buffers.insert("weight_packed".into(), w_bytes.clone());
+    buffers.insert("w".into(), w_bytes);
     buffers.insert("scales".into(), pack_bytes(&scales, Dt::F32));
     buffers.insert("biases".into(), pack_bytes(&biases, Dt::F32));
     buffers.insert(
         "expert_offsets".into(),
         expert_offsets.iter().flat_map(|o| o.to_le_bytes()).collect(),
     );
+    buffers.insert("indices".into(), indices.iter().flat_map(|i| i.to_le_bytes()).collect());
     buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * m_out], Dt::F32));
     buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
     buffers.insert("m_out".into(), (m_out as u32).to_le_bytes().to_vec());
+    buffers.insert("n_out".into(), (m_out as u32).to_le_bytes().to_vec());
     buffers.insert("n_experts".into(), (n_experts as u32).to_le_bytes().to_vec());
     buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
     buffers.insert("t_total".into(), (t_rows as u32).to_le_bytes().to_vec());
+    buffers.insert("m_total".into(), (t_rows as u32).to_le_bytes().to_vec());
 
     let mut kernel = match variant {
         Variant::M1 => mt_moe_gather_qmm_int4::kernel_ir_for(Dt::F32.to_dtype()),
         Variant::M8 => mt_moe_gather_qmm_int4_m8::kernel_ir_for(Dt::F32.to_dtype()),
+        Variant::Mma => mt_moe_gather_qmm_mma_int4::kernel_ir_for(Dt::F32.to_dtype()),
     };
     kernel.mode = KernelMode::Reduction;
-    let grid = match variant {
-        Variant::M1 => [m_out, t_rows, 1],
-        Variant::M8 => [m_out / 8, t_rows, 1],
+    let (grid, tg) = match variant {
+        Variant::M1 => ([m_out, t_rows, 1], [32usize, 1, 1]),
+        Variant::M8 => ([m_out / 8, t_rows, 1], [32, 1, 1]),
+        Variant::Mma => ([m_out / 32, t_rows.div_ceil(32), 1], [128, 1, 1]),
     };
 
-    let _ = ctx
-        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), grid, [32, 1, 1])
-        .expect("dispatch");
+    let _ =
+        ctx.dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), grid, tg).expect("dispatch");
 
     let start = Instant::now();
     for _ in 0..iters {
         let _ = ctx
-            .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), grid, [32, 1, 1])
+            .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), grid, tg)
             .expect("dispatch");
     }
     start.elapsed().as_micros() as f64 / iters as f64
@@ -141,15 +160,27 @@ fn bench_qwen36_a3b_moe_layer_shape() {
             time_gather_qmm_v(&ctx, t_rows, k_in, m_out, n_experts, group_size, iters, Variant::M1);
         let us_m8 =
             time_gather_qmm_v(&ctx, t_rows, k_in, m_out, n_experts, group_size, iters, Variant::M8);
+        let us_mma = time_gather_qmm_v(
+            &ctx,
+            t_rows,
+            k_in,
+            m_out,
+            n_experts,
+            group_size,
+            iters,
+            Variant::Mma,
+        );
         let flops = (t_rows * m_out * k_in * 2) as f64;
         let gf_m1 = flops / us_m1 / 1e3;
         let gf_m8 = flops / us_m8 / 1e3;
+        let gf_mma = flops / us_mma / 1e3;
         eprintln!(
             "Qwen3.6-A3B {label:>8} K={k_in} M={m_out} T={t_rows}: \
              m1={us_m1:>7.0}us ({gf_m1:>5.0} GF) \
              m8={us_m8:>7.0}us ({gf_m8:>5.0} GF) \
-             m8-vs-m1={:.2}×",
-            us_m1 / us_m8
+             mma={us_mma:>7.0}us ({gf_mma:>5.0} GF) \
+             mma-vs-m8={:.2}×",
+            us_m8 / us_mma
         );
     }
 }
