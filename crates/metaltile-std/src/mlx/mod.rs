@@ -20,8 +20,10 @@ pub mod copy;
 pub mod fp_quantized;
 #[cfg(feature = "nax")]
 pub mod fp_quantized_nax;
+pub mod gather_axis;
 pub mod gemv;
 pub mod gemv_masked;
+pub mod hadamard;
 pub mod layer_norm;
 pub mod logsumexp;
 pub mod quantized;
@@ -33,6 +35,7 @@ pub mod rms_norm;
 pub mod rope;
 pub mod scaled_dot_product_attention;
 pub mod scan;
+pub mod scatter_axis;
 pub mod sdpa_vector;
 pub mod sgload_smoke;
 pub mod softmax;

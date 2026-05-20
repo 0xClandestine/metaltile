@@ -73,28 +73,28 @@ Sources surveyed:
 | fp_quantized_nax | ✓ | ✓ | ✗ | Module file present but empty (no `#[kernel]` defs). NAX-gated. |
 | quantized_nax | ✓ | ✓ | ✗ | Module file present but empty (no `#[kernel]` defs). NAX-gated. |
 | fft (radix + readwrite) | ✓ | ✓ | ✗ | Stub file in repo, not declared. No DSL port. |
-| hadamard (hadamard_n + hadamard_m) | ✓ | ✓ | ✗ | Not ported. Used by Walsh-Hadamard quant path; could matter for AURA rotations longer-term. |
+| hadamard (hadamard_n + hadamard_m) | ✓ | ✓ | ~ | `mlx/hadamard.rs` → `mt_hadamard_n{64,128,256,512,1024}<T>`. Power-of-2 FWHT via log2(N) butterfly passes. The non-power-of-2 `hadamard_m` factor (M ∈ {12,20,28}) is a follow-up. |
 | fence | ✓ | ✓ | ✗ | Stub file in repo, not declared. Synchronization primitive. |
 | gather (bare-tensor embedding lookup) | ✓ (via indexing/) | ✓ | ✓ | `ffai/gather.rs` → `ffai_gather<T>`. FFAI's embedding-table gather. |
-| indexing (scatter, scatter_axis, gather_axis, gather_front, masked_scatter) | ✓ | ✓ | ✗ | Header-only family in MLX; metaltile only covers bare gather today. scatter/scatter_axis/masked_scatter all absent. |
+| indexing (scatter, scatter_axis, gather_axis, gather_front, masked_scatter) | ✓ | ✓ | ~ | `mlx/gather_axis.rs` + `mlx/scatter_axis.rs` → `mt_gather_axis` / `mt_scatter_axis`. Contiguous gather/scatter-along-axis. The general strided forms (scatter, gather_front, masked_scatter) need strided-indexing infra — follow-up. |
 | aura_encode (codebook quantize, fused) | ✗ | ✓ (`turbo_fused_encode` in `turbo_quant.metal`) | ✓ | `ffai/aura_encode.rs`. Bit-widths 2/3/4/8. Renamed turbo_*→aura_*. |
 | aura_dequant_rotated (bulk dequant to rotated codec space) | ✗ | ✓ (`turbo_dequant_rotated` in `turbo_quant.metal`) | ✓ | `ffai/aura_dequant_rotated.rs`. bits ∈ {2,3,4,8}. Renamed. |
 | aura_score (compressed-domain Q·K) | ✗ | ✓ (`turbo_score`) | ✓ | `ffai/aura_score.rs`. bits ∈ {2,3,4,8}. Renamed. |
 | aura_value (compressed-domain value aggregation) | ✗ | ✓ (`turbo_value` in `turbo_quant.metal`) | ✓ | `ffai/aura_value.rs`. Sparsity-threshold guard mirrors MLX upstream. Renamed. |
 | aura_flash_p1 (compressed-domain flash pass 1) | ✗ | ✓ (`turbo_flash_p1` in `turbo_flash.metal`) | ~ | `ffai/aura_flash_p1.rs`. Only the `(kb=4, vb=2, dim=128)` aura4v2/Qwen3-128 instantiation today; causal-variant from upstream not ported. |
 | aura_flash_pass2 (cross-block online-softmax merge) | ✗ | ✓ (`turbo_flash_pass2`) | ✓ | `ffai/aura_flash_pass2.rs`. fp32 accums → bf16 final. Renamed. |
-| turbo_flash_sdpa (fused single-pass SDPA, sinks variant) | ✗ | ✓ (`turbo_flash_sdpa.metal`) | ✗ | NOT PORTED. Sinks-using models (spec 041 phase 1.1) — needed for GPT-OSS / sink-attention configs. |
-| flash_quantized_sdpa (single-pass quantized SDPA, affine cache) | ✗ | ✓ (`flash_quantized_sdpa.metal`) | ✗ | NOT PORTED. bits ∈ {4,8}, head_dim ∈ {64,96,128,256,512}. Direct competitor to `sdpa_decode_2pass` over affine-quant KV caches. |
+| turbo_flash_sdpa (fused single-pass SDPA, sinks variant) | ✗ | ✓ (`turbo_flash_sdpa.metal`) | ✓ | `ffai/aura_flash_sdpa.rs` → `aura_flash_sdpa_kb*_vb*_d*<T>`. Single-pass online-softmax over compressed K/V with attention sinks + sliding-window causal mask. Single-simdgroup shape (token-parallelism a perf follow-up). |
+| flash_quantized_sdpa (single-pass quantized SDPA, affine cache) | ✗ | ✓ (`flash_quantized_sdpa.metal`) | ✓ | `ffai/flash_quantized_sdpa.rs` → `flash_quantized_sdpa_b{4,8}_d{64,128,256}<T>`. Single-pass online-softmax SDPA over affine-quant KV, with sinks + sliding-window. head_dim {96,512} and bool/float masks are a follow-up. |
 | gated_delta (GatedDeltaNet recurrence) | ✗ | ✓ (`gated_delta.metal`) | ✗ | NOT PORTED. Required for GDN-bearing models (Qwen 3.5 / 3.6 hybrid). Two variants in upstream: standard + fused. |
-| gated_delta_replay (tape capture + state replay) | ✗ | ✓ (`gated_delta_replay.metal`) | ✗ | NOT PORTED. Spec 020 phase 2 — speculative decoding rollback on GDN. |
+| gated_delta_replay (tape capture + state replay) | ✗ | ✓ (`gated_delta_replay.metal`) | ✓ | `ffai/gated_delta_replay.rs` → `gated_delta_step_record<T>` (forward + delta-tape) + `state_replay<T>` (branchless accepted-prefix re-fold). Speculative-decode rollback on GDN. |
 | ssm_step (Mamba 2 SSD single-token decode) | ✗ | ✓ (`ssm.metal`) | ✓ | `ffai/ssm.rs` → `ssm_step<T>`, `mt_ssm_step<T>`. Faithful port; `mlx_src: None` because pinned MLX upstream doesn't ship `ssm.metal`. Will graduate to `mlx/` when pin moves. |
 | conv1d_causal_step (depthwise SSM conv stream) | ✗ | partial (subset of SSM toolchain) | ✓ | `ffai/ssm.rs` → `conv1d_causal_step<T>`. fp32 state recurrence. |
-| ssm_replay (sequential tape capture + replay) | ✗ | ✓ (`ssm_replay.metal`) | ✗ | NOT PORTED. Spec 040 — Mamba/Mamba2 state replay for speculative decoding. |
+| ssm_replay (sequential tape capture + replay) | ✗ | ✓ (`ssm_replay.metal`) | ✓ | `ffai/ssm_replay.rs` → `ssm_step_record<T>` (SSD forward + dA/dBx tape) + `ssm_replay<T>` (re-fold first k entries). Spec 040 Mamba/Mamba2 state replay. |
 | fused_gate_activation (silu/gelu × up gate) | ✗ | ✓ (`fused_gate_activation.metal`) | ✗ | NOT PORTED. Single-row + looped variants; replaces split+act+mul (≥2 dispatches → 1). Hot path in every FFN. |
-| rms_norm_residual (RMSNorm + residual add fused) | ✗ | ✓ (`rms_norm_residual.metal`) | ✗ | NOT PORTED. ~90 saved dispatches/token on Gemma4-30 type configs. |
-| rms_norm_rope (RMSNorm + RoPE fused) | ✗ | ✓ (`rms_norm_rope.metal`) | ✗ | NOT PORTED. Q/K post-projection norm+rope in one dispatch. |
-| rms_norm_qgemv (RMSNorm + 4-bit quantized GEMV fused) | ✗ | ✓ (`rms_norm_qgemv.metal`) | ✗ | NOT PORTED. Eliminates global RT between norm and qmatmul. |
-| batched_qkv_qgemv (Q/K/V 4-bit qGEMV → 1 dispatch) | ✗ | ✓ (`batched_qkv_qgemv.metal`) | ✗ | NOT PORTED. Decode-form fused QKV projection over int4 weights. |
+| rms_norm_residual (RMSNorm + residual add fused) | ✗ | ✓ (`rms_norm_residual.metal`) | ✓ | `ffai/rms_norm_residual.rs` → `ffai_rms_norm_residual<T>`. Reduction-mode, `N = TPG*4`; mirrors `mt_rms_norm` + a residual-add input. ~90 saved dispatches/token on Gemma4-30 type configs. |
+| rms_norm_rope (RMSNorm + RoPE fused) | ✗ | ✓ (`rms_norm_rope.metal`) | ✓ | `ffai/rms_norm_rope.rs` → `ffai_rms_norm_rope<T>`. Reduction-mode, paired-layout RoPE; `TPG = axis_size/2`. Q/K post-projection norm+rope in one dispatch. |
+| rms_norm_qgemv (RMSNorm + 4-bit quantized GEMV fused) | ✗ | ✓ (`rms_norm_qgemv.metal`) | ✓ | `ffai/rms_norm_qgemv.rs` → `ffai_rms_norm_qgemv<T>`. Reduction-mode, int4, one row/threadgroup; eliminates the global RT of the normalized activation. MLX's 8-row-per-TG tiling is a perf follow-up. |
+| batched_qkv_qgemv (Q/K/V 4-bit qGEMV → 1 dispatch) | ✗ | ✓ (`batched_qkv_qgemv.metal`) | ✓ | `ffai/batched_qkv_qgemv.rs` → `ffai_batched_qkv_qgemv<T>`. Reduction-mode, int4; `program_id::<2>()` selects Q/K/V, output concatenated `[Q\|K\|V]`. Decode-form fused QKV projection. |
 | kv_cache_update (raw bf16/fp16 single-token append) | ✗ | ✗ | ✓ | `ffai/kv_cache.rs` → `kv_cache_update<T>`. FFAI-only; raw cache append. |
 | kv_cache (affine-quant int4/int8 quantize + bulk dequant) | ~ (via `quantized.metal` affine_quantize) | ~ | ✓ | `ffai/kv_cache.rs` — `quantize_kv` + `bulk_dequant_kv` for int4/int8. FFAI-specific cache layout. |
 | sampling (softmax + categorical inverse-CDF) | ✗ | ✗ | ✓ | `ffai/sampling.rs` → `softmax_categorical_sample`. Companion to `ffai_argmax` for `T > 0` decode. |
