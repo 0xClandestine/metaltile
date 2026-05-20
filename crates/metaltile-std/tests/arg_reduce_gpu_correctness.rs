@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 use common::{Dt, gpu_lock, pack_bytes, unpack_u32_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
-use metaltile_std::ffai::arg_reduce::argmax;
+use metaltile_std::ffai::arg_reduce::ffai_argmax;
 
 fn run_argmax(logits: &[f32], dt: Dt) -> u32 {
     let n = logits.len();
@@ -42,7 +42,7 @@ fn run_argmax(logits: &[f32], dt: Dt) -> u32 {
     buffers.insert("n".into(), (n as u32).to_le_bytes().to_vec());
 
     let ctx = Context::new().expect("Context::new on macOS");
-    let mut kernel = argmax::kernel_ir_for(dt.to_dtype());
+    let mut kernel = ffai_argmax::kernel_ir_for(dt.to_dtype());
     kernel.mode = KernelMode::Reduction;
 
     // Reduction dispatch: grid=[1,1,1] tg=[256,1,1]. TPG=256 satisfies
