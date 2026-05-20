@@ -39,10 +39,22 @@ fn main() {
 /// Multiple Cargo build scripts (metaltile-std, metaltile-cli) share the same
 /// `.cache/mlx` directory.  Cargo may run their build scripts in parallel, so
 /// we use a file-based advisory lock to serialise the fetch.
+///
+/// Progress visibility: when the cache is hot this is a 1 ms noop and prints
+/// nothing. When stale/missing (first `tile bench` after `cargo clean`, or
+/// after the pinned `MLX_COMMIT` changes — e.g. PR #94 repointed to
+/// `ekryski/mlx@alpha`), prints status to stderr in real time so the build
+/// doesn't look hung during the 30-60 s git fetch.
+///
+/// Cargo's build-script protocol normally swallows stdout/stderr unless
+/// `-vv` is passed or the build fails, BUT inherited child stdio (which is
+/// what `Command::status()` here uses) is shown through to the user's
+/// terminal when running `cargo build` interactively. The `eprintln!`s land
+/// in the same stream as `git`'s own output and are visible without flags.
 fn ensure_mlx(cache_dir: &Path) {
     let marker = cache_dir.join(".commit");
 
-    // Fast path: cache is already valid — no locking needed.
+    // Fast path: cache is already valid — no locking, no output.
     if cache_is_valid(cache_dir, &marker) {
         return;
     }
@@ -59,10 +71,19 @@ fn ensure_mlx(cache_dir: &Path) {
 
     // Stale or corrupt cache — start fresh.
     if cache_dir.exists() {
+        println!(
+            "cargo:warning=MLX cache stale (pinned commit changed) → wiping {}",
+            cache_dir.display()
+        );
         std::fs::remove_dir_all(cache_dir).unwrap();
     }
 
-    println!("cargo:warning=Fetching MLX kernels @ {}…", &MLX_COMMIT[..8]);
+    let start = std::time::Instant::now();
+    println!(
+        "cargo:warning=Fetching pinned MLX kernels (commit {} from {})… ~10-60 s on first build, cached afterwards.",
+        &MLX_COMMIT[..8],
+        MLX_URL
+    );
 
     // Shallow blobless sparse clone (downloads no file blobs yet).
     run("git", &[
@@ -80,11 +101,21 @@ fn ensure_mlx(cache_dir: &Path) {
     // If latest HEAD isn't our pinned commit, fetch and checkout the exact SHA.
     let head = git_head(cache_dir);
     if head != MLX_COMMIT {
+        println!(
+            "cargo:warning=  HEAD {} ≠ pinned {}, fetching exact commit",
+            &head[..8],
+            &MLX_COMMIT[..8]
+        );
         run_in("git", &["fetch", "--depth=1", "origin", MLX_COMMIT], cache_dir);
         run_in("git", &["checkout", "FETCH_HEAD"], cache_dir);
     }
 
     std::fs::write(&marker, MLX_COMMIT).unwrap();
+    println!(
+        "cargo:warning=MLX kernels ready ({:.1} s; cached at {})",
+        start.elapsed().as_secs_f64(),
+        cache_dir.display()
+    );
 }
 
 fn cache_is_valid(cache_dir: &Path, marker: &Path) -> bool {
