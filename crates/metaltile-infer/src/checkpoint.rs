@@ -49,9 +49,5 @@ pub fn load_safetensors_dir(dir: impl AsRef<Path>) -> Result<WeightMap, InferErr
 /// scan for all `.safetensors` shards.
 pub fn load_weights(path: impl AsRef<Path>) -> Result<WeightMap, InferError> {
     let path = path.as_ref();
-    if path.is_dir() {
-        load_safetensors_dir(path)
-    } else {
-        load_safetensors(path)
-    }
+    if path.is_dir() { load_safetensors_dir(path) } else { load_safetensors(path) }
 }

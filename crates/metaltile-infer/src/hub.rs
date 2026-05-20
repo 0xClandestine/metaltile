@@ -12,11 +12,8 @@ use crate::error::InferError;
 /// `config.json`. Uses the HF_HOME cache (default `~/.cache/huggingface`).
 pub async fn snapshot_download(repo_id: &str, revision: &str) -> Result<PathBuf, InferError> {
     let api = Api::new().map_err(|e| InferError::Hub(e.to_string()))?;
-    let repo = api.repo(Repo::with_revision(
-        repo_id.to_string(),
-        RepoType::Model,
-        revision.to_string(),
-    ));
+    let repo =
+        api.repo(Repo::with_revision(repo_id.to_string(), RepoType::Model, revision.to_string()));
 
     // Fetch the file listing from the Hub
     let info = repo.info().await.map_err(|e| InferError::Hub(e.to_string()))?;
@@ -32,10 +29,7 @@ pub async fn snapshot_download(repo_id: &str, revision: &str) -> Result<PathBuf,
         if !is_wanted {
             continue;
         }
-        let local = repo
-            .get(filename)
-            .await
-            .map_err(|e| InferError::Hub(e.to_string()))?;
+        let local = repo.get(filename).await.map_err(|e| InferError::Hub(e.to_string()))?;
         if local_dir.is_none() {
             local_dir = local.parent().map(|p| p.to_path_buf());
         }

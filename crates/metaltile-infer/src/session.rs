@@ -6,22 +6,22 @@
 //! 2. `session.generate(prompt, max_tokens, temperature, on_token)` — run
 //!    the tokenizer + inference loop, calling `on_token` for each new token.
 
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use metaltile_core::dtype::DType;
 use metaltile_model::{
-    CompileParams, KernelRegistry, ModelDef, StateMap, WeightMap,
-    compile, execute_plan,
+    CompileParams,
+    KernelRegistry,
+    ModelDef,
+    StateMap,
+    WeightMap,
+    compile,
+    execute_plan,
 };
 use metaltile_runtime::{Context, ResidentBuffer};
 use tokenizers::Tokenizer;
 
-use crate::{
-    checkpoint::load_weights,
-    config::ModelConfig,
-    error::InferError,
-};
+use crate::{checkpoint::load_weights, config::ModelConfig, error::InferError};
 
 /// Single-model inference session. Holds GPU-resident weights + KV cache.
 pub struct Session {
@@ -53,7 +53,8 @@ impl Session {
         let model_dir = model_dir.as_ref();
 
         // ── Parse model definition ─────────────────────────────────────
-        let def: ModelDef = toml::from_str(toml_src).map_err(|e| InferError::Other(e.to_string()))?;
+        let def: ModelDef =
+            toml::from_str(toml_src).map_err(|e| InferError::Other(e.to_string()))?;
 
         // ── Load weights ───────────────────────────────────────────────
         let weights: WeightMap = load_weights(model_dir)?;
@@ -64,19 +65,15 @@ impl Session {
         // ── Upload weights to GPU-resident buffers ─────────────────────
         let mut resident: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
         for (name, bytes) in &weights {
-            let rb = ctx
-                .upload_resident(bytes)
-                .map_err(|e| InferError::Other(e.to_string()))?;
+            let rb = ctx.upload_resident(bytes).map_err(|e| InferError::Other(e.to_string()))?;
             resident.insert(name.clone(), rb);
         }
 
         // ── Allocate GPU-resident KV cache ─────────────────────────────
         // Layout per layer, per K and V:
         //   n_kv_heads × max_seq_len × head_dim elements of `dtype`
-        let kv_bytes = config.n_kv_heads
-            * config.max_seq_len
-            * config.head_dim
-            * dtype.size_bytes();
+        let kv_bytes =
+            config.n_kv_heads * config.max_seq_len * config.head_dim * dtype.size_bytes();
         for layer in 0..config.n_layers {
             for key in ["k", "v"] {
                 let name = format!("kv_cache.{layer}.{key}");
@@ -118,21 +115,13 @@ impl Session {
 
         // ── Tokenizer ─────────────────────────────────────────────────
         let tok_path = model_dir.join("tokenizer.json");
-        let tokenizer = Tokenizer::from_file(&tok_path)
-            .map_err(|e| InferError::Tokenizer(e.to_string()))?;
+        let tokenizer =
+            Tokenizer::from_file(&tok_path).map_err(|e| InferError::Tokenizer(e.to_string()))?;
 
         // Common EOS token IDs for Llama family
         let eos_token_id = find_eos_token_id(&tokenizer);
 
-        Ok(Session {
-            ctx,
-            plan,
-            resident,
-            state,
-            tokenizer,
-            _config: config,
-            eos_token_id,
-        })
+        Ok(Session { ctx, plan, resident, state, tokenizer, _config: config, eos_token_id })
     }
 
     /// Run inference for `max_tokens` steps, calling `on_token` with each

@@ -17,8 +17,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use metaltile_runtime::{Context, DispatchSpec, ResidentBuffer};
-use metaltile_runtime::context::GridSpec;
+use metaltile_runtime::{Context, DispatchSpec, ResidentBuffer, context::GridSpec};
 
 use crate::{
     error::ModelError,
@@ -32,8 +31,7 @@ pub type WeightMap = HashMap<String, Vec<u8>>;
 pub type StateMap = HashMap<String, Vec<u8>>;
 
 /// Static empty function-constants map (shared across all dispatches).
-static EMPTY_FN_CONSTS: std::sync::OnceLock<BTreeMap<String, u32>> =
-    std::sync::OnceLock::new();
+static EMPTY_FN_CONSTS: std::sync::OnceLock<BTreeMap<String, u32>> = std::sync::OnceLock::new();
 
 /// Execute a plan on the GPU and read back the final output buffer.
 ///
@@ -57,11 +55,7 @@ pub fn execute_plan(
     let fn_consts = EMPTY_FN_CONSTS.get_or_init(BTreeMap::new);
 
     // Pre-allocate slot data with correct sizes from the liveness analysis.
-    let mut slot_data: Vec<Vec<u8>> = plan
-        .slots
-        .iter()
-        .map(|s| vec![0u8; s.size_bytes])
-        .collect();
+    let mut slot_data: Vec<Vec<u8>> = plan.slots.iter().map(|s| vec![0u8; s.size_bytes]).collect();
 
     for node in &plan.nodes {
         let kernel = (node.kernel_ir)(node.dtype);
@@ -80,13 +74,12 @@ pub fn execute_plan(
                         slot_data.get(*idx).cloned().unwrap_or_default(),
                     );
                 },
-                SlotRef::Weight(tensor_name) => {
+                SlotRef::Weight(tensor_name) =>
                     if let Some(rb) = resident.get(tensor_name) {
                         spec_resident.insert(param_name.clone(), rb.clone());
                     } else if let Some(bytes) = weights.get(tensor_name) {
                         buffers.insert(param_name.clone(), bytes.clone());
-                    }
-                },
+                    },
                 SlotRef::State(key) => {
                     // GPU-resident state (KV cache) bypasses CPU buffers.
                     if let Some(rb) = resident.get(key) {
@@ -132,13 +125,11 @@ pub fn execute_plan(
         for (name, cv) in &node.cexprs {
             let bits: u32 = match cv {
                 ConstexprValue::Static(val) => *val,
-                ConstexprValue::State(state_key) => {
-                    state
-                        .get(state_key)
-                        .and_then(|b| b.get(..4))
-                        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                        .unwrap_or(0)
-                },
+                ConstexprValue::State(state_key) => state
+                    .get(state_key)
+                    .and_then(|b| b.get(..4))
+                    .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .unwrap_or(0),
             };
             buffers.insert(name.clone(), bits.to_le_bytes().to_vec());
         }
@@ -155,9 +146,7 @@ pub fn execute_plan(
             output_resident: &spec_output_resident,
         };
 
-        let results = ctx
-            .dispatch_chain(&[spec])
-            .map_err(|e| ModelError::Other(e.to_string()))?;
+        let results = ctx.dispatch_chain(&[spec]).map_err(|e| ModelError::Other(e.to_string()))?;
 
         // ── Output readback ───────────────────────────────────────
         let Some(result) = results.into_iter().next() else { continue };
@@ -165,11 +154,10 @@ pub fn execute_plan(
         for (param_name, slot_ref) in &node.output_bindings {
             let Some(bytes) = result.outputs.get(param_name) else { continue };
             match slot_ref {
-                SlotRef::Slot(idx) => {
+                SlotRef::Slot(idx) =>
                     if let Some(slot) = slot_data.get_mut(*idx) {
                         *slot = bytes.clone();
-                    }
-                },
+                    },
                 SlotRef::State(key) => {
                     state.insert(key.clone(), bytes.clone());
                 },
@@ -179,10 +167,7 @@ pub fn execute_plan(
     }
 
     // Return the bytes of the plan's designated output slot.
-    Ok(slot_data
-        .get(plan.output_slot)
-        .cloned()
-        .unwrap_or_default())
+    Ok(slot_data.get(plan.output_slot).cloned().unwrap_or_default())
 }
 
 /// Convert a `GridSpec` to `(grid_groups: [usize; 3], threads_per_group: [usize; 3])`.
@@ -193,12 +178,10 @@ fn grid_to_dims(grid: &GridSpec) -> ([usize; 3], [usize; 3]) {
             let groups = n.div_ceil(tpg);
             ([groups, 1, 1], [tpg, 1, 1])
         },
-        GridSpec::Reduction { num_rows, threads_per_group } => {
-            ([*num_rows, 1, 1], [*threads_per_group, 1, 1])
-        },
-        GridSpec::Grid3D { x, y, z, threads_per_group } => {
-            ([*x, *y, *z], [*threads_per_group, 1, 1])
-        },
+        GridSpec::Reduction { num_rows, threads_per_group } =>
+            ([*num_rows, 1, 1], [*threads_per_group, 1, 1]),
+        GridSpec::Grid3D { x, y, z, threads_per_group } =>
+            ([*x, *y, *z], [*threads_per_group, 1, 1]),
     }
 }
 
@@ -216,10 +199,7 @@ mod tests {
 
     #[test]
     fn grid_to_dims_reduction() {
-        let grid = GridSpec::Reduction {
-            num_rows: 32,
-            threads_per_group: 1024,
-        };
+        let grid = GridSpec::Reduction { num_rows: 32, threads_per_group: 1024 };
         let (groups, tpg) = grid_to_dims(&grid);
         assert_eq!(groups, [32, 1, 1]);
         assert_eq!(tpg, [1024, 1, 1]);
@@ -227,12 +207,7 @@ mod tests {
 
     #[test]
     fn grid_to_dims_grid3d() {
-        let grid = GridSpec::Grid3D {
-            x: 32,
-            y: 64,
-            z: 1,
-            threads_per_group: 1,
-        };
+        let grid = GridSpec::Grid3D { x: 32, y: 64, z: 1, threads_per_group: 1 };
         let (groups, tpg) = grid_to_dims(&grid);
         assert_eq!(groups, [32, 64, 1]);
         assert_eq!(tpg, [1, 1, 1]);

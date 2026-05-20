@@ -9,10 +9,7 @@
 
 use std::collections::HashMap;
 
-use metaltile_core::{
-    dtype::DType,
-    ir::KernelMode,
-};
+use metaltile_core::{dtype::DType, ir::KernelMode};
 use metaltile_runtime::context::GridSpec;
 use metaltile_std::spec::effective_mode;
 
@@ -44,9 +41,7 @@ pub struct CompileParams {
 
 impl CompileParams {
     fn is_state_key(&self, name: &str) -> bool {
-        self.state_keys.iter().any(|k| {
-            name == k.as_str() || name.starts_with(&format!("{k}."))
-        })
+        self.state_keys.iter().any(|k| name == k.as_str() || name.starts_with(&format!("{k}.")))
     }
 }
 
@@ -70,9 +65,11 @@ pub fn compile(
         .iter()
         .map(|(name, expr)| {
             let cleaned = expr.strip_prefix('$').unwrap_or(expr);
-            let val = p.params.get(cleaned).copied().ok_or_else(|| {
-                ModelError::UnknownParam { name: expr.clone() }
-            })?;
+            let val = p
+                .params
+                .get(cleaned)
+                .copied()
+                .ok_or_else(|| ModelError::UnknownParam { name: expr.clone() })?;
             Ok((name.clone(), val))
         })
         .collect::<Result<HashMap<_, _>, ModelError>>()?;
@@ -124,16 +121,14 @@ pub fn compile(
 
     // ── Step 2: Compile each RawNode → DispatchNode ────────────────
     let mut nodes: Vec<DispatchNode> = Vec::with_capacity(raw_nodes.len());
-    let mut intermediate_outputs: Vec<Vec<(String, usize)>> =
-        Vec::with_capacity(raw_nodes.len());
-    let mut intermediate_inputs: Vec<Vec<String>> =
-        Vec::with_capacity(raw_nodes.len());
+    let mut intermediate_outputs: Vec<Vec<(String, usize)>> = Vec::with_capacity(raw_nodes.len());
+    let mut intermediate_inputs: Vec<Vec<String>> = Vec::with_capacity(raw_nodes.len());
 
     for raw in &raw_nodes {
         // 2a. Look up BenchSpec.
-        let spec = reg.get(&raw.node.op).ok_or_else(|| ModelError::UnknownOp {
-            op: raw.node.op.clone(),
-        })?;
+        let spec = reg
+            .get(&raw.node.op)
+            .ok_or_else(|| ModelError::UnknownOp { op: raw.node.op.clone() })?;
         let mode = effective_mode(spec);
 
         // 2b. Generate a dummy kernel to extract param metadata.
@@ -157,9 +152,8 @@ pub fn compile(
 
                 if is_float {
                     match eval_float_expr(expr, &resolved_params, &resolved_float_params) {
-                        Ok(val) => {
-                            cexprs.push((name.clone(), ConstexprValue::Static(val.to_bits())))
-                        },
+                        Ok(val) =>
+                            cexprs.push((name.clone(), ConstexprValue::Static(val.to_bits()))),
                         Err(ModelError::UnknownParam { .. }) => {
                             let var = expr.trim().strip_prefix('$').unwrap_or(expr);
                             cexprs.push((name.clone(), ConstexprValue::State(var.to_string())));
@@ -258,11 +252,8 @@ pub fn compile(
     let slots = assign_slots(nodes.len(), &intermediate_outputs, &intermediate_inputs);
 
     // Build name → slot index map.
-    let name_to_slot: HashMap<String, usize> = slots
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.name.clone(), i))
-        .collect();
+    let name_to_slot: HashMap<String, usize> =
+        slots.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
 
     // Replace Weight("_name") placeholders with Slot(idx).
     for node in &mut nodes {
@@ -281,9 +272,7 @@ pub fn compile(
     let output_slot = nodes
         .last()
         .and_then(|n| n.output_bindings.first())
-        .and_then(|(_, sr)| {
-            if let SlotRef::Slot(idx) = sr { Some(*idx) } else { None }
-        })
+        .and_then(|(_, sr)| if let SlotRef::Slot(idx) = sr { Some(*idx) } else { None })
         .unwrap_or(0);
 
     Ok(ExecutionPlan { nodes, slots, output_slot, n_layers })
@@ -304,10 +293,10 @@ fn eval_dispatch_hints(
     let Some(map) = dispatch else { return HashMap::new() };
     let mut out = HashMap::new();
     for (key, expr) in map {
-        match eval_constexpr(expr, params, float_params) {
-            Ok(val) => { out.insert(key.clone(), val); },
-            Err(_) => {}, // skip unresolvable hints
+        if let Ok(val) = eval_constexpr(expr, params, float_params) {
+            out.insert(key.clone(), val);
         }
+        // else: skip unresolvable hints
     }
     out
 }
@@ -316,10 +305,7 @@ fn eval_dispatch_hints(
 
 /// Compute the `GridSpec` for a kernel dispatch from its mode and
 /// resolved dispatch hints.
-fn compute_grid(
-    mode: &KernelMode,
-    hints: &HashMap<String, u32>,
-) -> Result<GridSpec, ModelError> {
+fn compute_grid(mode: &KernelMode, hints: &HashMap<String, u32>) -> Result<GridSpec, ModelError> {
     match mode {
         KernelMode::Elementwise => {
             let n = hints.get("n").copied().unwrap_or(1) as usize;
@@ -370,9 +356,7 @@ mod tests {
     use super::*;
     use crate::schema::ModelDef;
 
-    fn make_registry() -> KernelRegistry {
-        KernelRegistry::build()
-    }
+    fn make_registry() -> KernelRegistry { KernelRegistry::build() }
 
     fn base_state_keys() -> Vec<String> {
         vec![
@@ -480,10 +464,7 @@ outputs = {}
         let result = compile(&def, &params, &reg);
         assert!(result.is_err(), "unknown op should fail");
         let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("nonexistent_kernel"),
-            "error should mention the bad op: {err}"
-        );
+        assert!(err.contains("nonexistent_kernel"), "error should mention the bad op: {err}");
     }
 
     #[test]
@@ -496,11 +477,7 @@ outputs = {}
 
         // Verify pre_kernel ops exist.
         for kn in &def.pre_kernel {
-            assert!(
-                reg.get(&kn.op).is_some(),
-                "pre op '{}' not found in kernel registry",
-                kn.op
-            );
+            assert!(reg.get(&kn.op).is_some(), "pre op '{}' not found in kernel registry", kn.op);
         }
 
         // Verify all ops in the layer exist in the registry.
@@ -516,11 +493,7 @@ outputs = {}
 
         // Verify all post-layer ops exist.
         for kn in &def.kernel {
-            assert!(
-                reg.get(&kn.op).is_some(),
-                "post op '{}' not found in kernel registry",
-                kn.op
-            );
+            assert!(reg.get(&kn.op).is_some(), "post op '{}' not found in kernel registry", kn.op);
         }
 
         // Try compiling.

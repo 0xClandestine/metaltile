@@ -939,12 +939,12 @@ impl Context {
 
             for (param, plan) in spec.kernel.params.iter().zip(&binding_plans[i]) {
                 // Outputs with pre-uploaded GPU buffers → write directly in-place.
-                if param.is_output {
-                    if let Some(rb) = spec.output_resident.get(&param.name) {
-                        bufs.push(rb.inner.clone());
-                        push_strided(&mut bufs, param, spec.buffers)?;
-                        continue;
-                    }
+                if param.is_output
+                    && let Some(rb) = spec.output_resident.get(&param.name)
+                {
+                    bufs.push(rb.inner.clone());
+                    push_strided(&mut bufs, param, spec.buffers)?;
+                    continue;
                 }
                 // Inputs: resident-pre-uploaded > aliased from earlier spec.
                 if !param.is_output {

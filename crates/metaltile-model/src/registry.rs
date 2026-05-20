@@ -51,10 +51,7 @@ impl KernelRegistry {
     ///
     /// Tries `qualified` (op/subop) first, then `simple` (op only).
     pub fn get(&self, op: &str) -> Option<&'static BenchSpec> {
-        self.qualified
-            .get(op)
-            .or_else(|| self.simple.get(op))
-            .copied()
+        self.qualified.get(op).or_else(|| self.simple.get(op)).copied()
     }
 
     /// Number of registered kernel ops (simple keys).

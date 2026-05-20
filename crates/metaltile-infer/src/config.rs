@@ -1,7 +1,8 @@
 //! Parse `config.json` from a HuggingFace Llama model repo into a `ModelConfig`.
 
-use serde::Deserialize;
 use std::path::Path;
+
+use serde::Deserialize;
 
 use crate::error::InferError;
 
@@ -49,9 +50,7 @@ impl ModelConfig {
 
     fn from_hf(raw: &HfConfig) -> Result<Self, InferError> {
         let n_kv_heads = raw.num_key_value_heads.unwrap_or(raw.num_attention_heads);
-        let head_dim = raw
-            .head_dim
-            .unwrap_or(raw.hidden_size / raw.num_attention_heads);
+        let head_dim = raw.head_dim.unwrap_or(raw.hidden_size / raw.num_attention_heads);
         let max_seq_len = raw.max_position_embeddings.unwrap_or(4096);
 
         Ok(ModelConfig {

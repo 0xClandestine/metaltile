@@ -96,28 +96,28 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, ModelError> {
                     while i < chars.len() && chars[i].is_ascii_digit() {
                         i += 1;
                     }
-                    let val: f64 = expr[start..i]
-                        .parse::<f64>()
-                        .map_err(|e: std::num::ParseFloatError| ModelError::InvalidExpr {
-                            expr: expr.to_string(),
-                            detail: e.to_string(),
+                    let val: f64 =
+                        expr[start..i].parse::<f64>().map_err(|e: std::num::ParseFloatError| {
+                            ModelError::InvalidExpr {
+                                expr: expr.to_string(),
+                                detail: e.to_string(),
+                            }
                         })?;
                     tokens.push(Token::Float(val));
                 } else {
-                    let val: u64 = expr[start..i]
-                        .parse::<u64>()
-                        .map_err(|e: std::num::ParseIntError| ModelError::InvalidExpr {
-                            expr: expr.to_string(),
-                            detail: e.to_string(),
+                    let val: u64 =
+                        expr[start..i].parse::<u64>().map_err(|e: std::num::ParseIntError| {
+                            ModelError::InvalidExpr {
+                                expr: expr.to_string(),
+                                detail: e.to_string(),
+                            }
                         })?;
                     tokens.push(Token::Int(val));
                 }
             },
             c if c.is_alphabetic() || c == '_' => {
                 let start = i;
-                while i < chars.len()
-                    && (chars[i].is_alphanumeric() || chars[i] == '_')
-                {
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
                     i += 1;
                 }
                 let word = &expr[start..i];
@@ -412,11 +412,7 @@ pub fn eval_float_expr(
 ///
 /// Returns `None` if the expression isn't a dotted `$path`, meaning
 /// it should be treated as a simple var reference or intermediate name.
-pub fn resolve_tensor_ref(
-    expr: &str,
-    layer_idx: usize,
-    _params: &HashMap<String, u32>,
-) -> String {
+pub fn resolve_tensor_ref(expr: &str, layer_idx: usize, _params: &HashMap<String, u32>) -> String {
     let tokens = match tokenize(expr) {
         Ok(t) => t,
         Err(_) => return expr.to_string(),
@@ -514,20 +510,14 @@ mod tests {
     fn eval_integer_multiplication() {
         let params = test_params();
         let fp = HashMap::new();
-        assert_eq!(
-            eval_constexpr("$n_heads * $head_dim", &params, &fp).unwrap(),
-            32 * 128
-        );
+        assert_eq!(eval_constexpr("$n_heads * $head_dim", &params, &fp).unwrap(), 32 * 128);
     }
 
     #[test]
     fn eval_integer_division() {
         let params = test_params();
         let fp = HashMap::new();
-        assert_eq!(
-            eval_constexpr("$n_heads / $n_kv_heads", &params, &fp).unwrap(),
-            32 / 8
-        );
+        assert_eq!(eval_constexpr("$n_heads / $n_kv_heads", &params, &fp).unwrap(), 32 / 8);
     }
 
     #[test]
@@ -543,10 +533,7 @@ mod tests {
     fn eval_parens() {
         let params = test_params();
         let fp = HashMap::new();
-        assert_eq!(
-            eval_constexpr("($n_heads + 1) * 2", &params, &fp).unwrap(),
-            (32 + 1) * 2
-        );
+        assert_eq!(eval_constexpr("($n_heads + 1) * 2", &params, &fp).unwrap(), (32 + 1) * 2);
     }
 
     #[test]

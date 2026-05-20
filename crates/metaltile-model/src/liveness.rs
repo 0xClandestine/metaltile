@@ -137,11 +137,7 @@ pub fn assign_slots(
 
 /// Build a map from intermediate tensor name → slot index.
 pub fn build_slot_map(slots: &[BufferSlot]) -> HashMap<String, usize> {
-    slots
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.name.clone(), i))
-        .collect()
+    slots.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect()
 }
 
 #[cfg(test)]
@@ -186,12 +182,7 @@ mod tests {
             vec![],
             vec![],
         ];
-        let inputs = vec![
-            vec![],
-            vec![],
-            vec!["temp_a".to_string()],
-            vec!["temp_b".to_string()],
-        ];
+        let inputs = vec![vec![], vec![], vec!["temp_a".to_string()], vec!["temp_b".to_string()]];
         let slots = assign_slots(4, &outputs, &inputs);
         // temp_a [0,2] and temp_b [1,3] overlap, so 2 slots.
         assert_eq!(slots.len(), 2);
@@ -209,12 +200,7 @@ mod tests {
             vec![("temp_b".to_string(), 1024)],
             vec![],
         ];
-        let inputs = vec![
-            vec![],
-            vec!["temp_a".to_string()],
-            vec![],
-            vec!["temp_b".to_string()],
-        ];
+        let inputs = vec![vec![], vec!["temp_a".to_string()], vec![], vec!["temp_b".to_string()]];
         let slots = assign_slots(4, &outputs, &inputs);
         assert_eq!(slots.len(), 1, "sequential non-overlapping should reuse one slot");
     }

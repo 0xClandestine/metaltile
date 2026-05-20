@@ -114,12 +114,7 @@ mod tests {
 
     #[test]
     fn buffer_slot_lifetime_range() {
-        let slot = BufferSlot {
-            name: "test".into(),
-            size_bytes: 1024,
-            first_use: 3,
-            last_use: 7,
-        };
+        let slot = BufferSlot { name: "test".into(), size_bytes: 1024, first_use: 3, last_use: 7 };
         assert_eq!(slot.first_use, 3);
         assert_eq!(slot.last_use, 7);
     }

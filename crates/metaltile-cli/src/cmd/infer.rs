@@ -60,11 +60,7 @@ async fn run_async(args: &InferArgs) -> Result<(), metaltile_infer::InferError> 
     let config = ModelConfig::from_file(model_dir.join("config.json"))?;
     eprintln!(
         "Model: {} layers, {} heads ({} kv), dim={}, vocab={}",
-        config.n_layers,
-        config.n_heads,
-        config.n_kv_heads,
-        config.hidden_dim,
-        config.vocab_size,
+        config.n_layers, config.n_heads, config.n_kv_heads, config.hidden_dim, config.vocab_size,
     );
 
     // ── Load TOML model definition ─────────────────────────────────────
