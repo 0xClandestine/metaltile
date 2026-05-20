@@ -461,6 +461,57 @@ impl DslBodyParser {
                 ));
                 self.alloc_vid()
             },
+            // Control-flow constructs the body parser does not lower. Without
+            // these guards they fall into the `_` catch-all below, which
+            // allocates a ValueId but emits NO IR — the construct silently
+            // vanishes from the generated kernel and it ships wrong behavior
+            // (a `while` reduction loop that does zero steps; a `return` that
+            // falls through). Fail loudly instead, the same way `Expr::Macro`
+            // does, and point at the DSL construct that *is* supported.
+            Expr::While(w) => {
+                self.push_error(syn::Error::new_spanned(
+                    w,
+                    "`while` loops are not supported inside #[kernel] bodies — \
+                     the body parser would silently drop the loop. Use a DSL \
+                     `for _ in range(start, end, step)` loop instead.",
+                ));
+                self.alloc_vid()
+            },
+            Expr::Loop(l) => {
+                self.push_error(syn::Error::new_spanned(
+                    l,
+                    "`loop` is not supported inside #[kernel] bodies — the body \
+                     parser would silently drop it. Use a bounded DSL \
+                     `for _ in range(start, end, step)` loop instead.",
+                ));
+                self.alloc_vid()
+            },
+            Expr::Return(r) => {
+                self.push_error(syn::Error::new_spanned(
+                    r,
+                    "`return` is not supported inside #[kernel] bodies — the \
+                     body parser would silently drop it and execution would \
+                     fall through. Use `if` / `else` branching instead.",
+                ));
+                self.alloc_vid()
+            },
+            Expr::Match(m) => {
+                self.push_error(syn::Error::new_spanned(
+                    m,
+                    "`match` is not supported inside #[kernel] bodies — the \
+                     body parser would silently drop it. Use `if` / `else` \
+                     branching, or `select(cond, a, b)`.",
+                ));
+                self.alloc_vid()
+            },
+            Expr::Closure(c) => {
+                self.push_error(syn::Error::new_spanned(
+                    c,
+                    "closures are not supported inside #[kernel] bodies — the \
+                     body parser would silently drop them.",
+                ));
+                self.alloc_vid()
+            },
             _ => self.alloc_vid(),
         }
     }

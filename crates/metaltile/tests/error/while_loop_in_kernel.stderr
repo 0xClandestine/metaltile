@@ -1,0 +1,7 @@
+error: `while` loops are not supported inside #[kernel] bodies — the body parser would silently drop the loop. Use a DSL `for _ in range(start, end, step)` loop instead.
+  --> tests/error/while_loop_in_kernel.rs:9:5
+   |
+ 9 | /     while program_id(0) < 8u32 {
+10 | |         store(out[0u32], 0.0f32);
+11 | |     }
+   | |_____^

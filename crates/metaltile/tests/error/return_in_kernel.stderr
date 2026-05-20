@@ -1,0 +1,5 @@
+error: `return` is not supported inside #[kernel] bodies — the body parser would silently drop it and execution would fall through. Use `if` / `else` branching instead.
+  --> tests/error/return_in_kernel.rs:11:9
+   |
+11 |         return;
+   |         ^^^^^^
