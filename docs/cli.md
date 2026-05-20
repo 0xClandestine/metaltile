@@ -34,7 +34,7 @@ Compiles every kernel and reports errors; with `--emit`, writes artifacts.
 
 ```
 tile build [-f <substr>] [--dtypes f32,f16,bf16] [-v]
-           [--emit msl,metallib,swift,ir,all] [-o <dir>] [-t]
+           [--emit msl,metallib,swift,ir,all] [-o <dir>] [--sdk <sdk>] [-t]
 ```
 
 | Flag | Effect |
@@ -44,6 +44,7 @@ tile build [-f <substr>] [--dtypes f32,f16,bf16] [-v]
 | `-v` | print the generated MSL for each kernel |
 | `--emit <list>` | emit artifacts — `msl`, `metallib`, `swift`, `ir`, or `all` |
 | `-o, --out <dir>` | output directory (required when `--emit` is set) |
+| `--sdk <sdk>` | `xcrun` SDK for the Metal toolchain (default: `macosx`) |
 | `-t, --time-passes` | run the pass pipeline 25× per kernel, print per-pass median wall time instead of emitting |
 
 Codegen smoke check — emit everything and confirm `xcrun metal` accepts it: `tile build --emit all -o /tmp/mt-smoke`.
@@ -69,13 +70,34 @@ Omit the kernel name to list every registered kernel. See [Developing → debugg
 
 ## `tile device` — GPU info
 
-Prints the Metal device name, Metal version, Apple GPU family, and the supported feature flags (native `bfloat`, simdgroup matrix, etc.).
+Prints the Metal device name, Metal version, Apple GPU family, and the supported feature flags (native `bfloat`, simdgroup matrix, etc.). Add `--json` for machine-readable output.
 
-## `tile snap` / `tile diff` — perf regression baselines
+## `tile snap` — save a perf regression baseline
 
 ```
 tile snap [-o <file>] [--from <file.json>] [--note <text>] [-f <substr>]
-tile diff <baseline> [<current>]
 ```
 
-`snap` saves bench results as a baseline (default `.tile-snapshots/<sha>.json`); `--from` promotes an existing JSON instead of re-running the bench. `diff` compares current results — or a saved `<current>` JSON — against `<baseline>` and reports per-kernel deltas.
+| Flag | Effect |
+|---|---|
+| `-o, --out <file>` | write the snapshot here (default: `.tile-snapshots/<sha>.json`) |
+| `--from <file.json>` | promote an existing bench JSON instead of re-running the bench |
+| `--note <text>` | attach a note to the snapshot |
+| `-f, --filter <substr>` | only include kernels whose name contains `<substr>` |
+
+## `tile diff` — compare against a baseline
+
+```
+tile diff <baseline> [<current>] [-f <substr>] [--threshold <pct>]
+          [--sort name|delta|pct] [--only-regressions] [--only-improvements]
+```
+
+`<baseline>` is a saved snapshot JSON; `<current>` is an optional bench JSON — omit it and `diff` runs the bench itself.
+
+| Flag | Effect |
+|---|---|
+| `-f, --filter <substr>` | only show kernels whose name contains `<substr>` |
+| `--threshold <pct>` | highlight regressions larger than this percentage (default: `5`) |
+| `--sort <key>` | sort rows by `name`, `delta`, or `pct` (default: `name`) |
+| `--only-regressions` | show only regressed kernels |
+| `--only-improvements` | show only improved kernels |
