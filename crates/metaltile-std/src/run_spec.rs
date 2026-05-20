@@ -168,6 +168,15 @@ fn msl_elementwise(spec: &BenchSpec, dt: DType, tpg: Option<u32>) -> Option<Stri
 fn msl_reduction(spec: &BenchSpec, dt: DType, tpg: Option<u32>) -> Option<String> {
     let mut k = (spec.kernel_ir)(dt);
     k.mode = KernelMode::Reduction;
+    // Apply mt_qmm_mma's dtype-aware TG-skew (Fix 1 from MLX archaeology):
+    // f16/bf16 → BK+8=40 stride; f32 keeps BK+4=36. Matches MLX
+    // `affine_qmm_t`'s `BK_padded = BK + 16/sizeof(T)` formula. Bench
+    // path goes through `kernel_ir_for(dt)` directly (NOT `mt_qmm_for`),
+    // so we hook the patch here too. See `patch_qmm_mma_dtype_aware_skew`
+    // in quantized.rs for details.
+    if spec.kernel_name == "mt_qmm_mma" {
+        crate::mlx::quantized::patch_qmm_mma_dtype_aware_skew(&mut k, dt);
+    }
     MslGenerator::new(msl_cfg_for(tpg)).generate(&k).ok()
 }
 fn msl_grid3d(spec: &BenchSpec, dt: DType, tpg: Option<u32>) -> Option<String> {

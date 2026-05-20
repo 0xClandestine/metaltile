@@ -1690,7 +1690,10 @@ pub fn mt_qmm_mma<T>(
     simdgroup_elem_store(c_f11, 0, 0.0f32);
     simdgroup_elem_store(c_f11, 1, 0.0f32);
 
-    // A (X) and B (W^T) frag scratch, reused per k_inner.
+    // A (X) and B (W^T) frag scratch, reused per k_inner. Keep at native
+    // T precision — Fix 5 (upcast to f32 to mirror MLX's half→float MMA
+    // path) was tested in layered-bench: identical f16 numbers (93-96%
+    // MT MLX) with and without the upcast, so we keep simpler half MMA.
     let a_f0 = simdgroup_alloc::<T, 8, 8>();
     let a_f1 = simdgroup_alloc::<T, 8, 8>();
     let b_f0 = simdgroup_alloc::<T, 8, 8>();
@@ -1714,79 +1717,55 @@ pub fn mt_qmm_mma<T>(
     let sb_base = (w_n_base + w_row) * gs_per_row;
     let w_pack_row_base = (w_n_base + w_row) * packs_per_row;
 
-    // TG row stride = 36 (BK + 4 skew). Bank-conflict broken: row*36 mod
-    // 32 = row*4 mod 32 cycles through all 32 banks across 8 rows.
-    let xs_ld = 36u32;
-    let ws_ld = 36u32;
+    // TG row stride. Default is BK + 4 = 36 (skew by 4 T elements) to break
+    // 32-bank conflicts on the 8×8 frag column reads. For f16 the dtype-aware
+    // skew formula `BK + 16/sizeof(T)` (mirroring MLX `affine_qmm_t`) bumps
+    // this to 40 — see Fix 1 in `/tmp/mlx_archaeology.md`. The actual value
+    // is patched per-dtype in `mt_qmm_for` (`xs_ld_const`/`ws_ld_const` IR
+    // names are looked up + rewritten); the literal `36u32` here is the f32
+    // value and is also the default for non-f16 dtypes.
+    let xs_ld_const = 36u32;
+    let ws_ld_const = 36u32;
+    let xs_ld = xs_ld_const;
+    let ws_ld = ws_ld_const;
+
+    // Coop X-load mapping. 32×32 = 1024 elements. 128 lanes × 8 elems each.
+    // To enable vec4 device-load fusion (Fix 3 — see archaeology §4.2): map
+    // each lane to (m_row, k_quad) reading 8 *contiguous* Ks. Then the 8
+    // device-loads have indices `base + 0..7` which the vectorize pass fuses
+    // into 2× vec4 loads (MAX_VEC_RUN=4). Previous mapping read strided
+    // halves across 8 rows → no fusion possible.
+    //
+    // lane_in_tg ∈ 0..128, m_row = lane_in_tg / 4 ∈ 0..32, k_quad =
+    // lane_in_tg % 4 ∈ 0..4. Per lane writes 8 contiguous halves into
+    // Xs[m_row*xs_ld + k_quad*8 + i] for i in 0..8.
+    let x_m_row = lane_in_tg / 4u32;
+    let x_k_quad = lane_in_tg & 3u32;
+    let x_k_base = x_k_quad * 8u32;
 
     for kb in range(0u32, k, 32u32) {
-        // ── 1. Coop X load — 128 lanes × 8 elems each fill 1024-elt tile ──
-        // step i in 0..8: flat = i*128 + lane_in_tg ∈ 0..1023.
-        // m_row = flat/32, k_col = flat%32. Write to Xs[m_row*36 + k_col].
-        let flat0 = lane_in_tg;
-        let flat1 = 128u32 + lane_in_tg;
-        let flat2 = 256u32 + lane_in_tg;
-        let flat3 = 384u32 + lane_in_tg;
-        let flat4 = 512u32 + lane_in_tg;
-        let flat5 = 640u32 + lane_in_tg;
-        let flat6 = 768u32 + lane_in_tg;
-        let flat7 = 896u32 + lane_in_tg;
-        let mr0 = flat0 / 32u32;
-        let mr1 = flat1 / 32u32;
-        let mr2 = flat2 / 32u32;
-        let mr3 = flat3 / 32u32;
-        let mr4 = flat4 / 32u32;
-        let mr5 = flat5 / 32u32;
-        let mr6 = flat6 / 32u32;
-        let mr7 = flat7 / 32u32;
-        let kc0 = flat0 & 31u32;
-        let kc1 = flat1 & 31u32;
-        let kc2 = flat2 & 31u32;
-        let kc3 = flat3 & 31u32;
-        let kc4 = flat4 & 31u32;
-        let kc5 = flat5 & 31u32;
-        let kc6 = flat6 & 31u32;
-        let kc7 = flat7 & 31u32;
-        threadgroup_store(
-            "xs",
-            mr0 * xs_ld + kc0,
-            load(x[(x_m_base + mr0) * k + kb + kc0]).cast::<T>(),
-        );
-        threadgroup_store(
-            "xs",
-            mr1 * xs_ld + kc1,
-            load(x[(x_m_base + mr1) * k + kb + kc1]).cast::<T>(),
-        );
-        threadgroup_store(
-            "xs",
-            mr2 * xs_ld + kc2,
-            load(x[(x_m_base + mr2) * k + kb + kc2]).cast::<T>(),
-        );
-        threadgroup_store(
-            "xs",
-            mr3 * xs_ld + kc3,
-            load(x[(x_m_base + mr3) * k + kb + kc3]).cast::<T>(),
-        );
-        threadgroup_store(
-            "xs",
-            mr4 * xs_ld + kc4,
-            load(x[(x_m_base + mr4) * k + kb + kc4]).cast::<T>(),
-        );
-        threadgroup_store(
-            "xs",
-            mr5 * xs_ld + kc5,
-            load(x[(x_m_base + mr5) * k + kb + kc5]).cast::<T>(),
-        );
-        threadgroup_store(
-            "xs",
-            mr6 * xs_ld + kc6,
-            load(x[(x_m_base + mr6) * k + kb + kc6]).cast::<T>(),
-        );
-        threadgroup_store(
-            "xs",
-            mr7 * xs_ld + kc7,
-            load(x[(x_m_base + mr7) * k + kb + kc7]).cast::<T>(),
-        );
+        // ── 1. Coop X load — 128 lanes × 8 contiguous K elems per lane ──
+        // Each lane: read 8 contiguous halves from one X-row at k offset
+        // x_k_base, write to Xs[x_m_row*xs_ld + x_k_base + i].
+        let x_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base;
+        let x_ws_base = x_m_row * xs_ld + x_k_base;
+        // 8 contiguous device loads → 2× vec4 after vectorize pass.
+        let xv0 = load(x[x_row_dev_base]).cast::<T>();
+        let xv1 = load(x[x_row_dev_base + 1u32]).cast::<T>();
+        let xv2 = load(x[x_row_dev_base + 2u32]).cast::<T>();
+        let xv3 = load(x[x_row_dev_base + 3u32]).cast::<T>();
+        let xv4 = load(x[x_row_dev_base + 4u32]).cast::<T>();
+        let xv5 = load(x[x_row_dev_base + 5u32]).cast::<T>();
+        let xv6 = load(x[x_row_dev_base + 6u32]).cast::<T>();
+        let xv7 = load(x[x_row_dev_base + 7u32]).cast::<T>();
+        threadgroup_store("xs", x_ws_base, xv0);
+        threadgroup_store("xs", x_ws_base + 1u32, xv1);
+        threadgroup_store("xs", x_ws_base + 2u32, xv2);
+        threadgroup_store("xs", x_ws_base + 3u32, xv3);
+        threadgroup_store("xs", x_ws_base + 4u32, xv4);
+        threadgroup_store("xs", x_ws_base + 5u32, xv5);
+        threadgroup_store("xs", x_ws_base + 6u32, xv6);
+        threadgroup_store("xs", x_ws_base + 7u32, xv7);
 
         // ── 2. Coop W dequant — each lane loads 1 pack and writes 8 fp T ──
         let pack_k_off = kb / 8u32 + pack_in_row;
@@ -1828,11 +1807,14 @@ pub fn mt_qmm_mma<T>(
         let col_b0 = sn * 16u32; // frag_n = 0 base offset
         let col_b1 = sn * 16u32 + 8u32; // frag_n = 8 base offset
 
-        // k_inner = 0 (k offset 0..7 inside BK=32)
+        // k_inner = 0 (k offset 0..7 inside BK=32) — 3-barrier MLX pattern
+        // (Fix 2) + serpentine (Fix 4): A-load, barrier, B-load, barrier,
+        // MMAs in (0,0)→(0,1)→(1,1)→(1,0) order, barrier.
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + fn1));
         simdgroup_elem_store(a_f1, 0, threadgroup_load("xs", row_a1 * xs_ld + fn0));
         simdgroup_elem_store(a_f1, 1, threadgroup_load("xs", row_a1 * xs_ld + fn1));
+        simdgroup_barrier_mem_none();
         simdgroup_elem_store(b_f0, 0, threadgroup_load("ws", (col_b0 + fn0) * ws_ld + fm));
         simdgroup_elem_store(b_f0, 1, threadgroup_load("ws", (col_b0 + fn1) * ws_ld + fm));
         simdgroup_elem_store(b_f1, 0, threadgroup_load("ws", (col_b1 + fn0) * ws_ld + fm));
@@ -1840,14 +1822,16 @@ pub fn mt_qmm_mma<T>(
         simdgroup_barrier_mem_none();
         simdgroup_matmul(a_f0, b_f0, c_f00);
         simdgroup_matmul(a_f0, b_f1, c_f01);
-        simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_matmul(a_f1, b_f1, c_f11);
+        simdgroup_matmul(a_f1, b_f0, c_f10);
+        simdgroup_barrier_mem_none();
 
         // k_inner = 1 (k offset 8..15)
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 8u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 8u32 + fn1));
         simdgroup_elem_store(a_f1, 0, threadgroup_load("xs", row_a1 * xs_ld + 8u32 + fn0));
         simdgroup_elem_store(a_f1, 1, threadgroup_load("xs", row_a1 * xs_ld + 8u32 + fn1));
+        simdgroup_barrier_mem_none();
         simdgroup_elem_store(b_f0, 0, threadgroup_load("ws", (col_b0 + fn0) * ws_ld + 8u32 + fm));
         simdgroup_elem_store(b_f0, 1, threadgroup_load("ws", (col_b0 + fn1) * ws_ld + 8u32 + fm));
         simdgroup_elem_store(b_f1, 0, threadgroup_load("ws", (col_b1 + fn0) * ws_ld + 8u32 + fm));
@@ -1855,14 +1839,16 @@ pub fn mt_qmm_mma<T>(
         simdgroup_barrier_mem_none();
         simdgroup_matmul(a_f0, b_f0, c_f00);
         simdgroup_matmul(a_f0, b_f1, c_f01);
-        simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_matmul(a_f1, b_f1, c_f11);
+        simdgroup_matmul(a_f1, b_f0, c_f10);
+        simdgroup_barrier_mem_none();
 
         // k_inner = 2 (k offset 16..23)
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 16u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 16u32 + fn1));
         simdgroup_elem_store(a_f1, 0, threadgroup_load("xs", row_a1 * xs_ld + 16u32 + fn0));
         simdgroup_elem_store(a_f1, 1, threadgroup_load("xs", row_a1 * xs_ld + 16u32 + fn1));
+        simdgroup_barrier_mem_none();
         simdgroup_elem_store(b_f0, 0, threadgroup_load("ws", (col_b0 + fn0) * ws_ld + 16u32 + fm));
         simdgroup_elem_store(b_f0, 1, threadgroup_load("ws", (col_b0 + fn1) * ws_ld + 16u32 + fm));
         simdgroup_elem_store(b_f1, 0, threadgroup_load("ws", (col_b1 + fn0) * ws_ld + 16u32 + fm));
@@ -1870,14 +1856,16 @@ pub fn mt_qmm_mma<T>(
         simdgroup_barrier_mem_none();
         simdgroup_matmul(a_f0, b_f0, c_f00);
         simdgroup_matmul(a_f0, b_f1, c_f01);
-        simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_matmul(a_f1, b_f1, c_f11);
+        simdgroup_matmul(a_f1, b_f0, c_f10);
+        simdgroup_barrier_mem_none();
 
         // k_inner = 3 (k offset 24..31)
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 24u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 24u32 + fn1));
         simdgroup_elem_store(a_f1, 0, threadgroup_load("xs", row_a1 * xs_ld + 24u32 + fn0));
         simdgroup_elem_store(a_f1, 1, threadgroup_load("xs", row_a1 * xs_ld + 24u32 + fn1));
+        simdgroup_barrier_mem_none();
         simdgroup_elem_store(b_f0, 0, threadgroup_load("ws", (col_b0 + fn0) * ws_ld + 24u32 + fm));
         simdgroup_elem_store(b_f0, 1, threadgroup_load("ws", (col_b0 + fn1) * ws_ld + 24u32 + fm));
         simdgroup_elem_store(b_f1, 0, threadgroup_load("ws", (col_b1 + fn0) * ws_ld + 24u32 + fm));
@@ -1885,8 +1873,9 @@ pub fn mt_qmm_mma<T>(
         simdgroup_barrier_mem_none();
         simdgroup_matmul(a_f0, b_f0, c_f00);
         simdgroup_matmul(a_f0, b_f1, c_f01);
-        simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_matmul(a_f1, b_f1, c_f11);
+        simdgroup_matmul(a_f1, b_f0, c_f10);
+        simdgroup_barrier_mem_none();
 
         threadgroup_barrier();
     }
@@ -2783,7 +2772,9 @@ pub fn mt_qmm_for(dtype: metaltile_core::dtype::DType, m: u32) -> metaltile_core
     use metaltile_core::ir::KernelMode;
     let mut k = if m >= 32 && m.is_multiple_of(32) {
         // Full simdgroup-matrix MMA path (M=32, 64, 96, ...).
-        mt_qmm_mma::kernel_ir_for(dtype)
+        let mut kk = mt_qmm_mma::kernel_ir_for(dtype);
+        patch_qmm_mma_dtype_aware_skew(&mut kk, dtype);
+        kk
     } else if m == 16 {
         // Half-height MMA — half tpg → 2× occupancy. Wins M=16 cell
         // on both rigs (119-176% MT MLX vs bm4's 76-146%).
@@ -2802,6 +2793,66 @@ pub fn mt_qmm_for(dtype: metaltile_core::dtype::DType, m: u32) -> metaltile_core
     // kernels reference. Same dispatch contract as `mt_qmv`.
     k.mode = KernelMode::Reduction;
     k
+}
+
+/// Fix 1 from `/tmp/mlx_archaeology.md`: dtype-aware TG skew.
+///
+/// MLX's `affine_qmm_t` uses `BK_padded = BK + 16/sizeof(T)`, so:
+///   * f32 (4 bytes) → 32 + 4 = 36  (matches our default)
+///   * f16 (2 bytes) → 32 + 8 = 40  ← bump for f16 only
+///
+/// The DSL body emits `let xs_ld_const = 36u32; let ws_ld_const = 36u32;`
+/// which becomes `Op::Const { value: 36 }` named `xs_ld_const` /
+/// `ws_ld_const` in the kernel body. This post-patch rewrites those two
+/// `Const` ops to 40 when the dtype is f16, and also bumps the matching
+/// `ThreadgroupAlloc` sizes (`xs`, `ws`) from 1152 → 1280 so the wider
+/// rows fit. Bf16 follows the same 2-byte path. f32 leaves both at 36.
+///
+/// Uniform stride 40 was tested earlier in isolation and didn't move
+/// the M5 f16 needle — but layered with the other 3 archaeology fixes
+/// (3-barrier MMA, vectorized X load, serpentine MMA order) it is
+/// expected to land the missing 9-16pt.
+pub fn patch_qmm_mma_dtype_aware_skew(
+    kernel: &mut metaltile_core::ir::Kernel,
+    dtype: metaltile_core::dtype::DType,
+) {
+    use metaltile_core::{dtype::DType, ir::Op};
+    // f32 keeps its default 36 stride — nothing to do.
+    let bytes = match dtype {
+        DType::F32 => 4,
+        DType::F16 | DType::BF16 => 2,
+        _ => return,
+    };
+    if bytes == 4 {
+        return;
+    }
+    // `BK + 16/sizeof(T)` — 32 + 8 = 40 for 2-byte dtypes.
+    let new_ld: i64 = 32 + (16 / bytes as i64);
+    let new_alloc: u32 = 32 * (new_ld as u32);
+
+    // Patch Const ops named `xs_ld_const` / `ws_ld_const` in body.
+    let target_names: [&str; 2] = ["xs_ld_const", "ws_ld_const"];
+    for (vid, name) in kernel.body.names.clone().iter() {
+        if !target_names.iter().any(|t| t == name) {
+            continue;
+        }
+        // Find the op slot producing this ValueId.
+        for (i, r) in kernel.body.results.iter().enumerate() {
+            if r.map(|v| v == *vid).unwrap_or(false)
+                && let Op::Const { value } = &mut kernel.body.ops[i]
+            {
+                *value = new_ld;
+            }
+        }
+    }
+    // Patch ThreadgroupAlloc sizes for `xs` and `ws` (1152 → 1280 at f16).
+    for op in kernel.body.ops.iter_mut() {
+        if let Op::ThreadgroupAlloc { name, size, .. } = op
+            && (name == "xs" || name == "ws")
+        {
+            *size = new_alloc;
+        }
+    }
 }
 
 #[cfg(test)]

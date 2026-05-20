@@ -242,6 +242,11 @@ fn generate_msl(spec: &BenchSpec, dtypes: &[DType]) -> String {
 
 fn generate_msl_dt(spec: &BenchSpec, dt: DType) -> String {
     let mut k = (spec.kernel_ir)(dt);
+    // Mirror bench-side mt_qmm_mma dtype-aware-skew patch so `tile inspect`
+    // shows the same MSL the bench compiles.
+    if spec.kernel_name == "mt_qmm_mma" {
+        metaltile_std::mlx::quantized::patch_qmm_mma_dtype_aware_skew(&mut k, dt);
+    }
     let mode = effective_mode(spec);
     k.mode = mode;
     let expected_tpg =

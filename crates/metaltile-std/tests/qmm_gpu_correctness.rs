@@ -1255,6 +1255,8 @@ fn run_qmm_mma(
     buffers.insert("gs_per_row".into(), (gs_per_row as u32).to_le_bytes().to_vec());
 
     let mut kernel = mt_qmm_mma::kernel_ir_for(dtype);
+    // Apply Fix 1 (dtype-aware TG skew) — see patch_qmm_mma_dtype_aware_skew.
+    metaltile_std::mlx::quantized::patch_qmm_mma_dtype_aware_skew(&mut kernel, dtype);
     kernel.mode = metaltile_core::ir::KernelMode::Reduction;
     let result = ctx
         .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [n / 32, m / 32, 1], [128, 1, 1])
