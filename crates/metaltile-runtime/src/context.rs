@@ -87,6 +87,25 @@ pub struct ResidentBuffer {
     _stub: (),
 }
 
+impl ResidentBuffer {
+    /// Read the buffer contents back to a `Vec<u8>`. On Apple Silicon with
+    /// unified memory, this reads directly from the GPU buffer's CPU-accessible
+    /// mapping — no GPU→CPU transfer occurs at the hardware level.
+    pub fn read_bytes(&self, len: usize) -> Vec<u8> {
+        #[cfg(target_os = "macos")]
+        {
+            use objc2_metal::MTLBuffer;
+            let ptr = self.inner.contents();
+            unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const u8, len) }.to_vec()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = len;
+            Vec::new()
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 type BufRc =
     std::rc::Rc<objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>>>;
@@ -678,6 +697,45 @@ impl Context {
         _grid_override: Option<([usize; 3], [usize; 3])>,
     ) -> Result<DispatchResult, MetalTileError> {
         Ok(DispatchResult { elapsed_us: 0.0, gflops: 0.0, outputs: BTreeMap::new() })
+    }
+
+    /// Allocate a pool-managed GPU-resident buffer of `size` bytes without
+    /// copying host data. The returned buffer can be passed via
+    /// [`DispatchSpec::resident`] or [`DispatchSpec::output_resident`] to
+    /// skip per-dispatch alloc + memcpy for intermediate tensors.
+    ///
+    /// On Apple Silicon (unified memory), this is a zero-copy allocation —
+    /// the same physical memory is accessible to both CPU and GPU. Use
+    /// [`ResidentBuffer::read_bytes`] to read back the final result.
+    pub fn alloc_resident(&self, size: usize) -> Result<ResidentBuffer, MetalTileError> {
+        #[cfg(target_os = "macos")]
+        {
+            if !self.has_metal {
+                return Err(MetalTileError::NoDevice);
+            }
+            use std::sync::OnceLock;
+
+            use objc2::{rc::Retained, runtime::ProtocolObject};
+            use objc2_metal::{
+                MTLCreateSystemDefaultDevice,
+                MTLDevice,
+                MTLResourceOptions,
+            };
+            type Dev = ProtocolObject<dyn MTLDevice>;
+            static DEV: OnceLock<Retained<Dev>> = OnceLock::new();
+            let dev = DEV.get_or_init(|| {
+                MTLCreateSystemDefaultDevice().expect("MTLCreateSystemDefaultDevice returned nil")
+            });
+            let opts = MTLResourceOptions::StorageModeShared
+                | MTLResourceOptions::HazardTrackingModeUntracked;
+            let buf = pool_acquire(dev, size, opts)?;
+            Ok(ResidentBuffer { inner: buf })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = size;
+            Ok(ResidentBuffer { _stub: () })
+        }
     }
 
     /// Acquire a pool-managed Metal buffer in `MTLStorageModeShared`,

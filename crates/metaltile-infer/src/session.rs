@@ -3,8 +3,11 @@
 //! Lifecycle:
 //! 1. `Session::new(model_dir, toml_src, config, dtype)` — upload weights +
 //!    allocate GPU-resident KV cache.
-//! 2. `session.generate(prompt, max_tokens, temperature, on_token)` — run
-//!    the tokenizer + inference loop, calling `on_token` for each new token.
+//! 2. `session.step(token_id, temperature)` → `(next_token, gpu_seconds)` —
+//!    single forward pass with GPU timing. Drive the autoregressive loop
+//!    yourself for production control.
+//! 3. `session.generate(prompt, max_tokens, temperature, on_token)` —
+//!    convenience wrapper that returns `GenerateOutput` with timing stats.
 
 use std::{collections::BTreeMap, path::Path};
 
@@ -22,6 +25,23 @@ use metaltile_runtime::{Context, ResidentBuffer};
 use tokenizers::Tokenizer;
 
 use crate::{checkpoint::load_weights, config::ModelConfig, error::InferError};
+
+/// Result of a `generate` call with timing breakdown.
+#[derive(Debug, Clone)]
+pub struct GenerateOutput {
+    /// Generated text (decoded output tokens, excluding the prompt).
+    pub text: String,
+    /// Number of tokens generated.
+    pub tokens_generated: usize,
+    /// Number of prompt tokens processed during prefill.
+    pub prompt_tokens: usize,
+    /// GPU time spent on prefill (prompt processing) in seconds.
+    pub prefill_gpu_secs: f64,
+    /// GPU time spent on decode (token generation) in seconds.
+    pub decode_gpu_secs: f64,
+    /// Tokens per second during decode phase (decode only, excludes prefill).
+    pub decode_tok_per_sec: f64,
+}
 
 /// Single-model inference session. Holds GPU-resident weights + KV cache.
 pub struct Session {
@@ -137,32 +157,36 @@ impl Session {
     }
 
     /// Run inference for `max_tokens` steps, calling `on_token` with each
-    /// decoded piece. Returns the full generated string.
+    /// decoded piece. Returns the generated text with GPU timing breakdown.
     pub fn generate(
         &mut self,
         prompt: &str,
         max_tokens: usize,
         temperature: f32,
         mut on_token: impl FnMut(&str),
-    ) -> Result<String, InferError> {
+    ) -> Result<GenerateOutput, InferError> {
         // Tokenize prompt
         let encoding = self
             .tokenizer
             .encode(prompt, true)
             .map_err(|e| InferError::Tokenizer(e.to_string()))?;
         let prompt_ids: Vec<u32> = encoding.get_ids().to_vec();
+        let prompt_tokens = prompt_ids.len();
 
-        // Prefill: feed each prompt token through the model to populate KV cache.
-        // For simplicity we run one token at a time (decode path).
-        // In a production system you'd want a separate prefill kernel.
+        // ── Prefill ───────────────────────────────────────────────
+        // Feed each prompt token through the model to populate KV cache.
+        let mut prefill_gpu_secs = 0.0f64;
         let mut last_token_id = 0u32;
         for &token_id in &prompt_ids {
-            last_token_id = self.step(token_id, temperature)?;
+            let (tid, gpu_secs) = self.step(token_id, temperature)?;
+            last_token_id = tid;
+            prefill_gpu_secs += gpu_secs;
         }
 
-        // Generate
+        // ── Decode ────────────────────────────────────────────────
         let mut output_ids = Vec::new();
         let mut token_id = last_token_id;
+        let mut decode_gpu_secs = 0.0f64;
         for _ in 0..max_tokens {
             if token_id == self.eos_token_id {
                 break;
@@ -173,19 +197,40 @@ impl Session {
                 .decode(&[token_id], true)
                 .map_err(|e| InferError::Tokenizer(e.to_string()))?;
             on_token(&piece);
-            token_id = self.step(token_id, temperature)?;
+            let (tid, gpu_secs) = self.step(token_id, temperature)?;
+            token_id = tid;
+            decode_gpu_secs += gpu_secs;
         }
+
+        let tokens_generated = output_ids.len();
+        let decode_tok_per_sec = if decode_gpu_secs > 0.0 {
+            tokens_generated as f64 / decode_gpu_secs
+        } else {
+            0.0
+        };
 
         let generated = self
             .tokenizer
             .decode(&output_ids, true)
             .map_err(|e| InferError::Tokenizer(e.to_string()))?;
-        Ok(generated)
+
+        Ok(GenerateOutput {
+            text: generated,
+            tokens_generated,
+            prompt_tokens,
+            prefill_gpu_secs,
+            decode_gpu_secs,
+            decode_tok_per_sec,
+        })
     }
 
     /// Single forward pass: set token_id + temperature + uniform in state,
-    /// execute plan, return the sampled next token id.
-    fn step(&mut self, token_id: u32, temperature: f32) -> Result<u32, InferError> {
+    /// execute the plan, return the sampled next token id and GPU elapsed
+    /// time in seconds.
+    ///
+    /// This is the low-level step API — drive the autoregressive loop
+    /// yourself for fine-grained control over timing, sampling, etc.
+    pub fn step(&mut self, token_id: u32, temperature: f32) -> Result<(u32, f64), InferError> {
         let pos = position_from_state(&self.state);
 
         // n_kv = position + 1: the KV cache update will write token at slot `pos`,
@@ -196,8 +241,8 @@ impl Session {
         let uniform: f32 = pseudo_uniform(token_id, pos);
         self.state.insert("uniform".to_string(), uniform.to_le_bytes().to_vec());
 
-        // Execute plan
-        let out_bytes = execute_plan(
+        // Execute plan — returns (output_bytes, gpu_microseconds).
+        let (out_bytes, gpu_us) = execute_plan(
             &self.ctx,
             &self.plan,
             &WeightMap::new(), // all weights are GPU-resident
@@ -213,7 +258,7 @@ impl Session {
             return Err(InferError::Other("plan output too short".to_string()));
         }
         let next_id = u32::from_le_bytes([out_bytes[0], out_bytes[1], out_bytes[2], out_bytes[3]]);
-        Ok(next_id)
+        Ok((next_id, gpu_us / 1_000_000.0))
     }
 
     /// Reset KV cache and position counter (start a new conversation).

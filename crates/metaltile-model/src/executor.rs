@@ -1,10 +1,12 @@
 //! Execution plan executor: dispatches an `ExecutionPlan` on the GPU.
 //!
 //! Each `DispatchNode` is dispatched individually via a single-spec
-//! `Context::dispatch_chain` call. Intermediate tensors are tracked in
-//! `slot_data` (host-side `Vec<Vec<u8>>`). Weights live in the caller-
-//! provided `resident` map (pre-uploaded GPU buffers) or fall back to
-//! `weights` for CPU→GPU upload per dispatch.
+//! `Context::dispatch_chain` call. Intermediate tensors are stored
+//! directly in GPU-resident `ResidentBuffer`s ("slot_data") — on Apple
+//! Silicon's unified memory architecture this avoids the alloc+copy+
+//! readback+clone round-trips that `Vec<Vec<u8>>` would incur. Weights
+//! live in the caller-provided `resident` map (pre-uploaded GPU buffers)
+//! or fall back to `weights` for CPU→GPU upload per dispatch.
 //!
 //! Constexpr values are placed in `spec.buffers` (as 4-byte LE scalars)
 //! so `dispatch_chain` binds them via `setBytes`. The `fn_consts` field
@@ -48,25 +50,37 @@ static EMPTY_FN_CONSTS: std::sync::OnceLock<BTreeMap<String, u32>> = std::sync::
 ///
 /// This is the primary entry point for inference. Each `DispatchNode`
 /// is dispatched individually:
-/// 1. Build a `BTreeMap<String, Vec<u8>>` with input bytes (slot/weight/state)
-///    and correctly-sized zero output buffers.
-/// 2. Add constexpr values to the same map (4-byte LE scalars).
-/// 3. Call `ctx.dispatch_chain(&[spec])` with a single spec.
-/// 4. Read output param bytes from `DispatchResult.outputs`.
-/// 5. Write slot outputs to `slot_data`, state outputs to `state`.
+/// 1. Intermediate tensors are stored in GPU-resident `ResidentBuffer`s
+///    ("slot_data") — no host-side copies on Apple Silicon unified memory.
+/// 2. Input slots bind directly via `spec.resident`; output slots allocate
+///    fresh `ResidentBuffer`s bound via `spec.output_resident`.
+/// 3. Add constexpr values to `spec.buffers` (4-byte LE scalars).
+/// 4. Call `ctx.dispatch_chain(&[spec])` with a single spec.
+/// 5. Move output `ResidentBuffer`s into `slot_data`; write state outputs
+///    to `state`. Only the final output slot is read back to host.
 ///
-/// Returns the output bytes of the plan's final output slot.
+/// Returns the output bytes of the plan's final output slot and the total
+/// GPU elapsed time in **microseconds** across all dispatched nodes.
 pub fn execute_plan(
     ctx: &Context,
     plan: &ExecutionPlan,
     weights: &WeightMap,
     state: &mut StateMap,
     resident: &BTreeMap<String, ResidentBuffer>,
-) -> Result<Vec<u8>, ModelError> {
+) -> Result<(Vec<u8>, f64), ModelError> {
     let fn_consts = EMPTY_FN_CONSTS.get_or_init(BTreeMap::new);
 
-    // Pre-allocate slot data with correct sizes from the liveness analysis.
-    let mut slot_data: Vec<Vec<u8>> = plan.slots.iter().map(|s| vec![0u8; s.size_bytes]).collect();
+    // Pre-allocate GPU-resident slot buffers. On Apple Silicon unified
+    // memory, these are just Metal buffer handles — no data copy occurs.
+    let mut slot_data: Vec<ResidentBuffer> = plan
+        .slots
+        .iter()
+        .map(|s| ctx.alloc_resident(s.size_bytes))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| ModelError::Other(e.to_string()))?;
+
+    // Accumulate GPU elapsed time across all nodes (microseconds).
+    let mut total_gpu_us: f64 = 0.0;
 
     for node in &plan.nodes {
         let mut kernel = (node.kernel_ir)(node.dtype);
@@ -75,16 +89,17 @@ pub fn execute_plan(
 
         // ── Input bindings ────────────────────────────────────────
         // Weights/state in `resident` (keyed by tensor name) → skip CPU copy.
-        // State keys also checked in resident (e.g. GPU-resident KV cache).
+        // Intermediate slots → bind directly via `resident` (zero-copy on
+        // unified memory). State keys also checked in resident for KV cache.
         let mut spec_resident: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
 
         for (param_name, slot_ref) in &node.input_bindings {
             match slot_ref {
                 SlotRef::Slot(idx) => {
-                    buffers.insert(
-                        param_name.clone(),
-                        slot_data.get(*idx).cloned().unwrap_or_default(),
-                    );
+                    // GPU-resident intermediate — bind directly, no copy.
+                    if let Some(rb) = slot_data.get(*idx) {
+                        spec_resident.insert(param_name.clone(), rb.clone());
+                    }
                 },
                 SlotRef::Weight(tensor_name) =>
                     if let Some(rb) = resident.get(tensor_name) {
@@ -104,8 +119,8 @@ pub fn execute_plan(
         }
 
         // ── Output bindings ───────────────────────────────────────
-        // GPU-resident outputs (KV cache) use output_resident — no host buffer.
-        // All others get a correctly-sized zero buffer for dispatch_chain.
+        // GPU-resident outputs (KV cache, intermediate slots) use
+        // output_resident — GPU writes directly, no host buffer.
         let mut spec_output_resident: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
 
         for (param_name, slot_ref) in &node.output_bindings {
@@ -113,7 +128,10 @@ pub fn execute_plan(
                 SlotRef::Slot(idx) => {
                     let size = plan.slots.get(*idx).map(|s| s.size_bytes).unwrap_or(0);
                     if size > 0 {
-                        buffers.insert(param_name.clone(), vec![0u8; size]);
+                        let rb = ctx
+                            .alloc_resident(size)
+                            .map_err(|e| ModelError::Other(e.to_string()))?;
+                        spec_output_resident.insert(param_name.clone(), rb);
                     }
                 },
                 SlotRef::State(key) => {
@@ -210,27 +228,45 @@ pub fn execute_plan(
         let results = ctx.dispatch_chain(&[spec]).map_err(|e| ModelError::Other(e.to_string()))?;
         done_flag.store(true, Ordering::Release); // disarm watchdog
 
+        // ── Accumulate GPU time ─────────────────────────────────
+        // dispatch_chain attributes the full cmd-buffer elapsed time
+        // to the first result when there are multiple specs. For a
+        // single-spec chain, results[0].elapsed_us is the node time.
+        if let Some(r) = results.first() {
+            total_gpu_us += r.elapsed_us;
+        }
+
         // ── Output readback ───────────────────────────────────────
         let Some(result) = results.into_iter().next() else { continue };
 
         for (param_name, slot_ref) in &node.output_bindings {
-            let Some(bytes) = result.outputs.get(param_name) else { continue };
-
             match slot_ref {
-                SlotRef::Slot(idx) =>
-                    if let Some(slot) = slot_data.get_mut(*idx) {
-                        *slot = bytes.clone();
-                    },
+                SlotRef::Slot(idx) => {
+                    // GPU wrote directly into output_resident — retrieve it.
+                    if let Some(rb) = spec_output_resident.remove(param_name) {
+                        slot_data[*idx] = rb;
+                    }
+                },
                 SlotRef::State(key) => {
-                    state.insert(key.clone(), bytes.clone());
+                    // GPU-resident KV cache was updated in-place by the
+                    // output_resident path — no readback needed. Host-side
+                    // state still goes through DispatchResult.outputs.
+                    if !spec_output_resident.contains_key(param_name) {
+                        if let Some(bytes) = result.outputs.get(param_name) {
+                            state.insert(key.clone(), bytes.clone());
+                        }
+                    }
                 },
                 SlotRef::Weight(_) => {},
             }
         }
     }
 
-    // Return the bytes of the plan's designated output slot.
-    Ok(slot_data.get(plan.output_slot).cloned().unwrap_or_default())
+    // Return bytes from the plan's designated output slot via a single
+    // readback, plus accumulated GPU time in microseconds.
+    let final_slot = &slot_data[plan.output_slot];
+    let final_size = plan.slots[plan.output_slot].size_bytes;
+    Ok((final_slot.read_bytes(final_size), total_gpu_us))
 }
 
 

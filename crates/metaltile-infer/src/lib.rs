@@ -29,4 +29,4 @@ pub use checkpoint::{
 };
 pub use config::ModelConfig;
 pub use error::InferError;
-pub use session::Session;
+pub use session::{GenerateOutput, Session};

@@ -91,13 +91,32 @@ async fn run_async(args: &InferArgs) -> Result<(), metaltile_infer::InferError> 
     // ── Generate ───────────────────────────────────────────────────────
     eprintln!("\n--- generating ---");
     print!("{}", args.prompt);
-    session.generate(&args.prompt, args.max_tokens, args.temperature, |tok| {
+    let output = session.generate(&args.prompt, args.max_tokens, args.temperature, |tok| {
         print!("{tok}");
         // Flush stdout so tokens appear incrementally
         use std::io::Write;
         let _ = std::io::stdout().flush();
     })?;
     println!();
+
+    // ── Timing ─────────────────────────────────────────────────────────
+    let total_gpu = output.prefill_gpu_secs + output.decode_gpu_secs;
+    eprintln!(
+        "\n{pretok} prompt tokens processed in {prefill:.2}s GPU",
+        pretok = output.prompt_tokens,
+        prefill = output.prefill_gpu_secs,
+    );
+    if output.prompt_tokens > 0 && output.prefill_gpu_secs > 0.0 {
+        let prefill_tps = output.prompt_tokens as f64 / output.prefill_gpu_secs;
+        eprintln!("  prefill:  {prefill_tps:.1} tok/s GPU");
+    }
+    eprintln!(
+        "{gentok} tokens generated in {decode:.2}s GPU  ({tps:.1} tok/s)",
+        gentok = output.tokens_generated,
+        decode = output.decode_gpu_secs,
+        tps = output.decode_tok_per_sec,
+    );
+    eprintln!("  total GPU time: {total:.2}s", total = total_gpu);
 
     Ok(())
 }
