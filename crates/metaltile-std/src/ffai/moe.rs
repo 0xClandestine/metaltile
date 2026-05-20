@@ -156,3 +156,77 @@ inventory::submit! {
         kernel_mode: Some(KernelMode::Reduction),
     }
 }
+
+// ── mt_moe_unpermute ─────────────────────────────────────────────────────
+//
+// Combine k expert outputs back into the original token order with
+// top-k softmax weights.
+//
+// Inputs:
+//   expert_outputs  — [k*B*T, hidden]   per-expert dense outputs at the
+//                                       expert-sorted positions
+//   inv_perm        — [B*T, k]          where (token i, slot j) was placed
+//                                       in expert_outputs (computed by
+//                                       caller's sort step)
+//   top_k_weights   — [B*T, k]          softmax weights from
+//                                       mt_moe_router_topk
+//   out             — [B*T, hidden]     weighted sum across k experts
+//
+// Constexpr:
+//   hidden — model hidden dim (e.g. 2048 for Qwen3-MoE)
+//   k      — top-k expert count (e.g. 8)
+//
+// Geometry:
+//   tpg=128  (split hidden across 128 lanes via 4-wide vectorize)
+//   grid=[B*T, 1, 1]
+//
+// Per-token cost: read k * hidden / 128 = (k * hidden) / 128 expert
+// values + k weights, do k FMAs per output column, one store per
+// column. At hidden=2048, k=8 → ~1k FMAs per token. Bandwidth-bound,
+// not ALU-bound.
+#[kernel]
+pub fn mt_moe_unpermute<T>(
+    expert_outputs: Tensor<T>,
+    inv_perm: Tensor<u32>,
+    top_k_weights: Tensor<T>,
+    mut out: Tensor<T>,
+    #[constexpr] hidden: u32,
+    #[constexpr] k: u32,
+) {
+    let token = tgid_x;
+    let lane = tid;
+    let row_base_inv = token * k;
+    let row_base_w = token * k;
+    let row_base_out = token * hidden;
+
+    let n_per_lane = (hidden + 127u32) / 128u32;
+    for r in range(0u32, n_per_lane, 1u32) {
+        let h = r * 128u32 + lane;
+        if h < hidden {
+            let mut acc = 0.0f32;
+            for j in range(0u32, k, 1u32) {
+                let pos = load(inv_perm[row_base_inv + j]);
+                let v = load(expert_outputs[pos * hidden + h]).cast::<f32>();
+                let w = load(top_k_weights[row_base_w + j]).cast::<f32>();
+                acc = acc + w * v;
+            }
+            store(out[row_base_out + h], acc.cast::<T>());
+        }
+    }
+}
+
+inventory::submit! {
+    BenchSpec {
+        op: "moe",
+        subop: "unpermute",
+        kernel_name: "mt_moe_unpermute",
+        kernel_ir: mt_moe_unpermute::kernel_ir_for,
+        dtypes: &[DType::F32, DType::F16, DType::BF16],
+        tol: 1e-3,
+        mlx_src: None,
+        mlx_pattern: None,
+        shapes: &[],
+        dispatch: BenchDispatch::Generic,
+        kernel_mode: Some(KernelMode::Reduction),
+    }
+}

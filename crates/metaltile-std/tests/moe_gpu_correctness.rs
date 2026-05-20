@@ -15,7 +15,7 @@ mod common;
 use common::gpu_lock;
 use metaltile_core::dtype::DType;
 use metaltile_runtime::Context;
-use metaltile_std::ffai::moe::mt_moe_router_topk;
+use metaltile_std::ffai::moe::{mt_moe_router_topk, mt_moe_unpermute};
 
 #[allow(clippy::too_many_arguments)]
 fn run_topk(
@@ -125,4 +125,89 @@ fn mt_moe_router_topk_matches_cpu_reference_f32() {
             assert!(d < 1e-5, "weight[{i}] diverges: gpu={g:.6} ref={r:.6} diff={d:.2e}");
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_unpermute(
+    ctx: &Context,
+    dtype: DType,
+    expert_outputs_bytes: &[u8],
+    inv_perm: &[u32],
+    weights_bytes: &[u8],
+    n_rows: usize,
+    hidden: usize,
+    k: usize,
+    elem_bytes: usize,
+) -> Vec<u8> {
+    let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    buffers.insert("expert_outputs".into(), expert_outputs_bytes.to_vec());
+    buffers.insert("inv_perm".into(), inv_perm.iter().flat_map(|v| v.to_le_bytes()).collect());
+    buffers.insert("top_k_weights".into(), weights_bytes.to_vec());
+    buffers.insert("out".into(), vec![0u8; n_rows * hidden * elem_bytes]);
+    buffers.insert("hidden".into(), (hidden as u32).to_le_bytes().to_vec());
+    buffers.insert("k".into(), (k as u32).to_le_bytes().to_vec());
+
+    let mut kernel = mt_moe_unpermute::kernel_ir_for(dtype);
+    kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+    let result = ctx
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [n_rows, 1, 1], [128, 1, 1])
+        .expect("dispatch_with_grid should succeed");
+    result.outputs.get("out").expect("out").clone()
+}
+
+#[test]
+fn mt_moe_unpermute_matches_cpu_reference_f32() {
+    let n_rows = 4usize;
+    let hidden = 256usize;
+    let k = 4usize;
+    let total_expert_slots = n_rows * k;
+
+    // Deterministic expert outputs.
+    let expert_outputs: Vec<f32> =
+        (0..total_expert_slots * hidden).map(|i| ((i as f32 * 0.07) % 11.0) - 5.5).collect();
+    // Identity inv_perm — each (token i, slot j) stored at i*k+j.
+    let inv_perm: Vec<u32> = (0..total_expert_slots as u32).collect();
+    // Top-k weights — normalized so each row sums to 1.0.
+    let raw_weights: Vec<f32> = (0..n_rows * k).map(|i| 0.1 + (i as f32 * 0.03)).collect();
+    let mut weights = vec![0.0f32; n_rows * k];
+    for row in 0..n_rows {
+        let row_sum: f32 = raw_weights[row * k..(row + 1) * k].iter().sum();
+        for j in 0..k {
+            weights[row * k + j] = raw_weights[row * k + j] / row_sum;
+        }
+    }
+
+    // CPU reference.
+    let mut ref_out = vec![0.0f32; n_rows * hidden];
+    for token in 0..n_rows {
+        for h in 0..hidden {
+            let mut acc = 0.0f32;
+            for j in 0..k {
+                let pos = inv_perm[token * k + j] as usize;
+                acc += weights[token * k + j] * expert_outputs[pos * hidden + h];
+            }
+            ref_out[token * hidden + h] = acc;
+        }
+    }
+
+    let exp_bytes: Vec<u8> = expert_outputs.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let w_bytes: Vec<u8> = weights.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let _g = gpu_lock();
+    let ctx = Context::new().expect("Context::new on macOS");
+    let out_bytes =
+        run_unpermute(&ctx, DType::F32, &exp_bytes, &inv_perm, &w_bytes, n_rows, hidden, k, 4);
+    let gpu_out: Vec<f32> =
+        out_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+
+    let mut max_diff = 0.0f32;
+    let mut max_at = 0usize;
+    for (i, (g, r)) in gpu_out.iter().zip(ref_out.iter()).enumerate() {
+        let d = (g - r).abs();
+        if d > max_diff {
+            max_diff = d;
+            max_at = i;
+        }
+    }
+    assert!(max_diff < 1e-4, "unpermute mismatch at [{max_at}]: max |diff| = {max_diff:.2e}",);
 }
