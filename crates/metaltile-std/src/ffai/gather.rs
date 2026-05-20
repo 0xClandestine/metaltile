@@ -15,7 +15,12 @@ use crate::{
 };
 
 #[kernel]
-pub fn ffai_gather<T>(table: Tensor<T>, indices: Tensor<u32>, out: Tensor<T>, #[constexpr] dim: u32) {
+pub fn ffai_gather<T>(
+    table: Tensor<T>,
+    indices: Tensor<u32>,
+    out: Tensor<T>,
+    #[constexpr] dim: u32,
+) {
     let idx = program_id::<0>();
     let token = idx / dim;
     let d = idx - token * dim;
