@@ -45,3 +45,4 @@ pub mod sdpa_decode_2pass;
 pub mod sdpa_decode_d256;
 pub mod sdpa_decode_d64;
 pub mod ssm;
+pub mod ssm_replay;
