@@ -1,6 +1,7 @@
 # MetalTile
 
-A Rust-embedded DSL for writing Apple Metal GPU kernels. Write tile-level algorithms in Rust, get optimized Metal Shading Language out.
+A Rust-embedded DSL for writing Apple Metal GPU kernels. Write tile-level
+algorithms in Rust, get optimized Metal Shading Language out.
 
 ```rust
 #[kernel]
@@ -38,29 +39,39 @@ pub fn mt_rms_norm<T>(
 }
 ```
 
-This generates ~104% of MLX's hand-tuned `rms` kernel throughput on M4 Max across f32/f16/bfloat16.
+This generates ~104% of MLX's hand-tuned `rms` kernel throughput on M4 Max
+across f32 / f16 / bfloat16.
 
 ## Why MetalTile
 
-- **Write once in Rust, run fast on Apple Silicon.** No raw MSL, no thread-position arithmetic.
-- **Tile-level, not thread-level.** `strided_reduce`, `reduce_sum`, `dot` — express what to compute, the compiler handles thread mapping, vectorization, and SIMD-group reductions.
-- **Verified against MLX.** Every kernel is benchmarked and numerically compared against the corresponding MLX Metal kernel. 139/139 ops correct, avg 110% of MLX throughput on M4 Max.
-- **All three float dtypes.** `f32`, `f16`, and `bfloat16` work identically — native `bfloat` emitted on Metal 3.1+.
-- **Rust-only correctness checking.** Every kernel is verified against CPU-computed reference values without a Mac.
+- **Write once in Rust, run fast on Apple Silicon.** No raw MSL, no
+  thread-position arithmetic.
+- **Tile-level, not thread-level.** `strided_reduce`, `reduce_sum`, `dot` —
+  express *what* to compute; the compiler handles thread mapping,
+  vectorization, and SIMD-group reductions.
+- **Verified against MLX.** Every kernel is benchmarked and numerically
+  compared against the corresponding MLX Metal kernel.
+- **All three float dtypes.** `f32`, `f16`, and `bfloat16` work identically —
+  native `bfloat` emitted on Metal 3.1+.
+- **Rust-only correctness checking.** Every kernel is also verified against
+  CPU-computed reference values via the interpreter — no Mac required for that
+  layer.
 
 ## Status
 
-Early development — APIs are not yet stable. Core DSL works; autotuner and type-level shape algebra are planned for v0.2.
+Early development — APIs are not yet stable. The core DSL works; an autotuner
+and type-level shape algebra are planned.
 
 | Crate | Description |
 |---|---|
-| [`metaltile-core`](crates/metaltile-core/README.md) | IR types, DType, Shape |
+| [`metaltile-core`](crates/metaltile-core/README.md) | IR types, `DType`, `Shape` |
 | [`metaltile-macros`](crates/metaltile-macros/README.md) | `#[kernel]` proc macro |
-| [`metaltile-codegen`](crates/metaltile-codegen/README.md) | MSL lowering + 14 opt passes |
+| [`metaltile-codegen`](crates/metaltile-codegen/README.md) | MSL lowering + optimization passes |
 | [`metaltile-runtime`](crates/metaltile-runtime/README.md) | Metal dispatch, PSO cache |
-| [`metaltile`](crates/metaltile/README.md) | Facade re-exporting all crates |
-| [`metaltile-std`](crates/metaltile-std/README.md) | Kernel stdlib, op files, bench types |
-| [`metaltile-cli`](crates/metaltile-cli/README.md) | `tile` CLI binary |
+| [`metaltile-interp`](crates/metaltile-interp) | CPU reference interpreter |
+| [`metaltile`](crates/metaltile/README.md) | facade re-exporting all crates |
+| [`metaltile-std`](crates/metaltile-std/README.md) | kernel stdlib, op files, bench types |
+| [`metaltile-cli`](crates/metaltile-cli/README.md) | the `tile` CLI binary |
 
 ## Quick Start
 
@@ -82,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Context::new()?;
     let n = 256usize;
     let a: Vec<u8> = (0..n).flat_map(|i| (i as f32).to_le_bytes()).collect();
-    let b: Vec<u8> = (0..n).flat_map(|_| (1.0f32).to_le_bytes()).collect();
+    let b: Vec<u8> = (0..n).flat_map(|_| 1.0f32.to_le_bytes()).collect();
     let c = vec![0u8; n * 4];
 
     let result = vector_add::launch(&ctx)
@@ -100,58 +111,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-To inspect the generated MSL directly:
-
-```rust
-use metaltile::codegen::msl::MslGenerator;
-
-let msl = MslGenerator::default().generate(&vector_add::kernel_ir())?;
-println!("{msl}");
-```
+Full walkthrough: [`docs/getting-started.md`](docs/getting-started.md).
 
 ## Supported Operations
 
-22 operation categories benchmarked against MLX:
+Operation categories benchmarked against MLX:
 
-**Elementwise**: unary (exp, log, sqrt, sin, cos, erf, sigmoid, silu, gelu, relu, …), binary (add, mul, sub, div, max, min, pow, logaddexp), binary_two (fused add+mul), ternary (select), copy, arange
+**Elementwise** — unary (exp, log, sqrt, sin, cos, erf, sigmoid, silu, gelu,
+relu, …), binary (add, mul, sub, div, max, min, pow, logaddexp), fused add+mul,
+ternary select, copy, arange.
 
-**Reductions**: all-reduce sum/max/min, row-reduce sum/max/min, logsumexp, softmax, rms-norm, layer-norm
+**Reductions** — all-reduce sum/max/min, row-reduce sum/max/min, logsumexp,
+softmax, rms-norm, layer-norm.
 
-**Matrix**: GEMV, masked GEMV, SDPA vector decode
+**Matrix** — GEMV, masked GEMV, SDPA (vector decode + prefill).
 
-**Misc**: RoPE, scan (parallel prefix sum), arg-reduce (argmax), sort (bitonic), random (xorshift32), quantized GeMV (int4), fp4 quantize/dequantize, strided copy (non-contiguous tensors)
-
-## CLI
-
-Install the `tile` binary:
-
-```sh
-cargo install --path crates/metaltile-cli
-```
-
-```
-tile bench                      # full benchmark suite vs MLX
-tile bench --filter softmax     # narrow to one op
-tile build                      # compile all kernels, report errors
-tile inspect --kernel mt_rms_norm  # print IR and generated MSL
-tile profile                     # occupancy & register analysis for all kernels
-tile profile <kernel> --sweep    # per-threadgroup-size breakdown
-tile device                     # show GPU info and supported features
-tile snap -o baseline.json      # save bench results as a regression baseline
-tile diff baseline.json         # compare current results to baseline
-```
+**Misc** — RoPE, scan (parallel prefix sum), arg-reduce, sort (bitonic), random
+(xorshift32), quantized GEMV / GEMM, fp4 quantize/dequantize, strided copy.
 
 ## Benchmarks
 
-Run against MLX Metal kernels on M4 Max:
+`tile bench` runs every kernel against its MLX Metal reference on identical
+buffers and reports throughput + a correctness check. Selected results
+(M4 Max, higher = better vs MLX):
 
-```sh
-tile bench
-```
-
-Selected results (M4 Max, higher = better vs MLX):
-
-| Op | MT% of MLX |
+| Op | MT % of MLX |
 |---|---|
 | softmax f32 | ~105% |
 | rms_norm f16 | ~104% |
@@ -160,6 +144,8 @@ Selected results (M4 Max, higher = better vs MLX):
 | argmax f32 | **206%** |
 | scan f32 | ~104% |
 
+See [`docs/cli.md`](docs/cli.md) for the full `tile` reference.
+
 ## Architecture
 
 ```
@@ -167,13 +153,32 @@ Selected results (M4 Max, higher = better vs MLX):
                           │
                     MetalTile IR  (metaltile-core)
                           │
-               metaltile-codegen (14 opt passes → MSL)
-                 │
-         metaltile-runtime
-         (Metal GPU dispatch)
+               metaltile-codegen (optimization passes → MSL)
+                          │
+                  metaltile-runtime (Metal GPU dispatch)
 ```
 
-Optimization passes: TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM → IfConversion → ValueSink → TileLowering → Fusion → Unroll → Schedule → Vectorize → DeadStoreElim.
+Optimization passes run in order: TypeCheck → ConstFold → AlgebraicSimplify →
+CopyProp → CSE → LICM → IfConversion → ValueSink → TileLowering → Fusion →
+Unroll → Schedule → Vectorize → DeadStoreElim.
+
+## Documentation
+
+Full docs live in [`docs/`](docs/README.md):
+
+- [Getting started](docs/getting-started.md) — toolchain, build, first kernel.
+- [Developing](docs/developing.md) — repo layout, dev loop, and the
+  **kernel-authoring hazards** (a wrong dispatch can freeze the machine).
+- [Testing](docs/testing.md) — test layers, CI, and test-infra gaps.
+- [CLI](docs/cli.md) — the `tile` binary.
+- [Publishing](docs/publishing.md) — the release flow.
+
+## Contributing
+
+Contributions — including AI-assisted ones — are welcome. Read
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for the issue / PR process and
+[`docs/developing.md`](docs/developing.md) for the kernel-authoring hazards
+**before** writing a kernel.
 
 ## License
 
