@@ -8,6 +8,7 @@ members = [
   "crates/metaltile",
   "crates/metaltile-cli",
   "crates/metaltile-std",
+  "crates/metaltile-emit",
 ]
 
 [workspace.package]
