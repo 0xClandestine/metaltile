@@ -68,8 +68,8 @@ pub fn execute_plan(
         let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
         // ── Input bindings ────────────────────────────────────────
-        // Weights accessed via `spec.resident` (keyed by kernel param name)
-        // skip buffers entirely. Others go into buffers.
+        // Weights/state in `resident` (keyed by tensor name) → skip CPU copy.
+        // State keys also checked in resident (e.g. GPU-resident KV cache).
         let mut spec_resident: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
 
         for (param_name, slot_ref) in &node.input_bindings {
@@ -81,16 +81,17 @@ pub fn execute_plan(
                     );
                 },
                 SlotRef::Weight(tensor_name) => {
-                    // Try resident (GPU-uploaded) first.
                     if let Some(rb) = resident.get(tensor_name) {
                         spec_resident.insert(param_name.clone(), rb.clone());
                     } else if let Some(bytes) = weights.get(tensor_name) {
                         buffers.insert(param_name.clone(), bytes.clone());
                     }
-                    // If neither, leave unbound (kernel may handle absent params).
                 },
                 SlotRef::State(key) => {
-                    if let Some(bytes) = state.get(key) {
+                    // GPU-resident state (KV cache) bypasses CPU buffers.
+                    if let Some(rb) = resident.get(key) {
+                        spec_resident.insert(param_name.clone(), rb.clone());
+                    } else if let Some(bytes) = state.get(key) {
                         buffers.insert(param_name.clone(), bytes.clone());
                     }
                 },
@@ -98,20 +99,30 @@ pub fn execute_plan(
         }
 
         // ── Output bindings ───────────────────────────────────────
-        // Pass correctly-sized zero buffers so dispatch_chain allocates
-        // the right amount of GPU memory for output params.
+        // GPU-resident outputs (KV cache) use output_resident — no host buffer.
+        // All others get a correctly-sized zero buffer for dispatch_chain.
+        let mut spec_output_resident: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
+
         for (param_name, slot_ref) in &node.output_bindings {
-            let size = match slot_ref {
+            match slot_ref {
                 SlotRef::Slot(idx) => {
-                    plan.slots.get(*idx).map(|s| s.size_bytes).unwrap_or(0)
+                    let size = plan.slots.get(*idx).map(|s| s.size_bytes).unwrap_or(0);
+                    if size > 0 {
+                        buffers.insert(param_name.clone(), vec![0u8; size]);
+                    }
                 },
                 SlotRef::State(key) => {
-                    state.get(key).map(|v| v.len()).unwrap_or(0)
+                    if let Some(rb) = resident.get(key) {
+                        // GPU writes directly into the resident buffer; no readback.
+                        spec_output_resident.insert(param_name.clone(), rb.clone());
+                    } else {
+                        let size = state.get(key).map(|v| v.len()).unwrap_or(0);
+                        if size > 0 {
+                            buffers.insert(param_name.clone(), vec![0u8; size]);
+                        }
+                    }
                 },
-                SlotRef::Weight(_) => 0,
-            };
-            if size > 0 {
-                buffers.insert(param_name.clone(), vec![0u8; size]);
+                SlotRef::Weight(_) => {},
             }
         }
 
@@ -141,6 +152,7 @@ pub fn execute_plan(
             grid_groups,
             threads_per_group,
             resident: &spec_resident,
+            output_resident: &spec_output_resident,
         };
 
         let results = ctx

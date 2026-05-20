@@ -62,7 +62,12 @@ pub struct DispatchSpec<'a> {
     pub fn_consts: &'a BTreeMap<String, u32>,
     pub grid_groups: [usize; 3],
     pub threads_per_group: [usize; 3],
+    /// Pre-uploaded GPU buffers bound to INPUT params by kernel param name.
     pub resident: &'a BTreeMap<String, ResidentBuffer>,
+    /// Pre-uploaded GPU buffers bound to OUTPUT params by kernel param name.
+    /// The GPU writes directly into these; no host readback is performed.
+    /// Used for KV cache buffers that persist across decode steps.
+    pub output_resident: &'a BTreeMap<String, ResidentBuffer>,
 }
 
 /// Opaque handle to a GPU-resident input buffer. Produced by
@@ -933,6 +938,14 @@ impl Context {
             let mut bufs: Vec<BufRc> = Vec::with_capacity(spec.kernel.params.len() * 2);
 
             for (param, plan) in spec.kernel.params.iter().zip(&binding_plans[i]) {
+                // Outputs with pre-uploaded GPU buffers → write directly in-place.
+                if param.is_output {
+                    if let Some(rb) = spec.output_resident.get(&param.name) {
+                        bufs.push(rb.inner.clone());
+                        push_strided(&mut bufs, param, spec.buffers)?;
+                        continue;
+                    }
+                }
                 // Inputs: resident-pre-uploaded > aliased from earlier spec.
                 if !param.is_output {
                     let pre = spec
@@ -1018,6 +1031,10 @@ impl Context {
             let mut outputs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
             for (param, plan) in spec.kernel.params.iter().zip(&binding_plans[i]) {
                 if !param.is_output {
+                    continue;
+                }
+                // output_resident params are written directly on GPU; no host readback.
+                if spec.output_resident.contains_key(&param.name) {
                     continue;
                 }
                 if later_inputs[i].contains(param.name.as_str()) {

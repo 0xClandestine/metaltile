@@ -1,0 +1,25 @@
+[package]
+name = "metaltile-infer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "MetalTile inference engine — checkpoint loading, KV cache, inference loop"
+publish = false
+
+[dependencies]
+metaltile-core = { workspace = true }
+metaltile-runtime = { workspace = true }
+metaltile-model = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+half = { workspace = true }
+
+safetensors = "0.4"
+toml = "0.8"
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+hf-hub = { version = "0.3", features = ["tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }

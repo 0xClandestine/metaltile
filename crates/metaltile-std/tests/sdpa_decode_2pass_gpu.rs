@@ -102,6 +102,7 @@ fn run_2pass(
 
     let empty: BTreeMap<String, u32> = BTreeMap::new();
     let no_resident: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
+    let no_output_resident: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
 
     match mode {
         ChainMode::Unchained => {
@@ -146,6 +147,7 @@ fn run_2pass(
                     grid_groups: [a.n_kv_heads, a.blocks, 1],
                     threads_per_group: [32, gqa_factor, 1],
                     resident: &p1_resident,
+                    output_resident: &no_output_resident,
                 },
                 DispatchSpec {
                     kernel: &p2,
@@ -154,6 +156,7 @@ fn run_2pass(
                     grid_groups: [a.n_q_heads, 1, 1],
                     threads_per_group: [1024, 1, 1],
                     resident: &no_resident,
+                    output_resident: &no_output_resident,
                 },
             ];
             let r = a.ctx.dispatch_chain(&specs).expect("chain");

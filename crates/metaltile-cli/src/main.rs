@@ -7,6 +7,7 @@
 //!   device    Show GPU device info and supported features
 //!   snap      Save bench results as a regression baseline
 //!   diff      Compare bench results to a saved baseline
+//!   infer     Run inference with a TOML model + safetensors checkpoint
 
 mod cmd;
 pub mod suite_printer;
@@ -46,6 +47,8 @@ enum Command {
     Snap(SnapArgs),
     /// Compare bench results against a saved baseline
     Diff(DiffArgs),
+    /// Run inference with a TOML model + safetensors checkpoint
+    Infer(cmd::infer::InferArgs),
 }
 
 // ── Bench ────────────────────────────────────────────────────────────────
@@ -185,6 +188,7 @@ fn main() {
         Command::Device(args) => cmd::device::run(&args),
         Command::Snap(args) => cmd::snap::run(&args),
         Command::Diff(args) => cmd::diff::run(&args),
+        Command::Infer(args) => cmd::infer::run(&args),
     }
 }
 
