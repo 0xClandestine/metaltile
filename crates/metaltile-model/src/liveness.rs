@@ -53,32 +53,45 @@ struct LiveRange {
 ///   for outputs that will be assigned intermediate slots.
 /// - `intermediate_inputs`: for each node, list of `(param_name)` that read
 ///   from intermediate slots. The corresponding output must be found by name.
+/// Assign buffer slots to a sequence of nodes.
+///
+/// Returns `(slots, name_to_slot)` where:
+/// - `slots` is the list of `BufferSlot`s to pre-allocate, each sized to the
+///   MAXIMUM size ever used for that physical slot (not shrunk on reuse).
+/// - `name_to_slot` maps every intermediate tensor name to its assigned slot
+///   index, built during assignment and NOT rebuilt from the final slot vector
+///   (slot names are updated on reuse, so rebuilding from the vector would lose
+///   earlier tenant names).
 pub fn assign_slots(
     _num_nodes: usize,
     intermediate_outputs: &[Vec<(String, usize)>],
     intermediate_inputs: &[Vec<String>],
-) -> Vec<BufferSlot> {
+) -> (Vec<BufferSlot>, HashMap<String, usize>) {
     // Phase 1: collect all intermediate tensor names and their live ranges.
     let mut live_ranges: HashMap<String, LiveRange> = HashMap::new();
 
-    // Record writes (first_use).
+    // Record writes. For tensors written multiple times (e.g. `_residual`
+    // updated by each layer), keep the EARLIEST first_write so the slot
+    // stays live across the full sequence.
     for (node_idx, outputs) in intermediate_outputs.iter().enumerate() {
         for (name, size_bytes) in outputs {
             live_ranges
                 .entry(name.clone())
-                .and_modify(|_lr| {
-                    // first_write should already be set (each tensor written once).
+                .and_modify(|lr| {
+                    // Extend last_read to cover the re-write node so the slot
+                    // isn't freed before the write completes.
+                    lr.last_read = lr.last_read.max(node_idx);
                 })
                 .or_insert_with(|| LiveRange {
                     name: name.clone(),
                     size_bytes: *size_bytes,
                     first_write: node_idx,
-                    last_read: node_idx, // at least live through the write node
+                    last_read: node_idx,
                 });
         }
     }
 
-    // Record reads (update last_read).
+    // Record reads (extend last_read).
     for (node_idx, inputs) in intermediate_inputs.iter().enumerate() {
         for name in inputs {
             if let Some(lr) = live_ranges.get_mut(name) {
@@ -87,23 +100,25 @@ pub fn assign_slots(
         }
     }
 
-    // Phase 2: greedy slot assignment.
-    // Sort by first_write so we assign in temporal order.
+    // Phase 2: greedy slot assignment sorted by first_write.
     let mut ranges: Vec<LiveRange> = live_ranges.into_values().collect();
     ranges.sort_by_key(|lr| lr.first_write);
 
     let mut slots: Vec<BufferSlot> = Vec::new();
-    // Map from tensor name → assigned slot index.
+    // Canonical name→slot map built during assignment.  This is the source of
+    // truth — do NOT rebuild from the slot vector, which has mutable names.
     let mut name_to_slot: HashMap<String, usize> = HashMap::new();
 
     for lr in &ranges {
-        // Try to reuse a freed slot.
+        // Try to reuse a freed slot (one whose last_use ended before this
+        // tensor's first_write and that is large enough).
         let mut assigned = None;
         for (slot_idx, slot) in slots.iter_mut().enumerate() {
             if slot.last_use < lr.first_write && slot.size_bytes >= lr.size_bytes {
-                // Reuse this slot.
+                // Reuse: update bookkeeping but DO NOT shrink size_bytes — the
+                // pre-allocated buffer must stay large enough for all tenants.
                 slot.name = lr.name.clone();
-                slot.size_bytes = lr.size_bytes;
+                // slot.size_bytes intentionally unchanged (keeps original larger size)
                 slot.first_use = lr.first_write;
                 slot.last_use = lr.last_read;
                 assigned = Some(slot_idx);
@@ -114,7 +129,6 @@ pub fn assign_slots(
         let slot_idx = if let Some(idx) = assigned {
             idx
         } else {
-            // Allocate new slot.
             let idx = slots.len();
             slots.push(BufferSlot {
                 name: lr.name.clone(),
@@ -128,11 +142,7 @@ pub fn assign_slots(
         name_to_slot.insert(lr.name.clone(), slot_idx);
     }
 
-    // Phase 3: if no reuse happened, just use identity mapping (simple path).
-    // The greedy algorithm above handles reuse; if slots.len() == ranges.len(),
-    // we got no reuse. This is fine — Phase 1 default.
-
-    slots
+    (slots, name_to_slot)
 }
 
 /// Build a map from intermediate tensor name → slot index.
@@ -146,8 +156,9 @@ mod tests {
 
     #[test]
     fn no_intermediates_returns_empty() {
-        let slots = assign_slots(3, &[], &[]);
+        let (slots, map) = assign_slots(3, &[], &[]);
         assert!(slots.is_empty());
+        assert!(map.is_empty());
     }
 
     #[test]
@@ -155,10 +166,10 @@ mod tests {
         // One node with one output, no readers.
         let outputs = vec![vec![("temp".to_string(), 1024)]];
         let inputs: Vec<Vec<String>> = vec![vec![]];
-        let slots = assign_slots(1, &outputs, &inputs);
+        let (slots, map) = assign_slots(1, &outputs, &inputs);
         assert_eq!(slots.len(), 1);
-        assert_eq!(slots[0].name, "temp");
         assert_eq!(slots[0].size_bytes, 1024);
+        assert_eq!(map["temp"], 0);
     }
 
     #[test]
@@ -173,9 +184,6 @@ mod tests {
         //
         // At node 1, temp_a is still live (last_read=2 > 1), so temp_b
         // must get a new slot.
-        //
-        // If we reverse: temp_a last_read=1, temp_b first_write=2,
-        // then reuse is possible.
         let outputs = vec![
             vec![("temp_a".to_string(), 1024)],
             vec![("temp_b".to_string(), 512)],
@@ -183,9 +191,11 @@ mod tests {
             vec![],
         ];
         let inputs = vec![vec![], vec![], vec!["temp_a".to_string()], vec!["temp_b".to_string()]];
-        let slots = assign_slots(4, &outputs, &inputs);
+        let (slots, map) = assign_slots(4, &outputs, &inputs);
         // temp_a [0,2] and temp_b [1,3] overlap, so 2 slots.
         assert_eq!(slots.len(), 2);
+        assert!(map.contains_key("temp_a"));
+        assert!(map.contains_key("temp_b"));
     }
 
     #[test]
@@ -201,7 +211,10 @@ mod tests {
             vec![],
         ];
         let inputs = vec![vec![], vec!["temp_a".to_string()], vec![], vec!["temp_b".to_string()]];
-        let slots = assign_slots(4, &outputs, &inputs);
+        let (slots, map) = assign_slots(4, &outputs, &inputs);
         assert_eq!(slots.len(), 1, "sequential non-overlapping should reuse one slot");
+        // Both names must be present in the canonical map.
+        assert_eq!(map["temp_a"], 0);
+        assert_eq!(map["temp_b"], 0);
     }
 }

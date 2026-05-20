@@ -25,6 +25,11 @@ pub enum ModelError {
     #[error("missing required field: {field}")]
     MissingField { field: String },
 
+    /// Dispatch grid would exceed Metal hardware limits or violate kernel
+    /// invariants, potentially causing GPU hangs or out-of-bounds writes.
+    #[error("unsafe dispatch for '{op}': {detail}")]
+    UnsafeDispatch { op: String, detail: String },
+
     #[error("TOML parse error: {0}")]
     TomlParse(#[from] toml::de::Error),
 

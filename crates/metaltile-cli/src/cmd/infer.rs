@@ -35,6 +35,10 @@ pub struct InferArgs {
     /// HuggingFace Hub revision (branch/tag/commit)
     #[arg(long = "revision", default_value = "main")]
     pub revision: String,
+
+    /// Cap max_seq_len (KV cache size). Defaults to 2048 to avoid huge allocations.
+    #[arg(long = "max-seq-len", default_value = "2048")]
+    pub max_seq_len: usize,
 }
 
 pub fn run(args: &InferArgs) {
@@ -43,6 +47,8 @@ pub fn run(args: &InferArgs) {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+    // Force-exit to kill sleeping watchdog threads (one spawned per GPU dispatch).
+    std::process::exit(0);
 }
 
 async fn run_async(args: &InferArgs) -> Result<(), metaltile_infer::InferError> {
@@ -57,7 +63,8 @@ async fn run_async(args: &InferArgs) -> Result<(), metaltile_infer::InferError> 
     };
 
     // ── Parse config.json ──────────────────────────────────────────────
-    let config = ModelConfig::from_file(model_dir.join("config.json"))?;
+    let mut config = ModelConfig::from_file(model_dir.join("config.json"))?;
+    config.max_seq_len = config.max_seq_len.min(args.max_seq_len);
     eprintln!(
         "Model: {} layers, {} heads ({} kv), dim={}, vocab={}",
         config.n_layers, config.n_heads, config.n_kv_heads, config.hidden_dim, config.vocab_size,

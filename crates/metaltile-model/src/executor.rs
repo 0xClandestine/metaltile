@@ -215,15 +215,6 @@ pub fn execute_plan(
 
         for (param_name, slot_ref) in &node.output_bindings {
             let Some(bytes) = result.outputs.get(param_name) else { continue };
-            // Debug: print first 4 f32/bf16 values of each slot output.
-            if bytes.len() >= 8 {
-                let v0 = bf16_bytes_to_f32(&bytes[0..2]);
-                let v1 = bf16_bytes_to_f32(&bytes[2..4]);
-                let v2 = bf16_bytes_to_f32(&bytes[4..6]);
-                let v3 = bf16_bytes_to_f32(&bytes[6..8]);
-                eprintln!("[executor] {} → {}[0..4] = [{:.4}, {:.4}, {:.4}, {:.4}]",
-                    node.label, param_name, v0, v1, v2, v3);
-            }
             match slot_ref {
                 SlotRef::Slot(idx) =>
                     if let Some(slot) = slot_data.get_mut(*idx) {
@@ -239,12 +230,6 @@ pub fn execute_plan(
 
     // Return the bytes of the plan's designated output slot.
     Ok(slot_data.get(plan.output_slot).cloned().unwrap_or_default())
-}
-
-/// Decode two little-endian bytes as a bfloat16 value (returning f32).
-fn bf16_bytes_to_f32(b: &[u8]) -> f32 {
-    let bits = u16::from_le_bytes([b[0], b[1]]) as u32;
-    f32::from_bits(bits << 16)
 }
 
 /// Convert a `GridSpec` to `(grid_groups: [usize; 3], threads_per_group: [usize; 3])`.

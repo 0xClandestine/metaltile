@@ -66,14 +66,17 @@ dispatch  = { grid_x = "$hidden_dim", out_elems = "$hidden_dim" }
 name = "transformer_layer"
 
 # ── Pre-attention RMS norm ─────────────────────────────────────────────
-# mt_rms_norm: x[hidden_dim] → out[hidden_dim], 1 TG × 1024 threads.
+# mt_rms_norm: x[hidden_dim] → out[hidden_dim], 1 TG × (hidden_dim/4) threads.
+# tpg = hidden_dim/4 because mt_rms_norm processes 4 elements per thread.
+# Using rms_norm/rms_norm (4-elem variant) explicitly to avoid ambiguity with
+# rms_norm_small (2-elem variant). Correct tpg prevents out-of-bounds writes.
 
 [[layer.kernel]]
-op = "rms_norm"
+op = "rms_norm/rms_norm"
 inputs    = { x = "_residual", w = "$layers.$idx.attn_norm", eps_buf = "rms_eps" }
 outputs   = { out = "_normed" }
 constexpr = { n = "$hidden_dim" }
-dispatch  = { rows = "1", tpg = "1024", out_elems = "$hidden_dim" }
+dispatch  = { rows = "1", tpg = "$hidden_dim / 4", out_elems = "$hidden_dim" }
 
 # ── Self-attention: Q projection ───────────────────────────────────────
 # mt_gemv: mat[n_heads*head_dim, hidden_dim] × vec[hidden_dim] → out[n_heads*head_dim]
@@ -152,10 +155,10 @@ dispatch  = { grid_x = "$n_kv_heads * $head_dim" }
 # gqa_factor = n_heads / n_kv_heads (e.g. 32/8 = 4 for Llama 3 8B).
 
 [[layer.kernel]]
-op = "sdpa/sdpa_vector"
+op = "sdpa/sdpa_vector_hd64"
 inputs    = { q = "_q_rope", k = "$kv_cache.$idx.k", v = "$kv_cache.$idx.v" }
 outputs   = { out = "_attn_out" }
-constexpr = { head_dim = "$head_dim", n_kv = "$position", gqa_factor = "$n_heads / $n_kv_heads", scale = "1.0 / sqrt($head_dim)" }
+constexpr = { head_dim = "$head_dim", n_kv = "$n_kv", kv_stride = "$max_seq_len", gqa_factor = "$n_heads / $n_kv_heads", scale = "1.0 / sqrt($head_dim)" }
 dispatch  = { rows = "$n_heads", tpg = "1024", out_elems = "$n_heads * $head_dim" }
 
 # ── Attention output projection ────────────────────────────────────────
@@ -179,11 +182,11 @@ dispatch  = { n = "$hidden_dim", out_elems = "$hidden_dim" }
 # ── Pre-FFN RMS norm ───────────────────────────────────────────────────
 
 [[layer.kernel]]
-op = "rms_norm"
+op = "rms_norm/rms_norm"
 inputs    = { x = "_post_attn", w = "$layers.$idx.ffn_norm", eps_buf = "rms_eps" }
 outputs   = { out = "_ffn_normed" }
 constexpr = { n = "$hidden_dim" }
-dispatch  = { rows = "1", tpg = "1024", out_elems = "$hidden_dim" }
+dispatch  = { rows = "1", tpg = "$hidden_dim / 4", out_elems = "$hidden_dim" }
 
 # ── MLP: gate projection ───────────────────────────────────────────────
 
@@ -241,11 +244,11 @@ dispatch  = { n = "$hidden_dim", out_elems = "$hidden_dim" }
 # ── Post-layer: output norm ────────────────────────────────────────────
 
 [[kernel]]
-op = "rms_norm"
+op = "rms_norm/rms_norm"
 inputs    = { x = "_residual", w = "output_norm", eps_buf = "rms_eps" }
 outputs   = { out = "_final_normed" }
 constexpr = { n = "$hidden_dim" }
-dispatch  = { rows = "1", tpg = "1024", out_elems = "$hidden_dim" }
+dispatch  = { rows = "1", tpg = "$hidden_dim / 4", out_elems = "$hidden_dim" }
 
 # ── Post-layer: LM head ────────────────────────────────────────────────
 
@@ -265,4 +268,5 @@ op = "sampling/softmax_categorical_sample"
 inputs    = { inp = "_logits", temperature_in = "temperature", uniform_in = "uniform" }
 outputs   = { out = "_next_token" }
 constexpr = { n = "$vocab_size" }
-dispatch  = { rows = "1", tpg = "256", out_elems = "1" }
+# out_bytes: output is always Tensor<u32> (4 bytes) regardless of activation dtype.
+dispatch  = { rows = "1", tpg = "256", out_bytes = "4" }

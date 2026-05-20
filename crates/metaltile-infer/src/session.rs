@@ -57,7 +57,17 @@ impl Session {
             toml::from_str(toml_src).map_err(|e| InferError::Other(e.to_string()))?;
 
         // ── Load weights ───────────────────────────────────────────────
-        let weights: WeightMap = load_weights(model_dir)?;
+        // Weights are cast to the activation dtype at load time so that
+        // kernels compiled for `dtype` read correctly-typed bytes.
+        let mut weights: WeightMap = load_weights(model_dir, dtype)?;
+
+        // Handle weight tying: if lm_head is missing but tok_embeddings
+        // exists (tie_word_embeddings = true), alias them.
+        if !weights.contains_key("lm_head") {
+            if let Some(emb) = weights.get("tok_embeddings").cloned() {
+                weights.insert("lm_head".to_string(), emb);
+            }
+        }
 
         // ── Build GPU context ──────────────────────────────────────────
         let ctx = Context::new().map_err(|e| InferError::Other(e.to_string()))?;
@@ -89,6 +99,7 @@ impl Session {
         let state_keys = vec![
             "token_id".to_string(),
             "position".to_string(),
+            "n_kv".to_string(),   // = position + 1, set before each forward pass
             "rms_eps".to_string(),
             "temperature".to_string(),
             "uniform".to_string(),
@@ -108,6 +119,7 @@ impl Session {
         // ── Initial state ──────────────────────────────────────────────
         let mut state = StateMap::new();
         state.insert("position".to_string(), 0u32.to_le_bytes().to_vec());
+        state.insert("n_kv".to_string(), 0u32.to_le_bytes().to_vec());
         state.insert("rms_eps".to_string(), 1e-5f32.to_le_bytes().to_vec());
         state.insert("temperature".to_string(), 1.0f32.to_le_bytes().to_vec());
         state.insert("uniform".to_string(), 0.5f32.to_le_bytes().to_vec());
@@ -143,9 +155,12 @@ impl Session {
         // Prefill: feed each prompt token through the model to populate KV cache.
         // For simplicity we run one token at a time (decode path).
         // In a production system you'd want a separate prefill kernel.
+        eprintln!("[session] prompt_ids: {prompt_ids:?}");
+        eprintln!("[session] eos_token_id: {}", self.eos_token_id);
         let mut last_token_id = 0u32;
         for &token_id in &prompt_ids {
             last_token_id = self.step(token_id, temperature)?;
+            eprintln!("[session] after prefill token {token_id}, next={last_token_id}");
         }
 
         // Generate
@@ -174,11 +189,14 @@ impl Session {
     /// Single forward pass: set token_id + temperature + uniform in state,
     /// execute plan, return the sampled next token id.
     fn step(&mut self, token_id: u32, temperature: f32) -> Result<u32, InferError> {
-        // Update state
+        let pos = position_from_state(&self.state);
+
+        // n_kv = position + 1: the KV cache update will write token at slot `pos`,
+        // so SDPA must attend to all pos+1 tokens (0..=pos inclusive).
+        self.state.insert("n_kv".to_string(), (pos + 1).to_le_bytes().to_vec());
         self.state.insert("token_id".to_string(), token_id.to_le_bytes().to_vec());
         self.state.insert("temperature".to_string(), temperature.to_le_bytes().to_vec());
-        // Simple uniform sample — a real system would use a PRNG
-        let uniform: f32 = pseudo_uniform(token_id, position_from_state(&self.state));
+        let uniform: f32 = pseudo_uniform(token_id, pos);
         self.state.insert("uniform".to_string(), uniform.to_le_bytes().to_vec());
 
         // Execute plan
@@ -190,8 +208,7 @@ impl Session {
             &self.resident,
         )?;
 
-        // Increment position counter
-        let pos = position_from_state(&self.state);
+        // Advance position
         self.state.insert("position".to_string(), (pos + 1).to_le_bytes().to_vec());
 
         // Output is a u32 token id (4 bytes)
@@ -205,7 +222,7 @@ impl Session {
     /// Reset KV cache and position counter (start a new conversation).
     pub fn reset(&mut self) {
         self.state.insert("position".to_string(), 0u32.to_le_bytes().to_vec());
-        // KV cache is GPU-resident — it will be overwritten as new tokens come in.
+        self.state.insert("n_kv".to_string(), 0u32.to_le_bytes().to_vec());
     }
 }
 
