@@ -23,6 +23,7 @@ pub mod aura_score;
 pub mod aura_value;
 pub mod dequant_gather;
 pub mod dequant_gemv;
+pub mod fused_gate_activation;
 pub mod gather;
 pub mod kv_cache;
 pub mod logits_min_p;

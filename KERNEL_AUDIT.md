@@ -90,7 +90,7 @@ Sources surveyed:
 | ssm_step (Mamba 2 SSD single-token decode) | ✗ | ✓ (`ssm.metal`) | ✓ | `ffai/ssm.rs` → `ssm_step<T>`, `mt_ssm_step<T>`. Faithful port; `mlx_src: None` because pinned MLX upstream doesn't ship `ssm.metal`. Will graduate to `mlx/` when pin moves. |
 | conv1d_causal_step (depthwise SSM conv stream) | ✗ | partial (subset of SSM toolchain) | ✓ | `ffai/ssm.rs` → `conv1d_causal_step<T>`. fp32 state recurrence. |
 | ssm_replay (sequential tape capture + replay) | ✗ | ✓ (`ssm_replay.metal`) | ✗ | NOT PORTED. Spec 040 — Mamba/Mamba2 state replay for speculative decoding. |
-| fused_gate_activation (silu/gelu × up gate) | ✗ | ✓ (`fused_gate_activation.metal`) | ✗ | NOT PORTED. Single-row + looped variants; replaces split+act+mul (≥2 dispatches → 1). Hot path in every FFN. |
+| fused_gate_activation (silu/gelu × up gate) | ✗ | ✓ (`fused_gate_activation.metal`) | ✓ | `ffai/fused_gate_activation.rs` → `ffai_fused_gate_{silu,gelu,swiglu}<T>`. Grid3D elementwise, generic dtype; replaces split+act+mul (≥2 dispatches → 1). The MLX single-row/looped split is unneeded — one Grid3D kernel + the codegen vectorize pass covers any `hidden`. |
 | rms_norm_residual (RMSNorm + residual add fused) | ✗ | ✓ (`rms_norm_residual.metal`) | ✗ | NOT PORTED. ~90 saved dispatches/token on Gemma4-30 type configs. |
 | rms_norm_rope (RMSNorm + RoPE fused) | ✗ | ✓ (`rms_norm_rope.metal`) | ✗ | NOT PORTED. Q/K post-projection norm+rope in one dispatch. |
 | rms_norm_qgemv (RMSNorm + 4-bit quantized GEMV fused) | ✗ | ✓ (`rms_norm_qgemv.metal`) | ✗ | NOT PORTED. Eliminates global RT between norm and qmatmul. |
