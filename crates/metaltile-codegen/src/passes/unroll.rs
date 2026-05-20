@@ -62,8 +62,7 @@ impl super::Pass for UnrollPass {
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
         let max_vid = remap::find_max_vid(kernel);
         let mut next_vid = (max_vid + 1).max(10_000);
-        let max_block_id =
-            kernel.blocks.keys().map(|b| b.as_u32()).max().unwrap_or(0);
+        let max_block_id = kernel.blocks.keys().map(|b| b.as_u32()).max().unwrap_or(0);
         let mut next_block_id = max_block_id + 1;
 
         unroll_block(
@@ -258,12 +257,10 @@ fn unroll_block(
                 // ValueIds for its results so cross-iteration writes to
                 // shared state stay distinct.
                 let mut nested_vid_map = vid_map.clone();
-                for r in &src_block.results {
-                    if let Some(old_v) = r {
-                        let new_v = ValueId::new(*next_vid);
-                        *next_vid += 1;
-                        nested_vid_map.insert(*old_v, new_v);
-                    }
+                for old_v in src_block.results.iter().flatten() {
+                    let new_v = ValueId::new(*next_vid);
+                    *next_vid += 1;
+                    nested_vid_map.insert(*old_v, new_v);
                 }
 
                 let mut cloned = Block::new(*new_id);
@@ -271,9 +268,8 @@ fn unroll_block(
                 for (idx, src_op) in src_block.ops.iter().enumerate() {
                     let mut new_op = src_op.clone();
                     remap::remap_value_ids(&mut new_op, &nested_vid_map);
-                    let new_result = src_block.results[idx].map(|old_v| {
-                        nested_vid_map.get(&old_v).copied().unwrap_or(old_v)
-                    });
+                    let new_result = src_block.results[idx]
+                        .map(|old_v| nested_vid_map.get(&old_v).copied().unwrap_or(old_v));
                     cloned.ops.push(new_op);
                     cloned.results.push(new_result);
                 }
@@ -297,11 +293,10 @@ fn unroll_block(
                             *eb = *new_id;
                         }
                     },
-                    Op::Loop { body, .. } => {
+                    Op::Loop { body, .. } =>
                         if let Some(new_id) = block_map.get(body) {
                             *body = *new_id;
-                        }
-                    },
+                        },
                     _ => {},
                 }
 

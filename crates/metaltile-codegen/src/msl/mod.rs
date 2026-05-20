@@ -723,12 +723,7 @@ mod tests {
         k.mode = KernelMode::Reduction;
         k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
         k.body.push_op(
-            Op::Load {
-                src: "tgid_y".to_string(),
-                indices: Vec::new(),
-                mask: None,
-                other: None,
-            },
+            Op::Load { src: "tgid_y".to_string(), indices: Vec::new(), mask: None, other: None },
             ValueId::new(1),
         );
         let msl = MslGenerator::default().generate(&k).unwrap();

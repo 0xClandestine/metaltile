@@ -587,8 +587,12 @@ mod tests {
         CsePass.run(&mut k).unwrap();
 
         // The duplicate v3 must be gone from the body.
-        let body_add_count =
-            k.body.ops.iter().filter(|op| matches!(op, Op::BinOp { op: BinOpKind::Add, .. })).count();
+        let body_add_count = k
+            .body
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::BinOp { op: BinOpKind::Add, .. }))
+            .count();
         assert_eq!(body_add_count, 1, "duplicate add in body must be CSE'd away");
 
         // The inner block must no longer reference v3 — its add must now use v2.
