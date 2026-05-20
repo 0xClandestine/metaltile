@@ -1,7 +1,6 @@
 # MetalTile
 
-A Rust-embedded DSL for writing Apple Metal GPU kernels. Write tile-level
-algorithms in Rust, get optimized Metal Shading Language out.
+A Rust-embedded DSL for writing Apple Metal GPU kernels. Write tile-level algorithms in Rust, get optimized Metal Shading Language out.
 
 ```rust
 #[kernel]
@@ -39,29 +38,19 @@ pub fn mt_rms_norm<T>(
 }
 ```
 
-This generates ~104% of MLX's hand-tuned `rms` kernel throughput on M4 Max
-across f32 / f16 / bfloat16.
+This generates ~104% of MLX's hand-tuned `rms` kernel throughput on M4 Max across f32 / f16 / bfloat16.
 
 ## Why MetalTile
 
-- **Write once in Rust, run fast on Apple Silicon.** No raw MSL, no
-  thread-position arithmetic.
-- **Tile-level, not thread-level.** `strided_reduce`, `reduce_sum`, `dot` —
-  express *what* to compute; the compiler handles thread mapping,
-  vectorization, and SIMD-group reductions.
-- **Verified against MLX.** Every kernel is benchmarked and numerically
-  compared against the corresponding MLX Metal kernel.
-- **All three float dtypes.** `f32`, `f16`, and `bfloat16` work identically —
-  native `bfloat` emitted on Metal 3.1+.
-- **Layered correctness.** Codegen passes and the `#[kernel]` proc-macro have
-  unit + golden-MSL-snapshot coverage that runs on any platform; kernels are
-  verified end-to-end by GPU correctness tests against naive CPU references
-  and by the MLX side-by-side bench.
+- **Write once in Rust, run fast on Apple Silicon.** No raw MSL, no thread-position arithmetic.
+- **Tile-level, not thread-level.** `strided_reduce`, `reduce_sum`, `dot` — express *what* to compute; the compiler handles thread mapping, vectorization, and SIMD-group reductions.
+- **Verified against MLX.** Every kernel is benchmarked and numerically compared against the corresponding MLX Metal kernel.
+- **All three float dtypes.** `f32`, `f16`, and `bfloat16` work identically — native `bfloat` emitted on Metal 3.1+.
+- **Layered correctness.** Codegen passes and the `#[kernel]` proc-macro have unit + golden-MSL-snapshot coverage that runs on any platform; kernels are verified end-to-end by GPU correctness tests against naive CPU references and by the MLX side-by-side bench.
 
 ## Status
 
-Early development — APIs are not yet stable. The core DSL works; an autotuner
-and type-level shape algebra are planned.
+Early development — APIs are not yet stable. The core DSL works; an autotuner and type-level shape algebra are planned.
 
 | Crate | Description |
 |---|---|
@@ -117,23 +106,17 @@ Full walkthrough: [`docs/getting-started.md`](docs/getting-started.md).
 
 Operation categories benchmarked against MLX:
 
-**Elementwise** — unary (exp, log, sqrt, sin, cos, erf, sigmoid, silu, gelu,
-relu, …), binary (add, mul, sub, div, max, min, pow, logaddexp), fused add+mul,
-ternary select, copy, arange.
+**Elementwise** — unary (exp, log, sqrt, sin, cos, erf, sigmoid, silu, gelu, relu, …), binary (add, mul, sub, div, max, min, pow, logaddexp), fused add+mul, ternary select, copy, arange.
 
-**Reductions** — all-reduce sum/max/min, row-reduce sum/max/min, logsumexp,
-softmax, rms-norm, layer-norm.
+**Reductions** — all-reduce sum/max/min, row-reduce sum/max/min, logsumexp, softmax, rms-norm, layer-norm.
 
 **Matrix** — GEMV, masked GEMV, SDPA (vector decode + prefill).
 
-**Misc** — RoPE, scan (parallel prefix sum), arg-reduce, sort (bitonic), random
-(xorshift32), quantized GEMV / GEMM, fp4 quantize/dequantize, strided copy.
+**Misc** — RoPE, scan (parallel prefix sum), arg-reduce, sort (bitonic), random (xorshift32), quantized GEMV / GEMM, fp4 quantize/dequantize, strided copy.
 
 ## Benchmarks
 
-`tile bench` runs every kernel against its MLX Metal reference on identical
-buffers and reports throughput + a correctness check. Selected results
-(M4 Max, higher = better vs MLX):
+`tile bench` runs every kernel against its MLX Metal reference on identical buffers and reports throughput + a correctness check. Selected results (M4 Max, higher = better vs MLX):
 
 | Op | MT % of MLX |
 |---|---|
@@ -158,27 +141,21 @@ See [`docs/cli.md`](docs/cli.md) for the full `tile` reference.
                   metaltile-runtime (Metal GPU dispatch)
 ```
 
-Optimization passes run in order: TypeCheck → ConstFold → AlgebraicSimplify →
-CopyProp → CSE → LICM → IfConversion → ValueSink → TileLowering → Fusion →
-Unroll → Schedule → Vectorize → DeadStoreElim.
+Optimization passes run in order: TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM → IfConversion → ValueSink → TileLowering → Fusion → Unroll → Schedule → Vectorize → DeadStoreElim.
 
 ## Documentation
 
 Full docs live in [`docs/`](docs/README.md):
 
 - [Getting started](docs/getting-started.md) — toolchain, build, first kernel.
-- [Developing](docs/developing.md) — repo layout, dev loop, and the
-  **kernel-authoring hazards** (a wrong dispatch can freeze the machine).
+- [Developing](docs/developing.md) — repo layout, dev loop, and the **kernel-authoring hazards** (a wrong dispatch can freeze the machine).
 - [Testing](docs/testing.md) — test layers, CI, and test-infra gaps.
 - [CLI](docs/cli.md) — the `tile` binary.
 - [Publishing](docs/publishing.md) — the release flow.
 
 ## Contributing
 
-Contributions — including AI-assisted ones — are welcome. Read
-[`CONTRIBUTING.md`](CONTRIBUTING.md) for the issue / PR process and
-[`docs/developing.md`](docs/developing.md) for the kernel-authoring hazards
-**before** writing a kernel.
+Contributions — including AI-assisted ones — are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) for the issue / PR process and [`docs/developing.md`](docs/developing.md) for the kernel-authoring hazards **before** writing a kernel.
 
 ## License
 

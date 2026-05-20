@@ -1,7 +1,6 @@
 # CLI
 
-`tile` is the command-line driver for benchmarking, building, and inspecting
-kernels. Install it, or run it through `cargo` from a checkout.
+`tile` is the command-line driver for benchmarking, building, and inspecting kernels. Install it, or run it through `cargo` from a checkout.
 
 ```bash
 cargo install --path crates/metaltile-cli      # installs the `tile` binary
@@ -9,13 +8,11 @@ cargo install --path crates/metaltile-cli      # installs the `tile` binary
 cargo run -p metaltile-cli -- <command> …
 ```
 
-`make bench` wraps `tile bench`; for the other subcommands run `tile` (or the
-`cargo run` form) directly.
+`make bench` wraps `tile bench`; for the other subcommands run `tile` (or the `cargo run` form) directly.
 
 ## `tile bench` — benchmark vs MLX
 
-Runs every kernel against its MLX reference and reports throughput + a
-correctness check.
+Runs every kernel against its MLX reference and reports throughput + a correctness check.
 
 ```
 tile bench [-f <substr>] [-v|-vv] [-o <file.json>] [--allow-dirty]
@@ -49,8 +46,7 @@ tile build [-f <substr>] [--dtypes f32,f16,bf16] [-v]
 | `-o, --out <dir>` | output directory (required when `--emit` is set) |
 | `-t, --time-passes` | run the pass pipeline 25× per kernel, print per-pass median wall time instead of emitting |
 
-Codegen smoke check — emit everything and confirm `xcrun metal` accepts it:
-`tile build --emit all -o /tmp/mt-smoke`.
+Codegen smoke check — emit everything and confirm `xcrun metal` accepts it: `tile build --emit all -o /tmp/mt-smoke`.
 
 ## `tile inspect` — IR and MSL for one kernel
 
@@ -69,13 +65,11 @@ tile inspect [<kernel>] [--filter <substr>] [--all] [--ir] [--stats]
 | `--filter <substr>` / `--all` | inspect many kernels at once |
 | `-o, --dir <dir>` | write output files instead of printing to stdout |
 
-Omit the kernel name to list every registered kernel. See
-[Developing → debugging a kernel](developing.md#debugging-a-kernel).
+Omit the kernel name to list every registered kernel. See [Developing → debugging a kernel](developing.md#debugging-a-kernel).
 
 ## `tile device` — GPU info
 
-Prints the Metal device name, Metal version, Apple GPU family, and the
-supported feature flags (native `bfloat`, simdgroup matrix, etc.).
+Prints the Metal device name, Metal version, Apple GPU family, and the supported feature flags (native `bfloat`, simdgroup matrix, etc.).
 
 ## `tile snap` / `tile diff` — perf regression baselines
 
@@ -84,7 +78,4 @@ tile snap [-o <file>] [--from <file.json>] [--note <text>] [-f <substr>]
 tile diff <baseline> [<current>]
 ```
 
-`snap` saves bench results as a baseline (default `.tile-snapshots/<sha>.json`);
-`--from` promotes an existing JSON instead of re-running the bench. `diff`
-compares current results — or a saved `<current>` JSON — against `<baseline>`
-and reports per-kernel deltas.
+`snap` saves bench results as a baseline (default `.tile-snapshots/<sha>.json`); `--from` promotes an existing JSON instead of re-running the bench. `diff` compares current results — or a saved `<current>` JSON — against `<baseline>` and reports per-kernel deltas.

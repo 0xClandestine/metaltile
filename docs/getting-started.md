@@ -4,14 +4,9 @@ Get a MetalTile checkout building, tested, and emitting a kernel.
 
 ## Prerequisites
 
-- **Rust nightly.** The workspace is `edition = 2024` and uses unstable
-  `rustfmt` features; the toolchain is pinned in `rust-toolchain.toml`, so
-  `rustup` installs the right nightly automatically on first build.
-- **macOS + Metal** — only needed to *run* kernels on the GPU (`tile bench`,
-  GPU correctness tests). The DSL, codegen passes, and MSL emission build and
-  test on any platform; non-Mac CI exercises everything except GPU dispatch.
-- **Xcode command-line tools** (`xcrun metal`) on macOS — the codegen smoke
-  step compiles emitted MSL with the Metal toolchain.
+- **Rust nightly.** The workspace is `edition = 2024` and uses unstable `rustfmt` features; the toolchain is pinned in `rust-toolchain.toml`, so `rustup` installs the right nightly automatically on first build.
+- **macOS + Metal** — only needed to *run* kernels on the GPU (`tile bench`, GPU correctness tests). The DSL, codegen passes, and MSL emission build and test on any platform; non-Mac CI exercises everything except GPU dispatch.
+- **Xcode command-line tools** (`xcrun metal`) on macOS — the codegen smoke step compiles emitted MSL with the Metal toolchain.
 
 ## Clone and set up
 
@@ -21,8 +16,7 @@ cd metaltile
 ./.github/scripts/setup-dev.sh
 ```
 
-`setup-dev.sh` verifies the nightly toolchain, the `rustfmt` and `clippy`
-components, and the optional `typos-cli` / `cargo-llvm-cov` tools.
+`setup-dev.sh` verifies the nightly toolchain, the `rustfmt` and `clippy` components, and the optional `typos-cli` / `cargo-llvm-cov` tools.
 
 ## First build and test
 
@@ -31,14 +25,11 @@ make build      # debug build of the whole workspace
 make test       # workspace tests — codegen, runtime, GPU correctness (GPU on a Mac)
 ```
 
-`make` is the canonical entry point — it centralises flags and always passes
-`--workspace`. See [Developing](developing.md) for the full dev loop and
-[the CLI reference](cli.md) for the `tile` binary.
+`make` is the canonical entry point — it centralises flags and always passes `--workspace`. See [Developing](developing.md) for the full dev loop and [the CLI reference](cli.md) for the `tile` binary.
 
 ## Your first kernel
 
-A kernel is a Rust function annotated with `#[kernel]`. The proc-macro parses
-the body into MetalTile IR; the codegen lowers it to Metal Shading Language.
+A kernel is a Rust function annotated with `#[kernel]`. The proc-macro parses the body into MetalTile IR; the codegen lowers it to Metal Shading Language.
 
 ```rust
 use metaltile::prelude::*;
@@ -83,8 +74,5 @@ or from the CLI: `tile inspect vector_add`.
 
 ## Next steps
 
-- [Developing](developing.md) — repo layout, dev loop, and the kernel-authoring
-  hazards. **Read the ⚠️ sections before writing a non-trivial kernel** — one of
-  them is "a wrong dispatch can freeze your machine."
-- [Testing](testing.md) — every non-trivial kernel ships a paired GPU
-  correctness test in the same commit; this page explains why and how.
+- [Developing](developing.md) — repo layout, dev loop, and the kernel-authoring hazards. **Read the ⚠️ sections before writing a non-trivial kernel** — one of them is "a wrong dispatch can freeze your machine."
+- [Testing](testing.md) — every non-trivial kernel ships a paired GPU correctness test in the same commit; this page explains why and how.
