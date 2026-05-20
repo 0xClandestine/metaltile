@@ -184,26 +184,7 @@ pub fn execute_plan(
     }
 
     // ── Dispatch ───────────────────────────────────────────────────────
-    // Compute which consecutive nodes have data dependencies.
-    // Node i depends on i-1 if any output slot of i-1 is an input of i.
-    let barriers_after: Vec<bool> = (0..n)
-        .map(|i| {
-            if i + 1 >= n {
-                return false;
-            }
-            let producer = &plan.nodes[i];
-            let consumer = &plan.nodes[i + 1];
-            producer.output_bindings.iter().any(|(_, out_sr)| {
-                if let SlotRef::Slot(out_idx) = out_sr {
-                    consumer.input_bindings.iter().any(|(_, in_sr)| {
-                        matches!(in_sr, SlotRef::Slot(in_idx) if in_idx == out_idx)
-                    })
-                } else {
-                    false
-                }
-            })
-        })
-        .collect();
+    let barriers_after = compute_barriers_after(&plan.nodes[..n]);
 
     let all_specs: Vec<DispatchSpec<'_>> = (0..n)
         .map(|i| {
@@ -438,25 +419,8 @@ impl PreparedDispatch {
             all_buffers.push(buffers);
         }
 
-        // Pre-compute barrier mask (static — slot dependencies are fixed).
-        let barriers_after: Vec<bool> = (0..n)
-            .map(|i| {
-                if i + 1 >= n {
-                    return false;
-                }
-                let producer = &plan.nodes[i];
-                let consumer = &plan.nodes[i + 1];
-                producer.output_bindings.iter().any(|(_, out_sr)| {
-                    if let SlotRef::Slot(out_idx) = out_sr {
-                        consumer.input_bindings.iter().any(|(_, in_sr)| {
-                            matches!(in_sr, SlotRef::Slot(in_idx) if in_idx == out_idx)
-                        })
-                    } else {
-                        false
-                    }
-                })
-            })
-            .collect();
+        // Pre-compute barrier mask (static — dependencies don't change between tokens).
+        let barriers_after = compute_barriers_after(&plan.nodes);
 
         Ok(PreparedDispatch {
             slot_bufs,
@@ -610,4 +574,44 @@ pub fn execute_prepared(
         // Partial prefill: vocab head not run, no sampled token yet.
         Ok((Vec::new(), total_gpu_us))
     }
+}
+
+// ── Barrier helpers ────────────────────────────────────────────────────
+
+use crate::plan::DispatchNode;
+
+/// Compute the per-node barrier mask for `dispatch_chain`.
+///
+/// A barrier must be inserted after node `i` if node `i+1` reads any
+/// resource written by node `i`. This covers both:
+/// - Slot-to-Slot: intermediate tensors flowing through the plan's slot array.
+/// - State-to-State: GPU-resident buffers (KV cache) written by one kernel
+///   and read by the next (e.g. kv_cache_update → sdpa).
+///
+/// With `MTLDispatchType::Concurrent` and `HazardTrackingModeUntracked`
+/// buffers, Metal does not insert implicit barriers — they must be explicit.
+/// The `memoryBarrierWithScope(MTLBarrierScope::Buffers)` call covers all
+/// buffer writes (tracked and untracked) that precede it in encoding order.
+fn compute_barriers_after(nodes: &[DispatchNode]) -> Vec<bool> {
+    let n = nodes.len();
+    (0..n)
+        .map(|i| {
+            if i + 1 >= n {
+                return false;
+            }
+            let producer = &nodes[i];
+            let consumer = &nodes[i + 1];
+            producer.output_bindings.iter().any(|(_, out_sr)| match out_sr {
+                SlotRef::Slot(out_idx) => consumer
+                    .input_bindings
+                    .iter()
+                    .any(|(_, in_sr)| matches!(in_sr, SlotRef::Slot(in_idx) if in_idx == out_idx)),
+                SlotRef::State(out_key) => consumer
+                    .input_bindings
+                    .iter()
+                    .any(|(_, in_sr)| matches!(in_sr, SlotRef::State(in_key) if in_key == out_key)),
+                SlotRef::Weight(_) => false,
+            })
+        })
+        .collect()
 }

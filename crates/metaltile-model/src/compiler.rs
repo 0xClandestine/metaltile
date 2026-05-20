@@ -581,41 +581,55 @@ fn is_fusible_local(
 // ── TOML fuse tag handling ─────────────────────────────────────────────
 
 /// Validate that TOML `fuse` tags are contiguous.
+/// Returns the effective fuse tag for a raw node, scoped by layer index.
+///
+/// Per-layer kernels with `fuse = "q_chain"` in layer 0 get effective tag
+/// `"q_chain.0"`, in layer 1 `"q_chain.1"`, etc. This prevents the
+/// validator from flagging same-named groups in different layers as
+/// non-contiguous while still allowing cross-layer re-use of tag names.
+fn effective_fuse_tag(raw: &RawNode) -> Option<String> {
+    let tag = raw.node.fuse.as_deref()?;
+    if let Some(layer_idx) = raw.layer_idx {
+        Some(format!("{tag}.{layer_idx}"))
+    } else {
+        Some(tag.to_string())
+    }
+}
+
 fn validate_fuse_groups(raw_nodes: &[RawNode]) -> Result<(), ModelError> {
-    let mut seen: HashMap<&str, usize> = HashMap::default();
-    let mut in_group: Option<&str> = None;
+    let mut seen: HashMap<String, usize> = HashMap::default();
+    let mut in_group: Option<String> = None;
 
     for (i, raw) in raw_nodes.iter().enumerate() {
-        let tag = raw.node.fuse.as_deref();
-        match (in_group, tag) {
-            (Some(cur), Some(tag)) if cur == tag => {
+        let tag = effective_fuse_tag(raw);
+        match (in_group.as_deref(), tag.as_deref()) {
+            (Some(cur), Some(t)) if cur == t => {
                 // Still in same group.
             },
-            (Some(_), Some(tag)) => {
-                // Switching to a different group.
-                if seen.contains_key(tag) {
+            (Some(_), Some(t)) => {
+                if seen.contains_key(t) {
                     return Err(ModelError::NonContiguousFuseGroup {
-                        tag: tag.to_string(),
-                        first_instance: seen[tag],
+                        tag: raw.node.fuse.clone().unwrap_or_default(),
+                        first_instance: seen[t],
                         second_start: i,
                     });
                 }
-                seen.entry(tag).or_insert(i);
-                in_group = Some(tag);
+                seen.entry(t.to_string()).or_insert(i);
+                in_group = tag;
             },
             (Some(_), None) => {
                 in_group = None;
             },
-            (None, Some(tag)) => {
-                if seen.contains_key(tag) {
+            (None, Some(t)) => {
+                if seen.contains_key(t) {
                     return Err(ModelError::NonContiguousFuseGroup {
-                        tag: tag.to_string(),
-                        first_instance: seen[tag],
+                        tag: raw.node.fuse.clone().unwrap_or_default(),
+                        first_instance: seen[t],
                         second_start: i,
                     });
                 }
-                seen.entry(tag).or_insert(i);
-                in_group = Some(tag);
+                seen.entry(t.to_string()).or_insert(i);
+                in_group = tag;
             },
             (None, None) => { /* no group */ },
         }
@@ -625,26 +639,26 @@ fn validate_fuse_groups(raw_nodes: &[RawNode]) -> Result<(), ModelError> {
 }
 
 /// Assign `fuse_group` IDs from TOML `fuse` annotations.
-/// Contiguous nodes with matching `fuse` tags get the same group ID.
+/// Contiguous nodes with matching effective tags get the same group ID.
 fn assign_toml_fuse_groups(nodes: &mut [DispatchNode], raw_nodes: &[RawNode]) {
-    let mut current_tag: Option<&str> = None;
+    let mut current_tag: Option<String> = None;
     let mut next_group_id: usize = 0;
 
     for (i, node) in nodes.iter_mut().enumerate() {
-        let tag = raw_nodes[i].node.fuse.as_deref();
-        match (current_tag, tag) {
-            (None, Some(tag)) => {
-                current_tag = Some(tag);
+        let tag = effective_fuse_tag(&raw_nodes[i]);
+        match (current_tag.as_deref(), tag.as_deref()) {
+            (None, Some(_)) => {
+                current_tag = tag;
                 node.fuse_group = Some(next_group_id);
             },
-            (Some(cur), Some(tag)) if cur == tag => {
+            (Some(cur), Some(t)) if cur == t => {
                 node.fuse_group = Some(next_group_id);
             },
-            (Some(_), maybe_tag) => {
-                // Tag changed or ended.
+            (Some(_), _) => {
                 next_group_id += 1;
-                current_tag = maybe_tag;
-                if maybe_tag.is_some() {
+                let has_tag = tag.is_some();
+                current_tag = tag;
+                if has_tag {
                     node.fuse_group = Some(next_group_id);
                 }
             },

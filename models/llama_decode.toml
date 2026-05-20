@@ -81,48 +81,43 @@ dispatch  = { rows = "1", tpg = "$hidden_dim / 4", out_elems = "$hidden_dim" }
 # ── Self-attention: Q projection ───────────────────────────────────────
 # mt_gemv: mat[n_heads*head_dim, hidden_dim] × vec[hidden_dim] → out[n_heads*head_dim]
 
+# Kernels are ordered so each fuse group is contiguous.
+# Q, K, V chains run in sequence (each reads _normed, which is available
+# before any of them start). sdpa follows all three KV-cache writes.
+
 [[layer.kernel]]
 op = "gemv"
+fuse = "q_chain"
 inputs    = { mat = "$layers.$idx.attn.q_proj", vec = "_normed" }
 outputs   = { out = "_q" }
 constexpr = { k = "$hidden_dim" }
 dispatch  = { rows = "$n_heads * $head_dim", tpg = "256", out_elems = "$n_heads * $head_dim" }
 
-# ── Self-attention: K projection ───────────────────────────────────────
-
-[[layer.kernel]]
-op = "gemv"
-inputs    = { mat = "$layers.$idx.attn.k_proj", vec = "_normed" }
-outputs   = { out = "_k_new" }
-constexpr = { k = "$hidden_dim" }
-dispatch  = { rows = "$n_kv_heads * $head_dim", tpg = "256", out_elems = "$n_kv_heads * $head_dim" }
-
-# ── Self-attention: V projection ───────────────────────────────────────
-
-[[layer.kernel]]
-op = "gemv"
-inputs    = { mat = "$layers.$idx.attn.v_proj", vec = "_normed" }
-outputs   = { out = "_v_new" }
-constexpr = { k = "$hidden_dim" }
-dispatch  = { rows = "$n_kv_heads * $head_dim", tpg = "256", out_elems = "$n_kv_heads * $head_dim" }
-
 # ── RoPE: apply rotary embeddings to Q ────────────────────────────────
 # rope_llama: Grid3D [n_heads, half_dim, 1] × [1,1,1]
-# Constexprs: head_dim, half_dim, position (runtime state), theta_base,
-#             scale_factor, low_freq_factor, high_freq_factor, original_max_position
 # (Llama 3.1 defaults: rope_theta=500000, scale=8, low=1, high=4, orig=8192)
 
 [[layer.kernel]]
 op = "rope/rope_llama"
+fuse = "q_chain"
 inputs    = { qk = "_q" }
 outputs   = { out = "_q_rope" }
 constexpr = { head_dim = "$head_dim", half_dim = "$head_dim / 2", position = "$position", theta_base = "500000.0", scale_factor = "8.0", low_freq_factor = "1.0", high_freq_factor = "4.0", original_max_position = "8192.0" }
 dispatch  = { grid_x = "$n_heads", grid_y = "$head_dim / 2", out_elems = "$n_heads * $head_dim" }
 
-# ── RoPE: apply rotary embeddings to K ────────────────────────────────
+# ── Self-attention: K projection → RoPE → KV cache write ──────────────
+
+[[layer.kernel]]
+op = "gemv"
+fuse = "k_chain"
+inputs    = { mat = "$layers.$idx.attn.k_proj", vec = "_normed" }
+outputs   = { out = "_k_new" }
+constexpr = { k = "$hidden_dim" }
+dispatch  = { rows = "$n_kv_heads * $head_dim", tpg = "256", out_elems = "$n_kv_heads * $head_dim" }
 
 [[layer.kernel]]
 op = "rope/rope_llama"
+fuse = "k_chain"
 inputs    = { qk = "_k_new" }
 outputs   = { out = "_k_rope" }
 constexpr = { head_dim = "$head_dim", half_dim = "$head_dim / 2", position = "$position", theta_base = "500000.0", scale_factor = "8.0", low_freq_factor = "1.0", high_freq_factor = "4.0", original_max_position = "8192.0" }
@@ -130,20 +125,30 @@ dispatch  = { grid_x = "$n_kv_heads", grid_y = "$head_dim / 2", out_elems = "$n_
 
 # ── KV cache update: write K at current position ───────────────────────
 # kv_cache_update: src[n_kv_heads, head_dim] → out[n_kv_heads, max_seq, head_dim]
-# Grid3D [n_kv_heads * head_dim, 1, 1] × [1,1,1]
-# `position` is the 0-based slot index (runtime state u32).
 
 [[layer.kernel]]
 op = "kv_cache/update"
+fuse = "k_chain"
 inputs    = { src = "_k_rope" }
 outputs   = { out = "$kv_cache.$idx.k" }
 constexpr = { head_dim = "$head_dim", max_seq = "$max_seq_len", position = "$position" }
 dispatch  = { grid_x = "$n_kv_heads * $head_dim" }
 
+# ── Self-attention: V projection → KV cache write ──────────────────────
+
+[[layer.kernel]]
+op = "gemv"
+fuse = "v_chain"
+inputs    = { mat = "$layers.$idx.attn.v_proj", vec = "_normed" }
+outputs   = { out = "_v_new" }
+constexpr = { k = "$hidden_dim" }
+dispatch  = { rows = "$n_kv_heads * $head_dim", tpg = "256", out_elems = "$n_kv_heads * $head_dim" }
+
 # ── KV cache update: write V at current position ───────────────────────
 
 [[layer.kernel]]
 op = "kv_cache/update"
+fuse = "v_chain"
 inputs    = { src = "_v_new" }
 outputs   = { out = "$kv_cache.$idx.v" }
 constexpr = { head_dim = "$head_dim", max_seq = "$max_seq_len", position = "$position" }
@@ -165,6 +170,7 @@ dispatch  = { rows = "$n_heads", tpg = "1024", out_elems = "$n_heads * $head_dim
 
 [[layer.kernel]]
 op = "gemv"
+fuse = "attn_out"
 inputs    = { mat = "$layers.$idx.attn.o_proj", vec = "_attn_out" }
 outputs   = { out = "_o_proj" }
 constexpr = { k = "$n_heads * $head_dim" }
@@ -175,6 +181,7 @@ dispatch  = { rows = "$hidden_dim", tpg = "256", out_elems = "$hidden_dim" }
 
 [[layer.kernel]]
 op = "binary/add"
+fuse = "attn_out"
 inputs    = { a = "_o_proj", b = "_residual" }
 outputs   = { c = "_post_attn" }
 dispatch  = { n = "$hidden_dim", out_elems = "$hidden_dim" }
@@ -192,6 +199,7 @@ dispatch  = { rows = "1", tpg = "$hidden_dim / 4", out_elems = "$hidden_dim" }
 
 [[layer.kernel]]
 op = "gemv"
+fuse = "ffn_act"
 inputs    = { mat = "$layers.$idx.mlp.gate_proj", vec = "_ffn_normed" }
 outputs   = { out = "_gate" }
 constexpr = { k = "$hidden_dim" }
@@ -202,6 +210,7 @@ dispatch  = { rows = "$ffn_dim", tpg = "256", out_elems = "$ffn_dim" }
 
 [[layer.kernel]]
 op = "unary/silu"
+fuse = "ffn_act"
 inputs    = { a = "_gate" }
 outputs   = { out = "_gated" }
 dispatch  = { n = "$ffn_dim", out_elems = "$ffn_dim" }
@@ -210,6 +219,7 @@ dispatch  = { n = "$ffn_dim", out_elems = "$ffn_dim" }
 
 [[layer.kernel]]
 op = "gemv"
+fuse = "ffn_act"
 inputs    = { mat = "$layers.$idx.mlp.up_proj", vec = "_ffn_normed" }
 outputs   = { out = "_up" }
 constexpr = { k = "$hidden_dim" }
@@ -220,6 +230,7 @@ dispatch  = { rows = "$ffn_dim", tpg = "256", out_elems = "$ffn_dim" }
 
 [[layer.kernel]]
 op = "binary/mul"
+fuse = "ffn_act"
 inputs    = { a = "_gated", b = "_up" }
 outputs   = { out = "_combined" }
 dispatch  = { n = "$ffn_dim", out_elems = "$ffn_dim" }
@@ -228,6 +239,7 @@ dispatch  = { n = "$ffn_dim", out_elems = "$ffn_dim" }
 
 [[layer.kernel]]
 op = "gemv"
+fuse = "ffn_out"
 inputs    = { mat = "$layers.$idx.mlp.down_proj", vec = "_combined" }
 outputs   = { out = "_ffn_out" }
 constexpr = { k = "$ffn_dim" }
@@ -237,6 +249,7 @@ dispatch  = { rows = "$hidden_dim", tpg = "256", out_elems = "$hidden_dim" }
 
 [[layer.kernel]]
 op = "binary/add"
+fuse = "ffn_out"
 inputs    = { a = "_ffn_out", b = "_post_attn" }
 outputs   = { c = "_residual" }
 dispatch  = { n = "$hidden_dim", out_elems = "$hidden_dim" }
