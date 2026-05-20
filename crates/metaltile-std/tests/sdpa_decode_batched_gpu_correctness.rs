@@ -601,19 +601,47 @@ fn sdpa_decode_batched_q4_at_tpg_1024_diverges_from_tpg_512_f32() {
         scale,
     );
 
-    // The outputs must diverge — we expect tpg=1024 to be all-zeros or
-    // garbage, tpg=512 to be the real attention output. A safety
-    // margin of 1e-2 in max |diff| is well above fp32 noise (~1e-4 at
-    // n_kv=8) and well below the real attention output magnitudes
-    // (~1e-1).
+    // The M1 Max hazard this test pins: K=4 at tpg=1024 silently writes
+    // all-zero output because the kernel's PSO `maxTotalThreadsPerThreadgroup`
+    // is capped at 768 for K=4's register pressure on M1. The previous
+    // version of this test asserted unconditional divergence — which
+    // fails on chips with larger register files (M4 / M5 Max) where
+    // 1024 dispatches cleanly and matches tpg=512 within fp32 noise.
+    //
+    // Runtime probe: if tpg=1024 produced near-zero output, we're on
+    // an M1-class GPU and the divergence assertion still applies. If
+    // tpg=1024 produced legitimate output, we're on a chip where the
+    // cap is ≥ 1024 and the dispatch is safe — assert outputs match
+    // instead of diverge.
+    //
+    // Issue #113 — replaces the cross-chip-broken empirical test.
+    let max_abs_1024 = out_1024.iter().map(|v| v.abs()).fold(0.0_f32, f32::max);
+    let max_abs_512 = out_512.iter().map(|v| v.abs()).fold(0.0_f32, f32::max);
     let max_diff =
         out_512.iter().zip(out_1024.iter()).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-    assert!(
-        max_diff > 1e-2,
-        "K=4 at tpg=1024 should diverge from tpg=512 by at least 1e-2 \
-         (register-pressure cap). If this fails the cap has changed — \
-         update DISPATCH INVARIANTS, the runtime assert in \
-         `run_sdpa_batched_decode_form`, and the inventory submit's \
-         tpg. Observed max |diff| = {max_diff:.2e}.",
-    );
+
+    // "Near-zero" = max abs at tpg=1024 is < 10% of max abs at tpg=512.
+    // Well below any plausible fp32 noise + well above the all-zero case
+    // (0 vs ~1e-1).
+    let tpg_1024_appears_broken = max_abs_1024 < max_abs_512 * 0.1;
+
+    if tpg_1024_appears_broken {
+        // M1-class GPU — assert divergence is real, not numerical noise.
+        assert!(
+            max_diff > 1e-2,
+            "K=4 at tpg=1024 appears broken (max_abs={max_abs_1024:.2e}) but \
+             diverges from tpg=512 by only {max_diff:.2e}. Expected ≥ 1e-2.",
+        );
+    } else {
+        // M4 / M5 / future chip with `maxTotalThreadsPerThreadgroup` ≥ 1024
+        // for this kernel — tpg=1024 dispatches cleanly. Verify the
+        // outputs MATCH instead of diverge. fp32 reduction-order noise
+        // at n_kv=8 is ~1e-4, so 5e-4 leaves headroom.
+        assert!(
+            max_diff < 5e-4,
+            "K=4 at tpg=1024 produced valid output (max_abs={max_abs_1024:.2e}) \
+             but diverges from tpg=512 by {max_diff:.2e}. Expected < 5e-4 \
+             (fp32 reduction-order noise).",
+        );
+    }
 }
