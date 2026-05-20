@@ -61,7 +61,7 @@ One generic `#[kernel]` fn becomes a monomorphised `f32` / `f16` / `bfloat16` Me
 
 ## Status
 
-Early development — APIs are not yet stable. The core DSL, codegen, and runtime work today; the autotuner and type-level shape algebra are planned. See [`docs/getting-started.md`](docs/getting-started.md) for the crate layout.
+> ⚠️ **Heads Up: Construction Ahead!** Early development — APIs are not yet stable. The core DSL, codegen, and runtime work today; the autotuner and type-level shape algebra are planned. See [`docs/getting-started.md`](docs/getting-started.md) for the crate layout.
 
 ## Quick Start
 
