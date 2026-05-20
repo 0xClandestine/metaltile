@@ -54,13 +54,7 @@ fn sdpa_decode_d64_matches_naive_cpu_reference_f32() {
     // One TG per Q head, 1024 threads per TG (32 simdgroups × 32 lanes
     // — same design TPG as the head_dim=128 kernel).
     let result = ctx
-        .dispatch_with_grid(
-            &kernel,
-            &buffers,
-            &BTreeMap::new(),
-            [n_q_heads, 1, 1],
-            [1024, 1, 1],
-        )
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [n_q_heads, 1, 1], [1024, 1, 1])
         .expect("dispatch_with_grid should succeed");
 
     let out_bytes = result.outputs.get("out").expect("`out` buffer");
