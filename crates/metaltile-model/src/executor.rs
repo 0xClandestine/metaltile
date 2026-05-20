@@ -1,22 +1,23 @@
 //! Execution plan executor: dispatches an `ExecutionPlan` on the GPU.
 //!
-//! The entire forward pass is encoded into a **single** `dispatch_chain`
-//! call. This eliminates the per-node `waitUntilCompleted()` stall that
-//! previously limited throughput to ~16 tok/s on a 1B model.
+//! ## Two execution paths
 //!
-//! Strategy:
-//! 1. Pre-allocate all slot buffers (`slot_data`) and all intra-group
-//!    intermediate buffers (`intra_group_bufs`) upfront.
-//! 2. Single loop over all `plan.nodes` builds every kernel + spec.
-//!    All buffers are fully resolved before `dispatch_chain` is called.
-//! 3. `ctx.dispatch_chain(&all_specs)` submits the entire forward pass
-//!    in one MTLCommandBuffer and blocks exactly once.
-//! 4. CPU-side state outputs (non-KV-cache scalars) are read back from
-//!    `results[i].outputs` after the single dispatch.
+//! ### `execute_plan` (legacy, one-shot)
+//! Rebuilds all binding maps from scratch each call. Kept for testing.
+//!
+//! ### `PreparedDispatch` + `execute_prepared` (production path)
+//! Builds all static binding maps once at session load time. Per token,
+//! only the ~82 dynamic entries (runtime-state-derived constexprs and
+//! CPU-side state scalars) are updated in-place — reducing per-token
+//! work from ~876 BTreeMap operations to ~164.
+//!
+//! `execute_prepared` accepts a `max_nodes` parameter for prefill
+//! optimisation: pass `plan.prefill_node_count` to skip the output-norm +
+//! lm_head + sampling tail during non-final prompt tokens.
 //!
 //! On Apple Silicon unified memory, `ResidentBuffer::clone()` is a cheap
-//! handle copy — no data is moved. Slot and intra-group buffers are
-//! written directly by the GPU without any host-side copies.
+//! handle copy — no data is moved. Slot buffers in `PreparedDispatch` are
+//! persistent (session-lifetime scratch), eliminating per-token pool lookups.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -78,14 +79,12 @@ pub fn execute_plan(
     // refs to Slot(idx) before returning the plan, so slot_data covers all
     // intermediate tensors — no separate intra-group buffer map is needed.
     let n = plan.nodes.len();
-    let mut kernels: Vec<metaltile_core::ir::Kernel> = Vec::with_capacity(n);
     let mut all_buffers: Vec<BTreeMap<String, Vec<u8>>> = Vec::with_capacity(n);
     let mut all_resident: Vec<BTreeMap<String, ResidentBuffer>> = Vec::with_capacity(n);
     let mut all_output_resident: Vec<BTreeMap<String, ResidentBuffer>> = Vec::with_capacity(n);
 
     for (idx, node) in plan.nodes.iter().enumerate() {
-        // kernel.mode is pre-set at compile time (cached_kernels already has mode).
-        let kernel = plan.cached_kernels[idx].clone();
+        let kernel = &plan.cached_kernels[idx]; // mode pre-set at compile time
         let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         let mut spec_resident: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
         let mut spec_output_resident: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
@@ -179,22 +178,38 @@ pub fn execute_plan(
             }
         }
 
-        kernels.push(kernel);
         all_buffers.push(buffers);
         all_resident.push(spec_resident);
         all_output_resident.push(spec_output_resident);
     }
 
     // ── Dispatch ───────────────────────────────────────────────────────
-    // single_dispatch=true (TomlDriven/GraphDriven): entire forward pass in
-    // one MTLCommandBuffer — one waitUntilCompleted per token.
-    // single_dispatch=false (--no-fuse): one command buffer per node —
-    // useful for debugging but ~10× slower.
+    // Compute which consecutive nodes have data dependencies.
+    // Node i depends on i-1 if any output slot of i-1 is an input of i.
+    let barriers_after: Vec<bool> = (0..n)
+        .map(|i| {
+            if i + 1 >= n {
+                return false;
+            }
+            let producer = &plan.nodes[i];
+            let consumer = &plan.nodes[i + 1];
+            producer.output_bindings.iter().any(|(_, out_sr)| {
+                if let SlotRef::Slot(out_idx) = out_sr {
+                    consumer.input_bindings.iter().any(|(_, in_sr)| {
+                        matches!(in_sr, SlotRef::Slot(in_idx) if in_idx == out_idx)
+                    })
+                } else {
+                    false
+                }
+            })
+        })
+        .collect();
+
     let all_specs: Vec<DispatchSpec<'_>> = (0..n)
         .map(|i| {
             let (grid_groups, threads_per_group) = plan.nodes[i].grid_dims;
             DispatchSpec {
-                kernel: &kernels[i],
+                kernel: &plan.cached_kernels[i],
                 buffers: &all_buffers[i],
                 fn_consts,
                 grid_groups,
@@ -211,7 +226,7 @@ pub fn execute_plan(
     let results = if fused {
         // ── Fused: entire pass in one command buffer ────────────────
         let results = ctx
-            .dispatch_chain(&all_specs)
+            .dispatch_chain(&all_specs, &barriers_after)
             .map_err(|e| ModelError::Other(e.to_string()))?;
         if start.elapsed() > Duration::from_secs(GPU_WATCHDOG_SECS) {
             eprintln!(
@@ -227,7 +242,7 @@ pub fn execute_plan(
         let mut all_results = Vec::with_capacity(n);
         for i in 0..n {
             let mut res = ctx
-                .dispatch_chain(&all_specs[i..i + 1])
+                .dispatch_chain(&all_specs[i..i + 1], &[])
                 .map_err(|e| ModelError::Other(e.to_string()))?;
             all_results.append(&mut res);
             if start.elapsed() > Duration::from_secs(GPU_WATCHDOG_SECS) {
@@ -267,3 +282,332 @@ pub fn execute_plan(
     Ok((slot_data[plan.output_slot].read_bytes(final_size), total_gpu_us))
 }
 
+// ── PreparedDispatch ───────────────────────────────────────────────────
+
+/// Pre-built per-node binding maps for efficient per-token dispatch.
+///
+/// All static data (weights, pre-allocated slot buffers, static constexprs)
+/// is computed once in `PreparedDispatch::build()`. Per token, only the
+/// ~82 dynamic entries (runtime-state-derived constexprs and CPU-side state
+/// scalars) are updated in-place — reducing per-token work from ~876
+/// BTreeMap operations to ~164.
+pub struct PreparedDispatch {
+    /// Session-lifetime intermediate tensor scratch buffers. Allocated once,
+    /// reused across all tokens (avoids per-token buffer-pool lookups).
+    pub(crate) slot_bufs: Vec<ResidentBuffer>,
+    /// Static input GPU-resident maps (weights + pre-allocated slots).
+    all_resident: Vec<BTreeMap<String, ResidentBuffer>>,
+    /// Static output GPU-resident maps (KV cache + output slots).
+    all_output_resident: Vec<BTreeMap<String, ResidentBuffer>>,
+    /// CPU-side buffer maps. Pre-populated with static constexprs.
+    /// Dynamic entries (state-derived) updated in-place before each dispatch.
+    all_buffers: Vec<BTreeMap<String, Vec<u8>>>,
+    /// Nodes with dynamic (State-keyed) constexprs: (node_idx, [(param, state_key)]).
+    dyn_cexpr: Vec<(usize, Vec<(String, String)>)>,
+    /// Nodes with CPU-side state scalar inputs: (node_idx, [(param, state_key)]).
+    dyn_state_in: Vec<(usize, Vec<(String, String)>)>,
+    /// Nodes with CPU-side state scalar outputs:
+    /// (node_idx, [(param, state_key, size_bytes)]).
+    cpu_state_out: Vec<(usize, Vec<(String, String, usize)>)>,
+    /// Pre-computed barrier mask for `dispatch_chain`. Static — slot
+    /// dependencies don't change between tokens.
+    barriers_after: Vec<bool>,
+}
+
+impl PreparedDispatch {
+    /// Build static binding maps from a compiled plan.
+    ///
+    /// `resident` must contain all weight buffers and KV-cache buffers.
+    /// `state` provides sizes for any CPU-side state scalar outputs
+    /// (rare; not present in standard LLMs).
+    pub fn build(
+        ctx: &Context,
+        plan: &ExecutionPlan,
+        resident: &BTreeMap<String, ResidentBuffer>,
+        state: &StateMap,
+    ) -> Result<Self, ModelError> {
+        // Allocate session-lifetime slot buffers once.
+        let slot_bufs: Vec<ResidentBuffer> = plan
+            .slots
+            .iter()
+            .map(|s| ctx.alloc_resident(s.size_bytes))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ModelError::Other(e.to_string()))?;
+
+        let n = plan.nodes.len();
+        let mut all_resident = Vec::with_capacity(n);
+        let mut all_output_resident = Vec::with_capacity(n);
+        let mut all_buffers = Vec::with_capacity(n);
+        let mut dyn_cexpr: Vec<(usize, Vec<(String, String)>)> = Vec::new();
+        let mut dyn_state_in: Vec<(usize, Vec<(String, String)>)> = Vec::new();
+        let mut cpu_state_out: Vec<(usize, Vec<(String, String, usize)>)> = Vec::new();
+
+        for (idx, node) in plan.nodes.iter().enumerate() {
+            let kernel = &plan.cached_kernels[idx];
+            let mut spec_res: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
+            let mut spec_out_res: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
+            let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+            let mut node_dyn_cexpr: Vec<(String, String)> = Vec::new();
+            let mut node_dyn_state_in: Vec<(String, String)> = Vec::new();
+            let mut node_cpu_state_out: Vec<(String, String, usize)> = Vec::new();
+
+            // ── Input bindings ─────────────────────────────────────────
+            for (param, slot_ref) in &node.input_bindings {
+                match slot_ref {
+                    SlotRef::Slot(i) => {
+                        spec_res.insert(param.clone(), slot_bufs[*i].clone());
+                    },
+                    SlotRef::Weight(name) => {
+                        if let Some(rb) = resident.get(name) {
+                            spec_res.insert(param.clone(), rb.clone());
+                        }
+                        // Missing weight caught by safety check below.
+                    },
+                    SlotRef::State(key) => {
+                        if let Some(rb) = resident.get(key) {
+                            spec_res.insert(param.clone(), rb.clone());
+                        } else {
+                            node_dyn_state_in.push((param.clone(), key.clone()));
+                        }
+                    },
+                }
+            }
+
+            // ── Output bindings ────────────────────────────────────────
+            for (param, slot_ref) in &node.output_bindings {
+                match slot_ref {
+                    SlotRef::Slot(i) => {
+                        spec_out_res.insert(param.clone(), slot_bufs[*i].clone());
+                    },
+                    SlotRef::Weight(_) => {},
+                    SlotRef::State(key) => {
+                        if let Some(rb) = resident.get(key) {
+                            spec_out_res.insert(param.clone(), rb.clone());
+                        } else {
+                            let size = state.get(key).map(|v| v.len()).unwrap_or(0);
+                            if size > 0 {
+                                node_cpu_state_out.push((param.clone(), key.clone(), size));
+                            }
+                        }
+                    },
+                }
+            }
+
+            // ── Constexprs ─────────────────────────────────────────────
+            for (name, cv) in &node.cexprs {
+                match cv {
+                    ConstexprValue::Static(val) => {
+                        buffers.insert(name.clone(), val.to_le_bytes().to_vec());
+                    },
+                    ConstexprValue::State(key) => {
+                        node_dyn_cexpr.push((name.clone(), key.clone()));
+                    },
+                }
+            }
+
+            // ── Safety check at build time (not repeated per-token) ────
+            for param in kernel.params.iter().filter(|p| !p.is_output) {
+                let in_res = spec_res.contains_key(&param.name);
+                let in_buf = buffers.get(&param.name).is_some_and(|b| !b.is_empty());
+                let is_dyn = node_dyn_cexpr.iter().any(|(n, _)| n == &param.name)
+                    || node_dyn_state_in.iter().any(|(n, _)| n == &param.name);
+                if !in_res && !in_buf && !is_dyn {
+                    return Err(ModelError::UnsafeDispatch {
+                        op: node.label.clone(),
+                        detail: format!(
+                            "input '{}' has no data — weight missing from checkpoint \
+                             or weight-name mismatch",
+                            param.name
+                        ),
+                    });
+                }
+            }
+
+            if !node_dyn_cexpr.is_empty() {
+                dyn_cexpr.push((idx, node_dyn_cexpr));
+            }
+            if !node_dyn_state_in.is_empty() {
+                dyn_state_in.push((idx, node_dyn_state_in));
+            }
+            if !node_cpu_state_out.is_empty() {
+                cpu_state_out.push((idx, node_cpu_state_out));
+            }
+
+            all_resident.push(spec_res);
+            all_output_resident.push(spec_out_res);
+            all_buffers.push(buffers);
+        }
+
+        // Pre-compute barrier mask (static — slot dependencies are fixed).
+        let barriers_after: Vec<bool> = (0..n)
+            .map(|i| {
+                if i + 1 >= n {
+                    return false;
+                }
+                let producer = &plan.nodes[i];
+                let consumer = &plan.nodes[i + 1];
+                producer.output_bindings.iter().any(|(_, out_sr)| {
+                    if let SlotRef::Slot(out_idx) = out_sr {
+                        consumer.input_bindings.iter().any(|(_, in_sr)| {
+                            matches!(in_sr, SlotRef::Slot(in_idx) if in_idx == out_idx)
+                        })
+                    } else {
+                        false
+                    }
+                })
+            })
+            .collect();
+
+        Ok(PreparedDispatch {
+            slot_bufs,
+            all_resident,
+            all_output_resident,
+            all_buffers,
+            dyn_cexpr,
+            dyn_state_in,
+            cpu_state_out,
+            barriers_after,
+        })
+    }
+}
+
+/// Execute a plan using pre-built binding maps.
+///
+/// Much cheaper per-token than `execute_plan` — only dynamic
+/// (state-derived) entries are updated before each dispatch.
+///
+/// `max_nodes`: number of nodes to execute. Pass `plan.nodes.len()` for a
+/// full forward pass (decode step), or `plan.prefill_node_count` during
+/// non-final prefill steps to skip the vocab-projection + sampling tail.
+/// Returns `(vec![], elapsed)` for partial runs — caller discards output
+/// and advances position only.
+pub fn execute_prepared(
+    pd: &mut PreparedDispatch,
+    ctx: &Context,
+    plan: &ExecutionPlan,
+    state: &mut StateMap,
+    max_nodes: usize,
+) -> Result<(Vec<u8>, f64), ModelError> {
+    let fn_consts = EMPTY_FN_CONSTS.get_or_init(BTreeMap::new);
+    let n = max_nodes.min(plan.nodes.len());
+
+    // ── Update dynamic entries (per-token) ────────────────────────────
+
+    for (node_idx, cexprs) in &pd.dyn_cexpr {
+        if *node_idx >= n {
+            continue;
+        }
+        let buffers = &mut pd.all_buffers[*node_idx];
+        for (param, key) in cexprs {
+            let bytes = state
+                .get(key)
+                .and_then(|b| b.get(..4))
+                .ok_or_else(|| ModelError::UnsafeDispatch {
+                    op: plan.nodes[*node_idx].label.clone(),
+                    detail: format!(
+                        "runtime state '{key}' not found — \
+                         ensure it is set in the state map before the forward pass"
+                    ),
+                })?;
+            let bits = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            buffers.insert(param.clone(), bits.to_le_bytes().to_vec());
+        }
+    }
+
+    for (node_idx, inputs) in &pd.dyn_state_in {
+        if *node_idx >= n {
+            continue;
+        }
+        let buffers = &mut pd.all_buffers[*node_idx];
+        for (param, key) in inputs {
+            if let Some(bytes) = state.get(key) {
+                buffers.insert(param.clone(), bytes.clone());
+            }
+        }
+    }
+
+    for (node_idx, outputs) in &pd.cpu_state_out {
+        if *node_idx >= n {
+            continue;
+        }
+        let buffers = &mut pd.all_buffers[*node_idx];
+        for (param, _key, size) in outputs {
+            buffers.insert(param.clone(), vec![0u8; *size]);
+        }
+    }
+
+    // ── Build dispatch specs ───────────────────────────────────────────
+    let all_specs: Vec<DispatchSpec<'_>> = (0..n)
+        .map(|i| {
+            let (grid_groups, threads_per_group) = plan.nodes[i].grid_dims;
+            DispatchSpec {
+                kernel: &plan.cached_kernels[i],
+                buffers: &pd.all_buffers[i],
+                fn_consts,
+                grid_groups,
+                threads_per_group,
+                resident: &pd.all_resident[i],
+                output_resident: &pd.all_output_resident[i],
+            }
+        })
+        .collect();
+
+    // ── Dispatch ───────────────────────────────────────────────────────
+    let start = Instant::now();
+
+    let results = if plan.single_dispatch {
+        let results = ctx
+            .dispatch_chain(&all_specs, &pd.barriers_after[..n])
+            .map_err(|e| ModelError::Other(e.to_string()))?;
+        if start.elapsed() > Duration::from_secs(GPU_WATCHDOG_SECS) {
+            eprintln!(
+                "\n[executor] WATCHDOG: forward pass exceeded {}s — \
+                 killing process to prevent system freeze",
+                GPU_WATCHDOG_SECS
+            );
+            std::process::exit(1);
+        }
+        results
+    } else {
+        let mut all_results = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut res = ctx
+                .dispatch_chain(&all_specs[i..i + 1], &[])
+                .map_err(|e| ModelError::Other(e.to_string()))?;
+            all_results.append(&mut res);
+            if start.elapsed() > Duration::from_secs(GPU_WATCHDOG_SECS) {
+                eprintln!(
+                    "\n[executor] WATCHDOG: forward pass exceeded {}s at node {} — \
+                     killing process to prevent system freeze",
+                    GPU_WATCHDOG_SECS, i
+                );
+                std::process::exit(1);
+            }
+        }
+        all_results
+    };
+
+    let total_gpu_us = results.first().map(|r| r.elapsed_us).unwrap_or(0.0);
+
+    // ── Read back CPU-side state outputs ──────────────────────────────
+    for (node_idx, outputs) in &pd.cpu_state_out {
+        if *node_idx >= n {
+            continue;
+        }
+        let Some(result) = results.get(*node_idx) else { continue };
+        for (param, key, _size) in outputs {
+            if let Some(bytes) = result.outputs.get(param) {
+                state.insert(key.clone(), bytes.clone());
+            }
+        }
+    }
+
+    // ── Read final output ──────────────────────────────────────────────
+    if n == plan.nodes.len() {
+        let final_size = plan.slots[plan.output_slot].size_bytes;
+        Ok((pd.slot_bufs[plan.output_slot].read_bytes(final_size), total_gpu_us))
+    } else {
+        // Partial prefill: vocab head not run, no sampled token yet.
+        Ok((Vec::new(), total_gpu_us))
+    }
+}

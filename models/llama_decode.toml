@@ -242,9 +242,13 @@ outputs   = { c = "_residual" }
 dispatch  = { n = "$hidden_dim", out_elems = "$hidden_dim" }
 
 # ── Post-layer: output norm ────────────────────────────────────────────
+# prefill_skip = true: this kernel and all subsequent kernels (lm_head,
+# sampling) are skipped during non-final prefill steps. Their outputs
+# (logits, next token) are not needed until the last prompt token.
 
 [[kernel]]
 op = "rms_norm/rms_norm"
+prefill_skip = true
 inputs    = { x = "_residual", w = "output_norm", eps_buf = "rms_eps" }
 outputs   = { out = "_final_normed" }
 constexpr = { n = "$hidden_dim" }

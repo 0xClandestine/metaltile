@@ -124,6 +124,14 @@ pub struct KernelNode {
     /// takes full control).
     #[serde(default)]
     pub fuse: Option<String>,
+    /// When `true`, this kernel (and all subsequent kernels in the plan)
+    /// are skipped during non-final prefill steps. Set on the first
+    /// kernel that is not needed until the final decode output is required
+    /// (typically the output norm / vocab projection / sampling tail).
+    /// The compiler records the index of the first such kernel as
+    /// `ExecutionPlan::prefill_node_count`.
+    #[serde(default)]
+    pub prefill_skip: bool,
 }
 
 // ── Validation helpers ──────────────────────────────────────────────────

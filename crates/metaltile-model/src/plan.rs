@@ -37,6 +37,12 @@ pub struct ExecutionPlan {
     /// one `waitUntilCompleted` per token.  When `false` (`FusionMode::None`),
     /// each node gets its own command buffer (slow; useful for debugging).
     pub single_dispatch: bool,
+    /// Number of nodes to execute during non-final prefill steps.
+    /// Nodes from this index onward (typically output norm + lm_head + sampling)
+    /// are skipped when processing prompt tokens that are not the last one —
+    /// their outputs (logits, sampled token) are not needed until the final step.
+    /// Set to `nodes.len()` when no `prefill_skip = true` tag is present in the TOML.
+    pub prefill_node_count: usize,
 }
 
 // ── ConstexprValue ────────────────────────────────────────────────────

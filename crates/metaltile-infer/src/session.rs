@@ -17,10 +17,11 @@ use metaltile_model::{
     FusionMode,
     KernelRegistry,
     ModelDef,
+    PreparedDispatch,
     StateMap,
     WeightMap,
     compile,
-    execute_plan,
+    execute_prepared,
 };
 use metaltile_runtime::{Context, ResidentBuffer};
 use tokenizers::Tokenizer;
@@ -48,7 +49,7 @@ pub struct GenerateOutput {
 pub struct Session {
     ctx: Context,
     plan: metaltile_model::ExecutionPlan,
-    resident: BTreeMap<String, ResidentBuffer>,
+    prepared: PreparedDispatch,
     state: StateMap,
     tokenizer: Tokenizer,
     eos_token_id: u32,
@@ -148,6 +149,12 @@ impl Session {
         state.insert("uniform".to_string(), 0.5f32.to_le_bytes().to_vec());
         state.insert("token_id".to_string(), 0u32.to_le_bytes().to_vec());
 
+        // ── Build PreparedDispatch ─────────────────────────────────────
+        // Builds static binding maps once; only ~82 dynamic entries
+        // (position, n_kv, token_id, temperature, uniform) are updated per token.
+        let prepared = PreparedDispatch::build(&ctx, &plan, &resident, &state)
+            .map_err(|e| InferError::Other(e.to_string()))?;
+
         // ── Tokenizer ─────────────────────────────────────────────────
         let tok_path = model_dir.join("tokenizer.json");
         let tokenizer =
@@ -156,7 +163,7 @@ impl Session {
         // Common EOS token IDs for Llama family
         let eos_token_id = find_eos_token_id(&tokenizer);
 
-        Ok(Session { ctx, plan, resident, state, tokenizer, _config: config, eos_token_id })
+        Ok(Session { ctx, plan, prepared, state, tokenizer, _config: config, eos_token_id })
     }
 
     /// Run inference for `max_tokens` steps, calling `on_token` with each
@@ -178,11 +185,20 @@ impl Session {
 
         // ── Prefill ───────────────────────────────────────────────
         // Feed each prompt token through the model to populate KV cache.
+        // Non-final tokens skip the vocab-projection + sampling tail
+        // (output_norm → lm_head → sampling) — those outputs are not
+        // needed until the very last prefill step.
         let mut prefill_secs = 0.0f64;
         let mut last_token_id = 0u32;
-        for &token_id in &prompt_ids {
-            let (tid, secs) = self.step(token_id, temperature)?;
-            last_token_id = tid;
+        let n_prompt = prompt_ids.len();
+        let prefill_limit = self.plan.prefill_node_count;
+        for (i, &token_id) in prompt_ids.iter().enumerate() {
+            let is_last = i + 1 == n_prompt;
+            let max_nodes = if is_last { self.plan.nodes.len() } else { prefill_limit };
+            let (tid, secs) = self.step_inner(token_id, temperature, max_nodes)?;
+            if is_last {
+                last_token_id = tid;
+            }
             prefill_secs += secs;
         }
 
@@ -228,12 +244,25 @@ impl Session {
     }
 
     /// Single forward pass: set token_id + temperature + uniform in state,
-    /// execute the plan, return the sampled next token id and GPU elapsed
+    /// execute the plan, return the sampled next token id and wall-clock
     /// time in seconds.
     ///
     /// This is the low-level step API — drive the autoregressive loop
     /// yourself for fine-grained control over timing, sampling, etc.
     pub fn step(&mut self, token_id: u32, temperature: f32) -> Result<(u32, f64), InferError> {
+        self.step_inner(token_id, temperature, self.plan.nodes.len())
+    }
+
+    /// Internal step that runs at most `max_nodes` nodes of the plan.
+    ///
+    /// When `max_nodes < plan.nodes.len()` (prefill fast path), the plan
+    /// output is empty — the returned token id is `0` and should be ignored.
+    fn step_inner(
+        &mut self,
+        token_id: u32,
+        temperature: f32,
+        max_nodes: usize,
+    ) -> Result<(u32, f64), InferError> {
         let pos = position_from_state(&self.state);
 
         // n_kv = position + 1: the KV cache update will write token at slot `pos`,
@@ -244,26 +273,22 @@ impl Session {
         let uniform: f32 = pseudo_uniform(token_id, pos);
         self.state.insert("uniform".to_string(), uniform.to_le_bytes().to_vec());
 
-        // Execute plan — wall-clock time captures both GPU compute and
-        // CPU dispatch overhead (command-buffer creation, submission,
-        // waitUntilCompleted). This reflects the real end-to-end cost per
-        // token and shows the benefit of kernel fusion (fewer cmd buffers).
         let t0 = std::time::Instant::now();
-        let (out_bytes, _gpu_us) = execute_plan(
+        let (out_bytes, _gpu_us) = execute_prepared(
+            &mut self.prepared,
             &self.ctx,
             &self.plan,
-            &WeightMap::new(), // all weights are GPU-resident
             &mut self.state,
-            &self.resident,
+            max_nodes,
         )?;
         let wall_secs = t0.elapsed().as_secs_f64();
 
         // Advance position
         self.state.insert("position".to_string(), (pos + 1).to_le_bytes().to_vec());
 
-        // Output is a u32 token id (4 bytes)
+        // Partial prefill: output is empty, return sentinel 0.
         if out_bytes.len() < 4 {
-            return Err(InferError::Other("plan output too short".to_string()));
+            return Ok((0, wall_secs));
         }
         let next_id = u32::from_le_bytes([out_bytes[0], out_bytes[1], out_bytes[2], out_bytes[3]]);
         Ok((next_id, wall_secs))

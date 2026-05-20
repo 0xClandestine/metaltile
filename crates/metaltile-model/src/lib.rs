@@ -44,7 +44,7 @@ pub mod schema;
 // Re-export the main types for convenience.
 pub use compiler::{CompileParams, FusionMode, compile};
 pub use error::ModelError;
-pub use executor::{StateMap, WeightMap, execute_plan};
+pub use executor::{PreparedDispatch, StateMap, WeightMap, execute_plan, execute_prepared};
 pub use plan::{BufferSlot, ConstexprValue, DispatchNode, ExecutionPlan, SlotRef};
 pub use registry::KernelRegistry;
 pub use schema::{KernelNode, LayerDef, ModelDef, ModelMeta, TensorDecl};

@@ -137,6 +137,13 @@ pub fn compile(
         });
     }
 
+    // Find the index of the first prefill_skip = true node.
+    // Nodes from this index onward are skipped during non-final prefill.
+    let prefill_node_count = raw_nodes
+        .iter()
+        .position(|rn| rn.node.prefill_skip)
+        .unwrap_or(raw_nodes.len());
+
     // ── Step 2: Compile each RawNode → DispatchNode ────────────────
     let mut nodes: Vec<DispatchNode> = Vec::with_capacity(raw_nodes.len());
     let mut cached_kernels: Vec<Kernel> = Vec::with_capacity(raw_nodes.len());
@@ -350,7 +357,15 @@ pub fn compile(
         .unwrap_or(0);
 
     let single_dispatch = fusion_mode != FusionMode::None;
-    Ok(ExecutionPlan { nodes, slots, output_slot, n_layers, cached_kernels, single_dispatch })
+    Ok(ExecutionPlan {
+        nodes,
+        slots,
+        output_slot,
+        n_layers,
+        cached_kernels,
+        single_dispatch,
+        prefill_node_count,
+    })
 }
 
 // ── Graph-level kernel fusion ──────────────────────────────────────────
