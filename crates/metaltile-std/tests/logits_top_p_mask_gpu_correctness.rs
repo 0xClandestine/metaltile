@@ -123,7 +123,8 @@ fn check_oracle(logits: &[f32], n: usize, rows: usize, dtype: Dt, top_p: f32) {
             );
         } else {
             assert_eq!(
-                a, e,
+                a,
+                e,
                 "idx {i}: kept-token mismatch (n={n} rows={rows} \
                  dtype={:?} top_p={top_p})",
                 dtype.to_dtype(),
@@ -201,9 +202,12 @@ fn top_p_kept_set_is_a_downward_closed_nucleus() {
         let row = &logits[base..base + n];
         let mask = &out[base..base + n];
 
-        let min_kept = (0..n).filter(|&i| mask[i].is_finite()).map(|i| row[i]).fold(f32::INFINITY, f32::min);
-        let max_masked =
-            (0..n).filter(|&i| !mask[i].is_finite()).map(|i| row[i]).fold(f32::NEG_INFINITY, f32::max);
+        let min_kept =
+            (0..n).filter(|&i| mask[i].is_finite()).map(|i| row[i]).fold(f32::INFINITY, f32::min);
+        let max_masked = (0..n)
+            .filter(|&i| !mask[i].is_finite())
+            .map(|i| row[i])
+            .fold(f32::NEG_INFINITY, f32::max);
         assert!(
             min_kept >= max_masked,
             "row {r}: kept set is not downward-closed (min kept logit {min_kept} \
@@ -232,7 +236,8 @@ fn top_p_near_zero_keeps_only_argmax() {
     let logits: Vec<f32> = (0..n).map(|i| i as f32 * 0.1).collect();
     let out = run_top_p_mask(&logits, n, 1, Dt::F32, 0.01);
 
-    let kept: Vec<usize> = out.iter().enumerate().filter(|(_, v)| v.is_finite()).map(|(i, _)| i).collect();
+    let kept: Vec<usize> =
+        out.iter().enumerate().filter(|(_, v)| v.is_finite()).map(|(i, _)| i).collect();
     assert_eq!(kept, vec![n - 1], "top_p→0 must keep only the argmax");
 }
 
