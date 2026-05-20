@@ -99,7 +99,8 @@ fn check(logits: &[f32], n: usize, rows: usize, dtype: Dt, min_p: f32) {
             );
         } else {
             assert_eq!(
-                a, e,
+                a,
+                e,
                 "idx {i}: kept-token mismatch (n={n} rows={rows} \
                  dtype={:?} min_p={min_p})",
                 dtype.to_dtype(),
@@ -148,7 +149,8 @@ fn min_p_near_one_keeps_only_argmax() {
     check(&logits, n, 1, Dt::F32, 0.999);
 
     let out = run_min_p_mask(&logits, n, 1, Dt::F32, 0.999);
-    let kept: Vec<usize> = out.iter().enumerate().filter(|(_, v)| v.is_finite()).map(|(i, _)| i).collect();
+    let kept: Vec<usize> =
+        out.iter().enumerate().filter(|(_, v)| v.is_finite()).map(|(i, _)| i).collect();
     assert_eq!(kept, vec![n - 1], "min_p→1 must keep only the argmax");
 }
 
