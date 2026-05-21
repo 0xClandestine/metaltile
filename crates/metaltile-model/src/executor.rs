@@ -350,6 +350,8 @@ impl PreparedDispatch {
                         if let Some(rb) = resident.get(key) {
                             spec_res.insert(param.clone(), rb.clone());
                         } else {
+                            let size = state.get(key.as_str()).map(|v| v.len()).unwrap_or(4);
+                            buffers.insert(param.clone(), vec![0u8; size]);
                             node_dyn_state_in.push((param.clone(), key.clone()));
                         }
                     },
@@ -367,8 +369,9 @@ impl PreparedDispatch {
                         if let Some(rb) = resident.get(key) {
                             spec_out_res.insert(param.clone(), rb.clone());
                         } else {
-                            let size = state.get(key).map(|v| v.len()).unwrap_or(0);
+                            let size = state.get(key.as_str()).map(|v| v.len()).unwrap_or(0);
                             if size > 0 {
+                                buffers.insert(param.clone(), vec![0u8; size]);
                                 node_cpu_state_out.push((param.clone(), key.clone(), size));
                             }
                         }
@@ -383,6 +386,7 @@ impl PreparedDispatch {
                         buffers.insert(name.clone(), val.to_le_bytes().to_vec());
                     },
                     ConstexprValue::State(key) => {
+                        buffers.insert(name.clone(), vec![0u8; 4]);
                         node_dyn_cexpr.push((name.clone(), key.clone()));
                     },
                 }
@@ -476,7 +480,9 @@ pub fn execute_prepared(
                     ),
                 })?;
             let bits = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-            buffers.insert(param.clone(), bits.to_le_bytes().to_vec());
+            if let Some(buf) = buffers.get_mut(param.as_str()) {
+                buf[..4].copy_from_slice(&bits.to_le_bytes());
+            }
         }
     }
 
@@ -486,8 +492,11 @@ pub fn execute_prepared(
         }
         let buffers = &mut pd.all_buffers[*node_idx];
         for (param, key) in inputs {
-            if let Some(bytes) = state.get(key) {
-                buffers.insert(param.clone(), bytes.clone());
+            if let Some(src) = state.get(key.as_str()) {
+                if let Some(buf) = buffers.get_mut(param.as_str()) {
+                    let len = src.len().min(buf.len());
+                    buf[..len].copy_from_slice(&src[..len]);
+                }
             }
         }
     }
@@ -497,8 +506,10 @@ pub fn execute_prepared(
             continue;
         }
         let buffers = &mut pd.all_buffers[*node_idx];
-        for (param, _key, size) in outputs {
-            buffers.insert(param.clone(), vec![0u8; *size]);
+        for (param, _key, _size) in outputs {
+            if let Some(buf) = buffers.get_mut(param.as_str()) {
+                buf.fill(0);
+            }
         }
     }
 

@@ -118,8 +118,11 @@ impl Session {
         for layer in 0..config.n_layers {
             for key in ["k", "v"] {
                 let name = format!("kv_cache.{layer}.{key}");
+                // alloc_resident skips the zero-fill memcpy; the KV-update
+                // kernel always writes before reading, so uninitialised data
+                // at position ≥ n_kv is never consumed.
                 let rb = ctx
-                    .upload_resident(&vec![0u8; kv_bytes])
+                    .alloc_resident(kv_bytes)
                     .map_err(|e| InferError::Other(e.to_string()))?;
                 resident.insert(name, rb);
             }
@@ -301,11 +304,12 @@ impl Session {
 
         // n_kv = position + 1: the KV cache update will write token at slot `pos`,
         // so SDPA must attend to all pos+1 tokens (0..=pos inclusive).
-        self.state.insert("n_kv".to_string(), (pos + 1).to_le_bytes().to_vec());
-        self.state.insert("token_id".to_string(), token_id.to_le_bytes().to_vec());
-        self.state.insert("temperature".to_string(), temperature.to_le_bytes().to_vec());
+        // Use in-place updates to avoid per-token String + Vec heap allocations.
+        state_update_u32(&mut self.state, "n_kv", pos + 1);
+        state_update_u32(&mut self.state, "token_id", token_id);
+        state_update_f32(&mut self.state, "temperature", temperature);
         let uniform: f32 = pseudo_uniform(token_id, pos);
-        self.state.insert("uniform".to_string(), uniform.to_le_bytes().to_vec());
+        state_update_f32(&mut self.state, "uniform", uniform);
 
         let t0 = std::time::Instant::now();
         let (out_bytes, _gpu_us) = execute_prepared(
@@ -318,7 +322,7 @@ impl Session {
         let wall_secs = t0.elapsed().as_secs_f64();
 
         // Advance position
-        self.state.insert("position".to_string(), (pos + 1).to_le_bytes().to_vec());
+        state_update_u32(&mut self.state, "position", pos + 1);
 
         // Partial prefill: output is empty, return sentinel 0.
         if out_bytes.len() < 4 {
@@ -330,12 +334,29 @@ impl Session {
 
     /// Reset KV cache and position counter (start a new conversation).
     pub fn reset(&mut self) {
-        self.state.insert("position".to_string(), 0u32.to_le_bytes().to_vec());
-        self.state.insert("n_kv".to_string(), 0u32.to_le_bytes().to_vec());
+        state_update_u32(&mut self.state, "position", 0);
+        state_update_u32(&mut self.state, "n_kv", 0);
     }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+/// Update a u32 state value in-place, avoiding a String key allocation and
+/// a Vec<u8> heap allocation on every token step.
+#[inline]
+fn state_update_u32(state: &mut StateMap, key: &str, val: u32) {
+    if let Some(buf) = state.get_mut(key) {
+        buf[..4].copy_from_slice(&val.to_le_bytes());
+    }
+}
+
+/// Update an f32 state value in-place.
+#[inline]
+fn state_update_f32(state: &mut StateMap, key: &str, val: f32) {
+    if let Some(buf) = state.get_mut(key) {
+        buf[..4].copy_from_slice(&val.to_le_bytes());
+    }
+}
 
 fn build_compile_params(
     config: &ModelConfig,
@@ -361,6 +382,7 @@ fn build_compile_params(
     }
 }
 
+#[inline]
 fn position_from_state(state: &StateMap) -> u32 {
     state
         .get("position")
@@ -370,6 +392,7 @@ fn position_from_state(state: &StateMap) -> u32 {
 }
 
 /// Deterministic pseudo-random float in [0,1) — good enough for greedy/temp sampling.
+#[inline]
 fn pseudo_uniform(token_id: u32, position: u32) -> f32 {
     let mut x = token_id.wrapping_mul(2654435761).wrapping_add(position.wrapping_mul(2246822519));
     x ^= x >> 13;

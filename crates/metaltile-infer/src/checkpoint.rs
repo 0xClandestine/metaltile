@@ -2,7 +2,7 @@
 //! to the requested activation dtype). Supports single-file and sharded
 //! models (multiple `.safetensors` files in a directory).
 
-use std::path::{Path, PathBuf};
+use std::{borrow::Cow, path::{Path, PathBuf}};
 
 use metaltile_core::dtype::DType;
 use metaltile_model::WeightMap;
@@ -150,23 +150,26 @@ pub fn remap_hf_llama_names(raw: WeightMap) -> WeightMap {
     let mut out = WeightMap::with_capacity(raw.len());
     for (name, bytes) in raw {
         let mapped = remap_one(&name);
-        out.insert(mapped, bytes);
+        // Into<String> from Cow<str>: Borrowed variant is free (no alloc).
+        out.insert(mapped.into_owned(), bytes);
     }
     out
 }
 
-fn remap_one(name: &str) -> String {
+/// Returns a remapped name.  Uses `Cow::Borrowed` for static strings to
+/// avoid a heap allocation when no remapping is needed.
+fn remap_one(name: &str) -> Cow<'_, str> {
     // model.embed_tokens.weight → tok_embeddings
     if name == "model.embed_tokens.weight" {
-        return "tok_embeddings".to_string();
+        return Cow::Borrowed("tok_embeddings");
     }
     // model.norm.weight → output_norm
     if name == "model.norm.weight" {
-        return "output_norm".to_string();
+        return Cow::Borrowed("output_norm");
     }
     // lm_head.weight → lm_head
     if name == "lm_head.weight" {
-        return "lm_head".to_string();
+        return Cow::Borrowed("lm_head");
     }
 
     // model.layers.N.<suffix> patterns
@@ -188,11 +191,12 @@ fn remap_one(name: &str) -> String {
                     _ => None,
                 };
                 if let Some(s) = mapped_suffix {
-                    return format!("layers.{n}.{s}");
+                    return Cow::Owned(format!("layers.{n}.{s}"));
                 }
             }
         }
     }
 
-    name.to_string()
+    // No match — pass through without allocating.
+    Cow::Borrowed(name)
 }

@@ -525,11 +525,13 @@ impl Context {
                     use objc2_metal::{MTLDataType, MTLFunctionConstantValues};
                     let fcv = MTLFunctionConstantValues::new();
                     for (name, val) in fn_consts {
-                        let val_ref: &u32 = val;
+                        // Copy to owned stack variable; addr_of! avoids
+                        // casting a shared reference to *mut (UB).
+                        let val: u32 = *val;
                         unsafe {
                             fcv.setConstantValue_type_withName(
-                                NonNull::new(val_ref as *const u32 as *mut _)
-                                    .expect("u32 ref always non-null"),
+                                NonNull::new(std::ptr::addr_of!(val) as *mut _)
+                                    .expect("stack u32 always non-null"),
                                 MTLDataType::UInt,
                                 &NSString::from_str(name),
                             );
@@ -837,6 +839,12 @@ impl Context {
         specs: &[DispatchSpec<'_>],
         barriers_after: &[bool],
     ) -> Result<Vec<DispatchResult>, MetalTileError> {
+        // Drain all autoreleased Metal objects (NSString, MTLCommandBuffer,
+        // MTLComputeCommandEncoder, MTLLibrary, MTLFunction, etc.) at the end
+        // of each dispatch.  Without an explicit pool on worker threads the
+        // objects accumulate indefinitely — ~3 per token = ~300+ objects after
+        // a 100-token sequence.
+        objc2::rc::autoreleasepool(|_pool| {
         use std::{
             collections::HashSet,
             ptr::NonNull,
@@ -991,11 +999,14 @@ impl Context {
                         let consts = MTLFunctionConstantValues::new();
                         for (n, v) in spec.fn_consts {
                             let name = NSString::from_str(n);
-                            let val = v.to_le_bytes();
+                            // Use a stable owned u32 so addr_of! is valid for
+                            // the entire duration of the setConstantValue call.
+                            // Avoids UB from casting a &u32 reference to *mut.
+                            let val: u32 = *v;
                             unsafe {
                                 consts.setConstantValue_type_withName(
-                                    NonNull::new(val.as_ptr() as *mut _)
-                                        .expect("u32 bytes always non-null"),
+                                    NonNull::new(std::ptr::addr_of!(val) as *mut _)
+                                        .expect("stack u32 always non-null"),
                                     MTLDataType::UInt,
                                     &name,
                                 );
@@ -1185,6 +1196,7 @@ impl Context {
             results.push(DispatchResult { elapsed_us: us, gflops: 0.0, outputs });
         }
         Ok(results)
+        }) // end autoreleasepool
     }
 
     pub fn tuner_mut(&mut self) -> &mut Autotuner { &mut self.tuner }
