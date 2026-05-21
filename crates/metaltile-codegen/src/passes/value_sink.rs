@@ -39,12 +39,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use metaltile_core::{
-    error::Result,
-    ir::{Block, BlockId, Kernel, Op, ValueId},
-};
+use metaltile_core::ir::{Block, BlockId, Kernel, Op, ValueId};
 
 use super::remap;
+use crate::error::{Error, Result};
 
 pub struct ValueSinkPass;
 
@@ -62,7 +60,8 @@ impl super::Pass for ValueSinkPass {
 
         let block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
         for bid in block_ids {
-            let mut block = kernel.blocks.remove(&bid).unwrap();
+            let mut block =
+                kernel.blocks.remove(&bid).ok_or_else(|| Error::BlockNotFound(bid.as_u32()))?;
             sink_in_block(&mut block, &global_use_count);
             kernel.blocks.insert(bid, block);
         }

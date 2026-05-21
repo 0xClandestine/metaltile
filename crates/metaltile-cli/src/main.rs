@@ -9,12 +9,13 @@
 //!   diff      Compare bench results to a saved baseline
 
 mod cmd;
+mod error;
 pub mod git;
 pub mod suite_printer;
 pub mod term;
-
 use anstyle::AnsiColor;
 use clap::{Parser, builder::Styles};
+pub use error::CliError;
 
 const CLAP_STYLES: Styles = Styles::styled()
     .header(AnsiColor::Cyan.on_default().bold())
@@ -33,7 +34,7 @@ struct Cli {
     command: Command,
 }
 
-#[derive(clap::Subcommand)]
+#[derive(clap::Subcommand, Debug)]
 enum Command {
     /// Benchmark suite: MetalTile vs MLX reference
     Bench(BenchArgs),
@@ -51,7 +52,7 @@ enum Command {
 
 // ── Bench ────────────────────────────────────────────────────────────────
 
-#[derive(clap::Args)]
+#[derive(clap::Args, Debug)]
 struct BenchArgs {
     /// Only run kernels whose name contains this text
     #[arg(long = "filter", short = 'f')]
@@ -78,7 +79,7 @@ struct BenchArgs {
 
 // ── Build ────────────────────────────────────────────────────────────────
 
-#[derive(clap::Args)]
+#[derive(clap::Args, Debug)]
 struct BuildArgs {
     /// Only build kernels whose name contains this text
     #[arg(long = "filter", short = 'f')]
@@ -107,7 +108,7 @@ struct BuildArgs {
 
 // ── Inspect ──────────────────────────────────────────────────────────────
 
-#[derive(clap::Args)]
+#[derive(clap::Args, Debug)]
 struct InspectArgs {
     /// Kernel name to inspect (list all if omitted)
     kernel: Option<String>,
@@ -136,7 +137,7 @@ struct InspectArgs {
 
 // ── Device ───────────────────────────────────────────────────────────────
 
-#[derive(clap::Args)]
+#[derive(clap::Args, Debug)]
 struct DeviceArgs {
     /// Output as JSON
     #[arg(long = "json")]
@@ -145,7 +146,7 @@ struct DeviceArgs {
 
 // ── Snap ─────────────────────────────────────────────────────────────────
 
-#[derive(clap::Args)]
+#[derive(clap::Args, Debug)]
 struct SnapArgs {
     /// Write snapshot to <file> (default: .tile-snapshots/<sha>.json)
     #[arg(long = "out", short = 'o')]
@@ -163,7 +164,7 @@ struct SnapArgs {
 
 // ── Diff ─────────────────────────────────────────────────────────────────
 
-#[derive(clap::Args)]
+#[derive(clap::Args, Debug)]
 struct DiffArgs {
     /// Baseline JSON file
     baseline: String,
@@ -188,17 +189,45 @@ struct DiffArgs {
 
 // ── Dispatch ─────────────────────────────────────────────────────────────
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialise tracing. METALTILE_DEBUG=1 enables debug-level output for all
+    // metaltile crates; METALTILE_DEBUG=trace enables trace level.
+    // When the env-var is absent the subscriber is still installed but the filter
+    // rejects everything, so library crates pay only the ~1 ns no-subscriber cost.
+    let _debug_level = std::env::var("METALTILE_DEBUG").ok();
+    let filter = match _debug_level.as_deref() {
+        Some("1") | Some("debug") => "metaltile=debug",
+        Some("trace") => "metaltile=trace",
+        _ => "off",
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter)),
+        )
+        // Diagnostics go to stderr so they don't interleave with bench/build
+        // output on stdout. `with_target` shows which crate/module emitted
+        // each event — useful when tracing spans multiple crates.
+        .with_writer(std::io::stderr)
+        .with_target(true)
+        .with_thread_ids(false)
+        // Print a line when each span closes so you see elapsed wall time.
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+        .compact()
+        .init();
+
     let cli = Cli::parse();
+    let _span = tracing::info_span!("tile", command = ?cli.command).entered();
 
     match cli.command {
-        Command::Bench(args) => cmd::bench::run(&args),
-        Command::Build(args) => cmd::build::run(&args),
-        Command::Inspect(args) => cmd::inspect::run(&args),
-        Command::Device(args) => cmd::device::run(&args),
-        Command::Snap(args) => cmd::snap::run(&args),
-        Command::Diff(args) => cmd::diff::run(&args),
+        Command::Bench(args) => cmd::bench::run(&args)?,
+        Command::Build(args) => cmd::build::run(&args)?,
+        Command::Inspect(args) => cmd::inspect::run(&args)?,
+        Command::Device(args) => cmd::device::run(&args)?,
+        Command::Snap(args) => cmd::snap::run(&args)?,
+        Command::Diff(args) => cmd::diff::run(&args)?,
     }
+    Ok(())
 }
 
 /// Filter helper: case-insensitive substring match.

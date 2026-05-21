@@ -19,15 +19,24 @@ use metaltile_std::{
 };
 
 use crate::{
+    CliError,
     InspectArgs,
     matches_filter,
     term::{Color, Style, paint_stdout},
 };
 
-pub fn run(args: &InspectArgs) {
+pub fn run(args: &InspectArgs) -> Result<(), CliError> {
+    let filter_val = args.filter.as_ref().or(args.kernel.as_ref());
+    let _span = tracing::info_span!(
+        "inspect",
+        filter = ?filter_val,
+        ir = args.ir,
+        stats = args.stats,
+    )
+    .entered();
     let dir = &args.dir;
     // filter is either --filter flag or the positional kernel name
-    let filter = args.filter.as_ref().or(args.kernel.as_ref());
+    let filter = filter_val;
     let all_flag = args.all;
     let ir_flag = args.ir;
     let stats_flag = args.stats;
@@ -47,7 +56,7 @@ pub fn run(args: &InspectArgs) {
 
     if kernels.is_empty() {
         eprintln!("No kernels registered.");
-        return;
+        return Ok(());
     }
 
     let mut sorted: Vec<(&str, (&BenchSpec, Vec<DType>))> = kernels.into_iter().collect();
@@ -61,8 +70,8 @@ pub fn run(args: &InspectArgs) {
                 let k = (spec.kernel_ir)(dt);
                 if let Some(d) = dir {
                     let path = format!("{}/{}.ir", d, name);
-                    std::fs::create_dir_all(d).expect("failed to create output directory");
-                    std::fs::write(&path, format!("{k}")).expect("write failed");
+                    std::fs::create_dir_all(d).map_err(CliError::Io)?;
+                    std::fs::write(&path, format!("{k}")).map_err(CliError::Io)?;
                     println!("wrote {path}");
                 } else {
                     println!("{k}");
@@ -71,8 +80,8 @@ pub fn run(args: &InspectArgs) {
                 let msl = generate_msl(spec, dtypes);
                 if let Some(d) = dir {
                     let path = format!("{}/{}.metal", d, name);
-                    std::fs::create_dir_all(d).expect("failed to create output directory");
-                    std::fs::write(&path, &msl).expect("write failed");
+                    std::fs::create_dir_all(d).map_err(CliError::Io)?;
+                    std::fs::write(&path, &msl).map_err(CliError::Io)?;
                     println!("wrote {path}");
                 } else {
                     let mode_str = effective_mode(spec).to_string();
@@ -83,7 +92,7 @@ pub fn run(args: &InspectArgs) {
                 }
             }
         }
-        return;
+        return Ok(());
     }
 
     // No filter: list all kernels
@@ -106,7 +115,7 @@ pub fn run(args: &InspectArgs) {
             paint_stdout(format!("{} kernels", sorted.len()), Style::new().fg(Color::BrightBlack)),
             paint_stdout("<kernel> for MSL", Style::new().fg(Color::BrightBlack)),
         );
-        return;
+        return Ok(());
     };
 
     // Filter by kernel name
@@ -130,7 +139,7 @@ pub fn run(args: &InspectArgs) {
                 Style::new().fg(Color::BrightWhite),
             ),
         );
-        std::process::exit(1);
+        return Err(CliError::Other(format!("no kernel matched '{filter}'")));
     }
 
     for (name, (spec, dtypes)) in &matched {
@@ -141,8 +150,8 @@ pub fn run(args: &InspectArgs) {
             let k = (spec.kernel_ir)(dt);
             if let Some(d) = dir {
                 let path = format!("{}/{}.ir", d, name);
-                std::fs::create_dir_all(d).expect("failed to create output directory");
-                std::fs::write(&path, format!("{k}")).expect("write failed");
+                std::fs::create_dir_all(d).map_err(CliError::Io)?;
+                std::fs::write(&path, format!("{k}")).map_err(CliError::Io)?;
                 println!("wrote {path}");
             } else {
                 println!("{k}");
@@ -173,7 +182,7 @@ pub fn run(args: &InspectArgs) {
                     Some(pass_obj) => {
                         if let Err(e) = pass_obj.run(&mut k) {
                             eprintln!("Pass {name} failed: {e}");
-                            return;
+                            return Ok(());
                         }
                         println!("// ── AFTER {name} ────────────────────────");
                         println!("{k}");
@@ -181,7 +190,7 @@ pub fn run(args: &InspectArgs) {
                     None => {
                         let valid: Vec<_> = metaltile_codegen::passes::PassRegistry::names();
                         eprintln!("Unknown pass: {name}. Valid: {} all", valid.join(", "));
-                        return;
+                        return Ok(());
                     },
                 },
             }
@@ -192,8 +201,8 @@ pub fn run(args: &InspectArgs) {
             let msl = generate_msl_dt(spec, eff_dt);
             if let Some(d) = dir {
                 let path = format!("{}/{}.metal", d, name);
-                std::fs::create_dir_all(d).expect("failed to create output directory");
-                std::fs::write(&path, &msl).expect("write failed");
+                std::fs::create_dir_all(d).map_err(CliError::Io)?;
+                std::fs::write(&path, &msl).map_err(CliError::Io)?;
                 println!("wrote {path}");
             } else {
                 let mode_str = effective_mode(spec).to_string();
@@ -204,6 +213,7 @@ pub fn run(args: &InspectArgs) {
             }
         }
     }
+    Ok(())
 }
 
 /// Run all compilation passes and print IR after each stage.

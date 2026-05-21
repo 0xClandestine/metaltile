@@ -31,10 +31,9 @@
 
 use std::collections::BTreeSet;
 
-use metaltile_core::{
-    error::Result,
-    ir::{BinOpKind, Block, BlockId, IndexExpr, Kernel, Op, ValueId},
-};
+use metaltile_core::ir::{BinOpKind, Block, BlockId, IndexExpr, Kernel, Op, ValueId};
+
+use crate::error::Result;
 
 pub struct ConstFoldPass;
 

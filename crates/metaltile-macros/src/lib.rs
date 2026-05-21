@@ -8,7 +8,6 @@ mod body_parser;
 use std::collections::BTreeSet;
 
 use body_parser::DslBodyParser;
-use darling::FromMeta;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{ItemFn, parse_macro_input};
@@ -556,17 +555,6 @@ fn parse_dim_expr(s: &str) -> proc_macro2::TokenStream {
         let ident = syn::Ident::new(s, proc_macro2::Span::call_site());
         quote! { Dim::ConstExpr(ConstExpr::new(stringify!(#ident))) }
     }
-}
-
-// ---------------------------------------------------------------------------
-// #[autotune] attribute — parsed by #[kernel]
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, FromMeta)]
-#[allow(dead_code)]
-struct AutotuneArgs {
-    configs: Option<String>,
-    key: Option<String>,
 }
 
 #[cfg(test)]

@@ -12,7 +12,4 @@ categories = ["compilers", "hardware-support"]
 [dependencies]
 thiserror.workspace = true
 smallvec.workspace = true
-half.workspace = true
 serde.workspace = true
-bytemuck.workspace = true
-bitvec.workspace = true

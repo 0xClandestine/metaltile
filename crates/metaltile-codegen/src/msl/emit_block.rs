@@ -62,6 +62,7 @@ impl MslGenerator {
                         KernelMode::Reduction => match axis {
                             0 => wl!(out, "{pad}uint {v} = tgid_x;"),
                             1 => wl!(out, "{pad}uint {v} = tgid_y;"),
+                            2 => wl!(out, "{pad}uint {v} = tgid_z;"),
                             _ => wl!(out, "{pad}uint {v} = 0;"),
                         },
                         KernelMode::Grid3D => match axis {

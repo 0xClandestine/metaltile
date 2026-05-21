@@ -11,19 +11,26 @@ use std::{collections::HashMap, process::Command};
 use serde_json::Value;
 
 use crate::{
+    CliError,
     DiffArgs,
     matches_filter,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
-pub fn run(args: &DiffArgs) {
+pub fn run(args: &DiffArgs) -> Result<(), CliError> {
+    let _span = tracing::info_span!(
+        "diff",
+        baseline = %args.baseline,
+        threshold = args.threshold,
+    )
+    .entered();
     let baseline_path = &args.baseline;
     let current_path = &args.current;
 
-    let baseline = load_results(baseline_path, "baseline");
+    let baseline = load_results(baseline_path, "baseline")?;
 
     let current = if let Some(path) = current_path {
-        load_results(path, "current")
+        load_results(path, "current")?
     } else {
         eprintln!(
             "  {}",
@@ -31,14 +38,16 @@ pub fn run(args: &DiffArgs) {
         );
         let temp_file =
             std::env::temp_dir().join(format!(".tile-diff-tmp-{}.json", std::process::id()));
-        let mut child = Command::new(std::env::current_exe().unwrap())
+        let mut child = Command::new(std::env::current_exe().map_err(CliError::Io)?)
             .arg("bench")
             .arg("--json")
-            .arg(temp_file.to_str().unwrap())
+            .arg(temp_file.to_str().ok_or_else(|| CliError::Other("non-UTF8 temp path".into()))?)
             .spawn()
-            .expect("failed to run tile bench");
+            .map_err(|e| CliError::Subprocess(format!("failed to spawn tile bench: {e}")))?;
 
-        let status = child.wait().expect("tile bench did not start");
+        let status = child
+            .wait()
+            .map_err(|e| CliError::Subprocess(format!("tile bench did not start: {e}")))?;
         if !status.success() {
             eprintln!(
                 "{} {}",
@@ -46,19 +55,19 @@ pub fn run(args: &DiffArgs) {
                 paint_stderr("bench suite failed", Style::new().fg(Color::BrightWhite)),
             );
             let _ = std::fs::remove_file(&temp_file);
-            std::process::exit(1);
+            return Err(CliError::Other("bench suite failed".into()));
         }
 
-        let content = std::fs::read_to_string(&temp_file).unwrap_or_else(|e| {
+        let content = std::fs::read_to_string(&temp_file).map_err(|e| {
             eprintln!("cannot read temp results: {e}");
-            std::process::exit(1);
-        });
+            CliError::Io(e)
+        })?;
         let _ = std::fs::remove_file(&temp_file);
 
-        let json: Value = serde_json::from_str(&content).unwrap_or_else(|e| {
+        let json: Value = serde_json::from_str(&content).map_err(|e| {
             eprintln!("invalid bench JSON: {e}");
-            std::process::exit(1);
-        });
+            CliError::Json(e)
+        })?;
         json.get("results").and_then(|v| v.as_array()).cloned().unwrap_or_default()
     };
 
@@ -77,12 +86,13 @@ pub fn run(args: &DiffArgs) {
             "  {}",
             paint_stdout("No matching results to diff.", Style::new().fg(Color::BrightBlack)),
         );
-        return;
+        return Ok(());
     }
 
     if outcome.regressions > 0 {
-        std::process::exit(1);
+        return Err(CliError::Other(format!("{} regression(s) detected", outcome.regressions)));
     }
+    Ok(())
 }
 
 // ── Public render API ───────────────────────────────────────────────────
@@ -377,8 +387,8 @@ fn print_summary(
     eprintln!("\n  {}\n", parts.join(&format!("  {sep}  ")));
 }
 
-fn load_results(path: &str, label: &str) -> Vec<Value> {
-    let content = std::fs::read_to_string(path).unwrap_or_else(|e| {
+fn load_results(path: &str, label: &str) -> Result<Vec<Value>, CliError> {
+    let content = std::fs::read_to_string(path).map_err(|e| {
         eprintln!(
             "{} {}",
             paint_stderr("Error:", Style::new().fg(Color::Red).bold()),
@@ -387,21 +397,21 @@ fn load_results(path: &str, label: &str) -> Vec<Value> {
                 Style::new().fg(Color::BrightWhite)
             ),
         );
-        std::process::exit(1);
-    });
-    let json: Value = serde_json::from_str(&content).unwrap_or_else(|e| {
+        CliError::Io(e)
+    })?;
+    let json: Value = serde_json::from_str(&content).map_err(|e| {
         eprintln!(
             "{} {}",
             paint_stderr("Error:", Style::new().fg(Color::Red).bold()),
             paint_stderr(format!("invalid {label} JSON: {e}"), Style::new().fg(Color::BrightWhite)),
         );
-        std::process::exit(1);
-    });
+        CliError::Json(e)
+    })?;
     // Support both bench_dump format (results array at top level) and snapshot format
     if let Some(results) = json.get("results").and_then(|v| v.as_array()) {
-        results.clone()
+        Ok(results.clone())
     } else if let Some(results) = json.as_array() {
-        results.clone()
+        Ok(results.clone())
     } else {
         eprintln!(
             "{} {}",
@@ -411,7 +421,7 @@ fn load_results(path: &str, label: &str) -> Vec<Value> {
                 Style::new().fg(Color::BrightWhite)
             ),
         );
-        std::process::exit(1);
+        Err(CliError::Other(format!("{label} has no 'results' array")))
     }
 }
 

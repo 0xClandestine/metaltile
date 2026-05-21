@@ -17,7 +17,20 @@ identifier-leading-digits = false
 locale = "en"
 extend-ignore-identifiers-re = []
 extend-ignore-words-re = []
-extend-ignore-re = []
+# Structural ignores — these generalise instead of enumerating every
+# domain word, so the `extend-words` list below stops growing:
+#  1. Inline-code spans (`mt_silu`, `qk_per_thread`) — code identifiers
+#     in doc comments, never prose. Real doc-prose typos still caught.
+#  2. Standalone all-caps acronyms of 2–5 chars (WHT, GQA, SDPA, FWHT,
+#     …) — domain vocabulary. Capped at 5: a 6+ char all-caps token is
+#     unusual for an acronym and worth checking. This is all-caps only,
+#     so lowercase prose typos (`teh`, `wiht`, …) are never affected —
+#     the only blind spot is a genuine ≤5-char fully-uppercase typo,
+#     rare enough that skipping a per-acronym allowlist wins.
+extend-ignore-re = [
+    '`[^`\n]+`',
+    '\b[A-Z][A-Z0-9]{1,4}\b',
+]
 
 [default.extend-identifiers]
 

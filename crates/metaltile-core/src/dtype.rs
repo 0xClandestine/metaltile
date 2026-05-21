@@ -114,7 +114,7 @@ impl DType {
 }
 
 impl FromStr for DType {
-    type Err = String;
+    type Err = crate::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
@@ -129,9 +129,7 @@ impl FromStr for DType {
             "u64" => Ok(DType::U64),
             "i64" => Ok(DType::I64),
             "bool" => Ok(DType::Bool),
-            _ => Err(format!(
-                "unknown dtype '{s}'. Valid: f32,f16,bf16,i32,i8,i4,u8,u32,u64,i64,bool"
-            )),
+            _ => Err(crate::Error::InvalidDType(s.to_string())),
         }
     }
 }

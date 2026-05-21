@@ -19,10 +19,9 @@
 
 use std::collections::BTreeMap;
 
-use metaltile_core::{
-    error::Result,
-    ir::{Block, Kernel, Op, ValueId},
-};
+use metaltile_core::ir::{Block, Kernel, Op, ValueId};
+
+use crate::error::Result;
 
 /// A schedule configuration: how many threads per threadgroup and
 /// how tiles map to those threads.

@@ -62,6 +62,26 @@ jobs:
           cargo run --release -p metaltile-cli -- bench -vv \
             --allow-dirty --no-diff --json /tmp/bench.json
 
+      # Snapshot the raw bench JSON into the committed-baseline format
+      # (`tile snap` envelope) and upload it as an artifact. snap runs
+      # *on the runner* so the `device` field is the runner's real
+      # chip — letting a maintainer download it and commit it as
+      # `baselines/<chip-slug>.json` for a runner chip nobody owns
+      # locally (e.g. the paravirtualized macOS runner). Also the first
+      # building block for the auto-baseline workflow (issue #130).
+      - name: Snapshot bench result
+        run: |
+          cargo run --release -q -p metaltile-cli -- snap \
+            --from /tmp/bench.json -o /tmp/bench-snapshot.json \
+            --note "CI runner capture @ ${{ github.sha }} (${{ github.ref_name }})"
+
+      - name: Upload bench snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-snapshot
+          path: /tmp/bench-snapshot.json
+          if-no-files-found: error
+
       # Soft signal: render `tile diff` against whatever baseline matches
       # the runner's chip slug and post it as a PR comment. Never fails
       # the job — the runner chip frequently won't match any committed

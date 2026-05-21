@@ -6,6 +6,25 @@ expression: msl
 #include <metal_stdlib>
 using namespace metal;
 
+// BF16 compatibility struct for pre-Metal-3.1 targets
+struct bfloat16_t {
+    uint16_t bits;
+    bfloat16_t() = default;
+    bfloat16_t(float v) {
+        uint32_t x = as_type<uint32_t>(v);
+        bits = uint16_t((x + 0x7FFFu + ((x >> 16) & 1u)) >> 16);
+    }
+    operator float() const {
+        return as_type<float>(uint32_t(bits) << 16);
+    }
+    operator float() const device {
+        return as_type<float>(uint32_t(bits) << 16);
+    }
+    operator float() const threadgroup {
+        return as_type<float>(uint32_t(bits) << 16);
+    }
+};
+
 kernel void cast_chain(
     const device float *x [[buffer(0)]],
     device float *out [[buffer(1)]],

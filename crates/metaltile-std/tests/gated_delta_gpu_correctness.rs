@@ -39,6 +39,7 @@ use metaltile_std::ffai::gated_delta::{mt_gated_delta_chunk, mt_gated_delta_step
 ///   - v: [B, Hv, Dv]
 ///   - g, beta: [B, Hv]
 ///   - state: [B, Hv, Dv, Dk] (f32 in/out)
+///
 /// Returns: (y [B, Hv, Dv], new_state [B, Hv, Dv, Dk])
 #[allow(clippy::too_many_arguments)]
 fn naive_gated_delta_step(

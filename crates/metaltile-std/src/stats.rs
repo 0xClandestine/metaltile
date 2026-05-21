@@ -22,7 +22,7 @@ pub struct BenchStats {
 impl BenchStats {
     pub fn from_samples(mut samples: Vec<f64>) -> Self {
         assert!(!samples.is_empty());
-        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let n = samples.len();
         let min = samples[0];
         let mean = samples.iter().sum::<f64>() / n as f64;

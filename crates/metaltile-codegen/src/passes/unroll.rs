@@ -35,12 +35,10 @@
 
 use std::collections::BTreeMap;
 
-use metaltile_core::{
-    error::Result,
-    ir::{Block, BlockId, Kernel, Op, ValueId},
-};
+use metaltile_core::ir::{Block, BlockId, Kernel, Op, ValueId};
 
 use super::remap;
+use crate::error::{Error, Result};
 
 const MAX_UNROLL_TRIP: i64 = 8;
 
@@ -60,6 +58,7 @@ impl super::Pass for UnrollPass {
     fn name(&self) -> &str { "unroll" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
+        tracing::trace!("unroll pass");
         let max_vid = remap::find_max_vid(kernel);
         let mut next_vid = (max_vid + 1).max(10_000);
         let max_block_id = kernel.blocks.keys().map(|b| b.as_u32()).max().unwrap_or(0);
@@ -71,7 +70,7 @@ impl super::Pass for UnrollPass {
             &mut next_vid,
             &mut next_block_id,
             self.factor,
-        );
+        )?;
 
         // Iterate nested blocks. `unroll_block` removes inlined loop
         // bodies from `kernel.blocks` (see line ~226), so a BlockId we
@@ -89,7 +88,7 @@ impl super::Pass for UnrollPass {
                 &mut next_vid,
                 &mut next_block_id,
                 self.factor,
-            );
+            )?;
             kernel.blocks.insert(*bid, block);
         }
 
@@ -126,7 +125,7 @@ fn unroll_block(
     next_vid: &mut u32,
     next_block_id: &mut u32,
     factor: u32,
-) {
+) -> Result<()> {
     let n = block.ops.len();
 
     struct Plan {
@@ -174,7 +173,7 @@ fn unroll_block(
     }
 
     if plans.is_empty() {
-        return;
+        return Ok(());
     }
 
     // ---- rebuild parent block --------------------------------------------
@@ -189,7 +188,10 @@ fn unroll_block(
         // borrow on `blocks` — later in this iteration we mutate the map
         // by inserting fresh clones for any nested `Op::If` / `Op::Loop`
         // body blocks (so each unrolled iteration gets its own copy).
-        let body = blocks.get(&plan.body_id).cloned().unwrap();
+        let body = blocks
+            .get(&plan.body_id)
+            .cloned()
+            .ok_or_else(|| Error::BlockNotFound(plan.body_id.as_u32()))?;
         let body_n = body.ops.len();
 
         // IV ValueId (convention: var_id + 0x4000_0000).
@@ -330,6 +332,7 @@ fn unroll_block(
     for plan in &plans {
         blocks.remove(&plan.body_id);
     }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -41,12 +41,10 @@
 
 use std::collections::BTreeMap;
 
-use metaltile_core::{
-    error::Result,
-    ir::{Block, BlockId, Kernel, Op, ValueId},
-};
+use metaltile_core::ir::{Block, BlockId, Kernel, Op, ValueId};
 
 use super::remap;
+use crate::error::Result;
 
 /// Max total ops across both arms for profitable if-conversion.
 const MAX_DIAMOND_OPS: usize = 8;

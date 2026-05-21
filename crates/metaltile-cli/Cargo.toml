@@ -15,6 +15,7 @@ name = "tile"
 path = "src/main.rs"
 
 [dependencies]
+thiserror.workspace = true
 metaltile.workspace = true
 metaltile-core.workspace = true
 metaltile-codegen.workspace = true
@@ -23,5 +24,7 @@ inventory.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 clap.workspace = true
-anstyle.workspace = true
-anstream.workspace = true
+anstyle = "1"
+anstream = "1"
+tracing.workspace = true
+tracing-subscriber.workspace = true

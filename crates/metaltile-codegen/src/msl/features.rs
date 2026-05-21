@@ -66,70 +66,82 @@ impl MslGenerator {
 
     pub(super) fn analyze_block(&self, block: &Block, feat: &mut KernelFeatures) {
         for op in &block.ops {
-            match op {
-                Op::Dot { .. } => feat.has_tile = true,
-                Op::Reduce { op: reduce_kind, .. } | Op::Scan { op: reduce_kind, .. } => {
+            self.analyze_op(op, feat);
+        }
+    }
+
+    /// Per-op feature detection. Recurses into `FusedElementwise` so that
+    /// helpers an inner op needs (e.g. `mt_silu` for an `Activation`
+    /// folded into a fused chain) are still emitted — the fusion pass
+    /// hides the standalone `Op::Activation` inside the chain.
+    fn analyze_op(&self, op: &Op, feat: &mut KernelFeatures) {
+        match op {
+            Op::Dot { .. } => feat.has_tile = true,
+            Op::Reduce { op: reduce_kind, .. } | Op::Scan { op: reduce_kind, .. } => {
+                feat.needs_simd_lane = true;
+                feat.needs_simd_group = true;
+                if matches!(reduce_kind, metaltile_core::ir::ReduceKind::Product) {
+                    feat.needs_simd_product = true;
+                }
+            },
+            Op::StrideReduce { op: reduce_kind, .. } => {
+                if matches!(reduce_kind, metaltile_core::ir::ReduceKind::Product) {
+                    feat.needs_simd_product = true;
+                }
+            },
+            Op::Load { src, indices, .. } if indices.is_empty() => {
+                if src == "simd_lane" {
                     feat.needs_simd_lane = true;
+                }
+                if src == "simd_group" || src == "simd_id" {
                     feat.needs_simd_group = true;
-                    if matches!(reduce_kind, metaltile_core::ir::ReduceKind::Product) {
-                        feat.needs_simd_product = true;
-                    }
+                }
+            },
+            Op::Zeros { dtype, .. } | Op::Splat { dtype, .. } if *dtype == DType::BF16 => {
+                feat.needs_bf16_struct = true;
+            },
+            Op::Cast { dtype, .. } if *dtype == DType::BF16 => {
+                feat.needs_bf16_struct = true;
+            },
+            Op::Activation { kind, .. } => match kind {
+                ActKind::Silu => feat.needs_silu = true,
+                ActKind::Gelu => feat.needs_gelu = true,
+                ActKind::Relu => feat.needs_relu = true,
+                ActKind::Sigmoid => feat.needs_sigmoid = true,
+                ActKind::Tanh => {},
+            },
+            Op::UnaryOp { op: UnaryOpKind::Erf, .. } => feat.needs_erf = true,
+            Op::UnaryOp { op: UnaryOpKind::ErfInv, .. } => feat.needs_erfinv = true,
+            Op::UnaryOp { op: UnaryOpKind::Expm1, .. } => feat.needs_expm1 = true,
+            // simdgroup matrix ops need simd built-ins and the simdgroup_matrix header
+            Op::SimdgroupAlloc { .. }
+            | Op::SimdgroupElemLoad { .. }
+            | Op::SimdgroupElemStore { .. }
+            | Op::SimdgroupLoad { .. }
+            | Op::SimdgroupMatMul { .. } => {
+                feat.needs_simd_lane = true;
+                feat.needs_simd_group = true;
+                feat.needs_simdgroup_matrix = true;
+            },
+            Op::SimdLaneId => feat.needs_simd_lane = true,
+            Op::SimdGroupId => feat.needs_simd_group = true,
+            Op::SimdReduce { .. } => {
+                feat.needs_simd_lane = true;
+                feat.needs_simd_group = true;
+            },
+            Op::SimdShuffleXor { .. } => {
+                feat.needs_simd_lane = true;
+                feat.needs_simd_group = true;
+            },
+            Op::SimdScan { .. } => {
+                feat.needs_simd_lane = true;
+                feat.needs_simd_group = true;
+            },
+            Op::FusedElementwise { ops } =>
+                for inner in ops {
+                    self.analyze_op(inner, feat);
                 },
-                Op::StrideReduce { op: reduce_kind, .. } => {
-                    if matches!(reduce_kind, metaltile_core::ir::ReduceKind::Product) {
-                        feat.needs_simd_product = true;
-                    }
-                },
-                Op::Load { src, indices, .. } if indices.is_empty() => {
-                    if src == "simd_lane" {
-                        feat.needs_simd_lane = true;
-                    }
-                    if src == "simd_group" || src == "simd_id" {
-                        feat.needs_simd_group = true;
-                    }
-                },
-                Op::Zeros { dtype, .. } | Op::Splat { dtype, .. } if *dtype == DType::BF16 => {
-                    feat.needs_bf16_struct = true;
-                },
-                Op::Cast { dtype, .. } if *dtype == DType::BF16 => {
-                    feat.needs_bf16_struct = true;
-                },
-                Op::Activation { kind, .. } => match kind {
-                    ActKind::Silu => feat.needs_silu = true,
-                    ActKind::Gelu => feat.needs_gelu = true,
-                    ActKind::Relu => feat.needs_relu = true,
-                    ActKind::Sigmoid => feat.needs_sigmoid = true,
-                    ActKind::Tanh => {},
-                },
-                Op::UnaryOp { op: UnaryOpKind::Erf, .. } => feat.needs_erf = true,
-                Op::UnaryOp { op: UnaryOpKind::ErfInv, .. } => feat.needs_erfinv = true,
-                Op::UnaryOp { op: UnaryOpKind::Expm1, .. } => feat.needs_expm1 = true,
-                // simdgroup matrix ops need simd built-ins and the simdgroup_matrix header
-                Op::SimdgroupAlloc { .. }
-                | Op::SimdgroupElemLoad { .. }
-                | Op::SimdgroupElemStore { .. }
-                | Op::SimdgroupLoad { .. }
-                | Op::SimdgroupMatMul { .. } => {
-                    feat.needs_simd_lane = true;
-                    feat.needs_simd_group = true;
-                    feat.needs_simdgroup_matrix = true;
-                },
-                Op::SimdLaneId => feat.needs_simd_lane = true,
-                Op::SimdGroupId => feat.needs_simd_group = true,
-                Op::SimdReduce { .. } => {
-                    feat.needs_simd_lane = true;
-                    feat.needs_simd_group = true;
-                },
-                Op::SimdShuffleXor { .. } => {
-                    feat.needs_simd_lane = true;
-                    feat.needs_simd_group = true;
-                },
-                Op::SimdScan { .. } => {
-                    feat.needs_simd_lane = true;
-                    feat.needs_simd_group = true;
-                },
-                _ => {},
-            }
+            _ => {},
         }
     }
 }

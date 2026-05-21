@@ -29,13 +29,11 @@
 
 use std::collections::BTreeSet;
 
-use metaltile_core::{
-    error::Result,
-    ir::{Block, BlockId, IndexExpr, Kernel, Op, ValueId},
-};
+use metaltile_core::ir::{Block, BlockId, IndexExpr, Kernel, Op, ValueId};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::block_util;
+use crate::error::{Error, Result};
 
 pub struct DeadStoreElimPass;
 
@@ -51,7 +49,8 @@ impl super::Pass for DeadStoreElimPass {
 
         let block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
         for bid in block_ids {
-            let mut block = kernel.blocks.remove(&bid).unwrap();
+            let mut block =
+                kernel.blocks.remove(&bid).ok_or_else(|| Error::BlockNotFound(bid.as_u32()))?;
             dse_block(&mut block, &output_params);
             kernel.blocks.insert(bid, block);
         }

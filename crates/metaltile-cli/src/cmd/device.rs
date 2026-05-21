@@ -8,7 +8,8 @@ use crate::{
     term::{Color, Style, paint_stdout},
 };
 
-pub fn run(args: &DeviceArgs) {
+pub fn run(args: &DeviceArgs) -> Result<(), crate::CliError> {
+    let _span = tracing::info_span!("device", json = args.json).entered();
     let json_out = args.json;
 
     let runner = match GpuRunner::new() {
@@ -16,14 +17,14 @@ pub fn run(args: &DeviceArgs) {
         Err(e) => {
             if json_out {
                 println!("{{\"error\":{:?}}}", e);
-                return;
+                return Ok(());
             }
             eprintln!(
                 "{} {}",
                 paint_stdout("error:", Style::new().fg(Color::Red).bold()),
-                paint_stdout(e, Style::new().fg(Color::BrightWhite)),
+                paint_stdout(&e, Style::new().fg(Color::BrightWhite)),
             );
-            std::process::exit(1);
+            return Err(crate::CliError::GpuInit(e));
         },
     };
 
@@ -50,7 +51,7 @@ pub fn run(args: &DeviceArgs) {
             tpg_mem,
             max_tpg,
         );
-        return;
+        return Ok(());
     }
 
     let label_style = Style::new().fg(Color::BrightBlack).bold();
@@ -105,4 +106,5 @@ pub fn run(args: &DeviceArgs) {
         paint_stdout(GpuFamily::slc_label(device_name), Style::new().fg(Color::BrightWhite)),
     );
     println!();
+    Ok(())
 }

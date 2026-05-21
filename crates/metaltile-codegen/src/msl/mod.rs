@@ -72,6 +72,7 @@ impl MslGenerator {
     pub fn new(config: MslConfig) -> Self { MslGenerator { config } }
 
     /// Like [`generate`] but also returns per-pass statistics.
+    #[tracing::instrument(skip(self, kernel), fields(kernel = %kernel.name))]
     pub fn generate_with_stats(&self, kernel: &Kernel) -> Result<(String, Vec<passes::PassStats>)> {
         let mut k = kernel.clone();
         let stats = passes::run_passes_with_stats(&mut k, &passes::standard_pipeline())?;
@@ -79,6 +80,7 @@ impl MslGenerator {
         Ok((msl, stats))
     }
 
+    #[tracing::instrument(skip(self, kernel), fields(kernel = %kernel.name))]
     pub fn generate(&self, kernel: &Kernel) -> Result<String> {
         // Run the optimization pipeline on a clone before emitting.
         let mut k = kernel.clone();
@@ -97,6 +99,7 @@ impl MslGenerator {
     }
 
     fn emit_msl(&self, k: &Kernel) -> Result<String> {
+        tracing::debug!(kernel = %k.name, "starting MSL emit");
         let type_env = infer_types(k)?;
         let feat = self.analyze(k);
         let mut out = String::new();
@@ -113,6 +116,7 @@ impl MslGenerator {
         self.emit_activation_helpers(&feat, &mut out);
         wl!(out);
         self.emit_kernel(k, &feat, &type_env, &mut out)?;
+        tracing::debug!(kernel = %k.name, bytes = out.len(), "MSL emit complete");
         Ok(out)
     }
 
@@ -232,6 +236,9 @@ impl MslGenerator {
             wl!(out, "    uint tgid_x = _tgid3.x;");
             if kernel_uses_program_id_axis(kernel, 1) {
                 wl!(out, "    uint tgid_y = _tgid3.y;");
+            }
+            if kernel_uses_program_id_axis(kernel, 2) {
+                wl!(out, "    uint tgid_z = _tgid3.z;");
             }
             wl!(out, "    uint lsize  = _lsize3.x;");
             if feat.needs_simd_group {
@@ -593,6 +600,67 @@ mod tests {
     }
 
     #[test]
+    fn fused_activation_emits_helper() {
+        // `silu(a) * b`: the fusion pass folds the Activation into an
+        // `Op::FusedElementwise`, hiding the standalone `Op::Activation`.
+        // Feature analysis must recurse into the fused chain so the
+        // `mt_silu` helper preamble is still emitted — otherwise the MSL
+        // calls an undeclared identifier and fails to compile.
+        use metaltile_core::{
+            ir::{ActKind, BinOpKind, IndexExpr, Param},
+            shape::Shape,
+        };
+        let mut k = Kernel::new("fused_silu_mul");
+        for (name, is_output) in [("a", false), ("b", false), ("c", true)] {
+            k.params.push(Param {
+                name: name.into(),
+                dtype: DType::F32,
+                shape: Shape::scalar(),
+                is_output,
+                kind: Default::default(),
+            });
+        }
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(
+            Op::Load {
+                src: "a".into(),
+                mask: None,
+                other: None,
+                indices: vec![IndexExpr::Value(ValueId::new(0))],
+            },
+            ValueId::new(1),
+        );
+        k.body.push_op(
+            Op::Load {
+                src: "b".into(),
+                mask: None,
+                other: None,
+                indices: vec![IndexExpr::Value(ValueId::new(0))],
+            },
+            ValueId::new(2),
+        );
+        k.body.push_op(
+            Op::Activation { kind: ActKind::Silu, value: ValueId::new(1) },
+            ValueId::new(3),
+        );
+        k.body.push_op(
+            Op::BinOp { op: BinOpKind::Mul, lhs: ValueId::new(3), rhs: ValueId::new(2) },
+            ValueId::new(4),
+        );
+        k.body.push_op_no_result(Op::Store {
+            mask: None,
+            dst: "c".into(),
+            indices: vec![IndexExpr::Value(ValueId::new(0))],
+            value: ValueId::new(4),
+        });
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("inline T mt_silu"),
+            "fused silu must still emit the helper definition:\n{msl}"
+        );
+    }
+
+    #[test]
     fn select_emit() {
         let mut k = Kernel::new("select_test");
         k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
@@ -711,6 +779,23 @@ mod tests {
         k.body.push_op(Op::ProgramId { axis: 1 }, ValueId::new(1));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(msl.contains("tgid_y"), "tgid_y must be emitted when program_id axis 1 is used");
+    }
+
+    #[test]
+    fn reduction_program_id_axis_2_lowers_to_tgid_z() {
+        // A reduction kernel using the z grid axis (e.g. batched_qkv_qgemv,
+        // where program_id::<2>() selects the Q/K/V matrix) must lower
+        // axis 2 to `tgid_z` and declare the alias — not fold it to 0.
+        let mut k = Kernel::new("reduction_with_z");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::ProgramId { axis: 2 }, ValueId::new(1));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("uint tgid_z = _tgid3.z;"),
+            "preamble must declare tgid_z when program_id axis 2 is used: {msl}"
+        );
+        assert!(msl.contains("= tgid_z;"), "axis 2 must lower to tgid_z, not a constant: {msl}");
     }
 
     /// Regression: `ssm_step` and similar kernels reference `tgid_y` via the
