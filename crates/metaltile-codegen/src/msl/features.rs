@@ -29,6 +29,11 @@ pub(super) struct KernelFeatures {
     pub needs_erfinv: bool,
     pub needs_expm1: bool,
     pub needs_simd_product: bool,
+    /// MetalPerformancePrimitives (`mpp::tensor_ops::matmul2d` / NAX) needed.
+    /// Detected by scanning `Op::InlineMsl::source` for `"mpp::"` — kernels
+    /// using NAX-class MMA must include the framework header. Requires
+    /// macOS 26+ / Metal 4 toolchain.
+    pub needs_mpp: bool,
 }
 
 impl MslGenerator {
@@ -48,6 +53,7 @@ impl MslGenerator {
             needs_erfinv: false,
             needs_expm1: false,
             needs_simd_product: false,
+            needs_mpp: false,
         };
         for p in &kernel.params {
             if p.dtype == DType::BF16 {
@@ -126,12 +132,17 @@ impl MslGenerator {
             Op::UnaryOp { op: UnaryOpKind::Erf, .. } => feat.needs_erf = true,
             Op::UnaryOp { op: UnaryOpKind::ErfInv, .. } => feat.needs_erfinv = true,
             Op::UnaryOp { op: UnaryOpKind::Expm1, .. } => feat.needs_expm1 = true,
-            _ =>
-                if let Some(ops) = op.fused_ops() {
-                    for inner in ops {
-                        self.analyze_op(inner, feat);
-                    }
+            Op::FusedElementwise { ops } =>
+                for inner in ops {
+                    self.analyze_op(inner, feat);
                 },
+            // Detect MPP tensor-ops usage in raw inline MSL.
+            Op::InlineMsl { source, .. } if source.contains("mpp::") => {
+                feat.needs_mpp = true;
+                feat.needs_simd_lane = true;
+                feat.needs_simd_group = true;
+            },
+            _ => {},
         }
     }
 }

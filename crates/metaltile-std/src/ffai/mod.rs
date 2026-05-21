@@ -28,6 +28,7 @@ pub mod dequant_gemv;
 pub mod flash_quantized_sdpa;
 pub mod gated_delta;
 pub mod gated_delta_replay;
+pub mod gated_delta_wy;
 pub mod gather;
 pub mod kv_cache;
 pub mod logits_min_p;

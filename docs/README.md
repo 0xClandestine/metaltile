@@ -15,6 +15,7 @@ Table of contents for the MetalTile docs. The top-level [`README`](../README.md)
 ## Reference
 
 - [CLI](cli.md) — the `tile` binary: `bench`, `build`, `inspect`, `device`, `snap`, `diff`.
+- [Kernel audit](KERNEL_AUDIT.md) — per-op coverage table: which MLX / FFAI kernels are ported, partial, or still missing, with the gaps and open PRs called out.
 
 ## See also
 
