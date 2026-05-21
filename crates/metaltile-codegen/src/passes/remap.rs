@@ -43,8 +43,11 @@ pub fn remap_value_ids(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
 // ---------------------------------------------------------------------------
 
 /// Return all `ValueId` references in `op` (for liveness, use-count, invariant analysis).
+///
+/// Thin wrapper around `op.value_refs()` that returns owned `ValueId`s.  Callers that
+/// only need to iterate can call `op.value_refs()` directly to avoid the owned collection.
 pub fn op_value_refs(op: &Op) -> SmallVec<[ValueId; 4]> {
-    op.value_refs().iter().map(|&&v| v).collect()
+    op.value_refs().into_iter().copied().collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -775,17 +778,23 @@ mod tests {
         ];
 
         for (name, op) in all {
-            let has_result = op.is_result_u32_scalar()
-                || op.is_result_i32_scalar()
-                || op.is_result_f32_scalar()
-                || op.is_result_f16_scalar()
-                || op.is_result_same_type()
-                || op.is_result_custom()
-                || op.is_no_result();
-            assert!(
-                has_result,
-                "Op::{name} lacks a result-type flag (#[result_*], #[result_custom], or #[no_result]). \
-                 Add one in ir.rs so type inference is automatic."
+            let count = [
+                op.is_result_u32_scalar() as u32,
+                op.is_result_i32_scalar() as u32,
+                op.is_result_f32_scalar() as u32,
+                op.is_result_f16_scalar() as u32,
+                op.is_result_same_type() as u32,
+                op.is_result_custom() as u32,
+                op.is_no_result() as u32,
+            ]
+            .iter()
+            .sum::<u32>();
+            assert_eq!(
+                count, 1,
+                "Op::{name} has {count} result-type flags (expected exactly 1). \
+                 Each Op variant must carry exactly one of: #[no_result], \
+                 #[result_u32], #[result_i32], #[result_f32_scalar], \
+                 #[result_f16_scalar], #[result_same_type], or #[result_custom]."
             );
         }
     }

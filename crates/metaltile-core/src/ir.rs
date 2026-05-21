@@ -429,12 +429,10 @@ pub enum Op {
     /// `start` and `step` default to 0.0 and 1.0 respectively.
     #[shape_op]
     #[result_custom]
-    #[result_custom]
     Arange { start: Option<f64>, step: Option<f64>, len: ConstExpr },
 
     /// Load a tile from a tensor at given indices.
     #[op_load]
-    #[result_custom]
     #[result_custom]
     Load {
         /// The parameter to load from.
@@ -481,7 +479,6 @@ pub enum Op {
 
     /// Tile matrix multiply: `dot(a, b)`.
     #[result_custom]
-    #[result_custom]
     Dot {
         #[vid]
         a: ValueId,
@@ -493,7 +490,6 @@ pub enum Op {
     #[needs_simd_lane]
     #[needs_simd_group]
     #[result_custom]
-    #[result_custom]
     Reduce {
         #[vid]
         value: ValueId,
@@ -504,7 +500,6 @@ pub enum Op {
     /// Per-thread strided reduction over a device buffer.
     /// Reduces `src[offset]`, `src[offset+stride]`, `src[offset+2*stride]`, ... while index < `end`.
     /// If `transform` is set, the op is applied to each loaded element before accumulation.
-    #[result_custom]
     #[result_custom]
     StrideReduce {
         src: String,
@@ -533,7 +528,6 @@ pub enum Op {
     #[elementwise]
     #[cheap_alu]
     #[result_custom]
-    #[result_custom]
     Cast {
         #[vid]
         value: ValueId,
@@ -544,7 +538,6 @@ pub enum Op {
     #[unpredictable]
     #[op_loop]
     #[no_result]
-    #[result_custom]
     Loop {
         var: VarId,
         #[vid]
@@ -570,7 +563,6 @@ pub enum Op {
     /// Create a zero-filled tile.
     #[elementwise]
     #[result_custom]
-    #[result_custom]
     Zeros {
         dtype: DType,
         /// Shape of the tile (usually a 2D tile).
@@ -579,7 +571,6 @@ pub enum Op {
 
     /// Transpose a 2D tile.
     #[shape_op]
-    #[result_custom]
     #[result_custom]
     Transpose {
         #[vid]
@@ -606,7 +597,6 @@ pub enum Op {
 
     /// Concatenate tiles along `axis`.
     #[result_custom]
-    #[result_custom]
     Cat {
         #[vid_vec]
         values: Vec<ValueId>,
@@ -615,7 +605,6 @@ pub enum Op {
 
     /// Extract a slice of a tile.
     #[shape_op]
-    #[result_custom]
     #[result_custom]
     Slice {
         #[vid]
@@ -626,7 +615,6 @@ pub enum Op {
 
     /// Inline raw MSL code. Escape hatch.
     #[result_custom]
-    #[result_custom]
     InlineMsl {
         source: String,
         #[vid_vec]
@@ -636,7 +624,6 @@ pub enum Op {
 
     // ---- High-level ML primitives (lowered in a pass) ----
     /// Flash attention.
-    #[result_custom]
     #[result_custom]
     FlashAttention {
         #[vid]
@@ -650,7 +637,6 @@ pub enum Op {
 
     /// Sliding window attention.
     #[result_custom]
-    #[result_custom]
     SlidingWindowAttention {
         #[vid]
         q: ValueId,
@@ -663,7 +649,6 @@ pub enum Op {
 
     /// RMS normalization.
     #[result_custom]
-    #[result_custom]
     RmsNorm {
         #[vid]
         x: ValueId,
@@ -673,7 +658,6 @@ pub enum Op {
     },
 
     /// Gated MLP block.
-    #[result_custom]
     #[result_custom]
     GatedMlp {
         #[vid]
@@ -723,7 +707,6 @@ pub enum Op {
     /// Broadcast a scalar value to fill a tile shape (replication, no copy to device memory).
     #[elementwise]
     #[result_custom]
-    #[result_custom]
     Broadcast {
         #[vid]
         value: ValueId,
@@ -733,14 +716,12 @@ pub enum Op {
     /// Create a tile filled with a constant floating-point value (generalization of Zeros).
     #[elementwise]
     #[result_custom]
-    #[result_custom]
     Splat { value: f64, dtype: DType, shape: Shape },
 
     /// Fused chain of elementwise operations.
     /// Created by the FusionPass to merge adjacent ops like
     /// `UnaryOp(Exp) → Activation(Silu)` into a single expression.
     #[op_fused]
-    #[result_custom]
     #[result_custom]
     FusedElementwise {
         /// The elementwise ops in execution order (producer first).
@@ -753,7 +734,6 @@ pub enum Op {
     /// Vectorized load: loads `len` consecutive elements as a vector.
     /// `len` is 2, 4, or 8. Created by the VectorizePass from consecutive scalar Loads.
     #[op_load]
-    #[result_custom]
     #[result_custom]
     VectorLoad {
         /// The parameter to load from.
@@ -785,7 +765,6 @@ pub enum Op {
     /// Project one scalar lane (0..len) out of a VectorLoad result.
     /// Emitted by VectorizePass to feed each original scalar consumer.
     #[result_custom]
-    #[result_custom]
     VectorExtract {
         #[vid]
         vec: ValueId,
@@ -793,7 +772,6 @@ pub enum Op {
     },
 
     /// Gather: indexed load from a buffer. `out[i] = src[indices[i]]`.
-    #[result_custom]
     #[result_custom]
     Gather {
         src: String,
@@ -1062,7 +1040,6 @@ pub enum Op {
     /// Load one element from a named threadgroup array: `val = name[index]`.
     #[op_load]
     #[result_custom]
-    #[result_custom]
     ThreadgroupLoad {
         name: String,
         #[vid]
@@ -1096,7 +1073,6 @@ pub enum Op {
     /// Identical emission to `ThreadgroupLoad`; kept distinct in the IR so
     /// liveness / scoping passes know the buffer is thread-private.
     #[op_load]
-    #[result_custom]
     #[result_custom]
     StackLoad {
         name: String,
@@ -1140,7 +1116,6 @@ pub enum Op {
     /// Emits: `auto __ml_{name} = {init_value};`
     /// Used for loop-carried state (running prefix, best_val/best_idx, etc.).
     #[unpredictable]
-    #[result_custom]
     #[result_custom]
     DeclareLocal {
         name: String,
