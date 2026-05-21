@@ -194,8 +194,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // metaltile crates; METALTILE_DEBUG=trace enables trace level.
     // When the env-var is absent the subscriber is still installed but the filter
     // rejects everything, so library crates pay only the ~1 ns no-subscriber cost.
-    let _debug_level = std::env::var("METALTILE_DEBUG").ok();
-    let filter = match _debug_level.as_deref() {
+    let debug_level = std::env::var("METALTILE_DEBUG").ok();
+    let filter = match debug_level.as_deref() {
         Some("1") | Some("debug") => "metaltile=debug",
         Some("trace") => "metaltile=trace",
         _ => "off",

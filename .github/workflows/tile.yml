@@ -1,5 +1,10 @@
 name: Tile
 
+# Cancel in-progress runs when a new commit is pushed to the same PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 # Slow macOS job: `tile build` + `tile bench` together take ~5-6 min
 # on the GitHub-hosted runner. Skip on PRs that can't affect kernel
 # emission, dispatch, or measurement — docs-only PRs, baseline-JSON
@@ -14,7 +19,7 @@ on:
       - 'rust-toolchain.toml'
       - '.github/workflows/tile.yml'
   pull_request:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened]
     paths:
       - 'crates/**'
       - 'Cargo.toml'

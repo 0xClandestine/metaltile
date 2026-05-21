@@ -1,4 +1,8 @@
-name: PR
+name: Auto-Label
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 # Apply a release-notes label based on the PR title's conventional-commit
 # prefix (`feat:` / `fix:` / `perf:` / etc.). Without this, GitHub's
