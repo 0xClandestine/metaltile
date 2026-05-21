@@ -16,9 +16,7 @@ use std::collections::BTreeMap;
 use common::{Dt, gpu_lock, pack_bytes, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
-use metaltile_std::mlx::fused_gate_activation::{
-    mt_fused_gate_clipped_swiglu, mt_fused_gate_gelu,
-};
+use metaltile_std::mlx::fused_gate_activation::{mt_fused_gate_clipped_swiglu, mt_fused_gate_gelu};
 
 // ── CPU oracles — both computed in f32, mirroring the MSL reference ──
 
@@ -28,7 +26,7 @@ fn cpu_gelu_approx(gate: &[f32], up: &[f32]) -> Vec<f32> {
         .map(|(&g, &u)| {
             // gelu_approx(x) = 0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))
             let x3 = g * g * g;
-            let inner = 0.797_884_56_f32 * (g + 0.044_715_f32 * x3);
+            let inner = 0.797_884_6_f32 * (g + 0.044_715_f32 * x3);
             let act = 0.5 * g * (1.0 + inner.tanh());
             act * u
         })

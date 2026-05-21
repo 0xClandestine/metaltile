@@ -23,13 +23,7 @@ use metaltile_std::ffai::gated_rmsnorm::ffai_gated_rmsnorm;
 /// Naive reference: RMSNorm of the fp32 `y` row, scaled by `w`, gated
 /// by `silu(z)`. `z` / `w` are pre-rounded to the kernel's dtype by the
 /// caller so this stays a pure-arithmetic oracle.
-fn naive_gated_rmsnorm(
-    y: &[f32],
-    z: &[f32],
-    w: &[f32],
-    n: usize,
-    eps: f32,
-) -> Vec<f32> {
+fn naive_gated_rmsnorm(y: &[f32], z: &[f32], w: &[f32], n: usize, eps: f32) -> Vec<f32> {
     assert_eq!(y.len() % n, 0);
     assert_eq!(w.len(), n);
     let rows = y.len() / n;

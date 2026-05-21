@@ -21,9 +21,7 @@ use std::collections::BTreeMap;
 use common::{Dt, gpu_lock, max_abs_diff, pack_bytes, ramp, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
-use metaltile_std::ffai::conv2d::{
-    conv2d_generic, conv2d_grouped, conv2d_patch14, conv2d_patch16,
-};
+use metaltile_std::ffai::conv2d::{conv2d_generic, conv2d_grouped, conv2d_patch14, conv2d_patch16};
 
 #[derive(Clone, Copy)]
 struct ConvShape {
@@ -332,8 +330,7 @@ fn naive_conv2d_grouped(input: &[f32], weight: &[f32], bias: &[f32], s: &Grouped
                                 }
                                 let ih = ph - s.pad_h;
                                 let iw = pw - s.pad_w;
-                                let in_idx =
-                                    ((n * s.in_ch + real_ic) * s.in_h + ih) * s.in_w + iw;
+                                let in_idx = ((n * s.in_ch + real_ic) * s.in_h + ih) * s.in_w + iw;
                                 let w_idx = ((oc * icpg + wic) * s.kh + ky) * s.kw + kx;
                                 acc += input[in_idx] * weight[w_idx];
                             }
