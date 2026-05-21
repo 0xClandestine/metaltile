@@ -51,9 +51,10 @@ use rustc_hash::FxHashMap;
 
 use metaltile_core::{
     dtype::DType,
-    error::Result,
     ir::{BinOpKind, Block, BlockId, IndexExpr, Kernel, Op, Param, ValueId},
 };
+
+use crate::error::Result;
 
 pub struct VectorizePass;
 
