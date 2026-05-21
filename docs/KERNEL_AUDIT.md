@@ -12,8 +12,8 @@ Sources surveyed:
 ## Summary
 
 - Total kernel-op rows in this audit (union): **89**
-- metaltile-ported kernel ops: **72 / 89 = 81 %** — 64 full ✓ (72 %), 8 partial ~ (9 %)
-- **Still to cover: 17 ops not ported (✗)**, plus **8 partial ports** still to finish
+- metaltile-ported kernel ops: **72 / 89 = 81 %** — 65 full ✓ (73 %), 7 partial ~ (8 %)
+- **Still to cover: 17 ops not ported (✗)**, plus **7 partial ports** still to finish
 - The 6 Vision / STT / TTS front-end kernels (Phase 6.5 / 7) — `conv2d`,
   `patch_embed`, `rope_2d`, `mel_spectrogram`, `audio_conv1d`,
   `vocoder/iSTFT` — are now ported (✓ rows below).
@@ -109,7 +109,7 @@ Sources surveyed:
 | aura_dequant_rotated (bulk dequant to rotated codec space) | ✗ | ✓ (`turbo_dequant_rotated` in `turbo_quant.metal`) | ✓ | `ffai/aura_dequant_rotated.rs`. bits ∈ {2,3,4,8}. Renamed. |
 | aura_score (compressed-domain Q·K) | ✗ | ✓ (`turbo_score`) | ✓ | `ffai/aura_score.rs`. bits ∈ {2,3,4,8}. Renamed. |
 | aura_value (compressed-domain value aggregation) | ✗ | ✓ (`turbo_value` in `turbo_quant.metal`) | ✓ | `ffai/aura_value.rs`. Sparsity-threshold guard mirrors MLX upstream. Renamed. |
-| aura_flash_p1 (compressed-domain flash pass 1) | ✗ | ✓ (`turbo_flash_p1` in `turbo_flash.metal`) | ~ | `ffai/aura_flash_p1.rs`. Only the `(kb=4, vb=2, dim=128)` aura4v2/Qwen3-128 instantiation today; causal-variant from upstream not ported. |
+| aura_flash_p1 (compressed-domain flash pass 1) | ✗ | ✓ (`turbo_flash_p1` in `turbo_flash.metal`) | ✓ | `ffai/aura_flash_p1.rs` → non-causal `aura_flash_p1_{kb4_vb2,kb4_vb4}_{d64,d128}` (4 instantiations) **plus** the causal variant `aura_flash_p1_causal_kb4_vb2_{d64,d128}`. The causal kernel clamps the per-token inner loop at `q_position + 1` (a constexpr-folded `causal_end` select) — every key strictly after the query token is masked out, matching `turbo_flash_p1`'s `causal` template flag. Verified by `aura_flash_gpu_correctness` (end-to-end pair) + `aura_flash_p1_causal_gpu_correctness` (full-visibility ≡ non-causal, mid-cutoff masks later blocks). |
 | aura_flash_pass2 (cross-block online-softmax merge) | ✗ | ✓ (`turbo_flash_pass2`) | ✓ | `ffai/aura_flash_pass2.rs`. fp32 accums → bf16 final. Renamed. |
 | turbo_flash_sdpa (fused single-pass SDPA, sinks variant) | ✗ | ✓ (`turbo_flash_sdpa.metal`) | ✓ | `ffai/aura_flash_sdpa.rs` → `aura_flash_sdpa_kb*_vb*_d*<T>`. Single-pass online-softmax over compressed K/V with attention sinks + sliding-window causal mask. Single-simdgroup shape (token-parallelism a perf follow-up). |
 | flash_quantized_sdpa (single-pass quantized SDPA, affine cache) | ✗ | ✓ (`flash_quantized_sdpa.metal`) | ✓ | `ffai/flash_quantized_sdpa.rs` → `flash_quantized_sdpa_b{4,8}_d{64,128,256}<T>`. Single-pass online-softmax SDPA over affine-quant KV, with sinks + sliding-window. head_dim {96,512} and bool/float masks are a follow-up. |

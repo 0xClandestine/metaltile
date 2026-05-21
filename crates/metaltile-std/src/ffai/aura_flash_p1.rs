@@ -80,6 +80,7 @@ macro_rules! aura_flash_p1_kernel {
         $key_levels:literal,
         $value_levels:literal,
         $dims_per_lane:literal,
+        $causal:literal,
         $subop:literal
     ) => {
         #[kernel]
@@ -101,6 +102,12 @@ macro_rules! aura_flash_p1_kernel {
             #[constexpr] repeat_count: u32,
             #[constexpr] num_blocks: u32,
             #[constexpr] block_size: u32,
+            // Global position of this query token in the KV stream. Only
+            // consulted by the causal variant (`$causal == 1`): keys at
+            // token index `t > q_position` are masked out. The non-causal
+            // variant ignores it (constexpr, so the dead branch is folded
+            // away — no runtime cost).
+            #[constexpr] q_position: u32,
         ) {
             let lane = program_id::<0>();
             let q_idx = program_id::<1>();
@@ -111,7 +118,13 @@ macro_rules! aura_flash_p1_kernel {
             let val_mask = (1u32 << $value_bits) - 1u32;
 
             let raw_end = block_idx * block_size + block_size;
-            let t_end = select(raw_end > tokens, tokens, raw_end);
+            let clamped_end = select(raw_end > tokens, tokens, raw_end);
+            // Causal cutoff: tokens strictly after `q_position` contribute
+            // nothing, so the inner loop can stop at `q_position + 1`. For
+            // the non-causal variant `$causal == 0` makes this a no-op
+            // (the macro substitutes the literal at compile time).
+            let causal_end = select($causal == 1u32, q_position + 1u32, clamped_end);
+            let t_end = select(causal_end < clamped_end, causal_end, clamped_end);
             let t_start = block_idx * block_size;
 
             // ── Cache codebooks in per-thread stack arrays.  Each lane
@@ -277,6 +290,7 @@ aura_flash_p1_kernel!(
     16u32,
     4u32,
     4u32,
+    0u32,
     "flash_p1_kb4_vb2_d128"
 );
 aura_flash_p1_kernel!(
@@ -286,6 +300,7 @@ aura_flash_p1_kernel!(
     16u32,
     16u32,
     4u32,
+    0u32,
     "flash_p1_kb4_vb4_d128"
 );
 aura_flash_p1_kernel!(
@@ -295,6 +310,7 @@ aura_flash_p1_kernel!(
     16u32,
     4u32,
     2u32,
+    0u32,
     "flash_p1_kb4_vb2_d64"
 );
 aura_flash_p1_kernel!(
@@ -304,5 +320,40 @@ aura_flash_p1_kernel!(
     16u32,
     16u32,
     2u32,
+    0u32,
     "flash_p1_kb4_vb4_d64"
+);
+
+// ── Causal variants ──────────────────────────────────────────────────────
+//
+// Same compressed-domain online-softmax as the non-causal kernels, with
+// the per-token loop clamped at `q_position + 1` — every key strictly
+// after the query token is masked out. This is the prefill / chunked
+// form upstream's `turbo_flash_p1` carries as the `causal` template
+// flag. The `$causal == 1` literal lets the codegen const-fold the
+// `causal_end` selection, so the only runtime difference vs the
+// non-causal sibling is the inner-loop trip count.
+//
+// Production recipe `aura4v2` (kb=4, vb=2) for the two head dims FFAI
+// ships today; the symmetric `aura4v4` causal variant follows the same
+// macro arm if a consumer needs it.
+aura_flash_p1_kernel!(
+    aura_flash_p1_causal_kb4_vb2_d128,
+    4u32,
+    2u32,
+    16u32,
+    4u32,
+    4u32,
+    1u32,
+    "flash_p1_causal_kb4_vb2_d128"
+);
+aura_flash_p1_kernel!(
+    aura_flash_p1_causal_kb4_vb2_d64,
+    4u32,
+    2u32,
+    16u32,
+    4u32,
+    2u32,
+    1u32,
+    "flash_p1_causal_kb4_vb2_d64"
 );
