@@ -2816,7 +2816,7 @@ pub fn patch_qmm_mma_dtype_aware_skew(
     kernel: &mut metaltile_core::ir::Kernel,
     dtype: metaltile_core::dtype::DType,
 ) {
-    use metaltile_core::{dtype::DType, ir::Op};
+    use metaltile_core::dtype::DType;
     // f32 keeps its default 36 stride — nothing to do.
     let bytes = match dtype {
         DType::F32 => 4,
@@ -2839,7 +2839,7 @@ pub fn patch_qmm_mma_dtype_aware_skew(
         // Find the op slot producing this ValueId.
         for (i, r) in kernel.body.results.iter().enumerate() {
             if r.map(|v| v == *vid).unwrap_or(false)
-                && let Op::Const { value } = &mut kernel.body.ops[i]
+                && let Some(value) = kernel.body.ops[i].as_const_mut()
             {
                 *value = new_ld;
             }

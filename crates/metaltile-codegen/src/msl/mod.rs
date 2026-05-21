@@ -21,7 +21,8 @@ use metaltile_core::{
     ir::{Kernel, KernelMode, Op, ParamKind, ValueId},
 };
 
-use crate::{TileSchedule, error::Result, passes, passes::type_check::infer_types};
+use crate::{error::Result, passes, passes::type_check::infer_types};
+use config::TileSchedule;
 
 #[macro_export]
 macro_rules! wl {

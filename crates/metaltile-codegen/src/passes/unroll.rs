@@ -135,15 +135,15 @@ fn unroll_block(
     let mut plans: Vec<Plan> = Vec::new();
 
     for i in 0..n {
-        if let Op::Loop { var, start, end, step, body } = &block.ops[i] {
-            let Some(body_block) = blocks.get(body) else { continue };
-            let Some(start_val) = find_const_in_block(block, *start) else {
+        if let Some((var, start, end, step, body)) = block.ops[i].as_loop() {
+            let Some(body_block) = blocks.get(&body) else { continue };
+            let Some(start_val) = find_const_in_block(block, start) else {
                 continue;
             };
-            let Some(end_val) = find_const_in_block(block, *end) else {
+            let Some(end_val) = find_const_in_block(block, end) else {
                 continue;
             };
-            let Some(step_val) = find_const_in_block(block, *step) else {
+            let Some(step_val) = find_const_in_block(block, step) else {
                 continue;
             };
             if step_val <= 0 {
@@ -162,7 +162,7 @@ fn unroll_block(
                 start_val,
                 step_val,
                 var_id: var.as_u32(),
-                body_id: *body,
+                body_id: body,
             });
         }
     }

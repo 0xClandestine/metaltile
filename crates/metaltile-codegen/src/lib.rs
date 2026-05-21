@@ -15,4 +15,4 @@ pub mod passes;
 
 pub use error::{Error, Result};
 pub use msl::{MslGenerator, generator_for_mode};
-pub use passes::tile_lowering::TileSchedule;
+pub use msl::config::TileSchedule;

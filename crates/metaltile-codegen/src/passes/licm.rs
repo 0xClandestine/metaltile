@@ -120,8 +120,8 @@ fn licm_block(
     let mut plans: Vec<HoistPlan> = Vec::new();
 
     for i in 0..n {
-        if let Op::Loop { var, body, .. } = &block.ops[i] {
-            let Some(loop_body) = blocks.get(body) else {
+        if let Some((var, _, _, _, body)) = block.ops[i].as_loop() {
+            let Some(loop_body) = blocks.get(&body) else {
                 continue;
             };
 
@@ -202,7 +202,7 @@ fn licm_block(
                 loop_idx: i,
                 hoisted_ops,
                 hoisted_results,
-                body_id: *body,
+                body_id: body,
                 removal_indices: hoist_indices,
             });
         }
@@ -283,8 +283,8 @@ fn remove_ops_from_block(block: &mut Block, indices: &[usize]) {
 /// Return true if the op is pure (no side effects) and safe to hoist.
 fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
     // Load is pure only when the source is a read-only (const) param.
-    if let Op::Load { src, .. } = op {
-        return read_only.contains(src.as_str());
+    if let Some(src) = op.load_src() {
+        return read_only.contains(src);
     }
     // Elementwise and cheap-ALU ops are always pure.
     // Shape-manipulation ops (Arange, Transpose, Reshape, etc.) are also

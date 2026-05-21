@@ -1023,6 +1023,11 @@ impl Op {
         if let Op::Const { value } = self { Some(*value) } else { None }
     }
 
+    /// Returns a mutable reference to the constant value if this is `Op::Const`.
+    pub fn as_const_mut(&mut self) -> Option<&mut i64> {
+        if let Op::Const { value } = self { Some(value) } else { None }
+    }
+
     /// Returns `(var, start, end, step, body)` if this is `Op::Loop`.
     pub fn as_loop(&self) -> Option<(VarId, ValueId, ValueId, ValueId, BlockId)> {
         if let Op::Loop { var, start, end, step, body } = self {

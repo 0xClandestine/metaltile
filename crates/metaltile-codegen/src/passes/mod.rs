@@ -17,7 +17,6 @@ pub mod occupancy;
 pub mod register_estimate;
 pub mod remap;
 pub mod schedule;
-pub mod tile_lowering;
 pub mod type_check;
 pub mod unroll;
 pub mod value_sink;
@@ -112,7 +111,7 @@ impl PassRegistry {
     /// The standard pass order (names, in pipeline sequence).
     ///
     /// TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM
-    ///   → IfConversion → ValueSink → TileLowering → Fusion → Unroll
+    ///   → IfConversion → ValueSink → Fusion → Unroll
     ///   → Schedule → Vectorize → DeadStoreElim
     pub fn order() -> &'static [&'static str] {
         &[
@@ -124,7 +123,6 @@ impl PassRegistry {
             "licm",
             "if_conversion",
             "value_sink",
-            "tile_lowering",
             "fusion",
             "unroll",
             "schedule",
@@ -144,7 +142,6 @@ impl PassRegistry {
             "licm" => Some(Box::new(licm::LicmPass)),
             "if_conversion" => Some(Box::new(if_conversion::IfConversionPass)),
             "value_sink" => Some(Box::new(value_sink::ValueSinkPass)),
-            "tile_lowering" => Some(Box::new(tile_lowering::TileLoweringPass::default())),
             "fusion" => Some(Box::new(fusion::FusionPass)),
             "unroll" => Some(Box::new(unroll::UnrollPass::default())),
             "schedule" => Some(Box::new(schedule::SchedulePass::default())),
