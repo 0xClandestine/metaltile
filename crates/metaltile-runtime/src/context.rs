@@ -1073,7 +1073,7 @@ impl Context {
     pub fn tuner_mut(&mut self) -> &mut Autotuner { &mut self.tuner }
     pub fn tuner(&self) -> &Autotuner { &self.tuner }
 
-    pub fn shutdown(&self) -> Result<(), MetalTileError> { Ok(self.tuner.flush()?) }
+    pub fn shutdown(&self) -> Result<(), MetalTileError> { self.tuner.flush() }
 }
 
 impl Drop for Context {

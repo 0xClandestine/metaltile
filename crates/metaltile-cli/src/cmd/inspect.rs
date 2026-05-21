@@ -62,8 +62,8 @@ pub fn run(args: &InspectArgs) -> Result<(), CliError> {
                 let k = (spec.kernel_ir)(dt);
                 if let Some(d) = dir {
                     let path = format!("{}/{}.ir", d, name);
-                    std::fs::create_dir_all(d).map_err(|e| CliError::Io(e))?;
-                    std::fs::write(&path, format!("{k}")).map_err(|e| CliError::Io(e))?;
+                    std::fs::create_dir_all(d).map_err(CliError::Io)?;
+                    std::fs::write(&path, format!("{k}")).map_err(CliError::Io)?;
                     println!("wrote {path}");
                 } else {
                     println!("{k}");
@@ -72,8 +72,8 @@ pub fn run(args: &InspectArgs) -> Result<(), CliError> {
                 let msl = generate_msl(spec, dtypes);
                 if let Some(d) = dir {
                     let path = format!("{}/{}.metal", d, name);
-                    std::fs::create_dir_all(d).map_err(|e| CliError::Io(e))?;
-                    std::fs::write(&path, &msl).map_err(|e| CliError::Io(e))?;
+                    std::fs::create_dir_all(d).map_err(CliError::Io)?;
+                    std::fs::write(&path, &msl).map_err(CliError::Io)?;
                     println!("wrote {path}");
                 } else {
                     let mode_str = effective_mode(spec).to_string();
@@ -142,8 +142,8 @@ pub fn run(args: &InspectArgs) -> Result<(), CliError> {
             let k = (spec.kernel_ir)(dt);
             if let Some(d) = dir {
                 let path = format!("{}/{}.ir", d, name);
-                std::fs::create_dir_all(d).map_err(|e| CliError::Io(e))?;
-                std::fs::write(&path, format!("{k}")).map_err(|e| CliError::Io(e))?;
+                std::fs::create_dir_all(d).map_err(CliError::Io)?;
+                std::fs::write(&path, format!("{k}")).map_err(CliError::Io)?;
                 println!("wrote {path}");
             } else {
                 println!("{k}");
@@ -193,8 +193,8 @@ pub fn run(args: &InspectArgs) -> Result<(), CliError> {
             let msl = generate_msl_dt(spec, eff_dt);
             if let Some(d) = dir {
                 let path = format!("{}/{}.metal", d, name);
-                std::fs::create_dir_all(d).map_err(|e| CliError::Io(e))?;
-                std::fs::write(&path, &msl).map_err(|e| CliError::Io(e))?;
+                std::fs::create_dir_all(d).map_err(CliError::Io)?;
+                std::fs::write(&path, &msl).map_err(CliError::Io)?;
                 println!("wrote {path}");
             } else {
                 let mode_str = effective_mode(spec).to_string();

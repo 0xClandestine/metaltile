@@ -32,7 +32,7 @@ pub fn run(args: &DiffArgs) -> Result<(), CliError> {
         );
         let temp_file =
             std::env::temp_dir().join(format!(".tile-diff-tmp-{}.json", std::process::id()));
-        let mut child = Command::new(std::env::current_exe().map_err(|e| CliError::Io(e))?)
+        let mut child = Command::new(std::env::current_exe().map_err(CliError::Io)?)
             .arg("bench")
             .arg("--json")
             .arg(temp_file.to_str().ok_or_else(|| CliError::Other("non-UTF8 temp path".into()))?)

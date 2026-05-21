@@ -366,18 +366,18 @@ fn emit_artifacts(
     let resources_dir = out_root.join("Resources");
     let generated_dir = out_root.join("Generated");
 
-    if kinds.contains(&EmitKind::Ir) {
-        if let Err(e) = std::fs::create_dir_all(&resources_dir).and_then(|_| {
+    if kinds.contains(&EmitKind::Ir)
+        && let Err(e) = std::fs::create_dir_all(&resources_dir).and_then(|_| {
             write_manifest(kernels, &resources_dir.join("manifest.json"))
                 .map_err(|e| std::io::Error::other(e.to_string()))
-        }) {
-            eprintln!(
-                "  {} write manifest.json: {}",
-                paint_stderr("error:", Style::new().fg(Color::Red).bold()),
-                e
-            );
-            return Err(CliError::Io(e));
-        }
+        })
+    {
+        eprintln!(
+            "  {} write manifest.json: {}",
+            paint_stderr("error:", Style::new().fg(Color::Red).bold()),
+            e
+        );
+        return Err(CliError::Io(e));
     }
 
     if kinds.contains(&EmitKind::Swift) {
