@@ -87,7 +87,11 @@ enum CfgShape {
 }
 
 fn classify(op: &Op) -> CfgShape {
-    if op.as_if().map_or(false, |(_, _, eb)| eb.is_none()) { CfgShape::Triangle } else { CfgShape::Diamond }
+    if op.as_if().is_some_and(|(_, _, eb)| eb.is_none()) {
+        CfgShape::Triangle
+    } else {
+        CfgShape::Diamond
+    }
 }
 
 // ---------------------------------------------------------------------------
