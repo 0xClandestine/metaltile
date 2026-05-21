@@ -28,6 +28,7 @@ use metaltile_core::{
 // Bring high-perf kernels from metaltile-std into the emit registry.
 use metaltile_std::ffai::moe::mt_moe_gather_qmm_mma_int4_bm16;
 use metaltile_std::ffai::moe_mpp;
+use metaltile_std::ffai::moe_mpp_bm64;
 use metaltile_std::mlx::quantized::mt_qmm_mma;
 use serde::Serialize;
 
@@ -1876,6 +1877,19 @@ fn register_kernels() -> Vec<Kernel> {
     for &dt in &[DType::F32, DType::F16, DType::BF16] {
         let mut k = moe_mpp::kernel_ir_for(dt);
         k.name = format!("mt_moe_gather_qmm_mma_int4_bm16_mpp_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Reduction;
+        kernels.push(k);
+    }
+
+    // ─── mt_moe_gather_qmm_mma_int4_bm64_mpp (Reduction) — BM=BN=64 MPP MoE ──
+    // 4-SG WM=WN=2 scale-up of the BM=16 MPP MoE kernel. Mirrors MLX's
+    // `affine_gather_qmm_rhs_nax` tile geometry (BM=BN=BK=64, WM=WN=2). Each
+    // SG owns a 32×32 sub-tile; descriptor is (32, 32, 32) per SG. Required
+    // to close the 1.55× gap vs MLX on Qwen3.6-35B-A3B prefill at T=32K.
+    // See `crates/metaltile-std/src/ffai/moe_mpp_bm64.rs`.
+    for &dt in &[DType::F32, DType::F16, DType::BF16] {
+        let mut k = moe_mpp_bm64::kernel_ir_for(dt);
+        k.name = format!("mt_moe_gather_qmm_mma_int4_bm64_mpp_{}", dtype_suffix(dt));
         k.mode = KernelMode::Reduction;
         kernels.push(k);
     }

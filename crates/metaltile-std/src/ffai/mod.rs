@@ -37,6 +37,7 @@ pub mod logits_top_p;
 pub mod logits_topk;
 pub mod moe;
 pub mod moe_mpp;
+pub mod moe_mpp_bm64;
 pub mod rms_norm_qgemv;
 pub mod rms_norm_residual;
 pub mod rms_norm_rope;
