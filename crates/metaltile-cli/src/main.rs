@@ -205,13 +205,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter)),
         )
-        .with_target(false)
+        // Diagnostics go to stderr so they don't interleave with bench/build
+        // output on stdout. `with_target` shows which crate/module emitted
+        // each event — useful when tracing spans multiple crates.
+        .with_writer(std::io::stderr)
+        .with_target(true)
         .with_thread_ids(false)
+        // Print a line when each span closes so you see elapsed wall time.
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .compact()
         .init();
 
     let cli = Cli::parse();
-    let _span = tracing::debug_span!("tile", command = ?cli.command).entered();
+    let _span = tracing::info_span!("tile", command = ?cli.command).entered();
 
     match cli.command {
         Command::Bench(args) => cmd::bench::run(&args)?,

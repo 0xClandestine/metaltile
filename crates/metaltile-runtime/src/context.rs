@@ -342,6 +342,7 @@ impl Context {
         let has_metal = cfg!(target_os = "macos");
         let chip_family = detect_apple_family();
         let tuner = Autotuner::new(Autotuner::default_cache_dir(), has_metal);
+        tracing::info!(has_metal, chip_family = ?chip_family, "runtime context initialized");
         Ok(Context { tuner, has_metal, chip_family })
     }
 
@@ -390,6 +391,7 @@ impl Context {
     /// `grid_groups` is the number of threadgroups along each axis;
     /// `threads_per_group` is the size of each threadgroup. Both are
     /// `[x, y, z]`.
+    #[tracing::instrument(skip(self, kernel, buffers, fn_consts), fields(kernel = %kernel.name))]
     pub fn dispatch_with_grid(
         &self,
         kernel: &Kernel,
@@ -648,7 +650,12 @@ impl Context {
                 }),
             },
         };
-        tracing::trace!(kernel = %kernel.name, "dispatch queued");
+        tracing::debug!(
+            kernel = %kernel.name,
+            groups_x = tgs.width, groups_y = tgs.height, groups_z = tgs.depth,
+            tpg_x = tpg.width, tpg_y = tpg.height, tpg_z = tpg.depth,
+            "dispatch"
+        );
         enc.dispatchThreadgroups_threadsPerThreadgroup(tgs, tpg);
         (*enc).endEncoding();
         (*cb).commit();
@@ -1035,6 +1042,13 @@ impl Context {
                 }
             }
             let (g, t) = (spec.grid_groups, spec.threads_per_group);
+            tracing::debug!(
+                kernel = %spec.kernel.name,
+                pass = i,
+                groups_x = g[0], groups_y = g[1], groups_z = g[2],
+                tpg_x = t[0], tpg_y = t[1], tpg_z = t[2],
+                "chain pass dispatch"
+            );
             enc.dispatchThreadgroups_threadsPerThreadgroup(
                 MTLSize { width: g[0], height: g[1], depth: g[2] },
                 MTLSize { width: t[0], height: t[1], depth: t[2] },
