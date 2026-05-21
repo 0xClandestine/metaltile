@@ -68,9 +68,18 @@ use metaltile::{bench_kernel, kernel};
 /// - The output param `out` receives no arg; its store is skipped and the
 ///   stored `inv_rms` value is returned as the call result.
 ///
-/// The index `0u32` in `load(partial_ssq[0u32])` is a placeholder —
-/// `KernelInlinePass` skips this load entirely (Value arg) so it is never
-/// emitted to MSL.
+/// ## Standalone vs inlined semantics
+///
+/// `mt_rms_inv_scalar` is a **valid standalone kernel**: `partial_ssq` is a
+/// real 1-element `Tensor<f32>` and `load(partial_ssq[0u32])` is a legal
+/// memory access. It can be dispatched directly (e.g. in tests) by passing a
+/// 1-element buffer containing the pre-summed partial sum.
+///
+/// When called via the cross-kernel DSL (`let inv = mt_rms_inv_scalar(g, ...)`)
+/// the caller passes `g` as a `KernelCallArg::Value` — a pre-computed scalar
+/// already in registers. `KernelInlinePass` detects the `Value` arg, skips the
+/// load, and substitutes `g` directly, eliminating the memory round-trip.
+/// This is load-forwarding: the callee is correct both ways.
 #[kernel]
 pub fn mt_rms_inv_scalar(
     partial_ssq: Tensor<f32>,

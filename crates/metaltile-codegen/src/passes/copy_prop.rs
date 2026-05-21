@@ -29,12 +29,13 @@
 //!   ACM TOPLAS 13(2):181–210.  Sparse conditional constant propagation framework
 //!   that subsumes copy propagation.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use metaltile_core::{
     dtype::DType,
     ir::{Block, BlockId, Kernel, Op, ValueId},
 };
+use rustc_hash::FxHashMap;
 
 use super::remap;
 use crate::error::{Error, Result};
@@ -61,8 +62,8 @@ impl super::Pass for CopyPropPass {
 }
 
 /// Resolve transitive replacement chains: {v2→v1, v1→v0} becomes {v2→v0, v1→v0}.
-fn resolve_transitive(map: &BTreeMap<ValueId, ValueId>) -> BTreeMap<ValueId, ValueId> {
-    let mut resolved = BTreeMap::new();
+fn resolve_transitive(map: &FxHashMap<ValueId, ValueId>) -> FxHashMap<ValueId, ValueId> {
+    let mut resolved = FxHashMap::default();
     for (&key, &val) in map.iter() {
         let mut terminal = val;
         let mut visited = BTreeSet::new();
@@ -88,7 +89,7 @@ fn copy_prop_block_fixpoint(block: &mut Block) {
 
 fn copy_prop_block_once(block: &mut Block) -> bool {
     let n = block.ops.len();
-    let mut vid_replacements: BTreeMap<ValueId, ValueId> = BTreeMap::new();
+    let mut vid_replacements: FxHashMap<ValueId, ValueId> = FxHashMap::default();
 
     for i in 0..n {
         let op = &block.ops[i];

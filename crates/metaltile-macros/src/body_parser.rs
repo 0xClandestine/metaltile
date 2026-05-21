@@ -664,19 +664,30 @@ impl DslBodyParser {
                         "unrecognized MetalTile DSL call: cannot determine callee name",
                     ));
                 }
-                // Treat unrecognized calls as cross-kernel calls.
-                // KernelInlinePass resolves these at compile time by looking
-                // up `callee` in the inventory-based KernelEntry registry and
-                // splicing the callee's scalar body inline.
+                // Only treat as a cross-kernel call if the name follows the
+                // registered kernel naming convention (mt_* or ffai_* prefix).
+                // Anything else is almost certainly a typo of a DSL builtin
+                // and should fail at the call site with a span-accurate error,
+                // just as it did before cross-kernel calling was introduced.
+                if !path.starts_with("mt_") && !path.starts_with("ffai_") {
+                    return self.push_error_value(syn::Error::new_spanned(
+                        &call.func,
+                        format!(
+                            "unrecognized MetalTile DSL function `{path}`. \
+                             Cross-kernel callees must be registered via \
+                             #[kernel] and their names must start with `mt_` \
+                             or `ffai_`."
+                        ),
+                    ));
+                }
+                // Treat as a cross-kernel call. KernelInlinePass resolves it
+                // at compile time by looking up `callee` in the inventory-based
+                // KernelEntry registry and splicing the callee's scalar body.
                 //
                 // Arg classification:
                 //   - bare identifier matching a tensor param or constexpr
-                //     param → KernelCallArg::Tensor(name): the inline pass
-                //     substitutes the name into callee loads/stores directly,
-                //     enabling multi-element tensor access.
-                //   - any other expression → KernelCallArg::Value(vid): the
-                //     inline pass replaces the callee's input-param load with
-                //     the pre-computed scalar value.
+                //     param → KernelCallArg::Tensor(name)
+                //   - any other expression → KernelCallArg::Value(vid)
                 let mut args_tokens: Vec<proc_macro2::TokenStream> = Vec::new();
                 for a in &call.args {
                     if let syn::Expr::Path(p) = a
@@ -2108,19 +2119,35 @@ mod tests {
     }
 
     #[test]
-    fn unknown_calls_emit_kernel_call() {
-        // Unknown function names are now emitted as Op::KernelCall rather
-        // than a compile_error.  KernelInlinePass resolves them at
-        // compile time; if the callee is unregistered it returns a
-        // codegen error then, not at proc-macro expansion time.
+    fn mt_prefixed_calls_emit_kernel_call() {
+        // Names starting with `mt_` are treated as cross-kernel calls.
+        // KernelInlinePass resolves them at compile time; unregistered
+        // callees produce a codegen error (not a proc-macro error).
+        let body: Block = parse_quote!({
+            let y = mt_silu(x);
+        });
+
+        let tokens = DslBodyParser::parse(&body, &[], &[]).to_string();
+
+        assert!(tokens.contains("KernelCall"), "{tokens}");
+        assert!(tokens.contains("\"mt_silu\""), "{tokens}");
+    }
+
+    #[test]
+    fn non_prefixed_unknown_calls_emit_compile_error() {
+        // Names that don't start with `mt_` or `ffai_` and don't match
+        // any DSL builtin emit a compile_error token (not a KernelCall),
+        // restoring the pre-cross-kernel-calling behaviour for typos.
         let body: Block = parse_quote!({
             let y = sine(x);
         });
 
         let tokens = DslBodyParser::parse(&body, &[], &[]).to_string();
 
-        assert!(tokens.contains("KernelCall"), "{tokens}");
-        assert!(tokens.contains("\"sine\""), "{tokens}");
+        // Should not emit a KernelCall — that would silently swallow a typo.
+        assert!(!tokens.contains("KernelCall"), "typo should not produce KernelCall: {tokens}");
+        // Should contain a compile_error diagnostic.
+        assert!(tokens.contains("compile_error"), "{tokens}");
     }
 
     #[test]

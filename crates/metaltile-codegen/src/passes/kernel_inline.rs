@@ -33,13 +33,12 @@
 //!    used (causing a compile error if actually referenced — better than
 //!    silent wrong code).
 
-use std::collections::{BTreeMap, HashMap};
-
 use metaltile_core::{
     KernelEntry,
     dtype::DType,
     ir::{Kernel, KernelCallArg, Op, ValueId},
 };
+use rustc_hash::FxHashMap;
 
 use crate::{
     error::{Error, Result},
@@ -57,7 +56,7 @@ impl Pass for KernelInlinePass {
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
         // Collect caller's ProgramId result vids by axis (before we start
         // rewriting the body).  Callee ProgramId ops are remapped to these.
-        let caller_pids: BTreeMap<u32, ValueId> = kernel
+        let caller_pids: FxHashMap<u32, ValueId> = kernel
             .body
             .ops
             .iter()
@@ -135,10 +134,21 @@ fn lookup_kernel(name: &str, dtype: DType) -> Result<Kernel> {
 fn inline_callee(
     callee: &Kernel,
     args: &[KernelCallArg],
-    caller_pids: &BTreeMap<u32, ValueId>,
+    caller_pids: &FxHashMap<u32, ValueId>,
     call_result: Option<ValueId>,
     vid_offset: u32,
 ) -> Vec<(Op, Option<ValueId>)> {
+    // Enforce: callee bodies must not contain nested KernelCall.  If they do,
+    // the inner call would survive as an unresolved KernelCall in the MSL
+    // emitter and produce a silent `/* ERROR */` comment.  Either fixpoint the
+    // inliner or ensure callee kernels are always flat.
+    assert!(
+        !callee.body.ops.iter().any(|op| matches!(op, Op::KernelCall { .. })),
+        "KernelInlinePass: callee `{}` contains nested KernelCall — \
+         callee bodies must be flat (no cross-kernel calls)",
+        callee.name,
+    );
+
     // Collect param name lists in declaration order for positional arg matching.
     // Constexpr params live in `callee.constexprs` (not `callee.params`), so
     // the positional order is: [input_params..., constexprs..., output_params...].
@@ -152,7 +162,7 @@ fn inline_callee(
     // Unified name → arg map for all non-output params (tensor inputs + constexprs).
     // Single lookup replaces the three parallel arrays + offset arithmetic that
     // previously caused the constexpr positional-arg bug.
-    let param_arg: HashMap<&str, &KernelCallArg> = input_params
+    let param_arg: FxHashMap<&str, &KernelCallArg> = input_params
         .iter()
         .chain(constexpr_names.iter())
         .enumerate()
@@ -160,13 +170,13 @@ fn inline_callee(
         .collect();
 
     // Output param args (rare; usually absent → store is skipped, value → call_result).
-    let output_arg: HashMap<&str, Option<&KernelCallArg>> = output_params
+    let output_arg: FxHashMap<&str, Option<&KernelCallArg>> = output_params
         .iter()
         .enumerate()
         .map(|(j, &name)| (name, args.get(n_input_slots + j)))
         .collect();
 
-    let mut vid_map: BTreeMap<ValueId, ValueId> = BTreeMap::new();
+    let mut vid_map: FxHashMap<ValueId, ValueId> = FxHashMap::default();
     let mut next_vid = vid_offset;
 
     // Single pre-pass: seed Value-arg load results into vid_map, and map the
@@ -284,7 +294,7 @@ fn inline_callee(
 /// mapping or allocating a fresh vid.
 fn assign_result(
     op_result: &Option<ValueId>,
-    vid_map: &mut BTreeMap<ValueId, ValueId>,
+    vid_map: &mut FxHashMap<ValueId, ValueId>,
     next_vid: &mut u32,
 ) -> Option<ValueId> {
     op_result.map(|r| {
@@ -369,7 +379,7 @@ mod tests {
     #[test]
     fn value_arg_scalar_callee_splices_activation() {
         let callee = build_silu_callee();
-        let caller_pids: BTreeMap<u32, ValueId> = [(0, v(5))].into_iter().collect();
+        let caller_pids: FxHashMap<u32, ValueId> = [(0, v(5))].into_iter().collect();
         // g_vid = v10 (the pre-computed f32 scalar in caller)
         let args = vec![KernelCallArg::Value(v(10))];
         let call_result = Some(v(99));
@@ -423,7 +433,7 @@ mod tests {
     #[test]
     fn tensor_args_rename_load_store_and_keep_ops() {
         let callee = build_copy_callee();
-        let caller_pids: BTreeMap<u32, ValueId> = [(0, v(3))].into_iter().collect();
+        let caller_pids: FxHashMap<u32, ValueId> = [(0, v(3))].into_iter().collect();
         let args =
             vec![KernelCallArg::Tensor("x_buf".into()), KernelCallArg::Tensor("y_buf".into())];
         // No scalar call_result needed — output goes to the Tensor arg.
@@ -492,7 +502,7 @@ mod tests {
         });
 
         // Caller has ProgramId axis 0 → v10, axis 1 → v11.
-        let caller_pids: BTreeMap<u32, ValueId> = [(0, v(10)), (1, v(11))].into_iter().collect();
+        let caller_pids: FxHashMap<u32, ValueId> = [(0, v(10)), (1, v(11))].into_iter().collect();
         let args = vec![KernelCallArg::Value(v(20))]; // scalar input arg
         let call_result = Some(v(99));
 
