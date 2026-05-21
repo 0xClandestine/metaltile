@@ -13,7 +13,8 @@ on:
   push:
     branches: [main, dev]
     paths:
-      - 'crates/**'
+      - 'crates/**/*.rs'
+      - 'crates/**/Cargo.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
@@ -21,7 +22,8 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
-      - 'crates/**'
+      - 'crates/**/*.rs'
+      - 'crates/**/Cargo.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'

@@ -1,11 +1,24 @@
 name: Coverage
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches: [main, dev]
+    paths:
+      - 'crates/**/*.rs'
+      - 'crates/**/Cargo.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'codecov.yml'
+      - '.github/workflows/coverage.yml'
   pull_request:
     paths:
-      - 'crates/**'
+      - 'crates/**/*.rs'
+      - 'crates/**/Cargo.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
