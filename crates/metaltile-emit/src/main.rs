@@ -26,20 +26,29 @@ use metaltile_core::{
     ir::{Kernel, KernelMode, Param, ParamKind},
 };
 // Bring high-perf kernels from metaltile-std into the emit registry.
-use metaltile_std::ffai::gated_delta::{mt_gated_delta_chunk, mt_gated_delta_step};
+// All canonical sources — no inline duplicates here; metaltile-emit
+// just registers, names, and bakes mode/dispatch metadata.
 use metaltile_std::{
     ffai::{
+        arg_reduce::ffai_argmax,
+        gated_delta::{mt_gated_delta_chunk, mt_gated_delta_step},
         gated_delta_prep::mt_gated_delta_prep_step,
+        gather::ffai_gather,
         moe::mt_moe_gather_qmm_mma_int4_bm16,
         moe_mpp,
         moe_mpp_bm8,
         moe_mpp_bm64,
+        rope_llama::ffai_rope_llama,
+        sdpa_decode::ffai_sdpa_decode,
     },
     mlx::{
+        binary::{mt_mul, vector_add},
+        gemv::mt_gemv,
         quantized::mt_qmm_mma,
         quantized_mpp,
+        rms_norm::mt_rms_norm,
         steel::attn::steel_attention_mma::mt_sdpa_prefill_mma,
-        unary::{mt_gelu, mt_relu, mt_sigmoid},
+        unary::{mt_gelu, mt_relu, mt_sigmoid, mt_silu, mt_softplus},
     },
     probe::mpp_matmul_smoke,
 };
@@ -63,271 +72,6 @@ struct Cli {
     #[arg(long)]
     no_compile: bool,
 }
-
-// ─── Kernel definitions ───────────────────────────────────────────────────
-//
-// These are the kernels emitted into the Phase 0 metallib. To add a kernel:
-//   1. Define it here with `#[kernel]`
-//   2. Register it in `register_kernels()` below
-//   3. Re-run `cargo run -p metaltile-emit -- --out <dir>`
-
-// Generic elementwise add. c[i] = a[i] + b[i]. Works for f32 / f16 / bf16.
-// Mirrors metaltile_std::mlx::binary::vector_add (output param named `c`).
-#[kernel]
-fn add_elem<T>(a: Tensor<T>, b: Tensor<T>, c: Tensor<T>) {
-    let idx = program_id::<0>();
-    store(c[idx], load(a[idx]) + load(b[idx]));
-}
-
-// Generic elementwise multiply. out[i] = a[i] * b[i]. Used for SwiGLU's gate*up.
-// Mirrors metaltile_std::mlx::binary::mt_mul (output param named `out`).
-#[kernel]
-fn mul_elem<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
-    let idx = program_id::<0>();
-    store(out[idx], load(a[idx]) * load(b[idx]));
-}
-
-// SiLU activation: out[i] = x[i] / (1 + exp(-x[i])). Elementwise.
-#[kernel]
-fn silu_elem<T>(a: Tensor<T>, out: Tensor<T>) {
-    let idx = program_id::<0>();
-    let x = load(a[idx]).cast::<f32>();
-    let y = x / (1.0f32 + exp(-x));
-    store(out[idx], y.cast::<T>());
-}
-
-// Softplus activation: out[i] = log(1 + exp(x[i])). Elementwise.
-// Numerically-stable form: when x is large, log(1 + exp(x)) ≈ x; when
-// x is very negative, log(1 + exp(x)) ≈ exp(x). The simple form below
-// (log(1 + exp(x))) overflows for x > ~85 in fp32, so we add a max-with-0
-// shift: log(1 + exp(-|x|)) + max(x, 0) — exact for all inputs.
-#[kernel]
-fn softplus_elem<T>(a: Tensor<T>, out: Tensor<T>) {
-    let idx = program_id::<0>();
-    let x = load(a[idx]).cast::<f32>();
-    let abs_x = select(x < 0.0f32, -x, x);
-    let max0 = select(x > 0.0f32, x, 0.0f32);
-    let y = log(1.0f32 + exp(-abs_x)) + max0;
-    store(out[idx], y.cast::<T>());
-}
-
-// Embedding lookup. For each output element (token, d), copy
-// table[indices[token], d]. One thread per output element.
-#[kernel]
-fn gather_row<T>(table: Tensor<T>, indices: Tensor<u32>, out: Tensor<T>, #[constexpr] dim: u32) {
-    let idx = program_id::<0>();
-    let token = idx / dim;
-    let d = idx - token * dim;
-    let token_id = load(indices[token]);
-    let src = token_id * dim + d;
-    store(out[idx], load(table[src]));
-}
-
-// Cooperative-thread matrix-vector multiply. Reduction-mode kernel:
-// one threadgroup per output row, threads cooperate on the dot-product
-// reduction via strided_reduce_dot + reduce_sum. Ported from
-// metaltile-bench/src/ops/gemv.rs (which gets ~100% of MLX throughput
-// on M-series). weight is [out_dim, in_dim] row-major; input is [in_dim].
-#[kernel]
-fn gemv_naive<T>(mat: Tensor<T>, vec: Tensor<T>, out: Tensor<T>, #[constexpr] k: u32) {
-    let row = program_id::<0>();
-    let rs = row * k;
-    let re = rs + k;
-    let acc = strided_reduce_dot(mat, vec, rs, rs, re);
-    let result = reduce_sum(acc);
-    store(out[row], result);
-}
-
-// Llama-style RoPE (HuggingFace half-rotated convention) with optional
-// Llama-3 frequency-band scaling. For each (head, i in 0..head_dim/2):
-//
-//   base inv_freq = 1 / theta_base^(2i / head_dim)
-//   wavelen       = 2*pi / inv_freq
-//   if wavelen > low_freq_wavelen:        inv_freq /= scale_factor      (low-freq band)
-//   else if wavelen < high_freq_wavelen:  inv_freq                       (high-freq band)
-//   else (medium band):                   smoothed interpolation
-//
-// To turn scaling OFF, pass scale_factor=1, low_freq_factor=1,
-// high_freq_factor=1, original_max_position=very_large (e.g. 1e9).
-//
-// Wavelength bands:
-//   low_freq_wavelen  = original_max_position / low_freq_factor
-//   high_freq_wavelen = original_max_position / high_freq_factor
-//
-// Smoothed = (1 - s) * (inv_freq_base / scale_factor) + s * inv_freq_base
-//   where s = (original_max_position / wavelen - low_freq_factor)
-//             / (high_freq_factor - low_freq_factor)
-#[kernel]
-fn rope_llama<T>(
-    qk: Tensor<T>,
-    out: Tensor<T>,
-    #[constexpr] head_dim: u32,
-    #[constexpr] half_dim: u32,
-    #[constexpr] position: u32,
-    #[constexpr] theta_base: f32,
-    #[constexpr] scale_factor: f32,
-    #[constexpr] low_freq_factor: f32,
-    #[constexpr] high_freq_factor: f32,
-    #[constexpr] original_max_position: f32,
-) {
-    let head = program_id::<0>();
-    let i = program_id::<1>();
-
-    let i_f = i.cast::<f32>();
-    let half_f = half_dim.cast::<f32>();
-    let inv_freq_base = exp2(-i_f * log2(theta_base) / half_f);
-
-    let two_pi = 6.283185307179586f32;
-    let wavelen = two_pi / inv_freq_base;
-    let low_freq_wavelen = original_max_position / low_freq_factor;
-    let high_freq_wavelen = original_max_position / high_freq_factor;
-
-    let scaled = inv_freq_base / scale_factor;
-    let smooth_num = original_max_position / wavelen - low_freq_factor;
-    let smooth_den = high_freq_factor - low_freq_factor;
-    let s = smooth_num / smooth_den;
-    let smoothed = (1.0f32 - s) * scaled + s * inv_freq_base;
-
-    let is_low_freq = wavelen > low_freq_wavelen;
-    let is_high_freq = wavelen < high_freq_wavelen;
-    let inv_freq = select(is_low_freq, scaled, select(is_high_freq, inv_freq_base, smoothed));
-
-    let pos_f = position.cast::<f32>();
-    let theta = pos_f * inv_freq;
-    let cos_t = cos(theta);
-    let sin_t = sin(theta);
-
-    let base = head * head_dim;
-    let i1 = base + i;
-    let i2 = base + i + half_dim;
-
-    let x1 = load(qk[i1]).cast::<f32>();
-    let x2 = load(qk[i2]).cast::<f32>();
-    let o1 = x1 * cos_t - x2 * sin_t;
-    let o2 = x1 * sin_t + x2 * cos_t;
-
-    store(out[i1], o1.cast::<T>());
-    store(out[i2], o2.cast::<T>());
-}
-
-// Argmax over a 1D tensor — Reduction-mode kernel, 256-thread
-// cooperative tree reduction. Adapted from
-// metaltile-bench/src/ops/arg_reduce.rs but generic over input dtype.
-// Inputs cast to f32 for comparison; output is u32 index.
-//
-// Tie-breaking: strict > keeps the smallest matching index.
-#[kernel]
-fn argmax<T>(inp: Tensor<T>, out: Tensor<u32>, #[constexpr] n: u32) {
-    let lid = tid;
-    let mut best_val = neg_infinity();
-    let mut best_idx = lid - lid;
-    threadgroup_alloc("tg_vals", 256);
-    threadgroup_alloc("tg_idxs", 256);
-    let n_iters = (n + lsize - 1u32) / lsize;
-    for _r in range(0u32, n_iters, 1u32) {
-        let pos = _r * lsize + lid;
-        if pos < n {
-            let v = load(inp[pos]).cast::<f32>();
-            let better = v > best_val;
-            if better {
-                best_val = v;
-                best_idx = pos;
-            }
-        }
-    }
-    threadgroup_store("tg_vals", lid, best_val);
-    threadgroup_store("tg_idxs", lid, best_idx);
-    threadgroup_barrier();
-
-    // Tree reduction: stride 128, 64, 32, 16, 8, 4, 2, 1
-    if lid < 128u32 {
-        let ov = threadgroup_load("tg_vals", lid + 128u32);
-        let oi = threadgroup_load("tg_idxs", lid + 128u32);
-        let tv = threadgroup_load("tg_vals", lid);
-        let ti = threadgroup_load("tg_idxs", lid);
-        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
-        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
-        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
-    }
-    threadgroup_barrier();
-    if lid < 64u32 {
-        let ov = threadgroup_load("tg_vals", lid + 64u32);
-        let oi = threadgroup_load("tg_idxs", lid + 64u32);
-        let tv = threadgroup_load("tg_vals", lid);
-        let ti = threadgroup_load("tg_idxs", lid);
-        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
-        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
-        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
-    }
-    threadgroup_barrier();
-    if lid < 32u32 {
-        let ov = threadgroup_load("tg_vals", lid + 32u32);
-        let oi = threadgroup_load("tg_idxs", lid + 32u32);
-        let tv = threadgroup_load("tg_vals", lid);
-        let ti = threadgroup_load("tg_idxs", lid);
-        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
-        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
-        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
-    }
-    threadgroup_barrier();
-    if lid < 16u32 {
-        let ov = threadgroup_load("tg_vals", lid + 16u32);
-        let oi = threadgroup_load("tg_idxs", lid + 16u32);
-        let tv = threadgroup_load("tg_vals", lid);
-        let ti = threadgroup_load("tg_idxs", lid);
-        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
-        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
-        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
-    }
-    threadgroup_barrier();
-    if lid < 8u32 {
-        let ov = threadgroup_load("tg_vals", lid + 8u32);
-        let oi = threadgroup_load("tg_idxs", lid + 8u32);
-        let tv = threadgroup_load("tg_vals", lid);
-        let ti = threadgroup_load("tg_idxs", lid);
-        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
-        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
-        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
-    }
-    threadgroup_barrier();
-    if lid < 4u32 {
-        let ov = threadgroup_load("tg_vals", lid + 4u32);
-        let oi = threadgroup_load("tg_idxs", lid + 4u32);
-        let tv = threadgroup_load("tg_vals", lid);
-        let ti = threadgroup_load("tg_idxs", lid);
-        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
-        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
-        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
-    }
-    threadgroup_barrier();
-    if lid < 2u32 {
-        let ov = threadgroup_load("tg_vals", lid + 2u32);
-        let oi = threadgroup_load("tg_idxs", lid + 2u32);
-        let tv = threadgroup_load("tg_vals", lid);
-        let ti = threadgroup_load("tg_idxs", lid);
-        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
-        threadgroup_store("tg_vals", lid, select(bet, ov, tv));
-        threadgroup_store("tg_idxs", lid, select(bet, oi, ti));
-    }
-    threadgroup_barrier();
-    if lid == 0u32 {
-        let ov = threadgroup_load("tg_vals", 1u32);
-        let oi = threadgroup_load("tg_idxs", 1u32);
-        let tv = threadgroup_load("tg_vals", 0u32);
-        let ti = threadgroup_load("tg_idxs", 0u32);
-        let bet = (ov > tv) | ((ov == tv) & (oi < ti));
-        let final_idx = select(bet, oi, ti);
-        store(out[0], final_idx);
-    }
-}
-
-// Softmax + categorical sample over a 1D logits tensor. Cooperative
-// reduction (256 threads) for max + sum-exp; single-threaded inverse
-// CDF walk for the categorical pick.
-//
-// Inputs:
-//   inp            — logits [n]
-//   out            — token id [1] (u32)
 //   temperature_in — temperature [1] (f32, must be > 0)
 //   uniform_in     — uniform draw in [0, 1) [1] (f32)
 //
@@ -849,108 +593,6 @@ fn kv_cache_update<T>(
     let dst_idx = h * max_seq * head_dim + position * head_dim + d;
     store(out[dst_idx], load(src[idx]));
 }
-
-// Naive single-Q SDPA decode with online softmax. Each thread owns one
-// output element (q_head, d). Walks all KV positions; for each, computes
-// the full dot(q[q_head], k[kv_head, t]) (recomputed per thread — wasteful
-// but trivially correct). Maintains per-thread (max, sum, output_d) state.
-//
-// K and V cache layout: [n_kv_heads, kv_stride, head_dim] where kv_stride
-// is the physical capacity (maxSeq) and n_kv is the number of currently
-// filled positions (the loop bound). Decoupling the two lets the cache
-// be pre-allocated to maxSeq while only attending to filled positions.
-//
-// GQA: kv_head = q_head / heads_per_group.
-//
-// Dispatch: one thread per (q_head, d). Total threads = n_q_heads * head_dim.
-// `sink_end` / `window_start` carve out an optional skip-range
-// `[sink_end, window_start)` for sliding-window-with-sink attention.
-// Both zero ⇒ dense attention over `[0, n_kv)`. Otherwise the kernel
-// attends to `[0, sink_end) ∪ [window_start, n_kv)` — the loop only
-// pays for the kept range so the bound check is at the K-iteration
-// granularity, not per-element masking.
-#[kernel]
-fn sdpa_decode_naive<T>(
-    q: Tensor<T>,
-    k: Tensor<T>,
-    v: Tensor<T>,
-    out: Tensor<T>,
-    #[constexpr] head_dim: u32,
-    #[constexpr] n_kv: u32,
-    #[constexpr] kv_stride: u32,
-    #[constexpr] heads_per_group: u32,
-    #[constexpr] sink_end: u32,
-    #[constexpr] window_start: u32,
-    #[constexpr] scale: f32,
-) {
-    let idx = program_id::<0>();
-    let q_head = idx / head_dim;
-    let d = idx - q_head * head_dim;
-    let kv_head = q_head / heads_per_group;
-    let q_off = q_head * head_dim;
-    let head_slab = kv_head * kv_stride * head_dim;
-
-    let mut m = neg_infinity();
-    let mut s = 0.0f32;
-    let mut o = 0.0f32;
-
-    for _t in range(0u32, n_kv, 1u32) {
-        let k_base = head_slab + _t * head_dim;
-        let mut score = 0.0f32;
-        for j in range(0u32, head_dim, 1u32) {
-            score = score + load(q[q_off + j]).cast::<f32>() * load(k[k_base + j]).cast::<f32>();
-        }
-        score = score * scale;
-
-        let new_m = select(score > m, score, m);
-        let factor = exp(m - new_m);
-        let weight = exp(score - new_m);
-        s = s * factor + weight;
-
-        let v_idx = k_base + d;
-        o = o * factor + weight * load(v[v_idx]).cast::<f32>();
-        m = new_m;
-    }
-
-    let final_out = o / s;
-    store(out[idx], final_out.cast::<T>());
-}
-
-#[kernel]
-fn mt_rms_norm<T>(
-    x: Tensor<T>,
-    w: Tensor<T>,
-    out: Tensor<T>,
-    eps_buf: Tensor<f32>,
-    #[constexpr] n: u32,
-) {
-    let row = program_id::<0>();
-    let rs = row * n;
-    let re = rs + n;
-    let ssq = strided_reduce_dot(x, x, rs, 0, re);
-    let tg_ssq = reduce_sum(ssq);
-    let eps = load(eps_buf[0]);
-    let rms = rsqrt(tg_ssq / n + eps);
-    let n_full = n / (lsize * 4u32);
-    for _r in range(0u32, n_full, 1u32) {
-        let base = rs + (_r * lsize + tid) * 4u32;
-        let col = base - rs;
-        let n0 = load(x[base]).cast::<f32>() * rms * load(w[col]).cast::<f32>();
-        let n1 = load(x[base + 1u32]).cast::<f32>() * rms * load(w[col + 1u32]).cast::<f32>();
-        let n2 = load(x[base + 2u32]).cast::<f32>() * rms * load(w[col + 2u32]).cast::<f32>();
-        let n3 = load(x[base + 3u32]).cast::<f32>() * rms * load(w[col + 3u32]).cast::<f32>();
-        store(out[base], n0.cast::<T>());
-        store(out[base + 1u32], n1.cast::<T>());
-        store(out[base + 2u32], n2.cast::<T>());
-        store(out[base + 3u32], n3.cast::<T>());
-    }
-    for _i in range(rs + n_full * lsize * 4u32 + tid, re, lsize) {
-        let ni = load(x[_i]).cast::<f32>() * rms * load(w[_i - rs]).cast::<f32>();
-        store(out[_i], ni.cast::<T>());
-    }
-}
-
-// MLX-format int4 dequantizing gather. For each output element (token, d),
 // look up packed_w[token_id, d/8], extract the right nibble, then
 // dequantize via w_real = q * scale + bias (scale/bias for the group d
 // belongs to). One thread per output element.
@@ -1769,27 +1411,28 @@ fn register_kernels() -> Vec<Kernel> {
     // Naming convention: `vector_add` (legacy MLX name), `mt_*` for
     // metaltile-canonical ops, `ffai_*` for FFAI-specific row ops.
     for &dt in &dtypes {
-        let mut k = add_elem::kernel_ir_for(dt);
+        let mut k = vector_add::kernel_ir_for(dt);
         k.name = format!("vector_add_{}", dtype_suffix(dt));
         kernels.push(k);
 
-        let mut k = mul_elem::kernel_ir_for(dt);
+        let mut k = mt_mul::kernel_ir_for(dt);
         k.name = format!("mt_mul_{}", dtype_suffix(dt));
         kernels.push(k);
 
-        let mut k = silu_elem::kernel_ir_for(dt);
+        let mut k = mt_silu::kernel_ir_for(dt);
         k.name = format!("mt_silu_{}", dtype_suffix(dt));
         kernels.push(k);
 
-        let mut k = softplus_elem::kernel_ir_for(dt);
+        let mut k = mt_softplus::kernel_ir_for(dt);
         k.name = format!("mt_softplus_{}", dtype_suffix(dt));
         kernels.push(k);
 
-        let mut k = gather_row::kernel_ir_for(dt);
+        let mut k = ffai_gather::kernel_ir_for(dt);
         k.name = format!("ffai_gather_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Grid3D;
         kernels.push(k);
 
-        let mut k = gemv_naive::kernel_ir_for(dt);
+        let mut k = mt_gemv::kernel_ir_for(dt);
         k.name = format!("mt_gemv_{}", dtype_suffix(dt));
         k.mode = KernelMode::Reduction;
         kernels.push(k);
@@ -1808,16 +1451,21 @@ fn register_kernels() -> Vec<Kernel> {
     // ─── rope_llama (Grid3D — uses program_id<0> for head and
     //     program_id<1> for half-pair index)
     for &dt in &dtypes {
-        let mut k = rope_llama::kernel_ir_for(dt);
+        let mut k = ffai_rope_llama::kernel_ir_for(dt);
         k.name = format!("ffai_rope_llama_{}", dtype_suffix(dt));
         k.mode = KernelMode::Grid3D;
         kernels.push(k);
     }
 
-    // ─── ffai_sdpa_decode (Elementwise, head_dim=128 default) ────────
+    // ─── ffai_sdpa_decode (Reduction, head_dim=128 default) ──────────
+    // Canonical kernel body uses tgid_x / simd_id / simd_lane / n_simd
+    // — needs Reduction mode for the codegen to emit those aliases.
+    // Has sink_end / window_start constexprs for sliding-window-with-
+    // sink attention (Qwen3-class SWA, Gemma sliding layers).
     for &dt in &dtypes {
-        let mut k = sdpa_decode_naive::kernel_ir_for(dt);
+        let mut k = ffai_sdpa_decode::kernel_ir_for(dt);
         k.name = format!("ffai_sdpa_decode_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Reduction;
         kernels.push(k);
     }
 
@@ -1869,7 +1517,7 @@ fn register_kernels() -> Vec<Kernel> {
 
     // ─── ffai_argmax (Reduction) ─────────────────────────────────────
     for &dt in &dtypes {
-        let mut k = argmax::kernel_ir_for(dt);
+        let mut k = ffai_argmax::kernel_ir_for(dt);
         k.name = format!("ffai_argmax_{}", dtype_suffix(dt));
         k.mode = KernelMode::Reduction;
         kernels.push(k);
@@ -1929,16 +1577,19 @@ fn register_kernels() -> Vec<Kernel> {
     // baseline above. The distinct Swift wrapper names let callers
     // self-document the head-dim shape they're dispatching against.
     for &dt in &dtypes {
-        let mut k = sdpa_decode_naive::kernel_ir_for(dt);
+        let mut k = ffai_sdpa_decode::kernel_ir_for(dt);
         k.name = format!("ffai_sdpa_decode_d64_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Reduction;
         kernels.push(k);
 
-        let mut k = sdpa_decode_naive::kernel_ir_for(dt);
+        let mut k = ffai_sdpa_decode::kernel_ir_for(dt);
         k.name = format!("ffai_sdpa_decode_d256_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Reduction;
         kernels.push(k);
 
-        let mut k = sdpa_decode_naive::kernel_ir_for(dt);
+        let mut k = ffai_sdpa_decode::kernel_ir_for(dt);
         k.name = format!("ffai_sdpa_decode_d512_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Reduction;
         kernels.push(k);
     }
 
