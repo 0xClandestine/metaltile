@@ -131,7 +131,7 @@ fn expand_kernel(input_fn: ItemFn) -> TokenStream {
     let expanded = quote! {
         #vis mod #fn_name {
             use super::*;
-            use metaltile_core::ir::{Kernel, Block, Op, ValueId, BlockId, VarId, Param, ParamKind, TypedSlot, ConstExprDecl, BinOpKind, ReduceKind, AttnParams, AtomicKind, AtomicScope, IndexExpr, UnaryOpKind, ActKind};
+            use metaltile_core::ir::{Kernel, Block, Op, ValueId, BlockId, VarId, Param, ParamKind, TypedSlot, ConstExprDecl, BinOpKind, ReduceKind, AttnParams, AtomicKind, AtomicScope, IndexExpr, UnaryOpKind, ActKind, KernelCallArg};
             use metaltile_core::shape::{Shape, Dim};
             use metaltile_core::dtype::DType;
             use metaltile_core::constexpr::ConstExpr;
@@ -198,6 +198,20 @@ fn expand_kernel(input_fn: ItemFn) -> TokenStream {
             pub fn launch(ctx: &metaltile_runtime::Context) -> LaunchBuilder<'_> {
                 LaunchBuilder::new(ctx)
             }
+
+            // Use `const _: ()` hygiene scope so `__build_for_inline` does not
+            // leak into the enclosing module's namespace.
+            const _: () = {
+                fn __build_for_inline(dtypes: &[metaltile_core::dtype::DType]) -> metaltile_core::ir::Kernel {
+                    #[allow(unused_variables)]
+                    let _t = dtypes.first().copied().unwrap_or(metaltile_core::dtype::DType::F32);
+                    kernel_ir_for(#(#arg_var_idents),*)
+                }
+
+                metaltile_core::inventory::submit! {
+                    metaltile_core::KernelEntry::new(#fn_name_str, __build_for_inline)
+                }
+            };
         }
     };
 

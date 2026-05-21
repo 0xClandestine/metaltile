@@ -317,6 +317,7 @@ fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
         | Op::Loop { .. }
         | Op::If { .. }
         | Op::InlineMsl { .. }
+        | Op::KernelCall { .. }
         | Op::VectorStore { .. }
         | Op::VectorExtract { .. }
         | Op::Scatter { .. }

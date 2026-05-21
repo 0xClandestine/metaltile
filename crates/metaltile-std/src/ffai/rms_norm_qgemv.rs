@@ -56,7 +56,9 @@ pub fn ffai_rms_norm_qgemv<T>(
 ) {
     let row = program_id::<0>();
 
-    // Phase 1: RMSNorm — threadgroup-wide sum of squares over x.
+    // Phase 1: RMSNorm — per-thread partial sum of squares, then cross-kernel
+    // call to mt_rms_inv_scalar for the threadgroup reduce + rsqrt.
+    // ssq is a Value arg; eps_buf and in_dim are Tensor args.
     let mut ssq = 0.0f32;
     let n_iters = (in_dim + lsize - 1u32) / lsize;
     for _iter in range(0u32, n_iters, 1u32) {
@@ -66,9 +68,7 @@ pub fn ffai_rms_norm_qgemv<T>(
             ssq = ssq + v * v;
         }
     }
-    let tg_ssq = reduce_sum(ssq);
-    let eps = load(eps_buf[0]);
-    let inv_rms = rsqrt(tg_ssq / in_dim + eps);
+    let inv_rms = mt_rms_inv_scalar(ssq, eps_buf, in_dim);
 
     // Phase 2: pack-strided int4 GEMV over the normalized activation.
     let vals_per_pack = 8u32; // 32 / 4 bits

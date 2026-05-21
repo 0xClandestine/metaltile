@@ -31,7 +31,16 @@
 
 use std::collections::BTreeSet;
 
-use metaltile_core::ir::{BinOpKind, Block, BlockId, IndexExpr, Kernel, Op, ValueId};
+use metaltile_core::ir::{
+    BinOpKind,
+    Block,
+    BlockId,
+    IndexExpr,
+    Kernel,
+    KernelCallArg,
+    Op,
+    ValueId,
+};
 
 use crate::error::Result;
 
@@ -257,6 +266,8 @@ fn replace_value_in_op(op: &mut Op, old: ValueId, new: ValueId) {
             for v in inputs.iter_mut() {
                 s(v);
             },
+        Op::KernelCall { args, .. } =>
+            args.iter_mut().filter_map(KernelCallArg::as_value_mut).for_each(&s),
         Op::FlashAttention { q, k, v, .. } => {
             s(q);
             s(k);
@@ -450,6 +461,8 @@ fn collect_uses(op: &Op, used: &mut BTreeSet<ValueId>) {
             for v in inputs {
                 add(*v);
             },
+        Op::KernelCall { args, .. } =>
+            args.iter().filter_map(KernelCallArg::as_value).for_each(&mut add),
         Op::FlashAttention { q, k, v, .. } => {
             add(*q);
             add(*k);

@@ -37,6 +37,7 @@ use metaltile_core::{
         BlockId,
         IndexExpr,
         Kernel,
+        KernelCallArg,
         Op,
         ParamKind,
         UnaryOpKind,
@@ -268,6 +269,8 @@ fn replace_values(op: &mut Op, map: &FxHashMap<ValueId, ValueId>) {
             for v in inputs.iter_mut() {
                 s(v);
             },
+        Op::KernelCall { args, .. } =>
+            args.iter_mut().filter_map(KernelCallArg::as_value_mut).for_each(&s),
         Op::FlashAttention { q, k, v, .. } => {
             s(q);
             s(k);

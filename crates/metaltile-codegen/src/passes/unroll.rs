@@ -36,6 +36,7 @@
 use std::collections::BTreeMap;
 
 use metaltile_core::ir::{Block, BlockId, Kernel, Op, ValueId};
+use rustc_hash::FxHashMap;
 
 use super::remap;
 use crate::error::{Error, Result};
@@ -208,7 +209,7 @@ fn unroll_block(
             inlined.push((Op::Const { value: iv_val }, Some(iv_const_vid)));
 
             // ---- build vid-map for this clone ----------------------------
-            let mut vid_map: BTreeMap<ValueId, ValueId> = BTreeMap::new();
+            let mut vid_map: FxHashMap<ValueId, ValueId> = FxHashMap::default();
             vid_map.insert(iv_vid, iv_const_vid);
 
             for j in 0..body_n {

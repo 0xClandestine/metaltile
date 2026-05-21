@@ -19,9 +19,8 @@
 //! across passes.  The exhaustive match arms serve as a single point of truth;
 //! a test verifies no variant is silently skipped.
 
-use std::collections::BTreeMap;
-
-use metaltile_core::ir::{IndexExpr, Kernel, Op, ValueId};
+use metaltile_core::ir::{IndexExpr, Kernel, KernelCallArg, Op, ValueId};
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 // ---------------------------------------------------------------------------
@@ -30,7 +29,7 @@ use smallvec::SmallVec;
 
 /// Remap all `ValueId` references in `op` according to `map`.
 /// References not present in `map` are left unchanged.
-pub fn remap_value_ids(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
+pub fn remap_value_ids(op: &mut Op, map: &FxHashMap<ValueId, ValueId>) {
     let s = |v: &mut ValueId| {
         if let Some(&nv) = map.get(v) {
             *v = nv;
@@ -125,6 +124,8 @@ pub fn remap_value_ids(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
             for v in inputs {
                 s(v);
             },
+        Op::KernelCall { args, .. } =>
+            args.iter_mut().filter_map(KernelCallArg::as_value_mut).for_each(&s),
         Op::FusedElementwise { ops } =>
             for sub_op in ops.iter_mut() {
                 remap_value_ids(sub_op, map);
@@ -345,6 +346,8 @@ pub fn op_value_refs(op: &Op) -> SmallVec<[ValueId; 4]> {
         Op::InlineMsl { inputs, .. } => {
             refs.extend(inputs.iter().copied());
         },
+        Op::KernelCall { args, .. } =>
+            args.iter().filter_map(KernelCallArg::as_value).for_each(|v| refs.push(v)),
         Op::FusedElementwise { ops } =>
             for sub in ops {
                 refs.extend(op_value_refs(sub));
@@ -585,6 +588,8 @@ pub fn max_vid_in_op(op: &Op) -> u32 {
             for v in inputs {
                 push(v);
             },
+        Op::KernelCall { args, .. } =>
+            args.iter().filter_map(KernelCallArg::as_value).for_each(|v| push(&v)),
         Op::FusedElementwise { ops } =>
             for sub in ops {
                 m = m.max(max_vid_in_op(sub));
@@ -840,7 +845,7 @@ mod tests {
     fn all_op_variants_covered() {
         // We can't exhaustively instantiate every variant, but we exercise each
         // major category to ensure the match arms don't panic.
-        let map: BTreeMap<ValueId, ValueId> = BTreeMap::new();
+        let map: FxHashMap<ValueId, ValueId> = FxHashMap::default();
 
         // BinOp
         let mut op = Op::BinOp { op: BinOpKind::Add, lhs: ValueId::new(1), rhs: ValueId::new(2) };
@@ -932,7 +937,7 @@ mod tests {
 
     #[test]
     fn remap_rewrites_referenced_values() {
-        let mut map = BTreeMap::new();
+        let mut map = FxHashMap::default();
         map.insert(ValueId::new(1), ValueId::new(100));
         map.insert(ValueId::new(2), ValueId::new(200));
 
@@ -989,7 +994,7 @@ mod tests {
         // No-op map: remap_value_ids must not panic on any variant and
         // must leave value refs unchanged.
         let mut op_remapped = op.clone();
-        let empty: BTreeMap<ValueId, ValueId> = BTreeMap::new();
+        let empty: FxHashMap<ValueId, ValueId> = FxHashMap::default();
         remap_value_ids(&mut op_remapped, &empty);
         assert_eq!(op_value_refs(&op_remapped), refs);
     }

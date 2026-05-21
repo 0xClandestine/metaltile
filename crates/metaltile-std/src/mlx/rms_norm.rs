@@ -39,6 +39,60 @@
 
 use metaltile::{bench_kernel, kernel};
 
+/// Cross-kernel callee: threadgroup-wide RMS inverse.
+///
+/// Given each thread's pre-computed `partial_ssq` (sum of squares for its
+/// slice of the row), reduces across the threadgroup and returns:
+///
+/// ```text
+///   rsqrt(reduce_sum(partial_ssq) / n + eps)
+/// ```
+///
+/// This kernel exists **only** as a cross-kernel callee. Kernels that fuse
+/// RMSNorm with a second operation (residual add, RoPE, quantized GEMV) call
+/// it via the DSL cross-kernel syntax so that the reduction + rsqrt body is
+/// expressed once and inlined by `KernelInlinePass` rather than copy-pasted.
+///
+/// ## Calling convention
+///
+/// ```rust
+/// // In the caller kernel body (after computing per-thread partial_ssq):
+/// let inv_rms = mt_rms_inv_scalar(partial_ssq, eps_buf, n);
+/// ```
+///
+/// - `partial_ssq` → `KernelCallArg::Value`: the callee's param-load is
+///   replaced by the caller's pre-computed scalar. No memory round-trip.
+/// - `eps_buf`, `n` → `KernelCallArg::Tensor`: the callee's loads are kept
+///   but renamed to the caller's buffer/constexpr names, so the inlined code
+///   reads the correct per-kernel eps and row length.
+/// - The output param `out` receives no arg; its store is skipped and the
+///   stored `inv_rms` value is returned as the call result.
+///
+/// ## Standalone vs inlined semantics
+///
+/// `mt_rms_inv_scalar` is a **valid standalone kernel**: `partial_ssq` is a
+/// real 1-element `Tensor<f32>` and `load(partial_ssq[0u32])` is a legal
+/// memory access. It can be dispatched directly (e.g. in tests) by passing a
+/// 1-element buffer containing the pre-summed partial sum.
+///
+/// When called via the cross-kernel DSL (`let inv = mt_rms_inv_scalar(g, ...)`)
+/// the caller passes `g` as a `KernelCallArg::Value` — a pre-computed scalar
+/// already in registers. `KernelInlinePass` detects the `Value` arg, skips the
+/// load, and substitutes `g` directly, eliminating the memory round-trip.
+/// This is load-forwarding: the callee is correct both ways.
+#[kernel]
+pub fn mt_rms_inv_scalar(
+    partial_ssq: Tensor<f32>,
+    eps_buf: Tensor<f32>,
+    mut out: Tensor<f32>,
+    #[constexpr] n: u32,
+) {
+    let v = load(partial_ssq[0u32]); // replaced by Value arg at inline time
+    let tg_ssq = reduce_sum(v);
+    let eps = load(eps_buf[0u32]);
+    store(out[0u32], rsqrt(tg_ssq / n + eps));
+}
+
 #[bench_kernel(
     op="rms_norm",
     subop="rms_norm",
