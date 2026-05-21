@@ -38,7 +38,7 @@ permissions:
   pull-requests: write
 
 env:
-  CLICOLOR: 1
+  CLICOLOR_FORCE: 1
 
 jobs:
   tile:
@@ -59,15 +59,13 @@ jobs:
       - name: Build
         run: cargo run --release -p metaltile-cli -- build
 
-      # `--no-diff` because the next step renders the diff against the
-      # committed baseline (rather than the in-tree one auto-diff would
-      # pick on a PR that already modified its own baseline) and posts
-      # it as a comment. `--allow-dirty` is defensive — CI checks out
+      # Diff is opt-in (`--diff`); the next step runs `tile diff` separately.
+      # `--allow-dirty` is defensive — CI checks out
       # clean, but a future codegen step could mutate a tracked file.
       - name: Bench
         run: |
           cargo run --release -p metaltile-cli -- bench -vv \
-            --allow-dirty --no-diff --json /tmp/bench.json
+            --allow-dirty --json /tmp/bench.json
 
       # Snapshot the raw bench JSON into the committed-baseline format
       # (`tile snap` envelope) and upload it as an artifact. snap runs

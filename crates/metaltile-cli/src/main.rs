@@ -68,9 +68,9 @@ struct BenchArgs {
     /// numbers always tie back to a clean commit SHA.
     #[arg(long = "allow-dirty")]
     allow_dirty: bool,
-    /// Skip the post-bench diff against the target-branch baseline.
-    #[arg(long = "no-diff")]
-    no_diff: bool,
+    /// Opt into the post-bench diff against the target-branch baseline.
+    #[arg(long = "diff")]
+    diff: bool,
     /// Git ref whose `baselines/<chip>.json` to diff against (default:
     /// first of `origin/dev`, `upstream/dev`, `dev` that resolves).
     #[arg(long = "baseline-ref")]
