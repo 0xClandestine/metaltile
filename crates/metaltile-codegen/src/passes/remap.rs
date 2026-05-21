@@ -21,7 +21,7 @@
 
 use std::collections::BTreeMap;
 
-use metaltile_core::ir::{IndexExpr, Kernel, Op, ValueId};
+use metaltile_core::ir::{IndexExpr, Kernel, KernelCallArg, Op, ValueId};
 use smallvec::SmallVec;
 
 // ---------------------------------------------------------------------------
@@ -120,6 +120,12 @@ pub fn remap_value_ids(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
         Op::InlineMsl { inputs, .. } =>
             for v in inputs {
                 s(v);
+            },
+        Op::KernelCall { args, .. } =>
+            for a in args {
+                if let KernelCallArg::Value(v) = a {
+                    s(v);
+                }
             },
         Op::FusedElementwise { ops } =>
             for sub_op in ops.iter_mut() {
@@ -337,6 +343,12 @@ pub fn op_value_refs(op: &Op) -> SmallVec<[ValueId; 4]> {
         Op::InlineMsl { inputs, .. } => {
             refs.extend(inputs.iter().copied());
         },
+        Op::KernelCall { args, .. } =>
+            for a in args {
+                if let KernelCallArg::Value(v) = a {
+                    refs.push(*v);
+                }
+            },
         Op::FusedElementwise { ops } =>
             for sub in ops {
                 refs.extend(op_value_refs(sub));
@@ -572,6 +584,12 @@ pub fn max_vid_in_op(op: &Op) -> u32 {
         Op::InlineMsl { inputs, .. } =>
             for v in inputs {
                 push(v);
+            },
+        Op::KernelCall { args, .. } =>
+            for a in args {
+                if let KernelCallArg::Value(v) = a {
+                    push(v);
+                }
             },
         Op::FusedElementwise { ops } =>
             for sub in ops {

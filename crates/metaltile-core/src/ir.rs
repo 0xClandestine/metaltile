@@ -391,6 +391,26 @@ pub enum IndexExpr {
     Range(ValueId, i64),
 }
 
+/// An argument to a cross-kernel call ([`Op::KernelCall`]).
+///
+/// - [`KernelCallArg::Value`]: a computed scalar value in the caller's SSA.
+///   `KernelInlinePass` replaces the callee's single load from this param
+///   with the given `ValueId`.  Use for pre-computed scalars (e.g. `g` in
+///   `mt_swiglu(g)`).
+///
+/// - [`KernelCallArg::Tensor`]: a buffer / constexpr name in the caller.
+///   `KernelInlinePass` substitutes the param name string in every callee
+///   `Op::Load` / `Op::Store` that references this param, keeping the ops
+///   so the full index arithmetic runs in the caller's context.  Use for
+///   multi-element tensors and constexprs (e.g. `mt_rms_norm(x, w, ...)`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum KernelCallArg {
+    /// A scalar computed value — replaces the callee's single param-load result.
+    Value(ValueId),
+    /// A named buffer / constexpr — substituted in all callee loads/stores.
+    Tensor(String),
+}
+
 /// A single operation in the IR.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
@@ -496,6 +516,24 @@ pub enum Op {
 
     /// Inline raw MSL code. Escape hatch.
     InlineMsl { source: String, inputs: Vec<ValueId>, outputs: Vec<TypedSlot> },
+
+    /// Cross-kernel call: inline another kernel's computation at this site.
+    ///
+    /// Resolved by [`KernelInlinePass`] (runs as the first pass in the
+    /// standard pipeline) so all subsequent passes see only flat scalar ops.
+    /// Keeping it as a first-class IR op preserves the callee name for
+    /// future fusion passes that want to recognize kernel composition patterns.
+    ///
+    /// `callee` is the registered kernel name (matches `KernelEntry::name`).
+    /// `args` are positionally matched to the callee's params in declaration
+    /// order; each arg is either a computed [`ValueId`] (scalar) or a buffer
+    /// name string (tensor / constexpr — substituted in the callee's IR).
+    /// `dtype` is the primary generic type to instantiate the callee with.
+    KernelCall {
+        callee: String,
+        args: Vec<KernelCallArg>,
+        dtype: DType,
+    },
 
     // ---- High-level ML primitives (lowered in a pass) ----
     /// Flash attention.
@@ -1105,6 +1143,17 @@ impl Op {
                         .join(", "),
                     outputs.len()
                 )
+            },
+            Op::KernelCall { callee, args, dtype } => {
+                let args_str = args
+                    .iter()
+                    .map(|a| match a {
+                        KernelCallArg::Value(v) => format!("v{}", v.as_u32()),
+                        KernelCallArg::Tensor(s) => format!("\"{}\"", s),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "KernelCall(\"{callee}\", args=[{args_str}], dtype={dtype:?})")
             },
             Op::FlashAttention { q, k, v: v_val, params } => {
                 write!(

@@ -37,6 +37,7 @@ use std::{
 };
 
 use metaltile_codegen::{MslGenerator, msl::MslConfig};
+use metaltile_core::KernelEntry;
 use metaltile_std::spec::{BenchSpec, effective_mode};
 
 // ── DSL builtin whitelist (mt_* and __mt_* symbols emitted by codegen) ──
@@ -317,6 +318,11 @@ fn kernel_annotations_have_matching_inventory_submit() {
     let mut registered_kernel_names: HashSet<String> = HashSet::new();
     for spec in inventory::iter::<BenchSpec>() {
         registered_kernel_names.insert(spec.kernel_name.to_string());
+    }
+    // Also accept kernels registered as KernelEntry building blocks
+    // (no BenchSpec needed — they serve as callees for cross-kernel calls).
+    for entry in inventory::iter::<KernelEntry>() {
+        registered_kernel_names.insert(entry.name.to_string());
     }
     assert!(!registered_kernel_names.is_empty(), "inventory empty — link issue?");
 

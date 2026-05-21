@@ -59,7 +59,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use metaltile_core::ir::{BinOpKind, Block, BlockId, Kernel, Op, UnaryOpKind, ValueId};
+use metaltile_core::ir::{BinOpKind, Block, BlockId, Kernel, KernelCallArg, Op, UnaryOpKind, ValueId};
 
 use super::remap;
 use crate::error::{Error, Result};
@@ -526,6 +526,12 @@ fn remap_values_in_op(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
         Op::InlineMsl { inputs, .. } =>
             for v in inputs.iter_mut() {
                 s(v);
+            },
+        Op::KernelCall { args, .. } =>
+            for a in args.iter_mut() {
+                if let KernelCallArg::Value(v) = a {
+                    s(v);
+                }
             },
         Op::FlashAttention { q, k, v, .. } => {
             s(q);

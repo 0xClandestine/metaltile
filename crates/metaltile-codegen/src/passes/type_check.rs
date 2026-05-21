@@ -287,6 +287,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::Cat { .. } => "Cat",
         Op::Slice { .. } => "Slice",
         Op::InlineMsl { .. } => "InlineMsl",
+        Op::KernelCall { .. } => "KernelCall",
         Op::FlashAttention { .. } => "FlashAttention",
         Op::SlidingWindowAttention { .. } => "SlidingWindowAttention",
         Op::RmsNorm { .. } => "RmsNorm",
@@ -627,6 +628,10 @@ fn infer_block(
                     let out_vid = ValueId::new(vid.as_u32() + oi as u32);
                     env.insert(out_vid, TypedValue { dtype: slot.dtype, shape: Shape::scalar() });
                 },
+
+            Op::KernelCall { dtype, .. } => {
+                env.insert(vid, TypedValue { dtype: *dtype, shape: Shape::scalar() });
+            },
 
             Op::Dequantize { .. } => {
                 // Dequantize produces a scalar f16 value (the dequantized weight element).
