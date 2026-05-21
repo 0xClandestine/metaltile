@@ -280,8 +280,18 @@ mod tests {
     // `Op`. Each test groups variants by category for readability.
 
     use metaltile_core::{
+        constexpr::ConstExpr,
         dtype::DType,
-        ir::{ActKind, AtomicKind, AtomicScope, AttnParams, ReduceKind, UnaryOpKind},
+        ir::{
+            ActKind,
+            AtomicKind,
+            AtomicScope,
+            AttnParams,
+            BlockId,
+            ReduceKind,
+            UnaryOpKind,
+            VarId,
+        },
         shape::Shape,
     };
 
@@ -602,5 +612,181 @@ mod tests {
 
         let cast = Op::Cast { value: ValueId::new(0), dtype: DType::F16 };
         assert!(is_cheap_alu(&cast));
+    }
+
+    // ── result-flag coverage ─────────────────────────────────────────
+    //
+    // Every Op variant must carry exactly one of:
+    //   - #[no_result]        (no SSA output)
+    //   - #[result_u32]       (u32 scalar)
+    //   - #[result_i32]       (i32 scalar)
+    //   - #[result_f32_scalar] (f32 scalar)
+    //   - #[result_f16_scalar] (f16 scalar)
+    //   - #[result_same_type] (copies first-input type)
+    //   - #[result_custom]    (explicit type-inference arm in type_check.rs)
+    //
+    // This catches new variants that forget a flag and silently
+    // produce wrong codegen downstream.
+    #[test]
+    fn every_variant_has_result_flag_or_no_result() {
+        // Instantiate every Op variant.  The assert_msg identifies
+        // the variant that lacks a flag.
+        let shape = Shape::scalar();
+        let vid = ValueId::new(0);
+
+        let all: &[(&str, Op)] = &[
+            ("ProgramId", Op::ProgramId { axis: 0 }),
+            ("Const", Op::Const { value: 0 }),
+            ("Arange", Op::Arange { start: None, step: None, len: ConstExpr::new("N") }),
+            ("Load", Op::Load { src: "x".into(), indices: vec![], mask: None, other: None }),
+            ("Store", Op::Store { dst: "x".into(), indices: vec![], value: vid, mask: None }),
+            ("BinOp", Op::BinOp { op: BinOpKind::Add, lhs: vid, rhs: vid }),
+            ("Dot", Op::Dot { a: vid, b: vid }),
+            ("Reduce", Op::Reduce { value: vid, axis: 0, op: ReduceKind::Sum }),
+            ("StrideReduce", Op::StrideReduce {
+                src: "x".into(),
+                offset: vid,
+                stride: vid,
+                end: vid,
+                op: ReduceKind::Sum,
+                dtype: DType::F32,
+                transform: None,
+                secondary_src: None,
+                secondary_base: None,
+            }),
+            ("Cast", Op::Cast { value: vid, dtype: DType::F32 }),
+            ("Loop", Op::Loop {
+                var: VarId::new(0),
+                start: vid,
+                end: vid,
+                step: vid,
+                body: BlockId::new(1),
+            }),
+            ("If", Op::If { cond: vid, then_block: BlockId::new(1), else_block: None }),
+            ("Zeros", Op::Zeros { dtype: DType::F32, shape: shape.clone() }),
+            ("Transpose", Op::Transpose { value: vid }),
+            ("ExpandDims", Op::ExpandDims { value: vid, axis: 0 }),
+            ("Reshape", Op::Reshape { value: vid, shape: shape.clone() }),
+            ("Cat", Op::Cat { values: vec![vid], axis: 0 }),
+            ("Slice", Op::Slice { value: vid, ranges: vec![(0, 0, 4)] }),
+            ("InlineMsl", Op::InlineMsl { source: "".into(), inputs: vec![], outputs: vec![] }),
+            ("FlashAttention", Op::FlashAttention {
+                q: vid,
+                k: vid,
+                v: vid,
+                params: AttnParams { scale: None, is_causal: false, dropout_p: 0.0 },
+            }),
+            ("SlidingWindowAttention", Op::SlidingWindowAttention {
+                q: vid,
+                k: vid,
+                v: vid,
+                window: 128,
+            }),
+            ("RmsNorm", Op::RmsNorm { x: vid, scale: vid, eps: 1e-5 }),
+            ("GatedMlp", Op::GatedMlp { x: vid, gate_proj: vid, up_proj: vid, down_proj: vid }),
+            ("UnaryOp", Op::UnaryOp { op: UnaryOpKind::Exp, value: vid }),
+            ("Activation", Op::Activation { kind: ActKind::Silu, value: vid }),
+            ("Select", Op::Select { cond: vid, on_true: vid, on_false: vid }),
+            ("Broadcast", Op::Broadcast { value: vid, shape: shape.clone() }),
+            ("Splat", Op::Splat { value: 1.0, dtype: DType::F32, shape: shape.clone() }),
+            ("FusedElementwise", Op::FusedElementwise { ops: vec![] }),
+            ("VectorLoad", Op::VectorLoad { src: "x".into(), byte_offset: vid, len: 4 }),
+            ("VectorStore", Op::VectorStore {
+                dst: "x".into(),
+                byte_offset: vid,
+                len: 4,
+                value: vid,
+            }),
+            ("VectorExtract", Op::VectorExtract { vec: vid, lane: 0 }),
+            ("Gather", Op::Gather { src: "x".into(), indices: vid, axis: 0 }),
+            ("Scatter", Op::Scatter { dst: "x".into(), indices: vid, value: vid, axis: 0 }),
+            ("Atomic", Op::Atomic {
+                op: AtomicKind::Add,
+                scope: AtomicScope::Device,
+                dst: "x".into(),
+                index: vid,
+                value: vid,
+            }),
+            ("Scan", Op::Scan { value: vid, axis: 0, op: ReduceKind::Sum, exclusive: false }),
+            ("StrideScan", Op::StrideScan {
+                src: "x".into(),
+                dst: "y".into(),
+                offset: vid,
+                end: vid,
+                op: ReduceKind::Sum,
+            }),
+            ("StrideArgReduce", Op::StrideArgReduce {
+                src: "x".into(),
+                offset: vid,
+                end: vid,
+                op: ReduceKind::Max,
+            }),
+            ("StrideStore", Op::StrideStore {
+                src: "x".into(),
+                dst: "y".into(),
+                offset: vid,
+                end: vid,
+                scalar: vid,
+                aux_src: None,
+            }),
+            ("Dequantize", Op::Dequantize {
+                weights: "w".into(),
+                scales: "s".into(),
+                zeros: "z".into(),
+                group_size: 64,
+                bits: 4,
+            }),
+            ("SimdReduce", Op::SimdReduce { value: vid, op: ReduceKind::Sum }),
+            ("SimdShuffleXor", Op::SimdShuffleXor { value: vid, mask: 1 }),
+            ("SimdBroadcast", Op::SimdBroadcast { value: vid, lane: vid }),
+            ("ThreadgroupAlloc", Op::ThreadgroupAlloc {
+                dtype: DType::F32,
+                size: 64,
+                name: "tg".into(),
+            }),
+            ("ThreadgroupLoad", Op::ThreadgroupLoad { name: "tg".into(), index: vid }),
+            ("ThreadgroupStore", Op::ThreadgroupStore {
+                name: "tg".into(),
+                index: vid,
+                value: vid,
+            }),
+            ("StackAlloc", Op::StackAlloc { dtype: DType::F32, size: 4, name: "s".into() }),
+            ("StackLoad", Op::StackLoad { name: "s".into(), index: vid }),
+            ("StackStore", Op::StackStore { name: "s".into(), index: vid, value: vid }),
+            ("Barrier", Op::Barrier),
+            ("SimdgroupBarrier", Op::SimdgroupBarrier),
+            ("SimdgroupAlloc", Op::SimdgroupAlloc { dtype: DType::F32, m: 8, n: 8 }),
+            ("SimdgroupElemLoad", Op::SimdgroupElemLoad { value: vid, index: 0 }),
+            ("SimdgroupElemStore", Op::SimdgroupElemStore { value: vid, index: 0, data: vid }),
+            ("SimdgroupLoad", Op::SimdgroupLoad {
+                dest: vid,
+                tg: "tg".into(),
+                offset: vid,
+                stride: 8,
+                transpose: false,
+            }),
+            ("SimdgroupMatMul", Op::SimdgroupMatMul { a: vid, b: vid, c: vid }),
+            ("SimdScan", Op::SimdScan { value: vid, op: ReduceKind::Sum, exclusive: false }),
+            ("SimdLaneId", Op::SimdLaneId),
+            ("SimdGroupId", Op::SimdGroupId),
+            ("DeclareLocal", Op::DeclareLocal { name: "l".into(), value: vid }),
+            ("SetLocal", Op::SetLocal { name: "l".into(), value: vid }),
+            ("ArgReduce", Op::ArgReduce { value: vid, axis: 0, op: ReduceKind::Max }),
+        ];
+
+        for (name, op) in all {
+            let has_result = op.is_result_u32_scalar()
+                || op.is_result_i32_scalar()
+                || op.is_result_f32_scalar()
+                || op.is_result_f16_scalar()
+                || op.is_result_same_type()
+                || op.is_result_custom()
+                || op.is_no_result();
+            assert!(
+                has_result,
+                "Op::{name} lacks a result-type flag (#[result_*], #[result_custom], or #[no_result]). \
+                 Add one in ir.rs so type inference is automatic."
+            );
+        }
     }
 }

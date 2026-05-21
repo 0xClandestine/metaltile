@@ -427,10 +427,15 @@ pub enum Op {
 
     /// `arange(start, step, len)` — creates a 1D range [start, start+step, ...].
     /// `start` and `step` default to 0.0 and 1.0 respectively.
+    #[shape_op]
+    #[result_custom]
+    #[result_custom]
     Arange { start: Option<f64>, step: Option<f64>, len: ConstExpr },
 
     /// Load a tile from a tensor at given indices.
     #[op_load]
+    #[result_custom]
+    #[result_custom]
     Load {
         /// The parameter to load from.
         src: String,
@@ -475,6 +480,8 @@ pub enum Op {
     },
 
     /// Tile matrix multiply: `dot(a, b)`.
+    #[result_custom]
+    #[result_custom]
     Dot {
         #[vid]
         a: ValueId,
@@ -485,6 +492,8 @@ pub enum Op {
     /// Reduction along an axis.
     #[needs_simd_lane]
     #[needs_simd_group]
+    #[result_custom]
+    #[result_custom]
     Reduce {
         #[vid]
         value: ValueId,
@@ -495,6 +504,8 @@ pub enum Op {
     /// Per-thread strided reduction over a device buffer.
     /// Reduces `src[offset]`, `src[offset+stride]`, `src[offset+2*stride]`, ... while index < `end`.
     /// If `transform` is set, the op is applied to each loaded element before accumulation.
+    #[result_custom]
+    #[result_custom]
     StrideReduce {
         src: String,
         /// First index to load (= tid for intra-row; = row*N + tid for full buffer).
@@ -521,6 +532,8 @@ pub enum Op {
     /// Type cast.
     #[elementwise]
     #[cheap_alu]
+    #[result_custom]
+    #[result_custom]
     Cast {
         #[vid]
         value: ValueId,
@@ -531,6 +544,7 @@ pub enum Op {
     #[unpredictable]
     #[op_loop]
     #[no_result]
+    #[result_custom]
     Loop {
         var: VarId,
         #[vid]
@@ -555,6 +569,8 @@ pub enum Op {
 
     /// Create a zero-filled tile.
     #[elementwise]
+    #[result_custom]
+    #[result_custom]
     Zeros {
         dtype: DType,
         /// Shape of the tile (usually a 2D tile).
@@ -562,6 +578,9 @@ pub enum Op {
     },
 
     /// Transpose a 2D tile.
+    #[shape_op]
+    #[result_custom]
+    #[result_custom]
     Transpose {
         #[vid]
         value: ValueId,
@@ -569,6 +588,7 @@ pub enum Op {
 
     /// Insert a size-1 dimension at `axis`. Zero-cost reshape.
     #[result_same_type]
+    #[shape_op]
     ExpandDims {
         #[vid]
         value: ValueId,
@@ -577,6 +597,7 @@ pub enum Op {
 
     /// Reshape a tile to a new shape (same element count). Zero-cost if contiguous.
     #[result_same_type]
+    #[shape_op]
     Reshape {
         #[vid]
         value: ValueId,
@@ -584,6 +605,8 @@ pub enum Op {
     },
 
     /// Concatenate tiles along `axis`.
+    #[result_custom]
+    #[result_custom]
     Cat {
         #[vid_vec]
         values: Vec<ValueId>,
@@ -591,6 +614,9 @@ pub enum Op {
     },
 
     /// Extract a slice of a tile.
+    #[shape_op]
+    #[result_custom]
+    #[result_custom]
     Slice {
         #[vid]
         value: ValueId,
@@ -599,6 +625,8 @@ pub enum Op {
     },
 
     /// Inline raw MSL code. Escape hatch.
+    #[result_custom]
+    #[result_custom]
     InlineMsl {
         source: String,
         #[vid_vec]
@@ -608,6 +636,8 @@ pub enum Op {
 
     // ---- High-level ML primitives (lowered in a pass) ----
     /// Flash attention.
+    #[result_custom]
+    #[result_custom]
     FlashAttention {
         #[vid]
         q: ValueId,
@@ -619,6 +649,8 @@ pub enum Op {
     },
 
     /// Sliding window attention.
+    #[result_custom]
+    #[result_custom]
     SlidingWindowAttention {
         #[vid]
         q: ValueId,
@@ -630,6 +662,8 @@ pub enum Op {
     },
 
     /// RMS normalization.
+    #[result_custom]
+    #[result_custom]
     RmsNorm {
         #[vid]
         x: ValueId,
@@ -639,6 +673,8 @@ pub enum Op {
     },
 
     /// Gated MLP block.
+    #[result_custom]
+    #[result_custom]
     GatedMlp {
         #[vid]
         x: ValueId,
@@ -686,6 +722,8 @@ pub enum Op {
 
     /// Broadcast a scalar value to fill a tile shape (replication, no copy to device memory).
     #[elementwise]
+    #[result_custom]
+    #[result_custom]
     Broadcast {
         #[vid]
         value: ValueId,
@@ -694,12 +732,16 @@ pub enum Op {
 
     /// Create a tile filled with a constant floating-point value (generalization of Zeros).
     #[elementwise]
+    #[result_custom]
+    #[result_custom]
     Splat { value: f64, dtype: DType, shape: Shape },
 
     /// Fused chain of elementwise operations.
     /// Created by the FusionPass to merge adjacent ops like
     /// `UnaryOp(Exp) → Activation(Silu)` into a single expression.
     #[op_fused]
+    #[result_custom]
+    #[result_custom]
     FusedElementwise {
         /// The elementwise ops in execution order (producer first).
         /// Each op's inputs reference either external ValueIds or
@@ -711,6 +753,8 @@ pub enum Op {
     /// Vectorized load: loads `len` consecutive elements as a vector.
     /// `len` is 2, 4, or 8. Created by the VectorizePass from consecutive scalar Loads.
     #[op_load]
+    #[result_custom]
+    #[result_custom]
     VectorLoad {
         /// The parameter to load from.
         src: String,
@@ -740,6 +784,8 @@ pub enum Op {
 
     /// Project one scalar lane (0..len) out of a VectorLoad result.
     /// Emitted by VectorizePass to feed each original scalar consumer.
+    #[result_custom]
+    #[result_custom]
     VectorExtract {
         #[vid]
         vec: ValueId,
@@ -747,6 +793,8 @@ pub enum Op {
     },
 
     /// Gather: indexed load from a buffer. `out[i] = src[indices[i]]`.
+    #[result_custom]
+    #[result_custom]
     Gather {
         src: String,
         #[vid]
@@ -796,6 +844,7 @@ pub enum Op {
     /// Writes `dst[i] = src[offset] + src[offset+1] + ... + src[i]` for i in [offset, end).
     /// Single-threaded: dispatch with [B, 1, 1] × [1, 1, 1] (one thread per row).
     #[unpredictable]
+    #[result_custom]
     StrideScan {
         src: String,
         dst: String,
@@ -963,11 +1012,13 @@ pub enum Op {
     /// Built-in: returns the SIMD lane index (thread_index_in_simdgroup).
     #[needs_simd_lane]
     #[result_u32]
+    #[shape_op]
     SimdLaneId,
 
     /// Built-in: returns the SIMD group index (simdgroup_index_in_threadgroup).
     #[needs_simd_group]
     #[result_u32]
+    #[shape_op]
     SimdGroupId,
 
     /// SIMD-group inclusive prefix scan.
@@ -1010,6 +1061,8 @@ pub enum Op {
 
     /// Load one element from a named threadgroup array: `val = name[index]`.
     #[op_load]
+    #[result_custom]
+    #[result_custom]
     ThreadgroupLoad {
         name: String,
         #[vid]
@@ -1043,6 +1096,8 @@ pub enum Op {
     /// Identical emission to `ThreadgroupLoad`; kept distinct in the IR so
     /// liveness / scoping passes know the buffer is thread-private.
     #[op_load]
+    #[result_custom]
+    #[result_custom]
     StackLoad {
         name: String,
         #[vid]
@@ -1085,6 +1140,8 @@ pub enum Op {
     /// Emits: `auto __ml_{name} = {init_value};`
     /// Used for loop-carried state (running prefix, best_val/best_idx, etc.).
     #[unpredictable]
+    #[result_custom]
+    #[result_custom]
     DeclareLocal {
         name: String,
         #[vid]

@@ -69,6 +69,7 @@ pub fn derive_value_refs(input: TokenStream) -> TokenStream { derive_op::derive_
         op_if,
         op_fused,
         op_const,
+        shape_op,
         needs_simd_lane,
         needs_simd_group,
         needs_simdgroup_matrix,
@@ -78,16 +79,17 @@ pub fn derive_value_refs(input: TokenStream) -> TokenStream { derive_op::derive_
         result_i32,
         result_f32_scalar,
         result_f16_scalar,
-        result_same_type
+        result_same_type,
+        result_custom
     )
 )]
 pub fn derive_op_flags(input: TokenStream) -> TokenStream { derive_op::derive_op_flags(input) }
 
 /// Derive `Op::variant_name()` — returns the variant identifier as a &'static str.
 ///
-/// Supports `#[name("CustomName")]` on variants that need a display name different
+/// Supports `#[variant_name("CustomName")]` on variants that need a display name different
 /// from their Rust identifier.
-#[proc_macro_derive(VariantName, attributes(name))]
+#[proc_macro_derive(VariantName, attributes(variant_name))]
 pub fn derive_variant_name(input: TokenStream) -> TokenStream {
     derive_op::derive_variant_name(input)
 }

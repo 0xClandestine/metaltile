@@ -286,21 +286,8 @@ fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
     if let Some(src) = op.load_src() {
         return read_only.contains(src);
     }
-    // Elementwise and cheap-ALU ops are always pure.
-    // Shape-manipulation ops (Arange, Transpose, Reshape, etc.) are also
-    // pure but not flagged elementwise — list them explicitly.
-    op.is_elementwise()
-        || op.is_cheap_alu()
-        || matches!(
-            op,
-            Op::Arange { .. }
-                | Op::Transpose { .. }
-                | Op::ExpandDims { .. }
-                | Op::Reshape { .. }
-                | Op::Slice { .. }
-                | Op::SimdLaneId
-                | Op::SimdGroupId
-        )
+    // Elementwise, cheap-ALU, and shape-manipulation ops are always pure.
+    op.is_elementwise() || op.is_cheap_alu() || op.is_shape_op()
 }
 
 #[cfg(test)]

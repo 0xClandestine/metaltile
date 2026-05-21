@@ -1,12 +1,24 @@
 //! `#[derive(ValueRefs)]`, `#[derive(OpFlags)]`, and `#[derive(VariantName)]` for the `Op` enum.
 //!
+//! ## Generated code references core types by name
+//!
+//! The generated `impl Op` methods reference these `metaltile_core` symbols
+//! through `quote!` tokens — if any are renamed in `metaltile-core`, the
+//! consumer's rustc error will point at generated code.  Keep this list in
+//! sync:
+//!
+//! - `::smallvec::SmallVec`
+//! - `ValueId` (bare name, imported from `metaltile_core::ir`)
+//! - `IndexExpr::value_id()` / `IndexExpr::value_id_mut()`
+//! - `Op` (bare name, the enum itself — self-referential in `#[vid_recursive]` arms)
+//!
 //! ## ValueRefs
 //!
 //! Generates two methods on the annotated enum:
 //!
 //! ```ignore
 //! pub fn value_refs(&self) -> ::smallvec::SmallVec<[&ValueId; 4]>
-//! pub fn for_each_value_id_mut(&mut self, f: &mut dyn FnMut(&mut ValueId))
+//! pub fn for_each_value_id_mut<F: FnMut(&mut ValueId)>(&mut self, f: &mut F)
 //! ```
 //!
 //! Field annotations control which fields participate:
@@ -179,7 +191,7 @@ pub fn derive_value_refs(input: TokenStream) -> TokenStream {
             /// Prefer this over `value_refs_mut()` for substitution passes:
             /// the callback pattern avoids lifetime conflicts when `ValueId`s
             /// are nested inside `Vec<IndexExpr>` or `Vec<Op>`.
-            pub fn for_each_value_id_mut(&mut self, f: &mut dyn FnMut(&mut ValueId)) {
+            pub fn for_each_value_id_mut<F: FnMut(&mut ValueId)>(&mut self, f: &mut F) {
                 match self { #(#visit_arms,)* }
             }
         }
@@ -193,7 +205,7 @@ pub fn derive_value_refs(input: TokenStream) -> TokenStream {
 
 /// Generates `fn variant_name(&self) -> &'static str` from variant idents.
 ///
-/// Supports `#[name("CustomName")]` on variants that need a name different
+/// Supports `#[variant_name("CustomName")]` on variants that need a name different
 /// from their Rust identifier.
 pub fn derive_variant_name(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -237,10 +249,10 @@ pub fn derive_variant_name(input: TokenStream) -> TokenStream {
     expanded.into()
 }
 
-/// Extract a `#[name("...")]` override from a variant's attributes.
+/// Extract a `#[variant_name("...")]` override from a variant's attributes.
 fn variant_name_override(variant: &syn::Variant) -> Option<String> {
     for attr in &variant.attrs {
-        if !attr.path().is_ident("name") {
+        if !attr.path().is_ident("variant_name") {
             continue;
         }
         // Parse the attribute: #[name("Foo")]
@@ -281,6 +293,7 @@ pub fn derive_op_flags(input: TokenStream) -> TokenStream {
         ("op_if", "is_if"),
         ("op_fused", "is_fused_elementwise"),
         ("op_const", "is_const"),
+        ("shape_op", "is_shape_op"),
         // Feature-requirement flags
         ("needs_simd_lane", "needs_simd_lane"),
         ("needs_simd_group", "needs_simd_group"),
@@ -294,6 +307,7 @@ pub fn derive_op_flags(input: TokenStream) -> TokenStream {
         ("result_f32_scalar", "is_result_f32_scalar"),
         ("result_f16_scalar", "is_result_f16_scalar"),
         ("result_same_type", "is_result_same_type"),
+        ("result_custom", "is_result_custom"),
     ];
 
     let methods: Vec<TokenStream2> = flags
