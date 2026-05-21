@@ -66,16 +66,36 @@ fn kernel_uses_program_id_axis(kernel: &Kernel, axis: u32) -> bool {
 #[derive(Clone)]
 pub struct MslGenerator {
     config: MslConfig,
+    /// When `Some`, replaces the default `SchedulePass` in the
+    /// optimization pipeline. The autotuner uses this to bench the same
+    /// kernel under different tile sizes / threadgroup shapes without
+    /// having to thread a config through every dispatch arm.
+    schedule_override: Option<passes::schedule::ScheduleConfig>,
 }
 
 impl MslGenerator {
-    pub fn new(config: MslConfig) -> Self { MslGenerator { config } }
+    pub fn new(config: MslConfig) -> Self { MslGenerator { config, schedule_override: None } }
+
+    /// Replace the pipeline's default `SchedulePass` with one built from
+    /// `cfg`. See [`MslGenerator::schedule_override`].
+    pub fn with_schedule_override(mut self, cfg: passes::schedule::ScheduleConfig) -> Self {
+        self.schedule_override = Some(cfg);
+        self
+    }
+
+    fn pipeline(&self) -> Vec<Box<dyn passes::Pass>> {
+        match &self.schedule_override {
+            Some(cfg) =>
+                passes::PipelineBuilder::standard().with_schedule_config(cfg.clone()).build(),
+            None => passes::standard_pipeline(),
+        }
+    }
 
     /// Like [`generate`] but also returns per-pass statistics.
     #[tracing::instrument(skip(self, kernel), fields(kernel = %kernel.name))]
     pub fn generate_with_stats(&self, kernel: &Kernel) -> Result<(String, Vec<passes::PassStats>)> {
         let mut k = kernel.clone();
-        let stats = passes::run_passes_with_stats(&mut k, &passes::standard_pipeline())?;
+        let stats = passes::run_passes_with_stats(&mut k, &self.pipeline())?;
         let msl = self.emit_msl(&k)?;
         Ok((msl, stats))
     }
@@ -84,7 +104,7 @@ impl MslGenerator {
     pub fn generate(&self, kernel: &Kernel) -> Result<String> {
         // Run the optimization pipeline on a clone before emitting.
         let mut k = kernel.clone();
-        passes::run_passes_with_stats(&mut k, &passes::standard_pipeline())?;
+        passes::run_passes_with_stats(&mut k, &self.pipeline())?;
         // Per-kernel opt-in overrides the default-off
         // `bfloat_reinterpret_cast` config. See the field doc on
         // `Kernel` for why this is opt-in (truncation vs rounding

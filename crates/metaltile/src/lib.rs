@@ -88,6 +88,8 @@ pub use metaltile_codegen::error::Error as CodegenError;
 pub use metaltile_core as core;
 /// Proc macros and helper macros used by kernel definitions.
 pub use metaltile_macros::{bench_kernel, constexpr, kernel, shape, tile};
+/// Autotuner cache, search loop, and per-family config spaces.
+pub use metaltile_runtime::autotune;
 /// Runtime context, dispatch result, and top-level runtime error.
 pub use metaltile_runtime::{Context, DispatchResult, MetalTileError};
 /// Placeholder tensor marker used in `#[kernel]` signatures.
