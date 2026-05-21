@@ -245,7 +245,7 @@ fn add_op_context(
     op: &Op,
     result: Option<ValueId>,
 ) -> Error {
-    let mut ctx = format!("block {} op #{} ({})", block.id.as_u32(), op_idx, op_name(op));
+    let mut ctx = format!("block {} op #{} ({})", block.id.as_u32(), op_idx, op.variant_name());
     if let Some(vid) = result {
         ctx.push_str(&format!(" -> {vid}"));
     }
@@ -264,75 +264,6 @@ fn add_op_context(
         Error::InvalidDType(msg) => format!("invalid dtype: {msg}"),
     };
     Error::Validation(format!("{ctx}: {detail}"))
-}
-
-fn op_name(op: &Op) -> &'static str {
-    match op {
-        Op::ProgramId { .. } => "ProgramId",
-        Op::Const { .. } => "Const",
-        Op::Arange { .. } => "Arange",
-        Op::Load { .. } => "Load",
-        Op::Store { .. } => "Store",
-        Op::BinOp { .. } => "BinOp",
-        Op::Dot { .. } => "Dot",
-        Op::Reduce { .. } => "Reduce",
-        Op::StrideReduce { .. } => "StrideReduce",
-        Op::Cast { .. } => "Cast",
-        Op::Loop { .. } => "Loop",
-        Op::If { .. } => "If",
-        Op::Zeros { .. } => "Zeros",
-        Op::Transpose { .. } => "Transpose",
-        Op::ExpandDims { .. } => "ExpandDims",
-        Op::Reshape { .. } => "Reshape",
-        Op::Cat { .. } => "Cat",
-        Op::Slice { .. } => "Slice",
-        Op::InlineMsl { .. } => "InlineMsl",
-        Op::KernelCall { .. } => "KernelCall",
-        Op::FlashAttention { .. } => "FlashAttention",
-        Op::SlidingWindowAttention { .. } => "SlidingWindowAttention",
-        Op::RmsNorm { .. } => "RmsNorm",
-        Op::GatedMlp { .. } => "GatedMlp",
-        Op::UnaryOp { .. } => "UnaryOp",
-        Op::Activation { .. } => "Activation",
-        Op::Select { .. } => "Select",
-        Op::Broadcast { .. } => "Broadcast",
-        Op::Splat { .. } => "Splat",
-        Op::FusedElementwise { .. } => "FusedElementwise",
-        Op::VectorLoad { .. } => "VectorLoad",
-        Op::VectorStore { .. } => "VectorStore",
-        Op::VectorExtract { .. } => "VectorExtract",
-        Op::Gather { .. } => "Gather",
-        Op::Scatter { .. } => "Scatter",
-        Op::Atomic { .. } => "Atomic",
-        Op::Scan { .. } => "Scan",
-        Op::StrideStore { .. } => "StrideStore",
-        Op::Dequantize { .. } => "Dequantize",
-        Op::SimdReduce { .. } => "SimdReduce",
-        Op::SimdShuffleXor { .. } => "SimdShuffleXor",
-        Op::SimdBroadcast { .. } => "SimdBroadcast",
-        Op::ThreadgroupAlloc { .. } => "ThreadgroupAlloc",
-        Op::ThreadgroupLoad { .. } => "ThreadgroupLoad",
-        Op::ThreadgroupStore { .. } => "ThreadgroupStore",
-        Op::StackAlloc { .. } => "StackAlloc",
-        Op::StackLoad { .. } => "StackLoad",
-        Op::StackStore { .. } => "StackStore",
-        Op::Barrier => "Barrier",
-        Op::SimdgroupBarrier => "SimdgroupBarrier",
-        Op::SimdgroupAlloc { .. } => "SimdgroupAlloc",
-        Op::SimdgroupElemLoad { .. } => "SimdgroupElemLoad",
-        Op::SimdgroupElemStore { .. } => "SimdgroupElemStore",
-        Op::SimdgroupLoad { .. } => "SimdgroupLoad",
-        Op::SimdgroupMatMul { .. } => "SimdgroupMatMul",
-        Op::SimdScan { .. } => "SimdScan",
-        Op::SimdLaneId => "SimdLaneId",
-        Op::SimdGroupId => "SimdGroupId",
-        Op::DeclareLocal { .. } => "DeclareLocal",
-        Op::SetLocal { .. } => "SetLocal",
-        Op::ArgReduce { .. } => "ArgReduce",
-        Op::StrideScan { .. } => "StrideScan",
-        Op::StrideArgReduce { .. } => "StrideArgReduce",
-        Op::Pack { .. } => "Pack",
-    }
 }
 
 fn require_param<'a>(kernel: &'a Kernel, name: &str) -> CoreResult<&'a Param> {
@@ -474,12 +405,6 @@ fn infer_block(
 
         match op {
             // ---- indexing ------------------------------------------
-            Op::ProgramId { .. } => {
-                env.insert(vid, TypedValue { dtype: DType::U32, shape: Shape::scalar() });
-            },
-            Op::Const { .. } => {
-                env.insert(vid, TypedValue { dtype: DType::I32, shape: Shape::scalar() });
-            },
             Op::Arange { len, .. } => {
                 env.insert(vid, TypedValue {
                     dtype: DType::U32,
@@ -630,17 +555,15 @@ fn infer_block(
                     env.insert(out_vid, TypedValue { dtype: slot.dtype, shape: Shape::scalar() });
                 },
 
-            Op::KernelCall { dtype, .. } => {
-                env.insert(vid, TypedValue { dtype: *dtype, shape: Shape::scalar() });
-            },
-
             Op::Dequantize { .. } => {
                 // Dequantize produces a scalar f16 value (the dequantized weight element).
                 env.insert(vid, TypedValue { dtype: DType::F16, shape: Shape::scalar() });
             },
 
+            // SimdReduce/SimdShuffleXor/SimdBroadcast: same type as input,
+            // with F32 fallback.  (Explicit rather than relying on the
+            // result_same_type guard because of the fallback.)
             Op::SimdReduce { value, .. } | Op::SimdShuffleXor { value, .. } => {
-                // Same type as input
                 if let Some(tv) = env.get(value).cloned() {
                     env.insert(vid, tv);
                 } else {
@@ -648,8 +571,6 @@ fn infer_block(
                 }
             },
             Op::SimdBroadcast { value, .. } => {
-                // Same scalar type as the input value; the cross-lane broadcast
-                // doesn't change dtype or shape.
                 if let Some(tv) = env.get(value).cloned() {
                     env.insert(vid, tv);
                 } else {
@@ -682,46 +603,22 @@ fn infer_block(
                 let dtype = stack_dtypes.get(name).copied().unwrap_or(DType::F32);
                 env.insert(vid, TypedValue { dtype, shape: Shape::scalar() });
             },
-            Op::ArgReduce { .. } | Op::StrideArgReduce { .. } => {
-                env.insert(vid, TypedValue { dtype: DType::U32, shape: Shape::scalar() });
-            },
             Op::StrideScan { .. } => {
                 // Side-effect only — writes directly to dst buffer, no SSA result.
             },
+            // No-result ops (derived from #[no_result] on Op variants via OpFlags).
+            _ if op.is_no_result() => {},
+            // High-level ops that need lowering passes; not yet typable.
             Op::FlashAttention { .. }
             | Op::SlidingWindowAttention { .. }
             | Op::RmsNorm { .. }
             | Op::GatedMlp { .. }
-            | Op::Store { .. }
+            // Ops that produce a result but whose types are not yet
+            // inferred by this pass (relies on Metal compiler inference).
             | Op::VectorLoad { .. }
-            | Op::VectorStore { .. }
             | Op::VectorExtract { .. }
-            | Op::If { .. }
             | Op::Cat { .. }
-            | Op::Scatter { .. }
-            | Op::Atomic { .. }
-            | Op::StrideStore { .. }
-            | Op::ThreadgroupAlloc { .. }
-            | Op::ThreadgroupStore { .. }
-            | Op::StackAlloc { .. }
-            | Op::StackStore { .. }
-            | Op::Barrier
-            | Op::SimdgroupBarrier
-            | Op::DeclareLocal { .. }
-            | Op::SetLocal { .. }
-            | Op::SimdgroupMatMul { .. }
-            | Op::SimdgroupElemStore { .. }
-            | Op::SimdgroupLoad { .. } => {
-                // No output value to type (or side-effect-only op).
-            },
-            Op::Pack { .. } => {
-                // Pack produces a vector value — type is inferred from context
-                // (the VectorStore it feeds).  Default to scalar for safety.
-                env.insert(vid, TypedValue { dtype: DType::F32, shape: Shape::scalar() });
-            },
-            Op::SimdgroupAlloc { .. } | Op::SimdgroupElemLoad { .. } | Op::SimdScan { .. } => {
-                env.insert(vid, TypedValue { dtype: DType::F32, shape: Shape::scalar() });
-            },
+            | Op::DeclareLocal { .. } => {},
             // ExpandDims/Reshape emit `auto v = rv;` (emit_block.rs aliases the input
             // value), so downstream BinOps must see the input dtype — without this,
             // any chain off a reshape inherits no dtype and trips the fma-int guard.
@@ -730,10 +627,6 @@ fn infer_block(
                     env.insert(vid, tv);
                 }
             },
-            Op::SimdLaneId | Op::SimdGroupId => {
-                env.insert(vid, TypedValue { dtype: DType::U32, shape: Shape::scalar() });
-            },
-
             Op::FusedElementwise { ops } => {
                 // The final op determines the output type.
                 // Walk the chain to build local types, then use the last op.
@@ -810,6 +703,33 @@ fn infer_block(
                     env.insert(vid, tv.clone());
                 }
             },
+            // ---- Derived result-type hints (OpFlags annotations) ----
+            // These guards provide automatic type inference for ops annotated with
+            // #[result_*] attributes. Explicit arms above take precedence.
+            _ if op.is_result_u32_scalar() => {
+                env.insert(vid, TypedValue { dtype: DType::U32, shape: Shape::scalar() });
+            },
+            _ if op.is_result_i32_scalar() => {
+                env.insert(vid, TypedValue { dtype: DType::I32, shape: Shape::scalar() });
+            },
+            _ if op.is_result_f32_scalar() => {
+                env.insert(vid, TypedValue { dtype: DType::F32, shape: Shape::scalar() });
+            },
+            _ if op.is_result_f16_scalar() => {
+                env.insert(vid, TypedValue { dtype: DType::F16, shape: Shape::scalar() });
+            },
+            _ if op.is_result_same_type() => {
+                // Result type = first input's type.  Look up the first ValueId
+                // reference in the type environment.
+                if let Some(first_vid) = op.value_refs().first().copied()
+                    && let Some(tv) = env.get(first_vid)
+                {
+                    env.insert(vid, tv.clone());
+                }
+            },
+            // Catch-all for ops that haven't been explicitly matched above.
+            // New ops with derived type annotations should be added above.
+            _ => {},
         }
     }
     Ok(())

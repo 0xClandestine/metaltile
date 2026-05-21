@@ -120,8 +120,8 @@ fn licm_block(
     let mut plans: Vec<HoistPlan> = Vec::new();
 
     for i in 0..n {
-        if let Op::Loop { var, body, .. } = &block.ops[i] {
-            let Some(loop_body) = blocks.get(body) else {
+        if let Some((var, _, _, _, body)) = block.ops[i].as_loop() {
+            let Some(loop_body) = blocks.get(&body) else {
                 continue;
             };
 
@@ -202,7 +202,7 @@ fn licm_block(
                 loop_idx: i,
                 hoisted_ops,
                 hoisted_results,
-                body_id: *body,
+                body_id: body,
                 removal_indices: hoist_indices,
             });
         }
@@ -282,76 +282,12 @@ fn remove_ops_from_block(block: &mut Block, indices: &[usize]) {
 
 /// Return true if the op is pure (no side effects) and safe to hoist.
 fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
-    match op {
-        Op::BinOp { .. }
-        | Op::UnaryOp { .. }
-        | Op::Cast { .. }
-        | Op::Activation { .. }
-        | Op::Select { .. }
-        | Op::Const { .. }
-        | Op::ProgramId { .. }
-        | Op::Arange { .. }
-        | Op::Zeros { .. }
-        | Op::Splat { .. }
-        | Op::Broadcast { .. }
-        | Op::Transpose { .. }
-        | Op::ExpandDims { .. }
-        | Op::Reshape { .. }
-        | Op::Slice { .. }
-        | Op::SimdLaneId
-        | Op::SimdGroupId
-        | Op::Pack { .. } => true,
-
-        // Load from a read-only (const) param is pure.
-        Op::Load { src, .. } => read_only.contains(src.as_str()),
-
-        // NOT pure — side effects or loop-dependent:
-        Op::Store { .. }
-        | Op::Atomic { .. }
-        | Op::Barrier
-        | Op::SimdgroupBarrier
-        | Op::SimdgroupAlloc { .. }
-        | Op::ThreadgroupStore { .. }
-        | Op::SetLocal { .. }
-        | Op::DeclareLocal { .. }
-        | Op::Loop { .. }
-        | Op::If { .. }
-        | Op::InlineMsl { .. }
-        | Op::KernelCall { .. }
-        | Op::VectorStore { .. }
-        | Op::VectorExtract { .. }
-        | Op::Scatter { .. }
-        | Op::ThreadgroupLoad { .. }
-        | Op::ThreadgroupAlloc { .. }
-        | Op::StackLoad { .. }
-        | Op::StackStore { .. }
-        | Op::StackAlloc { .. }
-        | Op::StrideStore { .. }
-        | Op::Dequantize { .. }
-        | Op::SimdReduce { .. }
-        | Op::SimdShuffleXor { .. }
-        | Op::SimdScan { .. }
-        | Op::SimdBroadcast { .. }
-        | Op::ArgReduce { .. }
-        | Op::FusedElementwise { .. }
-        | Op::VectorLoad { .. }
-        | Op::StrideReduce { .. }
-        | Op::StrideScan { .. }
-        | Op::StrideArgReduce { .. }
-        | Op::Cat { .. }
-        | Op::Gather { .. }
-        | Op::Scan { .. }
-        | Op::Reduce { .. }
-        | Op::Dot { .. }
-        | Op::FlashAttention { .. }
-        | Op::SlidingWindowAttention { .. }
-        | Op::RmsNorm { .. }
-        | Op::GatedMlp { .. }
-        | Op::SimdgroupMatMul { .. }
-        | Op::SimdgroupElemLoad { .. }
-        | Op::SimdgroupElemStore { .. }
-        | Op::SimdgroupLoad { .. } => false,
+    // Load is pure only when the source is a read-only (const) param.
+    if let Some(src) = op.load_src() {
+        return read_only.contains(src);
     }
+    // Elementwise, cheap-ALU, and shape-manipulation ops are always pure.
+    op.is_elementwise() || op.is_cheap_alu() || op.is_shape_op()
 }
 
 #[cfg(test)]

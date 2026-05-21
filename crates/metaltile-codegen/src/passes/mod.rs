@@ -113,11 +113,8 @@ impl PassRegistry {
     /// The standard pass order (names, in pipeline sequence).
     ///
     /// TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM
-    ///   → IfConversion → ValueSink → TileLowering → Fusion → Unroll
-    ///   → Schedule → Vectorize → CSE_2 → ConstFold_2 → DeadStoreElim
-    ///
-    /// CSE_2 + ConstFold_2 clean up duplicate ops (e.g. repeated scalar
-    /// Cast ops on the same vector) created by the vectorize pass.
+    ///   → IfConversion → ValueSink → Fusion → Unroll
+    ///   → Schedule → Vectorize → DeadStoreElim
     pub fn order() -> &'static [&'static str] {
         &[
             "kernel_inline",
@@ -129,13 +126,10 @@ impl PassRegistry {
             "licm",
             "if_conversion",
             "value_sink",
-            "tile_lowering",
             "fusion",
             "unroll",
             "schedule",
             "vectorize",
-            "cse_2",
-            "const_fold_2",
             "dead_store_elim",
         ]
     }

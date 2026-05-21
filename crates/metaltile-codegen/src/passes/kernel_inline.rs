@@ -33,6 +33,8 @@
 //!    used (causing a compile error if actually referenced — better than
 //!    silent wrong code).
 
+use std::collections::BTreeMap;
+
 use metaltile_core::{
     KernelEntry,
     dtype::DType,
@@ -176,7 +178,7 @@ fn inline_callee(
         .map(|(j, &name)| (name, args.get(n_input_slots + j)))
         .collect();
 
-    let mut vid_map: FxHashMap<ValueId, ValueId> = FxHashMap::default();
+    let mut vid_map: BTreeMap<ValueId, ValueId> = BTreeMap::new();
     let mut next_vid = vid_offset;
 
     // Single pre-pass: seed Value-arg load results into vid_map, and map the
@@ -294,7 +296,7 @@ fn inline_callee(
 /// mapping or allocating a fresh vid.
 fn assign_result(
     op_result: &Option<ValueId>,
-    vid_map: &mut FxHashMap<ValueId, ValueId>,
+    vid_map: &mut BTreeMap<ValueId, ValueId>,
     next_vid: &mut u32,
 ) -> Option<ValueId> {
     op_result.map(|r| {

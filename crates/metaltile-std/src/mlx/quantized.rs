@@ -2816,7 +2816,7 @@ pub fn patch_qmm_mma_dtype_aware_skew(
     kernel: &mut metaltile_core::ir::Kernel,
     dtype: metaltile_core::dtype::DType,
 ) {
-    use metaltile_core::{dtype::DType, ir::Op};
+    use metaltile_core::dtype::DType;
     // f32 keeps its default 36 stride — nothing to do.
     let bytes = match dtype {
         DType::F32 => 4,
@@ -2839,7 +2839,7 @@ pub fn patch_qmm_mma_dtype_aware_skew(
         // Find the op slot producing this ValueId.
         for (i, r) in kernel.body.results.iter().enumerate() {
             if r.map(|v| v == *vid).unwrap_or(false)
-                && let Op::Const { value } = &mut kernel.body.ops[i]
+                && let Some(value) = kernel.body.ops[i].as_const_mut()
             {
                 *value = new_ld;
             }
@@ -2847,7 +2847,7 @@ pub fn patch_qmm_mma_dtype_aware_skew(
     }
     // Patch ThreadgroupAlloc sizes for `xs` and `ws` (1152 → 1280 at f16).
     for op in kernel.body.ops.iter_mut() {
-        if let Op::ThreadgroupAlloc { name, size, .. } = op
+        if let Some((name, size)) = op.as_threadgroup_alloc_mut()
             && (name == "xs" || name == "ws")
         {
             *size = new_alloc;

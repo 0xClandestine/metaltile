@@ -173,9 +173,5 @@ impl MslGenerator {
 
 /// Extract the result `ValueId` encoded inside certain leaf ops (used by fused expression emission).
 pub(super) fn op_to_vid(op: &Op) -> ValueId {
-    match op {
-        Op::ProgramId { .. } => ValueId::new(0),
-        Op::Const { value } => ValueId::new(*value as u32),
-        _ => ValueId::new(0),
-    }
+    op.as_const().map(|v| ValueId::new(v as u32)).unwrap_or(ValueId::new(0))
 }

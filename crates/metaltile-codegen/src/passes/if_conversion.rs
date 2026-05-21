@@ -87,10 +87,10 @@ enum CfgShape {
 }
 
 fn classify(op: &Op) -> CfgShape {
-    match op {
-        Op::If { else_block: None, .. } => CfgShape::Triangle,
-        Op::If { else_block: Some(_), .. } => CfgShape::Diamond,
-        _ => unreachable!(),
+    if op.as_if().is_some_and(|(_, _, eb)| eb.is_none()) {
+        CfgShape::Triangle
+    } else {
+        CfgShape::Diamond
     }
 }
 
@@ -139,8 +139,8 @@ fn if_convert_block(block: &mut Block, blocks: &mut BTreeMap<BlockId, Block>) {
     let mut conversions: Vec<Conversion> = Vec::new();
 
     for i in 0..n {
-        if let Op::If { cond, then_block: then_id, else_block: else_id } = &block.ops[i] {
-            let Some(then_block) = blocks.get(then_id) else { continue };
+        if let Some((cond, then_id, else_id)) = block.ops[i].as_if() {
+            let Some(then_block) = blocks.get(&then_id) else { continue };
             let else_block = else_id.and_then(|eid| blocks.get(&eid));
 
             // Safety check.
@@ -164,10 +164,10 @@ fn if_convert_block(block: &mut Block, blocks: &mut BTreeMap<BlockId, Block>) {
                 continue;
             }
 
-            let inlined = inline_diamond_as_selects(*cond, then_block, else_block.unwrap());
-            let mut remove_blocks = vec![*then_id];
+            let inlined = inline_diamond_as_selects(cond, then_block, else_block.unwrap());
+            let mut remove_blocks = vec![then_id];
             if let Some(eid) = else_id {
-                remove_blocks.push(*eid);
+                remove_blocks.push(eid);
             }
 
             conversions.push(Conversion { if_idx: i, inlined, remove_blocks });
