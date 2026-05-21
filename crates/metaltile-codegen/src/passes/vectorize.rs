@@ -39,6 +39,7 @@ use metaltile_core::{
 };
 
 use crate::error::Result;
+use crate::passes::remap::remap_value_ids;
 
 pub struct VectorizePass;
 
@@ -329,7 +330,7 @@ fn vectorize_block(
     // Remap value references in surviving ops (each skipped scalar
     // Load's VID now points at its dedicated VectorExtract output).
     for op in new_ops.iter_mut() {
-        remap_values_in_op(op, &result_remap);
+        remap_value_ids(op, &result_remap);
     }
 
     block.ops = new_ops;
@@ -413,56 +414,6 @@ fn find_const_in_block(block: &Block, vid: ValueId) -> Option<i64> {
 /// the load consolidation saves.
 fn is_vectorizable(dtype: DType) -> bool { matches!(dtype, DType::F16 | DType::F32 | DType::BF16) }
 
-fn remap_values_in_op(op: &mut Op, remap: &BTreeMap<ValueId, ValueId>) {
-    let s = |v: &mut ValueId| {
-        if let Some(&new_vid) = remap.get(v) {
-            *v = new_vid;
-        }
-    };
-    match op {
-        Op::BinOp { lhs, rhs, .. } => {
-            s(lhs);
-            s(rhs);
-        },
-        Op::UnaryOp { value, .. }
-        | Op::Activation { value, .. }
-        | Op::Cast { value, .. }
-        | Op::Reduce { value, .. }
-        | Op::Transpose { value }
-        | Op::Slice { value, .. }
-        | Op::Broadcast { value, .. } => {
-            s(value);
-        },
-        Op::Select { cond, on_true, on_false } => {
-            s(cond);
-            s(on_true);
-            s(on_false);
-        },
-        Op::Dot { a, b } => {
-            s(a);
-            s(b);
-        },
-        Op::Store { value, .. } => {
-            s(value);
-        },
-        Op::Loop { start, end, step, .. } => {
-            s(start);
-            s(end);
-            s(step);
-        },
-        Op::VectorStore { value, .. } => {
-            s(value);
-        },
-        Op::FusedElementwise { ops } =>
-            for sub in ops.iter_mut() {
-                remap_values_in_op(sub, remap);
-            },
-        Op::VectorExtract { vec, .. } => {
-            s(vec);
-        },
-        _ => {},
-    }
-}
 
 #[cfg(test)]
 mod tests {

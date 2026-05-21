@@ -282,74 +282,25 @@ fn remove_ops_from_block(block: &mut Block, indices: &[usize]) {
 
 /// Return true if the op is pure (no side effects) and safe to hoist.
 fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
-    match op {
-        Op::BinOp { .. }
-        | Op::UnaryOp { .. }
-        | Op::Cast { .. }
-        | Op::Activation { .. }
-        | Op::Select { .. }
-        | Op::Const { .. }
-        | Op::ProgramId { .. }
-        | Op::Arange { .. }
-        | Op::Zeros { .. }
-        | Op::Splat { .. }
-        | Op::Broadcast { .. }
-        | Op::Transpose { .. }
-        | Op::ExpandDims { .. }
-        | Op::Reshape { .. }
-        | Op::Slice { .. }
-        | Op::SimdLaneId
-        | Op::SimdGroupId => true,
-
-        // Load from a read-only (const) param is pure.
-        Op::Load { src, .. } => read_only.contains(src.as_str()),
-
-        // NOT pure — side effects or loop-dependent:
-        Op::Store { .. }
-        | Op::Atomic { .. }
-        | Op::Barrier
-        | Op::SimdgroupBarrier
-        | Op::SimdgroupAlloc { .. }
-        | Op::ThreadgroupStore { .. }
-        | Op::SetLocal { .. }
-        | Op::DeclareLocal { .. }
-        | Op::Loop { .. }
-        | Op::If { .. }
-        | Op::InlineMsl { .. }
-        | Op::VectorStore { .. }
-        | Op::VectorExtract { .. }
-        | Op::Scatter { .. }
-        | Op::ThreadgroupLoad { .. }
-        | Op::ThreadgroupAlloc { .. }
-        | Op::StackLoad { .. }
-        | Op::StackStore { .. }
-        | Op::StackAlloc { .. }
-        | Op::StrideStore { .. }
-        | Op::Dequantize { .. }
-        | Op::SimdReduce { .. }
-        | Op::SimdShuffleXor { .. }
-        | Op::SimdScan { .. }
-        | Op::SimdBroadcast { .. }
-        | Op::ArgReduce { .. }
-        | Op::FusedElementwise { .. }
-        | Op::VectorLoad { .. }
-        | Op::StrideReduce { .. }
-        | Op::StrideScan { .. }
-        | Op::StrideArgReduce { .. }
-        | Op::Cat { .. }
-        | Op::Gather { .. }
-        | Op::Scan { .. }
-        | Op::Reduce { .. }
-        | Op::Dot { .. }
-        | Op::FlashAttention { .. }
-        | Op::SlidingWindowAttention { .. }
-        | Op::RmsNorm { .. }
-        | Op::GatedMlp { .. }
-        | Op::SimdgroupMatMul { .. }
-        | Op::SimdgroupElemLoad { .. }
-        | Op::SimdgroupElemStore { .. }
-        | Op::SimdgroupLoad { .. } => false,
+    // Load is pure only when the source is a read-only (const) param.
+    if let Op::Load { src, .. } = op {
+        return read_only.contains(src.as_str());
     }
+    // Elementwise and cheap-ALU ops are always pure.
+    // Shape-manipulation ops (Arange, Transpose, Reshape, etc.) are also
+    // pure but not flagged elementwise — list them explicitly.
+    op.is_elementwise()
+        || op.is_cheap_alu()
+        || matches!(
+            op,
+            Op::Arange { .. }
+                | Op::Transpose { .. }
+                | Op::ExpandDims { .. }
+                | Op::Reshape { .. }
+                | Op::Slice { .. }
+                | Op::SimdLaneId
+                | Op::SimdGroupId
+        )
 }
 
 #[cfg(test)]
