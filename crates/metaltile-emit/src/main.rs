@@ -48,7 +48,7 @@ use metaltile_std::{
         quantized_mpp,
         rms_norm::mt_rms_norm,
         steel::attn::steel_attention_mma::mt_sdpa_prefill_mma,
-        unary::{mt_gelu, mt_relu, mt_sigmoid, mt_silu, mt_softplus},
+        unary::{mt_cast_to_f32, mt_gelu, mt_relu, mt_sigmoid, mt_silu, mt_softplus},
     },
     probe::mpp_matmul_smoke,
 };
@@ -1537,6 +1537,18 @@ fn register_kernels() -> Vec<Kernel> {
 
         let mut k = mt_sigmoid::kernel_ir_for(dt);
         k.name = format!("mt_sigmoid_{}", dtype_suffix(dt));
+        kernels.push(k);
+    }
+
+    // ─── mt_cast_to_f32 (Elementwise) — T → fp32 in-place cast ───────
+    // Used by the fused GDN prep path to bring bf16 / f16 model
+    // activations up to fp32 so the kernel can run against the fp32
+    // recurrence state without a host round-trip. One thread per
+    // element. f32-source variant is a no-op identity (kept for
+    // dispatch-table uniformity; callers should avoid calling it).
+    for &dt in &dtypes {
+        let mut k = mt_cast_to_f32::kernel_ir_for(dt);
+        k.name = format!("mt_cast_to_f32_{}", dtype_suffix(dt));
         kernels.push(k);
     }
 

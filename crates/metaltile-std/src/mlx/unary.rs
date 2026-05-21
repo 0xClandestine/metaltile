@@ -1,6 +1,12 @@
 //! Unary elementwise benchmark — #[kernel] DSL vs MLX metal/unary.metal
 
 use metaltile::{bench_kernel, kernel};
+use metaltile_core::ir::KernelMode;
+
+use crate::{
+    bench_types::DType,
+    spec::{BenchDispatch, BenchSpec},
+};
 
 #[bench_kernel(
     op="unary",
@@ -582,4 +588,32 @@ pub fn mt_softplus<T>(a: Tensor<T>, out: Tensor<T>) {
     let ax = select(pos, x, zero - x);
     let r = m + log(1.0f32 + exp(zero - ax));
     store(out[idx], r.cast::<T>());
+}
+
+/// Cast a tensor of model dtype `T` to fp32 in-place per element. One
+/// thread per element. Used by callers that need to mix fp32 state with
+/// bf16 / f16 model activations on the GPU without a host round-trip —
+/// the fused GDN prep step is the immediate consumer (its cache state
+/// stays fp32 to avoid the 7-bit-mantissa drift over long decodes, but
+/// the model activations into the kernel are bf16).
+#[kernel]
+pub fn mt_cast_to_f32<T>(input: Tensor<T>, out: Tensor<f32>) {
+    let idx = program_id(0);
+    store(out[idx], load(input[idx]).cast::<f32>());
+}
+
+inventory::submit! {
+    BenchSpec {
+        op: "unary",
+        subop: "cast_to_f32",
+        kernel_name: "mt_cast_to_f32",
+        kernel_ir: mt_cast_to_f32::kernel_ir_for,
+        dtypes: &[DType::F32, DType::F16, DType::BF16],
+        tol: 0.0,
+        mlx_src: None,
+        mlx_pattern: None,
+        shapes: &[],
+        dispatch: BenchDispatch::Generic,
+        kernel_mode: Some(KernelMode::Elementwise),
+    }
 }
