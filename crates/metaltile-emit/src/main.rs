@@ -1653,8 +1653,11 @@ fn register_kernels() -> Vec<Kernel> {
 
     // ─── mt_qmm_mma (Reduction) — simdgroup-matrix int4 qmm ────────────────
     // High-perf quantized matmul B>=4, K>=32, N>=32, group_size=64. Used by
-    // Linear/Dense layers at prefill / batched decode.
-    for &dt in &[DType::F32, DType::F16] {
+    // Linear/Dense layers at prefill / batched decode. bf16 added for the
+    // FFAI Qwen3.6-A3B prefill (Ops.dequantGemmDynamicM dispatches mt_qmm_mma
+    // through a host-side T-padding driver — the model is bf16, so the
+    // bf16 specialization is the load-bearing one for production).
+    for &dt in &[DType::F32, DType::F16, DType::BF16] {
         let mut k = mt_qmm_mma::kernel_ir_for(dt);
         k.name = format!("mt_qmm_mma_{}", dtype_suffix(dt));
         k.mode = KernelMode::Reduction;

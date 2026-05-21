@@ -48,9 +48,26 @@ fn pack_int4_row(weights: &[u32]) -> Vec<u32> {
 /// per-row mask edge cases, no K-remainder. Exactly one TG covers the
 /// 64×64 output. Same shape the bm16_mpp variant validates on (with one
 /// fewer TG since it only covers 16×32 per TG).
+/// MPP `tensor_ops::matmul2d` needs Apple10 (gen-17) silicon + macOS 26.2+.
+/// On older silicon or virtualised CI runners (chip_family = None or < 10)
+/// the kernel hits its pre-Metal-4 stub branch which writes zeros — the
+/// cosine assertion then fails with `cos = 0.0`. Skip rather than fail so
+/// CI's hosted Mac runner stays green; M5 Max + dev hardware still cover it.
+/// Mirrors the gate added to `mpp_matmul_smoke.rs` + `qmm_mpp_correctness.rs`.
+fn skip_unless_apple10(test_name: &str) -> Option<Context> {
+    let ctx = Context::new().expect("Context::new");
+    let family = ctx.chip_family();
+    if family.is_none_or(|lvl| lvl < 10) {
+        eprintln!("skip {test_name}: needs Apple10+ GPU (chip_family={family:?})");
+        return None;
+    }
+    Some(ctx)
+}
+
 #[test]
 fn moe_gather_qmm_mma_int4_bm64_mpp_matches_m1_clean_tile() {
     let _g = gpu_lock();
+    let Some(_ctx) = skip_unless_apple10("bm64_mpp_clean_tile") else { return };
     let n_experts = 4usize;
     let k_in = 64usize; // multiple of 32 (= BK) and 8 (pack size)
     let n_out = 64usize; // BN=64 → 1 n-tile
@@ -174,6 +191,7 @@ fn moe_gather_qmm_mma_int4_bm64_mpp_matches_m1_clean_tile() {
 #[test]
 fn moe_gather_qmm_mma_int4_bm64_mpp_matches_m1_multi_tile() {
     let _g = gpu_lock();
+    let Some(_ctx) = skip_unless_apple10("bm64_mpp_multi_tile") else { return };
     let n_experts = 8usize;
     let k_in = 128usize;
     let n_out = 128usize;
