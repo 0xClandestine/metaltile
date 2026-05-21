@@ -40,6 +40,8 @@ enum Command {
     Bench(BenchArgs),
     /// Compile all kernels to MSL and report errors
     Build(BuildArgs),
+    /// Emit kernels.metallib + manifest + Swift wrappers
+    Emit(EmitArgs),
     /// Print IR and/or MSL for registered kernels
     Inspect(InspectArgs),
     /// Show GPU device info and supported feature flags
@@ -162,6 +164,21 @@ struct SnapArgs {
     filter: Option<String>,
 }
 
+// ── Emit ─────────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+pub struct EmitArgs {
+    /// Output directory (typically `Sources/MetalTileSwift/` of a Swift package).
+    #[arg(long)]
+    pub out: String,
+    /// SDK to use for `xcrun metal` invocation.
+    #[arg(long, default_value = "macosx")]
+    pub sdk: String,
+    /// Skip the metallib compile step (still emits .metal + manifest + Swift).
+    #[arg(long)]
+    pub no_compile: bool,
+}
+
 // ── Diff ─────────────────────────────────────────────────────────────────
 
 #[derive(clap::Args, Debug)]
@@ -222,6 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Bench(args) => cmd::bench::run(&args)?,
         Command::Build(args) => cmd::build::run(&args)?,
+        Command::Emit(args) => cmd::emit::run(&args)?,
         Command::Inspect(args) => cmd::inspect::run(&args)?,
         Command::Device(args) => cmd::device::run(&args)?,
         Command::Snap(args) => cmd::snap::run(&args)?,
