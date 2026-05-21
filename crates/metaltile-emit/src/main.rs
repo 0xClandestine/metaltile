@@ -27,6 +27,7 @@ use metaltile_core::{
 };
 // Bring high-perf kernels from metaltile-std into the emit registry.
 use metaltile_std::ffai::moe::mt_moe_gather_qmm_mma_int4_bm16;
+use metaltile_std::ffai::moe_mpp;
 use metaltile_std::mlx::quantized::mt_qmm_mma;
 use serde::Serialize;
 
@@ -1861,6 +1862,50 @@ fn register_kernels() -> Vec<Kernel> {
         let mut k = mt_moe_gather_qmm_mma_int4_bm16::kernel_ir_for(dt);
         k.name = format!("mt_moe_gather_qmm_mma_int4_bm16_{}", dtype_suffix(dt));
         k.mode = KernelMode::Reduction;
+        kernels.push(k);
+    }
+
+    // ─── mt_moe_gather_qmm_mma_int4_bm16_mpp (Reduction) — MPP MoE BGEMM ───
+    // MPP-backed counterpart of mt_moe_gather_qmm_mma_int4_bm16. Mirrors the
+    // BM=16 row-partitioning + int4 dequant pipeline but routes the inner
+    // 16×32×16 tile matmul through `mpp::tensor_ops::matmul2d` — the same
+    // Apple-private API MLX uses to hit ~3000 GF on Qwen3.6-A3B `down_proj`.
+    // TG = 32 lanes = 1 SG (matmul2d is `execution_simdgroup`).
+    // Requires macOS 26+ / Metal 4. See
+    // `crates/metaltile-std/src/ffai/moe_mpp.rs`.
+    for &dt in &[DType::F32, DType::F16, DType::BF16] {
+        let mut k = moe_mpp::kernel_ir_for(dt);
+        k.name = format!("mt_moe_gather_qmm_mma_int4_bm16_mpp_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Reduction;
+        kernels.push(k);
+    }
+
+    // ─── mt_qmm_mma_mpp (Reduction) — MPP `matmul2d` production int4 qmm ──
+    // BM=BN=BK=32, TG=128 (4 SG × 32 lanes WM=WN=2), per-SG 16×16 MMA via
+    // `mpp::tensor_ops::matmul2d<desc, execution_simdgroup>`. Same int4
+    // dequant-into-TG-mem pattern as mt_qmm_mma; the matmul step swaps the
+    // manual 8×8 `simdgroup_matmul` ladder for one cooperative `matmul2d`
+    // per SG per K-block. This is the MPP/NAX path MLX uses for
+    // `affine_qmm_t_nax` / `gather_qmm_rhs_nax`. Requires macOS 26+ /
+    // Metal 4. See `crates/metaltile-std/src/mlx/quantized_mpp.rs`.
+    for &dt in &[DType::F32, DType::F16] {
+        let mut k = quantized_mpp::kernel_ir_for(dt);
+        k.name = format!("mt_qmm_mma_mpp_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Reduction;
+        kernels.push(k);
+    }
+
+    // ─── mt_mpp_matmul_smoke (Elementwise) — MPP `matmul2d` smoke kernel
+    // Single-simdgroup 16×32 fp16 → 16×16 fp32 matmul. Requires macOS 26+ /
+    // Metal 4 (header `<MetalPerformancePrimitives/...>` only available on
+    // those toolchains). Pre-Metal-4 builds compile a stub fallback so the
+    // metallib still links; correctness test fails as the intended signal.
+    //
+    // This is the foothold for the future MPP-backed `mt_qmm_mma` variant —
+    // taps the NAX hardware path MLX uses for `down_proj` (~3000 GF on
+    // Qwen3.6-A3B). See `crates/metaltile-std/src/probe/mpp_matmul_smoke.rs`.
+    {
+        let k = mpp_matmul_smoke::kernel_ir();
         kernels.push(k);
     }
 
