@@ -29,6 +29,22 @@ use metaltile_core::{dtype::DType, ir::KernelMode};
 use metaltile_runtime::Context;
 use metaltile_std::mlx::quantized_mpp;
 
+/// MPP `tensor_ops::matmul2d` requires Apple10 (gen-17) + macOS 26.2+.
+/// On older silicon or virtualised CI runners the kernel hits its
+/// pre-Metal-4 stub branch (writes one scalar; output ≈ all zeros),
+/// which would fail the cosine assertion. Returns `None` when the
+/// device can't run MPP so the caller can `return` and skip. M5 Max
+/// + dev hardware still exercises every shape.
+fn ctx_or_skip(test_name: &str) -> Option<Context> {
+    let ctx = Context::new().expect("Context::new");
+    let family = ctx.chip_family();
+    if family.is_none_or(|lvl| lvl < 10) {
+        eprintln!("skip {test_name}: needs Apple10+ GPU (chip_family={family:?})");
+        return None;
+    }
+    Some(ctx)
+}
+
 /// Triple-loop CPU oracle — bit-identical algorithm to `cpu_qmm_reference`
 /// in `qmm_gpu_correctness.rs`. Replicated here to keep the test file
 /// self-contained (integration tests can't share helpers across files
@@ -170,7 +186,7 @@ fn mt_qmm_mma_mpp_matches_cpu_reference_f32_small() {
     let expected = cpu_qmm_reference(&w, &scales, &biases, &x, m, n, k, gs_per_row, group_size);
 
     let _g = gpu_lock();
-    let ctx = Context::new().expect("Context::new");
+    let Some(ctx) = ctx_or_skip("f32_small") else { return };
     let out_bytes = run_qmm_mma_mpp(
         &ctx,
         DType::F32,
@@ -219,7 +235,7 @@ fn mt_qmm_mma_mpp_matches_cpu_reference_f32_multi_k() {
     let expected = cpu_qmm_reference(&w, &scales, &biases, &x, m, n, k, gs_per_row, group_size);
 
     let _g = gpu_lock();
-    let ctx = Context::new().expect("Context::new");
+    let Some(ctx) = ctx_or_skip("f32_multi_k") else { return };
     let out_bytes = run_qmm_mma_mpp(
         &ctx,
         DType::F32,
@@ -255,7 +271,7 @@ fn mt_qmm_mma_mpp_matches_cpu_reference_f32_multi_tile() {
     let expected = cpu_qmm_reference(&w, &scales, &biases, &x, m, n, k, gs_per_row, group_size);
 
     let _g = gpu_lock();
-    let ctx = Context::new().expect("Context::new");
+    let Some(ctx) = ctx_or_skip("f32_multi_tile") else { return };
     let out_bytes = run_qmm_mma_mpp(
         &ctx,
         DType::F32,
@@ -298,7 +314,7 @@ fn mt_qmm_mma_mpp_matches_cpu_reference_f16_small() {
     let expected = cpu_qmm_reference(&w, &scales, &biases, &x, m, n, k, gs_per_row, group_size);
 
     let _g = gpu_lock();
-    let ctx = Context::new().expect("Context::new");
+    let Some(ctx) = ctx_or_skip("f16_small") else { return };
     let out_bytes = run_qmm_mma_mpp(
         &ctx,
         DType::F16,
@@ -354,7 +370,7 @@ fn mt_qmm_mma_mpp_matches_cpu_reference_f16_multi_tile() {
     let expected = cpu_qmm_reference(&w, &scales, &biases, &x, m, n, k, gs_per_row, group_size);
 
     let _g = gpu_lock();
-    let ctx = Context::new().expect("Context::new");
+    let Some(ctx) = ctx_or_skip("f16_multi_tile") else { return };
     let out_bytes = run_qmm_mma_mpp(
         &ctx,
         DType::F16,

@@ -61,6 +61,19 @@ fn cpu_matmul_ref(a: &[f32], b: &[f32]) -> Vec<f32> {
 fn mpp_matmul_smoke_matches_cpu_reference() {
     let _lock = gpu_lock();
 
+    let ctx = Context::new().expect("Context::new");
+
+    // MPP `tensor_ops::matmul2d` requires Apple10 (gen-17) + macOS 26.2+.
+    // On older silicon or virtualised CI runners the kernel falls through
+    // to the pre-Metal-4 stub branch which copies one scalar — the output
+    // is mostly zero and the assertion would fail. Skip rather than fail
+    // so coverage runners stay green; M5 Max + dev hardware still cover it.
+    let family = ctx.chip_family();
+    if family.is_none_or(|lvl| lvl < 10) {
+        eprintln!("skip: mpp_matmul_smoke needs Apple10+ GPU (got chip_family={family:?})");
+        return;
+    }
+
     // Deterministic small-magnitude inputs in [-1, 1] so the fp16 round-trip
     // doesn't lose precision and so the dot-product accumulators stay well
     // inside fp32 finite range.
@@ -78,8 +91,6 @@ fn mpp_matmul_smoke_matches_cpu_reference() {
     let a_q = round_f16(&a_f32);
     let b_q = round_f16(&b_f32);
     let expected = cpu_matmul_ref(&a_q, &b_q);
-
-    let ctx = Context::new().expect("Context::new");
 
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     buffers.insert("A".into(), pack_f16_bytes(&a_q));
