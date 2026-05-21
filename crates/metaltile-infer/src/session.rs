@@ -11,6 +11,8 @@
 
 use std::{collections::BTreeMap, path::Path};
 
+use tracing::info;
+
 use metaltile_core::dtype::DType;
 use metaltile_model::{
     CompileParams,
@@ -67,6 +69,7 @@ impl Session {
     /// `toml_src` is the TOML model definition (e.g. contents of
     /// `models/llama_decode.toml`). `config` is the parsed `config.json`.
     /// `fusion_mode` controls whether kernel fusion is applied.
+    #[tracing::instrument(skip(toml_src, config), fields(model_dir = %model_dir.as_ref().display(), dtype = ?dtype, fusion = ?fusion_mode))]
     pub fn new(
         model_dir: impl AsRef<Path>,
         toml_src: &str,
@@ -77,13 +80,16 @@ impl Session {
         let model_dir = model_dir.as_ref();
 
         // ── Parse model definition ─────────────────────────────────────
+        info!("parsing model definition");
         let def: ModelDef =
             toml::from_str(toml_src).map_err(|e| InferError::Other(e.to_string()))?;
 
         // ── Load weights ───────────────────────────────────────────────
         // Weights are cast to the activation dtype at load time so that
         // kernels compiled for `dtype` read correctly-typed bytes.
+        info!("loading weights");
         let mut weights: WeightMap = load_weights(model_dir, dtype)?;
+        info!(n_tensors = weights.len(), "weights loaded");
 
         // Handle weight tying: if lm_head is missing but tok_embeddings
         // exists (tie_word_embeddings = true), alias them.
@@ -97,6 +103,7 @@ impl Session {
         let ctx = Context::new().map_err(|e| InferError::Other(e.to_string()))?;
 
         // ── Upload weights to GPU-resident buffers ─────────────────────
+        info!(n_tensors = weights.len(), "uploading weights to GPU");
         let mut resident: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
         for (name, bytes) in &weights {
             let rb = ctx.upload_resident(bytes).map_err(|e| InferError::Other(e.to_string()))?;
@@ -120,6 +127,7 @@ impl Session {
 
         // ── Compile execution plan ─────────────────────────────────────
         let reg = KernelRegistry::build();
+        info!(n_kernels = reg.len(), "compiling execution plan");
         let state_keys = vec![
             "token_id".to_string(),
             "position".to_string(),
@@ -157,17 +165,32 @@ impl Session {
 
         // ── Tokenizer ─────────────────────────────────────────────────
         let tok_path = model_dir.join("tokenizer.json");
+        info!(path = %tok_path.display(), "loading tokenizer");
         let tokenizer =
             Tokenizer::from_file(&tok_path).map_err(|e| InferError::Tokenizer(e.to_string()))?;
 
         // Common EOS token IDs for Llama family
         let eos_token_id = find_eos_token_id(&tokenizer);
 
+        info!(
+            n_layers = config.n_layers,
+            n_heads = config.n_heads,
+            n_kv_heads = config.n_kv_heads,
+            head_dim = config.head_dim,
+            hidden_dim = config.hidden_dim,
+            vocab_size = config.vocab_size,
+            max_seq_len = config.max_seq_len,
+            eos_token_id,
+            n_plan_nodes = plan.nodes.len(),
+            n_slots = plan.slots.len(),
+            "session ready"
+        );
         Ok(Session { ctx, plan, prepared, state, tokenizer, _config: config, eos_token_id })
     }
 
     /// Run inference for `max_tokens` steps, calling `on_token` with each
     /// decoded piece. Returns the generated text with GPU timing breakdown.
+    #[tracing::instrument(skip(self, on_token), fields(prompt_len = prompt.len(), max_tokens))]
     pub fn generate(
         &mut self,
         prompt: &str,
@@ -182,6 +205,7 @@ impl Session {
             .map_err(|e| InferError::Tokenizer(e.to_string()))?;
         let prompt_ids: Vec<u32> = encoding.get_ids().to_vec();
         let prompt_tokens = prompt_ids.len();
+        info!(n_prompt_tokens = prompt_tokens, "starting prefill");
 
         // ── Prefill ───────────────────────────────────────────────
         // Feed each prompt token through the model to populate KV cache.
@@ -203,6 +227,7 @@ impl Session {
         }
 
         // ── Decode ────────────────────────────────────────────────
+        info!("starting decode");
         let mut output_ids = Vec::new();
         let mut token_id = last_token_id;
         let mut decode_secs = 0.0f64;
@@ -233,6 +258,14 @@ impl Session {
             .decode(&output_ids, true)
             .map_err(|e| InferError::Tokenizer(e.to_string()))?;
 
+        info!(
+            tokens_generated,
+            prompt_tokens,
+            prefill_secs,
+            decode_secs,
+            decode_tok_per_sec,
+            "generation complete"
+        );
         Ok(GenerateOutput {
             text: generated,
             tokens_generated,
@@ -249,6 +282,7 @@ impl Session {
     ///
     /// This is the low-level step API — drive the autoregressive loop
     /// yourself for fine-grained control over timing, sampling, etc.
+    #[tracing::instrument(level = "debug", skip(self), fields(token_id, temperature))]
     pub fn step(&mut self, token_id: u32, temperature: f32) -> Result<(u32, f64), InferError> {
         self.step_inner(token_id, temperature, self.plan.nodes.len())
     }

@@ -5,12 +5,14 @@ use std::path::PathBuf;
 use hf_hub::{Repo, RepoType, api::tokio::Api};
 
 use crate::error::InferError;
+use tracing::info;
 
 /// Download a model repo to the local HF cache and return the local directory.
 ///
 /// Files downloaded: all `.safetensors` shards + `tokenizer.json` +
 /// `config.json`. Uses the HF_HOME cache (default `~/.cache/huggingface`).
 pub async fn snapshot_download(repo_id: &str, revision: &str) -> Result<PathBuf, InferError> {
+    info!(%repo_id, %revision, "downloading from HuggingFace Hub");
     let api = Api::new().map_err(|e| InferError::Hub(e.to_string()))?;
     let repo =
         api.repo(Repo::with_revision(repo_id.to_string(), RepoType::Model, revision.to_string()));

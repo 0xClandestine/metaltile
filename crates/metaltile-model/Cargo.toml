@@ -19,6 +19,7 @@ serde = { workspace = true }
 toml = "0.8"
 indexmap = { version = "2", features = ["serde"] }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 inventory = { workspace = true }
 half = { workspace = true }
 

@@ -24,6 +24,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use tracing::error;
+
 use metaltile_runtime::{Context, DispatchSpec, ResidentBuffer};
 
 use crate::{
@@ -210,8 +212,8 @@ pub fn execute_plan(
             .dispatch_chain(&all_specs, &barriers_after)
             .map_err(|e| ModelError::Other(e.to_string()))?;
         if start.elapsed() > Duration::from_secs(GPU_WATCHDOG_SECS) {
-            eprintln!(
-                "\n[executor] WATCHDOG: forward pass exceeded {}s — \
+            error!(
+                "WATCHDOG: forward pass exceeded {}s — \
                  killing process to prevent system freeze",
                 GPU_WATCHDOG_SECS
             );
@@ -227,8 +229,8 @@ pub fn execute_plan(
                 .map_err(|e| ModelError::Other(e.to_string()))?;
             all_results.append(&mut res);
             if start.elapsed() > Duration::from_secs(GPU_WATCHDOG_SECS) {
-                eprintln!(
-                    "\n[executor] WATCHDOG: forward pass exceeded {}s at node {} — \
+                error!(
+                    "WATCHDOG: forward pass exceeded {}s at node {} — \
                      killing process to prevent system freeze",
                     GPU_WATCHDOG_SECS, i
                 );
@@ -524,8 +526,8 @@ pub fn execute_prepared(
             .dispatch_chain(&all_specs, &pd.barriers_after[..n])
             .map_err(|e| ModelError::Other(e.to_string()))?;
         if start.elapsed() > Duration::from_secs(GPU_WATCHDOG_SECS) {
-            eprintln!(
-                "\n[executor] WATCHDOG: forward pass exceeded {}s — \
+            error!(
+                "WATCHDOG: forward pass exceeded {}s — \
                  killing process to prevent system freeze",
                 GPU_WATCHDOG_SECS
             );
@@ -540,8 +542,8 @@ pub fn execute_prepared(
                 .map_err(|e| ModelError::Other(e.to_string()))?;
             all_results.append(&mut res);
             if start.elapsed() > Duration::from_secs(GPU_WATCHDOG_SECS) {
-                eprintln!(
-                    "\n[executor] WATCHDOG: forward pass exceeded {}s at node {} — \
+                error!(
+                    "WATCHDOG: forward pass exceeded {}s at node {} — \
                      killing process to prevent system freeze",
                     GPU_WATCHDOG_SECS, i
                 );

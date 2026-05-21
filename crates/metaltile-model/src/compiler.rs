@@ -9,6 +9,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use tracing::info;
+
 use metaltile_core::{dtype::DType, ir::{Kernel, KernelMode}};
 use metaltile_runtime::context::GridSpec;
 use metaltile_std::spec::effective_mode;
@@ -78,6 +80,7 @@ impl CompileParams {
 ///    `fusion_mode`).
 /// 5. Run liveness analysis on intermediate buffers, assign `BufferSlot`s.
 /// 6. Return the fully resolved `ExecutionPlan`.
+#[tracing::instrument(skip(def, p, reg), fields(n_layers = p.n_layers, n_params = p.params.len(), fusion = ?fusion_mode))]
 pub fn compile(
     def: &ModelDef,
     p: &CompileParams,
@@ -293,14 +296,14 @@ pub fn compile(
             let n_groups = nodes.iter().filter_map(|n| n.fuse_group).max().map_or(0, |m| m + 1);
             let dispatches = n_groups + (total - fused_count);
             if n_groups > 0 {
-                eprintln!(
-                    "[compiler] TOML fusion: {total} nodes → {dispatches} dispatches \
+                info!(
+                    "TOML fusion: {total} nodes → {dispatches} dispatches \
                      ({n_groups} fused groups, {} standalone)",
                     total - fused_count
                 );
             } else {
-                eprintln!(
-                    "[compiler] no TOML fuse tags: {total} nodes → {total} dispatches"
+                info!(
+                    "no TOML fuse tags: {total} nodes → {total} dispatches"
                 );
             }
         },
@@ -309,15 +312,15 @@ pub fn compile(
             let (n_fused_groups, n_unfused) = fuse_dispatch_nodes(&mut nodes);
             let dispatches = n_fused_groups + n_unfused;
             if n_fused_groups > 0 {
-                eprintln!(
-                    "[compiler] graph fusion: {total} nodes → {dispatches} dispatches \
+                info!(
+                    "graph fusion: {total} nodes → {dispatches} dispatches \
                      ({n_fused_groups} fused groups, {n_unfused} standalone)"
                 );
             }
         },
         FusionMode::None => {
-            eprintln!(
-                "[compiler] no fusion: {} nodes → {} dispatches",
+            info!(
+                "no fusion: {} nodes → {} dispatches",
                 nodes.len(),
                 nodes.len()
             );

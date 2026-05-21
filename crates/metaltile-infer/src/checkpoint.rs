@@ -9,6 +9,7 @@ use metaltile_model::WeightMap;
 use safetensors::SafeTensors;
 
 use crate::error::InferError;
+use tracing::info;
 
 // ── Dtype conversion helpers ───────────────────────────────────────────────
 
@@ -98,6 +99,7 @@ pub fn load_safetensors_dir(
         .collect();
     shards.sort();
 
+    info!(n_shards = shards.len(), dir = %dir.display(), "loading safetensors shards");
     for shard in shards {
         let bytes = std::fs::read(&shard)?;
         let tensors = SafeTensors::deserialize(&bytes)?;
@@ -116,6 +118,7 @@ pub fn load_safetensors_dir(
 /// Auto-detect: if `path` is a file, load it directly; if it's a directory,
 /// scan for all `.safetensors` shards. Then apply HF→MetalTile name remapping.
 /// Weights are cast to `target_dtype` at load time.
+#[tracing::instrument(skip(path), fields(path = %path.as_ref().display(), dtype = ?target_dtype))]
 pub fn load_weights(path: impl AsRef<Path>, target_dtype: DType) -> Result<WeightMap, InferError> {
     let path = path.as_ref();
     let raw = if path.is_dir() {
