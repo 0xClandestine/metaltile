@@ -82,7 +82,7 @@ pub fn run(args: &DiffArgs) -> Result<(), CliError> {
     let outcome = render(&baseline, &current, &opts);
 
     if outcome.total_rows == 0 {
-        eprintln!(
+        println!(
             "  {}",
             paint_stdout("No matching results to diff.", Style::new().fg(Color::BrightBlack)),
         );
@@ -211,10 +211,10 @@ pub fn render(baseline: &[Value], current: &[Value], opts: &RenderOpts) -> Rende
     }
 
     if let Some(heading) = opts.heading {
-        eprintln!("{}", paint_stdout(heading, Style::new().fg(Color::Cyan).bold()));
+        println!("{}", paint_stdout(heading, Style::new().fg(Color::Cyan).bold()));
     }
 
-    eprintln!();
+    println!();
     for row in &diff_rows {
         print_diff_row(row);
     }
@@ -335,7 +335,7 @@ fn print_diff_row(row: &DiffRow) {
         DeltaKind::Unchanged => String::new(),
     };
 
-    eprintln!(
+    println!(
         "  {} {sep} {} {sep} {} → {} {sep} {}  {}",
         op_col, shape_col, baseline_cell, current_cell, delta_str, kind_label,
     );
@@ -384,7 +384,7 @@ fn print_summary(
     }
 
     let sep = paint_stdout("·", Style::new().fg(Color::BrightBlack).dim());
-    eprintln!("\n  {}\n", parts.join(&format!("  {sep}  ")));
+    println!("\n  {}\n", parts.join(&format!("  {sep}  ")));
 }
 
 fn load_results(path: &str, label: &str) -> Result<Vec<Value>, CliError> {
