@@ -881,37 +881,29 @@ impl MslGenerator {
                     hoists.push(format!("threadgroup {t} {name}[{size}];"));
                 },
 
-                Op::ThreadgroupLoad { name, index } => {
+                // ThreadgroupLoad+StackLoad: identical array-indexed load.
+                Op::ThreadgroupLoad { name, index }
+                | Op::StackLoad { name, index } => {
                     let v = self.vname(vid, block, extra_names);
                     let iv = self.vname(Some(*index), block, extra_names);
                     wl!(out, "{pad}auto {v} = {name}[{iv}];");
                 },
 
-                Op::ThreadgroupStore { name, index, value } => {
+                // ThreadgroupStore+StackStore: identical array-indexed store.
+                Op::ThreadgroupStore { name, index, value }
+                | Op::StackStore { name, index, value } => {
                     let iv = self.vname(Some(*index), block, extra_names);
                     let rv = self.vname(Some(*value), block, extra_names);
                     wl!(out, "{pad}{name}[{iv}] = {rv};");
                 },
 
-                // ---- per-thread stack arrays ----------------------------
+                // ---- per-thread stack alloc / barrier ----
                 Op::StackAlloc { dtype, size, name } => {
                     let t = self.msl_type_name(*dtype);
                     // No `threadgroup` qualifier — Metal places small
                     // fixed-size local arrays in per-thread registers
                     // (with spill to thread-local memory if they don't fit).
                     hoists.push(format!("{t} {name}[{size}];"));
-                },
-
-                Op::StackLoad { name, index } => {
-                    let v = self.vname(vid, block, extra_names);
-                    let iv = self.vname(Some(*index), block, extra_names);
-                    wl!(out, "{pad}auto {v} = {name}[{iv}];");
-                },
-
-                Op::StackStore { name, index, value } => {
-                    let iv = self.vname(Some(*index), block, extra_names);
-                    let rv = self.vname(Some(*value), block, extra_names);
-                    wl!(out, "{pad}{name}[{iv}] = {rv};");
                 },
 
                 Op::Barrier => {
