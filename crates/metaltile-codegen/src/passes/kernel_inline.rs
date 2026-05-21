@@ -79,7 +79,7 @@ impl Pass for KernelInlinePass {
         let old_ops = std::mem::take(&mut kernel.body.ops);
         let old_results = std::mem::take(&mut kernel.body.results);
 
-        for (op, result) in old_ops.into_iter().zip(old_results.into_iter()) {
+        for (op, result) in old_ops.into_iter().zip(old_results) {
             if let Op::KernelCall { ref callee, ref args, dtype } = op {
                 let call_result = result;
 
@@ -183,15 +183,15 @@ fn inline_callee(
     // Seed vid_map with Value args for input params and constexpr params.
     for (op, result) in callee.body.ops.iter().zip(callee.body.results.iter()) {
         if let (Op::Load { src, .. }, Some(r)) = (op, result) {
-            if let Some(idx) = input_params.iter().position(|&n| n == src.as_str()) {
-                if let Some(KernelCallArg::Value(arg_vid)) = input_arg[idx] {
-                    vid_map.insert(*r, *arg_vid);
-                }
+            if let Some(idx) = input_params.iter().position(|&n| n == src.as_str())
+                && let Some(KernelCallArg::Value(arg_vid)) = input_arg[idx]
+            {
+                vid_map.insert(*r, *arg_vid);
             }
-            if let Some(idx) = constexpr_names.iter().position(|&n| n == src.as_str()) {
-                if let Some(KernelCallArg::Value(arg_vid)) = constexpr_arg[idx] {
-                    vid_map.insert(*r, *arg_vid);
-                }
+            if let Some(idx) = constexpr_names.iter().position(|&n| n == src.as_str())
+                && let Some(KernelCallArg::Value(arg_vid)) = constexpr_arg[idx]
+            {
+                vid_map.insert(*r, *arg_vid);
             }
         }
     }
@@ -200,15 +200,14 @@ fn inline_callee(
     // to call_result.  Only the first such output is mapped (single return).
     let mut mapped_output = false;
     for (op, _result) in callee.body.ops.iter().zip(callee.body.results.iter()) {
-        if let Op::Store { dst, value, .. } = op {
-            if let Some(idx) = output_params.iter().position(|&n| n == dst.as_str()) {
-                if matches!(output_arg[idx], None) && !mapped_output {
-                    if let Some(cr) = call_result {
-                        vid_map.insert(*value, cr);
-                        mapped_output = true;
-                    }
-                }
-            }
+        if let Op::Store { dst, value, .. } = op
+            && let Some(idx) = output_params.iter().position(|&n| n == dst.as_str())
+            && output_arg[idx].is_none()
+            && !mapped_output
+            && let Some(cr) = call_result
+        {
+            vid_map.insert(*value, cr);
+            mapped_output = true;
         }
     }
 
@@ -243,12 +242,12 @@ fn inline_callee(
                         // Value arg: skip load, result already in vid_map.
                         Some(KernelCallArg::Value(_)) => {
                             // Ensure skipped result has a vid entry.
-                            if let Some(r) = op_result {
-                                if !vid_map.contains_key(r) {
-                                    let fresh = ValueId::new(next_vid);
-                                    next_vid += 1;
-                                    vid_map.insert(*r, fresh);
-                                }
+                            if let Some(r) = op_result
+                                && !vid_map.contains_key(r)
+                            {
+                                let fresh = ValueId::new(next_vid);
+                                next_vid += 1;
+                                vid_map.insert(*r, fresh);
                             }
                             continue;
                         },
@@ -317,12 +316,12 @@ fn inline_callee(
                         },
                         // No arg: skip store — value already mapped to call_result above.
                         None | Some(KernelCallArg::Value(_)) => {
-                            if let Some(r) = op_result {
-                                if !vid_map.contains_key(r) {
-                                    let fresh = ValueId::new(next_vid);
-                                    next_vid += 1;
-                                    vid_map.insert(*r, fresh);
-                                }
+                            if let Some(r) = op_result
+                                && !vid_map.contains_key(r)
+                            {
+                                let fresh = ValueId::new(next_vid);
+                                next_vid += 1;
+                                vid_map.insert(*r, fresh);
                             }
                             continue;
                         },

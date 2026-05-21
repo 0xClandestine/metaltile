@@ -679,16 +679,17 @@ impl DslBodyParser {
                 //     the pre-computed scalar value.
                 let mut args_tokens: Vec<proc_macro2::TokenStream> = Vec::new();
                 for a in &call.args {
-                    if let syn::Expr::Path(p) = a {
-                        if p.qself.is_none() && p.path.segments.len() == 1 {
-                            let ident = p.path.segments[0].ident.to_string();
-                            if self.param_names.contains(&ident)
-                                || self.constexpr_names.contains(&ident)
-                            {
-                                args_tokens
-                                    .push(quote! { KernelCallArg::Tensor(#ident.to_string()) });
-                                continue;
-                            }
+                    if let syn::Expr::Path(p) = a
+                        && p.qself.is_none()
+                        && p.path.segments.len() == 1
+                    {
+                        let ident = p.path.segments[0].ident.to_string();
+                        if self.param_names.contains(&ident)
+                            || self.constexpr_names.contains(&ident)
+                        {
+                            args_tokens
+                                .push(quote! { KernelCallArg::Tensor(#ident.to_string()) });
+                            continue;
                         }
                     }
                     let vid = self.parse_expr(a);
