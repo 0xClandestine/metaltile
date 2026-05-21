@@ -60,7 +60,12 @@ pub fn conv1d_causal_step<T>(
     // pair with state[0]..state[K-2].
     let w_last = load(w[(kernel_size - 1u32) * n_channels + d]).cast::<f32>();
     let mut acc = b_d + w_last * x_d;
-    for k in range(0u32, kernel_size - 1u32, 1u32) {
+    // `kernel_size` is contractually >= 2 (a causal conv with state).
+    // Guard the unsigned subtraction anyway: a stray `kernel_size == 0`
+    // would make `kernel_size - 1` underflow to ~4e9 — a GPU-pinning
+    // loop. `select` clamps the trip count to 0 instead.
+    let conv_taps = select(kernel_size > 1u32, kernel_size - 1u32, 0u32);
+    for k in range(0u32, conv_taps, 1u32) {
         let s_kd = load(state[k * n_channels + d]).cast::<f32>();
         let w_kd = load(w[k * n_channels + d]).cast::<f32>();
         acc = acc + w_kd * s_kd;
@@ -71,7 +76,10 @@ pub fn conv1d_causal_step<T>(
     // Sequential within the thread → safe even though state[k] is read
     // after being written: we read state[k+1] each iteration, never
     // state[k].
-    for k in range(0u32, kernel_size - 2u32, 1u32) {
+    // Same underflow guard: `kernel_size - 2` would wrap to ~4e9 for
+    // any `kernel_size < 2`.
+    let shift_taps = select(kernel_size > 2u32, kernel_size - 2u32, 0u32);
+    for k in range(0u32, shift_taps, 1u32) {
         let next = load(state[(k + 1u32) * n_channels + d]);
         store(state[k * n_channels + d], next);
     }
