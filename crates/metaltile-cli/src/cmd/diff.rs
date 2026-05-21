@@ -288,11 +288,11 @@ fn sort_diff_rows(diff_rows: &mut [DiffRow], sort: &str) {
 /// Display-ready column data for one diff row, with unstyled text for
 /// width measurement and styled text for final printing.
 struct DiffRowDisplay {
-    op: String,          // unstyled
-    shape: String,       // unstyled
-    baseline: String,    // unstyled, e.g. "104%" or "—"
-    current: String,     // unstyled, e.g. "—" or "420%"
-    delta: String,       // unstyled, e.g. "▲ +88%" or "removed"
+    op: String,       // unstyled
+    shape: String,    // unstyled
+    baseline: String, // unstyled, e.g. "104%" or "—"
+    current: String,  // unstyled, e.g. "—" or "420%"
+    delta: String,    // unstyled, e.g. "▲ +88%" or "removed"
     // Styled versions for final output
     op_styled: String,
     shape_styled: String,
@@ -311,14 +311,9 @@ fn build_diff_row_display(row: &DiffRow) -> DiffRowDisplay {
     let bright = Style::new().fg(Color::BrightWhite);
 
     let (baseline_styled, current_styled) = match row.kind {
-        DeltaKind::New | DeltaKind::Removed => (
-            paint_stdout(&baseline, dim_style),
-            paint_stdout(&current, dim_style),
-        ),
-        _ => (
-            paint_stdout(&baseline, bright),
-            paint_stdout(&current, bright),
-        ),
+        DeltaKind::New | DeltaKind::Removed =>
+            (paint_stdout(&baseline, dim_style), paint_stdout(&current, dim_style)),
+        _ => (paint_stdout(&baseline, bright), paint_stdout(&current, bright)),
     };
 
     // Delta column — kind label folded in, one paint() call so restyle
@@ -331,12 +326,9 @@ fn build_diff_row_display(row: &DiffRow) -> DiffRowDisplay {
     //   red        = "removed"
     //   cyan       = "new"
     let (delta, delta_styled) = match row.kind {
-        DeltaKind::Removed => {
-            ("removed".to_string(), paint_stderr("removed", Style::new().fg(Color::Red)))
-        },
-        DeltaKind::New => {
-            ("new".to_string(), paint_stdout("new", Style::new().fg(Color::Cyan)))
-        },
+        DeltaKind::Removed =>
+            ("removed".to_string(), paint_stderr("removed", Style::new().fg(Color::Red))),
+        DeltaKind::New => ("new".to_string(), paint_stdout("new", Style::new().fg(Color::Cyan))),
         DeltaKind::Unchanged => {
             let pct = row.delta_pct.unwrap_or(0.0);
             if pct == 0.0 {
@@ -411,21 +403,13 @@ fn print_diff_table(rows: &[DiffRow]) {
 /// Pad `s` on the right with spaces to reach `width`.
 fn pad_right(s: &str, width: usize) -> String {
     let len = s.len();
-    if len >= width {
-        s.to_string()
-    } else {
-        format!("{s}{: <len$}", "", len = width - len)
-    }
+    if len >= width { s.to_string() } else { format!("{s}{: <len$}", "", len = width - len) }
 }
 
 /// Pad `s` on the left with spaces to reach `width`.
 fn pad_left(s: &str, width: usize) -> String {
     let len = s.len();
-    if len >= width {
-        s.to_string()
-    } else {
-        format!("{: >len$}{s}", "", len = width - len)
-    }
+    if len >= width { s.to_string() } else { format!("{: >len$}{s}", "", len = width - len) }
 }
 
 /// Take a padded plain-text cell and its original styled short cell,
@@ -669,10 +653,7 @@ mod tests {
     #[test]
     fn restyle_wraps_padded_text() {
         // Simulate a styled short cell: "104%" in bold cyan
-        let short = format!(
-            "{}{}{}",
-            "\x1b[1;36m", "104%", "\x1b[0m"
-        );
+        let short = format!("{}{}{}", "\x1b[1;36m", "104%", "\x1b[0m");
         // Padded to width 6: "  104%"
         let padded = "  104%";
         let result = restyle(padded, &short);
