@@ -137,11 +137,12 @@ impl MslGenerator {
                 feat.needs_simd_lane = true;
                 feat.needs_simd_group = true;
             },
-            Op::FusedElementwise { ops } =>
-                for inner in ops {
-                    self.analyze_op(inner, feat);
+            _ =>
+                if let Some(ops) = op.fused_ops() {
+                    for inner in ops {
+                        self.analyze_op(inner, feat);
+                    }
                 },
-            _ => {},
         }
     }
 }

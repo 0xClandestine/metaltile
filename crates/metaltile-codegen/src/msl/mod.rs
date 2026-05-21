@@ -50,10 +50,9 @@ fn kernel_uses_program_id_axis(kernel: &Kernel, axis: u32) -> bool {
         _ => "",
     };
     let check = |ops: &[Op]| {
-        ops.iter().any(|op| match op {
-            Op::ProgramId { axis: a } => *a == axis,
-            Op::Load { src, indices, .. } => indices.is_empty() && src.as_str() == tgid_name,
-            _ => false,
+        ops.iter().any(|op| {
+            op.program_id_axis() == Some(axis)
+                || (op.load_src() == Some(tgid_name) && op.load_indices().is_empty())
         })
     };
     check(&kernel.body.ops) || kernel.blocks.values().any(|b| check(&b.ops))

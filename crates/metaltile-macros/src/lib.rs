@@ -57,7 +57,7 @@ pub fn derive_value_refs(input: TokenStream) -> TokenStream {
 ///
 /// Annotate variants with `#[elementwise]`, `#[side_effect]`, `#[unpredictable]`,
 /// `#[cheap_alu]`, or `#[op_load]`. See `derive_op` module docs for details.
-#[proc_macro_derive(OpFlags, attributes(elementwise, side_effect, unpredictable, cheap_alu, op_load))]
+#[proc_macro_derive(OpFlags, attributes(elementwise, side_effect, unpredictable, cheap_alu, op_load, op_store, barrier, op_loop, op_if, op_fused, op_const))]
 pub fn derive_op_flags(input: TokenStream) -> TokenStream {
     derive_op::derive_op_flags(input)
 }

@@ -287,15 +287,7 @@ fn is_fusible(op: &Op) -> bool {
 
 /// Return the first ValueId input of an op (used to trace the chain backward).
 fn first_value_input(op: &Op) -> Option<ValueId> {
-    match op {
-        Op::BinOp { lhs, .. }
-        | Op::UnaryOp { value: lhs, .. }
-        | Op::Activation { value: lhs, .. }
-        | Op::Cast { value: lhs, .. }
-        | Op::Select { cond: lhs, .. }
-        | Op::Broadcast { value: lhs, .. } => Some(*lhs),
-        _ => None,
-    }
+    op.value_refs().first().map(|v| **v)
 }
 
 /// Build a sub-op for a FusedElementwise chain.

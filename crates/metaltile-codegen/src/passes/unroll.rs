@@ -101,18 +101,13 @@ impl super::Pass for UnrollPass {
 // ---------------------------------------------------------------------------
 
 fn has_nested_loop_or_barrier(block: &Block) -> bool {
-    block.ops.iter().any(|op| matches!(op, Op::Loop { .. } | Op::Barrier | Op::SimdgroupBarrier))
+    block.ops.iter().any(|op| op.is_loop() || op.is_barrier())
 }
 
 fn find_const_in_block(block: &Block, vid: ValueId) -> Option<i64> {
-    for (i, op) in block.ops.iter().enumerate() {
-        if block.results.get(i) == Some(&Some(vid))
-            && let Op::Const { value } = op
-        {
-            return Some(*value);
-        }
-    }
-    None
+    block.ops.iter().enumerate().find_map(|(i, op)| {
+        if block.results.get(i) == Some(&Some(vid)) { op.as_const() } else { None }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -232,16 +227,17 @@ fn unroll_block(
             let pending_clones: Vec<(BlockId, BlockId)> = body
                 .ops
                 .iter()
-                .flat_map(|op| match op {
-                    Op::If { then_block, else_block, .. } => {
-                        let mut v = vec![*then_block];
+                .flat_map(|op| {
+                    let mut ids = Vec::new();
+                    if let Some((_, then_block, else_block)) = op.as_if() {
+                        ids.push(then_block);
                         if let Some(eb) = else_block {
-                            v.push(*eb);
+                            ids.push(eb);
                         }
-                        v
-                    },
-                    Op::Loop { body, .. } => vec![*body],
-                    _ => Vec::new(),
+                    } else if let Some((_, _, _, _, body_id)) = op.as_loop() {
+                        ids.push(body_id);
+                    }
+                    ids
                 })
                 .map(|old_id| {
                     let new_id = BlockId::new(*next_block_id);

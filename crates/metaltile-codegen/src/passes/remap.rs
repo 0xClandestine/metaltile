@@ -144,12 +144,10 @@ pub fn is_load(op: &Op) -> bool { op.is_load() }
 
 
 /// True if the op is a store to device or threadgroup memory.
-pub fn is_store(op: &Op) -> bool {
-    matches!(op, Op::Store { .. } | Op::VectorStore { .. } | Op::ThreadgroupStore { .. })
-}
+pub fn is_store(op: &Op) -> bool { op.is_store() }
 
 /// True if the op contains a barrier.
-pub fn is_barrier(op: &Op) -> bool { matches!(op, Op::Barrier | Op::SimdgroupBarrier) }
+pub fn is_barrier(op: &Op) -> bool { op.is_barrier() }
 
 #[cfg(test)]
 mod tests {

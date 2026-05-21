@@ -208,6 +208,12 @@ pub fn derive_op_flags(input: TokenStream) -> TokenStream {
         ("unpredictable", "is_unpredictable"),
         ("cheap_alu", "is_cheap_alu"),
         ("op_load", "is_load"),
+        ("op_store", "is_store"),
+        ("barrier", "is_barrier"),
+        ("op_loop", "is_loop"),
+        ("op_if", "is_if"),
+        ("op_fused", "is_fused_elementwise"),
+        ("op_const", "is_const"),
     ];
 
     let methods: Vec<TokenStream2> = flags

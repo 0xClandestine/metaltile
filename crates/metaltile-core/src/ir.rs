@@ -417,7 +417,7 @@ pub enum Op {
     #[cheap_alu] ProgramId { axis: u32 },
 
     /// A constant integer value (from a literal in the DSL).
-    #[cheap_alu] Const { value: i64 },
+    #[cheap_alu] #[op_const] Const { value: i64 },
 
     /// `arange(start, step, len)` — creates a 1D range [start, start+step, ...].
     /// `start` and `step` default to 0.0 and 1.0 respectively.
@@ -436,7 +436,7 @@ pub enum Op {
     },
 
     /// Store a tile to a tensor at given indices.
-    #[side_effect] Store {
+    #[side_effect] #[op_store] Store {
         /// The parameter to store to.
         dst: String,
         /// Per-dimension index expressions.
@@ -482,10 +482,10 @@ pub enum Op {
     #[elementwise] #[cheap_alu] Cast { #[vid] value: ValueId, dtype: DType },
 
     /// Loop: iterate a variable from start to end with step.
-    #[unpredictable] Loop { var: VarId, #[vid] start: ValueId, #[vid] end: ValueId, #[vid] step: ValueId, body: BlockId },
+    #[unpredictable] #[op_loop] Loop { var: VarId, #[vid] start: ValueId, #[vid] end: ValueId, #[vid] step: ValueId, body: BlockId },
 
     /// Conditional branch: if `cond` is true, execute `then_block`, else `else_block`.
-    #[unpredictable] If { #[vid] cond: ValueId, then_block: BlockId, else_block: Option<BlockId> },
+    #[unpredictable] #[op_if] If { #[vid] cond: ValueId, then_block: BlockId, else_block: Option<BlockId> },
 
     /// Create a zero-filled tile.
     #[elementwise] Zeros {
@@ -549,7 +549,7 @@ pub enum Op {
     /// Fused chain of elementwise operations.
     /// Created by the FusionPass to merge adjacent ops like
     /// `UnaryOp(Exp) → Activation(Silu)` into a single expression.
-    FusedElementwise {
+    #[op_fused] FusedElementwise {
         /// The elementwise ops in execution order (producer first).
         /// Each op's inputs reference either external ValueIds or
         /// the output of a preceding op in this chain (index 0..n-1).
@@ -568,7 +568,7 @@ pub enum Op {
     },
 
     /// Vectorized store: stores `len` consecutive elements as a vector.
-    #[side_effect] VectorStore {
+    #[side_effect] #[op_store] VectorStore {
         /// The parameter to store to.
         dst: String,
         /// Flat byte offset into the buffer (already aligned).
@@ -587,7 +587,7 @@ pub enum Op {
     Gather { src: String, #[vid] indices: ValueId, axis: u32 },
 
     /// Scatter: indexed store to a buffer. `dst[indices[i]] = value[i]`.
-    #[side_effect] Scatter { dst: String, #[vid] indices: ValueId, #[vid] value: ValueId, axis: u32 },
+    #[side_effect] #[op_store] Scatter { dst: String, #[vid] indices: ValueId, #[vid] value: ValueId, axis: u32 },
 
     /// Atomic operation on device memory.
     #[side_effect] Atomic { op: AtomicKind, scope: AtomicScope, dst: String, #[vid] index: ValueId, #[vid] value: ValueId },
@@ -608,7 +608,7 @@ pub enum Op {
     /// Strided per-element compute + store: for each element in the stride pattern,
     /// load from src, apply optional transform with a scalar operand, and store to dst.
     /// Used for write-back in reduction kernels (e.g., rout[i] = rx[i] * rms * w[i]).
-    #[side_effect] StrideStore {
+    #[side_effect] #[op_store] StrideStore {
         src: String,
         dst: String,
         #[vid] offset: ValueId,
@@ -710,7 +710,7 @@ pub enum Op {
     #[op_load] ThreadgroupLoad { name: String, #[vid] index: ValueId },
 
     /// Store one element to a named threadgroup array: `name[index] = value`.
-    #[side_effect] ThreadgroupStore { name: String, #[vid] index: ValueId, #[vid] value: ValueId },
+    #[side_effect] #[op_store] ThreadgroupStore { name: String, #[vid] index: ValueId, #[vid] value: ValueId },
 
     /// Allocate a per-thread stack-resident array.  Emits `T name[size];`
     /// inside the kernel body (no `threadgroup` qualifier — each thread
@@ -731,7 +731,7 @@ pub enum Op {
     /// Threadgroup barrier: `threadgroup_barrier(mem_flags::mem_threadgroup)`.
     /// Ensures all prior threadgroup stores are visible to all threads before
     /// any subsequent threadgroup loads.
-    #[side_effect] #[unpredictable] Barrier,
+    #[side_effect] #[unpredictable] #[barrier] Barrier,
 
     /// Compiler-only simdgroup barrier: `simdgroup_barrier(mem_flags::mem_none)`.
     /// Zero-cost at runtime — pins instruction ordering across the simdgroup
@@ -739,7 +739,7 @@ pub enum Op {
     /// Apple MLX uses these around V-tile loads when BD≥128
     /// (`steel_attention.h:431-443`) to keep `simdgroup_load → simdgroup_mma`
     /// ordering stable through aggressive scheduling.
-    #[side_effect] #[unpredictable] SimdgroupBarrier,
+    #[side_effect] #[unpredictable] #[barrier] SimdgroupBarrier,
 
     /// Declare a mutable register-local scalar variable.
     /// Emits: `auto __ml_{name} = {init_value};`
@@ -1014,6 +1014,84 @@ impl std::fmt::Display for Block {
 }
 
 impl Op {
+    // -----------------------------------------------------------------------
+    // Typed accessors — extract fields from specific variants without a match
+    // -----------------------------------------------------------------------
+
+    /// Returns the constant integer value if this is `Op::Const`.
+    pub fn as_const(&self) -> Option<i64> {
+        if let Op::Const { value } = self { Some(*value) } else { None }
+    }
+
+    /// Returns `(var, start, end, step, body)` if this is `Op::Loop`.
+    pub fn as_loop(&self) -> Option<(VarId, ValueId, ValueId, ValueId, BlockId)> {
+        if let Op::Loop { var, start, end, step, body } = self {
+            Some((*var, *start, *end, *step, *body))
+        } else {
+            None
+        }
+    }
+
+    /// Returns `(cond, then_block, else_block)` if this is `Op::If`.
+    pub fn as_if(&self) -> Option<(ValueId, BlockId, Option<BlockId>)> {
+        if let Op::If { cond, then_block, else_block } = self {
+            Some((*cond, *then_block, *else_block))
+        } else {
+            None
+        }
+    }
+
+    /// Returns the axis if this is `Op::ProgramId`.
+    pub fn program_id_axis(&self) -> Option<u32> {
+        if let Op::ProgramId { axis } = self { Some(*axis) } else { None }
+    }
+
+    /// Returns the destination buffer name for any store op
+    /// (`Store`, `VectorStore`, `StrideStore`, `ThreadgroupStore`).
+    pub fn store_dst(&self) -> Option<&str> {
+        match self {
+            Op::Store { dst, .. }
+            | Op::VectorStore { dst, .. }
+            | Op::StrideStore { dst, .. } => Some(dst),
+            Op::ThreadgroupStore { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Returns the source buffer name for any load op
+    /// (`Load`, `VectorLoad`, `ThreadgroupLoad`).
+    pub fn load_src(&self) -> Option<&str> {
+        match self {
+            Op::Load { src, .. } | Op::VectorLoad { src, .. } => Some(src),
+            Op::ThreadgroupLoad { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Returns the load indices slice if this is `Op::Load`; empty slice otherwise.
+    pub fn load_indices(&self) -> &[IndexExpr] {
+        if let Op::Load { indices, .. } = self { indices } else { &[] }
+    }
+
+    /// True if this `Store` carries a predicate mask (may-write semantics).
+    pub fn has_store_mask(&self) -> bool {
+        matches!(self, Op::Store { mask: Some(_), .. })
+    }
+
+    /// Returns the sub-ops if this is `Op::FusedElementwise`.
+    pub fn fused_ops(&self) -> Option<&[Op]> {
+        if let Op::FusedElementwise { ops } = self { Some(ops) } else { None }
+    }
+
+    /// Returns the sub-ops mutably if this is `Op::FusedElementwise`.
+    pub fn fused_ops_mut(&mut self) -> Option<&mut Vec<Op>> {
+        if let Op::FusedElementwise { ops } = self { Some(ops) } else { None }
+    }
+
+    // -----------------------------------------------------------------------
+    // Display impl
+    // -----------------------------------------------------------------------
+
     /// Write a compact IR representation of this op.
     fn fmt_ir(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
