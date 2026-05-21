@@ -38,6 +38,13 @@
 //!
 //! Correctness vs CPU oracle ≥ cos 0.999 — see
 //! `crates/metaltile-std/tests/qmm_mpp_correctness.rs`.
+//!
+//! Runtime behavior on `gen < 17` GPUs (M3 and earlier): the MSL body is
+//! `#if __METAL_VERSION__ >= 400` gated so the metallib still links cleanly
+//! on Metal 3 toolchains, with a no-op `#else` arm. Caller-side dispatch
+//! must skip this kernel on unsupported GPU gens — `KernelFeatures::needs_mpp`
+//! is the runtime gate; downstream callers route to `mt_qmm_mma` (the
+//! non-MPP `simdgroup_matmul` variant) when `needs_mpp` is unsupported.
 
 use std::collections::BTreeMap;
 

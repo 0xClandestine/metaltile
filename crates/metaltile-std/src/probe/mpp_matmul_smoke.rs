@@ -26,6 +26,13 @@
 //! preamble auto-detects the `"mpp::"` prefix and emits the required
 //! `#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>`
 //! gated on `__METAL_VERSION__ >= 400`.
+//!
+//! Runtime behavior on `gen < 17` GPUs (e.g. M3 and earlier): the metallib
+//! still links because the MPP source body is `#if __METAL_VERSION__ >= 400`
+//! gated and the `#else` branch performs only a trivial elementwise write.
+//! Caller-side dispatch should skip this kernel on unsupported GPU gens —
+//! `metaltile-runtime` already routes via `KernelFeatures::needs_mpp`, so
+//! downstream callers don't need to gate explicitly.
 
 use std::collections::BTreeMap;
 
