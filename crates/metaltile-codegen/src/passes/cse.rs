@@ -266,11 +266,7 @@ fn replace_values(op: &mut Op, map: &FxHashMap<ValueId, ValueId>) {
                 s(v);
             },
         Op::KernelCall { args, .. } =>
-            for a in args.iter_mut() {
-                if let KernelCallArg::Value(v) = a {
-                    s(v);
-                }
-            },
+            args.iter_mut().filter_map(KernelCallArg::as_value_mut).for_each(|v| s(v)),
         Op::FlashAttention { q, k, v, .. } => {
             s(q);
             s(k);

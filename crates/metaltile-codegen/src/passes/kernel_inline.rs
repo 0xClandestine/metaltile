@@ -33,7 +33,7 @@
 //!    used (causing a compile error if actually referenced — better than
 //!    silent wrong code).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use metaltile_core::{
     KernelEntry,
@@ -83,15 +83,7 @@ impl Pass for KernelInlinePass {
             if let Op::KernelCall { ref callee, ref args, dtype } = op {
                 let call_result = result;
 
-                let callee_kernel = match lookup_kernel(callee, dtype) {
-                    Some(k) => k,
-                    None => {
-                        return Err(Error::Generation(format!(
-                            "KernelInlinePass: unknown kernel `{callee}` \
-                             (not registered via #[kernel])"
-                        )));
-                    },
-                };
+                let callee_kernel = lookup_kernel(callee, dtype)?;
 
                 let inlined =
                     inline_callee(&callee_kernel, args, &caller_pids, call_result, vid_offset);
@@ -125,8 +117,15 @@ impl Pass for KernelInlinePass {
 // Registry lookup
 // ---------------------------------------------------------------------------
 
-fn lookup_kernel(name: &str, dtype: DType) -> Option<Kernel> {
-    inventory::iter::<KernelEntry>().find(|e| e.name == name).map(|e| (e.build)(&[dtype]))
+fn lookup_kernel(name: &str, dtype: DType) -> Result<Kernel> {
+    inventory::iter::<KernelEntry>()
+        .find(|e| e.name() == name)
+        .map(|e| e.build(&[dtype]))
+        .ok_or_else(|| {
+            Error::Generation(format!(
+                "KernelInlinePass: unknown kernel `{name}` (not registered via #[kernel])"
+            ))
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -140,74 +139,61 @@ fn inline_callee(
     call_result: Option<ValueId>,
     vid_offset: u32,
 ) -> Vec<(Op, Option<ValueId>)> {
-    // Separate callee params into input/output, preserving original order for
-    // positional arg matching.  Constexpr params live in `callee.constexprs`,
-    // not in `callee.params`, so we build three separate slot lists:
-    //   args[0..input_params.len())       → input tensor params
-    //   args[input_params.len()..n_input_slots) → constexpr params
-    //   args[n_input_slots..)             → output params (rare; usually None)
+    // Collect param name lists in declaration order for positional arg matching.
+    // Constexpr params live in `callee.constexprs` (not `callee.params`), so
+    // the positional order is: [input_params..., constexprs..., output_params...].
     let input_params: Vec<&str> =
         callee.params.iter().filter(|p| !p.is_output).map(|p| p.name.as_str()).collect();
     let constexpr_names: Vec<&str> = callee.constexprs.iter().map(|c| c.name.name()).collect();
     let output_params: Vec<&str> =
         callee.params.iter().filter(|p| p.is_output).map(|p| p.name.as_str()).collect();
-
-    // For each input param, determine how it's being supplied:
-    //   Value(vid) → skip the load, map load result → vid.
-    //   Tensor(name) → rename load/store src/dst to `name`, keep the op.
-    //   No arg → keep the load as-is (unusual; e.g. forwarding param by name
-    //             from a parent which already renamed it).
-    let input_arg: Vec<Option<&KernelCallArg>> =
-        (0..input_params.len()).map(|i| args.get(i)).collect();
-
-    // Constexpr args follow directly after input params.
-    let constexpr_arg: Vec<Option<&KernelCallArg>> =
-        (0..constexpr_names.len()).map(|j| args.get(input_params.len() + j)).collect();
-
-    // The total number of input slots (params + constexprs) determines where
-    // output param args begin.  Without this offset, constexpr args would be
-    // misidentified as output args and cause callee output stores to be renamed
-    // to the constexpr name instead of being skipped.
     let n_input_slots = input_params.len() + constexpr_names.len();
 
-    // For each output param, check if an explicit Tensor arg was passed.
-    // If not, the store is skipped and the stored value maps to call_result.
-    let output_arg: Vec<Option<&KernelCallArg>> =
-        (0..output_params.len()).map(|j| args.get(n_input_slots + j)).collect();
+    // Unified name → arg map for all non-output params (tensor inputs + constexprs).
+    // Single lookup replaces the three parallel arrays + offset arithmetic that
+    // previously caused the constexpr positional-arg bug.
+    let param_arg: HashMap<&str, &KernelCallArg> = input_params
+        .iter()
+        .chain(constexpr_names.iter())
+        .enumerate()
+        .filter_map(|(i, &name)| args.get(i).map(|a| (name, a)))
+        .collect();
 
-    // Find the callee SSA vid being stored to each output param without an
-    // explicit arg → these map to call_result.
+    // Output param args (rare; usually absent → store is skipped, value → call_result).
+    let output_arg: HashMap<&str, Option<&KernelCallArg>> = output_params
+        .iter()
+        .enumerate()
+        .map(|(j, &name)| (name, args.get(n_input_slots + j)))
+        .collect();
+
     let mut vid_map: BTreeMap<ValueId, ValueId> = BTreeMap::new();
     let mut next_vid = vid_offset;
 
-    // Seed vid_map with Value args for input params and constexpr params.
-    for (op, result) in callee.body.ops.iter().zip(callee.body.results.iter()) {
-        if let (Op::Load { src, .. }, Some(r)) = (op, result) {
-            if let Some(idx) = input_params.iter().position(|&n| n == src.as_str())
-                && let Some(KernelCallArg::Value(arg_vid)) = input_arg[idx]
-            {
-                vid_map.insert(*r, *arg_vid);
-            }
-            if let Some(idx) = constexpr_names.iter().position(|&n| n == src.as_str())
-                && let Some(KernelCallArg::Value(arg_vid)) = constexpr_arg[idx]
-            {
-                vid_map.insert(*r, *arg_vid);
-            }
-        }
-    }
-
-    // For output params without an explicit arg, map their stored value vids
-    // to call_result.  Only the first such output is mapped (single return).
+    // Single pre-pass: seed Value-arg load results into vid_map, and map the
+    // stored value of output params without an explicit arg to call_result.
+    // Merged from the previous two separate pre-pass loops.
     let mut mapped_output = false;
-    for (op, _result) in callee.body.ops.iter().zip(callee.body.results.iter()) {
-        if let Op::Store { dst, value, .. } = op
-            && let Some(idx) = output_params.iter().position(|&n| n == dst.as_str())
-            && output_arg[idx].is_none()
-            && !mapped_output
-            && let Some(cr) = call_result
-        {
-            vid_map.insert(*value, cr);
-            mapped_output = true;
+    for (op, result) in callee.body.ops.iter().zip(callee.body.results.iter()) {
+        match op {
+            Op::Load { src, .. } => {
+                if let Some(r) = result
+                    && let Some(KernelCallArg::Value(arg_vid)) =
+                        param_arg.get(src.as_str()).copied()
+                {
+                    vid_map.insert(*r, *arg_vid);
+                }
+            },
+            Op::Store { dst, value, .. } => {
+                if let Some(out_arg) = output_arg.get(dst.as_str())
+                    && out_arg.is_none()
+                    && !mapped_output
+                    && let Some(cr) = call_result
+                {
+                    vid_map.insert(*value, cr);
+                    mapped_output = true;
+                }
+            },
+            _ => {},
         }
     }
 
@@ -217,42 +203,34 @@ fn inline_callee(
     for (op, op_result) in callee.body.ops.iter().zip(callee.body.results.iter()) {
         match op {
             // ── ProgramId ────────────────────────────────────────────────────
-            // Map to the caller's ProgramId for the same axis, or allocate a
-            // fresh vid if the caller doesn't have one (will fail to compile if
-            // the callee actually uses it, which is the correct behaviour).
+            // Map to the caller's ProgramId for the same axis; don't re-emit.
+            // If the caller has no matching axis a fresh vid is allocated —
+            // it will fail to compile if actually referenced, which is correct.
             Op::ProgramId { axis } => {
                 if let Some(r) = op_result {
-                    let mapped = if let Some(&caller_pid) = caller_pids.get(axis) {
-                        caller_pid
-                    } else {
+                    let mapped = caller_pids.get(axis).copied().unwrap_or_else(|| {
                         let fresh = ValueId::new(next_vid);
                         next_vid += 1;
                         fresh
-                    };
+                    });
                     vid_map.insert(*r, mapped);
                 }
-                // Don't emit the op — the caller already has it.
                 continue;
             },
 
-            // ── Load from an input param ──────────────────────────────────────
+            // ── Load from any callee param (tensor input or constexpr) ────────
             Op::Load { src, .. } => {
-                if let Some(idx) = input_params.iter().position(|&n| n == src.as_str()) {
-                    match input_arg[idx] {
-                        // Value arg: skip load, result already in vid_map.
-                        Some(KernelCallArg::Value(_)) => {
-                            // Ensure skipped result has a vid entry.
-                            if let Some(r) = op_result
-                                && !vid_map.contains_key(r)
-                            {
-                                let fresh = ValueId::new(next_vid);
-                                next_vid += 1;
-                                vid_map.insert(*r, fresh);
-                            }
+                if let Some(arg) = param_arg.get(src.as_str()) {
+                    match arg {
+                        KernelCallArg::Value(_) => {
+                            // Pre-pass seeded vid_map with load_result → arg_vid.
+                            debug_assert!(
+                                op_result.map_or(true, |r| vid_map.contains_key(&r)),
+                                "Value-arg load result not in vid_map — callee IR malformed"
+                            );
                             continue;
                         },
-                        // Tensor arg: rename src and keep the op.
-                        Some(KernelCallArg::Tensor(tensor_name)) => {
+                        KernelCallArg::Tensor(tensor_name) => {
                             let mut new_op = op.clone();
                             if let Op::Load { src: ref mut s, .. } = new_op {
                                 *s = tensor_name.clone();
@@ -262,78 +240,37 @@ fn inline_callee(
                             inlined.push((new_op, new_result));
                             continue;
                         },
-                        // No arg: keep load as-is (unusual).
-                        None => {},
                     }
                 }
-                // ── Load from a constexpr param ───────────────────────────────
-                // Constexprs are auto-loaded via Op::Load { src: name, indices: [] }
-                // in the callee body. Apply the same rename/skip logic as for
-                // regular input params but sourced from constexpr_arg.
-                if let Some(idx) = constexpr_names.iter().position(|&n| n == src.as_str()) {
-                    match constexpr_arg[idx] {
-                        Some(KernelCallArg::Value(_)) => {
-                            // Seed pass already mapped this; ensure entry exists.
-                            if let Some(r) = op_result
-                                && !vid_map.contains_key(r)
-                            {
-                                let fresh = ValueId::new(next_vid);
-                                next_vid += 1;
-                                vid_map.insert(*r, fresh);
-                            }
-                            continue;
-                        },
-                        Some(KernelCallArg::Tensor(tensor_name)) => {
-                            let mut new_op = op.clone();
-                            if let Op::Load { src: ref mut s, .. } = new_op {
-                                *s = tensor_name.clone();
-                            }
-                            remap_value_ids(&mut new_op, &vid_map);
-                            let new_result = assign_result(op_result, &mut vid_map, &mut next_vid);
-                            inlined.push((new_op, new_result));
-                            continue;
-                        },
-                        None => {},
-                    }
-                }
-                // Fall through to default handling.
+                // Fall through: load from a non-param buffer (internal to callee).
             },
 
             // ── Store to an output param ──────────────────────────────────────
             Op::Store { dst, .. } => {
-                if let Some(idx) = output_params.iter().position(|&n| n == dst.as_str()) {
-                    match output_arg[idx] {
-                        // Tensor arg: rename dst and keep the store.
+                if let Some(out_arg) = output_arg.get(dst.as_str()) {
+                    match out_arg {
+                        // Explicit Tensor arg: rename dst and keep the store.
                         Some(KernelCallArg::Tensor(tensor_name)) => {
                             let mut new_op = op.clone();
                             if let Op::Store { dst: ref mut d, .. } = new_op {
                                 *d = tensor_name.clone();
                             }
                             remap_value_ids(&mut new_op, &vid_map);
-                            // Stores don't produce a result.
                             inlined.push((new_op, None));
                             continue;
                         },
-                        // No arg: skip store — value already mapped to call_result above.
-                        None | Some(KernelCallArg::Value(_)) => {
-                            if let Some(r) = op_result
-                                && !vid_map.contains_key(r)
-                            {
-                                let fresh = ValueId::new(next_vid);
-                                next_vid += 1;
-                                vid_map.insert(*r, fresh);
-                            }
-                            continue;
-                        },
+                        // No arg (or Value arg): skip store — value already
+                        // mapped to call_result by the pre-pass.
+                        None | Some(KernelCallArg::Value(_)) => continue,
                     }
                 }
-                // Fall through to default handling (store to a non-param buffer).
+                // Fall through: store to a non-param buffer (internal to callee).
             },
 
             _ => {},
         }
 
-        // Default: remap and keep the op.
+        // Default: remap value ids and keep the op.
         let mut new_op = op.clone();
         remap_value_ids(&mut new_op, &vid_map);
         let new_result = assign_result(op_result, &mut vid_map, &mut next_vid);

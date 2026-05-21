@@ -263,11 +263,7 @@ fn replace_value_in_op(op: &mut Op, old: ValueId, new: ValueId) {
                 s(v);
             },
         Op::KernelCall { args, .. } =>
-            for a in args.iter_mut() {
-                if let KernelCallArg::Value(v) = a {
-                    s(v);
-                }
-            },
+            args.iter_mut().filter_map(KernelCallArg::as_value_mut).for_each(|v| s(v)),
         Op::FlashAttention { q, k, v, .. } => {
             s(q);
             s(k);
@@ -458,11 +454,7 @@ fn collect_uses(op: &Op, used: &mut BTreeSet<ValueId>) {
                 add(*v);
             },
         Op::KernelCall { args, .. } =>
-            for a in args {
-                if let KernelCallArg::Value(v) = a {
-                    add(*v);
-                }
-            },
+            args.iter().filter_map(KernelCallArg::as_value).for_each(|v| add(v)),
         Op::FlashAttention { q, k, v, .. } => {
             add(*q);
             add(*k);

@@ -411,6 +411,19 @@ pub enum KernelCallArg {
     Tensor(String),
 }
 
+impl KernelCallArg {
+    /// Returns the inner [`ValueId`] if this is a [`Value`][Self::Value] variant.
+    pub fn as_value(&self) -> Option<ValueId> {
+        if let KernelCallArg::Value(v) = self { Some(*v) } else { None }
+    }
+
+    /// Returns a mutable reference to the inner [`ValueId`] if this is a
+    /// [`Value`][Self::Value] variant, or `None` for [`Tensor`][Self::Tensor].
+    pub fn as_value_mut(&mut self) -> Option<&mut ValueId> {
+        if let KernelCallArg::Value(v) = self { Some(v) } else { None }
+    }
+}
+
 /// A single operation in the IR.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {

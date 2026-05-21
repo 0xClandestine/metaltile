@@ -199,22 +199,19 @@ fn expand_kernel(input_fn: ItemFn) -> TokenStream {
                 LaunchBuilder::new(ctx)
             }
 
-            /// Build kernel IR for the inline registry (used by `KernelInlinePass`).
-            /// For non-generic kernels the `dtypes` slice is ignored.
-            /// For generic kernels `dtypes[0]` is used as the primary type param.
-            #[doc(hidden)]
-            pub fn __build_for_inline(dtypes: &[metaltile_core::dtype::DType]) -> metaltile_core::ir::Kernel {
-                #[allow(unused_variables)]
-                let _t = dtypes.first().copied().unwrap_or(metaltile_core::dtype::DType::F32);
-                kernel_ir_for(#(#arg_var_idents),*)
-            }
-
-            metaltile_core::inventory::submit! {
-                metaltile_core::KernelEntry {
-                    name: #fn_name_str,
-                    build: __build_for_inline,
+            // Use `const _: ()` hygiene scope so `__build_for_inline` does not
+            // leak into the enclosing module's namespace.
+            const _: () = {
+                fn __build_for_inline(dtypes: &[metaltile_core::dtype::DType]) -> metaltile_core::ir::Kernel {
+                    #[allow(unused_variables)]
+                    let _t = dtypes.first().copied().unwrap_or(metaltile_core::dtype::DType::F32);
+                    kernel_ir_for(#(#arg_var_idents),*)
                 }
-            }
+
+                metaltile_core::inventory::submit! {
+                    metaltile_core::KernelEntry::new(#fn_name_str, __build_for_inline)
+                }
+            };
         }
     };
 

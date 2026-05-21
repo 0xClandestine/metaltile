@@ -122,11 +122,7 @@ pub fn remap_value_ids(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
                 s(v);
             },
         Op::KernelCall { args, .. } =>
-            for a in args {
-                if let KernelCallArg::Value(v) = a {
-                    s(v);
-                }
-            },
+            args.iter_mut().filter_map(KernelCallArg::as_value_mut).for_each(|v| s(v)),
         Op::FusedElementwise { ops } =>
             for sub_op in ops.iter_mut() {
                 remap_value_ids(sub_op, map);
@@ -344,11 +340,7 @@ pub fn op_value_refs(op: &Op) -> SmallVec<[ValueId; 4]> {
             refs.extend(inputs.iter().copied());
         },
         Op::KernelCall { args, .. } =>
-            for a in args {
-                if let KernelCallArg::Value(v) = a {
-                    refs.push(*v);
-                }
-            },
+            args.iter().filter_map(KernelCallArg::as_value).for_each(|v| refs.push(v)),
         Op::FusedElementwise { ops } =>
             for sub in ops {
                 refs.extend(op_value_refs(sub));
@@ -586,11 +578,7 @@ pub fn max_vid_in_op(op: &Op) -> u32 {
                 push(v);
             },
         Op::KernelCall { args, .. } =>
-            for a in args {
-                if let KernelCallArg::Value(v) = a {
-                    push(v);
-                }
-            },
+            args.iter().filter_map(KernelCallArg::as_value).for_each(|v| push(&v)),
         Op::FusedElementwise { ops } =>
             for sub in ops {
                 m = m.max(max_vid_in_op(sub));
