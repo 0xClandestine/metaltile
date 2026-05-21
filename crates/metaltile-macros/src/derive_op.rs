@@ -1,4 +1,4 @@
-//! `#[derive(ValueRefs)]` and `#[derive(OpFlags)]` for the `Op` enum.
+//! `#[derive(ValueRefs)]`, `#[derive(OpFlags)]`, and `#[derive(VariantName)]` for the `Op` enum.
 //!
 //! ## ValueRefs
 //!
@@ -185,6 +185,74 @@ pub fn derive_value_refs(input: TokenStream) -> TokenStream {
         }
     }
     .into()
+}
+
+// ---------------------------------------------------------------------------
+// VariantName derive
+// ---------------------------------------------------------------------------
+
+/// Generates `fn variant_name(&self) -> &'static str` from variant idents.
+///
+/// Supports `#[name("CustomName")]` on variants that need a name different
+/// from their Rust identifier.
+pub fn derive_variant_name(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+
+    let Data::Enum(data) = &input.data else {
+        return syn::Error::new_spanned(&input, "VariantName can only be derived on enums")
+            .to_compile_error()
+            .into();
+    };
+
+    let arms: Vec<TokenStream2> = data
+        .variants
+        .iter()
+        .map(|v| {
+            let vname = &v.ident;
+            // Check for explicit #[name("...")] override.
+            let override_name = variant_name_override(v);
+            let label = match override_name {
+                Some(s) => quote! { #s },
+                None => {
+                    let s = vname.to_string();
+                    quote! { #s }
+                },
+            };
+            match &v.fields {
+                Fields::Unit => quote! { #name::#vname => #label },
+                _ => quote! { #name::#vname { .. } => #label },
+            }
+        })
+        .collect();
+
+    let expanded = quote! {
+        impl #name {
+            /// A stable display name for this variant, used in error messages and diagnostics.
+            pub fn variant_name(&self) -> &'static str {
+                match self { #(#arms,)* }
+            }
+        }
+    };
+    expanded.into()
+}
+
+/// Extract a `#[name("...")]` override from a variant's attributes.
+fn variant_name_override(variant: &syn::Variant) -> Option<String> {
+    for attr in &variant.attrs {
+        if !attr.path().is_ident("name") {
+            continue;
+        }
+        // Parse the attribute: #[name("Foo")]
+        if let syn::Meta::NameValue(mnv) = &attr.meta {
+            if let syn::Expr::Lit(expr_lit) = &mnv.value {
+                if let syn::Lit::Str(s) = &expr_lit.lit {
+                    return Some(s.value());
+                }
+            }
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
