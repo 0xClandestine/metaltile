@@ -33,6 +33,7 @@ use metaltile_std::mlx::quantized_mpp;
 /// in `qmm_gpu_correctness.rs`. Replicated here to keep the test file
 /// self-contained (integration tests can't share helpers across files
 /// without a `mod common`).
+#[allow(clippy::too_many_arguments)]
 fn cpu_qmm_reference(
     w: &[u32],
     scales: &[f32],
@@ -114,9 +115,7 @@ fn f32_to_f16_bytes(vals: &[f32]) -> Vec<u8> {
 }
 
 /// Pack a fp32 vector → fp32 bytes (little-endian).
-fn f32_to_f32_bytes(vals: &[f32]) -> Vec<u8> {
-    vals.iter().flat_map(|v| v.to_le_bytes()).collect()
-}
+fn f32_to_f32_bytes(vals: &[f32]) -> Vec<u8> { vals.iter().flat_map(|v| v.to_le_bytes()).collect() }
 
 /// Cosine similarity between two equal-length fp32 vectors.
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -185,10 +184,8 @@ fn mt_qmm_mma_mpp_matches_cpu_reference_f32_small() {
         gs_per_row,
         4,
     );
-    let actual: Vec<f32> = out_bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
+    let actual: Vec<f32> =
+        out_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
     assert_eq!(actual.len(), expected.len());
 
     let cos = cosine(&expected, &actual);
@@ -236,10 +233,8 @@ fn mt_qmm_mma_mpp_matches_cpu_reference_f32_multi_k() {
         gs_per_row,
         4,
     );
-    let actual: Vec<f32> = out_bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
+    let actual: Vec<f32> =
+        out_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
 
     let cos = cosine(&expected, &actual);
     println!("[f32 multi-k k={k}] cos={cos:.6}");
@@ -274,10 +269,8 @@ fn mt_qmm_mma_mpp_matches_cpu_reference_f32_multi_tile() {
         gs_per_row,
         4,
     );
-    let actual: Vec<f32> = out_bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
+    let actual: Vec<f32> =
+        out_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
 
     let cos = cosine(&expected, &actual);
     println!("[f32 multi-tile m={m} n={n}] cos={cos:.6}");

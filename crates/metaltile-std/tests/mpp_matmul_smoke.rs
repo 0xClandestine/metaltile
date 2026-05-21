@@ -29,7 +29,9 @@ const N: usize = 16;
 const K: usize = 32;
 
 fn pack_f16_bytes(vals: &[f32]) -> Vec<u8> {
-    vals.iter().flat_map(|v| half::f16::from_le_bytes(half::f16::from_f32(*v).to_le_bytes()).to_le_bytes()).collect()
+    vals.iter()
+        .flat_map(|v| half::f16::from_le_bytes(half::f16::from_f32(*v).to_le_bytes()).to_le_bytes())
+        .collect()
 }
 
 fn unpack_f32_bytes(bytes: &[u8]) -> Vec<f32> {

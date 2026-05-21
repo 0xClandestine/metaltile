@@ -154,14 +154,12 @@ impl MslGenerator {
             // IR variant once shape/dtype params are parametric across MPP
             // kernels (tracked as a follow-up). The current scan is fragile
             // (false-positive on a comment containing `mpp::`).
-            Op::InlineMsl { source, .. } => {
-                if source.contains("mpp::") {
-                    feat.needs_mpp = true;
-                    // MPP MMA is simdgroup-cooperative — pulls in the same
-                    // simd built-ins as the simdgroup_matrix path.
-                    feat.needs_simd_lane = true;
-                    feat.needs_simd_group = true;
-                }
+            Op::InlineMsl { source, .. } if source.contains("mpp::") => {
+                feat.needs_mpp = true;
+                // MPP MMA is simdgroup-cooperative — pulls in the same
+                // simd built-ins as the simdgroup_matrix path.
+                feat.needs_simd_lane = true;
+                feat.needs_simd_group = true;
             },
             _ => {},
         }
