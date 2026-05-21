@@ -1,6 +1,7 @@
 # metaltile kernel-op coverage audit
 
-Generated: 2026-05-18 · Refreshed: 2026-05-21 (consolidation pass)
+Generated: 2026-05-18 · Refreshed: 2026-05-21 (consolidation pass +
+Vision / STT / TTS front-end kernels)
 Sources surveyed:
 - MLX upstream `ml-explore/mlx@main` (commit `2414e5df`)
 - MLX fork `ekryski/mlx@alpha` (commit `4919270e`)
@@ -10,10 +11,11 @@ Sources surveyed:
 ## Summary
 
 - Total kernel-op rows in this audit (union): **89**
-- metaltile-ported kernel ops: **53 / 89 = 60 %** — 42 full ✓ (47 %), 11 partial ~ (12 %)
-- **Still to cover: 36 ops not ported (✗)**, plus **11 partial ports** still to finish
-- Of the 36 not-ported: **6 are Vision / STT / TTS front-end kernels**
-  (Phase 6.5 / 7) — see the VLM / audio rows + the un-ported recommendations.
+- metaltile-ported kernel ops: **59 / 89 = 66 %** — 48 full ✓ (54 %), 11 partial ~ (12 %)
+- **Still to cover: 30 ops not ported (✗)**, plus **11 partial ports** still to finish
+- The 6 Vision / STT / TTS front-end kernels (Phase 6.5 / 7) — `conv2d`,
+  `patch_embed`, `rope_2d`, `mel_spectrogram`, `audio_conv1d`,
+  `vocoder/iSTFT` — are now ported (✓ rows below).
 - 3 in-flight kernel families have an **open PR** (not yet landed) — see
   [Kernels with open PRs](#kernels-with-open-prs).
 
@@ -117,12 +119,12 @@ Sources surveyed:
 | sdpa_decode + learned attention sink (GPT-OSS-20B) | ✗ | ~ | ~ | **Partial — host-side fallback.** GPT-OSS-20B's per-head learned `sinks` logit is folded into the softmax denominator as a host-side post-hoc rescale of the raw-KV `sdpa_decode` (d64) output — the `sdpa_decode` kernel has a sink-*token* path (`sink_end`) but no learned per-head sink-*logit* term. `aura_flash_sdpa` / `flash_quantized_sdpa` carry sinks for the *quantized* cache only. A `sink_logit` constexpr on `sdpa_decode` would remove the GPT-OSS per-layer CPU sync. |
 | gated_rmsnorm (fp32-in gated RMSNorm → activation dtype) | ✗ | ✗ | ✗ | **NOT PORTED — host-side fallback.** The Qwen3.5 / 3.6 GDN post-step `y = rmsNorm(y)·silu(z)` runs host-side: the `gated_delta` kernel emits fp32 `y` and no GPU norm consumes fp32 and writes the activation dtype. A fused fp32-in / cast-out gated RMSNorm removes one CPU sync per GDN layer (≈75 % of Qwen3.5/3.6 layers). |
 | ssm_step (2D `A_log` / per-(head,state) decay — Jamba) | ✗ | ~ | ✗ | **NOT PORTED — host-side fallback.** The shipped `ssm_step` (row above) bakes in a per-channel scalar `A`; Jamba's `A_log` is 2D (per-(head,state)), so Jamba runs its entire Mamba 2 selective scan + dt/B/C RMSNorms host-side. A 2D-`A` `ssm_step` variant moves the Jamba scan to the GPU. The other Mamba 2 families (Mamba2, FalconH1, NemotronH, GraniteMoeHybrid) use the scalar-`A` kernel and are unaffected. |
-| conv2d (vision patch conv — im2col + tiled GEMM) | ✓ | ✓ | ✗ | **NOT PORTED.** Needed by every VLM vision encoder (Qwen2.5-VL / Qwen3.5-VL / Gemma 3-VL / Gemma 4-VL). Shares the im2col / unfold blocker with the `steel_conv 2D` / `conv` rows above. Phase 6.5. |
-| patch_embed (fused image unfold + linear projection) | ✗ | ✗ | ✗ | **NOT PORTED.** Vision patch embedding — unfold an image into patches and linear-project them, fused into one dispatch. FFAI-specific; Phase 6.5 VLM. |
-| rope_2d (2D positional RoPE for vision tokens) | ✓ | ✓ | ✗ | **NOT PORTED.** 2D RoPE over a (row, col) token grid for vision transformers. May extend `ffai/rope_llama.rs` rather than land as a new file. Phase 6.5 VLM. |
-| mel_spectrogram (STFT + log-Mel filterbank) | ✓ | ✓ | ✗ | **NOT PORTED.** Audio front-end: STFT + log-Mel filterbank (fp32/fp16). Needed for Whisper STT and Qwen-Omni audio-in. Phase 7. |
-| audio_conv1d (wide-stride 1D conv — STT patch embed) | ✓ | ✓ | ✗ | **NOT PORTED.** Wide-stride 1D convolution for STT audio patch embedding — distinct from the depthwise `conv1d_causal_step` SSM-stream conv. Phase 7. |
-| vocoder / iSTFT (TTS waveform synthesis) | ✓ | ✓ | ✗ | **NOT PORTED.** Inverse-STFT / vocoder overlap-add waveform synthesis for TTS (Kokoro). The transformer body reuses GEMM + conv1d; the iSTFT overlap-add stage needs a dedicated kernel. Phase 7. |
+| conv2d (vision patch conv — im2col + tiled GEMM) | ✓ | ✓ | ✓ | `ffai/conv2d.rs` → `conv2d_patch14` / `conv2d_patch16` (fixed-patch variants, kernel + stride baked in) + `conv2d_generic` (runtime kh/kw/stride/pad). NCHW input, OIHW weight; direct conv (implicit im2col, one thread per output). Generic `T`; verified by `conv2d_gpu_correctness`. Phase 6.5 VLM. |
+| patch_embed (fused image unfold + linear projection) | ✗ | ✗ | ✓ | `ffai/patch_embed.rs` → `patch_embed<T>`. Fused image-unfold + linear projection — gathers each patch's pixels and dots them with one weight row, no intermediate unfolded buffer. NCHW image, flat `[hidden, patch_dim]` weight, `[num_patches, hidden]` output. FFAI-specific; verified by `patch_embed_gpu_correctness`. Phase 6.5 VLM. |
+| rope_2d (2D positional RoPE for vision tokens) | ✓ | ✓ | ✓ | `ffai/rope_2d.rs` → `ffai_rope_2d<T>`. 2D RoPE over a (row, col) token grid — head_dim split into a row half and a column half, each running rotate-half RoPE. Consumes a per-token `(row, col)` pair. Generic `T`; verified by `rope_2d_gpu_correctness`. Phase 6.5 VLM. |
+| mel_spectrogram (STFT + log-Mel filterbank) | ✓ | ✓ | ✓ | `ffai/mel_spectrogram.rs` → `mel_spectrogram<T>`. Fused STFT + Mel filterbank + log; one thread per (frame, mel_bin), direct DFT (fp32/fp16). A radix-FFT path is a perf follow-up (needs complex-type codegen). Verified by `mel_spectrogram_gpu_correctness`. Phase 7. |
+| audio_conv1d (wide-stride 1D conv — STT patch embed) | ✓ | ✓ | ✓ | `ffai/audio_conv1d.rs` → `audio_conv1d<T>`. Dense wide-stride multi-channel 1D conv (NCL); distinct from the depthwise `conv1d_causal_step` SSM-stream conv. Generic `T`; verified by `audio_conv1d_gpu_correctness`. Phase 7. |
+| vocoder / iSTFT (TTS waveform synthesis) | ✓ | ✓ | ✓ | `ffai/vocoder.rs` → `vocoder_istft<T>`. Inverse-STFT overlap-add — one thread per output sample gathers every covering frame, inverse-DFTs with Hermitian symmetry, COLA-normalises (no atomics). Generic `T`; verified by `vocoder_gpu_correctness`. Phase 7. |
 
 ## Kernels with open PRs
 
@@ -190,11 +192,13 @@ on top.
 These don't move the coverage % much but each one unblocks a model family or
 removes a measured per-layer CPU sync:
 
-- **Vision (Phase 6.5)** — `conv2d` (im2col + tiled GEMM), `patch_embed`
-  (fused unfold + linear), `rope_2d`. Hard-blocks every VLM variant; `conv2d`
-  shares the im2col blocker with the `steel_conv` family.
+- **Vision (Phase 6.5)** — `conv2d`, `patch_embed`, `rope_2d`: **landed**
+  (`ffai/conv2d.rs`, `ffai/patch_embed.rs`, `ffai/rope_2d.rs`). Unblocks the
+  VLM vision encoders.
 - **STT / TTS (Phase 7)** — `mel_spectrogram`, `audio_conv1d`,
-  `vocoder/iSTFT`. Hard-blocks Whisper, Kokoro, and Qwen-Omni audio.
+  `vocoder/iSTFT`: **landed** (`ffai/mel_spectrogram.rs`,
+  `ffai/audio_conv1d.rs`, `ffai/vocoder.rs`). Unblocks Whisper, Kokoro, and
+  Qwen-Omni audio. A radix-FFT path for the STFT / iSTFT is a perf follow-up.
 - **Host-fallback closers** — `gated_rmsnorm` (Qwen3.5/3.6 GDN post-step),
   the `sdpa_decode` learned-sink term (GPT-OSS-20B), and a 2D-`A_log`
   `ssm_step` variant (Jamba). Each is correctness-neutral today but trades a

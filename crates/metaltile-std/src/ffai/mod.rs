@@ -15,6 +15,7 @@
 //! `mlx/`.
 
 pub mod arg_reduce;
+pub mod audio_conv1d;
 pub mod aura_dequant_rotated;
 pub mod aura_encode;
 pub mod aura_flash_p1;
@@ -23,6 +24,7 @@ pub mod aura_flash_sdpa;
 pub mod aura_score;
 pub mod aura_value;
 pub mod batched_qkv_qgemv;
+pub mod conv2d;
 pub mod dequant_gather;
 pub mod dequant_gemv;
 pub mod flash_quantized_sdpa;
@@ -35,10 +37,13 @@ pub mod logits_min_p;
 pub mod logits_processors;
 pub mod logits_top_p;
 pub mod logits_topk;
+pub mod mel_spectrogram;
 pub mod moe;
+pub mod patch_embed;
 pub mod rms_norm_qgemv;
 pub mod rms_norm_residual;
 pub mod rms_norm_rope;
+pub mod rope_2d;
 pub mod rope_llama;
 pub mod rope_yarn;
 pub mod sampling;
@@ -52,3 +57,4 @@ pub mod sdpa_decode_d64;
 pub mod sdpa_multi;
 pub mod ssm;
 pub mod ssm_replay;
+pub mod vocoder;
