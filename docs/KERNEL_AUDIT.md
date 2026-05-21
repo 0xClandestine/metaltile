@@ -11,8 +11,8 @@ Sources surveyed:
 ## Summary
 
 - Total kernel-op rows in this audit (union): **89**
-- metaltile-ported kernel ops: **61 / 89 = 69 %** — 50 full ✓ (56 %), 11 partial ~ (12 %)
-- **Still to cover: 28 ops not ported (✗)**, plus **11 partial ports** still to finish
+- metaltile-ported kernel ops: **64 / 89 = 72 %** — 52 full ✓ (58 %), 12 partial ~ (13 %)
+- **Still to cover: 25 ops not ported (✗)**, plus **12 partial ports** still to finish
 - The 6 Vision / STT / TTS front-end kernels (Phase 6.5 / 7) — `conv2d`,
   `patch_embed`, `rope_2d`, `mel_spectrogram`, `audio_conv1d`,
   `vocoder/iSTFT` — are now ported (✓ rows below).
@@ -72,10 +72,10 @@ Sources surveyed:
 | steel_gemm_segmented | ✓ | ✓ | ✗ | Blocker: ragged batched matmul. |
 | steel_gemm_splitk + accum | ✓ | ✓ | ✗ | Blocker: two-kernel split-K dispatch + accumulator pass. |
 | steel_gemm_splitk_nax | ✓ | ✓ | ✗ | Same + NAX feature gate. |
-| steel_conv 2D (implicit-GEMM) | ✓ | ✓ | ✗ | Blocker: im2col primitives missing. |
-| steel_conv 3D | ✓ | ✓ | ✗ | Same blocker + 3D `MLXConvParams<3>` indexing. |
-| steel_conv_general (strides/dilation/groups) | ✓ | ✓ | ✗ | Same blockers as steel_conv. |
-| conv (winograd + naive_unfold + depthwise) | ✓ | ✓ | ✗ | `crates/metaltile-std/src/mlx/conv.rs` is a stub left from the old bench crate, not declared in `mod.rs`. No DSL port. |
+| steel_conv 2D (implicit-GEMM) | ✓ | ✓ | ✓ | `ffai/conv2d.rs` → `conv2d_patch14` / `conv2d_patch16` / `conv2d_generic`. 2D convolution as a direct conv (implicit im2col, one thread per output) rather than MLX's explicit-im2col tiled GEMM — equivalent result, no im2col staging buffer. Covers fixed-patch and runtime-stride/pad configs. The MMA-tiled implicit-GEMM is a perf follow-up. Verified by `conv2d_gpu_correctness`. |
+| steel_conv 3D | ✓ | ✓ | ✗ | Blocker: 3D `MLXConvParams<3>` indexing (a 5D NCDHW direct conv, not yet ported). |
+| steel_conv_general (strides/dilation/groups) | ✓ | ✓ | ✓ | `ffai/conv2d.rs` → `conv2d_grouped<T>`. Fully general 2D conv: strides, dilation (atrous), padding, and grouped channels (`groups == in_ch` is depthwise). NCHW input, OIHW weight with the I dimension = `in_ch/groups`. Direct conv, one thread per output, fp32 accumulation. Verified by `conv2d_gpu_correctness`. |
+| conv (winograd + naive_unfold + depthwise) | ✓ | ✓ | ~ | The `naive_unfold` + depthwise cases are covered by `ffai/conv2d.rs` (`conv2d_generic` + `conv2d_grouped`, the latter handling depthwise via `groups == in_ch`). The Winograd fast-conv path is not ported (a perf-only specialization for 3×3 stride-1 convs). The old `mlx/conv.rs` bench-crate stub is superseded. |
 | gemv | ✓ | ✓ | ✓ | `mlx/gemv.rs` → `mt_gemv<T>`. |
 | gemv_masked | ✓ | ✓ | ✓ | `mlx/gemv_masked.rs` → `mt_gemv_masked<T>` (no MLX comparison wired). |
 | quantized (affine_quantize / affine_dequantize) | ✓ | ✓ | ~ | `mlx/quantized.rs` → quantize **and** dequantize for int4/int8, plus dequantize for int3/int5/int6 (`mt_affine_{quantize,dequantize}_int{3,4,5,6,8}`). Gap: int2, and the quantize side of int3/5/6. |
@@ -170,8 +170,9 @@ on top.
 3. **`steel_gemm_splitk` + accum** — two-kernel split-K dispatch + accumulator
    pass. Infra-gated (split-K scheduling primitive).
 4. **`steel_gemm_masked`** — block-level predication. Infra-gated.
-5. **`steel_conv` 2D / 3D / general** — all blocked on the im2col / unfold
-   threadgroup-staging tile loader. One infra PR unblocks the family.
+5. **`steel_conv` 3D** — a 5D NCDHW direct conv; `steel_conv` 2D /
+   general are now ported (`ffai/conv2d.rs`). The 3D variant needs the
+   extra depth axis threaded through the receptive-field walk.
 6. **NAX feature family** — `steel_attention_nax`, `steel_gemm_*_nax`,
    `quantized_nax`, `fp_quantized_nax`. PR #137 demonstrates the Apple
    `mpp::tensor_ops::matmul2d` path; the `nax`-gated rows can follow once the
