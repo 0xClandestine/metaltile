@@ -1,30 +1,34 @@
 # metaltile kernel-op coverage audit
 
-Generated: 2026-05-18 · Refreshed: 2026-05-21
+Generated: 2026-05-18 · Refreshed: 2026-05-21 (consolidation pass)
 Sources surveyed:
 - MLX upstream `ml-explore/mlx@main` (commit `2414e5df`)
 - MLX fork `ekryski/mlx@alpha` (commit `4919270e`)
-- metaltile `0xClandestine/metaltile:dev` (commit `dd4c2ef`)
+- metaltile `thewafflehaus/metaltile:ek/aura-port` (the consolidated branch —
+  `origin/dev` plus the Gemma / Nemotron-H / GPT-OSS-20B kernel work)
 
 ## Summary
 
-- Total kernel-op rows in this audit (union): **78**
-- metaltile-ported kernel ops: **50 / 78 = 64 %** — 40 full ✓ (51 %), 10 partial ~ (13 %)
-- **Still to cover: 28 ops not ported (✗)**, plus **10 partial ports** still to finish
+- Total kernel-op rows in this audit (union): **89**
+- metaltile-ported kernel ops: **53 / 89 = 60 %** — 42 full ✓ (47 %), 11 partial ~ (12 %)
+- **Still to cover: 36 ops not ported (✗)**, plus **11 partial ports** still to finish
+- Of the 36 not-ported: **6 are Vision / STT / TTS front-end kernels**
+  (Phase 6.5 / 7) — see the VLM / audio rows + the un-ported recommendations.
 - 3 in-flight kernel families have an **open PR** (not yet landed) — see
   [Kernels with open PRs](#kernels-with-open-prs).
 
-> **Note on the 2026-05-21 refresh.** The metaltile column was re-surveyed
-> against source at `dev` HEAD `dd4c2ef`. Since the previous refresh, PRs
-> #94–#99, #110, #128, #129, #134, #135 landed; the `gated_delta` row was
-> stale (the kernel had landed but the table still showed ✗), and four
-> kernel families that ship on `dev` had no row at all (`swiglu`,
-> `sdpa_decode_batched`, `moe`, the logits-processor stack). Those are added
-> below. The MLX-upstream and MLX-alpha columns were **not** re-verified
-> against those repos (not checked out) — only the metaltile column was
-> re-surveyed. More rows are expected: the Gemma / Nemotron-H / GPT-OSS-20B
-> kernel work lives in separate worktrees and will be folded in once it is
-> consolidated onto a branch and PR'd upstream.
+> **Note on the 2026-05-21 consolidation pass.** The Gemma / Nemotron-H /
+> GPT-OSS-20B kernel work, previously spread across separate worktrees, is now
+> consolidated onto `ek/aura-port`. Two Gemma kernels — `sdpa_decode_d512` and
+> `rms_norm_wide` — are added as ✓ rows. A model-side review of FFAI's decode
+> path also surfaced several **host-side compute fallbacks** that exist only
+> because a GPU kernel is missing; the kernels that would close them
+> (`gated_rmsnorm`, the `sdpa_decode` learned-sink term, a 2D-`A_log` `ssm_step`
+> variant) are recorded below, and the still-needed **Vision / STT / TTS**
+> front-end kernels (`conv2d`, `patch_embed`, `rope_2d`, `mel_spectrogram`,
+> `audio_conv1d`, `vocoder/iSTFT`) are added as ✗ rows for Phase 6.5 / 7.
+> The MLX-upstream and MLX-alpha columns were **not** re-verified against those
+> repos (not checked out) — only the metaltile column was re-surveyed.
 
 ## Op coverage table
 
@@ -108,6 +112,17 @@ Sources surveyed:
 | kv_cache (affine-quant int4/int8 quantize + bulk dequant) | ~ (via `quantized.metal` affine_quantize) | ~ | ✓ | `ffai/kv_cache.rs` — `quantize_kv` + `bulk_dequant_kv` for int4/int8. FFAI-specific cache layout. |
 | sampling (softmax + categorical inverse-CDF) | ✗ | ✗ | ✓ | `ffai/sampling.rs` → `softmax_categorical_sample`. Companion to `ffai_argmax` for `T > 0` decode. |
 | logits processors (temperature, repetition penalty, top-k / top-p / min-p masks) | ✗ | ✗ | ✓ | `ffai/logits_{processors,topk,top_p,min_p}.rs` → `logits_temperature`, `logits_repetition_penalty`, `logits_topk_mask`, `logits_top_p_mask`, `logits_min_p_mask` (all generic `T`). In-place decode-form sampler stages composed before `softmax_categorical_sample`. FFAI-only. |
+| sdpa_decode_d512 (head_dim=512 SDPA decode — Gemma 4 global) | ✗ | ✗ | ✓ | `ffai/sdpa_decode_d512.rs` → `ffai_sdpa_decode_d512<T>`. head_dim=512 specialization for Gemma 4's global-attention layers; dispatches at 512 threads/TG (the 16-wide per-lane footprint caps the pipeline below 1024). FFAI-only; verified by `sdpa_decode_d512_gpu_correctness`. Consolidation pass (2026-05-21). |
+| rms_norm_wide (RMSNorm for rows past the 4096-element cap) | ✗ | ✗ | ✓ | `mlx/rms_norm.rs` → `mt_rms_norm_wide<T>`. Strided wide-row variant for large-hidden models (Gemma 4 31B, hidden 5376) that exceed the standard `mt_rms_norm` 1024-thread × 4-element single-row cap. Verified by `rms_norm_wide_gpu_correctness`. Consolidation pass (2026-05-21). |
+| sdpa_decode + learned attention sink (GPT-OSS-20B) | ✗ | ~ | ~ | **Partial — host-side fallback.** GPT-OSS-20B's per-head learned `sinks` logit is folded into the softmax denominator as a host-side post-hoc rescale of the raw-KV `sdpa_decode` (d64) output — the `sdpa_decode` kernel has a sink-*token* path (`sink_end`) but no learned per-head sink-*logit* term. `aura_flash_sdpa` / `flash_quantized_sdpa` carry sinks for the *quantized* cache only. A `sink_logit` constexpr on `sdpa_decode` would remove the GPT-OSS per-layer CPU sync. |
+| gated_rmsnorm (fp32-in gated RMSNorm → activation dtype) | ✗ | ✗ | ✗ | **NOT PORTED — host-side fallback.** The Qwen3.5 / 3.6 GDN post-step `y = rmsNorm(y)·silu(z)` runs host-side: the `gated_delta` kernel emits fp32 `y` and no GPU norm consumes fp32 and writes the activation dtype. A fused fp32-in / cast-out gated RMSNorm removes one CPU sync per GDN layer (≈75 % of Qwen3.5/3.6 layers). |
+| ssm_step (2D `A_log` / per-(head,state) decay — Jamba) | ✗ | ~ | ✗ | **NOT PORTED — host-side fallback.** The shipped `ssm_step` (row above) bakes in a per-channel scalar `A`; Jamba's `A_log` is 2D (per-(head,state)), so Jamba runs its entire Mamba 2 selective scan + dt/B/C RMSNorms host-side. A 2D-`A` `ssm_step` variant moves the Jamba scan to the GPU. The other Mamba 2 families (Mamba2, FalconH1, NemotronH, GraniteMoeHybrid) use the scalar-`A` kernel and are unaffected. |
+| conv2d (vision patch conv — im2col + tiled GEMM) | ✓ | ✓ | ✗ | **NOT PORTED.** Needed by every VLM vision encoder (Qwen2.5-VL / Qwen3.5-VL / Gemma 3-VL / Gemma 4-VL). Shares the im2col / unfold blocker with the `steel_conv 2D` / `conv` rows above. Phase 6.5. |
+| patch_embed (fused image unfold + linear projection) | ✗ | ✗ | ✗ | **NOT PORTED.** Vision patch embedding — unfold an image into patches and linear-project them, fused into one dispatch. FFAI-specific; Phase 6.5 VLM. |
+| rope_2d (2D positional RoPE for vision tokens) | ✓ | ✓ | ✗ | **NOT PORTED.** 2D RoPE over a (row, col) token grid for vision transformers. May extend `ffai/rope_llama.rs` rather than land as a new file. Phase 6.5 VLM. |
+| mel_spectrogram (STFT + log-Mel filterbank) | ✓ | ✓ | ✗ | **NOT PORTED.** Audio front-end: STFT + log-Mel filterbank (fp32/fp16). Needed for Whisper STT and Qwen-Omni audio-in. Phase 7. |
+| audio_conv1d (wide-stride 1D conv — STT patch embed) | ✓ | ✓ | ✗ | **NOT PORTED.** Wide-stride 1D convolution for STT audio patch embedding — distinct from the depthwise `conv1d_causal_step` SSM-stream conv. Phase 7. |
+| vocoder / iSTFT (TTS waveform synthesis) | ✓ | ✓ | ✗ | **NOT PORTED.** Inverse-STFT / vocoder overlap-add waveform synthesis for TTS (Kokoro). The transformer body reuses GEMM + conv1d; the iSTFT overlap-add stage needs a dedicated kernel. Phase 7. |
 
 ## Kernels with open PRs
 
@@ -170,6 +185,22 @@ on top.
 10. **`fence`** — synchronization primitive. Needs atomics / device-memory
     fence primitives in the DSL; infrastructure, not a compute op.
 
+### Model-enablement kernels (separate track from generic-op completeness)
+
+These don't move the coverage % much but each one unblocks a model family or
+removes a measured per-layer CPU sync:
+
+- **Vision (Phase 6.5)** — `conv2d` (im2col + tiled GEMM), `patch_embed`
+  (fused unfold + linear), `rope_2d`. Hard-blocks every VLM variant; `conv2d`
+  shares the im2col blocker with the `steel_conv` family.
+- **STT / TTS (Phase 7)** — `mel_spectrogram`, `audio_conv1d`,
+  `vocoder/iSTFT`. Hard-blocks Whisper, Kokoro, and Qwen-Omni audio.
+- **Host-fallback closers** — `gated_rmsnorm` (Qwen3.5/3.6 GDN post-step),
+  the `sdpa_decode` learned-sink term (GPT-OSS-20B), and a 2D-`A_log`
+  `ssm_step` variant (Jamba). Each is correctness-neutral today but trades a
+  per-layer CPU↔GPU sync; landing them is a decode-throughput win, not a
+  correctness fix.
+
 ## Open uncertainties / counting caveats
 
 - The four rows added in the 2026-05-21 refresh (`swiglu`,
@@ -191,6 +222,13 @@ on top.
   other `(kb, vb, dim)` combos aren't ported yet.
 - Coverage % treats the alpha-only kernels as in-scope (we maintain the fork,
   so they count toward the union).
-- More rows are pending: the Gemma / Nemotron-H / GPT-OSS-20B kernel work is
-  spread across separate worktrees and will be folded into this audit once it
-  is consolidated onto a branch and PR'd upstream.
+- The Gemma / Nemotron-H / GPT-OSS-20B kernel work is now consolidated onto
+  `ek/aura-port` and folded into this audit (the `sdpa_decode_d512` and
+  `rms_norm_wide` rows). Three host-side fallbacks surfaced by the model
+  review (`gated_rmsnorm`, `sdpa_decode` learned-sink, 2D-`A` `ssm_step`) are
+  recorded as gap rows — they are correctness-neutral (the host path works)
+  but cost a CPU sync per layer on the affected models.
+- The Vision / STT / TTS rows (`conv2d`, `patch_embed`, `rope_2d`,
+  `mel_spectrogram`, `audio_conv1d`, `vocoder/iSTFT`) are scoped from the
+  Phase 6.5 / 7 plan, not yet from checked-out reference source — treat their
+  MLX columns as provisional.
