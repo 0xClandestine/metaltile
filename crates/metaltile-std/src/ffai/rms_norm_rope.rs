@@ -8,8 +8,8 @@
 //! `(batch, seq_pos, head)` slice of length `axis_size`; thread `lid`
 //! owns the pair `(lid, lid + half)`.
 //!
-//! Phase 1 — `inv_rms = rsqrt(mean(x²) + eps)` via threadgroup
-//! `reduce_sum` over both halves.
+//! Phase 1 — `inv_rms = rsqrt(mean(x²) + eps)` via `mt_rms_inv_scalar`
+//! cross-kernel call with `partial_ssq = v1² + v2²` as the Value arg.
 //! Phase 2 — `normed = w * x * inv_rms`, then rotate:
 //!   `out[lid]      = normed_a·cos θ − normed_b·sin θ`
 //!   `out[lid+half] = normed_a·sin θ + normed_b·cos θ`
@@ -56,12 +56,13 @@ pub fn ffai_rms_norm_rope<T>(
     let rs = row * axis_size;
     let lid = tid;
 
-    // Phase 1: per-thread pair → threadgroup-wide sum of squares.
+    // Phase 1: per-thread pair → threadgroup-wide inv_rms via cross-kernel call.
+    // partial_ssq is a Value arg; eps_buf and axis_size are Tensor args whose
+    // names are substituted into mt_rms_inv_scalar's callee loads.
     let v1 = load(x[rs + lid]).cast::<f32>();
     let v2 = load(x[rs + lid + half]).cast::<f32>();
-    let tg_ssq = reduce_sum(v1 * v1 + v2 * v2);
-    let eps = load(eps_buf[0]);
-    let inv_rms = rsqrt(tg_ssq / axis_size + eps);
+    let partial_ssq = v1 * v1 + v2 * v2;
+    let inv_rms = mt_rms_inv_scalar(partial_ssq, eps_buf, axis_size);
 
     // Phase 2: weight scale + RoPE rotation.
     let l = (row / n_heads) % seq_len;

@@ -261,3 +261,17 @@ fn push_unique_typed(
         entries.push((name, dtype));
     }
 }
+
+/// Extract tensor parameter names from a kernel function signature.
+pub(crate) fn extract_param_names(sig: &syn::Signature) -> Vec<String> {
+    let mut names = Vec::new();
+    for input in &sig.inputs {
+        if let syn::FnArg::Typed(pat_type) = input
+            && let syn::Pat::Ident(pat_ident) = &*pat_type.pat
+            && is_tensor_type(&pat_type.ty)
+        {
+            names.push(pat_ident.ident.to_string());
+        }
+    }
+    names
+}

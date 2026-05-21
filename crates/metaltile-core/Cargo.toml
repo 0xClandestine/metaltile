@@ -14,3 +14,4 @@ metaltile-macros.workspace = true
 thiserror.workspace = true
 smallvec.workspace = true
 serde.workspace = true
+inventory.workspace = true

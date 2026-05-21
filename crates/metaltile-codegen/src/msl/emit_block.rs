@@ -508,6 +508,19 @@ impl MslGenerator {
                     wl!(out, "{pad}}}");
                 },
 
+                // ---- cross-kernel call (should be resolved by KernelInlinePass) ----
+                Op::KernelCall { callee, .. } => {
+                    // If we reach here the KernelInlinePass did not run or
+                    // could not resolve this call.  Emit a compile-error
+                    // placeholder so the Metal shader fails loudly rather
+                    // than silently producing wrong results.
+                    wl!(
+                        out,
+                        "{pad}/* ERROR: unresolved KernelCall to `{callee}` — \
+                         KernelInlinePass must run before MSL emit */",
+                    );
+                },
+
                 // ---- escape hatch --------------------------------------
                 Op::InlineMsl { source, inputs, outputs } => {
                     for (oi, slot) in outputs.iter().enumerate() {

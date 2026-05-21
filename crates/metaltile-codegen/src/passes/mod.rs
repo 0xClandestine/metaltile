@@ -12,6 +12,7 @@ pub mod cse;
 pub mod dead_store_elim;
 pub mod fusion;
 pub mod if_conversion;
+pub mod kernel_inline;
 pub mod licm;
 pub mod occupancy;
 pub mod register_estimate;
@@ -116,6 +117,7 @@ impl PassRegistry {
     ///   → Schedule → Vectorize → DeadStoreElim
     pub fn order() -> &'static [&'static str] {
         &[
+            "kernel_inline",
             "type_check",
             "const_fold",
             "algebraic_simplify",
@@ -135,6 +137,7 @@ impl PassRegistry {
     /// Look up a pass by name.  Returns `None` for unknown names.
     pub fn get(name: &str) -> Option<Box<dyn Pass>> {
         match name {
+            "kernel_inline" => Some(Box::new(kernel_inline::KernelInlinePass)),
             "type_check" => Some(Box::new(type_check::TypeCheckPass)),
             "const_fold" => Some(Box::new(const_fold::ConstFoldPass::new())),
             "algebraic_simplify" => Some(Box::new(algebraic_simplify::AlgebraicSimplifyPass)),

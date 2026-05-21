@@ -24,6 +24,19 @@
 //! MLX reference: `mx.fast.swiglu` lives in
 //! `mlx/mlx/backend/metal/kernels/fast.metal` as a single launch with
 //! `silu(g) * u` in the body. We mirror that pattern.
+//!
+//! ## Cross-kernel calling
+//!
+//! `mt_swiglu` calls `mt_silu` via the DSL cross-kernel call syntax
+//! (just the kernel name). `KernelInlinePass` splices the silu body
+//! inline before MSL emission — no extra memory round-trip, same code
+//! quality as a manual inline, with a clear compositional structure
+//! that future fusion passes can reason about.
+//!
+//! Type-efficiency: `g` and `u` are loaded and cast to f32 before the
+//! call. `KernelInlinePass` replaces `mt_silu`'s input-param load with
+//! the actual f32 arg, so all arithmetic stays in f32 regardless of T.
+//! No T→f32→T precision loss in the silu path.
 
 use metaltile::{bench_kernel, kernel};
 
@@ -40,13 +53,10 @@ pub fn mt_swiglu<T>(gate: Tensor<T>, up: Tensor<T>, out: Tensor<T>) {
     let idx = tid;
     let g = load(gate[idx]).cast::<f32>();
     let u = load(up[idx]).cast::<f32>();
-    // silu(x) = x * sigmoid(x) = x / (1 + exp(-x)). Inlined here
-    // because the DSL's `silu()` builtin emits `mt_silu(...)` which
-    // requires the `template<typename T> inline T mt_silu` preamble
-    // that codegen only emits for kernels routed through certain
-    // feature-detection paths. Inlining the math sidesteps the
-    // preamble dependency and lets MLX's compiler do the constant
-    // folding / fast-math sigmoid pattern matching on its own.
-    let s = g / (1.0f32 + exp(0.0f32 - g));
+    // Cross-kernel call: KernelInlinePass splices mt_silu's scalar body
+    // here. mt_silu's input-param load is replaced by g (already f32),
+    // so silu runs in f32. Future fusion passes can identify the
+    // (silu, mul) → swiglu composition pattern from this call site.
+    let s = mt_silu(g);
     store(out[idx], (s * u).cast::<T>());
 }

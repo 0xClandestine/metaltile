@@ -61,6 +61,8 @@ pub struct DslBodyParser {
     blocks: Vec<(u32, TokenStream)>,
     /// Names of constexpr params.
     constexpr_names: Vec<String>,
+    /// Names of tensor parameters (for disambiguating KernelCall args).
+    param_names: Vec<String>,
     /// Current block target: "kernel.body" in main body, "block_N" inside a loop.
     current_target: TokenStream,
     /// Map from type parameter names (e.g. "T") to their DType arg idents (e.g. `_t`).
@@ -76,6 +78,7 @@ impl DslBodyParser {
     /// of defaulting to F32.  Pass `&Default::default()` for non-generic kernels.
     pub fn parse_with_type_vars(
         body: &Block,
+        param_names: &[String],
         constexpr_names: &[String],
         type_vars: &std::collections::HashMap<String, TokenStream>,
     ) -> TokenStream {
@@ -88,6 +91,7 @@ impl DslBodyParser {
             ir_stmts: Vec::new(),
             blocks: Vec::new(),
             constexpr_names: constexpr_names.to_vec(),
+            param_names: param_names.to_vec(),
             current_target: quote! { kernel.body },
             type_vars: type_vars.clone(),
         };
@@ -616,11 +620,73 @@ impl DslBodyParser {
             "strided_argmin" => self.parse_strided_argreduce(call, quote! { ReduceKind::Min }),
             "range" => 0,
             _ => {
-                let callee = if path.is_empty() { "<expr>".to_string() } else { path };
-                self.push_error_value(syn::Error::new_spanned(
-                    &call.func,
-                    format!("unrecognized MetalTile DSL call `{callee}`"),
-                ))
+                if path.is_empty() {
+                    return self.push_error_value(syn::Error::new_spanned(
+                        &call.func,
+                        "unrecognized MetalTile DSL call: cannot determine callee name",
+                    ));
+                }
+                // Only treat as a cross-kernel call if the name follows the
+                // registered kernel naming convention (mt_* or ffai_* prefix).
+                // Anything else is almost certainly a typo of a DSL builtin
+                // and should fail at the call site with a span-accurate error,
+                // just as it did before cross-kernel calling was introduced.
+                if !path.starts_with("mt_") && !path.starts_with("ffai_") {
+                    return self.push_error_value(syn::Error::new_spanned(
+                        &call.func,
+                        format!(
+                            "unrecognized MetalTile DSL function `{path}`. \
+                             Cross-kernel callees must be registered via \
+                             #[kernel] and their names must start with `mt_` \
+                             or `ffai_`."
+                        ),
+                    ));
+                }
+                // Treat as a cross-kernel call. KernelInlinePass resolves it
+                // at compile time by looking up `callee` in the inventory-based
+                // KernelEntry registry and splicing the callee's scalar body.
+                //
+                // Arg classification:
+                //   - bare identifier matching a tensor param or constexpr
+                //     param → KernelCallArg::Tensor(name)
+                //   - any other expression → KernelCallArg::Value(vid)
+                let mut args_tokens: Vec<proc_macro2::TokenStream> = Vec::new();
+                for a in &call.args {
+                    if let syn::Expr::Path(p) = a
+                        && p.qself.is_none()
+                        && p.path.segments.len() == 1
+                    {
+                        let ident = p.path.segments[0].ident.to_string();
+                        if self.param_names.contains(&ident)
+                            || self.constexpr_names.contains(&ident)
+                        {
+                            args_tokens.push(quote! { KernelCallArg::Tensor(#ident.to_string()) });
+                            continue;
+                        }
+                    }
+                    let vid = self.parse_expr(a);
+                    args_tokens.push(quote! { KernelCallArg::Value(ValueId::new(#vid)) });
+                }
+                let result = self.alloc_vid();
+                let callee_str = path;
+                // Use the first type variable as the dtype for instantiation.
+                let type_arg = self
+                    .type_vars
+                    .values()
+                    .next()
+                    .cloned()
+                    .unwrap_or_else(|| quote! { DType::F32 });
+                self.push_op(
+                    quote! {
+                        Op::KernelCall {
+                            callee: #callee_str.to_string(),
+                            args: vec![#(#args_tokens),*],
+                            dtype: #type_arg,
+                        }
+                    },
+                    result,
+                );
+                result
             },
         }
     }
@@ -1950,9 +2016,13 @@ mod tests {
             }
         });
 
-        let tokens =
-            DslBodyParser::parse_with_type_vars(&body, &[String::from("n")], &Default::default())
-                .to_string();
+        let tokens = DslBodyParser::parse_with_type_vars(
+            &body,
+            &[],
+            &[String::from("n")],
+            &Default::default(),
+        )
+        .to_string();
 
         assert!(tokens.contains("Op :: Loop"), "{tokens}");
         assert!(tokens.contains("Op :: Const { value : 0"), "{tokens}");
@@ -1961,17 +2031,37 @@ mod tests {
     }
 
     #[test]
-    fn unknown_calls_emit_compile_errors() {
+    fn mt_prefixed_calls_emit_kernel_call() {
+        // Names starting with `mt_` are treated as cross-kernel calls.
+        // KernelInlinePass resolves them at compile time; unregistered
+        // callees produce a codegen error (not a proc-macro error).
+        let body: Block = parse_quote!({
+            let y = mt_silu(x);
+        });
+
+        let tokens =
+            DslBodyParser::parse_with_type_vars(&body, &[], &[], &Default::default()).to_string();
+
+        assert!(tokens.contains("KernelCall"), "{tokens}");
+        assert!(tokens.contains("\"mt_silu\""), "{tokens}");
+    }
+
+    #[test]
+    fn non_prefixed_unknown_calls_emit_compile_error() {
+        // Names that don't start with `mt_` or `ffai_` and don't match
+        // any DSL builtin emit a compile_error token (not a KernelCall),
+        // restoring the pre-cross-kernel-calling behaviour for typos.
         let body: Block = parse_quote!({
             let y = sine(x);
         });
 
         let tokens =
-            DslBodyParser::parse_with_type_vars(&body, &[], &Default::default()).to_string();
+            DslBodyParser::parse_with_type_vars(&body, &[], &[], &Default::default()).to_string();
 
+        // Should not emit a KernelCall — that would silently swallow a typo.
+        assert!(!tokens.contains("KernelCall"), "typo should not produce KernelCall: {tokens}");
+        // Should contain a compile_error diagnostic.
         assert!(tokens.contains("compile_error"), "{tokens}");
-        assert!(tokens.contains("unrecognized MetalTile DSL call"), "{tokens}");
-        assert!(tokens.contains("sine"), "{tokens}");
     }
 
     #[test]
@@ -1983,7 +2073,7 @@ mod tests {
         });
 
         let tokens =
-            DslBodyParser::parse_with_type_vars(&body, &[], &Default::default()).to_string();
+            DslBodyParser::parse_with_type_vars(&body, &[], &[], &Default::default()).to_string();
 
         assert!(tokens.contains("Op :: SimdgroupLoad"), "{tokens}");
         assert!(tokens.contains("tg : \"ws\" . to_string ()"), "{tokens}");
@@ -2000,7 +2090,7 @@ mod tests {
         });
 
         let tokens =
-            DslBodyParser::parse_with_type_vars(&body, &[], &Default::default()).to_string();
+            DslBodyParser::parse_with_type_vars(&body, &[], &[], &Default::default()).to_string();
 
         assert!(tokens.contains("Op :: SimdgroupLoad"), "{tokens}");
         assert!(tokens.contains("transpose : true"), "{tokens}");

@@ -11,7 +11,7 @@ mod sig_parser;
 use body_parser::DslBodyParser;
 use proc_macro::TokenStream;
 use quote::quote;
-use sig_parser::{extract_constexprs_typed, parse_kernel_params_generic};
+use sig_parser::{extract_constexprs_typed, extract_param_names, parse_kernel_params_generic};
 use syn::{ItemFn, parse_macro_input};
 
 // ---------------------------------------------------------------------------
@@ -154,10 +154,15 @@ fn expand_kernel(input_fn: ItemFn) -> TokenStream {
     let param_decls = parse_kernel_params_generic(&input_fn.sig, &type_var_map);
     let constexpr_info = extract_constexprs_typed(&input_fn.sig);
     let constexpr_names: Vec<String> = constexpr_info.iter().map(|(n, _)| n.clone()).collect();
+    let param_names = extract_param_names(&input_fn.sig);
 
     // Parse the DSL body into IR-building token stream
-    let body_ir =
-        DslBodyParser::parse_with_type_vars(&input_fn.block, &constexpr_names, &type_var_map);
+    let body_ir = DslBodyParser::parse_with_type_vars(
+        &input_fn.block,
+        &param_names,
+        &constexpr_names,
+        &type_var_map,
+    );
 
     let constexpr_idents: Vec<_> = constexpr_names
         .iter()
@@ -178,7 +183,7 @@ fn expand_kernel(input_fn: ItemFn) -> TokenStream {
     let expanded = quote! {
         #vis mod #fn_name {
             use super::*;
-            use metaltile_core::ir::{Kernel, Block, Op, ValueId, BlockId, VarId, Param, ParamKind, TypedSlot, ConstExprDecl, BinOpKind, ReduceKind, AttnParams, AtomicKind, AtomicScope, IndexExpr, UnaryOpKind, ActKind};
+            use metaltile_core::ir::{Kernel, Block, Op, ValueId, BlockId, VarId, Param, ParamKind, TypedSlot, ConstExprDecl, BinOpKind, ReduceKind, AttnParams, AtomicKind, AtomicScope, IndexExpr, UnaryOpKind, ActKind, KernelCallArg};
             use metaltile_core::shape::{Shape, Dim};
             use metaltile_core::dtype::DType;
             use metaltile_core::constexpr::ConstExpr;
@@ -245,6 +250,20 @@ fn expand_kernel(input_fn: ItemFn) -> TokenStream {
             pub fn launch(ctx: &metaltile_runtime::Context) -> LaunchBuilder<'_> {
                 LaunchBuilder::new(ctx)
             }
+
+            // Use `const _: ()` hygiene scope so `__build_for_inline` does not
+            // leak into the enclosing module's namespace.
+            const _: () = {
+                fn __build_for_inline(dtypes: &[metaltile_core::dtype::DType]) -> metaltile_core::ir::Kernel {
+                    #[allow(unused_variables)]
+                    let _t = dtypes.first().copied().unwrap_or(metaltile_core::dtype::DType::F32);
+                    kernel_ir_for(#(#arg_var_idents),*)
+                }
+
+                metaltile_core::inventory::submit! {
+                    metaltile_core::KernelEntry::new(#fn_name_str, __build_for_inline)
+                }
+            };
         }
     };
 

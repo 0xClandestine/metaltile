@@ -411,6 +411,31 @@ impl IndexExpr {
     }
 }
 
+/// An argument to a cross-kernel call ([`Op::KernelCall`]).
+///
+/// - [`KernelCallArg::Value`]: a computed scalar value in the caller's SSA.
+///   The call's result is the callee's single output value.
+/// - [`KernelCallArg::Tensor`]: a buffer / constexpr name in the caller.
+///   Substituted for all loads/stores referencing that name in the callee's IR.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum KernelCallArg {
+    Value(ValueId),
+    Tensor(String),
+}
+
+impl KernelCallArg {
+    /// Returns the [`ValueId`] if this is a [`Value`][Self::Value] variant.
+    pub fn as_value(&self) -> Option<&ValueId> {
+        if let KernelCallArg::Value(v) = self { Some(v) } else { None }
+    }
+
+    /// Returns a mutable reference to the inner [`ValueId`] if this is a
+    /// [`Value`][Self::Value] variant, or `None` for [`Tensor`][Self::Tensor].
+    pub fn as_value_mut(&mut self) -> Option<&mut ValueId> {
+        if let KernelCallArg::Value(v) = self { Some(v) } else { None }
+    }
+}
+
 /// A single operation in the IR.
 #[derive(Debug, Clone, PartialEq, ValueRefs, OpFlags, VariantName)]
 pub enum Op {
@@ -1158,6 +1183,15 @@ pub enum Op {
         axis: u32,
         op: ReduceKind,
     },
+
+    /// Cross-kernel call: inline another kernel's computation at this site.
+    ///
+    /// Resolved by `KernelInlinePass` (runs as the first pass in the
+    /// standard pipeline) so all subsequent passes see only flat scalar ops.
+    /// `callee` is the registered kernel name; `args` are positionally
+    /// matched to the callee's params; `dtype` is the generic type.
+    #[result_custom]
+    KernelCall { callee: String, args: Vec<KernelCallArg>, dtype: DType },
 }
 
 // ---------------------------------------------------------------------------
@@ -1727,6 +1761,17 @@ impl Op {
                     offset.as_u32(),
                     end.as_u32()
                 )
+            },
+            Op::KernelCall { callee, args, dtype } => {
+                let args_str = args
+                    .iter()
+                    .map(|a| match a {
+                        KernelCallArg::Value(v) => format!("v{}", v.as_u32()),
+                        KernelCallArg::Tensor(s) => format!("\"{}\"", s),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "KernelCall(\"{callee}\", args=[{args_str}], dtype={dtype:?})")
             },
             Op::StrideArgReduce { src, offset, end, op } => {
                 write!(
