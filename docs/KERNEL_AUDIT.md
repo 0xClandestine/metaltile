@@ -11,8 +11,8 @@ Sources surveyed:
 ## Summary
 
 - Total kernel-op rows in this audit (union): **89**
-- metaltile-ported kernel ops: **60 / 89 = 67 %** — 49 full ✓ (55 %), 11 partial ~ (12 %)
-- **Still to cover: 29 ops not ported (✗)**, plus **11 partial ports** still to finish
+- metaltile-ported kernel ops: **61 / 89 = 69 %** — 50 full ✓ (56 %), 11 partial ~ (12 %)
+- **Still to cover: 28 ops not ported (✗)**, plus **11 partial ports** still to finish
 - The 6 Vision / STT / TTS front-end kernels (Phase 6.5 / 7) — `conv2d`,
   `patch_embed`, `rope_2d`, `mel_spectrogram`, `audio_conv1d`,
   `vocoder/iSTFT` — are now ported (✓ rows below).
@@ -117,7 +117,7 @@ Sources surveyed:
 | sdpa_decode_d512 (head_dim=512 SDPA decode — Gemma 4 global) | ✗ | ✗ | ✓ | `ffai/sdpa_decode_d512.rs` → `ffai_sdpa_decode_d512<T>`. head_dim=512 specialization for Gemma 4's global-attention layers; dispatches at 512 threads/TG (the 16-wide per-lane footprint caps the pipeline below 1024). FFAI-only; verified by `sdpa_decode_d512_gpu_correctness`. Consolidation pass (2026-05-21). |
 | rms_norm_wide (RMSNorm for rows past the 4096-element cap) | ✗ | ✗ | ✓ | `mlx/rms_norm.rs` → `mt_rms_norm_wide<T>`. Strided wide-row variant for large-hidden models (Gemma 4 31B, hidden 5376) that exceed the standard `mt_rms_norm` 1024-thread × 4-element single-row cap. Verified by `rms_norm_wide_gpu_correctness`. Consolidation pass (2026-05-21). |
 | sdpa_decode + learned attention sink (GPT-OSS-20B) | ✗ | ~ | ~ | **Partial — host-side fallback.** GPT-OSS-20B's per-head learned `sinks` logit is folded into the softmax denominator as a host-side post-hoc rescale of the raw-KV `sdpa_decode` (d64) output — the `sdpa_decode` kernel has a sink-*token* path (`sink_end`) but no learned per-head sink-*logit* term. `aura_flash_sdpa` / `flash_quantized_sdpa` carry sinks for the *quantized* cache only. A `sink_logit` constexpr on `sdpa_decode` would remove the GPT-OSS per-layer CPU sync. |
-| gated_rmsnorm (fp32-in gated RMSNorm → activation dtype) | ✗ | ✗ | ✗ | **NOT PORTED — host-side fallback.** The Qwen3.5 / 3.6 GDN post-step `y = rmsNorm(y)·silu(z)` runs host-side: the `gated_delta` kernel emits fp32 `y` and no GPU norm consumes fp32 and writes the activation dtype. A fused fp32-in / cast-out gated RMSNorm removes one CPU sync per GDN layer (≈75 % of Qwen3.5/3.6 layers). |
+| gated_rmsnorm (fp32-in gated RMSNorm → activation dtype) | ✗ | ✗ | ✓ | `ffai/gated_rmsnorm.rs` → `ffai_gated_rmsnorm<T>`. Fused Qwen3.5 / 3.6 GDN post-step `out = w·rmsNorm(y)·silu(z)`: `y` arrives fp32 (the `gated_delta` recurrence output), the gate `z` / weight `w` / output are activation-dtype `T`. Reduction-mode, `N = TPG*4`, mirrors `mt_rms_norm` with the fp32-in / `T`-out dtype split and the `silu(z)` gate. Closes the per-GDN-layer host-side CPU sync (≈75 % of Qwen3.5/3.6 layers). Verified by `gated_rmsnorm_gpu_correctness`. |
 | ssm_step (2D `A_log` / per-(head,state) decay — Jamba) | ✗ | ~ | ✗ | **NOT PORTED — host-side fallback.** The shipped `ssm_step` (row above) bakes in a per-channel scalar `A`; Jamba's `A_log` is 2D (per-(head,state)), so Jamba runs its entire Mamba 2 selective scan + dt/B/C RMSNorms host-side. A 2D-`A` `ssm_step` variant moves the Jamba scan to the GPU. The other Mamba 2 families (Mamba2, FalconH1, NemotronH, GraniteMoeHybrid) use the scalar-`A` kernel and are unaffected. |
 | conv2d (vision patch conv — im2col + tiled GEMM) | ✓ | ✓ | ✓ | `ffai/conv2d.rs` → `conv2d_patch14` / `conv2d_patch16` (fixed-patch variants, kernel + stride baked in) + `conv2d_generic` (runtime kh/kw/stride/pad). NCHW input, OIHW weight; direct conv (implicit im2col, one thread per output). Generic `T`; verified by `conv2d_gpu_correctness`. Phase 6.5 VLM. |
 | patch_embed (fused image unfold + linear projection) | ✗ | ✗ | ✓ | `ffai/patch_embed.rs` → `patch_embed<T>`. Fused image-unfold + linear projection — gathers each patch's pixels and dots them with one weight row, no intermediate unfolded buffer. NCHW image, flat `[hidden, patch_dim]` weight, `[num_patches, hidden]` output. FFAI-specific; verified by `patch_embed_gpu_correctness`. Phase 6.5 VLM. |
@@ -193,10 +193,11 @@ removes a measured per-layer CPU sync:
   `vocoder/iSTFT`: **landed** (`ffai/mel_spectrogram.rs`,
   `ffai/audio_conv1d.rs`, `ffai/vocoder.rs`). Unblocks Whisper, Kokoro, and
   Qwen-Omni audio. A radix-FFT path for the STFT / iSTFT is a perf follow-up.
-- **Host-fallback closers** — `gated_rmsnorm` (Qwen3.5/3.6 GDN post-step),
-  the `sdpa_decode` learned-sink term (GPT-OSS-20B), and a 2D-`A_log`
-  `ssm_step` variant (Jamba). Each is correctness-neutral today but trades a
-  per-layer CPU↔GPU sync; landing them is a decode-throughput win, not a
+- **Host-fallback closers** — `gated_rmsnorm` (Qwen3.5/3.6 GDN post-step):
+  **landed** (`ffai/gated_rmsnorm.rs`). Still open: the `sdpa_decode`
+  learned-sink term (GPT-OSS-20B) and a 2D-`A_log` `ssm_step` variant
+  (Jamba). Each is correctness-neutral today but trades a per-layer
+  CPU↔GPU sync; landing them is a decode-throughput win, not a
   correctness fix.
 
 ## Open uncertainties / counting caveats
