@@ -26,6 +26,7 @@ pub mod gather_axis;
 pub mod gemv;
 pub mod gemv_masked;
 pub mod hadamard;
+pub mod hadamard_m;
 pub mod indexing;
 pub mod layer_norm;
 pub mod logsumexp;
