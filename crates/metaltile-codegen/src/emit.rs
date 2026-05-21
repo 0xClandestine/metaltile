@@ -95,6 +95,9 @@ impl From<io::Error> for EmitError {
 impl From<serde_json::Error> for EmitError {
     fn from(e: serde_json::Error) -> Self { EmitError::Json(e) }
 }
+impl From<crate::error::Error> for EmitError {
+    fn from(e: crate::error::Error) -> Self { EmitError::Codegen(e.to_string()) }
+}
 
 type Result<T> = std::result::Result<T, EmitError>;
 
@@ -105,7 +108,7 @@ type Result<T> = std::result::Result<T, EmitError>;
 /// kernels can opt into `use_simd_matrix` without coupling the emit
 /// helpers to a single config.
 pub fn write_msl(kernel: &Kernel, dir: &Path, generator: &MslGenerator) -> Result<PathBuf> {
-    let msl = generator.generate(kernel).map_err(|e| EmitError::Codegen(format!("{e:?}")))?;
+    let msl = generator.generate(kernel).map_err(|e| EmitError::Codegen(e.to_string()))?;
     let path = dir.join(format!("{}.metal", kernel.name));
     std::fs::write(&path, msl)?;
     Ok(path)

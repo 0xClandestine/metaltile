@@ -59,12 +59,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use metaltile_core::{
-    error::Result,
-    ir::{BinOpKind, Block, BlockId, Kernel, Op, UnaryOpKind, ValueId},
-};
+use metaltile_core::ir::{BinOpKind, Block, BlockId, Kernel, Op, UnaryOpKind, ValueId};
 
 use super::remap;
+use crate::error::{Error, Result};
 
 pub struct AlgebraicSimplifyPass;
 
@@ -75,7 +73,8 @@ impl super::Pass for AlgebraicSimplifyPass {
         let block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
 
         for bid in &block_ids {
-            let mut block = kernel.blocks.remove(bid).unwrap();
+            let mut block =
+                kernel.blocks.remove(bid).ok_or_else(|| Error::BlockNotFound(bid.as_u32()))?;
             simplify_block_fixpoint(&mut block);
             kernel.blocks.insert(*bid, block);
         }

@@ -32,6 +32,12 @@ pub enum Error {
     /// Internal error.
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// Invalid dtype string.
+    #[error(
+        "invalid dtype '{0}'; expected one of: f32, f16, bf16, i32, i8, i4, u8, u32, u64, i64, bool"
+    )]
+    InvalidDType(String),
 }
 
 /// Convenience result type.

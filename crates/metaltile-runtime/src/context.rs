@@ -4,7 +4,7 @@
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {}
 
-use std::{borrow::Cow, collections::BTreeMap, io};
+use std::{borrow::Cow, collections::BTreeMap};
 
 use metaltile_codegen::msl::MslGenerator;
 #[cfg(target_os = "macos")]
@@ -448,20 +448,24 @@ impl Context {
         type Pso = ProtocolObject<dyn MTLComputePipelineState>;
         type Queue = ProtocolObject<dyn MTLCommandQueue>;
 
-        static DEV: OnceLock<Retained<Dev>> = OnceLock::new();
+        static DEV: OnceLock<Option<Retained<Dev>>> = OnceLock::new();
         // FxHashMap over HashMap because the key is a pre-hashed FNV-1a
         // u64 — SipHash13 over already-hashed bits is pure waste.
         static PSO_CACHE: OnceLock<Mutex<FxHashMap<u64, Retained<Pso>>>> = OnceLock::new();
         // Persist the command queue: Apple's Best Practices Guide flags
         // newCommandQueue as expensive ("should not be repeatedly created
         // and destroyed"). Per-dispatch construction was costing 10-50µs.
-        static QUEUE: OnceLock<Retained<Queue>> = OnceLock::new();
+        static QUEUE: OnceLock<Option<Retained<Queue>>> = OnceLock::new();
 
-        let dev = DEV.get_or_init(|| {
-            MTLCreateSystemDefaultDevice().expect("MTLCreateSystemDefaultDevice returned nil")
-        });
+        let dev = DEV
+            .get_or_init(|| MTLCreateSystemDefaultDevice())
+            .as_ref()
+            .ok_or(MetalTileError::DeviceCreation)?;
         let cache = PSO_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
-        let queue = QUEUE.get_or_init(|| dev.newCommandQueue().expect("newCommandQueue failed"));
+        let queue = QUEUE
+            .get_or_init(|| dev.newCommandQueue())
+            .as_ref()
+            .ok_or(MetalTileError::QueueCreation)?;
         let binding_plans = build_param_buffer_plans(kernel, buffers)?;
 
         let cache_key = {
@@ -477,16 +481,17 @@ impl Context {
         };
 
         let pipe: Retained<Pso> = {
-            let mut lock = cache.lock().unwrap();
+            let mut lock =
+                cache.lock().map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?;
             if let Some(cached) = lock.get(&cache_key) {
                 cached.clone()
             } else {
                 let lib = dev
                     .newLibraryWithSource_options_error(&NSString::from_str(msl_source), None)
-                    .map_err(|e| MetalTileError::Compilation(format!("{e:?}")))?;
+                    .map_err(|e| MetalTileError::MslCompilation(format!("{e:?}")))?;
                 let fun = if fn_consts.is_empty() {
                     lib.newFunctionWithName(&NSString::from_str(&kernel.name)).ok_or_else(|| {
-                        MetalTileError::Compilation(format!("fn '{}' not found", kernel.name))
+                        MetalTileError::FunctionNotFound { name: kernel.name.clone() }
                     })?
                 } else {
                     use objc2_metal::{MTLDataType, MTLFunctionConstantValues};
@@ -506,11 +511,8 @@ impl Context {
                         &NSString::from_str(&kernel.name),
                         &fcv,
                     )
-                    .map_err(|e| {
-                        MetalTileError::Compilation(format!(
-                            "fn '{}' with constants: {e:?}",
-                            kernel.name
-                        ))
+                    .map_err(|e| MetalTileError::FunctionNotFound {
+                        name: format!("{} (with constants): {e:?}", kernel.name),
                     })?
                 };
                 let desc = MTLComputePipelineDescriptor::new();
@@ -521,7 +523,10 @@ impl Context {
                         MTLPipelineOption(0),
                         None,
                     )
-                    .map_err(|e| MetalTileError::Compilation(format!("pipeline: {e:?}")))?;
+                    .map_err(|e| MetalTileError::PipelineCreation {
+                        name: kernel.name.clone(),
+                        reason: format!("{e:?}"),
+                    })?;
                 lock.insert(cache_key, pso.clone());
                 pso
             }
@@ -699,10 +704,11 @@ impl Context {
                 MTLResourceOptions,
             };
             type Dev = ProtocolObject<dyn MTLDevice>;
-            static DEV: OnceLock<Retained<Dev>> = OnceLock::new();
-            let dev = DEV.get_or_init(|| {
-                MTLCreateSystemDefaultDevice().expect("MTLCreateSystemDefaultDevice returned nil")
-            });
+            static DEV: OnceLock<Option<Retained<Dev>>> = OnceLock::new();
+            let dev = DEV
+                .get_or_init(|| MTLCreateSystemDefaultDevice())
+                .as_ref()
+                .ok_or(MetalTileError::DeviceCreation)?;
             let opts = MTLResourceOptions::StorageModeShared
                 | MTLResourceOptions::HazardTrackingModeUntracked;
             let buf = pool_acquire(dev, bytes.len(), opts)?;
@@ -783,15 +789,19 @@ impl Context {
         type Pso = ProtocolObject<dyn MTLComputePipelineState>;
         type Queue = ProtocolObject<dyn MTLCommandQueue>;
 
-        static DEV: OnceLock<Retained<Dev>> = OnceLock::new();
+        static DEV: OnceLock<Option<Retained<Dev>>> = OnceLock::new();
         static PSO_CACHE: OnceLock<Mutex<FxHashMap<u64, Retained<Pso>>>> = OnceLock::new();
-        static QUEUE: OnceLock<Retained<Queue>> = OnceLock::new();
+        static QUEUE: OnceLock<Option<Retained<Queue>>> = OnceLock::new();
 
-        let dev = DEV.get_or_init(|| {
-            MTLCreateSystemDefaultDevice().expect("MTLCreateSystemDefaultDevice returned nil")
-        });
+        let dev = DEV
+            .get_or_init(|| MTLCreateSystemDefaultDevice())
+            .as_ref()
+            .ok_or(MetalTileError::DeviceCreation)?;
         let cache = PSO_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
-        let queue = QUEUE.get_or_init(|| dev.newCommandQueue().expect("newCommandQueue failed"));
+        let queue = QUEUE
+            .get_or_init(|| dev.newCommandQueue())
+            .as_ref()
+            .ok_or(MetalTileError::QueueCreation)?;
 
         let acquire_shared = |bytes: Option<&[u8]>, len: usize| -> Result<BufRc, MetalTileError> {
             let opts = MTLResourceOptions::StorageModeShared
@@ -839,12 +849,19 @@ impl Context {
             // temporaries in a match scrutinee live until the end of the match
             // body (RFC 66), so writing back inside None would deadlock against
             // the still-held guard.
-            let cached = msl_cache.lock().unwrap().get(&h).cloned();
+            let cached = msl_cache
+                .lock()
+                .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?
+                .get(&h)
+                .cloned();
             let msl = match cached {
                 Some(m) => m,
                 None => {
                     let generated = MslGenerator::default().generate(spec.kernel)?;
-                    msl_cache.lock().unwrap().insert(h, generated.clone());
+                    msl_cache
+                        .lock()
+                        .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?
+                        .insert(h, generated.clone());
                     generated
                 },
             };
@@ -870,18 +887,21 @@ impl Context {
         for (spec, msl) in specs.iter().zip(msl_sources.iter()) {
             let cache_key = pso_cache_key(spec.kernel, spec.fn_consts);
             let pipe: Retained<Pso> = {
-                let mut lock = cache.lock().unwrap();
+                let mut lock = cache
+                    .lock()
+                    .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?;
                 if let Some(p) = lock.get(&cache_key) {
                     p.clone()
                 } else {
                     let src = NSString::from_str(msl);
                     let lib = dev
                         .newLibraryWithSource_options_error(&src, None)
-                        .map_err(|e| MetalTileError::Compilation(format!("{e:?}")))?;
+                        .map_err(|e| MetalTileError::MslCompilation(format!("{e:?}")))?;
                     let fn_name = NSString::from_str(&spec.kernel.name);
                     let fun = if spec.fn_consts.is_empty() {
-                        lib.newFunctionWithName(&fn_name)
-                            .ok_or_else(|| MetalTileError::Compilation(spec.kernel.name.clone()))?
+                        lib.newFunctionWithName(&fn_name).ok_or_else(|| {
+                            MetalTileError::FunctionNotFound { name: spec.kernel.name.clone() }
+                        })?
                     } else {
                         use objc2_metal::{MTLDataType, MTLFunctionConstantValues};
                         let consts = MTLFunctionConstantValues::new();
@@ -897,8 +917,11 @@ impl Context {
                                 );
                             }
                         }
-                        lib.newFunctionWithName_constantValues_error(&fn_name, &consts)
-                            .map_err(|e| MetalTileError::Compilation(format!("{e:?}")))?
+                        lib.newFunctionWithName_constantValues_error(&fn_name, &consts).map_err(
+                            |e| MetalTileError::FunctionNotFound {
+                                name: format!("{} (with constants): {e:?}", spec.kernel.name),
+                            },
+                        )?
                     };
                     let desc = MTLComputePipelineDescriptor::new();
                     desc.setComputeFunction(Some(&fun));
@@ -908,7 +931,10 @@ impl Context {
                             MTLPipelineOption(0),
                             None,
                         )
-                        .map_err(|e| MetalTileError::Compilation(format!("pipeline: {e:?}")))?;
+                        .map_err(|e| MetalTileError::PipelineCreation {
+                            name: spec.kernel.name.clone(),
+                            reason: format!("{e:?}"),
+                        })?;
                     lock.insert(cache_key, pso.clone());
                     pso
                 }
@@ -1047,7 +1073,7 @@ impl Context {
     pub fn tuner_mut(&mut self) -> &mut Autotuner { &mut self.tuner }
     pub fn tuner(&self) -> &Autotuner { &self.tuner }
 
-    pub fn shutdown(&self) -> Result<(), io::Error> { self.tuner.flush() }
+    pub fn shutdown(&self) -> Result<(), MetalTileError> { Ok(self.tuner.flush()?) }
 }
 
 impl Drop for Context {
@@ -1560,8 +1586,12 @@ mod tests {
             chip_family: None,
         };
         let err = ctx.shutdown().expect_err("shutdown should surface flush errors");
+        let io_err = match err {
+            MetalTileError::Io(e) => e,
+            other => panic!("expected MetalTileError::Io, got {other:?}"),
+        };
         assert!(matches!(
-            err.kind(),
+            io_err.kind(),
             io::ErrorKind::AlreadyExists | io::ErrorKind::NotADirectory | io::ErrorKind::Other
         ));
 

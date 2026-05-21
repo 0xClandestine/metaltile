@@ -36,6 +36,7 @@ use metaltile_std::{
 
 use crate::{
     BuildArgs,
+    CliError,
     matches_filter,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
@@ -69,7 +70,7 @@ pub fn run(args: &BuildArgs) {
                 eprintln!(
                     "  {} {}",
                     paint_stderr("error:", Style::new().fg(Color::Red).bold()),
-                    paint_stderr(e, Style::new().fg(Color::BrightWhite)),
+                    paint_stderr(e.to_string(), Style::new().fg(Color::BrightWhite)),
                 );
                 eprintln!("  valid kinds: msl, metallib, swift, ir, all");
                 std::process::exit(1);
@@ -312,7 +313,7 @@ enum EmitKind {
     Ir,
 }
 
-fn parse_emit_list(raw: &str) -> Result<BTreeSet<EmitKind>, String> {
+fn parse_emit_list(raw: &str) -> Result<BTreeSet<EmitKind>, CliError> {
     let mut kinds = BTreeSet::new();
     for tok in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
         match tok {
@@ -335,7 +336,7 @@ fn parse_emit_list(raw: &str) -> Result<BTreeSet<EmitKind>, String> {
                 kinds.insert(EmitKind::Swift);
                 kinds.insert(EmitKind::Ir);
             },
-            other => return Err(format!("unknown --emit kind '{other}'")),
+            other => return Err(CliError::Other(format!("unknown --emit kind '{other}'"))),
         }
     }
     Ok(kinds)

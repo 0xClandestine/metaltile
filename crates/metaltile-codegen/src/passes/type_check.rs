@@ -18,51 +18,60 @@ use std::collections::BTreeMap;
 
 use metaltile_core::{
     dtype::DType,
-    error::{Error, Result},
+    error::Error,
     ir::{BinOpKind, Block, BlockId, Kernel, Op, Param, ReduceKind, ValueId},
     shape::{Dim, Shape},
 };
+
+/// Internal result type — all helpers in this module use the core error type
+/// so they can construct `Error::Validation`, `Error::ShapeMismatch`, etc.
+/// directly.  The `Pass::run` impl converts at the boundary via `From`.
+type CoreResult<T> = metaltile_core::error::Result<T>;
 
 pub struct TypeCheckPass;
 
 impl super::Pass for TypeCheckPass {
     fn name(&self) -> &str { "type_check" }
 
-    fn run(&self, kernel: &mut Kernel) -> Result<()> {
-        // Validate that every ConstExpr dim in params has a matching constexpr decl.
-        for p in &kernel.params {
-            for dim in p.shape.iter() {
-                if let Dim::ConstExpr(ce) = dim {
-                    let found = kernel.constexprs.iter().any(|d| d.name == *ce);
-                    if !found {
-                        return Err(Error::Validation(format!(
-                            "param '{}' uses ConstExpr '{}' in shape but no constexpr decl found",
-                            p.name,
-                            ce.name()
-                        )));
-                    }
-                }
-            }
-        }
-
-        let type_env = infer_types(kernel)?;
-        check_block(&kernel.body, kernel, &type_env)?;
-
-        let block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
-        for bid in block_ids {
-            if bid == kernel.body.id {
-                continue;
-            }
-            if let Some(block) = kernel.blocks.get(&bid) {
-                let block = block.clone();
-                check_block(&block, kernel, &type_env)?;
-            }
-        }
-        Ok(())
+    fn run(&self, kernel: &mut Kernel) -> crate::error::Result<()> {
+        run_inner(kernel).map_err(crate::error::Error::Core)
     }
 }
 
-fn check_block(block: &Block, kernel: &Kernel, env: &TypeEnv) -> Result<()> {
+fn run_inner(kernel: &mut Kernel) -> CoreResult<()> {
+    // Validate that every ConstExpr dim in params has a matching constexpr decl.
+    for p in &kernel.params {
+        for dim in p.shape.iter() {
+            if let Dim::ConstExpr(ce) = dim {
+                let found = kernel.constexprs.iter().any(|d| d.name == *ce);
+                if !found {
+                    return Err(Error::Validation(format!(
+                        "param '{}' uses ConstExpr '{}' in shape but no constexpr decl found",
+                        p.name,
+                        ce.name()
+                    )));
+                }
+            }
+        }
+    }
+
+    let type_env = infer_types(kernel)?;
+    check_block(&kernel.body, kernel, &type_env)?;
+
+    let block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
+    for bid in block_ids {
+        if bid == kernel.body.id {
+            continue;
+        }
+        if let Some(block) = kernel.blocks.get(&bid) {
+            let block = block.clone();
+            check_block(&block, kernel, &type_env)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_block(block: &Block, kernel: &Kernel, env: &TypeEnv) -> CoreResult<()> {
     for (op_idx, op) in block.ops.iter().enumerate() {
         let result = block.results.get(op_idx).and_then(|x| *x);
         check_op(op, kernel, env).map_err(|err| add_op_context(err, block, op_idx, op, result))?;
@@ -70,7 +79,7 @@ fn check_block(block: &Block, kernel: &Kernel, env: &TypeEnv) -> Result<()> {
     Ok(())
 }
 
-fn check_op(op: &Op, kernel: &Kernel, env: &TypeEnv) -> Result<()> {
+fn check_op(op: &Op, kernel: &Kernel, env: &TypeEnv) -> CoreResult<()> {
     match op {
         Op::Dot { .. } => {
             let tensors: Vec<_> = kernel.params.iter().filter(|p| p.shape.rank() == 2).collect();
@@ -251,6 +260,7 @@ fn add_op_context(
         Error::Validation(msg) => msg,
         Error::UnknownValue(msg) => format!("unknown value reference: {msg}"),
         Error::Internal(msg) => format!("internal error: {msg}"),
+        Error::InvalidDType(msg) => format!("invalid dtype: {msg}"),
     };
     Error::Validation(format!("{ctx}: {detail}"))
 }
@@ -322,7 +332,7 @@ fn op_name(op: &Op) -> &'static str {
     }
 }
 
-fn require_param<'a>(kernel: &'a Kernel, name: &str) -> Result<&'a Param> {
+fn require_param<'a>(kernel: &'a Kernel, name: &str) -> CoreResult<&'a Param> {
     kernel
         .params
         .iter()
@@ -330,7 +340,7 @@ fn require_param<'a>(kernel: &'a Kernel, name: &str) -> Result<&'a Param> {
         .ok_or_else(|| Error::UnknownValue(format!("tensor parameter '{name}'")))
 }
 
-fn require_output_param<'a>(kernel: &'a Kernel, name: &str) -> Result<&'a Param> {
+fn require_output_param<'a>(kernel: &'a Kernel, name: &str) -> CoreResult<&'a Param> {
     let param = require_param(kernel, name)?;
     if !param.is_output {
         return Err(Error::Validation(format!("parameter '{name}' must be an output tensor")));
@@ -338,11 +348,15 @@ fn require_output_param<'a>(kernel: &'a Kernel, name: &str) -> Result<&'a Param>
     Ok(param)
 }
 
-fn require_typed_value<'a>(env: &'a TypeEnv, vid: ValueId, role: &str) -> Result<&'a TypedValue> {
+fn require_typed_value<'a>(
+    env: &'a TypeEnv,
+    vid: ValueId,
+    role: &str,
+) -> CoreResult<&'a TypedValue> {
     env.get(&vid).ok_or_else(|| Error::UnknownValue(format!("{role} value {vid}")))
 }
 
-fn require_scalar_integer(env: &TypeEnv, vid: ValueId, role: &str) -> Result<()> {
+fn require_scalar_integer(env: &TypeEnv, vid: ValueId, role: &str) -> CoreResult<()> {
     let tv = require_typed_value(env, vid, role)?;
     if tv.shape.rank() != 0 {
         return Err(Error::Validation(format!("{role} must be scalar, got shape {}", tv.shape)));
@@ -356,7 +370,7 @@ fn require_scalar_integer(env: &TypeEnv, vid: ValueId, role: &str) -> Result<()>
     Ok(())
 }
 
-fn validate_axis(axis: u32, shape: &Shape, op_name: &str) -> Result<()> {
+fn validate_axis(axis: u32, shape: &Shape, op_name: &str) -> CoreResult<()> {
     let logical_rank = shape.rank().max(1);
     if axis as usize >= logical_rank {
         return Err(Error::Validation(format!(
@@ -378,7 +392,7 @@ pub type TypeEnv = BTreeMap<ValueId, TypedValue>;
 
 /// Forward type inference across all blocks in a kernel.
 /// Returns a `TypeEnv` that the MSL emitter can query for every `ValueId`.
-pub fn infer_types(kernel: &Kernel) -> Result<TypeEnv> {
+pub fn infer_types(kernel: &Kernel) -> CoreResult<TypeEnv> {
     let mut env = TypeEnv::new();
     infer_block(&kernel.body, kernel, &kernel.blocks, &mut env)?;
     for block in kernel.blocks.values() {
@@ -421,7 +435,7 @@ fn infer_block(
     kernel: &Kernel,
     all_blocks: &BTreeMap<BlockId, Block>,
     env: &mut TypeEnv,
-) -> Result<()> {
+) -> CoreResult<()> {
     // Scan the entry body + child blocks for threadgroup_alloc dtypes by
     // name so ThreadgroupLoad can recover the underlying buffer dtype instead
     // of falling back to F32. tg_alloc usually lives in the entry block;
@@ -636,12 +650,14 @@ fn infer_block(
                 }
             },
             Op::Gather { src, indices, .. } => {
-                let dtype = kernel
-                    .params
-                    .iter()
-                    .find(|p| p.name == *src)
-                    .map(|p| p.dtype)
-                    .unwrap_or(DType::F32);
+                let dtype =
+                    kernel.params.iter().find(|p| p.name == *src).map(|p| p.dtype).ok_or_else(
+                        || {
+                            Error::UnknownValue(format!(
+                                "Op::Gather: source tensor '{src}' not found in kernel params"
+                            ))
+                        },
+                    )?;
                 let shape = env.get(indices).map(|tv| tv.shape.clone()).unwrap_or(Shape::scalar());
                 env.insert(vid, TypedValue { dtype, shape });
             },

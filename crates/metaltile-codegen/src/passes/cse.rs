@@ -30,7 +30,6 @@
 
 use metaltile_core::{
     dtype::DType,
-    error::Result,
     ir::{
         ActKind,
         BinOpKind,
@@ -45,6 +44,8 @@ use metaltile_core::{
     },
 };
 use rustc_hash::FxHashMap;
+
+use crate::error::Result;
 
 /// A structural key for CSE: captures the opcode and operands in a hashable form.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

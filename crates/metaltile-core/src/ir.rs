@@ -1055,8 +1055,8 @@ impl Op {
                 if secondary_src.is_some() {
                     write!(f, ", secondary")?;
                 }
-                if secondary_base.is_some() {
-                    write!(f, ", secondary_base=v{}", secondary_base.unwrap().as_u32())?;
+                if let Some(sb) = secondary_base {
+                    write!(f, ", secondary_base=v{}", sb.as_u32())?;
                 }
                 write!(f, ")")
             },
@@ -1314,7 +1314,8 @@ mod tests {
         let mut kernel = Kernel::new("sync");
         kernel.body.push_op(Op::Const { value: 7 }, ValueId::new(0));
         let cloned = kernel.clone();
-        let entry = cloned.blocks.get(&BlockId::new(0)).unwrap();
+        let entry =
+            cloned.blocks.get(&BlockId::new(0)).expect("entry block must exist after clone");
         assert_eq!(entry.ops, cloned.body.ops);
         assert_eq!(entry.results, cloned.body.results);
     }
@@ -1323,15 +1324,31 @@ mod tests {
     fn getters_treat_body_as_authoritative_entry_block() {
         let mut kernel = Kernel::new("body");
         kernel.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
-        assert_eq!(kernel.get_block(BlockId::new(0)).unwrap().ops.len(), 1);
+        assert_eq!(kernel.get_block(BlockId::new(0)).expect("entry block must exist").ops.len(), 1);
 
-        let body = kernel.get_block_mut(BlockId::new(0)).unwrap();
+        let body = kernel.get_block_mut(BlockId::new(0)).expect("entry block must be mutable");
         body.push_op(Op::Const { value: 2 }, ValueId::new(1));
         assert_eq!(kernel.body.ops.len(), 2);
-        assert_eq!(kernel.blocks.get(&BlockId::new(0)).unwrap().ops.len(), 0);
+        assert_eq!(
+            kernel
+                .blocks
+                .get(&BlockId::new(0))
+                .expect("entry block must exist before sync")
+                .ops
+                .len(),
+            0
+        );
 
         kernel.sync_entry_block();
-        assert_eq!(kernel.blocks.get(&BlockId::new(0)).unwrap().ops.len(), 2);
+        assert_eq!(
+            kernel
+                .blocks
+                .get(&BlockId::new(0))
+                .expect("entry block must exist after sync")
+                .ops
+                .len(),
+            2
+        );
         let _ = Block::new(BlockId::new(1));
     }
 

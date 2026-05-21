@@ -27,17 +27,16 @@ use std::time::Instant;
 
 use metaltile_core::ir::Kernel;
 
+use crate::error::Result;
+
 /// A transformation pass on the IR.
 pub trait Pass {
     fn name(&self) -> &str;
-    fn run(&self, kernel: &mut Kernel) -> metaltile_core::error::Result<()>;
+    fn run(&self, kernel: &mut Kernel) -> Result<()>;
 }
 
 /// Run a sequence of passes on a kernel.
-pub fn run_passes(
-    kernel: &mut Kernel,
-    passes: &[Box<dyn Pass>],
-) -> metaltile_core::error::Result<()> {
+pub fn run_passes(kernel: &mut Kernel, passes: &[Box<dyn Pass>]) -> Result<()> {
     for pass in passes {
         pass.run(kernel)?;
     }
@@ -57,7 +56,7 @@ pub struct PassStats {
 pub fn run_passes_with_stats(
     kernel: &mut Kernel,
     passes: &[Box<dyn Pass>],
-) -> metaltile_core::error::Result<Vec<PassStats>> {
+) -> Result<Vec<PassStats>> {
     let mut stats = Vec::with_capacity(passes.len());
 
     for pass in passes {

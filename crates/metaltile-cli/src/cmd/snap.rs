@@ -13,6 +13,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
+    CliError,
     SnapArgs,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
@@ -30,7 +31,7 @@ struct Snapshot {
     results: Vec<Value>,
 }
 
-pub fn run(args: &SnapArgs) {
+pub fn run(args: &SnapArgs) -> Result<(), CliError> {
     let out_path = args.out.as_deref();
     let from_path = args.from.as_deref();
     let note = &args.note;
@@ -48,7 +49,7 @@ pub fn run(args: &SnapArgs) {
 
     let results_json: Value = if let Some(from) = from_path {
         // Load existing JSON
-        let content = std::fs::read_to_string(from).unwrap_or_else(|e| {
+        let content = std::fs::read_to_string(from).map_err(|e| {
             eprintln!(
                 "{} {}",
                 paint_stderr("Error:", Style::new().fg(Color::Red).bold()),
@@ -57,16 +58,16 @@ pub fn run(args: &SnapArgs) {
                     Style::new().fg(Color::BrightWhite)
                 ),
             );
-            std::process::exit(1);
-        });
-        serde_json::from_str(&content).unwrap_or_else(|e| {
+            CliError::Io(e)
+        })?;
+        serde_json::from_str(&content).map_err(|e| {
             eprintln!(
                 "{} {}",
                 paint_stderr("Error:", Style::new().fg(Color::Red).bold()),
                 paint_stderr(format!("invalid JSON: {e}"), Style::new().fg(Color::BrightWhite)),
             );
-            std::process::exit(1);
-        })
+            CliError::Json(e)
+        })?
     } else {
         // Run bench and capture JSON
         eprintln!(
@@ -75,14 +76,16 @@ pub fn run(args: &SnapArgs) {
         );
         let temp_file =
             std::env::temp_dir().join(format!(".tile-snap-tmp-{}.json", std::process::id()));
-        let mut child = Command::new(std::env::current_exe().unwrap())
+        let mut child = Command::new(std::env::current_exe().map_err(|e| CliError::Io(e))?)
             .arg("bench")
             .arg("--json")
             .arg(temp_file.to_str().unwrap())
             .spawn()
-            .expect("failed to run tile bench");
+            .map_err(|e| CliError::Subprocess(format!("failed to spawn tile bench: {e}")))?;
 
-        let status = child.wait().expect("tile bench did not start");
+        let status = child
+            .wait()
+            .map_err(|e| CliError::Subprocess(format!("tile bench did not start: {e}")))?;
         if !status.success() {
             eprintln!(
                 "{} {}",
@@ -90,19 +93,19 @@ pub fn run(args: &SnapArgs) {
                 paint_stderr("bench suite failed", Style::new().fg(Color::BrightWhite)),
             );
             let _ = std::fs::remove_file(&temp_file);
-            std::process::exit(1);
+            return Err(CliError::Other("bench suite failed".into()));
         }
 
-        let content = std::fs::read_to_string(&temp_file).unwrap_or_else(|e| {
+        let content = std::fs::read_to_string(&temp_file).map_err(|e| {
             eprintln!("cannot read temp results: {e}");
-            std::process::exit(1);
-        });
+            CliError::Io(e)
+        })?;
         let _ = std::fs::remove_file(&temp_file);
 
-        serde_json::from_str(&content).unwrap_or_else(|e| {
+        serde_json::from_str(&content).map_err(|e| {
             eprintln!("invalid bench JSON: {e}");
-            std::process::exit(1);
-        })
+            CliError::Json(e)
+        })?
     };
 
     // Extract results array and device name
@@ -145,16 +148,16 @@ pub fn run(args: &SnapArgs) {
 
     // Write snapshot
     let dir = std::path::Path::new(&out_path).parent().unwrap_or(".".as_ref());
-    std::fs::create_dir_all(dir).unwrap_or_else(|e| {
+    std::fs::create_dir_all(dir).map_err(|e| {
         eprintln!("cannot create directory: {e}");
-        std::process::exit(1);
-    });
+        CliError::Io(e)
+    })?;
 
     let json = serde_json::to_string_pretty(&snapshot).unwrap();
-    std::fs::write(out_path, &json).unwrap_or_else(|e| {
+    std::fs::write(out_path, &json).map_err(|e| {
         eprintln!("cannot write snapshot: {e}");
-        std::process::exit(1);
-    });
+        CliError::Io(e)
+    })?;
 
     println!(
         "  {} {}  ({} results{})",
@@ -163,6 +166,7 @@ pub fn run(args: &SnapArgs) {
         result_count,
         note_suffix,
     );
+    Ok(())
 }
 
 fn chrono_like_now() -> String {

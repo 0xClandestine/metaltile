@@ -10,6 +10,7 @@ publish = true
 nax = []
 
 [dependencies]
+thiserror.workspace = true
 metaltile.workspace = true
 metaltile-core.workspace = true
 metaltile-codegen.workspace = true

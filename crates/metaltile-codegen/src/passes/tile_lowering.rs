@@ -16,7 +16,9 @@
 //!   Performance Computing", ACM Computing Surveys 26(4):345–420.
 //!   Foundational survey of tiling transformations.
 
-use metaltile_core::{error::Result, ir::Kernel};
+use metaltile_core::ir::Kernel;
+
+use crate::error::Result;
 
 #[derive(Debug, Clone)]
 pub struct TileSchedule {

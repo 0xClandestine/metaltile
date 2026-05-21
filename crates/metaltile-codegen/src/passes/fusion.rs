@@ -35,13 +35,11 @@
 
 use std::collections::BTreeSet;
 
-use metaltile_core::{
-    error::Result,
-    ir::{Block, BlockId, Kernel, Op, ValueId},
-};
+use metaltile_core::ir::{Block, BlockId, Kernel, Op, ValueId};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::remap::op_value_refs;
+use crate::error::{Error, Result};
 
 /// Mask for encoding internal sub-op references within FusedElementwise chains.
 pub const SUB_OP_FLAG: u32 = 0x8000_0000;
@@ -100,7 +98,7 @@ impl super::Pass for FusionPass {
 
         // Fuse the kernel body block.
         let body_pins = pinned_per_block.get(&kernel.body.id).cloned().unwrap_or_default();
-        fuse_block(&mut kernel.body, &body_pins);
+        fuse_block(&mut kernel.body, &body_pins)?;
 
         // Fuse all nested blocks (loop bodies, if/else branches) with their own
         // per-block pinned sets so values used in grandchild blocks are preserved.
@@ -108,7 +106,7 @@ impl super::Pass for FusionPass {
         for bid in block_ids {
             let pins = pinned_per_block.get(&bid).cloned().unwrap_or_default();
             if let Some(block) = kernel.blocks.get_mut(&bid) {
-                fuse_block(block, &pins);
+                fuse_block(block, &pins)?;
             }
         }
         Ok(())
@@ -119,7 +117,7 @@ impl super::Pass for FusionPass {
 // Fusion on a single block
 // ---------------------------------------------------------------------------
 
-fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
+fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) -> Result<()> {
     // Phase 1: build def-use graph.
     // uses[vid] = set of op indices that reference vid.
     let mut uses: FxHashMap<ValueId, Vec<usize>> = FxHashMap::default();
@@ -189,7 +187,7 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
     }
 
     if chains.is_empty() {
-        return;
+        return Ok(());
     }
 
     // Phase 3: rewrite the block — replace chains with FusedElementwise.
@@ -305,7 +303,7 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
             let fused_ops: Vec<Op> = chain
                 .iter()
                 .map(|&idx| build_fused_sub_op(idx, chain, &old_ops_snapshot, &old_results))
-                .collect();
+                .collect::<Result<Vec<Op>>>()?;
             new_ops.push(Op::FusedElementwise { ops: fused_ops });
             new_results.push(old_results.get(i).copied().unwrap_or(None));
         } else {
@@ -316,6 +314,7 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
 
     block.ops = new_ops;
     block.results = new_results;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -358,9 +357,12 @@ fn build_fused_sub_op(
     chain: &[usize],
     old_ops: &[Op],
     old_results: &[Option<ValueId>],
-) -> Op {
+) -> Result<Op> {
     let op = old_ops[idx].clone();
-    let pos_in_chain = chain.iter().position(|&c| c == idx).unwrap();
+    let pos_in_chain = chain
+        .iter()
+        .position(|&c| c == idx)
+        .ok_or_else(|| Error::OpNotFound(format!("chain position for op {idx}")))?;
 
     let map = |v: &mut ValueId| {
         // If this ValueId is produced by a previous op in the same chain,
@@ -396,7 +398,7 @@ fn build_fused_sub_op(
         _ => {},
     }
 
-    new_op
+    Ok(new_op)
 }
 
 #[cfg(test)]

@@ -33,11 +33,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use metaltile_core::{
     dtype::DType,
-    error::Result,
     ir::{Block, BlockId, Kernel, Op, ValueId},
 };
 
 use super::remap;
+use crate::error::{Error, Result};
 
 pub struct CopyPropPass;
 
@@ -48,7 +48,8 @@ impl super::Pass for CopyPropPass {
         let block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
 
         for bid in &block_ids {
-            let mut block = kernel.blocks.remove(bid).unwrap();
+            let mut block =
+                kernel.blocks.remove(bid).ok_or_else(|| Error::BlockNotFound(bid.as_u32()))?;
             copy_prop_block_fixpoint(&mut block);
             kernel.blocks.insert(*bid, block);
         }

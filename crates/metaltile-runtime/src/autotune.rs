@@ -151,7 +151,9 @@ impl Autotuner {
     }
 
     /// Persist the cache to disk.
-    pub fn flush(&self) -> std::io::Result<()> { self.cache.save(&self.cache_path) }
+    pub fn flush(&self) -> Result<(), crate::error::MetalTileError> {
+        Ok(self.cache.save(&self.cache_path)?)
+    }
 }
 
 fn dirs_next() -> Option<PathBuf> { std::env::var("HOME").ok().map(PathBuf::from) }
