@@ -274,12 +274,12 @@ fn inline_callee(
                     match constexpr_arg[idx] {
                         Some(KernelCallArg::Value(_)) => {
                             // Seed pass already mapped this; ensure entry exists.
-                            if let Some(r) = op_result {
-                                if !vid_map.contains_key(r) {
-                                    let fresh = ValueId::new(next_vid);
-                                    next_vid += 1;
-                                    vid_map.insert(*r, fresh);
-                                }
+                            if let Some(r) = op_result
+                                && !vid_map.contains_key(r)
+                            {
+                                let fresh = ValueId::new(next_vid);
+                                next_vid += 1;
+                                vid_map.insert(*r, fresh);
                             }
                             continue;
                         },

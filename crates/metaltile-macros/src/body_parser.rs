@@ -687,8 +687,7 @@ impl DslBodyParser {
                         if self.param_names.contains(&ident)
                             || self.constexpr_names.contains(&ident)
                         {
-                            args_tokens
-                                .push(quote! { KernelCallArg::Tensor(#ident.to_string()) });
+                            args_tokens.push(quote! { KernelCallArg::Tensor(#ident.to_string()) });
                             continue;
                         }
                     }
