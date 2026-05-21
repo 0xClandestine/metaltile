@@ -11,8 +11,8 @@ Sources surveyed:
 ## Summary
 
 - Total kernel-op rows in this audit (union): **89**
-- metaltile-ported kernel ops: **64 / 89 = 72 %** — 52 full ✓ (58 %), 12 partial ~ (13 %)
-- **Still to cover: 25 ops not ported (✗)**, plus **12 partial ports** still to finish
+- metaltile-ported kernel ops: **64 / 89 = 72 %** — 53 full ✓ (60 %), 11 partial ~ (12 %)
+- **Still to cover: 25 ops not ported (✗)**, plus **11 partial ports** still to finish
 - The 6 Vision / STT / TTS front-end kernels (Phase 6.5 / 7) — `conv2d`,
   `patch_embed`, `rope_2d`, `mel_spectrogram`, `audio_conv1d`,
   `vocoder/iSTFT` — are now ported (✓ rows below).
@@ -91,7 +91,7 @@ Sources surveyed:
 | hadamard (hadamard_n + hadamard_m) | ✓ | ✓ | ~ | `mlx/hadamard.rs` → `mt_hadamard_n{64,128,256,512,1024}<T>`. Power-of-2 FWHT via log2(N) butterfly passes. The non-power-of-2 `hadamard_m` factor (M ∈ {12,20,28}) is a follow-up. |
 | fence | ✓ | ✓ | ✗ | Stub file in repo, not declared. Synchronization primitive. |
 | gather (bare-tensor embedding lookup) | ✓ (via indexing/) | ✓ | ✓ | `ffai/gather.rs` → `ffai_gather<T>`. FFAI's embedding-table gather. |
-| indexing (scatter, scatter_axis, gather_axis, gather_front, masked_scatter) | ✓ | ✓ | ~ | `mlx/gather_axis.rs` + `mlx/scatter_axis.rs` → `mt_gather_axis` / `mt_scatter_axis`. Contiguous gather/scatter-along-axis. The general strided forms (scatter, gather_front, masked_scatter) need strided-indexing infra — follow-up. |
+| indexing (scatter, scatter_axis, gather_axis, gather_front, masked_scatter) | ✓ | ✓ | ✓ | `mlx/gather_axis.rs` + `mlx/scatter_axis.rs` → `mt_gather_axis` / `mt_scatter_axis` (contiguous along-axis); `mlx/indexing.rs` → `mt_gather_front` (first-axis row gather), `mt_scatter` (first-axis row scatter, no-reduce assignment form), `mt_masked_scatter` (per-element masked gather-scatter). All five are one-thread-per-output Grid3D with an `n_elems` bounds guard. Verified by `gather_axis_gpu_correctness` / `scatter_axis_gpu_correctness` / `indexing_gpu_correctness`. |
 | aura_encode (codebook quantize, fused) | ✗ | ✓ (`turbo_fused_encode` in `turbo_quant.metal`) | ✓ | `ffai/aura_encode.rs`. Bit-widths 2/3/4/8. Renamed turbo_*→aura_*. |
 | aura_dequant_rotated (bulk dequant to rotated codec space) | ✗ | ✓ (`turbo_dequant_rotated` in `turbo_quant.metal`) | ✓ | `ffai/aura_dequant_rotated.rs`. bits ∈ {2,3,4,8}. Renamed. |
 | aura_score (compressed-domain Q·K) | ✗ | ✓ (`turbo_score`) | ✓ | `ffai/aura_score.rs`. bits ∈ {2,3,4,8}. Renamed. |
