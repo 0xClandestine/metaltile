@@ -556,11 +556,6 @@ fn infer_block(
                     env.insert(out_vid, TypedValue { dtype: slot.dtype, shape: Shape::scalar() });
                 },
 
-            Op::Dequantize { .. } => {
-                // Dequantize produces a scalar f16 value (the dequantized weight element).
-                env.insert(vid, TypedValue { dtype: DType::F16, shape: Shape::scalar() });
-            },
-
             // SimdReduce/SimdShuffleXor/SimdBroadcast: same type as input,
             // with F32 fallback.  (Explicit rather than relying on the
             // result_same_type guard because of the fallback.)
@@ -571,13 +566,12 @@ fn infer_block(
                     env.insert(vid, TypedValue { dtype: DType::F32, shape: Shape::scalar() });
                 }
             },
-            Op::SimdBroadcast { value, .. } => {
+            Op::SimdBroadcast { value, .. } =>
                 if let Some(tv) = env.get(value).cloned() {
                     env.insert(vid, tv);
                 } else {
                     env.insert(vid, TypedValue { dtype: DType::F32, shape: Shape::scalar() });
-                }
-            },
+                },
             Op::Gather { src, indices, .. } => {
                 let dtype =
                     kernel.params.iter().find(|p| p.name == *src).map(|p| p.dtype).ok_or_else(
@@ -609,14 +603,9 @@ fn infer_block(
             },
             // No-result ops (derived from #[no_result] on Op variants via OpFlags).
             _ if op.is_no_result() => {},
-            // High-level ops that need lowering passes; not yet typable.
-            Op::FlashAttention { .. }
-            | Op::SlidingWindowAttention { .. }
-            | Op::RmsNorm { .. }
-            | Op::GatedMlp { .. }
             // Ops that produce a result but whose types are not yet
             // inferred by this pass (relies on Metal compiler inference).
-            | Op::VectorLoad { .. }
+            Op::VectorLoad { .. }
             | Op::VectorExtract { .. }
             | Op::Cat { .. }
             | Op::DeclareLocal { .. } => {},

@@ -136,6 +136,17 @@ impl MslGenerator {
                 for inner in ops {
                     self.analyze_op(inner, feat);
                 },
+            // CoopTile* ops use cooperative matmul — force the MPP framework header.
+            Op::CoopTileSetup { .. }
+            | Op::CoopTileZero { .. }
+            | Op::CoopTileLoadA { .. }
+            | Op::CoopTileLoadB { .. }
+            | Op::CoopTileRun { .. }
+            | Op::CoopTileStoreC { .. } => {
+                feat.needs_mpp = true;
+                feat.needs_simd_lane = true;
+                feat.needs_simd_group = true;
+            },
             // Detect MPP tensor-ops usage in raw inline MSL.
             Op::InlineMsl { source, .. } if source.contains("mpp::") => {
                 feat.needs_mpp = true;

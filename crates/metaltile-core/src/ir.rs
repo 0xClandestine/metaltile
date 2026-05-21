@@ -375,14 +375,6 @@ impl AtomicKind {
     }
 }
 
-/// Attention parameters.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AttnParams {
-    pub scale: Option<f32>,
-    pub is_causal: bool,
-    pub dropout_p: f32,
-}
-
 /// Index expression for loads/stores.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IndexExpr {
@@ -648,54 +640,6 @@ pub enum Op {
         outputs: Vec<TypedSlot>,
     },
 
-    // ---- High-level ML primitives (lowered in a pass) ----
-    /// Flash attention.
-    #[result_custom]
-    FlashAttention {
-        #[vid]
-        q: ValueId,
-        #[vid]
-        k: ValueId,
-        #[vid]
-        v: ValueId,
-        params: AttnParams,
-    },
-
-    /// Sliding window attention.
-    #[result_custom]
-    SlidingWindowAttention {
-        #[vid]
-        q: ValueId,
-        #[vid]
-        k: ValueId,
-        #[vid]
-        v: ValueId,
-        window: u32,
-    },
-
-    /// RMS normalization.
-    #[result_custom]
-    RmsNorm {
-        #[vid]
-        x: ValueId,
-        #[vid]
-        scale: ValueId,
-        eps: f32,
-    },
-
-    /// Gated MLP block.
-    #[result_custom]
-    GatedMlp {
-        #[vid]
-        x: ValueId,
-        #[vid]
-        gate_proj: ValueId,
-        #[vid]
-        up_proj: ValueId,
-        #[vid]
-        down_proj: ValueId,
-    },
-
     // ---- Scalar / element-wise math ----
     /// Unary math operation: exp, log, sqrt, rsqrt, abs, neg, ceil, floor, recip.
     #[elementwise]
@@ -907,26 +851,6 @@ pub enum Op {
         scalar: ValueId,
         /// Optional second operand: another device buffer (e.g., w[i] for weighted norm).
         aux_src: Option<String>,
-    },
-
-    /// Dequantize packed integer weights to floating-point tiles.
-    ///
-    /// Unpacks `bits`-bit integers from `weights`, scales by `scales`, and offsets
-    /// by `zeros`.  Used for quantized LLM weight loading (int4/int8 GEMM).
-    ///
-    /// Layout: `weights[N_out, N_in/2]` (2 int4 per byte), `scales/zeros[N_out, N_in/group_size]`.
-    #[result_f16_scalar]
-    Dequantize {
-        /// Packed int4/int8 weight buffer param name.
-        weights: String,
-        /// FP16 scales param name.
-        scales: String,
-        /// FP16 zeros/bias param name.
-        zeros: String,
-        /// Quantization group size (e.g. 64).
-        group_size: u32,
-        /// Bits per weight: 4 or 8.
-        bits: u8,
     },
 
     // ---- SIMD-group and threadgroup primitives ----
@@ -1193,6 +1117,154 @@ pub enum Op {
     /// matched to the callee's params; `dtype` is the generic type.
     #[result_custom]
     KernelCall { callee: String, args: Vec<KernelCallArg>, dtype: DType },
+
+    // ---- Cooperative register-tile matmul primitives ----
+    //
+    // These six ops model tile-level matrix multiply using a "cooperative
+    // register tile" — a matrix fragment distributed across all threads in a
+    // simdgroup / threadgroup.  Together they can express any tiled matmul
+    // kernel, including multi-K-block loops, quantized weights, and MoE
+    // expert routing.  Control flow (K-loops, barriers, dequant, gating)
+    // stays as ordinary DSL ops; only the tile-matmul operations themselves
+    // need these primitives.
+    //
+    // Codegen mapping:
+    //   Metal 4 (macOS 26+, gen ≥17): `mpp::tensor_ops::matmul2d` + `cooperative_tensor`
+    //   Metal 2/3 fallback:            zero-fill stub (metallib links but gives zeros)
+    //
+    // All six ops emit `#if __METAL_VERSION__ >= 400` guards so that
+    // metallibs still link on older toolchains.
+    /// Declare descriptor + A/B/C register tiles as kernel-local variables.
+    ///
+    /// `name` is a logical prefix: `{name}_op`, `{name}_ct_a`, `{name}_ct_b`, `{name}_ct_c`.
+    /// Must appear in the kernel body before any other `CoopTile*` op with the same name.
+    CoopTileSetup {
+        name: String,
+        m: u32,
+        n: u32,
+        k: u32,
+        /// Transpose A before multiplying.
+        ta: bool,
+        /// Transpose B before multiplying.
+        tb: bool,
+        /// Transpose C on store.
+        tc: bool,
+        /// Whether C accumulates across calls or is overwritten on each run.
+        acc_mode: CoopTileAccMode,
+        /// How many threads cooperate per tile operation.
+        exec_scope: CoopTileScope,
+        /// Element type for A and B tiles.
+        act_dtype: DType,
+        /// Accumulator element type for C (typically F32).
+        acc_dtype: DType,
+        /// When `true`, A and B are passed as direct `metal::tensor` views instead of
+        /// cooperative tensors (required when M ∉ {16, 32}, e.g. M=8).
+        /// The setup emits `using {name}_tA_t` / `{name}_tB_t` type aliases and only
+        /// `{name}_ct_c` (no ct_a/ct_b).
+        direct_inputs: bool,
+        /// Address space for the A type alias when `direct_inputs = true`.
+        a_is_tg: bool,
+        /// Inner extent for the A type alias (`metal::extents<int, A_EI, A_EO>`).
+        a_ei: u32,
+        /// Outer extent for the A type alias.
+        a_eo: u32,
+        /// Address space for the B type alias when `direct_inputs = true`.
+        b_is_tg: bool,
+        /// Inner extent for the B type alias.
+        b_ei: u32,
+        /// Outer extent for the B type alias.
+        b_eo: u32,
+    },
+
+    /// Zero every element of the C accumulator tile.
+    /// Call once before the K-loop when `acc_mode = Accumulate`.
+    CoopTileZero { name: String },
+
+    /// Load the A register tile from a `tensor_inline` view over `ptr_name[+ptr_offset]`.
+    ///
+    /// `dtype` is the element type of the A/B buffers (must match `act_dtype` in the setup).
+    /// `ei` / `eo` are the inner and outer extents for `metal::extents<int, EI, EO>`.
+    ///
+    /// When `direct = true` (direct-input mode), emits only the `{name}_tA_t {name}_tA(...)`
+    /// tensor-view declaration without calling `{name}_ct_a.load()`.
+    CoopTileLoadA {
+        name: String,
+        ptr_name: String,
+        #[vid_opt]
+        ptr_offset: Option<ValueId>,
+        is_tg: bool,
+        dtype: DType,
+        ei: u32,
+        eo: u32,
+        /// See `CoopTileSetup::direct_inputs`.
+        direct: bool,
+    },
+
+    /// Load the B register tile from a `tensor_inline` view.
+    ///
+    /// When `direct = true`, emits only `{name}_tB_t {name}_tB(...)` without `.load()`.
+    CoopTileLoadB {
+        name: String,
+        ptr_name: String,
+        #[vid_opt]
+        ptr_offset: Option<ValueId>,
+        is_tg: bool,
+        dtype: DType,
+        ei: u32,
+        eo: u32,
+        /// See `CoopTileSetup::direct_inputs`.
+        direct: bool,
+    },
+
+    /// Execute A·B → C (accumulates if `acc_mode = Accumulate`).
+    ///
+    /// When `direct = true`, calls `{name}_op.run({name}_tA, {name}_tB, {name}_ct_c)`
+    /// (direct tensor views) instead of the cooperative-tensor overload.
+    CoopTileRun {
+        name: String,
+        /// See `CoopTileSetup::direct_inputs`.
+        direct: bool,
+    },
+
+    /// Store the C register tile through a `tensor_inline` view into `ptr_name[+ptr_offset]`.
+    ///
+    /// `dtype` is the accumulator element type (must match `acc_dtype` in the setup).
+    CoopTileStoreC {
+        name: String,
+        ptr_name: String,
+        #[vid_opt]
+        ptr_offset: Option<ValueId>,
+        is_tg: bool,
+        dtype: DType,
+        ei: u32,
+        eo: u32,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// CoopTile enums
+// ---------------------------------------------------------------------------
+
+/// Execution scope for cooperative tile operations.
+///
+/// Maps to `metal::execution_simdgroup` / `metal::execution_threadgroup` in
+/// Metal 4 but is named hardware-agnostically so the same IR works with other
+/// backends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoopTileScope {
+    /// One simdgroup (32 lanes) cooperates per tile.
+    SimdGroup,
+    /// The whole threadgroup cooperates per tile.
+    Threadgroup,
+}
+
+/// Accumulation mode for a cooperative tile matmul.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoopTileAccMode {
+    /// C tile is overwritten with A·B (no prior accumulation).
+    Overwrite,
+    /// C tile accumulates: `C += A·B` across K-block iterations.
+    MultiplyAccumulate,
 }
 
 // ---------------------------------------------------------------------------
@@ -1657,38 +1729,36 @@ impl Op {
                     outputs.len()
                 )
             },
-            Op::FlashAttention { q, k, v: v_val, params } => {
+            Op::CoopTileSetup {
+                name,
+                m,
+                n,
+                k,
+                ta,
+                tb,
+                tc,
+                acc_mode,
+                exec_scope,
+                act_dtype,
+                acc_dtype,
+                direct_inputs,
+                ..
+            } => {
                 write!(
                     f,
-                    "FlashAttention(q=v{}, k=v{}, v=v{}, scale={:?}, causal={})",
-                    q.as_u32(),
-                    k.as_u32(),
-                    v_val.as_u32(),
-                    params.scale,
-                    params.is_causal
+                    "CoopTileSetup({name}, {m}×{n}×{k}, ta={ta} tb={tb} tc={tc}, acc={acc_mode:?}, scope={exec_scope:?}, T={act_dtype:?}, acc={acc_dtype:?}, direct={direct_inputs})"
                 )
             },
-            Op::SlidingWindowAttention { q, k, v: v_val, window } => {
-                write!(
-                    f,
-                    "SlidingWindowAttention(q=v{}, k=v{}, v=v{}, window={window})",
-                    q.as_u32(),
-                    k.as_u32(),
-                    v_val.as_u32()
-                )
+            Op::CoopTileZero { name } => write!(f, "CoopTileZero({name})"),
+            Op::CoopTileLoadA { name, ptr_name, ei, eo, direct, .. } => {
+                write!(f, "CoopTileLoadA({name}, {ptr_name}, extents<{ei},{eo}>, direct={direct})")
             },
-            Op::RmsNorm { x, scale, eps } => {
-                write!(f, "RmsNorm(x=v{}, scale=v{}, eps={eps})", x.as_u32(), scale.as_u32())
+            Op::CoopTileLoadB { name, ptr_name, ei, eo, direct, .. } => {
+                write!(f, "CoopTileLoadB({name}, {ptr_name}, extents<{ei},{eo}>, direct={direct})")
             },
-            Op::GatedMlp { x, gate_proj, up_proj, down_proj } => {
-                write!(
-                    f,
-                    "GatedMlp(x=v{}, gate=v{}, up=v{}, down=v{})",
-                    x.as_u32(),
-                    gate_proj.as_u32(),
-                    up_proj.as_u32(),
-                    down_proj.as_u32()
-                )
+            Op::CoopTileRun { name, direct } => write!(f, "CoopTileRun({name}, direct={direct})"),
+            Op::CoopTileStoreC { name, ptr_name, ei, eo, .. } => {
+                write!(f, "CoopTileStoreC({name}, {ptr_name}, extents<{ei},{eo}>)")
             },
             Op::UnaryOp { op, value } => write!(f, "UnaryOp({op:?}, v{})", value.as_u32()),
             Op::Activation { kind, value } =>
@@ -1794,9 +1864,6 @@ impl Op {
                     write!(f, ", aux_src={aux}")?;
                 }
                 write!(f, ")")
-            },
-            Op::Dequantize { weights, scales: _, zeros: _, group_size, bits } => {
-                write!(f, "Dequantize({weights}, gs={group_size}, bits={bits})")
             },
             Op::SimdReduce { value, op } => write!(f, "SimdReduce(v{}, {op:?})", value.as_u32()),
             Op::SimdShuffleXor { value, mask } => {
