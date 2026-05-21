@@ -128,7 +128,7 @@ impl Autotuner {
     pub fn set_enabled(&mut self, enabled: bool) { self.enabled = enabled; }
 
     /// Get the best known config, or trigger tuning.
-    #[tracing::instrument(skip(self, constexprs), fields(key = ?_kernel_name))]
+    #[tracing::instrument(skip(self, constexprs), fields(key = %_kernel_name))]
     pub fn get_or_tune(
         &mut self,
         _kernel_name: &str,
