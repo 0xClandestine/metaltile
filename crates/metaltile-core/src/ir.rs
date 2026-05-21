@@ -21,6 +21,7 @@
 use std::{collections::BTreeMap, fmt};
 
 use crate::{constexpr::ConstExpr, dtype::DType, shape::Shape};
+use metaltile_macros::{OpFlags, ValueRefs};
 
 // ---------------------------------------------------------------------------
 // ID types
@@ -391,51 +392,69 @@ pub enum IndexExpr {
     Range(ValueId, i64),
 }
 
+impl IndexExpr {
+    /// The `ValueId` embedded in this index expression, if any.
+    /// Both `Value` and `Range` carry a `ValueId`; `Const` does not.
+    pub fn value_id(&self) -> Option<&ValueId> {
+        match self {
+            IndexExpr::Value(v) | IndexExpr::Range(v, _) => Some(v),
+            IndexExpr::Const(_) => None,
+        }
+    }
+
+    pub fn value_id_mut(&mut self) -> Option<&mut ValueId> {
+        match self {
+            IndexExpr::Value(v) | IndexExpr::Range(v, _) => Some(v),
+            IndexExpr::Const(_) => None,
+        }
+    }
+}
+
 /// A single operation in the IR.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, ValueRefs, OpFlags)]
 pub enum Op {
     /// `program_id(axis)` — which block this threadgroup handles along an axis.
-    ProgramId { axis: u32 },
+    #[cheap_alu] ProgramId { axis: u32 },
 
     /// A constant integer value (from a literal in the DSL).
-    Const { value: i64 },
+    #[cheap_alu] Const { value: i64 },
 
     /// `arange(start, step, len)` — creates a 1D range [start, start+step, ...].
     /// `start` and `step` default to 0.0 and 1.0 respectively.
     Arange { start: Option<f64>, step: Option<f64>, len: ConstExpr },
 
     /// Load a tile from a tensor at given indices.
-    Load {
+    #[op_load] Load {
         /// The parameter to load from.
         src: String,
         /// Per-dimension index expressions.
-        indices: Vec<IndexExpr>,
+        #[vid_exprs] indices: Vec<IndexExpr>,
         /// Optional mask: load only where mask is true (false → fill with `other`).
-        mask: Option<ValueId>,
+        #[vid_opt] mask: Option<ValueId>,
         /// Fill value when mask is false (default 0.0).
         other: Option<f64>,
     },
 
     /// Store a tile to a tensor at given indices.
-    Store {
+    #[side_effect] Store {
         /// The parameter to store to.
         dst: String,
         /// Per-dimension index expressions.
-        indices: Vec<IndexExpr>,
+        #[vid_exprs] indices: Vec<IndexExpr>,
         /// The value to store.
-        value: ValueId,
+        #[vid] value: ValueId,
         /// Optional mask: store only where mask is true.
-        mask: Option<ValueId>,
+        #[vid_opt] mask: Option<ValueId>,
     },
 
     /// Elementwise binary operation.
-    BinOp { op: BinOpKind, lhs: ValueId, rhs: ValueId },
+    #[elementwise] #[cheap_alu] BinOp { op: BinOpKind, #[vid] lhs: ValueId, #[vid] rhs: ValueId },
 
     /// Tile matrix multiply: `dot(a, b)`.
-    Dot { a: ValueId, b: ValueId },
+    Dot { #[vid] a: ValueId, #[vid] b: ValueId },
 
     /// Reduction along an axis.
-    Reduce { value: ValueId, axis: u32, op: ReduceKind },
+    Reduce { #[vid] value: ValueId, axis: u32, op: ReduceKind },
 
     /// Per-thread strided reduction over a device buffer.
     /// Reduces `src[offset]`, `src[offset+stride]`, `src[offset+2*stride]`, ... while index < `end`.
@@ -443,11 +462,11 @@ pub enum Op {
     StrideReduce {
         src: String,
         /// First index to load (= tid for intra-row; = row*N + tid for full buffer).
-        offset: ValueId,
+        #[vid] offset: ValueId,
         /// Step between successive loads (= lsize).
-        stride: ValueId,
+        #[vid] stride: ValueId,
         /// Exclusive upper bound (= N for intra-row; = row*N + N for full buffer).
-        end: ValueId,
+        #[vid] end: ValueId,
         op: ReduceKind,
         dtype: DType,
         /// Optional per-element transform chain applied to the loaded value before accumulation.
@@ -456,76 +475,76 @@ pub enum Op {
         /// For dot-product reductions (GEMV): multiply each `src[_i]` by `secondary_src[_i - secondary_base]`.
         secondary_src: Option<String>,
         /// Base offset subtracted from the loop index when accessing secondary_src.
-        secondary_base: Option<ValueId>,
+        #[vid_opt] secondary_base: Option<ValueId>,
     },
 
     /// Type cast.
-    Cast { value: ValueId, dtype: DType },
+    #[elementwise] #[cheap_alu] Cast { #[vid] value: ValueId, dtype: DType },
 
     /// Loop: iterate a variable from start to end with step.
-    Loop { var: VarId, start: ValueId, end: ValueId, step: ValueId, body: BlockId },
+    #[unpredictable] Loop { var: VarId, #[vid] start: ValueId, #[vid] end: ValueId, #[vid] step: ValueId, body: BlockId },
 
     /// Conditional branch: if `cond` is true, execute `then_block`, else `else_block`.
-    If { cond: ValueId, then_block: BlockId, else_block: Option<BlockId> },
+    #[unpredictable] If { #[vid] cond: ValueId, then_block: BlockId, else_block: Option<BlockId> },
 
     /// Create a zero-filled tile.
-    Zeros {
+    #[elementwise] Zeros {
         dtype: DType,
         /// Shape of the tile (usually a 2D tile).
         shape: Shape,
     },
 
     /// Transpose a 2D tile.
-    Transpose { value: ValueId },
+    Transpose { #[vid] value: ValueId },
 
     /// Insert a size-1 dimension at `axis`. Zero-cost reshape.
-    ExpandDims { value: ValueId, axis: u32 },
+    ExpandDims { #[vid] value: ValueId, axis: u32 },
 
     /// Reshape a tile to a new shape (same element count). Zero-cost if contiguous.
-    Reshape { value: ValueId, shape: Shape },
+    Reshape { #[vid] value: ValueId, shape: Shape },
 
     /// Concatenate tiles along `axis`.
-    Cat { values: Vec<ValueId>, axis: u32 },
+    Cat { #[vid_vec] values: Vec<ValueId>, axis: u32 },
 
     /// Extract a slice of a tile.
     Slice {
-        value: ValueId,
+        #[vid] value: ValueId,
         /// Which dimensions to slice; (axis, start_offset, length).
         ranges: Vec<(u32, i64, i64)>,
     },
 
     /// Inline raw MSL code. Escape hatch.
-    InlineMsl { source: String, inputs: Vec<ValueId>, outputs: Vec<TypedSlot> },
+    InlineMsl { source: String, #[vid_vec] inputs: Vec<ValueId>, outputs: Vec<TypedSlot> },
 
     // ---- High-level ML primitives (lowered in a pass) ----
     /// Flash attention.
-    FlashAttention { q: ValueId, k: ValueId, v: ValueId, params: AttnParams },
+    FlashAttention { #[vid] q: ValueId, #[vid] k: ValueId, #[vid] v: ValueId, params: AttnParams },
 
     /// Sliding window attention.
-    SlidingWindowAttention { q: ValueId, k: ValueId, v: ValueId, window: u32 },
+    SlidingWindowAttention { #[vid] q: ValueId, #[vid] k: ValueId, #[vid] v: ValueId, window: u32 },
 
     /// RMS normalization.
-    RmsNorm { x: ValueId, scale: ValueId, eps: f32 },
+    RmsNorm { #[vid] x: ValueId, #[vid] scale: ValueId, eps: f32 },
 
     /// Gated MLP block.
-    GatedMlp { x: ValueId, gate_proj: ValueId, up_proj: ValueId, down_proj: ValueId },
+    GatedMlp { #[vid] x: ValueId, #[vid] gate_proj: ValueId, #[vid] up_proj: ValueId, #[vid] down_proj: ValueId },
 
     // ---- Scalar / element-wise math ----
     /// Unary math operation: exp, log, sqrt, rsqrt, abs, neg, ceil, floor, recip.
-    UnaryOp { op: UnaryOpKind, value: ValueId },
+    #[elementwise] #[cheap_alu] UnaryOp { op: UnaryOpKind, #[vid] value: ValueId },
 
     /// Neural activation function: silu, gelu, relu, tanh, sigmoid.
-    Activation { kind: ActKind, value: ValueId },
+    #[elementwise] Activation { kind: ActKind, #[vid] value: ValueId },
 
     /// Conditional select: `cond ? on_true : on_false`.
     /// Maps to MSL `select(on_false, on_true, bool(cond))`.
-    Select { cond: ValueId, on_true: ValueId, on_false: ValueId },
+    #[elementwise] #[cheap_alu] Select { #[vid] cond: ValueId, #[vid] on_true: ValueId, #[vid] on_false: ValueId },
 
     /// Broadcast a scalar value to fill a tile shape (replication, no copy to device memory).
-    Broadcast { value: ValueId, shape: Shape },
+    #[elementwise] Broadcast { #[vid] value: ValueId, shape: Shape },
 
     /// Create a tile filled with a constant floating-point value (generalization of Zeros).
-    Splat { value: f64, dtype: DType, shape: Shape },
+    #[elementwise] Splat { value: f64, dtype: DType, shape: Shape },
 
     /// Fused chain of elementwise operations.
     /// Created by the FusionPass to merge adjacent ops like
@@ -534,68 +553,68 @@ pub enum Op {
         /// The elementwise ops in execution order (producer first).
         /// Each op's inputs reference either external ValueIds or
         /// the output of a preceding op in this chain (index 0..n-1).
-        ops: Vec<Op>,
+        #[vid_recursive] ops: Vec<Op>,
     },
 
     /// Vectorized load: loads `len` consecutive elements as a vector.
     /// `len` is 2, 4, or 8. Created by the VectorizePass from consecutive scalar Loads.
-    VectorLoad {
+    #[op_load] VectorLoad {
         /// The parameter to load from.
         src: String,
         /// Flat byte offset into the buffer (already aligned).
-        byte_offset: ValueId,
+        #[vid] byte_offset: ValueId,
         /// Number of elements: 2, 4, or 8.
         len: u32,
     },
 
     /// Vectorized store: stores `len` consecutive elements as a vector.
-    VectorStore {
+    #[side_effect] VectorStore {
         /// The parameter to store to.
         dst: String,
         /// Flat byte offset into the buffer (already aligned).
-        byte_offset: ValueId,
+        #[vid] byte_offset: ValueId,
         /// Number of elements: 2, 4, or 8.
         len: u32,
         /// The value to store (scalar or vector ValueId).
-        value: ValueId,
+        #[vid] value: ValueId,
     },
 
     /// Project one scalar lane (0..len) out of a VectorLoad result.
     /// Emitted by VectorizePass to feed each original scalar consumer.
-    VectorExtract { vec: ValueId, lane: u32 },
+    VectorExtract { #[vid] vec: ValueId, lane: u32 },
 
     /// Gather: indexed load from a buffer. `out[i] = src[indices[i]]`.
-    Gather { src: String, indices: ValueId, axis: u32 },
+    Gather { src: String, #[vid] indices: ValueId, axis: u32 },
 
     /// Scatter: indexed store to a buffer. `dst[indices[i]] = value[i]`.
-    Scatter { dst: String, indices: ValueId, value: ValueId, axis: u32 },
+    #[side_effect] Scatter { dst: String, #[vid] indices: ValueId, #[vid] value: ValueId, axis: u32 },
 
     /// Atomic operation on device memory.
-    Atomic { op: AtomicKind, scope: AtomicScope, dst: String, index: ValueId, value: ValueId },
+    #[side_effect] Atomic { op: AtomicKind, scope: AtomicScope, dst: String, #[vid] index: ValueId, #[vid] value: ValueId },
 
     /// Prefix scan along an axis (inclusive or exclusive).
-    Scan { value: ValueId, axis: u32, op: ReduceKind, exclusive: bool },
+    Scan { #[vid] value: ValueId, axis: u32, op: ReduceKind, exclusive: bool },
 
     /// Serial inclusive prefix scan over a contiguous slice of a device buffer.
     /// Writes `dst[i] = src[offset] + src[offset+1] + ... + src[i]` for i in [offset, end).
     /// Single-threaded: dispatch with [B, 1, 1] × [1, 1, 1] (one thread per row).
-    StrideScan { src: String, dst: String, offset: ValueId, end: ValueId, op: ReduceKind },
+    #[unpredictable] StrideScan { src: String, dst: String, #[vid] offset: ValueId, #[vid] end: ValueId, op: ReduceKind },
 
     /// Serial argmax/argmin over a contiguous slice of a device buffer.
     /// Returns the flat index of the extreme element in [offset, end).
     /// Single-threaded: dispatch with [1, 1, 1] × [1, 1, 1] for a single row.
-    StrideArgReduce { src: String, offset: ValueId, end: ValueId, op: ReduceKind },
+    #[unpredictable] StrideArgReduce { src: String, #[vid] offset: ValueId, #[vid] end: ValueId, op: ReduceKind },
 
     /// Strided per-element compute + store: for each element in the stride pattern,
     /// load from src, apply optional transform with a scalar operand, and store to dst.
     /// Used for write-back in reduction kernels (e.g., rout[i] = rx[i] * rms * w[i]).
-    StrideStore {
+    #[side_effect] StrideStore {
         src: String,
         dst: String,
-        offset: ValueId,
-        end: ValueId,
+        #[vid] offset: ValueId,
+        #[vid] end: ValueId,
         /// First operand: the scalar from the reduction step (e.g., rms, mean, 1/std).
-        scalar: ValueId,
+        #[vid] scalar: ValueId,
         /// Optional second operand: another device buffer (e.g., w[i] for weighted norm).
         aux_src: Option<String>,
     },
@@ -622,12 +641,12 @@ pub enum Op {
     // ---- SIMD-group and threadgroup primitives ----
     /// SIMD-group reduction: reduce all lanes within the SIMD group.
     /// Maps to `simd_sum(v)`, `simd_max(v)`, `simd_min(v)` (Metal 2.1+).
-    SimdReduce { value: ValueId, op: ReduceKind },
+    SimdReduce { #[vid] value: ValueId, op: ReduceKind },
 
     /// SIMD-group butterfly shuffle: `simd_shuffle_xor(value, mask)`.
     /// Used by Steel attention row reductions, where lanes sharing the same
     /// MMA row exchange values through fixed xor masks (for example 1 and 8).
-    SimdShuffleXor { value: ValueId, mask: u32 },
+    SimdShuffleXor { #[vid] value: ValueId, mask: u32 },
 
     /// Allocate a simdgroup matrix of shape M×N with given element type.
     /// Emits `simdgroup_matrix<T, M, N> name;` in MSL.
@@ -635,11 +654,11 @@ pub enum Op {
 
     /// Load one element from a simdgroup matrix: `result = name.thread_elements()[index]`.
     /// Produces a scalar value.
-    SimdgroupElemLoad { value: ValueId, index: u32 },
+    SimdgroupElemLoad { #[vid] value: ValueId, index: u32 },
 
     /// Store one element into a simdgroup matrix: `name.thread_elements()[index] = data`.
     /// No result (side-effecting).
-    SimdgroupElemStore { value: ValueId, index: u32, data: ValueId },
+    SimdgroupElemStore { #[vid] value: ValueId, index: u32, #[vid] data: ValueId },
 
     /// Hardware-fused simdgroup load: fill all 64 elements of an 8×8
     /// `simdgroup_matrix<T,M,N>` from a contiguous threadgroup-memory tile
@@ -654,11 +673,11 @@ pub enum Op {
     /// and column dimensions of the loaded fragment — used to load a B
     /// operand stored row-major `[N, K]` as if it were `[K, N]` for the
     /// standard `C = A * B` MMA layout (MLX `qmm_t` pattern).
-    SimdgroupLoad { dest: ValueId, tg: String, offset: ValueId, stride: u32, transpose: bool },
+    SimdgroupLoad { #[vid] dest: ValueId, tg: String, #[vid] offset: ValueId, stride: u32, transpose: bool },
 
     /// simdgroup multiply-accumulate: `C = A * B + C`.
     /// All three operands must be simdgroup matrices of compatible shapes.
-    SimdgroupMatMul { a: ValueId, b: ValueId, c: ValueId },
+    SimdgroupMatMul { #[vid] a: ValueId, #[vid] b: ValueId, #[vid] c: ValueId },
 
     /// Built-in: returns the SIMD lane index (thread_index_in_simdgroup).
     SimdLaneId,
@@ -668,18 +687,18 @@ pub enum Op {
 
     /// SIMD-group inclusive prefix scan.
     /// Maps to `simd_scan_inclusive_<op>(v)` (Metal 3.0+).
-    SimdScan { value: ValueId, op: ReduceKind, exclusive: bool },
+    SimdScan { #[vid] value: ValueId, op: ReduceKind, exclusive: bool },
 
     /// SIMD-group broadcast: every lane receives the value held by the
     /// specified `lane` (a u32 index 0..simd_size). Maps to
     /// `simd_broadcast(v, lane)` (Metal 2.1+). Cooperative codebook hoist
     /// in AURA score/value kernels uses this to share one lane's loaded
     /// codebook word across the group.
-    SimdBroadcast { value: ValueId, lane: ValueId },
+    SimdBroadcast { #[vid] value: ValueId, #[vid] lane: ValueId },
 
     /// Allocate a named threadgroup (shared) memory array.
     /// Emits `threadgroup T name[size]` in the kernel body.
-    ThreadgroupAlloc {
+    #[side_effect] #[unpredictable] ThreadgroupAlloc {
         dtype: DType,
         /// Number of elements in the array.
         size: u32,
@@ -688,10 +707,10 @@ pub enum Op {
     },
 
     /// Load one element from a named threadgroup array: `val = name[index]`.
-    ThreadgroupLoad { name: String, index: ValueId },
+    #[op_load] ThreadgroupLoad { name: String, #[vid] index: ValueId },
 
     /// Store one element to a named threadgroup array: `name[index] = value`.
-    ThreadgroupStore { name: String, index: ValueId, value: ValueId },
+    #[side_effect] ThreadgroupStore { name: String, #[vid] index: ValueId, #[vid] value: ValueId },
 
     /// Allocate a per-thread stack-resident array.  Emits `T name[size];`
     /// inside the kernel body (no `threadgroup` qualifier — each thread
@@ -699,20 +718,20 @@ pub enum Op {
     /// registers; AURA flash kernels need this for `q_vals[DIMS_PER_LANE]`,
     /// `o[DIMS_PER_LANE]`, and the per-thread codebook cache that
     /// amortises lookup across the dim-strided inner loop.
-    StackAlloc { dtype: DType, size: u32, name: String },
+    #[side_effect] #[unpredictable] StackAlloc { dtype: DType, size: u32, name: String },
 
     /// Load one element from a per-thread stack array: `val = name[index]`.
     /// Identical emission to `ThreadgroupLoad`; kept distinct in the IR so
     /// liveness / scoping passes know the buffer is thread-private.
-    StackLoad { name: String, index: ValueId },
+    #[op_load] StackLoad { name: String, #[vid] index: ValueId },
 
     /// Store one element to a per-thread stack array: `name[index] = value`.
-    StackStore { name: String, index: ValueId, value: ValueId },
+    #[side_effect] StackStore { name: String, #[vid] index: ValueId, #[vid] value: ValueId },
 
     /// Threadgroup barrier: `threadgroup_barrier(mem_flags::mem_threadgroup)`.
     /// Ensures all prior threadgroup stores are visible to all threads before
     /// any subsequent threadgroup loads.
-    Barrier,
+    #[side_effect] #[unpredictable] Barrier,
 
     /// Compiler-only simdgroup barrier: `simdgroup_barrier(mem_flags::mem_none)`.
     /// Zero-cost at runtime — pins instruction ordering across the simdgroup
@@ -720,19 +739,19 @@ pub enum Op {
     /// Apple MLX uses these around V-tile loads when BD≥128
     /// (`steel_attention.h:431-443`) to keep `simdgroup_load → simdgroup_mma`
     /// ordering stable through aggressive scheduling.
-    SimdgroupBarrier,
+    #[side_effect] #[unpredictable] SimdgroupBarrier,
 
     /// Declare a mutable register-local scalar variable.
     /// Emits: `auto __ml_{name} = {init_value};`
     /// Used for loop-carried state (running prefix, best_val/best_idx, etc.).
-    DeclareLocal { name: String, value: ValueId },
+    #[unpredictable] DeclareLocal { name: String, #[vid] value: ValueId },
 
     /// Assign to a mutable register-local scalar variable.
     /// Emits: `__ml_{name} = {value};`
-    SetLocal { name: String, value: ValueId },
+    #[side_effect] #[unpredictable] SetLocal { name: String, #[vid] value: ValueId },
 
     /// Return the index of the min/max element along an axis.
-    ArgReduce { value: ValueId, axis: u32, op: ReduceKind },
+    ArgReduce { #[vid] value: ValueId, axis: u32, op: ReduceKind },
 }
 
 // ---------------------------------------------------------------------------

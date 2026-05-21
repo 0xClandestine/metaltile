@@ -247,66 +247,15 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) -> Result<()> {
         }
     }
 
-    fn remap_op(
-        op: &mut Op,
-        chain_map: &FxHashMap<usize, ValueId>,
-        old_results: &[Option<ValueId>],
-    ) {
-        match op {
-            Op::BinOp { lhs, rhs, .. } => {
-                remap_value(lhs, chain_map, old_results);
-                remap_value(rhs, chain_map, old_results);
-            },
-            Op::UnaryOp { value, .. }
-            | Op::Activation { value, .. }
-            | Op::Cast { value, .. }
-            | Op::Reduce { value, .. }
-            | Op::Transpose { value }
-            | Op::Slice { value, .. }
-            | Op::Broadcast { value, .. } => {
-                remap_value(value, chain_map, old_results);
-            },
-            Op::Select { cond, on_true, on_false } => {
-                remap_value(cond, chain_map, old_results);
-                remap_value(on_true, chain_map, old_results);
-                remap_value(on_false, chain_map, old_results);
-            },
-            Op::Dot { a, b } => {
-                remap_value(a, chain_map, old_results);
-                remap_value(b, chain_map, old_results);
-            },
-            Op::Store { value, .. } => {
-                remap_value(value, chain_map, old_results);
-            },
-            Op::Loop { start, end, step, .. } => {
-                remap_value(start, chain_map, old_results);
-                remap_value(end, chain_map, old_results);
-                remap_value(step, chain_map, old_results);
-            },
-            Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => {
-                remap_value(value, chain_map, old_results);
-            },
-            Op::ThreadgroupStore { index, value, .. } => {
-                remap_value(index, chain_map, old_results);
-                remap_value(value, chain_map, old_results);
-            },
-            Op::SimdReduce { value, .. }
-            | Op::SimdShuffleXor { value, .. }
-            | Op::ArgReduce { value, .. } => {
-                remap_value(value, chain_map, old_results);
-            },
-            _ => {},
-        }
-    }
-
     let old_ops_snapshot = old_ops.clone();
     for (i, mut op) in old_ops.into_iter().enumerate() {
         if skip_indices.contains(&i) {
             continue; // op is fused into a chain — skip it.
         }
 
-        // Remap value references.
-        remap_op(&mut op, &chain_result_map, &old_results);
+        // Remap value references: replace any ValueId produced by a fused
+        // chain member with the chain's output ValueId.
+        op.for_each_value_id_mut(&mut |v| remap_value(v, &chain_result_map, &old_results));
 
         // If this op is the last in a fused chain, emit the FusedElementwise instead.
         if let Some(chain) = chains.iter().find(|c| c[c.len() - 1] == i) {
@@ -333,17 +282,7 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) -> Result<()> {
 
 /// Returns true if the op is an elementwise op that can participate in fusion.
 fn is_fusible(op: &Op) -> bool {
-    matches!(
-        op,
-        Op::BinOp { .. }
-            | Op::UnaryOp { .. }
-            | Op::Activation { .. }
-            | Op::Cast { .. }
-            | Op::Select { .. }
-            | Op::Zeros { .. }
-            | Op::Splat { .. }
-            | Op::Broadcast { .. }
-    )
+    op.is_elementwise()
 }
 
 /// Return the first ValueId input of an op (used to trace the chain backward).
