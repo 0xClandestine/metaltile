@@ -26,9 +26,11 @@ use metaltile_core::{
     ir::{Kernel, KernelMode, Param, ParamKind},
 };
 // Bring high-perf kernels from metaltile-std into the emit registry.
+use metaltile_std::ffai::gated_delta_prep::mt_gated_delta_prep_step;
 use metaltile_std::ffai::moe::mt_moe_gather_qmm_mma_int4_bm16;
 use metaltile_std::ffai::moe_mpp;
 use metaltile_std::ffai::moe_mpp_bm64;
+use metaltile_std::ffai::moe_mpp_bm8;
 use metaltile_std::mlx::quantized::mt_qmm_mma;
 use metaltile_std::mlx::quantized_mpp;
 use metaltile_std::probe::mpp_matmul_smoke;
@@ -1892,6 +1894,34 @@ fn register_kernels() -> Vec<Kernel> {
     for &dt in &[DType::F32, DType::F16, DType::BF16] {
         let mut k = moe_mpp_bm64::kernel_ir_for(dt);
         k.name = format!("mt_moe_gather_qmm_mma_int4_bm64_mpp_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Reduction;
+        kernels.push(k);
+    }
+
+    // ─── mt_moe_gather_qmm_mma_int4_bm8_mpp (Reduction) — BM=8 MPP MoE ───────
+    // Half-height MoE BGEMM for topK=8 decode (`m_total = 8`). BM=16 wasted
+    // 50% of the tile rows; BM=8 fills exactly. Uses the destination-only-
+    // cooperative MPP path so the descriptor `(M=8, N=32, K=16)` clears the
+    // simdgroup-scope `M%8 / N%16 / one-of-M,N ≡ 16` constraint that the
+    // all-cooperative `matmul2d` would reject. See
+    // `crates/metaltile-std/src/ffai/moe_mpp_bm8.rs` + the Constraints note
+    // on PR #137 for the cooperative-tensor descriptor refinement.
+    for &dt in &[DType::F32, DType::F16, DType::BF16] {
+        let mut k = moe_mpp_bm8::kernel_ir_for(dt);
+        k.name = format!("mt_moe_gather_qmm_mma_int4_bm8_mpp_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Reduction;
+        kernels.push(k);
+    }
+
+    // ─── mt_gated_delta_prep_step (Reduction) — fused GDN prep + recurrence ──
+    // One dispatch absorbs conv-split + per-head q/k RMSNorm + g + beta +
+    // the existing GDN recurrence step, collapsing 3 host commit+wait pairs
+    // per layer down to 1 in Qwen35GDNMixer.forward. Same dispatch geometry
+    // as `mt_gated_delta_step` (`[Dv, B·Hv, 1]` × `[32, 1, 1]`). See
+    // `crates/metaltile-std/src/ffai/gated_delta_prep.rs`.
+    for &dt in &[DType::F32, DType::F16, DType::BF16] {
+        let mut k = mt_gated_delta_prep_step::kernel_ir_for(dt);
+        k.name = format!("mt_gated_delta_prep_step_{}", dtype_suffix(dt));
         k.mode = KernelMode::Reduction;
         kernels.push(k);
     }
