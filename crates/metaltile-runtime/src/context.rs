@@ -1592,7 +1592,9 @@ mod tests {
         };
         assert!(matches!(
             io_err.kind(),
-            io::ErrorKind::AlreadyExists | io::ErrorKind::NotADirectory | io::ErrorKind::Other
+            std::io::ErrorKind::AlreadyExists
+                | std::io::ErrorKind::NotADirectory
+                | std::io::ErrorKind::Other
         ));
 
         let ok_cache_root = unique_path("flush-ok");
