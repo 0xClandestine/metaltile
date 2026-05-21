@@ -113,7 +113,10 @@ impl PassRegistry {
     ///
     /// TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM
     ///   → IfConversion → ValueSink → TileLowering → Fusion → Unroll
-    ///   → Schedule → Vectorize → DeadStoreElim
+    ///   → Schedule → Vectorize → CSE_2 → ConstFold_2 → DeadStoreElim
+    ///
+    /// CSE_2 + ConstFold_2 clean up duplicate ops (e.g. repeated scalar
+    /// Cast ops on the same vector) created by the vectorize pass.
     pub fn order() -> &'static [&'static str] {
         &[
             "type_check",
@@ -129,6 +132,8 @@ impl PassRegistry {
             "unroll",
             "schedule",
             "vectorize",
+            "cse_2",
+            "const_fold_2",
             "dead_store_elim",
         ]
     }
@@ -149,6 +154,8 @@ impl PassRegistry {
             "unroll" => Some(Box::new(unroll::UnrollPass::default())),
             "schedule" => Some(Box::new(schedule::SchedulePass::default())),
             "vectorize" => Some(Box::new(vectorize::VectorizePass)),
+            "cse_2" => Some(Box::new(cse::CsePass)),
+            "const_fold_2" => Some(Box::new(const_fold::ConstFoldPass::new())),
             "dead_store_elim" => Some(Box::new(dead_store_elim::DeadStoreElimPass)),
             _ => None,
         }

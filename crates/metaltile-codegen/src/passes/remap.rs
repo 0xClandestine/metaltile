@@ -94,6 +94,10 @@ pub fn remap_value_ids(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
             s(byte_offset);
             s(value);
         },
+        Op::Pack { elements, .. } =>
+            for e in elements.iter_mut() {
+                s(e);
+            },
         Op::Gather { indices, .. } => {
             s(indices);
         },
@@ -311,6 +315,10 @@ pub fn op_value_refs(op: &Op) -> SmallVec<[ValueId; 4]> {
             refs.push(*byte_offset);
             refs.push(*value);
         },
+        Op::Pack { elements, .. } =>
+            for e in elements {
+                refs.push(*e);
+            },
         Op::Gather { indices, .. } => {
             refs.push(*indices);
         },
@@ -546,6 +554,10 @@ pub fn max_vid_in_op(op: &Op) -> u32 {
             push(byte_offset);
             push(value);
         },
+        Op::Pack { elements, .. } =>
+            for e in elements {
+                push(e);
+            },
         Op::Gather { indices, .. } => {
             push(indices);
         },
@@ -786,6 +798,7 @@ pub fn is_unpredictable(op: &Op) -> bool {
             | Op::If { .. } // nested If needs recursive if-conversion, not flat predicates
             | Op::StrideScan { .. }
             | Op::StrideArgReduce { .. }
+            | Op::Pack { .. }
     )
 }
 

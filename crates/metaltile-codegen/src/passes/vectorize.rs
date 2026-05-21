@@ -1,9 +1,22 @@
-//! Vectorization — promote consecutive scalar Load/Store to vector ops.
+//! Vectorization — promote scalar Load/Store to vector ops.
 //!
-//! Scans for consecutive scalar Load/Store ops with contiguous indices and
-//! replaces them with vectorized VectorLoad/VectorStore ops.  This reduces
+//! Scans for scalar Load/Store ops to the same buffer with contiguous indices
+//! and replaces them with vectorized VectorLoad/VectorStore ops.  This reduces
 //! instruction count and improves memory bandwidth utilization on Apple GPUs,
 //! which have native support for `half4`, `float4`, and `bfloat4` (Metal 3.1+).
+//!
+//! ## v3 changes (NON_CONSECUTIVE_VECTORIZE)
+//!
+//! Loads to the same buffer with consecutive index offsets are now fused even
+//! when interleaved with computation ops (Cast, BinOp, index arithmetic).
+//! Consumers of the original scalar load results are remapped to the vector
+//! result; Metal Shading Language supports per-element vector arithmetic natively
+//! (`float4 * float = float4`).  Duplicate consumer ops are left for downstream
+//! CSE cleanup (or, absent that, the MSL compiler trivially eliminates them).
+//!
+//! Stores require the stored values to already be a single vector (a Pack op
+//! or a VectorLoad result); non-consecutive store vectorization is deferred
+//! to a future pass that inserts Pack ops.
 //!
 //! ## v2 changes (CODEGEN_OVERHAUL §4.4)
 //!
@@ -21,6 +34,9 @@
 //! - Only handles contiguous, aligned accesses with power-of-2 element strides.
 //! - Gather/scatter patterns are not vectorized (requires SIMD permute support).
 //! - Interleaved loads (stride > 1 element) require a future stride-vectorize pass.
+//! - Stores are only vectorized when the store ops are consecutive in the op
+//!   list (no interleaved computation).  Non-consecutive store vectorization
+//!   requires a Pack op and is deferred.
 //!
 //! ## References
 //! - Bacon, Graham & Sharp (1994), "Compiler Transformations for High-
@@ -31,12 +47,11 @@
 //! - Apple, "Metal Shading Language Specification", §2.4 (vector data types).
 //!   https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf
 
-use std::collections::BTreeMap;
-
 use metaltile_core::{
     dtype::DType,
     ir::{BinOpKind, Block, BlockId, IndexExpr, Kernel, Op, Param, ValueId},
 };
+use rustc_hash::FxHashMap;
 
 use crate::error::Result;
 
@@ -88,6 +103,7 @@ const MAX_VEC_RUN: usize = 4;
 const VEC_SCAN_WINDOW: usize = 2 * MAX_VEC_RUN;
 
 #[allow(clippy::needless_range_loop)]
+#[allow(clippy::type_complexity)]
 fn vectorize_block(
     block: &mut Block,
     params: &[Param],
@@ -101,8 +117,8 @@ fn vectorize_block(
     // (vec_vid, lane, fresh_extract_vid, original_scalar_vid). Phase 3
     // splices in `Op::VectorExtract` ops + records the old → new VID
     // remap so downstream consumers reference the right lane.
-    let mut extract_inserts: BTreeMap<usize, (ValueId, u32, ValueId, Option<ValueId>)> =
-        BTreeMap::new();
+    let mut extract_inserts: FxHashMap<usize, (ValueId, u32, ValueId, Option<ValueId>)> =
+        FxHashMap::default();
 
     // Phase 1: find contiguous Load sequences.
     for i in 0..n {
@@ -193,91 +209,101 @@ fn vectorize_block(
         }
     }
 
-    // Phase 2: find contiguous Store sequences.
-    for i in 0..n {
-        if skip[i] {
-            continue;
+    // Phase 2: find vectorizable Store sequences (non-consecutive).
+    //
+    // Collect all stores by (dst, inv_base), group by consecutive offsets.
+    // For each run, we'll inject a Pack op followed by a VectorStore in
+    // Phase 3 (rebuild).
+    //
+    // `store_expansions`: last_op_index → (dst, byte_offset, len, values, dtype)
+    let mut store_expansions: FxHashMap<usize, (String, ValueId, u32, Vec<ValueId>, DType)> =
+        FxHashMap::default();
+    {
+        // Key borrows &str from block.ops to avoid cloning on every store op.
+        // Only own the String when persisting a run into store_expansions.
+        let mut store_groups: FxHashMap<(&str, ValueId), Vec<(usize, i64, ValueId)>> =
+            FxHashMap::default();
+
+        for i in 0..n {
+            if skip[i] {
+                continue;
+            }
+            if let Op::Store { dst, indices, value, .. } = &block.ops[i] {
+                if indices.len() != 1 {
+                    continue;
+                }
+                let base_vid = match &indices[0] {
+                    IndexExpr::Value(v) | IndexExpr::Range(v, _) => *v,
+                    _ => continue,
+                };
+                let Some(param) = params.iter().find(|p| &p.name == dst) else {
+                    continue;
+                };
+                if !is_vectorizable(param.dtype) {
+                    continue;
+                }
+                let (inv_base, offset) = decompose_index(block, base_vid, parent);
+                store_groups.entry((dst.as_str(), inv_base)).or_default().push((i, offset, *value));
+            }
         }
 
-        if let Op::Store { dst, indices, .. } = &block.ops[i] {
-            if indices.len() != 1 {
+        for ((dst, _inv_base), mut entries) in store_groups {
+            if entries.len() < 2 {
                 continue;
             }
-            let base_vid = match &indices[0] {
-                IndexExpr::Value(v) | IndexExpr::Range(v, _) => *v,
-                _ => continue,
-            };
+            entries.sort_by_key(|e| e.1);
 
-            let Some(param) = params.iter().find(|p| &p.name == dst) else {
-                continue;
-            };
-            if !is_vectorizable(param.dtype) {
-                continue;
-            }
-
-            let (inv_base, offset) = decompose_index(block, base_vid, parent);
-
-            let mut run_indices: Vec<usize> = vec![i];
-            let window = n.min(i + 1 + VEC_SCAN_WINDOW);
-            for j in (i + 1)..window {
-                if skip[j] {
-                    continue;
+            let mut run_start = 0usize;
+            while run_start < entries.len() {
+                let mut run_end = run_start + 1;
+                while run_end < entries.len()
+                    && entries[run_end].1 == entries[run_end - 1].1 + 1
+                    && (run_end - run_start) < MAX_VEC_RUN
+                {
+                    run_end += 1;
                 }
-                if run_indices.len() >= MAX_VEC_RUN {
-                    break;
-                }
-                match &block.ops[j] {
-                    Op::Store { dst: d2, indices: idx2, .. } if *d2 == *dst && idx2.len() == 1 => {
-                        let next_base = match &idx2[0] {
+                let run_len = run_end - run_start;
+
+                if run_len >= 2 {
+                    let last_idx = entries[run_end - 1].0;
+                    let first_base_vid = match &block.ops[entries[run_start].0] {
+                        Op::Store { indices, .. } => match &indices[0] {
                             IndexExpr::Value(v) | IndexExpr::Range(v, _) => *v,
-                            _ => break,
-                        };
-                        let (next_inv, next_off) = decompose_index(block, next_base, parent);
-                        if index_eq(block, next_inv, inv_base)
-                            && next_off == offset + run_indices.len() as i64
-                        {
-                            run_indices.push(j);
-                        } else {
-                            break;
-                        }
-                    },
-                    _ => continue,
-                }
-            }
+                            _ => continue,
+                        },
+                        _ => continue,
+                    };
 
-            if run_indices.len() >= 2 {
-                // VectorStore writes ONE value to all `len` slots — only safe
-                // when every store in the run writes the same ValueId (i.e. a
-                // genuine store-broadcast pattern). When the values differ
-                // (the normal case for SIMD reductions writing distinct
-                // per-lane outputs), fusing would silently drop N-1 values
-                // and broadcast the first. Skip fusion in that case.
-                let same_value = run_indices.iter().all(|&j| {
-                    matches!(&block.ops[j], Op::Store { value, .. } if {
-                        let first = match &block.ops[run_indices[0]] {
-                            Op::Store { value, .. } => *value,
-                            _ => return false,
-                        };
-                        *value == first
-                    })
-                });
-                if !same_value {
-                    continue;
+                    let scalar_values: Vec<ValueId> =
+                        entries[run_start..run_end].iter().map(|e| e.2).collect();
+
+                    // Determine the param dtype for the Pack.
+                    let pack_dtype = params
+                        .iter()
+                        .find(|p| p.name == dst)
+                        .map(|p| p.dtype)
+                        .unwrap_or(DType::F32);
+
+                    store_expansions.insert(
+                        last_idx,
+                        (
+                            dst.to_string(),
+                            first_base_vid,
+                            run_len as u32,
+                            scalar_values.clone(),
+                            pack_dtype,
+                        ),
+                    );
+
+                    // Skip all stores in the run (they'll be replaced in Phase 3).
+                    for k in run_start..run_end {
+                        skip[entries[k].0] = true;
+                    }
+                    // Unskip the last one — we'll insert Pack+VectorStore there.
+                    skip[last_idx] = false;
                 }
-                let vlen = run_indices.len() as u32;
-                let first_value = match &block.ops[i] {
-                    Op::Store { value, .. } => *value,
-                    _ => continue,
-                };
-                block.ops[i] = Op::VectorStore {
-                    dst: dst.clone(),
-                    byte_offset: base_vid,
-                    len: vlen,
-                    value: first_value,
-                };
-                for &idx in run_indices[1..].iter().rev() {
-                    skip[idx] = true;
-                }
+
+                run_start = run_end;
             }
         }
     }
@@ -286,10 +312,12 @@ fn vectorize_block(
     // with a VectorExtract op that pulls the right lane out of the
     // preceding VectorLoad. Each old skipped_vid → fresh extract_vid;
     // remap surviving op references through this map.
+    //
+    // For store runs, inject Pack + VectorStore at the last store position.
     let mut old_ops = std::mem::take(&mut block.ops);
     let old_results = std::mem::take(&mut block.results);
 
-    let mut result_remap: BTreeMap<ValueId, ValueId> = BTreeMap::new();
+    let mut result_remap: FxHashMap<ValueId, ValueId> = FxHashMap::default();
     let mut new_ops: Vec<Op> = Vec::new();
     let mut new_results: Vec<Option<ValueId>> = Vec::new();
 
@@ -309,6 +337,28 @@ fn vectorize_block(
             i += 1;
             continue;
         }
+
+        // If this index has a store expansion, emit Pack + VectorStore.
+        if let Some((dst, byte_offset, len, values, dtype)) = store_expansions.get(&i) {
+            // Emit Pack op.
+            let pack_vid = ValueId::new(*next_vid);
+            *next_vid += 1;
+            new_ops.push(Op::Pack { dtype: *dtype, elements: values.clone() });
+            new_results.push(Some(pack_vid));
+
+            // Emit VectorStore referencing the Pack result.
+            new_ops.push(Op::VectorStore {
+                dst: dst.clone(),
+                byte_offset: *byte_offset,
+                len: *len,
+                value: pack_vid,
+            });
+            new_results.push(None); // VectorStore produces no result
+
+            i += 1;
+            continue;
+        }
+
         // Keep the original op at this slot.
         new_ops.push(std::mem::replace(&mut old_ops[i], Op::Const { value: 0 }));
         new_results.push(old_results[i]);
@@ -413,7 +463,7 @@ fn find_const_in_block(block: &Block, vid: ValueId) -> Option<i64> {
 /// the load consolidation saves.
 fn is_vectorizable(dtype: DType) -> bool { matches!(dtype, DType::F16 | DType::F32 | DType::BF16) }
 
-fn remap_values_in_op(op: &mut Op, remap: &BTreeMap<ValueId, ValueId>) {
+fn remap_values_in_op(op: &mut Op, remap: &FxHashMap<ValueId, ValueId>) {
     let s = |v: &mut ValueId| {
         if let Some(&new_vid) = remap.get(v) {
             *v = new_vid;
@@ -453,6 +503,10 @@ fn remap_values_in_op(op: &mut Op, remap: &BTreeMap<ValueId, ValueId>) {
         Op::VectorStore { value, .. } => {
             s(value);
         },
+        Op::Pack { elements, .. } =>
+            for e in elements.iter_mut() {
+                s(e);
+            },
         Op::FusedElementwise { ops } =>
             for sub in ops.iter_mut() {
                 remap_values_in_op(sub, remap);

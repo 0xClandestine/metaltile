@@ -515,6 +515,10 @@ fn remap_values_in_op(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
             s(end);
             s(step);
         },
+        Op::Pack { elements, .. } =>
+            for e in elements.iter_mut() {
+                s(e);
+            },
         Op::Load { indices, .. } =>
             for idx in indices.iter_mut() {
                 if let metaltile_core::ir::IndexExpr::Value(v)
