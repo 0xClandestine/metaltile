@@ -48,7 +48,7 @@ use metaltile_std::{
         quantized_mpp,
         rms_norm::{mt_gated_mixer_norm, mt_rms_norm},
         steel::attn::steel_attention_mma::mt_sdpa_prefill_mma,
-        unary::{mt_cast_to_f32, mt_gelu, mt_relu, mt_sigmoid, mt_silu, mt_softplus},
+        unary::{mt_cast_to_f32, mt_gelu, mt_relu, mt_sigmoid, mt_sigmoid_scalar_fma, mt_silu, mt_softplus},
     },
     probe::mpp_matmul_smoke,
 };
@@ -1562,6 +1562,18 @@ fn register_kernels() -> Vec<Kernel> {
     for &dt in &dtypes {
         let mut k = mt_cast_to_f32::kernel_ir_for(dt);
         k.name = format!("mt_cast_to_f32_{}", dtype_suffix(dt));
+        kernels.push(k);
+    }
+
+    // ─── mt_sigmoid_scalar_fma (Elementwise) — fused sigmoid + FMA ──
+    // Used by FFAI Qwen3.5/3.6 shared-expert path:
+    //   `out[i] = base[i] + sigmoid(gate[0]) * value[i]`
+    // Replaces a host detour (gate scalar readback + sigmoid + filled
+    // broadcast + mul + add) that fires once per MoE layer per token.
+    // One thread per output element.
+    for &dt in &dtypes {
+        let mut k = mt_sigmoid_scalar_fma::kernel_ir_for(dt);
+        k.name = format!("mt_sigmoid_scalar_fma_{}", dtype_suffix(dt));
         kernels.push(k);
     }
 
