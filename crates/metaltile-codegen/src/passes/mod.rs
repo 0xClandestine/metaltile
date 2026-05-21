@@ -17,6 +17,7 @@ pub mod occupancy;
 pub mod register_estimate;
 pub mod remap;
 pub mod schedule;
+pub mod tile_lowering;
 pub mod type_check;
 pub mod unroll;
 pub mod value_sink;
@@ -142,10 +143,13 @@ impl PassRegistry {
             "licm" => Some(Box::new(licm::LicmPass)),
             "if_conversion" => Some(Box::new(if_conversion::IfConversionPass)),
             "value_sink" => Some(Box::new(value_sink::ValueSinkPass)),
+            "tile_lowering" => Some(Box::new(tile_lowering::TileLoweringPass::default())),
             "fusion" => Some(Box::new(fusion::FusionPass)),
             "unroll" => Some(Box::new(unroll::UnrollPass::default())),
             "schedule" => Some(Box::new(schedule::SchedulePass::default())),
             "vectorize" => Some(Box::new(vectorize::VectorizePass)),
+            "cse_2" => Some(Box::new(cse::CsePass)),
+            "const_fold_2" => Some(Box::new(const_fold::ConstFoldPass::new())),
             "dead_store_elim" => Some(Box::new(dead_store_elim::DeadStoreElimPass)),
             _ => None,
         }

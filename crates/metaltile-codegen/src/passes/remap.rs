@@ -434,6 +434,19 @@ mod tests {
         );
         check_op(Op::VectorLoad { src: "x".into(), byte_offset: ValueId::new(30), len: 4 }, 1, 30);
         check_op(
+            Op::Pack {
+                dtype: DType::F32,
+                elements: vec![
+                    ValueId::new(31),
+                    ValueId::new(32),
+                    ValueId::new(33),
+                    ValueId::new(34),
+                ],
+            },
+            4,
+            34,
+        );
+        check_op(
             Op::VectorStore {
                 dst: "y".into(),
                 byte_offset: ValueId::new(31),
@@ -701,6 +714,7 @@ mod tests {
                 value: vid,
             }),
             ("VectorExtract", Op::VectorExtract { vec: vid, lane: 0 }),
+            ("Pack", Op::Pack { dtype: DType::F32, elements: vec![vid, vid, vid, vid] }),
             ("Gather", Op::Gather { src: "x".into(), indices: vid, axis: 0 }),
             ("Scatter", Op::Scatter { dst: "x".into(), indices: vid, value: vid, axis: 0 }),
             ("Atomic", Op::Atomic {

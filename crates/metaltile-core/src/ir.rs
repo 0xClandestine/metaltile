@@ -771,6 +771,22 @@ pub enum Op {
         lane: u32,
     },
 
+    /// Pack scalar values into a vector.
+    ///
+    /// Assembles `elements` into a single vector value.  Used by the vectorize
+    /// pass to fuse stores with interleaved computation: collect the stored
+    /// values, emit a Pack op, then emit a single VectorStore referencing it.
+    ///
+    /// The MSL emitter lowers this to a vector constructor: `float4(v0, v1, v2, v3)`.
+    #[result_custom]
+    Pack {
+        /// The element data type (determines the vector type: float4, half4, bfloat4).
+        dtype: DType,
+        /// Scalar values to pack, in order.
+        #[vid_vec]
+        elements: Vec<ValueId>,
+    },
+
     /// Gather: indexed load from a buffer. `out[i] = src[indices[i]]`.
     #[result_custom]
     Gather {
@@ -1677,6 +1693,11 @@ impl Op {
             },
             Op::VectorExtract { vec, lane } => {
                 write!(f, "VectorExtract(v{}, lane={lane})", vec.as_u32())
+            },
+            Op::Pack { elements, .. } => {
+                let ids: Vec<String> =
+                    elements.iter().map(|v| format!("v{}", v.as_u32())).collect();
+                write!(f, "Pack({})", ids.join(", "))
             },
             Op::Gather { src, indices, axis } => {
                 write!(f, "Gather({src}, v{}, axis={axis})", indices.as_u32())
