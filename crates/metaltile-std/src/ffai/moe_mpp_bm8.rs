@@ -69,7 +69,7 @@
 //! - `tensor_inline` requires packed/contiguous strides — we stage
 //!   into TG memory rather than passing arbitrary-stride device views.
 
-use std::collections::BTreeMap;
+use rustc_hash::FxHashMap;
 
 use metaltile_core::{
     constexpr::ConstExpr,
@@ -416,7 +416,7 @@ pub fn kernel_ir_for(dt: DType) -> Kernel {
     });
 
     k.body = body.clone();
-    let mut blocks = BTreeMap::new();
+    let mut blocks = FxHashMap::default();
     blocks.insert(BlockId::new(0), body);
     k.blocks = blocks;
 

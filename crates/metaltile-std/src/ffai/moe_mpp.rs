@@ -80,7 +80,7 @@
 //! pending bench harness on M2 mini (see
 //! `feedback_metaltile_bench_on_m2_mini.md` — never bench on M5 Max).
 
-use std::collections::BTreeMap;
+use rustc_hash::FxHashMap;
 
 use metaltile_core::{
     constexpr::ConstExpr,
@@ -440,7 +440,7 @@ pub fn kernel_ir_for(dt: DType) -> Kernel {
     });
 
     k.body = body.clone();
-    let mut blocks = BTreeMap::new();
+    let mut blocks = FxHashMap::default();
     blocks.insert(BlockId::new(0), body);
     k.blocks = blocks;
 

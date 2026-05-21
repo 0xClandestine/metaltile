@@ -73,7 +73,7 @@
 //! per K-block, no inner SK sub-loop) which costs ~2× K-loop overhead but
 //! keeps the inline MSL tractable.
 
-use std::collections::BTreeMap;
+use rustc_hash::FxHashMap;
 
 use metaltile_core::{
     constexpr::ConstExpr,
@@ -481,7 +481,7 @@ pub fn kernel_ir_for(dt: DType) -> Kernel {
     });
 
     k.body = body.clone();
-    let mut blocks = BTreeMap::new();
+    let mut blocks = FxHashMap::default();
     blocks.insert(BlockId::new(0), body);
     k.blocks = blocks;
 

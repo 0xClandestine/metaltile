@@ -46,7 +46,7 @@
 //! is the runtime gate; downstream callers route to `mt_qmm_mma` (the
 //! non-MPP `simdgroup_matmul` variant) when `needs_mpp` is unsupported.
 
-use std::collections::BTreeMap;
+use rustc_hash::FxHashMap;
 
 use metaltile_core::{
     constexpr::ConstExpr,
@@ -360,7 +360,7 @@ pub fn kernel_ir_for(dt: DType) -> Kernel {
         outputs: Vec::new(),
     });
     k.body = body.clone();
-    let mut blocks = BTreeMap::new();
+    let mut blocks = FxHashMap::default();
     blocks.insert(BlockId::new(0), body);
     k.blocks = blocks;
 

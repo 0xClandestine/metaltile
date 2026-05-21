@@ -34,7 +34,7 @@
 //! `metaltile-runtime` already routes via `KernelFeatures::needs_mpp`, so
 //! downstream callers don't need to gate explicitly.
 
-use std::collections::BTreeMap;
+use rustc_hash::FxHashMap;
 
 use metaltile_core::{
     dtype::DType,
@@ -144,7 +144,7 @@ pub fn kernel_ir() -> Kernel {
         outputs: Vec::new(),
     });
     k.body = body.clone();
-    let mut blocks = BTreeMap::new();
+    let mut blocks = FxHashMap::default();
     blocks.insert(BlockId::new(0), body);
     k.blocks = blocks;
 
