@@ -12,8 +12,8 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use common::{gpu_lock, pack_u32_bytes, unpack_u32_bytes};
-use metaltile_core::{dtype::DType, ir::KernelMode};
+use common::{gpu_lock, unpack_u32_bytes};
+use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
 use metaltile_std::mlx::random::mt_random_hash;
 
@@ -38,7 +38,9 @@ fn run_random_hash(n: usize) -> Vec<u32> {
 
     let ctx = Context::new().expect("Context::new on macOS");
     // The kernel is Grid3D (one thread per output element).
-    let mut kernel = mt_random_hash::kernel_ir_for(DType::F32);
+    // `mt_random_hash` is a non-generic `#[kernel]` — `kernel_ir_for`
+    // takes no dtype argument.
+    let mut kernel = mt_random_hash::kernel_ir_for();
     kernel.mode = KernelMode::Grid3D;
     let tpg = 1024usize;
     let groups = n.div_ceil(tpg);

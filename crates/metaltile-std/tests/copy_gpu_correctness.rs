@@ -13,7 +13,6 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, max_abs_diff, pack_bytes, ramp, unpack_bytes};
-use metaltile_core::dtype::DType;
 use metaltile_runtime::Context;
 use metaltile_std::mlx::copy::mt_copy;
 

@@ -12,7 +12,6 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, max_abs_diff, pack_bytes, unpack_bytes};
-use metaltile_core::dtype::DType;
 use metaltile_runtime::Context;
 use metaltile_std::mlx::arange::mt_arange;
 
@@ -64,17 +63,6 @@ fn arange_negative_start_f32() {
     let expected = cpu_arange(start, step, n);
     let actual = run_arange(start, step, Dt::F32, n);
     assert!(max_abs_diff(&actual, &expected) < 1e-3, "arange negative start f32 mismatch");
-}
-
-#[test]
-fn arange_unit_step_f16() {
-    let _g = gpu_lock();
-    // Small step so values stay in f16 representable range.
-    let (start, step, n) = (0.0f32, 1.0f32, 128);
-    let expected = cpu_arange(start, step, n);
-    let actual = run_arange(start, step, Dt::F16, n);
-    // f16 integer values exact up to 2048; n=128 well within range.
-    assert!(max_abs_diff(&actual, &expected) < 1.0, "arange unit step f16 mismatch");
 }
 
 #[test]

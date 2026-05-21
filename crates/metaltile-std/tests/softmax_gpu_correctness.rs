@@ -18,7 +18,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, max_abs_diff, pack_bytes, unpack_bytes};
-use metaltile_core::{dtype::DType, ir::KernelMode};
+use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
 use metaltile_std::mlx::softmax::mt_softmax;
 
