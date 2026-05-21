@@ -537,7 +537,7 @@ fn remap_values_in_op(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
                 s(v);
             },
         Op::KernelCall { args, .. } =>
-            args.iter_mut().filter_map(KernelCallArg::as_value_mut).for_each(|v| s(v)),
+            args.iter_mut().filter_map(KernelCallArg::as_value_mut).for_each(&s),
         Op::FlashAttention { q, k, v, .. } => {
             s(q);
             s(k);

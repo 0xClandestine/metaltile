@@ -235,7 +235,7 @@ fn inline_callee(
                         KernelCallArg::Value(_) => {
                             // Pre-pass seeded vid_map with load_result → arg_vid.
                             debug_assert!(
-                                op_result.map_or(true, |r| vid_map.contains_key(&r)),
+                                op_result.is_none_or(|r| vid_map.contains_key(&r)),
                                 "Value-arg load result not in vid_map — callee IR malformed"
                             );
                             continue;
