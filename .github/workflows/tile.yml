@@ -110,12 +110,14 @@ jobs:
             | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')
           BL="baselines/${SLUG}.json"
           echo "chip='${DEVICE_NAME}' slug='${SLUG}' baseline='${BL}'"
+          COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
+          COMMIT_SHORT="${COMMIT_SHA:0:7}"
 
           {
             echo "<!-- bench-diff:${SLUG} -->"
             echo "### \`tile bench\` vs \`${BL}\`"
             echo
-            echo "Runner chip: \`${DEVICE_NAME}\` (slug \`${SLUG}\`)"
+            echo "Runner chip: \`${DEVICE_NAME}\` (slug \`${SLUG}\`) | commit \`${COMMIT_SHORT}\`"
             echo
             if [ ! -f "$BL" ]; then
               echo "_No committed baseline for this runner chip — skipping diff._"
@@ -124,11 +126,16 @@ jobs:
                 echo "Available baselines: $(ls baselines/*.json | xargs -n1 basename | tr '\n' ' ')"
               fi
             else
+              echo '<details open>'
+              echo '<summary>Benchmark results</summary>'
+              echo
               echo '```'
               # `|| true` so a regression exit code (1) doesn't kill the job.
               cargo run --release -q -p metaltile-cli -- diff \
                 "$BL" /tmp/bench.json 2>&1 || true
               echo '```'
+              echo
+              echo '</details>'
             fi
           } > /tmp/bench-diff-comment.md
 
@@ -136,11 +143,30 @@ jobs:
           cat /tmp/bench-diff-comment.md
           echo "---- end bench-diff comment body ----"
 
+          # Find an existing bench-diff comment by its marker and edit it.
+          # If none exists, create a new one.  This keeps PR threads clean
+          # as new commits come in — one rolling comment, not a pile of them.
+          #
           # Fork PRs get a read-only GITHUB_TOKEN regardless of the
           # `pull-requests: write` permission above — GitHub blocks
           # write tokens to mitigate untrusted-fork attacks. Log a
           # warning instead of failing the job; the comment body is
           # already in the step log right above.
-          if ! gh pr comment "$PR_NUMBER" --body-file /tmp/bench-diff-comment.md; then
-            echo "::warning::Could not post bench-diff comment (likely a fork PR with read-only token). Comment body is in this step log."
+          MARKER="<!-- bench-diff:${SLUG} -->"
+          EXISTING_ID=$(gh pr view "$PR_NUMBER" --json comments --jq \
+            --arg marker "$MARKER" \
+            '[.comments[] | select(.body | contains($marker)) | .id] | first')
+
+          REPO="${{ github.repository }}"
+          if [ -n "$EXISTING_ID" ]; then
+            echo "Updating existing bench-diff comment #${EXISTING_ID}"
+            if ! gh api "repos/${REPO}/issues/comments/${EXISTING_ID}" \
+                 -X PATCH -F body=@/tmp/bench-diff-comment.md --silent; then
+              echo "::warning::Could not update bench-diff comment (likely a fork PR with read-only token)."
+            fi
+          else
+            echo "Creating new bench-diff comment"
+            if ! gh pr comment "$PR_NUMBER" --body-file /tmp/bench-diff-comment.md; then
+              echo "::warning::Could not post bench-diff comment (likely a fork PR with read-only token). Comment body is in this step log."
+            fi
           fi
