@@ -74,7 +74,7 @@ Sources surveyed:
 | steel_gemm_fused_nax | ✓ | ✓ | ✗ | Blocker: `nax` feature gate. (Simdgroup-matrix primitive now exists — see `steel_attention_mma`.) |
 | steel_gemm_gather | ✓ | ✓ | ✗ | Blocker: indirect (gather) indexing of the matmul operands. |
 | steel_gemm_gather_nax | ✓ | ✓ | ✗ | Same + NAX feature gate. |
-| steel_gemm_masked | ✓ | ✓ | ✗ | Blocker: block-level predication. |
+| steel_gemm_masked | ✓ | ✓ | ✓ | `mlx/steel/gemm/steel_gemm_masked.rs` → `mt_steel_gemm_masked_{64x64x16_2x2,32x32x16_2x2}<T>`. Block-masked row-major `C = A·B`: an output-block mask zeroes whole `BM×BN` blocks (uniform `if` around the K-loop + `select` on the store), an operand-block mask scales each `BM×BK`/`BK×BN` K-block contribution (a `0` mask multiplies the loaded fragment to zero — branchless). Both masks are plain `Tensor<T>` operands; no new codegen primitive needed. Verified by `steel_gemm_masked_gpu_correctness` (all-ones, checkerboard out-mask, partial op-mask; f32/f16/bf16). |
 | steel_gemm_segmented | ✓ | ✓ | ✗ | Blocker: ragged batched matmul. |
 | steel_gemm_splitk + accum | ✓ | ✓ | ✗ | Blocker: two-kernel split-K dispatch + accumulator pass. |
 | steel_gemm_splitk_nax | ✓ | ✓ | ✗ | Same + NAX feature gate. |
