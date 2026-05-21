@@ -15,6 +15,7 @@ pub(crate) mod reduce;
 use std::{collections::BTreeMap, fmt::Write};
 
 pub use config::MslConfig;
+use config::TileSchedule;
 use features::KernelFeatures;
 use metaltile_core::{
     dtype::DType,
@@ -22,7 +23,6 @@ use metaltile_core::{
 };
 
 use crate::{error::Result, passes, passes::type_check::infer_types};
-use config::TileSchedule;
 
 #[macro_export]
 macro_rules! wl {

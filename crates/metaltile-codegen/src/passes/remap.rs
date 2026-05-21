@@ -38,7 +38,6 @@ pub fn remap_value_ids(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
     });
 }
 
-
 // ---------------------------------------------------------------------------
 // op_value_refs — collect all ValueId references (read-only, for analysis)
 // ---------------------------------------------------------------------------
@@ -47,7 +46,6 @@ pub fn remap_value_ids(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
 pub fn op_value_refs(op: &Op) -> SmallVec<[ValueId; 4]> {
     op.value_refs().iter().map(|&&v| v).collect()
 }
-
 
 // ---------------------------------------------------------------------------
 // max_vid_in_op — highest ValueId in an Op
@@ -67,7 +65,6 @@ pub fn max_vid_in_op(op: &Op) -> u32 {
         .max()
         .unwrap_or(0)
 }
-
 
 // ---------------------------------------------------------------------------
 // find_max_vid — maximum ValueId across a whole Kernel
@@ -130,18 +127,14 @@ pub fn all_block_ids(kernel: &Kernel) -> Vec<metaltile_core::ir::BlockId> {
 /// True if the op writes to memory or synchronises threads.
 pub fn has_side_effects(op: &Op) -> bool { op.has_side_effects() }
 
-
 /// True if the op cannot appear inside predicated code.
 pub fn is_unpredictable(op: &Op) -> bool { op.is_unpredictable() }
-
 
 /// True if the op is a cheap ALU op eligible for rematerialization.
 pub fn is_cheap_alu(op: &Op) -> bool { op.is_cheap_alu() }
 
-
 /// True if the op is a load from device or threadgroup memory.
 pub fn is_load(op: &Op) -> bool { op.is_load() }
-
 
 /// True if the op is a store to device or threadgroup memory.
 pub fn is_store(op: &Op) -> bool { op.is_store() }

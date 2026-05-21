@@ -38,8 +38,7 @@ use metaltile_core::{
     ir::{BinOpKind, Block, BlockId, IndexExpr, Kernel, Op, Param, ValueId},
 };
 
-use crate::error::Result;
-use crate::passes::remap::remap_value_ids;
+use crate::{error::Result, passes::remap::remap_value_ids};
 
 pub struct VectorizePass;
 
@@ -413,7 +412,6 @@ fn find_const_in_block(block: &Block, vid: ValueId) -> Option<i64> {
 /// scalar form already coalesces in L2 and the extra extract ops cost more than
 /// the load consolidation saves.
 fn is_vectorizable(dtype: DType) -> bool { matches!(dtype, DType::F16 | DType::F32 | DType::BF16) }
-
 
 #[cfg(test)]
 mod tests {

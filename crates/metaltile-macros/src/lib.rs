@@ -49,18 +49,29 @@ use syn::{ItemFn, parse_macro_input};
 /// Annotate `ValueId` fields with `#[vid]`, `#[vid_opt]`, `#[vid_vec]`,
 /// `#[vid_exprs]`, or `#[vid_recursive]`. See `derive_op` module docs for details.
 #[proc_macro_derive(ValueRefs, attributes(vid, vid_opt, vid_vec, vid_exprs, vid_recursive))]
-pub fn derive_value_refs(input: TokenStream) -> TokenStream {
-    derive_op::derive_value_refs(input)
-}
+pub fn derive_value_refs(input: TokenStream) -> TokenStream { derive_op::derive_value_refs(input) }
 
 /// Derive op-flag predicates (`is_elementwise`, `has_side_effects`, etc.).
 ///
 /// Annotate variants with `#[elementwise]`, `#[side_effect]`, `#[unpredictable]`,
 /// `#[cheap_alu]`, or `#[op_load]`. See `derive_op` module docs for details.
-#[proc_macro_derive(OpFlags, attributes(elementwise, side_effect, unpredictable, cheap_alu, op_load, op_store, barrier, op_loop, op_if, op_fused, op_const))]
-pub fn derive_op_flags(input: TokenStream) -> TokenStream {
-    derive_op::derive_op_flags(input)
-}
+#[proc_macro_derive(
+    OpFlags,
+    attributes(
+        elementwise,
+        side_effect,
+        unpredictable,
+        cheap_alu,
+        op_load,
+        op_store,
+        barrier,
+        op_loop,
+        op_if,
+        op_fused,
+        op_const
+    )
+)]
+pub fn derive_op_flags(input: TokenStream) -> TokenStream { derive_op::derive_op_flags(input) }
 
 #[proc_macro_attribute]
 pub fn constexpr(_attr: TokenStream, item: TokenStream) -> TokenStream {

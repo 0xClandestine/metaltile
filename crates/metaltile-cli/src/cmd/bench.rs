@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 
-
 use metaltile_codegen::passes::{
     self,
     occupancy::{self, Bottleneck},

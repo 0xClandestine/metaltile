@@ -281,14 +281,10 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Returns true if the op is an elementwise op that can participate in fusion.
-fn is_fusible(op: &Op) -> bool {
-    op.is_elementwise()
-}
+fn is_fusible(op: &Op) -> bool { op.is_elementwise() }
 
 /// Return the first ValueId input of an op (used to trace the chain backward).
-fn first_value_input(op: &Op) -> Option<ValueId> {
-    op.value_refs().first().map(|v| **v)
-}
+fn first_value_input(op: &Op) -> Option<ValueId> { op.value_refs().first().map(|v| **v) }
 
 /// Build a sub-op for a FusedElementwise chain.
 /// Rewrites ValueId references: external ValueIds stay as-is, internal
