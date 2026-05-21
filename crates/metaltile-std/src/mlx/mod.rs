@@ -20,6 +20,7 @@ pub mod copy;
 pub mod fp_quantized;
 #[cfg(feature = "nax")]
 pub mod fp_quantized_nax;
+pub mod fused_gate_activation;
 pub mod gather_axis;
 pub mod gemv;
 pub mod gemv_masked;

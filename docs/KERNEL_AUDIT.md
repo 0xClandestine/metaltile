@@ -11,8 +11,8 @@ Sources surveyed:
 ## Summary
 
 - Total kernel-op rows in this audit (union): **89**
-- metaltile-ported kernel ops: **59 / 89 = 66 %** — 48 full ✓ (54 %), 11 partial ~ (12 %)
-- **Still to cover: 30 ops not ported (✗)**, plus **11 partial ports** still to finish
+- metaltile-ported kernel ops: **60 / 89 = 67 %** — 49 full ✓ (55 %), 11 partial ~ (12 %)
+- **Still to cover: 29 ops not ported (✗)**, plus **11 partial ports** still to finish
 - The 6 Vision / STT / TTS front-end kernels (Phase 6.5 / 7) — `conv2d`,
   `patch_embed`, `rope_2d`, `mel_spectrogram`, `audio_conv1d`,
   `vocoder/iSTFT` — are now ported (✓ rows below).
@@ -105,7 +105,7 @@ Sources surveyed:
 | ssm_step (Mamba 2 SSD single-token decode) | ✗ | ✓ (`ssm.metal`) | ✓ | `ffai/ssm.rs` → `ssm_step<T>`, `mt_ssm_step<T>`. Faithful port; `mlx_src: None` because pinned MLX upstream doesn't ship `ssm.metal`. Will graduate to `mlx/` when pin moves. |
 | conv1d_causal_step (depthwise SSM conv stream) | ✗ | partial (subset of SSM toolchain) | ✓ | `ffai/ssm.rs` → `conv1d_causal_step<T>`. fp32 state recurrence. |
 | ssm_replay (sequential tape capture + replay) | ✗ | ✓ (`ssm_replay.metal`) | ✓ | `ffai/ssm_replay.rs` → `ssm_step_record<T>` (SSD forward + dA/dBx tape) + `ssm_replay<T>` (re-fold first k entries). Spec 040 Mamba/Mamba2 state replay. |
-| fused_gate_activation (silu/gelu × up gate) | ✗ | ✓ (`fused_gate_activation.metal`) | ✗ | NOT PORTED. The `silu` variant is covered by `mlx/swiglu.rs` (see the `swiglu` row); the gelu-approx and clipped-swiglu variants, plus the single-row / looped dispatch forms, are not. |
+| fused_gate_activation (silu/gelu × up gate) | ✗ | ✓ (`fused_gate_activation.metal`) | ✓ | `mlx/fused_gate_activation.rs` → `mt_fused_gate_gelu` (gelu-tanh approximation) + `mt_fused_gate_clipped_swiglu` (GPT-OSS clipped variant — `[-7,7]` clamp, `sigmoid(1.702·g)` gate, `+1` up bias). The `silu` variant ships separately as `mlx/swiglu.rs` (see the `swiglu` row). One-thread-per-output Grid3D; the MLX `single_row` / `looped` threadgroup-tiling split is a perf detail, not a separate op. Verified by `fused_gate_activation_gpu_correctness`. |
 | rms_norm_residual (RMSNorm + residual add fused) | ✗ | ✓ (`rms_norm_residual.metal`) | ✓ | `ffai/rms_norm_residual.rs` → `ffai_rms_norm_residual<T>`. Reduction-mode, `N = TPG*4`; mirrors `mt_rms_norm` + a residual-add input. ~90 saved dispatches/token on Gemma4-30 type configs. |
 | rms_norm_rope (RMSNorm + RoPE fused) | ✗ | ✓ (`rms_norm_rope.metal`) | ✓ | `ffai/rms_norm_rope.rs` → `ffai_rms_norm_rope<T>`. Reduction-mode, paired-layout RoPE; `TPG = axis_size/2`. Q/K post-projection norm+rope in one dispatch. |
 | rms_norm_qgemv (RMSNorm + 4-bit quantized GEMV fused) | ✗ | ✓ (`rms_norm_qgemv.metal`) | ✓ | `ffai/rms_norm_qgemv.rs` → `ffai_rms_norm_qgemv<T>`. Reduction-mode, int4, one row/threadgroup; eliminates the global RT of the normalized activation. MLX's 8-row-per-TG tiling is a perf follow-up. |
@@ -162,30 +162,24 @@ remaining `steel_gemm_*` / `steel_conv*` rows are no longer blocked on the
 primitive itself — only on the gather / masked / split-K / im2col logic layered
 on top.
 
-1. **`fused_gate_activation`** — gelu-approx and clipped-swiglu variants + the
-   single-row / looped dispatch forms. The `silu` case already ships as
-   `mlx/swiglu.rs`; finishing the row is a small elementwise port.
-2. **`quantized` gather_qmm / gather_qmv** — the affine grouped-gather matmul.
+1. **`quantized` gather_qmm / gather_qmv** — the affine grouped-gather matmul.
    In flight in PRs #125 / #136; landing it closes the MoE FFN dispatch-count
    win (one kernel for the whole expert projection).
-3. **`steel_gemm_fused` shape coverage** — only `64×64×16` is wired today;
+2. **`steel_gemm_fused` shape coverage** — only `64×64×16` is wired today;
    prefill perf needs more block shapes.
-4. **`steel_gemm_splitk` + accum** — two-kernel split-K dispatch + accumulator
+3. **`steel_gemm_splitk` + accum** — two-kernel split-K dispatch + accumulator
    pass. Infra-gated (split-K scheduling primitive).
-5. **`steel_gemm_masked`** — block-level predication. Infra-gated.
-6. **`steel_conv` 2D / 3D / general** + `conv` — all blocked on im2col / unfold
-   primitives. One infra PR unblocks the family.
-7. **`indexing` (scatter, gather_front, masked_scatter)** — the strided forms,
-   needed for any cache update path that isn't a simple append (sliding-window
-   evict, prefix-cache splice, batched scatter).
-8. **NAX feature family** — `steel_attention_nax`, `steel_gemm_*_nax`,
+4. **`steel_gemm_masked`** — block-level predication. Infra-gated.
+5. **`steel_conv` 2D / 3D / general** — all blocked on the im2col / unfold
+   threadgroup-staging tile loader. One infra PR unblocks the family.
+6. **NAX feature family** — `steel_attention_nax`, `steel_gemm_*_nax`,
    `quantized_nax`, `fp_quantized_nax`. PR #137 demonstrates the Apple
    `mpp::tensor_ops::matmul2d` path; the `nax`-gated rows can follow once the
    feature scaffolding lands.
-9. **`fft`** — radix + readwrite. Needs an FFT codegen path (complex types,
+7. **`fft`** — radix + readwrite. Needs an FFT codegen path (complex types,
    bit-reversal indexing). Lowest FFAI priority.
-10. **`fence`** — synchronization primitive. Needs atomics / device-memory
-    fence primitives in the DSL; infrastructure, not a compute op.
+8. **`fence`** — synchronization primitive. Needs atomics / device-memory
+   fence primitives in the DSL; infrastructure, not a compute op.
 
 ### Model-enablement kernels (separate track from generic-op completeness)
 
