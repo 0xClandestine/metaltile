@@ -125,3 +125,45 @@ fn sample_matches_naive_reference_f32() {
         assert_eq!(actual, expected, "u={u} mismatch — expected {expected}, got {actual}");
     }
 }
+
+#[test]
+fn sample_qwen_vocab_152k_parallel_prefix_path_f32() {
+    let _g = gpu_lock();
+    // n=152K (Qwen tokenizer scale) exercises the parallel-prefix CDF
+    // walk: chunk = ceil(152064/256) = 594 positions per lane. Every
+    // lane runs phase A (chunk sum-exp); a single lane fires phase C
+    // (the in-chunk serial walk). Uniform-logits distribution → CDF[i]
+    // = (i+1)/n is linear in i, so the GPU vs CPU index drift from
+    // FP-ordering ULPs on `total` is bounded by ±~50 tokens (vs
+    // pathological ~100s in deep Gaussian tails where density is
+    // exponentially small).
+    let n = 152_064usize;
+    let logits = vec![0.0_f32; n];
+    for u in [0.01_f32, 0.2, 0.4, 0.6, 0.8, 0.95] {
+        let expected = naive_sample(&logits, 1.0, u);
+        let actual = run_sample(&logits, 1.0, u);
+        // Uniform CDF: expected ≈ floor(u * n) ± 1. GPU's chunked sum
+        // produces a `total` that differs from CPU's serial sum by a
+        // few ULPs at n=152K; relative drift ~ 1e-7 × n ≈ 16 tokens
+        // in the linear-CDF case. Tolerate ±64 to leave headroom.
+        let diff = (expected as i64 - actual as i64).abs();
+        assert!(diff <= 64, "u={u} expected {expected}, got {actual} (diff {diff} > 64)",);
+    }
+}
+
+#[test]
+fn sample_qwen_vocab_152k_peaked_picks_peak_f32() {
+    let _g = gpu_lock();
+    // Peaked distribution at vocab=152K: the dominant token sits at
+    // index 99K (mid-vocab, well inside the parallel-prefix scan).
+    // Tests that one lane's chunk owns ~all the CDF mass and every
+    // uniform draw lands inside that lane's chunk.
+    let n = 152_064usize;
+    let peak_idx = 99_000usize;
+    let mut logits = vec![0.0_f32; n];
+    logits[peak_idx] = 30.0; // exp(30) >> exp(0)
+    for u in [0.001_f32, 0.5, 0.999] {
+        let actual = run_sample(&logits, 1.0, u);
+        assert_eq!(actual, peak_idx as u32, "peaked vocab=152K: u={u} → idx {peak_idx}");
+    }
+}
