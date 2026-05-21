@@ -416,11 +416,13 @@ impl IndexExpr {
 pub enum Op {
     /// `program_id(axis)` — which block this threadgroup handles along an axis.
     #[cheap_alu]
+    #[result_u32]
     ProgramId { axis: u32 },
 
     /// A constant integer value (from a literal in the DSL).
     #[cheap_alu]
     #[op_const]
+    #[result_i32]
     Const { value: i64 },
 
     /// `arange(start, step, len)` — creates a 1D range [start, start+step, ...].
@@ -463,6 +465,7 @@ pub enum Op {
     /// Elementwise binary operation.
     #[elementwise]
     #[cheap_alu]
+    #[result_same_type]
     BinOp {
         op: BinOpKind,
         #[vid]
@@ -565,6 +568,7 @@ pub enum Op {
     },
 
     /// Insert a size-1 dimension at `axis`. Zero-cost reshape.
+    #[result_same_type]
     ExpandDims {
         #[vid]
         value: ValueId,
@@ -572,6 +576,7 @@ pub enum Op {
     },
 
     /// Reshape a tile to a new shape (same element count). Zero-cost if contiguous.
+    #[result_same_type]
     Reshape {
         #[vid]
         value: ValueId,
@@ -649,6 +654,7 @@ pub enum Op {
     /// Unary math operation: exp, log, sqrt, rsqrt, abs, neg, ceil, floor, recip.
     #[elementwise]
     #[cheap_alu]
+    #[result_same_type]
     UnaryOp {
         op: UnaryOpKind,
         #[vid]
@@ -657,6 +663,7 @@ pub enum Op {
 
     /// Neural activation function: silu, gelu, relu, tanh, sigmoid.
     #[elementwise]
+    #[result_same_type]
     Activation {
         kind: ActKind,
         #[vid]
@@ -667,6 +674,7 @@ pub enum Op {
     /// Maps to MSL `select(on_false, on_true, bool(cond))`.
     #[elementwise]
     #[cheap_alu]
+    #[result_same_type]
     Select {
         #[vid]
         cond: ValueId,
@@ -775,6 +783,7 @@ pub enum Op {
     /// Prefix scan along an axis (inclusive or exclusive).
     #[needs_simd_lane]
     #[needs_simd_group]
+    #[result_same_type]
     Scan {
         #[vid]
         value: ValueId,
@@ -801,6 +810,7 @@ pub enum Op {
     /// Returns the flat index of the extreme element in [offset, end).
     /// Single-threaded: dispatch with [1, 1, 1] × [1, 1, 1] for a single row.
     #[unpredictable]
+    #[result_u32]
     StrideArgReduce {
         src: String,
         #[vid]
@@ -836,6 +846,7 @@ pub enum Op {
     /// by `zeros`.  Used for quantized LLM weight loading (int4/int8 GEMM).
     ///
     /// Layout: `weights[N_out, N_in/2]` (2 int4 per byte), `scales/zeros[N_out, N_in/group_size]`.
+    #[result_f16_scalar]
     Dequantize {
         /// Packed int4/int8 weight buffer param name.
         weights: String,
@@ -854,6 +865,7 @@ pub enum Op {
     /// Maps to `simd_sum(v)`, `simd_max(v)`, `simd_min(v)` (Metal 2.1+).
     #[needs_simd_lane]
     #[needs_simd_group]
+    #[result_same_type]
     SimdReduce {
         #[vid]
         value: ValueId,
@@ -865,6 +877,7 @@ pub enum Op {
     /// MMA row exchange values through fixed xor masks (for example 1 and 8).
     #[needs_simd_lane]
     #[needs_simd_group]
+    #[result_same_type]
     SimdShuffleXor {
         #[vid]
         value: ValueId,
@@ -876,6 +889,7 @@ pub enum Op {
     #[needs_simd_lane]
     #[needs_simd_group]
     #[needs_simdgroup_matrix]
+    #[result_f32_scalar]
     SimdgroupAlloc { dtype: DType, m: u32, n: u32 },
 
     /// Load one element from a simdgroup matrix: `result = name.thread_elements()[index]`.
@@ -883,6 +897,7 @@ pub enum Op {
     #[needs_simd_lane]
     #[needs_simd_group]
     #[needs_simdgroup_matrix]
+    #[result_f32_scalar]
     SimdgroupElemLoad {
         #[vid]
         value: ValueId,
@@ -947,16 +962,19 @@ pub enum Op {
 
     /// Built-in: returns the SIMD lane index (thread_index_in_simdgroup).
     #[needs_simd_lane]
+    #[result_u32]
     SimdLaneId,
 
     /// Built-in: returns the SIMD group index (simdgroup_index_in_threadgroup).
     #[needs_simd_group]
+    #[result_u32]
     SimdGroupId,
 
     /// SIMD-group inclusive prefix scan.
     /// Maps to `simd_scan_inclusive_<op>(v)` (Metal 3.0+).
     #[needs_simd_lane]
     #[needs_simd_group]
+    #[result_f32_scalar]
     SimdScan {
         #[vid]
         value: ValueId,
@@ -969,6 +987,7 @@ pub enum Op {
     /// `simd_broadcast(v, lane)` (Metal 2.1+). Cooperative codebook hoist
     /// in AURA score/value kernels uses this to share one lane's loaded
     /// codebook word across the group.
+    #[result_same_type]
     SimdBroadcast {
         #[vid]
         value: ValueId,
@@ -1084,6 +1103,7 @@ pub enum Op {
     },
 
     /// Return the index of the min/max element along an axis.
+    #[result_u32]
     ArgReduce {
         #[vid]
         value: ValueId,

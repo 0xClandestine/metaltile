@@ -405,12 +405,6 @@ fn infer_block(
 
         match op {
             // ---- indexing ------------------------------------------
-            Op::ProgramId { .. } => {
-                env.insert(vid, TypedValue { dtype: DType::U32, shape: Shape::scalar() });
-            },
-            Op::Const { .. } => {
-                env.insert(vid, TypedValue { dtype: DType::I32, shape: Shape::scalar() });
-            },
             Op::Arange { len, .. } => {
                 env.insert(vid, TypedValue {
                     dtype: DType::U32,
@@ -566,8 +560,10 @@ fn infer_block(
                 env.insert(vid, TypedValue { dtype: DType::F16, shape: Shape::scalar() });
             },
 
+            // SimdReduce/SimdShuffleXor/SimdBroadcast: same type as input,
+            // with F32 fallback.  (Explicit rather than relying on the
+            // result_same_type guard because of the fallback.)
             Op::SimdReduce { value, .. } | Op::SimdShuffleXor { value, .. } => {
-                // Same type as input
                 if let Some(tv) = env.get(value).cloned() {
                     env.insert(vid, tv);
                 } else {
@@ -575,8 +571,6 @@ fn infer_block(
                 }
             },
             Op::SimdBroadcast { value, .. } => {
-                // Same scalar type as the input value; the cross-lane broadcast
-                // doesn't change dtype or shape.
                 if let Some(tv) = env.get(value).cloned() {
                     env.insert(vid, tv);
                 } else {
@@ -609,9 +603,6 @@ fn infer_block(
                 let dtype = stack_dtypes.get(name).copied().unwrap_or(DType::F32);
                 env.insert(vid, TypedValue { dtype, shape: Shape::scalar() });
             },
-            Op::ArgReduce { .. } | Op::StrideArgReduce { .. } => {
-                env.insert(vid, TypedValue { dtype: DType::U32, shape: Shape::scalar() });
-            },
             Op::StrideScan { .. } => {
                 // Side-effect only — writes directly to dst buffer, no SSA result.
             },
@@ -628,9 +619,6 @@ fn infer_block(
             | Op::VectorExtract { .. }
             | Op::Cat { .. }
             | Op::DeclareLocal { .. } => {},
-            Op::SimdgroupAlloc { .. } | Op::SimdgroupElemLoad { .. } | Op::SimdScan { .. } => {
-                env.insert(vid, TypedValue { dtype: DType::F32, shape: Shape::scalar() });
-            },
             // ExpandDims/Reshape emit `auto v = rv;` (emit_block.rs aliases the input
             // value), so downstream BinOps must see the input dtype — without this,
             // any chain off a reshape inherits no dtype and trips the fma-int guard.
@@ -639,10 +627,6 @@ fn infer_block(
                     env.insert(vid, tv);
                 }
             },
-            Op::SimdLaneId | Op::SimdGroupId => {
-                env.insert(vid, TypedValue { dtype: DType::U32, shape: Shape::scalar() });
-            },
-
             Op::FusedElementwise { ops } => {
                 // The final op determines the output type.
                 // Walk the chain to build local types, then use the last op.
@@ -717,6 +701,30 @@ fn infer_block(
                 let last_vid = ValueId::new(vid.as_u32() + (ops.len() as u32 - 1));
                 if let Some(tv) = local_env.get(&last_vid) {
                     env.insert(vid, tv.clone());
+                }
+            },
+            // ---- Derived result-type hints (OpFlags annotations) ----
+            // These guards provide automatic type inference for ops annotated with
+            // #[result_*] attributes. Explicit arms above take precedence.
+            _ if op.is_result_u32_scalar() => {
+                env.insert(vid, TypedValue { dtype: DType::U32, shape: Shape::scalar() });
+            },
+            _ if op.is_result_i32_scalar() => {
+                env.insert(vid, TypedValue { dtype: DType::I32, shape: Shape::scalar() });
+            },
+            _ if op.is_result_f32_scalar() => {
+                env.insert(vid, TypedValue { dtype: DType::F32, shape: Shape::scalar() });
+            },
+            _ if op.is_result_f16_scalar() => {
+                env.insert(vid, TypedValue { dtype: DType::F16, shape: Shape::scalar() });
+            },
+            _ if op.is_result_same_type() => {
+                // Result type = first input's type.  Look up the first ValueId
+                // reference in the type environment.
+                if let Some(first_vid) = op.value_refs().first().copied() {
+                    if let Some(tv) = env.get(first_vid) {
+                        env.insert(vid, tv.clone());
+                    }
                 }
             },
             // Catch-all for ops that haven't been explicitly matched above.

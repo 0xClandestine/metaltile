@@ -73,7 +73,12 @@ pub fn derive_value_refs(input: TokenStream) -> TokenStream { derive_op::derive_
         needs_simd_group,
         needs_simdgroup_matrix,
         needs_simd_product,
-        no_result
+        no_result,
+        result_u32,
+        result_i32,
+        result_f32_scalar,
+        result_f16_scalar,
+        result_same_type
     )
 )]
 pub fn derive_op_flags(input: TokenStream) -> TokenStream { derive_op::derive_op_flags(input) }

@@ -289,6 +289,12 @@ pub fn derive_op_flags(input: TokenStream) -> TokenStream {
         ("needs_simd_product", "needs_simd_product"),
         // Result classification
         ("no_result", "is_no_result"),
+        // Result-type hints for type inference
+        ("result_u32", "is_result_u32_scalar"),
+        ("result_i32", "is_result_i32_scalar"),
+        ("result_f32_scalar", "is_result_f32_scalar"),
+        ("result_f16_scalar", "is_result_f16_scalar"),
+        ("result_same_type", "is_result_same_type"),
     ];
 
     let methods: Vec<TokenStream2> = flags
