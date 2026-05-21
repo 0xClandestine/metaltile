@@ -28,6 +28,7 @@ use metaltile_core::{
 // Bring high-perf kernels from metaltile-std into the emit registry.
 use metaltile_std::ffai::moe::mt_moe_gather_qmm_mma_int4_bm16;
 use metaltile_std::mlx::quantized::mt_qmm_mma;
+use metaltile_std::probe::mpp_matmul_smoke;
 use serde::Serialize;
 
 // ─── CLI ──────────────────────────────────────────────────────────────────
@@ -1861,6 +1862,20 @@ fn register_kernels() -> Vec<Kernel> {
         let mut k = mt_moe_gather_qmm_mma_int4_bm16::kernel_ir_for(dt);
         k.name = format!("mt_moe_gather_qmm_mma_int4_bm16_{}", dtype_suffix(dt));
         k.mode = KernelMode::Reduction;
+        kernels.push(k);
+    }
+
+    // ─── mt_mpp_matmul_smoke (Elementwise) — MPP `matmul2d` smoke kernel
+    // Single-simdgroup 16×32 fp16 → 16×16 fp32 matmul. Requires macOS 26+ /
+    // Metal 4 (header `<MetalPerformancePrimitives/...>` only available on
+    // those toolchains). Pre-Metal-4 builds compile a stub fallback so the
+    // metallib still links; correctness test fails as the intended signal.
+    //
+    // This is the foothold for the future MPP-backed `mt_qmm_mma` variant —
+    // taps the NAX hardware path MLX uses for `down_proj` (~3000 GF on
+    // Qwen3.6-A3B). See `crates/metaltile-std/src/probe/mpp_matmul_smoke.rs`.
+    {
+        let k = mpp_matmul_smoke::kernel_ir();
         kernels.push(k);
     }
 
