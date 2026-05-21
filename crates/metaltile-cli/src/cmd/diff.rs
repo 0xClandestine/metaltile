@@ -35,7 +35,7 @@ pub fn run(args: &DiffArgs) -> Result<(), CliError> {
         let mut child = Command::new(std::env::current_exe().map_err(|e| CliError::Io(e))?)
             .arg("bench")
             .arg("--json")
-            .arg(temp_file.to_str().unwrap())
+            .arg(temp_file.to_str().ok_or_else(|| CliError::Other("non-UTF8 temp path".into()))?)
             .spawn()
             .map_err(|e| CliError::Subprocess(format!("failed to spawn tile bench: {e}")))?;
 
@@ -84,7 +84,7 @@ pub fn run(args: &DiffArgs) -> Result<(), CliError> {
     }
 
     if outcome.regressions > 0 {
-        std::process::exit(1);
+        return Err(CliError::Other(format!("{} regression(s) detected", outcome.regressions)));
     }
     Ok(())
 }

@@ -193,10 +193,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Bench(args) => cmd::bench::run(&args),
-        Command::Build(args) => cmd::build::run(&args),
+        Command::Bench(args) => cmd::bench::run(&args)?,
+        Command::Build(args) => cmd::build::run(&args)?,
         Command::Inspect(args) => cmd::inspect::run(&args)?,
-        Command::Device(args) => cmd::device::run(&args),
+        Command::Device(args) => cmd::device::run(&args)?,
         Command::Snap(args) => cmd::snap::run(&args)?,
         Command::Diff(args) => cmd::diff::run(&args)?,
     }

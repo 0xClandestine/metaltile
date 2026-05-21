@@ -23,7 +23,7 @@ use crate::{
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
-pub fn run(args: &BenchArgs) {
+pub fn run(args: &BenchArgs) -> Result<(), crate::CliError> {
     let json_out = &args.json;
     let filter = &args.filter;
     let verbose = args.verbose;
@@ -67,7 +67,7 @@ pub fn run(args: &BenchArgs) {
                 Style::new().fg(Color::BrightBlack),
             ),
         );
-        std::process::exit(1);
+        return Err(crate::CliError::Other("uncommitted changes".into()));
     }
 
     let runner = match GpuRunner::new() {
@@ -76,9 +76,9 @@ pub fn run(args: &BenchArgs) {
             eprintln!(
                 "{} {}",
                 paint_stderr("Error:", Style::new().fg(Color::Red).bold()),
-                paint_stderr(e, Style::new().fg(Color::BrightWhite)),
+                paint_stderr(&e, Style::new().fg(Color::BrightWhite)),
             );
-            std::process::exit(1);
+            return Err(crate::CliError::GpuInit(e));
         },
     };
 
@@ -156,7 +156,7 @@ pub fn run(args: &BenchArgs) {
                 paint_stderr("No benchmarks ran", Style::new().fg(Color::BrightWhite)),
             );
         }
-        return;
+        return Ok(());
     }
 
     validate_results(&all).unwrap_or_else(|err| panic!("{err}"));
@@ -246,8 +246,9 @@ pub fn run(args: &BenchArgs) {
     }
 
     if equiv_fail > 0 {
-        std::process::exit(1);
+        return Err(crate::CliError::Other(format!("{equiv_fail} correctness check(s) failed")));
     }
+    Ok(())
 }
 
 /// Resolve a baseline file from the target branch and diff the
@@ -611,7 +612,7 @@ mod tests {
         // Shape strings sometimes embed `=`, spaces, and parens; ensure they
         // round-trip via Debug-quoting so the row is valid JSON.
         let row = format_result_row("foo", None, "k=2 (warm)", "GB/s", Some(1.0), Some(2.0));
-        let parsed: serde_json::Value = serde_json::from_str(&row).expect("row must be valid JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&row).unwrap();
         assert_eq!(parsed["shape"], "k=2 (warm)");
     }
 
