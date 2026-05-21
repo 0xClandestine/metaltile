@@ -151,11 +151,13 @@ const H28_SIGNS: [u32; 28] = [
 //      where sign(t,j) = ((signs[t] >> j) & 1) ? +1 : -1.
 //   4. Store (T)(acc * scale).
 //
-// The `constant uint signs[M]` array lives in constant address space, so
-// each GPU lane reads its own row at index `tid` without a shuffle or TG op.
+// The `signs[M]` sign-bit table is a function-local array of compile-time
+// literals — MSL forbids the `constant` address space on an automatic
+// variable, so it is a plain (thread-private) array; each lane reads its
+// own row at index `tid` without a shuffle or TG op.
 const MSL_TEMPLATE: &str = r#"// hadamard_m body — M={M}, one threadgroup per M-vector.
 // signs[t]: bit j = 1 → H_M[t][j] = +1, bit j = 0 → H_M[t][j] = -1.
-constant uint signs[{M}] = { {SIGNS} };
+uint signs[{M}] = { {SIGNS} };
 
 const uint row = tgid_x;          // threadgroup row index (0-based)
 const uint t   = tid;             // thread index within the threadgroup (0..M-1)

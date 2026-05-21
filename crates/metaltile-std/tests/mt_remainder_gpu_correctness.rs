@@ -121,12 +121,12 @@ fn remainder_output_not_all_zeros_f32() {
 fn remainder_perf_bench_f32() {
     use std::time::Instant;
     let _g = gpu_lock();
-    let n = 1 << 22;
+    let n: usize = 1 << 22;
     let a: Vec<f32> = (0..n).map(|i| (i % 23) as f32 * 0.3 - 3.0).collect();
     let b: Vec<f32> = (0..n).map(|i| (i % 11) as f32 * 0.4 + 0.3).collect();
     let ctx = Context::new().expect("Context::new");
     let kernel = mt_remainder::kernel_ir_for(DType::F32);
-    let tpg = 256;
+    let tpg: usize = 256;
     let groups = n.div_ceil(tpg);
     for _ in 0..5 {
         let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();

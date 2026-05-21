@@ -276,6 +276,14 @@ pub fn kernel_ir_for(dt: DType) -> Kernel {
         kind: ParamKind::Tensor,
     });
 
+    // `m` — the partials buffer is laid out [n_splits, m, n]; the MSL
+    // computes `part_base = split * m * n`, so `m` must be a bound
+    // constexpr (the pass-1 kernel previously omitted it).
+    k.constexprs.push(ConstExprDecl {
+        name: ConstExpr::new("m"),
+        dtype: DType::U32,
+        value: None,
+    });
     k.constexprs.push(ConstExprDecl {
         name: ConstExpr::new("k"),
         dtype: DType::U32,
@@ -408,10 +416,11 @@ mod tests {
             assert_eq!(k.params[2].name, "partials");
             assert!(k.params[2].is_output);
             assert_eq!(k.params[2].dtype, DType::F32);
-            assert_eq!(k.constexprs.len(), 3);
-            assert_eq!(k.constexprs[0].name.name(), "k");
-            assert_eq!(k.constexprs[1].name.name(), "n");
-            assert_eq!(k.constexprs[2].name.name(), "k_per_split");
+            assert_eq!(k.constexprs.len(), 4);
+            assert_eq!(k.constexprs[0].name.name(), "m");
+            assert_eq!(k.constexprs[1].name.name(), "k");
+            assert_eq!(k.constexprs[2].name.name(), "n");
+            assert_eq!(k.constexprs[3].name.name(), "k_per_split");
             assert!(k.body.ops.iter().any(|op| matches!(op, Op::InlineMsl { .. })));
             assert!(k.body.ops.iter().any(|op| matches!(op, Op::Load { src, .. } if src == "tgid_y")));
             assert!(k.body.ops.iter().any(|op| matches!(op, Op::Load { src, .. } if src == "tgid_z")));
