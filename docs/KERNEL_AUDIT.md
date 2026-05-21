@@ -12,8 +12,8 @@ Sources surveyed:
 ## Summary
 
 - Total kernel-op rows in this audit (union): **89**
-- metaltile-ported kernel ops: **72 / 89 = 81 %** — 61 full ✓ (69 %), 11 partial ~ (12 %)
-- **Still to cover: 17 ops not ported (✗)**, plus **11 partial ports** still to finish
+- metaltile-ported kernel ops: **72 / 89 = 81 %** — 65 full ✓ (73 %), 7 partial ~ (8 %)
+- **Still to cover: 17 ops not ported (✗)**, plus **7 partial ports** still to finish
 - The 6 Vision / STT / TTS front-end kernels (Phase 6.5 / 7) — `conv2d`,
   `patch_embed`, `rope_2d`, `mel_spectrogram`, `audio_conv1d`,
   `vocoder/iSTFT` — are now ported (✓ rows below).
@@ -50,7 +50,7 @@ Sources surveyed:
 | Op | MLX (upstream) | MLX (ekryski@alpha) | metaltile | Notes |
 |---|---|---|---|---|
 | arange | ✓ | ✓ | ✓ | `mlx/arange.rs` → `mt_arange`. Generic `T`. Direct port. |
-| arg_reduce (argmax/argmin → float) | ✓ | ✓ | ~ | `mlx/arg_reduce.rs` → `mt_argmax_f32` only. f32 argmax only; argmin and bf16/f16 not yet. |
+| arg_reduce (argmax/argmin → float) | ✓ | ✓ | ✓ | `mlx/arg_reduce.rs` → `mt_argmax<T>` + `mt_argmin<T>`, both generic over `T` (f32/f16/bf16 — values widened to f32 for the comparison). Both emit the winning index as `u32` (MLX `arg_reduce_general` semantics); ties take the smallest index. Verified by `mt_arg_reduce_gpu_correctness` (CPU oracle, tie-break, all three dtypes, strided cover). |
 | arg_reduce (argmax → u32 index) | ✗ | ✗ | ✓ | `ffai/arg_reduce.rs` → `ffai_argmax<T>`. FFAI-only; integer-index sampler workhorse. |
 | binary (elementwise add/sub/mul/div/min/max) | ✓ | ✓ | ✓ | `mlx/binary.rs` → 6 kernels. Generic `T`. Direct port. |
 | binary_two (fused two-output elementwise) | ✓ | ✓ | ✓ | `mlx/binary_two.rs` → `mt_binary_two<T>`. |
@@ -60,9 +60,9 @@ Sources surveyed:
 | unary (exp/log/sqrt/rsqrt/abs/silu/etc.) | ✓ | ✓ | ✓ | `mlx/unary.rs` → 7+ kernels including `mt_silu`. |
 | swiglu (`silu(gate)·up` fused MLP activation) | ✗ | ✗ | ✓ | `mlx/swiglu.rs` → `mt_swiglu<T>`. Fused element-wise `silu(gate) * up` — the standard modern-transformer MLP activation (Llama 4, Qwen3 dense + MoE, Gemma, Mistral). metaltile fuses what MLX expresses as separate `silu` + `mul` ops; no dedicated MLX kernel. The broader `fused_gate_activation` (gelu / clipped-swiglu variants) is still a separate ✗ row below. |
 | random (key hash → u32) | ✓ | ✓ | ✓ | `mlx/random.rs` → `mt_random_hash`. |
-| reduce (sum/prod/max/min — all + row + col) | ✓ | ✓ | ~ | `mlx/reduce.rs` covers `all_reduce*` and `row_reduce`. Column-reduce partial; segmented-reduce missing. |
+| reduce (sum/prod/max/min — all + row + col) | ✓ | ✓ | ✓ | `mlx/reduce.rs` covers `all_reduce*`, `row_reduce*`, `col_reduce*` (Grid3D one-thread-per-column, `cols`-strided fold) and `seg_reduce*` (Grid3D one-thread-per-segment, contiguous fixed-length runs) — all four ops (sum/prod/max/min) for each shape. Verified by `reduce_col_seg_gpu_correctness`. |
 | sort | ✓ | ✓ | ~ | `mlx/sort.rs` → `mt_sort<T>`. Single-block path only; multi-block / segmented not yet. |
-| scan (prefix sum) | ✓ | ✓ | ~ | `mlx/scan.rs` → `mt_scan<T>`. Inclusive sum only; exclusive / multi-op not yet. |
+| scan (prefix sum) | ✓ | ✓ | ✓ | `mlx/scan.rs` → `mt_scan<T>` (inclusive) + `mt_scan_exclusive<T>` (exclusive — `out[i] = Σ_{j<i} inp[j]`, `out[0] = 0`). Both share the identical two-level per-/cross-simdgroup prefix-sum machinery; the exclusive variant only shifts the store stage by one slot (`base_prefix` is already the exclusive prefix of every prior thread). Verified by `scan_exclusive_gpu_correctness` (sequential CPU oracle, chunk-aligned + ragged `n`). Multi-op (prod / max / min) scan is a follow-up — the sum scan is the production-relevant shape. |
 | softmax | ✓ | ✓ | ✓ | `mlx/softmax.rs` → `mt_softmax<T>` (looped + single-row collapsed). |
 | logsumexp | ✓ | ✓ | ✓ | `mlx/logsumexp.rs` → `mt_logsumexp<T>`. |
 | layer_norm | ✓ | ✓ | ✓ | `mlx/layer_norm.rs` → `mt_layer_norm<T>`. |
@@ -91,7 +91,7 @@ Sources surveyed:
 | conv (winograd + naive_unfold + depthwise) | ✓ | ✓ | ~ | The `naive_unfold` + depthwise cases are covered for **both 2D and 3D** — `ffai/conv2d.rs` (`conv2d_generic` + `conv2d_grouped`) and `ffai/conv3d.rs` (`conv3d_generic` + `conv3d_grouped`); the `_grouped` kernels handle depthwise via `groups == in_ch` and dilation (atrous). The Winograd fast-conv path is not ported (a perf-only specialization for 3×3 stride-1 convs). The old `mlx/conv.rs` bench-crate stub is superseded. |
 | gemv | ✓ | ✓ | ✓ | `mlx/gemv.rs` → `mt_gemv<T>`. |
 | gemv_masked | ✓ | ✓ | ✓ | `mlx/gemv_masked.rs` → `mt_gemv_masked<T>` (no MLX comparison wired). |
-| quantized (affine_quantize / affine_dequantize) | ✓ | ✓ | ~ | `mlx/quantized.rs` → quantize **and** dequantize for int4/int8, plus dequantize for int3/int5/int6 (`mt_affine_{quantize,dequantize}_int{3,4,5,6,8}`). Gap: int2, and the quantize side of int3/5/6. |
+| quantized (affine_quantize / affine_dequantize) | ✓ | ✓ | ~ | `mlx/quantized.rs` → quantize **and** dequantize for int2/int4/int8, plus dequantize for int3/int5/int6 (`mt_affine_{quantize,dequantize}_int{2,4,8}` + `mt_affine_dequantize_int{3,5,6}`). int2 packs 16 two-bit codes cleanly into one uint32, so both directions follow the power-of-2 int4/int8 template — verified by `affine_int2_gpu_correctness` (CPU bit-unpack reference + quantize→dequantize round-trip). Gap: the quantize side of int3/5/6 (byte-stream packing — the dequant kernels exist as the inverse spec). |
 | quantized (affine_qmv / qvm / qmm — matvec / matmul) | ✓ | ✓ | ~ | `mlx/quantized.rs` → `mt_qmv` + `mt_qmm` / `mt_qmm_bm2` / `mt_qmm_bm4` (3 M-batch tiles) with an `mt_qmm_for` selector, all f32+f16, int4. Gap: `qvm` absent, bit-widths other than int4 absent, bf16 absent. An int4 qmm via Apple `mpp::tensor_ops::matmul2d` (NAX tensor cores, MLX-parity) is **open in PR [#137](https://github.com/0xClandestine/metaltile/pull/137)** (`mt_qmm_mma_mpp`). |
 | quantized (gather_qmv / gather_qmm — gather variants) | ✓ | ✓ | ~ | `ffai/moe.rs` → `mt_moe_gather_qmm_int4` — the affine grouped-gather quantized matmul. One Reduction-mode dispatch does the per-expert FFN projection for a MoE block: per-row expert routing via a CSR `expert_offsets` walk + int4-quantized per-expert weight matmul, matching MLX's `gatherQuantizedMM`. Verified by `moe_gather_qmm_gpu_correctness` (f32/f16/bf16). Gap: int4 only (MLX MoE default); the MMA / MPP-NAX perf variants from PR [#136](https://github.com/0xClandestine/metaltile/pull/136) are a follow-up. Bare-tensor `ffai/gather.rs` exists but is non-quantized. |
 | moe (router top-k + permute + unpermute orchestration) | ✗ | ✓ | ✓ | `ffai/moe.rs` → `mt_moe_router_topk<T>`, `mt_moe_permute<T>`, `mt_moe_unpermute<T>`. MoE expert-routing orchestration for Qwen3.6-35B-A3B / Qwen3-Coder-30B-A3B end-to-end serving. The grouped quantized BGEMM that fuses the per-expert FFN matmuls into one dispatch is now landed — `mt_moe_gather_qmm_int4` (see the `quantized (gather_*)` row); the MMA / MPP-NAX perf variants from PR [#136](https://github.com/0xClandestine/metaltile/pull/136) remain a follow-up. |
@@ -109,7 +109,7 @@ Sources surveyed:
 | aura_dequant_rotated (bulk dequant to rotated codec space) | ✗ | ✓ (`turbo_dequant_rotated` in `turbo_quant.metal`) | ✓ | `ffai/aura_dequant_rotated.rs`. bits ∈ {2,3,4,8}. Renamed. |
 | aura_score (compressed-domain Q·K) | ✗ | ✓ (`turbo_score`) | ✓ | `ffai/aura_score.rs`. bits ∈ {2,3,4,8}. Renamed. |
 | aura_value (compressed-domain value aggregation) | ✗ | ✓ (`turbo_value` in `turbo_quant.metal`) | ✓ | `ffai/aura_value.rs`. Sparsity-threshold guard mirrors MLX upstream. Renamed. |
-| aura_flash_p1 (compressed-domain flash pass 1) | ✗ | ✓ (`turbo_flash_p1` in `turbo_flash.metal`) | ~ | `ffai/aura_flash_p1.rs`. Only the `(kb=4, vb=2, dim=128)` aura4v2/Qwen3-128 instantiation today; causal-variant from upstream not ported. |
+| aura_flash_p1 (compressed-domain flash pass 1) | ✗ | ✓ (`turbo_flash_p1` in `turbo_flash.metal`) | ✓ | `ffai/aura_flash_p1.rs` → non-causal `aura_flash_p1_{kb4_vb2,kb4_vb4}_{d64,d128}` (4 instantiations) **plus** the causal variant `aura_flash_p1_causal_kb4_vb2_{d64,d128}`. The causal kernel clamps the per-token inner loop at `q_position + 1` (a constexpr-folded `causal_end` select) — every key strictly after the query token is masked out, matching `turbo_flash_p1`'s `causal` template flag. Verified by `aura_flash_gpu_correctness` (end-to-end pair) + `aura_flash_p1_causal_gpu_correctness` (full-visibility ≡ non-causal, mid-cutoff masks later blocks). |
 | aura_flash_pass2 (cross-block online-softmax merge) | ✗ | ✓ (`turbo_flash_pass2`) | ✓ | `ffai/aura_flash_pass2.rs`. fp32 accums → bf16 final. Renamed. |
 | turbo_flash_sdpa (fused single-pass SDPA, sinks variant) | ✗ | ✓ (`turbo_flash_sdpa.metal`) | ✓ | `ffai/aura_flash_sdpa.rs` → `aura_flash_sdpa_kb*_vb*_d*<T>`. Single-pass online-softmax over compressed K/V with attention sinks + sliding-window causal mask. Single-simdgroup shape (token-parallelism a perf follow-up). |
 | flash_quantized_sdpa (single-pass quantized SDPA, affine cache) | ✗ | ✓ (`flash_quantized_sdpa.metal`) | ✓ | `ffai/flash_quantized_sdpa.rs` → `flash_quantized_sdpa_b{4,8}_d{64,128,256}<T>`. Single-pass online-softmax SDPA over affine-quant KV, with sinks + sliding-window. head_dim {96,512} and bool/float masks are a follow-up. |

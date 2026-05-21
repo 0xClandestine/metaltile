@@ -1671,6 +1671,7 @@ fn mlx_qtname(dt: DType) -> Option<&'static str> {
 
 fn affine_pack_factor(bits: usize) -> usize {
     match bits {
+        2 => 16, // 16 two-bit values pack cleanly into one uint32
         3..=5 => 8,
         6 | 8 => 4,
         _ => panic!("affine_pack_factor: unsupported bits={bits}"),
@@ -1679,6 +1680,7 @@ fn affine_pack_factor(bits: usize) -> usize {
 
 fn affine_bytes_per_pack(bits: usize) -> usize {
     match bits {
+        2 => 4, // one uint32 — int2 packs power-of-2, no byte-stream crossing
         3 => 3,
         4 => 4,
         5 => 5,
@@ -1695,6 +1697,7 @@ fn affine_bytes_per_pack(bits: usize) -> usize {
 /// value/byte and also dispatches 4× more.
 fn affine_mlx_pack_factor(bits: usize) -> usize {
     match bits {
+        2 => 4, // 8/2 — 4 values per byte
         3 => 8, // hardcoded
         4 => 2, // 8/4
         5 => 8, // hardcoded

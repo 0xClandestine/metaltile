@@ -2541,6 +2541,124 @@ pub fn mt_affine_quantize_int8<T>(
     }
 }
 
+// ─── mt_affine_dequantize_int2 ─────────────────────────────────────────
+//
+// One thread per pack (16 two-bit values in one uint32). `bits=2` packs
+// cleanly into a uint32 (16 values, no byte-stream crossing), so this
+// follows the int4 / int8 power-of-2 template with a 16-way unroll and
+// 2-bit shifts. For each output i in 0..16: `q = (val >> (i*2)) & 0x3`,
+// then `out[oindex+i] = scale * q + bias`.
+//
+// Faithful port of MLX `affine_dequantize<T, group_size, 2>` from
+// `quantized.h`.
+#[bench_kernel(
+    op="affine",
+    subop="dequantize_int2",
+    class=AffineDequantize,
+    bits=2,
+    group_size=64,
+    n_groups=4096,
+    batch=1,
+    tpg=32,
+    // tol=5e-3 — int2 max_q=3; tightest of the dequant family, the
+    // worst-case bf16 round-trip drift at n_groups=4096 is ~1e-3.
+    tol=5e-3,
+    metal_file="quantized.metal",
+)]
+#[kernel]
+pub fn mt_affine_dequantize_int2<T>(
+    w: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    mut out: Tensor<T>,
+    #[constexpr] group_size: u32,
+) {
+    let pack_idx = program_id::<0>();
+    let pack_factor = 16u32;
+    let oindex = pack_idx * pack_factor;
+    let g_idx = oindex / group_size;
+
+    let scale = load(scales[g_idx]).cast::<f32>();
+    let bias = load(biases[g_idx]).cast::<f32>();
+    let val = load(w[pack_idx]);
+
+    // 16 two-bit lanes; each is `(val >> (i*2)) & 0x3`.
+    for k in range(0u32, 16u32, 1u32) {
+        let q = (val >> (k * 2u32)) & 3u32;
+        store(out[oindex + k], (scale * q.cast::<f32>() + bias).cast::<T>());
+    }
+}
+
+// ─── mt_affine_quantize_int2 ───────────────────────────────────────────
+//
+// Inverse of `mt_affine_dequantize_int2`. One threadgroup of 32 threads
+// per group: each lane covers `group_size / 32 = 2` input values, the
+// min/max reduce runs over the simdgroup, then `packs_per_group =
+// group_size / 16` lanes each assemble one uint32 (16 two-bit codes).
+//
+// n_bins = 3 (`2^2 - 1`). Same template as `mt_affine_quantize_int4`
+// with the pack width widened from 8 nibbles to 16 two-bit fields.
+#[bench_kernel(
+    op="affine",
+    subop="quantize_int2",
+    class=AffineQuantize,
+    bits=2,
+    group_size=64,
+    n_groups=4096,
+    batch=1,
+    tpg=32,
+    tol=1e-1,
+    metal_file="quantized.metal",
+)]
+#[kernel]
+pub fn mt_affine_quantize_int2<T>(
+    w: Tensor<T>,
+    mut out: Tensor<u32>,
+    mut scales: Tensor<T>,
+    mut biases: Tensor<T>,
+    #[constexpr] group_size: u32,
+) {
+    let g_idx = tgid_x;
+    let lane = tid;
+    let in_base = g_idx * group_size;
+
+    let v0 = load(w[in_base + lane * 2u32]).cast::<f32>();
+    let v1 = load(w[in_base + lane * 2u32 + 1u32]).cast::<f32>();
+    let local_min = select(v0 < v1, v0, v1);
+    let local_max = select(v0 > v1, v0, v1);
+    let w_min = simd_min(local_min);
+    let w_max = simd_max(local_max);
+
+    let n_bins = 3.0f32;
+    let raw_scale = (w_max - w_min) / n_bins;
+    let eps = 1.0e-7f32;
+    let scale = select(raw_scale < eps, 1.0f32, raw_scale);
+    let inv_scale = 1.0f32 / scale;
+    let bias = w_min;
+
+    if lane == 0u32 {
+        store(scales[g_idx], scale.cast::<T>());
+        store(biases[g_idx], bias.cast::<T>());
+    }
+
+    // Packs in parallel: `packs_per_group = group_size / 16` lanes each
+    // assemble one uint32 (16 two-bit codes). For group_size=64 →
+    // packs_per_group=4.
+    let packs_per_group = group_size / 16u32;
+    if lane < packs_per_group {
+        let pack_in_base = in_base + lane * 16u32;
+        let mut acc = 0u32;
+        for k in range(0u32, 16u32, 1u32) {
+            let v = load(w[pack_in_base + k]).cast::<f32>();
+            let q_f = (v - bias) * inv_scale + 0.5f32;
+            let q_c = select(q_f > 3.0f32, 3.0f32, select(q_f < 0.0f32, 0.0f32, q_f));
+            let q = q_c.cast::<u32>();
+            acc = acc | (q << (k * 2u32));
+        }
+        store(out[g_idx * packs_per_group + lane], acc);
+    }
+}
+
 // ─── Byte-stream dequant variants (int3 / int5 / int6) ───────────────
 //
 // Non-power-of-2 bit widths can't pack cleanly into a uint32, so each

@@ -174,6 +174,10 @@ fn aura_flash_pair_matches_naive_reference_kb4_vb2_d128() {
     p1_buffers.insert("repeat_count".into(), (repeat as u32).to_le_bytes().to_vec());
     p1_buffers.insert("num_blocks".into(), (num_blocks as u32).to_le_bytes().to_vec());
     p1_buffers.insert("block_size".into(), (block_size as u32).to_le_bytes().to_vec());
+    // q_position is consulted only by the causal variant; the non-causal
+    // kernel ignores it, but the buffer must still be bound. tokens-1 =
+    // every token visible (a no-op cutoff).
+    p1_buffers.insert("q_position".into(), ((tokens - 1) as u32).to_le_bytes().to_vec());
 
     let mut p1_kernel = aura_flash_p1_kb4_vb2_d128::kernel_ir_for(DType::F32);
     p1_kernel.mode = KernelMode::Grid3D;
