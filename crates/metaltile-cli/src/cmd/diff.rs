@@ -321,63 +321,44 @@ fn build_diff_row_display(row: &DiffRow) -> DiffRowDisplay {
         ),
     };
 
-    // Delta column — kind label folded in, color communicates severity:
-    //   green  = improvement (▲ +88%)
-    //   red    = regression (▼ -35%)
-    //   yellow = borderline / within threshold (+5%, -3%)
-    //   dim    = exactly 0% (— +0%)
-    //   red    = "removed"
-    //   cyan   = "new"
+    // Delta column — kind label folded in, one paint() call so restyle
+    // sees a single SGR pair (fixes partial color in CI where the old
+    // arrow+percentage concatenation produced nested escapes).
+    //   green bold = improvement (▲ +88%)
+    //   red bold   = regression (▼ -35%)
+    //   yellow     = borderline / within threshold (▲ +5%, ▼ -3%)
+    //   dim        = exactly 0% (— +0%)
+    //   red        = "removed"
+    //   cyan       = "new"
     let (delta, delta_styled) = match row.kind {
         DeltaKind::Removed => {
-            let s = "removed";
-            (s.to_string(), paint_stderr(s, Style::new().fg(Color::Red)))
+            ("removed".to_string(), paint_stderr("removed", Style::new().fg(Color::Red)))
         },
         DeltaKind::New => {
-            let s = "new";
-            (s.to_string(), paint_stdout(s, Style::new().fg(Color::Cyan)))
+            ("new".to_string(), paint_stdout("new", Style::new().fg(Color::Cyan)))
         },
         DeltaKind::Unchanged => {
             let pct = row.delta_pct.unwrap_or(0.0);
-            let s = format!("{:+.0}%", pct);
             if pct == 0.0 {
-                let styled = format!(
-                    "{} {}",
-                    paint_stdout("—", dim_style),
-                    paint_stdout(&s, dim_style),
-                );
-                (format!("— {s}"), styled)
+                let s = format!("— {:+.0}%", pct);
+                (s.clone(), paint_stdout(&s, dim_style))
             } else {
-                // Borderline: yellow communicates "close to threshold"
-                let arrow_char = if pct > 0.0 { "▲" } else { "▼" };
+                let arrow = if pct > 0.0 { "▲" } else { "▼" };
+                let s = format!("{arrow} {:+.0}%", pct);
                 let yellow = Style::new().fg(Color::Yellow);
-                let arrow_styled = if pct < 0.0 {
-                    paint_stderr(arrow_char, yellow)
-                } else {
-                    paint_stdout(arrow_char, yellow)
-                };
-                let styled = format!("{} {}", arrow_styled, paint_stdout(&s, yellow));
-                (format!("{arrow_char} {s}"), styled)
+                let styled = paint_stdout(&s, yellow);
+                (s, styled)
             }
         },
-        _ => {
-            let (arrow_char, arrow_style) = match row.kind {
-                DeltaKind::Regression => ("▼", Style::new().fg(Color::Red).bold()),
-                DeltaKind::Improvement => ("▲", Style::new().fg(Color::Green).bold()),
-                _ => unreachable!(),
-            };
-            let s = format!("{:+.0}%", row.delta_pct.unwrap_or(0.0));
-            let delta_style = match row.kind {
-                DeltaKind::Regression => Style::new().fg(Color::Red).bold(),
-                DeltaKind::Improvement => Style::new().fg(Color::Green).bold(),
-                _ => unreachable!(),
-            };
-            let arrow_styled = match row.kind {
-                DeltaKind::Regression => paint_stderr(arrow_char, arrow_style),
-                _ => paint_stdout(arrow_char, arrow_style),
-            };
-            let styled = format!("{} {}", arrow_styled, paint_stdout(&s, delta_style));
-            (format!("{arrow_char} {s}"), styled)
+        DeltaKind::Regression => {
+            let s = format!("▼ {:+.0}%", row.delta_pct.unwrap_or(0.0));
+            let style = Style::new().fg(Color::Red).bold();
+            (s.clone(), paint_stderr(&s, style))
+        },
+        DeltaKind::Improvement => {
+            let s = format!("▲ {:+.0}%", row.delta_pct.unwrap_or(0.0));
+            let style = Style::new().fg(Color::Green).bold();
+            (s.clone(), paint_stdout(&s, style))
         },
     };
 
