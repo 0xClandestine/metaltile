@@ -48,6 +48,7 @@ use metaltile_std::{
         quantized_mpp,
         rms_norm::{mt_gated_mixer_norm, mt_rms_norm},
         steel::attn::steel_attention_mma::mt_sdpa_prefill_mma,
+        swiglu::mt_swiglu,
         unary::{mt_cast_to_f32, mt_gelu, mt_relu, mt_sigmoid, mt_sigmoid_scalar_fma, mt_silu, mt_softplus},
     },
     probe::mpp_matmul_smoke,
@@ -1550,6 +1551,17 @@ fn register_kernels() -> Vec<Kernel> {
 
         let mut k = mt_sigmoid::kernel_ir_for(dt);
         k.name = format!("mt_sigmoid_{}", dtype_suffix(dt));
+        kernels.push(k);
+    }
+
+    // ─── mt_swiglu (Elementwise) — fused silu(gate) * up ────────────
+    // Used by FFAI's MoE expert SwiGLU + Qwen3 dense MLPs. Replaces a
+    // two-launch path (Ops.silu + Ops.mul) with one dispatch — half
+    // the bandwidth on the activation tensor, and fewer per-dispatch
+    // commit/encode round-trips on the host side.
+    for &dt in &dtypes {
+        let mut k = mt_swiglu::kernel_ir_for(dt);
+        k.name = format!("mt_swiglu_{}", dtype_suffix(dt));
         kernels.push(k);
     }
 
