@@ -3,9 +3,9 @@
 use std::path::PathBuf;
 
 use hf_hub::{Repo, RepoType, api::tokio::Api};
+use tracing::info;
 
 use crate::error::InferError;
-use tracing::info;
 
 /// Download a model repo to the local HF cache and return the local directory.
 ///

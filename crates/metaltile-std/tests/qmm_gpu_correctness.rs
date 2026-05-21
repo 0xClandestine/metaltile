@@ -609,15 +609,18 @@ fn mt_qmm_perf_bench_qwen3_shapes_f16_m_sweep() {
             let mut samples = Vec::with_capacity(ITERS);
             for i in 0..(WARMUP + ITERS) {
                 let r = ctx
-                    .dispatch_chain(&[DispatchSpec {
-                        kernel: &kernel,
-                        buffers: &buffers,
-                        fn_consts: &empty_fn_consts,
-                        grid_groups: [n / 8, m, 1],
-                        threads_per_group: [64, 1, 1],
-                        resident: &residents,
-                        output_resident: &no_output_resident,
-                    }], &[])
+                    .dispatch_chain(
+                        &[DispatchSpec {
+                            kernel: &kernel,
+                            buffers: &buffers,
+                            fn_consts: &empty_fn_consts,
+                            grid_groups: [n / 8, m, 1],
+                            threads_per_group: [64, 1, 1],
+                            resident: &residents,
+                            output_resident: &no_output_resident,
+                        }],
+                        &[],
+                    )
                     .expect("dispatch");
                 if i >= WARMUP {
                     samples.push(r[0].elapsed_us);

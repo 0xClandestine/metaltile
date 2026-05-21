@@ -736,11 +736,7 @@ impl Context {
             use std::sync::OnceLock;
 
             use objc2::{rc::Retained, runtime::ProtocolObject};
-            use objc2_metal::{
-                MTLCreateSystemDefaultDevice,
-                MTLDevice,
-                MTLResourceOptions,
-            };
+            use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
             type Dev = ProtocolObject<dyn MTLDevice>;
             static DEV: OnceLock<Retained<Dev>> = OnceLock::new();
             let dev = DEV.get_or_init(|| {
@@ -845,357 +841,358 @@ impl Context {
         // objects accumulate indefinitely — ~3 per token = ~300+ objects after
         // a 100-token sequence.
         objc2::rc::autoreleasepool(|_pool| {
-        use std::{
-            collections::HashSet,
-            ptr::NonNull,
-            sync::{Mutex, OnceLock},
-        };
-
-        use objc2::{rc::Retained, runtime::ProtocolObject};
-        use objc2_foundation::NSString;
-        use objc2_metal::{
-            MTLBarrierScope,
-            MTLBuffer,
-            MTLCommandBuffer,
-            MTLCommandEncoder,
-            MTLCommandQueue,
-            MTLComputeCommandEncoder,
-            MTLComputePipelineDescriptor,
-            MTLComputePipelineState,
-            MTLCreateSystemDefaultDevice,
-            MTLDevice,
-            MTLDispatchType,
-            MTLLibrary,
-            MTLPipelineOption,
-            MTLResourceOptions,
-            MTLSize,
-        };
-        use rustc_hash::FxHashMap;
-
-        type Dev = ProtocolObject<dyn objc2_metal::MTLDevice>;
-        type Pso = ProtocolObject<dyn MTLComputePipelineState>;
-        type Queue = ProtocolObject<dyn MTLCommandQueue>;
-
-        static DEV: OnceLock<Option<Retained<Dev>>> = OnceLock::new();
-        static PSO_CACHE: OnceLock<Mutex<FxHashMap<u64, Retained<Pso>>>> = OnceLock::new();
-        static QUEUE: OnceLock<Option<Retained<Queue>>> = OnceLock::new();
-
-        let dev = DEV
-            .get_or_init(|| MTLCreateSystemDefaultDevice())
-            .as_ref()
-            .ok_or(MetalTileError::DeviceCreation)?;
-        let cache = PSO_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
-        let queue = QUEUE
-            .get_or_init(|| dev.newCommandQueue())
-            .as_ref()
-            .ok_or(MetalTileError::QueueCreation)?;
-
-        let acquire_shared = |bytes: Option<&[u8]>, len: usize| -> Result<BufRc, MetalTileError> {
-            let opts = MTLResourceOptions::StorageModeShared
-                | MTLResourceOptions::HazardTrackingModeUntracked;
-            let buf = pool_acquire(dev, len, opts)?;
-            if let Some(b) = bytes.filter(|b| !b.is_empty()) {
-                if b.len() < len {
-                    return Err(MetalTileError::Buffer(format!(
-                        "buffer expected {len} bytes, got {}",
-                        b.len()
-                    )));
-                }
-                let dst = buf.contents();
-                unsafe {
-                    std::ptr::copy_nonoverlapping(b.as_ptr(), dst.as_ptr() as *mut u8, b.len());
-                }
-            }
-            Ok(buf)
-        };
-        let acquire_private = |len: usize| -> Result<BufRc, MetalTileError> {
-            pool_acquire(
-                dev,
-                len,
-                MTLResourceOptions::StorageModePrivate
-                    | MTLResourceOptions::HazardTrackingModeUntracked,
-            )
-        };
-
-        // Precompute MSL + binding plans per spec; collect param names
-        // consumed as INPUT by any later spec — those drive private-storage
-        // aliasing for intermediate buffers.
-        let mut msl_sources: Vec<String> = Vec::with_capacity(specs.len());
-        let mut binding_plans: Vec<Vec<ParamBufferPlan>> = Vec::with_capacity(specs.len());
-        // MSL cache. Codegen passes (vectorize, fusion, …) cost tens of
-        // µs per kernel — at short context (n_kv ≤ 1K) the total iter
-        // time is in the 40 µs range so re-running passes per dispatch
-        // is a significant fraction. Cache keyed by the same FNV hash
-        // we use for PSO lookup (kernel name + sorted fn_consts +
-        // first param dtype) and check it before running the pipeline.
-        static MSL_CACHE: OnceLock<Mutex<FxHashMap<u64, String>>> = OnceLock::new();
-        let msl_cache = MSL_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
-        for spec in specs {
-            let h = pso_cache_key(spec.kernel, spec.fn_consts);
-            // Drop the guard BEFORE the match — Mutex isn't reentrant, and
-            // temporaries in a match scrutinee live until the end of the match
-            // body (RFC 66), so writing back inside None would deadlock against
-            // the still-held guard.
-            let cached = msl_cache
-                .lock()
-                .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?
-                .get(&h)
-                .cloned();
-            let msl = match cached {
-                Some(m) => {
-                    tracing::trace!(kernel = %spec.kernel.name, "msl cache hit");
-                    m
-                },
-                None => {
-                    let generated = MslGenerator::default().generate(spec.kernel)?;
-                    tracing::trace!(kernel = %spec.kernel.name, bytes = generated.len(), "msl generated");
-                    msl_cache
-                        .lock()
-                        .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?
-                        .insert(h, generated.clone());
-                    generated
-                },
+            use std::{
+                collections::HashSet,
+                ptr::NonNull,
+                sync::{Mutex, OnceLock},
             };
-            msl_sources.push(msl);
-            binding_plans.push(build_param_buffer_plans(spec.kernel, spec.buffers)?);
-        }
-        let later_inputs: Vec<HashSet<&str>> = (0..specs.len())
-            .map(|i| {
-                specs[i + 1..]
-                    .iter()
-                    .flat_map(|s| s.kernel.params.iter())
-                    .filter(|p| !p.is_output)
-                    .map(|p| p.name.as_str())
-                    .collect()
-            })
-            .collect();
 
-        // Persistent name→buffer map: outputs from earlier specs go here
-        // (private storage) so later specs find them by name and skip alloc.
-        let mut alias_pool: FxHashMap<String, BufRc> = FxHashMap::default();
+            use objc2::{rc::Retained, runtime::ProtocolObject};
+            use objc2_foundation::NSString;
+            use objc2_metal::{
+                MTLBarrierScope,
+                MTLBuffer,
+                MTLCommandBuffer,
+                MTLCommandEncoder,
+                MTLCommandQueue,
+                MTLComputeCommandEncoder,
+                MTLComputePipelineDescriptor,
+                MTLComputePipelineState,
+                MTLCreateSystemDefaultDevice,
+                MTLDevice,
+                MTLDispatchType,
+                MTLLibrary,
+                MTLPipelineOption,
+                MTLResourceOptions,
+                MTLSize,
+            };
+            use rustc_hash::FxHashMap;
 
-        let mut pipes: Vec<Retained<Pso>> = Vec::with_capacity(specs.len());
-        for (spec, msl) in specs.iter().zip(msl_sources.iter()) {
-            let cache_key = pso_cache_key(spec.kernel, spec.fn_consts);
-            let pipe: Retained<Pso> = {
-                let mut lock = cache
+            type Dev = ProtocolObject<dyn objc2_metal::MTLDevice>;
+            type Pso = ProtocolObject<dyn MTLComputePipelineState>;
+            type Queue = ProtocolObject<dyn MTLCommandQueue>;
+
+            static DEV: OnceLock<Option<Retained<Dev>>> = OnceLock::new();
+            static PSO_CACHE: OnceLock<Mutex<FxHashMap<u64, Retained<Pso>>>> = OnceLock::new();
+            static QUEUE: OnceLock<Option<Retained<Queue>>> = OnceLock::new();
+
+            let dev = DEV
+                .get_or_init(|| MTLCreateSystemDefaultDevice())
+                .as_ref()
+                .ok_or(MetalTileError::DeviceCreation)?;
+            let cache = PSO_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
+            let queue = QUEUE
+                .get_or_init(|| dev.newCommandQueue())
+                .as_ref()
+                .ok_or(MetalTileError::QueueCreation)?;
+
+            let acquire_shared = |bytes: Option<&[u8]>,
+                                  len: usize|
+             -> Result<BufRc, MetalTileError> {
+                let opts = MTLResourceOptions::StorageModeShared
+                    | MTLResourceOptions::HazardTrackingModeUntracked;
+                let buf = pool_acquire(dev, len, opts)?;
+                if let Some(b) = bytes.filter(|b| !b.is_empty()) {
+                    if b.len() < len {
+                        return Err(MetalTileError::Buffer(format!(
+                            "buffer expected {len} bytes, got {}",
+                            b.len()
+                        )));
+                    }
+                    let dst = buf.contents();
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(b.as_ptr(), dst.as_ptr() as *mut u8, b.len());
+                    }
+                }
+                Ok(buf)
+            };
+            let acquire_private = |len: usize| -> Result<BufRc, MetalTileError> {
+                pool_acquire(
+                    dev,
+                    len,
+                    MTLResourceOptions::StorageModePrivate
+                        | MTLResourceOptions::HazardTrackingModeUntracked,
+                )
+            };
+
+            // Precompute MSL + binding plans per spec; collect param names
+            // consumed as INPUT by any later spec — those drive private-storage
+            // aliasing for intermediate buffers.
+            let mut msl_sources: Vec<String> = Vec::with_capacity(specs.len());
+            let mut binding_plans: Vec<Vec<ParamBufferPlan>> = Vec::with_capacity(specs.len());
+            // MSL cache. Codegen passes (vectorize, fusion, …) cost tens of
+            // µs per kernel — at short context (n_kv ≤ 1K) the total iter
+            // time is in the 40 µs range so re-running passes per dispatch
+            // is a significant fraction. Cache keyed by the same FNV hash
+            // we use for PSO lookup (kernel name + sorted fn_consts +
+            // first param dtype) and check it before running the pipeline.
+            static MSL_CACHE: OnceLock<Mutex<FxHashMap<u64, String>>> = OnceLock::new();
+            let msl_cache = MSL_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
+            for spec in specs {
+                let h = pso_cache_key(spec.kernel, spec.fn_consts);
+                // Drop the guard BEFORE the match — Mutex isn't reentrant, and
+                // temporaries in a match scrutinee live until the end of the match
+                // body (RFC 66), so writing back inside None would deadlock against
+                // the still-held guard.
+                let cached = msl_cache
                     .lock()
-                    .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?;
-                if let Some(p) = lock.get(&cache_key) {
-                    tracing::debug!(kernel = %spec.kernel.name, "pso cache hit");
-                    p.clone()
-                } else {
-                    let src = NSString::from_str(msl);
-                    let lib = dev
-                        .newLibraryWithSource_options_error(&src, None)
-                        .map_err(|e| MetalTileError::MslCompilation(format!("{e:?}")))?;
-                    let fn_name = NSString::from_str(&spec.kernel.name);
-                    let fun = if spec.fn_consts.is_empty() {
-                        lib.newFunctionWithName(&fn_name).ok_or_else(|| {
-                            MetalTileError::FunctionNotFound { name: spec.kernel.name.clone() }
-                        })?
-                    } else {
-                        use objc2_metal::{MTLDataType, MTLFunctionConstantValues};
-                        let consts = MTLFunctionConstantValues::new();
-                        for (n, v) in spec.fn_consts {
-                            let name = NSString::from_str(n);
-                            // Use a stable owned u32 so addr_of! is valid for
-                            // the entire duration of the setConstantValue call.
-                            // Avoids UB from casting a &u32 reference to *mut.
-                            let val: u32 = *v;
-                            unsafe {
-                                consts.setConstantValue_type_withName(
-                                    NonNull::new(std::ptr::addr_of!(val) as *mut _)
-                                        .expect("stack u32 always non-null"),
-                                    MTLDataType::UInt,
-                                    &name,
-                                );
-                            }
-                        }
-                        lib.newFunctionWithName_constantValues_error(&fn_name, &consts).map_err(
-                            |e| MetalTileError::FunctionNotFound {
-                                name: format!("{} (with constants): {e:?}", spec.kernel.name),
-                            },
-                        )?
-                    };
-                    let desc = MTLComputePipelineDescriptor::new();
-                    desc.setComputeFunction(Some(&fun));
-                    let pso = dev
-                        .newComputePipelineStateWithDescriptor_options_reflection_error(
-                            &desc,
-                            MTLPipelineOption(0),
-                            None,
-                        )
-                        .map_err(|e| MetalTileError::PipelineCreation {
-                            name: spec.kernel.name.clone(),
-                            reason: format!("{e:?}"),
-                        })?;
-                    lock.insert(cache_key, pso.clone());
-                    tracing::debug!(kernel = %spec.kernel.name, "pso cache miss — compiled");
-                    pso
-                }
-            };
-            pipes.push(pipe);
-        }
-
-        let cb = queue.commandBuffer().ok_or(MetalTileError::NoDevice)?;
-
-        // Per-spec buffer slots kept so true outputs (not consumed by later
-        // specs) can be read back at the end.
-        let mut per_spec_bufs: Vec<Vec<BufRc>> = Vec::with_capacity(specs.len());
-
-        let push_strided = |bufs: &mut Vec<BufRc>,
-                            param: &Param,
-                            src: &BTreeMap<String, Vec<u8>>|
-         -> Result<(), MetalTileError> {
-            if param.kind == ParamKind::Strided {
-                let (shape, strides) = resolve_strided_metadata(param, src)?;
-                bufs.push(acquire_shared(Some(shape.as_ref()), shape.len())?);
-                bufs.push(acquire_shared(Some(strides.as_ref()), strides.len())?);
+                    .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?
+                    .get(&h)
+                    .cloned();
+                let msl = match cached {
+                    Some(m) => {
+                        tracing::trace!(kernel = %spec.kernel.name, "msl cache hit");
+                        m
+                    },
+                    None => {
+                        let generated = MslGenerator::default().generate(spec.kernel)?;
+                        tracing::trace!(kernel = %spec.kernel.name, bytes = generated.len(), "msl generated");
+                        msl_cache
+                            .lock()
+                            .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?
+                            .insert(h, generated.clone());
+                        generated
+                    },
+                };
+                msl_sources.push(msl);
+                binding_plans.push(build_param_buffer_plans(spec.kernel, spec.buffers)?);
             }
-            Ok(())
-        };
+            let later_inputs: Vec<HashSet<&str>> = (0..specs.len())
+                .map(|i| {
+                    specs[i + 1..]
+                        .iter()
+                        .flat_map(|s| s.kernel.params.iter())
+                        .filter(|p| !p.is_output)
+                        .map(|p| p.name.as_str())
+                        .collect()
+                })
+                .collect();
 
-        let mut enc: Option<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>> = None;
+            // Persistent name→buffer map: outputs from earlier specs go here
+            // (private storage) so later specs find them by name and skip alloc.
+            let mut alias_pool: FxHashMap<String, BufRc> = FxHashMap::default();
 
-        for (i, spec) in specs.iter().enumerate() {
-            let mut bufs: Vec<BufRc> = Vec::with_capacity(spec.kernel.params.len() * 2);
+            let mut pipes: Vec<Retained<Pso>> = Vec::with_capacity(specs.len());
+            for (spec, msl) in specs.iter().zip(msl_sources.iter()) {
+                let cache_key = pso_cache_key(spec.kernel, spec.fn_consts);
+                let pipe: Retained<Pso> = {
+                    let mut lock = cache
+                        .lock()
+                        .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?;
+                    if let Some(p) = lock.get(&cache_key) {
+                        tracing::debug!(kernel = %spec.kernel.name, "pso cache hit");
+                        p.clone()
+                    } else {
+                        let src = NSString::from_str(msl);
+                        let lib = dev
+                            .newLibraryWithSource_options_error(&src, None)
+                            .map_err(|e| MetalTileError::MslCompilation(format!("{e:?}")))?;
+                        let fn_name = NSString::from_str(&spec.kernel.name);
+                        let fun = if spec.fn_consts.is_empty() {
+                            lib.newFunctionWithName(&fn_name).ok_or_else(|| {
+                                MetalTileError::FunctionNotFound { name: spec.kernel.name.clone() }
+                            })?
+                        } else {
+                            use objc2_metal::{MTLDataType, MTLFunctionConstantValues};
+                            let consts = MTLFunctionConstantValues::new();
+                            for (n, v) in spec.fn_consts {
+                                let name = NSString::from_str(n);
+                                // Use a stable owned u32 so addr_of! is valid for
+                                // the entire duration of the setConstantValue call.
+                                // Avoids UB from casting a &u32 reference to *mut.
+                                let val: u32 = *v;
+                                unsafe {
+                                    consts.setConstantValue_type_withName(
+                                        NonNull::new(std::ptr::addr_of!(val) as *mut _)
+                                            .expect("stack u32 always non-null"),
+                                        MTLDataType::UInt,
+                                        &name,
+                                    );
+                                }
+                            }
+                            lib.newFunctionWithName_constantValues_error(&fn_name, &consts)
+                                .map_err(|e| MetalTileError::FunctionNotFound {
+                                    name: format!("{} (with constants): {e:?}", spec.kernel.name),
+                                })?
+                        };
+                        let desc = MTLComputePipelineDescriptor::new();
+                        desc.setComputeFunction(Some(&fun));
+                        let pso = dev
+                            .newComputePipelineStateWithDescriptor_options_reflection_error(
+                                &desc,
+                                MTLPipelineOption(0),
+                                None,
+                            )
+                            .map_err(|e| MetalTileError::PipelineCreation {
+                                name: spec.kernel.name.clone(),
+                                reason: format!("{e:?}"),
+                            })?;
+                        lock.insert(cache_key, pso.clone());
+                        tracing::debug!(kernel = %spec.kernel.name, "pso cache miss — compiled");
+                        pso
+                    }
+                };
+                pipes.push(pipe);
+            }
 
-            for (param, plan) in spec.kernel.params.iter().zip(&binding_plans[i]) {
-                // Outputs with pre-uploaded GPU buffers → write directly in-place.
-                if param.is_output
-                    && let Some(rb) = spec.output_resident.get(&param.name)
-                {
-                    bufs.push(rb.inner.clone());
-                    push_strided(&mut bufs, param, spec.buffers)?;
-                    continue;
+            let cb = queue.commandBuffer().ok_or(MetalTileError::NoDevice)?;
+
+            // Per-spec buffer slots kept so true outputs (not consumed by later
+            // specs) can be read back at the end.
+            let mut per_spec_bufs: Vec<Vec<BufRc>> = Vec::with_capacity(specs.len());
+
+            let push_strided = |bufs: &mut Vec<BufRc>,
+                                param: &Param,
+                                src: &BTreeMap<String, Vec<u8>>|
+             -> Result<(), MetalTileError> {
+                if param.kind == ParamKind::Strided {
+                    let (shape, strides) = resolve_strided_metadata(param, src)?;
+                    bufs.push(acquire_shared(Some(shape.as_ref()), shape.len())?);
+                    bufs.push(acquire_shared(Some(strides.as_ref()), strides.len())?);
                 }
-                // Inputs: resident-pre-uploaded > aliased from earlier spec.
-                if !param.is_output {
-                    let pre = spec
-                        .resident
-                        .get(&param.name)
-                        .map(|r| r.inner.clone())
-                        .or_else(|| alias_pool.get(&param.name).cloned());
-                    if let Some(buf) = pre {
-                        bufs.push(buf);
+                Ok(())
+            };
+
+            let mut enc: Option<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>> = None;
+
+            for (i, spec) in specs.iter().enumerate() {
+                let mut bufs: Vec<BufRc> = Vec::with_capacity(spec.kernel.params.len() * 2);
+
+                for (param, plan) in spec.kernel.params.iter().zip(&binding_plans[i]) {
+                    // Outputs with pre-uploaded GPU buffers → write directly in-place.
+                    if param.is_output
+                        && let Some(rb) = spec.output_resident.get(&param.name)
+                    {
+                        bufs.push(rb.inner.clone());
                         push_strided(&mut bufs, param, spec.buffers)?;
                         continue;
                     }
+                    // Inputs: resident-pre-uploaded > aliased from earlier spec.
+                    if !param.is_output {
+                        let pre = spec
+                            .resident
+                            .get(&param.name)
+                            .map(|r| r.inner.clone())
+                            .or_else(|| alias_pool.get(&param.name).cloned());
+                        if let Some(buf) = pre {
+                            bufs.push(buf);
+                            push_strided(&mut bufs, param, spec.buffers)?;
+                            continue;
+                        }
+                    }
+                    // Outputs aliased to later specs → private. Otherwise shared.
+                    let new_buf =
+                        if param.is_output && later_inputs[i].contains(param.name.as_str()) {
+                            let b = acquire_private(plan.data_len)?;
+                            alias_pool.insert(param.name.clone(), b.clone());
+                            b
+                        } else {
+                            let bytes = spec.buffers.get(&param.name).map(Vec::as_slice);
+                            acquire_shared(bytes, plan.data_len)?
+                        };
+                    bufs.push(new_buf);
+                    push_strided(&mut bufs, param, spec.buffers)?;
                 }
-                // Outputs aliased to later specs → private. Otherwise shared.
-                let new_buf = if param.is_output && later_inputs[i].contains(param.name.as_str()) {
-                    let b = acquire_private(plan.data_len)?;
-                    alias_pool.insert(param.name.clone(), b.clone());
-                    b
-                } else {
-                    let bytes = spec.buffers.get(&param.name).map(Vec::as_slice);
-                    acquire_shared(bytes, plan.data_len)?
-                };
-                bufs.push(new_buf);
-                push_strided(&mut bufs, param, spec.buffers)?;
-            }
-            // tensor_binding_count = next free slot after all tensor
-            // bindings (data + strided shape/strides). Constexpr scalars
-            // bind via setBytes starting here — no MTLBuffer alloc.
-            let tensor_binding_count = bufs.len();
+                // tensor_binding_count = next free slot after all tensor
+                // bindings (data + strided shape/strides). Constexpr scalars
+                // bind via setBytes starting here — no MTLBuffer alloc.
+                let tensor_binding_count = bufs.len();
 
-            if i == 0 {
-                // ── First pass: create a concurrent encoder ──
-                // Concurrent dispatch lets Metal overlap independent
-                // kernel dispatches; barriers only between dependent specs.
-                enc = (*cb)
-                    .computeCommandEncoderWithDispatchType(
-                        MTLDispatchType::Concurrent,
-                    )
-                    .map(Some)
-                    .ok_or(MetalTileError::NoDevice)?;
-            }
-            let enc_ref = enc.as_ref().unwrap();
-            enc_ref.setComputePipelineState(&pipes[i]);
-            for (idx, buf) in bufs.iter().enumerate() {
-                unsafe { enc_ref.setBuffer_offset_atIndex(Some(buf.as_ref()), 0, idx) };
-            }
-            // Inline constexpr scalars via setBytes (Apple-recommended
-            // path for <4KB constants — skips the allocator + binding
-            // table indirection for each scalar). Same wire format the
-            // codegen expects: each constexpr is a single u32/f32-sized
-            // scalar at slot `tensor_binding_count + constexpr_index`.
-            for (j, decl) in spec.kernel.constexprs.iter().enumerate() {
-                let key = decl.name.name();
-                let elem = decl.dtype.size_bytes().max(4);
-                let bytes = spec.buffers.get(key).map(Vec::as_slice).unwrap_or(&[]);
-                let mut staged = [0u8; 16];
-                let n = bytes.len().min(elem).min(staged.len());
-                staged[..n].copy_from_slice(&bytes[..n]);
-                unsafe {
-                    enc_ref.setBytes_length_atIndex(
-                        NonNull::new(staged.as_ptr() as *mut _)
-                            .ok_or_else(|| MetalTileError::Buffer("setBytes null".into()))?,
-                        elem,
-                        tensor_binding_count + j,
-                    );
+                if i == 0 {
+                    // ── First pass: create a concurrent encoder ──
+                    // Concurrent dispatch lets Metal overlap independent
+                    // kernel dispatches; barriers only between dependent specs.
+                    enc = (*cb)
+                        .computeCommandEncoderWithDispatchType(MTLDispatchType::Concurrent)
+                        .map(Some)
+                        .ok_or(MetalTileError::NoDevice)?;
                 }
+                let enc_ref = enc.as_ref().unwrap();
+                enc_ref.setComputePipelineState(&pipes[i]);
+                for (idx, buf) in bufs.iter().enumerate() {
+                    unsafe { enc_ref.setBuffer_offset_atIndex(Some(buf.as_ref()), 0, idx) };
+                }
+                // Inline constexpr scalars via setBytes (Apple-recommended
+                // path for <4KB constants — skips the allocator + binding
+                // table indirection for each scalar). Same wire format the
+                // codegen expects: each constexpr is a single u32/f32-sized
+                // scalar at slot `tensor_binding_count + constexpr_index`.
+                for (j, decl) in spec.kernel.constexprs.iter().enumerate() {
+                    let key = decl.name.name();
+                    let elem = decl.dtype.size_bytes().max(4);
+                    let bytes = spec.buffers.get(key).map(Vec::as_slice).unwrap_or(&[]);
+                    let mut staged = [0u8; 16];
+                    let n = bytes.len().min(elem).min(staged.len());
+                    staged[..n].copy_from_slice(&bytes[..n]);
+                    unsafe {
+                        enc_ref.setBytes_length_atIndex(
+                            NonNull::new(staged.as_ptr() as *mut _)
+                                .ok_or_else(|| MetalTileError::Buffer("setBytes null".into()))?,
+                            elem,
+                            tensor_binding_count + j,
+                        );
+                    }
+                }
+                let (g, t) = (spec.grid_groups, spec.threads_per_group);
+                tracing::debug!(
+                    kernel = %spec.kernel.name,
+                    pass = i,
+                    groups_x = g[0], groups_y = g[1], groups_z = g[2],
+                    tpg_x = t[0], tpg_y = t[1], tpg_z = t[2],
+                    "chain pass dispatch"
+                );
+                enc_ref.dispatchThreadgroups_threadsPerThreadgroup(
+                    MTLSize { width: g[0], height: g[1], depth: g[2] },
+                    MTLSize { width: t[0], height: t[1], depth: t[2] },
+                );
+                if i + 1 < specs.len() && barriers_after[i] {
+                    enc_ref.memoryBarrierWithScope(MTLBarrierScope::Buffers);
+                }
+                per_spec_bufs.push(bufs);
             }
-            let (g, t) = (spec.grid_groups, spec.threads_per_group);
-            tracing::debug!(
-                kernel = %spec.kernel.name,
-                pass = i,
-                groups_x = g[0], groups_y = g[1], groups_z = g[2],
-                tpg_x = t[0], tpg_y = t[1], tpg_z = t[2],
-                "chain pass dispatch"
-            );
-            enc_ref.dispatchThreadgroups_threadsPerThreadgroup(
-                MTLSize { width: g[0], height: g[1], depth: g[2] },
-                MTLSize { width: t[0], height: t[1], depth: t[2] },
-            );
-            if i + 1 < specs.len() && barriers_after[i] {
-                enc_ref.memoryBarrierWithScope(MTLBarrierScope::Buffers);
-            }
-            per_spec_bufs.push(bufs);
-        }
 
-        // ── End the single encoder ─────────────────────────────────
-        if let Some(e) = enc {
-            (*e).endEncoding();
-        }
-
-        tracing::debug!(spec_count = specs.len(), "chain dispatch committed");
-        (*cb).commit();
-        (*cb).waitUntilCompleted();
-
-        // Read back outputs from each spec, but only for params NOT
-        // consumed as input by a later spec (the aliased ones live in
-        // private memory and are intentionally not host-readable).
-        let elapsed_us = ((*cb).GPUEndTime() - (*cb).GPUStartTime()) * 1_000_000.0;
-        let mut results: Vec<DispatchResult> = Vec::with_capacity(specs.len());
-        for (i, spec) in specs.iter().enumerate() {
-            let mut outputs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-            for (param, plan) in spec.kernel.params.iter().zip(&binding_plans[i]) {
-                if !param.is_output {
-                    continue;
-                }
-                // output_resident params are written directly on GPU; no host readback.
-                if spec.output_resident.contains_key(&param.name) {
-                    continue;
-                }
-                if later_inputs[i].contains(param.name.as_str()) {
-                    continue;
-                }
-                let Some(buf) = per_spec_bufs[i].get(plan.data_binding_index) else { continue };
-                use objc2_metal::MTLBuffer as _;
-                let ptr = buf.contents();
-                let bytes =
-                    unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const u8, plan.data_len) }
-                        .to_vec();
-                outputs.insert(param.name.clone(), bytes);
+            // ── End the single encoder ─────────────────────────────────
+            if let Some(e) = enc {
+                (*e).endEncoding();
             }
-            // Attribute the entire chain's GPU time to the first result;
-            // chained passes share one cmd buffer and can't be split.
-            let us = if i == 0 { elapsed_us } else { 0.0 };
-            results.push(DispatchResult { elapsed_us: us, gflops: 0.0, outputs });
-        }
-        Ok(results)
+
+            tracing::debug!(spec_count = specs.len(), "chain dispatch committed");
+            (*cb).commit();
+            (*cb).waitUntilCompleted();
+
+            // Read back outputs from each spec, but only for params NOT
+            // consumed as input by a later spec (the aliased ones live in
+            // private memory and are intentionally not host-readable).
+            let elapsed_us = ((*cb).GPUEndTime() - (*cb).GPUStartTime()) * 1_000_000.0;
+            let mut results: Vec<DispatchResult> = Vec::with_capacity(specs.len());
+            for (i, spec) in specs.iter().enumerate() {
+                let mut outputs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+                for (param, plan) in spec.kernel.params.iter().zip(&binding_plans[i]) {
+                    if !param.is_output {
+                        continue;
+                    }
+                    // output_resident params are written directly on GPU; no host readback.
+                    if spec.output_resident.contains_key(&param.name) {
+                        continue;
+                    }
+                    if later_inputs[i].contains(param.name.as_str()) {
+                        continue;
+                    }
+                    let Some(buf) = per_spec_bufs[i].get(plan.data_binding_index) else { continue };
+                    use objc2_metal::MTLBuffer as _;
+                    let ptr = buf.contents();
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts(ptr.as_ptr() as *const u8, plan.data_len)
+                    }
+                    .to_vec();
+                    outputs.insert(param.name.clone(), bytes);
+                }
+                // Attribute the entire chain's GPU time to the first result;
+                // chained passes share one cmd buffer and can't be split.
+                let us = if i == 0 { elapsed_us } else { 0.0 };
+                results.push(DispatchResult { elapsed_us: us, gflops: 0.0, outputs });
+            }
+            Ok(results)
         }) // end autoreleasepool
     }
 

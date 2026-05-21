@@ -11,8 +11,6 @@
 
 use std::{collections::BTreeMap, path::Path};
 
-use tracing::info;
-
 use metaltile_core::dtype::DType;
 use metaltile_model::{
     CompileParams,
@@ -27,6 +25,7 @@ use metaltile_model::{
 };
 use metaltile_runtime::{Context, ResidentBuffer};
 use tokenizers::Tokenizer;
+use tracing::info;
 
 use crate::{checkpoint::load_weights, config::ModelConfig, error::InferError};
 
@@ -121,9 +120,8 @@ impl Session {
                 // alloc_resident skips the zero-fill memcpy; the KV-update
                 // kernel always writes before reading, so uninitialised data
                 // at position ≥ n_kv is never consumed.
-                let rb = ctx
-                    .alloc_resident(kv_bytes)
-                    .map_err(|e| InferError::Other(e.to_string()))?;
+                let rb =
+                    ctx.alloc_resident(kv_bytes).map_err(|e| InferError::Other(e.to_string()))?;
                 resident.insert(name, rb);
             }
         }
@@ -134,7 +132,7 @@ impl Session {
         let state_keys = vec![
             "token_id".to_string(),
             "position".to_string(),
-            "n_kv".to_string(),   // = position + 1, set before each forward pass
+            "n_kv".to_string(), // = position + 1, set before each forward pass
             "rms_eps".to_string(),
             "temperature".to_string(),
             "uniform".to_string(),
@@ -250,11 +248,8 @@ impl Session {
         }
 
         let tokens_generated = output_ids.len();
-        let decode_tok_per_sec = if decode_secs > 0.0 {
-            tokens_generated as f64 / decode_secs
-        } else {
-            0.0
-        };
+        let decode_tok_per_sec =
+            if decode_secs > 0.0 { tokens_generated as f64 / decode_secs } else { 0.0 };
 
         let generated = self
             .tokenizer
@@ -263,11 +258,7 @@ impl Session {
 
         info!(
             tokens_generated,
-            prompt_tokens,
-            prefill_secs,
-            decode_secs,
-            decode_tok_per_sec,
-            "generation complete"
+            prompt_tokens, prefill_secs, decode_secs, decode_tok_per_sec, "generation complete"
         );
         Ok(GenerateOutput {
             text: generated,

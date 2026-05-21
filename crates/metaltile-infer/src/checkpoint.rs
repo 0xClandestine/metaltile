@@ -2,28 +2,27 @@
 //! to the requested activation dtype). Supports single-file and sharded
 //! models (multiple `.safetensors` files in a directory).
 
-use std::{borrow::Cow, path::{Path, PathBuf}};
+use std::{
+    borrow::Cow,
+    path::{Path, PathBuf},
+};
 
 use metaltile_core::dtype::DType;
 use metaltile_model::WeightMap;
 use safetensors::SafeTensors;
+use tracing::info;
 
 use crate::error::InferError;
-use tracing::info;
 
 // ── Dtype conversion helpers ───────────────────────────────────────────────
 
 /// Decode bytes in `src_dtype` to a vec of f32.
 fn decode_to_f32(bytes: &[u8], src_dtype: safetensors::Dtype) -> Vec<f32> {
     match src_dtype {
-        safetensors::Dtype::F32 => bytes
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect(),
-        safetensors::Dtype::F16 => bytes
-            .chunks_exact(2)
-            .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
-            .collect(),
+        safetensors::Dtype::F32 =>
+            bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect(),
+        safetensors::Dtype::F16 =>
+            bytes.chunks_exact(2).map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32()).collect(),
         safetensors::Dtype::BF16 => bytes
             .chunks_exact(2)
             .map(|b| half::bf16::from_le_bytes([b[0], b[1]]).to_f32())
@@ -36,12 +35,8 @@ fn decode_to_f32(bytes: &[u8], src_dtype: safetensors::Dtype) -> Vec<f32> {
 fn encode_from_f32(vals: &[f32], dst_dtype: DType) -> Vec<u8> {
     match dst_dtype {
         DType::F32 => vals.iter().flat_map(|v| v.to_le_bytes()).collect(),
-        DType::F16 => {
-            vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect()
-        },
-        DType::BF16 => {
-            vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect()
-        },
+        DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+        DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
         _ => vals.iter().flat_map(|v| v.to_le_bytes()).collect(),
     }
 }

@@ -57,10 +57,10 @@ pub fn softmax_categorical_sample<T>(
     // function scope regardless of which branch uses them).
     threadgroup_alloc("tg_gmax", 256); // greedy: per-thread local max
     threadgroup_alloc("tg_gidx", 256); // greedy: index of per-thread max
-    threadgroup_alloc("tg_max",  256); // temperature: per-thread local max (scaled)
-    threadgroup_alloc("tg_sum",  256); // temperature: per-thread local sum-exp
+    threadgroup_alloc("tg_max", 256); // temperature: per-thread local max (scaled)
+    threadgroup_alloc("tg_sum", 256); // temperature: per-thread local sum-exp
 
-    let lid  = tid;
+    let lid = tid;
     let temp = load(temperature_in[0]);
     let n_iters = (n + lsize - 1u32) / lsize;
 
@@ -75,7 +75,7 @@ pub fn softmax_categorical_sample<T>(
             if pos < n {
                 let v = load(inp[pos]).cast::<f32>();
                 let better = v > glocal_max;
-                glocal_max = select(better, v,   glocal_max);
+                glocal_max = select(better, v, glocal_max);
                 glocal_idx = select(better, pos, glocal_idx);
             }
         }
@@ -90,9 +90,15 @@ pub fn softmax_categorical_sample<T>(
             let tg = threadgroup_load("tg_gmax", lid);
             let bt = og > tg;
             threadgroup_store("tg_gmax", lid, select(bt, og, tg));
-            threadgroup_store("tg_gidx", lid, select(bt,
-                threadgroup_load("tg_gidx", lid + 128u32),
-                threadgroup_load("tg_gidx", lid)));
+            threadgroup_store(
+                "tg_gidx",
+                lid,
+                select(
+                    bt,
+                    threadgroup_load("tg_gidx", lid + 128u32),
+                    threadgroup_load("tg_gidx", lid),
+                ),
+            );
         }
         threadgroup_barrier();
         if lid < 64u32 {
@@ -100,9 +106,15 @@ pub fn softmax_categorical_sample<T>(
             let tg = threadgroup_load("tg_gmax", lid);
             let bt = og > tg;
             threadgroup_store("tg_gmax", lid, select(bt, og, tg));
-            threadgroup_store("tg_gidx", lid, select(bt,
-                threadgroup_load("tg_gidx", lid + 64u32),
-                threadgroup_load("tg_gidx", lid)));
+            threadgroup_store(
+                "tg_gidx",
+                lid,
+                select(
+                    bt,
+                    threadgroup_load("tg_gidx", lid + 64u32),
+                    threadgroup_load("tg_gidx", lid),
+                ),
+            );
         }
         threadgroup_barrier();
         if lid < 32u32 {
@@ -110,9 +122,15 @@ pub fn softmax_categorical_sample<T>(
             let tg = threadgroup_load("tg_gmax", lid);
             let bt = og > tg;
             threadgroup_store("tg_gmax", lid, select(bt, og, tg));
-            threadgroup_store("tg_gidx", lid, select(bt,
-                threadgroup_load("tg_gidx", lid + 32u32),
-                threadgroup_load("tg_gidx", lid)));
+            threadgroup_store(
+                "tg_gidx",
+                lid,
+                select(
+                    bt,
+                    threadgroup_load("tg_gidx", lid + 32u32),
+                    threadgroup_load("tg_gidx", lid),
+                ),
+            );
         }
         threadgroup_barrier();
         if lid < 16u32 {
@@ -120,9 +138,15 @@ pub fn softmax_categorical_sample<T>(
             let tg = threadgroup_load("tg_gmax", lid);
             let bt = og > tg;
             threadgroup_store("tg_gmax", lid, select(bt, og, tg));
-            threadgroup_store("tg_gidx", lid, select(bt,
-                threadgroup_load("tg_gidx", lid + 16u32),
-                threadgroup_load("tg_gidx", lid)));
+            threadgroup_store(
+                "tg_gidx",
+                lid,
+                select(
+                    bt,
+                    threadgroup_load("tg_gidx", lid + 16u32),
+                    threadgroup_load("tg_gidx", lid),
+                ),
+            );
         }
         threadgroup_barrier();
         if lid < 8u32 {
@@ -130,9 +154,15 @@ pub fn softmax_categorical_sample<T>(
             let tg = threadgroup_load("tg_gmax", lid);
             let bt = og > tg;
             threadgroup_store("tg_gmax", lid, select(bt, og, tg));
-            threadgroup_store("tg_gidx", lid, select(bt,
-                threadgroup_load("tg_gidx", lid + 8u32),
-                threadgroup_load("tg_gidx", lid)));
+            threadgroup_store(
+                "tg_gidx",
+                lid,
+                select(
+                    bt,
+                    threadgroup_load("tg_gidx", lid + 8u32),
+                    threadgroup_load("tg_gidx", lid),
+                ),
+            );
         }
         threadgroup_barrier();
         if lid < 4u32 {
@@ -140,9 +170,15 @@ pub fn softmax_categorical_sample<T>(
             let tg = threadgroup_load("tg_gmax", lid);
             let bt = og > tg;
             threadgroup_store("tg_gmax", lid, select(bt, og, tg));
-            threadgroup_store("tg_gidx", lid, select(bt,
-                threadgroup_load("tg_gidx", lid + 4u32),
-                threadgroup_load("tg_gidx", lid)));
+            threadgroup_store(
+                "tg_gidx",
+                lid,
+                select(
+                    bt,
+                    threadgroup_load("tg_gidx", lid + 4u32),
+                    threadgroup_load("tg_gidx", lid),
+                ),
+            );
         }
         threadgroup_barrier();
         if lid < 2u32 {
@@ -150,9 +186,15 @@ pub fn softmax_categorical_sample<T>(
             let tg = threadgroup_load("tg_gmax", lid);
             let bt = og > tg;
             threadgroup_store("tg_gmax", lid, select(bt, og, tg));
-            threadgroup_store("tg_gidx", lid, select(bt,
-                threadgroup_load("tg_gidx", lid + 2u32),
-                threadgroup_load("tg_gidx", lid)));
+            threadgroup_store(
+                "tg_gidx",
+                lid,
+                select(
+                    bt,
+                    threadgroup_load("tg_gidx", lid + 2u32),
+                    threadgroup_load("tg_gidx", lid),
+                ),
+            );
         }
         threadgroup_barrier();
         if lid < 1u32 {
@@ -160,9 +202,15 @@ pub fn softmax_categorical_sample<T>(
             let tg = threadgroup_load("tg_gmax", lid);
             let bt = og > tg;
             threadgroup_store("tg_gmax", lid, select(bt, og, tg));
-            threadgroup_store("tg_gidx", lid, select(bt,
-                threadgroup_load("tg_gidx", lid + 1u32),
-                threadgroup_load("tg_gidx", lid)));
+            threadgroup_store(
+                "tg_gidx",
+                lid,
+                select(
+                    bt,
+                    threadgroup_load("tg_gidx", lid + 1u32),
+                    threadgroup_load("tg_gidx", lid),
+                ),
+            );
         }
         threadgroup_barrier();
 

@@ -9,11 +9,13 @@
 
 use std::collections::{HashMap, HashSet};
 
-use tracing::info;
-
-use metaltile_core::{dtype::DType, ir::{Kernel, KernelMode}};
+use metaltile_core::{
+    dtype::DType,
+    ir::{Kernel, KernelMode},
+};
 use metaltile_runtime::context::GridSpec;
 use metaltile_std::spec::effective_mode;
+use tracing::info;
 
 use crate::{
     ConstexprValue,
@@ -142,10 +144,8 @@ pub fn compile(
 
     // Find the index of the first prefill_skip = true node.
     // Nodes from this index onward are skipped during non-final prefill.
-    let prefill_node_count = raw_nodes
-        .iter()
-        .position(|rn| rn.node.prefill_skip)
-        .unwrap_or(raw_nodes.len());
+    let prefill_node_count =
+        raw_nodes.iter().position(|rn| rn.node.prefill_skip).unwrap_or(raw_nodes.len());
 
     // ── Step 2: Compile each RawNode → DispatchNode ────────────────
     let mut nodes: Vec<DispatchNode> = Vec::with_capacity(raw_nodes.len());
@@ -302,9 +302,7 @@ pub fn compile(
                     total - fused_count
                 );
             } else {
-                info!(
-                    "no TOML fuse tags: {total} nodes → {total} dispatches"
-                );
+                info!("no TOML fuse tags: {total} nodes → {total} dispatches");
             }
         },
         FusionMode::GraphDriven => {
@@ -319,11 +317,7 @@ pub fn compile(
             }
         },
         FusionMode::None => {
-            info!(
-                "no fusion: {} nodes → {} dispatches",
-                nodes.len(),
-                nodes.len()
-            );
+            info!("no fusion: {} nodes → {} dispatches", nodes.len(), nodes.len());
         },
     }
 
@@ -425,8 +419,12 @@ fn fuse_dispatch_nodes(nodes: &mut [DispatchNode]) -> (usize, usize) {
     }
 
     // Sort positions (they're inserted in order already, but be safe).
-    for v in writes.values_mut() { v.sort_unstable(); }
-    for v in reads.values_mut() { v.sort_unstable(); }
+    for v in writes.values_mut() {
+        v.sort_unstable();
+    }
+    for v in reads.values_mut() {
+        v.sort_unstable();
+    }
 
     // ── Phase 2: Find maximal fusible chains (backward scan) ─────
     let mut fused: HashSet<usize> = HashSet::default();
@@ -441,14 +439,11 @@ fn fuse_dispatch_nodes(nodes: &mut [DispatchNode]) -> (usize, usize) {
         let mut cursor = i;
 
         loop {
-            let Some(pred) =
-                find_single_use_producer_local(cursor, nodes, &writes, &reads, &defs)
+            let Some(pred) = find_single_use_producer_local(cursor, nodes, &writes, &reads, &defs)
             else {
                 break;
             };
-            if fused.contains(&pred)
-                || !is_fusible_local(nodes, pred, cursor, &writes, &reads)
-            {
+            if fused.contains(&pred) || !is_fusible_local(nodes, pred, cursor, &writes, &reads) {
                 break;
             }
             if chain.len() >= MAX_FUSED_PER_CHAIN {
@@ -685,7 +680,6 @@ pub(crate) fn grid_to_dims(grid: &GridSpec) -> ([usize; 3], [usize; 3]) {
     }
 }
 
-
 // ── Dispatch hint evaluation ───────────────────────────────────────────
 
 /// Evaluate the `dispatch` map from a KernelNode into a resolved `u32` map.
@@ -813,11 +807,7 @@ fn compute_buffer_size(hints: &HashMap<String, u32>, dtype: DType) -> usize {
         return bytes as usize;
     }
     let elems = hints.get("out_elems").copied().unwrap_or(0) as usize;
-    if elems > 0 {
-        elems * dtype.size_bytes()
-    } else {
-        4096 * dtype.size_bytes()
-    }
+    if elems > 0 { elems * dtype.size_bytes() } else { 4096 * dtype.size_bytes() }
 }
 
 #[cfg(test)]
@@ -1148,10 +1138,7 @@ dispatch = { rows = "$ffn_dim", tpg = "256", out_elems = "$ffn_dim" }
         assert_eq!(plan.nodes.len(), 3);
 
         // gate (node 0) → silu (node 1) should be fused (single-use _gate).
-        assert!(
-            plan.nodes[0].fuse_group.is_some(),
-            "gate gemv should be fused with silu"
-        );
+        assert!(plan.nodes[0].fuse_group.is_some(), "gate gemv should be fused with silu");
         assert_eq!(
             plan.nodes[0].fuse_group, plan.nodes[1].fuse_group,
             "gate and silu should share same group"
@@ -1210,8 +1197,7 @@ fuse = "my_group"
             state_keys: vec![],
         };
 
-        let plan =
-            compile(&def, &params, &reg, FusionMode::TomlDriven).expect("compile");
+        let plan = compile(&def, &params, &reg, FusionMode::TomlDriven).expect("compile");
         assert_eq!(plan.nodes.len(), 2);
 
         let g0 = plan.nodes[0].fuse_group;
@@ -1272,10 +1258,7 @@ fuse = "my_group"
         let result = compile(&def, &params, &reg, FusionMode::TomlDriven);
         assert!(result.is_err(), "non-contiguous fuse tags should error");
         let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("non-contiguous"),
-            "error should mention non-contiguous: {err}"
-        );
+        assert!(err.contains("non-contiguous"), "error should mention non-contiguous: {err}");
     }
 
     /// GraphDriven mode ignores TOML fuse tags.

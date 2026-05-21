@@ -24,9 +24,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tracing::error;
-
 use metaltile_runtime::{Context, DispatchSpec, ResidentBuffer};
+use tracing::error;
 
 use crate::{
     error::ModelError,
@@ -94,25 +93,22 @@ pub fn execute_plan(
         // ── Input bindings ─────────────────────────────────────────────
         for (param_name, slot_ref) in &node.input_bindings {
             match slot_ref {
-                SlotRef::Slot(i) => {
+                SlotRef::Slot(i) =>
                     if let Some(rb) = slot_data.get(*i) {
                         spec_resident.insert(param_name.clone(), rb.clone());
-                    }
-                },
-                SlotRef::Weight(tensor_name) => {
+                    },
+                SlotRef::Weight(tensor_name) =>
                     if let Some(rb) = resident.get(tensor_name) {
                         spec_resident.insert(param_name.clone(), rb.clone());
                     } else if let Some(bytes) = weights.get(tensor_name) {
                         buffers.insert(param_name.clone(), bytes.clone());
-                    }
-                },
-                SlotRef::State(key) => {
+                    },
+                SlotRef::State(key) =>
                     if let Some(rb) = resident.get(key) {
                         spec_resident.insert(param_name.clone(), rb.clone());
                     } else if let Some(bytes) = state.get(key) {
                         buffers.insert(param_name.clone(), bytes.clone());
-                    }
-                },
+                    },
             }
         }
 
@@ -123,8 +119,7 @@ pub fn execute_plan(
                     // Write directly into the pre-allocated slot buffer.
                     // GPU serial execution within the command buffer
                     // guarantees the producer finishes before any consumer.
-                    spec_output_resident
-                        .insert(param_name.clone(), slot_data[*i].clone());
+                    spec_output_resident.insert(param_name.clone(), slot_data[*i].clone());
                 },
                 SlotRef::Weight(_) => {},
                 SlotRef::State(key) => {
@@ -148,16 +143,15 @@ pub fn execute_plan(
             let bits: u32 = match cv {
                 ConstexprValue::Static(val) => *val,
                 ConstexprValue::State(state_key) => {
-                    let bytes = state
-                        .get(state_key)
-                        .and_then(|b| b.get(..4))
-                        .ok_or_else(|| ModelError::UnsafeDispatch {
+                    let bytes = state.get(state_key).and_then(|b| b.get(..4)).ok_or_else(|| {
+                        ModelError::UnsafeDispatch {
                             op: node.label.clone(),
                             detail: format!(
                                 "runtime state '{state_key}' not found — \
                                  ensure it is set in the state map before the forward pass"
                             ),
-                        })?;
+                        }
+                    })?;
                     u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
                 },
             };
@@ -346,15 +340,14 @@ impl PreparedDispatch {
                         }
                         // Missing weight caught by safety check below.
                     },
-                    SlotRef::State(key) => {
+                    SlotRef::State(key) =>
                         if let Some(rb) = resident.get(key) {
                             spec_res.insert(param.clone(), rb.clone());
                         } else {
                             let size = state.get(key.as_str()).map(|v| v.len()).unwrap_or(4);
                             buffers.insert(param.clone(), vec![0u8; size]);
                             node_dyn_state_in.push((param.clone(), key.clone()));
-                        }
-                    },
+                        },
                 }
             }
 
@@ -365,7 +358,7 @@ impl PreparedDispatch {
                         spec_out_res.insert(param.clone(), slot_bufs[*i].clone());
                     },
                     SlotRef::Weight(_) => {},
-                    SlotRef::State(key) => {
+                    SlotRef::State(key) =>
                         if let Some(rb) = resident.get(key) {
                             spec_out_res.insert(param.clone(), rb.clone());
                         } else {
@@ -374,8 +367,7 @@ impl PreparedDispatch {
                                 buffers.insert(param.clone(), vec![0u8; size]);
                                 node_cpu_state_out.push((param.clone(), key.clone(), size));
                             }
-                        }
-                    },
+                        },
                 }
             }
 
@@ -469,16 +461,15 @@ pub fn execute_prepared(
         }
         let buffers = &mut pd.all_buffers[*node_idx];
         for (param, key) in cexprs {
-            let bytes = state
-                .get(key)
-                .and_then(|b| b.get(..4))
-                .ok_or_else(|| ModelError::UnsafeDispatch {
+            let bytes = state.get(key).and_then(|b| b.get(..4)).ok_or_else(|| {
+                ModelError::UnsafeDispatch {
                     op: plan.nodes[*node_idx].label.clone(),
                     detail: format!(
                         "runtime state '{key}' not found — \
                          ensure it is set in the state map before the forward pass"
                     ),
-                })?;
+                }
+            })?;
             let bits = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
             if let Some(buf) = buffers.get_mut(param.as_str()) {
                 buf[..4].copy_from_slice(&bits.to_le_bytes());
