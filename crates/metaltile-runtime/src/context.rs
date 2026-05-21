@@ -366,6 +366,7 @@ impl Context {
     /// Like `dispatch_with_buffers` but also binds Metal function constants (for rope and similar
     /// kernels that use `[[function_constant(N)]]` annotations).
     /// `fn_consts` maps constant name → u32 value.
+    #[tracing::instrument(skip(self, kernel, buffers, fn_consts), fields(kernel = %kernel.name))]
     pub fn dispatch_with_options(
         &self,
         kernel: &Kernel,
@@ -484,6 +485,7 @@ impl Context {
             let mut lock =
                 cache.lock().map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?;
             if let Some(cached) = lock.get(&cache_key) {
+                tracing::debug!(kernel = %kernel.name, "pso cache hit");
                 cached.clone()
             } else {
                 let lib = dev
@@ -528,6 +530,7 @@ impl Context {
                         reason: format!("{e:?}"),
                     })?;
                 lock.insert(cache_key, pso.clone());
+                tracing::debug!(kernel = %kernel.name, "pso cache miss — compiled");
                 pso
             }
         };
@@ -645,6 +648,7 @@ impl Context {
                 }),
             },
         };
+        tracing::trace!(kernel = %kernel.name, "dispatch queued");
         enc.dispatchThreadgroups_threadsPerThreadgroup(tgs, tpg);
         (*enc).endEncoding();
         (*cb).commit();
@@ -688,6 +692,7 @@ impl Context {
     /// alloc + memcpy. The buffer stays GPU-resident as long as any
     /// clone of the [`ResidentBuffer`] exists; on the last drop it
     /// returns to the pool.
+    #[tracing::instrument(skip(self, bytes), fields(bytes = bytes.len()))]
     pub fn upload_resident(&self, bytes: &[u8]) -> Result<ResidentBuffer, MetalTileError> {
         #[cfg(target_os = "macos")]
         {
@@ -737,6 +742,7 @@ impl Context {
     /// For a 2-pass SDPA decode this replaces two separate cmd-buffer
     /// commits + a ~MB-sized host memcpy of `partial_o/m/l` with one
     /// commit and zero host traffic between passes.
+    #[tracing::instrument(skip(self, specs), fields(spec_count = specs.len()))]
     pub fn dispatch_chain(
         &self,
         specs: &[DispatchSpec<'_>],
@@ -855,9 +861,13 @@ impl Context {
                 .get(&h)
                 .cloned();
             let msl = match cached {
-                Some(m) => m,
+                Some(m) => {
+                    tracing::trace!(kernel = %spec.kernel.name, "msl cache hit");
+                    m
+                },
                 None => {
                     let generated = MslGenerator::default().generate(spec.kernel)?;
+                    tracing::trace!(kernel = %spec.kernel.name, bytes = generated.len(), "msl generated");
                     msl_cache
                         .lock()
                         .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?
@@ -891,6 +901,7 @@ impl Context {
                     .lock()
                     .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?;
                 if let Some(p) = lock.get(&cache_key) {
+                    tracing::debug!(kernel = %spec.kernel.name, "pso cache hit");
                     p.clone()
                 } else {
                     let src = NSString::from_str(msl);
@@ -936,6 +947,7 @@ impl Context {
                             reason: format!("{e:?}"),
                         })?;
                     lock.insert(cache_key, pso.clone());
+                    tracing::debug!(kernel = %spec.kernel.name, "pso cache miss — compiled");
                     pso
                 }
             };
@@ -1037,6 +1049,7 @@ impl Context {
             per_spec_bufs.push(bufs);
         }
 
+        tracing::debug!(spec_count = specs.len(), "chain dispatch committed");
         (*cb).commit();
         (*cb).waitUntilCompleted();
 

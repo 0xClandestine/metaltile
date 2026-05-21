@@ -62,15 +62,18 @@ pub fn run_passes_with_stats(
     for pass in passes {
         let ops_before = count_total_ops(kernel);
         let start = Instant::now();
+        tracing::debug!(pass = pass.name(), "running pass");
         pass.run(kernel)?;
         let elapsed = start.elapsed();
         let ops_after = count_total_ops(kernel);
-        stats.push(PassStats {
+        let s = PassStats {
             name: pass.name().to_string(),
             ops_before,
             ops_after,
             wall_us: elapsed.as_micros() as u64,
-        });
+        };
+        tracing::trace!(pass = pass.name(), wall_us = s.wall_us, "pass complete");
+        stats.push(s);
     }
 
     Ok(stats)
