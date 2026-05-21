@@ -129,7 +129,7 @@ jobs:
               echo '<details open>'
               echo '<summary>Benchmark results</summary>'
               echo
-              echo '```'
+              echo '```ansi'
               # `|| true` so a regression exit code (1) doesn't kill the job.
               cargo run --release -q -p metaltile-cli -- diff \
                 "$BL" /tmp/bench.json 2>&1 || true
