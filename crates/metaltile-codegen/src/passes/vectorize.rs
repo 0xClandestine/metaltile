@@ -47,12 +47,11 @@
 //! - Apple, "Metal Shading Language Specification", §2.4 (vector data types).
 //!   https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf
 
-use rustc_hash::FxHashMap;
-
 use metaltile_core::{
     dtype::DType,
     ir::{BinOpKind, Block, BlockId, IndexExpr, Kernel, Op, Param, ValueId},
 };
+use rustc_hash::FxHashMap;
 
 use crate::error::Result;
 

@@ -635,8 +635,20 @@ impl MslGenerator {
                         (4, _) => format!("{}4", dtype.msl_name()),
                         _ => format!("{}4", dtype.msl_name()),
                     };
-                    let args_str = args.join(", ");
-                    wl!(out, "{pad}{vec_t} {v} = {vec_t}({args_str});");
+                    // Metal does not support bfloat4(v0,v1,v2,v3) component
+                    // constructors even in Metal 3.1+; emit zero-init +
+                    // per-element assignment instead.
+                    let is_bfloat = matches!(*dtype, DType::BF16) && self.config.native_bfloat;
+                    if is_bfloat {
+                        wl!(out, "{pad}{vec_t} {v} = 0;");
+                        let lanes = ["x", "y", "z", "w"];
+                        for (i, arg) in args.iter().enumerate().take(elements.len()) {
+                            wl!(out, "{pad}{v}.{ln} = bfloat({arg});", ln = lanes[i]);
+                        }
+                    } else {
+                        let args_str = args.join(", ");
+                        wl!(out, "{pad}{vec_t} {v} = {vec_t}({args_str});");
+                    }
                 },
 
                 // ---- conditional branch ----------------------------------
