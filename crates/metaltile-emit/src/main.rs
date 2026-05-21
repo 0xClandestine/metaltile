@@ -34,7 +34,7 @@ use metaltile_std::{
         gated_delta::{mt_gated_delta_chunk, mt_gated_delta_step},
         gated_delta_prep::mt_gated_delta_prep_step,
         gather::ffai_gather,
-        moe::mt_moe_gather_qmm_mma_int4_bm16,
+        moe::{mt_moe_gather_qmm_int4, mt_moe_gather_qmm_mma_int4_bm16, mt_moe_router_topk},
         moe_mpp,
         moe_mpp_bm8,
         moe_mpp_bm64,
@@ -1562,6 +1562,37 @@ fn register_kernels() -> Vec<Kernel> {
     for &dt in &dtypes {
         let mut k = mt_swiglu::kernel_ir_for(dt);
         k.name = format!("mt_swiglu_{}", dtype_suffix(dt));
+        kernels.push(k);
+    }
+
+    // ─── mt_moe_router_topk (Reduction) — GPU-side top-K + softmax ─
+    // Fused router: iterative top-K from raw logits + softmax over the
+    // K chosen values, all in one TG per row. Output: indices [k] u32
+    // + weights [k] T. Used by FFAI's GPU MoE router path to keep the
+    // top-K result on the GPU instead of round-tripping through host.
+    // For Qwen3.6-A3B (`norm_topk_prob=true`) this is equivalent to
+    // `.softmaxThenTopK + normTopKProb` since softmax is monotonic on
+    // the index selection and the post-normalisation cancels.
+    for &dt in &dtypes {
+        let mut k = mt_moe_router_topk::kernel_ir_for(dt);
+        k.name = format!("mt_moe_router_topk_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Reduction;
+        kernels.push(k);
+    }
+
+    // ─── mt_moe_gather_qmm_int4 (Reduction) — scalar m1 gather GEMM ─
+    // Per-row dot-product over the gather quant-int4 weight stack:
+    // each TG owns one (output column m, row t) and resolves the
+    // expert via `expert_offsets` (CSR row offsets). Same algorithm
+    // as `dequant_gemv_int4` but with the expert lookup inlined and
+    // the weight pointer offset by `expert * m_out * k_in / 8`.
+    // Used by FFAI's m1 MoE path as a non-cooperative-tensor
+    // alternative to bm8/bm16/bm64 — for T=1 decode where the
+    // cooperative-tensor overhead dominates compute.
+    for &dt in &dtypes {
+        let mut k = mt_moe_gather_qmm_int4::kernel_ir_for(dt);
+        k.name = format!("mt_moe_gather_qmm_int4_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Reduction;
         kernels.push(k);
     }
 
