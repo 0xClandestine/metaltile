@@ -59,7 +59,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use metaltile_core::ir::{BinOpKind, Block, BlockId, Kernel, KernelCallArg, Op, UnaryOpKind, ValueId};
+use metaltile_core::ir::{
+    BinOpKind,
+    Block,
+    BlockId,
+    Kernel,
+    KernelCallArg,
+    Op,
+    UnaryOpKind,
+    ValueId,
+};
 
 use super::remap;
 use crate::error::{Error, Result};

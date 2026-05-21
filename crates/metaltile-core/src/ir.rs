@@ -529,11 +529,7 @@ pub enum Op {
     /// order; each arg is either a computed [`ValueId`] (scalar) or a buffer
     /// name string (tensor / constexpr — substituted in the callee's IR).
     /// `dtype` is the primary generic type to instantiate the callee with.
-    KernelCall {
-        callee: String,
-        args: Vec<KernelCallArg>,
-        dtype: DType,
-    },
+    KernelCall { callee: String, args: Vec<KernelCallArg>, dtype: DType },
 
     // ---- High-level ML primitives (lowered in a pass) ----
     /// Flash attention.

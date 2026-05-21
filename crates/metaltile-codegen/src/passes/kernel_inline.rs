@@ -74,8 +74,7 @@ impl Pass for KernelInlinePass {
         let mut vid_offset = find_max_vid(kernel) + 1;
 
         let mut new_ops: Vec<Op> = Vec::with_capacity(kernel.body.ops.len());
-        let mut new_results: Vec<Option<ValueId>> =
-            Vec::with_capacity(kernel.body.results.len());
+        let mut new_results: Vec<Option<ValueId>> = Vec::with_capacity(kernel.body.results.len());
 
         let old_ops = std::mem::take(&mut kernel.body.ops);
         let old_results = std::mem::take(&mut kernel.body.results);
@@ -149,8 +148,7 @@ fn inline_callee(
     //   args[n_input_slots..)             → output params (rare; usually None)
     let input_params: Vec<&str> =
         callee.params.iter().filter(|p| !p.is_output).map(|p| p.name.as_str()).collect();
-    let constexpr_names: Vec<&str> =
-        callee.constexprs.iter().map(|c| c.name.name()).collect();
+    let constexpr_names: Vec<&str> = callee.constexprs.iter().map(|c| c.name.name()).collect();
     let output_params: Vec<&str> =
         callee.params.iter().filter(|p| p.is_output).map(|p| p.name.as_str()).collect();
 
@@ -163,9 +161,8 @@ fn inline_callee(
         (0..input_params.len()).map(|i| args.get(i)).collect();
 
     // Constexpr args follow directly after input params.
-    let constexpr_arg: Vec<Option<&KernelCallArg>> = (0..constexpr_names.len())
-        .map(|j| args.get(input_params.len() + j))
-        .collect();
+    let constexpr_arg: Vec<Option<&KernelCallArg>> =
+        (0..constexpr_names.len()).map(|j| args.get(input_params.len() + j)).collect();
 
     // The total number of input slots (params + constexprs) determines where
     // output param args begin.  Without this offset, constexpr args would be
@@ -175,9 +172,8 @@ fn inline_callee(
 
     // For each output param, check if an explicit Tensor arg was passed.
     // If not, the store is skipped and the stored value maps to call_result.
-    let output_arg: Vec<Option<&KernelCallArg>> = (0..output_params.len())
-        .map(|j| args.get(n_input_slots + j))
-        .collect();
+    let output_arg: Vec<Option<&KernelCallArg>> =
+        (0..output_params.len()).map(|j| args.get(n_input_slots + j)).collect();
 
     // Find the callee SSA vid being stored to each output param without an
     // explicit arg → these map to call_result.
@@ -410,7 +406,12 @@ mod tests {
         k.body.push_op(Op::ProgramId { axis: 0 }, v(0));
         // v1 = load(a[v0])
         k.body.push_op(
-            Op::Load { src: "a".into(), indices: vec![IndexExpr::Value(v(0))], mask: None, other: None },
+            Op::Load {
+                src: "a".into(),
+                indices: vec![IndexExpr::Value(v(0))],
+                mask: None,
+                other: None,
+            },
             v(1),
         );
         // v2 = silu(v1)
@@ -464,7 +465,12 @@ mod tests {
 
         k.body.push_op(Op::ProgramId { axis: 0 }, v(0));
         k.body.push_op(
-            Op::Load { src: "src".into(), indices: vec![IndexExpr::Value(v(0))], mask: None, other: None },
+            Op::Load {
+                src: "src".into(),
+                indices: vec![IndexExpr::Value(v(0))],
+                mask: None,
+                other: None,
+            },
             v(1),
         );
         k.body.push_op_no_result(Op::Store {
@@ -482,10 +488,8 @@ mod tests {
     fn tensor_args_rename_load_store_and_keep_ops() {
         let callee = build_copy_callee();
         let caller_pids: BTreeMap<u32, ValueId> = [(0, v(3))].into_iter().collect();
-        let args = vec![
-            KernelCallArg::Tensor("x_buf".into()),
-            KernelCallArg::Tensor("y_buf".into()),
-        ];
+        let args =
+            vec![KernelCallArg::Tensor("x_buf".into()), KernelCallArg::Tensor("y_buf".into())];
         // No scalar call_result needed — output goes to the Tensor arg.
         let call_result = None;
 
@@ -513,7 +517,8 @@ mod tests {
         if let Op::Load { indices, .. } = &ops[0] {
             assert!(
                 matches!(indices[0], IndexExpr::Value(v) if v == ValueId::new(3)),
-                "load index should be caller's tid v3, got {:?}", indices[0]
+                "load index should be caller's tid v3, got {:?}",
+                indices[0]
             );
         }
     }
@@ -532,7 +537,12 @@ mod tests {
         callee.body.push_op(Op::ProgramId { axis: 1 }, v(0));
         // v1 = load(a[v0])
         callee.body.push_op(
-            Op::Load { src: "a".into(), indices: vec![IndexExpr::Value(v(0))], mask: None, other: None },
+            Op::Load {
+                src: "a".into(),
+                indices: vec![IndexExpr::Value(v(0))],
+                mask: None,
+                other: None,
+            },
             v(1),
         );
         // v2 = v1 + v1 (just to have an op that references v0-remapped chain)
@@ -546,8 +556,7 @@ mod tests {
         });
 
         // Caller has ProgramId axis 0 → v10, axis 1 → v11.
-        let caller_pids: BTreeMap<u32, ValueId> =
-            [(0, v(10)), (1, v(11))].into_iter().collect();
+        let caller_pids: BTreeMap<u32, ValueId> = [(0, v(10)), (1, v(11))].into_iter().collect();
         let args = vec![KernelCallArg::Value(v(20))]; // scalar input arg
         let call_result = Some(v(99));
 
@@ -588,10 +597,7 @@ mod tests {
         let result = KernelInlinePass.run(&mut k);
         assert!(result.is_err(), "expected error for unregistered callee");
         let msg = format!("{}", result.unwrap_err());
-        assert!(
-            msg.contains("nonexistent_kernel_xyz"),
-            "error should name the callee, got: {msg}"
-        );
+        assert!(msg.contains("nonexistent_kernel_xyz"), "error should name the callee, got: {msg}");
     }
 
     // ── test 5: no-op when body has no KernelCall ops ─────────────────────────
@@ -604,7 +610,12 @@ mod tests {
 
         k.body.push_op(Op::ProgramId { axis: 0 }, v(0));
         k.body.push_op(
-            Op::Load { src: "x".into(), indices: vec![IndexExpr::Value(v(0))], mask: None, other: None },
+            Op::Load {
+                src: "x".into(),
+                indices: vec![IndexExpr::Value(v(0))],
+                mask: None,
+                other: None,
+            },
             v(1),
         );
         k.body.push_op_no_result(Op::Store {

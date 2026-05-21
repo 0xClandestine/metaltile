@@ -31,7 +31,16 @@
 
 use std::collections::BTreeSet;
 
-use metaltile_core::ir::{BinOpKind, Block, BlockId, IndexExpr, Kernel, KernelCallArg, Op, ValueId};
+use metaltile_core::ir::{
+    BinOpKind,
+    Block,
+    BlockId,
+    IndexExpr,
+    Kernel,
+    KernelCallArg,
+    Op,
+    ValueId,
+};
 
 use crate::error::Result;
 

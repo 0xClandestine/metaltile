@@ -19,6 +19,10 @@ pub use constexpr::ConstExpr;
 pub use dtype::DType;
 pub use error::{Error, Result};
 pub use gpu_family::GpuFamily;
+/// Re-export of `inventory` so generated `inventory::submit!` code in
+/// `#[kernel]`-expanded modules can use `metaltile_core::inventory::submit!`.
+#[doc(hidden)]
+pub use inventory;
 pub use ir::{
     ActKind,
     Block,
@@ -35,8 +39,3 @@ pub use ir::{
 };
 pub use kernel_registry::KernelEntry;
 pub use shape::{Dim, DimExpr, Shape, tile};
-
-/// Re-export of `inventory` so generated `inventory::submit!` code in
-/// `#[kernel]`-expanded modules can use `metaltile_core::inventory::submit!`.
-#[doc(hidden)]
-pub use inventory;
