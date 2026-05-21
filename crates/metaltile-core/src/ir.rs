@@ -342,6 +342,23 @@ pub enum AtomicKind {
     Xor,
 }
 
+/// Memory scope for an atomic op.  Drives whether the MSL emitter
+/// treats `dst` as a device-memory buffer (typical kernel param) or a
+/// threadgroup-allocated array (needs reinterpret-cast to
+/// `threadgroup atomic_uint*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AtomicScope {
+    /// Device memory — `dst` is a kernel buffer parameter.  Emits
+    /// `atomic_fetch_<op>_explicit(dst + idx, val, memory_order_relaxed)`.
+    #[default]
+    Device,
+    /// Threadgroup memory — `dst` is a `threadgroup_alloc`'d array.
+    /// Emits `atomic_fetch_<op>_explicit((threadgroup atomic_uint*)&dst[idx], …)`.
+    /// AURA encode's pack stage uses this so threads racing on the same
+    /// u32 word are properly serialised.
+    Threadgroup,
+}
+
 impl AtomicKind {
     pub fn msl_fn(self) -> &'static str {
         match self {
@@ -554,7 +571,7 @@ pub enum Op {
     Scatter { dst: String, indices: ValueId, value: ValueId, axis: u32 },
 
     /// Atomic operation on device memory.
-    Atomic { op: AtomicKind, dst: String, index: ValueId, value: ValueId },
+    Atomic { op: AtomicKind, scope: AtomicScope, dst: String, index: ValueId, value: ValueId },
 
     /// Prefix scan along an axis (inclusive or exclusive).
     Scan { value: ValueId, axis: u32, op: ReduceKind, exclusive: bool },
@@ -624,6 +641,21 @@ pub enum Op {
     /// No result (side-effecting).
     SimdgroupElemStore { value: ValueId, index: u32, data: ValueId },
 
+    /// Hardware-fused simdgroup load: fill all 64 elements of an 8×8
+    /// `simdgroup_matrix<T,M,N>` from a contiguous threadgroup-memory tile
+    /// in one MSL `simdgroup_load(matrix, &tg[offset], stride, origin,
+    /// transpose)` instruction.
+    /// Bypasses the per-lane scatter of repeated `simdgroup_elem_store(
+    /// frag, idx, threadgroup_load(...))`, which suffers TG-bank conflicts
+    /// at f16 stride geometries (see `qmm_mma_ftrans_report.md` §7).
+    /// `offset` is a ValueId computing the starting element offset of the
+    /// fragment's top-left corner inside the named TG array. `stride` is
+    /// the row stride in elements (const). `transpose=true` swaps the row
+    /// and column dimensions of the loaded fragment — used to load a B
+    /// operand stored row-major `[N, K]` as if it were `[K, N]` for the
+    /// standard `C = A * B` MMA layout (MLX `qmm_t` pattern).
+    SimdgroupLoad { dest: ValueId, tg: String, offset: ValueId, stride: u32, transpose: bool },
+
     /// simdgroup multiply-accumulate: `C = A * B + C`.
     /// All three operands must be simdgroup matrices of compatible shapes.
     SimdgroupMatMul { a: ValueId, b: ValueId, c: ValueId },
@@ -637,6 +669,13 @@ pub enum Op {
     /// SIMD-group inclusive prefix scan.
     /// Maps to `simd_scan_inclusive_<op>(v)` (Metal 3.0+).
     SimdScan { value: ValueId, op: ReduceKind, exclusive: bool },
+
+    /// SIMD-group broadcast: every lane receives the value held by the
+    /// specified `lane` (a u32 index 0..simd_size). Maps to
+    /// `simd_broadcast(v, lane)` (Metal 2.1+). Cooperative codebook hoist
+    /// in AURA score/value kernels uses this to share one lane's loaded
+    /// codebook word across the group.
+    SimdBroadcast { value: ValueId, lane: ValueId },
 
     /// Allocate a named threadgroup (shared) memory array.
     /// Emits `threadgroup T name[size]` in the kernel body.
@@ -653,6 +692,22 @@ pub enum Op {
 
     /// Store one element to a named threadgroup array: `name[index] = value`.
     ThreadgroupStore { name: String, index: ValueId, value: ValueId },
+
+    /// Allocate a per-thread stack-resident array.  Emits `T name[size];`
+    /// inside the kernel body (no `threadgroup` qualifier — each thread
+    /// gets its own copy).  Metal keeps small fixed-size stack arrays in
+    /// registers; AURA flash kernels need this for `q_vals[DIMS_PER_LANE]`,
+    /// `o[DIMS_PER_LANE]`, and the per-thread codebook cache that
+    /// amortises lookup across the dim-strided inner loop.
+    StackAlloc { dtype: DType, size: u32, name: String },
+
+    /// Load one element from a per-thread stack array: `val = name[index]`.
+    /// Identical emission to `ThreadgroupLoad`; kept distinct in the IR so
+    /// liveness / scoping passes know the buffer is thread-private.
+    StackLoad { name: String, index: ValueId },
+
+    /// Store one element to a per-thread stack array: `name[index] = value`.
+    StackStore { name: String, index: ValueId, value: ValueId },
 
     /// Threadgroup barrier: `threadgroup_barrier(mem_flags::mem_threadgroup)`.
     /// Ensures all prior threadgroup stores are visible to all threads before
@@ -1000,8 +1055,8 @@ impl Op {
                 if secondary_src.is_some() {
                     write!(f, ", secondary")?;
                 }
-                if secondary_base.is_some() {
-                    write!(f, ", secondary_base=v{}", secondary_base.unwrap().as_u32())?;
+                if let Some(sb) = secondary_base {
+                    write!(f, ", secondary_base=v{}", sb.as_u32())?;
                 }
                 write!(f, ")")
             },
@@ -1129,8 +1184,13 @@ impl Op {
             Op::Scatter { dst, indices, value, axis } => {
                 write!(f, "Scatter({dst}, v{}, v{}, axis={axis})", indices.as_u32(), value.as_u32())
             },
-            Op::Atomic { op, dst, index, value } => {
-                write!(f, "Atomic({op:?}, {dst}, v{}, v{})", index.as_u32(), value.as_u32())
+            Op::Atomic { op, scope, dst, index, value } => {
+                write!(
+                    f,
+                    "Atomic({op:?}, scope={scope:?}, {dst}, v{}, v{})",
+                    index.as_u32(),
+                    value.as_u32()
+                )
             },
             Op::Scan { value, axis, op, exclusive } => {
                 write!(
@@ -1175,6 +1235,18 @@ impl Op {
             Op::SimdShuffleXor { value, mask } => {
                 write!(f, "SimdShuffleXor(v{}, mask={mask})", value.as_u32())
             },
+            Op::SimdBroadcast { value, lane } => {
+                write!(f, "SimdBroadcast(v{}, lane=v{})", value.as_u32(), lane.as_u32())
+            },
+            Op::StackAlloc { dtype, size, name } => {
+                write!(f, "StackAlloc({dtype:?}, {size}, {name})")
+            },
+            Op::StackLoad { name, index } => {
+                write!(f, "StackLoad({name}, v{})", index.as_u32())
+            },
+            Op::StackStore { name, index, value } => {
+                write!(f, "StackStore({name}, v{}, v{})", index.as_u32(), value.as_u32())
+            },
             Op::ThreadgroupAlloc { dtype, size, name } => {
                 write!(f, "ThreadgroupAlloc({dtype:?}, {size}, {name})")
             },
@@ -1203,6 +1275,14 @@ impl Op {
             },
             Op::SimdgroupElemStore { value, index, data } => {
                 write!(f, "SimdgroupElemStore(v{}, [{index}], v{})", value.as_u32(), data.as_u32())
+            },
+            Op::SimdgroupLoad { dest, tg, offset, stride, transpose } => {
+                write!(
+                    f,
+                    "SimdgroupLoad(v{}, {tg}, off=v{}, stride={stride}, transpose={transpose})",
+                    dest.as_u32(),
+                    offset.as_u32()
+                )
             },
             Op::SimdgroupMatMul { a, b, c } => {
                 write!(f, "SimdgroupMatMul(v{}, v{}, v{})", a.as_u32(), b.as_u32(), c.as_u32())
@@ -1234,7 +1314,8 @@ mod tests {
         let mut kernel = Kernel::new("sync");
         kernel.body.push_op(Op::Const { value: 7 }, ValueId::new(0));
         let cloned = kernel.clone();
-        let entry = cloned.blocks.get(&BlockId::new(0)).unwrap();
+        let entry =
+            cloned.blocks.get(&BlockId::new(0)).expect("entry block must exist after clone");
         assert_eq!(entry.ops, cloned.body.ops);
         assert_eq!(entry.results, cloned.body.results);
     }
@@ -1243,15 +1324,31 @@ mod tests {
     fn getters_treat_body_as_authoritative_entry_block() {
         let mut kernel = Kernel::new("body");
         kernel.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
-        assert_eq!(kernel.get_block(BlockId::new(0)).unwrap().ops.len(), 1);
+        assert_eq!(kernel.get_block(BlockId::new(0)).expect("entry block must exist").ops.len(), 1);
 
-        let body = kernel.get_block_mut(BlockId::new(0)).unwrap();
+        let body = kernel.get_block_mut(BlockId::new(0)).expect("entry block must be mutable");
         body.push_op(Op::Const { value: 2 }, ValueId::new(1));
         assert_eq!(kernel.body.ops.len(), 2);
-        assert_eq!(kernel.blocks.get(&BlockId::new(0)).unwrap().ops.len(), 0);
+        assert_eq!(
+            kernel
+                .blocks
+                .get(&BlockId::new(0))
+                .expect("entry block must exist before sync")
+                .ops
+                .len(),
+            0
+        );
 
         kernel.sync_entry_block();
-        assert_eq!(kernel.blocks.get(&BlockId::new(0)).unwrap().ops.len(), 2);
+        assert_eq!(
+            kernel
+                .blocks
+                .get(&BlockId::new(0))
+                .expect("entry block must exist after sync")
+                .ops
+                .len(),
+            2
+        );
         let _ = Block::new(BlockId::new(1));
     }
 

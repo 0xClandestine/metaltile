@@ -22,16 +22,29 @@ use metaltile_core::{dtype::DType, ir::Kernel};
 /// "unknown / non-Apple-Silicon target" — fall back to the sibling kernel
 /// which has the broadest perf profile).
 ///
-/// Composite numbers via this selector (median of 5 idle runs):
+/// Composite numbers via this selector — **median of 5 reruns, clean
+/// shell sessions, M2 mini canonical per `feedback_metaltile_bench_on_m2_mini`**:
 ///
-/// | Machine | dtype | Selected | MT% MLX |
-/// |---------|-------|----------|--------:|
-/// | M2 mini | f32   | mma       | 131% |
-/// | M2 mini | f16   | mma       |  98% |
-/// | M2 mini | bf16  | mma_bf16  |  99% |
-/// | M5 Max  | f32   | mma       | 114% |
-/// | M5 Max  | f16   | mma       | 106% |
-/// | M5 Max  | bf16  | mma       | 106% |
+/// | Machine | dtype | Selected | kv_ld=132 | kv_ld=136 | Δ |
+/// |---------|-------|----------|----------:|----------:|---:|
+/// | M2 mini | f32   | mma      | 124%      | **127%**  | +3 |
+/// | M2 mini | f16   | mma      | 92%       | **96%**   | +4 |
+/// | M2 mini | bf16  | mma_bf16 | 99%       | (n/a)     | — |
+/// | M5 Max  | f32   | mma      | 114%      | **116%**  | +2 |
+/// | M5 Max  | f16   | mma      | 107%      | 107%      | 0 |
+/// | M5 Max  | bf16  | mma      | 106%      | 107%      | +1* |
+///
+/// \* M5 f16 / bf16 deltas are within the 0.9-3.7% noise envelope —
+/// effectively a wash. The real wins are **M2 f16 (+4pt)** and **M2/M5 f32 (+2-3pt)**.
+/// M2 f16 max under kv_ld=132 was 95, min under kv_ld=136 was 95 — boundary just barely
+/// overlaps; median (96 vs 92) cleanly separates. Original single-shot bench claimed
+/// 99% — that was a best-case run, not the median. The direction (+4pt) holds; the
+/// absolute is more like 96%.
+///
+/// The `mma_bf16` sibling kept kv_ld=132. Agent B's clean median-of-5
+/// sweep found no kv_ld=136 win on `mma_bf16` larger than noise on
+/// either rig — the bank-pattern split (4-byte f16 wants +8, 8-byte
+/// bf16 wants +4) holds up.
 ///
 /// # Untested hardware
 ///

@@ -2,6 +2,35 @@
 //!
 //! Handles `Op::Reduce` lowering: two-level reduction for threadgroup-scope
 //! (Reduction/Tile2D modes) and SIMD-group reduction for Elementwise/Grid3D.
+//!
+//! ## Single-simdgroup specialization (`MslConfig::expected_tpg`)
+//!
+//! When the dispatched threadgroup is one simdgroup or smaller, the two-level
+//! threadgroup-scope reduction collapses to a no-op: phase 1's `simd_sum`
+//! already holds the full threadgroup result, and phases 2/3 are an indirect
+//! way to broadcast it back through threadgroup memory. The emit picks one of
+//! two specialized paths based on `MslConfig::expected_tpg`:
+//!
+//! - `Some(n) if n <= simd_size` → **fast path only.** Emit `simd_*(value)`
+//!   and nothing else. No threadgroup buffer, no barriers, no per-lane
+//!   masking. The reduction becomes a single MSL statement.
+//! - `Some(n) if n > simd_size` or `None` → **slow path only.** The
+//!   conservative two-level threadgroup reduction. Correct at any TPG ≥ 32.
+//!
+//! Bench dispatch in `metaltile-std/src/run_spec.rs` sets `expected_tpg` from
+//! `ShapeSpec.tpg`, so each (kernel × dtype × tpg-bucket) compiles to optimal
+//! MSL. Callers using `MslGenerator::default()` get the safe slow path
+//! (matching pre-specialization behavior — `None` is the default).
+//!
+//! This is the codegen counterpart to PR #49's softmax small-N bench, which
+//! pinned the 1.65× speedup at tpg=32 to "no second-level reduction overhead";
+//! before this change, the codegen emitted the two-level path unconditionally
+//! and the win at small N came from idle-thread elimination alone. With the
+//! `expected_tpg <= simd_size` specialization in place, every Reduction-mode
+//! kernel whose bench spec pins `tpg ≤ 32` (e.g. `mt_rms_norm_small`, the
+//! small-N softmax variant from #49) sheds the two `threadgroup_barrier`
+//! calls + the 32-slot threadgroup buffer roundtrip in its generated MSL,
+//! no kernel-source changes required.
 
 use std::fmt::Write;
 
@@ -30,10 +59,6 @@ impl super::MslGenerator {
             || kernel.mode == metaltile_core::ir::KernelMode::Tile2D)
             && axis == 0;
         if use_threadgroup {
-            let tg_name = format!("{result_var}_sg");
-            // 1024 threads / 32 per SIMD = 32 SIMD groups max.
-            hoists.push(format!("threadgroup float {tg_name}[32];"));
-
             let (simd_fn, pad_val) = match kind {
                 ReduceKind::Sum | ReduceKind::Mean => ("simd_sum", "0.0f"),
                 ReduceKind::Max => ("simd_max", "-INFINITY"),
@@ -41,9 +66,33 @@ impl super::MslGenerator {
                 ReduceKind::Product => ("__mt_simd_product", "1.0f"),
             };
 
-            // Phase 1: intra-warp reduction via simd_sum/max/min.
+            // Compile-time specialization: when the dispatched TPG is known
+            // to fit in one simdgroup, the two-level path is pure overhead.
+            // Emit only the fast path; skip the threadgroup buffer + both
+            // barriers entirely.
+            let single_simdgroup =
+                matches!(self.config.expected_tpg, Some(tpg) if tpg <= self.config.simd_size);
+
+            if single_simdgroup {
+                if kind == ReduceKind::Mean {
+                    wl!(
+                        out,
+                        "{pad}float {result_var} = {simd_fn}(float({input_var})) / float(lsize);"
+                    );
+                } else {
+                    wl!(out, "{pad}float {result_var} = {simd_fn}(float({input_var}));");
+                }
+                return;
+            }
+
+            // Slow path: full two-level reduction. Correct at any TPG ≥ 32.
+            let tg_name = format!("{result_var}_sg");
+            // 1024 threads / 32 per SIMD = 32 SIMD groups max.
+            hoists.push(format!("threadgroup float {tg_name}[32];"));
+
             wl!(out, "{pad}float {result_var};");
             wl!(out, "{pad}{{");
+            // Phase 1: intra-warp reduction via simd_sum/max/min.
             wl!(out, "{pad}    float _sv = {simd_fn}(float({input_var}));");
             // Phase 2: lane 0 of each SIMD group writes its total.
             wl!(out, "{pad}    if (simd_lane == 0) {tg_name}[simd_group] = _sv;");

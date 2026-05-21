@@ -35,6 +35,11 @@ macro_rules! wl {
 
 /// Return `true` if any op in the kernel (body + all child blocks) is
 /// `Op::ProgramId { axis }` for the given axis value.
+///
+/// Also catches the direct-identifier form (`tgid_y` written verbatim in DSL
+/// source) which the macro lowers to `Op::Load { src: "tgid_y", ... }` rather
+/// than `Op::ProgramId`. Both forms reach the same `tgid_y` reference in the
+/// emitted MSL, so the preamble must declare the alias in either case.
 fn kernel_uses_program_id_axis(kernel: &Kernel, axis: u32) -> bool {
     // Match either Op::ProgramId { axis } or a direct Op::Load { src: "tgid_y" }
     // (DSL kernels that use `tgid_y` directly instead of `program_id::<1>()`).
@@ -67,6 +72,7 @@ impl MslGenerator {
     pub fn new(config: MslConfig) -> Self { MslGenerator { config } }
 
     /// Like [`generate`] but also returns per-pass statistics.
+    #[tracing::instrument(skip(self, kernel), fields(kernel = %kernel.name))]
     pub fn generate_with_stats(&self, kernel: &Kernel) -> Result<(String, Vec<passes::PassStats>)> {
         let mut k = kernel.clone();
         let stats = passes::run_passes_with_stats(&mut k, &passes::standard_pipeline())?;
@@ -74,6 +80,7 @@ impl MslGenerator {
         Ok((msl, stats))
     }
 
+    #[tracing::instrument(skip(self, kernel), fields(kernel = %kernel.name))]
     pub fn generate(&self, kernel: &Kernel) -> Result<String> {
         // Run the optimization pipeline on a clone before emitting.
         let mut k = kernel.clone();
@@ -92,6 +99,7 @@ impl MslGenerator {
     }
 
     fn emit_msl(&self, k: &Kernel) -> Result<String> {
+        tracing::debug!(kernel = %k.name, "starting MSL emit");
         let type_env = infer_types(k)?;
         let feat = self.analyze(k);
         let mut out = String::new();
@@ -108,6 +116,7 @@ impl MslGenerator {
         self.emit_activation_helpers(&feat, &mut out);
         wl!(out);
         self.emit_kernel(k, &feat, &type_env, &mut out)?;
+        tracing::debug!(kernel = %k.name, bytes = out.len(), "MSL emit complete");
         Ok(out)
     }
 
@@ -228,6 +237,9 @@ impl MslGenerator {
             if kernel_uses_program_id_axis(kernel, 1) {
                 wl!(out, "    uint tgid_y = _tgid3.y;");
             }
+            if kernel_uses_program_id_axis(kernel, 2) {
+                wl!(out, "    uint tgid_z = _tgid3.z;");
+            }
             wl!(out, "    uint lsize  = _lsize3.x;");
             if feat.needs_simd_group {
                 wl!(out, "    uint n_simd = lsize / 32u;");
@@ -267,20 +279,34 @@ impl MslGenerator {
     }
 }
 
-/// Create a generator configured for the given kernel mode.
+/// Create a generator configured for the given kernel mode and the
+/// kernel's expected dispatch threadgroup size.
 ///
-/// Tile2D and SimdGroup2D modes enable simdgroup matrix intrinsics;
-/// all other modes use the default config.
-pub fn generator_for_mode(mode: KernelMode) -> MslGenerator {
-    if matches!(mode, KernelMode::Tile2D | KernelMode::SimdGroup2D) {
-        MslGenerator::new(MslConfig {
+/// Tile2D and SimdGroup2D modes enable simdgroup matrix intrinsics; all
+/// other modes use the default config. `expected_tpg` is forwarded to
+/// `MslConfig::expected_tpg` so codegen paths that depend on `lsize`
+/// (notably the Reduction-mode `Op::Reduce` emit — single `simd_*(value)`
+/// at `tpg ≤ simd_size`, two-level threadgroup reduction otherwise) pick
+/// the right specialization. Pass `None` when the dispatch TPG isn't
+/// known at codegen time (caller falls back to the conservative slow path).
+///
+/// **Why `tile build` callers should pass this:** the bench harness sets
+/// `expected_tpg` from `ShapeSpec.tpg`. If `tile build --emit all`
+/// dropped the TPG and produced different MSL than `tile bench` measured,
+/// the bench numbers would describe a kernel nobody actually runs in
+/// production. `cmd/build.rs` reads `spec.shapes[0].tpg` so the emitted
+/// `.metal` files match exactly what bench measured.
+pub fn generator_for_mode(mode: KernelMode, expected_tpg: Option<u32>) -> MslGenerator {
+    let base = if matches!(mode, KernelMode::Tile2D | KernelMode::SimdGroup2D) {
+        MslConfig {
             tile_schedule: TileSchedule::default(),
             use_simd_matrix: true,
             ..MslConfig::default()
-        })
+        }
     } else {
-        MslGenerator::default()
-    }
+        MslConfig::default()
+    };
+    MslGenerator::new(MslConfig { expected_tpg, ..base })
 }
 
 impl Default for MslGenerator {
@@ -574,6 +600,67 @@ mod tests {
     }
 
     #[test]
+    fn fused_activation_emits_helper() {
+        // `silu(a) * b`: the fusion pass folds the Activation into an
+        // `Op::FusedElementwise`, hiding the standalone `Op::Activation`.
+        // Feature analysis must recurse into the fused chain so the
+        // `mt_silu` helper preamble is still emitted — otherwise the MSL
+        // calls an undeclared identifier and fails to compile.
+        use metaltile_core::{
+            ir::{ActKind, BinOpKind, IndexExpr, Param},
+            shape::Shape,
+        };
+        let mut k = Kernel::new("fused_silu_mul");
+        for (name, is_output) in [("a", false), ("b", false), ("c", true)] {
+            k.params.push(Param {
+                name: name.into(),
+                dtype: DType::F32,
+                shape: Shape::scalar(),
+                is_output,
+                kind: Default::default(),
+            });
+        }
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(
+            Op::Load {
+                src: "a".into(),
+                mask: None,
+                other: None,
+                indices: vec![IndexExpr::Value(ValueId::new(0))],
+            },
+            ValueId::new(1),
+        );
+        k.body.push_op(
+            Op::Load {
+                src: "b".into(),
+                mask: None,
+                other: None,
+                indices: vec![IndexExpr::Value(ValueId::new(0))],
+            },
+            ValueId::new(2),
+        );
+        k.body.push_op(
+            Op::Activation { kind: ActKind::Silu, value: ValueId::new(1) },
+            ValueId::new(3),
+        );
+        k.body.push_op(
+            Op::BinOp { op: BinOpKind::Mul, lhs: ValueId::new(3), rhs: ValueId::new(2) },
+            ValueId::new(4),
+        );
+        k.body.push_op_no_result(Op::Store {
+            mask: None,
+            dst: "c".into(),
+            indices: vec![IndexExpr::Value(ValueId::new(0))],
+            value: ValueId::new(4),
+        });
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("inline T mt_silu"),
+            "fused silu must still emit the helper definition:\n{msl}"
+        );
+    }
+
+    #[test]
     fn select_emit() {
         let mut k = Kernel::new("select_test");
         k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
@@ -692,5 +779,197 @@ mod tests {
         k.body.push_op(Op::ProgramId { axis: 1 }, ValueId::new(1));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(msl.contains("tgid_y"), "tgid_y must be emitted when program_id axis 1 is used");
+    }
+
+    #[test]
+    fn reduction_program_id_axis_2_lowers_to_tgid_z() {
+        // A reduction kernel using the z grid axis (e.g. batched_qkv_qgemv,
+        // where program_id::<2>() selects the Q/K/V matrix) must lower
+        // axis 2 to `tgid_z` and declare the alias — not fold it to 0.
+        let mut k = Kernel::new("reduction_with_z");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::ProgramId { axis: 2 }, ValueId::new(1));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("uint tgid_z = _tgid3.z;"),
+            "preamble must declare tgid_z when program_id axis 2 is used: {msl}"
+        );
+        assert!(msl.contains("= tgid_z;"), "axis 2 must lower to tgid_z, not a constant: {msl}");
+    }
+
+    /// Regression: `ssm_step` and similar kernels reference `tgid_y` via the
+    /// direct-identifier form, which the body parser lowers to
+    /// `Op::Load { src: "tgid_y", .. }` rather than `Op::ProgramId`. The
+    /// preamble must still declare the alias.
+    #[test]
+    fn reduction_preamble_emits_tgid_y_when_used_as_identifier() {
+        let mut k = Kernel::new("reduction_with_y_load");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(
+            Op::Load { src: "tgid_y".to_string(), indices: Vec::new(), mask: None, other: None },
+            ValueId::new(1),
+        );
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("uint tgid_y = _tgid3.y;"),
+            "preamble must declare tgid_y when used via direct identifier: {msl}"
+        );
+    }
+
+    /// `Op::SimdShuffleXor { value, mask }` must emit `simd_shuffle_xor(v, mask)`
+    /// — the Metal 2.1+ butterfly shuffle used by AURA's FWHT inner loop and
+    /// Steel attention row reductions. `mask` is a compile-time u32 literal.
+    #[test]
+    fn simd_shuffle_xor_emits_metal_builtin() {
+        let mut k = Kernel::new("simd_xor_smoke");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::SimdShuffleXor { value: ValueId::new(0), mask: 1 }, ValueId::new(1));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("simd_shuffle_xor("),
+            "kernel must emit a simd_shuffle_xor call: {msl}"
+        );
+    }
+
+    /// `Op::SimdBroadcast { value, lane }` must emit `simd_broadcast(v, lane)`
+    /// — the Metal 2.1+ cross-lane broadcast used by AURA's codebook hoist.
+    #[test]
+    fn simd_broadcast_emits_metal_builtin() {
+        let mut k = Kernel::new("simd_bcast_smoke");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(1));
+        k.body.push_op(
+            Op::SimdBroadcast { value: ValueId::new(0), lane: ValueId::new(1) },
+            ValueId::new(2),
+        );
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(msl.contains("simd_broadcast("), "kernel must emit a simd_broadcast call: {msl}");
+    }
+
+    /// `Op::ThreadgroupAlloc { dtype: U32, .. }` must emit
+    /// `threadgroup uint <name>[<size>];`.  AURA encode's pack stage needs
+    /// a `uint` threadgroup buffer so subsequent `atomic_fetch_or_explicit`
+    /// can reinterpret it as `threadgroup atomic_uint*`.
+    #[test]
+    fn threadgroup_alloc_emits_u32_buffer() {
+        let mut k = Kernel::new("tg_u32_alloc");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op_no_result(Op::ThreadgroupAlloc {
+            dtype: DType::U32,
+            size: 128,
+            name: "shared_packed".to_string(),
+        });
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("threadgroup uint shared_packed[128];"),
+            "expected `threadgroup uint shared_packed[128];` for U32 alloc: {msl}"
+        );
+    }
+
+    /// `Op::Atomic { scope: AtomicScope::Threadgroup, .. }` must emit
+    /// the cast form `atomic_fetch_or_explicit((threadgroup atomic_uint*)&<dst>[<idx>], …)`.
+    /// `Device` scope keeps the existing `dst + idx` form.
+    #[test]
+    fn atomic_threadgroup_emits_cast_form() {
+        use metaltile_core::ir::{AtomicKind, AtomicScope};
+
+        let mut k = Kernel::new("atomic_tg_smoke");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(1));
+        k.body.push_op_no_result(Op::ThreadgroupAlloc {
+            dtype: DType::U32,
+            size: 128,
+            name: "shared_packed".to_string(),
+        });
+        k.body.push_op_no_result(Op::Atomic {
+            op: AtomicKind::Or,
+            scope: AtomicScope::Threadgroup,
+            dst: "shared_packed".to_string(),
+            index: ValueId::new(0),
+            value: ValueId::new(1),
+        });
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("(threadgroup atomic_uint*)&shared_packed["),
+            "threadgroup-scope atomic must reinterpret-cast the threadgroup slot: {msl}"
+        );
+        assert!(
+            msl.contains("atomic_fetch_or_explicit"),
+            "threadgroup atomic_or must still emit the OR intrinsic: {msl}"
+        );
+    }
+
+    /// `Op::StackAlloc { dtype: F32, size: 4, name: "o" }` must emit a
+    /// per-thread `float o[4];` (no `threadgroup` qualifier).  Subsequent
+    /// `Op::StackLoad` / `Op::StackStore` must emit the same indexed
+    /// access shape as the threadgroup variants — only the alloc qualifier
+    /// distinguishes them.  AURA flash kernels need this for the per-lane
+    /// `q_vals[DIMS_PER_LANE]` / `o[DIMS_PER_LANE]` arrays.
+    #[test]
+    fn stack_array_emits_per_thread_buffer() {
+        let mut k = Kernel::new("stack_smoke");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 3 }, ValueId::new(1));
+        k.body.push_op_no_result(Op::StackAlloc {
+            dtype: DType::F32,
+            size: 4,
+            name: "o".to_string(),
+        });
+        k.body.push_op(
+            Op::StackLoad { name: "o".to_string(), index: ValueId::new(1) },
+            ValueId::new(2),
+        );
+        k.body.push_op_no_result(Op::StackStore {
+            name: "o".to_string(),
+            index: ValueId::new(1),
+            value: ValueId::new(2),
+        });
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("float o[4];"),
+            "stack array must emit unqualified `float o[4];` (no threadgroup): {msl}"
+        );
+        assert!(
+            !msl.contains("threadgroup float o["),
+            "stack array must NOT carry the threadgroup qualifier: {msl}"
+        );
+        assert!(
+            msl.contains("o[v_v1]") || msl.contains("o["),
+            "stack store/load must use plain `name[idx]` shape: {msl}"
+        );
+    }
+
+    /// Sanity: device-scope atomics keep the unchanged `<dst> + <idx>` form.
+    #[test]
+    fn atomic_device_emits_buffer_offset_form() {
+        use metaltile_core::ir::{AtomicKind, AtomicScope};
+
+        let mut k = Kernel::new("atomic_dev_smoke");
+        k.mode = KernelMode::Elementwise;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(1));
+        k.body.push_op_no_result(Op::Atomic {
+            op: AtomicKind::Add,
+            scope: AtomicScope::Device,
+            dst: "counter".to_string(),
+            index: ValueId::new(0),
+            value: ValueId::new(1),
+        });
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("atomic_fetch_add_explicit(counter +"),
+            "device-scope atomic must keep buffer-offset form: {msl}"
+        );
+        assert!(
+            !msl.contains("(threadgroup"),
+            "device-scope atomic must NOT emit a threadgroup cast: {msl}"
+        );
     }
 }

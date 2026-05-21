@@ -6,7 +6,7 @@ use metaltile_core::dtype::DType;
 use metaltile_infer::{FusionMode, ModelConfig, Session};
 
 /// Args for `tile infer`.
-#[derive(clap::Args)]
+#[derive(clap::Args, Debug)]
 pub struct InferArgs {
     /// Model directory (contains .safetensors + tokenizer.json + config.json)
     /// OR a HuggingFace repo ID (e.g. "meta-llama/Llama-3.2-1B-Instruct").

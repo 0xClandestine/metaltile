@@ -191,6 +191,25 @@ pub struct ShapeSpec {
 
 // ── BenchDispatch ────────────────────────────────────────────────────────
 
+/// Which kernel architecture backs an [`BenchDispatch::SdpaBatchedDecode`] row.
+///
+/// The fork is structural, not just a tuning parameter: at small K the
+/// lane-quartile decode pattern wins (low register pressure, easy
+/// constexpr unroll); at larger K the FA-2 simdgroup-matrix prefill tile
+/// wins (the BQ×BK MMA already implements the KV-reuse pattern the spec
+/// wants and is what dflash-mlx's `verify_qmm` runs).
+pub enum BatchedDecodeVariant {
+    /// Decode-form. Extends `sdpa_decode`'s lane-quartile pattern with
+    /// `#[constexpr] batch_q` independent online-softmax streams. Used at
+    /// K=2 and K=4. Threadgroup of 1024 (Reduction kernel mode).
+    Decode,
+    /// Prefill-tile reuse. Dispatches `mt_sdpa_prefill_mma` with
+    /// `q_len = batch_q, k_len = n_kv`, causal-mask-trimmed so each Q
+    /// position sees its own prefix. Used at K=8 and K=16. SimdGroup2D
+    /// kernel mode; `bq`/`bk`/`wm`/`wn` mirror the SdpaPrefill tuning.
+    PrefillTile { bq: usize, bk: usize, wm: usize, wn: usize },
+}
+
 pub enum BenchDispatch {
     Generic,
     Sort {
@@ -321,6 +340,29 @@ pub enum BenchDispatch {
         wn: usize,
         tpg: usize,
     },
+    /// Batched-Q SDPA decode for speculative decoding (M7). K query
+    /// positions share one KV walk per dispatch, amortizing KV bandwidth
+    /// by K× vs. K independent `SdpaVector` dispatches at the same shape.
+    ///
+    /// Two architectures, selected by `variant`:
+    ///   * `BatchedDecodeVariant::Decode` (K=2,4): extends `sdpa_decode`'s
+    ///     lane-quartile pattern with K independent online-softmax streams.
+    ///     Threadgroup of 1024 (32 simdgroups × 32 lanes), same as single-Q.
+    ///   * `BatchedDecodeVariant::PrefillTile` (K=8,16): reuses
+    ///     `mt_sdpa_prefill_mma` driven with `q_len = batch_q, k_len = n_kv`.
+    ///     KV reuse comes from the FA-2 simdgroup-matrix tile (BQ×BK with
+    ///     online softmax in registers) — the same pattern dflash-mlx's
+    ///     `verify_qmm` uses.
+    SdpaBatchedDecode {
+        head_dim: usize,
+        n_kv: usize,
+        n_q_heads: usize,
+        gqa_factor: usize,
+        /// K — number of query positions sharing the KV walk (2, 4, 8, 16).
+        batch_q: usize,
+        variant: BatchedDecodeVariant,
+        tpg: usize,
+    },
     /// Tiled simdgroup GEMM (steel_gemm_fused).
     SteelGemm {
         m: usize,
@@ -354,12 +396,51 @@ impl BenchDispatch {
             | BenchDispatch::AffineQuantize { .. }
             | BenchDispatch::SdpaVector { .. }
             | BenchDispatch::SdpaVector2Pass { .. } => KernelMode::Reduction,
+            BenchDispatch::SdpaBatchedDecode { variant, .. } => match variant {
+                BatchedDecodeVariant::Decode => KernelMode::Reduction,
+                BatchedDecodeVariant::PrefillTile { .. } => KernelMode::SimdGroup2D,
+            },
             BenchDispatch::Random { .. }
             | BenchDispatch::FpQuantized { .. }
             | BenchDispatch::AffineDequantize { .. } => KernelMode::Elementwise,
             BenchDispatch::Rope { .. } | BenchDispatch::StridedCopy { .. } => KernelMode::Grid3D,
             BenchDispatch::SteelGemm { .. } => KernelMode::SimdGroup2D,
             BenchDispatch::SdpaPrefill { .. } => KernelMode::SimdGroup2D,
+        }
+    }
+
+    /// The dispatch threadgroup size this variant uses, when one is fixed
+    /// at the bench/dispatch layer. `cmd/build.rs` reads this so the MSL
+    /// emitted by `tile build --emit all` matches the MSL `tile bench`
+    /// measures — both feed the same value into `MslConfig::expected_tpg`.
+    ///
+    /// Returns `None` for `Generic` (the caller falls back to
+    /// `spec.shapes.first().map(|s| s.tpg)` instead, since `Generic`'s TPG
+    /// lives on `ShapeSpec`), and for variants without a single fixed TPG
+    /// (`Rope`, `StridedCopy` — Grid3D/Elementwise modes that don't use
+    /// the Reduction-mode `Op::Reduce` emit; `SdpaVector2Pass` — pass1
+    /// dispatches at the kernel's design TPG of 1024 with no spec-level
+    /// override).
+    pub fn tpg_hint(&self) -> Option<u32> {
+        match self {
+            BenchDispatch::Generic
+            | BenchDispatch::Rope { .. }
+            | BenchDispatch::StridedCopy { .. }
+            | BenchDispatch::SdpaVector2Pass { .. } => None,
+            BenchDispatch::Sort { tpg, .. }
+            | BenchDispatch::Scan { tpg, .. }
+            | BenchDispatch::ArgReduce { tpg, .. }
+            | BenchDispatch::Random { tpg, .. }
+            | BenchDispatch::FpQuantized { tpg, .. }
+            | BenchDispatch::QuantizedMatVec { tpg, .. }
+            | BenchDispatch::QuantizedMatMul { tpg, .. }
+            | BenchDispatch::Attention { tpg, .. }
+            | BenchDispatch::AffineDequantize { tpg, .. }
+            | BenchDispatch::AffineQuantize { tpg, .. }
+            | BenchDispatch::SdpaVector { tpg, .. }
+            | BenchDispatch::SdpaPrefill { tpg, .. }
+            | BenchDispatch::SdpaBatchedDecode { tpg, .. }
+            | BenchDispatch::SteelGemm { tpg, .. } => Some(*tpg as u32),
         }
     }
 }

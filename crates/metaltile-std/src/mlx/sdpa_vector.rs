@@ -17,6 +17,15 @@
 //! consecutive Q/K/V quartiles, the dot-product across `head_dim`
 //! reduces via `simd_sum`, and the V accumulator stays in 4 thread-
 //! local f32 registers throughout the n_kv walk.
+//!
+//! `ffai/sdpa_decode.rs` is a sibling kernel with the same dispatch +
+//! reduction shape but extra FFAI-specific surface
+//! (`kv_stride`, `heads_per_group`, `sink_end`, `window_start`). The
+//! split is deliberate: this file's charter is a 1:1 MLX port for the
+//! `tile bench` head-to-head, so additions that diverge from MLX's
+//! `sdpa_vector` template live in `ffai/`. Bandwidth fixes that apply
+//! to both should be ported across — see the `tg_out` occupancy fix
+//! in PR #43 for the precedent.
 
 use metaltile::{bench_kernel, kernel};
 
@@ -58,8 +67,7 @@ pub fn mt_sdpa_vector<T>(
         for d in range(0u32, head_dim, 1u32) {
             store(out[out_off + d], 0.0f32.cast::<T>());
         }
-        return;
-    }
+    } else {
 
     // 32-slot scalars for the cross-simdgroup max/sum + a 1024-slot output
     // buffer reused 4× in the reduction loop below. Matches MLX's layout:
@@ -194,6 +202,7 @@ pub fn mt_sdpa_vector<T>(
         store(out[out_off + 2u32], red2);
         store(out[out_off + 3u32], red3);
     }
+    } // else ns != 0
 }
 
 /// SDPA decode for small head dims (head_dim = 64, 2 elems per lane).
@@ -240,8 +249,7 @@ pub fn mt_sdpa_vector_hd64<T>(
         for d in range(0u32, head_dim, 1u32) {
             store(out[out_off + d], 0.0f32.cast::<T>());
         }
-        return;
-    }
+    } else {
 
     threadgroup_alloc("tg_max", 32);
     threadgroup_alloc("tg_sum", 32);
@@ -318,4 +326,5 @@ pub fn mt_sdpa_vector_hd64<T>(
         store(out[out_off], red0);
         store(out[out_off + 1u32], red1);
     }
+    } // else ns != 0
 }

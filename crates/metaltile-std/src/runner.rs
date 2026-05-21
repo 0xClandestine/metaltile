@@ -327,14 +327,16 @@ impl GpuRunner {
     }
 
     pub fn buffer_f32(&self, data: &[f32]) -> GpuBuffer {
-        let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
-        self.buffer_bytes(&bytes)
+        // Zero-copy view as bytes via bytemuck::Pod. Apple Silicon is LE
+        // and f32/u16 are POD, so this is byte-identical to the previous
+        // `.flat_map(.to_le_bytes()).collect()` path without the
+        // intermediate Vec<u8> alloc.
+        self.buffer_bytes(bytemuck::cast_slice(data))
     }
 
     /// `data` is raw fp16 bits (e.g. `0x3C00` = 1.0).
     pub fn buffer_f16(&self, data: &[u16]) -> GpuBuffer {
-        let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
-        self.buffer_bytes(&bytes)
+        self.buffer_bytes(bytemuck::cast_slice(data))
     }
 
     pub fn buffer_u32(&self, v: u32) -> GpuBuffer { self.buffer_bytes(&v.to_le_bytes()) }

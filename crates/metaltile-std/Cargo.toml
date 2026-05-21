@@ -10,12 +10,14 @@ publish = true
 nax = []
 
 [dependencies]
+thiserror.workspace = true
 metaltile.workspace = true
 metaltile-core.workspace = true
 metaltile-codegen.workspace = true
 metaltile-runtime.workspace = true
 inventory.workspace = true
 half.workspace = true
+bytemuck.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -26,3 +28,4 @@ objc2-metal = { version = "0.3", features = [
     "MTLFunctionConstantValues", "MTLDataType",
 ] }
 objc2-foundation = "0.3"
+

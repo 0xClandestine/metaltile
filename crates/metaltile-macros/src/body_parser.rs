@@ -177,6 +177,25 @@ impl DslBodyParser {
         match stmt {
             Stmt::Local(local) => self.parse_let(local),
             Stmt::Expr(expr, _semi) => self.parse_expr_stmt(expr),
+            Stmt::Macro(mac) => {
+                // The proc-macro does NOT expand declarative macros inside the
+                // kernel body — they're seen as opaque tokens and would
+                // silently produce no IR. Fail loudly so future contributors
+                // can't ship a kernel with a dropped body (PR #19 shipped 25+
+                // such kernels before this guard existed).
+                //
+                // Workarounds: (1) wrap the entire `#[kernel] fn …` declaration
+                // in a `macro_rules!` so declarative expansion happens before
+                // the proc-macro runs; (2) inline the macro body; (3) replace
+                // an unrolled tree with a DSL `for` loop.
+                self.push_error(syn::Error::new_spanned(
+                    &mac.mac.path,
+                    "macro_rules! invocations inside #[kernel] bodies are not \
+                     expanded by the metaltile proc-macro and would silently \
+                     drop their body. Wrap the entire `#[kernel] fn` in the \
+                     macro instead, or inline / replace with a DSL loop.",
+                ));
+            },
             _ => {},
         }
     }
@@ -421,8 +440,78 @@ impl DslBodyParser {
             Expr::MethodCall(method) => self.parse_method_call(method),
             Expr::Unary(unary) => self.parse_unary(unary),
             Expr::Paren(paren) => self.parse_expr(&paren.expr),
+            // `macro_rules!` captures (e.g. `$bits:literal`) are substituted
+            // wrapped in `Delimiter::None` invisible groups, which syn parses
+            // as `Expr::Group`. Unwrap so the inner literal / expression
+            // reaches its real arm — otherwise the catch-all below allocates
+            // a VID without pushing an Op and downstream consumers reference
+            // an undeclared SSA value.
+            Expr::Group(group) => self.parse_expr(&group.expr),
             Expr::If(if_expr) => self.parse_if(if_expr),
             Expr::ForLoop(_) => self.alloc_vid(),
+            Expr::Macro(mac) => {
+                // Same hazard as Stmt::Macro — fail loudly so silent-drop
+                // regressions cannot recur.
+                self.push_error(syn::Error::new_spanned(
+                    &mac.mac.path,
+                    "macro_rules! invocations inside #[kernel] bodies are not \
+                     expanded by the metaltile proc-macro and would silently \
+                     drop their body. Wrap the entire `#[kernel] fn` in the \
+                     macro instead, or inline / replace with a DSL loop.",
+                ));
+                self.alloc_vid()
+            },
+            // Control-flow constructs the body parser does not lower. Without
+            // these guards they fall into the `_` catch-all below, which
+            // allocates a ValueId but emits NO IR — the construct silently
+            // vanishes from the generated kernel and it ships wrong behavior
+            // (a `while` reduction loop that does zero steps; a `return` that
+            // falls through). Fail loudly instead, the same way `Expr::Macro`
+            // does, and point at the DSL construct that *is* supported.
+            Expr::While(w) => {
+                self.push_error(syn::Error::new_spanned(
+                    w,
+                    "`while` loops are not supported inside #[kernel] bodies — \
+                     the body parser would silently drop the loop. Use a DSL \
+                     `for _ in range(start, end, step)` loop instead.",
+                ));
+                self.alloc_vid()
+            },
+            Expr::Loop(l) => {
+                self.push_error(syn::Error::new_spanned(
+                    l,
+                    "`loop` is not supported inside #[kernel] bodies — the body \
+                     parser would silently drop it. Use a bounded DSL \
+                     `for _ in range(start, end, step)` loop instead.",
+                ));
+                self.alloc_vid()
+            },
+            Expr::Return(r) => {
+                self.push_error(syn::Error::new_spanned(
+                    r,
+                    "`return` is not supported inside #[kernel] bodies — the \
+                     body parser would silently drop it and execution would \
+                     fall through. Use `if` / `else` branching instead.",
+                ));
+                self.alloc_vid()
+            },
+            Expr::Match(m) => {
+                self.push_error(syn::Error::new_spanned(
+                    m,
+                    "`match` is not supported inside #[kernel] bodies — the \
+                     body parser would silently drop it. Use `if` / `else` \
+                     branching, or `select(cond, a, b)`.",
+                ));
+                self.alloc_vid()
+            },
+            Expr::Closure(c) => {
+                self.push_error(syn::Error::new_spanned(
+                    c,
+                    "closures are not supported inside #[kernel] bodies — the \
+                     body parser would silently drop them.",
+                ));
+                self.alloc_vid()
+            },
             _ => self.alloc_vid(),
         }
     }
@@ -518,16 +607,43 @@ impl DslBodyParser {
             "simd_max" => self.parse_simd_reduce(call, "Max"),
             "simd_min" => self.parse_simd_reduce(call, "Min"),
             "simd_shuffle_xor" => self.parse_simd_shuffle_xor(call),
+            "simd_broadcast" => self.parse_simd_broadcast(call),
+            // Device-scope atomics — target a kernel buffer parameter.
+            "atomic_add" => self.parse_atomic(call, "Add", "Device"),
+            "atomic_max" => self.parse_atomic(call, "Max", "Device"),
+            "atomic_min" => self.parse_atomic(call, "Min", "Device"),
+            "atomic_and" => self.parse_atomic(call, "And", "Device"),
+            "atomic_or" => self.parse_atomic(call, "Or", "Device"),
+            "atomic_xor" => self.parse_atomic(call, "Xor", "Device"),
+            // Threadgroup-scope atomics — target a `threadgroup_alloc`'d
+            // uint array.  Codegen reinterprets each slot as
+            // `threadgroup atomic_uint*` for the call.  AURA encode's
+            // pack stage races on shared u32 words with these.
+            "atomic_add_tg" => self.parse_atomic(call, "Add", "Threadgroup"),
+            "atomic_max_tg" => self.parse_atomic(call, "Max", "Threadgroup"),
+            "atomic_min_tg" => self.parse_atomic(call, "Min", "Threadgroup"),
+            "atomic_and_tg" => self.parse_atomic(call, "And", "Threadgroup"),
+            "atomic_or_tg" => self.parse_atomic(call, "Or", "Threadgroup"),
+            "atomic_xor_tg" => self.parse_atomic(call, "Xor", "Threadgroup"),
             "threadgroup_barrier" => self.parse_barrier(call),
             "simdgroup_barrier_mem_none" => self.parse_simdgroup_barrier(call),
             "threadgroup_alloc" => self.parse_threadgroup_alloc(call),
             "threadgroup_load" => self.parse_threadgroup_load(call),
             "threadgroup_store" => self.parse_threadgroup_store(call),
+            // Per-thread stack arrays.  Mirror the threadgroup_* shape but
+            // emit an unqualified `T name[size];` so Metal places the
+            // array in per-thread registers / thread-local memory.  AURA
+            // flash kernels need this for `q_vals[DIMS_PER_LANE]`,
+            // `o[DIMS_PER_LANE]`, and the per-thread codebook cache.
+            "stack_alloc" => self.parse_stack_alloc(call),
+            "stack_load" => self.parse_stack_load(call),
+            "stack_store" => self.parse_stack_store(call),
             "simd_scan_inclusive" => self.parse_simd_scan(call, false),
             "simd_scan_exclusive" => self.parse_simd_scan(call, true),
             "simdgroup_alloc" => self.parse_simdgroup_alloc(call),
             "simdgroup_elem_load" => self.parse_simdgroup_elem_load(call),
             "simdgroup_elem_store" => self.parse_simdgroup_elem_store(call),
+            "simdgroup_load" => self.parse_simdgroup_load(call),
             "simdgroup_matmul" => self.parse_simdgroup_matmul(call),
             "simd_lane_id" => self.parse_simd_lane_id(call),
             "simd_group_id" => self.parse_simd_group_id(call),
@@ -1245,7 +1361,10 @@ impl DslBodyParser {
         result
     }
 
-    /// `simd_shuffle_xor(val, mask)` → Op::SimdShuffleXor
+    /// `simd_shuffle_xor(val, mask)` → Op::SimdShuffleXor.
+    /// Each lane receives the value held by lane `lane_id ^ mask`. `mask` is a
+    /// compile-time u32 literal (typically `1, 2, 4, 8, …` from a butterfly
+    /// stride loop — AURA's FWHT and Steel attention row reductions).
     fn parse_simd_shuffle_xor(&mut self, call: &ExprCall) -> u32 {
         let args: Vec<_> = call.args.iter().collect();
         let val = args.first().map(|a| self.parse_expr(a)).unwrap_or_else(|| self.alloc_vid());
@@ -1263,6 +1382,78 @@ impl DslBodyParser {
         result
     }
 
+    /// `simd_broadcast(value, lane)` → Op::SimdBroadcast.
+    /// Broadcasts `lane`'s value to every lane in the simdgroup. Used by
+    /// AURA's cooperative codebook hoist.
+    fn parse_simd_broadcast(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<_> = call.args.iter().collect();
+        let val = args.first().map(|a| self.parse_expr(a)).unwrap_or_else(|| self.alloc_vid());
+        let lane = args.get(1).map(|a| self.parse_expr(a)).unwrap_or_else(|| self.alloc_vid());
+        let result = self.alloc_vid();
+        self.push_op(
+            quote! {
+                Op::SimdBroadcast {
+                    value: ValueId::new(#val),
+                    lane: ValueId::new(#lane),
+                }
+            },
+            result,
+        );
+        result
+    }
+
+    /// `atomic_<op>(dst, index, value)` → `Op::Atomic`.  `dst` must be a
+    /// string literal:
+    ///   * Device scope (default `atomic_<op>(…)`): a kernel buffer
+    ///     parameter name.
+    ///   * Threadgroup scope (`atomic_<op>_tg(…)`): a name that was
+    ///     declared via `threadgroup_alloc(name, size, "u32")` earlier in
+    ///     the kernel.
+    ///
+    /// `index` and `value` are SSA expressions.  No result — atomics are
+    /// side-effecting stores.
+    fn parse_atomic(&mut self, call: &ExprCall, op_str: &str, scope_str: &str) -> u32 {
+        let args: Vec<_> = call.args.iter().collect();
+        let dst = if let Some(syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. })) =
+            args.first().map(|a| match a {
+                syn::Expr::Group(g) => &*g.expr,
+                other => other,
+            }) {
+            s.value()
+        } else {
+            self.push_error(syn::Error::new_spanned(
+                &call.func,
+                format!("atomic_{} expects a string literal as first argument (the destination param name)", op_str.to_lowercase()),
+            ));
+            String::new()
+        };
+        let index = args.get(1).map(|a| self.parse_expr(a)).unwrap_or_else(|| self.alloc_vid());
+        let value = args.get(2).map(|a| self.parse_expr(a)).unwrap_or_else(|| self.alloc_vid());
+        let op_tokens = match op_str {
+            "Add" => quote! { AtomicKind::Add },
+            "Max" => quote! { AtomicKind::Max },
+            "Min" => quote! { AtomicKind::Min },
+            "And" => quote! { AtomicKind::And },
+            "Or" => quote! { AtomicKind::Or },
+            "Xor" => quote! { AtomicKind::Xor },
+            _ => quote! { AtomicKind::Add },
+        };
+        let scope_tokens = match scope_str {
+            "Threadgroup" => quote! { AtomicScope::Threadgroup },
+            _ => quote! { AtomicScope::Device },
+        };
+        self.push_op_no_result(quote! {
+            Op::Atomic {
+                op: #op_tokens,
+                scope: #scope_tokens,
+                dst: #dst.to_string(),
+                index: ValueId::new(#index),
+                value: ValueId::new(#value),
+            }
+        });
+        0
+    }
+
     /// `threadgroup_barrier()` → Op::Barrier (no result — DCE keeps no-result ops)
     fn parse_barrier(&mut self, _call: &ExprCall) -> u32 {
         self.push_op_no_result(quote! { Op::Barrier });
@@ -1276,30 +1467,66 @@ impl DslBodyParser {
         0
     }
 
-    /// `threadgroup_alloc("name", size)` → Op::ThreadgroupAlloc (no result).
-    /// Optional third argument: `T` uses kernel's generic type, any other type
-    /// name (`f32`, `f16`, etc.) uses that specific dtype. Defaults to F32.
+    /// `threadgroup_alloc("name", size [, dtype])` → Op::ThreadgroupAlloc.
+    ///
+    /// `dtype` is an optional 3rd argument and accepts either form:
+    ///   * **Type-path form**: `T` (resolves to the kernel's generic
+    ///     type), or `f32` / `f16` / `bf16` / `u32` / `i32` (specific
+    ///     dtype). Used by `mlx/sort.rs` etc.
+    ///   * **String-literal form**: `"f32"` / `"f16"` / `"bf16"` /
+    ///     `"u32"` / `"i32"`. Used by AURA encode for `"u32"` so the
+    ///     threadgroup pack buffer can be reinterpreted as `atomic_uint`
+    ///     by the threadgroup-scoped atomic ops.
+    ///
+    /// Defaults to F32 if omitted.
     fn parse_threadgroup_alloc(&mut self, call: &ExprCall) -> u32 {
         let args: Vec<_> = call.args.iter().collect();
         let name = string_lit_from_expr(args.first().unwrap_or(&&*call.func));
         let size: usize = usize_lit_from_expr(args.get(1).copied());
         let size_u32 = size as u32;
-        let dtype_ts = if let Some(ty_arg) = args.get(2) {
-            // Explicit dtype: `T` resolves to kernel generic type.
-            let ty_str = quote! { #ty_arg }.to_string();
-            match ty_str.trim() {
-                "T" =>
-                    if let Some(tok) = self.type_vars.get("T") {
-                        tok.clone()
-                    } else {
+        let dtype_ts = if let Some(arg) = args.get(2) {
+            // Try string-literal form first (`"u32"`, `"f32"`, ...).
+            // macro_rules!-substituted args show up wrapped in
+            // Expr::Group; unwrap to peek through.
+            let unwrapped: &syn::Expr = match arg {
+                syn::Expr::Group(g) => &g.expr,
+                other => other,
+            };
+            if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = unwrapped {
+                match s.value().as_str() {
+                    "f32" => quote! { DType::F32 },
+                    "f16" => quote! { DType::F16 },
+                    "bf16" => quote! { DType::BF16 },
+                    "u32" => quote! { DType::U32 },
+                    "i32" => quote! { DType::I32 },
+                    other => {
+                        self.push_error(syn::Error::new_spanned(
+                            arg,
+                            format!(
+                                "threadgroup_alloc dtype must be one of \
+                                 f32/f16/bf16/u32/i32 (got {other:?})"
+                            ),
+                        ));
                         quote! { DType::F32 }
                     },
-                "f32" => quote! { DType::F32 },
-                "f16" => quote! { DType::F16 },
-                "bf16" => quote! { DType::BF16 },
-                "i32" => quote! { DType::I32 },
-                "u32" => quote! { DType::U32 },
-                _ => quote! { DType::F32 },
+                }
+            } else {
+                // Fall back to type-path form (`T`, `f32`, `f16`, ...).
+                let ty_str = quote! { #arg }.to_string();
+                match ty_str.trim() {
+                    "T" =>
+                        if let Some(tok) = self.type_vars.get("T") {
+                            tok.clone()
+                        } else {
+                            quote! { DType::F32 }
+                        },
+                    "f32" => quote! { DType::F32 },
+                    "f16" => quote! { DType::F16 },
+                    "bf16" => quote! { DType::BF16 },
+                    "i32" => quote! { DType::I32 },
+                    "u32" => quote! { DType::U32 },
+                    _ => quote! { DType::F32 },
+                }
             }
         } else {
             quote! { DType::F32 }
@@ -1340,6 +1567,96 @@ impl DslBodyParser {
         let val_vid = args.get(2).map(|a| self.parse_expr(a)).unwrap_or(0);
         self.push_op_no_result(quote! {
             Op::ThreadgroupStore {
+                name: #name.to_string(),
+                index: ValueId::new(#idx_vid),
+                value: ValueId::new(#val_vid),
+            }
+        });
+        0
+    }
+
+    /// `stack_alloc("name", size [, dtype])` → Op::StackAlloc.
+    ///
+    /// Per-thread stack-resident array.  `dtype` is an optional 3rd
+    /// argument as a string literal (`"f32"` / `"f16"` / `"bf16"` /
+    /// `"u32"` / `"i32"`); defaults to `f32`.  Metal places small
+    /// fixed-size local arrays in registers; AURA flash kernels use
+    /// this for the per-lane `q_vals[]`, `o[]`, and codebook caches.
+    fn parse_stack_alloc(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<_> = call.args.iter().collect();
+        let name = string_lit_from_expr(args.first().unwrap_or(&&*call.func));
+        let size: usize = usize_lit_from_expr(args.get(1).copied());
+        let size_u32 = size as u32;
+
+        let dtype_tokens = if let Some(arg) = args.get(2) {
+            let unwrapped: &syn::Expr = match arg {
+                syn::Expr::Group(g) => &g.expr,
+                other => other,
+            };
+            if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = unwrapped {
+                match s.value().as_str() {
+                    "f32" => quote! { DType::F32 },
+                    "f16" => quote! { DType::F16 },
+                    "bf16" => quote! { DType::BF16 },
+                    "u32" => quote! { DType::U32 },
+                    "i32" => quote! { DType::I32 },
+                    other => {
+                        self.push_error(syn::Error::new_spanned(
+                            arg,
+                            format!(
+                                "stack_alloc dtype must be one of f32/f16/bf16/u32/i32 (got {other:?})"
+                            ),
+                        ));
+                        quote! { DType::F32 }
+                    },
+                }
+            } else {
+                self.push_error(syn::Error::new_spanned(
+                    arg,
+                    "stack_alloc dtype must be a string literal",
+                ));
+                quote! { DType::F32 }
+            }
+        } else {
+            quote! { DType::F32 }
+        };
+
+        self.push_op_no_result(quote! {
+            Op::StackAlloc {
+                dtype: #dtype_tokens,
+                size: #size_u32,
+                name: #name.to_string(),
+            }
+        });
+        0
+    }
+
+    /// `stack_load("name", idx)` → Op::StackLoad.
+    fn parse_stack_load(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<_> = call.args.iter().collect();
+        let name = string_lit_from_expr(args.first().unwrap_or(&&*call.func));
+        let idx_vid = args.get(1).map(|a| self.parse_expr(a)).unwrap_or(0);
+        let result = self.alloc_vid();
+        self.push_op(
+            quote! {
+                Op::StackLoad {
+                    name: #name.to_string(),
+                    index: ValueId::new(#idx_vid),
+                }
+            },
+            result,
+        );
+        result
+    }
+
+    /// `stack_store("name", idx, val)` → Op::StackStore (no result).
+    fn parse_stack_store(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<_> = call.args.iter().collect();
+        let name = string_lit_from_expr(args.first().unwrap_or(&&*call.func));
+        let idx_vid = args.get(1).map(|a| self.parse_expr(a)).unwrap_or(0);
+        let val_vid = args.get(2).map(|a| self.parse_expr(a)).unwrap_or(0);
+        self.push_op_no_result(quote! {
+            Op::StackStore {
                 name: #name.to_string(),
                 index: ValueId::new(#idx_vid),
                 value: ValueId::new(#val_vid),
@@ -1424,6 +1741,49 @@ impl DslBodyParser {
                 value: ValueId::new(#sm_vid),
                 index: #idx,
                 data: ValueId::new(#data_vid),
+            }
+        });
+        0
+    }
+
+    /// `simdgroup_load(frag, "tg_name", offset, stride)` /
+    /// `simdgroup_load(frag, "tg_name", offset, stride, transpose)` →
+    /// Op::SimdgroupLoad (no result). HW-fused 8×8 fragment load from
+    /// threadgroup memory — emits a single MSL `simdgroup_load(...)`
+    /// instruction that issues a coalesced 32-lane fetch with HW swizzle.
+    /// Use in place of the per-lane scatter
+    /// `simdgroup_elem_store(frag, idx, threadgroup_load("tg", off))`
+    /// to dodge f16 TG-bank conflicts on 8×8 fragment fills.
+    /// Args: frag value-id (ssa), tg name (str literal), offset (ssa),
+    /// stride (u32 const literal — row stride in elements), optional
+    /// `transpose` (bool literal — default `false`; pass `true` to swap
+    /// the row/col axes of the loaded fragment, e.g. for a row-major
+    /// `[N, K]` B tile read into the MMA's `[K, N]` operand layout).
+    fn parse_simdgroup_load(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<_> = call.args.iter().collect();
+        let frag_vid = args.first().map(|a| self.parse_expr(a)).unwrap_or(0);
+        let tg_name = string_lit_from_expr(args.get(1).unwrap_or(&&*call.func));
+        let off_vid = args.get(2).map(|a| self.parse_expr(a)).unwrap_or(0);
+        let stride = args.get(3).map(|a| literal_u32(a)).unwrap_or(0);
+        let transpose = args
+            .get(4)
+            .map(|a| {
+                if let Expr::Lit(lit) = *a
+                    && let syn::Lit::Bool(b) = &lit.lit
+                {
+                    b.value
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false);
+        self.push_op_no_result(quote! {
+            Op::SimdgroupLoad {
+                dest: ValueId::new(#frag_vid),
+                tg: #tg_name.to_string(),
+                offset: ValueId::new(#off_vid),
+                stride: #stride,
+                transpose: #transpose,
             }
         });
         0
@@ -1655,10 +2015,17 @@ fn string_lit_from_expr(expr: &Expr) -> String {
     String::new()
 }
 
-/// Extract a usize literal from an optional expression like `9`.
+/// Extract a usize literal from an optional expression like `9` or `9u32`.
+/// Unwraps `Expr::Group` (the invisible delimiter `macro_rules!` wraps
+/// captured fragments in) so callers like `threadgroup_alloc!(..., $size)`
+/// see the underlying integer literal rather than the Group wrapping.
 fn usize_lit_from_expr(expr: Option<&Expr>) -> usize {
     let Some(expr) = expr else { return 0 };
-    if let Expr::Lit(lit) = expr
+    let unwrapped: &Expr = match expr {
+        Expr::Group(g) => &g.expr,
+        other => other,
+    };
+    if let Expr::Lit(lit) = unwrapped
         && let syn::Lit::Int(n) = &lit.lit
     {
         return n.base10_parse::<usize>().unwrap_or(0);
@@ -1700,5 +2067,35 @@ mod tests {
         assert!(tokens.contains("compile_error"), "{tokens}");
         assert!(tokens.contains("unrecognized MetalTile DSL call"), "{tokens}");
         assert!(tokens.contains("sine"), "{tokens}");
+    }
+
+    #[test]
+    fn parses_simdgroup_load_basic() {
+        // `simdgroup_load(frag, "tg", off, stride)` — default transpose=false.
+        let body: Block = parse_quote!({
+            let f = simdgroup_alloc::<f16, 8, 8>();
+            simdgroup_load(f, "ws", off, 36u32);
+        });
+
+        let tokens = DslBodyParser::parse(&body, &[], &[]).to_string();
+
+        assert!(tokens.contains("Op :: SimdgroupLoad"), "{tokens}");
+        assert!(tokens.contains("tg : \"ws\" . to_string ()"), "{tokens}");
+        assert!(tokens.contains("stride : 36u32"), "{tokens}");
+        assert!(tokens.contains("transpose : false"), "{tokens}");
+    }
+
+    #[test]
+    fn parses_simdgroup_load_with_transpose() {
+        // 5-arg form: `simdgroup_load(frag, "tg", off, stride, true)`.
+        let body: Block = parse_quote!({
+            let f = simdgroup_alloc::<f16, 8, 8>();
+            simdgroup_load(f, "ws", off, 36u32, true);
+        });
+
+        let tokens = DslBodyParser::parse(&body, &[], &[]).to_string();
+
+        assert!(tokens.contains("Op :: SimdgroupLoad"), "{tokens}");
+        assert!(tokens.contains("transpose : true"), "{tokens}");
     }
 }

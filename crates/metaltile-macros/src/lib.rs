@@ -8,7 +8,6 @@ mod body_parser;
 use std::collections::BTreeSet;
 
 use body_parser::DslBodyParser;
-use darling::FromMeta;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{ItemFn, parse_macro_input};
@@ -132,7 +131,7 @@ fn expand_kernel(input_fn: ItemFn) -> TokenStream {
     let expanded = quote! {
         #vis mod #fn_name {
             use super::*;
-            use metaltile_core::ir::{Kernel, Block, Op, ValueId, BlockId, VarId, Param, ParamKind, TypedSlot, ConstExprDecl, BinOpKind, ReduceKind, AttnParams, IndexExpr, UnaryOpKind, ActKind};
+            use metaltile_core::ir::{Kernel, Block, Op, ValueId, BlockId, VarId, Param, ParamKind, TypedSlot, ConstExprDecl, BinOpKind, ReduceKind, AttnParams, AtomicKind, AtomicScope, IndexExpr, UnaryOpKind, ActKind};
             use metaltile_core::shape::{Shape, Dim};
             use metaltile_core::dtype::DType;
             use metaltile_core::constexpr::ConstExpr;
@@ -207,6 +206,22 @@ fn expand_kernel(input_fn: ItemFn) -> TokenStream {
 
 /// Parse tensor parameters from function signature into IR param declarations.
 /// `type_vars` maps type-param names (e.g. "T") to their DType arg-variable tokens (e.g. `_t`).
+///
+/// ## Persistent state-buffer convention
+///
+/// A `mut Tensor<T>` parameter is marked `is_output: true` and emits MSL
+/// `device T*` (non-const). Within a single kernel dispatch, both `Op::Load`
+/// and `Op::Store` may target the same buffer — Metal's memory model
+/// supports read+write through a single pointer without undefined behavior.
+/// This is the supported pattern for **persistent state buffers** that the
+/// host re-binds to the same `MTLBuffer` across dispatches (e.g. AURA's
+/// rotating index buffer): declare a single `mut state: Tensor<u32>` param
+/// and intermix `load(state[..])` and `store(state[..], ..)` in the body.
+///
+/// Do *not* declare a separate `state_in: Tensor<T>` + `mut state_out: Tensor<T>`
+/// pair and bind the same buffer to both positions on the host side — Metal's
+/// `const device T*` qualifier on the read param would let the compiler
+/// assume no aliasing, producing undefined behavior.
 fn parse_kernel_params_generic(
     sig: &syn::Signature,
     type_vars: &std::collections::HashMap<String, proc_macro2::TokenStream>,
@@ -540,17 +555,6 @@ fn parse_dim_expr(s: &str) -> proc_macro2::TokenStream {
         let ident = syn::Ident::new(s, proc_macro2::Span::call_site());
         quote! { Dim::ConstExpr(ConstExpr::new(stringify!(#ident))) }
     }
-}
-
-// ---------------------------------------------------------------------------
-// #[autotune] attribute — parsed by #[kernel]
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, FromMeta)]
-#[allow(dead_code)]
-struct AutotuneArgs {
-    configs: Option<String>,
-    key: Option<String>,
 }
 
 #[cfg(test)]

@@ -59,12 +59,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use metaltile_core::{
-    error::Result,
-    ir::{BinOpKind, Block, BlockId, Kernel, Op, UnaryOpKind, ValueId},
-};
+use metaltile_core::ir::{BinOpKind, Block, BlockId, Kernel, Op, UnaryOpKind, ValueId};
 
 use super::remap;
+use crate::error::{Error, Result};
 
 pub struct AlgebraicSimplifyPass;
 
@@ -75,7 +73,8 @@ impl super::Pass for AlgebraicSimplifyPass {
         let block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
 
         for bid in &block_ids {
-            let mut block = kernel.blocks.remove(bid).unwrap();
+            let mut block =
+                kernel.blocks.remove(bid).ok_or_else(|| Error::BlockNotFound(bid.as_u32()))?;
             simplify_block_fixpoint(&mut block);
             kernel.blocks.insert(*bid, block);
         }
@@ -592,6 +591,10 @@ fn remap_values_in_op(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
         },
         Op::Dequantize { .. } => {},
         Op::SimdReduce { value, .. } | Op::SimdShuffleXor { value, .. } => s(value),
+        Op::SimdBroadcast { value, lane } => {
+            s(value);
+            s(lane);
+        },
         Op::ThreadgroupLoad { index, .. } => s(index),
         Op::ThreadgroupStore { index, value, .. } => {
             s(index);
@@ -608,7 +611,17 @@ fn remap_values_in_op(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
             s(value);
             s(data);
         },
+        Op::SimdgroupLoad { dest, offset, .. } => {
+            s(dest);
+            s(offset);
+        },
         Op::SimdScan { value, .. } => s(value),
+        Op::StackLoad { index, .. } => s(index),
+        Op::StackStore { index, value, .. } => {
+            s(index);
+            s(value);
+        },
+        Op::StackAlloc { .. } => {},
         Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => s(value),
         Op::ArgReduce { value, .. } => s(value),
         Op::StrideScan { offset, end, .. } => {

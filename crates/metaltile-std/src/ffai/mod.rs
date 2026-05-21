@@ -15,12 +15,36 @@
 //! `mlx/`.
 
 pub mod arg_reduce;
+pub mod aura_dequant_rotated;
+pub mod aura_encode;
+pub mod aura_flash_p1;
+pub mod aura_flash_pass2;
+pub mod aura_flash_sdpa;
+pub mod aura_score;
+pub mod aura_value;
+pub mod batched_qkv_qgemv;
 pub mod dequant_gather;
 pub mod dequant_gemv;
+pub mod flash_quantized_sdpa;
+pub mod gated_delta;
+pub mod gated_delta_replay;
 pub mod gather;
 pub mod kv_cache;
+pub mod logits_min_p;
+pub mod logits_processors;
+pub mod logits_top_p;
+pub mod logits_topk;
+pub mod moe;
+pub mod rms_norm_qgemv;
+pub mod rms_norm_residual;
+pub mod rms_norm_rope;
 pub mod rope_llama;
 pub mod sampling;
 pub mod sdpa_decode;
 pub mod sdpa_decode_2pass;
+pub mod sdpa_decode_batched;
+pub mod sdpa_decode_batched_prefill;
+pub mod sdpa_decode_d256;
+pub mod sdpa_decode_d64;
 pub mod ssm;
+pub mod ssm_replay;

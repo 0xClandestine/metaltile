@@ -83,9 +83,18 @@ pub fn mt_sdpa_prefill_mma<T>(
     let q_tile_first = q_tile * bq + sg * bq_sg;
     let q_row_base = q_head_row_off + q_tile_first * head_dim;
 
-    let kv_ld = 132u32;
-    threadgroup_alloc("tg_ks", 2112, T);
-    threadgroup_alloc("tg_vs", 2112, T);
+    // kv_ld = head_dim + 8 = 136 bank-skew pad on the column-major K^T
+    // reads (`tg_ks[fn * kv_ld + fm]` strides by kv_ld across lanes).
+    // Median-of-5 sweep (2026-05-19, see selector docstring) confirmed
+    // +8 wins on the f16 4-byte-load bank pattern. Real wins: M2 f16
+    // 92% → 96% (+4pt, larger than noise), M2 f32 124% → 127% (+3pt),
+    // M5 f32 114% → 116% (+2pt). M5 f16 / bf16 are wash (within 0.9-3.7%
+    // noise). The mma_bf16 sibling keeps +4 (132) — 8-byte bf16 loads
+    // hit a different bank pattern than 4-byte f16 loads, and no
+    // kv_ld=136 win on bf16 surfaced larger than noise.
+    let kv_ld = 136u32;
+    threadgroup_alloc("tg_ks", 2176, T);
+    threadgroup_alloc("tg_vs", 2176, T);
     // No softmax scratch — row reduction via simd_shuffle_xor keeps S in regs.
 
     // ── Preload 16 Q frags (one per d_frag of head_dim=128), pre-scaled ──

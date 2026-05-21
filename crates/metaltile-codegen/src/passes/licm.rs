@@ -35,12 +35,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use metaltile_core::{
-    error::Result,
-    ir::{Block, BlockId, Kernel, Op, ParamKind, ValueId},
-};
+use metaltile_core::ir::{Block, BlockId, Kernel, Op, ParamKind, ValueId};
 
 use super::remap;
+use crate::error::{Error, Result};
 
 pub struct LicmPass;
 
@@ -85,7 +83,8 @@ impl super::Pass for LicmPass {
         block_ids.sort_by_key(|bid| -(bid.as_u32() as i32));
 
         for bid in block_ids {
-            let mut block = blocks.remove(&bid).unwrap();
+            let mut block =
+                blocks.remove(&bid).ok_or_else(|| Error::BlockNotFound(bid.as_u32()))?;
             licm_block(&mut block, &mut blocks, &def_block, &read_only);
             blocks.insert(bid, block);
         }
@@ -322,11 +321,15 @@ fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
         | Op::Scatter { .. }
         | Op::ThreadgroupLoad { .. }
         | Op::ThreadgroupAlloc { .. }
+        | Op::StackLoad { .. }
+        | Op::StackStore { .. }
+        | Op::StackAlloc { .. }
         | Op::StrideStore { .. }
         | Op::Dequantize { .. }
         | Op::SimdReduce { .. }
         | Op::SimdShuffleXor { .. }
         | Op::SimdScan { .. }
+        | Op::SimdBroadcast { .. }
         | Op::ArgReduce { .. }
         | Op::FusedElementwise { .. }
         | Op::VectorLoad { .. }
@@ -344,7 +347,8 @@ fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
         | Op::GatedMlp { .. }
         | Op::SimdgroupMatMul { .. }
         | Op::SimdgroupElemLoad { .. }
-        | Op::SimdgroupElemStore { .. } => false,
+        | Op::SimdgroupElemStore { .. }
+        | Op::SimdgroupLoad { .. } => false,
     }
 }
 

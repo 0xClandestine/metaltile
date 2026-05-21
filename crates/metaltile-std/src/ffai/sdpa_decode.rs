@@ -2,28 +2,71 @@
 //! cross-simdgroup online-softmax reduction — FFAI's production decode
 //! kernel.
 //!
-//! Layout assumptions:
-//!   * `head_dim == 128` (one threadgroup is 32 simdgroups × 32 lanes;
-//!     each lane owns 4 consecutive Q/K/V elements). Other head dims
-//!     are queued for follow-up specializations — common targets
-//!     include 64 (smaller Qwen/Llama variants) and 256 (some Gemma
-//!     configurations). The right shape for each is the same pattern
-//!     with `head_dim / 32` elements per lane.
-//!   * K/V cache shape `[n_kv_heads, kv_stride, head_dim]` where
-//!     `kv_stride` is the pre-allocated maxSeq capacity and `n_kv` is
-//!     the currently-filled prefix. The kernel walks `[0, n_kv)` only.
-//!   * GQA: `kv_head = q_head / heads_per_group`. Set
-//!     `heads_per_group = 1` to disable GQA.
+//! ## DISPATCH INVARIANTS
 //!
-//! Dispatch: one threadgroup per Q head (1D grid, tgid_x = q_head),
-//! 1024 threads (32 simdgroups × 32 lanes).
+//! This kernel is reduction-mode and has STRICT threadgroup-geometry
+//! requirements. Violating any of these silently miscomputes the
+//! attention output (best case) or pins the GPU in an infinite loop
+//! (worst case — this was the trigger for FFAI post-mortem
+//! 2026-05-19). Consumers MUST encode these as preconditions in
+//! their wrappers.
+//!
+//! - **TPG = 1024 threads** (32 simdgroups × 32 lanes). Hard.
+//!   Smaller TPG produces `n_simd = TPG / 32 = 0` for `TPG < 32`,
+//!   making the per-token K walk `for _t in range(sg, n_kv, 0)` an
+//!   infinite GPU loop. This is the freeze mode that took down the
+//!   dev machine.
+//! - **`head_dim == 128`.** Each lane owns 4 consecutive Q/K/V
+//!   elements (128 / 32 = 4) and indexes them unconditionally at
+//!   `lane * 4 + {0..3}`. Other head dims OOB-read. Specializations
+//!   for 64 (smaller Qwen/Llama) and 256 (Gemma) are queued — same
+//!   pattern with `head_dim / 32` elements per lane.
+//! - **Grid: 1 threadgroup per q_head** (1D grid, `tgid_x = q_head`).
+//!   Wrapper uses `grid = (nQHeads * 1024, 1, 1)`, `tg = (1024, 1, 1)`.
+//! - **`nQHeads % nKVHeads == 0`** so GQA fan-out is integer.
+//! - **`n_kv ≤ kv_stride`.** Cache is pre-allocated to `kv_stride`
+//!   (maxSeq); the kernel walks `[0, n_kv)` only — passing
+//!   `n_kv > kv_stride` reads past the cache.
+//!
+//! ## Layout
+//!
+//! K/V cache shape `[n_kv_heads, kv_stride, head_dim]` where
+//! `kv_stride` is the pre-allocated maxSeq capacity and `n_kv` is
+//! the currently-filled prefix. The kernel walks `[0, n_kv)` only.
+//! GQA: `kv_head = q_head / heads_per_group`. Set
+//! `heads_per_group = 1` to disable GQA.
 //!
 //! The dispatch + walk pattern mirrors `mlx/sdpa_vector.rs`
-//! (mt_sdpa_vector). The differences are FFAI-specific:
+//! (mt_sdpa_vector). The two kernels are intentionally kept separate
+//! rather than unified: `mt_sdpa_vector` is a faithful port of MLX's
+//! `sdpa_vector` template, instantiated against MLX's source as the
+//! `tile bench` reference. Adding FFAI-specific surface area
+//! (`kv_stride`, `heads_per_group`, `sink_end`, `window_start`) to it
+//! would break that 1:1 charter and the per-shape MSL diffing
+//! invariant the bench harness relies on. Edits to either kernel must
+//! stay aware of the other — bandwidth fixes on `mt_sdpa_vector`
+//! (e.g. the `tg_out` occupancy collapse in PR #43) should be ported
+//! here too, and vice versa. The differences are FFAI-specific:
 //!
 //! * `kv_stride` decoupled from `n_kv` (cache pre-allocated to
 //!   `maxSeq`; loop bound is the filled prefix `n_kv`).
 //! * `heads_per_group` parameter name (instead of `gqa_factor`).
+//! * Sliding-window + sink-token specialization via the
+//!   `sink_end` / `window_start` constexprs. Both default to zero in
+//!   the dense path (the sink loop bound is zero so its body never
+//!   emits a load; the window loop starts at `sg + 0`, identical to
+//!   the original walk). When set, the kernel skips the masked range
+//!   `[sink_end, window_start)` at the loop-bound level — no
+//!   per-position branching, no simdgroup divergence. MLX's
+//!   `sdpa_vector` mask path (sdpa_vector.h:7-13) gates per position
+//!   inside the strided walk, so it still iterates every KV slot;
+//!   this shrinks the iteration count itself.
+//!
+//! Caller contract for the sparse path: `window_start >= sink_end`
+//! (otherwise the two passes overlap and the online softmax
+//! double-counts the intersection) and `window_start <= n_kv`. Both
+//! are constexprs so they're host-side checked, not validated in the
+//! kernel.
 //!
 //! Online-softmax math runs in fp32 throughout (storage stays in T)
 //! to avoid catastrophic cancellation in the `exp(max_old - max_new)`
@@ -38,7 +81,7 @@ use crate::{
 };
 
 #[kernel]
-pub fn sdpa_decode<T>(
+pub fn ffai_sdpa_decode<T>(
     q: Tensor<T>,
     k: Tensor<T>,
     v: Tensor<T>,
@@ -47,6 +90,8 @@ pub fn sdpa_decode<T>(
     #[constexpr] n_kv: u32,
     #[constexpr] kv_stride: u32,
     #[constexpr] heads_per_group: u32,
+    #[constexpr] sink_end: u32,
+    #[constexpr] window_start: u32,
     #[constexpr] scale: f32,
 ) {
     let q_head = tgid_x;
@@ -89,12 +134,63 @@ pub fn sdpa_decode<T>(
     // the per-lane quartile dot product into the full score; online
     // softmax updates the running (max, sum) tuple; V is accumulated
     // into per-lane fp32 registers.
-    for _t in range(sg, n_kv, ns) {
+    //
+    // Sink-token pass: walks `[0, sink_end)`. When `sink_end == 0` the
+    // loop bound collapses to `range(sg, 0, ns)`, no iterations emit.
+    // The body is intentionally a copy of the window pass — the
+    // `#[kernel]` proc-macro does not expand `macro_rules!`
+    // invocations inside the function body (the AST handed to the
+    // body parser keeps the `!` call opaque), so a shared-body macro
+    // produces an empty MSL kernel. Keep the two bodies bit-identical
+    // by hand and rely on the simdgroup-stride-walk invariant: each
+    // visited KV position contributes once across both passes as long
+    // as the caller honors `window_start >= sink_end`.
+    for _t in range(sg, sink_end, ns) {
         let base = kv_head_base + _t * head_dim;
         let kv_idx = base + d0;
-        // Pre-compute index VIDs BEFORE issuing loads — vectorize wants
-        // 4 consecutive Op::Load with no BinOp/Const interleaved, so
-        // the kv_idx+1/2/3 adds need to happen up here.
+        let kv0 = kv_idx;
+        let kv1 = kv_idx + 1u32;
+        let kv2 = kv_idx + 2u32;
+        let kv3 = kv_idx + 3u32;
+        let k0_raw = load(k[kv0]);
+        let k1_raw = load(k[kv1]);
+        let k2_raw = load(k[kv2]);
+        let k3_raw = load(k[kv3]);
+        let k0 = k0_raw.cast::<f32>();
+        let k1 = k1_raw.cast::<f32>();
+        let k2 = k2_raw.cast::<f32>();
+        let k3 = k3_raw.cast::<f32>();
+        let partial = q0 * k0 + q1 * k1 + q2 * k2 + q3 * k3;
+        let score = simd_sum(partial);
+        let new_max = select(score > run_max, score, run_max);
+        let factor = exp(run_max - new_max);
+        let weight = exp(score - new_max);
+        run_sum = run_sum * factor + weight;
+        run_max = new_max;
+        let v0_raw = load(v[kv0]);
+        let v1_raw = load(v[kv1]);
+        let v2_raw = load(v[kv2]);
+        let v3_raw = load(v[kv3]);
+        let v0 = v0_raw.cast::<f32>();
+        let v1 = v1_raw.cast::<f32>();
+        let v2 = v2_raw.cast::<f32>();
+        let v3 = v3_raw.cast::<f32>();
+        o0 = o0 * factor + weight * v0;
+        o1 = o1 * factor + weight * v1;
+        o2 = o2 * factor + weight * v2;
+        o3 = o3 * factor + weight * v3;
+    }
+    // Window pass: walks `[window_start, n_kv)`. Dense path sets
+    // `window_start = 0`, giving the original `range(sg, n_kv, ns)`
+    // walk back; sliding window passes `n_kv - W` (or
+    // `max(sink_end, n_kv - W)` when sinks are active).
+    //
+    // Pre-compute index VIDs BEFORE issuing loads — vectorize wants
+    // 4 consecutive Op::Load with no BinOp/Const interleaved, so the
+    // kv_idx+1/2/3 adds need to happen up here.
+    for _t in range(sg + window_start, n_kv, ns) {
+        let base = kv_head_base + _t * head_dim;
+        let kv_idx = base + d0;
         let kv0 = kv_idx;
         let kv1 = kv_idx + 1u32;
         let kv2 = kv_idx + 2u32;
@@ -195,8 +291,8 @@ inventory::submit! {
     BenchSpec {
         op: "sdpa",
         subop: "sdpa_decode",
-        kernel_name: "sdpa_decode",
-        kernel_ir: sdpa_decode::kernel_ir_for,
+        kernel_name: "ffai_sdpa_decode",
+        kernel_ir: ffai_sdpa_decode::kernel_ir_for,
         dtypes: &[DType::F32, DType::F16, DType::BF16],
         tol: 1e-3,
         mlx_src: None,
@@ -212,13 +308,13 @@ mod tests {
     use metaltile_codegen::msl::MslGenerator;
     use metaltile_core::ir::KernelMode;
 
-    use super::sdpa_decode;
+    use super::ffai_sdpa_decode;
     use crate::bench_types::DType;
 
     fn msl_for(dt: DType) -> String {
-        let mut k = sdpa_decode::kernel_ir_for(dt);
+        let mut k = ffai_sdpa_decode::kernel_ir_for(dt);
         k.mode = KernelMode::Reduction;
-        MslGenerator::default().generate(&k).expect("sdpa_decode codegen succeeds")
+        MslGenerator::default().generate(&k).expect("ffai_sdpa_decode codegen succeeds")
     }
 
     #[test]
@@ -227,7 +323,7 @@ mod tests {
             let src = msl_for(dt);
             assert!(!src.trim().is_empty(), "MSL for {dt:?} should not be empty");
             assert!(
-                src.contains("kernel void sdpa_decode"),
+                src.contains("kernel void ffai_sdpa_decode"),
                 "MSL for {dt:?} should declare the kernel function:\n{src}",
             );
         }

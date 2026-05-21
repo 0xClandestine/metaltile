@@ -53,7 +53,7 @@ pub fn start_gpu_trace(output_path: &str) -> Result<(), MetalTileError> {
     let dev: Retained<ProtocolObject<dyn MTLDevice>> =
         MTLCreateSystemDefaultDevice().ok_or(MetalTileError::NoDevice)?;
     if !manager.supportsDestination(MTLCaptureDestination::GPUTraceDocument) {
-        return Err(MetalTileError::Compilation(
+        return Err(MetalTileError::CaptureNotSupported(
             "MTLCaptureManager rejects GPUTraceDocument — set MTL_CAPTURE_ENABLED=1 before \
              launching, or attach Xcode and use DeveloperTools destination instead"
                 .into(),
@@ -67,7 +67,7 @@ pub fn start_gpu_trace(output_path: &str) -> Result<(), MetalTileError> {
     desc.setOutputURL(Some(&url));
     manager
         .startCaptureWithDescriptor_error(&desc)
-        .map_err(|e| MetalTileError::Compilation(format!("startCapture: {e:?}")))
+        .map_err(|e| MetalTileError::CaptureFailed(format!("startCapture: {e:?}")))
 }
 
 #[cfg(target_os = "macos")]
@@ -78,7 +78,7 @@ pub fn stop_gpu_trace() {
 
 #[cfg(not(target_os = "macos"))]
 pub fn start_gpu_trace(_output_path: &str) -> Result<(), MetalTileError> {
-    Err(MetalTileError::NoDevice)
+    Err(MetalTileError::CaptureNotSupported("GPU capture requires macOS".into()))
 }
 
 #[cfg(not(target_os = "macos"))]

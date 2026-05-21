@@ -11,26 +11,26 @@ use std::{collections::HashMap, process::Command};
 use serde_json::Value;
 
 use crate::{
+    CliError,
     DiffArgs,
     matches_filter,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
-pub fn run(args: &DiffArgs) {
+pub fn run(args: &DiffArgs) -> Result<(), CliError> {
+    let _span = tracing::info_span!(
+        "diff",
+        baseline = %args.baseline,
+        threshold = args.threshold,
+    )
+    .entered();
     let baseline_path = &args.baseline;
     let current_path = &args.current;
-    let filter = &args.filter;
-    let threshold = args.threshold;
-    let sort = &args.sort;
-    let only_regressions = args.only_regressions;
-    let only_improvements = args.only_improvements;
 
-    // Load baseline
-    let baseline = load_results(baseline_path, "baseline");
+    let baseline = load_results(baseline_path, "baseline")?;
 
-    // Load or generate current
     let current = if let Some(path) = current_path {
-        load_results(path, "current")
+        load_results(path, "current")?
     } else {
         eprintln!(
             "  {}",
@@ -38,14 +38,16 @@ pub fn run(args: &DiffArgs) {
         );
         let temp_file =
             std::env::temp_dir().join(format!(".tile-diff-tmp-{}.json", std::process::id()));
-        let mut child = Command::new(std::env::current_exe().unwrap())
+        let mut child = Command::new(std::env::current_exe().map_err(CliError::Io)?)
             .arg("bench")
             .arg("--json")
-            .arg(temp_file.to_str().unwrap())
+            .arg(temp_file.to_str().ok_or_else(|| CliError::Other("non-UTF8 temp path".into()))?)
             .spawn()
-            .expect("failed to run tile bench");
+            .map_err(|e| CliError::Subprocess(format!("failed to spawn tile bench: {e}")))?;
 
-        let status = child.wait().expect("tile bench did not start");
+        let status = child
+            .wait()
+            .map_err(|e| CliError::Subprocess(format!("tile bench did not start: {e}")))?;
         if !status.success() {
             eprintln!(
                 "{} {}",
@@ -53,39 +55,100 @@ pub fn run(args: &DiffArgs) {
                 paint_stderr("bench suite failed", Style::new().fg(Color::BrightWhite)),
             );
             let _ = std::fs::remove_file(&temp_file);
-            std::process::exit(1);
+            return Err(CliError::Other("bench suite failed".into()));
         }
 
-        let content = std::fs::read_to_string(&temp_file).unwrap_or_else(|e| {
+        let content = std::fs::read_to_string(&temp_file).map_err(|e| {
             eprintln!("cannot read temp results: {e}");
-            std::process::exit(1);
-        });
+            CliError::Io(e)
+        })?;
         let _ = std::fs::remove_file(&temp_file);
 
-        // Map of shape -> mt_perf for pct calc
-        let json: Value = serde_json::from_str(&content).unwrap_or_else(|e| {
+        let json: Value = serde_json::from_str(&content).map_err(|e| {
             eprintln!("invalid bench JSON: {e}");
-            std::process::exit(1);
-        });
+            CliError::Json(e)
+        })?;
         json.get("results").and_then(|v| v.as_array()).cloned().unwrap_or_default()
     };
 
-    // Build lookup maps: key -> (ref_perf, mt_perf)
-    let baseline_map = build_result_map(&baseline);
-    let current_map = build_result_map(&current);
+    let opts = RenderOpts {
+        filter: args.filter.as_deref(),
+        threshold: args.threshold,
+        sort: &args.sort,
+        only_regressions: args.only_regressions,
+        only_improvements: args.only_improvements,
+        heading: Some("tile diff"),
+    };
+    let outcome = render(&baseline, &current, &opts);
 
-    // Collect all keys (sorted by op then shape).
+    if outcome.total_rows == 0 {
+        eprintln!(
+            "  {}",
+            paint_stdout("No matching results to diff.", Style::new().fg(Color::BrightBlack)),
+        );
+        return Ok(());
+    }
+
+    if outcome.regressions > 0 {
+        return Err(CliError::Other(format!("{} regression(s) detected", outcome.regressions)));
+    }
+    Ok(())
+}
+
+// ── Public render API ───────────────────────────────────────────────────
+
+/// Options for [`render`]. Mirrors the relevant subset of [`DiffArgs`]
+/// without the file-loading concerns.
+pub struct RenderOpts<'a> {
+    pub filter: Option<&'a str>,
+    pub threshold: f64,
+    pub sort: &'a str,
+    pub only_regressions: bool,
+    pub only_improvements: bool,
+    /// Heading printed above the diff table. Suppress with `None`.
+    pub heading: Option<&'a str>,
+}
+
+impl Default for RenderOpts<'_> {
+    fn default() -> Self {
+        Self {
+            filter: None,
+            threshold: 5.0,
+            sort: "name",
+            only_regressions: false,
+            only_improvements: false,
+            heading: Some("tile diff"),
+        }
+    }
+}
+
+/// Summary counts returned from [`render`]. `total_rows` is the number
+/// of (op, shape) keys printed after filtering — callers can use it to
+/// decide whether to print a "no matching results" message vs. trust
+/// the table to speak for itself. `regressions` drives the `tile diff`
+/// exit code.
+pub struct RenderOutcome {
+    pub regressions: usize,
+    pub total_rows: usize,
+}
+
+/// Compute, sort, and print the diff between two result sets. Pure
+/// w.r.t. the filesystem — callers (both `tile diff` and `tile bench`)
+/// load JSON however they like and hand the parsed arrays in here.
+pub fn render(baseline: &[Value], current: &[Value], opts: &RenderOpts) -> RenderOutcome {
+    let baseline_map = build_result_map(baseline);
+    let current_map = build_result_map(current);
+
     let mut all_keys: Vec<&RowKey> = baseline_map.keys().collect();
     for k in current_map.keys() {
         if !baseline_map.contains_key(k) {
             all_keys.push(k);
         }
     }
-    // Sort: collect into Vec of owned entries so we can sort by op+shape
-    let mut diff_rows: Vec<DiffRow> = Vec::new();
 
+    let mut diff_rows: Vec<DiffRow> = Vec::new();
     for key in &all_keys {
-        if !matches_filter(filter.as_deref(), &key.op) {
+        if !matches_filter(opts.filter, &key.op) {
             continue;
         }
         let b = baseline_map.get(*key);
@@ -100,8 +163,8 @@ pub fn run(args: &DiffArgs) {
                     _ => None,
                 };
                 let kind = match delta {
-                    Some(d) if d < -threshold => DeltaKind::Regression,
-                    Some(d) if d > threshold => DeltaKind::Improvement,
+                    Some(d) if d < -opts.threshold => DeltaKind::Regression,
+                    Some(d) if d > opts.threshold => DeltaKind::Improvement,
                     _ => DeltaKind::Unchanged,
                 };
                 (kind, delta, bpct, cpct)
@@ -117,10 +180,10 @@ pub fn run(args: &DiffArgs) {
             (None, None) => continue,
         };
 
-        if only_regressions && kind != DeltaKind::Regression {
+        if opts.only_regressions && kind != DeltaKind::Regression {
             continue;
         }
-        if only_improvements && kind != DeltaKind::Improvement {
+        if opts.only_improvements && kind != DeltaKind::Improvement {
             continue;
         }
 
@@ -134,8 +197,64 @@ pub fn run(args: &DiffArgs) {
         });
     }
 
-    // Sort
-    match sort.as_str() {
+    sort_diff_rows(&mut diff_rows, opts.sort);
+
+    let regressions = diff_rows.iter().filter(|r| r.kind == DeltaKind::Regression).count();
+    let improvements = diff_rows.iter().filter(|r| r.kind == DeltaKind::Improvement).count();
+    let unchanged = diff_rows.iter().filter(|r| r.kind == DeltaKind::Unchanged).count();
+    let new_rows = diff_rows.iter().filter(|r| r.kind == DeltaKind::New).count();
+    let removed = diff_rows.iter().filter(|r| r.kind == DeltaKind::Removed).count();
+    let total_rows = diff_rows.len();
+
+    if total_rows == 0 {
+        return RenderOutcome { regressions, total_rows };
+    }
+
+    if let Some(heading) = opts.heading {
+        eprintln!("{}", paint_stdout(heading, Style::new().fg(Color::Cyan).bold()));
+    }
+
+    eprintln!();
+    for row in &diff_rows {
+        print_diff_row(row);
+    }
+
+    print_summary(regressions, improvements, unchanged, new_rows, removed, opts.threshold);
+
+    RenderOutcome { regressions, total_rows }
+}
+
+// ── Data types ───────────────────────────────────────────────────────────
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct RowKey {
+    op: String,
+    shape: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DeltaKind {
+    Regression,
+    Improvement,
+    Unchanged,
+    New,
+    Removed,
+}
+
+#[derive(Debug)]
+struct DiffRow {
+    op: String,
+    shape: String,
+    baseline_pct: Option<f64>,
+    current_pct: Option<f64>,
+    delta_pct: Option<f64>,
+    kind: DeltaKind,
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+fn sort_diff_rows(diff_rows: &mut [DiffRow], sort: &str) {
+    match sort {
         "delta" => diff_rows.sort_by(|a, b| {
             b.delta_pct
                 .unwrap_or(0.0)
@@ -143,7 +262,6 @@ pub fn run(args: &DiffArgs) {
                 .unwrap_or(std::cmp::Ordering::Equal)
         }),
         "regression" => diff_rows.sort_by(|a, b| {
-            // Regressions first, then improvements, then unchanged
             let rank = |k: DeltaKind| match k {
                 DeltaKind::Regression => 0,
                 DeltaKind::Removed => 1,
@@ -153,7 +271,6 @@ pub fn run(args: &DiffArgs) {
             };
             let cmp = rank(a.kind).cmp(&rank(b.kind));
             if cmp == std::cmp::Ordering::Equal {
-                // Within same kind, sort by delta magnitude
                 b.delta_pct
                     .map(|d| d.abs())
                     .unwrap_or(0.0)
@@ -168,83 +285,70 @@ pub fn run(args: &DiffArgs) {
             if cmp == std::cmp::Ordering::Equal { a.shape.cmp(&b.shape) } else { cmp }
         }),
     }
+}
 
-    if diff_rows.is_empty() {
-        eprintln!(
-            "  {}",
-            paint_stdout("No matching results to diff.", Style::new().fg(Color::BrightBlack)),
-        );
-        return;
-    }
+fn print_diff_row(row: &DiffRow) {
+    let (op_col, shape_col) = format_op_shape(&row.op, &row.shape);
 
-    // Header.
-    eprintln!("{}", paint_stdout("tile diff", Style::new().fg(Color::Cyan).bold()),);
+    let baseline_str = row.baseline_pct.map(|p| format!("{p:.0}%")).unwrap_or_else(|| "—".into());
+    let current_str = row.current_pct.map(|p| format!("{p:.0}%")).unwrap_or_else(|| "—".into());
+    let delta_str = match row.kind {
+        DeltaKind::New => "new".to_string(),
+        DeltaKind::Removed => "removed".to_string(),
+        _ => {
+            let arrow = match row.kind {
+                DeltaKind::Regression => paint_stderr("▼", Style::new().fg(Color::Red).bold()),
+                DeltaKind::Improvement => paint_stdout("▲", Style::new().fg(Color::Green).bold()),
+                _ => paint_stdout("—", Style::new().fg(Color::BrightBlack)),
+            };
+            let delta = row.delta_pct.unwrap_or(0.0);
+            format!(
+                "{} {}",
+                arrow,
+                paint_stdout(format!("{:+.0}%", delta), match row.kind {
+                    DeltaKind::Regression => Style::new().fg(Color::Red).bold(),
+                    DeltaKind::Improvement => Style::new().fg(Color::Green).bold(),
+                    _ => Style::new().fg(Color::BrightBlack),
+                },),
+            )
+        },
+    };
 
-    // Print diff table
-    eprintln!();
-    for row in &diff_rows {
-        let (op_col, shape_col) = format_op_shape(&row.op, &row.shape);
+    let (baseline_cell, current_cell) = match row.kind {
+        DeltaKind::New | DeltaKind::Removed => (
+            paint_stdout(&baseline_str, Style::new().fg(Color::BrightBlack)),
+            paint_stdout(&current_str, Style::new().fg(Color::BrightBlack)),
+        ),
+        _ => (
+            paint_stdout(&baseline_str, Style::new().fg(Color::BrightWhite)),
+            paint_stdout(&current_str, Style::new().fg(Color::BrightWhite)),
+        ),
+    };
 
-        let baseline_str =
-            row.baseline_pct.map(|p| format!("{p:.0}%")).unwrap_or_else(|| "—".into());
-        let current_str = row.current_pct.map(|p| format!("{p:.0}%")).unwrap_or_else(|| "—".into());
-        let delta_str = match row.kind {
-            DeltaKind::New => "new".to_string(),
-            DeltaKind::Removed => "removed".to_string(),
-            _ => {
-                let arrow = match row.kind {
-                    DeltaKind::Regression => paint_stderr("▼", Style::new().fg(Color::Red).bold()),
-                    DeltaKind::Improvement =>
-                        paint_stdout("▲", Style::new().fg(Color::Green).bold()),
-                    _ => paint_stdout("—", Style::new().fg(Color::BrightBlack)),
-                };
-                let delta = row.delta_pct.unwrap_or(0.0);
-                format!(
-                    "{} {}",
-                    arrow,
-                    paint_stdout(format!("{:+.0}%", delta), match row.kind {
-                        DeltaKind::Regression => Style::new().fg(Color::Red).bold(),
-                        DeltaKind::Improvement => Style::new().fg(Color::Green).bold(),
-                        _ => Style::new().fg(Color::BrightBlack),
-                    },),
-                )
-            },
-        };
+    let sep = paint_stdout("│", Style::new().fg(Color::BrightBlack).dim());
 
-        let (baseline_cell, current_cell) = match row.kind {
-            DeltaKind::New | DeltaKind::Removed => (
-                paint_stdout(&baseline_str, Style::new().fg(Color::BrightBlack)),
-                paint_stdout(&current_str, Style::new().fg(Color::BrightBlack)),
-            ),
-            _ => (
-                paint_stdout(&baseline_str, Style::new().fg(Color::BrightWhite)),
-                paint_stdout(&current_str, Style::new().fg(Color::BrightWhite)),
-            ),
-        };
+    let kind_label = match row.kind {
+        DeltaKind::Regression => paint_stderr("REGRESSION", Style::new().fg(Color::Red).bold()),
+        DeltaKind::Improvement => paint_stdout("improvement", Style::new().fg(Color::Green)),
+        DeltaKind::New => paint_stdout("new", Style::new().fg(Color::Cyan)),
+        DeltaKind::Removed => paint_stderr("removed", Style::new().fg(Color::Red)),
+        DeltaKind::Unchanged => String::new(),
+    };
 
-        let sep = paint_stdout("│", Style::new().fg(Color::BrightBlack).dim());
+    eprintln!(
+        "  {} {sep} {} {sep} {} → {} {sep} {}  {}",
+        op_col, shape_col, baseline_cell, current_cell, delta_str, kind_label,
+    );
+}
 
-        let kind_label = match row.kind {
-            DeltaKind::Regression => paint_stderr("REGRESSION", Style::new().fg(Color::Red).bold()),
-            DeltaKind::Improvement => paint_stdout("improvement", Style::new().fg(Color::Green)),
-            DeltaKind::New => paint_stdout("new", Style::new().fg(Color::Cyan)),
-            DeltaKind::Removed => paint_stderr("removed", Style::new().fg(Color::Red)),
-            DeltaKind::Unchanged => String::new(),
-        };
-
-        eprintln!(
-            "  {} {sep} {} {sep} {} → {} {sep} {}  {}",
-            op_col, shape_col, baseline_cell, current_cell, delta_str, kind_label,
-        );
-    }
-
-    // Summary
-    let regressions = diff_rows.iter().filter(|r| r.kind == DeltaKind::Regression).count();
-    let improvements = diff_rows.iter().filter(|r| r.kind == DeltaKind::Improvement).count();
-    let unchanged = diff_rows.iter().filter(|r| r.kind == DeltaKind::Unchanged).count();
-    let new_count = diff_rows.iter().filter(|r| r.kind == DeltaKind::New).count();
-    let removed_count = diff_rows.iter().filter(|r| r.kind == DeltaKind::Removed).count();
-
+fn print_summary(
+    regressions: usize,
+    improvements: usize,
+    unchanged: usize,
+    new_count: usize,
+    removed_count: usize,
+    threshold: f64,
+) {
     let mut parts: Vec<String> = Vec::new();
     if regressions > 0 {
         parts.push(format!(
@@ -280,44 +384,11 @@ pub fn run(args: &DiffArgs) {
     }
 
     let sep = paint_stdout("·", Style::new().fg(Color::BrightBlack).dim());
-    eprintln!("\n  {}\n", parts.join(&format!("  {sep}  ")),);
-
-    if regressions > 0 {
-        std::process::exit(1);
-    }
+    eprintln!("\n  {}\n", parts.join(&format!("  {sep}  ")));
 }
 
-// ── Data types ───────────────────────────────────────────────────────────
-
-#[derive(Debug, PartialEq, Eq, Hash)]
-struct RowKey {
-    op: String,
-    shape: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum DeltaKind {
-    Regression,
-    Improvement,
-    Unchanged,
-    New,
-    Removed,
-}
-
-#[derive(Debug)]
-struct DiffRow {
-    op: String,
-    shape: String,
-    baseline_pct: Option<f64>,
-    current_pct: Option<f64>,
-    delta_pct: Option<f64>,
-    kind: DeltaKind,
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────
-
-fn load_results(path: &str, label: &str) -> Vec<Value> {
-    let content = std::fs::read_to_string(path).unwrap_or_else(|e| {
+fn load_results(path: &str, label: &str) -> Result<Vec<Value>, CliError> {
+    let content = std::fs::read_to_string(path).map_err(|e| {
         eprintln!(
             "{} {}",
             paint_stderr("Error:", Style::new().fg(Color::Red).bold()),
@@ -326,21 +397,21 @@ fn load_results(path: &str, label: &str) -> Vec<Value> {
                 Style::new().fg(Color::BrightWhite)
             ),
         );
-        std::process::exit(1);
-    });
-    let json: Value = serde_json::from_str(&content).unwrap_or_else(|e| {
+        CliError::Io(e)
+    })?;
+    let json: Value = serde_json::from_str(&content).map_err(|e| {
         eprintln!(
             "{} {}",
             paint_stderr("Error:", Style::new().fg(Color::Red).bold()),
             paint_stderr(format!("invalid {label} JSON: {e}"), Style::new().fg(Color::BrightWhite)),
         );
-        std::process::exit(1);
-    });
+        CliError::Json(e)
+    })?;
     // Support both bench_dump format (results array at top level) and snapshot format
     if let Some(results) = json.get("results").and_then(|v| v.as_array()) {
-        results.clone()
+        Ok(results.clone())
     } else if let Some(results) = json.as_array() {
-        results.clone()
+        Ok(results.clone())
     } else {
         eprintln!(
             "{} {}",
@@ -350,7 +421,7 @@ fn load_results(path: &str, label: &str) -> Vec<Value> {
                 Style::new().fg(Color::BrightWhite)
             ),
         );
-        std::process::exit(1);
+        Err(CliError::Other(format!("{label} has no 'results' array")))
     }
 }
 
@@ -371,4 +442,77 @@ fn format_op_shape(op: &str, shape: &str) -> (String, String) {
     let op_col = paint_stdout(format!("{op:<20}"), Style::new().fg(Color::Cyan).bold());
     let shape_col = paint_stdout(format!("{shape:<26}"), Style::new().fg(Color::BrightWhite));
     (op_col, shape_col)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn rows(pairs: &[(&str, &str, f64, f64)]) -> Vec<Value> {
+        pairs
+            .iter()
+            .map(|(op, shape, r, m)| {
+                json!({ "op": op, "shape": shape, "metric": "GB/s", "ref": r, "mt": m })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn render_classifies_regression_and_improvement() {
+        let baseline =
+            rows(&[("softmax", "B=1 N=8", 100.0, 100.0), ("rms_norm", "B=1 N=8", 100.0, 50.0)]);
+        let current =
+            rows(&[("softmax", "B=1 N=8", 100.0, 60.0), ("rms_norm", "B=1 N=8", 100.0, 90.0)]);
+        let opts = RenderOpts { heading: None, threshold: 5.0, ..RenderOpts::default() };
+        let outcome = render(&baseline, &current, &opts);
+        assert_eq!(outcome.regressions, 1);
+        assert_eq!(outcome.total_rows, 2);
+    }
+
+    #[test]
+    fn render_marks_new_and_removed_keys() {
+        let baseline = rows(&[("softmax", "B=1 N=8", 100.0, 100.0)]);
+        let current = rows(&[("rope", "B=1 N=8", 100.0, 80.0)]);
+        let opts = RenderOpts { heading: None, ..RenderOpts::default() };
+        let outcome = render(&baseline, &current, &opts);
+        // One new + one removed, neither counts as a regression.
+        assert_eq!(outcome.regressions, 0);
+        assert_eq!(outcome.total_rows, 2);
+    }
+
+    #[test]
+    fn render_only_regressions_filter_drops_improvements() {
+        let baseline =
+            rows(&[("softmax", "B=1 N=8", 100.0, 100.0), ("rms_norm", "B=1 N=8", 100.0, 50.0)]);
+        let current =
+            rows(&[("softmax", "B=1 N=8", 100.0, 50.0), ("rms_norm", "B=1 N=8", 100.0, 90.0)]);
+        let opts = RenderOpts { heading: None, only_regressions: true, ..RenderOpts::default() };
+        let outcome = render(&baseline, &current, &opts);
+        assert_eq!(outcome.regressions, 1);
+        assert_eq!(outcome.total_rows, 1);
+    }
+
+    #[test]
+    fn render_filter_substring_match_is_case_insensitive() {
+        let baseline =
+            rows(&[("softmax", "B=1 N=8", 100.0, 100.0), ("rope", "B=1 N=8", 100.0, 100.0)]);
+        let current =
+            rows(&[("softmax", "B=1 N=8", 100.0, 50.0), ("rope", "B=1 N=8", 100.0, 50.0)]);
+        let opts = RenderOpts { heading: None, filter: Some("ROPE"), ..RenderOpts::default() };
+        let outcome = render(&baseline, &current, &opts);
+        assert_eq!(outcome.total_rows, 1);
+        assert_eq!(outcome.regressions, 1);
+    }
+
+    #[test]
+    fn render_zero_baseline_perf_does_not_panic() {
+        let baseline = rows(&[("op", "shape", 0.0, 0.0)]);
+        let current = rows(&[("op", "shape", 100.0, 50.0)]);
+        let opts = RenderOpts { heading: None, ..RenderOpts::default() };
+        let outcome = render(&baseline, &current, &opts);
+        assert_eq!(outcome.regressions, 0);
+        assert_eq!(outcome.total_rows, 1);
+    }
 }

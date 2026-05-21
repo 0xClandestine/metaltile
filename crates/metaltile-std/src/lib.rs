@@ -4,6 +4,7 @@
 //! (`#[bench_kernel]`) and the CLI runner. It contains no GPU runtime code.
 
 pub mod bench_types;
+pub mod error;
 pub mod ffai;
 pub mod mlx;
 pub mod probe;

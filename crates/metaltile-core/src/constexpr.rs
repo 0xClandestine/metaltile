@@ -50,22 +50,25 @@ impl ConstExprValues {
         self.values.insert(name.into(), value);
     }
 
-    /// Get a resolved value. Panics if not found.
+    /// Get a resolved value. Returns an error if not found.
     ///
     /// If `name` is a numeric literal (e.g. "256" from `arange::<256>()`),
     /// it is parsed directly without requiring a mapping entry.
-    pub fn get(&self, name: &str) -> usize {
+    pub fn get(&self, name: &str) -> Result<usize, crate::Error> {
         if let Ok(n) = name.parse::<usize>() {
-            return n;
+            return Ok(n);
         }
-        *self.values.get(name).unwrap_or_else(|| panic!("constexpr '{name}' not resolved"))
+        self.values
+            .get(name)
+            .copied()
+            .ok_or_else(|| crate::Error::UnresolvedConstExpr(name.to_string()))
     }
 
     /// Try to get a resolved value.
     pub fn try_get(&self, name: &str) -> Option<usize> { self.values.get(name).copied() }
 
     /// Resolve a [`ConstExpr`] to its concrete value.
-    pub fn resolve(&self, ce: &ConstExpr) -> usize { self.get(ce.name()) }
+    pub fn resolve(&self, ce: &ConstExpr) -> Result<usize, crate::Error> { self.get(ce.name()) }
 
     /// Iterator over all resolved values.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &usize)> { self.values.iter() }
@@ -133,7 +136,7 @@ mod tests {
         v.insert("N".to_string(), 128);
         assert_eq!(v.len(), 2);
         assert!(!v.is_empty());
-        assert_eq!(v.get("M"), 64);
+        assert_eq!(v.get("M").unwrap(), 64);
         assert_eq!(v.try_get("M"), Some(64));
         assert_eq!(v.try_get("Z"), None);
     }
@@ -143,7 +146,7 @@ mod tests {
         let mut v = ConstExprValues::new();
         v.insert("K", 256);
         let ce = ConstExpr::new("K");
-        assert_eq!(v.resolve(&ce), 256);
+        assert_eq!(v.resolve(&ce).unwrap(), 256);
     }
 
     #[test]
@@ -151,13 +154,15 @@ mod tests {
         // `arange::<256>()` lowers to a constexpr named "256" — get() must
         // parse it directly without a mapping entry.
         let v = ConstExprValues::new();
-        assert_eq!(v.get("256"), 256);
-        assert_eq!(v.get("0"), 0);
+        assert_eq!(v.get("256").unwrap(), 256);
+        assert_eq!(v.get("0").unwrap(), 0);
     }
 
     #[test]
-    #[should_panic(expected = "constexpr 'MISSING' not resolved")]
-    fn values_get_panics_on_unresolved_non_numeric() { ConstExprValues::new().get("MISSING"); }
+    fn values_get_returns_err_on_unresolved_non_numeric() {
+        let result = ConstExprValues::new().get("MISSING");
+        assert!(matches!(result, Err(crate::Error::UnresolvedConstExpr(ref s)) if s == "MISSING"));
+    }
 
     #[test]
     fn values_iter_yields_inserted_pairs() {

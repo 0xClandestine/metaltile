@@ -31,10 +31,9 @@
 
 use std::collections::BTreeSet;
 
-use metaltile_core::{
-    error::Result,
-    ir::{BinOpKind, Block, BlockId, IndexExpr, Kernel, Op, ValueId},
-};
+use metaltile_core::ir::{BinOpKind, Block, BlockId, IndexExpr, Kernel, Op, ValueId};
+
+use crate::error::Result;
 
 pub struct ConstFoldPass;
 
@@ -49,6 +48,22 @@ impl super::Pass for ConstFoldPass {
     fn name(&self) -> &str { "const_fold" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
+        // Fold `kernel.body` (the entry block) AND every nested block.
+        //
+        // The previous shape walked `kernel.blocks` only, which skipped
+        // the entry block entirely — so a Div / Mul of two Consts that
+        // landed in `kernel.body` (e.g. `dims_per_word = 32 / bits`)
+        // never got folded.  That hid the trip count from `unroll`,
+        // which uses `find_const_in_block` to discover loop bounds: it
+        // looks for a direct `Op::Const`, not a still-rolled
+        // `BinOp(Div, Const, Const)`.  The result was that small
+        // top-level loops in `kernel.body` — for instance the
+        // `dims_per_word == 4` loop in `aura_dequant_rotated_int8` —
+        // stayed rolled when the rest of the pipeline expected them
+        // unrolled, and the loop body fell through downstream passes,
+        // leaving an empty `for (...)` header in the emitted MSL.
+        // Folding the entry block first closes that gap.
+        fold_block(&mut kernel.body);
         let block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
         for bid in &block_ids {
             if let Some(block) = kernel.blocks.get_mut(bid) {
@@ -69,6 +84,13 @@ impl super::Pass for ConstFoldPass {
             collect_uses(op, &mut cross_block_refs);
         }
 
+        // DCE limited to nested blocks. The entry block (kernel.body)
+        // is intentionally left rolled: tests that hand-build kernels
+        // with orphan ops (no Stores, no cross-block uses) rely on the
+        // ops surviving to MSL. Folding constants in the entry block
+        // is enough to unblock unroll; the harmless dead ops downstream
+        // are cleaned up by the per-pass DCE the runtime pipeline
+        // already runs after fusion + vectorize.
         for bid in &block_ids {
             if let Some(block) = kernel.blocks.get_mut(bid) {
                 dce_block(block, &cross_block_refs);
@@ -295,6 +317,10 @@ fn replace_value_in_op(op: &mut Op, old: ValueId, new: ValueId) {
         },
         Op::Dequantize { .. } => {},
         Op::SimdReduce { value, .. } | Op::SimdShuffleXor { value, .. } => s(value),
+        Op::SimdBroadcast { value, lane } => {
+            s(value);
+            s(lane);
+        },
         Op::ThreadgroupLoad { index, .. } => s(index),
         Op::ThreadgroupStore { index, value, .. } => {
             s(index);
@@ -311,7 +337,17 @@ fn replace_value_in_op(op: &mut Op, old: ValueId, new: ValueId) {
             s(value);
             s(data);
         },
+        Op::SimdgroupLoad { dest, offset, .. } => {
+            s(dest);
+            s(offset);
+        },
         Op::SimdScan { value, .. } => s(value),
+        Op::StackLoad { index, .. } => s(index),
+        Op::StackStore { index, value, .. } => {
+            s(index);
+            s(value);
+        },
+        Op::StackAlloc { .. } => {},
         Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => s(value),
         Op::ArgReduce { value, .. } => s(value),
         Op::StrideScan { offset, end, .. } => {
@@ -470,6 +506,10 @@ fn collect_uses(op: &Op, used: &mut BTreeSet<ValueId>) {
         },
         Op::Dequantize { .. } => {},
         Op::SimdReduce { value, .. } | Op::SimdShuffleXor { value, .. } => add(*value),
+        Op::SimdBroadcast { value, lane } => {
+            add(*value);
+            add(*lane);
+        },
         Op::ThreadgroupLoad { index, .. } => add(*index),
         Op::ThreadgroupStore { index, value, .. } => {
             add(*index);
@@ -486,7 +526,17 @@ fn collect_uses(op: &Op, used: &mut BTreeSet<ValueId>) {
             add(*value);
             add(*data);
         },
+        Op::SimdgroupLoad { dest, offset, .. } => {
+            add(*dest);
+            add(*offset);
+        },
         Op::SimdScan { value, .. } => add(*value),
+        Op::StackLoad { index, .. } => add(*index),
+        Op::StackStore { index, value, .. } => {
+            add(*index);
+            add(*value);
+        },
+        Op::StackAlloc { .. } => {},
         Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => add(*value),
         Op::ArgReduce { value, .. } => add(*value),
         Op::StrideScan { offset, end, .. } => {
