@@ -38,9 +38,15 @@ build-release: ## cargo build (release)
 	cargo build --workspace --release
 
 # ─── Test ─────────────────────────────────────────────────────────────
+# MTL_SHADER_VALIDATION=1 turns on Metal's shader bounds-checking layer:
+# an out-of-bounds buffer access inside a kernel aborts the command
+# buffer with a diagnostic instead of faulting into a GPU pin (a
+# machine-freezing hang). The GPU correctness tests dispatch every
+# kernel on a real device, so this is where an OOB bug surfaces — worth
+# the runtime overhead to convert a freeze into a clean, named failure.
 .PHONY: test
-test: ## cargo test --workspace
-	cargo test --workspace
+test: ## cargo test --workspace (with Metal shader validation)
+	MTL_SHADER_VALIDATION=1 cargo test --workspace
 
 .PHONY: coverage
 coverage: ## test coverage report (requires cargo-llvm-cov)
