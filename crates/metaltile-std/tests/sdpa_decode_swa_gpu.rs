@@ -68,6 +68,9 @@ fn build_scalar_buffers(cfg: &DispatchCfg, dt: Dt) -> BTreeMap<String, Vec<u8>> 
     b.insert("heads_per_group".into(), (cfg.heads_per_group as u32).to_le_bytes().to_vec());
     b.insert("sink_end".into(), cfg.sink_end.to_le_bytes().to_vec());
     b.insert("window_start".into(), cfg.window_start.to_le_bytes().to_vec());
+    // Learned attention sink unused on this SWA bench path.
+    b.insert("has_sink".into(), 0u32.to_le_bytes().to_vec());
+    b.insert("sink_logit".into(), 0.0f32.to_le_bytes().to_vec());
     b.insert("scale".into(), cfg.scale.to_le_bytes().to_vec());
     b
 }

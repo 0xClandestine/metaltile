@@ -1,7 +1,8 @@
 # metaltile kernel-op coverage audit
 
 Generated: 2026-05-18 · Refreshed: 2026-05-21 (consolidation pass +
-Vision / STT / TTS front-end kernels)
+Vision / STT / TTS front-end kernels; MoE gather-qmm + host-fallback
+closers landed)
 Sources surveyed:
 - MLX upstream `ml-explore/mlx@main` (commit `2414e5df`)
 - MLX fork `ekryski/mlx@alpha` (commit `4919270e`)
@@ -11,24 +12,29 @@ Sources surveyed:
 ## Summary
 
 - Total kernel-op rows in this audit (union): **89**
-- metaltile-ported kernel ops: **65 / 89 = 73 %** — 54 full ✓ (61 %), 11 partial ~ (12 %)
-- **Still to cover: 24 ops not ported (✗)**, plus **11 partial ports** still to finish
+- metaltile-ported kernel ops: **66 / 89 = 74 %** — 55 full ✓ (62 %), 11 partial ~ (12 %)
+- **Still to cover: 23 ops not ported (✗)**, plus **11 partial ports** still to finish
 - The 6 Vision / STT / TTS front-end kernels (Phase 6.5 / 7) — `conv2d`,
   `patch_embed`, `rope_2d`, `mel_spectrogram`, `audio_conv1d`,
   `vocoder/iSTFT` — are now ported (✓ rows below).
-- 3 in-flight kernel families have an **open PR** (not yet landed) — see
+- The three model-review **host-fallback closers** (`gated_rmsnorm`, the
+  `sdpa_decode` learned-sink term, the 2D-`A_log` `ssm_step` variant) are
+  all landed — see the [host-fallback closers](#model-enablement-kernels-separate-track-from-generic-op-completeness)
+  note.
+- 2 in-flight kernel families have an **open PR** (not yet landed) — see
   [Kernels with open PRs](#kernels-with-open-prs).
 
 > **Note on the 2026-05-21 consolidation pass.** The Gemma / Nemotron-H /
 > GPT-OSS-20B kernel work, previously spread across separate worktrees, is now
 > consolidated onto `ek/aura-port`. Two Gemma kernels — `sdpa_decode_d512` and
 > `rms_norm_wide` — are added as ✓ rows. A model-side review of FFAI's decode
-> path also surfaced several **host-side compute fallbacks** that exist only
-> because a GPU kernel is missing; the kernels that would close them
-> (`gated_rmsnorm`, the `sdpa_decode` learned-sink term, a 2D-`A_log` `ssm_step`
-> variant) are recorded below, and the still-needed **Vision / STT / TTS**
-> front-end kernels (`conv2d`, `patch_embed`, `rope_2d`, `mel_spectrogram`,
-> `audio_conv1d`, `vocoder/iSTFT`) are added as ✗ rows for Phase 6.5 / 7.
+> path also surfaced several **host-side compute fallbacks** that existed only
+> because a GPU kernel was missing; the kernels that close them
+> (`gated_rmsnorm`, the `sdpa_decode` learned-sink term, the 2D-`A_log`
+> `ssm_step_a2d` variant) are now all landed (✓ rows below), and the
+> **Vision / STT / TTS** front-end kernels (`conv2d`, `patch_embed`,
+> `rope_2d`, `mel_spectrogram`, `audio_conv1d`, `vocoder/iSTFT`) are ✓ rows
+> for Phase 6.5 / 7.
 > The MLX-upstream and MLX-alpha columns were **not** re-verified against those
 > repos (not checked out) — only the metaltile column was re-surveyed.
 
@@ -80,8 +86,8 @@ Sources surveyed:
 | gemv_masked | ✓ | ✓ | ✓ | `mlx/gemv_masked.rs` → `mt_gemv_masked<T>` (no MLX comparison wired). |
 | quantized (affine_quantize / affine_dequantize) | ✓ | ✓ | ~ | `mlx/quantized.rs` → quantize **and** dequantize for int4/int8, plus dequantize for int3/int5/int6 (`mt_affine_{quantize,dequantize}_int{3,4,5,6,8}`). Gap: int2, and the quantize side of int3/5/6. |
 | quantized (affine_qmv / qvm / qmm — matvec / matmul) | ✓ | ✓ | ~ | `mlx/quantized.rs` → `mt_qmv` + `mt_qmm` / `mt_qmm_bm2` / `mt_qmm_bm4` (3 M-batch tiles) with an `mt_qmm_for` selector, all f32+f16, int4. Gap: `qvm` absent, bit-widths other than int4 absent, bf16 absent. An int4 qmm via Apple `mpp::tensor_ops::matmul2d` (NAX tensor cores, MLX-parity) is **open in PR [#137](https://github.com/0xClandestine/metaltile/pull/137)** (`mt_qmm_mma_mpp`). |
-| quantized (gather_qmv / gather_qmm — gather variants) | ✓ | ✓ | ✗ | Affine gather-qmm/qvm absent. Bare-tensor `ffai/gather.rs` exists but is non-quantized. The MoE grouped-gather quantized matmul is **open in PR [#125](https://github.com/0xClandestine/metaltile/pull/125) / [#136](https://github.com/0xClandestine/metaltile/pull/136)** (`mt_moe_gather_qmm_int4` + MMA / MPP-NAX variants). |
-| moe (router top-k + permute + unpermute orchestration) | ✗ | ✓ | ✓ | `ffai/moe.rs` → `mt_moe_router_topk<T>`, `mt_moe_permute<T>`, `mt_moe_unpermute<T>`. MoE expert-routing orchestration for Qwen3.6-35B-A3B / Qwen3-Coder-30B-A3B end-to-end serving. The grouped quantized BGEMM that fuses the per-expert FFN matmuls into one dispatch is **open in PR [#125](https://github.com/0xClandestine/metaltile/pull/125) / [#136](https://github.com/0xClandestine/metaltile/pull/136)**. |
+| quantized (gather_qmv / gather_qmm — gather variants) | ✓ | ✓ | ~ | `ffai/moe.rs` → `mt_moe_gather_qmm_int4` — the affine grouped-gather quantized matmul. One Reduction-mode dispatch does the per-expert FFN projection for a MoE block: per-row expert routing via a CSR `expert_offsets` walk + int4-quantized per-expert weight matmul, matching MLX's `gatherQuantizedMM`. Verified by `moe_gather_qmm_gpu_correctness` (f32/f16/bf16). Gap: int4 only (MLX MoE default); the MMA / MPP-NAX perf variants from PR [#136](https://github.com/0xClandestine/metaltile/pull/136) are a follow-up. Bare-tensor `ffai/gather.rs` exists but is non-quantized. |
+| moe (router top-k + permute + unpermute orchestration) | ✗ | ✓ | ✓ | `ffai/moe.rs` → `mt_moe_router_topk<T>`, `mt_moe_permute<T>`, `mt_moe_unpermute<T>`. MoE expert-routing orchestration for Qwen3.6-35B-A3B / Qwen3-Coder-30B-A3B end-to-end serving. The grouped quantized BGEMM that fuses the per-expert FFN matmuls into one dispatch is now landed — `mt_moe_gather_qmm_int4` (see the `quantized (gather_*)` row); the MMA / MPP-NAX perf variants from PR [#136](https://github.com/0xClandestine/metaltile/pull/136) remain a follow-up. |
 | dequant_gather (quantized embedding-table gather) | ✗ | ✗ | ✓ | `ffai/dequant_gather.rs`. int{3,4,5,6,8} all bit-widths. FFAI-specific, no MLX counterpart. |
 | dequant_gemv (quantized GEMV, FFAI flavour) | ~ (subset of `quantized.metal`) | ~ | ✓ | `ffai/dequant_gemv.rs`. int{3,4,5,6,8}, generic `T`. Coexists with the partial `mt_qmv_f32` port; FFAI-tuned shape. |
 | fp_quantized (fp4/fp8 quant + dequant) | ✓ | ✓ | ~ | `mlx/fp_quantized.rs` → `mt_fp4_quant_dequant` (f32 only). fp8 path and other dtypes missing. |
@@ -116,9 +122,9 @@ Sources surveyed:
 | logits processors (temperature, repetition penalty, top-k / top-p / min-p masks) | ✗ | ✗ | ✓ | `ffai/logits_{processors,topk,top_p,min_p}.rs` → `logits_temperature`, `logits_repetition_penalty`, `logits_topk_mask`, `logits_top_p_mask`, `logits_min_p_mask` (all generic `T`). In-place decode-form sampler stages composed before `softmax_categorical_sample`. FFAI-only. |
 | sdpa_decode_d512 (head_dim=512 SDPA decode — Gemma 4 global) | ✗ | ✗ | ✓ | `ffai/sdpa_decode_d512.rs` → `ffai_sdpa_decode_d512<T>`. head_dim=512 specialization for Gemma 4's global-attention layers; dispatches at 512 threads/TG (the 16-wide per-lane footprint caps the pipeline below 1024). FFAI-only; verified by `sdpa_decode_d512_gpu_correctness`. Consolidation pass (2026-05-21). |
 | rms_norm_wide (RMSNorm for rows past the 4096-element cap) | ✗ | ✗ | ✓ | `mlx/rms_norm.rs` → `mt_rms_norm_wide<T>`. Strided wide-row variant for large-hidden models (Gemma 4 31B, hidden 5376) that exceed the standard `mt_rms_norm` 1024-thread × 4-element single-row cap. Verified by `rms_norm_wide_gpu_correctness`. Consolidation pass (2026-05-21). |
-| sdpa_decode + learned attention sink (GPT-OSS-20B) | ✗ | ~ | ~ | **Partial — host-side fallback.** GPT-OSS-20B's per-head learned `sinks` logit is folded into the softmax denominator as a host-side post-hoc rescale of the raw-KV `sdpa_decode` (d64) output — the `sdpa_decode` kernel has a sink-*token* path (`sink_end`) but no learned per-head sink-*logit* term. `aura_flash_sdpa` / `flash_quantized_sdpa` carry sinks for the *quantized* cache only. A `sink_logit` constexpr on `sdpa_decode` would remove the GPT-OSS per-layer CPU sync. |
+| sdpa_decode + learned attention sink (GPT-OSS-20B) | ✗ | ~ | ✓ | `ffai/sdpa_decode.rs` → `ffai_sdpa_decode` `has_sink` / `sink_logit` constexprs. GPT-OSS-20B's per-head learned attention-sink logit now folds into the cross-simdgroup softmax denominator on-GPU as a virtual key (score `sink_logit`, value 0) — removing the host-side post-hoc rescale that previously cost a CPU sync per attention layer. `has_sink == 0` masks the term out, keeping the dense / sliding-window paths bit-identical to the pre-sink kernel. Distinct from the `sink_end` sink-*token* range. Verified by `sdpa_decode_gpu_correctness` (`sdpa_decode_learned_sink_matches_cpu_f32`). |
 | gated_rmsnorm (fp32-in gated RMSNorm → activation dtype) | ✗ | ✗ | ✓ | `ffai/gated_rmsnorm.rs` → `ffai_gated_rmsnorm<T>`. Fused Qwen3.5 / 3.6 GDN post-step `out = w·rmsNorm(y)·silu(z)`: `y` arrives fp32 (the `gated_delta` recurrence output), the gate `z` / weight `w` / output are activation-dtype `T`. Reduction-mode, `N = TPG*4`, mirrors `mt_rms_norm` with the fp32-in / `T`-out dtype split and the `silu(z)` gate. Closes the per-GDN-layer host-side CPU sync (≈75 % of Qwen3.5/3.6 layers). Verified by `gated_rmsnorm_gpu_correctness`. |
-| ssm_step (2D `A_log` / per-(head,state) decay — Jamba) | ✗ | ~ | ✗ | **NOT PORTED — host-side fallback.** The shipped `ssm_step` (row above) bakes in a per-channel scalar `A`; Jamba's `A_log` is 2D (per-(head,state)), so Jamba runs its entire Mamba 2 selective scan + dt/B/C RMSNorms host-side. A 2D-`A` `ssm_step` variant moves the Jamba scan to the GPU. The other Mamba 2 families (Mamba2, FalconH1, NemotronH, GraniteMoeHybrid) use the scalar-`A` kernel and are unaffected. |
+| ssm_step (2D `A_log` / per-(head,state) decay — Jamba) | ✗ | ~ | ✓ | `ffai/ssm.rs` → `ssm_step_a2d<T>`. The 2-D-`A_log` variant of `ssm_step`: carries a per-(channel, state) `A_log` of shape `[n_heads*head_dim, state_dim]` so the decay `exp(-exp(A_log)·dt)` varies with the state index, moving Jamba's Mamba 1 selective scan onto the GPU (it previously ran host-side). Same Grid3D geometry as `ssm_step` — one thread per `(head, d)`, state `h` in fp32. The other Mamba 2 families (Mamba2, FalconH1, NemotronH, GraniteMoeHybrid) use the scalar-`A` kernel and are unaffected. Verified by `ssm_step_a2d_gpu_correctness` (f32/f16/bf16). |
 | conv2d (vision patch conv — im2col + tiled GEMM) | ✓ | ✓ | ✓ | `ffai/conv2d.rs` → `conv2d_patch14` / `conv2d_patch16` (fixed-patch variants, kernel + stride baked in) + `conv2d_generic` (runtime kh/kw/stride/pad). NCHW input, OIHW weight; direct conv (implicit im2col, one thread per output). Generic `T`; verified by `conv2d_gpu_correctness`. Phase 6.5 VLM. |
 | patch_embed (fused image unfold + linear projection) | ✗ | ✗ | ✓ | `ffai/patch_embed.rs` → `patch_embed<T>`. Fused image-unfold + linear projection — gathers each patch's pixels and dots them with one weight row, no intermediate unfolded buffer. NCHW image, flat `[hidden, patch_dim]` weight, `[num_patches, hidden]` output. FFAI-specific; verified by `patch_embed_gpu_correctness`. Phase 6.5 VLM. |
 | rope_2d (2D positional RoPE for vision tokens) | ✓ | ✓ | ✓ | `ffai/rope_2d.rs` → `ffai_rope_2d<T>`. 2D RoPE over a (row, col) token grid — head_dim split into a row half and a column half, each running rotate-half RoPE. Consumes a per-token `(row, col)` pair. Generic `T`; verified by `rope_2d_gpu_correctness`. Phase 6.5 VLM. |
@@ -134,8 +140,7 @@ for quick scanning. Status reflects the open PRs as of 2026-05-21.
 | PR | Kernel(s) | Affects row | State |
 |---|---|---|---|
 | [#115](https://github.com/0xClandestine/metaltile/pull/115) | `mt_gated_delta_wy_chunk` — chunked-WY GDN prefill (scalar foundation) | `gated_delta` | Draft / WIP; CI green, needs rebase onto current `dev`. |
-| [#125](https://github.com/0xClandestine/metaltile/pull/125) | `mt_moe_gather_qmm_int4` — grouped MoE quantized matmul (m1 scalar) | `quantized (gather_*)`, `moe` | Draft; fmt/clippy/commit-hygiene red. Overlaps #136. |
-| [#136](https://github.com/0xClandestine/metaltile/pull/136) | MoE gather BGEMM stack (m8 / MMA / MPP-NAX bm16 + bm64) | `quantized (gather_*)`, `moe` | Draft / WIP — surfaced for visibility; currently regresses vs MLX. |
+| [#136](https://github.com/0xClandestine/metaltile/pull/136) | MoE gather BGEMM perf stack (m8 / MMA / MPP-NAX bm16 + bm64) | `quantized (gather_*)`, `moe` | Draft / WIP. The scalar `mt_moe_gather_qmm_int4` foundation has landed (see the `quantized (gather_*)` row); this PR's remaining content is the MMA / MPP-NAX perf variants. |
 | [#137](https://github.com/0xClandestine/metaltile/pull/137) | `mt_qmm_mma_mpp` + `mt_mpp_matmul_smoke` — int4 qmm via Apple `mpp::tensor_ops::matmul2d` | `quantized (qmm)` | Draft; MLX-parity, needs rebase + CI. |
 
 ## Notes on counting decisions
@@ -163,14 +168,15 @@ only on the gather / masked / split-K logic layered on top. The `steel_conv`
 family (2D, general, 3D) is now fully ported as direct convs (`ffai/conv2d.rs`,
 `ffai/conv3d.rs`).
 
-1. **`quantized` gather_qmm / gather_qmv** — the affine grouped-gather matmul.
-   In flight in PRs #125 / #136; landing it closes the MoE FFN dispatch-count
-   win (one kernel for the whole expert projection).
-2. **`steel_gemm_fused` shape coverage** — only `64×64×16` is wired today;
+1. **`steel_gemm_fused` shape coverage** — only `64×64×16` is wired today;
    prefill perf needs more block shapes.
-3. **`steel_gemm_splitk` + accum** — two-kernel split-K dispatch + accumulator
+2. **`steel_gemm_splitk` + accum** — two-kernel split-K dispatch + accumulator
    pass. Infra-gated (split-K scheduling primitive).
-4. **`steel_gemm_masked`** — block-level predication. Infra-gated.
+3. **`steel_gemm_masked`** — block-level predication. Infra-gated.
+4. **`quantized` gather_qmm MMA / MPP-NAX variants** — the scalar
+   `mt_moe_gather_qmm_int4` is landed; the simdgroup-MMA and Apple
+   `mpp::tensor_ops::matmul2d` perf variants (PR #136) are the remaining
+   throughput follow-up, plus bit-widths beyond int4.
 5. **NAX feature family** — `steel_attention_nax`, `steel_gemm_*_nax`,
    `quantized_nax`, `fp_quantized_nax`. PR #137 demonstrates the Apple
    `mpp::tensor_ops::matmul2d` path; the `nax`-gated rows can follow once the
@@ -196,12 +202,13 @@ removes a measured per-layer CPU sync:
   `vocoder/iSTFT`: **landed** (`ffai/mel_spectrogram.rs`,
   `ffai/audio_conv1d.rs`, `ffai/vocoder.rs`). Unblocks Whisper, Kokoro, and
   Qwen-Omni audio. A radix-FFT path for the STFT / iSTFT is a perf follow-up.
-- **Host-fallback closers** — `gated_rmsnorm` (Qwen3.5/3.6 GDN post-step):
-  **landed** (`ffai/gated_rmsnorm.rs`). Still open: the `sdpa_decode`
-  learned-sink term (GPT-OSS-20B) and a 2D-`A_log` `ssm_step` variant
-  (Jamba). Each is correctness-neutral today but trades a per-layer
-  CPU↔GPU sync; landing them is a decode-throughput win, not a
-  correctness fix.
+- **Host-fallback closers** — all three **landed**: `gated_rmsnorm`
+  (Qwen3.5/3.6 GDN post-step, `ffai/gated_rmsnorm.rs`), the
+  `sdpa_decode` learned-sink term (GPT-OSS-20B, `has_sink` /
+  `sink_logit` on `ffai/sdpa_decode.rs`), and the 2D-`A_log`
+  `ssm_step` variant (Jamba, `ssm_step_a2d` in `ffai/ssm.rs`). Each
+  was correctness-neutral (the host path worked) but cost a per-layer
+  CPU↔GPU sync; folding them on-GPU is a decode-throughput win.
 
 ## Open uncertainties / counting caveats
 
@@ -226,10 +233,11 @@ removes a measured per-layer CPU sync:
   so they count toward the union).
 - The Gemma / Nemotron-H / GPT-OSS-20B kernel work is now consolidated onto
   `ek/aura-port` and folded into this audit (the `sdpa_decode_d512` and
-  `rms_norm_wide` rows). Three host-side fallbacks surfaced by the model
-  review (`gated_rmsnorm`, `sdpa_decode` learned-sink, 2D-`A` `ssm_step`) are
-  recorded as gap rows — they are correctness-neutral (the host path works)
-  but cost a CPU sync per layer on the affected models.
+  `rms_norm_wide` rows). The three host-side fallbacks surfaced by the model
+  review (`gated_rmsnorm`, the `sdpa_decode` learned-sink term, the 2D-`A_log`
+  `ssm_step_a2d` variant) are now all landed as ✓ rows — they were
+  correctness-neutral (the host path worked) but cost a CPU sync per layer
+  on the affected models.
 - The Vision / STT / TTS rows (`conv2d`, `patch_embed`, `rope_2d`,
   `mel_spectrogram`, `audio_conv1d`, `vocoder/iSTFT`) are scoped from the
   Phase 6.5 / 7 plan, not yet from checked-out reference source — treat their
