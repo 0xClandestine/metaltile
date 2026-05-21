@@ -25,6 +25,7 @@ pub mod aura_score;
 pub mod aura_value;
 pub mod batched_qkv_qgemv;
 pub mod conv2d;
+pub mod conv3d;
 pub mod dequant_gather;
 pub mod dequant_gemv;
 pub mod flash_quantized_sdpa;
