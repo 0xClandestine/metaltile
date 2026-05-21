@@ -38,14 +38,22 @@ build-release: ## cargo build (release)
 	cargo build --workspace --release
 
 # ─── Test ─────────────────────────────────────────────────────────────
-# MTL_SHADER_VALIDATION=1 turns on Metal's shader bounds-checking layer:
-# an out-of-bounds buffer access inside a kernel aborts the command
-# buffer with a diagnostic instead of faulting into a GPU pin (a
-# machine-freezing hang). The GPU correctness tests dispatch every
-# kernel on a real device, so this is where an OOB bug surfaces — worth
-# the runtime overhead to convert a freeze into a clean, named failure.
 .PHONY: test
-test: ## cargo test --workspace (with Metal shader validation)
+test: ## cargo test --workspace
+	cargo test --workspace
+
+# Diagnostic gate: re-run the suite under Metal's shader-validation layer.
+# Validation bounds-checks every in-kernel buffer access and turns an OOB
+# fault into a diagnostic instead of a machine-freezing GPU pin — useful
+# when a kernel is suspected of an out-of-bounds access.
+#
+# NOT the default `test` gate: the validation instrumentation consumes
+# registers, which lowers each PSO's maxTotalThreadsPerThreadgroup (e.g.
+# 1024 → ~704). Any kernel whose test dispatches a threadgroup near the
+# 1024 cap then exceeds the *instrumented* limit and false-fails. Run
+# this when diagnosing a suspected OOB, not as a correctness gate.
+.PHONY: test-validate
+test-validate: ## cargo test --workspace under Metal shader validation (diagnostic)
 	MTL_SHADER_VALIDATION=1 cargo test --workspace
 
 .PHONY: coverage
