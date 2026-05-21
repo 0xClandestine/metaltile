@@ -322,7 +322,7 @@ fn kernel_annotations_have_matching_inventory_submit() {
     // Also accept kernels registered as KernelEntry building blocks
     // (no BenchSpec needed — they serve as callees for cross-kernel calls).
     for entry in inventory::iter::<KernelEntry>() {
-        registered_kernel_names.insert(entry.name.to_string());
+        registered_kernel_names.insert(entry.name().to_string());
     }
     assert!(!registered_kernel_names.is_empty(), "inventory empty — link issue?");
 
