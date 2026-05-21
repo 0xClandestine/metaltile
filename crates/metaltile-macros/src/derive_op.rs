@@ -282,6 +282,13 @@ pub fn derive_op_flags(input: TokenStream) -> TokenStream {
         ("op_if", "is_if"),
         ("op_fused", "is_fused_elementwise"),
         ("op_const", "is_const"),
+        // Feature-requirement flags
+        ("needs_simd_lane", "needs_simd_lane"),
+        ("needs_simd_group", "needs_simd_group"),
+        ("needs_simdgroup_matrix", "needs_simdgroup_matrix"),
+        ("needs_simd_product", "needs_simd_product"),
+        // Result classification
+        ("no_result", "is_no_result"),
     ];
 
     let methods: Vec<TokenStream2> = flags

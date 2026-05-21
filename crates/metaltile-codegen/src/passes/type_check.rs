@@ -615,32 +615,19 @@ fn infer_block(
             Op::StrideScan { .. } => {
                 // Side-effect only — writes directly to dst buffer, no SSA result.
             },
+            // No-result ops (derived from #[no_result] on Op variants via OpFlags).
+            _ if op.is_no_result() => {},
+            // High-level ops that need lowering passes; not yet typable.
             Op::FlashAttention { .. }
             | Op::SlidingWindowAttention { .. }
             | Op::RmsNorm { .. }
             | Op::GatedMlp { .. }
-            | Op::Store { .. }
+            // Ops that produce a result but whose types are not yet
+            // inferred by this pass (relies on Metal compiler inference).
             | Op::VectorLoad { .. }
-            | Op::VectorStore { .. }
             | Op::VectorExtract { .. }
-            | Op::If { .. }
             | Op::Cat { .. }
-            | Op::Scatter { .. }
-            | Op::Atomic { .. }
-            | Op::StrideStore { .. }
-            | Op::ThreadgroupAlloc { .. }
-            | Op::ThreadgroupStore { .. }
-            | Op::StackAlloc { .. }
-            | Op::StackStore { .. }
-            | Op::Barrier
-            | Op::SimdgroupBarrier
-            | Op::DeclareLocal { .. }
-            | Op::SetLocal { .. }
-            | Op::SimdgroupMatMul { .. }
-            | Op::SimdgroupElemStore { .. }
-            | Op::SimdgroupLoad { .. } => {
-                // No output value to type (or side-effect-only op).
-            },
+            | Op::DeclareLocal { .. } => {},
             Op::SimdgroupAlloc { .. } | Op::SimdgroupElemLoad { .. } | Op::SimdScan { .. } => {
                 env.insert(vid, TypedValue { dtype: DType::F32, shape: Shape::scalar() });
             },
@@ -732,6 +719,9 @@ fn infer_block(
                     env.insert(vid, tv.clone());
                 }
             },
+            // Catch-all for ops that haven't been explicitly matched above.
+            // New ops with derived type annotations should be added above.
+            _ => {},
         }
     }
     Ok(())

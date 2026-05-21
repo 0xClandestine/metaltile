@@ -75,11 +75,24 @@ impl MslGenerator {
     /// folded into a fused chain) are still emitted — the fusion pass
     /// hides the standalone `Op::Activation` inside the chain.
     fn analyze_op(&self, op: &Op, feat: &mut KernelFeatures) {
+        // --- Feature flags derived from OpFlags ---
+        if op.needs_simd_lane() {
+            feat.needs_simd_lane = true;
+        }
+        if op.needs_simd_group() {
+            feat.needs_simd_group = true;
+        }
+        if op.needs_simdgroup_matrix() {
+            feat.needs_simdgroup_matrix = true;
+        }
+        if op.needs_simd_product() {
+            feat.needs_simd_product = true;
+        }
+
+        // --- Op-specific (data-dependent) checks ---
         match op {
             Op::Dot { .. } => feat.has_tile = true,
             Op::Reduce { op: reduce_kind, .. } | Op::Scan { op: reduce_kind, .. } => {
-                feat.needs_simd_lane = true;
-                feat.needs_simd_group = true;
                 if matches!(reduce_kind, metaltile_core::ir::ReduceKind::Product) {
                     feat.needs_simd_product = true;
                 }
@@ -113,30 +126,6 @@ impl MslGenerator {
             Op::UnaryOp { op: UnaryOpKind::Erf, .. } => feat.needs_erf = true,
             Op::UnaryOp { op: UnaryOpKind::ErfInv, .. } => feat.needs_erfinv = true,
             Op::UnaryOp { op: UnaryOpKind::Expm1, .. } => feat.needs_expm1 = true,
-            // simdgroup matrix ops need simd built-ins and the simdgroup_matrix header
-            Op::SimdgroupAlloc { .. }
-            | Op::SimdgroupElemLoad { .. }
-            | Op::SimdgroupElemStore { .. }
-            | Op::SimdgroupLoad { .. }
-            | Op::SimdgroupMatMul { .. } => {
-                feat.needs_simd_lane = true;
-                feat.needs_simd_group = true;
-                feat.needs_simdgroup_matrix = true;
-            },
-            Op::SimdLaneId => feat.needs_simd_lane = true,
-            Op::SimdGroupId => feat.needs_simd_group = true,
-            Op::SimdReduce { .. } => {
-                feat.needs_simd_lane = true;
-                feat.needs_simd_group = true;
-            },
-            Op::SimdShuffleXor { .. } => {
-                feat.needs_simd_lane = true;
-                feat.needs_simd_group = true;
-            },
-            Op::SimdScan { .. } => {
-                feat.needs_simd_lane = true;
-                feat.needs_simd_group = true;
-            },
             _ =>
                 if let Some(ops) = op.fused_ops() {
                     for inner in ops {

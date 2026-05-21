@@ -445,6 +445,7 @@ pub enum Op {
     /// Store a tile to a tensor at given indices.
     #[side_effect]
     #[op_store]
+    #[no_result]
     Store {
         /// The parameter to store to.
         dst: String,
@@ -479,6 +480,8 @@ pub enum Op {
     },
 
     /// Reduction along an axis.
+    #[needs_simd_lane]
+    #[needs_simd_group]
     Reduce {
         #[vid]
         value: ValueId,
@@ -524,6 +527,7 @@ pub enum Op {
     /// Loop: iterate a variable from start to end with step.
     #[unpredictable]
     #[op_loop]
+    #[no_result]
     Loop {
         var: VarId,
         #[vid]
@@ -538,6 +542,7 @@ pub enum Op {
     /// Conditional branch: if `cond` is true, execute `then_block`, else `else_block`.
     #[unpredictable]
     #[op_if]
+    #[no_result]
     If {
         #[vid]
         cond: ValueId,
@@ -711,6 +716,7 @@ pub enum Op {
     /// Vectorized store: stores `len` consecutive elements as a vector.
     #[side_effect]
     #[op_store]
+    #[no_result]
     VectorStore {
         /// The parameter to store to.
         dst: String,
@@ -743,6 +749,7 @@ pub enum Op {
     /// Scatter: indexed store to a buffer. `dst[indices[i]] = value[i]`.
     #[side_effect]
     #[op_store]
+    #[no_result]
     Scatter {
         dst: String,
         #[vid]
@@ -754,6 +761,7 @@ pub enum Op {
 
     /// Atomic operation on device memory.
     #[side_effect]
+    #[no_result]
     Atomic {
         op: AtomicKind,
         scope: AtomicScope,
@@ -765,6 +773,8 @@ pub enum Op {
     },
 
     /// Prefix scan along an axis (inclusive or exclusive).
+    #[needs_simd_lane]
+    #[needs_simd_group]
     Scan {
         #[vid]
         value: ValueId,
@@ -805,6 +815,7 @@ pub enum Op {
     /// Used for write-back in reduction kernels (e.g., rout[i] = rx[i] * rms * w[i]).
     #[side_effect]
     #[op_store]
+    #[no_result]
     StrideStore {
         src: String,
         dst: String,
@@ -841,6 +852,8 @@ pub enum Op {
     // ---- SIMD-group and threadgroup primitives ----
     /// SIMD-group reduction: reduce all lanes within the SIMD group.
     /// Maps to `simd_sum(v)`, `simd_max(v)`, `simd_min(v)` (Metal 2.1+).
+    #[needs_simd_lane]
+    #[needs_simd_group]
     SimdReduce {
         #[vid]
         value: ValueId,
@@ -850,6 +863,8 @@ pub enum Op {
     /// SIMD-group butterfly shuffle: `simd_shuffle_xor(value, mask)`.
     /// Used by Steel attention row reductions, where lanes sharing the same
     /// MMA row exchange values through fixed xor masks (for example 1 and 8).
+    #[needs_simd_lane]
+    #[needs_simd_group]
     SimdShuffleXor {
         #[vid]
         value: ValueId,
@@ -858,10 +873,16 @@ pub enum Op {
 
     /// Allocate a simdgroup matrix of shape M×N with given element type.
     /// Emits `simdgroup_matrix<T, M, N> name;` in MSL.
+    #[needs_simd_lane]
+    #[needs_simd_group]
+    #[needs_simdgroup_matrix]
     SimdgroupAlloc { dtype: DType, m: u32, n: u32 },
 
     /// Load one element from a simdgroup matrix: `result = name.thread_elements()[index]`.
     /// Produces a scalar value.
+    #[needs_simd_lane]
+    #[needs_simd_group]
+    #[needs_simdgroup_matrix]
     SimdgroupElemLoad {
         #[vid]
         value: ValueId,
@@ -870,6 +891,10 @@ pub enum Op {
 
     /// Store one element into a simdgroup matrix: `name.thread_elements()[index] = data`.
     /// No result (side-effecting).
+    #[needs_simd_lane]
+    #[needs_simd_group]
+    #[needs_simdgroup_matrix]
+    #[no_result]
     SimdgroupElemStore {
         #[vid]
         value: ValueId,
@@ -891,6 +916,10 @@ pub enum Op {
     /// and column dimensions of the loaded fragment — used to load a B
     /// operand stored row-major `[N, K]` as if it were `[K, N]` for the
     /// standard `C = A * B` MMA layout (MLX `qmm_t` pattern).
+    #[needs_simd_lane]
+    #[needs_simd_group]
+    #[needs_simdgroup_matrix]
+    #[no_result]
     SimdgroupLoad {
         #[vid]
         dest: ValueId,
@@ -903,6 +932,10 @@ pub enum Op {
 
     /// simdgroup multiply-accumulate: `C = A * B + C`.
     /// All three operands must be simdgroup matrices of compatible shapes.
+    #[needs_simd_lane]
+    #[needs_simd_group]
+    #[needs_simdgroup_matrix]
+    #[no_result]
     SimdgroupMatMul {
         #[vid]
         a: ValueId,
@@ -913,13 +946,17 @@ pub enum Op {
     },
 
     /// Built-in: returns the SIMD lane index (thread_index_in_simdgroup).
+    #[needs_simd_lane]
     SimdLaneId,
 
     /// Built-in: returns the SIMD group index (simdgroup_index_in_threadgroup).
+    #[needs_simd_group]
     SimdGroupId,
 
     /// SIMD-group inclusive prefix scan.
     /// Maps to `simd_scan_inclusive_<op>(v)` (Metal 3.0+).
+    #[needs_simd_lane]
+    #[needs_simd_group]
     SimdScan {
         #[vid]
         value: ValueId,
@@ -943,6 +980,7 @@ pub enum Op {
     /// Emits `threadgroup T name[size]` in the kernel body.
     #[side_effect]
     #[unpredictable]
+    #[no_result]
     ThreadgroupAlloc {
         dtype: DType,
         /// Number of elements in the array.
@@ -962,6 +1000,7 @@ pub enum Op {
     /// Store one element to a named threadgroup array: `name[index] = value`.
     #[side_effect]
     #[op_store]
+    #[no_result]
     ThreadgroupStore {
         name: String,
         #[vid]
@@ -978,6 +1017,7 @@ pub enum Op {
     /// amortises lookup across the dim-strided inner loop.
     #[side_effect]
     #[unpredictable]
+    #[no_result]
     StackAlloc { dtype: DType, size: u32, name: String },
 
     /// Load one element from a per-thread stack array: `val = name[index]`.
@@ -992,6 +1032,7 @@ pub enum Op {
 
     /// Store one element to a per-thread stack array: `name[index] = value`.
     #[side_effect]
+    #[no_result]
     StackStore {
         name: String,
         #[vid]
@@ -1006,6 +1047,7 @@ pub enum Op {
     #[side_effect]
     #[unpredictable]
     #[barrier]
+    #[no_result]
     Barrier,
 
     /// Compiler-only simdgroup barrier: `simdgroup_barrier(mem_flags::mem_none)`.
@@ -1017,6 +1059,7 @@ pub enum Op {
     #[side_effect]
     #[unpredictable]
     #[barrier]
+    #[no_result]
     SimdgroupBarrier,
 
     /// Declare a mutable register-local scalar variable.
@@ -1033,6 +1076,7 @@ pub enum Op {
     /// Emits: `__ml_{name} = {value};`
     #[side_effect]
     #[unpredictable]
+    #[no_result]
     SetLocal {
         name: String,
         #[vid]
