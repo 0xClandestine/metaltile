@@ -2847,7 +2847,7 @@ pub fn patch_qmm_mma_dtype_aware_skew(
     }
     // Patch ThreadgroupAlloc sizes for `xs` and `ws` (1152 → 1280 at f16).
     for op in kernel.body.ops.iter_mut() {
-        if let Op::ThreadgroupAlloc { name, size, .. } = op
+        if let Some((name, size)) = op.as_threadgroup_alloc_mut()
             && (name == "xs" || name == "ws")
         {
             *size = new_alloc;

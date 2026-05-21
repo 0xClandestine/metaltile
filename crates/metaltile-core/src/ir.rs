@@ -1088,6 +1088,80 @@ impl Op {
         if let Op::FusedElementwise { ops } = self { Some(ops) } else { None }
     }
 
+    /// Returns `(name, &mut size)` if this is `Op::ThreadgroupAlloc`.
+    pub fn as_threadgroup_alloc_mut(&mut self) -> Option<(&str, &mut u32)> {
+        if let Op::ThreadgroupAlloc { name, size, .. } = self { Some((name.as_str(), size)) }
+        else { None }
+    }
+
+    /// A stable display name for this op variant, used in error messages and diagnostics.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Op::ProgramId { .. } => "ProgramId",
+            Op::Const { .. } => "Const",
+            Op::Arange { .. } => "Arange",
+            Op::Load { .. } => "Load",
+            Op::Store { .. } => "Store",
+            Op::BinOp { .. } => "BinOp",
+            Op::Dot { .. } => "Dot",
+            Op::Reduce { .. } => "Reduce",
+            Op::StrideReduce { .. } => "StrideReduce",
+            Op::Cast { .. } => "Cast",
+            Op::Loop { .. } => "Loop",
+            Op::If { .. } => "If",
+            Op::Zeros { .. } => "Zeros",
+            Op::Transpose { .. } => "Transpose",
+            Op::ExpandDims { .. } => "ExpandDims",
+            Op::Reshape { .. } => "Reshape",
+            Op::Cat { .. } => "Cat",
+            Op::Slice { .. } => "Slice",
+            Op::InlineMsl { .. } => "InlineMsl",
+            Op::FlashAttention { .. } => "FlashAttention",
+            Op::SlidingWindowAttention { .. } => "SlidingWindowAttention",
+            Op::RmsNorm { .. } => "RmsNorm",
+            Op::GatedMlp { .. } => "GatedMlp",
+            Op::UnaryOp { .. } => "UnaryOp",
+            Op::Activation { .. } => "Activation",
+            Op::Select { .. } => "Select",
+            Op::Broadcast { .. } => "Broadcast",
+            Op::Splat { .. } => "Splat",
+            Op::FusedElementwise { .. } => "FusedElementwise",
+            Op::VectorLoad { .. } => "VectorLoad",
+            Op::VectorStore { .. } => "VectorStore",
+            Op::VectorExtract { .. } => "VectorExtract",
+            Op::Gather { .. } => "Gather",
+            Op::Scatter { .. } => "Scatter",
+            Op::Atomic { .. } => "Atomic",
+            Op::Scan { .. } => "Scan",
+            Op::StrideStore { .. } => "StrideStore",
+            Op::Dequantize { .. } => "Dequantize",
+            Op::SimdReduce { .. } => "SimdReduce",
+            Op::SimdShuffleXor { .. } => "SimdShuffleXor",
+            Op::SimdBroadcast { .. } => "SimdBroadcast",
+            Op::ThreadgroupAlloc { .. } => "ThreadgroupAlloc",
+            Op::ThreadgroupLoad { .. } => "ThreadgroupLoad",
+            Op::ThreadgroupStore { .. } => "ThreadgroupStore",
+            Op::StackAlloc { .. } => "StackAlloc",
+            Op::StackLoad { .. } => "StackLoad",
+            Op::StackStore { .. } => "StackStore",
+            Op::Barrier => "Barrier",
+            Op::SimdgroupBarrier => "SimdgroupBarrier",
+            Op::SimdgroupAlloc { .. } => "SimdgroupAlloc",
+            Op::SimdgroupElemLoad { .. } => "SimdgroupElemLoad",
+            Op::SimdgroupElemStore { .. } => "SimdgroupElemStore",
+            Op::SimdgroupLoad { .. } => "SimdgroupLoad",
+            Op::SimdgroupMatMul { .. } => "SimdgroupMatMul",
+            Op::SimdScan { .. } => "SimdScan",
+            Op::SimdLaneId => "SimdLaneId",
+            Op::SimdGroupId => "SimdGroupId",
+            Op::DeclareLocal { .. } => "DeclareLocal",
+            Op::SetLocal { .. } => "SetLocal",
+            Op::ArgReduce { .. } => "ArgReduce",
+            Op::StrideScan { .. } => "StrideScan",
+            Op::StrideArgReduce { .. } => "StrideArgReduce",
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Display impl
     // -----------------------------------------------------------------------

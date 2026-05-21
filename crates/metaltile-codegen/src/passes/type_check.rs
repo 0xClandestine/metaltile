@@ -245,7 +245,7 @@ fn add_op_context(
     op: &Op,
     result: Option<ValueId>,
 ) -> Error {
-    let mut ctx = format!("block {} op #{} ({})", block.id.as_u32(), op_idx, op_name(op));
+    let mut ctx = format!("block {} op #{} ({})", block.id.as_u32(), op_idx, op.variant_name());
     if let Some(vid) = result {
         ctx.push_str(&format!(" -> {vid}"));
     }
@@ -264,73 +264,6 @@ fn add_op_context(
         Error::InvalidDType(msg) => format!("invalid dtype: {msg}"),
     };
     Error::Validation(format!("{ctx}: {detail}"))
-}
-
-fn op_name(op: &Op) -> &'static str {
-    match op {
-        Op::ProgramId { .. } => "ProgramId",
-        Op::Const { .. } => "Const",
-        Op::Arange { .. } => "Arange",
-        Op::Load { .. } => "Load",
-        Op::Store { .. } => "Store",
-        Op::BinOp { .. } => "BinOp",
-        Op::Dot { .. } => "Dot",
-        Op::Reduce { .. } => "Reduce",
-        Op::StrideReduce { .. } => "StrideReduce",
-        Op::Cast { .. } => "Cast",
-        Op::Loop { .. } => "Loop",
-        Op::If { .. } => "If",
-        Op::Zeros { .. } => "Zeros",
-        Op::Transpose { .. } => "Transpose",
-        Op::ExpandDims { .. } => "ExpandDims",
-        Op::Reshape { .. } => "Reshape",
-        Op::Cat { .. } => "Cat",
-        Op::Slice { .. } => "Slice",
-        Op::InlineMsl { .. } => "InlineMsl",
-        Op::FlashAttention { .. } => "FlashAttention",
-        Op::SlidingWindowAttention { .. } => "SlidingWindowAttention",
-        Op::RmsNorm { .. } => "RmsNorm",
-        Op::GatedMlp { .. } => "GatedMlp",
-        Op::UnaryOp { .. } => "UnaryOp",
-        Op::Activation { .. } => "Activation",
-        Op::Select { .. } => "Select",
-        Op::Broadcast { .. } => "Broadcast",
-        Op::Splat { .. } => "Splat",
-        Op::FusedElementwise { .. } => "FusedElementwise",
-        Op::VectorLoad { .. } => "VectorLoad",
-        Op::VectorStore { .. } => "VectorStore",
-        Op::VectorExtract { .. } => "VectorExtract",
-        Op::Gather { .. } => "Gather",
-        Op::Scatter { .. } => "Scatter",
-        Op::Atomic { .. } => "Atomic",
-        Op::Scan { .. } => "Scan",
-        Op::StrideStore { .. } => "StrideStore",
-        Op::Dequantize { .. } => "Dequantize",
-        Op::SimdReduce { .. } => "SimdReduce",
-        Op::SimdShuffleXor { .. } => "SimdShuffleXor",
-        Op::SimdBroadcast { .. } => "SimdBroadcast",
-        Op::ThreadgroupAlloc { .. } => "ThreadgroupAlloc",
-        Op::ThreadgroupLoad { .. } => "ThreadgroupLoad",
-        Op::ThreadgroupStore { .. } => "ThreadgroupStore",
-        Op::StackAlloc { .. } => "StackAlloc",
-        Op::StackLoad { .. } => "StackLoad",
-        Op::StackStore { .. } => "StackStore",
-        Op::Barrier => "Barrier",
-        Op::SimdgroupBarrier => "SimdgroupBarrier",
-        Op::SimdgroupAlloc { .. } => "SimdgroupAlloc",
-        Op::SimdgroupElemLoad { .. } => "SimdgroupElemLoad",
-        Op::SimdgroupElemStore { .. } => "SimdgroupElemStore",
-        Op::SimdgroupLoad { .. } => "SimdgroupLoad",
-        Op::SimdgroupMatMul { .. } => "SimdgroupMatMul",
-        Op::SimdScan { .. } => "SimdScan",
-        Op::SimdLaneId => "SimdLaneId",
-        Op::SimdGroupId => "SimdGroupId",
-        Op::DeclareLocal { .. } => "DeclareLocal",
-        Op::SetLocal { .. } => "SetLocal",
-        Op::ArgReduce { .. } => "ArgReduce",
-        Op::StrideScan { .. } => "StrideScan",
-        Op::StrideArgReduce { .. } => "StrideArgReduce",
-    }
 }
 
 fn require_param<'a>(kernel: &'a Kernel, name: &str) -> CoreResult<&'a Param> {
