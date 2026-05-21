@@ -2659,6 +2659,302 @@ pub fn mt_affine_quantize_int2<T>(
     }
 }
 
+// ─── Byte-stream quantize variants (int3 / int5 / int6) ─────────────
+//
+// Non-power-of-2 bit widths pack into a contiguous byte stream. Each
+// group of `group_size` values writes `group_size * bits / 8` bytes.
+//
+// For the canonical `group_size=32`:
+//   int3: 32 x 3 bits =  96 bits = 12 bytes = 3 uint32 words per group.
+//   int5: 32 x 5 bits = 160 bits = 20 bytes = 5 uint32 words per group.
+//   int6: 32 x 6 bits = 192 bits = 24 bytes = 6 uint32 words per group.
+//
+// Because adjacent packs may share a uint32 word, parallel packing
+// requires atomics. Instead, one threadgroup of 32 threads per group
+// performs the simd min/max cooperatively, then lane 0 writes the bit
+// stream serially (iterating over all group_size elements, ORing each
+// code's bits into the correct uint32 word at the right shift).
+//
+// Bit layouts are the exact inverse of `mt_affine_dequantize_int{3,5,6}`.
+
+// ─── mt_affine_quantize_int3 ──────────────────────────────────────────
+//
+// int3 (3-bit codes): 96-bit stream for group_size=32.
+// Lane 0 iterates over all 32 values, computes q = clamp(round(v), 0, 7),
+// then ORs q's 3 bits into the three uint32 output words.
+//
+//   bit_pos   = i * 3  (position in the 96-bit stream)
+//   word_idx  = bit_pos / 32
+//   bit_shift = bit_pos % 32
+//
+// Codes span at most two words (3-bit code starting at bit_shift > 29).
+//
+// ## DISPATCH INVARIANTS
+// - Reduction mode (simd_min / simd_max). TPG = 32 (one simdgroup).
+// - Grid: [n_groups, 1, 1].
+#[bench_kernel(
+    op="affine",
+    subop="quantize_int3",
+    class=AffineQuantize,
+    bits=3,
+    group_size=32,
+    n_groups=4096,
+    batch=1,
+    tpg=32,
+    tol=1e-1,
+    metal_file="quantized.metal",
+)]
+#[kernel]
+pub fn mt_affine_quantize_int3<T>(
+    w: Tensor<T>,
+    mut out: Tensor<u32>,
+    mut scales: Tensor<T>,
+    mut biases: Tensor<T>,
+    #[constexpr] group_size: u32,
+) {
+    let g_idx = tgid_x;
+    let lane = tid;
+    let in_base = g_idx * group_size;
+
+    // Cooperative min/max over the simdgroup (one value per lane).
+    let v = load(w[in_base + lane]).cast::<f32>();
+    let w_min = simd_min(v);
+    let w_max = simd_max(v);
+
+    let n_bins = 7.0f32; // 2^3 - 1
+    let raw_scale = (w_max - w_min) / n_bins;
+    let eps = 1.0e-7f32;
+    let scale = select(raw_scale < eps, 1.0f32, raw_scale);
+    let inv_scale = 1.0f32 / scale;
+    let bias = w_min;
+
+    if lane == 0u32 {
+        store(scales[g_idx], scale.cast::<T>());
+        store(biases[g_idx], bias.cast::<T>());
+
+        // For group_size=32: 3 uint32 output words (12 bytes).
+        let out_base = g_idx * 3u32;
+        let mut w0 = 0u32;
+        let mut w1 = 0u32;
+        let mut w2 = 0u32;
+
+        for i in range(0u32, group_size, 1u32) {
+            let vi = load(w[in_base + i]).cast::<f32>();
+            let q_f = (vi - bias) * inv_scale + 0.5f32;
+            let q_c = select(q_f > 7.0f32, 7.0f32, select(q_f < 0.0f32, 0.0f32, q_f));
+            let q = q_c.cast::<u32>() & 7u32;
+
+            let bit_pos = i * 3u32;
+            let word_idx = bit_pos / 32u32;
+            let bit_shift = bit_pos & 31u32;
+
+            let q_lo = q << bit_shift;
+            w0 = select(word_idx == 0u32, w0 | q_lo, w0);
+            w1 = select(word_idx == 1u32, w1 | q_lo, w1);
+            w2 = select(word_idx == 2u32, w2 | q_lo, w2);
+
+            // Handle spillover into the next word (occurs when bit_shift > 29).
+            let spills = bit_shift + 3u32 > 32u32;
+            if spills {
+                let bits_hi = (bit_shift + 3u32) - 32u32;
+                let q_hi = q >> (3u32 - bits_hi);
+                w1 = select(word_idx == 0u32, w1 | q_hi, w1);
+                w2 = select(word_idx == 1u32, w2 | q_hi, w2);
+            }
+        }
+
+        store(out[out_base + 0u32], w0);
+        store(out[out_base + 1u32], w1);
+        store(out[out_base + 2u32], w2);
+    }
+}
+
+// ─── mt_affine_quantize_int5 ──────────────────────────────────────────
+//
+// int5 (5-bit codes): 160-bit stream for group_size=32 (5 uint32 words).
+// Same bit-stream OR strategy as int3 but with 5 output words.
+//
+// ## DISPATCH INVARIANTS
+// - Reduction mode (simd_min / simd_max). TPG = 32 (one simdgroup).
+// - Grid: [n_groups, 1, 1].
+#[bench_kernel(
+    op="affine",
+    subop="quantize_int5",
+    class=AffineQuantize,
+    bits=5,
+    group_size=32,
+    n_groups=4096,
+    batch=1,
+    tpg=32,
+    tol=1e-1,
+    metal_file="quantized.metal",
+)]
+#[kernel]
+pub fn mt_affine_quantize_int5<T>(
+    w: Tensor<T>,
+    mut out: Tensor<u32>,
+    mut scales: Tensor<T>,
+    mut biases: Tensor<T>,
+    #[constexpr] group_size: u32,
+) {
+    let g_idx = tgid_x;
+    let lane = tid;
+    let in_base = g_idx * group_size;
+
+    let v = load(w[in_base + lane]).cast::<f32>();
+    let w_min = simd_min(v);
+    let w_max = simd_max(v);
+
+    let n_bins = 31.0f32; // 2^5 - 1
+    let raw_scale = (w_max - w_min) / n_bins;
+    let eps = 1.0e-7f32;
+    let scale = select(raw_scale < eps, 1.0f32, raw_scale);
+    let inv_scale = 1.0f32 / scale;
+    let bias = w_min;
+
+    if lane == 0u32 {
+        store(scales[g_idx], scale.cast::<T>());
+        store(biases[g_idx], bias.cast::<T>());
+
+        // For group_size=32: 5 uint32 output words (20 bytes).
+        let out_base = g_idx * 5u32;
+        let mut w0 = 0u32;
+        let mut w1 = 0u32;
+        let mut w2 = 0u32;
+        let mut w3 = 0u32;
+        let mut w4 = 0u32;
+
+        for i in range(0u32, group_size, 1u32) {
+            let vi = load(w[in_base + i]).cast::<f32>();
+            let q_f = (vi - bias) * inv_scale + 0.5f32;
+            let q_c = select(q_f > 31.0f32, 31.0f32, select(q_f < 0.0f32, 0.0f32, q_f));
+            let q = q_c.cast::<u32>() & 31u32;
+
+            let bit_pos = i * 5u32;
+            let word_idx = bit_pos / 32u32;
+            let bit_shift = bit_pos & 31u32;
+
+            let q_lo = q << bit_shift;
+            w0 = select(word_idx == 0u32, w0 | q_lo, w0);
+            w1 = select(word_idx == 1u32, w1 | q_lo, w1);
+            w2 = select(word_idx == 2u32, w2 | q_lo, w2);
+            w3 = select(word_idx == 3u32, w3 | q_lo, w3);
+            w4 = select(word_idx == 4u32, w4 | q_lo, w4);
+
+            let spills = bit_shift + 5u32 > 32u32;
+            if spills {
+                let bits_hi = (bit_shift + 5u32) - 32u32;
+                let q_hi = q >> (5u32 - bits_hi);
+                w1 = select(word_idx == 0u32, w1 | q_hi, w1);
+                w2 = select(word_idx == 1u32, w2 | q_hi, w2);
+                w3 = select(word_idx == 2u32, w3 | q_hi, w3);
+                w4 = select(word_idx == 3u32, w4 | q_hi, w4);
+            }
+        }
+
+        store(out[out_base + 0u32], w0);
+        store(out[out_base + 1u32], w1);
+        store(out[out_base + 2u32], w2);
+        store(out[out_base + 3u32], w3);
+        store(out[out_base + 4u32], w4);
+    }
+}
+
+// ─── mt_affine_quantize_int6 ──────────────────────────────────────────
+//
+// int6 (6-bit codes): 192-bit stream for group_size=32 (6 uint32 words).
+// Same bit-stream OR strategy as int3/int5 but with 6 output words.
+//
+// ## DISPATCH INVARIANTS
+// - Reduction mode (simd_min / simd_max). TPG = 32 (one simdgroup).
+// - Grid: [n_groups, 1, 1].
+#[bench_kernel(
+    op="affine",
+    subop="quantize_int6",
+    class=AffineQuantize,
+    bits=6,
+    group_size=32,
+    n_groups=4096,
+    batch=1,
+    tpg=32,
+    tol=1e-1,
+    metal_file="quantized.metal",
+)]
+#[kernel]
+pub fn mt_affine_quantize_int6<T>(
+    w: Tensor<T>,
+    mut out: Tensor<u32>,
+    mut scales: Tensor<T>,
+    mut biases: Tensor<T>,
+    #[constexpr] group_size: u32,
+) {
+    let g_idx = tgid_x;
+    let lane = tid;
+    let in_base = g_idx * group_size;
+
+    let v = load(w[in_base + lane]).cast::<f32>();
+    let w_min = simd_min(v);
+    let w_max = simd_max(v);
+
+    let n_bins = 63.0f32; // 2^6 - 1
+    let raw_scale = (w_max - w_min) / n_bins;
+    let eps = 1.0e-7f32;
+    let scale = select(raw_scale < eps, 1.0f32, raw_scale);
+    let inv_scale = 1.0f32 / scale;
+    let bias = w_min;
+
+    if lane == 0u32 {
+        store(scales[g_idx], scale.cast::<T>());
+        store(biases[g_idx], bias.cast::<T>());
+
+        // For group_size=32: 6 uint32 output words (24 bytes).
+        let out_base = g_idx * 6u32;
+        let mut w0 = 0u32;
+        let mut w1 = 0u32;
+        let mut w2 = 0u32;
+        let mut w3 = 0u32;
+        let mut w4 = 0u32;
+        let mut w5 = 0u32;
+
+        for i in range(0u32, group_size, 1u32) {
+            let vi = load(w[in_base + i]).cast::<f32>();
+            let q_f = (vi - bias) * inv_scale + 0.5f32;
+            let q_c = select(q_f > 63.0f32, 63.0f32, select(q_f < 0.0f32, 0.0f32, q_f));
+            let q = q_c.cast::<u32>() & 63u32;
+
+            let bit_pos = i * 6u32;
+            let word_idx = bit_pos / 32u32;
+            let bit_shift = bit_pos & 31u32;
+
+            let q_lo = q << bit_shift;
+            w0 = select(word_idx == 0u32, w0 | q_lo, w0);
+            w1 = select(word_idx == 1u32, w1 | q_lo, w1);
+            w2 = select(word_idx == 2u32, w2 | q_lo, w2);
+            w3 = select(word_idx == 3u32, w3 | q_lo, w3);
+            w4 = select(word_idx == 4u32, w4 | q_lo, w4);
+            w5 = select(word_idx == 5u32, w5 | q_lo, w5);
+
+            let spills = bit_shift + 6u32 > 32u32;
+            if spills {
+                let bits_hi = (bit_shift + 6u32) - 32u32;
+                let q_hi = q >> (6u32 - bits_hi);
+                w1 = select(word_idx == 0u32, w1 | q_hi, w1);
+                w2 = select(word_idx == 1u32, w2 | q_hi, w2);
+                w3 = select(word_idx == 2u32, w3 | q_hi, w3);
+                w4 = select(word_idx == 3u32, w4 | q_hi, w4);
+                w5 = select(word_idx == 4u32, w5 | q_hi, w5);
+            }
+        }
+
+        store(out[out_base + 0u32], w0);
+        store(out[out_base + 1u32], w1);
+        store(out[out_base + 2u32], w2);
+        store(out[out_base + 3u32], w3);
+        store(out[out_base + 4u32], w4);
+        store(out[out_base + 5u32], w5);
+    }
+}
+
 // ─── Byte-stream dequant variants (int3 / int5 / int6) ───────────────
 //
 // Non-power-of-2 bit widths can't pack cleanly into a uint32, so each
