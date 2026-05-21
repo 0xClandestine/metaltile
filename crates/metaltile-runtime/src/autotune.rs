@@ -108,6 +108,27 @@ pub fn cache_key(kernel_name: &str, ce: &ConstExprValues) -> String {
     s
 }
 
+/// Compile-time properties of a `MTLComputePipelineState`, read once
+/// per PSO via objc2-metal reflection.
+///
+/// On Apple Silicon this is the *only* introspection signal autotune
+/// gets — counter sampling exposes only timestamps (see
+/// `notes/gputrace_introspection_plan.md`). Specifically:
+/// - `max_total_threads_per_threadgroup` reflects register pressure;
+///   the value drops below the kernel's requested TPG when the
+///   compiler can't fit all threads' state in the register file.
+/// - `static_threadgroup_memory_length` is the bytes the kernel
+///   statically allocates in threadgroup memory (excludes dynamic
+///   `setThreadgroupMemoryLength` allocations).
+/// - `thread_execution_width` is the SIMD width (32 on every shipping
+///   Apple GPU).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PsoReflection {
+    pub max_total_threads_per_threadgroup: u64,
+    pub static_threadgroup_memory_length: u64,
+    pub thread_execution_width: u64,
+}
+
 /// A single tuning entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuneEntry {
@@ -119,6 +140,11 @@ pub struct TuneEntry {
     pub perf: f64,
     /// When this entry was last updated (unix seconds).
     pub timestamp: u64,
+    /// PSO reflection for the winning config. `None` for legacy entries
+    /// and for measurer paths that don't yet thread reflection through;
+    /// new code populates this on every entry it writes.
+    #[serde(default)]
+    pub reflection: Option<PsoReflection>,
 }
 
 /// Persistent autotune cache.
@@ -255,11 +281,17 @@ impl Autotuner {
     /// candidate with `bench_fn`, cache the winner, and flush the cache
     /// to disk.
     ///
-    /// `bench_fn(cfg) -> elapsed_us`. The caller is responsible for
-    /// building a `Kernel` from `cfg`, applying any `SchedulePass`, and
-    /// dispatching it on a `Context`. Decoupling avoids a cyclic
-    /// borrow with `Context::tuner`, and makes the search trivially
-    /// testable with mocked timings.
+    /// `bench_fn(cfg) -> (elapsed_us, reflection)`. The caller is
+    /// responsible for building a `Kernel` from `cfg`, applying any
+    /// `SchedulePass`, and dispatching it on a `Context`. Decoupling
+    /// avoids a cyclic borrow with `Context::tuner`, and makes the
+    /// search trivially testable with mocked timings.
+    ///
+    /// `reflection` is `Some` when the measurer compiled a PSO and
+    /// could read its `maxTotalThreadsPerThreadgroup` /
+    /// `staticThreadgroupMemoryLength` / `threadExecutionWidth`;
+    /// `None` for static-cost fallback paths and non-macOS targets.
+    /// Only the winning config's reflection is persisted to the cache.
     ///
     /// On bench errors we log + skip the candidate. If every candidate
     /// errors we surface the last error.
@@ -268,7 +300,9 @@ impl Autotuner {
         kernel_name: &str,
         family: KernelFamily,
         constexprs: &ConstExprValues,
-        bench_fn: &mut dyn FnMut(&TuneConfig) -> Result<f64, crate::error::MetalTileError>,
+        bench_fn: &mut dyn FnMut(
+            &TuneConfig,
+        ) -> Result<(f64, Option<PsoReflection>), crate::error::MetalTileError>,
     ) -> Result<TuneConfig, crate::error::MetalTileError> {
         let space = family.config_space();
         let key = cache_key(kernel_name, constexprs);
@@ -280,15 +314,15 @@ impl Autotuner {
             "autotune search start",
         );
 
-        let mut best: Option<(TuneConfig, f64)> = None;
+        let mut best: Option<(TuneConfig, f64, Option<PsoReflection>)> = None;
         let mut last_err: Option<crate::error::MetalTileError> = None;
         for cfg in space.iter() {
             match bench_fn(cfg) {
-                Ok(us) => {
+                Ok((us, refl)) => {
                     info!(config = ?cfg, elapsed_us = us, "autotune candidate");
-                    let take = best.as_ref().is_none_or(|(_, b)| us < *b);
+                    let take = best.as_ref().is_none_or(|(_, b, _)| us < *b);
                     if take {
-                        best = Some((cfg.clone(), us));
+                        best = Some((cfg.clone(), us, refl));
                     }
                 },
                 Err(e) => {
@@ -298,7 +332,7 @@ impl Autotuner {
             }
         }
 
-        let (winner, perf) = best.ok_or_else(|| {
+        let (winner, perf, reflection) = best.ok_or_else(|| {
             last_err.unwrap_or_else(|| {
                 crate::error::MetalTileError::Autotune("config space was empty".into())
             })
@@ -311,6 +345,7 @@ impl Autotuner {
             best_config: winner.clone(),
             perf,
             timestamp: unix_secs_now(),
+            reflection,
         };
         self.cache.insert(key, entry);
         self.flush()?;
@@ -441,6 +476,7 @@ mod tests {
             best_config: sample_config(),
             perf: 12.34,
             timestamp: 0,
+            reflection: None,
         }
     }
 
@@ -573,8 +609,8 @@ mod tests {
 
         // Mocked bench: pick a deterministic winner inside the
         // Elementwise config space so we can assert against it below.
-        let mut bench = |cfg: &TuneConfig| -> Result<f64, crate::error::MetalTileError> {
-            Ok(if cfg.threads.0 == 1024 { 4.0 } else { 9.0 })
+        let mut bench = |cfg: &TuneConfig| -> Result<(f64, Option<PsoReflection>), crate::error::MetalTileError> {
+            Ok((if cfg.threads.0 == 1024 { 4.0 } else { 9.0 }, None))
         };
         let warm_winner = t
             .tune("warm_kernel", KernelFamily::Elementwise, &ce_warm, &mut bench)
@@ -621,7 +657,7 @@ mod tests {
 
         // Mocked bench: synthesize a perf landscape where the
         // 512-thread / SIMD-on config is fastest.
-        let mut bench = |cfg: &TuneConfig| -> Result<f64, crate::error::MetalTileError> {
+        let mut bench = |cfg: &TuneConfig| -> Result<(f64, Option<PsoReflection>), crate::error::MetalTileError> {
             let mut us = 100.0;
             if cfg.threads.0 == 512 {
                 us -= 50.0;
@@ -629,7 +665,7 @@ mod tests {
             if cfg.use_simd_matrix {
                 us -= 20.0;
             }
-            Ok(us)
+            Ok((us, None))
         };
 
         let winner = t
@@ -652,13 +688,13 @@ mod tests {
         let mut t = Autotuner::new(dir, true);
         let ce = ce_with("M", 128);
 
-        let mut bench = |cfg: &TuneConfig| -> Result<f64, crate::error::MetalTileError> {
+        let mut bench = |cfg: &TuneConfig| -> Result<(f64, Option<PsoReflection>), crate::error::MetalTileError> {
             // Fail anything that asks for async copy; pick a non-zero
             // winner among the rest.
             if cfg.use_async_copy {
                 return Err(crate::error::MetalTileError::Autotune("simulated".into()));
             }
-            Ok(if cfg.threads.0 == 256 { 9.0 } else { 12.0 })
+            Ok((if cfg.threads.0 == 256 { 9.0 } else { 12.0 }, None))
         };
 
         let winner = t.tune("mock_red", KernelFamily::Reduction, &ce, &mut bench).expect("winner");
@@ -672,7 +708,7 @@ mod tests {
         let mut t = Autotuner::new(dir, true);
         let ce = ce_with("N", 256);
 
-        let mut bench = |_cfg: &TuneConfig| -> Result<f64, crate::error::MetalTileError> {
+        let mut bench = |_cfg: &TuneConfig| -> Result<(f64, Option<PsoReflection>), crate::error::MetalTileError> {
             Err(crate::error::MetalTileError::Autotune("everything broken".into()))
         };
 
@@ -766,6 +802,7 @@ mod tests {
             best_config: sample_config(),
             perf: 12.5,
             timestamp: 999,
+            reflection: None,
         };
         let row = TrainingRow::from_entry("mt_unary_acos@f16#B=0..256#N=1024..4096", &entry);
         assert_eq!(row.kernel, "mt_unary_acos");
@@ -797,6 +834,7 @@ mod tests {
             best_config: sample_config(),
             perf: bucket_lo as f64,
             timestamp: 1,
+            reflection: None,
         };
         t.cache.insert("mt_kernel@f16#N=1024..1280", mk(1024));
         t.cache.insert("mt_kernel@f16#N=0..256", mk(0));

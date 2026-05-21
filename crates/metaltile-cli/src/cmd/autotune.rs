@@ -32,7 +32,7 @@ use std::{
 
 use metaltile::{
     MetalTileError,
-    autotune::{Autotuner, TrainingRow, TuneConfig},
+    autotune::{Autotuner, PsoReflection, TrainingRow, TuneConfig},
 };
 use metaltile_codegen::{
     msl::{MslConfig, MslGenerator},
@@ -260,7 +260,14 @@ struct TuneReport {
 /// (outcome flipping, fallback counting, no-measurer path) without
 /// needing a Metal device.
 trait CandidateMeasurer {
-    fn measure(&self, cfg: &TuneConfig, budget: BenchBudget) -> Result<f64, String>;
+    /// Returns `(elapsed_us, pso_reflection)`. Reflection populated when
+    /// the measurer compiled a PSO (the common case); `None` only for
+    /// future variants that bypass PSO compilation entirely.
+    fn measure(
+        &self,
+        cfg: &TuneConfig,
+        budget: BenchBudget,
+    ) -> Result<(f64, Option<PsoReflection>), String>;
 }
 
 struct GpuMeasurer<'a> {
@@ -296,7 +303,11 @@ impl<'a> GpuMeasurer<'a> {
 }
 
 impl CandidateMeasurer for GpuMeasurer<'_> {
-    fn measure(&self, cfg: &TuneConfig, budget: BenchBudget) -> Result<f64, String> {
+    fn measure(
+        &self,
+        cfg: &TuneConfig,
+        budget: BenchBudget,
+    ) -> Result<(f64, Option<PsoReflection>), String> {
         measure_generic(
             self.runner,
             self.spec,
@@ -376,7 +387,11 @@ impl<'a> SdpaVectorMeasurer<'a> {
 }
 
 impl CandidateMeasurer for SdpaVectorMeasurer<'_> {
-    fn measure(&self, cfg: &TuneConfig, budget: BenchBudget) -> Result<f64, String> {
+    fn measure(
+        &self,
+        cfg: &TuneConfig,
+        budget: BenchBudget,
+    ) -> Result<(f64, Option<PsoReflection>), String> {
         let (warmup, iters) = budget.iters();
 
         let mut k = (self.spec.kernel_ir)(self.dt);
@@ -393,6 +408,7 @@ impl CandidateMeasurer for SdpaVectorMeasurer<'_> {
             .runner
             .compile(&msl, self.spec.kernel_name)
             .map_err(|e| format!("compile: {e}"))?;
+        let reflection = self.runner.pso_reflection(&compiled);
 
         let buf_refs: Vec<&GpuBuffer> = self.bufs.iter().collect();
         let tgs = [self.n_q_heads, 1, 1];
@@ -400,7 +416,7 @@ impl CandidateMeasurer for SdpaVectorMeasurer<'_> {
 
         self.runner.flush_slc();
         let samples = self.runner.measure(&compiled, &buf_refs, tgs, tpg_arr, warmup, iters);
-        median_us(samples)
+        median_us(samples).map(|us| (us, Some(reflection)))
     }
 }
 
@@ -487,7 +503,11 @@ impl<'a> SdpaPrefillMeasurer<'a> {
 }
 
 impl CandidateMeasurer for SdpaPrefillMeasurer<'_> {
-    fn measure(&self, cfg: &TuneConfig, budget: BenchBudget) -> Result<f64, String> {
+    fn measure(
+        &self,
+        cfg: &TuneConfig,
+        budget: BenchBudget,
+    ) -> Result<(f64, Option<PsoReflection>), String> {
         let (warmup, iters) = budget.iters();
 
         let mut k = (self.spec.kernel_ir)(self.dt);
@@ -511,6 +531,7 @@ impl CandidateMeasurer for SdpaPrefillMeasurer<'_> {
             .runner
             .compile(&msl, self.spec.kernel_name)
             .map_err(|e| format!("compile: {e}"))?;
+        let reflection = self.runner.pso_reflection(&compiled);
 
         let buf_refs: Vec<&GpuBuffer> = self.bufs.iter().collect();
         let tgs = [self.q_tiles, self.n_q_heads, self.batch];
@@ -518,7 +539,7 @@ impl CandidateMeasurer for SdpaPrefillMeasurer<'_> {
 
         self.runner.flush_slc();
         let samples = self.runner.measure(&compiled, &buf_refs, tgs, tpg_arr, warmup, iters);
-        median_us(samples)
+        median_us(samples).map(|us| (us, Some(reflection)))
     }
 }
 
@@ -578,12 +599,12 @@ impl<'a> CandidateSearch<'a> {
         &mut self,
         cfg: &TuneConfig,
         static_fallback: impl FnOnce(&TuneConfig) -> Result<f64, MetalTileError>,
-    ) -> Result<f64, MetalTileError> {
+    ) -> Result<(f64, Option<PsoReflection>), MetalTileError> {
         if let Some(m) = self.measurer {
             match m.measure(cfg, self.budget) {
-                Ok(us) => {
+                Ok((us, refl)) => {
                     self.outcome = TuneOutcome::Measured;
-                    return Ok(us);
+                    return Ok((us, refl));
                 },
                 Err(e) => {
                     self.fallback_configs += 1;
@@ -597,7 +618,8 @@ impl<'a> CandidateSearch<'a> {
                 },
             }
         }
-        static_fallback(cfg)
+        // Static fallback path has no PSO; no reflection to report.
+        static_fallback(cfg).map(|us| (us, None))
     }
 
     fn into_report(self) -> TuneReport {
@@ -644,7 +666,7 @@ fn tune_one(
     let log_ctx = LogCtx { kernel: spec.kernel_name, dtype: dtype_label };
     let mut search = CandidateSearch::new(measurer.as_ref().map(|m| m.as_dyn()), budget, log_ctx);
 
-    let mut bench = |cfg: &TuneConfig| -> Result<f64, MetalTileError> {
+    let mut bench = |cfg: &TuneConfig| -> Result<(f64, Option<PsoReflection>), MetalTileError> {
         search.step(cfg, |cfg| static_cost(&kernel_template, mode, cfg))
     };
 
@@ -762,7 +784,7 @@ fn measure_generic(
     cfg: &TuneConfig,
     bufs: &[GpuBuffer],
     budget: BenchBudget,
-) -> Result<f64, String> {
+) -> Result<(f64, Option<PsoReflection>), String> {
     let (warmup, iters) = budget.iters();
 
     let mut k = (spec.kernel_ir)(dt);
@@ -772,6 +794,7 @@ fn measure_generic(
     let generator = MslGenerator::new(msl_cfg).with_schedule_override(tune_to_schedule(cfg));
     let msl = generator.generate(&k).map_err(|e| format!("MSL gen: {e}"))?;
     let compiled = runner.compile(&msl, spec.kernel_name).map_err(|e| format!("compile: {e}"))?;
+    let reflection = runner.pso_reflection(&compiled);
 
     let buf_refs: Vec<&GpuBuffer> = bufs.iter().collect();
 
@@ -783,7 +806,7 @@ fn measure_generic(
     // — same hygiene `tile bench` uses.
     runner.flush_slc();
     let samples = runner.measure(&compiled, &buf_refs, tgs, tpg, warmup, iters);
-    median_us(samples)
+    median_us(samples).map(|us| (us, Some(reflection)))
 }
 
 fn build_generic_buffers(
@@ -1113,12 +1136,17 @@ mod tests {
         }
     }
     impl CandidateMeasurer for ScriptedMeasurer {
-        fn measure(&self, _cfg: &TuneConfig, budget: BenchBudget) -> Result<f64, String> {
+        fn measure(
+            &self,
+            _cfg: &TuneConfig,
+            budget: BenchBudget,
+        ) -> Result<(f64, Option<PsoReflection>), String> {
             self.last_budget.set(Some(budget));
             self.script
                 .borrow_mut()
                 .pop_front()
                 .expect("ScriptedMeasurer: more measure() calls than scripted")
+                .map(|us| (us, None))
         }
     }
 
@@ -1130,7 +1158,7 @@ mod tests {
         let m = ScriptedMeasurer::new([Ok(5.0)]);
         let mut s = CandidateSearch::new(Some(&m), BenchBudget::Quick, synth_log_ctx());
         let got = s.step(&synth_cfg(), |_| panic!("static_fallback should not run")).unwrap();
-        assert_eq!(got, 5.0);
+        assert_eq!(got, (5.0, None));
         let r = s.into_report();
         assert_eq!(r.outcome, TuneOutcome::Measured);
         assert_eq!(r.fallback_configs, 0);
@@ -1141,7 +1169,7 @@ mod tests {
         let m = ScriptedMeasurer::new([Err("compile failed".into())]);
         let mut s = CandidateSearch::new(Some(&m), BenchBudget::Quick, synth_log_ctx());
         let got = s.step(&synth_cfg(), |_| Ok(42.0)).unwrap();
-        assert_eq!(got, 42.0, "fallback value flows back to caller");
+        assert_eq!(got, (42.0, None), "fallback value flows back to caller");
         let r = s.into_report();
         // Outcome stays Estimated when no candidate measured.
         assert_eq!(r.outcome, TuneOutcome::Estimated);
@@ -1152,7 +1180,7 @@ mod tests {
     fn candidate_search_no_measurer_calls_static_directly() {
         let mut s = CandidateSearch::new(None, BenchBudget::Standard, synth_log_ctx());
         let got = s.step(&synth_cfg(), |_| Ok(7.5)).unwrap();
-        assert_eq!(got, 7.5);
+        assert_eq!(got, (7.5, None));
         let r = s.into_report();
         assert_eq!(r.outcome, TuneOutcome::Estimated);
         assert_eq!(r.fallback_configs, 0);

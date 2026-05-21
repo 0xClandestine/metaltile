@@ -64,21 +64,52 @@ pub struct GpuBuffer {
 #[cfg(target_os = "macos")]
 mod metal_impl {
     use objc2::{rc::Retained, runtime::ProtocolObject};
-    use objc2_foundation::NSString;
+    use objc2_foundation::{NSRange, NSString};
     use objc2_metal::{
         MTLBuffer,
         MTLCommandBuffer,
         MTLCommandEncoder,
         MTLCommandQueue,
+        MTLCommonCounterSetTimestamp,
         MTLComputeCommandEncoder,
+        MTLComputePassDescriptor,
         MTLComputePipelineDescriptor,
         MTLComputePipelineState,
+        MTLCounterResultTimestamp,
+        MTLCounterSampleBuffer,
+        MTLCounterSampleBufferDescriptor,
+        MTLCounterSet,
         MTLDataType,
         MTLDevice,
         MTLFunctionConstantValues,
         MTLLibrary,
         MTLResourceOptions,
+        MTLStorageMode,
     };
+
+    /// GPU ticks elapsed across one encoder, from the
+    /// `MTLCommonCounterSetTimestamp` counter set. This is the only
+    /// counter set Apple Silicon exposes through the public
+    /// `MTLCounterSampleBuffer` API — the cycles/utilization data Xcode's
+    /// GPU debugger displays comes from a private path Apple does not
+    /// surface here.
+    ///
+    /// Convert ticks → nanoseconds via [`MacosRunner::gpu_tick_period_ns`]:
+    /// `ns = ticks * tick_period_ns`.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct TimestampCounters {
+        /// `end - start` GPU timestamp delta, in device ticks.
+        pub gpu_ticks: u64,
+    }
+
+    /// One iteration's measurement when counter sampling is enabled.
+    #[derive(Debug, Clone, Copy)]
+    pub struct CounterSample {
+        /// Wallclock GPU time, μs — same value [`MacosRunner::measure`] returns.
+        pub gpu_us: f64,
+        /// Per-encoder timestamp delta from `MTLCommonCounterSetTimestamp`.
+        pub ts: TimestampCounters,
+    }
 
     pub struct MacosRunner {
         pub device: Retained<ProtocolObject<dyn MTLDevice>>,
@@ -193,6 +224,199 @@ mod metal_impl {
             unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const u8, n_bytes) }.to_vec()
         }
 
+        /// Find the `MTLCommonCounterSetTimestamp` counter set on the
+        /// device, or `None` if the device doesn't expose any counter sets
+        /// at all. Apple Silicon devices observed in the field expose only
+        /// this set through the public `MTLCounterSampleBuffer` API.
+        pub fn timestamp_counter_set(
+            &self,
+        ) -> Option<Retained<ProtocolObject<dyn MTLCounterSet>>> {
+            let sets = self.device.counterSets()?;
+            let target: &NSString = unsafe { MTLCommonCounterSetTimestamp };
+            for i in 0..sets.count() {
+                let set = sets.objectAtIndex(i);
+                if set.name().isEqualToString(target) {
+                    return Some(set);
+                }
+            }
+            None
+        }
+
+        /// Nanoseconds per GPU tick on this device, derived from a single
+        /// paired `(cpu_ns, gpu_ticks)` snapshot via
+        /// `sampleTimestamps:gpuTimestamp:`. One snapshot is enough only
+        /// because Apple Silicon's GPU timestamp domain *is* mach absolute
+        /// time (= nanoseconds); on systems where the two domains diverge
+        /// the caller should sample twice and divide the deltas. Returned
+        /// as f64 so caller can do `ticks as f64 * period_ns` directly.
+        pub fn gpu_tick_period_ns(&self) -> f64 {
+            use objc2_metal::MTLTimestamp;
+            let mut cpu: MTLTimestamp = 0;
+            let mut gpu: MTLTimestamp = 0;
+            unsafe {
+                self.device.sampleTimestamps_gpuTimestamp(
+                    core::ptr::NonNull::new_unchecked(&mut cpu as *mut _),
+                    core::ptr::NonNull::new_unchecked(&mut gpu as *mut _),
+                );
+            }
+            if gpu == 0 {
+                1.0
+            } else {
+                cpu as f64 / gpu as f64
+            }
+        }
+
+        /// Diagnostic: every counter set name the device exposes. Used by the
+        /// `counter_probe` example to surface what's actually available on
+        /// non-StageUtilization devices (most Apple Silicon).
+        pub fn counter_set_names(&self) -> Vec<String> {
+            let Some(sets) = self.device.counterSets() else {
+                return vec![];
+            };
+            (0..sets.count())
+                .map(|i| sets.objectAtIndex(i).name().to_string())
+                .collect()
+        }
+
+        /// Diagnostic: which `MTLCounterSamplingPoint` values the device
+        /// supports. Returned as `(name, supported)` pairs.
+        pub fn counter_sampling_support(&self) -> Vec<(&'static str, bool)> {
+            use objc2_metal::MTLCounterSamplingPoint;
+            let pts: &[(&'static str, MTLCounterSamplingPoint)] = &[
+                ("AtStageBoundary", MTLCounterSamplingPoint::AtStageBoundary),
+                ("AtDrawBoundary", MTLCounterSamplingPoint::AtDrawBoundary),
+                ("AtDispatchBoundary", MTLCounterSamplingPoint::AtDispatchBoundary),
+                ("AtTileDispatchBoundary", MTLCounterSamplingPoint::AtTileDispatchBoundary),
+                ("AtBlitBoundary", MTLCounterSamplingPoint::AtBlitBoundary),
+            ];
+            pts.iter()
+                .map(|(name, p)| (*name, self.device.supportsCounterSampling(*p)))
+                .collect()
+        }
+
+        /// Mirror of [`measure`] that also samples
+        /// `MTLCommonCounterSetTimestamp` at start- and end-of-encoder
+        /// boundaries for every iteration.
+        ///
+        /// Returns one [`CounterSample`] per non-warmup iter. The function
+        /// allocates a single `MTLCounterSampleBuffer` sized for the full
+        /// `warmup + iters` run (kernel-mode alloc is non-trivial; sharing
+        /// it across iters keeps the autotune inner loop cheap).
+        ///
+        /// Fails when the device exposes no timestamp counter set or
+        /// sample-buffer allocation fails; in both cases the caller can
+        /// fall back to the timing-only [`measure`] path.
+        pub fn measure_with_counters(
+            &self,
+            pso: &MacosPipeline,
+            buffers: &[&MacosBuffer],
+            tgs: [usize; 3],
+            tpg: [usize; 3],
+            warmup: usize,
+            iters: usize,
+        ) -> Result<Vec<CounterSample>, String> {
+            use objc2_metal::MTLSize;
+
+            let counter_set = self
+                .timestamp_counter_set()
+                .ok_or_else(|| "device exposes no timestamp counter set".to_string())?;
+
+            let total_passes = warmup + iters;
+            let sample_count = 2 * total_passes; // start + end per pass
+
+            // Allocate the sample buffer once, reuse across iters.
+            let desc = MTLCounterSampleBufferDescriptor::new();
+            desc.setCounterSet(Some(&counter_set));
+            desc.setStorageMode(MTLStorageMode::Shared);
+            unsafe { desc.setSampleCount(sample_count) };
+            let sample_buf = self
+                .device
+                .newCounterSampleBufferWithDescriptor_error(&desc)
+                .map_err(|e| format!("newCounterSampleBufferWithDescriptor: {:?}", e))?;
+
+            let mut results = Vec::with_capacity(iters);
+            for pass in 0..total_passes {
+                let start_idx = 2 * pass;
+                let end_idx = 2 * pass + 1;
+
+                let pass_desc = MTLComputePassDescriptor::new();
+                let attach = unsafe { pass_desc.sampleBufferAttachments().objectAtIndexedSubscript(0) };
+                attach.setSampleBuffer(Some(&sample_buf));
+                unsafe {
+                    attach.setStartOfEncoderSampleIndex(start_idx);
+                    attach.setEndOfEncoderSampleIndex(end_idx);
+                }
+
+                unsafe {
+                    let cb = self.queue.commandBuffer().expect("commandBuffer");
+                    let enc = cb
+                        .computeCommandEncoderWithDescriptor(&pass_desc)
+                        .expect("computeCommandEncoderWithDescriptor");
+                    enc.setComputePipelineState(&pso.pso);
+                    for (i, b) in buffers.iter().enumerate() {
+                        enc.setBuffer_offset_atIndex(Some(&b.buf), 0, i);
+                    }
+                    enc.dispatchThreadgroups_threadsPerThreadgroup(
+                        MTLSize { width: tgs[0], height: tgs[1], depth: tgs[2] },
+                        MTLSize { width: tpg[0], height: tpg[1], depth: tpg[2] },
+                    );
+                    enc.endEncoding();
+                    cb.commit();
+                    cb.waitUntilCompleted();
+
+                    if pass >= warmup {
+                        let gpu_us = ((*cb).GPUEndTime() - (*cb).GPUStartTime()) * 1_000_000.0;
+                        let (start, end) =
+                            resolve_timestamp_pair(&sample_buf, start_idx, end_idx)?;
+                        results.push(CounterSample {
+                            gpu_us,
+                            ts: TimestampCounters {
+                                gpu_ticks: end.timestamp.wrapping_sub(start.timestamp),
+                            },
+                        });
+                    }
+                }
+            }
+            Ok(results)
+        }
+    }
+
+    /// Resolve indices `[start_idx, end_idx]` from `sample_buf` as a pair
+    /// of `MTLCounterResultTimestamp` structs. The resolved `NSData`
+    /// covers the requested `NSRange`; we copy out the two 8-byte structs
+    /// at offsets 0 and `size_of::<...>()`.
+    fn resolve_timestamp_pair(
+        sample_buf: &ProtocolObject<dyn MTLCounterSampleBuffer>,
+        start_idx: usize,
+        end_idx: usize,
+    ) -> Result<(MTLCounterResultTimestamp, MTLCounterResultTimestamp), String> {
+        debug_assert_eq!(end_idx, start_idx + 1, "expected adjacent sample indices");
+        let range = NSRange::new(start_idx, 2);
+        let data = unsafe { sample_buf.resolveCounterRange(range) }
+            .ok_or_else(|| "resolveCounterRange returned nil".to_string())?;
+        let bytes = data.to_vec();
+        let stride = core::mem::size_of::<MTLCounterResultTimestamp>();
+        if bytes.len() < 2 * stride {
+            return Err(format!(
+                "resolved data too short: got {} bytes, need {}",
+                bytes.len(),
+                2 * stride,
+            ));
+        }
+        // `MTLCounterResultTimestamp` is `#[repr(C)]` { u64 }, so the
+        // resolved buffer layout matches the struct.
+        let start = unsafe {
+            core::ptr::read_unaligned(bytes.as_ptr() as *const MTLCounterResultTimestamp)
+        };
+        let end = unsafe {
+            core::ptr::read_unaligned(
+                bytes.as_ptr().add(stride) as *const MTLCounterResultTimestamp,
+            )
+        };
+        Ok((start, end))
+    }
+
+    impl MacosRunner {
         pub fn measure(
             &self,
             pso: &MacosPipeline,
@@ -232,6 +456,24 @@ mod metal_impl {
 
 #[cfg(target_os = "macos")]
 use metal_impl::{MacosBuffer, MacosPipeline, MacosRunner};
+
+#[cfg(target_os = "macos")]
+pub use metal_impl::{CounterSample, TimestampCounters};
+
+/// Non-macOS stub of [`CounterSample`] so callers can write platform-agnostic
+/// signatures. All-zero on non-macOS.
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CounterSample {
+    pub gpu_us: f64,
+    pub ts: TimestampCounters,
+}
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TimestampCounters {
+    pub gpu_ticks: u64,
+}
 
 // ── GpuRunner ────────────────────────────────────────────────────────────────
 
@@ -424,6 +666,94 @@ impl GpuRunner {
         }
         #[cfg(not(target_os = "macos"))]
         vec![0.0; iters]
+    }
+
+    /// Nanoseconds per GPU tick reported by [`Self::measure_with_counters`].
+    /// 1.0 on non-macOS (no counter data available).
+    pub fn gpu_tick_period_ns(&self) -> f64 {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.gpu_tick_period_ns()
+        }
+        #[cfg(not(target_os = "macos"))]
+        1.0
+    }
+
+    /// Read PSO reflection (`max_total_threads_per_threadgroup`,
+    /// `static_threadgroup_memory_length`, `thread_execution_width`)
+    /// from the compiled kernel. These are derived from the PSO at
+    /// creation time and reflect register pressure, threadgroup-memory
+    /// usage, and SIMD width respectively.
+    ///
+    /// On non-macOS targets returns `PsoReflection::default()`.
+    #[allow(unused_variables)]
+    pub fn pso_reflection(
+        &self,
+        kernel: &CompiledKernel,
+    ) -> metaltile_runtime::autotune::PsoReflection {
+        #[cfg(target_os = "macos")]
+        {
+            use objc2_metal::MTLComputePipelineState;
+            let pso = &kernel.inner.pso;
+            metaltile_runtime::autotune::PsoReflection {
+                max_total_threads_per_threadgroup: pso.maxTotalThreadsPerThreadgroup() as u64,
+                static_threadgroup_memory_length: pso.staticThreadgroupMemoryLength() as u64,
+                thread_execution_width: pso.threadExecutionWidth() as u64,
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        metaltile_runtime::autotune::PsoReflection::default()
+    }
+
+    /// Diagnostic: counter-set names exposed by this device.
+    /// Empty on non-macOS. See [`Self::measure_with_counters`].
+    pub fn counter_set_names(&self) -> Vec<String> {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.counter_set_names()
+        }
+        #[cfg(not(target_os = "macos"))]
+        vec![]
+    }
+
+    /// Diagnostic: `(sampling_point_name, supported)` for every
+    /// `MTLCounterSamplingPoint` variant. Empty on non-macOS.
+    pub fn counter_sampling_support(&self) -> Vec<(&'static str, bool)> {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.counter_sampling_support()
+        }
+        #[cfg(not(target_os = "macos"))]
+        vec![]
+    }
+
+    /// Like [`Self::measure`], but also samples
+    /// `MTLCommonCounterSetStageUtilization` counters at the start and end
+    /// of every iteration's encoder. Returns one [`CounterSample`] per
+    /// non-warmup iter.
+    ///
+    /// Returns `Err` when the device exposes no stage-utilization counter
+    /// set or sample-buffer allocation fails. On Apple Silicon (M1+) the
+    /// happy path holds; on older Intel macOS hardware callers should fall
+    /// back to [`Self::measure`].
+    #[allow(unused_variables)]
+    pub fn measure_with_counters(
+        &self,
+        kernel: &CompiledKernel,
+        buffers: &[&GpuBuffer],
+        tgs: [usize; 3],
+        tpg: [usize; 3],
+        warmup: usize,
+        iters: usize,
+    ) -> Result<Vec<CounterSample>, String> {
+        #[cfg(target_os = "macos")]
+        {
+            let raw: Vec<&MacosBuffer> = buffers.iter().map(|b| &b.inner).collect();
+            self.inner
+                .measure_with_counters(&kernel.inner, &raw, tgs, tpg, warmup, iters)
+        }
+        #[cfg(not(target_os = "macos"))]
+        Err("Metal counter sampling is only available on macOS".into())
     }
 
     #[allow(unused_variables)]
