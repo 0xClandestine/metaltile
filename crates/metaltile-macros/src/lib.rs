@@ -88,7 +88,9 @@ pub fn derive_op_flags(input: TokenStream) -> TokenStream { derive_op::derive_op
 /// Supports `#[name("CustomName")]` on variants that need a display name different
 /// from their Rust identifier.
 #[proc_macro_derive(VariantName, attributes(name))]
-pub fn derive_variant_name(input: TokenStream) -> TokenStream { derive_op::derive_variant_name(input) }
+pub fn derive_variant_name(input: TokenStream) -> TokenStream {
+    derive_op::derive_variant_name(input)
+}
 
 #[proc_macro_attribute]
 pub fn constexpr(_attr: TokenStream, item: TokenStream) -> TokenStream {

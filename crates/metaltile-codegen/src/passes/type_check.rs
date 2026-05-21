@@ -721,10 +721,10 @@ fn infer_block(
             _ if op.is_result_same_type() => {
                 // Result type = first input's type.  Look up the first ValueId
                 // reference in the type environment.
-                if let Some(first_vid) = op.value_refs().first().copied() {
-                    if let Some(tv) = env.get(first_vid) {
-                        env.insert(vid, tv.clone());
-                    }
+                if let Some(first_vid) = op.value_refs().first().copied()
+                    && let Some(tv) = env.get(first_vid)
+                {
+                    env.insert(vid, tv.clone());
                 }
             },
             // Catch-all for ops that haven't been explicitly matched above.

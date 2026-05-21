@@ -882,8 +882,7 @@ impl MslGenerator {
                 },
 
                 // ThreadgroupLoad+StackLoad: identical array-indexed load.
-                Op::ThreadgroupLoad { name, index }
-                | Op::StackLoad { name, index } => {
+                Op::ThreadgroupLoad { name, index } | Op::StackLoad { name, index } => {
                     let v = self.vname(vid, block, extra_names);
                     let iv = self.vname(Some(*index), block, extra_names);
                     wl!(out, "{pad}auto {v} = {name}[{iv}];");

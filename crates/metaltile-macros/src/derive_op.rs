@@ -244,12 +244,11 @@ fn variant_name_override(variant: &syn::Variant) -> Option<String> {
             continue;
         }
         // Parse the attribute: #[name("Foo")]
-        if let syn::Meta::NameValue(mnv) = &attr.meta {
-            if let syn::Expr::Lit(expr_lit) = &mnv.value {
-                if let syn::Lit::Str(s) = &expr_lit.lit {
-                    return Some(s.value());
-                }
-            }
+        if let syn::Meta::NameValue(mnv) = &attr.meta
+            && let syn::Expr::Lit(expr_lit) = &mnv.value
+            && let syn::Lit::Str(s) = &expr_lit.lit
+        {
+            return Some(s.value());
         }
     }
     None
