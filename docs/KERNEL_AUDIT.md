@@ -12,8 +12,8 @@ Sources surveyed:
 ## Summary
 
 - Total kernel-op rows in this audit (union): **89**
-- metaltile-ported kernel ops: **66 / 89 = 74 %** — 55 full ✓ (62 %), 11 partial ~ (12 %)
-- **Still to cover: 23 ops not ported (✗)**, plus **11 partial ports** still to finish
+- metaltile-ported kernel ops: **72 / 89 = 81 %** — 61 full ✓ (69 %), 11 partial ~ (12 %)
+- **Still to cover: 17 ops not ported (✗)**, plus **11 partial ports** still to finish
 - The 6 Vision / STT / TTS front-end kernels (Phase 6.5 / 7) — `conv2d`,
   `patch_embed`, `rope_2d`, `mel_spectrogram`, `audio_conv1d`,
   `vocoder/iSTFT` — are now ported (✓ rows below).
@@ -21,6 +21,13 @@ Sources surveyed:
   `sdpa_decode` learned-sink term, the 2D-`A_log` `ssm_step` variant) are
   all landed — see the [host-fallback closers](#model-enablement-kernels-separate-track-from-generic-op-completeness)
   note.
+- The four **`steel_gemm` variants** (`gather`, `masked`, `segmented`,
+  `splitk + accum`) are now ported as ✓ rows — each composes the
+  `steel_gemm_fused` simdgroup-MMA ladder with one extra piece of
+  index / mask / split logic (no new codegen primitive). `fft`
+  (radix-2 Cooley–Tukey) and `quantized_nax` (int4 matmul via Apple
+  `mpp::tensor_ops::matmul2d`) are also ✓ — the latter via an
+  `Op::InlineMsl` MPP escape-hatch.
 - 2 in-flight kernel families have an **open PR** (not yet landed) — see
   [Kernels with open PRs](#kernels-with-open-prs).
 
@@ -92,8 +99,8 @@ Sources surveyed:
 | dequant_gemv (quantized GEMV, FFAI flavour) | ~ (subset of `quantized.metal`) | ~ | ✓ | `ffai/dequant_gemv.rs`. int{3,4,5,6,8}, generic `T`. Coexists with the partial `mt_qmv_f32` port; FFAI-tuned shape. |
 | fp_quantized (fp4/fp8 quant + dequant) | ✓ | ✓ | ~ | `mlx/fp_quantized.rs` → `mt_fp4_quant_dequant` (f32 only). fp8 path and other dtypes missing. |
 | fp_quantized_nax | ✓ | ✓ | ✗ | Module file present but empty (no `#[kernel]` defs). NAX-gated. |
-| quantized_nax | ✓ | ✓ | ✗ | Module file present but empty (no `#[kernel]` defs). NAX-gated. |
-| fft (radix + readwrite) | ✓ | ✓ | ✗ | Stub file in repo, not declared. No DSL port. |
+| quantized_nax | ✓ | ✓ | ✓ | `mlx/quantized_nax.rs` → `mt_qmm_nax` — int4 quantized matmul via Apple `mpp::tensor_ops::matmul2d` (NAX tensor cores). Built as an `Op::InlineMsl` IR escape-hatch (the `#[kernel]` front-end does not expose `mpp::` types); the codegen emits the `MetalPerformancePrimitives` framework include when it detects the `mpp::` marker. MPP counterpart of `mt_qmm_mma` — same int4-dequant-into-TG-memory algorithm, one cooperative `matmul2d` per simdgroup per K-block. `#[cfg(feature = "nax")]`-gated; needs macOS 26+ / Metal 4. Verified by `quantized_nax_gpu_correctness` (f32/f16, vs the `qmm_gpu_correctness` triple-loop oracle). |
+| fft (radix + readwrite) | ✓ | ✓ | ✓ | `mlx/fft.rs` → `mt_fft_n{32,64,128,256,512,1024}<T>`. Iterative radix-2 Cooley–Tukey FFT along the last axis (power-of-two N), one kernel covering forward + inverse via an `inv` constexpr. Complex numbers without a complex type: real / imaginary planes are two parallel real `f32` buffers, the butterfly's complex multiply expands to the four-real-mul form — the same representation `mel_spectrogram` / `vocoder` use. Bit-reversal load + `log2(N)` `threadgroup`-buffered butterfly stages; genuine O(N log N). The prime-length (Rader) / arbitrary-length (Bluestein) paths remain a follow-up. Verified by `fft_gpu_correctness` (forward vs naive DFT, inverse, round-trip; f32/f16/bf16). |
 | hadamard (hadamard_n + hadamard_m) | ✓ | ✓ | ~ | `mlx/hadamard.rs` → `mt_hadamard_n{64,128,256,512,1024}<T>`. Power-of-2 FWHT via log2(N) butterfly passes. The non-power-of-2 `hadamard_m` factor (M ∈ {12,20,28}) is a follow-up. |
 | fence | ✓ | ✓ | ✗ | Stub file in repo, not declared. Synchronization primitive. |
 | gather (bare-tensor embedding lookup) | ✓ (via indexing/) | ✓ | ✓ | `ffai/gather.rs` → `ffai_gather<T>`. FFAI's embedding-table gather. |
@@ -161,31 +168,29 @@ A few rows mix multiple `.metal` files into one op or split one file into multip
 Roughly ordered by FFAI-impact × tractability. The fused-norm/-act family is
 largely landed now (`rms_norm_residual` / `_rope` / `_qgemv`,
 `batched_qkv_qgemv`, `aura_flash_sdpa`, `flash_quantized_sdpa`, `gated_delta`,
-`ssm_replay` all ✓). The DSL has a working simdgroup-matrix MMA path
-(`steel_attention_mma`, the `probe/mma_layout_probe.rs` layout probe), so the
-remaining `steel_gemm_*` rows are no longer blocked on the primitive itself —
-only on the gather / masked / split-K logic layered on top. The `steel_conv`
-family (2D, general, 3D) is now fully ported as direct convs (`ffai/conv2d.rs`,
+`ssm_replay` all ✓). The four `steel_gemm` variants (`gather`, `masked`,
+`segmented`, `splitk + accum`) are now ✓ — each composes the
+`steel_gemm_fused` simdgroup-MMA ladder with one extra piece of index / mask /
+split logic. `fft` (radix-2) and `quantized_nax` are also ✓. The `steel_conv`
+family (2D, general, 3D) is fully ported as direct convs (`ffai/conv2d.rs`,
 `ffai/conv3d.rs`).
 
-1. **`steel_gemm_fused` shape coverage** — only `64×64×16` is wired today;
-   prefill perf needs more block shapes.
-2. **`steel_gemm_splitk` + accum** — two-kernel split-K dispatch + accumulator
-   pass. Infra-gated (split-K scheduling primitive).
-3. **`steel_gemm_masked`** — block-level predication. Infra-gated.
-4. **`quantized` gather_qmm MMA / MPP-NAX variants** — the scalar
+1. **`steel_gemm_fused` shape coverage** — only `64×64×16` is wired today for
+   the `fused` row; prefill perf needs more block shapes. (The `gather` /
+   `masked` / `segmented` / `splitk` ports each ship the 64×64 + 32×32 pair.)
+2. **`quantized` gather_qmm MMA / MPP-NAX variants** — the scalar
    `mt_moe_gather_qmm_int4` is landed; the simdgroup-MMA and Apple
    `mpp::tensor_ops::matmul2d` perf variants (PR #136) are the remaining
    throughput follow-up, plus bit-widths beyond int4.
-5. **NAX feature family** — `steel_attention_nax`, `steel_gemm_*_nax`,
-   `quantized_nax`, `fp_quantized_nax`. PR #137 demonstrates the Apple
-   `mpp::tensor_ops::matmul2d` path; the `nax`-gated rows can follow once the
-   feature scaffolding lands.
-6. **`fft`** — radix + readwrite. Needs an FFT codegen path (complex types,
-   bit-reversal indexing). Lowest FFAI priority.
-7. **`fence`** — synchronization primitive. Needs atomics / device-memory
-   fence primitives in the DSL; infrastructure, not a compute op.
-8. **Winograd fast-conv** — the 3×3 stride-1 perf specialization on the
+3. **NAX feature family** — `steel_attention_nax`, `steel_gemm_*_nax`,
+   `fp_quantized_nax`. `quantized_nax` is ✓ (the `Op::InlineMsl` MPP
+   escape-hatch — see its row); the remaining `nax`-gated rows can follow the
+   same pattern, but each is a from-scratch `mpp::` MSL body (the `#[kernel]`
+   front-end does not expose cooperative-tensor types).
+4. **`fence`** — synchronization primitive. Needs atomics / device-memory
+   fence primitives in the DSL; infrastructure, not a compute op. Still a
+   docs-only stub (`mlx/fence.rs`).
+5. **Winograd fast-conv** — the 3×3 stride-1 perf specialization on the
    `conv` row; the direct-conv `naive_unfold` / depthwise paths are
    landed (`ffai/conv2d.rs`, `ffai/conv3d.rs`), Winograd is the remaining
    perf follow-up.
@@ -217,9 +222,14 @@ removes a measured per-layer CPU sync:
   verified against source; their MLX-upstream / MLX-alpha columns are a
   best-effort read (those repos were not checked out) — treat them as
   provisional.
-- `quantized_nax.rs` and `fp_quantized_nax.rs` were re-checked: both are still
-  empty (TODO comment only, zero `#[kernel]`) and both are
-  `#[cfg(feature = "nax")]`-gated in `mlx/mod.rs`. Counted as `✗` for metaltile.
+- `quantized_nax.rs` is now a real port — `mt_qmm_nax`, an `Op::InlineMsl`
+  int4 matmul via Apple `mpp::tensor_ops::matmul2d`, with a paired
+  `quantized_nax_gpu_correctness` test (counted ✓). `fp_quantized_nax.rs`
+  is still empty (TODO comment only, zero `#[kernel]`); both modules are
+  `#[cfg(feature = "nax")]`-gated in `mlx/mod.rs`. The `nax`-gated kernels
+  do **not** register an `inventory::submit!` BenchSpec — they are tested
+  directly, and the `nax` feature is off in default / non-macOS CI builds,
+  so `kernel_registry_consistency` never sees them.
 - `mlx/strided.rs` (`mt_strided_copy`) covers strided copy but the stride
   dimensionalities were not audited — marked `~` defensively. Upstream
   `copy.metal` has multiple `copy_g_nd*` shapes.
