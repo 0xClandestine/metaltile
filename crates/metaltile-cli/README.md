@@ -84,6 +84,7 @@ tile build --help
 |---|---|
 | `tile bench` | Run the full benchmark suite. MetalTile kernels run against MLX Metal kernel reference. Use `--filter <op>` to narrow. Outputs per-op throughput ratio and correctness. |
 | `tile build` | Compile all registered kernels to MSL and report any errors. Use `--emit` to write `.metal` files and compile a `kernels.metallib`. |
+| `tile emit --out <dir>` | Emit the Swift-consumable kernel package: `kernels.metallib` + per-kernel `.metal` sources + `MetalTileKernels.swift` wrappers + `manifest.json`. |
 | `tile inspect --kernel <name>` | Print the IR (SSA-form) and/or generated MSL for one kernel. Use `--ir` for IR only, `--msl` for MSL only. |
 | `tile profile [kernel]` | Estimate GPU occupancy and register pressure. Without a kernel name, profiles all kernels. With `--sweep`, shows per-threadgroup-size breakdown. |
 | `tile device` | Show GPU device info: name, Metal feature set, supported language version, max threadgroup size. |
