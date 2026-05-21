@@ -30,6 +30,8 @@ use metaltile_std::ffai::moe::mt_moe_gather_qmm_mma_int4_bm16;
 use metaltile_std::ffai::moe_mpp;
 use metaltile_std::ffai::moe_mpp_bm64;
 use metaltile_std::mlx::quantized::mt_qmm_mma;
+use metaltile_std::mlx::quantized_mpp;
+use metaltile_std::probe::mpp_matmul_smoke;
 use serde::Serialize;
 
 // ─── CLI ──────────────────────────────────────────────────────────────────
