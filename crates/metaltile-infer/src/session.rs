@@ -298,7 +298,12 @@ impl Session {
         // Use in-place updates to avoid per-token String + Vec heap allocations.
         state_update_u32(&mut self.state, "n_kv", pos + 1);
         state_update_u32(&mut self.state, "token_id", token_id);
-        state_update_f32(&mut self.state, "temperature", temperature);
+        // Clamp to a small positive value: the sampling kernel computes
+        // inv_t = 1/T which is +inf for T=0 (IEEE 754), poisoning the
+        // entire softmax with NaN and silently returning token 0.
+        // At T≤1e-5 the distribution is already effectively one-hot at
+        // the argmax, so clamping here gives correct greedy behaviour.
+        state_update_f32(&mut self.state, "temperature", temperature.max(1e-5));
         let uniform: f32 = pseudo_uniform(token_id, pos);
         state_update_f32(&mut self.state, "uniform", uniform);
 
@@ -382,14 +387,22 @@ fn position_from_state(state: &StateMap) -> u32 {
         .unwrap_or(0)
 }
 
-/// Deterministic pseudo-random float in [0,1) — good enough for greedy/temp sampling.
+/// Deterministic pseudo-random float in (0, 1) — good enough for greedy/temp sampling.
+///
+/// Returns a value strictly in (0, 1): the OR-with-1 ensures x is never 0
+/// (which would produce uniform=0.0 and cause the CDF hit condition
+/// `prev_cum < target` to fail at lid=0, silently returning token 0).
 #[inline]
 fn pseudo_uniform(token_id: u32, position: u32) -> f32 {
     let mut x = token_id.wrapping_mul(2654435761).wrapping_add(position.wrapping_mul(2246822519));
     x ^= x >> 13;
     x ^= x << 17;
     x ^= x >> 5;
-    (x as f32) / (u32::MAX as f32)
+    // OR-with-1 guarantees x ≥ 1, so result is in (0, 1] ∩ f32 representable values.
+    // The largest representable f32 < 1 is used as the upper bound in practice since
+    // x=u32::MAX gives (u32::MAX as f32) / (u32::MAX as f32) which rounds to 1.0 in f32
+    // — that's fine: uniform=1.0 lands inside the last CDF bucket.
+    (x | 1) as f32 / (u32::MAX as f32)
 }
 
 fn find_eos_token_id(tokenizer: &Tokenizer) -> u32 {
