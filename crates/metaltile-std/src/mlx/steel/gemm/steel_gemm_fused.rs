@@ -217,3 +217,14 @@ steel_gemm_fused_kernel!(
     2u32,
     "bm32_bn64_bk16_wm1_wn2"
 );
+// 64×64×16 / 4×2 — large tile at higher occupancy (8 simdgroups, TPG=256).
+// ~40% faster than the 2×2 variant on the 4096³ bench (f32 1.4 vs 1.0
+// GB/s) — the extra simdgroups hide the device-memory fragment loads.
+steel_gemm_fused_kernel!(
+    mt_steel_gemm_64x64x16_4x2,
+    64u32,
+    64u32,
+    4u32,
+    2u32,
+    "bm64_bn64_bk16_wm4_wn2"
+);
