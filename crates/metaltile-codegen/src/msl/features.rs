@@ -136,11 +136,22 @@ impl MslGenerator {
                 for inner in ops {
                     self.analyze_op(inner, feat);
                 },
+            Op::CoopTileSetup { .. }
+            | Op::CoopTileZero { .. }
+            | Op::CoopTileLoadA { .. }
+            | Op::CoopTileLoadB { .. }
+            | Op::CoopTileRun { .. }
+            | Op::CoopTileStoreC { .. } => {
+                feat.needs_mpp = true;
+                feat.needs_simd_lane = true;
+                feat.needs_simd_group = true;
+            },
             // Detect MPP tensor-ops usage in raw inline MSL — escape-hatch
             // for kernels that call `mpp::tensor_ops::matmul2d` / NAX.
             // Forces the codegen preamble to include the framework header.
             // MPP MMA is simdgroup-cooperative — pulls in the same simd
             // built-ins as the simdgroup_matrix path.
+            // CoopTile* ops use cooperative matmul — force the MPP framework header.
             Op::InlineMsl { source, .. } if source.contains("mpp::") => {
                 feat.needs_mpp = true;
                 feat.needs_simd_lane = true;

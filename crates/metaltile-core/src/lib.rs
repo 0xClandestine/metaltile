@@ -27,6 +27,8 @@ pub use ir::{
     ActKind,
     Block,
     BlockId,
+    CoopTileAccMode,
+    CoopTileScope,
     Kernel,
     KernelCallArg,
     KernelMode,

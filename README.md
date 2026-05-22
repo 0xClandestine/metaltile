@@ -143,6 +143,7 @@ Full walkthrough and crate layout: [`docs/getting-started.md`](docs/getting-star
 |---|---|
 | `tile bench` | Benchmark every kernel against its MLX reference; reports throughput + a correctness check |
 | `tile build` | Compile all kernels to MSL and report errors; `--emit` writes `.metal` / `.metallib` / Swift / IR |
+| `tile emit` | Emit a Swift-consumable kernel package (`kernels.metallib` + manifest + Swift wrappers) |
 | `tile inspect <kernel>` | Print a kernel's IR and generated MSL (`--ir`, `--pass`, `--stats` for codegen debugging) |
 | `tile device` | Show the GPU device, Metal version, and supported feature flags |
 | `tile snap` | Save bench results as a regression baseline |

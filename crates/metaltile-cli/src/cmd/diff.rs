@@ -14,7 +14,7 @@ use crate::{
     CliError,
     DiffArgs,
     matches_filter,
-    term::{Color, Style, paint_stderr, paint_stdout},
+    term::{Color, Style, paint_stderr},
 };
 
 pub fn run(args: &DiffArgs) -> Result<(), CliError> {
@@ -34,7 +34,7 @@ pub fn run(args: &DiffArgs) -> Result<(), CliError> {
     } else {
         eprintln!(
             "  {}",
-            paint_stdout("Running bench suite for current...", Style::new().fg(Color::Cyan).bold()),
+            paint_stderr("Running bench suite for current...", Style::new().fg(Color::Cyan).bold()),
         );
         let temp_file =
             std::env::temp_dir().join(format!(".tile-diff-tmp-{}.json", std::process::id()));
@@ -84,7 +84,7 @@ pub fn run(args: &DiffArgs) -> Result<(), CliError> {
     if outcome.total_rows == 0 {
         eprintln!(
             "  {}",
-            paint_stdout("No matching results to diff.", Style::new().fg(Color::BrightBlack)),
+            paint_stderr("No matching results to diff.", Style::new().fg(Color::BrightBlack)),
         );
         return Ok(());
     }
@@ -211,7 +211,7 @@ pub fn render(baseline: &[Value], current: &[Value], opts: &RenderOpts) -> Rende
     }
 
     if let Some(heading) = opts.heading {
-        eprintln!("{}", paint_stdout(heading, Style::new().fg(Color::Cyan).bold()));
+        eprintln!("{}", paint_stderr(heading, Style::new().fg(Color::Cyan).bold()));
     }
 
     eprintln!();
@@ -297,17 +297,19 @@ fn print_diff_row(row: &DiffRow) {
         DeltaKind::Removed => "removed".to_string(),
         _ => {
             let arrow = match row.kind {
-                DeltaKind::Regression => paint_stderr("▼", Style::new().fg(Color::Red).bold()),
-                DeltaKind::Improvement => paint_stdout("▲", Style::new().fg(Color::Green).bold()),
-                _ => paint_stdout("—", Style::new().fg(Color::BrightBlack)),
+                DeltaKind::Regression =>
+                    paint_stderr("▼", Style::new().fg(Color::BrightRed).bold()),
+                DeltaKind::Improvement =>
+                    paint_stderr("▲", Style::new().fg(Color::BrightGreen).bold()),
+                _ => paint_stderr("—", Style::new().fg(Color::BrightBlack)),
             };
             let delta = row.delta_pct.unwrap_or(0.0);
             format!(
                 "{} {}",
                 arrow,
-                paint_stdout(format!("{:+.0}%", delta), match row.kind {
-                    DeltaKind::Regression => Style::new().fg(Color::Red).bold(),
-                    DeltaKind::Improvement => Style::new().fg(Color::Green).bold(),
+                paint_stderr(format!("{:+.0}%", delta), match row.kind {
+                    DeltaKind::Regression => Style::new().fg(Color::BrightRed).bold(),
+                    DeltaKind::Improvement => Style::new().fg(Color::BrightGreen).bold(),
                     _ => Style::new().fg(Color::BrightBlack),
                 },),
             )
@@ -316,22 +318,23 @@ fn print_diff_row(row: &DiffRow) {
 
     let (baseline_cell, current_cell) = match row.kind {
         DeltaKind::New | DeltaKind::Removed => (
-            paint_stdout(&baseline_str, Style::new().fg(Color::BrightBlack)),
-            paint_stdout(&current_str, Style::new().fg(Color::BrightBlack)),
+            paint_stderr(&baseline_str, Style::new().fg(Color::BrightBlack)),
+            paint_stderr(&current_str, Style::new().fg(Color::BrightBlack)),
         ),
         _ => (
-            paint_stdout(&baseline_str, Style::new().fg(Color::BrightWhite)),
-            paint_stdout(&current_str, Style::new().fg(Color::BrightWhite)),
+            paint_stderr(&baseline_str, Style::new().fg(Color::BrightWhite)),
+            paint_stderr(&current_str, Style::new().fg(Color::BrightWhite)),
         ),
     };
 
-    let sep = paint_stdout("│", Style::new().fg(Color::BrightBlack).dim());
+    let sep = paint_stderr("│", Style::new().fg(Color::BrightBlack).dim());
 
     let kind_label = match row.kind {
-        DeltaKind::Regression => paint_stderr("REGRESSION", Style::new().fg(Color::Red).bold()),
-        DeltaKind::Improvement => paint_stdout("improvement", Style::new().fg(Color::Green)),
-        DeltaKind::New => paint_stdout("new", Style::new().fg(Color::Cyan)),
-        DeltaKind::Removed => paint_stderr("removed", Style::new().fg(Color::Red)),
+        DeltaKind::Regression =>
+            paint_stderr("REGRESSION", Style::new().fg(Color::BrightRed).bold()),
+        DeltaKind::Improvement => paint_stderr("improvement", Style::new().fg(Color::BrightGreen)),
+        DeltaKind::New => paint_stderr("new", Style::new().fg(Color::Cyan)),
+        DeltaKind::Removed => paint_stderr("removed", Style::new().fg(Color::BrightRed)),
         DeltaKind::Unchanged => String::new(),
     };
 
@@ -353,7 +356,7 @@ fn print_summary(
     if regressions > 0 {
         parts.push(format!(
             "{} regression{} (threshold {}%)",
-            paint_stderr(regressions.to_string(), Style::new().fg(Color::Red).bold()),
+            paint_stderr(regressions.to_string(), Style::new().fg(Color::BrightRed).bold()),
             if regressions == 1 { "" } else { "s" },
             threshold,
         ));
@@ -361,29 +364,29 @@ fn print_summary(
     if improvements > 0 {
         parts.push(format!(
             "{} improved",
-            paint_stdout(improvements.to_string(), Style::new().fg(Color::Green).bold()),
+            paint_stderr(improvements.to_string(), Style::new().fg(Color::BrightGreen).bold()),
         ));
     }
     if unchanged > 0 {
         parts.push(format!(
             "{} unchanged",
-            paint_stdout(unchanged.to_string(), Style::new().fg(Color::BrightBlack)),
+            paint_stderr(unchanged.to_string(), Style::new().fg(Color::BrightBlack)),
         ));
     }
     if new_count > 0 {
         parts.push(format!(
             "{} new",
-            paint_stdout(new_count.to_string(), Style::new().fg(Color::Cyan)),
+            paint_stderr(new_count.to_string(), Style::new().fg(Color::Cyan)),
         ));
     }
     if removed_count > 0 {
         parts.push(format!(
             "{} removed",
-            paint_stderr(removed_count.to_string(), Style::new().fg(Color::Red)),
+            paint_stderr(removed_count.to_string(), Style::new().fg(Color::BrightRed)),
         ));
     }
 
-    let sep = paint_stdout("·", Style::new().fg(Color::BrightBlack).dim());
+    let sep = paint_stderr("·", Style::new().fg(Color::BrightBlack).dim());
     eprintln!("\n  {}\n", parts.join(&format!("  {sep}  ")));
 }
 
@@ -439,8 +442,8 @@ fn build_result_map(results: &[Value]) -> HashMap<RowKey, (f64, f64)> {
 }
 
 fn format_op_shape(op: &str, shape: &str) -> (String, String) {
-    let op_col = paint_stdout(format!("{op:<20}"), Style::new().fg(Color::Cyan).bold());
-    let shape_col = paint_stdout(format!("{shape:<26}"), Style::new().fg(Color::BrightWhite));
+    let op_col = paint_stderr(format!("{op:<20}"), Style::new().fg(Color::Cyan).bold());
+    let shape_col = paint_stderr(format!("{shape:<26}"), Style::new().fg(Color::BrightWhite));
     (op_col, shape_col)
 }
 

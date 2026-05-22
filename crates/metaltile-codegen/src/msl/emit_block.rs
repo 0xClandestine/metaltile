@@ -6,7 +6,7 @@ use std::{collections::BTreeMap, fmt::Write};
 
 use metaltile_core::{
     dtype::DType,
-    ir::{BinOpKind, Block, BlockId, Kernel, KernelMode, Op, ReduceKind, ValueId},
+    ir::{BinOpKind, Block, BlockId, CoopTileScope, Kernel, KernelMode, Op, ReduceKind, ValueId},
 };
 use rustc_hash::FxHashMap;
 
@@ -538,6 +538,166 @@ impl MslGenerator {
                     }
                 },
 
+                // ---- CoopTile setup: declare descriptor + operator + ct_a/ct_b/ct_c
+                Op::CoopTileSetup {
+                    name,
+                    m,
+                    n,
+                    k,
+                    ta,
+                    tb,
+                    tc,
+                    acc_mode,
+                    exec_scope,
+                    act_dtype,
+                    acc_dtype,
+                    direct_inputs,
+                    a_is_tg,
+                    a_ei,
+                    a_eo,
+                    b_is_tg,
+                    b_ei,
+                    b_eo,
+                } => {
+                    let scope_s = match exec_scope {
+                        CoopTileScope::SimdGroup => "metal::execution_simdgroup",
+                        CoopTileScope::Threadgroup => "metal::execution_threadgroup",
+                    };
+                    let acc_mode_s = match acc_mode {
+                        metaltile_core::ir::CoopTileAccMode::Overwrite => "mode::overwrite",
+                        metaltile_core::ir::CoopTileAccMode::MultiplyAccumulate =>
+                            "mode::multiply_accumulate",
+                    };
+                    let ta_s = if *ta { "true" } else { "false" };
+                    let tb_s = if *tb { "true" } else { "false" };
+                    let tc_s = if *tc { "true" } else { "false" };
+                    let act_t = self.msl_type_name(*act_dtype);
+                    let acc_t = self.msl_type_name(*acc_dtype);
+                    wl!(out, "{pad}// --- CoopTileSetup: {name} ({m}×{n}×{k}) ---");
+                    wl!(
+                        out,
+                        "{pad}constexpr auto {name}_desc = mpp::tensor_ops::matmul2d_descriptor("
+                    );
+                    wl!(out, "{pad}    /*M=*/{m}, /*N=*/{n}, /*K=*/{k},");
+                    wl!(out, "{pad}    /*ta=*/{ta_s}, /*tb=*/{tb_s}, /*tc=*/{tc_s},");
+                    wl!(out, "{pad}    mpp::tensor_ops::matmul2d_descriptor::{acc_mode_s});");
+                    wl!(out, "{pad}mpp::tensor_ops::matmul2d<{name}_desc, {scope_s}> {name}_op;");
+                    if *direct_inputs {
+                        // Direct-input mode: emit type aliases + ct_c only (no ct_a/ct_b).
+                        let a_as = if *a_is_tg { "threadgroup" } else { "device" };
+                        let b_as = if *b_is_tg { "threadgroup" } else { "device" };
+                        wl!(
+                            out,
+                            "{pad}using {name}_tA_t = metal::tensor<{a_as} {act_t}, metal::extents<int, {a_ei}, {a_eo}>, metal::tensor_inline>;"
+                        );
+                        wl!(
+                            out,
+                            "{pad}using {name}_tB_t = metal::tensor<{b_as} {act_t}, metal::extents<int, {b_ei}, {b_eo}>, metal::tensor_inline>;"
+                        );
+                        wl!(
+                            out,
+                            "{pad}auto {name}_ct_c = {name}_op.template get_destination_cooperative_tensor<{name}_tA_t, {name}_tB_t, {acc_t}>();"
+                        );
+                    } else {
+                        wl!(
+                            out,
+                            "{pad}auto {name}_ct_a = {name}_op.template get_left_input_cooperative_tensor<{act_t}, {act_t}, {acc_t}>();"
+                        );
+                        wl!(
+                            out,
+                            "{pad}auto {name}_ct_b = {name}_op.template get_right_input_cooperative_tensor<{act_t}, {act_t}, {acc_t}>();"
+                        );
+                        wl!(
+                            out,
+                            "{pad}auto {name}_ct_c = {name}_op.template get_destination_cooperative_tensor<decltype({name}_ct_a), decltype({name}_ct_b), {acc_t}>();"
+                        );
+                    }
+                },
+
+                // ---- CoopTile zero: zero C accumulator before K-loop
+                Op::CoopTileZero { name } => {
+                    wl!(
+                        out,
+                        "{pad}for (uint16_t _i = 0; _i < {name}_ct_c.get_capacity(); ++_i) {name}_ct_c[_i] = {{}};"
+                    );
+                },
+
+                // ---- CoopTile load A
+                Op::CoopTileLoadA { name, ptr_name, ptr_offset, is_tg, dtype, ei, eo, direct } => {
+                    let t = self.msl_type_name(*dtype);
+                    let as_ = if *is_tg { "threadgroup" } else { "device" };
+                    let ptr = if let Some(off) = ptr_offset {
+                        let ov = self.vname(Some(*off), block, extra_names);
+                        format!("{ptr_name} + {ov}")
+                    } else {
+                        ptr_name.clone()
+                    };
+                    let ptr_expr =
+                        if *is_tg { ptr.clone() } else { format!("const_cast<{as_} {t}*>({ptr})") };
+                    if *direct {
+                        // Direct-input mode: instantiate tensor view using the type alias.
+                        wl!(
+                            out,
+                            "{pad}{name}_tA_t {name}_tA({ptr_expr}, metal::extents<int, {ei}, {eo}>{{}});"
+                        );
+                    } else {
+                        wl!(
+                            out,
+                            "{pad}metal::tensor<{as_} {t}, metal::extents<int, {ei}, {eo}>, metal::tensor_inline> {name}_tA({ptr_expr}, metal::extents<int, {ei}, {eo}>{{}}); {name}_ct_a.load({name}_tA);"
+                        );
+                    }
+                },
+
+                // ---- CoopTile load B
+                Op::CoopTileLoadB { name, ptr_name, ptr_offset, is_tg, dtype, ei, eo, direct } => {
+                    let t = self.msl_type_name(*dtype);
+                    let as_ = if *is_tg { "threadgroup" } else { "device" };
+                    let ptr = if let Some(off) = ptr_offset {
+                        let ov = self.vname(Some(*off), block, extra_names);
+                        format!("{ptr_name} + {ov}")
+                    } else {
+                        ptr_name.clone()
+                    };
+                    let ptr_expr =
+                        if *is_tg { ptr.clone() } else { format!("const_cast<{as_} {t}*>({ptr})") };
+                    if *direct {
+                        // Direct-input mode: instantiate tensor view using the type alias.
+                        wl!(
+                            out,
+                            "{pad}{name}_tB_t {name}_tB({ptr_expr}, metal::extents<int, {ei}, {eo}>{{}});"
+                        );
+                    } else {
+                        wl!(
+                            out,
+                            "{pad}metal::tensor<{as_} {t}, metal::extents<int, {ei}, {eo}>, metal::tensor_inline> {name}_tB({ptr_expr}, metal::extents<int, {ei}, {eo}>{{}}); {name}_ct_b.load({name}_tB);"
+                        );
+                    }
+                },
+
+                // ---- CoopTile run: execute A·B → C
+                Op::CoopTileRun { name, direct } =>
+                    if *direct {
+                        wl!(out, "{pad}{name}_op.run({name}_tA, {name}_tB, {name}_ct_c);");
+                    } else {
+                        wl!(out, "{pad}{name}_op.run({name}_ct_a, {name}_ct_b, {name}_ct_c);");
+                    },
+
+                // ---- CoopTile store C
+                Op::CoopTileStoreC { name, ptr_name, ptr_offset, is_tg, dtype, ei, eo } => {
+                    let t = self.msl_type_name(*dtype);
+                    let as_ = if *is_tg { "threadgroup" } else { "device" };
+                    let ptr = if let Some(off) = ptr_offset {
+                        let ov = self.vname(Some(*off), block, extra_names);
+                        format!("{ptr_name} + {ov}")
+                    } else {
+                        ptr_name.clone()
+                    };
+                    wl!(
+                        out,
+                        "{pad}metal::tensor<{as_} {t}, metal::extents<int, {ei}, {eo}>, metal::tensor_inline> {name}_tC({ptr}, metal::extents<int, {ei}, {eo}>{{}}); {name}_ct_c.store({name}_tC);"
+                    );
+                },
+
                 // ---- fused elementwise chain ---------------------------
                 Op::FusedElementwise { ops: fused_ops } => {
                     let v = self.vname(vid, block, extra_names);
@@ -874,21 +1034,6 @@ impl MslGenerator {
                             );
                         }
                     }
-                },
-
-                // ---- flash attention / sliding window attention ------------
-                Op::FlashAttention { .. } | Op::SlidingWindowAttention { .. } => {
-                    wl!(out, "{pad}// Attention: needs lowering pass");
-                },
-
-                // ---- high-level norms / mlp blocks -------------------------
-                Op::RmsNorm { .. } | Op::GatedMlp { .. } => {
-                    wl!(out, "{pad}// High-level op: needs lowering pass");
-                },
-
-                // ---- dequantize --------------------------------------------
-                Op::Dequantize { .. } => {
-                    wl!(out, "{pad}// Dequantize: needs lowering pass");
                 },
 
                 // ---- SIMD/threadgroup primitives ---------------------------

@@ -4,14 +4,10 @@
 //! `mt_qmm_mma`. It mirrors the same algorithm — int4 weights dequantized
 //! into threadgroup memory once per K-block, then a per-simdgroup matmul
 //! against the fp T X-tile — but replaces the manual 8×8 `simdgroup_matmul`
-//! ladder with one cooperative `matmul2d` per SG per K-block. The
-//! cooperative-tensor path is what taps the NAX hardware MLX uses for
-//! `affine_qmm_t_nax` / `gather_qmm_rhs_nax` (≈3000 GF on Qwen3.6-A3B
-//! `down_proj` shapes).
+//! ladder with one cooperative `matmul2d` per SG per K-block.
 //!
-//! Built as an IR escape-hatch via `Op::InlineMsl` rather than the
-//! `#[kernel]` macro because the macro front-end does not (yet) expose
-//! `mpp::` types. Geometry mirrors `mt_qmm_mma`:
+//! Expressed entirely via `CoopTile*` IR ops — no `Op::InlineMsl`.
+//! Geometry mirrors `mt_qmm_mma`:
 //!
 //!   tpg = 128 = 4 SG × 32 lanes (WM = WN = 2)
 //!   BM = BN = BK = 32 → 32×32 output tile (1024 outputs/TG)
@@ -19,269 +15,65 @@
 //!   Per SG: one 16×16×32 `matmul2d` per K-block (acc-mode multiply_accumulate)
 //!
 //! Per-K-block layout (cooperative, all 128 lanes):
-//!   1. X-tile coop-load → Xs[BM × (BK+4)] (skewed for bank-conflict avoidance)
-//!   2. W-tile coop-dequant int4 → Ws[BN × (BK+4)] in fp T
+//!   1. X-tile coop-load → Xs[BM × TG_LD=36] (skewed for bank-conflict avoidance)
+//!   2. W-tile coop-dequant int4 → Ws[BN × TG_LD=36] in fp T
 //!   3. threadgroup_barrier
 //!   4. Each SG calls `gemm_op.run(ct_a, ct_b, ct_c)` where ct_c persists across
 //!      K-blocks (matmul2d_descriptor::mode::multiply_accumulate)
 //!   5. threadgroup_barrier
 //!
-//! After all K-blocks, each SG stores its 16×16 fp32 ct_c via
-//! `tensor_inline<half, extents<16,16>>` cast over the device `out` pointer
-//! (cast to half on store; same final-precision as mt_qmm_mma).
-//!
-//! The MPP descriptor uses `(M=16, N=16, K=32)` — K=32 satisfies the
-//! Apple "at least one of M/N/K = 32" assertion for two-operand
-//! cooperative tensors. With `ta=false, tb=true` we read B from a
-//! `[BN, BK]` (= W-layout) threadgroup tile, matching the `mt_qmm_mma`
-//! dequant W layout exactly.
-//!
-//! Correctness vs CPU oracle ≥ cos 0.999 — see
-//! `crates/metaltile-std/tests/qmm_mpp_correctness.rs`.
-//!
-//! Runtime behavior on `gen < 17` GPUs (M3 and earlier): the MSL body is
-//! `#if __METAL_VERSION__ >= 400` gated so the metallib still links cleanly
-//! on Metal 3 toolchains, with a no-op `#else` arm. Caller-side dispatch
-//! must skip this kernel on unsupported GPU gens — `KernelFeatures::needs_mpp`
-//! is the runtime gate; downstream callers route to `mt_qmm_mma` (the
-//! non-MPP `simdgroup_matmul` variant) when `needs_mpp` is unsupported.
+//! After all K-blocks, each SG stores its 16×16 fp32 ct_c into a per-SG
+//! slot of `OutScratch`, then all 32 lanes coop-write it to `out` (cast to T).
 
 use metaltile_core::{
     constexpr::ConstExpr,
     dtype::DType,
-    ir::{Block, BlockId, ConstExprDecl, Kernel, KernelMode, Op, Param, ParamKind},
+    ir::{
+        BinOpKind,
+        Block,
+        BlockId,
+        ConstExprDecl,
+        CoopTileAccMode,
+        CoopTileScope,
+        IndexExpr,
+        Kernel,
+        KernelMode,
+        Op,
+        Param,
+        ParamKind,
+        ValueId,
+        VarId,
+    },
     shape::{Dim, Shape},
 };
 use rustc_hash::FxHashMap;
 
-/// Tile geometry — keep in lock-step with the inline MSL below.
+/// Tile geometry.
 pub const BM: u32 = 32;
 pub const BN: u32 = 32;
 pub const BK: u32 = 32;
 /// Threads per group (4 SG × 32 lanes).
 pub const TPG: u32 = 128;
-/// Threadgroup-mem row skew (matches `mt_qmm_mma` xs_ld_const). 4 elems of
-/// padding past BK to scatter 32-bank conflicts on the column reads done
-/// inside `matmul2d`'s frag load. Stride = BK + 4 = 36.
+/// Threadgroup-mem row stride = BK + 4 (bank-conflict skew).
 pub const TG_SKEW: u32 = 4;
 pub const TG_LD: u32 = BK + TG_SKEW; // 36
+/// Group size baked in at 64 (Qwen3.6-A3B default).
+pub const GROUP_SIZE: u32 = 64;
 
-/// MSL source. References the kernel parameters by name; codegen emits
-/// the bindings as `const device {T} *w/scales/biases/x` + `device {T} *out`
-/// + `constant uint &k/n/gs_per_row` per the standard `Param` /
-///   `ConstExprDecl` signature path.
-///
-/// Templated on `T` (fp32 / fp16) at metaltile-build time via the per-dtype
-/// kernel-IR (`kernel_ir_for(DType)`) — the `{T}` placeholder is rewritten
-/// before codegen. Group size baked in at 64 (Qwen3.6-A3B / Qwen3.6-27B-UD
-/// default).
-const QMM_MMA_MPP_SRC_TEMPLATE: &str = r#"// --- mt_qmm_mma_mpp body (BM=BN=BK=32, TG=128, 4 SGs WM=WN=2) ---
-#if defined(__METAL_VERSION__) && __METAL_VERSION__ >= 400
-constexpr uint BM = 32;
-constexpr uint BN = 32;
-constexpr uint BK = 32;
-constexpr uint TG_LD = 36;     // BK + 4 skew
-constexpr uint GROUP_SIZE = 64;
-
-// Threadgroup tiles — Xs holds X in (m, k) row-major; Ws holds dequant W in
-// (n, k) row-major (qmm_t layout). Skew of 4 elements past BK breaks the
-// 32-bank conflict on the column-strided frag loads inside `matmul2d`.
-threadgroup {T} Xs[BM * TG_LD];
-threadgroup {T} Ws[BN * TG_LD];
-
-// Per-TG output tile origin in (m, n).
-const uint m_tile = tgid_y;
-const uint n_tile = tgid_x;
-const uint lane_in_tg = simd_group * 32u + simd_lane;
-// 4 SGs in a 2×2 WM=WN=2 warp grid: sm = simd_group/2, sn = simd_group%2.
-// Each SG owns a 16×16 sub-tile at (sm*16, sn*16) inside the 32×32 output.
-const uint sm = simd_group / 2u;
-const uint sn = simd_group & 1u;
-
-// ── X coop-load mapping ──
-// 128 lanes × 8 contiguous K-elems each fill the 1024-elt Xs tile.
-// lane_in_tg ∈ 0..128, m_row = lane_in_tg / 4 ∈ 0..32, k_quad = lane_in_tg & 3 ∈ 0..4.
-// Per lane writes 8 contiguous {T} into Xs[m_row*TG_LD + k_quad*8 + i] for i in 0..8.
-const uint x_m_row  = lane_in_tg / 4u;
-const uint x_k_quad = lane_in_tg & 3u;
-const uint x_k_base = x_k_quad * 8u;
-
-// ── W coop-dequant mapping ──
-// 128 packs / 128 lanes = 1 pack per lane. lane_in_tg = w_row*4 + pack_in_row.
-// Each lane dequants 8 nibbles → Ws[w_row*TG_LD + pack_in_row*8 + i].
-const uint w_row        = lane_in_tg / 4u;
-const uint pack_in_row  = lane_in_tg & 3u;
-
-const uint x_m_base = m_tile * 32u;
-const uint w_n_base = n_tile * 32u;
-const uint packs_per_row = k / 8u;
-const uint sb_base = (w_n_base + w_row) * gs_per_row;
-const uint w_pack_row_base = (w_n_base + w_row) * packs_per_row;
-
-// ── Set up MPP matmul: (M=16, N=16, K=32), ta=false, tb=true, tc=false ──
-// `tb=true` lets us read B from the [BN, BK] = W-layout threadgroup tile
-// without transposing in memory. mode=multiply_accumulate so ct_c persists
-// across K-block iterations (we zero it once before the K-loop).
-constexpr auto desc = mpp::tensor_ops::matmul2d_descriptor(
-    /*M=*/16, /*N=*/16, /*K=*/32,
-    /*ta=*/false, /*tb=*/true, /*tc=*/false,
-    mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
-mpp::tensor_ops::matmul2d<desc, metal::execution_simdgroup> gemm_op;
-
-auto ct_a = gemm_op.template get_left_input_cooperative_tensor<{T}, {T}, float>();
-auto ct_b = gemm_op.template get_right_input_cooperative_tensor<{T}, {T}, float>();
-auto ct_c = gemm_op.template get_destination_cooperative_tensor<decltype(ct_a), decltype(ct_b), float>();
-
-// Zero accumulator (mode = multiply_accumulate adds to dst on each run()).
-for (uint16_t i = 0; i < ct_c.get_capacity(); ++i) {
-    ct_c[i] = 0.0f;
-}
-
-// Per-SG sub-tile origin inside the 32×32 TG tile.
-const uint sg_m_base = sm * 16u;
-const uint sg_n_base = sn * 16u;
-
-for (uint kb = 0u; kb < k; kb += BK) {
-    // ── 1. Coop X load (128 lanes × 8 contiguous K) ──
-    const uint x_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base;
-    const uint x_ws_base = x_m_row * TG_LD + x_k_base;
-    {T} xv0 = ({T})x[x_row_dev_base + 0u];
-    {T} xv1 = ({T})x[x_row_dev_base + 1u];
-    {T} xv2 = ({T})x[x_row_dev_base + 2u];
-    {T} xv3 = ({T})x[x_row_dev_base + 3u];
-    {T} xv4 = ({T})x[x_row_dev_base + 4u];
-    {T} xv5 = ({T})x[x_row_dev_base + 5u];
-    {T} xv6 = ({T})x[x_row_dev_base + 6u];
-    {T} xv7 = ({T})x[x_row_dev_base + 7u];
-    Xs[x_ws_base + 0u] = xv0;
-    Xs[x_ws_base + 1u] = xv1;
-    Xs[x_ws_base + 2u] = xv2;
-    Xs[x_ws_base + 3u] = xv3;
-    Xs[x_ws_base + 4u] = xv4;
-    Xs[x_ws_base + 5u] = xv5;
-    Xs[x_ws_base + 6u] = xv6;
-    Xs[x_ws_base + 7u] = xv7;
-
-    // ── 2. Coop W dequant — 1 pack/lane → 8 fp {T} into Ws ──
-    const uint pack_k_off = kb / 8u + pack_in_row;
-    const uint pack = w[w_pack_row_base + pack_k_off];
-    const uint k_off = kb + pack_in_row * 8u;
-    const uint g = k_off / GROUP_SIZE;
-    const float s = (float)scales[sb_base + g];
-    const float b = (float)biases[sb_base + g];
-    // Mask-without-shift trick (matches mt_qmm_mma) — multiply by 1/16^i
-    // instead of right-shifting.
-    const float s_16    = 0.0625f;
-    const float s_256   = 0.00390625f;
-    const float s_4096  = 0.000244140625f;
-    const uint pack_hi = pack >> 16u;
-    const float q0 = (float)(pack    &     15u);
-    const float q1 = (float)(pack    &    240u) * s_16;
-    const float q2 = (float)(pack    &   3840u) * s_256;
-    const float q3 = (float)(pack    &  61440u) * s_4096;
-    const float q4 = (float)(pack_hi &     15u);
-    const float q5 = (float)(pack_hi &    240u) * s_16;
-    const float q6 = (float)(pack_hi &   3840u) * s_256;
-    const float q7 = (float)(pack_hi &  61440u) * s_4096;
-    const uint ws_base = w_row * TG_LD + pack_in_row * 8u;
-    Ws[ws_base + 0u] = ({T})(s * q0 + b);
-    Ws[ws_base + 1u] = ({T})(s * q1 + b);
-    Ws[ws_base + 2u] = ({T})(s * q2 + b);
-    Ws[ws_base + 3u] = ({T})(s * q3 + b);
-    Ws[ws_base + 4u] = ({T})(s * q4 + b);
-    Ws[ws_base + 5u] = ({T})(s * q5 + b);
-    Ws[ws_base + 6u] = ({T})(s * q6 + b);
-    Ws[ws_base + 7u] = ({T})(s * q7 + b);
-
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    // ── 3. Build per-SG tensor views over the TG tiles ──
-    // ct_a reads A [16, 32] = Xs[sg_m_base..sg_m_base+16, 0..32] (row-major, ld=TG_LD).
-    // ct_b reads B [16, 32] = Ws[sg_n_base..sg_n_base+16, 0..32] (row-major, ld=TG_LD)
-    //   — with tb=true, MPP treats this as K×N column-major = the qmm_t weight tile.
-    // `tensor_inline` packed-stride ctor: strides[0]=1, strides[1]=extents[0]=TG_LD.
-    // So extents{TG_LD, 16} means stride[0]=1 along the TG_LD-wide axis (k-inner),
-    // stride[1]=TG_LD along the 16-wide axis (m or n). That matches our row-major
-    // staging perfectly: contiguous in k, strided by TG_LD across rows.
-    threadgroup {T}* xs_sg = Xs + sg_m_base * TG_LD;
-    threadgroup {T}* ws_sg = Ws + sg_n_base * TG_LD;
-    metal::tensor<threadgroup {T}, metal::extents<int, TG_LD, 16>, metal::tensor_inline>
-        tA(xs_sg, metal::extents<int, TG_LD, 16>{});
-    metal::tensor<threadgroup {T}, metal::extents<int, TG_LD, 16>, metal::tensor_inline>
-        tB(ws_sg, metal::extents<int, TG_LD, 16>{});
-
-    ct_a.load(tA);
-    ct_b.load(tB);
-
-    // ── 4. Run the matmul; ct_c accumulates ──
-    gemm_op.run(ct_a, ct_b, ct_c);
-
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-}
-
-// ── 5. Store ct_c to global out (cast fp32 → {T}) ──
-// Output tile origin for this SG.
-const uint out_m_base = m_tile * 32u + sg_m_base;
-const uint out_n_base = n_tile * 32u + sg_n_base;
-// We need to write a 16×16 fp32 ct_c to a 16×16 {T} sub-tile of out.
-// `ct_c.store(...)` writes through a tensor_inline view. For {T}=half we
-// store directly; for {T}=float the cast is a no-op. Use a temporary fp32
-// stage then cast — simplest cross-dtype path. Stage in a small per-SG TG
-// scratch to keep ct_c.store typed as float.
-// Per-SG fp32 scratch (4 SG × 256 floats = 4 KB).
-threadgroup float OutScratch[4 * 16 * 16];
-threadgroup float* sg_scratch = OutScratch + simd_group * (16 * 16);
-metal::tensor<threadgroup float, metal::extents<int, 16, 16>, metal::tensor_inline>
-    tC(sg_scratch, metal::extents<int, 16, 16>{});
-ct_c.store(tC);
-// Cooperative store back to device out, casting to {T}. 32 lanes × 8 elems
-// covers 16×16=256.
-threadgroup_barrier(mem_flags::mem_threadgroup);
-const uint lane = simd_lane;
-// Map lane → (row, col) in the 16×16 sub-tile: 32 lanes × 8 elems = 256
-// outputs. Lane handles row = lane/2, col_base = (lane & 1) * 8 → 8 contig
-// cols per lane in one row.
-const uint o_row = lane / 2u;
-const uint o_col_base = (lane & 1u) * 8u;
-#pragma clang loop unroll(full)
-for (uint i = 0u; i < 8u; ++i) {
-    out[(out_m_base + o_row) * n + (out_n_base + o_col_base + i)] =
-        ({T})sg_scratch[o_row * 16u + o_col_base + i];
-}
-#else
-// Pre-Metal-4 fallback — silence the bindings so the metallib still links.
-// Correctness test on such targets is the intended failure signal.
-if (simd_group == 0u && simd_lane == 0u) {
-    const uint o = tgid_y * 32u * n + tgid_x * 32u;
-    const uint _gs = gs_per_row; // silence unused-var
-    out[o] = ({T})((float)x[0] * (float)scales[0] + (float)biases[0]) * ({T})(w[0] & 15u) * ({T})_gs;
-}
-#endif
-"#;
-
-/// Substitute the `{T}` placeholder for the per-dtype MSL source.
-fn substitute_dtype(src: &str, dt: DType) -> String {
-    let t = match dt {
-        DType::F32 => "float",
-        DType::F16 => "half",
-        _ => unreachable!("kernel_ir_for asserts dtype before reaching here"),
-    };
-    src.replace("{T}", t)
-}
-
-/// Build the per-dtype [`Kernel`] IR for `mt_qmm_mma_mpp_{T}`.
+/// Build the per-dtype [`Kernel`] IR for `mt_qmm_mma_mpp`.
 ///
 /// Param layout (lock-step with `run_qmm_mma_mpp` in the correctness test):
-///   buffer(0) = w        const device uint  *
-///   buffer(1) = scales   const device {T}   *
-///   buffer(2) = biases   const device {T}   *
-///   buffer(3) = x        const device {T}   *
-///   buffer(4) = out      device       {T}   *
-///   buffer(5) = k        constant     uint  &
-///   buffer(6) = n        constant     uint  &
-///   buffer(7) = gs_per_row constant   uint  &
+///   buffer(0) = w          const device uint  *
+///   buffer(1) = scales     const device {T}   *
+///   buffer(2) = biases     const device {T}   *
+///   buffer(3) = x          const device {T}   *
+///   buffer(4) = out        device       {T}   *
+///   buffer(5) = k          constant     uint  &
+///   buffer(6) = n          constant     uint  &
+///   buffer(7) = gs_per_row constant     uint  &
 ///
 /// Dispatch geometry: grid `[n/32, m/32, 1]`, threadgroup `[128, 1, 1]`.
+#[allow(unused_assignments)] // final nv!() bumps vid past last read — by design
 pub fn kernel_ir_for(dt: DType) -> Kernel {
     assert!(
         matches!(dt, DType::F32 | DType::F16),
@@ -291,46 +83,43 @@ pub fn kernel_ir_for(dt: DType) -> Kernel {
     let mut k = Kernel::new("mt_qmm_mma_mpp");
     k.mode = KernelMode::Reduction;
 
-    // Buffers. Shapes are nominal — codegen emits the C-pointer signature
-    // regardless. Concrete shapes (M, N, K) are passed via the `k`/`n`
-    // constexpr scalars at dispatch time.
+    // All params use flat 1D indexing — rank-1 shapes satisfy type_check.
     k.params.push(Param {
         name: "w".into(),
         dtype: DType::U32,
-        shape: Shape::new([Dim::Any, Dim::Any]),
+        shape: Shape::new([Dim::Any]),
         is_output: false,
         kind: ParamKind::Tensor,
     });
     k.params.push(Param {
         name: "scales".into(),
         dtype: dt,
-        shape: Shape::new([Dim::Any, Dim::Any]),
+        shape: Shape::new([Dim::Any]),
         is_output: false,
         kind: ParamKind::Tensor,
     });
     k.params.push(Param {
         name: "biases".into(),
         dtype: dt,
-        shape: Shape::new([Dim::Any, Dim::Any]),
+        shape: Shape::new([Dim::Any]),
         is_output: false,
         kind: ParamKind::Tensor,
     });
     k.params.push(Param {
         name: "x".into(),
         dtype: dt,
-        shape: Shape::new([Dim::Any, Dim::Any]),
+        shape: Shape::new([Dim::Any]),
         is_output: false,
         kind: ParamKind::Tensor,
     });
     k.params.push(Param {
         name: "out".into(),
         dtype: dt,
-        shape: Shape::new([Dim::Any, Dim::Any]),
+        shape: Shape::new([Dim::Any]),
         is_output: true,
         kind: ParamKind::Tensor,
     });
 
-    // Constexpr scalars (passed via setBytes after the buffers).
     k.constexprs.push(ConstExprDecl { name: ConstExpr::new("k"), dtype: DType::U32, value: None });
     k.constexprs.push(ConstExprDecl { name: ConstExpr::new("n"), dtype: DType::U32, value: None });
     k.constexprs.push(ConstExprDecl {
@@ -341,28 +130,419 @@ pub fn kernel_ir_for(dt: DType) -> Kernel {
 
     k.return_shapes.push(Shape::new([Dim::Any, Dim::Any]));
 
-    // Force `tgid_y` alias emission. InlineMsl source mentions `tgid_y` but
-    // the body-text isn't scanned for the alias trigger — codegen only looks
-    // at IR ops. Use the `Op::Load { src: "tgid_y" }` direct-identifier form
-    // (per `ssm_step` precedent, see `reduction_preamble_emits_tgid_y_when_used_as_identifier`
-    // test in `metaltile-codegen/src/msl/mod.rs`). Reduction mode emits
-    // `tgid_x` unconditionally, so axis=0 needs no hint.
-    use metaltile_core::ir::ValueId;
-    let mut body = Block::new(BlockId::new(0));
-    body.push_op(
-        Op::Load { src: "tgid_y".to_string(), indices: Vec::new(), mask: None, other: None },
-        ValueId::new(0),
-    );
-    body.push_op_no_result(Op::InlineMsl {
-        source: substitute_dtype(QMM_MMA_MPP_SRC_TEMPLATE, dt),
-        inputs: Vec::new(),
-        outputs: Vec::new(),
-    });
-    k.body = body.clone();
-    let mut blocks = FxHashMap::default();
-    blocks.insert(BlockId::new(0), body);
-    k.blocks = blocks;
+    // -----------------------------------------------------------------------
+    // ValueId counter shared across all three blocks so every variable name
+    // is unique and the v{n} fallback names don't collide across blocks.
+    // -----------------------------------------------------------------------
+    let mut vid: u32 = 0;
+    macro_rules! nv {
+        () => {{
+            let id = ValueId::new(vid);
+            vid += 1;
+            id
+        }};
+    }
+    macro_rules! load0 {
+        ($src:expr) => {
+            Op::Load { src: $src.into(), indices: vec![], mask: None, other: None }
+        };
+    }
+    macro_rules! bop {
+        ($op:ident, $l:expr, $r:expr) => {
+            Op::BinOp { op: BinOpKind::$op, lhs: $l, rhs: $r }
+        };
+    }
 
+    // -----------------------------------------------------------------------
+    // Block 0 — preamble: program IDs, per-lane indices, TG allocs, setup.
+    // -----------------------------------------------------------------------
+    let mut b0 = Block::new(BlockId::new(0));
+
+    // TG arrays (hoisted to function scope by codegen).
+    b0.push_op_no_result(Op::ThreadgroupAlloc { dtype: dt, size: BM * TG_LD, name: "Xs".into() });
+    b0.push_op_no_result(Op::ThreadgroupAlloc { dtype: dt, size: BN * TG_LD, name: "Ws".into() });
+    // fp32 staging for ct_c.store() — 4 SG × 16×16 floats.
+    b0.push_op_no_result(Op::ThreadgroupAlloc {
+        dtype: DType::F32,
+        size: 4 * 16 * 16,
+        name: "OutScratch".into(),
+    });
+
+    // Program IDs (axis=1 triggers tgid_y alias in Reduction mode).
+    let v_tgid_y = nv!();
+    b0.push_op(Op::ProgramId { axis: 1 }, v_tgid_y); // v0
+    let v_tgid_x = nv!();
+    b0.push_op(Op::ProgramId { axis: 0 }, v_tgid_x); // v1
+
+    // Built-in lane/SG indices.
+    let v_sg = nv!();
+    b0.push_op(load0!("simd_id"), v_sg); // v2 simd_group
+    let v_lane = nv!();
+    b0.push_op(load0!("simd_lane"), v_lane); // v3 simd_lane
+
+    // Constants.
+    let c0 = nv!();
+    b0.push_op(Op::Const { value: 0 }, c0); // v4
+    let c1 = nv!();
+    b0.push_op(Op::Const { value: 1 }, c1); // v5
+    let c2 = nv!();
+    b0.push_op(Op::Const { value: 2 }, c2); // v6
+    let c3 = nv!();
+    b0.push_op(Op::Const { value: 3 }, c3); // v7
+    let c4 = nv!();
+    b0.push_op(Op::Const { value: 4 }, c4); // v8
+    let c8 = nv!();
+    b0.push_op(Op::Const { value: 8 }, c8); // v9
+    let c15 = nv!();
+    b0.push_op(Op::Const { value: 15 }, c15); // v10
+    let c16 = nv!();
+    b0.push_op(Op::Const { value: 16 }, c16); // v11
+    let c32 = nv!();
+    b0.push_op(Op::Const { value: 32 }, c32); // v12
+    let c36 = nv!();
+    b0.push_op(Op::Const { value: 36 }, c36); // v13 TG_LD
+    let c64 = nv!();
+    b0.push_op(Op::Const { value: 64 }, c64); // v14 GROUP_SIZE
+    let c256 = nv!();
+    b0.push_op(Op::Const { value: 256 }, c256); // v15 per-SG scratch
+
+    // Constexpr loads.
+    let v_k = nv!();
+    b0.push_op(load0!("k"), v_k); // v16
+    let v_n = nv!();
+    b0.push_op(load0!("n"), v_n); // v17
+    let v_gs = nv!();
+    b0.push_op(load0!("gs_per_row"), v_gs); // v18
+
+    // lane_in_tg = simd_group * 32 + simd_lane.
+    let v_sg32 = nv!();
+    b0.push_op(bop!(Mul, v_sg, c32), v_sg32); // v19
+    let v_lane_in_tg = nv!();
+    b0.push_op(bop!(Add, v_sg32, v_lane), v_lane_in_tg); // v20
+
+    // sm = simd_group / 2, sn = simd_group & 1.
+    let v_sm = nv!();
+    b0.push_op(bop!(Div, v_sg, c2), v_sm); // v21
+    let v_sn = nv!();
+    b0.push_op(bop!(BitAnd, v_sg, c1), v_sn); // v22
+
+    // sg_m_base = sm * 16, sg_n_base = sn * 16.
+    let v_sg_m_base = nv!();
+    b0.push_op(bop!(Mul, v_sm, c16), v_sg_m_base); // v23
+    let v_sg_n_base = nv!();
+    b0.push_op(bop!(Mul, v_sn, c16), v_sg_n_base); // v24
+
+    // Per-SG TG-buffer offsets: xs_sg_off = sg_m_base * TG_LD, ws_sg_off = sg_n_base * TG_LD.
+    let v_xs_sg_off = nv!();
+    b0.push_op(bop!(Mul, v_sg_m_base, c36), v_xs_sg_off); // v25
+    let v_ws_sg_off = nv!();
+    b0.push_op(bop!(Mul, v_sg_n_base, c36), v_ws_sg_off); // v26
+
+    // x_m_row = lane_in_tg / 4  (= w_row; both derived from lane_in_tg/4).
+    // x_k_quad = lane_in_tg & 3 (= pack_in_row).
+    // x_k_base = x_k_quad * 8.
+    let v_x_m_row = nv!();
+    b0.push_op(bop!(Div, v_lane_in_tg, c4), v_x_m_row); // v27
+    let v_x_k_quad = nv!();
+    b0.push_op(bop!(BitAnd, v_lane_in_tg, c3), v_x_k_quad); // v28
+    let v_x_k_base = nv!();
+    b0.push_op(bop!(Mul, v_x_k_quad, c8), v_x_k_base); // v29
+
+    // x_m_base = tgid_y * 32, w_n_base = tgid_x * 32.
+    let v_x_m_base = nv!();
+    b0.push_op(bop!(Mul, v_tgid_y, c32), v_x_m_base); // v30
+    let v_w_n_base = nv!();
+    b0.push_op(bop!(Mul, v_tgid_x, c32), v_w_n_base); // v31
+
+    // packs_per_row = k / 8.
+    let v_packs_per_row = nv!();
+    b0.push_op(bop!(Div, v_k, c8), v_packs_per_row); // v32
+
+    // wn_plus_wr = w_n_base + w_row (w_row == x_m_row == v27).
+    let v_wn_wr = nv!();
+    b0.push_op(bop!(Add, v_w_n_base, v_x_m_row), v_wn_wr); // v33
+
+    // sb_base = wn_plus_wr * gs_per_row.
+    let v_sb_base = nv!();
+    b0.push_op(bop!(Mul, v_wn_wr, v_gs), v_sb_base); // v34
+
+    // w_pack_row_base = wn_plus_wr * packs_per_row.
+    let v_w_pack_row_base = nv!();
+    b0.push_op(bop!(Mul, v_wn_wr, v_packs_per_row), v_w_pack_row_base); // v35
+
+    // out_m_base = x_m_base + sg_m_base, out_n_base = w_n_base + sg_n_base.
+    let v_out_m_base = nv!();
+    b0.push_op(bop!(Add, v_x_m_base, v_sg_m_base), v_out_m_base); // v36
+    let v_out_n_base = nv!();
+    b0.push_op(bop!(Add, v_w_n_base, v_sg_n_base), v_out_n_base); // v37
+
+    // sg_scratch_off = simd_group * 256 (per-SG offset into OutScratch).
+    let v_sg_scratch_off = nv!();
+    b0.push_op(bop!(Mul, v_sg, c256), v_sg_scratch_off); // v38
+
+    // o_row = simd_lane / 2, o_col_base = (simd_lane & 1) * 8.
+    let v_o_row = nv!();
+    b0.push_op(bop!(Div, v_lane, c2), v_o_row); // v39
+    let v_lane_mod2 = nv!();
+    b0.push_op(bop!(BitAnd, v_lane, c1), v_lane_mod2); // v40
+    let v_o_col_base = nv!();
+    b0.push_op(bop!(Mul, v_lane_mod2, c8), v_o_col_base); // v41
+
+    // CoopTile setup: descriptor (16×16×32, ta=false, tb=true) + ct objects.
+    b0.push_op_no_result(Op::CoopTileSetup {
+        name: "gemm".into(),
+        m: 16,
+        n: 16,
+        k: 32,
+        ta: false,
+        tb: true,
+        tc: false,
+        acc_mode: CoopTileAccMode::MultiplyAccumulate,
+        exec_scope: CoopTileScope::SimdGroup,
+        act_dtype: dt,
+        acc_dtype: DType::F32,
+        direct_inputs: false,
+        a_is_tg: false,
+        a_ei: 0,
+        a_eo: 0,
+        b_is_tg: false,
+        b_ei: 0,
+        b_eo: 0,
+    });
+    // Zero accumulator once before the K-loop.
+    b0.push_op_no_result(Op::CoopTileZero { name: "gemm".into() });
+
+    // K-loop: kb = 0..k step BK=32.  VarId(0) → i_0 in Block 1.
+    b0.push_op_no_result(Op::Loop {
+        var: VarId::new(0),
+        start: c0,
+        end: v_k,
+        step: c32,
+        body: BlockId::new(1),
+    });
+
+    // Store ct_c to per-SG slot of OutScratch.
+    b0.push_op_no_result(Op::CoopTileStoreC {
+        name: "gemm".into(),
+        ptr_name: "OutScratch".into(),
+        ptr_offset: Some(v_sg_scratch_off),
+        is_tg: true,
+        dtype: DType::F32,
+        ei: 16,
+        eo: 16,
+    });
+    b0.push_op_no_result(Op::Barrier);
+
+    // Write loop: 32 lanes × 8 elems → 256 = 16×16. VarId(1) → i_1 in Block 2.
+    b0.push_op_no_result(Op::Loop {
+        var: VarId::new(1),
+        start: c0,
+        end: c8,
+        step: c1,
+        body: BlockId::new(2),
+    });
+
+    // -----------------------------------------------------------------------
+    // Block 1 — K-loop body: X staging + W dequant + CoopTile ops.
+    // -----------------------------------------------------------------------
+    let mut b1 = Block::new(BlockId::new(1));
+    let v_kb = ValueId::new(0xC000_0000); // loop var i_0
+
+    // x_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base.
+    let v_xm_mr = nv!();
+    b1.push_op(bop!(Add, v_x_m_base, v_x_m_row), v_xm_mr); // v42
+    let v_xm_k = nv!();
+    b1.push_op(bop!(Mul, v_xm_mr, v_k), v_xm_k); // v43
+    let v_xm_kb = nv!();
+    b1.push_op(bop!(Add, v_xm_k, v_kb), v_xm_kb); // v44
+    let v_x_rdb = nv!();
+    b1.push_op(bop!(Add, v_xm_kb, v_x_k_base), v_x_rdb); // v45
+
+    // x_ws_base = x_m_row * TG_LD + x_k_base.
+    let v_mr_tgld = nv!();
+    b1.push_op(bop!(Mul, v_x_m_row, c36), v_mr_tgld); // v46
+    let v_x_wsb = nv!();
+    b1.push_op(bop!(Add, v_mr_tgld, v_x_k_base), v_x_wsb); // v47
+
+    // Unrolled X load/store: 8 elements per lane.
+    for ei in 0u32..8 {
+        let vc = nv!();
+        b1.push_op(Op::Const { value: ei as i64 }, vc);
+        let vdi = nv!();
+        b1.push_op(bop!(Add, v_x_rdb, vc), vdi);
+        let vxv = nv!();
+        b1.push_op(
+            Op::Load {
+                src: "x".into(),
+                indices: vec![IndexExpr::Value(vdi)],
+                mask: None,
+                other: None,
+            },
+            vxv,
+        );
+        let vti = nv!();
+        b1.push_op(bop!(Add, v_x_wsb, vc), vti);
+        b1.push_op_no_result(Op::ThreadgroupStore { name: "Xs".into(), index: vti, value: vxv });
+    }
+
+    // W dequant: 1 pack per lane covers 8 nibbles.
+    // pack_k_off = kb / 8 + pack_in_row.
+    let v_kb8 = nv!();
+    b1.push_op(bop!(Div, v_kb, c8), v_kb8); // v80
+    let v_pkoff = nv!();
+    b1.push_op(bop!(Add, v_kb8, v_x_k_quad), v_pkoff); // v81
+    let v_pdev = nv!();
+    b1.push_op(bop!(Add, v_w_pack_row_base, v_pkoff), v_pdev); // v82
+    let v_pack = nv!();
+    b1.push_op(
+        Op::Load {
+            src: "w".into(),
+            indices: vec![IndexExpr::Value(v_pdev)],
+            mask: None,
+            other: None,
+        },
+        v_pack,
+    ); // v83
+    let v_pir8 = nv!();
+    b1.push_op(bop!(Mul, v_x_k_quad, c8), v_pir8); // v84
+    let v_koff = nv!();
+    b1.push_op(bop!(Add, v_kb, v_pir8), v_koff); // v85
+    let v_g = nv!();
+    b1.push_op(bop!(Div, v_koff, c64), v_g); // v86
+    let v_sbg = nv!();
+    b1.push_op(bop!(Add, v_sb_base, v_g), v_sbg); // v87
+    let v_scl_raw = nv!();
+    b1.push_op(
+        Op::Load {
+            src: "scales".into(),
+            indices: vec![IndexExpr::Value(v_sbg)],
+            mask: None,
+            other: None,
+        },
+        v_scl_raw,
+    ); // v88
+    let v_scl = nv!();
+    b1.push_op(Op::Cast { value: v_scl_raw, dtype: DType::F32 }, v_scl); // v89
+    let v_bia_raw = nv!();
+    b1.push_op(
+        Op::Load {
+            src: "biases".into(),
+            indices: vec![IndexExpr::Value(v_sbg)],
+            mask: None,
+            other: None,
+        },
+        v_bia_raw,
+    ); // v90
+    let v_bia = nv!();
+    b1.push_op(Op::Cast { value: v_bia_raw, dtype: DType::F32 }, v_bia); // v91
+    // ws_base = w_row * TG_LD + pack_in_row * 8.
+    let v_wr36 = nv!();
+    b1.push_op(bop!(Mul, v_x_m_row, c36), v_wr36); // v92
+    let v_wsb = nv!();
+    b1.push_op(bop!(Add, v_wr36, v_pir8), v_wsb); // v93
+
+    // Unrolled nibble extraction: shift+mask pattern (avoids float constants).
+    for (ni, shift) in [0u32, 4, 8, 12, 16, 20, 24, 28].iter().enumerate() {
+        let vc_sh = nv!();
+        b1.push_op(Op::Const { value: *shift as i64 }, vc_sh);
+        let v_shr = nv!();
+        b1.push_op(bop!(Shr, v_pack, vc_sh), v_shr);
+        let v_nib = nv!();
+        b1.push_op(bop!(BitAnd, v_shr, c15), v_nib);
+        let v_q = nv!();
+        b1.push_op(Op::Cast { value: v_nib, dtype: DType::F32 }, v_q);
+        let v_sq = nv!();
+        b1.push_op(bop!(Mul, v_scl, v_q), v_sq);
+        let v_sqb = nv!();
+        b1.push_op(bop!(Add, v_sq, v_bia), v_sqb);
+        let v_wv = nv!();
+        b1.push_op(Op::Cast { value: v_sqb, dtype: dt }, v_wv);
+        let vc_i = nv!();
+        b1.push_op(Op::Const { value: ni as i64 }, vc_i);
+        let v_wi = nv!();
+        b1.push_op(bop!(Add, v_wsb, vc_i), v_wi);
+        b1.push_op_no_result(Op::ThreadgroupStore { name: "Ws".into(), index: v_wi, value: v_wv });
+    }
+
+    b1.push_op_no_result(Op::Barrier);
+
+    // Per-SG cooperative-tensor load from TG staging buffers.
+    // extents<TG_LD=36, 16>: stride-1 along the K dimension (inner), stride TG_LD along M/N (outer).
+    b1.push_op_no_result(Op::CoopTileLoadA {
+        name: "gemm".into(),
+        ptr_name: "Xs".into(),
+        ptr_offset: Some(v_xs_sg_off),
+        is_tg: true,
+        dtype: dt,
+        ei: 36,
+        eo: 16,
+        direct: false,
+    });
+    b1.push_op_no_result(Op::CoopTileLoadB {
+        name: "gemm".into(),
+        ptr_name: "Ws".into(),
+        ptr_offset: Some(v_ws_sg_off),
+        is_tg: true,
+        dtype: dt,
+        ei: 36,
+        eo: 16,
+        direct: false,
+    });
+    b1.push_op_no_result(Op::CoopTileRun { name: "gemm".into(), direct: false });
+    b1.push_op_no_result(Op::Barrier);
+
+    // -----------------------------------------------------------------------
+    // Block 2 — write loop: cast fp32 scratch → T and store to `out`.
+    // 32 lanes × 8 elems = 256 = 16×16.
+    // -----------------------------------------------------------------------
+    let mut b2 = Block::new(BlockId::new(2));
+    let v_wi_loop = ValueId::new(0xC000_0001); // loop var i_1
+
+    // col = o_col_base + i.
+    let v_col = nv!();
+    b2.push_op(bop!(Add, v_o_col_base, v_wi_loop), v_col);
+
+    // scratch index = sg_scratch_off + o_row * 16 + col.
+    let v_r16 = nv!();
+    b2.push_op(bop!(Mul, v_o_row, c16), v_r16);
+    let v_sloc = nv!();
+    b2.push_op(bop!(Add, v_r16, v_col), v_sloc);
+    let v_sidx = nv!();
+    b2.push_op(bop!(Add, v_sg_scratch_off, v_sloc), v_sidx);
+
+    // Load fp32 from scratch, cast to T.
+    let v_f32 = nv!();
+    b2.push_op(Op::ThreadgroupLoad { name: "OutScratch".into(), index: v_sidx }, v_f32);
+    let v_vt = nv!();
+    b2.push_op(Op::Cast { value: v_f32, dtype: dt }, v_vt);
+
+    // Compute flat output index = (out_m_base + o_row) * n + (out_n_base + col).
+    let v_orow = nv!();
+    b2.push_op(bop!(Add, v_out_m_base, v_o_row), v_orow);
+    let v_ocol = nv!();
+    b2.push_op(bop!(Add, v_out_n_base, v_col), v_ocol);
+    let v_orn = nv!();
+    b2.push_op(bop!(Mul, v_orow, v_n), v_orn);
+    let v_oidx = nv!();
+    b2.push_op(bop!(Add, v_orn, v_ocol), v_oidx);
+
+    b2.push_op_no_result(Op::Store {
+        dst: "out".into(),
+        indices: vec![IndexExpr::Value(v_oidx)],
+        value: v_vt,
+        mask: None,
+    });
+
+    // -----------------------------------------------------------------------
+    // Assemble kernel.
+    // -----------------------------------------------------------------------
+    let mut all_blocks = FxHashMap::default();
+    all_blocks.insert(BlockId::new(0), b0.clone());
+    all_blocks.insert(BlockId::new(1), b1);
+    all_blocks.insert(BlockId::new(2), b2);
+
+    k.body = b0;
+    k.blocks = all_blocks;
     k
 }
 
@@ -386,16 +566,19 @@ mod tests {
             assert_eq!(k.constexprs[0].name.name(), "k");
             assert_eq!(k.constexprs[1].name.name(), "n");
             assert_eq!(k.constexprs[2].name.name(), "gs_per_row");
-            // Body has `Op::Load { src: "tgid_y" }` (tgid_y alias trigger) + InlineMsl.
-            assert!(k.body.ops.iter().any(|op| matches!(op, Op::InlineMsl { .. })));
-            assert!(
-                k.body.ops.iter().any(|op| matches!(op, Op::Load { src, .. } if src == "tgid_y"))
-            );
+            // Body must use CoopTile* ops, not InlineMsl.
+            assert!(k.body.ops.iter().any(|op| matches!(op, Op::CoopTileSetup { .. })));
+            assert!(k.body.ops.iter().any(|op| matches!(op, Op::CoopTileZero { .. })));
+            assert!(k.body.ops.iter().any(|op| matches!(op, Op::CoopTileStoreC { .. })));
+            assert!(!k.body.ops.iter().any(|op| matches!(op, Op::InlineMsl { .. })));
+            // K-loop body (block 1) must have CoopTileLoadA/B and Run.
+            let b1 = &k.blocks[&BlockId::new(1)];
+            assert!(b1.ops.iter().any(|op| matches!(op, Op::CoopTileLoadA { .. })));
+            assert!(b1.ops.iter().any(|op| matches!(op, Op::CoopTileLoadB { .. })));
+            assert!(b1.ops.iter().any(|op| matches!(op, Op::CoopTileRun { .. })));
         }
     }
 
-    /// Developer aid — `cargo test -p metaltile-std --lib quantized_mpp::tests::dump_generated_msl -- --nocapture`.
-    /// Always passes; gated behind `--nocapture` for output.
     #[test]
     fn dump_generated_msl() {
         use metaltile_codegen::msl::MslGenerator;
@@ -408,7 +591,7 @@ mod tests {
     #[test]
     fn codegen_emits_mpp_include_and_kernel_decl() {
         use metaltile_codegen::msl::MslGenerator;
-        for (dt, t_name) in [(DType::F32, "float"), (DType::F16, "half")] {
+        for (dt, _t_name) in [(DType::F32, "float"), (DType::F16, "half")] {
             let mut k = kernel_ir_for(dt);
             // Per-dtype naming convention used by the `tile emit` subcommand.
             let suffix = match dt {
@@ -420,20 +603,12 @@ mod tests {
             let msl = MslGenerator::default().generate(&k).expect("codegen");
             assert!(
                 msl.contains("MetalPerformancePrimitives/MetalPerformancePrimitives.h"),
-                "MPP include missing from generated MSL:\n{msl}"
+                "MPP include missing:\n{msl}"
             );
             assert!(msl.contains("mpp::tensor_ops::matmul2d_descriptor"));
             assert!(msl.contains(&format!("kernel void mt_qmm_mma_mpp_{suffix}")));
-            // Sanity-check the dtype substitution landed.
-            assert!(msl.contains(&format!("threadgroup {t_name} Xs")));
-            assert!(msl.contains(&format!("threadgroup {t_name} Ws")));
-            // Sanity-check tgid_y is bound (Reduction mode emits it when
-            // `kernel_uses_program_id_axis(1)` returns true, which the
-            // synthetic Op::ProgramId { axis: 1 } guarantees).
-            assert!(
-                msl.contains("tgid_y"),
-                "tgid_y must be bound (synthetic ProgramId axis=1 op):\n{msl}"
-            );
+            assert!(msl.contains("tgid_y"), "tgid_y must be bound:\n{msl}");
+            assert!(msl.contains("gemm_ct_c"), "ct_c missing:\n{msl}");
         }
     }
 }
