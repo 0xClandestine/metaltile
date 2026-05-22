@@ -12,8 +12,9 @@ Sources surveyed:
 ## Summary
 
 - Total kernel-op rows in this audit (union): **89**
-- metaltile-ported kernel ops: **73 / 89 = 82 %** — 72 full ✓ (81 %), 1 partial ~ (1 %)
-- **Still to cover: 17 ops not ported (✗)**, plus **1 partial port** still to finish (conv winograd)
+- metaltile-ported kernel ops: **73 / 89 = 82 %** — 73 full ✓ (82 %), 0 partial
+- **Still to cover: 17 ops not ported (✗)** — every partial port is now
+  closed (the conv Winograd fast path landed, see the `conv` row below)
 - The 6 Vision / STT / TTS front-end kernels (Phase 6.5 / 7) — `conv2d`,
   `patch_embed`, `rope_2d`, `mel_spectrogram`, `audio_conv1d`,
   `vocoder/iSTFT` — are now ported (✓ rows below).
@@ -88,7 +89,7 @@ Sources surveyed:
 | steel_conv 2D (implicit-GEMM) | ✓ | ✓ | ✓ | `ffai/conv2d.rs` → `conv2d_patch14` / `conv2d_patch16` / `conv2d_generic`. 2D convolution as a direct conv (implicit im2col, one thread per output) rather than MLX's explicit-im2col tiled GEMM — equivalent result, no im2col staging buffer. Covers fixed-patch and runtime-stride/pad configs. The MMA-tiled implicit-GEMM is a perf follow-up. Verified by `conv2d_gpu_correctness`. |
 | steel_conv 3D | ✓ | ✓ | ✓ | `ffai/conv3d.rs` → `conv3d_generic` (strided / padded dense 3D conv) + `conv3d_grouped` (adds dilation + grouped channels; `groups == in_ch` is depthwise). 5D NCDHW input, OIDHW weight — the volumetric counterpart of `conv2d.rs`: direct conv (implicit im2col), one thread per output voxel, fp32 accumulation, padding taps masked in the padded-input frame. Generic `T` (f32/f16/bf16). The MMA-tiled implicit-GEMM is a perf follow-up. Verified by `conv3d_gpu_correctness`. |
 | steel_conv_general (strides/dilation/groups) | ✓ | ✓ | ✓ | `ffai/conv2d.rs` → `conv2d_grouped<T>`. Fully general 2D conv: strides, dilation (atrous), padding, and grouped channels (`groups == in_ch` is depthwise). NCHW input, OIHW weight with the I dimension = `in_ch/groups`. Direct conv, one thread per output, fp32 accumulation. Verified by `conv2d_gpu_correctness`. |
-| conv (winograd + naive_unfold + depthwise) | ✓ | ✓ | ~ | The `naive_unfold` + depthwise cases are covered for **both 2D and 3D** — `ffai/conv2d.rs` (`conv2d_generic` + `conv2d_grouped`) and `ffai/conv3d.rs` (`conv3d_generic` + `conv3d_grouped`); the `_grouped` kernels handle depthwise via `groups == in_ch` and dilation (atrous). The Winograd fast-conv path is not ported (a perf-only specialization for 3×3 stride-1 convs). The old `mlx/conv.rs` bench-crate stub is superseded. |
+| conv (winograd + naive_unfold + depthwise) | ✓ | ✓ | ✓ | The `naive_unfold` + depthwise cases are covered for **both 2D and 3D** — `ffai/conv2d.rs` (`conv2d_generic` + `conv2d_grouped`) and `ffai/conv3d.rs` (`conv3d_generic` + `conv3d_grouped`); the `_grouped` kernels handle depthwise via `groups == in_ch` and dilation (atrous). The Winograd fast-conv path is `ffai/winograd_conv.rs` → `winograd_conv2d_3x3<T>` — the F(2×2, 3×3) minimal-filtering algorithm (input/filter/output transforms + a 4×4 element-wise product summed over `in_ch`), one thread per 2×2 output tile; requires even output dims (`conv2d_generic` covers odd outputs). The cuDNN-style split into separate filter-transform / batched-GEMM / untransform kernels is a perf follow-up. Verified by `winograd_conv_gpu_correctness`. The old `mlx/conv.rs` bench-crate stub is superseded. |
 | gemv | ✓ | ✓ | ✓ | `mlx/gemv.rs` → `mt_gemv<T>`. |
 | gemv_masked | ✓ | ✓ | ✓ | `mlx/gemv_masked.rs` → `mt_gemv_masked<T>` (no MLX comparison wired). |
 | quantized (affine_quantize / affine_dequantize) | ✓ | ✓ | ✓ | `mlx/quantized.rs` → quantize **and** dequantize for all widths: int2/int4/int8 (power-of-2, pack-aligned) + int3/int5/int6 (byte-stream, non-power-of-2). All six quantize kernels (`mt_affine_quantize_int{2,3,4,5,6,8}`) + six dequantize kernels (`mt_affine_dequantize_int{2,3,4,5,6,8}`) are ported. The int3/5/6 quantize kernels use a bit-stream OR strategy (lane 0 iterates over all group_size elements, ORing each code into the correct uint32 word) to handle codes that straddle word boundaries — no atomics needed. Verified by `affine_int2_gpu_correctness` (int2 round-trip) + `affine_int356_quantize_gpu_correctness` (int3/5/6 quantize→dequantize round-trips). |
@@ -173,7 +174,8 @@ largely landed now (`rms_norm_residual` / `_rope` / `_qgemv`,
 `steel_gemm_fused` simdgroup-MMA ladder with one extra piece of index / mask /
 split logic. `fft` (radix-2) and `quantized_nax` are also ✓. The `steel_conv`
 family (2D, general, 3D) is fully ported as direct convs (`ffai/conv2d.rs`,
-`ffai/conv3d.rs`).
+`ffai/conv3d.rs`), and the 3×3-stride-1 Winograd fast path is landed
+(`ffai/winograd_conv.rs`).
 
 1. **`steel_gemm_fused` shape coverage** — only `64×64×16` is wired today for
    the `fused` row; prefill perf needs more block shapes. (The `gather` /
@@ -187,10 +189,11 @@ family (2D, general, 3D) is fully ported as direct convs (`ffai/conv2d.rs`,
    escape-hatch — see its row); the remaining `nax`-gated rows can follow the
    same pattern, but each is a from-scratch `mpp::` MSL body (the `#[kernel]`
    front-end does not expose cooperative-tensor types).
-4. **Winograd fast-conv** — the 3×3 stride-1 perf specialization on the
-   `conv` row; the direct-conv `naive_unfold` / depthwise paths are
-   landed (`ffai/conv2d.rs`, `ffai/conv3d.rs`), Winograd is the remaining
-   perf follow-up.
+4. **Winograd fast-conv** — **landed** (`ffai/winograd_conv.rs` →
+   `winograd_conv2d_3x3<T>`, F(2×2, 3×3)). The remaining perf follow-up
+   is the cuDNN-style kernel split (filter-transform / batched-GEMM /
+   untransform) so the filter transform is hoisted out of the per-tile
+   inner loop.
 
 (`fence` is **not** a next-up item — it is intentionally out of scope; see
 [§ Fence ops](#fence-ops--intentionally-out-of-scope).)

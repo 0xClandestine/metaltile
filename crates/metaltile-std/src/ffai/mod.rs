@@ -60,3 +60,4 @@ pub mod sdpa_multi;
 pub mod ssm;
 pub mod ssm_replay;
 pub mod vocoder;
+pub mod winograd_conv;
