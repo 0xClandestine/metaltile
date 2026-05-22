@@ -2788,7 +2788,7 @@ fn run_sdpa_batched_decode_form(
             Ok(s) => s,
             Err(_) => return vec![],
         };
-    let single_compiled = match compile_mt(runner, &single_msl, "sdpa_decode") {
+    let single_compiled = match compile_mt(runner, &single_msl, "ffai_sdpa_decode") {
         Some(k) => k,
         None => return vec![],
     };
@@ -2827,10 +2827,10 @@ fn run_sdpa_batched_decode_form(
     let mt_out = read_typed(runner, &mt_out_buf, n_q_heads * batch_q * head_dim, dt);
 
     // Single-Q reference — gather Q[h, 0, :] for all h, dispatch
-    // `sdpa_decode` once, compare against M7's row qi=0 across all heads.
-    // sdpa_decode picks up the post-#50 signature:
+    // `ffai_sdpa_decode` once, compare against M7's row qi=0 across all
+    // heads. `ffai_sdpa_decode`'s 13-buffer signature is:
     // q, k, v, out, head_dim, n_kv, kv_stride, heads_per_group,
-    // sink_end, window_start, scale.
+    // sink_end, window_start, has_sink, sink_logit, scale.
     let mut q_first: Vec<f32> = vec![0.0; n_q_heads * head_dim];
     for h in 0..n_q_heads {
         let src = (h * batch_q) * head_dim;
@@ -2841,6 +2841,9 @@ fn run_sdpa_batched_decode_form(
     let single_out_buf = zeros_typed(runner, n_q_heads * head_dim, dt);
     let sink_buf = runner.buffer_u32(0);
     let window_buf = runner.buffer_u32(0);
+    // Dense path — no learned attention sink (has_sink = 0).
+    let has_sink_buf = runner.buffer_u32(0);
+    let sink_logit_buf = runner.buffer_f32_scalar(0.0);
     let single_bufs: Vec<&GpuBuffer> = vec![
         &single_q_buf,
         &k_buf,
@@ -2852,6 +2855,8 @@ fn run_sdpa_batched_decode_form(
         &hpg_buf,
         &sink_buf,
         &window_buf,
+        &has_sink_buf,
+        &sink_logit_buf,
         &sc_buf,
     ];
     runner.measure(&single_compiled, &single_bufs, [n_q_heads, 1, 1], [single_tpg, 1, 1], 0, 1);
@@ -3134,7 +3139,7 @@ fn run_sdpa_batched_decode_prefill_tile(
     let (ref_perf, ref_timing) = match MslGenerator::new(msl_cfg_for(Some(single_tpg as u32)))
         .generate(&single_kernel)
         .ok()
-        .and_then(|s| compile_mt(runner, &s, "sdpa_decode"))
+        .and_then(|s| compile_mt(runner, &s, "ffai_sdpa_decode"))
     {
         Some(single_compiled) => {
             let mut q_first: Vec<f32> = vec![0.0; n_q_heads * head_dim];
@@ -3155,6 +3160,9 @@ fn run_sdpa_batched_decode_prefill_tile(
             let single_hpg_buf = runner.buffer_u32(gqa_factor as u32);
             let sink_buf = runner.buffer_u32(0);
             let window_buf = runner.buffer_u32(0);
+            // Dense path — no learned attention sink (has_sink = 0).
+            let has_sink_buf = runner.buffer_u32(0);
+            let sink_logit_buf = runner.buffer_f32_scalar(0.0);
             let single_bufs: Vec<&GpuBuffer> = vec![
                 &single_q_buf,
                 &k_single_buf,
@@ -3166,6 +3174,8 @@ fn run_sdpa_batched_decode_prefill_tile(
                 &single_hpg_buf,
                 &sink_buf,
                 &window_buf,
+                &has_sink_buf,
+                &sink_logit_buf,
                 &sc_buf,
             ];
             let ref_bytes_scaled = m7_bytes / (batch_q as f64);
