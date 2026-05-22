@@ -203,6 +203,21 @@ impl PipelineBuilder {
         PipelineBuilder { passes }
     }
 
+    /// Replace the default schedule pass with one constructed from
+    /// `config`. Used by the autotuner to inject a candidate
+    /// `ScheduleConfig` per benchmark run without rebuilding the rest
+    /// of the pipeline.
+    pub fn with_schedule_config(self, config: schedule::ScheduleConfig) -> Self {
+        let mut passes = self.passes;
+        for p in passes.iter_mut() {
+            if p.name() == "schedule" {
+                *p = Box::new(schedule::SchedulePass::new(config.clone()));
+                break;
+            }
+        }
+        PipelineBuilder { passes }
+    }
+
     /// Build the final pass list.
     pub fn build(self) -> Vec<Box<dyn Pass>> { self.passes }
 }

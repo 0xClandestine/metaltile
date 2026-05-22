@@ -48,6 +48,8 @@ enum Command {
     Snap(SnapArgs),
     /// Compare bench results against a saved baseline
     Diff(DiffArgs),
+    /// Warm the autotune cache by searching per-family config spaces
+    Autotune(AutotuneArgs),
 }
 
 // ── Bench ────────────────────────────────────────────────────────────────
@@ -187,6 +189,57 @@ struct DiffArgs {
     only_improvements: bool,
 }
 
+// ── Autotune ─────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+struct AutotuneArgs {
+    /// Only tune kernels whose name contains this text
+    #[arg(long = "filter", short = 'f')]
+    filter: Option<String>,
+    /// List tuneable kernels + their config spaces and exit
+    #[arg(long = "list", conflicts_with_all = ["dump", "clear"])]
+    list: bool,
+    /// Print the current disk cache JSON and exit
+    #[arg(long = "dump", conflicts_with_all = ["clear"])]
+    dump: bool,
+    /// Delete the disk cache file and exit
+    #[arg(long = "clear")]
+    clear: bool,
+    /// Use real GPU timing instead of the static occupancy heuristic.
+    /// Currently covers BenchDispatch::Generic specs; non-Generic
+    /// dispatches fall back to static cost.
+    #[arg(long = "measure")]
+    measure: bool,
+    /// Triage mode: 3 warmup + 11 iterations per --measure candidate.
+    /// Skips the 20/100 Playbook minimum — only use for quick smoke
+    /// runs. Cached winners are not safe to persist into a long-lived
+    /// disk cache from --quick alone. No-op without --measure.
+    #[arg(long = "quick", requires = "measure")]
+    quick: bool,
+    /// Comma-separated list of N values to tune over (e.g. `64,256,1024,16384`).
+    /// Each N overrides `spec.shapes[0].n` and produces an independent
+    /// cache entry keyed by the bucket the N falls into — so one run
+    /// can populate several buckets per (kernel, dtype). When absent,
+    /// only `spec.shapes[0]` is tuned (legacy behavior). Only `Generic`
+    /// dispatch specs honor this; non-`Generic` arms ignore it.
+    #[arg(long = "shapes", value_delimiter = ',')]
+    shapes: Vec<usize>,
+    /// Export the current disk cache as JSONL training data for the
+    /// Phase 2 learned predictor. One row per (kernel, dtype, bucket)
+    /// winner, with the cache_key split out into separate fields and
+    /// the family tagged via `Autotuner::infer_family`. Pass a path,
+    /// `-` for stdout, or omit the value to write to
+    /// `~/.cache/metaltile/training_data.jsonl`. Read-only: doesn't
+    /// dispatch or modify the cache.
+    #[arg(
+        long = "export-training-data",
+        num_args = 0..=1,
+        default_missing_value = "",
+        conflicts_with_all = ["measure", "quick", "clear", "dump", "list"],
+    )]
+    export_training_data: Option<String>,
+}
+
 // ── Dispatch ─────────────────────────────────────────────────────────────
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -226,6 +279,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Device(args) => cmd::device::run(&args)?,
         Command::Snap(args) => cmd::snap::run(&args)?,
         Command::Diff(args) => cmd::diff::run(&args)?,
+        Command::Autotune(args) => cmd::autotune::run(&args)?,
     }
     Ok(())
 }
