@@ -144,7 +144,7 @@ pub fn compile(
 
     // Find the index of the first prefill_skip = true node.
     // Nodes from this index onward are skipped during non-final prefill.
-    let prefill_node_count =
+    let mut prefill_node_count =
         raw_nodes.iter().position(|rn| rn.node.prefill_skip).unwrap_or(raw_nodes.len());
 
     // ── Step 2: Compile each RawNode → DispatchNode ────────────────
@@ -319,6 +319,26 @@ pub fn compile(
         FusionMode::None => {
             info!("no fusion: {} nodes → {} dispatches", nodes.len(), nodes.len());
         },
+    }
+
+    // ── Step 2.6: Kernel-body fusion synthesis ───────────────────
+    // For compatible fuse groups, replace N DispatchNodes with a single
+    // synthesized "host kernel" that chains the individual kernels via
+    // Op::KernelCall.  KernelInlinePass (first pass in standard_pipeline)
+    // splices the callees inline at MSL generation time, eliminating
+    // intermediate buffer round-trips for intra-group tensors.
+    //
+    // Must run BEFORE slot assignment so liveness analysis doesn't allocate
+    // slots for eliminated intra-group intermediates.
+    if fusion_mode != FusionMode::None {
+        crate::fuse_group::synthesize_fuse_groups(
+            &mut nodes,
+            &mut cached_kernels,
+            &mut intermediate_outputs,
+            &mut intermediate_inputs,
+            &mut prefill_node_count,
+            p.activation_dtype,
+        );
     }
 
     // ── Step 3: Liveness analysis → slot assignment ────────────────

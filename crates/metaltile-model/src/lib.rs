@@ -36,6 +36,7 @@ pub mod compiler;
 pub mod error;
 pub mod executor;
 pub mod expr;
+pub mod fuse_group;
 pub mod liveness;
 pub mod plan;
 pub mod registry;
