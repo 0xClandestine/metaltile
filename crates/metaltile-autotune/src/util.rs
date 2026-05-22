@@ -58,9 +58,10 @@ pub(crate) fn median_us(samples: Vec<f64>) -> Result<f64, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use metaltile_core::dtype::DType;
     use metaltile_std::spec::{BenchDispatch, BenchSpec, ScalarBufSpec, ShapeSpec};
+
+    use super::*;
 
     #[test]
     fn median_us_returns_middle_for_odd_n() {

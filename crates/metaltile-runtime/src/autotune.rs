@@ -295,6 +295,7 @@ impl Autotuner {
     ///
     /// On bench errors we log + skip the candidate. If every candidate
     /// errors we surface the last error.
+    #[allow(clippy::type_complexity)] // bench_fn is intentionally a `&mut dyn FnMut` — a type alias would obscure the signature at the call site for marginal gain.
     pub fn tune(
         &mut self,
         kernel_name: &str,
@@ -302,7 +303,10 @@ impl Autotuner {
         constexprs: &ConstExprValues,
         bench_fn: &mut dyn FnMut(
             &TuneConfig,
-        ) -> Result<(f64, Option<PsoReflection>), crate::error::MetalTileError>,
+        ) -> Result<
+            (f64, Option<PsoReflection>),
+            crate::error::MetalTileError,
+        >,
     ) -> Result<TuneConfig, crate::error::MetalTileError> {
         let space = family.config_space();
         let key = cache_key(kernel_name, constexprs);

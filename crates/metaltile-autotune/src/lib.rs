@@ -36,10 +36,11 @@ mod util;
 pub use budget::TuneOutcome;
 pub use engine::{KernelOk, run_autotune};
 pub use export::{
-    collect_training_rows, default_training_data_path, write_training_jsonl,
+    collect_training_rows,
+    default_training_data_path,
+    write_training_jsonl,
     write_training_jsonl_to_file,
 };
-
 // Re-export so callers don't need a transitive metaltile dep just to
 // match on TrainingRow fields.
 pub use metaltile::autotune::TrainingRow;

@@ -59,13 +59,7 @@ fn main() {
     let kernel = runner.compile(MSL, "add_one").expect("compile add_one");
 
     // 64K → 16M f32 elements (256 KB → 64 MB).
-    let sizes: &[usize] = &[
-        64 * 1024,
-        256 * 1024,
-        1024 * 1024,
-        4 * 1024 * 1024,
-        16 * 1024 * 1024,
-    ];
+    let sizes: &[usize] = &[64 * 1024, 256 * 1024, 1024 * 1024, 4 * 1024 * 1024, 16 * 1024 * 1024];
     const TPG: usize = 256;
     const WARMUP: usize = 3;
     const ITERS: usize = 5;

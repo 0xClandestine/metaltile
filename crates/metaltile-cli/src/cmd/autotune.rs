@@ -10,8 +10,14 @@ use std::path::PathBuf;
 
 use metaltile::autotune::Autotuner;
 use metaltile_autotune::{
-    AutotuneError, AutotuneOptions, AutotuneSummary, KernelTuneResult, collect_training_rows,
-    default_training_data_path, write_training_jsonl, write_training_jsonl_to_file,
+    AutotuneError,
+    AutotuneOptions,
+    AutotuneSummary,
+    KernelTuneResult,
+    collect_training_rows,
+    default_training_data_path,
+    write_training_jsonl,
+    write_training_jsonl_to_file,
 };
 use metaltile_std::spec::{BenchDispatch, BenchSpec};
 
@@ -131,10 +137,8 @@ fn print_summary(args: &AutotuneArgs, summary: &AutotuneSummary) {
     };
     println!(
         "\n  {tuned}{sep}{measured}{sep}{estimated}{sep}{skipped}{fallback_segment}{sep}{disk}",
-        tuned = paint_stdout(
-            format!("{} tuned", summary.tuned),
-            Style::new().fg(Color::Green).bold(),
-        ),
+        tuned =
+            paint_stdout(format!("{} tuned", summary.tuned), Style::new().fg(Color::Green).bold(),),
         measured = paint_stdout(
             format!("{} measured", summary.measured),
             if summary.measured > 0 {
@@ -193,11 +197,7 @@ fn export_training_data(dest: &str) -> Result<(), crate::CliError> {
         return Ok(());
     }
 
-    let path = if dest.is_empty() {
-        default_training_data_path()
-    } else {
-        PathBuf::from(dest)
-    };
+    let path = if dest.is_empty() { default_training_data_path() } else { PathBuf::from(dest) };
     write_training_jsonl_to_file(&path, &rows).map_err(map_autotune_error)?;
     println!(
         "  {} {} {}",

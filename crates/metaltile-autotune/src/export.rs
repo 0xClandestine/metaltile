@@ -35,10 +35,7 @@ pub fn write_training_jsonl_to_file(
 }
 
 /// Write rows as JSONL to any `Write` sink — one row per line.
-pub fn write_training_jsonl<W: Write>(
-    mut w: W,
-    rows: &[TrainingRow],
-) -> Result<(), AutotuneError> {
+pub fn write_training_jsonl<W: Write>(mut w: W, rows: &[TrainingRow]) -> Result<(), AutotuneError> {
     for row in rows {
         let line = serde_json::to_string(row)
             .map_err(|e| AutotuneError::Other(format!("serialize training row: {e}")))?;
@@ -49,8 +46,9 @@ pub fn write_training_jsonl<W: Write>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use metaltile::autotune::TuneConfig;
+
+    use super::*;
 
     #[test]
     fn write_training_jsonl_emits_one_object_per_line() {

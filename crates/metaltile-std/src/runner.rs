@@ -228,9 +228,7 @@ mod metal_impl {
         /// device, or `None` if the device doesn't expose any counter sets
         /// at all. Apple Silicon devices observed in the field expose only
         /// this set through the public `MTLCounterSampleBuffer` API.
-        pub fn timestamp_counter_set(
-            &self,
-        ) -> Option<Retained<ProtocolObject<dyn MTLCounterSet>>> {
+        pub fn timestamp_counter_set(&self) -> Option<Retained<ProtocolObject<dyn MTLCounterSet>>> {
             let sets = self.device.counterSets()?;
             let target: &NSString = unsafe { MTLCommonCounterSetTimestamp };
             for i in 0..sets.count() {
@@ -259,11 +257,7 @@ mod metal_impl {
                     core::ptr::NonNull::new_unchecked(&mut gpu as *mut _),
                 );
             }
-            if gpu == 0 {
-                1.0
-            } else {
-                cpu as f64 / gpu as f64
-            }
+            if gpu == 0 { 1.0 } else { cpu as f64 / gpu as f64 }
         }
 
         /// Diagnostic: every counter set name the device exposes. Used by the
@@ -273,9 +267,7 @@ mod metal_impl {
             let Some(sets) = self.device.counterSets() else {
                 return vec![];
             };
-            (0..sets.count())
-                .map(|i| sets.objectAtIndex(i).name().to_string())
-                .collect()
+            (0..sets.count()).map(|i| sets.objectAtIndex(i).name().to_string()).collect()
         }
 
         /// Diagnostic: which `MTLCounterSamplingPoint` values the device
@@ -289,9 +281,7 @@ mod metal_impl {
                 ("AtTileDispatchBoundary", MTLCounterSamplingPoint::AtTileDispatchBoundary),
                 ("AtBlitBoundary", MTLCounterSamplingPoint::AtBlitBoundary),
             ];
-            pts.iter()
-                .map(|(name, p)| (*name, self.device.supportsCounterSampling(*p)))
-                .collect()
+            pts.iter().map(|(name, p)| (*name, self.device.supportsCounterSampling(*p))).collect()
         }
 
         /// Mirror of [`measure`] that also samples
@@ -340,7 +330,8 @@ mod metal_impl {
                 let end_idx = 2 * pass + 1;
 
                 let pass_desc = MTLComputePassDescriptor::new();
-                let attach = unsafe { pass_desc.sampleBufferAttachments().objectAtIndexedSubscript(0) };
+                let attach =
+                    unsafe { pass_desc.sampleBufferAttachments().objectAtIndexedSubscript(0) };
                 attach.setSampleBuffer(Some(&sample_buf));
                 unsafe {
                     attach.setStartOfEncoderSampleIndex(start_idx);
@@ -366,8 +357,7 @@ mod metal_impl {
 
                     if pass >= warmup {
                         let gpu_us = ((*cb).GPUEndTime() - (*cb).GPUStartTime()) * 1_000_000.0;
-                        let (start, end) =
-                            resolve_timestamp_pair(&sample_buf, start_idx, end_idx)?;
+                        let (start, end) = resolve_timestamp_pair(&sample_buf, start_idx, end_idx)?;
                         results.push(CounterSample {
                             gpu_us,
                             ts: TimestampCounters {
@@ -409,9 +399,7 @@ mod metal_impl {
             core::ptr::read_unaligned(bytes.as_ptr() as *const MTLCounterResultTimestamp)
         };
         let end = unsafe {
-            core::ptr::read_unaligned(
-                bytes.as_ptr().add(stride) as *const MTLCounterResultTimestamp,
-            )
+            core::ptr::read_unaligned(bytes.as_ptr().add(stride) as *const MTLCounterResultTimestamp)
         };
         Ok((start, end))
     }
@@ -455,10 +443,9 @@ mod metal_impl {
 }
 
 #[cfg(target_os = "macos")]
-use metal_impl::{MacosBuffer, MacosPipeline, MacosRunner};
-
-#[cfg(target_os = "macos")]
 pub use metal_impl::{CounterSample, TimestampCounters};
+#[cfg(target_os = "macos")]
+use metal_impl::{MacosBuffer, MacosPipeline, MacosRunner};
 
 /// Non-macOS stub of [`CounterSample`] so callers can write platform-agnostic
 /// signatures. All-zero on non-macOS.
@@ -749,8 +736,7 @@ impl GpuRunner {
         #[cfg(target_os = "macos")]
         {
             let raw: Vec<&MacosBuffer> = buffers.iter().map(|b| &b.inner).collect();
-            self.inner
-                .measure_with_counters(&kernel.inner, &raw, tgs, tpg, warmup, iters)
+            self.inner.measure_with_counters(&kernel.inner, &raw, tgs, tpg, warmup, iters)
         }
         #[cfg(not(target_os = "macos"))]
         Err("Metal counter sampling is only available on macOS".into())

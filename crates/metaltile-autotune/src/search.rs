@@ -76,9 +76,9 @@ impl<'a> CandidateSearch<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use std::cell::RefCell;
+
+    use super::*;
 
     /// Programmable measurer. Each script entry is the result for the
     /// next `measure` call, in order. `Some(Ok(us))` → success;

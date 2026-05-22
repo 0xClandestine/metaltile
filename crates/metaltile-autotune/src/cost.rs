@@ -2,7 +2,8 @@
 
 use metaltile::{MetalTileError, autotune::TuneConfig};
 use metaltile_codegen::passes::{
-    self, Pass,
+    self,
+    Pass,
     occupancy::{self, Bottleneck},
     schedule::ScheduleConfig,
 };

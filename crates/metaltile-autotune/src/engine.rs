@@ -11,7 +11,10 @@ use metaltile_std::{
 };
 
 use crate::{
-    AutotuneError, AutotuneOptions, AutotuneSummary, KernelTuneResult,
+    AutotuneError,
+    AutotuneOptions,
+    AutotuneSummary,
+    KernelTuneResult,
     budget::{BenchBudget, TuneOutcome, TuneReport},
     cost::static_cost,
     measurer::{AnyMeasurer, GpuMeasurer, SdpaPrefillMeasurer, SdpaVectorMeasurer},
@@ -46,8 +49,7 @@ where
     let mut specs: Vec<&BenchSpec> = inventory::iter::<BenchSpec>.into_iter().collect();
     specs.sort_unstable_by_key(|s| (s.op, s.subop));
 
-    let bench_budget =
-        if options.quick { BenchBudget::Quick } else { BenchBudget::Standard };
+    let bench_budget = if options.quick { BenchBudget::Quick } else { BenchBudget::Standard };
 
     let mut tuned = 0usize;
     let mut measured = 0usize;
