@@ -1516,8 +1516,11 @@ macro_rules! gather_qmm_mma {
                             & (global_row < m_total);
                         let x_row_dev_base = global_row * k_in + kb + x_k_base;
                         let x_ws_base = tile_row * xs_ld + x_k_base;
-                        let xv0 =
-                            select(x_in_run, load(x[x_row_dev_base]).cast::<T>(), 0.0f32.cast::<T>());
+                        let xv0 = select(
+                            x_in_run,
+                            load(x[x_row_dev_base]).cast::<T>(),
+                            0.0f32.cast::<T>(),
+                        );
                         let xv1 = select(
                             x_in_run,
                             load(x[x_row_dev_base + 1u32]).cast::<T>(),

@@ -19,8 +19,10 @@ use std::collections::BTreeMap;
 use common::{Dt, gpu_lock, max_abs_diff, pack_bytes, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
-use metaltile_std::ffai::mel_spectrogram::{mel_filterbank, mel_spectrogram, mel_stft_window};
-use metaltile_std::mlx::fft::mt_fft_n256;
+use metaltile_std::{
+    ffai::mel_spectrogram::{mel_filterbank, mel_spectrogram, mel_stft_window},
+    mlx::fft::mt_fft_n256,
+};
 
 #[derive(Clone, Copy)]
 struct MelShape {
@@ -192,7 +194,13 @@ fn mel_spectrogram_matches_naive_f16() {
 /// Run the three-stage FFT-routed STFT pipeline — `mel_stft_window` →
 /// `mt_fft_n256` → `mel_filterbank` — and read back the log-Mel output.
 /// `n_fft` is fixed at 256 (a power of two, the `mt_fft_n*` requirement).
-fn run_mel_fft(audio: &[f32], window: &[f32], mel_weight: &[f32], dt: Dt, s: &MelShape) -> Vec<f32> {
+fn run_mel_fft(
+    audio: &[f32],
+    window: &[f32],
+    mel_weight: &[f32],
+    dt: Dt,
+    s: &MelShape,
+) -> Vec<f32> {
     assert_eq!(s.n_fft, 256, "FFT route is wired for n_fft = 256");
     let n_frames = s.n_frames();
     let n_out = n_frames * s.n_mels;
@@ -258,8 +266,9 @@ fn mel_spectrogram_fft_route_matches_direct_dft_f32() {
     let _g = gpu_lock();
     // n_fft = 256 (power of two), triangular filterbank, several frames.
     let s = MelShape { n_samples: 768, n_fft: 256, n_mels: 20, hop_length: 128, log_eps: 1e-6 };
-    let audio: Vec<f32> =
-        (0..s.n_samples).map(|i| (i as f32 * 0.07).sin() * 0.5 + (i as f32 * 0.013).cos() * 0.3).collect();
+    let audio: Vec<f32> = (0..s.n_samples)
+        .map(|i| (i as f32 * 0.07).sin() * 0.5 + (i as f32 * 0.013).cos() * 0.3)
+        .collect();
     let window = hann(s.n_fft);
     let mel_weight = triangular_filterbank(s.n_mels, s.n_freq());
 

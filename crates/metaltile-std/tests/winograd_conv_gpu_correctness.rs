@@ -28,7 +28,9 @@ use common::{Dt, gpu_lock, max_abs_diff, pack_bytes, ramp, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
 use metaltile_std::ffai::winograd_conv::{
-    winograd_conv2d_3x3, winograd_conv2d_3x3_split, winograd_filter_transform_3x3,
+    winograd_conv2d_3x3,
+    winograd_conv2d_3x3_split,
+    winograd_filter_transform_3x3,
 };
 
 #[derive(Clone, Copy)]
@@ -203,7 +205,13 @@ fn winograd_padded_multi_channel_matches_naive_bf16() {
 /// pre-transforms every filter into its 4×4 `U`, then
 /// `winograd_conv2d_3x3_split` consumes that buffer. Result must match the
 /// single-kernel `winograd_conv2d_3x3` (and thus the naive oracle).
-fn run_winograd_split(input: &[f32], weight: &[f32], bias: &[f32], dt: Dt, s: &ConvShape) -> Vec<f32> {
+fn run_winograd_split(
+    input: &[f32],
+    weight: &[f32],
+    bias: &[f32],
+    dt: Dt,
+    s: &ConvShape,
+) -> Vec<f32> {
     let (out_h, out_w) = (s.out_h(), s.out_w());
     assert!(out_h % 2 == 0 && out_w % 2 == 0, "Winograd needs even output dims");
     let (tiles_h, tiles_w) = (out_h / 2, out_w / 2);

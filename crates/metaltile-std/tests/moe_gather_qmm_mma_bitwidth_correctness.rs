@@ -22,7 +22,9 @@ use common::{Dt, gpu_lock, pack_bytes, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
 use metaltile_std::ffai::moe::{
-    mt_moe_gather_qmm_mma_b3, mt_moe_gather_qmm_mma_b5, mt_moe_gather_qmm_mma_b6,
+    mt_moe_gather_qmm_mma_b3,
+    mt_moe_gather_qmm_mma_b5,
+    mt_moe_gather_qmm_mma_b6,
     mt_moe_gather_qmm_mma_b8,
 };
 
@@ -86,7 +88,10 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
     dot / (na.sqrt() * nb.sqrt() + 1e-12)
 }
 
-fn run_bitwidth(bits: u32, kernel_ir: fn(metaltile_core::dtype::DType) -> metaltile_core::ir::Kernel) {
+fn run_bitwidth(
+    bits: u32,
+    kernel_ir: fn(metaltile_core::dtype::DType) -> metaltile_core::ir::Kernel,
+) {
     let _g = gpu_lock();
     let n_experts = 4usize;
     let k_in = 64usize;
@@ -112,8 +117,9 @@ fn run_bitwidth(bits: u32, kernel_ir: fn(metaltile_core::dtype::DType) -> metalt
         (0..groups_total).map(|i| -0.02 + 0.005 * (i as f32 * 0.07).cos()).collect();
     let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * (i as f32 * 0.013).sin()).collect();
 
-    let expected =
-        cpu_oracle(&codes, &scales, &biases, &x, &indices, n_experts, t_rows, n_out, k_in, group_size);
+    let expected = cpu_oracle(
+        &codes, &scales, &biases, &x, &indices, n_experts, t_rows, n_out, k_in, group_size,
+    );
 
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     buffers.insert("x".into(), pack_bytes(&x, Dt::F32));
@@ -132,18 +138,18 @@ fn run_bitwidth(bits: u32, kernel_ir: fn(metaltile_core::dtype::DType) -> metalt
     k.mode = KernelMode::Reduction;
     // BM=BN=32 → grid [N/32, ceil(T/32), 1], TG = 4 simdgroups (128 lanes).
     let r = ctx
-        .dispatch_with_grid(
-            &k,
-            &buffers,
-            &BTreeMap::new(),
-            [n_out / 32, t_rows.div_ceil(32), 1],
-            [128, 1, 1],
-        )
+        .dispatch_with_grid(&k, &buffers, &BTreeMap::new(), [n_out / 32, t_rows.div_ceil(32), 1], [
+            128, 1, 1,
+        ])
         .expect("dispatch");
     let actual = unpack_bytes(r.outputs.get("out").expect("out"), Dt::F32);
 
     let cos = cosine(&expected, &actual);
-    eprintln!("[gather_qmm_mma b{bits}] cos={cos:.6}  exp[0..4]={:?} got[0..4]={:?}", &expected[..4], &actual[..4]);
+    eprintln!(
+        "[gather_qmm_mma b{bits}] cos={cos:.6}  exp[0..4]={:?} got[0..4]={:?}",
+        &expected[..4],
+        &actual[..4]
+    );
     assert!(cos >= 0.999, "gather_qmm_mma b{bits} vs CPU oracle cosine = {cos:.6} (want ≥ 0.999)");
 }
 
