@@ -129,12 +129,8 @@ pub fn mt_moe_gather_qmm_mma_int4_bm64_mpp<T>(
                 let x_dev_base = safe_gr_x * k_in + kb + x_k_base;
                 let x_ws_base = x_m_row * 32u32 + x_k_base;
                 for _i in range(0u32, 16u32, 1u32) {
-                    let xv = load(x[x_dev_base + _i]).cast::<T>();
-                    threadgroup_store(
-                        "Xs",
-                        x_ws_base + _i,
-                        select(in_run_x, xv, 0.0f32.cast::<T>()),
-                    );
+                    let xv = load(x[x_dev_base + _i]).cast::<f32>();
+                    threadgroup_store("Xs", x_ws_base + _i, select(in_run_x, xv, 0.0f32));
                 }
 
                 // Dequant W → Ws. 128 lanes × 2 packs/lane = 256 packs.
@@ -155,7 +151,7 @@ pub fn mt_moe_gather_qmm_mma_int4_bm64_mpp<T>(
                     let ws_base = w_row * 32u32 + pack_in_row * 8u32;
                     for _j in range(0u32, 8u32, 1u32) {
                         let q = ((packed >> (_j * 4u32)) & 15u32).cast::<f32>();
-                        threadgroup_store("Ws", ws_base + _j, (s * q + b).cast::<T>());
+                        threadgroup_store("Ws", ws_base + _j, s * q + b);
                     }
                 }
 

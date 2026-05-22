@@ -139,12 +139,8 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16_mpp<T>(
                     let gr = m_tile_base + mr;
                     let in_run = (mr >= sub_offset) & (mr < sub_end) & (gr < m_total);
                     let safe_g = select(in_run, gr, 0u32);
-                    let xv = load(x[safe_g * k_in + kb + kc]).cast::<T>();
-                    threadgroup_store(
-                        "xs",
-                        mr * 16u32 + kc,
-                        select(in_run, xv, 0.0f32.cast::<T>()),
-                    );
+                    let xv = load(x[safe_g * k_in + kb + kc]).cast::<f32>();
+                    threadgroup_store("xs", mr * 16u32 + kc, select(in_run, xv, 0.0f32));
                 }
 
                 // Dequant W[expert, n_tile_base..+32, kb..kb+16] → ws.
@@ -166,7 +162,7 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16_mpp<T>(
                     let dst = w_row * 16u32 + pack_col * 8u32;
                     for _j in range(0u32, 8u32, 1u32) {
                         let q = ((packed >> (_j * 4u32)) & 15u32).cast::<f32>();
-                        threadgroup_store("ws", dst + _j, (s * q + b).cast::<T>());
+                        threadgroup_store("ws", dst + _j, s * q + b);
                     }
                 }
 
