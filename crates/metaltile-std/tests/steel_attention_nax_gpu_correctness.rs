@@ -131,7 +131,7 @@ fn run_sdpa_nax(
     buffers.insert("n_kv_heads".into(), (n_kv_heads as u32).to_le_bytes().to_vec());
     buffers.insert("scale".into(), scale.to_le_bytes().to_vec());
 
-    let mut kernel = steel_attention_nax::kernel_ir_for(dtype);
+    let mut kernel = steel_attention_nax::mt_sdpa_prefill_nax::kernel_ir_for(dtype);
     kernel.mode = KernelMode::Reduction;
 
     let result = ctx
