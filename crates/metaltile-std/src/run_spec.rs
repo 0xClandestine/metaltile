@@ -899,13 +899,23 @@ fn run_quantized_mat_vec(
     let dtype_bytes = dt.size_bytes();
     let dtype_label = dt.label();
     // Round through the kernel dtype so the correctness oracle and MT output
-    // agree to within f16 precision (no-op for f32).
-    let round =
-        |v: f32| -> f32 { if dt == DType::F16 { half::f16::from_f32(v).to_f32() } else { v } };
+    // agree to within the kernel-dtype precision (no-op for f32). bf16 must
+    // be handled explicitly — falling through to the f32 path would let the
+    // oracle outrun the kernel's bf16 inputs and pack buffers at the wrong
+    // width.
+    let round = |v: f32| -> f32 {
+        match dt {
+            DType::F16 => half::f16::from_f32(v).to_f32(),
+            DType::BF16 => half::bf16::from_f32(v).to_f32(),
+            _ => v,
+        }
+    };
     let make_buf = |runner: &GpuRunner, data: &[f32]| -> GpuBuffer {
         let bytes: Vec<u8> = match dt {
             DType::F16 =>
                 data.iter().flat_map(|&v| half::f16::from_f32(v).to_bits().to_le_bytes()).collect(),
+            DType::BF16 =>
+                data.iter().flat_map(|&v| half::bf16::from_f32(v).to_bits().to_le_bytes()).collect(),
             _ => data.iter().flat_map(|&v| v.to_le_bytes()).collect(),
         };
         runner.buffer_bytes(&bytes)
@@ -916,6 +926,11 @@ fn run_quantized_mat_vec(
                 .read_bytes(buf, n * 2)
                 .chunks_exact(2)
                 .map(|c| half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
+                .collect(),
+            DType::BF16 => runner
+                .read_bytes(buf, n * 2)
+                .chunks_exact(2)
+                .map(|c| half::bf16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
                 .collect(),
             _ => runner.read_f32_slice(buf, n),
         }
@@ -961,7 +976,11 @@ fn run_quantized_mat_vec(
                         }
                     }
                 }
-                acc
+                // Round the oracle result through the kernel dtype: the
+                // kernel accumulates in fp32 but narrows `out` to the
+                // kernel dtype on store. At magnitude ~512 a bf16 half-ULP
+                // is ~1.0, so an un-rounded f32 oracle trips the tolerance.
+                round(acc)
             })
             .collect();
         let w_bytes: Vec<u8> = w_check.iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -1865,48 +1884,52 @@ fn run_affine_quantize(
     // so we can compare bit-for-bit (packed) and float-for-float
     // (scales + biases). MLX dispatches one threadgroup per group, 32
     // threads per group (one simdgroup).
-    let equiv = rk.as_ref().map(|rk| {
-        let mlx_packed_buf = runner.buffer_zeros(n_packs * 4);
-        let mlx_scales_buf = zeros_typed(runner, n_total_groups, dt);
-        let mlx_biases_buf = zeros_typed(runner, n_total_groups, dt);
-        let mlx_bufs: Vec<&GpuBuffer> =
-            vec![&w_buf, &mlx_packed_buf, &mlx_scales_buf, &mlx_biases_buf];
-        runner.measure(rk, &mlx_bufs, [n_total_groups, 1, 1], [32, 1, 1], 0, 1);
-        let ref_packed_bytes = runner.read_bytes(&mlx_packed_buf, n_packs * 4);
-        let ref_packed: Vec<u32> = ref_packed_bytes
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-            .collect();
-        let ref_scales = crate::runner::read_typed(runner, &mlx_scales_buf, n_total_groups, dt);
-        let ref_biases = crate::runner::read_typed(runner, &mlx_biases_buf, n_total_groups, dt);
-
-        // Compare in dequantized space so ±1-ULP packed disagreement
-        // maps to ±scale absolute error matching `spec.tol`.
+    // Correctness gate: a **round-trip** check — MT quantize → dequantize
+    // must reconstruct the input within one quantization step.
+    //
+    // The previous check compared MT's packed output against MLX's
+    // `affine_quantize`. That is a *convention* check, not a correctness
+    // one: the scale/bias formula, the rounding rule and the code↔value
+    // mapping are all implementation-defined, and MLX's int2/3/5/6
+    // instantiations make different choices than metaltile's — so an
+    // MLX-vs-MT diff flags a benign convention gap as a failure even
+    // though both round-trip the input correctly. The round-trip is the
+    // convention-independent criterion, and it is what the dedicated
+    // `affine_int*` GPU correctness tests already use.
+    let equiv = {
+        // `scales[g] * q + biases[g]`, unpacking each group's codes from a
+        // contiguous LSB-first bit-stream. Code `c` of a group occupies
+        // bits `[c*bits, c*bits+bits)` of the group's `packs_per_group`
+        // u32 words; for the non-power-of-2 widths (int3/5/6) a code can
+        // straddle a word boundary, so read a 64-bit window. (An in-word
+        // `val >> k*bits` unpacker is only correct when `bits` divides 32.)
         let dequant = |packed: &[u32], scales: &[f32], biases: &[f32]| -> Vec<f32> {
             let mut out = vec![0.0f32; n_elem];
+            let packs_per_group = group_size / pack_factor;
+            let mask: u64 = (1u64 << bits) - 1;
             for g in 0..n_total_groups {
-                let packs_per_group = group_size / pack_factor;
-                let pack_base = g * packs_per_group;
-                for p in 0..packs_per_group {
-                    let val = packed[pack_base + p];
-                    for k in 0..pack_factor {
-                        let shift = (k * bits) as u32;
-                        let mask = (1u32 << bits) - 1;
-                        let q = (val >> shift) & mask;
-                        out[g * group_size + p * pack_factor + k] =
-                            scales[g] * q as f32 + biases[g];
-                    }
+                let word_base = g * packs_per_group;
+                for c in 0..group_size {
+                    let bit_off = c * bits;
+                    let w = bit_off / 32;
+                    let bo = bit_off % 32;
+                    let lo = packed[word_base + w] as u64;
+                    let hi =
+                        if w + 1 < packs_per_group { packed[word_base + w + 1] as u64 } else { 0 };
+                    let q = (((lo | (hi << 32)) >> bo) & mask) as f32;
+                    out[g * group_size + c] = scales[g] * q + biases[g];
                 }
             }
             out
         };
-        let ref_dequant = dequant(&ref_packed, &ref_scales, &ref_biases);
         let mt_dequant = dequant(&mt_packed, &mt_scales, &mt_biases);
-        // Cosine floor 0.99 — quantization rounding in f16/bf16 can flip
-        // ±1 nibble on a small fraction of elements (depresses cosine
-        // slightly below the default 0.999).
-        check_equiv_with(&ref_dequant, &mt_dequant, EquivTolerance::new(spec.tol, 0.99))
-    });
+        // One int_b quantization step over the input range (`w_f32`
+        // spans (-11..11)·0.05 → 1.1), plus a little dtype-rounding slack
+        // on the per-group scale/bias.
+        let q_step = 1.1f32 / ((1u32 << bits) - 1) as f32;
+        let tol = q_step + 0.05;
+        Some(check_equiv_with(&w_f32, &mt_dequant, EquivTolerance::new(tol, 0.95)))
+    };
 
     let elem_bytes = match dt {
         DType::F32 => 4,
@@ -2551,6 +2574,19 @@ fn run_steel_gemm(
     bn: usize,
     tpg: usize,
 ) -> Vec<OpResult> {
+    // `run_steel_gemm` only models the plain fused `C = A·B` signature
+    // (`[a, b, d, m, n, k]`). The gather / masked / segmented / split-K
+    // variants take extra operands (gather indices, block masks, K
+    // segments, an fp32 partials slab) that this harness does not build —
+    // dispatching them here binds the wrong buffer set and yields a
+    // garbage correctness result. Their correctness is owned by the
+    // dedicated `tests/steel_gemm_{gather,masked,segmented,splitk}_gpu_
+    // correctness.rs` suites; skip them in `tile bench` until the harness
+    // grows per-variant operand + oracle support.
+    if spec.op != "steel_gemm_fused" {
+        return Vec::new();
+    }
+
     let ctx = DtypeCtx::elementwise(dt);
 
     // Compile MT kernel — must use SimdGroup2D so program_id axes map to
