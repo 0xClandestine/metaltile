@@ -96,6 +96,20 @@ pub fn mt_fp4_quant_dequant(inp: Tensor<f32>, out: Tensor<f32>, #[constexpr] n: 
 //   format by the `fp8_kernel!` macro — a wrong set silently mis-rounds.
 macro_rules! fp8_kernel {
     ($name:ident, $subop:literal, $mant:literal, $emin:literal, $emax:literal, $fp8max:literal) => {
+        // `#[bench_kernel]` placed before `#[kernel]` registers a BenchSpec
+        // for this non-generic kernel (the attribute handles the
+        // no-DType `kernel_ir_for` signature) — so each fp8 format gets
+        // its own bench row, like `mt_fp4_quant_dequant`. No `mlx=` /
+        // `metal_file=`: fp8 has no MLX side-by-side counterpart.
+        #[bench_kernel(
+            op = "fp_quantized",
+            subop = $subop,
+            class = FpQuantized,
+            n = 1048576,
+            tpg = 32,
+            tol = 0.05,
+            dtypes = crate::spec::F32_ONLY,
+        )]
         #[kernel]
         pub fn $name(inp: Tensor<f32>, out: Tensor<f32>, #[constexpr] n: u32) {
             let gid = program_id::<0>();
@@ -128,11 +142,6 @@ macro_rules! fp8_kernel {
             let result = sign * q_clamped * (group_max / $fp8max);
             store(out[gid], result);
         }
-        // No `inventory::submit!` BenchSpec: these are non-generic
-        // `#[kernel]`s (`kernel_ir_for` takes no DType), so they don't
-        // fit the bench harness's `fn(DType) -> Kernel` signature —
-        // matching `mt_fp4_quant_dequant`. Correctness is gated by
-        // `tests/fp_quantized_fp8_gpu_correctness.rs`.
     };
 }
 
