@@ -126,6 +126,9 @@ jobs:
                 echo "Available baselines: $(ls baselines/*.json | xargs -n1 basename | tr '\n' ' ')"
               fi
             else
+              echo "<details>"
+              echo "<summary>tile diff @ commit \`${COMMIT_SHORT}\`</summary>"
+              echo
               echo '```ansi'
               # `|| true` so a regression exit code (1) doesn't kill the job.
               cargo run --release -q -p metaltile-cli -- diff \
