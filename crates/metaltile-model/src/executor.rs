@@ -34,11 +34,30 @@ use crate::{
     plan::{ConstexprValue, ExecutionPlan, SlotRef},
 };
 
-/// Watchdog timeout: if the full forward pass takes longer than this,
-/// the process is killed to prevent an indefinite GPU hang from freezing
-/// macOS.  Checked with an elapsed-time guard after every dispatch_chain
-/// call (no per-dispatch thread spawn).
+/// GPU watchdog timeout: if the full forward pass exceeds this, the process
+/// is killed to prevent an indefinite GPU hang from freezing macOS.
 const GPU_WATCHDOG_SECS: u64 = 30;
+
+/// Check GPU watchdog every N dispatch calls to avoid per-call syscalls.
+/// `Instant::now()` is a Mach absolute time syscall (~50ns); for 4096
+/// tokens at ~150 nodes that's ~600K syscalls — reduced here to ~6K.
+const WATCHDOG_CHECK_INTERVAL: u64 = 100;
+
+/// Thread-local counter for watchdog check interval. Each call site gets
+/// its own counter via a different static.
+fn check_watchdog(start: &Instant, counter: &mut u64, label: &str) {
+    *counter += 1;
+    if *counter % WATCHDOG_CHECK_INTERVAL == 0
+        && start.elapsed() > Duration::from_secs(GPU_WATCHDOG_SECS)
+    {
+        error!(
+            "WATCHDOG: forward pass exceeded {}s at {label} — \
+             killing process to prevent system freeze",
+            GPU_WATCHDOG_SECS
+        );
+        std::process::exit(1);
+    }
+}
 
 /// GPU buffer storage keyed by tensor name.
 pub type WeightMap = FxHashMap<String, Vec<u8>>;
@@ -201,6 +220,7 @@ pub fn execute_plan(
         .collect();
 
     let start = Instant::now();
+    let mut watchdog_ctr: u64 = 0;
     let fused = plan.single_dispatch;
 
     let results = if fused {
@@ -208,14 +228,7 @@ pub fn execute_plan(
         let results = ctx
             .dispatch_chain(&all_specs, &barriers_after)
             .map_err(|e| ModelError::Other(e.to_string()))?;
-        if start.elapsed() > Duration::from_secs(GPU_WATCHDOG_SECS) {
-            error!(
-                "WATCHDOG: forward pass exceeded {}s — \
-                 killing process to prevent system freeze",
-                GPU_WATCHDOG_SECS
-            );
-            std::process::exit(1);
-        }
+        check_watchdog(&start, &mut watchdog_ctr, "execute_plan (fused)");
         results
     } else {
         // ── Unfused: one command buffer per node (--no-fuse) ────────
@@ -225,14 +238,7 @@ pub fn execute_plan(
                 .dispatch_chain(&all_specs[i..i + 1], &[])
                 .map_err(|e| ModelError::Other(e.to_string()))?;
             all_results.append(&mut res);
-            if start.elapsed() > Duration::from_secs(GPU_WATCHDOG_SECS) {
-                error!(
-                    "WATCHDOG: forward pass exceeded {}s at node {} — \
-                     killing process to prevent system freeze",
-                    GPU_WATCHDOG_SECS, i
-                );
-                std::process::exit(1);
-            }
+            check_watchdog(&start, &mut watchdog_ctr, &format!("execute_plan node {i}"));
         }
         all_results
     };
@@ -526,19 +532,13 @@ pub fn execute_prepared(
 
     // ── Dispatch ───────────────────────────────────────────────────────
     let start = Instant::now();
+    let mut watchdog_ctr: u64 = 0;
 
     let results = if plan.single_dispatch {
         let results = ctx
             .dispatch_chain(&all_specs, &pd.barriers_after[..n])
             .map_err(|e| ModelError::Other(e.to_string()))?;
-        if start.elapsed() > Duration::from_secs(GPU_WATCHDOG_SECS) {
-            error!(
-                "WATCHDOG: forward pass exceeded {}s — \
-                 killing process to prevent system freeze",
-                GPU_WATCHDOG_SECS
-            );
-            std::process::exit(1);
-        }
+        check_watchdog(&start, &mut watchdog_ctr, "execute_prepared (fused)");
         results
     } else {
         let mut all_results = Vec::with_capacity(n);
@@ -547,14 +547,7 @@ pub fn execute_prepared(
                 .dispatch_chain(&all_specs[i..i + 1], &[])
                 .map_err(|e| ModelError::Other(e.to_string()))?;
             all_results.append(&mut res);
-            if start.elapsed() > Duration::from_secs(GPU_WATCHDOG_SECS) {
-                error!(
-                    "WATCHDOG: forward pass exceeded {}s at node {} — \
-                     killing process to prevent system freeze",
-                    GPU_WATCHDOG_SECS, i
-                );
-                std::process::exit(1);
-            }
+            check_watchdog(&start, &mut watchdog_ctr, &format!("execute_prepared node {i}"));
         }
         all_results
     };
