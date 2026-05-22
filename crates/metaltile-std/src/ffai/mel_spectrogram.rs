@@ -113,3 +113,111 @@ inventory::submit! {
         kernel_mode: Some(KernelMode::Grid3D),
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// FFT-routed STFT path.
+//
+// `mel_spectrogram` does a direct DFT *inside every (frame, mel_bin)
+// thread* — so the full O(n_freq·n_fft) power spectrum is recomputed
+// `n_mels` times per frame. The FFT route splits it into three stages:
+//
+//   1. `mel_stft_window`  — extract + window each frame into FFT input
+//                           planes (real = windowed sample, imag = 0).
+//   2. `mt_fft_n{n_fft}`  — one radix-2 FFT per frame (O(n_fft·log n_fft)).
+//   3. `mel_filterbank`   — power = re²+im², Mel-weight, log.
+//
+// The spectrum is now computed once per (frame, k) and the transform is
+// O(N log N) instead of O(N²). `n_fft` must be a power of two (the
+// `mt_fft_n*` set). The single-kernel `mel_spectrogram` is kept for
+// non-pow2 `n_fft` and single-dispatch callers.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// STFT stage 1 — extract and window each frame into the real/imag input
+/// planes the `mt_fft_n*` kernels expect. `out_re[frame*n_fft + t] =
+/// audio[frame*hop + t] · window[t]`, `out_im` zeroed. One thread per
+/// `(frame, t)`; dispatch flat over `n_frames * n_fft`.
+#[kernel]
+pub fn mel_stft_window<T>(
+    audio: Tensor<T>,
+    window: Tensor<T>,
+    mut out_re: Tensor<T>,
+    mut out_im: Tensor<T>,
+    #[constexpr] n_fft: u32,
+    #[constexpr] hop_length: u32,
+) {
+    let idx = program_id::<0>();
+    let t = idx % n_fft;
+    let frame = idx / n_fft;
+    let sample = load(audio[frame * hop_length + t]).cast::<f32>();
+    let win = load(window[t]).cast::<f32>();
+    store(out_re[idx], (sample * win).cast::<T>());
+    store(out_im[idx], 0.0f32.cast::<T>());
+}
+
+inventory::submit! {
+    BenchSpec {
+        op: "mel_spectrogram",
+        subop: "stft_window",
+        kernel_name: "mel_stft_window",
+        kernel_ir: mel_stft_window::kernel_ir_for,
+        dtypes: &[DType::F32, DType::F16],
+        tol: 1e-3,
+        mlx_src: None,
+        mlx_pattern: None,
+        shapes: &[],
+        dispatch: BenchDispatch::Generic,
+        kernel_mode: Some(KernelMode::Grid3D),
+    }
+}
+
+/// STFT stage 3 — Mel filterbank over an FFT'd frame buffer. `out[frame,
+/// mel] = log(Σ_{k<n_freq} mel_weight[mel,k]·(re²+im²) + log_eps)`, where
+/// `re`/`im` are `fft_re`/`fft_im` from `mt_fft_n{n_fft}`. One thread per
+/// `(frame, mel)`; dispatch flat over `n_frames * n_mels`. Output is
+/// bit-identical in form to `mel_spectrogram` — only the spectrum source
+/// (FFT vs in-thread DFT) differs.
+#[kernel]
+pub fn mel_filterbank<T>(
+    fft_re: Tensor<T>,
+    fft_im: Tensor<T>,
+    mel_weight: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] n_fft: u32,
+    #[constexpr] n_freq: u32,
+    #[constexpr] n_mels: u32,
+    #[constexpr] log_eps: f32,
+) {
+    let idx = program_id::<0>();
+    let mel_bin = idx % n_mels;
+    let frame = idx / n_mels;
+    let frame_base = frame * n_fft;
+    let mel_row = mel_bin * n_freq;
+
+    let mut mel_acc = 0.0f32;
+    for k in range(0u32, n_freq, 1u32) {
+        let re = load(fft_re[frame_base + k]).cast::<f32>();
+        let im = load(fft_im[frame_base + k]).cast::<f32>();
+        let power = re * re + im * im;
+        let w = load(mel_weight[mel_row + k]).cast::<f32>();
+        mel_acc = mel_acc + w * power;
+    }
+
+    let log_mel = log(mel_acc + log_eps);
+    store(out[idx], log_mel.cast::<T>());
+}
+
+inventory::submit! {
+    BenchSpec {
+        op: "mel_spectrogram",
+        subop: "filterbank",
+        kernel_name: "mel_filterbank",
+        kernel_ir: mel_filterbank::kernel_ir_for,
+        dtypes: &[DType::F32, DType::F16],
+        tol: 1e-3,
+        mlx_src: None,
+        mlx_pattern: None,
+        shapes: &[],
+        dispatch: BenchDispatch::Generic,
+        kernel_mode: Some(KernelMode::Grid3D),
+    }
+}

@@ -19,7 +19,8 @@ use std::collections::BTreeMap;
 use common::{Dt, gpu_lock, max_abs_diff, pack_bytes, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
-use metaltile_std::ffai::mel_spectrogram::mel_spectrogram;
+use metaltile_std::ffai::mel_spectrogram::{mel_filterbank, mel_spectrogram, mel_stft_window};
+use metaltile_std::mlx::fft::mt_fft_n256;
 
 #[derive(Clone, Copy)]
 struct MelShape {
@@ -186,4 +187,88 @@ fn mel_spectrogram_matches_naive_f16() {
         max_rel = max_rel.max((a - e).abs() / e.abs().max(1.0));
     }
     assert!(max_rel < 5e-2, "mel f16: max rel = {max_rel:.2e}");
+}
+
+/// Run the three-stage FFT-routed STFT pipeline — `mel_stft_window` →
+/// `mt_fft_n256` → `mel_filterbank` — and read back the log-Mel output.
+/// `n_fft` is fixed at 256 (a power of two, the `mt_fft_n*` requirement).
+fn run_mel_fft(audio: &[f32], window: &[f32], mel_weight: &[f32], dt: Dt, s: &MelShape) -> Vec<f32> {
+    assert_eq!(s.n_fft, 256, "FFT route is wired for n_fft = 256");
+    let n_frames = s.n_frames();
+    let n_out = n_frames * s.n_mels;
+    let u = |v: usize| (v as u32).to_le_bytes().to_vec();
+    let ctx = Context::new().expect("Context::new on macOS");
+
+    // ── Stage 1: window each frame into the FFT real/imag planes ──
+    let mut wb: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    wb.insert("audio".into(), pack_bytes(audio, dt));
+    wb.insert("window".into(), pack_bytes(window, dt));
+    wb.insert("out_re".into(), pack_bytes(&vec![0.0f32; n_frames * s.n_fft], dt));
+    wb.insert("out_im".into(), pack_bytes(&vec![0.0f32; n_frames * s.n_fft], dt));
+    wb.insert("n_fft".into(), u(s.n_fft));
+    wb.insert("hop_length".into(), u(s.hop_length));
+    let mut wk = mel_stft_window::kernel_ir_for(dt.to_dtype());
+    wk.mode = KernelMode::Grid3D;
+    let tpg = 128usize;
+    let wgrid = (n_frames * s.n_fft).div_ceil(tpg);
+    let wres = ctx
+        .dispatch_with_grid(&wk, &wb, &BTreeMap::new(), [wgrid, 1, 1], [tpg, 1, 1])
+        .expect("mel_stft_window dispatch");
+    let frames_re = wres.outputs.get("out_re").expect("out_re").clone();
+    let frames_im = wres.outputs.get("out_im").expect("out_im").clone();
+
+    // ── Stage 2: one radix-2 FFT per frame ──
+    let mut fb: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    fb.insert("in_re".into(), frames_re);
+    fb.insert("in_im".into(), frames_im);
+    fb.insert("out_re".into(), pack_bytes(&vec![0.0f32; n_frames * s.n_fft], dt));
+    fb.insert("out_im".into(), pack_bytes(&vec![0.0f32; n_frames * s.n_fft], dt));
+    fb.insert("inv".into(), u(0));
+    let mut fk = mt_fft_n256::kernel_ir_for(dt.to_dtype());
+    fk.mode = KernelMode::Reduction;
+    let fres = ctx
+        .dispatch_with_grid(&fk, &fb, &BTreeMap::new(), [n_frames, 1, 1], [256, 1, 1])
+        .expect("mt_fft_n256 dispatch");
+    let fft_re = fres.outputs.get("out_re").expect("fft_re").clone();
+    let fft_im = fres.outputs.get("out_im").expect("fft_im").clone();
+
+    // ── Stage 3: power + Mel filterbank + log ──
+    let mut mb: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    mb.insert("fft_re".into(), fft_re);
+    mb.insert("fft_im".into(), fft_im);
+    mb.insert("mel_weight".into(), pack_bytes(mel_weight, dt));
+    mb.insert("out".into(), pack_bytes(&vec![0.0f32; n_out], dt));
+    mb.insert("n_fft".into(), u(s.n_fft));
+    mb.insert("n_freq".into(), u(s.n_freq()));
+    mb.insert("n_mels".into(), u(s.n_mels));
+    mb.insert("log_eps".into(), s.log_eps.to_le_bytes().to_vec());
+    let mut mk = mel_filterbank::kernel_ir_for(dt.to_dtype());
+    mk.mode = KernelMode::Grid3D;
+    let mgrid = n_out.div_ceil(tpg);
+    let mres = ctx
+        .dispatch_with_grid(&mk, &mb, &BTreeMap::new(), [mgrid, 1, 1], [tpg, 1, 1])
+        .expect("mel_filterbank dispatch");
+    let mut out = unpack_bytes(mres.outputs.get("out").expect("out"), dt);
+    out.truncate(n_out);
+    out
+}
+
+#[test]
+fn mel_spectrogram_fft_route_matches_direct_dft_f32() {
+    let _g = gpu_lock();
+    // n_fft = 256 (power of two), triangular filterbank, several frames.
+    let s = MelShape { n_samples: 768, n_fft: 256, n_mels: 20, hop_length: 128, log_eps: 1e-6 };
+    let audio: Vec<f32> =
+        (0..s.n_samples).map(|i| (i as f32 * 0.07).sin() * 0.5 + (i as f32 * 0.013).cos() * 0.3).collect();
+    let window = hann(s.n_fft);
+    let mel_weight = triangular_filterbank(s.n_mels, s.n_freq());
+
+    // The single-kernel direct DFT is the reference; the FFT route must
+    // reproduce it (FFT and DFT are the same transform).
+    let reference = run_mel(&audio, &window, &mel_weight, Dt::F32, &s);
+    let fft_route = run_mel_fft(&audio, &window, &mel_weight, Dt::F32, &s);
+    let d = max_abs_diff(&reference, &fft_route);
+    println!("[mel FFT route f32] max|Δ| vs direct DFT = {d:.5e}");
+    assert!(fft_route.iter().any(|&v| v != 0.0), "FFT route: all-zero output");
+    assert!(d < 2e-3, "mel FFT route vs direct DFT: max|Δ| = {d:.5e}");
 }
