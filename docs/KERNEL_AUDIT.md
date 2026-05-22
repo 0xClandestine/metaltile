@@ -12,8 +12,8 @@ Sources surveyed:
 ## Summary
 
 - Total kernel-op rows in this audit (union): **89**
-- metaltile-ported kernel ops: **73 / 89 = 82 %** — 71 full ✓ (80 %), 2 partial ~ (2 %)
-- **Still to cover: 17 ops not ported (✗)**, plus **2 partial ports** still to finish (conv winograd; multi-block sort)
+- metaltile-ported kernel ops: **73 / 89 = 82 %** — 72 full ✓ (81 %), 1 partial ~ (1 %)
+- **Still to cover: 17 ops not ported (✗)**, plus **1 partial port** still to finish (conv winograd)
 - The 6 Vision / STT / TTS front-end kernels (Phase 6.5 / 7) — `conv2d`,
   `patch_embed`, `rope_2d`, `mel_spectrogram`, `audio_conv1d`,
   `vocoder/iSTFT` — are now ported (✓ rows below).
@@ -61,7 +61,7 @@ Sources surveyed:
 | swiglu (`silu(gate)·up` fused MLP activation) | ✗ | ✗ | ✓ | `mlx/swiglu.rs` → `mt_swiglu<T>`. Fused element-wise `silu(gate) * up` — the standard modern-transformer MLP activation (Llama 4, Qwen3 dense + MoE, Gemma, Mistral). metaltile fuses what MLX expresses as separate `silu` + `mul` ops; no dedicated MLX kernel. The broader `fused_gate_activation` (gelu / clipped-swiglu variants) is still a separate ✗ row below. |
 | random (key hash → u32) | ✓ | ✓ | ✓ | `mlx/random.rs` → `mt_random_hash`. |
 | reduce (sum/prod/max/min — all + row + col) | ✓ | ✓ | ✓ | `mlx/reduce.rs` covers `all_reduce*`, `row_reduce*`, `col_reduce*` (Grid3D one-thread-per-column, `cols`-strided fold) and `seg_reduce*` (Grid3D one-thread-per-segment, contiguous fixed-length runs) — all four ops (sum/prod/max/min) for each shape. Verified by `reduce_col_seg_gpu_correctness`. |
-| sort | ✓ | ✓ | ~ | `mlx/sort.rs` → `mt_sort<T>`. Single-block path only; multi-block / segmented not yet. |
+| sort | ✓ | ✓ | ✓ | `mlx/sort.rs` → `mt_sort<T>` (single-block bitonic sort) + `mt_merge<T>` (multi-block bottom-up merge pass). `mt_sort` sorts each 1024-element block; `mt_merge` then runs `log2(n_blocks)` merge passes, each merging adjacent sorted runs of length `run` into runs of `2*run` (caller ping-pongs two buffers). The merge is a per-output-element merge-path / co-rank kernel — every thread binary-searches the diagonal for how many elements of run A precede its output slot, then picks the smaller of the two candidate elements (A wins ties → **stable**). Run boundaries are clamped to `n` and out-of-range reads use a `+∞` sentinel, so a final partial run (non-power-of-two `n` / odd block count) needs no special path. Verified by `sort_gpu_correctness` (2/4/8-block sorts, reverse-input worst case, stability / multiset preservation, non-power-of-two `n`; f32 + f16, naive CPU `sort` oracle). Segmented (per-row) sort is a follow-up. |
 | scan (prefix sum) | ✓ | ✓ | ✓ | `mlx/scan.rs` → `mt_scan<T>` (inclusive) + `mt_scan_exclusive<T>` (exclusive — `out[i] = Σ_{j<i} inp[j]`, `out[0] = 0`). Both share the identical two-level per-/cross-simdgroup prefix-sum machinery; the exclusive variant only shifts the store stage by one slot (`base_prefix` is already the exclusive prefix of every prior thread). Verified by `scan_exclusive_gpu_correctness` (sequential CPU oracle, chunk-aligned + ragged `n`). Multi-op (prod / max / min) scan is a follow-up — the sum scan is the production-relevant shape. |
 | softmax | ✓ | ✓ | ✓ | `mlx/softmax.rs` → `mt_softmax<T>` (looped + single-row collapsed). |
 | logsumexp | ✓ | ✓ | ✓ | `mlx/logsumexp.rs` → `mt_logsumexp<T>`. |
