@@ -1,6 +1,27 @@
 //! MSL generation configuration.
 
-use crate::passes::tile_lowering::TileSchedule;
+#[derive(Debug, Clone)]
+pub struct TileSchedule {
+    pub tile_m: u32,
+    pub tile_n: u32,
+    pub tile_k: u32,
+    pub threads: (u32, u32, u32),
+    pub rows_per_thread: u32,
+    pub cols_per_thread: u32,
+}
+
+impl Default for TileSchedule {
+    fn default() -> Self {
+        TileSchedule {
+            tile_m: 64,
+            tile_n: 64,
+            tile_k: 32,
+            threads: (16, 16, 1),
+            rows_per_thread: 4,
+            cols_per_thread: 4,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct MslConfig {

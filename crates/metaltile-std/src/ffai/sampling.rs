@@ -4,14 +4,6 @@
 //!
 //! Codegen-only. End-to-end sampling correctness lives in FFAI's
 //! harness.
-//!
-//! ## Known DSL limitations (body parser)
-//! - `while` loops are silently dropped → use explicit if-blocks for reductions
-//! - `return` is silently dropped → use `if/else` style branching
-//! - Rust declarative macros inside #[kernel] are dropped → inline all code
-//! - threadgroup_alloc declarations are hoisted to function scope → names must
-//!   be unique across all branches (greedy uses tg_gmax/tg_gidx, temperature
-//!   uses tg_max/tg_sum)
 
 use metaltile::kernel;
 use metaltile_core::ir::KernelMode;
@@ -29,22 +21,28 @@ use crate::{
 // that yield the same Metal output and survive the proc-macro intact.
 
 // Softmax + categorical sample over a 1D logits tensor. Cooperative
-// reduction (256 threads) for max + sum-exp; single-thread inverse
-// CDF walk for the categorical pick.
+// reduction (256 threads) for max-pass; combined chunked sum-exp +
+// inclusive scan + parallel-prefix CDF walk for the categorical pick.
 //
 // Inputs:
 //   inp            — logits [n]
 //   out            — token id [1] (u32)
-//   temperature_in — temperature [1] (f32, ≥ 0; 0 → greedy argmax)
+//   temperature_in — temperature [1] (f32, must be > 0)
 //   uniform_in     — uniform draw in [0, 1) [1] (f32)
 //
-// When temperature < 1e-7 the kernel runs argmax instead to avoid
-// 1/0 = Inf propagating through the softmax.
+// Output is the smallest index `i` such that the cumulative softmax
+// (in fp32) up to and including `i` is ≥ `uniform_in * sum_exp`.
 //
-// Both paths use a 256-thread cooperative tree reduction.
-// Greedy uses tg_gmax + tg_gidx; temperature uses tg_max + tg_sum.
-// All four are allocated at the top level (hoisted by the DSL) so the
-// names must not collide.
+// Cost: vocab=152K on M5 Max ~563µs median (down from ~8370µs in the
+// single-thread CDF walk version, measured via the 1000-iter dispatch
+// loop in `tests/softmax_categorical_sample_perf.rs`). ~15× speedup
+// dominated by collapsing pass 3's O(n) walk. Lane lid owns a contiguous
+// chunk = ceil(n/lsize) ≈ 594 positions; Hillis-Steele inclusive scan
+// turns per-lane chunk-partials into per-lane cumulative bounds; the
+// lane whose chunk contains `u * total` walks its own chunk serially
+// to find the exact index. The full-vocab serial walk (152K ops) is
+// replaced by 1 × n/lsize chunk-traverse per lane + an 8-stage scan +
+// 1 × n/lsize finalizing walk on the winning lane.
 #[kernel]
 pub fn softmax_categorical_sample<T>(
     inp: Tensor<T>,
@@ -53,243 +51,99 @@ pub fn softmax_categorical_sample<T>(
     uniform_in: Tensor<f32>,
     #[constexpr] n: u32,
 ) {
-    // Hoist all four threadgroup arrays (DSL lifts threadgroup_alloc to
-    // function scope regardless of which branch uses them).
-    threadgroup_alloc("tg_gmax", 256); // greedy: per-thread local max
-    threadgroup_alloc("tg_gidx", 256); // greedy: index of per-thread max
-    threadgroup_alloc("tg_max", 256); // temperature: per-thread local max (scaled)
-    threadgroup_alloc("tg_sum", 256); // temperature: per-thread local sum-exp
-
     let lid = tid;
-    let temp = load(temperature_in[0]);
+    let inv_t = 1.0f32 / load(temperature_in[0]);
+
+    // ─── Pass 1: cooperative max reduce (strided) ───────────────────
+    let mut local_max = neg_infinity();
+    threadgroup_alloc("tg_max", 256);
     let n_iters = (n + lsize - 1u32) / lsize;
+    for _r in range(0u32, n_iters, 1u32) {
+        let pos = _r * lsize + lid;
+        if pos < n {
+            let v = load(inp[pos]).cast::<f32>() * inv_t;
+            local_max = select(v > local_max, v, local_max);
+        }
+    }
+    threadgroup_store("tg_max", lid, local_max);
+    threadgroup_barrier();
 
-    // ─── Greedy (argmax) path — T ≈ 0 ───────────────────────────────
-    // All 256 threads read the same temp → uniform branch, so barriers
-    // inside this block are safe.
-    if temp < 1e-7f32 {
-        let mut glocal_max = neg_infinity();
-        let mut glocal_idx = 0u32;
-        for _r in range(0u32, n_iters, 1u32) {
-            let pos = _r * lsize + lid;
-            if pos < n {
-                let v = load(inp[pos]).cast::<f32>();
-                let better = v > glocal_max;
-                glocal_max = select(better, v, glocal_max);
-                glocal_idx = select(better, pos, glocal_idx);
-            }
+    // 8-stage power-of-two halving max-reduction (stride 128 → 1).
+    for _stage in range(0u32, 8u32, 1u32) {
+        let stride = 128u32 >> _stage;
+        if lid < stride {
+            let ov = threadgroup_load("tg_max", lid + stride);
+            let tv = threadgroup_load("tg_max", lid);
+            threadgroup_store("tg_max", lid, select(ov > tv, ov, tv));
         }
-        threadgroup_store("tg_gmax", lid, glocal_max);
-        threadgroup_store("tg_gidx", lid, glocal_idx);
         threadgroup_barrier();
+    }
 
-        // 8-stage binary tree: reduce max, carrying the winning index.
-        // tg_gidx stores float(u32) — exact for indices < 2^24.
-        if lid < 128u32 {
-            let og = threadgroup_load("tg_gmax", lid + 128u32);
-            let tg = threadgroup_load("tg_gmax", lid);
-            let bt = og > tg;
-            threadgroup_store("tg_gmax", lid, select(bt, og, tg));
-            threadgroup_store(
-                "tg_gidx",
-                lid,
-                select(
-                    bt,
-                    threadgroup_load("tg_gidx", lid + 128u32),
-                    threadgroup_load("tg_gidx", lid),
-                ),
-            );
-        }
-        threadgroup_barrier();
-        if lid < 64u32 {
-            let og = threadgroup_load("tg_gmax", lid + 64u32);
-            let tg = threadgroup_load("tg_gmax", lid);
-            let bt = og > tg;
-            threadgroup_store("tg_gmax", lid, select(bt, og, tg));
-            threadgroup_store(
-                "tg_gidx",
-                lid,
-                select(
-                    bt,
-                    threadgroup_load("tg_gidx", lid + 64u32),
-                    threadgroup_load("tg_gidx", lid),
-                ),
-            );
-        }
-        threadgroup_barrier();
-        if lid < 32u32 {
-            let og = threadgroup_load("tg_gmax", lid + 32u32);
-            let tg = threadgroup_load("tg_gmax", lid);
-            let bt = og > tg;
-            threadgroup_store("tg_gmax", lid, select(bt, og, tg));
-            threadgroup_store(
-                "tg_gidx",
-                lid,
-                select(
-                    bt,
-                    threadgroup_load("tg_gidx", lid + 32u32),
-                    threadgroup_load("tg_gidx", lid),
-                ),
-            );
-        }
-        threadgroup_barrier();
-        if lid < 16u32 {
-            let og = threadgroup_load("tg_gmax", lid + 16u32);
-            let tg = threadgroup_load("tg_gmax", lid);
-            let bt = og > tg;
-            threadgroup_store("tg_gmax", lid, select(bt, og, tg));
-            threadgroup_store(
-                "tg_gidx",
-                lid,
-                select(
-                    bt,
-                    threadgroup_load("tg_gidx", lid + 16u32),
-                    threadgroup_load("tg_gidx", lid),
-                ),
-            );
-        }
-        threadgroup_barrier();
-        if lid < 8u32 {
-            let og = threadgroup_load("tg_gmax", lid + 8u32);
-            let tg = threadgroup_load("tg_gmax", lid);
-            let bt = og > tg;
-            threadgroup_store("tg_gmax", lid, select(bt, og, tg));
-            threadgroup_store(
-                "tg_gidx",
-                lid,
-                select(
-                    bt,
-                    threadgroup_load("tg_gidx", lid + 8u32),
-                    threadgroup_load("tg_gidx", lid),
-                ),
-            );
-        }
-        threadgroup_barrier();
-        if lid < 4u32 {
-            let og = threadgroup_load("tg_gmax", lid + 4u32);
-            let tg = threadgroup_load("tg_gmax", lid);
-            let bt = og > tg;
-            threadgroup_store("tg_gmax", lid, select(bt, og, tg));
-            threadgroup_store(
-                "tg_gidx",
-                lid,
-                select(
-                    bt,
-                    threadgroup_load("tg_gidx", lid + 4u32),
-                    threadgroup_load("tg_gidx", lid),
-                ),
-            );
-        }
-        threadgroup_barrier();
-        if lid < 2u32 {
-            let og = threadgroup_load("tg_gmax", lid + 2u32);
-            let tg = threadgroup_load("tg_gmax", lid);
-            let bt = og > tg;
-            threadgroup_store("tg_gmax", lid, select(bt, og, tg));
-            threadgroup_store(
-                "tg_gidx",
-                lid,
-                select(
-                    bt,
-                    threadgroup_load("tg_gidx", lid + 2u32),
-                    threadgroup_load("tg_gidx", lid),
-                ),
-            );
-        }
-        threadgroup_barrier();
-        if lid < 1u32 {
-            let og = threadgroup_load("tg_gmax", lid + 1u32);
-            let tg = threadgroup_load("tg_gmax", lid);
-            let bt = og > tg;
-            threadgroup_store("tg_gmax", lid, select(bt, og, tg));
-            threadgroup_store(
-                "tg_gidx",
-                lid,
-                select(
-                    bt,
-                    threadgroup_load("tg_gidx", lid + 1u32),
-                    threadgroup_load("tg_gidx", lid),
-                ),
-            );
-        }
-        threadgroup_barrier();
+    let max_val = threadgroup_load("tg_max", 0u32);
 
-        if lid == 0u32 {
-            // tg_gidx stores float(u32) — cast back to u32 for output.
-            store(out[0], threadgroup_load("tg_gidx", 0u32).cast::<u32>());
+    // ─── Combined pass 2+3: chunk-partial sum-exp → inclusive scan
+    //                       → parallel-prefix CDF walk ─────────────
+    //
+    // Lane lid covers contiguous chunk [lo, hi); `total = tg_cdf[lsize-1]`
+    // after the scan replaces the previous standalone sum-exp reduce.
+    let chunk = (n + lsize - 1u32) / lsize;
+    let lo = lid * chunk;
+    let hi_raw = lo + chunk;
+    let hi = select(hi_raw > n, n, hi_raw);
+
+    let mut local_partial = 0.0f32;
+    for j in range(lo, hi, 1u32) {
+        if j < n {
+            let v = load(inp[j]).cast::<f32>() * inv_t;
+            local_partial = local_partial + exp(v - max_val);
         }
     }
 
-    // ─── Temperature sampling path — T > 0 ──────────────────────────
-    // `return` is dropped by the body parser, so guard with if temp >= 1e-7.
-    if temp >= 1e-7f32 {
-        let inv_t = 1.0f32 / temp;
+    threadgroup_alloc("tg_cdf", 256);
+    threadgroup_store("tg_cdf", lid, local_partial);
+    threadgroup_barrier();
 
-        // Pass 1: cooperative max reduce
-        let mut local_max = neg_infinity();
-        for _r in range(0u32, n_iters, 1u32) {
-            let pos = _r * lsize + lid;
-            if pos < n {
-                let v = load(inp[pos]).cast::<f32>() * inv_t;
-                local_max = select(v > local_max, v, local_max);
-            }
-        }
-        threadgroup_store("tg_max", lid, local_max);
+    // Hillis-Steele inclusive scan: 8 stages (stride 1 → 128).
+    // Underflow-safe: lanes with lid < stride contribute 0 instead of
+    // reading from negative indices.
+    for _stage in range(0u32, 8u32, 1u32) {
+        let stride = 1u32 << _stage;
+        let safe_neighbor = select(lid >= stride, lid - stride, lid);
+        let raw = threadgroup_load("tg_cdf", safe_neighbor);
+        let neighbor_val = select(lid >= stride, raw, 0.0f32);
         threadgroup_barrier();
-
-        // 8-stage power-of-two halving max-reduction (stride 128 → 1).
-        for _stage in range(0u32, 8u32, 1u32) {
-            let stride = 128u32 >> _stage;
-            if lid < stride {
-                let ov = threadgroup_load("tg_max", lid + stride);
-                let tv = threadgroup_load("tg_max", lid);
-                threadgroup_store("tg_max", lid, select(ov > tv, ov, tv));
-            }
-            threadgroup_barrier();
-        }
-
-        let max_val = threadgroup_load("tg_max", 0u32);
-
-        // Pass 2: cooperative sum-exp reduce
-        let mut local_sum = 0.0f32;
-        for _r in range(0u32, n_iters, 1u32) {
-            let pos = _r * lsize + lid;
-            if pos < n {
-                let v = load(inp[pos]).cast::<f32>() * inv_t;
-                local_sum = local_sum + exp(v - max_val);
-            }
-        }
-        threadgroup_store("tg_sum", lid, local_sum);
+        let cur = threadgroup_load("tg_cdf", lid);
+        threadgroup_store("tg_cdf", lid, cur + neighbor_val);
         threadgroup_barrier();
+    }
 
-        // 8-stage power-of-two halving sum-reduction (stride 128 → 1).
-        for _stage in range(0u32, 8u32, 1u32) {
-            let stride = 128u32 >> _stage;
-            if lid < stride {
-                let ov = threadgroup_load("tg_sum", lid + stride);
-                let tv = threadgroup_load("tg_sum", lid);
-                threadgroup_store("tg_sum", lid, ov + tv);
-            }
-            threadgroup_barrier();
-        }
+    let total = threadgroup_load("tg_cdf", lsize - 1u32);
+    let target = load(uniform_in[0]) * total;
+    let my_cum_end = threadgroup_load("tg_cdf", lid);
+    let prev_cum = select(
+        lid == 0u32,
+        0.0f32,
+        threadgroup_load("tg_cdf", select(lid > 0u32, lid - 1u32, lid)),
+    );
 
-        let total = threadgroup_load("tg_sum", 0u32);
+    // Hit lane: target sits in (prev_cum, my_cum_end]. The strict
+    // lower bound means exactly one lane fires at a boundary value.
+    let is_hit = (prev_cum < target) & (target <= my_cum_end) & (lo < n);
 
-        // ─── Pass 3: single-thread inverse CDF walk ─────────────────────
-        if lid == 0u32 {
-            let target = load(uniform_in[0]) * total;
-            let mut cum = 0.0f32;
-            let mut found_idx = n - 1u32; // fallback to last index
-            let mut done = 0u32;
-            for i in range(0u32, n, 1u32) {
+    if is_hit {
+        let mut cum = prev_cum;
+        let mut found_idx = hi - 1u32; // fallback: last position in chunk
+        let mut done = 0u32;
+        for i in range(lo, hi, 1u32) {
+            if i < n {
                 let v = load(inp[i]).cast::<f32>() * inv_t;
                 cum = cum + exp(v - max_val);
-                let hit = (cum >= target) & (done == 0u32);
-                found_idx = select(hit, i, found_idx);
-                done = select(hit, 1u32, done);
+                let hit_i = (cum >= target) & (done == 0u32);
+                found_idx = select(hit_i, i, found_idx);
+                done = select(hit_i, 1u32, done);
             }
-            store(out[0], found_idx);
         }
+        store(out[0], found_idx);
     }
 }
 

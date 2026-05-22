@@ -49,6 +49,29 @@ tile build [-f <substr>] [--dtypes f32,f16,bf16] [-v]
 
 Codegen smoke check — emit everything and confirm `xcrun metal` accepts it: `tile build --emit all -o /tmp/mt-smoke`.
 
+## `tile emit` — emit a Swift-consumable kernel package
+
+Generates a `kernels.metallib` + per-kernel `.metal` sources + `MetalTileKernels.swift` dispatch wrappers under `<out>/`:
+
+```
+tile emit --out <swift-package-dir> [--sdk macosx] [--no-compile]
+```
+
+| Flag | Effect |
+|---|---|
+| `--out <dir>` | output root (required); artifacts land in `<dir>/Resources/` and `<dir>/Generated/` |
+| `--sdk <sdk>` | `xcrun` SDK for the Metal toolchain (default: `macosx`) |
+| `--no-compile` | skip the `xcrun metal` / `metallib` step (still writes `.metal` + manifest + Swift) |
+
+Output layout matches a SwiftPM `Sources/<Target>/` convention:
+
+```
+<out>/Resources/kernels/<name>.metal
+<out>/Resources/kernels.metallib
+<out>/Resources/manifest.json
+<out>/Generated/MetalTileKernels.swift
+```
+
 ## `tile inspect` — IR and MSL for one kernel
 
 ```

@@ -19,6 +19,15 @@ help: ## show this help
 setup: ## one-time dev environment setup (toolchains, deps, first build)
 	./.github/scripts/setup-dev.sh
 
+.PHONY: hooks
+hooks: ## install git hooks (pre-commit, commit-msg, pre-push)
+	./.github/scripts/install-hooks.sh
+
+.PHONY: hooks-uninstall
+hooks-uninstall: ## remove git hook installation
+	git config --unset core.hooksPath || true
+	@echo "✓ Uninstalled hooks (core.hooksPath cleared)"
+
 # ─── Build ────────────────────────────────────────────────────────────
 .PHONY: build
 build: ## cargo build (debug)
@@ -51,8 +60,8 @@ fmt-check: ## check formatting without modifying files
 	cargo fmt --all -- --check
 
 .PHONY: typos
-typos: ## run typos checker
-	typos
+typos: ## run typos checker (same config CI uses)
+	typos --config .github/configs/typos-cli.toml
 
 # ─── tile CLI ─────────────────────────────────────────────────────────
 #

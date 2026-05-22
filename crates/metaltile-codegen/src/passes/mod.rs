@@ -12,6 +12,7 @@ pub mod cse;
 pub mod dead_store_elim;
 pub mod fusion;
 pub mod if_conversion;
+pub mod kernel_inline;
 pub mod licm;
 pub mod occupancy;
 pub mod register_estimate;
@@ -112,10 +113,11 @@ impl PassRegistry {
     /// The standard pass order (names, in pipeline sequence).
     ///
     /// TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM
-    ///   → IfConversion → ValueSink → TileLowering → Fusion → Unroll
+    ///   → IfConversion → ValueSink → Fusion → Unroll
     ///   → Schedule → Vectorize → DeadStoreElim
     pub fn order() -> &'static [&'static str] {
         &[
+            "kernel_inline",
             "type_check",
             "const_fold",
             "algebraic_simplify",
@@ -124,7 +126,6 @@ impl PassRegistry {
             "licm",
             "if_conversion",
             "value_sink",
-            "tile_lowering",
             "fusion",
             "unroll",
             "schedule",
@@ -136,6 +137,7 @@ impl PassRegistry {
     /// Look up a pass by name.  Returns `None` for unknown names.
     pub fn get(name: &str) -> Option<Box<dyn Pass>> {
         match name {
+            "kernel_inline" => Some(Box::new(kernel_inline::KernelInlinePass)),
             "type_check" => Some(Box::new(type_check::TypeCheckPass)),
             "const_fold" => Some(Box::new(const_fold::ConstFoldPass::new())),
             "algebraic_simplify" => Some(Box::new(algebraic_simplify::AlgebraicSimplifyPass)),
@@ -149,6 +151,8 @@ impl PassRegistry {
             "unroll" => Some(Box::new(unroll::UnrollPass::default())),
             "schedule" => Some(Box::new(schedule::SchedulePass::default())),
             "vectorize" => Some(Box::new(vectorize::VectorizePass)),
+            "cse_2" => Some(Box::new(cse::CsePass)),
+            "const_fold_2" => Some(Box::new(const_fold::ConstFoldPass::new())),
             "dead_store_elim" => Some(Box::new(dead_store_elim::DeadStoreElimPass)),
             _ => None,
         }

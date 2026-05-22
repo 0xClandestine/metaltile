@@ -21,7 +21,7 @@
 
 use std::collections::BTreeMap;
 
-use metaltile_core::ir::{IndexExpr, Kernel, Op, ValueId};
+use metaltile_core::ir::{Kernel, Op, ValueId};
 use smallvec::SmallVec;
 
 // ---------------------------------------------------------------------------
@@ -31,215 +31,11 @@ use smallvec::SmallVec;
 /// Remap all `ValueId` references in `op` according to `map`.
 /// References not present in `map` are left unchanged.
 pub fn remap_value_ids(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
-    let s = |v: &mut ValueId| {
+    op.for_each_value_id_mut(&mut |v| {
         if let Some(&nv) = map.get(v) {
             *v = nv;
         }
-    };
-
-    match op {
-        // ── arithmetic / logic ────────────────────────────────────────────
-        Op::BinOp { lhs, rhs, .. } => {
-            s(lhs);
-            s(rhs);
-        },
-        Op::UnaryOp { value, .. }
-        | Op::Activation { value, .. }
-        | Op::Cast { value, .. }
-        | Op::Reduce { value, .. }
-        | Op::Transpose { value }
-        | Op::Slice { value, .. }
-        | Op::Broadcast { value, .. } => {
-            s(value);
-        },
-        Op::Select { cond, on_true, on_false } => {
-            s(cond);
-            s(on_true);
-            s(on_false);
-        },
-        Op::Dot { a, b } => {
-            s(a);
-            s(b);
-        },
-
-        // ── memory ────────────────────────────────────────────────────────
-        Op::Load { indices, mask, .. } => {
-            for ix in indices.iter_mut() {
-                match ix {
-                    IndexExpr::Value(v) | IndexExpr::Range(v, _) => s(v),
-                    IndexExpr::Const(_) => {},
-                }
-            }
-            if let Some(m) = mask {
-                s(m);
-            }
-        },
-        Op::Store { value, indices, mask, .. } => {
-            s(value);
-            for ix in indices.iter_mut() {
-                match ix {
-                    IndexExpr::Value(v) | IndexExpr::Range(v, _) => s(v),
-                    IndexExpr::Const(_) => {},
-                }
-            }
-            if let Some(m) = mask {
-                s(m);
-            }
-        },
-        Op::VectorLoad { byte_offset, .. } => {
-            s(byte_offset);
-        },
-        Op::VectorExtract { .. } => {},
-        Op::VectorStore { byte_offset, value, .. } => {
-            s(byte_offset);
-            s(value);
-        },
-        Op::Gather { indices, .. } => {
-            s(indices);
-        },
-        Op::Scatter { indices, value, .. } => {
-            s(indices);
-            s(value);
-        },
-        Op::Atomic { index, value, .. } => {
-            s(index);
-            s(value);
-        },
-
-        // ── control flow ─────────────────────────────────────────────────
-        Op::Loop { start, end, step, .. } => {
-            s(start);
-            s(end);
-            s(step);
-        },
-        Op::If { cond, .. } => {
-            s(cond);
-        },
-
-        // ── inline / fused ───────────────────────────────────────────────
-        Op::InlineMsl { inputs, .. } =>
-            for v in inputs {
-                s(v);
-            },
-        Op::FusedElementwise { ops } =>
-            for sub_op in ops.iter_mut() {
-                remap_value_ids(sub_op, map);
-            },
-
-        // ── ML primitives ────────────────────────────────────────────────
-        Op::FlashAttention { q, k, v, .. } => {
-            s(q);
-            s(k);
-            s(v);
-        },
-        Op::SlidingWindowAttention { q, k, v, .. } => {
-            s(q);
-            s(k);
-            s(v);
-        },
-        Op::RmsNorm { x, scale, .. } => {
-            s(x);
-            s(scale);
-        },
-        Op::GatedMlp { x, gate_proj, up_proj, down_proj } => {
-            s(x);
-            s(gate_proj);
-            s(up_proj);
-            s(down_proj);
-        },
-
-        // ── tiling / reduction ───────────────────────────────────────────
-        Op::StrideReduce { offset, stride, end, secondary_base, .. } => {
-            s(offset);
-            s(stride);
-            s(end);
-            if let Some(sb) = secondary_base {
-                s(sb);
-            }
-        },
-        Op::StrideStore { offset, end, scalar, .. } => {
-            s(offset);
-            s(end);
-            s(scalar);
-        },
-        Op::StrideScan { offset, end, .. } => {
-            s(offset);
-            s(end);
-        },
-        Op::StrideArgReduce { offset, end, .. } => {
-            s(offset);
-            s(end);
-        },
-        Op::Scan { value, .. } => {
-            s(value);
-        },
-
-        // ── SIMD / threadgroup ────────────────────────────────────────────
-        Op::SimdReduce { value, .. }
-        | Op::SimdShuffleXor { value, .. }
-        | Op::ArgReduce { value, .. }
-        | Op::SimdScan { value, .. } => {
-            s(value);
-        },
-        Op::SimdgroupElemLoad { value, .. } => {
-            s(value);
-        },
-        Op::SimdgroupElemStore { value, data, .. } => {
-            s(value);
-            s(data);
-        },
-        Op::SimdgroupLoad { dest, offset, .. } => {
-            s(dest);
-            s(offset);
-        },
-        Op::SimdgroupAlloc { .. } | Op::SimdgroupMatMul { .. } => {},
-        Op::SimdBroadcast { value, lane } => {
-            s(value);
-            s(lane);
-        },
-        Op::ThreadgroupLoad { index, .. } => {
-            s(index);
-        },
-        Op::ThreadgroupStore { index, value, .. } => {
-            s(index);
-            s(value);
-        },
-        Op::StackLoad { index, .. } => {
-            s(index);
-        },
-        Op::StackStore { index, value, .. } => {
-            s(index);
-            s(value);
-        },
-        Op::StackAlloc { .. } => {},
-
-        // ── locals ───────────────────────────────────────────────────────
-        Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => {
-            s(value);
-        },
-
-        // ── shape ops ────────────────────────────────────────────────────
-        Op::ExpandDims { value, .. } | Op::Reshape { value, .. } => {
-            s(value);
-        },
-        Op::Cat { values, .. } =>
-            for v in values {
-                s(v);
-            },
-
-        // ── no ValueId refs ──────────────────────────────────────────────
-        Op::ProgramId { .. }
-        | Op::Const { .. }
-        | Op::Arange { .. }
-        | Op::Zeros { .. }
-        | Op::Splat { .. }
-        | Op::Barrier
-        | Op::SimdgroupBarrier
-        | Op::ThreadgroupAlloc { .. }
-        | Op::Dequantize { .. }
-        | Op::SimdLaneId
-        | Op::SimdGroupId => {},
-    }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -248,215 +44,10 @@ pub fn remap_value_ids(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
 
 /// Return all `ValueId` references in `op` (for liveness, use-count, invariant analysis).
 ///
-/// Modal cardinality is 1–3 (BinOp=2, UnaryOp=1, Select=3, Load≤2 typically),
-/// so the inline `[T; 4]` covers every elementwise/scalar op without spilling
-/// to the heap. Variadic ops (`InlineMsl`, `FusedElementwise`, `Cat`) spill.
+/// Thin wrapper around `op.value_refs()` that returns owned `ValueId`s.  Callers that
+/// only need to iterate can call `op.value_refs()` directly to avoid the owned collection.
 pub fn op_value_refs(op: &Op) -> SmallVec<[ValueId; 4]> {
-    let mut refs = SmallVec::new();
-
-    match op {
-        // ── arithmetic / logic ────────────────────────────────────────────
-        Op::BinOp { lhs, rhs, .. } => {
-            refs.push(*lhs);
-            refs.push(*rhs);
-        },
-        Op::UnaryOp { value, .. }
-        | Op::Activation { value, .. }
-        | Op::Cast { value, .. }
-        | Op::Reduce { value, .. }
-        | Op::Transpose { value }
-        | Op::Slice { value, .. }
-        | Op::Broadcast { value, .. } => {
-            refs.push(*value);
-        },
-        Op::Select { cond, on_true, on_false } => {
-            refs.push(*cond);
-            refs.push(*on_true);
-            refs.push(*on_false);
-        },
-        Op::Dot { a, b } => {
-            refs.push(*a);
-            refs.push(*b);
-        },
-
-        // ── memory ────────────────────────────────────────────────────────
-        Op::Load { indices, mask, .. } => {
-            for ix in indices {
-                match ix {
-                    IndexExpr::Value(v) | IndexExpr::Range(v, _) => refs.push(*v),
-                    IndexExpr::Const(_) => {},
-                }
-            }
-            if let Some(m) = mask {
-                refs.push(*m);
-            }
-        },
-        Op::Store { indices, value, mask, .. } => {
-            for ix in indices {
-                match ix {
-                    IndexExpr::Value(v) | IndexExpr::Range(v, _) => refs.push(*v),
-                    IndexExpr::Const(_) => {},
-                }
-            }
-            refs.push(*value);
-            if let Some(m) = mask {
-                refs.push(*m);
-            }
-        },
-        Op::VectorLoad { byte_offset, .. } => {
-            refs.push(*byte_offset);
-        },
-        Op::VectorExtract { .. } => {},
-        Op::VectorStore { byte_offset, value, .. } => {
-            refs.push(*byte_offset);
-            refs.push(*value);
-        },
-        Op::Gather { indices, .. } => {
-            refs.push(*indices);
-        },
-        Op::Scatter { indices, value, .. } => {
-            refs.push(*indices);
-            refs.push(*value);
-        },
-        Op::Atomic { index, value, .. } => {
-            refs.push(*index);
-            refs.push(*value);
-        },
-
-        // ── control flow ─────────────────────────────────────────────────
-        Op::Loop { start, end, step, .. } => {
-            refs.push(*start);
-            refs.push(*end);
-            refs.push(*step);
-        },
-        Op::If { cond, .. } => {
-            refs.push(*cond);
-        },
-
-        // ── inline / fused ───────────────────────────────────────────────
-        Op::InlineMsl { inputs, .. } => {
-            refs.extend(inputs.iter().copied());
-        },
-        Op::FusedElementwise { ops } =>
-            for sub in ops {
-                refs.extend(op_value_refs(sub));
-            },
-
-        // ── ML primitives ────────────────────────────────────────────────
-        Op::FlashAttention { q, k, v, .. } => {
-            refs.push(*q);
-            refs.push(*k);
-            refs.push(*v);
-        },
-        Op::SlidingWindowAttention { q, k, v, .. } => {
-            refs.push(*q);
-            refs.push(*k);
-            refs.push(*v);
-        },
-        Op::RmsNorm { x, scale, .. } => {
-            refs.push(*x);
-            refs.push(*scale);
-        },
-        Op::GatedMlp { x, gate_proj, up_proj, down_proj } => {
-            refs.push(*x);
-            refs.push(*gate_proj);
-            refs.push(*up_proj);
-            refs.push(*down_proj);
-        },
-
-        // ── tiling / reduction ───────────────────────────────────────────
-        Op::StrideReduce { offset, stride, end, secondary_base, .. } => {
-            refs.push(*offset);
-            refs.push(*stride);
-            refs.push(*end);
-            if let Some(sb) = secondary_base {
-                refs.push(*sb);
-            }
-        },
-        Op::StrideStore { offset, end, scalar, .. } => {
-            refs.push(*offset);
-            refs.push(*end);
-            refs.push(*scalar);
-        },
-        Op::StrideScan { offset, end, .. } => {
-            refs.push(*offset);
-            refs.push(*end);
-        },
-        Op::StrideArgReduce { offset, end, .. } => {
-            refs.push(*offset);
-            refs.push(*end);
-        },
-        Op::Scan { value, .. } => {
-            refs.push(*value);
-        },
-
-        // ── SIMD / threadgroup ────────────────────────────────────────────
-        Op::SimdReduce { value, .. }
-        | Op::SimdShuffleXor { value, .. }
-        | Op::ArgReduce { value, .. }
-        | Op::SimdScan { value, .. } => {
-            refs.push(*value);
-        },
-        Op::SimdgroupElemLoad { value, .. } => {
-            refs.push(*value);
-        },
-        Op::SimdgroupElemStore { value, data, .. } => {
-            refs.push(*value);
-            refs.push(*data);
-        },
-        Op::SimdgroupLoad { dest, offset, .. } => {
-            refs.push(*dest);
-            refs.push(*offset);
-        },
-        Op::SimdgroupAlloc { .. } | Op::SimdgroupMatMul { .. } => {},
-        Op::SimdBroadcast { value, lane } => {
-            refs.push(*value);
-            refs.push(*lane);
-        },
-        Op::ThreadgroupLoad { index, .. } => {
-            refs.push(*index);
-        },
-        Op::ThreadgroupStore { index, value, .. } => {
-            refs.push(*index);
-            refs.push(*value);
-        },
-        Op::StackLoad { index, .. } => {
-            refs.push(*index);
-        },
-        Op::StackStore { index, value, .. } => {
-            refs.push(*index);
-            refs.push(*value);
-        },
-        Op::StackAlloc { .. } => {},
-
-        // ── locals ───────────────────────────────────────────────────────
-        Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => {
-            refs.push(*value);
-        },
-
-        // ── shape ops ────────────────────────────────────────────────────
-        Op::ExpandDims { value, .. } | Op::Reshape { value, .. } => {
-            refs.push(*value);
-        },
-        Op::Cat { values, .. } => {
-            refs.extend(values.iter().copied());
-        },
-
-        // ── no ValueId refs ──────────────────────────────────────────────
-        Op::ProgramId { .. }
-        | Op::Const { .. }
-        | Op::Arange { .. }
-        | Op::Zeros { .. }
-        | Op::Splat { .. }
-        | Op::Barrier
-        | Op::SimdgroupBarrier
-        | Op::ThreadgroupAlloc { .. }
-        | Op::Dequantize { .. }
-        | Op::SimdLaneId
-        | Op::SimdGroupId => {},
-    }
-
-    refs
+    op.value_refs().into_iter().copied().collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -465,235 +56,17 @@ pub fn op_value_refs(op: &Op) -> SmallVec<[ValueId; 4]> {
 
 /// Return the maximum *real* `ValueId` referenced by `op`.
 ///
-/// `FusedElementwise` sub-ops encode references to siblings within the
-/// fused chain by setting the top bit of the `ValueId` (see
-/// `passes::fusion::SUB_OP_FLAG = 0x8000_0000`). Those encoded refs are
-/// NOT real ValueIds in the kernel-wide namespace — they're chain-local
-/// position indices that happen to share the `ValueId` type. Including
-/// them when allocating fresh IDs (`next_vid = max_vid + 1` in the
-/// unroll pass) would push `next_vid` past `0x8000_0000`, and the newly
-/// minted IDs would collide with the sub-op-ref encoding, causing the
-/// MSL emitter to interpret them as bogus sub-op refs and emit
-/// `0 /* bad sub-op ref */` placeholders. We mask them out here.
+/// `FusedElementwise` sub-ops encode chain-internal references using
+/// `SUB_OP_FLAG = 0x8000_0000` as the top bit. Those are not real
+/// kernel-wide ValueIds — they are filtered out here.
 pub fn max_vid_in_op(op: &Op) -> u32 {
-    /// Top bit reserved by `passes::fusion::SUB_OP_FLAG` to mark
-    /// chain-internal references in `FusedElementwise` sub-ops.
     const SUB_OP_FLAG: u32 = 0x8000_0000;
-    let mut m = 0u32;
-    let mut push = |v: &ValueId| {
-        let raw = v.as_u32();
-        // Skip sub-op refs — they're not real ValueIds in the
-        // kernel-wide namespace, just chain-local position indices.
-        if raw & SUB_OP_FLAG == 0 && raw > m {
-            m = raw;
-        }
-    };
-
-    match op {
-        // ── arithmetic / logic ────────────────────────────────────────────
-        Op::BinOp { lhs, rhs, .. } => {
-            push(lhs);
-            push(rhs);
-        },
-        Op::UnaryOp { value, .. }
-        | Op::Activation { value, .. }
-        | Op::Cast { value, .. }
-        | Op::Reduce { value, .. }
-        | Op::Transpose { value }
-        | Op::Slice { value, .. }
-        | Op::Broadcast { value, .. } => {
-            push(value);
-        },
-        Op::Select { cond, on_true, on_false } => {
-            push(cond);
-            push(on_true);
-            push(on_false);
-        },
-        Op::Dot { a, b } => {
-            push(a);
-            push(b);
-        },
-
-        // ── memory ────────────────────────────────────────────────────────
-        Op::Load { indices, mask, .. } => {
-            for ix in indices {
-                match ix {
-                    IndexExpr::Value(v) | IndexExpr::Range(v, _) => push(v),
-                    IndexExpr::Const(_) => {},
-                }
-            }
-            if let Some(m) = mask {
-                push(m);
-            }
-        },
-        Op::Store { value, indices, mask, .. } => {
-            push(value);
-            for ix in indices {
-                match ix {
-                    IndexExpr::Value(v) | IndexExpr::Range(v, _) => push(v),
-                    IndexExpr::Const(_) => {},
-                }
-            }
-            if let Some(m) = mask {
-                push(m);
-            }
-        },
-        Op::VectorLoad { byte_offset, .. } => {
-            push(byte_offset);
-        },
-        Op::VectorExtract { .. } => {},
-        Op::VectorStore { byte_offset, value, .. } => {
-            push(byte_offset);
-            push(value);
-        },
-        Op::Gather { indices, .. } => {
-            push(indices);
-        },
-        Op::Scatter { indices, value, .. } => {
-            push(indices);
-            push(value);
-        },
-        Op::Atomic { index, value, .. } => {
-            push(index);
-            push(value);
-        },
-
-        // ── control flow ─────────────────────────────────────────────────
-        Op::Loop { start, end, step, .. } => {
-            push(start);
-            push(end);
-            push(step);
-        },
-        Op::If { cond, .. } => {
-            push(cond);
-        },
-
-        // ── inline / fused ───────────────────────────────────────────────
-        Op::InlineMsl { inputs, .. } =>
-            for v in inputs {
-                push(v);
-            },
-        Op::FusedElementwise { ops } =>
-            for sub in ops {
-                m = m.max(max_vid_in_op(sub));
-            },
-
-        // ── ML primitives ────────────────────────────────────────────────
-        Op::FlashAttention { q, k, v, .. } => {
-            push(q);
-            push(k);
-            push(v);
-        },
-        Op::SlidingWindowAttention { q, k, v, .. } => {
-            push(q);
-            push(k);
-            push(v);
-        },
-        Op::RmsNorm { x, scale, .. } => {
-            push(x);
-            push(scale);
-        },
-        Op::GatedMlp { x, gate_proj, up_proj, down_proj } => {
-            push(x);
-            push(gate_proj);
-            push(up_proj);
-            push(down_proj);
-        },
-
-        // ── tiling / reduction ───────────────────────────────────────────
-        Op::StrideReduce { offset, stride, end, secondary_base, .. } => {
-            push(offset);
-            push(stride);
-            push(end);
-            if let Some(sb) = secondary_base {
-                push(sb);
-            }
-        },
-        Op::StrideStore { offset, end, scalar, .. } => {
-            push(offset);
-            push(end);
-            push(scalar);
-        },
-        Op::StrideScan { offset, end, .. } => {
-            push(offset);
-            push(end);
-        },
-        Op::StrideArgReduce { offset, end, .. } => {
-            push(offset);
-            push(end);
-        },
-        Op::Scan { value, .. } => {
-            push(value);
-        },
-
-        // ── SIMD / threadgroup ────────────────────────────────────────────
-        Op::SimdReduce { value, .. }
-        | Op::SimdShuffleXor { value, .. }
-        | Op::ArgReduce { value, .. }
-        | Op::SimdScan { value, .. } => {
-            push(value);
-        },
-        Op::SimdgroupElemLoad { value, .. } => {
-            push(value);
-        },
-        Op::SimdgroupElemStore { value, data, .. } => {
-            push(value);
-            push(data);
-        },
-        Op::SimdgroupLoad { dest, offset, .. } => {
-            push(dest);
-            push(offset);
-        },
-        Op::SimdgroupAlloc { .. } | Op::SimdgroupMatMul { .. } => {},
-        Op::SimdBroadcast { value, lane } => {
-            push(value);
-            push(lane);
-        },
-        Op::ThreadgroupLoad { index, .. } => {
-            push(index);
-        },
-        Op::ThreadgroupStore { index, value, .. } => {
-            push(index);
-            push(value);
-        },
-        Op::StackLoad { index, .. } => {
-            push(index);
-        },
-        Op::StackStore { index, value, .. } => {
-            push(index);
-            push(value);
-        },
-        Op::StackAlloc { .. } => {},
-
-        // ── locals ───────────────────────────────────────────────────────
-        Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => {
-            push(value);
-        },
-
-        // ── shape ops ────────────────────────────────────────────────────
-        Op::ExpandDims { value, .. } | Op::Reshape { value, .. } => {
-            push(value);
-        },
-        Op::Cat { values, .. } =>
-            for v in values {
-                push(v);
-            },
-
-        // ── no ValueId refs ──────────────────────────────────────────────
-        Op::ProgramId { .. }
-        | Op::Const { .. }
-        | Op::Arange { .. }
-        | Op::Zeros { .. }
-        | Op::Splat { .. }
-        | Op::Barrier
-        | Op::SimdgroupBarrier
-        | Op::ThreadgroupAlloc { .. }
-        | Op::Dequantize { .. }
-        | Op::SimdLaneId
-        | Op::SimdGroupId => {},
-    }
-
-    m
+    op.value_refs()
+        .iter()
+        .map(|v| v.as_u32())
+        .filter(|&raw| raw & SUB_OP_FLAG == 0)
+        .max()
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -754,70 +127,27 @@ pub fn all_block_ids(kernel: &Kernel) -> Vec<metaltile_core::ir::BlockId> {
 // Op predicates (shared across passes)
 // ---------------------------------------------------------------------------
 
-/// True if the op has side effects and cannot be moved, duplicated, or deleted.
-pub fn has_side_effects(op: &Op) -> bool {
-    matches!(
-        op,
-        Op::Store { .. }
-            | Op::VectorStore { .. }
-            | Op::Atomic { .. }
-            | Op::Barrier
-            | Op::SimdgroupBarrier
-            | Op::SetLocal { .. }
-            | Op::ThreadgroupStore { .. }
-            | Op::ThreadgroupAlloc { .. }
-            | Op::StackStore { .. }
-            | Op::StackAlloc { .. }
-            | Op::StrideStore { .. }
-            | Op::Scatter { .. }
-    )
-}
+/// True if the op writes to memory or synchronises threads.
+pub fn has_side_effects(op: &Op) -> bool { op.has_side_effects() }
 
-/// True if the op cannot appear inside predicated code (Barrier, Atomic, Loop, etc.).
-pub fn is_unpredictable(op: &Op) -> bool {
-    matches!(
-        op,
-        Op::Barrier | Op::SimdgroupBarrier
-            | Op::Atomic { .. }
-            | Op::Loop { .. }
-            | Op::SetLocal { .. }
-            | Op::DeclareLocal { .. }
-            | Op::ThreadgroupAlloc { .. }
-            | Op::If { .. } // nested If needs recursive if-conversion, not flat predicates
-            | Op::StrideScan { .. }
-            | Op::StrideArgReduce { .. }
-    )
-}
+/// True if the op cannot appear inside predicated code.
+pub fn is_unpredictable(op: &Op) -> bool { op.is_unpredictable() }
 
-/// True if the op is a "cheap ALU" op (eligible for rematerialization / value sinking).
-pub fn is_cheap_alu(op: &Op) -> bool {
-    matches!(
-        op,
-        Op::BinOp { .. }
-            | Op::UnaryOp { .. }
-            | Op::Cast { .. }
-            | Op::Select { .. }
-            | Op::Const { .. }
-            | Op::ProgramId { .. }
-    )
-}
+/// True if the op is a cheap ALU op eligible for rematerialization.
+pub fn is_cheap_alu(op: &Op) -> bool { op.is_cheap_alu() }
 
 /// True if the op is a load from device or threadgroup memory.
-pub fn is_load(op: &Op) -> bool {
-    matches!(op, Op::Load { .. } | Op::VectorLoad { .. } | Op::ThreadgroupLoad { .. })
-}
+pub fn is_load(op: &Op) -> bool { op.is_load() }
 
 /// True if the op is a store to device or threadgroup memory.
-pub fn is_store(op: &Op) -> bool {
-    matches!(op, Op::Store { .. } | Op::VectorStore { .. } | Op::ThreadgroupStore { .. })
-}
+pub fn is_store(op: &Op) -> bool { op.is_store() }
 
 /// True if the op contains a barrier.
-pub fn is_barrier(op: &Op) -> bool { matches!(op, Op::Barrier | Op::SimdgroupBarrier) }
+pub fn is_barrier(op: &Op) -> bool { op.is_barrier() }
 
 #[cfg(test)]
 mod tests {
-    use metaltile_core::ir::BinOpKind;
+    use metaltile_core::ir::{BinOpKind, IndexExpr};
 
     use super::*;
 
@@ -953,8 +283,9 @@ mod tests {
     // `Op`. Each test groups variants by category for readability.
 
     use metaltile_core::{
+        constexpr::ConstExpr,
         dtype::DType,
-        ir::{ActKind, AtomicKind, AtomicScope, AttnParams, ReduceKind, UnaryOpKind},
+        ir::{ActKind, AtomicKind, AtomicScope, BlockId, ReduceKind, UnaryOpKind, VarId},
         shape::Shape,
     };
 
@@ -1094,6 +425,19 @@ mod tests {
         );
         check_op(Op::VectorLoad { src: "x".into(), byte_offset: ValueId::new(30), len: 4 }, 1, 30);
         check_op(
+            Op::Pack {
+                dtype: DType::F32,
+                elements: vec![
+                    ValueId::new(31),
+                    ValueId::new(32),
+                    ValueId::new(33),
+                    ValueId::new(34),
+                ],
+            },
+            4,
+            34,
+        );
+        check_op(
             Op::VectorStore {
                 dst: "y".into(),
                 byte_offset: ValueId::new(31),
@@ -1102,41 +446,6 @@ mod tests {
             },
             2,
             32,
-        );
-    }
-
-    #[test]
-    fn attention_and_ml_variants() {
-        check_op(
-            Op::FlashAttention {
-                q: ValueId::new(33),
-                k: ValueId::new(34),
-                v: ValueId::new(35),
-                params: AttnParams { scale: None, is_causal: false, dropout_p: 0.0 },
-            },
-            3,
-            35,
-        );
-        check_op(
-            Op::SlidingWindowAttention {
-                q: ValueId::new(36),
-                k: ValueId::new(37),
-                v: ValueId::new(38),
-                window: 128,
-            },
-            3,
-            38,
-        );
-        check_op(Op::RmsNorm { x: ValueId::new(39), scale: ValueId::new(40), eps: 1e-5 }, 2, 40);
-        check_op(
-            Op::GatedMlp {
-                x: ValueId::new(41),
-                gate_proj: ValueId::new(42),
-                up_proj: ValueId::new(43),
-                down_proj: ValueId::new(44),
-            },
-            4,
-            44,
         );
     }
 
@@ -1166,30 +475,15 @@ mod tests {
             2,
             52,
         );
-        // SimdgroupMatMul / SimdgroupAlloc reference named simdgroup slots
-        // (not SSA ValueIds), so remap treats them as having no refs.
+        // SimdgroupMatMul a/b/c are SSA ValueIds produced by SimdgroupAlloc /
+        // SimdgroupLoad — they participate in value_refs and must be remappable.
         check_op(
             Op::SimdgroupMatMul { a: ValueId::new(53), b: ValueId::new(54), c: ValueId::new(55) },
-            0,
-            0,
+            3,
+            55,
         );
         check_op(Op::SimdLaneId, 0, 0);
         check_op(Op::SimdGroupId, 0, 0);
-    }
-
-    #[test]
-    fn dequant_variant() {
-        check_op(
-            Op::Dequantize {
-                weights: "w".into(),
-                scales: "s".into(),
-                zeros: "z".into(),
-                group_size: 64,
-                bits: 4,
-            },
-            0,
-            0,
-        );
     }
 
     // ── op-classification predicates ──────────────────────────────────────
@@ -1275,5 +569,167 @@ mod tests {
 
         let cast = Op::Cast { value: ValueId::new(0), dtype: DType::F16 };
         assert!(is_cheap_alu(&cast));
+    }
+
+    // ── result-flag coverage ─────────────────────────────────────────
+    //
+    // Every Op variant must carry exactly one of:
+    //   - #[no_result]        (no SSA output)
+    //   - #[result_u32]       (u32 scalar)
+    //   - #[result_i32]       (i32 scalar)
+    //   - #[result_f32_scalar] (f32 scalar)
+    //   - #[result_f16_scalar] (f16 scalar)
+    //   - #[result_same_type] (copies first-input type)
+    //   - #[result_custom]    (explicit type-inference arm in type_check.rs)
+    //
+    // This catches new variants that forget a flag and silently
+    // produce wrong codegen downstream.
+    #[test]
+    fn every_variant_has_result_flag_or_no_result() {
+        // Instantiate every Op variant.  The assert_msg identifies
+        // the variant that lacks a flag.
+        let shape = Shape::scalar();
+        let vid = ValueId::new(0);
+
+        let all: &[(&str, Op)] = &[
+            ("ProgramId", Op::ProgramId { axis: 0 }),
+            ("Const", Op::Const { value: 0 }),
+            ("Arange", Op::Arange { start: None, step: None, len: ConstExpr::new("N") }),
+            ("Load", Op::Load { src: "x".into(), indices: vec![], mask: None, other: None }),
+            ("Store", Op::Store { dst: "x".into(), indices: vec![], value: vid, mask: None }),
+            ("BinOp", Op::BinOp { op: BinOpKind::Add, lhs: vid, rhs: vid }),
+            ("Dot", Op::Dot { a: vid, b: vid }),
+            ("Reduce", Op::Reduce { value: vid, axis: 0, op: ReduceKind::Sum }),
+            ("StrideReduce", Op::StrideReduce {
+                src: "x".into(),
+                offset: vid,
+                stride: vid,
+                end: vid,
+                op: ReduceKind::Sum,
+                dtype: DType::F32,
+                transform: None,
+                secondary_src: None,
+                secondary_base: None,
+            }),
+            ("Cast", Op::Cast { value: vid, dtype: DType::F32 }),
+            ("Loop", Op::Loop {
+                var: VarId::new(0),
+                start: vid,
+                end: vid,
+                step: vid,
+                body: BlockId::new(1),
+            }),
+            ("If", Op::If { cond: vid, then_block: BlockId::new(1), else_block: None }),
+            ("Zeros", Op::Zeros { dtype: DType::F32, shape: shape.clone() }),
+            ("Transpose", Op::Transpose { value: vid }),
+            ("ExpandDims", Op::ExpandDims { value: vid, axis: 0 }),
+            ("Reshape", Op::Reshape { value: vid, shape: shape.clone() }),
+            ("Cat", Op::Cat { values: vec![vid], axis: 0 }),
+            ("Slice", Op::Slice { value: vid, ranges: vec![(0, 0, 4)] }),
+            ("InlineMsl", Op::InlineMsl { source: "".into(), inputs: vec![], outputs: vec![] }),
+            ("UnaryOp", Op::UnaryOp { op: UnaryOpKind::Exp, value: vid }),
+            ("Activation", Op::Activation { kind: ActKind::Silu, value: vid }),
+            ("Select", Op::Select { cond: vid, on_true: vid, on_false: vid }),
+            ("Broadcast", Op::Broadcast { value: vid, shape: shape.clone() }),
+            ("Splat", Op::Splat { value: 1.0, dtype: DType::F32, shape: shape.clone() }),
+            ("FusedElementwise", Op::FusedElementwise { ops: vec![] }),
+            ("VectorLoad", Op::VectorLoad { src: "x".into(), byte_offset: vid, len: 4 }),
+            ("VectorStore", Op::VectorStore {
+                dst: "x".into(),
+                byte_offset: vid,
+                len: 4,
+                value: vid,
+            }),
+            ("VectorExtract", Op::VectorExtract { vec: vid, lane: 0 }),
+            ("Pack", Op::Pack { dtype: DType::F32, elements: vec![vid, vid, vid, vid] }),
+            ("Gather", Op::Gather { src: "x".into(), indices: vid, axis: 0 }),
+            ("Scatter", Op::Scatter { dst: "x".into(), indices: vid, value: vid, axis: 0 }),
+            ("Atomic", Op::Atomic {
+                op: AtomicKind::Add,
+                scope: AtomicScope::Device,
+                dst: "x".into(),
+                index: vid,
+                value: vid,
+            }),
+            ("Scan", Op::Scan { value: vid, axis: 0, op: ReduceKind::Sum, exclusive: false }),
+            ("StrideScan", Op::StrideScan {
+                src: "x".into(),
+                dst: "y".into(),
+                offset: vid,
+                end: vid,
+                op: ReduceKind::Sum,
+            }),
+            ("StrideArgReduce", Op::StrideArgReduce {
+                src: "x".into(),
+                offset: vid,
+                end: vid,
+                op: ReduceKind::Max,
+            }),
+            ("StrideStore", Op::StrideStore {
+                src: "x".into(),
+                dst: "y".into(),
+                offset: vid,
+                end: vid,
+                scalar: vid,
+                aux_src: None,
+            }),
+            ("SimdReduce", Op::SimdReduce { value: vid, op: ReduceKind::Sum }),
+            ("SimdShuffleXor", Op::SimdShuffleXor { value: vid, mask: 1 }),
+            ("SimdBroadcast", Op::SimdBroadcast { value: vid, lane: vid }),
+            ("ThreadgroupAlloc", Op::ThreadgroupAlloc {
+                dtype: DType::F32,
+                size: 64,
+                name: "tg".into(),
+            }),
+            ("ThreadgroupLoad", Op::ThreadgroupLoad { name: "tg".into(), index: vid }),
+            ("ThreadgroupStore", Op::ThreadgroupStore {
+                name: "tg".into(),
+                index: vid,
+                value: vid,
+            }),
+            ("StackAlloc", Op::StackAlloc { dtype: DType::F32, size: 4, name: "s".into() }),
+            ("StackLoad", Op::StackLoad { name: "s".into(), index: vid }),
+            ("StackStore", Op::StackStore { name: "s".into(), index: vid, value: vid }),
+            ("Barrier", Op::Barrier),
+            ("SimdgroupBarrier", Op::SimdgroupBarrier),
+            ("SimdgroupAlloc", Op::SimdgroupAlloc { dtype: DType::F32, m: 8, n: 8 }),
+            ("SimdgroupElemLoad", Op::SimdgroupElemLoad { value: vid, index: 0 }),
+            ("SimdgroupElemStore", Op::SimdgroupElemStore { value: vid, index: 0, data: vid }),
+            ("SimdgroupLoad", Op::SimdgroupLoad {
+                dest: vid,
+                tg: "tg".into(),
+                offset: vid,
+                stride: 8,
+                transpose: false,
+            }),
+            ("SimdgroupMatMul", Op::SimdgroupMatMul { a: vid, b: vid, c: vid }),
+            ("SimdScan", Op::SimdScan { value: vid, op: ReduceKind::Sum, exclusive: false }),
+            ("SimdLaneId", Op::SimdLaneId),
+            ("SimdGroupId", Op::SimdGroupId),
+            ("DeclareLocal", Op::DeclareLocal { name: "l".into(), value: vid }),
+            ("SetLocal", Op::SetLocal { name: "l".into(), value: vid }),
+            ("ArgReduce", Op::ArgReduce { value: vid, axis: 0, op: ReduceKind::Max }),
+        ];
+
+        for (name, op) in all {
+            let count = [
+                op.is_result_u32_scalar() as u32,
+                op.is_result_i32_scalar() as u32,
+                op.is_result_f32_scalar() as u32,
+                op.is_result_f16_scalar() as u32,
+                op.is_result_same_type() as u32,
+                op.is_result_custom() as u32,
+                op.is_no_result() as u32,
+            ]
+            .iter()
+            .sum::<u32>();
+            assert_eq!(
+                count, 1,
+                "Op::{name} has {count} result-type flags (expected exactly 1). \
+                 Each Op variant must carry exactly one of: #[no_result], \
+                 #[result_u32], #[result_i32], #[result_f32_scalar], \
+                 #[result_f16_scalar], #[result_same_type], or #[result_custom]."
+            );
+        }
     }
 }

@@ -59,26 +59,23 @@ pub struct DslBodyParser {
     ir_stmts: Vec<TokenStream>,
     /// Accumulated block definitions for loops.
     blocks: Vec<(u32, TokenStream)>,
-    /// Names of tensor params (for load/store).
-    #[allow(dead_code)]
-    param_names: Vec<String>,
     /// Names of constexpr params.
     constexpr_names: Vec<String>,
+    /// Names of tensor parameters (for disambiguating KernelCall args).
+    param_names: Vec<String>,
     /// Current block target: "kernel.body" in main body, "block_N" inside a loop.
-    current_target: String,
+    current_target: TokenStream,
     /// Map from type parameter names (e.g. "T") to their DType arg idents (e.g. `_t`).
     /// Used so `.cast::<T>()` emits `dtype: _t` instead of defaulting to F32.
     type_vars: std::collections::HashMap<String, TokenStream>,
 }
 
 impl DslBodyParser {
-    /// Parse a function body and return token streams for IR construction.
-    #[allow(dead_code)]
-    pub fn parse(body: &Block, param_names: &[String], constexpr_names: &[String]) -> TokenStream {
-        Self::parse_with_type_vars(body, param_names, constexpr_names, &Default::default())
-    }
-
-    /// Like `parse` but also maps generic type-param names → DType arg TokenStreams.
+    /// Parse a function body into IR-building token streams.
+    ///
+    /// Pass `type_vars` to map generic type-param names (e.g. `"T"`) to their DType arg
+    /// TokenStreams (e.g. `_t`), so `.cast::<T>()` emits the correct dtype variable instead
+    /// of defaulting to F32.  Pass `&Default::default()` for non-generic kernels.
     pub fn parse_with_type_vars(
         body: &Block,
         param_names: &[String],
@@ -93,9 +90,9 @@ impl DslBodyParser {
             mut_locals: BTreeSet::new(),
             ir_stmts: Vec::new(),
             blocks: Vec::new(),
-            param_names: param_names.to_vec(),
             constexpr_names: constexpr_names.to_vec(),
-            current_target: "kernel.body".into(),
+            param_names: param_names.to_vec(),
+            current_target: quote! { kernel.body },
             type_vars: type_vars.clone(),
         };
 
@@ -148,19 +145,19 @@ impl DslBodyParser {
 
     /// Push `<target>.push_op(<op>, ValueId::new(<result>));`
     fn push_op(&mut self, op_ts: TokenStream, result: u32) {
-        let tgt: TokenStream = self.current_target.parse().expect("valid target");
+        let tgt = &self.current_target;
         self.ir_stmts.push(quote! { #tgt.push_op(#op_ts, ValueId::new(#result)); });
     }
 
     /// Push `<target>.push_op_no_result(<op>);`
     fn push_op_no_result(&mut self, op_ts: TokenStream) {
-        let tgt: TokenStream = self.current_target.parse().expect("valid target");
+        let tgt = &self.current_target;
         self.ir_stmts.push(quote! { #tgt.push_op_no_result(#op_ts); });
     }
 
     /// Push `<target>.name_value(ValueId::new(<vid>), <name>);`
     fn push_name_value(&mut self, vid: u32, name: &str) {
-        let tgt: TokenStream = self.current_target.parse().expect("valid target");
+        let tgt = &self.current_target;
         self.ir_stmts.push(quote! { #tgt.name_value(ValueId::new(#vid), #name); });
     }
 
@@ -169,6 +166,26 @@ impl DslBodyParser {
     fn push_error_value(&mut self, error: syn::Error) -> u32 {
         self.push_error(error);
         self.alloc_vid()
+    }
+
+    // ---- Block scope helper ---------------------------------------------------
+
+    /// Sentinel added to a loop VarId when stored in the bindings map so the MSL
+    /// emitter can distinguish loop-variable references from SSA value IDs.
+    const LOOP_VAR_VID_OFFSET: u32 = 0x4000_0000;
+
+    /// Execute `f` with `self` targeting a fresh block `bid`, restore the outer
+    /// target/stmts/bindings afterward, and return the inner block's statements.
+    fn with_block(&mut self, bid: u32, f: impl FnOnce(&mut Self)) -> Vec<TokenStream> {
+        let block_var = format_ident!("block_{bid}");
+        let prev_target = std::mem::replace(&mut self.current_target, quote! { #block_var });
+        let prev_stmts = std::mem::take(&mut self.ir_stmts);
+        let prev_bindings = self.bindings.clone();
+        f(self);
+        let block_stmts = std::mem::replace(&mut self.ir_stmts, prev_stmts);
+        self.current_target = prev_target;
+        self.bindings = prev_bindings;
+        block_stmts
     }
 
     // ---- Statement parsing --------------------------------------------------
@@ -285,23 +302,14 @@ impl DslBodyParser {
         let var_id = self.alloc_var();
         let loop_body_bid = self.alloc_bid();
 
-        // Save outer scope; add loop variable with the +1000 legacy key that
-        // the msl.rs emitter also registers.
-        let prev_bindings = self.bindings.clone();
-        self.bindings.insert(loop_var_name.clone(), var_id + 0x4000_0000);
-
-        // Redirect IR emission to the loop body block.
-        let prev_target =
-            std::mem::replace(&mut self.current_target, format!("block_{loop_body_bid}"));
-        let prev_stmts = std::mem::take(&mut self.ir_stmts);
-
-        for stmt in &for_loop.body.stmts {
-            self.parse_stmt(stmt);
-        }
-
-        let loop_body_tokens = std::mem::replace(&mut self.ir_stmts, prev_stmts);
-        self.current_target = prev_target;
-        self.bindings = prev_bindings;
+        // Seed loop var into bindings before descending so body stmts can resolve it.
+        // LOOP_VAR_VID_OFFSET distinguishes it from SSA value IDs for the MSL emitter.
+        self.bindings.insert(loop_var_name.clone(), var_id + Self::LOOP_VAR_VID_OFFSET);
+        let loop_body_tokens = self.with_block(loop_body_bid, |p| {
+            for stmt in &for_loop.body.stmts {
+                p.parse_stmt(stmt);
+            }
+        });
 
         // Emit the Loop op into the parent block.
         self.push_op_no_result(quote! {
@@ -325,37 +333,25 @@ impl DslBodyParser {
         let then_bid = self.alloc_bid();
 
         // Collect then-block IR.
-        let prev_target = std::mem::replace(&mut self.current_target, format!("block_{then_bid}"));
-        let prev_stmts = std::mem::take(&mut self.ir_stmts);
-        let prev_bindings = self.bindings.clone();
-        for stmt in &if_expr.then_branch.stmts {
-            self.parse_stmt(stmt);
-        }
-        let then_tokens = std::mem::replace(&mut self.ir_stmts, prev_stmts);
-        self.current_target = prev_target;
-        self.bindings = prev_bindings;
+        let then_tokens = self.with_block(then_bid, |p| {
+            for stmt in &if_expr.then_branch.stmts {
+                p.parse_stmt(stmt);
+            }
+        });
 
         // Collect else-block IR (if present).
         let else_bid_tokens = if let Some((_, else_expr)) = &if_expr.else_branch {
             let else_bid = self.alloc_bid();
-            let prev_target =
-                std::mem::replace(&mut self.current_target, format!("block_{else_bid}"));
-            let prev_stmts = std::mem::take(&mut self.ir_stmts);
-            let prev_bindings = self.bindings.clone();
-            match else_expr.as_ref() {
+            let else_tokens = self.with_block(else_bid, |p| match else_expr.as_ref() {
                 Expr::Block(else_block) =>
                     for stmt in &else_block.block.stmts {
-                        self.parse_stmt(stmt);
+                        p.parse_stmt(stmt);
                     },
-                // else if — recurse
                 Expr::If(nested_if) => {
-                    self.parse_if(nested_if);
+                    p.parse_if(nested_if);
                 },
                 _ => {},
-            }
-            let else_tokens = std::mem::replace(&mut self.ir_stmts, prev_stmts);
-            self.current_target = prev_target;
-            self.bindings = prev_bindings;
+            });
             self.blocks.push((else_bid, quote! { #(#else_tokens)* }));
             quote! { Some(BlockId::new(#else_bid)) }
         } else {
@@ -552,89 +548,55 @@ impl DslBodyParser {
 
     fn parse_call(&mut self, call: &ExprCall) -> u32 {
         let path = expr_to_path_string(&call.func);
-        match path.as_str() {
+        let name = path.as_str();
+
+        // Unary math ops → Op::UnaryOp
+        if let Some(kind) = unary_op_kind(name) {
+            return self.emit_unary_op(call, kind);
+        }
+        // Activation functions → Op::Activation
+        if let Some(kind) = activation_kind(name) {
+            return self.emit_activation(call, kind);
+        }
+        // Reduce ops → Op::Reduce
+        if let Some(op) = reduce_kind(name) {
+            return self.emit_reduce(call, op);
+        }
+        // SIMD group reduce → Op::SimdReduce
+        if let Some(op) = simd_reduce_kind(name) {
+            return self.parse_simd_reduce(call, op);
+        }
+        // Binary function calls → Op::BinOp
+        if let Some(op) = binary_fn_kind(name) {
+            return self.parse_binary_call(call, op);
+        }
+        // Device-scope atomics — target a kernel buffer parameter.
+        if let Some(op) = atomic_op_kind(name) {
+            return self.parse_atomic(call, op, quote! { AtomicScope::Device });
+        }
+        // Threadgroup-scope atomics — target a `threadgroup_alloc`'d uint array.
+        // Codegen reinterprets each slot as `threadgroup atomic_uint*`.
+        if let Some(op) = atomic_tg_op_kind(name) {
+            return self.parse_atomic(call, op, quote! { AtomicScope::Threadgroup });
+        }
+
+        match name {
             "program_id" => self.parse_program_id(call),
             "arange" => self.parse_arange(call),
             "load" => self.parse_load(call),
             "store" => self.parse_store(call),
             "zeros" => self.parse_zeros(call),
             "dot" => self.parse_dot(call),
-            "exp" => self.parse_unary_call(call, "exp"),
-            "exp2" => self.parse_unary_call(call, "exp2"),
-            "log" => self.parse_unary_call(call, "log"),
-            "log2" => self.parse_unary_call(call, "log2"),
-            "sqrt" => self.parse_unary_call(call, "sqrt"),
-            "rsqrt" => self.parse_unary_call(call, "rsqrt"),
-            "recip" => self.parse_unary_call(call, "recip"),
-            "abs" => self.parse_unary_call(call, "abs"),
-            "sin" => self.parse_unary_call(call, "sin"),
-            "cos" => self.parse_unary_call(call, "cos"),
-            "ceil" => self.parse_unary_call(call, "ceil"),
-            "floor" => self.parse_unary_call(call, "floor"),
-            "silu" => self.parse_unary_call(call, "silu"),
-            "gelu" => self.parse_unary_call(call, "gelu"),
-            "relu" => self.parse_unary_call(call, "relu"),
-            "tanh" => self.parse_unary_call(call, "tanh"),
-            "sigmoid" => self.parse_unary_call(call, "sigmoid"),
-            "reduce_max" => self.parse_unary_call(call, "reduce_max"),
-            "reduce_sum" => self.parse_unary_call(call, "reduce_sum"),
-            "reduce_min" => self.parse_unary_call(call, "reduce_min"),
-            "reduce_product" => self.parse_unary_call(call, "reduce_product"),
-            "erf" => self.parse_unary_call(call, "erf"),
-            "sign" => self.parse_unary_call(call, "sign"),
-            "round" => self.parse_unary_call(call, "round"),
-            "trunc" => self.parse_unary_call(call, "trunc"),
-            "sinh" => self.parse_unary_call(call, "sinh"),
-            "cosh" => self.parse_unary_call(call, "cosh"),
-            "tan" => self.parse_unary_call(call, "tan"),
-            "asin" => self.parse_unary_call(call, "asin"),
-            "atan" => self.parse_unary_call(call, "atan"),
-            "asinh" => self.parse_unary_call(call, "asinh"),
-            "acos" => self.parse_unary_call(call, "acos"),
-            "acosh" => self.parse_unary_call(call, "acosh"),
-            "atanh" => self.parse_unary_call(call, "atanh"),
-            "expm1" => self.parse_unary_call(call, "expm1"),
-            "log10" => self.parse_unary_call(call, "log10"),
-            "erfinv" => self.parse_unary_call(call, "erfinv"),
-            "atan2" => self.parse_binary_call(call, "ATan2"),
-            "remainder" => self.parse_binary_call(call, "Rem"),
-            "max" => self.parse_binary_call(call, "Max"),
-            "min" => self.parse_binary_call(call, "Min"),
             "cast" => self.parse_cast_call(call),
             "select" => self.parse_select_call(call),
-            "pow" => self.parse_binary_call(call, "Pow"),
-            "simd_sum" => self.parse_simd_reduce(call, "Sum"),
-            "simd_max" => self.parse_simd_reduce(call, "Max"),
-            "simd_min" => self.parse_simd_reduce(call, "Min"),
             "simd_shuffle_xor" => self.parse_simd_shuffle_xor(call),
             "simd_broadcast" => self.parse_simd_broadcast(call),
-            // Device-scope atomics — target a kernel buffer parameter.
-            "atomic_add" => self.parse_atomic(call, "Add", "Device"),
-            "atomic_max" => self.parse_atomic(call, "Max", "Device"),
-            "atomic_min" => self.parse_atomic(call, "Min", "Device"),
-            "atomic_and" => self.parse_atomic(call, "And", "Device"),
-            "atomic_or" => self.parse_atomic(call, "Or", "Device"),
-            "atomic_xor" => self.parse_atomic(call, "Xor", "Device"),
-            // Threadgroup-scope atomics — target a `threadgroup_alloc`'d
-            // uint array.  Codegen reinterprets each slot as
-            // `threadgroup atomic_uint*` for the call.  AURA encode's
-            // pack stage races on shared u32 words with these.
-            "atomic_add_tg" => self.parse_atomic(call, "Add", "Threadgroup"),
-            "atomic_max_tg" => self.parse_atomic(call, "Max", "Threadgroup"),
-            "atomic_min_tg" => self.parse_atomic(call, "Min", "Threadgroup"),
-            "atomic_and_tg" => self.parse_atomic(call, "And", "Threadgroup"),
-            "atomic_or_tg" => self.parse_atomic(call, "Or", "Threadgroup"),
-            "atomic_xor_tg" => self.parse_atomic(call, "Xor", "Threadgroup"),
             "threadgroup_barrier" => self.parse_barrier(call),
             "simdgroup_barrier_mem_none" => self.parse_simdgroup_barrier(call),
             "threadgroup_alloc" => self.parse_threadgroup_alloc(call),
             "threadgroup_load" => self.parse_threadgroup_load(call),
             "threadgroup_store" => self.parse_threadgroup_store(call),
-            // Per-thread stack arrays.  Mirror the threadgroup_* shape but
-            // emit an unqualified `T name[size];` so Metal places the
-            // array in per-thread registers / thread-local memory.  AURA
-            // flash kernels need this for `q_vals[DIMS_PER_LANE]`,
-            // `o[DIMS_PER_LANE]`, and the per-thread codebook cache.
+            // Per-thread stack arrays — unqualified `T name[size];`, placed in registers by Metal.
             "stack_alloc" => self.parse_stack_alloc(call),
             "stack_load" => self.parse_stack_load(call),
             "stack_store" => self.parse_stack_store(call),
@@ -654,15 +616,84 @@ impl DslBodyParser {
             "strided_reduce_dot" => self.parse_strided_reduce_dot(call),
             "strided_store" => self.parse_strided_store(call),
             "strided_scan" => self.parse_strided_scan(call),
-            "strided_argmax" => self.parse_strided_argreduce(call, "Max"),
-            "strided_argmin" => self.parse_strided_argreduce(call, "Min"),
+            "strided_argmax" => self.parse_strided_argreduce(call, quote! { ReduceKind::Max }),
+            "strided_argmin" => self.parse_strided_argreduce(call, quote! { ReduceKind::Min }),
+            // CoopTile ops — lower to mpp::tensor_ops::matmul2d on Metal 4.
+            "coop_tile_setup" => self.parse_coop_tile_setup(call),
+            "coop_tile_zero" => self.parse_coop_tile_zero(call),
+            "coop_tile_load_a" => self.parse_coop_tile_load_a(call),
+            "coop_tile_load_b" => self.parse_coop_tile_load_b(call),
+            "coop_tile_run" => self.parse_coop_tile_run(call),
+            "coop_tile_store_c" => self.parse_coop_tile_store_c(call),
             "range" => 0,
             _ => {
-                let callee = if path.is_empty() { "<expr>".to_string() } else { path };
-                self.push_error_value(syn::Error::new_spanned(
-                    &call.func,
-                    format!("unrecognized MetalTile DSL call `{callee}`"),
-                ))
+                if path.is_empty() {
+                    return self.push_error_value(syn::Error::new_spanned(
+                        &call.func,
+                        "unrecognized MetalTile DSL call: cannot determine callee name",
+                    ));
+                }
+                // Only treat as a cross-kernel call if the name follows the
+                // registered kernel naming convention (mt_* or ffai_* prefix).
+                // Anything else is almost certainly a typo of a DSL builtin
+                // and should fail at the call site with a span-accurate error,
+                // just as it did before cross-kernel calling was introduced.
+                if !path.starts_with("mt_") && !path.starts_with("ffai_") {
+                    return self.push_error_value(syn::Error::new_spanned(
+                        &call.func,
+                        format!(
+                            "unrecognized MetalTile DSL function `{path}`. \
+                             Cross-kernel callees must be registered via \
+                             #[kernel] and their names must start with `mt_` \
+                             or `ffai_`."
+                        ),
+                    ));
+                }
+                // Treat as a cross-kernel call. KernelInlinePass resolves it
+                // at compile time by looking up `callee` in the inventory-based
+                // KernelEntry registry and splicing the callee's scalar body.
+                //
+                // Arg classification:
+                //   - bare identifier matching a tensor param or constexpr
+                //     param → KernelCallArg::Tensor(name)
+                //   - any other expression → KernelCallArg::Value(vid)
+                let mut args_tokens: Vec<proc_macro2::TokenStream> = Vec::new();
+                for a in &call.args {
+                    if let syn::Expr::Path(p) = a
+                        && p.qself.is_none()
+                        && p.path.segments.len() == 1
+                    {
+                        let ident = p.path.segments[0].ident.to_string();
+                        if self.param_names.contains(&ident)
+                            || self.constexpr_names.contains(&ident)
+                        {
+                            args_tokens.push(quote! { KernelCallArg::Tensor(#ident.to_string()) });
+                            continue;
+                        }
+                    }
+                    let vid = self.parse_expr(a);
+                    args_tokens.push(quote! { KernelCallArg::Value(ValueId::new(#vid)) });
+                }
+                let result = self.alloc_vid();
+                let callee_str = path;
+                // Use the first type variable as the dtype for instantiation.
+                let type_arg = self
+                    .type_vars
+                    .values()
+                    .next()
+                    .cloned()
+                    .unwrap_or_else(|| quote! { DType::F32 });
+                self.push_op(
+                    quote! {
+                        Op::KernelCall {
+                            callee: #callee_str.to_string(),
+                            args: vec![#(#args_tokens),*],
+                            dtype: #type_arg,
+                        }
+                    },
+                    result,
+                );
+                result
             },
         }
     }
@@ -743,113 +774,36 @@ impl DslBodyParser {
         result
     }
 
-    fn parse_unary_call(&mut self, call: &ExprCall, fn_name: &str) -> u32 {
-        let args: Vec<_> = call.args.iter().collect();
-        let val = args.first().map(|a| self.parse_expr(a)).unwrap_or_else(|| self.alloc_vid());
+    /// Emit `Op::UnaryOp` for a one-argument DSL call given a pre-resolved op-kind token stream.
+    fn emit_unary_op(&mut self, call: &ExprCall, kind: TokenStream) -> u32 {
+        let val = call.args.first().map(|a| self.parse_expr(a)).unwrap_or_else(|| self.alloc_vid());
         let result = self.alloc_vid();
-        match fn_name {
-            "exp" | "exp2" | "log" | "log2" | "sqrt" | "rsqrt" | "abs" | "sin" | "cos" | "ceil"
-            | "floor" | "recip" | "erf" | "sign" | "round" | "trunc" | "sinh" | "cosh" | "tan"
-            | "asin" | "acos" | "atan" | "asinh" | "acosh" | "atanh" | "expm1" | "log10"
-            | "erfinv" => {
-                let op_tokens = match fn_name {
-                    "exp" => quote! { UnaryOpKind::Exp },
-                    "exp2" => quote! { UnaryOpKind::Exp2 },
-                    "log" => quote! { UnaryOpKind::Log },
-                    "log2" => quote! { UnaryOpKind::Log2 },
-                    "sqrt" => quote! { UnaryOpKind::Sqrt },
-                    "rsqrt" => quote! { UnaryOpKind::Rsqrt },
-                    "abs" => quote! { UnaryOpKind::Abs },
-                    "sin" => quote! { UnaryOpKind::Sin },
-                    "cos" => quote! { UnaryOpKind::Cos },
-                    "ceil" => quote! { UnaryOpKind::Ceil },
-                    "floor" => quote! { UnaryOpKind::Floor },
-                    "recip" => quote! { UnaryOpKind::Recip },
-                    "erf" => quote! { UnaryOpKind::Erf },
-                    "sign" => quote! { UnaryOpKind::Sign },
-                    "round" => quote! { UnaryOpKind::Round },
-                    "sinh" => quote! { UnaryOpKind::Sinh },
-                    "cosh" => quote! { UnaryOpKind::Cosh },
-                    "tan" => quote! { UnaryOpKind::Tan },
-                    "asin" => quote! { UnaryOpKind::Asin },
-                    "atan" => quote! { UnaryOpKind::Atan },
-                    "asinh" => quote! { UnaryOpKind::Asinh },
-                    "trunc" => quote! { UnaryOpKind::Trunc },
-                    "acos" => quote! { UnaryOpKind::Acos },
-                    "acosh" => quote! { UnaryOpKind::Acosh },
-                    "atanh" => quote! { UnaryOpKind::Atanh },
-                    "expm1" => quote! { UnaryOpKind::Expm1 },
-                    "log10" => quote! { UnaryOpKind::Log10 },
-                    "erfinv" => quote! { UnaryOpKind::ErfInv },
-                    _ => quote! { UnaryOpKind::Exp },
-                };
-                self.push_op(
-                    quote! {
-                        Op::UnaryOp { op: #op_tokens, value: ValueId::new(#val) }
-                    },
-                    result,
-                );
-            },
-            "silu" | "gelu" | "relu" | "tanh" | "sigmoid" => {
-                let kind = match fn_name {
-                    "silu" => quote! { ActKind::Silu },
-                    "gelu" => quote! { ActKind::Gelu },
-                    "relu" => quote! { ActKind::Relu },
-                    "tanh" => quote! { ActKind::Tanh },
-                    "sigmoid" => quote! { ActKind::Sigmoid },
-                    _ => quote! { ActKind::Silu },
-                };
-                self.push_op(
-                    quote! {
-                        Op::Activation { kind: #kind, value: ValueId::new(#val) }
-                    },
-                    result,
-                );
-            },
-            "reduce_sum" | "reduce_max" | "reduce_min" | "reduce_product" => {
-                let op = match fn_name {
-                    "reduce_sum" => quote! { ReduceKind::Sum },
-                    "reduce_max" => quote! { ReduceKind::Max },
-                    "reduce_min" => quote! { ReduceKind::Min },
-                    "reduce_product" => quote! { ReduceKind::Product },
-                    _ => quote! { ReduceKind::Sum },
-                };
-                self.push_op(
-                    quote! {
-                        Op::Reduce { value: ValueId::new(#val), axis: 0, op: #op }
-                    },
-                    result,
-                );
-            },
-            _ => {
-                self.push_op(
-                    quote! {
-                        Op::Reduce { value: ValueId::new(#val), axis: 0, op: ReduceKind::Sum }
-                    },
-                    result,
-                );
-            },
-        }
+        self.push_op(quote! { Op::UnaryOp { op: #kind, value: ValueId::new(#val) } }, result);
         result
     }
 
-    fn parse_binary_call(&mut self, call: &ExprCall, kind: &str) -> u32 {
-        let args: Vec<_> = call.args.iter().collect();
-        let lhs = args.first().map(|a| self.parse_expr(a)).unwrap_or_else(|| self.alloc_vid());
-        let rhs = args.get(1).map(|a| self.parse_expr(a)).unwrap_or_else(|| self.alloc_vid());
+    /// Emit `Op::Activation` for a one-argument activation call.
+    fn emit_activation(&mut self, call: &ExprCall, kind: TokenStream) -> u32 {
+        let val = call.args.first().map(|a| self.parse_expr(a)).unwrap_or_else(|| self.alloc_vid());
         let result = self.alloc_vid();
-        let op_tokens = match kind {
-            "Max" => quote! { BinOpKind::Max },
-            "Min" => quote! { BinOpKind::Min },
-            "Pow" => quote! { BinOpKind::Pow },
-            "ATan2" => quote! { BinOpKind::ATan2 },
-            "Rem" => quote! { BinOpKind::Rem },
-            _ => quote! { BinOpKind::Add },
-        };
+        self.push_op(quote! { Op::Activation { kind: #kind, value: ValueId::new(#val) } }, result);
+        result
+    }
+
+    /// Emit `Op::Reduce` for a one-argument reduce call.
+    fn emit_reduce(&mut self, call: &ExprCall, op: TokenStream) -> u32 {
+        let val = call.args.first().map(|a| self.parse_expr(a)).unwrap_or_else(|| self.alloc_vid());
+        let result = self.alloc_vid();
+        self.push_op(quote! { Op::Reduce { value: ValueId::new(#val), axis: 0, op: #op } }, result);
+        result
+    }
+
+    fn parse_binary_call(&mut self, call: &ExprCall, op: TokenStream) -> u32 {
+        let lhs = call.args.first().map(|a| self.parse_expr(a)).unwrap_or_else(|| self.alloc_vid());
+        let rhs = call.args.get(1).map(|a| self.parse_expr(a)).unwrap_or_else(|| self.alloc_vid());
+        let result = self.alloc_vid();
         self.push_op(
-            quote! {
-                Op::BinOp { op: #op_tokens, lhs: ValueId::new(#lhs), rhs: ValueId::new(#rhs) }
-            },
+            quote! { Op::BinOp { op: #op, lhs: ValueId::new(#lhs), rhs: ValueId::new(#rhs) } },
             result,
         );
         result
@@ -1076,7 +1030,7 @@ impl DslBodyParser {
 
     /// `strided_argmax(src, start, end)` or `strided_argmin(src, start, end)`
     /// — serial argmax/argmin of src[start..end], returns the flat index.
-    fn parse_strided_argreduce(&mut self, call: &ExprCall, op_str: &str) -> u32 {
+    fn parse_strided_argreduce(&mut self, call: &ExprCall, op: TokenStream) -> u32 {
         let args: Vec<_> = call.args.iter().collect();
         if args.len() < 3 {
             return self.alloc_vid();
@@ -1087,10 +1041,6 @@ impl DslBodyParser {
         }
         let offset = self.parse_expr(args[1]);
         let end = self.parse_expr(args[2]);
-        let op = match op_str {
-            "Max" => quote! { ReduceKind::Max },
-            _ => quote! { ReduceKind::Min },
-        };
         let result = self.alloc_vid();
         self.push_op(
             quote! {
@@ -1109,63 +1059,54 @@ impl DslBodyParser {
     // ---- Method calls (.cast::<T>(), .t(), .slice()) ------------------------
 
     fn parse_method_call(&mut self, method: &syn::ExprMethodCall) -> u32 {
-        let method_name = method.method.to_string();
-
-        if method_name == "cast" {
-            let receiver_vid = self.parse_expr(&method.receiver);
-            let result = self.alloc_vid();
-            let dtype = method
-                .turbofish
-                .as_ref()
-                .and_then(|args| {
-                    args.args.first().and_then(|arg| {
-                        if let syn::GenericArgument::Type(syn::Type::Path(tp)) = arg {
-                            tp.path.segments.last().map(|s| s.ident.to_string())
-                        } else {
-                            None
-                        }
+        match method.method.to_string().as_str() {
+            "cast" => {
+                let receiver_vid = self.parse_expr(&method.receiver);
+                let result = self.alloc_vid();
+                let dtype = method
+                    .turbofish
+                    .as_ref()
+                    .and_then(|args| {
+                        args.args.first().and_then(|arg| {
+                            if let syn::GenericArgument::Type(syn::Type::Path(tp)) = arg {
+                                tp.path.segments.last().map(|s| s.ident.to_string())
+                            } else {
+                                None
+                            }
+                        })
                     })
-                })
-                .map(|n| match n.as_str() {
-                    "f16" => quote! { DType::F16 },
-                    "f32" => quote! { DType::F32 },
-                    "bf16" => quote! { DType::BF16 },
-                    "i32" => quote! { DType::I32 },
-                    "u32" => quote! { DType::U32 },
-                    other =>
-                        if let Some(ts) = self.type_vars.get(other) {
-                            ts.clone()
-                        } else {
-                            quote! { DType::F32 }
-                        },
-                })
-                .unwrap_or(quote! { DType::F16 });
-            self.push_op(
-                quote! {
-                    Op::Cast { value: ValueId::new(#receiver_vid), dtype: #dtype }
-                },
-                result,
-            );
-            return result;
+                    .map(|n| match n.as_str() {
+                        "f16" => quote! { DType::F16 },
+                        "f32" => quote! { DType::F32 },
+                        "bf16" => quote! { DType::BF16 },
+                        "i32" => quote! { DType::I32 },
+                        "u32" => quote! { DType::U32 },
+                        other =>
+                            if let Some(ts) = self.type_vars.get(other) {
+                                ts.clone()
+                            } else {
+                                quote! { DType::F32 }
+                            },
+                    })
+                    .unwrap_or(quote! { DType::F16 });
+                self.push_op(
+                    quote! { Op::Cast { value: ValueId::new(#receiver_vid), dtype: #dtype } },
+                    result,
+                );
+                result
+            },
+            "t" => {
+                let receiver_vid = self.parse_expr(&method.receiver);
+                let result = self.alloc_vid();
+                self.push_op(
+                    quote! { Op::Transpose { value: ValueId::new(#receiver_vid) } },
+                    result,
+                );
+                result
+            },
+            "slice" => self.parse_expr(&method.receiver),
+            _ => self.alloc_vid(),
         }
-
-        if method_name == "t" {
-            let receiver_vid = self.parse_expr(&method.receiver);
-            let result = self.alloc_vid();
-            self.push_op(
-                quote! {
-                    Op::Transpose { value: ValueId::new(#receiver_vid) }
-                },
-                result,
-            );
-            return result;
-        }
-
-        if method_name == "slice" {
-            return self.parse_expr(&method.receiver);
-        }
-
-        self.alloc_vid()
     }
 
     // ---- Indexing / path / literal ------------------------------------------
@@ -1343,21 +1284,10 @@ impl DslBodyParser {
     }
 
     /// `simd_sum/max/min(val)` → Op::SimdReduce
-    fn parse_simd_reduce(&mut self, call: &ExprCall, op_str: &str) -> u32 {
-        let args: Vec<_> = call.args.iter().collect();
-        let val = args.first().map(|a| self.parse_expr(a)).unwrap_or_else(|| self.alloc_vid());
+    fn parse_simd_reduce(&mut self, call: &ExprCall, op: TokenStream) -> u32 {
+        let val = call.args.first().map(|a| self.parse_expr(a)).unwrap_or_else(|| self.alloc_vid());
         let result = self.alloc_vid();
-        let op_tokens = match op_str {
-            "Max" => quote! { ReduceKind::Max },
-            "Min" => quote! { ReduceKind::Min },
-            _ => quote! { ReduceKind::Sum },
-        };
-        self.push_op(
-            quote! {
-                Op::SimdReduce { value: ValueId::new(#val), op: #op_tokens }
-            },
-            result,
-        );
+        self.push_op(quote! { Op::SimdReduce { value: ValueId::new(#val), op: #op } }, result);
         result
     }
 
@@ -1412,7 +1342,7 @@ impl DslBodyParser {
     ///
     /// `index` and `value` are SSA expressions.  No result — atomics are
     /// side-effecting stores.
-    fn parse_atomic(&mut self, call: &ExprCall, op_str: &str, scope_str: &str) -> u32 {
+    fn parse_atomic(&mut self, call: &ExprCall, op: TokenStream, scope: TokenStream) -> u32 {
         let args: Vec<_> = call.args.iter().collect();
         let dst = if let Some(syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. })) =
             args.first().map(|a| match a {
@@ -1423,29 +1353,16 @@ impl DslBodyParser {
         } else {
             self.push_error(syn::Error::new_spanned(
                 &call.func,
-                format!("atomic_{} expects a string literal as first argument (the destination param name)", op_str.to_lowercase()),
+                "atomic_* expects a string literal as first argument (the destination param name)",
             ));
             String::new()
         };
         let index = args.get(1).map(|a| self.parse_expr(a)).unwrap_or_else(|| self.alloc_vid());
         let value = args.get(2).map(|a| self.parse_expr(a)).unwrap_or_else(|| self.alloc_vid());
-        let op_tokens = match op_str {
-            "Add" => quote! { AtomicKind::Add },
-            "Max" => quote! { AtomicKind::Max },
-            "Min" => quote! { AtomicKind::Min },
-            "And" => quote! { AtomicKind::And },
-            "Or" => quote! { AtomicKind::Or },
-            "Xor" => quote! { AtomicKind::Xor },
-            _ => quote! { AtomicKind::Add },
-        };
-        let scope_tokens = match scope_str {
-            "Threadgroup" => quote! { AtomicScope::Threadgroup },
-            _ => quote! { AtomicScope::Device },
-        };
         self.push_op_no_result(quote! {
             Op::Atomic {
-                op: #op_tokens,
-                scope: #scope_tokens,
+                op: #op,
+                scope: #scope,
                 dst: #dst.to_string(),
                 index: ValueId::new(#index),
                 value: ValueId::new(#value),
@@ -1831,6 +1748,221 @@ impl DslBodyParser {
         );
         result
     }
+
+    // ---- CoopTile ops -------------------------------------------------------
+
+    /// Resolve a dtype from a positional argument expression.
+    ///
+    /// Accepts type-path form (`f32`, `f16`, `bf16`, `T`, …). Generic type
+    /// variables (e.g. `T`) are looked up in `self.type_vars`.
+    fn dtype_from_expr_arg(&self, arg: &Expr) -> TokenStream {
+        let name = match arg {
+            Expr::Path(p) =>
+                p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default(),
+            _ => String::new(),
+        };
+        if let Some(ts) = self.type_vars.get(&name) {
+            ts.clone()
+        } else {
+            dtype_tokens_for_name(&name)
+        }
+    }
+
+    /// ```text
+    /// coop_tile_setup(name, m, n, k, act_dtype
+    ///     [, acc_mode_str                   // "overwrite" | "accumulate"  (default "overwrite")
+    ///     [, scope_str                      // "simdgroup"  | "threadgroup" (default "simdgroup")
+    ///     [, acc_dtype                      // default f32
+    ///     [, ta [, tb [, tc                 // default false
+    ///     [, direct_inputs                  // default false
+    ///     [, a_is_tg, a_ei, a_eo,           // only used when direct_inputs=true
+    ///        b_is_tg, b_ei, b_eo ]]]]]]]]])
+    /// ```
+    fn parse_coop_tile_setup(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<&Expr> = call.args.iter().collect();
+
+        let name = string_lit_from_expr(args.first().copied().unwrap_or(&*call.func));
+        let m = args.get(1).map(|a| literal_u32(a)).unwrap_or(0);
+        let n = args.get(2).map(|a| literal_u32(a)).unwrap_or(0);
+        let k = args.get(3).map(|a| literal_u32(a)).unwrap_or(0);
+        let act_dtype = args
+            .get(4)
+            .map(|a| self.dtype_from_expr_arg(a))
+            .unwrap_or_else(|| quote! { DType::F16 });
+
+        let acc_mode_str = args.get(5).map(|a| string_lit_from_expr(a)).unwrap_or_default();
+        let acc_mode = match acc_mode_str.as_str() {
+            "accumulate" | "multiply_accumulate" | "acc" =>
+                quote! { CoopTileAccMode::MultiplyAccumulate },
+            _ => quote! { CoopTileAccMode::Overwrite },
+        };
+
+        let scope_str = args.get(6).map(|a| string_lit_from_expr(a)).unwrap_or_default();
+        let scope = match scope_str.as_str() {
+            "threadgroup" | "tg" => quote! { CoopTileScope::Threadgroup },
+            _ => quote! { CoopTileScope::SimdGroup },
+        };
+
+        let acc_dtype = args
+            .get(7)
+            .map(|a| self.dtype_from_expr_arg(a))
+            .unwrap_or_else(|| quote! { DType::F32 });
+
+        let ta = args.get(8).and_then(|a| bool_lit(a)).unwrap_or(false);
+        let tb = args.get(9).and_then(|a| bool_lit(a)).unwrap_or(false);
+        let tc = args.get(10).and_then(|a| bool_lit(a)).unwrap_or(false);
+        let direct_inputs = args.get(11).and_then(|a| bool_lit(a)).unwrap_or(false);
+
+        // direct_inputs extras: a_is_tg, a_ei, a_eo, b_is_tg, b_ei, b_eo
+        let a_is_tg = args.get(12).and_then(|a| bool_lit(a)).unwrap_or(false);
+        let a_ei = args.get(13).map(|a| literal_u32(a)).unwrap_or(0);
+        let a_eo = args.get(14).map(|a| literal_u32(a)).unwrap_or(0);
+        let b_is_tg = args.get(15).and_then(|a| bool_lit(a)).unwrap_or(false);
+        let b_ei = args.get(16).map(|a| literal_u32(a)).unwrap_or(0);
+        let b_eo = args.get(17).map(|a| literal_u32(a)).unwrap_or(0);
+
+        self.push_op_no_result(quote! {
+            Op::CoopTileSetup {
+                name: #name.to_string(),
+                m: #m, n: #n, k: #k,
+                ta: #ta, tb: #tb, tc: #tc,
+                acc_mode: #acc_mode,
+                exec_scope: #scope,
+                act_dtype: #act_dtype,
+                acc_dtype: #acc_dtype,
+                direct_inputs: #direct_inputs,
+                a_is_tg: #a_is_tg, a_ei: #a_ei, a_eo: #a_eo,
+                b_is_tg: #b_is_tg, b_ei: #b_ei, b_eo: #b_eo,
+            }
+        });
+        0
+    }
+
+    /// `coop_tile_zero(name)` → Op::CoopTileZero.
+    fn parse_coop_tile_zero(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<&Expr> = call.args.iter().collect();
+        let name = string_lit_from_expr(args.first().copied().unwrap_or(&*call.func));
+        self.push_op_no_result(quote! { Op::CoopTileZero { name: #name.to_string() } });
+        0
+    }
+
+    /// ```text
+    /// coop_tile_load_a(name, ptr, is_tg, dtype, ei, eo
+    ///     [, offset_expr | direct_bool   // if bool → direct flag, no offset
+    ///     [, direct_bool ]])             // only when offset_expr given
+    /// ```
+    fn parse_coop_tile_load_a(&mut self, call: &ExprCall) -> u32 {
+        self.parse_coop_tile_load(call, true)
+    }
+
+    /// Same signature as `coop_tile_load_a`.
+    fn parse_coop_tile_load_b(&mut self, call: &ExprCall) -> u32 {
+        self.parse_coop_tile_load(call, false)
+    }
+
+    fn parse_coop_tile_load(&mut self, call: &ExprCall, is_a: bool) -> u32 {
+        let args: Vec<&Expr> = call.args.iter().collect();
+        let name = string_lit_from_expr(args.first().copied().unwrap_or(&*call.func));
+        let ptr_name = string_lit_from_expr(args.get(1).copied().unwrap_or(&*call.func));
+        let is_tg = args.get(2).and_then(|a| bool_lit(a)).unwrap_or(false);
+        let dtype = args
+            .get(3)
+            .map(|a| self.dtype_from_expr_arg(a))
+            .unwrap_or_else(|| quote! { DType::F16 });
+        let ei = args.get(4).map(|a| literal_u32(a)).unwrap_or(0);
+        let eo = args.get(5).map(|a| literal_u32(a)).unwrap_or(0);
+
+        // arg[6]: bool literal → it's `direct` (no offset); any other expr → it's `offset`.
+        let (ptr_offset_ts, direct) = match args.get(6) {
+            None => (quote! { None }, false),
+            Some(a) =>
+                if let Some(b) = bool_lit(a) {
+                    (quote! { None }, b)
+                } else {
+                    let offset_vid = self.parse_expr(a);
+                    let direct = args.get(7).and_then(|a| bool_lit(a)).unwrap_or(false);
+                    (quote! { Some(ValueId::new(#offset_vid)) }, direct)
+                },
+        };
+
+        let op = if is_a {
+            quote! {
+                Op::CoopTileLoadA {
+                    name: #name.to_string(),
+                    ptr_name: #ptr_name.to_string(),
+                    ptr_offset: #ptr_offset_ts,
+                    is_tg: #is_tg,
+                    dtype: #dtype,
+                    ei: #ei,
+                    eo: #eo,
+                    direct: #direct,
+                }
+            }
+        } else {
+            quote! {
+                Op::CoopTileLoadB {
+                    name: #name.to_string(),
+                    ptr_name: #ptr_name.to_string(),
+                    ptr_offset: #ptr_offset_ts,
+                    is_tg: #is_tg,
+                    dtype: #dtype,
+                    ei: #ei,
+                    eo: #eo,
+                    direct: #direct,
+                }
+            }
+        };
+        self.push_op_no_result(op);
+        0
+    }
+
+    /// `coop_tile_run(name [, direct])` → Op::CoopTileRun.
+    fn parse_coop_tile_run(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<&Expr> = call.args.iter().collect();
+        let name = string_lit_from_expr(args.first().copied().unwrap_or(&*call.func));
+        let direct = args.get(1).and_then(|a| bool_lit(a)).unwrap_or(false);
+        self.push_op_no_result(quote! {
+            Op::CoopTileRun { name: #name.to_string(), direct: #direct }
+        });
+        0
+    }
+
+    /// ```text
+    /// coop_tile_store_c(name, ptr, is_tg, dtype, ei, eo [, offset_expr])
+    /// ```
+    fn parse_coop_tile_store_c(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<&Expr> = call.args.iter().collect();
+        let name = string_lit_from_expr(args.first().copied().unwrap_or(&*call.func));
+        let ptr_name = string_lit_from_expr(args.get(1).copied().unwrap_or(&*call.func));
+        let is_tg = args.get(2).and_then(|a| bool_lit(a)).unwrap_or(false);
+        let dtype = args
+            .get(3)
+            .map(|a| self.dtype_from_expr_arg(a))
+            .unwrap_or_else(|| quote! { DType::F32 });
+        let ei = args.get(4).map(|a| literal_u32(a)).unwrap_or(0);
+        let eo = args.get(5).map(|a| literal_u32(a)).unwrap_or(0);
+
+        let ptr_offset_ts = match args.get(6) {
+            None => quote! { None },
+            Some(a) => {
+                let offset_vid = self.parse_expr(a);
+                quote! { Some(ValueId::new(#offset_vid)) }
+            },
+        };
+
+        self.push_op_no_result(quote! {
+            Op::CoopTileStoreC {
+                name: #name.to_string(),
+                ptr_name: #ptr_name.to_string(),
+                ptr_offset: #ptr_offset_ts,
+                is_tg: #is_tg,
+                dtype: #dtype,
+                ei: #ei,
+                eo: #eo,
+            }
+        });
+        0
+    }
 }
 
 // ---- Helpers ----------------------------------------------------------------
@@ -1946,52 +2078,6 @@ fn extract_turbofish_name_and_mn(expr: &Expr) -> Option<(String, u32, u32)> {
     None
 }
 
-/// Extract (dtype_tokens, M, N) from a turbofish like `::<f16, 8, 8>`.
-/// Used by `simdgroup_alloc::<dtype, M, N>()`.
-#[allow(dead_code)]
-fn extract_turbofish_dtype_and_mn(expr: &Expr) -> Option<(proc_macro2::TokenStream, u32, u32)> {
-    if let Expr::Path(path) = expr {
-        for seg in &path.path.segments {
-            if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                let mut iter = args.args.iter();
-                let dtype = iter.next().and_then(|arg| {
-                    if let syn::GenericArgument::Type(syn::Type::Path(tp)) = arg
-                        && let Some(last) = tp.path.segments.last()
-                    {
-                        Some(dtype_tokens_for_name(&last.ident.to_string()))
-                    } else {
-                        None
-                    }
-                });
-                let m = iter.next().and_then(|arg| {
-                    if let syn::GenericArgument::Const(syn::Expr::Lit(lit)) = arg
-                        && let syn::Lit::Int(n) = &lit.lit
-                        && let Ok(val) = n.base10_parse::<u32>()
-                    {
-                        Some(val)
-                    } else {
-                        None
-                    }
-                });
-                let n = iter.next().and_then(|arg| {
-                    if let syn::GenericArgument::Const(syn::Expr::Lit(lit)) = arg
-                        && let syn::Lit::Int(n) = &lit.lit
-                        && let Ok(val) = n.base10_parse::<u32>()
-                    {
-                        Some(val)
-                    } else {
-                        None
-                    }
-                });
-                if let (Some(dt), Some(mm), Some(nn)) = (dtype, m, n) {
-                    return Some((dt, mm, nn));
-                }
-            }
-        }
-    }
-    None
-}
-
 /// Extract a u32 from a literal expression (e.g. `0u32`, `1u32`).
 fn literal_u32(expr: &Expr) -> u32 {
     if let Expr::Lit(lit) = expr {
@@ -2002,6 +2088,15 @@ fn literal_u32(expr: &Expr) -> u32 {
         }
     } else {
         0
+    }
+}
+
+/// Extract a bool literal from an expression (`true` / `false`), returning `None` otherwise.
+fn bool_lit(expr: &Expr) -> Option<bool> {
+    if let Expr::Lit(syn::ExprLit { lit: syn::Lit::Bool(b), .. }) = expr {
+        Some(b.value)
+    } else {
+        None
     }
 }
 
@@ -2033,6 +2128,111 @@ fn usize_lit_from_expr(expr: Option<&Expr>) -> usize {
     0
 }
 
+// ---- Op-kind lookup tables --------------------------------------------------
+// Pure functions: name → Option<TokenStream>. Called before the main dispatch
+// match in parse_call so each group of related ops is defined in one place.
+
+fn unary_op_kind(name: &str) -> Option<TokenStream> {
+    Some(match name {
+        "exp" => quote! { UnaryOpKind::Exp },
+        "exp2" => quote! { UnaryOpKind::Exp2 },
+        "log" => quote! { UnaryOpKind::Log },
+        "log2" => quote! { UnaryOpKind::Log2 },
+        "sqrt" => quote! { UnaryOpKind::Sqrt },
+        "rsqrt" => quote! { UnaryOpKind::Rsqrt },
+        "abs" => quote! { UnaryOpKind::Abs },
+        "sin" => quote! { UnaryOpKind::Sin },
+        "cos" => quote! { UnaryOpKind::Cos },
+        "ceil" => quote! { UnaryOpKind::Ceil },
+        "floor" => quote! { UnaryOpKind::Floor },
+        "recip" => quote! { UnaryOpKind::Recip },
+        "erf" => quote! { UnaryOpKind::Erf },
+        "sign" => quote! { UnaryOpKind::Sign },
+        "round" => quote! { UnaryOpKind::Round },
+        "trunc" => quote! { UnaryOpKind::Trunc },
+        "sinh" => quote! { UnaryOpKind::Sinh },
+        "cosh" => quote! { UnaryOpKind::Cosh },
+        "tan" => quote! { UnaryOpKind::Tan },
+        "asin" => quote! { UnaryOpKind::Asin },
+        "acos" => quote! { UnaryOpKind::Acos },
+        "atan" => quote! { UnaryOpKind::Atan },
+        "asinh" => quote! { UnaryOpKind::Asinh },
+        "acosh" => quote! { UnaryOpKind::Acosh },
+        "atanh" => quote! { UnaryOpKind::Atanh },
+        "expm1" => quote! { UnaryOpKind::Expm1 },
+        "log10" => quote! { UnaryOpKind::Log10 },
+        "erfinv" => quote! { UnaryOpKind::ErfInv },
+        _ => return None,
+    })
+}
+
+fn activation_kind(name: &str) -> Option<TokenStream> {
+    Some(match name {
+        "silu" => quote! { ActKind::Silu },
+        "gelu" => quote! { ActKind::Gelu },
+        "relu" => quote! { ActKind::Relu },
+        "tanh" => quote! { ActKind::Tanh },
+        "sigmoid" => quote! { ActKind::Sigmoid },
+        _ => return None,
+    })
+}
+
+fn reduce_kind(name: &str) -> Option<TokenStream> {
+    Some(match name {
+        "reduce_sum" => quote! { ReduceKind::Sum },
+        "reduce_max" => quote! { ReduceKind::Max },
+        "reduce_min" => quote! { ReduceKind::Min },
+        "reduce_product" => quote! { ReduceKind::Product },
+        _ => return None,
+    })
+}
+
+fn simd_reduce_kind(name: &str) -> Option<TokenStream> {
+    Some(match name {
+        "simd_sum" => quote! { ReduceKind::Sum },
+        "simd_max" => quote! { ReduceKind::Max },
+        "simd_min" => quote! { ReduceKind::Min },
+        _ => return None,
+    })
+}
+
+fn binary_fn_kind(name: &str) -> Option<TokenStream> {
+    Some(match name {
+        "max" => quote! { BinOpKind::Max },
+        "min" => quote! { BinOpKind::Min },
+        "pow" => quote! { BinOpKind::Pow },
+        "atan2" => quote! { BinOpKind::ATan2 },
+        "remainder" => quote! { BinOpKind::Rem },
+        _ => return None,
+    })
+}
+
+/// Device-scope atomic ops (`atomic_add`, `atomic_max`, …).
+fn atomic_op_kind(name: &str) -> Option<TokenStream> {
+    Some(match name {
+        "atomic_add" => quote! { AtomicKind::Add },
+        "atomic_max" => quote! { AtomicKind::Max },
+        "atomic_min" => quote! { AtomicKind::Min },
+        "atomic_and" => quote! { AtomicKind::And },
+        "atomic_or" => quote! { AtomicKind::Or },
+        "atomic_xor" => quote! { AtomicKind::Xor },
+        _ => return None,
+    })
+}
+
+/// Threadgroup-scope atomic ops (`atomic_add_tg`, `atomic_max_tg`, …).
+fn atomic_tg_op_kind(name: &str) -> Option<TokenStream> {
+    Some(match name {
+        "atomic_add_tg" => quote! { AtomicKind::Add },
+        "atomic_max_tg" => quote! { AtomicKind::Max },
+        "atomic_min_tg" => quote! { AtomicKind::Min },
+        "atomic_and_tg" => quote! { AtomicKind::And },
+        "atomic_or_tg" => quote! { AtomicKind::Or },
+        "atomic_xor_tg" => quote! { AtomicKind::Xor },
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use syn::parse_quote;
@@ -2047,8 +2247,13 @@ mod tests {
             }
         });
 
-        let tokens =
-            DslBodyParser::parse(&body, &[String::from("out")], &[String::from("n")]).to_string();
+        let tokens = DslBodyParser::parse_with_type_vars(
+            &body,
+            &[],
+            &[String::from("n")],
+            &Default::default(),
+        )
+        .to_string();
 
         assert!(tokens.contains("Op :: Loop"), "{tokens}");
         assert!(tokens.contains("Op :: Const { value : 0"), "{tokens}");
@@ -2057,16 +2262,37 @@ mod tests {
     }
 
     #[test]
-    fn unknown_calls_emit_compile_errors() {
+    fn mt_prefixed_calls_emit_kernel_call() {
+        // Names starting with `mt_` are treated as cross-kernel calls.
+        // KernelInlinePass resolves them at compile time; unregistered
+        // callees produce a codegen error (not a proc-macro error).
+        let body: Block = parse_quote!({
+            let y = mt_silu(x);
+        });
+
+        let tokens =
+            DslBodyParser::parse_with_type_vars(&body, &[], &[], &Default::default()).to_string();
+
+        assert!(tokens.contains("KernelCall"), "{tokens}");
+        assert!(tokens.contains("\"mt_silu\""), "{tokens}");
+    }
+
+    #[test]
+    fn non_prefixed_unknown_calls_emit_compile_error() {
+        // Names that don't start with `mt_` or `ffai_` and don't match
+        // any DSL builtin emit a compile_error token (not a KernelCall),
+        // restoring the pre-cross-kernel-calling behaviour for typos.
         let body: Block = parse_quote!({
             let y = sine(x);
         });
 
-        let tokens = DslBodyParser::parse(&body, &[], &[]).to_string();
+        let tokens =
+            DslBodyParser::parse_with_type_vars(&body, &[], &[], &Default::default()).to_string();
 
+        // Should not emit a KernelCall — that would silently swallow a typo.
+        assert!(!tokens.contains("KernelCall"), "typo should not produce KernelCall: {tokens}");
+        // Should contain a compile_error diagnostic.
         assert!(tokens.contains("compile_error"), "{tokens}");
-        assert!(tokens.contains("unrecognized MetalTile DSL call"), "{tokens}");
-        assert!(tokens.contains("sine"), "{tokens}");
     }
 
     #[test]
@@ -2077,7 +2303,8 @@ mod tests {
             simdgroup_load(f, "ws", off, 36u32);
         });
 
-        let tokens = DslBodyParser::parse(&body, &[], &[]).to_string();
+        let tokens =
+            DslBodyParser::parse_with_type_vars(&body, &[], &[], &Default::default()).to_string();
 
         assert!(tokens.contains("Op :: SimdgroupLoad"), "{tokens}");
         assert!(tokens.contains("tg : \"ws\" . to_string ()"), "{tokens}");
@@ -2093,9 +2320,90 @@ mod tests {
             simdgroup_load(f, "ws", off, 36u32, true);
         });
 
-        let tokens = DslBodyParser::parse(&body, &[], &[]).to_string();
+        let tokens =
+            DslBodyParser::parse_with_type_vars(&body, &[], &[], &Default::default()).to_string();
 
         assert!(tokens.contains("Op :: SimdgroupLoad"), "{tokens}");
         assert!(tokens.contains("transpose : true"), "{tokens}");
+    }
+
+    #[test]
+    fn parses_coop_tile_setup_basic() {
+        let body: Block = parse_quote!({
+            coop_tile_setup("gemm", 16u32, 32u32, 16u32, f16);
+        });
+        let tokens =
+            DslBodyParser::parse_with_type_vars(&body, &[], &[], &Default::default()).to_string();
+        assert!(tokens.contains("Op :: CoopTileSetup"), "{tokens}");
+        assert!(tokens.contains("\"gemm\""), "{tokens}");
+        assert!(tokens.contains("m : 16u32"), "{tokens}");
+        assert!(tokens.contains("DType :: F16"), "{tokens}");
+        assert!(tokens.contains("CoopTileAccMode :: Overwrite"), "{tokens}");
+        assert!(tokens.contains("CoopTileScope :: SimdGroup"), "{tokens}");
+    }
+
+    #[test]
+    fn parses_coop_tile_setup_accumulate() {
+        let body: Block = parse_quote!({
+            coop_tile_setup(
+                "g",
+                16u32,
+                32u32,
+                16u32,
+                f16,
+                "accumulate",
+                "simdgroup",
+                f32,
+                false,
+                true,
+                false,
+            );
+        });
+        let tokens =
+            DslBodyParser::parse_with_type_vars(&body, &[], &[], &Default::default()).to_string();
+        assert!(tokens.contains("CoopTileAccMode :: MultiplyAccumulate"), "{tokens}");
+        assert!(tokens.contains("tb : true"), "{tokens}");
+    }
+
+    #[test]
+    fn parses_coop_tile_zero_run() {
+        let body: Block = parse_quote!({
+            coop_tile_zero("gemm");
+            coop_tile_run("gemm");
+            coop_tile_run("gemm", true);
+        });
+        let tokens =
+            DslBodyParser::parse_with_type_vars(&body, &[], &[], &Default::default()).to_string();
+        assert!(tokens.contains("Op :: CoopTileZero"), "{tokens}");
+        assert!(tokens.contains("Op :: CoopTileRun"), "{tokens}");
+        assert!(tokens.contains("direct : true"), "{tokens}");
+    }
+
+    #[test]
+    fn parses_coop_tile_load_store() {
+        let body: Block = parse_quote!({
+            coop_tile_load_a("gemm", "xs", true, f16, 16u32, 16u32);
+            coop_tile_load_b("gemm", "ws", true, f16, 16u32, 32u32);
+            coop_tile_store_c("gemm", "out", false, f32, 16u32, 32u32);
+        });
+        let tokens =
+            DslBodyParser::parse_with_type_vars(&body, &[], &[], &Default::default()).to_string();
+        assert!(tokens.contains("Op :: CoopTileLoadA"), "{tokens}");
+        assert!(tokens.contains("Op :: CoopTileLoadB"), "{tokens}");
+        assert!(tokens.contains("Op :: CoopTileStoreC"), "{tokens}");
+        assert!(tokens.contains("ptr_offset : None"), "{tokens}");
+    }
+
+    #[test]
+    fn parses_coop_tile_load_direct_flag() {
+        // 7-arg form where arg[6] is bool → it's `direct`, no offset.
+        let body: Block = parse_quote!({
+            coop_tile_load_a("g", "xs", true, f16, 16u32, 8u32, true);
+        });
+        let tokens =
+            DslBodyParser::parse_with_type_vars(&body, &[], &[], &Default::default()).to_string();
+        assert!(tokens.contains("Op :: CoopTileLoadA"), "{tokens}");
+        assert!(tokens.contains("direct : true"), "{tokens}");
+        assert!(tokens.contains("ptr_offset : None"), "{tokens}");
     }
 }

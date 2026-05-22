@@ -4,10 +4,11 @@
 //! in one dispatch. Saves a kernel launch at every post-attention and
 //! post-FFN norm+residual site (≈3 calls/layer).
 //!
-//! Algorithm-identical to `mlx/rms_norm.rs`'s `mt_rms_norm` — f32
-//! sum-of-squares accumulator, threadgroup-wide `reduce_sum`,
-//! `rsqrt(ssq/n + eps)` scaling — with one extra `residual` input
-//! tensor added to the normalized result before the store.
+//! Uses `mt_rms_inv_scalar` (from `mlx/rms_norm.rs`) via cross-kernel
+//! call for the shared reduction phase: each thread computes its
+//! `partial_ssq`, then calls `mt_rms_inv_scalar(partial_ssq, eps_buf, n)`
+//! which inlines the `reduce_sum + rsqrt` body. The second phase applies
+//! the residual add and stores the normalized+residual output.
 //!
 //! ## DISPATCH INVARIANTS
 //!
@@ -57,9 +58,10 @@ pub fn ffai_rms_norm_residual<T>(
     let x3 = load(x[safe_base + 3u32]).cast::<f32>();
     let raw_ssq = x0 * x0 + x1 * x1 + x2 * x2 + x3 * x3;
     let partial_ssq = select(in_bounds, raw_ssq, 0.0f32);
-    let tg_ssq = reduce_sum(partial_ssq);
-    let eps = load(eps_buf[0]);
-    let rms = rsqrt(tg_ssq / n + eps);
+    // Cross-kernel call: KernelInlinePass splices mt_rms_inv_scalar's body
+    // here. partial_ssq is a Value arg (pre-computed f32 scalar, no load);
+    // eps_buf and n are Tensor args (renamed in callee's loads transparently).
+    let rms = mt_rms_inv_scalar(partial_ssq, eps_buf, n);
     if in_bounds {
         let o0 = load(residual[base]).cast::<f32>() + x0 * rms * load(w[col]).cast::<f32>();
         let o1 = load(residual[base + 1u32]).cast::<f32>()

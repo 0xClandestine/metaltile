@@ -51,6 +51,7 @@ that step is informational only — it never gates the job.
 
 | File | Chip | Captured @ | Headline |
 |---|---|---|---|
+| [`apple-m1-max.json`](apple-m1-max.json) | Apple M1 Max | `dd4c2ef` (2026-05-20) | 327/327 implemented + numerically correct; **avg MT% 146%**. Refreshed against current `dev` (post #110/#128/#129/#135); the prior baseline predated those landings so `tile bench`'s auto-diff was comparing against stale numbers. |
 | [`apple-m5-max.json`](apple-m5-max.json) | Apple M5 Max | `0cb0a85` (2026-05-18) | 241/241 implemented + numerically correct; **avg MT% 136%** but masked by an `sdpa` GQA bf16 regression to **31%** of MLX (see below). |
 
 ## Apple M5 Max — headline findings (2026-05-18, dev @ `0cb0a85`)

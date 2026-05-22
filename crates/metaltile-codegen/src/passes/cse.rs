@@ -87,7 +87,13 @@ impl super::Pass for CsePass {
         // CSE each nested block. After each one, propagate its remap to the
         // kernel body and to every other block — a value defined in one
         // nested block may be referenced from a sibling or from the body.
-        let block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
+        //
+        // Sort explicitly: `kernel.blocks` is `FxHashMap`, so `.keys()` order
+        // is non-deterministic; the per-block remap is propagated to sibling
+        // blocks, so the order in which blocks are processed affects the
+        // final state — sort for byte-stable MSL output.
+        let mut block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
+        block_ids.sort_unstable_by_key(|b| b.as_u32());
         for bid in &block_ids {
             let Some(mut block) = kernel.blocks.remove(bid) else { continue };
             let remap = cse_block(&mut block, &read_only);
@@ -215,161 +221,11 @@ fn canonicalize_binop(op: BinOpKind, lhs: u32, rhs: u32) -> (u32, u32) {
 
 /// Replace all ValueId references in `op` using the remapping map.
 fn replace_values(op: &mut Op, map: &FxHashMap<ValueId, ValueId>) {
-    let s = |v: &mut ValueId| {
+    op.for_each_value_id_mut(&mut |v| {
         if let Some(&new_v) = map.get(v) {
             *v = new_v;
         }
-    };
-    match op {
-        Op::BinOp { lhs, rhs, .. } => {
-            s(lhs);
-            s(rhs);
-        },
-        Op::UnaryOp { value, .. } => s(value),
-        Op::Activation { value, .. } => s(value),
-        Op::Select { cond, on_true, on_false } => {
-            s(cond);
-            s(on_true);
-            s(on_false);
-        },
-        Op::Broadcast { value, .. } => s(value),
-        Op::Dot { a, b } => {
-            s(a);
-            s(b);
-        },
-        Op::Store { value, indices, .. } => {
-            s(value);
-            for idx in indices.iter_mut() {
-                if let IndexExpr::Value(v) | IndexExpr::Range(v, _) = idx {
-                    s(v);
-                }
-            }
-        },
-        Op::Cast { value, .. } => s(value),
-        Op::Reduce { value, .. } => s(value),
-        Op::Transpose { value } => s(value),
-        Op::Slice { value, .. } => s(value),
-        Op::Loop { start, end, step, .. } => {
-            s(start);
-            s(end);
-            s(step);
-        },
-        Op::Load { indices, .. } =>
-            for idx in indices.iter_mut() {
-                if let IndexExpr::Value(v) | IndexExpr::Range(v, _) = idx {
-                    s(v);
-                }
-            },
-        Op::InlineMsl { inputs, .. } =>
-            for v in inputs.iter_mut() {
-                s(v);
-            },
-        Op::FlashAttention { q, k, v, .. } => {
-            s(q);
-            s(k);
-            s(v);
-        },
-        Op::SlidingWindowAttention { q, k, v, .. } => {
-            s(q);
-            s(k);
-            s(v);
-        },
-        Op::RmsNorm { x, scale, .. } => {
-            s(x);
-            s(scale);
-        },
-        Op::GatedMlp { x, gate_proj, up_proj, down_proj } => {
-            s(x);
-            s(gate_proj);
-            s(up_proj);
-            s(down_proj);
-        },
-        Op::ProgramId { .. }
-        | Op::Const { .. }
-        | Op::Arange { .. }
-        | Op::Zeros { .. }
-        | Op::Splat { .. } => {},
-        Op::FusedElementwise { ops } =>
-            for op in ops.iter_mut() {
-                replace_values(op, map);
-            },
-        Op::VectorLoad { byte_offset, .. } => s(byte_offset),
-        Op::VectorExtract { .. } => {},
-        Op::VectorStore { byte_offset, value, .. } => {
-            s(byte_offset);
-            s(value);
-        },
-        Op::StrideReduce { offset, stride, end, .. } => {
-            s(offset);
-            s(stride);
-            s(end);
-        },
-        Op::If { cond, .. } => s(cond),
-        Op::ExpandDims { value, .. } => s(value),
-        Op::Reshape { value, .. } => s(value),
-        Op::Cat { values, .. } =>
-            for v in values.iter_mut() {
-                s(v);
-            },
-        Op::Gather { indices, .. } => s(indices),
-        Op::Scatter { indices, value, .. } => {
-            s(indices);
-            s(value);
-        },
-        Op::Atomic { index, value, .. } => {
-            s(index);
-            s(value);
-        },
-        Op::Scan { value, .. } => s(value),
-        Op::StrideScan { offset, end, .. } => {
-            s(offset);
-            s(end);
-        },
-        Op::StrideArgReduce { offset, end, .. } => {
-            s(offset);
-            s(end);
-        },
-        Op::StrideStore { offset, end, scalar, .. } => {
-            s(offset);
-            s(end);
-            s(scalar);
-        },
-        Op::Dequantize { .. } => {},
-        Op::SimdReduce { value, .. } | Op::SimdShuffleXor { value, .. } => s(value),
-        Op::SimdBroadcast { value, lane } => {
-            s(value);
-            s(lane);
-        },
-        Op::ThreadgroupLoad { index, .. } => s(index),
-        Op::ThreadgroupStore { index, value, .. } => {
-            s(index);
-            s(value);
-        },
-        Op::ThreadgroupAlloc { .. }
-        | Op::Barrier
-        | Op::SimdgroupBarrier
-        | Op::SimdLaneId
-        | Op::SimdGroupId => {},
-        Op::SimdgroupAlloc { .. } | Op::SimdgroupMatMul { .. } => {},
-        Op::SimdgroupElemLoad { value, .. } => s(value),
-        Op::SimdgroupElemStore { value, data, .. } => {
-            s(value);
-            s(data);
-        },
-        Op::SimdgroupLoad { dest, offset, .. } => {
-            s(dest);
-            s(offset);
-        },
-        Op::SimdScan { value, .. } => s(value),
-        Op::StackLoad { index, .. } => s(index),
-        Op::StackStore { index, value, .. } => {
-            s(index);
-            s(value);
-        },
-        Op::StackAlloc { .. } => {},
-        Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => s(value),
-        Op::ArgReduce { value, .. } => s(value),
-    }
+    });
 }
 
 #[cfg(test)]

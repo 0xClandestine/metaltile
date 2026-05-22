@@ -31,7 +31,7 @@
 
 use std::collections::BTreeSet;
 
-use metaltile_core::ir::{BinOpKind, Block, BlockId, IndexExpr, Kernel, Op, ValueId};
+use metaltile_core::ir::{BinOpKind, Block, BlockId, Kernel, Op, ValueId};
 
 use crate::error::Result;
 
@@ -193,172 +193,17 @@ fn eval_binop(op: BinOpKind, a: i64, b: i64) -> Option<i64> {
 }
 
 fn find_const(block: &Block, vid: ValueId) -> Option<i64> {
-    for (i, op) in block.ops.iter().enumerate() {
-        if block.results.get(i) == Some(&Some(vid))
-            && let Op::Const { value } = op
-        {
-            return Some(*value);
-        }
-    }
-    None
+    block.ops.iter().enumerate().find_map(|(i, op)| {
+        if block.results.get(i) == Some(&Some(vid)) { op.as_const() } else { None }
+    })
 }
 
 fn replace_value_in_op(op: &mut Op, old: ValueId, new: ValueId) {
-    let s = |v: &mut ValueId| {
+    op.for_each_value_id_mut(&mut |v| {
         if *v == old {
             *v = new;
         }
-    };
-    match op {
-        Op::BinOp { lhs, rhs, .. } => {
-            s(lhs);
-            s(rhs);
-        },
-        Op::UnaryOp { value, .. } => s(value),
-        Op::Activation { value, .. } => s(value),
-        Op::Select { cond, on_true, on_false } => {
-            s(cond);
-            s(on_true);
-            s(on_false);
-        },
-        Op::Broadcast { value, .. } => s(value),
-        Op::Dot { a, b } => {
-            s(a);
-            s(b);
-        },
-        Op::Store { value, indices, .. } => {
-            s(value);
-            for idx in indices.iter_mut() {
-                if let IndexExpr::Value(v) | IndexExpr::Range(v, _) = idx {
-                    s(v);
-                }
-            }
-        },
-        Op::Cast { value, .. } => s(value),
-        Op::Reduce { value, .. } => s(value),
-        Op::Transpose { value } => s(value),
-        Op::Slice { value, .. } => s(value),
-        Op::Loop { start, end, step, .. } => {
-            s(start);
-            s(end);
-            s(step);
-        },
-        Op::Load { indices, .. } =>
-            for idx in indices.iter_mut() {
-                if let IndexExpr::Value(v) | IndexExpr::Range(v, _) = idx {
-                    s(v);
-                }
-            },
-        Op::InlineMsl { inputs, .. } =>
-            for v in inputs.iter_mut() {
-                s(v);
-            },
-        Op::FlashAttention { q, k, v, .. } => {
-            s(q);
-            s(k);
-            s(v);
-        },
-        Op::SlidingWindowAttention { q, k, v, .. } => {
-            s(q);
-            s(k);
-            s(v);
-        },
-        Op::RmsNorm { x, scale, .. } => {
-            s(x);
-            s(scale);
-        },
-        Op::GatedMlp { x, gate_proj, up_proj, down_proj } => {
-            s(x);
-            s(gate_proj);
-            s(up_proj);
-            s(down_proj);
-        },
-        Op::ProgramId { .. }
-        | Op::Const { .. }
-        | Op::Arange { .. }
-        | Op::Zeros { .. }
-        | Op::Splat { .. } => {},
-        Op::FusedElementwise { ops } =>
-            for op in ops.iter_mut() {
-                replace_value_in_op(op, old, new);
-            },
-        Op::VectorLoad { byte_offset, .. } => s(byte_offset),
-        Op::VectorStore { byte_offset, value, .. } => {
-            s(byte_offset);
-            s(value);
-        },
-        Op::VectorExtract { vec, .. } => s(vec),
-        Op::StrideReduce { offset, stride, end, .. } => {
-            s(offset);
-            s(stride);
-            s(end);
-        },
-        Op::If { cond, .. } => s(cond),
-        Op::ExpandDims { value, .. } => s(value),
-        Op::Reshape { value, .. } => s(value),
-        Op::Cat { values, .. } =>
-            for v in values.iter_mut() {
-                s(v);
-            },
-        Op::Gather { indices, .. } => s(indices),
-        Op::Scatter { indices, value, .. } => {
-            s(indices);
-            s(value);
-        },
-        Op::Atomic { index, value, .. } => {
-            s(index);
-            s(value);
-        },
-        Op::Scan { value, .. } => s(value),
-        Op::StrideStore { offset, end, scalar, .. } => {
-            s(offset);
-            s(end);
-            s(scalar);
-        },
-        Op::Dequantize { .. } => {},
-        Op::SimdReduce { value, .. } | Op::SimdShuffleXor { value, .. } => s(value),
-        Op::SimdBroadcast { value, lane } => {
-            s(value);
-            s(lane);
-        },
-        Op::ThreadgroupLoad { index, .. } => s(index),
-        Op::ThreadgroupStore { index, value, .. } => {
-            s(index);
-            s(value);
-        },
-        Op::ThreadgroupAlloc { .. }
-        | Op::Barrier
-        | Op::SimdgroupBarrier
-        | Op::SimdLaneId
-        | Op::SimdGroupId => {},
-        Op::SimdgroupAlloc { .. } | Op::SimdgroupMatMul { .. } => {},
-        Op::SimdgroupElemLoad { value, .. } => s(value),
-        Op::SimdgroupElemStore { value, data, .. } => {
-            s(value);
-            s(data);
-        },
-        Op::SimdgroupLoad { dest, offset, .. } => {
-            s(dest);
-            s(offset);
-        },
-        Op::SimdScan { value, .. } => s(value),
-        Op::StackLoad { index, .. } => s(index),
-        Op::StackStore { index, value, .. } => {
-            s(index);
-            s(value);
-        },
-        Op::StackAlloc { .. } => {},
-        Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => s(value),
-        Op::ArgReduce { value, .. } => s(value),
-        Op::StrideScan { offset, end, .. } => {
-            s(offset);
-            s(end);
-        },
-        Op::StrideArgReduce { offset, end, .. } => {
-            s(offset);
-            s(end);
-        },
-    }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -395,158 +240,8 @@ fn dce_block(block: &mut Block, cross_block_refs: &BTreeSet<ValueId>) {
 }
 
 fn collect_uses(op: &Op, used: &mut BTreeSet<ValueId>) {
-    let mut add = |v: ValueId| {
-        used.insert(v);
-    };
-    match op {
-        Op::BinOp { lhs, rhs, .. } => {
-            add(*lhs);
-            add(*rhs);
-        },
-        Op::UnaryOp { value, .. } => add(*value),
-        Op::Activation { value, .. } => add(*value),
-        Op::Select { cond, on_true, on_false } => {
-            add(*cond);
-            add(*on_true);
-            add(*on_false);
-        },
-        Op::Broadcast { value, .. } => add(*value),
-        Op::Dot { a, b } => {
-            add(*a);
-            add(*b);
-        },
-        Op::Store { value, indices, .. } => {
-            add(*value);
-            for idx in indices {
-                if let IndexExpr::Value(v) | IndexExpr::Range(v, _) = idx {
-                    add(*v);
-                }
-            }
-        },
-        Op::Cast { value, .. } => add(*value),
-        Op::Reduce { value, .. } => add(*value),
-        Op::Transpose { value } => add(*value),
-        Op::Slice { value, .. } => add(*value),
-        Op::Loop { start, end, step, .. } => {
-            add(*start);
-            add(*end);
-            add(*step);
-        },
-        Op::Load { indices, .. } =>
-            for idx in indices {
-                if let IndexExpr::Value(v) | IndexExpr::Range(v, _) = idx {
-                    add(*v);
-                }
-            },
-        Op::InlineMsl { inputs, .. } =>
-            for v in inputs {
-                add(*v);
-            },
-        Op::FlashAttention { q, k, v, .. } => {
-            add(*q);
-            add(*k);
-            add(*v);
-        },
-        Op::SlidingWindowAttention { q, k, v, .. } => {
-            add(*q);
-            add(*k);
-            add(*v);
-        },
-        Op::RmsNorm { x, scale, .. } => {
-            add(*x);
-            add(*scale);
-        },
-        Op::GatedMlp { x, gate_proj, up_proj, down_proj } => {
-            add(*x);
-            add(*gate_proj);
-            add(*up_proj);
-            add(*down_proj);
-        },
-        Op::ProgramId { .. }
-        | Op::Const { .. }
-        | Op::Arange { .. }
-        | Op::Zeros { .. }
-        | Op::Splat { .. } => {},
-        Op::FusedElementwise { ops } =>
-            for op in ops {
-                collect_uses(op, used);
-            },
-        Op::VectorLoad { byte_offset, .. } => add(*byte_offset),
-        Op::VectorStore { byte_offset, value, .. } => {
-            add(*byte_offset);
-            add(*value);
-        },
-        Op::VectorExtract { vec, .. } => add(*vec),
-        Op::StrideReduce { offset, stride, end, .. } => {
-            add(*offset);
-            add(*stride);
-            add(*end);
-        },
-        Op::If { cond, .. } => add(*cond),
-        Op::ExpandDims { value, .. } => add(*value),
-        Op::Reshape { value, .. } => add(*value),
-        Op::Cat { values, .. } =>
-            for v in values {
-                add(*v);
-            },
-        Op::Gather { indices, .. } => add(*indices),
-        Op::Scatter { indices, value, .. } => {
-            add(*indices);
-            add(*value);
-        },
-        Op::Atomic { index, value, .. } => {
-            add(*index);
-            add(*value);
-        },
-        Op::Scan { value, .. } => add(*value),
-        Op::StrideStore { offset, end, scalar, .. } => {
-            add(*offset);
-            add(*end);
-            add(*scalar);
-        },
-        Op::Dequantize { .. } => {},
-        Op::SimdReduce { value, .. } | Op::SimdShuffleXor { value, .. } => add(*value),
-        Op::SimdBroadcast { value, lane } => {
-            add(*value);
-            add(*lane);
-        },
-        Op::ThreadgroupLoad { index, .. } => add(*index),
-        Op::ThreadgroupStore { index, value, .. } => {
-            add(*index);
-            add(*value);
-        },
-        Op::ThreadgroupAlloc { .. }
-        | Op::Barrier
-        | Op::SimdgroupBarrier
-        | Op::SimdLaneId
-        | Op::SimdGroupId => {},
-        Op::SimdgroupAlloc { .. } | Op::SimdgroupMatMul { .. } => {},
-        Op::SimdgroupElemLoad { value, .. } => add(*value),
-        Op::SimdgroupElemStore { value, data, .. } => {
-            add(*value);
-            add(*data);
-        },
-        Op::SimdgroupLoad { dest, offset, .. } => {
-            add(*dest);
-            add(*offset);
-        },
-        Op::SimdScan { value, .. } => add(*value),
-        Op::StackLoad { index, .. } => add(*index),
-        Op::StackStore { index, value, .. } => {
-            add(*index);
-            add(*value);
-        },
-        Op::StackAlloc { .. } => {},
-        Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => add(*value),
-        Op::ArgReduce { value, .. } => add(*value),
-        Op::StrideScan { offset, end, .. } => {
-            add(*offset);
-            add(*end);
-        },
-        Op::StrideArgReduce { offset, end, .. } => {
-            add(*offset);
-            add(*end);
-        },
+    for &v in op.value_refs().iter() {
+        used.insert(*v);
     }
 }
 
