@@ -455,22 +455,23 @@ fn fuse_dispatch_nodes(nodes: &mut [DispatchNode]) -> (usize, usize) {
             continue;
         }
 
+        // `chain` is built in reverse order: chain[0] = anchor (rightmost),
+        // chain.last() = current leftmost head.  Reversed before storing.
         let mut chain: Vec<usize> = vec![i];
-        let mut cursor = i;
 
         loop {
-            let Some(pred) = find_single_use_producer_local(cursor, nodes, &writes, &reads, &defs)
-            else {
-                break;
-            };
-            if fused.contains(&pred) || !is_fusible_local(nodes, pred, cursor, &writes, &reads) {
+            let head = *chain.last().unwrap();
+            let Some(pred) = head.checked_sub(1) else { break };
+            if fused.contains(&pred) {
                 break;
             }
             if chain.len() >= MAX_FUSED_PER_CHAIN {
                 break;
             }
+            if !can_prepend_to_chain(pred, &chain, nodes, &writes, &reads, &defs) {
+                break;
+            }
             chain.push(pred);
-            cursor = pred;
         }
 
         if chain.len() >= 2 {
@@ -495,104 +496,175 @@ fn fuse_dispatch_nodes(nodes: &mut [DispatchNode]) -> (usize, usize) {
     (chains.len(), n_unfused)
 }
 
-/// Check whether `name` written at `producer_idx` has a single consumer
-/// in its local scope (between this write and the next write to `name`).
-/// Returns `true` when exactly one reader exists and it is at
-/// `producer_idx + 1`.
-fn is_local_single_use(
+/// Returns `true` when every local reader of `name` (in the scope between
+/// `writer_idx` and the next write to the same name) is a member of `group`.
+///
+/// "Local readers" are those at positions strictly after `writer_idx` and
+/// before the next write to `name`.  Returns `true` for a written-but-never-
+/// read name (dead intermediate — safe to fuse away).
+fn is_local_readers_all_in_set(
     name: &str,
-    producer_idx: usize,
+    writer_idx: usize,
+    group: &HashSet<usize>,
     writes: &HashMap<String, Vec<usize>>,
     reads: &HashMap<String, Vec<usize>>,
 ) -> bool {
     let Some(write_list) = writes.get(name) else { return false };
-    let Some(read_list) = reads.get(name) else { return false };
-
-    // Find this write's position in the ordered write list.
-    let Ok(write_pos) = write_list.binary_search(&producer_idx) else { return false };
+    let Ok(write_pos) = write_list.binary_search(&writer_idx) else { return false };
     let next_write = write_list.get(write_pos + 1).copied();
 
-    // Find the first reader at or after producer_idx.
-    let read_start = match read_list.binary_search(&producer_idx) {
-        Ok(pos) => pos + 1, // skip the write itself if it happens to also read
-        Err(pos) => pos,
+    let Some(read_list) = reads.get(name) else {
+        // Written but never read — can be eliminated as a dead intermediate.
+        return true;
     };
-    // Find the first reader at or after the next write (exclusive bound).
+
+    let read_start = read_list.partition_point(|&r| r <= writer_idx);
     let read_end = match next_write {
-        Some(nw) => match read_list.binary_search(&nw) {
-            Ok(pos) => pos,
-            Err(pos) => pos,
-        },
+        Some(nw) => read_list.partition_point(|&r| r < nw),
         None => read_list.len(),
     };
 
     let local_readers = &read_list[read_start..read_end];
-    local_readers.len() == 1 && local_readers[0] == producer_idx + 1
+    !local_readers.is_empty() && local_readers.iter().all(|r| group.contains(r))
 }
 
-/// Find the immediate predecessor of `cursor` that writes an intermediate
-/// which `cursor` reads and which is single-use in its local scope.
-fn find_single_use_producer_local(
-    cursor: usize,
+/// Returns `true` when `candidate` is grid-compatible with all nodes already
+/// in `chain`.
+///
+/// Rules mirror `fuse_group::check_grid_compatibility`:
+/// - `Grid3D`, `Tile2D`, `SimdGroup2D` — always incompatible.
+/// - All `Reduction` nodes must share the same `(num_rows, threads_per_group)`.
+/// - All `Elementwise` nodes must share the same `n`.
+/// - In a mixed group `n` (Elementwise) must equal `num_rows` (Reduction).
+/// - Any incompatible-mode node already in `chain` disqualifies immediately.
+fn chain_grid_compatible(
+    candidate: &DispatchNode,
+    chain: &[usize],
+    nodes: &[DispatchNode],
+) -> bool {
+    match candidate.mode {
+        KernelMode::Elementwise | KernelMode::Reduction => {},
+        _ => return false,
+    }
+
+    let mut reduction_spec: Option<(usize, usize)> = None;
+    let mut elementwise_n: Option<usize> = None;
+
+    for &cidx in chain {
+        match (&nodes[cidx].mode, &nodes[cidx].grid) {
+            (KernelMode::Reduction, GridSpec::Reduction { num_rows, threads_per_group }) => {
+                match reduction_spec {
+                    None => reduction_spec = Some((*num_rows, *threads_per_group)),
+                    Some((r, t)) if r == *num_rows && t == *threads_per_group => {},
+                    _ => return false,
+                }
+            },
+            (KernelMode::Elementwise, GridSpec::Elementwise { n }) => {
+                match elementwise_n {
+                    None => elementwise_n = Some(*n),
+                    Some(en) if en == *n => {},
+                    _ => return false,
+                }
+            },
+            _ => return false, // Grid3D or other incompatible mode in chain
+        }
+    }
+
+    match (&candidate.mode, &candidate.grid) {
+        (KernelMode::Reduction, GridSpec::Reduction { num_rows, threads_per_group }) => {
+            match reduction_spec {
+                None => {
+                    if let Some(n) = elementwise_n {
+                        if n != *num_rows {
+                            return false;
+                        }
+                    }
+                },
+                Some((r, t)) if r == *num_rows && t == *threads_per_group => {},
+                _ => return false,
+            }
+            // Re-check mixed constraint.
+            if let Some(n) = elementwise_n {
+                if n != *num_rows {
+                    return false;
+                }
+            }
+        },
+        (KernelMode::Elementwise, GridSpec::Elementwise { n }) => {
+            match elementwise_n {
+                None => {
+                    if let Some((num_rows, _)) = reduction_spec {
+                        if *n != num_rows {
+                            return false;
+                        }
+                    }
+                },
+                Some(en) if en == *n => {},
+                _ => return false,
+            }
+        },
+        _ => return false,
+    }
+
+    true
+}
+
+/// Returns `true` when `pred` can be prepended to `chain`, extending it
+/// leftward by one position.
+///
+/// Requirements:
+/// 1. `pred == chain.last() - 1` — must be the immediate predecessor
+///    (contiguity is required for the splice in `synthesize_fuse_groups`).
+/// 2. `pred` is grid-compatible with every node already in `chain`.
+/// 3. At least one intermediate written by `pred` is read exclusively within
+///    `chain` — it will become an intra-group tensor, eliminating the global-
+///    memory round-trip.
+///
+/// This handles diamond fan-out patterns (e.g. `_ffn_normed` flowing into
+/// both `gemv_gate` and `gemv_up`): the candidate's output only needs to be
+/// consumed by *some* chain node, not necessarily the immediate chain head.
+/// Intermediates written by `pred` that are read both inside and outside
+/// `chain` remain as external outputs of the fused node — they don't block
+/// fusion.
+fn can_prepend_to_chain(
+    pred: usize,
+    chain: &[usize],
     nodes: &[DispatchNode],
     writes: &HashMap<String, Vec<usize>>,
     reads: &HashMap<String, Vec<usize>>,
     defs: &[Vec<String>],
-) -> Option<usize> {
-    let pred = cursor.checked_sub(1)?;
-
-    // All intermediates written by pred that cursor also reads.
-    for name in &defs[pred] {
-        let cursor_reads = nodes[cursor]
-            .input_bindings
-            .iter()
-            .any(|(_, sr)| matches!(sr, SlotRef::Weight(n) if n == name));
-        if cursor_reads && is_local_single_use(name, pred, writes, reads) {
-            return Some(pred);
-        }
-    }
-    None
-}
-
-/// Predicate: can node `producer` and `consumer` be fused?
-/// Uses local-scope single-use semantics (respects intermediate name reuse
-/// across layers).
-fn is_fusible_local(
-    nodes: &[DispatchNode],
-    producer: usize,
-    consumer: usize,
-    writes: &HashMap<String, Vec<usize>>,
-    reads: &HashMap<String, Vec<usize>>,
 ) -> bool {
-    if consumer != producer + 1 {
+    let head = *chain.last().unwrap();
+    if pred + 1 != head {
         return false;
     }
 
+    if !chain_grid_compatible(&nodes[pred], chain, nodes) {
+        return false;
+    }
+
+    let chain_set: HashSet<usize> = chain.iter().copied().collect();
+
     let mut has_shared = false;
-    for (_, slot_ref) in &nodes[producer].output_bindings {
-        if let SlotRef::Weight(name) = slot_ref
-            && name.starts_with(INTERMEDIATE_PREFIX)
-        {
-            // Check if consumer reads this name.
-            let read_by_consumer = nodes[consumer]
+    for name in &defs[pred] {
+        let read_by_chain = chain.iter().any(|&cidx| {
+            nodes[cidx]
                 .input_bindings
                 .iter()
-                .any(|(_, sr)| matches!(sr, SlotRef::Weight(n) if n == name));
-
-            if !read_by_consumer {
-                // Producer writes this name, but consumer doesn't read it.
-                // That's fine — but we must NOT penalize multi-use here.
-                // Only check local single-use for names the consumer DOES read.
-                continue;
-            }
-
-            // Consumer reads this name — now verify local single-use.
-            if !is_local_single_use(name, producer, writes, reads) {
-                return false;
-            }
+                .any(|(_, sr)| matches!(sr, SlotRef::Weight(n) if n == name))
+        });
+        if !read_by_chain {
+            continue;
+        }
+        // Name is read by at least one chain node.  If ALL its local readers
+        // are within the chain it becomes a fully-intra tensor (eliminated).
+        // If some readers are outside the chain, it stays as an external
+        // output — that's fine, it doesn't prevent fusion.
+        if is_local_readers_all_in_set(name, pred, &chain_set, writes, reads) {
             has_shared = true;
         }
     }
+
     has_shared
 }
 
