@@ -102,7 +102,7 @@ Sources surveyed:
 | quantized_nax | ✓ | ✓ | ✓ | `mlx/quantized_nax.rs` → `mt_qmm_nax` — int4 quantized matmul via Apple `mpp::tensor_ops::matmul2d` (NAX tensor cores). Built as an `Op::InlineMsl` IR escape-hatch (the `#[kernel]` front-end does not expose `mpp::` types); the codegen emits the `MetalPerformancePrimitives` framework include when it detects the `mpp::` marker. MPP counterpart of `mt_qmm_mma` — same int4-dequant-into-TG-memory algorithm, one cooperative `matmul2d` per simdgroup per K-block. `#[cfg(feature = "nax")]`-gated; needs macOS 26+ / Metal 4. Verified by `quantized_nax_gpu_correctness` (f32/f16, vs the `qmm_gpu_correctness` triple-loop oracle). |
 | fft (radix + readwrite) | ✓ | ✓ | ✓ | `mlx/fft.rs` → `mt_fft_n{32,64,128,256,512,1024}<T>`. Iterative radix-2 Cooley–Tukey FFT along the last axis (power-of-two N), one kernel covering forward + inverse via an `inv` constexpr. Complex numbers without a complex type: real / imaginary planes are two parallel real `f32` buffers, the butterfly's complex multiply expands to the four-real-mul form — the same representation `mel_spectrogram` / `vocoder` use. Bit-reversal load + `log2(N)` `threadgroup`-buffered butterfly stages; genuine O(N log N). The prime-length (Rader) / arbitrary-length (Bluestein) paths remain a follow-up. Verified by `fft_gpu_correctness` (forward vs naive DFT, inverse, round-trip; f32/f16/bf16). |
 | hadamard (hadamard_n + hadamard_m) | ✓ | ✓ | ✓ | `mlx/hadamard.rs` → `mt_hadamard_n{64,128,256,512,1024}<T>` (power-of-2 FWHT via log2(N) butterfly passes). `mlx/hadamard_m.rs` → `mt_hadamard_m{12,20,28}<T>` (non-power-of-2 M factor; Sloane-table bitmask accumulate via `Op::InlineMsl`; sign arrays verified orthogonal). Verified by `hadamard_m_gpu_correctness`. |
-| fence | ✓ | ✓ | ✗ | Stub file in repo, not declared. Synchronization primitive. |
+| fence | ✓ | ✓ | — | **Intentionally out of scope** — a GPU-side sync primitive, not a compute op, and not a `#[kernel]`. See [§ Fence ops](#fence-ops--intentionally-out-of-scope). |
 | gather (bare-tensor embedding lookup) | ✓ (via indexing/) | ✓ | ✓ | `ffai/gather.rs` → `ffai_gather<T>`. FFAI's embedding-table gather. |
 | indexing (scatter, scatter_axis, gather_axis, gather_front, masked_scatter) | ✓ | ✓ | ✓ | `mlx/gather_axis.rs` + `mlx/scatter_axis.rs` → `mt_gather_axis` / `mt_scatter_axis` (contiguous along-axis); `mlx/indexing.rs` → `mt_gather_front` (first-axis row gather), `mt_scatter` (first-axis row scatter, no-reduce assignment form), `mt_masked_scatter` (per-element masked gather-scatter). All five are one-thread-per-output Grid3D with an `n_elems` bounds guard. Verified by `gather_axis_gpu_correctness` / `scatter_axis_gpu_correctness` / `indexing_gpu_correctness`. |
 | aura_encode (codebook quantize, fused) | ✗ | ✓ (`turbo_fused_encode` in `turbo_quant.metal`) | ✓ | `ffai/aura_encode.rs`. Bit-widths 2/3/4/8. Renamed turbo_*→aura_*. |
@@ -187,13 +187,13 @@ family (2D, general, 3D) is fully ported as direct convs (`ffai/conv2d.rs`,
    escape-hatch — see its row); the remaining `nax`-gated rows can follow the
    same pattern, but each is a from-scratch `mpp::` MSL body (the `#[kernel]`
    front-end does not expose cooperative-tensor types).
-4. **`fence`** — synchronization primitive. Needs atomics / device-memory
-   fence primitives in the DSL; infrastructure, not a compute op. Still a
-   docs-only stub (`mlx/fence.rs`).
-5. **Winograd fast-conv** — the 3×3 stride-1 perf specialization on the
+4. **Winograd fast-conv** — the 3×3 stride-1 perf specialization on the
    `conv` row; the direct-conv `naive_unfold` / depthwise paths are
    landed (`ffai/conv2d.rs`, `ffai/conv3d.rs`), Winograd is the remaining
    perf follow-up.
+
+(`fence` is **not** a next-up item — it is intentionally out of scope; see
+[§ Fence ops](#fence-ops--intentionally-out-of-scope).)
 
 ### Model-enablement kernels (separate track from generic-op completeness)
 
@@ -252,3 +252,61 @@ removes a measured per-layer CPU sync:
   `mel_spectrogram`, `audio_conv1d`, `vocoder/iSTFT`) are scoped from the
   Phase 6.5 / 7 plan, not yet from checked-out reference source — treat their
   MLX columns as provisional.
+
+## Fence ops — intentionally out of scope
+
+MLX's `fence.metal` (`mlx/backend/metal/kernels/fence.metal`, ~52 lines) is
+**not a compute kernel** — it is a GPU-side synchronisation primitive. It is
+deliberately *not* ported to metaltile, and the `fence` audit row is marked
+`—` rather than `✗`. This section records why.
+
+### What the fence ops are
+
+Three kernels: `input_coherent` (force input-buffer visibility),
+`fence_update` (bump a counter in a shared buffer), and `fence_wait` — a
+compute kernel that **spin-loops** reading that counter until it changes.
+Together they let the GPU order work *across command buffers / streams*
+without a CPU round-trip.
+
+### How MLX actually uses them
+
+`mlx/backend/metal/fence.cpp`'s `FenceImpl` has **two paths**:
+
+- **Default:** `device->newSharedEvent()` — a standard **`MTLSharedEvent`**.
+  The wait executes in the GPU *command processor*, not a shader core.
+- **`use_fast` path** (the `fence.metal` spin-wait kernels): gated behind
+  `GPUFamilyMetal3` **and** macOS 15 **and** an opt-in env var
+  (`metal_fast_synch`). **Off by default.**
+
+So MLX itself treats the GPU spin-wait fence as an *opt-in latency
+micro-optimization* for its multi-stream `async_eval` workloads — not a
+primitive every pipeline needs. Its default is `MTLSharedEvent`.
+
+### Why FFAI does not need it
+
+- FFAI's current pipeline is single-stream autoregressive decode. Within a
+  forward pass, Metal's automatic hazard tracking orders kernels in a
+  command buffer for free; across command buffers on one queue, submission
+  order suffices. No GPU-side fence is involved.
+- CPU/GPU pipelining (build command buffer N+1 while the GPU runs N) is
+  `commit` + completion handlers — not a fence.
+- For genuine cross-queue / cross-stream GPU sync, `MTLEvent` /
+  `MTLSharedEvent` (encoder-level — `encodeWaitForEvent` /
+  `encodeSignalEvent`) are the correct, power-efficient primitive, and they
+  belong in `metaltile-runtime`'s dispatch layer, **not** as a `#[kernel]`.
+- A `fence_wait` spin-wait is a deliberate near-infinite GPU loop: it burns
+  a shader core + power, and a counter that never updates (a bug, a wrong
+  dispatch) is a permanent GPU pin → hard reboot — the exact
+  machine-freeze hazard documented in `developing.md`.
+
+### When this could change
+
+If FFAI later runs **multiple concurrent GPU streams** — e.g. speculative
+decoding (draft/target overlap), prefill/decode overlap, or ANE+GPU
+concurrency (Phase 8 / 9) — it will need cross-stream ordering. The right
+implementation is `MTLEvent`-based encoder-level sync added to
+`metaltile-runtime` (MLX's own default), **not** a spin-wait `#[kernel]`.
+Only if profiling later shows that `MTLEvent`'s command-processor latency is
+a measured bottleneck for an ultra-fine-grained sync pattern would the
+opt-in spin-wait become worth revisiting — and even then it is a runtime
+concern, not a metaltile kernel.
