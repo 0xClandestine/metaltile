@@ -198,10 +198,7 @@ pub fn mt_gated_delta_prep_chunk<T>(
     // ─── Write final state ONCE at the end ──────────────────────────────
     for i in range(0u32, n_per_t, 1u32) {
         let s_idx = n_per_t * dk_idx + i;
-        store(
-            state_out[state_base + s_idx],
-            stack_load("state_reg", i).cast::<T>(),
-        );
+        store(state_out[state_base + s_idx], stack_load("state_reg", i).cast::<T>());
     }
 }
 

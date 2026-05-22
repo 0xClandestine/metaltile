@@ -52,7 +52,7 @@ fn cpu_chunk_oracle(
     let stride_b = 2 * hk * dk + hv * dv;
     let hk_per_hv = hv / hk;
 
-    let mut state = state_in.to_vec();           // mutated across T
+    let mut state = state_in.to_vec(); // mutated across T
     let mut y_all = vec![0.0_f32; b * t * hv * dv];
 
     for step in 0..t {
@@ -212,17 +212,24 @@ struct Fixture {
     state_in: Vec<f32>,
 }
 
-fn make_fixture(b: usize, t: usize, hv: usize, hk: usize, dv: usize, dk: usize,
-                identity_weights: bool, weight_scale: f32) -> Fixture {
+fn make_fixture(
+    b: usize,
+    t: usize,
+    hv: usize,
+    hk: usize,
+    dv: usize,
+    dk: usize,
+    identity_weights: bool,
+    weight_scale: f32,
+) -> Fixture {
     // Magnitudes are tighter than prep_step's unit-test fixture because
     // 32-step recurrence with `g ≈ 0.99` slow-decay + k_normed ≈ 1.0
     // amplifies state by ~T·delta — with the prep_step magnitudes the
     // state overflows f32 around T=20. Production training keeps this
     // stable via learned a_log / dt_bias; random fixtures need clamping.
     let stride_b = 2 * hk * dk + hv * dv;
-    let conv_out: Vec<f32> = (0..b * t * stride_b)
-        .map(|i| ((i as f32) * 0.0131).sin() * 0.1)
-        .collect();
+    let conv_out: Vec<f32> =
+        (0..b * t * stride_b).map(|i| ((i as f32) * 0.0131).sin() * 0.1).collect();
     // More-negative a_log → smaller exp(a_log) → g closer to 1 but the
     // decay accelerates near 1 anyway. Keep a_log ≤ -2 so the *step
     // count* dominates state growth, not single-step gain.
@@ -240,9 +247,8 @@ fn make_fixture(b: usize, t: usize, hv: usize, hk: usize, dv: usize, dk: usize,
     } else {
         (0..hk * dk).map(|i| weight_scale * (1.0 + ((i % 13) as f32) * 0.04)).collect()
     };
-    let state_in: Vec<f32> = (0..b * hv * dv * dk)
-        .map(|i| ((i as f32) * 0.0073).cos() * 0.02)
-        .collect();
+    let state_in: Vec<f32> =
+        (0..b * hv * dv * dk).map(|i| ((i as f32) * 0.0073).cos() * 0.02).collect();
     Fixture { conv_out, a_log, dt_bias, a_raw, b_raw, q_norm_weight, k_norm_weight, state_in }
 }
 
@@ -260,19 +266,53 @@ fn round_fixture(f: &Fixture, dt: Dt) -> Fixture {
     }
 }
 
-fn run_cell(b: usize, t: usize, hv: usize, hk: usize, dv: usize, dk: usize,
-            dt: Dt, identity_weights: bool, weight_scale: f32) -> (f32, f32) {
+fn run_cell(
+    b: usize,
+    t: usize,
+    hv: usize,
+    hk: usize,
+    dv: usize,
+    dk: usize,
+    dt: Dt,
+    identity_weights: bool,
+    weight_scale: f32,
+) -> (f32, f32) {
     let _g = gpu_lock();
     let raw = make_fixture(b, t, hv, hk, dv, dk, identity_weights, weight_scale);
     let f = round_fixture(&raw, dt);
     let (y_cpu, state_cpu) = cpu_chunk_oracle(
-        &f.conv_out, &f.a_log, &f.dt_bias, &f.a_raw, &f.b_raw,
-        &f.q_norm_weight, &f.k_norm_weight, &f.state_in,
-        b, t, hv, hk, dv, dk);
+        &f.conv_out,
+        &f.a_log,
+        &f.dt_bias,
+        &f.a_raw,
+        &f.b_raw,
+        &f.q_norm_weight,
+        &f.k_norm_weight,
+        &f.state_in,
+        b,
+        t,
+        hv,
+        hk,
+        dv,
+        dk,
+    );
     let (y_gpu, state_gpu) = run_gpu(
-        &f.conv_out, &f.a_log, &f.dt_bias, &f.a_raw, &f.b_raw,
-        &f.q_norm_weight, &f.k_norm_weight, &f.state_in,
-        dt, b, t, hv, hk, dv, dk);
+        &f.conv_out,
+        &f.a_log,
+        &f.dt_bias,
+        &f.a_raw,
+        &f.b_raw,
+        &f.q_norm_weight,
+        &f.k_norm_weight,
+        &f.state_in,
+        dt,
+        b,
+        t,
+        hv,
+        hk,
+        dv,
+        dk,
+    );
     (cosine(&y_gpu, &y_cpu), cosine(&state_gpu, &state_cpu))
 }
 
