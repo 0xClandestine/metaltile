@@ -662,11 +662,16 @@ fn run_arg_reduce(
     let ref_kernel = compile_mlx(runner, spec.mlx_src, spec.mlx_pattern, "float32");
 
     let check_vals: Vec<f32> = (0..check_n).map(|i| ((i * 7 + 3) % 97) as f32 * 0.1).collect();
+    // `mt_argmax` / `mt_argmin` emit the winning index as `u32`; the oracle
+    // must mirror the subop (argmax vs argmin) and break ties to the
+    // smallest index, exactly like the kernel.
+    let is_argmin = spec.subop == "argmin";
     let expected: f32 = {
-        let mut best = f32::NEG_INFINITY;
+        let mut best = if is_argmin { f32::INFINITY } else { f32::NEG_INFINITY };
         let mut idx = 0usize;
         for (i, &v) in check_vals.iter().enumerate() {
-            if v > best {
+            let better = if is_argmin { v < best } else { v > best };
+            if better {
                 best = v;
                 idx = i;
             }
@@ -674,19 +679,15 @@ fn run_arg_reduce(
         idx as f32
     };
     let inp_c = buffer_typed(runner, &check_vals, DType::F32);
-    let out_c = zeros_typed(runner, 1, DType::F32);
+    // The kernel writes a `u32` index — allocate a raw 4-byte buffer and
+    // read it back as `u32`, not `f32` (reinterpreting the index bits as
+    // `f32` yields a denormal ≈ 0 and a spurious correctness failure).
+    let out_c = runner.buffer_zeros(4);
     let ns_c = runner.buffer_u32(check_n as u32);
-    let mt_chk = run_typed_once(
-        runner,
-        &mk,
-        &[&inp_c, &out_c, &ns_c],
-        &out_c,
-        1,
-        [1, 1, 1],
-        [tpg, 1, 1],
-        DType::F32,
-    );
-    let equiv = check_equiv(&[expected], &mt_chk, 0.5);
+    runner.measure(&mk, &[&inp_c, &out_c, &ns_c], [1, 1, 1], [tpg, 1, 1], 0, 1);
+    let idx_bytes = runner.read_bytes(&out_c, 4);
+    let mt_idx = u32::from_le_bytes(idx_bytes[..4].try_into().unwrap()) as f32;
+    let equiv = check_equiv(&[expected], &[mt_idx], 0.5);
 
     let vals: Vec<f32> = (0..n).map(|i| ((i * 13 + 7) % 1009) as f32 * 0.001).collect();
     let inp = buffer_typed(runner, &vals, DType::F32);
@@ -982,8 +983,10 @@ fn run_quantized_mat_vec(
             1,
         );
         let mt_out_c = read_mt_out(runner, &out_c, cm);
-        // f16 has ~3 decimal digits of precision; tolerance must match dtype.
-        let tol: f32 = if dt == DType::F16 { 1.0 } else { 1e-3 };
+        // f16/bf16 have only ~3 decimal digits of precision; tolerance must
+        // match dtype. bf16's 8-bit mantissa is *coarser* than f16's, so it
+        // needs the same loose bound — not the f32 `1e-3`.
+        let tol: f32 = if matches!(dt, DType::F16 | DType::BF16) { 1.0 } else { 1e-3 };
         let n_bad =
             ref_out.iter().zip(mt_out_c.iter()).filter(|(r, m)| (*r - *m).abs() > tol).count();
         let equiv = EquivResult {
