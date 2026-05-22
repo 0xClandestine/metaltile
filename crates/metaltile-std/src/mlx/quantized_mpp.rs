@@ -411,7 +411,7 @@ mod tests {
         use metaltile_codegen::msl::MslGenerator;
         for (dt, t_name) in [(DType::F32, "float"), (DType::F16, "half")] {
             let mut k = kernel_ir_for(dt);
-            // Per-dtype naming convention used by metaltile-emit/main.rs.
+            // Per-dtype naming convention used by the `tile emit` subcommand.
             let suffix = match dt {
                 DType::F32 => "f32",
                 DType::F16 => "f16",
