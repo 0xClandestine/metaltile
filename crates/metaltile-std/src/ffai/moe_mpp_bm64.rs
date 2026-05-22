@@ -100,10 +100,25 @@ pub const TG_LD: u32 = BK; // 32
 
 /// Render the inline MSL body for the BM=64 MPP MoE kernel.
 ///
-/// `t` is the MSL type name for the activation/scale/bias/output dtype
-/// (`"half"`, `"float"`, or `"bfloat"`). The W buffer is `uint32_t` (packed
-/// int4) regardless of `t`. Group size baked in at 64 (Qwen3.6-A3B default).
-fn msl_body(t: &str) -> String {
+/// `t` is the MSL type of the device-side params (`x`, `out`) — `"half"`,
+/// `"float"`, or `"bfloat"`. `ts` is the *staging* type used for the
+/// threadgroup tiles + MPP cooperative tensors — `"half"` for both `half`
+/// and `bfloat` activations, `"float"` for `float`.
+///
+/// Why the split: Apple's `mpp::tensor_ops::matmul2d` does not handle
+/// `bfloat` cooperative tensors correctly (verified on M5 Max — `bfloat`
+/// coop tensors produce garbage while the bit-identical `half` path is
+/// correct). bf16 activations are therefore read from device `bfloat`,
+/// cast to `half` on the way into the threadgroup tiles, and the matmul
+/// runs `half`×`half`→`float`. `half`'s 10-bit mantissa strictly covers
+/// `bfloat`'s 7, so this is lossless for the staged operands and the
+/// accumulation is fp32 regardless. `out` is narrowed back to `t` on
+/// store. For `float`/`half` activations `ts == t`, so the emitted MSL is
+/// byte-identical to the pre-split kernel.
+///
+/// The W buffer is `uint32_t` (packed int4) regardless of `t`. Group size
+/// baked in at 64 (Qwen3.6-A3B default).
+fn msl_body(t: &str, ts: &str) -> String {
     // Internal name aliases used in the inline body:
     //   x, w, scales, biases, indices, out — kernel params (bound by name)
     //   Xs, Ws, OutScratch                 — threadgroup arrays (hoisted)
@@ -168,8 +183,8 @@ constexpr auto desc = mpp::tensor_ops::matmul2d_descriptor(
     mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
 mpp::tensor_ops::matmul2d<desc, metal::execution_simdgroup> gemm_op;
 
-auto ct_a = gemm_op.template get_left_input_cooperative_tensor<{t}, {t}, float>();
-auto ct_b = gemm_op.template get_right_input_cooperative_tensor<{t}, {t}, float>();
+auto ct_a = gemm_op.template get_left_input_cooperative_tensor<{ts}, {ts}, float>();
+auto ct_b = gemm_op.template get_right_input_cooperative_tensor<{ts}, {ts}, float>();
 auto ct_c = gemm_op.template get_destination_cooperative_tensor<
     decltype(ct_a), decltype(ct_b), float>();
 
@@ -219,8 +234,11 @@ for (uint _sub_iter = 0u; _sub_iter < BM; _sub_iter++) {{
             uint x_ws_base  = x_m_row * TG_LD + x_k_base;
             #pragma clang loop unroll(full)
             for (uint i = 0u; i < 16u; i++) {{
-                {t} xv = x[x_dev_base + i];
-                Xs[x_ws_base + i] = in_run_x ? xv : ({t})0;
+                // Explicit cast: device `x` is `{t}`; for bf16 activations
+                // this narrows bfloat → half for the staged matmul. For
+                // f32/f16 it is a no-op the compiler elides.
+                {ts} xv = ({ts})x[x_dev_base + i];
+                Xs[x_ws_base + i] = in_run_x ? xv : ({ts})0;
             }}
 
             // ── 2. Dequant W[expert, n_tile_base..+BN, kb..kb+BK] -> Ws
@@ -252,14 +270,14 @@ for (uint _sub_iter = 0u; _sub_iter < BM; _sub_iter++) {{
                 float q6 = (float)(pack_hi  &   3840u) * s_256;
                 float q7 = (float)(pack_hi  &  61440u) * s_4096;
                 uint ws_base = w_row * TG_LD + pack_in_row * 8u;
-                Ws[ws_base + 0u] = ({t})(s * q0 + b);
-                Ws[ws_base + 1u] = ({t})(s * q1 + b);
-                Ws[ws_base + 2u] = ({t})(s * q2 + b);
-                Ws[ws_base + 3u] = ({t})(s * q3 + b);
-                Ws[ws_base + 4u] = ({t})(s * q4 + b);
-                Ws[ws_base + 5u] = ({t})(s * q5 + b);
-                Ws[ws_base + 6u] = ({t})(s * q6 + b);
-                Ws[ws_base + 7u] = ({t})(s * q7 + b);
+                Ws[ws_base + 0u] = ({ts})(s * q0 + b);
+                Ws[ws_base + 1u] = ({ts})(s * q1 + b);
+                Ws[ws_base + 2u] = ({ts})(s * q2 + b);
+                Ws[ws_base + 3u] = ({ts})(s * q3 + b);
+                Ws[ws_base + 4u] = ({ts})(s * q4 + b);
+                Ws[ws_base + 5u] = ({ts})(s * q5 + b);
+                Ws[ws_base + 6u] = ({ts})(s * q6 + b);
+                Ws[ws_base + 7u] = ({ts})(s * q7 + b);
             }}
 
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -271,11 +289,11 @@ for (uint _sub_iter = 0u; _sub_iter < BM; _sub_iter++) {{
             // = the qmm_t weight tile. `tensor_inline` packed-stride ctor:
             // extents{{TG_LD, 32}} → stride[0]=1 along TG_LD (k-inner),
             // stride[1]=TG_LD along 32 (m or n outer).
-            threadgroup {t}* xs_sg = Xs + sg_m_base * TG_LD;
-            threadgroup {t}* ws_sg = Ws + sg_n_base * TG_LD;
-            metal::tensor<threadgroup {t}, metal::extents<int, TG_LD, 32>, metal::tensor_inline>
+            threadgroup {ts}* xs_sg = Xs + sg_m_base * TG_LD;
+            threadgroup {ts}* ws_sg = Ws + sg_n_base * TG_LD;
+            metal::tensor<threadgroup {ts}, metal::extents<int, TG_LD, 32>, metal::tensor_inline>
                 tA(xs_sg, metal::extents<int, TG_LD, 32>{{}});
-            metal::tensor<threadgroup {t}, metal::extents<int, TG_LD, 32>, metal::tensor_inline>
+            metal::tensor<threadgroup {ts}, metal::extents<int, TG_LD, 32>, metal::tensor_inline>
                 tB(ws_sg, metal::extents<int, TG_LD, 32>{{}});
 
             ct_a.load(tA);
@@ -347,7 +365,8 @@ if (simd_group == 0u && simd_lane == 0u) {{
 }}
 #endif
 "#,
-        t = t
+        t = t,
+        ts = ts
     )
 }
 
@@ -365,6 +384,18 @@ pub fn kernel_ir_for(dt: DType) -> Kernel {
         DType::F32 => "float",
         DType::F16 => "half",
         DType::BF16 => "bfloat",
+        _ => unreachable!(),
+    };
+    // Staging dtype for the threadgroup tiles + MPP cooperative tensors.
+    // bf16 stages through `half` because `matmul2d` mishandles `bfloat`
+    // cooperative tensors; f32/f16 stage in their own type (ts == t).
+    let stage_dt = match dt {
+        DType::BF16 => DType::F16,
+        other => other,
+    };
+    let ts = match stage_dt {
+        DType::F32 => "float",
+        DType::F16 => "half",
         _ => unreachable!(),
     };
 
@@ -452,12 +483,12 @@ pub fn kernel_ir_for(dt: DType) -> Kernel {
 
     // Threadgroup allocations (sizes in elements, not bytes).
     body.push_op_no_result(Op::ThreadgroupAlloc {
-        dtype: dt,
+        dtype: stage_dt,
         size: BM * TG_LD, // 64 * 36 = 2304
         name: "Xs".into(),
     });
     body.push_op_no_result(Op::ThreadgroupAlloc {
-        dtype: dt,
+        dtype: stage_dt,
         size: BN * TG_LD, // 64 * 36 = 2304
         name: "Ws".into(),
     });
@@ -474,7 +505,7 @@ pub fn kernel_ir_for(dt: DType) -> Kernel {
     body.push_op(Op::ProgramId { axis: 1 }, ValueId::new(0));
 
     body.push_op_no_result(Op::InlineMsl {
-        source: msl_body(t),
+        source: msl_body(t, ts),
         inputs: Vec::new(),
         outputs: Vec::new(),
     });
@@ -496,7 +527,7 @@ inventory::submit! {
         subop: "gather_qmm_mma_int4_bm64_mpp",
         kernel_name: "mt_moe_gather_qmm_mma_int4_bm64_mpp",
         kernel_ir: kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16],
+        dtypes: &[DType::F32, DType::F16, DType::BF16],
         tol: 5e-2,
         mlx_src: None,
         mlx_pattern: None,
@@ -533,11 +564,29 @@ mod tests {
     #[test]
     fn kernel_ir_constructs_bf16() {
         let k = kernel_ir_for(DType::BF16);
-        let has_bfloat = k.body.ops.iter().any(|op| match op {
-            Op::InlineMsl { source, .. } => source.contains("metal::tensor<threadgroup bfloat"),
-            _ => false,
-        });
-        assert!(has_bfloat, "BF16 kernel should carry `threadgroup bfloat` tensor view");
+        // Device params stay bf16 — call-site buffers are bf16.
+        assert_eq!(k.params[0].dtype, DType::BF16, "x param should be bf16");
+        assert_eq!(k.params[5].dtype, DType::BF16, "out param should be bf16");
+        // ...but the MPP staging path runs in `half`: matmul2d mishandles
+        // `bfloat` cooperative tensors, so Xs/Ws + the tensor views are
+        // emitted as `half`, never `bfloat`.
+        let src = k
+            .body
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::InlineMsl { source, .. } => Some(source.clone()),
+                _ => None,
+            })
+            .expect("InlineMsl body");
+        assert!(
+            src.contains("metal::tensor<threadgroup half"),
+            "bf16 kernel should stage through `threadgroup half` tensor views"
+        );
+        assert!(
+            !src.contains("threadgroup bfloat"),
+            "bf16 kernel must not emit `threadgroup bfloat` (matmul2d mishandles it)"
+        );
     }
 
     /// Sanity-check that the generated MSL pulls in the MPP header + the

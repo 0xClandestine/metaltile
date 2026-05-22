@@ -298,3 +298,126 @@ fn moe_gather_qmm_mma_int4_bm64_mpp_matches_m1_multi_tile() {
     assert_eq!(nan_count, 0, "MPP BM=64 kernel produced non-finite values (multi-tile)");
     assert!(cos >= 0.999, "MPP MoE BM=64 vs m1 cosine = {cos:.6} (want ≥ 0.999) (multi-tile)");
 }
+
+/// bf16 activations. `mpp::tensor_ops::matmul2d` mishandles `bfloat`
+/// cooperative tensors, so the bf16 kernel reads device `bfloat`, stages
+/// through `half` threadgroup tiles + half coop tensors, and accumulates
+/// in fp32. This cell guards that path: it must produce the same result
+/// (cosine ≥ 0.997 — looser than the f32 cell's 0.999 only because the
+/// `x`/`scales`/`biases` inputs are themselves bf16-rounded, matching the
+/// bm8 bf16 cells' bar) and never the garbage a broken `bfloat` matmul
+/// produced (cosine ≈ 0).
+///
+/// Clean-tile shape, same as `..._matches_m1_clean_tile`. The m1 oracle
+/// runs in f32 — the most accurate reference — so the cosine gap is a
+/// faithful measure of the bf16 input quantization, not staging error.
+#[test]
+fn moe_gather_qmm_mma_int4_bm64_mpp_bf16_matches_m1_clean_tile() {
+    let _g = gpu_lock();
+    let Some(_ctx) = skip_unless_apple10("bm64_mpp_bf16_clean_tile") else { return };
+    let n_experts = 4usize;
+    let k_in = 64usize;
+    let n_out = 64usize;
+    let group_size = 32usize;
+    let t_rows = 64usize;
+
+    let indices: Vec<u32> = (0..t_rows).map(|r| (r / (t_rows / n_experts)) as u32).collect();
+
+    let total_weights = n_experts * n_out * k_in;
+    let weight_unpacked: Vec<u32> =
+        (0..total_weights).map(|i| ((i as u32) * 7 + 3) & 0xf).collect();
+    let weight_packed: Vec<u32> =
+        weight_unpacked.chunks_exact(k_in).flat_map(pack_int4_row).collect();
+    let groups_total = n_experts * n_out * (k_in / group_size);
+    let scales: Vec<f32> =
+        (0..groups_total).map(|i| 0.005 + 0.001 * (i as f32 * 0.03).sin()).collect();
+    let biases: Vec<f32> =
+        (0..groups_total).map(|i| -0.02 + 0.005 * (i as f32 * 0.07).cos()).collect();
+    let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * (i as f32 * 0.013).sin()).collect();
+
+    let mut expert_offsets: Vec<u32> = vec![0; n_experts + 1];
+    for (e_idx, off) in expert_offsets.iter_mut().enumerate().take(n_experts + 1) {
+        *off = indices
+            .iter()
+            .position(|&e| e as usize >= e_idx)
+            .map(|p| p as u32)
+            .unwrap_or(t_rows as u32);
+    }
+    expert_offsets[n_experts] = t_rows as u32;
+
+    // ── Reference: scalar m1 in f32 ──────────────────────────────────────
+    let y_m1 = {
+        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        buffers.insert("x".into(), pack_bytes(&x, Dt::F32));
+        buffers.insert(
+            "weight_packed".into(),
+            weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        );
+        buffers.insert("scales".into(), pack_bytes(&scales, Dt::F32));
+        buffers.insert("biases".into(), pack_bytes(&biases, Dt::F32));
+        buffers.insert(
+            "expert_offsets".into(),
+            expert_offsets.iter().flat_map(|o| o.to_le_bytes()).collect(),
+        );
+        buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * n_out], Dt::F32));
+        buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+        buffers.insert("m_out".into(), (n_out as u32).to_le_bytes().to_vec());
+        buffers.insert("n_experts".into(), (n_experts as u32).to_le_bytes().to_vec());
+        buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+        let ctx = Context::new().unwrap();
+        let mut k = mt_moe_gather_qmm_int4::kernel_ir_for(Dt::F32.to_dtype());
+        k.mode = KernelMode::Reduction;
+        let r = ctx
+            .dispatch_with_grid(&k, &buffers, &BTreeMap::new(), [n_out, t_rows, 1], [32, 1, 1])
+            .unwrap();
+        unpack_bytes(r.outputs.get("out").unwrap(), Dt::F32)
+    };
+
+    // ── Under test: BM=64 MPP MoE kernel, bf16 activations ───────────────
+    let y_mpp = {
+        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        buffers.insert("x".into(), pack_bytes(&x, Dt::Bf16));
+        buffers.insert("w".into(), weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect());
+        buffers.insert("scales".into(), pack_bytes(&scales, Dt::Bf16));
+        buffers.insert("biases".into(), pack_bytes(&biases, Dt::Bf16));
+        buffers.insert("indices".into(), indices.iter().flat_map(|i| i.to_le_bytes()).collect());
+        buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * n_out], Dt::Bf16));
+        buffers.insert("m_total".into(), (t_rows as u32).to_le_bytes().to_vec());
+        buffers.insert("n_out".into(), (n_out as u32).to_le_bytes().to_vec());
+        buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+        buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+        let ctx = Context::new().unwrap();
+        let mut k = moe_mpp_bm64::kernel_ir_for(Dt::Bf16.to_dtype());
+        k.mode = KernelMode::Reduction;
+        let r = ctx
+            .dispatch_with_grid(
+                &k,
+                &buffers,
+                &BTreeMap::new(),
+                [n_out.div_ceil(64), t_rows.div_ceil(64), 1],
+                [128, 1, 1],
+            )
+            .unwrap();
+        unpack_bytes(r.outputs.get("out").unwrap(), Dt::Bf16)
+    };
+
+    let mut dot = 0.0_f64;
+    let mut na = 0.0_f64;
+    let mut nb = 0.0_f64;
+    let mut nan_count = 0usize;
+    for (a, b) in y_m1.iter().zip(&y_mpp) {
+        if !a.is_finite() || !b.is_finite() {
+            nan_count += 1;
+            continue;
+        }
+        dot += (*a as f64) * (*b as f64);
+        na += (*a as f64) * (*a as f64);
+        nb += (*b as f64) * (*b as f64);
+    }
+    let cos = dot / (na.sqrt() * nb.sqrt() + 1e-12);
+    eprintln!("bf16 y_m1[0..8]  = {:?}", &y_m1[..8]);
+    eprintln!("bf16 y_mpp[0..8] = {:?}", &y_mpp[..8]);
+    eprintln!("bf16 cosine      = {cos:.6}");
+    assert_eq!(nan_count, 0, "MPP BM=64 bf16 kernel produced non-finite values");
+    assert!(cos >= 0.997, "MPP MoE BM=64 bf16 vs m1 cosine = {cos:.6} (want ≥ 0.997)");
+}

@@ -92,10 +92,20 @@ use crate::spec::{BenchDispatch, BenchSpec};
 
 /// Render the inline MSL body for the MoE MPP kernel.
 ///
-/// `t` is the MSL type name for the activation/scale/bias/output dtype
-/// (`"half"` or `"float"`). The W buffer is `uint32_t` (packed int4)
+/// `t` is the MSL type of the device-side params (`x`, `out`) — `"half"`,
+/// `"float"`, or `"bfloat"`. `ts` is the *staging* type used for the
+/// threadgroup tiles + MPP cooperative tensors — `"half"` for both `half`
+/// and `bfloat` activations, `"float"` for `float`.
+///
+/// Why the split: Apple's `mpp::tensor_ops::matmul2d` does not handle
+/// `bfloat` cooperative tensors correctly (verified on M5 Max). bf16
+/// activations are read from device `bfloat`, cast to `half` into the
+/// threadgroup tiles, and the matmul runs `half`×`half`→`float`. `half`'s
+/// 10-bit mantissa strictly covers `bfloat`'s 7, so the staged operands
+/// are lossless and accumulation is fp32 regardless. For `float`/`half`
+/// activations `ts == t`. The W buffer is `uint32_t` (packed int4)
 /// regardless of `t`.
-fn msl_body(t: &str) -> String {
+fn msl_body(t: &str, ts: &str) -> String {
     // Internal name aliases used in the inline body:
     //   x, w, scales, biases, indices, out — kernel params (bound by name)
     //   xs, ws, ys                          — threadgroup arrays (hoisted)
@@ -140,8 +150,8 @@ constexpr auto desc = mpp::tensor_ops::matmul2d_descriptor(
 
 mpp::tensor_ops::matmul2d<desc, metal::execution_simdgroup> gemm_op;
 
-auto ct_a = gemm_op.template get_left_input_cooperative_tensor<{t}, {t}, float>();
-auto ct_b = gemm_op.template get_right_input_cooperative_tensor<{t}, {t}, float>();
+auto ct_a = gemm_op.template get_left_input_cooperative_tensor<{ts}, {ts}, float>();
+auto ct_b = gemm_op.template get_right_input_cooperative_tensor<{ts}, {ts}, float>();
 auto ct_c = gemm_op.template get_destination_cooperative_tensor<
     decltype(ct_a), decltype(ct_b), float>();
 
@@ -191,8 +201,11 @@ for (uint _sub_iter = 0u; _sub_iter < 16u; _sub_iter++) {{
                 // — they contribute zero to the matmul.
                 bool in_run = (mr >= sub_offset) && (mr < sub_end) && (gr < m_total);
                 uint safe_g = in_run ? gr : 0u;
-                {t} xv = x[safe_g * k_in + kb + kc];
-                xs[mr * BK + kc] = in_run ? xv : ({t})0;
+                // Explicit cast: device `x` is `{t}`; for bf16 activations
+                // this narrows bfloat → half for the staged matmul. For
+                // f32/f16 it is a no-op the compiler elides.
+                {ts} xv = ({ts})x[safe_g * k_in + kb + kc];
+                xs[mr * BK + kc] = in_run ? xv : ({ts})0;
             }}
 
             // -- Dequant W[expert, n_tile_base..+BN, kb..kb+BK] -> ws[BN*BK]
@@ -215,14 +228,14 @@ for (uint _sub_iter = 0u; _sub_iter < 16u; _sub_iter++) {{
 
                 uint hi = packed >> 16u;
                 uint dst_row_base = w_row * BK + pack_col * 8u;
-                ws[dst_row_base + 0u] = ({t})(s * (float)((packed >>  0) & 0xfu) + b);
-                ws[dst_row_base + 1u] = ({t})(s * (float)((packed >>  4) & 0xfu) + b);
-                ws[dst_row_base + 2u] = ({t})(s * (float)((packed >>  8) & 0xfu) + b);
-                ws[dst_row_base + 3u] = ({t})(s * (float)((packed >> 12) & 0xfu) + b);
-                ws[dst_row_base + 4u] = ({t})(s * (float)((hi     >>  0) & 0xfu) + b);
-                ws[dst_row_base + 5u] = ({t})(s * (float)((hi     >>  4) & 0xfu) + b);
-                ws[dst_row_base + 6u] = ({t})(s * (float)((hi     >>  8) & 0xfu) + b);
-                ws[dst_row_base + 7u] = ({t})(s * (float)((hi     >> 12) & 0xfu) + b);
+                ws[dst_row_base + 0u] = ({ts})(s * (float)((packed >>  0) & 0xfu) + b);
+                ws[dst_row_base + 1u] = ({ts})(s * (float)((packed >>  4) & 0xfu) + b);
+                ws[dst_row_base + 2u] = ({ts})(s * (float)((packed >>  8) & 0xfu) + b);
+                ws[dst_row_base + 3u] = ({ts})(s * (float)((packed >> 12) & 0xfu) + b);
+                ws[dst_row_base + 4u] = ({ts})(s * (float)((hi     >>  0) & 0xfu) + b);
+                ws[dst_row_base + 5u] = ({ts})(s * (float)((hi     >>  4) & 0xfu) + b);
+                ws[dst_row_base + 6u] = ({ts})(s * (float)((hi     >>  8) & 0xfu) + b);
+                ws[dst_row_base + 7u] = ({ts})(s * (float)((hi     >> 12) & 0xfu) + b);
             }}
 
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -231,9 +244,9 @@ for (uint _sub_iter = 0u; _sub_iter < 16u; _sub_iter++) {{
             // into cooperative_tensors. extents are inner-first; with
             //   ta=false, A is row-major [M=16, K=16] → extents{{K=16, M=16}}
             //   tb=true , B is row-major [N=32, K=16] → extents{{K=16, N=32}}
-            metal::tensor<threadgroup {t}, metal::extents<int, 16, 16>, metal::tensor_inline>
+            metal::tensor<threadgroup {ts}, metal::extents<int, 16, 16>, metal::tensor_inline>
                 tA(xs, metal::extents<int, 16, 16>{{}});
-            metal::tensor<threadgroup {t}, metal::extents<int, 16, 32>, metal::tensor_inline>
+            metal::tensor<threadgroup {ts}, metal::extents<int, 16, 32>, metal::tensor_inline>
                 tB(ws, metal::extents<int, 16, 32>{{}});
 
             ct_a.load(tA);
@@ -312,6 +325,18 @@ pub fn kernel_ir_for(dt: DType) -> Kernel {
         DType::F32 => "float",
         DType::F16 => "half",
         DType::BF16 => "bfloat",
+        _ => unreachable!(),
+    };
+    // Staging dtype for the threadgroup tiles + MPP cooperative tensors.
+    // bf16 stages through `half` because `matmul2d` mishandles `bfloat`
+    // cooperative tensors; f32/f16 stage in their own type (ts == t).
+    let stage_dt = match dt {
+        DType::BF16 => DType::F16,
+        other => other,
+    };
+    let ts = match stage_dt {
+        DType::F32 => "float",
+        DType::F16 => "half",
         _ => unreachable!(),
     };
 
@@ -409,8 +434,16 @@ pub fn kernel_ir_for(dt: DType) -> Kernel {
     // Threadgroup allocations. `xs` and `ws` are sized for ONE BK=16
     // K-chunk; `ys` is sized for the BM=16 × BN=32 output stage. Sizes
     // are in elements (not bytes).
-    body.push_op_no_result(Op::ThreadgroupAlloc { dtype: dt, size: 16 * 16, name: "xs".into() });
-    body.push_op_no_result(Op::ThreadgroupAlloc { dtype: dt, size: 32 * 16, name: "ws".into() });
+    body.push_op_no_result(Op::ThreadgroupAlloc {
+        dtype: stage_dt,
+        size: 16 * 16,
+        name: "xs".into(),
+    });
+    body.push_op_no_result(Op::ThreadgroupAlloc {
+        dtype: stage_dt,
+        size: 32 * 16,
+        name: "ws".into(),
+    });
     // fp32 staging for the cooperative_tensor `ct_c.store(...)`. The
     // store overload requires destination elem-type == accumulator type
     // (float here). We narrow to `{t}` during the coop-write to global.
@@ -433,7 +466,7 @@ pub fn kernel_ir_for(dt: DType) -> Kernel {
     // The InlineMsl op contains the full body. inputs/outputs are empty
     // because the body addresses params + TG arrays by name in MSL.
     body.push_op_no_result(Op::InlineMsl {
-        source: msl_body(t),
+        source: msl_body(t, ts),
         inputs: Vec::new(),
         outputs: Vec::new(),
     });
@@ -455,7 +488,7 @@ inventory::submit! {
         subop: "gather_qmm_mma_int4_bm16_mpp",
         kernel_name: "mt_moe_gather_qmm_mma_int4_bm16_mpp",
         kernel_ir: kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16],
+        dtypes: &[DType::F32, DType::F16, DType::BF16],
         tol: 5e-2,
         mlx_src: None,
         mlx_pattern: None,
