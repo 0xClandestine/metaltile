@@ -18,7 +18,6 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
-      - '.github/workflows/tile.yml'
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
@@ -27,7 +26,6 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
-      - '.github/workflows/tile.yml'
   workflow_dispatch: {}
 
 permissions:
@@ -56,27 +54,29 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # Build the CLI once and add the release binary to PATH so all
+      # subsequent steps call `tile` directly without cargo overhead.
+      - name: Install tile CLI
+        run: |
+          cargo build --release -p metaltile-cli
+          echo "${GITHUB_WORKSPACE}/target/release" >> "$GITHUB_PATH"
+
       - name: Build
-        run: cargo run --release -p metaltile-cli -- build
+        run: tile build
 
       # Diff is opt-in (`--diff`); the next step runs `tile diff` separately.
       # `--allow-dirty` is defensive — CI checks out
       # clean, but a future codegen step could mutate a tracked file.
       - name: Bench
-        run: |
-          cargo run --release -p metaltile-cli -- bench -vv \
-            --allow-dirty --json /tmp/bench.json
+        run: tile bench -vv --allow-dirty --json /tmp/bench.json
 
-      # Snapshot the raw bench JSON into the committed-baseline format
-      # (`tile snap` envelope) and upload it as an artifact. snap runs
-      # *on the runner* so the `device` field is the runner's real
+      # Snapshot the raw bench JSON into the committed-baseline format.
+      # snap runs *on the runner* so the `device` field reflects the real
       # chip — letting a maintainer download it and commit it as
-      # `baselines/<chip-slug>.json` for a runner chip nobody owns
-      # locally (e.g. the paravirtualized macOS runner). Also the first
-      # building block for the auto-baseline workflow (issue #130).
+      # `baselines/<chip-slug>.json`.
       - name: Snapshot bench result
         run: |
-          cargo run --release -q -p metaltile-cli -- snap \
+          tile snap \
             --from /tmp/bench.json -o /tmp/bench-snapshot.json \
             --note "CI runner capture @ ${{ github.sha }} (${{ github.ref_name }})"
 
@@ -98,10 +98,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          DEVICE_NAME=$(
-            cargo run --release -q -p metaltile-cli -- device --json \
-              | jq -r '.device'
-          )
+          DEVICE_NAME=$(tile device --json | jq -r '.device')
           # Same rule as `cmd::bench::chip_slug` in the Rust code:
           # lowercase, collapse non-alphanumeric runs to a single dash,
           # trim leading/trailing dashes.
@@ -131,8 +128,7 @@ jobs:
               echo
               echo '```ansi'
               # `|| true` so a regression exit code (1) doesn't kill the job.
-              cargo run --release -q -p metaltile-cli -- diff \
-                "$BL" /tmp/bench.json 2>&1 || true
+              tile diff "$BL" /tmp/bench.json 2>&1 || true
               echo '```'
               echo
               echo '</details>'
