@@ -56,7 +56,7 @@ pub const TG_LD_D: u32 = BD + TG_SKEW; // 36
 pub const TG_LD_K: u32 = BK + TG_SKEW; // 20
 
 /// Flash-attention prefill via cooperative `matmul2d`. Generic over
-/// `T ∈ {f32, f16}`.
+/// `T ∈ {f32, f16, bf16}` — bf16 stages through `half` via `coop_stage(T)`.
 ///
 /// Params: `q`/`k`/`v`/`out` are `[batch, heads, len, head_dim]` slabs
 /// (`q`/`out` use `n_q_heads`, `k`/`v` use `n_kv_heads`). Constexprs:
@@ -91,10 +91,10 @@ pub fn mt_sdpa_prefill_nax<T>(
     let q_tile_first = q_tile * 16u32;
 
     // Threadgroup tiles (skewed). Qs/Ks/Vs/Ps are T; Ss/Os/Obk are fp32.
-    threadgroup_alloc("Qs", 576, T); // 16 × 36
-    threadgroup_alloc("Ks", 576, T);
-    threadgroup_alloc("Vs", 576, T);
-    threadgroup_alloc("Ps", 320, T); // 16 × 20
+    threadgroup_alloc("Qs", 576, coop_stage(T)); // 16 × 36
+    threadgroup_alloc("Ks", 576, coop_stage(T));
+    threadgroup_alloc("Vs", 576, coop_stage(T));
+    threadgroup_alloc("Ps", 320, coop_stage(T)); // 16 × 20
     threadgroup_alloc("Ss", 320, f32);
     threadgroup_alloc("Os", 576, f32);
     threadgroup_alloc("Obk", 576, f32);
@@ -103,7 +103,7 @@ pub fn mt_sdpa_prefill_nax<T>(
     for _r in range(0u32, 16u32, 1u32) {
         let q_dev = q_head_row_off + (q_tile_first + _r) * head_dim + lane;
         let qv = load(q[q_dev]).cast::<f32>() * scale;
-        threadgroup_store("Qs", _r * 36u32 + lane, qv.cast::<T>());
+        threadgroup_store("Qs", _r * 36u32 + lane, qv);
         threadgroup_store("Os", _r * 36u32 + lane, 0.0f32);
     }
 
@@ -115,9 +115,33 @@ pub fn mt_sdpa_prefill_nax<T>(
     let q_abs = q_tile_first + my_row + q_len_off;
 
     // QK: matmul2d(16, 16, 32), ta=false tb=true, overwrite (S fresh).
-    coop_tile_setup("qk", 16, 16, 32, T, "overwrite", "simdgroup", f32, false, true, false);
+    coop_tile_setup(
+        "qk",
+        16,
+        16,
+        32,
+        coop_stage(T),
+        "overwrite",
+        "simdgroup",
+        f32,
+        false,
+        true,
+        false,
+    );
     // PV: matmul2d(16, 32, 16), ta=false tb=false, overwrite (per-block).
-    coop_tile_setup("pv", 16, 32, 16, T, "overwrite", "simdgroup", f32, false, false, false);
+    coop_tile_setup(
+        "pv",
+        16,
+        32,
+        16,
+        coop_stage(T),
+        "overwrite",
+        "simdgroup",
+        f32,
+        false,
+        false,
+        false,
+    );
 
     // Causal trim — last K-block touched by the tile's last query.
     let q_tile_last_abs = q_tile_first + 15u32 + q_len_off;
@@ -129,15 +153,15 @@ pub fn mt_sdpa_prefill_nax<T>(
         // 1. Coop-load the 16×32 K and V tiles.
         for _r in range(0u32, 16u32, 1u32) {
             let kv_dev = kv_row_base + (kb_off + _r) * head_dim + lane;
-            threadgroup_store("Ks", _r * 36u32 + lane, load(k[kv_dev]).cast::<T>());
-            threadgroup_store("Vs", _r * 36u32 + lane, load(v[kv_dev]).cast::<T>());
+            threadgroup_store("Ks", _r * 36u32 + lane, load(k[kv_dev]).cast::<f32>());
+            threadgroup_store("Vs", _r * 36u32 + lane, load(v[kv_dev]).cast::<f32>());
         }
         threadgroup_barrier();
 
         // 2. S = Q·Kᵀ — extents inner-first: tQ/tK [TG_LD_D=36, 16],
         //    tS [TG_LD_K=20, 16].
-        coop_tile_load_a("qk", "Qs", true, T, 36, 16);
-        coop_tile_load_b("qk", "Ks", true, T, 36, 16);
+        coop_tile_load_a("qk", "Qs", true, coop_stage(T), 36, 16);
+        coop_tile_load_b("qk", "Ks", true, coop_stage(T), 36, 16);
         coop_tile_run("qk");
         coop_tile_store_c("qk", "Ss", true, f32, 20, 16);
         threadgroup_barrier();
@@ -174,15 +198,15 @@ pub fn mt_sdpa_prefill_nax<T>(
         if owns_row {
             for _c in range(0u32, 16u32, 1u32) {
                 let p = threadgroup_load("Ss", my_row * 20u32 + _c);
-                threadgroup_store("Ps", my_row * 20u32 + _c, p.cast::<T>());
+                threadgroup_store("Ps", my_row * 20u32 + _c, p);
             }
         }
         threadgroup_barrier();
 
         // O_blk = P·V — tP [TG_LD_K=20, 16], tV [TG_LD_D=36, 16],
         // tObk [TG_LD_D=36, 16].
-        coop_tile_load_a("pv", "Ps", true, T, 20, 16);
-        coop_tile_load_b("pv", "Vs", true, T, 36, 16);
+        coop_tile_load_a("pv", "Ps", true, coop_stage(T), 20, 16);
+        coop_tile_load_b("pv", "Vs", true, coop_stage(T), 36, 16);
         coop_tile_run("pv");
         coop_tile_store_c("pv", "Obk", true, f32, 36, 16);
         threadgroup_barrier();
@@ -217,7 +241,7 @@ mod tests {
 
     #[test]
     fn kernel_ir_constructs_and_uses_coop_tile_ops() {
-        for dt in [DType::F32, DType::F16] {
+        for dt in [DType::F32, DType::F16, DType::BF16] {
             let k = mt_sdpa_prefill_nax::kernel_ir_for(dt);
             assert_eq!(k.name, "mt_sdpa_prefill_nax");
             assert_eq!(k.params.len(), 4);
@@ -236,9 +260,13 @@ mod tests {
     #[test]
     fn codegen_emits_mpp_include_and_kernel_decl() {
         use metaltile_codegen::msl::MslGenerator;
-        for (dt, t_name) in [(DType::F32, "float"), (DType::F16, "half")] {
+        for (dt, t_name) in [(DType::F32, "float"), (DType::F16, "half"), (DType::BF16, "half")] {
             let mut k = mt_sdpa_prefill_nax::kernel_ir_for(dt);
-            let suffix = if dt == DType::F32 { "f32" } else { "f16" };
+            let suffix = match dt {
+                DType::F32 => "f32",
+                DType::F16 => "f16",
+                _ => "bf16",
+            };
             k.name = format!("mt_sdpa_prefill_nax_{suffix}");
             let msl = MslGenerator::default().generate(&k).expect("codegen");
             assert!(msl.contains("MetalPerformancePrimitives/MetalPerformancePrimitives.h"));
