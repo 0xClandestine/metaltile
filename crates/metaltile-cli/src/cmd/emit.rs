@@ -38,7 +38,7 @@ pub fn run(args: &EmitArgs) -> Result<(), CliError> {
     println!("tile emit: {} kernels", kernels.len());
 
     let generator = MslGenerator::default();
-    let mut metal_paths = Vec::new();
+    let mut metal_paths = Vec::with_capacity(kernels.len());
 
     for kernel in &kernels {
         let path = write_msl(kernel, &kernels_dir, &generator)
@@ -88,7 +88,8 @@ fn collect_kernels() -> Vec<Kernel> {
         }
     }
 
-    let mut kernels = Vec::new();
+    let total: usize = by_name.values().map(|(_, dtypes)| dtypes.len()).sum();
+    let mut kernels = Vec::with_capacity(total);
     for (kernel_name, (spec, dtypes)) in &by_name {
         let mode = effective_mode(spec);
         for &dt in dtypes {
