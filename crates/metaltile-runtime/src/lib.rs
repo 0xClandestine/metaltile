@@ -1,6 +1,6 @@
-//! MetalTile runtime: GPU dispatch, buffer management, and autotuning.
+//! `MetalTile` runtime: GPU dispatch, buffer management, and autotuning.
 //!
-//! This crate handles the runtime execution of compiled MetalTile kernels:
+//! This crate handles the runtime execution of compiled `MetalTile` kernels:
 //! - Metal device and command queue management
 //! - Pipeline state compilation and caching
 //! - Buffer allocation and transfer

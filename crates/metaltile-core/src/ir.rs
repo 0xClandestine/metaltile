@@ -1,4 +1,4 @@
-//! MetalTile IR: SSA-form intermediate representation for tile-level kernels.
+//! `MetalTile` IR: SSA-form intermediate representation for tile-level kernels.
 //!
 //! The IR is the central data structure of the compiler. It is:
 //! - **SSA-form**: every value is produced once, by one operation.
@@ -34,8 +34,10 @@ use crate::{constexpr::ConstExpr, dtype::DType, shape::Shape};
 pub struct ValueId(u32);
 
 impl ValueId {
-    pub const fn new(id: u32) -> Self { ValueId(id) }
+    #[must_use]
+    pub const fn new(id: u32) -> Self { Self(id) }
 
+    #[must_use]
     pub const fn as_u32(self) -> u32 { self.0 }
 }
 
@@ -48,8 +50,10 @@ impl std::fmt::Display for ValueId {
 pub struct BlockId(u32);
 
 impl BlockId {
-    pub const fn new(id: u32) -> Self { BlockId(id) }
+    #[must_use]
+    pub const fn new(id: u32) -> Self { Self(id) }
 
+    #[must_use]
     pub const fn as_u32(self) -> u32 { self.0 }
 }
 
@@ -58,8 +62,10 @@ impl BlockId {
 pub struct VarId(u32);
 
 impl VarId {
-    pub const fn new(id: u32) -> Self { VarId(id) }
+    #[must_use]
+    pub const fn new(id: u32) -> Self { Self(id) }
 
+    #[must_use]
     pub const fn as_u32(self) -> u32 { self.0 }
 }
 
@@ -164,40 +170,41 @@ pub enum UnaryOpKind {
 
 impl UnaryOpKind {
     /// Emit the MSL expression for this unary op applied to `arg`.
+    #[must_use]
     pub fn msl_emit(self, arg: &str) -> String {
         match self {
-            UnaryOpKind::Neg => format!("(-{arg})"),
-            UnaryOpKind::Recip => format!("(1.0f / {arg})"),
-            UnaryOpKind::Exp => format!("exp({arg})"),
-            UnaryOpKind::Log => format!("log({arg})"),
-            UnaryOpKind::Sqrt => format!("sqrt({arg})"),
-            UnaryOpKind::Rsqrt => format!("rsqrt({arg})"),
-            UnaryOpKind::Abs => format!("abs({arg})"),
-            UnaryOpKind::Ceil => format!("ceil({arg})"),
-            UnaryOpKind::Floor => format!("floor({arg})"),
-            UnaryOpKind::Sin => format!("sin({arg})"),
-            UnaryOpKind::Cos => format!("cos({arg})"),
-            UnaryOpKind::Erf => format!("mt_erf_impl({arg})"),
-            UnaryOpKind::Exp2 => format!("exp2({arg})"),
-            UnaryOpKind::Log2 => format!("log2({arg})"),
-            UnaryOpKind::Sign => format!("sign({arg})"),
+            Self::Neg => format!("(-{arg})"),
+            Self::Recip => format!("(1.0f / {arg})"),
+            Self::Exp => format!("exp({arg})"),
+            Self::Log => format!("log({arg})"),
+            Self::Sqrt => format!("sqrt({arg})"),
+            Self::Rsqrt => format!("rsqrt({arg})"),
+            Self::Abs => format!("abs({arg})"),
+            Self::Ceil => format!("ceil({arg})"),
+            Self::Floor => format!("floor({arg})"),
+            Self::Sin => format!("sin({arg})"),
+            Self::Cos => format!("cos({arg})"),
+            Self::Erf => format!("mt_erf_impl({arg})"),
+            Self::Exp2 => format!("exp2({arg})"),
+            Self::Log2 => format!("log2({arg})"),
+            Self::Sign => format!("sign({arg})"),
             // rint() maps to the hardware RINT instruction (round-to-even, IEEE 754 default).
             // round() requires software emulation for half-away-from-zero on bfloat, making it
             // ~2× slower. MLX also uses rint() for its Round op (see unary.metal).
-            UnaryOpKind::Round => format!("rint({arg})"),
-            UnaryOpKind::Trunc => format!("trunc({arg})"),
-            UnaryOpKind::Sinh => format!("sinh({arg})"),
-            UnaryOpKind::Cosh => format!("cosh({arg})"),
-            UnaryOpKind::Tan => format!("tan({arg})"),
-            UnaryOpKind::Asin => format!("asin({arg})"),
-            UnaryOpKind::Atan => format!("atan({arg})"),
-            UnaryOpKind::Asinh => format!("asinh({arg})"),
-            UnaryOpKind::Acos => format!("acos({arg})"),
-            UnaryOpKind::Acosh => format!("acosh({arg})"),
-            UnaryOpKind::Atanh => format!("atanh({arg})"),
-            UnaryOpKind::Expm1 => format!("mt_expm1_impl({arg})"),
-            UnaryOpKind::Log10 => format!("log10({arg})"),
-            UnaryOpKind::ErfInv => format!("mt_erfinv_impl({arg})"),
+            Self::Round => format!("rint({arg})"),
+            Self::Trunc => format!("trunc({arg})"),
+            Self::Sinh => format!("sinh({arg})"),
+            Self::Cosh => format!("cosh({arg})"),
+            Self::Tan => format!("tan({arg})"),
+            Self::Asin => format!("asin({arg})"),
+            Self::Atan => format!("atan({arg})"),
+            Self::Asinh => format!("asinh({arg})"),
+            Self::Acos => format!("acos({arg})"),
+            Self::Acosh => format!("acosh({arg})"),
+            Self::Atanh => format!("atanh({arg})"),
+            Self::Expm1 => format!("mt_expm1_impl({arg})"),
+            Self::Log10 => format!("log10({arg})"),
+            Self::ErfInv => format!("mt_erfinv_impl({arg})"),
         }
     }
 }
@@ -214,18 +221,20 @@ pub enum ActKind {
 
 impl ActKind {
     /// MSL helper function name. `Tanh` is a Metal built-in; others need a preamble helper.
-    pub fn msl_fn(self) -> &'static str {
+    #[must_use]
+    pub const fn msl_fn(self) -> &'static str {
         match self {
-            ActKind::Silu => "mt_silu",
-            ActKind::Gelu => "mt_gelu",
-            ActKind::Relu => "mt_relu",
-            ActKind::Tanh => "tanh",
-            ActKind::Sigmoid => "mt_sigmoid",
+            Self::Silu => "mt_silu",
+            Self::Gelu => "mt_gelu",
+            Self::Relu => "mt_relu",
+            Self::Tanh => "tanh",
+            Self::Sigmoid => "mt_sigmoid",
         }
     }
 
     /// Whether this activation needs a preamble helper function emitted before the kernel.
-    pub fn needs_helper(self) -> bool { !matches!(self, ActKind::Tanh) }
+    #[must_use]
+    pub const fn needs_helper(self) -> bool { !matches!(self, Self::Tanh) }
 }
 
 /// Binary operation kind.
@@ -273,53 +282,56 @@ pub enum BinOpKind {
 }
 
 impl BinOpKind {
-    pub fn msl_symbol(self) -> &'static str {
+    #[must_use]
+    pub const fn msl_symbol(self) -> &'static str {
         match self {
-            BinOpKind::Add => "+",
-            BinOpKind::Sub => "-",
-            BinOpKind::Mul => "*",
-            BinOpKind::Div => "/",
-            BinOpKind::Max => "max",
-            BinOpKind::Min => "min",
-            BinOpKind::And => "&&",
-            BinOpKind::Or => "||",
-            BinOpKind::Xor => "^",
-            BinOpKind::CmpLt => "<",
-            BinOpKind::CmpGt => ">",
-            BinOpKind::CmpLe => "<=",
-            BinOpKind::CmpGe => ">=",
-            BinOpKind::CmpEq => "==",
-            BinOpKind::CmpNe => "!=",
-            BinOpKind::Pow => "pow",
-            BinOpKind::ATan2 => "atan2",
-            BinOpKind::Rem => "fmod",
-            BinOpKind::Shl => "<<",
-            BinOpKind::Shr => ">>",
-            BinOpKind::BitAnd => "&",
-            BinOpKind::BitOr => "|",
-            BinOpKind::BitXor => "^",
-            BinOpKind::Mod => "%",
+            Self::Add => "+",
+            Self::Sub => "-",
+            Self::Mul => "*",
+            Self::Div => "/",
+            Self::Max => "max",
+            Self::Min => "min",
+            Self::And => "&&",
+            Self::Or => "||",
+            Self::Xor => "^",
+            Self::CmpLt => "<",
+            Self::CmpGt => ">",
+            Self::CmpLe => "<=",
+            Self::CmpGe => ">=",
+            Self::CmpEq => "==",
+            Self::CmpNe => "!=",
+            Self::Pow => "pow",
+            Self::ATan2 => "atan2",
+            Self::Rem => "fmod",
+            Self::Shl => "<<",
+            Self::Shr => ">>",
+            Self::BitAnd => "&",
+            Self::BitOr => "|",
+            Self::BitXor => "^",
+            Self::Mod => "%",
         }
     }
 
     /// Whether this op produces a boolean result.
-    pub fn is_cmp(self) -> bool {
+    #[must_use]
+    pub const fn is_cmp(self) -> bool {
         matches!(
             self,
-            BinOpKind::CmpLt
-                | BinOpKind::CmpGt
-                | BinOpKind::CmpLe
-                | BinOpKind::CmpGe
-                | BinOpKind::CmpEq
-                | BinOpKind::CmpNe
+            Self::CmpLt
+                | Self::CmpGt
+                | Self::CmpLe
+                | Self::CmpGe
+                | Self::CmpEq
+                | Self::CmpNe
         )
     }
 
     /// Whether this op is emitted as `fn(a, b)` rather than infix `a op b`.
-    pub fn is_fn_call(self) -> bool {
+    #[must_use]
+    pub const fn is_fn_call(self) -> bool {
         matches!(
             self,
-            BinOpKind::Max | BinOpKind::Min | BinOpKind::Pow | BinOpKind::ATan2 | BinOpKind::Rem
+            Self::Max | Self::Min | Self::Pow | Self::ATan2 | Self::Rem
         )
     }
 }
@@ -363,14 +375,15 @@ pub enum AtomicScope {
 }
 
 impl AtomicKind {
-    pub fn msl_fn(self) -> &'static str {
+    #[must_use]
+    pub const fn msl_fn(self) -> &'static str {
         match self {
-            AtomicKind::Add => "atomic_fetch_add_explicit",
-            AtomicKind::Max => "atomic_fetch_max_explicit",
-            AtomicKind::Min => "atomic_fetch_min_explicit",
-            AtomicKind::And => "atomic_fetch_and_explicit",
-            AtomicKind::Or => "atomic_fetch_or_explicit",
-            AtomicKind::Xor => "atomic_fetch_xor_explicit",
+            Self::Add => "atomic_fetch_add_explicit",
+            Self::Max => "atomic_fetch_max_explicit",
+            Self::Min => "atomic_fetch_min_explicit",
+            Self::And => "atomic_fetch_and_explicit",
+            Self::Or => "atomic_fetch_or_explicit",
+            Self::Xor => "atomic_fetch_xor_explicit",
         }
     }
 }
@@ -389,17 +402,18 @@ pub enum IndexExpr {
 impl IndexExpr {
     /// The `ValueId` embedded in this index expression, if any.
     /// Both `Value` and `Range` carry a `ValueId`; `Const` does not.
-    pub fn value_id(&self) -> Option<&ValueId> {
+    #[must_use]
+    pub const fn value_id(&self) -> Option<&ValueId> {
         match self {
-            IndexExpr::Value(v) | IndexExpr::Range(v, _) => Some(v),
-            IndexExpr::Const(_) => None,
+            Self::Value(v) | Self::Range(v, _) => Some(v),
+            Self::Const(_) => None,
         }
     }
 
-    pub fn value_id_mut(&mut self) -> Option<&mut ValueId> {
+    pub const fn value_id_mut(&mut self) -> Option<&mut ValueId> {
         match self {
-            IndexExpr::Value(v) | IndexExpr::Range(v, _) => Some(v),
-            IndexExpr::Const(_) => None,
+            Self::Value(v) | Self::Range(v, _) => Some(v),
+            Self::Const(_) => None,
         }
     }
 }
@@ -418,14 +432,15 @@ pub enum KernelCallArg {
 
 impl KernelCallArg {
     /// Returns the [`ValueId`] if this is a [`Value`][Self::Value] variant.
-    pub fn as_value(&self) -> Option<&ValueId> {
-        if let KernelCallArg::Value(v) = self { Some(v) } else { None }
+    #[must_use]
+    pub const fn as_value(&self) -> Option<&ValueId> {
+        if let Self::Value(v) = self { Some(v) } else { None }
     }
 
     /// Returns a mutable reference to the inner [`ValueId`] if this is a
     /// [`Value`][Self::Value] variant, or `None` for [`Tensor`][Self::Tensor].
-    pub fn as_value_mut(&mut self) -> Option<&mut ValueId> {
-        if let KernelCallArg::Value(v) = self { Some(v) } else { None }
+    pub const fn as_value_mut(&mut self) -> Option<&mut ValueId> {
+        if let Self::Value(v) = self { Some(v) } else { None }
     }
 }
 
@@ -534,10 +549,10 @@ pub enum Op {
         dtype: DType,
         /// Optional per-element transform chain applied to the loaded value before accumulation.
         /// Each op in the chain takes the previous result as input.
-        transform: Option<Vec<Op>>,
+        transform: Option<Vec<Self>>,
         /// For dot-product reductions (GEMV): multiply each `src[_i]` by `secondary_src[_i - secondary_base]`.
         secondary_src: Option<String>,
-        /// Base offset subtracted from the loop index when accessing secondary_src.
+        /// Base offset subtracted from the loop index when accessing `secondary_src`.
         #[vid_opt]
         secondary_base: Option<ValueId>,
     },
@@ -627,7 +642,7 @@ pub enum Op {
     Slice {
         #[vid]
         value: ValueId,
-        /// Which dimensions to slice; (axis, start_offset, length).
+        /// Which dimensions to slice; (axis, `start_offset`, length).
         ranges: Vec<(u32, i64, i64)>,
     },
 
@@ -689,20 +704,20 @@ pub enum Op {
     Splat { value: f64, dtype: DType, shape: Shape },
 
     /// Fused chain of elementwise operations.
-    /// Created by the FusionPass to merge adjacent ops like
+    /// Created by the `FusionPass` to merge adjacent ops like
     /// `UnaryOp(Exp) → Activation(Silu)` into a single expression.
     #[op_fused]
     #[result_custom]
     FusedElementwise {
         /// The elementwise ops in execution order (producer first).
-        /// Each op's inputs reference either external ValueIds or
+        /// Each op's inputs reference either external `ValueIds` or
         /// the output of a preceding op in this chain (index 0..n-1).
         #[vid_recursive]
-        ops: Vec<Op>,
+        ops: Vec<Self>,
     },
 
     /// Vectorized load: loads `len` consecutive elements as a vector.
-    /// `len` is 2, 4, or 8. Created by the VectorizePass from consecutive scalar Loads.
+    /// `len` is 2, 4, or 8. Created by the `VectorizePass` from consecutive scalar Loads.
     #[op_load]
     #[result_custom]
     VectorLoad {
@@ -727,13 +742,13 @@ pub enum Op {
         byte_offset: ValueId,
         /// Number of elements: 2, 4, or 8.
         len: u32,
-        /// The value to store (scalar or vector ValueId).
+        /// The value to store (scalar or vector `ValueId`).
         #[vid]
         value: ValueId,
     },
 
-    /// Project one scalar lane (0..len) out of a VectorLoad result.
-    /// Emitted by VectorizePass to feed each original scalar consumer.
+    /// Project one scalar lane (0..len) out of a `VectorLoad` result.
+    /// Emitted by `VectorizePass` to feed each original scalar consumer.
     #[result_custom]
     VectorExtract {
         #[vid]
@@ -745,7 +760,7 @@ pub enum Op {
     ///
     /// Assembles `elements` into a single vector value.  Used by the vectorize
     /// pass to fuse stores with interleaved computation: collect the stored
-    /// values, emit a Pack op, then emit a single VectorStore referencing it.
+    /// values, emit a Pack op, then emit a single `VectorStore` referencing it.
     ///
     /// The MSL emitter lowers this to a vector constructor: `float4(v0, v1, v2, v3)`.
     #[result_custom]
@@ -918,7 +933,7 @@ pub enum Op {
     /// Bypasses the per-lane scatter of repeated `simdgroup_elem_store(
     /// frag, idx, threadgroup_load(...))`, which suffers TG-bank conflicts
     /// at f16 stride geometries (see `qmm_mma_ftrans_report.md` §7).
-    /// `offset` is a ValueId computing the starting element offset of the
+    /// `offset` is a `ValueId` computing the starting element offset of the
     /// fragment's top-left corner inside the named TG array. `stride` is
     /// the row stride in elements (const). `transpose=true` swaps the row
     /// and column dimensions of the loaded fragment — used to load a B
@@ -953,13 +968,13 @@ pub enum Op {
         c: ValueId,
     },
 
-    /// Built-in: returns the SIMD lane index (thread_index_in_simdgroup).
+    /// Built-in: returns the SIMD lane index (`thread_index_in_simdgroup`).
     #[needs_simd_lane]
     #[result_u32]
     #[shape_op]
     SimdLaneId,
 
-    /// Built-in: returns the SIMD group index (simdgroup_index_in_threadgroup).
+    /// Built-in: returns the SIMD group index (`simdgroup_index_in_threadgroup`).
     #[needs_simd_group]
     #[result_u32]
     #[shape_op]
@@ -978,7 +993,7 @@ pub enum Op {
     },
 
     /// SIMD-group broadcast: every lane receives the value held by the
-    /// specified `lane` (a u32 index 0..simd_size). Maps to
+    /// specified `lane` (a u32 index `0..simd_size`). Maps to
     /// `simd_broadcast(v, lane)` (Metal 2.1+). Cooperative codebook hoist
     /// in AURA score/value kernels uses this to share one lane's loaded
     /// codebook word across the group.
@@ -1080,7 +1095,7 @@ pub enum Op {
 
     /// Declare a mutable register-local scalar variable.
     /// Emits: `auto __ml_{name} = {init_value};`
-    /// Used for loop-carried state (running prefix, best_val/best_idx, etc.).
+    /// Used for loop-carried state (running prefix, `best_val/best_idx`, etc.).
     #[unpredictable]
     #[result_custom]
     DeclareLocal {
@@ -1160,7 +1175,7 @@ pub enum Op {
         /// When `true`, A and B are passed as direct `metal::tensor` views instead of
         /// cooperative tensors (required when M ∉ {16, 32}, e.g. M=8).
         /// The setup emits `using {name}_tA_t` / `{name}_tB_t` type aliases and only
-        /// `{name}_ct_c` (no ct_a/ct_b).
+        /// `{name}_ct_c` (no `ct_a/ct_b`).
         direct_inputs: bool,
         /// Address space for the A type alias when `direct_inputs = true`.
         a_is_tg: bool,
@@ -1281,18 +1296,18 @@ pub enum CoopTileAccMode {
 /// `tgid_y`, `tgid_z`, `lsize`, `simd_lane`, `simd_group`, `n_simd`).
 /// Each mode emits a different subset of those:
 ///
-/// | mode         | tid | tgid_x | tgid_y | tgid_z | lsize | simd_lane | simd_group |
+/// | mode         | tid | `tgid_x` | `tgid_y` | `tgid_z` | lsize | `simd_lane` | `simd_group` |
 /// |--------------|:---:|:------:|:------:|:------:|:-----:|:---------:|:----------:|
 /// | Elementwise  |  ✓  |        |        |        |       |           |            |
 /// | Reduction    |  ✓  |   ✓    |   ✓ †  |        |   ✓   |           |            |
-/// | Grid3D       |  ✓  |        |        |        |       |           |            |
-/// | Tile2D       |  ✓  |   ✓    |   ✓    |        |       |           |            |
-/// | SimdGroup2D  |     |   ✓    |   ✓    |   ✓    |       |     ✓     |     ✓      |
+/// | `Grid3D`       |  ✓  |        |        |        |       |           |            |
+/// | `Tile2D`       |  ✓  |   ✓    |   ✓    |        |       |           |            |
+/// | `SimdGroup2D`  |     |   ✓    |   ✓    |   ✓    |       |     ✓     |     ✓      |
 ///
 /// † Reduction emits `tgid_y` only when the kernel actually references
 /// axis 1 (avoids `-Wunused-variable`). Reduction does **not** emit
 /// `tgid_z` — kernels needing 3-axis grid + simdgroup primitives must
-/// use SimdGroup2D.
+/// use `SimdGroup2D`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KernelMode {
     /// `uint tid [[thread_position_in_grid]]`
@@ -1300,7 +1315,7 @@ pub enum KernelMode {
     #[default]
     Elementwise,
     /// `uint3 _tid3/tgid3/lsize3` with `.x`/`.y` aliases injected.
-    /// Used for row-reduction kernels (softmax, rms_norm, layer_norm, …).
+    /// Used for row-reduction kernels (softmax, `rms_norm`, `layer_norm`, …).
     Reduction,
     /// `uint3 gid [[thread_position_in_grid]]`
     /// Used for 3-axis grid kernels (rope).
@@ -1319,11 +1334,11 @@ pub enum KernelMode {
 impl fmt::Display for KernelMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            KernelMode::Elementwise => "Elementwise",
-            KernelMode::Reduction => "Reduction",
-            KernelMode::Grid3D => "Grid3D",
-            KernelMode::Tile2D => "Tile2D",
-            KernelMode::SimdGroup2D => "SimdGroup",
+            Self::Elementwise => "Elementwise",
+            Self::Reduction => "Reduction",
+            Self::Grid3D => "Grid3D",
+            Self::Tile2D => "Tile2D",
+            Self::SimdGroup2D => "SimdGroup",
         })
     }
 }
@@ -1347,8 +1362,9 @@ pub struct Block {
 }
 
 impl Block {
-    pub fn new(id: BlockId) -> Self {
-        Block { id, ops: Vec::new(), results: Vec::new(), names: BTreeMap::new() }
+    #[must_use]
+    pub const fn new(id: BlockId) -> Self {
+        Self { id, ops: Vec::new(), results: Vec::new(), names: BTreeMap::new() }
     }
 
     /// Push an op that produces a value.
@@ -1386,8 +1402,8 @@ pub struct Kernel {
     pub blocks: FxHashMap<BlockId, Block>,
     /// Return shapes — for each output tensor, the shape of the written region.
     pub return_shapes: Vec<Shape>,
-    /// Tile schedule annotations set by SchedulePass.
-    /// Keys are ValueId of Dot ops; values are (tile_m, tile_n, tile_k).
+    /// Tile schedule annotations set by `SchedulePass`.
+    /// Keys are `ValueId` of Dot ops; values are (`tile_m`, `tile_n`, `tile_k`).
     pub tile_annotations: FxHashMap<ValueId, (u32, u32, u32)>,
     /// Per-kernel opt-in for the MFA-style f32→bf16 reinterpret cast.
     /// Overrides `MslConfig::bfloat_reinterpret_cast` when set true:
@@ -1418,7 +1434,7 @@ impl Kernel {
         let mut blocks = FxHashMap::default();
         blocks.insert(BlockId::new(0), body.clone());
 
-        Kernel {
+        Self {
             name: name.into(),
             mode: KernelMode::default(),
             params: Vec::new(),
@@ -1447,6 +1463,7 @@ impl Kernel {
     pub fn sync_entry_block(&mut self) { self.blocks.insert(self.body.id, self.body.clone()); }
 
     /// Get a block by ID.
+    #[must_use]
     pub fn get_block(&self, id: BlockId) -> Option<&Block> {
         if id == self.body.id {
             return Some(&self.body);
@@ -1467,7 +1484,7 @@ impl Clone for Kernel {
     fn clone(&self) -> Self {
         let mut blocks = self.blocks.clone();
         blocks.insert(self.body.id, self.body.clone());
-        Kernel {
+        Self {
             name: self.name.clone(),
             mode: self.mode,
             params: self.params.clone(),
@@ -1545,18 +1562,20 @@ impl Op {
     // -----------------------------------------------------------------------
 
     /// Returns the constant integer value if this is `Op::Const`.
-    pub fn as_const(&self) -> Option<i64> {
-        if let Op::Const { value } = self { Some(*value) } else { None }
+    #[must_use]
+    pub const fn as_const(&self) -> Option<i64> {
+        if let Self::Const { value } = self { Some(*value) } else { None }
     }
 
     /// Returns a mutable reference to the constant value if this is `Op::Const`.
-    pub fn as_const_mut(&mut self) -> Option<&mut i64> {
-        if let Op::Const { value } = self { Some(value) } else { None }
+    pub const fn as_const_mut(&mut self) -> Option<&mut i64> {
+        if let Self::Const { value } = self { Some(value) } else { None }
     }
 
     /// Returns `(var, start, end, step, body)` if this is `Op::Loop`.
-    pub fn as_loop(&self) -> Option<(VarId, ValueId, ValueId, ValueId, BlockId)> {
-        if let Op::Loop { var, start, end, step, body } = self {
+    #[must_use]
+    pub const fn as_loop(&self) -> Option<(VarId, ValueId, ValueId, ValueId, BlockId)> {
+        if let Self::Loop { var, start, end, step, body } = self {
             Some((*var, *start, *end, *step, *body))
         } else {
             None
@@ -1564,8 +1583,9 @@ impl Op {
     }
 
     /// Returns `(cond, then_block, else_block)` if this is `Op::If`.
-    pub fn as_if(&self) -> Option<(ValueId, BlockId, Option<BlockId>)> {
-        if let Op::If { cond, then_block, else_block } = self {
+    #[must_use]
+    pub const fn as_if(&self) -> Option<(ValueId, BlockId, Option<BlockId>)> {
+        if let Self::If { cond, then_block, else_block } = self {
             Some((*cond, *then_block, *else_block))
         } else {
             None
@@ -1573,52 +1593,58 @@ impl Op {
     }
 
     /// Returns the axis if this is `Op::ProgramId`.
-    pub fn program_id_axis(&self) -> Option<u32> {
-        if let Op::ProgramId { axis } = self { Some(*axis) } else { None }
+    #[must_use]
+    pub const fn program_id_axis(&self) -> Option<u32> {
+        if let Self::ProgramId { axis } = self { Some(*axis) } else { None }
     }
 
     /// Returns the destination buffer name for any store op
     /// (`Store`, `VectorStore`, `StrideStore`, `ThreadgroupStore`).
+    #[must_use]
     pub fn store_dst(&self) -> Option<&str> {
         match self {
-            Op::Store { dst, .. } | Op::VectorStore { dst, .. } | Op::StrideStore { dst, .. } =>
+            Self::Store { dst, .. } | Self::VectorStore { dst, .. } | Self::StrideStore { dst, .. } =>
                 Some(dst),
-            Op::ThreadgroupStore { name, .. } => Some(name),
+            Self::ThreadgroupStore { name, .. } => Some(name),
             _ => None,
         }
     }
 
     /// Returns the source buffer name for any load op
     /// (`Load`, `VectorLoad`, `ThreadgroupLoad`).
+    #[must_use]
     pub fn load_src(&self) -> Option<&str> {
         match self {
-            Op::Load { src, .. } | Op::VectorLoad { src, .. } => Some(src),
-            Op::ThreadgroupLoad { name, .. } => Some(name),
+            Self::Load { src, .. } | Self::VectorLoad { src, .. } => Some(src),
+            Self::ThreadgroupLoad { name, .. } => Some(name),
             _ => None,
         }
     }
 
     /// Returns the load indices slice if this is `Op::Load`; empty slice otherwise.
+    #[must_use]
     pub fn load_indices(&self) -> &[IndexExpr] {
-        if let Op::Load { indices, .. } = self { indices } else { &[] }
+        if let Self::Load { indices, .. } = self { indices } else { &[] }
     }
 
     /// True if this `Store` carries a predicate mask (may-write semantics).
-    pub fn has_store_mask(&self) -> bool { matches!(self, Op::Store { mask: Some(_), .. }) }
+    #[must_use]
+    pub const fn has_store_mask(&self) -> bool { matches!(self, Self::Store { mask: Some(_), .. }) }
 
     /// Returns the sub-ops if this is `Op::FusedElementwise`.
-    pub fn fused_ops(&self) -> Option<&[Op]> {
-        if let Op::FusedElementwise { ops } = self { Some(ops) } else { None }
+    #[must_use]
+    pub fn fused_ops(&self) -> Option<&[Self]> {
+        if let Self::FusedElementwise { ops } = self { Some(ops) } else { None }
     }
 
     /// Returns the sub-ops mutably if this is `Op::FusedElementwise`.
-    pub fn fused_ops_mut(&mut self) -> Option<&mut Vec<Op>> {
-        if let Op::FusedElementwise { ops } = self { Some(ops) } else { None }
+    pub const fn fused_ops_mut(&mut self) -> Option<&mut Vec<Self>> {
+        if let Self::FusedElementwise { ops } = self { Some(ops) } else { None }
     }
 
     /// Returns `(name, &mut size)` if this is `Op::ThreadgroupAlloc`.
-    pub fn as_threadgroup_alloc_mut(&mut self) -> Option<(&str, &mut u32)> {
-        if let Op::ThreadgroupAlloc { name, size, .. } = self {
+    pub const fn as_threadgroup_alloc_mut(&mut self) -> Option<(&str, &mut u32)> {
+        if let Self::ThreadgroupAlloc { name, size, .. } = self {
             Some((name.as_str(), size))
         } else {
             None
@@ -1634,14 +1660,14 @@ impl Op {
     /// Write a compact IR representation of this op.
     fn fmt_ir(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Op::ProgramId { axis } => write!(f, "ProgramId(axis={axis})"),
-            Op::Const { value } => write!(f, "Const({value})"),
-            Op::Arange { start, step, len } => {
+            Self::ProgramId { axis } => write!(f, "ProgramId(axis={axis})"),
+            Self::Const { value } => write!(f, "Const({value})"),
+            Self::Arange { start, step, len } => {
                 let s = start.map_or("0.0".into(), |v| format!("{v}"));
                 let st = step.map_or("1.0".into(), |v| format!("{v}"));
                 write!(f, "Arange(start={s}, step={st}, len={len:?})")
             },
-            Op::Load { src, indices, mask, other } => {
+            Self::Load { src, indices, mask, other } => {
                 let idx_str: Vec<String> = indices.iter().map(fmt_index).collect();
                 write!(f, "Load({src}, [{}]", idx_str.join(", "))?;
                 if let Some(m) = mask {
@@ -1652,7 +1678,7 @@ impl Op {
                 }
                 write!(f, ")")
             },
-            Op::Store { dst, indices, value, mask } => {
+            Self::Store { dst, indices, value, mask } => {
                 let idx_str: Vec<String> = indices.iter().map(fmt_index).collect();
                 write!(f, "Store({dst}, v{}, [{}]", value.as_u32(), idx_str.join(", "))?;
                 if let Some(m) = mask {
@@ -1660,14 +1686,14 @@ impl Op {
                 }
                 write!(f, ")")
             },
-            Op::BinOp { op, lhs, rhs } => {
+            Self::BinOp { op, lhs, rhs } => {
                 write!(f, "BinOp({op:?}, v{}, v{})", lhs.as_u32(), rhs.as_u32())
             },
-            Op::Dot { a, b } => write!(f, "Dot(v{}, v{})", a.as_u32(), b.as_u32()),
-            Op::Reduce { value, axis, op } => {
+            Self::Dot { a, b } => write!(f, "Dot(v{}, v{})", a.as_u32(), b.as_u32()),
+            Self::Reduce { value, axis, op } => {
                 write!(f, "Reduce({op:?}, axis={axis}, v{})", value.as_u32())
             },
-            Op::StrideReduce {
+            Self::StrideReduce {
                 src,
                 offset,
                 stride,
@@ -1696,8 +1722,8 @@ impl Op {
                 }
                 write!(f, ")")
             },
-            Op::Cast { value, dtype } => write!(f, "Cast(v{}, {dtype:?})", value.as_u32()),
-            Op::Loop { var, start, end, step, body } => {
+            Self::Cast { value, dtype } => write!(f, "Cast(v{}, {dtype:?})", value.as_u32()),
+            Self::Loop { var, start, end, step, body } => {
                 write!(
                     f,
                     "Loop(var{}, v{}..v{}, step=v{}, body=b{})",
@@ -1708,29 +1734,29 @@ impl Op {
                     body.as_u32()
                 )
             },
-            Op::If { cond, then_block, else_block } => {
+            Self::If { cond, then_block, else_block } => {
                 write!(f, "If(v{}, b{}", cond.as_u32(), then_block.as_u32())?;
                 if let Some(eb) = else_block {
                     write!(f, ", b{}", eb.as_u32())?;
                 }
                 write!(f, ")")
             },
-            Op::Zeros { dtype, shape } => write!(f, "Zeros({dtype:?}, {shape:?})"),
-            Op::Transpose { value } => write!(f, "Transpose(v{})", value.as_u32()),
-            Op::ExpandDims { value, axis } => {
+            Self::Zeros { dtype, shape } => write!(f, "Zeros({dtype:?}, {shape:?})"),
+            Self::Transpose { value } => write!(f, "Transpose(v{})", value.as_u32()),
+            Self::ExpandDims { value, axis } => {
                 write!(f, "ExpandDims(v{}, axis={axis})", value.as_u32())
             },
-            Op::Reshape { value, shape } => write!(f, "Reshape(v{}, {shape:?})", value.as_u32()),
-            Op::Cat { values, axis } => {
+            Self::Reshape { value, shape } => write!(f, "Reshape(v{}, {shape:?})", value.as_u32()),
+            Self::Cat { values, axis } => {
                 let vals: Vec<String> = values.iter().map(|v| format!("v{}", v.as_u32())).collect();
                 write!(f, "Cat([{}], axis={axis})", vals.join(", "))
             },
-            Op::Slice { value, ranges } => {
+            Self::Slice { value, ranges } => {
                 let r: Vec<String> =
                     ranges.iter().map(|(a, s, l)| format!("dim{a}[{s}..{s}+{l}]")).collect();
                 write!(f, "Slice(v{}, [{}])", value.as_u32(), r.join(", "))
             },
-            Op::InlineMsl { source, inputs, outputs } => {
+            Self::InlineMsl { source, inputs, outputs } => {
                 write!(
                     f,
                     "InlineMsl(\"{}\", inputs=[{}], outputs={})",
@@ -1743,7 +1769,7 @@ impl Op {
                     outputs.len()
                 )
             },
-            Op::CoopTileSetup {
+            Self::CoopTileSetup {
                 name,
                 m,
                 n,
@@ -1763,22 +1789,22 @@ impl Op {
                     "CoopTileSetup({name}, {m}×{n}×{k}, ta={ta} tb={tb} tc={tc}, acc={acc_mode:?}, scope={exec_scope:?}, T={act_dtype:?}, acc={acc_dtype:?}, direct={direct_inputs})"
                 )
             },
-            Op::CoopTileZero { name } => write!(f, "CoopTileZero({name})"),
-            Op::CoopTileLoadA { name, ptr_name, ei, eo, direct, .. } => {
+            Self::CoopTileZero { name } => write!(f, "CoopTileZero({name})"),
+            Self::CoopTileLoadA { name, ptr_name, ei, eo, direct, .. } => {
                 write!(f, "CoopTileLoadA({name}, {ptr_name}, extents<{ei},{eo}>, direct={direct})")
             },
-            Op::CoopTileLoadB { name, ptr_name, ei, eo, direct, .. } => {
+            Self::CoopTileLoadB { name, ptr_name, ei, eo, direct, .. } => {
                 write!(f, "CoopTileLoadB({name}, {ptr_name}, extents<{ei},{eo}>, direct={direct})")
             },
-            Op::CoopTileRun { name, direct } => write!(f, "CoopTileRun({name}, direct={direct})"),
-            Op::CoopTileStoreC { name, ptr_name, ei, eo, .. } => {
+            Self::CoopTileRun { name, direct } => write!(f, "CoopTileRun({name}, direct={direct})"),
+            Self::CoopTileStoreC { name, ptr_name, ei, eo, .. } => {
                 write!(f, "CoopTileStoreC({name}, {ptr_name}, extents<{ei},{eo}>)")
             },
-            Op::UnaryOp { op, value } => write!(f, "UnaryOp({op:?}, v{})", value.as_u32()),
-            Op::Activation { kind, value } => {
+            Self::UnaryOp { op, value } => write!(f, "UnaryOp({op:?}, v{})", value.as_u32()),
+            Self::Activation { kind, value } => {
                 write!(f, "Activation({kind:?}, v{})", value.as_u32())
             },
-            Op::Select { cond, on_true, on_false } => {
+            Self::Select { cond, on_true, on_false } => {
                 write!(
                     f,
                     "Select(v{}, v{}, v{})",
@@ -1787,11 +1813,11 @@ impl Op {
                     on_false.as_u32()
                 )
             },
-            Op::Broadcast { value, shape } => {
+            Self::Broadcast { value, shape } => {
                 write!(f, "Broadcast(v{}, {shape:?})", value.as_u32())
             },
-            Op::Splat { value, dtype, shape } => write!(f, "Splat({value}, {dtype:?}, {shape:?})"),
-            Op::FusedElementwise { ops } => {
+            Self::Splat { value, dtype, shape } => write!(f, "Splat({value}, {dtype:?}, {shape:?})"),
+            Self::FusedElementwise { ops } => {
                 write!(f, "FusedElementwise([")?;
                 for (i, op) in ops.iter().enumerate() {
                     if i > 0 {
@@ -1801,10 +1827,10 @@ impl Op {
                 }
                 write!(f, "])")
             },
-            Op::VectorLoad { src, byte_offset, len } => {
+            Self::VectorLoad { src, byte_offset, len } => {
                 write!(f, "VectorLoad({src}, offset=v{}, len={len})", byte_offset.as_u32())
             },
-            Op::VectorStore { dst, byte_offset, len, value } => {
+            Self::VectorStore { dst, byte_offset, len, value } => {
                 write!(
                     f,
                     "VectorStore({dst}, offset=v{}, len={len}, v{})",
@@ -1812,21 +1838,21 @@ impl Op {
                     value.as_u32()
                 )
             },
-            Op::VectorExtract { vec, lane } => {
+            Self::VectorExtract { vec, lane } => {
                 write!(f, "VectorExtract(v{}, lane={lane})", vec.as_u32())
             },
-            Op::Pack { elements, .. } => {
+            Self::Pack { elements, .. } => {
                 let ids: Vec<String> =
                     elements.iter().map(|v| format!("v{}", v.as_u32())).collect();
                 write!(f, "Pack({})", ids.join(", "))
             },
-            Op::Gather { src, indices, axis } => {
+            Self::Gather { src, indices, axis } => {
                 write!(f, "Gather({src}, v{}, axis={axis})", indices.as_u32())
             },
-            Op::Scatter { dst, indices, value, axis } => {
+            Self::Scatter { dst, indices, value, axis } => {
                 write!(f, "Scatter({dst}, v{}, v{}, axis={axis})", indices.as_u32(), value.as_u32())
             },
-            Op::Atomic { op, scope, dst, index, value } => {
+            Self::Atomic { op, scope, dst, index, value } => {
                 write!(
                     f,
                     "Atomic({op:?}, scope={scope:?}, {dst}, v{}, v{})",
@@ -1834,14 +1860,14 @@ impl Op {
                     value.as_u32()
                 )
             },
-            Op::Scan { value, axis, op, exclusive } => {
+            Self::Scan { value, axis, op, exclusive } => {
                 write!(
                     f,
                     "Scan(v{}, axis={axis}, op={op:?}, exclusive={exclusive})",
                     value.as_u32()
                 )
             },
-            Op::StrideScan { src, dst, offset, end, op } => {
+            Self::StrideScan { src, dst, offset, end, op } => {
                 write!(
                     f,
                     "StrideScan({src}->{dst}, v{}..v{}, op={op:?})",
@@ -1849,7 +1875,7 @@ impl Op {
                     end.as_u32()
                 )
             },
-            Op::KernelCall { callee, args, dtype } => {
+            Self::KernelCall { callee, args, dtype } => {
                 let args_str = args
                     .iter()
                     .map(|a| match a {
@@ -1860,7 +1886,7 @@ impl Op {
                     .join(", ");
                 write!(f, "KernelCall(\"{callee}\", args=[{args_str}], dtype={dtype:?})")
             },
-            Op::StrideArgReduce { src, offset, end, op } => {
+            Self::StrideArgReduce { src, offset, end, op } => {
                 write!(
                     f,
                     "StrideArgReduce({src}, v{}..v{}, op={op:?})",
@@ -1868,7 +1894,7 @@ impl Op {
                     end.as_u32()
                 )
             },
-            Op::StrideStore { src, dst, offset, end, scalar, aux_src } => {
+            Self::StrideStore { src, dst, offset, end, scalar, aux_src } => {
                 write!(
                     f,
                     "StrideStore({src}->{dst}, v{}..v{}, scalar=v{}",
@@ -1881,52 +1907,52 @@ impl Op {
                 }
                 write!(f, ")")
             },
-            Op::SimdReduce { value, op } => write!(f, "SimdReduce(v{}, {op:?})", value.as_u32()),
-            Op::SimdShuffleXor { value, mask } => {
+            Self::SimdReduce { value, op } => write!(f, "SimdReduce(v{}, {op:?})", value.as_u32()),
+            Self::SimdShuffleXor { value, mask } => {
                 write!(f, "SimdShuffleXor(v{}, mask={mask})", value.as_u32())
             },
-            Op::SimdBroadcast { value, lane } => {
+            Self::SimdBroadcast { value, lane } => {
                 write!(f, "SimdBroadcast(v{}, lane=v{})", value.as_u32(), lane.as_u32())
             },
-            Op::StackAlloc { dtype, size, name } => {
+            Self::StackAlloc { dtype, size, name } => {
                 write!(f, "StackAlloc({dtype:?}, {size}, {name})")
             },
-            Op::StackLoad { name, index } => {
+            Self::StackLoad { name, index } => {
                 write!(f, "StackLoad({name}, v{})", index.as_u32())
             },
-            Op::StackStore { name, index, value } => {
+            Self::StackStore { name, index, value } => {
                 write!(f, "StackStore({name}, v{}, v{})", index.as_u32(), value.as_u32())
             },
-            Op::ThreadgroupAlloc { dtype, size, name } => {
+            Self::ThreadgroupAlloc { dtype, size, name } => {
                 write!(f, "ThreadgroupAlloc({dtype:?}, {size}, {name})")
             },
-            Op::ThreadgroupLoad { name, index } => {
+            Self::ThreadgroupLoad { name, index } => {
                 write!(f, "ThreadgroupLoad({name}, v{})", index.as_u32())
             },
-            Op::ThreadgroupStore { name, index, value } => {
+            Self::ThreadgroupStore { name, index, value } => {
                 write!(f, "ThreadgroupStore({name}, v{}, v{})", index.as_u32(), value.as_u32())
             },
-            Op::Barrier => write!(f, "Barrier"),
-            Op::SimdgroupBarrier => write!(f, "SimdgroupBarrier"),
-            Op::DeclareLocal { name, value } => {
+            Self::Barrier => write!(f, "Barrier"),
+            Self::SimdgroupBarrier => write!(f, "SimdgroupBarrier"),
+            Self::DeclareLocal { name, value } => {
                 write!(f, "DeclareLocal({name}, v{})", value.as_u32())
             },
-            Op::SetLocal { name, value } => {
+            Self::SetLocal { name, value } => {
                 write!(f, "SetLocal({name}, v{})", value.as_u32())
             },
-            Op::ArgReduce { value, axis, op } => {
+            Self::ArgReduce { value, axis, op } => {
                 write!(f, "ArgReduce(v{}, axis={axis}, {op:?})", value.as_u32())
             },
-            Op::SimdgroupAlloc { dtype, m, n } => {
+            Self::SimdgroupAlloc { dtype, m, n } => {
                 write!(f, "SimdgroupAlloc({dtype:?}, {m}×{n})")
             },
-            Op::SimdgroupElemLoad { value, index } => {
+            Self::SimdgroupElemLoad { value, index } => {
                 write!(f, "SimdgroupElemLoad(v{}, [{index}])", value.as_u32())
             },
-            Op::SimdgroupElemStore { value, index, data } => {
+            Self::SimdgroupElemStore { value, index, data } => {
                 write!(f, "SimdgroupElemStore(v{}, [{index}], v{})", value.as_u32(), data.as_u32())
             },
-            Op::SimdgroupLoad { dest, tg, offset, stride, transpose } => {
+            Self::SimdgroupLoad { dest, tg, offset, stride, transpose } => {
                 write!(
                     f,
                     "SimdgroupLoad(v{}, {tg}, off=v{}, stride={stride}, transpose={transpose})",
@@ -1934,12 +1960,12 @@ impl Op {
                     offset.as_u32()
                 )
             },
-            Op::SimdgroupMatMul { a, b, c } => {
+            Self::SimdgroupMatMul { a, b, c } => {
                 write!(f, "SimdgroupMatMul(v{}, v{}, v{})", a.as_u32(), b.as_u32(), c.as_u32())
             },
-            Op::SimdLaneId => write!(f, "SimdLaneId"),
-            Op::SimdGroupId => write!(f, "SimdGroupId"),
-            Op::SimdScan { value, op, exclusive } => {
+            Self::SimdLaneId => write!(f, "SimdLaneId"),
+            Self::SimdGroupId => write!(f, "SimdGroupId"),
+            Self::SimdScan { value, op, exclusive } => {
                 write!(f, "SimdScan(v{}, {op:?}, exclusive={exclusive})", value.as_u32())
             },
         }

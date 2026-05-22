@@ -1,4 +1,4 @@
-//! Operator Fusion — merge adjacent elementwise operations into FusedElementwise.
+//! Operator Fusion — merge adjacent elementwise operations into `FusedElementwise`.
 //!
 //! Fuses chains of elementwise ops (arithmetic, activation, cast) where each
 //! intermediate result has exactly one consumer.  The fused chain is emitted as
@@ -9,7 +9,7 @@
 //! stencil and deep-learning compilers (Halide, TVM, XLA).
 //!
 //! ## Algorithm
-//! 1. Build def-use graph: for each ValueId, which op indices use it?
+//! 1. Build def-use graph: for each `ValueId`, which op indices use it?
 //! 2. Find chains where each op produces a value used only by the next op.
 //! 3. Create an `Op::FusedElementwise` containing the whole chain.
 //! 4. Replace the original ops; the MSL emitter then emits a single expression.
@@ -28,10 +28,10 @@
 //! - Chen, Moreau, Jiang et al. (2018), "TVM: An Automated End-to-End
 //!   Optimizing Compiler for Deep Learning", OSDI 2018.  Operator fusion
 //!   in the deep-learning compiler context.
-//!   https://arxiv.org/abs/1802.04799
+//!   <https://arxiv.org/abs/1802.04799>
 //! - Google (2017), "XLA: Optimizing Compiler for Machine Learning",
 //!   TensorFlow blog.  Production operator fusion for ML workloads.
-//!   https://developers.googleblog.com/xla-tensorflow-compiled/
+//!   <https://developers.googleblog.com/xla-tensorflow-compiled>/
 
 use std::collections::BTreeSet;
 
@@ -41,7 +41,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::remap::op_value_refs;
 use crate::error::{Error, Result};
 
-/// Mask for encoding internal sub-op references within FusedElementwise chains.
+/// Mask for encoding internal sub-op references within `FusedElementwise` chains.
 pub const SUB_OP_FLAG: u32 = 0x8000_0000;
 
 /// Tag for loop-variable `ValueId`s (`emit_block` encodes a loop var as
@@ -52,18 +52,20 @@ pub const LOOP_VAR_FLAG: u32 = 0xC000_0000;
 
 /// True when `raw` is a genuine fused-chain sub-op reference — the top bit
 /// set, but not the loop-var pattern (`0xC000_0000`).
-pub fn is_sub_op_ref(raw: u32) -> bool {
+#[must_use]
+pub const fn is_sub_op_ref(raw: u32) -> bool {
     raw & SUB_OP_FLAG != 0 && raw & LOOP_VAR_FLAG != LOOP_VAR_FLAG
 }
 
-/// Create a ValueId that references the result of sub-op at position `idx`
-/// within a FusedElementwise chain.
-pub fn sub_op_ref(idx: usize) -> ValueId { ValueId::new(SUB_OP_FLAG | idx as u32) }
+/// Create a `ValueId` that references the result of sub-op at position `idx`
+/// within a `FusedElementwise` chain.
+#[must_use]
+pub const fn sub_op_ref(idx: usize) -> ValueId { ValueId::new(SUB_OP_FLAG | idx as u32) }
 
 pub struct FusionPass;
 
 impl super::Pass for FusionPass {
-    fn name(&self) -> &str { "fusion" }
+    fn name(&self) -> &'static str { "fusion" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
         let mut total_chains = 0usize;
@@ -181,7 +183,7 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) -> Result<()> {
             {
                 break;
             }
-            let use_count = uses.get(&prev_result).map(|v| v.len()).unwrap_or(0);
+            let use_count = uses.get(&prev_result).map_or(0, std::vec::Vec::len);
             if use_count != 1 || pinned.contains(&prev_result) {
                 break;
             }
@@ -295,11 +297,11 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) -> Result<()> {
 /// Returns true if the op is an elementwise op that can participate in fusion.
 fn is_fusible(op: &Op) -> bool { op.is_elementwise() }
 
-/// Return the first ValueId input of an op (used to trace the chain backward).
+/// Return the first `ValueId` input of an op (used to trace the chain backward).
 fn first_value_input(op: &Op) -> Option<ValueId> { op.value_refs().first().map(|v| **v) }
 
-/// Build a sub-op for a FusedElementwise chain.
-/// Rewrites ValueId references: external ValueIds stay as-is, internal
+/// Build a sub-op for a `FusedElementwise` chain.
+/// Rewrites `ValueId` references: external `ValueIds` stay as-is, internal
 /// (to the chain) references are encoded with `sub_op_ref(relative_idx)`.
 fn build_fused_sub_op(
     idx: usize,

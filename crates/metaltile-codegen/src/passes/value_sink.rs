@@ -8,7 +8,7 @@
 //!
 //! ## Why It Matters
 //!
-//! MetalTile emits MSL source with `auto` variables.  The Metal compiler
+//! `MetalTile` emits MSL source with `auto` variables.  The Metal compiler
 //! handles register allocation, but shorter live ranges in the IR correlate
 //! with lower register pressure in the generated code.  On M3+, the OMU can
 //! exploit lower register pressure for higher occupancy.
@@ -16,7 +16,7 @@
 //! ## Algorithm
 //!
 //! Block-local single-use sinking:
-//! 1. Compute use-counts for each ValueId.
+//! 1. Compute use-counts for each `ValueId`.
 //! 2. For each cheap-ALU op with exactly one use, find its use position.
 //! 3. If the use is farther than 1 position away and no barrier separates
 //!    them, sink the definition to just before the use.
@@ -24,8 +24,8 @@
 //!
 //! ## Safety
 //!
-//! - Only cheap ALU ops are sunk (BinOp, UnaryOp, Cast, Select, Const,
-//!   ProgramId).
+//! - Only cheap ALU ops are sunk (`BinOp`, `UnaryOp`, Cast, Select, Const,
+//!   `ProgramId`).
 //! - Ops with side effects are never moved.
 //! - Ops are never sunk across a Barrier.
 //! - Ops are never sunk across block boundaries (Phase 1 is block-local).
@@ -47,7 +47,7 @@ use crate::error::{Error, Result};
 pub struct ValueSinkPass;
 
 impl super::Pass for ValueSinkPass {
-    fn name(&self) -> &str { "value_sink" }
+    fn name(&self) -> &'static str { "value_sink" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
         // Block-local sinking, with use-counts computed across ALL blocks

@@ -38,7 +38,7 @@ pub struct ScheduleConfig {
 
 impl Default for ScheduleConfig {
     fn default() -> Self {
-        ScheduleConfig {
+        Self {
             threads_per_threadgroup: (256, 1, 1),
             threadgroups_per_grid: (1, 1, 1),
             tile_dims: (32, 32, 16),
@@ -52,15 +52,16 @@ pub struct SchedulePass {
 }
 
 impl SchedulePass {
-    pub fn new(config: ScheduleConfig) -> Self { SchedulePass { config } }
+    #[must_use]
+    pub const fn new(config: ScheduleConfig) -> Self { Self { config } }
 }
 
 impl Default for SchedulePass {
-    fn default() -> Self { SchedulePass::new(ScheduleConfig::default()) }
+    fn default() -> Self { Self::new(ScheduleConfig::default()) }
 }
 
 impl super::Pass for SchedulePass {
-    fn name(&self) -> &str { "schedule" }
+    fn name(&self) -> &'static str { "schedule" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
         kernel.tile_annotations.clear();

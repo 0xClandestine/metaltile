@@ -18,8 +18,8 @@
 //!
 //! 1. Block-local fold: scan each op; if all operands are Const, evaluate.
 //! 2. Identity elimination: replace identity-binop with its non-trivial operand.
-//! 3. Cross-block liveness: collect all ValueId uses across the entire kernel;
-//!    any ValueId defined in a block but never used is dead.
+//! 3. Cross-block liveness: collect all `ValueId` uses across the entire kernel;
+//!    any `ValueId` defined in a block but never used is dead.
 //! 4. DCE: rebuild each block omitting dead ops, recurse into loop bodies.
 //!
 //! ## References
@@ -38,14 +38,15 @@ use crate::error::Result;
 pub struct ConstFoldPass;
 
 impl ConstFoldPass {
-    pub fn new() -> Self { ConstFoldPass }
+    #[must_use]
+    pub const fn new() -> Self { Self }
 }
 impl Default for ConstFoldPass {
-    fn default() -> Self { ConstFoldPass }
+    fn default() -> Self { Self }
 }
 
 impl super::Pass for ConstFoldPass {
-    fn name(&self) -> &str { "const_fold" }
+    fn name(&self) -> &'static str { "const_fold" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
         // Fold `kernel.body` (the entry block) AND every nested block.
@@ -154,7 +155,7 @@ fn fold_block(block: &mut Block) {
             Some(v) => v,
             None => continue,
         };
-        for op in block.ops.iter_mut() {
+        for op in &mut block.ops {
             replace_value_in_op(op, old_vid, replacement);
         }
     }
@@ -173,8 +174,8 @@ fn eval_binop(op: BinOpKind, a: i64, b: i64) -> Option<i64> {
             },
         BinOpKind::Max => Some(a.max(b)),
         BinOpKind::Min => Some(a.min(b)),
-        BinOpKind::And => Some((a != 0 && b != 0) as i64),
-        BinOpKind::Or => Some((a != 0 || b != 0) as i64),
+        BinOpKind::And => Some(i64::from(a != 0 && b != 0)),
+        BinOpKind::Or => Some(i64::from(a != 0 || b != 0)),
         BinOpKind::Xor => Some(a ^ b),
         BinOpKind::CmpLt
         | BinOpKind::CmpGt
@@ -240,7 +241,7 @@ fn dce_block(block: &mut Block, cross_block_refs: &BTreeSet<ValueId>) {
 }
 
 fn collect_uses(op: &Op, used: &mut BTreeSet<ValueId>) {
-    for &v in op.value_refs().iter() {
+    for &v in &op.value_refs() {
         used.insert(*v);
     }
 }

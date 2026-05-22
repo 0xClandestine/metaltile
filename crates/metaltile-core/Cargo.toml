@@ -9,6 +9,9 @@ description = "Core IR types and data structures for the MetalTile GPU kernel DS
 keywords = ["metal", "gpu", "apple-silicon", "compiler", "ir"]
 categories = ["compilers", "hardware-support"]
 
+[lints]
+workspace = true
+
 [dependencies]
 metaltile-macros.workspace = true
 thiserror.workspace = true

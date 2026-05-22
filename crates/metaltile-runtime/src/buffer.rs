@@ -1,6 +1,6 @@
 //! GPU buffer management: allocation, transfer, and lifetime tracking.
 //!
-//! Buffers wrap Metal's MTLBuffer with typed metadata and provide
+//! Buffers wrap Metal's `MTLBuffer` with typed metadata and provide
 //! Rust-native read/write for host↔device transfers.
 
 use metaltile_core::dtype::DType;
@@ -20,9 +20,10 @@ pub struct GpuBuffer {
 
 impl GpuBuffer {
     /// Create buffer metadata describing a tensor on the GPU.
+    #[must_use]
     pub fn new(shape: &[usize], dtype: DType) -> Self {
         let num_elements: usize = shape.iter().product();
-        GpuBuffer {
+        Self {
             dtype,
             shape: shape.to_vec(),
             num_elements,
@@ -31,7 +32,8 @@ impl GpuBuffer {
     }
 
     /// Rank of the tensor.
-    pub fn rank(&self) -> usize { self.shape.len() }
+    #[must_use]
+    pub const fn rank(&self) -> usize { self.shape.len() }
 }
 
 /// Host-side data ready for upload to GPU.
@@ -43,8 +45,9 @@ pub struct HostData {
 }
 
 impl HostData {
+    #[must_use]
     pub fn new(shape: &[usize], dtype: DType, data: Vec<u8>) -> Self {
-        HostData { dtype, shape: shape.to_vec(), data }
+        Self { dtype, shape: shape.to_vec(), data }
     }
 }
 

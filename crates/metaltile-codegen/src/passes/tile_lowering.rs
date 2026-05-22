@@ -5,13 +5,13 @@
 //! This pass validates the IR and attaches tile schedule metadata to the kernel.
 //!
 //! The tile schedule specifies: tile dimensions (M, N, K), threadgroup shape,
-//! and per-thread work distribution (rows_per_thread, cols_per_thread).
+//! and per-thread work distribution (`rows_per_thread`, `cols_per_thread`).
 //!
 //! ## References
 //! - Chen, Moreau, Jiang et al. (2018), "TVM: An Automated End-to-End
 //!   Optimizing Compiler for Deep Learning", OSDI 2018.
 //!   Tile-based schedule primitives for GPU code generation.
-//!   https://arxiv.org/abs/1802.04799
+//!   <https://arxiv.org/abs/1802.04799>
 //! - Bacon, Graham & Sharp (1994), "Compiler Transformations for High-
 //!   Performance Computing", ACM Computing Surveys 26(4):345–420.
 //!   Foundational survey of tiling transformations.
@@ -32,7 +32,7 @@ pub struct TileSchedule {
 
 impl Default for TileSchedule {
     fn default() -> Self {
-        TileSchedule {
+        Self {
             tile_m: 64,
             tile_n: 64,
             tile_k: 32,
@@ -49,15 +49,16 @@ pub struct TileLoweringPass {
 }
 
 impl TileLoweringPass {
-    pub fn new(#[allow(dead_code)] schedule: TileSchedule) -> Self { TileLoweringPass { schedule } }
+    #[must_use]
+    pub const fn new(#[allow(dead_code)] schedule: TileSchedule) -> Self { Self { schedule } }
 }
 
 impl Default for TileLoweringPass {
-    fn default() -> Self { TileLoweringPass::new(TileSchedule::default()) }
+    fn default() -> Self { Self::new(TileSchedule::default()) }
 }
 
 impl super::Pass for TileLoweringPass {
-    fn name(&self) -> &str { "tile_lowering" }
+    fn name(&self) -> &'static str { "tile_lowering" }
     fn run(&self, _kernel: &mut Kernel) -> Result<()> {
         // Lowering happens in MSL generator via emit_tiled.
         // This pass is a placeholder for future IR-level expansion.

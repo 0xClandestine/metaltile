@@ -32,7 +32,7 @@ type CoreResult<T> = metaltile_core::error::Result<T>;
 pub struct TypeCheckPass;
 
 impl super::Pass for TypeCheckPass {
-    fn name(&self) -> &str { "type_check" }
+    fn name(&self) -> &'static str { "type_check" }
 
     fn run(&self, kernel: &mut Kernel) -> crate::error::Result<()> {
         tracing::trace!("type_check pass");
@@ -339,9 +339,9 @@ pub fn infer_types(kernel: &Kernel) -> CoreResult<TypeEnv> {
     Ok(env)
 }
 
-/// Determine the result DType of a BinOp given its input DType.
+/// Determine the result `DType` of a `BinOp` given its input `DType`.
 /// Comparison ops always produce Bool regardless of input type.
-fn binop_result_dtype(op: BinOpKind, input_dtype: DType) -> DType {
+const fn binop_result_dtype(op: BinOpKind, input_dtype: DType) -> DType {
     match op {
         BinOpKind::CmpLt
         | BinOpKind::CmpGt
@@ -353,8 +353,8 @@ fn binop_result_dtype(op: BinOpKind, input_dtype: DType) -> DType {
     }
 }
 
-/// Extract the first input ValueId from a sub-op (for type propagation).
-fn first_input_shape(op: &Op) -> Option<ValueId> {
+/// Extract the first input `ValueId` from a sub-op (for type propagation).
+const fn first_input_shape(op: &Op) -> Option<ValueId> {
     match op {
         Op::Cast { value, .. }
         | Op::UnaryOp { value, .. }
@@ -446,7 +446,7 @@ fn infer_block(
             },
 
             Op::Broadcast { value: src_v, shape, .. } => {
-                let dtype = env.get(src_v).map(|tv| tv.dtype).unwrap_or(DType::F32);
+                let dtype = env.get(src_v).map_or(DType::F32, |tv| tv.dtype);
                 env.insert(vid, TypedValue { dtype, shape: shape.clone() });
             },
 
@@ -492,7 +492,7 @@ fn infer_block(
                 },
 
             Op::Cast { value, dtype } => {
-                let shape = env.get(value).map(|tv| tv.shape.clone()).unwrap_or(Shape::scalar());
+                let shape = env.get(value).map_or(Shape::scalar(), |tv| tv.shape.clone());
                 env.insert(vid, TypedValue { dtype: *dtype, shape });
             },
 
@@ -528,7 +528,7 @@ fn infer_block(
                     ),
                     _ => (Dim::Any, Dim::Any),
                 };
-                let dtype = env.get(a).map(|tv| tv.dtype).unwrap_or(DType::F16);
+                let dtype = env.get(a).map_or(DType::F16, |tv| tv.dtype);
                 env.insert(vid, TypedValue { dtype, shape: Shape::new([m, n]) });
             },
 
@@ -581,7 +581,7 @@ fn infer_block(
                             ))
                         },
                     )?;
-                let shape = env.get(indices).map(|tv| tv.shape.clone()).unwrap_or(Shape::scalar());
+                let shape = env.get(indices).map_or(Shape::scalar(), |tv| tv.shape.clone());
                 env.insert(vid, TypedValue { dtype, shape });
             },
             Op::Scan { value, .. } =>
@@ -628,13 +628,11 @@ fn infer_block(
                             let shape = if si == 0 {
                                 first_input_shape(sub_op)
                                     .and_then(|iv| env.get(&iv))
-                                    .map(|tv| tv.shape.clone())
-                                    .unwrap_or(Shape::scalar())
+                                    .map_or(Shape::scalar(), |tv| tv.shape.clone())
                             } else {
                                 local_env
                                     .get(&ValueId::new(vid.as_u32() + (si as u32 - 1)))
-                                    .map(|tv| tv.shape.clone())
-                                    .unwrap_or(Shape::scalar())
+                                    .map_or(Shape::scalar(), |tv| tv.shape.clone())
                             };
                             local_env.insert(sub_vid, TypedValue { dtype: *dtype, shape });
                         },
@@ -645,24 +643,20 @@ fn infer_block(
                             let shape = if si == 0 {
                                 first_input_shape(sub_op)
                                     .and_then(|iv| env.get(&iv))
-                                    .map(|tv| tv.shape.clone())
-                                    .unwrap_or(Shape::scalar())
+                                    .map_or(Shape::scalar(), |tv| tv.shape.clone())
                             } else {
                                 local_env
                                     .get(&ValueId::new(vid.as_u32() + (si as u32 - 1)))
-                                    .map(|tv| tv.shape.clone())
-                                    .unwrap_or(Shape::scalar())
+                                    .map_or(Shape::scalar(), |tv| tv.shape.clone())
                             };
                             let input_dtype = if si == 0 {
                                 first_input_shape(sub_op)
                                     .and_then(|iv| env.get(&iv))
-                                    .map(|tv| tv.dtype)
-                                    .unwrap_or(DType::F32)
+                                    .map_or(DType::F32, |tv| tv.dtype)
                             } else {
                                 local_env
                                     .get(&ValueId::new(vid.as_u32() + (si as u32 - 1)))
-                                    .map(|tv| tv.dtype)
-                                    .unwrap_or(DType::F32)
+                                    .map_or(DType::F32, |tv| tv.dtype)
                             };
                             let dtype = if let Op::BinOp { op, .. } = sub_op {
                                 binop_result_dtype(*op, input_dtype)
@@ -675,10 +669,9 @@ fn infer_block(
                                     let pos = raw & !0x8000_0000;
                                     local_env
                                         .get(&ValueId::new(vid.as_u32() + pos))
-                                        .map(|tv| tv.dtype)
-                                        .unwrap_or(input_dtype)
+                                        .map_or(input_dtype, |tv| tv.dtype)
                                 } else {
-                                    env.get(on_true).map(|tv| tv.dtype).unwrap_or(input_dtype)
+                                    env.get(on_true).map_or(input_dtype, |tv| tv.dtype)
                                 }
                             } else {
                                 input_dtype

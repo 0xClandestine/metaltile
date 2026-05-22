@@ -12,7 +12,7 @@ pub struct TileSchedule {
 
 impl Default for TileSchedule {
     fn default() -> Self {
-        TileSchedule {
+        Self {
             tile_m: 64,
             tile_n: 64,
             tile_k: 32,
@@ -77,7 +77,7 @@ pub struct MslConfig {
 
 impl Default for MslConfig {
     fn default() -> Self {
-        MslConfig {
+        Self {
             simd_size: 32,
             use_simd_matrix: false,
             debug_comments: false,

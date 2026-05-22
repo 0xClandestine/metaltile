@@ -5,13 +5,13 @@
 //! instruction count and improves memory bandwidth utilization on Apple GPUs,
 //! which have native support for `half4`, `float4`, and `bfloat4` (Metal 3.1+).
 //!
-//! ## v2 changes (CODEGEN_OVERHAUL §4.4)
+//! ## v2 changes (`CODEGEN_OVERHAUL` §4.4)
 //!
 //! - **BF16 support**: `DType::BF16` params are now vectorizable (`bfloat4` on
 //!   Metal 3.1+).
-//! - **Structural contiguity**: instead of relying on ValueId encoding
-//!   heuristics, the pass examines the defining op of each index ValueId.
-//!   After ConstFold + CSE + LICM, consecutive loads at `base+0, base+1, …`
+//! - **Structural contiguity**: instead of relying on `ValueId` encoding
+//!   heuristics, the pass examines the defining op of each index `ValueId`.
+//!   After `ConstFold` + CSE + LICM, consecutive loads at `base+0, base+1, …`
 //!   show up as `BinOp(Add, invariant_vid, Const(k))` with incrementing *k*.
 //! - **Width 8**: `MAX_VEC_LEN` is 8; the emitter decomposes `float8`/`half8`
 //!   into `float2x4` when the native 8-wide vector isn't available.
@@ -29,7 +29,7 @@
 //! - Nuzman, Rosen, Zaks et al. (2006), "Auto-vectorization of interleaved
 //!   data for SIMD", PLDI 2006.  Stride-based vectorization patterns.
 //! - Apple, "Metal Shading Language Specification", §2.4 (vector data types).
-//!   https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf
+//!   <https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf>
 
 use std::collections::BTreeMap;
 
@@ -43,7 +43,7 @@ use crate::{error::Result, passes::remap::remap_value_ids};
 pub struct VectorizePass;
 
 impl super::Pass for VectorizePass {
-    fn name(&self) -> &str { "vectorize" }
+    fn name(&self) -> &'static str { "vectorize" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
         // Sort explicitly: `kernel.blocks` is `FxHashMap` so iteration order
@@ -59,7 +59,7 @@ impl super::Pass for VectorizePass {
             .results
             .iter()
             .chain(kernel.blocks.values().flat_map(|b| b.results.iter()))
-            .filter_map(|r| r.map(|v| v.as_u32()))
+            .filter_map(|r| r.map(metaltile_core::ValueId::as_u32))
             .max()
             .unwrap_or(0);
         // Loop-var aliases in the MSL emitter use `var.as_u32() + 0x4000_0000`
@@ -88,7 +88,7 @@ impl super::Pass for VectorizePass {
 /// emitter has no general `*8` fallback — cap at 4 universally.
 const MAX_VEC_RUN: usize = 4;
 /// Forward-scan window: tolerate up to one intermediate non-Load op between
-/// each pair of Loads (schedule pass interleaves index BinOps with their
+/// each pair of Loads (schedule pass interleaves index `BinOps` with their
 /// consuming Loads) — `2 × MAX_VEC_RUN` gives just enough headroom.
 const VEC_SCAN_WINDOW: usize = 2 * MAX_VEC_RUN;
 
@@ -333,7 +333,7 @@ fn vectorize_block(
 
     // Remap value references in surviving ops (each skipped scalar
     // Load's VID now points at its dedicated VectorExtract output).
-    for op in new_ops.iter_mut() {
+    for op in &mut new_ops {
         remap_value_ids(op, &result_remap);
     }
 
@@ -341,7 +341,7 @@ fn vectorize_block(
     block.results = new_results;
 }
 
-/// Decompose a ValueId index into (invariant_base, const_offset).
+/// Decompose a `ValueId` index into (`invariant_base`, `const_offset`).
 ///
 /// If the index is defined by `BinOp(Add, base, Const(k))`, returns `(base, k)`.
 /// Otherwise returns `(vid, 0)` — treating the index itself as the base with offset 0.
@@ -366,7 +366,7 @@ fn decompose_index(block: &Block, vid: ValueId, parent: Option<&Block>) -> (Valu
     (vid, 0)
 }
 
-/// Structural equality on index ValueIds — two `Add(x, y)` ops with identical
+/// Structural equality on index `ValueIds` — two `Add(x, y)` ops with identical
 /// operands are treated as equal even if scheduling re-introduced the duplicate
 /// after CSE. Without this, consecutive scalar Loads whose base address gets
 /// re-emitted per-Load (instead of CSE-shared) fail to vectorize.
@@ -394,12 +394,12 @@ fn find_op(block: &Block, vid: ValueId) -> Option<&Op> {
     None
 }
 
-/// Find an Op::Const for `vid` — current block first, then `parent`.
+/// Find an `Op::Const` for `vid` — current block first, then `parent`.
 fn find_const(block: &Block, parent: Option<&Block>, vid: ValueId) -> Option<i64> {
     find_const_in_block(block, vid).or_else(|| parent.and_then(|p| find_const_in_block(p, vid)))
 }
 
-/// Check if a ValueId is defined by an Op::Const in this block.
+/// Check if a `ValueId` is defined by an `Op::Const` in this block.
 fn find_const_in_block(block: &Block, vid: ValueId) -> Option<i64> {
     for (i, op) in block.ops.iter().enumerate() {
         if block.results.get(i) == Some(&Some(vid))
@@ -416,7 +416,7 @@ fn find_const_in_block(block: &Block, vid: ValueId) -> Option<i64> {
 /// excluded — `uint2` weight loads in qmv regressed perf on M2 Pro because the
 /// scalar form already coalesces in L2 and the extra extract ops cost more than
 /// the load consolidation saves.
-fn is_vectorizable(dtype: DType) -> bool { matches!(dtype, DType::F16 | DType::F32 | DType::BF16) }
+const fn is_vectorizable(dtype: DType) -> bool { matches!(dtype, DType::F16 | DType::F32 | DType::BF16) }
 
 #[cfg(test)]
 mod tests {

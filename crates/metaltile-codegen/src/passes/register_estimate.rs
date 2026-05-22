@@ -1,7 +1,7 @@
 //! Register Estimation — conservative linear-scan liveness analysis.
 //!
 //! Performs a conservative forward liveness analysis over IR blocks to
-//! estimate the maximum number of simultaneously-live ValueIds, which
+//! estimate the maximum number of simultaneously-live `ValueIds`, which
 //! approximates register pressure per thread.  Used by [`occupancy`] to
 //! compare tile size candidates.
 //!
@@ -9,13 +9,13 @@
 //!
 //! This is a *static estimate*.  The Metal compiler performs the actual
 //! register allocation.  The estimate is useful for comparing tile size
-//! candidates: lower max_live → higher occupancy potential.
+//! candidates: lower `max_live` → higher occupancy potential.
 //!
 //! ## Algorithm
 //!
 //! For each block, iterate forward through ops:
-//! - When an op references a ValueId, add it to the live set.
-//! - When an op defines a ValueId, add it to the live set.
+//! - When an op references a `ValueId`, add it to the live set.
+//! - When an op defines a `ValueId`, add it to the live set.
 //! - Track the maximum live set size at each step.
 //!
 //! Phase 1 uses conservative liveness: values are never killed within a block
@@ -26,7 +26,7 @@
 //! - Poletto & Sarkar (1999), "Linear scan register allocation",
 //!   ACM TOPLAS 21(5):895–913.  The foundational paper on linear-scan
 //!   liveness analysis for fast register allocation.
-//!   https://dl.acm.org/doi/10.1145/330249.330250
+//!   <https://dl.acm.org/doi/10.1145/330249.330250>
 
 use metaltile_core::ir::{Kernel, ValueId};
 
@@ -35,15 +35,16 @@ use super::remap;
 /// Estimated register pressure for a kernel.
 #[derive(Debug, Clone)]
 pub struct RegisterEstimate {
-    /// Maximum simultaneously-live ValueIds across all blocks.
+    /// Maximum simultaneously-live `ValueIds` across all blocks.
     pub max_live: usize,
-    /// Estimated registers per thread (max_live × avg_regs_per_value).
+    /// Estimated registers per thread (`max_live` × `avg_regs_per_value`).
     /// Uses 1.5 as a heuristic: some values are scalars (1 reg),
     /// some are vectors (4 regs), and many are short-lived.
     pub regs_per_thread: usize,
 }
 
 /// Run a conservative liveness analysis and return the register estimate.
+#[must_use]
 pub fn estimate_registers(kernel: &Kernel) -> RegisterEstimate {
     let mut max_live = 0usize;
 
@@ -60,7 +61,7 @@ pub fn estimate_registers(kernel: &Kernel) -> RegisterEstimate {
     RegisterEstimate { max_live, regs_per_thread }
 }
 
-/// Compute the maximum live ValueId count in a single block.
+/// Compute the maximum live `ValueId` count in a single block.
 fn block_max_live(block: &metaltile_core::ir::Block) -> usize {
     let mut live: std::collections::BTreeSet<ValueId> = std::collections::BTreeSet::new();
     let mut max = 0usize;

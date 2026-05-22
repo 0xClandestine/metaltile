@@ -1,4 +1,4 @@
-//! `tile bench` — Benchmark suite: MetalTile vs MLX reference.
+//! `tile bench` — Benchmark suite: `MetalTile` vs MLX reference.
 
 use std::collections::HashMap;
 
@@ -35,7 +35,7 @@ pub fn run(args: &BenchArgs) -> Result<(), crate::CliError> {
     // commit SHA we'd record in a snapshot. `working_tree_dirty()`
     // returns None outside a repo — skip the check there.
     if !args.allow_dirty
-        && let Some(true) = git::working_tree_dirty()
+        && git::working_tree_dirty() == Some(true)
     {
         let files = git::list_dirty_files();
         eprintln!(
@@ -185,7 +185,7 @@ pub fn run(args: &BenchArgs) -> Result<(), crate::CliError> {
         .map(|r| format!("{} [{}]", r.op(), r.shape()))
         .collect();
     let avg_pct: Option<f64> = {
-        let valid: Vec<f64> = all.iter().filter_map(|r| r.pct()).collect();
+        let valid: Vec<f64> = all.iter().filter_map(metaltile_std::bench_types::OpResult::pct).collect();
         if valid.is_empty() { None } else { Some(valid.iter().sum::<f64>() / valid.len() as f64) }
     };
 
@@ -204,7 +204,7 @@ pub fn run(args: &BenchArgs) -> Result<(), crate::CliError> {
         ));
     }
     if let Some(p) = avg_pct {
-        parts.push(format!("avg {}", paint_stdout(format!("{p:.0}% MT"), pct_style(p)),));
+        parts.push(format!("avg {}", paint_stdout(format!("{p:.0}% MT"), pct_style(p))));
     }
     if checked_count > 0 {
         let corr_style = if equiv_fail == 0 {
@@ -352,8 +352,8 @@ fn result_to_value(r: &OpResult) -> Value {
     }
     obj.insert("shape".into(), Value::from(r.shape()));
     obj.insert("metric".into(), Value::from(r.metric()));
-    obj.insert("ref".into(), r.ref_perf().map(Value::from).unwrap_or(Value::Null));
-    obj.insert("mt".into(), r.mt_perf().map(Value::from).unwrap_or(Value::Null));
+    obj.insert("ref".into(), r.ref_perf().map_or(Value::Null, Value::from));
+    obj.insert("mt".into(), r.mt_perf().map_or(Value::Null, Value::from));
     Value::Object(obj)
 }
 
@@ -379,7 +379,7 @@ fn save_json(device: &str, results: &[OpResult], path: &str) {
     }
     out.push_str("]}");
     match std::fs::create_dir_all(std::path::Path::new(path).parent().unwrap_or(".".as_ref()))
-        .and_then(|_| std::fs::File::create(path))
+        .and_then(|()| std::fs::File::create(path))
         .and_then(|mut f| f.write_all(out.as_bytes()))
     {
         Ok(()) => println!(
@@ -450,7 +450,7 @@ fn format_result_row(
 }
 
 fn json_f(v: Option<f64>) -> String {
-    v.map(|x| format!("{x:.3}")).unwrap_or_else(|| "null".into())
+    v.map_or_else(|| "null".into(), |x| format!("{x:.3}"))
 }
 
 fn pct_style(pct: f64) -> Style {

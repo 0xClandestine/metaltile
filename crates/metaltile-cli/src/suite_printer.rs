@@ -1,4 +1,4 @@
-//! Suite printer: formats OpResult batches as terminal tables.
+//! Suite printer: formats `OpResult` batches as terminal tables.
 //!
 //! All terminal output logic lives here (and in `term.rs`). The data types
 //! (`OpResult`, `OpBench`, `CorrectnessStatus`) stay in `metaltile-std`.
@@ -32,6 +32,7 @@ pub struct ProfileRow {
 }
 
 impl SuitePrinter {
+    #[must_use]
     pub fn new(show_correctness: bool) -> Self {
         Self {
             show_correctness,
@@ -44,7 +45,7 @@ impl SuitePrinter {
         }
     }
 
-    pub fn set_verbose(&mut self, v: u8) { self.verbose = v; }
+    pub const fn set_verbose(&mut self, v: u8) { self.verbose = v; }
 
     pub fn set_profile_map(&mut self, m: std::collections::HashMap<(String, String), ProfileRow>) {
         self.profile_map = Some(m);
@@ -104,7 +105,7 @@ impl SuitePrinter {
             paint_stdout(pad_right("MT%", pct_w), bold),
         );
         if self.show_correctness {
-            hdr.push_str(&format!(" {} {}", sep, paint_stdout(pad_right("ok", ck_w), bold),));
+            hdr.push_str(&format!(" {} {}", sep, paint_stdout(pad_right("ok", ck_w), bold)));
         }
         // -vv: scaling distribution columns
         if self.verbose >= 2 {
@@ -168,7 +169,7 @@ impl SuitePrinter {
             paint_stdout(pad_left(result.shape(), shape_w), Style::new().fg(Color::BrightWhite));
         let ref_s = fmt_perf(result.ref_perf(), metric, "—");
         let mt_s = fmt_perf(result.mt_perf(), metric, "NYI");
-        let pct_s = result.pct().map(|p| format!("{p:.0}%")).unwrap_or_else(|| "—".into());
+        let pct_s = result.pct().map_or_else(|| "—".into(), |p| format!("{p:.0}%"));
 
         let ref_cell = style_reference(&pad_right(&ref_s, ref_w), result.ref_perf());
         let mt_cell = style_metaltile(&pad_right(&mt_s, mt_w), result);
@@ -325,7 +326,7 @@ fn fmt_profile(
     };
 
     // Parse dtype label from shape string (last word).
-    let dtype_label = result.shape().rsplit_once(' ').map(|(_, last)| last).unwrap_or("f32");
+    let dtype_label = result.shape().rsplit_once(' ').map_or("f32", |(_, last)| last);
     let key = (result.op_display(), dtype_label.to_string());
     let p = match map.get(&key) {
         Some(p) => p,

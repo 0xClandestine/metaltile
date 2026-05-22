@@ -9,13 +9,13 @@
 //!
 //! The DSL parser binds loop variables with the convention
 //! `ValueId::new(var_id + 0x4000_0000)`.  Inside the body the variable appears as a
-//! direct ValueId reference rather than a Load op.  For each iteration *k* we
-//! emit `Op::Const { value: start + k*step }` and remap the IV ValueId to that
+//! direct `ValueId` reference rather than a Load op.  For each iteration *k* we
+//! emit `Op::Const { value: start + k*step }` and remap the IV `ValueId` to that
 //! Const's result.
 //!
 //! ## Alpha-renaming
 //!
-//! Every op result defined inside the loop body gets a fresh ValueId for each
+//! Every op result defined inside the loop body gets a fresh `ValueId` for each
 //! cloned iteration.  Operands that point into the body are remapped to the
 //! clone's fresh IDs; operands pointing **outside** the body pass through
 //! unchanged.
@@ -48,15 +48,16 @@ pub struct UnrollPass {
 }
 
 impl UnrollPass {
-    pub fn new(factor: u32) -> Self { UnrollPass { factor: factor.min(MAX_UNROLL_TRIP as u32) } }
+    #[must_use]
+    pub fn new(factor: u32) -> Self { Self { factor: factor.min(MAX_UNROLL_TRIP as u32) } }
 }
 
 impl Default for UnrollPass {
-    fn default() -> Self { UnrollPass::new(4) }
+    fn default() -> Self { Self::new(4) }
 }
 
 impl super::Pass for UnrollPass {
-    fn name(&self) -> &str { "unroll" }
+    fn name(&self) -> &'static str { "unroll" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
         tracing::trace!("unroll pass");
@@ -153,14 +154,14 @@ fn unroll_block(
             };
             if step_val <= 0 {
                 continue;
-            };
+            }
             let tc = (end_val - start_val) / step_val;
-            if tc <= 0 || tc > factor as i64 {
+            if tc <= 0 || tc > i64::from(factor) {
                 continue;
-            };
+            }
             if has_nested_loop_or_barrier(body_block) {
                 continue;
-            };
+            }
             plans.push(Plan {
                 loop_idx: i,
                 trip_count: tc,

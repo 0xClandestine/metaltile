@@ -51,9 +51,11 @@ impl<T, S> Index<u32> for Tensor<T, S> {
 // ---- DSL function stubs (panic if called outside #[kernel]) ----
 
 /// Return the current program/thread id for the given axis.
+#[must_use]
 pub fn program_id<const AXIS: u32>() -> u32 { panic!("program_id only valid inside #[kernel]") }
 
 /// Load a value from a tensor index expression.
+#[must_use]
 pub fn load<T>(_src: u32) -> T { panic!("load only valid inside #[kernel]") }
 
 /// Store a value into a tensor index expression.

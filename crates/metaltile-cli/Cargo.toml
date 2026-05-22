@@ -10,6 +10,9 @@ keywords = ["metal", "gpu", "apple-silicon", "benchmark", "cli"]
 categories = ["hardware-support", "development-tools"]
 publish = false
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "tile"
 path = "src/main.rs"

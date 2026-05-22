@@ -1,7 +1,7 @@
-//! MetalTile CLI — `tile` binary.
+//! `MetalTile` CLI — `tile` binary.
 //!
 //! Subcommands:
-//!   bench     Benchmark suite: MetalTile vs MLX reference
+//!   bench     Benchmark suite: `MetalTile` vs MLX reference
 //!   build     Compile all kernels to MSL and report errors
 //!   inspect   Print IR and/or MSL for one kernel
 //!   device    Show GPU device info and supported features
@@ -26,7 +26,7 @@ const CLAP_STYLES: Styles = Styles::styled()
     .valid(AnsiColor::Green.on_default())
     .invalid(AnsiColor::Red.on_default());
 
-/// MetalTile CLI — benchmark and inspect GPU kernels on Apple Silicon.
+/// `MetalTile` CLI — benchmark and inspect GPU kernels on Apple Silicon.
 #[derive(Parser)]
 #[command(name = "tile", version, about, styles = CLAP_STYLES)]
 struct Cli {
@@ -36,7 +36,7 @@ struct Cli {
 
 #[derive(clap::Subcommand, Debug)]
 enum Command {
-    /// Benchmark suite: MetalTile vs MLX reference
+    /// Benchmark suite: `MetalTile` vs MLX reference
     Bench(BenchArgs),
     /// Compile all kernels to MSL and report errors
     Build(BuildArgs),
@@ -102,7 +102,7 @@ struct BuildArgs {
     #[arg(long = "sdk", default_value = "macosx")]
     sdk: String,
     /// Run the standard pass pipeline 25× per kernel and print per-pass
-    /// median wall_us instead of emitting MSL (after 5 warmup iters).
+    /// median `wall_us` instead of emitting MSL (after 5 warmup iters).
     /// Inherits `--filter` and `--dtypes`.
     #[arg(long = "time-passes", short = 't')]
     time_passes: bool,
@@ -213,7 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // rejects everything, so library crates pay only the ~1 ns no-subscriber cost.
     let _debug_level = std::env::var("METALTILE_DEBUG").ok();
     let filter = match _debug_level.as_deref() {
-        Some("1") | Some("debug") => "metaltile=debug",
+        Some("1" | "debug") => "metaltile=debug",
         Some("trace") => "metaltile=trace",
         _ => "off",
     };

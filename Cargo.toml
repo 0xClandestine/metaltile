@@ -56,3 +56,49 @@ panic = "abort"
 [profile.bench]
 inherits = "release"
 debug = true
+
+[workspace.lints.clippy]
+# === Base groups (lower priority so individuals can override) ===
+all = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# === Lints that help make code more compact ===
+manual_map = "warn"
+manual_filter = "warn"
+manual_flatten = "warn"
+manual_unwrap_or = "warn"
+manual_is_variant_and = "warn"
+manual_let_else = "warn"
+manual_retain = "warn"
+
+needless_lifetimes = "warn"
+needless_borrow = "warn"
+needless_continue = "warn"
+needless_for_each = "warn"
+needless_collect = "warn"
+needless_pass_by_value = "warn"
+
+redundant_clone = "warn"
+redundant_else = "warn"
+redundant_field_names = "warn"
+
+collapsible_if = "warn"
+collapsible_else_if = "warn"
+collapsible_match = "warn"
+if_not_else = "warn"
+option_if_let_else = "warn"
+question_mark = "warn"
+
+match_same_arms = "warn"
+match_bool = "warn"
+single_match_else = "warn"
+
+# === Allow noisy or anti-compact lints ===
+too_many_lines = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
+cognitive_complexity = "allow"
+uninlined_format_args = "allow"

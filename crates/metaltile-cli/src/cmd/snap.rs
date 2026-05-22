@@ -38,12 +38,9 @@ pub fn run(args: &SnapArgs) -> Result<(), CliError> {
     let note = &args.note;
     let filter = &args.filter;
 
-    let out_path: String = match out_path {
-        Some(p) => p.to_string(),
-        None => {
-            let date = chrono_like_now();
-            format!(".tile-snapshots/{}.json", date)
-        },
+    let out_path: String = if let Some(p) = out_path { p.to_string() } else {
+        let date = chrono_like_now();
+        format!(".tile-snapshots/{}.json", date)
     };
 
     let out_path = &out_path;
@@ -122,8 +119,7 @@ pub fn run(args: &SnapArgs) -> Result<(), CliError> {
         results.retain(|r| {
             r.get("op")
                 .and_then(|v| v.as_str())
-                .map(|op| op.to_ascii_lowercase().contains(&f_lower))
-                .unwrap_or(false)
+                .is_some_and(|op| op.to_ascii_lowercase().contains(&f_lower))
         });
     }
 
@@ -138,7 +134,7 @@ pub fn run(args: &SnapArgs) -> Result<(), CliError> {
         });
 
     // GPU family heuristic
-    let gpu_family = GpuFamily::from_device_name(&device).code().map(|s| s.to_string());
+    let gpu_family = GpuFamily::from_device_name(&device).code().map(std::string::ToString::to_string);
 
     // Timestamp
     let timestamp = chrono_like_now();
@@ -211,7 +207,7 @@ fn unix_secs_to_iso(secs: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hours:02}:{mins:02}:{s:02}Z")
 }
 
-fn is_leap(y: i64) -> bool { (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0) }
+const fn is_leap(y: i64) -> bool { (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0) }
 
 #[cfg(test)]
 mod tests {

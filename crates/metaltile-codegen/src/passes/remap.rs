@@ -1,13 +1,13 @@
-//! ValueId Remapping — shared utilities for IR traversal and mutation.
+//! `ValueId` Remapping — shared utilities for IR traversal and mutation.
 //!
-//! Provides canonical functions for ValueId remapping, reference collection,
+//! Provides canonical functions for `ValueId` remapping, reference collection,
 //! and Op classification used by nearly every pass in the pipeline.
 //!
 //! ## Core functions
-//! - [`remap_value_ids`] — rewrite all ValueId references in an Op.
-//! - [`op_value_refs`] — collect all ValueId references (read-only, for analysis).
-//! - [`max_vid_in_op`] — find the maximum ValueId in an Op.
-//! - [`find_max_vid`] — find the maximum ValueId across a whole Kernel.
+//! - [`remap_value_ids`] — rewrite all `ValueId` references in an Op.
+//! - [`op_value_refs`] — collect all `ValueId` references (read-only, for analysis).
+//! - [`max_vid_in_op`] — find the maximum `ValueId` in an Op.
+//! - [`find_max_vid`] — find the maximum `ValueId` across a whole Kernel.
 //!
 //! ## Op predicates
 //! - [`has_side_effects`] — cannot be moved, duplicated, or deleted.
@@ -46,6 +46,7 @@ pub fn remap_value_ids(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
 ///
 /// Thin wrapper around `op.value_refs()` that returns owned `ValueId`s.  Callers that
 /// only need to iterate can call `op.value_refs()` directly to avoid the owned collection.
+#[must_use]
 pub fn op_value_refs(op: &Op) -> SmallVec<[ValueId; 4]> {
     op.value_refs().into_iter().copied().collect()
 }
@@ -58,7 +59,8 @@ pub fn op_value_refs(op: &Op) -> SmallVec<[ValueId; 4]> {
 ///
 /// `FusedElementwise` sub-ops encode chain-internal references using
 /// `SUB_OP_FLAG = 0x8000_0000` as the top bit. Those are not real
-/// kernel-wide ValueIds — they are filtered out here.
+/// kernel-wide `ValueIds` — they are filtered out here.
+#[must_use]
 pub fn max_vid_in_op(op: &Op) -> u32 {
     const SUB_OP_FLAG: u32 = 0x8000_0000;
     op.value_refs()
@@ -76,6 +78,7 @@ pub fn max_vid_in_op(op: &Op) -> u32 {
 /// Find the maximum *real* `ValueId` across all ops and results in
 /// `kernel`. Ignores `FusedElementwise` sub-op refs (top-bit-set
 /// chain-internal indices); see [`max_vid_in_op`] for why.
+#[must_use]
 pub fn find_max_vid(kernel: &Kernel) -> u32 {
     /// Top bit reserved by `passes::fusion::SUB_OP_FLAG`.
     const SUB_OP_FLAG: u32 = 0x8000_0000;
@@ -117,6 +120,7 @@ pub fn find_max_vid(kernel: &Kernel) -> u32 {
 
 /// Collect all block IDs in the kernel, including the body.
 /// Returns sorted keys from the block map plus the body block ID.
+#[must_use]
 pub fn all_block_ids(kernel: &Kernel) -> Vec<metaltile_core::ir::BlockId> {
     let mut ids: Vec<metaltile_core::ir::BlockId> = kernel.blocks.keys().copied().collect();
     ids.push(kernel.body.id);
@@ -128,21 +132,27 @@ pub fn all_block_ids(kernel: &Kernel) -> Vec<metaltile_core::ir::BlockId> {
 // ---------------------------------------------------------------------------
 
 /// True if the op writes to memory or synchronises threads.
+#[must_use]
 pub fn has_side_effects(op: &Op) -> bool { op.has_side_effects() }
 
 /// True if the op cannot appear inside predicated code.
+#[must_use]
 pub fn is_unpredictable(op: &Op) -> bool { op.is_unpredictable() }
 
 /// True if the op is a cheap ALU op eligible for rematerialization.
+#[must_use]
 pub fn is_cheap_alu(op: &Op) -> bool { op.is_cheap_alu() }
 
 /// True if the op is a load from device or threadgroup memory.
+#[must_use]
 pub fn is_load(op: &Op) -> bool { op.is_load() }
 
 /// True if the op is a store to device or threadgroup memory.
+#[must_use]
 pub fn is_store(op: &Op) -> bool { op.is_store() }
 
 /// True if the op contains a barrier.
+#[must_use]
 pub fn is_barrier(op: &Op) -> bool { op.is_barrier() }
 
 #[cfg(test)]

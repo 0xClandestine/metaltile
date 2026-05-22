@@ -17,7 +17,7 @@ use crate::passes::{
 };
 
 /// Recover the dtype of a fused sub-op's result. Walks the fused chain when
-/// the operand ValueId points to another sub-op (marked by `SUB_OP_FLAG`),
+/// the operand `ValueId` points to another sub-op (marked by `SUB_OP_FLAG`),
 /// falls back to the global `type_env` for cross-op operands. Returns `None`
 /// when the dtype can't be determined locally — caller should treat that as
 /// "don't apply dtype-dependent peepholes."

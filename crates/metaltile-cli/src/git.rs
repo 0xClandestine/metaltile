@@ -32,6 +32,7 @@ fn git_raw(args: &[&str]) -> Option<Vec<u8>> {
 /// Returns `None` when not inside a git repo / git isn't available, in
 /// which case callers should skip the dirty-tree check rather than
 /// fail.
+#[must_use]
 pub fn working_tree_dirty() -> Option<bool> {
     // `git rev-parse --is-inside-work-tree` is the canonical "are we in
     // a repo" probe; if it fails, return None so the caller silently
@@ -44,16 +45,18 @@ pub fn working_tree_dirty() -> Option<bool> {
 
 /// List the paths git considers dirty (modified or staged). Used to
 /// give a useful error message when the dirty guard fires.
+#[must_use]
 pub fn list_dirty_files() -> Vec<String> {
     let Some(s) = git(&["diff", "HEAD", "--name-only"]) else {
         return Vec::new();
     };
-    s.lines().map(|l| l.to_string()).filter(|l| !l.is_empty()).collect()
+    s.lines().map(std::string::ToString::to_string).filter(|l| !l.is_empty()).collect()
 }
 
 /// Return the first ref in `candidates` that resolves to a commit, or
 /// `None` if none do. The ref is returned verbatim (e.g. `origin/dev`)
 /// so it can be fed back into git commands.
+#[must_use]
 pub fn resolve_baseline_ref(candidates: &[&str]) -> Option<String> {
     for &r in candidates {
         if git(&["rev-parse", "--verify", "--quiet", r]).is_some() {
@@ -64,12 +67,14 @@ pub fn resolve_baseline_ref(candidates: &[&str]) -> Option<String> {
 }
 
 /// `git merge-base HEAD <ref>` — common ancestor SHA, or None.
+#[must_use]
 pub fn merge_base_with(reference: &str) -> Option<String> {
     git(&["merge-base", "HEAD", reference])
 }
 
 /// `git show <rev>:<path>` — file contents at a revision, or None if
 /// the path doesn't exist at that rev.
+#[must_use]
 pub fn show_file_at(rev: &str, path: &str) -> Option<String> {
     let spec = format!("{rev}:{path}");
     let bytes = git_raw(&["show", &spec])?;

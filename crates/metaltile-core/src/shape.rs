@@ -16,7 +16,7 @@ use crate::constexpr::ConstExpr;
 /// A single dimension — either known, constexpr, or dynamic.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Dim {
-    /// Statically known size (from const generic params, e.g. TILE_M = 32).
+    /// Statically known size (from const generic params, e.g. `TILE_M` = 32).
     Known(usize),
     /// A constexpr variable (e.g. `N` in a kernel signature).
     ConstExpr(ConstExpr),
@@ -26,34 +26,37 @@ pub enum Dim {
 
 impl Dim {
     /// The value if known, otherwise panics.
+    #[must_use]
     pub fn as_known(&self) -> usize {
         match self {
-            Dim::Known(n) => *n,
+            Self::Known(n) => *n,
             _ => panic!("expected known dimension, got {self:?}"),
         }
     }
 
     /// Whether this dimension is statically known.
-    pub const fn is_known(&self) -> bool { matches!(self, Dim::Known(_)) }
+    #[must_use]
+    pub const fn is_known(&self) -> bool { matches!(self, Self::Known(_)) }
 
     /// Whether this dimension is constexpr.
-    pub const fn is_constexpr(&self) -> bool { matches!(self, Dim::ConstExpr(_)) }
+    #[must_use]
+    pub const fn is_constexpr(&self) -> bool { matches!(self, Self::ConstExpr(_)) }
 }
 
 impl From<usize> for Dim {
-    fn from(n: usize) -> Self { Dim::Known(n) }
+    fn from(n: usize) -> Self { Self::Known(n) }
 }
 
 impl From<ConstExpr> for Dim {
-    fn from(ce: ConstExpr) -> Self { Dim::ConstExpr(ce) }
+    fn from(ce: ConstExpr) -> Self { Self::ConstExpr(ce) }
 }
 
 impl fmt::Display for Dim {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Dim::Known(n) => write!(f, "{n}"),
-            Dim::ConstExpr(ce) => write!(f, "{ce}"),
-            Dim::Any => write!(f, "?"),
+            Self::Known(n) => write!(f, "{n}"),
+            Self::ConstExpr(ce) => write!(f, "{ce}"),
+            Self::Any => write!(f, "?"),
         }
     }
 }
@@ -68,7 +71,7 @@ pub enum DimExpr {
     /// A named constexpr as-is.
     Var(ConstExpr),
     /// Sum of two expressions.
-    Add(Box<DimExpr>, Box<DimExpr>),
+    Add(Box<Self>, Box<Self>),
     /// A fixed range slice: [start..end).
     Range(ConstExpr, i64, i64),
 }
@@ -76,11 +79,11 @@ pub enum DimExpr {
 impl fmt::Display for DimExpr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DimExpr::Scale(c, v) => write!(f, "{c}*{v}"),
-            DimExpr::Const(c) => write!(f, "{c}"),
-            DimExpr::Var(v) => write!(f, "{v}"),
-            DimExpr::Add(a, b) => write!(f, "({a} + {b})"),
-            DimExpr::Range(v, start, end) => write!(f, "{v}[{start}..{end})"),
+            Self::Scale(c, v) => write!(f, "{c}*{v}"),
+            Self::Const(c) => write!(f, "{c}"),
+            Self::Var(v) => write!(f, "{v}"),
+            Self::Add(a, b) => write!(f, "({a} + {b})"),
+            Self::Range(v, start, end) => write!(f, "{v}[{start}..{end})"),
         }
     }
 }
@@ -94,20 +97,24 @@ pub struct Shape {
 impl Shape {
     /// Create a new shape from a list of dimensions.
     pub fn new(dims: impl IntoIterator<Item = Dim>) -> Self {
-        Shape { dims: dims.into_iter().collect() }
+        Self { dims: dims.into_iter().collect() }
     }
 
     /// A scalar (zero-dimensional value).
-    pub fn scalar() -> Self { Shape { dims: smallvec::SmallVec::new() } }
+    #[must_use]
+    pub fn scalar() -> Self { Self { dims: smallvec::SmallVec::new() } }
 
     /// The number of dimensions (rank).
+    #[must_use]
     pub fn rank(&self) -> usize { self.dims.len() }
 
     /// Access a dimension by index.
+    #[must_use]
     pub fn dim(&self, index: usize) -> Option<&Dim> { self.dims.get(index) }
 
     /// Total number of elements (product of known dimensions).
     /// Returns None if any dimension is not statically known.
+    #[must_use]
     pub fn num_elements(&self) -> Option<usize> {
         self.dims.iter().try_fold(1usize, |acc, d| match d {
             Dim::Known(n) => Some(acc * n),
@@ -119,7 +126,8 @@ impl Shape {
     pub fn iter(&self) -> impl Iterator<Item = &Dim> { self.dims.iter() }
 
     /// Check if this shape equals another shape exactly.
-    pub fn matches(&self, other: &Shape) -> bool {
+    #[must_use]
+    pub fn matches(&self, other: &Self) -> bool {
         if self.rank() != other.rank() {
             return false;
         }

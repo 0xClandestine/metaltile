@@ -4,7 +4,7 @@
 //!
 //! Used by the `tile build --emit` flow in `metaltile-cli`. Kept in
 //! `metaltile-codegen` so other tooling (custom build scripts, IDE
-//! integrations, future SwiftPM build plugins) can also consume the
+//! integrations, future `SwiftPM` build plugins) can also consume the
 //! emit pipeline without depending on the CLI binary.
 //!
 //! Naming convention: kernels are written under their per-dtype
@@ -79,10 +79,10 @@ pub enum EmitError {
 impl std::fmt::Display for EmitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EmitError::Io(e) => write!(f, "I/O error: {e}"),
-            EmitError::Codegen(s) => write!(f, "codegen error: {s}"),
-            EmitError::Json(e) => write!(f, "JSON serialization error: {e}"),
-            EmitError::MetalToolchain(s) => write!(f, "metal toolchain error: {s}"),
+            Self::Io(e) => write!(f, "I/O error: {e}"),
+            Self::Codegen(s) => write!(f, "codegen error: {s}"),
+            Self::Json(e) => write!(f, "JSON serialization error: {e}"),
+            Self::MetalToolchain(s) => write!(f, "metal toolchain error: {s}"),
         }
     }
 }
@@ -90,13 +90,13 @@ impl std::fmt::Display for EmitError {
 impl std::error::Error for EmitError {}
 
 impl From<io::Error> for EmitError {
-    fn from(e: io::Error) -> Self { EmitError::Io(e) }
+    fn from(e: io::Error) -> Self { Self::Io(e) }
 }
 impl From<serde_json::Error> for EmitError {
-    fn from(e: serde_json::Error) -> Self { EmitError::Json(e) }
+    fn from(e: serde_json::Error) -> Self { Self::Json(e) }
 }
 impl From<crate::error::Error> for EmitError {
-    fn from(e: crate::error::Error) -> Self { EmitError::Codegen(e.to_string()) }
+    fn from(e: crate::error::Error) -> Self { Self::Codegen(e.to_string()) }
 }
 
 type Result<T> = std::result::Result<T, EmitError>;
@@ -104,7 +104,7 @@ type Result<T> = std::result::Result<T, EmitError>;
 // ─── MSL ─────────────────────────────────────────────────────────────
 
 /// Render `kernel` to MSL and write `<dir>/<kernel.name>.metal`. Returns
-/// the written path. Caller chooses the `MslGenerator` so e.g. Tile2D
+/// the written path. Caller chooses the `MslGenerator` so e.g. `Tile2D`
 /// kernels can opt into `use_simd_matrix` without coupling the emit
 /// helpers to a single config.
 pub fn write_msl(kernel: &Kernel, dir: &Path, generator: &MslGenerator) -> Result<PathBuf> {
@@ -159,8 +159,9 @@ fn constexpr_to_manifest(c: &ConstExprDecl) -> ConstExprManifest {
 
 /// Render `MetalTileKernels.swift` — one static function per kernel,
 /// looking up the PSO from `PSOCache.shared` and encoding the dispatch
-/// onto the supplied command buffer. The PSOCache + metallib loading is
+/// onto the supplied command buffer. The `PSOCache` + metallib loading is
 /// hand-written on the Swift side (lives in `MetalTileSwift`).
+#[must_use]
 pub fn render_swift_wrappers(kernels: &[Kernel]) -> String {
     let mut out = String::new();
     out.push_str(
@@ -364,7 +365,8 @@ pub fn compile_metallib(
 
 // ─── String helpers ──────────────────────────────────────────────────
 
-pub fn dtype_suffix(dt: DType) -> &'static str {
+#[must_use]
+pub const fn dtype_suffix(dt: DType) -> &'static str {
     match dt {
         DType::F32 => "f32",
         DType::F16 => "f16",
@@ -380,7 +382,7 @@ pub fn dtype_suffix(dt: DType) -> &'static str {
     }
 }
 
-fn param_kind_str(k: &ParamKind) -> &'static str {
+const fn param_kind_str(k: &ParamKind) -> &'static str {
     match k {
         ParamKind::Tensor => "Tensor",
         ParamKind::Strided => "Strided",
@@ -388,7 +390,7 @@ fn param_kind_str(k: &ParamKind) -> &'static str {
     }
 }
 
-fn kernel_mode_str(m: KernelMode) -> &'static str {
+const fn kernel_mode_str(m: KernelMode) -> &'static str {
     match m {
         KernelMode::Elementwise => "Elementwise",
         KernelMode::Reduction => "Reduction",

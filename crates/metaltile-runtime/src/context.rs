@@ -69,7 +69,7 @@ pub struct DispatchSpec<'a> {
 /// [`Context::upload_resident`]; pass via [`DispatchSpec::resident`]
 /// to bind without per-call alloc + host memcpy.
 ///
-/// Cloning is cheap (Rc::clone) and shares the underlying Metal
+/// Cloning is cheap (`Rc::clone`) and shares the underlying Metal
 /// buffer. The buffer returns to the dispatch buffer pool when the
 /// last clone drops.
 #[derive(Clone)]
@@ -92,13 +92,13 @@ const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 #[cfg(any(target_os = "macos", test))]
 fn fnv1a_extend(h: &mut u64, bytes: &[u8]) {
     for &b in bytes {
-        *h ^= b as u64;
+        *h ^= u64::from(b);
         *h = h.wrapping_mul(0x0100_0000_01b3);
     }
 }
 
-/// PSO / MSL cache key for a dispatch_chain pass: kernel name +
-/// first-param dtype label + sorted fn_consts. The MSL source is fully
+/// PSO / MSL cache key for a `dispatch_chain` pass: kernel name +
+/// first-param dtype label + sorted `fn_consts`. The MSL source is fully
 /// determined by this tuple, so hashing the source string per pass is
 /// pure waste (5–50 KB → ~10–30 µs vs ~16 ns for this key).
 ///
@@ -285,53 +285,47 @@ fn resolve_strided_metadata<'a>(
     let prefix_len = key.len();
     key.push_str("_shape");
 
-    let shape_data = match buffers.get(&key) {
-        Some(bytes) => {
-            if expected_len > 0 && bytes.len() < expected_len {
-                return Err(MetalTileError::Buffer(format!(
-                    "buffer '{}' has {} bytes, expected at least {}",
-                    key,
-                    bytes.len(),
-                    expected_len
-                )));
-            }
-            Cow::Borrowed(bytes.as_slice())
-        },
-        None => {
-            let Some((shape_bytes, _)) = defaults.as_ref() else {
-                return Err(MetalTileError::Buffer(format!(
-                    "missing required strided metadata buffer '{}'",
-                    key
-                )));
-            };
-            Cow::Owned(shape_bytes.clone())
-        },
+    let shape_data = if let Some(bytes) = buffers.get(&key) {
+        if expected_len > 0 && bytes.len() < expected_len {
+            return Err(MetalTileError::Buffer(format!(
+                "buffer '{}' has {} bytes, expected at least {}",
+                key,
+                bytes.len(),
+                expected_len
+            )));
+        }
+        Cow::Borrowed(bytes.as_slice())
+    } else {
+        let Some((shape_bytes, _)) = defaults.as_ref() else {
+            return Err(MetalTileError::Buffer(format!(
+                "missing required strided metadata buffer '{}'",
+                key
+            )));
+        };
+        Cow::Owned(shape_bytes.clone())
     };
 
     key.truncate(prefix_len);
     key.push_str("_strides");
 
-    let strides_data = match buffers.get(&key) {
-        Some(bytes) => {
-            if expected_len > 0 && bytes.len() < expected_len {
-                return Err(MetalTileError::Buffer(format!(
-                    "buffer '{}' has {} bytes, expected at least {}",
-                    key,
-                    bytes.len(),
-                    expected_len
-                )));
-            }
-            Cow::Borrowed(bytes.as_slice())
-        },
-        None => {
-            let Some((_, strides_bytes)) = defaults.as_ref() else {
-                return Err(MetalTileError::Buffer(format!(
-                    "missing required strided metadata buffer '{}'",
-                    key
-                )));
-            };
-            Cow::Owned(strides_bytes.clone())
-        },
+    let strides_data = if let Some(bytes) = buffers.get(&key) {
+        if expected_len > 0 && bytes.len() < expected_len {
+            return Err(MetalTileError::Buffer(format!(
+                "buffer '{}' has {} bytes, expected at least {}",
+                key,
+                bytes.len(),
+                expected_len
+            )));
+        }
+        Cow::Borrowed(bytes.as_slice())
+    } else {
+        let Some((_, strides_bytes)) = defaults.as_ref() else {
+            return Err(MetalTileError::Buffer(format!(
+                "missing required strided metadata buffer '{}'",
+                key
+            )));
+        };
+        Cow::Owned(strides_bytes.clone())
     };
 
     Ok((shape_data, strides_data))
@@ -343,14 +337,16 @@ impl Context {
         let chip_family = detect_apple_family();
         let tuner = Autotuner::new(Autotuner::default_cache_dir(), has_metal);
         tracing::info!(has_metal, chip_family = ?chip_family, "runtime context initialized");
-        Ok(Context { tuner, has_metal, chip_family })
+        Ok(Self { tuner, has_metal, chip_family })
     }
 
-    pub fn has_gpu(&self) -> bool { self.has_metal }
+    #[must_use]
+    pub const fn has_gpu(&self) -> bool { self.has_metal }
 
     /// Apple GPU family level detected at construction time, or `None`
     /// off macOS. See the field doc for the level → chip mapping.
-    pub fn chip_family(&self) -> Option<u32> { self.chip_family }
+    #[must_use]
+    pub const fn chip_family(&self) -> Option<u32> { self.chip_family }
 
     pub fn dispatch(&self, kernel: &Kernel) -> Result<DispatchResult, MetalTileError> {
         self.dispatch_with_buffers(kernel, &BTreeMap::new())
@@ -504,7 +500,7 @@ impl Context {
                         let val_ref: &u32 = val;
                         unsafe {
                             fcv.setConstantValue_type_withName(
-                                NonNull::new(val_ref as *const u32 as *mut _)
+                                NonNull::new(std::ptr::from_ref::<u32>(val_ref) as *mut _)
                                     .expect("u32 ref always non-null"),
                                 MTLDataType::UInt,
                                 &NSString::from_str(name),
@@ -726,7 +722,7 @@ impl Context {
             let buf = pool_acquire(dev, bytes.len(), opts)?;
             let dst = buf.contents();
             unsafe {
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.as_ptr() as *mut u8, bytes.len());
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.as_ptr().cast::<u8>(), bytes.len());
             }
             Ok(ResidentBuffer { inner: buf })
         }
@@ -829,7 +825,7 @@ impl Context {
                 }
                 let dst = buf.contents();
                 unsafe {
-                    std::ptr::copy_nonoverlapping(b.as_ptr(), dst.as_ptr() as *mut u8, b.len());
+                    std::ptr::copy_nonoverlapping(b.as_ptr(), dst.as_ptr().cast::<u8>(), b.len());
                 }
             }
             Ok(buf)
@@ -867,20 +863,17 @@ impl Context {
                 .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?
                 .get(&h)
                 .cloned();
-            let msl = match cached {
-                Some(m) => {
-                    tracing::trace!(kernel = %spec.kernel.name, "msl cache hit");
-                    m
-                },
-                None => {
-                    let generated = MslGenerator::default().generate(spec.kernel)?;
-                    tracing::trace!(kernel = %spec.kernel.name, bytes = generated.len(), "msl generated");
-                    msl_cache
-                        .lock()
-                        .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?
-                        .insert(h, generated.clone());
-                    generated
-                },
+            let msl = if let Some(m) = cached {
+                tracing::trace!(kernel = %spec.kernel.name, "msl cache hit");
+                m
+            } else {
+                let generated = MslGenerator::default().generate(spec.kernel)?;
+                tracing::trace!(kernel = %spec.kernel.name, bytes = generated.len(), "msl generated");
+                msl_cache
+                    .lock()
+                    .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?
+                    .insert(h, generated.clone());
+                generated
             };
             msl_sources.push(msl);
             binding_plans.push(build_param_buffer_plans(spec.kernel, spec.buffers)?);
@@ -1097,8 +1090,9 @@ impl Context {
         Ok(results)
     }
 
-    pub fn tuner_mut(&mut self) -> &mut Autotuner { &mut self.tuner }
-    pub fn tuner(&self) -> &Autotuner { &self.tuner }
+    pub const fn tuner_mut(&mut self) -> &mut Autotuner { &mut self.tuner }
+    #[must_use]
+    pub const fn tuner(&self) -> &Autotuner { &self.tuner }
 
     pub fn shutdown(&self) -> Result<(), MetalTileError> { self.tuner.flush() }
 }

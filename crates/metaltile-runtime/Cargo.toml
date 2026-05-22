@@ -9,6 +9,9 @@ description = "Apple Metal runtime dispatch for MetalTile GPU kernels"
 keywords = ["metal", "gpu", "apple-silicon", "runtime", "dispatch"]
 categories = ["compilers", "hardware-support"]
 
+[lints]
+workspace = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-metal = { version = "0.3", features = ["MTLDevice", "MTLCommandQueue", "MTLLibrary", "MTLComputePipeline", "MTLComputeCommandEncoder", "MTLBuffer", "MTLCommandBuffer", "MTLCommandEncoder", "MTLFunctionConstantValues", "MTLCaptureManager"] }

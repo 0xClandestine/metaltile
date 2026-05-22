@@ -1,7 +1,7 @@
 //! Block Utilities — shared primitives for IR block manipulation.
 //!
 //! Provides `remove_ops` and `insert_ops` for safely mutating op sequences
-//! within a [`Block`].  Used by Unroll, LICM, DSE, IfConversion, ValueSink, and
+//! within a [`Block`].  Used by Unroll, LICM, DSE, `IfConversion`, `ValueSink`, and
 //! any pass that rewrites the op/results arrays of a block.
 
 use std::collections::BTreeSet;
@@ -83,9 +83,9 @@ pub enum BlockAction {
 
 /// Rebuild a block according to a plan.
 ///
-/// `plan` maps original positions (0..block.ops.len()) to actions.
+/// `plan` maps original positions (`0..block.ops.len()`) to actions.
 /// Positions not in the map are kept. Actions are applied in order.
-/// This is the most general block manipulation — Unroll's inline_at,
+/// This is the most general block manipulation — Unroll's `inline_at`,
 /// LICM's hoist insertion, and DSE's dead-store removal all use
 /// patterns that map to this.
 pub fn rebuild_block(block: &mut Block, plan: &std::collections::BTreeMap<usize, BlockAction>) {
@@ -107,7 +107,7 @@ pub fn rebuild_block(block: &mut Block, plan: &std::collections::BTreeMap<usize,
             },
             Some(BlockAction::Insert(ops)) => {
                 // insert before the current op
-                for (op, vid) in ops.iter() {
+                for (op, vid) in ops {
                     new_ops.push(op.clone());
                     new_results.push(*vid);
                 }
@@ -124,7 +124,7 @@ pub fn rebuild_block(block: &mut Block, plan: &std::collections::BTreeMap<usize,
 
     // Insert-after-last: if any plan entry is for position == n
     if let Some(BlockAction::Insert(ops)) = plan.get(&n) {
-        for (op, vid) in ops.iter() {
+        for (op, vid) in ops {
             new_ops.push(op.clone());
             new_results.push(*vid);
         }

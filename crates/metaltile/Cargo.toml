@@ -10,6 +10,9 @@ description = "Rust DSL for writing Apple Metal GPU kernels — write once, run 
 keywords = ["metal", "gpu", "apple-silicon", "dsl", "shader"]
 categories = ["compilers", "hardware-support"]
 
+[lints]
+workspace = true
+
 [dependencies]
 metaltile-core.workspace = true
 metaltile-macros.workspace = true

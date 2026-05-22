@@ -1,7 +1,7 @@
 //! Autotuner: persistent tuning cache for kernel schedules.
 //!
 //! The autotuner stores the best schedule configuration for each
-//! (kernel, chip, shape_bucket) combination. Configs are persisted
+//! (kernel, chip, `shape_bucket`) combination. Configs are persisted
 //! to `~/.cache/metaltile/<chip>/<kernel_hash>.json`.
 //!
 //! ## Search strategy
@@ -58,12 +58,13 @@ pub struct TuneEntry {
 /// Persistent autotune cache.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TuneCache {
-    /// entries[bucket_key] = best config
+    /// entries[`bucket_key`] = best config
     entries: BTreeMap<String, TuneEntry>,
 }
 
 impl TuneCache {
     /// Load from disk, or create empty.
+    #[must_use]
     pub fn load(path: &PathBuf) -> Self {
         if path.exists() {
             std::fs::read_to_string(path)
@@ -71,7 +72,7 @@ impl TuneCache {
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default()
         } else {
-            TuneCache::default()
+            Self::default()
         }
     }
 
@@ -85,7 +86,8 @@ impl TuneCache {
     }
 
     /// Look up the best config for a given set of constexpr values.
-    pub fn lookup(
+    #[must_use]
+    pub const fn lookup(
         &self,
         _constexprs: &metaltile_core::constexpr::ConstExprValues,
     ) -> Option<&TuneEntry> {
@@ -112,20 +114,22 @@ pub struct Autotuner {
 
 impl Autotuner {
     /// Create a new autotuner with a cache directory.
+    #[must_use]
     pub fn new(cache_dir: PathBuf, enabled: bool) -> Self {
         let cache_path = cache_dir.join("tuning_cache.json");
         let cache = TuneCache::load(&cache_path);
 
-        Autotuner { cache_path, cache, enabled }
+        Self { cache_path, cache, enabled }
     }
 
     /// Default cache directory: `~/.cache/metaltile/`.
+    #[must_use]
     pub fn default_cache_dir() -> PathBuf {
         dirs_next().unwrap_or_else(|| PathBuf::from(".cache")).join("metaltile")
     }
 
     /// Enable or disable autotuning.
-    pub fn set_enabled(&mut self, enabled: bool) { self.enabled = enabled; }
+    pub const fn set_enabled(&mut self, enabled: bool) { self.enabled = enabled; }
 
     /// Get the best known config, or trigger tuning.
     #[tracing::instrument(skip(self, constexprs), fields(key = %_kernel_name))]

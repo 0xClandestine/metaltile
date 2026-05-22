@@ -6,6 +6,9 @@ license.workspace = true
 description = "MetalTile kernel standard library — benchmark metadata and type definitions"
 publish = true
 
+[lints]
+workspace = true
+
 [features]
 nax = []
 

@@ -9,7 +9,7 @@
 //! ## Algorithm
 //!
 //! For each `Op::Loop` in every block:
-//! 1. Build the initial invariant set: all ValueIds defined in the parent block
+//! 1. Build the initial invariant set: all `ValueIds` defined in the parent block
 //!    before the loop (or in ancestor blocks).
 //! 2. Iterate to fixpoint: any op in the loop body whose operands are all
 //!    invariant AND which has no side effects is marked as hoistable.
@@ -44,7 +44,7 @@ use crate::error::{Error, Result};
 pub struct LicmPass;
 
 impl super::Pass for LicmPass {
-    fn name(&self) -> &str { "licm" }
+    fn name(&self) -> &'static str { "licm" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
         // Determine which params are read-only (Load-safe for hoisting).
@@ -192,7 +192,7 @@ fn licm_block(
             }
 
             // Sort ascending for topological order.
-            hoist_indices.sort();
+            hoist_indices.sort_unstable();
 
             let hoisted_ops: Vec<Op> =
                 hoist_indices.iter().map(|&j| loop_body.ops[j].clone()).collect();

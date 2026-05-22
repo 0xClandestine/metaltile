@@ -97,7 +97,7 @@ pub fn run(args: &InspectArgs) -> Result<(), CliError> {
 
     // No filter: list all kernels
     let Some(filter) = filter else {
-        eprintln!("{}", paint_stdout("tile inspect", Style::new().fg(Color::Cyan).bold()),);
+        eprintln!("{}", paint_stdout("tile inspect", Style::new().fg(Color::Cyan).bold()));
         eprintln!();
         for (name, (spec, dtypes)) in &sorted {
             let dtype_str = dtypes.iter().map(|dt| dt.label()).collect::<Vec<_>>().join("/");
@@ -178,20 +178,17 @@ pub fn run(args: &InspectArgs) -> Result<(), CliError> {
                     println!("{k}");
                     run_all_passes_and_print(&mut k);
                 },
-                name => match metaltile_codegen::passes::PassRegistry::get(name) {
-                    Some(pass_obj) => {
-                        if let Err(e) = pass_obj.run(&mut k) {
-                            eprintln!("Pass {name} failed: {e}");
-                            return Ok(());
-                        }
-                        println!("// ── AFTER {name} ────────────────────────");
-                        println!("{k}");
-                    },
-                    None => {
-                        let valid: Vec<_> = metaltile_codegen::passes::PassRegistry::names();
-                        eprintln!("Unknown pass: {name}. Valid: {} all", valid.join(", "));
+                name => if let Some(pass_obj) = metaltile_codegen::passes::PassRegistry::get(name) {
+                    if let Err(e) = pass_obj.run(&mut k) {
+                        eprintln!("Pass {name} failed: {e}");
                         return Ok(());
-                    },
+                    }
+                    println!("// ── AFTER {name} ────────────────────────");
+                    println!("{k}");
+                } else {
+                    let valid: Vec<_> = metaltile_codegen::passes::PassRegistry::names();
+                    eprintln!("Unknown pass: {name}. Valid: {} all", valid.join(", "));
+                    return Ok(());
                 },
             }
         } else {

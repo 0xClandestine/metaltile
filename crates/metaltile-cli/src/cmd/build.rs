@@ -16,7 +16,7 @@
 //! The output layout intentionally matches a Swift Package's
 //! `Sources/<Target>/{Resources,Generated}/` convention so a consumer
 //! can point `--out` at their target directory and have the artifacts
-//! land in the right place for SwiftPM resource bundling.
+//! land in the right place for `SwiftPM` resource bundling.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -323,7 +323,7 @@ enum EmitKind {
 
 fn parse_emit_list(raw: &str) -> Result<BTreeSet<EmitKind>, CliError> {
     let mut kinds = BTreeSet::new();
-    for tok in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    for tok in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         match tok {
             "msl" => {
                 kinds.insert(EmitKind::Msl);
@@ -374,7 +374,7 @@ fn emit_artifacts(
     let generated_dir = out_root.join("Generated");
 
     if kinds.contains(&EmitKind::Ir)
-        && let Err(e) = std::fs::create_dir_all(&resources_dir).and_then(|_| {
+        && let Err(e) = std::fs::create_dir_all(&resources_dir).and_then(|()| {
             write_manifest(kernels, &resources_dir.join("manifest.json"))
                 .map_err(|e| std::io::Error::other(e.to_string()))
         })
@@ -411,9 +411,7 @@ fn emit_artifacts(
 
     if kinds.contains(&EmitKind::Metallib) {
         let metallib_path = resources_dir.join("kernels.metallib");
-        let air_dir = std::env::var("CARGO_TARGET_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("target"))
+        let air_dir = std::env::var("CARGO_TARGET_DIR").map_or_else(|_| PathBuf::from("target"), PathBuf::from)
             .join("tile-build-air");
         if let Err(e) = compile_metallib(metal_files, &metallib_path, sdk, &air_dir) {
             eprintln!(
@@ -477,7 +475,7 @@ const TIME_PASSES_WARMUP: usize = 5;
 const TIME_PASSES_ITERS: usize = 25;
 
 /// Run the standard pass pipeline `TIME_PASSES_ITERS` times over the
-/// filtered `BenchSpec × dtype` corpus and print per-pass median wall_us
+/// filtered `BenchSpec × dtype` corpus and print per-pass median `wall_us`
 /// (after `TIME_PASSES_WARMUP` discarded warmup iters).
 ///
 /// Output schema matches `rustc -Z time-passes`-style tables:

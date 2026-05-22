@@ -3,7 +3,7 @@
 //! Performs block-local value numbering: when two ops compute the same result
 //! (identical opcode and operands), the second is eliminated and all downstream
 //! uses are rerouted to the first.  Commutative binary ops (Add, Mul, Max, Min,
-//! BitAnd, BitOr, BitXor, CmpEq, CmpNe) are canonicalized to catch `a+b` vs `b+a`.
+//! `BitAnd`, `BitOr`, `BitXor`, `CmpEq`, `CmpNe`) are canonicalized to catch `a+b` vs `b+a`.
 //!
 //! ## CSE-eligible ops
 //!
@@ -61,7 +61,7 @@ enum OpKey {
 pub struct CsePass;
 
 impl super::Pass for CsePass {
-    fn name(&self) -> &str { "cse" }
+    fn name(&self) -> &'static str { "cse" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
         // Determine which params are read-only.
@@ -78,7 +78,7 @@ impl super::Pass for CsePass {
         let body_remap = cse_block(&mut kernel.body, &read_only);
         if !body_remap.is_empty() {
             for block in kernel.blocks.values_mut() {
-                for op in block.ops.iter_mut() {
+                for op in &mut block.ops {
                     replace_values(op, &body_remap);
                 }
             }
@@ -99,11 +99,11 @@ impl super::Pass for CsePass {
             let remap = cse_block(&mut block, &read_only);
             kernel.blocks.insert(*bid, block);
             if !remap.is_empty() {
-                for op in kernel.body.ops.iter_mut() {
+                for op in &mut kernel.body.ops {
                     replace_values(op, &remap);
                 }
                 for other in kernel.blocks.values_mut() {
-                    for op in other.ops.iter_mut() {
+                    for op in &mut other.ops {
                         replace_values(op, &remap);
                     }
                 }
@@ -150,7 +150,7 @@ fn cse_block(
     }
 
     // Phase 2: remap ValueId references in all surviving ops.
-    for op in block.ops.iter_mut() {
+    for op in &mut block.ops {
         replace_values(op, &old_to_new);
     }
 
@@ -172,7 +172,7 @@ fn cse_block(
     old_to_new
 }
 
-/// Build an OpKey for an op if it's CSE-eligible.
+/// Build an `OpKey` for an op if it's CSE-eligible.
 fn op_key(op: &Op, read_only: &std::collections::BTreeSet<String>) -> Option<OpKey> {
     match op {
         Op::BinOp { op: kind, lhs, rhs } => {
@@ -200,7 +200,7 @@ fn op_key(op: &Op, read_only: &std::collections::BTreeSet<String>) -> Option<OpK
 }
 
 /// For commutative binary ops, sort operands so that `a+b` and `b+a` hash identically.
-fn canonicalize_binop(op: BinOpKind, lhs: u32, rhs: u32) -> (u32, u32) {
+const fn canonicalize_binop(op: BinOpKind, lhs: u32, rhs: u32) -> (u32, u32) {
     let is_commutative = matches!(
         op,
         BinOpKind::Add
@@ -219,7 +219,7 @@ fn canonicalize_binop(op: BinOpKind, lhs: u32, rhs: u32) -> (u32, u32) {
     if is_commutative && lhs > rhs { (rhs, lhs) } else { (lhs, rhs) }
 }
 
-/// Replace all ValueId references in `op` using the remapping map.
+/// Replace all `ValueId` references in `op` using the remapping map.
 fn replace_values(op: &mut Op, map: &FxHashMap<ValueId, ValueId>) {
     op.for_each_value_id_mut(&mut |v| {
         if let Some(&new_v) = map.get(v) {

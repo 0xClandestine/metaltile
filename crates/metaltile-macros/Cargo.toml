@@ -9,6 +9,9 @@ description = "Proc-macro crate providing the #[kernel] DSL for MetalTile GPU ke
 keywords = ["metal", "gpu", "apple-silicon", "macro", "dsl"]
 categories = ["compilers", "hardware-support"]
 
+[lints]
+workspace = true
+
 [lib]
 proc-macro = true
 

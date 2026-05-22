@@ -56,7 +56,7 @@ pub fn run(args: &DeviceArgs) -> Result<(), crate::CliError> {
 
     let label_style = Style::new().fg(Color::BrightBlack).bold();
 
-    eprintln!("{}", paint_stdout("tile device", Style::new().fg(Color::Cyan).bold()),);
+    eprintln!("{}", paint_stdout("tile device", Style::new().fg(Color::Cyan).bold()));
     eprintln!();
     eprintln!(
         "  {}  {}",
@@ -68,7 +68,7 @@ pub fn run(args: &DeviceArgs) -> Result<(), crate::CliError> {
         paint_stdout(format!("{:<16}", "GPU family"), label_style),
         paint_stdout(gpu_family.display_label(), Style::new().fg(Color::BrightWhite)),
     );
-    println!("  {}", paint_stdout("─".repeat(42), Style::new().fg(Color::BrightBlack).dim(),),);
+    println!("  {}", paint_stdout("─".repeat(42), Style::new().fg(Color::BrightBlack).dim(),));
 
     // Feature flags
     let check = |label: &str, supported: bool, note: &str| {
@@ -88,7 +88,7 @@ pub fn run(args: &DeviceArgs) -> Result<(), crate::CliError> {
     check("simdgroup_hw", simd, "simdgroup matrix multiply");
     check("async_copy", apple9_or_later, "async threadgroup copy (M3+)");
 
-    println!("  {}", paint_stdout("─".repeat(42), Style::new().fg(Color::BrightBlack).dim(),),);
+    println!("  {}", paint_stdout("─".repeat(42), Style::new().fg(Color::BrightBlack).dim(),));
 
     println!(
         "  {}  {}",

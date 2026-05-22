@@ -272,9 +272,8 @@ fn sort_diff_rows(diff_rows: &mut [DiffRow], sort: &str) {
             let cmp = rank(a.kind).cmp(&rank(b.kind));
             if cmp == std::cmp::Ordering::Equal {
                 b.delta_pct
-                    .map(|d| d.abs())
-                    .unwrap_or(0.0)
-                    .partial_cmp(&a.delta_pct.map(|d| d.abs()).unwrap_or(0.0))
+                    .map_or(0.0, f64::abs)
+                    .partial_cmp(&a.delta_pct.map_or(0.0, f64::abs))
                     .unwrap_or(std::cmp::Ordering::Equal)
             } else {
                 cmp
@@ -290,8 +289,8 @@ fn sort_diff_rows(diff_rows: &mut [DiffRow], sort: &str) {
 fn print_diff_row(row: &DiffRow) {
     let (op_col, shape_col) = format_op_shape(&row.op, &row.shape);
 
-    let baseline_str = row.baseline_pct.map(|p| format!("{p:.0}%")).unwrap_or_else(|| "—".into());
-    let current_str = row.current_pct.map(|p| format!("{p:.0}%")).unwrap_or_else(|| "—".into());
+    let baseline_str = row.baseline_pct.map_or_else(|| "—".into(), |p| format!("{p:.0}%"));
+    let current_str = row.current_pct.map_or_else(|| "—".into(), |p| format!("{p:.0}%"));
     let delta_str = match row.kind {
         DeltaKind::New => "new".to_string(),
         DeltaKind::Removed => "removed".to_string(),
@@ -428,14 +427,14 @@ fn load_results(path: &str, label: &str) -> Result<Vec<Value>, CliError> {
     }
 }
 
-/// Build a map from (op, shape) -> (ref_perf, mt_perf).
+/// Build a map from (op, shape) -> (`ref_perf`, `mt_perf`).
 fn build_result_map(results: &[Value]) -> HashMap<RowKey, (f64, f64)> {
     let mut map = HashMap::new();
     for item in results {
         let op = item.get("op").and_then(|v| v.as_str()).unwrap_or("?").to_string();
         let shape = item.get("shape").and_then(|v| v.as_str()).unwrap_or("?").to_string();
-        let ref_perf = item.get("ref").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let mt_perf = item.get("mt").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let ref_perf = item.get("ref").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        let mt_perf = item.get("mt").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
         map.insert(RowKey { op, shape }, (ref_perf, mt_perf));
     }
     map

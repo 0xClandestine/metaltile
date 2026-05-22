@@ -89,6 +89,7 @@ pub fn run_passes_with_stats(
 }
 
 /// Count all ops across the kernel body and all nested blocks.
+#[must_use]
 pub fn count_total_ops(kernel: &Kernel) -> usize {
     let mut total = kernel.body.ops.len();
     for block in kernel.blocks.values() {
@@ -112,10 +113,11 @@ pub struct PassRegistry;
 impl PassRegistry {
     /// The standard pass order (names, in pipeline sequence).
     ///
-    /// TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM
-    ///   → IfConversion → ValueSink → Fusion → Unroll
-    ///   → Schedule → Vectorize → DeadStoreElim
-    pub fn order() -> &'static [&'static str] {
+    /// `TypeCheck` → `ConstFold` → `AlgebraicSimplify` → `CopyProp` → CSE → LICM
+    ///   → `IfConversion` → `ValueSink` → Fusion → Unroll
+    ///   → Schedule → Vectorize → `DeadStoreElim`
+    #[must_use]
+    pub const fn order() -> &'static [&'static str] {
         &[
             "kernel_inline",
             "type_check",
@@ -135,6 +137,7 @@ impl PassRegistry {
     }
 
     /// Look up a pass by name.  Returns `None` for unknown names.
+    #[must_use]
     pub fn get(name: &str) -> Option<Box<dyn Pass>> {
         match name {
             "kernel_inline" => Some(Box::new(kernel_inline::KernelInlinePass)),
@@ -159,16 +162,19 @@ impl PassRegistry {
     }
 
     /// Build the standard pipeline (all passes, in canonical order).
+    #[must_use]
     pub fn standard_pipeline() -> Vec<Box<dyn Pass>> {
         Self::order().iter().filter_map(|&n| Self::get(n)).collect()
     }
 
     /// Return the standard pipeline with names attached (for debug/inspect).
+    #[must_use]
     pub fn standard_with_names() -> Vec<(&'static str, Box<dyn Pass>)> {
         Self::order().iter().filter_map(|&n| Some((n, Self::get(n)?))).collect()
     }
 
     /// Return sorted pass names (for usage / error messages).
+    #[must_use]
     pub fn names() -> Vec<&'static str> {
         let mut n: Vec<_> = Self::order().to_vec();
         n.sort_unstable();
@@ -187,31 +193,36 @@ pub struct PipelineBuilder {
 
 impl PipelineBuilder {
     /// Create a builder with the standard pipeline from [`PassRegistry`].
-    pub fn standard() -> Self { PipelineBuilder { passes: PassRegistry::standard_pipeline() } }
+    #[must_use]
+    pub fn standard() -> Self { Self { passes: PassRegistry::standard_pipeline() } }
 
     /// Remove a pass by name from the pipeline.
+    #[must_use]
     pub fn without(mut self, name: &str) -> Self {
         self.passes.retain(|p| p.name() != name);
         self
     }
 
     /// Override the unroll factor.
+    #[must_use]
     pub fn with_unroll_factor(self, factor: u32) -> Self {
         let mut passes = self.passes;
-        for p in passes.iter_mut() {
+        for p in &mut passes {
             if p.name() == "unroll" {
                 *p = Box::new(unroll::UnrollPass::new(factor));
                 break;
             }
         }
-        PipelineBuilder { passes }
+        Self { passes }
     }
 
     /// Build the final pass list.
+    #[must_use]
     pub fn build(self) -> Vec<Box<dyn Pass>> { self.passes }
 }
 
 /// Standard optimization pipeline.
 ///
 /// Convenience wrapper around [`PassRegistry::standard_pipeline`].
+#[must_use]
 pub fn standard_pipeline() -> Vec<Box<dyn Pass>> { PassRegistry::standard_pipeline() }

@@ -1,6 +1,6 @@
 //! MSL (Metal Shading Language) code generator.
 //!
-//! Walks the MetalTile IR and emits valid MSL source text.
+//! Walks the `MetalTile` IR and emits valid MSL source text.
 //! Handles constexpr params, tiled matmul, vectorized loads, and thread indexing.
 
 pub(crate) mod config;
@@ -69,7 +69,8 @@ pub struct MslGenerator {
 }
 
 impl MslGenerator {
-    pub fn new(config: MslConfig) -> Self { MslGenerator { config } }
+    #[must_use]
+    pub const fn new(config: MslConfig) -> Self { Self { config } }
 
     /// Like [`generate`] but also returns per-pass statistics.
     #[tracing::instrument(skip(self, kernel), fields(kernel = %kernel.name))]
@@ -293,7 +294,7 @@ impl MslGenerator {
 /// Create a generator configured for the given kernel mode and the
 /// kernel's expected dispatch threadgroup size.
 ///
-/// Tile2D and SimdGroup2D modes enable simdgroup matrix intrinsics; all
+/// `Tile2D` and `SimdGroup2D` modes enable simdgroup matrix intrinsics; all
 /// other modes use the default config. `expected_tpg` is forwarded to
 /// `MslConfig::expected_tpg` so codegen paths that depend on `lsize`
 /// (notably the Reduction-mode `Op::Reduce` emit — single `simd_*(value)`
@@ -307,6 +308,7 @@ impl MslGenerator {
 /// the bench numbers would describe a kernel nobody actually runs in
 /// production. `cmd/build.rs` reads `spec.shapes[0].tpg` so the emitted
 /// `.metal` files match exactly what bench measured.
+#[must_use]
 pub fn generator_for_mode(mode: KernelMode, expected_tpg: Option<u32>) -> MslGenerator {
     let base = if matches!(mode, KernelMode::Tile2D | KernelMode::SimdGroup2D) {
         MslConfig {
@@ -321,7 +323,7 @@ pub fn generator_for_mode(mode: KernelMode, expected_tpg: Option<u32>) -> MslGen
 }
 
 impl Default for MslGenerator {
-    fn default() -> Self { MslGenerator::new(MslConfig::default()) }
+    fn default() -> Self { Self::new(MslConfig::default()) }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-//! MetalTile codegen: lowers the algorithm IR to Metal Shading Language (MSL).
+//! `MetalTile` codegen: lowers the algorithm IR to Metal Shading Language (MSL).
 //!
 //! This crate performs:
 //! - Schedule application (thread-to-tile mapping, vectorization)

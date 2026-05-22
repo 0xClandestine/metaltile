@@ -1,4 +1,4 @@
-//! MetalTile facade crate.
+//! `MetalTile` facade crate.
 //!
 //! `metaltile` re-exports the DSL macros, compile-time placeholder types, IR/codegen crates,
 //! and runtime entry points used to define and launch `#[kernel]` functions.
@@ -77,6 +77,7 @@ pub mod prelude;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Return the crate version from `Cargo.toml`.
+#[must_use]
 pub const fn version() -> &'static str { VERSION }
 
 // Re-exports

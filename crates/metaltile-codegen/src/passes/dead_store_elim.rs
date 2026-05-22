@@ -38,7 +38,7 @@ use crate::error::{Error, Result};
 pub struct DeadStoreElimPass;
 
 impl super::Pass for DeadStoreElimPass {
-    fn name(&self) -> &str { "dead_store_elim" }
+    fn name(&self) -> &'static str { "dead_store_elim" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
         // Collect output param names (never eliminate these).
@@ -74,9 +74,9 @@ impl StoreKey {
     fn from_store(op: &Op) -> Option<Self> {
         match op {
             Op::Store { dst, indices, .. } =>
-                Some(StoreKey::Scalar { dst: dst.clone(), indices: indices.clone() }),
+                Some(Self::Scalar { dst: dst.clone(), indices: indices.clone() }),
             Op::VectorStore { dst, byte_offset, len, .. } =>
-                Some(StoreKey::Vector { dst: dst.clone(), byte_offset: *byte_offset, len: *len }),
+                Some(Self::Vector { dst: dst.clone(), byte_offset: *byte_offset, len: *len }),
             _ => None,
         }
     }
@@ -84,9 +84,9 @@ impl StoreKey {
     fn from_load(op: &Op) -> Option<Self> {
         match op {
             Op::Load { src, indices, .. } =>
-                Some(StoreKey::Scalar { dst: src.clone(), indices: indices.clone() }),
+                Some(Self::Scalar { dst: src.clone(), indices: indices.clone() }),
             Op::VectorLoad { src, byte_offset, len } =>
-                Some(StoreKey::Vector { dst: src.clone(), byte_offset: *byte_offset, len: *len }),
+                Some(Self::Vector { dst: src.clone(), byte_offset: *byte_offset, len: *len }),
             _ => None,
         }
     }
@@ -166,7 +166,7 @@ fn dse_block(block: &mut Block, output_params: &BTreeSet<String>) {
 }
 
 /// Check if a store has a mask (may-write semantics).
-fn has_mask(op: &Op) -> bool { op.has_store_mask() }
+const fn has_mask(op: &Op) -> bool { op.has_store_mask() }
 
 /// Check if a store targets an output param.
 fn store_target_is_output(op: &Op, output_params: &BTreeSet<String>) -> bool {

@@ -25,64 +25,71 @@ pub enum GpuFamily {
 impl GpuFamily {
     /// Infer the GPU family from a Metal device name string
     /// (e.g. `"Apple M4 Max"`, `"Apple M1 Pro"`).
+    #[must_use]
     pub fn from_device_name(name: &str) -> Self {
         // M-series checked before A-series since "M1 Pro" etc.
         // contain no A-chip substring. Newer chips checked first so
         // "M4" doesn't shadow the broader M5 substring on future strings.
         if name.contains("M5") {
-            GpuFamily::Apple10
+            Self::Apple10
         } else if name.contains("M4") || name.contains("M3") {
-            GpuFamily::Apple9
+            Self::Apple9
         } else if name.contains("M2") {
-            GpuFamily::Apple8
+            Self::Apple8
         } else if name.contains("M1") {
-            GpuFamily::Apple7
+            Self::Apple7
         } else if name.contains("A18") || name.contains("A17") {
-            GpuFamily::Apple9
+            Self::Apple9
         } else if name.contains("A16") || name.contains("A15") {
-            GpuFamily::Apple8
+            Self::Apple8
         } else if name.contains("A14") {
-            GpuFamily::Apple7
+            Self::Apple7
         } else {
-            GpuFamily::Unknown
+            Self::Unknown
         }
     }
 
     /// Human-readable label for display (e.g. `"Apple9 (M4)"`).
-    pub fn display_label(self) -> &'static str {
+    #[must_use]
+    pub const fn display_label(self) -> &'static str {
         match self {
-            GpuFamily::Apple7 => "Apple7 (M1/A14)",
-            GpuFamily::Apple8 => "Apple8 (M2/A15+)",
-            GpuFamily::Apple9 => "Apple9 (M3+)",
-            GpuFamily::Apple10 => "Apple10 (M5)",
-            GpuFamily::Unknown => "unknown",
+            Self::Apple7 => "Apple7 (M1/A14)",
+            Self::Apple8 => "Apple8 (M2/A15+)",
+            Self::Apple9 => "Apple9 (M3+)",
+            Self::Apple10 => "Apple10 (M5)",
+            Self::Unknown => "unknown",
         }
     }
 
     /// Bare label used in snapshot metadata (e.g. `"Apple9"`).
-    pub fn code(self) -> Option<&'static str> {
+    #[must_use]
+    pub const fn code(self) -> Option<&'static str> {
         match self {
-            GpuFamily::Apple7 => Some("Apple7"),
-            GpuFamily::Apple8 => Some("Apple8"),
-            GpuFamily::Apple9 => Some("Apple9"),
-            GpuFamily::Apple10 => Some("Apple10"),
-            GpuFamily::Unknown => None,
+            Self::Apple7 => Some("Apple7"),
+            Self::Apple8 => Some("Apple8"),
+            Self::Apple9 => Some("Apple9"),
+            Self::Apple10 => Some("Apple10"),
+            Self::Unknown => None,
         }
     }
 
     /// True for Apple9+ (M3, M4, M5, A17, A18).
+    #[must_use]
     pub const fn is_apple9_or_later(self) -> bool {
-        matches!(self, GpuFamily::Apple9 | GpuFamily::Apple10)
+        matches!(self, Self::Apple9 | Self::Apple10)
     }
 
     /// Threadgroup memory in KB. All Apple7-9 GPUs have 32 KB.
+    #[must_use]
     pub const fn threadgroup_mem_kb(self) -> u32 { 32 }
 
     /// Maximum threads per threadgroup. All Apple7-9 GPUs support 1024.
+    #[must_use]
     pub const fn max_threads_per_threadgroup(self) -> u32 { 1024 }
 
     /// Known SLC (System Level Cache) size string per chip tier.
     /// Returns `"varies"` when the tier is not recognised.
+    #[must_use]
     pub fn slc_label(device_name: &str) -> &'static str {
         if device_name.contains("Ultra") {
             "~96 MB"

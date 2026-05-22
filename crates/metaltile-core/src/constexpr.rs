@@ -1,4 +1,4 @@
-//! ConstExpr: compile-time constant expressions resolved at kernel specialization time.
+//! `ConstExpr`: compile-time constant expressions resolved at kernel specialization time.
 //!
 //! These represent variables like `M`, `N`, `K` in kernel signatures that are
 //! marked `#[constexpr]`. They are not known when the DSL is written but are
@@ -11,15 +11,16 @@ use serde::{Deserialize, Serialize};
 /// A named constexpr variable.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct ConstExpr {
-    /// The name of the constexpr (e.g. "M", "BLOCK_SIZE").
+    /// The name of the constexpr (e.g. "M", "`BLOCK_SIZE`").
     name: String,
 }
 
 impl ConstExpr {
     /// Create a new constexpr with the given name.
-    pub fn new(name: impl Into<String>) -> Self { ConstExpr { name: name.into() } }
+    pub fn new(name: impl Into<String>) -> Self { Self { name: name.into() } }
 
     /// The name of this constexpr.
+    #[must_use]
     pub fn name(&self) -> &str { &self.name }
 }
 
@@ -28,11 +29,11 @@ impl fmt::Display for ConstExpr {
 }
 
 impl From<&str> for ConstExpr {
-    fn from(s: &str) -> Self { ConstExpr::new(s) }
+    fn from(s: &str) -> Self { Self::new(s) }
 }
 
 impl From<String> for ConstExpr {
-    fn from(s: String) -> Self { ConstExpr::new(s) }
+    fn from(s: String) -> Self { Self::new(s) }
 }
 
 /// A collection of resolved constexpr values for a specific kernel launch.
@@ -43,7 +44,8 @@ pub struct ConstExprValues {
 
 impl ConstExprValues {
     /// Create empty.
-    pub fn new() -> Self { ConstExprValues::default() }
+    #[must_use]
+    pub fn new() -> Self { Self::default() }
 
     /// Insert a resolved value.
     pub fn insert(&mut self, name: impl Into<String>, value: usize) {
@@ -65,6 +67,7 @@ impl ConstExprValues {
     }
 
     /// Try to get a resolved value.
+    #[must_use]
     pub fn try_get(&self, name: &str) -> Option<usize> { self.values.get(name).copied() }
 
     /// Resolve a [`ConstExpr`] to its concrete value.
@@ -74,9 +77,11 @@ impl ConstExprValues {
     pub fn iter(&self) -> impl Iterator<Item = (&String, &usize)> { self.values.iter() }
 
     /// Number of resolved values.
+    #[must_use]
     pub fn len(&self) -> usize { self.values.len() }
 
     /// Whether there are no resolved values.
+    #[must_use]
     pub fn is_empty(&self) -> bool { self.values.is_empty() }
 }
 

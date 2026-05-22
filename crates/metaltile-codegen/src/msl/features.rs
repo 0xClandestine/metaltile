@@ -29,7 +29,7 @@ pub(super) struct KernelFeatures {
     pub needs_erfinv: bool,
     pub needs_expm1: bool,
     pub needs_simd_product: bool,
-    /// MetalPerformancePrimitives (`mpp::tensor_ops::matmul2d` / NAX) needed.
+    /// `MetalPerformancePrimitives` (`mpp::tensor_ops::matmul2d` / NAX) needed.
     /// Detected by scanning `Op::InlineMsl::source` for `"mpp::"` — kernels
     /// using NAX-class cooperative-tensor MMA must include the framework
     /// header. Requires macOS 26+ / Metal 4 toolchain.

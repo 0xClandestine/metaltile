@@ -1,7 +1,7 @@
-//! KernelInlinePass — resolve `Op::KernelCall` by splicing callee ops inline.
+//! `KernelInlinePass` — resolve `Op::KernelCall` by splicing callee ops inline.
 //!
 //! Runs as the **first** pass in `standard_pipeline()` so all subsequent
-//! passes (const_fold, fusion, vectorize, etc.) see only flat scalar ops.
+//! passes (`const_fold`, fusion, vectorize, etc.) see only flat scalar ops.
 //! The callee name is preserved in a comment during inlining to help future
 //! fusion passes recognize cross-kernel composition patterns.
 //!
@@ -14,7 +14,7 @@
 //! 1. Look up `callee` in the `inventory`-based `KernelEntry` registry,
 //!    build its IR for the requested `dtype`.
 //! 2. Find the callee's `max_vid`; use `find_max_vid(caller) + 1` as the
-//!    starting offset for fresh callee ValueIds so they don't collide.
+//!    starting offset for fresh callee `ValueIds` so they don't collide.
 //! 3. Args are matched positionally to callee params. Two arg kinds:
 //!    - `KernelCallArg::Value(vid)` — a pre-computed scalar.  The callee's
 //!      input-param load for that param is skipped; all references to its
@@ -53,7 +53,7 @@ use crate::{
 pub struct KernelInlinePass;
 
 impl Pass for KernelInlinePass {
-    fn name(&self) -> &str { "kernel_inline" }
+    fn name(&self) -> &'static str { "kernel_inline" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
         // Collect caller's ProgramId result vids by axis (before we start
@@ -92,7 +92,7 @@ impl Pass for KernelInlinePass {
                 let max_new_vid = inlined
                     .iter()
                     .filter_map(|(_, r)| *r)
-                    .map(|v| v.as_u32())
+                    .map(metaltile_core::ValueId::as_u32)
                     .max()
                     .unwrap_or(vid_offset.saturating_sub(1));
                 vid_offset = max_new_vid + 1;

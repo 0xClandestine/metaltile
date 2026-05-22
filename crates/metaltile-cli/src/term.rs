@@ -16,19 +16,23 @@ pub use anstyle::AnsiColor as Color;
 pub struct Style(anstyle::Style);
 
 impl Style {
+    #[must_use]
     pub fn new() -> Self { Self::default() }
 
-    pub fn fg(mut self, color: Color) -> Self {
+    #[must_use]
+    pub const fn fg(mut self, color: Color) -> Self {
         self.0 = self.0.fg_color(Some(anstyle::Color::Ansi(color)));
         self
     }
 
-    pub fn bold(mut self) -> Self {
+    #[must_use]
+    pub const fn bold(mut self) -> Self {
         self.0 = self.0.bold();
         self
     }
 
-    pub fn dim(mut self) -> Self {
+    #[must_use]
+    pub const fn dim(mut self) -> Self {
         self.0 = self.0.dimmed();
         self
     }

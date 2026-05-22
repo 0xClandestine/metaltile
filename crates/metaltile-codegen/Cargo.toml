@@ -9,6 +9,9 @@ description = "Metal Shading Language (MSL) code generator for MetalTile kernels
 keywords = ["metal", "gpu", "apple-silicon", "codegen", "msl"]
 categories = ["compilers", "hardware-support"]
 
+[lints]
+workspace = true
+
 [dependencies]
 metaltile-core.workspace = true
 inventory.workspace = true

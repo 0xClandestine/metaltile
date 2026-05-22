@@ -2,13 +2,13 @@
 //!
 //! Eliminates no-op operations and propagates the underlying source value
 //! through chains of copies and identity casts.  Shortens use-def chains so
-//! downstream passes (CSE, Fusion, AlgebraicSimplify) see the "real" values.
+//! downstream passes (CSE, Fusion, `AlgebraicSimplify`) see the "real" values.
 //!
 //! ## Identity Patterns
 //! - `Cast(dtype, x)` → `x`  when `x` is already that dtype
 //! - `Broadcast(x, [1])` → `x`  when broadcasting a scalar with shape [1]
 //! - `Reshape(x, s)` → `x`  when shapes are identical
-//! - `Select(cond, x, x)` → `x`  (also in AlgebraicSimplify, but cheap to re-check)
+//! - `Select(cond, x, x)` → `x`  (also in `AlgebraicSimplify`, but cheap to re-check)
 //!
 //! ## Copy Forwarding
 //! When an op's result is used through a chain of identity operations,
@@ -19,7 +19,7 @@
 //!
 //! Iterates to fixpoint.  Each iteration:
 //! 1. Find identity ops (result == source).
-//! 2. Replace all uses of the identity result with the source ValueId.
+//! 2. Replace all uses of the identity result with the source `ValueId`.
 //! 3. DCE cleans up the dead identity ops (ran after this pass).
 //!
 //! ## References
@@ -42,7 +42,7 @@ use crate::error::{Error, Result};
 pub struct CopyPropPass;
 
 impl super::Pass for CopyPropPass {
-    fn name(&self) -> &str { "copy_prop" }
+    fn name(&self) -> &'static str { "copy_prop" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
         let block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
@@ -63,7 +63,7 @@ impl super::Pass for CopyPropPass {
 /// Resolve transitive replacement chains: {v2→v1, v1→v0} becomes {v2→v0, v1→v0}.
 fn resolve_transitive(map: &BTreeMap<ValueId, ValueId>) -> BTreeMap<ValueId, ValueId> {
     let mut resolved = BTreeMap::new();
-    for (&key, &val) in map.iter() {
+    for (&key, &val) in map {
         let mut terminal = val;
         let mut visited = BTreeSet::new();
         visited.insert(key);
@@ -107,7 +107,7 @@ fn copy_prop_block_once(block: &mut Block) -> bool {
     let vid_replacements = resolve_transitive(&vid_replacements);
 
     // Remap ValueIds in all ops.
-    for op in block.ops.iter_mut() {
+    for op in &mut block.ops {
         remap::remap_value_ids(op, &vid_replacements);
     }
 

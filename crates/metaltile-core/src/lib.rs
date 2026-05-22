@@ -1,4 +1,4 @@
-//! MetalTile core: IR types, shape algebra, and DType system.
+//! `MetalTile` core: IR types, shape algebra, and `DType` system.
 //!
 //! This crate defines the foundational types that all other crates share:
 //! - [`DType`]: numeric types (f16, f32, i32, etc.)

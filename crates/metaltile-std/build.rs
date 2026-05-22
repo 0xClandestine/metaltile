@@ -8,7 +8,7 @@ use std::{
 ///
 /// Points at ekryski/mlx's `alpha` branch — a superset of upstream MLX that
 /// carries the custom Metal kernels FFAI ports from (turbo / aura, gated-delta,
-/// ssm, ssm_replay, etc.). Stock upstream is missing those, so `tile bench`
+/// ssm, `ssm_replay`, etc.). Stock upstream is missing those, so `tile bench`
 /// would have no side-by-side reference for them.
 const MLX_COMMIT: &str = "4919270e03f0bc5116db67c99c5d8907dce589a8";
 const MLX_URL: &str = "https://github.com/ekryski/mlx.git";

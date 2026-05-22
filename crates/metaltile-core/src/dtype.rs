@@ -1,4 +1,4 @@
-//! Numeric types supported in MetalTile kernels.
+//! Numeric types supported in `MetalTile` kernels.
 
 use std::{fmt, str::FromStr};
 
@@ -33,59 +33,64 @@ pub enum DType {
 
 impl DType {
     /// Size in bytes of a single element.
+    #[must_use]
     pub const fn size_bytes(self) -> usize {
         match self {
-            DType::F32 | DType::I32 | DType::U32 => 4,
-            DType::F16 | DType::BF16 => 2,
-            DType::I8 | DType::U8 => 1,
-            DType::I4 => 1, // packed, but addressable as 1 byte
-            DType::U64 | DType::I64 => 8,
-            DType::Bool => 1,
+            Self::F32 | Self::I32 | Self::U32 => 4,
+            Self::F16 | Self::BF16 => 2,
+            Self::I8 | Self::U8 => 1,
+            Self::I4 => 1, // packed, but addressable as 1 byte
+            Self::U64 | Self::I64 => 8,
+            Self::Bool => 1,
         }
     }
 
     /// Whether this is a floating-point type.
-    pub const fn is_float(self) -> bool { matches!(self, DType::F32 | DType::F16 | DType::BF16) }
+    #[must_use]
+    pub const fn is_float(self) -> bool { matches!(self, Self::F32 | Self::F16 | Self::BF16) }
 
     /// Whether this is an integer type.
+    #[must_use]
     pub const fn is_integer(self) -> bool {
         matches!(
             self,
-            DType::I32 | DType::I8 | DType::I4 | DType::U8 | DType::U32 | DType::U64 | DType::I64
+            Self::I32 | Self::I8 | Self::I4 | Self::U8 | Self::U32 | Self::U64 | Self::I64
         )
     }
 
     /// Metal Shading Language name for this type.
-    pub fn msl_name(self) -> &'static str {
+    #[must_use]
+    pub const fn msl_name(self) -> &'static str {
         match self {
-            DType::F32 => "float",
-            DType::F16 => "half",
-            DType::BF16 => "bfloat", // custom type in MSL
-            DType::I32 => "int",
-            DType::I8 => "char",
-            DType::I4 => "char", // packed char
-            DType::U8 => "uchar",
-            DType::U32 => "uint",
-            DType::U64 => "ulong",
-            DType::I64 => "long",
-            DType::Bool => "bool",
+            Self::F32 => "float",
+            Self::F16 => "half",
+            Self::BF16 => "bfloat", // custom type in MSL
+            Self::I32 => "int",
+            Self::I8 => "char",
+            Self::I4 => "char", // packed char
+            Self::U8 => "uchar",
+            Self::U32 => "uint",
+            Self::U64 => "ulong",
+            Self::I64 => "long",
+            Self::Bool => "bool",
         }
     }
 
     /// Rust equivalent type for CPU interpretation.
-    pub fn rust_name(self) -> &'static str {
+    #[must_use]
+    pub const fn rust_name(self) -> &'static str {
         match self {
-            DType::F32 => "f32",
-            DType::F16 => "half::f16",
-            DType::BF16 => "half::bf16",
-            DType::I32 => "i32",
-            DType::I8 => "i8",
-            DType::I4 => "i8", // stored as i8
-            DType::U8 => "u8",
-            DType::U32 => "u32",
-            DType::U64 => "u64",
-            DType::I64 => "i64",
-            DType::Bool => "bool",
+            Self::F32 => "f32",
+            Self::F16 => "half::f16",
+            Self::BF16 => "half::bf16",
+            Self::I32 => "i32",
+            Self::I8 => "i8",
+            Self::I4 => "i8", // stored as i8
+            Self::U8 => "u8",
+            Self::U32 => "u32",
+            Self::U64 => "u64",
+            Self::I64 => "i64",
+            Self::Bool => "bool",
         }
     }
 }
@@ -96,19 +101,20 @@ impl fmt::Display for DType {
 
 impl DType {
     /// Short label string ("f32", "f16", etc.).
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            DType::F32 => "f32",
-            DType::F16 => "f16",
-            DType::BF16 => "bf16",
-            DType::I32 => "i32",
-            DType::I8 => "i8",
-            DType::I4 => "i4",
-            DType::U8 => "u8",
-            DType::U32 => "u32",
-            DType::U64 => "u64",
-            DType::I64 => "i64",
-            DType::Bool => "bool",
+            Self::F32 => "f32",
+            Self::F16 => "f16",
+            Self::BF16 => "bf16",
+            Self::I32 => "i32",
+            Self::I8 => "i8",
+            Self::I4 => "i4",
+            Self::U8 => "u8",
+            Self::U32 => "u32",
+            Self::U64 => "u64",
+            Self::I64 => "i64",
+            Self::Bool => "bool",
         }
     }
 }
@@ -118,17 +124,17 @@ impl FromStr for DType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "f32" => Ok(DType::F32),
-            "f16" => Ok(DType::F16),
-            "bf16" => Ok(DType::BF16),
-            "i32" => Ok(DType::I32),
-            "i8" => Ok(DType::I8),
-            "i4" => Ok(DType::I4),
-            "u8" => Ok(DType::U8),
-            "u32" => Ok(DType::U32),
-            "u64" => Ok(DType::U64),
-            "i64" => Ok(DType::I64),
-            "bool" => Ok(DType::Bool),
+            "f32" => Ok(Self::F32),
+            "f16" => Ok(Self::F16),
+            "bf16" => Ok(Self::BF16),
+            "i32" => Ok(Self::I32),
+            "i8" => Ok(Self::I8),
+            "i4" => Ok(Self::I4),
+            "u8" => Ok(Self::U8),
+            "u32" => Ok(Self::U32),
+            "u64" => Ok(Self::U64),
+            "i64" => Ok(Self::I64),
+            "bool" => Ok(Self::Bool),
             _ => Err(crate::Error::InvalidDType(s.to_string())),
         }
     }

@@ -7,7 +7,8 @@ pub struct IdCounter {
 }
 
 impl IdCounter {
-    pub fn new() -> Self { IdCounter { next: 0 } }
+    #[must_use]
+    pub const fn new() -> Self { Self { next: 0 } }
 }
 
 impl Iterator for IdCounter {

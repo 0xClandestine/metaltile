@@ -114,7 +114,7 @@ impl MslGenerator {
             // Multi-dim into flat: N is first stride, 1 is last stride.
             let param = kernel.params.iter().find(|p| p.name == src_or_dst);
             let shape = param.map(|p| &p.shape);
-            let stride1 = shape.and_then(|s| s.dim(1)).map(dim_to_msl_str).unwrap_or("1".into());
+            let stride1 = shape.and_then(|s| s.dim(1)).map_or("1".into(), dim_to_msl_str);
             let mut offset = String::new();
             for (dim, ix) in indices.iter().enumerate() {
                 let ix_str = self.idx_expr_str(ix, block, extra_names);
@@ -142,14 +142,14 @@ impl MslGenerator {
     }
 
     pub(super) fn shape_nelems_str(&self, shape: &Shape) -> String {
-        shape.num_elements().map(|n| n.to_string()).unwrap_or_else(|| {
+        shape.num_elements().map_or_else(|| {
             let rank = shape.rank();
             (0..rank)
                 .filter_map(|i| shape.dim(i))
                 .map(dim_to_msl_str)
                 .collect::<Vec<_>>()
                 .join(" * ")
-        })
+        }, |n| n.to_string())
     }
 
     pub(super) fn emit_tile_alloc(
@@ -173,5 +173,5 @@ impl MslGenerator {
 
 /// Extract the result `ValueId` encoded inside certain leaf ops (used by fused expression emission).
 pub(super) fn op_to_vid(op: &Op) -> ValueId {
-    op.as_const().map(|v| ValueId::new(v as u32)).unwrap_or(ValueId::new(0))
+    op.as_const().map_or(ValueId::new(0), |v| ValueId::new(v as u32))
 }

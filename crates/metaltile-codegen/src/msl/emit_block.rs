@@ -238,8 +238,8 @@ impl MslGenerator {
                     if let Some(tv) = type_env.get(value) {
                         let rank = tv.shape.rank();
                         if rank == 2 {
-                            let m = tv.shape.dim(0).map(dim_to_msl_str).unwrap_or("M".into());
-                            let n = tv.shape.dim(1).map(dim_to_msl_str).unwrap_or("N".into());
+                            let m = tv.shape.dim(0).map_or("M".into(), dim_to_msl_str);
+                            let n = tv.shape.dim(1).map_or("N".into(), dim_to_msl_str);
                             let t = self.msl_type_name(tv.dtype);
                             wl!(out, "{pad}{t} {v}[{m} * {n}];");
                             wl!(out, "{pad}for (uint r = 0; r < {m}; r++) {{");
@@ -265,10 +265,9 @@ impl MslGenerator {
                     let is_float = |id: ValueId| -> bool {
                         type_env
                             .get(&id)
-                            .map(|tv| matches!(tv.dtype, DType::F32 | DType::F16 | DType::BF16))
-                            .unwrap_or(false)
+                            .is_some_and(|tv| matches!(tv.dtype, DType::F32 | DType::F16 | DType::BF16))
                     };
-                    let result_is_float = vid.map(is_float).unwrap_or(false);
+                    let result_is_float = vid.is_some_and(is_float);
                     // FMA fusion needs ALL operands float (Metal has no
                     // integer fma overload). Result-only check is unsafe
                     // because type inference can propagate float from an
@@ -281,7 +280,7 @@ impl MslGenerator {
                         | BinOpKind::Pow
                         | BinOpKind::ATan2
                         | BinOpKind::Rem => {
-                            wl!(out, "{pad}auto {v} = {}({l}, {r});", op.msl_symbol())
+                            wl!(out, "{pad}auto {v} = {}({l}, {r});", op.msl_symbol());
                         },
                         BinOpKind::And => wl!(out, "{pad}auto {v} = ({l} && {r});"),
                         BinOpKind::Or => wl!(out, "{pad}auto {v} = ({l} || {r});"),
@@ -353,8 +352,7 @@ impl MslGenerator {
                     let n = self.shape_nelems_str(shape);
                     let dt = type_env
                         .get(value)
-                        .map(|tv| self.msl_type_name(tv.dtype))
-                        .unwrap_or("float");
+                        .map_or("float", |tv| self.msl_type_name(tv.dtype));
                     wl!(out, "{pad}{dt} {v}_data[{n}];");
                     wl!(out, "{pad}for (uint _i = 0; _i < {n}; _i++) {v}_data[_i] = {dt}({rv});");
                     wl!(out, "{pad}{dt}* {v} = {v}_data;");
@@ -391,7 +389,7 @@ impl MslGenerator {
                     } else {
                         format!("float({src}[_i])")
                     };
-                    let elem_expr = match transform.as_ref().map(|v| v.as_slice()) {
+                    let elem_expr = match transform.as_ref().map(std::vec::Vec::as_slice) {
                         None | Some(&[]) => base_elem,
                         Some(ops) => {
                             let mut expr = base_elem;
@@ -719,8 +717,7 @@ impl MslGenerator {
                         );
                         let result_is_bf16 = type_env
                             .get(&resolved_vid)
-                            .map(|tv| tv.dtype == DType::BF16)
-                            .unwrap_or(false);
+                            .is_some_and(|tv| tv.dtype == DType::BF16);
                         if self.config.native_bfloat && result_is_bf16 {
                             if expr.starts_with("bfloat(") || expr.starts_with("as_type<bfloat2>(")
                             {
@@ -753,8 +750,7 @@ impl MslGenerator {
                         .params
                         .iter()
                         .find(|p| p.name == *src)
-                        .map(|p| p.dtype)
-                        .unwrap_or(DType::F32);
+                        .map_or(DType::F32, |p| p.dtype);
                     let scalar_t = param_dtype.msl_name();
                     let vec_t: String = match (*len, param_dtype) {
                         (4, DType::F16) => "half4".into(),
@@ -778,8 +774,7 @@ impl MslGenerator {
                         .params
                         .iter()
                         .find(|p| p.name == *dst)
-                        .map(|p| p.dtype)
-                        .unwrap_or(DType::F32);
+                        .map_or(DType::F32, |p| p.dtype);
                     let scalar_t = param_dtype.msl_name();
                     let vec_t: String = match (*len, param_dtype) {
                         (4, DType::F16) => "half4".into(),
@@ -940,23 +935,20 @@ impl MslGenerator {
                             Some("simd_prefix_inclusive_sum"),
                         _ => None,
                     };
-                    match fn_name {
-                        Some(f) => wl!(out, "{pad}float {v} = {f}({rv});"),
-                        None => {
-                            let init = match rk {
-                                ReduceKind::Max => "-INFINITY",
-                                ReduceKind::Min => "INFINITY",
-                                ReduceKind::Product => "1.0f",
-                                _ => "0.0f",
-                            };
-                            // TODO: lower min/max scans via simd_shuffle_xor
-                            // butterfly. No kernel hits this today.
-                            wl!(
-                                out,
-                                "{pad}float {v} = {rv} + {init}; // TODO: simd \
-                                 scan min/max not implemented"
-                            );
-                        },
+                    if let Some(f) = fn_name { wl!(out, "{pad}float {v} = {f}({rv});") } else {
+                        let init = match rk {
+                            ReduceKind::Max => "-INFINITY",
+                            ReduceKind::Min => "INFINITY",
+                            ReduceKind::Product => "1.0f",
+                            _ => "0.0f",
+                        };
+                        // TODO: lower min/max scans via simd_shuffle_xor
+                        // butterfly. No kernel hits this today.
+                        wl!(
+                            out,
+                            "{pad}float {v} = {rv} + {init}; // TODO: simd \
+                             scan min/max not implemented"
+                        );
                     }
                 },
 
@@ -1022,18 +1014,16 @@ impl MslGenerator {
                         }
                         wl!(out, "{pad}    }}");
                         wl!(out, "{pad}}}");
+                    } else if let Some(aux) = aux_src {
+                        wl!(
+                            out,
+                            "{pad}for (uint _i = {off}; _i < {en}; _i++) {dst}[_i] = {src}[_i] * {sc} * {aux}[_i];"
+                        );
                     } else {
-                        if let Some(aux) = aux_src {
-                            wl!(
-                                out,
-                                "{pad}for (uint _i = {off}; _i < {en}; _i++) {dst}[_i] = {src}[_i] * {sc} * {aux}[_i];"
-                            );
-                        } else {
-                            wl!(
-                                out,
-                                "{pad}for (uint _i = {off}; _i < {en}; _i++) {dst}[_i] = {src}[_i] * {sc};"
-                            );
-                        }
+                        wl!(
+                            out,
+                            "{pad}for (uint _i = {off}; _i < {en}; _i++) {dst}[_i] = {src}[_i] * {sc};"
+                        );
                     }
                 },
 
@@ -1043,12 +1033,12 @@ impl MslGenerator {
                     let rv = self.vname(Some(*value), block, extra_names);
                     match rk {
                         ReduceKind::Sum | ReduceKind::Mean => {
-                            wl!(out, "{pad}float {v} = simd_sum(float({rv}));")
+                            wl!(out, "{pad}float {v} = simd_sum(float({rv}));");
                         },
                         ReduceKind::Max => wl!(out, "{pad}float {v} = simd_max(float({rv}));"),
                         ReduceKind::Min => wl!(out, "{pad}float {v} = simd_min(float({rv}));"),
                         ReduceKind::Product => {
-                            wl!(out, "{pad}float {v} = __mt_simd_product(float({rv}));")
+                            wl!(out, "{pad}float {v} = __mt_simd_product(float({rv}));");
                         },
                     }
                 },
@@ -1167,16 +1157,16 @@ impl MslGenerator {
                     let prefix = if *exclusive { "exclusive" } else { "inclusive" };
                     match rk {
                         ReduceKind::Sum | ReduceKind::Mean => {
-                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_sum({rv});")
+                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_sum({rv});");
                         },
                         ReduceKind::Product => {
-                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_product({rv});")
+                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_product({rv});");
                         },
                         ReduceKind::Max => {
-                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_max({rv});")
+                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_max({rv});");
                         },
                         ReduceKind::Min => {
-                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_min({rv});")
+                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_min({rv});");
                         },
                     }
                 },

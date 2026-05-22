@@ -28,15 +28,15 @@
 //! ## References
 //! - Apple (2023), "Explore GPU advancements in M3 and A17 Pro",
 //!   WWDC Tech Talks.  Introduced the OMU and dynamic register allocation.
-//!   https://developer.apple.com/videos/play/tech-talks/111375
+//!   <https://developer.apple.com/videos/play/tech-talks/111375>
 //! - Apple (2021), "Create image processing apps powered by Apple silicon",
 //!   WWDC21.  Register pressure and occupancy trade-offs on Apple GPUs.
-//!   https://developer.apple.com/videos/play/wwdc2021/10153/
+//!   <https://developer.apple.com/videos/play/wwdc2021/10153>/
 //! - Apple, "Finding your Metal app's GPU occupancy", Xcode documentation.
-//!   https://developer.apple.com/documentation/xcode/finding-your-metal-apps-gpu-occupancy
+//!   <https://developer.apple.com/documentation/xcode/finding-your-metal-apps-gpu-occupancy>
 //! - Rosenzweig (2021), "Dissecting the Apple M1 GPU, part III",
 //!   Asahi Linux blog.  Reverse-engineered register file and occupancy details.
-//!   https://alyssarosenzweig.ca/blog/asahi-gpu-part-3/
+//!   <https://alyssarosenzweig.ca/blog/asahi-gpu-part-3>/
 //! - Poletto & Sarkar (1999), "Linear scan register allocation",
 //!   ACM TOPLAS 21(5):895–913.  Foundation for the linear-scan liveness
 //!   model used in [`register_estimate`].
@@ -61,7 +61,7 @@ pub struct GpuLimits {
 
 impl Default for GpuLimits {
     fn default() -> Self {
-        GpuLimits {
+        Self {
             max_threads_per_tg: 1024,
             tg_memory_bytes: 32 * 1024,
             regs_per_thread_guide: 128,
@@ -80,17 +80,17 @@ pub enum Bottleneck {
     ThreadLimited,
     /// Tile working set exceeds likely on-chip cache.
     /// The OMU may throttle occupancy to prevent L1 thrashing.
-    /// (Set by the autotuner when tile dims are known; not computed in estimate_occupancy.)
+    /// (Set by the autotuner when tile dims are known; not computed in `estimate_occupancy`.)
     CachePressure,
 }
 
 impl fmt::Display for Bottleneck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Bottleneck::RegisterLimited => "register-limited",
-            Bottleneck::MemoryLimited => "memory-limited",
-            Bottleneck::ThreadLimited => "thread-limited",
-            Bottleneck::CachePressure => "cache-pressure",
+            Self::RegisterLimited => "register-limited",
+            Self::MemoryLimited => "memory-limited",
+            Self::ThreadLimited => "thread-limited",
+            Self::CachePressure => "cache-pressure",
         })
     }
 }
@@ -113,6 +113,7 @@ pub struct OccupancyEstimate {
 ///
 /// `tg_mem_usage_bytes` is an optional estimate of threadgroup memory usage.
 /// If None, memory is assumed not to be the bottleneck.
+#[must_use]
 pub fn estimate_occupancy(
     kernel: &Kernel,
     threadgroup_size: u32,
@@ -130,21 +131,21 @@ pub fn estimate_occupancy(
     let reg_occ = if reg_est.regs_per_thread <= limits.regs_per_thread_guide as usize {
         1.0
     } else {
-        let excess = reg_est.regs_per_thread as f64 - limits.regs_per_thread_guide as f64;
-        (1.0 - excess / limits.regs_per_thread_guide as f64).max(0.1)
+        let excess = reg_est.regs_per_thread as f64 - f64::from(limits.regs_per_thread_guide);
+        (1.0 - excess / f64::from(limits.regs_per_thread_guide)).max(0.1)
     };
 
     // --- Thread-limited occupancy ---
     //
     // Hard ceiling: max 1024 threads per threadgroup on Apple GPUs.
-    let thr_occ = limits.max_threads_per_tg as f64 / threadgroup_size as f64;
+    let thr_occ = f64::from(limits.max_threads_per_tg) / f64::from(threadgroup_size);
     let thr_occ = thr_occ.min(1.0);
 
     // --- Threadgroup memory ---
     //
     // Hard ceiling: max 32 KB per threadgroup on Apple GPUs.
     let mem_occ = if let Some(mem_used) = tg_mem_usage_bytes {
-        if mem_used == 0 { 1.0 } else { (limits.tg_memory_bytes as f64 / mem_used as f64).min(1.0) }
+        if mem_used == 0 { 1.0 } else { (f64::from(limits.tg_memory_bytes) / f64::from(mem_used)).min(1.0) }
     } else {
         1.0
     };
@@ -175,8 +176,9 @@ pub fn estimate_occupancy(
 
 /// Convenience: estimate occupancy for common threadgroup sizes and return the best.
 ///
-/// `candidates` is a list of (threadgroup_size, tg_mem_bytes) to evaluate.
+/// `candidates` is a list of (`threadgroup_size`, `tg_mem_bytes`) to evaluate.
 /// Returns the candidate with the highest estimated occupancy.
+#[must_use]
 pub fn best_threadgroup_size(
     kernel: &Kernel,
     candidates: &[(u32, Option<u32>)],

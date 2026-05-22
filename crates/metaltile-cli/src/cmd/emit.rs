@@ -59,9 +59,7 @@ pub fn run(args: &EmitArgs) -> Result<(), CliError> {
         println!("--no-compile: skipping metallib build");
     } else {
         let metallib = resources_dir.join("kernels.metallib");
-        let air_dir = std::env::var("CARGO_TARGET_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from("target"))
+        let air_dir = std::env::var("CARGO_TARGET_DIR").map_or_else(|_| std::path::PathBuf::from("target"), std::path::PathBuf::from)
             .join("tile-emit-air");
         compile_metallib(&metal_paths, &metallib, &args.sdk, &air_dir)
             .map_err(|e| CliError::Other(e.to_string()))?;
@@ -72,7 +70,7 @@ pub fn run(args: &EmitArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Collect all kernels from the inventory, one per (kernel_name, dtype) pair.
+/// Collect all kernels from the inventory, one per (`kernel_name`, dtype) pair.
 ///
 /// Multiple `BenchSpec`s can share the same `kernel_name` (e.g. different
 /// shapes for the same kernel). We deduplicate by name and union their dtypes,

@@ -1,8 +1,8 @@
 //! Algebraic Simplification — pattern-matching rewrite system.
 //!
-//! Simplifies IR operations beyond what ConstFold handles: identity absorption,
+//! Simplifies IR operations beyond what `ConstFold` handles: identity absorption,
 //! idempotence, canonicalization, and algebraic rewrites.  After earlier passes
-//! (CopyProp, ConstFold, CSE) have cleaned the IR, this pass catches residual
+//! (`CopyProp`, `ConstFold`, CSE) have cleaned the IR, this pass catches residual
 //! patterns that emerge from those transformations.
 //!
 //! ## Patterns
@@ -39,7 +39,7 @@
 //! ## Algorithm
 //!
 //! Iterates to fixpoint over each block.  Each iteration collects rewrites
-//! (new ops or ValueId replacements), applies them, and stops when stable.
+//! (new ops or `ValueId` replacements), applies them, and stops when stable.
 //! This is a local (single-block) algorithm; inter-block algebraic identities
 //! require a global value-numbering framework.
 //!
@@ -67,7 +67,7 @@ use crate::error::{Error, Result};
 pub struct AlgebraicSimplifyPass;
 
 impl super::Pass for AlgebraicSimplifyPass {
-    fn name(&self) -> &str { "algebraic_simplify" }
+    fn name(&self) -> &'static str { "algebraic_simplify" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
         let block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
@@ -92,7 +92,7 @@ impl super::Pass for AlgebraicSimplifyPass {
 /// Resolve transitive replacement chains: {v2→v1, v1→v0} becomes {v2→v0, v1→v0}.
 fn resolve_transitive(map: &BTreeMap<ValueId, ValueId>) -> BTreeMap<ValueId, ValueId> {
     let mut resolved = BTreeMap::new();
-    for (&key, &val) in map.iter() {
+    for (&key, &val) in map {
         let mut terminal = val;
         let mut visited = BTreeSet::new();
         visited.insert(key);
@@ -170,7 +170,7 @@ fn simplify_block_once(block: &mut Block) -> bool {
     let vid_replacements = resolve_transitive(&vid_replacements);
 
     // Remap ValueIds in all ops in the block.
-    for op in block.ops.iter_mut() {
+    for op in &mut block.ops {
         remap_values_in_op(op, &vid_replacements);
     }
 
@@ -383,11 +383,11 @@ fn simplify_select(
     vid_to_pos: &BTreeMap<ValueId, usize>,
 ) -> Option<SimpResult> {
     // Select(true, a, b) → a
-    if let Some(1) = find_const_in_block(block, cond) {
+    if find_const_in_block(block, cond) == Some(1) {
         return Some(SimpResult::ReplaceWithVid(on_true));
     }
     // Select(false, a, b) → b
-    if let Some(0) = find_const_in_block(block, cond) {
+    if find_const_in_block(block, cond) == Some(0) {
         return Some(SimpResult::ReplaceWithVid(on_false));
     }
     // Select(cond, a, a) → a
@@ -420,7 +420,7 @@ fn find_const_in_block(block: &Block, vid: ValueId) -> Option<i64> {
     None
 }
 
-/// Get the defining op for a ValueId. Returns (position, op) if definition is in this block.
+/// Get the defining op for a `ValueId`. Returns (position, op) if definition is in this block.
 fn get_defining_op<'a>(
     vid: ValueId,
     block: &'a Block,
@@ -472,7 +472,7 @@ fn get_not_arg(
     }
 }
 
-/// Remap all ValueId references in an op.
+/// Remap all `ValueId` references in an op.
 fn remap_values_in_op(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
     op.for_each_value_id_mut(&mut |v| {
         if let Some(&nv) = map.get(v) {

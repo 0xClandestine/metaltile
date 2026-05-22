@@ -15,18 +15,18 @@
 //!
 //! 1. Classify the CFG shape: Diamond (both arms) or Triangle (one arm empty).
 //! 2. Safety check: reject arms containing unpredictable ops (Barrier, Atomic,
-//!    Loop, SetLocal, DeclareLocal, ThreadgroupAlloc, nested If, StrideScan,
-//!    StrideArgReduce).
+//!    Loop, `SetLocal`, `DeclareLocal`, `ThreadgroupAlloc`, nested If, `StrideScan`,
+//!    `StrideArgReduce`).
 //! 3. Profitability check: Diamond ≤ 8 total ops, Triangle ≤ 5 ops.
-//! 4. Transform: inline both arms as Select(output, then_result, else_result)
-//!    chains. For Diamond shapes, each result-producing op in the then_block
-//!    is paired with the corresponding result from the else_block.
+//! 4. Transform: inline both arms as Select(output, `then_result`, `else_result`)
+//!    chains. For Diamond shapes, each result-producing op in the `then_block`
+//!    is paired with the corresponding result from the `else_block`.
 //!    For Triangle shapes, we use the passthrough value (Phase 2).
-//! 5. Remove then_block and else_block from kernel.blocks.
+//! 5. Remove `then_block` and `else_block` from kernel.blocks.
 //!
 //! ## Limitations (Phase 1)
 //!
-//! - Only handles Diamond shapes (both arms). Triangle shapes (no else_block)
+//! - Only handles Diamond shapes (both arms). Triangle shapes (no `else_block`)
 //!   require liveness analysis to determine passthrough values — deferred.
 //! - Does not handle extended diamonds (multi-block chains in arms).
 //! - Conservatively rejects any arm with unpredictable ops.
@@ -55,7 +55,7 @@ const MAX_TRIANGLE_OPS: usize = 5;
 pub struct IfConversionPass;
 
 impl super::Pass for IfConversionPass {
-    fn name(&self) -> &str { "if_conversion" }
+    fn name(&self) -> &'static str { "if_conversion" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
         // Sort explicitly: `kernel.blocks` is `FxHashMap`, so `.keys()`
@@ -85,7 +85,7 @@ impl super::Pass for IfConversionPass {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CfgShape {
-    /// One arm empty (no else_block).
+    /// One arm empty (no `else_block`).
     Triangle,
     /// Both arms have code.
     Diamond,
@@ -223,8 +223,8 @@ fn if_convert_block(block: &mut Block, blocks: &mut FxHashMap<BlockId, Block>) {
 
 /// Inline a diamond-shaped If as a chain of Select ops.
 ///
-/// Each result-producing op in the then_block is paired with the corresponding
-/// result from the else_block. The result is:
+/// Each result-producing op in the `then_block` is paired with the corresponding
+/// result from the `else_block`. The result is:
 ///   `Select(cond, then_result[i], else_result[i])`
 ///
 /// Ops that don't produce results (stores, barriers) in the arms are
