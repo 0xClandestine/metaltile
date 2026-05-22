@@ -95,7 +95,11 @@ impl Pass for KernelInlinePass {
                     .map(|v| v.as_u32())
                     .max()
                     .unwrap_or(vid_offset.saturating_sub(1));
-                vid_offset = max_new_vid + 1;
+                // Never let vid_offset decrease: intra-mapped result vids (like
+                // call_result from build_fused_group) may be lower than the
+                // freshly-allocated vids for this callee, which would cause
+                // subsequent callees to reuse already-live vids.
+                vid_offset = (max_new_vid + 1).max(vid_offset);
 
                 for (inlined_op, inlined_result) in inlined {
                     new_ops.push(inlined_op);
