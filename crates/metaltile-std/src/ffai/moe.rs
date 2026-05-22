@@ -518,3 +518,207 @@ inventory::submit! {
         kernel_mode: Some(KernelMode::Reduction),
     }
 }
+
+// ── mt_moe_gather_qmm_b{3,5,6,8} — wider-precision gather matmul ──────────
+//
+// `mt_moe_gather_qmm_int4` above is int4-only (MLX's MoE quantization
+// default). This macro generates the same grouped-gather quantized
+// matmul for the remaining MLX bit-widths — int3 / int5 / int6 / int8 —
+// so a MoE block quantized at any width has a single-dispatch GPU path.
+//
+// The body is identical to `mt_moe_gather_qmm_int4` except for the
+// weight-code extraction: pow2 widths (8) are pack-aligned (`32/bits`
+// codes per u32, simple shift+mask), odd widths (3/5/6) use the
+// two-word bit-stream extract (a code may straddle a u32 boundary) —
+// the same split as `dequant_gemv.rs` / the `mt_qmv_b*` family. The
+// per-output-element routing, CSR `expert_offsets` walk, group-indexed
+// scale/bias, and `simd_sum` reduction are unchanged.
+//
+// `mt_moe_gather_qmv_b*` aliases register the same kernels under a
+// `gather_qmv` subop — MLX names the M=1 / single-token decode form
+// `gather_qmv`; the per-row-routed body serves both (qmv is the
+// `T == n_experts-row-count` case of qmm).
+//
+// Layouts / constexpr / DISPATCH INVARIANTS — identical to
+// `mt_moe_gather_qmm_int4`; see its doc block. `k_in` must be a
+// multiple of 32; for pow2 widths it must also be a multiple of
+// `32/bits`; `group_size` must divide `k_in`.
+
+/// Grouped-gather quantized matmul — pow2 bit-widths (8).
+macro_rules! gather_qmm_pow2 {
+    ($name:ident, $bits:literal, $subop:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            x: Tensor<T>,
+            weight_packed: Tensor<u32>,
+            scales: Tensor<T>,
+            biases: Tensor<T>,
+            expert_offsets: Tensor<u32>,
+            mut out: Tensor<T>,
+            #[constexpr] k_in: u32,
+            #[constexpr] m_out: u32,
+            #[constexpr] n_experts: u32,
+            #[constexpr] group_size: u32,
+        ) {
+            let m = tgid_x;
+            let row = tgid_y;
+            let lane = tid;
+
+            // Resolve expert — linear CSR walk on every lane (cheap).
+            let mut expert = 0u32;
+            let mut found = 0u32;
+            for ee in range(0u32, n_experts, 1u32) {
+                let end = load(expert_offsets[ee + 1u32]);
+                let inside = select(row < end, 1u32, 0u32);
+                let take = inside * (1u32 - found);
+                expert = select(take == 1u32, ee, expert);
+                found = select(take == 1u32, 1u32, found);
+            }
+
+            let vals_per_pack = 32u32 / $bits;
+            let mask = (1u32 << $bits) - 1u32;
+            let total_packs = k_in / vals_per_pack;
+            let weight_row_base = expert * m_out * total_packs + m * total_packs;
+
+            let groups_per_row = k_in / group_size;
+            let scale_row_base = expert * m_out * groups_per_row + m * groups_per_row;
+            let x_row_base = row * k_in;
+
+            let mut acc = 0.0f32;
+            for pack_idx in range(lane, total_packs, 32u32) {
+                let packed = load(weight_packed[weight_row_base + pack_idx]);
+                let k_first = pack_idx * vals_per_pack;
+                let g = k_first / group_size;
+                let scale = load(scales[scale_row_base + g]).cast::<f32>();
+                let bias = load(biases[scale_row_base + g]).cast::<f32>();
+
+                // Unpack vals_per_pack codes from this u32, FMA each.
+                for i in range(0u32, vals_per_pack, 1u32) {
+                    let q = (packed >> (i * $bits)) & mask;
+                    let wv = q.cast::<f32>() * scale + bias;
+                    let xv = load(x[x_row_base + k_first + i]).cast::<f32>();
+                    acc = acc + wv * xv;
+                }
+            }
+
+            let total = simd_sum(acc);
+            if lane == 0u32 {
+                store(out[row * m_out + m], total.cast::<T>());
+            }
+        }
+
+        inventory::submit! {
+            BenchSpec {
+                op: "moe",
+                subop: $subop,
+                kernel_name: stringify!($name),
+                kernel_ir: $name::kernel_ir_for,
+                dtypes: &[DType::F32, DType::F16, DType::BF16],
+                tol: 5e-2,
+                mlx_src: None,
+                mlx_pattern: None,
+                shapes: &[],
+                dispatch: BenchDispatch::Generic,
+                kernel_mode: Some(KernelMode::Reduction),
+            }
+        }
+    };
+}
+
+/// Grouped-gather quantized matmul — odd bit-widths (3, 5, 6).
+macro_rules! gather_qmm_odd {
+    ($name:ident, $bits:literal, $subop:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            x: Tensor<T>,
+            weight_packed: Tensor<u32>,
+            scales: Tensor<T>,
+            biases: Tensor<T>,
+            expert_offsets: Tensor<u32>,
+            mut out: Tensor<T>,
+            #[constexpr] k_in: u32,
+            #[constexpr] m_out: u32,
+            #[constexpr] n_experts: u32,
+            #[constexpr] group_size: u32,
+        ) {
+            let m = tgid_x;
+            let row = tgid_y;
+            let lane = tid;
+
+            let mut expert = 0u32;
+            let mut found = 0u32;
+            for ee in range(0u32, n_experts, 1u32) {
+                let end = load(expert_offsets[ee + 1u32]);
+                let inside = select(row < end, 1u32, 0u32);
+                let take = inside * (1u32 - found);
+                expert = select(take == 1u32, ee, expert);
+                found = select(take == 1u32, 1u32, found);
+            }
+
+            // Bit-stream layout: u32_per_row words per weight row.
+            let u32_per_row = k_in * $bits / 32u32;
+            let weight_row_base = expert * m_out * u32_per_row + m * u32_per_row;
+
+            let groups_per_row = k_in / group_size;
+            let scale_row_base = expert * m_out * groups_per_row + m * groups_per_row;
+            let x_row_base = row * k_in;
+
+            // Each lane strides over individual K-elements (odd widths
+            // don't pack-align — element-strided, like `dequant_gemv_odd`).
+            let mut acc = 0.0f32;
+            let n_iters = (k_in + 31u32) / 32u32;
+            for _it in range(0u32, n_iters, 1u32) {
+                let d = _it * 32u32 + lane;
+                if d < k_in {
+                    let g = d / group_size;
+                    let scale = load(scales[scale_row_base + g]).cast::<f32>();
+                    let bias = load(biases[scale_row_base + g]).cast::<f32>();
+
+                    let bit_off = d * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(weight_packed[weight_row_base + word_idx]);
+                    let w1idx = select(spill > 0u32, word_idx + 1u32, word_idx);
+                    let w1 = load(weight_packed[weight_row_base + w1idx]);
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+
+                    let wv = q.cast::<f32>() * scale + bias;
+                    let xv = load(x[x_row_base + d]).cast::<f32>();
+                    acc = acc + wv * xv;
+                }
+            }
+
+            let total = simd_sum(acc);
+            if lane == 0u32 {
+                store(out[row * m_out + m], total.cast::<T>());
+            }
+        }
+
+        inventory::submit! {
+            BenchSpec {
+                op: "moe",
+                subop: $subop,
+                kernel_name: stringify!($name),
+                kernel_ir: $name::kernel_ir_for,
+                dtypes: &[DType::F32, DType::F16, DType::BF16],
+                tol: 5e-2,
+                mlx_src: None,
+                mlx_pattern: None,
+                shapes: &[],
+                dispatch: BenchDispatch::Generic,
+                kernel_mode: Some(KernelMode::Reduction),
+            }
+        }
+    };
+}
+
+// gather_qmm — wider-precision grouped-gather matmul (int4 above).
+gather_qmm_pow2!(mt_moe_gather_qmm_b8, 8u32, "gather_qmm_b8");
+gather_qmm_odd!(mt_moe_gather_qmm_b3, 3u32, "gather_qmm_b3");
+gather_qmm_odd!(mt_moe_gather_qmm_b5, 5u32, "gather_qmm_b5");
+gather_qmm_odd!(mt_moe_gather_qmm_b6, 6u32, "gather_qmm_b6");
