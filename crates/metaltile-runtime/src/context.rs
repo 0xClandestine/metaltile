@@ -7,6 +7,7 @@ unsafe extern "C" {}
 use std::{borrow::Cow, collections::BTreeMap};
 
 use metaltile_codegen::msl::MslGenerator;
+use rustc_hash::FxHashMap;
 #[cfg(target_os = "macos")]
 use metaltile_core::ir::KernelMode;
 use metaltile_core::{
@@ -56,18 +57,22 @@ pub struct Context {
 /// dispatch then skips the per-call alloc + memcpy for that input.
 /// Holding the [`ResidentBuffer`] across iterations keeps the bytes
 /// GPU-resident.
+///
+/// Uses `FxHashMap` for fast per-token buffer lookups in the hot dispatch
+/// path (O(1) vs BTreeMap's O(log n)). Function constants use `BTreeMap`
+/// for deterministic sorted iteration in PSO cache key hashing.
 pub struct DispatchSpec<'a> {
     pub kernel: &'a Kernel,
-    pub buffers: &'a BTreeMap<String, Vec<u8>>,
+    pub buffers: &'a FxHashMap<String, Vec<u8>>,
     pub fn_consts: &'a BTreeMap<String, u32>,
     pub grid_groups: [usize; 3],
     pub threads_per_group: [usize; 3],
     /// Pre-uploaded GPU buffers bound to INPUT params by kernel param name.
-    pub resident: &'a BTreeMap<String, ResidentBuffer>,
+    pub resident: &'a FxHashMap<String, ResidentBuffer>,
     /// Pre-uploaded GPU buffers bound to OUTPUT params by kernel param name.
     /// The GPU writes directly into these; no host readback is performed.
     /// Used for KV cache buffers that persist across decode steps.
-    pub output_resident: &'a BTreeMap<String, ResidentBuffer>,
+    pub output_resident: &'a FxHashMap<String, ResidentBuffer>,
 }
 
 /// Opaque handle to a GPU-resident input buffer. Produced by
@@ -83,6 +88,10 @@ pub struct ResidentBuffer {
     inner: std::rc::Rc<
         objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>>,
     >,
+    /// Byte offset into the underlying Metal buffer for sub-allocations.
+    /// Zero for full-buffer allocations (weights, standalone KV cache entries).
+    /// Non-zero for sub-buffer views created via `Self::slice()`.
+    offset: usize,
     #[cfg(not(target_os = "macos"))]
     _stub: (),
 }
@@ -96,12 +105,41 @@ impl ResidentBuffer {
         {
             use objc2_metal::MTLBuffer;
             let ptr = self.inner.contents();
-            unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const u8, len) }.to_vec()
+            unsafe {
+                std::slice::from_raw_parts(
+                    ptr.as_ptr().add(self.offset) as *const u8,
+                    len,
+                )
+            }
+            .to_vec()
         }
         #[cfg(not(target_os = "macos"))]
         {
             let _ = len;
             Vec::new()
+        }
+    }
+
+    /// Create a sub-buffer view (slice) of this resident buffer at the given
+    /// byte offset. Both the parent and child share the same underlying Metal
+    /// allocation; the parent buffer is kept alive via Rc as long as any slice
+    /// exists.
+    ///
+    /// This allows consolidating many small GPU allocations (e.g. per-layer
+    /// KV cache entries) into a single large allocation, reducing allocation
+    /// overhead and memory fragmentation.
+    pub fn slice(&self, offset: usize, _size: usize) -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            ResidentBuffer {
+                inner: self.inner.clone(),
+                offset: self.offset + offset,
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = offset;
+            ResidentBuffer { _stub: () }
         }
     }
 }
@@ -745,7 +783,7 @@ impl Context {
             let opts = MTLResourceOptions::StorageModeShared
                 | MTLResourceOptions::HazardTrackingModeUntracked;
             let buf = pool_acquire(dev, size, opts)?;
-            Ok(ResidentBuffer { inner: buf })
+            Ok(ResidentBuffer { inner: buf, offset: 0 })
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -789,7 +827,7 @@ impl Context {
             unsafe {
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.as_ptr() as *mut u8, bytes.len());
             }
-            Ok(ResidentBuffer { inner: buf })
+            Ok(ResidentBuffer { inner: buf, offset: 0 })
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -955,7 +993,36 @@ impl Context {
                     },
                 };
                 msl_sources.push(msl);
-                binding_plans.push(build_param_buffer_plans(spec.kernel, spec.buffers)?);
+                // Inline build_param_buffer_plans for FxHashMap (the type used by
+                // PreparedDispatch). The BTreeMap variant is kept for the legacy
+                // dispatch_metal path; inlining here avoids type conversion overhead.
+                let mut next_binding_index = 0usize;
+                let mut plans = Vec::with_capacity(spec.kernel.params.len());
+                for param in &spec.kernel.params {
+                    let provided_len = spec.buffers.get(&param.name).map_or(0, Vec::len);
+                    let static_len = static_buffer_len(param)?;
+                    let data_len = if let Some(expected_len) = static_len {
+                        if provided_len > 0 && provided_len < expected_len {
+                            return Err(MetalTileError::Buffer(format!(
+                                "buffer '{}' has {} bytes, expected at least {}",
+                                param.name, provided_len, expected_len
+                            )));
+                        }
+                        if param.is_output {
+                            provided_len.max(expected_len)
+                        } else {
+                            provided_len
+                        }
+                    } else {
+                        provided_len
+                    };
+                    plans.push(ParamBufferPlan {
+                        data_binding_index: next_binding_index,
+                        data_len,
+                    });
+                    next_binding_index += if param.kind == ParamKind::Strided { 3 } else { 1 };
+                }
+                binding_plans.push(plans);
             }
             let later_inputs: Vec<HashSet<&str>> = (0..specs.len())
                 .map(|i| {
@@ -1037,18 +1104,71 @@ impl Context {
 
             let cb = queue.commandBuffer().ok_or(MetalTileError::NoDevice)?;
 
-            // Per-spec buffer slots kept so true outputs (not consumed by later
-            // specs) can be read back at the end.
-            let mut per_spec_bufs: Vec<Vec<BufRc>> = Vec::with_capacity(specs.len());
+            // Each entry is (BufRc, byte_offset_into_buffer).
+            let mut per_spec_bufs: Vec<Vec<(BufRc, usize)>> = Vec::with_capacity(specs.len());
 
-            let push_strided = |bufs: &mut Vec<BufRc>,
+            let push_strided = |bufs: &mut Vec<(BufRc, usize)>,
                                 param: &Param,
-                                src: &BTreeMap<String, Vec<u8>>|
+                                src: &FxHashMap<String, Vec<u8>>|
              -> Result<(), MetalTileError> {
                 if param.kind == ParamKind::Strided {
-                    let (shape, strides) = resolve_strided_metadata(param, src)?;
-                    bufs.push(acquire_shared(Some(shape.as_ref()), shape.len())?);
-                    bufs.push(acquire_shared(Some(strides.as_ref()), strides.len())?);
+                    // Inline resolve_strided_metadata for FxHashMap.
+                    // The BTreeMap variant is kept for the legacy dispatch_metal path.
+                    let expected_len = param.shape.rank() * std::mem::size_of::<u32>();
+                    let defaults = known_shape_dims(param)?
+                        .map(|dims| {
+                            let strides = row_major_strides(&param.name, &dims)?;
+                            Ok::<(Vec<u8>, Vec<u8>), MetalTileError>(
+                                (encode_u32s(&dims), encode_u32s(&strides))
+                            )
+                        })
+                        .transpose()?;
+                    let mut key = String::with_capacity(param.name.len() + 8);
+                    key.push_str(&param.name);
+                    let prefix_len = key.len();
+                    key.push_str("_shape");
+                    let shape_data = match src.get(&key) {
+                        Some(bytes) => {
+                            if expected_len > 0 && bytes.len() < expected_len {
+                                return Err(MetalTileError::Buffer(format!(
+                                    "buffer '{}' has {} bytes, expected at least {}",
+                                    key, bytes.len(), expected_len
+                                )));
+                            }
+                            Cow::Borrowed(bytes.as_slice())
+                        },
+                        None => {
+                            let Some((shape_bytes, _)) = defaults.as_ref() else {
+                                return Err(MetalTileError::Buffer(format!(
+                                    "missing required strided metadata buffer '{}'", key
+                                )));
+                            };
+                            Cow::Owned(shape_bytes.clone())
+                        },
+                    };
+                    key.truncate(prefix_len);
+                    key.push_str("_strides");
+                    let strides_data = match src.get(&key) {
+                        Some(bytes) => {
+                            if expected_len > 0 && bytes.len() < expected_len {
+                                return Err(MetalTileError::Buffer(format!(
+                                    "buffer '{}' has {} bytes, expected at least {}",
+                                    key, bytes.len(), expected_len
+                                )));
+                            }
+                            Cow::Borrowed(bytes.as_slice())
+                        },
+                        None => {
+                            let Some((_, strides_bytes)) = defaults.as_ref() else {
+                                return Err(MetalTileError::Buffer(format!(
+                                    "missing required strided metadata buffer '{}'", key
+                                )));
+                            };
+                            Cow::Owned(strides_bytes.clone())
+                        },
+                    };
+                    bufs.push((acquire_shared(Some(shape_data.as_ref()), shape_data.len())?, 0));
+                    bufs.push((acquire_shared(Some(strides_data.as_ref()), strides_data.len())?, 0));
                 }
                 Ok(())
             };
@@ -1056,14 +1176,14 @@ impl Context {
             let mut enc: Option<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>> = None;
 
             for (i, spec) in specs.iter().enumerate() {
-                let mut bufs: Vec<BufRc> = Vec::with_capacity(spec.kernel.params.len() * 2);
+                let mut bufs: Vec<(BufRc, usize)> = Vec::with_capacity(spec.kernel.params.len() * 2);
 
                 for (param, plan) in spec.kernel.params.iter().zip(&binding_plans[i]) {
                     // Outputs with pre-uploaded GPU buffers → write directly in-place.
                     if param.is_output
                         && let Some(rb) = spec.output_resident.get(&param.name)
                     {
-                        bufs.push(rb.inner.clone());
+                        bufs.push((rb.inner.clone(), rb.offset));
                         push_strided(&mut bufs, param, spec.buffers)?;
                         continue;
                     }
@@ -1072,10 +1192,10 @@ impl Context {
                         let pre = spec
                             .resident
                             .get(&param.name)
-                            .map(|r| r.inner.clone())
-                            .or_else(|| alias_pool.get(&param.name).cloned());
-                        if let Some(buf) = pre {
-                            bufs.push(buf);
+                            .map(|r| (r.inner.clone(), r.offset))
+                            .or_else(|| alias_pool.get(&param.name).map(|b| (b.clone(), 0usize)));
+                        if let Some((buf, offset)) = pre {
+                            bufs.push((buf, offset));
                             push_strided(&mut bufs, param, spec.buffers)?;
                             continue;
                         }
@@ -1085,10 +1205,10 @@ impl Context {
                         if param.is_output && later_inputs[i].contains(param.name.as_str()) {
                             let b = acquire_private(plan.data_len)?;
                             alias_pool.insert(param.name.clone(), b.clone());
-                            b
+                            (b, 0usize)
                         } else {
                             let bytes = spec.buffers.get(&param.name).map(Vec::as_slice);
-                            acquire_shared(bytes, plan.data_len)?
+                            (acquire_shared(bytes, plan.data_len)?, 0usize)
                         };
                     bufs.push(new_buf);
                     push_strided(&mut bufs, param, spec.buffers)?;
@@ -1109,8 +1229,8 @@ impl Context {
                 }
                 let enc_ref = enc.as_ref().unwrap();
                 enc_ref.setComputePipelineState(&pipes[i]);
-                for (idx, buf) in bufs.iter().enumerate() {
-                    unsafe { enc_ref.setBuffer_offset_atIndex(Some(buf.as_ref()), 0, idx) };
+                for (idx, (buf, offset)) in bufs.iter().enumerate() {
+                    unsafe { enc_ref.setBuffer_offset_atIndex(Some(buf.as_ref()), *offset, idx) };
                 }
                 // Inline constexpr scalars via setBytes (Apple-recommended
                 // path for <4KB constants — skips the allocator + binding
@@ -1178,11 +1298,14 @@ impl Context {
                     if later_inputs[i].contains(param.name.as_str()) {
                         continue;
                     }
-                    let Some(buf) = per_spec_bufs[i].get(plan.data_binding_index) else { continue };
+                    let Some((buf, offset)) = per_spec_bufs[i].get(plan.data_binding_index) else { continue };
                     use objc2_metal::MTLBuffer as _;
                     let ptr = buf.contents();
                     let bytes = unsafe {
-                        std::slice::from_raw_parts(ptr.as_ptr() as *const u8, plan.data_len)
+                        std::slice::from_raw_parts(
+                            ptr.as_ptr().add(*offset) as *const u8,
+                            plan.data_len,
+                        )
                     }
                     .to_vec();
                     outputs.insert(param.name.clone(), bytes);

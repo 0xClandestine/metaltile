@@ -9,7 +9,9 @@
 //! 3. `session.generate(prompt, max_tokens, temperature, on_token)` —
 //!    convenience wrapper that returns `GenerateOutput` with timing stats.
 
-use std::{collections::BTreeMap, path::Path};
+use std::path::Path;
+
+use rustc_hash::FxHashMap;
 
 use metaltile_core::dtype::DType;
 use metaltile_model::{
@@ -103,25 +105,29 @@ impl Session {
 
         // ── Upload weights to GPU-resident buffers ─────────────────────
         info!(n_tensors = weights.len(), "uploading weights to GPU");
-        let mut resident: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
+        let mut resident: FxHashMap<String, ResidentBuffer> = FxHashMap::default();
         for (name, bytes) in &weights {
             let rb = ctx.upload_resident(bytes).map_err(|e| InferError::Other(e.to_string()))?;
             resident.insert(name.clone(), rb);
         }
 
         // ── Allocate GPU-resident KV cache ─────────────────────────────
-        // Layout per layer, per K and V:
-        //   n_kv_heads × max_seq_len × head_dim elements of `dtype`
+        // Layout: a single large GPU allocation for all K and V caches,
+        // replacing 2×n_layers separate Metal buffer allocations.
+        // Each "kv_cache.{layer}.{k/v}" entry maps to a view of this buffer.
         let kv_bytes =
             config.n_kv_heads * config.max_seq_len * config.head_dim * dtype.size_bytes();
+        let total_kv_bytes = kv_bytes * 2 * config.n_layers;
+        let kv_base = ctx.alloc_resident(total_kv_bytes).map_err(|e| InferError::Other(e.to_string()))?;
         for layer in 0..config.n_layers {
-            for key in ["k", "v"] {
+            for (ki, key) in ["k", "v"].iter().enumerate() {
                 let name = format!("kv_cache.{layer}.{key}");
+                let offset_bytes = (layer * 2 + ki) * kv_bytes;
+                // Create a sub-buffer view into the single large allocation.
                 // alloc_resident skips the zero-fill memcpy; the KV-update
                 // kernel always writes before reading, so uninitialised data
                 // at position ≥ n_kv is never consumed.
-                let rb =
-                    ctx.alloc_resident(kv_bytes).map_err(|e| InferError::Other(e.to_string()))?;
+                let rb = kv_base.slice(offset_bytes, kv_bytes);
                 resident.insert(name, rb);
             }
         }
@@ -150,7 +156,7 @@ impl Session {
         let plan = compile(&def, &params, &reg, fusion_mode)?;
 
         // ── Initial state ──────────────────────────────────────────────
-        let mut state = StateMap::new();
+        let mut state = StateMap::default();
         state.insert("position".to_string(), 0u32.to_le_bytes().to_vec());
         state.insert("n_kv".to_string(), 0u32.to_le_bytes().to_vec());
         state.insert("rms_eps".to_string(), 1e-5f32.to_le_bytes().to_vec());

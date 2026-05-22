@@ -89,7 +89,7 @@ pub fn load_safetensors(
 ) -> Result<WeightMap, InferError> {
     let bytes = std::fs::read(path.as_ref())?;
     let tensors = SafeTensors::deserialize(&bytes)?;
-    let mut map = WeightMap::new();
+    let mut map = WeightMap::default();
     for (name, view) in tensors.tensors() {
         let data = match target_dtype {
             Some(dst) => convert_tensor(view.data(), view.dtype(), dst),
@@ -108,7 +108,7 @@ pub fn load_safetensors_dir(
     target_dtype: Option<DType>,
 ) -> Result<WeightMap, InferError> {
     let dir = dir.as_ref();
-    let mut map = WeightMap::new();
+    let mut map = WeightMap::default();
 
     let mut shards: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok())
@@ -165,10 +165,9 @@ pub fn load_weights(path: impl AsRef<Path>, target_dtype: DType) -> Result<Weigh
 ///
 /// Names that don't match any pattern are passed through unchanged.
 pub fn remap_hf_llama_names(raw: WeightMap) -> WeightMap {
-    let mut out = WeightMap::with_capacity(raw.len());
+    let mut out = WeightMap::default();
     for (name, bytes) in raw {
         let mapped = remap_one(&name);
-        // Into<String> from Cow<str>: Borrowed variant is free (no alloc).
         out.insert(mapped.into_owned(), bytes);
     }
     out

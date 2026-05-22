@@ -19,6 +19,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 half = { workspace = true }
 
+rustc-hash = { workspace = true }
 safetensors = "0.7"
 toml = "0.8"
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }

@@ -20,9 +20,11 @@
 //! persistent (session-lifetime scratch), eliminating per-token pool lookups.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     time::{Duration, Instant},
 };
+
+use rustc_hash::FxHashMap;
 
 use metaltile_runtime::{Context, DispatchSpec, ResidentBuffer};
 use tracing::error;
@@ -39,12 +41,13 @@ use crate::{
 const GPU_WATCHDOG_SECS: u64 = 30;
 
 /// GPU buffer storage keyed by tensor name.
-pub type WeightMap = HashMap<String, Vec<u8>>;
+pub type WeightMap = FxHashMap<String, Vec<u8>>;
 
 /// Runtime state buffers (kv_cache, position counters, etc.).
-pub type StateMap = HashMap<String, Vec<u8>>;
+pub type StateMap = FxHashMap<String, Vec<u8>>;
 
 /// Static empty function-constants map (shared across all dispatches).
+/// Uses BTreeMap for deterministic sorted iteration in PSO cache key hashing.
 static EMPTY_FN_CONSTS: std::sync::OnceLock<BTreeMap<String, u32>> = std::sync::OnceLock::new();
 
 /// Execute a plan on the GPU and read back the final output buffer.
@@ -80,15 +83,15 @@ pub fn execute_plan(
     // refs to Slot(idx) before returning the plan, so slot_data covers all
     // intermediate tensors — no separate intra-group buffer map is needed.
     let n = plan.nodes.len();
-    let mut all_buffers: Vec<BTreeMap<String, Vec<u8>>> = Vec::with_capacity(n);
-    let mut all_resident: Vec<BTreeMap<String, ResidentBuffer>> = Vec::with_capacity(n);
-    let mut all_output_resident: Vec<BTreeMap<String, ResidentBuffer>> = Vec::with_capacity(n);
+    let mut all_buffers: Vec<FxHashMap<String, Vec<u8>>> = Vec::with_capacity(n);
+    let mut all_resident: Vec<FxHashMap<String, ResidentBuffer>> = Vec::with_capacity(n);
+    let mut all_output_resident: Vec<FxHashMap<String, ResidentBuffer>> = Vec::with_capacity(n);
 
     for (idx, node) in plan.nodes.iter().enumerate() {
         let kernel = &plan.cached_kernels[idx]; // mode pre-set at compile time
-        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-        let mut spec_resident: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
-        let mut spec_output_resident: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
+        let mut buffers: FxHashMap<String, Vec<u8>> = FxHashMap::default();
+        let mut spec_resident: FxHashMap<String, ResidentBuffer> = FxHashMap::default();
+        let mut spec_output_resident: FxHashMap<String, ResidentBuffer> = FxHashMap::default();
 
         // ── Input bindings ─────────────────────────────────────────────
         for (param_name, slot_ref) in &node.input_bindings {
@@ -273,12 +276,13 @@ pub struct PreparedDispatch {
     /// reused across all tokens (avoids per-token buffer-pool lookups).
     pub(crate) slot_bufs: Vec<ResidentBuffer>,
     /// Static input GPU-resident maps (weights + pre-allocated slots).
-    all_resident: Vec<BTreeMap<String, ResidentBuffer>>,
+    /// Uses FxHashMap for O(1) lookup in the hot per-token dispatch path.
+    all_resident: Vec<FxHashMap<String, ResidentBuffer>>,
     /// Static output GPU-resident maps (KV cache + output slots).
-    all_output_resident: Vec<BTreeMap<String, ResidentBuffer>>,
+    all_output_resident: Vec<FxHashMap<String, ResidentBuffer>>,
     /// CPU-side buffer maps. Pre-populated with static constexprs.
     /// Dynamic entries (state-derived) updated in-place before each dispatch.
-    all_buffers: Vec<BTreeMap<String, Vec<u8>>>,
+    all_buffers: Vec<FxHashMap<String, Vec<u8>>>,
     /// Nodes with dynamic (State-keyed) constexprs: (node_idx, [(param, state_key)]).
     dyn_cexpr: Vec<(usize, Vec<(String, String)>)>,
     /// Nodes with CPU-side state scalar inputs: (node_idx, [(param, state_key)]).
@@ -300,7 +304,7 @@ impl PreparedDispatch {
     pub fn build(
         ctx: &Context,
         plan: &ExecutionPlan,
-        resident: &BTreeMap<String, ResidentBuffer>,
+        resident: &FxHashMap<String, ResidentBuffer>,
         state: &StateMap,
     ) -> Result<Self, ModelError> {
         // Allocate session-lifetime slot buffers once.
@@ -312,18 +316,18 @@ impl PreparedDispatch {
             .map_err(|e| ModelError::Other(e.to_string()))?;
 
         let n = plan.nodes.len();
-        let mut all_resident = Vec::with_capacity(n);
-        let mut all_output_resident = Vec::with_capacity(n);
-        let mut all_buffers = Vec::with_capacity(n);
+        let mut all_resident: Vec<FxHashMap<String, ResidentBuffer>> = Vec::with_capacity(n);
+        let mut all_output_resident: Vec<FxHashMap<String, ResidentBuffer>> = Vec::with_capacity(n);
+        let mut all_buffers: Vec<FxHashMap<String, Vec<u8>>> = Vec::with_capacity(n);
         let mut dyn_cexpr: Vec<(usize, Vec<(String, String)>)> = Vec::new();
         let mut dyn_state_in: Vec<(usize, Vec<(String, String)>)> = Vec::new();
         let mut cpu_state_out: Vec<(usize, Vec<(String, String, usize)>)> = Vec::new();
 
         for (idx, node) in plan.nodes.iter().enumerate() {
             let kernel = &plan.cached_kernels[idx];
-            let mut spec_res: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
-            let mut spec_out_res: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
-            let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+            let mut spec_res: FxHashMap<String, ResidentBuffer> = FxHashMap::default();
+            let mut spec_out_res: FxHashMap<String, ResidentBuffer> = FxHashMap::default();
+            let mut buffers: FxHashMap<String, Vec<u8>> = FxHashMap::default();
             let mut node_dyn_cexpr: Vec<(String, String)> = Vec::new();
             let mut node_dyn_state_in: Vec<(String, String)> = Vec::new();
             let mut node_cpu_state_out: Vec<(String, String, usize)> = Vec::new();
