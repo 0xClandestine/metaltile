@@ -564,8 +564,11 @@ impl MslGenerator {
                         CoopTileScope::SimdGroup => "metal::execution_simdgroup",
                         CoopTileScope::Threadgroup => "metal::execution_threadgroup",
                     };
+                    // Apple's `matmul2d_descriptor::mode` has two members:
+                    // `multiply` (C ← A·B, fresh) and `multiply_accumulate`
+                    // (C ← C + A·B). `Overwrite` is the fresh-product case.
                     let acc_mode_s = match acc_mode {
-                        metaltile_core::ir::CoopTileAccMode::Overwrite => "mode::overwrite",
+                        metaltile_core::ir::CoopTileAccMode::Overwrite => "mode::multiply",
                         metaltile_core::ir::CoopTileAccMode::MultiplyAccumulate =>
                             "mode::multiply_accumulate",
                     };

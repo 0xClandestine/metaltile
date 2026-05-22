@@ -186,7 +186,7 @@ fn run_case(case: &Case) {
         buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
         buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
         let ctx = Context::new().unwrap();
-        let mut k = moe_mpp_bm8::kernel_ir_for(dt.to_dtype());
+        let mut k = moe_mpp_bm8::mt_moe_gather_qmm_mma_int4_bm8_mpp::kernel_ir_for(dt.to_dtype());
         k.mode = KernelMode::Reduction;
         // Grid: [ceil(N/32), ceil(T/8), 1]. TG: 32 lanes = 1 SG.
         let r = ctx

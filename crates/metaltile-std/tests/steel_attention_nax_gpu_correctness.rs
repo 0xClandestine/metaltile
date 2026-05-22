@@ -131,7 +131,7 @@ fn run_sdpa_nax(
     buffers.insert("n_kv_heads".into(), (n_kv_heads as u32).to_le_bytes().to_vec());
     buffers.insert("scale".into(), scale.to_le_bytes().to_vec());
 
-    let mut kernel = steel_attention_nax::kernel_ir_for(dtype);
+    let mut kernel = steel_attention_nax::mt_sdpa_prefill_nax::kernel_ir_for(dtype);
     kernel.mode = KernelMode::Reduction;
 
     let result = ctx
@@ -320,4 +320,49 @@ fn mt_sdpa_prefill_nax_matches_cpu_reference_f16_multi_tile() {
     let cos = cosine(&expected, &actual);
     println!("[f16 multi-tile q_len={q_len}] cos={cos:.6}");
     assert!(cos >= 0.999, "cosine {cos:.6} < 0.999 (f16 multi-tile)");
+}
+
+#[test]
+fn mt_sdpa_prefill_nax_matches_cpu_reference_bf16_multi_tile() {
+    // bf16 stages through `half` inside the kernel (`coop_stage(T)`) —
+    // Apple's `matmul2d` mishandles `bfloat` cooperative tensors. The
+    // oracle rounds inputs through bf16 so the comparison is apples-to-
+    // apples; bf16's 8-bit significand widens the bar slightly.
+    let (q_len, k_len, gqa, nqh, nkvh) = (64usize, 64usize, 1usize, 1usize, 1usize);
+    let scale = 1.0 / (HEAD_DIM as f32).sqrt();
+    let (q_f32, k_f32, v_f32) = build_attn_inputs(q_len, k_len, nqh, nkvh);
+    let round_bf16 = |v: f32| -> f32 { half::bf16::from_f32(v).to_f32() };
+    let q: Vec<f32> = q_f32.iter().map(|&v| round_bf16(v)).collect();
+    let k: Vec<f32> = k_f32.iter().map(|&v| round_bf16(v)).collect();
+    let v: Vec<f32> = v_f32.iter().map(|&v| round_bf16(v)).collect();
+    let expected = cpu_sdpa_reference(&q, &k, &v, q_len, k_len, gqa, nqh, nkvh, scale);
+
+    let to_bf16 = |xs: &[f32]| -> Vec<u8> {
+        xs.iter().flat_map(|&v| half::bf16::from_f32(v).to_bits().to_le_bytes()).collect()
+    };
+
+    let _g = gpu_lock();
+    let ctx = Context::new().expect("Context::new");
+    let out_bytes = run_sdpa_nax(
+        &ctx,
+        DType::BF16,
+        &to_bf16(&q),
+        &to_bf16(&k),
+        &to_bf16(&v),
+        q_len,
+        k_len,
+        gqa,
+        nqh,
+        nkvh,
+        scale,
+        2,
+    );
+    let actual: Vec<f32> = out_bytes
+        .chunks_exact(2)
+        .map(|c| half::bf16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
+        .collect();
+
+    let cos = cosine(&expected, &actual);
+    println!("[bf16 multi-tile q_len={q_len}] cos={cos:.6}");
+    assert!(cos >= 0.997, "cosine {cos:.6} < 0.997 (bf16 multi-tile)");
 }

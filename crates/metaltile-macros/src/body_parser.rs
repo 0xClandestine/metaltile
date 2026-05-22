@@ -1428,22 +1428,10 @@ impl DslBodyParser {
                     },
                 }
             } else {
-                // Fall back to type-path form (`T`, `f32`, `f16`, ...).
-                let ty_str = quote! { #arg }.to_string();
-                match ty_str.trim() {
-                    "T" =>
-                        if let Some(tok) = self.type_vars.get("T") {
-                            tok.clone()
-                        } else {
-                            quote! { DType::F32 }
-                        },
-                    "f32" => quote! { DType::F32 },
-                    "f16" => quote! { DType::F16 },
-                    "bf16" => quote! { DType::BF16 },
-                    "i32" => quote! { DType::I32 },
-                    "u32" => quote! { DType::U32 },
-                    _ => quote! { DType::F32 },
-                }
+                // Type-path form (`T`, `f32`, `f16`, …) or the MPP staging
+                // form `coop_stage(T)` — both resolved by the shared
+                // `dtype_from_expr_arg` helper.
+                self.dtype_from_expr_arg(unwrapped)
             }
         } else {
             quote! { DType::F32 }
@@ -1755,7 +1743,34 @@ impl DslBodyParser {
     ///
     /// Accepts type-path form (`f32`, `f16`, `bf16`, `T`, …). Generic type
     /// variables (e.g. `T`) are looked up in `self.type_vars`.
+    ///
+    /// Also accepts the call form **`coop_stage(D)`** — the *MPP staging
+    /// dtype* of `D`. Apple's `mpp::tensor_ops::matmul2d` mishandles
+    /// `bfloat` cooperative tensors, so a `bfloat` activation must be
+    /// staged through `half` (whose 10-bit mantissa losslessly covers
+    /// bf16's 7); `f32`/`f16` stage as themselves. `coop_stage(T)` lets a
+    /// kernel stay generic over `T` while its threadgroup tiles and
+    /// `coop_tile_*` ops pick up the staged type automatically.
     fn dtype_from_expr_arg(&self, arg: &Expr) -> TokenStream {
+        // `coop_stage(D)` → half-for-bf16-else-D, resolved per instantiation.
+        if let Expr::Call(call) = arg {
+            let fname = match &*call.func {
+                Expr::Path(p) =>
+                    p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default(),
+                _ => String::new(),
+            };
+            if fname == "coop_stage"
+                && let Some(inner) = call.args.first()
+            {
+                let inner_ts = self.dtype_from_expr_arg(inner);
+                return quote! {
+                    {
+                        let __coop_stage_d = #inner_ts;
+                        if __coop_stage_d == DType::BF16 { DType::F16 } else { __coop_stage_d }
+                    }
+                };
+            }
+        }
         let name = match arg {
             Expr::Path(p) =>
                 p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default(),
