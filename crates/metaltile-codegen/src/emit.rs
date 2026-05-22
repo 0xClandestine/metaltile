@@ -174,29 +174,12 @@ pub fn render_swift_wrappers(kernels: &[Kernel]) -> String {
     );
     for k in kernels {
         emit_swift_wrapper(&mut out, k);
-        if needs_indirect_variant(&k.name) {
+        if k.wants_indirect_variant {
             emit_swift_wrapper_indirect(&mut out, k);
         }
     }
     out.push_str("}\n");
     out
-}
-
-/// Kernels that get a `_indirect` Swift wrapper alongside the regular one.
-///
-/// The indirect variant takes an `MTLBuffer` carrying
-/// `MTLDispatchThreadgroupsIndirectArguments` instead of an `MTLSize`
-/// grid, so the GPU can pick the dispatch shape from a buffer rather
-/// than the host computing it. Used by FFAI's GPU-router work to chain
-/// successive MoE-layer expert dispatches onto one command buffer
-/// without per-layer host stalls.
-///
-/// Allowlist (not opt-in via the kernel DSL) so codegen cost is not paid
-/// on kernels that have no consumer for the indirect form. Restricted to
-/// the f16 + bf16 `dequant_gemv_int4` variants — the only kernels FFAI
-/// dispatches indirectly today.
-fn needs_indirect_variant(name: &str) -> bool {
-    name == "dequant_gemv_int4_f16" || name == "dequant_gemv_int4_bf16"
 }
 
 pub fn write_swift_wrappers(kernels: &[Kernel], path: &Path) -> Result<()> {
@@ -462,17 +445,10 @@ mod tests {
     }
 
     #[test]
-    fn indirect_variant_allowlist() {
-        assert!(needs_indirect_variant("dequant_gemv_int4_f16"));
-        assert!(needs_indirect_variant("dequant_gemv_int4_bf16"));
-        // f32 has no MoE consumer; non-gemv kernels never get the variant.
-        assert!(!needs_indirect_variant("dequant_gemv_int4_f32"));
-        assert!(!needs_indirect_variant("mt_add_f32"));
-    }
-
-    #[test]
-    fn emits_indirect_wrapper_for_allowlisted_kernel() {
-        let swift = render_swift_wrappers(&[dummy_kernel("dequant_gemv_int4_bf16")]);
+    fn emits_indirect_wrapper_when_kernel_opts_in() {
+        let mut k = dummy_kernel("dequant_gemv_int4_bf16");
+        k.wants_indirect_variant = true;
+        let swift = render_swift_wrappers(&[k]);
         // Direct + indirect wrappers both present.
         assert!(swift.contains("func dequant_gemv_int4_bf16("));
         assert!(swift.contains("func dequant_gemv_int4_bf16_indirect("));
@@ -481,6 +457,14 @@ mod tests {
         assert!(swift.contains("dispatchThreadgroups(indirectBuffer: indirectBuffer"));
         // PSO lookup uses the base kernel name (no `_indirect` PSO exists).
         assert!(swift.contains("pipelineState(for: \"dequant_gemv_int4_bf16\")"));
+    }
+
+    #[test]
+    fn no_indirect_wrapper_when_kernel_does_not_opt_in() {
+        // Default Kernel::new returns `wants_indirect_variant: false`.
+        let swift = render_swift_wrappers(&[dummy_kernel("dequant_gemv_int4_bf16")]);
+        assert!(swift.contains("func dequant_gemv_int4_bf16("));
+        assert!(!swift.contains("_indirect("));
     }
 
     #[test]

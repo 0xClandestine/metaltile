@@ -1399,6 +1399,17 @@ pub struct Kernel {
     /// opt in via the kernel module's wrapper. Currently used by the
     /// SDPA-prefill MMA family on M2 where it buys ~2pts bf16.
     pub bfloat_reinterpret_cast: bool,
+    /// Per-kernel opt-in for the indirect-dispatch Swift wrapper variant.
+    /// When `true`, `render_swift_wrappers` emits a `<name>_indirect`
+    /// alongside the regular wrapper that takes an `MTLBuffer` carrying
+    /// `MTLDispatchThreadgroupsIndirectArguments` instead of an `MTLSize`
+    /// grid. Used by FFAI's GPU-router work to chain successive MoE-layer
+    /// dispatches without per-layer host stalls. Replaces the previous
+    /// hardcoded kernel-name allowlist in `metaltile-codegen::emit` —
+    /// kernels now declare their own indirect-dispatch eligibility via
+    /// the DSL / IR rather than the codegen having a special-case match
+    /// on `name`.
+    pub wants_indirect_variant: bool,
 }
 
 impl Kernel {
@@ -1417,6 +1428,7 @@ impl Kernel {
             return_shapes: Vec::new(),
             tile_annotations: FxHashMap::default(),
             bfloat_reinterpret_cast: false,
+            wants_indirect_variant: false,
         }
     }
 
@@ -1465,6 +1477,7 @@ impl Clone for Kernel {
             return_shapes: self.return_shapes.clone(),
             tile_annotations: self.tile_annotations.clone(),
             bfloat_reinterpret_cast: self.bfloat_reinterpret_cast,
+            wants_indirect_variant: self.wants_indirect_variant,
         }
     }
 }

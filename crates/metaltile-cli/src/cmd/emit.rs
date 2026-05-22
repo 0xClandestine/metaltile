@@ -96,6 +96,15 @@ fn collect_kernels() -> Vec<Kernel> {
             let mut k = (spec.kernel_ir)(dt);
             k.name = format!("{}_{}", kernel_name, dtype_suffix(dt));
             k.mode = mode;
+            // Per-kernel opt-in for the `_indirect` Swift wrapper.
+            // Replaces the previous hardcoded kernel-name allowlist in
+            // `metaltile-codegen::emit` — kernels now declare their own
+            // indirect-dispatch eligibility (see
+            // `dequant_gemv::dequant_gemv_wants_indirect`) and the
+            // codegen pass just reads `Kernel::wants_indirect_variant`.
+            if metaltile_std::ffai::dequant_gemv::dequant_gemv_wants_indirect(&k.name) {
+                k.wants_indirect_variant = true;
+            }
             kernels.push(k);
         }
     }
