@@ -33,11 +33,7 @@ use metaltile_core::{dtype::DType, ir::KernelMode};
 use metaltile_std::mlx::{
     hadamard_m,
     quantized_nax,
-    steel::gemm::{
-        steel_gemm_fused_nax,
-        steel_gemm_gather_nax,
-        steel_gemm_splitk_nax,
-    },
+    steel::gemm::{steel_gemm_fused_nax, steel_gemm_gather_nax, steel_gemm_splitk_nax},
 };
 
 /// Lower one of the NAX-family kernel IRs to MSL with its declared
@@ -48,9 +44,7 @@ use metaltile_std::mlx::{
 fn steel_msl(kernel_ir: metaltile_core::ir::Kernel, mode: KernelMode) -> String {
     let mut kernel = kernel_ir;
     kernel.mode = mode;
-    MslGenerator::new(MslConfig::default())
-        .generate(&kernel)
-        .expect("kernel must codegen cleanly")
+    MslGenerator::new(MslConfig::default()).generate(&kernel).expect("kernel must codegen cleanly")
 }
 
 // ── steel_gemm_fused_nax ─────────────────────────────────────────────
@@ -89,10 +83,7 @@ fn steel_gemm_splitk_nax_f16_msl() {
 
 #[test]
 fn steel_gemm_splitk_nax_accum_f32_msl() {
-    let msl = steel_msl(
-        steel_gemm_splitk_nax::accum_kernel_ir_for(DType::F32),
-        KernelMode::Grid3D,
-    );
+    let msl = steel_msl(steel_gemm_splitk_nax::accum_kernel_ir_for(DType::F32), KernelMode::Grid3D);
     assert_snapshot!(msl);
 }
 
