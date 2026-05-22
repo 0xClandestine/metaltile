@@ -31,6 +31,7 @@ use insta::assert_snapshot;
 use metaltile_codegen::{MslGenerator, msl::MslConfig};
 use metaltile_core::{dtype::DType, ir::KernelMode};
 use metaltile_std::mlx::{
+    fp_quantized_nax,
     hadamard_m,
     quantized_nax,
     steel::gemm::{steel_gemm_fused_nax, steel_gemm_gather_nax, steel_gemm_splitk_nax},
@@ -95,6 +96,18 @@ fn steel_gemm_splitk_nax_accum_f32_msl() {
 #[test]
 fn quantized_nax_f16_msl() {
     let msl = steel_msl(quantized_nax::kernel_ir_for(DType::F16), KernelMode::Reduction);
+    assert_snapshot!(msl);
+}
+
+// ── fp_quantized_nax ─────────────────────────────────────────────────
+//
+// `mt_fp_qmm_nax` — fp4 (E2M1) quantized matmul. Same MPP coop-load /
+// `matmul2d` shape as `quantized_nax`, with the FP4 codebook dequant
+// replacing int4 nibble · scale + bias. F16 pins the production dtype.
+
+#[test]
+fn fp_quantized_nax_f16_msl() {
+    let msl = steel_msl(fp_quantized_nax::kernel_ir_for(DType::F16), KernelMode::Reduction);
     assert_snapshot!(msl);
 }
 
