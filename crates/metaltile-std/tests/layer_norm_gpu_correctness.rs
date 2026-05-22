@@ -44,10 +44,18 @@ fn cpu_layer_norm_f32(x: &[f32], w: &[f32], b: &[f32], n: usize, eps: f32) -> Ve
     out
 }
 
-fn run_layer_norm(x: &[f32], w: &[f32], b_vec: &[f32], eps: f32, dt: Dt, n: usize, rows: usize) -> Vec<f32> {
+fn run_layer_norm(
+    x: &[f32],
+    w: &[f32],
+    b_vec: &[f32],
+    eps: f32,
+    dt: Dt,
+    n: usize,
+    rows: usize,
+) -> Vec<f32> {
     // TPG = n / 4 — kernel invariant: each thread handles 4 consecutive elements.
     let tpg = n / 4;
-    assert!(tpg >= 32 && tpg <= 1024, "TPG must be in [32, 1024]");
+    assert!((32..=1024).contains(&tpg), "TPG must be in [32, 1024]");
 
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     buffers.insert("x".into(), pack_bytes(x, dt));

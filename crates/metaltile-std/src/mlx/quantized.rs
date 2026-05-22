@@ -3527,7 +3527,6 @@ qvm_odd!(mt_qvm_b3, 3u32, "qvm_b3");
 qvm_odd!(mt_qvm_b5, 5u32, "qvm_b5");
 qvm_odd!(mt_qvm_b6, 6u32, "qvm_b6");
 
-
 /// Auto-select the best `mt_qmm*` kernel for a given dtype + M
 /// (number of tokens / batched rows in this prefill). Returns the
 /// kernel IR ready to dispatch. Caller still owns grid sizing — see

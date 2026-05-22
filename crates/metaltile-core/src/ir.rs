@@ -1704,8 +1704,9 @@ impl Op {
             },
             Op::Zeros { dtype, shape } => write!(f, "Zeros({dtype:?}, {shape:?})"),
             Op::Transpose { value } => write!(f, "Transpose(v{})", value.as_u32()),
-            Op::ExpandDims { value, axis } =>
-                write!(f, "ExpandDims(v{}, axis={axis})", value.as_u32()),
+            Op::ExpandDims { value, axis } => {
+                write!(f, "ExpandDims(v{}, axis={axis})", value.as_u32())
+            },
             Op::Reshape { value, shape } => write!(f, "Reshape(v{}, {shape:?})", value.as_u32()),
             Op::Cat { values, axis } => {
                 let vals: Vec<String> = values.iter().map(|v| format!("v{}", v.as_u32())).collect();
@@ -1761,8 +1762,9 @@ impl Op {
                 write!(f, "CoopTileStoreC({name}, {ptr_name}, extents<{ei},{eo}>)")
             },
             Op::UnaryOp { op, value } => write!(f, "UnaryOp({op:?}, v{})", value.as_u32()),
-            Op::Activation { kind, value } =>
-                write!(f, "Activation({kind:?}, v{})", value.as_u32()),
+            Op::Activation { kind, value } => {
+                write!(f, "Activation({kind:?}, v{})", value.as_u32())
+            },
             Op::Select { cond, on_true, on_false } => {
                 write!(
                     f,
@@ -1772,8 +1774,9 @@ impl Op {
                     on_false.as_u32()
                 )
             },
-            Op::Broadcast { value, shape } =>
-                write!(f, "Broadcast(v{}, {shape:?})", value.as_u32()),
+            Op::Broadcast { value, shape } => {
+                write!(f, "Broadcast(v{}, {shape:?})", value.as_u32())
+            },
             Op::Splat { value, dtype, shape } => write!(f, "Splat({value}, {dtype:?}, {shape:?})"),
             Op::FusedElementwise { ops } => {
                 write!(f, "FusedElementwise([")?;

@@ -20,7 +20,7 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> { unpack_bytes(bytes, Dt::F32) }
 #[test]
 fn sdpa_decode_d512_matches_naive_cpu_reference_f32() {
     let n_q_heads = 4usize;
-    let n_kv_heads = 1usize;   // GQA fan-out 4 (Gemma 4 E2B global layout)
+    let n_kv_heads = 1usize; // GQA fan-out 4 (Gemma 4 E2B global layout)
     let head_dim = 512usize;
     let n_kv = 8usize;
     let kv_stride = 8usize;
@@ -54,13 +54,7 @@ fn sdpa_decode_d512_matches_naive_cpu_reference_f32() {
     // 1024, so a 1024-thread dispatch silently no-ops (output stays
     // zero). See the kernel's DISPATCH INVARIANTS.
     let result = ctx
-        .dispatch_with_grid(
-            &kernel,
-            &buffers,
-            &BTreeMap::new(),
-            [n_q_heads, 1, 1],
-            [512, 1, 1],
-        )
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [n_q_heads, 1, 1], [512, 1, 1])
         .expect("dispatch_with_grid should succeed");
 
     let out_bytes = result.outputs.get("out").expect("`out` buffer");
@@ -82,6 +76,7 @@ fn sdpa_decode_d512_matches_naive_cpu_reference_f32() {
         max_diff < 1e-3,
         "sdpa_decode_d512 diverges from CPU reference: max |diff| = {max_diff:.2e} at {max_at} \
          (expected[{max_at}] = {:.4}, actual[{max_at}] = {:.4})",
-        expected[max_at], actual[max_at],
+        expected[max_at],
+        actual[max_at],
     );
 }

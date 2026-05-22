@@ -256,7 +256,13 @@ fn sdpa_decode_swa_no_sinks_matches_cpu_f32() {
 /// joins the softmax max + denominator but contributes nothing to the
 /// weighted-V sum. Result is the dense SDPA output scaled down by
 /// `denom_no_sink / denom_with_sink` per head.
-fn naive_sdpa_sink_f32(q: &[f32], k: &[f32], v: &[f32], s: &SdpaShape, sink_logit: f32) -> Vec<f32> {
+fn naive_sdpa_sink_f32(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    s: &SdpaShape,
+    sink_logit: f32,
+) -> Vec<f32> {
     let gqa = s.n_q_heads / s.n_kv_heads;
     let mut out = vec![0.0f32; s.n_q_heads * s.head_dim];
     for qh in 0..s.n_q_heads {
@@ -358,7 +364,7 @@ fn sdpa_decode_learned_sink_matches_cpu_f32() {
         heads_per_group,
         0,
         0,
-        0, // has_sink off
+        0,          // has_sink off
         sink_logit, // ignored when has_sink == 0
         scale,
     );

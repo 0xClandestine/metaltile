@@ -17,13 +17,22 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{
-    Dt, max_abs_diff, naive_aura_encode_f32, pack_bytes, pack_u32_bytes, ramp, srht_rotation,
-    unpack_bytes, unpack_u32_bytes,
+    Dt,
+    max_abs_diff,
+    naive_aura_encode_f32,
+    pack_bytes,
+    pack_u32_bytes,
+    ramp,
+    srht_rotation,
+    unpack_bytes,
+    unpack_u32_bytes,
 };
 use metaltile_core::{dtype::DType, ir::KernelMode};
 use metaltile_runtime::Context;
-use metaltile_std::ffai::aura_dequant_rotated::aura_dequant_rotated_int4;
-use metaltile_std::ffai::aura_encode::aura_encode_int4;
+use metaltile_std::ffai::{
+    aura_dequant_rotated::aura_dequant_rotated_int4,
+    aura_encode::aura_encode_int4,
+};
 
 fn f32_slice_to_bytes(vals: &[f32]) -> Vec<u8> { pack_bytes(vals, Dt::F32) }
 fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> { unpack_bytes(bytes, Dt::F32) }
@@ -193,26 +202,16 @@ fn aura_encode_to_dequant_round_trip_srht_rotation_f32() {
     let mut enc_kernel = aura_encode_int4::kernel_ir_for(DType::F32);
     enc_kernel.mode = KernelMode::Reduction;
     let enc_result = ctx
-        .dispatch_with_grid(
-            &enc_kernel,
-            &enc_buffers,
-            &BTreeMap::new(),
-            [rows, 1, 1],
-            [dim, 1, 1],
-        )
+        .dispatch_with_grid(&enc_kernel, &enc_buffers, &BTreeMap::new(), [rows, 1, 1], [dim, 1, 1])
         .expect("encode dispatch_with_grid should succeed");
 
-    let gpu_packed =
-        unpack_u32_bytes(enc_result.outputs.get("packed_out").expect("`packed_out`"));
+    let gpu_packed = unpack_u32_bytes(enc_result.outputs.get("packed_out").expect("`packed_out`"));
     let gpu_norms = bytes_to_f32_vec(enc_result.outputs.get("norms_out").expect("`norms_out`"));
 
     // Sanity: the GPU encoder agrees with the CPU encode reference
     // under the non-identity rotation before we round-trip it — both
     // the quantisation indices and the norm-correction factors.
-    assert_eq!(
-        gpu_packed, cpu_packed,
-        "encode packed_out diverges under SRHT rotation",
-    );
+    assert_eq!(gpu_packed, cpu_packed, "encode packed_out diverges under SRHT rotation",);
     let norm_diff = max_abs_diff(&cpu_norms, &gpu_norms);
     assert!(
         norm_diff < 1e-4,
@@ -235,19 +234,14 @@ fn aura_encode_to_dequant_round_trip_srht_rotation_f32() {
     let mut deq_kernel = aura_dequant_rotated_int4::kernel_ir_for(DType::F32);
     deq_kernel.mode = KernelMode::Grid3D;
     let deq_result = ctx
-        .dispatch_with_grid(
-            &deq_kernel,
-            &deq_buffers,
-            &BTreeMap::new(),
-            [1, 1, rows],
-            [packed_width, 1, 1],
-        )
+        .dispatch_with_grid(&deq_kernel, &deq_buffers, &BTreeMap::new(), [1, 1, rows], [
+            packed_width,
+            1,
+            1,
+        ])
         .expect("dequant dispatch_with_grid should succeed");
 
     let actual = bytes_to_f32_vec(deq_result.outputs.get("out").expect("`out` buffer"));
     let diff = max_abs_diff(&expected, &actual);
-    assert!(
-        diff < 1e-5,
-        "encode→dequant round-trip under SRHT rotation: max |diff| = {diff:.2e}",
-    );
+    assert!(diff < 1e-5, "encode→dequant round-trip under SRHT rotation: max |diff| = {diff:.2e}",);
 }

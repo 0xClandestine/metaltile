@@ -24,7 +24,8 @@ use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
 use metaltile_core::{dtype::DType, ir::KernelMode};
 use metaltile_runtime::Context;
 use metaltile_std::ffai::aura_flash_p1::{
-    aura_flash_p1_causal_kb4_vb2_d128, aura_flash_p1_kb4_vb2_d128,
+    aura_flash_p1_causal_kb4_vb2_d128,
+    aura_flash_p1_kb4_vb2_d128,
 };
 
 const DIM: usize = 128;
@@ -36,7 +37,13 @@ const TOKENS: usize = 8;
 const BLOCK_SIZE: usize = 4;
 
 /// Pack per-dim integer codebook indices into the kernel's bit-stream.
-fn pack_int_indices(indices: &[u32], kv_heads: usize, tokens: usize, dim: usize, bits: usize) -> Vec<u32> {
+fn pack_int_indices(
+    indices: &[u32],
+    kv_heads: usize,
+    tokens: usize,
+    dim: usize,
+    bits: usize,
+) -> Vec<u32> {
     let mask = (1u32 << bits) - 1;
     let packed_width = (dim * bits).div_ceil(32);
     let mut packed = vec![0u32; kv_heads * tokens * packed_width];
@@ -60,6 +67,7 @@ fn pack_int_indices(indices: &[u32], kv_heads: usize, tokens: usize, dim: usize,
     packed
 }
 
+#[allow(dead_code)] // key_indices / val_indices mirror the kernel input set
 struct Inputs {
     q_rot: Vec<f32>,
     key_packed: Vec<u32>,

@@ -13,7 +13,7 @@
 //! - `src`          — the raw data bytes
 //! - `src_shape`    — `[rows, cols]` as 4 LE u32 bytes each
 //! - `src_strides`  — `[row_stride, col_stride]` (row_stride = src_cols + pad;
-//!                     col_stride = 1)
+//!   col_stride = 1)
 //!
 //! If `src_shape` and `src_strides` are omitted from the buffer map, the
 //! runtime derives them from the kernel's declared param shape. Since the
@@ -37,9 +37,7 @@ use metaltile_runtime::Context;
 use metaltile_std::mlx::strided::{mt_strided_copy, mt_strided_copy_nd};
 
 /// Pack a slice of u32 values as LE bytes (used for shape/stride buffers).
-fn pack_u32_slice(vals: &[u32]) -> Vec<u8> {
-    vals.iter().flat_map(|v| v.to_le_bytes()).collect()
-}
+fn pack_u32_slice(vals: &[u32]) -> Vec<u8> { vals.iter().flat_map(|v| v.to_le_bytes()).collect() }
 
 /// Dispatch `mt_strided_copy<T>` to copy a `rows × dest_cols` tile from a
 /// `rows × src_cols` padded source (where `src_cols >= dest_cols`).
@@ -77,13 +75,7 @@ fn run_strided_copy(
     // Grid3D: one thread per (row, col) pair in the output.
     // grid = [rows, dest_cols, 1], tpg = [1, 1, 1].
     let result = ctx
-        .dispatch_with_grid(
-            &kernel,
-            &buffers,
-            &BTreeMap::new(),
-            [rows, dest_cols, 1],
-            [1, 1, 1],
-        )
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [rows, dest_cols, 1], [1, 1, 1])
         .expect("strided_copy dispatch");
 
     let out_bytes = result.outputs.get("out").expect("out buffer");
@@ -109,11 +101,14 @@ fn strided_copy_simple_submatrix_f32() {
     let src_cols = 8;
     let dest_cols = 4;
     // Source: value = row * dest_cols + col (logical coords), padding = -999.
-    let src: Vec<f32> = (0..rows).flat_map(|r| {
-        (0..src_cols).map(move |c| {
-            if c < dest_cols { (r * dest_cols + c) as f32 + 1.0 } else { -999.0 }
-        })
-    }).collect();
+    let src: Vec<f32> =
+        (0..rows)
+            .flat_map(|r| {
+                (0..src_cols).map(move |c| {
+                    if c < dest_cols { (r * dest_cols + c) as f32 + 1.0 } else { -999.0 }
+                })
+            })
+            .collect();
     let expected = oracle_strided_copy(&src, rows, src_cols, dest_cols);
     let actual = run_strided_copy(&src, Dt::F32, rows, src_cols, dest_cols);
     let diff = max_abs_diff(&actual, &expected);
@@ -134,11 +129,14 @@ fn strided_copy_matches_bench_shape_f32() {
     let dest_cols = 16;
     let pad = 4;
     let src_cols = dest_cols + pad;
-    let src: Vec<f32> = (0..rows).flat_map(|r| {
-        (0..src_cols).map(move |c| {
-            if c < dest_cols { (r * dest_cols + c) as f32 + 1.0 } else { -999.0 }
-        })
-    }).collect();
+    let src: Vec<f32> =
+        (0..rows)
+            .flat_map(|r| {
+                (0..src_cols).map(move |c| {
+                    if c < dest_cols { (r * dest_cols + c) as f32 + 1.0 } else { -999.0 }
+                })
+            })
+            .collect();
     let expected: Vec<f32> = (0..rows * dest_cols).map(|i| i as f32 + 1.0).collect();
     let actual = run_strided_copy(&src, Dt::F32, rows, src_cols, dest_cols);
     let diff = max_abs_diff(&actual, &expected);
@@ -164,9 +162,9 @@ fn strided_copy_matches_oracle_f16() {
     let rows = 4;
     let src_cols = 8;
     let dest_cols = 4;
-    let src: Vec<f32> = (0..rows * src_cols).map(|i| {
-        if i % src_cols < dest_cols { Dt::F16.round((i as f32 - 8.0) * 0.2) } else { 0.0 }
-    }).collect();
+    let src: Vec<f32> = (0..rows * src_cols)
+        .map(|i| if i % src_cols < dest_cols { Dt::F16.round((i as f32 - 8.0) * 0.2) } else { 0.0 })
+        .collect();
     let expected = oracle_strided_copy(&src, rows, src_cols, dest_cols);
     let actual = run_strided_copy(&src, Dt::F16, rows, src_cols, dest_cols);
     let diff = max_abs_diff(&actual, &expected);
@@ -179,7 +177,7 @@ fn strided_copy_output_not_all_zeros_f32() {
     let rows = 2;
     let src_cols = 4;
     let dest_cols = 2;
-    let src: Vec<f32> = (1..=rows * src_cols as usize).map(|i| i as f32).collect();
+    let src: Vec<f32> = (1..=rows * src_cols).map(|i| i as f32).collect();
     let actual = run_strided_copy(&src, Dt::F32, rows, src_cols, dest_cols);
     assert!(
         actual.iter().any(|&v| v != 0.0),
@@ -194,12 +192,7 @@ fn strided_copy_output_not_all_zeros_f32() {
 ///
 /// `shape` / `strides` are per-dimension u32 arrays (major-to-minor). The
 /// output is contiguous row-major with `n_out = product(shape)` elements.
-fn run_strided_copy_nd(
-    src_data: &[f32],
-    dt: Dt,
-    shape: &[u32],
-    strides: &[u32],
-) -> Vec<f32> {
+fn run_strided_copy_nd(src_data: &[f32], dt: Dt, shape: &[u32], strides: &[u32]) -> Vec<f32> {
     let n_out: usize = shape.iter().map(|&s| s as usize).product();
 
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -267,9 +260,7 @@ fn strided_copy_nd_2d_padded_matches_2d_kernel_f32() {
     let shape = [rows, cols];
     let strides = [row_stride, 1u32];
     let src: Vec<f32> = (0..rows * row_stride)
-        .map(|i| {
-            if i % row_stride < cols { (i as f32) + 1.0 } else { -999.0 }
-        })
+        .map(|i| if i % row_stride < cols { (i as f32) + 1.0 } else { -999.0 })
         .collect();
     let expected = oracle_strided_copy_nd(&src, &shape, &strides);
     let actual = run_strided_copy_nd(&src, Dt::F32, &shape, &strides);
@@ -301,11 +292,7 @@ fn strided_copy_nd_3d_transpose_f32() {
     // strides are the contiguous strides permuted to (2, 1, 0) order.
     // Source layout is contiguous; only the strides express the transpose.
     let src_dims = [3usize, 4, 5];
-    let cont = [
-        (src_dims[1] * src_dims[2]) as u32,
-        src_dims[2] as u32,
-        1u32,
-    ];
+    let cont = [(src_dims[1] * src_dims[2]) as u32, src_dims[2] as u32, 1u32];
     // Permutation (0,1,2) -> (2,1,0): logical dim 0 ← src dim 2, etc.
     let shape = [src_dims[2] as u32, src_dims[1] as u32, src_dims[0] as u32];
     let strides = [cont[2], cont[1], cont[0]];
@@ -326,7 +313,7 @@ fn strided_copy_nd_4d_broadcast_axis_f32() {
     // Source physically holds [2, 3, 1, 4]; the size-2 logical axis 2
     // broadcasts from a single physical slot (stride 0).
     let strides = [(3u32 * 4u32), 4u32, 0u32, 1u32];
-    let phys_total = 2 * 3 * 1 * 4;
+    let phys_total = (2 * 3) * 4;
     let src: Vec<f32> = (0..phys_total).map(|i| i as f32 * 1.5 + 0.5).collect();
     let expected = oracle_strided_copy_nd(&src, &shape, &strides);
     let actual = run_strided_copy_nd(&src, Dt::F32, &shape, &strides);
@@ -383,8 +370,10 @@ fn strided_copy_perf_bench_f32() {
         buffers.insert("src_strides".into(), pack_u32_slice(&[src_cols as u32, 1u32]));
         buffers.insert("out".into(), vec![0u8; rows * dest_cols * 4]);
         buffers.insert("cols".into(), (dest_cols as u32).to_le_bytes().to_vec());
-        ctx.dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [rows, dest_cols, 1], [1, 1, 1])
-            .expect("warmup");
+        ctx.dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [rows, dest_cols, 1], [
+            1, 1, 1,
+        ])
+        .expect("warmup");
     }
     let iters = 20;
     let t0 = Instant::now();
@@ -395,8 +384,10 @@ fn strided_copy_perf_bench_f32() {
         buffers.insert("src_strides".into(), pack_u32_slice(&[src_cols as u32, 1u32]));
         buffers.insert("out".into(), vec![0u8; rows * dest_cols * 4]);
         buffers.insert("cols".into(), (dest_cols as u32).to_le_bytes().to_vec());
-        ctx.dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [rows, dest_cols, 1], [1, 1, 1])
-            .expect("bench");
+        ctx.dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [rows, dest_cols, 1], [
+            1, 1, 1,
+        ])
+        .expect("bench");
     }
     let elapsed_us = t0.elapsed().as_micros() as f64 / iters as f64;
     let bytes = rows as f64 * dest_cols as f64 * 4.0 * 2.0;

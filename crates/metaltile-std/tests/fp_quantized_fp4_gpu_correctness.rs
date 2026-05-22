@@ -53,7 +53,7 @@ fn fp4_snap(norm: f32) -> f32 {
 /// CPU oracle: per-32-element-simdgroup max-scale → codebook snap →
 /// rescale + sign. Mirrors the kernel's float arithmetic step for step.
 fn oracle_fp4(inp: &[f32]) -> Vec<f32> {
-    assert!(inp.len() % 32 == 0, "input length must be a multiple of 32");
+    assert!(inp.len().is_multiple_of(32), "input length must be a multiple of 32");
     let mut out = vec![0.0f32; inp.len()];
     for (gi, group) in inp.chunks_exact(32).enumerate() {
         let group_max = group.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
@@ -75,7 +75,7 @@ fn oracle_fp4(inp: &[f32]) -> Vec<f32> {
 /// per-group amax with no out-of-bounds lanes.
 fn run_fp4(inp: &[f32]) -> Vec<f32> {
     let n = inp.len();
-    assert!(n % 32 == 0, "fp4 dispatch needs a multiple of 32 elements");
+    assert!(n.is_multiple_of(32), "fp4 dispatch needs a multiple of 32 elements");
 
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     buffers.insert("inp".into(), pack_bytes(inp, Dt::F32));
@@ -105,10 +105,10 @@ fn synthetic_group(seed: usize) -> Vec<f32> {
             // midpoint once scaled by the group max.
             let v = ((i * 7 + seed * 11) % 33) as f32 * 0.03 - 0.46;
             match i % 4 {
-                0 => v * 10.0,  // large
-                1 => v * 0.05,  // small
-                2 => 0.0,       // exact zero
-                _ => v,         // mid
+                0 => v * 10.0, // large
+                1 => v * 0.05, // small
+                2 => 0.0,      // exact zero
+                _ => v,        // mid
             }
         })
         .collect()

@@ -23,8 +23,13 @@ use metaltile_runtime::Context;
 use metaltile_std::ffai::gemm::ffai_gemm;
 
 /// CPU reference: out[r, o] = sum_k weight[o, k] * input[r, k].
-fn naive_gemm(weight: &[f32], input: &[f32],
-              n_rows: usize, in_dim: usize, out_dim: usize) -> Vec<f32> {
+fn naive_gemm(
+    weight: &[f32],
+    input: &[f32],
+    n_rows: usize,
+    in_dim: usize,
+    out_dim: usize,
+) -> Vec<f32> {
     let mut out = vec![0.0f32; n_rows * out_dim];
     for r in 0..n_rows {
         for o in 0..out_dim {
@@ -38,8 +43,14 @@ fn naive_gemm(weight: &[f32], input: &[f32],
     out
 }
 
-fn run_gemm(weight: &[f32], input: &[f32], dt: Dt,
-            n_rows: usize, in_dim: usize, out_dim: usize) -> Vec<f32> {
+fn run_gemm(
+    weight: &[f32],
+    input: &[f32],
+    dt: Dt,
+    n_rows: usize,
+    in_dim: usize,
+    out_dim: usize,
+) -> Vec<f32> {
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     buffers.insert("weight".into(), pack_bytes(weight, dt));
     buffers.insert("input".into(), pack_bytes(input, dt));
@@ -56,8 +67,9 @@ fn run_gemm(weight: &[f32], input: &[f32], dt: Dt,
     let n_tiles = out_dim.div_ceil(32);
     let m_tiles = n_rows.div_ceil(32);
     let result = ctx
-        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(),
-                            [n_tiles, m_tiles, 1], [1024, 1, 1])
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [n_tiles, m_tiles, 1], [
+            1024, 1, 1,
+        ])
         .expect("dispatch_with_grid");
     unpack_bytes(result.outputs.get("out").expect("out buffer"), dt)
 }
@@ -68,11 +80,17 @@ fn assert_close(actual: &[f32], expected: &[f32], tol: f32, label: &str) {
     let mut at = 0usize;
     for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
         let d = (a - e).abs();
-        if d > max_diff { max_diff = d; at = i; }
+        if d > max_diff {
+            max_diff = d;
+            at = i;
+        }
     }
-    assert!(max_diff < tol,
-            "{label}: max |diff| = {max_diff:.2e} at {at} (expected {:.6}, got {:.6})",
-            expected[at], actual[at]);
+    assert!(
+        max_diff < tol,
+        "{label}: max |diff| = {max_diff:.2e} at {at} (expected {:.6}, got {:.6})",
+        expected[at],
+        actual[at]
+    );
 }
 
 #[test]

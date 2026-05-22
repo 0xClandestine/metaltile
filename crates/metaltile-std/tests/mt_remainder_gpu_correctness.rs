@@ -55,7 +55,8 @@ fn remainder_positive_inputs_matches_oracle_f32() {
     // Both inputs positive — fmod and floored remainder agree here.
     let a: Vec<f32> = (0..n).map(|i| (i % 17) as f32 * 0.9 + 0.5).collect();
     let b: Vec<f32> = (0..n).map(|i| (i % 7) as f32 * 0.4 + 0.3).collect();
-    let expected: Vec<f32> = a.iter().zip(b.iter()).map(|(x, y)| oracle_remainder(*x, *y)).collect();
+    let expected: Vec<f32> =
+        a.iter().zip(b.iter()).map(|(x, y)| oracle_remainder(*x, *y)).collect();
 
     let actual = run_remainder(&a, &b, Dt::F32, n);
     let diff = max_abs_diff(&actual, &expected);
@@ -70,7 +71,8 @@ fn remainder_negative_dividend_truncated_semantics_f32() {
     let a: Vec<f32> = vec![-7.0, -3.5, -10.0, -1.0, -5.0, 5.0, 7.0, 3.5];
     let b: Vec<f32> = vec![3.0, 1.5, 3.0, 0.7, 2.1, 3.0, 3.0, 1.5];
     let n = a.len();
-    let expected: Vec<f32> = a.iter().zip(b.iter()).map(|(x, y)| oracle_remainder(*x, *y)).collect();
+    let expected: Vec<f32> =
+        a.iter().zip(b.iter()).map(|(x, y)| oracle_remainder(*x, *y)).collect();
 
     let actual = run_remainder(&a, &b, Dt::F32, n);
     for (i, (got, exp)) in actual.iter().zip(expected.iter()).enumerate() {
@@ -89,12 +91,15 @@ fn remainder_mixed_sign_inputs_f32() {
     let n = 1024usize;
     // Mixed-sign ramp — covers all four sign combinations across the array.
     let a: Vec<f32> = (0..n).map(|i| (i % 23) as f32 * 0.3 - 3.0).collect();
-    let b: Vec<f32> = (0..n).map(|i| {
-        // Avoid near-zero divisors (fmod(x, ε) is noisy).
-        let raw = (i % 11) as f32 * 0.4 - 2.0;
-        if raw.abs() < 0.3 { raw.signum() * 0.4 } else { raw }
-    }).collect();
-    let expected: Vec<f32> = a.iter().zip(b.iter()).map(|(x, y)| oracle_remainder(*x, *y)).collect();
+    let b: Vec<f32> = (0..n)
+        .map(|i| {
+            // Avoid near-zero divisors (fmod(x, ε) is noisy).
+            let raw = (i % 11) as f32 * 0.4 - 2.0;
+            if raw.abs() < 0.3 { raw.signum() * 0.4 } else { raw }
+        })
+        .collect();
+    let expected: Vec<f32> =
+        a.iter().zip(b.iter()).map(|(x, y)| oracle_remainder(*x, *y)).collect();
 
     let actual = run_remainder(&a, &b, Dt::F32, n);
     let diff = max_abs_diff(&actual, &expected);
@@ -110,10 +115,7 @@ fn remainder_output_not_all_zeros_f32() {
     let a: Vec<f32> = (1..=n as u32).map(|i| i as f32 * 1.7).collect();
     let b: Vec<f32> = vec![3.0f32; n];
     let actual = run_remainder(&a, &b, Dt::F32, n);
-    assert!(
-        actual.iter().any(|&v| v != 0.0),
-        "remainder output is all zeros — empty kernel body?",
-    );
+    assert!(actual.iter().any(|&v| v != 0.0), "remainder output is all zeros — empty kernel body?",);
 }
 
 #[test]

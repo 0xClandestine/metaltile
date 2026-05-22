@@ -135,10 +135,22 @@ pub fn ffai_sdpa_decode_d512<T>(
         let k13 = load(k[kv0 + 13u32]).cast::<f32>();
         let k14 = load(k[kv0 + 14u32]).cast::<f32>();
         let k15 = load(k[kv0 + 15u32]).cast::<f32>();
-        let partial = q0 * k0 + q1 * k1 + q2 * k2 + q3 * k3
-                    + q4 * k4 + q5 * k5 + q6 * k6 + q7 * k7
-                    + q8 * k8 + q9 * k9 + q10 * k10 + q11 * k11
-                    + q12 * k12 + q13 * k13 + q14 * k14 + q15 * k15;
+        let partial = q0 * k0
+            + q1 * k1
+            + q2 * k2
+            + q3 * k3
+            + q4 * k4
+            + q5 * k5
+            + q6 * k6
+            + q7 * k7
+            + q8 * k8
+            + q9 * k9
+            + q10 * k10
+            + q11 * k11
+            + q12 * k12
+            + q13 * k13
+            + q14 * k14
+            + q15 * k15;
         let score = simd_sum(partial);
         let new_max = select(score > run_max, score, run_max);
         let factor = exp(run_max - new_max);
@@ -336,9 +348,7 @@ mod tests {
     fn msl_for(dt: DType) -> String {
         let mut k = ffai_sdpa_decode_d512::kernel_ir_for(dt);
         k.mode = KernelMode::Reduction;
-        MslGenerator::default()
-            .generate(&k)
-            .expect("ffai_sdpa_decode_d512 codegen succeeds")
+        MslGenerator::default().generate(&k).expect("ffai_sdpa_decode_d512 codegen succeeds")
     }
 
     #[test]

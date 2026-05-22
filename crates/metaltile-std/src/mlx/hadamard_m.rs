@@ -38,7 +38,6 @@
 //!
 //! Verified for orthogonality: H · H^T = M · I.
 
-
 use metaltile_core::{
     constexpr::ConstExpr,
     dtype::DType,
@@ -92,8 +91,8 @@ const H12_SIGNS: [u32; 12] = [4093, 1364, 3127, 1681, 223, 2629, 883, 2329, 3523
 //   row 18: --+-+++------+----+-  → 270452
 //   row 19: +--+--++------+----+  → 540873
 const H20_SIGNS: [u32; 20] = [
-    445473, 859202, 702596, 389384, 747024, 641086, 234589, 469147, 938263, 828943,
-    984492, 953176, 889521, 762211, 508614, 34194, 68357, 135722, 270452, 540873,
+    445473, 859202, 702596, 389384, 747024, 641086, 234589, 469147, 938263, 828943, 984492, 953176,
+    889521, 762211, 508614, 34194, 68357, 135722, 270452, 540873,
 ];
 
 // ── H_28 sign-bit encoding ─────────────────────────────────────────────────
@@ -130,10 +129,10 @@ const H20_SIGNS: [u32; 20] = [
 //   row 26: +--++-+-++-+-+----+++-----+-  →  68954969
 //   row 27: ++--++-+-++-+-+----++------+  → 135812787
 const H28_SIGNS: [u32; 28] = [
-    53043585, 106070914, 210061060, 153783816, 41229328, 80377888, 160739520, 79265980,
-    156451192, 44483185, 88966243, 177932359, 87445519, 172810270, 125848794, 251697461,
-    237056618, 207758549, 149162411, 31986518, 63972909, 3206502, 4315853, 8631579,
-    17246902, 34477548, 68954969, 135812787,
+    53043585, 106070914, 210061060, 153783816, 41229328, 80377888, 160739520, 79265980, 156451192,
+    44483185, 88966243, 177932359, 87445519, 172810270, 125848794, 251697461, 237056618, 207758549,
+    149162411, 31986518, 63972909, 3206502, 4315853, 8631579, 17246902, 34477548, 68954969,
+    135812787,
 ];
 
 // ── MSL template ───────────────────────────────────────────────────────────
@@ -201,10 +200,7 @@ fn build_msl(m: u32, signs: &[u32], dt: DType) -> String {
 ///
 /// Constexpr `scale: f32` is passed as a 4-byte LE buffer under key `"scale"`.
 pub fn kernel_ir_for(m: u32, dt: DType) -> Kernel {
-    assert!(
-        matches!(m, 12 | 20 | 28),
-        "mt_hadamard_m only supports M ∈ {{12, 20, 28}}, got {m}"
-    );
+    assert!(matches!(m, 12 | 20 | 28), "mt_hadamard_m only supports M ∈ {{12, 20, 28}}, got {m}");
     assert!(
         matches!(dt, DType::F32 | DType::F16 | DType::BF16),
         "mt_hadamard_m only supports F32/F16/BF16, got {dt:?}"
@@ -253,12 +249,7 @@ pub fn kernel_ir_for(m: u32, dt: DType) -> Kernel {
     // The Load{tgid_x} op triggers the alias in the codegen preamble.
     let mut body = Block::new(BlockId::new(0));
     body.push_op(
-        Op::Load {
-            src: "tgid_x".to_string(),
-            indices: Vec::new(),
-            mask: None,
-            other: None,
-        },
+        Op::Load { src: "tgid_x".to_string(), indices: Vec::new(), mask: None, other: None },
         ValueId::new(0),
     );
     body.push_op_no_result(Op::InlineMsl {
@@ -276,6 +267,7 @@ pub fn kernel_ir_for(m: u32, dt: DType) -> Kernel {
 }
 
 #[cfg(test)]
+#[allow(clippy::needless_range_loop)] // index loops mirror the H_m matrix math
 mod tests {
     use super::*;
 
@@ -299,9 +291,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "only supports M")]
-    fn kernel_ir_rejects_invalid_m() {
-        let _ = kernel_ir_for(16, DType::F32);
-    }
+    fn kernel_ir_rejects_invalid_m() { let _ = kernel_ir_for(16, DType::F32); }
 
     /// Verify H_12 is orthogonal: H · H^T = 12 · I.
     #[test]

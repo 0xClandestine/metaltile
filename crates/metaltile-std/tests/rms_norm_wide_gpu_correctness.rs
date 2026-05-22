@@ -42,13 +42,7 @@ fn run_rms_norm_wide(x: &[f32], w: &[f32], n: usize, rows: usize, eps: f32) -> V
     // 1 threadgroup per row; the kernel strides over the row, so the
     // threadgroup width is independent of `n`.
     let result = ctx
-        .dispatch_with_grid(
-            &kernel,
-            &buffers,
-            &BTreeMap::new(),
-            [rows, 1, 1],
-            [TPG, 1, 1],
-        )
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [rows, 1, 1], [TPG, 1, 1])
         .expect("dispatch_with_grid should succeed");
 
     let out_bytes = result.outputs.get("out").expect("`out` buffer in dispatch result");

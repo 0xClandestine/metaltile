@@ -190,7 +190,9 @@ fn infer_value_dtype(vid: ValueId, block: &Block) -> Option<DType> {
             Op::Cast { dtype, .. } => return Some(*dtype),
             Op::Const { .. } =>
             // Constants are integers; they'll be cast to target dtype at use.
-                return None,
+            {
+                return None;
+            },
             Op::Zeros { dtype, .. } | Op::Splat { dtype, .. } => return Some(*dtype),
             Op::Load { .. } => return None, // dtype comes from param
             _ => return None,

@@ -17,13 +17,7 @@ use metaltile_core::ir::Kernel;
 use metaltile_runtime::Context;
 use metaltile_std::mlx::ternary::mt_select;
 
-fn run_select(
-    on_true: &[f32],
-    on_false: &[f32],
-    cond: &[u8],
-    dt: Dt,
-    n: usize,
-) -> Vec<f32> {
+fn run_select(on_true: &[f32], on_false: &[f32], cond: &[u8], dt: Dt, n: usize) -> Vec<f32> {
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     buffers.insert("cond".into(), cond.to_vec());
     buffers.insert("on_true".into(), pack_bytes(on_true, dt));
@@ -90,10 +84,8 @@ fn ternary_select_all_false_f32() {
 fn ternary_select_mixed_condition_f16() {
     let _g = gpu_lock();
     let n = 512usize;
-    let on_true: Vec<f32> =
-        (0..n).map(|i| Dt::F16.round((i % 13) as f32 * 0.1 - 0.5)).collect();
-    let on_false: Vec<f32> =
-        (0..n).map(|i| Dt::F16.round((i % 11) as f32 * 0.2 - 1.0)).collect();
+    let on_true: Vec<f32> = (0..n).map(|i| Dt::F16.round((i % 13) as f32 * 0.1 - 0.5)).collect();
+    let on_false: Vec<f32> = (0..n).map(|i| Dt::F16.round((i % 11) as f32 * 0.2 - 1.0)).collect();
     let cond: Vec<u8> = (0..n).map(|i| (i % 3 != 0) as u8).collect();
     let expected = cpu_select_reference(&on_true, &on_false, &cond);
     let actual = run_select(&on_true, &on_false, &cond, Dt::F16, n);
@@ -105,10 +97,8 @@ fn ternary_select_mixed_condition_f16() {
 fn ternary_select_mixed_condition_bf16() {
     let _g = gpu_lock();
     let n = 256usize;
-    let on_true: Vec<f32> =
-        (0..n).map(|i| Dt::Bf16.round((i % 7) as f32 * 0.3 - 1.0)).collect();
-    let on_false: Vec<f32> =
-        (0..n).map(|i| Dt::Bf16.round((i % 9) as f32 * 0.2 - 0.8)).collect();
+    let on_true: Vec<f32> = (0..n).map(|i| Dt::Bf16.round((i % 7) as f32 * 0.3 - 1.0)).collect();
+    let on_false: Vec<f32> = (0..n).map(|i| Dt::Bf16.round((i % 9) as f32 * 0.2 - 0.8)).collect();
     let cond: Vec<u8> = (0..n).map(|i| (i % 4 < 2) as u8).collect();
     let expected = cpu_select_reference(&on_true, &on_false, &cond);
     let actual = run_select(&on_true, &on_false, &cond, Dt::Bf16, n);

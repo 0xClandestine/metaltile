@@ -29,6 +29,7 @@ use metaltile_std::mlx::steel::attn::steel_attention::mt_sdpa_prefill;
 
 /// Naive causal SDPA for a single batch.
 /// Q/K/V layout: `[n_heads, q_len, head_dim]` (contiguous).
+#[allow(clippy::too_many_arguments)]
 fn naive_sdpa_prefill_causal(
     q: &[f32],
     k: &[f32],
@@ -108,13 +109,9 @@ fn run_sdpa_prefill(
     kernel.mode = KernelMode::SimdGroup2D;
     // Grid: (q_len / BQ=32, n_q_heads, batch), TPG = 128.
     let result = ctx
-        .dispatch_with_grid(
-            &kernel,
-            &buffers,
-            &BTreeMap::new(),
-            [q_len / 32, n_q_heads, batch],
-            [128, 1, 1],
-        )
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [q_len / 32, n_q_heads, batch], [
+            128, 1, 1,
+        ])
         .expect("sdpa_prefill dispatch");
 
     let mut out = unpack_bytes(result.outputs.get("out").expect("out"), dt);
@@ -152,8 +149,21 @@ fn steel_attention_prefill_matches_cpu_t128_f32() {
     let k = ramp(n_kv_heads * k_len * head_dim, 13, 6.0);
     let v = ramp(n_kv_heads * k_len * head_dim, 11, 5.0);
 
-    let expected = naive_sdpa_prefill_causal(&q, &k, &v, n_q_heads, n_kv_heads, q_len, k_len, head_dim, scale);
-    let actual = run_sdpa_prefill(&q, &k, &v, Dt::F32, 1, n_q_heads, n_kv_heads, q_len, k_len, head_dim, scale);
+    let expected =
+        naive_sdpa_prefill_causal(&q, &k, &v, n_q_heads, n_kv_heads, q_len, k_len, head_dim, scale);
+    let actual = run_sdpa_prefill(
+        &q,
+        &k,
+        &v,
+        Dt::F32,
+        1,
+        n_q_heads,
+        n_kv_heads,
+        q_len,
+        k_len,
+        head_dim,
+        scale,
+    );
 
     assert_close(&actual, &expected, 2e-2, "scalar prefill T=128 f32");
 }
@@ -169,8 +179,21 @@ fn steel_attention_prefill_gqa_factor2_f32() {
     let k = ramp(n_kv_heads * k_len * head_dim, 7, 3.0);
     let v = ramp(n_kv_heads * k_len * head_dim, 11, 5.0);
 
-    let expected = naive_sdpa_prefill_causal(&q, &k, &v, n_q_heads, n_kv_heads, q_len, k_len, head_dim, scale);
-    let actual = run_sdpa_prefill(&q, &k, &v, Dt::F32, 1, n_q_heads, n_kv_heads, q_len, k_len, head_dim, scale);
+    let expected =
+        naive_sdpa_prefill_causal(&q, &k, &v, n_q_heads, n_kv_heads, q_len, k_len, head_dim, scale);
+    let actual = run_sdpa_prefill(
+        &q,
+        &k,
+        &v,
+        Dt::F32,
+        1,
+        n_q_heads,
+        n_kv_heads,
+        q_len,
+        k_len,
+        head_dim,
+        scale,
+    );
 
     assert_close(&actual, &expected, 2e-2, "scalar prefill GQA=2 f32");
 }
@@ -183,7 +206,19 @@ fn steel_attention_prefill_output_not_all_zeros_f32() {
     let q: Vec<f32> = (1..=n_q_heads * q_len * head_dim).map(|i| i as f32 * 0.001).collect();
     let k: Vec<f32> = (1..=n_kv_heads * k_len * head_dim).map(|i| i as f32 * 0.001).collect();
     let v: Vec<f32> = (1..=n_kv_heads * k_len * head_dim).map(|i| i as f32 * 0.001).collect();
-    let actual = run_sdpa_prefill(&q, &k, &v, Dt::F32, 1, n_q_heads, n_kv_heads, q_len, k_len, head_dim, scale);
+    let actual = run_sdpa_prefill(
+        &q,
+        &k,
+        &v,
+        Dt::F32,
+        1,
+        n_q_heads,
+        n_kv_heads,
+        q_len,
+        k_len,
+        head_dim,
+        scale,
+    );
     assert!(actual.iter().any(|&x| x != 0.0), "sdpa_prefill output all zeros — empty kernel?");
 }
 
@@ -201,8 +236,22 @@ fn steel_attention_prefill_matches_cpu_f16() {
     let k_r: Vec<f32> = k_f32.iter().map(|&v| Dt::F16.round(v)).collect();
     let v_r: Vec<f32> = v_f32.iter().map(|&v| Dt::F16.round(v)).collect();
 
-    let expected = naive_sdpa_prefill_causal(&q_r, &k_r, &v_r, n_q_heads, n_kv_heads, q_len, k_len, head_dim, scale);
-    let actual = run_sdpa_prefill(&q_f32, &k_f32, &v_f32, Dt::F16, 1, n_q_heads, n_kv_heads, q_len, k_len, head_dim, scale);
+    let expected = naive_sdpa_prefill_causal(
+        &q_r, &k_r, &v_r, n_q_heads, n_kv_heads, q_len, k_len, head_dim, scale,
+    );
+    let actual = run_sdpa_prefill(
+        &q_f32,
+        &k_f32,
+        &v_f32,
+        Dt::F16,
+        1,
+        n_q_heads,
+        n_kv_heads,
+        q_len,
+        k_len,
+        head_dim,
+        scale,
+    );
 
     // f16 scalar flash has wider drift than f32.
     assert_close(&actual, &expected, 5e-2, "scalar prefill T=64 f16");

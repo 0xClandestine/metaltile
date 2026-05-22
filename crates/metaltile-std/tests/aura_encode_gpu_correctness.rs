@@ -24,8 +24,15 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{
-    Dt, max_abs_diff, naive_aura_encode_f32, pack_bytes, pack_u32_bytes, ramp, srht_rotation,
-    unpack_bytes, unpack_u32_bytes,
+    Dt,
+    max_abs_diff,
+    naive_aura_encode_f32,
+    pack_bytes,
+    pack_u32_bytes,
+    ramp,
+    srht_rotation,
+    unpack_bytes,
+    unpack_u32_bytes,
 };
 use metaltile_core::{dtype::DType, ir::KernelMode};
 use metaltile_runtime::Context;
@@ -201,13 +208,7 @@ fn aura_encode_int4_srht_rotation_f32() {
     kernel.mode = KernelMode::Reduction;
 
     let result = ctx
-        .dispatch_with_grid(
-            &kernel,
-            &buffers,
-            &BTreeMap::new(),
-            [rows, 1, 1],
-            [dim, 1, 1],
-        )
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [rows, 1, 1], [dim, 1, 1])
         .expect("dispatch_with_grid should succeed");
 
     let packed_bytes =
@@ -228,8 +229,5 @@ fn aura_encode_int4_srht_rotation_f32() {
         "packed_out mismatch under SRHT rotation — rotation matmul stage diverges",
     );
     let diff = max_abs_diff(&expected_norms, &actual_norms);
-    assert!(
-        diff < 1e-4,
-        "norms_out diverges under SRHT rotation: max |diff| = {diff:.2e}",
-    );
+    assert!(diff < 1e-4, "norms_out diverges under SRHT rotation: max |diff| = {diff:.2e}",);
 }

@@ -32,15 +32,15 @@ use metaltile_std::mlx::hadamard_m;
 const H12_SIGNS: [u32; 12] = [4093, 1364, 3127, 1681, 223, 2629, 883, 2329, 3523, 1129, 1807, 421];
 
 const H20_SIGNS: [u32; 20] = [
-    445473, 859202, 702596, 389384, 747024, 641086, 234589, 469147, 938263, 828943,
-    984492, 953176, 889521, 762211, 508614, 34194, 68357, 135722, 270452, 540873,
+    445473, 859202, 702596, 389384, 747024, 641086, 234589, 469147, 938263, 828943, 984492, 953176,
+    889521, 762211, 508614, 34194, 68357, 135722, 270452, 540873,
 ];
 
 const H28_SIGNS: [u32; 28] = [
-    53043585, 106070914, 210061060, 153783816, 41229328, 80377888, 160739520, 79265980,
-    156451192, 44483185, 88966243, 177932359, 87445519, 172810270, 125848794, 251697461,
-    237056618, 207758549, 149162411, 31986518, 63972909, 3206502, 4315853, 8631579,
-    17246902, 34477548, 68954969, 135812787,
+    53043585, 106070914, 210061060, 153783816, 41229328, 80377888, 160739520, 79265980, 156451192,
+    44483185, 88966243, 177932359, 87445519, 172810270, 125848794, 251697461, 237056618, 207758549,
+    149162411, 31986518, 63972909, 3206502, 4315853, 8631579, 17246902, 34477548, 68954969,
+    135812787,
 ];
 
 /// CPU oracle: apply H_M (via sign-bit table) to each M-element row of `data`,
@@ -83,13 +83,7 @@ fn run_hadamard_m(data: &[f32], dt: Dt, m: u32, scale: f32) -> Vec<f32> {
 
     // Reduction: one threadgroup per row, tpg = M threads.
     let result = ctx
-        .dispatch_with_grid(
-            &kernel,
-            &buffers,
-            &BTreeMap::new(),
-            [n_rows, 1, 1],
-            [m as usize, 1, 1],
-        )
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [n_rows, 1, 1], [m as usize, 1, 1])
         .expect("hadamard_m dispatch");
 
     let out_bytes = result.outputs.get("out").expect("out buffer");
@@ -120,9 +114,8 @@ fn hadamard_m12_matches_oracle_f16() {
     let n_rows = 8;
     let scale = 1.0f32;
     // Round through f16 so oracle uses same load precision.
-    let data: Vec<f32> = (0..n_rows * m)
-        .map(|i| Dt::F16.round(((i % 17) as f32 - 8.0) * 0.25))
-        .collect();
+    let data: Vec<f32> =
+        (0..n_rows * m).map(|i| Dt::F16.round(((i % 17) as f32 - 8.0) * 0.25)).collect();
     let expected = oracle_hadamard_m(&data, m, &H12_SIGNS, scale);
     let actual = run_hadamard_m(&data, Dt::F16, m as u32, scale);
     let diff = max_abs_diff(&actual, &expected);
@@ -144,9 +137,8 @@ fn hadamard_m12_identity_vector_f32() {
     // H_12 · e_0 = column 0 of H_12^T = row 0 of H_12 (since it's symmetric up to sign)
     // Actually H_12 · e_0 picks out column 0 of H_12, which is the first *column*.
     // The sign of column 0 = H_12[t][0] = (signs[t] >> 0) & 1 → +1 : -1.
-    let expected: Vec<f32> = (0..m)
-        .map(|t| if (H12_SIGNS[t] >> 0) & 1 == 1 { 1.0 } else { -1.0 })
-        .collect();
+    let expected: Vec<f32> =
+        (0..m).map(|t| if H12_SIGNS[t] & 1 == 1 { 1.0 } else { -1.0 }).collect();
     let diff = max_abs_diff(&actual, &expected);
     assert!(diff < 1e-5, "hadamard_m12 e0 f32: max |diff| = {diff:.2e}");
 }
@@ -186,9 +178,8 @@ fn hadamard_m20_identity_vector_f32() {
     data[0] = 1.0;
     let actual = run_hadamard_m(&data, Dt::F32, m as u32, 1.0);
     // H_20 · e_0 = column 0 = sign of H_20[t][0] for each row t.
-    let expected: Vec<f32> = (0..m)
-        .map(|t| if (H20_SIGNS[t] >> 0) & 1 == 1 { 1.0 } else { -1.0 })
-        .collect();
+    let expected: Vec<f32> =
+        (0..m).map(|t| if H20_SIGNS[t] & 1 == 1 { 1.0 } else { -1.0 }).collect();
     let diff = max_abs_diff(&actual, &expected);
     assert!(diff < 1e-5, "hadamard_m20 e0 f32: max |diff| = {diff:.2e}");
 }
@@ -228,9 +219,8 @@ fn hadamard_m28_identity_vector_f32() {
     data[0] = 1.0;
     let actual = run_hadamard_m(&data, Dt::F32, m as u32, 1.0);
     // H_28 · e_0 = column 0 = H_28[t][0] for each row t.
-    let expected: Vec<f32> = (0..m)
-        .map(|t| if (H28_SIGNS[t] >> 0) & 1 == 1 { 1.0 } else { -1.0 })
-        .collect();
+    let expected: Vec<f32> =
+        (0..m).map(|t| if H28_SIGNS[t] & 1 == 1 { 1.0 } else { -1.0 }).collect();
     let diff = max_abs_diff(&actual, &expected);
     assert!(diff < 1e-5, "hadamard_m28 e0 f32: max |diff| = {diff:.2e}");
 }
@@ -272,14 +262,18 @@ fn hadamard_m12_perf_bench_f32() {
         b
     };
     for _ in 0..3 {
-        ctx.dispatch_with_grid(&kernel, &make_bufs(), &BTreeMap::new(), [n_rows, 1, 1], [m as usize, 1, 1])
-            .expect("warmup");
+        ctx.dispatch_with_grid(&kernel, &make_bufs(), &BTreeMap::new(), [n_rows, 1, 1], [
+            m as usize, 1, 1,
+        ])
+        .expect("warmup");
     }
     let iters = 20;
     let t0 = Instant::now();
     for _ in 0..iters {
-        ctx.dispatch_with_grid(&kernel, &make_bufs(), &BTreeMap::new(), [n_rows, 1, 1], [m as usize, 1, 1])
-            .expect("bench");
+        ctx.dispatch_with_grid(&kernel, &make_bufs(), &BTreeMap::new(), [n_rows, 1, 1], [
+            m as usize, 1, 1,
+        ])
+        .expect("bench");
     }
     let elapsed_us = t0.elapsed().as_micros() as f64 / iters as f64;
     let n_elems = n_rows * m as usize;

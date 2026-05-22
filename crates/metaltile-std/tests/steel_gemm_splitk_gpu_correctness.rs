@@ -29,7 +29,8 @@ use metaltile_core::{
 };
 use metaltile_runtime::Context;
 use metaltile_std::mlx::steel::gemm::steel_gemm_splitk::{
-    mt_steel_gemm_splitk_64x64x16_2x2, mt_steel_gemm_splitk_accum,
+    mt_steel_gemm_splitk_64x64x16_2x2,
+    mt_steel_gemm_splitk_accum,
     mt_steel_gemm_splitk_accum_axpby,
 };
 
@@ -89,10 +90,7 @@ fn run_splitk_pass1(
     buffers.insert("a".into(), pack_bytes(a, dt));
     buffers.insert("b".into(), pack_bytes(b, dt));
     // Partials are always fp32.
-    buffers.insert(
-        "partials".into(),
-        pack_bytes(&vec![0.0f32; n_splits * m * n], Dt::F32),
-    );
+    buffers.insert("partials".into(), pack_bytes(&vec![0.0f32; n_splits * m * n], Dt::F32));
     buffers.insert("m".into(), (m as u32).to_le_bytes().to_vec());
     buffers.insert("n".into(), (n as u32).to_le_bytes().to_vec());
     buffers.insert("k".into(), (k as u32).to_le_bytes().to_vec());
@@ -219,11 +217,8 @@ fn splitk_accum_axpby_matches_reference_f32() {
     let c_in = ramp(m * n, 41, 5.0);
 
     let prod = naive_matmul(&a, &b, m, k, n);
-    let expected: Vec<f32> = prod
-        .iter()
-        .zip(c_in.iter())
-        .map(|(&p, &c)| alpha * p + beta * c)
-        .collect();
+    let expected: Vec<f32> =
+        prod.iter().zip(c_in.iter()).map(|(&p, &c)| alpha * p + beta * c).collect();
 
     let partials = run_splitk_pass1(
         mt_steel_gemm_splitk_64x64x16_2x2::kernel_ir_for,
@@ -236,8 +231,7 @@ fn splitk_accum_axpby_matches_reference_f32() {
         n_splits,
         k_per_split,
     );
-    let actual =
-        run_splitk_accum_axpby(&partials, &c_in, Dt::F32, m, n, n_splits, alpha, beta);
+    let actual = run_splitk_accum_axpby(&partials, &c_in, Dt::F32, m, n, n_splits, alpha, beta);
     assert_close(&actual, &expected, 3e-3, "splitk accum_axpby f32");
 }
 

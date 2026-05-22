@@ -26,8 +26,21 @@ use common::{Dt, gpu_lock, max_abs_diff, pack_bytes, pack_u32_bytes, unpack_byte
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
 use metaltile_std::mlx::quantized::{
-    mt_qmm_b3, mt_qmm_b4, mt_qmm_b5, mt_qmm_b6, mt_qmm_b8, mt_qmv_b3, mt_qmv_b4, mt_qmv_b5,
-    mt_qmv_b6, mt_qmv_b8, mt_qvm_b3, mt_qvm_b4, mt_qvm_b5, mt_qvm_b6, mt_qvm_b8,
+    mt_qmm_b3,
+    mt_qmm_b4,
+    mt_qmm_b5,
+    mt_qmm_b6,
+    mt_qmm_b8,
+    mt_qmv_b3,
+    mt_qmv_b4,
+    mt_qmv_b5,
+    mt_qmv_b6,
+    mt_qmv_b8,
+    mt_qvm_b3,
+    mt_qvm_b4,
+    mt_qvm_b5,
+    mt_qvm_b6,
+    mt_qvm_b8,
 };
 
 /// Pack a row of unsigned codes (`< 2^bits`) into a u32 bit-stream.
@@ -60,10 +73,8 @@ fn quantize_group(group: &[f32], bits: u32) -> (Vec<u32>, f32, f32) {
     let mx = group.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let scale = if (mx - mn).abs() < 1e-10 { 1.0 } else { (mx - mn) / max_code };
     let bias = mn;
-    let codes = group
-        .iter()
-        .map(|&v| ((v - bias) / scale).round().clamp(0.0, max_code) as u32)
-        .collect();
+    let codes =
+        group.iter().map(|&v| ((v - bias) / scale).round().clamp(0.0, max_code) as u32).collect();
     (codes, scale, bias)
 }
 
@@ -174,16 +185,12 @@ fn dispatch_family(
 
 /// CPU oracle — naive matvec `y = W · x` with W dequantized in f32.
 fn oracle_matvec(w_deq: &[f32], x: &[f32], n: usize, k: usize) -> Vec<f32> {
-    (0..n)
-        .map(|row| (0..k).map(|d| w_deq[row * k + d] * x[d]).sum())
-        .collect()
+    (0..n).map(|row| (0..k).map(|d| w_deq[row * k + d] * x[d]).sum()).collect()
 }
 
 /// CPU oracle — naive vecmat `y = xᵀ · W` with W [K, N] dequantized.
 fn oracle_vecmat(w_deq: &[f32], x: &[f32], n: usize, k: usize) -> Vec<f32> {
-    (0..n)
-        .map(|col| (0..k).map(|d| x[d] * w_deq[d * n + col]).sum())
-        .collect()
+    (0..n).map(|col| (0..k).map(|d| x[d] * w_deq[d * n + col]).sum()).collect()
 }
 
 // ─── qmv — matvec, W [N, K] ──────────────────────────────────────────────
@@ -194,9 +201,7 @@ fn run_qmv_test(bits: u32, kernel: metaltile_core::ir::Kernel, dt: Dt) {
     let group_size = 64usize;
 
     // Deterministic synthetic weight matrix + input vector.
-    let w: Vec<f32> = (0..n * k)
-        .map(|i| (((i * 31 + 7) % 53) as f32 - 26.0) * 0.03)
-        .collect();
+    let w: Vec<f32> = (0..n * k).map(|i| (((i * 31 + 7) % 53) as f32 - 26.0) * 0.03).collect();
     let x: Vec<f32> = (0..k).map(|d| (((d * 17 + 3) % 19) as f32 - 9.0) * 0.05).collect();
 
     let (packed, scales, biases) = quantize_matrix(&w, n, k, group_size, bits);
@@ -204,7 +209,18 @@ fn run_qmv_test(bits: u32, kernel: metaltile_core::ir::Kernel, dt: Dt) {
     let expected = oracle_matvec(&w_deq, &x, n, k);
 
     let actual = dispatch_family(
-        kernel, &packed, &scales, &biases, &x, dt, k as u32, n as u32, group_size as u32, n, 1, n,
+        kernel,
+        &packed,
+        &scales,
+        &biases,
+        &x,
+        dt,
+        k as u32,
+        n as u32,
+        group_size as u32,
+        n,
+        1,
+        n,
     );
     assert!(actual.iter().any(|&v| v != 0.0), "qmv b{bits}: all-zero output (empty body?)");
     let diff = max_abs_diff(&actual, &expected);
@@ -267,9 +283,7 @@ fn run_qvm_test(bits: u32, kernel: metaltile_core::ir::Kernel, dt: Dt) {
     // *transpose* view: each "row" of the quantizer is a length-K
     // column of W. Build W column-major-quantized by quantizing the
     // transposed [N, K] matrix, then transposing the dequant back.
-    let w_t: Vec<f32> = (0..n * k)
-        .map(|i| (((i * 29 + 5) % 47) as f32 - 23.0) * 0.025)
-        .collect(); // logical [N, K]
+    let w_t: Vec<f32> = (0..n * k).map(|i| (((i * 29 + 5) % 47) as f32 - 23.0) * 0.025).collect(); // logical [N, K]
     let x: Vec<f32> = (0..k).map(|d| (((d * 11 + 2) % 23) as f32 - 11.0) * 0.04).collect();
 
     // Quantize the [N, K] view (groups along K), then the kernel reads
@@ -285,8 +299,7 @@ fn run_qvm_test(bits: u32, kernel: metaltile_core::ir::Kernel, dt: Dt) {
     for col in 0..n {
         for g in 0..n_groups {
             let off = g * group_size;
-            let slice: Vec<f32> =
-                (0..group_size).map(|i| w_t[col * k + off + i]).collect();
+            let slice: Vec<f32> = (0..group_size).map(|i| w_t[col * k + off + i]).collect();
             let (codes, s, b) = quantize_group(&slice, bits);
             scales[g * n + col] = s;
             biases[g * n + col] = b;
@@ -328,7 +341,18 @@ fn run_qvm_test(bits: u32, kernel: metaltile_core::ir::Kernel, dt: Dt) {
     let expected = oracle_vecmat(&w_deq, &x, n, k);
 
     let actual = dispatch_family(
-        kernel, &packed, &scales, &biases, &x, dt, k as u32, n as u32, group_size as u32, n, 1, n,
+        kernel,
+        &packed,
+        &scales,
+        &biases,
+        &x,
+        dt,
+        k as u32,
+        n as u32,
+        group_size as u32,
+        n,
+        1,
+        n,
     );
     assert!(actual.iter().any(|&v| v != 0.0), "qvm b{bits}: all-zero output (empty body?)");
     let diff = max_abs_diff(&actual, &expected);
@@ -380,13 +404,9 @@ fn run_qmm_test(bits: u32, kernel: metaltile_core::ir::Kernel, dt: Dt) {
     let m = 4usize; // batch rows
     let group_size = 64usize;
 
-    let w: Vec<f32> = (0..n * k)
-        .map(|i| (((i * 31 + 7) % 53) as f32 - 26.0) * 0.03)
-        .collect();
+    let w: Vec<f32> = (0..n * k).map(|i| (((i * 31 + 7) % 53) as f32 - 26.0) * 0.03).collect();
     // M independent input rows.
-    let x: Vec<f32> = (0..m * k)
-        .map(|i| (((i * 17 + 3) % 19) as f32 - 9.0) * 0.05)
-        .collect();
+    let x: Vec<f32> = (0..m * k).map(|i| (((i * 17 + 3) % 19) as f32 - 9.0) * 0.05).collect();
 
     let (packed, scales, biases) = quantize_matrix(&w, n, k, group_size, bits);
     let w_deq = dequant_matrix(&packed, &scales, &biases, n, k, group_size, bits);
@@ -399,7 +419,17 @@ fn run_qmm_test(bits: u32, kernel: metaltile_core::ir::Kernel, dt: Dt) {
     }
 
     let actual = dispatch_family(
-        kernel, &packed, &scales, &biases, &x, dt, k as u32, n as u32, group_size as u32, n, m,
+        kernel,
+        &packed,
+        &scales,
+        &biases,
+        &x,
+        dt,
+        k as u32,
+        n as u32,
+        group_size as u32,
+        n,
+        m,
         m * n,
     );
     assert!(actual.iter().any(|&v| v != 0.0), "qmm b{bits}: all-zero output (empty body?)");

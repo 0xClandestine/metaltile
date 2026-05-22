@@ -177,9 +177,7 @@ fn masked_gemm_checkerboard_outmask_f32() {
 fn masked_gemm_partial_opmask_f32() {
     // Drop the middle K-block of every active output block.
     let out_mask = vec![1.0f32; 4];
-    let op_mask: Vec<f32> = (0..12)
-        .map(|i| if i % 3 == 1 { 0.0 } else { 1.0 })
-        .collect();
+    let op_mask: Vec<f32> = (0..12).map(|i| if i % 3 == 1 { 0.0 } else { 1.0 }).collect();
     run_case(Dt::F32, &out_mask, &op_mask, 2e-3, "masked partial-opmask f32");
 }
 
@@ -193,8 +191,6 @@ fn masked_gemm_checkerboard_outmask_f16() {
 #[test]
 fn masked_gemm_partial_opmask_bf16() {
     let out_mask = vec![1.0f32; 4];
-    let op_mask: Vec<f32> = (0..12)
-        .map(|i| if i % 3 == 1 { 0.0 } else { 1.0 })
-        .collect();
+    let op_mask: Vec<f32> = (0..12).map(|i| if i % 3 == 1 { 0.0 } else { 1.0 }).collect();
     run_case(Dt::Bf16, &out_mask, &op_mask, 5e-1, "masked partial-opmask bf16");
 }

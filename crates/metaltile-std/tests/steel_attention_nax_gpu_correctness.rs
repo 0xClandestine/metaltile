@@ -19,6 +19,7 @@
 //!     --test steel_attention_nax_gpu_correctness -- --nocapture
 
 #![cfg(all(target_os = "macos", feature = "nax"))]
+#![allow(clippy::needless_range_loop)]
 
 use std::collections::BTreeMap;
 
@@ -134,13 +135,9 @@ fn run_sdpa_nax(
     kernel.mode = KernelMode::Reduction;
 
     let result = ctx
-        .dispatch_with_grid(
-            &kernel,
-            &buffers,
-            &BTreeMap::new(),
-            [q_len / 16, n_q_heads, 1],
-            [32, 1, 1],
-        )
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [q_len / 16, n_q_heads, 1], [
+            32, 1, 1,
+        ])
         .expect("dispatch mt_sdpa_prefill_nax");
 
     result.outputs.get("out").expect("`out` buffer in dispatch result").clone()
@@ -150,9 +147,7 @@ fn f32_to_f16_bytes(vals: &[f32]) -> Vec<u8> {
     vals.iter().flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes()).collect()
 }
 
-fn f32_to_f32_bytes(vals: &[f32]) -> Vec<u8> {
-    vals.iter().flat_map(|v| v.to_le_bytes()).collect()
-}
+fn f32_to_f32_bytes(vals: &[f32]) -> Vec<u8> { vals.iter().flat_map(|v| v.to_le_bytes()).collect() }
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     let mut dot = 0.0f64;
@@ -179,15 +174,12 @@ fn build_attn_inputs(
     n_kv_heads: usize,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let hd = HEAD_DIM;
-    let q: Vec<f32> = (0..n_q_heads * q_len * hd)
-        .map(|i| 0.01 + (i as f32 % 23.0) * 0.007)
-        .collect();
-    let k: Vec<f32> = (0..n_kv_heads * k_len * hd)
-        .map(|i| -0.02 + (i as f32 % 19.0) * 0.006)
-        .collect();
-    let v: Vec<f32> = (0..n_kv_heads * k_len * hd)
-        .map(|i| 0.03 + (i as f32 % 29.0) * 0.005)
-        .collect();
+    let q: Vec<f32> =
+        (0..n_q_heads * q_len * hd).map(|i| 0.01 + (i as f32 % 23.0) * 0.007).collect();
+    let k: Vec<f32> =
+        (0..n_kv_heads * k_len * hd).map(|i| -0.02 + (i as f32 % 19.0) * 0.006).collect();
+    let v: Vec<f32> =
+        (0..n_kv_heads * k_len * hd).map(|i| 0.03 + (i as f32 % 29.0) * 0.005).collect();
     (q, k, v)
 }
 
@@ -216,10 +208,8 @@ fn mt_sdpa_prefill_nax_matches_cpu_reference_f32_single_tile() {
         scale,
         4,
     );
-    let actual: Vec<f32> = out_bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
+    let actual: Vec<f32> =
+        out_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
     assert_eq!(actual.len(), expected.len());
 
     let cos = cosine(&expected, &actual);
@@ -252,10 +242,8 @@ fn mt_sdpa_prefill_nax_matches_cpu_reference_f32_multi_tile() {
         scale,
         4,
     );
-    let actual: Vec<f32> = out_bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
+    let actual: Vec<f32> =
+        out_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
 
     let cos = cosine(&expected, &actual);
     println!("[f32 multi-tile q_len={q_len}] cos={cos:.6}");
@@ -287,10 +275,8 @@ fn mt_sdpa_prefill_nax_matches_cpu_reference_f32_gqa() {
         scale,
         4,
     );
-    let actual: Vec<f32> = out_bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
+    let actual: Vec<f32> =
+        out_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
 
     let cos = cosine(&expected, &actual);
     println!("[f32 gqa nqh={nqh} nkvh={nkvh}] cos={cos:.6}");

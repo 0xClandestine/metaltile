@@ -21,6 +21,7 @@
 //! macOS-gated. Shared gpu_lock.
 
 #![cfg(target_os = "macos")]
+#![allow(clippy::needless_range_loop)]
 
 mod common;
 
@@ -30,8 +31,12 @@ use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes, unpack_u32_
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
 use metaltile_std::mlx::quantized::{
-    mt_affine_dequantize_int3, mt_affine_dequantize_int5, mt_affine_dequantize_int6,
-    mt_affine_quantize_int3, mt_affine_quantize_int5, mt_affine_quantize_int6,
+    mt_affine_dequantize_int3,
+    mt_affine_dequantize_int5,
+    mt_affine_dequantize_int6,
+    mt_affine_quantize_int3,
+    mt_affine_quantize_int5,
+    mt_affine_quantize_int6,
 };
 
 const GROUP_SIZE: usize = 32;
@@ -80,13 +85,7 @@ fn quantize_then_dequantize_int3_round_trips_f32() {
     let mut dk = mt_affine_dequantize_int3::kernel_ir_for(Dt::F32.to_dtype());
     dk.mode = KernelMode::Grid3D;
     let dres = ctx
-        .dispatch_with_grid(
-            &dk,
-            &db,
-            &BTreeMap::new(),
-            [n_packs.div_ceil(16), 1, 1],
-            [16, 1, 1],
-        )
+        .dispatch_with_grid(&dk, &db, &BTreeMap::new(), [n_packs.div_ceil(16), 1, 1], [16, 1, 1])
         .expect("dequantize_int3 dispatch");
 
     let mut recon = unpack_bytes(dres.outputs.get("out").expect("out"), Dt::F32);
@@ -178,13 +177,7 @@ fn quantize_then_dequantize_int5_round_trips_f32() {
     let mut dk = mt_affine_dequantize_int5::kernel_ir_for(Dt::F32.to_dtype());
     dk.mode = KernelMode::Grid3D;
     let dres = ctx
-        .dispatch_with_grid(
-            &dk,
-            &db,
-            &BTreeMap::new(),
-            [n_packs.div_ceil(16), 1, 1],
-            [16, 1, 1],
-        )
+        .dispatch_with_grid(&dk, &db, &BTreeMap::new(), [n_packs.div_ceil(16), 1, 1], [16, 1, 1])
         .expect("dequantize_int5 dispatch");
 
     let mut recon = unpack_bytes(dres.outputs.get("out").expect("out"), Dt::F32);
@@ -275,13 +268,7 @@ fn quantize_then_dequantize_int6_round_trips_f32() {
     let mut dk = mt_affine_dequantize_int6::kernel_ir_for(Dt::F32.to_dtype());
     dk.mode = KernelMode::Grid3D;
     let dres = ctx
-        .dispatch_with_grid(
-            &dk,
-            &db,
-            &BTreeMap::new(),
-            [n_packs.div_ceil(16), 1, 1],
-            [16, 1, 1],
-        )
+        .dispatch_with_grid(&dk, &db, &BTreeMap::new(), [n_packs.div_ceil(16), 1, 1], [16, 1, 1])
         .expect("dequantize_int6 dispatch");
 
     let mut recon = unpack_bytes(dres.outputs.get("out").expect("out"), Dt::F32);

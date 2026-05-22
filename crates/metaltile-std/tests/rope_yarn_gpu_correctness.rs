@@ -78,8 +78,13 @@ fn naive_rope_yarn(
 }
 
 /// Plain-RoPE oracle — `rope_yarn` with `factor == 1` must reproduce it.
-fn naive_plain_rope(qk: &[f32], head_dim: u32, n_heads: u32, position: u32,
-                    theta_base: f32) -> Vec<f32> {
+fn naive_plain_rope(
+    qk: &[f32],
+    head_dim: u32,
+    n_heads: u32,
+    position: u32,
+    theta_base: f32,
+) -> Vec<f32> {
     let half_dim = head_dim / 2;
     let half_f = half_dim as f32;
     let mut out = vec![0.0_f32; qk.len()];
@@ -159,10 +164,12 @@ fn rope_yarn_identity_at_position_zero_f32() {
     let n_heads = 4u32;
     let head_dim = 32u32;
     let qk: Vec<f32> = (0..n_heads * head_dim).map(|i| 0.1 + (i as f32 * 0.013).sin()).collect();
-    let actual =
-        run_rope_yarn(&qk, Dt::F32, n_heads, head_dim, 0, 1.0e6, 16.0, 8.0, 20.0, 1.0);
+    let actual = run_rope_yarn(&qk, Dt::F32, n_heads, head_dim, 0, 1.0e6, 16.0, 8.0, 20.0, 1.0);
     for (idx, (a, e)) in actual.iter().zip(qk.iter()).enumerate() {
-        assert!((a - e).abs() < 1e-6, "identity at pos=0 broke at idx={idx}: got {a}, expected {e}");
+        assert!(
+            (a - e).abs() < 1e-6,
+            "identity at pos=0 broke at idx={idx}: got {a}, expected {e}"
+        );
     }
 }
 
@@ -178,8 +185,8 @@ fn rope_yarn_factor_one_collapses_to_plain_rope_f32() {
     let qk: Vec<f32> = (0..n_heads * head_dim).map(|i| ((i % 41) as f32 - 20.0) * 0.05).collect();
 
     let expected = naive_plain_rope(&qk, head_dim, n_heads, position, theta_base);
-    let actual = run_rope_yarn(&qk, Dt::F32, n_heads, head_dim, position, theta_base,
-                               1.0, 8.0, 24.0, 1.0);
+    let actual =
+        run_rope_yarn(&qk, Dt::F32, n_heads, head_dim, position, theta_base, 1.0, 8.0, 24.0, 1.0);
     let mut max_diff = 0.0_f32;
     for (a, e) in actual.iter().zip(expected.iter()) {
         max_diff = max_diff.max((a - e).abs());
@@ -201,8 +208,8 @@ fn rope_yarn_nemotron_params_match_oracle_f32() {
 
     let expected =
         naive_rope_yarn(&qk, head_dim, n_heads, position, theta_base, 16.0, 20.0, 37.0, 1.0);
-    let actual = run_rope_yarn(&qk, Dt::F32, n_heads, head_dim, position, theta_base,
-                               16.0, 20.0, 37.0, 1.0);
+    let actual =
+        run_rope_yarn(&qk, Dt::F32, n_heads, head_dim, position, theta_base, 16.0, 20.0, 37.0, 1.0);
     let mut max_diff = 0.0_f32;
     for (a, e) in actual.iter().zip(expected.iter()) {
         max_diff = max_diff.max((a - e).abs());
@@ -223,8 +230,8 @@ fn rope_yarn_preserves_norm_f32() {
     let head_dim = 64u32;
     let position = 333u32;
     let qk: Vec<f32> = (0..n_heads * head_dim).map(|i| 0.5 + (i as f32 * 0.073).cos()).collect();
-    let actual = run_rope_yarn(&qk, Dt::F32, n_heads, head_dim, position, 1.0e6,
-                               16.0, 20.0, 37.0, 1.0);
+    let actual =
+        run_rope_yarn(&qk, Dt::F32, n_heads, head_dim, position, 1.0e6, 16.0, 20.0, 37.0, 1.0);
     let half_dim = head_dim / 2;
     for head in 0..n_heads {
         let base = (head * head_dim) as usize;
@@ -233,8 +240,7 @@ fn rope_yarn_preserves_norm_f32() {
             let i2 = base + (i + half_dim) as usize;
             let in_sq = qk[i1] * qk[i1] + qk[i2] * qk[i2];
             let out_sq = actual[i1] * actual[i1] + actual[i2] * actual[i2];
-            assert!((in_sq - out_sq).abs() < 1e-4,
-                    "norm not preserved at (head={head}, i={i})");
+            assert!((in_sq - out_sq).abs() < 1e-4, "norm not preserved at (head={head}, i={i})");
         }
     }
 }
@@ -248,10 +254,19 @@ fn rope_yarn_nemotron_params_match_oracle_f16() {
     let theta_base = 1.0e6_f32;
     let qk: Vec<f32> = (0..n_heads * head_dim).map(|i| ((i % 41) as f32 - 20.0) * 0.05).collect();
     let qk_rounded: Vec<f32> = qk.iter().map(|&v| Dt::F16.round(v)).collect();
-    let expected =
-        naive_rope_yarn(&qk_rounded, head_dim, n_heads, position, theta_base, 16.0, 12.0, 28.0, 1.0);
-    let actual = run_rope_yarn(&qk, Dt::F16, n_heads, head_dim, position, theta_base,
-                               16.0, 12.0, 28.0, 1.0);
+    let expected = naive_rope_yarn(
+        &qk_rounded,
+        head_dim,
+        n_heads,
+        position,
+        theta_base,
+        16.0,
+        12.0,
+        28.0,
+        1.0,
+    );
+    let actual =
+        run_rope_yarn(&qk, Dt::F16, n_heads, head_dim, position, theta_base, 16.0, 12.0, 28.0, 1.0);
     let mut max_rel = 0.0_f32;
     for (a, e) in actual.iter().zip(expected.iter()) {
         max_rel = max_rel.max((a - e).abs() / e.abs().max(1e-3));
@@ -268,10 +283,29 @@ fn rope_yarn_nemotron_params_match_oracle_bf16() {
     let theta_base = 1.0e6_f32;
     let qk: Vec<f32> = (0..n_heads * head_dim).map(|i| ((i % 41) as f32 - 20.0) * 0.05).collect();
     let qk_rounded: Vec<f32> = qk.iter().map(|&v| Dt::Bf16.round(v)).collect();
-    let expected =
-        naive_rope_yarn(&qk_rounded, head_dim, n_heads, position, theta_base, 16.0, 12.0, 28.0, 1.0);
-    let actual = run_rope_yarn(&qk, Dt::Bf16, n_heads, head_dim, position, theta_base,
-                               16.0, 12.0, 28.0, 1.0);
+    let expected = naive_rope_yarn(
+        &qk_rounded,
+        head_dim,
+        n_heads,
+        position,
+        theta_base,
+        16.0,
+        12.0,
+        28.0,
+        1.0,
+    );
+    let actual = run_rope_yarn(
+        &qk,
+        Dt::Bf16,
+        n_heads,
+        head_dim,
+        position,
+        theta_base,
+        16.0,
+        12.0,
+        28.0,
+        1.0,
+    );
     let mut max_rel = 0.0_f32;
     for (a, e) in actual.iter().zip(expected.iter()) {
         max_rel = max_rel.max((a - e).abs() / e.abs().max(1e-3));

@@ -51,7 +51,6 @@
 //! Correctness vs CPU oracle ≥ cos 0.999 — see
 //! `crates/metaltile-std/tests/fp_quantized_nax_gpu_correctness.rs`.
 
-
 use metaltile_core::{
     constexpr::ConstExpr,
     dtype::DType,
@@ -267,16 +266,8 @@ pub fn kernel_ir_for(dt: DType) -> Kernel {
         kind: ParamKind::Tensor,
     });
 
-    k.constexprs.push(ConstExprDecl {
-        name: ConstExpr::new("k"),
-        dtype: DType::U32,
-        value: None,
-    });
-    k.constexprs.push(ConstExprDecl {
-        name: ConstExpr::new("n"),
-        dtype: DType::U32,
-        value: None,
-    });
+    k.constexprs.push(ConstExprDecl { name: ConstExpr::new("k"), dtype: DType::U32, value: None });
+    k.constexprs.push(ConstExprDecl { name: ConstExpr::new("n"), dtype: DType::U32, value: None });
     k.constexprs.push(ConstExprDecl {
         name: ConstExpr::new("gs_per_row"),
         dtype: DType::U32,
@@ -330,7 +321,9 @@ mod tests {
             assert_eq!(k.constexprs[1].name.name(), "n");
             assert_eq!(k.constexprs[2].name.name(), "gs_per_row");
             assert!(k.body.ops.iter().any(|op| matches!(op, Op::InlineMsl { .. })));
-            assert!(k.body.ops.iter().any(|op| matches!(op, Op::Load { src, .. } if src == "tgid_y")));
+            assert!(
+                k.body.ops.iter().any(|op| matches!(op, Op::Load { src, .. } if src == "tgid_y"))
+            );
         }
     }
 

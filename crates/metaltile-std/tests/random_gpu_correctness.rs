@@ -81,9 +81,6 @@ fn random_hash_large_n() {
     assert_eq!(actual.len(), n);
     // Only spot-check a few elements to keep the test fast.
     for i in [0, 1, 1023, n / 2, n - 1] {
-        assert_eq!(
-            actual[i], expected[i],
-            "random_hash large_n mismatch at [{i}]"
-        );
+        assert_eq!(actual[i], expected[i], "random_hash large_n mismatch at [{i}]");
     }
 }

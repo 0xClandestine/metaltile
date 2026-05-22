@@ -46,8 +46,8 @@ use metaltile_std::mlx::rope::mt_rope;
 /// of the inverse-frequency, the fused rotate. `n_heads` must be a
 /// multiple of 4 (the kernel folds 4 heads per z-program).
 fn naive_rope(inp: &[f32], n_heads: u32, seq_len: u32, head_dim: u32, theta_base: f32) -> Vec<f32> {
-    assert!(n_heads % 4 == 0, "kernel folds 4 heads per z-program");
-    assert!(head_dim % 2 == 0, "rotate-half needs an even head_dim");
+    assert!(n_heads.is_multiple_of(4), "kernel folds 4 heads per z-program");
+    assert!(head_dim.is_multiple_of(2), "rotate-half needs an even head_dim");
     let grid_x = head_dim / 2;
     let h_stride = seq_len * head_dim;
     let seq_stride = head_dim;
@@ -86,7 +86,7 @@ fn run_rope(
     head_dim: u32,
     theta_base: f32,
 ) -> Vec<f32> {
-    assert!(n_heads % 4 == 0 && head_dim % 2 == 0);
+    assert!(n_heads.is_multiple_of(4) && head_dim.is_multiple_of(2));
     let grid_x = head_dim / 2;
     let h_stride = seq_len * head_dim;
     let seq_stride = head_dim;
@@ -135,7 +135,10 @@ fn rope_identity_at_position_zero_f32() {
 
     let actual = run_rope(&inp, Dt::F32, n_heads, seq_len, head_dim, 10000.0);
     for (idx, (a, e)) in actual.iter().zip(inp.iter()).enumerate() {
-        assert!((a - e).abs() < 1e-6, "identity at pos=0 broke at idx={idx}: got {a}, expected {e}");
+        assert!(
+            (a - e).abs() < 1e-6,
+            "identity at pos=0 broke at idx={idx}: got {a}, expected {e}"
+        );
     }
 }
 
@@ -149,9 +152,8 @@ fn rope_matches_oracle_f32() {
     let head_dim = 16u32;
     let theta_base = 10000.0f32;
 
-    let inp: Vec<f32> = (0..n_heads * seq_len * head_dim)
-        .map(|i| ((i % 41) as f32 - 20.0) * 0.05)
-        .collect();
+    let inp: Vec<f32> =
+        (0..n_heads * seq_len * head_dim).map(|i| ((i % 41) as f32 - 20.0) * 0.05).collect();
     let expected = naive_rope(&inp, n_heads, seq_len, head_dim, theta_base);
     let actual = run_rope(&inp, Dt::F32, n_heads, seq_len, head_dim, theta_base);
 
@@ -171,9 +173,8 @@ fn rope_matches_oracle_f16() {
     let head_dim = 16u32;
     let theta_base = 10000.0f32;
 
-    let inp: Vec<f32> = (0..n_heads * seq_len * head_dim)
-        .map(|i| ((i % 41) as f32 - 20.0) * 0.05)
-        .collect();
+    let inp: Vec<f32> =
+        (0..n_heads * seq_len * head_dim).map(|i| ((i % 41) as f32 - 20.0) * 0.05).collect();
     // Round source through f16 so the oracle uses the same load
     // precision as the kernel's initial cast.
     let inp_rounded: Vec<f32> = inp.iter().map(|&v| Dt::F16.round(v)).collect();
@@ -195,9 +196,8 @@ fn rope_matches_oracle_bf16() {
     let head_dim = 16u32;
     let theta_base = 10000.0f32;
 
-    let inp: Vec<f32> = (0..n_heads * seq_len * head_dim)
-        .map(|i| ((i % 41) as f32 - 20.0) * 0.05)
-        .collect();
+    let inp: Vec<f32> =
+        (0..n_heads * seq_len * head_dim).map(|i| ((i % 41) as f32 - 20.0) * 0.05).collect();
     let inp_rounded: Vec<f32> = inp.iter().map(|&v| Dt::Bf16.round(v)).collect();
     let expected = naive_rope(&inp_rounded, n_heads, seq_len, head_dim, theta_base);
     let actual = run_rope(&inp, Dt::Bf16, n_heads, seq_len, head_dim, theta_base);
@@ -221,9 +221,8 @@ fn rope_preserves_pair_norm_f32() {
     let head_dim = 16u32;
     let theta_base = 10000.0f32;
 
-    let inp: Vec<f32> = (0..n_heads * seq_len * head_dim)
-        .map(|i| 0.5 + (i as f32 * 0.071).cos())
-        .collect();
+    let inp: Vec<f32> =
+        (0..n_heads * seq_len * head_dim).map(|i| 0.5 + (i as f32 * 0.071).cos()).collect();
     let actual = run_rope(&inp, Dt::F32, n_heads, seq_len, head_dim, theta_base);
 
     let grid_x = (head_dim / 2) as usize;

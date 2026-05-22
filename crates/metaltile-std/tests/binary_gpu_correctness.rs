@@ -16,17 +16,18 @@ use common::{Dt, gpu_lock, max_abs_diff, pack_bytes, unpack_bytes};
 use metaltile_core::{dtype::DType, ir::Kernel};
 use metaltile_runtime::Context;
 use metaltile_std::mlx::binary::{
-    mt_atan2, mt_div, mt_logaddexp, mt_max_elem, mt_min_elem, mt_mul, mt_pow, mt_sub,
+    mt_atan2,
+    mt_div,
+    mt_logaddexp,
+    mt_max_elem,
+    mt_min_elem,
+    mt_mul,
+    mt_pow,
+    mt_sub,
 };
 
 // Dispatch a two-input, one-output binary kernel (Grid3D — one thread per element).
-fn run_binary(
-    kernel_ir: fn(DType) -> Kernel,
-    a: &[f32],
-    b: &[f32],
-    dt: Dt,
-    n: usize,
-) -> Vec<f32> {
+fn run_binary(kernel_ir: fn(DType) -> Kernel, a: &[f32], b: &[f32], dt: Dt, n: usize) -> Vec<f32> {
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     buffers.insert("a".into(), pack_bytes(a, dt));
     buffers.insert("b".into(), pack_bytes(b, dt));
@@ -150,8 +151,10 @@ fn binary_atan2_matches_cpu_f32() {
     let result = ctx
         .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [groups, 1, 1], [tpg, 1, 1])
         .expect("atan2 dispatch");
-    let actual: Vec<f32> =
-        unpack_bytes(result.outputs.get("out").expect("out"), Dt::F32).into_iter().take(n).collect();
+    let actual: Vec<f32> = unpack_bytes(result.outputs.get("out").expect("out"), Dt::F32)
+        .into_iter()
+        .take(n)
+        .collect();
     assert!(max_abs_diff(&actual, &expected) < 1e-4, "atan2 f32 mismatch");
 }
 

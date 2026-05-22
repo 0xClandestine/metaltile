@@ -87,13 +87,7 @@ fn naive_conv3x3(input: &[f32], weight: &[f32], bias: &[f32], s: &ConvShape) -> 
 }
 
 /// Dispatch the Winograd kernel and read back the output.
-fn run_winograd(
-    input: &[f32],
-    weight: &[f32],
-    bias: &[f32],
-    dt: Dt,
-    s: &ConvShape,
-) -> Vec<f32> {
+fn run_winograd(input: &[f32], weight: &[f32], bias: &[f32], dt: Dt, s: &ConvShape) -> Vec<f32> {
     let (out_h, out_w) = (s.out_h(), s.out_w());
     assert!(out_h % 2 == 0 && out_w % 2 == 0, "Winograd needs even output dims");
     let (tiles_h, tiles_w) = (out_h / 2, out_w / 2);

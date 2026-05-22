@@ -36,7 +36,7 @@ const E5M2: Fp8Fmt = Fp8Fmt { mantissa_bits: 2.0, e_min: -14.0, e_max: 15.0, fp8
 /// time (each group is one simdgroup with its own amax). Mirrors the
 /// kernel's float-arithmetic mantissa rounding exactly.
 fn oracle_fp8_round_trip(inp: &[f32], fmt: &Fp8Fmt) -> Vec<f32> {
-    assert!(inp.len() % 32 == 0, "input length must be a multiple of 32");
+    assert!(inp.len().is_multiple_of(32), "input length must be a multiple of 32");
     let mut out = vec![0.0f32; inp.len()];
     for (gi, group) in inp.chunks_exact(32).enumerate() {
         let group_max = group.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
@@ -63,7 +63,7 @@ fn oracle_fp8_round_trip(inp: &[f32], fmt: &Fp8Fmt) -> Vec<f32> {
 /// Dispatch an fp8 quant-dequant kernel over `inp` (length a multiple of 32).
 fn run_fp8(inp: &[f32], kernel: metaltile_core::ir::Kernel) -> Vec<f32> {
     let n = inp.len();
-    assert!(n % 32 == 0);
+    assert!(n.is_multiple_of(32));
 
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     buffers.insert("inp".into(), pack_bytes(inp, Dt::F32));
@@ -133,10 +133,7 @@ fn fp8_e4m3_preserves_sign() {
     let inp: Vec<f32> = (0..32).map(|i| if i % 2 == 0 { 1.5 } else { -2.25 }).collect();
     let actual = run_fp8(&inp, mt_fp8_e4m3_quant_dequant::kernel_ir_for());
     for (i, (&x, &y)) in inp.iter().zip(actual.iter()).enumerate() {
-        assert!(
-            (x >= 0.0) == (y >= 0.0),
-            "fp8 e4m3 flipped sign at [{i}]: in {x}, out {y}",
-        );
+        assert!((x >= 0.0) == (y >= 0.0), "fp8 e4m3 flipped sign at [{i}]: in {x}, out {y}",);
     }
 }
 

@@ -80,14 +80,12 @@ fn run_case(dt_kind: Dt) {
     // Round every operand through the dtype so the oracle matches the
     // kernel's load-cast precision. `h` is genuinely fp32 on both sides.
     let r = |v: f32| dt_kind.round(v);
-    let x: Vec<f32> =
-        (0..n_heads * head_dim).map(|i| r(((i % 11) as f32 - 5.0) * 0.02)).collect();
+    let x: Vec<f32> = (0..n_heads * head_dim).map(|i| r(((i % 11) as f32 - 5.0) * 0.02)).collect();
     // A_log is the raw log-param; the kernel applies A = -exp(A_log),
     // so any real A_log yields a stable decay = exp(-exp(A_log)*dt) < 1.
     // Distinct value per (channel, state) — the whole point of the 2-D form.
-    let a_log: Vec<f32> = (0..n_heads * head_dim * state_dim)
-        .map(|i| r(-1.0 + 0.013 * (i as f32 % 19.0)))
-        .collect();
+    let a_log: Vec<f32> =
+        (0..n_heads * head_dim * state_dim).map(|i| r(-1.0 + 0.013 * (i as f32 % 19.0))).collect();
     let b: Vec<f32> = (0..state_dim).map(|i| r(((i % 5) as f32 - 2.0) * 0.05)).collect();
     let c: Vec<f32> = (0..state_dim).map(|i| r(((i % 7) as f32 - 3.0) * 0.03)).collect();
     let dt: Vec<f32> = (0..n_heads).map(|i| r(0.1 + 0.05 * i as f32)).collect();

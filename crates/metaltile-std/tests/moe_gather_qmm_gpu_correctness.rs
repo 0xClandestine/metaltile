@@ -28,8 +28,13 @@ use common::{Dt, gpu_lock, pack_bytes, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
 use metaltile_std::ffai::moe::{
-    mt_moe_gather_qmm_b3, mt_moe_gather_qmm_b5, mt_moe_gather_qmm_b6, mt_moe_gather_qmm_b8,
-    mt_moe_gather_qmm_int4, mt_moe_gather_qmm_int4_m8, mt_moe_gather_qmm_mma_int4,
+    mt_moe_gather_qmm_b3,
+    mt_moe_gather_qmm_b5,
+    mt_moe_gather_qmm_b6,
+    mt_moe_gather_qmm_b8,
+    mt_moe_gather_qmm_int4,
+    mt_moe_gather_qmm_int4_m8,
+    mt_moe_gather_qmm_mma_int4,
     mt_moe_gather_qmm_mma_int4_bm16,
 };
 
@@ -349,7 +354,7 @@ fn run_gather_qmm_bits(bits: u32, kernel: metaltile_core::ir::Kernel) {
     let mut weight_packed: Vec<u32> = Vec::new();
     for r in 0..n_rows {
         let codes: Vec<u32> =
-            (0..k_in).map(|d| ((r as u32 * 13 + d as u32 * 7 + 3) % (max_code + 1))).collect();
+            (0..k_in).map(|d| (r as u32 * 13 + d as u32 * 7 + 3) % (max_code + 1)).collect();
         weight_packed.extend(pack_codes_bits(&codes, bits));
     }
 
@@ -359,8 +364,17 @@ fn run_gather_qmm_bits(bits: u32, kernel: metaltile_core::ir::Kernel) {
     let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.1 * ((i as f32 * 0.17).sin())).collect();
 
     let y_cpu = cpu_gather_qmm_bits(
-        &x, &weight_packed, &scales, &biases, &expert_offsets, t_rows, k_in, m_out, n_experts,
-        group_size, bits,
+        &x,
+        &weight_packed,
+        &scales,
+        &biases,
+        &expert_offsets,
+        t_rows,
+        k_in,
+        m_out,
+        n_experts,
+        group_size,
+        bits,
     );
 
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();

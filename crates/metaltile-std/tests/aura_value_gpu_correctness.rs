@@ -21,7 +21,7 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use common::{max_abs_diff, pack_bytes, pack_u32_bytes, unpack_bytes, Dt};
+use common::{Dt, max_abs_diff, pack_bytes, pack_u32_bytes, unpack_bytes};
 use metaltile_core::{dtype::DType, ir::KernelMode};
 use metaltile_runtime::Context;
 use metaltile_std::ffai::aura_value::aura_value_int4;

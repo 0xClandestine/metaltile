@@ -5,6 +5,7 @@
 //!   - output row `r` is computed from `A` row `lhs_indices[r]`,
 //!   - output N-block `c` multiplies against `B` matrix
 //!     `rhs_indices[c]` (one `[K, N]` matrix of several).
+//!
 //! This is the MLX `gather_mm` op — the dense matmul of a MoE FFN.
 //!
 //! It pins the kernel against a triple-loop fp32 CPU reference that
@@ -79,14 +80,10 @@ fn run_gather_gemm(
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     buffers.insert("a".into(), pack_bytes(a, dt));
     buffers.insert("b".into(), pack_bytes(b, dt));
-    buffers.insert(
-        "lhs_indices".into(),
-        lhs_indices.iter().flat_map(|v| v.to_le_bytes()).collect(),
-    );
-    buffers.insert(
-        "rhs_indices".into(),
-        rhs_indices.iter().flat_map(|v| v.to_le_bytes()).collect(),
-    );
+    buffers
+        .insert("lhs_indices".into(), lhs_indices.iter().flat_map(|v| v.to_le_bytes()).collect());
+    buffers
+        .insert("rhs_indices".into(), rhs_indices.iter().flat_map(|v| v.to_le_bytes()).collect());
     buffers.insert("out".into(), vec![0u8; m * n * dt.bytes()]);
     buffers.insert("m".into(), (m as u32).to_le_bytes().to_vec());
     buffers.insert("n".into(), (n as u32).to_le_bytes().to_vec());

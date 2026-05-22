@@ -19,7 +19,14 @@ use common::{Dt, gpu_lock, max_abs_diff, pack_bytes, unpack_bytes};
 use metaltile_core::{dtype::DType, ir::Kernel};
 use metaltile_runtime::Context;
 use metaltile_std::mlx::unary::{
-    mt_abs, mt_exp, mt_log, mt_relu, mt_rsqrt, mt_sigmoid, mt_silu, mt_sqrt,
+    mt_abs,
+    mt_exp,
+    mt_log,
+    mt_relu,
+    mt_rsqrt,
+    mt_sigmoid,
+    mt_silu,
+    mt_sqrt,
 };
 
 /// Dispatch a one-input, one-output unary kernel (Grid3D).

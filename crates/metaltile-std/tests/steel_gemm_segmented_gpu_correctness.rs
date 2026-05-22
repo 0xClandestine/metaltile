@@ -79,10 +79,7 @@ fn run_segmented_gemm(
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     buffers.insert("a".into(), pack_bytes(a, dt));
     buffers.insert("b".into(), pack_bytes(b, dt));
-    buffers.insert(
-        "segments".into(),
-        segments.iter().flat_map(|v| v.to_le_bytes()).collect(),
-    );
+    buffers.insert("segments".into(), segments.iter().flat_map(|v| v.to_le_bytes()).collect());
     buffers.insert("out".into(), vec![0u8; n_segments * m * n * dt.bytes()]);
     buffers.insert("m".into(), (m as u32).to_le_bytes().to_vec());
     buffers.insert("n".into(), (n as u32).to_le_bytes().to_vec());

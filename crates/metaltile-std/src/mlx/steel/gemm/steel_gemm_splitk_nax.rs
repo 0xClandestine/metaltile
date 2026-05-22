@@ -54,7 +54,6 @@
 //! Correctness vs CPU oracle ≥ cos 0.999 — see
 //! `crates/metaltile-std/tests/steel_gemm_splitk_nax_gpu_correctness.rs`.
 
-
 use metaltile_core::{
     constexpr::ConstExpr,
     dtype::DType,
@@ -278,21 +277,9 @@ pub fn kernel_ir_for(dt: DType) -> Kernel {
     // `m` — the partials buffer is laid out [n_splits, m, n]; the MSL
     // computes `part_base = split * m * n`, so `m` must be a bound
     // constexpr (the pass-1 kernel previously omitted it).
-    k.constexprs.push(ConstExprDecl {
-        name: ConstExpr::new("m"),
-        dtype: DType::U32,
-        value: None,
-    });
-    k.constexprs.push(ConstExprDecl {
-        name: ConstExpr::new("k"),
-        dtype: DType::U32,
-        value: None,
-    });
-    k.constexprs.push(ConstExprDecl {
-        name: ConstExpr::new("n"),
-        dtype: DType::U32,
-        value: None,
-    });
+    k.constexprs.push(ConstExprDecl { name: ConstExpr::new("m"), dtype: DType::U32, value: None });
+    k.constexprs.push(ConstExprDecl { name: ConstExpr::new("k"), dtype: DType::U32, value: None });
+    k.constexprs.push(ConstExprDecl { name: ConstExpr::new("n"), dtype: DType::U32, value: None });
     k.constexprs.push(ConstExprDecl {
         name: ConstExpr::new("k_per_split"),
         dtype: DType::U32,
@@ -367,16 +354,8 @@ pub fn accum_kernel_ir_for(dt: DType) -> Kernel {
         kind: ParamKind::Tensor,
     });
 
-    k.constexprs.push(ConstExprDecl {
-        name: ConstExpr::new("m"),
-        dtype: DType::U32,
-        value: None,
-    });
-    k.constexprs.push(ConstExprDecl {
-        name: ConstExpr::new("n"),
-        dtype: DType::U32,
-        value: None,
-    });
+    k.constexprs.push(ConstExprDecl { name: ConstExpr::new("m"), dtype: DType::U32, value: None });
+    k.constexprs.push(ConstExprDecl { name: ConstExpr::new("n"), dtype: DType::U32, value: None });
     k.constexprs.push(ConstExprDecl {
         name: ConstExpr::new("n_splits"),
         dtype: DType::U32,
@@ -423,8 +402,12 @@ mod tests {
             assert_eq!(k.constexprs[2].name.name(), "n");
             assert_eq!(k.constexprs[3].name.name(), "k_per_split");
             assert!(k.body.ops.iter().any(|op| matches!(op, Op::InlineMsl { .. })));
-            assert!(k.body.ops.iter().any(|op| matches!(op, Op::Load { src, .. } if src == "tgid_y")));
-            assert!(k.body.ops.iter().any(|op| matches!(op, Op::Load { src, .. } if src == "tgid_z")));
+            assert!(
+                k.body.ops.iter().any(|op| matches!(op, Op::Load { src, .. } if src == "tgid_y"))
+            );
+            assert!(
+                k.body.ops.iter().any(|op| matches!(op, Op::Load { src, .. } if src == "tgid_z"))
+            );
         }
     }
 

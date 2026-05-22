@@ -1792,8 +1792,9 @@ impl DslBodyParser {
 
         let acc_mode_str = args.get(5).map(|a| string_lit_from_expr(a)).unwrap_or_default();
         let acc_mode = match acc_mode_str.as_str() {
-            "accumulate" | "multiply_accumulate" | "acc" =>
-                quote! { CoopTileAccMode::MultiplyAccumulate },
+            "accumulate" | "multiply_accumulate" | "acc" => {
+                quote! { CoopTileAccMode::MultiplyAccumulate }
+            },
             _ => quote! { CoopTileAccMode::Overwrite },
         };
 

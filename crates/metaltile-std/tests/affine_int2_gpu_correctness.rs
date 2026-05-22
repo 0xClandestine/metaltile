@@ -14,6 +14,7 @@
 //! macOS-gated. Shared gpu_lock.
 
 #![cfg(target_os = "macos")]
+#![allow(clippy::needless_range_loop)]
 
 mod common;
 
@@ -26,7 +27,6 @@ use metaltile_std::mlx::quantized::{mt_affine_dequantize_int2, mt_affine_quantiz
 
 const GROUP_SIZE: usize = 64;
 const PACK_FACTOR: usize = 16; // 16 two-bit codes per uint32
-const N_BINS: f32 = 3.0; // 2^2 - 1
 
 // ── 1. dequantize vs explicit CPU bit-unpack ──────────────────────────────
 
@@ -119,13 +119,9 @@ fn quantize_then_dequantize_int2_round_trips_f32() {
     let mut dkernel = mt_affine_dequantize_int2::kernel_ir_for(Dt::F32.to_dtype());
     dkernel.mode = KernelMode::Grid3D;
     let dres = ctx
-        .dispatch_with_grid(
-            &dkernel,
-            &db,
-            &BTreeMap::new(),
-            [n_packs.div_ceil(64), 1, 1],
-            [64, 1, 1],
-        )
+        .dispatch_with_grid(&dkernel, &db, &BTreeMap::new(), [n_packs.div_ceil(64), 1, 1], [
+            64, 1, 1,
+        ])
         .expect("dequantize_int2 dispatch");
     let mut recon = unpack_bytes(dres.outputs.get("out").expect("out"), Dt::F32);
     recon.truncate(n_elem);

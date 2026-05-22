@@ -80,10 +80,7 @@ fn softmax_output_sums_to_one_f32() {
 
     for r in 0..rows {
         let sum: f32 = actual[r * n..(r + 1) * n].iter().sum();
-        assert!(
-            (sum - 1.0).abs() < 1e-4,
-            "softmax row {r} sum = {sum:.6} (expected 1.0)"
-        );
+        assert!((sum - 1.0).abs() < 1e-4, "softmax row {r} sum = {sum:.6} (expected 1.0)");
     }
 }
 

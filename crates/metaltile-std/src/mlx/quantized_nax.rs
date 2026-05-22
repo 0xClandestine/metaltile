@@ -45,7 +45,6 @@
 //! Correctness vs CPU oracle ≥ cos 0.999 — see
 //! `crates/metaltile-std/tests/quantized_nax_gpu_correctness.rs`.
 
-
 use metaltile_core::{
     constexpr::ConstExpr,
     dtype::DType,
@@ -68,7 +67,7 @@ pub const TG_LD: u32 = BK + TG_SKEW; // 36
 /// MSL source. References the kernel parameters by name; codegen emits
 /// the bindings as `const device {T} *w/scales/biases/x` + `device {T} *out`
 /// + `constant uint &k/n/gs_per_row` per the standard `Param` / `ConstExprDecl`
-/// signature path.
+///   signature path.
 ///
 /// Templated on `T` (fp32 / fp16) at metaltile-build time via the per-dtype
 /// kernel-IR (`kernel_ir_for(DType)`) — the `{T}` placeholder is rewritten
@@ -330,16 +329,8 @@ pub fn kernel_ir_for(dt: DType) -> Kernel {
     });
 
     // Constexpr scalars (passed via setBytes after the buffers).
-    k.constexprs.push(ConstExprDecl {
-        name: ConstExpr::new("k"),
-        dtype: DType::U32,
-        value: None,
-    });
-    k.constexprs.push(ConstExprDecl {
-        name: ConstExpr::new("n"),
-        dtype: DType::U32,
-        value: None,
-    });
+    k.constexprs.push(ConstExprDecl { name: ConstExpr::new("k"), dtype: DType::U32, value: None });
+    k.constexprs.push(ConstExprDecl { name: ConstExpr::new("n"), dtype: DType::U32, value: None });
     k.constexprs.push(ConstExprDecl {
         name: ConstExpr::new("gs_per_row"),
         dtype: DType::U32,
@@ -396,7 +387,9 @@ mod tests {
             assert_eq!(k.constexprs[2].name.name(), "gs_per_row");
             // Body has `Op::Load { src: "tgid_y" }` (tgid_y alias trigger) + InlineMsl.
             assert!(k.body.ops.iter().any(|op| matches!(op, Op::InlineMsl { .. })));
-            assert!(k.body.ops.iter().any(|op| matches!(op, Op::Load { src, .. } if src == "tgid_y")));
+            assert!(
+                k.body.ops.iter().any(|op| matches!(op, Op::Load { src, .. } if src == "tgid_y"))
+            );
         }
     }
 

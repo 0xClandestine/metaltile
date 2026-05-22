@@ -54,13 +54,7 @@ fn run_sort(inp: &[f32], dt: Dt, n_blocks: usize) -> Vec<f32> {
 
     // 1 threadgroup per block, 256 threads per threadgroup.
     let result = ctx
-        .dispatch_with_grid(
-            &kernel,
-            &buffers,
-            &BTreeMap::new(),
-            [n_blocks, 1, 1],
-            [256, 1, 1],
-        )
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [n_blocks, 1, 1], [256, 1, 1])
         .expect("sort dispatch");
 
     let mut out = unpack_bytes(result.outputs.get("out").expect("out"), dt);
@@ -86,10 +80,7 @@ fn sort_single_block_matches_cpu_f32() {
 
     assert!(actual.iter().any(|&v| v != 0.0), "sort output all zeros — empty kernel body?");
     for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
-        assert!(
-            (e - a).abs() < 1e-6,
-            "sort mismatch at [{i}]: expected {e:.4}, got {a:.4}"
-        );
+        assert!((e - a).abs() < 1e-6, "sort mismatch at [{i}]: expected {e:.4}, got {a:.4}");
     }
 }
 
@@ -103,10 +94,7 @@ fn sort_single_block_random_f32() {
     let actual = run_sort(&inp, Dt::F32, 1);
 
     for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
-        assert!(
-            (e - a).abs() < 1e-6,
-            "sort random mismatch at [{i}]: expected {e:.4}, got {a:.4}"
-        );
+        assert!((e - a).abs() < 1e-6, "sort random mismatch at [{i}]: expected {e:.4}, got {a:.4}");
     }
 }
 
@@ -138,16 +126,11 @@ fn sort_single_block_f16() {
     let _g = gpu_lock();
     const N: usize = 1024;
     // Values representable exactly in f16 — avoids rounding confusion.
-    let inp: Vec<f32> = (0..N)
-        .map(|i| Dt::F16.round(((N - 1 - i) as f32) * 0.1))
-        .collect();
+    let inp: Vec<f32> = (0..N).map(|i| Dt::F16.round(((N - 1 - i) as f32) * 0.1)).collect();
     let expected = cpu_sort_block(&inp);
     let actual = run_sort(&inp, Dt::F16, 1);
     for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
-        assert!(
-            (e - a).abs() < 1e-3,
-            "sort f16 mismatch at [{i}]: expected {e:.4}, got {a:.4}"
-        );
+        assert!((e - a).abs() < 1e-3, "sort f16 mismatch at [{i}]: expected {e:.4}, got {a:.4}");
     }
 }
 
@@ -192,13 +175,9 @@ fn run_merge_pass(ctx: &Context, inp: &[f32], dt: Dt, n: usize, run: usize) -> V
     // One thread per output element; any TPG works for Grid3D.
     const TPG: usize = 256;
     let result = ctx
-        .dispatch_with_grid(
-            &kernel,
-            &buffers,
-            &BTreeMap::new(),
-            [n.div_ceil(TPG), 1, 1],
-            [TPG, 1, 1],
-        )
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [n.div_ceil(TPG), 1, 1], [
+            TPG, 1, 1,
+        ])
         .expect("merge dispatch");
 
     let mut out = unpack_bytes(result.outputs.get("out").expect("out"), dt);
@@ -273,8 +252,9 @@ fn sort_eight_blocks_merge_matches_cpu_f32() {
     let _g = gpu_lock();
     // Pseudo-random pattern across 8 blocks — exercises 3 merge passes
     // with elements interleaved across many run boundaries.
-    let inp: Vec<f32> =
-        (0..8 * BLOCK).map(|i| ((i * 2_654_435_761usize) % 1_000_003) as f32 * 0.001 - 500.0).collect();
+    let inp: Vec<f32> = (0..8 * BLOCK)
+        .map(|i| ((i * 2_654_435_761usize) % 1_000_003) as f32 * 0.001 - 500.0)
+        .collect();
     let expected = cpu_sort_full(&inp);
     let actual = run_multiblock_sort(&inp, Dt::F32, inp.len());
     for (i, (e, a)) in expected.iter().zip(&actual).enumerate() {
@@ -360,9 +340,6 @@ fn sort_non_power_of_two_n_matches_cpu_f32() {
     let actual = run_multiblock_sort(&inp, Dt::F32, N);
     assert_eq!(actual.len(), N, "result truncated to logical n");
     for (i, (e, a)) in expected.iter().zip(&actual).enumerate() {
-        assert!(
-            (e - a).abs() < 1e-3,
-            "non-pow2 sort mismatch at [{i}]: expected {e}, got {a}"
-        );
+        assert!((e - a).abs() < 1e-3, "non-pow2 sort mismatch at [{i}]: expected {e}, got {a}");
     }
 }

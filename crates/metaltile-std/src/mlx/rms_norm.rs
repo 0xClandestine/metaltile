@@ -396,9 +396,7 @@ mod wide_tests {
     fn msl_for(dt: DType) -> String {
         let mut k = mt_rms_norm_wide::kernel_ir_for(dt);
         k.mode = KernelMode::Reduction;
-        MslGenerator::default()
-            .generate(&k)
-            .expect("mt_rms_norm_wide codegen succeeds")
+        MslGenerator::default().generate(&k).expect("mt_rms_norm_wide codegen succeeds")
     }
 
     #[test]

@@ -56,7 +56,6 @@
 //! Correctness vs CPU oracle ≥ cos 0.999 — see
 //! `crates/metaltile-std/tests/steel_attention_nax_gpu_correctness.rs`.
 
-
 use metaltile_core::{
     constexpr::ConstExpr,
     dtype::DType,
@@ -406,8 +405,12 @@ mod tests {
             assert_eq!(k.constexprs[4].name.name(), "n_kv_heads");
             assert_eq!(k.constexprs[5].name.name(), "scale");
             assert!(k.body.ops.iter().any(|op| matches!(op, Op::InlineMsl { .. })));
-            assert!(k.body.ops.iter().any(|op| matches!(op, Op::Load { src, .. } if src == "tgid_y")));
-            assert!(k.body.ops.iter().any(|op| matches!(op, Op::Load { src, .. } if src == "tgid_z")));
+            assert!(
+                k.body.ops.iter().any(|op| matches!(op, Op::Load { src, .. } if src == "tgid_y"))
+            );
+            assert!(
+                k.body.ops.iter().any(|op| matches!(op, Op::Load { src, .. } if src == "tgid_z"))
+            );
         }
     }
 

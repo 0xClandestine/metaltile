@@ -263,11 +263,8 @@ pub fn ffai_sdpa_decode<T>(
         // that lane's real max, never replacing it) so simd_max sees
         // it exactly once. Masked to -inf when `has_sink == 0`.
         let sink_max = select(has_sink > 0u32, sink_logit, neg_infinity());
-        let g_max_in = select(
-            lane == 0u32,
-            select(g_max_raw > sink_max, g_max_raw, sink_max),
-            g_max_raw,
-        );
+        let g_max_in =
+            select(lane == 0u32, select(g_max_raw > sink_max, g_max_raw, sink_max), g_max_raw);
         let g_max = simd_max(g_max_in);
         // Each simdgroup's partial sum was computed against its own
         // `tg_max[lane]` (the *raw* per-simdgroup max), so the rescale
