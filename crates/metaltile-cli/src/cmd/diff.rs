@@ -14,7 +14,7 @@ use crate::{
     CliError,
     DiffArgs,
     matches_filter,
-    term::{Color, Style, paint_stderr, paint_stdout},
+    term::{Color, Style, paint_stderr},
 };
 
 pub fn run(args: &DiffArgs) -> Result<(), CliError> {
@@ -34,7 +34,7 @@ pub fn run(args: &DiffArgs) -> Result<(), CliError> {
     } else {
         eprintln!(
             "  {}",
-            paint_stdout("Running bench suite for current...", Style::new().fg(Color::Cyan).bold()),
+            paint_stderr("Running bench suite for current...", Style::new().fg(Color::Cyan).bold()),
         );
         let temp_file =
             std::env::temp_dir().join(format!(".tile-diff-tmp-{}.json", std::process::id()));
@@ -84,7 +84,7 @@ pub fn run(args: &DiffArgs) -> Result<(), CliError> {
     if outcome.total_rows == 0 {
         println!(
             "  {}",
-            paint_stdout("No matching results to diff.", Style::new().fg(Color::BrightBlack)),
+            paint_stderr("No matching results to diff.", Style::new().fg(Color::BrightBlack)),
         );
         return Ok(());
     }
@@ -211,7 +211,7 @@ pub fn render(baseline: &[Value], current: &[Value], opts: &RenderOpts) -> Rende
     }
 
     if let Some(heading) = opts.heading {
-        println!("{}", paint_stdout(heading, Style::new().fg(Color::Cyan).bold()));
+        eprintln!("{}", paint_stderr(heading, Style::new().fg(Color::Cyan).bold()));
     }
 
     println!();
@@ -312,8 +312,8 @@ fn build_diff_row_display(row: &DiffRow) -> DiffRowDisplay {
 
     let (baseline_styled, current_styled) = match row.kind {
         DeltaKind::New | DeltaKind::Removed =>
-            (paint_stdout(&baseline, dim_style), paint_stdout(&current, dim_style)),
-        _ => (paint_stdout(&baseline, bright), paint_stdout(&current, bright)),
+            (paint_stderr(&baseline, dim_style), paint_stderr(&current, dim_style)),
+        _ => (paint_stderr(&baseline, bright), paint_stderr(&current, bright)),
     };
 
     // Delta column — kind label folded in, one paint() call so restyle
@@ -328,17 +328,17 @@ fn build_diff_row_display(row: &DiffRow) -> DiffRowDisplay {
     let (delta, delta_styled) = match row.kind {
         DeltaKind::Removed =>
             ("removed".to_string(), paint_stderr("removed", Style::new().fg(Color::Red))),
-        DeltaKind::New => ("new".to_string(), paint_stdout("new", Style::new().fg(Color::Cyan))),
+        DeltaKind::New => ("new".to_string(), paint_stderr("new", Style::new().fg(Color::Cyan))),
         DeltaKind::Unchanged => {
             let pct = row.delta_pct.unwrap_or(0.0);
             if pct == 0.0 {
                 let s = format!("— {:+.0}%", pct);
-                (s.clone(), paint_stdout(&s, dim_style))
+                (s.clone(), paint_stderr(&s, dim_style))
             } else {
                 let arrow = if pct > 0.0 { "▲" } else { "▼" };
                 let s = format!("{arrow} {:+.0}%", pct);
                 let yellow = Style::new().fg(Color::Yellow);
-                let styled = paint_stdout(&s, yellow);
+                let styled = paint_stderr(&s, yellow);
                 (s, styled)
             }
         },
@@ -350,7 +350,7 @@ fn build_diff_row_display(row: &DiffRow) -> DiffRowDisplay {
         DeltaKind::Improvement => {
             let s = format!("▲ {:+.0}%", row.delta_pct.unwrap_or(0.0));
             let style = Style::new().fg(Color::Green).bold();
-            (s.clone(), paint_stdout(&s, style))
+            (s.clone(), paint_stderr(&s, style))
         },
     };
 
@@ -379,7 +379,7 @@ fn print_diff_table(rows: &[DiffRow]) {
     let cur_w = displays.iter().map(|d| d.current.len()).max().unwrap_or(3);
     let delta_w = displays.iter().map(|d| d.delta.len()).max().unwrap_or(2).max(2);
 
-    let sep = paint_stdout("│", Style::new().fg(Color::BrightBlack).dim());
+    let sep = paint_stderr("│", Style::new().fg(Color::BrightBlack).dim());
 
     for d in &displays {
         let op_padded = pad_right(&d.op, op_w);
@@ -458,7 +458,7 @@ fn print_summary(
     if regressions > 0 {
         parts.push(format!(
             "{} regression{} (threshold {}%)",
-            paint_stderr(regressions.to_string(), Style::new().fg(Color::Red).bold()),
+            paint_stderr(regressions.to_string(), Style::new().fg(Color::BrightRed).bold()),
             if regressions == 1 { "" } else { "s" },
             threshold,
         ));
@@ -466,30 +466,30 @@ fn print_summary(
     if improvements > 0 {
         parts.push(format!(
             "{} improved",
-            paint_stdout(improvements.to_string(), Style::new().fg(Color::Green).bold()),
+            paint_stderr(improvements.to_string(), Style::new().fg(Color::BrightGreen).bold()),
         ));
     }
     if unchanged > 0 {
         parts.push(format!(
             "{} unchanged",
-            paint_stdout(unchanged.to_string(), Style::new().fg(Color::BrightBlack)),
+            paint_stderr(unchanged.to_string(), Style::new().fg(Color::BrightBlack)),
         ));
     }
     if new_count > 0 {
         parts.push(format!(
             "{} new",
-            paint_stdout(new_count.to_string(), Style::new().fg(Color::Cyan)),
+            paint_stderr(new_count.to_string(), Style::new().fg(Color::Cyan)),
         ));
     }
     if removed_count > 0 {
         parts.push(format!(
             "{} removed",
-            paint_stderr(removed_count.to_string(), Style::new().fg(Color::Red)),
+            paint_stderr(removed_count.to_string(), Style::new().fg(Color::BrightRed)),
         ));
     }
 
-    let sep = paint_stdout("·", Style::new().fg(Color::BrightBlack).dim());
-    println!("\n  {}\n", parts.join(&format!("  {sep}  ")));
+    let sep = paint_stderr("·", Style::new().fg(Color::BrightBlack).dim());
+    eprintln!("\n  {}\n", parts.join(&format!("  {sep}  ")));
 }
 
 fn load_results(path: &str, label: &str) -> Result<Vec<Value>, CliError> {
@@ -544,8 +544,8 @@ fn build_result_map(results: &[Value]) -> HashMap<RowKey, (f64, f64)> {
 }
 
 fn format_op_shape(op: &str, shape: &str) -> (String, String) {
-    let op_col = paint_stdout(op, Style::new().fg(Color::Cyan).bold());
-    let shape_col = paint_stdout(shape, Style::new().fg(Color::BrightWhite));
+    let op_col = paint_stderr(op, Style::new().fg(Color::Cyan).bold());
+    let shape_col = paint_stderr(shape, Style::new().fg(Color::BrightWhite));
     (op_col, shape_col)
 }
 

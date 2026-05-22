@@ -285,16 +285,7 @@ mod tests {
     use metaltile_core::{
         constexpr::ConstExpr,
         dtype::DType,
-        ir::{
-            ActKind,
-            AtomicKind,
-            AtomicScope,
-            AttnParams,
-            BlockId,
-            ReduceKind,
-            UnaryOpKind,
-            VarId,
-        },
+        ir::{ActKind, AtomicKind, AtomicScope, BlockId, ReduceKind, UnaryOpKind, VarId},
         shape::Shape,
     };
 
@@ -459,41 +450,6 @@ mod tests {
     }
 
     #[test]
-    fn attention_and_ml_variants() {
-        check_op(
-            Op::FlashAttention {
-                q: ValueId::new(33),
-                k: ValueId::new(34),
-                v: ValueId::new(35),
-                params: AttnParams { scale: None, is_causal: false, dropout_p: 0.0 },
-            },
-            3,
-            35,
-        );
-        check_op(
-            Op::SlidingWindowAttention {
-                q: ValueId::new(36),
-                k: ValueId::new(37),
-                v: ValueId::new(38),
-                window: 128,
-            },
-            3,
-            38,
-        );
-        check_op(Op::RmsNorm { x: ValueId::new(39), scale: ValueId::new(40), eps: 1e-5 }, 2, 40);
-        check_op(
-            Op::GatedMlp {
-                x: ValueId::new(41),
-                gate_proj: ValueId::new(42),
-                up_proj: ValueId::new(43),
-                down_proj: ValueId::new(44),
-            },
-            4,
-            44,
-        );
-    }
-
-    #[test]
     fn threadgroup_and_local_variants() {
         check_op(Op::ThreadgroupLoad { name: "tg".into(), index: ValueId::new(45) }, 1, 45);
         check_op(
@@ -528,21 +484,6 @@ mod tests {
         );
         check_op(Op::SimdLaneId, 0, 0);
         check_op(Op::SimdGroupId, 0, 0);
-    }
-
-    #[test]
-    fn dequant_variant() {
-        check_op(
-            Op::Dequantize {
-                weights: "w".into(),
-                scales: "s".into(),
-                zeros: "z".into(),
-                group_size: 64,
-                bits: 4,
-            },
-            0,
-            0,
-        );
     }
 
     // ── op-classification predicates ──────────────────────────────────────
@@ -686,20 +627,6 @@ mod tests {
             ("Cat", Op::Cat { values: vec![vid], axis: 0 }),
             ("Slice", Op::Slice { value: vid, ranges: vec![(0, 0, 4)] }),
             ("InlineMsl", Op::InlineMsl { source: "".into(), inputs: vec![], outputs: vec![] }),
-            ("FlashAttention", Op::FlashAttention {
-                q: vid,
-                k: vid,
-                v: vid,
-                params: AttnParams { scale: None, is_causal: false, dropout_p: 0.0 },
-            }),
-            ("SlidingWindowAttention", Op::SlidingWindowAttention {
-                q: vid,
-                k: vid,
-                v: vid,
-                window: 128,
-            }),
-            ("RmsNorm", Op::RmsNorm { x: vid, scale: vid, eps: 1e-5 }),
-            ("GatedMlp", Op::GatedMlp { x: vid, gate_proj: vid, up_proj: vid, down_proj: vid }),
             ("UnaryOp", Op::UnaryOp { op: UnaryOpKind::Exp, value: vid }),
             ("Activation", Op::Activation { kind: ActKind::Silu, value: vid }),
             ("Select", Op::Select { cond: vid, on_true: vid, on_false: vid }),
@@ -745,13 +672,6 @@ mod tests {
                 end: vid,
                 scalar: vid,
                 aux_src: None,
-            }),
-            ("Dequantize", Op::Dequantize {
-                weights: "w".into(),
-                scales: "s".into(),
-                zeros: "z".into(),
-                group_size: 64,
-                bits: 4,
             }),
             ("SimdReduce", Op::SimdReduce { value: vid, op: ReduceKind::Sum }),
             ("SimdShuffleXor", Op::SimdShuffleXor { value: vid, mask: 1 }),

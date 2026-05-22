@@ -618,6 +618,13 @@ impl DslBodyParser {
             "strided_scan" => self.parse_strided_scan(call),
             "strided_argmax" => self.parse_strided_argreduce(call, quote! { ReduceKind::Max }),
             "strided_argmin" => self.parse_strided_argreduce(call, quote! { ReduceKind::Min }),
+            // CoopTile ops — lower to mpp::tensor_ops::matmul2d on Metal 4.
+            "coop_tile_setup" => self.parse_coop_tile_setup(call),
+            "coop_tile_zero" => self.parse_coop_tile_zero(call),
+            "coop_tile_load_a" => self.parse_coop_tile_load_a(call),
+            "coop_tile_load_b" => self.parse_coop_tile_load_b(call),
+            "coop_tile_run" => self.parse_coop_tile_run(call),
+            "coop_tile_store_c" => self.parse_coop_tile_store_c(call),
             "range" => 0,
             _ => {
                 if path.is_empty() {
@@ -1741,6 +1748,221 @@ impl DslBodyParser {
         );
         result
     }
+
+    // ---- CoopTile ops -------------------------------------------------------
+
+    /// Resolve a dtype from a positional argument expression.
+    ///
+    /// Accepts type-path form (`f32`, `f16`, `bf16`, `T`, …). Generic type
+    /// variables (e.g. `T`) are looked up in `self.type_vars`.
+    fn dtype_from_expr_arg(&self, arg: &Expr) -> TokenStream {
+        let name = match arg {
+            Expr::Path(p) =>
+                p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default(),
+            _ => String::new(),
+        };
+        if let Some(ts) = self.type_vars.get(&name) {
+            ts.clone()
+        } else {
+            dtype_tokens_for_name(&name)
+        }
+    }
+
+    /// ```text
+    /// coop_tile_setup(name, m, n, k, act_dtype
+    ///     [, acc_mode_str                   // "overwrite" | "accumulate"  (default "overwrite")
+    ///     [, scope_str                      // "simdgroup"  | "threadgroup" (default "simdgroup")
+    ///     [, acc_dtype                      // default f32
+    ///     [, ta [, tb [, tc                 // default false
+    ///     [, direct_inputs                  // default false
+    ///     [, a_is_tg, a_ei, a_eo,           // only used when direct_inputs=true
+    ///        b_is_tg, b_ei, b_eo ]]]]]]]]])
+    /// ```
+    fn parse_coop_tile_setup(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<&Expr> = call.args.iter().collect();
+
+        let name = string_lit_from_expr(args.first().copied().unwrap_or(&*call.func));
+        let m = args.get(1).map(|a| literal_u32(a)).unwrap_or(0);
+        let n = args.get(2).map(|a| literal_u32(a)).unwrap_or(0);
+        let k = args.get(3).map(|a| literal_u32(a)).unwrap_or(0);
+        let act_dtype = args
+            .get(4)
+            .map(|a| self.dtype_from_expr_arg(a))
+            .unwrap_or_else(|| quote! { DType::F16 });
+
+        let acc_mode_str = args.get(5).map(|a| string_lit_from_expr(a)).unwrap_or_default();
+        let acc_mode = match acc_mode_str.as_str() {
+            "accumulate" | "multiply_accumulate" | "acc" =>
+                quote! { CoopTileAccMode::MultiplyAccumulate },
+            _ => quote! { CoopTileAccMode::Overwrite },
+        };
+
+        let scope_str = args.get(6).map(|a| string_lit_from_expr(a)).unwrap_or_default();
+        let scope = match scope_str.as_str() {
+            "threadgroup" | "tg" => quote! { CoopTileScope::Threadgroup },
+            _ => quote! { CoopTileScope::SimdGroup },
+        };
+
+        let acc_dtype = args
+            .get(7)
+            .map(|a| self.dtype_from_expr_arg(a))
+            .unwrap_or_else(|| quote! { DType::F32 });
+
+        let ta = args.get(8).and_then(|a| bool_lit(a)).unwrap_or(false);
+        let tb = args.get(9).and_then(|a| bool_lit(a)).unwrap_or(false);
+        let tc = args.get(10).and_then(|a| bool_lit(a)).unwrap_or(false);
+        let direct_inputs = args.get(11).and_then(|a| bool_lit(a)).unwrap_or(false);
+
+        // direct_inputs extras: a_is_tg, a_ei, a_eo, b_is_tg, b_ei, b_eo
+        let a_is_tg = args.get(12).and_then(|a| bool_lit(a)).unwrap_or(false);
+        let a_ei = args.get(13).map(|a| literal_u32(a)).unwrap_or(0);
+        let a_eo = args.get(14).map(|a| literal_u32(a)).unwrap_or(0);
+        let b_is_tg = args.get(15).and_then(|a| bool_lit(a)).unwrap_or(false);
+        let b_ei = args.get(16).map(|a| literal_u32(a)).unwrap_or(0);
+        let b_eo = args.get(17).map(|a| literal_u32(a)).unwrap_or(0);
+
+        self.push_op_no_result(quote! {
+            Op::CoopTileSetup {
+                name: #name.to_string(),
+                m: #m, n: #n, k: #k,
+                ta: #ta, tb: #tb, tc: #tc,
+                acc_mode: #acc_mode,
+                exec_scope: #scope,
+                act_dtype: #act_dtype,
+                acc_dtype: #acc_dtype,
+                direct_inputs: #direct_inputs,
+                a_is_tg: #a_is_tg, a_ei: #a_ei, a_eo: #a_eo,
+                b_is_tg: #b_is_tg, b_ei: #b_ei, b_eo: #b_eo,
+            }
+        });
+        0
+    }
+
+    /// `coop_tile_zero(name)` → Op::CoopTileZero.
+    fn parse_coop_tile_zero(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<&Expr> = call.args.iter().collect();
+        let name = string_lit_from_expr(args.first().copied().unwrap_or(&*call.func));
+        self.push_op_no_result(quote! { Op::CoopTileZero { name: #name.to_string() } });
+        0
+    }
+
+    /// ```text
+    /// coop_tile_load_a(name, ptr, is_tg, dtype, ei, eo
+    ///     [, offset_expr | direct_bool   // if bool → direct flag, no offset
+    ///     [, direct_bool ]])             // only when offset_expr given
+    /// ```
+    fn parse_coop_tile_load_a(&mut self, call: &ExprCall) -> u32 {
+        self.parse_coop_tile_load(call, true)
+    }
+
+    /// Same signature as `coop_tile_load_a`.
+    fn parse_coop_tile_load_b(&mut self, call: &ExprCall) -> u32 {
+        self.parse_coop_tile_load(call, false)
+    }
+
+    fn parse_coop_tile_load(&mut self, call: &ExprCall, is_a: bool) -> u32 {
+        let args: Vec<&Expr> = call.args.iter().collect();
+        let name = string_lit_from_expr(args.first().copied().unwrap_or(&*call.func));
+        let ptr_name = string_lit_from_expr(args.get(1).copied().unwrap_or(&*call.func));
+        let is_tg = args.get(2).and_then(|a| bool_lit(a)).unwrap_or(false);
+        let dtype = args
+            .get(3)
+            .map(|a| self.dtype_from_expr_arg(a))
+            .unwrap_or_else(|| quote! { DType::F16 });
+        let ei = args.get(4).map(|a| literal_u32(a)).unwrap_or(0);
+        let eo = args.get(5).map(|a| literal_u32(a)).unwrap_or(0);
+
+        // arg[6]: bool literal → it's `direct` (no offset); any other expr → it's `offset`.
+        let (ptr_offset_ts, direct) = match args.get(6) {
+            None => (quote! { None }, false),
+            Some(a) =>
+                if let Some(b) = bool_lit(a) {
+                    (quote! { None }, b)
+                } else {
+                    let offset_vid = self.parse_expr(a);
+                    let direct = args.get(7).and_then(|a| bool_lit(a)).unwrap_or(false);
+                    (quote! { Some(ValueId::new(#offset_vid)) }, direct)
+                },
+        };
+
+        let op = if is_a {
+            quote! {
+                Op::CoopTileLoadA {
+                    name: #name.to_string(),
+                    ptr_name: #ptr_name.to_string(),
+                    ptr_offset: #ptr_offset_ts,
+                    is_tg: #is_tg,
+                    dtype: #dtype,
+                    ei: #ei,
+                    eo: #eo,
+                    direct: #direct,
+                }
+            }
+        } else {
+            quote! {
+                Op::CoopTileLoadB {
+                    name: #name.to_string(),
+                    ptr_name: #ptr_name.to_string(),
+                    ptr_offset: #ptr_offset_ts,
+                    is_tg: #is_tg,
+                    dtype: #dtype,
+                    ei: #ei,
+                    eo: #eo,
+                    direct: #direct,
+                }
+            }
+        };
+        self.push_op_no_result(op);
+        0
+    }
+
+    /// `coop_tile_run(name [, direct])` → Op::CoopTileRun.
+    fn parse_coop_tile_run(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<&Expr> = call.args.iter().collect();
+        let name = string_lit_from_expr(args.first().copied().unwrap_or(&*call.func));
+        let direct = args.get(1).and_then(|a| bool_lit(a)).unwrap_or(false);
+        self.push_op_no_result(quote! {
+            Op::CoopTileRun { name: #name.to_string(), direct: #direct }
+        });
+        0
+    }
+
+    /// ```text
+    /// coop_tile_store_c(name, ptr, is_tg, dtype, ei, eo [, offset_expr])
+    /// ```
+    fn parse_coop_tile_store_c(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<&Expr> = call.args.iter().collect();
+        let name = string_lit_from_expr(args.first().copied().unwrap_or(&*call.func));
+        let ptr_name = string_lit_from_expr(args.get(1).copied().unwrap_or(&*call.func));
+        let is_tg = args.get(2).and_then(|a| bool_lit(a)).unwrap_or(false);
+        let dtype = args
+            .get(3)
+            .map(|a| self.dtype_from_expr_arg(a))
+            .unwrap_or_else(|| quote! { DType::F32 });
+        let ei = args.get(4).map(|a| literal_u32(a)).unwrap_or(0);
+        let eo = args.get(5).map(|a| literal_u32(a)).unwrap_or(0);
+
+        let ptr_offset_ts = match args.get(6) {
+            None => quote! { None },
+            Some(a) => {
+                let offset_vid = self.parse_expr(a);
+                quote! { Some(ValueId::new(#offset_vid)) }
+            },
+        };
+
+        self.push_op_no_result(quote! {
+            Op::CoopTileStoreC {
+                name: #name.to_string(),
+                ptr_name: #ptr_name.to_string(),
+                ptr_offset: #ptr_offset_ts,
+                is_tg: #is_tg,
+                dtype: #dtype,
+                ei: #ei,
+                eo: #eo,
+            }
+        });
+        0
+    }
 }
 
 // ---- Helpers ----------------------------------------------------------------
@@ -1866,6 +2088,15 @@ fn literal_u32(expr: &Expr) -> u32 {
         }
     } else {
         0
+    }
+}
+
+/// Extract a bool literal from an expression (`true` / `false`), returning `None` otherwise.
+fn bool_lit(expr: &Expr) -> Option<bool> {
+    if let Expr::Lit(syn::ExprLit { lit: syn::Lit::Bool(b), .. }) = expr {
+        Some(b.value)
+    } else {
+        None
     }
 }
 
@@ -2094,5 +2325,85 @@ mod tests {
 
         assert!(tokens.contains("Op :: SimdgroupLoad"), "{tokens}");
         assert!(tokens.contains("transpose : true"), "{tokens}");
+    }
+
+    #[test]
+    fn parses_coop_tile_setup_basic() {
+        let body: Block = parse_quote!({
+            coop_tile_setup("gemm", 16u32, 32u32, 16u32, f16);
+        });
+        let tokens =
+            DslBodyParser::parse_with_type_vars(&body, &[], &[], &Default::default()).to_string();
+        assert!(tokens.contains("Op :: CoopTileSetup"), "{tokens}");
+        assert!(tokens.contains("\"gemm\""), "{tokens}");
+        assert!(tokens.contains("m : 16u32"), "{tokens}");
+        assert!(tokens.contains("DType :: F16"), "{tokens}");
+        assert!(tokens.contains("CoopTileAccMode :: Overwrite"), "{tokens}");
+        assert!(tokens.contains("CoopTileScope :: SimdGroup"), "{tokens}");
+    }
+
+    #[test]
+    fn parses_coop_tile_setup_accumulate() {
+        let body: Block = parse_quote!({
+            coop_tile_setup(
+                "g",
+                16u32,
+                32u32,
+                16u32,
+                f16,
+                "accumulate",
+                "simdgroup",
+                f32,
+                false,
+                true,
+                false,
+            );
+        });
+        let tokens =
+            DslBodyParser::parse_with_type_vars(&body, &[], &[], &Default::default()).to_string();
+        assert!(tokens.contains("CoopTileAccMode :: MultiplyAccumulate"), "{tokens}");
+        assert!(tokens.contains("tb : true"), "{tokens}");
+    }
+
+    #[test]
+    fn parses_coop_tile_zero_run() {
+        let body: Block = parse_quote!({
+            coop_tile_zero("gemm");
+            coop_tile_run("gemm");
+            coop_tile_run("gemm", true);
+        });
+        let tokens =
+            DslBodyParser::parse_with_type_vars(&body, &[], &[], &Default::default()).to_string();
+        assert!(tokens.contains("Op :: CoopTileZero"), "{tokens}");
+        assert!(tokens.contains("Op :: CoopTileRun"), "{tokens}");
+        assert!(tokens.contains("direct : true"), "{tokens}");
+    }
+
+    #[test]
+    fn parses_coop_tile_load_store() {
+        let body: Block = parse_quote!({
+            coop_tile_load_a("gemm", "xs", true, f16, 16u32, 16u32);
+            coop_tile_load_b("gemm", "ws", true, f16, 16u32, 32u32);
+            coop_tile_store_c("gemm", "out", false, f32, 16u32, 32u32);
+        });
+        let tokens =
+            DslBodyParser::parse_with_type_vars(&body, &[], &[], &Default::default()).to_string();
+        assert!(tokens.contains("Op :: CoopTileLoadA"), "{tokens}");
+        assert!(tokens.contains("Op :: CoopTileLoadB"), "{tokens}");
+        assert!(tokens.contains("Op :: CoopTileStoreC"), "{tokens}");
+        assert!(tokens.contains("ptr_offset : None"), "{tokens}");
+    }
+
+    #[test]
+    fn parses_coop_tile_load_direct_flag() {
+        // 7-arg form where arg[6] is bool → it's `direct`, no offset.
+        let body: Block = parse_quote!({
+            coop_tile_load_a("g", "xs", true, f16, 16u32, 8u32, true);
+        });
+        let tokens =
+            DslBodyParser::parse_with_type_vars(&body, &[], &[], &Default::default()).to_string();
+        assert!(tokens.contains("Op :: CoopTileLoadA"), "{tokens}");
+        assert!(tokens.contains("direct : true"), "{tokens}");
+        assert!(tokens.contains("ptr_offset : None"), "{tokens}");
     }
 }

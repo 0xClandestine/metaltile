@@ -183,7 +183,7 @@ fn expand_kernel(input_fn: ItemFn) -> TokenStream {
     let expanded = quote! {
         #vis mod #fn_name {
             use super::*;
-            use metaltile_core::ir::{Kernel, Block, Op, ValueId, BlockId, VarId, Param, ParamKind, TypedSlot, ConstExprDecl, BinOpKind, ReduceKind, AttnParams, AtomicKind, AtomicScope, IndexExpr, UnaryOpKind, ActKind, KernelCallArg};
+            use metaltile_core::ir::{Kernel, Block, Op, ValueId, BlockId, VarId, Param, ParamKind, TypedSlot, ConstExprDecl, BinOpKind, ReduceKind, AtomicKind, AtomicScope, IndexExpr, UnaryOpKind, ActKind, KernelCallArg, CoopTileAccMode, CoopTileScope};
             use metaltile_core::shape::{Shape, Dim};
             use metaltile_core::dtype::DType;
             use metaltile_core::constexpr::ConstExpr;
