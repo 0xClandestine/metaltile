@@ -17,8 +17,9 @@
 //!     `{0, 0.5, 1, 1.5, 2, 3, 4, 6}` (the nvfp4 levels — see
 //!     MLX `fp4.h`). We compute it without a table via the
 //!     identity:
-//!         subnormal (exp = 0): magnitude = mantissa · 0.5
-//!         normal    (exp ≥ 1): magnitude = (1 + mantissa·0.5) · 2^(exp − 1)
+//!     - subnormal (exp = 0): magnitude = mantissa · 0.5
+//!     - normal    (exp ≥ 1): magnitude = (1 + mantissa·0.5) · 2^(exp − 1)
+//!
 //!     One `Select` between the two branches in IR.
 //!   - The sign bit (`code & 8`) negates the magnitude.
 //!   - The dequantized value is `scale · sign · magnitude`. Fp4
