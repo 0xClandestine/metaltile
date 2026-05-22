@@ -150,27 +150,34 @@ A few rows mix multiple `.metal` files into one op or split one file into multip
 - **`logits processors`** is one row for the FFAI sampler-stage kernels (`temperature`, `repetition_penalty`, `topk` / `top_p` / `min_p` masks). FFAI-only, no MLX counterpart.
 - **Cells marked `~`** indicate metaltile has a partial port — typically one bit-width, one dtype, or one block shape where upstream has many. Read the notes column for the specific gap.
 
-## Perf follow-ups (kernels are complete; these are throughput refinements)
+## Perf follow-ups — landed (throughput refinements)
 
-Op coverage is complete — every row below is ✓ except `fence` (out of
-scope). What remains is *performance* work on kernels that are already
-correct and shipped:
+Op coverage is complete — every row is ✓ except `fence` (out of scope).
+The four throughput refinements below have **all landed**; each is
+purely additive — the original kernels are kept for callers that don't
+want the split / extra dispatch.
 
-1. **`steel_gemm_fused` block-shape coverage** — four shapes are wired
-   (`64×64×16_2x2`, `32×32×16_2x2`, `64×64×16_1x2`, `32×64×16_1x2`);
-   MLX's full `instantiate_gemm_shapes_helper` set is wider. More shapes
-   would let the dispatcher pick a better tile per problem size.
-2. **`moe` gather_qmm bit-widths beyond int4** — the scalar +
-   MMA / MPP-NAX int4 variants are landed; int3/5/6/8 gather-qmm exists
-   as the correctness-first `mt_moe_gather_qmm_b{3,5,6,8}` family, but
-   the MMA / MPP throughput variants are int4-only.
-3. **Winograd kernel split** — `winograd_conv2d_3x3` is landed as a
-   single per-tile kernel; the cuDNN-style split (filter-transform /
-   batched-GEMM / untransform) would hoist the filter transform out of
-   the per-tile inner loop.
-4. **Radix-FFT STFT path** — `mel_spectrogram` / `vocoder` use a direct
-   DFT; routing them through `mt_fft_n*` is an O(N log N) win (needs the
-   complex-plane plumbing those kernels already established).
+1. **`steel_gemm_fused` block-shape coverage** ✓ — added the
+   `64×64×16 / 4×2` shape (8 simdgroups, TPG=256): **~40% faster** than
+   the prior-best 2×2 on the 4096³ bench (f32 1.4 vs 1.0 GB/s) — the
+   extra simdgroups hide the device-memory fragment loads. Also added
+   the M-skewed `64×32 / 1×2` and low-TPG `32×32 / 1×2` tiles, for 7
+   shapes total to feed a future per-shape dispatcher.
+2. **`moe` gather_qmm bit-widths beyond int4** ✓ — the `gather_qmm_mma!`
+   macro carries the tiled-MMA geometry for any bit-width via a
+   bit-stream weight coop-dequant; instantiated as
+   `mt_moe_gather_qmm_mma_b{3,5,6,8}`, so int3/5/6/8 MoE experts now hit
+   the matrix engine instead of the scalar fallback.
+3. **Winograd kernel split** ✓ — `winograd_filter_transform_3x3`
+   pre-transforms every filter into its 4×4 `U` once;
+   `winograd_conv2d_3x3_split` then loads the precomputed `U` instead of
+   re-running `G·g·Gᵀ` per output tile, removing the O(tiles) redundant
+   transform work.
+4. **Radix-FFT STFT path** ✓ — `mel_stft_window` → `mt_fft_n{n_fft}` →
+   `mel_filterbank` replaces `mel_spectrogram`'s in-thread direct DFT
+   (recomputed per Mel bin) with one O(N log N) FFT per frame. `n_fft`
+   must be a power of two; the single-kernel `mel_spectrogram` stays for
+   non-pow2 sizes.
 
 (`fence` is **not** a next-up item — it is intentionally out of scope; see
 [§ Fence ops](#fence-ops--intentionally-out-of-scope).)
