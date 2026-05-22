@@ -27,7 +27,9 @@ use std::collections::BTreeMap;
 use common::{Dt, gpu_lock, max_abs_diff, pack_bytes, ramp, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
-use metaltile_std::ffai::winograd_conv::winograd_conv2d_3x3;
+use metaltile_std::ffai::winograd_conv::{
+    winograd_conv2d_3x3, winograd_conv2d_3x3_split, winograd_filter_transform_3x3,
+};
 
 #[derive(Clone, Copy)]
 struct ConvShape {
@@ -195,4 +197,90 @@ fn winograd_padded_multi_channel_matches_naive_bf16() {
     let diff = max_abs_diff(&expected, &actual);
     // bf16 has a 7-bit mantissa — wider tolerance than f16.
     assert!(diff < 1.5e-1, "winograd bf16: max |diff| = {diff:.2e}");
+}
+
+/// Run the two-kernel cuDNN-style split — `winograd_filter_transform_3x3`
+/// pre-transforms every filter into its 4×4 `U`, then
+/// `winograd_conv2d_3x3_split` consumes that buffer. Result must match the
+/// single-kernel `winograd_conv2d_3x3` (and thus the naive oracle).
+fn run_winograd_split(input: &[f32], weight: &[f32], bias: &[f32], dt: Dt, s: &ConvShape) -> Vec<f32> {
+    let (out_h, out_w) = (s.out_h(), s.out_w());
+    assert!(out_h % 2 == 0 && out_w % 2 == 0, "Winograd needs even output dims");
+    let (tiles_h, tiles_w) = (out_h / 2, out_w / 2);
+    let n_out = s.batch * s.out_ch * out_h * out_w;
+    let u = |v: usize| (v as u32).to_le_bytes().to_vec();
+    let ctx = Context::new().expect("Context::new on macOS");
+
+    // ── Stage 1: filter transform → U[out_ch, in_ch, 4, 4] ──
+    let n_filt = s.out_ch * s.in_ch;
+    let mut fb: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    fb.insert("weight".into(), pack_bytes(weight, dt));
+    fb.insert("out".into(), pack_bytes(&vec![0.0f32; n_filt * 16], dt));
+    fb.insert("in_ch".into(), u(s.in_ch));
+    fb.insert("out_ch".into(), u(s.out_ch));
+    let mut fk = winograd_filter_transform_3x3::kernel_ir_for(dt.to_dtype());
+    fk.mode = KernelMode::Grid3D;
+    let tpg = 64usize;
+    let fgrid = n_filt.div_ceil(tpg);
+    let fres = ctx
+        .dispatch_with_grid(&fk, &fb, &BTreeMap::new(), [fgrid, 1, 1], [tpg, 1, 1])
+        .expect("filter-transform dispatch");
+    // The transformed-filter buffer, still dt-packed — feed it straight in.
+    let u_bytes = fres.outputs.get("out").expect("u").clone();
+
+    // ── Stage 2: split conv consuming the pre-transformed U ──
+    let mut cb: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    cb.insert("input".into(), pack_bytes(input, dt));
+    cb.insert("u".into(), u_bytes);
+    cb.insert("bias".into(), pack_bytes(bias, dt));
+    cb.insert("out".into(), pack_bytes(&vec![0.0f32; n_out], dt));
+    cb.insert("in_ch".into(), u(s.in_ch));
+    cb.insert("in_h".into(), u(s.in_h));
+    cb.insert("in_w".into(), u(s.in_w));
+    cb.insert("out_ch".into(), u(s.out_ch));
+    cb.insert("out_h".into(), u(out_h));
+    cb.insert("out_w".into(), u(out_w));
+    cb.insert("pad_h".into(), u(s.pad));
+    cb.insert("pad_w".into(), u(s.pad));
+    cb.insert("tiles_h".into(), u(tiles_h));
+    cb.insert("tiles_w".into(), u(tiles_w));
+    let mut ck = winograd_conv2d_3x3_split::kernel_ir_for(dt.to_dtype());
+    ck.mode = KernelMode::Grid3D;
+    let n_tiles = s.batch * s.out_ch * tiles_h * tiles_w;
+    let cgrid = n_tiles.div_ceil(tpg);
+    let cres = ctx
+        .dispatch_with_grid(&ck, &cb, &BTreeMap::new(), [cgrid, 1, 1], [tpg, 1, 1])
+        .expect("split-conv dispatch");
+    let mut out = unpack_bytes(cres.outputs.get("out").expect("out"), dt);
+    out.truncate(n_out);
+    out
+}
+
+#[test]
+fn winograd_split_padded_multi_channel_matches_naive_f32() {
+    let _g = gpu_lock();
+    let s = ConvShape { batch: 2, in_ch: 4, in_h: 8, in_w: 10, out_ch: 5, pad: 1 };
+    let input = ramp(s.batch * s.in_ch * s.in_h * s.in_w, 37, 18.0);
+    let weight = ramp(s.out_ch * s.in_ch * 9, 41, 20.0);
+    let bias = ramp(s.out_ch, 7, 3.0);
+    let expected = naive_conv3x3(&input, &weight, &bias, &s);
+    let got = run_winograd_split(&input, &weight, &bias, Dt::F32, &s);
+    let d = max_abs_diff(&expected, &got);
+    println!("[winograd split f32] max|Δ| = {d:.5e}");
+    assert!(d < 1e-3, "winograd split f32 max|Δ| = {d:.5e}");
+}
+
+#[test]
+fn winograd_split_padded_multi_channel_matches_naive_f16() {
+    let _g = gpu_lock();
+    let s = ConvShape { batch: 1, in_ch: 4, in_h: 8, in_w: 8, out_ch: 4, pad: 1 };
+    let input = ramp(s.batch * s.in_ch * s.in_h * s.in_w, 37, 18.0);
+    let weight = ramp(s.out_ch * s.in_ch * 9, 41, 20.0);
+    let bias = ramp(s.out_ch, 7, 3.0);
+    let expected = naive_conv3x3(&input, &weight, &bias, &s);
+    let got = run_winograd_split(&input, &weight, &bias, Dt::F16, &s);
+    let d = max_abs_diff(&expected, &got);
+    println!("[winograd split f16] max|Δ| = {d:.5e}");
+    // f16 transform-domain rounding — same bar as the single-kernel f16 test.
+    assert!(d < 2.0, "winograd split f16 max|Δ| = {d:.5e}");
 }
