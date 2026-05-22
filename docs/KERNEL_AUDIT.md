@@ -12,8 +12,8 @@ Sources surveyed:
 ## Summary
 
 - Total kernel-op rows in this audit (union): **89**
-- metaltile-ported kernel ops: **74 / 89 = 83 %** — 67 full ✓ (75 %), 5 partial ~ (6 %)
-- **Still to cover: 17 ops not ported (✗)**, plus **7 partial ports** still to finish
+- metaltile-ported kernel ops: **74 / 89 = 83 %** — 68 full ✓ (76 %), 5 partial ~ (6 %)
+- **Still to cover: 17 ops not ported (✗)**, plus **5 partial ports** still to finish
 - The 6 Vision / STT / TTS front-end kernels (Phase 6.5 / 7) — `conv2d`,
   `patch_embed`, `rope_2d`, `mel_spectrogram`, `audio_conv1d`,
   `vocoder/iSTFT` — are now ported (✓ rows below).
@@ -55,7 +55,7 @@ Sources surveyed:
 | binary (elementwise add/sub/mul/div/min/max) | ✓ | ✓ | ✓ | `mlx/binary.rs` → 6 kernels. Generic `T`. Direct port. |
 | binary_two (fused two-output elementwise) | ✓ | ✓ | ✓ | `mlx/binary_two.rs` → `mt_binary_two<T>`. |
 | copy (contiguous) | ✓ | ✓ | ✓ | `mlx/copy.rs` → `mt_copy<T>`. |
-| copy (strided / general) | ✓ | ✓ | ~ | `mlx/strided.rs` → `mt_strided_copy`. Limited stride dimensionality. |
+| copy (strided / general) | ✓ | ✓ | ✓ | `mlx/strided.rs` → `mt_strided_copy` (2-D padded) **plus** `mt_strided_copy_nd` — general arbitrary-rank strided copy. Each output element unravels its contiguous flat index against a runtime `shape` array and gathers `src[Σ coord_d · strides[d]]` — MLX's `elem_to_loc` / `copy_g`. Arbitrary source strides cover padded copies, transposes (permuted strides), broadcasts (stride 0), and dilated slices in one kernel; `rank` is a constexpr so the unravel loop fully unrolls. Verified by `mt_strided_copy_gpu_correctness` (1-D contiguous, 2-D padded, 3-D padded + transpose, 4-D broadcast-axis; f32/f16). |
 | ternary (select) | ✓ | ✓ | ✓ | `mlx/ternary.rs` → `mt_select<T>`. |
 | unary (exp/log/sqrt/rsqrt/abs/silu/etc.) | ✓ | ✓ | ✓ | `mlx/unary.rs` → 7+ kernels including `mt_silu`. |
 | swiglu (`silu(gate)·up` fused MLP activation) | ✗ | ✗ | ✓ | `mlx/swiglu.rs` → `mt_swiglu<T>`. Fused element-wise `silu(gate) * up` — the standard modern-transformer MLP activation (Llama 4, Qwen3 dense + MoE, Gemma, Mistral). metaltile fuses what MLX expresses as separate `silu` + `mul` ops; no dedicated MLX kernel. The broader `fused_gate_activation` (gelu / clipped-swiglu variants) is still a separate ✗ row below. |

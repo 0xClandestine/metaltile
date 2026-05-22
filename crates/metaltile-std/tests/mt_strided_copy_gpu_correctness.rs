@@ -34,7 +34,7 @@ use std::collections::BTreeMap;
 use common::{Dt, gpu_lock, max_abs_diff, pack_bytes, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
-use metaltile_std::mlx::strided::mt_strided_copy;
+use metaltile_std::mlx::strided::{mt_strided_copy, mt_strided_copy_nd};
 
 /// Pack a slice of u32 values as LE bytes (used for shape/stride buffers).
 fn pack_u32_slice(vals: &[u32]) -> Vec<u8> {
@@ -184,6 +184,180 @@ fn strided_copy_output_not_all_zeros_f32() {
     assert!(
         actual.iter().any(|&v| v != 0.0),
         "strided_copy: all-zero output for non-zero input (empty kernel body?)",
+    );
+}
+
+// ─── mt_strided_copy_nd — general N-D strided copy ───────────────────────
+
+/// Dispatch `mt_strided_copy_nd<T>`: copy a logical `shape` tensor out of a
+/// physically-strided `src` buffer into a contiguous output.
+///
+/// `shape` / `strides` are per-dimension u32 arrays (major-to-minor). The
+/// output is contiguous row-major with `n_out = product(shape)` elements.
+fn run_strided_copy_nd(
+    src_data: &[f32],
+    dt: Dt,
+    shape: &[u32],
+    strides: &[u32],
+) -> Vec<f32> {
+    let n_out: usize = shape.iter().map(|&s| s as usize).product();
+
+    let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    buffers.insert("src".into(), pack_bytes(src_data, dt));
+    buffers.insert("shape".into(), pack_u32_slice(shape));
+    buffers.insert("strides".into(), pack_u32_slice(strides));
+    buffers.insert("out".into(), pack_bytes(&vec![0.0f32; n_out], dt));
+    buffers.insert("rank".into(), (shape.len() as u32).to_le_bytes().to_vec());
+
+    let ctx = Context::new().expect("Context::new on macOS");
+    let mut kernel = mt_strided_copy_nd::kernel_ir_for(dt.to_dtype());
+    kernel.mode = KernelMode::Grid3D;
+
+    // Grid3D: one thread per output element.
+    let result = ctx
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [n_out, 1, 1], [1, 1, 1])
+        .expect("strided_copy_nd dispatch");
+
+    let mut out = unpack_bytes(result.outputs.get("out").expect("out buffer"), dt);
+    out.truncate(n_out);
+    out
+}
+
+/// CPU oracle for N-D strided copy: for each contiguous output index `p`,
+/// unravel against `shape` and gather `src[Σ coord_d · strides[d]]`.
+fn oracle_strided_copy_nd(src: &[f32], shape: &[u32], strides: &[u32]) -> Vec<f32> {
+    let n_out: usize = shape.iter().map(|&s| s as usize).product();
+    let rank = shape.len();
+    let mut out = Vec::with_capacity(n_out);
+    for p in 0..n_out {
+        let mut rem = p;
+        let mut src_off = 0usize;
+        for d in (0..rank).rev() {
+            let extent = shape[d] as usize;
+            let coord = rem % extent;
+            rem /= extent;
+            src_off += coord * strides[d] as usize;
+        }
+        out.push(src[src_off]);
+    }
+    out
+}
+
+#[test]
+fn strided_copy_nd_1d_contiguous_f32() {
+    let _g = gpu_lock();
+    // Rank-1 unit-stride copy is a plain contiguous copy.
+    let shape = [6u32];
+    let strides = [1u32];
+    let src: Vec<f32> = (0..6).map(|i| i as f32 * 0.5).collect();
+    let expected = oracle_strided_copy_nd(&src, &shape, &strides);
+    let actual = run_strided_copy_nd(&src, Dt::F32, &shape, &strides);
+    let diff = max_abs_diff(&actual, &expected);
+    assert!(diff < 1e-6, "strided_copy_nd 1d f32: max |diff| = {diff:.2e}");
+}
+
+#[test]
+fn strided_copy_nd_2d_padded_matches_2d_kernel_f32() {
+    let _g = gpu_lock();
+    // 2-D padded view: 4 rows × 4 logical cols, physical row stride 8.
+    // Equivalent to the original `mt_strided_copy` padded-submatrix case.
+    let rows = 4u32;
+    let cols = 4u32;
+    let row_stride = 8u32;
+    let shape = [rows, cols];
+    let strides = [row_stride, 1u32];
+    let src: Vec<f32> = (0..rows * row_stride)
+        .map(|i| {
+            if i % row_stride < cols { (i as f32) + 1.0 } else { -999.0 }
+        })
+        .collect();
+    let expected = oracle_strided_copy_nd(&src, &shape, &strides);
+    let actual = run_strided_copy_nd(&src, Dt::F32, &shape, &strides);
+    let diff = max_abs_diff(&actual, &expected);
+    assert!(diff < 1e-6, "strided_copy_nd 2d padded f32: max |diff| = {diff:.2e}");
+    assert!(actual.iter().all(|&v| v > 0.0), "padding leaked into output");
+}
+
+#[test]
+fn strided_copy_nd_3d_matches_oracle_f32() {
+    let _g = gpu_lock();
+    // 3-D logical [2, 3, 4] out of a physically larger [2, 3, 6] buffer
+    // (innermost dim padded by 2).
+    let shape = [2u32, 3u32, 4u32];
+    let phys = [2usize, 3, 6];
+    let strides = [(phys[1] * phys[2]) as u32, phys[2] as u32, 1u32];
+    let total: usize = phys.iter().product();
+    let src: Vec<f32> = (0..total).map(|i| i as f32 * 0.25 - 3.0).collect();
+    let expected = oracle_strided_copy_nd(&src, &shape, &strides);
+    let actual = run_strided_copy_nd(&src, Dt::F32, &shape, &strides);
+    let diff = max_abs_diff(&actual, &expected);
+    assert!(diff < 1e-6, "strided_copy_nd 3d f32: max |diff| = {diff:.2e}");
+}
+
+#[test]
+fn strided_copy_nd_3d_transpose_f32() {
+    let _g = gpu_lock();
+    // Transpose of a contiguous [3, 4, 5] tensor: logical shape [5, 4, 3],
+    // strides are the contiguous strides permuted to (2, 1, 0) order.
+    // Source layout is contiguous; only the strides express the transpose.
+    let src_dims = [3usize, 4, 5];
+    let cont = [
+        (src_dims[1] * src_dims[2]) as u32,
+        src_dims[2] as u32,
+        1u32,
+    ];
+    // Permutation (0,1,2) -> (2,1,0): logical dim 0 ← src dim 2, etc.
+    let shape = [src_dims[2] as u32, src_dims[1] as u32, src_dims[0] as u32];
+    let strides = [cont[2], cont[1], cont[0]];
+    let total: usize = src_dims.iter().product();
+    let src: Vec<f32> = (0..total).map(|i| i as f32).collect();
+    let expected = oracle_strided_copy_nd(&src, &shape, &strides);
+    let actual = run_strided_copy_nd(&src, Dt::F32, &shape, &strides);
+    let diff = max_abs_diff(&actual, &expected);
+    assert!(diff < 1e-6, "strided_copy_nd 3d transpose f32: max |diff| = {diff:.2e}");
+}
+
+#[test]
+fn strided_copy_nd_4d_broadcast_axis_f32() {
+    let _g = gpu_lock();
+    // 4-D logical [2, 3, 2, 4] where dim 2 is a broadcast axis: its
+    // source stride is 0, so every coord on that axis reads the same row.
+    let shape = [2u32, 3u32, 2u32, 4u32];
+    // Source physically holds [2, 3, 1, 4]; the size-2 logical axis 2
+    // broadcasts from a single physical slot (stride 0).
+    let strides = [(3u32 * 4u32), 4u32, 0u32, 1u32];
+    let phys_total = 2 * 3 * 1 * 4;
+    let src: Vec<f32> = (0..phys_total).map(|i| i as f32 * 1.5 + 0.5).collect();
+    let expected = oracle_strided_copy_nd(&src, &shape, &strides);
+    let actual = run_strided_copy_nd(&src, Dt::F32, &shape, &strides);
+    let diff = max_abs_diff(&actual, &expected);
+    assert!(diff < 1e-6, "strided_copy_nd 4d broadcast f32: max |diff| = {diff:.2e}");
+}
+
+#[test]
+fn strided_copy_nd_3d_matches_oracle_f16() {
+    let _g = gpu_lock();
+    let shape = [2u32, 2u32, 3u32];
+    let phys = [2usize, 2, 5];
+    let strides = [(phys[1] * phys[2]) as u32, phys[2] as u32, 1u32];
+    let total: usize = phys.iter().product();
+    let src: Vec<f32> = (0..total).map(|i| Dt::F16.round(i as f32 * 0.1)).collect();
+    let expected = oracle_strided_copy_nd(&src, &shape, &strides);
+    let actual = run_strided_copy_nd(&src, Dt::F16, &shape, &strides);
+    let diff = max_abs_diff(&actual, &expected);
+    assert!(diff < 1e-3, "strided_copy_nd 3d f16: max |diff| = {diff:.2e}");
+}
+
+#[test]
+fn strided_copy_nd_output_not_all_zeros_f32() {
+    let _g = gpu_lock();
+    let shape = [2u32, 3u32];
+    let strides = [4u32, 1u32];
+    let src: Vec<f32> = (1..=8).map(|i| i as f32).collect();
+    let actual = run_strided_copy_nd(&src, Dt::F32, &shape, &strides);
+    assert!(
+        actual.iter().any(|&v| v != 0.0),
+        "strided_copy_nd: all-zero output for non-zero input (empty kernel body?)",
     );
 }
 
