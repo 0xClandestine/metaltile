@@ -26,6 +26,7 @@ pub mod batched_qkv_qgemv;
 pub mod dequant_gather;
 pub mod dequant_gemv;
 pub mod flash_quantized_sdpa;
+pub mod gemv_bm4;
 pub mod gated_delta;
 pub mod gated_delta_prep;
 pub mod gated_delta_replay;

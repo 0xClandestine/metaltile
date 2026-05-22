@@ -86,12 +86,12 @@ dispatch  = { rows = "1", tpg = "$hidden_dim / 4", out_elems = "$hidden_dim" }
 # before any of them start). sdpa follows all three KV-cache writes.
 
 [[layer.kernel]]
-op = "gemv"
+op = "gemv/bm4"
 fuse = "q_chain"
 inputs    = { mat = "$layers.$idx.attn.q_proj", vec = "_normed" }
 outputs   = { out = "_q" }
-constexpr = { k = "$hidden_dim" }
-dispatch  = { rows = "$n_heads * $head_dim", tpg = "256", out_elems = "$n_heads * $head_dim" }
+constexpr = { k = "$hidden_dim", rows = "$n_heads * $head_dim" }
+dispatch  = { rows = "$n_heads * $head_dim / 4", tpg = "256", out_elems = "$n_heads * $head_dim" }
 
 # ── RoPE: apply rotary embeddings to Q ────────────────────────────────
 # rope_llama: Grid3D [n_heads, half_dim, 1] × [1,1,1]
@@ -108,12 +108,12 @@ dispatch  = { grid_x = "$n_heads", grid_y = "$head_dim / 2", out_elems = "$n_hea
 # ── Self-attention: K projection → RoPE → KV cache write ──────────────
 
 [[layer.kernel]]
-op = "gemv"
+op = "gemv/bm4"
 fuse = "k_chain"
 inputs    = { mat = "$layers.$idx.attn.k_proj", vec = "_normed" }
 outputs   = { out = "_k_new" }
-constexpr = { k = "$hidden_dim" }
-dispatch  = { rows = "$n_kv_heads * $head_dim", tpg = "256", out_elems = "$n_kv_heads * $head_dim" }
+constexpr = { k = "$hidden_dim", rows = "$n_kv_heads * $head_dim" }
+dispatch  = { rows = "$n_kv_heads * $head_dim / 4", tpg = "256", out_elems = "$n_kv_heads * $head_dim" }
 
 [[layer.kernel]]
 op = "rope/rope_llama"
@@ -137,12 +137,12 @@ dispatch  = { grid_x = "$n_kv_heads * $head_dim" }
 # ── Self-attention: V projection → KV cache write ──────────────────────
 
 [[layer.kernel]]
-op = "gemv"
+op = "gemv/bm4"
 fuse = "v_chain"
 inputs    = { mat = "$layers.$idx.attn.v_proj", vec = "_normed" }
 outputs   = { out = "_v_new" }
-constexpr = { k = "$hidden_dim" }
-dispatch  = { rows = "$n_kv_heads * $head_dim", tpg = "256", out_elems = "$n_kv_heads * $head_dim" }
+constexpr = { k = "$hidden_dim", rows = "$n_kv_heads * $head_dim" }
+dispatch  = { rows = "$n_kv_heads * $head_dim / 4", tpg = "256", out_elems = "$n_kv_heads * $head_dim" }
 
 # ── KV cache update: write V at current position ───────────────────────
 
@@ -169,12 +169,12 @@ dispatch  = { rows = "$n_heads", tpg = "1024", out_elems = "$n_heads * $head_dim
 # ── Attention output projection ────────────────────────────────────────
 
 [[layer.kernel]]
-op = "gemv"
+op = "gemv/bm4"
 fuse = "attn_out"
 inputs    = { mat = "$layers.$idx.attn.o_proj", vec = "_attn_out" }
 outputs   = { out = "_o_proj" }
-constexpr = { k = "$n_heads * $head_dim" }
-dispatch  = { rows = "$hidden_dim", tpg = "256", out_elems = "$hidden_dim" }
+constexpr = { k = "$n_heads * $head_dim", rows = "$hidden_dim" }
+dispatch  = { rows = "$hidden_dim / 4", tpg = "256", out_elems = "$hidden_dim" }
 
 # ── Residual add: attn output + residual stream ────────────────────────
 # binary/add (Elementwise): a + b → c
@@ -198,12 +198,12 @@ dispatch  = { rows = "1", tpg = "$hidden_dim / 4", out_elems = "$hidden_dim" }
 # ── MLP: gate projection ───────────────────────────────────────────────
 
 [[layer.kernel]]
-op = "gemv"
+op = "gemv/bm4"
 fuse = "ffn_act"
 inputs    = { mat = "$layers.$idx.mlp.gate_proj", vec = "_ffn_normed" }
 outputs   = { out = "_gate" }
-constexpr = { k = "$hidden_dim" }
-dispatch  = { rows = "$ffn_dim", tpg = "256", out_elems = "$ffn_dim" }
+constexpr = { k = "$hidden_dim", rows = "$ffn_dim" }
+dispatch  = { rows = "$ffn_dim / 4", tpg = "256", out_elems = "$ffn_dim" }
 
 # ── MLP: SiLU activation ───────────────────────────────────────────────
 # mt_silu (Elementwise): a[ffn_dim] → out[ffn_dim]
@@ -218,12 +218,12 @@ dispatch  = { n = "$ffn_dim", out_elems = "$ffn_dim" }
 # ── MLP: up projection ─────────────────────────────────────────────────
 
 [[layer.kernel]]
-op = "gemv"
+op = "gemv/bm4"
 fuse = "ffn_act"
 inputs    = { mat = "$layers.$idx.mlp.up_proj", vec = "_ffn_normed" }
 outputs   = { out = "_up" }
-constexpr = { k = "$hidden_dim" }
-dispatch  = { rows = "$ffn_dim", tpg = "256", out_elems = "$ffn_dim" }
+constexpr = { k = "$hidden_dim", rows = "$ffn_dim" }
+dispatch  = { rows = "$ffn_dim / 4", tpg = "256", out_elems = "$ffn_dim" }
 
 # ── MLP: elementwise multiply (gated × up) ─────────────────────────────
 # binary/mul (Elementwise): a * b → out
@@ -238,12 +238,12 @@ dispatch  = { n = "$ffn_dim", out_elems = "$ffn_dim" }
 # ── MLP: down projection ───────────────────────────────────────────────
 
 [[layer.kernel]]
-op = "gemv"
+op = "gemv/bm4"
 fuse = "ffn_out"
 inputs    = { mat = "$layers.$idx.mlp.down_proj", vec = "_combined" }
 outputs   = { out = "_ffn_out" }
-constexpr = { k = "$ffn_dim" }
-dispatch  = { rows = "$hidden_dim", tpg = "256", out_elems = "$hidden_dim" }
+constexpr = { k = "$ffn_dim", rows = "$hidden_dim" }
+dispatch  = { rows = "$hidden_dim / 4", tpg = "256", out_elems = "$hidden_dim" }
 
 # ── Residual add: FFN output + post-attn → update residual stream ──────
 
@@ -270,11 +270,11 @@ dispatch  = { rows = "1", tpg = "$hidden_dim / 4", out_elems = "$hidden_dim" }
 # ── Post-layer: LM head ────────────────────────────────────────────────
 
 [[kernel]]
-op = "gemv"
+op = "gemv/bm4"
 inputs    = { mat = "lm_head", vec = "_final_normed" }
 outputs   = { out = "_logits" }
-constexpr = { k = "$hidden_dim" }
-dispatch  = { rows = "$vocab_size", tpg = "256", out_elems = "$vocab_size" }
+constexpr = { k = "$hidden_dim", rows = "$vocab_size" }
+dispatch  = { rows = "$vocab_size / 4", tpg = "256", out_elems = "$vocab_size" }
 
 # ── Post-layer: sampling ───────────────────────────────────────────────
 # softmax_categorical_sample: Reduction [1, 1, 1] × [256, 1, 1]
