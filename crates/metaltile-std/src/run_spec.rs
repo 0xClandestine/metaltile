@@ -2785,7 +2785,7 @@ fn run_sdpa_batched_decode_form(
             Ok(s) => s,
             Err(_) => return vec![],
         };
-    let single_compiled = match compile_mt(runner, &single_msl, "sdpa_decode") {
+    let single_compiled = match compile_mt(runner, &single_msl, "ffai_sdpa_decode") {
         Some(k) => k,
         None => return vec![],
     };
@@ -3131,7 +3131,7 @@ fn run_sdpa_batched_decode_prefill_tile(
     let (ref_perf, ref_timing) = match MslGenerator::new(msl_cfg_for(Some(single_tpg as u32)))
         .generate(&single_kernel)
         .ok()
-        .and_then(|s| compile_mt(runner, &s, "sdpa_decode"))
+        .and_then(|s| compile_mt(runner, &s, "ffai_sdpa_decode"))
     {
         Some(single_compiled) => {
             let mut q_first: Vec<f32> = vec![0.0; n_q_heads * head_dim];
