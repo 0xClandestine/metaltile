@@ -142,14 +142,17 @@ impl MslGenerator {
     }
 
     pub(super) fn shape_nelems_str(&self, shape: &Shape) -> String {
-        shape.num_elements().map_or_else(|| {
-            let rank = shape.rank();
-            (0..rank)
-                .filter_map(|i| shape.dim(i))
-                .map(dim_to_msl_str)
-                .collect::<Vec<_>>()
-                .join(" * ")
-        }, |n| n.to_string())
+        shape.num_elements().map_or_else(
+            || {
+                let rank = shape.rank();
+                (0..rank)
+                    .filter_map(|i| shape.dim(i))
+                    .map(dim_to_msl_str)
+                    .collect::<Vec<_>>()
+                    .join(" * ")
+            },
+            |n| n.to_string(),
+        )
     }
 
     pub(super) fn emit_tile_alloc(

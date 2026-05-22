@@ -411,7 +411,8 @@ fn emit_artifacts(
 
     if kinds.contains(&EmitKind::Metallib) {
         let metallib_path = resources_dir.join("kernels.metallib");
-        let air_dir = std::env::var("CARGO_TARGET_DIR").map_or_else(|_| PathBuf::from("target"), PathBuf::from)
+        let air_dir = std::env::var("CARGO_TARGET_DIR")
+            .map_or_else(|_| PathBuf::from("target"), PathBuf::from)
             .join("tile-build-air");
         if let Err(e) = compile_metallib(metal_files, &metallib_path, sdk, &air_dir) {
             eprintln!(

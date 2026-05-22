@@ -75,9 +75,7 @@ impl GpuFamily {
 
     /// True for Apple9+ (M3, M4, M5, A17, A18).
     #[must_use]
-    pub const fn is_apple9_or_later(self) -> bool {
-        matches!(self, Self::Apple9 | Self::Apple10)
-    }
+    pub const fn is_apple9_or_later(self) -> bool { matches!(self, Self::Apple9 | Self::Apple10) }
 
     /// Threadgroup memory in KB. All Apple7-9 GPUs have 32 KB.
     #[must_use]

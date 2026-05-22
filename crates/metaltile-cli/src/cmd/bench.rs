@@ -34,9 +34,7 @@ pub fn run(args: &BenchArgs) -> Result<(), crate::CliError> {
     // a dirty source tree silently decouples the numbers from any
     // commit SHA we'd record in a snapshot. `working_tree_dirty()`
     // returns None outside a repo — skip the check there.
-    if !args.allow_dirty
-        && git::working_tree_dirty() == Some(true)
-    {
+    if !args.allow_dirty && git::working_tree_dirty() == Some(true) {
         let files = git::list_dirty_files();
         eprintln!(
             "{} {}",
@@ -185,7 +183,8 @@ pub fn run(args: &BenchArgs) -> Result<(), crate::CliError> {
         .map(|r| format!("{} [{}]", r.op(), r.shape()))
         .collect();
     let avg_pct: Option<f64> = {
-        let valid: Vec<f64> = all.iter().filter_map(metaltile_std::bench_types::OpResult::pct).collect();
+        let valid: Vec<f64> =
+            all.iter().filter_map(metaltile_std::bench_types::OpResult::pct).collect();
         if valid.is_empty() { None } else { Some(valid.iter().sum::<f64>() / valid.len() as f64) }
     };
 
@@ -449,9 +448,7 @@ fn format_result_row(
     }
 }
 
-fn json_f(v: Option<f64>) -> String {
-    v.map_or_else(|| "null".into(), |x| format!("{x:.3}"))
-}
+fn json_f(v: Option<f64>) -> String { v.map_or_else(|| "null".into(), |x| format!("{x:.3}")) }
 
 fn pct_style(pct: f64) -> Style {
     if pct >= 90.0 {

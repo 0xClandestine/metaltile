@@ -317,22 +317,14 @@ impl BinOpKind {
     pub const fn is_cmp(self) -> bool {
         matches!(
             self,
-            Self::CmpLt
-                | Self::CmpGt
-                | Self::CmpLe
-                | Self::CmpGe
-                | Self::CmpEq
-                | Self::CmpNe
+            Self::CmpLt | Self::CmpGt | Self::CmpLe | Self::CmpGe | Self::CmpEq | Self::CmpNe
         )
     }
 
     /// Whether this op is emitted as `fn(a, b)` rather than infix `a op b`.
     #[must_use]
     pub const fn is_fn_call(self) -> bool {
-        matches!(
-            self,
-            Self::Max | Self::Min | Self::Pow | Self::ATan2 | Self::Rem
-        )
+        matches!(self, Self::Max | Self::Min | Self::Pow | Self::ATan2 | Self::Rem)
     }
 }
 
@@ -1603,8 +1595,9 @@ impl Op {
     #[must_use]
     pub fn store_dst(&self) -> Option<&str> {
         match self {
-            Self::Store { dst, .. } | Self::VectorStore { dst, .. } | Self::StrideStore { dst, .. } =>
-                Some(dst),
+            Self::Store { dst, .. }
+            | Self::VectorStore { dst, .. }
+            | Self::StrideStore { dst, .. } => Some(dst),
             Self::ThreadgroupStore { name, .. } => Some(name),
             _ => None,
         }
@@ -1816,7 +1809,8 @@ impl Op {
             Self::Broadcast { value, shape } => {
                 write!(f, "Broadcast(v{}, {shape:?})", value.as_u32())
             },
-            Self::Splat { value, dtype, shape } => write!(f, "Splat({value}, {dtype:?}, {shape:?})"),
+            Self::Splat { value, dtype, shape } =>
+                write!(f, "Splat({value}, {dtype:?}, {shape:?})"),
             Self::FusedElementwise { ops } => {
                 write!(f, "FusedElementwise([")?;
                 for (i, op) in ops.iter().enumerate() {

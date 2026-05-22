@@ -178,18 +178,19 @@ pub fn run(args: &InspectArgs) -> Result<(), CliError> {
                     println!("{k}");
                     run_all_passes_and_print(&mut k);
                 },
-                name => if let Some(pass_obj) = metaltile_codegen::passes::PassRegistry::get(name) {
-                    if let Err(e) = pass_obj.run(&mut k) {
-                        eprintln!("Pass {name} failed: {e}");
+                name =>
+                    if let Some(pass_obj) = metaltile_codegen::passes::PassRegistry::get(name) {
+                        if let Err(e) = pass_obj.run(&mut k) {
+                            eprintln!("Pass {name} failed: {e}");
+                            return Ok(());
+                        }
+                        println!("// ── AFTER {name} ────────────────────────");
+                        println!("{k}");
+                    } else {
+                        let valid: Vec<_> = metaltile_codegen::passes::PassRegistry::names();
+                        eprintln!("Unknown pass: {name}. Valid: {} all", valid.join(", "));
                         return Ok(());
-                    }
-                    println!("// ── AFTER {name} ────────────────────────");
-                    println!("{k}");
-                } else {
-                    let valid: Vec<_> = metaltile_codegen::passes::PassRegistry::names();
-                    eprintln!("Unknown pass: {name}. Valid: {} all", valid.join(", "));
-                    return Ok(());
-                },
+                    },
             }
         } else {
             // Default: print MSL

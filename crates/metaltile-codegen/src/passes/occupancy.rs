@@ -61,11 +61,7 @@ pub struct GpuLimits {
 
 impl Default for GpuLimits {
     fn default() -> Self {
-        Self {
-            max_threads_per_tg: 1024,
-            tg_memory_bytes: 32 * 1024,
-            regs_per_thread_guide: 128,
-        }
+        Self { max_threads_per_tg: 1024, tg_memory_bytes: 32 * 1024, regs_per_thread_guide: 128 }
     }
 }
 
@@ -145,7 +141,11 @@ pub fn estimate_occupancy(
     //
     // Hard ceiling: max 32 KB per threadgroup on Apple GPUs.
     let mem_occ = if let Some(mem_used) = tg_mem_usage_bytes {
-        if mem_used == 0 { 1.0 } else { (f64::from(limits.tg_memory_bytes) / f64::from(mem_used)).min(1.0) }
+        if mem_used == 0 {
+            1.0
+        } else {
+            (f64::from(limits.tg_memory_bytes) / f64::from(mem_used)).min(1.0)
+        }
     } else {
         1.0
     };

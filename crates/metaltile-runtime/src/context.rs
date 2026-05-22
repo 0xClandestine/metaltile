@@ -722,7 +722,11 @@ impl Context {
             let buf = pool_acquire(dev, bytes.len(), opts)?;
             let dst = buf.contents();
             unsafe {
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.as_ptr().cast::<u8>(), bytes.len());
+                std::ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    dst.as_ptr().cast::<u8>(),
+                    bytes.len(),
+                );
             }
             Ok(ResidentBuffer { inner: buf })
         }

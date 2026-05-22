@@ -263,9 +263,9 @@ impl MslGenerator {
                     let l = self.vname(Some(*lhs), block, extra_names);
                     let r = self.vname(Some(*rhs), block, extra_names);
                     let is_float = |id: ValueId| -> bool {
-                        type_env
-                            .get(&id)
-                            .is_some_and(|tv| matches!(tv.dtype, DType::F32 | DType::F16 | DType::BF16))
+                        type_env.get(&id).is_some_and(|tv| {
+                            matches!(tv.dtype, DType::F32 | DType::F16 | DType::BF16)
+                        })
                     };
                     let result_is_float = vid.is_some_and(is_float);
                     // FMA fusion needs ALL operands float (Metal has no
@@ -350,9 +350,7 @@ impl MslGenerator {
                     let v = self.vname(vid, block, extra_names);
                     let rv = self.vname(Some(*value), block, extra_names);
                     let n = self.shape_nelems_str(shape);
-                    let dt = type_env
-                        .get(value)
-                        .map_or("float", |tv| self.msl_type_name(tv.dtype));
+                    let dt = type_env.get(value).map_or("float", |tv| self.msl_type_name(tv.dtype));
                     wl!(out, "{pad}{dt} {v}_data[{n}];");
                     wl!(out, "{pad}for (uint _i = 0; _i < {n}; _i++) {v}_data[_i] = {dt}({rv});");
                     wl!(out, "{pad}{dt}* {v} = {v}_data;");
@@ -715,9 +713,8 @@ impl MslGenerator {
                             resolved_vid,
                             last_idx,
                         );
-                        let result_is_bf16 = type_env
-                            .get(&resolved_vid)
-                            .is_some_and(|tv| tv.dtype == DType::BF16);
+                        let result_is_bf16 =
+                            type_env.get(&resolved_vid).is_some_and(|tv| tv.dtype == DType::BF16);
                         if self.config.native_bfloat && result_is_bf16 {
                             if expr.starts_with("bfloat(") || expr.starts_with("as_type<bfloat2>(")
                             {
@@ -935,7 +932,9 @@ impl MslGenerator {
                             Some("simd_prefix_inclusive_sum"),
                         _ => None,
                     };
-                    if let Some(f) = fn_name { wl!(out, "{pad}float {v} = {f}({rv});") } else {
+                    if let Some(f) = fn_name {
+                        wl!(out, "{pad}float {v} = {f}({rv});")
+                    } else {
                         let init = match rk {
                             ReduceKind::Max => "-INFINITY",
                             ReduceKind::Min => "INFINITY",

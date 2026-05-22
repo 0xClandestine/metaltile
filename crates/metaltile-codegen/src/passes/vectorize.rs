@@ -416,7 +416,9 @@ fn find_const_in_block(block: &Block, vid: ValueId) -> Option<i64> {
 /// excluded — `uint2` weight loads in qmv regressed perf on M2 Pro because the
 /// scalar form already coalesces in L2 and the extra extract ops cost more than
 /// the load consolidation saves.
-const fn is_vectorizable(dtype: DType) -> bool { matches!(dtype, DType::F16 | DType::F32 | DType::BF16) }
+const fn is_vectorizable(dtype: DType) -> bool {
+    matches!(dtype, DType::F16 | DType::F32 | DType::BF16)
+}
 
 #[cfg(test)]
 mod tests {

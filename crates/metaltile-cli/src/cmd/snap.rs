@@ -38,7 +38,9 @@ pub fn run(args: &SnapArgs) -> Result<(), CliError> {
     let note = &args.note;
     let filter = &args.filter;
 
-    let out_path: String = if let Some(p) = out_path { p.to_string() } else {
+    let out_path: String = if let Some(p) = out_path {
+        p.to_string()
+    } else {
         let date = chrono_like_now();
         format!(".tile-snapshots/{}.json", date)
     };
@@ -134,7 +136,8 @@ pub fn run(args: &SnapArgs) -> Result<(), CliError> {
         });
 
     // GPU family heuristic
-    let gpu_family = GpuFamily::from_device_name(&device).code().map(std::string::ToString::to_string);
+    let gpu_family =
+        GpuFamily::from_device_name(&device).code().map(std::string::ToString::to_string);
 
     // Timestamp
     let timestamp = chrono_like_now();
