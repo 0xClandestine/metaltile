@@ -139,7 +139,7 @@ fn moe_gather_qmm_mma_int4_bm16_mpp_matches_m1_clean_tile() {
         buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
         buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
         let ctx = Context::new().unwrap();
-        let mut k = moe_mpp::kernel_ir_for(Dt::F32.to_dtype());
+        let mut k = moe_mpp::mt_moe_gather_qmm_mma_int4_bm16_mpp::kernel_ir_for(Dt::F32.to_dtype());
         k.mode = KernelMode::Reduction;
         // Grid: [N/BN=32, ceil(T/BM=16), 1]. TG: 32 lanes = 1 SG (MPP's
         // matmul2d uses `execution_simdgroup`).
@@ -271,7 +271,8 @@ fn moe_gather_qmm_mma_int4_bm16_mpp_bf16_matches_m1_clean_tile() {
         buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
         buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
         let ctx = Context::new().unwrap();
-        let mut k = moe_mpp::kernel_ir_for(Dt::Bf16.to_dtype());
+        let mut k =
+            moe_mpp::mt_moe_gather_qmm_mma_int4_bm16_mpp::kernel_ir_for(Dt::Bf16.to_dtype());
         k.mode = KernelMode::Reduction;
         let r = ctx
             .dispatch_with_grid(
