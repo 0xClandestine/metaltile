@@ -11,7 +11,10 @@ use metaltile_core::{
 };
 
 use super::MslGenerator;
-use crate::passes::{fusion::SUB_OP_FLAG, type_check::TypeEnv};
+use crate::passes::{
+    fusion::{SUB_OP_FLAG, is_sub_op_ref},
+    type_check::TypeEnv,
+};
 
 /// Recover the dtype of a fused sub-op's result. Walks the fused chain when
 /// the operand ValueId points to another sub-op (marked by `SUB_OP_FLAG`),
@@ -20,7 +23,7 @@ use crate::passes::{fusion::SUB_OP_FLAG, type_check::TypeEnv};
 /// "don't apply dtype-dependent peepholes."
 fn infer_fused_op_dtype(vid: ValueId, fused_ops: &[Op], type_env: &TypeEnv) -> Option<DType> {
     let raw = vid.as_u32();
-    if raw & SUB_OP_FLAG != 0 {
+    if is_sub_op_ref(raw) {
         let idx = (raw & !SUB_OP_FLAG) as usize;
         let op = fused_ops.get(idx)?;
         match op {
@@ -200,7 +203,7 @@ impl MslGenerator {
         extra_names: &BTreeMap<ValueId, String>,
         resolved_vid: ValueId,
     ) -> String {
-        if vid.as_u32() & SUB_OP_FLAG != 0 {
+        if is_sub_op_ref(vid.as_u32()) {
             let sub_idx = (vid.as_u32() & !SUB_OP_FLAG) as usize;
             if sub_idx < fused_ops.len() {
                 self.emit_fused_expr(
@@ -218,6 +221,9 @@ impl MslGenerator {
                 "0 /* bad sub-op ref */".into()
             }
         } else {
+            // Plain value — an ordinary SSA name or a loop-var ValueId
+            // (`LOOP_VAR_FLAG | VarId`); `vname` resolves both via
+            // `extra_names` (the loop body's `inner_names`).
             self.vname(Some(vid), block, extra_names)
         }
     }
