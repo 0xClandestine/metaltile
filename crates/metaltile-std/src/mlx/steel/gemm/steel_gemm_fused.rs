@@ -228,3 +228,25 @@ steel_gemm_fused_kernel!(
     2u32,
     "bm64_bn64_bk16_wm4_wn2"
 );
+// 64×32×16 / 1×2 — M-heavy block (transpose of 32×64; 2 simdgroups).
+// For M-skewed problems where a tall, narrow output tile keeps the
+// per-simdgroup A-fragment reuse high.
+steel_gemm_fused_kernel!(
+    mt_steel_gemm_64x32x16_1x2,
+    64u32,
+    32u32,
+    1u32,
+    2u32,
+    "bm64_bn32_bk16_wm1_wn2"
+);
+// 32×32×16 / 1×2 — small tile, 2 simdgroups (skinny problems, low TPG).
+// A lower-occupancy small tile for problems too small to fill a 4-SG
+// block; gives the dispatcher a 64-thread option.
+steel_gemm_fused_kernel!(
+    mt_steel_gemm_32x32x16_1x2,
+    32u32,
+    32u32,
+    1u32,
+    2u32,
+    "bm32_bn32_bk16_wm1_wn2"
+);
