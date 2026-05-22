@@ -146,7 +146,8 @@ fn moe_gather_qmm_mma_int4_bm64_mpp_matches_m1_clean_tile() {
         buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
         buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
         let ctx = Context::new().unwrap();
-        let mut k = moe_mpp_bm64::kernel_ir_for(Dt::F32.to_dtype());
+        let mut k =
+            moe_mpp_bm64::mt_moe_gather_qmm_mma_int4_bm64_mpp::kernel_ir_for(Dt::F32.to_dtype());
         k.mode = KernelMode::Reduction;
         // Grid: [ceil(N/64), ceil(T/64), 1]. TG: 128 lanes = 4 SGs (WM=WN=2).
         let r = ctx
@@ -264,7 +265,8 @@ fn moe_gather_qmm_mma_int4_bm64_mpp_matches_m1_multi_tile() {
         buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
         buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
         let ctx = Context::new().unwrap();
-        let mut k = moe_mpp_bm64::kernel_ir_for(Dt::F32.to_dtype());
+        let mut k =
+            moe_mpp_bm64::mt_moe_gather_qmm_mma_int4_bm64_mpp::kernel_ir_for(Dt::F32.to_dtype());
         k.mode = KernelMode::Reduction;
         let r = ctx
             .dispatch_with_grid(
@@ -387,7 +389,8 @@ fn moe_gather_qmm_mma_int4_bm64_mpp_bf16_matches_m1_clean_tile() {
         buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
         buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
         let ctx = Context::new().unwrap();
-        let mut k = moe_mpp_bm64::kernel_ir_for(Dt::Bf16.to_dtype());
+        let mut k =
+            moe_mpp_bm64::mt_moe_gather_qmm_mma_int4_bm64_mpp::kernel_ir_for(Dt::Bf16.to_dtype());
         k.mode = KernelMode::Reduction;
         let r = ctx
             .dispatch_with_grid(
