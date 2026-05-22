@@ -15,17 +15,18 @@
 //!    constant: bit j set = H[t][j] = +1, bit j clear = H[t][j] = −1.
 //! 4. Result is scaled by `scale` and stored.
 //!
-//! Built as `Op::InlineMsl` rather than `#[kernel]` DSL because the DSL has no
-//! mechanism to index into a compile-time per-thread constant array with a
-//! dynamic thread index. The MSL uses `constant uint signs[M]` which the GPU
-//! broadcasts efficiently.
+//! Expressed via DSL IR ops — no `Op::InlineMsl`. The per-thread sign table
+//! is a `StackAlloc` u32 array seeded with the M compile-time row masks; the
+//! thread reads its own row with a dynamic `StackLoad(signs, t)`. The
+//! M-element accumulation is fully unrolled (M ≤ 28).
 //!
 //! ## DISPATCH INVARIANTS
 //!
 //! - **Reduction mode**, `grid = [n_rows, 1, 1]`, `tg = [M, 1, 1]`.
 //! - One threadgroup per M-element vector; `tpg = M` (12, 20, or 28).
 //! - `M < 32` is safe because the kernel uses a plain threadgroup-barrier
-//!   accumulate (no `simd_*` intrinsics).
+//!   accumulate (no `simd_*` intrinsics); `simd_lane` doubles as the
+//!   thread-in-threadgroup index since one partial simdgroup covers the TG.
 //! - `n_rows * M` must equal the total element count of the input tensor.
 //!
 //! Correctness pinned by `tests/hadamard_m_gpu_correctness.rs`.
@@ -41,7 +42,19 @@
 use metaltile_core::{
     constexpr::ConstExpr,
     dtype::DType,
-    ir::{Block, BlockId, ConstExprDecl, Kernel, KernelMode, Op, Param, ParamKind, ValueId},
+    ir::{
+        BinOpKind,
+        Block,
+        BlockId,
+        ConstExprDecl,
+        IndexExpr,
+        Kernel,
+        KernelMode,
+        Op,
+        Param,
+        ParamKind,
+        ValueId,
+    },
     shape::{Dim, Shape},
 };
 
@@ -50,46 +63,12 @@ use metaltile_core::{
 // Derived from `mlx/backend/common/hadamard.h` `h12` string.
 // Verified: H_12 · H_12^T = 12 · I.
 // Encoding: bit j of signs[t] = 1  ⟺  H_12[t][j] = +1.
-//
-//   row  0: +-++++++++++  → 4093
-//   row  1: --+-+-+-+-+-  → 1364
-//   row  2: +++-++----++  → 3127
-//   row  3: +---+--+-++-  → 1681
-//   row  4: +++++-++----  →  223  (Note: bit 0 = '+', only 0..11 matter)
-//   row  5: +-+---+--+-+  → 2629
-//   row  6: ++--+++-++--  →  883
-//   row  7: +--++---+--+  → 2329
-//   row  8: ++----+++-++  → 3523
-//   row  9: +--+-++---+-  → 1129
-//   row 10: ++++----+++-  → 1807
-//   row 11: +-+--+-++---  →  421
 const H12_SIGNS: [u32; 12] = [4093, 1364, 3127, 1681, 223, 2629, 883, 2329, 3523, 1129, 1807, 421];
 
 // ── H_20 sign-bit encoding ─────────────────────────────────────────────────
 //
 // Derived from `mlx/backend/common/hadamard.h` `h20` string.
 // Verified: H_20 · H_20^T = 20 · I.
-//
-//   row  0: +----+----++--++-++-  → 445473
-//   row  1: -+----+---+++---+-++  → 859202
-//   row  2: --+----+---+++-+-+-+  → 702596
-//   row  3: ---+----+---+++++-+-  → 389384
-//   row  4: ----+----++--++-++-+  → 747024
-//   row  5: -+++++-----+--+++--+  → 641086
-//   row  6: +-+++-+---+-+--+++--  → 234589
-//   row  7: ++-++--+---+-+--+++-  → 469147
-//   row  8: +++-+---+---+-+--+++  → 938263
-//   row  9: ++++-----++--+-+--++  → 828943
-//   row 10: --++-+-++-+-----++++  → 984492
-//   row 11: ---++-+-++-+---+-+++  → 953176
-//   row 12: +---++-+-+--+--++-++  → 889521
-//   row 13: ++---++-+----+-+++-+  → 762211
-//   row 14: -++---++-+----+++++-  → 508614
-//   row 15: -+--+--++-+----+----  →  34194
-//   row 16: +-+-----++-+----+---  →  68357
-//   row 17: -+-+-+---+--+----+--  → 135722
-//   row 18: --+-+++------+----+-  → 270452
-//   row 19: +--+--++------+----+  → 540873
 const H20_SIGNS: [u32; 20] = [
     445473, 859202, 702596, 389384, 747024, 641086, 234589, 469147, 938263, 828943, 984492, 953176,
     889521, 762211, 508614, 34194, 68357, 135722, 270452, 540873,
@@ -99,35 +78,6 @@ const H20_SIGNS: [u32; 20] = [
 //
 // Derived from `mlx/backend/common/hadamard.h` `h28` string.
 // Verified: H_28 · H_28^T = 28 · I.
-//
-//   row  0: +------++----++-+--+-+--++--  →  53043585
-//   row  1: -+-----+++-----+-+--+-+--++-  → 106070914
-//   row  2: --+-----+++---+-+-+----+--++  → 210061060
-//   row  3: ---+-----+++---+-+-+-+--+--+  → 153783816
-//   row  4: ----+-----+++---+-+-+++--+--  →  41229328
-//   row  5: -----+-----++++--+-+--++--+-  →  80377888
-//   row  6: ------++----++-+--+-+--++--+  → 160739520
-//   row  7: --++++-+-------++--+++-+--+-  →  79265980
-//   row  8: ---++++-+-----+-++--+-+-+--+  → 156451192
-//   row  9: +---+++--+----++-++--+-+-+--  →  44483185
-//   row 10: ++---++---+----++-++--+-+-+-  →  88966243
-//   row 11: +++---+----+----++-++--+-+-+  → 177932359
-//   row 12: ++++--------+-+--++-++--+-+-  →  87445519
-//   row 13: -++++--------+++--++--+--+-+  → 172810270
-//   row 14: -+-++-++--++--+--------++++-  → 125848794
-//   row 15: +-+-++--+--++--+--------++++  → 251697461
-//   row 16: -+-+-++--+--++--+----+---+++  → 237056618
-//   row 17: +-+-+-++--+--+---+---++---++  → 207758549
-//   row 18: ++-+-+-++--+------+--+++---+  → 149162411
-//   row 19: -++-+-+-++--+------+-++++---  →  31986518
-//   row 20: +-++-+---++--+------+-++++--  →  63972909
-//   row 21: -++--++-+-++-+++----++------  →   3206502
-//   row 22: +-++--++-+-++-+++-----+-----  →   4315853
-//   row 23: ++-++---+-+-++-+++-----+----  →   8631579
-//   row 24: -++-++-+-+-+-+--+++-----+---  →  17246902
-//   row 25: --++-++++-+-+----+++-----+--  →  34477548
-//   row 26: +--++-+-++-+-+----+++-----+-  →  68954969
-//   row 27: ++--++-+-++-+-+----++------+  → 135812787
 const H28_SIGNS: [u32; 28] = [
     53043585, 106070914, 210061060, 153783816, 41229328, 80377888, 160739520, 79265980, 156451192,
     44483185, 88966243, 177932359, 87445519, 172810270, 125848794, 251697461, 237056618, 207758549,
@@ -135,70 +85,14 @@ const H28_SIGNS: [u32; 28] = [
     135812787,
 ];
 
-// ── MSL template ───────────────────────────────────────────────────────────
-//
-// The MSL source takes three template parameters filled in by `kernel_ir_for`:
-//   {T}    → MSL type (float / half / bfloat)
-//   {M}    → matrix size (12, 20, or 28) — a compile-time constant
-//   {SIGNS} → comma-separated list of `M` u32 sign bitmasks
-//
-// Algorithm:
-//   1. All M threads load their element into threadgroup float buf[M].
-//   2. Barrier.
-//   3. Each thread t accumulates acc = Σ_j sign(t,j) * buf[j]
-//      where sign(t,j) = ((signs[t] >> j) & 1) ? +1 : -1.
-//   4. Store (T)(acc * scale).
-//
-// The `signs[M]` sign-bit table is a function-local array of compile-time
-// literals — MSL forbids the `constant` address space on an automatic
-// variable, so it is a plain (thread-private) array; each lane reads its
-// own row at index `tid` without a shuffle or TG op.
-const MSL_TEMPLATE: &str = r#"// hadamard_m body — M={M}, one threadgroup per M-vector.
-// signs[t]: bit j = 1 → H_M[t][j] = +1, bit j = 0 → H_M[t][j] = -1.
-uint signs[{M}] = { {SIGNS} };
-
-const uint row = tgid_x;          // threadgroup row index (0-based)
-const uint t   = tid;             // thread index within the threadgroup (0..M-1)
-const uint base = row * {M}u;
-
-// Phase 1: load element into shared memory (promote to float for accuracy).
-threadgroup float buf[{M}];
-buf[t] = (float)(inp[base + t]);
-threadgroup_barrier(mem_flags::mem_threadgroup);
-
-// Phase 2: accumulate H_M[t][*] · buf[*].
-float acc = 0.0f;
-for (uint j = 0u; j < {M}u; j++) {
-    float sign = ((signs[t] >> j) & 1u) ? 1.0f : -1.0f;
-    acc += sign * buf[j];
-}
-
-// Phase 3: scale and store.
-out[base + t] = ({T})(acc * scale);
-"#;
-
-/// Substitute the three template placeholders in `MSL_TEMPLATE`.
-fn build_msl(m: u32, signs: &[u32], dt: DType) -> String {
-    let t_str = match dt {
-        DType::F32 => "float",
-        DType::F16 => "half",
-        DType::BF16 => "bfloat",
-        _ => unreachable!("hadamard_m only supports F32/F16/BF16"),
-    };
-    let signs_str: Vec<String> = signs.iter().map(|v| v.to_string()).collect();
-    MSL_TEMPLATE
-        .replace("{T}", t_str)
-        .replace("{M}", &m.to_string())
-        .replace("{SIGNS}", &signs_str.join(", "))
-}
-
-/// Build the kernel IR for `mt_hadamard_m<T>` with M ∈ {12, 20, 28}.
+/// Build the kernel IR for `mt_hadamard_m{M}` with M ∈ {12, 20, 28}.
 ///
 /// The caller selects M at build time. Dispatch:
 ///   `grid = [n_rows, 1, 1]`, `tpg = [M, 1, 1]`, `KernelMode::Reduction`.
 /// where `n_rows = total_elements / M`.
 ///
 /// Constexpr `scale: f32` is passed as a 4-byte LE buffer under key `"scale"`.
+#[allow(unused_assignments)] // final nv!() bumps vid past last read — by design
 pub fn kernel_ir_for(m: u32, dt: DType) -> Kernel {
     assert!(matches!(m, 12 | 20 | 28), "mt_hadamard_m only supports M ∈ {{12, 20, 28}}, got {m}");
     assert!(
@@ -221,7 +115,7 @@ pub fn kernel_ir_for(m: u32, dt: DType) -> Kernel {
     k.params.push(Param {
         name: "inp".into(),
         dtype: dt,
-        shape: Shape::new([Dim::Any, Dim::Known(m as usize)]),
+        shape: Shape::new([Dim::Any]),
         is_output: false,
         kind: ParamKind::Tensor,
     });
@@ -229,7 +123,7 @@ pub fn kernel_ir_for(m: u32, dt: DType) -> Kernel {
     k.params.push(Param {
         name: "out".into(),
         dtype: dt,
-        shape: Shape::new([Dim::Any, Dim::Known(m as usize)]),
+        shape: Shape::new([Dim::Any]),
         is_output: true,
         kind: ParamKind::Tensor,
     });
@@ -241,28 +135,128 @@ pub fn kernel_ir_for(m: u32, dt: DType) -> Kernel {
         value: None,
     });
 
-    k.return_shapes.push(Shape::new([Dim::Any, Dim::Known(m as usize)]));
+    k.return_shapes.push(Shape::new([Dim::Any]));
 
-    // Build body: Op::Load{tgid_x} to trigger the tgid_x alias, then InlineMsl.
-    // Reduction mode unconditionally emits `tgid_x` for the reduction axis,
-    // but the InlineMsl body also uses `tid` (thread_position_in_threadgroup).
-    // The Load{tgid_x} op triggers the alias in the codegen preamble.
-    let mut body = Block::new(BlockId::new(0));
-    body.push_op(
-        Op::Load { src: "tgid_x".to_string(), indices: Vec::new(), mask: None, other: None },
-        ValueId::new(0),
+    let mut vid: u32 = 0;
+    macro_rules! nv {
+        () => {{
+            let id = ValueId::new(vid);
+            vid += 1;
+            id
+        }};
+    }
+    macro_rules! bop {
+        ($op:ident, $l:expr, $r:expr) => {
+            Op::BinOp { op: BinOpKind::$op, lhs: $l, rhs: $r }
+        };
+    }
+
+    let mut b = Block::new(BlockId::new(0));
+
+    // Thread-private sign table + threadgroup staging buffer.
+    b.push_op_no_result(Op::StackAlloc { dtype: DType::U32, size: m, name: "signs".into() });
+    b.push_op_no_result(Op::ThreadgroupAlloc { dtype: DType::F32, size: m, name: "buf".into() });
+
+    let c1 = nv!();
+    b.push_op(Op::Const { value: 1 }, c1);
+    let v_one_f = nv!();
+    b.push_op(Op::Cast { value: c1, dtype: DType::F32 }, v_one_f);
+
+    // Per-index constants j ∈ 0..M — reused for the shift amount, the buf
+    // index, and the signs-table slot.
+    let mut cj: Vec<ValueId> = Vec::with_capacity(m as usize);
+    for j in 0..m {
+        let c = nv!();
+        b.push_op(Op::Const { value: j as i64 }, c);
+        cj.push(c);
+    }
+
+    // Seed the per-thread sign table with the M compile-time row masks.
+    for (j, &c) in cj.iter().enumerate() {
+        let cs = nv!();
+        b.push_op(Op::Const { value: signs[j] as i64 }, cs);
+        b.push_op_no_result(Op::StackStore { name: "signs".into(), index: c, value: cs });
+    }
+
+    // row = tgid_x, t = thread-in-threadgroup (== simd_lane for M < 32).
+    let v_row = nv!();
+    b.push_op(Op::ProgramId { axis: 0 }, v_row);
+    let v_t = nv!();
+    b.push_op(Op::Load { src: "simd_lane".into(), indices: vec![], mask: None, other: None }, v_t);
+
+    // base = row * M, global element index = base + t.
+    let v_m = nv!();
+    b.push_op(Op::Const { value: m as i64 }, v_m);
+    let v_base = nv!();
+    b.push_op(bop!(Mul, v_row, v_m), v_base);
+    let v_tg = nv!();
+    b.push_op(bop!(Add, v_base, v_t), v_tg);
+
+    // Phase 1: load this thread's element into the TG buffer (promote to f32).
+    let v_inp = nv!();
+    b.push_op(
+        Op::Load {
+            src: "inp".into(),
+            indices: vec![IndexExpr::Value(v_tg)],
+            mask: None,
+            other: None,
+        },
+        v_inp,
     );
-    body.push_op_no_result(Op::InlineMsl {
-        source: build_msl(m, signs, dt),
-        inputs: Vec::new(),
-        outputs: Vec::new(),
-    });
-    k.body = body;
-    // #140 made `Kernel::blocks` an `FxHashMap`; `sync_entry_block` is the
-    // post-refactor idiom for keeping the entry-block entry in sync with
-    // `body` after a manual `InlineMsl` body construction.
-    k.sync_entry_block();
+    let v_inp_f = nv!();
+    b.push_op(Op::Cast { value: v_inp, dtype: DType::F32 }, v_inp_f);
+    b.push_op_no_result(Op::ThreadgroupStore { name: "buf".into(), index: v_t, value: v_inp_f });
+    b.push_op_no_result(Op::Barrier);
 
+    // Phase 2: acc = Σ_j H_M[t][j] · buf[j], fully unrolled (M ≤ 28).
+    // sign(t,j) = ((signs[t] >> j) & 1) ? +1 : -1 = 2·bit − 1 in f32.
+    let v_signs_t = nv!();
+    b.push_op(Op::StackLoad { name: "signs".into(), index: v_t }, v_signs_t);
+
+    let mut acc: Option<ValueId> = None;
+    for &c in &cj {
+        let v_shifted = nv!();
+        b.push_op(bop!(Shr, v_signs_t, c), v_shifted);
+        let v_bit = nv!();
+        b.push_op(bop!(BitAnd, v_shifted, c1), v_bit);
+        let v_bitf = nv!();
+        b.push_op(Op::Cast { value: v_bit, dtype: DType::F32 }, v_bitf);
+        // sign = bitf + bitf − 1.0  (∈ {−1, +1}).
+        let v_two_bitf = nv!();
+        b.push_op(bop!(Add, v_bitf, v_bitf), v_two_bitf);
+        let v_sign = nv!();
+        b.push_op(bop!(Sub, v_two_bitf, v_one_f), v_sign);
+        let v_bufj = nv!();
+        b.push_op(Op::ThreadgroupLoad { name: "buf".into(), index: c }, v_bufj);
+        let v_term = nv!();
+        b.push_op(bop!(Mul, v_sign, v_bufj), v_term);
+        acc = Some(match acc {
+            None => v_term,
+            Some(prev) => {
+                let v_acc = nv!();
+                b.push_op(bop!(Add, prev, v_term), v_acc);
+                v_acc
+            },
+        });
+    }
+    let v_acc = acc.expect("M >= 1");
+
+    // Phase 3: scale and store.
+    let v_scale = nv!();
+    b.push_op(Op::Load { src: "scale".into(), indices: vec![], mask: None, other: None }, v_scale);
+    let v_scaled = nv!();
+    b.push_op(bop!(Mul, v_acc, v_scale), v_scaled);
+    let v_out = nv!();
+    b.push_op(Op::Cast { value: v_scaled, dtype: dt }, v_out);
+    b.push_op_no_result(Op::Store {
+        dst: "out".into(),
+        indices: vec![IndexExpr::Value(v_tg)],
+        value: v_out,
+        mask: None,
+    });
+
+    k.body = b;
+    k.sync_entry_block();
     k
 }
 
@@ -284,7 +278,11 @@ mod tests {
                 assert!(k.params[1].is_output);
                 assert_eq!(k.constexprs.len(), 1);
                 assert_eq!(k.constexprs[0].name.name(), "scale");
-                assert!(k.body.ops.iter().any(|op| matches!(op, Op::InlineMsl { .. })));
+                // Body is DSL IR — no InlineMsl — with the sign table as a
+                // StackAlloc seeded by StackStore.
+                assert!(!k.body.ops.iter().any(|op| matches!(op, Op::InlineMsl { .. })));
+                assert!(k.body.ops.iter().any(|op| matches!(op, Op::StackAlloc { .. })));
+                assert!(k.body.ops.iter().any(|op| matches!(op, Op::StackLoad { .. })));
             }
         }
     }
@@ -292,6 +290,19 @@ mod tests {
     #[test]
     #[should_panic(expected = "only supports M")]
     fn kernel_ir_rejects_invalid_m() { let _ = kernel_ir_for(16, DType::F32); }
+
+    /// Codegen sanity — the generated MSL builds and carries the sign table.
+    #[test]
+    fn codegen_emits_kernel_decl() {
+        use metaltile_codegen::msl::MslGenerator;
+        for m in [12u32, 20, 28] {
+            let mut k = kernel_ir_for(m, DType::F32);
+            k.name = format!("mt_hadamard_m{m}_f32");
+            let msl = MslGenerator::default().generate(&k).expect("codegen");
+            assert!(msl.contains(&format!("kernel void mt_hadamard_m{m}_f32")));
+            assert!(!msl.contains("InlineMsl"));
+        }
+    }
 
     /// Verify H_12 is orthogonal: H · H^T = 12 · I.
     #[test]
