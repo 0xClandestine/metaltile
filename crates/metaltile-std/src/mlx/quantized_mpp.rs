@@ -73,6 +73,7 @@ pub const GROUP_SIZE: u32 = 64;
 ///   buffer(7) = gs_per_row constant     uint  &
 ///
 /// Dispatch geometry: grid `[n/32, m/32, 1]`, threadgroup `[128, 1, 1]`.
+#[allow(unused_assignments)] // final nv!() bumps vid past last read — by design
 pub fn kernel_ir_for(dt: DType) -> Kernel {
     assert!(
         matches!(dt, DType::F32 | DType::F16),
