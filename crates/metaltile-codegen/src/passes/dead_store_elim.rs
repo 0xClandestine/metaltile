@@ -166,22 +166,11 @@ fn dse_block(block: &mut Block, output_params: &BTreeSet<String>) {
 }
 
 /// Check if a store has a mask (may-write semantics).
-fn has_mask(op: &Op) -> bool {
-    match op {
-        Op::Store { mask, .. } => mask.is_some(),
-        Op::VectorStore { .. } => false, // VectorStore has no mask field
-        _ => false,
-    }
-}
+fn has_mask(op: &Op) -> bool { op.has_store_mask() }
 
 /// Check if a store targets an output param.
 fn store_target_is_output(op: &Op, output_params: &BTreeSet<String>) -> bool {
-    let dst = match op {
-        Op::Store { dst, .. } => dst,
-        Op::VectorStore { dst, .. } => dst,
-        _ => return false,
-    };
-    output_params.contains(dst.as_str())
+    op.store_dst().is_some_and(|dst| output_params.contains(dst))
 }
 
 #[cfg(test)]

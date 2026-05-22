@@ -8,6 +8,7 @@ use metaltile_core::{
     dtype::DType,
     ir::{BinOpKind, Block, BlockId, Kernel, KernelMode, Op, ReduceKind, ValueId},
 };
+use rustc_hash::FxHashMap;
 
 use super::{
     MslGenerator,
@@ -20,7 +21,7 @@ impl MslGenerator {
     pub(super) fn emit_block(
         &self,
         block: &Block,
-        all_blocks: &BTreeMap<BlockId, Block>,
+        all_blocks: &FxHashMap<BlockId, Block>,
         out: &mut String,
         indent: usize,
         kernel: &Kernel,
@@ -508,6 +509,19 @@ impl MslGenerator {
                     wl!(out, "{pad}}}");
                 },
 
+                // ---- cross-kernel call (should be resolved by KernelInlinePass) ----
+                Op::KernelCall { callee, .. } => {
+                    // If we reach here the KernelInlinePass did not run or
+                    // could not resolve this call.  Emit a compile-error
+                    // placeholder so the Metal shader fails loudly rather
+                    // than silently producing wrong results.
+                    wl!(
+                        out,
+                        "{pad}/* ERROR: unresolved KernelCall to `{callee}` — \
+                         KernelInlinePass must run before MSL emit */",
+                    );
+                },
+
                 // ---- escape hatch --------------------------------------
                 Op::InlineMsl { source, inputs, outputs } => {
                     for (oi, slot) in outputs.iter().enumerate() {
@@ -584,7 +598,6 @@ impl MslGenerator {
                     let vec_t: String = match (*len, param_dtype) {
                         (4, DType::F16) => "half4".into(),
                         (4, DType::F32) => "float4".into(),
-                        (8, DType::F16) => "half8".into(),
                         (4, DType::BF16) if self.config.native_bfloat => "bfloat4".into(),
                         (2, DType::BF16) if self.config.native_bfloat => "bfloat2".into(),
                         (2, _) => format!("{}2", scalar_t),
@@ -610,7 +623,6 @@ impl MslGenerator {
                     let vec_t: String = match (*len, param_dtype) {
                         (4, DType::F16) => "half4".into(),
                         (4, DType::F32) => "float4".into(),
-                        (8, DType::F16) => "half8".into(),
                         (4, DType::BF16) if self.config.native_bfloat => "bfloat4".into(),
                         (2, DType::BF16) if self.config.native_bfloat => "bfloat2".into(),
                         (2, _) => format!("{}2", scalar_t),
@@ -621,6 +633,36 @@ impl MslGenerator {
                         out,
                         "{pad}*((device {vec_t}*)((device {scalar_t}*){dst} + {bo})) = {vec_t}({rv});"
                     );
+                },
+
+                // ---- vector pack --------------------------------------
+                Op::Pack { dtype, elements } => {
+                    let v = self.vname(vid, block, extra_names);
+                    let args: Vec<String> =
+                        elements.iter().map(|e| self.vname(Some(*e), block, extra_names)).collect();
+                    let vec_t: String = match (elements.len() as u32, *dtype) {
+                        (4, DType::F16) => "half4".into(),
+                        (4, DType::F32) => "float4".into(),
+                        (4, DType::BF16) if self.config.native_bfloat => "bfloat4".into(),
+                        (2, DType::BF16) if self.config.native_bfloat => "bfloat2".into(),
+                        (2, _) => format!("{}2", dtype.msl_name()),
+                        (4, _) => format!("{}4", dtype.msl_name()),
+                        _ => format!("{}4", dtype.msl_name()),
+                    };
+                    // Metal does not support bfloat4(v0,v1,v2,v3) component
+                    // constructors even in Metal 3.1+; emit zero-init +
+                    // per-element assignment instead.
+                    let is_bfloat = matches!(*dtype, DType::BF16) && self.config.native_bfloat;
+                    if is_bfloat {
+                        wl!(out, "{pad}{vec_t} {v} = 0;");
+                        let lanes = ["x", "y", "z", "w"];
+                        for (i, arg) in args.iter().enumerate().take(elements.len()) {
+                            wl!(out, "{pad}{v}.{ln} = bfloat({arg});", ln = lanes[i]);
+                        }
+                    } else {
+                        let args_str = args.join(", ");
+                        wl!(out, "{pad}{vec_t} {v} = {vec_t}({args_str});");
+                    }
                 },
 
                 // ---- conditional branch ----------------------------------
@@ -881,37 +923,28 @@ impl MslGenerator {
                     hoists.push(format!("threadgroup {t} {name}[{size}];"));
                 },
 
-                Op::ThreadgroupLoad { name, index } => {
+                // ThreadgroupLoad+StackLoad: identical array-indexed load.
+                Op::ThreadgroupLoad { name, index } | Op::StackLoad { name, index } => {
                     let v = self.vname(vid, block, extra_names);
                     let iv = self.vname(Some(*index), block, extra_names);
                     wl!(out, "{pad}auto {v} = {name}[{iv}];");
                 },
 
-                Op::ThreadgroupStore { name, index, value } => {
+                // ThreadgroupStore+StackStore: identical array-indexed store.
+                Op::ThreadgroupStore { name, index, value }
+                | Op::StackStore { name, index, value } => {
                     let iv = self.vname(Some(*index), block, extra_names);
                     let rv = self.vname(Some(*value), block, extra_names);
                     wl!(out, "{pad}{name}[{iv}] = {rv};");
                 },
 
-                // ---- per-thread stack arrays ----------------------------
+                // ---- per-thread stack alloc / barrier ----
                 Op::StackAlloc { dtype, size, name } => {
                     let t = self.msl_type_name(*dtype);
                     // No `threadgroup` qualifier — Metal places small
                     // fixed-size local arrays in per-thread registers
                     // (with spill to thread-local memory if they don't fit).
                     hoists.push(format!("{t} {name}[{size}];"));
-                },
-
-                Op::StackLoad { name, index } => {
-                    let v = self.vname(vid, block, extra_names);
-                    let iv = self.vname(Some(*index), block, extra_names);
-                    wl!(out, "{pad}auto {v} = {name}[{iv}];");
-                },
-
-                Op::StackStore { name, index, value } => {
-                    let iv = self.vname(Some(*index), block, extra_names);
-                    let rv = self.vname(Some(*value), block, extra_names);
-                    wl!(out, "{pad}{name}[{iv}] = {rv};");
                 },
 
                 Op::Barrier => {

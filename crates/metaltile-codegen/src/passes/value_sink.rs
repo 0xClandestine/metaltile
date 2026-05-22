@@ -97,7 +97,7 @@ fn compute_global_use_count(kernel: &Kernel) -> BTreeMap<ValueId, usize> {
 fn is_sinkable(op: &Op) -> bool { remap::is_cheap_alu(op) && !remap::has_side_effects(op) }
 
 /// Ops that block sinking across them (Barrier).
-fn is_sink_barrier(op: &Op) -> bool { matches!(op, Op::Barrier | Op::SimdgroupBarrier) }
+fn is_sink_barrier(op: &Op) -> bool { op.is_barrier() }
 
 // ---------------------------------------------------------------------------
 // data structures

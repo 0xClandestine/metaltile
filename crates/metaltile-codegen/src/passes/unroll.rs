@@ -36,6 +36,7 @@
 use std::collections::BTreeMap;
 
 use metaltile_core::ir::{Block, BlockId, Kernel, Op, ValueId};
+use rustc_hash::FxHashMap;
 
 use super::remap;
 use crate::error::{Error, Result};
@@ -77,7 +78,11 @@ impl super::Pass for UnrollPass {
         // captured before the body's parent ran may no longer exist by
         // the time we get to it — use `.remove(...)` + `if let Some(...)`
         // rather than `.unwrap()` so the pass tolerates that race.
-        let block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
+        // Sort explicitly: `kernel.blocks` is `FxHashMap`, so iteration
+        // order is non-deterministic — parent-before-child stability
+        // matters when an outer pass inlines a child body.
+        let mut block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
+        block_ids.sort_unstable_by_key(|b| b.as_u32());
         for bid in &block_ids {
             let Some(mut block) = kernel.blocks.remove(bid) else {
                 continue;
@@ -101,18 +106,13 @@ impl super::Pass for UnrollPass {
 // ---------------------------------------------------------------------------
 
 fn has_nested_loop_or_barrier(block: &Block) -> bool {
-    block.ops.iter().any(|op| matches!(op, Op::Loop { .. } | Op::Barrier | Op::SimdgroupBarrier))
+    block.ops.iter().any(|op| op.is_loop() || op.is_barrier())
 }
 
 fn find_const_in_block(block: &Block, vid: ValueId) -> Option<i64> {
-    for (i, op) in block.ops.iter().enumerate() {
-        if block.results.get(i) == Some(&Some(vid))
-            && let Op::Const { value } = op
-        {
-            return Some(*value);
-        }
-    }
-    None
+    block.ops.iter().enumerate().find_map(|(i, op)| {
+        if block.results.get(i) == Some(&Some(vid)) { op.as_const() } else { None }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -121,7 +121,7 @@ fn find_const_in_block(block: &Block, vid: ValueId) -> Option<i64> {
 
 fn unroll_block(
     block: &mut Block,
-    blocks: &mut BTreeMap<BlockId, Block>,
+    blocks: &mut FxHashMap<BlockId, Block>,
     next_vid: &mut u32,
     next_block_id: &mut u32,
     factor: u32,
@@ -140,15 +140,15 @@ fn unroll_block(
     let mut plans: Vec<Plan> = Vec::new();
 
     for i in 0..n {
-        if let Op::Loop { var, start, end, step, body } = &block.ops[i] {
-            let Some(body_block) = blocks.get(body) else { continue };
-            let Some(start_val) = find_const_in_block(block, *start) else {
+        if let Some((var, start, end, step, body)) = block.ops[i].as_loop() {
+            let Some(body_block) = blocks.get(&body) else { continue };
+            let Some(start_val) = find_const_in_block(block, start) else {
                 continue;
             };
-            let Some(end_val) = find_const_in_block(block, *end) else {
+            let Some(end_val) = find_const_in_block(block, end) else {
                 continue;
             };
-            let Some(step_val) = find_const_in_block(block, *step) else {
+            let Some(step_val) = find_const_in_block(block, step) else {
                 continue;
             };
             if step_val <= 0 {
@@ -167,7 +167,7 @@ fn unroll_block(
                 start_val,
                 step_val,
                 var_id: var.as_u32(),
-                body_id: *body,
+                body_id: body,
             });
         }
     }
@@ -232,16 +232,17 @@ fn unroll_block(
             let pending_clones: Vec<(BlockId, BlockId)> = body
                 .ops
                 .iter()
-                .flat_map(|op| match op {
-                    Op::If { then_block, else_block, .. } => {
-                        let mut v = vec![*then_block];
+                .flat_map(|op| {
+                    let mut ids = Vec::new();
+                    if let Some((_, then_block, else_block)) = op.as_if() {
+                        ids.push(then_block);
                         if let Some(eb) = else_block {
-                            v.push(*eb);
+                            ids.push(eb);
                         }
-                        v
-                    },
-                    Op::Loop { body, .. } => vec![*body],
-                    _ => Vec::new(),
+                    } else if let Some((_, _, _, _, body_id)) = op.as_loop() {
+                        ids.push(body_id);
+                    }
+                    ids
                 })
                 .map(|old_id| {
                     let new_id = BlockId::new(*next_block_id);

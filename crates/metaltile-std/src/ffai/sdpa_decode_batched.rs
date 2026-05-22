@@ -809,15 +809,18 @@ mod tests {
     fn codegen_emits_two_phase_reduction() {
         // The Q[0] and Q[1] output reductions reuse the same tg buffer
         // names. We can't directly count "phases" in the MSL, but the
-        // store-out path runs twice — once for each Q — so the
-        // `out[...]` store should appear 8× (4 quartiles × 2 Q's),
-        // not 4× like single-Q `sdpa_decode`.
+        // store-out path runs twice — once for each Q — so there should
+        // be 8 effective element-writes (4 quartiles × 2 Q's), whether
+        // emitted as 8 scalar `out[...]=` or 2 vectorized VectorStore ops
+        // (`*((device float4*)((device float*)out + ...))`, each covering 4).
         let src = msl_for(DType::F32);
-        let store_count = src.matches("out[").count();
+        let scalar = src.matches("out[").count();
+        let vector = src.matches("float*)out +").count();
+        let effective = scalar + vector * 4;
         assert!(
-            store_count >= 8,
-            "Expected ≥8 `out[...]` stores (4 quartiles × 2 Q positions); got {store_count}:\n\
-             {src}",
+            effective >= 8,
+            "Expected ≥8 effective out-writes (4 quartiles × 2 Q positions); \
+             got {effective} ({scalar} scalar + {vector} vectorized×4):\n{src}",
         );
     }
 
@@ -857,13 +860,17 @@ mod tests {
     #[test]
     fn q4_codegen_emits_four_phase_reduction() {
         // K=4 runs the output reduction in 4 sequential phases. Each
-        // phase writes 4 quartiles to `out[...]`, so the kernel emits
-        // ≥16 store-out statements (vs. K=2's ≥8 and single-Q's 4).
+        // phase writes 4 quartiles, so there should be 16 effective
+        // element-writes (4 quartiles × 4 Q positions), whether scalar
+        // or fused into VectorStore ops (each covering 4 elements).
         let src = msl_for_q4(DType::F32);
-        let store_count = src.matches("out[").count();
+        let scalar = src.matches("out[").count();
+        let vector = src.matches("float*)out +").count();
+        let effective = scalar + vector * 4;
         assert!(
-            store_count >= 16,
-            "Expected ≥16 `out[...]` stores (4 quartiles × 4 Q positions); got {store_count}",
+            effective >= 16,
+            "Expected ≥16 effective out-writes (4 quartiles × 4 Q positions); \
+             got {effective} ({scalar} scalar + {vector} vectorized×4)",
         );
     }
 

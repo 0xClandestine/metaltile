@@ -38,7 +38,6 @@
 //!
 //! Verified for orthogonality: H · H^T = M · I.
 
-use std::collections::BTreeMap;
 
 use metaltile_core::{
     constexpr::ConstExpr,
@@ -267,10 +266,11 @@ pub fn kernel_ir_for(m: u32, dt: DType) -> Kernel {
         inputs: Vec::new(),
         outputs: Vec::new(),
     });
-    k.body = body.clone();
-    let mut blocks = BTreeMap::new();
-    blocks.insert(BlockId::new(0), body);
-    k.blocks = blocks;
+    k.body = body;
+    // #140 made `Kernel::blocks` an `FxHashMap`; `sync_entry_block` is the
+    // post-refactor idiom for keeping the entry-block entry in sync with
+    // `body` after a manual `InlineMsl` body construction.
+    k.sync_entry_block();
 
     k
 }

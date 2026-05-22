@@ -15,13 +15,14 @@ pub(crate) mod reduce;
 use std::{collections::BTreeMap, fmt::Write};
 
 pub use config::MslConfig;
+use config::TileSchedule;
 use features::KernelFeatures;
 use metaltile_core::{
     dtype::DType,
     ir::{Kernel, KernelMode, Op, ParamKind, ValueId},
 };
 
-use crate::{TileSchedule, error::Result, passes, passes::type_check::infer_types};
+use crate::{error::Result, passes, passes::type_check::infer_types};
 
 #[macro_export]
 macro_rules! wl {
@@ -50,10 +51,9 @@ fn kernel_uses_program_id_axis(kernel: &Kernel, axis: u32) -> bool {
         _ => "",
     };
     let check = |ops: &[Op]| {
-        ops.iter().any(|op| match op {
-            Op::ProgramId { axis: a } => *a == axis,
-            Op::Load { src, indices, .. } => indices.is_empty() && src.as_str() == tgid_name,
-            _ => false,
+        ops.iter().any(|op| {
+            op.program_id_axis() == Some(axis)
+                || (op.load_src() == Some(tgid_name) && op.load_indices().is_empty())
         })
     };
     check(&kernel.body.ops) || kernel.blocks.values().any(|b| check(&b.ops))
@@ -1018,6 +1018,7 @@ mod tests {
         let mut k = Kernel::new("no_mpp");
         k.mode = KernelMode::Reduction;
         k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        // InlineMsl body present but no `mpp::` token anywhere.
         k.body.push_op_no_result(Op::InlineMsl {
             source: "float x = 1.0;".to_string(),
             inputs: Vec::new(),

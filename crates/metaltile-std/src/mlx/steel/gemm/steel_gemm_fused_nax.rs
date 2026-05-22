@@ -32,7 +32,6 @@
 //! Correctness vs CPU oracle ≥ cos 0.999 — see
 //! `crates/metaltile-std/tests/steel_gemm_fused_nax_gpu_correctness.rs`.
 
-use std::collections::BTreeMap;
 
 use metaltile_core::{
     constexpr::ConstExpr,
@@ -265,10 +264,11 @@ pub fn kernel_ir_for(dt: DType) -> Kernel {
         inputs: Vec::new(),
         outputs: Vec::new(),
     });
-    k.body = body.clone();
-    let mut blocks = BTreeMap::new();
-    blocks.insert(BlockId::new(0), body);
-    k.blocks = blocks;
+    k.body = body;
+    // #140 made `Kernel::blocks` an `FxHashMap`; `sync_entry_block` keeps
+    // the entry-block entry in sync with `body` after a manual InlineMsl
+    // body construction.
+    k.sync_entry_block();
 
     k
 }

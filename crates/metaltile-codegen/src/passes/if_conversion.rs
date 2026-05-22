@@ -42,6 +42,7 @@
 use std::collections::BTreeMap;
 
 use metaltile_core::ir::{Block, BlockId, Kernel, Op, ValueId};
+use rustc_hash::FxHashMap;
 
 use super::remap;
 use crate::error::Result;
@@ -57,7 +58,11 @@ impl super::Pass for IfConversionPass {
     fn name(&self) -> &str { "if_conversion" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
-        let block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
+        // Sort explicitly: `kernel.blocks` is `FxHashMap`, so `.keys()`
+        // order is non-deterministic — the inside-out `.rev()` walk
+        // below relies on ascending BlockId order.
+        let mut block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
+        block_ids.sort_unstable_by_key(|b| b.as_u32());
 
         // Process the body first.
         if_convert_block(&mut kernel.body, &mut kernel.blocks);
@@ -87,10 +92,10 @@ enum CfgShape {
 }
 
 fn classify(op: &Op) -> CfgShape {
-    match op {
-        Op::If { else_block: None, .. } => CfgShape::Triangle,
-        Op::If { else_block: Some(_), .. } => CfgShape::Diamond,
-        _ => unreachable!(),
+    if op.as_if().is_some_and(|(_, _, eb)| eb.is_none()) {
+        CfgShape::Triangle
+    } else {
+        CfgShape::Diamond
     }
 }
 
@@ -127,7 +132,7 @@ fn is_profitable(shape: CfgShape, then_block: &Block, else_block: Option<&Block>
 // main transform
 // ---------------------------------------------------------------------------
 
-fn if_convert_block(block: &mut Block, blocks: &mut BTreeMap<BlockId, Block>) {
+fn if_convert_block(block: &mut Block, blocks: &mut FxHashMap<BlockId, Block>) {
     let n = block.ops.len();
 
     struct Conversion {
@@ -139,8 +144,8 @@ fn if_convert_block(block: &mut Block, blocks: &mut BTreeMap<BlockId, Block>) {
     let mut conversions: Vec<Conversion> = Vec::new();
 
     for i in 0..n {
-        if let Op::If { cond, then_block: then_id, else_block: else_id } = &block.ops[i] {
-            let Some(then_block) = blocks.get(then_id) else { continue };
+        if let Some((cond, then_id, else_id)) = block.ops[i].as_if() {
+            let Some(then_block) = blocks.get(&then_id) else { continue };
             let else_block = else_id.and_then(|eid| blocks.get(&eid));
 
             // Safety check.
@@ -164,10 +169,10 @@ fn if_convert_block(block: &mut Block, blocks: &mut BTreeMap<BlockId, Block>) {
                 continue;
             }
 
-            let inlined = inline_diamond_as_selects(*cond, then_block, else_block.unwrap());
-            let mut remove_blocks = vec![*then_id];
+            let inlined = inline_diamond_as_selects(cond, then_block, else_block.unwrap());
+            let mut remove_blocks = vec![then_id];
             if let Some(eid) = else_id {
-                remove_blocks.push(*eid);
+                remove_blocks.push(eid);
             }
 
             conversions.push(Conversion { if_idx: i, inlined, remove_blocks });

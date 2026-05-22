@@ -10,6 +10,9 @@ keywords = ["metal", "gpu", "apple-silicon", "compiler", "ir"]
 categories = ["compilers", "hardware-support"]
 
 [dependencies]
+metaltile-macros.workspace = true
 thiserror.workspace = true
 smallvec.workspace = true
 serde.workspace = true
+inventory.workspace = true
+rustc-hash.workspace = true

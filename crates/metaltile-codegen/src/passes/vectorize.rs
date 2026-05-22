@@ -38,7 +38,7 @@ use metaltile_core::{
     ir::{BinOpKind, Block, BlockId, IndexExpr, Kernel, Op, Param, ValueId},
 };
 
-use crate::error::Result;
+use crate::{error::Result, passes::remap::remap_value_ids};
 
 pub struct VectorizePass;
 
@@ -46,7 +46,12 @@ impl super::Pass for VectorizePass {
     fn name(&self) -> &str { "vectorize" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
-        let block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
+        // Sort explicitly: `kernel.blocks` is `FxHashMap` so iteration order
+        // is non-deterministic; `next_vid` is incremented across blocks, so
+        // the order in which blocks consume fresh ValueIds affects emitted
+        // MSL variable names — sort for byte-stable output.
+        let mut block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
+        block_ids.sort_unstable_by_key(|b| b.as_u32());
         let params = kernel.params.clone();
         // Allocate fresh ValueIds starting one past the current max.
         let max_vid = kernel
@@ -329,7 +334,7 @@ fn vectorize_block(
     // Remap value references in surviving ops (each skipped scalar
     // Load's VID now points at its dedicated VectorExtract output).
     for op in new_ops.iter_mut() {
-        remap_values_in_op(op, &result_remap);
+        remap_value_ids(op, &result_remap);
     }
 
     block.ops = new_ops;
@@ -412,65 +417,6 @@ fn find_const_in_block(block: &Block, vid: ValueId) -> Option<i64> {
 /// scalar form already coalesces in L2 and the extra extract ops cost more than
 /// the load consolidation saves.
 fn is_vectorizable(dtype: DType) -> bool { matches!(dtype, DType::F16 | DType::F32 | DType::BF16) }
-
-fn remap_values_in_op(op: &mut Op, remap: &BTreeMap<ValueId, ValueId>) {
-    let s = |v: &mut ValueId| {
-        if let Some(&new_vid) = remap.get(v) {
-            *v = new_vid;
-        }
-    };
-    match op {
-        Op::BinOp { lhs, rhs, .. } => {
-            s(lhs);
-            s(rhs);
-        },
-        Op::UnaryOp { value, .. }
-        | Op::Activation { value, .. }
-        | Op::Cast { value, .. }
-        | Op::Reduce { value, .. }
-        | Op::Transpose { value }
-        | Op::Slice { value, .. }
-        | Op::Broadcast { value, .. } => {
-            s(value);
-        },
-        Op::Select { cond, on_true, on_false } => {
-            s(cond);
-            s(on_true);
-            s(on_false);
-        },
-        Op::Dot { a, b } => {
-            s(a);
-            s(b);
-        },
-        Op::Store { value, .. } => {
-            s(value);
-        },
-        Op::Loop { start, end, step, .. } => {
-            s(start);
-            s(end);
-            s(step);
-        },
-        Op::VectorStore { value, .. } => {
-            s(value);
-        },
-        Op::FusedElementwise { ops } =>
-            for sub in ops.iter_mut() {
-                remap_values_in_op(sub, remap);
-            },
-        Op::VectorExtract { vec, .. } => {
-            s(vec);
-        },
-        // Mutable register-local declaration / assignment both carry a
-        // `value` operand. Without these arms a `let mut x = load(...)`
-        // whose load got coalesced into a VectorExtract keeps pointing
-        // at the eliminated scalar VID and emits an undeclared-identifier
-        // MSL compile error.
-        Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => {
-            s(value);
-        },
-        _ => {},
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -713,14 +659,14 @@ mod tests {
                 .collect();
 
         let mut decl = Op::DeclareLocal { name: "s0".into(), value: ValueId::new(1) };
-        remap_values_in_op(&mut decl, &remap);
+        remap_value_ids(&mut decl, &remap);
         match decl {
             Op::DeclareLocal { value, .. } => assert_eq!(value, ValueId::new(100)),
             _ => panic!("DeclareLocal variant changed"),
         }
 
         let mut set = Op::SetLocal { name: "s0".into(), value: ValueId::new(2) };
-        remap_values_in_op(&mut set, &remap);
+        remap_value_ids(&mut set, &remap);
         match set {
             Op::SetLocal { value, .. } => assert_eq!(value, ValueId::new(200)),
             _ => panic!("SetLocal variant changed"),
@@ -728,7 +674,7 @@ mod tests {
 
         // A value not in the remap map is left untouched.
         let mut untouched = Op::SetLocal { name: "s1".into(), value: ValueId::new(7) };
-        remap_values_in_op(&mut untouched, &remap);
+        remap_value_ids(&mut untouched, &remap);
         match untouched {
             Op::SetLocal { value, .. } => assert_eq!(value, ValueId::new(7)),
             _ => panic!("SetLocal variant changed"),
