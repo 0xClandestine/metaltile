@@ -34,7 +34,7 @@ use metaltile_std::{
         gated_delta::{mt_gated_delta_chunk, mt_gated_delta_step},
         gated_delta_prep::mt_gated_delta_prep_step,
         gather::ffai_gather,
-        moe::{mt_moe_gather_qmm_int4, mt_moe_gather_qmm_mma_int4_bm16, mt_moe_router_topk},
+        moe::{mt_moe_gather_qmm_int4, mt_moe_gather_qmm_mma_int4_bm16, mt_moe_router_topk, mt_moe_unpermute},
         moe_mpp,
         moe_mpp_bm8,
         moe_mpp_bm64,
@@ -1576,6 +1576,35 @@ fn register_kernels() -> Vec<Kernel> {
     for &dt in &dtypes {
         let mut k = mt_moe_router_topk::kernel_ir_for(dt);
         k.name = format!("mt_moe_router_topk_{}", dtype_suffix(dt));
+        k.mode = KernelMode::Reduction;
+        kernels.push(k);
+    }
+
+    // ─── mt_moe_unpermute (Reduction) — weighted scatter-sum back ───
+    // Combines the BGEMM expert outputs back into the original token
+    // order with the top-k routing weights, in ONE dispatch per
+    // (gate/up/down) projection. Replaces the per-row mTotal·2 scalar
+    // mul+add loop on the FFAI side (Tensor.filled([hidden]) ×
+    // mTotal — the dominant residual cost after batched-prefill
+    // MoE BGEMM lands per project_moe_decodeMany_big_win_2026_05_21).
+    //
+    // Inputs / outputs:
+    //   expert_outputs : [k·B·T, hidden]  per-expert dense outputs at
+    //                                     expert-sorted positions
+    //   inv_perm       : [B·T, k] u32     where (token, slot) was
+    //                                     placed in expert_outputs
+    //   top_k_weights  : [B·T, k] T       routing weights
+    //   out            : [B·T, hidden] T  weighted sum across k experts
+    //
+    // Constexpr:
+    //   hidden — model hidden dim (e.g. 2048 for Qwen3-MoE)
+    //   k      — top-K expert count (e.g. 8)
+    //
+    // Geometry: tg = [128, 1, 1], grid = [B·T, 1, 1] TGs (Reduction
+    // mode — one TG per token). Bandwidth-bound.
+    for &dt in &dtypes {
+        let mut k = mt_moe_unpermute::kernel_ir_for(dt);
+        k.name = format!("mt_moe_unpermute_{}", dtype_suffix(dt));
         k.mode = KernelMode::Reduction;
         kernels.push(k);
     }
