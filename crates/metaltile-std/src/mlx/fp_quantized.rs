@@ -1,12 +1,6 @@
 //! FP quantized benchmark — #[kernel] DSL vs MLX metal/fp_quantized.metal
 
 use metaltile::{bench_kernel, kernel};
-use metaltile_core::ir::KernelMode;
-
-use crate::{
-    bench_types::DType,
-    spec::{BenchDispatch, BenchSpec},
-};
 
 #[bench_kernel(
     op="fp_quantized",
@@ -134,22 +128,11 @@ macro_rules! fp8_kernel {
             let result = sign * q_clamped * (group_max / $fp8max);
             store(out[gid], result);
         }
-
-        inventory::submit! {
-            BenchSpec {
-                op: "fp_quantized",
-                subop: $subop,
-                kernel_name: stringify!($name),
-                kernel_ir: $name::kernel_ir_for,
-                dtypes: crate::spec::F32_ONLY,
-                tol: 5e-2, // fp8 round-trip — lossy by construction
-                mlx_src: None,
-                mlx_pattern: None,
-                shapes: &[],
-                dispatch: BenchDispatch::Generic,
-                kernel_mode: Some(KernelMode::Grid3D),
-            }
-        }
+        // No `inventory::submit!` BenchSpec: these are non-generic
+        // `#[kernel]`s (`kernel_ir_for` takes no DType), so they don't
+        // fit the bench harness's `fn(DType) -> Kernel` signature —
+        // matching `mt_fp4_quant_dequant`. Correctness is gated by
+        // `tests/fp_quantized_fp8_gpu_correctness.rs`.
     };
 }
 

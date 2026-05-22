@@ -107,7 +107,7 @@ fn fp8_e4m3_round_trip_matches_oracle() {
     let _g = gpu_lock();
     let inp: Vec<f32> = (0..4).flat_map(synthetic_group).collect();
     let expected = oracle_fp8_round_trip(&inp, &E4M3);
-    let actual = run_fp8(&inp, mt_fp8_e4m3_quant_dequant::kernel_ir_for(Dt::F32.to_dtype()));
+    let actual = run_fp8(&inp, mt_fp8_e4m3_quant_dequant::kernel_ir_for());
     assert!(actual.iter().any(|&v| v != 0.0), "fp8 e4m3: all-zero output (empty body?)");
     let diff = max_abs_diff(&actual, &expected);
     // GPU vs CPU implement the identical fp8 grid — only f32 arithmetic
@@ -120,7 +120,7 @@ fn fp8_e5m2_round_trip_matches_oracle() {
     let _g = gpu_lock();
     let inp: Vec<f32> = (0..4).flat_map(synthetic_group).collect();
     let expected = oracle_fp8_round_trip(&inp, &E5M2);
-    let actual = run_fp8(&inp, mt_fp8_e5m2_quant_dequant::kernel_ir_for(Dt::F32.to_dtype()));
+    let actual = run_fp8(&inp, mt_fp8_e5m2_quant_dequant::kernel_ir_for());
     assert!(actual.iter().any(|&v| v != 0.0), "fp8 e5m2: all-zero output (empty body?)");
     let diff = max_abs_diff(&actual, &expected);
     assert!(diff < 1e-1, "fp8 e5m2 round-trip: max |diff| = {diff:.2e}");
@@ -131,7 +131,7 @@ fn fp8_e4m3_preserves_sign() {
     let _g = gpu_lock();
     // A group with a clear sign pattern — the round-trip must keep it.
     let inp: Vec<f32> = (0..32).map(|i| if i % 2 == 0 { 1.5 } else { -2.25 }).collect();
-    let actual = run_fp8(&inp, mt_fp8_e4m3_quant_dequant::kernel_ir_for(Dt::F32.to_dtype()));
+    let actual = run_fp8(&inp, mt_fp8_e4m3_quant_dequant::kernel_ir_for());
     for (i, (&x, &y)) in inp.iter().zip(actual.iter()).enumerate() {
         assert!(
             (x >= 0.0) == (y >= 0.0),
@@ -156,7 +156,7 @@ fn fp8_e4m3_round_trip_is_near_identity_for_exact_values() {
             if i == 0 { group_max } else { v }
         })
         .collect();
-    let actual = run_fp8(&inp, mt_fp8_e4m3_quant_dequant::kernel_ir_for(Dt::F32.to_dtype()));
+    let actual = run_fp8(&inp, mt_fp8_e4m3_quant_dequant::kernel_ir_for());
     let expected = oracle_fp8_round_trip(&inp, &E4M3);
     let diff = max_abs_diff(&actual, &expected);
     assert!(diff < 1e-2, "fp8 e4m3 exact-value round-trip: max |diff| = {diff:.2e}");
@@ -169,7 +169,7 @@ fn fp8_e5m2_saturates_large_values() {
     // → the round-trip is the identity (the saturating clamp is a no-op
     // at exactly fp8_max). Confirms the clamp doesn't corrupt the top.
     let inp: Vec<f32> = vec![12345.0f32; 32];
-    let actual = run_fp8(&inp, mt_fp8_e5m2_quant_dequant::kernel_ir_for(Dt::F32.to_dtype()));
+    let actual = run_fp8(&inp, mt_fp8_e5m2_quant_dequant::kernel_ir_for());
     for (i, &y) in actual.iter().enumerate() {
         let rel = (y - 12345.0).abs() / 12345.0;
         assert!(rel < 1e-2, "fp8 e5m2 uniform-group drift at [{i}]: out {y}");
