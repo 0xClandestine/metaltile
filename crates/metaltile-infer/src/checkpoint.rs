@@ -35,42 +35,38 @@ fn convert_tensor(bytes: &[u8], src_dtype: safetensors::Dtype, dst: DType) -> Ve
     // Single-pass conversion: decode each element and write directly into
     // the target buffer, eliminating the intermediate Vec<f32> allocation.
     match (src_dtype, dst) {
-        (safetensors::Dtype::F16, DType::F32) => {
-            bytes
-                .chunks_exact(2)
-                .flat_map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32().to_le_bytes())
-                .collect()
-        },
-        (safetensors::Dtype::F16, DType::BF16) => {
-            bytes
-                .chunks_exact(2)
-                .flat_map(|b| half::bf16::from_f32(half::f16::from_le_bytes([b[0], b[1]]).to_f32()).to_le_bytes())
-                .collect()
-        },
-        (safetensors::Dtype::BF16, DType::F32) => {
-            bytes
-                .chunks_exact(2)
-                .flat_map(|b| half::bf16::from_le_bytes([b[0], b[1]]).to_f32().to_le_bytes())
-                .collect()
-        },
-        (safetensors::Dtype::BF16, DType::F16) => {
-            bytes
-                .chunks_exact(2)
-                .flat_map(|b| half::f16::from_f32(half::bf16::from_le_bytes([b[0], b[1]]).to_f32()).to_le_bytes())
-                .collect()
-        },
-        (safetensors::Dtype::F32, DType::F16) => {
-            bytes
-                .chunks_exact(4)
-                .flat_map(|b| half::f16::from_f32(f32::from_le_bytes([b[0], b[1], b[2], b[3]])).to_le_bytes())
-                .collect()
-        },
-        (safetensors::Dtype::F32, DType::BF16) => {
-            bytes
-                .chunks_exact(4)
-                .flat_map(|b| half::bf16::from_f32(f32::from_le_bytes([b[0], b[1], b[2], b[3]])).to_le_bytes())
-                .collect()
-        },
+        (safetensors::Dtype::F16, DType::F32) => bytes
+            .chunks_exact(2)
+            .flat_map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32().to_le_bytes())
+            .collect(),
+        (safetensors::Dtype::F16, DType::BF16) => bytes
+            .chunks_exact(2)
+            .flat_map(|b| {
+                half::bf16::from_f32(half::f16::from_le_bytes([b[0], b[1]]).to_f32()).to_le_bytes()
+            })
+            .collect(),
+        (safetensors::Dtype::BF16, DType::F32) => bytes
+            .chunks_exact(2)
+            .flat_map(|b| half::bf16::from_le_bytes([b[0], b[1]]).to_f32().to_le_bytes())
+            .collect(),
+        (safetensors::Dtype::BF16, DType::F16) => bytes
+            .chunks_exact(2)
+            .flat_map(|b| {
+                half::f16::from_f32(half::bf16::from_le_bytes([b[0], b[1]]).to_f32()).to_le_bytes()
+            })
+            .collect(),
+        (safetensors::Dtype::F32, DType::F16) => bytes
+            .chunks_exact(4)
+            .flat_map(|b| {
+                half::f16::from_f32(f32::from_le_bytes([b[0], b[1], b[2], b[3]])).to_le_bytes()
+            })
+            .collect(),
+        (safetensors::Dtype::F32, DType::BF16) => bytes
+            .chunks_exact(4)
+            .flat_map(|b| {
+                half::bf16::from_f32(f32::from_le_bytes([b[0], b[1], b[2], b[3]])).to_le_bytes()
+            })
+            .collect(),
         _ => {
             // fallback for unexpected combinations — should not be hit
             // for any standard checkpoint (all tensors are float types)

@@ -11,8 +11,6 @@
 
 use std::path::Path;
 
-use rustc_hash::FxHashMap;
-
 use metaltile_core::dtype::DType;
 use metaltile_model::{
     CompileParams,
@@ -26,6 +24,7 @@ use metaltile_model::{
     execute_prepared,
 };
 use metaltile_runtime::{Context, ResidentBuffer};
+use rustc_hash::FxHashMap;
 use tokenizers::Tokenizer;
 use tracing::info;
 
@@ -122,7 +121,8 @@ impl Session {
         let kv_bytes =
             config.n_kv_heads * config.max_seq_len * config.head_dim * dtype.size_bytes();
         let total_kv_bytes = kv_bytes * 2 * config.n_layers;
-        let kv_base = ctx.alloc_resident(total_kv_bytes).map_err(|e| InferError::Other(e.to_string()))?;
+        let kv_base =
+            ctx.alloc_resident(total_kv_bytes).map_err(|e| InferError::Other(e.to_string()))?;
         for layer in 0..config.n_layers {
             for (ki, key) in ["k", "v"].iter().enumerate() {
                 let name = format!("kv_cache.{layer}.{key}");
@@ -200,7 +200,16 @@ impl Session {
             n_slots = plan.slots.len(),
             "session ready"
         );
-        Ok(Session { ctx, plan, prepared, state, scalars, tokenizer, _config: config, eos_token_id })
+        Ok(Session {
+            ctx,
+            plan,
+            prepared,
+            state,
+            scalars,
+            tokenizer,
+            _config: config,
+            eos_token_id,
+        })
     }
 
     /// Run inference for `max_tokens` steps, calling `on_token` with each

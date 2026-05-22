@@ -24,9 +24,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rustc_hash::FxHashMap;
-
 use metaltile_runtime::{Context, DispatchSpec, ResidentBuffer};
+use rustc_hash::FxHashMap;
 use tracing::error;
 
 use crate::{

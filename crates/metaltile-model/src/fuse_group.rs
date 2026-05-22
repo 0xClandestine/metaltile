@@ -85,21 +85,16 @@ pub fn synthesize_fuse_groups(
     let (writes, reads) = build_write_read_maps(nodes);
 
     // group_node_set: original node index → group_id (for intra-tensor analysis).
-    let group_node_set: HashMap<usize, usize> = nodes
-        .iter()
-        .enumerate()
-        .filter_map(|(i, n)| n.fuse_group.map(|g| (i, g)))
-        .collect();
+    let group_node_set: HashMap<usize, usize> =
+        nodes.iter().enumerate().filter_map(|(i, n)| n.fuse_group.map(|g| (i, g))).collect();
 
     // Sort groups by start index descending so we splice from end to start.
     let mut group_list: Vec<(usize, Vec<usize>)> = groups.into_iter().collect();
     group_list.sort_unstable_by(|a, b| b.1[0].cmp(&a.1[0]));
 
     for (group_id, node_indices) in &group_list {
-        let group_nodes: Vec<&DispatchNode> =
-            node_indices.iter().map(|&i| &nodes[i]).collect();
-        let group_cached: Vec<&Kernel> =
-            node_indices.iter().map(|&i| &cached_kernels[i]).collect();
+        let group_nodes: Vec<&DispatchNode> = node_indices.iter().map(|&i| &nodes[i]).collect();
+        let group_cached: Vec<&Kernel> = node_indices.iter().map(|&i| &cached_kernels[i]).collect();
 
         // Only synthesize compatible groups.
         let Some((fused_mode, fused_grid)) = check_grid_compatibility(&group_nodes) else {
@@ -107,8 +102,7 @@ pub fn synthesize_fuse_groups(
             continue;
         };
 
-        let intra_tensors =
-            find_pure_intra_tensors(node_indices, &group_node_set, &writes, &reads);
+        let intra_tensors = find_pure_intra_tensors(node_indices, &group_node_set, &writes, &reads);
 
         let Some((fused_node, fused_kernel)) = build_fused_group(
             &group_nodes,
@@ -252,9 +246,8 @@ fn check_grid_compatibility(nodes: &[&DispatchNode]) -> Option<(KernelMode, Grid
         // Mixed: Elementwise n must equal Reduction num_rows.
         (Some((num_rows, _)), Some(n)) if n != num_rows => None,
         // Reduction wins in mixed groups.
-        (Some((num_rows, tpg)), _) => {
-            Some((KernelMode::Reduction, GridSpec::Reduction { num_rows, threads_per_group: tpg }))
-        },
+        (Some((num_rows, tpg)), _) =>
+            Some((KernelMode::Reduction, GridSpec::Reduction { num_rows, threads_per_group: tpg })),
         (None, Some(n)) => Some((KernelMode::Elementwise, GridSpec::Elementwise { n })),
         (None, None) => None, // empty group
     }
@@ -382,8 +375,7 @@ fn build_fused_group(
         }
     }
 
-    let kernel_name: &'static str =
-        Box::leak(format!("fused_group_{group_id}").into_boxed_str());
+    let kernel_name: &'static str = Box::leak(format!("fused_group_{group_id}").into_boxed_str());
 
     let mut host = Kernel::new(kernel_name);
     host.mode = fused_mode;
@@ -424,8 +416,7 @@ fn build_fused_group(
 
         // ── Input params ──────────────────────────────────────────────────
         for &param_name in &input_params {
-            let Some((_, slot_ref)) =
-                node.input_bindings.iter().find(|(n, _)| n == param_name)
+            let Some((_, slot_ref)) = node.input_bindings.iter().find(|(n, _)| n == param_name)
             else {
                 return None; // param not found — IR / TOML mismatch
             };
@@ -438,22 +429,21 @@ fn build_fused_group(
                 args.push(KernelCallArg::Value(vid));
             } else {
                 // External tensor: get or create a host param.
-                let host_name =
-                    if let Some(hn) = input_host_names.get(&tensor_name) {
-                        hn.clone()
-                    } else {
-                        let hn = make_param_name(&tensor_name, &mut used_param_names);
-                        input_host_names.insert(tensor_name.clone(), hn.clone());
-                        host.params.push(Param {
-                            name: hn.clone(),
-                            dtype,
-                            shape: Shape::scalar(),
-                            is_output: false,
-                            kind: ParamKind::Tensor,
-                        });
-                        fused_input_bindings.push((hn.clone(), slot_ref.clone()));
-                        hn
-                    };
+                let host_name = if let Some(hn) = input_host_names.get(&tensor_name) {
+                    hn.clone()
+                } else {
+                    let hn = make_param_name(&tensor_name, &mut used_param_names);
+                    input_host_names.insert(tensor_name.clone(), hn.clone());
+                    host.params.push(Param {
+                        name: hn.clone(),
+                        dtype,
+                        shape: Shape::scalar(),
+                        is_output: false,
+                        kind: ParamKind::Tensor,
+                    });
+                    fused_input_bindings.push((hn.clone(), slot_ref.clone()));
+                    hn
+                };
                 args.push(KernelCallArg::Tensor(host_name));
             }
         }
@@ -485,18 +475,16 @@ fn build_fused_group(
         let mut call_result: Option<ValueId> = None;
 
         for &param_name in &output_params {
-            let Some((_, slot_ref)) =
-                node.output_bindings.iter().find(|(n, _)| n == param_name)
+            let Some((_, slot_ref)) = node.output_bindings.iter().find(|(n, _)| n == param_name)
             else {
                 return None;
             };
 
             let tensor_name = slot_ref_name(slot_ref)?;
 
-            let is_intra =
-                single_output
-                    && tensor_name.starts_with('_')
-                    && intra_tensors.contains(&tensor_name);
+            let is_intra = single_output
+                && tensor_name.starts_with('_')
+                && intra_tensors.contains(&tensor_name);
 
             if is_intra && call_result.is_none() {
                 // Omit the arg → KernelInlinePass maps stored value → call_result.
@@ -506,22 +494,21 @@ fn build_fused_group(
                 call_result = Some(vid);
             } else {
                 // External output: add a Tensor arg, keep the store.
-                let host_name =
-                    if let Some(hn) = output_host_names.get(&tensor_name) {
-                        hn.clone()
-                    } else {
-                        let hn = make_param_name(&tensor_name, &mut used_param_names);
-                        output_host_names.insert(tensor_name.clone(), hn.clone());
-                        host.params.push(Param {
-                            name: hn.clone(),
-                            dtype,
-                            shape: Shape::scalar(),
-                            is_output: true,
-                            kind: ParamKind::Tensor,
-                        });
-                        fused_output_bindings.push((hn.clone(), slot_ref.clone()));
-                        hn
-                    };
+                let host_name = if let Some(hn) = output_host_names.get(&tensor_name) {
+                    hn.clone()
+                } else {
+                    let hn = make_param_name(&tensor_name, &mut used_param_names);
+                    output_host_names.insert(tensor_name.clone(), hn.clone());
+                    host.params.push(Param {
+                        name: hn.clone(),
+                        dtype,
+                        shape: Shape::scalar(),
+                        is_output: true,
+                        kind: ParamKind::Tensor,
+                    });
+                    fused_output_bindings.push((hn.clone(), slot_ref.clone()));
+                    hn
+                };
                 args.push(KernelCallArg::Tensor(host_name));
             }
         }
@@ -673,7 +660,8 @@ mod tests {
             vec![("mat", "weight_a"), ("vec", "_x")],
             vec![("out", "_gate")],
             vec![],
-            1024, 256,
+            1024,
+            256,
             Some(0),
         );
         let n1 = make_elementwise_node(
@@ -688,7 +676,8 @@ mod tests {
             vec![("a", "_gated")],
             vec![("out", "_result")],
             vec![],
-            1024, 256,
+            1024,
+            256,
             None, // outside group
         );
 
@@ -708,20 +697,25 @@ mod tests {
     #[test]
     fn find_pure_intra_external_reader_excludes_tensor() {
         // Node 0 (group) writes _gate; node 1 (group) AND node 2 (external) read _gate.
-        let n0 = make_reduction_node(
-            "gemv",
-            vec![],
-            vec![("out", "_gate")],
-            vec![],
-            1024, 256,
+        let n0 =
+            make_reduction_node("gemv", vec![], vec![("out", "_gate")], vec![], 1024, 256, Some(0));
+        let n1 = make_elementwise_node(
+            "silu",
+            vec![("a", "_gate")],
+            vec![("out", "_gated")],
+            1024,
             Some(0),
         );
-        let n1 = make_elementwise_node("silu", vec![("a", "_gate")], vec![("out", "_gated")], 1024, Some(0));
-        let n2 = make_elementwise_node("other", vec![("a", "_gate")], vec![("out", "_other")], 1024, None);
+        let n2 = make_elementwise_node(
+            "other",
+            vec![("a", "_gate")],
+            vec![("out", "_other")],
+            1024,
+            None,
+        );
 
         let nodes = vec![n0, n1, n2];
-        let group_node_set: HashMap<usize, usize> =
-            [(0, 0), (1, 0)].into_iter().collect();
+        let group_node_set: HashMap<usize, usize> = [(0, 0), (1, 0)].into_iter().collect();
         let (writes, reads) = build_write_read_maps(&nodes);
 
         let intra = find_pure_intra_tensors(&[0, 1], &group_node_set, &writes, &reads);

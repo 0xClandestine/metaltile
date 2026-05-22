@@ -552,19 +552,16 @@ fn chain_grid_compatible(
 
     for &cidx in chain {
         match (&nodes[cidx].mode, &nodes[cidx].grid) {
-            (KernelMode::Reduction, GridSpec::Reduction { num_rows, threads_per_group }) => {
+            (KernelMode::Reduction, GridSpec::Reduction { num_rows, threads_per_group }) =>
                 match reduction_spec {
                     None => reduction_spec = Some((*num_rows, *threads_per_group)),
                     Some((r, t)) if r == *num_rows && t == *threads_per_group => {},
                     _ => return false,
-                }
-            },
-            (KernelMode::Elementwise, GridSpec::Elementwise { n }) => {
-                match elementwise_n {
-                    None => elementwise_n = Some(*n),
-                    Some(en) if en == *n => {},
-                    _ => return false,
-                }
+                },
+            (KernelMode::Elementwise, GridSpec::Elementwise { n }) => match elementwise_n {
+                None => elementwise_n = Some(*n),
+                Some(en) if en == *n => {},
+                _ => return false,
             },
             _ => return false, // Grid3D or other incompatible mode in chain
         }
@@ -573,13 +570,12 @@ fn chain_grid_compatible(
     match (&candidate.mode, &candidate.grid) {
         (KernelMode::Reduction, GridSpec::Reduction { num_rows, threads_per_group }) => {
             match reduction_spec {
-                None => {
+                None =>
                     if let Some(n) = elementwise_n {
                         if n != *num_rows {
                             return false;
                         }
-                    }
-                },
+                    },
                 Some((r, t)) if r == *num_rows && t == *threads_per_group => {},
                 _ => return false,
             }
@@ -590,18 +586,15 @@ fn chain_grid_compatible(
                 }
             }
         },
-        (KernelMode::Elementwise, GridSpec::Elementwise { n }) => {
-            match elementwise_n {
-                None => {
-                    if let Some((num_rows, _)) = reduction_spec {
-                        if *n != num_rows {
-                            return false;
-                        }
+        (KernelMode::Elementwise, GridSpec::Elementwise { n }) => match elementwise_n {
+            None =>
+                if let Some((num_rows, _)) = reduction_spec {
+                    if *n != num_rows {
+                        return false;
                     }
                 },
-                Some(en) if en == *n => {},
-                _ => return false,
-            }
+            Some(en) if en == *n => {},
+            _ => return false,
         },
         _ => return false,
     }

@@ -7,13 +7,13 @@ unsafe extern "C" {}
 use std::{borrow::Cow, collections::BTreeMap};
 
 use metaltile_codegen::msl::MslGenerator;
-use rustc_hash::FxHashMap;
 #[cfg(target_os = "macos")]
 use metaltile_core::ir::KernelMode;
 use metaltile_core::{
     ir::{Kernel, Param, ParamKind},
     shape::Dim,
 };
+use rustc_hash::FxHashMap;
 
 use crate::{autotune::Autotuner, error::MetalTileError};
 
@@ -105,13 +105,8 @@ impl ResidentBuffer {
         {
             use objc2_metal::MTLBuffer;
             let ptr = self.inner.contents();
-            unsafe {
-                std::slice::from_raw_parts(
-                    ptr.as_ptr().add(self.offset) as *const u8,
-                    len,
-                )
-            }
-            .to_vec()
+            unsafe { std::slice::from_raw_parts(ptr.as_ptr().add(self.offset) as *const u8, len) }
+                .to_vec()
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -131,10 +126,7 @@ impl ResidentBuffer {
     pub fn slice(&self, offset: usize, _size: usize) -> Self {
         #[cfg(target_os = "macos")]
         {
-            ResidentBuffer {
-                inner: self.inner.clone(),
-                offset: self.offset + offset,
-            }
+            ResidentBuffer { inner: self.inner.clone(), offset: self.offset + offset }
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -1008,18 +1000,12 @@ impl Context {
                                 param.name, provided_len, expected_len
                             )));
                         }
-                        if param.is_output {
-                            provided_len.max(expected_len)
-                        } else {
-                            provided_len
-                        }
+                        if param.is_output { provided_len.max(expected_len) } else { provided_len }
                     } else {
                         provided_len
                     };
-                    plans.push(ParamBufferPlan {
-                        data_binding_index: next_binding_index,
-                        data_len,
-                    });
+                    plans
+                        .push(ParamBufferPlan { data_binding_index: next_binding_index, data_len });
                     next_binding_index += if param.kind == ParamKind::Strided { 3 } else { 1 };
                 }
                 binding_plans.push(plans);
@@ -1118,9 +1104,10 @@ impl Context {
                     let defaults = known_shape_dims(param)?
                         .map(|dims| {
                             let strides = row_major_strides(&param.name, &dims)?;
-                            Ok::<(Vec<u8>, Vec<u8>), MetalTileError>(
-                                (encode_u32s(&dims), encode_u32s(&strides))
-                            )
+                            Ok::<(Vec<u8>, Vec<u8>), MetalTileError>((
+                                encode_u32s(&dims),
+                                encode_u32s(&strides),
+                            ))
                         })
                         .transpose()?;
                     let mut key = String::with_capacity(param.name.len() + 8);
@@ -1132,7 +1119,9 @@ impl Context {
                             if expected_len > 0 && bytes.len() < expected_len {
                                 return Err(MetalTileError::Buffer(format!(
                                     "buffer '{}' has {} bytes, expected at least {}",
-                                    key, bytes.len(), expected_len
+                                    key,
+                                    bytes.len(),
+                                    expected_len
                                 )));
                             }
                             Cow::Borrowed(bytes.as_slice())
@@ -1140,7 +1129,8 @@ impl Context {
                         None => {
                             let Some((shape_bytes, _)) = defaults.as_ref() else {
                                 return Err(MetalTileError::Buffer(format!(
-                                    "missing required strided metadata buffer '{}'", key
+                                    "missing required strided metadata buffer '{}'",
+                                    key
                                 )));
                             };
                             Cow::Owned(shape_bytes.clone())
@@ -1153,7 +1143,9 @@ impl Context {
                             if expected_len > 0 && bytes.len() < expected_len {
                                 return Err(MetalTileError::Buffer(format!(
                                     "buffer '{}' has {} bytes, expected at least {}",
-                                    key, bytes.len(), expected_len
+                                    key,
+                                    bytes.len(),
+                                    expected_len
                                 )));
                             }
                             Cow::Borrowed(bytes.as_slice())
@@ -1161,14 +1153,18 @@ impl Context {
                         None => {
                             let Some((_, strides_bytes)) = defaults.as_ref() else {
                                 return Err(MetalTileError::Buffer(format!(
-                                    "missing required strided metadata buffer '{}'", key
+                                    "missing required strided metadata buffer '{}'",
+                                    key
                                 )));
                             };
                             Cow::Owned(strides_bytes.clone())
                         },
                     };
                     bufs.push((acquire_shared(Some(shape_data.as_ref()), shape_data.len())?, 0));
-                    bufs.push((acquire_shared(Some(strides_data.as_ref()), strides_data.len())?, 0));
+                    bufs.push((
+                        acquire_shared(Some(strides_data.as_ref()), strides_data.len())?,
+                        0,
+                    ));
                 }
                 Ok(())
             };
@@ -1176,7 +1172,8 @@ impl Context {
             let mut enc: Option<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>> = None;
 
             for (i, spec) in specs.iter().enumerate() {
-                let mut bufs: Vec<(BufRc, usize)> = Vec::with_capacity(spec.kernel.params.len() * 2);
+                let mut bufs: Vec<(BufRc, usize)> =
+                    Vec::with_capacity(spec.kernel.params.len() * 2);
 
                 for (param, plan) in spec.kernel.params.iter().zip(&binding_plans[i]) {
                     // Outputs with pre-uploaded GPU buffers → write directly in-place.
@@ -1298,7 +1295,9 @@ impl Context {
                     if later_inputs[i].contains(param.name.as_str()) {
                         continue;
                     }
-                    let Some((buf, offset)) = per_spec_bufs[i].get(plan.data_binding_index) else { continue };
+                    let Some((buf, offset)) = per_spec_bufs[i].get(plan.data_binding_index) else {
+                        continue;
+                    };
                     use objc2_metal::MTLBuffer as _;
                     let ptr = buf.contents();
                     let bytes = unsafe {
