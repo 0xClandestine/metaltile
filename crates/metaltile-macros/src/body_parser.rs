@@ -1759,16 +1759,16 @@ impl DslBodyParser {
                     p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default(),
                 _ => String::new(),
             };
-            if fname == "coop_stage" {
-                if let Some(inner) = call.args.first() {
-                    let inner_ts = self.dtype_from_expr_arg(inner);
-                    return quote! {
-                        {
-                            let __coop_stage_d = #inner_ts;
-                            if __coop_stage_d == DType::BF16 { DType::F16 } else { __coop_stage_d }
-                        }
-                    };
-                }
+            if fname == "coop_stage"
+                && let Some(inner) = call.args.first()
+            {
+                let inner_ts = self.dtype_from_expr_arg(inner);
+                return quote! {
+                    {
+                        let __coop_stage_d = #inner_ts;
+                        if __coop_stage_d == DType::BF16 { DType::F16 } else { __coop_stage_d }
+                    }
+                };
             }
         }
         let name = match arg {
