@@ -1,0 +1,49 @@
+name: Smoke
+
+# Fast "heartbeat" CI: dispatches 6 critical FFAI kernels on real Metal
+# in < 2 min. Complements tile.yml (slow build+bench) and check.yml
+# (fmt, clippy, Ubuntu tests). First line of defence against silent
+# kernel regressions that would surface as garbage model output downstream.
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/smoke.yml'
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/smoke.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CLICOLOR: 1
+
+jobs:
+  kernel-smoke:
+    name: Kernel Smoke (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5.0.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Single binary, ~6 kernels, tiny shapes. < 2 min on GHA runner.
+      - name: Run kernel smoke test
+        run: cargo test -p metaltile-std --test smoke_test -- --nocapture
