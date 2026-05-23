@@ -175,24 +175,16 @@ fn run_case(dt: Dt, in_dim: usize, group_size: usize, out_dim: usize, tol: f32) 
 }
 
 #[test]
-fn rms_norm_qgemv_f32_gs64() {
-    run_case(Dt::F32, 256, 64, 8, 5e-3);
-}
+fn rms_norm_qgemv_f32_gs64() { run_case(Dt::F32, 256, 64, 8, 5e-3); }
 
 #[test]
-fn rms_norm_qgemv_f32_gs128() {
-    run_case(Dt::F32, 512, 128, 6, 5e-3);
-}
+fn rms_norm_qgemv_f32_gs128() { run_case(Dt::F32, 512, 128, 6, 5e-3); }
 
 #[test]
-fn rms_norm_qgemv_f16_gs64() {
-    run_case(Dt::F16, 256, 64, 8, 2e-2);
-}
+fn rms_norm_qgemv_f16_gs64() { run_case(Dt::F16, 256, 64, 8, 2e-2); }
 
 #[test]
-fn rms_norm_qgemv_bf16_gs64() {
-    run_case(Dt::Bf16, 256, 64, 8, 5e-2);
-}
+fn rms_norm_qgemv_bf16_gs64() { run_case(Dt::Bf16, 256, 64, 8, 5e-2); }
 
 // ── ffai_rms_norm_qgemv_fast ─────────────────────────────────────────────
 //
@@ -288,14 +280,10 @@ fn rms_norm_qgemv_fast_f32_gs64() {
 }
 
 #[test]
-fn rms_norm_qgemv_fast_f16_gs64() {
-    run_case_fast(Dt::F16, 512, 64, 16, 2e-2);
-}
+fn rms_norm_qgemv_fast_f16_gs64() { run_case_fast(Dt::F16, 512, 64, 16, 2e-2); }
 
 #[test]
-fn rms_norm_qgemv_fast_bf16_gs64() {
-    run_case_fast(Dt::Bf16, 512, 64, 16, 5e-2);
-}
+fn rms_norm_qgemv_fast_bf16_gs64() { run_case_fast(Dt::Bf16, 512, 64, 16, 5e-2); }
 
 #[test]
 fn rms_norm_qgemv_fast_f32_large() {

@@ -40,8 +40,12 @@ use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
 use metaltile_std::ffai::dequant_gemv::{
-    dequant_gemv_int3, dequant_gemv_int4, dequant_gemv_int4_fast, dequant_gemv_int5,
-    dequant_gemv_int6, dequant_gemv_int8,
+    dequant_gemv_int3,
+    dequant_gemv_int4,
+    dequant_gemv_int4_fast,
+    dequant_gemv_int5,
+    dequant_gemv_int6,
+    dequant_gemv_int8,
 };
 
 // ── Quantize helpers ──────────────────────────────────────────────────────
@@ -292,29 +296,19 @@ fn dequant_gemv_int4_qwen_shape_f32() {
 }
 
 #[test]
-fn dequant_gemv_int4_qwen_shape_f16() {
-    run_one_test(4, Dt::F16, 256, 32, 4, 1e-2);
-}
+fn dequant_gemv_int4_qwen_shape_f16() { run_one_test(4, Dt::F16, 256, 32, 4, 1e-2); }
 
 #[test]
-fn dequant_gemv_int4_qwen_shape_bf16() {
-    run_one_test(4, Dt::Bf16, 256, 32, 4, 3e-2);
-}
+fn dequant_gemv_int4_qwen_shape_bf16() { run_one_test(4, Dt::Bf16, 256, 32, 4, 3e-2); }
 
 #[test]
-fn dequant_gemv_int8_qwen_shape_f32() {
-    run_one_test(8, Dt::F32, 256, 32, 4, 5e-4);
-}
+fn dequant_gemv_int8_qwen_shape_f32() { run_one_test(8, Dt::F32, 256, 32, 4, 5e-4); }
 
 #[test]
-fn dequant_gemv_int8_qwen_shape_f16() {
-    run_one_test(8, Dt::F16, 256, 32, 4, 5e-3);
-}
+fn dequant_gemv_int8_qwen_shape_f16() { run_one_test(8, Dt::F16, 256, 32, 4, 5e-3); }
 
 #[test]
-fn dequant_gemv_int8_qwen_shape_bf16() {
-    run_one_test(8, Dt::Bf16, 256, 32, 4, 3e-2);
-}
+fn dequant_gemv_int8_qwen_shape_bf16() { run_one_test(8, Dt::Bf16, 256, 32, 4, 3e-2); }
 
 #[test]
 fn dequant_gemv_int6_word_spill_path_f32() {
@@ -326,9 +320,7 @@ fn dequant_gemv_int6_word_spill_path_f32() {
 }
 
 #[test]
-fn dequant_gemv_int6_word_spill_path_f16() {
-    run_one_test(6, Dt::F16, 64, 32, 4, 1e-2);
-}
+fn dequant_gemv_int6_word_spill_path_f16() { run_one_test(6, Dt::F16, 64, 32, 4, 1e-2); }
 
 // ── int3 / int5 odd-width pin (BenchSpec registration + bit-stream decode) ──
 //
@@ -440,19 +432,13 @@ fn run_one_test_fast(dt: Dt, in_dim: usize, group_size: usize, out_dim: usize, t
 }
 
 #[test]
-fn dequant_gemv_int4_fast_f32() {
-    run_one_test_fast(Dt::F32, 512, 64, 8, 5e-3);
-}
+fn dequant_gemv_int4_fast_f32() { run_one_test_fast(Dt::F32, 512, 64, 8, 5e-3); }
 
 #[test]
-fn dequant_gemv_int4_fast_f16() {
-    run_one_test_fast(Dt::F16, 512, 64, 8, 1e-2);
-}
+fn dequant_gemv_int4_fast_f16() { run_one_test_fast(Dt::F16, 512, 64, 8, 1e-2); }
 
 #[test]
-fn dequant_gemv_int4_fast_bf16() {
-    run_one_test_fast(Dt::Bf16, 512, 64, 8, 3e-2);
-}
+fn dequant_gemv_int4_fast_bf16() { run_one_test_fast(Dt::Bf16, 512, 64, 8, 3e-2); }
 
 #[test]
 fn dequant_gemv_int4_fast_f32_large() {

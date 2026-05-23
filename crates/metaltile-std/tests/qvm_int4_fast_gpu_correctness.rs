@@ -218,14 +218,10 @@ fn qvm_int4_fast_f32_k64_n64() {
 }
 
 #[test]
-fn qvm_int4_fast_f16_k64_n64() {
-    run_case(Dt::F16, 64, 64, 64, 2e-2);
-}
+fn qvm_int4_fast_f16_k64_n64() { run_case(Dt::F16, 64, 64, 64, 2e-2); }
 
 #[test]
-fn qvm_int4_fast_bf16_k64_n64() {
-    run_case(Dt::Bf16, 64, 64, 64, 5e-2);
-}
+fn qvm_int4_fast_bf16_k64_n64() { run_case(Dt::Bf16, 64, 64, 64, 5e-2); }
 
 #[test]
 fn qvm_int4_fast_f32_k128_n128() {

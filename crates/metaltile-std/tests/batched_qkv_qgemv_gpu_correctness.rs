@@ -169,19 +169,13 @@ fn batched_qkv_qgemv_f32_gqa() {
 }
 
 #[test]
-fn batched_qkv_qgemv_f32_gs128() {
-    run_case(Dt::F32, 512, 128, 12, 6, 5e-3);
-}
+fn batched_qkv_qgemv_f32_gs128() { run_case(Dt::F32, 512, 128, 12, 6, 5e-3); }
 
 #[test]
-fn batched_qkv_qgemv_f16_gqa() {
-    run_case(Dt::F16, 256, 64, 16, 4, 2e-2);
-}
+fn batched_qkv_qgemv_f16_gqa() { run_case(Dt::F16, 256, 64, 16, 4, 2e-2); }
 
 #[test]
-fn batched_qkv_qgemv_bf16_gqa() {
-    run_case(Dt::Bf16, 256, 64, 16, 4, 5e-2);
-}
+fn batched_qkv_qgemv_bf16_gqa() { run_case(Dt::Bf16, 256, 64, 16, 4, 5e-2); }
 
 // ── ffai_batched_qkv_qgemv_fast ──────────────────────────────────────────
 //
@@ -290,11 +284,7 @@ fn batched_qkv_qgemv_fast_f32_gqa() {
 }
 
 #[test]
-fn batched_qkv_qgemv_fast_f16_gqa() {
-    run_case_fast_qkv(Dt::F16, 512, 64, 16, 8, 2e-2);
-}
+fn batched_qkv_qgemv_fast_f16_gqa() { run_case_fast_qkv(Dt::F16, 512, 64, 16, 8, 2e-2); }
 
 #[test]
-fn batched_qkv_qgemv_fast_bf16_gqa() {
-    run_case_fast_qkv(Dt::Bf16, 512, 64, 16, 8, 5e-2);
-}
+fn batched_qkv_qgemv_fast_bf16_gqa() { run_case_fast_qkv(Dt::Bf16, 512, 64, 16, 8, 5e-2); }
