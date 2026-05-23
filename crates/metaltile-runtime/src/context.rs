@@ -6,7 +6,7 @@ unsafe extern "C" {}
 
 use std::{borrow::Cow, collections::BTreeMap};
 
-use metaltile_codegen::msl::MslGenerator;
+use metaltile_codegen::msl::{generator_for_mode, MslGenerator};
 #[cfg(target_os = "macos")]
 use metaltile_core::ir::KernelMode;
 use metaltile_core::{
@@ -165,13 +165,18 @@ fn fnv1a_extend(h: &mut u64, bytes: &[u8]) {
 /// failing only when run after the bf16 sibling test (which seeded
 /// the cache slot with the bf16 PSO).
 #[cfg(any(target_os = "macos", test))]
-fn pso_cache_key(kernel: &Kernel, fn_consts: &BTreeMap<String, u32>) -> u64 {
+fn pso_cache_key(kernel: &Kernel, fn_consts: &BTreeMap<String, u32>, tpg: u32) -> u64 {
     let mut h = FNV_OFFSET;
     fnv1a_extend(&mut h, kernel.name.as_bytes());
     fnv1a_extend(&mut h, b":");
     if let Some(p) = kernel.params.first() {
         fnv1a_extend(&mut h, p.dtype.label().as_bytes());
     }
+    // Include tpg so kernels compiled with different threadgroup sizes (and thus
+    // different reduction strategies — e.g. single-simdgroup vs two-level) don't
+    // share a cache slot.
+    fnv1a_extend(&mut h, b":tpg:");
+    fnv1a_extend(&mut h, &tpg.to_le_bytes());
     for (n, v) in fn_consts {
         fnv1a_extend(&mut h, n.as_bytes());
         fnv1a_extend(&mut h, &v.to_le_bytes());
@@ -959,7 +964,8 @@ impl Context {
             static MSL_CACHE: OnceLock<Mutex<FxHashMap<u64, String>>> = OnceLock::new();
             let msl_cache = MSL_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
             for spec in specs {
-                let h = pso_cache_key(spec.kernel, spec.fn_consts);
+                let tpg = spec.threads_per_group[0] as u32;
+                let h = pso_cache_key(spec.kernel, spec.fn_consts, tpg);
                 // Drop the guard BEFORE the match — Mutex isn't reentrant, and
                 // temporaries in a match scrutinee live until the end of the match
                 // body (RFC 66), so writing back inside None would deadlock against
@@ -975,7 +981,12 @@ impl Context {
                         m
                     },
                     None => {
-                        let generated = MslGenerator::default().generate(spec.kernel)?;
+                        // Pass the actual tpg so the codegen can specialise
+                        // reductions: tpg ≤ 32 emits a single simd_sum (zero
+                        // threadgroup barriers); tpg > 32 emits the two-level
+                        // threadgroup reduction.
+                        let generator = generator_for_mode(spec.kernel.mode, Some(tpg));
+                        let generated = generator.generate(spec.kernel)?;
                         tracing::trace!(kernel = %spec.kernel.name, bytes = generated.len(), "msl generated");
                         msl_cache
                             .lock()
@@ -1027,7 +1038,7 @@ impl Context {
 
             let mut pipes: Vec<Retained<Pso>> = Vec::with_capacity(specs.len());
             for (spec, msl) in specs.iter().zip(msl_sources.iter()) {
-                let cache_key = pso_cache_key(spec.kernel, spec.fn_consts);
+                let cache_key = pso_cache_key(spec.kernel, spec.fn_consts, spec.threads_per_group[0] as u32);
                 let pipe: Retained<Pso> = {
                     let mut lock = cache
                         .lock()
@@ -1447,34 +1458,38 @@ mod tests {
         let mut consts = BTreeMap::new();
         consts.insert("gqa".to_string(), 4u32);
         consts.insert("head_dim".to_string(), 128u32);
-        let baseline = pso_cache_key(&k, &consts);
-        assert_eq!(baseline, pso_cache_key(&k, &consts), "key must be deterministic");
+        let tpg = 256u32;
+        let baseline = pso_cache_key(&k, &consts, tpg);
+        assert_eq!(baseline, pso_cache_key(&k, &consts, tpg), "key must be deterministic");
 
         // Kernel name change → different key.
         let k_other_name = key_kernel("sdpa_prefill", DType::F32);
-        assert_ne!(baseline, pso_cache_key(&k_other_name, &consts));
+        assert_ne!(baseline, pso_cache_key(&k_other_name, &consts, tpg));
 
         // First-param dtype change → different key (f32 vs f16 specializations).
         let k_other_dtype = key_kernel("sdpa_decode", DType::F16);
-        assert_ne!(baseline, pso_cache_key(&k_other_dtype, &consts));
+        assert_ne!(baseline, pso_cache_key(&k_other_dtype, &consts, tpg));
 
         // fn_const value change → different key.
         let mut consts_other_val = consts.clone();
         consts_other_val.insert("gqa".to_string(), 8u32);
-        assert_ne!(baseline, pso_cache_key(&k, &consts_other_val));
+        assert_ne!(baseline, pso_cache_key(&k, &consts_other_val, tpg));
 
         // fn_const name change → different key.
         let mut consts_other_name = BTreeMap::new();
         consts_other_name.insert("kv_heads".to_string(), 4u32);
         consts_other_name.insert("head_dim".to_string(), 128u32);
-        assert_ne!(baseline, pso_cache_key(&k, &consts_other_name));
+        assert_ne!(baseline, pso_cache_key(&k, &consts_other_name, tpg));
+
+        // tpg change → different key (different reduction strategy).
+        assert_ne!(baseline, pso_cache_key(&k, &consts, 32u32));
 
         // Empty fn_consts and empty params are both well-defined.
         let empty_consts = BTreeMap::new();
-        assert_ne!(baseline, pso_cache_key(&k, &empty_consts));
+        assert_ne!(baseline, pso_cache_key(&k, &empty_consts, tpg));
         let mut k_empty = Kernel::new("noop");
         k_empty.params = vec![];
-        let _ = pso_cache_key(&k_empty, &empty_consts);
+        let _ = pso_cache_key(&k_empty, &empty_consts, tpg);
     }
 
     #[test]
@@ -1556,7 +1571,7 @@ mod tests {
         b.insert("head_dim".to_string(), 128u32);
         b.insert("gqa".to_string(), 4u32);
 
-        assert_eq!(pso_cache_key(&k, &a), pso_cache_key(&k, &b));
+        assert_eq!(pso_cache_key(&k, &a, 256), pso_cache_key(&k, &b, 256));
     }
 
     #[test]
@@ -1575,9 +1590,9 @@ mod tests {
         let k_f16 = key_kernel("noop", DType::F16);
         let k_bf16 = key_kernel("noop", DType::BF16);
 
-        assert_ne!(pso_cache_key(&k_f32, &consts), pso_cache_key(&k_i32, &consts));
-        assert_ne!(pso_cache_key(&k_f16, &consts), pso_cache_key(&k_bf16, &consts));
-        assert_ne!(pso_cache_key(&k_f32, &consts), pso_cache_key(&k_f16, &consts));
+        assert_ne!(pso_cache_key(&k_f32, &consts, 256), pso_cache_key(&k_i32, &consts, 256));
+        assert_ne!(pso_cache_key(&k_f16, &consts, 256), pso_cache_key(&k_bf16, &consts, 256));
+        assert_ne!(pso_cache_key(&k_f32, &consts, 256), pso_cache_key(&k_f16, &consts, 256));
     }
 
     #[test]
@@ -1594,7 +1609,7 @@ mod tests {
             tensor_param("b", DType::F16, &[4], true, ParamKind::Tensor),
         ];
         let consts = BTreeMap::new();
-        assert_eq!(pso_cache_key(&k_one, &consts), pso_cache_key(&k_two, &consts));
+        assert_eq!(pso_cache_key(&k_one, &consts, 256), pso_cache_key(&k_two, &consts, 256));
     }
 
     #[test]
@@ -1608,14 +1623,14 @@ mod tests {
         k.params = vec![];
         let mut consts = BTreeMap::new();
         consts.insert("foo".to_string(), 1u32);
-        let key = pso_cache_key(&k, &consts);
+        let key = pso_cache_key(&k, &consts, 256);
         assert_ne!(key, FNV_OFFSET);
-        assert_eq!(key, pso_cache_key(&k, &consts));
+        assert_eq!(key, pso_cache_key(&k, &consts, 256));
 
         // A different kernel name still discriminates with no params present.
         let mut k_other = Kernel::new("other_zero_param_kernel");
         k_other.params = vec![];
-        assert_ne!(key, pso_cache_key(&k_other, &consts));
+        assert_ne!(key, pso_cache_key(&k_other, &consts, 256));
     }
 
     /// Representative MSL source size for a real metaltile kernel:
@@ -1647,6 +1662,7 @@ mod tests {
         std::hint::black_box(pso_cache_key(
             std::hint::black_box(kernel),
             std::hint::black_box(consts),
+            256,
         ))
     }
 
@@ -1668,7 +1684,7 @@ mod tests {
         let mut k_b = Kernel::new("foo:");
         k_b.params = vec![];
         let consts = BTreeMap::new();
-        assert_ne!(pso_cache_key(&k_a, &consts), pso_cache_key(&k_b, &consts));
+        assert_ne!(pso_cache_key(&k_a, &consts, 256), pso_cache_key(&k_b, &consts, 256));
     }
 
     #[test]
@@ -1682,7 +1698,7 @@ mod tests {
         a.insert("c".to_string(), 0x0000_0001_u32);
         let mut b = BTreeMap::new();
         b.insert("c".to_string(), 0x0100_0000_u32);
-        assert_ne!(pso_cache_key(&k, &a), pso_cache_key(&k, &b));
+        assert_ne!(pso_cache_key(&k, &a, 256), pso_cache_key(&k, &b, 256));
     }
 
     #[test]
@@ -1709,7 +1725,7 @@ mod tests {
                         let mut consts = BTreeMap::new();
                         consts.insert("gqa".to_string(), gqa);
                         consts.insert("head_dim".to_string(), hd);
-                        let key = pso_cache_key(&k, &consts);
+                        let key = pso_cache_key(&k, &consts, 256);
                         assert!(
                             seen.insert(key),
                             "duplicate key for ({kname}, {dt:?}, gqa={gqa}, hd={hd})"
