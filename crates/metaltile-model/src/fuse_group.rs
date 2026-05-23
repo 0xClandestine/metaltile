@@ -1316,6 +1316,23 @@ fn synthesize_pattern3(
     let body_ops_before_r1 = host.body.ops.len();
     let blocks_before_r1: HashSet<BlockId> = host.blocks.keys().cloned().collect();
 
+    // Collect threadgroup alloc names already present in the host (from R0).
+    // Any TG alloc R1 adds with the same name must be renamed to avoid a
+    // Metal "redefinition" error when two identical GEMVs share `tg_vec`.
+    let existing_tg_alloc_names: HashSet<String> = host
+        .body
+        .ops
+        .iter()
+        .chain(host.blocks.values().flat_map(|b| b.ops.iter()))
+        .filter_map(|op| {
+            if let Op::ThreadgroupAlloc { name, .. } = op {
+                Some(name.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
     clone_callee_into_host(&mut host, c1, &r1_param_renames);
 
     // Append "_r1" to every DeclareLocal/SetLocal/Load-of-mutable name added by R1.
@@ -1323,10 +1340,20 @@ fn synthesize_pattern3(
     // Mutable local reads are represented as Op::Load { src: "__ml_acc0" } — the
     // MSL emitter emits `auto vN = __ml_acc0;`.  We must rename these load srcs
     // in parallel with DeclareLocal/SetLocal to keep all references consistent.
+    //
+    // Also rename any ThreadgroupAlloc/Load/Store names that conflict with R0's
+    // TG allocs (e.g. both gemv/bm16v kernels allocate `tg_vec`).
     let rename_r1_op = |op: &mut Op| {
         match op {
             Op::DeclareLocal { name, .. } | Op::SetLocal { name, .. } => name.push_str("_r1"),
             Op::Load { src, .. } if src.starts_with("__ml_") => src.push_str("_r1"),
+            Op::ThreadgroupAlloc { name, .. }
+            | Op::ThreadgroupLoad { name, .. }
+            | Op::ThreadgroupStore { name, .. }
+                if existing_tg_alloc_names.contains(name.as_str()) =>
+            {
+                name.push_str("_r1");
+            },
             _ => {},
         }
     };

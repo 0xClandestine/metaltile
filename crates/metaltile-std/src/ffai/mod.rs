@@ -40,6 +40,7 @@ pub mod gather;
 pub mod gemm;
 pub mod gemv_bm4;
 pub mod gemv_bm_hd;
+pub mod gemv_smm;
 pub mod kv_cache;
 pub mod logits_min_p;
 pub mod logits_processors;

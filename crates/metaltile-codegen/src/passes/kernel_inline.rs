@@ -33,7 +33,7 @@
 //!    used (causing a compile error if actually referenced — better than
 //!    silent wrong code).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use metaltile_core::{
     KernelEntry,
@@ -77,6 +77,12 @@ impl Pass for KernelInlinePass {
         let mut new_ops: Vec<Op> = Vec::with_capacity(kernel.body.ops.len());
         let mut new_results: Vec<Option<ValueId>> = Vec::with_capacity(kernel.body.results.len());
 
+        // Track threadgroup alloc names already emitted so that two inlined
+        // callees sharing the same tg buffer name (e.g. two `gemv/bm16v` in
+        // an `ffn_act` fuse group) don't produce a Metal "redefinition" error.
+        // Dedup is safe when size + dtype match; skip if identical.
+        let mut seen_tg_allocs: BTreeSet<String> = BTreeSet::new();
+
         let old_ops = std::mem::take(&mut kernel.body.ops);
         let old_results = std::mem::take(&mut kernel.body.results);
 
@@ -102,10 +108,21 @@ impl Pass for KernelInlinePass {
                 vid_offset = (max_new_vid + 1).max(vid_offset);
 
                 for (inlined_op, inlined_result) in inlined {
+                    // Deduplicate ThreadgroupAlloc: skip if same name already
+                    // declared by a previously-inlined callee.
+                    if let Op::ThreadgroupAlloc { ref name, .. } = inlined_op {
+                        if !seen_tg_allocs.insert(name.clone()) {
+                            continue; // already emitted — skip duplicate
+                        }
+                    }
                     new_ops.push(inlined_op);
                     new_results.push(inlined_result);
                 }
             } else {
+                // Track allocs already present in the host kernel itself.
+                if let Op::ThreadgroupAlloc { ref name, .. } = op {
+                    seen_tg_allocs.insert(name.clone());
+                }
                 new_ops.push(op);
                 new_results.push(result);
             }
