@@ -6,16 +6,7 @@ concurrency:
 
 on:
   push:
-    branches: [main, dev]
-    paths:
-      - 'crates/**/*.rs'
-      - 'crates/**/Cargo.toml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'codecov.yml'
-      - '.github/workflows/coverage.yml'
-  pull_request:
+    branches: [main]
     paths:
       - 'crates/**/*.rs'
       - 'crates/**/Cargo.toml'

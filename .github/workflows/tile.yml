@@ -58,8 +58,8 @@ jobs:
       # subsequent steps call `tile` directly without cargo overhead.
       - name: Install tile CLI
         run: |
-          cargo build --release -p metaltile-cli
-          echo "${GITHUB_WORKSPACE}/target/release" >> "$GITHUB_PATH"
+          cargo build --profile ci -p metaltile-cli
+          echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
 
       - name: Build
         run: tile build
