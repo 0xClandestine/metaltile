@@ -138,6 +138,42 @@ struct InspectArgs {
     /// Write output files to <path> instead of stdout
     #[arg(long = "dir", short = 'o')]
     dir: Option<String>,
+    /// TOML model definition to inspect (e.g. models/llama_decode.toml)
+    #[arg(long = "toml")]
+    toml: Option<String>,
+    /// HuggingFace config.json path for model params (used with --toml)
+    #[arg(long = "config-json")]
+    config_json: Option<String>,
+    /// Number of transformer layers (default: 32, Llama 3 8B)
+    #[arg(long = "n-layers")]
+    n_layers: Option<u32>,
+    /// Number of attention heads (default: 32)
+    #[arg(long = "n-heads")]
+    n_heads: Option<u32>,
+    /// Number of key/value heads (default: 8, GQA for Llama 3 8B)
+    #[arg(long = "n-kv-heads")]
+    n_kv_heads: Option<u32>,
+    /// Head dimension (default: 128)
+    #[arg(long = "head-dim")]
+    head_dim: Option<u32>,
+    /// Hidden dimension (default: 4096)
+    #[arg(long = "hidden-dim")]
+    hidden_dim: Option<u32>,
+    /// FFN intermediate dimension (default: 14336)
+    #[arg(long = "ffn-dim")]
+    ffn_dim: Option<u32>,
+    /// Vocabulary size (default: 128256)
+    #[arg(long = "vocab-size")]
+    vocab_size: Option<u32>,
+    /// Maximum sequence length (default: 8192)
+    #[arg(long = "max-seq-len")]
+    max_seq_len: Option<u32>,
+    /// Disable kernel fusion entirely (each node dispatched separately)
+    #[arg(long = "no-fuse", default_value_t = false, conflicts_with = "graph_fuse")]
+    no_fuse: bool,
+    /// Use graph-driven fusion (ignores TOML fuse tags)
+    #[arg(long = "graph-fuse", default_value_t = false, conflicts_with = "no_fuse")]
+    graph_fuse: bool,
 }
 
 // ── Device ───────────────────────────────────────────────────────────────
