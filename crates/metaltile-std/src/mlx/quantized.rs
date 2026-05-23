@@ -1622,16 +1622,23 @@ pub fn mt_qmm_bm4<T>(
 //   x       [k]                    T
 //   out     [m]                    T
 
-// NOTE: registered via `inventory::submit!` below with
-// `BenchDispatch::Generic` + `shapes: &[]` (no per-shape `tile bench`
-// runner) because the int4-hardcoded `run_quantized_mat_vec` allocates
-// a W buffer sized for 8 nibbles/u32, while this int8 kernel reads
-// 4 bytes/u32 — exactly 2× the buffer. On Apple Paravirtual GPU
-// (GitHub macOS CI) the out-of-bounds W read corrupts the Metal
-// command-queue state for every subsequent dispatch. The
-// `qmv_int8_fast_gpu_correctness` integration test pins numerical
-// behaviour; bench wiring is a follow-up once the runner is extended
-// with a per-spec `bits` parameter.
+#[bench_kernel(
+    op="quantized",
+    subop="qmv_int8_fast",
+    class=QuantizedMatVec,
+    shapes=&QUANTIZED_SHAPES,
+    group_size=64,
+    tpg=64,
+    // bits=8: drives `run_quantized_mat_vec`'s W pack-factor (4
+    // bytes/u32) + the bit-stream extract in the correctness oracle.
+    // Without this the runner defaults to bits=4 and the int8 kernel
+    // reads 2× the int4-sized W buffer.
+    bits=8,
+    tol=1e-3,
+    mlx="affine_qmv_fast_float16_t_gs_64_b_8_batch_0",
+    metal_file="quantized.metal",
+    dtypes=&[metaltile_core::dtype::DType::F32, metaltile_core::dtype::DType::F16, metaltile_core::dtype::DType::BF16],
+)]
 #[kernel]
 pub fn mt_qmv_int8_fast<T>(
     w: Tensor<u32>,
@@ -1752,26 +1759,6 @@ pub fn mt_qmv_int8_fast<T>(
     }
 }
 
-inventory::submit! {
-    crate::spec::BenchSpec {
-        op: "quantized",
-        subop: "qmv_int8_fast",
-        kernel_name: "mt_qmv_int8_fast",
-        kernel_ir: mt_qmv_int8_fast::kernel_ir_for,
-        dtypes: &[
-            metaltile_core::dtype::DType::F32,
-            metaltile_core::dtype::DType::F16,
-            metaltile_core::dtype::DType::BF16,
-        ],
-        tol: 5e-2,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: crate::spec::BenchDispatch::Generic,
-        kernel_mode: Some(metaltile_core::ir::KernelMode::Reduction),
-    }
-}
-
 // ─── mt_qmm_int8_fast ───────────────────────────────────────────────────
 //
 // Int8 matmul (M=1 batched form) — mirrors `mt_qmm` for int4 but adapted
@@ -1790,11 +1777,20 @@ inventory::submit! {
 //   x       [m, k]                 T
 //   out     [m, n]                 T
 
-// NOTE: registered via `inventory::submit!` below with
-// `BenchDispatch::Generic` + `shapes: &[]` — see the
-// `mt_qmv_int8_fast` note for why the int4-hardcoded bench runner
-// can't host int8 kernels. Numerical behaviour pinned by
-// `qmm_int8_fast_gpu_correctness`.
+#[bench_kernel(
+    op="quantized",
+    subop="qmm_int8_fast",
+    class=QuantizedMatMul,
+    shapes=&QUANTIZED_SHAPES,
+    m=4,
+    group_size=64,
+    tpg=64,
+    bits=8,
+    tol=1e-2,
+    mlx="affine_qmm_fast_float16_t_gs_64_b_8_alN_true_batch_0",
+    metal_file="quantized.metal",
+    dtypes=&[metaltile_core::dtype::DType::F32, metaltile_core::dtype::DType::F16, metaltile_core::dtype::DType::BF16],
+)]
 #[kernel]
 pub fn mt_qmm_int8_fast<T>(
     w: Tensor<u32>,
@@ -1906,26 +1902,6 @@ pub fn mt_qmm_int8_fast<T>(
     }
 }
 
-inventory::submit! {
-    crate::spec::BenchSpec {
-        op: "quantized",
-        subop: "qmm_int8_fast",
-        kernel_name: "mt_qmm_int8_fast",
-        kernel_ir: mt_qmm_int8_fast::kernel_ir_for,
-        dtypes: &[
-            metaltile_core::dtype::DType::F32,
-            metaltile_core::dtype::DType::F16,
-            metaltile_core::dtype::DType::BF16,
-        ],
-        tol: 5e-2,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: crate::spec::BenchDispatch::Generic,
-        kernel_mode: Some(metaltile_core::ir::KernelMode::Reduction),
-    }
-}
-
 // ─── mt_qmm_bm2_int8_fast ───────────────────────────────────────────────
 //
 // Int8 matmul BM=2 — mirrors `mt_qmm_bm2` for int4 but adapted for
@@ -1944,9 +1920,20 @@ inventory::submit! {
 //   x       [m, k]                 T
 //   out     [m, n]                 T
 
-// NOTE: registered via `inventory::submit!` below with
-// `BenchDispatch::Generic` — see `mt_qmv_int8_fast` for why. Pinned
-// by `qmm_int8_fast_gpu_correctness`.
+#[bench_kernel(
+    op="quantized",
+    subop="qmm_bm2_int8_fast",
+    class=QuantizedMatMul,
+    shapes=&QUANTIZED_SHAPES,
+    m=8,
+    group_size=64,
+    tpg=64,
+    bits=8,
+    tol=1e-2,
+    mlx="affine_qmm_fast_float16_t_gs_64_b_8_alN_true_batch_0",
+    metal_file="quantized.metal",
+    dtypes=&[metaltile_core::dtype::DType::F32, metaltile_core::dtype::DType::F16, metaltile_core::dtype::DType::BF16],
+)]
 #[kernel]
 pub fn mt_qmm_bm2_int8_fast<T>(
     w: Tensor<u32>,
@@ -2092,26 +2079,6 @@ pub fn mt_qmm_bm2_int8_fast<T>(
     }
 }
 
-inventory::submit! {
-    crate::spec::BenchSpec {
-        op: "quantized",
-        subop: "qmm_bm2_int8_fast",
-        kernel_name: "mt_qmm_bm2_int8_fast",
-        kernel_ir: mt_qmm_bm2_int8_fast::kernel_ir_for,
-        dtypes: &[
-            metaltile_core::dtype::DType::F32,
-            metaltile_core::dtype::DType::F16,
-            metaltile_core::dtype::DType::BF16,
-        ],
-        tol: 5e-2,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: crate::spec::BenchDispatch::Generic,
-        kernel_mode: Some(metaltile_core::ir::KernelMode::Reduction),
-    }
-}
-
 // ─── mt_qmm_bm4_int8_fast ───────────────────────────────────────────────
 //
 // Int8 matmul BM=4 — mirrors `mt_qmm_bm4` for int4 but adapted for
@@ -2131,8 +2098,20 @@ inventory::submit! {
 //   x       [m, k]                 T
 //   out     [m, n]                 T
 
-// NOTE: registered via `inventory::submit!` below — see
-// `mt_qmv_int8_fast`. Pinned by `qmm_int8_fast_gpu_correctness`.
+#[bench_kernel(
+    op="quantized",
+    subop="qmm_bm4_int8_fast",
+    class=QuantizedMatMul,
+    shapes=&QUANTIZED_SHAPES,
+    m=8,
+    group_size=64,
+    tpg=64,
+    bits=8,
+    tol=1e-2,
+    mlx="affine_qmm_fast_float16_t_gs_64_b_8_alN_true_batch_0",
+    metal_file="quantized.metal",
+    dtypes=&[metaltile_core::dtype::DType::F32, metaltile_core::dtype::DType::F16, metaltile_core::dtype::DType::BF16],
+)]
 #[kernel]
 pub fn mt_qmm_bm4_int8_fast<T>(
     w: Tensor<u32>,
@@ -2333,26 +2312,6 @@ pub fn mt_qmm_bm4_int8_fast<T>(
         store(out[m_row_d * n + row1], r1_d.cast::<T>());
         store(out[m_row_d * n + row2], r2_d.cast::<T>());
         store(out[m_row_d * n + row3], r3_d.cast::<T>());
-    }
-}
-
-inventory::submit! {
-    crate::spec::BenchSpec {
-        op: "quantized",
-        subop: "qmm_bm4_int8_fast",
-        kernel_name: "mt_qmm_bm4_int8_fast",
-        kernel_ir: mt_qmm_bm4_int8_fast::kernel_ir_for,
-        dtypes: &[
-            metaltile_core::dtype::DType::F32,
-            metaltile_core::dtype::DType::F16,
-            metaltile_core::dtype::DType::BF16,
-        ],
-        tol: 5e-2,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: crate::spec::BenchDispatch::Generic,
-        kernel_mode: Some(metaltile_core::ir::KernelMode::Reduction),
     }
 }
 
@@ -3111,8 +3070,23 @@ pub fn mt_qmm_mma_m16<T>(
 // TG memory layout: identical Xs[32×36] / Ws[32×36] shape (skew=4).
 // X load: same as mt_qmm_mma (8 contiguous K elems per lane, vec4 fusion).
 // MMA inner loop: identical to mt_qmm_mma (4 k-inner × 4 frags = 16 MMAs/SG).
-// NOTE: registered via `inventory::submit!` below — see
-// `mt_qmv_int8_fast`. Pinned by `qmm_mma_int8_gpu_correctness`.
+#[bench_kernel(
+    op="quantized",
+    subop="qmm_mma_int8",
+    class=QuantizedMatMul,
+    shapes=&QUANTIZED_SHAPES,
+    m=32,
+    group_size=64,
+    tpg=128,
+    bits=8,
+    // int8 max_q=255 amplifies bf16 round-trip drift further than int4's 15.
+    // At production shapes (M=4096+, K=4096+) bf16 cosine drifts ~8-9e-3.
+    // tol=1e-2 keeps f32/f16 cells tight while passing bf16.
+    tol=1e-2,
+    mlx="affine_qmm_t_{tn}_gs_64_b_8_alN_true_batch_0",
+    metal_file="quantized.metal",
+    dtypes=&[metaltile_core::dtype::DType::F32, metaltile_core::dtype::DType::F16, metaltile_core::dtype::DType::BF16],
+)]
 #[kernel]
 pub fn mt_qmm_mma_int8<T>(
     w: Tensor<u32>,
@@ -3370,26 +3344,6 @@ pub fn mt_qmm_mma_int8<T>(
     );
 }
 
-inventory::submit! {
-    crate::spec::BenchSpec {
-        op: "quantized",
-        subop: "qmm_mma_int8",
-        kernel_name: "mt_qmm_mma_int8",
-        kernel_ir: mt_qmm_mma_int8::kernel_ir_for,
-        dtypes: &[
-            metaltile_core::dtype::DType::F32,
-            metaltile_core::dtype::DType::F16,
-            metaltile_core::dtype::DType::BF16,
-        ],
-        tol: 5e-2,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: crate::spec::BenchDispatch::Generic,
-        kernel_mode: Some(metaltile_core::ir::KernelMode::Reduction),
-    }
-}
-
 // ─── mt_qmm_mma_m16_int8 ────────────────────────────────────────────────
 //
 // Int8 half-height MMA — the M=16 cell, int8 weights.
@@ -3412,8 +3366,21 @@ inventory::submit! {
 // the 512-element Xs tile). Same as int4.
 //
 // MMA inner loop: identical to mt_qmm_mma_m16 (no A/B barrier; 4 k-inner).
-// NOTE: registered via `inventory::submit!` below — see
-// `mt_qmv_int8_fast`. Pinned by `qmm_mma_int8_gpu_correctness`.
+#[bench_kernel(
+    op="quantized",
+    subop="qmm_mma_m16_int8",
+    class=QuantizedMatMul,
+    shapes=&QUANTIZED_SHAPES,
+    m=16,
+    group_size=64,
+    tpg=64,
+    bits=8,
+    // Same bf16 tolerance rationale as mt_qmm_mma_int8.
+    tol=1e-2,
+    mlx="affine_qmm_t_{tn}_gs_64_b_8_alN_true_batch_0",
+    metal_file="quantized.metal",
+    dtypes=&[metaltile_core::dtype::DType::F32, metaltile_core::dtype::DType::F16, metaltile_core::dtype::DType::BF16],
+)]
 #[kernel]
 pub fn mt_qmm_mma_m16_int8<T>(
     w: Tensor<u32>,
@@ -3731,26 +3698,6 @@ pub fn mt_qmm_mma_m16_int8<T>(
         out[(out_m_base + 8u32 + fm) * n + out_n_base + 8u32 + fn1],
         simdgroup_elem_load(c_f11, 1).cast::<T>(),
     );
-}
-
-inventory::submit! {
-    crate::spec::BenchSpec {
-        op: "quantized",
-        subop: "qmm_mma_m16_int8",
-        kernel_name: "mt_qmm_mma_m16_int8",
-        kernel_ir: mt_qmm_mma_m16_int8::kernel_ir_for,
-        dtypes: &[
-            metaltile_core::dtype::DType::F32,
-            metaltile_core::dtype::DType::F16,
-            metaltile_core::dtype::DType::BF16,
-        ],
-        tol: 5e-2,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: crate::spec::BenchDispatch::Generic,
-        kernel_mode: Some(metaltile_core::ir::KernelMode::Reduction),
-    }
 }
 
 // ─── mt_affine_dequantize_int4 ─────────────────────────────────────────
