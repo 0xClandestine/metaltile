@@ -226,7 +226,7 @@ fn run_fast_qkv(
     kernel.mode = KernelMode::Reduction;
 
     let max_rows = out_q.max(out_k).max(out_v);
-    let n_tgs = (max_rows + 7) / 8;
+    let n_tgs = max_rows.div_ceil(8);
     let result = ctx
         .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [n_tgs, 1, 3], [64, 1, 1])
         .expect("batched_qkv_qgemv_fast dispatch");

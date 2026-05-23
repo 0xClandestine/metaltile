@@ -82,6 +82,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 
 // ── dispatch helper ────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn run_int8_mma(
     x: &[f32],
     weight_packed: &[u32],
@@ -122,6 +123,7 @@ fn run_int8_mma(
 
 /// Test data factory: n_experts=4, T=64, N=64, K=64, group_size=32.
 /// All dims are clean multiples of BM=BN=BK=32.
+#[allow(clippy::type_complexity)]
 fn make_test_data(dt: Dt) -> (Vec<u32>, Vec<u32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<u32>) {
     let n_experts = 4usize;
     let k_in = 64usize;

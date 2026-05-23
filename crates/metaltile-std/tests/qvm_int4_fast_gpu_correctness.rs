@@ -62,9 +62,9 @@ fn oracle_vecmat(
     n: usize,
     group_size: usize,
 ) -> Vec<f32> {
-    let n_groups_k = k / group_size;
     let packs_per_krow = n / 8;
     let mut y = vec![0.0_f32; n];
+    #[allow(clippy::needless_range_loop)]
     for kk in 0..k {
         let g = kk / group_size;
         let xk = x[kk];
@@ -77,8 +77,6 @@ fn oracle_vecmat(
             let bias = biases[g * n + c];
             y[c] += (q * scale + bias) * xk;
         }
-        // Suppress unused variable warning for n_groups_k.
-        let _ = n_groups_k;
     }
     y
 }
@@ -99,6 +97,7 @@ fn source(n: usize, seed: u64, scale: f32, off: f32) -> Vec<f32> {
 /// `k` = inner dimension (K), `n` = output columns (N).
 /// Grid: `[N/8, 1, 1]`, TPG = 64.
 /// Kernel constexpr args: `k`, `n`, `gs_per_col = k / group_size`.
+#[allow(clippy::too_many_arguments)]
 fn run(
     w: &[u32],      // [K, N/8] flattened
     scales: &[f32], // [K/G, N]

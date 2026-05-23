@@ -355,6 +355,7 @@ fn dequant_gemv_int5_word_spill_path_f32() {
 // `out_dim` must be a multiple of 8; `group_size` must be 64.
 // Grid: [out_dim/8, 1, 1]; TPG = 64.
 
+#[allow(clippy::too_many_arguments)]
 fn run_dequant_gemv_int4_fast(
     weight: &[u32],
     scales: &[f32],

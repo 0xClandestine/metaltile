@@ -105,6 +105,7 @@ fn skip_unless_apple10() -> bool {
 
 // ── dispatch helper ────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn run_mpp_int8(
     x: &[f32],
     weight_packed: &[u32],
@@ -144,6 +145,7 @@ fn run_mpp_int8(
 // ── test data factory ──────────────────────────────────────────────────────
 
 /// n_experts=4, T=64, N=64, K=64, group_size=32 — clean tile shape.
+#[allow(clippy::type_complexity)]
 fn make_test_data(dt: Dt) -> (Vec<u32>, Vec<u32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<u32>) {
     let n_experts = 4usize;
     let k_in = 64usize;
