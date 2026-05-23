@@ -287,6 +287,81 @@ want the split / extra dispatch.
 (`fence` is **not** a next-up item — it is intentionally out of scope; see
 [§ Fence ops](#fence-ops--intentionally-out-of-scope).)
 
+## §5 Micro-optimizations across existing perf paths
+
+Researched on branch `ek/t4-microopts` (2026-05-23).  For each of the
+five standard micro-optimization patterns the investigation determined
+whether the pattern applies, is already present, or requires new
+infrastructure.  Full rationale and implementation sketches are in
+[`docs/PROPOSED_OPTIMIZATIONS.md`](PROPOSED_OPTIMIZATIONS.md).
+
+### Pattern 1 — `float4` / `half4` vectorized X loads
+
+**Already implemented** — no action required.
+
+The `VectorizePass`
+(`crates/metaltile-codegen/src/passes/vectorize.rs`, `MAX_VEC_RUN = 4`)
+detects consecutive scalar `Load` ops with contiguous indices and
+promotes them to `Op::VectorLoad`.  The MSL emitter maps width-4 loads
+to `float4` (F32), `half4` (F16), `bfloat4` (BF16, Metal 3.1+).  All
+X-load sites in the GEMV/GEMM kernels are deliberately sequenced for
+this pattern (code comments confirm; e.g. `mt_qmv`: "16 X loads —
+consecutive in IR for vectorize fusion (4× float4)"; `mt_qmm_mma`:
+"8 contiguous device loads → 2× vec4 after vectorize pass").
+
+### Pattern 2 — `simd_broadcast` for scale/bias broadcast across lanes
+
+**Proposal only** — see `PROPOSED_OPTIMIZATIONS.md §2`.
+
+The DSL exposes `simd_broadcast(value, lane)` (used in AURA kernels);
+the optimization applies in principle to the int4/int8 GEMV kernels
+where 4 (int4) or 16 (int8) consecutive lanes share the same group
+scale/bias address per K-block.  Not implemented because:
+(a) Apple Silicon L1 cache natively broadcasts same-address loads from
+threads in the same simdgroup — the hardware already coalesces the
+redundant loads into a single fetch; (b) no profiling evidence that
+instruction pressure (not memory bandwidth) is the bottleneck.
+
+### Pattern 3 — `fast::` math intrinsics in audio + numeric paths
+
+**Proposal only** — see `PROPOSED_OPTIMIZATIONS.md §3`.
+
+`mel_spectrogram` (sin/cos/log), `mt_softmax` (exp), `mt_logsumexp`
+(exp/log), `vocoder_istft` (sin/cos) all use IEEE-precise Metal
+built-ins.  Metal's `fast::exp`, `fast::log`, `fast::sin`, `fast::cos`
+would give ~1.5–2× speedup at 1–3 ULP instead of ≤ 0.5 ULP.  Not
+implemented because the DSL has no `FastExp` / `FastLog` / `FastSin` /
+`FastCos` `UnaryOpKind` variants — adding them requires new IR nodes,
+codegen emission, and precision validation against the existing
+test tolerances (`1e-3` for mel, `1e-4` for softmax/logsumexp).
+
+### Pattern 4 — f16/bf16 accumulator path for small-K shapes
+
+**Not applicable** — see `PROPOSED_OPTIMIZATIONS.md §4`.
+
+All production GEMV/GEMM kernel shapes accumulate over K ≥ 64 elements
+under int4/int8 quantization noise; switching accumulators from f32 to T
+would push the accumulated error above the 0.999 cosine similarity gate.
+The audio kernels (mel/vocoder) are also f32-accumulation-critical due to
+catastrophic cancellation in online-softmax / DFT summation.  fp32
+accumulators are correctness-required across all identified targets.
+
+### Pattern 5 — K-loop software pipelining
+
+**Proposal only** — see `PROPOSED_OPTIMIZATIONS.md §5`.
+
+The MMA-tiled K-loop kernels (`mt_qmm_mma`, `mt_qmm_mma_m16`,
+`mt_qmm_mma_int8`, `mt_qmm_mma_m16_int8`, `mt_qmm_mma_mpp_int8`,
+`mt_qmm_nax_int8`, `mt_moe_gather_qmm_mma_*`) load the next K-block
+into threadgroup memory and then compute MMA in strict sequence.
+Overlapping the load of K=k with MMA of K=k-1 (two-stage ping-pong)
+would hide ≈50% of the memory-latency gap and typically yields 15–25%
+throughput improvement on M3 hardware (per Apple's `steel_gemm` docs).
+Not implemented because it requires a new `Op::PrefetchAsync` IR op and
+a `prefetch.rs` codegen pass that identifies and reorders the
+`[ThreadgroupStore* … ThreadgroupBarrier … MMA*]` pattern; estimated
+scope is 2–3 days of codegen work.
+
 ### Model-enablement kernels (separate track from generic-op completeness)
 
 These don't move the coverage % much but each one unblocks a model family or
