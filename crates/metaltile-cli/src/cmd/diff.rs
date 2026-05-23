@@ -14,7 +14,7 @@ use crate::{
     CliError,
     DiffArgs,
     matches_filter,
-    term::{Color, Style, paint_stderr},
+    term::{Color, Style, paint_stderr, paint_stdout},
 };
 
 pub fn run(args: &DiffArgs) -> Result<(), CliError> {
@@ -286,71 +286,56 @@ fn sort_diff_rows(diff_rows: &mut [DiffRow], sort: &str) {
 }
 
 /// Display-ready column data for one diff row, with unstyled text for
-/// width measurement and styled text for final printing.
+/// width measurement and style parameters for final styling (matching
+/// bench's approach: pad text then style the whole padded string with
+/// `paint_stdout`).
 struct DiffRowDisplay {
-    op: String,       // unstyled
-    shape: String,    // unstyled
-    baseline: String, // unstyled, e.g. "104%" or "—"
-    current: String,  // unstyled, e.g. "—" or "420%"
-    delta: String,    // unstyled, e.g. "▲ +88%" or "removed"
-    // Styled versions for final output
-    op_styled: String,
-    shape_styled: String,
-    baseline_styled: String,
-    current_styled: String,
-    delta_styled: String,
+    op: String,          // unstyled
+    shape: String,       // unstyled
+    baseline: String,    // unstyled, e.g. "104%" or "—"
+    current: String,     // unstyled, e.g. "—" or "420%"
+    delta: String,       // unstyled, e.g. "▲ +88%" or "removed"
+    baseline_style: Style,
+    current_style: Style,
+    delta_style: Style,
 }
 
 fn build_diff_row_display(row: &DiffRow) -> DiffRowDisplay {
-    let (op_styled, shape_styled) = format_op_shape(&row.op, &row.shape);
-
     let baseline = row.baseline_pct.map(|p| format!("{p:.0}%")).unwrap_or_else(|| "—".into());
     let current = row.current_pct.map(|p| format!("{p:.0}%")).unwrap_or_else(|| "—".into());
 
-    let dim_style = Style::new().fg(Color::BrightBlack);
-    let bright = Style::new().fg(Color::BrightWhite);
-
-    let (baseline_styled, current_styled) = match row.kind {
+    // Baseline/current style — dim for new/removed, bright white otherwise
+    let (baseline_style, current_style) = match row.kind {
         DeltaKind::New | DeltaKind::Removed =>
-            (paint_stderr(&baseline, dim_style), paint_stderr(&current, dim_style)),
-        _ => (paint_stderr(&baseline, bright), paint_stderr(&current, bright)),
+            (Style::new().fg(Color::BrightBlack), Style::new().fg(Color::BrightBlack)),
+        _ => (Style::new().fg(Color::BrightWhite), Style::new().fg(Color::BrightWhite)),
     };
 
-    // Delta column — kind label folded in, one paint() call so restyle
-    // sees a single SGR pair (fixes partial color in CI where the old
-    // arrow+percentage concatenation produced nested escapes).
+    // Delta column style:
     //   green bold = improvement (▲ +88%)
     //   red bold   = regression (▼ -35%)
     //   yellow     = borderline / within threshold (▲ +5%, ▼ -3%)
     //   dim        = exactly 0% (— +0%)
     //   red        = "removed"
     //   cyan       = "new"
-    let (delta, delta_styled) = match row.kind {
+    let (delta, delta_style) = match row.kind {
         DeltaKind::Removed =>
-            ("removed".to_string(), paint_stderr("removed", Style::new().fg(Color::Red))),
-        DeltaKind::New => ("new".to_string(), paint_stderr("new", Style::new().fg(Color::Cyan))),
+            ("removed".to_string(), Style::new().fg(Color::Red)),
+        DeltaKind::New => ("new".to_string(), Style::new().fg(Color::Cyan)),
         DeltaKind::Unchanged => {
             let pct = row.delta_pct.unwrap_or(0.0);
             if pct == 0.0 {
-                let s = format!("— {:+.0}%", pct);
-                (s.clone(), paint_stderr(&s, dim_style))
+                (format!("— {:+.0}%", pct), Style::new().fg(Color::BrightBlack))
             } else {
                 let arrow = if pct > 0.0 { "▲" } else { "▼" };
-                let s = format!("{arrow} {:+.0}%", pct);
-                let yellow = Style::new().fg(Color::Yellow);
-                let styled = paint_stderr(&s, yellow);
-                (s, styled)
+                (format!("{arrow} {:+.0}%", pct), Style::new().fg(Color::Yellow))
             }
         },
         DeltaKind::Regression => {
-            let s = format!("▼ {:+.0}%", row.delta_pct.unwrap_or(0.0));
-            let style = Style::new().fg(Color::Red).bold();
-            (s.clone(), paint_stderr(&s, style))
+            (format!("▼ {:+.0}%", row.delta_pct.unwrap_or(0.0)), Style::new().fg(Color::Red).bold())
         },
         DeltaKind::Improvement => {
-            let s = format!("▲ {:+.0}%", row.delta_pct.unwrap_or(0.0));
-            let style = Style::new().fg(Color::Green).bold();
-            (s.clone(), paint_stderr(&s, style))
+            (format!("▲ {:+.0}%", row.delta_pct.unwrap_or(0.0)), Style::new().fg(Color::Green).bold())
         },
     };
 
@@ -360,11 +345,9 @@ fn build_diff_row_display(row: &DiffRow) -> DiffRowDisplay {
         baseline,
         current,
         delta,
-        op_styled,
-        shape_styled,
-        baseline_styled,
-        current_styled,
-        delta_styled,
+        baseline_style,
+        current_style,
+        delta_style,
     }
 }
 
@@ -379,20 +362,18 @@ fn print_diff_table(rows: &[DiffRow]) {
     let cur_w = displays.iter().map(|d| d.current.len()).max().unwrap_or(3);
     let delta_w = displays.iter().map(|d| d.delta.len()).max().unwrap_or(2).max(2);
 
-    let sep = paint_stderr("│", Style::new().fg(Color::BrightBlack).dim());
+    let sep = paint_stdout("│", Style::new().fg(Color::BrightBlack).dim());
+
+    // Apply style to padded text directly (matching bench's approach).
+    let op_style = Style::new().fg(Color::Cyan).bold();
+    let shape_style = Style::new().fg(Color::BrightWhite);
 
     for d in &displays {
-        let op_padded = pad_right(&d.op, op_w);
-        let shape_padded = pad_right(&d.shape, shape_w);
-        let bl_padded = pad_left(&d.baseline, bl_w);
-        let cur_padded = pad_left(&d.current, cur_w);
-        let delta_padded = pad_left(&d.delta, delta_w);
-
-        let op_styled = restyle(&op_padded, &d.op_styled);
-        let shape_styled = restyle(&shape_padded, &d.shape_styled);
-        let bl_styled = restyle(&bl_padded, &d.baseline_styled);
-        let cur_styled = restyle(&cur_padded, &d.current_styled);
-        let delta_styled = restyle(&delta_padded, &d.delta_styled);
+        let op_styled = paint_stdout(pad_right(&d.op, op_w), op_style);
+        let shape_styled = paint_stdout(pad_right(&d.shape, shape_w), shape_style);
+        let bl_styled = paint_stdout(pad_left(&d.baseline, bl_w), d.baseline_style);
+        let cur_styled = paint_stdout(pad_left(&d.current, cur_w), d.current_style);
+        let delta_styled = paint_stdout(pad_left(&d.delta, delta_w), d.delta_style);
 
         println!(
             "  {op_styled} {sep} {shape_styled} {sep} {bl_styled} → {cur_styled} {sep} {delta_styled}",
@@ -412,39 +393,7 @@ fn pad_left(s: &str, width: usize) -> String {
     if len >= width { s.to_string() } else { format!("{: >len$}{s}", "", len = width - len) }
 }
 
-/// Take a padded plain-text cell and its original styled short cell,
-/// then apply the same styling to the padded version. We do this by
-/// wrapping the padding gap in the same ANSI style as the original.
-fn restyle(padded: &str, styled_short: &str) -> String {
-    // styled_short looks like "\x1b[1;31m104%\x1b[0m"
-    // padded looks like "  104%"
-    // We need to insert the SGR codes around the non-blank portion.
 
-    // Find the SGR open and close.
-    let open_end = styled_short.find('m').map(|i| i + 1);
-    let Some(sgr_open_end) = open_end else {
-        return padded.to_string();
-    };
-    let sgr_open = &styled_short[..sgr_open_end];
-    let sgr_close = "\x1b[0m";
-
-    // Everything between SGR open and SGR close is the styled content.
-    let after_open = &styled_short[sgr_open_end..];
-    let Some(close_pos) = after_open.rfind(sgr_close) else {
-        return padded.to_string();
-    };
-    let content = &after_open[..close_pos];
-
-    // Find where `content` starts in `padded`.
-    if let Some(pos) = padded.find(content) {
-        let before = &padded[..pos];
-        let after = &padded[pos + content.len()..];
-        format!("{before}{sgr_open}{content}{sgr_close}{after}")
-    } else {
-        // Fallback: wrap the entire padded string.
-        format!("{sgr_open}{padded}{sgr_close}")
-    }
-}
 
 fn print_summary(
     regressions: usize,
@@ -543,11 +492,7 @@ fn build_result_map(results: &[Value]) -> HashMap<RowKey, (f64, f64)> {
     map
 }
 
-fn format_op_shape(op: &str, shape: &str) -> (String, String) {
-    let op_col = paint_stderr(op, Style::new().fg(Color::Cyan).bold());
-    let shape_col = paint_stderr(shape, Style::new().fg(Color::BrightWhite));
-    (op_col, shape_col)
-}
+
 
 #[cfg(test)]
 mod tests {
@@ -648,25 +593,7 @@ mod tests {
         assert_eq!(pad_right("rust", 4), "rust");
     }
 
-    // ── restyle ───────────────────────────────────────────────────────
 
-    #[test]
-    fn restyle_wraps_padded_text() {
-        // Simulate a styled short cell: "104%" in bold cyan
-        let short = format!("{}{}{}", "\x1b[1;36m", "104%", "\x1b[0m");
-        // Padded to width 6: "  104%"
-        let padded = "  104%";
-        let result = restyle(padded, &short);
-        // Should insert SGR around the content portion
-        assert!(result.starts_with("  "));
-        assert!(result.contains("\x1b[1;36m104%\x1b[0m"));
-    }
-
-    #[test]
-    fn restyle_handles_no_sgr() {
-        let result = restyle("hello", "hello");
-        assert_eq!(result, "hello");
-    }
 
     // ── build_diff_row_display: delta column carries all info ─────
 
