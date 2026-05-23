@@ -68,6 +68,19 @@
 //! are constexprs so they're host-side checked, not validated in the
 //! kernel.
 //!
+//! * Learned per-head attention sink (`has_sink` / `sink_logit`
+//!   constexprs) — GPT-OSS-20B. Distinct from the `sink_end`
+//!   sink-*token* range above: this is a single learned logit per
+//!   head that joins the softmax denominator as a virtual key with
+//!   value 0. It contributes `exp(sink_logit - g_max)` to the running
+//!   sum and nothing to the output accumulator. The grid is one
+//!   threadgroup per q_head, so the host passes the routed head's
+//!   sink as a scalar constexpr (same as `scale`). `has_sink == 0`
+//!   masks the term out — the dense / sliding-window paths stay
+//!   bit-identical to the pre-sink kernel. Folding it on-GPU removes
+//!   the per-layer host-side post-hoc softmax rescale GPT-OSS-20B
+//!   otherwise pays.
+//!
 //! Online-softmax math runs in fp32 throughout (storage stays in T)
 //! to avoid catastrophic cancellation in the `exp(max_old - max_new)`
 //! rescale at long context.
@@ -92,6 +105,18 @@ pub fn ffai_sdpa_decode<T>(
     #[constexpr] heads_per_group: u32,
     #[constexpr] sink_end: u32,
     #[constexpr] window_start: u32,
+    // Learned per-head attention sink (GPT-OSS-20B). When `has_sink == 1`
+    // the softmax denominator gains a virtual key with score
+    // `sink_logit` and value 0 — the sink contributes
+    // `exp(sink_logit - g_max)` to the running sum but nothing to the
+    // output accumulator. The grid is one threadgroup per q_head, so
+    // the host passes the routed head's sink as a scalar constexpr,
+    // exactly like `scale`. `has_sink == 0` masks the term out, so the
+    // dense / sliding-window paths are bit-identical to the pre-sink
+    // kernel. Distinct from the `sink_end` sink-*token* path above:
+    // this is a learned per-head logit, not a position range.
+    #[constexpr] has_sink: u32,
+    #[constexpr] sink_logit: f32,
     #[constexpr] scale: f32,
 ) {
     let q_head = tgid_x;
@@ -231,11 +256,27 @@ pub fn ffai_sdpa_decode<T>(
     }
     threadgroup_barrier();
     if sg == 0 {
-        let g_max_in = select(lane < ns, threadgroup_load("tg_max", lane), neg_infinity());
+        let g_max_raw = select(lane < ns, threadgroup_load("tg_max", lane), neg_infinity());
+        // Fold the learned sink logit into the cross-simdgroup max:
+        // the sink is a virtual key, so the global softmax max must
+        // also cover its score. Carry it on lane 0 only (combined with
+        // that lane's real max, never replacing it) so simd_max sees
+        // it exactly once. Masked to -inf when `has_sink == 0`.
+        let sink_max = select(has_sink > 0u32, sink_logit, neg_infinity());
+        let g_max_in =
+            select(lane == 0u32, select(g_max_raw > sink_max, g_max_raw, sink_max), g_max_raw);
         let g_max = simd_max(g_max_in);
+        // Each simdgroup's partial sum was computed against its own
+        // `tg_max[lane]` (the *raw* per-simdgroup max), so the rescale
+        // factor must use `g_max_raw`, not the sink-combined `g_max_in`.
         let g_sum_in =
-            select(lane < ns, threadgroup_load("tg_sum", lane) * exp(g_max_in - g_max), 0.0f32);
-        let g_sum = simd_sum(g_sum_in);
+            select(lane < ns, threadgroup_load("tg_sum", lane) * exp(g_max_raw - g_max), 0.0f32);
+        // The sink contributes `exp(sink_logit - g_max)` to the
+        // denominator (value 0 → nothing to the output accumulator).
+        // Accumulate it on lane 0 so it counts exactly once in the
+        // simd_sum. Zero when `has_sink == 0`.
+        let sink_sum = select(has_sink > 0u32, exp(sink_logit - g_max), 0.0f32);
+        let g_sum = simd_sum(g_sum_in + select(lane == 0u32, sink_sum, 0.0f32));
         if lane == 0 {
             threadgroup_store("tg_max", 0, g_max);
             threadgroup_store("tg_sum", 0, g_sum);

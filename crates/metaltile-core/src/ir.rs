@@ -1399,6 +1399,17 @@ pub struct Kernel {
     /// opt in via the kernel module's wrapper. Currently used by the
     /// SDPA-prefill MMA family on M2 where it buys ~2pts bf16.
     pub bfloat_reinterpret_cast: bool,
+    /// Per-kernel opt-in for the indirect-dispatch Swift wrapper variant.
+    /// When `true`, `render_swift_wrappers` emits a `<name>_indirect`
+    /// alongside the regular wrapper that takes an `MTLBuffer` carrying
+    /// `MTLDispatchThreadgroupsIndirectArguments` instead of an `MTLSize`
+    /// grid. Used by FFAI's GPU-router work to chain successive MoE-layer
+    /// dispatches without per-layer host stalls. Replaces the previous
+    /// hardcoded kernel-name allowlist in `metaltile-codegen::emit` —
+    /// kernels now declare their own indirect-dispatch eligibility via
+    /// the DSL / IR rather than the codegen having a special-case match
+    /// on `name`.
+    pub wants_indirect_variant: bool,
 }
 
 impl Kernel {
@@ -1417,6 +1428,7 @@ impl Kernel {
             return_shapes: Vec::new(),
             tile_annotations: FxHashMap::default(),
             bfloat_reinterpret_cast: false,
+            wants_indirect_variant: false,
         }
     }
 
@@ -1465,6 +1477,7 @@ impl Clone for Kernel {
             return_shapes: self.return_shapes.clone(),
             tile_annotations: self.tile_annotations.clone(),
             bfloat_reinterpret_cast: self.bfloat_reinterpret_cast,
+            wants_indirect_variant: self.wants_indirect_variant,
         }
     }
 }
@@ -1704,8 +1717,9 @@ impl Op {
             },
             Op::Zeros { dtype, shape } => write!(f, "Zeros({dtype:?}, {shape:?})"),
             Op::Transpose { value } => write!(f, "Transpose(v{})", value.as_u32()),
-            Op::ExpandDims { value, axis } =>
-                write!(f, "ExpandDims(v{}, axis={axis})", value.as_u32()),
+            Op::ExpandDims { value, axis } => {
+                write!(f, "ExpandDims(v{}, axis={axis})", value.as_u32())
+            },
             Op::Reshape { value, shape } => write!(f, "Reshape(v{}, {shape:?})", value.as_u32()),
             Op::Cat { values, axis } => {
                 let vals: Vec<String> = values.iter().map(|v| format!("v{}", v.as_u32())).collect();
@@ -1761,8 +1775,9 @@ impl Op {
                 write!(f, "CoopTileStoreC({name}, {ptr_name}, extents<{ei},{eo}>)")
             },
             Op::UnaryOp { op, value } => write!(f, "UnaryOp({op:?}, v{})", value.as_u32()),
-            Op::Activation { kind, value } =>
-                write!(f, "Activation({kind:?}, v{})", value.as_u32()),
+            Op::Activation { kind, value } => {
+                write!(f, "Activation({kind:?}, v{})", value.as_u32())
+            },
             Op::Select { cond, on_true, on_false } => {
                 write!(
                     f,
@@ -1772,8 +1787,9 @@ impl Op {
                     on_false.as_u32()
                 )
             },
-            Op::Broadcast { value, shape } =>
-                write!(f, "Broadcast(v{}, {shape:?})", value.as_u32()),
+            Op::Broadcast { value, shape } => {
+                write!(f, "Broadcast(v{}, {shape:?})", value.as_u32())
+            },
             Op::Splat { value, dtype, shape } => write!(f, "Splat({value}, {dtype:?}, {shape:?})"),
             Op::FusedElementwise { ops } => {
                 write!(f, "FusedElementwise([")?;

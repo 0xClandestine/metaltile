@@ -120,8 +120,9 @@ impl super::MslGenerator {
             ReduceKind::Sum => wl!(out, "{pad}float {result_var} = simd_sum(float({input_var}));"),
             ReduceKind::Max => wl!(out, "{pad}float {result_var} = simd_max(float({input_var}));"),
             ReduceKind::Min => wl!(out, "{pad}float {result_var} = simd_min(float({input_var}));"),
-            ReduceKind::Product =>
-                wl!(out, "{pad}float {result_var} = __mt_simd_product(float({input_var}));"),
+            ReduceKind::Product => {
+                wl!(out, "{pad}float {result_var} = __mt_simd_product(float({input_var}));")
+            },
             ReduceKind::Mean => {
                 wl!(
                     out,

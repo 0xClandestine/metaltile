@@ -30,3 +30,6 @@ objc2-metal = { version = "0.3", features = [
 ] }
 objc2-foundation = "0.3"
 
+[dev-dependencies]
+# AURA MSL snapshot tests (tests/aura_msl_snapshots.rs).
+insta.workspace = true

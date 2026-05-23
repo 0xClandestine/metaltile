@@ -66,11 +66,14 @@ use metaltile::kernel;
 use metaltile_core::ir::KernelMode;
 
 use crate::{
-    bench_types::DType,
+    bench_types::{DType, FLOAT_DTYPES},
     spec::{BenchDispatch, BenchSpec},
 };
 
-const F32_ONLY: &[DType] = &[DType::F32];
+// Keep `DType` referenced for the inventory submit; `FLOAT_DTYPES`
+// supersedes the old `F32_ONLY` shortlist now that the kernel handles
+// fp32/fp16/bf16 via the generic `T` I/O dtype.
+const _: DType = DType::F32;
 
 macro_rules! aura_flash_p1_kernel {
     (
@@ -80,20 +83,21 @@ macro_rules! aura_flash_p1_kernel {
         $key_levels:literal,
         $value_levels:literal,
         $dims_per_lane:literal,
+        $causal:literal,
         $subop:literal
     ) => {
         #[kernel]
         pub fn $name<T>(
-            q_rot: Tensor<f32>,
+            q_rot: Tensor<T>,
             key_packed: Tensor<u32>,
-            key_norms: Tensor<f32>,
-            key_codebook: Tensor<f32>,
+            key_norms: Tensor<T>,
+            key_codebook: Tensor<T>,
             val_packed: Tensor<u32>,
-            val_norms: Tensor<f32>,
-            val_codebook: Tensor<f32>,
-            mut o_partials: Tensor<f32>,
-            mut m_partials: Tensor<f32>,
-            mut l_partials: Tensor<f32>,
+            val_norms: Tensor<T>,
+            val_codebook: Tensor<T>,
+            mut o_partials: Tensor<T>,
+            mut m_partials: Tensor<T>,
+            mut l_partials: Tensor<T>,
             #[constexpr] dim: u32,
             #[constexpr] key_packed_width: u32,
             #[constexpr] value_packed_width: u32,
@@ -101,6 +105,12 @@ macro_rules! aura_flash_p1_kernel {
             #[constexpr] repeat_count: u32,
             #[constexpr] num_blocks: u32,
             #[constexpr] block_size: u32,
+            // Global position of this query token in the KV stream. Only
+            // consulted by the causal variant (`$causal == 1`): keys at
+            // token index `t > q_position` are masked out. The non-causal
+            // variant ignores it (constexpr, so the dead branch is folded
+            // away — no runtime cost).
+            #[constexpr] q_position: u32,
         ) {
             let lane = program_id::<0>();
             let q_idx = program_id::<1>();
@@ -111,7 +121,13 @@ macro_rules! aura_flash_p1_kernel {
             let val_mask = (1u32 << $value_bits) - 1u32;
 
             let raw_end = block_idx * block_size + block_size;
-            let t_end = select(raw_end > tokens, tokens, raw_end);
+            let clamped_end = select(raw_end > tokens, tokens, raw_end);
+            // Causal cutoff: tokens strictly after `q_position` contribute
+            // nothing, so the inner loop can stop at `q_position + 1`. For
+            // the non-causal variant `$causal == 0` makes this a no-op
+            // (the macro substitutes the literal at compile time).
+            let causal_end = select($causal == 1u32, q_position + 1u32, clamped_end);
+            let t_end = select(causal_end < clamped_end, causal_end, clamped_end);
             let t_start = block_idx * block_size;
 
             // ── Cache codebooks in per-thread stack arrays.  Each lane
@@ -119,21 +135,21 @@ macro_rules! aura_flash_p1_kernel {
             // across the inner per-token loop.
             stack_alloc("key_cb", $key_levels, "f32");
             for i in range(0u32, $key_levels, 1u32) {
-                stack_store("key_cb", i, load(key_codebook[i]));
+                stack_store("key_cb", i, load(key_codebook[i]).cast::<f32>());
             }
             stack_alloc("val_cb", $value_levels, "f32");
             for i in range(0u32, $value_levels, 1u32) {
-                stack_store("val_cb", i, load(val_codebook[i]));
+                stack_store("val_cb", i, load(val_codebook[i]).cast::<f32>());
             }
 
             // ── Per-lane slice of the rotated query vector — held in
             // stack registers, loaded once.  Trailing lanes whose
             // `d >= dim` get zero so the dot product treats them as a
-            // no-op.
+            // no-op. Loaded as T and promoted to f32 for compute.
             stack_alloc("q_vals", $dims_per_lane, "f32");
             for i in range(0u32, $dims_per_lane, 1u32) {
                 let d = lane + i * 32u32;
-                let v = select(d < dim, load(q_rot[q_idx * dim + d]), 0.0f32);
+                let v = select(d < dim, load(q_rot[q_idx * dim + d]).cast::<f32>(), 0.0f32);
                 stack_store("q_vals", i, v);
             }
 
@@ -150,7 +166,7 @@ macro_rules! aura_flash_p1_kernel {
             // ── Per-token inner loop ───────────────────────────────────
             for t in range(t_start, t_end, 1u32) {
                 let k_packed_row = (kv_idx * tokens + t) * key_packed_width;
-                let k_norm = load(key_norms[kv_idx * tokens + t]);
+                let k_norm = load(key_norms[kv_idx * tokens + t]).cast::<f32>();
 
                 // Q · K via compressed-domain dot — bit-extract per dim,
                 // lookup centroid in cached key_cb, accumulate against the
@@ -190,7 +206,7 @@ macro_rules! aura_flash_p1_kernel {
                 // the running output via the standard online-softmax
                 // rescale-then-add.
                 let v_packed_row = (kv_idx * tokens + t) * value_packed_width;
-                let v_norm = load(val_norms[kv_idx * tokens + t]);
+                let v_norm = load(val_norms[kv_idx * tokens + t]).cast::<f32>();
 
                 for i in range(0u32, $dims_per_lane, 1u32) {
                     let d = lane + i * 32u32;
@@ -220,18 +236,18 @@ macro_rules! aura_flash_p1_kernel {
                 m_acc = new_m;
             }
 
-            // ── Write per-block partials ───────────────────────────────
+            // ── Write per-block partials (cast f32 → T on store) ───────
             let partial_base = (q_idx * num_blocks + block_idx) * dim;
             for i in range(0u32, $dims_per_lane, 1u32) {
                 let d = lane + i * 32u32;
                 if d < dim {
-                    store(o_partials[partial_base + d], stack_load("o", i));
+                    store(o_partials[partial_base + d], stack_load("o", i).cast::<T>());
                 }
             }
             if lane == 0u32 {
                 let ml_idx = q_idx * num_blocks + block_idx;
-                store(m_partials[ml_idx], m_acc);
-                store(l_partials[ml_idx], l_acc);
+                store(m_partials[ml_idx], m_acc.cast::<T>());
+                store(l_partials[ml_idx], l_acc.cast::<T>());
             }
         }
 
@@ -241,7 +257,7 @@ macro_rules! aura_flash_p1_kernel {
                 subop: $subop,
                 kernel_name: stringify!($name),
                 kernel_ir: $name::kernel_ir_for,
-                dtypes: F32_ONLY,
+                dtypes: FLOAT_DTYPES,
                 tol: 0.0,
                 mlx_src: None,
                 mlx_pattern: None,
@@ -277,6 +293,7 @@ aura_flash_p1_kernel!(
     16u32,
     4u32,
     4u32,
+    0u32,
     "flash_p1_kb4_vb2_d128"
 );
 aura_flash_p1_kernel!(
@@ -286,6 +303,7 @@ aura_flash_p1_kernel!(
     16u32,
     16u32,
     4u32,
+    0u32,
     "flash_p1_kb4_vb4_d128"
 );
 aura_flash_p1_kernel!(
@@ -295,6 +313,7 @@ aura_flash_p1_kernel!(
     16u32,
     4u32,
     2u32,
+    0u32,
     "flash_p1_kb4_vb2_d64"
 );
 aura_flash_p1_kernel!(
@@ -304,5 +323,40 @@ aura_flash_p1_kernel!(
     16u32,
     16u32,
     2u32,
+    0u32,
     "flash_p1_kb4_vb4_d64"
+);
+
+// ── Causal variants ──────────────────────────────────────────────────────
+//
+// Same compressed-domain online-softmax as the non-causal kernels, with
+// the per-token loop clamped at `q_position + 1` — every key strictly
+// after the query token is masked out. This is the prefill / chunked
+// form upstream's `turbo_flash_p1` carries as the `causal` template
+// flag. The `$causal == 1` literal lets the codegen const-fold the
+// `causal_end` selection, so the only runtime difference vs the
+// non-causal sibling is the inner-loop trip count.
+//
+// Production recipe `aura4v2` (kb=4, vb=2) for the two head dims FFAI
+// ships today; the symmetric `aura4v4` causal variant follows the same
+// macro arm if a consumer needs it.
+aura_flash_p1_kernel!(
+    aura_flash_p1_causal_kb4_vb2_d128,
+    4u32,
+    2u32,
+    16u32,
+    4u32,
+    4u32,
+    1u32,
+    "flash_p1_causal_kb4_vb2_d128"
+);
+aura_flash_p1_kernel!(
+    aura_flash_p1_causal_kb4_vb2_d64,
+    4u32,
+    2u32,
+    16u32,
+    4u32,
+    2u32,
+    1u32,
+    "flash_p1_causal_kb4_vb2_d64"
 );

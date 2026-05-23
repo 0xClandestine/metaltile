@@ -668,6 +668,177 @@ inventory::submit! {
     }
 }
 
+/// Scalar-broadcast FMA. Computes
+///   `out[i] = base[i] + scalar[0] * value[i]`
+/// for `i in 0..n`, broadcasting a 1-element scalar buffer across the
+/// `[n]` vectors. One thread per output element; the scalar re-loads
+/// through the GPU L1 cache so the broadcast is free.
+///
+/// Replaces FFAI's MoE per-expert weighted-add chain at decode T=1:
+/// instead of `Tensor.filled([hidden], weight)` (host alloc + memcpy)
+/// + `Ops.mul(expertOut, broadcast)` + `Ops.add(accumulator, scaled)`,
+/// we pack the routing weight into a 4-byte scalar buffer + dispatch
+/// this kernel once. Saves 8 host allocations + 16 dispatches per MoE
+/// layer × 40 layers = 320 allocations + 640 dispatches per
+/// Qwen3.6-A3B decode token.
+///
+/// Numerical: accumulation widens to f32 via load-side `.cast` to keep
+/// long sums of many small-weight expert outputs precise, then narrows
+/// back to T on store.
+#[kernel]
+pub fn mt_scalar_fma<T>(scalar: Tensor<T>, value: Tensor<T>, base: Tensor<T>, out: Tensor<T>) {
+    let idx = program_id(0);
+    let s = load(scalar[0]).cast::<f32>();
+    let v = load(value[idx]).cast::<f32>();
+    let b = load(base[idx]).cast::<f32>();
+    store(out[idx], (b + s * v).cast::<T>());
+}
+
+inventory::submit! {
+    BenchSpec {
+        op: "unary",
+        subop: "scalar_fma",
+        kernel_name: "mt_scalar_fma",
+        kernel_ir: mt_scalar_fma::kernel_ir_for,
+        dtypes: &[DType::F32, DType::F16, DType::BF16],
+        tol: 1e-3,
+        mlx_src: None,
+        mlx_pattern: None,
+        shapes: &[],
+        dispatch: BenchDispatch::Generic,
+        kernel_mode: Some(KernelMode::Elementwise),
+    }
+}
+
+/// Fused elementwise sigmoid + mul. Computes
+///   `out[i] = a[i] * sigmoid(b[i])`
+/// in one dispatch. Used by Qwen3 attention layer's output gate:
+///   attn_out = attn(x) * sigmoid(gate_proj(x))
+/// Currently expressed as `Ops.mul(attnFlat, Ops.sigmoid(gate))` —
+/// two dispatches. This fuses to one, saving 10 dispatches per
+/// Qwen3.6-A3B decode token (1 per attn layer × 10 attn layers).
+///
+/// Sigmoid is computed at f32 precision via load-side cast to avoid
+/// bf16 saturation drift near the asymptotes.
+#[kernel]
+pub fn mt_sigmoid_mul<T>(a: Tensor<T>, b: Tensor<T>, out: Tensor<T>) {
+    let idx = program_id(0);
+    let av = load(a[idx]).cast::<f32>();
+    let bv = load(b[idx]).cast::<f32>();
+    let sig = 1.0f32 / (1.0f32 + exp(0.0f32 - bv));
+    store(out[idx], (av * sig).cast::<T>());
+}
+
+inventory::submit! {
+    BenchSpec {
+        op: "unary",
+        subop: "sigmoid_mul",
+        kernel_name: "mt_sigmoid_mul",
+        kernel_ir: mt_sigmoid_mul::kernel_ir_for,
+        dtypes: &[DType::F32, DType::F16, DType::BF16],
+        tol: 1e-3,
+        mlx_src: None,
+        mlx_pattern: None,
+        shapes: &[],
+        dispatch: BenchDispatch::Generic,
+        kernel_mode: Some(KernelMode::Elementwise),
+    }
+}
+
+/// ⚠️ BROKEN — produces NaN/wrong output in FFAI integration test
+/// (forwardManyEquivalence fails T=8 + T=128). Kept here as a stub
+/// for future debug. Likely issue: multi-output codegen + the inlined
+/// `mt_rms_inv_scalar` reduction call don't compose correctly in this
+/// kernel shape. Possible fix paths:
+///   1. Manually inline the reduction without `mt_rms_inv_scalar`
+///   2. Use TWO compiled variants — one for residual write only, one
+///      for residual+norm — and dispatch both in a shared encoder
+///   3. Investigate the codegen MSL output for residual_out + normed_out
+///      ordering vs the reduction-tg threadgroup layout
+///
+/// Fused residual-add + RMSNorm. For each row of `[n]` elements:
+///   residual_out[i] = a[i] + b[i]
+///   normed_out[i]   = (a[i] + b[i]) * w[i] / sqrt(mean((a+b)^2) + eps)
+///
+/// Standard transformer pattern at layer boundary:
+///   h_new = h_old + mixer_out           (residual add)
+///   normed = rms_norm(h_new, w)         (pre-norm for next mixer)
+///
+/// Both outputs are needed downstream: `residual_out` is the persistent
+/// residual stream (input to the SECOND residual add of the same
+/// layer); `normed_out` is the pre-FFN/pre-next-mixer input.
+///
+/// Same TG=n/4 contract as `mt_rms_norm`. Saves 1 dispatch per
+/// residual-add+norm pair × 80 such pairs in Qwen3.6-A3B decode
+/// (2 per layer × 40 layers) = ~1.4 ms / token at 17 µs encoder
+/// overhead each.
+#[kernel]
+pub fn mt_add_rms_norm<T>(
+    a: Tensor<T>,
+    b: Tensor<T>,
+    w: Tensor<T>,
+    mut residual_out: Tensor<T>,
+    mut normed_out: Tensor<T>,
+    eps_buf: Tensor<f32>,
+    #[constexpr] n: u32,
+) {
+    let row = program_id::<0>();
+    let rs = row * n;
+    let col = tid * 4u32;
+    let in_bounds = col + 3u32 < n;
+    let safe_col = select(in_bounds, col, 0u32);
+    let safe_base = rs + safe_col;
+    let base = rs + col;
+    // Read a + b for 4 elements.
+    let a0 = load(a[safe_base]).cast::<f32>();
+    let a1 = load(a[safe_base + 1u32]).cast::<f32>();
+    let a2 = load(a[safe_base + 2u32]).cast::<f32>();
+    let a3 = load(a[safe_base + 3u32]).cast::<f32>();
+    let b0 = load(b[safe_base]).cast::<f32>();
+    let b1 = load(b[safe_base + 1u32]).cast::<f32>();
+    let b2 = load(b[safe_base + 2u32]).cast::<f32>();
+    let b3 = load(b[safe_base + 3u32]).cast::<f32>();
+    let s0 = a0 + b0;
+    let s1 = a1 + b1;
+    let s2 = a2 + b2;
+    let s3 = a3 + b3;
+    let raw_ssq = s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3;
+    let partial_ssq = select(in_bounds, raw_ssq, 0.0f32);
+    let rms = mt_rms_inv_scalar(partial_ssq, eps_buf, n);
+    if in_bounds {
+        // Write the residual stream (just the add).
+        store(residual_out[base], s0.cast::<T>());
+        store(residual_out[base + 1u32], s1.cast::<T>());
+        store(residual_out[base + 2u32], s2.cast::<T>());
+        store(residual_out[base + 3u32], s3.cast::<T>());
+        // Write the normalized stream.
+        let n0 = s0 * rms * load(w[col]).cast::<f32>();
+        let n1 = s1 * rms * load(w[col + 1u32]).cast::<f32>();
+        let n2 = s2 * rms * load(w[col + 2u32]).cast::<f32>();
+        let n3 = s3 * rms * load(w[col + 3u32]).cast::<f32>();
+        store(normed_out[base], n0.cast::<T>());
+        store(normed_out[base + 1u32], n1.cast::<T>());
+        store(normed_out[base + 2u32], n2.cast::<T>());
+        store(normed_out[base + 3u32], n3.cast::<T>());
+    }
+}
+
+inventory::submit! {
+    BenchSpec {
+        op: "unary",
+        subop: "add_rms_norm",
+        kernel_name: "mt_add_rms_norm",
+        kernel_ir: mt_add_rms_norm::kernel_ir_for,
+        dtypes: &[DType::F32, DType::F16, DType::BF16],
+        tol: 1e-3,
+        mlx_src: None,
+        mlx_pattern: None,
+        shapes: &[],
+        dispatch: BenchDispatch::Generic,
+        kernel_mode: Some(KernelMode::Elementwise),
+    }
+}
+
 inventory::submit! {
     BenchSpec {
         op: "unary",

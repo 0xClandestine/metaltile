@@ -1,5 +1,7 @@
 //! Mamba 2 (SSD-form) building blocks: the selective-scan single-token
-//! decode step and the depthwise causal-conv streaming step.
+//! decode step and the depthwise causal-conv streaming step. Plus
+//! `ssm_step_a2d` — the Mamba 1 (Jamba) variant carrying a 2-D
+//! per-(channel, state) `A_log` instead of the scalar-per-head `A`.
 //!
 //! `mt_ssm_step` is a faithful port of MLX's `ssm_step<T, Dh, Ds, H, G>`
 //! from ekryski's `mlx` fork (`alpha` branch) — semantically MLX-aligned
@@ -58,7 +60,12 @@ pub fn conv1d_causal_step<T>(
     // pair with state[0]..state[K-2].
     let w_last = load(w[(kernel_size - 1u32) * n_channels + d]).cast::<f32>();
     let mut acc = b_d + w_last * x_d;
-    for k in range(0u32, kernel_size - 1u32, 1u32) {
+    // `kernel_size` is contractually >= 2 (a causal conv with state).
+    // Guard the unsigned subtraction anyway: a stray `kernel_size == 0`
+    // would make `kernel_size - 1` underflow to ~4e9 — a GPU-pinning
+    // loop. `select` clamps the trip count to 0 instead.
+    let conv_taps = select(kernel_size > 1u32, kernel_size - 1u32, 0u32);
+    for k in range(0u32, conv_taps, 1u32) {
         let s_kd = load(state[k * n_channels + d]).cast::<f32>();
         let w_kd = load(w[k * n_channels + d]).cast::<f32>();
         acc = acc + w_kd * s_kd;
@@ -69,7 +76,10 @@ pub fn conv1d_causal_step<T>(
     // Sequential within the thread → safe even though state[k] is read
     // after being written: we read state[k+1] each iteration, never
     // state[k].
-    for k in range(0u32, kernel_size - 2u32, 1u32) {
+    // Same underflow guard: `kernel_size - 2` would wrap to ~4e9 for
+    // any `kernel_size < 2`.
+    let shift_taps = select(kernel_size > 2u32, kernel_size - 2u32, 0u32);
+    for k in range(0u32, shift_taps, 1u32) {
         let next = load(state[(k + 1u32) * n_channels + d]);
         store(state[k * n_channels + d], next);
     }
@@ -139,6 +149,88 @@ inventory::submit! {
         subop: "step",
         kernel_name: "ssm_step",
         kernel_ir: ssm_step::kernel_ir_for,
+        dtypes: &[DType::F32, DType::F16, DType::BF16],
+        tol: 0.0,
+        mlx_src: None,
+        mlx_pattern: None,
+        shapes: &[],
+        dispatch: BenchDispatch::Generic,
+        kernel_mode: Some(KernelMode::Grid3D),
+    }
+}
+
+// Mamba 1 (Jamba) selective-scan single-token decode step — the
+// 2D-`A_log` variant of `ssm_step` above.
+//
+// The scalar `ssm_step` bakes in a per-channel scalar `A` (`a[h_id]`),
+// so the decay `exp(A·dt)` is constant across the state dimension.
+// Jamba's Mamba 1 mixer instead carries a *2-D* `A_log` of shape
+// `[n_heads*head_dim, state_dim]` — one decay coefficient per
+// `(channel, state)` pair — so `decay` varies with `n` inside the
+// state loop. Mainline Mamba 2 families (Mamba2, FalconH1, NemotronH,
+// GraniteMoeHybrid) use the scalar-`A` kernel and are unaffected;
+// this variant exists purely to move Jamba's selective scan onto the
+// GPU (it otherwise runs host-side).
+//
+// `A_log` is the raw log-parameter; the kernel applies the canonical
+// Mamba `A = -exp(A_log)` reparam (matching `mt_ssm_step`). Per state
+// element `(h, d, n)`:
+//
+//   A      = -exp(A_log[(h*head_dim + d), n])
+//   decay  = exp(A · dt[h])
+//   h'     = decay · h_old + dt[h] · B[n] · x[h, d]
+//   y[h,d] = Σ_n C[n] · h'[h, d, n]
+//
+// One thread per `(head, d)` — same Grid3D geometry as `ssm_step`; no
+// cross-thread sync because each `(head, d)` column of `h` is owned by
+// exactly one thread. The state `h` runs in fp32 (the recurrence
+// drifts in bf16 within a few dozen decode steps).
+#[kernel]
+pub fn ssm_step_a2d<T>(
+    x: Tensor<T>,
+    a_log: Tensor<T>,
+    b: Tensor<T>,
+    c: Tensor<T>,
+    dt: Tensor<T>,
+    mut h: Tensor<f32>,
+    mut y: Tensor<T>,
+    #[constexpr] head_dim: u32,
+    #[constexpr] state_dim: u32,
+) {
+    let idx = program_id::<0>();
+    let h_id = idx / head_dim;
+    let d = idx - h_id * head_dim;
+
+    let dt_val = load(dt[h_id]).cast::<f32>();
+    let x_d = load(x[h_id * head_dim + d]).cast::<f32>();
+
+    // `A_log` row for this channel: channel = h_id*head_dim + d, the
+    // same flat index `idx` already computed.
+    let a_log_base = idx * state_dim;
+
+    let mut y_d = 0.0f32;
+    let h_base = h_id * state_dim * head_dim;
+    for n in range(0u32, state_dim, 1u32) {
+        // Per-(channel, state) decay — the 2-D `A_log` difference.
+        let a_val = 0.0f32 - exp(load(a_log[a_log_base + n]).cast::<f32>());
+        let decay = exp(a_val * dt_val);
+        let h_idx = h_base + n * head_dim + d;
+        let h_old = load(h[h_idx]);
+        let b_n = load(b[n]).cast::<f32>();
+        let new_h = decay * h_old + dt_val * b_n * x_d;
+        store(h[h_idx], new_h);
+        let c_n = load(c[n]).cast::<f32>();
+        y_d = y_d + c_n * new_h;
+    }
+    store(y[h_id * head_dim + d], y_d.cast::<T>());
+}
+
+inventory::submit! {
+    BenchSpec {
+        op: "ssm",
+        subop: "step_a2d",
+        kernel_name: "ssm_step_a2d",
+        kernel_ir: ssm_step_a2d::kernel_ir_for,
         dtypes: &[DType::F32, DType::F16, DType::BF16],
         tol: 0.0,
         mlx_src: None,

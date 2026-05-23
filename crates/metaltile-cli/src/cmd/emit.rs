@@ -96,8 +96,62 @@ fn collect_kernels() -> Vec<Kernel> {
             let mut k = (spec.kernel_ir)(dt);
             k.name = format!("{}_{}", kernel_name, dtype_suffix(dt));
             k.mode = mode;
+            // Per-kernel opt-in for the `_indirect` Swift wrapper.
+            // Replaces the previous hardcoded kernel-name allowlist in
+            // `metaltile-codegen::emit` — kernels now declare their own
+            // indirect-dispatch eligibility (see
+            // `dequant_gemv::dequant_gemv_wants_indirect`) and the
+            // codegen pass just reads `Kernel::wants_indirect_variant`.
+            if metaltile_std::ffai::dequant_gemv::dequant_gemv_wants_indirect(&k.name) {
+                k.wants_indirect_variant = true;
+            }
             kernels.push(k);
         }
     }
     kernels
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression guard for the `_indirect` Swift wrappers.
+    ///
+    /// FFAI's GPU-router dispatches `dequant_gemv_int4` indirectly (grid
+    /// shape from an `MTLBuffer` rather than a host `MTLSize`). When emit
+    /// moved out of the `metaltile-emit` crate into `tile emit` (#145),
+    /// the indirect-wrapper generator was dropped — `tile emit` produced
+    /// only the direct wrappers and the FFAI build broke.
+    ///
+    /// This exercises the full `tile emit` pipeline — registry inventory
+    /// → per-dtype naming → `render_swift_wrappers` — so a future drop of
+    /// the indirect path, an unregistered/renamed `dequant_gemv_int4`, or
+    /// a lost f16/bf16 dtype all fail here rather than in a downstream
+    /// FFAI build.
+    #[test]
+    fn tile_emit_keeps_indirect_wrappers_for_dequant_gemv_int4() {
+        let kernels = collect_kernels();
+        assert!(
+            kernels.iter().any(|k| k.name == "dequant_gemv_int4_f16"),
+            "dequant_gemv_int4_f16 missing from the `tile emit` kernel set"
+        );
+        assert!(
+            kernels.iter().any(|k| k.name == "dequant_gemv_int4_bf16"),
+            "dequant_gemv_int4_bf16 missing from the `tile emit` kernel set"
+        );
+
+        let swift = metaltile_codegen::emit::render_swift_wrappers(&kernels);
+        assert!(
+            swift.contains("func dequant_gemv_int4_f16_indirect("),
+            "indirect Swift wrapper for dequant_gemv_int4_f16 dropped from `tile emit`"
+        );
+        assert!(
+            swift.contains("func dequant_gemv_int4_bf16_indirect("),
+            "indirect Swift wrapper for dequant_gemv_int4_bf16 dropped from `tile emit`"
+        );
+        assert!(
+            swift.contains("dispatchThreadgroups(indirectBuffer:"),
+            "indirect wrappers must dispatch from an indirect buffer"
+        );
+    }
 }

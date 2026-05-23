@@ -2571,6 +2571,420 @@ pub fn mt_affine_quantize_int8<T>(
     }
 }
 
+// ─── mt_affine_dequantize_int2 ─────────────────────────────────────────
+//
+// One thread per pack (16 two-bit values in one uint32). `bits=2` packs
+// cleanly into a uint32 (16 values, no byte-stream crossing), so this
+// follows the int4 / int8 power-of-2 template with a 16-way unroll and
+// 2-bit shifts. For each output i in 0..16: `q = (val >> (i*2)) & 0x3`,
+// then `out[oindex+i] = scale * q + bias`.
+//
+// Faithful port of MLX `affine_dequantize<T, group_size, 2>` from
+// `quantized.h`.
+#[bench_kernel(
+    op="affine",
+    subop="dequantize_int2",
+    class=AffineDequantize,
+    bits=2,
+    group_size=64,
+    n_groups=4096,
+    batch=1,
+    tpg=32,
+    // tol=5e-3 — int2 max_q=3; tightest of the dequant family, the
+    // worst-case bf16 round-trip drift at n_groups=4096 is ~1e-3.
+    tol=5e-3,
+    metal_file="quantized.metal",
+)]
+#[kernel]
+pub fn mt_affine_dequantize_int2<T>(
+    w: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    mut out: Tensor<T>,
+    #[constexpr] group_size: u32,
+) {
+    let pack_idx = program_id::<0>();
+    let pack_factor = 16u32;
+    let oindex = pack_idx * pack_factor;
+    let g_idx = oindex / group_size;
+
+    let scale = load(scales[g_idx]).cast::<f32>();
+    let bias = load(biases[g_idx]).cast::<f32>();
+    let val = load(w[pack_idx]);
+
+    // 16 two-bit lanes; each is `(val >> (i*2)) & 0x3`.
+    for k in range(0u32, 16u32, 1u32) {
+        let q = (val >> (k * 2u32)) & 3u32;
+        store(out[oindex + k], (scale * q.cast::<f32>() + bias).cast::<T>());
+    }
+}
+
+// ─── mt_affine_quantize_int2 ───────────────────────────────────────────
+//
+// Inverse of `mt_affine_dequantize_int2`. One threadgroup of 32 threads
+// per group: each lane covers `group_size / 32 = 2` input values, the
+// min/max reduce runs over the simdgroup, then `packs_per_group =
+// group_size / 16` lanes each assemble one uint32 (16 two-bit codes).
+//
+// n_bins = 3 (`2^2 - 1`). Same template as `mt_affine_quantize_int4`
+// with the pack width widened from 8 nibbles to 16 two-bit fields.
+#[bench_kernel(
+    op="affine",
+    subop="quantize_int2",
+    class=AffineQuantize,
+    bits=2,
+    group_size=64,
+    n_groups=4096,
+    batch=1,
+    tpg=32,
+    tol=1e-1,
+    metal_file="quantized.metal",
+)]
+#[kernel]
+pub fn mt_affine_quantize_int2<T>(
+    w: Tensor<T>,
+    mut out: Tensor<u32>,
+    mut scales: Tensor<T>,
+    mut biases: Tensor<T>,
+    #[constexpr] group_size: u32,
+) {
+    let g_idx = tgid_x;
+    let lane = tid;
+    let in_base = g_idx * group_size;
+
+    let v0 = load(w[in_base + lane * 2u32]).cast::<f32>();
+    let v1 = load(w[in_base + lane * 2u32 + 1u32]).cast::<f32>();
+    let local_min = select(v0 < v1, v0, v1);
+    let local_max = select(v0 > v1, v0, v1);
+    let w_min = simd_min(local_min);
+    let w_max = simd_max(local_max);
+
+    let n_bins = 3.0f32;
+    let raw_scale = (w_max - w_min) / n_bins;
+    let eps = 1.0e-7f32;
+    let scale = select(raw_scale < eps, 1.0f32, raw_scale);
+    let inv_scale = 1.0f32 / scale;
+    let bias = w_min;
+
+    if lane == 0u32 {
+        store(scales[g_idx], scale.cast::<T>());
+        store(biases[g_idx], bias.cast::<T>());
+    }
+
+    // Packs in parallel: `packs_per_group = group_size / 16` lanes each
+    // assemble one uint32 (16 two-bit codes). For group_size=64 →
+    // packs_per_group=4.
+    let packs_per_group = group_size / 16u32;
+    if lane < packs_per_group {
+        let pack_in_base = in_base + lane * 16u32;
+        let mut acc = 0u32;
+        for k in range(0u32, 16u32, 1u32) {
+            let v = load(w[pack_in_base + k]).cast::<f32>();
+            let q_f = (v - bias) * inv_scale + 0.5f32;
+            let q_c = select(q_f > 3.0f32, 3.0f32, select(q_f < 0.0f32, 0.0f32, q_f));
+            let q = q_c.cast::<u32>();
+            acc = acc | (q << (k * 2u32));
+        }
+        store(out[g_idx * packs_per_group + lane], acc);
+    }
+}
+
+// ─── Byte-stream quantize variants (int3 / int5 / int6) ─────────────
+//
+// Non-power-of-2 bit widths pack into a contiguous byte stream. Each
+// group of `group_size` values writes `group_size * bits / 8` bytes.
+//
+// For the canonical `group_size=32`:
+//   int3: 32 x 3 bits =  96 bits = 12 bytes = 3 uint32 words per group.
+//   int5: 32 x 5 bits = 160 bits = 20 bytes = 5 uint32 words per group.
+//   int6: 32 x 6 bits = 192 bits = 24 bytes = 6 uint32 words per group.
+//
+// Because adjacent packs may share a uint32 word, parallel packing
+// requires atomics. Instead, one threadgroup of 32 threads per group
+// performs the simd min/max cooperatively, then lane 0 writes the bit
+// stream serially (iterating over all group_size elements, ORing each
+// code's bits into the correct uint32 word at the right shift).
+//
+// Bit layouts are the exact inverse of `mt_affine_dequantize_int{3,5,6}`.
+
+// ─── mt_affine_quantize_int3 ──────────────────────────────────────────
+//
+// int3 (3-bit codes): 96-bit stream for group_size=32.
+// Lane 0 iterates over all 32 values, computes q = clamp(round(v), 0, 7),
+// then ORs q's 3 bits into the three uint32 output words.
+//
+//   bit_pos   = i * 3  (position in the 96-bit stream)
+//   word_idx  = bit_pos / 32
+//   bit_shift = bit_pos % 32
+//
+// Codes span at most two words (3-bit code starting at bit_shift > 29).
+//
+// ## DISPATCH INVARIANTS
+// - Reduction mode (simd_min / simd_max). TPG = 32 (one simdgroup).
+// - Grid: [n_groups, 1, 1].
+#[bench_kernel(
+    op="affine",
+    subop="quantize_int3",
+    class=AffineQuantize,
+    bits=3,
+    group_size=32,
+    n_groups=4096,
+    batch=1,
+    tpg=32,
+    tol=1e-1,
+    metal_file="quantized.metal",
+)]
+#[kernel]
+pub fn mt_affine_quantize_int3<T>(
+    w: Tensor<T>,
+    mut out: Tensor<u32>,
+    mut scales: Tensor<T>,
+    mut biases: Tensor<T>,
+    #[constexpr] group_size: u32,
+) {
+    let g_idx = tgid_x;
+    let lane = tid;
+    let in_base = g_idx * group_size;
+
+    // Cooperative min/max over the simdgroup (one value per lane).
+    let v = load(w[in_base + lane]).cast::<f32>();
+    let w_min = simd_min(v);
+    let w_max = simd_max(v);
+
+    let n_bins = 7.0f32; // 2^3 - 1
+    let raw_scale = (w_max - w_min) / n_bins;
+    let eps = 1.0e-7f32;
+    let scale = select(raw_scale < eps, 1.0f32, raw_scale);
+    let inv_scale = 1.0f32 / scale;
+    let bias = w_min;
+
+    if lane == 0u32 {
+        store(scales[g_idx], scale.cast::<T>());
+        store(biases[g_idx], bias.cast::<T>());
+
+        // For group_size=32: 3 uint32 output words (12 bytes).
+        let out_base = g_idx * 3u32;
+        let mut w0 = 0u32;
+        let mut w1 = 0u32;
+        let mut w2 = 0u32;
+
+        for i in range(0u32, group_size, 1u32) {
+            let vi = load(w[in_base + i]).cast::<f32>();
+            let q_f = (vi - bias) * inv_scale + 0.5f32;
+            let q_c = select(q_f > 7.0f32, 7.0f32, select(q_f < 0.0f32, 0.0f32, q_f));
+            let q = q_c.cast::<u32>() & 7u32;
+
+            let bit_pos = i * 3u32;
+            let word_idx = bit_pos / 32u32;
+            let bit_shift = bit_pos & 31u32;
+
+            let q_lo = q << bit_shift;
+            w0 = select(word_idx == 0u32, w0 | q_lo, w0);
+            w1 = select(word_idx == 1u32, w1 | q_lo, w1);
+            w2 = select(word_idx == 2u32, w2 | q_lo, w2);
+
+            // Handle spillover into the next word (occurs when bit_shift > 29).
+            let spills = bit_shift + 3u32 > 32u32;
+            if spills {
+                let bits_hi = (bit_shift + 3u32) - 32u32;
+                let q_hi = q >> (3u32 - bits_hi);
+                w1 = select(word_idx == 0u32, w1 | q_hi, w1);
+                w2 = select(word_idx == 1u32, w2 | q_hi, w2);
+            }
+        }
+
+        store(out[out_base + 0u32], w0);
+        store(out[out_base + 1u32], w1);
+        store(out[out_base + 2u32], w2);
+    }
+}
+
+// ─── mt_affine_quantize_int5 ──────────────────────────────────────────
+//
+// int5 (5-bit codes): 160-bit stream for group_size=32 (5 uint32 words).
+// Same bit-stream OR strategy as int3 but with 5 output words.
+//
+// ## DISPATCH INVARIANTS
+// - Reduction mode (simd_min / simd_max). TPG = 32 (one simdgroup).
+// - Grid: [n_groups, 1, 1].
+#[bench_kernel(
+    op="affine",
+    subop="quantize_int5",
+    class=AffineQuantize,
+    bits=5,
+    group_size=32,
+    n_groups=4096,
+    batch=1,
+    tpg=32,
+    tol=1e-1,
+    metal_file="quantized.metal",
+)]
+#[kernel]
+pub fn mt_affine_quantize_int5<T>(
+    w: Tensor<T>,
+    mut out: Tensor<u32>,
+    mut scales: Tensor<T>,
+    mut biases: Tensor<T>,
+    #[constexpr] group_size: u32,
+) {
+    let g_idx = tgid_x;
+    let lane = tid;
+    let in_base = g_idx * group_size;
+
+    let v = load(w[in_base + lane]).cast::<f32>();
+    let w_min = simd_min(v);
+    let w_max = simd_max(v);
+
+    let n_bins = 31.0f32; // 2^5 - 1
+    let raw_scale = (w_max - w_min) / n_bins;
+    let eps = 1.0e-7f32;
+    let scale = select(raw_scale < eps, 1.0f32, raw_scale);
+    let inv_scale = 1.0f32 / scale;
+    let bias = w_min;
+
+    if lane == 0u32 {
+        store(scales[g_idx], scale.cast::<T>());
+        store(biases[g_idx], bias.cast::<T>());
+
+        // For group_size=32: 5 uint32 output words (20 bytes).
+        let out_base = g_idx * 5u32;
+        let mut w0 = 0u32;
+        let mut w1 = 0u32;
+        let mut w2 = 0u32;
+        let mut w3 = 0u32;
+        let mut w4 = 0u32;
+
+        for i in range(0u32, group_size, 1u32) {
+            let vi = load(w[in_base + i]).cast::<f32>();
+            let q_f = (vi - bias) * inv_scale + 0.5f32;
+            let q_c = select(q_f > 31.0f32, 31.0f32, select(q_f < 0.0f32, 0.0f32, q_f));
+            let q = q_c.cast::<u32>() & 31u32;
+
+            let bit_pos = i * 5u32;
+            let word_idx = bit_pos / 32u32;
+            let bit_shift = bit_pos & 31u32;
+
+            let q_lo = q << bit_shift;
+            w0 = select(word_idx == 0u32, w0 | q_lo, w0);
+            w1 = select(word_idx == 1u32, w1 | q_lo, w1);
+            w2 = select(word_idx == 2u32, w2 | q_lo, w2);
+            w3 = select(word_idx == 3u32, w3 | q_lo, w3);
+            w4 = select(word_idx == 4u32, w4 | q_lo, w4);
+
+            let spills = bit_shift + 5u32 > 32u32;
+            if spills {
+                let bits_hi = (bit_shift + 5u32) - 32u32;
+                let q_hi = q >> (5u32 - bits_hi);
+                w1 = select(word_idx == 0u32, w1 | q_hi, w1);
+                w2 = select(word_idx == 1u32, w2 | q_hi, w2);
+                w3 = select(word_idx == 2u32, w3 | q_hi, w3);
+                w4 = select(word_idx == 3u32, w4 | q_hi, w4);
+            }
+        }
+
+        store(out[out_base + 0u32], w0);
+        store(out[out_base + 1u32], w1);
+        store(out[out_base + 2u32], w2);
+        store(out[out_base + 3u32], w3);
+        store(out[out_base + 4u32], w4);
+    }
+}
+
+// ─── mt_affine_quantize_int6 ──────────────────────────────────────────
+//
+// int6 (6-bit codes): 192-bit stream for group_size=32 (6 uint32 words).
+// Same bit-stream OR strategy as int3/int5 but with 6 output words.
+//
+// ## DISPATCH INVARIANTS
+// - Reduction mode (simd_min / simd_max). TPG = 32 (one simdgroup).
+// - Grid: [n_groups, 1, 1].
+#[bench_kernel(
+    op="affine",
+    subop="quantize_int6",
+    class=AffineQuantize,
+    bits=6,
+    group_size=32,
+    n_groups=4096,
+    batch=1,
+    tpg=32,
+    tol=1e-1,
+    metal_file="quantized.metal",
+)]
+#[kernel]
+pub fn mt_affine_quantize_int6<T>(
+    w: Tensor<T>,
+    mut out: Tensor<u32>,
+    mut scales: Tensor<T>,
+    mut biases: Tensor<T>,
+    #[constexpr] group_size: u32,
+) {
+    let g_idx = tgid_x;
+    let lane = tid;
+    let in_base = g_idx * group_size;
+
+    let v = load(w[in_base + lane]).cast::<f32>();
+    let w_min = simd_min(v);
+    let w_max = simd_max(v);
+
+    let n_bins = 63.0f32; // 2^6 - 1
+    let raw_scale = (w_max - w_min) / n_bins;
+    let eps = 1.0e-7f32;
+    let scale = select(raw_scale < eps, 1.0f32, raw_scale);
+    let inv_scale = 1.0f32 / scale;
+    let bias = w_min;
+
+    if lane == 0u32 {
+        store(scales[g_idx], scale.cast::<T>());
+        store(biases[g_idx], bias.cast::<T>());
+
+        // For group_size=32: 6 uint32 output words (24 bytes).
+        let out_base = g_idx * 6u32;
+        let mut w0 = 0u32;
+        let mut w1 = 0u32;
+        let mut w2 = 0u32;
+        let mut w3 = 0u32;
+        let mut w4 = 0u32;
+        let mut w5 = 0u32;
+
+        for i in range(0u32, group_size, 1u32) {
+            let vi = load(w[in_base + i]).cast::<f32>();
+            let q_f = (vi - bias) * inv_scale + 0.5f32;
+            let q_c = select(q_f > 63.0f32, 63.0f32, select(q_f < 0.0f32, 0.0f32, q_f));
+            let q = q_c.cast::<u32>() & 63u32;
+
+            let bit_pos = i * 6u32;
+            let word_idx = bit_pos / 32u32;
+            let bit_shift = bit_pos & 31u32;
+
+            let q_lo = q << bit_shift;
+            w0 = select(word_idx == 0u32, w0 | q_lo, w0);
+            w1 = select(word_idx == 1u32, w1 | q_lo, w1);
+            w2 = select(word_idx == 2u32, w2 | q_lo, w2);
+            w3 = select(word_idx == 3u32, w3 | q_lo, w3);
+            w4 = select(word_idx == 4u32, w4 | q_lo, w4);
+            w5 = select(word_idx == 5u32, w5 | q_lo, w5);
+
+            let spills = bit_shift + 6u32 > 32u32;
+            if spills {
+                let bits_hi = (bit_shift + 6u32) - 32u32;
+                let q_hi = q >> (6u32 - bits_hi);
+                w1 = select(word_idx == 0u32, w1 | q_hi, w1);
+                w2 = select(word_idx == 1u32, w2 | q_hi, w2);
+                w3 = select(word_idx == 2u32, w3 | q_hi, w3);
+                w4 = select(word_idx == 3u32, w4 | q_hi, w4);
+                w5 = select(word_idx == 4u32, w5 | q_hi, w5);
+            }
+        }
+
+        store(out[out_base + 0u32], w0);
+        store(out[out_base + 1u32], w1);
+        store(out[out_base + 2u32], w2);
+        store(out[out_base + 3u32], w3);
+        store(out[out_base + 4u32], w4);
+        store(out[out_base + 5u32], w5);
+    }
+}
+
 // ─── Byte-stream dequant variants (int3 / int5 / int6) ───────────────
 //
 // Non-power-of-2 bit widths can't pack cleanly into a uint32, so each
@@ -2771,6 +3185,347 @@ pub fn mt_affine_dequantize_int6<T>(
     store(out[oindex + 2u32], (scale * q2.cast::<f32>() + bias).cast::<T>());
     store(out[oindex + 3u32], (scale * q3.cast::<f32>() + bias).cast::<T>());
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Multi-bit-width quantized matvec / vecmat / matmul family
+// ═══════════════════════════════════════════════════════════════════════
+//
+// The hand-unrolled `mt_qmv` / `mt_qmm*` above are int4-only, f32+f16 —
+// the production hot path. This section closes the rest of the
+// `affine_qmv / qvm / qmm` coverage gap with a clean, generic family:
+//
+//   - `mt_qmv_b{3,4,5,6,8}`  — quantized matvec, `y = W · x`
+//   - `mt_qvm_b{3,4,5,6,8}`  — quantized vecmat, `y = xᵀ · W`
+//   - `mt_qmm_b{3,4,5,6,8}`  — quantized matmul (batched matvec)
+//
+// Every kernel is generic over `T` (so **bf16** flows through the same
+// body — closing the bf16 gap) and parameterised on bit-width via an
+// outer `macro_rules!` (the whole `#[kernel] fn` is macro-expanded
+// before the proc-macro runs — never an inner-body macro; see
+// `dequant_gemv.rs` and the empty-body hazard in `docs/developing.md`).
+//
+// These are correctness-first scalar kernels — one threadgroup per
+// output element, lanes stride the K dimension, `simd_sum` reduces.
+// They are not the perf path (the unrolled int4 `mt_qmv`/`mt_qmm*`
+// remain that, and the NAX/MMA qmm variant is upstream PR #137); they
+// exist so every MLX `affine_qmv/qvm/qmm` bit-width × dtype cell has a
+// metaltile kernel + a GPU correctness test behind it.
+//
+// ── Bit-extraction ──
+// Power-of-two widths (4, 8) divide a u32 evenly: element `e` of a row
+// lives in pack `e / (32/bits)`, shifted `(e % (32/bits)) * bits` — the
+// `*_pow2!` macros. Odd widths (3, 5, 6) use the two-word bit-stream
+// formula from `dequant_gather.rs` — a code may straddle a u32
+// boundary, so each element reads up to two consecutive words — the
+// `*_odd!` macros. Splitting pow2 vs odd into separate macros (rather
+// than a runtime branch) keeps the extraction a straight-line body:
+// the DSL's `if` is a statement, not an expression.
+//
+// ── Layouts (N = out_dim, K = in_dim, G = group_size) ──
+//   qmv / qmm  W [N, K]  packed row-major (groups along K)
+//              scales/biases [N, K/G]
+//   qvm        W [K, N]  packed row-major (groups along K)
+//              scales/biases [K/G, N]
+//
+// ## DISPATCH INVARIANTS (all kernels in this family)
+//
+// - **Mode: Reduction.** `simd_sum` reduces the per-lane partial dot.
+// - **TG: `[32, 1, 1]`** — exactly one simdgroup. Fewer than 32
+//   threads would make the `simd_sum` reduce a partial set; the loop
+//   strides by 32, matching.
+// - **qmv  Grid: `[N, 1, 1]`** — one TG per output row.
+// - **qvm  Grid: `[N, 1, 1]`** — one TG per output column.
+// - **qmm  Grid: `[N, M, 1]`** — one TG per (output col, batch row).
+// - **`K` must be a multiple of 32** and **`G` must divide `K`**.
+//   Every Qwen3 / Qwen3.6 quantized shape satisfies both.
+
+/// `BenchSpec` for a kernel in the multi-bit qmv/qvm/qmm family.
+macro_rules! quantized_family_spec {
+    ($name:ident, $subop:literal) => {
+        inventory::submit! {
+            crate::spec::BenchSpec {
+                op: "quantized",
+                subop: $subop,
+                kernel_name: stringify!($name),
+                kernel_ir: $name::kernel_ir_for,
+                dtypes: &[
+                    metaltile_core::dtype::DType::F32,
+                    metaltile_core::dtype::DType::F16,
+                    metaltile_core::dtype::DType::BF16,
+                ],
+                tol: 5e-2, // int-quant — wide tolerance vs full-precision oracle
+                mlx_src: None,
+                mlx_pattern: None,
+                shapes: &[],
+                dispatch: crate::spec::BenchDispatch::Generic,
+                kernel_mode: Some(metaltile_core::ir::KernelMode::Reduction),
+            }
+        }
+    };
+}
+
+/// Quantized matvec / matmul (`y = W · x`) — pow2 bit-widths (4, 8).
+/// `mt_qmm_b*` is the M-batched form; `mt_qmv_b*` its M=1 row. W is
+/// `[N, K]` row-major; element `(row, d)` lives in a pack-aligned u32.
+macro_rules! qmv_pow2 {
+    ($name:ident, $bits:literal, $subop:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            w: Tensor<u32>,
+            scales: Tensor<T>,
+            biases: Tensor<T>,
+            x: Tensor<T>,
+            out: Tensor<T>,
+            #[constexpr] k: u32,
+            #[constexpr] n: u32,
+            #[constexpr] group_size: u32,
+        ) {
+            // tgid_x = output row, tgid_y = batch row (M). At M=1 the
+            // grid's y extent is 1, so this is the plain matvec.
+            let row = tgid_x;
+            let m_row = tgid_y;
+            let lane = simd_lane;
+
+            let groups_per_row = k / group_size;
+            let scale_row_base = row * groups_per_row;
+            let x_row_base = m_row * k;
+
+            let vals_per_pack = 32u32 / $bits;
+            let packs_per_row = k / vals_per_pack;
+            let mask = (1u32 << $bits) - 1u32;
+
+            // Each lane owns K-positions lane, lane+32, lane+64, ...
+            let mut acc = 0.0f32;
+            let n_iters = (k + 31u32) / 32u32;
+            for _it in range(0u32, n_iters, 1u32) {
+                let d = _it * 32u32 + lane;
+                if d < k {
+                    let g = d / group_size;
+                    let scale = load(scales[scale_row_base + g]).cast::<f32>();
+                    let bias = load(biases[scale_row_base + g]).cast::<f32>();
+
+                    // Pack-aligned int-$bits weight code at (row, d).
+                    let pack = d / vals_per_pack;
+                    let slot = d - pack * vals_per_pack;
+                    let word = load(w[row * packs_per_row + pack]);
+                    let q = (word >> (slot * $bits)) & mask;
+
+                    let wv = q.cast::<f32>() * scale + bias;
+                    acc = acc + wv * load(x[x_row_base + d]).cast::<f32>();
+                }
+            }
+
+            let total = simd_sum(acc);
+            if lane == 0u32 {
+                store(out[m_row * n + row], total.cast::<T>());
+            }
+        }
+        quantized_family_spec!($name, $subop);
+    };
+}
+
+/// Quantized matvec / matmul (`y = W · x`) — odd bit-widths (3, 5, 6).
+/// W is `[N, K]` bit-stream-packed; element `(row, d)` may straddle two
+/// consecutive u32 words.
+macro_rules! qmv_odd {
+    ($name:ident, $bits:literal, $subop:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            w: Tensor<u32>,
+            scales: Tensor<T>,
+            biases: Tensor<T>,
+            x: Tensor<T>,
+            out: Tensor<T>,
+            #[constexpr] k: u32,
+            #[constexpr] n: u32,
+            #[constexpr] group_size: u32,
+        ) {
+            let row = tgid_x;
+            let m_row = tgid_y;
+            let lane = simd_lane;
+
+            let groups_per_row = k / group_size;
+            let scale_row_base = row * groups_per_row;
+            let x_row_base = m_row * k;
+
+            let u32_per_row = k * $bits / 32u32;
+            let row_u32_off = row * u32_per_row;
+
+            let mut acc = 0.0f32;
+            let n_iters = (k + 31u32) / 32u32;
+            for _it in range(0u32, n_iters, 1u32) {
+                let d = _it * 32u32 + lane;
+                if d < k {
+                    let g = d / group_size;
+                    let scale = load(scales[scale_row_base + g]).cast::<f32>();
+                    let bias = load(biases[scale_row_base + g]).cast::<f32>();
+
+                    // Two-word bit-stream extract — code may straddle a
+                    // u32 boundary (`spill` bits land in the next word).
+                    let bit_off = d * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(w[row_u32_off + word_idx]);
+                    let w1idx = select(spill > 0u32, word_idx + 1u32, word_idx);
+                    let w1 = load(w[row_u32_off + w1idx]);
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+
+                    let wv = q.cast::<f32>() * scale + bias;
+                    acc = acc + wv * load(x[x_row_base + d]).cast::<f32>();
+                }
+            }
+
+            let total = simd_sum(acc);
+            if lane == 0u32 {
+                store(out[m_row * n + row], total.cast::<T>());
+            }
+        }
+        quantized_family_spec!($name, $subop);
+    };
+}
+
+/// Quantized vecmat (`y = xᵀ · W`) — pow2 bit-widths. W is `[K, N]`
+/// row-major; output column `c` sums over K, reading element `(d, c)`.
+macro_rules! qvm_pow2 {
+    ($name:ident, $bits:literal, $subop:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            w: Tensor<u32>,
+            scales: Tensor<T>,
+            biases: Tensor<T>,
+            x: Tensor<T>,
+            out: Tensor<T>,
+            #[constexpr] k: u32,
+            #[constexpr] n: u32,
+            #[constexpr] group_size: u32,
+        ) {
+            // tgid_x = output column, tgid_y = batch row (M).
+            let col = tgid_x;
+            let m_row = tgid_y;
+            let lane = simd_lane;
+
+            let x_row_base = m_row * k;
+            let vals_per_pack = 32u32 / $bits;
+            let packs_per_row = n / vals_per_pack;
+            let mask = (1u32 << $bits) - 1u32;
+
+            let mut acc = 0.0f32;
+            let n_iters = (k + 31u32) / 32u32;
+            for _it in range(0u32, n_iters, 1u32) {
+                let d = _it * 32u32 + lane;
+                if d < k {
+                    // Groups run along K; scales/biases are [K/G, N].
+                    let g = d / group_size;
+                    let scale = load(scales[g * n + col]).cast::<f32>();
+                    let bias = load(biases[g * n + col]).cast::<f32>();
+
+                    // Element (d, col) of a [K, N]-packed weight matrix.
+                    let pack = col / vals_per_pack;
+                    let slot = col - pack * vals_per_pack;
+                    let word = load(w[d * packs_per_row + pack]);
+                    let q = (word >> (slot * $bits)) & mask;
+
+                    let wv = q.cast::<f32>() * scale + bias;
+                    acc = acc + wv * load(x[x_row_base + d]).cast::<f32>();
+                }
+            }
+
+            let total = simd_sum(acc);
+            if lane == 0u32 {
+                store(out[m_row * n + col], total.cast::<T>());
+            }
+        }
+        quantized_family_spec!($name, $subop);
+    };
+}
+
+/// Quantized vecmat (`y = xᵀ · W`) — odd bit-widths. W is `[K, N]`
+/// bit-stream-packed.
+macro_rules! qvm_odd {
+    ($name:ident, $bits:literal, $subop:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            w: Tensor<u32>,
+            scales: Tensor<T>,
+            biases: Tensor<T>,
+            x: Tensor<T>,
+            out: Tensor<T>,
+            #[constexpr] k: u32,
+            #[constexpr] n: u32,
+            #[constexpr] group_size: u32,
+        ) {
+            let col = tgid_x;
+            let m_row = tgid_y;
+            let lane = simd_lane;
+
+            let x_row_base = m_row * k;
+            let u32_per_row = n * $bits / 32u32;
+
+            let mut acc = 0.0f32;
+            let n_iters = (k + 31u32) / 32u32;
+            for _it in range(0u32, n_iters, 1u32) {
+                let d = _it * 32u32 + lane;
+                if d < k {
+                    let g = d / group_size;
+                    let scale = load(scales[g * n + col]).cast::<f32>();
+                    let bias = load(biases[g * n + col]).cast::<f32>();
+
+                    // Two-word bit-stream extract of element (d, col).
+                    let row_u32_off = d * u32_per_row;
+                    let bit_off = col * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(w[row_u32_off + word_idx]);
+                    let w1idx = select(spill > 0u32, word_idx + 1u32, word_idx);
+                    let w1 = load(w[row_u32_off + w1idx]);
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+
+                    let wv = q.cast::<f32>() * scale + bias;
+                    acc = acc + wv * load(x[x_row_base + d]).cast::<f32>();
+                }
+            }
+
+            let total = simd_sum(acc);
+            if lane == 0u32 {
+                store(out[m_row * n + col], total.cast::<T>());
+            }
+        }
+        quantized_family_spec!($name, $subop);
+    };
+}
+
+// qmv (matvec) — pow2 widths 4/8, odd widths 3/5/6.
+qmv_pow2!(mt_qmv_b4, 4u32, "qmv_b4");
+qmv_pow2!(mt_qmv_b8, 8u32, "qmv_b8");
+qmv_odd!(mt_qmv_b3, 3u32, "qmv_b3");
+qmv_odd!(mt_qmv_b5, 5u32, "qmv_b5");
+qmv_odd!(mt_qmv_b6, 6u32, "qmv_b6");
+
+// qmm (matmul / batched matvec) — identical body to qmv, registered
+// under the `qmm_b*` subop so the bench scoreboard tracks it
+// separately. Dispatch with `grid = [N, M, 1]`.
+qmv_pow2!(mt_qmm_b4, 4u32, "qmm_b4");
+qmv_pow2!(mt_qmm_b8, 8u32, "qmm_b8");
+qmv_odd!(mt_qmm_b3, 3u32, "qmm_b3");
+qmv_odd!(mt_qmm_b5, 5u32, "qmm_b5");
+qmv_odd!(mt_qmm_b6, 6u32, "qmm_b6");
+
+// qvm (vecmat) — the genuinely missing op; W transposed to [K, N].
+qvm_pow2!(mt_qvm_b4, 4u32, "qvm_b4");
+qvm_pow2!(mt_qvm_b8, 8u32, "qvm_b8");
+qvm_odd!(mt_qvm_b3, 3u32, "qvm_b3");
+qvm_odd!(mt_qvm_b5, 5u32, "qvm_b5");
+qvm_odd!(mt_qvm_b6, 6u32, "qvm_b6");
 
 /// Auto-select the best `mt_qmm*` kernel for a given dtype + M
 /// (number of tokens / batched rows in this prefill). Returns the

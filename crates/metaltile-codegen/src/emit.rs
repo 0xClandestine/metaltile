@@ -174,6 +174,10 @@ pub fn render_swift_wrappers(kernels: &[Kernel]) -> String {
     );
     for k in kernels {
         emit_swift_wrapper(&mut out, k);
+        if k.wants_indirect_variant {
+            emit_swift_wrapper_indirect(&mut out, k);
+        }
+        emit_swift_wrapper_icb_record(&mut out, k);
     }
     out.push_str("}\n");
     out
@@ -234,6 +238,173 @@ fn emit_swift_wrapper(out: &mut String, k: &Kernel) {
         .ok();
     writeln!(out, "        enc.endEncoding()").ok();
     writeln!(out, "    }}\n").ok();
+}
+
+/// Indirect-dispatch variant of `emit_swift_wrapper`. Same buffer +
+/// constexpr bindings, same PSO (the underlying kernel is unchanged),
+/// but the dispatch shape comes from an `MTLBuffer` carrying
+/// `MTLDispatchThreadgroupsIndirectArguments` (3 × u32 = threadgroup
+/// counts for x/y/z). `threadgroupSize` is still passed direct — it is a
+/// compile-time-known shape; only the grid is data-dependent. Note this
+/// dispatches THREADGROUPS (not threads), so the indirect buffer holds
+/// threadgroup counts and the kernel must bounds-check its own threads.
+fn emit_swift_wrapper_indirect(out: &mut String, k: &Kernel) {
+    use std::fmt::Write as _;
+    let fn_name = format!("{}_indirect", swift_safe_name(&k.name));
+
+    writeln!(out, "    /// Indirect-dispatch variant of `{}` — grid from a GPU buffer.", k.name)
+        .ok();
+    writeln!(out, "    public static func {fn_name}(").ok();
+
+    for p in &k.params {
+        let label = swift_safe_name(&p.name);
+        writeln!(out, "        {label}: MTLBuffer, {label}Offset: Int = 0,").ok();
+    }
+    for c in &k.constexprs {
+        let label = swift_safe_name(c.name.name());
+        let swift_ty = swift_scalar_type(dtype_suffix(c.dtype));
+        writeln!(out, "        {label}: {swift_ty},").ok();
+    }
+    writeln!(out, "        indirectBuffer: MTLBuffer,").ok();
+    writeln!(out, "        indirectBufferOffset: Int = 0,").ok();
+    writeln!(out, "        threadgroupSize: MTLSize,").ok();
+    writeln!(out, "        on commandBuffer: MTLCommandBuffer").ok();
+    writeln!(out, "    ) {{").ok();
+    // PSO lookup uses the underlying kernel name — there is no separate
+    // `_indirect` PSO; the dispatch path is what differs, not the kernel.
+    writeln!(out, "        let pso = PSOCache.shared.pipelineState(for: \"{}\")", k.name).ok();
+    writeln!(
+        out,
+        "        guard let enc = commandBuffer.makeComputeCommandEncoder() else {{ return }}"
+    )
+    .ok();
+    writeln!(out, "        enc.setComputePipelineState(pso)").ok();
+
+    let mut slot = 0usize;
+    for p in &k.params {
+        let label = swift_safe_name(&p.name);
+        writeln!(out, "        enc.setBuffer({label}, offset: {label}Offset, index: {slot})").ok();
+        slot += 1;
+    }
+    for c in &k.constexprs {
+        let label = swift_safe_name(c.name.name());
+        let len = swift_scalar_size(dtype_suffix(c.dtype));
+        writeln!(out, "        var {label}_v = {label}").ok();
+        writeln!(out, "        enc.setBytes(&{label}_v, length: {len}, index: {slot})").ok();
+        slot += 1;
+    }
+    writeln!(
+        out,
+        "        enc.dispatchThreadgroups(indirectBuffer: indirectBuffer, \
+indirectBufferOffset: indirectBufferOffset, threadsPerThreadgroup: threadgroupSize)"
+    )
+    .ok();
+    writeln!(out, "        enc.endEncoding()").ok();
+    writeln!(out, "    }}\n").ok();
+}
+
+/// ICB-recording variant of `emit_swift_wrapper`. Records a single
+/// dispatch into an `MTLIndirectComputeCommand` rather than encoding
+/// onto a live `MTLComputeCommandEncoder`. Same buffer + constexpr
+/// surface, but:
+///
+///   * Constexpr scalars are packed into a caller-provided
+///     `paramsBuffer` at a caller-provided `paramsBufferOffset`, then
+///     bound via `setKernelBuffer` (the only scalar-binding option
+///     `MTLIndirectComputeCommand` exposes — there is no `setBytes`
+///     equivalent).
+///   * Dispatch uses `concurrentDispatchThreads` (the ICB-side analog
+///     of `dispatchThreads`). Same thread-grid semantics.
+///   * Pipeline state must have been built with
+///     `supportIndirectCommandBuffers = true` (FFAI's PSOCache does).
+///
+/// Caller responsibility: allocate `paramsBuffer` big enough to hold
+/// the packed scalars for every kernel recorded into the ICB. The
+/// per-kernel byte footprint is the sum of `swift_scalar_size` for
+/// each constexpr — kernels expose this via the generated `_params_size`
+/// helper. Per-token replay only needs to update the scalars whose
+/// VALUES change (e.g. position, KV write offset); buffer bindings stay
+/// frozen at recording time.
+fn emit_swift_wrapper_icb_record(out: &mut String, k: &Kernel) {
+    use std::fmt::Write as _;
+    let fn_name = format!("{}_record", swift_safe_name(&k.name));
+
+    writeln!(out, "    /// ICB-recording variant of `{}` — encodes into an", k.name).ok();
+    writeln!(out, "    /// `MTLIndirectComputeCommand`. Scalars are packed into").ok();
+    writeln!(out, "    /// `paramsBuffer` at `paramsBufferOffset`; per-token replay").ok();
+    writeln!(out, "    /// mutates `paramsBuffer` contents and re-executes the ICB.").ok();
+    writeln!(out, "    public static func {fn_name}(").ok();
+
+    for p in &k.params {
+        let label = swift_safe_name(&p.name);
+        writeln!(out, "        {label}: MTLBuffer, {label}Offset: Int = 0,").ok();
+    }
+    for c in &k.constexprs {
+        let label = swift_safe_name(c.name.name());
+        let swift_ty = swift_scalar_type(dtype_suffix(c.dtype));
+        writeln!(out, "        {label}: {swift_ty},").ok();
+    }
+    writeln!(out, "        paramsBuffer: MTLBuffer,").ok();
+    writeln!(out, "        paramsBufferOffset: Int = 0,").ok();
+    writeln!(out, "        gridSize: MTLSize,").ok();
+    writeln!(out, "        threadgroupSize: MTLSize,").ok();
+    writeln!(out, "        into icbCommand: MTLIndirectComputeCommand").ok();
+    writeln!(out, "    ) {{").ok();
+    writeln!(out, "        let pso = PSOCache.shared.pipelineState(for: \"{}\")", k.name).ok();
+    writeln!(out, "        icbCommand.setComputePipelineState(pso)").ok();
+
+    let mut slot = 0usize;
+    for p in &k.params {
+        let label = swift_safe_name(&p.name);
+        writeln!(
+            out,
+            "        icbCommand.setKernelBuffer({label}, offset: {label}Offset, at: {slot})"
+        )
+        .ok();
+        slot += 1;
+    }
+
+    // Pack constexpr scalars into paramsBuffer at sequential offsets
+    // starting at paramsBufferOffset, then bind each at its kernel slot.
+    let mut params_cursor: usize = 0;
+    for c in &k.constexprs {
+        let label = swift_safe_name(c.name.name());
+        let len = swift_scalar_size(dtype_suffix(c.dtype));
+        writeln!(out, "        // pack scalar `{label}` into paramsBuffer").ok();
+        writeln!(out, "        do {{").ok();
+        writeln!(out, "            var {label}_v = {label}").ok();
+        writeln!(
+            out,
+            "            paramsBuffer.contents().advanced(by: paramsBufferOffset + {params_cursor}).copyMemory(from: &{label}_v, byteCount: {len})"
+        )
+        .ok();
+        writeln!(out, "        }}").ok();
+        writeln!(
+            out,
+            "        icbCommand.setKernelBuffer(paramsBuffer, offset: paramsBufferOffset + {params_cursor}, at: {slot})"
+        )
+        .ok();
+        params_cursor += len;
+        slot += 1;
+    }
+    writeln!(
+        out,
+        "        icbCommand.concurrentDispatchThreads(gridSize, threadsPerThreadgroup: threadgroupSize)"
+    )
+    .ok();
+    writeln!(out, "    }}\n").ok();
+
+    // Companion helper: per-kernel params footprint in bytes. Lets the
+    // caller pre-compute the total paramsBuffer size when recording an
+    // ICB with many kernels.
+    let helper_name = format!("{}_params_size", swift_safe_name(&k.name));
+    writeln!(
+        out,
+        "    /// Total bytes `{}` consumes in `paramsBuffer` (sum of constexpr sizes).",
+        k.name
+    )
+    .ok();
+    writeln!(out, "    public static var {helper_name}: Int {{ {params_cursor} }}\n").ok();
 }
 
 // ─── metallib compilation (xcrun metal + metallib) ───────────────────
@@ -357,5 +528,54 @@ fn swift_scalar_size(dtype: &str) -> usize {
         "i8" | "u8" | "bool" => 1,
         "i64" | "u64" => 8,
         _ => 4,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use metaltile_core::shape::Shape;
+
+    use super::*;
+
+    fn dummy_kernel(name: &str) -> Kernel {
+        let mut k = Kernel::new(name);
+        k.params.push(Param {
+            name: "out".into(),
+            dtype: DType::BF16,
+            shape: Shape::scalar(),
+            is_output: true,
+            kind: ParamKind::Tensor,
+        });
+        k
+    }
+
+    #[test]
+    fn emits_indirect_wrapper_when_kernel_opts_in() {
+        let mut k = dummy_kernel("dequant_gemv_int4_bf16");
+        k.wants_indirect_variant = true;
+        let swift = render_swift_wrappers(&[k]);
+        // Direct + indirect wrappers both present.
+        assert!(swift.contains("func dequant_gemv_int4_bf16("));
+        assert!(swift.contains("func dequant_gemv_int4_bf16_indirect("));
+        // Indirect variant takes an indirect buffer, not a gridSize.
+        assert!(swift.contains("indirectBuffer: MTLBuffer"));
+        assert!(swift.contains("dispatchThreadgroups(indirectBuffer: indirectBuffer"));
+        // PSO lookup uses the base kernel name (no `_indirect` PSO exists).
+        assert!(swift.contains("pipelineState(for: \"dequant_gemv_int4_bf16\")"));
+    }
+
+    #[test]
+    fn no_indirect_wrapper_when_kernel_does_not_opt_in() {
+        // Default Kernel::new returns `wants_indirect_variant: false`.
+        let swift = render_swift_wrappers(&[dummy_kernel("dequant_gemv_int4_bf16")]);
+        assert!(swift.contains("func dequant_gemv_int4_bf16("));
+        assert!(!swift.contains("_indirect("));
+    }
+
+    #[test]
+    fn no_indirect_wrapper_for_other_kernels() {
+        let swift = render_swift_wrappers(&[dummy_kernel("mt_add_f32")]);
+        assert!(swift.contains("func mt_add_f32("));
+        assert!(!swift.contains("_indirect("));
     }
 }

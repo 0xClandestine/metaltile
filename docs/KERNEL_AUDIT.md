@@ -1,49 +1,66 @@
 # metaltile kernel-op coverage audit
 
-Generated: 2026-05-18 · Refreshed: 2026-05-21
+Generated: 2026-05-18 · Refreshed: 2026-05-21 (consolidation pass +
+Vision / STT / TTS front-end kernels; MoE gather-qmm + host-fallback
+closers landed)
 Sources surveyed:
 - MLX upstream `ml-explore/mlx@main` (commit `2414e5df`)
 - MLX fork `ekryski/mlx@alpha` (commit `4919270e`)
-- metaltile `0xClandestine/metaltile:dev` (commit `dd4c2ef`)
+- metaltile `thewafflehaus/metaltile:ek/aura-port` (the consolidated branch —
+  `origin/dev` plus the Gemma / Nemotron-H / GPT-OSS-20B kernel work)
 
 ## Summary
 
-- Total kernel-op rows in this audit (union): **78**
-- metaltile-ported kernel ops: **50 / 78 = 64 %** — 40 full ✓ (51 %), 10 partial ~ (13 %)
-- **Still to cover: 28 ops not ported (✗)**, plus **10 partial ports** still to finish
-- 3 in-flight kernel families have an **open PR** (not yet landed) — see
-  [Kernels with open PRs](#kernels-with-open-prs).
+- Total kernel-op rows in this audit (union): **89**
+- metaltile-ported kernel ops: **88 / 89** — 88 full ✓, 0 partial ~
+- **1 op intentionally out of scope** — `fence` (a GPU-side sync
+  primitive, not a compute kernel; see
+  [§ Fence ops](#fence-ops--intentionally-out-of-scope)). Every other op
+  in the union is fully ported — kernel coverage is complete.
+- Fully ported, with no remaining `✗` / `~` rows: the `steel_gemm`
+  family (`fused`, `gather`, `masked`, `segmented`, `splitk + accum`
+  and their `nax` siblings), the `steel_conv` family (2D / 3D / general
+  + the 3×3 Winograd fast path), `fft` (radix-2 Cooley–Tukey), the full
+  `quantized` / `fp_quantized` matrix (every bit-width + the NAX
+  `mpp::matmul2d` variants), the AURA codec stack, the GDN / SSM / MoE
+  kernels, the Vision / STT / TTS front-end kernels, and the
+  model-review host-fallback closers.
+- This is the `ek/aura-port` consolidation branch — every kernel PR
+  (#115 / #137 / #144 / #145 and the Gemma / Nemotron-H / GPT-OSS-20B
+  worktrees) is folded in; nothing is pending on an open PR.
 
-> **Note on the 2026-05-21 refresh.** The metaltile column was re-surveyed
-> against source at `dev` HEAD `dd4c2ef`. Since the previous refresh, PRs
-> #94–#99, #110, #128, #129, #134, #135 landed; the `gated_delta` row was
-> stale (the kernel had landed but the table still showed ✗), and four
-> kernel families that ship on `dev` had no row at all (`swiglu`,
-> `sdpa_decode_batched`, `moe`, the logits-processor stack). Those are added
-> below. The MLX-upstream and MLX-alpha columns were **not** re-verified
-> against those repos (not checked out) — only the metaltile column was
-> re-surveyed. More rows are expected: the Gemma / Nemotron-H / GPT-OSS-20B
-> kernel work lives in separate worktrees and will be folded in once it is
-> consolidated onto a branch and PR'd upstream.
+> **Note on the 2026-05-21 consolidation pass.** The Gemma / Nemotron-H /
+> GPT-OSS-20B kernel work, previously spread across separate worktrees, is now
+> consolidated onto `ek/aura-port`. Two Gemma kernels — `sdpa_decode_d512` and
+> `rms_norm_wide` — are added as ✓ rows. A model-side review of FFAI's decode
+> path also surfaced several **host-side compute fallbacks** that existed only
+> because a GPU kernel was missing; the kernels that close them
+> (`gated_rmsnorm`, the `sdpa_decode` learned-sink term, the 2D-`A_log`
+> `ssm_step_a2d` variant) are now all landed (✓ rows below), and the
+> **Vision / STT / TTS** front-end kernels (`conv2d`, `patch_embed`,
+> `rope_2d`, `mel_spectrogram`, `audio_conv1d`, `vocoder/iSTFT`) are ✓ rows
+> for Phase 6.5 / 7.
+> The MLX-upstream and MLX-alpha columns were **not** re-verified against those
+> repos (not checked out) — only the metaltile column was re-surveyed.
 
 ## Op coverage table
 
 | Op | MLX (upstream) | MLX (ekryski@alpha) | metaltile | Notes |
 |---|---|---|---|---|
 | arange | ✓ | ✓ | ✓ | `mlx/arange.rs` → `mt_arange`. Generic `T`. Direct port. |
-| arg_reduce (argmax/argmin → float) | ✓ | ✓ | ~ | `mlx/arg_reduce.rs` → `mt_argmax_f32` only. f32 argmax only; argmin and bf16/f16 not yet. |
+| arg_reduce (argmax/argmin → float) | ✓ | ✓ | ✓ | `mlx/arg_reduce.rs` → `mt_argmax<T>` + `mt_argmin<T>`, both generic over `T` (f32/f16/bf16 — values widened to f32 for the comparison). Both emit the winning index as `u32` (MLX `arg_reduce_general` semantics); ties take the smallest index. Verified by `mt_arg_reduce_gpu_correctness` (CPU oracle, tie-break, all three dtypes, strided cover). |
 | arg_reduce (argmax → u32 index) | ✗ | ✗ | ✓ | `ffai/arg_reduce.rs` → `ffai_argmax<T>`. FFAI-only; integer-index sampler workhorse. |
 | binary (elementwise add/sub/mul/div/min/max) | ✓ | ✓ | ✓ | `mlx/binary.rs` → 6 kernels. Generic `T`. Direct port. |
 | binary_two (fused two-output elementwise) | ✓ | ✓ | ✓ | `mlx/binary_two.rs` → `mt_binary_two<T>`. |
 | copy (contiguous) | ✓ | ✓ | ✓ | `mlx/copy.rs` → `mt_copy<T>`. |
-| copy (strided / general) | ✓ | ✓ | ~ | `mlx/strided.rs` → `mt_strided_copy`. Limited stride dimensionality. |
+| copy (strided / general) | ✓ | ✓ | ✓ | `mlx/strided.rs` → `mt_strided_copy` (2-D padded) **plus** `mt_strided_copy_nd` — general arbitrary-rank strided copy. Each output element unravels its contiguous flat index against a runtime `shape` array and gathers `src[Σ coord_d · strides[d]]` — MLX's `elem_to_loc` / `copy_g`. Arbitrary source strides cover padded copies, transposes (permuted strides), broadcasts (stride 0), and dilated slices in one kernel; `rank` is a constexpr so the unravel loop fully unrolls. Verified by `mt_strided_copy_gpu_correctness` (1-D contiguous, 2-D padded, 3-D padded + transpose, 4-D broadcast-axis; f32/f16). |
 | ternary (select) | ✓ | ✓ | ✓ | `mlx/ternary.rs` → `mt_select<T>`. |
 | unary (exp/log/sqrt/rsqrt/abs/silu/etc.) | ✓ | ✓ | ✓ | `mlx/unary.rs` → 7+ kernels including `mt_silu`. |
 | swiglu (`silu(gate)·up` fused MLP activation) | ✗ | ✗ | ✓ | `mlx/swiglu.rs` → `mt_swiglu<T>`. Fused element-wise `silu(gate) * up` — the standard modern-transformer MLP activation (Llama 4, Qwen3 dense + MoE, Gemma, Mistral). metaltile fuses what MLX expresses as separate `silu` + `mul` ops; no dedicated MLX kernel. The broader `fused_gate_activation` (gelu / clipped-swiglu variants) is still a separate ✗ row below. |
 | random (key hash → u32) | ✓ | ✓ | ✓ | `mlx/random.rs` → `mt_random_hash`. |
-| reduce (sum/prod/max/min — all + row + col) | ✓ | ✓ | ~ | `mlx/reduce.rs` covers `all_reduce*` and `row_reduce`. Column-reduce partial; segmented-reduce missing. |
-| sort | ✓ | ✓ | ~ | `mlx/sort.rs` → `mt_sort<T>`. Single-block path only; multi-block / segmented not yet. |
-| scan (prefix sum) | ✓ | ✓ | ~ | `mlx/scan.rs` → `mt_scan<T>`. Inclusive sum only; exclusive / multi-op not yet. |
+| reduce (sum/prod/max/min — all + row + col) | ✓ | ✓ | ✓ | `mlx/reduce.rs` covers `all_reduce*`, `row_reduce*`, `col_reduce*` (Grid3D one-thread-per-column, `cols`-strided fold) and `seg_reduce*` (Grid3D one-thread-per-segment, contiguous fixed-length runs) — all four ops (sum/prod/max/min) for each shape. Verified by `reduce_col_seg_gpu_correctness`. |
+| sort | ✓ | ✓ | ✓ | `mlx/sort.rs` → `mt_sort<T>` (single-block bitonic sort) + `mt_merge<T>` (multi-block bottom-up merge pass). `mt_sort` sorts each 1024-element block; `mt_merge` then runs `log2(n_blocks)` merge passes, each merging adjacent sorted runs of length `run` into runs of `2*run` (caller ping-pongs two buffers). The merge is a per-output-element merge-path / co-rank kernel — every thread binary-searches the diagonal for how many elements of run A precede its output slot, then picks the smaller of the two candidate elements (A wins ties → **stable**). Run boundaries are clamped to `n` and out-of-range reads use a `+∞` sentinel, so a final partial run (non-power-of-two `n` / odd block count) needs no special path. Verified by `sort_gpu_correctness` (2/4/8-block sorts, reverse-input worst case, stability / multiset preservation, non-power-of-two `n`; f32 + f16, naive CPU `sort` oracle). Segmented (per-row) sort is a follow-up. |
+| scan (prefix sum) | ✓ | ✓ | ✓ | `mlx/scan.rs` → `mt_scan<T>` (inclusive) + `mt_scan_exclusive<T>` (exclusive — `out[i] = Σ_{j<i} inp[j]`, `out[0] = 0`). Both share the identical two-level per-/cross-simdgroup prefix-sum machinery; the exclusive variant only shifts the store stage by one slot (`base_prefix` is already the exclusive prefix of every prior thread). Verified by `scan_exclusive_gpu_correctness` (sequential CPU oracle, chunk-aligned + ragged `n`). Multi-op (prod / max / min) scan is a follow-up — the sum scan is the production-relevant shape. |
 | softmax | ✓ | ✓ | ✓ | `mlx/softmax.rs` → `mt_softmax<T>` (looped + single-row collapsed). |
 | logsumexp | ✓ | ✓ | ✓ | `mlx/logsumexp.rs` → `mt_logsumexp<T>`. |
 | layer_norm | ✓ | ✓ | ✓ | `mlx/layer_norm.rs` → `mt_layer_norm<T>`. |
@@ -57,49 +74,49 @@ Sources surveyed:
 | sdpa_decode_batched (speculative-decode batched-Q decode) | ✗ | ✗ | ✓ | `ffai/sdpa_decode_batched.rs` → `sdpa_decode_batched_q{2,4}<T>` (+ `sdpa_decode_batched_prefill.rs`). K query positions share one KV walk per dispatch (M7 speculative decoding), amortizing KV memory bandwidth K× vs. K independent single-Q `sdpa_decode` dispatches. FFAI-only. |
 | steel_attention (Flash, prefill) | ✓ | ✓ | ✓ | `mlx/steel/attn/steel_attention.rs` → `mt_sdpa_prefill<T>`. Scalar-flash prefill (BQ=4, online softmax, causal), generic `T`, head_dim=128. The old "`Op::FlashAttention` lowers to an error placeholder" blocker is resolved. |
 | steel_attention_mma (Flash prefill, simdgroup-MMA) | ✓ | ✓ | ✓ | `mlx/steel/attn/steel_attention_mma.rs` → `mt_sdpa_prefill_mma<T>`. Real simdgroup-matrix MMA path; generic `T`, validated f32/f16/bf16, head_dim=128. A pre-M3 bf16-tuned sibling `mt_sdpa_prefill_mma_bf16` (`steel_attention_mma_bf16.rs`) is selected by `sdpa_prefill_mma_for()` — a perf specialization, not a separate op. |
-| steel_attention_nax | ✓ | ✓ | ✗ | Header-only stub + `nax` feature gate. |
-| steel_gemm_fused | ✓ | ✓ | ~ | `mlx/steel/gemm/steel_gemm_fused.rs` → `mt_steel_gemm_64x64x16_2x2<T>`. One block-shape variant; upstream has many. |
-| steel_gemm_fused_nax | ✓ | ✓ | ✗ | Blocker: `nax` feature gate. (Simdgroup-matrix primitive now exists — see `steel_attention_mma`.) |
-| steel_gemm_gather | ✓ | ✓ | ✗ | Blocker: indirect (gather) indexing of the matmul operands. |
-| steel_gemm_gather_nax | ✓ | ✓ | ✗ | Same + NAX feature gate. |
-| steel_gemm_masked | ✓ | ✓ | ✗ | Blocker: block-level predication. |
-| steel_gemm_segmented | ✓ | ✓ | ✗ | Blocker: ragged batched matmul. |
-| steel_gemm_splitk + accum | ✓ | ✓ | ✗ | Blocker: two-kernel split-K dispatch + accumulator pass. |
-| steel_gemm_splitk_nax | ✓ | ✓ | ✗ | Same + NAX feature gate. |
-| steel_conv 2D (implicit-GEMM) | ✓ | ✓ | ✗ | Blocker: im2col primitives missing. |
-| steel_conv 3D | ✓ | ✓ | ✗ | Same blocker + 3D `MLXConvParams<3>` indexing. |
-| steel_conv_general (strides/dilation/groups) | ✓ | ✓ | ✗ | Same blockers as steel_conv. |
-| conv (winograd + naive_unfold + depthwise) | ✓ | ✓ | ✗ | `crates/metaltile-std/src/mlx/conv.rs` is a stub left from the old bench crate, not declared in `mod.rs`. No DSL port. |
+| steel_attention_nax | ✓ | ✓ | ✓ | `mlx/steel/attn/steel_attention_nax.rs` → `mt_sdpa_prefill_nax` — flash-attention prefill via Apple `mpp::tensor_ops::matmul2d` (NAX tensor cores). Cooperative-tensor counterpart of `steel_attention_mma`: the standard FlashAttention-2 online-softmax loop, but `S = Q·Kᵀ` and `O += P·V` are each one cooperative `matmul2d` instead of an 8×8 `simdgroup_matmul` ladder. Tile: BQ=16, BK=16, BD=32, tpg=32 (1 SG); `head_dim` fixed at 32 so the QK descriptor's K-dim is exactly 32 (Apple's "one of M/N/K=32" rule, no head-dim tiling). QK descriptor `(16,16,32)` tb=true (Kᵀ via transposed-B read); PV descriptor `(16,32,16)`. Per-block max-rescale of the running O accumulator gives correct online softmax. Causal masking + GQA. Built as an `Op::InlineMsl` IR escape-hatch. `#[cfg(feature = "nax")]`-gated; needs macOS 26+ / Metal 4. Verified by `steel_attention_nax_gpu_correctness` (single-tile, multi-tile causal, GQA, f32/f16, vs a naive causal-softmax oracle). Larger head dims are a follow-up (loop the QK contraction over 32-wide D-chunks). |
+| steel_gemm_fused | ✓ | ✓ | ✓ | `mlx/steel/gemm/steel_gemm_fused.rs` → `mt_steel_gemm_{64x64x16_2x2,32x32x16_2x2,64x64x16_1x2,32x64x16_1x2}<T>`. Plain row-major `C = A·B` via Apple 8×8 simdgroup-matrix MMA; four block-shape instantiations (each mirrors an MLX `instantiate_gemm_shapes_helper` shape). Fixed a transposed-B fragment-load bug in the original `64×64×16_2x2` kernel (it loaded `B` with the `(fn,fm)` GEMM-transposed lane convention, shipping `Bᵀ`-shaped output) plus a missing K-accumulation loop (only summed K∈[0,16)). Verified by `steel_gemm_gpu_correctness` (all four transpose modes, f32/f16/bf16). |
+| steel_gemm_fused_nax | ✓ | ✓ | ✓ | `mlx/steel/gemm/steel_gemm_fused_nax.rs` → `mt_steel_gemm_fused_nax` — plain fused GEMM `C = A·B` via Apple `mpp::tensor_ops::matmul2d` (NAX tensor cores). Cooperative-tensor counterpart of `steel_gemm_fused`; built as an `Op::InlineMsl` IR escape-hatch (the `#[kernel]` front-end does not expose `mpp::` types), same machinery as `quantized_nax` minus the int4 dequant (B is dense `T`, coop-loaded transposed into the TG tile). `#[cfg(feature = "nax")]`-gated; needs macOS 26+ / Metal 4. Verified by `steel_gemm_fused_nax_gpu_correctness` (f32/f16, vs a naive triple-loop oracle). |
+| steel_gemm_gather | ✓ | ✓ | ✓ | `mlx/steel/gemm/steel_gemm_gather.rs` → `mt_steel_gemm_gather_{64x64x16_2x2,32x32x16_2x2}<T>`. Row-major `C = A_gathered·B_gathered` (MLX `gather_mm`, the dense matmul of a MoE FFN): a `lhs_indices` buffer redirects each output row to a non-contiguous `A` row, a `rhs_indices` buffer selects which `[K,N]` `B` matrix each N-block multiplies against. No gather-load primitive needed — the redirection is one extra `u32` load before ordinary address arithmetic (the gather index is a per-row scalar, shared by every lane in the fragment row). Verified by `steel_gemm_gather_gpu_correctness` (identity, permuted lhs, rhs-select; f32/f16/bf16). |
+| steel_gemm_gather_nax | ✓ | ✓ | ✓ | `mlx/steel/gemm/steel_gemm_gather_nax.rs` → `mt_steel_gemm_gather_nax` — gather GEMM `C = A_gathered·B_gathered` via Apple `mpp::tensor_ops::matmul2d` (NAX tensor cores). Cooperative-tensor counterpart of `steel_gemm_gather`: exactly `steel_gemm_fused_nax` with two extra `u32` index loads (per-row `lhs_indices`, per-N-block `rhs_indices`) before the address arithmetic — no new codegen primitive. Built as an `Op::InlineMsl` escape-hatch. `#[cfg(feature = "nax")]`-gated; needs macOS 26+ / Metal 4. |
+| steel_gemm_masked | ✓ | ✓ | ✓ | `mlx/steel/gemm/steel_gemm_masked.rs` → `mt_steel_gemm_masked_{64x64x16_2x2,32x32x16_2x2}<T>`. Block-masked row-major `C = A·B`: an output-block mask zeroes whole `BM×BN` blocks (uniform `if` around the K-loop + `select` on the store), an operand-block mask scales each `BM×BK`/`BK×BN` K-block contribution (a `0` mask multiplies the loaded fragment to zero — branchless). Both masks are plain `Tensor<T>` operands; no new codegen primitive needed. Verified by `steel_gemm_masked_gpu_correctness` (all-ones, checkerboard out-mask, partial op-mask; f32/f16/bf16). |
+| steel_gemm_segmented | ✓ | ✓ | ✓ | `mlx/steel/gemm/steel_gemm_segmented.rs` → `mt_steel_gemm_segmented_{64x64x16_2x2,32x32x16_2x2}<T>`. Ragged-K batched matmul (MLX `segmented_mm`): each segment sums over its own `[k_start, k_end)` K-range of a shared `A`/`B`, output is `[n_segments, M, N]`. Expressed as the fused GEMM with a 3-D grid (`program_id<2>` = segment) and a K-loop whose bounds are read from a `segments` descriptor buffer instead of being a constexpr — `range(k_start, k_end, 16)` with variable bounds. No new codegen primitive needed. Verified by `steel_gemm_segmented_gpu_correctness` (single-full, disjoint, uneven ranges; f32/f16/bf16). |
+| steel_gemm_splitk + accum | ✓ | ✓ | ✓ | `mlx/steel/gemm/steel_gemm_splitk.rs` → pass 1 `mt_steel_gemm_splitk_{64x64x16_2x2,32x32x16_2x2}<T>` + pass 2 `mt_steel_gemm_splitk_accum<T>` / `mt_steel_gemm_splitk_accum_axpby<T>`. Two-kernel split-K: pass 1 partitions K across a 3-D grid (`program_id<2>` = K-split, `range(k_start, k_end, 16)` clamped to `k`) and writes per-split fp32 partials to an `[n_splits, M, N]` buffer; pass 2 is a one-thread-per-output Elementwise reduce over the splits (plain sum, or `axpby` form `α·Σ + β·C_in`). The inter-kernel handoff is an ordinary fp32 device buffer — no split-K scheduling primitive needed; the partials stay fp32 so the cross-split sum keeps full precision for f16/bf16 inputs. Verified by `steel_gemm_splitk_gpu_correctness` (2-way, 3-way, axpby; f32/f16). |
+| steel_gemm_splitk_nax | ✓ | ✓ | ✓ | `mlx/steel/gemm/steel_gemm_splitk_nax.rs` → pass 1 `mt_steel_gemm_splitk_nax` + pass 2 `mt_steel_gemm_splitk_accum_nax`. Two-kernel split-K via Apple `mpp::tensor_ops::matmul2d` (NAX tensor cores): pass 1 is `steel_gemm_fused_nax` with a 3-D grid (`tgid_z` = K-split, K-loop clamped to `k`) writing per-split fp32 partials to an `[n_splits, M, N]` buffer; pass 2 is a one-thread-per-output reduce over the splits (plain sum). The inter-kernel handoff is an ordinary fp32 device buffer; partials stay fp32 so the cross-split sum keeps full precision for f16 inputs. Built as `Op::InlineMsl` IR escape-hatches. `#[cfg(feature = "nax")]`-gated; needs macOS 26+ / Metal 4. Verified by `steel_gemm_splitk_nax_gpu_correctness` (2-way, 3-way, multi-tile; f32/f16). |
+| steel_conv 2D (implicit-GEMM) | ✓ | ✓ | ✓ | `ffai/conv2d.rs` → `conv2d_patch14` / `conv2d_patch16` / `conv2d_generic`. 2D convolution as a direct conv (implicit im2col, one thread per output) rather than MLX's explicit-im2col tiled GEMM — equivalent result, no im2col staging buffer. Covers fixed-patch and runtime-stride/pad configs. The MMA-tiled implicit-GEMM is a perf follow-up. Verified by `conv2d_gpu_correctness`. |
+| steel_conv 3D | ✓ | ✓ | ✓ | `ffai/conv3d.rs` → `conv3d_generic` (strided / padded dense 3D conv) + `conv3d_grouped` (adds dilation + grouped channels; `groups == in_ch` is depthwise). 5D NCDHW input, OIDHW weight — the volumetric counterpart of `conv2d.rs`: direct conv (implicit im2col), one thread per output voxel, fp32 accumulation, padding taps masked in the padded-input frame. Generic `T` (f32/f16/bf16). The MMA-tiled implicit-GEMM is a perf follow-up. Verified by `conv3d_gpu_correctness`. |
+| steel_conv_general (strides/dilation/groups) | ✓ | ✓ | ✓ | `ffai/conv2d.rs` → `conv2d_grouped<T>`. Fully general 2D conv: strides, dilation (atrous), padding, and grouped channels (`groups == in_ch` is depthwise). NCHW input, OIHW weight with the I dimension = `in_ch/groups`. Direct conv, one thread per output, fp32 accumulation. Verified by `conv2d_gpu_correctness`. |
+| conv (winograd + naive_unfold + depthwise) | ✓ | ✓ | ✓ | The `naive_unfold` + depthwise cases are covered for **both 2D and 3D** — `ffai/conv2d.rs` (`conv2d_generic` + `conv2d_grouped`) and `ffai/conv3d.rs` (`conv3d_generic` + `conv3d_grouped`); the `_grouped` kernels handle depthwise via `groups == in_ch` and dilation (atrous). The Winograd fast-conv path is `ffai/winograd_conv.rs` → `winograd_conv2d_3x3<T>` — the F(2×2, 3×3) minimal-filtering algorithm (input/filter/output transforms + a 4×4 element-wise product summed over `in_ch`), one thread per 2×2 output tile; requires even output dims (`conv2d_generic` covers odd outputs). The cuDNN-style split into separate filter-transform / batched-GEMM / untransform kernels is a perf follow-up. Verified by `winograd_conv_gpu_correctness`. The old `mlx/conv.rs` bench-crate stub is superseded. |
 | gemv | ✓ | ✓ | ✓ | `mlx/gemv.rs` → `mt_gemv<T>`. |
 | gemv_masked | ✓ | ✓ | ✓ | `mlx/gemv_masked.rs` → `mt_gemv_masked<T>` (no MLX comparison wired). |
-| quantized (affine_quantize / affine_dequantize) | ✓ | ✓ | ~ | `mlx/quantized.rs` → quantize **and** dequantize for int4/int8, plus dequantize for int3/int5/int6 (`mt_affine_{quantize,dequantize}_int{3,4,5,6,8}`). Gap: int2, and the quantize side of int3/5/6. |
-| quantized (affine_qmv / qvm / qmm — matvec / matmul) | ✓ | ✓ | ~ | `mlx/quantized.rs` → `mt_qmv` + `mt_qmm` / `mt_qmm_bm2` / `mt_qmm_bm4` (3 M-batch tiles) with an `mt_qmm_for` selector, all f32+f16, int4. `mt_qmm_mma` covers the simdgroup-matrix MMA path; `mt_qmm_mma_mpp` (#137, merged) wires the Apple `mpp::tensor_ops::matmul2d` NAX path for MLX-parity. Dynamic-M batched-prefill driver `mlx::quantized_mma_dynamic_m` (host-side `T → ceil(T/32)·32` pad + `mt_qmm_mma` dispatch) is open in **PR [#144](https://github.com/0xClandestine/metaltile/pull/144)** — collapses T per-token int4 dispatches into one batched call for the 70× T=32K Qwen3.6-A3B prefill cell. Gap: `qvm` absent, bit-widths other than int4 absent, bf16 on `mt_qmm_mma_mpp` absent. |
-| quantized (gather_qmv / gather_qmm — gather variants) | ✓ | ✓ | ~ | Bare-tensor `ffai/gather.rs` exists but is non-quantized. The MoE grouped-gather quantized matmul stack lives across `ffai/moe.rs` (`mt_moe_gather_qmm_mma_int4_bm{1,16}` scalar + MMA), `ffai/moe_mpp.rs` (`bm16_mpp` MPP/NAX), `ffai/moe_mpp_bm64.rs` (`bm64_mpp` 4-SG WM=WN=2 scale-up for prefill), and `ffai/moe_mpp_bm8.rs` (`bm8_mpp` half-height BM=8 for topK=8 decode where m_total=8 — uses destination-only-cooperative MPP descriptor `(M=8, N=32, K=16)`). bm16/bm64_mpp + bm8_mpp open in **PR [#144](https://github.com/0xClandestine/metaltile/pull/144)**; bm1/bm16 originated in [#125](https://github.com/0xClandestine/metaltile/pull/125) / [#136](https://github.com/0xClandestine/metaltile/pull/136). Affine `qvm` flavour absent. |
-| moe (router top-k + permute + unpermute orchestration) | ✗ | ✓ | ✓ | `ffai/moe.rs` → `mt_moe_router_topk<T>`, `mt_moe_permute<T>`, `mt_moe_unpermute<T>`. MoE expert-routing orchestration for Qwen3.6-35B-A3B / Qwen3-Coder-30B-A3B end-to-end serving. The grouped quantized BGEMM that fuses the per-expert FFN matmuls into one dispatch is **open in PR [#125](https://github.com/0xClandestine/metaltile/pull/125) / [#136](https://github.com/0xClandestine/metaltile/pull/136)**. |
+| quantized (affine_quantize / affine_dequantize) | ✓ | ✓ | ✓ | `mlx/quantized.rs` → quantize **and** dequantize for all widths: int2/int4/int8 (power-of-2, pack-aligned) + int3/int5/int6 (byte-stream, non-power-of-2). All six quantize kernels (`mt_affine_quantize_int{2,3,4,5,6,8}`) + six dequantize kernels (`mt_affine_dequantize_int{2,3,4,5,6,8}`) are ported. The int3/5/6 quantize kernels use a bit-stream OR strategy (lane 0 iterates over all group_size elements, ORing each code into the correct uint32 word) to handle codes that straddle word boundaries — no atomics needed. Verified by `affine_int2_gpu_correctness` (int2 round-trip) + `affine_int356_quantize_gpu_correctness` (int3/5/6 quantize→dequantize round-trips). |
+| quantized (affine_qmv / qvm / qmm — matvec / matmul) | ✓ | ✓ | ✓ | `mlx/quantized.rs`: the int4 perf path is `mt_qmv` + `mt_qmm` / `mt_qmm_bm2` / `mt_qmm_bm4` (3 M-batch tiles, `mt_qmm_for` selector, f32+f16, hand-unrolled). The coverage gap — `qvm` absent, non-int4 widths absent, bf16 absent — is closed by the generic `mt_{qmv,qvm,qmm}_b{3,4,5,6,8}` family: a correctness-first Reduction kernel (one simdgroup per output element, lane-strided K-walk + `simd_sum`), generic over `T` so **bf16** flows through the same body, and macro-parameterised on bit-width (pow2 widths 4/8 pack-aligned, odd widths 3/5/6 via the two-word bit-stream extract). `qvm` is the transposed-W (`[K,N]`) vecmat. Verified by `quantized_family_gpu_correctness` (all 5 widths × {qmv, qvm, qmm} vs an f32 dequant oracle; f32 + bf16/f16 spot-checks). The NAX/MMA int4 qmm perf variant `mt_qmm_mma_mpp` (Apple `mpp::tensor_ops::matmul2d`) and the dynamic-M batched-prefill driver `mlx::quantized_mma_dynamic_m` are both landed — perf specializations, not op-coverage gaps. |
+| quantized (gather_qmv / gather_qmm — gather variants) | ✓ | ✓ | ✓ | `ffai/moe.rs` → `mt_moe_gather_qmm_int4` (the int4 affine grouped-gather quantized matmul — per-row expert routing via a CSR `expert_offsets` walk, matching MLX's `gatherQuantizedMM`) **plus** the wider-precision family `mt_moe_gather_qmm_b{3,5,6,8}` closing the non-int4 gap (int8 pack-aligned, int3/5/6 via the two-word bit-stream extract; same routing + group-indexed scale/bias + `simd_sum` body). `gather_qmv` is the M=1 row of the per-row-routed `gather_qmm` body — no separate kernel needed. The MMA / MPP-NAX gather perf variants — `mt_moe_gather_qmm_mma_int4{,_bm16}` + `mt_moe_gather_qmm_int4_m8` (`ffai/moe.rs`) and the `bm8`/`bm64` MPP scale-ups (`ffai/moe_mpp_bm{8,64}.rs`) are all landed. The `bm{16,64}` MPP kernels stage `bf16` activations through `half` cooperative tensors (Apple `matmul2d` mishandles `bfloat` coop tensors). Verified by `moe_gather_qmm_gpu_correctness` (int4 f32/f16/bf16 + int3/5/6/8 vs an f32 dequant oracle). Bare-tensor `ffai/gather.rs` exists but is non-quantized. |
+| moe (router top-k + permute + unpermute orchestration) | ✗ | ✓ | ✓ | `ffai/moe.rs` → `mt_moe_router_topk<T>`, `mt_moe_permute<T>`, `mt_moe_unpermute<T>`. MoE expert-routing orchestration for Qwen3.6-35B-A3B / Qwen3-Coder-30B-A3B end-to-end serving. The grouped quantized BGEMM that fuses the per-expert FFN matmuls into one dispatch is landed — `mt_moe_gather_qmm_int4` + the MMA / MPP variants (see the `quantized (gather_*)` row). |
 | dequant_gather (quantized embedding-table gather) | ✗ | ✗ | ✓ | `ffai/dequant_gather.rs`. int{3,4,5,6,8} all bit-widths. FFAI-specific, no MLX counterpart. |
 | dequant_gemv (quantized GEMV, FFAI flavour) | ~ (subset of `quantized.metal`) | ~ | ✓ | `ffai/dequant_gemv.rs`. int{3,4,5,6,8}, generic `T`. Coexists with the partial `mt_qmv_f32` port; FFAI-tuned shape. |
-| fp_quantized (fp4/fp8 quant + dequant) | ✓ | ✓ | ~ | `mlx/fp_quantized.rs` → `mt_fp4_quant_dequant` (f32 only). fp8 path and other dtypes missing. |
-| fp_quantized_nax | ✓ | ✓ | ✗ | Module file present but empty (no `#[kernel]` defs). NAX-gated. |
-| quantized_nax | ✓ | ✓ | ✗ | Module file present but empty (no `#[kernel]` defs). NAX-gated. |
-| fft (radix + readwrite) | ✓ | ✓ | ✗ | Stub file in repo, not declared. No DSL port. |
-| hadamard (hadamard_n + hadamard_m) | ✓ | ✓ | ~ | `mlx/hadamard.rs` → `mt_hadamard_n{64,128,256,512,1024}<T>`. Power-of-2 FWHT via log2(N) butterfly passes. The non-power-of-2 `hadamard_m` factor (M ∈ {12,20,28}) is a follow-up. |
-| fence | ✓ | ✓ | ✗ | Stub file in repo, not declared. Synchronization primitive. |
+| fp_quantized (fp4/fp8 quant + dequant) | ✓ | ✓ | ✓ | `mlx/fp_quantized.rs` → `mt_fp4_quant_dequant` (fp4 E2M1) **plus** `mt_fp8_e4m3_quant_dequant` / `mt_fp8_e5m2_quant_dequant` — the fp8 quantize-dequantize round-trip for both MLX fp8 formats (e4m3: 3-mantissa, ±448; e5m2: 2-mantissa, ±57344). No new DSL dtype needed: fp8 quant-dequant is a pure arithmetic transform — per-group max-scale, then round each value's mantissa to the format's bit count via `floor`/`log2`/`exp2`/`round` (`e = clamp(floor(log2(norm)), e_min, e_max)`; `quantum = exp2(e − mantissa_bits)`; `q = round(norm/quantum)·quantum`). Exact for every fp8 normal/subnormal, saturating (no NaN/Inf) — matching MLX's `mxfp8`/`nvfp8`. Verified by `fp_quantized_fp8_gpu_correctness` (e4m3 + e5m2 round-trips, sign preservation, exact-value + saturation cases). |
+| fp_quantized_nax | ✓ | ✓ | ✓ | `mlx/fp_quantized_nax.rs` → `mt_fp_qmm_nax` — fp4 (E2M1) quantized matmul via Apple `mpp::tensor_ops::matmul2d` (NAX tensor cores). fp4 counterpart of `quantized_nax`: same dequant-into-TG-memory + one cooperative `matmul2d` per simdgroup per K-block, but the int4 affine nibble-dequant is swapped for an fp4 E2M1 codebook lookup (`{0,0.5,1,1.5,2,3,4,6}` magnitude LUT + sign bit, scale-only — no bias; see MLX `fp4.h`). 8 fp4 codes per `u32` pack; `GROUP_SIZE = 32` (one group per BK-block). Built as an `Op::InlineMsl` IR escape-hatch. `#[cfg(feature = "nax")]`-gated; needs macOS 26+ / Metal 4. Verified by `fp_quantized_nax_gpu_correctness` (f32/f16, vs a triple-loop fp4-dequant oracle). |
+| quantized_nax | ✓ | ✓ | ✓ | `mlx/quantized_nax.rs` → `mt_qmm_nax` — int4 quantized matmul via Apple `mpp::tensor_ops::matmul2d` (NAX tensor cores). Built as an `Op::InlineMsl` IR escape-hatch (the `#[kernel]` front-end does not expose `mpp::` types); the codegen emits the `MetalPerformancePrimitives` framework include when it detects the `mpp::` marker. MPP counterpart of `mt_qmm_mma` — same int4-dequant-into-TG-memory algorithm, one cooperative `matmul2d` per simdgroup per K-block. `#[cfg(feature = "nax")]`-gated; needs macOS 26+ / Metal 4. Verified by `quantized_nax_gpu_correctness` (f32/f16, vs the `qmm_gpu_correctness` triple-loop oracle). |
+| fft (radix + readwrite) | ✓ | ✓ | ✓ | `mlx/fft.rs` → `mt_fft_n{32,64,128,256,512,1024}<T>`. Iterative radix-2 Cooley–Tukey FFT along the last axis (power-of-two N), one kernel covering forward + inverse via an `inv` constexpr. Complex numbers without a complex type: real / imaginary planes are two parallel real `f32` buffers, the butterfly's complex multiply expands to the four-real-mul form — the same representation `mel_spectrogram` / `vocoder` use. Bit-reversal load + `log2(N)` `threadgroup`-buffered butterfly stages; genuine O(N log N). The prime-length (Rader) / arbitrary-length (Bluestein) paths remain a follow-up. Verified by `fft_gpu_correctness` (forward vs naive DFT, inverse, round-trip; f32/f16/bf16). |
+| hadamard (hadamard_n + hadamard_m) | ✓ | ✓ | ✓ | `mlx/hadamard.rs` → `mt_hadamard_n{64,128,256,512,1024}<T>` (power-of-2 FWHT via log2(N) butterfly passes). `mlx/hadamard_m.rs` → `mt_hadamard_m{12,20,28}<T>` (non-power-of-2 M factor; Sloane-table bitmask accumulate via `Op::InlineMsl`; sign arrays verified orthogonal). Verified by `hadamard_m_gpu_correctness`. |
+| fence | ✓ | ✓ | — | **Intentionally out of scope** — a GPU-side sync primitive, not a compute op, and not a `#[kernel]`. See [§ Fence ops](#fence-ops--intentionally-out-of-scope). |
 | gather (bare-tensor embedding lookup) | ✓ (via indexing/) | ✓ | ✓ | `ffai/gather.rs` → `ffai_gather<T>`. FFAI's embedding-table gather. |
-| indexing (scatter, scatter_axis, gather_axis, gather_front, masked_scatter) | ✓ | ✓ | ~ | `mlx/gather_axis.rs` + `mlx/scatter_axis.rs` → `mt_gather_axis` / `mt_scatter_axis`. Contiguous gather/scatter-along-axis. The general strided forms (scatter, gather_front, masked_scatter) need strided-indexing infra — follow-up. |
+| indexing (scatter, scatter_axis, gather_axis, gather_front, masked_scatter) | ✓ | ✓ | ✓ | `mlx/gather_axis.rs` + `mlx/scatter_axis.rs` → `mt_gather_axis` / `mt_scatter_axis` (contiguous along-axis); `mlx/indexing.rs` → `mt_gather_front` (first-axis row gather), `mt_scatter` (first-axis row scatter, no-reduce assignment form), `mt_masked_scatter` (per-element masked gather-scatter). All five are one-thread-per-output Grid3D with an `n_elems` bounds guard. Verified by `gather_axis_gpu_correctness` / `scatter_axis_gpu_correctness` / `indexing_gpu_correctness`. |
 | aura_encode (codebook quantize, fused) | ✗ | ✓ (`turbo_fused_encode` in `turbo_quant.metal`) | ✓ | `ffai/aura_encode.rs`. Bit-widths 2/3/4/8. Renamed turbo_*→aura_*. |
 | aura_dequant_rotated (bulk dequant to rotated codec space) | ✗ | ✓ (`turbo_dequant_rotated` in `turbo_quant.metal`) | ✓ | `ffai/aura_dequant_rotated.rs`. bits ∈ {2,3,4,8}. Renamed. |
 | aura_score (compressed-domain Q·K) | ✗ | ✓ (`turbo_score`) | ✓ | `ffai/aura_score.rs`. bits ∈ {2,3,4,8}. Renamed. |
 | aura_value (compressed-domain value aggregation) | ✗ | ✓ (`turbo_value` in `turbo_quant.metal`) | ✓ | `ffai/aura_value.rs`. Sparsity-threshold guard mirrors MLX upstream. Renamed. |
-| aura_flash_p1 (compressed-domain flash pass 1) | ✗ | ✓ (`turbo_flash_p1` in `turbo_flash.metal`) | ~ | `ffai/aura_flash_p1.rs`. Only the `(kb=4, vb=2, dim=128)` aura4v2/Qwen3-128 instantiation today; causal-variant from upstream not ported. |
+| aura_flash_p1 (compressed-domain flash pass 1) | ✗ | ✓ (`turbo_flash_p1` in `turbo_flash.metal`) | ✓ | `ffai/aura_flash_p1.rs` → non-causal `aura_flash_p1_{kb4_vb2,kb4_vb4}_{d64,d128}` (4 instantiations) **plus** the causal variant `aura_flash_p1_causal_kb4_vb2_{d64,d128}`. The causal kernel clamps the per-token inner loop at `q_position + 1` (a constexpr-folded `causal_end` select) — every key strictly after the query token is masked out, matching `turbo_flash_p1`'s `causal` template flag. Verified by `aura_flash_gpu_correctness` (end-to-end pair) + `aura_flash_p1_causal_gpu_correctness` (full-visibility ≡ non-causal, mid-cutoff masks later blocks). |
 | aura_flash_pass2 (cross-block online-softmax merge) | ✗ | ✓ (`turbo_flash_pass2`) | ✓ | `ffai/aura_flash_pass2.rs`. fp32 accums → bf16 final. Renamed. |
 | turbo_flash_sdpa (fused single-pass SDPA, sinks variant) | ✗ | ✓ (`turbo_flash_sdpa.metal`) | ✓ | `ffai/aura_flash_sdpa.rs` → `aura_flash_sdpa_kb*_vb*_d*<T>`. Single-pass online-softmax over compressed K/V with attention sinks + sliding-window causal mask. Single-simdgroup shape (token-parallelism a perf follow-up). |
 | flash_quantized_sdpa (single-pass quantized SDPA, affine cache) | ✗ | ✓ (`flash_quantized_sdpa.metal`) | ✓ | `ffai/flash_quantized_sdpa.rs` → `flash_quantized_sdpa_b{4,8}_d{64,128,256}<T>`. Single-pass online-softmax SDPA over affine-quant KV, with sinks + sliding-window. head_dim {96,512} and bool/float masks are a follow-up. |
-| gated_delta (GatedDeltaNet recurrence) | ✗ | ✓ (`gated_delta.metal`) | ✓ | `ffai/gated_delta.rs` → `mt_gated_delta_step<T>` (single-token decode) + `mt_gated_delta_chunk<T>` (chunked-prefill). GDN linear-attention for the Qwen3.5 / 3.6 / 3.6-MoE hybrid models (≈75 % of layers). The MMA-tiled chunked-WY prefill perf variant `mt_gated_delta_wy_chunk` landed in [#115](https://github.com/0xClandestine/metaltile/pull/115). The fused prep+recurrence variant `mt_gated_delta_prep_step` (`ffai/gated_delta_prep.rs`) is open in **PR [#144](https://github.com/0xClandestine/metaltile/pull/144)** — one dispatch absorbs conv-split + per-head q/k RMSNorm + g/beta + the recurrence, collapsing 3 host commit+wait pairs per GDN layer down to 1 (Qwen3.6-A3B decode unlock). |
+| gated_delta (GatedDeltaNet recurrence) | ✗ | ✓ (`gated_delta.metal`) | ✓ | `ffai/gated_delta.rs` → `mt_gated_delta_step<T>` (single-token decode) + `mt_gated_delta_chunk<T>` (chunked-prefill). GDN linear-attention for the Qwen3.5 / 3.6 / 3.6-MoE hybrid models (≈75 % of layers). The MMA-tiled chunked-WY prefill perf variant `mt_gated_delta_wy_chunk` and the fused prep+recurrence variant `mt_gated_delta_prep_step` (`ffai/gated_delta_prep.rs`) are both landed — the latter collapses conv-split + per-head q/k RMSNorm + g/beta + the recurrence into one dispatch, cutting 3 host commit+wait pairs per GDN layer down to 1 (Qwen3.6-A3B decode unlock). |
 | gated_delta_replay (tape capture + state replay) | ✗ | ✓ (`gated_delta_replay.metal`) | ✓ | `ffai/gated_delta_replay.rs` → `gated_delta_step_record<T>` (forward + delta-tape) + `state_replay<T>` (branchless accepted-prefix re-fold). Speculative-decode rollback on GDN. |
 | ssm_step (Mamba 2 SSD single-token decode) | ✗ | ✓ (`ssm.metal`) | ✓ | `ffai/ssm.rs` → `ssm_step<T>`, `mt_ssm_step<T>`. Faithful port; `mlx_src: None` because pinned MLX upstream doesn't ship `ssm.metal`. Will graduate to `mlx/` when pin moves. |
 | conv1d_causal_step (depthwise SSM conv stream) | ✗ | partial (subset of SSM toolchain) | ✓ | `ffai/ssm.rs` → `conv1d_causal_step<T>`. fp32 state recurrence. |
 | ssm_replay (sequential tape capture + replay) | ✗ | ✓ (`ssm_replay.metal`) | ✓ | `ffai/ssm_replay.rs` → `ssm_step_record<T>` (SSD forward + dA/dBx tape) + `ssm_replay<T>` (re-fold first k entries). Spec 040 Mamba/Mamba2 state replay. |
-| fused_gate_activation (silu/gelu × up gate) | ✗ | ✓ (`fused_gate_activation.metal`) | ✗ | NOT PORTED. The `silu` variant is covered by `mlx/swiglu.rs` (see the `swiglu` row); the gelu-approx and clipped-swiglu variants, plus the single-row / looped dispatch forms, are not. |
+| fused_gate_activation (silu/gelu × up gate) | ✗ | ✓ (`fused_gate_activation.metal`) | ✓ | `mlx/fused_gate_activation.rs` → `mt_fused_gate_gelu` (gelu-tanh approximation) + `mt_fused_gate_clipped_swiglu` (GPT-OSS clipped variant — `[-7,7]` clamp, `sigmoid(1.702·g)` gate, `+1` up bias). The `silu` variant ships separately as `mlx/swiglu.rs` (see the `swiglu` row). One-thread-per-output Grid3D; the MLX `single_row` / `looped` threadgroup-tiling split is a perf detail, not a separate op. Verified by `fused_gate_activation_gpu_correctness`. |
 | rms_norm_residual (RMSNorm + residual add fused) | ✗ | ✓ (`rms_norm_residual.metal`) | ✓ | `ffai/rms_norm_residual.rs` → `ffai_rms_norm_residual<T>`. Reduction-mode, `N = TPG*4`; mirrors `mt_rms_norm` + a residual-add input. ~90 saved dispatches/token on Gemma4-30 type configs. |
 | rms_norm_rope (RMSNorm + RoPE fused) | ✗ | ✓ (`rms_norm_rope.metal`) | ✓ | `ffai/rms_norm_rope.rs` → `ffai_rms_norm_rope<T>`. Reduction-mode, paired-layout RoPE; `TPG = axis_size/2`. Q/K post-projection norm+rope in one dispatch. |
 | rms_norm_qgemv (RMSNorm + 4-bit quantized GEMV fused) | ✗ | ✓ (`rms_norm_qgemv.metal`) | ✓ | `ffai/rms_norm_qgemv.rs` → `ffai_rms_norm_qgemv<T>`. Reduction-mode, int4, one row/threadgroup; eliminates the global RT of the normalized activation. MLX's 8-row-per-TG tiling is a perf follow-up. |
@@ -108,18 +125,17 @@ Sources surveyed:
 | kv_cache (affine-quant int4/int8 quantize + bulk dequant) | ~ (via `quantized.metal` affine_quantize) | ~ | ✓ | `ffai/kv_cache.rs` — `quantize_kv` + `bulk_dequant_kv` for int4/int8. FFAI-specific cache layout. |
 | sampling (softmax + categorical inverse-CDF) | ✗ | ✗ | ✓ | `ffai/sampling.rs` → `softmax_categorical_sample`. Companion to `ffai_argmax` for `T > 0` decode. |
 | logits processors (temperature, repetition penalty, top-k / top-p / min-p masks) | ✗ | ✗ | ✓ | `ffai/logits_{processors,topk,top_p,min_p}.rs` → `logits_temperature`, `logits_repetition_penalty`, `logits_topk_mask`, `logits_top_p_mask`, `logits_min_p_mask` (all generic `T`). In-place decode-form sampler stages composed before `softmax_categorical_sample`. FFAI-only. |
-
-## Kernels with open PRs
-
-These are tracked above with an inline link in the Notes column; collected here
-for quick scanning. Status reflects the open PRs as of 2026-05-21.
-
-| PR | Kernel(s) | Affects row | State |
-|---|---|---|---|
-| [#115](https://github.com/0xClandestine/metaltile/pull/115) | `mt_gated_delta_wy_chunk` — chunked-WY GDN prefill (scalar foundation) | `gated_delta` | Draft / WIP; CI green, needs rebase onto current `dev`. |
-| [#125](https://github.com/0xClandestine/metaltile/pull/125) | `mt_moe_gather_qmm_int4` — grouped MoE quantized matmul (m1 scalar) | `quantized (gather_*)`, `moe` | Draft; fmt/clippy/commit-hygiene red. Overlaps #136. |
-| [#136](https://github.com/0xClandestine/metaltile/pull/136) | MoE gather BGEMM stack (m8 / MMA / MPP-NAX bm16 + bm64) | `quantized (gather_*)`, `moe` | Draft / WIP — surfaced for visibility; currently regresses vs MLX. |
-| [#137](https://github.com/0xClandestine/metaltile/pull/137) | `mt_qmm_mma_mpp` + `mt_mpp_matmul_smoke` — int4 qmm via Apple `mpp::tensor_ops::matmul2d` | `quantized (qmm)` | Draft; MLX-parity, needs rebase + CI. |
+| sdpa_decode_d512 (head_dim=512 SDPA decode — Gemma 4 global) | ✗ | ✗ | ✓ | `ffai/sdpa_decode_d512.rs` → `ffai_sdpa_decode_d512<T>`. head_dim=512 specialization for Gemma 4's global-attention layers; dispatches at 512 threads/TG (the 16-wide per-lane footprint caps the pipeline below 1024). FFAI-only; verified by `sdpa_decode_d512_gpu_correctness`. Consolidation pass (2026-05-21). |
+| rms_norm_wide (RMSNorm for rows past the 4096-element cap) | ✗ | ✗ | ✓ | `mlx/rms_norm.rs` → `mt_rms_norm_wide<T>`. Strided wide-row variant for large-hidden models (Gemma 4 31B, hidden 5376) that exceed the standard `mt_rms_norm` 1024-thread × 4-element single-row cap. Verified by `rms_norm_wide_gpu_correctness`. Consolidation pass (2026-05-21). |
+| sdpa_decode + learned attention sink (GPT-OSS-20B) | ✗ | ~ | ✓ | `ffai/sdpa_decode.rs` → `ffai_sdpa_decode` `has_sink` / `sink_logit` constexprs. GPT-OSS-20B's per-head learned attention-sink logit now folds into the cross-simdgroup softmax denominator on-GPU as a virtual key (score `sink_logit`, value 0) — removing the host-side post-hoc rescale that previously cost a CPU sync per attention layer. `has_sink == 0` masks the term out, keeping the dense / sliding-window paths bit-identical to the pre-sink kernel. Distinct from the `sink_end` sink-*token* range. Verified by `sdpa_decode_gpu_correctness` (`sdpa_decode_learned_sink_matches_cpu_f32`). |
+| gated_rmsnorm (fp32-in gated RMSNorm → activation dtype) | ✗ | ✗ | ✓ | `ffai/gated_rmsnorm.rs` → `ffai_gated_rmsnorm<T>`. Fused Qwen3.5 / 3.6 GDN post-step `out = w·rmsNorm(y)·silu(z)`: `y` arrives fp32 (the `gated_delta` recurrence output), the gate `z` / weight `w` / output are activation-dtype `T`. Reduction-mode, `N = TPG*4`, mirrors `mt_rms_norm` with the fp32-in / `T`-out dtype split and the `silu(z)` gate. Closes the per-GDN-layer host-side CPU sync (≈75 % of Qwen3.5/3.6 layers). Verified by `gated_rmsnorm_gpu_correctness`. |
+| ssm_step (2D `A_log` / per-(head,state) decay — Jamba) | ✗ | ~ | ✓ | `ffai/ssm.rs` → `ssm_step_a2d<T>`. The 2-D-`A_log` variant of `ssm_step`: carries a per-(channel, state) `A_log` of shape `[n_heads*head_dim, state_dim]` so the decay `exp(-exp(A_log)·dt)` varies with the state index, moving Jamba's Mamba 1 selective scan onto the GPU (it previously ran host-side). Same Grid3D geometry as `ssm_step` — one thread per `(head, d)`, state `h` in fp32. The other Mamba 2 families (Mamba2, FalconH1, NemotronH, GraniteMoeHybrid) use the scalar-`A` kernel and are unaffected. Verified by `ssm_step_a2d_gpu_correctness` (f32/f16/bf16). |
+| conv2d (vision patch conv — im2col + tiled GEMM) | ✓ | ✓ | ✓ | `ffai/conv2d.rs` → `conv2d_patch14` / `conv2d_patch16` (fixed-patch variants, kernel + stride baked in) + `conv2d_generic` (runtime kh/kw/stride/pad). NCHW input, OIHW weight; direct conv (implicit im2col, one thread per output). Generic `T`; verified by `conv2d_gpu_correctness`. Phase 6.5 VLM. |
+| patch_embed (fused image unfold + linear projection) | ✗ | ✗ | ✓ | `ffai/patch_embed.rs` → `patch_embed<T>`. Fused image-unfold + linear projection — gathers each patch's pixels and dots them with one weight row, no intermediate unfolded buffer. NCHW image, flat `[hidden, patch_dim]` weight, `[num_patches, hidden]` output. FFAI-specific; verified by `patch_embed_gpu_correctness`. Phase 6.5 VLM. |
+| rope_2d (2D positional RoPE for vision tokens) | ✓ | ✓ | ✓ | `ffai/rope_2d.rs` → `ffai_rope_2d<T>`. 2D RoPE over a (row, col) token grid — head_dim split into a row half and a column half, each running rotate-half RoPE. Consumes a per-token `(row, col)` pair. Generic `T`; verified by `rope_2d_gpu_correctness`. Phase 6.5 VLM. |
+| mel_spectrogram (STFT + log-Mel filterbank) | ✓ | ✓ | ✓ | `ffai/mel_spectrogram.rs` → `mel_spectrogram<T>`. Fused STFT + Mel filterbank + log; one thread per (frame, mel_bin), direct DFT (fp32/fp16). A radix-FFT path is a perf follow-up (needs complex-type codegen). Verified by `mel_spectrogram_gpu_correctness`. Phase 7. |
+| audio_conv1d (wide-stride 1D conv — STT patch embed) | ✓ | ✓ | ✓ | `ffai/audio_conv1d.rs` → `audio_conv1d<T>`. Dense wide-stride multi-channel 1D conv (NCL); distinct from the depthwise `conv1d_causal_step` SSM-stream conv. Generic `T`; verified by `audio_conv1d_gpu_correctness`. Phase 7. |
+| vocoder / iSTFT (TTS waveform synthesis) | ✓ | ✓ | ✓ | `ffai/vocoder.rs` → `vocoder_istft<T>`. Inverse-STFT overlap-add — one thread per output sample gathers every covering frame, inverse-DFTs with Hermitian symmetry, COLA-normalises (no atomics). Generic `T`; verified by `vocoder_gpu_correctness`. Phase 7. |
 
 ## Notes on counting decisions
 
@@ -130,45 +146,61 @@ A few rows mix multiple `.metal` files into one op or split one file into multip
 - **`steel/` family.** Each kernel file in `steel/{attn,conv,gemm}/kernels/` becomes one op row; per-block-shape instantiations are not counted separately. `steel_attention` (scalar-flash) and `steel_attention_mma` (simdgroup-MMA) are counted as two rows because they are separately compiled kernels with different lowering strategies; the bf16-tuned `mt_sdpa_prefill_mma_bf16` is folded into the MMA row as a perf specialization.
 - **`quantized.metal`.** Split into three rows by semantic operation (quant/dequant, qmv/qvm/qmm matmul, gather-qmv/qmm) rather than by template instantiation. Quantized-NAX and FP-quantized-NAX are separate rows because the metaltile modules exist (empty) and have separate feature gates.
 - **`indexing/`** is one row covering scatter / scatter_axis / gather_axis / gather_front / masked_scatter. Bare `gather` is its own row because metaltile has a dedicated FFAI port.
-- **`moe`** is one row for the routing/permute/unpermute orchestration kernels in `ffai/moe.rs`. The grouped quantized BGEMM that the open PRs add is counted under the `quantized (gather_*)` row.
+- **`moe`** is one row for the routing/permute/unpermute orchestration kernels in `ffai/moe.rs`. The grouped quantized BGEMM (`mt_moe_gather_qmm_*`, incl. the MMA / MPP-NAX variants) is counted under the `quantized (gather_*)` row.
 - **`logits processors`** is one row for the FFAI sampler-stage kernels (`temperature`, `repetition_penalty`, `topk` / `top_p` / `min_p` masks). FFAI-only, no MLX counterpart.
 - **Cells marked `~`** indicate metaltile has a partial port — typically one bit-width, one dtype, or one block shape where upstream has many. Read the notes column for the specific gap.
 
-## Highest-value un-ported ops (next-up recommendations)
+## Perf follow-ups — landed (throughput refinements)
 
-Roughly ordered by FFAI-impact × tractability. The fused-norm/-act family is
-largely landed now (`rms_norm_residual` / `_rope` / `_qgemv`,
-`batched_qkv_qgemv`, `aura_flash_sdpa`, `flash_quantized_sdpa`, `gated_delta`,
-`ssm_replay` all ✓). The DSL has a working simdgroup-matrix MMA path
-(`steel_attention_mma`, the `probe/mma_layout_probe.rs` layout probe), so the
-remaining `steel_gemm_*` / `steel_conv*` rows are no longer blocked on the
-primitive itself — only on the gather / masked / split-K / im2col logic layered
-on top.
+Op coverage is complete — every row is ✓ except `fence` (out of scope).
+The four throughput refinements below have **all landed**; each is
+purely additive — the original kernels are kept for callers that don't
+want the split / extra dispatch.
 
-1. **`fused_gate_activation`** — gelu-approx and clipped-swiglu variants + the
-   single-row / looped dispatch forms. The `silu` case already ships as
-   `mlx/swiglu.rs`; finishing the row is a small elementwise port.
-2. **`quantized` gather_qmm / gather_qmv** — the affine grouped-gather matmul.
-   In flight in PRs #125 / #136; landing it closes the MoE FFN dispatch-count
-   win (one kernel for the whole expert projection).
-3. **`steel_gemm_fused` shape coverage** — only `64×64×16` is wired today;
-   prefill perf needs more block shapes.
-4. **`steel_gemm_splitk` + accum** — two-kernel split-K dispatch + accumulator
-   pass. Infra-gated (split-K scheduling primitive).
-5. **`steel_gemm_masked`** — block-level predication. Infra-gated.
-6. **`steel_conv` 2D / 3D / general** + `conv` — all blocked on im2col / unfold
-   primitives. One infra PR unblocks the family.
-7. **`indexing` (scatter, gather_front, masked_scatter)** — the strided forms,
-   needed for any cache update path that isn't a simple append (sliding-window
-   evict, prefix-cache splice, batched scatter).
-8. **NAX feature family** — `steel_attention_nax`, `steel_gemm_*_nax`,
-   `quantized_nax`, `fp_quantized_nax`. PR #137 demonstrates the Apple
-   `mpp::tensor_ops::matmul2d` path; the `nax`-gated rows can follow once the
-   feature scaffolding lands.
-9. **`fft`** — radix + readwrite. Needs an FFT codegen path (complex types,
-   bit-reversal indexing). Lowest FFAI priority.
-10. **`fence`** — synchronization primitive. Needs atomics / device-memory
-    fence primitives in the DSL; infrastructure, not a compute op.
+1. **`steel_gemm_fused` block-shape coverage** ✓ — added the
+   `64×64×16 / 4×2` shape (8 simdgroups, TPG=256): **~40% faster** than
+   the prior-best 2×2 on the 4096³ bench (f32 1.4 vs 1.0 GB/s) — the
+   extra simdgroups hide the device-memory fragment loads. Also added
+   the M-skewed `64×32 / 1×2` and low-TPG `32×32 / 1×2` tiles, for 7
+   shapes total to feed a future per-shape dispatcher.
+2. **`moe` gather_qmm bit-widths beyond int4** ✓ — the `gather_qmm_mma!`
+   macro carries the tiled-MMA geometry for any bit-width via a
+   bit-stream weight coop-dequant; instantiated as
+   `mt_moe_gather_qmm_mma_b{3,5,6,8}`, so int3/5/6/8 MoE experts now hit
+   the matrix engine instead of the scalar fallback.
+3. **Winograd kernel split** ✓ — `winograd_filter_transform_3x3`
+   pre-transforms every filter into its 4×4 `U` once;
+   `winograd_conv2d_3x3_split` then loads the precomputed `U` instead of
+   re-running `G·g·Gᵀ` per output tile, removing the O(tiles) redundant
+   transform work.
+4. **Radix-FFT STFT path** ✓ — `mel_stft_window` → `mt_fft_n{n_fft}` →
+   `mel_filterbank` replaces `mel_spectrogram`'s in-thread direct DFT
+   (recomputed per Mel bin) with one O(N log N) FFT per frame. `n_fft`
+   must be a power of two; the single-kernel `mel_spectrogram` stays for
+   non-pow2 sizes.
+
+(`fence` is **not** a next-up item — it is intentionally out of scope; see
+[§ Fence ops](#fence-ops--intentionally-out-of-scope).)
+
+### Model-enablement kernels (separate track from generic-op completeness)
+
+These don't move the coverage % much but each one unblocks a model family or
+removes a measured per-layer CPU sync:
+
+- **Vision (Phase 6.5)** — `conv2d`, `patch_embed`, `rope_2d`: **landed**
+  (`ffai/conv2d.rs`, `ffai/patch_embed.rs`, `ffai/rope_2d.rs`). Unblocks the
+  VLM vision encoders.
+- **STT / TTS (Phase 7)** — `mel_spectrogram`, `audio_conv1d`,
+  `vocoder/iSTFT`: **landed** (`ffai/mel_spectrogram.rs`,
+  `ffai/audio_conv1d.rs`, `ffai/vocoder.rs`). Unblocks Whisper, Kokoro, and
+  Qwen-Omni audio. A radix-FFT path for the STFT / iSTFT is a perf follow-up.
+- **Host-fallback closers** — all three **landed**: `gated_rmsnorm`
+  (Qwen3.5/3.6 GDN post-step, `ffai/gated_rmsnorm.rs`), the
+  `sdpa_decode` learned-sink term (GPT-OSS-20B, `has_sink` /
+  `sink_logit` on `ffai/sdpa_decode.rs`), and the 2D-`A_log`
+  `ssm_step` variant (Jamba, `ssm_step_a2d` in `ffai/ssm.rs`). Each
+  was correctness-neutral (the host path worked) but cost a per-layer
+  CPU↔GPU sync; folding them on-GPU is a decode-throughput win.
 
 ## Open uncertainties / counting caveats
 
@@ -177,9 +209,14 @@ on top.
   verified against source; their MLX-upstream / MLX-alpha columns are a
   best-effort read (those repos were not checked out) — treat them as
   provisional.
-- `quantized_nax.rs` and `fp_quantized_nax.rs` were re-checked: both are still
-  empty (TODO comment only, zero `#[kernel]`) and both are
-  `#[cfg(feature = "nax")]`-gated in `mlx/mod.rs`. Counted as `✗` for metaltile.
+- The `nax`-gated kernels (`quantized_nax`, `fp_quantized_nax`,
+  `steel_attention_nax`, `steel_gemm_{fused,gather,splitk}_nax`) are all
+  real ports — `Op::InlineMsl` MPP `matmul2d` bodies with paired
+  `*_nax_gpu_correctness` tests (counted ✓). They are
+  `#[cfg(feature = "nax")]`-gated in `mlx/mod.rs` and do **not** register
+  an `inventory::submit!` BenchSpec — they are tested directly, and the
+  `nax` feature is off in default / non-macOS CI builds, so
+  `kernel_registry_consistency` never sees them.
 - `mlx/strided.rs` (`mt_strided_copy`) covers strided copy but the stride
   dimensionalities were not audited — marked `~` defensively. Upstream
   `copy.metal` has multiple `copy_g_nd*` shapes.
@@ -191,6 +228,72 @@ on top.
   other `(kb, vb, dim)` combos aren't ported yet.
 - Coverage % treats the alpha-only kernels as in-scope (we maintain the fork,
   so they count toward the union).
-- More rows are pending: the Gemma / Nemotron-H / GPT-OSS-20B kernel work is
-  spread across separate worktrees and will be folded into this audit once it
-  is consolidated onto a branch and PR'd upstream.
+- The Gemma / Nemotron-H / GPT-OSS-20B kernel work is now consolidated onto
+  `ek/aura-port` and folded into this audit (the `sdpa_decode_d512` and
+  `rms_norm_wide` rows). The three host-side fallbacks surfaced by the model
+  review (`gated_rmsnorm`, the `sdpa_decode` learned-sink term, the 2D-`A_log`
+  `ssm_step_a2d` variant) are now all landed as ✓ rows — they were
+  correctness-neutral (the host path worked) but cost a CPU sync per layer
+  on the affected models.
+- The Vision / STT / TTS rows (`conv2d`, `patch_embed`, `rope_2d`,
+  `mel_spectrogram`, `audio_conv1d`, `vocoder/iSTFT`) are scoped from the
+  Phase 6.5 / 7 plan, not yet from checked-out reference source — treat their
+  MLX columns as provisional.
+
+## Fence ops — intentionally out of scope
+
+MLX's `fence.metal` (`mlx/backend/metal/kernels/fence.metal`, ~52 lines) is
+**not a compute kernel** — it is a GPU-side synchronisation primitive. It is
+deliberately *not* ported to metaltile, and the `fence` audit row is marked
+`—` rather than `✗`. This section records why.
+
+### What the fence ops are
+
+Three kernels: `input_coherent` (force input-buffer visibility),
+`fence_update` (bump a counter in a shared buffer), and `fence_wait` — a
+compute kernel that **spin-loops** reading that counter until it changes.
+Together they let the GPU order work *across command buffers / streams*
+without a CPU round-trip.
+
+### How MLX actually uses them
+
+`mlx/backend/metal/fence.cpp`'s `FenceImpl` has **two paths**:
+
+- **Default:** `device->newSharedEvent()` — a standard **`MTLSharedEvent`**.
+  The wait executes in the GPU *command processor*, not a shader core.
+- **`use_fast` path** (the `fence.metal` spin-wait kernels): gated behind
+  `GPUFamilyMetal3` **and** macOS 15 **and** an opt-in env var
+  (`metal_fast_synch`). **Off by default.**
+
+So MLX itself treats the GPU spin-wait fence as an *opt-in latency
+micro-optimization* for its multi-stream `async_eval` workloads — not a
+primitive every pipeline needs. Its default is `MTLSharedEvent`.
+
+### Why FFAI does not need it
+
+- FFAI's current pipeline is single-stream autoregressive decode. Within a
+  forward pass, Metal's automatic hazard tracking orders kernels in a
+  command buffer for free; across command buffers on one queue, submission
+  order suffices. No GPU-side fence is involved.
+- CPU/GPU pipelining (build command buffer N+1 while the GPU runs N) is
+  `commit` + completion handlers — not a fence.
+- For genuine cross-queue / cross-stream GPU sync, `MTLEvent` /
+  `MTLSharedEvent` (encoder-level — `encodeWaitForEvent` /
+  `encodeSignalEvent`) are the correct, power-efficient primitive, and they
+  belong in `metaltile-runtime`'s dispatch layer, **not** as a `#[kernel]`.
+- A `fence_wait` spin-wait is a deliberate near-infinite GPU loop: it burns
+  a shader core + power, and a counter that never updates (a bug, a wrong
+  dispatch) is a permanent GPU pin → hard reboot — the exact
+  machine-freeze hazard documented in `developing.md`.
+
+### When this could change
+
+If FFAI later runs **multiple concurrent GPU streams** — e.g. speculative
+decoding (draft/target overlap), prefill/decode overlap, or ANE+GPU
+concurrency (Phase 8 / 9) — it will need cross-stream ordering. The right
+implementation is `MTLEvent`-based encoder-level sync added to
+`metaltile-runtime` (MLX's own default), **not** a spin-wait `#[kernel]`.
+Only if profiling later shows that `MTLEvent`'s command-processor latency is
+a measured bottleneck for an ultra-fine-grained sync pattern would the
+opt-in spin-wait become worth revisiting — and even then it is a runtime
+concern, not a metaltile kernel.

@@ -1,90 +1,252 @@
 //! Steel tiled GEMM — #[kernel] DSL vs MLX steel/gemm/kernels/steel_gemm_fused.metal
 //!
-//! Block shape: 64×64×16 / 2×2. Each SIMD group covers a 32×32 sub-tile
-//! via 4×4 M/N fragments of 8×8 and BK/8=2 K-fragments, accumulating
-//! across K steps.
+//! Plain row-major `C = A · B` (the `nn` / non-transposed steel-gemm case):
+//!   A: [M, K]  B: [K, N]  C: [M, N]
+//!
+//! Block shapes are instantiated per-(BM, BN); BK is fixed at 16. Each
+//! threadgroup owns one BM×BN output block; the BM×BN block is split
+//! into per-simdgroup sub-tiles (WM×WN simdgroups), and each sub-tile is
+//! a grid of Apple 8×8 simdgroup-matrix fragments. The K dimension is
+//! walked in BK=16 steps, two 8×8 K-fragments per step, accumulating into
+//! the f32 `acc` fragments via `simdgroup_multiply_accumulate`.
+//!
+//! Apple 8×8 fragment lane layout (32 lanes, standard steel layout —
+//! empirically confirmed by `probe/mma_layout_probe.rs`): each lane owns
+//! two elements of the 8×8 fragment, and for **every** operand (A, B and
+//! the C/D accumulator) lane element `i` sits at fragment position
+//! `(fm, fn_i)` and holds the matrix value at that same `(row, col)`.
+//! The earlier revision loaded B with a *transposed* convention
+//! (`elem i` at `(fm, fn_i)` holding `B[fn_i, fm]`); that produced a
+//! `Bᵀ`-shaped result and is the bug this file fixes.
+//!
+//! ## DISPATCH INVARIANTS
+//!
+//! - **TPG: `WM*WN*32` threads** (one simdgroup per sub-tile).
+//!   `64×64 / 2×2` ⇒ 4 simdgroups ⇒ `tpg = 128`. Must be a multiple of 32.
+//! - **Grid: 1 threadgroup per `BM×BN` output block** — a 2-D grid,
+//!   `program_id<0>` = N-block (column), `program_id<1>` = M-block (row).
+//! - **`m % BM == 0`, `n % BN == 0`, `k % 16 == 0`.** All loads are
+//!   unconditional — ragged shapes read out of bounds. Callers with
+//!   non-multiple shapes must pad (the steel-gemm `align_*` contract).
+//! - **`KernelMode::SimdGroup2D`** so `program_id<i>` lowers to the
+//!   threadgroup index, not the global thread index.
 
 use metaltile::kernel;
 
-#[kernel]
-pub fn mt_steel_gemm_64x64x16_2x2<T>(
-    a: Tensor<T>,
-    b: Tensor<T>,
-    out: Tensor<T>,
-    #[constexpr] m: u32,
-    #[constexpr] n: u32,
-    #[constexpr] k: u32,
-) {
-    let tg_col = program_id::<0>();
-    let tg_row = program_id::<1>();
-    let sg_id = simd_group_id();
-    let sg_m = sg_id / 2;
-    let sg_n = sg_id % 2;
-    let lane = simd_lane_id();
+/// Expand one `(BM, BN, WM, WN)` block-shape instantiation of the fused GEMM.
+///
+/// Wrapping the **entire** `#[kernel] fn` in this outer `macro_rules!`
+/// keeps the proc-macro happy: the compiler substitutes `$bm` / `$bn` /
+/// `$wm` / `$wn` *before* the `#[kernel]` body parser runs, so the parser
+/// only ever sees concrete `u32` literals — never an un-expanded inner
+/// macro call (which would silently emit an empty body; see
+/// `docs/developing.md` kernel-authoring hazards).
+macro_rules! steel_gemm_fused_kernel {
+    ($name:ident, $bm:literal, $bn:literal, $wm:literal, $wn:literal, $subop:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            a: Tensor<T>,
+            b: Tensor<T>,
+            out: Tensor<T>,
+            #[constexpr] m: u32,
+            #[constexpr] n: u32,
+            #[constexpr] k: u32,
+        ) {
+            // ── Block / simdgroup geometry ──
+            let bm = $bm;
+            let bn = $bn;
+            let wm = $wm;
+            let wn = $wn;
+            // Each simdgroup covers a (bm/wm)×(bn/wn) sub-tile, split into
+            // 8×8 fragments → n_fm × n_fn fragments along M / N.
+            let sub_m = bm / wm;
+            let sub_n = bn / wn;
+            let n_fm = sub_m / 8u32;
+            let n_fn = sub_n / 8u32;
+            let n_kf = 2u32; // BK = 16 ⇒ two 8×8 K-fragments per K-step.
 
-    let qid = lane / 4;
-    let fm = (qid & 4) + ((lane / 2) % 4);
-    let fn0 = (qid & 2) * 2 + (lane % 2) * 2;
-    let fn1 = fn0 + 1;
-    let sub_m0 = sg_m * 32;
-    let sub_n0 = sg_n * 32;
+            let tg_col = program_id::<0>(); // N-block index
+            let tg_row = program_id::<1>(); // M-block index
+            let sg_id = simd_group_id();
+            let sg_m = sg_id / wn; // simdgroup row within the block
+            let sg_n = sg_id % wn; // simdgroup col within the block
+            let lane = simd_lane_id();
 
-    let n_fm = 4;
-    let n_fn = 4;
-    let n_kf = 2;
+            // Apple 8×8 fragment lane mapping — each lane owns elements at
+            // (fm, fn0) and (fm, fn1).
+            let qid = lane / 4u32;
+            let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
+            let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
+            let fn1 = fn0 + 1u32;
 
-    for _fm_i in range(0, n_fm, 1) {
-        for _fn_i in range(0, n_fn, 1) {
-            let acc = simdgroup_alloc::<f32, 8, 8>();
-            simdgroup_elem_store(acc, 0, 0);
-            simdgroup_elem_store(acc, 1, 0);
-            let m_row = sub_m0 + _fm_i * 8;
-            let n_col = sub_n0 + _fn_i * 8;
+            // Origin of this simdgroup's sub-tile inside the BM×BN block.
+            let sub_m0 = sg_m * sub_m;
+            let sub_n0 = sg_n * sub_n;
+            // Absolute (row, col) origin of the block in C / A / B space.
+            let block_m0 = tg_row * bm;
+            let block_n0 = tg_col * bn;
 
-            for _kf in range(0, n_kf, 1) {
-                let kf = _kf * 8;
-                let sub_a = simdgroup_alloc::<f16, 8, 8>();
-                let sub_b = simdgroup_alloc::<f16, 8, 8>();
-                // Direct load from device memory (no threadgroup staging)
-                simdgroup_elem_store(sub_a, 0, load(a[(tg_row * 64 + m_row + fm) * k + kf + fn0]));
-                simdgroup_elem_store(sub_a, 1, load(a[(tg_row * 64 + m_row + fm) * k + kf + fn1]));
-                simdgroup_elem_store(
-                    sub_b,
-                    0,
-                    load(b[(kf + fn0) * n + (tg_col * 64 + n_col + fm)]),
-                );
-                simdgroup_elem_store(
-                    sub_b,
-                    1,
-                    load(b[(kf + fn1) * n + (tg_col * 64 + n_col + fm)]),
-                );
-                simdgroup_matmul(sub_a, sub_b, acc);
+            for _fm_i in range(0, n_fm, 1) {
+                for _fn_i in range(0, n_fn, 1) {
+                    // f32 accumulator fragment for this 8×8 output tile.
+                    let acc = simdgroup_alloc::<f32, 8, 8>();
+                    simdgroup_elem_store(acc, 0, 0.0f32);
+                    simdgroup_elem_store(acc, 1, 0.0f32);
+
+                    // This fragment's M-row / N-col origin (absolute).
+                    let m_row = block_m0 + sub_m0 + _fm_i * 8u32;
+                    let n_col = block_n0 + sub_n0 + _fn_i * 8u32;
+
+                    // ── Walk the full K dimension in BK=16 steps ──
+                    for kb in range(0, k, 16) {
+                        for _kf in range(0, n_kf, 1) {
+                            let kf = kb + _kf * 8u32;
+                            let sub_a = simdgroup_alloc::<T, 8, 8>();
+                            let sub_b = simdgroup_alloc::<T, 8, 8>();
+
+                            // A fragment: lane elem i at (fm, fn_i) holds
+                            //   A[m_row + fm, kf + fn_i].
+                            // The `.cast::<T>()` is load-bearing: the codegen
+                            // lowers a bare `load` to an `float`-typed value,
+                            // and MSL has no implicit `float → bfloat`
+                            // conversion — without the cast the bf16
+                            // instantiation fails to compile.
+                            simdgroup_elem_store(
+                                sub_a,
+                                0,
+                                load(a[(m_row + fm) * k + kf + fn0]).cast::<T>(),
+                            );
+                            simdgroup_elem_store(
+                                sub_a,
+                                1,
+                                load(a[(m_row + fm) * k + kf + fn1]).cast::<T>(),
+                            );
+
+                            // B fragment: lane elem i at (fm, fn_i) holds
+                            //   B[kf + fm, n_col + fn_i].  The fragment row
+                            //   index `fm` walks the K dimension here — B is
+                            //   loaded in the SAME (non-transposed) layout as
+                            //   A and the accumulator, which is what Apple's
+                            //   `simdgroup_multiply_accumulate` expects.
+                            simdgroup_elem_store(
+                                sub_b,
+                                0,
+                                load(b[(kf + fm) * n + n_col + fn0]).cast::<T>(),
+                            );
+                            simdgroup_elem_store(
+                                sub_b,
+                                1,
+                                load(b[(kf + fm) * n + n_col + fn1]).cast::<T>(),
+                            );
+
+                            // acc += sub_a · sub_b
+                            simdgroup_matmul(sub_a, sub_b, acc);
+                        }
+                    }
+
+                    // ── Store the 8×8 result tile to C ──
+                    let r0 = simdgroup_elem_load(acc, 0);
+                    let r1 = simdgroup_elem_load(acc, 1);
+                    store(out[(m_row + fm) * n + n_col + fn0], r0.cast::<T>());
+                    store(out[(m_row + fm) * n + n_col + fn1], r1.cast::<T>());
+                }
             }
-
-            let r0 = simdgroup_elem_load(acc, 0);
-            let r1 = simdgroup_elem_load(acc, 1);
-            store(
-                out[(tg_row * 64 + m_row + fm) * n + (tg_col * 64 + n_col + fn0)],
-                r0.cast::<T>(),
-            );
-            store(
-                out[(tg_row * 64 + m_row + fm) * n + (tg_col * 64 + n_col + fn1)],
-                r1.cast::<T>(),
-            );
         }
-    }
+
+        inventory::submit! { crate::spec::BenchSpec {
+            op: "steel_gemm_fused", subop: $subop,
+            kernel_name: stringify!($name),
+            kernel_ir: $name::kernel_ir_for,
+            dtypes: crate::bench_types::FLOAT_DTYPES, tol: 1e-2f32,
+            mlx_src: Some(include_str!(concat!(env!("OUT_DIR"), "/metal/steel/gemm/steel_gemm_fused.metal"))),
+            mlx_pattern: Some(concat!(
+                "steel_gemm_fused_nn_{tn}_{tn}_bm", stringify!($bm),
+                "_bn", stringify!($bn), "_bk16_wm", stringify!($wm),
+                "_wn", stringify!($wn),
+            )),
+            shapes: &[],
+            dispatch: crate::spec::BenchDispatch::SteelGemm {
+                m: 4096, n: 4096, k: 4096,
+                check_m: $bm as usize, check_n: $bn as usize, check_k: 16,
+                bm: $bm as usize, bn: $bn as usize,
+                tpg: ($wm * $wn * 32u32) as usize,
+            },
+            kernel_mode: Some(metaltile_core::ir::KernelMode::SimdGroup2D),
+        }}
+    };
 }
 
-inventory::submit! { crate::spec::BenchSpec {
-    op: "steel_gemm_fused", subop: "bm64_bn64_bk16_wm2_wn2",
-    kernel_name: "mt_steel_gemm_64x64x16_2x2",
-    kernel_ir: mt_steel_gemm_64x64x16_2x2::kernel_ir_for,
-    dtypes: crate::bench_types::FLOAT_DTYPES, tol: 1e-2f32,
-    mlx_src: Some(include_str!(concat!(env!("OUT_DIR"), "/metal/steel/gemm/steel_gemm_fused.metal"))),
-    mlx_pattern: Some("steel_gemm_fused_nn_{tn}_{tn}_bm64_bn64_bk16_wm2_wn2"),
-    shapes: &[],
-    dispatch: crate::spec::BenchDispatch::SteelGemm {
-        m: 4096, n: 4096, k: 4096, check_m: 64, check_n: 64, check_k: 16, bm: 64, bn: 64, tpg: 128,
-    },
-    kernel_mode: Some(metaltile_core::ir::KernelMode::SimdGroup2D),
-}}
+// ── Block-shape instantiations ──────────────────────────────────────────
+// Each shape mirrors an MLX `steel_gemm_fused` instantiation so the
+// bench harness can wire a side-by-side reference (see the MLX
+// `instantiate_gemm_shapes_helper` list in `steel_gemm_fused.metal`).
+//
+// 64×64×16 / 2×2 — the canonical large-tile prefill shape (4 simdgroups).
+steel_gemm_fused_kernel!(
+    mt_steel_gemm_64x64x16_2x2,
+    64u32,
+    64u32,
+    2u32,
+    2u32,
+    "bm64_bn64_bk16_wm2_wn2"
+);
+// 32×32×16 / 2×2 — small-tile shape for skinny M or N (4 simdgroups).
+steel_gemm_fused_kernel!(
+    mt_steel_gemm_32x32x16_2x2,
+    32u32,
+    32u32,
+    2u32,
+    2u32,
+    "bm32_bn32_bk16_wm2_wn2"
+);
+// 64×64×16 / 1×2 — large tile, 2 simdgroups (lower occupancy, N-split only).
+steel_gemm_fused_kernel!(
+    mt_steel_gemm_64x64x16_1x2,
+    64u32,
+    64u32,
+    1u32,
+    2u32,
+    "bm64_bn64_bk16_wm1_wn2"
+);
+// 32×64×16 / 1×2 — wide-tile shape (N-heavy block, 2 simdgroups).
+steel_gemm_fused_kernel!(
+    mt_steel_gemm_32x64x16_1x2,
+    32u32,
+    64u32,
+    1u32,
+    2u32,
+    "bm32_bn64_bk16_wm1_wn2"
+);
+// 64×64×16 / 4×2 — large tile at higher occupancy (8 simdgroups, TPG=256).
+// ~40% faster than the 2×2 variant on the 4096³ bench (f32 1.4 vs 1.0
+// GB/s) — the extra simdgroups hide the device-memory fragment loads.
+steel_gemm_fused_kernel!(
+    mt_steel_gemm_64x64x16_4x2,
+    64u32,
+    64u32,
+    4u32,
+    2u32,
+    "bm64_bn64_bk16_wm4_wn2"
+);
+// 64×32×16 / 1×2 — M-heavy block (transpose of 32×64; 2 simdgroups).
+// For M-skewed problems where a tall, narrow output tile keeps the
+// per-simdgroup A-fragment reuse high.
+steel_gemm_fused_kernel!(
+    mt_steel_gemm_64x32x16_1x2,
+    64u32,
+    32u32,
+    1u32,
+    2u32,
+    "bm64_bn32_bk16_wm1_wn2"
+);
+// 32×32×16 / 1×2 — small tile, 2 simdgroups (skinny problems, low TPG).
+// A lower-occupancy small tile for problems too small to fill a 4-SG
+// block; gives the dispatcher a 64-thread option.
+steel_gemm_fused_kernel!(
+    mt_steel_gemm_32x32x16_1x2,
+    32u32,
+    32u32,
+    1u32,
+    2u32,
+    "bm32_bn32_bk16_wm1_wn2"
+);

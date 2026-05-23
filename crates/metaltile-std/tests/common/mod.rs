@@ -24,7 +24,7 @@ pub fn gpu_lock() -> MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Dt {
     F32,
     F16,
@@ -231,6 +231,51 @@ pub fn naive_sdpa_causal_prefix_f32(
         }
     }
     out
+}
+
+/// Build a small SRHT-style orthogonal rotation `[dim, dim]` for the
+/// AURA codec tests: `H · diag(±1) / √dim` where `H` is the
+/// Sylvester–Hadamard matrix. `dim` must be a power of two.
+///
+/// The production AURA path rotates each K/V vector with exactly this
+/// shape (a sub-sampled randomised Hadamard transform). It is
+/// orthogonal — `Rᵀ R = I` — so the encoder's norm bookkeeping holds,
+/// while every output coordinate mixes every input coordinate, which
+/// exercises the encode kernel's rotation matmul stage that an identity
+/// Π leaves dormant.
+///
+/// The `±1` sign flips are derived deterministically from a small LCG
+/// seeded by `seed`, so the rotation is reproducible across runs.
+pub fn srht_rotation(dim: usize, seed: u64) -> Vec<f32> {
+    assert!(dim.is_power_of_two(), "SRHT rotation requires a power-of-two dim");
+
+    // Sylvester–Hadamard: H[i][j] = (-1)^popcount(i & j).
+    let mut h = vec![0.0_f32; dim * dim];
+    for i in 0..dim {
+        for j in 0..dim {
+            let sign = if (i & j).count_ones() % 2 == 0 { 1.0 } else { -1.0 };
+            h[i * dim + j] = sign;
+        }
+    }
+
+    // Deterministic ±1 diagonal sign vector via a small LCG.
+    let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    let signs: Vec<f32> = (0..dim)
+        .map(|_| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            if (state >> 33) & 1 == 0 { 1.0 } else { -1.0 }
+        })
+        .collect();
+
+    // R = H · diag(signs) / √dim → column j scaled by signs[j].
+    let scale = 1.0 / (dim as f32).sqrt();
+    let mut r = vec![0.0_f32; dim * dim];
+    for i in 0..dim {
+        for j in 0..dim {
+            r[i * dim + j] = h[i * dim + j] * signs[j] * scale;
+        }
+    }
+    r
 }
 
 /// Deterministic init pattern — small repeating modulus avoids both

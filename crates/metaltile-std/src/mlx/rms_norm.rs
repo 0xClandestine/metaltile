@@ -215,6 +215,67 @@ pub fn mt_rms_norm_small<T>(
     store(out[base + 1u32], (x1 * rms * load(w[col + 1u32]).cast::<f32>()).cast::<T>());
 }
 
+/// Wide-row RMSNorm — handles rows wider than the 4096-element cap of
+/// [`mt_rms_norm`]. Where `mt_rms_norm` fixes `N = TPG * 4` (so a
+/// 1024-thread group tops out at 4096), this kernel has each thread
+/// *stride* over the row in steps of one full threadgroup, so any `n`
+/// is covered regardless of the threadgroup size. Needed for
+/// large-hidden models (e.g. Gemma 4 31B, hidden 5376).
+///
+/// Two passes over device memory: pass 1 accumulates the strided
+/// sum-of-squares and reduces it threadgroup-wide; pass 2 re-reads `x`
+/// and writes the scaled output. The per-thread element count is
+/// `ceil(n / TPG)` and varies with `n`, so the `x` values cannot be
+/// held in registers across the reduction the way `mt_rms_norm` does
+/// — hence the re-read. RMSNorm is memory-bound; the extra `x` read is
+/// the price of unbounded `n`.
+///
+/// ## DISPATCH INVARIANTS
+///
+/// - **TPG a multiple of 32** (one full Apple simdgroup) so the
+///   `reduce_sum` cross-simdgroup combine is well-defined. The wrapper
+///   uses TPG = 1024. The stride is derived as `n_simd * 32`, so the
+///   kernel is correct for any such TPG.
+/// - **Grid: 1 threadgroup per row.** Multi-row dispatch uses
+///   `grid = (nRows * TPG, 1, 1)`, `tg = (TPG, 1, 1)`.
+/// - **`n` may be any positive value.** The strided loops bound on
+///   `n`, so no `N = TPG * k` relationship is required; threads whose
+///   stride walks past `n` simply stop. Unlike `mt_rms_norm` there is
+///   no 128-alignment or `n ≤ 4096` requirement.
+#[kernel]
+pub fn mt_rms_norm_wide<T>(
+    x: Tensor<T>,
+    w: Tensor<T>,
+    out: Tensor<T>,
+    eps_buf: Tensor<f32>,
+    #[constexpr] n: u32,
+) {
+    let row = program_id::<0>();
+    let rs = row * n;
+    // One full threadgroup of threads; every thread strides by this.
+    let tpg = n_simd * 32u32;
+
+    // Pass 1: strided sum-of-squares. A thread with `tid >= n` runs
+    // zero iterations and contributes 0 — still required to reach
+    // `reduce_sum` (Apple simdgroup reductions need all lanes active).
+    let mut acc = 0.0f32;
+    for i in range(tid, n, tpg) {
+        let xi = load(x[rs + i]).cast::<f32>();
+        acc = acc + xi * xi;
+    }
+    let tg_ssq = reduce_sum(acc);
+    let eps = load(eps_buf[0]);
+    let rms = rsqrt(tg_ssq / n + eps);
+
+    // Pass 2: strided scaled store. `x` is re-read from device memory
+    // (see the doc note above).
+    for i in range(tid, n, tpg) {
+        let xi = load(x[rs + i]).cast::<f32>();
+        let wi = load(w[i]).cast::<f32>();
+        store(out[rs + i], (xi * rms * wi).cast::<T>());
+    }
+}
+
 /// Fused gated-mixer-norm: `out = rms_norm(y, w) · silu(z)`. Per-row
 /// across `[Hv, Dv]` — one row per threadgroup. Used by the FFAI
 /// Qwen3.5 / Qwen3.6 GDN mixer's phase-2 step (`y` is the recurrence
@@ -295,6 +356,22 @@ pub fn mt_gated_mixer_norm<T>(
 inventory::submit! {
     BenchSpec {
         op: "rms_norm",
+        subop: "rms_norm_wide",
+        kernel_name: "mt_rms_norm_wide",
+        kernel_ir: mt_rms_norm_wide::kernel_ir_for,
+        dtypes: &[DType::F32, DType::F16, DType::BF16],
+        tol: 5e-4,
+        mlx_src: None,
+        mlx_pattern: None,
+        shapes: &[],
+        dispatch: BenchDispatch::Generic,
+        kernel_mode: Some(KernelMode::Reduction),
+    }
+}
+
+inventory::submit! {
+    BenchSpec {
+        op: "rms_norm",
         subop: "gated_mixer_norm",
         kernel_name: "mt_gated_mixer_norm",
         kernel_ir: mt_gated_mixer_norm::kernel_ir_for,
@@ -305,5 +382,32 @@ inventory::submit! {
         shapes: &[],
         dispatch: BenchDispatch::Generic,
         kernel_mode: Some(KernelMode::Reduction),
+    }
+}
+
+#[cfg(test)]
+mod wide_tests {
+    use metaltile_codegen::msl::MslGenerator;
+    use metaltile_core::ir::KernelMode;
+
+    use super::mt_rms_norm_wide;
+    use crate::bench_types::DType;
+
+    fn msl_for(dt: DType) -> String {
+        let mut k = mt_rms_norm_wide::kernel_ir_for(dt);
+        k.mode = KernelMode::Reduction;
+        MslGenerator::default().generate(&k).expect("mt_rms_norm_wide codegen succeeds")
+    }
+
+    #[test]
+    fn codegen_produces_nonempty_msl_for_all_float_dtypes() {
+        for dt in [DType::F32, DType::F16, DType::BF16] {
+            let src = msl_for(dt);
+            assert!(!src.trim().is_empty(), "MSL for {dt:?} should not be empty");
+            assert!(
+                src.contains("kernel void mt_rms_norm_wide"),
+                "MSL for {dt:?} should declare mt_rms_norm_wide:\n{src}",
+            );
+        }
     }
 }

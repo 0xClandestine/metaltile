@@ -30,6 +30,7 @@ use common::{
     pack_bytes,
     pack_u32_bytes,
     ramp,
+    srht_rotation,
     unpack_bytes,
     unpack_u32_bytes,
 };
@@ -165,4 +166,68 @@ fn aura_encode_int4_minimum_dim_f32() {
     assert_eq!(actual_packed, expected_packed, "packed_out mismatch at dim=32");
     let diff = max_abs_diff(&expected_norms, &actual_norms);
     assert!(diff < 1e-4, "norms_out diverges: max |diff| = {diff:.2e}");
+}
+
+#[test]
+fn aura_encode_int4_srht_rotation_f32() {
+    // Non-identity rotation. The two tests above use an identity Π,
+    // which leaves the encode kernel's Stage-2 rotation matmul dormant:
+    // every rotated coordinate equals its input coordinate, so a bug in
+    // the `Σ_j rotation[d,j] * shared_unit[j]` accumulation would be
+    // invisible. Here Π is a Sylvester–Hadamard SRHT rotation
+    // (`H · diag(±1) / √dim`, orthogonal), so every output coordinate
+    // mixes every input coordinate and the matmul stage is genuinely
+    // exercised against the CPU reference (which applies the same Π).
+    //
+    // dim = 128 → 4 simdgroups, the production AURA dim and a
+    // power-of-two as the SRHT Hadamard construction requires.
+    let dim = 128usize;
+    let bits = 4usize;
+    let rows = 3usize;
+    let packed_width = (dim * bits).div_ceil(32);
+
+    let (codebook, boundaries) = int4_uniform_codebook();
+    let rotation = srht_rotation(dim, 0xA09A_5EED);
+    let input = ramp(rows * dim, 29, 11.0);
+
+    let (expected_packed, expected_norms) =
+        naive_aura_encode_f32(&input, &rotation, &boundaries, &codebook, rows, dim, bits);
+
+    let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    buffers.insert("input".into(), f32_slice_to_bytes(&input));
+    buffers.insert("rotation".into(), f32_slice_to_bytes(&rotation));
+    buffers.insert("boundaries".into(), f32_slice_to_bytes(&boundaries));
+    buffers.insert("codebook".into(), f32_slice_to_bytes(&codebook));
+    buffers.insert("packed_out".into(), pack_u32_bytes(&vec![0u32; rows * packed_width]));
+    buffers.insert("norms_out".into(), f32_slice_to_bytes(&vec![0.0_f32; rows]));
+    buffers.insert("dim".into(), (dim as u32).to_le_bytes().to_vec());
+    buffers.insert("packed_width".into(), (packed_width as u32).to_le_bytes().to_vec());
+
+    let ctx = Context::new().expect("Context::new should succeed on macOS");
+    let mut kernel = aura_encode_int4::kernel_ir_for(DType::F32);
+    kernel.mode = KernelMode::Reduction;
+
+    let result = ctx
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [rows, 1, 1], [dim, 1, 1])
+        .expect("dispatch_with_grid should succeed");
+
+    let packed_bytes =
+        result.outputs.get("packed_out").expect("`packed_out` buffer in dispatch result");
+    let norms_bytes =
+        result.outputs.get("norms_out").expect("`norms_out` buffer in dispatch result");
+    let actual_packed = unpack_u32_bytes(packed_bytes);
+    let actual_norms = bytes_to_f32_vec(norms_bytes);
+
+    // With a non-identity rotation the matmul reorders partials
+    // relative to the CPU's left-fold, so rotated values can land a few
+    // ulp either side of a Lloyd-Max boundary. Quantisation indices are
+    // still expected to match bit-exactly here because the ramp input
+    // avoids landing rotated values exactly on a boundary; if a future
+    // input pattern straddles one, compare dequantised values instead.
+    assert_eq!(
+        actual_packed, expected_packed,
+        "packed_out mismatch under SRHT rotation — rotation matmul stage diverges",
+    );
+    let diff = max_abs_diff(&expected_norms, &actual_norms);
+    assert!(diff < 1e-4, "norms_out diverges under SRHT rotation: max |diff| = {diff:.2e}",);
 }

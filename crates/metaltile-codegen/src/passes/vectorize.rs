@@ -645,4 +645,39 @@ mod tests {
         // Actually: second run may differ if first run already vectorized.
         // The important property is: it doesn't crash or corrupt the IR.
     }
+
+    /// `DeclareLocal` / `SetLocal` carry a `value` operand that must be
+    /// rewired when its producer is eliminated by load coalescing.
+    /// Without the dedicated match arms a `let mut x = load(...)` whose
+    /// load is folded into a `VectorExtract` keeps pointing at the dead
+    /// scalar VID and emits an undeclared-identifier MSL compile error.
+    #[test]
+    fn remap_rewires_declare_and_set_local() {
+        let remap: BTreeMap<ValueId, ValueId> =
+            [(ValueId::new(1), ValueId::new(100)), (ValueId::new(2), ValueId::new(200))]
+                .into_iter()
+                .collect();
+
+        let mut decl = Op::DeclareLocal { name: "s0".into(), value: ValueId::new(1) };
+        remap_value_ids(&mut decl, &remap);
+        match decl {
+            Op::DeclareLocal { value, .. } => assert_eq!(value, ValueId::new(100)),
+            _ => panic!("DeclareLocal variant changed"),
+        }
+
+        let mut set = Op::SetLocal { name: "s0".into(), value: ValueId::new(2) };
+        remap_value_ids(&mut set, &remap);
+        match set {
+            Op::SetLocal { value, .. } => assert_eq!(value, ValueId::new(200)),
+            _ => panic!("SetLocal variant changed"),
+        }
+
+        // A value not in the remap map is left untouched.
+        let mut untouched = Op::SetLocal { name: "s1".into(), value: ValueId::new(7) };
+        remap_value_ids(&mut untouched, &remap);
+        match untouched {
+            Op::SetLocal { value, .. } => assert_eq!(value, ValueId::new(7)),
+            _ => panic!("SetLocal variant changed"),
+        }
+    }
 }

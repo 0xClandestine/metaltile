@@ -42,6 +42,20 @@ build-release: ## cargo build (release)
 test: ## cargo test --workspace
 	cargo test --workspace
 
+# Diagnostic gate: re-run the suite under Metal's shader-validation layer.
+# Validation bounds-checks every in-kernel buffer access and turns an OOB
+# fault into a diagnostic instead of a machine-freezing GPU pin — useful
+# when a kernel is suspected of an out-of-bounds access.
+#
+# NOT the default `test` gate: the validation instrumentation consumes
+# registers, which lowers each PSO's maxTotalThreadsPerThreadgroup (e.g.
+# 1024 → ~704). Any kernel whose test dispatches a threadgroup near the
+# 1024 cap then exceeds the *instrumented* limit and false-fails. Run
+# this when diagnosing a suspected OOB, not as a correctness gate.
+.PHONY: test-validate
+test-validate: ## cargo test --workspace under Metal shader validation (diagnostic)
+	MTL_SHADER_VALIDATION=1 cargo test --workspace
+
 .PHONY: coverage
 coverage: ## test coverage report (requires cargo-llvm-cov)
 	./scripts/coverage.sh

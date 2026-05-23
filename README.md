@@ -157,26 +157,35 @@ Full walkthrough and crate layout: [`docs/getting-started.md`](docs/getting-star
 |---|---|
 | Unary elementwise — `exp`, `log`, `sqrt`, trig/hyperbolic, `erf`, `gelu`, `silu`, `sigmoid`, `relu`, … (40+) | ✅ |
 | Binary elementwise — `add`, `sub`, `mul`, `div`, `max`, `min`, `pow`, `logaddexp`, `atan2`, `remainder` | ✅ |
-| Fused binary (add+mul), ternary `select`, `copy`, strided copy, `arange` | ✅ |
-| Reductions — all-reduce & row-reduce (sum / max / min / prod) | ✅ |
+| Fused binary (add+mul), ternary `select`, `copy`, strided copy (2-D + N-D), `arange`, `swiglu` | ✅ |
+| Reductions — all / row / column / segmented (sum / max / min / prod) | ✅ |
 | `softmax`, `logsumexp` | ✅ |
-| `rms_norm` (+ small-N variant), `layer_norm` | ✅ |
-| `rope` — rotary position embedding | ✅ |
-| `argmax`, `scan` (parallel prefix sum), `sort` (bitonic) | ✅ |
+| `rms_norm` (+ small-N / wide / gated / fused-residual / fused-rope / fused-qgemv variants), `layer_norm` | ✅ |
+| `rope` — rotary position embedding (standard, Llama-3 banded, 2-D vision) | ✅ |
+| `argmax` / `argmin`, `scan` (inclusive + exclusive prefix sum), `sort` (bitonic + multi-block merge) | ✅ |
 | `random` — xorshift / key-hash | ✅ |
 | GEMV — dense and masked | ✅ |
-| Quantized GEMV / GEMM (`qmv`, `qmm`, int4) | ✅ |
-| Affine quantize / dequantize — int3 / 4 / 5 / 6 / 8 | ✅ |
-| FP4 quantize / dequantize | ✅ |
-| SDPA — vector decode (GQA), two-pass decode | ✅ |
+| Quantized GEMV / GEMM — `qmv` / `qvm` / `qmm`, int3–8, gather / grouped-MoE BGEMM variants | ✅ |
+| Affine quantize / dequantize — int2 / 3 / 4 / 5 / 6 / 8 | ✅ |
+| FP4 / FP8 quantize / dequantize (E2M1, E4M3, E5M2) | ✅ |
+| SDPA — vector decode (GQA), two-pass decode, batched-Q speculative decode | ✅ |
 | SDPA — Flash-Attention-2 prefill, incl. simdgroup-MMA fragments | ✅ |
-| Tiled GEMM — general matmul (`steel_gemm`) | 🚧 Planned |
-| Convolution — 1D / 2D / general | 🚧 Planned |
-| FFT | 🚧 Planned |
-| Scatter / gather-indexing family | 🚧 Planned |
-| FP8 quantization | 🚧 Planned |
+| Tiled GEMM — `steel_gemm` fused / gather / masked / segmented / split-K | ✅ |
+| Convolution — 1-D / 2-D / 3-D / general (strided, dilated, grouped) + 3×3 Winograd | ✅ |
+| FFT — radix-2 Cooley–Tukey, forward + inverse | ✅ |
+| Scatter / gather-indexing family — `scatter`, `gather_axis`, `gather_front`, `masked_scatter` | ✅ |
+| Hadamard transform — power-of-2 (FWHT) + non-power-of-2 (M ∈ {12, 20, 28}) | ✅ |
+| AURA compressed-KV codec — encode / dequant / score / value / flash-attention | ✅ |
+| GatedDeltaNet + Mamba/SSM recurrence — decode, chunked prefill, tape replay | ✅ |
+| MoE — router top-k, permute / unpermute, grouped quantized BGEMM | ✅ |
+| NAX (Apple `mpp::tensor_ops::matmul2d`) — GEMM, attention, quantized matmul | ✅ |
+| Vision / STT / TTS front-end — patch conv, patch embed, mel-spectrogram, vocoder/iSTFT | ✅ |
+| Sampling — categorical inverse-CDF, top-k / top-p / min-p, temperature, repetition penalty | ✅ |
 
-Survey of the codebase as of the current `dev`; see [`docs/developing.md`](docs/developing.md) for how kernels are organised.
+Kernel coverage is complete — every op in the MLX / FFAI survey is ported.
+See [`docs/KERNEL_AUDIT.md`](docs/KERNEL_AUDIT.md) for the full per-op
+coverage table and [`docs/developing.md`](docs/developing.md) for how
+kernels are organised.
 
 ## Benchmarks
 

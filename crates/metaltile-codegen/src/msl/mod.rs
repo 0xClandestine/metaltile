@@ -239,6 +239,17 @@ impl MslGenerator {
 
         wl!(out, "\n) {{");
 
+        // MPP (`mpp::tensor_ops::matmul2d`) is macOS-26+/Metal-4 only. The
+        // framework `#include` is already `#if __METAL_VERSION__ >= 400`
+        // guarded; the kernel *body* references `mpp::` symbols too, so it
+        // must sit behind the same guard or it fails to compile on older
+        // toolchains. The `#else` branch is an empty no-op stub — the
+        // metallib still links; the kernel is simply inert pre-Metal-4
+        // (NAX hardware requires macOS 26+ at runtime anyway).
+        if feat.needs_mpp {
+            wl!(out, "#if defined(__METAL_VERSION__) && __METAL_VERSION__ >= 400");
+        }
+
         // Inject scalar aliases for Reduction mode.
         // `tgid_y` is only emitted when the kernel references program_id::<1>(),
         // avoiding -Wunused-variable on single-axis reduction kernels.
@@ -284,6 +295,12 @@ impl MslGenerator {
             wl!(out);
         }
         out.push_str(&body_buf);
+
+        if feat.needs_mpp {
+            wl!(out, "#else");
+            wl!(out, "    // Pre-Metal-4 stub: mpp::tensor_ops is unavailable.");
+            wl!(out, "#endif");
+        }
 
         wl!(out, "}}");
         Ok(())
@@ -986,7 +1003,7 @@ mod tests {
 
     /// `needs_mpp` triggers the MetalPerformancePrimitives include when an
     /// `Op::InlineMsl` body references `mpp::`. Detection lives in
-    /// `KernelFeatures` (see `msl/features.rs:33`); the preamble emits the
+    /// `KernelFeatures` (see `msl/features.rs`); the preamble emits the
     /// header gated on Metal 4 so older toolchains still link.
     #[test]
     fn mpp_preamble_emits_when_inline_msl_contains_mpp() {

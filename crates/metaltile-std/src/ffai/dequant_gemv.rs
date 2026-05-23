@@ -203,3 +203,18 @@ dequant_gemv_pow2!(dequant_gemv_int8, 8u32, "int8");
 dequant_gemv_odd!(dequant_gemv_int3, 3u32, "int3");
 dequant_gemv_odd!(dequant_gemv_int5, 5u32, "int5");
 dequant_gemv_odd!(dequant_gemv_int6, 6u32, "int6");
+
+/// Per-kernel opt-in for the indirect Swift-wrapper variant. FFAI's
+/// GPU-router dispatches the int4 dequant-GEMV indirectly so the GPU
+/// can drive the per-MoE-layer grid shape from a buffer; the other
+/// dequant-GEMV bit-widths have no indirect consumer today.
+///
+/// Lives here (next to the kernel definitions) rather than in
+/// `metaltile-codegen` so that adding a new kernel that wants the
+/// indirect variant is a one-line edit in the same file as the
+/// kernel, not a special-case match buried in the codegen pass.
+/// The `tile emit` driver consumes this on the way to setting
+/// `Kernel::wants_indirect_variant` before codegen runs.
+pub fn dequant_gemv_wants_indirect(kernel_name: &str) -> bool {
+    matches!(kernel_name, "dequant_gemv_int4_f16" | "dequant_gemv_int4_bf16")
+}

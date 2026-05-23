@@ -53,6 +53,8 @@ fn run_sdpa_decode_f32(
     heads_per_group: usize,
     sink_end: usize,
     window_start: usize,
+    has_sink: u32,
+    sink_logit: f32,
     scale: f32,
 ) -> Vec<f32> {
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -66,6 +68,8 @@ fn run_sdpa_decode_f32(
     buffers.insert("heads_per_group".into(), (heads_per_group as u32).to_le_bytes().to_vec());
     buffers.insert("sink_end".into(), (sink_end as u32).to_le_bytes().to_vec());
     buffers.insert("window_start".into(), (window_start as u32).to_le_bytes().to_vec());
+    buffers.insert("has_sink".into(), has_sink.to_le_bytes().to_vec());
+    buffers.insert("sink_logit".into(), sink_logit.to_le_bytes().to_vec());
     buffers.insert("scale".into(), scale.to_le_bytes().to_vec());
 
     let result = ctx
@@ -136,6 +140,8 @@ fn sdpa_decode_matches_naive_cpu_reference_f32() {
         heads_per_group,
         0,
         0,
+        0,
+        0.0,
         scale,
     );
 
@@ -189,6 +195,8 @@ fn sdpa_decode_swa_matches_naive_cpu_reference_f32() {
         heads_per_group,
         sink_end,
         window_start,
+        0,
+        0.0,
         scale,
     );
 
@@ -235,10 +243,132 @@ fn sdpa_decode_swa_no_sinks_matches_cpu_f32() {
         heads_per_group,
         sink_end,
         window_start,
+        0,
+        0.0,
         scale,
     );
 
     assert_close(&actual, &expected, 1e-4, "sdpa_decode SWA (no sinks) vs CPU naive");
+}
+
+/// Naive dense SDPA reference with a learned per-head attention sink.
+/// The sink is a virtual key with score `sink_logit` and value 0: it
+/// joins the softmax max + denominator but contributes nothing to the
+/// weighted-V sum. Result is the dense SDPA output scaled down by
+/// `denom_no_sink / denom_with_sink` per head.
+fn naive_sdpa_sink_f32(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    s: &SdpaShape,
+    sink_logit: f32,
+) -> Vec<f32> {
+    let gqa = s.n_q_heads / s.n_kv_heads;
+    let mut out = vec![0.0f32; s.n_q_heads * s.head_dim];
+    for qh in 0..s.n_q_heads {
+        let kvh = qh / gqa;
+        let q_off = qh * s.head_dim;
+        let kv_slab = kvh * s.n_kv * s.head_dim;
+        // Scores for the real keys.
+        let mut scores = vec![0.0f32; s.n_kv];
+        let mut m = sink_logit; // softmax max also covers the sink
+        for (t, sc) in scores.iter_mut().enumerate() {
+            let k_off = kv_slab + t * s.head_dim;
+            let mut dot = 0.0f32;
+            for d in 0..s.head_dim {
+                dot += q[q_off + d] * k[k_off + d];
+            }
+            *sc = dot * s.scale;
+            if *sc > m {
+                m = *sc;
+            }
+        }
+        // Denominator includes the sink's exp(sink_logit - m) term.
+        let mut denom = (sink_logit - m).exp();
+        for sc in &scores {
+            denom += (sc - m).exp();
+        }
+        for (t, sc) in scores.iter().enumerate() {
+            let w = (sc - m).exp() / denom;
+            let v_off = kv_slab + t * s.head_dim;
+            for d in 0..s.head_dim {
+                out[q_off + d] += w * v[v_off + d];
+            }
+        }
+    }
+    out
+}
+
+// Learned attention-sink correctness (GPT-OSS-20B). Dense KV walk with
+// a per-head sink logit folded into the softmax denominator on-GPU —
+// pins the `has_sink` / `sink_logit` constexpr path against a CPU
+// reference that applies the same virtual-key term.
+#[test]
+fn sdpa_decode_learned_sink_matches_cpu_f32() {
+    let _g = gpu_lock();
+    let n_q_heads = 2usize;
+    let n_kv_heads = 1usize;
+    let head_dim = 128usize;
+    let n_kv = 8usize;
+    let kv_stride = 8usize;
+    let heads_per_group = n_q_heads / n_kv_heads;
+    let scale = 1.0_f32 / (head_dim as f32).sqrt();
+    // A non-trivial sink logit — large enough to absorb a meaningful
+    // share of the softmax mass so the rescale is visible.
+    let sink_logit = 2.5_f32;
+
+    let q = ramp(n_q_heads * head_dim, 17, 8.0);
+    let k = ramp(n_kv_heads * kv_stride * head_dim, 13, 6.0);
+    let v = ramp(n_kv_heads * kv_stride * head_dim, 11, 5.0);
+
+    let shape = SdpaShape { n_q_heads, n_kv_heads, head_dim, n_kv, scale };
+    let expected = naive_sdpa_sink_f32(&q, &k, &v, &shape, sink_logit);
+
+    let ctx = Context::new().expect("Context::new should succeed on macOS");
+    let mut kernel = ffai_sdpa_decode::kernel_ir_for(DType::F32);
+    kernel.mode = KernelMode::Reduction;
+
+    let actual = run_sdpa_decode_f32(
+        &ctx,
+        &kernel,
+        &q,
+        &k,
+        &v,
+        n_q_heads,
+        head_dim,
+        n_kv,
+        kv_stride,
+        heads_per_group,
+        0,
+        0,
+        1, // has_sink
+        sink_logit,
+        scale,
+    );
+
+    assert_close(&actual, &expected, 1e-4, "sdpa_decode learned sink vs CPU naive");
+
+    // Cross-check: with `has_sink = 0` the same shape must reproduce the
+    // sink-free dense output (the term is fully masked out).
+    let dense_expected = naive_sdpa_f32(&q, &k, &v, &shape);
+    let dense_actual = run_sdpa_decode_f32(
+        &ctx,
+        &kernel,
+        &q,
+        &k,
+        &v,
+        n_q_heads,
+        head_dim,
+        n_kv,
+        kv_stride,
+        heads_per_group,
+        0,
+        0,
+        0,          // has_sink off
+        sink_logit, // ignored when has_sink == 0
+        scale,
+    );
+    assert_close(&dense_actual, &dense_expected, 1e-4, "sdpa_decode has_sink=0 stays dense");
 }
 
 // ── Perf bench ───────────────────────────────────────────────────────────
@@ -291,6 +421,8 @@ fn sdpa_decode_perf_bench_f32() {
         buffers.insert("heads_per_group".into(), (heads_per_group as u32).to_le_bytes().to_vec());
         buffers.insert("sink_end".into(), 0u32.to_le_bytes().to_vec());
         buffers.insert("window_start".into(), 0u32.to_le_bytes().to_vec());
+        buffers.insert("has_sink".into(), 0u32.to_le_bytes().to_vec());
+        buffers.insert("sink_logit".into(), 0.0f32.to_le_bytes().to_vec());
         buffers.insert("scale".into(), scale.to_le_bytes().to_vec());
 
         // 20 warmup + 100 measure.

@@ -44,6 +44,18 @@ use crate::error::{Error, Result};
 /// Mask for encoding internal sub-op references within FusedElementwise chains.
 pub const SUB_OP_FLAG: u32 = 0x8000_0000;
 
+/// Tag for loop-variable `ValueId`s (`emit_block` encodes a loop var as
+/// `LOOP_VAR_FLAG | VarId`). It shares `SUB_OP_FLAG`'s top bit, so any
+/// `raw & SUB_OP_FLAG` test must first exclude loop vars via
+/// [`is_sub_op_ref`] — a loop var is *not* a fused sub-op reference.
+pub const LOOP_VAR_FLAG: u32 = 0xC000_0000;
+
+/// True when `raw` is a genuine fused-chain sub-op reference — the top bit
+/// set, but not the loop-var pattern (`0xC000_0000`).
+pub fn is_sub_op_ref(raw: u32) -> bool {
+    raw & SUB_OP_FLAG != 0 && raw & LOOP_VAR_FLAG != LOOP_VAR_FLAG
+}
+
 /// Create a ValueId that references the result of sub-op at position `idx`
 /// within a FusedElementwise chain.
 pub fn sub_op_ref(idx: usize) -> ValueId { ValueId::new(SUB_OP_FLAG | idx as u32) }

@@ -17,13 +17,17 @@ pub mod arg_reduce;
 pub mod binary;
 pub mod binary_two;
 pub mod copy;
+pub mod fft;
 pub mod fp_quantized;
 #[cfg(feature = "nax")]
 pub mod fp_quantized_nax;
+pub mod fused_gate_activation;
 pub mod gather_axis;
 pub mod gemv;
 pub mod gemv_masked;
 pub mod hadamard;
+pub mod hadamard_m;
+pub mod indexing;
 pub mod layer_norm;
 pub mod logsumexp;
 pub mod quantized;
@@ -48,9 +52,10 @@ pub mod swiglu;
 pub mod ternary;
 pub mod unary;
 
-// `conv.rs`, `fence.rs`, `fft.rs`, `shared.rs` are placeholder/stale
-// stubs left over from the old `metaltile-bench` crate. They reference
-// `crate::runner` which lives in `metaltile-cli`, so they don't
-// compile — kept on disk for the kernel docs / future-work notes but
-// intentionally not declared here. Delete or port when those kernels
-// land in the #[kernel] DSL.
+// `conv.rs` and `shared.rs` are placeholder/stale stubs left over from
+// the old `metaltile-bench` crate. They reference `crate::runner` which
+// lives in `metaltile-cli`, so they don't compile — kept on disk for
+// the kernel docs / future-work notes but intentionally not declared
+// here. Delete or port when those kernels land in the #[kernel] DSL.
+// `fft.rs` and `fence.rs` are now real `#[kernel]` ports (declared
+// above / in `ffai/`).

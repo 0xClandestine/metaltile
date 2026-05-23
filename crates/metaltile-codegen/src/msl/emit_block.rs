@@ -398,8 +398,9 @@ impl MslGenerator {
                             for sub_op in ops {
                                 expr = match sub_op {
                                     Op::UnaryOp { op, .. } => op.msl_emit(&expr),
-                                    Op::Activation { kind, .. } =>
-                                        format!("{}({})", kind.msl_fn(), expr),
+                                    Op::Activation { kind, .. } => {
+                                        format!("{}({})", kind.msl_fn(), expr)
+                                    },
                                     Op::Cast { dtype, .. } => self.emit_cast_expr(*dtype, &expr),
                                     Op::BinOp { op, rhs, .. } => {
                                         let rv = self.vname(Some(*rhs), block, extra_names);
@@ -563,8 +564,11 @@ impl MslGenerator {
                         CoopTileScope::SimdGroup => "metal::execution_simdgroup",
                         CoopTileScope::Threadgroup => "metal::execution_threadgroup",
                     };
+                    // Apple's `matmul2d_descriptor::mode` has two members:
+                    // `multiply` (C ← A·B, fresh) and `multiply_accumulate`
+                    // (C ← C + A·B). `Overwrite` is the fresh-product case.
                     let acc_mode_s = match acc_mode {
-                        metaltile_core::ir::CoopTileAccMode::Overwrite => "mode::overwrite",
+                        metaltile_core::ir::CoopTileAccMode::Overwrite => "mode::multiply",
                         metaltile_core::ir::CoopTileAccMode::MultiplyAccumulate =>
                             "mode::multiply_accumulate",
                     };
@@ -1041,12 +1045,14 @@ impl MslGenerator {
                     let v = self.vname(vid, block, extra_names);
                     let rv = self.vname(Some(*value), block, extra_names);
                     match rk {
-                        ReduceKind::Sum | ReduceKind::Mean =>
-                            wl!(out, "{pad}float {v} = simd_sum(float({rv}));"),
+                        ReduceKind::Sum | ReduceKind::Mean => {
+                            wl!(out, "{pad}float {v} = simd_sum(float({rv}));")
+                        },
                         ReduceKind::Max => wl!(out, "{pad}float {v} = simd_max(float({rv}));"),
                         ReduceKind::Min => wl!(out, "{pad}float {v} = simd_min(float({rv}));"),
-                        ReduceKind::Product =>
-                            wl!(out, "{pad}float {v} = __mt_simd_product(float({rv}));"),
+                        ReduceKind::Product => {
+                            wl!(out, "{pad}float {v} = __mt_simd_product(float({rv}));")
+                        },
                     }
                 },
 
@@ -1163,14 +1169,18 @@ impl MslGenerator {
                     let rv = self.vname(Some(*value), block, extra_names);
                     let prefix = if *exclusive { "exclusive" } else { "inclusive" };
                     match rk {
-                        ReduceKind::Sum | ReduceKind::Mean =>
-                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_sum({rv});"),
-                        ReduceKind::Product =>
-                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_product({rv});"),
-                        ReduceKind::Max =>
-                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_max({rv});"),
-                        ReduceKind::Min =>
-                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_min({rv});"),
+                        ReduceKind::Sum | ReduceKind::Mean => {
+                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_sum({rv});")
+                        },
+                        ReduceKind::Product => {
+                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_product({rv});")
+                        },
+                        ReduceKind::Max => {
+                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_max({rv});")
+                        },
+                        ReduceKind::Min => {
+                            wl!(out, "{pad}float {v} = simd_prefix_{prefix}_min({rv});")
+                        },
                     }
                 },
 

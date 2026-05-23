@@ -31,8 +31,8 @@ pub(super) struct KernelFeatures {
     pub needs_simd_product: bool,
     /// MetalPerformancePrimitives (`mpp::tensor_ops::matmul2d` / NAX) needed.
     /// Detected by scanning `Op::InlineMsl::source` for `"mpp::"` — kernels
-    /// using NAX-class MMA must include the framework header. Requires
-    /// macOS 26+ / Metal 4 toolchain.
+    /// using NAX-class cooperative-tensor MMA must include the framework
+    /// header. Requires macOS 26+ / Metal 4 toolchain.
     pub needs_mpp: bool,
 }
 
@@ -136,7 +136,6 @@ impl MslGenerator {
                 for inner in ops {
                     self.analyze_op(inner, feat);
                 },
-            // CoopTile* ops use cooperative matmul — force the MPP framework header.
             Op::CoopTileSetup { .. }
             | Op::CoopTileZero { .. }
             | Op::CoopTileLoadA { .. }
@@ -147,7 +146,12 @@ impl MslGenerator {
                 feat.needs_simd_lane = true;
                 feat.needs_simd_group = true;
             },
-            // Detect MPP tensor-ops usage in raw inline MSL.
+            // Detect MPP tensor-ops usage in raw inline MSL — escape-hatch
+            // for kernels that call `mpp::tensor_ops::matmul2d` / NAX.
+            // Forces the codegen preamble to include the framework header.
+            // MPP MMA is simdgroup-cooperative — pulls in the same simd
+            // built-ins as the simdgroup_matrix path.
+            // CoopTile* ops use cooperative matmul — force the MPP framework header.
             Op::InlineMsl { source, .. } if source.contains("mpp::") => {
                 feat.needs_mpp = true;
                 feat.needs_simd_lane = true;
