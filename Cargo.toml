@@ -60,7 +60,7 @@ panic = "abort"
 [profile.ci]
 inherits = "release"
 lto = "thin"
-codegen-units = 0          # 0 = one per CPU core
+codegen-units = 16
 
 [profile.bench]
 inherits = "release"
