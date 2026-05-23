@@ -290,11 +290,11 @@ fn sort_diff_rows(diff_rows: &mut [DiffRow], sort: &str) {
 /// bench's approach: pad text then style the whole padded string with
 /// `paint_stdout`).
 struct DiffRowDisplay {
-    op: String,          // unstyled
-    shape: String,       // unstyled
-    baseline: String,    // unstyled, e.g. "104%" or "—"
-    current: String,     // unstyled, e.g. "—" or "420%"
-    delta: String,       // unstyled, e.g. "▲ +88%" or "removed"
+    op: String,       // unstyled
+    shape: String,    // unstyled
+    baseline: String, // unstyled, e.g. "104%" or "—"
+    current: String,  // unstyled, e.g. "—" or "420%"
+    delta: String,    // unstyled, e.g. "▲ +88%" or "removed"
     baseline_style: Style,
     current_style: Style,
     delta_style: Style,
@@ -319,8 +319,7 @@ fn build_diff_row_display(row: &DiffRow) -> DiffRowDisplay {
     //   red        = "removed"
     //   cyan       = "new"
     let (delta, delta_style) = match row.kind {
-        DeltaKind::Removed =>
-            ("removed".to_string(), Style::new().fg(Color::Red)),
+        DeltaKind::Removed => ("removed".to_string(), Style::new().fg(Color::Red)),
         DeltaKind::New => ("new".to_string(), Style::new().fg(Color::Cyan)),
         DeltaKind::Unchanged => {
             let pct = row.delta_pct.unwrap_or(0.0);
@@ -331,12 +330,12 @@ fn build_diff_row_display(row: &DiffRow) -> DiffRowDisplay {
                 (format!("{arrow} {:+.0}%", pct), Style::new().fg(Color::Yellow))
             }
         },
-        DeltaKind::Regression => {
-            (format!("▼ {:+.0}%", row.delta_pct.unwrap_or(0.0)), Style::new().fg(Color::Red).bold())
-        },
-        DeltaKind::Improvement => {
-            (format!("▲ {:+.0}%", row.delta_pct.unwrap_or(0.0)), Style::new().fg(Color::Green).bold())
-        },
+        DeltaKind::Regression =>
+            (format!("▼ {:+.0}%", row.delta_pct.unwrap_or(0.0)), Style::new().fg(Color::Red).bold()),
+        DeltaKind::Improvement => (
+            format!("▲ {:+.0}%", row.delta_pct.unwrap_or(0.0)),
+            Style::new().fg(Color::Green).bold(),
+        ),
     };
 
     DiffRowDisplay {
@@ -392,8 +391,6 @@ fn pad_left(s: &str, width: usize) -> String {
     let len = s.len();
     if len >= width { s.to_string() } else { format!("{: >len$}{s}", "", len = width - len) }
 }
-
-
 
 fn print_summary(
     regressions: usize,
@@ -491,8 +488,6 @@ fn build_result_map(results: &[Value]) -> HashMap<RowKey, (f64, f64)> {
     }
     map
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -592,8 +587,6 @@ mod tests {
     fn pad_right_no_op_when_equal() {
         assert_eq!(pad_right("rust", 4), "rust");
     }
-
-
 
     // ── build_diff_row_display: delta column carries all info ─────
 
