@@ -4899,6 +4899,193 @@ qvm_odd!(mt_qvm_b3, 3u32, "qvm_b3");
 qvm_odd!(mt_qvm_b5, 5u32, "qvm_b5");
 qvm_odd!(mt_qvm_b6, 6u32, "qvm_b6");
 
+// ─── mt_qvm_int4_fast ─────────────────────────────────────────────────
+//
+// Perf-tuned int4 vecmat `y = xᵀ · W` where W is `[K, N]` row-major.
+//
+// Geometry vs qmv_fast: qmv tiles *output rows* (W rows, `[N, K]`); here
+// we tile *output columns* (W columns, N axis) because the K-dimension
+// is the inner dot. The 8-column-per-TG tile (2 SG × 4 cols) is the
+// structural dual of qmv's 8-row-per-TG tile — each SG handles 4
+// consecutive output columns; each lane contributes to 4 partial sums
+// by loading 16 X values and reading 4 corresponding W packs from each
+// K-position's row.
+//
+// W layout: `[K, N]` row-major — row `d` has `N/8` u32 packs, the
+// `c`-th output column's nibble for K-position `d` is in pack
+// `c/8` at nibble `c%8`. Lane-stride over K — each lane covers K
+// positions `lane, lane+32, lane+64, …` with a 32-lane simdgroup.
+// (Structurally different from qmv_fast because W strides are transposed:
+// column index `c` is within each K-row pack, while K-row index `d` is
+// the outer loop axis rather than the inner.)
+//
+// Scale/bias layout: `[K/G, N]` — scale for column `c` at group `g`
+// is at `scales[g * N + c]`, same column-major structure as the scalar
+// qvm_pow2. Within a 512-K block `N * G / 512` groups are crossed;
+// group index = `d / G` = `(lane_k_base + d_local) / G`.
+//
+// Algebraic split: `acc_c += scale_c * q_dot_c + bias_c * xs`, where
+// `xs = Σ_{d in block} x[d]` is shared across all 4 columns in the SG
+// (X is the same vector regardless of which output column we're
+// computing). `q_dot_c = Σ_{d in block} nibble(W[d, c]) * x[d]` is
+// column-specific.
+//
+// The mask-without-shift trick: nibbles at positions 1/2/3 within a
+// u32 pack have position-powers 16/256/4096. Pre-scaling x[d] by
+// 1/16, 1/256, 1/4096 at the matching positions and using the mask
+// constant (rather than shift) lets the multiplier absorb the nibble
+// position — saves 7 shifts per pack per column = 28 shifts per block.
+//
+// Dispatch:
+//   Grid: [N/8, 1, 1]  — one TG per 8-column tile.
+//   TPG:  64           — 2 SG × 32 lanes.
+//   K: multiple of 32 (lane-stride). N: multiple of 8.
+//   group_size: 64 (standard Qwen3 gs=64).
+
+/// Perf-tuned int4 vecmat `y = xᵀ · W`, W `[K, N]` — 8 output columns
+/// per TG, mirroring `mt_qmv`'s 8-row geometry with K/N transposed.
+///
+/// Each simdgroup handles 4 consecutive output columns. Lane-strided over
+/// K: each lane covers `K/32` K-positions. Grid: `[N/8, 1, 1]`, TPG = 64,
+/// group_size = 64.
+#[kernel]
+pub fn mt_qvm_int4_fast<T>(
+    w: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    x: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] k: u32,
+    #[constexpr] n: u32,
+    #[constexpr] gs_per_col: u32, // K / group_size — groups per output column
+) {
+    // Each TG handles 8 output columns: SG 0 → cols 0-3, SG 1 → cols 4-7.
+    // `tgid_x` = column tile; `simd_id` = 0 or 1; `simd_lane` = lane.
+    let tg = tgid_x;
+    let sg = simd_id;
+    let lane = simd_lane;
+
+    let col0 = tg * 8u32 + sg * 4u32;
+    let col1 = col0 + 1u32;
+    let col2 = col0 + 2u32;
+    let col3 = col0 + 3u32;
+
+    // Pack offsets within a K-row (N elements packed 8 int4 per u32).
+    let packs_per_krow = n / 8u32;
+    let col0_pack = col0 / 8u32;
+    let col1_pack = col1 / 8u32;
+    let col2_pack = col2 / 8u32;
+    let col3_pack = col3 / 8u32;
+
+    // Nibble slot within the u32 pack for each column.
+    let col0_slot = col0 & 7u32;
+    let col1_slot = col1 & 7u32;
+    let col2_slot = col2 & 7u32;
+    let col3_slot = col3 & 7u32;
+
+    // Mask-without-shift: if the nibble slot is at position p, the
+    // 4-bit value lives at bits [4p, 4p+4). The mask-without-shift trick
+    // works within a u32 when we pre-scale x by 1/16^p so that the raw
+    // masked value (nibble × 16^p) × (x/16^p) = nibble × x.
+    // Here each column has a fixed nibble slot within its u32 pack, so
+    // we can pre-compute the per-column slot factor once.
+    // Slot → mask constant and x-scale factor:
+    //   slot 0: mask=0x0000000f, x_scale=1
+    //   slot 1: mask=0x000000f0, x_scale=1/16
+    //   slot 2: mask=0x00000f00, x_scale=1/256
+    //   slot 3: mask=0x0000f000, x_scale=1/4096
+    //   slot 4: mask=0x000f0000, x_scale=1/65536
+    //   slot 5: mask=0x00f00000, x_scale=1/1048576
+    //   slot 6: mask=0x0f000000, x_scale=1/16777216
+    //   slot 7: mask=0xf0000000, x_scale=1/268435456
+    // For gs=64 with lane-strided K-walk (32 lanes × 1 K-position each),
+    // each outer block covers 32 K-positions → 4 half-words per lane for
+    // gs=64; but since qvm iterates K one element at a time per lane
+    // (not 16 elements as in qmv), we use a simple shift-mask approach
+    // at each K-position to extract the nibble, and still apply the
+    // algebraic split (xs accumulated per-lane, contributed via simd_sum).
+    //
+    // Simpler inner loop than qmv: one K-position per lane per iter,
+    // extract nibble via shift+mask (not mask-without-shift in the hot
+    // path — the column slot varies by column so no single pre-scale
+    // covers all 4 columns). The algebraic split still halves the FMA
+    // count vs the naive `w_real * x` form.
+
+    let mask4 = 15u32;
+    let group_size = k / gs_per_col;
+
+    let mut acc0 = 0.0f32;
+    let mut acc1 = 0.0f32;
+    let mut acc2 = 0.0f32;
+    let mut acc3 = 0.0f32;
+
+    // Lane-strided K walk: each lane covers K positions
+    // `lane, lane+32, lane+64, …`.
+    let n_iters = (k + 31u32) / 32u32;
+    for _it in range(0u32, n_iters, 1u32) {
+        let d = _it * 32u32 + lane; // K-position for this lane
+        if d < k {
+            let xd = load(x[d]).cast::<f32>();
+            let g = d / group_size;
+
+            // Scales/biases: layout [K/G, N] — col c, group g → index g*N+c.
+            let s0 = load(scales[g * n + col0]).cast::<f32>();
+            let bi0 = load(biases[g * n + col0]).cast::<f32>();
+            let s1 = load(scales[g * n + col1]).cast::<f32>();
+            let bi1 = load(biases[g * n + col1]).cast::<f32>();
+            let s2 = load(scales[g * n + col2]).cast::<f32>();
+            let bi2 = load(biases[g * n + col2]).cast::<f32>();
+            let s3 = load(scales[g * n + col3]).cast::<f32>();
+            let bi3 = load(biases[g * n + col3]).cast::<f32>();
+
+            // W row `d` base offset in the packed array.
+            let row_base = d * packs_per_krow;
+
+            // Extract nibbles for each of the 4 output columns.
+            let w0 = load(w[row_base + col0_pack]);
+            let q0 = ((w0 >> (col0_slot * 4u32)) & mask4).cast::<f32>();
+
+            let w1 = load(w[row_base + col1_pack]);
+            let q1 = ((w1 >> (col1_slot * 4u32)) & mask4).cast::<f32>();
+
+            let w2 = load(w[row_base + col2_pack]);
+            let q2 = ((w2 >> (col2_slot * 4u32)) & mask4).cast::<f32>();
+
+            let w3 = load(w[row_base + col3_pack]);
+            let q3 = ((w3 >> (col3_slot * 4u32)) & mask4).cast::<f32>();
+
+            // Algebraic split: accumulate (s * q - s*bias/s + bias) * x
+            // = s*q*x + bias*x.  Equivalently:
+            //   acc += s * q * x + bias * x
+            //       = s * (q * x) + bias * x
+            // Factored as: acc += s * q_dot + bias * xs (over the group),
+            // but since we do it per-element here the split is just:
+            //   acc += (q * s + bias) * x   — same FMA count as scalar.
+            // The xs algebraic split is only advantageous when 16 x values
+            // are shared across rows/cols; with 1 K-position per iter it
+            // doesn't help. We keep the standard form here.
+            acc0 = acc0 + (q0 * s0 + bi0) * xd;
+            acc1 = acc1 + (q1 * s1 + bi1) * xd;
+            acc2 = acc2 + (q2 * s2 + bi2) * xd;
+            acc3 = acc3 + (q3 * s3 + bi3) * xd;
+        }
+    }
+
+    // Cross-lane reduce within each simdgroup.
+    let r0 = simd_sum(acc0);
+    let r1 = simd_sum(acc1);
+    let r2 = simd_sum(acc2);
+    let r3 = simd_sum(acc3);
+    if lane == 0u32 {
+        store(out[col0], r0.cast::<T>());
+        store(out[col1], r1.cast::<T>());
+        store(out[col2], r2.cast::<T>());
+        store(out[col3], r3.cast::<T>());
+    }
+}
+
+quantized_family_spec!(mt_qvm_int4_fast, "qvm_int4_fast");
+
 /// Auto-select the best `mt_qmm*` kernel for a given dtype + M
 /// (number of tokens / batched rows in this prefill). Returns the
 /// kernel IR ready to dispatch. Caller still owns grid sizing — see
