@@ -195,11 +195,22 @@ macro_rules! flash_quantized_sdpa_kernel {
 }
 
 flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b4_d64, 4u32, 64u32, 2u32, "b4_d64");
+// d=96: GPT-NeoX head dim. dims_per_lane = ceil(96/32) = 3.
+flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b4_d96, 4u32, 96u32, 3u32, "b4_d96");
 flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b4_d128, 4u32, 128u32, 4u32, "b4_d128");
 flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b4_d256, 4u32, 256u32, 8u32, "b4_d256");
+// d=512: Gemma 4 global-attention head dim. dims_per_lane = 512/32 = 16.
+// Register pressure with 16 fp32 accumulators pushes maxTotalThreadsPerThreadgroup
+// below 1024; dispatch at 256 threads/TG (8 SG) — same approach as
+// ffai_sdpa_decode_d512 which also uses 16 elements/lane.
+flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b4_d512, 4u32, 512u32, 16u32, "b4_d512");
 flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b8_d64, 8u32, 64u32, 2u32, "b8_d64");
+// d=96: GPT-NeoX, int8.
+flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b8_d96, 8u32, 96u32, 3u32, "b8_d96");
 flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b8_d128, 8u32, 128u32, 4u32, "b8_d128");
 flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b8_d256, 8u32, 256u32, 8u32, "b8_d256");
+// d=512: Gemma 4 global, int8. Same 256-thread/TG constraint as b4_d512.
+flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b8_d512, 8u32, 512u32, 16u32, "b8_d512");
 
 // ── Bool-mask variants ───────────────────────────────────────────────────
 //
