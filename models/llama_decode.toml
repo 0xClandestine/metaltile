@@ -87,7 +87,6 @@ dispatch  = { rows = "1", tpg = "$hidden_dim / 4", out_elems = "$hidden_dim" }
 
 [[layer.kernel]]
 op = "gemv/bm4"
-fuse = "q_chain"
 inputs    = { mat = "$layers.$idx.attn.q_proj", vec = "_normed" }
 outputs   = { out = "_q" }
 constexpr = { k = "$hidden_dim", rows = "$n_heads * $head_dim" }
@@ -99,7 +98,6 @@ dispatch  = { rows = "$n_heads * $head_dim / 4", tpg = "256", out_elems = "$n_he
 
 [[layer.kernel]]
 op = "rope/rope_llama"
-fuse = "q_chain"
 inputs    = { qk = "_q" }
 outputs   = { out = "_q_rope" }
 constexpr = { head_dim = "$head_dim", half_dim = "$head_dim / 2", position = "$position", theta_base = "500000.0", scale_factor = "8.0", low_freq_factor = "1.0", high_freq_factor = "4.0", original_max_position = "8192.0" }
@@ -109,7 +107,6 @@ dispatch  = { grid_x = "$n_heads", grid_y = "$head_dim / 2", out_elems = "$n_hea
 
 [[layer.kernel]]
 op = "gemv/bm4"
-fuse = "k_chain"
 inputs    = { mat = "$layers.$idx.attn.k_proj", vec = "_normed" }
 outputs   = { out = "_k_new" }
 constexpr = { k = "$hidden_dim", rows = "$n_kv_heads * $head_dim" }

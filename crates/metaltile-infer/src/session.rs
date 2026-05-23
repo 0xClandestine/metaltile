@@ -325,7 +325,7 @@ impl Session {
         // At T≤1e-5 the distribution is already effectively one-hot at
         // the argmax, so clamping here gives correct greedy behaviour.
         scalar_write_f32(&mut self.scalars, S_TEMPERATURE, temperature.max(1e-5));
-        let uniform: f32 = pseudo_uniform(token_id, pos);
+        let uniform: f32 = random_uniform();
         scalar_write_f32(&mut self.scalars, S_UNIFORM, uniform);
 
         // Sync scalar array to StateMap before dispatch (execute_prepared
@@ -456,22 +456,36 @@ fn build_compile_params(
     }
 }
 
-/// Deterministic pseudo-random float in (0, 1) — good enough for greedy/temp sampling.
+use std::cell::Cell;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+thread_local! {
+    static RNG: Cell<u64> = Cell::new({
+        let t = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let pid = std::process::id() as u64;
+        let seed = t ^ pid.wrapping_mul(6364136223846793005);
+        if seed == 0 { 1 } else { seed }
+    });
+}
+
+/// OS-seeded xorshift64 uniform float in (0, 1).
 ///
-/// Returns a value strictly in (0, 1): the OR-with-1 ensures x is never 0
-/// (which would produce uniform=0.0 and cause the CDF hit condition
-/// `prev_cum < target` to fail at lid=0, silently returning token 0).
+/// Returns a value in [0, 1): mantissa bits are taken from the upper 53 bits
+/// so the result never rounds to exactly 1.0. Values of 0.0 are possible but
+/// benign — they cause the sampling CDF to hit the first token, which is correct.
 #[inline]
-fn pseudo_uniform(token_id: u32, position: u32) -> f32 {
-    let mut x = token_id.wrapping_mul(2654435761).wrapping_add(position.wrapping_mul(2246822519));
-    x ^= x >> 13;
-    x ^= x << 17;
-    x ^= x >> 5;
-    // OR-with-1 guarantees x ≥ 1, so result is in (0, 1] ∩ f32 representable values.
-    // The largest representable f32 < 1 is used as the upper bound in practice since
-    // x=u32::MAX gives (u32::MAX as f32) / (u32::MAX as f32) which rounds to 1.0 in f32
-    // — that's fine: uniform=1.0 lands inside the last CDF bucket.
-    (x | 1) as f32 / (u32::MAX as f32)
+fn random_uniform() -> f32 {
+    RNG.with(|rng| {
+        let mut x = rng.get();
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        rng.set(x);
+        (x >> 11) as f32 * (1.0f32 / (1u64 << 53) as f32)
+    })
 }
 
 fn find_eos_token_id(tokenizer: &Tokenizer) -> u32 {

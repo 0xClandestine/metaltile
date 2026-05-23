@@ -64,7 +64,7 @@ pub enum ConstexprValue {
 /// Maps 1:1 to a `Context::dispatch_chain` pass (one `DispatchSpec`).
 /// The node holds enough information to build a `DispatchSpec` at
 /// dispatch time, resolving `SlotRef`s to actual GPU buffers.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DispatchNode {
     /// Human-readable label for debugging (e.g. "layer.3.rms_norm").
     pub label: String,

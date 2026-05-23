@@ -101,8 +101,21 @@ Add `!` for breaking changes (`feat!: …`) and describe them in the PR body.
 | Per-pass op-count deltas | `tile inspect <kernel> --stats` |
 | Which pass is slow | `tile build --time-passes --filter <kernel>` |
 | Emit every kernel's MSL | `tile build --emit all -o <dir>` |
+| **TOML pipeline: full fused MSL** | `tile inspect --toml models/llama_decode.toml` |
+| **TOML pipeline: see fusion groups** | `tile inspect --toml models/llama_decode.toml --no-fuse` |
+| **TOML pipeline: IR after fusion** | `tile inspect --toml models/llama_decode.toml --pass fusion` |
+| **TOML pipeline: per-pass stats** | `tile inspect --toml models/llama_decode.toml --stats` |
+| **TOML pipeline: all pass stages** | `tile inspect --toml models/llama_decode.toml --pass all -o /tmp/p` |
 
 When a kernel regresses, `--stats` before/after the change shows which pass changed the op count; `--pass all` dumps the IR at every stage.
+
+For TOML-based models, `tile inspect --toml` compiles the full model definition
+and shows how fusion groups reorganize the dispatch pipeline. Use `--no-fuse` to
+see the un-fused pipeline, then `--pass fusion` to see which elementwise chains
+were fused into `FusedElementwise` ops.
+
+Model params default to Llama 3 8B; override with `--n-layers <N>`, `--hidden-dim <N>`,
+etc., or use `--config-json <path>` to load from a HuggingFace `config.json`.
 
 ## Kernel-authoring hazards
 

@@ -493,7 +493,145 @@ fn fuse_dispatch_nodes(nodes: &mut [DispatchNode]) -> (usize, usize) {
         }
     }
 
+    // ── Phase 4: Merge adjacent parallel-Reduction pairs ────────
+    // Scan adjacent fuse groups and merge [R_a, E_a] + [R_b, E_b]
+    // when they form a diamond dependency: R_a and R_b are parallel
+    // identically-spec'd Reductions, and E_b reads from E_a.
+    merge_parallel_reduction_pairs(nodes, &writes, &reads);
+
     (chains.len(), n_unfused)
+}
+
+/// Merge adjacent same-spec parallel-Reduction fuse groups when they form a
+/// diamond dependency: two parallel [R→E] pairs where the second E reads
+/// from the first E.
+///
+/// Scans pairs of consecutive fuse groups (group_id, group_id+1) and merges
+/// them when:
+/// - Both groups have exactly 2 nodes: [R, E] in execution order.
+/// - Both R nodes have identical Reduction specs (num_rows, threads_per_group).
+/// - R_b does NOT read any tensor written by R_a or E_a (parallel, not dependent).
+/// - E_b reads at least one tensor written by E_a (diamond dependency).
+/// - No unfused nodes exist between the two groups.
+///
+/// When conditions are met, group_id+1's nodes are reassigned to group_id.
+fn merge_parallel_reduction_pairs(
+    nodes: &mut [DispatchNode],
+    _writes: &HashMap<String, Vec<usize>>,
+    _reads: &HashMap<String, Vec<usize>>,
+) {
+    use metaltile_runtime::context::GridSpec;
+
+    if nodes.len() < 4 {
+        return;
+    }
+
+    // Collect groups: group_id → Vec<node_index>
+    let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, node) in nodes.iter().enumerate() {
+        if let Some(gid) = node.fuse_group {
+            groups.entry(gid).or_default().push(i);
+        }
+    }
+
+    if groups.len() < 2 {
+        return;
+    }
+
+    // Sort groups by their first node's execution position.
+    let mut sorted_groups: Vec<(usize, Vec<usize>)> = groups.into_iter().collect();
+    sorted_groups.sort_unstable_by_key(|(_, indices)| indices[0]);
+
+    let n_groups = sorted_groups.len();
+
+    // Process adjacent pairs in execution order.
+    let mut merged_set: HashSet<usize> = HashSet::new(); // set of first-node indices that are merged
+    for gi in 0..n_groups.saturating_sub(1) {
+        let (gid_a, group_a) = (&sorted_groups[gi].0, &sorted_groups[gi].1);
+        let (_gid_b, group_b) = (&sorted_groups[gi + 1].0, &sorted_groups[gi + 1].1);
+
+        // Both groups must have exactly 2 nodes: [R, E].
+        if group_a.len() != 2 || group_b.len() != 2 {
+            continue;
+        }
+
+        let (ra_idx, ea_idx) = (group_a[0], group_a[1]);
+        let (rb_idx, eb_idx) = (group_b[0], group_b[1]);
+
+        // Groups must be adjacent: no unfused nodes between.
+        if ea_idx + 1 != rb_idx {
+            continue;
+        }
+
+        // Skip if either group was already merged by another pair.
+        if merged_set.contains(&ra_idx) || merged_set.contains(&rb_idx) {
+            continue;
+        }
+
+        let ra = &nodes[ra_idx];
+        let _ea = &nodes[ea_idx];
+        let rb = &nodes[rb_idx];
+        let _eb = &nodes[eb_idx];
+
+        // Both first nodes must be Reduction.
+        let GridSpec::Reduction { num_rows: rows_a, threads_per_group: tpg_a } = &ra.grid
+        else {
+            continue;
+        };
+        let GridSpec::Reduction { num_rows: rows_b, threads_per_group: tpg_b } = &rb.grid
+        else {
+            continue;
+        };
+
+        // Identical Reduction specs.
+        if rows_a != rows_b || tpg_a != tpg_b {
+            continue;
+        }
+
+        // R_b must NOT read any tensor written by R_a or E_a (parallel, not dependent).
+        let tensors_written_by_a: HashSet<&str> = [ra_idx, ea_idx]
+            .iter()
+            .flat_map(|&idx| {
+                nodes[idx].output_bindings.iter().filter_map(|(_, sr)| match sr {
+                    SlotRef::Weight(name) if name.starts_with('_') => Some(name.as_str()),
+                    _ => None,
+                })
+            })
+            .collect();
+
+        let rb_reads_from_a = nodes[rb_idx].input_bindings.iter().any(|(_, sr)| match sr {
+            SlotRef::Weight(name) => tensors_written_by_a.contains(name.as_str()),
+            _ => false,
+        });
+        if rb_reads_from_a {
+            continue;
+        }
+
+        // E_b must read at least one tensor written by E_a.
+        let ea_writes: HashSet<&str> = nodes[ea_idx]
+            .output_bindings
+            .iter()
+            .filter_map(|(_, sr)| match sr {
+                SlotRef::Weight(name) if name.starts_with('_') => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        let eb_reads_ea = nodes[eb_idx].input_bindings.iter().any(|(_, sr)| match sr {
+            SlotRef::Weight(name) => ea_writes.contains(name.as_str()),
+            _ => false,
+        });
+        if !eb_reads_ea {
+            continue;
+        }
+
+        // Merge group B's nodes into group A.
+        for &idx in group_b {
+            nodes[idx].fuse_group = Some(*gid_a);
+        }
+        merged_set.insert(ra_idx);
+        merged_set.insert(rb_idx);
+    }
 }
 
 /// Returns `true` when every local reader of `name` (in the scope between
@@ -531,72 +669,149 @@ fn is_local_readers_all_in_set(
 /// Returns `true` when `candidate` is grid-compatible with all nodes already
 /// in `chain`.
 ///
-/// Rules mirror `fuse_group::check_grid_compatibility`:
-/// - `Grid3D`, `Tile2D`, `SimdGroup2D` — always incompatible.
-/// - All `Reduction` nodes must share the same `(num_rows, threads_per_group)`.
-/// - All `Elementwise` nodes must share the same `n`.
-/// - In a mixed group `n` (Elementwise) must equal `num_rows` (Reduction).
-/// - Any incompatible-mode node already in `chain` disqualifies immediately.
+/// Supports two synthesis paths:
+///
+/// **Path B (same-grid)**: all nodes share an identical grid spec:
+/// - All `Reduction` nodes share `(num_rows, threads_per_group)`.
+/// - All `Elementwise` nodes share `n`.
+///
+/// **Pattern 1 (epilogue chain)**: one "host" node (Reduction or non-flat
+/// Grid3D) followed by N "follower" nodes (Elementwise or flat-1D Grid3D).
+/// Each follower's element count must be divisible by the host's output count.
+/// The `has_shared` check in `can_prepend_to_chain` filters out orderings
+/// that are data-flow invalid (e.g. Elementwise before its Reduction host).
+///
+/// `Tile2D` and `SimdGroup2D` are always incompatible.
 fn chain_grid_compatible(
     candidate: &DispatchNode,
     chain: &[usize],
     nodes: &[DispatchNode],
 ) -> bool {
-    match candidate.mode {
-        KernelMode::Elementwise | KernelMode::Reduction => {},
-        _ => return false,
+    // Classify a node as "host" (Reduction or non-flat Grid3D) or "follower"
+    // (Elementwise or flat-1D Grid3D).  Returns `(is_host, output_count)`.
+    // Returns `None` for unsupported modes (Tile2D, SimdGroup2D, etc.).
+    fn node_class(mode: &KernelMode, grid: &GridSpec) -> Option<(bool, usize)> {
+        match (mode, grid) {
+            (KernelMode::Reduction, GridSpec::Reduction { num_rows, .. }) =>
+                Some((true, *num_rows)),
+            (KernelMode::Grid3D, GridSpec::Grid3D { x, y, z, .. }) if !(*y == 1 && *z == 1) =>
+                Some((true, x * y * z)),
+            (KernelMode::Grid3D, GridSpec::Grid3D { x, y: 1, z: 1, .. }) =>
+                Some((false, *x)),
+            (KernelMode::Elementwise, GridSpec::Elementwise { n }) =>
+                Some((false, *n)),
+            _ => None,
+        }
     }
 
+    let Some((cand_is_host, cand_n)) = node_class(&candidate.mode, &candidate.grid) else {
+        return false;
+    };
+
+    // Scan existing chain members to extract:
+    //   reduction_spec — for Path B same-Reduction constraint
+    //   host_out       — output count of the host node (Reduction or Grid3D)
+    //   follower_n     — element count shared by follower nodes (no-host case)
     let mut reduction_spec: Option<(usize, usize)> = None;
-    let mut elementwise_n: Option<usize> = None;
+    let mut host_out: Option<usize> = None;
+    let mut follower_n: Option<usize> = None;
 
     for &cidx in chain {
-        match (&nodes[cidx].mode, &nodes[cidx].grid) {
-            (KernelMode::Reduction, GridSpec::Reduction { num_rows, threads_per_group }) =>
+        let n = &nodes[cidx];
+        let Some((is_host, count)) = node_class(&n.mode, &n.grid) else {
+            return false;
+        };
+        if is_host {
+            // Accumulate Reduction spec for Path B.
+            if let (KernelMode::Reduction, GridSpec::Reduction { num_rows, threads_per_group }) =
+                (&n.mode, &n.grid)
+            {
                 match reduction_spec {
                     None => reduction_spec = Some((*num_rows, *threads_per_group)),
                     Some((r, t)) if r == *num_rows && t == *threads_per_group => {},
                     _ => return false,
-                },
-            (KernelMode::Elementwise, GridSpec::Elementwise { n }) => match elementwise_n {
-                None => elementwise_n = Some(*n),
-                Some(en) if en == *n => {},
+                }
+            }
+            // All host nodes in a chain must agree on output count.
+            match host_out {
+                None => host_out = Some(count),
+                Some(h) if h == count => {},
                 _ => return false,
-            },
-            _ => return false, // Grid3D or other incompatible mode in chain
+            }
+        } else {
+            // Follower: if a host is already present it must divide evenly.
+            if let Some(hoc) = host_out {
+                if count % hoc != 0 {
+                    return false;
+                }
+            } else {
+                // No host yet — Path B same-n followers.
+                match follower_n {
+                    None => follower_n = Some(count),
+                    Some(fn_) if fn_ == count => {},
+                    _ => return false,
+                }
+            }
         }
     }
 
-    match (&candidate.mode, &candidate.grid) {
-        (KernelMode::Reduction, GridSpec::Reduction { num_rows, threads_per_group }) => {
-            match reduction_spec {
-                None =>
-                    if let Some(n) = elementwise_n {
-                        if n != *num_rows {
-                            return false;
-                        }
-                    },
-                Some((r, t)) if r == *num_rows && t == *threads_per_group => {},
-                _ => return false,
+    // Check whether the candidate fits the chain so far.
+    if cand_is_host {
+        // Adding a host to the chain.
+        if let Some(fn_) = follower_n {
+            // Chain currently has only followers; host must divide them evenly.
+            if fn_ % cand_n != 0 {
+                return false;
             }
-            // Re-check mixed constraint.
-            if let Some(n) = elementwise_n {
-                if n != *num_rows {
+        }
+        if let Some(hoc) = host_out {
+            // Chain already has a host; output counts must match.
+            if hoc != cand_n {
+                return false;
+            }
+        }
+        // Path B same-Reduction: spec must match.
+        if let (KernelMode::Reduction, GridSpec::Reduction { num_rows, threads_per_group }) =
+            (&candidate.mode, &candidate.grid)
+        {
+            if let Some((r, t)) = reduction_spec {
+                if r != *num_rows || t != *threads_per_group {
                     return false;
                 }
             }
-        },
-        (KernelMode::Elementwise, GridSpec::Elementwise { n }) => match elementwise_n {
-            None =>
-                if let Some((num_rows, _)) = reduction_spec {
-                    if *n != num_rows {
-                        return false;
-                    }
-                },
-            Some(en) if en == *n => {},
-            _ => return false,
-        },
-        _ => return false,
+        }
+    } else {
+        // Adding a follower to the chain.
+        //
+        // Pattern 1 ordering guard: a follower must come AFTER its host in
+        // execution.  The chain is built backward (earlier nodes prepended),
+        // so `chain.last()` is the current leftmost/earliest node.  If that
+        // node is a host (Reduction or non-flat Grid3D) and we prepend a
+        // follower further left, the resulting order is [follower, host, …] —
+        // Pattern 1 cannot synthesize this.  Reject here so the backward scan
+        // can instead find valid producer-consumer pairs (e.g. up→mul).
+        if let Some(&leftmost) = chain.last() {
+            let lm = &nodes[leftmost];
+            if let Some((lm_is_host, _)) = node_class(&lm.mode, &lm.grid) {
+                if lm_is_host {
+                    return false;
+                }
+            }
+        }
+
+        if let Some(hoc) = host_out {
+            // Host present: follower count must be divisible by host output count.
+            if cand_n % hoc != 0 {
+                return false;
+            }
+        } else {
+            // No host: Path B same-n followers.
+            match follower_n {
+                None => {},
+                Some(fn_) if fn_ == cand_n => {},
+                _ => return false,
+            }
+        }
     }
 
     true

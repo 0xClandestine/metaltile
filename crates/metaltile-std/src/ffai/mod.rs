@@ -32,6 +32,7 @@ pub mod gated_delta_replay;
 pub mod gated_delta_wy;
 pub mod gather;
 pub mod gemv_bm4;
+pub mod gemv_bm_hd;
 pub mod kv_cache;
 pub mod logits_min_p;
 pub mod logits_processors;
