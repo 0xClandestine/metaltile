@@ -149,9 +149,15 @@ jobs:
           # warning instead of failing the job; the comment body is
           # already in the step log right above.
           MARKER="<!-- bench-diff:${SLUG} -->"
-          EXISTING_ID=$(gh pr view "$PR_NUMBER" --json comments --jq \
-            --arg marker "$MARKER" \
-            '[.comments[] | select(.body | contains($marker)) | .id] | first')
+          # `gh --jq` only takes a jq expression — `--arg` is a jq
+          # flag, not a gh flag, so `gh pr view --jq <expr> --arg ...`
+          # tokenises `--arg / name / value / <expr>` as four trailing
+          # positional args and fails with "accepts at most 1 arg(s),
+          # received 4". Pipe to a real `jq` invocation instead so
+          # `--arg` lands on the right binary.
+          EXISTING_ID=$(gh pr view "$PR_NUMBER" --json comments \
+            | jq -r --arg marker "$MARKER" \
+              '[.comments[] | select(.body | contains($marker)) | .id] | first')
 
           REPO="${{ github.repository }}"
           if [ -n "$EXISTING_ID" ]; then
