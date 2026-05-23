@@ -159,7 +159,7 @@ Sources surveyed:
 | rms_norm_qgemv (RMSNorm + quantized GEMV fused) | ✗ | ✓ (`rms_norm_qgemv.metal`) | ✓ | `ffai/rms_norm_qgemv.rs` → `ffai_rms_norm_qgemv<T>` (one-row-per-TG correctness shape, int4) **plus** `ffai_rms_norm_qgemv_fast<T>` (8-row-per-TG, 2 SG × 4 rows, int4, mirrors MLX `rms_norm_qmm` — added in the int-quant perf PR to close the perf follow-up flagged in prior audits) **plus** `ffai_rms_norm_qgemv_int8_fast<T>` (8-row-per-TG int8 variant, `ek/t3-quant-completeness`): same 2-SG × 4-row geometry but with byte-shift int8 weight extract (4 bytes/u32, packs_per_row = in_dim/4); requires in_dim % 512 == 0, group_size == 64; closes the parity gap where the RMSNorm-fused path for int8 models had no perf variant. All three Reduction-mode; the non-fast kernel stays for callers that don't satisfy the 8-row shape constraint. Verified by `rms_norm_qgemv_int8_fast_gpu_correctness` (f32/f16/bf16, in_dim ∈ {512, 1024}). |
 | batched_qkv_qgemv (Q/K/V 4-bit qGEMV → 1 dispatch) | ✗ | ✓ (`batched_qkv_qgemv.metal`) | ✓ | `ffai/batched_qkv_qgemv.rs` → `ffai_batched_qkv_qgemv<T>` (one-row-per-TG correctness shape) **plus** `ffai_batched_qkv_qgemv_fast<T>` (8-row-per-TG, 2 SG × 4 rows, GQA-guarded — added in this PR). Reduction-mode, int4; `program_id::<2>()` selects Q/K/V, output concatenated `[Q\|K\|V]`. Decode-form fused QKV projection. |
 | kv_cache_update (raw bf16/fp16 single-token append) | ✗ | ✗ | ✓ | `ffai/kv_cache.rs` → `kv_cache_update<T>`. FFAI-only; raw cache append. |
-| kv_cache (affine-quant int4/int8/fp8 quantize + bulk dequant) | ~ (via `quantized.metal` affine_quantize) | ~ | ✓ | `ffai/kv_cache.rs` — `quantize_kv` + `bulk_dequant_kv` for int4/int8. FFAI-specific cache layout. **fp8 KV cache** (`ek/t3-quant-completeness`): `quantize_kv_fp8_{e4m3,e5m2}` (single-token append — per-group amax → scale, 4 fp8 codes/u32, scale-only, no bias; grid `[1, 1, total_groups]`) + `bulk_dequant_kv_fp8_{e4m3,e5m2}` (bulk dequant: byte-shift extract + biased-exp decode; grid `[ceil(total/256), 1, 1]`). Format constants baked via macro: E4M3 — mantissa_bits=3, e_bias=-6.0, max_val=448.0; E5M2 — mantissa_bits=2, e_bias=-14.0, max_val=57344.0. Closes the gap where fp8 KV cache required a host-side quantize+unpack round-trip; round-trip correctness verified by `kv_cache_fp8_gpu_correctness` (f32/f16/bf16 × {e4m3, e5m2}, cross-slot isolation). |
+| kv_cache (affine-quant int4/int8/fp8 quantize + bulk dequant) | ~ (via `quantized.metal` affine_quantize) | ~ | ✓ | `ffai/kv_cache.rs` — `quantize_kv` + `bulk_dequant_kv` for int4/int8. FFAI-specific cache layout. **fp8 KV cache** (`ek/t3-quant-completeness`): `quantize_kv_fp8_{e4m3,e5m2}` (single-token append — per-group amax → scale, 4 fp8 codes/u32, scale-only, no bias) + `bulk_dequant_kv_fp8_{e4m3,e5m2}` (bulk dequant: byte-shift extract + biased-exp decode). The fp8 macro takes the mantissa width as **two literals** (`$mant_f` float + `$mant_i` u32) instead of one — the DSL body parser doesn't handle Rust's `as u32` cast on literal floats (only `.cast::<T>()` on `Tensor`/`Value`), so a single `let mant_bits = $mant as u32;` lowers to a phantom SSA value the codegen references but never declares. Splitting the literal sidesteps the lowering gap. Format constants: E4M3 — mantissa_bits=3, e_bias=-6.0, max_val=448.0; E5M2 — mantissa_bits=2, e_bias=-14.0, max_val=57344.0. Closes the gap where fp8 KV cache required a host-side quantize+unpack round-trip; round-trip correctness verified by `kv_cache_fp8_gpu_correctness` (f32/f16/bf16 × {e4m3, e5m2}, cross-slot isolation). |
 | sampling (softmax + categorical inverse-CDF) | ✗ | ✗ | ✓ | `ffai/sampling.rs` → `softmax_categorical_sample`. Companion to `ffai_argmax` for `T > 0` decode. |
 | logits processors (temperature, repetition penalty, top-k / top-p / min-p masks) | ✗ | ✗ | ✓ | `ffai/logits_{processors,topk,top_p,min_p}.rs` → `logits_temperature`, `logits_repetition_penalty`, `logits_topk_mask`, `logits_top_p_mask`, `logits_min_p_mask` (all generic `T`). In-place decode-form sampler stages composed before `softmax_categorical_sample`. FFAI-only. |
 | sdpa_decode_d512 (head_dim=512 SDPA decode — Gemma 4 global) | ✗ | ✗ | ✓ | `ffai/sdpa_decode_d512.rs` → `ffai_sdpa_decode_d512<T>`. head_dim=512 specialization for Gemma 4's global-attention layers; dispatches at 512 threads/TG (the 16-wide per-lane footprint caps the pipeline below 1024). FFAI-only; verified by `sdpa_decode_d512_gpu_correctness`. Consolidation pass (2026-05-21). |
@@ -259,15 +259,21 @@ want the split / extra dispatch.
    `ffai_rms_norm_qgemv_fast` perf path was int4-only before this PR.
    Verified by `rms_norm_qgemv_int8_fast_gpu_correctness`. **fp8 KV
    cache**: `quantize_kv_fp8_{e4m3,e5m2}` + `bulk_dequant_kv_fp8_{e4m3,e5m2}`
-   (`ffai/kv_cache.rs`) — per-group amax→scale quantize and biased-exp
-   decode dequant for E4M3 and E5M2 fp8; previously the KV cache only
-   supported int4/int8 affine quant. Verified by `kv_cache_fp8_gpu_correctness`
-   (round-trip + cross-slot isolation). **Short-prefill MoE**:
-   `mt_moe_gather_qmm_int4_m{16,32}` (`ffai/moe.rs`) — M-batched
-   int4 gather-QMM (TPG=32, grid `[m_out/m_batch, T_rows, 1]`); covers
-   the M=16..32 short-prefill regime between the `_m8` decode kernel
-   and the MMA/MPP tile-fill point. Verified by
-   `moe_gather_qmm_int4_m16_m32_correctness`.
+   (`ffai/kv_cache.rs`) — per-group amax → scale quantize, biased-exp
+   decode dequant. The macro takes the mantissa bit count as both a
+   float (`$mant_f`) and a u32 (`$mant_i`) since the DSL body parser
+   doesn't lower a `let mant_bits = $mant as u32;` literal cast (the
+   first draft emitted a phantom `v_mant_bits` the codegen never
+   declared). Closes the host-side fp8 KV round-trip — verified by
+   `kv_cache_fp8_gpu_correctness`. **Short-prefill MoE**:
+   `mt_moe_gather_qmm_int4_m{16,32}` (`ffai/moe.rs`) — hand-unrolled
+   16- and 32-cell variants of the `_m8` decode kernel (each cell is
+   an individually-named `accN` accumulator to sidestep the same DSL
+   array-indexing limitation), TPG=32, grid `[m_out/m_batch, T_rows,
+   1]`; covers the M=16..32 short-prefill regime between the `_m8`
+   decode kernel and the MMA/MPP tile-fill point. Verified by
+   `moe_gather_qmm_int4_m16_m32_correctness` (cosine = 1.000000 vs
+   the `_m8` reference).
 
 6. **Attention head_dim coverage** ✓ (2026-05-23 — `ek/t1-attn-headdim`) —
    closes the head_dim gaps flagged in prior audit notes for four kernel
