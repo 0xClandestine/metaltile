@@ -1318,22 +1318,27 @@ fn synthesize_pattern3(
 
     clone_callee_into_host(&mut host, c1, &r1_param_renames);
 
-    // Append "_r1" to every DeclareLocal/SetLocal name added by R1.
-    for op in host.body.ops[body_ops_before_r1..].iter_mut() {
+    // Append "_r1" to every DeclareLocal/SetLocal/Load-of-mutable name added by R1.
+    //
+    // Mutable local reads are represented as Op::Load { src: "__ml_acc0" } — the
+    // MSL emitter emits `auto vN = __ml_acc0;`.  We must rename these load srcs
+    // in parallel with DeclareLocal/SetLocal to keep all references consistent.
+    let rename_r1_op = |op: &mut Op| {
         match op {
             Op::DeclareLocal { name, .. } | Op::SetLocal { name, .. } => name.push_str("_r1"),
+            Op::Load { src, .. } if src.starts_with("__ml_") => src.push_str("_r1"),
             _ => {},
         }
+    };
+    for op in host.body.ops[body_ops_before_r1..].iter_mut() {
+        rename_r1_op(op);
     }
     for (&bid, block) in host.blocks.iter_mut() {
         if blocks_before_r1.contains(&bid) {
             continue;
         }
         for op in block.ops.iter_mut() {
-            match op {
-                Op::DeclareLocal { name, .. } | Op::SetLocal { name, .. } => name.push_str("_r1"),
-                _ => {},
-            }
+            rename_r1_op(op);
         }
     }
 
