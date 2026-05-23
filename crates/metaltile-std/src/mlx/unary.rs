@@ -847,9 +847,9 @@ pub fn mt_add_rms_norm<T>(
     a: Tensor<T>,
     b: Tensor<T>,
     w: Tensor<T>,
+    eps_buf: Tensor<f32>,
     mut residual_out: Tensor<T>,
     mut normed_out: Tensor<T>,
-    eps_buf: Tensor<f32>,
     #[constexpr] n: u32,
 ) {
     let row = program_id::<0>();
@@ -874,7 +874,14 @@ pub fn mt_add_rms_norm<T>(
     let s3 = a3 + b3;
     let raw_ssq = s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3;
     let partial_ssq = select(in_bounds, raw_ssq, 0.0f32);
-    let rms = mt_rms_inv_scalar(partial_ssq, eps_buf, n);
+    // ITER 50 (Bagel 2): inline the reduction with `reduce_sum` directly
+    // (no cross-kernel call to `mt_rms_inv_scalar`). The previous stub
+    // used the cross-kernel call but the multi-output codegen path
+    // didn't compose with the inlined reduction. Inlining matches the
+    // working `mt_rms_norm` pattern exactly.
+    let tg_ssq = reduce_sum(partial_ssq);
+    let eps = load(eps_buf[0u32]);
+    let rms = rsqrt(tg_ssq / n + eps);
     if in_bounds {
         // Write the residual stream (just the add).
         store(residual_out[base], s0.cast::<T>());
@@ -905,7 +912,7 @@ inventory::submit! {
         mlx_pattern: None,
         shapes: &[],
         dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Elementwise),
+        kernel_mode: Some(KernelMode::Reduction),
     }
 }
 
