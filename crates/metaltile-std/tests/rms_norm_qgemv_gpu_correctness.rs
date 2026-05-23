@@ -175,16 +175,24 @@ fn run_case(dt: Dt, in_dim: usize, group_size: usize, out_dim: usize, tol: f32) 
 }
 
 #[test]
-fn rms_norm_qgemv_f32_gs64() { run_case(Dt::F32, 256, 64, 8, 5e-3); }
+fn rms_norm_qgemv_f32_gs64() {
+    run_case(Dt::F32, 256, 64, 8, 5e-3);
+}
 
 #[test]
-fn rms_norm_qgemv_f32_gs128() { run_case(Dt::F32, 512, 128, 6, 5e-3); }
+fn rms_norm_qgemv_f32_gs128() {
+    run_case(Dt::F32, 512, 128, 6, 5e-3);
+}
 
 #[test]
-fn rms_norm_qgemv_f16_gs64() { run_case(Dt::F16, 256, 64, 8, 2e-2); }
+fn rms_norm_qgemv_f16_gs64() {
+    run_case(Dt::F16, 256, 64, 8, 2e-2);
+}
 
 #[test]
-fn rms_norm_qgemv_bf16_gs64() { run_case(Dt::Bf16, 256, 64, 8, 5e-2); }
+fn rms_norm_qgemv_bf16_gs64() {
+    run_case(Dt::Bf16, 256, 64, 8, 5e-2);
+}
 
 // ── ffai_rms_norm_qgemv_fast ─────────────────────────────────────────────
 //
@@ -222,13 +230,7 @@ fn run_fast(
 
     // Grid: [out_dim/8, 1, 1]; TPG = 64 (2 SG × 32 lanes).
     let result = ctx
-        .dispatch_with_grid(
-            &kernel,
-            &buffers,
-            &BTreeMap::new(),
-            [out_dim / 8, 1, 1],
-            [64, 1, 1],
-        )
+        .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [out_dim / 8, 1, 1], [64, 1, 1])
         .expect("rms_norm_qgemv_fast dispatch");
     unpack_bytes(result.outputs.get("output").expect("output"), dt)
 }
@@ -262,18 +264,8 @@ fn run_case_fast(dt: Dt, in_dim: usize, group_size: usize, out_dim: usize, tol: 
 
     let expected =
         naive(&weight, &scales_r, &biases_r, &x, &norm_weight, in_dim, group_size, out_dim, eps);
-    let actual = run_fast(
-        &weight,
-        &scales,
-        &biases,
-        &x,
-        &norm_weight,
-        dt,
-        in_dim,
-        group_size,
-        out_dim,
-        eps,
-    );
+    let actual =
+        run_fast(&weight, &scales, &biases, &x, &norm_weight, dt, in_dim, group_size, out_dim, eps);
 
     assert_eq!(actual.len(), out_dim);
     assert!(actual.iter().any(|&v| v != 0.0), "fast output is all zeros");
@@ -296,10 +288,14 @@ fn rms_norm_qgemv_fast_f32_gs64() {
 }
 
 #[test]
-fn rms_norm_qgemv_fast_f16_gs64() { run_case_fast(Dt::F16, 512, 64, 16, 2e-2); }
+fn rms_norm_qgemv_fast_f16_gs64() {
+    run_case_fast(Dt::F16, 512, 64, 16, 2e-2);
+}
 
 #[test]
-fn rms_norm_qgemv_fast_bf16_gs64() { run_case_fast(Dt::Bf16, 512, 64, 16, 5e-2); }
+fn rms_norm_qgemv_fast_bf16_gs64() {
+    run_case_fast(Dt::Bf16, 512, 64, 16, 5e-2);
+}
 
 #[test]
 fn rms_norm_qgemv_fast_f32_large() {
