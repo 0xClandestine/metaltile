@@ -87,7 +87,7 @@ Fixtures exist to **exercise distinct emit paths**, not to be exhaustive — add
 
 ## Coverage
 
-`make coverage` (or `./scripts/coverage.sh`) produces an HTML report at `target/llvm-cov/html/index.html`; `./scripts/coverage.sh summary` prints the per-file table CI emits. Per-crate floors live in `codecov.yml`:
+`make coverage` (or `./.github/scripts/coverage.sh`) produces an HTML report at `target/llvm-cov/html/index.html`; `./.github/scripts/coverage.sh summary` prints the per-file table CI emits. Per-crate floors live in `codecov.yml`:
 
 | Crate | Floor |
 |---|---|
