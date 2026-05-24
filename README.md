@@ -10,6 +10,8 @@
 
 <p align="center">A Rust-embedded DSL for writing Apple Metal GPU kernels. Write tile-level algorithms in Rust, get optimized Metal Shading Language out — verified against, and frequently faster than, hand-tuned MLX.</p>
 
+> ⚠️ Early development — APIs are not yet stable. The core DSL, codegen, and runtime work today; the autotuner and type-level shape algebra are planned.
+
 <table>
 <tr>
 <th>Rust DSL — what you write</th>
@@ -65,8 +67,6 @@ One generic `#[kernel]` fn becomes a monomorphised `f32` / `f16` / `bfloat16` Me
 | **Cross-hardware baselines** | Committed `tile bench` snapshots per chip; CI diffs every PR against them. | ✅ |
 | **Autotuner** | Per-shape kernel tuning so no performance is left on the table. | 🚧 Planned |
 | **Type-level shape algebra** | Tensor shapes checked at compile time. | 🚧 Planned |
-
-> ⚠️ Early development — APIs are not yet stable. The core DSL, codegen, and runtime work today; the autotuner and type-level shape algebra are planned.
 
 ## CLI
 
