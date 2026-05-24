@@ -14,13 +14,13 @@
 
 <pre>
 crates
-├── <a href="crates/metaltile/README.md">metaltile</a>
-├── <a href="crates/metaltile-cli/README.md">metaltile-cli</a>
-├── <a href="crates/metaltile-codegen/README.md">metaltile-codegen</a>
-├── <a href="crates/metaltile-core/README.md">metaltile-core</a>
-├── <a href="crates/metaltile-macros/README.md">metaltile-macros</a>
-├── <a href="crates/metaltile-runtime/README.md">metaltile-runtime</a>
-└── <a href="crates/metaltile-std/README.md">metaltile-std</a>
+├── <a href="crates/metaltile">metaltile</a>          — facade crate, re-exports the full public API
+├── <a href="crates/metaltile-cli">metaltile-cli</a>      — <code>tile</code> binary (bench, build, inspect, snap, diff)
+├── <a href="crates/metaltile-codegen">metaltile-codegen</a>  — IR → MSL lowering and 14-pass optimization pipeline
+├── <a href="crates/metaltile-core">metaltile-core</a>     — IR types, Op variants, DType, Shape
+├── <a href="crates/metaltile-macros">metaltile-macros</a>   — <code>#[kernel]</code> and <code>#[bench_kernel]</code> proc macros
+├── <a href="crates/metaltile-runtime">metaltile-runtime</a>  — Metal GPU dispatch and buffer management
+└── <a href="crates/metaltile-std">metaltile-std</a>      — kernel standard library and benchmark registry
 </pre>
 
 <table>
