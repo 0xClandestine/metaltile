@@ -1,0 +1,286 @@
+# ── Llama 3.x decoder-only transformer (decode path) ──────────────────
+#
+# Single-token autoregressive forward pass:
+#   1. Embed token (pre_kernel gather)
+#   2. For each layer: RMS norm → Q/K/V proj → RoPE → KV cache update →
+#      SDPA decode → output proj → residual add → RMS norm → gate+up →
+#      SiLU → multiply → down → residual add
+#   3. Output norm → LM head → sampling
+#
+# ── Intermediate buffers ────────────────────────────────────────────────
+# All intermediates use the `_` prefix. The residual stream is `_residual`
+# and lives for the full forward pass (written by gather, updated per layer).
+#
+# ── State convention ────────────────────────────────────────────────────
+# State keys (must appear in CompileParams.state_keys):
+#   token_id     → current input token [u32 scalar, 4 bytes]
+#   position     → number of KV entries in cache (decode step counter) [u32 scalar]
+#   rms_eps      → RMS norm epsilon [f32 scalar, default 1e-5]
+#   temperature  → sampling temperature [f32 scalar, default 1.0]
+#   uniform      → uniform random draw in [0,1) [f32 scalar]
+#   kv_cache     → prefix; e.g. kv_cache.0.k [n_kv_heads × max_seq × head_dim × dtype]
+#
+# ── Weight naming (HuggingFace / GGUF convention) ───────────────────────
+#   tok_embeddings          [vocab_size, hidden_dim]
+#   layers.N.attn_norm      [hidden_dim]
+#   layers.N.attn.q_proj    [n_heads * head_dim, hidden_dim]
+#   layers.N.attn.k_proj    [n_kv_heads * head_dim, hidden_dim]
+#   layers.N.attn.v_proj    [n_kv_heads * head_dim, hidden_dim]
+#   layers.N.attn.o_proj    [hidden_dim, n_heads * head_dim]
+#   layers.N.ffn_norm        [hidden_dim]
+#   layers.N.mlp.gate_proj  [ffn_dim, hidden_dim]
+#   layers.N.mlp.up_proj    [ffn_dim, hidden_dim]
+#   layers.N.mlp.down_proj  [hidden_dim, ffn_dim]
+#   output_norm             [hidden_dim]
+#   lm_head                 [vocab_size, hidden_dim]
+
+[model]
+name = "llama-decode"
+description = "Standard Llama 3 decoder-only transformer — single-token decode path"
+
+[params]
+n_layers    = "$n_layers"
+n_heads     = "$n_heads"
+n_kv_heads  = "$n_kv_heads"
+head_dim    = "$head_dim"
+hidden_dim  = "$hidden_dim"
+ffn_dim     = "$ffn_dim"
+vocab_size  = "$vocab_size"
+max_seq_len = "$max_seq_len"
+
+# ── Pre-layer: token embedding gather ─────────────────────────────────
+# Kernel: gather (ffai/gather.rs) — Grid3D mode, one thread per output element.
+# Reads token_id from state, looks up row in tok_embeddings table,
+# writes hidden_dim values into _residual.
+
+[[pre_kernel]]
+op = "gather"
+inputs  = { table = "tok_embeddings", indices = "token_id" }
+outputs = { out = "_residual" }
+constexpr = { dim = "$hidden_dim" }
+dispatch  = { grid_x = "$hidden_dim", out_elems = "$hidden_dim" }
+
+# ── Per-layer kernel sequence (unrolled n_layers times) ────────────────
+
+[layer]
+name = "transformer_layer"
+
+# ── Pre-attention RMS norm ─────────────────────────────────────────────
+# mt_rms_norm: x[hidden_dim] → out[hidden_dim], 1 TG × (hidden_dim/4) threads.
+# tpg = hidden_dim/4 because mt_rms_norm processes 4 elements per thread.
+# Using rms_norm/rms_norm (4-elem variant) explicitly to avoid ambiguity with
+# rms_norm_small (2-elem variant). Correct tpg prevents out-of-bounds writes.
+
+[[layer.kernel]]
+op = "rms_norm/rms_norm"
+inputs    = { x = "_residual", w = "$layers.$idx.attn_norm", eps_buf = "rms_eps" }
+outputs   = { out = "_normed" }
+constexpr = { n = "$hidden_dim" }
+dispatch  = { rows = "1", tpg = "$hidden_dim / 4", out_elems = "$hidden_dim" }
+
+# ── Self-attention: Q projection ───────────────────────────────────────
+# mt_gemv: mat[n_heads*head_dim, hidden_dim] × vec[hidden_dim] → out[n_heads*head_dim]
+
+# Kernels are ordered so each fuse group is contiguous.
+# Q, K, V chains run in sequence (each reads _normed, which is available
+# before any of them start). sdpa follows all three KV-cache writes.
+
+[[layer.kernel]]
+op = "gemv/smm"
+inputs    = { mat = "$layers.$idx.attn.q_proj", vec = "_normed" }
+outputs   = { out = "_q" }
+constexpr = { k = "$hidden_dim", rows = "$n_heads * $head_dim" }
+dispatch  = { rows = "$n_heads * $head_dim / 4", tpg = "256", out_elems = "$n_heads * $head_dim" }
+
+# ── RoPE: apply rotary embeddings to Q ────────────────────────────────
+# rope_llama: Grid3D [n_heads, half_dim, 1] × [1,1,1]
+# (Llama 3.1 defaults: rope_theta=500000, scale=8, low=1, high=4, orig=8192)
+
+[[layer.kernel]]
+op = "rope/rope_llama"
+inputs    = { qk = "_q" }
+outputs   = { out = "_q_rope" }
+constexpr = { head_dim = "$head_dim", half_dim = "$head_dim / 2", position = "$position", theta_base = "500000.0", scale_factor = "8.0", low_freq_factor = "1.0", high_freq_factor = "4.0", original_max_position = "8192.0" }
+dispatch  = { grid_x = "$n_heads", grid_y = "$head_dim / 2", out_elems = "$n_heads * $head_dim" }
+
+# ── Self-attention: K projection → RoPE → KV cache write ──────────────
+
+[[layer.kernel]]
+op = "gemv/smm"
+inputs    = { mat = "$layers.$idx.attn.k_proj", vec = "_normed" }
+outputs   = { out = "_k_new" }
+constexpr = { k = "$hidden_dim", rows = "$n_kv_heads * $head_dim" }
+dispatch  = { rows = "$n_kv_heads * $head_dim / 4", tpg = "256", out_elems = "$n_kv_heads * $head_dim" }
+
+[[layer.kernel]]
+op = "rope/rope_llama"
+fuse = "k_chain"
+inputs    = { qk = "_k_new" }
+outputs   = { out = "_k_rope" }
+constexpr = { head_dim = "$head_dim", half_dim = "$head_dim / 2", position = "$position", theta_base = "500000.0", scale_factor = "8.0", low_freq_factor = "1.0", high_freq_factor = "4.0", original_max_position = "8192.0" }
+dispatch  = { grid_x = "$n_kv_heads", grid_y = "$head_dim / 2", out_elems = "$n_kv_heads * $head_dim" }
+
+# ── KV cache update: write K at current position ───────────────────────
+# kv_cache_update: src[n_kv_heads, head_dim] → out[n_kv_heads, max_seq, head_dim]
+
+[[layer.kernel]]
+op = "kv_cache/update"
+fuse = "k_chain"
+inputs    = { src = "_k_rope" }
+outputs   = { out = "$kv_cache.$idx.k" }
+constexpr = { head_dim = "$head_dim", max_seq = "$max_seq_len", position = "$position" }
+dispatch  = { grid_x = "$n_kv_heads * $head_dim" }
+
+# ── Self-attention: V projection → KV cache write ──────────────────────
+
+[[layer.kernel]]
+op = "gemv/smm"
+fuse = "v_chain"
+inputs    = { mat = "$layers.$idx.attn.v_proj", vec = "_normed" }
+outputs   = { out = "_v_new" }
+constexpr = { k = "$hidden_dim", rows = "$n_kv_heads * $head_dim" }
+dispatch  = { rows = "$n_kv_heads * $head_dim / 4", tpg = "256", out_elems = "$n_kv_heads * $head_dim" }
+
+# ── KV cache update: write V at current position ───────────────────────
+
+[[layer.kernel]]
+op = "kv_cache/update"
+fuse = "v_chain"
+inputs    = { src = "_v_new" }
+outputs   = { out = "$kv_cache.$idx.v" }
+constexpr = { head_dim = "$head_dim", max_seq = "$max_seq_len", position = "$position" }
+dispatch  = { grid_x = "$n_kv_heads * $head_dim" }
+
+# ── Scaled dot-product attention (decode) ─────────────────────────────
+# mt_sdpa_vector: SimdGroup2D → Reduction [n_heads, 1, 1] × [1024, 1, 1]
+# n_kv = number of cached tokens (same as `position` value after cache update).
+# gqa_factor = n_heads / n_kv_heads (e.g. 32/8 = 4 for Llama 3 8B).
+
+[[layer.kernel]]
+op = "sdpa/sdpa_vector_hd64"
+inputs    = { q = "_q_rope", k = "$kv_cache.$idx.k", v = "$kv_cache.$idx.v" }
+outputs   = { out = "_attn_out" }
+constexpr = { head_dim = "$head_dim", n_kv = "$n_kv", kv_stride = "$max_seq_len", gqa_factor = "$n_heads / $n_kv_heads", scale = "1.0 / sqrt($head_dim)" }
+dispatch  = { rows = "$n_heads", tpg = "1024", out_elems = "$n_heads * $head_dim" }
+
+# ── Attention output projection ────────────────────────────────────────
+
+[[layer.kernel]]
+op = "gemv/smm"
+fuse = "attn_out"
+inputs    = { mat = "$layers.$idx.attn.o_proj", vec = "_attn_out" }
+outputs   = { out = "_o_proj" }
+constexpr = { k = "$n_heads * $head_dim", rows = "$hidden_dim" }
+dispatch  = { rows = "$hidden_dim / 4", tpg = "256", out_elems = "$hidden_dim" }
+
+# ── Residual add: attn output + residual stream ────────────────────────
+# binary/add (Elementwise): a + b → c
+
+[[layer.kernel]]
+op = "binary/add"
+fuse = "attn_out"
+inputs    = { a = "_o_proj", b = "_residual" }
+outputs   = { c = "_post_attn" }
+dispatch  = { n = "$hidden_dim", out_elems = "$hidden_dim" }
+
+# ── Pre-FFN RMS norm ───────────────────────────────────────────────────
+
+[[layer.kernel]]
+op = "rms_norm/rms_norm"
+inputs    = { x = "_post_attn", w = "$layers.$idx.ffn_norm", eps_buf = "rms_eps" }
+outputs   = { out = "_ffn_normed" }
+constexpr = { n = "$hidden_dim" }
+dispatch  = { rows = "1", tpg = "$hidden_dim / 4", out_elems = "$hidden_dim" }
+
+# ── MLP: gate projection ───────────────────────────────────────────────
+
+[[layer.kernel]]
+op = "gemv/smm"
+fuse = "ffn_act"
+inputs    = { mat = "$layers.$idx.mlp.gate_proj", vec = "_ffn_normed" }
+outputs   = { out = "_gate" }
+constexpr = { k = "$hidden_dim", rows = "$ffn_dim" }
+dispatch  = { rows = "$ffn_dim / 4", tpg = "256", out_elems = "$ffn_dim" }
+
+# ── MLP: SiLU activation ───────────────────────────────────────────────
+# mt_silu (Elementwise): a[ffn_dim] → out[ffn_dim]
+
+[[layer.kernel]]
+op = "unary/silu"
+fuse = "ffn_act"
+inputs    = { a = "_gate" }
+outputs   = { out = "_gated" }
+dispatch  = { n = "$ffn_dim", out_elems = "$ffn_dim" }
+
+# ── MLP: up projection ─────────────────────────────────────────────────
+
+[[layer.kernel]]
+op = "gemv/smm"
+fuse = "ffn_act"
+inputs    = { mat = "$layers.$idx.mlp.up_proj", vec = "_ffn_normed" }
+outputs   = { out = "_up" }
+constexpr = { k = "$hidden_dim", rows = "$ffn_dim" }
+dispatch  = { rows = "$ffn_dim / 4", tpg = "256", out_elems = "$ffn_dim" }
+
+# ── MLP: elementwise multiply (gated × up) ─────────────────────────────
+# binary/mul (Elementwise): a * b → out
+
+[[layer.kernel]]
+op = "binary/mul"
+fuse = "ffn_act"
+inputs    = { a = "_gated", b = "_up" }
+outputs   = { out = "_combined" }
+dispatch  = { n = "$ffn_dim", out_elems = "$ffn_dim" }
+
+# ── MLP: down projection ───────────────────────────────────────────────
+
+[[layer.kernel]]
+op = "gemv/smm"
+fuse = "ffn_out"
+inputs    = { mat = "$layers.$idx.mlp.down_proj", vec = "_combined" }
+outputs   = { out = "_ffn_out" }
+constexpr = { k = "$ffn_dim", rows = "$hidden_dim" }
+dispatch  = { rows = "$hidden_dim / 4", tpg = "256", out_elems = "$hidden_dim" }
+
+# ── Residual add: FFN output + post-attn → update residual stream ──────
+
+[[layer.kernel]]
+op = "binary/add"
+fuse = "ffn_out"
+inputs    = { a = "_ffn_out", b = "_post_attn" }
+outputs   = { c = "_residual" }
+dispatch  = { n = "$hidden_dim", out_elems = "$hidden_dim" }
+
+# ── Post-layer: output norm ────────────────────────────────────────────
+# prefill_skip = true: this kernel and all subsequent kernels (lm_head,
+# sampling) are skipped during non-final prefill steps. Their outputs
+# (logits, next token) are not needed until the last prompt token.
+
+[[kernel]]
+op = "rms_norm/rms_norm"
+prefill_skip = true
+inputs    = { x = "_residual", w = "output_norm", eps_buf = "rms_eps" }
+outputs   = { out = "_final_normed" }
+constexpr = { n = "$hidden_dim" }
+dispatch  = { rows = "1", tpg = "$hidden_dim / 4", out_elems = "$hidden_dim" }
+
+# ── Post-layer: LM head ────────────────────────────────────────────────
+
+[[kernel]]
+op = "gemv/smm"
+inputs    = { mat = "lm_head", vec = "_final_normed" }
+outputs   = { out = "_logits" }
+constexpr = { k = "$hidden_dim", rows = "$vocab_size" }
+dispatch  = { rows = "$vocab_size / 4", tpg = "256", out_elems = "$vocab_size" }
+
+# ── Post-layer: sampling ───────────────────────────────────────────────
+# softmax_categorical_sample: Reduction [1, 1, 1] × [256, 1, 1]
+# uniform_in must be a pre-rolled uniform draw from [0,1) in the state map.
+
+[[kernel]]
+op = "sampling/softmax_categorical_sample"
+inputs    = { inp = "_logits", temperature_in = "temperature", uniform_in = "uniform" }
+outputs   = { out = "_next_token" }
+constexpr = { n = "$vocab_size" }
+# out_bytes: output is always Tensor<u32> (4 bytes) regardless of activation dtype.
+dispatch  = { rows = "1", tpg = "256", out_bytes = "4" }

@@ -2065,12 +2065,14 @@ fn run_sdpa_vector(
     let mt_out_buf = zeros_typed(runner, n_q_heads * head_dim, dt);
     let hd_buf = runner.buffer_u32(head_dim as u32);
     let n_buf = runner.buffer_u32(n_kv as u32);
+    // kv_stride == n_kv for bench (freshly-allocated KV buffer, stride = count).
+    let ks_buf = runner.buffer_u32(n_kv as u32);
     let gqa_buf = runner.buffer_u32(gqa_factor as u32);
     let sc_buf = runner.buffer_f32_scalar(scale);
 
     // MT dispatch — one threadgroup per Q head, 32 threads each.
     let mt_bufs: Vec<&GpuBuffer> =
-        vec![&q_buf, &k_buf, &v_buf, &mt_out_buf, &hd_buf, &n_buf, &gqa_buf, &sc_buf];
+        vec![&q_buf, &k_buf, &v_buf, &mt_out_buf, &hd_buf, &n_buf, &ks_buf, &gqa_buf, &sc_buf];
     runner.measure(&mk, &mt_bufs, [n_q_heads, 1, 1], [tpg, 1, 1], 0, 1);
     let mt_out = crate::runner::read_typed(runner, &mt_out_buf, n_q_heads * head_dim, dt);
 

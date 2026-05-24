@@ -33,7 +33,7 @@
 //!    used (causing a compile error if actually referenced — better than
 //!    silent wrong code).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use metaltile_core::{
     KernelEntry,
@@ -77,6 +77,12 @@ impl Pass for KernelInlinePass {
         let mut new_ops: Vec<Op> = Vec::with_capacity(kernel.body.ops.len());
         let mut new_results: Vec<Option<ValueId>> = Vec::with_capacity(kernel.body.results.len());
 
+        // Track threadgroup alloc names already emitted so that two inlined
+        // callees sharing the same tg buffer name (e.g. two `gemv/bm16v` in
+        // an `ffn_act` fuse group) don't produce a Metal "redefinition" error.
+        // Dedup is safe when size + dtype match; skip if identical.
+        let mut seen_tg_allocs: BTreeSet<String> = BTreeSet::new();
+
         let old_ops = std::mem::take(&mut kernel.body.ops);
         let old_results = std::mem::take(&mut kernel.body.results);
 
@@ -95,13 +101,28 @@ impl Pass for KernelInlinePass {
                     .map(|v| v.as_u32())
                     .max()
                     .unwrap_or(vid_offset.saturating_sub(1));
-                vid_offset = max_new_vid + 1;
+                // Never let vid_offset decrease: intra-mapped result vids (like
+                // call_result from build_fused_group) may be lower than the
+                // freshly-allocated vids for this callee, which would cause
+                // subsequent callees to reuse already-live vids.
+                vid_offset = (max_new_vid + 1).max(vid_offset);
 
                 for (inlined_op, inlined_result) in inlined {
+                    // Deduplicate ThreadgroupAlloc: skip if same name already
+                    // declared by a previously-inlined callee.
+                    if let Op::ThreadgroupAlloc { ref name, .. } = inlined_op
+                        && !seen_tg_allocs.insert(name.clone())
+                    {
+                        continue; // already emitted — skip duplicate
+                    }
                     new_ops.push(inlined_op);
                     new_results.push(inlined_result);
                 }
             } else {
+                // Track allocs already present in the host kernel itself.
+                if let Op::ThreadgroupAlloc { ref name, .. } = op {
+                    seen_tg_allocs.insert(name.clone());
+                }
                 new_ops.push(op);
                 new_results.push(result);
             }
@@ -176,6 +197,26 @@ fn inline_callee(
         .iter()
         .enumerate()
         .map(|(j, &name)| (name, args.get(n_input_slots + j)))
+        .collect();
+
+    // Build a rename map for non-Load/Store buffer-name ops (StrideReduce, etc.).
+    // Maps callee param name → host buffer name for all Tensor args.
+    let tensor_renames: FxHashMap<String, String> = param_arg
+        .iter()
+        .filter_map(|(&callee_name, arg)| {
+            if let KernelCallArg::Tensor(host_name) = arg {
+                Some((callee_name.to_string(), host_name.clone()))
+            } else {
+                None
+            }
+        })
+        .chain(output_arg.iter().filter_map(|(&callee_name, maybe_arg)| {
+            if let Some(KernelCallArg::Tensor(host_name)) = maybe_arg {
+                Some((callee_name.to_string(), host_name.clone()))
+            } else {
+                None
+            }
+        }))
         .collect();
 
     let mut vid_map: BTreeMap<ValueId, ValueId> = BTreeMap::new();
@@ -282,14 +323,66 @@ fn inline_callee(
             _ => {},
         }
 
-        // Default: remap value ids and keep the op.
+        // Default: rename buffer refs (StrideReduce, VectorLoad, etc.), remap value ids, keep op.
         let mut new_op = op.clone();
+        apply_tensor_renames(&mut new_op, &tensor_renames);
         remap_value_ids(&mut new_op, &vid_map);
         let new_result = assign_result(op_result, &mut vid_map, &mut next_vid);
         inlined.push((new_op, new_result));
     }
 
     inlined
+}
+
+// ---------------------------------------------------------------------------
+// Buffer-name renaming for non-Load/Store ops
+// ---------------------------------------------------------------------------
+
+/// Rename string buffer references in ops that bypass the `Op::Load`/`Op::Store`
+/// path (e.g., `StrideReduce.src`, `StrideStore.src`, `Gather.src`, etc.).
+///
+/// Called in the default branch of `inline_callee`'s main loop, after cloning
+/// the op and before remapping value IDs.  Only renames names present in the
+/// `renames` map (i.e., those that correspond to callee params being forwarded
+/// as `KernelCallArg::Tensor`); non-param internal names are left unchanged.
+fn apply_tensor_renames(op: &mut Op, renames: &FxHashMap<String, String>) {
+    if renames.is_empty() {
+        return;
+    }
+    let rename = |s: &mut String| {
+        if let Some(new) = renames.get(s.as_str()) {
+            s.clone_from(new);
+        }
+    };
+    let rename_opt = |s: &mut Option<String>| {
+        if let Some(name) = s
+            && let Some(new) = renames.get(name.as_str())
+        {
+            name.clone_from(new);
+        }
+    };
+    match op {
+        Op::StrideReduce { src, secondary_src, .. } => {
+            rename(src);
+            rename_opt(secondary_src);
+        },
+        Op::StrideStore { src, dst, aux_src, .. } => {
+            rename(src);
+            rename(dst);
+            rename_opt(aux_src);
+        },
+        Op::VectorLoad { src, .. } => rename(src),
+        Op::VectorStore { dst, .. } => rename(dst),
+        Op::Gather { src, .. } => rename(src),
+        Op::Scatter { dst, .. } => rename(dst),
+        Op::Atomic { dst, .. } => rename(dst),
+        Op::StrideScan { src, dst, .. } => {
+            rename(src);
+            rename(dst);
+        },
+        Op::StrideArgReduce { src, .. } => rename(src),
+        _ => {},
+    }
 }
 
 /// Assign a caller-side result vid for a callee op result, using any existing

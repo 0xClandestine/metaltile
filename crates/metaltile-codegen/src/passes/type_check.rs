@@ -58,7 +58,12 @@ fn run_inner(kernel: &mut Kernel) -> CoreResult<()> {
     }
 
     let type_env = infer_types(kernel)?;
-    check_block(&kernel.body, kernel, &type_env)?;
+    check_block(&kernel.body, kernel, &type_env).map_err(|e| {
+        Error::Validation(format!("kernel `{}`: {}", kernel.name, match e {
+            Error::Validation(msg) => msg,
+            other => format!("{other:?}"),
+        }))
+    })?;
 
     let block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
     for bid in block_ids {
@@ -406,6 +411,10 @@ fn infer_block(
 
         match op {
             // ---- indexing ------------------------------------------
+            Op::ProgramId { .. } => {
+                env.insert(vid, TypedValue { dtype: DType::U32, shape: Shape::scalar() });
+            },
+
             Op::Arange { len, .. } => {
                 env.insert(vid, TypedValue {
                     dtype: DType::U32,

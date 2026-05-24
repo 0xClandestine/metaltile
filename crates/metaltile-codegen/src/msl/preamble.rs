@@ -37,7 +37,10 @@ impl super::MslGenerator {
         if feat.needs_silu {
             wl!(out);
             wl!(out, "template<typename T>");
-            wl!(out, "inline T mt_silu(T x) {{ return x / (T(1) + exp(-x)); }}");
+            wl!(
+                out,
+                "inline T mt_silu(T x) {{ float xf = float(x); return T(xf / (1.0f + exp(-xf))); }}"
+            );
         }
         if feat.needs_gelu {
             wl!(out);
@@ -75,7 +78,10 @@ impl super::MslGenerator {
         if feat.needs_sigmoid {
             wl!(out);
             wl!(out, "template<typename T>");
-            wl!(out, "inline T mt_sigmoid(T x) {{ return T(1) / (T(1) + exp(-x)); }}");
+            wl!(
+                out,
+                "inline T mt_sigmoid(T x) {{ float xf = float(x); return T(1.0f / (1.0f + exp(-xf))); }}"
+            );
         }
         if feat.needs_erf {
             wl!(out);

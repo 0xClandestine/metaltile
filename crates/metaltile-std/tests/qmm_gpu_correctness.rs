@@ -564,6 +564,7 @@ fn mt_qmm_perf_bench_qwen3_shapes_f16_m_sweep() {
     let mut kernel = mt_qmm::kernel_ir_for(DType::F16);
     kernel.mode = metaltile_core::ir::KernelMode::Reduction;
     let empty_fn_consts: BTreeMap<String, u32> = BTreeMap::new();
+    let no_output_resident: BTreeMap<String, ResidentBuffer> = BTreeMap::new();
 
     for &(n, k, label) in QWEN3_SHAPES {
         let gs_per_row = k / group_size;
@@ -608,14 +609,18 @@ fn mt_qmm_perf_bench_qwen3_shapes_f16_m_sweep() {
             let mut samples = Vec::with_capacity(ITERS);
             for i in 0..(WARMUP + ITERS) {
                 let r = ctx
-                    .dispatch_chain(&[DispatchSpec {
-                        kernel: &kernel,
-                        buffers: &buffers,
-                        fn_consts: &empty_fn_consts,
-                        grid_groups: [n / 8, m, 1],
-                        threads_per_group: [64, 1, 1],
-                        resident: &residents,
-                    }])
+                    .dispatch_chain(
+                        &[DispatchSpec {
+                            kernel: &kernel,
+                            buffers: &buffers,
+                            fn_consts: &empty_fn_consts,
+                            grid_groups: [n / 8, m, 1],
+                            threads_per_group: [64, 1, 1],
+                            resident: &residents,
+                            output_resident: &no_output_resident,
+                        }],
+                        &[],
+                    )
                     .expect("dispatch");
                 if i >= WARMUP {
                     samples.push(r[0].elapsed_us);

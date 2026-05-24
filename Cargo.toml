@@ -8,6 +8,8 @@ members = [
   "crates/metaltile",
   "crates/metaltile-cli",
   "crates/metaltile-std",
+  "crates/metaltile-model",
+  "crates/metaltile-infer",
 ]
 
 [workspace.package]
@@ -26,6 +28,8 @@ metaltile-macros = { path = "crates/metaltile-macros" }
 metaltile-codegen = { path = "crates/metaltile-codegen" }
 metaltile-runtime = { path = "crates/metaltile-runtime" }
 metaltile-std = { path = "crates/metaltile-std" }
+metaltile-model = { path = "crates/metaltile-model" }
+metaltile-infer = { path = "crates/metaltile-infer" }
 
 # External
 clap = { version = "4.6", features = ["derive"] }

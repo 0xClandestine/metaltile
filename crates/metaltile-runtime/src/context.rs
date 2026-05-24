@@ -6,13 +6,14 @@ unsafe extern "C" {}
 
 use std::{borrow::Cow, collections::BTreeMap};
 
-use metaltile_codegen::msl::MslGenerator;
+use metaltile_codegen::msl::{MslGenerator, generator_for_mode};
 #[cfg(target_os = "macos")]
 use metaltile_core::ir::KernelMode;
 use metaltile_core::{
     ir::{Kernel, Param, ParamKind},
     shape::Dim,
 };
+use rustc_hash::FxHashMap;
 
 use crate::{autotune::Autotuner, error::MetalTileError};
 
@@ -56,13 +57,22 @@ pub struct Context {
 /// dispatch then skips the per-call alloc + memcpy for that input.
 /// Holding the [`ResidentBuffer`] across iterations keeps the bytes
 /// GPU-resident.
+///
+/// Uses `FxHashMap` for fast per-token buffer lookups in the hot dispatch
+/// path (O(1) vs BTreeMap's O(log n)). Function constants use `BTreeMap`
+/// for deterministic sorted iteration in PSO cache key hashing.
 pub struct DispatchSpec<'a> {
     pub kernel: &'a Kernel,
-    pub buffers: &'a BTreeMap<String, Vec<u8>>,
+    pub buffers: &'a FxHashMap<String, Vec<u8>>,
     pub fn_consts: &'a BTreeMap<String, u32>,
     pub grid_groups: [usize; 3],
     pub threads_per_group: [usize; 3],
-    pub resident: &'a BTreeMap<String, ResidentBuffer>,
+    /// Pre-uploaded GPU buffers bound to INPUT params by kernel param name.
+    pub resident: &'a FxHashMap<String, ResidentBuffer>,
+    /// Pre-uploaded GPU buffers bound to OUTPUT params by kernel param name.
+    /// The GPU writes directly into these; no host readback is performed.
+    /// Used for KV cache buffers that persist across decode steps.
+    pub output_resident: &'a FxHashMap<String, ResidentBuffer>,
 }
 
 /// Opaque handle to a GPU-resident input buffer. Produced by
@@ -78,8 +88,52 @@ pub struct ResidentBuffer {
     inner: std::rc::Rc<
         objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>>,
     >,
+    /// Byte offset into the underlying Metal buffer for sub-allocations.
+    /// Zero for full-buffer allocations (weights, standalone KV cache entries).
+    /// Non-zero for sub-buffer views created via `Self::slice()`.
+    offset: usize,
     #[cfg(not(target_os = "macos"))]
     _stub: (),
+}
+
+impl ResidentBuffer {
+    /// Read the buffer contents back to a `Vec<u8>`. On Apple Silicon with
+    /// unified memory, this reads directly from the GPU buffer's CPU-accessible
+    /// mapping — no GPU→CPU transfer occurs at the hardware level.
+    pub fn read_bytes(&self, len: usize) -> Vec<u8> {
+        #[cfg(target_os = "macos")]
+        {
+            use objc2_metal::MTLBuffer;
+            let ptr = self.inner.contents();
+            unsafe { std::slice::from_raw_parts(ptr.as_ptr().add(self.offset) as *const u8, len) }
+                .to_vec()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = len;
+            Vec::new()
+        }
+    }
+
+    /// Create a sub-buffer view (slice) of this resident buffer at the given
+    /// byte offset. Both the parent and child share the same underlying Metal
+    /// allocation; the parent buffer is kept alive via Rc as long as any slice
+    /// exists.
+    ///
+    /// This allows consolidating many small GPU allocations (e.g. per-layer
+    /// KV cache entries) into a single large allocation, reducing allocation
+    /// overhead and memory fragmentation.
+    pub fn slice(&self, offset: usize, _size: usize) -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            ResidentBuffer { inner: self.inner.clone(), offset: self.offset + offset }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = offset;
+            ResidentBuffer { _stub: () }
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -111,13 +165,18 @@ fn fnv1a_extend(h: &mut u64, bytes: &[u8]) {
 /// failing only when run after the bf16 sibling test (which seeded
 /// the cache slot with the bf16 PSO).
 #[cfg(any(target_os = "macos", test))]
-fn pso_cache_key(kernel: &Kernel, fn_consts: &BTreeMap<String, u32>) -> u64 {
+fn pso_cache_key(kernel: &Kernel, fn_consts: &BTreeMap<String, u32>, tpg: u32) -> u64 {
     let mut h = FNV_OFFSET;
     fnv1a_extend(&mut h, kernel.name.as_bytes());
     fnv1a_extend(&mut h, b":");
     if let Some(p) = kernel.params.first() {
         fnv1a_extend(&mut h, p.dtype.label().as_bytes());
     }
+    // Include tpg so kernels compiled with different threadgroup sizes (and thus
+    // different reduction strategies — e.g. single-simdgroup vs two-level) don't
+    // share a cache slot.
+    fnv1a_extend(&mut h, b":tpg:");
+    fnv1a_extend(&mut h, &tpg.to_le_bytes());
     for (n, v) in fn_consts {
         fnv1a_extend(&mut h, n.as_bytes());
         fnv1a_extend(&mut h, &v.to_le_bytes());
@@ -501,11 +560,13 @@ impl Context {
                     use objc2_metal::{MTLDataType, MTLFunctionConstantValues};
                     let fcv = MTLFunctionConstantValues::new();
                     for (name, val) in fn_consts {
-                        let val_ref: &u32 = val;
+                        // Copy to owned stack variable; addr_of! avoids
+                        // casting a shared reference to *mut (UB).
+                        let val: u32 = *val;
                         unsafe {
                             fcv.setConstantValue_type_withName(
-                                NonNull::new(val_ref as *const u32 as *mut _)
-                                    .expect("u32 ref always non-null"),
+                                NonNull::new(std::ptr::addr_of!(val) as *mut _)
+                                    .expect("stack u32 always non-null"),
                                 MTLDataType::UInt,
                                 &NSString::from_str(name),
                             );
@@ -693,6 +754,41 @@ impl Context {
         Ok(DispatchResult { elapsed_us: 0.0, gflops: 0.0, outputs: BTreeMap::new() })
     }
 
+    /// Allocate a pool-managed GPU-resident buffer of `size` bytes without
+    /// copying host data. The returned buffer can be passed via
+    /// [`DispatchSpec::resident`] or [`DispatchSpec::output_resident`] to
+    /// skip per-dispatch alloc + memcpy for intermediate tensors.
+    ///
+    /// On Apple Silicon (unified memory), this is a zero-copy allocation —
+    /// the same physical memory is accessible to both CPU and GPU. Use
+    /// [`ResidentBuffer::read_bytes`] to read back the final result.
+    pub fn alloc_resident(&self, size: usize) -> Result<ResidentBuffer, MetalTileError> {
+        #[cfg(target_os = "macos")]
+        {
+            if !self.has_metal {
+                return Err(MetalTileError::NoDevice);
+            }
+            use std::sync::OnceLock;
+
+            use objc2::{rc::Retained, runtime::ProtocolObject};
+            use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
+            type Dev = ProtocolObject<dyn MTLDevice>;
+            static DEV: OnceLock<Retained<Dev>> = OnceLock::new();
+            let dev = DEV.get_or_init(|| {
+                MTLCreateSystemDefaultDevice().expect("MTLCreateSystemDefaultDevice returned nil")
+            });
+            let opts = MTLResourceOptions::StorageModeShared
+                | MTLResourceOptions::HazardTrackingModeUntracked;
+            let buf = pool_acquire(dev, size, opts)?;
+            Ok(ResidentBuffer { inner: buf, offset: 0 })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = size;
+            Ok(ResidentBuffer { _stub: () })
+        }
+    }
+
     /// Acquire a pool-managed Metal buffer in `MTLStorageModeShared`,
     /// memcpy `bytes` into it, and return an opaque handle. Pass the
     /// handle via [`DispatchSpec::resident`] to bind without per-call
@@ -728,7 +824,7 @@ impl Context {
             unsafe {
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.as_ptr() as *mut u8, bytes.len());
             }
-            Ok(ResidentBuffer { inner: buf })
+            Ok(ResidentBuffer { inner: buf, offset: 0 })
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -753,13 +849,14 @@ impl Context {
     pub fn dispatch_chain(
         &self,
         specs: &[DispatchSpec<'_>],
+        barriers_after: &[bool],
     ) -> Result<Vec<DispatchResult>, MetalTileError> {
         if specs.is_empty() {
             return Ok(Vec::new());
         }
         #[cfg(target_os = "macos")]
         if self.has_metal {
-            return self.dispatch_chain_metal(specs);
+            return self.dispatch_chain_metal(specs, barriers_after);
         }
         Ok(specs
             .iter()
@@ -771,330 +868,466 @@ impl Context {
     fn dispatch_chain_metal(
         &self,
         specs: &[DispatchSpec<'_>],
+        barriers_after: &[bool],
     ) -> Result<Vec<DispatchResult>, MetalTileError> {
-        use std::{
-            collections::HashSet,
-            ptr::NonNull,
-            sync::{Mutex, OnceLock},
-        };
-
-        use objc2::{rc::Retained, runtime::ProtocolObject};
-        use objc2_foundation::NSString;
-        use objc2_metal::{
-            MTLBarrierScope,
-            MTLBuffer,
-            MTLCommandBuffer,
-            MTLCommandEncoder,
-            MTLCommandQueue,
-            MTLComputeCommandEncoder,
-            MTLComputePipelineDescriptor,
-            MTLComputePipelineState,
-            MTLCreateSystemDefaultDevice,
-            MTLDevice,
-            MTLLibrary,
-            MTLPipelineOption,
-            MTLResourceOptions,
-            MTLSize,
-        };
-        use rustc_hash::FxHashMap;
-
-        type Dev = ProtocolObject<dyn objc2_metal::MTLDevice>;
-        type Pso = ProtocolObject<dyn MTLComputePipelineState>;
-        type Queue = ProtocolObject<dyn MTLCommandQueue>;
-
-        static DEV: OnceLock<Option<Retained<Dev>>> = OnceLock::new();
-        static PSO_CACHE: OnceLock<Mutex<FxHashMap<u64, Retained<Pso>>>> = OnceLock::new();
-        static QUEUE: OnceLock<Option<Retained<Queue>>> = OnceLock::new();
-
-        let dev = DEV
-            .get_or_init(|| MTLCreateSystemDefaultDevice())
-            .as_ref()
-            .ok_or(MetalTileError::DeviceCreation)?;
-        let cache = PSO_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
-        let queue = QUEUE
-            .get_or_init(|| dev.newCommandQueue())
-            .as_ref()
-            .ok_or(MetalTileError::QueueCreation)?;
-
-        let acquire_shared = |bytes: Option<&[u8]>, len: usize| -> Result<BufRc, MetalTileError> {
-            let opts = MTLResourceOptions::StorageModeShared
-                | MTLResourceOptions::HazardTrackingModeUntracked;
-            let buf = pool_acquire(dev, len, opts)?;
-            if let Some(b) = bytes.filter(|b| !b.is_empty()) {
-                if b.len() < len {
-                    return Err(MetalTileError::Buffer(format!(
-                        "buffer expected {len} bytes, got {}",
-                        b.len()
-                    )));
-                }
-                let dst = buf.contents();
-                unsafe {
-                    std::ptr::copy_nonoverlapping(b.as_ptr(), dst.as_ptr() as *mut u8, b.len());
-                }
-            }
-            Ok(buf)
-        };
-        let acquire_private = |len: usize| -> Result<BufRc, MetalTileError> {
-            pool_acquire(
-                dev,
-                len,
-                MTLResourceOptions::StorageModePrivate
-                    | MTLResourceOptions::HazardTrackingModeUntracked,
-            )
-        };
-
-        // Precompute MSL + binding plans per spec; collect param names
-        // consumed as INPUT by any later spec — those drive private-storage
-        // aliasing for intermediate buffers.
-        let mut msl_sources: Vec<String> = Vec::with_capacity(specs.len());
-        let mut binding_plans: Vec<Vec<ParamBufferPlan>> = Vec::with_capacity(specs.len());
-        // MSL cache. Codegen passes (vectorize, fusion, …) cost tens of
-        // µs per kernel — at short context (n_kv ≤ 1K) the total iter
-        // time is in the 40 µs range so re-running passes per dispatch
-        // is a significant fraction. Cache keyed by the same FNV hash
-        // we use for PSO lookup (kernel name + sorted fn_consts +
-        // first param dtype) and check it before running the pipeline.
-        static MSL_CACHE: OnceLock<Mutex<FxHashMap<u64, String>>> = OnceLock::new();
-        let msl_cache = MSL_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
-        for spec in specs {
-            let h = pso_cache_key(spec.kernel, spec.fn_consts);
-            // Drop the guard BEFORE the match — Mutex isn't reentrant, and
-            // temporaries in a match scrutinee live until the end of the match
-            // body (RFC 66), so writing back inside None would deadlock against
-            // the still-held guard.
-            let cached = msl_cache
-                .lock()
-                .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?
-                .get(&h)
-                .cloned();
-            let msl = match cached {
-                Some(m) => {
-                    tracing::trace!(kernel = %spec.kernel.name, "msl cache hit");
-                    m
-                },
-                None => {
-                    let generated = MslGenerator::default().generate(spec.kernel)?;
-                    tracing::trace!(kernel = %spec.kernel.name, bytes = generated.len(), "msl generated");
-                    msl_cache
-                        .lock()
-                        .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?
-                        .insert(h, generated.clone());
-                    generated
-                },
+        // Drain all autoreleased Metal objects (NSString, MTLCommandBuffer,
+        // MTLComputeCommandEncoder, MTLLibrary, MTLFunction, etc.) at the end
+        // of each dispatch.  Without an explicit pool on worker threads the
+        // objects accumulate indefinitely — ~3 per token = ~300+ objects after
+        // a 100-token sequence.
+        objc2::rc::autoreleasepool(|_pool| {
+            use std::{
+                collections::HashSet,
+                ptr::NonNull,
+                sync::{Mutex, OnceLock},
             };
-            msl_sources.push(msl);
-            binding_plans.push(build_param_buffer_plans(spec.kernel, spec.buffers)?);
-        }
-        let later_inputs: Vec<HashSet<&str>> = (0..specs.len())
-            .map(|i| {
-                specs[i + 1..]
-                    .iter()
-                    .flat_map(|s| s.kernel.params.iter())
-                    .filter(|p| !p.is_output)
-                    .map(|p| p.name.as_str())
-                    .collect()
-            })
-            .collect();
 
-        // Persistent name→buffer map: outputs from earlier specs go here
-        // (private storage) so later specs find them by name and skip alloc.
-        let mut alias_pool: FxHashMap<String, BufRc> = FxHashMap::default();
+            use objc2::{rc::Retained, runtime::ProtocolObject};
+            use objc2_foundation::NSString;
+            use objc2_metal::{
+                MTLBarrierScope,
+                MTLBuffer,
+                MTLCommandBuffer,
+                MTLCommandEncoder,
+                MTLCommandQueue,
+                MTLComputeCommandEncoder,
+                MTLComputePipelineDescriptor,
+                MTLComputePipelineState,
+                MTLCreateSystemDefaultDevice,
+                MTLDevice,
+                MTLDispatchType,
+                MTLLibrary,
+                MTLPipelineOption,
+                MTLResourceOptions,
+                MTLSize,
+            };
+            use rustc_hash::FxHashMap;
 
-        let mut pipes: Vec<Retained<Pso>> = Vec::with_capacity(specs.len());
-        for (spec, msl) in specs.iter().zip(msl_sources.iter()) {
-            let cache_key = pso_cache_key(spec.kernel, spec.fn_consts);
-            let pipe: Retained<Pso> = {
-                let mut lock = cache
+            type Dev = ProtocolObject<dyn objc2_metal::MTLDevice>;
+            type Pso = ProtocolObject<dyn MTLComputePipelineState>;
+            type Queue = ProtocolObject<dyn MTLCommandQueue>;
+
+            static DEV: OnceLock<Option<Retained<Dev>>> = OnceLock::new();
+            static PSO_CACHE: OnceLock<Mutex<FxHashMap<u64, Retained<Pso>>>> = OnceLock::new();
+            static QUEUE: OnceLock<Option<Retained<Queue>>> = OnceLock::new();
+
+            let dev = DEV
+                .get_or_init(|| MTLCreateSystemDefaultDevice())
+                .as_ref()
+                .ok_or(MetalTileError::DeviceCreation)?;
+            let cache = PSO_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
+            let queue = QUEUE
+                .get_or_init(|| dev.newCommandQueue())
+                .as_ref()
+                .ok_or(MetalTileError::QueueCreation)?;
+
+            let acquire_shared = |bytes: Option<&[u8]>,
+                                  len: usize|
+             -> Result<BufRc, MetalTileError> {
+                let opts = MTLResourceOptions::StorageModeShared
+                    | MTLResourceOptions::HazardTrackingModeUntracked;
+                let buf = pool_acquire(dev, len, opts)?;
+                if let Some(b) = bytes.filter(|b| !b.is_empty()) {
+                    if b.len() < len {
+                        return Err(MetalTileError::Buffer(format!(
+                            "buffer expected {len} bytes, got {}",
+                            b.len()
+                        )));
+                    }
+                    let dst = buf.contents();
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(b.as_ptr(), dst.as_ptr() as *mut u8, b.len());
+                    }
+                }
+                Ok(buf)
+            };
+            let acquire_private = |len: usize| -> Result<BufRc, MetalTileError> {
+                pool_acquire(
+                    dev,
+                    len,
+                    MTLResourceOptions::StorageModePrivate
+                        | MTLResourceOptions::HazardTrackingModeUntracked,
+                )
+            };
+
+            // Precompute MSL + binding plans per spec; collect param names
+            // consumed as INPUT by any later spec — those drive private-storage
+            // aliasing for intermediate buffers.
+            let mut msl_sources: Vec<String> = Vec::with_capacity(specs.len());
+            let mut binding_plans: Vec<Vec<ParamBufferPlan>> = Vec::with_capacity(specs.len());
+            // MSL cache. Codegen passes (vectorize, fusion, …) cost tens of
+            // µs per kernel — at short context (n_kv ≤ 1K) the total iter
+            // time is in the 40 µs range so re-running passes per dispatch
+            // is a significant fraction. Cache keyed by the same FNV hash
+            // we use for PSO lookup (kernel name + sorted fn_consts +
+            // first param dtype) and check it before running the pipeline.
+            static MSL_CACHE: OnceLock<Mutex<FxHashMap<u64, String>>> = OnceLock::new();
+            let msl_cache = MSL_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
+            for spec in specs {
+                let tpg = spec.threads_per_group[0] as u32;
+                let h = pso_cache_key(spec.kernel, spec.fn_consts, tpg);
+                // Drop the guard BEFORE the match — Mutex isn't reentrant, and
+                // temporaries in a match scrutinee live until the end of the match
+                // body (RFC 66), so writing back inside None would deadlock against
+                // the still-held guard.
+                let cached = msl_cache
                     .lock()
-                    .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?;
-                if let Some(p) = lock.get(&cache_key) {
-                    tracing::debug!(kernel = %spec.kernel.name, "pso cache hit");
-                    p.clone()
-                } else {
-                    let src = NSString::from_str(msl);
-                    let lib = dev
-                        .newLibraryWithSource_options_error(&src, None)
-                        .map_err(|e| MetalTileError::MslCompilation(format!("{e:?}")))?;
-                    let fn_name = NSString::from_str(&spec.kernel.name);
-                    let fun = if spec.fn_consts.is_empty() {
-                        lib.newFunctionWithName(&fn_name).ok_or_else(|| {
-                            MetalTileError::FunctionNotFound { name: spec.kernel.name.clone() }
-                        })?
-                    } else {
-                        use objc2_metal::{MTLDataType, MTLFunctionConstantValues};
-                        let consts = MTLFunctionConstantValues::new();
-                        for (n, v) in spec.fn_consts {
-                            let name = NSString::from_str(n);
-                            let val = v.to_le_bytes();
-                            unsafe {
-                                consts.setConstantValue_type_withName(
-                                    NonNull::new(val.as_ptr() as *mut _)
-                                        .expect("u32 bytes always non-null"),
-                                    MTLDataType::UInt,
-                                    &name,
-                                );
-                            }
+                    .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?
+                    .get(&h)
+                    .cloned();
+                let msl = match cached {
+                    Some(m) => {
+                        tracing::trace!(kernel = %spec.kernel.name, "msl cache hit");
+                        m
+                    },
+                    None => {
+                        // Pass the actual tpg so the codegen can specialise
+                        // reductions: tpg ≤ 32 emits a single simd_sum (zero
+                        // threadgroup barriers); tpg > 32 emits the two-level
+                        // threadgroup reduction.
+                        let generator = generator_for_mode(spec.kernel.mode, Some(tpg));
+                        let generated = generator.generate(spec.kernel)?;
+                        tracing::trace!(kernel = %spec.kernel.name, bytes = generated.len(), "msl generated");
+                        msl_cache
+                            .lock()
+                            .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?
+                            .insert(h, generated.clone());
+                        generated
+                    },
+                };
+                msl_sources.push(msl);
+                // Inline build_param_buffer_plans for FxHashMap (the type used by
+                // PreparedDispatch). The BTreeMap variant is kept for the legacy
+                // dispatch_metal path; inlining here avoids type conversion overhead.
+                let mut next_binding_index = 0usize;
+                let mut plans = Vec::with_capacity(spec.kernel.params.len());
+                for param in &spec.kernel.params {
+                    let provided_len = spec.buffers.get(&param.name).map_or(0, Vec::len);
+                    let static_len = static_buffer_len(param)?;
+                    let data_len = if let Some(expected_len) = static_len {
+                        if provided_len > 0 && provided_len < expected_len {
+                            return Err(MetalTileError::Buffer(format!(
+                                "buffer '{}' has {} bytes, expected at least {}",
+                                param.name, provided_len, expected_len
+                            )));
                         }
-                        lib.newFunctionWithName_constantValues_error(&fn_name, &consts).map_err(
-                            |e| MetalTileError::FunctionNotFound {
-                                name: format!("{} (with constants): {e:?}", spec.kernel.name),
-                            },
-                        )?
+                        if param.is_output { provided_len.max(expected_len) } else { provided_len }
+                    } else {
+                        provided_len
                     };
-                    let desc = MTLComputePipelineDescriptor::new();
-                    desc.setComputeFunction(Some(&fun));
-                    let pso = dev
-                        .newComputePipelineStateWithDescriptor_options_reflection_error(
-                            &desc,
-                            MTLPipelineOption(0),
-                            None,
-                        )
-                        .map_err(|e| MetalTileError::PipelineCreation {
-                            name: spec.kernel.name.clone(),
-                            reason: format!("{e:?}"),
-                        })?;
-                    lock.insert(cache_key, pso.clone());
-                    tracing::debug!(kernel = %spec.kernel.name, "pso cache miss — compiled");
-                    pso
+                    plans
+                        .push(ParamBufferPlan { data_binding_index: next_binding_index, data_len });
+                    next_binding_index += if param.kind == ParamKind::Strided { 3 } else { 1 };
                 }
-            };
-            pipes.push(pipe);
-        }
-
-        let cb = queue.commandBuffer().ok_or(MetalTileError::NoDevice)?;
-
-        // Per-spec buffer slots kept so true outputs (not consumed by later
-        // specs) can be read back at the end.
-        let mut per_spec_bufs: Vec<Vec<BufRc>> = Vec::with_capacity(specs.len());
-
-        let push_strided = |bufs: &mut Vec<BufRc>,
-                            param: &Param,
-                            src: &BTreeMap<String, Vec<u8>>|
-         -> Result<(), MetalTileError> {
-            if param.kind == ParamKind::Strided {
-                let (shape, strides) = resolve_strided_metadata(param, src)?;
-                bufs.push(acquire_shared(Some(shape.as_ref()), shape.len())?);
-                bufs.push(acquire_shared(Some(strides.as_ref()), strides.len())?);
+                binding_plans.push(plans);
             }
-            Ok(())
-        };
+            let later_inputs: Vec<HashSet<&str>> = (0..specs.len())
+                .map(|i| {
+                    specs[i + 1..]
+                        .iter()
+                        .flat_map(|s| s.kernel.params.iter())
+                        .filter(|p| !p.is_output)
+                        .map(|p| p.name.as_str())
+                        .collect()
+                })
+                .collect();
 
-        for (i, spec) in specs.iter().enumerate() {
-            let mut bufs: Vec<BufRc> = Vec::with_capacity(spec.kernel.params.len() * 2);
+            // Persistent name→buffer map: outputs from earlier specs go here
+            // (private storage) so later specs find them by name and skip alloc.
+            let mut alias_pool: FxHashMap<String, BufRc> = FxHashMap::default();
 
-            for (param, plan) in spec.kernel.params.iter().zip(&binding_plans[i]) {
-                // Inputs: resident-pre-uploaded > aliased from earlier spec.
-                if !param.is_output {
-                    let pre = spec
-                        .resident
-                        .get(&param.name)
-                        .map(|r| r.inner.clone())
-                        .or_else(|| alias_pool.get(&param.name).cloned());
-                    if let Some(buf) = pre {
-                        bufs.push(buf);
+            let mut pipes: Vec<Retained<Pso>> = Vec::with_capacity(specs.len());
+            for (spec, msl) in specs.iter().zip(msl_sources.iter()) {
+                let cache_key =
+                    pso_cache_key(spec.kernel, spec.fn_consts, spec.threads_per_group[0] as u32);
+                let pipe: Retained<Pso> = {
+                    let mut lock = cache
+                        .lock()
+                        .map_err(|_| MetalTileError::LockPoisoned("PSO/MSL cache".into()))?;
+                    if let Some(p) = lock.get(&cache_key) {
+                        tracing::debug!(kernel = %spec.kernel.name, "pso cache hit");
+                        p.clone()
+                    } else {
+                        let src = NSString::from_str(msl);
+                        let lib = dev
+                            .newLibraryWithSource_options_error(&src, None)
+                            .map_err(|e| MetalTileError::MslCompilation(format!("{e:?}")))?;
+                        let fn_name = NSString::from_str(&spec.kernel.name);
+                        let fun = if spec.fn_consts.is_empty() {
+                            lib.newFunctionWithName(&fn_name).ok_or_else(|| {
+                                MetalTileError::FunctionNotFound { name: spec.kernel.name.clone() }
+                            })?
+                        } else {
+                            use objc2_metal::{MTLDataType, MTLFunctionConstantValues};
+                            let consts = MTLFunctionConstantValues::new();
+                            for (n, v) in spec.fn_consts {
+                                let name = NSString::from_str(n);
+                                // Use a stable owned u32 so addr_of! is valid for
+                                // the entire duration of the setConstantValue call.
+                                // Avoids UB from casting a &u32 reference to *mut.
+                                let val: u32 = *v;
+                                unsafe {
+                                    consts.setConstantValue_type_withName(
+                                        NonNull::new(std::ptr::addr_of!(val) as *mut _)
+                                            .expect("stack u32 always non-null"),
+                                        MTLDataType::UInt,
+                                        &name,
+                                    );
+                                }
+                            }
+                            lib.newFunctionWithName_constantValues_error(&fn_name, &consts)
+                                .map_err(|e| MetalTileError::FunctionNotFound {
+                                    name: format!("{} (with constants): {e:?}", spec.kernel.name),
+                                })?
+                        };
+                        let desc = MTLComputePipelineDescriptor::new();
+                        desc.setComputeFunction(Some(&fun));
+                        let pso = dev
+                            .newComputePipelineStateWithDescriptor_options_reflection_error(
+                                &desc,
+                                MTLPipelineOption(0),
+                                None,
+                            )
+                            .map_err(|e| MetalTileError::PipelineCreation {
+                                name: spec.kernel.name.clone(),
+                                reason: format!("{e:?}"),
+                            })?;
+                        lock.insert(cache_key, pso.clone());
+                        tracing::debug!(kernel = %spec.kernel.name, "pso cache miss — compiled");
+                        pso
+                    }
+                };
+                pipes.push(pipe);
+            }
+
+            let cb = queue.commandBuffer().ok_or(MetalTileError::NoDevice)?;
+
+            // Each entry is (BufRc, byte_offset_into_buffer).
+            let mut per_spec_bufs: Vec<Vec<(BufRc, usize)>> = Vec::with_capacity(specs.len());
+
+            let push_strided = |bufs: &mut Vec<(BufRc, usize)>,
+                                param: &Param,
+                                src: &FxHashMap<String, Vec<u8>>|
+             -> Result<(), MetalTileError> {
+                if param.kind == ParamKind::Strided {
+                    // Inline resolve_strided_metadata for FxHashMap.
+                    // The BTreeMap variant is kept for the legacy dispatch_metal path.
+                    let expected_len = param.shape.rank() * std::mem::size_of::<u32>();
+                    let defaults = known_shape_dims(param)?
+                        .map(|dims| {
+                            let strides = row_major_strides(&param.name, &dims)?;
+                            Ok::<(Vec<u8>, Vec<u8>), MetalTileError>((
+                                encode_u32s(&dims),
+                                encode_u32s(&strides),
+                            ))
+                        })
+                        .transpose()?;
+                    let mut key = String::with_capacity(param.name.len() + 8);
+                    key.push_str(&param.name);
+                    let prefix_len = key.len();
+                    key.push_str("_shape");
+                    let shape_data = match src.get(&key) {
+                        Some(bytes) => {
+                            if expected_len > 0 && bytes.len() < expected_len {
+                                return Err(MetalTileError::Buffer(format!(
+                                    "buffer '{}' has {} bytes, expected at least {}",
+                                    key,
+                                    bytes.len(),
+                                    expected_len
+                                )));
+                            }
+                            Cow::Borrowed(bytes.as_slice())
+                        },
+                        None => {
+                            let Some((shape_bytes, _)) = defaults.as_ref() else {
+                                return Err(MetalTileError::Buffer(format!(
+                                    "missing required strided metadata buffer '{}'",
+                                    key
+                                )));
+                            };
+                            Cow::Owned(shape_bytes.clone())
+                        },
+                    };
+                    key.truncate(prefix_len);
+                    key.push_str("_strides");
+                    let strides_data = match src.get(&key) {
+                        Some(bytes) => {
+                            if expected_len > 0 && bytes.len() < expected_len {
+                                return Err(MetalTileError::Buffer(format!(
+                                    "buffer '{}' has {} bytes, expected at least {}",
+                                    key,
+                                    bytes.len(),
+                                    expected_len
+                                )));
+                            }
+                            Cow::Borrowed(bytes.as_slice())
+                        },
+                        None => {
+                            let Some((_, strides_bytes)) = defaults.as_ref() else {
+                                return Err(MetalTileError::Buffer(format!(
+                                    "missing required strided metadata buffer '{}'",
+                                    key
+                                )));
+                            };
+                            Cow::Owned(strides_bytes.clone())
+                        },
+                    };
+                    bufs.push((acquire_shared(Some(shape_data.as_ref()), shape_data.len())?, 0));
+                    bufs.push((
+                        acquire_shared(Some(strides_data.as_ref()), strides_data.len())?,
+                        0,
+                    ));
+                }
+                Ok(())
+            };
+
+            let mut enc: Option<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>> = None;
+
+            for (i, spec) in specs.iter().enumerate() {
+                let mut bufs: Vec<(BufRc, usize)> =
+                    Vec::with_capacity(spec.kernel.params.len() * 2);
+
+                for (param, plan) in spec.kernel.params.iter().zip(&binding_plans[i]) {
+                    // Outputs with pre-uploaded GPU buffers → write directly in-place.
+                    if param.is_output
+                        && let Some(rb) = spec.output_resident.get(&param.name)
+                    {
+                        bufs.push((rb.inner.clone(), rb.offset));
                         push_strided(&mut bufs, param, spec.buffers)?;
                         continue;
                     }
+                    // Inputs: resident-pre-uploaded > aliased from earlier spec.
+                    if !param.is_output {
+                        let pre = spec
+                            .resident
+                            .get(&param.name)
+                            .map(|r| (r.inner.clone(), r.offset))
+                            .or_else(|| alias_pool.get(&param.name).map(|b| (b.clone(), 0usize)));
+                        if let Some((buf, offset)) = pre {
+                            bufs.push((buf, offset));
+                            push_strided(&mut bufs, param, spec.buffers)?;
+                            continue;
+                        }
+                    }
+                    // Outputs aliased to later specs → private. Otherwise shared.
+                    let new_buf =
+                        if param.is_output && later_inputs[i].contains(param.name.as_str()) {
+                            let b = acquire_private(plan.data_len)?;
+                            alias_pool.insert(param.name.clone(), b.clone());
+                            (b, 0usize)
+                        } else {
+                            let bytes = spec.buffers.get(&param.name).map(Vec::as_slice);
+                            (acquire_shared(bytes, plan.data_len)?, 0usize)
+                        };
+                    bufs.push(new_buf);
+                    push_strided(&mut bufs, param, spec.buffers)?;
                 }
-                // Outputs aliased to later specs → private. Otherwise shared.
-                let new_buf = if param.is_output && later_inputs[i].contains(param.name.as_str()) {
-                    let b = acquire_private(plan.data_len)?;
-                    alias_pool.insert(param.name.clone(), b.clone());
-                    b
-                } else {
-                    let bytes = spec.buffers.get(&param.name).map(Vec::as_slice);
-                    acquire_shared(bytes, plan.data_len)?
-                };
-                bufs.push(new_buf);
-                push_strided(&mut bufs, param, spec.buffers)?;
-            }
-            // tensor_binding_count = next free slot after all tensor
-            // bindings (data + strided shape/strides). Constexpr scalars
-            // bind via setBytes starting here — no MTLBuffer alloc.
-            let tensor_binding_count = bufs.len();
+                // tensor_binding_count = next free slot after all tensor
+                // bindings (data + strided shape/strides). Constexpr scalars
+                // bind via setBytes starting here — no MTLBuffer alloc.
+                let tensor_binding_count = bufs.len();
 
-            let enc = (*cb).computeCommandEncoder().ok_or(MetalTileError::NoDevice)?;
-            enc.setComputePipelineState(&pipes[i]);
-            for (idx, buf) in bufs.iter().enumerate() {
-                unsafe { enc.setBuffer_offset_atIndex(Some(buf.as_ref()), 0, idx) };
-            }
-            // Inline constexpr scalars via setBytes (Apple-recommended
-            // path for <4KB constants — skips the allocator + binding
-            // table indirection for each scalar). Same wire format the
-            // codegen expects: each constexpr is a single u32/f32-sized
-            // scalar at slot `tensor_binding_count + constexpr_index`.
-            for (j, decl) in spec.kernel.constexprs.iter().enumerate() {
-                let key = decl.name.name();
-                let elem = decl.dtype.size_bytes().max(4);
-                let bytes = spec.buffers.get(key).map(Vec::as_slice).unwrap_or(&[]);
-                // Pad to elem if caller supplied fewer bytes (legacy
-                // alloc_shared zeroed beyond elem too).
-                let mut staged = [0u8; 16];
-                let n = bytes.len().min(elem).min(staged.len());
-                staged[..n].copy_from_slice(&bytes[..n]);
-                unsafe {
-                    enc.setBytes_length_atIndex(
-                        NonNull::new(staged.as_ptr() as *mut _)
-                            .ok_or_else(|| MetalTileError::Buffer("setBytes null".into()))?,
-                        elem,
-                        tensor_binding_count + j,
-                    );
+                if i == 0 {
+                    // ── First pass: create a concurrent encoder ──
+                    // Concurrent dispatch lets Metal overlap independent
+                    // kernel dispatches; barriers only between dependent specs.
+                    enc = (*cb)
+                        .computeCommandEncoderWithDispatchType(MTLDispatchType::Concurrent)
+                        .map(Some)
+                        .ok_or(MetalTileError::NoDevice)?;
                 }
+                let enc_ref = enc.as_ref().unwrap();
+                enc_ref.setComputePipelineState(&pipes[i]);
+                for (idx, (buf, offset)) in bufs.iter().enumerate() {
+                    unsafe { enc_ref.setBuffer_offset_atIndex(Some(buf.as_ref()), *offset, idx) };
+                }
+                // Inline constexpr scalars via setBytes (Apple-recommended
+                // path for <4KB constants — skips the allocator + binding
+                // table indirection for each scalar). Same wire format the
+                // codegen expects: each constexpr is a single u32/f32-sized
+                // scalar at slot `tensor_binding_count + constexpr_index`.
+                for (j, decl) in spec.kernel.constexprs.iter().enumerate() {
+                    let key = decl.name.name();
+                    let elem = decl.dtype.size_bytes().max(4);
+                    let bytes = spec.buffers.get(key).map(Vec::as_slice).unwrap_or(&[]);
+                    let mut staged = [0u8; 16];
+                    let n = bytes.len().min(elem).min(staged.len());
+                    staged[..n].copy_from_slice(&bytes[..n]);
+                    unsafe {
+                        enc_ref.setBytes_length_atIndex(
+                            NonNull::new(staged.as_ptr() as *mut _)
+                                .ok_or_else(|| MetalTileError::Buffer("setBytes null".into()))?,
+                            elem,
+                            tensor_binding_count + j,
+                        );
+                    }
+                }
+                let (g, t) = (spec.grid_groups, spec.threads_per_group);
+                tracing::debug!(
+                    kernel = %spec.kernel.name,
+                    pass = i,
+                    groups_x = g[0], groups_y = g[1], groups_z = g[2],
+                    tpg_x = t[0], tpg_y = t[1], tpg_z = t[2],
+                    "chain pass dispatch"
+                );
+                enc_ref.dispatchThreadgroups_threadsPerThreadgroup(
+                    MTLSize { width: g[0], height: g[1], depth: g[2] },
+                    MTLSize { width: t[0], height: t[1], depth: t[2] },
+                );
+                if i + 1 < specs.len() && barriers_after[i] {
+                    enc_ref.memoryBarrierWithScope(MTLBarrierScope::Buffers);
+                }
+                per_spec_bufs.push(bufs);
             }
-            let (g, t) = (spec.grid_groups, spec.threads_per_group);
-            tracing::debug!(
-                kernel = %spec.kernel.name,
-                pass = i,
-                groups_x = g[0], groups_y = g[1], groups_z = g[2],
-                tpg_x = t[0], tpg_y = t[1], tpg_z = t[2],
-                "chain pass dispatch"
-            );
-            enc.dispatchThreadgroups_threadsPerThreadgroup(
-                MTLSize { width: g[0], height: g[1], depth: g[2] },
-                MTLSize { width: t[0], height: t[1], depth: t[2] },
-            );
-            // Barrier between consecutive passes — staging buffers go
-            // private + untracked, so the driver doesn't auto-track
-            // dependencies. We insert an explicit buffer-scope barrier.
-            if i + 1 < specs.len() {
-                enc.memoryBarrierWithScope(MTLBarrierScope::Buffers);
-            }
-            (*enc).endEncoding();
-            per_spec_bufs.push(bufs);
-        }
 
-        tracing::debug!(spec_count = specs.len(), "chain dispatch committed");
-        (*cb).commit();
-        (*cb).waitUntilCompleted();
-
-        // Read back outputs from each spec, but only for params NOT
-        // consumed as input by a later spec (the aliased ones live in
-        // private memory and are intentionally not host-readable).
-        let elapsed_us = ((*cb).GPUEndTime() - (*cb).GPUStartTime()) * 1_000_000.0;
-        let mut results: Vec<DispatchResult> = Vec::with_capacity(specs.len());
-        for (i, spec) in specs.iter().enumerate() {
-            let mut outputs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-            for (param, plan) in spec.kernel.params.iter().zip(&binding_plans[i]) {
-                if !param.is_output {
-                    continue;
-                }
-                if later_inputs[i].contains(param.name.as_str()) {
-                    continue;
-                }
-                let Some(buf) = per_spec_bufs[i].get(plan.data_binding_index) else { continue };
-                use objc2_metal::MTLBuffer as _;
-                let ptr = buf.contents();
-                let bytes =
-                    unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const u8, plan.data_len) }
-                        .to_vec();
-                outputs.insert(param.name.clone(), bytes);
+            // ── End the single encoder ─────────────────────────────────
+            if let Some(e) = enc {
+                (*e).endEncoding();
             }
-            // Attribute the entire chain's GPU time to the first result;
-            // chained passes share one cmd buffer and can't be split.
-            let us = if i == 0 { elapsed_us } else { 0.0 };
-            results.push(DispatchResult { elapsed_us: us, gflops: 0.0, outputs });
-        }
-        Ok(results)
+
+            tracing::debug!(spec_count = specs.len(), "chain dispatch committed");
+            (*cb).commit();
+            (*cb).waitUntilCompleted();
+
+            // Read back outputs from each spec, but only for params NOT
+            // consumed as input by a later spec (the aliased ones live in
+            // private memory and are intentionally not host-readable).
+            let elapsed_us = ((*cb).GPUEndTime() - (*cb).GPUStartTime()) * 1_000_000.0;
+            let mut results: Vec<DispatchResult> = Vec::with_capacity(specs.len());
+            for (i, spec) in specs.iter().enumerate() {
+                let mut outputs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+                for (param, plan) in spec.kernel.params.iter().zip(&binding_plans[i]) {
+                    if !param.is_output {
+                        continue;
+                    }
+                    // output_resident params are written directly on GPU; no host readback.
+                    if spec.output_resident.contains_key(&param.name) {
+                        continue;
+                    }
+                    if later_inputs[i].contains(param.name.as_str()) {
+                        continue;
+                    }
+                    let Some((buf, offset)) = per_spec_bufs[i].get(plan.data_binding_index) else {
+                        continue;
+                    };
+                    use objc2_metal::MTLBuffer as _;
+                    let ptr = buf.contents();
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            ptr.as_ptr().add(*offset) as *const u8,
+                            plan.data_len,
+                        )
+                    }
+                    .to_vec();
+                    outputs.insert(param.name.clone(), bytes);
+                }
+                // Attribute the entire chain's GPU time to the first result;
+                // chained passes share one cmd buffer and can't be split.
+                let us = if i == 0 { elapsed_us } else { 0.0 };
+                results.push(DispatchResult { elapsed_us: us, gflops: 0.0, outputs });
+            }
+            Ok(results)
+        }) // end autoreleasepool
     }
 
     pub fn tuner_mut(&mut self) -> &mut Autotuner { &mut self.tuner }
@@ -1226,34 +1459,38 @@ mod tests {
         let mut consts = BTreeMap::new();
         consts.insert("gqa".to_string(), 4u32);
         consts.insert("head_dim".to_string(), 128u32);
-        let baseline = pso_cache_key(&k, &consts);
-        assert_eq!(baseline, pso_cache_key(&k, &consts), "key must be deterministic");
+        let tpg = 256u32;
+        let baseline = pso_cache_key(&k, &consts, tpg);
+        assert_eq!(baseline, pso_cache_key(&k, &consts, tpg), "key must be deterministic");
 
         // Kernel name change → different key.
         let k_other_name = key_kernel("sdpa_prefill", DType::F32);
-        assert_ne!(baseline, pso_cache_key(&k_other_name, &consts));
+        assert_ne!(baseline, pso_cache_key(&k_other_name, &consts, tpg));
 
         // First-param dtype change → different key (f32 vs f16 specializations).
         let k_other_dtype = key_kernel("sdpa_decode", DType::F16);
-        assert_ne!(baseline, pso_cache_key(&k_other_dtype, &consts));
+        assert_ne!(baseline, pso_cache_key(&k_other_dtype, &consts, tpg));
 
         // fn_const value change → different key.
         let mut consts_other_val = consts.clone();
         consts_other_val.insert("gqa".to_string(), 8u32);
-        assert_ne!(baseline, pso_cache_key(&k, &consts_other_val));
+        assert_ne!(baseline, pso_cache_key(&k, &consts_other_val, tpg));
 
         // fn_const name change → different key.
         let mut consts_other_name = BTreeMap::new();
         consts_other_name.insert("kv_heads".to_string(), 4u32);
         consts_other_name.insert("head_dim".to_string(), 128u32);
-        assert_ne!(baseline, pso_cache_key(&k, &consts_other_name));
+        assert_ne!(baseline, pso_cache_key(&k, &consts_other_name, tpg));
+
+        // tpg change → different key (different reduction strategy).
+        assert_ne!(baseline, pso_cache_key(&k, &consts, 32u32));
 
         // Empty fn_consts and empty params are both well-defined.
         let empty_consts = BTreeMap::new();
-        assert_ne!(baseline, pso_cache_key(&k, &empty_consts));
+        assert_ne!(baseline, pso_cache_key(&k, &empty_consts, tpg));
         let mut k_empty = Kernel::new("noop");
         k_empty.params = vec![];
-        let _ = pso_cache_key(&k_empty, &empty_consts);
+        let _ = pso_cache_key(&k_empty, &empty_consts, tpg);
     }
 
     #[test]
@@ -1335,7 +1572,7 @@ mod tests {
         b.insert("head_dim".to_string(), 128u32);
         b.insert("gqa".to_string(), 4u32);
 
-        assert_eq!(pso_cache_key(&k, &a), pso_cache_key(&k, &b));
+        assert_eq!(pso_cache_key(&k, &a, 256), pso_cache_key(&k, &b, 256));
     }
 
     #[test]
@@ -1354,9 +1591,9 @@ mod tests {
         let k_f16 = key_kernel("noop", DType::F16);
         let k_bf16 = key_kernel("noop", DType::BF16);
 
-        assert_ne!(pso_cache_key(&k_f32, &consts), pso_cache_key(&k_i32, &consts));
-        assert_ne!(pso_cache_key(&k_f16, &consts), pso_cache_key(&k_bf16, &consts));
-        assert_ne!(pso_cache_key(&k_f32, &consts), pso_cache_key(&k_f16, &consts));
+        assert_ne!(pso_cache_key(&k_f32, &consts, 256), pso_cache_key(&k_i32, &consts, 256));
+        assert_ne!(pso_cache_key(&k_f16, &consts, 256), pso_cache_key(&k_bf16, &consts, 256));
+        assert_ne!(pso_cache_key(&k_f32, &consts, 256), pso_cache_key(&k_f16, &consts, 256));
     }
 
     #[test]
@@ -1373,7 +1610,7 @@ mod tests {
             tensor_param("b", DType::F16, &[4], true, ParamKind::Tensor),
         ];
         let consts = BTreeMap::new();
-        assert_eq!(pso_cache_key(&k_one, &consts), pso_cache_key(&k_two, &consts));
+        assert_eq!(pso_cache_key(&k_one, &consts, 256), pso_cache_key(&k_two, &consts, 256));
     }
 
     #[test]
@@ -1387,14 +1624,14 @@ mod tests {
         k.params = vec![];
         let mut consts = BTreeMap::new();
         consts.insert("foo".to_string(), 1u32);
-        let key = pso_cache_key(&k, &consts);
+        let key = pso_cache_key(&k, &consts, 256);
         assert_ne!(key, FNV_OFFSET);
-        assert_eq!(key, pso_cache_key(&k, &consts));
+        assert_eq!(key, pso_cache_key(&k, &consts, 256));
 
         // A different kernel name still discriminates with no params present.
         let mut k_other = Kernel::new("other_zero_param_kernel");
         k_other.params = vec![];
-        assert_ne!(key, pso_cache_key(&k_other, &consts));
+        assert_ne!(key, pso_cache_key(&k_other, &consts, 256));
     }
 
     /// Representative MSL source size for a real metaltile kernel:
@@ -1426,6 +1663,7 @@ mod tests {
         std::hint::black_box(pso_cache_key(
             std::hint::black_box(kernel),
             std::hint::black_box(consts),
+            256,
         ))
     }
 
@@ -1447,7 +1685,7 @@ mod tests {
         let mut k_b = Kernel::new("foo:");
         k_b.params = vec![];
         let consts = BTreeMap::new();
-        assert_ne!(pso_cache_key(&k_a, &consts), pso_cache_key(&k_b, &consts));
+        assert_ne!(pso_cache_key(&k_a, &consts, 256), pso_cache_key(&k_b, &consts, 256));
     }
 
     #[test]
@@ -1461,7 +1699,7 @@ mod tests {
         a.insert("c".to_string(), 0x0000_0001_u32);
         let mut b = BTreeMap::new();
         b.insert("c".to_string(), 0x0100_0000_u32);
-        assert_ne!(pso_cache_key(&k, &a), pso_cache_key(&k, &b));
+        assert_ne!(pso_cache_key(&k, &a, 256), pso_cache_key(&k, &b, 256));
     }
 
     #[test]
@@ -1488,7 +1726,7 @@ mod tests {
                         let mut consts = BTreeMap::new();
                         consts.insert("gqa".to_string(), gqa);
                         consts.insert("head_dim".to_string(), hd);
-                        let key = pso_cache_key(&k, &consts);
+                        let key = pso_cache_key(&k, &consts, 256);
                         assert!(
                             seen.insert(key),
                             "duplicate key for ({kname}, {dt:?}, gqa={gqa}, hd={hd})"

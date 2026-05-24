@@ -72,7 +72,11 @@ Output layout matches a SwiftPM `Sources/<Target>/` convention:
 <out>/Generated/MetalTileKernels.swift
 ```
 
-## `tile inspect` — IR and MSL for one kernel
+## `tile inspect` — IR and MSL for kernels and TOML models
+
+### Single-kernel mode (default)
+
+Prints IR and/or MSL for individual kernels registered via `inventory`.
 
 ```
 tile inspect [<kernel>] [--filter <substr>] [--all] [--ir] [--stats]
@@ -90,6 +94,72 @@ tile inspect [<kernel>] [--filter <substr>] [--all] [--ir] [--stats]
 | `-o, --dir <dir>` | write output files instead of printing to stdout |
 
 Omit the kernel name to list every registered kernel. See [Developing → debugging a kernel](developing.md#debugging-a-kernel).
+
+### TOML model pipeline mode (`--toml`)
+
+Compile a TOML model definition (e.g. `models/llama_decode.toml`) and inspect
+the full compiled pipeline — how fusion groups affect dispatch ordering,
+fused host kernel IR, and final MSL.
+
+```
+tile inspect --toml <file.toml> [options]
+             [--config-json <path>]
+             [--n-layers <N>] [--n-heads <N>] [--n-kv-heads <N>]
+             [--head-dim <N>] [--hidden-dim <N>] [--ffn-dim <N>]
+             [--vocab-size <N>] [--max-seq-len <N>]
+             [--no-fuse] [--graph-fuse]
+             [--ir] [--stats] [--pass <name>]
+             [-o <dir>] [--dtype <d>]
+```
+
+| Flag | Effect |
+|---|---|
+| `--toml <path>` | path to TOML model definition (required for this mode) |
+| `--config-json <path>` | HuggingFace `config.json` to load model params from |
+| `--n-layers <N>` | override number of transformer layers (default: 32) |
+| `--n-heads <N>` | override number of attention heads (default: 32) |
+| `--n-kv-heads <N>` | override number of key/value heads (default: 8) |
+| `--head-dim <N>` | override head dimension (default: 128) |
+| `--hidden-dim <N>` | override hidden dimension (default: 4096) |
+| `--ffn-dim <N>` | override FFN intermediate dimension (default: 14336) |
+| `--vocab-size <N>` | override vocabulary size (default: 128256) |
+| `--max-seq-len <N>` | override max sequence length (default: 8192) |
+| `--dtype <d>` | activation dtype (default: f16) |
+| *(no flag)* | print pipeline summary + per-node fused MSL |
+| `--ir` | print raw IR for each individual node (pre-fusion) |
+| `--pass fusion` | print IR after fusion (shows `FusedElementwise` chains) |
+| `--pass all` | run the full pass pipeline and print IR after every stage |
+| `--stats` | print per-pass op-count reduction table for each kernel |
+| `--no-fuse` | disable all fusion (each node dispatched separately) |
+| `--graph-fuse` | use graph-driven fusion (ignores TOML `fuse` tags) |
+| `-o, --dir <dir>` | write per-node `.ir`, `.metal`, or `.stats.txt` files |
+
+Model params are resolved from:
+1. `--config-json <path>` (HuggingFace `config.json`), or
+2. Individual `--n-layers`, `--n-heads`, `--n-kv-heads`, etc. CLI flags, or
+3. Defaults (Llama 3 8B-ish parameters)
+
+#### Examples
+
+```bash
+# Show pipeline structure and fused MSL for a small model
+tile inspect --toml models/llama_decode.toml --n-layers 1 --hidden-dim 1024
+
+# Show pre-fusion IR for every individual kernel
+tile inspect --toml models/llama_decode.toml --no-fuse --ir
+
+# Show how the fusion pass creates FusedElementwise chains
+tile inspect --toml models/llama_decode.toml --pass fusion
+
+# Per-pass op-count table for each fused kernel
+tile inspect --toml models/llama_decode.toml --stats
+
+# Dump all per-pass IR stages to files
+tile inspect --toml models/llama_decode.toml --pass all -o /tmp/pipeline
+
+# Use a real model's config.json to set params
+tile inspect --toml models/llama_decode.toml --config-json /path/to/config.json
+```
 
 ## `tile device` — GPU info
 
