@@ -5,7 +5,77 @@ open-source projects and individuals whose contributions made it possible.
 
 ---
 
+## Contributors
+
+### 0xClandestine
+
+Founder and primary architect of MetalTile. Designed and built the
+project from the ground up: the `#[kernel]` proc-macro DSL and body
+parser, the IR (`Op` variants, shape algebra, DType system), the MSL
+codegen pipeline and its optimisation passes, graph-driven fusion
+(Patterns 1, 3, and 6), cross-kernel calling via `KernelCallArg` and
+`KernelInlinePass`, the derive-based `Op` abstraction, and the full
+`tile` CLI (`bench`, `build`, `inspect`, `snap`, `diff`). Also owns
+the CI infrastructure, error handling strategy, tracing, and project
+architecture.
+
+### Tom Turney (TheTom)
+
+MetalTile's most prolific kernel author, responsible for the majority
+of the FFAI kernel library. Introduced the `metaltile-emit` crate and
+Swift wrapper infrastructure, MoE orchestration kernels (`mt_moe_permute`,
+`mt_moe_router_topk`, `mt_moe_unpermute`, `mt_moe_expert_indexed`),
+gated delta network kernels (decode, chunked-prefill, chunked-WY, prep
+variants), simdgroup-matrix quantised GEMM (`mt_qmm_mma`, `mt_qmm_bm2`,
+`mt_qmm_bm4`), ICB `_record` kernel variants, `mt_scalar_fma_chain8`,
+`mt_swiglu`, logits-processor kernels (temperature, repetition penalty,
+top-K), and an extensive GPU correctness test suite covering KV cache,
+SDPA, RoPE, SSM, and sampling.
+
+### Eric Kryski (ekryski)
+
+Led the GPU correctness testing infrastructure and kernel completeness
+audit. Ported eleven FFAI kernels from `ekryski/mlx@alpha`, introduced
+the AURA codec kernel set, and drove the CoopTile DSL migration that
+replaced all hand-written `InlineMsl` blocks with composable primitives.
+Delivered major performance work across attention head dimensions, MMA
+convolution, FFT non-power-of-2, int4/int8 quantised paths, and
+`sdpa_bidirectional` kernels for VLM vision towers. Also fixed
+foundational codegen correctness bugs (SSA preservation, loop-body
+cloning, FusedElementwise detection) and owns the CI bench-diff
+pipeline.
+
+### Ambisphaeric
+
+Delivered high-impact performance work on the SDPA decode path:
+sliding-window attention with sink-token specialisation (4× throughput
+at N=16K, 8× at N=32K) and batched-Q SDPA decode variants (K=2/4/8/16).
+Also contributed GEMV threadgroup-per-group tuning, the bench dirty-tree
+guard with automatic baseline diff against the target branch, and GPU
+correctness tests for gather, dequant_gemv, and arg_reduce.
+
+---
+
+## Inspiration and Prior Art
+
+<!-- TODO: acknowledge projects, papers, or people that directly inspired
+     MetalTile's design — e.g. Triton, MLX, IREE, or specific kernel
+     techniques. Fill this in as a team. -->
+
+---
+
+## Special Thanks
+
+<!-- TODO: anyone the team wants to call out individually — advisors,
+     early testers, reviewers, or community members who shaped the
+     project in a meaningful way. -->
+
+---
+
 ## Open-Source Software
+
+<details>
+<summary>Third-party dependencies</summary>
 
 ### objc2 / objc2-metal / objc2-foundation
 
@@ -132,69 +202,4 @@ Fast, non-cryptographic hashing for IR maps and pass data structures uses
 - Repository: <https://github.com/rust-lang/rustc-hash>
 - License: MIT / Apache-2.0
 
----
-
-## Contributors
-
-### 0xClandestine
-
-Founder and primary architect of MetalTile. Designed and built the
-project from the ground up: the `#[kernel]` proc-macro DSL and body
-parser, the IR (`Op` variants, shape algebra, DType system), the MSL
-codegen pipeline and its optimisation passes, graph-driven fusion
-(Patterns 1, 3, and 6), cross-kernel calling via `KernelCallArg` and
-`KernelInlinePass`, the derive-based `Op` abstraction, and the full
-`tile` CLI (`bench`, `build`, `inspect`, `snap`, `diff`). Also owns
-the CI infrastructure, error handling strategy, tracing, and project
-architecture.
-
-### Tom Turney (TheTom)
-
-MetalTile's most prolific kernel author, responsible for the majority
-of the FFAI kernel library. Introduced the `metaltile-emit` crate and
-Swift wrapper infrastructure, MoE orchestration kernels (`mt_moe_permute`,
-`mt_moe_router_topk`, `mt_moe_unpermute`, `mt_moe_expert_indexed`),
-gated delta network kernels (decode, chunked-prefill, chunked-WY, prep
-variants), simdgroup-matrix quantised GEMM (`mt_qmm_mma`, `mt_qmm_bm2`,
-`mt_qmm_bm4`), ICB `_record` kernel variants, `mt_scalar_fma_chain8`,
-`mt_swiglu`, logits-processor kernels (temperature, repetition penalty,
-top-K), and an extensive GPU correctness test suite covering KV cache,
-SDPA, RoPE, SSM, and sampling.
-
-### Eric Kryski (ekryski)
-
-Led the GPU correctness testing infrastructure and kernel completeness
-audit. Ported eleven FFAI kernels from `ekryski/mlx@alpha`, introduced
-the AURA codec kernel set, and drove the CoopTile DSL migration that
-replaced all hand-written `InlineMsl` blocks with composable primitives.
-Delivered major performance work across attention head dimensions, MMA
-convolution, FFT non-power-of-2, int4/int8 quantised paths, and
-`sdpa_bidirectional` kernels for VLM vision towers. Also fixed
-foundational codegen correctness bugs (SSA preservation, loop-body
-cloning, FusedElementwise detection) and owns the CI bench-diff
-pipeline.
-
-### Ambisphaeric
-
-Delivered high-impact performance work on the SDPA decode path:
-sliding-window attention with sink-token specialisation (4× throughput
-at N=16K, 8× at N=32K) and batched-Q SDPA decode variants (K=2/4/8/16).
-Also contributed GEMV threadgroup-per-group tuning, the bench dirty-tree
-guard with automatic baseline diff against the target branch, and GPU
-correctness tests for gather, dequant_gemv, and arg_reduce.
-
----
-
-## Inspiration and Prior Art
-
-<!-- TODO: acknowledge projects, papers, or people that directly inspired
-     MetalTile's design — e.g. Triton, MLX, IREE, or specific kernel
-     techniques. Fill this in as a team. -->
-
----
-
-## Special Thanks
-
-<!-- TODO: anyone the team wants to call out individually — advisors,
-     early testers, reviewers, or community members who shaped the
-     project in a meaningful way. -->
+</details>
