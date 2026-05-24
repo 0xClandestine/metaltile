@@ -213,20 +213,6 @@ See [`docs/cli.md`](docs/cli.md) for `-v` / `-vv` profiling, JSON output, and th
 
 📊 **Full cross-hardware results live in [`baselines/`](baselines/)** — committed `tile bench` snapshots, one canonical file per chip, refreshed as new hardware is benched. CI diffs every PR against the matching baseline.
 
-## Architecture
-
-```
-#[kernel] fn  →  metaltile-macros (proc macro)
-                          │
-                    MetalTile IR  (metaltile-core)
-                          │
-               metaltile-codegen (optimization passes → MSL)
-                          │
-                  metaltile-runtime (Metal GPU dispatch)
-```
-
-Optimization passes run in order: TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM → IfConversion → ValueSink → TileLowering → Fusion → Unroll → Schedule → Vectorize → DeadStoreElim.
-
 ## Documentation
 
 Full docs live in [`docs/`](docs/README.md):
