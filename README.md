@@ -10,7 +10,6 @@
 
 <p align="center">A Rust-embedded DSL for writing Apple Metal GPU kernels. Write tile-level algorithms in Rust, get optimized Metal Shading Language out — verified against, and frequently faster than, hand-tuned MLX.</p>
 
-<!-- TODO(image): replace this HTML table with a side-by-side graphic of the DSL ↔ MSL. -->
 <table>
 <tr>
 <th>Rust DSL — what you write</th>
@@ -52,6 +51,17 @@ kernel void mt_exp(
 
 One generic `#[kernel]` fn becomes a monomorphised `f32` / `f16` / `bfloat16` Metal kernel — the compiler handles thread indexing, dtype lowering, and Metal idioms. Bigger kernels lean on tile-level primitives (`reduce_sum`, `strided_reduce`, `dot`); the codegen emits the simdgroup and threadgroup machinery for you.
 
+## Table of Contents
+
+- [Why MetalTile](#why-metaltile)
+- [Quick Start](#quick-start)
+- [CLI](#cli)
+- [Supported Operations](#supported-operations)
+- [Benchmarks](#benchmarks)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
+
 ## Why MetalTile
 
 | Functionality | Description | Status |
@@ -67,9 +77,7 @@ One generic `#[kernel]` fn becomes a monomorphised `f32` / `f16` / `bfloat16` Me
 | **Autotuner** | Per-shape kernel tuning so no performance is left on the table. | 🚧 Planned |
 | **Type-level shape algebra** | Tensor shapes checked at compile time. | 🚧 Planned |
 
-## Status
-
-> ⚠️ **Heads Up: Construction Ahead!** Early development — APIs are not yet stable. The core DSL, codegen, and runtime work today; the autotuner and type-level shape algebra are planned. See [`docs/getting-started.md`](docs/getting-started.md) for the crate layout.
+> ⚠️ Early development — APIs are not yet stable. The core DSL, codegen, and runtime work today; the autotuner and type-level shape algebra are planned.
 
 ## Quick Start
 
@@ -113,34 +121,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-A real kernel is barely longer. This is `mt_rms_norm_small` — RMSNorm for small head dims, the whole thing:
-
-```rust
-#[kernel]
-pub fn mt_rms_norm_small<T>(
-    x: Tensor<T>,
-    w: Tensor<T>,
-    out: Tensor<T>,
-    eps_buf: Tensor<f32>,
-    #[constexpr] n: u32,
-) {
-    let row = program_id::<0>();
-    let rs = row * n;
-    let base = rs + tid * 2u32;
-    let col = tid * 2u32;
-    let x0 = load(x[base]).cast::<f32>();
-    let x1 = load(x[base + 1u32]).cast::<f32>();
-    let partial_ssq = x0 * x0 + x1 * x1;
-    let tg_ssq = reduce_sum(partial_ssq);          // ← tile-level: the codegen emits the simdgroup reduction
-    let eps = load(eps_buf[0]);
-    let rms = rsqrt(tg_ssq / n + eps);
-    store(out[base], (x0 * rms * load(w[col]).cast::<f32>()).cast::<T>());
-    store(out[base + 1u32], (x1 * rms * load(w[col + 1u32]).cast::<f32>()).cast::<T>());
-}
-```
-
-That single `reduce_sum` lowers to a full two-level simdgroup + threadgroup reduction. The result runs at **354% of MLX's hand-tuned `rms` kernel** on an Apple M4 Max (`B=1024 N=64`, f32 — see [`baselines/`](baselines/)).
-
 Full walkthrough and crate layout: [`docs/getting-started.md`](docs/getting-started.md).
 
 ## CLI
@@ -157,7 +137,7 @@ Full walkthrough and crate layout: [`docs/getting-started.md`](docs/getting-star
 | `tile snap` | Save bench results as a regression baseline |
 | `tile diff` | Compare bench results against a saved baseline |
 
-**Running it today:** there is no published binary yet — clone the repo and run `cargo run -p metaltile-cli -- <command>`, or `cargo install --path crates/metaltile-cli` for a local `tile`. An installable release will ship once the APIs stabilise. Full flag reference: [`docs/cli.md`](docs/cli.md).
+Install with `cargo install --path crates/metaltile-cli`, then run `tile <command>`. Full flag reference: [`docs/cli.md`](docs/cli.md).
 
 ## Supported Operations
 
@@ -207,11 +187,9 @@ tile bench                   # full suite
 tile bench --filter softmax  # one op
 ```
 
-<!-- TODO(image): screenshot of a `tile bench` run table goes here. -->
+A sample of what to expect: `mt_rms_norm_small` runs at **354% of MLX's hand-tuned `rms` kernel** on an Apple M4 Max (`B=1024 N=64`, f32). Full cross-hardware results live in [`baselines/`](baselines/) — committed snapshots per chip, refreshed as new hardware is benched. CI diffs every PR against the matching baseline.
 
 See [`docs/cli.md`](docs/cli.md) for `-v` / `-vv` profiling, JSON output, and the `snap` / `diff` regression workflow.
-
-📊 **Full cross-hardware results live in [`baselines/`](baselines/)** — committed `tile bench` snapshots, one canonical file per chip, refreshed as new hardware is benched. CI diffs every PR against the matching baseline.
 
 ## Documentation
 
