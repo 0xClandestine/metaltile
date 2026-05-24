@@ -231,9 +231,10 @@ pub fn mt_gated_delta_prep_step<T>(
 
 #[cfg(test)]
 mod tests {
+    use metaltile_core::ir::KernelMode;
+
     use super::*;
     use crate::bench_types::DType;
-    use metaltile_core::ir::KernelMode;
 
     /// Developer aid — dump the full generated MSL for inspection.
     /// `cargo test -p metaltile-std --lib --release -- ffai::gated_delta_prep::tests::dump --nocapture`
