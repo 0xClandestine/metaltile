@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end GPU correctness for `ffai::audio_conv1d` — the wide-stride
 //! multi-channel 1D convolution that downsamples the STT audio sequence.
 //!

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! ArgReduce benchmarks — #[kernel] DSL vs MLX metal/arg_reduce.metal
 //!
 //! Two reductions over a flat input: `argmax` and `argmin`. Both

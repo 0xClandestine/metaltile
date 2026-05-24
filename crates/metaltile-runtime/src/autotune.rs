@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Autotuner: persistent tuning cache for kernel schedules.
 //!
 //! The autotuner stores the best schedule configuration for each

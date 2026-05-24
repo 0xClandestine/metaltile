@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! 3D convolution — the volumetric counterpart of `ffai::conv2d`.
 //!
 //! Closes the `steel_conv 3D` row of the kernel audit: MLX's

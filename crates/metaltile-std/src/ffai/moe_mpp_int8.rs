@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! MPP-backed MoE int8 grouped BGEMM — `mt_moe_gather_qmm_mma_int8_bm16_mpp`.
 //!
 //! Int8 analogue of `moe_mpp::mt_moe_gather_qmm_mma_int4_bm16_mpp`. Same

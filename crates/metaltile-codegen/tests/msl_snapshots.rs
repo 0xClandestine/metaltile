@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Golden MSL snapshots — the full MSL output for a small zoo of
 //! hand-built kernels is pinned via `insta`, so any change to codegen
 //! (op lowering, preamble emission, scheduling, vectorization) shows

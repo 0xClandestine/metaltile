@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Terminal styling backed by `anstyle` + `anstream`.
 //!
 //! Thin wrapper that provides the same builder API (`Style::new().fg(Color::Cyan).bold()`)

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Shape algebra: type-level dimension tracking for compile-time shape checking.
 //!
 //! Dimensions can be:

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Tile Lowering — validate and annotate the IR for tiled matmul.
 //!
 //! Phase 2 of the tiling pipeline: `Op::Dot` → full tiled matrix multiply.

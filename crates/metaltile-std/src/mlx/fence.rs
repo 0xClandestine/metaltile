@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! fence benchmarks — metal/fence.metal  (MLX, Apache-2.0)
 //!
 //! Synchronisation primitives for multi-kernel pipelines:

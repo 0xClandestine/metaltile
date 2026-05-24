@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness coverage for `logits_min_p_mask`.
 //!
 //! Min-p sampling keeps every token whose probability is at least

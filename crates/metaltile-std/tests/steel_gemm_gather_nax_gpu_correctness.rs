@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness oracle for `mt_steel_gemm_gather_nax` — gather GEMM
 //! `C = A_gathered · B_gathered` backed by `mpp::tensor_ops::matmul2d`.
 //!

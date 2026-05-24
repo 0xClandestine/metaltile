@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Long-context + batched coverage for `mt_sdpa_prefill_mma`.
 //!
 //! The kernel is bench-wired at B=1, T=512 in

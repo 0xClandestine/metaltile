@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `ffai::aura_flash_sdpa` — fused single-pass SDPA
 //! over an AURA-compressed K/V cache, with attention sinks and
 //! sliding-window causal masking.

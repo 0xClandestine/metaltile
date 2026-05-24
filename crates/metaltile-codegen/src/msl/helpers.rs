@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Variable naming, index expression emission, and tile allocation helpers.
 
 use std::collections::BTreeMap;

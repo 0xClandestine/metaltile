@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Constant Folding & Dead Code Elimination — evaluate compile-time expressions.
 //!
 //! Folds literal-literal arithmetic at compile time and propagates identity

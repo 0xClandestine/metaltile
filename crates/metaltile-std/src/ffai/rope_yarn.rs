@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! YaRN RoPE — per-token decode form, generic over T.
 //!
 //! YaRN ("Yet another RoPE extensioN") rescales the rotary frequencies

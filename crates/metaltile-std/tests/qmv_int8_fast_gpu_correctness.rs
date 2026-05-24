@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Correctness tests for `mt_qmv_int8_fast` — 8-row-per-TG int8 decode GEMV.
 //!
 //! Weight layout: `w[m, k/4]` u32 (4 int8 codes per word, LE byte order).

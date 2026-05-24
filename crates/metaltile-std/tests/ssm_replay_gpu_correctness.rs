@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `ffai::ssm_replay` — the Mamba 2 SSD
 //! tape-capture (`ssm_step_record`) and tape-replay (`ssm_replay`)
 //! kernels for speculative-decode rollback.

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Emit-side helpers: write per-kernel MSL source files, a manifest
 //! JSON, Swift dispatch wrappers, and (optionally) shell out to
 //! `xcrun metal` to compile a `kernels.metallib`.

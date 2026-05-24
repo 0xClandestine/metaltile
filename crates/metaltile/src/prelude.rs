@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Re-exports and placeholder DSL items for `#[kernel]` functions.
 //!
 //! Import this module with `use metaltile::prelude::*;` in the same Rust module as your kernels.

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Generic `argmax<T>` with u32 index output — FFAI's decode-form
 //! greedy-sampler workhorse.
 //!

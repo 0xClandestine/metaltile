@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! `#[kernel]` rejects `while` loops — the body parser does not lower them
 //! and would otherwise silently drop the loop, shipping a kernel that does
 //! zero iterations. The macro fails loudly instead.

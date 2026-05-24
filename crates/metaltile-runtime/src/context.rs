@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Runtime context: Metal device management, pipeline compilation, and kernel dispatch.
 
 #[cfg(target_os = "macos")]

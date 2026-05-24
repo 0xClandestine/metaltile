@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::random` — XOR-shift hash to u32.
 //!
 //! Verifies `mt_random_hash`: each output element is the XOR-shift

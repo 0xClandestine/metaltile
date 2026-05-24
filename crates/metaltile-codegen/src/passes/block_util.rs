@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Block Utilities — shared primitives for IR block manipulation.
 //!
 //! Provides `remove_ops` and `insert_ops` for safely mutating op sequences

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! ConstExpr: compile-time constant expressions resolved at kernel specialization time.
 //!
 //! These represent variables like `M`, `N`, `K` in kernel signatures that are

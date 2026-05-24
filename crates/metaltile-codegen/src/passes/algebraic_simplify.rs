@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Algebraic Simplification — pattern-matching rewrite system.
 //!
 //! Simplifies IR operations beyond what ConstFold handles: identity absorption,

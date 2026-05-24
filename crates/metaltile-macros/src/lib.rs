@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! MetalTile proc macros: `#[kernel]`, `shape!`, `tile!`, `#[autotune]`.
 //!
 //! These macros parse user-written Rust functions and transform them

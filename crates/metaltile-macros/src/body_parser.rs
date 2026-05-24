@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! DSL body parser: walks `syn::Expr` trees and translates DSL function calls
 //! into MetalTile IR-building token streams.
 //!

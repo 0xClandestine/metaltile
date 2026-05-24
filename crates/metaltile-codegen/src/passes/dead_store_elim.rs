@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Dead Store Elimination — remove writes that are overwritten before any read.
 //!
 //! Eliminates `Op::Store` / `Op::VectorStore` operations that write to a

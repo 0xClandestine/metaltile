@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `ffai::gated_delta_wy::mt_gated_delta_wy_chunk`.
 //!
 //! Chunked-WY GDN is the prefill-perf kernel (spec #028). It must produce

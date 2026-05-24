@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Unary elementwise benchmark — #[kernel] DSL vs MLX metal/unary.metal
 
 use metaltile::{bench_kernel, kernel};

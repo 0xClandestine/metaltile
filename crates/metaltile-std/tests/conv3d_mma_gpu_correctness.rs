@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `ffai::conv3d_mma` — MMA-tiled implicit-GEMM 3D conv.
 //!
 //! Validates against a five-loop CPU reference for stride=1, dilation=1,

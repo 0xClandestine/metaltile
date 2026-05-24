@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mt_moe_gather_qmm_int4_m16` and
 //! `mt_moe_gather_qmm_int4_m32` — short-prefill MoE GEMV with int4
 //! quantized weights and 16/32-row-per-TG batching.

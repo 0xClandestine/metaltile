@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `ffai::gated_rmsnorm` — the fused GDN post-step
 //! `out = w · rmsNorm(y) · silu(z)`.
 //!

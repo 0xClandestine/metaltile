@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! MetalTile runtime: GPU dispatch, buffer management, and autotuning.
 //!
 //! This crate handles the runtime execution of compiled MetalTile kernels:

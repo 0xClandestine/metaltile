@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! `#[derive(ValueRefs)]`, `#[derive(OpFlags)]`, and `#[derive(VariantName)]` for the `Op` enum.
 //!
 //! ## Generated code references core types by name

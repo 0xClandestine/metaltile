@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `quantize_kv_int4/int8` + `bulk_dequant_kv_int4/int8`
 //! via raw → quantize → dequant round-trip.
 //!

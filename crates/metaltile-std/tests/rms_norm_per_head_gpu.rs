@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Per-head RMSNorm coverage test for Qwen3-style q_norm / k_norm.
 //!
 //! Qwen3 / Qwen3.5 / Qwen3.6 apply RMSNorm to projected Q and K

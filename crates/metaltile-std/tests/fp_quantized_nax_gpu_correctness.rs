@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness oracle for `mt_fp_qmm_nax` — fp4 (E2M1) quantized
 //! matmul backed by `mpp::tensor_ops::matmul2d` (NAX path).
 //!

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU buffer management: allocation, transfer, and lifetime tracking.
 //!
 //! Buffers wrap Metal's MTLBuffer with typed metadata and provide

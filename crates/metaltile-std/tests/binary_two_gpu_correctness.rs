@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::binary_two` — fused two-output elementwise.
 //!
 //! Verifies `mt_binary_two<T>`: simultaneously computes `c = a + b` and

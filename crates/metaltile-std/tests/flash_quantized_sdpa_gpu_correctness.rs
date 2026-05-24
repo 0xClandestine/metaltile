@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `ffai::flash_quantized_sdpa` — single-pass SDPA
 //! over an affine-quantized K/V cache.
 //!

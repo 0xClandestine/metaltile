@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::scatter_axis` — contiguous scatter along
 //! an axis: `out[o, indices[o,a,i], i] = updates[o,a,i]`.
 //!

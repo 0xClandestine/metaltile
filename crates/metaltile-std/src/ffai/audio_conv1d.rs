@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Wide-stride multi-channel 1D convolution — the STT audio patch
 //! embedding.
 //!

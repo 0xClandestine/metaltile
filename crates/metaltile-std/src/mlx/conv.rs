@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! conv benchmarks — metal/conv.metal  (MLX, Apache-2.0)
 //!
 //! Naive (unfold-based) convolution fallback kernels:

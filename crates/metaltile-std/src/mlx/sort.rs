@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Sort benchmark — #[kernel] DSL vs MLX metal/sort.metal
 //!
 //! Two stages cover arrays larger than one threadgroup, mirroring MLX's

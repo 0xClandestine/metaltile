@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::sort::mt_sort_segmented` — per-row (segmented)
 //! bitonic sort over a `[batch, n]` matrix.
 //!

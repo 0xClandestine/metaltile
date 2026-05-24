@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mt_fp4_qmm_mma` (fp4 E2M1) and `mt_fp8_e4m3_qmm_mma`
 //! (fp8 E4M3) — simdgroup-matrix MMA prefill kernels for floating-point
 //! quantized weights.

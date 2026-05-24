@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end correctness test for the rewritten `ffai::sdpa_decode`
 //! kernel: dispatch on the real Metal pipeline and compare against a
 //! straight-translation CPU reference.

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `quantize_kv_fp8_e4m3`, `quantize_kv_fp8_e5m2`,
 //! `bulk_dequant_kv_fp8_e4m3`, `bulk_dequant_kv_fp8_e5m2` via round-trip.
 //!

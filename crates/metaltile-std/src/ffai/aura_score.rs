@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! AURA compressed-domain Q · K dot-product reduction.
 //!
 //! For each (q_head, k_position) pair, computes the dot product of the

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Reduce benchmarks — #[kernel] DSL vs MLX metal/reduce.metal
 //!
 //! Covers four reduction shapes:

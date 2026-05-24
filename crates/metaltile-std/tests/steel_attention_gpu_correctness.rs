@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::steel::attn::steel_attention` — the scalar
 //! flash-prefill kernel `mt_sdpa_prefill`.
 //!

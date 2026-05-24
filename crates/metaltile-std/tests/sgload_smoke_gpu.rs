@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU smoke test for the `Op::SimdgroupLoad` HW intrinsic.
 //!
 //! The kernel under test (`mt_sgload_smoke` in `mlx::sgload_smoke`)

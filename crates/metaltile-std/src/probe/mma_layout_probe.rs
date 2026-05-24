@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Empirical probe of Apple Metal's `simdgroup_matrix<f32, 8, 8>` layout.
 //!
 //! Computes C = A · B with A = identity (8×8) and B = label matrix

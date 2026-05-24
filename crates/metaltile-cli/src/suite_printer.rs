@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Suite printer: formats OpResult batches as terminal tables.
 //!
 //! All terminal output logic lives here (and in `term.rs`). The data types

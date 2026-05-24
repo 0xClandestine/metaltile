@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU runner implementation extracted from metaltile-bench/src/spec.rs
 //! BenchSpec::run() and all dispatch arms, transformed into free functions.
 

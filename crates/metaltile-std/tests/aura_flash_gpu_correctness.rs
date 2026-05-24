@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end correctness test for the AURA flash pair —
 //! `ffai::aura_flash_p1_kb4_vb2_d128` (block-level online softmax over
 //! compressed K/V) + `ffai::aura_flash_pass2_d128` (cross-block merge

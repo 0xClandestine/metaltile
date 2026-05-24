@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness test for `mlx::rms_norm::mt_gated_mixer_norm`.
 //!
 //! Fused `out = rms_norm(y, w) · silu(z)` per `[Hv, Dv]` row. Replaces

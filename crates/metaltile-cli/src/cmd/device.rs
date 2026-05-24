@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! `tile device` — Show GPU device info and supported feature flags.
 
 use metaltile_core::GpuFamily;

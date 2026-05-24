@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `ffai::logits_topk::logits_topk_mask`.
 //!
 //! The mask kernel takes a pre-computed threshold (typically the K-th

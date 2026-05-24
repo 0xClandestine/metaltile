@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Scan benchmark — #[kernel] DSL vs MLX metal/scan.metal
 //!
 //! Two scan shapes over a `[rows, n]` input, scanned along the last

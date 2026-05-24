@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::fp_quantized::mt_fp8_e4m3_quant_dequant` /
 //! `mt_fp8_e5m2_quant_dequant` — the fp8 quantize-dequantize round-trip.
 //!

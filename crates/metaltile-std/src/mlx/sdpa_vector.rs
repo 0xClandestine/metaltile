@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Decode-form scaled dot-product attention — `mt_sdpa_vector` family.
 //!
 //! Faithful port of MLX `sdpa_vector<T, D, V=D>` template. One threadgroup

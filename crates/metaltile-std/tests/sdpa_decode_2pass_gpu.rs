@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end correctness + perf bench for the MLX-geometry two-pass
 //! SDPA decode kernel pair.
 //!

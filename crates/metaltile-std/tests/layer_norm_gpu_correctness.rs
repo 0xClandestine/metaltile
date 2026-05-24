@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::layer_norm` — LayerNorm with weight and bias.
 //!
 //! `mt_layer_norm<T>`: `out[row, i] = (x[row, i] - mean) * is * w[i] + b[i]`

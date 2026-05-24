@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! MetalTile codegen: lowers the algorithm IR to Metal Shading Language (MSL).
 //!
 //! This crate performs:

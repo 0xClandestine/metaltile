@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end correctness for `ffai_sdpa_decode_d256` — the head_dim=256
 //! specialization needed for Gemma 3 + Gemma 4. Validates that the
 //! two-phase output reduction produces the same answer as a naive CPU

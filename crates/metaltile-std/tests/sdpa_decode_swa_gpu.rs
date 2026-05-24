@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Sliding-window + sink-token perf bench for `ffai::sdpa_decode`.
 //!
 //! Companion to `sdpa_decode_gpu_correctness.rs`. The correctness file

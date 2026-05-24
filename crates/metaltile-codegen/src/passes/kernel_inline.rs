@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! KernelInlinePass — resolve `Op::KernelCall` by splicing callee ops inline.
 //!
 //! Runs as the **first** pass in `standard_pipeline()` so all subsequent

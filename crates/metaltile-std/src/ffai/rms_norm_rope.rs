@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Fused RMSNorm + RoPE — normalizes a Q/K head then applies the
 //! rotary position embedding, in one dispatch. Saves a kernel launch
 //! per Q and per K vs separate `rms_norm` + `rope` calls (the

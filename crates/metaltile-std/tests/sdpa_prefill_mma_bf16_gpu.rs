@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness oracle for `mt_sdpa_prefill_mma_bf16` — the
 //! bf16-emulated MMA prefill variant in
 //! `crates/metaltile-std/src/mlx/steel/attn/steel_attention_mma_bf16.rs`.

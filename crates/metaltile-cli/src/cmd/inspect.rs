@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! `tile inspect` — Print IR and/or MSL for kernels.
 //!
 //! Auto-discovers kernels via inventory — no hardcoded list.

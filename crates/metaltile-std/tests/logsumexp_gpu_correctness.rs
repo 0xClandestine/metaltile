@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::logsumexp` — log(sum(exp(x))) per row.
 //!
 //! `mt_logsumexp<T>` computes the numerically stable logsumexp over each

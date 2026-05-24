@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Cooperative tile matmul smoke kernel.
 //!
 //! Single simdgroup, 16×32 fp16 → 16×16 fp32 matmul using the

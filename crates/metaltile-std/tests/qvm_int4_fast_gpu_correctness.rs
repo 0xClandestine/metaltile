@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::quantized::mt_qvm_int4_fast` — perf-tuned
 //! int4 vecmat `y = xᵀ · W`, W `[K, N]` row-major.
 //!

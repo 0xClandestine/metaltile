@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::copy` — contiguous copy kernel.
 //!
 //! Verifies `mt_copy<T>`: output must exactly equal input for all

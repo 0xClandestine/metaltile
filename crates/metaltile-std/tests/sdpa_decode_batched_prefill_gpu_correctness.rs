@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end GPU correctness for M7's K=8/16 batched-Q SDPA decode
 //! via the `mt_sdpa_prefill_mma` prefill-tile reuse path.
 //!

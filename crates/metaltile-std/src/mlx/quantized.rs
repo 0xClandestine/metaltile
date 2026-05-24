@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Quantized MatVec benchmark — #[kernel] DSL vs MLX metal/quantized.metal
 
 use metaltile::{bench_kernel, kernel};

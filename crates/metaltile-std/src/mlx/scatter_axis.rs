@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Scatter along an axis — contiguous form of MLX's `scatter_axis`.
 //!
 //! `out[o, indices[o, a, i], i] = updates[o, a, i]` — each update

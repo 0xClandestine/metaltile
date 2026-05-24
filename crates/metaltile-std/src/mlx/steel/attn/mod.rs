@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 pub mod steel_attention;
 pub mod steel_attention_mma;
 pub mod steel_attention_mma_bf16;

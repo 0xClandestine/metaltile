@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for the strided `indexing` kernels —
 //! `mt_gather_front`, `mt_scatter`, `mt_masked_scatter`.
 //!

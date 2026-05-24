@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::binary` — elementwise binary ops
 //! (add, mul, sub, div, max, min, pow, atan2, remainder, logaddexp).
 //!

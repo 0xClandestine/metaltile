@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::hadamard_m::kernel_ir_for(M, DType)`.
 //!
 //! `mt_hadamard_m` applies the Hadamard transform H_M to a batch of

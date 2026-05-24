@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! MetalTile core: IR types, shape algebra, and DType system.
 //!
 //! This crate defines the foundational types that all other crates share:

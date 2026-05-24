@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Walsh–Hadamard transform along the last axis (size N = 2^k) —
 //! port of MLX's `hadamard_n`.
 //!

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! binary_two benchmark — #[kernel] DSL fused two-output elementwise
 
 use metaltile::{bench_kernel, kernel};

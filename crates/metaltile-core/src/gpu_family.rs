@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Apple GPU family detection from Metal device name strings.
 //!
 //! Provides a lightweight [`GpuFamily`] enum with a `from_device_name`

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Value Sinking — move single-use definitions closer to their consumers.
 //!
 //! If a value is computed at position *i* in a block but only consumed at

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `ffai::gated_delta::mt_gated_delta_step`.
 //!
 //! GDN (Gated DeltaNet) is the recurrent linear-attention variant used by

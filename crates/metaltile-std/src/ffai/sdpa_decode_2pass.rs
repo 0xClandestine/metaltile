@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Two-pass SDPA decode — pass 1 emits per-block (max, sum, partial_o)
 //! into staging buffers; pass 2 merges across blocks to produce the
 //! normalised output.

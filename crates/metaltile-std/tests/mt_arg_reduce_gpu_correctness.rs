@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::arg_reduce` — the generic-`T`
 //! `mt_argmax` / `mt_argmin` reductions. Both emit the winning index
 //! as a `u32`, mirroring MLX `arg_reduce_general`'s `uint32_t` output

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `ffai::rms_norm_qgemv` and
 //! `ffai::rms_norm_qgemv_fast` — fused RMSNorm + 4-bit quantized GEMV for
 //! decode.

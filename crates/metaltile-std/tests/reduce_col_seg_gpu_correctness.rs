@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::reduce` — the column-reduce and
 //! segmented-reduce families (`mt_col_reduce*` / `mt_seg_reduce*`).
 //!

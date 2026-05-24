@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Single-token SDPA decode for `head_dim == 512`. Parallel of
 //! `ffai_sdpa_decode_d256` with 16 elements per lane and a **4-phase
 //! output reduction** to stay under Apple's 32 KB threadgroup-memory

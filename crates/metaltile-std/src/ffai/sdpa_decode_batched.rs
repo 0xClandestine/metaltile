@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Batched-Q SDPA decode for speculative decoding (M7) — K query
 //! positions share one KV walk per dispatch, amortizing KV memory
 //! bandwidth by K× vs. K independent single-Q `sdpa_decode` dispatches.

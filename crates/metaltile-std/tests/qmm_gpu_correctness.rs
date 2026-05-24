@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end correctness test for `mt_qmm` — quantized matmul (B>1
 //! prefill path). Dispatches the kernel on the Metal pipeline and
 //! compares against a straight-translation CPU reference that mirrors

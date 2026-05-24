@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::strided::mt_strided_copy<T>`.
 //!
 //! `mt_strided_copy` copies a 2-D slice from a strided (padded) source buffer

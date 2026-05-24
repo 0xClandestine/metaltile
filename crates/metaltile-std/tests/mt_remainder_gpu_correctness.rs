@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::binary::mt_remainder<T>`.
 //!
 //! The DSL `remainder(a, b)` maps to MSL `fmod(a, b)`, which is the

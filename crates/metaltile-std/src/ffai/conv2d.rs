@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! 2D convolution for vision-transformer patch embedding.
 //!
 //! Every VLM vision encoder (Qwen2.5-VL / Qwen3.5-VL / Gemma 3-VL /

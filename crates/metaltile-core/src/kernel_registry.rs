@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Kernel registry for cross-kernel inline calling.
 //!
 //! Each `#[kernel]` macro auto-submits a [`KernelEntry`] via

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! CPU-only oracle validation for the chunked-WY GDN algorithm.
 //!
 //! Two implementations:

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Golden MSL snapshots for the steel / hadamard / quantized NAX
 //! kernels in PR #147.
 //!

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Register Estimation — conservative linear-scan liveness analysis.
 //!
 //! Performs a conservative forward liveness analysis over IR blocks to

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for the int3/int5/int6 affine quantize kernels
 //! (`mlx::quantized::mt_affine_quantize_int{3,5,6}`).
 //!

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Radix-2 Cooley–Tukey FFT along the last axis (size N = 2^k) — a
 //! port of the radix path of MLX's `metal/fft.metal`.
 //!

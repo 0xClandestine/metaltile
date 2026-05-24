@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `ffai::rms_norm_rope` — fused RMSNorm + RoPE.
 //!
 //! Pins: (1) the RMSNorm reduction over the *whole* row drives the

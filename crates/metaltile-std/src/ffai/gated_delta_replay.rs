@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GatedDeltaNet innovation-tape capture + replay — port of
 //! `gated_delta_replay.metal` (spec 020 phase 2). Companion to
 //! `gated_delta.rs`; the speculative-decode rollback path for

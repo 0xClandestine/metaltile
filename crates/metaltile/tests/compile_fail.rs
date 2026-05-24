@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Compile-fail tests for the `#[kernel]` proc-macro.
 //!
 //! Each fixture under `tests/error/` is a minimal `#[kernel]` body that
