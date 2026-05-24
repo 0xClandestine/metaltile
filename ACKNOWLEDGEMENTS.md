@@ -8,7 +8,7 @@ with a short description of your contribution(s) below. For example:
 MetalTile was developed with contributions from the following individuals:
 
 - 0xClandestine — Founded the project and designed the full stack: #[kernel] proc-macro DSL, body parser, IR, MSL codegen + optimization passes, graph-driven fusion, and cross-kernel calling. 
-- Tom Turney (TheTom): MetalTile's most prolific kernel author — FFAI kernel library, Swift wrapper infrastructure, MoE orchestration kernels, gated delta network kernels, simdgroup-matrix quantised GEMM, ICB `_record` variants, `mt_scalar_fma_chain8`, `mt_swiglu`, logits-processor kernels, and an extensive GPU correctness test suite covering KV cache, SDPA, RoPE, SSM, and sampling.
+- Tom Turney (@TheTom): one of MetalTile's most prolific kernel authors, with Flash-Attention-2 SDPA, simdgroup-matrix quantised GEMM/GEMV, MoE + gated-delta-network kernels, sampling + logits processors, fused activations, ICB `_record` codegen, FFAI kernel-pack infrastructure, and GPU correctness tests.
 - Eric Kryski (ekryski): GPU correctness testing infrastructure and kernel completeness audit, CoopTile DSL migration (removing all hand-written `InlineMsl`), AURA codec kernels, eleven FFAI kernel ports, attention/conv/quant performance work, `sdpa_bidirectional` kernels for VLM vision towers, foundational codegen correctness fixes, and CI bench-diff pipeline.
 - Ambisphaeric: CI hygiene, bench dirty-tree guard, GPU correctness tests, a few kernel tuning wins, project bot, and PM duties.
 
