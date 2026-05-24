@@ -25,7 +25,10 @@ impl KernelRegistry {
         for spec in inventory::iter::<BenchSpec> {
             // Simple key: op only.
             match map.entry(spec.op.to_string()) {
-                Entry::Vacant(e) => { e.insert(spec); n_unique += 1; },
+                Entry::Vacant(e) => {
+                    e.insert(spec);
+                    n_unique += 1;
+                },
                 Entry::Occupied(_) => {},
             }
             // Qualified key: op/subop (when subop is non-empty).
@@ -39,9 +42,7 @@ impl KernelRegistry {
     /// Look up a `BenchSpec` by op name.
     ///
     /// Tries `op/subop` first (qualified key), then `op` only.
-    pub fn get(&self, op: &str) -> Option<&'static BenchSpec> {
-        self.map.get(op).copied()
-    }
+    pub fn get(&self, op: &str) -> Option<&'static BenchSpec> { self.map.get(op).copied() }
 
     /// Number of unique kernel ops.
     pub fn len(&self) -> usize { self.n_unique }
@@ -50,9 +51,7 @@ impl KernelRegistry {
     pub fn is_empty(&self) -> bool { self.n_unique == 0 }
 
     /// Iterate over all unique `BenchSpec` references.
-    pub fn iter(&self) -> impl Iterator<Item = &&'static BenchSpec> {
-        self.map.values()
-    }
+    pub fn iter(&self) -> impl Iterator<Item = &&'static BenchSpec> { self.map.values() }
 }
 
 #[cfg(test)]

@@ -574,12 +574,10 @@ fn merge_parallel_reduction_pairs(
         let _eb = &nodes[eb_idx];
 
         // Both first nodes must be Reduction.
-        let GridSpec::Reduction { num_rows: rows_a, threads_per_group: tpg_a } = &ra.grid
-        else {
+        let GridSpec::Reduction { num_rows: rows_a, threads_per_group: tpg_a } = &ra.grid else {
             continue;
         };
-        let GridSpec::Reduction { num_rows: rows_b, threads_per_group: tpg_b } = &rb.grid
-        else {
+        let GridSpec::Reduction { num_rows: rows_b, threads_per_group: tpg_b } = &rb.grid else {
             continue;
         };
 
@@ -696,10 +694,8 @@ fn chain_grid_compatible(
                 Some((true, *num_rows)),
             (KernelMode::Grid3D, GridSpec::Grid3D { x, y, z, .. }) if !(*y == 1 && *z == 1) =>
                 Some((true, x * y * z)),
-            (KernelMode::Grid3D, GridSpec::Grid3D { x, y: 1, z: 1, .. }) =>
-                Some((false, *x)),
-            (KernelMode::Elementwise, GridSpec::Elementwise { n }) =>
-                Some((false, *n)),
+            (KernelMode::Grid3D, GridSpec::Grid3D { x, y: 1, z: 1, .. }) => Some((false, *x)),
+            (KernelMode::Elementwise, GridSpec::Elementwise { n }) => Some((false, *n)),
             _ => None,
         }
     }
@@ -773,12 +769,10 @@ fn chain_grid_compatible(
         // Path B same-Reduction: spec must match.
         if let (KernelMode::Reduction, GridSpec::Reduction { num_rows, threads_per_group }) =
             (&candidate.mode, &candidate.grid)
+            && let Some((r, t)) = reduction_spec
+            && (r != *num_rows || t != *threads_per_group)
         {
-            if let Some((r, t)) = reduction_spec {
-                if r != *num_rows || t != *threads_per_group {
-                    return false;
-                }
-            }
+            return false;
         }
     } else {
         // Adding a follower to the chain.
@@ -792,10 +786,10 @@ fn chain_grid_compatible(
         // can instead find valid producer-consumer pairs (e.g. up→mul).
         if let Some(&leftmost) = chain.last() {
             let lm = &nodes[leftmost];
-            if let Some((lm_is_host, _)) = node_class(&lm.mode, &lm.grid) {
-                if lm_is_host {
-                    return false;
-                }
+            if let Some((lm_is_host, _)) = node_class(&lm.mode, &lm.grid)
+                && lm_is_host
+            {
+                return false;
             }
         }
 

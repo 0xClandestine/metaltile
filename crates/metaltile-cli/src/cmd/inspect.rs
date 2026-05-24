@@ -24,7 +24,11 @@ use std::{collections::BTreeMap, str::FromStr};
 
 use metaltile_codegen::generator_for_mode;
 use metaltile_model::{
-    CompileParams, ExecutionPlan, FusionMode, KernelRegistry, ModelDef,
+    CompileParams,
+    ExecutionPlan,
+    FusionMode,
+    KernelRegistry,
+    ModelDef,
     compile,
 };
 use metaltile_std::{
@@ -343,13 +347,7 @@ fn print_toml_pipeline_summary(
 ) {
     let n_fused = plan.nodes.iter().filter(|n| n.fuse_group.is_some()).count();
     let n_standalone = plan.nodes.len() - n_fused;
-    let n_groups = plan
-        .nodes
-        .iter()
-        .filter_map(|n| n.fuse_group)
-        .max()
-        .map(|m| m + 1)
-        .unwrap_or(0);
+    let n_groups = plan.nodes.iter().filter_map(|n| n.fuse_group).max().map(|m| m + 1).unwrap_or(0);
 
     let bold_cyan = Style::new().fg(Color::Cyan).bold();
     let bright_black = Style::new().fg(Color::BrightBlack);
@@ -434,7 +432,10 @@ fn print_toml_nodes_ir(
 ) -> Result<(), CliError> {
     for (i, kernel) in plan.cached_kernels.iter().enumerate() {
         let label = &plan.nodes[i].label;
-        let safe_name: String = label.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect();
+        let safe_name: String = label
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+            .collect();
         let filename = format!("{:03}_{}", i, safe_name);
 
         if let Some(d) = dir {
@@ -477,15 +478,9 @@ fn print_toml_kernels_msl(
             std::fs::write(&path, &msl).map_err(CliError::Io)?;
             println!("wrote {path}");
         } else {
-            let fuse_tag = node
-                .fuse_group
-                .map(|g| format!(" fuse_group={g}"))
-                .unwrap_or_default();
+            let fuse_tag = node.fuse_group.map(|g| format!(" fuse_group={g}")).unwrap_or_default();
             println!("// ═══════════════════════════════════════════════════════");
-            println!(
-                "// [{:>3}] {}    mode: {}{}",
-                i, node.label, node.mode, fuse_tag
-            );
+            println!("// [{:>3}] {}    mode: {}{}", i, node.label, node.mode, fuse_tag);
             println!("// kernel: {}", node.kernel_name);
             println!("// ═══════════════════════════════════════════════════════");
             println!("{msl}");
@@ -495,10 +490,7 @@ fn print_toml_kernels_msl(
 }
 
 /// Run the full pass pipeline on each (fused) kernel and print per-pass stats.
-fn print_toml_kernel_stats(
-    plan: &ExecutionPlan,
-    dir: &Option<String>,
-) -> Result<(), CliError> {
+fn print_toml_kernel_stats(plan: &ExecutionPlan, dir: &Option<String>) -> Result<(), CliError> {
     for (i, kernel) in plan.cached_kernels.iter().enumerate() {
         let node = &plan.nodes[i];
         let mut k = kernel.clone();
@@ -507,10 +499,7 @@ fn print_toml_kernel_stats(
 
         match generator.generate_with_stats(&k) {
             Ok((_, ref stats)) => {
-                let fuse_tag = node
-                    .fuse_group
-                    .map(|g| format!(" [fuse={g}]"))
-                    .unwrap_or_default();
+                let fuse_tag = node.fuse_group.map(|g| format!(" [fuse={g}]")).unwrap_or_default();
                 println!("// ── [{:>3}] {}{} ─────────────────────", i, node.label, fuse_tag);
                 print_stats_table(stats);
                 println!();
@@ -520,11 +509,7 @@ fn print_toml_kernel_stats(
                         .label
                         .chars()
                         .map(|c| {
-                            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                                c
-                            } else {
-                                '_'
-                            }
+                            if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }
                         })
                         .collect();
                     let filename = format!("{:03}_{}", i, safe_name);
@@ -533,7 +518,7 @@ fn print_toml_kernel_stats(
                     std::fs::write(&path, format!("{stats:#?}")).map_err(CliError::Io)?;
                     println!("wrote {path}");
                 }
-            }
+            },
             Err(e) => eprintln!("error: [{i}] {} — {e}", node.label),
         }
     }
@@ -553,31 +538,18 @@ fn print_toml_passes_all(
         let mut k = kernel.clone();
         k.mode = node.mode;
 
-        let fuse_tag = node
-            .fuse_group
-            .map(|g| format!(" [fuse={g}]"))
-            .unwrap_or_default();
+        let fuse_tag = node.fuse_group.map(|g| format!(" [fuse={g}]")).unwrap_or_default();
 
         if let Some(d) = dir {
             let safe_name: String = node
                 .label
                 .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
+                .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
                 .collect();
             let filename = format!("{:03}_{}", i, safe_name);
             let base = format!("{}/{}.pass", d, filename);
             std::fs::create_dir_all(d).map_err(CliError::Io)?;
-            std::fs::write(
-                format!("{base}_00_before.ir"),
-                format!("{k}"),
-            )
-            .map_err(CliError::Io)?;
+            std::fs::write(format!("{base}_00_before.ir"), format!("{k}")).map_err(CliError::Io)?;
 
             let passes = metaltile_codegen::passes::PassRegistry::standard_with_names();
             for (pi, (name, pass)) in passes.iter().enumerate() {
@@ -597,7 +569,7 @@ fn print_toml_passes_all(
                     let path = format!("{base}_final.msl");
                     std::fs::write(&path, &msl).map_err(CliError::Io)?;
                     println!("wrote {path}");
-                }
+                },
                 Err(e) => eprintln!("MSL error on [{i}] {}: {e}", node.label),
             }
         } else {
@@ -622,10 +594,7 @@ fn print_toml_pass_single(
         let mut k = kernel.clone();
         k.mode = node.mode;
 
-        let fuse_tag = node
-            .fuse_group
-            .map(|g| format!(" [fuse={g}]"))
-            .unwrap_or_default();
+        let fuse_tag = node.fuse_group.map(|g| format!(" [fuse={g}]")).unwrap_or_default();
 
         match metaltile_codegen::passes::PassRegistry::get(pass_name) {
             Some(pass_obj) => {
@@ -639,11 +608,7 @@ fn print_toml_pass_single(
                         .label
                         .chars()
                         .map(|c| {
-                            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                                c
-                            } else {
-                                '_'
-                            }
+                            if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }
                         })
                         .collect();
                     let filename = format!("{:03}_{}", i, safe_name);
@@ -662,7 +627,9 @@ fn print_toml_pass_single(
                             .body
                             .ops
                             .iter()
-                            .filter(|op| matches!(op, metaltile_core::ir::Op::FusedElementwise { .. }))
+                            .filter(|op| {
+                                matches!(op, metaltile_core::ir::Op::FusedElementwise { .. })
+                            })
                             .count();
                         if n_fused > 0 {
                             println!(
@@ -672,17 +639,13 @@ fn print_toml_pass_single(
                         }
                     }
                 }
-            }
-            None => {
+            },
+            None =>
                 if i == 0 {
                     let valid: Vec<_> = metaltile_codegen::passes::PassRegistry::names();
-                    eprintln!(
-                        "Unknown pass: {pass_name}. Valid: {} all",
-                        valid.join(", ")
-                    );
+                    eprintln!("Unknown pass: {pass_name}. Valid: {} all", valid.join(", "));
                     return Err(CliError::Other(format!("unknown pass '{pass_name}'")));
-                }
-            }
+                },
         }
     }
     Ok(())
@@ -719,21 +682,17 @@ fn resolve_model_params(args: &InspectArgs, _def: &ModelDef) -> Result<ResolvedP
 
 /// Resolve model parameters from a HuggingFace-style config.json.
 fn resolve_from_config_json(path: &str) -> Result<ResolvedParams, CliError> {
-    let config: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(path).map_err(|e| {
-            CliError::Other(format!("reading config.json: {e}"))
-        })?)
-        .map_err(|e| CliError::Other(format!("parsing config.json: {e}")))?;
+    let config: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(path)
+            .map_err(|e| CliError::Other(format!("reading config.json: {e}")))?,
+    )
+    .map_err(|e| CliError::Other(format!("parsing config.json: {e}")))?;
 
     let mut params = std::collections::HashMap::new();
 
     // HuggingFace Llama config keys
     let get_u32 = |key: &str, fallback: u32| -> u32 {
-        config
-            .get(key)
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32)
-            .unwrap_or(fallback)
+        config.get(key).and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(fallback)
     };
 
     let n_layers = get_u32("num_hidden_layers", 32);

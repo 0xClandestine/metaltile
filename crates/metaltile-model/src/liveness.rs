@@ -53,6 +53,7 @@ struct LiveRange {
 ///   for outputs that will be assigned intermediate slots.
 /// - `intermediate_inputs`: for each node, list of `(param_name)` that read
 ///   from intermediate slots. The corresponding output must be found by name.
+///
 /// Assign buffer slots to a sequence of nodes.
 ///
 /// Returns `(slots, name_to_slot)` where:

@@ -29,7 +29,9 @@ pub enum ModelError {
     #[error("TOML parse error: {0}")]
     TomlParse(#[from] toml::de::Error),
 
-    #[error("non-contiguous fuse group '{tag}' declared at node {first_instance} and reused at node {second_start}; fuse groups must be contiguous")]
+    #[error(
+        "non-contiguous fuse group '{tag}' declared at node {first_instance} and reused at node {second_start}; fuse groups must be contiguous"
+    )]
     NonContiguousFuseGroup { tag: String, first_instance: usize, second_start: usize },
 
     #[error("IO error: {0}")]

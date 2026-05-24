@@ -29,15 +29,20 @@ fn convert_tensor(bytes: &[u8], src_dtype: safetensors::Dtype, dst: DType) -> Ve
     for i in 0..n {
         let base = i * src_sz;
         let f = match src_dtype {
-            safetensors::Dtype::F16 => half::f16::from_le_bytes([bytes[base], bytes[base + 1]]).to_f32(),
-            safetensors::Dtype::BF16 => half::bf16::from_le_bytes([bytes[base], bytes[base + 1]]).to_f32(),
-            safetensors::Dtype::F32 => f32::from_le_bytes([bytes[base], bytes[base + 1], bytes[base + 2], bytes[base + 3]]),
+            safetensors::Dtype::F16 =>
+                half::f16::from_le_bytes([bytes[base], bytes[base + 1]]).to_f32(),
+            safetensors::Dtype::BF16 =>
+                half::bf16::from_le_bytes([bytes[base], bytes[base + 1]]).to_f32(),
+            safetensors::Dtype::F32 =>
+                f32::from_le_bytes([bytes[base], bytes[base + 1], bytes[base + 2], bytes[base + 3]]),
             _ => unreachable!(),
         };
         let obase = i * dst_sz;
         match dst {
-            DType::F16 => out[obase..obase + 2].copy_from_slice(&half::f16::from_f32(f).to_le_bytes()),
-            DType::BF16 => out[obase..obase + 2].copy_from_slice(&half::bf16::from_f32(f).to_le_bytes()),
+            DType::F16 =>
+                out[obase..obase + 2].copy_from_slice(&half::f16::from_f32(f).to_le_bytes()),
+            DType::BF16 =>
+                out[obase..obase + 2].copy_from_slice(&half::bf16::from_f32(f).to_le_bytes()),
             DType::F32 => out[obase..obase + 4].copy_from_slice(&f.to_le_bytes()),
             _ => unreachable!(),
         }
@@ -57,7 +62,11 @@ pub fn load_weights(path: impl AsRef<Path>, target_dtype: DType) -> Result<Weigh
     // Collect safetensors shards (single file or directory).
     let shards: Vec<_> = if path.is_dir() {
         let mut s: Vec<_> = std::fs::read_dir(path)?
-            .filter_map(|e| e.ok().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "safetensors")))
+            .filter_map(|e| {
+                e.ok()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|e| e == "safetensors"))
+            })
             .collect();
         s.sort();
         info!(n_shards = s.len(), dir = %path.display(), "loading safetensors shards");
@@ -88,29 +97,35 @@ pub fn remap_hf_llama_names(raw: WeightMap) -> WeightMap {
 }
 
 fn remap_one(name: &str) -> Cow<'_, str> {
-    if name == "model.embed_tokens.weight" { return Cow::Borrowed("tok_embeddings"); }
-    if name == "model.norm.weight" { return Cow::Borrowed("output_norm"); }
-    if name == "lm_head.weight" { return Cow::Borrowed("lm_head"); }
+    if name == "model.embed_tokens.weight" {
+        return Cow::Borrowed("tok_embeddings");
+    }
+    if name == "model.norm.weight" {
+        return Cow::Borrowed("output_norm");
+    }
+    if name == "lm_head.weight" {
+        return Cow::Borrowed("lm_head");
+    }
 
-    if let Some(rest) = name.strip_prefix("model.layers.") {
-        if let Some(dot) = rest.find('.') {
-            let suffix = &rest[dot + 1..];
-            if let Ok(n) = rest[..dot].parse::<usize>() {
-                let mapped = match suffix {
-                    "input_layernorm.weight" => Some("attn_norm"),
-                    "post_attention_layernorm.weight" => Some("ffn_norm"),
-                    "self_attn.q_proj.weight" => Some("attn.q_proj"),
-                    "self_attn.k_proj.weight" => Some("attn.k_proj"),
-                    "self_attn.v_proj.weight" => Some("attn.v_proj"),
-                    "self_attn.o_proj.weight" => Some("attn.o_proj"),
-                    "mlp.gate_proj.weight" => Some("mlp.gate_proj"),
-                    "mlp.up_proj.weight" => Some("mlp.up_proj"),
-                    "mlp.down_proj.weight" => Some("mlp.down_proj"),
-                    _ => None,
-                };
-                if let Some(s) = mapped {
-                    return Cow::Owned(format!("layers.{n}.{s}"));
-                }
+    if let Some(rest) = name.strip_prefix("model.layers.")
+        && let Some(dot) = rest.find('.')
+    {
+        let suffix = &rest[dot + 1..];
+        if let Ok(n) = rest[..dot].parse::<usize>() {
+            let mapped = match suffix {
+                "input_layernorm.weight" => Some("attn_norm"),
+                "post_attention_layernorm.weight" => Some("ffn_norm"),
+                "self_attn.q_proj.weight" => Some("attn.q_proj"),
+                "self_attn.k_proj.weight" => Some("attn.k_proj"),
+                "self_attn.v_proj.weight" => Some("attn.v_proj"),
+                "self_attn.o_proj.weight" => Some("attn.o_proj"),
+                "mlp.gate_proj.weight" => Some("mlp.gate_proj"),
+                "mlp.up_proj.weight" => Some("mlp.up_proj"),
+                "mlp.down_proj.weight" => Some("mlp.down_proj"),
+                _ => None,
+            };
+            if let Some(s) = mapped {
+                return Cow::Owned(format!("layers.{n}.{s}"));
             }
         }
     }

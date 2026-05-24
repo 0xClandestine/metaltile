@@ -39,7 +39,7 @@ const WATCHDOG_CHECK_INTERVAL: u64 = 100;
 
 fn check_watchdog(start: &Instant, counter: &mut u64, label: &str) {
     *counter += 1;
-    if *counter % WATCHDOG_CHECK_INTERVAL == 0
+    if (*counter).is_multiple_of(WATCHDOG_CHECK_INTERVAL)
         && start.elapsed() > Duration::from_secs(GPU_WATCHDOG_SECS)
     {
         error!(
@@ -104,10 +104,10 @@ fn bind_node(
             SlotRef::Weight(name) => {
                 if let Some(rb) = resident.get(name) {
                     sp.insert(param.clone(), rb.clone());
-                } else if let Some(wm) = weights {
-                    if let Some(bytes) = wm.get(name) {
-                        bufs.insert(param.clone(), bytes.clone());
-                    }
+                } else if let Some(wm) = weights
+                    && let Some(bytes) = wm.get(name)
+                {
+                    bufs.insert(param.clone(), bytes.clone());
                 }
                 // Missing weight caught by safety check below.
             },
@@ -179,7 +179,14 @@ fn bind_node(
         }
     }
 
-    Ok(NodeBindings { resident: sp, out_resident: sp_out, buffers: bufs, dyn_cexpr: dc, dyn_state_in: dsi, cpu_state_out: cso })
+    Ok(NodeBindings {
+        resident: sp,
+        out_resident: sp_out,
+        buffers: bufs,
+        dyn_cexpr: dc,
+        dyn_state_in: dsi,
+        cpu_state_out: cso,
+    })
 }
 
 /// Execute a plan on the GPU and read back the final output buffer.
@@ -206,6 +213,7 @@ pub fn execute_plan(
 // ── PreparedDispatch ───────────────────────────────────────────────────
 
 /// Pre-built per-node binding maps for efficient per-token dispatch.
+#[allow(clippy::type_complexity)]
 pub struct PreparedDispatch {
     pub(crate) slot_bufs: Vec<ResidentBuffer>,
     all_resident: Vec<FxHashMap<String, ResidentBuffer>>,
@@ -284,7 +292,9 @@ pub fn execute_prepared(
 
     // ── Update dynamic entries (per-token) ────────────────────────────
     for (node_idx, cexprs) in &pd.dyn_cexpr {
-        if *node_idx >= n { continue; }
+        if *node_idx >= n {
+            continue;
+        }
         let bufs = &mut pd.all_buffers[*node_idx];
         for (param, key) in cexprs {
             let bytes = state.get(key).and_then(|b| b.get(..4)).ok_or_else(|| {
@@ -301,20 +311,24 @@ pub fn execute_prepared(
     }
 
     for (node_idx, inputs) in &pd.dyn_state_in {
-        if *node_idx >= n { continue; }
+        if *node_idx >= n {
+            continue;
+        }
         let bufs = &mut pd.all_buffers[*node_idx];
         for (param, key) in inputs {
-            if let Some(src) = state.get(key.as_str()) {
-                if let Some(buf) = bufs.get_mut(param.as_str()) {
-                    let len = src.len().min(buf.len());
-                    buf[..len].copy_from_slice(&src[..len]);
-                }
+            if let Some(src) = state.get(key.as_str())
+                && let Some(buf) = bufs.get_mut(param.as_str())
+            {
+                let len = src.len().min(buf.len());
+                buf[..len].copy_from_slice(&src[..len]);
             }
         }
     }
 
     for (node_idx, outputs) in &pd.cpu_state_out {
-        if *node_idx >= n { continue; }
+        if *node_idx >= n {
+            continue;
+        }
         let bufs = &mut pd.all_buffers[*node_idx];
         for (param, _key, _size) in outputs {
             if let Some(buf) = bufs.get_mut(param.as_str()) {
@@ -344,18 +358,39 @@ pub fn execute_prepared(
     let mut watchdog_ctr: u64 = 0;
 
     #[inline]
-    fn dispatch_one(ctx: &Context, specs: &[DispatchSpec], barriers: &[bool], label: &str, ctr: &mut u64, start: &Instant) -> Result<Vec<metaltile_runtime::DispatchResult>, ModelError> {
+    fn dispatch_one(
+        ctx: &Context,
+        specs: &[DispatchSpec],
+        barriers: &[bool],
+        label: &str,
+        ctr: &mut u64,
+        start: &Instant,
+    ) -> Result<Vec<metaltile_runtime::DispatchResult>, ModelError> {
         let r = ctx.dispatch_chain(specs, barriers)?;
         check_watchdog(start, ctr, label);
         Ok(r)
     }
 
     let results = if plan.single_dispatch {
-        dispatch_one(ctx, &all_specs, &pd.barriers_after[..n], "execute_prepared (fused)", &mut watchdog_ctr, &start)?
+        dispatch_one(
+            ctx,
+            &all_specs,
+            &pd.barriers_after[..n],
+            "execute_prepared (fused)",
+            &mut watchdog_ctr,
+            &start,
+        )?
     } else {
         let mut all = Vec::with_capacity(n);
         for i in 0..n {
-            all.append(&mut dispatch_one(ctx, &all_specs[i..i + 1], &[], &format!("execute_prepared node {i}"), &mut watchdog_ctr, &start)?);
+            all.append(&mut dispatch_one(
+                ctx,
+                &all_specs[i..i + 1],
+                &[],
+                &format!("execute_prepared node {i}"),
+                &mut watchdog_ctr,
+                &start,
+            )?);
         }
         all
     };
@@ -364,7 +399,9 @@ pub fn execute_prepared(
 
     // ── Read back CPU-side state outputs ──────────────────────────────
     for (node_idx, outputs) in &pd.cpu_state_out {
-        if *node_idx >= n { continue; }
+        if *node_idx >= n {
+            continue;
+        }
         let Some(result) = results.get(*node_idx) else { continue };
         for (param, key, _size) in outputs {
             if let Some(bytes) = result.outputs.get(param) {
@@ -389,12 +426,20 @@ fn compute_barriers_after(nodes: &[DispatchNode]) -> Vec<bool> {
     let n = nodes.len();
     (0..n)
         .map(|i| {
-            if i + 1 >= n { return false; }
+            if i + 1 >= n {
+                return false;
+            }
             let p = &nodes[i];
             let c = &nodes[i + 1];
             p.output_bindings.iter().any(|(_, out)| match out {
-                SlotRef::Slot(oi) => c.input_bindings.iter().any(|(_, inn)| matches!(inn, SlotRef::Slot(ii) if ii == oi)),
-                SlotRef::State(ok) => c.input_bindings.iter().any(|(_, inn)| matches!(inn, SlotRef::State(ik) if ik == ok)),
+                SlotRef::Slot(oi) => c
+                    .input_bindings
+                    .iter()
+                    .any(|(_, inn)| matches!(inn, SlotRef::Slot(ii) if ii == oi)),
+                SlotRef::State(ok) => c
+                    .input_bindings
+                    .iter()
+                    .any(|(_, inn)| matches!(inn, SlotRef::State(ik) if ik == ok)),
                 SlotRef::Weight(_) => false,
             })
         })

@@ -110,10 +110,10 @@ impl Pass for KernelInlinePass {
                 for (inlined_op, inlined_result) in inlined {
                     // Deduplicate ThreadgroupAlloc: skip if same name already
                     // declared by a previously-inlined callee.
-                    if let Op::ThreadgroupAlloc { ref name, .. } = inlined_op {
-                        if !seen_tg_allocs.insert(name.clone()) {
-                            continue; // already emitted — skip duplicate
-                        }
+                    if let Op::ThreadgroupAlloc { ref name, .. } = inlined_op
+                        && !seen_tg_allocs.insert(name.clone())
+                    {
+                        continue; // already emitted — skip duplicate
                     }
                     new_ops.push(inlined_op);
                     new_results.push(inlined_result);
@@ -355,10 +355,10 @@ fn apply_tensor_renames(op: &mut Op, renames: &FxHashMap<String, String>) {
         }
     };
     let rename_opt = |s: &mut Option<String>| {
-        if let Some(name) = s {
-            if let Some(new) = renames.get(name.as_str()) {
-                name.clone_from(new);
-            }
+        if let Some(name) = s
+            && let Some(new) = renames.get(name.as_str())
+        {
+            name.clone_from(new);
         }
     };
     match op {

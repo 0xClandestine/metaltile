@@ -6,7 +6,7 @@ unsafe extern "C" {}
 
 use std::{borrow::Cow, collections::BTreeMap};
 
-use metaltile_codegen::msl::{generator_for_mode, MslGenerator};
+use metaltile_codegen::msl::{MslGenerator, generator_for_mode};
 #[cfg(target_os = "macos")]
 use metaltile_core::ir::KernelMode;
 use metaltile_core::{
@@ -1038,7 +1038,8 @@ impl Context {
 
             let mut pipes: Vec<Retained<Pso>> = Vec::with_capacity(specs.len());
             for (spec, msl) in specs.iter().zip(msl_sources.iter()) {
-                let cache_key = pso_cache_key(spec.kernel, spec.fn_consts, spec.threads_per_group[0] as u32);
+                let cache_key =
+                    pso_cache_key(spec.kernel, spec.fn_consts, spec.threads_per_group[0] as u32);
                 let pipe: Retained<Pso> = {
                     let mut lock = cache
                         .lock()

@@ -96,10 +96,10 @@ impl Session {
 
         // Handle weight tying: if lm_head is missing but tok_embeddings
         // exists (tie_word_embeddings = true), alias them.
-        if !weights.contains_key("lm_head") {
-            if let Some(emb) = weights.get("tok_embeddings").cloned() {
-                weights.insert("lm_head".to_string(), emb);
-            }
+        if !weights.contains_key("lm_head")
+            && let Some(emb) = weights.get("tok_embeddings").cloned()
+        {
+            weights.insert("lm_head".to_string(), emb);
         }
 
         // ── Build GPU context ──────────────────────────────────────────
@@ -356,7 +356,8 @@ struct ScalarState([u8; 24]);
 
 impl ScalarState {
     fn from_state(state: &StateMap) -> Self {
-        const KEYS: [&str; 6] = ["token_id", "position", "n_kv", "rms_eps", "temperature", "uniform"];
+        const KEYS: [&str; 6] =
+            ["token_id", "position", "n_kv", "rms_eps", "temperature", "uniform"];
         let mut s = [0u8; 24];
         for (i, key) in KEYS.iter().enumerate() {
             if let Some(buf) = state.get(*key) {
@@ -374,7 +375,8 @@ impl ScalarState {
     fn set_uniform(&mut self, val: f32) { self.set_f32(5, val); }
 
     fn sync_to_state(&self, state: &mut StateMap) {
-        const KEYS: [&str; 6] = ["token_id", "position", "n_kv", "rms_eps", "temperature", "uniform"];
+        const KEYS: [&str; 6] =
+            ["token_id", "position", "n_kv", "rms_eps", "temperature", "uniform"];
         for (i, key) in KEYS.iter().enumerate() {
             let base = i * 4;
             if let Some(buf) = state.get_mut(*key) {
@@ -423,8 +425,10 @@ fn build_compile_params(
     }
 }
 
-use std::cell::Cell;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    cell::Cell,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 thread_local! {
     static RNG: Cell<u64> = Cell::new({
