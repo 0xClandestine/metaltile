@@ -40,7 +40,6 @@ pub use metaltile_core::constexpr::ConstExprValues;
 pub use metaltile_core::dtype::DType;
 /// Apple GPU family inference from Metal device name strings.
 pub use metaltile_core::gpu_family::GpuFamily;
-
 // IR types — user-facing subset (op-kind enums and kernel-level containers).
 // Raw IR plumbing (Op, Block, ValueId, Param, etc.) lives in `metaltile::core::ir`.
 /// Neural activation function kind.
@@ -63,48 +62,45 @@ pub use metaltile_core::ir::KernelMode;
 pub use metaltile_core::ir::ReduceKind;
 /// Unary math operation kind.
 pub use metaltile_core::ir::UnaryOpKind;
-
 /// Registry entry for a MetalTile kernel available for cross-kernel calling.
 ///
 /// You only need this when registering a kernel for use as an inlined callee via the
 /// `inventory::collect!` mechanism. For ordinary `#[kernel]` definitions this is handled
 /// automatically by the macro.
 pub use metaltile_core::kernel_registry::KernelEntry;
-
 /// Shape-building helpers.
 pub use metaltile_core::shape::Dim;
-pub use metaltile_core::shape::DimExpr;
-pub use metaltile_core::shape::Shape;
 /// Build a 2D tile shape at runtime: `make_tile(rows, cols) -> Shape`.
 ///
 /// For a compile-time equivalent use the [`tile!`] macro instead.
 pub use metaltile_core::shape::tile as make_tile;
-
-/// Marks a function as a MetalTile kernel.
-pub use metaltile_macros::kernel;
-/// Marks a kernel parameter as a compile-time constant.
-pub use metaltile_macros::constexpr;
-/// Marks a `Tensor` parameter for `constant T&` lowering in MSL.
-pub use metaltile_macros::scalar;
-/// Marks a `Tensor` parameter for strided lowering (shape + stride arrays emitted).
-pub use metaltile_macros::strided;
-/// Constructs a `Shape` from dimension expressions.
-pub use metaltile_macros::shape;
-/// Constructs a 2D tile shape at macro-expansion time.
-pub use metaltile_macros::tile;
+/// A single dimension expression used in shape algebra.
+// (grouped by rustfmt)
+pub use metaltile_core::shape::{DimExpr, Shape};
 /// Registers a kernel for automatic benchmarking (place before `#[kernel]`).
 pub use metaltile_macros::bench_kernel;
-
+/// Marks a kernel parameter as a compile-time constant.
+pub use metaltile_macros::constexpr;
+/// Marks a function as a MetalTile kernel.
+pub use metaltile_macros::kernel;
+/// Marks a `Tensor` parameter for `constant T&` lowering in MSL.
+pub use metaltile_macros::scalar;
+/// Constructs a `Shape` from dimension expressions.
+pub use metaltile_macros::shape;
+/// Marks a `Tensor` parameter for strided lowering (shape + stride arrays emitted).
+pub use metaltile_macros::strided;
+/// Constructs a 2D tile shape at macro-expansion time.
+pub use metaltile_macros::tile;
 /// Metal GPU device and command queue context.
 pub use metaltile_runtime::Context;
 /// Output buffers returned after a kernel dispatch.
 pub use metaltile_runtime::DispatchResult;
 /// Input buffer spec for the launched dispatch pipeline.
 pub use metaltile_runtime::DispatchSpec;
-/// A resident Metal buffer managed by the context.
-pub use metaltile_runtime::ResidentBuffer;
 /// Top-level runtime error.
 pub use metaltile_runtime::MetalTileError;
+/// A resident Metal buffer managed by the context.
+pub use metaltile_runtime::ResidentBuffer;
 /// Start GPU trace capture (Xcode GPU frame capture).
 pub use metaltile_runtime::start_gpu_trace;
 /// Stop GPU trace capture.
