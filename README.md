@@ -76,13 +76,16 @@ kernel void mt_exp(
 
 ## Docs
 
-<pre>
-├── <a href="docs/getting-started.md">getting-started.md</a> — toolchain, crate layout, build, first kernel
-├── <a href="docs/developing.md">developing.md</a>      — repo layout, dev loop, kernel-authoring hazards
-├── <a href="docs/testing.md">testing.md</a>         — test layers, CI, and test-infra gaps
-├── <a href="docs/cli.md">cli.md</a>             — the <code>tile</code> binary, all flags and subcommands
-└── <a href="docs/publishing.md">publishing.md</a>      — the release flow
-</pre>
+<details>
+  <summary>Documentation</summary>
+  <ol>
+    <li><a href="docs/getting-started.md">Getting Started</a> — toolchain, crate layout, build, first kernel</li>
+    <li><a href="docs/developing.md">Developing</a> — repo layout, dev loop, kernel-authoring hazards</li>
+    <li><a href="docs/testing.md">Testing</a> — test layers, CI, and test-infra gaps</li>
+    <li><a href="docs/cli.md">CLI</a> — the <code>tile</code> binary, all flags and subcommands</li>
+    <li><a href="docs/publishing.md">Publishing</a> — the release flow</li>
+  </ol>
+</details>
 
 ## Contributing
 
