@@ -1,0 +1,56 @@
+name: Release
+
+# Trigger on semver tags pushed to main (e.g. v0.2.0, v1.0.0-rc.1).
+# Also runnable manually to re-publish a tag that already exists.
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.2.0)'
+        required: true
+
+permissions:
+  contents: write   # create/update GitHub Releases and upload assets
+
+jobs:
+  build:
+    name: Build tile binary
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5.0.0
+        with:
+          # Use the explicit tag when triggered manually; otherwise the push
+          # event already has the tag checked out.
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false   # release builds are rare; don't pollute the cache
+
+      - name: Build release binary
+        run: cargo build --release -p metaltile-cli
+
+      - name: Package binary
+        run: |
+          cp target/release/tile tile
+          tar czf tile-aarch64-apple-darwin.tar.gz tile
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+
+          # Create the release (idempotent: --target prevents re-creating if
+          # the tag already exists from a previous manual run).
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            tile-aarch64-apple-darwin.tar.gz \
+            || gh release upload "$TAG" \
+                 tile-aarch64-apple-darwin.tar.gz \
+                 --clobber
