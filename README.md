@@ -170,6 +170,7 @@ Full walkthrough and crate layout: [`docs/getting-started.md`](docs/getting-star
 | FP4 / FP8 quantize / dequantize (E2M1, E4M3, E5M2) | ✅ |
 | SDPA — vector decode (GQA), two-pass decode, batched-Q speculative decode | ✅ |
 | SDPA — Flash-Attention-2 prefill, incl. simdgroup-MMA fragments | ✅ |
+| SDPA — VLM vision-tower bidirectional (SigLIP / CLIP / FastViT / PaliGemma; d=32/64/72) | ✅ |
 | Tiled GEMM — `steel_gemm` fused / gather / masked / segmented / split-K | ✅ |
 | Convolution — 1-D / 2-D / 3-D / general (strided, dilated, grouped) + 3×3 Winograd | ✅ |
 | FFT — radix-2 Cooley–Tukey, forward + inverse | ✅ |
