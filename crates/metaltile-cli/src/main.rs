@@ -9,6 +9,7 @@
 //!   device    Show GPU device info and supported features
 //!   snap      Save bench results as a regression baseline
 //!   diff      Compare bench results to a saved baseline
+//!   update    Install the latest tile binary (or build from a PR / commit)
 
 mod cmd;
 mod error;
@@ -50,6 +51,8 @@ enum Command {
     Snap(SnapArgs),
     /// Compare bench results against a saved baseline
     Diff(DiffArgs),
+    /// Install the latest tile binary, or build from a PR / commit
+    Update(UpdateArgs),
 }
 
 // ── Bench ────────────────────────────────────────────────────────────────
@@ -189,6 +192,21 @@ struct DiffArgs {
     only_improvements: bool,
 }
 
+// ── Update ────────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+struct UpdateArgs {
+    /// Print what would be installed without modifying anything
+    #[arg(long = "check")]
+    check: bool,
+    /// Build and install from the head of this PR number (requires git + cargo)
+    #[arg(long = "pr", value_name = "N", conflicts_with = "commit")]
+    pr: Option<u32>,
+    /// Build and install from this commit SHA (requires git + cargo)
+    #[arg(long = "commit", value_name = "SHA", conflicts_with = "pr")]
+    commit: Option<String>,
+}
+
 // ── Dispatch ─────────────────────────────────────────────────────────────
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -228,6 +246,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Device(args) => cmd::device::run(&args)?,
         Command::Snap(args) => cmd::snap::run(&args)?,
         Command::Diff(args) => cmd::diff::run(&args)?,
+        Command::Update(args) => cmd::update::run(&args)?,
     }
     Ok(())
 }
