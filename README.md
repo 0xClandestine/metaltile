@@ -1,6 +1,6 @@
 <p align="center">
   <h1 align="center">MetalTile</h1>
-  <p align="center">Rust-embedded DSL for Apple Metal GPU kernels — write Rust, get faster-than-MLX MSL</p>
+  <p align="center">A Rust-embedded DSL for writing Apple Metal GPU kernels. Write tile-level algorithms in Rust, get optimized Metal Shading Language out — verified against, and frequently faster than, hand-tuned MLX.</p>
 </p>
 
 <p align="center">
