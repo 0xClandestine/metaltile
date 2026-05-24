@@ -89,16 +89,13 @@ pub fn mt_hadamard_m12<T>(inp: Tensor<T>, mut out: Tensor<T>, #[constexpr] scale
     stack_store("signs", 9u32, 1129u32);
     stack_store("signs", 10u32, 1807u32);
     stack_store("signs", 11u32, 421u32);
-
     let t = simd_lane;
     let row = tgid_x;
     let base = row * 12u32;
     let tg = base + t;
-
     let inp_f = load(inp[tg]).cast::<f32>();
     threadgroup_store("buf", t, inp_f);
     threadgroup_barrier();
-
     let signs_t = stack_load("signs", t);
     let mut acc = 0.0f32;
     for j in range(0u32, 12u32, 1u32) {
@@ -107,7 +104,6 @@ pub fn mt_hadamard_m12<T>(inp: Tensor<T>, mut out: Tensor<T>, #[constexpr] scale
         let buf_j = threadgroup_load("buf", j);
         acc = acc + sign * buf_j;
     }
-
     let scaled = acc * scale;
     store(out[tg], scaled.cast::<T>());
 }
@@ -137,16 +133,13 @@ pub fn mt_hadamard_m20<T>(inp: Tensor<T>, mut out: Tensor<T>, #[constexpr] scale
     stack_store("signs", 17u32, 135722u32);
     stack_store("signs", 18u32, 270452u32);
     stack_store("signs", 19u32, 540873u32);
-
     let t = simd_lane;
     let row = tgid_x;
     let base = row * 20u32;
     let tg = base + t;
-
     let inp_f = load(inp[tg]).cast::<f32>();
     threadgroup_store("buf", t, inp_f);
     threadgroup_barrier();
-
     let signs_t = stack_load("signs", t);
     let mut acc = 0.0f32;
     for j in range(0u32, 20u32, 1u32) {
@@ -155,7 +148,6 @@ pub fn mt_hadamard_m20<T>(inp: Tensor<T>, mut out: Tensor<T>, #[constexpr] scale
         let buf_j = threadgroup_load("buf", j);
         acc = acc + sign * buf_j;
     }
-
     let scaled = acc * scale;
     store(out[tg], scaled.cast::<T>());
 }
@@ -193,16 +185,13 @@ pub fn mt_hadamard_m28<T>(inp: Tensor<T>, mut out: Tensor<T>, #[constexpr] scale
     stack_store("signs", 25u32, 34477548u32);
     stack_store("signs", 26u32, 68954969u32);
     stack_store("signs", 27u32, 135812787u32);
-
     let t = simd_lane;
     let row = tgid_x;
     let base = row * 28u32;
     let tg = base + t;
-
     let inp_f = load(inp[tg]).cast::<f32>();
     threadgroup_store("buf", t, inp_f);
     threadgroup_barrier();
-
     let signs_t = stack_load("signs", t);
     let mut acc = 0.0f32;
     for j in range(0u32, 28u32, 1u32) {
@@ -211,7 +200,6 @@ pub fn mt_hadamard_m28<T>(inp: Tensor<T>, mut out: Tensor<T>, #[constexpr] scale
         let buf_j = threadgroup_load("buf", j);
         acc = acc + sign * buf_j;
     }
-
     let scaled = acc * scale;
     store(out[tg], scaled.cast::<T>());
 }

@@ -83,29 +83,23 @@ pub fn ffai_sdpa_bidirectional_d64<T>(
     let sg = simd_id;
     let lane = simd_lane;
     let ns = n_simd;
-
     // No `causal` branch — every query attends the full block.
     let n_kv = base_kv + n_query;
-
     // Two tg_out slots at head_dim=64; 2 elements per lane.
     threadgroup_alloc("tg_max", 32);
     threadgroup_alloc("tg_sum", 32);
     threadgroup_alloc("tg_out0", 1056);
     threadgroup_alloc("tg_out1", 1056);
-
     let q_off = (query_idx * n_q_heads + q_head) * head_dim;
     let kv_head_base = kv_head * kv_stride * head_dim;
     let d0 = lane * 2u32;
-
     // Pre-scale this lane's 2-element Q pair once; K/V are streamed.
     let q0 = load(q[q_off + d0]).cast::<f32>() * scale;
     let q1 = load(q[q_off + d0 + 1u32]).cast::<f32>() * scale;
-
     let mut run_max = neg_infinity();
     let mut run_sum = 0.0f32;
     let mut o0 = 0.0f32;
     let mut o1 = 0.0f32;
-
     for _t in range(sg, n_kv, ns) {
         let base = kv_head_base + _t * head_dim;
         let kv_idx = base + d0;
@@ -129,7 +123,6 @@ pub fn ffai_sdpa_bidirectional_d64<T>(
         o0 = o0 * factor + weight * v0;
         o1 = o1 * factor + weight * v1;
     }
-
     // ── Cross-simdgroup reduction: max + sum_exp ────────────────────
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max);
@@ -148,7 +141,6 @@ pub fn ffai_sdpa_bidirectional_d64<T>(
         }
     }
     threadgroup_barrier();
-
     // ── Cross-simdgroup reduction: outputs ──────────────────────────
     let g_max = threadgroup_load("tg_max", 0);
     let g_sum = threadgroup_load("tg_sum", 0);
@@ -160,7 +152,6 @@ pub fn ffai_sdpa_bidirectional_d64<T>(
     threadgroup_store("tg_out0", idx, o0 * rescale);
     threadgroup_store("tg_out1", idx, o1 * rescale);
     threadgroup_barrier();
-
     if sg == 0 {
         let mut so0 = 0.0f32;
         let mut so1 = 0.0f32;
@@ -205,25 +196,19 @@ pub fn ffai_sdpa_bidirectional_d32<T>(
     let sg = simd_id;
     let lane = simd_lane;
     let ns = n_simd;
-
     let n_kv = base_kv + n_query;
-
     // Single tg_out slot at head_dim=32; 1 element per lane.
     threadgroup_alloc("tg_max", 32);
     threadgroup_alloc("tg_sum", 32);
     threadgroup_alloc("tg_out0", 1056);
-
     let q_off = (query_idx * n_q_heads + q_head) * head_dim;
     let kv_head_base = kv_head * kv_stride * head_dim;
     let d0 = lane;
-
     // Pre-scale this lane's single Q element once; K/V are streamed.
     let q0 = load(q[q_off + d0]).cast::<f32>() * scale;
-
     let mut run_max = neg_infinity();
     let mut run_sum = 0.0f32;
     let mut o0 = 0.0f32;
-
     for _t in range(sg, n_kv, ns) {
         let base = kv_head_base + _t * head_dim;
         let kv0 = base + d0;
@@ -240,7 +225,6 @@ pub fn ffai_sdpa_bidirectional_d32<T>(
         let v0 = v0_raw.cast::<f32>();
         o0 = o0 * factor + weight * v0;
     }
-
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max);
         threadgroup_store("tg_sum", sg, run_sum);
@@ -258,7 +242,6 @@ pub fn ffai_sdpa_bidirectional_d32<T>(
         }
     }
     threadgroup_barrier();
-
     let g_max = threadgroup_load("tg_max", 0);
     let g_sum = threadgroup_load("tg_sum", 0);
     let rescale = select(g_sum > 0.0f32, exp(run_max - g_max) / g_sum, 0.0f32);
@@ -266,7 +249,6 @@ pub fn ffai_sdpa_bidirectional_d32<T>(
     let idx = lane * stride + sg;
     threadgroup_store("tg_out0", idx, o0 * rescale);
     threadgroup_barrier();
-
     if sg == 0 {
         let mut so0 = 0.0f32;
         for _g in range(0u32, ns, 1u32) {
@@ -317,9 +299,7 @@ pub fn ffai_sdpa_bidirectional_d72<T>(
     let sg = simd_id;
     let lane = simd_lane;
     let ns = n_simd;
-
     let n_kv = base_kv + n_query;
-
     // Three tg_out slots at head_dim=72; 3 elements per lane (lanes
     // 24..31 are idle — their per-element bounds checks fail).
     threadgroup_alloc("tg_max", 32);
@@ -327,31 +307,26 @@ pub fn ffai_sdpa_bidirectional_d72<T>(
     threadgroup_alloc("tg_out0", 1056);
     threadgroup_alloc("tg_out1", 1056);
     threadgroup_alloc("tg_out2", 1056);
-
     let q_off = (query_idx * n_q_heads + q_head) * head_dim;
     let kv_head_base = kv_head * kv_stride * head_dim;
     let d0 = lane * 3u32;
     let d1 = d0 + 1u32;
     let d2 = d0 + 2u32;
-
     // Per-element bounds masks. Clamp indices to a safe in-buffer
     // location (0) so the load itself never reads OOB; the select on
     // the result zeros the lane's contribution to the dot product.
     let d0s = select(d0 < head_dim, d0, 0u32);
     let d1s = select(d1 < head_dim, d1, 0u32);
     let d2s = select(d2 < head_dim, d2, 0u32);
-
     // Pre-scale this lane's 3-element Q triplet; mask OOB to 0.
     let q0 = select(d0 < head_dim, load(q[q_off + d0s]).cast::<f32>() * scale, 0.0f32);
     let q1 = select(d1 < head_dim, load(q[q_off + d1s]).cast::<f32>() * scale, 0.0f32);
     let q2 = select(d2 < head_dim, load(q[q_off + d2s]).cast::<f32>() * scale, 0.0f32);
-
     let mut run_max = neg_infinity();
     let mut run_sum = 0.0f32;
     let mut o0 = 0.0f32;
     let mut o1 = 0.0f32;
     let mut o2 = 0.0f32;
-
     for _t in range(sg, n_kv, ns) {
         let base = kv_head_base + _t * head_dim;
         // Same clamp-then-mask pattern as Q.
@@ -372,7 +347,6 @@ pub fn ffai_sdpa_bidirectional_d72<T>(
         o1 = o1 * factor + weight * v1;
         o2 = o2 * factor + weight * v2;
     }
-
     // ── Cross-simdgroup reduction: max + sum_exp ────────────────────
     if lane == 0u32 {
         threadgroup_store("tg_max", sg, run_max);
@@ -391,7 +365,6 @@ pub fn ffai_sdpa_bidirectional_d72<T>(
         }
     }
     threadgroup_barrier();
-
     // ── Cross-simdgroup reduction: outputs ──────────────────────────
     let g_max = threadgroup_load("tg_max", 0);
     let g_sum = threadgroup_load("tg_sum", 0);
@@ -405,7 +378,6 @@ pub fn ffai_sdpa_bidirectional_d72<T>(
     threadgroup_store("tg_out1", idx, o1 * rescale);
     threadgroup_store("tg_out2", idx, o2 * rescale);
     threadgroup_barrier();
-
     if sg == 0u32 {
         let mut so0 = 0.0f32;
         let mut so1 = 0.0f32;

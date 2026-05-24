@@ -85,16 +85,13 @@ pub fn mt_gated_delta_prep_step<T>(
     let dv_idx = tgid_x;
     let n = tgid_y;
     let dk_idx = tid;
-
     // GQA decomposition: n = b · Hv + hv_idx; hk_idx = hv_idx / (Hv/Hk).
     // Mirrors `mt_gated_delta_step` exactly.
     let hv_idx = n - (n / hv) * hv;
     let b = n / hv;
     let hk_per_hv = hv / hk;
     let hk_idx = hv_idx / hk_per_hv;
-
     let n_per_t = dk / 32u32;
-
     // Conv-output flat layout for batch `b`:
     //   q_base = b · (2·Hk·Dk + Hv·Dv)
     //   k_base = q_base + Hk·Dk
@@ -104,11 +101,9 @@ pub fn mt_gated_delta_prep_step<T>(
     let q_off = conv_base + hk_idx * dk;
     let k_off = conv_base + hk * dk + hk_idx * dk;
     let v_off = conv_base + 2u32 * hk * dk + hv_idx * dv;
-
     // Per-head RMSNorm eps = 1e-6 (matches `perHeadRMSNormScale35`).
     let eps = 0.000001f32;
     let dk_f = dk.cast::<f32>();
-
     // ─── Phase 0a: Per-head RMSNorm of q / k ─────────────────────────────
     //
     // Each lane reads its `n_per_t` chunk of q and k (Dk-wide, per-head),
@@ -123,7 +118,6 @@ pub fn mt_gated_delta_prep_step<T>(
     stack_alloc("k_raw", 8u32, "f32");
     stack_alloc("q_w", 8u32, "f32");
     stack_alloc("k_w", 8u32, "f32");
-
     let mut q_ssq = 0.0f32;
     let mut k_ssq = 0.0f32;
     for i in range(0u32, n_per_t, 1u32) {
@@ -146,7 +140,6 @@ pub fn mt_gated_delta_prep_step<T>(
     // `scale` parameter directly: caller bakes it into `*_norm_weight`.
     let q_inv = rsqrt(q_ssq_sum / dk_f + eps);
     let k_inv = rsqrt(k_ssq_sum / dk_f + eps);
-
     // ─── Phase 0b: g / beta from a_log / dt_bias / a_raw / b_raw ─────────
     //
     // Math per Hv-head:
@@ -167,7 +160,6 @@ pub fn mt_gated_delta_prep_step<T>(
     let dt_bias_val = load(dt_bias[hv_idx]).cast::<f32>();
     let a_raw_val = load(a_raw[n]).cast::<f32>();
     let b_raw_val = load(b_raw[n]).cast::<f32>();
-
     // softplus(x)   = log(1 + exp(x))  — un-clamped; production magnitudes
     //                  of (a_raw + dt_bias) sit in fp32 safe range.
     // sigmoid(x)    = 1 / (1 + exp(-x))  — inlined rather than using the
@@ -181,20 +173,16 @@ pub fn mt_gated_delta_prep_step<T>(
     let dt_val = log(exp(pre_softplus) + 1.0f32);
     let g_val = exp(0.0f32 - exp(a_log_val) * dt_val);
     let beta_val = 1.0f32 / (1.0f32 + exp(0.0f32 - b_raw_val));
-
     // v reads once per Dv slot — no normalization, just dtype-cast.
     let v_val = load(conv_out[v_off + dv_idx]).cast::<f32>();
-
     // ─── Phase 1: decay + kv_mem reduction ───────────────────────────────
     //
     // Same shape as `mt_gated_delta_step::phase_1` but reads q/k from the
     // per-lane `*_normed` stash instead of global. `decayed` and `k_cache`
     // stay register-resident across phases 1/2, same convention.
     let state_base = n * dv * dk + dv_idx * dk;
-
     stack_alloc("decayed", 8u32, "f32");
     stack_alloc("k_cache", 8u32, "f32");
-
     let mut kv_mem = 0.0f32;
     for i in range(0u32, n_per_t, 1u32) {
         let s_idx = n_per_t * dk_idx + i;
@@ -207,9 +195,7 @@ pub fn mt_gated_delta_prep_step<T>(
         kv_mem = kv_mem + s_decayed * k_normed;
     }
     let kv_mem_sum = simd_sum(kv_mem);
-
     let delta = (v_val - kv_mem_sum) * beta_val;
-
     // ─── Phase 2: rank-1 update + output projection ──────────────────────
     let mut out_acc = 0.0f32;
     for i in range(0u32, n_per_t, 1u32) {
@@ -222,7 +208,6 @@ pub fn mt_gated_delta_prep_step<T>(
         out_acc = out_acc + s_new * q_normed;
     }
     let out_sum = simd_sum(out_acc);
-
     // ─── Phase 3: lane 0 writes y[n, dv_idx] ────────────────────────────
     if dk_idx == 0u32 {
         store(y[n * dv + dv_idx], out_sum.cast::<T>());

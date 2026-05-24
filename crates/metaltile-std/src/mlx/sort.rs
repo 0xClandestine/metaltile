@@ -153,7 +153,6 @@ pub fn mt_merge<T>(
         let merged = run + run;
         let pair = gi / merged;
         let o = gi - pair * merged;
-
         // Run boundaries, each clamped into [0, n] so a final partial
         // pair (n not a multiple of `merged`, or an odd run count) is
         // handled without a separate code path.
@@ -164,20 +163,16 @@ pub fn mt_merge<T>(
         let b_start = a_end;
         let b_end_raw = b_start + run;
         let b_end = select(b_end_raw < n, b_end_raw, n);
-
         let a_len = a_end - a_start;
         let b_len = b_end - b_start;
-
         // Binary-search bounds for the co-rank `i` (count of A-elements
         // preceding output offset `o`).
         //   lo = max(0, o - b_len)
         //   hi = min(o, a_len)
         let lo0 = select(o > b_len, o - b_len, 0u32);
         let hi0 = select(o < a_len, o, a_len);
-
         let mut lo = lo0;
         let mut hi = hi0;
-
         // Branchless binary search. `log_steps` is a constexpr so this
         // loop fully unrolls; each step is a no-op once `lo == hi`.
         for _s in range(0u32, log_steps, 1u32) {
@@ -185,7 +180,6 @@ pub fn mt_merge<T>(
             // settle on `hi`. Only meaningful while lo < hi.
             let active = lo < hi;
             let mid = (lo + hi + 1u32) / 2u32;
-
             // Probe A[mid-1] vs B[o-mid]. While `active`, mid is in
             // (lo, hi] with 1 <= mid <= hi <= a_len, so `mid-1` indexes
             // a valid A element and `o-mid` is in [0, b_len]. Once the
@@ -203,7 +197,6 @@ pub fn mt_merge<T>(
             let b_in_range = active & (b_idx < b_len);
             let b_load = load(inp[b_start + b_idx]).cast::<f32>();
             let b_probe = select(b_in_range, b_load, infinity());
-
             // Taking the mid-th A element keeps sorted order when
             // A[mid-1] <= B[o-mid]. If so, raise `lo` to `mid`;
             // otherwise lower `hi` to `mid-1`. Both updates are gated
@@ -213,11 +206,9 @@ pub fn mt_merge<T>(
             lo = select(active, select(take_more_a, mid, lo), lo);
             hi = select(active, select(take_more_a, hi, mid - 1u32), hi);
         }
-
         // i = co-rank, j = its B counterpart.
         let i = lo;
         let j = o - i;
-
         // Pick the smaller candidate; out-of-range slots are +inf so an
         // exhausted run never wins. `i + j == o < a_len + b_len`, so at
         // least one of the two is a real element. Indices are clamped
@@ -231,7 +222,6 @@ pub fn mt_merge<T>(
         let b_safe = select(b_start + j < n, b_start + j, 0u32);
         let a_val = select(a_real, load(inp[a_safe]).cast::<f32>(), infinity());
         let b_val = select(b_real, load(inp[b_safe]).cast::<f32>(), infinity());
-
         // A wins ties (a_val <= b_val) → stable merge.
         let pick_a = a_val <= b_val;
         let chosen = select(pick_a, a_val, b_val);
@@ -287,31 +277,25 @@ pub fn mt_sort_segmented<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32)
     // `tgid_x` = row index; `tid` = thread-local ID within the TG.
     let row = tgid_x;
     let t = tid;
-
     // 1024-slot shared memory for the bitonic network.
     threadgroup_alloc("shared", 1024, T);
-
     let row_base = row * n;
-
     // Load 4 elements per thread. Out-of-range slots get `+∞` so they
     // sink to the tail and the in-range result is correct for any n ≤ 1024.
     let i0 = t * 4u32;
     let i1 = i0 + 1u32;
     let i2 = i0 + 2u32;
     let i3 = i0 + 3u32;
-
     let inf_f = infinity();
     let v0 = select(i0 < n, load(inp[row_base + i0]).cast::<f32>(), inf_f);
     let v1 = select(i1 < n, load(inp[row_base + i1]).cast::<f32>(), inf_f);
     let v2 = select(i2 < n, load(inp[row_base + i2]).cast::<f32>(), inf_f);
     let v3 = select(i3 < n, load(inp[row_base + i3]).cast::<f32>(), inf_f);
-
     threadgroup_store("shared", i0, v0.cast::<T>());
     threadgroup_store("shared", i1, v1.cast::<T>());
     threadgroup_store("shared", i2, v2.cast::<T>());
     threadgroup_store("shared", i3, v3.cast::<T>());
     threadgroup_barrier();
-
     // Bitonic sort network — identical structure to `mt_sort`.
     // Outer loop `_k` grows the sorted sub-sequence length (2^_k).
     // Inner loop `_jb` walks the merge stages from `_k-1` down to 0.
@@ -340,7 +324,6 @@ pub fn mt_sort_segmented<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32)
         }
     }
     threadgroup_barrier();
-
     // Write sorted result back, skipping out-of-range sentinel slots.
     if i0 < n {
         store(out[row_base + i0], threadgroup_load("shared", i0));

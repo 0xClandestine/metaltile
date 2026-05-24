@@ -51,7 +51,6 @@ pub fn ffai_sdpa_decode_d64<T>(
     let sg = simd_id;
     let lane = simd_lane;
     let ns = n_simd;
-
     // Two tg_out slots instead of four — each lane owns 2 output
     // elements at head_dim=64. Same `+32` bank-conflict padding
     // rationale as the head_dim=128 kernel.
@@ -59,20 +58,16 @@ pub fn ffai_sdpa_decode_d64<T>(
     threadgroup_alloc("tg_sum", 32);
     threadgroup_alloc("tg_out0", 1056);
     threadgroup_alloc("tg_out1", 1056);
-
     let q_off = q_head * head_dim;
     let kv_head_base = kv_head * kv_stride * head_dim;
     let d0 = lane * 2u32;
-
     // Pre-scale this lane's 2-element Q pair once; K/V are streamed.
     let q0 = load(q[q_off + d0]).cast::<f32>() * scale;
     let q1 = load(q[q_off + d0 + 1u32]).cast::<f32>() * scale;
-
     let mut run_max = neg_infinity();
     let mut run_sum = 0.0f32;
     let mut o0 = 0.0f32;
     let mut o1 = 0.0f32;
-
     for _t in range(sg, n_kv, ns) {
         let base = kv_head_base + _t * head_dim;
         let kv_idx = base + d0;
@@ -96,7 +91,6 @@ pub fn ffai_sdpa_decode_d64<T>(
         o0 = o0 * factor + weight * v0;
         o1 = o1 * factor + weight * v1;
     }
-
     // ── Cross-simdgroup reduction: max + sum_exp ────────────────────
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max);
@@ -115,7 +109,6 @@ pub fn ffai_sdpa_decode_d64<T>(
         }
     }
     threadgroup_barrier();
-
     // ── Cross-simdgroup reduction: outputs ──────────────────────────
     let g_max = threadgroup_load("tg_max", 0);
     let g_sum = threadgroup_load("tg_sum", 0);
@@ -127,7 +120,6 @@ pub fn ffai_sdpa_decode_d64<T>(
     threadgroup_store("tg_out0", idx, o0 * rescale);
     threadgroup_store("tg_out1", idx, o1 * rescale);
     threadgroup_barrier();
-
     if sg == 0 {
         let mut so0 = 0.0f32;
         let mut so1 = 0.0f32;

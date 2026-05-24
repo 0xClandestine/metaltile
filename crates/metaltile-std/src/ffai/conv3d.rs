@@ -111,7 +111,6 @@ pub fn conv3d_generic<T>(
     let t3 = t2 / out_d;
     let oc = t3 % out_ch;
     let n = t3 / out_ch;
-
     // Receptive-field anchors in the *padded* input frame — a real
     // voxel at padded coordinate `p` sits at unpadded `p - pad`, valid
     // iff `pad <= p < pad + extent`. Working in the padded frame keeps
@@ -119,16 +118,13 @@ pub fn conv3d_generic<T>(
     let pd0 = od * stride_d;
     let ph0 = oh * stride_h;
     let pw0 = ow * stride_w;
-
     let input_plane = in_h * in_w;
     let input_vol = in_d * input_plane;
     let in_n_stride = in_ch * input_vol;
     let w_kd_stride = kh * kw;
     let w_in_stride = kd * w_kd_stride;
     let w_oc_stride = in_ch * w_in_stride;
-
     let mut acc = load(bias[oc]).cast::<f32>();
-
     // Walk the in_ch × kd × kh × kw receptive field. Padding voxels
     // (depth/row/col outside the real input) contribute zero — the load
     // is clamped to index 0 and masked out, so it never reads OOB.
@@ -148,11 +144,9 @@ pub fn conv3d_generic<T>(
                     let col_ok = (pw >= pad_w) & (pw < pad_w + in_w);
                     let valid = dep_ok & row_ok & col_ok;
                     let iw = select(col_ok, pw - pad_w, 0u32);
-
                     let in_idx = in_ic_base + id * input_plane + ih * in_w + iw;
                     let pix = load(input[in_idx]).cast::<f32>();
                     let pix_m = select(valid, pix, 0.0f32);
-
                     let w_idx = w_ic_base + kz * w_kd_stride + ky * kw + kx;
                     let wt = load(weight[w_idx]).cast::<f32>();
                     acc = acc + pix_m * wt;
@@ -160,7 +154,6 @@ pub fn conv3d_generic<T>(
             }
         }
     }
-
     store(out[idx], acc.cast::<T>());
 }
 
@@ -255,29 +248,24 @@ pub fn conv3d_grouped<T>(
     let t3 = t2 / out_d;
     let oc = t3 % out_ch;
     let n = t3 / out_ch;
-
     // Group of this output channel, and the first input channel it
     // convolves. The weight's I dimension is `icpg`, so the weight
     // channel index runs `0..icpg` and the real input channel is
     // `ic_base + wic`.
     let group = oc / ocpg;
     let ic_base = group * icpg;
-
     // Receptive-field anchors in the *padded* input frame (see the
     // `conv3d_generic` comment).
     let pd0 = od * stride_d;
     let ph0 = oh * stride_h;
     let pw0 = ow * stride_w;
-
     let input_plane = in_h * in_w;
     let input_vol = in_d * input_plane;
     let in_n_stride = in_ch * input_vol;
     let w_kd_stride = kh * kw;
     let w_in_stride = kd * w_kd_stride;
     let w_oc_stride = icpg * w_in_stride;
-
     let mut acc = load(bias[oc]).cast::<f32>();
-
     // Walk the icpg × kd × kh × kw receptive field. Dilation scales the
     // tap offsets; padding taps contribute zero (clamped load, masked).
     for wic in range(0u32, icpg, 1u32) {
@@ -297,11 +285,9 @@ pub fn conv3d_grouped<T>(
                     let col_ok = (pw >= pad_w) & (pw < pad_w + in_w);
                     let valid = dep_ok & row_ok & col_ok;
                     let iw = select(col_ok, pw - pad_w, 0u32);
-
                     let in_idx = in_ic_base + id * input_plane + ih * in_w + iw;
                     let pix = load(input[in_idx]).cast::<f32>();
                     let pix_m = select(valid, pix, 0.0f32);
-
                     let w_idx = w_ic_base + kz * w_kd_stride + ky * kw + kx;
                     let wt = load(weight[w_idx]).cast::<f32>();
                     acc = acc + pix_m * wt;
@@ -309,6 +295,5 @@ pub fn conv3d_grouped<T>(
             }
         }
     }
-
     store(out[idx], acc.cast::<T>());
 }

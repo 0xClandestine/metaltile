@@ -114,22 +114,18 @@ pub fn sdpa_decode_2pass_pass1<T>(
     let lane = simd_lane;
     let q_head = kv_head * gqa_factor + gqa_idx;
     let d0 = lane * 4u32;
-
     let q_off = q_head * head_dim;
     let kv_head_base = kv_head * kv_stride * head_dim;
-
     let q0 = load(q[q_off + d0]).cast::<f32>() * scale;
     let q1 = load(q[q_off + d0 + 1u32]).cast::<f32>() * scale;
     let q2 = load(q[q_off + d0 + 2u32]).cast::<f32>() * scale;
     let q3 = load(q[q_off + d0 + 3u32]).cast::<f32>() * scale;
-
     let mut run_max = neg_infinity();
     let mut run_sum = 0.0f32;
     let mut o0 = 0.0f32;
     let mut o1 = 0.0f32;
     let mut o2 = 0.0f32;
     let mut o3 = 0.0f32;
-
     for _t in range(block_idx, n_kv, blocks) {
         let base = kv_head_base + _t * head_dim;
         let kv_idx = base + d0;
@@ -168,7 +164,6 @@ pub fn sdpa_decode_2pass_pass1<T>(
         o2 = o2 * factor + weight * v2;
         o3 = o3 * factor + weight * v3;
     }
-
     // Pre-compute store indices AND pre-load the o0..3 accumulators
     // into fresh values so all four Stores land consecutively in IR
     // (vectorize requires consecutive Op::Store with no intervening
@@ -221,23 +216,19 @@ pub fn sdpa_decode_2pass_pass2<T>(
     let bn = 32u32;
     let block_chunks = blocks / bn;
     let d0 = lane * 4u32;
-
     let mbase = q_head * blocks;
     let obase = q_head * blocks * head_dim;
     let stride = bn + 1u32;
-
     threadgroup_alloc("tg_out0", 1056);
     threadgroup_alloc("tg_out1", 1056);
     threadgroup_alloc("tg_out2", 1056);
     threadgroup_alloc("tg_out3", 1056);
-
     let mut local_max = neg_infinity();
     for b in range(0u32, block_chunks, 1u32) {
         let m_val = load(partial_m[mbase + lane + b * bn]);
         local_max = select(m_val > local_max, m_val, local_max);
     }
     let max_score = simd_max(local_max);
-
     let mut local_sum = 0.0f32;
     for b in range(0u32, block_chunks, 1u32) {
         let m_val = load(partial_m[mbase + lane + b * bn]);
@@ -246,7 +237,6 @@ pub fn sdpa_decode_2pass_pass2<T>(
         local_sum = local_sum + factor * l_val;
     }
     let sum_exp = simd_sum(local_sum);
-
     let mut o0 = 0.0f32;
     let mut o1 = 0.0f32;
     let mut o2 = 0.0f32;
@@ -277,13 +267,11 @@ pub fn sdpa_decode_2pass_pass2<T>(
         o2 = o2 + factor * p2;
         o3 = o3 + factor * p3;
     }
-
     threadgroup_store("tg_out0", lane * stride + sg, o0);
     threadgroup_store("tg_out1", lane * stride + sg, o1);
     threadgroup_store("tg_out2", lane * stride + sg, o2);
     threadgroup_store("tg_out3", lane * stride + sg, o3);
     threadgroup_barrier();
-
     let r0 = threadgroup_load("tg_out0", sg * stride + lane);
     let r1 = threadgroup_load("tg_out1", sg * stride + lane);
     let r2 = threadgroup_load("tg_out2", sg * stride + lane);
@@ -292,7 +280,6 @@ pub fn sdpa_decode_2pass_pass2<T>(
     let red1 = simd_sum(r1);
     let red2 = simd_sum(r2);
     let red3 = simd_sum(r3);
-
     if lane == 0u32 {
         let inv_sum = select(sum_exp > 0.0f32, 1.0f32 / sum_exp, 0.0f32);
         let out_off = q_head * head_dim + sg * 4u32;
@@ -334,18 +321,14 @@ pub fn sdpa_decode_2pass_pass1_d64<T>(
     let lane = simd_lane;
     let q_head = kv_head * gqa_factor + gqa_idx;
     let d0 = lane * 2u32;
-
     let q_off = q_head * head_dim;
     let kv_head_base = kv_head * kv_stride * head_dim;
-
     let q0 = load(q[q_off + d0]).cast::<f32>() * scale;
     let q1 = load(q[q_off + d0 + 1u32]).cast::<f32>() * scale;
-
     let mut run_max = neg_infinity();
     let mut run_sum = 0.0f32;
     let mut o0 = 0.0f32;
     let mut o1 = 0.0f32;
-
     for _t in range(block_idx, n_kv, blocks) {
         let kv_idx = kv_head_base + _t * head_dim + d0;
         let kv0 = kv_idx;
@@ -363,7 +346,6 @@ pub fn sdpa_decode_2pass_pass1_d64<T>(
         o0 = o0 * factor + weight * v0;
         o1 = o1 * factor + weight * v1;
     }
-
     let out_block_off = (q_head * blocks + block_idx) * head_dim + d0;
     let so0 = o0;
     let so1 = o1;
@@ -393,21 +375,17 @@ pub fn sdpa_decode_2pass_pass2_d64<T>(
     let bn = 32u32;
     let block_chunks = blocks / bn;
     let d0 = lane * 2u32;
-
     let mbase = q_head * blocks;
     let obase = q_head * blocks * head_dim;
     let stride = bn + 1u32;
-
     threadgroup_alloc("tg_out0", 1056);
     threadgroup_alloc("tg_out1", 1056);
-
     let mut local_max = neg_infinity();
     for b in range(0u32, block_chunks, 1u32) {
         let m_val = load(partial_m[mbase + lane + b * bn]);
         local_max = select(m_val > local_max, m_val, local_max);
     }
     let max_score = simd_max(local_max);
-
     let mut local_sum = 0.0f32;
     for b in range(0u32, block_chunks, 1u32) {
         let m_val = load(partial_m[mbase + lane + b * bn]);
@@ -415,7 +393,6 @@ pub fn sdpa_decode_2pass_pass2_d64<T>(
         local_sum = local_sum + exp(m_val - max_score) * l_val;
     }
     let sum_exp = simd_sum(local_sum);
-
     let mut o0 = 0.0f32;
     let mut o1 = 0.0f32;
     for b in range(0u32, block_chunks, 1u32) {
@@ -427,14 +404,11 @@ pub fn sdpa_decode_2pass_pass2_d64<T>(
         o0 = o0 + factor * p0;
         o1 = o1 + factor * p1;
     }
-
     threadgroup_store("tg_out0", lane * stride + sg, o0);
     threadgroup_store("tg_out1", lane * stride + sg, o1);
     threadgroup_barrier();
-
     let r0 = simd_sum(threadgroup_load("tg_out0", sg * stride + lane));
     let r1 = simd_sum(threadgroup_load("tg_out1", sg * stride + lane));
-
     if lane == 0u32 {
         let inv_sum = select(sum_exp > 0.0f32, 1.0f32 / sum_exp, 0.0f32);
         let out_off = q_head * head_dim + sg * 2u32;
@@ -465,20 +439,16 @@ pub fn sdpa_decode_2pass_pass1_d96<T>(
     let lane = simd_lane;
     let q_head = kv_head * gqa_factor + gqa_idx;
     let d0 = lane * 3u32;
-
     let q_off = q_head * head_dim;
     let kv_head_base = kv_head * kv_stride * head_dim;
-
     let q0 = load(q[q_off + d0]).cast::<f32>() * scale;
     let q1 = load(q[q_off + d0 + 1u32]).cast::<f32>() * scale;
     let q2 = load(q[q_off + d0 + 2u32]).cast::<f32>() * scale;
-
     let mut run_max = neg_infinity();
     let mut run_sum = 0.0f32;
     let mut o0 = 0.0f32;
     let mut o1 = 0.0f32;
     let mut o2 = 0.0f32;
-
     for _t in range(block_idx, n_kv, blocks) {
         let kv_idx = kv_head_base + _t * head_dim + d0;
         let kv0 = kv_idx;
@@ -500,7 +470,6 @@ pub fn sdpa_decode_2pass_pass1_d96<T>(
         o1 = o1 * factor + weight * v1;
         o2 = o2 * factor + weight * v2;
     }
-
     let out_block_off = (q_head * blocks + block_idx) * head_dim + d0;
     let so0 = o0;
     let so1 = o1;
@@ -531,22 +500,18 @@ pub fn sdpa_decode_2pass_pass2_d96<T>(
     let bn = 32u32;
     let block_chunks = blocks / bn;
     let d0 = lane * 3u32;
-
     let mbase = q_head * blocks;
     let obase = q_head * blocks * head_dim;
     let stride = bn + 1u32;
-
     threadgroup_alloc("tg_out0", 1056);
     threadgroup_alloc("tg_out1", 1056);
     threadgroup_alloc("tg_out2", 1056);
-
     let mut local_max = neg_infinity();
     for b in range(0u32, block_chunks, 1u32) {
         let m_val = load(partial_m[mbase + lane + b * bn]);
         local_max = select(m_val > local_max, m_val, local_max);
     }
     let max_score = simd_max(local_max);
-
     let mut local_sum = 0.0f32;
     for b in range(0u32, block_chunks, 1u32) {
         let m_val = load(partial_m[mbase + lane + b * bn]);
@@ -554,7 +519,6 @@ pub fn sdpa_decode_2pass_pass2_d96<T>(
         local_sum = local_sum + exp(m_val - max_score) * l_val;
     }
     let sum_exp = simd_sum(local_sum);
-
     let mut o0 = 0.0f32;
     let mut o1 = 0.0f32;
     let mut o2 = 0.0f32;
@@ -569,16 +533,13 @@ pub fn sdpa_decode_2pass_pass2_d96<T>(
         o1 = o1 + factor * p1;
         o2 = o2 + factor * p2;
     }
-
     threadgroup_store("tg_out0", lane * stride + sg, o0);
     threadgroup_store("tg_out1", lane * stride + sg, o1);
     threadgroup_store("tg_out2", lane * stride + sg, o2);
     threadgroup_barrier();
-
     let r0 = simd_sum(threadgroup_load("tg_out0", sg * stride + lane));
     let r1 = simd_sum(threadgroup_load("tg_out1", sg * stride + lane));
     let r2 = simd_sum(threadgroup_load("tg_out2", sg * stride + lane));
-
     if lane == 0u32 {
         let inv_sum = select(sum_exp > 0.0f32, 1.0f32 / sum_exp, 0.0f32);
         let out_off = q_head * head_dim + sg * 3u32;
@@ -610,10 +571,8 @@ pub fn sdpa_decode_2pass_pass1_d256<T>(
     let lane = simd_lane;
     let q_head = kv_head * gqa_factor + gqa_idx;
     let d0 = lane * 8u32;
-
     let q_off = q_head * head_dim;
     let kv_head_base = kv_head * kv_stride * head_dim;
-
     let q0 = load(q[q_off + d0]).cast::<f32>() * scale;
     let q1 = load(q[q_off + d0 + 1u32]).cast::<f32>() * scale;
     let q2 = load(q[q_off + d0 + 2u32]).cast::<f32>() * scale;
@@ -622,7 +581,6 @@ pub fn sdpa_decode_2pass_pass1_d256<T>(
     let q5 = load(q[q_off + d0 + 5u32]).cast::<f32>() * scale;
     let q6 = load(q[q_off + d0 + 6u32]).cast::<f32>() * scale;
     let q7 = load(q[q_off + d0 + 7u32]).cast::<f32>() * scale;
-
     let mut run_max = neg_infinity();
     let mut run_sum = 0.0f32;
     let mut o0 = 0.0f32;
@@ -633,7 +591,6 @@ pub fn sdpa_decode_2pass_pass1_d256<T>(
     let mut o5 = 0.0f32;
     let mut o6 = 0.0f32;
     let mut o7 = 0.0f32;
-
     for _t in range(block_idx, n_kv, blocks) {
         let kv_idx = kv_head_base + _t * head_dim + d0;
         let kv0 = kv_idx;
@@ -676,7 +633,6 @@ pub fn sdpa_decode_2pass_pass1_d256<T>(
         o6 = o6 * factor + weight * v6;
         o7 = o7 * factor + weight * v7;
     }
-
     let out_block_off = (q_head * blocks + block_idx) * head_dim + d0;
     let so0 = o0;
     let so1 = o1;
@@ -718,24 +674,20 @@ pub fn sdpa_decode_2pass_pass2_d256<T>(
     let bn = 32u32;
     let block_chunks = blocks / bn;
     let d0 = lane * 8u32;
-
     let mbase = q_head * blocks;
     let obase = q_head * blocks * head_dim;
     let stride = bn + 1u32;
-
     // Four tg_out buffers reused across two phases (like sdpa_decode_d256).
     threadgroup_alloc("tg_out0", 1056);
     threadgroup_alloc("tg_out1", 1056);
     threadgroup_alloc("tg_out2", 1056);
     threadgroup_alloc("tg_out3", 1056);
-
     let mut local_max = neg_infinity();
     for b in range(0u32, block_chunks, 1u32) {
         let m_val = load(partial_m[mbase + lane + b * bn]);
         local_max = select(m_val > local_max, m_val, local_max);
     }
     let max_score = simd_max(local_max);
-
     let mut local_sum = 0.0f32;
     for b in range(0u32, block_chunks, 1u32) {
         let m_val = load(partial_m[mbase + lane + b * bn]);
@@ -743,7 +695,6 @@ pub fn sdpa_decode_2pass_pass2_d256<T>(
         local_sum = local_sum + exp(m_val - max_score) * l_val;
     }
     let sum_exp = simd_sum(local_sum);
-
     let mut o0 = 0.0f32;
     let mut o1 = 0.0f32;
     let mut o2 = 0.0f32;
@@ -773,32 +724,27 @@ pub fn sdpa_decode_2pass_pass2_d256<T>(
         o6 = o6 + factor * p6;
         o7 = o7 + factor * p7;
     }
-
     // Phase 1: dims 0..3
     threadgroup_store("tg_out0", lane * stride + sg, o0);
     threadgroup_store("tg_out1", lane * stride + sg, o1);
     threadgroup_store("tg_out2", lane * stride + sg, o2);
     threadgroup_store("tg_out3", lane * stride + sg, o3);
     threadgroup_barrier();
-
     let r0 = simd_sum(threadgroup_load("tg_out0", sg * stride + lane));
     let r1 = simd_sum(threadgroup_load("tg_out1", sg * stride + lane));
     let r2 = simd_sum(threadgroup_load("tg_out2", sg * stride + lane));
     let r3 = simd_sum(threadgroup_load("tg_out3", sg * stride + lane));
     threadgroup_barrier();
-
     // Phase 2: dims 4..7
     threadgroup_store("tg_out0", lane * stride + sg, o4);
     threadgroup_store("tg_out1", lane * stride + sg, o5);
     threadgroup_store("tg_out2", lane * stride + sg, o6);
     threadgroup_store("tg_out3", lane * stride + sg, o7);
     threadgroup_barrier();
-
     let r4 = simd_sum(threadgroup_load("tg_out0", sg * stride + lane));
     let r5 = simd_sum(threadgroup_load("tg_out1", sg * stride + lane));
     let r6 = simd_sum(threadgroup_load("tg_out2", sg * stride + lane));
     let r7 = simd_sum(threadgroup_load("tg_out3", sg * stride + lane));
-
     if lane == 0u32 {
         let inv_sum = select(sum_exp > 0.0f32, 1.0f32 / sum_exp, 0.0f32);
         let out_off = q_head * head_dim + sg * 8u32;

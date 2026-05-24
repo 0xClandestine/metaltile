@@ -61,7 +61,6 @@ pub fn mt_sdpa_vector<T>(
     let sg = simd_id;
     let lane = simd_lane;
     let ns = n_simd;
-
     // 32-slot scalars for the cross-simdgroup max/sum + a 1024-slot output
     // buffer reused 4× in the reduction loop below. Matches MLX's layout:
     // 4 KB tg memory total. On M2 (32 KB tg/SM) that's 7 concurrent TGs/SM
@@ -70,24 +69,20 @@ pub fn mt_sdpa_vector<T>(
     threadgroup_alloc("tg_max", 32);
     threadgroup_alloc("tg_sum", 32);
     threadgroup_alloc("tg_out", 1024);
-
     let q_off = q_head * head_dim;
     let kv_base = kv_head * n_kv * head_dim;
     let d0 = lane * 4u32;
-
     // Each lane pre-scales its 4 query elements once. K/V are streamed.
     let q0 = load(q[q_off + d0]).cast::<f32>() * scale;
     let q1 = load(q[q_off + d0 + 1u32]).cast::<f32>() * scale;
     let q2 = load(q[q_off + d0 + 2u32]).cast::<f32>() * scale;
     let q3 = load(q[q_off + d0 + 3u32]).cast::<f32>() * scale;
-
     let mut run_max = neg_infinity();
     let mut run_sum = 0.0f32;
     let mut o0 = 0.0f32;
     let mut o1 = 0.0f32;
     let mut o2 = 0.0f32;
     let mut o3 = 0.0f32;
-
     // Per iter: dot Q with one K row → online-softmax update → accumulate V row.
     // Pre-computing the 4 KV indices and issuing the 4 loads as a single run
     // (no BinOp/Cast interleaved) is what lets the vectorize pass collapse
@@ -125,7 +120,6 @@ pub fn mt_sdpa_vector<T>(
         o2 = o2 * factor + weight * v2;
         o3 = o3 * factor + weight * v3;
     }
-
     // ── Cross-simdgroup reduction: max + sum_exp ───────────────────
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max);
@@ -144,7 +138,6 @@ pub fn mt_sdpa_vector<T>(
         }
     }
     threadgroup_barrier();
-
     // ── Cross-simdgroup reduction: outputs ─────────────────────────
     //
     // Per output element: write per-(lane, sg) partial, barrier, transpose-
@@ -156,26 +149,21 @@ pub fn mt_sdpa_vector<T>(
     let g_sum = threadgroup_load("tg_sum", 0);
     let factor_g = exp(run_max - g_max);
     let inv_sum = select(g_sum > 0.0f32, 1.0f32 / g_sum, 0.0f32);
-
     threadgroup_store("tg_out", lane * ns + sg, o0);
     threadgroup_barrier();
     let red0 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
     threadgroup_barrier();
-
     threadgroup_store("tg_out", lane * ns + sg, o1);
     threadgroup_barrier();
     let red1 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
     threadgroup_barrier();
-
     threadgroup_store("tg_out", lane * ns + sg, o2);
     threadgroup_barrier();
     let red2 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
     threadgroup_barrier();
-
     threadgroup_store("tg_out", lane * ns + sg, o3);
     threadgroup_barrier();
     let red3 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
-
     // lane 0 of each simdgroup writes its 4 elements at `q_off + sg*4`.
     // Output assignment is sg-indexed (was lane-indexed pre-occupancy fix),
     // matching MLX. f32→T narrowing is implicit at the MSL Store — adding
@@ -216,24 +204,19 @@ pub fn mt_sdpa_vector_d64<T>(
     let sg = simd_id;
     let lane = simd_lane;
     let ns = n_simd;
-
     threadgroup_alloc("tg_max", 32);
     threadgroup_alloc("tg_sum", 32);
     threadgroup_alloc("tg_out", 1024);
-
     let q_off = q_head * head_dim;
     let kv_base = kv_head * n_kv * head_dim;
     // Each lane owns 2 consecutive elements: d0 = lane * 2.
     let d0 = lane * 2u32;
-
     let q0 = load(q[q_off + d0]).cast::<f32>() * scale;
     let q1 = load(q[q_off + d0 + 1u32]).cast::<f32>() * scale;
-
     let mut run_max = neg_infinity();
     let mut run_sum = 0.0f32;
     let mut o0 = 0.0f32;
     let mut o1 = 0.0f32;
-
     for t in range(sg, n_kv, ns) {
         let kv0 = kv_base + t * head_dim + d0;
         let kv1 = kv0 + 1u32;
@@ -254,7 +237,6 @@ pub fn mt_sdpa_vector_d64<T>(
         o0 = o0 * factor + weight * v0;
         o1 = o1 * factor + weight * v1;
     }
-
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max);
         threadgroup_store("tg_sum", sg, run_sum);
@@ -272,21 +254,17 @@ pub fn mt_sdpa_vector_d64<T>(
         }
     }
     threadgroup_barrier();
-
     let g_max = threadgroup_load("tg_max", 0);
     let g_sum = threadgroup_load("tg_sum", 0);
     let factor_g = exp(run_max - g_max);
     let inv_sum = select(g_sum > 0.0f32, 1.0f32 / g_sum, 0.0f32);
-
     threadgroup_store("tg_out", lane * ns + sg, o0);
     threadgroup_barrier();
     let red0 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
     threadgroup_barrier();
-
     threadgroup_store("tg_out", lane * ns + sg, o1);
     threadgroup_barrier();
     let red1 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
-
     if lane == 0u32 {
         let out_off = q_off + sg * 2u32;
         store(out[out_off], red0);
@@ -312,25 +290,20 @@ pub fn mt_sdpa_vector_d96<T>(
     let sg = simd_id;
     let lane = simd_lane;
     let ns = n_simd;
-
     threadgroup_alloc("tg_max", 32);
     threadgroup_alloc("tg_sum", 32);
     threadgroup_alloc("tg_out", 1024);
-
     let q_off = q_head * head_dim;
     let kv_base = kv_head * n_kv * head_dim;
     let d0 = lane * 3u32;
-
     let q0 = load(q[q_off + d0]).cast::<f32>() * scale;
     let q1 = load(q[q_off + d0 + 1u32]).cast::<f32>() * scale;
     let q2 = load(q[q_off + d0 + 2u32]).cast::<f32>() * scale;
-
     let mut run_max = neg_infinity();
     let mut run_sum = 0.0f32;
     let mut o0 = 0.0f32;
     let mut o1 = 0.0f32;
     let mut o2 = 0.0f32;
-
     for t in range(sg, n_kv, ns) {
         let kv0 = kv_base + t * head_dim + d0;
         let kv1 = kv0 + 1u32;
@@ -357,7 +330,6 @@ pub fn mt_sdpa_vector_d96<T>(
         o1 = o1 * factor + weight * v1;
         o2 = o2 * factor + weight * v2;
     }
-
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max);
         threadgroup_store("tg_sum", sg, run_sum);
@@ -375,26 +347,21 @@ pub fn mt_sdpa_vector_d96<T>(
         }
     }
     threadgroup_barrier();
-
     let g_max = threadgroup_load("tg_max", 0);
     let g_sum = threadgroup_load("tg_sum", 0);
     let factor_g = exp(run_max - g_max);
     let inv_sum = select(g_sum > 0.0f32, 1.0f32 / g_sum, 0.0f32);
-
     threadgroup_store("tg_out", lane * ns + sg, o0);
     threadgroup_barrier();
     let red0 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
     threadgroup_barrier();
-
     threadgroup_store("tg_out", lane * ns + sg, o1);
     threadgroup_barrier();
     let red1 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
     threadgroup_barrier();
-
     threadgroup_store("tg_out", lane * ns + sg, o2);
     threadgroup_barrier();
     let red2 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
-
     if lane == 0u32 {
         let out_off = q_off + sg * 3u32;
         store(out[out_off], red0);
@@ -425,22 +392,18 @@ pub fn mt_sdpa_vector_d192<T>(
     let sg = simd_id;
     let lane = simd_lane;
     let ns = n_simd;
-
     threadgroup_alloc("tg_max", 32);
     threadgroup_alloc("tg_sum", 32);
     threadgroup_alloc("tg_out", 1024);
-
     let q_off = q_head * head_dim;
     let kv_base = kv_head * n_kv * head_dim;
     let d0 = lane * 6u32;
-
     let q0 = load(q[q_off + d0]).cast::<f32>() * scale;
     let q1 = load(q[q_off + d0 + 1u32]).cast::<f32>() * scale;
     let q2 = load(q[q_off + d0 + 2u32]).cast::<f32>() * scale;
     let q3 = load(q[q_off + d0 + 3u32]).cast::<f32>() * scale;
     let q4 = load(q[q_off + d0 + 4u32]).cast::<f32>() * scale;
     let q5 = load(q[q_off + d0 + 5u32]).cast::<f32>() * scale;
-
     let mut run_max = neg_infinity();
     let mut run_sum = 0.0f32;
     let mut o0 = 0.0f32;
@@ -449,7 +412,6 @@ pub fn mt_sdpa_vector_d192<T>(
     let mut o3 = 0.0f32;
     let mut o4 = 0.0f32;
     let mut o5 = 0.0f32;
-
     for t in range(sg, n_kv, ns) {
         let kv0 = kv_base + t * head_dim + d0;
         let kv1 = kv0 + 1u32;
@@ -482,7 +444,6 @@ pub fn mt_sdpa_vector_d192<T>(
         o4 = o4 * factor + weight * v4;
         o5 = o5 * factor + weight * v5;
     }
-
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max);
         threadgroup_store("tg_sum", sg, run_sum);
@@ -500,42 +461,34 @@ pub fn mt_sdpa_vector_d192<T>(
         }
     }
     threadgroup_barrier();
-
     let g_max = threadgroup_load("tg_max", 0);
     let g_sum = threadgroup_load("tg_sum", 0);
     let factor_g = exp(run_max - g_max);
     let inv_sum = select(g_sum > 0.0f32, 1.0f32 / g_sum, 0.0f32);
-
     // 6-phase output reduction — each phase reduces one element.
     threadgroup_store("tg_out", lane * ns + sg, o0);
     threadgroup_barrier();
     let red0 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
     threadgroup_barrier();
-
     threadgroup_store("tg_out", lane * ns + sg, o1);
     threadgroup_barrier();
     let red1 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
     threadgroup_barrier();
-
     threadgroup_store("tg_out", lane * ns + sg, o2);
     threadgroup_barrier();
     let red2 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
     threadgroup_barrier();
-
     threadgroup_store("tg_out", lane * ns + sg, o3);
     threadgroup_barrier();
     let red3 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
     threadgroup_barrier();
-
     threadgroup_store("tg_out", lane * ns + sg, o4);
     threadgroup_barrier();
     let red4 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
     threadgroup_barrier();
-
     threadgroup_store("tg_out", lane * ns + sg, o5);
     threadgroup_barrier();
     let red5 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
-
     if lane == 0u32 {
         let out_off = q_off + sg * 6u32;
         store(out[out_off], red0);
@@ -570,15 +523,12 @@ pub fn mt_sdpa_vector_d256<T>(
     let sg = simd_id;
     let lane = simd_lane;
     let ns = n_simd;
-
     threadgroup_alloc("tg_max", 32);
     threadgroup_alloc("tg_sum", 32);
     threadgroup_alloc("tg_out", 1024);
-
     let q_off = q_head * head_dim;
     let kv_base = kv_head * n_kv * head_dim;
     let d0 = lane * 8u32;
-
     let q0 = load(q[q_off + d0]).cast::<f32>() * scale;
     let q1 = load(q[q_off + d0 + 1u32]).cast::<f32>() * scale;
     let q2 = load(q[q_off + d0 + 2u32]).cast::<f32>() * scale;
@@ -587,7 +537,6 @@ pub fn mt_sdpa_vector_d256<T>(
     let q5 = load(q[q_off + d0 + 5u32]).cast::<f32>() * scale;
     let q6 = load(q[q_off + d0 + 6u32]).cast::<f32>() * scale;
     let q7 = load(q[q_off + d0 + 7u32]).cast::<f32>() * scale;
-
     let mut run_max = neg_infinity();
     let mut run_sum = 0.0f32;
     let mut o0 = 0.0f32;
@@ -598,7 +547,6 @@ pub fn mt_sdpa_vector_d256<T>(
     let mut o5 = 0.0f32;
     let mut o6 = 0.0f32;
     let mut o7 = 0.0f32;
-
     for t in range(sg, n_kv, ns) {
         let kv0 = kv_base + t * head_dim + d0;
         let kv1 = kv0 + 1u32;
@@ -640,7 +588,6 @@ pub fn mt_sdpa_vector_d256<T>(
         o6 = o6 * factor + weight * v6;
         o7 = o7 * factor + weight * v7;
     }
-
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max);
         threadgroup_store("tg_sum", sg, run_sum);
@@ -658,52 +605,42 @@ pub fn mt_sdpa_vector_d256<T>(
         }
     }
     threadgroup_barrier();
-
     let g_max = threadgroup_load("tg_max", 0);
     let g_sum = threadgroup_load("tg_sum", 0);
     let factor_g = exp(run_max - g_max);
     let inv_sum = select(g_sum > 0.0f32, 1.0f32 / g_sum, 0.0f32);
-
     // 8-phase output reduction — identical single-buffer strategy as d=128.
     threadgroup_store("tg_out", lane * ns + sg, o0);
     threadgroup_barrier();
     let red0 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
     threadgroup_barrier();
-
     threadgroup_store("tg_out", lane * ns + sg, o1);
     threadgroup_barrier();
     let red1 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
     threadgroup_barrier();
-
     threadgroup_store("tg_out", lane * ns + sg, o2);
     threadgroup_barrier();
     let red2 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
     threadgroup_barrier();
-
     threadgroup_store("tg_out", lane * ns + sg, o3);
     threadgroup_barrier();
     let red3 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
     threadgroup_barrier();
-
     threadgroup_store("tg_out", lane * ns + sg, o4);
     threadgroup_barrier();
     let red4 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
     threadgroup_barrier();
-
     threadgroup_store("tg_out", lane * ns + sg, o5);
     threadgroup_barrier();
     let red5 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
     threadgroup_barrier();
-
     threadgroup_store("tg_out", lane * ns + sg, o6);
     threadgroup_barrier();
     let red6 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
     threadgroup_barrier();
-
     threadgroup_store("tg_out", lane * ns + sg, o7);
     threadgroup_barrier();
     let red7 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
-
     if lane == 0u32 {
         let out_off = q_off + sg * 8u32;
         store(out[out_off], red0);

@@ -70,10 +70,8 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16_mpp<T>(
     let n_tile_base = tgid_x * 32u32;
     let m_tile_base = tgid_y * 16u32;
     let lane = simd_lane;
-
     let packs_per_row = k_in / 8u32;
     let groups_per_row = k_in / group_size;
-
     // Threadgroup staging tiles. `coop_stage(T)` = half for bf16, else T —
     // the matmul reads these as cooperative tensors. `out_scratch` is
     // fp32: `coop_tile_store_c` requires the destination elem-type to
@@ -81,7 +79,6 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16_mpp<T>(
     threadgroup_alloc("xs", 256, coop_stage(T)); // 16 × 16
     threadgroup_alloc("ws", 512, coop_stage(T)); // 32 × 16
     threadgroup_alloc("out_scratch", 512, f32); // 16 × 32
-
     // MPP descriptor 16×32×16, ta=false tb=true tc=false, accumulate.
     coop_tile_setup(
         "gemm",
@@ -96,14 +93,12 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16_mpp<T>(
         true,
         false,
     );
-
     // Walk the BM=16 rows in contiguous-expert sub-runs.
     let mut sub_offset = 0u32;
     for _sub_iter in range(0u32, 16u32, 1u32) {
         let cur_row = m_tile_base + sub_offset;
         let cur_in_range = (sub_offset < 16u32) & (cur_row < m_total);
         let cur_expert = select(cur_in_range, load(indices[cur_row]), 4294967295u32);
-
         // Find the run end — first row whose expert differs (or OOB).
         let mut sub_end = 16u32;
         let mut found = 0u32;
@@ -123,14 +118,11 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16_mpp<T>(
                 found = 1u32;
             }
         }
-
         let cur_valid = (cur_expert != 4294967295u32) & (sub_offset < 16u32);
         if cur_valid {
             let w_expert_base = cur_expert * n_out * packs_per_row;
             let sb_expert_base = cur_expert * n_out * groups_per_row;
-
             coop_tile_zero("gemm");
-
             for kb in range(0u32, k_in, 16u32) {
                 // Stage X[m_tile_base..+16, kb..kb+16] → xs. 32 lanes × 8.
                 for _e in range(0u32, 8u32, 1u32) {
@@ -143,7 +135,6 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16_mpp<T>(
                     let xv = load(x[safe_g * k_in + kb + kc]).cast::<f32>();
                     threadgroup_store("xs", mr * 16u32 + kc, select(in_run, xv, 0.0f32));
                 }
-
                 // Dequant W[expert, n_tile_base..+32, kb..kb+16] → ws.
                 // 32 lanes × 2 packs/lane; 8 nibbles/pack.
                 for _pi in range(0u32, 2u32, 1u32) {
@@ -166,22 +157,17 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16_mpp<T>(
                         threadgroup_store("ws", dst + _j, s * q + b);
                     }
                 }
-
                 threadgroup_barrier();
-
                 // A = xs [M=16, K=16] (ta=false → extents K,M = 16,16).
                 // B = ws [N=32, K=16] (tb=true  → extents K,N = 16,32).
                 coop_tile_load_a("gemm", "xs", true, coop_stage(T), 16, 16);
                 coop_tile_load_b("gemm", "ws", true, coop_stage(T), 16, 32);
                 coop_tile_run("gemm");
-
                 threadgroup_barrier();
             }
-
             // C [M=16, N=32] row-major → extents N,M = 32,16.
             coop_tile_store_c("gemm", "out_scratch", true, f32, 32, 16);
             threadgroup_barrier();
-
             // Coop-write out_scratch → out with the per-row expert mask.
             // 32 lanes × 16 elems = 512 = BM*BN.
             for _e in range(0u32, 16u32, 1u32) {

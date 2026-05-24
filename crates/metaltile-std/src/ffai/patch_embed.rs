@@ -67,19 +67,14 @@ pub fn patch_embed<T>(
     let idx = program_id::<0>();
     let h = idx % hidden;
     let patch = idx / hidden;
-
     let patches_w = in_w / patch_w;
-
     // Top-left pixel of this patch in the image.
     let py0 = (patch / patches_w) * patch_h;
     let px0 = (patch - (patch / patches_w) * patches_w) * patch_w;
-
     let input_plane = in_h * in_w;
     let patch_dim = in_ch * patch_h * patch_w;
     let w_row_base = h * patch_dim;
-
     let mut acc = load(bias[h]).cast::<f32>();
-
     // Walk the patch's in_ch × patch_h × patch_w pixels, dotting each
     // with the corresponding weight column. The patch grid divides the
     // image exactly (caller precondition), so every read is in-bounds —
@@ -97,6 +92,5 @@ pub fn patch_embed<T>(
             }
         }
     }
-
     store(out[idx], acc.cast::<T>());
 }

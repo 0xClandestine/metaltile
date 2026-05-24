@@ -59,14 +59,11 @@ pub fn mt_moe_gather_qmm_mma_int4_bm8_mpp<T>(
     let n_tile_base = tgid_x * 32u32;
     let m_tile_base = tgid_y * 8u32;
     let lane = simd_lane;
-
     let packs_per_row = k_in / 8u32;
     let groups_per_row = k_in / group_size;
-
     threadgroup_alloc("xs", 128, coop_stage(T)); // 8 × 16
     threadgroup_alloc("ws", 512, coop_stage(T)); // 32 × 16
     threadgroup_alloc("out_scratch", 256, f32); // 8 × 32
-
     // Descriptor 8×32×16, direct-input (M=8 → not a cooperative tensor).
     // direct_inputs=true; A view = [K=16, M=8], B view = [K=16, N=32].
     coop_tile_setup(
@@ -89,13 +86,11 @@ pub fn mt_moe_gather_qmm_mma_int4_bm8_mpp<T>(
         16,
         32, // b: is_tg, ei, eo
     );
-
     let mut sub_offset = 0u32;
     for _sub_iter in range(0u32, 8u32, 1u32) {
         let cur_row = m_tile_base + sub_offset;
         let cur_in_range = (sub_offset < 8u32) & (cur_row < m_total);
         let cur_expert = select(cur_in_range, load(indices[cur_row]), 4294967295u32);
-
         let mut sub_end = 8u32;
         let mut found = 0u32;
         for _ii in range(0u32, 8u32, 1u32) {
@@ -114,14 +109,11 @@ pub fn mt_moe_gather_qmm_mma_int4_bm8_mpp<T>(
                 found = 1u32;
             }
         }
-
         let cur_valid = (cur_expert != 4294967295u32) & (sub_offset < 8u32);
         if cur_valid {
             let w_expert_base = cur_expert * n_out * packs_per_row;
             let sb_expert_base = cur_expert * n_out * groups_per_row;
-
             coop_tile_zero("gemm");
-
             for kb in range(0u32, k_in, 16u32) {
                 // Stage X[m_tile_base..+8, kb..kb+16] → xs. 32 lanes × 4.
                 for _e in range(0u32, 4u32, 1u32) {
@@ -134,7 +126,6 @@ pub fn mt_moe_gather_qmm_mma_int4_bm8_mpp<T>(
                     let xv = load(x[safe_g * k_in + kb + kc]).cast::<f32>();
                     threadgroup_store("xs", mr * 16u32 + kc, select(in_run, xv, 0.0f32));
                 }
-
                 // Dequant W → ws. 32 lanes × 2 packs/lane, 8 nibbles/pack.
                 for _pi in range(0u32, 2u32, 1u32) {
                     let pack_id = lane * 2u32 + _pi;
@@ -156,20 +147,15 @@ pub fn mt_moe_gather_qmm_mma_int4_bm8_mpp<T>(
                         threadgroup_store("ws", dst + _j, s * q + b);
                     }
                 }
-
                 threadgroup_barrier();
-
                 coop_tile_load_a("gemm", "xs", true, coop_stage(T), 16, 8, true);
                 coop_tile_load_b("gemm", "ws", true, coop_stage(T), 16, 32, true);
                 coop_tile_run("gemm", true);
-
                 threadgroup_barrier();
             }
-
             // C [M=8, N=32] row-major → extents N,M = 32,8.
             coop_tile_store_c("gemm", "out_scratch", true, f32, 32, 8);
             threadgroup_barrier();
-
             // Coop-write out_scratch → out. 32 lanes × 8 elems = 256 = BM*BN.
             for _e in range(0u32, 8u32, 1u32) {
                 let flat = lane * 8u32 + _e;

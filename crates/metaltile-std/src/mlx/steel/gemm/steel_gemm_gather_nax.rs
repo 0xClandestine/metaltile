@@ -70,20 +70,16 @@ pub fn mt_steel_gemm_gather_nax<T>(
     let lane = simd_lane;
     let sg = simd_group_id();
     let lane_in_tg = sg * 32u32 + lane;
-
     // 2×2 warp grid: sm / sn pick this SG's 16×16 sub-tile.
     let sm = sg / 2u32;
     let sn = sg & 1u32;
     let sg_m_base = sm * 16u32;
     let sg_n_base = sn * 16u32;
-
     let x_m_base = tgid_y * 32u32;
     let w_n_base = tgid_x * 32u32;
-
     threadgroup_alloc("Xs", 1152u32, coop_stage(T)); // 32 × 36
     threadgroup_alloc("Ws", 1152u32, coop_stage(T)); // 32 × 36
     threadgroup_alloc("OutScratch", 1024u32, f32); // 4 SG × 16 × 16
-
     coop_tile_setup(
         "gemm",
         16u32,
@@ -98,27 +94,21 @@ pub fn mt_steel_gemm_gather_nax<T>(
         false,
     );
     coop_tile_zero("gemm");
-
     // Per-lane stage coordinates: 128 lanes × 8 elems = 1024 = 32 × 32.
     let x_m_row = lane_in_tg / 4u32;
     let x_k_quad = lane_in_tg & 3u32;
     let x_k_base = x_k_quad * 8u32;
     let x_ws_base = x_m_row * 36u32 + x_k_base;
-
     let xs_sg_off = sg_m_base * 36u32;
     let ws_sg_off = sg_n_base * 36u32;
     let sg_scratch_off = sg * 256u32;
-
     // ── Gather: which A-row does this output-row pull from?
     let a_src_row = load(lhs_indices[x_m_base + x_m_row]);
-
     // ── Gather: which [K, N] B-matrix does this N-block multiply against?
     let b_mat = load(rhs_indices[tgid_x]);
     let b_base = b_mat * k * n;
-
     // N column this lane gathers from device B (transposed Ws read).
     let b_n = w_n_base + x_m_row;
-
     for kb in range(0u32, k, 32u32) {
         // Stage gathered A[a_src_row, kb + x_k_base..+8] → Xs.
         let a_row_dev_base = a_src_row * k + kb + x_k_base;
@@ -126,7 +116,6 @@ pub fn mt_steel_gemm_gather_nax<T>(
             let av = load(a[a_row_dev_base + _i]).cast::<f32>();
             threadgroup_store("Xs", x_ws_base + _i, av);
         }
-
         // Stage gathered B^T[w_n_base + x_m_row, kb + x_k_base..+8] → Ws.
         // Device read: b[b_base + (kb + x_k_base + i) * n + b_n].
         let b_k_base = kb + x_k_base;
@@ -134,19 +123,14 @@ pub fn mt_steel_gemm_gather_nax<T>(
             let bv = load(b[b_base + (b_k_base + _i) * n + b_n]).cast::<f32>();
             threadgroup_store("Ws", x_ws_base + _i, bv);
         }
-
         threadgroup_barrier();
-
         coop_tile_load_a("gemm", "Xs", true, coop_stage(T), 36u32, 16u32, xs_sg_off);
         coop_tile_load_b("gemm", "Ws", true, coop_stage(T), 36u32, 16u32, ws_sg_off);
         coop_tile_run("gemm");
-
         threadgroup_barrier();
     }
-
     coop_tile_store_c("gemm", "OutScratch", true, f32, 16u32, 16u32, sg_scratch_off);
     threadgroup_barrier();
-
     // Coop-write OutScratch → out. Destination row is contiguous (not
     // gathered) — the gather only redirects the *A* source rows.
     let out_m_base = x_m_base + sg_m_base;

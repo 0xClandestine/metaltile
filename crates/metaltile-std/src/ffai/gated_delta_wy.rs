@@ -97,7 +97,6 @@ pub fn mt_gated_delta_wy_chunk<T>(
     let hv_per_hk = hv / hk;
     let hk_idx = hv_idx / hv_per_hk;
     let lane = simd_lane;
-
     // ── TG buffers ─────────────────────────────────────────────────────
     //
     // Scalar correctness path — supports up to Dk=Dv=32, C=16.
@@ -126,7 +125,6 @@ pub fn mt_gated_delta_wy_chunk<T>(
     // Precomputed once per chunk; both y_pass and S_end reuse it.
     // Eliminates ~256K redundant TG state reads per chunk at Dv=32 C=16.
     threadgroup_alloc("tg_s0p", 512u32, f32); // Dv × C, max 32 × 16 = 512
-
     // ── State init: load [Dv, Dk] from state_in[n] ────────────────────
     let state_base = n * dv * dk;
     let total_state = dv * dk;
@@ -135,7 +133,6 @@ pub fn mt_gated_delta_wy_chunk<T>(
         threadgroup_store("tg_state", ii, v_in);
     }
     threadgroup_barrier();
-
     // ── Chunk loop ────────────────────────────────────────────────────
     //
     // Precondition: t_len % c == 0. Caller must pad shorter prefills up to
@@ -145,7 +142,6 @@ pub fn mt_gated_delta_wy_chunk<T>(
     let num_chunks = t_len / c;
     for chunk_idx in range(0u32, num_chunks, 1u32) {
         let chunk_start = chunk_idx * c;
-
         // Step 1: gather Q, K, V, g, β for this chunk into TG.
         for i in range(0u32, c, 1u32) {
             let t_abs = chunk_start + i;
@@ -165,7 +161,6 @@ pub fn mt_gated_delta_wy_chunk<T>(
             }
         }
         threadgroup_barrier();
-
         // Step 2: prefix gates G_t (one lane, scalar — small C).
         if lane == 0u32 {
             let mut g_acc = 1.0f32;
@@ -175,7 +170,6 @@ pub fn mt_gated_delta_wy_chunk<T>(
             }
         }
         threadgroup_barrier();
-
         // Step 3: KKT[i, j] = k_i · k_j  (lane-parallel over (i, j) pairs).
         for ij in range(lane, c * c, 32u32) {
             let i = ij / c;
@@ -189,7 +183,6 @@ pub fn mt_gated_delta_wy_chunk<T>(
             threadgroup_store("tg_kkt", i * c + j, s);
         }
         threadgroup_barrier();
-
         // Step 4: solve (I + L) p = K via forward substitution.
         //   L[t, j] = β_j · KKT[t, j] for j < t; else 0.
         //   p[0] = K[0]
@@ -211,7 +204,6 @@ pub fn mt_gated_delta_wy_chunk<T>(
             }
             threadgroup_barrier();
         }
-
         // Step 5: solve (I + A) u^v = β ⊙ V.
         //   A[t, j] = β_t · Γ[t,j] · KKT[t, j]  for j < t
         //   u^v[0]  = β_0 · v_0
@@ -234,7 +226,6 @@ pub fn mt_gated_delta_wy_chunk<T>(
             }
             threadgroup_barrier();
         }
-
         // Step 6 prep: QKT[t, j] = Σ_d q[t,d] · k[j,d]
         for tj in range(lane, c * c, 32u32) {
             let t = tj / c;
@@ -248,7 +239,6 @@ pub fn mt_gated_delta_wy_chunk<T>(
             threadgroup_store("tg_qkt", t * c + j, s);
         }
         threadgroup_barrier();
-
         // Precompute S0_p[d_v, i] = Σ_d state[d_v, d] · p[i, d] (∈ R^{Dv × C}).
         // Reused by both the y_pass correction term AND the chunk-end state
         // update. Lane-parallel over (d_v, i) pairs.
@@ -264,7 +254,6 @@ pub fn mt_gated_delta_wy_chunk<T>(
             threadgroup_store("tg_s0p", d_v * c + i, acc);
         }
         threadgroup_barrier();
-
         // Steps 6–8: per (t, d_v) compute y[t, d_v] = y_pass + y_local.
         //   y_local[t, dv]  = Σ_{j≤t} Γ[t,j] · QKT[t,j] · u^v[j, dv]
         //   S0_q[t, dv]     = Σ_d  state[dv, d] · q[t, d]
@@ -274,7 +263,6 @@ pub fn mt_gated_delta_wy_chunk<T>(
             let t = tdv / dv;
             let d_v = tdv % dv;
             let big_g_t = threadgroup_load("tg_bigG", t);
-
             // y_local
             let mut y_loc = 0.0f32;
             for j in range(0u32, t + 1u32, 1u32) {
@@ -284,7 +272,6 @@ pub fn mt_gated_delta_wy_chunk<T>(
                 let uv_jd = threadgroup_load("tg_uv", j * dv + d_v);
                 y_loc = y_loc + gamma_tj * qkt_tj * uv_jd;
             }
-
             // S0_q[t, dv] = Σ_d state[dv, d] · q[t, d]
             let mut s0q = 0.0f32;
             for d in range(0u32, dk, 1u32) {
@@ -292,7 +279,6 @@ pub fn mt_gated_delta_wy_chunk<T>(
                 let qt = threadgroup_load("tg_q", t * dk + d);
                 s0q = s0q + st * qt;
             }
-
             // correction = Σ_{i≤t} β_i · QKT[t,i] · S0_p[d_v, i]
             let mut corr = 0.0f32;
             for i in range(0u32, t + 1u32, 1u32) {
@@ -301,14 +287,12 @@ pub fn mt_gated_delta_wy_chunk<T>(
                 let s0p_vi = threadgroup_load("tg_s0p", d_v * c + i);
                 corr = corr + beta_i * qkt_ti * s0p_vi;
             }
-
             let y_pass = big_g_t * (s0q - corr);
             let t_abs = chunk_start + t;
             let y_off = (t_abs * hv + hv_idx) * dv + d_v;
             store(y[y_off], (y_pass + y_loc).cast::<T>());
         }
         threadgroup_barrier();
-
         // Step 9: end-of-chunk state update.
         //   S_through[v, d] = G_C · (S_0[v, d] - Σ_i β_i · p[i, d] · (S_0[v, *] · p[i, *]^T))
         //   U_end[v, d]     = Σ_j (G_C/G_j) · u^v[j, v] · k[j, d]
@@ -319,9 +303,7 @@ pub fn mt_gated_delta_wy_chunk<T>(
         for vd in range(lane, dv * dk, 32u32) {
             let d_v = vd / dk;
             let d_k = vd % dk;
-
             let s0_old = threadgroup_load("tg_state", d_v * dk + d_k);
-
             // S0_bp_t_K [d_v, d_k] = Σ_i β_i · p[i, d_k] · S0_p[d_v, i]
             // S0_p was precomputed before y_pass — reuse it here.
             let mut s_corr = 0.0f32;
@@ -332,7 +314,6 @@ pub fn mt_gated_delta_wy_chunk<T>(
                 s_corr = s_corr + beta_i * p_ik * s0p_vi;
             }
             let s_through = big_g_c * (s0_old - s_corr);
-
             // U_end[d_v, d_k] = Σ_j (G_C/G_j) · u^v[j, d_v] · k[j, d_k]
             let mut u_end = 0.0f32;
             for j in range(0u32, c, 1u32) {
@@ -342,13 +323,11 @@ pub fn mt_gated_delta_wy_chunk<T>(
                 let k_jd = threadgroup_load("tg_k", j * dk + d_k);
                 u_end = u_end + rw * uv_jv * k_jd;
             }
-
             // Stash in per-lane stack; flush to tg_state after a barrier.
             stack_store("new_state", iter_idx, s_through + u_end);
             iter_idx = iter_idx + 1u32;
         }
         threadgroup_barrier();
-
         // Flush staged values back into tg_state for the next chunk's reads.
         let mut flush_idx = 0u32;
         for vd in range(lane, dv * dk, 32u32) {
@@ -357,7 +336,6 @@ pub fn mt_gated_delta_wy_chunk<T>(
         }
         threadgroup_barrier();
     }
-
     // ── Write final state out ──────────────────────────────────────────
     for ii in range(lane, total_state, 32u32) {
         let s = threadgroup_load("tg_state", ii);

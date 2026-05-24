@@ -71,21 +71,17 @@ pub fn mel_spectrogram<T>(
     let idx = program_id::<0>();
     let mel_bin = idx % n_mels;
     let frame = idx / n_mels;
-
     let frame_start = frame * hop_length;
     let n_fft_f = n_fft.cast::<f32>();
     // -2π / n_fft — the DFT twiddle-angle step.
     let neg_two_pi_over_n = -6.283185307179586f32 / n_fft_f;
     let mel_row = mel_bin * n_freq;
-
     let mut mel_acc = 0.0f32;
-
     // For each frequency bin: direct DFT of the windowed frame, square
     // to power, weight by the Mel filterbank coefficient, accumulate.
     for k in range(0u32, n_freq, 1u32) {
         let k_f = k.cast::<f32>();
         let angle_step = neg_two_pi_over_n * k_f;
-
         let mut re = 0.0f32;
         let mut im = 0.0f32;
         for t in range(0u32, n_fft, 1u32) {
@@ -100,7 +96,6 @@ pub fn mel_spectrogram<T>(
         let w = load(mel_weight[mel_row + k]).cast::<f32>();
         mel_acc = mel_acc + w * power;
     }
-
     let log_mel = log(mel_acc + log_eps);
     store(out[idx], log_mel.cast::<T>());
 }
@@ -181,7 +176,6 @@ pub fn mel_filterbank<T>(
     let frame = idx / n_mels;
     let frame_base = frame * n_fft;
     let mel_row = mel_bin * n_freq;
-
     let mut mel_acc = 0.0f32;
     for k in range(0u32, n_freq, 1u32) {
         let re = load(fft_re[frame_base + k]).cast::<f32>();
@@ -190,7 +184,6 @@ pub fn mel_filterbank<T>(
         let w = load(mel_weight[mel_row + k]).cast::<f32>();
         mel_acc = mel_acc + w * power;
     }
-
     let log_mel = log(mel_acc + log_eps);
     store(out[idx], log_mel.cast::<T>());
 }

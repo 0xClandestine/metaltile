@@ -72,7 +72,6 @@ pub fn ffai_batched_qkv_qgemv<T>(
     let p_iters = (n_packs + lsize - 1u32) / lsize;
     let row_pack_off = row * n_packs;
     let row_group_off = row * n_groups;
-
     if matrix == 0u32 {
         if row < out_q {
             let mut acc = 0.0f32;
@@ -189,42 +188,33 @@ pub fn ffai_batched_qkv_qgemv_fast<T>(
     let tg = tgid_x;
     let sg = simd_id;
     let lane = simd_lane;
-
     // Each TG covers 8 output rows: SG 0 → rows 0-3, SG 1 → rows 4-7.
     let row0 = tg * 8u32 + sg * 4u32;
     let row1 = row0 + 1u32;
     let row2 = row0 + 2u32;
     let row3 = row0 + 3u32;
-
     let gs_per_row = in_dim / group_size;
     let packs_per_row = in_dim / 8u32;
-
     let w_base0 = row0 * packs_per_row;
     let w_base1 = row1 * packs_per_row;
     let w_base2 = row2 * packs_per_row;
     let w_base3 = row3 * packs_per_row;
-
     let sb_base0 = row0 * gs_per_row;
     let sb_base1 = row1 * gs_per_row;
     let sb_base2 = row2 * gs_per_row;
     let sb_base3 = row3 * gs_per_row;
-
     let mut acc0 = 0.0f32;
     let mut acc1 = 0.0f32;
     let mut acc2 = 0.0f32;
     let mut acc3 = 0.0f32;
-
     let lane_x_off = lane * 16u32;
     let lane_pack_off = lane * 2u32;
-
     // Mask-without-shift constants (inverse nibble position scaling).
     let s_16 = 0.0625f32;
     let s_256 = 0.00390625f32;
     let s_4096 = 0.000244140625f32;
-
     // The DSL has no function calls so each of the three matrix branches
     // is spelled out with its full inner loop.
-
     if matrix == 0u32 {
         if row0 < out_q {
             for _b in range(0u32, in_dim, 512u32) {

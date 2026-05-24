@@ -103,7 +103,6 @@ pub fn winograd_conv2d_3x3<T>(
     let r2 = r1 / tiles_h;
     let oc = r2 % out_ch;
     let n = r2 / out_ch;
-
     // Input tile origin in the *padded* frame. Output rows 2·th and
     // 2·th+1 have receptive fields starting at padded rows 2·th and
     // 2·th+1, so the 4×4 tile spans padded rows [2·th, 2·th+3]. A real
@@ -111,7 +110,6 @@ pub fn winograd_conv2d_3x3<T>(
     // iff `pad_h <= pr < pad_h + in_h` (same trick as `conv2d.rs`).
     let pr0 = th * 2u32;
     let pc0 = tw * 2u32;
-
     // Per-row / per-column validity + unpadded coordinate, computed once
     // and reused across all 16 tile loads.
     let pr_0 = pr0;
@@ -126,7 +124,6 @@ pub fn winograd_conv2d_3x3<T>(
     let ih_1 = select(row_ok_1, pr_1 - pad_h, 0u32);
     let ih_2 = select(row_ok_2, pr_2 - pad_h, 0u32);
     let ih_3 = select(row_ok_3, pr_3 - pad_h, 0u32);
-
     let pc_0 = pc0;
     let pc_1 = pc0 + 1u32;
     let pc_2 = pc0 + 2u32;
@@ -139,13 +136,11 @@ pub fn winograd_conv2d_3x3<T>(
     let iw_1 = select(col_ok_1, pc_1 - pad_w, 0u32);
     let iw_2 = select(col_ok_2, pc_2 - pad_w, 0u32);
     let iw_3 = select(col_ok_3, pc_3 - pad_w, 0u32);
-
     let input_plane = in_h * in_w;
     let in_n_stride = in_ch * input_plane;
     let n_base = n * in_n_stride;
     // Weight: [out_ch, in_ch, 3, 3] — 9 contiguous taps per (oc, ic).
     let w_oc_base = oc * in_ch * 9u32;
-
     // M = Σ_ic (U ⊙ V) — the 4×4 transformed-domain accumulator.
     let mut m00 = 0.0f32;
     let mut m01 = 0.0f32;
@@ -163,14 +158,12 @@ pub fn winograd_conv2d_3x3<T>(
     let mut m31 = 0.0f32;
     let mut m32 = 0.0f32;
     let mut m33 = 0.0f32;
-
     for ic in range(0u32, in_ch, 1u32) {
         let in_ic_base = n_base + ic * input_plane;
         let row0 = in_ic_base + ih_0 * in_w;
         let row1 = in_ic_base + ih_1 * in_w;
         let row2 = in_ic_base + ih_2 * in_w;
         let row3 = in_ic_base + ih_3 * in_w;
-
         // Load the 4×4 input tile; padded taps contribute zero.
         let d00 = select(row_ok_0 & col_ok_0, load(input[row0 + iw_0]).cast::<f32>(), 0.0f32);
         let d01 = select(row_ok_0 & col_ok_1, load(input[row0 + iw_1]).cast::<f32>(), 0.0f32);
@@ -188,7 +181,6 @@ pub fn winograd_conv2d_3x3<T>(
         let d31 = select(row_ok_3 & col_ok_1, load(input[row3 + iw_1]).cast::<f32>(), 0.0f32);
         let d32 = select(row_ok_3 & col_ok_2, load(input[row3 + iw_2]).cast::<f32>(), 0.0f32);
         let d33 = select(row_ok_3 & col_ok_3, load(input[row3 + iw_3]).cast::<f32>(), 0.0f32);
-
         // Input transform V = Bᵀ·d·B. First t = Bᵀ·d (rows mix), then
         // V = t·B (columns mix). Bᵀ rows: [1,0,-1,0] [0,1,1,0]
         // [0,-1,1,0] [0,1,0,-1].
@@ -208,7 +200,6 @@ pub fn winograd_conv2d_3x3<T>(
         let t31 = d11 - d31;
         let t32 = d12 - d32;
         let t33 = d13 - d33;
-
         // V[r][·] = [tr0-tr2, tr1+tr2, tr2-tr1, tr1-tr3].
         let v00 = t00 - t02;
         let v01 = t01 + t02;
@@ -226,7 +217,6 @@ pub fn winograd_conv2d_3x3<T>(
         let v31 = t31 + t32;
         let v32 = t32 - t31;
         let v33 = t31 - t33;
-
         // Load the 3×3 filter for this (oc, ic).
         let w_base = w_oc_base + ic * 9u32;
         let g00 = load(weight[w_base + 0u32]).cast::<f32>();
@@ -238,7 +228,6 @@ pub fn winograd_conv2d_3x3<T>(
         let g20 = load(weight[w_base + 6u32]).cast::<f32>();
         let g21 = load(weight[w_base + 7u32]).cast::<f32>();
         let g22 = load(weight[w_base + 8u32]).cast::<f32>();
-
         // Filter transform U = G·g·Gᵀ. First s = G·g (rows mix), then
         // U = s·Gᵀ (columns mix). G rows: [1,0,0] [½,½,½] [½,-½,½]
         // [0,0,1].
@@ -254,7 +243,6 @@ pub fn winograd_conv2d_3x3<T>(
         let s30 = g20;
         let s31 = g21;
         let s32 = g22;
-
         // U[i][·] = [si0, ½(si0+si1+si2), ½(si0-si1+si2), si2].
         let u00 = s00;
         let u01 = 0.5f32 * (s00 + s01 + s02);
@@ -272,7 +260,6 @@ pub fn winograd_conv2d_3x3<T>(
         let u31 = 0.5f32 * (s30 + s31 + s32);
         let u32 = 0.5f32 * (s30 - s31 + s32);
         let u33 = s32;
-
         // Element-wise product, accumulated across input channels.
         m00 = m00 + u00 * v00;
         m01 = m01 + u01 * v01;
@@ -291,7 +278,6 @@ pub fn winograd_conv2d_3x3<T>(
         m32 = m32 + u32 * v32;
         m33 = m33 + u33 * v33;
     }
-
     // Output transform Y = Aᵀ·M·A. First p = Aᵀ·M (rows mix), then
     // Y = p·A (columns mix). Aᵀ rows: [1,1,1,0] [0,1,-1,-1].
     let p00 = m00 + m10 + m20;
@@ -302,14 +288,12 @@ pub fn winograd_conv2d_3x3<T>(
     let p11 = m11 - m21 - m31;
     let p12 = m12 - m22 - m32;
     let p13 = m13 - m23 - m33;
-
     // Y[i][·] = [pi0+pi1+pi2, pi1-pi2-pi3].
     let bias_v = load(bias[oc]).cast::<f32>();
     let y00 = p00 + p01 + p02 + bias_v;
     let y01 = p01 - p02 - p03 + bias_v;
     let y10 = p10 + p11 + p12 + bias_v;
     let y11 = p11 - p12 - p13 + bias_v;
-
     // Scatter the 2×2 tile. out_h / out_w are even (dispatch invariant),
     // so every (oh, ow) is in-bounds.
     let out_plane = out_h * out_w;
@@ -367,7 +351,6 @@ pub fn winograd_filter_transform_3x3<T>(
         let g20 = load(weight[w_base + 6u32]).cast::<f32>();
         let g21 = load(weight[w_base + 7u32]).cast::<f32>();
         let g22 = load(weight[w_base + 8u32]).cast::<f32>();
-
         // s = G·g (rows mix). G rows: [1,0,0] [½,½,½] [½,-½,½] [0,0,1].
         let s00 = g00;
         let s01 = g01;
@@ -381,7 +364,6 @@ pub fn winograd_filter_transform_3x3<T>(
         let s30 = g20;
         let s31 = g21;
         let s32 = g22;
-
         // U = s·Gᵀ (columns mix).
         let u_base = idx * 16u32;
         store(out[u_base + 0u32], s00.cast::<T>());
@@ -440,10 +422,8 @@ pub fn winograd_conv2d_3x3_split<T>(
     let r2 = r1 / tiles_h;
     let oc = r2 % out_ch;
     let n = r2 / out_ch;
-
     let pr0 = th * 2u32;
     let pc0 = tw * 2u32;
-
     let pr_0 = pr0;
     let pr_1 = pr0 + 1u32;
     let pr_2 = pr0 + 2u32;
@@ -456,7 +436,6 @@ pub fn winograd_conv2d_3x3_split<T>(
     let ih_1 = select(row_ok_1, pr_1 - pad_h, 0u32);
     let ih_2 = select(row_ok_2, pr_2 - pad_h, 0u32);
     let ih_3 = select(row_ok_3, pr_3 - pad_h, 0u32);
-
     let pc_0 = pc0;
     let pc_1 = pc0 + 1u32;
     let pc_2 = pc0 + 2u32;
@@ -469,12 +448,10 @@ pub fn winograd_conv2d_3x3_split<T>(
     let iw_1 = select(col_ok_1, pc_1 - pad_w, 0u32);
     let iw_2 = select(col_ok_2, pc_2 - pad_w, 0u32);
     let iw_3 = select(col_ok_3, pc_3 - pad_w, 0u32);
-
     let input_plane = in_h * in_w;
     let in_n_stride = in_ch * input_plane;
     let n_base = n * in_n_stride;
     let u_oc_base = oc * in_ch * 16u32;
-
     let mut m00 = 0.0f32;
     let mut m01 = 0.0f32;
     let mut m02 = 0.0f32;
@@ -491,14 +468,12 @@ pub fn winograd_conv2d_3x3_split<T>(
     let mut m31 = 0.0f32;
     let mut m32 = 0.0f32;
     let mut m33 = 0.0f32;
-
     for ic in range(0u32, in_ch, 1u32) {
         let in_ic_base = n_base + ic * input_plane;
         let row0 = in_ic_base + ih_0 * in_w;
         let row1 = in_ic_base + ih_1 * in_w;
         let row2 = in_ic_base + ih_2 * in_w;
         let row3 = in_ic_base + ih_3 * in_w;
-
         let d00 = select(row_ok_0 & col_ok_0, load(input[row0 + iw_0]).cast::<f32>(), 0.0f32);
         let d01 = select(row_ok_0 & col_ok_1, load(input[row0 + iw_1]).cast::<f32>(), 0.0f32);
         let d02 = select(row_ok_0 & col_ok_2, load(input[row0 + iw_2]).cast::<f32>(), 0.0f32);
@@ -515,7 +490,6 @@ pub fn winograd_conv2d_3x3_split<T>(
         let d31 = select(row_ok_3 & col_ok_1, load(input[row3 + iw_1]).cast::<f32>(), 0.0f32);
         let d32 = select(row_ok_3 & col_ok_2, load(input[row3 + iw_2]).cast::<f32>(), 0.0f32);
         let d33 = select(row_ok_3 & col_ok_3, load(input[row3 + iw_3]).cast::<f32>(), 0.0f32);
-
         let t00 = d00 - d20;
         let t01 = d01 - d21;
         let t02 = d02 - d22;
@@ -532,7 +506,6 @@ pub fn winograd_conv2d_3x3_split<T>(
         let t31 = d11 - d31;
         let t32 = d12 - d32;
         let t33 = d13 - d33;
-
         let v00 = t00 - t02;
         let v01 = t01 + t02;
         let v02 = t02 - t01;
@@ -549,7 +522,6 @@ pub fn winograd_conv2d_3x3_split<T>(
         let v31 = t31 + t32;
         let v32 = t32 - t31;
         let v33 = t31 - t33;
-
         // Load the pre-transformed 4×4 filter U for this (oc, ic).
         let u_base = u_oc_base + ic * 16u32;
         let u00 = load(u[u_base + 0u32]).cast::<f32>();
@@ -568,7 +540,6 @@ pub fn winograd_conv2d_3x3_split<T>(
         let u31 = load(u[u_base + 13u32]).cast::<f32>();
         let u32_ = load(u[u_base + 14u32]).cast::<f32>();
         let u33 = load(u[u_base + 15u32]).cast::<f32>();
-
         m00 = m00 + u00 * v00;
         m01 = m01 + u01 * v01;
         m02 = m02 + u02 * v02;
@@ -586,7 +557,6 @@ pub fn winograd_conv2d_3x3_split<T>(
         m32 = m32 + u32_ * v32;
         m33 = m33 + u33 * v33;
     }
-
     let p00 = m00 + m10 + m20;
     let p01 = m01 + m11 + m21;
     let p02 = m02 + m12 + m22;
@@ -595,13 +565,11 @@ pub fn winograd_conv2d_3x3_split<T>(
     let p11 = m11 - m21 - m31;
     let p12 = m12 - m22 - m32;
     let p13 = m13 - m23 - m33;
-
     let bias_v = load(bias[oc]).cast::<f32>();
     let y00 = p00 + p01 + p02 + bias_v;
     let y01 = p01 - p02 - p03 + bias_v;
     let y10 = p10 + p11 + p12 + bias_v;
     let y11 = p11 - p12 - p13 + bias_v;
-
     let out_plane = out_h * out_w;
     let out_oc_base = (n * out_ch + oc) * out_plane;
     let oh0 = th * 2u32;

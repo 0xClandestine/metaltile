@@ -56,7 +56,6 @@ pub fn logits_top_p_mask<T>(
     let row = program_id::<0>();
     let rs = row * n;
     let re = rs + n;
-
     // Pass 1: one streaming pass for both the row max and the partition
     // function Z = Σ exp(logit − row_max). Each lane keeps a running
     // (max, sum) pair in online-softmax form; the pair is then merged
@@ -72,7 +71,6 @@ pub fn logits_top_p_mask<T>(
     let row_max = reduce_max(lm);
     // Rescale every lane's partial sum to the common max before reducing.
     let z = reduce_sum(ls * exp(lm - row_max));
-
     // Bisection: find the largest weight threshold `t` whose kept mass
     // S(t) = Σ_{w_i ≥ t} w_i still reaches `target`. `lo` is the highest
     // threshold known to keep enough mass, `hi` the lowest known to keep
@@ -96,7 +94,6 @@ pub fn logits_top_p_mask<T>(
         lo = select(enough, mid, lo);
         hi = select(enough, hi, mid);
     }
-
     // Pass 2: keep a logit iff its weight clears the converged floor
     // `lo`, else -inf. `lo` starts at 0, so a token whose weight equals
     // the floor is kept — the argmax (weight 1) therefore always survives.

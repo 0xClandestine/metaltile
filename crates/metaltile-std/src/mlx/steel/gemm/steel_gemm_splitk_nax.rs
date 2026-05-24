@@ -75,30 +75,24 @@ pub fn mt_steel_gemm_splitk_nax<T>(
     let lane = simd_lane;
     let sg = simd_group_id();
     let lane_in_tg = sg * 32u32 + lane;
-
     // 2×2 warp grid.
     let sm = sg / 2u32;
     let sn = sg & 1u32;
     let sg_m_base = sm * 16u32;
     let sg_n_base = sn * 16u32;
-
     let x_m_base = tgid_y * 32u32;
     let w_n_base = tgid_x * 32u32;
-
     // This split's K-range. The last split may legally have
     // `k_start + k_per_split > k` — clamp via `min`.
     let split = tgid_z;
     let k_start = split * k_per_split;
     let k_end_raw = k_start + k_per_split;
     let k_end = min(k_end_raw, k);
-
     // Per-split partials base: this slab is `[split, M, N]`.
     let part_base = split * m * n;
-
     threadgroup_alloc("Xs", 1152u32, coop_stage(T)); // 32 × 36
     threadgroup_alloc("Ws", 1152u32, coop_stage(T)); // 32 × 36
     threadgroup_alloc("OutScratch", 1024u32, f32); // 4 SG × 16 × 16
-
     coop_tile_setup(
         "gemm",
         16u32,
@@ -113,19 +107,15 @@ pub fn mt_steel_gemm_splitk_nax<T>(
         false,
     );
     coop_tile_zero("gemm");
-
     // Per-lane stage coordinates: 128 lanes × 8 elems = 1024 = 32 × 32.
     let x_m_row = lane_in_tg / 4u32;
     let x_k_quad = lane_in_tg & 3u32;
     let x_k_base = x_k_quad * 8u32;
     let x_ws_base = x_m_row * 36u32 + x_k_base;
-
     let xs_sg_off = sg_m_base * 36u32;
     let ws_sg_off = sg_n_base * 36u32;
     let sg_scratch_off = sg * 256u32;
-
     let b_n = w_n_base + x_m_row;
-
     // K-loop only over this split's range.
     for kb in range(k_start, k_end, 32u32) {
         let a_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base;
@@ -133,25 +123,19 @@ pub fn mt_steel_gemm_splitk_nax<T>(
             let av = load(a[a_row_dev_base + _i]).cast::<f32>();
             threadgroup_store("Xs", x_ws_base + _i, av);
         }
-
         let b_k_base = kb + x_k_base;
         for _i in range(0u32, 8u32, 1u32) {
             let bv = load(b[(b_k_base + _i) * n + b_n]).cast::<f32>();
             threadgroup_store("Ws", x_ws_base + _i, bv);
         }
-
         threadgroup_barrier();
-
         coop_tile_load_a("gemm", "Xs", true, coop_stage(T), 36u32, 16u32, xs_sg_off);
         coop_tile_load_b("gemm", "Ws", true, coop_stage(T), 36u32, 16u32, ws_sg_off);
         coop_tile_run("gemm");
-
         threadgroup_barrier();
     }
-
     coop_tile_store_c("gemm", "OutScratch", true, f32, 16u32, 16u32, sg_scratch_off);
     threadgroup_barrier();
-
     // Write per-SG 16×16 fp32 result → this split's partials slab.
     let out_m_base = x_m_base + sg_m_base;
     let out_n_base = w_n_base + sg_n_base;
@@ -176,7 +160,6 @@ pub fn mt_steel_gemm_splitk_accum_nax<T>(
 ) {
     let idx = tgid_x;
     let total = m * n;
-
     // Seed accumulator with split-0; loop adds the rest. fp32 throughout
     // so cross-split sums keep precision for f16/bf16 operands.
     let mut acc = load(partials[idx]);

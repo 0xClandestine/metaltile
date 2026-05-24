@@ -80,7 +80,6 @@ pub fn mt_strided_copy_nd<T>(
     #[constexpr] rank: u32,
 ) {
     let p = program_id::<0>();
-
     // Unravel the flat output index `p` against `shape`, walking
     // dimensions from the innermost (last) to the outermost (first).
     // `rem` carries the not-yet-consumed portion of `p`; at each step
@@ -97,7 +96,6 @@ pub fn mt_strided_copy_nd<T>(
         rem = rem / extent;
         src_off = src_off + coord * load(strides[d]);
     }
-
     store(out[p], load(src[src_off]));
 }
 

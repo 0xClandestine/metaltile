@@ -253,7 +253,6 @@ pub fn mt_fft_bluestein_preprocess<T>(
     if idx < rows * m_len {
         let col = idx % m_len;
         let row = idx / m_len;
-
         let pi = 3.141592653589793f32;
         // Standard Bluestein for the forward DFT uses exp(-iπn²/N) on
         // the input side and exp(-iπk²/N) on the output side (paired
@@ -262,7 +261,6 @@ pub fn mt_fft_bluestein_preprocess<T>(
         //   forward (inv=0): angle_sign = -1   (chirp = exp(-iπn²/N))
         //   inverse (inv=1): angle_sign = +1   (chirp = exp(+iπn²/N))
         let angle_sign = select(inv == 0u32, -1.0f32, 1.0f32);
-
         // Zero-pad region: col >= n_len writes zero.
         if col >= n_len {
             store(out_re[row * m_len + col], 0.0f32.cast::<T>());
@@ -274,15 +272,12 @@ pub fn mt_fft_bluestein_preprocess<T>(
             let angle = angle_sign * pi * n_f * n_f / n_len_f;
             let wr = cos(angle);
             let wi = sin(angle);
-
             // Load input (complex).
             let xr = load(in_re[row * n_len + col]).cast::<f32>();
             let xi = load(in_im[row * n_len + col]).cast::<f32>();
-
             // Complex multiply: (xr + xi·i)(wr + wi·i).
             let pr = xr * wr - xi * wi;
             let pi_v = xr * wi + xi * wr;
-
             store(out_re[row * m_len + col], pr.cast::<T>());
             store(out_im[row * m_len + col], pi_v.cast::<T>());
         }
@@ -331,14 +326,11 @@ pub fn mt_fft_bluestein_chirp_filter(
     #[constexpr] m_len: u32,
 ) {
     let m = program_id::<0>(); // column index in [0, M)
-
     let pi = 3.141592653589793f32;
-
     // n = min(m, M-m) — the "wrapped" tap index.
     let m_minus = m_len - m;
     let n_tap = select(m < n_len, m, select(m_minus < n_len, m_minus, n_len));
     let in_range = (m < n_len) | ((m_minus < n_len) & (m > 0u32));
-
     if in_range {
         let n_f = n_tap.cast::<f32>();
         let n_len_f = n_len.cast::<f32>();
@@ -401,17 +393,14 @@ pub fn mt_fft_bluestein_cmul<T>(
     // Bounds guard — see preprocess kernel for rationale.
     if idx < rows * m_len {
         let col = idx % m_len;
-
         let yr = load(y_re[idx]).cast::<f32>();
         let yi = load(y_im[idx]).cast::<f32>();
         // Filter broadcasts across rows (index by col only).
         let fr = load(filter_re[col]);
         let fi = load(filter_im[col]);
-
         // Complex multiply.
         let pr = yr * fr - yi * fi;
         let pi_v = yr * fi + yi * fr;
-
         store(out_re[idx], pr.cast::<T>());
         store(out_im[idx], pi_v.cast::<T>());
     }
@@ -463,29 +452,23 @@ pub fn mt_fft_bluestein_postprocess<T>(
     if idx < rows * n_len {
         let k = idx % n_len;
         let row = idx / n_len;
-
         let pi = 3.141592653589793f32;
         // Post-multiply chirp: same sign convention as pre-multiply.
         let angle_sign = select(inv == 0u32, -1.0f32, 1.0f32);
-
         let k_f = k.cast::<f32>();
         let n_len_f = n_len.cast::<f32>();
         let angle = angle_sign * pi * k_f * k_f / n_len_f;
         let wr = cos(angle);
         let wi = sin(angle);
-
         // Load from the IFFT output at position (row, k). The circular
         // convolution result is in [rows, M]; we only need the first N values.
         let cr = load(conv_re[row * m_len + k]).cast::<f32>();
         let ci = load(conv_im[row * m_len + k]).cast::<f32>();
-
         // Complex multiply.
         let pr = cr * wr - ci * wi;
         let pi_v = cr * wi + ci * wr;
-
         // Inverse scale: 1/N for the inverse DFT, 1 for forward.
         let scale = select(inv == 0u32, 1.0f32, 1.0f32 / n_len_f);
-
         store(out_re[idx], (pr * scale).cast::<T>());
         store(out_im[idx], (pi_v * scale).cast::<T>());
     }

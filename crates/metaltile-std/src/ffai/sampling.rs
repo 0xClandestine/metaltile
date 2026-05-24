@@ -54,7 +54,6 @@ pub fn softmax_categorical_sample<T>(
 ) {
     let lid = tid;
     let inv_t = 1.0f32 / load(temperature_in[0]);
-
     // ─── Pass 1: cooperative max reduce (strided) ───────────────────
     let mut local_max = neg_infinity();
     threadgroup_alloc("tg_max", 256);
@@ -68,7 +67,6 @@ pub fn softmax_categorical_sample<T>(
     }
     threadgroup_store("tg_max", lid, local_max);
     threadgroup_barrier();
-
     // 8-stage power-of-two halving max-reduction (stride 128 → 1).
     for _stage in range(0u32, 8u32, 1u32) {
         let stride = 128u32 >> _stage;
@@ -79,9 +77,7 @@ pub fn softmax_categorical_sample<T>(
         }
         threadgroup_barrier();
     }
-
     let max_val = threadgroup_load("tg_max", 0u32);
-
     // ─── Combined pass 2+3: chunk-partial sum-exp → inclusive scan
     //                       → parallel-prefix CDF walk ─────────────
     //
@@ -91,7 +87,6 @@ pub fn softmax_categorical_sample<T>(
     let lo = lid * chunk;
     let hi_raw = lo + chunk;
     let hi = select(hi_raw > n, n, hi_raw);
-
     let mut local_partial = 0.0f32;
     for j in range(lo, hi, 1u32) {
         if j < n {
@@ -99,11 +94,9 @@ pub fn softmax_categorical_sample<T>(
             local_partial = local_partial + exp(v - max_val);
         }
     }
-
     threadgroup_alloc("tg_cdf", 256);
     threadgroup_store("tg_cdf", lid, local_partial);
     threadgroup_barrier();
-
     // Hillis-Steele inclusive scan: 8 stages (stride 1 → 128).
     // Underflow-safe: lanes with lid < stride contribute 0 instead of
     // reading from negative indices.
@@ -117,7 +110,6 @@ pub fn softmax_categorical_sample<T>(
         threadgroup_store("tg_cdf", lid, cur + neighbor_val);
         threadgroup_barrier();
     }
-
     let total = threadgroup_load("tg_cdf", lsize - 1u32);
     let target = load(uniform_in[0]) * total;
     let my_cum_end = threadgroup_load("tg_cdf", lid);
@@ -126,11 +118,9 @@ pub fn softmax_categorical_sample<T>(
         0.0f32,
         threadgroup_load("tg_cdf", select(lid > 0u32, lid - 1u32, lid)),
     );
-
     // Hit lane: target sits in (prev_cum, my_cum_end]. The strict
     // lower bound means exactly one lane fires at a boundary value.
     let is_hit = (prev_cum < target) & (target <= my_cum_end) & (lo < n);
-
     if is_hit {
         let mut cum = prev_cum;
         let mut found_idx = hi - 1u32; // fallback: last position in chunk

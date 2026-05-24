@@ -81,20 +81,17 @@ pub fn mt_sdpa_prefill_mma_bf16<T>(
     let lane = simd_lane;
     let sg = simd_group_id();
     let lane_in_tg = sg * 32u32 + lane;
-
     // ── 8×8 frag lane mapping (Apple steel_gemm layout) ──
     let qid = lane / 4u32;
     let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
     let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
     let fn1 = fn0 + 1u32;
-
     let head_dim = 128u32;
     let bq = 32u32;
     let bq_sg = 8u32;
     let bk = 16u32;
     let q_len_off = k_len - q_len;
     let scale_log2 = scale * 1.4426950408889634f32;
-
     // Batched-prefill layout: q/out [batch, n_q_heads, q_len, head_dim],
     // k/v [batch, n_kv_heads, k_len, head_dim]. Single-batch B=1
     // collapses to the original `(kv|q_head) * len * head_dim` form.
@@ -102,7 +99,6 @@ pub fn mt_sdpa_prefill_mma_bf16<T>(
     let q_head_row_off = batch * n_q_heads * q_len * head_dim + q_head * q_len * head_dim;
     let q_tile_first = q_tile * bq + sg * bq_sg;
     let q_row_base = q_head_row_off + q_tile_first * head_dim;
-
     // TG memory layout (Q lives in thread-private scalar regs, see preload
     // below — no tg_qs):
     //   tg_ks: BK × kv_ld = 16 × 132 = 2112 T elems (8KB f32, 4KB f16/bf16)
@@ -112,7 +108,6 @@ pub fn mt_sdpa_prefill_mma_bf16<T>(
     let kv_ld = 132u32;
     threadgroup_alloc("tg_ks", 2112, T);
     threadgroup_alloc("tg_vs", 2112, T);
-
     // ── Init 16 O frags to zero (f32) ──
     let o_f0 = simdgroup_alloc::<f32, 8, 8>();
     simdgroup_elem_store(o_f0, 0, 0.0f32);
@@ -162,7 +157,6 @@ pub fn mt_sdpa_prefill_mma_bf16<T>(
     let o_ff = simdgroup_alloc::<f32, 8, 8>();
     simdgroup_elem_store(o_ff, 0, 0.0f32);
     simdgroup_elem_store(o_ff, 1, 0.0f32);
-
     // S/P frags (2: cols 0..7 and 8..15) reused per K-block. f32 — mirrors MLX.
     let s_f0 = simdgroup_alloc::<f32, 8, 8>();
     let s_f1 = simdgroup_alloc::<f32, 8, 8>();
@@ -178,17 +172,14 @@ pub fn mt_sdpa_prefill_mma_bf16<T>(
     let kt_b = simdgroup_alloc::<T, 8, 8>();
     let v_a = simdgroup_alloc::<T, 8, 8>();
     let v_b = simdgroup_alloc::<T, 8, 8>();
-
     // Per-lane row state (4 lanes share the same fm → redundantly hold
     // identical m_row / s_row, which is fine).
     let mut m_row = neg_infinity();
     let mut s_row = 0.0f32;
-
     let q_abs = q_tile_first + fm + q_len_off;
     // TG-wide kb_lim so all 4 SGs execute the same barrier count.
     let q_tile_last_abs = q_tile * bq + (bq - 1u32) + q_len_off;
     let kb_lim = (q_tile_last_abs / bk) + 1u32;
-
     // ── Preload Q into thread-scalar regs (32 values per lane). ──
     // Single q_frag (vs original 16) drops simdgroup-matrix register pressure;
     // hoisting Q-reads out of the kb-loop avoids redundant device loads per dd.
@@ -226,10 +217,8 @@ pub fn mt_sdpa_prefill_mma_bf16<T>(
     let q_de_1 = load(q[q_row_base + fm * head_dim + 112u32 + fn1]).cast::<T>();
     let q_df_0 = load(q[q_row_base + fm * head_dim + 120u32 + fn0]).cast::<T>();
     let q_df_1 = load(q[q_row_base + fm * head_dim + 120u32 + fn1]).cast::<T>();
-
     for kb in range(0u32, kb_lim, 1u32) {
         let kb_off = kb * bk;
-
         // ── Coop K/V load (combined): 128 lanes × bk × 1 elem = full K-block.
         for kr in range(0u32, bk, 1u32) {
             let kv_off = kv_row_base + (kb_off + kr) * head_dim + lane_in_tg;
@@ -238,13 +227,11 @@ pub fn mt_sdpa_prefill_mma_bf16<T>(
             threadgroup_store("tg_vs", kr_off + lane_in_tg, load(v[kv_off]).cast::<T>());
         }
         threadgroup_barrier();
-
         // ── S = Q · K^T (32 matmuls per SG: 16 d_frags × 2 k_chunks) ──
         simdgroup_elem_store(s_f0, 0, 0.0f32);
         simdgroup_elem_store(s_f0, 1, 0.0f32);
         simdgroup_elem_store(s_f1, 0, 0.0f32);
         simdgroup_elem_store(s_f1, 1, 0.0f32);
-
         // Per-dd: write q_frag from preloaded scalars (q_dX_Y), load kt_a/kt_b
         // from tg_ks, then matmul. K^T frag elem layout:
         //   elem[i] = K[k_base + fn_i, d_base + fm]
@@ -665,7 +652,6 @@ pub fn mt_sdpa_prefill_mma_bf16<T>(
             threadgroup_load("tg_ks", (fn1 + 8u32) * kv_ld + 120u32 + fm).cast::<T>(),
         );
         simdgroup_matmul(q_frag, kt_b, s_f1);
-
         // ── Online softmax, register-only via simd_shuffle_xor row reduce ──
         let raw_s00 = simdgroup_elem_load(s_f0, 0) * scale_log2;
         let raw_s01 = simdgroup_elem_load(s_f0, 1) * scale_log2;
@@ -675,39 +661,31 @@ pub fn mt_sdpa_prefill_mma_bf16<T>(
         let s01 = select(kb_off + fn1 > q_abs, neg_infinity(), raw_s01);
         let s10 = select(kb_off + 8u32 + fn0 > q_abs, neg_infinity(), raw_s10);
         let s11 = select(kb_off + 8u32 + fn1 > q_abs, neg_infinity(), raw_s11);
-
         let mxa = select(s00 > s01, s00, s01);
         let mxb = select(s10 > s11, s10, s11);
         let lane_max = select(mxa > mxb, mxa, mxb);
-
         let mxor1 = simd_shuffle_xor(lane_max, 1u32);
         let mx_after1 = select(lane_max > mxor1, lane_max, mxor1);
         let mxor8 = simd_shuffle_xor(mx_after1, 8u32);
         let row_max = select(mx_after1 > mxor8, mx_after1, mxor8);
-
         let new_m = select(row_max > m_row, row_max, m_row);
         let m_diff = exp2(m_row - new_m);
-
         let p00 = exp2(s00 - new_m);
         let p01 = exp2(s01 - new_m);
         let p10 = exp2(s10 - new_m);
         let p11 = exp2(s11 - new_m);
-
         let lane_sum = p00 + p01 + p10 + p11;
         let sxor1 = simd_shuffle_xor(lane_sum, 1u32);
         let sum_after1 = lane_sum + sxor1;
         let sxor8 = simd_shuffle_xor(sum_after1, 8u32);
         let row_sum = sum_after1 + sxor8;
-
         s_row = s_row * m_diff + row_sum;
         m_row = new_m;
-
         // P frag is f32 (MLX MMATile<float> pattern); P·V runs as float MMA.
         simdgroup_elem_store(p_f0, 0, p00.cast::<T>());
         simdgroup_elem_store(p_f0, 1, p01.cast::<T>());
         simdgroup_elem_store(p_f1, 0, p10.cast::<T>());
         simdgroup_elem_store(p_f1, 1, p11.cast::<T>());
-
         // ── Scale all 16 O frags by m_diff ──
         simdgroup_elem_store(o_f0, 0, simdgroup_elem_load(o_f0, 0) * m_diff);
         simdgroup_elem_store(o_f0, 1, simdgroup_elem_load(o_f0, 1) * m_diff);
@@ -741,7 +719,6 @@ pub fn mt_sdpa_prefill_mma_bf16<T>(
         simdgroup_elem_store(o_fe, 1, simdgroup_elem_load(o_fe, 1) * m_diff);
         simdgroup_elem_store(o_ff, 0, simdgroup_elem_load(o_ff, 0) * m_diff);
         simdgroup_elem_store(o_ff, 1, simdgroup_elem_load(o_ff, 1) * m_diff);
-
         // ── O += P · V (32 matmuls per SG: 16 d_frags × 2 k_chunks) ──
         // V frag elem: V_a.elem[i] = V[fm,        d_base + fn_i] = tg_vs[fm * kv_ld       + d_base + fn_i]
         //              V_b.elem[i] = V[fm + 8,    d_base + fn_i] = tg_vs[(fm + 8) * kv_ld + d_base + fn_i]
@@ -1119,10 +1096,8 @@ pub fn mt_sdpa_prefill_mma_bf16<T>(
             threadgroup_load("tg_vs", (fm + 8u32) * kv_ld + 120u32 + fn1).cast::<T>(),
         );
         simdgroup_matmul(p_f1, v_b, o_ff);
-
         threadgroup_barrier();
     }
-
     // ── Final normalize + write O to out ──
     let is_row = select(s_row > 0.0f32, 1.0f32 / s_row, 0.0f32);
     store(

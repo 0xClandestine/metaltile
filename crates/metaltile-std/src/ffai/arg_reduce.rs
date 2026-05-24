@@ -55,7 +55,6 @@ pub fn ffai_argmax<T>(inp: Tensor<T>, out: Tensor<u32>, #[constexpr] n: u32) {
     threadgroup_store("tg_vals", lid, best_val);
     threadgroup_store("tg_idxs", lid, best_idx);
     threadgroup_barrier();
-
     // 7-stage power-of-two halving reduction over the 256-thread group.
     for _stage in range(0u32, 7u32, 1u32) {
         let stride = 128u32 >> _stage;
@@ -70,7 +69,6 @@ pub fn ffai_argmax<T>(inp: Tensor<T>, out: Tensor<u32>, #[constexpr] n: u32) {
         }
         threadgroup_barrier();
     }
-
     // Final stride-1 merge writes result directly to output.
     if lid == 0u32 {
         let ov = threadgroup_load("tg_vals", 1u32);

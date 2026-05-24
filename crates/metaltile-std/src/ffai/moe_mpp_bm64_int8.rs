@@ -71,19 +71,15 @@ pub fn mt_moe_gather_qmm_mma_int8_bm64_mpp<T>(
     // 2×2 warp grid: sg_m_base / sg_n_base select this SG's 32×32 sub-tile.
     let sg_m_base = (sg / 2u32) * 32u32;
     let sg_n_base = (sg & 1u32) * 32u32;
-
     // int8: 4 bytes per u32 → k_in / 4 packs per weight row.
     let packs_per_row = k_in / 4u32;
     let groups_per_row = k_in / group_size;
-
     // X coop-load: 128 lanes × 16 contiguous K = 2048 = BM(64)×TG_LD(32).
     let x_m_row = lane_in_tg / 2u32;
     let x_k_base = (lane_in_tg & 1u32) * 16u32;
-
     threadgroup_alloc("Xs", 2048, coop_stage(T)); // 64 × 32
     threadgroup_alloc("Ws", 2048, coop_stage(T)); // 64 × 32
     threadgroup_alloc("OutScratch", 4096, f32); // 4 SG × 32 × 32
-
     // Descriptor 32×32×32, cooperative-tensor inputs, accumulate.
     coop_tile_setup(
         "gemm",
@@ -98,13 +94,11 @@ pub fn mt_moe_gather_qmm_mma_int8_bm64_mpp<T>(
         true,
         false,
     );
-
     let mut sub_offset = 0u32;
     for _sub_iter in range(0u32, 64u32, 1u32) {
         let cur_row = m_tile_base + sub_offset;
         let cur_in_range = (sub_offset < 64u32) & (cur_row < m_total);
         let cur_expert = select(cur_in_range, load(indices[cur_row]), 4294967295u32);
-
         // Walk forward to find the first row whose expert differs, clamping
         // sub_end at the tile boundary or at m_total.
         let mut sub_end = 64u32;
@@ -125,14 +119,11 @@ pub fn mt_moe_gather_qmm_mma_int8_bm64_mpp<T>(
                 found = 1u32;
             }
         }
-
         let cur_valid = (cur_expert != 4294967295u32) & (sub_offset < 64u32);
         if cur_valid {
             let w_expert_base = cur_expert * n_out * packs_per_row;
             let sb_expert_base = cur_expert * n_out * groups_per_row;
-
             coop_tile_zero("gemm");
-
             for kb in range(0u32, k_in, 32u32) {
                 // Stage X[m_tile_base..+64, kb..kb+32] → Xs. 128 lanes × 16.
                 let gr_x = m_tile_base + x_m_row;
@@ -144,7 +135,6 @@ pub fn mt_moe_gather_qmm_mma_int8_bm64_mpp<T>(
                     let xv = load(x[x_dev_base + _i]).cast::<f32>();
                     threadgroup_store("Xs", x_ws_base + _i, select(in_run_x, xv, 0.0f32));
                 }
-
                 // Dequant W → Ws.
                 //
                 // int8 lane mapping: 128 lanes × 4 packs/lane × 4 bytes/pack
@@ -179,22 +169,17 @@ pub fn mt_moe_gather_qmm_mma_int8_bm64_mpp<T>(
                         threadgroup_store("Ws", ws_base + _j, s * q + b);
                     }
                 }
-
                 threadgroup_barrier();
-
                 // Per-SG 32×32 sub-tile views into Xs / Ws (offset by the
                 // SG's 32-row span × TG_LD=32). extents<32, 32> = K-inner.
                 coop_tile_load_a("gemm", "Xs", true, coop_stage(T), 32, 32, sg_m_base * 32u32);
                 coop_tile_load_b("gemm", "Ws", true, coop_stage(T), 32, 32, sg_n_base * 32u32);
                 coop_tile_run("gemm");
-
                 threadgroup_barrier();
             }
-
             // Store this SG's 32×32 fp32 result into its OutScratch slot.
             coop_tile_store_c("gemm", "OutScratch", true, f32, 32, 32, sg * 1024u32);
             threadgroup_barrier();
-
             // Coop-write OutScratch → out. 128 lanes × 32 = 4096 = BM*BN.
             // Each (mr, nc) lives in SG `(mr/32)*2 + (nc/32)`'s scratch.
             for _e in range(0u32, 32u32, 1u32) {

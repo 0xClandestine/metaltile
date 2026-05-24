@@ -54,19 +54,15 @@ pub fn mt_qmm_nax_int8<T>(
     let lane = simd_lane;
     let sg = simd_group_id();
     let lane_in_tg = sg * 32u32 + lane;
-
     let sm = sg / 2u32;
     let sn = sg & 1u32;
     let sg_m_base = sm * 16u32;
     let sg_n_base = sn * 16u32;
-
     let x_m_base = tgid_y * 32u32;
     let w_n_base = tgid_x * 32u32;
-
     threadgroup_alloc("Xs", 1152u32, coop_stage(T)); // 32 × 36
     threadgroup_alloc("Ws", 1152u32, coop_stage(T)); // 32 × 36
     threadgroup_alloc("OutScratch", 1024u32, f32); // 4 SG × 16 × 16
-
     coop_tile_setup(
         "gemm",
         16u32,
@@ -81,23 +77,19 @@ pub fn mt_qmm_nax_int8<T>(
         false,
     );
     coop_tile_zero("gemm");
-
     // Per-lane coordinates — same decomposition as int4 NAX/MPP.
     let x_m_row = lane_in_tg / 4u32; // 0..32 (= w_row)
     let x_k_quad = lane_in_tg & 3u32; // 0..4  (column group selector)
     let x_k_base = x_k_quad * 8u32; // 0/8/16/24
     let x_ws_base = x_m_row * 36u32 + x_k_base;
-
     // int8: 4 bytes per u32 → packs_per_row = k/4.
     let packs_per_row = k / 4u32;
     let wn_plus_wr = w_n_base + x_m_row;
     let sb_base = wn_plus_wr * gs_per_row;
     let w_pack_row_base = wn_plus_wr * packs_per_row;
-
     let xs_sg_off = sg_m_base * 36u32;
     let ws_sg_off = sg_n_base * 36u32;
     let sg_scratch_off = sg * 256u32;
-
     for kb in range(0u32, k, 32u32) {
         // Stage X[x_m_base + x_m_row, kb + x_k_base..+8] → Xs.
         let x_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base;
@@ -105,43 +97,34 @@ pub fn mt_qmm_nax_int8<T>(
             let xv = load(x[x_row_dev_base + _i]).cast::<f32>();
             threadgroup_store("Xs", x_ws_base + _i, xv);
         }
-
         // W dequant (int8): 2 u32 packs per lane, 4 bytes each = 8 K-elems.
         // Pack base: kb/4 gives block-start in packs; x_k_quad*2 selects the
         // pair of consecutive packs owned by this lane within the K-block.
         let w_kb_off = kb / 4u32 + x_k_quad * 2u32;
-
         for _pi in range(0u32, 2u32, 1u32) {
             let pack_dev = w_pack_row_base + w_kb_off + _pi;
             let packed = load(w[pack_dev]);
-
             // Absolute K start for this pack, used to pick the scale/bias group.
             let k_off = kb + x_k_quad * 8u32 + _pi * 4u32;
             let g = k_off / 32u32; // group_size = 32 (baked)
             let sb_off = sb_base + g;
             let scale = load(scales[sb_off]).cast::<f32>();
             let bias = load(biases[sb_off]).cast::<f32>();
-
             // Extract 4 bytes from this u32 and write to Ws.
             for _bi in range(0u32, 4u32, 1u32) {
                 let byte_val = ((packed >> (_bi * 8u32)) & 255u32).cast::<f32>();
                 threadgroup_store("Ws", x_ws_base + _pi * 4u32 + _bi, scale * byte_val + bias);
             }
         }
-
         threadgroup_barrier();
-
         // Per-SG cooperative matmul — identical to int4 NAX.
         coop_tile_load_a("gemm", "Xs", true, coop_stage(T), 36u32, 16u32, xs_sg_off);
         coop_tile_load_b("gemm", "Ws", true, coop_stage(T), 36u32, 16u32, ws_sg_off);
         coop_tile_run("gemm");
-
         threadgroup_barrier();
     }
-
     coop_tile_store_c("gemm", "OutScratch", true, f32, 16u32, 16u32, sg_scratch_off);
     threadgroup_barrier();
-
     // Coop-write OutScratch → out.
     let out_m_base = x_m_base + sg_m_base;
     let out_n_base = w_n_base + sg_n_base;

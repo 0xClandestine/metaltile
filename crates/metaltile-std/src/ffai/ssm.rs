@@ -56,7 +56,6 @@ pub fn conv1d_causal_step<T>(
     let d = program_id::<0>();
     let x_d = load(x[d]).cast::<f32>();
     let b_d = load(b[d]).cast::<f32>();
-
     // Convolution: w[K-1] pairs with current input x[d]; w[0]..w[K-2]
     // pair with state[0]..state[K-2].
     let w_last = load(w[(kernel_size - 1u32) * n_channels + d]).cast::<f32>();
@@ -72,7 +71,6 @@ pub fn conv1d_causal_step<T>(
         acc = acc + w_kd * s_kd;
     }
     store(y[d], acc.cast::<T>());
-
     // Shift state up by one (drop state[0], append x[d] at the tail).
     // Sequential within the thread → safe even though state[k] is read
     // after being written: we read state[k+1] each iteration, never
@@ -115,12 +113,10 @@ pub fn ssm_step<T>(
     let idx = program_id::<0>();
     let h_id = idx / head_dim;
     let d = idx - h_id * head_dim;
-
     let dt_val = load(dt[h_id]).cast::<f32>();
     let a_val = load(a[h_id]).cast::<f32>();
     let decay = exp(a_val * dt_val);
     let x_d = load(x[h_id * head_dim + d]).cast::<f32>();
-
     let mut y_d = 0.0f32;
     let h_base = h_id * state_dim * head_dim;
     for n in range(0u32, state_dim, 1u32) {
@@ -183,14 +179,11 @@ pub fn ssm_step_a2d<T>(
     let idx = program_id::<0>();
     let h_id = idx / head_dim;
     let d = idx - h_id * head_dim;
-
     let dt_val = load(dt[h_id]).cast::<f32>();
     let x_d = load(x[h_id * head_dim + d]).cast::<f32>();
-
     // `A_log` row for this channel: channel = h_id*head_dim + d, the
     // same flat index `idx` already computed.
     let a_log_base = idx * state_dim;
-
     let mut y_d = 0.0f32;
     let h_base = h_id * state_dim * head_dim;
     for n in range(0u32, state_dim, 1u32) {
@@ -243,21 +236,17 @@ pub fn mt_ssm_step<T>(
     let d_idx = tgid_x;
     let n = tgid_y;
     let ds_idx = tid;
-
     // h_idx = n % n_heads (which head within the batch).
     // g_idx = n / heads_per_group (which (B, C) group this head reads from).
     let h_idx = n - (n / n_heads) * n_heads;
     let g_idx = n / heads_per_group;
-
     let dt_val = load(dt[n]).cast::<f32>();
     let a_val = 0.0f32 - exp(load(a_log[h_idx]).cast::<f32>());
     let da = exp(a_val * dt_val);
     let x_val = load(x[n * dh + d_idx]).cast::<f32>();
-
     let n_per_t = ds / 32u32;
     let bc_base = g_idx * ds;
     let state_base = n * dh * ds + d_idx * ds;
-
     let mut acc = 0.0f32;
     for i in range(0u32, n_per_t, 1u32) {
         let s_idx = n_per_t * ds_idx + i;
@@ -267,7 +256,6 @@ pub fn mt_ssm_step<T>(
         store(state_out[idx], new_state.cast::<T>());
         acc = acc + new_state * load(c_mat[bc_base + s_idx]).cast::<f32>();
     }
-
     let total = simd_sum(acc);
     if ds_idx == 0u32 {
         let d_val = load(d_skip[h_idx]).cast::<f32>();
