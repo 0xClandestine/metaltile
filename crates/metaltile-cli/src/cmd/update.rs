@@ -13,10 +13,7 @@
 //!
 //! `--check`: print what would be installed without touching the binary.
 
-use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
-use std::path::PathBuf;
-use std::process::Command;
+use std::{fs, os::unix::fs::PermissionsExt as _, path::PathBuf, process::Command};
 
 use crate::{
     UpdateArgs,
@@ -133,12 +130,7 @@ fn fetch_latest_release_tag() -> Result<String, crate::CliError> {
 
 fn try_gh_latest_tag() -> Option<String> {
     let out = Command::new("gh")
-        .args([
-            "release", "view",
-            "--repo", REPO_SLUG,
-            "--json", "tagName",
-            "--jq", ".tagName",
-        ])
+        .args(["release", "view", "--repo", REPO_SLUG, "--json", "tagName", "--jq", ".tagName"])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -152,9 +144,12 @@ fn curl_latest_tag() -> Result<String, crate::CliError> {
     let url = format!("https://api.github.com/repos/{REPO_SLUG}/releases/latest");
     let out = Command::new("curl")
         .args([
-            "--silent", "--fail-with-body",
-            "--header", "Accept: application/vnd.github+json",
-            "--header", "User-Agent: tile-update/1",
+            "--silent",
+            "--fail-with-body",
+            "--header",
+            "Accept: application/vnd.github+json",
+            "--header",
+            "User-Agent: tile-update/1",
             &url,
         ])
         .output()
@@ -192,8 +187,7 @@ fn curl_latest_tag() -> Result<String, crate::CliError> {
 
 /// Download the release tarball for `tag` and atomically replace `dest`.
 fn download_release_binary(tag: &str, dest: &PathBuf) -> Result<(), crate::CliError> {
-    let asset_url =
-        format!("https://github.com/{REPO_SLUG}/releases/download/{tag}/{ASSET_NAME}");
+    let asset_url = format!("https://github.com/{REPO_SLUG}/releases/download/{tag}/{ASSET_NAME}");
 
     let tar_path = std::env::temp_dir().join("tile-update.tar.gz");
     let extract_dir = std::env::temp_dir().join("tile-update-extract");
@@ -201,8 +195,11 @@ fn download_release_binary(tag: &str, dest: &PathBuf) -> Result<(), crate::CliEr
     // Download.
     let status = Command::new("curl")
         .args([
-            "--silent", "--fail", "--location",
-            "--output", tar_path.to_str().unwrap(),
+            "--silent",
+            "--fail",
+            "--location",
+            "--output",
+            tar_path.to_str().unwrap(),
             &asset_url,
         ])
         .status()
@@ -336,8 +333,7 @@ fn install_binary(src: &PathBuf, dest: &PathBuf) -> Result<(), crate::CliError> 
     fs::copy(src, &tmp)
         .map_err(|e| crate::CliError::Other(format!("failed to copy binary: {e}")))?;
 
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))
-        .map_err(crate::CliError::Io)?;
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).map_err(crate::CliError::Io)?;
 
     fs::rename(&tmp, dest).map_err(|e| {
         let _ = fs::remove_file(&tmp);
