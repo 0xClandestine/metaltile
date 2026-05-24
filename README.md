@@ -76,6 +76,36 @@ The compiler wires up thread indexing and expands tile primitives like `reduce_s
 cargo install --path crates/metaltile-cli
 ```
 
+## Getting Started
+
+Benchmark all kernels against their MLX counterparts:
+
+```sh
+tile bench
+```
+
+Narrow to a specific op:
+
+```sh
+tile bench --filter softmax
+```
+
+Inspect a kernel's IR and generated MSL:
+
+```sh
+tile inspect mt_softmax
+tile inspect mt_softmax --pass vectorize
+```
+
+Compile all kernels and emit a Swift-consumable package:
+
+```sh
+tile build
+tile emit --out kernels/
+```
+
+Read the [docs](docs/) to learn more.
+
 ## Contributing
 
 Contributions are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) for the issue / PR process and [`docs/developing.md`](docs/developing.md) for the kernel-authoring hazards **before** writing a kernel.
