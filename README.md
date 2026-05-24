@@ -100,14 +100,14 @@ Contributions are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) for the iss
 
 ## Acknowledgements
 
-Many of MetalTile's kernels — Steel GEMM, Steel attention, Hadamard, RoPE, SSM, SDPA, sort, and the quantized GEMM family — are ports from the MLX ecosystem:
+MetalTile's benchmark suite and kernel library stand on the shoulders of the MLX ecosystem. A large
+portion of the `metaltile-std` kernels are ports or faithful re-implementations of kernels from the following projects:
 
-- [**ml-explore/mlx**](https://github.com/ml-explore/mlx) — primary source for reference kernels and the `erf` preamble.
+- [**ml-explore/mlx**](https://github.com/ml-explore/mlx) — primary source for reference kernels.
 - [**ekryski/mlx**](https://github.com/ekryski/mlx) (`alpha`) — FFAI extensions: gated-delta, SSM replay, AURA codec.
 - [**ml-explore/mlx-lm**](https://github.com/ml-explore/mlx-lm) — reference for GatedDeltaNet step semantics.
-- [**ml-explore/mlx-swift-lm**](https://github.com/ml-explore/mlx-swift-lm) — reference for MoE routing and the GatedDeltaNet scheduler.
 
-Thanks to the MLX team at Apple and the broader MLX community.
+We are grateful to the MLX team at Apple and the broader MLX community, this wouldn't have been possible without you.
 
 See [`ACKNOWLEDGEMENTS.md`](ACKNOWLEDGEMENTS.md) for the full list of individual contributors and third-party software.
 
