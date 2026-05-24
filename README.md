@@ -1,6 +1,5 @@
 <p align="center">
   <h1 align="center">MetalTile</h1>
-  <p align="center">A Rust-embedded DSL for writing Apple Metal GPU kernels. Write tile-level algorithms in Rust, get optimized Metal Shading Language out — verified against, and frequently faster than, hand-tuned MLX.</p>
 </p>
 
 <p align="center">
@@ -8,6 +7,8 @@
   <img src="https://img.shields.io/badge/language-Rust-orange?logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
 </p>
+
+<p align="center">A Rust-embedded DSL for writing Apple Metal GPU kernels. Write tile-level algorithms in Rust, get optimized Metal Shading Language out — verified against, and frequently faster than, hand-tuned MLX.</p>
 
 <!-- TODO(image): replace this HTML table with a side-by-side graphic of the DSL ↔ MSL. -->
 <table>
