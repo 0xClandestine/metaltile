@@ -42,14 +42,13 @@ use metaltile::{bench_kernel, kernel};
 
 macro_rules! dequant_gather_kernel {
     ($name:ident, $bits:literal, $subop:literal) => {
-#[rustfmt::skip]
         #[bench_kernel(
-                                            op="dequant_gather",
-                                            subop=$subop,
-                                            class=GenericEmpty,
-                                            tol=0.0,
-                                            kernel_mode=Grid3D,
-                                        )]
+                    op="dequant_gather",
+                    subop=$subop,
+                    class=GenericEmpty,
+                    tol=0.0,
+                    kernel_mode=Grid3D,
+                )]
         #[kernel]
         pub fn $name<T>(
             weight: Tensor<u32>,
