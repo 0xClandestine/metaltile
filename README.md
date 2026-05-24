@@ -62,8 +62,9 @@ kernel void mt_exp(
    toil. Kernels are benchmarked against their MLX equivalents on real
   hardware; a number of them are faster.
 
+## Crates
+
 <pre>
-crates
 ├── <a href="crates/metaltile">metaltile</a>          — facade crate, re-exports the full public API
 ├── <a href="crates/metaltile-cli">metaltile-cli</a>      — <code>tile</code> binary (bench, build, inspect, snap, diff)
 ├── <a href="crates/metaltile-codegen">metaltile-codegen</a>  — IR → MSL lowering and 14-pass optimization pipeline
@@ -73,27 +74,15 @@ crates
 └── <a href="crates/metaltile-std">metaltile-std</a>      — kernel standard library and benchmark registry
 </pre>
 
+## Docs
+
 <pre>
-docs
 ├── <a href="docs/getting-started.md">getting-started.md</a> — toolchain, crate layout, build, first kernel
 ├── <a href="docs/developing.md">developing.md</a>      — repo layout, dev loop, kernel-authoring hazards
 ├── <a href="docs/testing.md">testing.md</a>         — test layers, CI, and test-infra gaps
 ├── <a href="docs/cli.md">cli.md</a>             — the <code>tile</code> binary, all flags and subcommands
 └── <a href="docs/publishing.md">publishing.md</a>      — the release flow
 </pre>
-
-## Benchmarks
-
-`tile bench` dispatches every MetalTile kernel and its MLX Metal reference on identical buffers, then reports throughput and a numerical-equivalence check. Run the whole suite, or narrow with `--filter`:
-
-```sh
-tile bench                   # full suite
-tile bench --filter softmax  # one op
-```
-
-A sample of what to expect: `mt_rms_norm_small` runs at **354% of MLX's hand-tuned `rms` kernel** on an Apple M4 Max (`B=1024 N=64`, f32). Full cross-hardware results live in [`baselines/`](baselines/) — committed snapshots per chip, refreshed as new hardware is benched. CI diffs every PR against the matching baseline.
-
-See [`docs/cli.md`](docs/cli.md) for `-v` / `-vv` profiling, JSON output, and the `snap` / `diff` regression workflow.
 
 ## Contributing
 
