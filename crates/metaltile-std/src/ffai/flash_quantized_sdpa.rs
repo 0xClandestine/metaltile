@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Flash quantized SDPA — single-pass online-softmax attention over an
 //! affine-quantized K/V cache. Port of `flash_quantized_sdpa.h`
 //! (spec 041 phase 1.1/1.2). The affine-quant counterpart of

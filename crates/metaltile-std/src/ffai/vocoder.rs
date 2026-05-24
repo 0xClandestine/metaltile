@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Inverse-STFT overlap-add — the TTS vocoder waveform-synthesis tail.
 //!
 //! iSTFTNet-style vocoders (Kokoro, the StyleTTS2 decoder family) end by

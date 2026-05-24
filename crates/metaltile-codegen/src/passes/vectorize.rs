@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Vectorization — promote consecutive scalar Load/Store to vector ops.
 //!
 //! Scans for consecutive scalar Load/Store ops with contiguous indices and

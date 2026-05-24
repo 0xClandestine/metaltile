@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Min-p (minimum-probability) logits filter for the sampling pipeline.
 //!
 //! Min-p sampling keeps every token whose probability is at least

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! MetalTile IR: SSA-form intermediate representation for tile-level kernels.
 //!
 //! The IR is the central data structure of the compiler. It is:

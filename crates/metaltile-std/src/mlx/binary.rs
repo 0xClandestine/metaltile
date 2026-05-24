@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Elementwise binary ops — #[kernel] DSL vs MLX metal/binary.metal
 
 use metaltile::{bench_kernel, kernel};

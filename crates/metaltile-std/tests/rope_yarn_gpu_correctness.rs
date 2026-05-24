@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end GPU correctness for `ffai::rope_yarn`.
 //!
 //! YaRN per-token RoPE. For each `(head, i in 0..head_dim/2)`:

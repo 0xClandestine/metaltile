@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! MetalTile facade crate.
 //!
 //! `metaltile` re-exports the DSL macros, compile-time placeholder types, IR/codegen crates,

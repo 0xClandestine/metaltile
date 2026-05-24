@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Single-token SDPA decode with GQA, threadgroup-stride K walk, and
 //! cross-simdgroup online-softmax reduction — FFAI's production decode
 //! kernel.

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end correctness test for `mlx::mt_rms_norm` on real Metal.
 //!
 //! Pins the kernel's `N = TPG * 4` invariant: each thread owns 4

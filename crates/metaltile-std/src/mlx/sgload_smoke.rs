@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Smoke kernel for `simdgroup_load` HW intrinsic — first kernel to
 //! actually use the `Op::SimdgroupLoad` DSL primitive end-to-end, so
 //! future kernels (qmm B-load fast path etc.) have a working call

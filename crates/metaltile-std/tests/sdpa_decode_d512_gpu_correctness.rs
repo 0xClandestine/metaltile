@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end correctness for `ffai_sdpa_decode_d512` — the head_dim=512
 //! specialization needed for Gemma 4's global (`full_attention`) layers.
 //! Validates that the four-phase output reduction produces the same

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! RMS normalization benchmark — #[kernel] DSL vs MLX metal/rms_norm.metal
 //!
 //! The kernel is generic over `N = tpg * 4` — each thread owns 4

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Common Subexpression Elimination — local value numbering.
 //!
 //! Performs block-local value numbering: when two ops compute the same result

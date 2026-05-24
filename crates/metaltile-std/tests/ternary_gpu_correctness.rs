@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::ternary` — elementwise select kernel.
 //!
 //! Verifies `mt_select<T>`: `out[i] = cond[i] != 0 ? on_true[i] : on_false[i]`.

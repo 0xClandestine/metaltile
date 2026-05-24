@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `ffai::dequant_gemv_int{4,8,6}` — dequantizing GEMV
 //! kernels used at decode-time output / LM-head projections.
 //!

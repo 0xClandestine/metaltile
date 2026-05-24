@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end GPU correctness for `ffai::mel_spectrogram` — the fused
 //! STFT + Mel-filterbank + log audio front-end.
 //!

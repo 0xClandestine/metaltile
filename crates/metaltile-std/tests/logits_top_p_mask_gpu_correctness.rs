@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness coverage for `logits_top_p_mask`.
 //!
 //! Top-p (nucleus) sampling keeps the smallest set of most-likely

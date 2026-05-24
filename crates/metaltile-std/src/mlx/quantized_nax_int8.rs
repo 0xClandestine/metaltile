@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! `mt_qmm_nax_int8` — production int8 quantized matmul via `mpp::tensor_ops::matmul2d`.
 //!
 //! Int8 NAX counterpart of `mt_qmm_nax` (int4). Algorithmically identical

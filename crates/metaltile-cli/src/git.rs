@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Thin wrappers around the `git` CLI used by `tile bench` and `tile diff`.
 //!
 //! Each helper returns `None`/empty when git is unavailable, the cwd

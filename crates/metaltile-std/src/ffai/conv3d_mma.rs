@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! MMA-tiled implicit-GEMM 3D convolution.
 //!
 //! Perf follow-up to `ffai/conv3d.rs` — the 3D counterpart of `conv2d_mma`.

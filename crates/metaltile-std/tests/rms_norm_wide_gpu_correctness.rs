@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end correctness for `mlx::mt_rms_norm_wide` — the wide-row
 //! RMSNorm variant for rows past the 4096-element cap of `mt_rms_norm`.
 //!

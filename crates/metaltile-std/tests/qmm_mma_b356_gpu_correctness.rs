@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mt_qmm_mma_b{3,5,6}` — bit-stream MMA prefill
 //! kernels for odd-bit-width quantized weights.
 //!

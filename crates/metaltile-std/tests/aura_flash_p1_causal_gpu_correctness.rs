@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for the causal AURA flash pass-1 variant
 //! (`ffai::aura_flash_p1_causal_kb4_vb2_d128`).
 //!

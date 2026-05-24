@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Prefill scaled-dot-product attention — `mt_sdpa_prefill`.
 //!
 //! Self-attention prefill with online softmax + causal masking. MLX

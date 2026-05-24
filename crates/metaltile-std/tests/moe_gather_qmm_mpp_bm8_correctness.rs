@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 #![allow(clippy::manual_is_multiple_of)]
 
 //! GPU correctness for `ffai::moe_mpp_bm8::mt_moe_gather_qmm_mma_int4_bm8_mpp`.

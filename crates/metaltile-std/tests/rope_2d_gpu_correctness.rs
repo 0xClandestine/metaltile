@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end GPU correctness for `ffai::rope_2d` — 2D positional RoPE
 //! over a `(row, col)` token grid for vision transformers.
 //!

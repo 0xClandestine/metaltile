@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Correctness tests for the int8 matmul family:
 //!   - `mt_qmm_int8_fast`      — BM=1 (one M-row per TG)
 //!   - `mt_qmm_bm2_int8_fast`  — BM=2 (two M-rows per TG)

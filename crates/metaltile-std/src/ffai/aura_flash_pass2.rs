@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! AURA Flash Pass 2 — cross-block online-softmax merge.
 //!
 //! Reduces the `(o_partials, m_partials, l_partials)` tuples emitted

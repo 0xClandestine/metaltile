@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Dynamic-M qmm path — host-side driver for batched-T quantized matmul.
 //!
 //! Closes the bandwidth-bound prefill gap in FFAI. The existing

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Programmatic Metal Frame Capture — wrap a span of dispatches in
 //! `start_gpu_trace` / `stop_gpu_trace` to emit a `.gputrace` file
 //! that Xcode opens with full DRAM/ALU/occupancy counters.

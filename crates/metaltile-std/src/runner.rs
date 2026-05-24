@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU runner: compile Metal source, allocate buffers, dispatch kernels, measure GPU time.
 //!
 //! All Metal-specific code is gated with `#[cfg(target_os = "macos")]`.

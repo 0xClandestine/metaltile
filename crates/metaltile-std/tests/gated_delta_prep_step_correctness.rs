@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 #![allow(clippy::type_complexity)]
 
 //! GPU correctness for `ffai::gated_delta_prep::mt_gated_delta_prep_step`.

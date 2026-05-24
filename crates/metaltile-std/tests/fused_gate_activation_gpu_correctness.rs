@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end correctness for the `fused_gate_activation` kernels —
 //! `mt_fused_gate_gelu` (gelu-approx variant) and
 //! `mt_fused_gate_clipped_swiglu` (GPT-OSS clipped variant).

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for the Bluestein chirp-Z FFT — arbitrary-length DFT.
 //!
 //! Tests lengths 400 (Whisper standard) and 480 (Whisper large-v3 variant),

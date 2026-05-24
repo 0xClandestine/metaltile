@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Fused RMSNorm + residual add — `out = residual + w * x * inv_rms`.
 //!
 //! Combines RMS normalization with the residual (skip-connection) add

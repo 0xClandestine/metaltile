@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GEMV benchmark — #[kernel] DSL vs MLX metal/gemv.metal
 //!
 //! Tuned for K=4096 via tpg sweep (64,128,256,512,1024): tpg=512 gives the best f16

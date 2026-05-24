@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 use std::{cell::RefCell, ptr::NonNull};
 
 use metaltile_codegen::msl::MslGenerator;

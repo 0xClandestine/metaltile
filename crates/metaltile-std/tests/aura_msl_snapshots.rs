@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Golden MSL snapshots for the AURA kernel family.
 //!
 //! Sibling to `metaltile-codegen/tests/msl_snapshots.rs` — that file

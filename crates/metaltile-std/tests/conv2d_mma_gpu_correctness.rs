@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `ffai::conv2d_mma` — MMA-tiled implicit-GEMM 2D conv.
 //!
 //! Validates the simdgroup-matrix tiled output against the same six-loop

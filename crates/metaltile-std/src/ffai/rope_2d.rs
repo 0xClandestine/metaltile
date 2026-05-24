@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! 2D positional RoPE for vision transformers.
 //!
 //! A vision transformer lays its tokens out on a 2-D `(row, col)` grid

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Llama-style RoPE with optional Llama-3 frequency-band scaling.
 //! Per-token decode form (single position constexpr), generic over T.
 //!

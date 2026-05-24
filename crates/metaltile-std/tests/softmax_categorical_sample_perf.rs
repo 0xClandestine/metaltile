@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Quick perf-only timing for `softmax_categorical_sample` at vocab=152K.
 //!
 //! Ignored by default — run with `--ignored` to measure. Times 1000

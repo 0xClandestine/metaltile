@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Empirical probe of Apple Metal `simdgroup_matrix<f32, 8, 8>` lane layout.
 //!
 //! Dispatches MMA(identity, label) → C. Prints the 8×8 C matrix.

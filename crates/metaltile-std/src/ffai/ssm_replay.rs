@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Mamba / Mamba 2 state replay — port of `ssm_replay.metal`
 //! (spec 040). The speculative-decode rollback companion to
 //! `ssm.rs`'s `ssm_step`. Two kernels:

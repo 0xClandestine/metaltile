@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end GPU correctness for `ffai::sdpa_multi` — the multi-query
 //! SDPA kernel that attends a whole block of query rows against a
 //! shared K/V cache in one dispatch.

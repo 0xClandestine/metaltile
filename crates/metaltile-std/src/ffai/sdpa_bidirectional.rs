@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Multi-query bidirectional SDPA — attends `n_query` query rows
 //! against a shared K/V cache in a single dispatch, with every query
 //! attending the full `[0, base_kv + n_query)` range (no causal mask).

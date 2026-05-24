@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness oracle for the MPP `matmul2d` smoke kernel.
 //!
 //! Dispatches `mt_mpp_matmul_smoke` (single threadgroup × single simdgroup,

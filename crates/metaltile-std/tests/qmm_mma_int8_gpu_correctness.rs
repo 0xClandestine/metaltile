@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness tests for `mt_qmm_mma_int8` and `mt_qmm_mma_m16_int8` —
 //! simdgroup-matrix MMA prefill kernels for int8-quantized weights.
 //!

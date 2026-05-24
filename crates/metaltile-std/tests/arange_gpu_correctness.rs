@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::arange` — `out[i] = start + i * step`.
 //!
 //! Verifies the arange kernel against a simple CPU reference across

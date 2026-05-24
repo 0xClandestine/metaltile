@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Type & Shape Checking — validate IR before MSL emission.
 //!
 //! Validates that the IR is well-formed before code generation:

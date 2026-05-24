@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness oracle for `mt_steel_gemm_splitk_nax` — split-K GEMM
 //! `C = A · B` backed by `mpp::tensor_ops::matmul2d` (NAX path).
 //!

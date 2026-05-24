@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Top-p (nucleus) logits filter for the sampling pipeline.
 //!
 //! Top-p sampling keeps the smallest set of most-likely tokens whose

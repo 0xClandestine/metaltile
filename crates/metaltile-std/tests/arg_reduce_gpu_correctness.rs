@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `ffai::arg_reduce::argmax` — generic-T argmax
 //! with u32 index output. Decode-form greedy-sampler workhorse.
 //!

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! `mt_fp4_qmm_mma` / `mt_fp8_e4m3_qmm_mma` — fp4/fp8 simdgroup-matrix MMA.
 //!
 //! Simdgroup-matrix MMA prefill path for fp4 (E2M1) and fp8 (E4M3) quantized

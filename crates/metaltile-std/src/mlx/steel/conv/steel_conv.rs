@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Steel implicit-GEMM 2D conv — metal/steel/conv/kernels/steel_conv.metal
 //!
 //! 2D convolution via implicit GEMM (im2col × filter matrix):

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end GPU correctness tests for `mt_sdpa_vector` — the decode-step
 //! attention kernel introduced in PR #43 (faithful port of MLX's
 //! `sdpa_vector<T, D, V=D>` template, see

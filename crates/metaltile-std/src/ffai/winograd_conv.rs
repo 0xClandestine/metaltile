@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Winograd fast convolution — F(2×2, 3×3).
 //!
 //! The 3×3 stride-1 convolution is the workhorse of every CNN vision

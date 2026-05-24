@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Pass Infrastructure — trait, runner, and pass ordering.
 //!
 //! Defines the [`Pass`] trait that all optimization passes implement, the

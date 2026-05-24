@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness oracle for `mt_sdpa_prefill_nax` — flash attention
 //! backed by `mpp::tensor_ops::matmul2d` (NAX path).
 //!

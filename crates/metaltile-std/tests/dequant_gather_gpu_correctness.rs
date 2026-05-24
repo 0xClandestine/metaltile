@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end correctness test for `ffai::dequant_gather_int4` on real Metal.
 //!
 //! Pins the dequantizing-gather arithmetic: per output element

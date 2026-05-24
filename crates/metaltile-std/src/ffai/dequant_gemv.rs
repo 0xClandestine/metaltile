@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! MLX-format dequantizing GEMV kernels for int3 / int4 / int5 / int6 /
 //! int8 weights. Reduction-mode kernels; one threadgroup per output row.
 //!

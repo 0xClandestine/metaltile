@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Multi-row GEMM — `out[r, :] = weight · input[r, :]` for a block of
 //! `n_rows` rows in one dispatch. Generic over T.
 //!

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! `#[kernel]` rejects `return` — the body parser does not lower it and
 //! would otherwise silently drop it, letting execution fall through. The
 //! macro fails loudly instead.

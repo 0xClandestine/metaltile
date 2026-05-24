@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! AURA bulk dequant — unpack codebook-quantized values into rotated
 //! codec space, ready to be consumed by the AURA flash-SDPA path or
 //! materialised as a fp16/bf16 tensor for downstream SDPA.

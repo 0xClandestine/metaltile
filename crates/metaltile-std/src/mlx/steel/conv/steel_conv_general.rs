@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Steel general implicit-GEMM 2D conv — metal/steel/conv/kernels/steel_conv_general.metal
 //!
 //! 2D convolution supporting arbitrary strides, dilation, padding, and groups:

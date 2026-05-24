@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU sampling kernels — softmax + categorical inverse-CDF walk used
 //! by FFAI's `gpu-categorical` decode path (T > 0, no filters). The
 //! greedy fast path uses `argmax` instead.

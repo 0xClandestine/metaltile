@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Microbench: `mt_moe_gather_qmm_int4` at Qwen3.6-35B-A3B shape.
 //!
 //! `#[ignore]`-gated — run with:

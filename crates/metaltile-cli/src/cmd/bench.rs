@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! `tile bench` — Benchmark suite: MetalTile vs MLX reference.
 
 use std::collections::HashMap;

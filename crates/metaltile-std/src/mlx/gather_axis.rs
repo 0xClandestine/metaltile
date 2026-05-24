@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Gather along an axis — contiguous form of MLX's `gather_axis`.
 //!
 //! `out[o, a, i] = src[o, indices[o, a, i], i]` — for each output

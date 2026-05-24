@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Mamba 2 (SSD-form) building blocks: the selective-scan single-token
 //! decode step and the depthwise causal-conv streaming step. Plus
 //! `ssm_step_a2d` — the Mamba 1 (Jamba) variant carrying a 2-D

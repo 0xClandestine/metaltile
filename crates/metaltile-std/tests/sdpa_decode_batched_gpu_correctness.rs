@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end GPU correctness for `sdpa_decode_batched_q2` (M7).
 //!
 //! Strategy: build two independent Q vectors (`Q_a` and `Q_b`) per head,

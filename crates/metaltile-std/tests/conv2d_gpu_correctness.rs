@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end GPU correctness for `ffai::conv2d` — the vision
 //! patch-embedding 2D convolution (im2col + GEMM done as a direct conv).
 //!

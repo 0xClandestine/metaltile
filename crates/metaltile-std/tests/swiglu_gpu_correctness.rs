@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end correctness for `mt_swiglu` — fused `silu(gate) * up`.
 //!
 //! Verifies the fused single-launch kernel against a CPU oracle that

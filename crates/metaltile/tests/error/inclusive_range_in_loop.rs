@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! `#[kernel]` rejects `start..=end` (inclusive range) in `for` loops —
 //! Metal has no inclusive-loop primitive, so the macro emits a clear
 //! diagnostic at parse time instead of letting the codegen panic later.

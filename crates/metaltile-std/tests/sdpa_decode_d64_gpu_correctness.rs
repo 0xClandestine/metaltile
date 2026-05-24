@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end correctness for `ffai_sdpa_decode_d64` — the
 //! head_dim=64 specialization needed for Llama 3.2 1B and GPT-OSS-20B.
 //!

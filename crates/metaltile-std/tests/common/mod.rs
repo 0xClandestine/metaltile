@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Shared test helpers for metaltile-std GPU integration tests.
 
 #![allow(dead_code)]

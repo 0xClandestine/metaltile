@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! `mt_qmm_mma_mpp` — production int4 quantized matmul via `mpp::tensor_ops::matmul2d`.
 //!
 //! This is the MPP (MetalPerformancePrimitives) counterpart of

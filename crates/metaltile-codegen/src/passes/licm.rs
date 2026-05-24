@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Loop Invariant Code Motion — hoist loop-invariant computations.
 //!
 //! Identifies computations inside loop bodies whose operands are all defined

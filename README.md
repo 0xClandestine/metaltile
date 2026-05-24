@@ -98,6 +98,19 @@ Read the [docs](docs/) to learn more.
 
 Contributions are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) for the issue / PR process and [`docs/developing.md`](docs/developing.md) for the kernel-authoring hazards **before** writing a kernel.
 
+## Acknowledgements
+
+MetalTile's benchmark suite and kernel library stand on the shoulders of the MLX ecosystem. A large
+portion of the `metaltile-std` kernels are ports or faithful re-implementations of kernels from the following projects:
+
+- [**ml-explore/mlx**](https://github.com/ml-explore/mlx) — primary source for reference kernels.
+- [**ekryski/mlx**](https://github.com/ekryski/mlx) (`alpha`) — FFAI extensions: gated-delta, SSM replay, AURA codec.
+- [**ml-explore/mlx-lm**](https://github.com/ml-explore/mlx-lm) — reference for GatedDeltaNet step semantics.
+
+We are grateful to the MLX team at Apple and the broader MLX community, this wouldn't have been possible without you.
+
+See [`ACKNOWLEDGEMENTS.md`](ACKNOWLEDGEMENTS.md) for the full list of individual contributors and third-party software.
+
 ## License
 
 <sup>

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end GPU correctness for `ffai::sdpa_bidirectional_d{32,64,72}`
 //! — multi-query bidirectional SDPA at head_dim 32 (FastViT-HD),
 //! head_dim 64 (SigLIP / CLIP), and head_dim 72 (PaliGemma's

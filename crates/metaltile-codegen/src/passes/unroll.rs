@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Loop Unrolling — replicate loop body for known-constant trip counts.
 //!
 //! Replicates a loop body `trip_count` times when the trip count is a known

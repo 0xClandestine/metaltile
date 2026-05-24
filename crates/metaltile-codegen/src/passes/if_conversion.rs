@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! If-Conversion — replace short branches with predicated Select chains.
 //!
 //! Converts `Op::If { cond, then_block, else_block }` blocks with short bodies

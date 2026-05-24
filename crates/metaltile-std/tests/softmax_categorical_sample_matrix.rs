@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Matrix coverage for `ffai::softmax_categorical_sample` —
 //! dtype × vocab × temperature × distribution × uniform-draw, plus
 //! invariant property assertions that catch silent codegen bugs

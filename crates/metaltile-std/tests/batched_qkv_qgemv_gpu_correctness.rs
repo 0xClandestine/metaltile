@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `ffai::batched_qkv_qgemv` and
 //! `ffai::batched_qkv_qgemv_fast` — fused Q/K/V 4-bit quantized GEMV.
 //!

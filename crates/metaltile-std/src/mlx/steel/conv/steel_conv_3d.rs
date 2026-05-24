@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Steel implicit-GEMM 3D conv — metal/steel/conv/kernels/steel_conv_3d.metal
 //!
 //! 3D convolution (D×H×W input) via implicit GEMM:

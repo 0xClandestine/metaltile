@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 /// Summary statistics for a set of GPU timing measurements.
 #[derive(Debug, Clone)]
 pub struct BenchStats {

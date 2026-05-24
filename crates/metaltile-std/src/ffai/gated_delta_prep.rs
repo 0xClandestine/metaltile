@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Gated DeltaNet — **fused** prep + decode kernel.
 //!
 //! `mt_gated_delta_prep_step` extends the recurrence-only

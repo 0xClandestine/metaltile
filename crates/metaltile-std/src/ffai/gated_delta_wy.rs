@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Chunked-WY Gated DeltaNet prefill kernel — `mt_gated_delta_wy_chunk`.
 //!
 //! Spec 028 Phase 2 (naive scalar Metal port). Process the full prefill

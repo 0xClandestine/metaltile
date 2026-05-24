@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Scheduling — annotate Dot ops with tile dimensions for the autotuner.
 //!
 //! The Autotuner varies tile sizes at runtime.  This pass stores the chosen

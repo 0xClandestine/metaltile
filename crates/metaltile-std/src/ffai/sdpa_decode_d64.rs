@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Single-token SDPA decode for `head_dim == 64`. Parallel of
 //! `ffai_sdpa_decode` (head_dim=128) with 2 elements per lane instead
 //! of 4 — see that file for the full algorithm walkthrough.

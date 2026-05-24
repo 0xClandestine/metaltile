@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Copy Propagation — forward source values through identity operations.
 //!
 //! Eliminates no-op operations and propagates the underlying source value

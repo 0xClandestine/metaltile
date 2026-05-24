@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `ffai::patch_embed_mma` — MMA-tiled patch embedding.
 //!
 //! Validates against the same CPU reference as `patch_embed_gpu_correctness.rs`

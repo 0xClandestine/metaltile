@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Structural consistency tests for the metaltile-std kernel registry.
 //!
 //! Catches two classes of regression without touching the GPU:

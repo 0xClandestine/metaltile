@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Prefill SDPA via `simdgroup_multiply_accumulate` (MMA) — `mt_sdpa_prefill_mma`.
 //!
 //! MLX-style dd-loop (steel_attention.h `tile_matmad` body): per K-block, a

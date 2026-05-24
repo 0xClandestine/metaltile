@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end correctness test for `ffai::ssm::ssm_step_a2d` — the
 //! Mamba 1 (Jamba) selective-scan single-token decode step with a 2-D
 //! per-(channel, state) `A_log`.

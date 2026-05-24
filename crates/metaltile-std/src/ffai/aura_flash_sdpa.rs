@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! AURA fused single-pass SDPA — online-softmax attention over an
 //! AURA/TurboQuant-compressed K/V cache, with optional attention sinks
 //! and sliding-window causal masking. Port of `turbo_flash_sdpa.h`

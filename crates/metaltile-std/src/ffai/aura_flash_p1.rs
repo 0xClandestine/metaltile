@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! AURA Flash Pass 1 — per-block online-softmax over the AURA-encoded
 //! K and V caches.  The hot path: runs every decode token.
 //!

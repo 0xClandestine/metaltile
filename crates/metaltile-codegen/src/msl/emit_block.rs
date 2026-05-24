@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Op-by-op block emission.
 //!
 //! Walks a `Block`'s op list and emits MSL statements for each IR op.

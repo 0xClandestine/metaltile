@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Scaled dot-product attention benchmark — #[kernel] DSL vs MLX metal/scaled_dot_product_attention.metal
 
 use metaltile::{bench_kernel, kernel};

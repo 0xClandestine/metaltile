@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Non-power-of-2 Hadamard transform — `hadamard_m` factor M ∈ {12, 20, 28}.
 //!
 //! This is the second stage in MLX's `hadamard_mn_contiguous` pipeline, which

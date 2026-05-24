@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Fused gated RMSNorm — `out = rmsNorm(y) · silu(z)`.
 //!
 //! The post-step of a Gated-DeltaNet (GDN) layer. After the GDN

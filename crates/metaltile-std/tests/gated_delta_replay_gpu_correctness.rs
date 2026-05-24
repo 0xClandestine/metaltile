@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `ffai::gated_delta_replay` — the GatedDeltaNet
 //! tape-capture (`gated_delta_step_record`) and tape-replay
 //! (`state_replay`) kernels for speculative-decode rollback.

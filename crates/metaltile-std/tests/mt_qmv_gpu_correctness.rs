@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! End-to-end correctness test for `mlx::mt_qmv` on real Metal.
 //!
 //! Pins the kernel's strict `tpg=64` (2 simdgroups × 32 lanes), 8-row

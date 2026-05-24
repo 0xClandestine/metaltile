@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! AURA fused encode — full per-vector encode pipeline:
 //!
 //!   1. L2 norm via `simd_sum` + cross-simdgroup reduction in

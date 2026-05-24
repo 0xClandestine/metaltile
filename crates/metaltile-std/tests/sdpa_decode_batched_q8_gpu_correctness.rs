@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `sdpa_decode_batched_q8` (M7 branching-factor-8).
 //!
 //! Strategy: build eight independent Q vectors per head, interleave them

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness oracle for the dynamic-M qmm path
 //! (`metaltile_std::mlx::quantized_mma_dynamic_m`). This is the
 //! bandwidth-bound prefill unlock for FFAI's `Qwen35Model.forwardMany`:

@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Steel block-masked GEMM — #[kernel] DSL vs MLX
 //! `metal/steel/gemm/kernels/steel_gemm_masked.metal`.
 //!

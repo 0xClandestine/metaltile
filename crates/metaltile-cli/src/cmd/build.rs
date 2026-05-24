@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! `tile build` — Compile all registered kernels.
 //!
 //! Default behavior is a compile-check (codegen MSL, report errors,

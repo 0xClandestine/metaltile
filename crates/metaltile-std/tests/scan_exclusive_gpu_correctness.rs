@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::scan::mt_scan_exclusive` — the exclusive
 //! prefix sum along the last axis of a `[rows, n]` input.
 //!

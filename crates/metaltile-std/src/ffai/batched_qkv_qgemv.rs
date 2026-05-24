@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Batched Q/K/V 4-bit quantized GEMV — fuses the three independent
 //! Q, K, V projection matvecs of a decode step into one dispatch.
 //!

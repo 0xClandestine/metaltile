@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::softmax` — row-wise numerically stable softmax.
 //!
 //! `mt_softmax<T>` computes `out[row, i] = exp(x[i] - max_row) / Σ exp(x[j] - max_row)`

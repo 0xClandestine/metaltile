@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Embedding-table gather. For each output element `(token, d)`: copy
 //! `table[indices[token], d]`. One thread per output element.
 //!

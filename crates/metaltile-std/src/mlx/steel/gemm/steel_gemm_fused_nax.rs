@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! `mt_steel_gemm_fused_nax` — plain fused GEMM via `mpp::tensor_ops::matmul2d`.
 //!
 //! NAX (Apple tensor-core) port of the `nn` (non-transposed) steel-gemm

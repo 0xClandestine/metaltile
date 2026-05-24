@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! ValueId Remapping — shared utilities for IR traversal and mutation.
 //!
 //! Provides canonical functions for ValueId remapping, reference collection,

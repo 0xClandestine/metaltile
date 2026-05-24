@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Log-Mel spectrogram — the STT / audio-in front-end.
 //!
 //! Whisper, Qwen-Omni audio-in, Parakeet and every other speech model

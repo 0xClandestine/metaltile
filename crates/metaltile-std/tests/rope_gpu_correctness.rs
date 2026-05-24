@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! GPU correctness for `mlx::rope::mt_rope` — rotate-half RoPE.
 //!
 //! Grid3D, 4 heads per z-program. For each `(px, py, pz)`:

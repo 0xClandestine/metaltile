@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! AURA compressed-domain value aggregation.
 //!
 //! For each (q_head, dim) output element, computes

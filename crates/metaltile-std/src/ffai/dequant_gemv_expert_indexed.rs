@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Per-expert indexed int4 dequantizing GEMV.
 //!
 //! Variant of `dequant_gemv_int4` where the weight / scale / bias tensors

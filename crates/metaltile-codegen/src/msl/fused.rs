@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Fused elementwise chain emission.
 //!
 //! Handles `Op::FusedElementwise` lowering: walks the fused op tree and emits
