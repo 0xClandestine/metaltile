@@ -9,7 +9,7 @@ MetalTile was developed with contributions from the following individuals:
 
 - clandestine.eth (@0xClandestine) — Founded the project and designed the full stack: #[kernel] proc-macro DSL, body parser, IR, MSL codegen + optimization passes, graph-driven fusion, and cross-kernel calling.
 - Tom Turney (@TheTom): one of MetalTile's most prolific kernel authors, with Flash-Attention-2 SDPA, simdgroup-matrix quantised GEMM/GEMV, MoE + gated-delta-network kernels, sampling + logits processors, fused activations, ICB `_record` codegen, FFAI kernel-pack infrastructure, and GPU correctness tests.
-- Eric Kryski (@ekryski): GPU correctness testing infrastructure and kernel completeness audit, CoopTile DSL migration (removing all hand-written `InlineMsl`), AURA codec kernels, eleven FFAI kernel ports, attention/conv/quant performance work, `sdpa_bidirectional` kernels for VLM vision towers, foundational codegen correctness fixes, and CI bench-diff pipeline.
+- Eric Kryski (@ekryski): Eric drove the bulk of kernel implementations — AURA codec family, SDPA variants, vision/audio front-ends, strided indexing, logits processors, conv2d, RMSNorm, fused activations, and quantized paths.
 - Ambisphaeric (@Ambisphaeric): CI hygiene, bench dirty-tree guard, GPU correctness tests, a few kernel tuning wins, project bot, and PM duties.
 
 <a href="https://github.com/0xClandestine/metaltile/graphs/contributors">
