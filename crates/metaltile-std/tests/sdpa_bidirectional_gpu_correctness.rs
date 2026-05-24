@@ -1,6 +1,7 @@
-//! End-to-end GPU correctness for `ffai::sdpa_bidirectional_d{32,64}`
-//! — multi-query bidirectional SDPA at head_dim 32 (FastViT-HD) and
-//! head_dim 64 (SigLIP / CLIP).
+//! End-to-end GPU correctness for `ffai::sdpa_bidirectional_d{32,64,72}`
+//! — multi-query bidirectional SDPA at head_dim 32 (FastViT-HD),
+//! head_dim 64 (SigLIP / CLIP), and head_dim 72 (PaliGemma's
+//! SigLIP-So400m, ragged 3-elems-per-lane layout).
 //!
 //! Validates proc-macro → IR → MSL → PSO → dispatch → readback against
 //! a straight-translation CPU reference. Covers:
@@ -25,6 +26,7 @@ use metaltile_runtime::Context;
 use metaltile_std::ffai::sdpa_bidirectional::{
     ffai_sdpa_bidirectional_d32,
     ffai_sdpa_bidirectional_d64,
+    ffai_sdpa_bidirectional_d72,
 };
 
 /// CPU reference: per (query, q_head), softmax(Q·Kᵀ·scale)·V over the
@@ -83,6 +85,7 @@ fn naive_sdpa_bidirectional(
 enum Variant {
     D32,
     D64,
+    D72,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -118,6 +121,7 @@ fn run_sdpa_bidirectional(
     let mut kernel = match variant {
         Variant::D32 => ffai_sdpa_bidirectional_d32::kernel_ir_for(dt.to_dtype()),
         Variant::D64 => ffai_sdpa_bidirectional_d64::kernel_ir_for(dt.to_dtype()),
+        Variant::D72 => ffai_sdpa_bidirectional_d72::kernel_ir_for(dt.to_dtype()),
     };
     kernel.mode = KernelMode::Reduction;
 
@@ -451,4 +455,162 @@ fn sdpa_bidirectional_d32_matches_cpu_bf16() {
         scale,
     );
     assert_close(&actual, &expected, 2e-2, "sdpa_bidirectional_d32 bf16");
+}
+
+// ─── head_dim = 72 (PaliGemma SigLIP-So400m, ragged layout) ───────
+//
+// These cases specifically exercise the bounds-masking path: head_dim
+// is not a multiple of 32, so lanes 24..31 of every simdgroup must
+// contribute 0 to the dot product and skip the per-element output
+// store. The CPU reference is the same naive softmax(Q·Kᵀ·scale)·V —
+// it implicitly handles "no ragged layout" by just summing over all
+// 72 elements. The GPU result must agree.
+
+#[test]
+fn sdpa_bidirectional_d72_no_prefix_matches_cpu_f32() {
+    let _g = gpu_lock();
+    // SigLIP-So400m-style heads (16 heads × 72 head_dim = 1152 hidden).
+    let (n_q_heads, n_kv_heads, head_dim) = (4usize, 4usize, 72usize);
+    let (base_kv, n_query) = (0usize, 8usize);
+    let kv_stride = base_kv + n_query;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+    let q = ramp(n_query * n_q_heads * head_dim, 23, 9.0);
+    let k = ramp(n_kv_heads * kv_stride * head_dim, 13, 6.0);
+    let v = ramp(n_kv_heads * kv_stride * head_dim, 11, 5.0);
+
+    let expected = naive_sdpa_bidirectional(
+        &q, &k, &v, n_q_heads, n_kv_heads, head_dim, base_kv, n_query, kv_stride, scale,
+    );
+    let actual = run_sdpa_bidirectional(
+        Variant::D72,
+        &q,
+        &k,
+        &v,
+        Dt::F32,
+        n_q_heads,
+        n_kv_heads,
+        head_dim,
+        base_kv,
+        n_query,
+        kv_stride,
+        scale,
+    );
+    assert_close(&actual, &expected, 1e-4, "sdpa_bidirectional_d72 no-prefix f32");
+}
+
+#[test]
+fn sdpa_bidirectional_d72_with_prefix_and_gqa_matches_cpu_f32() {
+    let _g = gpu_lock();
+    let (n_q_heads, n_kv_heads, head_dim) = (8usize, 2usize, 72usize);
+    let (base_kv, n_query) = (16usize, 8usize);
+    let kv_stride = base_kv + n_query;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+    let q = ramp(n_query * n_q_heads * head_dim, 29, 12.0);
+    let k = ramp(n_kv_heads * kv_stride * head_dim, 13, 6.0);
+    let v = ramp(n_kv_heads * kv_stride * head_dim, 11, 5.0);
+
+    let expected = naive_sdpa_bidirectional(
+        &q, &k, &v, n_q_heads, n_kv_heads, head_dim, base_kv, n_query, kv_stride, scale,
+    );
+    let actual = run_sdpa_bidirectional(
+        Variant::D72,
+        &q,
+        &k,
+        &v,
+        Dt::F32,
+        n_q_heads,
+        n_kv_heads,
+        head_dim,
+        base_kv,
+        n_query,
+        kv_stride,
+        scale,
+    );
+    assert_close(&actual, &expected, 1e-4, "sdpa_bidirectional_d72 prefix+GQA f32");
+}
+
+#[test]
+fn sdpa_bidirectional_d72_matches_cpu_f16() {
+    let _g = gpu_lock();
+    let (n_q_heads, n_kv_heads, head_dim) = (4usize, 2usize, 72usize);
+    let (base_kv, n_query) = (12usize, 8usize);
+    let kv_stride = base_kv + n_query;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+    let q = ramp(n_query * n_q_heads * head_dim, 23, 9.0);
+    let k = ramp(n_kv_heads * kv_stride * head_dim, 13, 6.0);
+    let v = ramp(n_kv_heads * kv_stride * head_dim, 11, 5.0);
+    let round = |xs: &[f32]| -> Vec<f32> { xs.iter().map(|&x| Dt::F16.round(x)).collect() };
+
+    let expected = naive_sdpa_bidirectional(
+        &round(&q),
+        &round(&k),
+        &round(&v),
+        n_q_heads,
+        n_kv_heads,
+        head_dim,
+        base_kv,
+        n_query,
+        kv_stride,
+        scale,
+    );
+    let actual = run_sdpa_bidirectional(
+        Variant::D72,
+        &q,
+        &k,
+        &v,
+        Dt::F16,
+        n_q_heads,
+        n_kv_heads,
+        head_dim,
+        base_kv,
+        n_query,
+        kv_stride,
+        scale,
+    );
+    assert_close(&actual, &expected, 5e-3, "sdpa_bidirectional_d72 f16");
+}
+
+#[test]
+fn sdpa_bidirectional_d72_matches_cpu_bf16() {
+    let _g = gpu_lock();
+    let (n_q_heads, n_kv_heads, head_dim) = (4usize, 2usize, 72usize);
+    let (base_kv, n_query) = (12usize, 8usize);
+    let kv_stride = base_kv + n_query;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+    let q = ramp(n_query * n_q_heads * head_dim, 23, 9.0);
+    let k = ramp(n_kv_heads * kv_stride * head_dim, 13, 6.0);
+    let v = ramp(n_kv_heads * kv_stride * head_dim, 11, 5.0);
+    let round = |xs: &[f32]| -> Vec<f32> { xs.iter().map(|&x| Dt::Bf16.round(x)).collect() };
+
+    let expected = naive_sdpa_bidirectional(
+        &round(&q),
+        &round(&k),
+        &round(&v),
+        n_q_heads,
+        n_kv_heads,
+        head_dim,
+        base_kv,
+        n_query,
+        kv_stride,
+        scale,
+    );
+    let actual = run_sdpa_bidirectional(
+        Variant::D72,
+        &q,
+        &k,
+        &v,
+        Dt::Bf16,
+        n_q_heads,
+        n_kv_heads,
+        head_dim,
+        base_kv,
+        n_query,
+        kv_stride,
+        scale,
+    );
+    assert_close(&actual, &expected, 2e-2, "sdpa_bidirectional_d72 bf16");
 }
