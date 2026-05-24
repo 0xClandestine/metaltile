@@ -1,44 +1,13 @@
-//! TOML fuse-group kernel body synthesis.
+//! Fuse-group kernel body synthesis.
 //!
-//! Synthesizes a single "host kernel" for each compatible fuse group.
-//! Two synthesis paths are attempted in order:
+//! Three synthesis paths are attempted in order:
+//!   1. `synthesize_via_ir` — direct IR cloning/injection (linear chains & diamonds).
+//!   2. `build_fused_group` — KernelCall-chain synthesis (same-grid groups).
+//!   3. `subpair_decomposition` — 2-node R→E sub-pair fallback.
 //!
-//! ## Path A — Pattern 1 direct IR synthesis (general N-node linear chain)
-//!
-//! Handles any N ≥ 2 node chain where:
-//! - `node[0]` is `Reduction` or `Grid3D` (drives dispatch)
-//! - each `node[i]` (i ≥ 1) is `Elementwise` or flat-1D `Grid3D`, has a flat body,
-//!   and reads exactly one intra tensor produced by `node[i-1]`
-//! - each epilogue node's element count `n` is a multiple of `node[0]`'s `num_rows`
-//!
-//! Examples: `gemv/bm4 → binary/add` (`attn_out`/`ffn_out`),
-//! `gemv/bm4 → kv_cache_update` (`v_chain`),
-//! `rope_llama → kv_cache_update` (`k_chain` sub-pair).
-//!
-//! The first node's IR body is cloned into the host kernel.  Each subsequent
-//! node's flat body is injected in place of the preceding node's intra-output
-//! stores: the stored scalar becomes `intra_vid` and the store's index VID
-//! becomes the epilogue's `program_id(0)`.  Intermediate intra tensors are
-//! eliminated from global memory entirely.
-//!
-//! ## Path B — `KernelCall`-chain synthesis (same-grid groups)
-//!
-//! For groups where all nodes share the same grid dimensions (same-grid
-//! `Elementwise` or same-spec `Reduction`, or mixed `R+E` with `n == num_rows`),
-//! a host kernel with one `Op::KernelCall` per group node is built.
-//! `KernelInlinePass` resolves the calls into a flat kernel at MSL generation time.
-//!
-//! ## Common steps (both paths)
-//!
-//! 1. **Intra-group tensor detection** — an intermediate tensor is "pure intra"
-//!    when it is written by a group node and ALL reads between that write and
-//!    the next write to the same name come from other group nodes.  Intra
-//!    tensors flow as computed scalars instead of round-tripping through
-//!    global memory.
-//!
-//! 2. **Node replacement** — the N group nodes are replaced by 1 fused node
-//!    in `nodes` and `cached_kernels`; intermediate tracking is updated to
-//!    exclude eliminated intra tensors.
+//! Intra tensors (written and read only within the group) flow as computed scalars
+//! instead of round-tripping through global memory. The N group nodes are replaced
+//! by 1 fused node in `nodes` and `cached_kernels`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -68,29 +37,11 @@ use crate::{
     plan::{DispatchNode, SlotRef},
 };
 
-// ---------------------------------------------------------------------------
-// Public entry point
-// ---------------------------------------------------------------------------
-
-/// Placeholder `kernel_ir` function for synthesized fused nodes.
-///
-/// The executor uses `cached_kernels[i]` directly and never calls `kernel_ir`
-/// at dispatch time.  This placeholder satisfies the `fn(DType) -> Kernel`
-/// field type requirement on `DispatchNode`.
+/// Placeholder `kernel_ir` satisfying the `fn(DType) -> Kernel` field type requirement.
 pub fn fused_kernel_placeholder(_dtype: DType) -> Kernel { Kernel::new("fused_placeholder") }
 
 /// Synthesize fused kernels for all compatible fuse groups in place.
-///
-/// Called in `compiler::compile` between step 2.5 (fuse-group assignment)
-/// and step 3 (liveness / slot assignment).  Replaces each compatible N-node
-/// fuse group with a single synthesized node whose kernel body chains the
-/// individual kernels via `Op::KernelCall`.
-///
-/// Groups are processed from the last to the first so that the `Vec::splice`
-/// calls don't invalidate earlier node indices.
-///
-/// `prefill_node_count` is adjusted downward by the number of nodes removed
-/// before the original prefill boundary.
+/// Processes groups last-to-first; adjusts `prefill_node_count`.
 pub fn synthesize_fuse_groups(
     nodes: &mut Vec<DispatchNode>,
     cached_kernels: &mut Vec<Kernel>,
@@ -122,16 +73,7 @@ pub fn synthesize_fuse_groups(
         let intra_tensors = find_pure_intra_tensors(node_indices, &group_node_set, &writes, &reads);
 
         let synthesis_result =
-            synthesize_pattern3(&group_nodes, &group_cached, &intra_tensors, dtype, *group_id)
-                .or_else(|| {
-                    synthesize_pattern1(
-                        &group_nodes,
-                        &group_cached,
-                        &intra_tensors,
-                        dtype,
-                        *group_id,
-                    )
-                })
+            synthesize_via_ir(&group_nodes, &group_cached, &intra_tensors, dtype, *group_id)
                 .or_else(|| {
                     let Some((fused_mode, fused_grid)) = check_grid_compatibility(&group_nodes)
                     else {
@@ -152,51 +94,52 @@ pub fn synthesize_fuse_groups(
 
         let Some((fused_node, fused_kernel)) = synthesis_result else {
             // Full synthesis failed.  Try sub-pair decomposition: find consecutive
-            // 2-node (R→E) pairs within the group that satisfy Pattern 1 and
-            // synthesize each independently.  This handles the `ffn_act` diamond
-            // (gemv_gate→silu, gemv_up→mul) without requiring a custom kernel.
-            let subpairs = try_subpair_decomposition(
-                &group_nodes,
-                &group_cached,
-                node_indices,
-                &writes,
-                &reads,
-                dtype,
-                *group_id,
-            );
-
-            if subpairs.is_empty() {
+            // 2-node (R→E) pairs within the group and synthesize each independently.
+            let Some((repl_nodes, repl_kernels, repl_int_out, repl_int_in, n_removed)) =
+                subpair_decomposition(
+                    &group_nodes,
+                    &group_cached,
+                    node_indices,
+                    &writes,
+                    &reads,
+                    intermediate_outputs,
+                    intermediate_inputs,
+                    nodes,
+                    cached_kernels,
+                    dtype,
+                    *group_id,
+                )
+            else {
                 debug!("fuse group {group_id}: no synthesis path succeeded, skipping");
                 continue;
-            }
+            };
 
-            // Drop borrows of nodes/cached_kernels before the mutable splice below.
+            let start = node_indices[0];
             drop(group_nodes);
             drop(group_cached);
 
-            apply_subpair_decomposition(
-                subpairs,
-                node_indices,
-                nodes,
-                cached_kernels,
-                intermediate_outputs,
-                intermediate_inputs,
-                &writes,
-                &reads,
-                prefill_node_count,
-                *group_id,
-            );
+            if start < *prefill_node_count {
+                let removed_before = n_removed.min(*prefill_node_count - start);
+                *prefill_node_count -= removed_before;
+            }
+
+            let end = start + n_removed + repl_nodes.len();
+            nodes.splice(start..end, repl_nodes);
+            cached_kernels.splice(start..end, repl_kernels);
+            intermediate_outputs.splice(start..end, repl_int_out);
+            intermediate_inputs.splice(start..end, repl_int_in);
             continue;
         };
 
-        // Fused intermediate tracking: drop intra tensors, deduplicate.
+        // Build fused tracking: drop intra tensors, deduplicate.
         let fused_int_out: Vec<(String, usize)> = {
             let mut seen = HashSet::new();
             node_indices
                 .iter()
                 .flat_map(|&ni| intermediate_outputs[ni].iter().cloned())
-                .filter(|(name, _)| !intra_tensors.contains(name.as_str()))
-                .filter(|(name, _)| seen.insert(name.clone()))
+                .filter(|(name, _)| {
+                    !intra_tensors.contains(name.as_str()) && seen.insert(name.clone())
+                })
                 .collect()
         };
         let fused_int_in: Vec<String> = {
@@ -204,8 +147,7 @@ pub fn synthesize_fuse_groups(
             node_indices
                 .iter()
                 .flat_map(|&ni| intermediate_inputs[ni].iter().cloned())
-                .filter(|name| !intra_tensors.contains(name.as_str()))
-                .filter(|name| seen.insert(name.clone()))
+                .filter(|name| !intra_tensors.contains(name.as_str()) && seen.insert(name.clone()))
                 .collect()
         };
 
@@ -232,9 +174,7 @@ pub fn synthesize_fuse_groups(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Group collection
-// ---------------------------------------------------------------------------
 
 fn collect_groups(nodes: &[DispatchNode]) -> HashMap<usize, Vec<usize>> {
     let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -246,9 +186,7 @@ fn collect_groups(nodes: &[DispatchNode]) -> HashMap<usize, Vec<usize>> {
     groups
 }
 
-// ---------------------------------------------------------------------------
 // Write/read position maps for intermediate tensors
-// ---------------------------------------------------------------------------
 
 fn build_write_read_maps(
     nodes: &[DispatchNode],
@@ -276,64 +214,39 @@ fn build_write_read_maps(
     (writes, reads)
 }
 
-// ---------------------------------------------------------------------------
-// Grid compatibility check
-// ---------------------------------------------------------------------------
-
-/// Returns `Some((fused_mode, fused_grid))` when all nodes in the group can be
-/// fused, `None` when any node is incompatible.
-///
-/// Rules:
-/// - Only `Elementwise` and `Reduction` modes are supported.  `Grid3D`,
-///   `Tile2D`, and `SimdGroup2D` are always incompatible.
-/// - All `Reduction` nodes must share the same `(num_rows, threads_per_group)`.
-/// - All `Elementwise` nodes must share the same `n`.
-/// - In a mixed group, `n` (Elementwise) must equal `num_rows` (Reduction).
+/// Check grid compatibility for KernelCall-chain synthesis (Path B).
 fn check_grid_compatibility(nodes: &[&DispatchNode]) -> Option<(KernelMode, GridSpec)> {
-    let mut reduction_spec: Option<(usize, usize)> = None; // (num_rows, tpg)
-    let mut elementwise_n: Option<usize> = None;
-
+    let mut rs: Option<(usize, usize)> = None;
+    let mut en: Option<usize> = None;
     for node in nodes {
         match (&node.mode, &node.grid) {
-            (KernelMode::Reduction, GridSpec::Reduction { num_rows, threads_per_group }) => {
-                match reduction_spec {
-                    None => reduction_spec = Some((*num_rows, *threads_per_group)),
+            (KernelMode::Reduction, GridSpec::Reduction { num_rows, threads_per_group }) =>
+                match rs {
+                    None => rs = Some((*num_rows, *threads_per_group)),
                     Some((r, t)) if r == *num_rows && t == *threads_per_group => {},
-                    _ => return None, // mismatched reduction dims
-                }
+                    _ => return None,
+                },
+            (KernelMode::Elementwise, GridSpec::Elementwise { n }) => match en {
+                None => en = Some(*n),
+                Some(e) if e == *n => {},
+                _ => return None,
             },
-            (KernelMode::Elementwise, GridSpec::Elementwise { n }) => {
-                match elementwise_n {
-                    None => elementwise_n = Some(*n),
-                    Some(en) if en == *n => {},
-                    _ => return None, // mismatched elementwise dims
-                }
-            },
-            _ => return None, // Grid3D, Tile2D, SimdGroup2D or unexpected combo
+            _ => return None,
         }
     }
-
-    match (reduction_spec, elementwise_n) {
-        // Mixed: Elementwise n must equal Reduction num_rows.
+    match (rs, en) {
         (Some((num_rows, _)), Some(n)) if n != num_rows => None,
-        // Reduction wins in mixed groups.
         (Some((num_rows, tpg)), _) =>
             Some((KernelMode::Reduction, GridSpec::Reduction { num_rows, threads_per_group: tpg })),
         (None, Some(n)) => Some((KernelMode::Elementwise, GridSpec::Elementwise { n })),
-        (None, None) => None, // empty group
+        _ => None,
     }
 }
 
-// ---------------------------------------------------------------------------
 // Intra-group tensor detection
-// ---------------------------------------------------------------------------
 
-/// Returns the set of intermediate tensor names that are "pure intra-group":
-/// written by a group node and read ONLY by group nodes between that write
-/// and the next write to the same name.
-///
-/// These tensors can be eliminated from global memory — they flow as scalar
-/// `Value` args between `KernelCall` ops.
+/// Return tensors written by a group node and read ONLY by group nodes before
+/// the next write to the same name. These can be eliminated from global memory.
 fn find_pure_intra_tensors(
     node_indices: &[usize],
     _group_node_set: &HashMap<usize, usize>,
@@ -376,11 +289,8 @@ fn find_pure_intra_tensors(
     intra
 }
 
-// ---------------------------------------------------------------------------
 // Host kernel synthesis
-// ---------------------------------------------------------------------------
 
-/// Extract the string name from a `SlotRef` (only valid before slot assignment).
 fn slot_ref_name(slot_ref: &SlotRef) -> Option<String> {
     match slot_ref {
         SlotRef::Weight(name) => Some(name.clone()),
@@ -389,12 +299,7 @@ fn slot_ref_name(slot_ref: &SlotRef) -> Option<String> {
     }
 }
 
-/// Create a valid Metal identifier from a tensor name:
-/// - Strip leading `_`
-/// - Replace `.`, `/`, `-` and other non-alnum chars with `_`
-/// - Prefix with `p_` to avoid Metal keyword collisions
-///
-/// If the sanitized name collides with an existing `used` name, append `_N`.
+/// Create a valid Metal identifier from a tensor name, avoiding collisions.
 fn make_param_name(tensor_name: &str, used: &mut HashSet<String>) -> String {
     let no_leading = tensor_name.trim_start_matches('_');
     let base: String = no_leading
@@ -415,18 +320,15 @@ fn make_param_name(tensor_name: &str, used: &mut HashSet<String>) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Synthesis context
-// ---------------------------------------------------------------------------
+
+struct BindResult {
+    renames: HashMap<String, String>,
+    args: Vec<KernelCallArg>,
+    call_result: Option<ValueId>,
+}
 
 /// Accumulates the host kernel and its binding/cexpr lists during synthesis.
-///
-/// All three synthesis paths (`build_fused_group`, `synthesize_pattern1`,
-/// `synthesize_pattern3`) share the same "register this callee's params into
-/// the host" logic.  `SynthesisCtx` bundles the six mutable variables that
-/// were previously passed individually through every helper function, and
-/// exposes `bind_callee` to replace `build_reduction_renames` /
-/// `build_elementwise_renames`.
 struct SynthesisCtx<'a> {
     host: Kernel,
     input_bindings: Vec<(String, SlotRef)>,
@@ -509,10 +411,16 @@ impl<'a> SynthesisCtx<'a> {
         intra_out_param: Option<&str>,
         skip_intra_inputs: bool,
         node_prefix: &str,
-    ) -> Option<HashMap<String, String>> {
-        let mut renames: HashMap<String, String> = HashMap::new();
+        mut kcall_out: Option<(&mut HashMap<String, ValueId>, &mut u32)>,
+    ) -> Option<BindResult> {
+        let output_count = callee.params.iter().filter(|p| p.is_output).count();
+        let single_output = output_count == 1;
 
-        // ── Input params ─────────────────────────────────────────────────────
+        let mut renames: HashMap<String, String> = HashMap::new();
+        let mut args: Vec<KernelCallArg> = Vec::new();
+        let mut call_result: Option<ValueId> = None;
+
+        // Input params.
         for param in callee.params.iter().filter(|p| !p.is_output) {
             let (tensor_name, orig_slot_ref) = node
                 .input_bindings
@@ -520,14 +428,18 @@ impl<'a> SynthesisCtx<'a> {
                 .find(|(n, _)| n == &param.name)
                 .and_then(|(_, slot)| slot_ref_name(slot).map(|n| (n, slot.clone())))?;
 
-            if skip_intra_inputs && self.intra_tensors.contains(&tensor_name) {
-                // Intra input: will be substituted in-register during epilogue injection.
+            if self.intra_tensors.contains(&tensor_name) {
+                // Intra input: keep original callee param name for renames.
                 renames.insert(param.name.clone(), param.name.clone());
+                if let Some((ref mut ivm, _)) = kcall_out {
+                    let vid = *ivm.get(&tensor_name)?;
+                    args.push(KernelCallArg::Value(vid));
+                }
                 continue;
             }
 
-            // Deduplicate: reuse an existing host input param for the same tensor.
-            let host_name = if skip_intra_inputs {
+            // External input: register/reuse host param.
+            let host_name = if skip_intra_inputs || kcall_out.is_some() {
                 self.input_bindings
                     .iter()
                     .find(|(_, s)| slot_ref_name(s).as_deref() == Some(&tensor_name))
@@ -548,10 +460,13 @@ impl<'a> SynthesisCtx<'a> {
                 self.input_bindings.push((hn.clone(), orig_slot_ref));
                 hn
             });
-            renames.insert(param.name.clone(), host_name);
+            renames.insert(param.name.clone(), host_name.clone());
+            if kcall_out.is_some() {
+                args.push(KernelCallArg::Tensor(host_name));
+            }
         }
 
-        // ── Constexpr params ─────────────────────────────────────────────────
+        // Constexpr params.
         for cexpr_decl in &callee.constexprs {
             let cexpr_name = cexpr_decl.name.name();
             let host_cexpr = format!("{node_prefix}_{cexpr_name}");
@@ -564,10 +479,13 @@ impl<'a> SynthesisCtx<'a> {
                 value: None,
             });
             self.cexprs.push((host_cexpr.clone(), cexpr_val.clone()));
-            renames.insert(cexpr_name.to_string(), host_cexpr);
+            renames.insert(cexpr_name.to_string(), host_cexpr.clone());
+            if kcall_out.is_some() {
+                args.push(KernelCallArg::Tensor(host_cexpr));
+            }
         }
 
-        // ── Output params ─────────────────────────────────────────────────────
+        // Output params.
         for param in callee.params.iter().filter(|p| p.is_output) {
             let (tensor_name, orig_slot_ref) = node
                 .output_bindings
@@ -582,9 +500,22 @@ impl<'a> SynthesisCtx<'a> {
             };
 
             if is_intra {
-                // Keep original callee param name so subsequent store-searches work.
                 renames.insert(param.name.clone(), param.name.clone());
-                continue;
+                match &mut kcall_out {
+                    Some((ivm, nv)) if single_output => {
+                        let vid = ValueId::new(**nv);
+                        **nv += 1;
+                        ivm.insert(tensor_name, vid);
+                        call_result = Some(vid);
+                        continue;
+                    },
+                    _ => {
+                        if kcall_out.is_none() {
+                            continue;
+                        }
+                        // KCall multi-output intra: register as host param below.
+                    },
+                }
             }
 
             let host_name = make_param_name(&tensor_name, &mut self.used_names);
@@ -596,18 +527,18 @@ impl<'a> SynthesisCtx<'a> {
                 kind: param.kind.clone(),
             });
             self.output_bindings.push((host_name.clone(), orig_slot_ref));
-            renames.insert(param.name.clone(), host_name);
+            renames.insert(param.name.clone(), host_name.clone());
+            if kcall_out.is_some() {
+                args.push(KernelCallArg::Tensor(host_name));
+            }
         }
 
-        Some(renames)
+        Some(BindResult { renames, args, call_result })
     }
 }
 
-/// Build the synthesized fused `DispatchNode` and `Kernel` for a compatible group.
-///
-/// Returns `None` if the group cannot be synthesized (e.g., a callee contains
-/// nested `KernelCall`, a param lookup fails, or a `SlotRef::Slot` is seen
-/// before slot assignment).
+/// Build a KernelCall-chain fused kernel (Path B). Returns None on incompatible callees.
+#[allow(clippy::too_many_arguments)]
 fn build_fused_group(
     group_nodes: &[&DispatchNode],
     group_cached: &[&Kernel],
@@ -618,399 +549,167 @@ fn build_fused_group(
     fused_grid: GridSpec,
     group_id: usize,
 ) -> Option<(DispatchNode, Kernel)> {
-    // Safety: reject if any callee has nested KernelCall (would fail the
-    // KernelInlinePass assertion and can't be inlined).
     for callee in group_cached {
-        if callee.body.ops.iter().any(|op| matches!(op, Op::KernelCall { .. })) {
-            return None;
-        }
-    }
-
-    // Reject any callee that uses Strided params (requires extra shape/strides
-    // buffers that the synthesis doesn't yet model).
-    for callee in group_cached {
-        if callee.params.iter().any(|p| p.kind == ParamKind::Strided) {
+        if callee.body.ops.iter().any(|op| matches!(op, Op::KernelCall { .. }))
+            || callee.params.iter().any(|p| p.kind == ParamKind::Strided)
+        {
             return None;
         }
     }
 
     let kernel_name: &'static str = Box::leak(format!("fused_group_{group_id}").into_boxed_str());
+    let mut ctx = SynthesisCtx::new(kernel_name, fused_mode, dtype, intra_tensors);
+    ctx.host.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
 
-    let mut host = Kernel::new(kernel_name);
-    host.mode = fused_mode;
-
-    // Fused node bindings.
-    let mut fused_input_bindings: Vec<(String, SlotRef)> = Vec::new();
-    let mut fused_output_bindings: Vec<(String, SlotRef)> = Vec::new();
-    let mut fused_cexprs: Vec<(String, ConstexprValue)> = Vec::new();
-
-    // Deduplication: original tensor name → host param name.
-    let mut input_host_names: HashMap<String, String> = HashMap::new();
-    let mut output_host_names: HashMap<String, String> = HashMap::new();
-    // Tracks all declared host param/constexpr names to avoid collisions.
-    let mut used_param_names: HashSet<String> = HashSet::new();
-
-    // Host kernel body.
-    let mut next_vid: u32 = 0;
-    let pid_vid = ValueId::new(next_vid);
-    next_vid += 1;
-    // Emit ProgramId(0) so KernelInlinePass builds a non-empty caller_pids map.
-    host.body.push_op(Op::ProgramId { axis: 0 }, pid_vid);
-
-    // intra_tensor_name → ValueId produced by the KernelCall that wrote it.
     let mut intra_value_map: HashMap<String, ValueId> = HashMap::new();
+    let mut next_vid: u32 = 1;
 
     for (gi, (node, callee)) in group_nodes.iter().zip(group_cached.iter()).enumerate() {
-        // Callee param lists (positional order for KernelCall args).
-        let input_params: Vec<&str> =
-            callee.params.iter().filter(|p| !p.is_output).map(|p| p.name.as_str()).collect();
-        let output_params: Vec<&str> =
-            callee.params.iter().filter(|p| p.is_output).map(|p| p.name.as_str()).collect();
+        let result = ctx.bind_callee(
+            node,
+            callee,
+            None,
+            false,
+            &format!("n{gi}"),
+            Some((&mut intra_value_map, &mut next_vid)),
+        )?;
 
-        // For kernels with >1 output param we treat all outputs as external to
-        // avoid the complexity of mapping multiple call_results.
-        let single_output = output_params.len() == 1;
-
-        let mut args: Vec<KernelCallArg> = Vec::new();
-
-        // ── Input params ──────────────────────────────────────────────────
-        for &param_name in &input_params {
-            let Some((_, slot_ref)) = node.input_bindings.iter().find(|(n, _)| n == param_name)
-            else {
-                return None; // param not found — IR / TOML mismatch
-            };
-
-            let tensor_name = slot_ref_name(slot_ref)?;
-
-            if tensor_name.starts_with('_') && intra_tensors.contains(&tensor_name) {
-                // Intra-group tensor: pass the scalar ValueId computed earlier.
-                let vid = *intra_value_map.get(&tensor_name)?;
-                args.push(KernelCallArg::Value(vid));
-            } else {
-                // External tensor: get or create a host param.
-                let host_name = if let Some(hn) = input_host_names.get(&tensor_name) {
-                    hn.clone()
-                } else {
-                    let hn = make_param_name(&tensor_name, &mut used_param_names);
-                    input_host_names.insert(tensor_name.clone(), hn.clone());
-                    host.params.push(Param {
-                        name: hn.clone(),
-                        dtype,
-                        shape: Shape::scalar(),
-                        is_output: false,
-                        kind: ParamKind::Tensor,
-                    });
-                    fused_input_bindings.push((hn.clone(), slot_ref.clone()));
-                    hn
-                };
-                args.push(KernelCallArg::Tensor(host_name));
-            }
-        }
-
-        // ── Constexpr params ─────────────────────────────────────────────
-        for cexpr_decl in &callee.constexprs {
-            let cexpr_name = cexpr_decl.name.name();
-            // Unique host name: n{group_pos}_{callee_name}
-            let host_cexpr = format!("n{}_{}", gi, cexpr_name);
-
-            let Some((_, cexpr_val)) = node.cexprs.iter().find(|(n, _)| n == cexpr_name) else {
-                return None; // constexpr not found in node
-            };
-
-            host.constexprs.push(ConstExprDecl {
-                name: ConstExpr::new(&host_cexpr),
-                dtype: cexpr_decl.dtype,
-                value: None,
-            });
-            fused_cexprs.push((host_cexpr.clone(), cexpr_val.clone()));
-            args.push(KernelCallArg::Tensor(host_cexpr));
-        }
-
-        // ── Output params ────────────────────────────────────────────────
-        // For single-output kernels: if the output is intra, omit the arg so
-        // KernelInlinePass skips the Store and maps the stored value to
-        // call_result.  For external outputs (or multi-output kernels), pass
-        // a Tensor arg so the store is kept.
-        let mut call_result: Option<ValueId> = None;
-
-        for &param_name in &output_params {
-            let Some((_, slot_ref)) = node.output_bindings.iter().find(|(n, _)| n == param_name)
-            else {
-                return None;
-            };
-
-            let tensor_name = slot_ref_name(slot_ref)?;
-
-            let is_intra = single_output
-                && tensor_name.starts_with('_')
-                && intra_tensors.contains(&tensor_name);
-
-            if is_intra && call_result.is_none() {
-                // Omit the arg → KernelInlinePass maps stored value → call_result.
-                let vid = ValueId::new(next_vid);
-                next_vid += 1;
-                intra_value_map.insert(tensor_name, vid);
-                call_result = Some(vid);
-            } else {
-                // External output: add a Tensor arg, keep the store.
-                let host_name = if let Some(hn) = output_host_names.get(&tensor_name) {
-                    hn.clone()
-                } else {
-                    let hn = make_param_name(&tensor_name, &mut used_param_names);
-                    output_host_names.insert(tensor_name.clone(), hn.clone());
-                    host.params.push(Param {
-                        name: hn.clone(),
-                        dtype,
-                        shape: Shape::scalar(),
-                        is_output: true,
-                        kind: ParamKind::Tensor,
-                    });
-                    fused_output_bindings.push((hn.clone(), slot_ref.clone()));
-                    hn
-                };
-                args.push(KernelCallArg::Tensor(host_name));
-            }
-        }
-
-        let kc = Op::KernelCall { callee: node.kernel_name.to_string(), args, dtype };
-        match call_result {
-            Some(vid) => host.body.push_op(kc, vid),
-            None => host.body.push_op_no_result(kc),
+        let kc = Op::KernelCall { callee: node.kernel_name.to_string(), args: result.args, dtype };
+        match result.call_result {
+            Some(vid) => ctx.host.body.push_op(kc, vid),
+            None => ctx.host.body.push_op_no_result(kc),
         }
     }
 
-    // A fused node with no outputs is useless.
-    if fused_output_bindings.is_empty() {
-        return None;
-    }
-
-    let grid_dims = grid_to_dims(&fused_grid);
-
-    let fused_node = DispatchNode {
-        label: format!("fused.group.{group_id}"),
-        kernel_name,
-        kernel_ir: fused_kernel_placeholder,
-        mode: fused_mode,
-        input_bindings: fused_input_bindings,
-        output_bindings: fused_output_bindings,
-        cexprs: fused_cexprs,
-        grid: fused_grid,
-        dtype,
-        grid_dims,
-        fuse_group: None,
-    };
-
-    Some((fused_node, host))
+    debug!(
+        "fuse group {group_id}: Path B KernelCall-chain synthesis ({} nodes → 1)",
+        group_nodes.len()
+    );
+    ctx.finish(group_id, kernel_name, fused_mode, fused_grid)
 }
 
-// ---------------------------------------------------------------------------
 // Direct IR synthesis — Pattern 1 (Reduction → Elementwise epilogue)
-// ---------------------------------------------------------------------------
 
-/// Maximum non-special ValueId across all blocks in a kernel.
-/// Special VIDs (top bit set — loop-var refs, sub-op-flag refs) are excluded.
 fn kernel_max_vid(kernel: &Kernel) -> u32 {
-    const SPECIAL: u32 = 0x4000_0000; // covers both 0x4000_xxxx and 0xC000_xxxx loop-var VIDs
-    let check = |m: &mut u32, block: &Block| {
-        for (op, result) in block.ops.iter().zip(block.results.iter()) {
-            op.value_refs().iter().for_each(|v| {
-                if v.as_u32() & SPECIAL == 0 {
+    const SP: u32 = 0x4000_0000;
+    let mut m = 0u32;
+    let chk = |m: &mut u32, b: &Block| {
+        for (op, r) in b.ops.iter().zip(b.results.iter()) {
+            for v in op.value_refs() {
+                if v.as_u32() & SP == 0 {
                     *m = (*m).max(v.as_u32());
                 }
-            });
-            if let Some(r) = result {
-                if r.as_u32() & SPECIAL == 0 {
-                    *m = (*m).max(r.as_u32());
-                }
+            }
+            if let Some(r) = r
+                && r.as_u32() & SP == 0
+            {
+                *m = (*m).max(r.as_u32());
             }
         }
     };
-    let mut m = 0u32;
-    check(&mut m, &kernel.body);
-    for block in kernel.blocks.values() {
-        check(&mut m, block);
+    chk(&mut m, &kernel.body);
+    for b in kernel.blocks.values() {
+        chk(&mut m, b);
     }
     m
 }
 
-/// Maximum BlockId across all blocks registered in a kernel.
-fn kernel_max_block_id(kernel: &Kernel) -> u32 {
-    kernel.blocks.keys().map(|b| b.as_u32()).max().unwrap_or(0)
-}
-
-/// Rename string-named param/constexpr references inside an Op.
-/// Handles Load.src, Store.dst, StrideReduce.src, StrideStore, VectorLoad/Store, etc.
-/// Only names present in `renames` are substituted; others are kept.
+/// Rename param/constexpr references in an Op per `renames` map.
 fn rename_param_refs_in_op(op: &mut Op, renames: &HashMap<String, String>) {
     if renames.is_empty() {
         return;
     }
-    let rename = |s: &mut String| {
-        if let Some(new) = renames.get(s.as_str()) {
-            s.clone_from(new);
+    let rn = |s: &mut String| {
+        if let Some(n) = renames.get(s.as_str()) {
+            s.clone_from(n);
         }
     };
-    let rename_opt = |s: &mut Option<String>| {
-        if let Some(name) = s {
-            if let Some(new) = renames.get(name.as_str()) {
-                name.clone_from(new);
-            }
+    let rno = |s: &mut Option<String>| {
+        if let Some(name) = s
+            && let Some(n) = renames.get(name.as_str())
+        {
+            name.clone_from(n);
         }
     };
     match op {
-        Op::Load { src, .. } => rename(src),
-        Op::Store { dst, .. } => rename(dst),
+        Op::Load { src, .. }
+        | Op::VectorLoad { src, .. }
+        | Op::Gather { src, .. }
+        | Op::StrideArgReduce { src, .. } => rn(src),
+        Op::Store { dst, .. }
+        | Op::VectorStore { dst, .. }
+        | Op::Scatter { dst, .. }
+        | Op::Atomic { dst, .. } => rn(dst),
         Op::StrideReduce { src, secondary_src, .. } => {
-            rename(src);
-            rename_opt(secondary_src);
+            rn(src);
+            rno(secondary_src);
         },
         Op::StrideStore { src, dst, aux_src, .. } => {
-            rename(src);
-            rename(dst);
-            rename_opt(aux_src);
+            rn(src);
+            rn(dst);
+            rno(aux_src);
         },
-        Op::VectorLoad { src, .. } => rename(src),
-        Op::VectorStore { dst, .. } => rename(dst),
-        Op::Gather { src, .. } => rename(src),
-        Op::Scatter { dst, .. } => rename(dst),
-        Op::Atomic { dst, .. } => rename(dst),
         Op::StrideScan { src, dst, .. } => {
-            rename(src);
-            rename(dst);
+            rn(src);
+            rn(dst);
         },
-        Op::StrideArgReduce { src, .. } => rename(src),
-        // Threadgroup-private names are NOT renamed (they're internal to the callee).
         _ => {},
     }
 }
-
-/// Clone one block with VID and BlockId offsets applied plus param renames.
-///
-/// - All non-special ValueIds (`raw < 0x8000_0000`) are shifted by `vid_offset`.
-/// - All `BlockId` references in `Op::Loop.body` and `Op::If.then/else_block` are
-///   shifted by `block_offset`.
-/// - Param string references in Load/Store/etc. are renamed via `param_renames`.
-fn clone_block_with_offsets(
-    block: &Block,
-    vid_offset: u32,
-    block_offset: u32,
-    param_renames: &HashMap<String, String>,
-) -> Block {
-    const SPECIAL: u32 = 0x4000_0000; // covers both 0x4000_xxxx and 0xC000_xxxx loop-var VIDs
-    let remap_vid = |v: ValueId| -> ValueId {
-        if v.as_u32() & SPECIAL == 0 { ValueId::new(v.as_u32() + vid_offset) } else { v }
-    };
-
-    let new_bid = BlockId::new(block.id.as_u32() + block_offset);
-    let mut new_block = Block::new(new_bid);
-
-    for (op, result) in block.ops.iter().zip(block.results.iter()) {
-        let mut new_op = op.clone();
-
-        // Remap BlockId references in Loop and If.
-        match &mut new_op {
-            Op::Loop { body, .. } => {
-                *body = BlockId::new(body.as_u32() + block_offset);
-            },
-            Op::If { then_block, else_block, .. } => {
-                *then_block = BlockId::new(then_block.as_u32() + block_offset);
-                if let Some(eb) = else_block {
-                    *eb = BlockId::new(eb.as_u32() + block_offset);
-                }
-            },
-            _ => {},
-        }
-
-        // Rename param references.
-        rename_param_refs_in_op(&mut new_op, param_renames);
-
-        // Remap all non-special ValueIds.
-        new_op.for_each_value_id_mut(&mut |v| {
-            if v.as_u32() & SPECIAL == 0 {
-                *v = ValueId::new(v.as_u32() + vid_offset);
-            }
-        });
-
-        new_block.ops.push(new_op);
-        new_block.results.push(result.map(remap_vid));
-    }
-
-    new_block
-}
-
-/// Clone the entire callee kernel (body + all sub-blocks) into the host kernel.
-///
-/// - Callee entry-block ops are **appended** to `host.body` (not added as a
-///   separate block).
-/// - Callee sub-blocks (non-entry) are added to `host.blocks` with a BlockId offset.
-/// - VIDs are shifted so they don't collide with any existing VIDs in the host.
-/// - Param string names present in `param_renames` are substituted throughout.
-///
-/// Returns the VID offset used (= `kernel_max_vid(host_before_clone) + 1`).
 fn clone_callee_into_host(
     host: &mut Kernel,
     callee: &Kernel,
     param_renames: &HashMap<String, String>,
 ) -> u32 {
+    const SPECIAL: u32 = 0x4000_0000;
     let vid_offset = kernel_max_vid(host) + 1;
-    let block_offset = kernel_max_block_id(host) + 1;
+    let block_offset = host.blocks.keys().map(|b| b.as_u32()).max().unwrap_or(0) + 1;
 
-    // Clone sub-blocks (all blocks except the entry block).
-    let sub_block_ids: Vec<BlockId> =
-        callee.blocks.keys().filter(|&&bid| bid != callee.body.id).copied().collect();
-    for bid in sub_block_ids {
-        let block = &callee.blocks[&bid];
-        let cloned = clone_block_with_offsets(block, vid_offset, block_offset, param_renames);
-        host.blocks.insert(cloned.id, cloned);
-    }
-
-    // Merge callee entry-block ops into host body (with block_offset on references,
-    // but NOT adding block_offset to the entry block's own ID — it's merged, not stored).
-    const SPECIAL: u32 = 0x4000_0000; // covers both 0x4000_xxxx and 0xC000_xxxx loop-var VIDs
     let remap_vid = |v: ValueId| -> ValueId {
         if v.as_u32() & SPECIAL == 0 { ValueId::new(v.as_u32() + vid_offset) } else { v }
     };
 
-    for (op, result) in callee.body.ops.iter().zip(callee.body.results.iter()) {
-        let mut new_op = op.clone();
-
-        match &mut new_op {
-            Op::Loop { body, .. } => {
-                *body = BlockId::new(body.as_u32() + block_offset);
-            },
-            Op::If { then_block, else_block, .. } => {
-                *then_block = BlockId::new(then_block.as_u32() + block_offset);
-                if let Some(eb) = else_block {
-                    *eb = BlockId::new(eb.as_u32() + block_offset);
-                }
-            },
-            _ => {},
-        }
-
-        rename_param_refs_in_op(&mut new_op, param_renames);
-
-        new_op.for_each_value_id_mut(&mut |v| {
-            if v.as_u32() & SPECIAL == 0 {
-                *v = ValueId::new(v.as_u32() + vid_offset);
+    let clone_ops_into_block = |src: &Block, dst: &mut Block| {
+        for (op, result) in src.ops.iter().zip(src.results.iter()) {
+            let mut new_op = op.clone();
+            match &mut new_op {
+                Op::Loop { body, .. } => *body = BlockId::new(body.as_u32() + block_offset),
+                Op::If { then_block, else_block, .. } => {
+                    *then_block = BlockId::new(then_block.as_u32() + block_offset);
+                    if let Some(eb) = else_block {
+                        *eb = BlockId::new(eb.as_u32() + block_offset);
+                    }
+                },
+                _ => {},
             }
-        });
+            rename_param_refs_in_op(&mut new_op, param_renames);
+            new_op.for_each_value_id_mut(&mut |v| {
+                if v.as_u32() & SPECIAL == 0 {
+                    *v = ValueId::new(v.as_u32() + vid_offset);
+                }
+            });
+            dst.ops.push(new_op);
+            dst.results.push(result.map(remap_vid));
+        }
+    };
 
-        host.body.ops.push(new_op);
-        host.body.results.push(result.map(remap_vid));
+    // Clone sub-blocks.
+    for (&bid, block) in &callee.blocks.clone() {
+        if bid == callee.body.id {
+            continue;
+        }
+        let mut cloned = Block::new(BlockId::new(bid.as_u32() + block_offset));
+        clone_ops_into_block(block, &mut cloned);
+        host.blocks.insert(cloned.id, cloned);
     }
+
+    // Merge callee entry-block ops into host body.
+    clone_ops_into_block(&callee.body, &mut host.body);
 
     vid_offset
 }
 
-/// For each `Store { dst: store_dst }` found in `kernel.body` or any sub-block,
-/// collect `(block_id, op_index, first_index_expr, stored_value_vid)`.
-/// Trace a VID through one level of Cast to find the raw underlying value.
-///
-/// Gemv/bm4 stores bfloat-cast values: `v74 = bfloat(v64)` then `store v74`.
-/// `v64` is the f32 SIMD-reduction result, broadcast to all threads and declared
-/// at function scope.  `v74` is declared inside the if(tid==0) block.
-/// When we capture the stored VID (`v74`) and need to use it OUTSIDE that block,
-/// we must trace back to the pre-cast VID (`v64`) which is in function scope.
+/// Trace through one level of Cast to get the pre-cast VID in function scope.
 fn trace_through_cast(vid: ValueId, host: &Kernel) -> ValueId {
     let search_block = |block: &Block| -> Option<ValueId> {
         for (op, result) in block.ops.iter().zip(block.results.iter()) {
@@ -1038,68 +737,27 @@ fn collect_stores_to_param(
     kernel: &Kernel,
     store_dst: &str,
 ) -> Vec<(BlockId, usize, metaltile_core::ir::IndexExpr, ValueId)> {
-    use metaltile_core::ir::IndexExpr;
-
     let mut result = Vec::new();
-
-    let check =
-        |bid: BlockId, block: &Block, out: &mut Vec<(BlockId, usize, IndexExpr, ValueId)>| {
-            for (i, op) in block.ops.iter().enumerate() {
-                if let Op::Store { dst, indices, value, .. } = op
-                    && dst == store_dst
-                {
-                    if let Some(idx) = indices.first() {
-                        out.push((bid, i, idx.clone(), *value));
-                    }
-                }
+    let check = |bid: BlockId, b: &Block, out: &mut Vec<_>| {
+        for (i, op) in b.ops.iter().enumerate() {
+            if let Op::Store { dst, indices, value, .. } = op
+                && dst == store_dst
+                && let Some(idx) = indices.first()
+            {
+                out.push((bid, i, idx.clone(), *value));
             }
-        };
-
+        }
+    };
     check(kernel.body.id, &kernel.body, &mut result);
     for (&bid, block) in &kernel.blocks {
-        if bid == kernel.body.id {
-            continue; // already processed above
+        if bid != kernel.body.id {
+            check(bid, block, &mut result);
         }
-        check(bid, block, &mut result);
     }
-
     result
 }
 
-/// Assign or allocate a fresh VID for `op_result`, recording it in `vid_map`.
-fn assign_fresh_vid(
-    op_result: &Option<ValueId>,
-    vid_map: &mut BTreeMap<ValueId, ValueId>,
-    next_vid: &mut u32,
-) -> Option<ValueId> {
-    op_result.map(|r| {
-        if let Some(&existing) = vid_map.get(&r) {
-            existing
-        } else {
-            let fresh = ValueId::new(*next_vid);
-            *next_vid += 1;
-            vid_map.insert(r, fresh);
-            fresh
-        }
-    })
-}
-
-/// Inline a **flat** (no sub-blocks) elementwise callee for one specific row.
-///
-/// Substitutions:
-/// - `Op::ProgramId { axis: 0 }` → remapped to `row_index`'s ValueId.
-/// - `Op::Load { src }` → if src is a key in `intra_substitutions`, the load
-///   is skipped and its result is replaced by the mapped ValueId.
-/// - All other `Op::Load` srcs are renamed via `e_param_renames`.
-/// - All `Op::Store` dsts are renamed via `e_param_renames`; Store indices are
-///   replaced with `row_index` (the row index from the reduction store).
-///
-/// When `capture_store_dst` is Some, stores to that specific original
-/// callee param name are NOT emitted and their stored value VID is captured.
-///
-/// Returns the ops to splice in place of the reduction's store for this row,
-/// plus an optional captured value VID.
-fn inline_flat_elementwise_for_row(
+fn inline_row(
     e_callee: &Kernel,
     row_index: &metaltile_core::ir::IndexExpr,
     intra_substitutions: &HashMap<String, ValueId>,
@@ -1109,6 +767,22 @@ fn inline_flat_elementwise_for_row(
 ) -> (Vec<(Op, Option<ValueId>)>, Option<ValueId>) {
     use metaltile_core::ir::IndexExpr;
 
+    let assign_vid = |op_result: &Option<ValueId>,
+                      vid_map: &mut BTreeMap<ValueId, ValueId>,
+                      next_vid: &mut u32|
+     -> Option<ValueId> {
+        op_result.map(|r| {
+            if let Some(&existing) = vid_map.get(&r) {
+                existing
+            } else {
+                let fresh = ValueId::new(*next_vid);
+                *next_vid += 1;
+                vid_map.insert(r, fresh);
+                fresh
+            }
+        })
+    };
+
     let row_vid = match row_index {
         IndexExpr::Value(v) => *v,
         _ => return (Vec::new(), None),
@@ -1117,129 +791,85 @@ fn inline_flat_elementwise_for_row(
     let mut vid_map: BTreeMap<ValueId, ValueId> = BTreeMap::new();
     let mut captured: Option<ValueId> = None;
 
-    // Pre-pass: seed intra-substitution load results and ProgramId results into vid_map.
+    // Pre-pass: seed intra-substitution + ProgramId results into vid_map.
     for (op, op_result) in e_callee.body.ops.iter().zip(e_callee.body.results.iter()) {
-        match op {
-            Op::Load { src, .. } if intra_substitutions.contains_key(src.as_str()) => {
-                if let Some(r) = op_result {
-                    vid_map.insert(*r, intra_substitutions[src.as_str()]);
-                }
-            },
-            Op::ProgramId { .. } =>
-                if let Some(r) = op_result {
-                    vid_map.insert(*r, row_vid);
-                },
-            _ => {},
+        if let Some(r) = op_result {
+            match op {
+                Op::Load { src, .. } if intra_substitutions.contains_key(src.as_str()) =>
+                    vid_map.insert(*r, intra_substitutions[src.as_str()]),
+                Op::ProgramId { .. } => vid_map.insert(*r, row_vid),
+                _ => None,
+            };
         }
     }
+
+    let remap = |indices: &[IndexExpr], vm: &BTreeMap<ValueId, ValueId>| -> Vec<IndexExpr> {
+        indices
+            .iter()
+            .map(|ie| match ie {
+                IndexExpr::Value(v) => IndexExpr::Value(vm.get(v).copied().unwrap_or(*v)),
+                IndexExpr::Range(v, n) => IndexExpr::Range(vm.get(v).copied().unwrap_or(*v), *n),
+                c => c.clone(),
+            })
+            .collect()
+    };
 
     let mut result: Vec<(Op, Option<ValueId>)> = Vec::new();
 
     for (op, op_result) in e_callee.body.ops.iter().zip(e_callee.body.results.iter()) {
         match op {
-            // ProgramId: already mapped, skip.
             Op::ProgramId { .. } => continue,
-
-            // Intra-param load: already mapped, skip.
             Op::Load { src, .. } if intra_substitutions.contains_key(src.as_str()) => continue,
 
-            // External input load: rename src, remap indices via VID map.
-            // Scalar / constexpr loads have empty indices — keep them empty.
-            // Indexed loads remap each IndexExpr::Value VID through vid_map so
-            // that program_id(0) references become `row_vid` automatically.
             Op::Load { src, indices, .. } => {
                 let renamed = e_param_renames.get(src.as_str()).map(|s| s.as_str()).unwrap_or(src);
-                let new_indices: Vec<IndexExpr> = if indices.is_empty() {
-                    vec![]
-                } else {
-                    indices
-                        .iter()
-                        .map(|ie| match ie {
-                            IndexExpr::Value(v) =>
-                                IndexExpr::Value(vid_map.get(v).copied().unwrap_or(*v)),
-                            IndexExpr::Range(v, n) =>
-                                IndexExpr::Range(vid_map.get(v).copied().unwrap_or(*v), *n),
-                            IndexExpr::Const(_) => ie.clone(),
-                        })
-                        .collect()
-                };
+                let new_indices = remap(indices, &vid_map);
                 let new_op = Op::Load {
                     src: renamed.to_string(),
                     indices: new_indices,
                     mask: None,
                     other: None,
                 };
-                let new_result = assign_fresh_vid(op_result, &mut vid_map, next_vid);
-                result.push((new_op, new_result));
-                continue;
+                result.push((new_op, assign_vid(op_result, &mut vid_map, next_vid)));
             },
 
-            // Output store: rename dst, remap value and indices via VID map.
-            // For simple elementwise (store index = program_id), vid_map remaps it
-            // to row_vid.  For scattered stores (e.g. kv_cache), the derived VIDs
-            // for the index computation are remapped transitively through vid_map.
             Op::Store { dst, indices, value, mask } => {
-                // Capture: suppress store and record the stored value VID.
-                if let Some(cap_dst) = capture_store_dst
-                    && dst == cap_dst
+                if let Some(cap) = capture_store_dst
+                    && dst == cap
                 {
-                    let remapped_val = vid_map.get(value).copied().unwrap_or(*value);
-                    captured = Some(remapped_val);
+                    captured = Some(vid_map.get(value).copied().unwrap_or(*value));
                     continue;
                 }
                 let renamed = e_param_renames.get(dst.as_str()).map(|s| s.as_str()).unwrap_or(dst);
-                let remapped_val = vid_map.get(value).copied().unwrap_or(*value);
-                let new_indices: Vec<IndexExpr> = indices
-                    .iter()
-                    .map(|ie| match ie {
-                        IndexExpr::Value(v) =>
-                            IndexExpr::Value(vid_map.get(v).copied().unwrap_or(*v)),
-                        IndexExpr::Range(v, n) =>
-                            IndexExpr::Range(vid_map.get(v).copied().unwrap_or(*v), *n),
-                        IndexExpr::Const(_) => ie.clone(),
-                    })
-                    .collect();
-                let new_op = Op::Store {
-                    dst: renamed.to_string(),
-                    indices: new_indices,
-                    value: remapped_val,
-                    mask: *mask,
-                };
-                result.push((new_op, None));
-                continue;
+                let new_indices = remap(indices, &vid_map);
+                result.push((
+                    Op::Store {
+                        dst: renamed.to_string(),
+                        indices: new_indices,
+                        value: vid_map.get(value).copied().unwrap_or(*value),
+                        mask: *mask,
+                    },
+                    None,
+                ));
             },
 
-            _ => {},
+            _ => {
+                let mut new_op = op.clone();
+                new_op.for_each_value_id_mut(&mut |v| {
+                    if let Some(&nv) = vid_map.get(v) {
+                        *v = nv;
+                    }
+                });
+                result.push((new_op, assign_vid(op_result, &mut vid_map, next_vid)));
+            },
         }
-
-        // Default: remap VIDs and emit.
-        let mut new_op = op.clone();
-        new_op.for_each_value_id_mut(&mut |v| {
-            if let Some(&nv) = vid_map.get(v) {
-                *v = nv;
-            }
-        });
-        let new_result = assign_fresh_vid(op_result, &mut vid_map, next_vid);
-        result.push((new_op, new_result));
     }
 
     (result, captured)
 }
 
-/// Find all `Store { dst: store_dst }` across all blocks in `kernel` and replace
-/// each with the inlined elementwise epilogue for that row.
-///
-/// Stores are processed from the highest (block_id, op_index) to the lowest
-/// so that in-block `Vec::remove` + `Vec::insert` don't shift unprocessed indices.
-///
-/// `intra_substitutions_base` provides the static (non-per-row) intra param → VID
-/// mappings (e.g., shared intermediate consumed across rows).  The per-row stored
-/// value from the reduction is NOT in this map — it's derived from each store.
-///
-/// When `capture_store_dst` is Some, stores to that callee param name in the
-/// epilogue body are suppressed and their values are captured.
-///
-/// Returns `Vec<(row_index, captured_value_vid)>` when `capture_store_dst` is set.
+#[allow(clippy::too_many_arguments)]
+/// Inline an elementwise callee at each store to `store_dst`. Returns captured VIDs.
 fn inject_elementwise_epilogue(
     kernel: &mut Kernel,
     store_dst: &str,
@@ -1252,22 +882,17 @@ fn inject_elementwise_epilogue(
 ) -> Vec<(metaltile_core::ir::IndexExpr, ValueId)> {
     use metaltile_core::ir::IndexExpr;
 
-    // Collect all stores first (before any mutation).
     let mut stores: Vec<(BlockId, usize, IndexExpr, ValueId)> =
         collect_stores_to_param(kernel, store_dst);
-
-    // Sort descending by (block_id, op_index) so that the highest index in each
-    // block is processed first — preserving validity of lower indices in that block.
     stores.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(b.0.as_u32().cmp(&a.0.as_u32())));
 
     let mut captured: Vec<(IndexExpr, ValueId)> = Vec::new();
 
     for (bid, store_idx, row_idx, res_vid) in stores {
-        // Build per-row intra_substitutions: main intra param + extras.
         let mut intra_substitutions: HashMap<String, ValueId> = extra_intra_subs.clone();
         intra_substitutions.insert(e_intra_param.to_string(), res_vid);
 
-        let (epilogue, row_captured) = inline_flat_elementwise_for_row(
+        let (epilogue, row_captured) = inline_row(
             e_callee,
             &row_idx,
             &intra_substitutions,
@@ -1275,348 +900,27 @@ fn inject_elementwise_epilogue(
             next_vid,
             capture_store_dst,
         );
-
-        if let Some(cap_vid) = row_captured {
-            captured.push((row_idx.clone(), cap_vid));
+        if let Some(cap) = row_captured {
+            captured.push((row_idx.clone(), cap));
         }
 
-        // Locate the block (entry block vs sub-block).
         let block = if bid == kernel.body.id {
             &mut kernel.body
         } else {
-            match kernel.blocks.get_mut(&bid) {
-                Some(b) => b,
-                None => continue,
-            }
+            kernel.blocks.get_mut(&bid).unwrap()
         };
-
-        // Replace the store at store_idx with the epilogue ops.
         block.ops.remove(store_idx);
         block.results.remove(store_idx);
-        for (j, (ep_op, ep_result)) in epilogue.into_iter().enumerate() {
-            block.ops.insert(store_idx + j, ep_op);
-            block.results.insert(store_idx + j, ep_result);
+        for (j, (op, res)) in epilogue.into_iter().enumerate() {
+            block.ops.insert(store_idx + j, op);
+            block.results.insert(store_idx + j, res);
         }
     }
 
     captured
 }
 
-/// Attempt **Pattern 3** direct IR synthesis for a diamond [R0, E0, R1, E1] group.
-///
-/// Handles exactly 4-node groups where:
-/// - R0 and R1 are identical-spec Reduction kernels (same num_rows, tpg)
-/// - E0 is a flat Elementwise reading R0's intra output and writing an intra
-///   tensor consumed by E1
-/// - E1 is a flat Elementwise reading R1's intra output AND E0's intra output,
-///   writing external output(s)
-///
-/// Returns `None` when the group doesn't match the pattern.
-fn synthesize_pattern3(
-    group_nodes: &[&DispatchNode],
-    group_cached: &[&Kernel],
-    intra_tensors: &HashSet<String>,
-    dtype: DType,
-    group_id: usize,
-) -> Option<(DispatchNode, Kernel)> {
-    if group_nodes.len() != 4 {
-        return None;
-    }
-
-    let (r0, e0, r1, e1) = (group_nodes[0], group_nodes[1], group_nodes[2], group_nodes[3]);
-    let (c0, ce0, c1, ce1) = (group_cached[0], group_cached[1], group_cached[2], group_cached[3]);
-
-    // Validate: R0, R1 must be Reduction with identical specs.
-    let (num_rows, tpg) = match (&r0.mode, &r0.grid) {
-        (KernelMode::Reduction, GridSpec::Reduction { num_rows, threads_per_group }) =>
-            (*num_rows, *threads_per_group),
-        _ => return None,
-    };
-    match (&r1.mode, &r1.grid) {
-        (KernelMode::Reduction, GridSpec::Reduction { num_rows: nr, threads_per_group: t }) =>
-            if *nr != num_rows || *t != tpg {
-                return None;
-            },
-        _ => return None,
-    };
-
-    // Validate: E0, E1 must be flat elementwise with n a multiple of num_rows.
-    for (en, ec) in [(&e0, &ce0), (&e1, &ce1)] {
-        let n = match (&en.mode, &en.grid) {
-            (KernelMode::Elementwise, GridSpec::Elementwise { n }) => *n,
-            _ => return None,
-        };
-        if n % num_rows != 0 || ec.blocks.len() > 1 {
-            return None;
-        }
-        if ec.body.ops.iter().any(|op| matches!(op, Op::KernelCall { .. })) {
-            return None;
-        }
-    }
-    for rc in [c0, c1] {
-        if rc.body.ops.iter().any(|op| matches!(op, Op::KernelCall { .. })) {
-            return None;
-        }
-        if rc.params.iter().any(|p| p.kind == ParamKind::Strided) {
-            return None;
-        }
-    }
-
-    // ── Find intra param names ──────────────────────────────────────────────
-
-    let (r0_out_param, _) = find_single_intra_output_param(r0, c0, intra_tensors)?;
-    let e0_intra_in = find_single_intra_input_param(e0, ce0, intra_tensors)?;
-    let (e0_intra_out_callee, e0_intra_out_tensor) =
-        find_single_intra_output_param(e0, ce0, intra_tensors)?;
-    let (r1_out_param, _) = find_single_intra_output_param(r1, c1, intra_tensors)?;
-
-    // E1's intra input from R1 (not from E0).
-    let e1_intra_in_r1 = {
-        let v: Vec<_> = ce1
-            .params
-            .iter()
-            .filter(|p| !p.is_output)
-            .filter(|p| {
-                e1.input_bindings
-                    .iter()
-                    .find(|(n, _)| n == &p.name)
-                    .and_then(|(_, s)| slot_ref_name(s))
-                    .map(|t| intra_tensors.contains(&t) && t != e0_intra_out_tensor)
-                    .unwrap_or(false)
-            })
-            .collect();
-        if v.len() != 1 {
-            return None;
-        }
-        v[0].name.clone()
-    };
-    // E1's intra input from E0.
-    let e1_intra_in_e0 = {
-        let v: Vec<_> = ce1
-            .params
-            .iter()
-            .filter(|p| !p.is_output)
-            .filter(|p| {
-                e1.input_bindings
-                    .iter()
-                    .find(|(n, _)| n == &p.name)
-                    .and_then(|(_, s)| slot_ref_name(s))
-                    .map(|t| intra_tensors.contains(&t) && t == e0_intra_out_tensor)
-                    .unwrap_or(false)
-            })
-            .collect();
-        if v.len() != 1 {
-            return None;
-        }
-        v[0].name.clone()
-    };
-
-    // ── Build host kernel via SynthesisCtx ─────────────────────────────────
-
-    let kernel_name: &'static str = Box::leak(format!("fused_group_{group_id}").into_boxed_str());
-    let fused_grid = GridSpec::Reduction { num_rows, threads_per_group: tpg };
-    let mut ctx = SynthesisCtx::new(kernel_name, KernelMode::Reduction, dtype, intra_tensors);
-
-    // Step A: register R0 params and clone its body.
-    let r0_renames = ctx.bind_callee(r0, c0, Some(&r0_out_param), false, "n0")?;
-    clone_callee_into_host(&mut ctx.host, c0, &r0_renames);
-
-    // Step B: register E0 params (renames used later during epilogue injection).
-    // Do NOT inject E0 here — its results must be emitted inside R1's if-block
-    // to stay in scope when E1 runs (C++ scope restriction).
-    let e0_renames = ctx.bind_callee(e0, ce0, None, true, "n1")?;
-
-    // Collect R0's stores (descending), capture raw gate VIDs, then remove stores.
-    use metaltile_core::ir::IndexExpr;
-    let mut r0_stores: Vec<(BlockId, usize, IndexExpr, ValueId)> =
-        collect_stores_to_param(&ctx.host, &r0_out_param);
-    r0_stores.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(b.0.as_u32().cmp(&a.0.as_u32())));
-    let gate_vids: Vec<ValueId> =
-        r0_stores.iter().map(|(_, _, _, v)| trace_through_cast(*v, &ctx.host)).collect();
-    for (bid, store_idx, ..) in &r0_stores {
-        let block = if *bid == ctx.host.body.id {
-            &mut ctx.host.body
-        } else {
-            match ctx.host.blocks.get_mut(bid) {
-                Some(b) => b,
-                None => continue,
-            }
-        };
-        block.ops.remove(*store_idx);
-        block.results.remove(*store_idx);
-    }
-
-    // Step C: register R1 params and clone its body (with collision renaming).
-    let r1_renames = ctx.bind_callee(r1, c1, Some(&r1_out_param), false, "nr1")?;
-    let body_ops_before_r1 = ctx.host.body.ops.len();
-    let blocks_before_r1: HashSet<BlockId> = ctx.host.blocks.keys().cloned().collect();
-    let existing_tg_allocs: HashSet<String> = ctx
-        .host
-        .body
-        .ops
-        .iter()
-        .chain(ctx.host.blocks.values().flat_map(|b| b.ops.iter()))
-        .filter_map(|op| {
-            if let Op::ThreadgroupAlloc { name, .. } = op { Some(name.clone()) } else { None }
-        })
-        .collect();
-    clone_callee_into_host(&mut ctx.host, c1, &r1_renames);
-
-    // Rename R1's DeclareLocal/SetLocal/TG names to avoid Metal redefinition errors.
-    let rename_r1_op = |op: &mut Op| match op {
-        Op::DeclareLocal { name, .. } | Op::SetLocal { name, .. } => name.push_str("_r1"),
-        Op::Load { src, .. } if src.starts_with("__ml_") => src.push_str("_r1"),
-        Op::ThreadgroupAlloc { name, .. }
-        | Op::ThreadgroupLoad { name, .. }
-        | Op::ThreadgroupStore { name, .. }
-            if existing_tg_allocs.contains(name.as_str()) =>
-        {
-            name.push_str("_r1");
-        },
-        _ => {},
-    };
-    for op in ctx.host.body.ops[body_ops_before_r1..].iter_mut() {
-        rename_r1_op(op);
-    }
-    for (&bid, block) in ctx.host.blocks.iter_mut() {
-        if !blocks_before_r1.contains(&bid) {
-            for op in block.ops.iter_mut() {
-                rename_r1_op(op);
-            }
-        }
-    }
-
-    // Step D: register E1 params, inject E0+E1 at each of R1's store sites.
-    let e1_renames = ctx.bind_callee(e1, ce1, None, true, "n2")?;
-    let mut next_vid = kernel_max_vid(&ctx.host) + 1;
-    let mut r1_stores: Vec<(BlockId, usize, IndexExpr, ValueId)> =
-        collect_stores_to_param(&ctx.host, &r1_out_param);
-    r1_stores.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(b.0.as_u32().cmp(&a.0.as_u32())));
-
-    for (i, (bid, store_idx, row_idx, r1_vid)) in r1_stores.iter().enumerate() {
-        let (bid, store_idx, row_idx, r1_vid) = (*bid, *store_idx, row_idx.clone(), *r1_vid);
-
-        let (e0_ops, silu_vid) = if let Some(&gate_vid) = gate_vids.get(i) {
-            let mut subs = HashMap::new();
-            subs.insert(e0_intra_in.clone(), gate_vid);
-            inline_flat_elementwise_for_row(
-                ce0,
-                &row_idx,
-                &subs,
-                &e0_renames,
-                &mut next_vid,
-                Some(&e0_intra_out_callee),
-            )
-        } else {
-            (Vec::new(), None)
-        };
-
-        let mut e1_subs = HashMap::new();
-        e1_subs.insert(e1_intra_in_r1.clone(), r1_vid);
-        if let Some(sv) = silu_vid {
-            e1_subs.insert(e1_intra_in_e0.clone(), sv);
-        }
-        let (e1_ops, _) = inline_flat_elementwise_for_row(
-            ce1,
-            &row_idx,
-            &e1_subs,
-            &e1_renames,
-            &mut next_vid,
-            None,
-        );
-
-        let block = if bid == ctx.host.body.id {
-            &mut ctx.host.body
-        } else {
-            match ctx.host.blocks.get_mut(&bid) {
-                Some(b) => b,
-                None => continue,
-            }
-        };
-        block.ops.remove(store_idx);
-        block.results.remove(store_idx);
-        for (j, (op, res)) in e0_ops.into_iter().chain(e1_ops).enumerate() {
-            block.ops.insert(store_idx + j, op);
-            block.results.insert(store_idx + j, res);
-        }
-    }
-
-    debug!("fuse group {group_id}: Pattern 3 diamond synthesis (4 nodes → 1, num_rows={num_rows})");
-    ctx.finish(group_id, kernel_name, KernelMode::Reduction, fused_grid)
-}
-
-// ── Helper: find single intra output param ─────────────────────────────────
-
-fn find_single_intra_output_param(
-    node: &DispatchNode,
-    callee: &Kernel,
-    intra_tensors: &HashSet<String>,
-) -> Option<(String, String)> {
-    let intra_outs: Vec<_> = callee
-        .params
-        .iter()
-        .filter(|p| p.is_output)
-        .filter(|p| {
-            node.output_bindings
-                .iter()
-                .find(|(n, _)| n == &p.name)
-                .and_then(|(_, slot)| slot_ref_name(slot))
-                .map(|t| intra_tensors.contains(&t))
-                .unwrap_or(false)
-        })
-        .collect();
-    if intra_outs.len() != 1 {
-        return None;
-    }
-    let param = &intra_outs[0];
-    let tensor_name = node
-        .output_bindings
-        .iter()
-        .find(|(n, _)| n == &param.name)
-        .and_then(|(_, slot)| slot_ref_name(slot))?;
-    Some((param.name.clone(), tensor_name))
-}
-
-// ── Helper: find single intra input param ───────────────────────────────────
-
-fn find_single_intra_input_param(
-    node: &DispatchNode,
-    callee: &Kernel,
-    intra_tensors: &HashSet<String>,
-) -> Option<String> {
-    let intra_ins: Vec<_> = callee
-        .params
-        .iter()
-        .filter(|p| !p.is_output)
-        .filter(|p| {
-            node.input_bindings
-                .iter()
-                .find(|(n, _)| n == &p.name)
-                .and_then(|(_, slot)| slot_ref_name(slot))
-                .map(|t| intra_tensors.contains(&t))
-                .unwrap_or(false)
-        })
-        .collect();
-    if intra_ins.len() != 1 {
-        return None;
-    }
-    Some(intra_ins[0].name.clone())
-}
-
-/// Attempt **Pattern 1** direct IR synthesis for a linear epilogue chain.
-///
-/// Handles N ≥ 2 nodes where:
-/// - `node[0]` is `Reduction` or `Grid3D` (the "host" that drives dispatch)
-/// - Each `node[i]` (i ≥ 1) is `Elementwise` or flat-1D `Grid3D`, has a flat
-///   body, and consumes exactly one intra tensor produced by `node[i-1]`
-/// - Each node's element count `n` is a multiple of the first node's `num_rows`
-///
-/// The first node's body is cloned into the host kernel; each subsequent node's
-/// body is injected in place of the preceding node's intra-output stores.
-/// Intermediate intra tensors never materialise in global memory.
-///
-/// Returns `None` when the group doesn't match the pattern or synthesis fails.
-fn synthesize_pattern1(
+fn synthesize_via_ir(
     group_nodes: &[&DispatchNode],
     group_cached: &[&Kernel],
     intra_tensors: &HashSet<String>,
@@ -1627,9 +931,229 @@ fn synthesize_pattern1(
         return None;
     }
 
+    let kernel_name: &'static str = Box::leak(format!("fused_group_{group_id}").into_boxed_str());
+
+    // ── Diamond path (Pattern 3 generalized): [R0, E0, R1, E1] ──────────
+    if group_nodes.len() == 4 {
+        let (r0, e0, r1, e1) = (group_nodes[0], group_nodes[1], group_nodes[2], group_nodes[3]);
+        let (c0, ce0, c1, ce1) =
+            (group_cached[0], group_cached[1], group_cached[2], group_cached[3]);
+
+        // Validate: R0, R1 must be Reduction with identical specs.
+        let (num_rows, tpg) = match (&r0.mode, &r0.grid) {
+            (KernelMode::Reduction, GridSpec::Reduction { num_rows, threads_per_group }) =>
+                (*num_rows, *threads_per_group),
+            _ =>
+                return try_linear(
+                    group_nodes,
+                    group_cached,
+                    intra_tensors,
+                    dtype,
+                    group_id,
+                    kernel_name,
+                ),
+        };
+        match (&r1.mode, &r1.grid) {
+            (KernelMode::Reduction, GridSpec::Reduction { num_rows: nr, threads_per_group: t }) =>
+                if *nr != num_rows || *t != tpg {
+                    return try_linear(
+                        group_nodes,
+                        group_cached,
+                        intra_tensors,
+                        dtype,
+                        group_id,
+                        kernel_name,
+                    );
+                },
+            _ =>
+                return try_linear(
+                    group_nodes,
+                    group_cached,
+                    intra_tensors,
+                    dtype,
+                    group_id,
+                    kernel_name,
+                ),
+        };
+
+        // Validate E0, E1: flat elementwise, n multiple of num_rows, no KernelCall.
+        let tl =
+            || try_linear(group_nodes, group_cached, intra_tensors, dtype, group_id, kernel_name);
+        for (en, ec) in [(&e0, &ce0), (&e1, &ce1)] {
+            let n = match (&en.mode, &en.grid) {
+                (KernelMode::Elementwise, GridSpec::Elementwise { n }) => *n,
+                _ => return tl(),
+            };
+            if n % num_rows != 0
+                || ec.blocks.len() > 1
+                || ec.body.ops.iter().any(|op| matches!(op, Op::KernelCall { .. }))
+            {
+                return tl();
+            }
+        }
+        for rc in [c0, c1] {
+            if rc.body.ops.iter().any(|op| matches!(op, Op::KernelCall { .. }))
+                || rc.params.iter().any(|p| p.kind == ParamKind::Strided)
+            {
+                return tl();
+            }
+        }
+
+        let (r0_out_param, _) = find_single_intra_param(r0, c0, intra_tensors, true)?;
+        let e0_intra_in = find_single_intra_param(e0, ce0, intra_tensors, false).map(|(n, _)| n)?;
+        let (e0_intra_out_callee, e0_intra_out_tensor) =
+            find_single_intra_param(e0, ce0, intra_tensors, true)?;
+        let (r1_out_param, _) = find_single_intra_param(r1, c1, intra_tensors, true)?;
+
+        let e1_intra_ins: Vec<(String, String)> = ce1
+            .params
+            .iter()
+            .filter(|p| !p.is_output)
+            .filter_map(|p| {
+                e1.input_bindings
+                    .iter()
+                    .find(|(n, _)| n == &p.name)
+                    .and_then(|(_, s)| slot_ref_name(s))
+                    .filter(|t| intra_tensors.contains(t))
+                    .map(|t| (p.name.clone(), t))
+            })
+            .collect();
+        if e1_intra_ins.len() != 2 {
+            return tl();
+        }
+        let e1_intra_in_r1 =
+            e1_intra_ins.iter().find(|(_, t)| t != &e0_intra_out_tensor)?.0.clone();
+        let e1_intra_in_e0 =
+            e1_intra_ins.iter().find(|(_, t)| t == &e0_intra_out_tensor)?.0.clone();
+
+        // Build host kernel.
+        let mut ctx = SynthesisCtx::new(kernel_name, KernelMode::Reduction, dtype, intra_tensors);
+
+        // Clone R0 body.
+        let r0_renames = ctx.bind_callee(r0, c0, Some(&r0_out_param), false, "n0", None)?.renames;
+        clone_callee_into_host(&mut ctx.host, c0, &r0_renames);
+
+        // Register E0 params (injected later inside R1's if-block for C++ scope).
+        let e0_renames = ctx.bind_callee(e0, ce0, None, true, "n1", None)?.renames;
+
+        // Collect R0's stores, capture gate VIDs, remove stores.
+        use metaltile_core::ir::IndexExpr;
+        let mut r0_stores: Vec<(BlockId, usize, IndexExpr, ValueId)> =
+            collect_stores_to_param(&ctx.host, &r0_out_param);
+        r0_stores.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(b.0.as_u32().cmp(&a.0.as_u32())));
+        let gate_vids: Vec<ValueId> =
+            r0_stores.iter().map(|(_, _, _, v)| trace_through_cast(*v, &ctx.host)).collect();
+        for (bid, store_idx, ..) in &r0_stores {
+            let block = if *bid == ctx.host.body.id {
+                &mut ctx.host.body
+            } else {
+                ctx.host.blocks.get_mut(bid)?
+            };
+            block.ops.remove(*store_idx);
+            block.results.remove(*store_idx);
+        }
+
+        // Clone R1 body with collision-avoidance renaming.
+        let r1_renames = ctx.bind_callee(r1, c1, Some(&r1_out_param), false, "nr1", None)?.renames;
+        let body_ops_before_r1 = ctx.host.body.ops.len();
+        let blocks_before_r1: HashSet<BlockId> = ctx.host.blocks.keys().cloned().collect();
+        let existing_tg_allocs: HashSet<String> = ctx
+            .host
+            .body
+            .ops
+            .iter()
+            .chain(ctx.host.blocks.values().flat_map(|b| b.ops.iter()))
+            .filter_map(|op| {
+                if let Op::ThreadgroupAlloc { name, .. } = op { Some(name.clone()) } else { None }
+            })
+            .collect();
+        clone_callee_into_host(&mut ctx.host, c1, &r1_renames);
+
+        let rename_r1_op = |op: &mut Op| match op {
+            Op::DeclareLocal { name, .. } | Op::SetLocal { name, .. } => name.push_str("_r1"),
+            Op::Load { src, .. } if src.starts_with("__ml_") => src.push_str("_r1"),
+            Op::ThreadgroupAlloc { name, .. }
+            | Op::ThreadgroupLoad { name, .. }
+            | Op::ThreadgroupStore { name, .. }
+                if existing_tg_allocs.contains(name.as_str()) =>
+                name.push_str("_r1"),
+            _ => {},
+        };
+        for op in ctx.host.body.ops[body_ops_before_r1..].iter_mut() {
+            rename_r1_op(op);
+        }
+        for (&bid, block) in ctx.host.blocks.iter_mut() {
+            if !blocks_before_r1.contains(&bid) {
+                for op in block.ops.iter_mut() {
+                    rename_r1_op(op);
+                }
+            }
+        }
+
+        // Inject E0+E1 at each of R1's store sites.
+        let e1_renames = ctx.bind_callee(e1, ce1, None, true, "n2", None)?.renames;
+        let mut next_vid = kernel_max_vid(&ctx.host) + 1;
+        let mut r1_stores: Vec<(BlockId, usize, IndexExpr, ValueId)> =
+            collect_stores_to_param(&ctx.host, &r1_out_param);
+        r1_stores.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(b.0.as_u32().cmp(&a.0.as_u32())));
+
+        for (i, (bid, store_idx, row_idx, r1_vid)) in r1_stores.iter().enumerate() {
+            let (bid, store_idx, row_idx, r1_vid) = (*bid, *store_idx, row_idx.clone(), *r1_vid);
+
+            let (e0_ops, silu_vid) = if let Some(&gate_vid) = gate_vids.get(i) {
+                let mut subs = HashMap::new();
+                subs.insert(e0_intra_in.clone(), gate_vid);
+                inline_row(
+                    ce0,
+                    &row_idx,
+                    &subs,
+                    &e0_renames,
+                    &mut next_vid,
+                    Some(&e0_intra_out_callee),
+                )
+            } else {
+                (Vec::new(), None)
+            };
+
+            let mut e1_subs = HashMap::new();
+            e1_subs.insert(e1_intra_in_r1.clone(), r1_vid);
+            if let Some(sv) = silu_vid {
+                e1_subs.insert(e1_intra_in_e0.clone(), sv);
+            }
+            let (e1_ops, _) = inline_row(ce1, &row_idx, &e1_subs, &e1_renames, &mut next_vid, None);
+
+            let block = if bid == ctx.host.body.id {
+                &mut ctx.host.body
+            } else {
+                ctx.host.blocks.get_mut(&bid)?
+            };
+            block.ops.remove(store_idx);
+            block.results.remove(store_idx);
+            for (j, (op, res)) in e0_ops.into_iter().chain(e1_ops).enumerate() {
+                block.ops.insert(store_idx + j, op);
+                block.results.insert(store_idx + j, res);
+            }
+        }
+
+        debug!("fuse group {group_id}: diamond synthesis (4 nodes → 1, num_rows={num_rows})");
+        let fused_grid = GridSpec::Reduction { num_rows, threads_per_group: tpg };
+        return ctx.finish(group_id, kernel_name, KernelMode::Reduction, fused_grid);
+    }
+
+    // ── Linear path (Pattern 1 generalized): 1 root + N-1 followers ─────
+    try_linear(group_nodes, group_cached, intra_tensors, dtype, group_id, kernel_name)
+}
+
+fn try_linear(
+    group_nodes: &[&DispatchNode],
+    group_cached: &[&Kernel],
+    intra_tensors: &HashSet<String>,
+    dtype: DType,
+    group_id: usize,
+    kernel_name: &'static str,
+) -> Option<(DispatchNode, Kernel)> {
     let (r_node, r_callee) = (group_nodes[0], group_cached[0]);
 
-    // First node: Reduction OR any-shape Grid3D (e.g. rope_llama with grid_y=half_dim).
     let (num_rows, r_fused_mode, r_fused_grid) = match (&r_node.mode, &r_node.grid) {
         (KernelMode::Reduction, GridSpec::Reduction { num_rows, threads_per_group }) =>
             (*num_rows, KernelMode::Reduction, GridSpec::Reduction {
@@ -1661,16 +1185,12 @@ fn synthesize_pattern1(
         return None;
     }
 
-    // Single intra output of the first node — the tensor flowing into node[1].
     let r_out_param =
-        find_single_intra_output_param(r_node, r_callee, intra_tensors).map(|(name, _)| name)?;
+        find_single_intra_param(r_node, r_callee, intra_tensors, true).map(|(name, _)| name)?;
 
-    // ── Build host kernel via SynthesisCtx ───────────────────────────────────
-
-    let kernel_name: &'static str = Box::leak(format!("fused_group_{group_id}").into_boxed_str());
-    let mut ctx = SynthesisCtx::new(kernel_name, r_fused_mode.clone(), dtype, intra_tensors);
-
-    let r_renames = ctx.bind_callee(r_node, r_callee, Some(&r_out_param), false, "n0")?;
+    let mut ctx = SynthesisCtx::new(kernel_name, r_fused_mode, dtype, intra_tensors);
+    let r_renames =
+        ctx.bind_callee(r_node, r_callee, Some(&r_out_param), false, "n0", None)?.renames;
     clone_callee_into_host(&mut ctx.host, r_callee, &r_renames);
 
     let mut current_intra_store = r_out_param;
@@ -1680,11 +1200,10 @@ fn synthesize_pattern1(
         group_nodes[1..].iter().zip(group_cached[1..].iter()).enumerate()
     {
         let node_prefix = format!("n{}", ei + 1);
-        let e_intra_in = find_single_intra_input_param(e_node, e_callee, intra_tensors)?;
-        let e_renames = ctx.bind_callee(e_node, e_callee, None, true, &node_prefix)?;
+        let e_intra_in =
+            find_single_intra_param(e_node, e_callee, intra_tensors, false).map(|(n, _)| n)?;
+        let e_renames = ctx.bind_callee(e_node, e_callee, None, true, &node_prefix, None)?.renames;
 
-        // If this epilogue has an intra output, track its callee param name for the
-        // next iteration (inject_elementwise_epilogue will look for stores to it).
         let next_intra = e_callee
             .params
             .iter()
@@ -1717,117 +1236,115 @@ fn synthesize_pattern1(
     }
 
     debug!(
-        "fuse group {group_id}: Pattern 1 {} direct IR synthesis ({} nodes → 1, num_rows={num_rows})",
+        "fuse group {group_id}: linear {} direct IR synthesis ({} nodes → 1)",
         if matches!(r_node.mode, KernelMode::Grid3D) { "Grid3D→…" } else { "R→…" },
         group_nodes.len(),
     );
 
     ctx.finish(group_id, kernel_name, r_fused_mode, r_fused_grid)
 }
+fn find_single_intra_param(
+    node: &DispatchNode,
+    callee: &Kernel,
+    intra_tensors: &HashSet<String>,
+    is_output: bool,
+) -> Option<(String, String)> {
+    let bindings = if is_output { &node.output_bindings } else { &node.input_bindings };
+    let matches: Vec<_> = callee
+        .params
+        .iter()
+        .filter(|p| p.is_output == is_output)
+        .filter(|p| {
+            bindings
+                .iter()
+                .find(|(n, _)| n == &p.name)
+                .and_then(|(_, slot)| slot_ref_name(slot))
+                .map(|t| intra_tensors.contains(&t))
+                .unwrap_or(false)
+        })
+        .collect();
+    if matches.len() != 1 {
+        return None;
+    }
+    let param = &matches[0];
+    let tensor_name = bindings
+        .iter()
+        .find(|(n, _)| n == &param.name)
+        .and_then(|(_, slot)| slot_ref_name(slot))?;
+    Some((param.name.clone(), tensor_name))
+}
 
-// ---------------------------------------------------------------------------
+#[allow(dead_code)]
+fn synthesize_pattern3(
+    group_nodes: &[&DispatchNode],
+    group_cached: &[&Kernel],
+    intra_tensors: &HashSet<String>,
+    dtype: DType,
+    group_id: usize,
+) -> Option<(DispatchNode, Kernel)> {
+    synthesize_via_ir(group_nodes, group_cached, intra_tensors, dtype, group_id)
+}
+
+fn synthesize_pattern1(
+    group_nodes: &[&DispatchNode],
+    group_cached: &[&Kernel],
+    intra_tensors: &HashSet<String>,
+    dtype: DType,
+    group_id: usize,
+) -> Option<(DispatchNode, Kernel)> {
+    synthesize_via_ir(group_nodes, group_cached, intra_tensors, dtype, group_id)
+}
+
 // Sub-pair decomposition — fallback when full-group synthesis fails
-// ---------------------------------------------------------------------------
 
-/// When a multi-node fuse group fails both Pattern 1 and Path B synthesis,
-/// attempt to find consecutive 2-node `(Reduction → Elementwise)` sub-pairs
-/// within the group and synthesize each pair independently via Pattern 1.
-///
-/// Returns `(local_start, local_end_exclusive, fused_node, fused_kernel)` for
-/// every sub-pair that synthesized successfully.  Pairs that fail are skipped;
-/// the nodes at those positions remain unchanged in the output of
-/// `apply_subpair_decomposition`.
-///
-/// This handles the `ffn_act` pattern:
-///
-/// ```text
-/// gemv_gate (R) → _gate → silu (E) → _gated ─┐
-///                                               └→ mul (E) → _combined
-/// gemv_up   (R) ─────────────────── → _up   ───┘
-/// ```
-///
-/// Pairs found: `(gemv_gate, silu)` and `(gemv_up, mul)` — each a valid
-/// 2-node R→E group. After synthesis both are fused via Pattern 1, reducing
-/// 4 dispatches to 2 per layer (×16 layers = 32 fewer dispatches/token).
-fn try_subpair_decomposition(
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn subpair_decomposition(
     group_nodes: &[&DispatchNode],
     group_cached: &[&Kernel],
     node_indices: &[usize],
     writes: &HashMap<String, Vec<usize>>,
     reads: &HashMap<String, Vec<usize>>,
+    intermediate_outputs: &[Vec<(String, usize)>],
+    intermediate_inputs: &[Vec<String>],
+    orig_nodes: &[DispatchNode],
+    orig_cached: &[Kernel],
     dtype: DType,
     group_id: usize,
-) -> Vec<(usize, usize, DispatchNode, Kernel)> {
+) -> Option<(Vec<DispatchNode>, Vec<Kernel>, Vec<Vec<(String, usize)>>, Vec<Vec<String>>, usize)> {
     if group_nodes.len() < 2 {
-        return Vec::new();
+        return None;
     }
 
-    let mut results: Vec<(usize, usize, DispatchNode, Kernel)> = Vec::new();
+    // Phase 1: find synthesizable sub-pairs.
+    let mut pairs: Vec<(usize, usize, DispatchNode, Kernel)> = Vec::new();
     let mut local = 0usize;
-
     while local + 1 < group_nodes.len() {
-        let pair_nodes = [group_nodes[local], group_nodes[local + 1]];
-        let pair_cached = [group_cached[local], group_cached[local + 1]];
-        let pair_indices = [node_indices[local], node_indices[local + 1]];
+        let pn = [group_nodes[local], group_nodes[local + 1]];
+        let pc = [group_cached[local], group_cached[local + 1]];
+        let pi = [node_indices[local], node_indices[local + 1]];
+        let pair_intra = find_pure_intra_tensors(&pi, &HashMap::new(), writes, reads);
+        let sgid = group_id.saturating_mul(1000).saturating_add(local);
 
-        // Compute intra tensors scoped to this 2-node sub-pair.
-        let pair_intra = find_pure_intra_tensors(&pair_indices, &HashMap::new(), writes, reads);
+        let r = synthesize_pattern1(&pn, &pc, &pair_intra, dtype, sgid).or_else(|| {
+            let (fm, fg) = check_grid_compatibility(&pn)?;
+            build_fused_group(&pn, &pc, &pi, &pair_intra, dtype, fm, fg, sgid)
+        });
 
-        // Use a unique sub-group ID so kernel names don't collide.
-        let sub_group_id = group_id.saturating_mul(1000).saturating_add(local);
-
-        let pair_result =
-            synthesize_pattern1(&pair_nodes, &pair_cached, &pair_intra, dtype, sub_group_id)
-                .or_else(|| {
-                    let (fused_mode, fused_grid) = check_grid_compatibility(&pair_nodes)?;
-                    build_fused_group(
-                        &pair_nodes,
-                        &pair_cached,
-                        &pair_indices,
-                        &pair_intra,
-                        dtype,
-                        fused_mode,
-                        fused_grid,
-                        sub_group_id,
-                    )
-                });
-
-        if let Some((fused_node, fused_kernel)) = pair_result {
-            results.push((local, local + 2, fused_node, fused_kernel));
+        if let Some((fn_, fk)) = r {
+            pairs.push((local, local + 2, fn_, fk));
             local += 2;
         } else {
             local += 1;
         }
     }
 
-    results
-}
+    if pairs.is_empty() {
+        return None;
+    }
 
-/// Apply the results of `try_subpair_decomposition` to the node/kernel/tracking
-/// vecs.  Synthesized pairs are collapsed into one fused node each; the
-/// remaining nodes in the group are kept as-is.
-///
-/// Splices the group range `[start..end]` in place; adjusts `prefill_node_count`
-/// if any nodes before the boundary were removed.
-fn apply_subpair_decomposition(
-    subpairs: Vec<(usize, usize, DispatchNode, Kernel)>,
-    node_indices: &[usize],
-    nodes: &mut Vec<DispatchNode>,
-    cached_kernels: &mut Vec<Kernel>,
-    intermediate_outputs: &mut Vec<Vec<(String, usize)>>,
-    intermediate_inputs: &mut Vec<Vec<String>>,
-    writes: &HashMap<String, Vec<usize>>,
-    reads: &HashMap<String, Vec<usize>>,
-    prefill_node_count: &mut usize,
-    group_id: usize,
-) {
-    // Build the replacement sequence for the group's global range.
-    // For positions covered by a synthesized pair, emit the fused node.
-    // For all other positions, clone the original node.
-
-    // Map local_start → (local_end, fused_node, fused_kernel).
+    // Phase 2: build replacement sequences.
     let mut pair_map: HashMap<usize, (usize, DispatchNode, Kernel)> =
-        subpairs.into_iter().map(|(ls, le, n, k)| (ls, (le, n, k))).collect();
+        pairs.into_iter().map(|(ls, le, n, k)| (ls, (le, n, k))).collect();
 
     let mut repl_nodes: Vec<DispatchNode> = Vec::new();
     let mut repl_kernels: Vec<Kernel> = Vec::new();
@@ -1836,73 +1353,54 @@ fn apply_subpair_decomposition(
 
     let mut local = 0usize;
     while local < node_indices.len() {
-        if let Some((le, fused_node, fused_kernel)) = pair_map.remove(&local) {
-            // Synthesized sub-pair: compute scoped intra tensors for tracking.
-            let sp_indices = &node_indices[local..le];
-            let sp_intra = find_pure_intra_tensors(sp_indices, &HashMap::new(), writes, reads);
-
-            let fi_out: Vec<(String, usize)> = {
-                let mut seen = HashSet::new();
+        if let Some((le, fn_, fk)) = pair_map.remove(&local) {
+            let si = &node_indices[local..le];
+            let sp_intra = find_pure_intra_tensors(si, &HashMap::new(), writes, reads);
+            let fi_out: Vec<_> = {
+                let mut s = HashSet::new();
                 (local..le)
                     .flat_map(|j| intermediate_outputs[node_indices[j]].iter().cloned())
-                    .filter(|(name, _)| !sp_intra.contains(name.as_str()))
-                    .filter(|(name, _)| seen.insert(name.clone()))
+                    .filter(|(n, _)| !sp_intra.contains(n.as_str()) && s.insert(n.clone()))
                     .collect()
             };
-            let fi_in: Vec<String> = {
-                let mut seen = HashSet::new();
+            let fi_in: Vec<_> = {
+                let mut s = HashSet::new();
                 (local..le)
                     .flat_map(|j| intermediate_inputs[node_indices[j]].iter().cloned())
-                    .filter(|name| !sp_intra.contains(name.as_str()))
-                    .filter(|name| seen.insert(name.clone()))
+                    .filter(|n| !sp_intra.contains(n.as_str()) && s.insert(n.clone()))
                     .collect()
             };
-
-            repl_nodes.push(fused_node);
-            repl_kernels.push(fused_kernel);
+            repl_nodes.push(fn_);
+            repl_kernels.push(fk);
             repl_int_out.push(fi_out);
             repl_int_in.push(fi_in);
             local = le;
         } else {
-            // Unsynthesized node: keep as-is.
             let ni = node_indices[local];
-            repl_nodes.push(nodes[ni].clone());
-            repl_kernels.push(cached_kernels[ni].clone());
+            repl_nodes.push(orig_nodes[ni].clone());
+            repl_kernels.push(orig_cached[ni].clone());
             repl_int_out.push(intermediate_outputs[ni].clone());
             repl_int_in.push(intermediate_inputs[ni].clone());
             local += 1;
         }
     }
 
-    let n_fused_pairs = repl_nodes.iter().filter(|n| n.label.starts_with("fused.group.")).count();
+    let n_fused = repl_nodes.iter().filter(|n| n.label.starts_with("fused.group.")).count();
     debug!(
-        "fuse group {group_id}: sub-pair decomposition → {} synthesized pairs, {} nodes total",
-        n_fused_pairs,
-        repl_nodes.len(),
+        "fuse group {group_id}: sub-pair decomposition → {n_fused} synthesized pairs, {} nodes total",
+        repl_nodes.len()
     );
 
-    let start = node_indices[0];
-    let end = *node_indices.last().unwrap() + 1;
-    let n_removed = (end - start) - repl_nodes.len();
-
-    if start < *prefill_node_count {
-        let removed_before = n_removed.min(*prefill_node_count - start);
-        *prefill_node_count -= removed_before;
-    }
-
-    nodes.splice(start..end, repl_nodes);
-    cached_kernels.splice(start..end, repl_kernels);
-    intermediate_outputs.splice(start..end, repl_int_out);
-    intermediate_inputs.splice(start..end, repl_int_in);
+    let n_removed = (node_indices.last().unwrap() + 1 - node_indices[0]) - repl_nodes.len();
+    Some((repl_nodes, repl_kernels, repl_int_out, repl_int_in, n_removed))
 }
-
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
-    use metaltile_core::{DType, ir::{BinOpKind, IndexExpr, KernelMode, VarId}};
+    use metaltile_core::{
+        DType,
+        ir::{BinOpKind, IndexExpr, KernelMode, VarId},
+    };
     use metaltile_runtime::context::GridSpec;
 
     use super::*;
@@ -2035,7 +1533,9 @@ mod tests {
         let loop_var_in_clone = host.blocks.values().any(|blk| {
             blk.ops.iter().any(|op| {
                 if let Op::Load { indices, .. } = op {
-                    indices.iter().any(|ix| matches!(ix, IndexExpr::Value(v) if v.as_u32() == LOOP_VAR_VID))
+                    indices
+                        .iter()
+                        .any(|ix| matches!(ix, IndexExpr::Value(v) if v.as_u32() == LOOP_VAR_VID))
                 } else {
                     false
                 }
@@ -2048,16 +1548,17 @@ mod tests {
 
         // Verify the WRONG (shifted) VID does NOT appear.
         let shifted = LOOP_VAR_VID + vid_offset;
-        let shifted_in_clone =
-            host.blocks.values().chain(std::iter::once(&host.body)).any(|blk| {
-                blk.ops.iter().any(|op| {
-                    if let Op::Load { indices, .. } = op {
-                        indices.iter().any(|ix| matches!(ix, IndexExpr::Value(v) if v.as_u32() == shifted))
-                    } else {
-                        false
-                    }
-                })
-            });
+        let shifted_in_clone = host.blocks.values().chain(std::iter::once(&host.body)).any(|blk| {
+            blk.ops.iter().any(|op| {
+                if let Op::Load { indices, .. } = op {
+                    indices
+                        .iter()
+                        .any(|ix| matches!(ix, IndexExpr::Value(v) if v.as_u32() == shifted))
+                } else {
+                    false
+                }
+            })
+        });
         assert!(
             !shifted_in_clone,
             "shifted loop-var VID 0x{shifted:08x} must NOT appear (would cause 'undeclared identifier' in MSL)"
@@ -2068,7 +1569,7 @@ mod tests {
     fn check_grid_compat_all_reduction_same_dims() {
         let n0 = make_reduction_node("a", vec![], vec![], vec![], 1024, 256, None);
         let n1 = make_reduction_node("b", vec![], vec![], vec![], 1024, 256, None);
-        let result = check_grid_compatibility(&[&&n0, &&n1]);
+        let result = check_grid_compatibility(&[&n0, &n1]);
         assert!(result.is_some());
         let (mode, grid) = result.unwrap();
         assert_eq!(mode, KernelMode::Reduction);
@@ -2079,7 +1580,7 @@ mod tests {
     fn check_grid_compat_mixed_ok() {
         let r = make_reduction_node("r", vec![], vec![], vec![], 512, 256, None);
         let e = make_elementwise_node("e", vec![], vec![], 512, None);
-        let result = check_grid_compatibility(&[&&r, &&e]);
+        let result = check_grid_compatibility(&[&r, &e]);
         assert!(result.is_some());
         let (mode, _) = result.unwrap();
         assert_eq!(mode, KernelMode::Reduction); // Reduction wins
@@ -2089,14 +1590,14 @@ mod tests {
     fn check_grid_compat_mixed_mismatch() {
         let r = make_reduction_node("r", vec![], vec![], vec![], 512, 256, None);
         let e = make_elementwise_node("e", vec![], vec![], 256, None); // different n
-        assert!(check_grid_compatibility(&[&&r, &&e]).is_none());
+        assert!(check_grid_compatibility(&[&r, &e]).is_none());
     }
 
     #[test]
     fn check_grid_compat_mismatched_reduction_rows() {
         let n0 = make_reduction_node("a", vec![], vec![], vec![], 512, 256, None);
         let n1 = make_reduction_node("b", vec![], vec![], vec![], 1024, 256, None);
-        assert!(check_grid_compatibility(&[&&n0, &&n1]).is_none());
+        assert!(check_grid_compatibility(&[&n0, &n1]).is_none());
     }
 
     #[test]
@@ -2224,12 +1725,22 @@ mod tests {
         k.body.push_op(Op::ProgramId { axis: 0 }, pid);
         let val_a = ValueId::new(1);
         k.body.push_op(
-            Op::Load { src: "a".to_string(), indices: vec![IndexExpr::Value(pid)], mask: None, other: None },
+            Op::Load {
+                src: "a".to_string(),
+                indices: vec![IndexExpr::Value(pid)],
+                mask: None,
+                other: None,
+            },
             val_a,
         );
         let val_b = ValueId::new(2);
         k.body.push_op(
-            Op::Load { src: "b".to_string(), indices: vec![IndexExpr::Value(pid)], mask: None, other: None },
+            Op::Load {
+                src: "b".to_string(),
+                indices: vec![IndexExpr::Value(pid)],
+                mask: None,
+                other: None,
+            },
             val_b,
         );
         let val_sum = ValueId::new(3);
@@ -2265,9 +1776,7 @@ mod tests {
                 ("mat".to_string(), SlotRef::Weight("layers.0.attn.o_proj".to_string())),
                 ("vec_in".to_string(), SlotRef::Weight("_attn_out".to_string())),
             ],
-            output_bindings: vec![
-                ("out".to_string(), SlotRef::Weight("_o_proj".to_string())),
-            ],
+            output_bindings: vec![("out".to_string(), SlotRef::Weight("_o_proj".to_string()))],
             cexprs: vec![
                 ("k".to_string(), ConstexprValue::Static(HIDDEN_DIM as u32)),
                 ("rows".to_string(), ConstexprValue::Static(NUM_ROWS as u32)),
@@ -2287,9 +1796,7 @@ mod tests {
                 ("a".to_string(), SlotRef::Weight("_o_proj".to_string())),
                 ("b".to_string(), SlotRef::Weight("_residual".to_string())),
             ],
-            output_bindings: vec![
-                ("c".to_string(), SlotRef::Weight("_post_attn".to_string())),
-            ],
+            output_bindings: vec![("c".to_string(), SlotRef::Weight("_post_attn".to_string()))],
             cexprs: vec![],
             grid: GridSpec::Elementwise { n: HIDDEN_DIM },
             dtype: DType::F32,
@@ -2300,7 +1807,13 @@ mod tests {
         // _o_proj is pure intra: written by r_node, read only by e_node.
         let intra: HashSet<String> = ["_o_proj".to_string()].into_iter().collect();
 
-        let result = synthesize_pattern1(&[&r_node, &e_node], &[&r_kernel, &e_kernel], &intra, DType::F32, 0);
+        let result = synthesize_pattern1(
+            &[&r_node, &e_node],
+            &[&r_kernel, &e_kernel],
+            &intra,
+            DType::F32,
+            0,
+        );
         assert!(result.is_some(), "Pattern 1 should synthesize R(1024)→E(4096)");
 
         let (fused_node, fused_kernel) = result.unwrap();
@@ -2308,7 +1821,10 @@ mod tests {
         // Fused node inherits the Reduction grid.
         assert_eq!(fused_node.mode, KernelMode::Reduction);
         assert!(
-            matches!(fused_node.grid, GridSpec::Reduction { num_rows: NUM_ROWS, threads_per_group: 256 }),
+            matches!(fused_node.grid, GridSpec::Reduction {
+                num_rows: NUM_ROWS,
+                threads_per_group: 256
+            }),
             "fused node must keep the Reduction grid"
         );
         assert_eq!(fused_node.fuse_group, None);
@@ -2338,9 +1854,12 @@ mod tests {
         assert_eq!(fused_kernel.mode, KernelMode::Reduction);
 
         // No store to the intra param original name ("out") should remain.
-        let stores_to_out = fused_kernel.body.ops.iter().filter(|op| {
-            matches!(op, Op::Store { dst, .. } if dst == "out")
-        }).count();
+        let stores_to_out = fused_kernel
+            .body
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Store { dst, .. } if dst == "out"))
+            .count();
         assert_eq!(stores_to_out, 0, "intra stores to 'out' must be replaced by epilogue");
 
         // The epilogue store to the external output must be present.
@@ -2351,7 +1870,10 @@ mod tests {
                 false
             }
         });
-        assert!(has_epilogue_store, "fused kernel must contain the epilogue store to the external output");
+        assert!(
+            has_epilogue_store,
+            "fused kernel must contain the epilogue store to the external output"
+        );
     }
 
     #[test]
@@ -2399,8 +1921,13 @@ mod tests {
         };
 
         let intra: HashSet<String> = ["_y".to_string()].into_iter().collect();
-        let result =
-            synthesize_pattern1(&[&r_node, &e_node], &[&r_kernel, &e_kernel], &intra, DType::F32, 1);
+        let result = synthesize_pattern1(
+            &[&r_node, &e_node],
+            &[&r_kernel, &e_kernel],
+            &intra,
+            DType::F32,
+            1,
+        );
         assert!(result.is_some(), "n == num_rows (ratio=1) must be synthesized by Pattern 1");
         let (fused_node, _) = result.unwrap();
         assert_eq!(fused_node.mode, KernelMode::Reduction);
@@ -2443,7 +1970,7 @@ mod tests {
             kernel_ir: fused_kernel_placeholder,
             mode: KernelMode::Elementwise,
             input_bindings: vec![
-                ("a".to_string(), SlotRef::Weight("_y".to_string())),   // intra from R
+                ("a".to_string(), SlotRef::Weight("_y".to_string())), // intra from R
                 ("b".to_string(), SlotRef::Weight("_ext1".to_string())),
             ],
             output_bindings: vec![("c".to_string(), SlotRef::Weight("_mid".to_string()))],
@@ -2459,7 +1986,7 @@ mod tests {
             kernel_ir: fused_kernel_placeholder,
             mode: KernelMode::Elementwise,
             input_bindings: vec![
-                ("a".to_string(), SlotRef::Weight("_mid".to_string())),  // intra from E1
+                ("a".to_string(), SlotRef::Weight("_mid".to_string())), // intra from E1
                 ("b".to_string(), SlotRef::Weight("_ext2".to_string())),
             ],
             output_bindings: vec![("c".to_string(), SlotRef::Weight("_final".to_string()))],
@@ -2471,8 +1998,7 @@ mod tests {
         };
 
         // Both _y (R→E1) and _mid (E1→E2) are intra.
-        let intra: HashSet<String> =
-            ["_y".to_string(), "_mid".to_string()].into_iter().collect();
+        let intra: HashSet<String> = ["_y".to_string(), "_mid".to_string()].into_iter().collect();
 
         let result = synthesize_pattern1(
             &[&r_node, &e1_node, &e2_node],
@@ -2512,8 +2038,12 @@ mod tests {
         assert!(in_tensors.contains(&"_ext2"), "must expose _ext2");
 
         // No stores to the intra param names should remain in the fused kernel.
-        let stores_to_y =
-            fused_kernel.body.ops.iter().filter(|op| matches!(op, Op::Store { dst, .. } if dst == "out")).count();
+        let stores_to_y = fused_kernel
+            .body
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Store { dst, .. } if dst == "out"))
+            .count();
         assert_eq!(stores_to_y, 0, "all intra stores to 'out' (R's param) must be replaced");
     }
 
@@ -2566,7 +2096,13 @@ mod tests {
         };
 
         let intra: HashSet<String> = ["_intra".to_string()].into_iter().collect();
-        let result = synthesize_pattern1(&[&r_node, &e_node], &[&r_kernel, &e_kernel], &intra, DType::F32, 2);
+        let result = synthesize_pattern1(
+            &[&r_node, &e_node],
+            &[&r_kernel, &e_kernel],
+            &intra,
+            DType::F32,
+            2,
+        );
         assert!(result.is_none(), "non-flat elementwise callee must be rejected by Pattern 1");
     }
 
@@ -2668,8 +2204,13 @@ mod tests {
             },
             down_proj, // reads _combined → keeps it non-intra
         ];
-        let mut cached_kernels =
-            vec![gemv_gate_kernel, silu_kernel, gemv_up_kernel, mul_kernel, make_gemv_reduction_kernel()];
+        let mut cached_kernels = vec![
+            gemv_gate_kernel,
+            silu_kernel,
+            gemv_up_kernel,
+            mul_kernel,
+            make_gemv_reduction_kernel(),
+        ];
         let mut int_out: Vec<Vec<(String, usize)>> = vec![
             vec![("_gate".to_string(), 0)],
             vec![("_gated".to_string(), 1)],
@@ -2687,8 +2228,12 @@ mod tests {
         let mut prefill_count = 5usize;
 
         synthesize_fuse_groups(
-            &mut nodes, &mut cached_kernels, &mut int_out, &mut int_in,
-            &mut prefill_count, DType::F32,
+            &mut nodes,
+            &mut cached_kernels,
+            &mut int_out,
+            &mut int_in,
+            &mut prefill_count,
+            DType::F32,
         );
 
         // 4 group nodes → 1 fused node by Pattern 3; downstream node stays → 2 total.
@@ -2705,7 +2250,10 @@ mod tests {
 
         // _combined is the fused group output (down_proj reads it externally).
         let node0_names: Vec<String> = int_out[0].iter().map(|(n, _)| n.clone()).collect();
-        assert!(node0_names.contains(&"_combined".to_string()), "_combined in fused outputs: {node0_names:?}");
+        assert!(
+            node0_names.contains(&"_combined".to_string()),
+            "_combined in fused outputs: {node0_names:?}"
+        );
     }
 
     #[test]
@@ -2831,15 +2379,16 @@ mod tests {
         let group_nodes = [&r0_node, &e0_node, &r1_node, &e1_node];
         let group_cached = [&r_kernel, &e_kernel, &r_kernel, &e_kernel];
 
-        let result = synthesize_pattern3(
-            &group_nodes, &group_cached, &intra, DType::F32, 0,
-        );
+        let result = synthesize_pattern3(&group_nodes, &group_cached, &intra, DType::F32, 0);
         assert!(result.is_some(), "Pattern 3 should synthesize 4-node diamond");
 
         let (fused_node, fused_kernel) = result.unwrap();
         assert_eq!(fused_node.mode, KernelMode::Reduction);
         assert!(
-            matches!(fused_node.grid, GridSpec::Reduction { num_rows: NUM_ROWS, threads_per_group: 256 }),
+            matches!(fused_node.grid, GridSpec::Reduction {
+                num_rows: NUM_ROWS,
+                threads_per_group: 256
+            }),
             "fused node keeps Reduction grid"
         );
 
@@ -2849,7 +2398,10 @@ mod tests {
             .iter()
             .filter_map(|(_, s)| if let SlotRef::Weight(n) = s { Some(n.as_str()) } else { None })
             .collect();
-        assert!(out_tensors.contains(&"_combined"), "output must include _combined: {out_tensors:?}");
+        assert!(
+            out_tensors.contains(&"_combined"),
+            "output must include _combined: {out_tensors:?}"
+        );
         assert!(!out_tensors.contains(&"_gate"), "_gate must be intra-eliminated");
         assert!(!out_tensors.contains(&"_gated"), "_gated must be intra-eliminated");
         assert!(!out_tensors.contains(&"_up"), "_up must be intra-eliminated");
