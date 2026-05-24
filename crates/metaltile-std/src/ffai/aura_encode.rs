@@ -76,13 +76,14 @@ macro_rules! aura_encode_kernel {
         // production, f32 in tests). All internal math runs in f32 —
         // we cast at the load. Everything else stays f32-only because
         // rotation, codebook, and norm-correction need the precision.
+        #[rustfmt::skip]
         #[bench_kernel(
-                    op="aura",
-                    subop=$subop,
-                    class=GenericEmpty,
-                    tol=0.0,
-                    kernel_mode=Reduction,
-                )]
+                                            op="aura",
+                                            subop=$subop,
+                                            class=GenericEmpty,
+                                            tol=0.0,
+                                            kernel_mode=Reduction,
+                                        )]
         #[kernel]
         pub fn $name<T>(
             input: Tensor<T>,

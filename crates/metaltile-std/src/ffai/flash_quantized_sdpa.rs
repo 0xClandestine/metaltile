@@ -64,13 +64,14 @@ use metaltile::{bench_kernel, kernel};
 
 macro_rules! flash_quantized_sdpa_kernel {
     ($name:ident, $bits:literal, $dim:literal, $dims_per_lane:literal, $subop:literal) => {
+        #[rustfmt::skip]
         #[bench_kernel(
-                    op="flash_quantized_sdpa",
-                    subop=$subop,
-                    class=GenericEmpty,
-                    tol=1e-3,
-                    kernel_mode=Grid3D,
-                )]
+                                            op="flash_quantized_sdpa",
+                                            subop=$subop,
+                                            class=GenericEmpty,
+                                            tol=1e-3,
+                                            kernel_mode=Grid3D,
+                                        )]
         #[kernel]
         pub fn $name<T>(
             queries: Tensor<T>,
@@ -208,13 +209,14 @@ flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b8_d512, 8u32, 512u32, 16u32, 
 
 macro_rules! flash_quantized_sdpa_bool_mask_kernel {
     ($name:ident, $bits:literal, $dim:literal, $dims_per_lane:literal, $subop:literal) => {
+        #[rustfmt::skip]
         #[bench_kernel(
-                    op="flash_quantized_sdpa",
-                    subop=$subop,
-                    class=GenericEmpty,
-                    tol=1e-3,
-                    kernel_mode=Grid3D,
-                )]
+                                            op="flash_quantized_sdpa",
+                                            subop=$subop,
+                                            class=GenericEmpty,
+                                            tol=1e-3,
+                                            kernel_mode=Grid3D,
+                                        )]
         #[kernel]
         pub fn $name<T>(
             queries: Tensor<T>,
@@ -376,13 +378,14 @@ flash_quantized_sdpa_bool_mask_kernel!(
 
 macro_rules! flash_quantized_sdpa_float_mask_kernel {
     ($name:ident, $bits:literal, $dim:literal, $dims_per_lane:literal, $subop:literal) => {
+        #[rustfmt::skip]
         #[bench_kernel(
-                    op="flash_quantized_sdpa",
-                    subop=$subop,
-                    class=GenericEmpty,
-                    tol=1e-3,
-                    kernel_mode=Grid3D,
-                )]
+                                            op="flash_quantized_sdpa",
+                                            subop=$subop,
+                                            class=GenericEmpty,
+                                            tol=1e-3,
+                                            kernel_mode=Grid3D,
+                                        )]
         #[kernel]
         pub fn $name<T>(
             queries: Tensor<T>,

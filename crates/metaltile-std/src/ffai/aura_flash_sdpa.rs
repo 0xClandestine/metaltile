@@ -52,13 +52,14 @@ macro_rules! aura_flash_sdpa_kernel {
         $dims_per_lane:literal,
         $subop:literal
     ) => {
+        #[rustfmt::skip]
         #[bench_kernel(
-                    op="aura",
-                    subop=$subop,
-                    class=GenericEmpty,
-                    tol=1e-3,
-                    kernel_mode=Grid3D,
-                )]
+                                            op="aura",
+                                            subop=$subop,
+                                            class=GenericEmpty,
+                                            tol=1e-3,
+                                            kernel_mode=Grid3D,
+                                        )]
         #[kernel]
         pub fn $name<T>(
             q_rot: Tensor<f32>,
