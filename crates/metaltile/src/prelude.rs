@@ -3,7 +3,7 @@
 //! Import this module with `use metaltile::prelude::*;` in the same Rust module as your kernels.
 //! It provides:
 //!
-//! - facade macros: `#[kernel]`, `#[constexpr]`, `shape!`, and `tile!`
+//! - facade macros: `#[kernel]`, `#[constexpr]`, `#[scalar]`, `#[strided]`, `shape!`, and `tile!`
 //! - IR-facing helper types: [`ConstExpr`], [`DType`], [`Dim`], [`Shape`], [`KernelMode`], and
 //!   [`Context`]
 //! - placeholder syntax items such as [`Tensor`], [`program_id`], [`load`], and [`store`]
@@ -26,7 +26,7 @@ pub use metaltile_core::ir::KernelMode;
 /// Shape-building helpers used in tensor annotations.
 pub use metaltile_core::shape::{Dim, Shape, tile};
 /// Facade macros used in kernel signatures and bodies.
-pub use metaltile_macros::{constexpr, kernel, shape, tile};
+pub use metaltile_macros::{constexpr, kernel, scalar, shape, strided, tile};
 /// Runtime context used by generated `launch` helpers.
 pub use metaltile_runtime::Context;
 

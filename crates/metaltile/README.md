@@ -78,7 +78,7 @@ println!("{msl}");
 
 | Module | Purpose |
 |---|---|
-| `prelude` | Everything needed in a `#[kernel]` module: `Tensor`, DSL stubs, macros, core types |
+| `prelude` | Everything needed in a `#[kernel]` module: `Tensor`, DSL stubs, macros (`#[kernel]`, `#[constexpr]`, `#[scalar]`, `#[strided]`, `shape!`, `tile!`), core types, and runtime `Context` |
 | `codegen` | Re-export of `metaltile_codegen` — MSL generation and optimization passes |
 | `core` | Re-export of `metaltile_core` — IR types, DType, Shape, ConstExpr |
 
@@ -94,6 +94,8 @@ println!("{msl}");
 |---|---|---|
 | `#[kernel]` | attribute | Transforms a Rust function into IR + host-side `LaunchBuilder` |
 | `#[constexpr]` | attribute | Marks a kernel parameter as a compile-time constant |
+| `#[scalar]` | attribute | Marks a `Tensor` parameter for `constant T&` lowering in MSL |
+| `#[strided]` | attribute | Marks a `Tensor` parameter for strided lowering (shape + stride arrays emitted) |
 | `shape!(…)` | function-like | Constructs a `Shape` from dimension expressions |
 | `tile!(…)` | function-like | Constructs a 2D tile shape |
 
@@ -130,6 +132,8 @@ Directly accessible from `metaltile::`:
 | `metaltile::kernel` | `#[kernel]` proc-macro attribute |
 | `metaltile::bench_kernel` | `#[bench_kernel]` proc-macro attribute |
 | `metaltile::constexpr` | `#[constexpr]` proc-macro attribute |
+| `metaltile::scalar` | `#[scalar]` proc-macro attribute |
+| `metaltile::strided` | `#[strided]` proc-macro attribute |
 | `metaltile::shape` | `shape!` proc-macro |
 | `metaltile::tile` | `tile!` proc-macro |
 | `metaltile::codegen` | `metaltile_codegen` crate (MSL generator, optimization passes) |
@@ -149,7 +153,7 @@ Directly accessible from `metaltile::`:
 | Crate | Role in this crate |
 |---|---|
 | `metaltile-core` | Re-exported as `metaltile::core`; provides IR types and DType for the prelude |
-| `metaltile-macros` | Re-exported as individual proc macros (`kernel`, `bench_kernel`, `constexpr`, `shape`, `tile`) |
+| `metaltile-macros` | Re-exported as individual proc macros (`kernel`, `bench_kernel`, `constexpr`, `scalar`, `strided`, `shape`, `tile`) |
 | `metaltile-codegen` | Re-exported as `metaltile::codegen`; provides MSL generation for inspection |
 | `metaltile-runtime` | Re-exported as `Context`, `DispatchResult`, `MetalTileError`; provides GPU dispatch |
 
