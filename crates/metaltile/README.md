@@ -78,7 +78,7 @@ println!("{msl}");
 
 | Module | Purpose |
 |---|---|
-| `prelude` | Everything needed in a `#[kernel]` module: `Tensor`, DSL stubs, macros (`#[kernel]`, `#[constexpr]`, `#[scalar]`, `#[strided]`, `shape!`, `tile!`), core types, and runtime `Context` |
+| `prelude` | Comprehensive single import: `#[kernel]` DSL stubs, all IR types, all macros, runtime bindings, and codegen entry points — re-exports **everything** public from all sub-crates |
 | `codegen` | Re-export of `metaltile_codegen` — MSL generation and optimization passes |
 | `core` | Re-export of `metaltile_core` — IR types, DType, Shape, ConstExpr |
 
@@ -86,30 +86,81 @@ println!("{msl}");
 
 ### Prelude
 
-`use metaltile::prelude::*;` brings these into scope:
+`use metaltile::prelude::*;` brings **everything public from all sub-crates** into scope:
 
 **Macros (from `metaltile-macros`):**
 
 | Macro | Kind | What it does |
 |---|---|---|
 | `#[kernel]` | attribute | Transforms a Rust function into IR + host-side `LaunchBuilder` |
+| `#[bench_kernel]` | attribute | Registers a kernel for automatic benchmarking via `inventory::submit!` |
 | `#[constexpr]` | attribute | Marks a kernel parameter as a compile-time constant |
 | `#[scalar]` | attribute | Marks a `Tensor` parameter for `constant T&` lowering in MSL |
 | `#[strided]` | attribute | Marks a `Tensor` parameter for strided lowering (shape + stride arrays emitted) |
 | `shape!(…)` | function-like | Constructs a `Shape` from dimension expressions |
 | `tile!(…)` | function-like | Constructs a 2D tile shape |
 
-**Types (from `metaltile-core`):**
+**IR types (from `metaltile-core`):**
+
+| Type | Kind | Purpose |
+|---|---|---|
+| `Tensor<T, S>` | struct | Placeholder type for kernel signatures — zero-sized marker |
+| `DType` | enum | Numeric type: F32, F16, BF16, I32, U32, etc. |
+| `Shape` | struct | Compile-time dimension tracking |
+| `Dim` | enum | A single dimension: `Known`, `ConstExpr`, `Any` |
+| `DimExpr` | enum | Dimension expression for indexing |
+| `ConstExpr` | struct | Named compile-time constant |
+| `ConstExprValues` | struct | Resolved constexpr values for a kernel launch |
+| `Kernel` | struct | Complete kernel IR (params, body, blocks) |
+| `KernelMode` | enum | Dispatch shape hint: Elementwise, Reduction, Tile2D, SimdGroup2D, Grid3D |
+| `Op` | enum | A single IR operation (all variants) |
+| `Block` | struct | Basic block: sequence of ops |
+| `ValueId` | struct | Unique SSA value identifier |
+| `BlockId` | struct | Unique block identifier |
+| `VarId` | struct | Unique loop-variable identifier |
+| `Param` | struct | Kernel parameter metadata |
+| `TypedSlot` | struct | Typed hole for inline MSL |
+| `UnaryOpKind` | enum | Unary math: Exp, Log, Sqrt, Cos, Sin, etc. |
+| `BinOpKind` | enum | Binary math: Add, Sub, Mul, Max, Min, CmpLt, etc. |
+| `ActKind` | enum | Activation: Silu, Gelu, Relu, Tanh, Sigmoid |
+| `ReduceKind` | enum | Reduction: Sum, Max, Min, Mean, Product |
+| `AtomicKind` | enum | Atomic: Add, Max, Min, And, Or, Xor |
+| `AtomicScope` | enum | Memory scope: Device, Threadgroup |
+| `CoopTileScope` | enum | Execution scope: SimdGroup, Threadgroup |
+| `CoopTileAccMode` | enum | Accumulation: Overwrite, MultiplyAccumulate |
+| `IndexExpr` | enum | Index expression for loads/stores |
+| `KernelCallArg` | enum | Argument to a cross-kernel call |
+| `KernelEntry` | struct | Registry entry for cross-kernel inlining |
+| `Error` | enum | Core error type |
+| `GpuFamily` | enum | Apple GPU family (Apple7–Apple10) |
+| `IdCounter` | struct | Unique ID generator |
+
+**Runtime (from `metaltile-runtime`):**
 
 | Type | Purpose |
 |---|---|
-| `Tensor<T, S>` | Placeholder type for kernel signatures — zero-sized, carries element type and optional shape |
-| `DType` | Numeric type: F32, F16, BF16, I32, U32, etc. |
-| `Shape` | Compile-time dimension tracking |
-| `Dim` | A single dimension: `Known(usize)` or `ConstExpr(name)` |
-| `ConstExpr` | Named compile-time constant |
-| `KernelMode` | Dispatch shape hint: Elementwise, Reduction, Matmul |
 | `Context` | Metal GPU device and command queue |
+| `DispatchResult` | Output buffers after a kernel run |
+| `DispatchSpec` | Input buffer spec for the dispatch pipeline |
+| `ResidentBuffer` | A Metal buffer managed by the context |
+| `MetalTileError` | Top-level runtime error |
+
+| Function | Purpose |
+|---|---|
+| `start_gpu_trace()` | Start Xcode GPU frame capture |
+| `stop_gpu_trace()` | Stop Xcode GPU frame capture |
+
+**Codegen (from `metaltile-codegen`):**
+
+| Type | Purpose |
+|---|---|
+| `MslGenerator` | Converts kernel IR to Metal Shading Language |
+| `TileSchedule` | Codegen tile schedule configuration |
+| `CodegenError` | Codegen error type (aliased from `metaltile_codegen::Error`) |
+
+| Function | Purpose |
+|---|---|
+| `generator_for_mode(KernelMode)` | Select the right MSL generator for a kernel mode |
 
 **DSL function stubs (panic if called outside `#[kernel]`):**
 
