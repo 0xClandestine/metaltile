@@ -40,13 +40,8 @@
 //! Codegen-only; correctness pinned by
 //! `tests/aura_flash_sdpa_gpu_correctness.rs`.
 
-use metaltile::kernel;
-use metaltile_core::ir::KernelMode;
+use metaltile::{bench_kernel, kernel};
 
-use crate::{
-    bench_types::DType,
-    spec::{BenchDispatch, BenchSpec},
-};
 
 macro_rules! aura_flash_sdpa_kernel {
     (
@@ -58,6 +53,13 @@ macro_rules! aura_flash_sdpa_kernel {
         $dims_per_lane:literal,
         $subop:literal
     ) => {
+        #[bench_kernel(
+            op="aura",
+            subop=$subop,
+            class=GenericEmpty,
+            tol=1e-3,
+            kernel_mode=Grid3D,
+        )]
         #[kernel]
         pub fn $name<T>(
             q_rot: Tensor<f32>,
@@ -196,21 +198,6 @@ macro_rules! aura_flash_sdpa_kernel {
             }
         }
 
-        inventory::submit! {
-            BenchSpec {
-                op: "aura",
-                subop: $subop,
-                kernel_name: stringify!($name),
-                kernel_ir: $name::kernel_ir_for,
-                dtypes: &[DType::F32, DType::F16, DType::BF16],
-                tol: 1e-3,
-                mlx_src: None,
-                mlx_pattern: None,
-                shapes: &[],
-                dispatch: BenchDispatch::Generic,
-                kernel_mode: Some(KernelMode::Grid3D),
-            }
-        }
     };
 }
 

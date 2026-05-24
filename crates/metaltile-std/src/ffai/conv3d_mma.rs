@@ -51,21 +51,22 @@
 //!
 //! Codegen-only. Correctness validated by `conv3d_mma_gpu_correctness`.
 
-use metaltile::kernel;
-use metaltile_core::ir::KernelMode;
+use metaltile::{bench_kernel, kernel};
 
-use crate::{
-    bench_types::DType,
-    spec::{BenchDispatch, BenchSpec},
-};
 
-const ALL_FLOAT_DTYPES: &[DType] = &[DType::F32, DType::F16, DType::BF16];
 
 /// MMA-tiled 3D convolution (stride=1, dilation=1, pad=0).
 ///
 /// Grid `[out_ch/32, (batch*out_d*out_h*out_w)/32, 1]`, tpg = 128.
 ///
 /// Correctness pinned by `conv3d_mma_gpu_correctness`.
+#[bench_kernel(
+    op="conv3d",
+    subop="mma",
+    class=GenericEmpty,
+    tol=1e-3,
+    kernel_mode=Reduction,
+)]
 #[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn conv3d_mma<T>(
@@ -317,18 +318,3 @@ pub fn conv3d_mma<T>(
     );
 }
 
-inventory::submit! {
-    BenchSpec {
-        op: "conv3d",
-        subop: "mma",
-        kernel_name: "conv3d_mma",
-        kernel_ir: conv3d_mma::kernel_ir_for,
-        dtypes: ALL_FLOAT_DTYPES,
-        tol: 1e-3,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Reduction),
-    }
-}

@@ -39,14 +39,16 @@
 //! layout `[n_query, n_q_heads, head_dim]`. Online softmax runs in
 //! fp32 throughout (storage stays in T).
 
-use metaltile::kernel;
-use metaltile_core::ir::KernelMode;
+use metaltile::{bench_kernel, kernel};
 
-use crate::{
-    bench_types::DType,
-    spec::{BenchDispatch, BenchSpec},
-};
 
+#[bench_kernel(
+    op="sdpa",
+    subop="sdpa_multi",
+    class=GenericEmpty,
+    tol=1e-3,
+    kernel_mode=Reduction,
+)]
 #[kernel]
 pub fn ffai_sdpa_multi<T>(
     q: Tensor<T>,
@@ -192,18 +194,3 @@ pub fn ffai_sdpa_multi<T>(
     }
 }
 
-inventory::submit! {
-    BenchSpec {
-        op: "sdpa",
-        subop: "sdpa_multi",
-        kernel_name: "ffai_sdpa_multi",
-        kernel_ir: ffai_sdpa_multi::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 1e-3,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Reduction),
-    }
-}

@@ -5,13 +5,8 @@
 //! Codegen-only. End-to-end sampling correctness lives in FFAI's
 //! harness.
 
-use metaltile::kernel;
-use metaltile_core::ir::KernelMode;
+use metaltile::{bench_kernel, kernel};
 
-use crate::{
-    bench_types::DType,
-    spec::{BenchDispatch, BenchSpec},
-};
 
 // Tree reductions for the max-pass and sum-pass each fold 256 threadgroup
 // slots → 1 value across 8 power-of-two halving stages.  Originally
@@ -43,6 +38,13 @@ use crate::{
 // to find the exact index. The full-vocab serial walk (152K ops) is
 // replaced by 1 × n/lsize chunk-traverse per lane + an 8-stage scan +
 // 1 × n/lsize finalizing walk on the winning lane.
+#[bench_kernel(
+    op="sampling",
+    subop="softmax_categorical_sample",
+    class=GenericEmpty,
+    tol=0.0,
+    kernel_mode=Reduction,
+)]
 #[kernel]
 pub fn softmax_categorical_sample<T>(
     inp: Tensor<T>,
@@ -147,18 +149,3 @@ pub fn softmax_categorical_sample<T>(
     }
 }
 
-inventory::submit! {
-    BenchSpec {
-        op: "sampling",
-        subop: "softmax_categorical_sample",
-        kernel_name: "softmax_categorical_sample",
-        kernel_ir: softmax_categorical_sample::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 0.0,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Reduction),
-    }
-}

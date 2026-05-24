@@ -44,17 +44,19 @@
 //! Codegen-only; correctness pinned by
 //! `tests/gated_rmsnorm_gpu_correctness.rs`.
 
-use metaltile::kernel;
-use metaltile_core::ir::KernelMode;
+use metaltile::{bench_kernel, kernel};
 
-use crate::{
-    bench_types::DType,
-    spec::{BenchDispatch, BenchSpec},
-};
 
 /// `out[r, i] = w[i] · y[r, i] · rsqrt(mean(y[r]²) + eps) · silu(z[r, i])`.
 ///
 /// `y` is fp32 (the GDN recurrence output); `z`, `w`, `out` are `T`.
+#[bench_kernel(
+    op="gated_rmsnorm",
+    subop="gated_rmsnorm",
+    class=GenericEmpty,
+    tol=1e-4,
+    kernel_mode=Reduction,
+)]
 #[kernel]
 pub fn ffai_gated_rmsnorm<T>(
     y: Tensor<f32>,
@@ -111,18 +113,3 @@ pub fn ffai_gated_rmsnorm<T>(
     }
 }
 
-inventory::submit! {
-    BenchSpec {
-        op: "gated_rmsnorm",
-        subop: "gated_rmsnorm",
-        kernel_name: "ffai_gated_rmsnorm",
-        kernel_ir: ffai_gated_rmsnorm::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 1e-4,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Reduction),
-    }
-}

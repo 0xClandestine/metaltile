@@ -32,13 +32,8 @@
 //!   └──────────────────┘
 //! ```
 
-use metaltile::kernel;
-use metaltile_core::ir::KernelMode;
+use metaltile::{bench_kernel, kernel};
 
-use crate::{
-    bench_types::DType,
-    spec::{BenchDispatch, BenchSpec},
-};
 
 // ── mt_moe_router_topk ───────────────────────────────────────────────────
 //
@@ -66,6 +61,13 @@ use crate::{
 // Bench spec uses BenchDispatch::Generic + shapes: &[] so `tile bench`
 // skips it; correctness lives in unit tests + downstream MoE
 // integration. Same convention as other ffai/ kernels (gather, sampling).
+#[bench_kernel(
+    op="moe",
+    subop="router_topk",
+    class=GenericEmpty,
+    tol=1e-3,
+    kernel_mode=Reduction,
+)]
 #[kernel]
 pub fn mt_moe_router_topk<T>(
     router_logits: Tensor<T>,
@@ -202,21 +204,6 @@ pub fn mt_moe_router_topk<T>(
     }
 }
 
-inventory::submit! {
-    BenchSpec {
-        op: "moe",
-        subop: "router_topk",
-        kernel_name: "mt_moe_router_topk",
-        kernel_ir: mt_moe_router_topk::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 1e-3,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Reduction),
-    }
-}
 
 // ── mt_moe_unpermute ─────────────────────────────────────────────────────
 //
@@ -245,6 +232,13 @@ inventory::submit! {
 // values + k weights, do k FMAs per output column, one store per
 // column. At hidden=2048, k=8 → ~1k FMAs per token. Bandwidth-bound,
 // not ALU-bound.
+#[bench_kernel(
+    op="moe",
+    subop="unpermute",
+    class=GenericEmpty,
+    tol=1e-3,
+    kernel_mode=Reduction,
+)]
 #[kernel]
 pub fn mt_moe_unpermute<T>(
     expert_outputs: Tensor<T>,
@@ -276,21 +270,6 @@ pub fn mt_moe_unpermute<T>(
     }
 }
 
-inventory::submit! {
-    BenchSpec {
-        op: "moe",
-        subop: "unpermute",
-        kernel_name: "mt_moe_unpermute",
-        kernel_ir: mt_moe_unpermute::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 1e-3,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Reduction),
-    }
-}
 
 // ── mt_moe_permute ───────────────────────────────────────────────────────
 //
@@ -323,6 +302,13 @@ inventory::submit! {
 //
 // Per-permuted-row cost: hidden / 128 = 16 loads + 16 stores (at
 // hidden=2048). Bandwidth-bound — no FMAs, just a vector copy.
+#[bench_kernel(
+    op="moe",
+    subop="permute",
+    class=GenericEmpty,
+    tol=0.0,
+    kernel_mode=Reduction,
+)]
 #[kernel]
 pub fn mt_moe_permute<T>(
     tokens: Tensor<T>,
@@ -346,21 +332,6 @@ pub fn mt_moe_permute<T>(
     }
 }
 
-inventory::submit! {
-    BenchSpec {
-        op: "moe",
-        subop: "permute",
-        kernel_name: "mt_moe_permute",
-        kernel_ir: mt_moe_permute::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 0.0, // exact copy — no numerical drift
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Reduction),
-    }
-}
 
 // ── mt_moe_gather_qmm_int4 ────────────────────────────────────────────────
 //
@@ -415,6 +386,13 @@ inventory::submit! {
 //   3. `simd_sum` reduces 32 partial sums → one output value per TG.
 //
 // Mirrors the per-thread pattern in `dequant_gemv_int4`.
+#[bench_kernel(
+    op="moe",
+    subop="gather_qmm_int4",
+    class=GenericEmpty,
+    tol=5e-2,
+    kernel_mode=Reduction,
+)]
 #[kernel]
 pub fn mt_moe_gather_qmm_int4<T>(
     x: Tensor<T>,
@@ -503,21 +481,6 @@ pub fn mt_moe_gather_qmm_int4<T>(
     }
 }
 
-inventory::submit! {
-    BenchSpec {
-        op: "moe",
-        subop: "gather_qmm_int4",
-        kernel_name: "mt_moe_gather_qmm_int4",
-        kernel_ir: mt_moe_gather_qmm_int4::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 5e-2, // int4 quant — wide tolerance vs full-precision oracle
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Reduction),
-    }
-}
 
 // ── mt_moe_gather_qmm_b{3,5,6,8} — wider-precision gather matmul ──────────
 //
@@ -547,6 +510,13 @@ inventory::submit! {
 /// Grouped-gather quantized matmul — pow2 bit-widths (8).
 macro_rules! gather_qmm_pow2 {
     ($name:ident, $bits:literal, $subop:literal) => {
+        #[bench_kernel(
+            op="moe",
+            subop=$subop,
+            class=GenericEmpty,
+            tol=5e-2,
+            kernel_mode=Reduction,
+        )]
         #[kernel]
         pub fn $name<T>(
             x: Tensor<T>,
@@ -607,27 +577,19 @@ macro_rules! gather_qmm_pow2 {
             }
         }
 
-        inventory::submit! {
-            BenchSpec {
-                op: "moe",
-                subop: $subop,
-                kernel_name: stringify!($name),
-                kernel_ir: $name::kernel_ir_for,
-                dtypes: &[DType::F32, DType::F16, DType::BF16],
-                tol: 5e-2,
-                mlx_src: None,
-                mlx_pattern: None,
-                shapes: &[],
-                dispatch: BenchDispatch::Generic,
-                kernel_mode: Some(KernelMode::Reduction),
-            }
-        }
     };
 }
 
 /// Grouped-gather quantized matmul — odd bit-widths (3, 5, 6).
 macro_rules! gather_qmm_odd {
     ($name:ident, $bits:literal, $subop:literal) => {
+        #[bench_kernel(
+            op="moe",
+            subop=$subop,
+            class=GenericEmpty,
+            tol=5e-2,
+            kernel_mode=Reduction,
+        )]
         #[kernel]
         pub fn $name<T>(
             x: Tensor<T>,
@@ -699,21 +661,6 @@ macro_rules! gather_qmm_odd {
             }
         }
 
-        inventory::submit! {
-            BenchSpec {
-                op: "moe",
-                subop: $subop,
-                kernel_name: stringify!($name),
-                kernel_ir: $name::kernel_ir_for,
-                dtypes: &[DType::F32, DType::F16, DType::BF16],
-                tol: 5e-2,
-                mlx_src: None,
-                mlx_pattern: None,
-                shapes: &[],
-                dispatch: BenchDispatch::Generic,
-                kernel_mode: Some(KernelMode::Reduction),
-            }
-        }
     };
 }
 
@@ -748,6 +695,13 @@ gather_qmm_odd!(mt_moe_gather_qmm_b6, 6u32, "gather_qmm_b6");
 //   - x  : k_in floats (loaded once, used 8 times)
 //   - W  : 8 × (k_in / 8) uint32s = k_in uint32s of weight
 //   - s/b: 8 × (k_in / group_size) × 2 floats
+#[bench_kernel(
+    op="moe",
+    subop="gather_qmm_int4_m8",
+    class=GenericEmpty,
+    tol=5e-2,
+    kernel_mode=Reduction,
+)]
 #[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_moe_gather_qmm_int4_m8<T>(
@@ -1022,21 +976,6 @@ pub fn mt_moe_gather_qmm_int4_m8<T>(
     }
 }
 
-inventory::submit! {
-    BenchSpec {
-        op: "moe",
-        subop: "gather_qmm_int4_m8",
-        kernel_name: "mt_moe_gather_qmm_int4_m8",
-        kernel_ir: mt_moe_gather_qmm_int4_m8::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 5e-2,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Reduction),
-    }
-}
 
 // ── mt_moe_gather_qmm_int4_m16 ────────────────────────────────────────────
 //
@@ -1047,6 +986,13 @@ inventory::submit! {
 // DISPATCH:
 //   Grid = [m_out / 16, T_rows, 1]   (m_out must be a multiple of 16)
 //   TG   = [32, 1, 1]
+#[bench_kernel(
+    op="moe",
+    subop="gather_qmm_int4_m16",
+    class=GenericEmpty,
+    tol=5e-2,
+    kernel_mode=Reduction,
+)]
 #[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_moe_gather_qmm_int4_m16<T>(
@@ -1527,21 +1473,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
     }
 }
 
-inventory::submit! {
-    BenchSpec {
-        op: "moe",
-        subop: "gather_qmm_int4_m16",
-        kernel_name: "mt_moe_gather_qmm_int4_m16",
-        kernel_ir: mt_moe_gather_qmm_int4_m16::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 5e-2,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Reduction),
-    }
-}
 
 // ── mt_moe_gather_qmm_int4_m32 ────────────────────────────────────────────
 //
@@ -1552,6 +1483,13 @@ inventory::submit! {
 // DISPATCH:
 //   Grid = [m_out / 32, T_rows, 1]   (m_out must be a multiple of 32)
 //   TG   = [32, 1, 1]
+#[bench_kernel(
+    op="moe",
+    subop="gather_qmm_int4_m32",
+    class=GenericEmpty,
+    tol=5e-2,
+    kernel_mode=Reduction,
+)]
 #[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_moe_gather_qmm_int4_m32<T>(
@@ -2448,21 +2386,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
     }
 }
 
-inventory::submit! {
-    BenchSpec {
-        op: "moe",
-        subop: "gather_qmm_int4_m32",
-        kernel_name: "mt_moe_gather_qmm_int4_m32",
-        kernel_ir: mt_moe_gather_qmm_int4_m32::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 5e-2,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Reduction),
-    }
-}
 
 // ── mt_moe_gather_qmm_mma_int4 ────────────────────────────────────────────
 //
@@ -2503,6 +2426,13 @@ inventory::submit! {
 // We use 4 SGs (vs MLX's 2) because the existing mt_qmm_mma proves the
 // 4-SG 2×2 warp grid hits ~95% of MLX throughput on the same 8×8 frag
 // path. MoE inherits that geometry.
+#[bench_kernel(
+    op="moe",
+    subop="gather_qmm_mma_int4",
+    class=GenericEmpty,
+    tol=5e-2,
+    kernel_mode=Reduction,
+)]
 #[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_moe_gather_qmm_mma_int4<T>(
@@ -2806,21 +2736,6 @@ pub fn mt_moe_gather_qmm_mma_int4<T>(
     }
 }
 
-inventory::submit! {
-    BenchSpec {
-        op: "moe",
-        subop: "gather_qmm_mma_int4",
-        kernel_name: "mt_moe_gather_qmm_mma_int4",
-        kernel_ir: mt_moe_gather_qmm_mma_int4::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 5e-2,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Reduction),
-    }
-}
 
 // ── mt_moe_gather_qmm_mma_b{3,5,6,8} — wider-precision MMA gather matmul ──
 //
@@ -2838,6 +2753,13 @@ inventory::submit! {
 // per-lane group index is hoistable.
 macro_rules! gather_qmm_mma {
     ($name:ident, $bits:literal, $subop:literal) => {
+        #[bench_kernel(
+            op="moe",
+            subop=$subop,
+            class=GenericEmpty,
+            tol=5e-2,
+            kernel_mode=Reduction,
+        )]
         #[kernel]
         #[allow(clippy::too_many_arguments)]
         pub fn $name<T>(
@@ -3114,21 +3036,6 @@ macro_rules! gather_qmm_mma {
             }
         }
 
-        inventory::submit! {
-            BenchSpec {
-                op: "moe",
-                subop: $subop,
-                kernel_name: stringify!($name),
-                kernel_ir: $name::kernel_ir_for,
-                dtypes: &[DType::F32, DType::F16, DType::BF16],
-                tol: 5e-2,
-                mlx_src: None,
-                mlx_pattern: None,
-                shapes: &[],
-                dispatch: BenchDispatch::Generic,
-                kernel_mode: Some(KernelMode::Reduction),
-            }
-        }
     };
 }
 
@@ -3155,6 +3062,13 @@ gather_qmm_mma!(mt_moe_gather_qmm_mma_b8, 8u32, "gather_qmm_mma_b8");
 //   Per SG per K-block: 4 frags × 4 k_inner = 16 MMAs (32 across TG)
 //
 // Inputs / outputs match the BM=32 sibling — same signature.
+#[bench_kernel(
+    op="moe",
+    subop="gather_qmm_mma_int4_bm16",
+    class=GenericEmpty,
+    tol=5e-2,
+    kernel_mode=Reduction,
+)]
 #[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_moe_gather_qmm_mma_int4_bm16<T>(
@@ -3532,21 +3446,6 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16<T>(
     }
 }
 
-inventory::submit! {
-    BenchSpec {
-        op: "moe",
-        subop: "gather_qmm_mma_int4_bm16",
-        kernel_name: "mt_moe_gather_qmm_mma_int4_bm16",
-        kernel_ir: mt_moe_gather_qmm_mma_int4_bm16::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 5e-2,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Reduction),
-    }
-}
 
 // ── mt_moe_gather_qmm_mma_int8 — pack-aligned int8 MoE MMA BGEMM ────────
 //
@@ -3566,6 +3465,13 @@ inventory::submit! {
 //
 // Dispatch: grid `[N/32, ceil(M/32), 1]`, TG `[128, 1, 1]` (4 SGs).
 // Correctness: `tests/moe_gather_qmm_mma_int8_gpu_correctness.rs`.
+#[bench_kernel(
+    op="moe",
+    subop="gather_qmm_mma_int8",
+    class=GenericEmpty,
+    tol=5e-2,
+    kernel_mode=Reduction,
+)]
 #[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_moe_gather_qmm_mma_int8<T>(
@@ -3890,18 +3796,3 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
     }
 }
 
-inventory::submit! {
-    BenchSpec {
-        op: "moe",
-        subop: "gather_qmm_mma_int8",
-        kernel_name: "mt_moe_gather_qmm_mma_int8",
-        kernel_ir: mt_moe_gather_qmm_mma_int8::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 5e-2,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Reduction),
-    }
-}

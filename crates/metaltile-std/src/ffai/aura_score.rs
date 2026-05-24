@@ -43,13 +43,9 @@
 //! tightly enough that this is functionally equivalent — re-evaluate
 //! if `tile profile` shows codebook reads dominating later.
 
-use metaltile::kernel;
-use metaltile_core::ir::KernelMode;
+use metaltile::{bench_kernel, kernel};
 
-use crate::{
-    bench_types::{DType, FLOAT_DTYPES},
-    spec::{BenchDispatch, BenchSpec},
-};
+use crate::bench_types::DType;
 
 // Keep `DType` referenced for the inventory submit; `FLOAT_DTYPES`
 // supersedes the old `F32_ONLY` shortlist now that the kernel is generic
@@ -58,6 +54,13 @@ const _: DType = DType::F32;
 
 macro_rules! aura_score_kernel {
     ($name:ident, $bits:literal, $subop:literal) => {
+        #[bench_kernel(
+            op="aura",
+            subop=$subop,
+            class=GenericEmpty,
+            tol=0.0,
+            kernel_mode=Reduction,
+        )]
         #[kernel]
         pub fn $name<T>(
             q_rot: Tensor<T>,
@@ -121,21 +124,6 @@ macro_rules! aura_score_kernel {
             }
         }
 
-        inventory::submit! {
-            BenchSpec {
-                op: "aura",
-                subop: $subop,
-                kernel_name: stringify!($name),
-                kernel_ir: $name::kernel_ir_for,
-                dtypes: FLOAT_DTYPES,
-                tol: 0.0,
-                mlx_src: None,
-                mlx_pattern: None,
-                shapes: &[],
-                dispatch: BenchDispatch::Generic,
-                kernel_mode: Some(KernelMode::Reduction),
-            }
-        }
     };
 }
 

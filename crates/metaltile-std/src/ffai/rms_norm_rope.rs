@@ -30,15 +30,17 @@
 //! Codegen-only; correctness pinned by
 //! `tests/rms_norm_rope_gpu_correctness.rs`.
 
-use metaltile::kernel;
-use metaltile_core::ir::KernelMode;
+use metaltile::{bench_kernel, kernel};
 
-use crate::{
-    bench_types::DType,
-    spec::{BenchDispatch, BenchSpec},
-};
 
 /// Fused RMSNorm + paired-layout RoPE for one Q/K head per threadgroup.
+#[bench_kernel(
+    op="rms_norm_rope",
+    subop="rms_norm_rope",
+    class=GenericEmpty,
+    tol=1e-4,
+    kernel_mode=Reduction,
+)]
 #[kernel]
 pub fn ffai_rms_norm_rope<T>(
     x: Tensor<T>,
@@ -78,18 +80,3 @@ pub fn ffai_rms_norm_rope<T>(
     store(out[rs + lid + half], (normed_a * sin_t + normed_b * cos_t).cast::<T>());
 }
 
-inventory::submit! {
-    BenchSpec {
-        op: "rms_norm_rope",
-        subop: "rms_norm_rope",
-        kernel_name: "ffai_rms_norm_rope",
-        kernel_ir: ffai_rms_norm_rope::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 1e-4,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Reduction),
-    }
-}

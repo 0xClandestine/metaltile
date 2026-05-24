@@ -41,14 +41,16 @@
 //!
 //! Codegen-only. Correctness validated by `patch_embed_gpu_correctness`.
 
-use metaltile::kernel;
-use metaltile_core::ir::KernelMode;
+use metaltile::{bench_kernel, kernel};
 
-use crate::{
-    bench_types::DType,
-    spec::{BenchDispatch, BenchSpec},
-};
 
+#[bench_kernel(
+    op="patch_embed",
+    subop="patch_embed",
+    class=GenericEmpty,
+    tol=1e-3,
+    kernel_mode=Grid3D,
+)]
 #[kernel]
 pub fn patch_embed<T>(
     image: Tensor<T>,
@@ -100,18 +102,3 @@ pub fn patch_embed<T>(
     store(out[idx], acc.cast::<T>());
 }
 
-inventory::submit! {
-    BenchSpec {
-        op: "patch_embed",
-        subop: "patch_embed",
-        kernel_name: "patch_embed",
-        kernel_ir: patch_embed::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 1e-3,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Grid3D),
-    }
-}

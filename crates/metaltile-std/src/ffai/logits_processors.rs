@@ -26,13 +26,8 @@
 //! logits accumulate cleanly across the scale and don't drift on the
 //! repeated-token gather. Output dtype matches input dtype.
 
-use metaltile::kernel;
-use metaltile_core::ir::KernelMode;
+use metaltile::{bench_kernel, kernel};
 
-use crate::{
-    bench_types::DType,
-    spec::{BenchDispatch, BenchSpec},
-};
 
 // ── Temperature scaling ───────────────────────────────────────────────────
 //
@@ -55,6 +50,13 @@ use crate::{
 //   the full logits length. Threads with `program_id::<0>() >= n` would
 //   read/write out of bounds; the runtime should size the dispatch so the
 //   total thread count exactly matches the logits length.
+#[bench_kernel(
+    op="logits_processors",
+    subop="temperature",
+    class=GenericEmpty,
+    tol=0.0,
+    kernel_mode=Grid3D,
+)]
 #[kernel]
 pub fn logits_temperature<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] temperature: f32) {
     let i = program_id::<0>();
@@ -63,21 +65,6 @@ pub fn logits_temperature<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] temper
     store(out[i], (v * inv_t).cast::<T>());
 }
 
-inventory::submit! {
-    BenchSpec {
-        op: "logits_processors",
-        subop: "temperature",
-        kernel_name: "logits_temperature",
-        kernel_ir: logits_temperature::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 0.0,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Grid3D),
-    }
-}
 
 // ── Repetition penalty ────────────────────────────────────────────────────
 //
@@ -108,6 +95,13 @@ inventory::submit! {
 //   small contexts) is the tested geometry.
 // - **No `threadgroup_*` / `simd_*` cooperation** — every thread is
 //   independent. The only invariant is the dedupe contract above.
+#[bench_kernel(
+    op="logits_processors",
+    subop="repetition_penalty",
+    class=GenericEmpty,
+    tol=0.0,
+    kernel_mode=Grid3D,
+)]
 #[kernel]
 pub fn logits_repetition_penalty<T>(
     mut logits: Tensor<T>,
@@ -121,18 +115,3 @@ pub fn logits_repetition_penalty<T>(
     store(logits[tok], scaled.cast::<T>());
 }
 
-inventory::submit! {
-    BenchSpec {
-        op: "logits_processors",
-        subop: "repetition_penalty",
-        kernel_name: "logits_repetition_penalty",
-        kernel_ir: logits_repetition_penalty::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 0.0,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Grid3D),
-    }
-}
