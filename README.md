@@ -12,25 +12,6 @@
 
 > ⚠️ Early development — APIs are not yet stable. The core DSL, codegen, and runtime work today; the autotuner and type-level shape algebra are planned.
 
-<details>
-  <summary>Table of Contents</summary>
-  <ol>
-    <li><a href="#why-metaltile">Why MetalTile</a></li>
-    <li><a href="#supported-operations">Supported Operations</a></li>
-    <li><a href="#benchmarks">Benchmarks</a></li>
-    <li><a href="#contributing">Contributing</a></li>
-    <li><a href="#license">License</a></li>
-  </ol>
-  <strong>Docs</strong>
-  <ul>
-    <li><a href="docs/getting-started.md">Getting Started</a> — toolchain, crate layout, build, first kernel</li>
-    <li><a href="docs/developing.md">Developing</a> — repo layout, dev loop, kernel-authoring hazards</li>
-    <li><a href="docs/testing.md">Testing</a> — test layers, CI, and test-infra gaps</li>
-    <li><a href="docs/cli.md">CLI</a> — the <code>tile</code> binary</li>
-    <li><a href="docs/publishing.md">Publishing</a> — the release flow</li>
-  </ul>
-</details>
-
 <table>
 <tr>
 <th>Rust DSL — what you write</th>
