@@ -53,19 +53,15 @@ pub fn mt_qmm_nax<T>(
     let lane = simd_lane;
     let sg = simd_group_id();
     let lane_in_tg = sg * 32u32 + lane;
-
     let sm = sg / 2u32;
     let sn = sg & 1u32;
     let sg_m_base = sm * 16u32;
     let sg_n_base = sn * 16u32;
-
     let x_m_base = tgid_y * 32u32;
     let w_n_base = tgid_x * 32u32;
-
     threadgroup_alloc("Xs", 1152u32, coop_stage(T)); // 32 × 36
     threadgroup_alloc("Ws", 1152u32, coop_stage(T)); // 32 × 36
     threadgroup_alloc("OutScratch", 1024u32, f32); // 4 SG × 16 × 16
-
     coop_tile_setup(
         "gemm",
         16u32,
@@ -80,28 +76,23 @@ pub fn mt_qmm_nax<T>(
         false,
     );
     coop_tile_zero("gemm");
-
     let x_m_row = lane_in_tg / 4u32;
     let x_k_quad = lane_in_tg & 3u32;
     let x_k_base = x_k_quad * 8u32;
     let x_ws_base = x_m_row * 36u32 + x_k_base;
-
     let packs_per_row = k / 8u32;
     let wn_plus_wr = w_n_base + x_m_row;
     let sb_base = wn_plus_wr * gs_per_row;
     let w_pack_row_base = wn_plus_wr * packs_per_row;
-
     let xs_sg_off = sg_m_base * 36u32;
     let ws_sg_off = sg_n_base * 36u32;
     let sg_scratch_off = sg * 256u32;
-
     for kb in range(0u32, k, 32u32) {
         let x_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base;
         for _i in range(0u32, 8u32, 1u32) {
             let xv = load(x[x_row_dev_base + _i]).cast::<f32>();
             threadgroup_store("Xs", x_ws_base + _i, xv);
         }
-
         let pack_dev = w_pack_row_base + kb / 8u32 + x_k_quad;
         let packed = load(w[pack_dev]);
         let k_off = kb + x_k_quad * 8u32;
@@ -109,24 +100,18 @@ pub fn mt_qmm_nax<T>(
         let sb_off = sb_base + g;
         let scale = load(scales[sb_off]).cast::<f32>();
         let bias = load(biases[sb_off]).cast::<f32>();
-
         for _ni in range(0u32, 8u32, 1u32) {
             let nib = ((packed >> (_ni * 4u32)) & 15u32).cast::<f32>();
             threadgroup_store("Ws", x_ws_base + _ni, scale * nib + bias);
         }
-
         threadgroup_barrier();
-
         coop_tile_load_a("gemm", "Xs", true, coop_stage(T), 36u32, 16u32, xs_sg_off);
         coop_tile_load_b("gemm", "Ws", true, coop_stage(T), 36u32, 16u32, ws_sg_off);
         coop_tile_run("gemm");
-
         threadgroup_barrier();
     }
-
     coop_tile_store_c("gemm", "OutScratch", true, f32, 16u32, 16u32, sg_scratch_off);
     threadgroup_barrier();
-
     let out_m_base = x_m_base + sg_m_base;
     let out_n_base = w_n_base + sg_n_base;
     let o_row = lane / 2u32;

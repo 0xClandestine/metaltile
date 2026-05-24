@@ -92,24 +92,20 @@ pub fn patch_embed_mma<T>(
     // BM (hidden-axis) tile = tgid_x * 32, BN (patch-axis) tile = tgid_y * 32.
     let h_tile = tgid_x;
     let pat_tile = tgid_y;
-
     let lane = simd_lane;
     let sg = simd_group_id();
     let sm = sg / 2u32;
     let sn = sg & 1u32;
     let lane_in_tg = sg * 32u32 + lane;
-
     // ── 8×8 frag lane mapping ────────────────────────────────────────────
     let qid = lane / 4u32;
     let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
     let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
     let fn1 = fn0 + 1u32;
-
     // ── TG memory: skew-36 stride ─────────────────────────────────────────
     let stride = 36u32;
     threadgroup_alloc("as", 1152, T); // [32 × 36] A (patch unfold)
     threadgroup_alloc("bs", 1152, T); // [32 × 36] B (weight)
-
     // ── Accumulator frags ─────────────────────────────────────────────────
     let c_f00 = simdgroup_alloc::<f32, 8, 8>();
     simdgroup_elem_store(c_f00, 0, 0.0f32);
@@ -123,36 +119,30 @@ pub fn patch_embed_mma<T>(
     let c_f11 = simdgroup_alloc::<f32, 8, 8>();
     simdgroup_elem_store(c_f11, 0, 0.0f32);
     simdgroup_elem_store(c_f11, 1, 0.0f32);
-
     let a_f0 = simdgroup_alloc::<T, 8, 8>();
     let a_f1 = simdgroup_alloc::<T, 8, 8>();
     let b_f0 = simdgroup_alloc::<T, 8, 8>();
     let b_f1 = simdgroup_alloc::<T, 8, 8>();
-
     // ── Precompute patch-space extents ────────────────────────────────────
     let phw = patch_h * patch_w;
     let patch_dim = in_ch * phw; // total tap dimension
     let patches_w = in_w / patch_w; // patches along width axis
     let input_plane = in_h * in_w;
-
     // ── Coop A-load lane assignment (patch unfold) ────────────────────────
     // lane_in_tg = pat_row * 4 + k_quad; pat_row ∈ 0..32, k_quad ∈ 0..4.
     let a_pat_row = lane_in_tg / 4u32;
     let a_k_quad = lane_in_tg & 3u32;
     let a_k_base = a_k_quad * 8u32;
-
     let global_pat = pat_tile * 32u32 + a_pat_row;
     // Decode patch → (py0, px0): top-left pixel of this patch.
     let py0 = (global_pat / patches_w) * patch_h;
     let px0 = (global_pat - (global_pat / patches_w) * patches_w) * patch_w;
-
     // ── Coop B-load lane assignment (weight) ──────────────────────────────
     let b_h_row = lane_in_tg / 4u32; // which hidden-unit row
     let b_k_quad = lane_in_tg & 3u32;
     let b_k_base = b_k_quad * 8u32;
     let global_h = h_tile * 32u32 + b_h_row;
     let w_h_base = global_h * patch_dim;
-
     // ── K-block loop (step 32 through patch_dim) ─────────────────────────
     // K-tail handling: `patch_dim = in_ch * patch_h * patch_w` isn't
     // always a multiple of 32 (e.g. ViT-patch14, in_ch=3 → 588). Both
@@ -175,7 +165,6 @@ pub fn patch_embed_mma<T>(
             let val = select(in_bounds, raw, 0.0f32).cast::<T>();
             threadgroup_store("as", a_pat_row * stride + a_k_base + i, val);
         }
-
         // ─ 2. Coop B load (weight `[hidden, patch_dim]` row-major) ───────
         for i in range(0u32, 8u32, 1u32) {
             let kt = kb + b_k_base + i;
@@ -186,15 +175,12 @@ pub fn patch_embed_mma<T>(
             let val = select(in_bounds, raw, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_h_row * stride + b_k_base + i, val);
         }
-
         threadgroup_barrier();
-
         // ─ 3. MMA inner loop (4 k-inner × 4 frags = 16 MMAs / SG) ──────
         let row_a0 = sm * 16u32 + fm;
         let row_a1 = sm * 16u32 + 8u32 + fm;
         let col_b0 = sn * 16u32;
         let col_b1 = sn * 16u32 + 8u32;
-
         // k_inner = 0
         simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + fn1));
@@ -211,7 +197,6 @@ pub fn patch_embed_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 1
         simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 8u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 8u32 + fn1));
@@ -228,7 +213,6 @@ pub fn patch_embed_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 2
         simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 16u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 16u32 + fn1));
@@ -245,7 +229,6 @@ pub fn patch_embed_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 3
         simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 24u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 24u32 + fn1));
@@ -262,21 +245,17 @@ pub fn patch_embed_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         threadgroup_barrier();
     }
-
     // ── 4. Add bias and write frags to global out ─────────────────────────
     // out layout: [num_patches, hidden].
     let out_pat_base = pat_tile * 32u32 + sm * 16u32;
     let out_h_base = h_tile * 32u32 + sn * 16u32;
-
     // Load bias for each of the 4 output oc positions this lane writes.
     let b00 = load(bias[out_h_base + fn0]).cast::<f32>();
     let b01 = load(bias[out_h_base + fn1]).cast::<f32>();
     let b10 = load(bias[out_h_base + 8u32 + fn0]).cast::<f32>();
     let b11 = load(bias[out_h_base + 8u32 + fn1]).cast::<f32>();
-
     // c_f00 at (frag_m=0, frag_n=0)
     store(
         out[(out_pat_base + fm) * hidden + out_h_base + fn0],

@@ -81,27 +81,21 @@ pub fn mt_gated_delta_prep_chunk<T>(
     let dv_idx = tgid_x;
     let n = tgid_y;
     let dk_idx = tid;
-
     // GQA decomposition.
     let hv_idx = n - (n / hv) * hv;
     let b = n / hv;
     let hk_per_hv = hv / hk;
     let hk_idx = hv_idx / hk_per_hv;
-
     let n_per_t = dk / 32u32;
     let t_total = load(t_len[0]);
-
     let stride_b = 2u32 * hk * dk + hv * dv;
     let eps = 0.000001f32;
     let dk_f = dk.cast::<f32>();
-
     // Per-layer constants (loaded once per TG).
     let a_log_val = load(a_log[hv_idx]).cast::<f32>();
     let dt_bias_val = load(dt_bias[hv_idx]).cast::<f32>();
     let exp_a_log = exp(a_log_val);
-
     let state_base = n * dv * dk + dv_idx * dk;
-
     // ─── Load state into per-lane registers ONCE — persists across the T-loop.
     stack_alloc("state_reg", 8u32, "f32");
     for i in range(0u32, n_per_t, 1u32) {
@@ -109,7 +103,6 @@ pub fn mt_gated_delta_prep_chunk<T>(
         let val = load(state_in[state_base + s_idx]).cast::<f32>();
         stack_store("state_reg", i, val);
     }
-
     // q_w / k_w are static across the T-loop (one row of weights per
     // hk_idx); load them once into per-lane stack so the inner T-loop
     // doesn't re-read.
@@ -122,12 +115,10 @@ pub fn mt_gated_delta_prep_chunk<T>(
         stack_store("q_w", i, qw);
         stack_store("k_w", i, kw);
     }
-
     // Stack arrays reused per-token: q_raw / k_raw / k_cache.
     stack_alloc("q_raw", 8u32, "f32");
     stack_alloc("k_raw", 8u32, "f32");
     stack_alloc("k_cache", 8u32, "f32");
-
     // ─── Inner T-loop: prep + recurrence per token ──────────────────────
     for t in range(0u32, t_total, 1u32) {
         let bt = b * t_total + t;
@@ -136,7 +127,6 @@ pub fn mt_gated_delta_prep_chunk<T>(
         let k_off = conv_base + hk * dk + hk_idx * dk;
         let v_off = conv_base + 2u32 * hk * dk + hv_idx * dv;
         let gbeta_idx = bt * hv + hv_idx;
-
         // ─── Phase 0a: Per-head RMSNorm of q / k ─────────────────────────
         let mut q_ssq = 0.0f32;
         let mut k_ssq = 0.0f32;
@@ -153,7 +143,6 @@ pub fn mt_gated_delta_prep_chunk<T>(
         let k_ssq_sum = simd_sum(k_ssq);
         let q_inv = rsqrt(q_ssq_sum / dk_f + eps);
         let k_inv = rsqrt(k_ssq_sum / dk_f + eps);
-
         // ─── Phase 0b: g / beta ──────────────────────────────────────────
         let a_raw_val = load(a_raw[gbeta_idx]).cast::<f32>();
         let b_raw_val = load(b_raw[gbeta_idx]).cast::<f32>();
@@ -161,10 +150,8 @@ pub fn mt_gated_delta_prep_chunk<T>(
         let dt_val = log(exp(pre_softplus) + 1.0f32);
         let g_val = exp(0.0f32 - exp_a_log * dt_val);
         let beta_val = 1.0f32 / (1.0f32 + exp(0.0f32 - b_raw_val));
-
         // v: one read per Dv slot per token.
         let v_val = load(conv_out[v_off + dv_idx]).cast::<f32>();
-
         // ─── Phase 1: decay state + accumulate kv_mem; cache k_normed ────
         let mut kv_mem = 0.0f32;
         for i in range(0u32, n_per_t, 1u32) {
@@ -177,7 +164,6 @@ pub fn mt_gated_delta_prep_chunk<T>(
         }
         let kv_mem_sum = simd_sum(kv_mem);
         let delta = (v_val - kv_mem_sum) * beta_val;
-
         // ─── Phase 2: rank-1 update + output projection ──────────────────
         let mut out_acc = 0.0f32;
         for i in range(0u32, n_per_t, 1u32) {
@@ -189,13 +175,11 @@ pub fn mt_gated_delta_prep_chunk<T>(
             out_acc = out_acc + s_new * q_normed;
         }
         let out_sum = simd_sum(out_acc);
-
         // ─── Phase 3: lane 0 writes y[t, n, dv_idx] ──────────────────────
         if dk_idx == 0u32 {
             store(y[(bt * hv + hv_idx) * dv + dv_idx], out_sum.cast::<T>());
         }
     }
-
     // ─── Write final state ONCE at the end ──────────────────────────────
     for i in range(0u32, n_per_t, 1u32) {
         let s_idx = n_per_t * dk_idx + i;

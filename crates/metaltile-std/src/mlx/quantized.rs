@@ -58,26 +58,21 @@ pub fn mt_qmv<T>(
     let row1 = row0 + 1u32;
     let row2 = row0 + 2u32;
     let row3 = row0 + 3u32;
-
     let packs_per_row = k / 8u32;
     let w_base0 = row0 * packs_per_row;
     let w_base1 = row1 * packs_per_row;
     let w_base2 = row2 * packs_per_row;
     let w_base3 = row3 * packs_per_row;
-
     let sb_base0 = row0 * gs_per_row;
     let sb_base1 = row1 * gs_per_row;
     let sb_base2 = row2 * gs_per_row;
     let sb_base3 = row3 * gs_per_row;
-
     let mut acc0 = 0.0f32;
     let mut acc1 = 0.0f32;
     let mut acc2 = 0.0f32;
     let mut acc3 = 0.0f32;
-
     let lane_x_off = lane * 16u32;
     let lane_pack_off = lane * 2u32;
-
     for _b in range(0u32, k, 512u32) {
         // 16 X loads — consecutive in IR for vectorize fusion (4× float4).
         let xb = _b + lane_x_off;
@@ -153,12 +148,10 @@ pub fn mt_qmv<T>(
         let x13 = x13_raw * s_16;
         let x14 = x14_raw * s_256;
         let x15 = x15_raw * s_4096;
-
         // Each lane covers 16 X values within a single gs=64 group.
         // 4 lanes per group, 8 groups per block (32 lanes × 16 = 512).
         let g = xb / 64u32;
         let pack_off = _b / 8u32 + lane_pack_off;
-
         // ── Row 0 ──
         let p00 = load(w[w_base0 + pack_off]);
         let p01 = load(w[w_base0 + pack_off + 1u32]);
@@ -201,7 +194,6 @@ pub fn mt_qmv<T>(
             + q014 * x14
             + q015 * x15;
         acc0 = acc0 + s0 * qd0 + bi0 * xs;
-
         // ── Row 1 ──
         let p10 = load(w[w_base1 + pack_off]);
         let p11 = load(w[w_base1 + pack_off + 1u32]);
@@ -242,7 +234,6 @@ pub fn mt_qmv<T>(
             + q114 * x14
             + q115 * x15;
         acc1 = acc1 + s1 * qd1 + bi1 * xs;
-
         // ── Row 2 ──
         let p20 = load(w[w_base2 + pack_off]);
         let p21 = load(w[w_base2 + pack_off + 1u32]);
@@ -283,7 +274,6 @@ pub fn mt_qmv<T>(
             + q214 * x14
             + q215 * x15;
         acc2 = acc2 + s2 * qd2 + bi2 * xs;
-
         // ── Row 3 ──
         let p30 = load(w[w_base3 + pack_off]);
         let p31 = load(w[w_base3 + pack_off + 1u32]);
@@ -325,7 +315,6 @@ pub fn mt_qmv<T>(
             + q315 * x15;
         acc3 = acc3 + s3 * qd3 + bi3 * xs;
     }
-
     // Cross-lane reduction: each row's partial → single value, lane 0 stores.
     let r0 = simd_sum(acc0);
     let r1 = simd_sum(acc1);
@@ -414,28 +403,22 @@ pub fn mt_qmm<T>(
     let row1 = row0 + 1u32;
     let row2 = row0 + 2u32;
     let row3 = row0 + 3u32;
-
     let packs_per_row = k / 8u32;
     let w_base0 = row0 * packs_per_row;
     let w_base1 = row1 * packs_per_row;
     let w_base2 = row2 * packs_per_row;
     let w_base3 = row3 * packs_per_row;
-
     let sb_base0 = row0 * gs_per_row;
     let sb_base1 = row1 * gs_per_row;
     let sb_base2 = row2 * gs_per_row;
     let sb_base3 = row3 * gs_per_row;
-
     let x_row_base = m_row * k;
-
     let mut acc0 = 0.0f32;
     let mut acc1 = 0.0f32;
     let mut acc2 = 0.0f32;
     let mut acc3 = 0.0f32;
-
     let lane_x_off = lane * 16u32;
     let lane_pack_off = lane * 2u32;
-
     for _b in range(0u32, k, 512u32) {
         // 16 X loads — consecutive in IR for vectorize fusion.
         let xb = x_row_base + _b + lane_x_off;
@@ -503,14 +486,12 @@ pub fn mt_qmm<T>(
         let x13 = x13_raw * s_16;
         let x14 = x14_raw * s_256;
         let x15 = x15_raw * s_4096;
-
         // Group index within this row's K dimension. mt_qmv uses
         // `xb / 64` because there `xb` is already a K-position; here
         // `xb` includes the `x_row_base = m_row * k` offset, so we
         // recompute against the K-local base.
         let g = (_b + lane_x_off) / 64u32;
         let pack_off = _b / 8u32 + lane_pack_off;
-
         // ── Row 0 ──
         let p00 = load(w[w_base0 + pack_off]);
         let p01 = load(w[w_base0 + pack_off + 1u32]);
@@ -551,7 +532,6 @@ pub fn mt_qmm<T>(
             + q014 * x14
             + q015 * x15;
         acc0 = acc0 + s0 * qd0 + bi0 * xs;
-
         // ── Row 1 ──
         let p10 = load(w[w_base1 + pack_off]);
         let p11 = load(w[w_base1 + pack_off + 1u32]);
@@ -592,7 +572,6 @@ pub fn mt_qmm<T>(
             + q114 * x14
             + q115 * x15;
         acc1 = acc1 + s1 * qd1 + bi1 * xs;
-
         // ── Row 2 ──
         let p20 = load(w[w_base2 + pack_off]);
         let p21 = load(w[w_base2 + pack_off + 1u32]);
@@ -633,7 +612,6 @@ pub fn mt_qmm<T>(
             + q214 * x14
             + q215 * x15;
         acc2 = acc2 + s2 * qd2 + bi2 * xs;
-
         // ── Row 3 ──
         let p30 = load(w[w_base3 + pack_off]);
         let p31 = load(w[w_base3 + pack_off + 1u32]);
@@ -675,7 +653,6 @@ pub fn mt_qmm<T>(
             + q315 * x15;
         acc3 = acc3 + s3 * qd3 + bi3 * xs;
     }
-
     let r0 = simd_sum(acc0);
     let r1 = simd_sum(acc1);
     let r2 = simd_sum(acc2);
@@ -765,24 +742,20 @@ pub fn mt_qmm_bm2<T>(
     let row1 = row0 + 1u32;
     let row2 = row0 + 2u32;
     let row3 = row0 + 3u32;
-
     let packs_per_row = k / 8u32;
     let w_base0 = row0 * packs_per_row;
     let w_base1 = row1 * packs_per_row;
     let w_base2 = row2 * packs_per_row;
     let w_base3 = row3 * packs_per_row;
-
     let sb_base0 = row0 * gs_per_row;
     let sb_base1 = row1 * gs_per_row;
     let sb_base2 = row2 * gs_per_row;
     let sb_base3 = row3 * gs_per_row;
-
     // BM=2 M-rows per TG.
     let m_row_a = m_tile * 2u32;
     let m_row_b = m_row_a + 1u32;
     let x_base_a = m_row_a * k;
     let x_base_b = m_row_b * k;
-
     // 8 accumulators: 4 N-rows × 2 M-rows.
     let mut acc0_a = 0.0f32;
     let mut acc0_b = 0.0f32;
@@ -792,10 +765,8 @@ pub fn mt_qmm_bm2<T>(
     let mut acc2_b = 0.0f32;
     let mut acc3_a = 0.0f32;
     let mut acc3_b = 0.0f32;
-
     let lane_x_off = lane * 16u32;
     let lane_pack_off = lane * 2u32;
-
     for _b in range(0u32, k, 512u32) {
         // ── Load 16 X values for M-row A ──
         let xb_a = x_base_a + _b + lane_x_off;
@@ -846,7 +817,6 @@ pub fn mt_qmm_bm2<T>(
         let x13_a = x13_a_raw * s_16;
         let x14_a = x14_a_raw * s_256;
         let x15_a = x15_a_raw * s_4096;
-
         // ── Load 16 X values for M-row B ──
         let xb_b = x_base_b + _b + lane_x_off;
         let x0_b = load(x[xb_b]).cast::<f32>();
@@ -893,10 +863,8 @@ pub fn mt_qmm_bm2<T>(
         let x13_b = x13_b_raw * s_16;
         let x14_b = x14_b_raw * s_256;
         let x15_b = x15_b_raw * s_4096;
-
         let g = (_b + lane_x_off) / 64u32;
         let pack_off = _b / 8u32 + lane_pack_off;
-
         // ── Row 0 (shared W extracts, dual qdots) ──
         let p00 = load(w[w_base0 + pack_off]);
         let p01 = load(w[w_base0 + pack_off + 1u32]);
@@ -954,7 +922,6 @@ pub fn mt_qmm_bm2<T>(
             + q015 * x15_b;
         acc0_a = acc0_a + s0 * qd0_a + bi0 * xs_a;
         acc0_b = acc0_b + s0 * qd0_b + bi0 * xs_b;
-
         // ── Row 1 ──
         let p10 = load(w[w_base1 + pack_off]);
         let p11 = load(w[w_base1 + pack_off + 1u32]);
@@ -1012,7 +979,6 @@ pub fn mt_qmm_bm2<T>(
             + q115 * x15_b;
         acc1_a = acc1_a + s1 * qd1_a + bi1 * xs_a;
         acc1_b = acc1_b + s1 * qd1_b + bi1 * xs_b;
-
         // ── Row 2 ──
         let p20 = load(w[w_base2 + pack_off]);
         let p21 = load(w[w_base2 + pack_off + 1u32]);
@@ -1070,7 +1036,6 @@ pub fn mt_qmm_bm2<T>(
             + q215 * x15_b;
         acc2_a = acc2_a + s2 * qd2_a + bi2 * xs_a;
         acc2_b = acc2_b + s2 * qd2_b + bi2 * xs_b;
-
         // ── Row 3 ──
         let p30 = load(w[w_base3 + pack_off]);
         let p31 = load(w[w_base3 + pack_off + 1u32]);
@@ -1129,7 +1094,6 @@ pub fn mt_qmm_bm2<T>(
         acc3_a = acc3_a + s3 * qd3_a + bi3 * xs_a;
         acc3_b = acc3_b + s3 * qd3_b + bi3 * xs_b;
     }
-
     // Cross-lane reduce + lane-0 stores. 8 outputs per TG.
     let r0_a = simd_sum(acc0_a);
     let r0_b = simd_sum(acc0_b);
@@ -1222,18 +1186,15 @@ pub fn mt_qmm_bm4<T>(
     let row1 = row0 + 1u32;
     let row2 = row0 + 2u32;
     let row3 = row0 + 3u32;
-
     let packs_per_row = k / 8u32;
     let w_base0 = row0 * packs_per_row;
     let w_base1 = row1 * packs_per_row;
     let w_base2 = row2 * packs_per_row;
     let w_base3 = row3 * packs_per_row;
-
     let sb_base0 = row0 * gs_per_row;
     let sb_base1 = row1 * gs_per_row;
     let sb_base2 = row2 * gs_per_row;
     let sb_base3 = row3 * gs_per_row;
-
     // BM=4 M-rows per TG.
     let m_row_a = m_tile * 4u32;
     let m_row_b = m_row_a + 1u32;
@@ -1243,7 +1204,6 @@ pub fn mt_qmm_bm4<T>(
     let x_base_b = m_row_b * k;
     let x_base_c = m_row_c * k;
     let x_base_d = m_row_d * k;
-
     // 16 accumulators: 4 N-rows × 4 M-rows.
     let mut acc0_a = 0.0f32;
     let mut acc0_b = 0.0f32;
@@ -1261,18 +1221,15 @@ pub fn mt_qmm_bm4<T>(
     let mut acc3_b = 0.0f32;
     let mut acc3_c = 0.0f32;
     let mut acc3_d = 0.0f32;
-
     // VARIANT A (K=256): halve the K-block stride to reduce per-iter live X.
     // lane_x_off = lane * 8 (was 16), lane_pack_off = lane (was lane*2).
     // Each lane covers 8 X / 1 W pack per iter; 32 lanes = 256 K per block.
     let lane_x_off = lane * 8u32;
     let lane_pack_off = lane;
-
     for _b in range(0u32, k, 256u32) {
         let s_16 = 0.0625f32;
         let s_256 = 0.00390625f32;
         let s_4096 = 0.000244140625f32;
-
         // ── Load 8 X values for M-row A ──
         let xb_a = x_base_a + _b + lane_x_off;
         let x0_a = load(x[xb_a]).cast::<f32>();
@@ -1290,7 +1247,6 @@ pub fn mt_qmm_bm4<T>(
         let x5_a = x5_a_raw * s_16;
         let x6_a = x6_a_raw * s_256;
         let x7_a = x7_a_raw * s_4096;
-
         // ── Load 8 X values for M-row B ──
         let xb_b = x_base_b + _b + lane_x_off;
         let x0_b = load(x[xb_b]).cast::<f32>();
@@ -1308,7 +1264,6 @@ pub fn mt_qmm_bm4<T>(
         let x5_b = x5_b_raw * s_16;
         let x6_b = x6_b_raw * s_256;
         let x7_b = x7_b_raw * s_4096;
-
         // ── Load 8 X values for M-row C ──
         let xb_c = x_base_c + _b + lane_x_off;
         let x0_c = load(x[xb_c]).cast::<f32>();
@@ -1326,7 +1281,6 @@ pub fn mt_qmm_bm4<T>(
         let x5_c = x5_c_raw * s_16;
         let x6_c = x6_c_raw * s_256;
         let x7_c = x7_c_raw * s_4096;
-
         // ── Load 8 X values for M-row D ──
         let xb_d = x_base_d + _b + lane_x_off;
         let x0_d = load(x[xb_d]).cast::<f32>();
@@ -1344,7 +1298,6 @@ pub fn mt_qmm_bm4<T>(
         let x5_d = x5_d_raw * s_16;
         let x6_d = x6_d_raw * s_256;
         let x7_d = x7_d_raw * s_4096;
-
         // VARIANT A: gs_per_row=64 means K-elements/group=64. With lane_x_off=lane*8,
         // each lane's 8 X-values span exactly half a group (8 < 64), so the group
         // index is constant within a lane's 8-elt slice. _b advances by 256 per
@@ -1352,7 +1305,6 @@ pub fn mt_qmm_bm4<T>(
         let g = (_b + lane_x_off) / 64u32;
         // pack_off: 1 pack (8 nibbles) per lane per K-iter. _b/8 packs at base.
         let pack_off = _b / 8u32 + lane_pack_off;
-
         // ── Row 0 (W extracts shared across all 4 M-rows) — 8 nibbles ──
         let p00 = load(w[w_base0 + pack_off]);
         let p00_hi = p00 >> 16u32;
@@ -1402,7 +1354,6 @@ pub fn mt_qmm_bm4<T>(
         acc0_b = acc0_b + s0 * qd0_b + bi0 * xs_b;
         acc0_c = acc0_c + s0 * qd0_c + bi0 * xs_c;
         acc0_d = acc0_d + s0 * qd0_d + bi0 * xs_d;
-
         // ── Row 1 ──
         let p10 = load(w[w_base1 + pack_off]);
         let p10_hi = p10 >> 16u32;
@@ -1452,7 +1403,6 @@ pub fn mt_qmm_bm4<T>(
         acc1_b = acc1_b + s1 * qd1_b + bi1 * xs_b;
         acc1_c = acc1_c + s1 * qd1_c + bi1 * xs_c;
         acc1_d = acc1_d + s1 * qd1_d + bi1 * xs_d;
-
         // ── Row 2 ──
         let p20 = load(w[w_base2 + pack_off]);
         let p20_hi = p20 >> 16u32;
@@ -1502,7 +1452,6 @@ pub fn mt_qmm_bm4<T>(
         acc2_b = acc2_b + s2 * qd2_b + bi2 * xs_b;
         acc2_c = acc2_c + s2 * qd2_c + bi2 * xs_c;
         acc2_d = acc2_d + s2 * qd2_d + bi2 * xs_d;
-
         // ── Row 3 ──
         let p30 = load(w[w_base3 + pack_off]);
         let p30_hi = p30 >> 16u32;
@@ -1553,7 +1502,6 @@ pub fn mt_qmm_bm4<T>(
         acc3_c = acc3_c + s3 * qd3_c + bi3 * xs_c;
         acc3_d = acc3_d + s3 * qd3_d + bi3 * xs_d;
     }
-
     // Cross-lane reduce + lane-0 stores. 16 outputs per TG.
     let r0_a = simd_sum(acc0_a);
     let r0_b = simd_sum(acc0_b);
@@ -1661,29 +1609,24 @@ pub fn mt_qmv_int8_fast<T>(
     let row1 = row0 + 1u32;
     let row2 = row0 + 2u32;
     let row3 = row0 + 3u32;
-
     // int8: 4 codes per u32. packs_per_row = k/4.
     let packs_per_row = k / 4u32;
     let w_base0 = row0 * packs_per_row;
     let w_base1 = row1 * packs_per_row;
     let w_base2 = row2 * packs_per_row;
     let w_base3 = row3 * packs_per_row;
-
     let sb_base0 = row0 * gs_per_row;
     let sb_base1 = row1 * gs_per_row;
     let sb_base2 = row2 * gs_per_row;
     let sb_base3 = row3 * gs_per_row;
-
     let mut acc0 = 0.0f32;
     let mut acc1 = 0.0f32;
     let mut acc2 = 0.0f32;
     let mut acc3 = 0.0f32;
-
     // Each lane owns 4 X values per K-block (32 lanes × 4 = 128 K elements).
     let lane_x_off = lane * 4u32;
     // One pack per lane per K-block (4 int8 codes per u32).
     let lane_pack_off = lane;
-
     for _b in range(0u32, k, 128u32) {
         // 4 X loads per lane — consecutive for vectorise fusion.
         let xb = _b + lane_x_off;
@@ -1693,13 +1636,11 @@ pub fn mt_qmv_int8_fast<T>(
         let x3 = load(x[xb + 3u32]).cast::<f32>();
         // Bias-hoist xs: raw X sum for the bias accumulation term.
         let xs = x0 + x1 + x2 + x3;
-
         // Group index: each lane's 4 X values fall within one group
         // (group_size=64; 4 × 32 lanes = 128 K-block ≥ 2 groups, but
         // within a lane the 4 slots belong to the same group).
         let g = xb / 64u32;
         let pack_off = _b / 4u32 + lane_pack_off;
-
         // ── Row 0 ──
         let p0 = load(w[w_base0 + pack_off]);
         let s0 = load(scales[sb_base0 + g]).cast::<f32>();
@@ -1711,7 +1652,6 @@ pub fn mt_qmv_int8_fast<T>(
         let q03 = ((p0 >> 24u32) & 255u32).cast::<f32>();
         let qd0 = q00 * x0 + q01 * x1 + q02 * x2 + q03 * x3;
         acc0 = acc0 + s0 * qd0 + bi0 * xs;
-
         // ── Row 1 ──
         let p1 = load(w[w_base1 + pack_off]);
         let s1 = load(scales[sb_base1 + g]).cast::<f32>();
@@ -1722,7 +1662,6 @@ pub fn mt_qmv_int8_fast<T>(
         let q13 = ((p1 >> 24u32) & 255u32).cast::<f32>();
         let qd1 = q10 * x0 + q11 * x1 + q12 * x2 + q13 * x3;
         acc1 = acc1 + s1 * qd1 + bi1 * xs;
-
         // ── Row 2 ──
         let p2 = load(w[w_base2 + pack_off]);
         let s2 = load(scales[sb_base2 + g]).cast::<f32>();
@@ -1733,7 +1672,6 @@ pub fn mt_qmv_int8_fast<T>(
         let q23 = ((p2 >> 24u32) & 255u32).cast::<f32>();
         let qd2 = q20 * x0 + q21 * x1 + q22 * x2 + q23 * x3;
         acc2 = acc2 + s2 * qd2 + bi2 * xs;
-
         // ── Row 3 ──
         let p3 = load(w[w_base3 + pack_off]);
         let s3 = load(scales[sb_base3 + g]).cast::<f32>();
@@ -1745,7 +1683,6 @@ pub fn mt_qmv_int8_fast<T>(
         let qd3 = q30 * x0 + q31 * x1 + q32 * x2 + q33 * x3;
         acc3 = acc3 + s3 * qd3 + bi3 * xs;
     }
-
     // Cross-lane reduction: each row's partial → single value, lane 0 stores.
     let r0 = simd_sum(acc0);
     let r1 = simd_sum(acc1);
@@ -1810,29 +1747,23 @@ pub fn mt_qmm_int8_fast<T>(
     let row1 = row0 + 1u32;
     let row2 = row0 + 2u32;
     let row3 = row0 + 3u32;
-
     // int8: 4 codes per u32.
     let packs_per_row = k / 4u32;
     let w_base0 = row0 * packs_per_row;
     let w_base1 = row1 * packs_per_row;
     let w_base2 = row2 * packs_per_row;
     let w_base3 = row3 * packs_per_row;
-
     let sb_base0 = row0 * gs_per_row;
     let sb_base1 = row1 * gs_per_row;
     let sb_base2 = row2 * gs_per_row;
     let sb_base3 = row3 * gs_per_row;
-
     let x_row_base = m_row * k;
-
     let mut acc0 = 0.0f32;
     let mut acc1 = 0.0f32;
     let mut acc2 = 0.0f32;
     let mut acc3 = 0.0f32;
-
     let lane_x_off = lane * 4u32;
     let lane_pack_off = lane;
-
     for _b in range(0u32, k, 128u32) {
         let xb = x_row_base + _b + lane_x_off;
         let x0 = load(x[xb]).cast::<f32>();
@@ -1840,11 +1771,9 @@ pub fn mt_qmm_int8_fast<T>(
         let x2 = load(x[xb + 2u32]).cast::<f32>();
         let x3 = load(x[xb + 3u32]).cast::<f32>();
         let xs = x0 + x1 + x2 + x3;
-
         // Group index recomputed against K-local base (xb includes x_row_base).
         let g = (_b + lane_x_off) / 64u32;
         let pack_off = _b / 4u32 + lane_pack_off;
-
         // ── Row 0 ──
         let p0 = load(w[w_base0 + pack_off]);
         let s0 = load(scales[sb_base0 + g]).cast::<f32>();
@@ -1855,7 +1784,6 @@ pub fn mt_qmm_int8_fast<T>(
         let q03 = ((p0 >> 24u32) & 255u32).cast::<f32>();
         let qd0 = q00 * x0 + q01 * x1 + q02 * x2 + q03 * x3;
         acc0 = acc0 + s0 * qd0 + bi0 * xs;
-
         // ── Row 1 ──
         let p1 = load(w[w_base1 + pack_off]);
         let s1 = load(scales[sb_base1 + g]).cast::<f32>();
@@ -1866,7 +1794,6 @@ pub fn mt_qmm_int8_fast<T>(
         let q13 = ((p1 >> 24u32) & 255u32).cast::<f32>();
         let qd1 = q10 * x0 + q11 * x1 + q12 * x2 + q13 * x3;
         acc1 = acc1 + s1 * qd1 + bi1 * xs;
-
         // ── Row 2 ──
         let p2 = load(w[w_base2 + pack_off]);
         let s2 = load(scales[sb_base2 + g]).cast::<f32>();
@@ -1877,7 +1804,6 @@ pub fn mt_qmm_int8_fast<T>(
         let q23 = ((p2 >> 24u32) & 255u32).cast::<f32>();
         let qd2 = q20 * x0 + q21 * x1 + q22 * x2 + q23 * x3;
         acc2 = acc2 + s2 * qd2 + bi2 * xs;
-
         // ── Row 3 ──
         let p3 = load(w[w_base3 + pack_off]);
         let s3 = load(scales[sb_base3 + g]).cast::<f32>();
@@ -1889,7 +1815,6 @@ pub fn mt_qmm_int8_fast<T>(
         let qd3 = q30 * x0 + q31 * x1 + q32 * x2 + q33 * x3;
         acc3 = acc3 + s3 * qd3 + bi3 * xs;
     }
-
     let r0 = simd_sum(acc0);
     let r1 = simd_sum(acc1);
     let r2 = simd_sum(acc2);
@@ -1953,25 +1878,21 @@ pub fn mt_qmm_bm2_int8_fast<T>(
     let row1 = row0 + 1u32;
     let row2 = row0 + 2u32;
     let row3 = row0 + 3u32;
-
     // int8: 4 codes per u32.
     let packs_per_row = k / 4u32;
     let w_base0 = row0 * packs_per_row;
     let w_base1 = row1 * packs_per_row;
     let w_base2 = row2 * packs_per_row;
     let w_base3 = row3 * packs_per_row;
-
     let sb_base0 = row0 * gs_per_row;
     let sb_base1 = row1 * gs_per_row;
     let sb_base2 = row2 * gs_per_row;
     let sb_base3 = row3 * gs_per_row;
-
     // BM=2 M-rows per TG.
     let m_row_a = m_tile * 2u32;
     let m_row_b = m_row_a + 1u32;
     let x_base_a = m_row_a * k;
     let x_base_b = m_row_b * k;
-
     // 8 accumulators: 4 N-rows × 2 M-rows.
     let mut acc0_a = 0.0f32;
     let mut acc0_b = 0.0f32;
@@ -1981,10 +1902,8 @@ pub fn mt_qmm_bm2_int8_fast<T>(
     let mut acc2_b = 0.0f32;
     let mut acc3_a = 0.0f32;
     let mut acc3_b = 0.0f32;
-
     let lane_x_off = lane * 4u32;
     let lane_pack_off = lane;
-
     for _b in range(0u32, k, 128u32) {
         // ── Load 4 X values for M-row A ──
         let xb_a = x_base_a + _b + lane_x_off;
@@ -1993,7 +1912,6 @@ pub fn mt_qmm_bm2_int8_fast<T>(
         let x2_a = load(x[xb_a + 2u32]).cast::<f32>();
         let x3_a = load(x[xb_a + 3u32]).cast::<f32>();
         let xs_a = x0_a + x1_a + x2_a + x3_a;
-
         // ── Load 4 X values for M-row B ──
         let xb_b = x_base_b + _b + lane_x_off;
         let x0_b = load(x[xb_b]).cast::<f32>();
@@ -2001,10 +1919,8 @@ pub fn mt_qmm_bm2_int8_fast<T>(
         let x2_b = load(x[xb_b + 2u32]).cast::<f32>();
         let x3_b = load(x[xb_b + 3u32]).cast::<f32>();
         let xs_b = x0_b + x1_b + x2_b + x3_b;
-
         let g = (_b + lane_x_off) / 64u32;
         let pack_off = _b / 4u32 + lane_pack_off;
-
         // ── Row 0 (shared W extract, dual qdots) ──
         let p0 = load(w[w_base0 + pack_off]);
         let s0 = load(scales[sb_base0 + g]).cast::<f32>();
@@ -2017,7 +1933,6 @@ pub fn mt_qmm_bm2_int8_fast<T>(
         let qd0_b = q00 * x0_b + q01 * x1_b + q02 * x2_b + q03 * x3_b;
         acc0_a = acc0_a + s0 * qd0_a + bi0 * xs_a;
         acc0_b = acc0_b + s0 * qd0_b + bi0 * xs_b;
-
         // ── Row 1 ──
         let p1 = load(w[w_base1 + pack_off]);
         let s1 = load(scales[sb_base1 + g]).cast::<f32>();
@@ -2030,7 +1945,6 @@ pub fn mt_qmm_bm2_int8_fast<T>(
         let qd1_b = q10 * x0_b + q11 * x1_b + q12 * x2_b + q13 * x3_b;
         acc1_a = acc1_a + s1 * qd1_a + bi1 * xs_a;
         acc1_b = acc1_b + s1 * qd1_b + bi1 * xs_b;
-
         // ── Row 2 ──
         let p2 = load(w[w_base2 + pack_off]);
         let s2 = load(scales[sb_base2 + g]).cast::<f32>();
@@ -2043,7 +1957,6 @@ pub fn mt_qmm_bm2_int8_fast<T>(
         let qd2_b = q20 * x0_b + q21 * x1_b + q22 * x2_b + q23 * x3_b;
         acc2_a = acc2_a + s2 * qd2_a + bi2 * xs_a;
         acc2_b = acc2_b + s2 * qd2_b + bi2 * xs_b;
-
         // ── Row 3 ──
         let p3 = load(w[w_base3 + pack_off]);
         let s3 = load(scales[sb_base3 + g]).cast::<f32>();
@@ -2057,7 +1970,6 @@ pub fn mt_qmm_bm2_int8_fast<T>(
         acc3_a = acc3_a + s3 * qd3_a + bi3 * xs_a;
         acc3_b = acc3_b + s3 * qd3_b + bi3 * xs_b;
     }
-
     // Cross-lane reduce + lane-0 stores. 8 outputs per TG.
     let r0_a = simd_sum(acc0_a);
     let r0_b = simd_sum(acc0_b);
@@ -2131,19 +2043,16 @@ pub fn mt_qmm_bm4_int8_fast<T>(
     let row1 = row0 + 1u32;
     let row2 = row0 + 2u32;
     let row3 = row0 + 3u32;
-
     // int8: 4 codes per u32.
     let packs_per_row = k / 4u32;
     let w_base0 = row0 * packs_per_row;
     let w_base1 = row1 * packs_per_row;
     let w_base2 = row2 * packs_per_row;
     let w_base3 = row3 * packs_per_row;
-
     let sb_base0 = row0 * gs_per_row;
     let sb_base1 = row1 * gs_per_row;
     let sb_base2 = row2 * gs_per_row;
     let sb_base3 = row3 * gs_per_row;
-
     // BM=4 M-rows per TG.
     let m_row_a = m_tile * 4u32;
     let m_row_b = m_row_a + 1u32;
@@ -2153,7 +2062,6 @@ pub fn mt_qmm_bm4_int8_fast<T>(
     let x_base_b = m_row_b * k;
     let x_base_c = m_row_c * k;
     let x_base_d = m_row_d * k;
-
     // 16 accumulators: 4 N-rows × 4 M-rows.
     let mut acc0_a = 0.0f32;
     let mut acc0_b = 0.0f32;
@@ -2171,11 +2079,9 @@ pub fn mt_qmm_bm4_int8_fast<T>(
     let mut acc3_b = 0.0f32;
     let mut acc3_c = 0.0f32;
     let mut acc3_d = 0.0f32;
-
     // 4 X per lane × 32 lanes = 128 K-block.
     let lane_x_off = lane * 4u32;
     let lane_pack_off = lane;
-
     for _b in range(0u32, k, 128u32) {
         // ── Load 4 X values for each of the 4 M-rows ──
         let xb_a = x_base_a + _b + lane_x_off;
@@ -2184,31 +2090,26 @@ pub fn mt_qmm_bm4_int8_fast<T>(
         let x2_a = load(x[xb_a + 2u32]).cast::<f32>();
         let x3_a = load(x[xb_a + 3u32]).cast::<f32>();
         let xs_a = x0_a + x1_a + x2_a + x3_a;
-
         let xb_b = x_base_b + _b + lane_x_off;
         let x0_b = load(x[xb_b]).cast::<f32>();
         let x1_b = load(x[xb_b + 1u32]).cast::<f32>();
         let x2_b = load(x[xb_b + 2u32]).cast::<f32>();
         let x3_b = load(x[xb_b + 3u32]).cast::<f32>();
         let xs_b = x0_b + x1_b + x2_b + x3_b;
-
         let xb_c = x_base_c + _b + lane_x_off;
         let x0_c = load(x[xb_c]).cast::<f32>();
         let x1_c = load(x[xb_c + 1u32]).cast::<f32>();
         let x2_c = load(x[xb_c + 2u32]).cast::<f32>();
         let x3_c = load(x[xb_c + 3u32]).cast::<f32>();
         let xs_c = x0_c + x1_c + x2_c + x3_c;
-
         let xb_d = x_base_d + _b + lane_x_off;
         let x0_d = load(x[xb_d]).cast::<f32>();
         let x1_d = load(x[xb_d + 1u32]).cast::<f32>();
         let x2_d = load(x[xb_d + 2u32]).cast::<f32>();
         let x3_d = load(x[xb_d + 3u32]).cast::<f32>();
         let xs_d = x0_d + x1_d + x2_d + x3_d;
-
         let g = (_b + lane_x_off) / 64u32;
         let pack_off = _b / 4u32 + lane_pack_off;
-
         // ── Row 0 (W extracts shared across all 4 M-rows) ──
         let p0 = load(w[w_base0 + pack_off]);
         let s0 = load(scales[sb_base0 + g]).cast::<f32>();
@@ -2225,7 +2126,6 @@ pub fn mt_qmm_bm4_int8_fast<T>(
         acc0_b = acc0_b + s0 * qd0_b + bi0 * xs_b;
         acc0_c = acc0_c + s0 * qd0_c + bi0 * xs_c;
         acc0_d = acc0_d + s0 * qd0_d + bi0 * xs_d;
-
         // ── Row 1 ──
         let p1 = load(w[w_base1 + pack_off]);
         let s1 = load(scales[sb_base1 + g]).cast::<f32>();
@@ -2242,7 +2142,6 @@ pub fn mt_qmm_bm4_int8_fast<T>(
         acc1_b = acc1_b + s1 * qd1_b + bi1 * xs_b;
         acc1_c = acc1_c + s1 * qd1_c + bi1 * xs_c;
         acc1_d = acc1_d + s1 * qd1_d + bi1 * xs_d;
-
         // ── Row 2 ──
         let p2 = load(w[w_base2 + pack_off]);
         let s2 = load(scales[sb_base2 + g]).cast::<f32>();
@@ -2259,7 +2158,6 @@ pub fn mt_qmm_bm4_int8_fast<T>(
         acc2_b = acc2_b + s2 * qd2_b + bi2 * xs_b;
         acc2_c = acc2_c + s2 * qd2_c + bi2 * xs_c;
         acc2_d = acc2_d + s2 * qd2_d + bi2 * xs_d;
-
         // ── Row 3 ──
         let p3 = load(w[w_base3 + pack_off]);
         let s3 = load(scales[sb_base3 + g]).cast::<f32>();
@@ -2277,7 +2175,6 @@ pub fn mt_qmm_bm4_int8_fast<T>(
         acc3_c = acc3_c + s3 * qd3_c + bi3 * xs_c;
         acc3_d = acc3_d + s3 * qd3_d + bi3 * xs_d;
     }
-
     // Cross-lane reduce + lane-0 stores. 16 outputs per TG.
     let r0_a = simd_sum(acc0_a);
     let r0_b = simd_sum(acc0_b);
@@ -2406,13 +2303,11 @@ pub fn mt_qmm_mma<T>(
     let sm = sg / 2u32;
     let sn = sg & 1u32;
     let lane_in_tg = sg * 32u32 + lane;
-
     // 8×8 frag lane mapping (Apple steel_gemm layout).
     let qid = lane / 4u32;
     let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
     let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
     let fn1 = fn0 + 1u32;
-
     // TG memory for X tile [BM × BK] and dequant W tile [BN × BK].
     // Stride = BK + 4 = 36 (skew by 4 T elements) to break 32-bank conflicts
     // on the 8×8 frag column reads. Without skew, A-frag reads collide
@@ -2421,7 +2316,6 @@ pub fn mt_qmm_mma<T>(
     // across all 32 banks. Size = 32 × 36 = 1152 T (4.5 KB f32 / 2.25 KB f16).
     threadgroup_alloc("xs", 1152, T);
     threadgroup_alloc("ws", 1152, T);
-
     // ── 4 output frags per SG, init to 0 ──
     // c_f<row_frag><col_frag>: row_frag = fm-axis (0 = rows 0..7 of 16-row
     // sub-tile, 1 = rows 8..15), col_frag = fn-axis (likewise for cols).
@@ -2437,7 +2331,6 @@ pub fn mt_qmm_mma<T>(
     let c_f11 = simdgroup_alloc::<f32, 8, 8>();
     simdgroup_elem_store(c_f11, 0, 0.0f32);
     simdgroup_elem_store(c_f11, 1, 0.0f32);
-
     // A (X) and B (W^T) frag scratch, reused per k_inner. Keep at native
     // T precision — Fix 5 (upcast to f32 to mirror MLX's half→float MMA
     // path) was tested in layered-bench: identical f16 numbers (93-96%
@@ -2446,7 +2339,6 @@ pub fn mt_qmm_mma<T>(
     let a_f1 = simdgroup_alloc::<T, 8, 8>();
     let b_f0 = simdgroup_alloc::<T, 8, 8>();
     let b_f1 = simdgroup_alloc::<T, 8, 8>();
-
     // Coop-load lane assignments.
     // X tile: 32×32 = 1024 elements, 128 lanes × 8 strides; each step i in
     //   0..8 writes Xs[i*128 + lane_in_tg] from X[m_row, k_col] where
@@ -2456,15 +2348,12 @@ pub fn mt_qmm_mma<T>(
     //   Each lane dequants 8 nibbles into Ws[w_row*32 + pack_in_row*8 + i].
     let w_row = lane_in_tg / 4u32;
     let pack_in_row = lane_in_tg & 3u32;
-
     let x_m_base = m_tile * 32u32; // first M-row this TG handles
     let w_n_base = n_tile * 32u32; // first N-row this TG handles
     let packs_per_row = k / 8u32;
-
     // Per-lane scale/bias row base (for W dequant). Fixed across K-blocks.
     let sb_base = (w_n_base + w_row) * gs_per_row;
     let w_pack_row_base = (w_n_base + w_row) * packs_per_row;
-
     // TG row stride. Default is BK + 4 = 36 (skew by 4 T elements) to break
     // 32-bank conflicts on the 8×8 frag column reads. For f16 the dtype-aware
     // skew formula `BK + 16/sizeof(T)` (mirroring MLX `affine_qmm_t`) bumps
@@ -2476,7 +2365,6 @@ pub fn mt_qmm_mma<T>(
     let ws_ld_const = 36u32;
     let xs_ld = xs_ld_const;
     let ws_ld = ws_ld_const;
-
     // Coop X-load mapping. 32×32 = 1024 elements. 128 lanes × 8 elems each.
     // To enable vec4 device-load fusion (Fix 3 — see archaeology §4.2): map
     // each lane to (m_row, k_quad) reading 8 *contiguous* Ks. Then the 8
@@ -2490,7 +2378,6 @@ pub fn mt_qmm_mma<T>(
     let x_m_row = lane_in_tg / 4u32;
     let x_k_quad = lane_in_tg & 3u32;
     let x_k_base = x_k_quad * 8u32;
-
     for kb in range(0u32, k, 32u32) {
         // ── 1. Coop X load — 128 lanes × 8 contiguous K elems per lane ──
         // Each lane: read 8 contiguous halves from one X-row at k offset
@@ -2514,7 +2401,6 @@ pub fn mt_qmm_mma<T>(
         threadgroup_store("xs", x_ws_base + 5u32, xv5);
         threadgroup_store("xs", x_ws_base + 6u32, xv6);
         threadgroup_store("xs", x_ws_base + 7u32, xv7);
-
         // ── 2. Coop W dequant — each lane loads 1 pack and writes 8 fp T ──
         let pack_k_off = kb / 8u32 + pack_in_row;
         let pack = load(w[w_pack_row_base + pack_k_off]);
@@ -2544,9 +2430,7 @@ pub fn mt_qmm_mma<T>(
         threadgroup_store("ws", ws_base + 5u32, (s * q5 + b).cast::<T>());
         threadgroup_store("ws", ws_base + 6u32, (s * q6 + b).cast::<T>());
         threadgroup_store("ws", ws_base + 7u32, (s * q7 + b).cast::<T>());
-
         threadgroup_barrier();
-
         // ── 3. MMA inner loop — 4 frags × 4 k-inner = 16 MMAs per SG ──
         // A-frag (X) elem[i] @ (fm, fn_i) = Xs[(sm*16 + frag_m + fm) * 36 + (k_inner*8 + fn_i)]
         // B-frag (W^T) elem[i] @ (fm, fn_i) = Ws[(sn*16 + frag_n + fn_i) * 36 + (k_inner*8 + fm)]
@@ -2554,7 +2438,6 @@ pub fn mt_qmm_mma<T>(
         let row_a1 = sm * 16u32 + 8u32 + fm; // frag_m = 8
         let col_b0 = sn * 16u32; // frag_n = 0 base offset
         let col_b1 = sn * 16u32 + 8u32; // frag_n = 8 base offset
-
         // k_inner = 0 (k offset 0..7 inside BK=32) — 3-barrier MLX pattern
         // (Fix 2) + serpentine (Fix 4): A-load, barrier, B-load, barrier,
         // MMAs in (0,0)→(0,1)→(1,1)→(1,0) order, barrier.
@@ -2573,7 +2456,6 @@ pub fn mt_qmm_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 1 (k offset 8..15)
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 8u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 8u32 + fn1));
@@ -2590,7 +2472,6 @@ pub fn mt_qmm_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 2 (k offset 16..23)
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 16u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 16u32 + fn1));
@@ -2607,7 +2488,6 @@ pub fn mt_qmm_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 3 (k offset 24..31)
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 24u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 24u32 + fn1));
@@ -2624,10 +2504,8 @@ pub fn mt_qmm_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         threadgroup_barrier();
     }
-
     // ── 4. Write 4 C frags to global out ──
     let out_m_base = m_tile * 32u32 + sm * 16u32;
     let out_n_base = n_tile * 32u32 + sn * 16u32;
@@ -2750,19 +2628,16 @@ pub fn mt_qmm_mma_m16<T>(
     let sm = 0u32;
     let sn = sg & 1u32;
     let lane_in_tg = sg * 32u32 + lane;
-
     // 8×8 frag lane mapping (Apple steel_gemm layout — same as mt_qmm_mma).
     let qid = lane / 4u32;
     let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
     let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
     let fn1 = fn0 + 1u32;
-
     // TG memory for X tile [16 × 32] and dequant W tile [32 × 32].
     // BK + 4 = 36 stride for bank-conflict avoidance — same skew rationale
     // as mt_qmm_mma. Xs size = 16 × 36 = 576 T; Ws size = 32 × 36 = 1152 T.
     threadgroup_alloc("xs", 576, T);
     threadgroup_alloc("ws", 1152, T);
-
     // ── 4 output frags per SG, init to 0 ──
     let c_f00 = simdgroup_alloc::<f32, 8, 8>();
     simdgroup_elem_store(c_f00, 0, 0.0f32);
@@ -2776,13 +2651,11 @@ pub fn mt_qmm_mma_m16<T>(
     let c_f11 = simdgroup_alloc::<f32, 8, 8>();
     simdgroup_elem_store(c_f11, 0, 0.0f32);
     simdgroup_elem_store(c_f11, 1, 0.0f32);
-
     // A (X) and B (W^T) frag scratch, reused per k_inner.
     let a_f0 = simdgroup_alloc::<T, 8, 8>();
     let a_f1 = simdgroup_alloc::<T, 8, 8>();
     let b_f0 = simdgroup_alloc::<T, 8, 8>();
     let b_f1 = simdgroup_alloc::<T, 8, 8>();
-
     // Coop-load lane assignments.
     // X tile: 16×32 = 512 elements, 64 lanes × 8 strides each → 512 covers.
     //   step i in 0..8: flat = i*64 + lane_in_tg ∈ 0..511.
@@ -2794,11 +2667,9 @@ pub fn mt_qmm_mma_m16<T>(
     let x_m_base = m_tile * 16u32; // first M-row this TG handles
     let w_n_base = n_tile * 32u32; // first N-row this TG handles
     let packs_per_row = k / 8u32;
-
     // TG row stride = 36 (BK + 4 skew).
     let xs_ld = 36u32;
     let ws_ld = 36u32;
-
     for kb in range(0u32, k, 32u32) {
         // ── 1. Coop X load — 64 lanes × 8 strides each fill 512-elt tile ──
         let flat0 = lane_in_tg;
@@ -2865,7 +2736,6 @@ pub fn mt_qmm_mma_m16<T>(
             mr7 * xs_ld + kc7,
             load(x[(x_m_base + mr7) * k + kb + kc7]).cast::<T>(),
         );
-
         // ── 2. Coop W dequant — 64 lanes × 2 packs each → 1024 fp T ──
         // Pack 0: pack_idx = lane_in_tg ∈ 0..63 (first 64 packs).
         // Pack 1: pack_idx = 64 + lane_in_tg ∈ 64..127 (last 64 packs).
@@ -2873,7 +2743,6 @@ pub fn mt_qmm_mma_m16<T>(
         let s_16 = 0.0625f32;
         let s_256 = 0.00390625f32;
         let s_4096 = 0.000244140625f32;
-
         // Pack 0
         let pack_idx_0 = lane_in_tg;
         let w_row_0 = pack_idx_0 / 4u32;
@@ -2902,7 +2771,6 @@ pub fn mt_qmm_mma_m16<T>(
         threadgroup_store("ws", ws_base_0 + 5u32, (s_0 * q5_0 + b_0).cast::<T>());
         threadgroup_store("ws", ws_base_0 + 6u32, (s_0 * q6_0 + b_0).cast::<T>());
         threadgroup_store("ws", ws_base_0 + 7u32, (s_0 * q7_0 + b_0).cast::<T>());
-
         // Pack 1
         let pack_idx_1 = 64u32 + lane_in_tg;
         let w_row_1 = pack_idx_1 / 4u32;
@@ -2931,9 +2799,7 @@ pub fn mt_qmm_mma_m16<T>(
         threadgroup_store("ws", ws_base_1 + 5u32, (s_1 * q5_1 + b_1).cast::<T>());
         threadgroup_store("ws", ws_base_1 + 6u32, (s_1 * q6_1 + b_1).cast::<T>());
         threadgroup_store("ws", ws_base_1 + 7u32, (s_1 * q7_1 + b_1).cast::<T>());
-
         threadgroup_barrier();
-
         // ── 3. MMA inner loop — 4 frags × 4 k-inner = 16 MMAs per SG ──
         // sm = 0 fixed (WM=1 → both SGs cover full BM=16).
         // A-frag (X) elem[i] @ (fm, fn_i) = Xs[(0 + frag_m + fm) * 36 + (k_inner*8 + fn_i)]
@@ -2942,7 +2808,6 @@ pub fn mt_qmm_mma_m16<T>(
         let row_a1 = sm * 16u32 + 8u32 + fm; // frag_m = 8
         let col_b0 = sn * 16u32; // frag_n = 0 base offset
         let col_b1 = sn * 16u32 + 8u32; // frag_n = 8 base offset
-
         // k_inner = 0 (k offset 0..7 inside BK=32)
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + fn1));
@@ -2957,7 +2822,6 @@ pub fn mt_qmm_mma_m16<T>(
         simdgroup_matmul(a_f0, b_f1, c_f01);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_matmul(a_f1, b_f1, c_f11);
-
         // k_inner = 1 (k offset 8..15)
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 8u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 8u32 + fn1));
@@ -2972,7 +2836,6 @@ pub fn mt_qmm_mma_m16<T>(
         simdgroup_matmul(a_f0, b_f1, c_f01);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_matmul(a_f1, b_f1, c_f11);
-
         // k_inner = 2 (k offset 16..23)
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 16u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 16u32 + fn1));
@@ -2987,7 +2850,6 @@ pub fn mt_qmm_mma_m16<T>(
         simdgroup_matmul(a_f0, b_f1, c_f01);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_matmul(a_f1, b_f1, c_f11);
-
         // k_inner = 3 (k offset 24..31)
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 24u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 24u32 + fn1));
@@ -3002,10 +2864,8 @@ pub fn mt_qmm_mma_m16<T>(
         simdgroup_matmul(a_f0, b_f1, c_f01);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_matmul(a_f1, b_f1, c_f11);
-
         threadgroup_barrier();
     }
-
     // ── 4. Write 4 C frags to global out ──
     // sm = 0 → out_m_base starts at m_tile*16 (no sub-tile m offset).
     let out_m_base = m_tile * 16u32;
@@ -3107,19 +2967,16 @@ pub fn mt_qmm_mma_int8<T>(
     let sm = sg / 2u32;
     let sn = sg & 1u32;
     let lane_in_tg = sg * 32u32 + lane;
-
     // 8×8 frag lane mapping (Apple steel_gemm layout — same as mt_qmm_mma).
     let qid = lane / 4u32;
     let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
     let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
     let fn1 = fn0 + 1u32;
-
     // TG memory for X tile [BM × BK] and dequant W tile [BN × BK].
     // BK + 4 = 36 stride for bank-conflict avoidance — same skew rationale
     // as mt_qmm_mma. Xs size = 32 × 36 = 1152 T; Ws size = 32 × 36 = 1152 T.
     threadgroup_alloc("xs", 1152, T);
     threadgroup_alloc("ws", 1152, T);
-
     // ── 4 output frags per SG, init to 0 ──
     let c_f00 = simdgroup_alloc::<f32, 8, 8>();
     simdgroup_elem_store(c_f00, 0, 0.0f32);
@@ -3133,35 +2990,29 @@ pub fn mt_qmm_mma_int8<T>(
     let c_f11 = simdgroup_alloc::<f32, 8, 8>();
     simdgroup_elem_store(c_f11, 0, 0.0f32);
     simdgroup_elem_store(c_f11, 1, 0.0f32);
-
     // A (X) and B (W^T) frag scratch, reused per k_inner.
     let a_f0 = simdgroup_alloc::<T, 8, 8>();
     let a_f1 = simdgroup_alloc::<T, 8, 8>();
     let b_f0 = simdgroup_alloc::<T, 8, 8>();
     let b_f1 = simdgroup_alloc::<T, 8, 8>();
-
     let x_m_base = m_tile * 32u32; // first M-row this TG handles
     let w_n_base = n_tile * 32u32; // first N-row this TG handles
     // Int8: 4 elements per pack → packs_per_row = k / 4.
     let packs_per_row = k / 4u32;
-
     // TG row stride = 36 (BK + 4 skew).
     let xs_ld_const = 36u32;
     let ws_ld_const = 36u32;
     let xs_ld = xs_ld_const;
     let ws_ld = ws_ld_const;
-
     // Coop X-load mapping. 32×32 = 1024 elements, 128 lanes × 8 elems each.
     // Same vec4-fusion layout as mt_qmm_mma: lane_in_tg/4 = m_row, lane_in_tg%4 = k_quad.
     let x_m_row = lane_in_tg / 4u32;
     let x_k_quad = lane_in_tg & 3u32;
     let x_k_base = x_k_quad * 8u32;
-
     // W dequant lane mapping for int8:
     // 256 packs per K-block (32 rows × 8 packs/row). 128 lanes → 2 packs/lane.
     // pack_idx_0 = lane_in_tg (packs 0..127), pack_idx_1 = 128 + lane_in_tg (packs 128..255).
     // w_row = pack_idx / 8 ∈ 0..31, pack_in_row = pack_idx % 8 ∈ 0..7.
-
     for kb in range(0u32, k, 32u32) {
         // ── 1. Coop X load — 128 lanes × 8 contiguous K elems per lane ──
         let x_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base;
@@ -3182,12 +3033,10 @@ pub fn mt_qmm_mma_int8<T>(
         threadgroup_store("xs", x_ws_base + 5u32, xv5);
         threadgroup_store("xs", x_ws_base + 6u32, xv6);
         threadgroup_store("xs", x_ws_base + 7u32, xv7);
-
         // ── 2. Coop W dequant (int8) — 128 lanes × 2 packs each → 1024 fp T ──
         // Pack 0: pack_idx = lane_in_tg ∈ 0..127 (first 128 packs).
         // Pack 1: pack_idx = 128 + lane_in_tg ∈ 128..255 (last 128 packs).
         // Each pack yields 4 values via (pack >> (i*8)) & 0xFF, i ∈ 0..3.
-
         // Pack 0
         let pack_idx_0 = lane_in_tg;
         let w_row_0 = pack_idx_0 / 8u32;
@@ -3207,7 +3056,6 @@ pub fn mt_qmm_mma_int8<T>(
         threadgroup_store("ws", ws_base_0 + 1u32, (s_0 * q1_0 + b_0).cast::<T>());
         threadgroup_store("ws", ws_base_0 + 2u32, (s_0 * q2_0 + b_0).cast::<T>());
         threadgroup_store("ws", ws_base_0 + 3u32, (s_0 * q3_0 + b_0).cast::<T>());
-
         // Pack 1
         let pack_idx_1 = 128u32 + lane_in_tg;
         let w_row_1 = pack_idx_1 / 8u32;
@@ -3227,9 +3075,7 @@ pub fn mt_qmm_mma_int8<T>(
         threadgroup_store("ws", ws_base_1 + 1u32, (s_1 * q1_1 + b_1).cast::<T>());
         threadgroup_store("ws", ws_base_1 + 2u32, (s_1 * q2_1 + b_1).cast::<T>());
         threadgroup_store("ws", ws_base_1 + 3u32, (s_1 * q3_1 + b_1).cast::<T>());
-
         threadgroup_barrier();
-
         // ── 3. MMA inner loop — 4 frags × 4 k-inner = 16 MMAs per SG ──
         // Identical to mt_qmm_mma: A-load, barrier, B-load, barrier, MMAs,
         // barrier; serpentine MMA order (00→01→11→10).
@@ -3237,7 +3083,6 @@ pub fn mt_qmm_mma_int8<T>(
         let row_a1 = sm * 16u32 + 8u32 + fm; // frag_m = 8
         let col_b0 = sn * 16u32; // frag_n = 0 base offset
         let col_b1 = sn * 16u32 + 8u32; // frag_n = 8 base offset
-
         // k_inner = 0 (k offset 0..7 inside BK=32)
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + fn1));
@@ -3254,7 +3099,6 @@ pub fn mt_qmm_mma_int8<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 1 (k offset 8..15)
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 8u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 8u32 + fn1));
@@ -3271,7 +3115,6 @@ pub fn mt_qmm_mma_int8<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 2 (k offset 16..23)
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 16u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 16u32 + fn1));
@@ -3288,7 +3131,6 @@ pub fn mt_qmm_mma_int8<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 3 (k offset 24..31)
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 24u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 24u32 + fn1));
@@ -3305,10 +3147,8 @@ pub fn mt_qmm_mma_int8<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         threadgroup_barrier();
     }
-
     // ── 4. Write 4 C frags to global out ──
     let out_m_base = m_tile * 32u32 + sm * 16u32;
     let out_n_base = n_tile * 32u32 + sn * 16u32;
@@ -3400,17 +3240,14 @@ pub fn mt_qmm_mma_m16_int8<T>(
     let sm = 0u32;
     let sn = sg & 1u32;
     let lane_in_tg = sg * 32u32 + lane;
-
     // 8×8 frag lane mapping (Apple steel_gemm layout — same as mt_qmm_mma).
     let qid = lane / 4u32;
     let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
     let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
     let fn1 = fn0 + 1u32;
-
     // TG memory: Xs[16 × 36] = 576 T; Ws[32 × 36] = 1152 T.
     threadgroup_alloc("xs", 576, T);
     threadgroup_alloc("ws", 1152, T);
-
     // ── 4 output frags per SG, init to 0 ──
     let c_f00 = simdgroup_alloc::<f32, 8, 8>();
     simdgroup_elem_store(c_f00, 0, 0.0f32);
@@ -3424,22 +3261,18 @@ pub fn mt_qmm_mma_m16_int8<T>(
     let c_f11 = simdgroup_alloc::<f32, 8, 8>();
     simdgroup_elem_store(c_f11, 0, 0.0f32);
     simdgroup_elem_store(c_f11, 1, 0.0f32);
-
     // A (X) and B (W^T) frag scratch, reused per k_inner.
     let a_f0 = simdgroup_alloc::<T, 8, 8>();
     let a_f1 = simdgroup_alloc::<T, 8, 8>();
     let b_f0 = simdgroup_alloc::<T, 8, 8>();
     let b_f1 = simdgroup_alloc::<T, 8, 8>();
-
     let x_m_base = m_tile * 16u32; // first M-row this TG handles
     let w_n_base = n_tile * 32u32; // first N-row this TG handles
     // Int8: 4 elements per pack → packs_per_row = k / 4.
     let packs_per_row = k / 4u32;
-
     // TG row stride = 36 (BK + 4 skew).
     let xs_ld = 36u32;
     let ws_ld = 36u32;
-
     for kb in range(0u32, k, 32u32) {
         // ── 1. Coop X load — 64 lanes × 8 strides each fill 512-elt tile ──
         let flat0 = lane_in_tg;
@@ -3506,12 +3339,10 @@ pub fn mt_qmm_mma_m16_int8<T>(
             mr7 * xs_ld + kc7,
             load(x[(x_m_base + mr7) * k + kb + kc7]).cast::<T>(),
         );
-
         // ── 2. Coop W dequant (int8) — 64 lanes × 4 packs each → 1024 fp T ──
         // 256 packs per K-block. 64 lanes × 4 packs = 256. ✓
         // Step N ∈ {0,1,2,3}: pack_idx = N*64 + lane_in_tg.
         // w_row = pack_idx / 8, pack_in_row = pack_idx % 8.
-
         // Pack step 0
         let pack_idx_0 = lane_in_tg;
         let w_row_0 = pack_idx_0 / 8u32;
@@ -3531,7 +3362,6 @@ pub fn mt_qmm_mma_m16_int8<T>(
         threadgroup_store("ws", ws_base_0 + 1u32, (s_0 * q1_0 + b_0).cast::<T>());
         threadgroup_store("ws", ws_base_0 + 2u32, (s_0 * q2_0 + b_0).cast::<T>());
         threadgroup_store("ws", ws_base_0 + 3u32, (s_0 * q3_0 + b_0).cast::<T>());
-
         // Pack step 1
         let pack_idx_1 = 64u32 + lane_in_tg;
         let w_row_1 = pack_idx_1 / 8u32;
@@ -3551,7 +3381,6 @@ pub fn mt_qmm_mma_m16_int8<T>(
         threadgroup_store("ws", ws_base_1 + 1u32, (s_1 * q1_1 + b_1).cast::<T>());
         threadgroup_store("ws", ws_base_1 + 2u32, (s_1 * q2_1 + b_1).cast::<T>());
         threadgroup_store("ws", ws_base_1 + 3u32, (s_1 * q3_1 + b_1).cast::<T>());
-
         // Pack step 2
         let pack_idx_2 = 128u32 + lane_in_tg;
         let w_row_2 = pack_idx_2 / 8u32;
@@ -3571,7 +3400,6 @@ pub fn mt_qmm_mma_m16_int8<T>(
         threadgroup_store("ws", ws_base_2 + 1u32, (s_2 * q1_2 + b_2).cast::<T>());
         threadgroup_store("ws", ws_base_2 + 2u32, (s_2 * q2_2 + b_2).cast::<T>());
         threadgroup_store("ws", ws_base_2 + 3u32, (s_2 * q3_2 + b_2).cast::<T>());
-
         // Pack step 3
         let pack_idx_3 = 192u32 + lane_in_tg;
         let w_row_3 = pack_idx_3 / 8u32;
@@ -3591,16 +3419,13 @@ pub fn mt_qmm_mma_m16_int8<T>(
         threadgroup_store("ws", ws_base_3 + 1u32, (s_3 * q1_3 + b_3).cast::<T>());
         threadgroup_store("ws", ws_base_3 + 2u32, (s_3 * q2_3 + b_3).cast::<T>());
         threadgroup_store("ws", ws_base_3 + 3u32, (s_3 * q3_3 + b_3).cast::<T>());
-
         threadgroup_barrier();
-
         // ── 3. MMA inner loop — 4 frags × 4 k-inner = 16 MMAs per SG ──
         // sm = 0 fixed (WM=1 → both SGs cover full BM=16).
         let row_a0 = sm * 16u32 + fm; // frag_m = 0
         let row_a1 = sm * 16u32 + 8u32 + fm; // frag_m = 8
         let col_b0 = sn * 16u32; // frag_n = 0 base offset
         let col_b1 = sn * 16u32 + 8u32; // frag_n = 8 base offset
-
         // k_inner = 0 (k offset 0..7 inside BK=32)
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + fn1));
@@ -3615,7 +3440,6 @@ pub fn mt_qmm_mma_m16_int8<T>(
         simdgroup_matmul(a_f0, b_f1, c_f01);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_matmul(a_f1, b_f1, c_f11);
-
         // k_inner = 1 (k offset 8..15)
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 8u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 8u32 + fn1));
@@ -3630,7 +3454,6 @@ pub fn mt_qmm_mma_m16_int8<T>(
         simdgroup_matmul(a_f0, b_f1, c_f01);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_matmul(a_f1, b_f1, c_f11);
-
         // k_inner = 2 (k offset 16..23)
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 16u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 16u32 + fn1));
@@ -3645,7 +3468,6 @@ pub fn mt_qmm_mma_m16_int8<T>(
         simdgroup_matmul(a_f0, b_f1, c_f01);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_matmul(a_f1, b_f1, c_f11);
-
         // k_inner = 3 (k offset 24..31)
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 24u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 24u32 + fn1));
@@ -3660,10 +3482,8 @@ pub fn mt_qmm_mma_m16_int8<T>(
         simdgroup_matmul(a_f0, b_f1, c_f01);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_matmul(a_f1, b_f1, c_f11);
-
         threadgroup_barrier();
     }
-
     // ── 4. Write 4 C frags to global out ──
     // sm = 0 → out_m_base starts at m_tile*16 (no sub-tile m offset).
     let out_m_base = m_tile * 16u32;
@@ -3736,11 +3556,9 @@ pub fn mt_affine_dequantize_int4<T>(
     let pack_factor = 8u32;
     let oindex = pack_idx * pack_factor;
     let g_idx = oindex / group_size;
-
     let scale = load(scales[g_idx]).cast::<f32>();
     let bias = load(biases[g_idx]).cast::<f32>();
     let val = load(w[pack_idx]);
-
     let q0 = (val >> 0u32) & 15u32;
     let q1 = (val >> 4u32) & 15u32;
     let q2 = (val >> 8u32) & 15u32;
@@ -3749,7 +3567,6 @@ pub fn mt_affine_dequantize_int4<T>(
     let q5 = (val >> 20u32) & 15u32;
     let q6 = (val >> 24u32) & 15u32;
     let q7 = (val >> 28u32) & 15u32;
-
     store(out[oindex + 0u32], (scale * q0.cast::<f32>() + bias).cast::<T>());
     store(out[oindex + 1u32], (scale * q1.cast::<f32>() + bias).cast::<T>());
     store(out[oindex + 2u32], (scale * q2.cast::<f32>() + bias).cast::<T>());
@@ -3804,26 +3621,22 @@ pub fn mt_affine_quantize_int4<T>(
     let g_idx = tgid_x;
     let lane = tid;
     let in_base = g_idx * group_size;
-
     let v0 = load(w[in_base + lane * 2u32]).cast::<f32>();
     let v1 = load(w[in_base + lane * 2u32 + 1u32]).cast::<f32>();
     let local_min = select(v0 < v1, v0, v1);
     let local_max = select(v0 > v1, v0, v1);
     let w_min = simd_min(local_min);
     let w_max = simd_max(local_max);
-
     let n_bins = 15.0f32;
     let raw_scale = (w_max - w_min) / n_bins;
     let eps = 1.0e-7f32;
     let scale = select(raw_scale < eps, 1.0f32, raw_scale);
     let inv_scale = 1.0f32 / scale;
     let bias = w_min;
-
     if lane == 0u32 {
         store(scales[g_idx], scale.cast::<T>());
         store(biases[g_idx], bias.cast::<T>());
     }
-
     // Packs in parallel: lanes 0..packs_per_group each pack one uint32.
     // For group_size=64 → packs_per_group=8, so 8 lanes work in parallel
     // vs the previous lane-0 serial loop over all 8 packs.
@@ -3875,16 +3688,13 @@ pub fn mt_affine_dequantize_int8<T>(
     let pack_factor = 4u32;
     let oindex = pack_idx * pack_factor;
     let g_idx = oindex / group_size;
-
     let scale = load(scales[g_idx]).cast::<f32>();
     let bias = load(biases[g_idx]).cast::<f32>();
     let val = load(w[pack_idx]);
-
     let q0 = (val >> 0u32) & 255u32;
     let q1 = (val >> 8u32) & 255u32;
     let q2 = (val >> 16u32) & 255u32;
     let q3 = (val >> 24u32) & 255u32;
-
     store(out[oindex + 0u32], (scale * q0.cast::<f32>() + bias).cast::<T>());
     store(out[oindex + 1u32], (scale * q1.cast::<f32>() + bias).cast::<T>());
     store(out[oindex + 2u32], (scale * q2.cast::<f32>() + bias).cast::<T>());
@@ -3915,26 +3725,22 @@ pub fn mt_affine_quantize_int8<T>(
     let g_idx = tgid_x;
     let lane = tid;
     let in_base = g_idx * group_size;
-
     let v0 = load(w[in_base + lane * 2u32]).cast::<f32>();
     let v1 = load(w[in_base + lane * 2u32 + 1u32]).cast::<f32>();
     let local_min = select(v0 < v1, v0, v1);
     let local_max = select(v0 > v1, v0, v1);
     let w_min = simd_min(local_min);
     let w_max = simd_max(local_max);
-
     let n_bins = 255.0f32;
     let raw_scale = (w_max - w_min) / n_bins;
     let eps = 1.0e-7f32;
     let scale = select(raw_scale < eps, 1.0f32, raw_scale);
     let inv_scale = 1.0f32 / scale;
     let bias = w_min;
-
     if lane == 0u32 {
         store(scales[g_idx], scale.cast::<T>());
         store(biases[g_idx], bias.cast::<T>());
     }
-
     // Packs in parallel: lanes 0..packs_per_group each pack one uint32.
     // For group_size=64, pack_factor=4 → packs_per_group=16, so 16
     // lanes pack in parallel vs the previous lane-0 serial loop.
@@ -3989,11 +3795,9 @@ pub fn mt_affine_dequantize_int2<T>(
     let pack_factor = 16u32;
     let oindex = pack_idx * pack_factor;
     let g_idx = oindex / group_size;
-
     let scale = load(scales[g_idx]).cast::<f32>();
     let bias = load(biases[g_idx]).cast::<f32>();
     let val = load(w[pack_idx]);
-
     // 16 two-bit lanes; each is `(val >> (i*2)) & 0x3`.
     for k in range(0u32, 16u32, 1u32) {
         let q = (val >> (k * 2u32)) & 3u32;
@@ -4033,26 +3837,22 @@ pub fn mt_affine_quantize_int2<T>(
     let g_idx = tgid_x;
     let lane = tid;
     let in_base = g_idx * group_size;
-
     let v0 = load(w[in_base + lane * 2u32]).cast::<f32>();
     let v1 = load(w[in_base + lane * 2u32 + 1u32]).cast::<f32>();
     let local_min = select(v0 < v1, v0, v1);
     let local_max = select(v0 > v1, v0, v1);
     let w_min = simd_min(local_min);
     let w_max = simd_max(local_max);
-
     let n_bins = 3.0f32;
     let raw_scale = (w_max - w_min) / n_bins;
     let eps = 1.0e-7f32;
     let scale = select(raw_scale < eps, 1.0f32, raw_scale);
     let inv_scale = 1.0f32 / scale;
     let bias = w_min;
-
     if lane == 0u32 {
         store(scales[g_idx], scale.cast::<T>());
         store(biases[g_idx], bias.cast::<T>());
     }
-
     // Packs in parallel: `packs_per_group = group_size / 16` lanes each
     // assemble one uint32 (16 two-bit codes). For group_size=64 →
     // packs_per_group=4.
@@ -4127,44 +3927,36 @@ pub fn mt_affine_quantize_int3<T>(
     let g_idx = tgid_x;
     let lane = tid;
     let in_base = g_idx * group_size;
-
     // Cooperative min/max over the simdgroup (one value per lane).
     let v = load(w[in_base + lane]).cast::<f32>();
     let w_min = simd_min(v);
     let w_max = simd_max(v);
-
     let n_bins = 7.0f32; // 2^3 - 1
     let raw_scale = (w_max - w_min) / n_bins;
     let eps = 1.0e-7f32;
     let scale = select(raw_scale < eps, 1.0f32, raw_scale);
     let inv_scale = 1.0f32 / scale;
     let bias = w_min;
-
     if lane == 0u32 {
         store(scales[g_idx], scale.cast::<T>());
         store(biases[g_idx], bias.cast::<T>());
-
         // For group_size=32: 3 uint32 output words (12 bytes).
         let out_base = g_idx * 3u32;
         let mut w0 = 0u32;
         let mut w1 = 0u32;
         let mut w2 = 0u32;
-
         for i in range(0u32, group_size, 1u32) {
             let vi = load(w[in_base + i]).cast::<f32>();
             let q_f = (vi - bias) * inv_scale + 0.5f32;
             let q_c = select(q_f > 7.0f32, 7.0f32, select(q_f < 0.0f32, 0.0f32, q_f));
             let q = q_c.cast::<u32>() & 7u32;
-
             let bit_pos = i * 3u32;
             let word_idx = bit_pos / 32u32;
             let bit_shift = bit_pos & 31u32;
-
             let q_lo = q << bit_shift;
             w0 = select(word_idx == 0u32, w0 | q_lo, w0);
             w1 = select(word_idx == 1u32, w1 | q_lo, w1);
             w2 = select(word_idx == 2u32, w2 | q_lo, w2);
-
             // Handle spillover into the next word (occurs when bit_shift > 29).
             let spills = bit_shift + 3u32 > 32u32;
             if spills {
@@ -4174,7 +3966,6 @@ pub fn mt_affine_quantize_int3<T>(
                 w2 = select(word_idx == 1u32, w2 | q_hi, w2);
             }
         }
-
         store(out[out_base + 0u32], w0);
         store(out[out_base + 1u32], w1);
         store(out[out_base + 2u32], w2);
@@ -4212,22 +4003,18 @@ pub fn mt_affine_quantize_int5<T>(
     let g_idx = tgid_x;
     let lane = tid;
     let in_base = g_idx * group_size;
-
     let v = load(w[in_base + lane]).cast::<f32>();
     let w_min = simd_min(v);
     let w_max = simd_max(v);
-
     let n_bins = 31.0f32; // 2^5 - 1
     let raw_scale = (w_max - w_min) / n_bins;
     let eps = 1.0e-7f32;
     let scale = select(raw_scale < eps, 1.0f32, raw_scale);
     let inv_scale = 1.0f32 / scale;
     let bias = w_min;
-
     if lane == 0u32 {
         store(scales[g_idx], scale.cast::<T>());
         store(biases[g_idx], bias.cast::<T>());
-
         // For group_size=32: 5 uint32 output words (20 bytes).
         let out_base = g_idx * 5u32;
         let mut w0 = 0u32;
@@ -4235,24 +4022,20 @@ pub fn mt_affine_quantize_int5<T>(
         let mut w2 = 0u32;
         let mut w3 = 0u32;
         let mut w4 = 0u32;
-
         for i in range(0u32, group_size, 1u32) {
             let vi = load(w[in_base + i]).cast::<f32>();
             let q_f = (vi - bias) * inv_scale + 0.5f32;
             let q_c = select(q_f > 31.0f32, 31.0f32, select(q_f < 0.0f32, 0.0f32, q_f));
             let q = q_c.cast::<u32>() & 31u32;
-
             let bit_pos = i * 5u32;
             let word_idx = bit_pos / 32u32;
             let bit_shift = bit_pos & 31u32;
-
             let q_lo = q << bit_shift;
             w0 = select(word_idx == 0u32, w0 | q_lo, w0);
             w1 = select(word_idx == 1u32, w1 | q_lo, w1);
             w2 = select(word_idx == 2u32, w2 | q_lo, w2);
             w3 = select(word_idx == 3u32, w3 | q_lo, w3);
             w4 = select(word_idx == 4u32, w4 | q_lo, w4);
-
             let spills = bit_shift + 5u32 > 32u32;
             if spills {
                 let bits_hi = (bit_shift + 5u32) - 32u32;
@@ -4263,7 +4046,6 @@ pub fn mt_affine_quantize_int5<T>(
                 w4 = select(word_idx == 3u32, w4 | q_hi, w4);
             }
         }
-
         store(out[out_base + 0u32], w0);
         store(out[out_base + 1u32], w1);
         store(out[out_base + 2u32], w2);
@@ -4303,22 +4085,18 @@ pub fn mt_affine_quantize_int6<T>(
     let g_idx = tgid_x;
     let lane = tid;
     let in_base = g_idx * group_size;
-
     let v = load(w[in_base + lane]).cast::<f32>();
     let w_min = simd_min(v);
     let w_max = simd_max(v);
-
     let n_bins = 63.0f32; // 2^6 - 1
     let raw_scale = (w_max - w_min) / n_bins;
     let eps = 1.0e-7f32;
     let scale = select(raw_scale < eps, 1.0f32, raw_scale);
     let inv_scale = 1.0f32 / scale;
     let bias = w_min;
-
     if lane == 0u32 {
         store(scales[g_idx], scale.cast::<T>());
         store(biases[g_idx], bias.cast::<T>());
-
         // For group_size=32: 6 uint32 output words (24 bytes).
         let out_base = g_idx * 6u32;
         let mut w0 = 0u32;
@@ -4327,17 +4105,14 @@ pub fn mt_affine_quantize_int6<T>(
         let mut w3 = 0u32;
         let mut w4 = 0u32;
         let mut w5 = 0u32;
-
         for i in range(0u32, group_size, 1u32) {
             let vi = load(w[in_base + i]).cast::<f32>();
             let q_f = (vi - bias) * inv_scale + 0.5f32;
             let q_c = select(q_f > 63.0f32, 63.0f32, select(q_f < 0.0f32, 0.0f32, q_f));
             let q = q_c.cast::<u32>() & 63u32;
-
             let bit_pos = i * 6u32;
             let word_idx = bit_pos / 32u32;
             let bit_shift = bit_pos & 31u32;
-
             let q_lo = q << bit_shift;
             w0 = select(word_idx == 0u32, w0 | q_lo, w0);
             w1 = select(word_idx == 1u32, w1 | q_lo, w1);
@@ -4345,7 +4120,6 @@ pub fn mt_affine_quantize_int6<T>(
             w3 = select(word_idx == 3u32, w3 | q_lo, w3);
             w4 = select(word_idx == 4u32, w4 | q_lo, w4);
             w5 = select(word_idx == 5u32, w5 | q_lo, w5);
-
             let spills = bit_shift + 6u32 > 32u32;
             if spills {
                 let bits_hi = (bit_shift + 6u32) - 32u32;
@@ -4357,7 +4131,6 @@ pub fn mt_affine_quantize_int6<T>(
                 w5 = select(word_idx == 4u32, w5 | q_hi, w5);
             }
         }
-
         store(out[out_base + 0u32], w0);
         store(out[out_base + 1u32], w1);
         store(out[out_base + 2u32], w2);
@@ -4404,15 +4177,12 @@ pub fn mt_affine_dequantize_int3<T>(
     let bytes_per_pack = 3u32;
     let oindex = pack_idx * pack_factor;
     let g_idx = oindex / group_size;
-
     let scale = load(scales[g_idx]).cast::<f32>();
     let bias = load(biases[g_idx]).cast::<f32>();
-
     let byte_off = pack_idx * bytes_per_pack;
     let u_idx0 = byte_off / 4u32;
     let u0 = load(w[u_idx0]);
     let u1 = load(w[u_idx0 + 1u32]);
-
     let s0 = byte_off & 3u32;
     let s1 = (byte_off + 1u32) & 3u32;
     let s2 = (byte_off + 2u32) & 3u32;
@@ -4422,7 +4192,6 @@ pub fn mt_affine_dequantize_int3<T>(
     let b0 = (select(in0_0, u0, u1) >> (s0 * 8u32)) & 255u32;
     let b1 = (select(in0_1, u0, u1) >> (s1 * 8u32)) & 255u32;
     let b2 = (select(in0_2, u0, u1) >> (s2 * 8u32)) & 255u32;
-
     let q0 = b0 & 7u32;
     let q1 = (b0 >> 3u32) & 7u32;
     let q2 = ((b0 >> 6u32) & 3u32) | ((b1 & 1u32) << 2u32);
@@ -4431,7 +4200,6 @@ pub fn mt_affine_dequantize_int3<T>(
     let q5 = ((b1 >> 7u32) & 1u32) | ((b2 & 3u32) << 1u32);
     let q6 = (b2 >> 2u32) & 7u32;
     let q7 = (b2 >> 5u32) & 7u32;
-
     store(out[oindex + 0u32], (scale * q0.cast::<f32>() + bias).cast::<T>());
     store(out[oindex + 1u32], (scale * q1.cast::<f32>() + bias).cast::<T>());
     store(out[oindex + 2u32], (scale * q2.cast::<f32>() + bias).cast::<T>());
@@ -4467,15 +4235,12 @@ pub fn mt_affine_dequantize_int5<T>(
     let bytes_per_pack = 5u32;
     let oindex = pack_idx * pack_factor;
     let g_idx = oindex / group_size;
-
     let scale = load(scales[g_idx]).cast::<f32>();
     let bias = load(biases[g_idx]).cast::<f32>();
-
     let byte_off = pack_idx * bytes_per_pack;
     let u_idx0 = byte_off / 4u32;
     let u0 = load(w[u_idx0]);
     let u1 = load(w[u_idx0 + 1u32]);
-
     let s0 = byte_off & 3u32;
     let s1 = (byte_off + 1u32) & 3u32;
     let s2 = (byte_off + 2u32) & 3u32;
@@ -4491,7 +4256,6 @@ pub fn mt_affine_dequantize_int5<T>(
     let b2 = (select(in0_2, u0, u1) >> (s2 * 8u32)) & 255u32;
     let b3 = (select(in0_3, u0, u1) >> (s3 * 8u32)) & 255u32;
     let b4 = (select(in0_4, u0, u1) >> (s4 * 8u32)) & 255u32;
-
     let q0 = b0 & 31u32;
     let q1 = ((b0 >> 5u32) & 7u32) | ((b1 & 3u32) << 3u32);
     let q2 = (b1 >> 2u32) & 31u32;
@@ -4500,7 +4264,6 @@ pub fn mt_affine_dequantize_int5<T>(
     let q5 = (b3 >> 1u32) & 31u32;
     let q6 = ((b3 >> 6u32) & 3u32) | ((b4 & 7u32) << 2u32);
     let q7 = (b4 >> 3u32) & 31u32;
-
     store(out[oindex + 0u32], (scale * q0.cast::<f32>() + bias).cast::<T>());
     store(out[oindex + 1u32], (scale * q1.cast::<f32>() + bias).cast::<T>());
     store(out[oindex + 2u32], (scale * q2.cast::<f32>() + bias).cast::<T>());
@@ -4538,15 +4301,12 @@ pub fn mt_affine_dequantize_int6<T>(
     let bytes_per_pack = 3u32;
     let oindex = pack_idx * pack_factor;
     let g_idx = oindex / group_size;
-
     let scale = load(scales[g_idx]).cast::<f32>();
     let bias = load(biases[g_idx]).cast::<f32>();
-
     let byte_off = pack_idx * bytes_per_pack;
     let u_idx0 = byte_off / 4u32;
     let u0 = load(w[u_idx0]);
     let u1 = load(w[u_idx0 + 1u32]);
-
     let s0 = byte_off & 3u32;
     let s1 = (byte_off + 1u32) & 3u32;
     let s2 = (byte_off + 2u32) & 3u32;
@@ -4556,12 +4316,10 @@ pub fn mt_affine_dequantize_int6<T>(
     let b0 = (select(in0_0, u0, u1) >> (s0 * 8u32)) & 255u32;
     let b1 = (select(in0_1, u0, u1) >> (s1 * 8u32)) & 255u32;
     let b2 = (select(in0_2, u0, u1) >> (s2 * 8u32)) & 255u32;
-
     let q0 = b0 & 63u32;
     let q1 = ((b0 >> 6u32) & 3u32) | ((b1 & 15u32) << 2u32);
     let q2 = ((b1 >> 4u32) & 15u32) | ((b2 & 3u32) << 4u32);
     let q3 = (b2 >> 2u32) & 63u32;
-
     store(out[oindex + 0u32], (scale * q0.cast::<f32>() + bias).cast::<T>());
     store(out[oindex + 1u32], (scale * q1.cast::<f32>() + bias).cast::<T>());
     store(out[oindex + 2u32], (scale * q2.cast::<f32>() + bias).cast::<T>());
@@ -4974,25 +4732,21 @@ pub fn mt_qvm_int4_fast<T>(
     let tg = tgid_x;
     let sg = simd_id;
     let lane = simd_lane;
-
     let col0 = tg * 8u32 + sg * 4u32;
     let col1 = col0 + 1u32;
     let col2 = col0 + 2u32;
     let col3 = col0 + 3u32;
-
     // Pack offsets within a K-row (N elements packed 8 int4 per u32).
     let packs_per_krow = n / 8u32;
     let col0_pack = col0 / 8u32;
     let col1_pack = col1 / 8u32;
     let col2_pack = col2 / 8u32;
     let col3_pack = col3 / 8u32;
-
     // Nibble slot within the u32 pack for each column.
     let col0_slot = col0 & 7u32;
     let col1_slot = col1 & 7u32;
     let col2_slot = col2 & 7u32;
     let col3_slot = col3 & 7u32;
-
     // Mask-without-shift: if the nibble slot is at position p, the
     // 4-bit value lives at bits [4p, 4p+4). The mask-without-shift trick
     // works within a u32 when we pre-scale x by 1/16^p so that the raw
@@ -5020,15 +4774,12 @@ pub fn mt_qvm_int4_fast<T>(
     // path — the column slot varies by column so no single pre-scale
     // covers all 4 columns). The algebraic split still halves the FMA
     // count vs the naive `w_real * x` form.
-
     let mask4 = 15u32;
     let group_size = k / gs_per_col;
-
     let mut acc0 = 0.0f32;
     let mut acc1 = 0.0f32;
     let mut acc2 = 0.0f32;
     let mut acc3 = 0.0f32;
-
     // Lane-strided K walk: each lane covers K positions
     // `lane, lane+32, lane+64, …`.
     let n_iters = (k + 31u32) / 32u32;
@@ -5037,7 +4788,6 @@ pub fn mt_qvm_int4_fast<T>(
         if d < k {
             let xd = load(x[d]).cast::<f32>();
             let g = d / group_size;
-
             // Scales/biases: layout [K/G, N] — col c, group g → index g*N+c.
             let s0 = load(scales[g * n + col0]).cast::<f32>();
             let bi0 = load(biases[g * n + col0]).cast::<f32>();
@@ -5047,23 +4797,17 @@ pub fn mt_qvm_int4_fast<T>(
             let bi2 = load(biases[g * n + col2]).cast::<f32>();
             let s3 = load(scales[g * n + col3]).cast::<f32>();
             let bi3 = load(biases[g * n + col3]).cast::<f32>();
-
             // W row `d` base offset in the packed array.
             let row_base = d * packs_per_krow;
-
             // Extract nibbles for each of the 4 output columns.
             let w0 = load(w[row_base + col0_pack]);
             let q0 = ((w0 >> (col0_slot * 4u32)) & mask4).cast::<f32>();
-
             let w1 = load(w[row_base + col1_pack]);
             let q1 = ((w1 >> (col1_slot * 4u32)) & mask4).cast::<f32>();
-
             let w2 = load(w[row_base + col2_pack]);
             let q2 = ((w2 >> (col2_slot * 4u32)) & mask4).cast::<f32>();
-
             let w3 = load(w[row_base + col3_pack]);
             let q3 = ((w3 >> (col3_slot * 4u32)) & mask4).cast::<f32>();
-
             // Algebraic split: accumulate (s * q - s*bias/s + bias) * x
             // = s*q*x + bias*x.  Equivalently:
             //   acc += s * q * x + bias * x
@@ -5080,7 +4824,6 @@ pub fn mt_qvm_int4_fast<T>(
             acc3 = acc3 + (q3 * s3 + bi3) * xd;
         }
     }
-
     // Cross-lane reduce within each simdgroup.
     let r0 = simd_sum(acc0);
     let r1 = simd_sum(acc1);

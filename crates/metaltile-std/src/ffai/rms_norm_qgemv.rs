@@ -67,7 +67,6 @@ pub fn ffai_rms_norm_qgemv<T>(
     #[constexpr] group_size: u32,
 ) {
     let row = program_id::<0>();
-
     // Phase 1: RMSNorm — per-thread partial sum of squares, then cross-kernel
     // call to mt_rms_inv_scalar for the threadgroup reduce + rsqrt.
     // ssq is a Value arg; eps_buf and in_dim are Tensor args.
@@ -81,7 +80,6 @@ pub fn ffai_rms_norm_qgemv<T>(
         }
     }
     let inv_rms = mt_rms_inv_scalar(ssq, eps_buf, in_dim);
-
     // Phase 2: pack-strided int4 GEMV over the normalized activation.
     let vals_per_pack = 8u32; // 32 / 4 bits
     let mask = 15u32;
@@ -90,7 +88,6 @@ pub fn ffai_rms_norm_qgemv<T>(
     let packs_per_group = group_size / vals_per_pack;
     let row_pack_off = row * n_packs_per_row;
     let row_group_off = row * n_groups;
-
     let mut acc = 0.0f32;
     let p_iters = (n_packs_per_row + lsize - 1u32) / lsize;
     for _p in range(0u32, p_iters, 1u32) {
@@ -110,7 +107,6 @@ pub fn ffai_rms_norm_qgemv<T>(
             }
         }
     }
-
     let total = reduce_sum(acc);
     if tid == 0u32 {
         store(output[row], total.cast::<T>());
@@ -155,13 +151,11 @@ pub fn ffai_rms_norm_qgemv_fast<T>(
     let tg = tgid_x;
     let sg = simd_id;
     let lane = simd_lane;
-
     // Each TG covers 8 output rows: simdgroup 0 → rows 0-3, sg 1 → rows 4-7.
     let row0 = tg * 8u32 + sg * 4u32;
     let row1 = row0 + 1u32;
     let row2 = row0 + 2u32;
     let row3 = row0 + 3u32;
-
     // Phase 1: TG-wide SSQ for RMSNorm.
     // All 64 threads cooperate — `mt_rms_inv_scalar` performs the full
     // TG reduce + rsqrt + broadcast, identical to the single-row variant.
@@ -175,38 +169,31 @@ pub fn ffai_rms_norm_qgemv_fast<T>(
         }
     }
     let inv_rms = mt_rms_inv_scalar(ssq, eps_buf, in_dim);
-
     // Phase 2: 4-row int4 GEMV per simdgroup, mirroring `mt_qmv`.
     // gs_per_row = in_dim / group_size (= in_dim / 64).
     let gs_per_row = in_dim / group_size;
     let packs_per_row = in_dim / 8u32; // 8 int4 values per u32
-
     let w_base0 = row0 * packs_per_row;
     let w_base1 = row1 * packs_per_row;
     let w_base2 = row2 * packs_per_row;
     let w_base3 = row3 * packs_per_row;
-
     let sb_base0 = row0 * gs_per_row;
     let sb_base1 = row1 * gs_per_row;
     let sb_base2 = row2 * gs_per_row;
     let sb_base3 = row3 * gs_per_row;
-
     let mut acc0 = 0.0f32;
     let mut acc1 = 0.0f32;
     let mut acc2 = 0.0f32;
     let mut acc3 = 0.0f32;
-
     // Each lane covers 16 normed-X values per block. Block = 512 K elements.
     let lane_x_off = lane * 16u32;
     let lane_pack_off = lane * 2u32;
-
     // Mask-without-shift constants (inverse nibble position scaling).
     // Eliminates 7 shifts per pack × 2 packs × 4 rows = 56 shifts per block.
     // Mirrors `mt_qmv` and MLX `qdot` (quantized.h:235-244).
     let s_16 = 0.0625f32;
     let s_256 = 0.00390625f32;
     let s_4096 = 0.000244140625f32;
-
     for _b in range(0u32, in_dim, 512u32) {
         // Load 16 X values and apply RMSNorm + norm_weight in registers.
         let xb = _b + lane_x_off;
@@ -226,7 +213,6 @@ pub fn ffai_rms_norm_qgemv_fast<T>(
         let xi13 = xb + 13u32;
         let xi14 = xb + 14u32;
         let xi15 = xb + 15u32;
-
         // Fuse RMSNorm: normed[i] = x[i] * norm_weight[i] * inv_rms.
         // Raw values needed at nibble positions 1/2/3 for mask-without-shift.
         let n0_raw = load(x[xi0]).cast::<f32>() * load(norm_weight[xi0]).cast::<f32>() * inv_rms;
@@ -245,7 +231,6 @@ pub fn ffai_rms_norm_qgemv_fast<T>(
         let n13_raw = load(x[xi13]).cast::<f32>() * load(norm_weight[xi13]).cast::<f32>() * inv_rms;
         let n14_raw = load(x[xi14]).cast::<f32>() * load(norm_weight[xi14]).cast::<f32>() * inv_rms;
         let n15_raw = load(x[xi15]).cast::<f32>() * load(norm_weight[xi15]).cast::<f32>() * inv_rms;
-
         // Sum of normed activations for the bias term of the algebraic split.
         let ns = n0_raw
             + n1_raw
@@ -263,7 +248,6 @@ pub fn ffai_rms_norm_qgemv_fast<T>(
             + n13_raw
             + n14_raw
             + n15_raw;
-
         // Pre-scale normed values at nibble positions 1/2/3 for
         // mask-without-shift. Position 0 stays unscaled (*1).
         let n1 = n1_raw * s_16;
@@ -278,11 +262,9 @@ pub fn ffai_rms_norm_qgemv_fast<T>(
         let n13 = n13_raw * s_16;
         let n14 = n14_raw * s_256;
         let n15 = n15_raw * s_4096;
-
         // Group index — one group per 64 K elements, 4 lanes per group.
         let g = xb / group_size;
         let pack_off = _b / 8u32 + lane_pack_off;
-
         // ── Row 0 ──
         let p00 = load(weight[w_base0 + pack_off]);
         let p01 = load(weight[w_base0 + pack_off + 1u32]);
@@ -323,7 +305,6 @@ pub fn ffai_rms_norm_qgemv_fast<T>(
             + q014 * n14
             + q015 * n15;
         acc0 = acc0 + s0 * qd0 + bi0 * ns;
-
         // ── Row 1 ──
         let p10 = load(weight[w_base1 + pack_off]);
         let p11 = load(weight[w_base1 + pack_off + 1u32]);
@@ -364,7 +345,6 @@ pub fn ffai_rms_norm_qgemv_fast<T>(
             + q114 * n14
             + q115 * n15;
         acc1 = acc1 + s1 * qd1 + bi1 * ns;
-
         // ── Row 2 ──
         let p20 = load(weight[w_base2 + pack_off]);
         let p21 = load(weight[w_base2 + pack_off + 1u32]);
@@ -405,7 +385,6 @@ pub fn ffai_rms_norm_qgemv_fast<T>(
             + q214 * n14
             + q215 * n15;
         acc2 = acc2 + s2 * qd2 + bi2 * ns;
-
         // ── Row 3 ──
         let p30 = load(weight[w_base3 + pack_off]);
         let p31 = load(weight[w_base3 + pack_off + 1u32]);
@@ -447,7 +426,6 @@ pub fn ffai_rms_norm_qgemv_fast<T>(
             + q315 * n15;
         acc3 = acc3 + s3 * qd3 + bi3 * ns;
     }
-
     // Cross-lane reduce: each row's partial → one value per simdgroup.
     let r0 = simd_sum(acc0);
     let r1 = simd_sum(acc1);
@@ -511,13 +489,11 @@ pub fn ffai_rms_norm_qgemv_int8_fast<T>(
     let tg = tgid_x;
     let sg = simd_id;
     let lane = simd_lane;
-
     // Each TG covers 8 output rows: sg 0 → rows 0-3, sg 1 → rows 4-7.
     let row0 = tg * 8u32 + sg * 4u32;
     let row1 = row0 + 1u32;
     let row2 = row0 + 2u32;
     let row3 = row0 + 3u32;
-
     // Phase 1: TG-wide SSQ for RMSNorm (same as int4 fast variant).
     let mut ssq = 0.0f32;
     let n_iters = (in_dim + lsize - 1u32) / lsize;
@@ -529,32 +505,26 @@ pub fn ffai_rms_norm_qgemv_int8_fast<T>(
         }
     }
     let inv_rms = mt_rms_inv_scalar(ssq, eps_buf, in_dim);
-
     // Phase 2: 4-row int8 GEMV per simdgroup, algebraic-split accumulator.
     // int8: 4 bytes per u32, packs_per_row = in_dim / 4.
     let gs_per_row = in_dim / group_size;
     let packs_per_row = in_dim / 4u32;
-
     let w_base0 = row0 * packs_per_row;
     let w_base1 = row1 * packs_per_row;
     let w_base2 = row2 * packs_per_row;
     let w_base3 = row3 * packs_per_row;
-
     let sb_base0 = row0 * gs_per_row;
     let sb_base1 = row1 * gs_per_row;
     let sb_base2 = row2 * gs_per_row;
     let sb_base3 = row3 * gs_per_row;
-
     let mut acc0 = 0.0f32;
     let mut acc1 = 0.0f32;
     let mut acc2 = 0.0f32;
     let mut acc3 = 0.0f32;
-
     // Each lane covers 16 K values per block (512 K / 32 lanes).
     // int8: 4 bytes/pack → 4 packs per lane per block.
     let lane_x_off = lane * 16u32;
     let lane_pack_off = lane * 4u32;
-
     for _b in range(0u32, in_dim, 512u32) {
         // Load 16 X values, fuse RMSNorm.
         let xb = _b + lane_x_off;
@@ -595,14 +565,11 @@ pub fn ffai_rms_norm_qgemv_int8_fast<T>(
         let n15 = load(x[xb + 15u32]).cast::<f32>()
             * load(norm_weight[xb + 15u32]).cast::<f32>()
             * inv_rms;
-
         // Bias accumulation sum for algebraic split.
         let ns =
             n0 + n1 + n2 + n3 + n4 + n5 + n6 + n7 + n8 + n9 + n10 + n11 + n12 + n13 + n14 + n15;
-
         let g = xb / group_size;
         let pack_off = _b / 4u32 + lane_pack_off;
-
         // ── Row 0 ──
         let p00 = load(weight[w_base0 + pack_off]);
         let p01 = load(weight[w_base0 + pack_off + 1u32]);
@@ -627,7 +594,6 @@ pub fn ffai_rms_norm_qgemv_int8_fast<T>(
             + ((p03 >> 16u32) & 255u32).cast::<f32>() * n14
             + ((p03 >> 24u32) & 255u32).cast::<f32>() * n15;
         acc0 = acc0 + s0 * qd0 + bi0 * ns;
-
         // ── Row 1 ──
         let p10 = load(weight[w_base1 + pack_off]);
         let p11 = load(weight[w_base1 + pack_off + 1u32]);
@@ -652,7 +618,6 @@ pub fn ffai_rms_norm_qgemv_int8_fast<T>(
             + ((p13 >> 16u32) & 255u32).cast::<f32>() * n14
             + ((p13 >> 24u32) & 255u32).cast::<f32>() * n15;
         acc1 = acc1 + s1 * qd1 + bi1 * ns;
-
         // ── Row 2 ──
         let p20 = load(weight[w_base2 + pack_off]);
         let p21 = load(weight[w_base2 + pack_off + 1u32]);
@@ -677,7 +642,6 @@ pub fn ffai_rms_norm_qgemv_int8_fast<T>(
             + ((p23 >> 16u32) & 255u32).cast::<f32>() * n14
             + ((p23 >> 24u32) & 255u32).cast::<f32>() * n15;
         acc2 = acc2 + s2 * qd2 + bi2 * ns;
-
         // ── Row 3 ──
         let p30 = load(weight[w_base3 + pack_off]);
         let p31 = load(weight[w_base3 + pack_off + 1u32]);
@@ -703,7 +667,6 @@ pub fn ffai_rms_norm_qgemv_int8_fast<T>(
             + ((p33 >> 24u32) & 255u32).cast::<f32>() * n15;
         acc3 = acc3 + s3 * qd3 + bi3 * ns;
     }
-
     // Cross-lane reduce: each row → one value per simdgroup.
     let r0 = simd_sum(acc0);
     let r1 = simd_sum(acc1);

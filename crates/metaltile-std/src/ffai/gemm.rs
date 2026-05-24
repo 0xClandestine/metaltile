@@ -51,13 +51,10 @@ pub fn ffai_gemm<T>(
     let tid = simd_id * 32u32 + simd_lane;
     let lr = tid / 32u32; // output row within the tile (0..31)
     let lo = tid % 32u32; // output col within the tile (0..31)
-
     // Weight tile [BN=32][BK=16] + input tile [BM=32][BK=16].
     threadgroup_alloc("gemm_w", 512);
     threadgroup_alloc("gemm_x", 512);
-
     let mut acc = 0.0f32;
-
     for k0 in range(0u32, in_dim, 16u32) {
         // Cooperative load: threads 0..511 fill the weight tile, threads
         // 512..1023 fill the input tile — one element each.
@@ -78,7 +75,6 @@ pub fn ffai_gemm<T>(
             threadgroup_store("gemm_x", s, select(x_valid, x_raw, 0.0f32));
         }
         threadgroup_barrier();
-
         // Each thread accumulates its output element from the tiles.
         for k in range(0u32, 16u32, 1u32) {
             let w = threadgroup_load("gemm_w", lo * 16u32 + k);
@@ -87,7 +83,6 @@ pub fn ffai_gemm<T>(
         }
         threadgroup_barrier();
     }
-
     let r = tgid_y * 32u32 + lr;
     let o = tgid_x * 32u32 + lo;
     if r < n_rows {

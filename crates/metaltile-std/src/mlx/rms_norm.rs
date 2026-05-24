@@ -254,7 +254,6 @@ pub fn mt_rms_norm_wide<T>(
     let rs = row * n;
     // One full threadgroup of threads; every thread strides by this.
     let tpg = n_simd * 32u32;
-
     // Pass 1: strided sum-of-squares. A thread with `tid >= n` runs
     // zero iterations and contributes 0 — still required to reach
     // `reduce_sum` (Apple simdgroup reductions need all lanes active).
@@ -266,7 +265,6 @@ pub fn mt_rms_norm_wide<T>(
     let tg_ssq = reduce_sum(acc);
     let eps = load(eps_buf[0]);
     let rms = rsqrt(tg_ssq / n + eps);
-
     // Pass 2: strided scaled store. `x` is re-read from device memory
     // (see the doc note above).
     for i in range(tid, n, tpg) {

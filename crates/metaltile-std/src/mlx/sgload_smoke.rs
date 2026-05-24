@@ -64,7 +64,6 @@ use crate::{
 #[kernel]
 pub fn mt_sgload_smoke<T>(src: Tensor<T>, mut dst: Tensor<T>) {
     let lane = simd_lane;
-
     // A/C lane → frag-element mapping. Matches the probe kernel +
     // every MMA call site in `quantized.rs`. `fn0` / `fn1` are the
     // two consecutive columns this lane owns inside its `fm` row.
@@ -72,7 +71,6 @@ pub fn mt_sgload_smoke<T>(src: Tensor<T>, mut dst: Tensor<T>) {
     let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
     let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
     let fn1 = fn0 + 1u32;
-
     // ── 1. Stage `src` into TG memory cooperatively ────────────────
     // 32 lanes × 2 elems = 64. Lane writes its two destination
     // positions (fm, fn0) and (fm, fn1) — both ∈ [0, 64) — directly,
@@ -87,7 +85,6 @@ pub fn mt_sgload_smoke<T>(src: Tensor<T>, mut dst: Tensor<T>) {
     // runtime cost) is enough to publish the stores before the
     // HW-fused load.
     simdgroup_barrier_mem_none();
-
     // ── 2. HW-fused fragment load ──────────────────────────────────
     // One MSL `simdgroup_load(...)` instruction — the whole point of
     // this kernel. `offset = 0` (top-left of the tile), `stride = 8`
@@ -96,7 +93,6 @@ pub fn mt_sgload_smoke<T>(src: Tensor<T>, mut dst: Tensor<T>) {
     let off = 0u32;
     simdgroup_load(frag, "tg_tile", off, 8u32);
     simdgroup_barrier_mem_none();
-
     // ── 3. Scatter the fragment back out ───────────────────────────
     // A/C convention: lane (fm, fn0) holds tile[fm, fn0]. So writing
     // `dst[fm*8 + fn0] = frag.elem[0]` round-trips the input value

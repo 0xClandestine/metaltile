@@ -57,7 +57,6 @@ pub fn ffai_sdpa_decode_d256<T>(
     let sg = simd_id;
     let lane = simd_lane;
     let ns = n_simd;
-
     // Two-phase reduction: 4 tg_outN buffers, reused for dims (0..3)
     // then (4..7). 1056 = n_lanes * (n_simd + 1) with bank padding.
     threadgroup_alloc("tg_max", 32);
@@ -66,11 +65,9 @@ pub fn ffai_sdpa_decode_d256<T>(
     threadgroup_alloc("tg_out1", 1056);
     threadgroup_alloc("tg_out2", 1056);
     threadgroup_alloc("tg_out3", 1056);
-
     let q_off = q_head * head_dim;
     let kv_head_base = kv_head * kv_stride * head_dim;
     let d0 = lane * 8u32;
-
     // Pre-scale this lane's 8-element Q stripe once; K/V are streamed.
     let q0 = load(q[q_off + d0]).cast::<f32>() * scale;
     let q1 = load(q[q_off + d0 + 1u32]).cast::<f32>() * scale;
@@ -80,7 +77,6 @@ pub fn ffai_sdpa_decode_d256<T>(
     let q5 = load(q[q_off + d0 + 5u32]).cast::<f32>() * scale;
     let q6 = load(q[q_off + d0 + 6u32]).cast::<f32>() * scale;
     let q7 = load(q[q_off + d0 + 7u32]).cast::<f32>() * scale;
-
     let mut run_max = neg_infinity();
     let mut run_sum = 0.0f32;
     let mut o0 = 0.0f32;
@@ -91,7 +87,6 @@ pub fn ffai_sdpa_decode_d256<T>(
     let mut o5 = 0.0f32;
     let mut o6 = 0.0f32;
     let mut o7 = 0.0f32;
-
     for _t in range(sg, n_kv, ns) {
         let base = kv_head_base + _t * head_dim;
         let kv0 = base + d0;
@@ -127,7 +122,6 @@ pub fn ffai_sdpa_decode_d256<T>(
         o6 = o6 * factor + weight * v6;
         o7 = o7 * factor + weight * v7;
     }
-
     // ── Cross-simdgroup reduction: max + sum_exp ────────────────────
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max);
@@ -149,7 +143,6 @@ pub fn ffai_sdpa_decode_d256<T>(
     let g_max = threadgroup_load("tg_max", 0);
     let g_sum = threadgroup_load("tg_sum", 0);
     let rescale = select(g_sum > 0.0f32, exp(run_max - g_max) / g_sum, 0.0f32);
-
     // ── Cross-simdgroup output reduction — phase 1 (dims 0..3) ─────
     // Transpose layout: idx = lane * stride + sg. After barrier, sg=0
     // lanes read back ns partials each for their own (lane, d) slot.
@@ -179,7 +172,6 @@ pub fn ffai_sdpa_decode_d256<T>(
         store(out[out_off + 3u32], so3.cast::<T>());
     }
     threadgroup_barrier();
-
     // ── Cross-simdgroup output reduction — phase 2 (dims 4..7) ─────
     threadgroup_store("tg_out0", idx, o4 * rescale);
     threadgroup_store("tg_out1", idx, o5 * rescale);

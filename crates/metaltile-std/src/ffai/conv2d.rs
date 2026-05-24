@@ -235,27 +235,22 @@ pub fn conv2d_grouped<T>(
     let t2 = t1 / out_h;
     let oc = t2 % out_ch;
     let n = t2 / out_ch;
-
     // Group of this output channel, and the first input channel it
     // convolves. The weight's I dimension is `icpg`, so the weight
     // channel index runs `0..icpg` and the *real* input channel is
     // `ic_base + wic`.
     let group = oc / ocpg;
     let ic_base = group * icpg;
-
     // Receptive-field anchors in the *padded* input frame (see the
     // `conv2d_kernel!` comment) — a real pixel at padded row `ph` sits
     // at unpadded row `ph - pad_h`, valid iff `pad_h <= ph < pad_h+in_h`.
     let ph0 = oh * stride_h;
     let pw0 = ow * stride_w;
-
     let input_plane = in_h * in_w;
     let in_n_stride = in_ch * input_plane;
     let w_in_stride = kh * kw;
     let w_oc_stride = icpg * w_in_stride;
-
     let mut acc = load(bias[oc]).cast::<f32>();
-
     // Walk the icpg × kh × kw receptive field. Dilation scales the tap
     // offsets; padding taps contribute zero (clamped load, masked out).
     for wic in range(0u32, icpg, 1u32) {
@@ -271,17 +266,14 @@ pub fn conv2d_grouped<T>(
                 let col_ok = (pw >= pad_w) & (pw < pad_w + in_w);
                 let valid = row_ok & col_ok;
                 let iw = select(col_ok, pw - pad_w, 0u32);
-
                 let in_idx = in_ic_base + ih * in_w + iw;
                 let pix = load(input[in_idx]).cast::<f32>();
                 let pix_m = select(valid, pix, 0.0f32);
-
                 let w_idx = w_ic_base + ky * kw + kx;
                 let wt = load(weight[w_idx]).cast::<f32>();
                 acc = acc + pix_m * wt;
             }
         }
     }
-
     store(out[idx], acc.cast::<T>());
 }

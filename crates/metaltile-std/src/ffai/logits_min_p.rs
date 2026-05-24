@@ -47,14 +47,12 @@ pub fn logits_min_p_mask<T>(
     let row = program_id::<0>();
     let rs = row * n;
     let re = rs + n;
-
     // Pass 1: threadgroup-wide max of the row's logits.
     let mut lm = neg_infinity();
     for _i in range(rs + tid, re, lsize) {
         lm = max(lm, load(inp[_i]).cast::<f32>());
     }
     let row_max = reduce_max(lm);
-
     // Pass 2: keep a logit iff exp(logit - row_max) >= min_p, else -inf.
     let neg_inf = neg_infinity();
     for _i in range(rs + tid, re, lsize) {

@@ -125,7 +125,6 @@ pub fn ffai_sdpa_decode<T>(
     let sg = simd_id;
     let lane = simd_lane;
     let ns = n_simd;
-
     // Cross-simdgroup reduction storage: 32 slots for max/sum (one per
     // simdgroup), 1024+32 slots × 4 quartiles for the output transpose.
     // The +32 padding avoids 32-way threadgroup-memory bank conflicts in
@@ -138,24 +137,20 @@ pub fn ffai_sdpa_decode<T>(
     threadgroup_alloc("tg_out1", 1056);
     threadgroup_alloc("tg_out2", 1056);
     threadgroup_alloc("tg_out3", 1056);
-
     let q_off = q_head * head_dim;
     let kv_head_base = kv_head * kv_stride * head_dim;
     let d0 = lane * 4u32;
-
     // Pre-scale this lane's 4-element Q quartile once; K/V are streamed.
     let q0 = load(q[q_off + d0]).cast::<f32>() * scale;
     let q1 = load(q[q_off + d0 + 1u32]).cast::<f32>() * scale;
     let q2 = load(q[q_off + d0 + 2u32]).cast::<f32>() * scale;
     let q3 = load(q[q_off + d0 + 3u32]).cast::<f32>() * scale;
-
     let mut run_max = neg_infinity();
     let mut run_sum = 0.0f32;
     let mut o0 = 0.0f32;
     let mut o1 = 0.0f32;
     let mut o2 = 0.0f32;
     let mut o3 = 0.0f32;
-
     // Each simdgroup walks every ns-th KV position. simd_sum reduces
     // the per-lane quartile dot product into the full score; online
     // softmax updates the running (max, sum) tuple; V is accumulated
@@ -249,7 +244,6 @@ pub fn ffai_sdpa_decode<T>(
         o2 = o2 * factor + weight * v2;
         o3 = o3 * factor + weight * v3;
     }
-
     // ── Cross-simdgroup reduction: max + sum_exp ────────────────────
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max);
@@ -284,7 +278,6 @@ pub fn ffai_sdpa_decode<T>(
         }
     }
     threadgroup_barrier();
-
     // ── Cross-simdgroup reduction: outputs ──────────────────────────
     let g_max = threadgroup_load("tg_max", 0);
     let g_sum = threadgroup_load("tg_sum", 0);
@@ -308,7 +301,6 @@ pub fn ffai_sdpa_decode<T>(
     threadgroup_store("tg_out2", idx, o2 * rescale);
     threadgroup_store("tg_out3", idx, o3 * rescale);
     threadgroup_barrier();
-
     if sg == 0 {
         let mut so0 = 0.0f32;
         let mut so1 = 0.0f32;

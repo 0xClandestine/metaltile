@@ -116,7 +116,6 @@ pub fn sdpa_decode_batched_q2<T>(
     let sg = simd_id;
     let lane = simd_lane;
     let ns = n_simd;
-
     // Reuses the single-Q `sdpa_decode` threadgroup-memory layout: 32
     // slots for max/sum (one per simdgroup) + 4 × 1056-slot transpose
     // buffers (1024 + 32 padding to dodge 32-way bank conflicts during
@@ -139,14 +138,12 @@ pub fn sdpa_decode_batched_q2<T>(
     threadgroup_alloc("tg_out1", 1056);
     threadgroup_alloc("tg_out2", 1056);
     threadgroup_alloc("tg_out3", 1056);
-
     // Q layout: [n_q_heads, 2, head_dim] — two batched-Q positions per
     // query head sit at adjacent head_dim-wide slots.
     let q_off_0 = q_head * 2u32 * head_dim;
     let q_off_1 = q_off_0 + head_dim;
     let kv_head_base = kv_head * kv_stride * head_dim;
     let d0 = lane * 4u32;
-
     // Pre-scale each lane's 4-element quartile of both Q vectors. K and
     // V are streamed inside the walk loop.
     let q0_a = load(q[q_off_0 + d0]).cast::<f32>() * scale;
@@ -157,7 +154,6 @@ pub fn sdpa_decode_batched_q2<T>(
     let q1_b = load(q[q_off_1 + d0 + 1u32]).cast::<f32>() * scale;
     let q1_c = load(q[q_off_1 + d0 + 2u32]).cast::<f32>() * scale;
     let q1_d = load(q[q_off_1 + d0 + 3u32]).cast::<f32>() * scale;
-
     // Two independent online-softmax tuples + two output accumulators.
     // At K=2 this is 14 fp32 per lane (max+sum × 2, o0..o3 × 2) plus
     // the 8 pre-loaded Q quartiles — comfortably inside Apple GPUs'
@@ -174,7 +170,6 @@ pub fn sdpa_decode_batched_q2<T>(
     let mut o1_1 = 0.0f32;
     let mut o1_2 = 0.0f32;
     let mut o1_3 = 0.0f32;
-
     // ── Shared KV walk: KV loaded ONCE per position, both Q streams
     //    updated in lockstep. This is where the bandwidth amortization
     //    lives — the rest of the kernel runs in compute-bound territory.
@@ -227,7 +222,6 @@ pub fn sdpa_decode_batched_q2<T>(
         o1_2 = o1_2 * factor_1 + weight_1 * v2;
         o1_3 = o1_3 * factor_1 + weight_1 * v3;
     }
-
     // ── Phase A: cross-simdgroup reduction + output write for Q[0] ──
     //
     // Mirrors `sdpa_decode`'s single-Q output stage. Phase B repeats it
@@ -250,7 +244,6 @@ pub fn sdpa_decode_batched_q2<T>(
         }
     }
     threadgroup_barrier();
-
     let g_max_0 = threadgroup_load("tg_max", 0);
     let g_sum_0 = threadgroup_load("tg_sum", 0);
     // Guard against `n_kv == 0`: no K positions visited → run_max stays
@@ -264,7 +257,6 @@ pub fn sdpa_decode_batched_q2<T>(
     threadgroup_store("tg_out2", idx, o0_2 * rescale_0);
     threadgroup_store("tg_out3", idx, o0_3 * rescale_0);
     threadgroup_barrier();
-
     if sg == 0 {
         let mut so0_0 = 0.0f32;
         let mut so0_1 = 0.0f32;
@@ -287,7 +279,6 @@ pub fn sdpa_decode_batched_q2<T>(
     // overwrites them. The `mem_threadgroup` scope on the barrier is
     // the standard `sdpa_decode` flavor.
     threadgroup_barrier();
-
     // ── Phase B: cross-simdgroup reduction + output write for Q[1] ──
     //
     // Bit-identical to Phase A modulo the `_1` register state. The two
@@ -313,7 +304,6 @@ pub fn sdpa_decode_batched_q2<T>(
         }
     }
     threadgroup_barrier();
-
     let g_max_1 = threadgroup_load("tg_max", 0);
     let g_sum_1 = threadgroup_load("tg_sum", 0);
     let rescale_1 = select(g_sum_1 > 0.0f32, exp(run_max_1 - g_max_1) / g_sum_1, 0.0f32);
@@ -322,7 +312,6 @@ pub fn sdpa_decode_batched_q2<T>(
     threadgroup_store("tg_out2", idx, o1_2 * rescale_1);
     threadgroup_store("tg_out3", idx, o1_3 * rescale_1);
     threadgroup_barrier();
-
     if sg == 0 {
         let mut so1_0 = 0.0f32;
         let mut so1_1 = 0.0f32;
@@ -411,14 +400,12 @@ pub fn sdpa_decode_batched_q4<T>(
     let sg = simd_id;
     let lane = simd_lane;
     let ns = n_simd;
-
     threadgroup_alloc("tg_max", 32);
     threadgroup_alloc("tg_sum", 32);
     threadgroup_alloc("tg_out0", 1056);
     threadgroup_alloc("tg_out1", 1056);
     threadgroup_alloc("tg_out2", 1056);
     threadgroup_alloc("tg_out3", 1056);
-
     // Q layout: [n_q_heads, 4, head_dim]. Four batched-Q positions per
     // head sit at adjacent head_dim-wide slots.
     let q_off_0 = q_head * 4u32 * head_dim;
@@ -427,7 +414,6 @@ pub fn sdpa_decode_batched_q4<T>(
     let q_off_3 = q_off_2 + head_dim;
     let kv_head_base = kv_head * kv_stride * head_dim;
     let d0 = lane * 4u32;
-
     // Pre-scale each lane's 4-element quartile of all four Q vectors.
     let q0_a = load(q[q_off_0 + d0]).cast::<f32>() * scale;
     let q0_b = load(q[q_off_0 + d0 + 1u32]).cast::<f32>() * scale;
@@ -445,7 +431,6 @@ pub fn sdpa_decode_batched_q4<T>(
     let q3_b = load(q[q_off_3 + d0 + 1u32]).cast::<f32>() * scale;
     let q3_c = load(q[q_off_3 + d0 + 2u32]).cast::<f32>() * scale;
     let q3_d = load(q[q_off_3 + d0 + 3u32]).cast::<f32>() * scale;
-
     let mut run_max_0 = neg_infinity();
     let mut run_max_1 = neg_infinity();
     let mut run_max_2 = neg_infinity();
@@ -470,7 +455,6 @@ pub fn sdpa_decode_batched_q4<T>(
     let mut o3_1 = 0.0f32;
     let mut o3_2 = 0.0f32;
     let mut o3_3 = 0.0f32;
-
     // ── Shared KV walk: KV loaded ONCE per position, all four Q
     //    streams updated in lockstep.
     for _t in range(sg, n_kv, ns) {
@@ -541,10 +525,8 @@ pub fn sdpa_decode_batched_q4<T>(
         o3_2 = o3_2 * factor_3 + weight_3 * v2;
         o3_3 = o3_3 * factor_3 + weight_3 * v3;
     }
-
     let stride = ns + 1u32;
     let idx = lane * stride + sg;
-
     // ── Phase A: cross-simdgroup reduction + output write for Q[0] ──
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max_0);
@@ -590,7 +572,6 @@ pub fn sdpa_decode_batched_q4<T>(
         store(out[out_off_0 + 3u32], so0_3.cast::<T>());
     }
     threadgroup_barrier();
-
     // ── Phase B: cross-simdgroup reduction + output write for Q[1] ──
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max_1);
@@ -636,7 +617,6 @@ pub fn sdpa_decode_batched_q4<T>(
         store(out[out_off_1 + 3u32], so1_3.cast::<T>());
     }
     threadgroup_barrier();
-
     // ── Phase C: cross-simdgroup reduction + output write for Q[2] ──
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max_2);
@@ -682,7 +662,6 @@ pub fn sdpa_decode_batched_q4<T>(
         store(out[out_off_2 + 3u32], so2_3.cast::<T>());
     }
     threadgroup_barrier();
-
     // ── Phase D: cross-simdgroup reduction + output write for Q[3] ──
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max_3);
@@ -784,14 +763,12 @@ pub fn sdpa_decode_batched_q8<T>(
     let sg = simd_id;
     let lane = simd_lane;
     let ns = n_simd;
-
     threadgroup_alloc("tg_max", 32);
     threadgroup_alloc("tg_sum", 32);
     threadgroup_alloc("tg_out0", 1056);
     threadgroup_alloc("tg_out1", 1056);
     threadgroup_alloc("tg_out2", 1056);
     threadgroup_alloc("tg_out3", 1056);
-
     // Q layout: [n_q_heads, 8, head_dim]. Eight batched-Q positions per
     // head sit at adjacent head_dim-wide slots.
     let q_off_0 = q_head * 8u32 * head_dim;
@@ -804,7 +781,6 @@ pub fn sdpa_decode_batched_q8<T>(
     let q_off_7 = q_off_6 + head_dim;
     let kv_head_base = kv_head * kv_stride * head_dim;
     let d0 = lane * 4u32;
-
     // Pre-scale each lane's 4-element quartile of all eight Q vectors.
     let q0_a = load(q[q_off_0 + d0]).cast::<f32>() * scale;
     let q0_b = load(q[q_off_0 + d0 + 1u32]).cast::<f32>() * scale;
@@ -838,7 +814,6 @@ pub fn sdpa_decode_batched_q8<T>(
     let q7_b = load(q[q_off_7 + d0 + 1u32]).cast::<f32>() * scale;
     let q7_c = load(q[q_off_7 + d0 + 2u32]).cast::<f32>() * scale;
     let q7_d = load(q[q_off_7 + d0 + 3u32]).cast::<f32>() * scale;
-
     let mut run_max_0 = neg_infinity();
     let mut run_max_1 = neg_infinity();
     let mut run_max_2 = neg_infinity();
@@ -887,7 +862,6 @@ pub fn sdpa_decode_batched_q8<T>(
     let mut o7_1 = 0.0f32;
     let mut o7_2 = 0.0f32;
     let mut o7_3 = 0.0f32;
-
     // ── Shared KV walk: KV loaded ONCE per position, all eight Q
     //    streams updated in lockstep.
     for _t in range(sg, n_kv, ns) {
@@ -994,10 +968,8 @@ pub fn sdpa_decode_batched_q8<T>(
         o7_2 = o7_2 * factor_7 + weight_7 * v2;
         o7_3 = o7_3 * factor_7 + weight_7 * v3;
     }
-
     let stride = ns + 1u32;
     let idx = lane * stride + sg;
-
     // Helper macro pattern: each phase follows the same reduction structure.
     // Phase A: Q[0]
     if lane == 0 {
@@ -1044,7 +1016,6 @@ pub fn sdpa_decode_batched_q8<T>(
         store(out[out_off_0 + 3u32], so0_3.cast::<T>());
     }
     threadgroup_barrier();
-
     // Phase B: Q[1]
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max_1);
@@ -1090,7 +1061,6 @@ pub fn sdpa_decode_batched_q8<T>(
         store(out[out_off_1 + 3u32], so1_3.cast::<T>());
     }
     threadgroup_barrier();
-
     // Phase C: Q[2]
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max_2);
@@ -1136,7 +1106,6 @@ pub fn sdpa_decode_batched_q8<T>(
         store(out[out_off_2 + 3u32], so2_3.cast::<T>());
     }
     threadgroup_barrier();
-
     // Phase D: Q[3]
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max_3);
@@ -1182,7 +1151,6 @@ pub fn sdpa_decode_batched_q8<T>(
         store(out[out_off_3 + 3u32], so3_3.cast::<T>());
     }
     threadgroup_barrier();
-
     // Phase E: Q[4]
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max_4);
@@ -1228,7 +1196,6 @@ pub fn sdpa_decode_batched_q8<T>(
         store(out[out_off_4 + 3u32], so4_3.cast::<T>());
     }
     threadgroup_barrier();
-
     // Phase F: Q[5]
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max_5);
@@ -1274,7 +1241,6 @@ pub fn sdpa_decode_batched_q8<T>(
         store(out[out_off_5 + 3u32], so5_3.cast::<T>());
     }
     threadgroup_barrier();
-
     // Phase G: Q[6]
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max_6);
@@ -1320,7 +1286,6 @@ pub fn sdpa_decode_batched_q8<T>(
         store(out[out_off_6 + 3u32], so6_3.cast::<T>());
     }
     threadgroup_barrier();
-
     // Phase H: Q[7]
     if lane == 0 {
         threadgroup_store("tg_max", sg, run_max_7);

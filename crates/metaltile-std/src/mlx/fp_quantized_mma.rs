@@ -75,15 +75,12 @@ pub fn mt_fp4_qmm_mma<T>(
     let sm = sg / 2u32;
     let sn = sg & 1u32;
     let lane_in_tg = sg * 32u32 + lane;
-
     let qid = lane / 4u32;
     let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
     let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
     let fn1 = fn0 + 1u32;
-
     threadgroup_alloc("xs", 1152, T);
     threadgroup_alloc("ws", 1152, T);
-
     let c_f00 = simdgroup_alloc::<f32, 8, 8>();
     simdgroup_elem_store(c_f00, 0, 0.0f32);
     simdgroup_elem_store(c_f00, 1, 0.0f32);
@@ -96,35 +93,28 @@ pub fn mt_fp4_qmm_mma<T>(
     let c_f11 = simdgroup_alloc::<f32, 8, 8>();
     simdgroup_elem_store(c_f11, 0, 0.0f32);
     simdgroup_elem_store(c_f11, 1, 0.0f32);
-
     let a_f0 = simdgroup_alloc::<T, 8, 8>();
     let a_f1 = simdgroup_alloc::<T, 8, 8>();
     let b_f0 = simdgroup_alloc::<T, 8, 8>();
     let b_f1 = simdgroup_alloc::<T, 8, 8>();
-
     // W coop-dequant: each lane handles one fp4 u32 word (8 codes).
     // lane_in_tg / 4 = w_row (0..32), lane_in_tg & 3 = word_in_row (0..4).
     // 32 N-rows × 4 words = 128 lanes = full TG.
     let w_row = lane_in_tg / 4u32;
     let word_in_row = lane_in_tg & 3u32;
-
     let x_m_row = lane_in_tg / 4u32;
     let x_k_quad = lane_in_tg & 3u32;
     let x_k_base = x_k_quad * 8u32;
-
     let xs_ld = 36u32;
     let ws_ld = 36u32;
-
     let x_m_base = m_tile * 32u32;
     let w_n_base = n_tile * 32u32;
     // fp4: 8 codes/u32 → packs_per_row = k/8.
     let packs_per_row = k / 8u32;
     let sb_base = (w_n_base + w_row) * gs_per_row;
     let w_pack_row_base = (w_n_base + w_row) * packs_per_row;
-
     // group_size = k / gs_per_row (= 32 for the default fp4 layout).
     let group_size = k / gs_per_row;
-
     for kb in range(0u32, k, 32u32) {
         // ── 1. Coop X load ── (identical to mt_qmm_mma)
         let x_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base;
@@ -137,7 +127,6 @@ pub fn mt_fp4_qmm_mma<T>(
         threadgroup_store("xs", x_ws_base + 5u32, load(x[x_row_dev_base + 5u32]).cast::<T>());
         threadgroup_store("xs", x_ws_base + 6u32, load(x[x_row_dev_base + 6u32]).cast::<T>());
         threadgroup_store("xs", x_ws_base + 7u32, load(x[x_row_dev_base + 7u32]).cast::<T>());
-
         // ── 2. Coop W fp4 dequant ──
         // Each lane loads one u32 pack (8 fp4 codes) and dequantizes into Ws.
         let pack_k_off = kb / 8u32 + word_in_row;
@@ -146,7 +135,6 @@ pub fn mt_fp4_qmm_mma<T>(
         let g = k_off / group_size;
         let s = load(scales[sb_base + g]).cast::<f32>();
         let ws_base = w_row * ws_ld + word_in_row * 8u32;
-
         // Dequant 8 fp4 codes using the E2M1 two_m_int trick.
         // code3 = 3-bit magnitude (bits 0-2 of each nibble), sign = bit 3.
         for _ci in range(0u32, 8u32, 1u32) {
@@ -165,15 +153,12 @@ pub fn mt_fp4_qmm_mma<T>(
             let val = s * sign * two_m_int.cast::<f32>() * 0.5f32;
             threadgroup_store("ws", ws_base + _ci, val.cast::<T>());
         }
-
         threadgroup_barrier();
-
         // ── 3. MMA inner loop — identical to mt_qmm_mma ──
         let row_a0 = sm * 16u32 + fm;
         let row_a1 = sm * 16u32 + 8u32 + fm;
         let col_b0 = sn * 16u32;
         let col_b1 = sn * 16u32 + 8u32;
-
         // k_inner = 0
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + fn1));
@@ -190,7 +175,6 @@ pub fn mt_fp4_qmm_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 1
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 8u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 8u32 + fn1));
@@ -207,7 +191,6 @@ pub fn mt_fp4_qmm_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 2
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 16u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 16u32 + fn1));
@@ -224,7 +207,6 @@ pub fn mt_fp4_qmm_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 3
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 24u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 24u32 + fn1));
@@ -241,10 +223,8 @@ pub fn mt_fp4_qmm_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         threadgroup_barrier();
     }
-
     // ── 4. Write C frags ──
     let out_m_base = m_tile * 32u32 + sm * 16u32;
     let out_n_base = n_tile * 32u32 + sn * 16u32;
@@ -331,15 +311,12 @@ pub fn mt_fp8_e4m3_qmm_mma<T>(
     let sm = sg / 2u32;
     let sn = sg & 1u32;
     let lane_in_tg = sg * 32u32 + lane;
-
     let qid = lane / 4u32;
     let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
     let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
     let fn1 = fn0 + 1u32;
-
     threadgroup_alloc("xs", 1152, T);
     threadgroup_alloc("ws", 1152, T);
-
     let c_f00 = simdgroup_alloc::<f32, 8, 8>();
     simdgroup_elem_store(c_f00, 0, 0.0f32);
     simdgroup_elem_store(c_f00, 1, 0.0f32);
@@ -352,12 +329,10 @@ pub fn mt_fp8_e4m3_qmm_mma<T>(
     let c_f11 = simdgroup_alloc::<f32, 8, 8>();
     simdgroup_elem_store(c_f11, 0, 0.0f32);
     simdgroup_elem_store(c_f11, 1, 0.0f32);
-
     let a_f0 = simdgroup_alloc::<T, 8, 8>();
     let a_f1 = simdgroup_alloc::<T, 8, 8>();
     let b_f0 = simdgroup_alloc::<T, 8, 8>();
     let b_f1 = simdgroup_alloc::<T, 8, 8>();
-
     // W coop-dequant: fp8 has 4 codes/u32 → BK=32 spans 8 words per N-row.
     // 32 N-rows × 8 words = 256 — too many for 128 lanes in one step.
     // Use 2 steps: step 0 covers words 0-3, step 1 covers words 4-7.
@@ -368,14 +343,11 @@ pub fn mt_fp8_e4m3_qmm_mma<T>(
     // Then a second pass covers words 4..7.
     let w_row = lane_in_tg / 4u32;
     let word_in_row = lane_in_tg & 3u32;
-
     let x_m_row = lane_in_tg / 4u32;
     let x_k_quad = lane_in_tg & 3u32;
     let x_k_base = x_k_quad * 8u32;
-
     let xs_ld = 36u32;
     let ws_ld = 36u32;
-
     let x_m_base = m_tile * 32u32;
     let w_n_base = n_tile * 32u32;
     // fp8: 4 codes/u32 → packs_per_row = k/4.
@@ -383,7 +355,6 @@ pub fn mt_fp8_e4m3_qmm_mma<T>(
     let sb_base = (w_n_base + w_row) * gs_per_row;
     let w_pack_row_base = (w_n_base + w_row) * packs_per_row;
     let group_size = k / gs_per_row;
-
     for kb in range(0u32, k, 32u32) {
         // ── 1. Coop X load ──
         let x_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base;
@@ -396,12 +367,10 @@ pub fn mt_fp8_e4m3_qmm_mma<T>(
         threadgroup_store("xs", x_ws_base + 5u32, load(x[x_row_dev_base + 5u32]).cast::<T>());
         threadgroup_store("xs", x_ws_base + 6u32, load(x[x_row_dev_base + 6u32]).cast::<T>());
         threadgroup_store("xs", x_ws_base + 7u32, load(x[x_row_dev_base + 7u32]).cast::<T>());
-
         // ── 2. Coop W fp8 E4M3 dequant — 2 passes (words 0..3, words 4..7) ──
         let k_off = kb + word_in_row * 4u32;
         let g = k_off / group_size;
         let s = load(scales[sb_base + g]).cast::<f32>();
-
         // Pass A: words 0..3 (word_in_row = 0..3)
         let pack_a = load(w[w_pack_row_base + kb / 4u32 + word_in_row]);
         let ws_base_a = w_row * ws_ld + word_in_row * 4u32;
@@ -421,7 +390,6 @@ pub fn mt_fp8_e4m3_qmm_mma<T>(
             let val = s * sign * mag;
             threadgroup_store("ws", ws_base_a + _ci, val.cast::<T>());
         }
-
         // Pass B: words 4..7 (same lane, offset by 4 in Ws and W packs).
         let k_off_b = kb + (word_in_row + 4u32) * 4u32;
         let g_b = k_off_b / group_size;
@@ -442,15 +410,12 @@ pub fn mt_fp8_e4m3_qmm_mma<T>(
             let val = s_b * sign * mag;
             threadgroup_store("ws", ws_base_b + _ci, val.cast::<T>());
         }
-
         threadgroup_barrier();
-
         // ── 3. MMA inner loop ── (identical to mt_qmm_mma)
         let row_a0 = sm * 16u32 + fm;
         let row_a1 = sm * 16u32 + 8u32 + fm;
         let col_b0 = sn * 16u32;
         let col_b1 = sn * 16u32 + 8u32;
-
         // k_inner = 0
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + fn1));
@@ -467,7 +432,6 @@ pub fn mt_fp8_e4m3_qmm_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 1
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 8u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 8u32 + fn1));
@@ -484,7 +448,6 @@ pub fn mt_fp8_e4m3_qmm_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 2
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 16u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 16u32 + fn1));
@@ -501,7 +464,6 @@ pub fn mt_fp8_e4m3_qmm_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 3
         simdgroup_elem_store(a_f0, 0, threadgroup_load("xs", row_a0 * xs_ld + 24u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("xs", row_a0 * xs_ld + 24u32 + fn1));
@@ -518,10 +480,8 @@ pub fn mt_fp8_e4m3_qmm_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         threadgroup_barrier();
     }
-
     // ── 4. Write C frags ──
     let out_m_base = m_tile * 32u32 + sm * 16u32;
     let out_n_base = n_tile * 32u32 + sn * 16u32;

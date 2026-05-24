@@ -105,14 +105,12 @@ pub fn conv2d_mma<T>(
     // BM (oc-axis) tile = tgid_x * 32, BN (pixel-axis) tile = tgid_y * 32.
     let oc_tile = tgid_x;
     let px_tile = tgid_y;
-
     let lane = simd_lane;
     let sg = simd_group_id();
     // 4 SGs in a 2×2 warp grid: sm = row half, sn = col half.
     let sm = sg / 2u32;
     let sn = sg & 1u32;
     let lane_in_tg = sg * 32u32 + lane;
-
     // ── 8×8 frag lane mapping (Apple steel_gemm layout) ──────────────────
     // Same mapping as `mt_qmm_mma`.
     // Each lane owns 2 elements per 8×8 frag at (fm, fn0) and (fm, fn1).
@@ -120,13 +118,11 @@ pub fn conv2d_mma<T>(
     let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
     let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
     let fn1 = fn0 + 1u32;
-
     // ── TG memory: A (input gathers) and B (weight) tiles ─────────────
     // Row stride = BK + 4 = 36 (skew by 4 T to break 32-bank conflicts).
     let stride = 36u32;
     threadgroup_alloc("as", 1152, T); // [32 × 36] A tile
     threadgroup_alloc("bs", 1152, T); // [32 × 36] B tile
-
     // ── Accumulator frags, init to 0 ─────────────────────────────────────
     // c_f<row_half><col_half>: 4 8×8 frags per SG covering the 16×16 sub-tile.
     let c_f00 = simdgroup_alloc::<f32, 8, 8>();
@@ -141,17 +137,14 @@ pub fn conv2d_mma<T>(
     let c_f11 = simdgroup_alloc::<f32, 8, 8>();
     simdgroup_elem_store(c_f11, 0, 0.0f32);
     simdgroup_elem_store(c_f11, 1, 0.0f32);
-
     // A and B frag scratch, reused per k-inner.
     let a_f0 = simdgroup_alloc::<T, 8, 8>();
     let a_f1 = simdgroup_alloc::<T, 8, 8>();
     let b_f0 = simdgroup_alloc::<T, 8, 8>();
     let b_f1 = simdgroup_alloc::<T, 8, 8>();
-
     // ── Precompute K-space (BK = in_ch * kh * kw) ──────────────────────
     let kk = kh * kw;
     let total_k = in_ch * kk; // total tap dimension
-
     // ── Pixel-axis indices for this TG ──────────────────────────────────
     // Pixel = flat index into batch * out_h * out_w.
     let out_hw = out_h * out_w;
@@ -160,7 +153,6 @@ pub fn conv2d_mma<T>(
     let a_px_row = lane_in_tg / 4u32; // which of the 32 pixel rows
     let a_k_quad = lane_in_tg & 3u32; // which K-quad (8-elem chunk) in [0,4)
     let a_k_base = a_k_quad * 8u32;
-
     // Global pixel index for this lane's A row.
     let global_px = px_tile * 32u32 + a_px_row;
     // Decode pixel → (n, oh, ow) for im2col gather.
@@ -171,7 +163,6 @@ pub fn conv2d_mma<T>(
     // Base offset into input for this pixel's batch/spatial position.
     let in_n_stride = in_ch * in_h * in_w;
     let px_in_base = n_px * in_n_stride;
-
     // Lane mapping for coop B-load (weight): same as X-load in mt_qmm_mma.
     // lane_in_tg = oc_row * 4 + k_quad → oc_row ∈ 0..32, k_quad ∈ 0..4.
     let b_oc_row = lane_in_tg / 4u32;
@@ -180,7 +171,6 @@ pub fn conv2d_mma<T>(
     let global_oc = oc_tile * 32u32 + b_oc_row;
     // Weight row base: [oc * total_k] (OIHW flattened).
     let w_oc_base = global_oc * total_k;
-
     // ── K-block loop (step BK=32 through total_k = in_ch * kh * kw) ────
     // The K-loop steps by 32, but `total_k` is rarely a multiple of 32
     // (e.g. ViT-patch14: in_ch=3, kh=kw=14 → total_k=588). The A/B coop
@@ -211,7 +201,6 @@ pub fn conv2d_mma<T>(
             let val = select(in_bounds, raw, 0.0f32).cast::<T>();
             threadgroup_store("as", a_px_row * stride + a_k_base + i, val);
         }
-
         // ─ 2. Coop B load (weight, dense OIHW) ─────────────────────────
         // Each lane loads 8 contiguous K-elements for its oc row.
         for i in range(0u32, 8u32, 1u32) {
@@ -223,9 +212,7 @@ pub fn conv2d_mma<T>(
             let val = select(in_bounds, raw, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_oc_row * stride + b_k_base + i, val);
         }
-
         threadgroup_barrier();
-
         // ─ 3. MMA inner loop — 4 frags × 4 k-inner = 16 MMAs per SG ───
         // A-frag (pixels) at (fm, fn_i): as[(sm*16 + frag_m + fm)*36 + k_inner*8 + fn_i]
         // B-frag (weight) at (fm, fn_i): bs[(sn*16 + frag_n + fn_i)*36 + k_inner*8 + fm]
@@ -235,7 +222,6 @@ pub fn conv2d_mma<T>(
         let row_a1 = sm * 16u32 + 8u32 + fm;
         let col_b0 = sn * 16u32;
         let col_b1 = sn * 16u32 + 8u32;
-
         // k_inner = 0
         simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + fn1));
@@ -252,7 +238,6 @@ pub fn conv2d_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 1
         simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 8u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 8u32 + fn1));
@@ -269,7 +254,6 @@ pub fn conv2d_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 2
         simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 16u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 16u32 + fn1));
@@ -286,7 +270,6 @@ pub fn conv2d_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 3
         simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 24u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 24u32 + fn1));
@@ -303,17 +286,14 @@ pub fn conv2d_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         threadgroup_barrier();
     }
-
     // ── 4. Write 4 C frags to global out ─────────────────────────────────
     // out layout: [batch * out_h * out_w, out_ch] row-major (pixel-major).
     // out_px_base = pixel-axis base; out_oc_base = oc-axis base.
     let out_px_base = px_tile * 32u32 + sm * 16u32;
     let out_oc_base = oc_tile * 32u32 + sn * 16u32;
     // Stride along the oc axis (number of columns) = out_ch.
-
     // c_f00 at (frag_m=0, frag_n=0)
     store(
         out[(out_px_base + fm) * out_ch + out_oc_base + fn0],

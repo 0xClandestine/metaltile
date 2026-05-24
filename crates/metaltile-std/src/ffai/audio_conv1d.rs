@@ -57,17 +57,13 @@ pub fn audio_conv1d<T>(
     let t1 = idx / out_len;
     let oc = t1 % out_ch;
     let n = t1 / out_ch;
-
     // Receptive-field anchor in the *padded* input frame: tap `kx` of
     // output position `op` lands at padded index `op*stride + kx`, which
     // maps to real input index `p - pad`, valid iff `pad <= p < pad+in_len`.
     let p0 = op * stride;
-
     let in_n_stride = in_ch * in_len;
     let w_oc_stride = in_ch * k;
-
     let mut acc = load(bias[oc]).cast::<f32>();
-
     for ic in range(0u32, in_ch, 1u32) {
         let in_ic_base = n * in_n_stride + ic * in_len;
         let w_ic_base = oc * w_oc_stride + ic * k;
@@ -81,6 +77,5 @@ pub fn audio_conv1d<T>(
             acc = acc + x_m * wt;
         }
     }
-
     store(out[idx], acc.cast::<T>());
 }

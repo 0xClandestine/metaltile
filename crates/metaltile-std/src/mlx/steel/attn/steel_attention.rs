@@ -66,24 +66,20 @@ pub fn mt_sdpa_prefill<T>(
     let sg = simd_group_id();
     let lane_in_tg = sg * 32u32 + lane;
     let d0_load = lane_in_tg;
-
     let d0 = lane * 4u32;
     let head_dim = 128u32;
     let bq = 32u32;
     let bq_sg = 8u32;
     let bk = 16u32;
     let q_len_off = k_len - q_len;
-
     let scale_log2 = scale * 1.4426950408889634f32;
     // Batched-prefill layout: q/out [batch, n_q_heads, q_len, head_dim],
     // k/v [batch, n_kv_heads, k_len, head_dim]. Single-batch B=1 collapses
     // to the original `(kv|q_head) * len * head_dim` form.
     let kv_row_base = batch * n_kv_heads * k_len * head_dim + kv_head * k_len * head_dim;
     let q_head_row_off = batch * n_q_heads * q_len * head_dim + q_head * q_len * head_dim;
-
     threadgroup_alloc("tg_ks", 2048, T);
     threadgroup_alloc("tg_vs", 2048, T);
-
     let q_tile_first = q_tile * bq + sg * bq_sg;
     let q0_row = q_head_row_off + (q_tile_first + 0u32) * head_dim;
     let q1_row = q_head_row_off + (q_tile_first + 1u32) * head_dim;
@@ -125,7 +121,6 @@ pub fn mt_sdpa_prefill<T>(
     let q7_1 = load(q[q7_row + d0 + 1u32]).cast::<f32>() * scale_log2;
     let q7_2 = load(q[q7_row + d0 + 2u32]).cast::<f32>() * scale_log2;
     let q7_3 = load(q[q7_row + d0 + 3u32]).cast::<f32>() * scale_log2;
-
     let q0_abs = q_tile_first + 0u32 + q_len_off;
     let q1_abs = q_tile_first + 1u32 + q_len_off;
     let q2_abs = q_tile_first + 2u32 + q_len_off;
@@ -134,7 +129,6 @@ pub fn mt_sdpa_prefill<T>(
     let q5_abs = q_tile_first + 5u32 + q_len_off;
     let q6_abs = q_tile_first + 6u32 + q_len_off;
     let q7_abs = q_tile_first + 7u32 + q_len_off;
-
     let mut m0 = neg_infinity();
     let mut s0 = 0.0f32;
     let mut o00 = 0.0f32;
@@ -183,14 +177,12 @@ pub fn mt_sdpa_prefill<T>(
     let mut o71 = 0.0f32;
     let mut o72 = 0.0f32;
     let mut o73 = 0.0f32;
-
     // Causal trim: bound K-block loop at the LAST query of the ENTIRE TG
     // (across all simdgroups), not per-SG. All 4 SGs must execute the same
     // count of `threadgroup_barrier`s or the TG deadlocks.
     let q_tile_last_abs = q_tile * bq + (bq - 1u32) + q_len_off;
     let kb_lim = (q_tile_last_abs / bk) + 1u32;
     let sg_kb_lim = (q7_abs / bk) + 1u32;
-
     for kb in range(0u32, kb_lim, 1u32) {
         let kb_off = kb * bk;
         // Coop load: 128 lanes × bk × 1 element = 128 × 16 = full K-block (BK*BD = 2048).
@@ -205,7 +197,6 @@ pub fn mt_sdpa_prefill<T>(
             threadgroup_store("tg_vs", kr_off + d0_load, load(v[kv_off]).cast::<T>());
         }
         threadgroup_barrier();
-
         if kb < sg_kb_lim {
             for k_off in range(0u32, bk, 1u32) {
                 let k_abs = kb_off + k_off;
@@ -218,7 +209,6 @@ pub fn mt_sdpa_prefill<T>(
                 let v1 = threadgroup_load("tg_vs", kr_off + d0 + 1u32).cast::<f32>();
                 let v2 = threadgroup_load("tg_vs", kr_off + d0 + 2u32).cast::<f32>();
                 let v3 = threadgroup_load("tg_vs", kr_off + d0 + 3u32).cast::<f32>();
-
                 let r0 = simd_sum(q0_0 * k0 + q0_1 * k1 + q0_2 * k2 + q0_3 * k3);
                 let r1 = simd_sum(q1_0 * k0 + q1_1 * k1 + q1_2 * k2 + q1_3 * k3);
                 let r2 = simd_sum(q2_0 * k0 + q2_1 * k1 + q2_2 * k2 + q2_3 * k3);
@@ -227,7 +217,6 @@ pub fn mt_sdpa_prefill<T>(
                 let r5 = simd_sum(q5_0 * k0 + q5_1 * k1 + q5_2 * k2 + q5_3 * k3);
                 let r6 = simd_sum(q6_0 * k0 + q6_1 * k1 + q6_2 * k2 + q6_3 * k3);
                 let r7 = simd_sum(q7_0 * k0 + q7_1 * k1 + q7_2 * k2 + q7_3 * k3);
-
                 let mk0 = select(k_abs > q0_abs, neg_infinity(), r0);
                 let mk1 = select(k_abs > q1_abs, neg_infinity(), r1);
                 let mk2 = select(k_abs > q2_abs, neg_infinity(), r2);
@@ -236,7 +225,6 @@ pub fn mt_sdpa_prefill<T>(
                 let mk5 = select(k_abs > q5_abs, neg_infinity(), r5);
                 let mk6 = select(k_abs > q6_abs, neg_infinity(), r6);
                 let mk7 = select(k_abs > q7_abs, neg_infinity(), r7);
-
                 let nm0 = select(mk0 > m0, mk0, m0);
                 let f0 = exp2(m0 - nm0);
                 let w0 = exp2(mk0 - nm0);
@@ -246,7 +234,6 @@ pub fn mt_sdpa_prefill<T>(
                 o01 = o01 * f0 + w0 * v1;
                 o02 = o02 * f0 + w0 * v2;
                 o03 = o03 * f0 + w0 * v3;
-
                 let nm1 = select(mk1 > m1, mk1, m1);
                 let f1 = exp2(m1 - nm1);
                 let w1 = exp2(mk1 - nm1);
@@ -256,7 +243,6 @@ pub fn mt_sdpa_prefill<T>(
                 o11 = o11 * f1 + w1 * v1;
                 o12 = o12 * f1 + w1 * v2;
                 o13 = o13 * f1 + w1 * v3;
-
                 let nm2 = select(mk2 > m2, mk2, m2);
                 let f2 = exp2(m2 - nm2);
                 let w2 = exp2(mk2 - nm2);
@@ -266,7 +252,6 @@ pub fn mt_sdpa_prefill<T>(
                 o21 = o21 * f2 + w2 * v1;
                 o22 = o22 * f2 + w2 * v2;
                 o23 = o23 * f2 + w2 * v3;
-
                 let nm3 = select(mk3 > m3, mk3, m3);
                 let f3 = exp2(m3 - nm3);
                 let w3 = exp2(mk3 - nm3);
@@ -276,7 +261,6 @@ pub fn mt_sdpa_prefill<T>(
                 o31 = o31 * f3 + w3 * v1;
                 o32 = o32 * f3 + w3 * v2;
                 o33 = o33 * f3 + w3 * v3;
-
                 let nm4 = select(mk4 > m4, mk4, m4);
                 let f4 = exp2(m4 - nm4);
                 let w4 = exp2(mk4 - nm4);
@@ -286,7 +270,6 @@ pub fn mt_sdpa_prefill<T>(
                 o41 = o41 * f4 + w4 * v1;
                 o42 = o42 * f4 + w4 * v2;
                 o43 = o43 * f4 + w4 * v3;
-
                 let nm5 = select(mk5 > m5, mk5, m5);
                 let f5 = exp2(m5 - nm5);
                 let w5 = exp2(mk5 - nm5);
@@ -296,7 +279,6 @@ pub fn mt_sdpa_prefill<T>(
                 o51 = o51 * f5 + w5 * v1;
                 o52 = o52 * f5 + w5 * v2;
                 o53 = o53 * f5 + w5 * v3;
-
                 let nm6 = select(mk6 > m6, mk6, m6);
                 let f6 = exp2(m6 - nm6);
                 let w6 = exp2(mk6 - nm6);
@@ -306,7 +288,6 @@ pub fn mt_sdpa_prefill<T>(
                 o61 = o61 * f6 + w6 * v1;
                 o62 = o62 * f6 + w6 * v2;
                 o63 = o63 * f6 + w6 * v3;
-
                 let nm7 = select(mk7 > m7, mk7, m7);
                 let f7 = exp2(m7 - nm7);
                 let w7 = exp2(mk7 - nm7);
@@ -320,7 +301,6 @@ pub fn mt_sdpa_prefill<T>(
         }
         threadgroup_barrier();
     }
-
     let is0 = select(s0 > 0.0f32, 1.0f32 / s0, 0.0f32);
     let is1 = select(s1 > 0.0f32, 1.0f32 / s1, 0.0f32);
     let is2 = select(s2 > 0.0f32, 1.0f32 / s2, 0.0f32);

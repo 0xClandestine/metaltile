@@ -56,7 +56,6 @@ pub fn ffai_rms_norm_rope<T>(
     let half = axis_size / 2u32;
     let rs = row * axis_size;
     let lid = tid;
-
     // Phase 1: per-thread pair → threadgroup-wide inv_rms via cross-kernel call.
     // partial_ssq is a Value arg; eps_buf and axis_size are Tensor args whose
     // names are substituted into mt_rms_inv_scalar's callee loads.
@@ -64,17 +63,14 @@ pub fn ffai_rms_norm_rope<T>(
     let v2 = load(x[rs + lid + half]).cast::<f32>();
     let partial_ssq = v1 * v1 + v2 * v2;
     let inv_rms = mt_rms_inv_scalar(partial_ssq, eps_buf, axis_size);
-
     // Phase 2: weight scale + RoPE rotation.
     let l = (row / n_heads) % seq_len;
     let pos = (offset + l).cast::<f32>();
     let theta = pos * load(inv_freqs[lid]);
     let cos_t = cos(theta);
     let sin_t = sin(theta);
-
     let normed_a = v1 * load(w[lid]).cast::<f32>() * inv_rms;
     let normed_b = v2 * load(w[lid + half]).cast::<f32>() * inv_rms;
-
     store(out[rs + lid], (normed_a * cos_t - normed_b * sin_t).cast::<T>());
     store(out[rs + lid + half], (normed_a * sin_t + normed_b * cos_t).cast::<T>());
 }

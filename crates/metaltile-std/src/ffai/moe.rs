@@ -90,7 +90,6 @@ pub fn mt_moe_router_topk<T>(
     let row = tgid_x;
     let lane = tid;
     let row_base = row * n_experts;
-
     // TG scratch: chosen indices + values from each of the k argmax passes.
     // 32 slots covers any reasonable k (typical 6-8). Kernel assumes
     // k ≤ 32 — caller MUST enforce this in the host-side dispatcher
@@ -101,7 +100,6 @@ pub fn mt_moe_router_topk<T>(
     // 1 slot, written by lane 0 in the prepass.
     threadgroup_alloc("tg_full_sum", 1u32);
     threadgroup_alloc("tg_full_max", 1u32);
-
     // ── Pre-pass: compute softmax denominator over ALL n_experts ─────
     // Needed only for norm_topk_prob=0 (Qwen3-Next), but the cost is
     // trivial (one simd_max + simd_sum) and emitting it unconditionally
@@ -132,7 +130,6 @@ pub fn mt_moe_router_topk<T>(
         threadgroup_store("tg_full_sum", 0u32, row_sum_all);
     }
     simdgroup_barrier_mem_none();
-
     // ── k argmax passes with chosen-mask ─────────────────────────────
     for it in range(0u32, k, 1u32) {
         // Per-lane local argmax over its slice of n_experts.
@@ -158,14 +155,12 @@ pub fn mt_moe_router_topk<T>(
                 best_idx = select(better, j, best_idx);
             }
         }
-
         // Cross-lane reduce.  simd_max gives the global best value;
         // ties broken to smaller idx via simd_min on (idx | sentinel).
         let global_best_val = simd_max(best_val);
         let i_have = best_val == global_best_val;
         let my_idx_or_max = select(i_have, best_idx, 4294967295u32); // u32::MAX
         let global_best_idx = simd_min(my_idx_or_max);
-
         // Lane 0 writes the iter's chosen slot.
         if lane == 0u32 {
             threadgroup_store("tg_chosen_idx", it, global_best_idx);
@@ -173,7 +168,6 @@ pub fn mt_moe_router_topk<T>(
         }
         simdgroup_barrier_mem_none();
     }
-
     // ── Softmax / weight emit per `norm_topk_prob` ──────────────────
     // Mode 1 (Qwen3-MoE, default): softmax over chosen-k (sum-to-1).
     //   numerator   = exp(z_i - max_chosen);  divisor = Σ_j∈chosen
@@ -194,7 +188,6 @@ pub fn mt_moe_router_topk<T>(
     // const-folds when `norm_topk_prob` bakes in.
     let divisor = select(norm_topk_prob == 1u32, sum_chosen, row_sum_full);
     let weight = masked_exp / divisor;
-
     // ── Write outputs ───────────────────────────────────────────────
     if lane < k {
         let out_base = row * k + lane;
@@ -251,7 +244,6 @@ pub fn mt_moe_unpermute<T>(
     let row_base_inv = token * k;
     let row_base_w = token * k;
     let row_base_out = token * hidden;
-
     let n_per_lane = (hidden + 127u32) / 128u32;
     for r in range(0u32, n_per_lane, 1u32) {
         let h = r * 128u32 + lane;
@@ -318,7 +310,6 @@ pub fn mt_moe_permute<T>(
     let token = load(sort_token_idx[permuted_pos]);
     let src_base = token * hidden;
     let dst_base = permuted_pos * hidden;
-
     let n_per_lane = (hidden + 127u32) / 128u32;
     for r in range(0u32, n_per_lane, 1u32) {
         let h = r * 128u32 + lane;
@@ -405,7 +396,6 @@ pub fn mt_moe_gather_qmm_int4<T>(
     let m = tgid_x;
     let row = tgid_y;
     let lane = tid;
-
     // Resolve expert — linear walk on EVERY lane (cheap, ≤ 256 reads from
     // a small uniform buffer) so the result lives in a per-lane u32 register
     // and never round-trips through float-typed TG memory.
@@ -419,7 +409,6 @@ pub fn mt_moe_gather_qmm_int4<T>(
         expert = select(take == 1u32, ee, expert);
         found = select(take == 1u32, 1u32, found);
     }
-
     // Stride-by-32 over packs: each lane handles packs at positions
     // lane, lane+32, lane+64, ... up to k_in/8. Correct for both small
     // (k_in=32 → 4 packs, only lanes 0..3 work) and large (k_in=2048 →
@@ -427,12 +416,9 @@ pub fn mt_moe_gather_qmm_int4<T>(
     let total_packs = k_in / 8u32;
     let weight_stride_m = total_packs;
     let weight_row_base = expert * m_out * weight_stride_m + m * weight_stride_m;
-
     let groups_per_row = k_in / group_size;
     let scale_row_base = expert * m_out * groups_per_row + m * groups_per_row;
-
     let x_row_base = row * k_in;
-
     let mut acc = 0.0f32;
     for pack_idx in range(lane, total_packs, 32u32) {
         let packed = load(weight_packed[weight_row_base + pack_idx]);
@@ -440,7 +426,6 @@ pub fn mt_moe_gather_qmm_int4<T>(
         let g = k_first / group_size;
         let scale = load(scales[scale_row_base + g]).cast::<f32>();
         let bias = load(biases[scale_row_base + g]).cast::<f32>();
-
         let q0 = (packed >> 0u32) & 15u32;
         let q1 = (packed >> 4u32) & 15u32;
         let q2 = (packed >> 8u32) & 15u32;
@@ -449,7 +434,6 @@ pub fn mt_moe_gather_qmm_int4<T>(
         let q5 = (packed >> 20u32) & 15u32;
         let q6 = (packed >> 24u32) & 15u32;
         let q7 = (packed >> 28u32) & 15u32;
-
         let w0 = q0.cast::<f32>() * scale + bias;
         let w1 = q1.cast::<f32>() * scale + bias;
         let w2 = q2.cast::<f32>() * scale + bias;
@@ -458,7 +442,6 @@ pub fn mt_moe_gather_qmm_int4<T>(
         let w5 = q5.cast::<f32>() * scale + bias;
         let w6 = q6.cast::<f32>() * scale + bias;
         let w7 = q7.cast::<f32>() * scale + bias;
-
         let x0 = load(x[x_row_base + k_first + 0u32]).cast::<f32>();
         let x1 = load(x[x_row_base + k_first + 1u32]).cast::<f32>();
         let x2 = load(x[x_row_base + k_first + 2u32]).cast::<f32>();
@@ -467,10 +450,8 @@ pub fn mt_moe_gather_qmm_int4<T>(
         let x5 = load(x[x_row_base + k_first + 5u32]).cast::<f32>();
         let x6 = load(x[x_row_base + k_first + 6u32]).cast::<f32>();
         let x7 = load(x[x_row_base + k_first + 7u32]).cast::<f32>();
-
         acc = acc + w0 * x0 + w1 * x1 + w2 * x2 + w3 * x3 + w4 * x4 + w5 * x5 + w6 * x6 + w7 * x7;
     }
-
     let total = simd_sum(acc);
     if lane == 0u32 {
         store(out[row * m_out + m], total.cast::<T>());
@@ -701,7 +682,6 @@ pub fn mt_moe_gather_qmm_int4_m8<T>(
     let row = tgid_y;
     let lane = tid;
     let m_base = m_chunk * 8u32;
-
     // Resolve expert — same linear walk as the m=1 variant.
     let mut expert = 0u32;
     let mut found = 0u32;
@@ -713,15 +693,11 @@ pub fn mt_moe_gather_qmm_int4_m8<T>(
         expert = select(take == 1u32, ee, expert);
         found = select(take == 1u32, 1u32, found);
     }
-
     let total_packs = k_in / 8u32;
     let groups_per_row = k_in / group_size;
-
     let weight_expert_base = expert * m_out * total_packs;
     let scale_expert_base = expert * m_out * groups_per_row;
-
     let x_row_base = row * k_in;
-
     // 8 separate accumulators, one per m-cell in the chunk.
     let mut acc0 = 0.0f32;
     let mut acc1 = 0.0f32;
@@ -731,11 +707,9 @@ pub fn mt_moe_gather_qmm_int4_m8<T>(
     let mut acc5 = 0.0f32;
     let mut acc6 = 0.0f32;
     let mut acc7 = 0.0f32;
-
     for pack_idx in range(lane, total_packs, 32u32) {
         let k_first = pack_idx * 8u32;
         let g = k_first / group_size;
-
         // Load 8 input values once — reused across 8 m-cells.
         let x0 = load(x[x_row_base + k_first + 0u32]).cast::<f32>();
         let x1 = load(x[x_row_base + k_first + 1u32]).cast::<f32>();
@@ -745,7 +719,6 @@ pub fn mt_moe_gather_qmm_int4_m8<T>(
         let x5 = load(x[x_row_base + k_first + 5u32]).cast::<f32>();
         let x6 = load(x[x_row_base + k_first + 6u32]).cast::<f32>();
         let x7 = load(x[x_row_base + k_first + 7u32]).cast::<f32>();
-
         // 8 hand-unrolled m-cells: each block computes one dot product and
         // adds directly to its accumulator — no select, no branch.
         //
@@ -773,7 +746,6 @@ pub fn mt_moe_gather_qmm_int4_m8<T>(
             + ((p0 >> 28u32) & 15u32).cast::<f32>() * s0 * x7
             + b0 * x7;
         acc0 = acc0 + dot0;
-
         let wrb1 = weight_expert_base + (m_base + 1u32) * total_packs;
         let srb1 = scale_expert_base + (m_base + 1u32) * groups_per_row;
         let p1 = load(weight_packed[wrb1 + pack_idx]);
@@ -796,7 +768,6 @@ pub fn mt_moe_gather_qmm_int4_m8<T>(
             + ((p1 >> 28u32) & 15u32).cast::<f32>() * s1 * x7
             + b1 * x7;
         acc1 = acc1 + dot1;
-
         let wrb2 = weight_expert_base + (m_base + 2u32) * total_packs;
         let srb2 = scale_expert_base + (m_base + 2u32) * groups_per_row;
         let p2 = load(weight_packed[wrb2 + pack_idx]);
@@ -819,7 +790,6 @@ pub fn mt_moe_gather_qmm_int4_m8<T>(
             + ((p2 >> 28u32) & 15u32).cast::<f32>() * s2 * x7
             + b2 * x7;
         acc2 = acc2 + dot2;
-
         let wrb3 = weight_expert_base + (m_base + 3u32) * total_packs;
         let srb3 = scale_expert_base + (m_base + 3u32) * groups_per_row;
         let p3 = load(weight_packed[wrb3 + pack_idx]);
@@ -842,7 +812,6 @@ pub fn mt_moe_gather_qmm_int4_m8<T>(
             + ((p3 >> 28u32) & 15u32).cast::<f32>() * s3 * x7
             + b3 * x7;
         acc3 = acc3 + dot3;
-
         let wrb4 = weight_expert_base + (m_base + 4u32) * total_packs;
         let srb4 = scale_expert_base + (m_base + 4u32) * groups_per_row;
         let p4 = load(weight_packed[wrb4 + pack_idx]);
@@ -865,7 +834,6 @@ pub fn mt_moe_gather_qmm_int4_m8<T>(
             + ((p4 >> 28u32) & 15u32).cast::<f32>() * s4 * x7
             + b4 * x7;
         acc4 = acc4 + dot4;
-
         let wrb5 = weight_expert_base + (m_base + 5u32) * total_packs;
         let srb5 = scale_expert_base + (m_base + 5u32) * groups_per_row;
         let p5 = load(weight_packed[wrb5 + pack_idx]);
@@ -888,7 +856,6 @@ pub fn mt_moe_gather_qmm_int4_m8<T>(
             + ((p5 >> 28u32) & 15u32).cast::<f32>() * s5 * x7
             + b5 * x7;
         acc5 = acc5 + dot5;
-
         let wrb6 = weight_expert_base + (m_base + 6u32) * total_packs;
         let srb6 = scale_expert_base + (m_base + 6u32) * groups_per_row;
         let p6 = load(weight_packed[wrb6 + pack_idx]);
@@ -911,7 +878,6 @@ pub fn mt_moe_gather_qmm_int4_m8<T>(
             + ((p6 >> 28u32) & 15u32).cast::<f32>() * s6 * x7
             + b6 * x7;
         acc6 = acc6 + dot6;
-
         let wrb7 = weight_expert_base + (m_base + 7u32) * total_packs;
         let srb7 = scale_expert_base + (m_base + 7u32) * groups_per_row;
         let p7 = load(weight_packed[wrb7 + pack_idx]);
@@ -935,7 +901,6 @@ pub fn mt_moe_gather_qmm_int4_m8<T>(
             + b7 * x7;
         acc7 = acc7 + dot7;
     }
-
     let t0 = simd_sum(acc0);
     let t1 = simd_sum(acc1);
     let t2 = simd_sum(acc2);
@@ -944,7 +909,6 @@ pub fn mt_moe_gather_qmm_int4_m8<T>(
     let t5 = simd_sum(acc5);
     let t6 = simd_sum(acc6);
     let t7 = simd_sum(acc7);
-
     if lane == 0u32 {
         store(out[row * m_out + m_base + 0u32], t0.cast::<T>());
         store(out[row * m_out + m_base + 1u32], t1.cast::<T>());
@@ -991,7 +955,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
     let row = tgid_y;
     let lane = tid;
     let m_base = m_chunk * 16u32;
-
     // Resolve expert — same linear walk as the m=1 variant.
     let mut expert = 0u32;
     let mut found = 0u32;
@@ -1003,15 +966,11 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
         expert = select(take == 1u32, ee, expert);
         found = select(take == 1u32, 1u32, found);
     }
-
     let total_packs = k_in / 8u32;
     let groups_per_row = k_in / group_size;
-
     let weight_expert_base = expert * m_out * total_packs;
     let scale_expert_base = expert * m_out * groups_per_row;
-
     let x_row_base = row * k_in;
-
     // 16 separate accumulators, one per m-cell in the chunk.
     let mut acc0 = 0.0f32;
     let mut acc1 = 0.0f32;
@@ -1029,11 +988,9 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
     let mut acc13 = 0.0f32;
     let mut acc14 = 0.0f32;
     let mut acc15 = 0.0f32;
-
     for pack_idx in range(lane, total_packs, 32u32) {
         let k_first = pack_idx * 8u32;
         let g = k_first / group_size;
-
         // Load 8 input values once — reused across 16 m-cells.
         let x0 = load(x[x_row_base + k_first + 0u32]).cast::<f32>();
         let x1 = load(x[x_row_base + k_first + 1u32]).cast::<f32>();
@@ -1043,10 +1000,8 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
         let x5 = load(x[x_row_base + k_first + 5u32]).cast::<f32>();
         let x6 = load(x[x_row_base + k_first + 6u32]).cast::<f32>();
         let x7 = load(x[x_row_base + k_first + 7u32]).cast::<f32>();
-
         // 16 hand-unrolled m-cells: each block computes one dot product and
         // adds directly to its accumulator — no select, no branch.
-
         let wrb0 = weight_expert_base + (m_base + 0u32) * total_packs;
         let srb0 = scale_expert_base + (m_base + 0u32) * groups_per_row;
         let p0 = load(weight_packed[wrb0 + pack_idx]);
@@ -1069,7 +1024,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
             + ((p0 >> 28u32) & 15u32).cast::<f32>() * s0 * x7
             + b0 * x7;
         acc0 = acc0 + dot0;
-
         let wrb1 = weight_expert_base + (m_base + 1u32) * total_packs;
         let srb1 = scale_expert_base + (m_base + 1u32) * groups_per_row;
         let p1 = load(weight_packed[wrb1 + pack_idx]);
@@ -1092,7 +1046,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
             + ((p1 >> 28u32) & 15u32).cast::<f32>() * s1 * x7
             + b1 * x7;
         acc1 = acc1 + dot1;
-
         let wrb2 = weight_expert_base + (m_base + 2u32) * total_packs;
         let srb2 = scale_expert_base + (m_base + 2u32) * groups_per_row;
         let p2 = load(weight_packed[wrb2 + pack_idx]);
@@ -1115,7 +1068,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
             + ((p2 >> 28u32) & 15u32).cast::<f32>() * s2 * x7
             + b2 * x7;
         acc2 = acc2 + dot2;
-
         let wrb3 = weight_expert_base + (m_base + 3u32) * total_packs;
         let srb3 = scale_expert_base + (m_base + 3u32) * groups_per_row;
         let p3 = load(weight_packed[wrb3 + pack_idx]);
@@ -1138,7 +1090,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
             + ((p3 >> 28u32) & 15u32).cast::<f32>() * s3 * x7
             + b3 * x7;
         acc3 = acc3 + dot3;
-
         let wrb4 = weight_expert_base + (m_base + 4u32) * total_packs;
         let srb4 = scale_expert_base + (m_base + 4u32) * groups_per_row;
         let p4 = load(weight_packed[wrb4 + pack_idx]);
@@ -1161,7 +1112,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
             + ((p4 >> 28u32) & 15u32).cast::<f32>() * s4 * x7
             + b4 * x7;
         acc4 = acc4 + dot4;
-
         let wrb5 = weight_expert_base + (m_base + 5u32) * total_packs;
         let srb5 = scale_expert_base + (m_base + 5u32) * groups_per_row;
         let p5 = load(weight_packed[wrb5 + pack_idx]);
@@ -1184,7 +1134,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
             + ((p5 >> 28u32) & 15u32).cast::<f32>() * s5 * x7
             + b5 * x7;
         acc5 = acc5 + dot5;
-
         let wrb6 = weight_expert_base + (m_base + 6u32) * total_packs;
         let srb6 = scale_expert_base + (m_base + 6u32) * groups_per_row;
         let p6 = load(weight_packed[wrb6 + pack_idx]);
@@ -1207,7 +1156,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
             + ((p6 >> 28u32) & 15u32).cast::<f32>() * s6 * x7
             + b6 * x7;
         acc6 = acc6 + dot6;
-
         let wrb7 = weight_expert_base + (m_base + 7u32) * total_packs;
         let srb7 = scale_expert_base + (m_base + 7u32) * groups_per_row;
         let p7 = load(weight_packed[wrb7 + pack_idx]);
@@ -1230,7 +1178,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
             + ((p7 >> 28u32) & 15u32).cast::<f32>() * s7 * x7
             + b7 * x7;
         acc7 = acc7 + dot7;
-
         let wrb8 = weight_expert_base + (m_base + 8u32) * total_packs;
         let srb8 = scale_expert_base + (m_base + 8u32) * groups_per_row;
         let p8 = load(weight_packed[wrb8 + pack_idx]);
@@ -1253,7 +1200,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
             + ((p8 >> 28u32) & 15u32).cast::<f32>() * s8 * x7
             + b8 * x7;
         acc8 = acc8 + dot8;
-
         let wrb9 = weight_expert_base + (m_base + 9u32) * total_packs;
         let srb9 = scale_expert_base + (m_base + 9u32) * groups_per_row;
         let p9 = load(weight_packed[wrb9 + pack_idx]);
@@ -1276,7 +1222,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
             + ((p9 >> 28u32) & 15u32).cast::<f32>() * s9 * x7
             + b9 * x7;
         acc9 = acc9 + dot9;
-
         let wrb10 = weight_expert_base + (m_base + 10u32) * total_packs;
         let srb10 = scale_expert_base + (m_base + 10u32) * groups_per_row;
         let p10 = load(weight_packed[wrb10 + pack_idx]);
@@ -1299,7 +1244,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
             + ((p10 >> 28u32) & 15u32).cast::<f32>() * s10 * x7
             + b10 * x7;
         acc10 = acc10 + dot10;
-
         let wrb11 = weight_expert_base + (m_base + 11u32) * total_packs;
         let srb11 = scale_expert_base + (m_base + 11u32) * groups_per_row;
         let p11 = load(weight_packed[wrb11 + pack_idx]);
@@ -1322,7 +1266,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
             + ((p11 >> 28u32) & 15u32).cast::<f32>() * s11 * x7
             + b11 * x7;
         acc11 = acc11 + dot11;
-
         let wrb12 = weight_expert_base + (m_base + 12u32) * total_packs;
         let srb12 = scale_expert_base + (m_base + 12u32) * groups_per_row;
         let p12 = load(weight_packed[wrb12 + pack_idx]);
@@ -1345,7 +1288,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
             + ((p12 >> 28u32) & 15u32).cast::<f32>() * s12 * x7
             + b12 * x7;
         acc12 = acc12 + dot12;
-
         let wrb13 = weight_expert_base + (m_base + 13u32) * total_packs;
         let srb13 = scale_expert_base + (m_base + 13u32) * groups_per_row;
         let p13 = load(weight_packed[wrb13 + pack_idx]);
@@ -1368,7 +1310,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
             + ((p13 >> 28u32) & 15u32).cast::<f32>() * s13 * x7
             + b13 * x7;
         acc13 = acc13 + dot13;
-
         let wrb14 = weight_expert_base + (m_base + 14u32) * total_packs;
         let srb14 = scale_expert_base + (m_base + 14u32) * groups_per_row;
         let p14 = load(weight_packed[wrb14 + pack_idx]);
@@ -1391,7 +1332,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
             + ((p14 >> 28u32) & 15u32).cast::<f32>() * s14 * x7
             + b14 * x7;
         acc14 = acc14 + dot14;
-
         let wrb15 = weight_expert_base + (m_base + 15u32) * total_packs;
         let srb15 = scale_expert_base + (m_base + 15u32) * groups_per_row;
         let p15 = load(weight_packed[wrb15 + pack_idx]);
@@ -1415,7 +1355,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
             + b15 * x7;
         acc15 = acc15 + dot15;
     }
-
     let t0 = simd_sum(acc0);
     let t1 = simd_sum(acc1);
     let t2 = simd_sum(acc2);
@@ -1432,7 +1371,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
     let t13 = simd_sum(acc13);
     let t14 = simd_sum(acc14);
     let t15 = simd_sum(acc15);
-
     if lane == 0u32 {
         store(out[row * m_out + m_base + 0u32], t0.cast::<T>());
         store(out[row * m_out + m_base + 1u32], t1.cast::<T>());
@@ -1487,7 +1425,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
     let row = tgid_y;
     let lane = tid;
     let m_base = m_chunk * 32u32;
-
     // Resolve expert — same linear walk as the m=1 variant.
     let mut expert = 0u32;
     let mut found = 0u32;
@@ -1499,15 +1436,11 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
         expert = select(take == 1u32, ee, expert);
         found = select(take == 1u32, 1u32, found);
     }
-
     let total_packs = k_in / 8u32;
     let groups_per_row = k_in / group_size;
-
     let weight_expert_base = expert * m_out * total_packs;
     let scale_expert_base = expert * m_out * groups_per_row;
-
     let x_row_base = row * k_in;
-
     // 32 separate accumulators, one per m-cell in the chunk.
     let mut acc0 = 0.0f32;
     let mut acc1 = 0.0f32;
@@ -1541,11 +1474,9 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
     let mut acc29 = 0.0f32;
     let mut acc30 = 0.0f32;
     let mut acc31 = 0.0f32;
-
     for pack_idx in range(lane, total_packs, 32u32) {
         let k_first = pack_idx * 8u32;
         let g = k_first / group_size;
-
         // Load 8 input values once — reused across 32 m-cells.
         let x0 = load(x[x_row_base + k_first + 0u32]).cast::<f32>();
         let x1 = load(x[x_row_base + k_first + 1u32]).cast::<f32>();
@@ -1555,10 +1486,8 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
         let x5 = load(x[x_row_base + k_first + 5u32]).cast::<f32>();
         let x6 = load(x[x_row_base + k_first + 6u32]).cast::<f32>();
         let x7 = load(x[x_row_base + k_first + 7u32]).cast::<f32>();
-
         // 32 hand-unrolled m-cells: each block computes one dot product and
         // adds directly to its accumulator — no select, no branch.
-
         let wrb0 = weight_expert_base + (m_base + 0u32) * total_packs;
         let srb0 = scale_expert_base + (m_base + 0u32) * groups_per_row;
         let p0 = load(weight_packed[wrb0 + pack_idx]);
@@ -1581,7 +1510,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p0 >> 28u32) & 15u32).cast::<f32>() * s0 * x7
             + b0 * x7;
         acc0 = acc0 + dot0;
-
         let wrb1 = weight_expert_base + (m_base + 1u32) * total_packs;
         let srb1 = scale_expert_base + (m_base + 1u32) * groups_per_row;
         let p1 = load(weight_packed[wrb1 + pack_idx]);
@@ -1604,7 +1532,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p1 >> 28u32) & 15u32).cast::<f32>() * s1 * x7
             + b1 * x7;
         acc1 = acc1 + dot1;
-
         let wrb2 = weight_expert_base + (m_base + 2u32) * total_packs;
         let srb2 = scale_expert_base + (m_base + 2u32) * groups_per_row;
         let p2 = load(weight_packed[wrb2 + pack_idx]);
@@ -1627,7 +1554,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p2 >> 28u32) & 15u32).cast::<f32>() * s2 * x7
             + b2 * x7;
         acc2 = acc2 + dot2;
-
         let wrb3 = weight_expert_base + (m_base + 3u32) * total_packs;
         let srb3 = scale_expert_base + (m_base + 3u32) * groups_per_row;
         let p3 = load(weight_packed[wrb3 + pack_idx]);
@@ -1650,7 +1576,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p3 >> 28u32) & 15u32).cast::<f32>() * s3 * x7
             + b3 * x7;
         acc3 = acc3 + dot3;
-
         let wrb4 = weight_expert_base + (m_base + 4u32) * total_packs;
         let srb4 = scale_expert_base + (m_base + 4u32) * groups_per_row;
         let p4 = load(weight_packed[wrb4 + pack_idx]);
@@ -1673,7 +1598,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p4 >> 28u32) & 15u32).cast::<f32>() * s4 * x7
             + b4 * x7;
         acc4 = acc4 + dot4;
-
         let wrb5 = weight_expert_base + (m_base + 5u32) * total_packs;
         let srb5 = scale_expert_base + (m_base + 5u32) * groups_per_row;
         let p5 = load(weight_packed[wrb5 + pack_idx]);
@@ -1696,7 +1620,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p5 >> 28u32) & 15u32).cast::<f32>() * s5 * x7
             + b5 * x7;
         acc5 = acc5 + dot5;
-
         let wrb6 = weight_expert_base + (m_base + 6u32) * total_packs;
         let srb6 = scale_expert_base + (m_base + 6u32) * groups_per_row;
         let p6 = load(weight_packed[wrb6 + pack_idx]);
@@ -1719,7 +1642,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p6 >> 28u32) & 15u32).cast::<f32>() * s6 * x7
             + b6 * x7;
         acc6 = acc6 + dot6;
-
         let wrb7 = weight_expert_base + (m_base + 7u32) * total_packs;
         let srb7 = scale_expert_base + (m_base + 7u32) * groups_per_row;
         let p7 = load(weight_packed[wrb7 + pack_idx]);
@@ -1742,7 +1664,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p7 >> 28u32) & 15u32).cast::<f32>() * s7 * x7
             + b7 * x7;
         acc7 = acc7 + dot7;
-
         let wrb8 = weight_expert_base + (m_base + 8u32) * total_packs;
         let srb8 = scale_expert_base + (m_base + 8u32) * groups_per_row;
         let p8 = load(weight_packed[wrb8 + pack_idx]);
@@ -1765,7 +1686,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p8 >> 28u32) & 15u32).cast::<f32>() * s8 * x7
             + b8 * x7;
         acc8 = acc8 + dot8;
-
         let wrb9 = weight_expert_base + (m_base + 9u32) * total_packs;
         let srb9 = scale_expert_base + (m_base + 9u32) * groups_per_row;
         let p9 = load(weight_packed[wrb9 + pack_idx]);
@@ -1788,7 +1708,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p9 >> 28u32) & 15u32).cast::<f32>() * s9 * x7
             + b9 * x7;
         acc9 = acc9 + dot9;
-
         let wrb10 = weight_expert_base + (m_base + 10u32) * total_packs;
         let srb10 = scale_expert_base + (m_base + 10u32) * groups_per_row;
         let p10 = load(weight_packed[wrb10 + pack_idx]);
@@ -1811,7 +1730,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p10 >> 28u32) & 15u32).cast::<f32>() * s10 * x7
             + b10 * x7;
         acc10 = acc10 + dot10;
-
         let wrb11 = weight_expert_base + (m_base + 11u32) * total_packs;
         let srb11 = scale_expert_base + (m_base + 11u32) * groups_per_row;
         let p11 = load(weight_packed[wrb11 + pack_idx]);
@@ -1834,7 +1752,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p11 >> 28u32) & 15u32).cast::<f32>() * s11 * x7
             + b11 * x7;
         acc11 = acc11 + dot11;
-
         let wrb12 = weight_expert_base + (m_base + 12u32) * total_packs;
         let srb12 = scale_expert_base + (m_base + 12u32) * groups_per_row;
         let p12 = load(weight_packed[wrb12 + pack_idx]);
@@ -1857,7 +1774,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p12 >> 28u32) & 15u32).cast::<f32>() * s12 * x7
             + b12 * x7;
         acc12 = acc12 + dot12;
-
         let wrb13 = weight_expert_base + (m_base + 13u32) * total_packs;
         let srb13 = scale_expert_base + (m_base + 13u32) * groups_per_row;
         let p13 = load(weight_packed[wrb13 + pack_idx]);
@@ -1880,7 +1796,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p13 >> 28u32) & 15u32).cast::<f32>() * s13 * x7
             + b13 * x7;
         acc13 = acc13 + dot13;
-
         let wrb14 = weight_expert_base + (m_base + 14u32) * total_packs;
         let srb14 = scale_expert_base + (m_base + 14u32) * groups_per_row;
         let p14 = load(weight_packed[wrb14 + pack_idx]);
@@ -1903,7 +1818,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p14 >> 28u32) & 15u32).cast::<f32>() * s14 * x7
             + b14 * x7;
         acc14 = acc14 + dot14;
-
         let wrb15 = weight_expert_base + (m_base + 15u32) * total_packs;
         let srb15 = scale_expert_base + (m_base + 15u32) * groups_per_row;
         let p15 = load(weight_packed[wrb15 + pack_idx]);
@@ -1926,7 +1840,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p15 >> 28u32) & 15u32).cast::<f32>() * s15 * x7
             + b15 * x7;
         acc15 = acc15 + dot15;
-
         let wrb16 = weight_expert_base + (m_base + 16u32) * total_packs;
         let srb16 = scale_expert_base + (m_base + 16u32) * groups_per_row;
         let p16 = load(weight_packed[wrb16 + pack_idx]);
@@ -1949,7 +1862,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p16 >> 28u32) & 15u32).cast::<f32>() * s16 * x7
             + b16 * x7;
         acc16 = acc16 + dot16;
-
         let wrb17 = weight_expert_base + (m_base + 17u32) * total_packs;
         let srb17 = scale_expert_base + (m_base + 17u32) * groups_per_row;
         let p17 = load(weight_packed[wrb17 + pack_idx]);
@@ -1972,7 +1884,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p17 >> 28u32) & 15u32).cast::<f32>() * s17 * x7
             + b17 * x7;
         acc17 = acc17 + dot17;
-
         let wrb18 = weight_expert_base + (m_base + 18u32) * total_packs;
         let srb18 = scale_expert_base + (m_base + 18u32) * groups_per_row;
         let p18 = load(weight_packed[wrb18 + pack_idx]);
@@ -1995,7 +1906,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p18 >> 28u32) & 15u32).cast::<f32>() * s18 * x7
             + b18 * x7;
         acc18 = acc18 + dot18;
-
         let wrb19 = weight_expert_base + (m_base + 19u32) * total_packs;
         let srb19 = scale_expert_base + (m_base + 19u32) * groups_per_row;
         let p19 = load(weight_packed[wrb19 + pack_idx]);
@@ -2018,7 +1928,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p19 >> 28u32) & 15u32).cast::<f32>() * s19 * x7
             + b19 * x7;
         acc19 = acc19 + dot19;
-
         let wrb20 = weight_expert_base + (m_base + 20u32) * total_packs;
         let srb20 = scale_expert_base + (m_base + 20u32) * groups_per_row;
         let p20 = load(weight_packed[wrb20 + pack_idx]);
@@ -2041,7 +1950,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p20 >> 28u32) & 15u32).cast::<f32>() * s20 * x7
             + b20 * x7;
         acc20 = acc20 + dot20;
-
         let wrb21 = weight_expert_base + (m_base + 21u32) * total_packs;
         let srb21 = scale_expert_base + (m_base + 21u32) * groups_per_row;
         let p21 = load(weight_packed[wrb21 + pack_idx]);
@@ -2064,7 +1972,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p21 >> 28u32) & 15u32).cast::<f32>() * s21 * x7
             + b21 * x7;
         acc21 = acc21 + dot21;
-
         let wrb22 = weight_expert_base + (m_base + 22u32) * total_packs;
         let srb22 = scale_expert_base + (m_base + 22u32) * groups_per_row;
         let p22 = load(weight_packed[wrb22 + pack_idx]);
@@ -2087,7 +1994,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p22 >> 28u32) & 15u32).cast::<f32>() * s22 * x7
             + b22 * x7;
         acc22 = acc22 + dot22;
-
         let wrb23 = weight_expert_base + (m_base + 23u32) * total_packs;
         let srb23 = scale_expert_base + (m_base + 23u32) * groups_per_row;
         let p23 = load(weight_packed[wrb23 + pack_idx]);
@@ -2110,7 +2016,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p23 >> 28u32) & 15u32).cast::<f32>() * s23 * x7
             + b23 * x7;
         acc23 = acc23 + dot23;
-
         let wrb24 = weight_expert_base + (m_base + 24u32) * total_packs;
         let srb24 = scale_expert_base + (m_base + 24u32) * groups_per_row;
         let p24 = load(weight_packed[wrb24 + pack_idx]);
@@ -2133,7 +2038,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p24 >> 28u32) & 15u32).cast::<f32>() * s24 * x7
             + b24 * x7;
         acc24 = acc24 + dot24;
-
         let wrb25 = weight_expert_base + (m_base + 25u32) * total_packs;
         let srb25 = scale_expert_base + (m_base + 25u32) * groups_per_row;
         let p25 = load(weight_packed[wrb25 + pack_idx]);
@@ -2156,7 +2060,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p25 >> 28u32) & 15u32).cast::<f32>() * s25 * x7
             + b25 * x7;
         acc25 = acc25 + dot25;
-
         let wrb26 = weight_expert_base + (m_base + 26u32) * total_packs;
         let srb26 = scale_expert_base + (m_base + 26u32) * groups_per_row;
         let p26 = load(weight_packed[wrb26 + pack_idx]);
@@ -2179,7 +2082,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p26 >> 28u32) & 15u32).cast::<f32>() * s26 * x7
             + b26 * x7;
         acc26 = acc26 + dot26;
-
         let wrb27 = weight_expert_base + (m_base + 27u32) * total_packs;
         let srb27 = scale_expert_base + (m_base + 27u32) * groups_per_row;
         let p27 = load(weight_packed[wrb27 + pack_idx]);
@@ -2202,7 +2104,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p27 >> 28u32) & 15u32).cast::<f32>() * s27 * x7
             + b27 * x7;
         acc27 = acc27 + dot27;
-
         let wrb28 = weight_expert_base + (m_base + 28u32) * total_packs;
         let srb28 = scale_expert_base + (m_base + 28u32) * groups_per_row;
         let p28 = load(weight_packed[wrb28 + pack_idx]);
@@ -2225,7 +2126,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p28 >> 28u32) & 15u32).cast::<f32>() * s28 * x7
             + b28 * x7;
         acc28 = acc28 + dot28;
-
         let wrb29 = weight_expert_base + (m_base + 29u32) * total_packs;
         let srb29 = scale_expert_base + (m_base + 29u32) * groups_per_row;
         let p29 = load(weight_packed[wrb29 + pack_idx]);
@@ -2248,7 +2148,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p29 >> 28u32) & 15u32).cast::<f32>() * s29 * x7
             + b29 * x7;
         acc29 = acc29 + dot29;
-
         let wrb30 = weight_expert_base + (m_base + 30u32) * total_packs;
         let srb30 = scale_expert_base + (m_base + 30u32) * groups_per_row;
         let p30 = load(weight_packed[wrb30 + pack_idx]);
@@ -2271,7 +2170,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + ((p30 >> 28u32) & 15u32).cast::<f32>() * s30 * x7
             + b30 * x7;
         acc30 = acc30 + dot30;
-
         let wrb31 = weight_expert_base + (m_base + 31u32) * total_packs;
         let srb31 = scale_expert_base + (m_base + 31u32) * groups_per_row;
         let p31 = load(weight_packed[wrb31 + pack_idx]);
@@ -2295,7 +2193,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
             + b31 * x7;
         acc31 = acc31 + dot31;
     }
-
     let t0 = simd_sum(acc0);
     let t1 = simd_sum(acc1);
     let t2 = simd_sum(acc2);
@@ -2328,7 +2225,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
     let t29 = simd_sum(acc29);
     let t30 = simd_sum(acc30);
     let t31 = simd_sum(acc31);
-
     if lane == 0u32 {
         store(out[row * m_out + m_base + 0u32], t0.cast::<T>());
         store(out[row * m_out + m_base + 1u32], t1.cast::<T>());
@@ -2433,44 +2329,36 @@ pub fn mt_moe_gather_qmm_mma_int4<T>(
     let sm = sg / 2u32;
     let sn = sg & 1u32;
     let lane_in_tg = sg * 32u32 + lane;
-
     // 8×8 frag lane mapping (Apple steel_gemm layout).
     let qid = lane / 4u32;
     let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
     let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
     let fn1 = fn0 + 1u32;
-
     // TG memory: X tile [BM=32 × BK=32] and dequant W tile [BN=32 × BK=32].
     // Skew = +4 on BK for bank-conflict avoidance (see mt_qmm_mma).
     threadgroup_alloc("xs", 1152, T);
     threadgroup_alloc("ws", 1152, T);
-
     // 4 output frags per SG (16×16 sub-tile inside the 32×32 output tile).
     let c_f00 = simdgroup_alloc::<f32, 8, 8>();
     let c_f01 = simdgroup_alloc::<f32, 8, 8>();
     let c_f10 = simdgroup_alloc::<f32, 8, 8>();
     let c_f11 = simdgroup_alloc::<f32, 8, 8>();
-
     // Reused per k_inner.
     let a_f0 = simdgroup_alloc::<T, 8, 8>();
     let a_f1 = simdgroup_alloc::<T, 8, 8>();
     let b_f0 = simdgroup_alloc::<T, 8, 8>();
     let b_f1 = simdgroup_alloc::<T, 8, 8>();
-
     let w_row_in_tg = lane_in_tg / 4u32;
     let pack_in_row = lane_in_tg & 3u32;
     let x_m_row = lane_in_tg / 4u32;
     let x_k_quad = lane_in_tg & 3u32;
     let x_k_base = x_k_quad * 8u32;
-
     let xs_ld = 36u32;
     let ws_ld = 36u32;
-
     let m_tile_base = m_tile * 32u32; // first M-row this TG handles
     let n_tile_base = n_tile * 32u32;
     let packs_per_row = k_in / 8u32;
     let groups_per_row = k_in / group_size;
-
     // Walk the TG's BM=32 rows in contiguous expert runs. Up to 32
     // sub-runs (one per row worst case); typically 1-2.
     //
@@ -2483,7 +2371,6 @@ pub fn mt_moe_gather_qmm_mma_int4<T>(
         let cur_row = m_tile_base + sub_offset;
         let cur_in_range = (sub_offset < 32u32) & (cur_row < m_total);
         let cur_expert = select(cur_in_range, load(indices[cur_row]), 4294967295u32);
-
         // Find the run end (first row in [sub_offset+1..32) whose expert differs).
         let mut sub_end = 32u32;
         let mut found = 0u32;
@@ -2504,7 +2391,6 @@ pub fn mt_moe_gather_qmm_mma_int4<T>(
                 found = 1u32;
             }
         }
-
         // Skip sentinel runs (out-of-range rows) AND past-end iterations.
         let cur_valid = (cur_expert != 4294967295u32) & (sub_offset < 32u32);
         if cur_valid {
@@ -2514,7 +2400,6 @@ pub fn mt_moe_gather_qmm_mma_int4<T>(
             // For this TG (n_tile), w_n_base is the expert's slab + n column offset.
             let sb_base = sb_expert_base + (n_tile_base + w_row_in_tg) * groups_per_row;
             let w_pack_row_base = w_expert_base + (n_tile_base + w_row_in_tg) * packs_per_row;
-
             // Reset output frags for this sub-run.
             simdgroup_elem_store(c_f00, 0, 0.0f32);
             simdgroup_elem_store(c_f00, 1, 0.0f32);
@@ -2524,7 +2409,6 @@ pub fn mt_moe_gather_qmm_mma_int4<T>(
             simdgroup_elem_store(c_f10, 1, 0.0f32);
             simdgroup_elem_store(c_f11, 0, 0.0f32);
             simdgroup_elem_store(c_f11, 1, 0.0f32);
-
             // Inner GEMM over K. Each iteration loads a 32×32 X tile + 32×32 W tile,
             // does 4 k_inner × 4 frags = 16 MMAs.
             for kb in range(0u32, k_in, 32u32) {
@@ -2581,7 +2465,6 @@ pub fn mt_moe_gather_qmm_mma_int4<T>(
                 threadgroup_store("xs", x_ws_base + 5u32, xv5);
                 threadgroup_store("xs", x_ws_base + 6u32, xv6);
                 threadgroup_store("xs", x_ws_base + 7u32, xv7);
-
                 // Coop W dequant — 128 lanes × 1 pack × 8 nibbles.
                 let pack_k_off = kb / 8u32 + pack_in_row;
                 let pack = load(w[w_pack_row_base + pack_k_off]);
@@ -2610,15 +2493,12 @@ pub fn mt_moe_gather_qmm_mma_int4<T>(
                 threadgroup_store("ws", ws_base + 5u32, (s * q5 + b).cast::<T>());
                 threadgroup_store("ws", ws_base + 6u32, (s * q6 + b).cast::<T>());
                 threadgroup_store("ws", ws_base + 7u32, (s * q7 + b).cast::<T>());
-
                 threadgroup_barrier();
-
                 // MMA inner loop — 4 frags × 4 k_inner = 16 MMAs per SG.
                 let row_a0 = sm * 16u32 + fm;
                 let row_a1 = sm * 16u32 + 8u32 + fm;
                 let col_b0 = sn * 16u32;
                 let col_b1 = sn * 16u32 + 8u32;
-
                 for k_inner in range(0u32, 4u32, 1u32) {
                     let ki_off = k_inner * 8u32;
                     simdgroup_elem_store(
@@ -2671,7 +2551,6 @@ pub fn mt_moe_gather_qmm_mma_int4<T>(
                 }
                 threadgroup_barrier();
             }
-
             // Store the 32×32 output tile back to device memory, masked
             // to [sub_offset, sub_end). 4 lanes per output row (sm * 16 + fm
             // for rows, sn * 16 + fn0/fn1 for cols).
@@ -2681,7 +2560,6 @@ pub fn mt_moe_gather_qmm_mma_int4<T>(
             let out_col_01 = sn * 16u32 + fn1;
             let out_col_10 = sn * 16u32 + 8u32 + fn0;
             let out_col_11 = sn * 16u32 + 8u32 + fn1;
-
             let r00_0 = simdgroup_elem_load(c_f00, 0);
             let r00_1 = simdgroup_elem_load(c_f00, 1);
             let r01_0 = simdgroup_elem_load(c_f01, 0);
@@ -2690,7 +2568,6 @@ pub fn mt_moe_gather_qmm_mma_int4<T>(
             let r10_1 = simdgroup_elem_load(c_f10, 1);
             let r11_0 = simdgroup_elem_load(c_f11, 0);
             let r11_1 = simdgroup_elem_load(c_f11, 1);
-
             // Output rows are tile-local (0..32). Write only if the frag's row
             // falls in this sub-run AND inside the global m bound.
             let r0_g = m_tile_base + out_row_a0;
@@ -3061,13 +2938,11 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16<T>(
     let sm = 0u32;
     let sn = sg & 1u32;
     let lane_in_tg = sg * 32u32 + lane;
-
     // 8×8 frag lane mapping (Apple steel_gemm layout).
     let qid = lane / 4u32;
     let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
     let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
     let fn1 = fn0 + 1u32;
-
     // TG memory: X tile [BM=16 × (BK=32 +8)] and W tile [BN=32 × (BK=32 +8)].
     // BK_padded = 40 (= BK + 16/sizeof(T) at f16) matches MLX's
     // affine_gather_qmm_rhs_nt padding — breaks the bank-conflict that
@@ -3075,18 +2950,15 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16<T>(
     // hundred extra T per TG. Free at our occupancy.
     threadgroup_alloc("xs", 640, T);
     threadgroup_alloc("ws", 1280, T);
-
     // 4 output frags per SG (16 rows × 16 cols of the 16×32 output tile).
     let c_f00 = simdgroup_alloc::<f32, 8, 8>();
     let c_f01 = simdgroup_alloc::<f32, 8, 8>();
     let c_f10 = simdgroup_alloc::<f32, 8, 8>();
     let c_f11 = simdgroup_alloc::<f32, 8, 8>();
-
     let a_f0 = simdgroup_alloc::<T, 8, 8>();
     let a_f1 = simdgroup_alloc::<T, 8, 8>();
     let b_f0 = simdgroup_alloc::<T, 8, 8>();
     let b_f1 = simdgroup_alloc::<T, 8, 8>();
-
     // Coop-load lane assignments — X tile is 16×32 = 512 elements,
     // 64 lanes × 8 strides each (= matches mt_qmm_mma_m16).
     // W tile is 32×32 = 1024 elements / 8 nibbles per pack = 128 packs,
@@ -3096,18 +2968,15 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16<T>(
     // For 2-pack-per-lane W load: pack at lane+64 (second half).
     let w_row_2nd = (64u32 + lane_in_tg) / 4u32;
     let pack_in_row_2nd = (64u32 + lane_in_tg) & 3u32;
-
     // BK_padded = 40 (= BK + 16/sizeof(T) at f16) matches MLX's
     // affine_gather_qmm_rhs_nt skew — breaks the bank-conflict that the
     // +4 skew leaves for fp16 MMA fragment column reads.
     let xs_ld = 40u32;
     let ws_ld = 40u32;
-
     let m_tile_base = m_tile * 16u32;
     let n_tile_base = n_tile * 32u32;
     let packs_per_row = k_in / 8u32;
     let groups_per_row = k_in / group_size;
-
     // Walk the TG's BM=16 rows in contiguous expert runs. Up to 16
     // sub-runs (one per row worst case); typical 1-2 at production
     // T*topk shapes.
@@ -3123,7 +2992,6 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16<T>(
             let cur_row = m_tile_base + sub_offset;
             let cur_in_range = cur_row < m_total;
             cur_expert = select(cur_in_range, load(indices[cur_row]), 4294967295u32);
-
             sub_end = 16u32;
             let mut found = 0u32;
             for _ii in range(0u32, 16u32, 1u32) {
@@ -3143,12 +3011,10 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16<T>(
                 }
             }
         }
-
         let cur_valid = (cur_expert != 4294967295u32) & (sub_offset < 16u32);
         if cur_valid {
             let w_expert_base = cur_expert * n_out * packs_per_row;
             let sb_expert_base = cur_expert * n_out * groups_per_row;
-
             // Reset 4 frags.
             simdgroup_elem_store(c_f00, 0, 0.0f32);
             simdgroup_elem_store(c_f00, 1, 0.0f32);
@@ -3158,7 +3024,6 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16<T>(
             simdgroup_elem_store(c_f10, 1, 0.0f32);
             simdgroup_elem_store(c_f11, 0, 0.0f32);
             simdgroup_elem_store(c_f11, 1, 0.0f32);
-
             for kb in range(0u32, k_in, 32u32) {
                 // X load — 64 lanes × 8 contiguous K elements each (flat
                 // index covers all 512 elems of the 16×32 tile).
@@ -3252,12 +3117,10 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16<T>(
                 threadgroup_store("xs", mr5 * xs_ld + kc5, xv5 * m5);
                 threadgroup_store("xs", mr6 * xs_ld + kc6, xv6 * m6);
                 threadgroup_store("xs", mr7 * xs_ld + kc7, xv7 * m7);
-
                 // W dequant — 64 lanes × 2 packs each.
                 let s_16 = 0.0625f32;
                 let s_256 = 0.00390625f32;
                 let s_4096 = 0.000244140625f32;
-
                 // Pack 0 — lanes 0..63.
                 let pack_row_0 = n_tile_base + w_row_in_tg;
                 let pack_dev_0 =
@@ -3286,7 +3149,6 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16<T>(
                 threadgroup_store("ws", wb_0 + 5u32, (s_0 * q5_0 + b_0).cast::<T>());
                 threadgroup_store("ws", wb_0 + 6u32, (s_0 * q6_0 + b_0).cast::<T>());
                 threadgroup_store("ws", wb_0 + 7u32, (s_0 * q7_0 + b_0).cast::<T>());
-
                 // Pack 1 — lanes 64..127 (second half of 32 rows).
                 let pack_row_1 = n_tile_base + w_row_2nd;
                 let pack_dev_1 =
@@ -3315,16 +3177,13 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16<T>(
                 threadgroup_store("ws", wb_1 + 5u32, (s_1 * q5_1 + b_1).cast::<T>());
                 threadgroup_store("ws", wb_1 + 6u32, (s_1 * q6_1 + b_1).cast::<T>());
                 threadgroup_store("ws", wb_1 + 7u32, (s_1 * q7_1 + b_1).cast::<T>());
-
                 threadgroup_barrier();
-
                 // MMA inner — 4 frags × 4 k_inner = 16 MMAs per SG.
                 // sm=0 (WM=1 → both SGs share rows 0..15).
                 let row_a0 = sm * 16u32 + fm;
                 let row_a1 = sm * 16u32 + 8u32 + fm;
                 let col_b0 = sn * 16u32;
                 let col_b1 = sn * 16u32 + 8u32;
-
                 for k_inner in range(0u32, 4u32, 1u32) {
                     let ki_off = k_inner * 8u32;
                     simdgroup_elem_store(
@@ -3377,7 +3236,6 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16<T>(
                 }
                 threadgroup_barrier();
             }
-
             // Write 4 frags. Mask each row to [sub_offset, sub_end) ∩ m_total.
             let out_row_a0 = sm * 16u32 + fm;
             let out_row_a1 = sm * 16u32 + 8u32 + fm;
@@ -3385,7 +3243,6 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16<T>(
             let out_col_01 = sn * 16u32 + fn1;
             let out_col_10 = sn * 16u32 + 8u32 + fn0;
             let out_col_11 = sn * 16u32 + 8u32 + fn1;
-
             let r00_0 = simdgroup_elem_load(c_f00, 0);
             let r00_1 = simdgroup_elem_load(c_f00, 1);
             let r01_0 = simdgroup_elem_load(c_f01, 0);
@@ -3394,7 +3251,6 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16<T>(
             let r10_1 = simdgroup_elem_load(c_f10, 1);
             let r11_0 = simdgroup_elem_load(c_f11, 0);
             let r11_1 = simdgroup_elem_load(c_f11, 1);
-
             let r0_g = m_tile_base + out_row_a0;
             let r0_valid = (out_row_a0 >= sub_offset) & (out_row_a0 < sub_end) & (r0_g < m_total);
             if r0_valid {
@@ -3463,29 +3319,24 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
     let sm = sg / 2u32;
     let sn = sg & 1u32;
     let lane_in_tg = sg * 32u32 + lane;
-
     // 8×8 frag lane mapping (Apple steel_gemm layout).
     let qid = lane / 4u32;
     let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
     let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
     let fn1 = fn0 + 1u32;
-
     // TG memory: X tile [BM=32 × BK=32+4] and dequant W tile [BN=32 × BK=32+4].
     // Skew +4 for bank-conflict avoidance (same as int4 MMA variant).
     threadgroup_alloc("xs", 1152, T);
     threadgroup_alloc("ws", 1152, T);
-
     // 4 output frags per SG (16×16 sub-tile inside the 32×32 output tile).
     let c_f00 = simdgroup_alloc::<f32, 8, 8>();
     let c_f01 = simdgroup_alloc::<f32, 8, 8>();
     let c_f10 = simdgroup_alloc::<f32, 8, 8>();
     let c_f11 = simdgroup_alloc::<f32, 8, 8>();
-
     let a_f0 = simdgroup_alloc::<T, 8, 8>();
     let a_f1 = simdgroup_alloc::<T, 8, 8>();
     let b_f0 = simdgroup_alloc::<T, 8, 8>();
     let b_f1 = simdgroup_alloc::<T, 8, 8>();
-
     // W coop-dequant lane assignments for int8.
     // BN×BK = 32×32 = 1024 elements. Each uint32 holds 4 bytes = 4 dequant vals.
     // → packs_per_BK_slice = BK / 4 = 32 / 4 = 8 packs per BN row.
@@ -3506,23 +3357,19 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
     let pack_col_0 = lane_in_tg & 7u32; // 0..7 (8 packs × 4 bytes = 32 = BK)
     let w_row_1 = 16u32 + lane_in_tg / 8u32; // 16..31 (second BN half)
     let pack_col_1 = lane_in_tg & 7u32; // same 0..7
-
     let xs_ld = 36u32;
     let ws_ld = 36u32;
-
     let m_tile_base = m_tile * 32u32;
     let n_tile_base = n_tile * 32u32;
     // int8: 4 bytes per u32 → packs_per_row = k_in / 4.
     let packs_per_row = k_in / 4u32;
     let groups_per_row = k_in / group_size;
-
     // Walk the TG's BM=32 rows in contiguous expert sub-runs (identical to int4 MMA).
     let mut sub_offset = 0u32;
     for _sub_iter in range(0u32, 32u32, 1u32) {
         let cur_row = m_tile_base + sub_offset;
         let cur_in_range = (sub_offset < 32u32) & (cur_row < m_total);
         let cur_expert = select(cur_in_range, load(indices[cur_row]), 4294967295u32);
-
         // Find the run end (first row in [sub_offset+1..32) whose expert differs).
         let mut sub_end = 32u32;
         let mut found = 0u32;
@@ -3542,7 +3389,6 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
                 found = 1u32;
             }
         }
-
         let cur_valid = (cur_expert != 4294967295u32) & (sub_offset < 32u32);
         if cur_valid {
             let w_expert_base = cur_expert * n_out * packs_per_row;
@@ -3552,7 +3398,6 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
             let sb_base_1 = sb_expert_base + (n_tile_base + w_row_1) * groups_per_row;
             let w_pack_row_base_0 = w_expert_base + (n_tile_base + w_row_0) * packs_per_row;
             let w_pack_row_base_1 = w_expert_base + (n_tile_base + w_row_1) * packs_per_row;
-
             // Reset output frags.
             simdgroup_elem_store(c_f00, 0, 0.0f32);
             simdgroup_elem_store(c_f00, 1, 0.0f32);
@@ -3562,7 +3407,6 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
             simdgroup_elem_store(c_f10, 1, 0.0f32);
             simdgroup_elem_store(c_f11, 0, 0.0f32);
             simdgroup_elem_store(c_f11, 1, 0.0f32);
-
             // Inner GEMM over K, BK=32. Each iteration loads 32×32 X tile +
             // 32×32 dequant W tile, then runs 4 k_inner × 4 frags MMAs.
             for kb in range(0u32, k_in, 32u32) {
@@ -3620,7 +3464,6 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
                 threadgroup_store("xs", x_ws_base + 5u32, xv5);
                 threadgroup_store("xs", x_ws_base + 6u32, xv6);
                 threadgroup_store("xs", x_ws_base + 7u32, xv7);
-
                 // W int8 dequant — 128 lanes × 2 packs/lane × 4 bytes/pack = 1024 = BN×BK.
                 //
                 // Pass 0 — lanes 0..127 cover BN rows 0..15, all 8 packs per row:
@@ -3631,7 +3474,6 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
                 // Pass 1 — same lanes cover BN rows 16..31:
                 //   w_row_1 = 16 + lane_in_tg / 8 ∈ 16..31
                 //   pack_col_1 = lane_in_tg & 7 ∈ 0..7 (same)
-
                 // Pass 0: rows 0..15.
                 let pack_dev_0 = w_pack_row_base_0 + kb / 4u32 + pack_col_0;
                 let p0 = load(w[pack_dev_0]);
@@ -3648,7 +3490,6 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
                 threadgroup_store("ws", wb_0 + 1u32, (s_0 * q1_0 + b_0).cast::<T>());
                 threadgroup_store("ws", wb_0 + 2u32, (s_0 * q2_0 + b_0).cast::<T>());
                 threadgroup_store("ws", wb_0 + 3u32, (s_0 * q3_0 + b_0).cast::<T>());
-
                 // Pass 1: rows 16..31.
                 let pack_dev_1 = w_pack_row_base_1 + kb / 4u32 + pack_col_1;
                 let p1 = load(w[pack_dev_1]);
@@ -3665,15 +3506,12 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
                 threadgroup_store("ws", wb_1 + 1u32, (s_1 * q1_1 + b_1).cast::<T>());
                 threadgroup_store("ws", wb_1 + 2u32, (s_1 * q2_1 + b_1).cast::<T>());
                 threadgroup_store("ws", wb_1 + 3u32, (s_1 * q3_1 + b_1).cast::<T>());
-
                 threadgroup_barrier();
-
                 // MMA inner loop — 4 frags × 4 k_inner = 16 MMAs per SG.
                 let row_a0 = sm * 16u32 + fm;
                 let row_a1 = sm * 16u32 + 8u32 + fm;
                 let col_b0 = sn * 16u32;
                 let col_b1 = sn * 16u32 + 8u32;
-
                 for k_inner in range(0u32, 4u32, 1u32) {
                     let ki_off = k_inner * 8u32;
                     simdgroup_elem_store(
@@ -3726,7 +3564,6 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
                 }
                 threadgroup_barrier();
             }
-
             // Store the 32×32 output tile back to device memory, masked to [sub_offset, sub_end).
             let out_row_a0 = sm * 16u32 + fm;
             let out_row_a1 = sm * 16u32 + 8u32 + fm;
@@ -3734,7 +3571,6 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
             let out_col_01 = sn * 16u32 + fn1;
             let out_col_10 = sn * 16u32 + 8u32 + fn0;
             let out_col_11 = sn * 16u32 + 8u32 + fn1;
-
             let r00_0 = simdgroup_elem_load(c_f00, 0);
             let r00_1 = simdgroup_elem_load(c_f00, 1);
             let r01_0 = simdgroup_elem_load(c_f01, 0);
@@ -3743,7 +3579,6 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
             let r10_1 = simdgroup_elem_load(c_f10, 1);
             let r11_0 = simdgroup_elem_load(c_f11, 0);
             let r11_1 = simdgroup_elem_load(c_f11, 1);
-
             let r0_g = m_tile_base + out_row_a0;
             let r0_valid = (out_row_a0 >= sub_offset) & (out_row_a0 < sub_end) & (r0_g < m_total);
             if r0_valid {

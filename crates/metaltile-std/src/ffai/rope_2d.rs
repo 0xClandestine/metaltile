@@ -62,28 +62,22 @@ pub fn ffai_rope_2d<T>(
     let token = program_id::<0>();
     let head = program_id::<1>();
     let j = program_id::<2>();
-
     // Inverse frequency for this paired index. The exponent denominator
     // is `half_dim` because each spatial half is treated as its own
     // RoPE block of width `half_dim` (= 2 * quarter_dim).
     let j_f = j.cast::<f32>();
     let half_f = half_dim.cast::<f32>();
     let inv_freq = exp2(-2.0f32 * j_f * log2(theta_base) / half_f);
-
     // Per-token (row, col) grid position.
     let row = load(positions[token * 2u32]).cast::<f32>();
     let col = load(positions[token * 2u32 + 1u32]).cast::<f32>();
-
     let theta_row = row * inv_freq;
     let cos_r = cos(theta_row);
     let sin_r = sin(theta_row);
-
     let theta_col = col * inv_freq;
     let cos_c = cos(theta_col);
     let sin_c = sin(theta_col);
-
     let head_base = token * n_heads * head_dim + head * head_dim;
-
     // Row half: dims [0, half_dim), pair (j, j + quarter_dim).
     let r1 = head_base + j;
     let r2 = head_base + j + quarter_dim;
@@ -91,7 +85,6 @@ pub fn ffai_rope_2d<T>(
     let xr2 = load(qk[r2]).cast::<f32>();
     store(out[r1], (xr1 * cos_r - xr2 * sin_r).cast::<T>());
     store(out[r2], (xr1 * sin_r + xr2 * cos_r).cast::<T>());
-
     // Column half: dims [half_dim, head_dim), pair (j, j + quarter_dim)
     // measured from the start of the second half.
     let c1 = head_base + half_dim + j;

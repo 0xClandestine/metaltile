@@ -97,16 +97,13 @@ pub fn mt_sdpa_prefill_nax<T>(
     let batch = tgid_z;
     let kv_head = q_head / gqa_factor;
     let lane = simd_lane;
-
     let head_dim = 32u32;
     let q_len_off = k_len - q_len;
-
     // Slab offsets — q/out: [batch, n_q_heads, q_len, D]; k/v: [batch,
     // n_kv_heads, k_len, D].
     let kv_row_base = batch * n_kv_heads * k_len * head_dim + kv_head * k_len * head_dim;
     let q_head_row_off = batch * n_q_heads * q_len * head_dim + q_head * q_len * head_dim;
     let q_tile_first = q_tile * 16u32;
-
     // Threadgroup tiles (skewed). Qs/Ks/Vs/Ps are T; Ss/Os/Obk are fp32.
     threadgroup_alloc("Qs", 576, coop_stage(T)); // 16 × 36
     threadgroup_alloc("Ks", 576, coop_stage(T));
@@ -115,7 +112,6 @@ pub fn mt_sdpa_prefill_nax<T>(
     threadgroup_alloc("Ss", 320, f32);
     threadgroup_alloc("Os", 576, f32);
     threadgroup_alloc("Obk", 576, f32);
-
     // Coop-load the 16×32 Q tile (lane fills column `lane`); zero Os.
     for _r in range(0u32, 16u32, 1u32) {
         let q_dev = q_head_row_off + (q_tile_first + _r) * head_dim + lane;
@@ -123,14 +119,12 @@ pub fn mt_sdpa_prefill_nax<T>(
         threadgroup_store("Qs", _r * 36u32 + lane, qv);
         threadgroup_store("Os", _r * 36u32 + lane, 0.0f32);
     }
-
     // Per-row online-softmax state — lane `r` (r < 16) owns row r.
     let mut row_m = -1.0e30f32;
     let mut row_s = 0.0f32;
     let owns_row = lane < 16u32;
     let my_row = lane;
     let q_abs = q_tile_first + my_row + q_len_off;
-
     // QK: matmul2d(16, 16, 32), ta=false tb=true, overwrite (S fresh).
     coop_tile_setup(
         "qk",
@@ -159,14 +153,11 @@ pub fn mt_sdpa_prefill_nax<T>(
         false,
         false,
     );
-
     // Causal trim — last K-block touched by the tile's last query.
     let q_tile_last_abs = q_tile_first + 15u32 + q_len_off;
     let kb_lim = q_tile_last_abs / 16u32 + 1u32;
-
     for kb in range(0u32, kb_lim, 1u32) {
         let kb_off = kb * 16u32;
-
         // 1. Coop-load the 16×32 K and V tiles.
         for _r in range(0u32, 16u32, 1u32) {
             let kv_dev = kv_row_base + (kb_off + _r) * head_dim + lane;
@@ -174,7 +165,6 @@ pub fn mt_sdpa_prefill_nax<T>(
             threadgroup_store("Vs", _r * 36u32 + lane, load(v[kv_dev]).cast::<f32>());
         }
         threadgroup_barrier();
-
         // 2. S = Q·Kᵀ — extents inner-first: tQ/tK [TG_LD_D=36, 16],
         //    tS [TG_LD_K=20, 16].
         coop_tile_load_a("qk", "Qs", true, coop_stage(T), 36, 16);
@@ -182,7 +172,6 @@ pub fn mt_sdpa_prefill_nax<T>(
         coop_tile_run("qk");
         coop_tile_store_c("qk", "Ss", true, f32, 20, 16);
         threadgroup_barrier();
-
         // 3. Online softmax — each owning lane processes its S row.
         if owns_row {
             let mut blk_m = -1.0e30f32;
@@ -210,7 +199,6 @@ pub fn mt_sdpa_prefill_nax<T>(
             row_m = new_m;
         }
         threadgroup_barrier();
-
         // 4. Stage the fp32 exp-weights P into the T-typed Ps tile.
         if owns_row {
             for _c in range(0u32, 16u32, 1u32) {
@@ -219,7 +207,6 @@ pub fn mt_sdpa_prefill_nax<T>(
             }
         }
         threadgroup_barrier();
-
         // O_blk = P·V — tP [TG_LD_K=20, 16], tV [TG_LD_D=36, 16],
         // tObk [TG_LD_D=36, 16].
         coop_tile_load_a("pv", "Ps", true, coop_stage(T), 20, 16);
@@ -227,7 +214,6 @@ pub fn mt_sdpa_prefill_nax<T>(
         coop_tile_run("pv");
         coop_tile_store_c("pv", "Obk", true, f32, 36, 16);
         threadgroup_barrier();
-
         // Add the per-block P·V product into the running Os accumulator.
         if owns_row {
             for _d in range(0u32, 32u32, 1u32) {
@@ -238,7 +224,6 @@ pub fn mt_sdpa_prefill_nax<T>(
         }
         threadgroup_barrier();
     }
-
     // 5. Normalize by the softmax denominator and store O.
     if owns_row {
         let inv_s = select(row_s > 0.0f32, 1.0f32 / row_s, 0.0f32);

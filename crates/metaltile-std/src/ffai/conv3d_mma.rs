@@ -86,24 +86,20 @@ pub fn conv3d_mma<T>(
     // BM (oc-axis) tile = tgid_x * 32, BN (voxel-axis) tile = tgid_y * 32.
     let oc_tile = tgid_x;
     let pv_tile = tgid_y;
-
     let lane = simd_lane;
     let sg = simd_group_id();
     let sm = sg / 2u32;
     let sn = sg & 1u32;
     let lane_in_tg = sg * 32u32 + lane;
-
     // ── 8×8 frag lane mapping (Apple steel_gemm layout) ──────────────────
     let qid = lane / 4u32;
     let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
     let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
     let fn1 = fn0 + 1u32;
-
     // ── TG memory: A and B tiles, skewed stride = 36 ─────────────────────
     let stride = 36u32;
     threadgroup_alloc("as", 1152, T);
     threadgroup_alloc("bs", 1152, T);
-
     // ── Accumulator frags ─────────────────────────────────────────────────
     let c_f00 = simdgroup_alloc::<f32, 8, 8>();
     simdgroup_elem_store(c_f00, 0, 0.0f32);
@@ -117,26 +113,21 @@ pub fn conv3d_mma<T>(
     let c_f11 = simdgroup_alloc::<f32, 8, 8>();
     simdgroup_elem_store(c_f11, 0, 0.0f32);
     simdgroup_elem_store(c_f11, 1, 0.0f32);
-
     let a_f0 = simdgroup_alloc::<T, 8, 8>();
     let a_f1 = simdgroup_alloc::<T, 8, 8>();
     let b_f0 = simdgroup_alloc::<T, 8, 8>();
     let b_f1 = simdgroup_alloc::<T, 8, 8>();
-
     // ── Precompute K-space extents ────────────────────────────────────────
     let khw = kh * kw;
     let kdhw = kd * khw; // taps per input channel
     let total_k = in_ch * kdhw; // total tap dimension
-
     // ── Voxel-axis im2col decode for this TG's A rows ────────────────────
     let out_hw = out_h * out_w;
     let out_dhw = out_d * out_hw;
-
     // Coop A-load lane assignment: lane_in_tg = pv_row * 4 + k_quad.
     let a_pv_row = lane_in_tg / 4u32;
     let a_k_quad = lane_in_tg & 3u32;
     let a_k_base = a_k_quad * 8u32;
-
     let global_pv = pv_tile * 32u32 + a_pv_row;
     let n_pv = global_pv / out_dhw;
     let rem_pv = global_pv - n_pv * out_dhw;
@@ -149,14 +140,12 @@ pub fn conv3d_mma<T>(
     let in_vol = in_d * in_plane;
     let in_n_stride = in_ch * in_vol;
     let pv_in_base = n_pv * in_n_stride;
-
     // Coop B-load (weight).
     let b_oc_row = lane_in_tg / 4u32;
     let b_k_quad = lane_in_tg & 3u32;
     let b_k_base = b_k_quad * 8u32;
     let global_oc = oc_tile * 32u32 + b_oc_row;
     let w_oc_base = global_oc * total_k;
-
     // ── K-block loop ──────────────────────────────────────────────────────
     // K-tail handling: `total_k = in_ch * kd * kh * kw` rarely lands on
     // a multiple of 32 (e.g. in_ch=4, k=3³ → 108). The A/B coop loads
@@ -186,7 +175,6 @@ pub fn conv3d_mma<T>(
             let val = select(in_bounds, raw, 0.0f32).cast::<T>();
             threadgroup_store("as", a_pv_row * stride + a_k_base + i, val);
         }
-
         // ─ 2. Coop B load (weight, dense OIDHW) ─────────────────────────
         for i in range(0u32, 8u32, 1u32) {
             let kt = kb + b_k_base + i;
@@ -197,15 +185,12 @@ pub fn conv3d_mma<T>(
             let val = select(in_bounds, raw, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_oc_row * stride + b_k_base + i, val);
         }
-
         threadgroup_barrier();
-
         // ─ 3. MMA inner loop (4 k-inner × 4 frags = 16 MMAs / SG) ──────
         let row_a0 = sm * 16u32 + fm;
         let row_a1 = sm * 16u32 + 8u32 + fm;
         let col_b0 = sn * 16u32;
         let col_b1 = sn * 16u32 + 8u32;
-
         // k_inner = 0
         simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + fn1));
@@ -222,7 +207,6 @@ pub fn conv3d_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 1
         simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 8u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 8u32 + fn1));
@@ -239,7 +223,6 @@ pub fn conv3d_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 2
         simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 16u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 16u32 + fn1));
@@ -256,7 +239,6 @@ pub fn conv3d_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         // k_inner = 3
         simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 24u32 + fn0));
         simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 24u32 + fn1));
@@ -273,15 +255,12 @@ pub fn conv3d_mma<T>(
         simdgroup_matmul(a_f1, b_f1, c_f11);
         simdgroup_matmul(a_f1, b_f0, c_f10);
         simdgroup_barrier_mem_none();
-
         threadgroup_barrier();
     }
-
     // ── 4. Write 4 C frags to global out ─────────────────────────────────
     // out layout: [batch * out_d * out_h * out_w, out_ch].
     let out_pv_base = pv_tile * 32u32 + sm * 16u32;
     let out_oc_base = oc_tile * 32u32 + sn * 16u32;
-
     store(
         out[(out_pv_base + fm) * out_ch + out_oc_base + fn0],
         simdgroup_elem_load(c_f00, 0).cast::<T>(),

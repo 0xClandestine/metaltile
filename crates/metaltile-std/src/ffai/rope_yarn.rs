@@ -51,37 +51,29 @@ pub fn ffai_rope_yarn<T>(
 ) {
     let head = program_id::<0>();
     let i = program_id::<1>();
-
     let i_f = i.cast::<f32>();
     let half_f = half_dim.cast::<f32>();
-
     // Base (extrapolation) frequency — identical to plain RoPE.
     let inv_freq_extrap = exp2(-i_f * log2(theta_base) / half_f);
     // Interpolation frequency — extended context by `factor`.
     let inv_freq_interp = inv_freq_extrap / factor;
-
     // Linear ramp over the [low, high] correction band, clamped to
     // [0, 1]. ramp=0 → pure extrapolation; ramp=1 → pure interpolation.
     // The caller guarantees high > low, so the divide is safe.
     let t = (i_f - low) / (high - low);
     let ramp = select(t < 0.0f32, 0.0f32, select(t > 1.0f32, 1.0f32, t));
-
     let inv_freq = inv_freq_interp * ramp + inv_freq_extrap * (1.0f32 - ramp);
-
     let pos_f = position.cast::<f32>();
     let theta = pos_f * inv_freq;
     let cos_t = cos(theta) * attn_factor;
     let sin_t = sin(theta) * attn_factor;
-
     let base = head * head_dim;
     let i1 = base + i;
     let i2 = base + i + half_dim;
-
     let x1 = load(qk[i1]).cast::<f32>();
     let x2 = load(qk[i2]).cast::<f32>();
     let o1 = x1 * cos_t - x2 * sin_t;
     let o2 = x1 * sin_t + x2 * cos_t;
-
     store(out[i1], o1.cast::<T>());
     store(out[i2], o2.cast::<T>());
 }

@@ -72,22 +72,17 @@ pub fn mt_gated_delta_step<T>(
     let dv_idx = tgid_x;
     let n = tgid_y;
     let dk_idx = tid;
-
     // GQA decomposition: n = b * Hv + hv_idx; hk_idx = hv_idx / (Hv / Hk)
     let hv_idx = n - (n / hv) * hv;
     let b = n / hv;
     let hk_per_hv = hv / hk;
     let hk_idx = hv_idx / hk_per_hv;
-
     let n_per_t = dk / 32u32;
-
     let g_val = load(g[n]).cast::<f32>();
     let beta_val = load(beta[n]).cast::<f32>();
     let v_val = load(v[n * dv + dv_idx]).cast::<f32>();
-
     let qk_base = (b * hk + hk_idx) * dk;
     let state_base = n * dv * dk + dv_idx * dk;
-
     // ─── Phase 1: decay + kv_mem reduction ─────────────────────────────
     //
     // Per-lane register cache for the decayed state (`decayed`) and the
@@ -100,7 +95,6 @@ pub fn mt_gated_delta_step<T>(
     // under-utilises the upper slots.
     stack_alloc("decayed", 8u32, "f32");
     stack_alloc("k_cache", 8u32, "f32");
-
     let mut kv_mem = 0.0f32;
     for i in range(0u32, n_per_t, 1u32) {
         let s_idx = n_per_t * dk_idx + i;
@@ -111,9 +105,7 @@ pub fn mt_gated_delta_step<T>(
         kv_mem = kv_mem + s_decayed * k_val;
     }
     let kv_mem_sum = simd_sum(kv_mem);
-
     let delta = (v_val - kv_mem_sum) * beta_val;
-
     // ─── Phase 2: rank-1 update + output projection ────────────────────
     //
     // Read decayed + k from the per-lane register caches (no global
@@ -131,7 +123,6 @@ pub fn mt_gated_delta_step<T>(
         out = out + s_new * q_val;
     }
     let out_sum = simd_sum(out);
-
     // ─── Phase 3: lane 0 writes the result ────────────────────────────
     if dk_idx == 0u32 {
         store(y[n * dv + dv_idx], out_sum.cast::<T>());
@@ -203,17 +194,13 @@ pub fn mt_gated_delta_chunk<T>(
     let dv_idx = tgid_x;
     let n = tgid_y;
     let dk_idx = tid;
-
     let hv_idx = n - (n / hv) * hv;
     let b = n / hv;
     let hk_per_hv = hv / hk;
     let hk_idx = hv_idx / hk_per_hv;
-
     let n_per_t = dk / 32u32;
     let t_total = load(t_len[0]);
-
     let state_base = n * dv * dk + dv_idx * dk;
-
     // ─── Load state into per-lane registers once ─────────────────────
     //
     // State persists across all `T` recurrence steps in registers.
@@ -226,7 +213,6 @@ pub fn mt_gated_delta_chunk<T>(
         let val = load(state_in[state_base + s_idx]).cast::<f32>();
         stack_store("state_reg", i, val);
     }
-
     // ─── Inner T-loop: GDN recurrence per token ──────────────────────
     //
     // Pointer arithmetic per t:
@@ -238,11 +224,9 @@ pub fn mt_gated_delta_chunk<T>(
         let qk_base = (bt * hk + hk_idx) * dk;
         let vy_base = (bt * hv + hv_idx) * dv;
         let gbeta_idx = bt * hv + hv_idx;
-
         let g_val = load(g[gbeta_idx]).cast::<f32>();
         let beta_val = load(beta[gbeta_idx]).cast::<f32>();
         let v_val = load(v[vy_base + dv_idx]).cast::<f32>();
-
         // Phase 1: decay state + accumulate kv_mem; cache k.
         let mut kv_mem = 0.0f32;
         for i in range(0u32, n_per_t, 1u32) {
@@ -256,7 +240,6 @@ pub fn mt_gated_delta_chunk<T>(
         }
         let kv_mem_sum = simd_sum(kv_mem);
         let delta = (v_val - kv_mem_sum) * beta_val;
-
         // Phase 2: rank-1 update + output projection.
         let mut out = 0.0f32;
         for i in range(0u32, n_per_t, 1u32) {
@@ -269,12 +252,10 @@ pub fn mt_gated_delta_chunk<T>(
             out = out + s_new * q_val;
         }
         let out_sum = simd_sum(out);
-
         if dk_idx == 0u32 {
             store(y[vy_base + dv_idx], out_sum.cast::<T>());
         }
     }
-
     // ─── Write final state once at the end ──────────────────────────
     for i in range(0u32, n_per_t, 1u32) {
         let s_idx = n_per_t * dk_idx + i;
