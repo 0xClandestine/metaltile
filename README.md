@@ -91,19 +91,6 @@ cargo install --path crates/metaltile-cli
 └── <a href="crates/metaltile-std">metaltile-std</a>      — kernel standard library and benchmark registry
 </pre>
 
-## Docs
-
-<details>
-  <summary>Documentation</summary>
-  <ol>
-    <li><a href="docs/getting-started.md">Getting Started</a> — toolchain, crate layout, build, first kernel</li>
-    <li><a href="docs/developing.md">Developing</a> — repo layout, dev loop, kernel-authoring hazards</li>
-    <li><a href="docs/testing.md">Testing</a> — test layers, CI, and test-infra gaps</li>
-    <li><a href="docs/cli.md">CLI</a> — the <code>tile</code> binary, all flags and subcommands</li>
-    <li><a href="docs/publishing.md">Publishing</a> — the release flow</li>
-  </ol>
-</details>
-
 ## Contributing
 
 Contributions are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) for the issue / PR process and [`docs/developing.md`](docs/developing.md) for the kernel-authoring hazards **before** writing a kernel.
