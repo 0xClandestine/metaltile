@@ -216,6 +216,7 @@ mod tests {
     use metaltile_core::ir::Op;
 
     use super::*;
+    use crate::bench_types::DType;
 
     #[test]
     fn kernel_ir_constructs_and_uses_coop_tile_ops() {
