@@ -21,7 +21,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 #[bench_kernel(
     op="rope",
     subop="rope_llama",
@@ -81,4 +80,3 @@ pub fn ffai_rope_llama<T>(
     store(out[i1], o1.cast::<T>());
     store(out[i2], o2.cast::<T>());
 }
-

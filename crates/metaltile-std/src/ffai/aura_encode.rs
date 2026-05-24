@@ -70,8 +70,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
-
 macro_rules! aura_encode_kernel {
     ($name:ident, $bits:literal, $levels:literal, $subop:literal) => {
         // `input` is the model-dtype K or V row (typically bf16/f16 in
@@ -79,12 +77,12 @@ macro_rules! aura_encode_kernel {
         // we cast at the load. Everything else stays f32-only because
         // rotation, codebook, and norm-correction need the precision.
         #[bench_kernel(
-            op="aura",
-            subop=$subop,
-            class=GenericEmpty,
-            tol=0.0,
-            kernel_mode=Reduction,
-        )]
+                    op="aura",
+                    subop=$subop,
+                    class=GenericEmpty,
+                    tol=0.0,
+                    kernel_mode=Reduction,
+                )]
         #[kernel]
         pub fn $name<T>(
             input: Tensor<T>,
@@ -211,7 +209,6 @@ macro_rules! aura_encode_kernel {
                 store(norms_out[row], corrected_norm);
             }
         }
-
     };
 }
 

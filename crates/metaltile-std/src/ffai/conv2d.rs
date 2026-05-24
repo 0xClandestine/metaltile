@@ -49,8 +49,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
-
 /// Emit a conv2d kernel. `$kh / $kw / $stride` are either literals (the
 /// fixed-patch variants) or the `kh / kw / stride_h / stride_w`
 /// constexpr idents (the generic variant). Padding is always a runtime
@@ -59,12 +57,12 @@ use metaltile::{bench_kernel, kernel};
 macro_rules! conv2d_kernel {
     ($name:ident, $subop:literal, $kh:expr, $kw:expr, $sh:expr, $sw:expr) => {
         #[bench_kernel(
-            op="conv2d",
-            subop=$subop,
-            class=GenericEmpty,
-            tol=1e-3,
-            kernel_mode=Grid3D,
-        )]
+                    op="conv2d",
+                    subop=$subop,
+                    class=GenericEmpty,
+                    tol=1e-3,
+                    kernel_mode=Grid3D,
+                )]
         #[kernel]
         pub fn $name<T>(
             input: Tensor<T>,
@@ -143,7 +141,6 @@ macro_rules! conv2d_kernel {
 
             store(out[idx], acc.cast::<T>());
         }
-
     };
 }
 
@@ -294,4 +291,3 @@ pub fn conv2d_grouped<T>(
 
     store(out[idx], acc.cast::<T>());
 }
-

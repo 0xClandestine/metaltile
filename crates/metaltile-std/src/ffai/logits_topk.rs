@@ -35,7 +35,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 #[bench_kernel(
     op="logits_processors",
     subop="topk_mask",
@@ -53,4 +52,3 @@ pub fn logits_topk_mask<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] threshol
     let masked = select(v >= threshold, v, neg_inf);
     store(out[i], masked.cast::<T>());
 }
-

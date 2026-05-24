@@ -66,7 +66,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 #[bench_kernel(
     op="gated_delta",
     subop="wy_chunk",
@@ -365,4 +364,3 @@ pub fn mt_gated_delta_wy_chunk<T>(
         store(state_out[state_base + ii], s.cast::<T>());
     }
 }
-

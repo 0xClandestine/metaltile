@@ -22,7 +22,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 // Mamba 2 / Mamba 1D depthwise causal-conv step — streaming-decode form.
 //
 //   y[d] = bias[d]
@@ -88,7 +87,6 @@ pub fn conv1d_causal_step<T>(
     store(state[(kernel_size - 2u32) * n_channels + d], load(x[d]));
 }
 
-
 // Mamba 2 selective-scan single-token decode step. One thread per
 // (head, d) — no cross-thread sync needed because each (head, d)
 // column of h is owned by exactly one thread.
@@ -136,7 +134,6 @@ pub fn ssm_step<T>(
     }
     store(y[h_id * head_dim + d], y_d.cast::<T>());
 }
-
 
 // Mamba 1 (Jamba) selective-scan single-token decode step — the
 // 2D-`A_log` variant of `ssm_step` above.
@@ -211,7 +208,6 @@ pub fn ssm_step_a2d<T>(
     store(y[h_id * head_dim + d], y_d.cast::<T>());
 }
 
-
 // Faithful port of MLX's `ssm_step<T, Dh, Ds, H, G>` (alpha branch). One
 // threadgroup per `(d_idx, n)` output element, where `n ∈ [0, n_heads*batch)`
 // and `d_idx ∈ [0, dh)`. Each threadgroup runs 32 threads (one simd-group)
@@ -278,4 +274,3 @@ pub fn mt_ssm_step<T>(
         store(out[n * dh + d_idx], (total + x_val * d_val).cast::<T>());
     }
 }
-

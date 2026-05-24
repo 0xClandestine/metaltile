@@ -66,8 +66,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
-
 /// Winograd F(2×2, 3×3) convolution. See the module docs for the
 /// algorithm and the dispatch invariants.
 #[bench_kernel(
@@ -326,7 +324,6 @@ pub fn winograd_conv2d_3x3<T>(
     store(out[out_row1 + ow0 + 1u32], y11.cast::<T>());
 }
 
-
 // ─────────────────────────────────────────────────────────────────────────
 // cuDNN-style split: hoist the filter transform.
 //
@@ -405,7 +402,6 @@ pub fn winograd_filter_transform_3x3<T>(
         store(out[u_base + 15u32], s32.cast::<T>());
     }
 }
-
 
 /// Winograd F(2×2, 3×3) convolution consuming a *pre-transformed* filter
 /// buffer `u` (`[out_ch, in_ch, 4, 4]`, produced by
@@ -617,4 +613,3 @@ pub fn winograd_conv2d_3x3_split<T>(
     store(out[out_row1 + ow0], y10.cast::<T>());
     store(out[out_row1 + ow0 + 1u32], y11.cast::<T>());
 }
-

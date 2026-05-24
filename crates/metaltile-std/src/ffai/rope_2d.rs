@@ -41,7 +41,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 #[bench_kernel(
     op="rope",
     subop="rope_2d",
@@ -102,4 +101,3 @@ pub fn ffai_rope_2d<T>(
     store(out[c1], (xc1 * cos_c - xc2 * sin_c).cast::<T>());
     store(out[c2], (xc1 * sin_c + xc2 * cos_c).cast::<T>());
 }
-

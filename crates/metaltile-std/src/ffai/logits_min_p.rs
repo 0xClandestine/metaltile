@@ -30,7 +30,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 #[bench_kernel(
     op="logits_processors",
     subop="min_p_mask",
@@ -63,4 +62,3 @@ pub fn logits_min_p_mask<T>(
         store(out[_i], select(exp(v - row_max) >= min_p, v, neg_inf).cast::<T>());
     }
 }
-

@@ -34,7 +34,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 // ── mt_moe_router_topk ───────────────────────────────────────────────────
 //
 // Per-token select top-k experts from `router_logits`, plus softmax
@@ -204,7 +203,6 @@ pub fn mt_moe_router_topk<T>(
     }
 }
 
-
 // ── mt_moe_unpermute ─────────────────────────────────────────────────────
 //
 // Combine k expert outputs back into the original token order with
@@ -270,7 +268,6 @@ pub fn mt_moe_unpermute<T>(
     }
 }
 
-
 // ── mt_moe_permute ───────────────────────────────────────────────────────
 //
 // Gather tokens into per-expert contiguous buffers given a pre-computed
@@ -331,7 +328,6 @@ pub fn mt_moe_permute<T>(
         }
     }
 }
-
 
 // ── mt_moe_gather_qmm_int4 ────────────────────────────────────────────────
 //
@@ -481,7 +477,6 @@ pub fn mt_moe_gather_qmm_int4<T>(
     }
 }
 
-
 // ── mt_moe_gather_qmm_b{3,5,6,8} — wider-precision gather matmul ──────────
 //
 // `mt_moe_gather_qmm_int4` above is int4-only (MLX's MoE quantization
@@ -511,12 +506,12 @@ pub fn mt_moe_gather_qmm_int4<T>(
 macro_rules! gather_qmm_pow2 {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[bench_kernel(
-            op="moe",
-            subop=$subop,
-            class=GenericEmpty,
-            tol=5e-2,
-            kernel_mode=Reduction,
-        )]
+                    op="moe",
+                    subop=$subop,
+                    class=GenericEmpty,
+                    tol=5e-2,
+                    kernel_mode=Reduction,
+                )]
         #[kernel]
         pub fn $name<T>(
             x: Tensor<T>,
@@ -576,7 +571,6 @@ macro_rules! gather_qmm_pow2 {
                 store(out[row * m_out + m], total.cast::<T>());
             }
         }
-
     };
 }
 
@@ -584,12 +578,12 @@ macro_rules! gather_qmm_pow2 {
 macro_rules! gather_qmm_odd {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[bench_kernel(
-            op="moe",
-            subop=$subop,
-            class=GenericEmpty,
-            tol=5e-2,
-            kernel_mode=Reduction,
-        )]
+                    op="moe",
+                    subop=$subop,
+                    class=GenericEmpty,
+                    tol=5e-2,
+                    kernel_mode=Reduction,
+                )]
         #[kernel]
         pub fn $name<T>(
             x: Tensor<T>,
@@ -660,7 +654,6 @@ macro_rules! gather_qmm_odd {
                 store(out[row * m_out + m], total.cast::<T>());
             }
         }
-
     };
 }
 
@@ -975,7 +968,6 @@ pub fn mt_moe_gather_qmm_int4_m8<T>(
         store(out[row * m_out + m_base + 7u32], t7.cast::<T>());
     }
 }
-
 
 // ── mt_moe_gather_qmm_int4_m16 ────────────────────────────────────────────
 //
@@ -1472,7 +1464,6 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
         store(out[row * m_out + m_base + 15u32], t15.cast::<T>());
     }
 }
-
 
 // ── mt_moe_gather_qmm_int4_m32 ────────────────────────────────────────────
 //
@@ -2386,7 +2377,6 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
     }
 }
 
-
 // ── mt_moe_gather_qmm_mma_int4 ────────────────────────────────────────────
 //
 // Tiled-MMA grouped quantized matmul. Mirrors MLX's
@@ -2736,7 +2726,6 @@ pub fn mt_moe_gather_qmm_mma_int4<T>(
     }
 }
 
-
 // ── mt_moe_gather_qmm_mma_b{3,5,6,8} — wider-precision MMA gather matmul ──
 //
 // Bit-width-generalized siblings of `mt_moe_gather_qmm_mma_int4`. Same
@@ -2754,12 +2743,12 @@ pub fn mt_moe_gather_qmm_mma_int4<T>(
 macro_rules! gather_qmm_mma {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[bench_kernel(
-            op="moe",
-            subop=$subop,
-            class=GenericEmpty,
-            tol=5e-2,
-            kernel_mode=Reduction,
-        )]
+                    op="moe",
+                    subop=$subop,
+                    class=GenericEmpty,
+                    tol=5e-2,
+                    kernel_mode=Reduction,
+                )]
         #[kernel]
         #[allow(clippy::too_many_arguments)]
         pub fn $name<T>(
@@ -3035,7 +3024,6 @@ macro_rules! gather_qmm_mma {
                 sub_offset = sub_end;
             }
         }
-
     };
 }
 
@@ -3446,7 +3434,6 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16<T>(
     }
 }
 
-
 // ── mt_moe_gather_qmm_mma_int8 — pack-aligned int8 MoE MMA BGEMM ────────
 //
 // Simdgroup-matrix MoE BGEMM for int8-quantized weights. Same tiled-MMA
@@ -3795,4 +3782,3 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
         sub_offset = sub_end;
     }
 }
-

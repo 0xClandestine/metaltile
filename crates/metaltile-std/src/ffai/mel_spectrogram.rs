@@ -105,7 +105,6 @@ pub fn mel_spectrogram<T>(
     store(out[idx], log_mel.cast::<T>());
 }
 
-
 // ─────────────────────────────────────────────────────────────────────────
 // FFT-routed STFT path.
 //
@@ -153,7 +152,6 @@ pub fn mel_stft_window<T>(
     store(out_im[idx], 0.0f32.cast::<T>());
 }
 
-
 /// STFT stage 3 — Mel filterbank over an FFT'd frame buffer. `out[frame,
 /// mel] = log(Σ_{k<n_freq} mel_weight[mel,k]·(re²+im²) + log_eps)`, where
 /// `re`/`im` are `fft_re`/`fft_im` from `mt_fft_n{n_fft}`. One thread per
@@ -196,4 +194,3 @@ pub fn mel_filterbank<T>(
     let log_mel = log(mel_acc + log_eps);
     store(out[idx], log_mel.cast::<T>());
 }
-

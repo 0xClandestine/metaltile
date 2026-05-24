@@ -52,8 +52,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
-
 #[bench_kernel(
     op="dequant_gemv_expert_indexed",
     subop="int4",
@@ -116,4 +114,3 @@ pub fn dequant_gemv_int4_expert_indexed<T>(
         store(output[row], total.cast::<T>());
     }
 }
-

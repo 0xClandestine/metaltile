@@ -15,7 +15,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 // Tree-reduction strides: 128 → 64 → 32 → 16 → 8 → 4 → 2.
 // Each iteration: threads with `lid < stride` merge the upper half into
 // the lower half (take higher value; on ties take smaller index — NumPy
@@ -83,4 +82,3 @@ pub fn ffai_argmax<T>(inp: Tensor<T>, out: Tensor<u32>, #[constexpr] n: u32) {
         store(out[0], final_idx);
     }
 }
-

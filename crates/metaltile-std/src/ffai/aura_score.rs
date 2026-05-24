@@ -55,12 +55,12 @@ const _: DType = DType::F32;
 macro_rules! aura_score_kernel {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[bench_kernel(
-            op="aura",
-            subop=$subop,
-            class=GenericEmpty,
-            tol=0.0,
-            kernel_mode=Reduction,
-        )]
+                    op="aura",
+                    subop=$subop,
+                    class=GenericEmpty,
+                    tol=0.0,
+                    kernel_mode=Reduction,
+                )]
         #[kernel]
         pub fn $name<T>(
             q_rot: Tensor<T>,
@@ -123,7 +123,6 @@ macro_rules! aura_score_kernel {
                 store(scores[q_idx * tokens + k_idx], (total * norm_val).cast::<T>());
             }
         }
-
     };
 }
 

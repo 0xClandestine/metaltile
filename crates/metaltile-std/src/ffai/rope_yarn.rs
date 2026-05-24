@@ -29,7 +29,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 #[bench_kernel(
     op="rope",
     subop="rope_yarn",
@@ -86,4 +85,3 @@ pub fn ffai_rope_yarn<T>(
     store(out[i1], o1.cast::<T>());
     store(out[i2], o2.cast::<T>());
 }
-

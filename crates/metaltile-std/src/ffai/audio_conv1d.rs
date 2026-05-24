@@ -29,7 +29,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 #[bench_kernel(
     op="audio_conv1d",
     subop="audio_conv1d",
@@ -85,4 +84,3 @@ pub fn audio_conv1d<T>(
 
     store(out[idx], acc.cast::<T>());
 }
-

@@ -27,7 +27,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 #[bench_kernel(
     op="sdpa",
     subop="sdpa_decode_d64",
@@ -142,7 +141,6 @@ pub fn ffai_sdpa_decode_d64<T>(
         store(out[out_off + 1u32], so1.cast::<T>());
     }
 }
-
 
 #[cfg(test)]
 mod tests {

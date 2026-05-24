@@ -260,9 +260,13 @@ impl Parse for BenchArgs {
                         "Reduction" => KernelModeArg::Reduction,
                         "Grid3D" => KernelModeArg::Grid3D,
                         "SimdGroup2D" => KernelModeArg::SimdGroup2D,
-                        o => return Err(syn::Error::new(id.span(),
-                            format!("kernel_mode must be None|Elementwise|Reduction|Grid3D|SimdGroup2D, got `{o}`")),
-                        ),
+                        o =>
+                            return Err(syn::Error::new(
+                                id.span(),
+                                format!(
+                                    "kernel_mode must be None|Elementwise|Reduction|Grid3D|SimdGroup2D, got `{o}`"
+                                ),
+                            )),
                     };
                     km_field = Some(km);
                 },
@@ -303,9 +307,11 @@ impl Parse for BenchArgs {
                     let var = match id.to_string().as_str() {
                         "Decode" => BatchedDecodeVariantArg::Decode,
                         "PrefillTile" => BatchedDecodeVariantArg::PrefillTile,
-                        o => return Err(syn::Error::new(id.span(),
-                            format!("variant must be Decode|PrefillTile, got `{o}`")),
-                        ),
+                        o =>
+                            return Err(syn::Error::new(
+                                id.span(),
+                                format!("variant must be Decode|PrefillTile, got `{o}`"),
+                            )),
                     };
                     variant_field = Some(var);
                 },
@@ -1007,9 +1013,7 @@ pub fn generate_submit(fn_name: &syn::Ident, a: &BenchArgs, is_generic: bool) ->
             })
         },
         // ── GenericEmpty: Generic dispatch with empty shapes ────────────
-        ClassKind::GenericEmpty => {
-            (quote! { &[] }, quote! { crate::spec::BenchDispatch::Generic })
-        },
+        ClassKind::GenericEmpty => (quote! { &[] }, quote! { crate::spec::BenchDispatch::Generic }),
         // ── Complex: SdpaVector2Pass (two-pass SDPA decode) ────────────
         ClassKind::SdpaVector2Pass => {
             let hd = a.h.as_ref().expect("SdpaVector2Pass requires h (head_dim)");
@@ -1041,25 +1045,26 @@ pub fn generate_submit(fn_name: &syn::Ident, a: &BenchArgs, is_generic: bool) ->
             let gqa = a.gqa_factor.as_ref().expect("SdpaBatchedDecode requires gqa_factor");
             let bq = a.batch_q.as_ref().expect("SdpaBatchedDecode requires batch_q");
             let tpg_val = a.tpg.as_ref().expect("SdpaBatchedDecode requires tpg");
-            let variant_dispatch = match a.variant.as_ref().expect("SdpaBatchedDecode requires variant") {
-                BatchedDecodeVariantArg::Decode => {
-                    quote! { crate::spec::BatchedDecodeVariant::Decode }
-                },
-                BatchedDecodeVariantArg::PrefillTile => {
-                    let bq_tile = a.bq.as_ref().expect("PrefillTile requires bq");
-                    let bk_tile = a.bk.as_ref().expect("PrefillTile requires bk");
-                    let wm_tile = a.wm.as_ref().expect("PrefillTile requires wm");
-                    let wn_tile = a.wn.as_ref().expect("PrefillTile requires wn");
-                    quote! {
-                        crate::spec::BatchedDecodeVariant::PrefillTile {
-                            bq: #bq_tile as usize,
-                            bk: #bk_tile as usize,
-                            wm: #wm_tile as usize,
-                            wn: #wn_tile as usize,
+            let variant_dispatch =
+                match a.variant.as_ref().expect("SdpaBatchedDecode requires variant") {
+                    BatchedDecodeVariantArg::Decode => {
+                        quote! { crate::spec::BatchedDecodeVariant::Decode }
+                    },
+                    BatchedDecodeVariantArg::PrefillTile => {
+                        let bq_tile = a.bq.as_ref().expect("PrefillTile requires bq");
+                        let bk_tile = a.bk.as_ref().expect("PrefillTile requires bk");
+                        let wm_tile = a.wm.as_ref().expect("PrefillTile requires wm");
+                        let wn_tile = a.wn.as_ref().expect("PrefillTile requires wn");
+                        quote! {
+                            crate::spec::BatchedDecodeVariant::PrefillTile {
+                                bq: #bq_tile as usize,
+                                bk: #bk_tile as usize,
+                                wm: #wm_tile as usize,
+                                wn: #wn_tile as usize,
+                            }
                         }
-                    }
-                },
-            };
+                    },
+                };
             (quote! { &[] }, quote! {
                 crate::spec::BenchDispatch::SdpaBatchedDecode {
                     head_dim: #hd as usize,

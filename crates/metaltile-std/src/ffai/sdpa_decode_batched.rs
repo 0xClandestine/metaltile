@@ -85,7 +85,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 #[bench_kernel(
     op="sdpa",
     subop="sdpa_decode_batched_q2",
@@ -730,7 +729,6 @@ pub fn sdpa_decode_batched_q4<T>(
     }
 }
 
-
 // ── K=8 specialization ──────────────────────────────────────────────────
 //
 // Mechanical extension of K=4: eight online-softmax streams instead of
@@ -1368,7 +1366,6 @@ pub fn sdpa_decode_batched_q8<T>(
         store(out[out_off_7 + 3u32], so7_3.cast::<T>());
     }
 }
-
 
 #[cfg(test)]
 mod tests {

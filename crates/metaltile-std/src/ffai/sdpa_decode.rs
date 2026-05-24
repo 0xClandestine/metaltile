@@ -87,7 +87,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 #[bench_kernel(
     op="sdpa",
     subop="sdpa_decode",
@@ -329,7 +328,6 @@ pub fn ffai_sdpa_decode<T>(
         store(out[out_off + 3u32], so3.cast::<T>());
     }
 }
-
 
 #[cfg(test)]
 mod tests {

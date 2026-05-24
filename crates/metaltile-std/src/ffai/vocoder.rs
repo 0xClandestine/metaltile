@@ -53,7 +53,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 #[bench_kernel(
     op="vocoder",
     subop="istft",
@@ -135,4 +134,3 @@ pub fn vocoder_istft<T>(
     let out_val = select(den > 1e-8f32, num / safe_den, 0.0f32);
     store(out[t], out_val.cast::<T>());
 }
-

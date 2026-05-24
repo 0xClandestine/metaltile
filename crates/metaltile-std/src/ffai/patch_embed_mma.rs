@@ -63,8 +63,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
-
 /// MMA-tiled patch embedding.
 ///
 /// Grid `[hidden/32, num_patches/32, 1]`, tpg = 128.
@@ -316,4 +314,3 @@ pub fn patch_embed_mma<T>(
         (simdgroup_elem_load(c_f11, 1) + b11).cast::<T>(),
     );
 }
-

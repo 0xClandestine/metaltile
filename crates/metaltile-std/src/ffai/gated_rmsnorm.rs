@@ -46,7 +46,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 /// `out[r, i] = w[i] · y[r, i] · rsqrt(mean(y[r]²) + eps) · silu(z[r, i])`.
 ///
 /// `y` is fp32 (the GDN recurrence output); `z`, `w`, `out` are `T`.
@@ -112,4 +111,3 @@ pub fn ffai_gated_rmsnorm<T>(
         store(out[base + 3u32], o3.cast::<T>());
     }
 }
-

@@ -18,7 +18,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 /// MLX-derived `blocks` value for chained 2-pass dispatch on Apple
 /// M5 Max (architecture char `'s'`). Mirrors the curve in upstream
 /// `mlx/backend/metal/scaled_dot_product_attention.cpp`:

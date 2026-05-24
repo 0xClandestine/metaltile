@@ -26,7 +26,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 /// `out[r, i] = residual[r, i] + w[i] * x[r, i] * rsqrt(mean(x[r]²) + eps)`.
 #[bench_kernel(
     op="rms_norm_residual",
@@ -78,4 +77,3 @@ pub fn ffai_rms_norm_residual<T>(
         store(out[base + 3u32], o3.cast::<T>());
     }
 }
-

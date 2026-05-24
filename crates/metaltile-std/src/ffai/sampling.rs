@@ -7,7 +7,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 // Tree reductions for the max-pass and sum-pass each fold 256 threadgroup
 // slots → 1 value across 8 power-of-two halving stages.  Originally
 // hand-unrolled via `tg_max_step!` / `tg_sum_step!` declarative macros;
@@ -148,4 +147,3 @@ pub fn softmax_categorical_sample<T>(
         store(out[0], found_idx);
     }
 }
-

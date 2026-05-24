@@ -34,7 +34,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 /// Fused Q/K/V int4 quantized GEMV — one output row per TG.
 /// `program_id::<2>()` picks the matrix.
 #[bench_kernel(
@@ -944,5 +943,3 @@ pub fn ffai_batched_qkv_qgemv_fast<T>(
         }
     }
 }
-
-

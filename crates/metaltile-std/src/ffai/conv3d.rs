@@ -49,8 +49,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
-
 /// Dense 3D convolution — strides and padding, unit dilation, one
 /// channel group.
 ///
@@ -165,7 +163,6 @@ pub fn conv3d_generic<T>(
 
     store(out[idx], acc.cast::<T>());
 }
-
 
 /// Fully general 3D convolution — strides, dilation, padding, and
 /// grouped channels.
@@ -315,4 +312,3 @@ pub fn conv3d_grouped<T>(
 
     store(out[idx], acc.cast::<T>());
 }
-

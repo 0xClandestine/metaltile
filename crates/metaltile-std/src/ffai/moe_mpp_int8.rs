@@ -34,7 +34,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 /// MPP MoE int8 grouped BGEMM, BM=16 / BN=32 / BK=16, one simdgroup.
 ///
 /// Params: `x [m_total, k_in]`, `w [n_experts, n_out, k_in/4]` (int8
@@ -210,7 +209,6 @@ pub fn mt_moe_gather_qmm_mma_int8_bm16_mpp<T>(
         sub_offset = sub_end;
     }
 }
-
 
 #[cfg(test)]
 mod tests {

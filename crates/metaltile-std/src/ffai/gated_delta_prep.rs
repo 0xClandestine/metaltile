@@ -55,7 +55,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 /// Fused GDN prep + recurrence step. See module doc for layout and
 /// dispatch invariants. Drop-in replacement for the
 /// `host-prep + mt_gated_delta_step` pair in `Qwen35GDNMixer.forward`.
@@ -229,7 +228,6 @@ pub fn mt_gated_delta_prep_step<T>(
         store(y[n * dv + dv_idx], out_sum.cast::<T>());
     }
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -44,7 +44,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 /// `y[row] = Σ_i (q[row,i]·scale + bias) · (x[i]·norm_weight[i]·inv_rms)`,
 /// with `inv_rms = rsqrt(mean(x²) + eps)`, weights int4-packed.
 /// One output row per threadgroup (original correctness-first variant).
@@ -462,8 +461,6 @@ pub fn ffai_rms_norm_qgemv_fast<T>(
     }
 }
 
-
-
 // ─── ffai_rms_norm_qgemv_int8_fast ───────────────────────────────────────────
 //
 // Fused RMSNorm + int8-quantized GEMV — 8-row-per-TG perf variant.
@@ -719,4 +716,3 @@ pub fn ffai_rms_norm_qgemv_int8_fast<T>(
         store(output[row3], r3.cast::<T>());
     }
 }
-

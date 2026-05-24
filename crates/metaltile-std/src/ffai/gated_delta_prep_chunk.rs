@@ -53,7 +53,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 #[bench_kernel(
     op="gated_delta",
     subop="prep_chunk",
@@ -203,7 +202,6 @@ pub fn mt_gated_delta_prep_chunk<T>(
         store(state_out[state_base + s_idx], stack_load("state_reg", i).cast::<T>());
     }
 }
-
 
 #[cfg(test)]
 mod tests {

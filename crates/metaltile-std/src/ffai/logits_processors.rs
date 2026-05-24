@@ -28,7 +28,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 // ── Temperature scaling ───────────────────────────────────────────────────
 //
 // Pure elementwise `logits[i] /= temperature`. Generic-T, one thread per
@@ -64,7 +63,6 @@ pub fn logits_temperature<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] temper
     let v = load(inp[i]).cast::<f32>();
     store(out[i], (v * inv_t).cast::<T>());
 }
-
 
 // ── Repetition penalty ────────────────────────────────────────────────────
 //
@@ -114,4 +112,3 @@ pub fn logits_repetition_penalty<T>(
     let scaled = select(v > 0.0f32, v / penalty, v * penalty);
     store(logits[tok], scaled.cast::<T>());
 }
-

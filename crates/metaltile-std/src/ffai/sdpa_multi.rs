@@ -41,7 +41,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 #[bench_kernel(
     op="sdpa",
     subop="sdpa_multi",
@@ -193,4 +192,3 @@ pub fn ffai_sdpa_multi<T>(
         store(out[out_off + 3u32], so3.cast::<T>());
     }
 }
-

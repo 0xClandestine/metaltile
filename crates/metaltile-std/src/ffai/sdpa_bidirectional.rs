@@ -53,7 +53,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 // ─── head_dim = 64 (SigLIP base/large, CLIP-L) ─────────────────────
 
 #[bench_kernel(
@@ -176,7 +175,6 @@ pub fn ffai_sdpa_bidirectional_d64<T>(
     }
 }
 
-
 // ─── head_dim = 32 (FastViT-HD) ────────────────────────────────────
 
 #[bench_kernel(
@@ -279,7 +277,6 @@ pub fn ffai_sdpa_bidirectional_d32<T>(
         store(out[out_off], so0.cast::<T>());
     }
 }
-
 
 // ─── head_dim = 72 (PaliGemma SigLIP-So400m) ──────────────────────
 //
@@ -432,4 +429,3 @@ pub fn ffai_sdpa_bidirectional_d72<T>(
         }
     }
 }
-

@@ -31,7 +31,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 #[bench_kernel(
     op="gemm",
     subop="gemm",
@@ -97,4 +96,3 @@ pub fn ffai_gemm<T>(
         }
     }
 }
-

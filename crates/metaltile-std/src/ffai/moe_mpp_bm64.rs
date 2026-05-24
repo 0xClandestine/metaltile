@@ -33,7 +33,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 /// MPP MoE int4 grouped BGEMM, BM=BN=64 / BK=32, 4 simdgroups (2×2).
 /// Signature matches `…_bm16_mpp`.
 #[bench_kernel(
@@ -195,7 +194,6 @@ pub fn mt_moe_gather_qmm_mma_int4_bm64_mpp<T>(
         sub_offset = sub_end;
     }
 }
-
 
 #[cfg(test)]
 mod tests {

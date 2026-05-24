@@ -43,8 +43,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
-
 // ── Pack-strided kernel (int4, int8) ──────────────────────────────────────
 //
 // Each thread strides over u32 packs. One pack load → (32/$bits) extractions.
@@ -52,12 +50,12 @@ use metaltile::{bench_kernel, kernel};
 macro_rules! dequant_gemv_pow2 {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[bench_kernel(
-            op="dequant_gemv",
-            subop=$subop,
-            class=GenericEmpty,
-            tol=0.0,
-            kernel_mode=Reduction,
-        )]
+                    op="dequant_gemv",
+                    subop=$subop,
+                    class=GenericEmpty,
+                    tol=0.0,
+                    kernel_mode=Reduction,
+                )]
         #[kernel]
         pub fn $name<T>(
             weight: Tensor<u32>,
@@ -103,7 +101,6 @@ macro_rules! dequant_gemv_pow2 {
                 store(output[row], total.cast::<T>());
             }
         }
-
     };
 }
 
@@ -117,12 +114,12 @@ macro_rules! dequant_gemv_pow2 {
 macro_rules! dequant_gemv_odd {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[bench_kernel(
-            op="dequant_gemv",
-            subop=$subop,
-            class=GenericEmpty,
-            tol=0.0,
-            kernel_mode=Reduction,
-        )]
+                    op="dequant_gemv",
+                    subop=$subop,
+                    class=GenericEmpty,
+                    tol=0.0,
+                    kernel_mode=Reduction,
+                )]
         #[kernel]
         pub fn $name<T>(
             weight: Tensor<u32>,
@@ -172,7 +169,6 @@ macro_rules! dequant_gemv_odd {
                 store(output[row], total.cast::<T>());
             }
         }
-
     };
 }
 
@@ -375,7 +371,6 @@ pub fn dequant_gemv_int4_fast<T>(
         }
     }
 }
-
 
 /// Per-kernel opt-in for the indirect Swift-wrapper variant. FFAI's
 /// GPU-router dispatches the int4 dequant-GEMV indirectly so the GPU

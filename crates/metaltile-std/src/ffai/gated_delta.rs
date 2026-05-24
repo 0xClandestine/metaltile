@@ -47,7 +47,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 #[bench_kernel(
     op="gated_delta",
     subop="step",
@@ -138,7 +137,6 @@ pub fn mt_gated_delta_step<T>(
         store(y[n * dv + dv_idx], out_sum.cast::<T>());
     }
 }
-
 
 // ────────────────────────────────────────────────────────────────────
 //  Chunked-prefill form (T > 1)
@@ -283,4 +281,3 @@ pub fn mt_gated_delta_chunk<T>(
         store(state_out[state_base + s_idx], stack_load("state_reg", i).cast::<T>());
     }
 }
-

@@ -74,8 +74,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
-
 /// MMA-tiled 2D convolution (stride=1, dilation=1, pad=0).
 ///
 /// Grid `[out_ch/32, (batch*out_h*out_w)/32, 1]`, tpg = 128.
@@ -353,4 +351,3 @@ pub fn conv2d_mma<T>(
         simdgroup_elem_load(c_f11, 1).cast::<T>(),
     );
 }
-

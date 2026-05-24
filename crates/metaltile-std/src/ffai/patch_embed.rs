@@ -43,7 +43,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 #[bench_kernel(
     op="patch_embed",
     subop="patch_embed",
@@ -101,4 +100,3 @@ pub fn patch_embed<T>(
 
     store(out[idx], acc.cast::<T>());
 }
-

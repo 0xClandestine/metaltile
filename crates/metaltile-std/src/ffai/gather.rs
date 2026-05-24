@@ -8,7 +8,6 @@
 
 use metaltile::{bench_kernel, kernel};
 
-
 #[bench_kernel(
     op="gather",
     subop="gather",
@@ -30,4 +29,3 @@ pub fn ffai_gather<T>(
     let src = token_id * dim + d;
     store(out[idx], load(table[src]));
 }
-
