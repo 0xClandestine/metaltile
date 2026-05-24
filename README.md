@@ -23,11 +23,6 @@
 
 A Rust-embedded DSL for writing Apple Metal GPU kernels. Write tile-level algorithms in Rust, get optimized Metal Shading Language out — verified against, and frequently faster than, hand-tuned MLX.
 
-- [**`#[kernel]`**](crates/metaltile-macros) — write a kernel once in Rust with generics, get `f32`, `f16`, and `bfloat16` Metal variants out automatically.
-- [**`tile bench`**](crates/metaltile-cli) — benchmark every kernel against its hand-tuned MLX counterpart on real hardware.
-- [**`tile build`**](crates/metaltile-cli) — compile all kernels to MSL; `--emit` writes `.metal` / `.metallib` / Swift wrappers.
-- [**`tile inspect`**](crates/metaltile-cli) — print a kernel's IR and generated MSL for debugging.
-
 > ⚠️ Early development — APIs are not yet stable. The core DSL, codegen, and runtime work today; the autotuner and type-level shape algebra are planned.
 
 <table>
@@ -68,6 +63,11 @@ kernel void mt_exp(
 </td>
 </tr>
 </table>
+
+- [**`#[kernel]`**](crates/metaltile-macros) — write a kernel once in Rust with generics, get `f32`, `f16`, and `bfloat16` Metal variants out automatically.
+- [**`tile bench`**](crates/metaltile-cli) — benchmark every kernel against its hand-tuned MLX counterpart on real hardware.
+- [**`tile build`**](crates/metaltile-cli) — compile all kernels to MSL; `--emit` writes `.metal` / `.metallib` / Swift wrappers.
+- [**`tile inspect`**](crates/metaltile-cli) — print a kernel's IR and generated MSL for debugging.
 
 MLX's Metal kernels are hand-written MSL — one kernel per type, thread indexing by hand, reduction boilerplate repeated everywhere. MetalTile is a `#[kernel]` proc-macro that lets you write the algorithm once in Rust using generics, and automatically get `f32`, `f16`, and `bfloat16` kernel variants out.
 
