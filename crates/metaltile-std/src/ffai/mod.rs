@@ -62,6 +62,7 @@ pub mod rope_2d;
 pub mod rope_llama;
 pub mod rope_yarn;
 pub mod sampling;
+pub mod sdpa_bidirectional;
 pub mod sdpa_decode;
 pub mod sdpa_decode_2pass;
 pub mod sdpa_decode_batched;
