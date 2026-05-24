@@ -55,18 +55,7 @@ One generic `#[kernel]` fn becomes a monomorphised `f32` / `f16` / `bfloat16` Me
 
 ## Why MetalTile
 
-| Functionality | Description | Status |
-|---|---|---|
-| **Write kernels in Rust** | A real `#[kernel]` proc-macro — no raw MSL, no hand-written thread-position arithmetic. | ✅ |
-| **Tile-level primitives** | `reduce_sum`, `strided_reduce`, `dot` — say *what* to compute; codegen emits the simdgroup + threadgroup reduction. | ✅ |
-| **One source, three dtypes** | Generic `<T>` kernels lower to `f32`, `f16`, and `bfloat16` — native `bfloat` on Metal 3.1+. | ✅ |
-| **Optimizing compiler** | A 14-pass pipeline — const-folding, CSE, LICM, fusion, vectorization, and more — sits between the IR and the emitted MSL. | ✅ |
-| **Verified against MLX** | Every benched kernel runs side-by-side against the hand-tuned MLX Metal kernel and must match it numerically. | ✅ |
-| **Frequently faster than MLX** | A meaningful slice of ops — argmax, small-N RMSNorm, quantized matmul — land 3×+ over MLX on M4 Max. | ✅ |
-| **`tile` CLI** | `bench` / `build` / `inspect` / `device` / `snap` / `diff` — one binary for the whole dev loop. | ✅ |
-| **Cross-hardware baselines** | Committed `tile bench` snapshots per chip; CI diffs every PR against them. | ✅ |
-| **Autotuner** | Per-shape kernel tuning so no performance is left on the table. | 🚧 Planned |
-| **Type-level shape algebra** | Tensor shapes checked at compile time. | 🚧 Planned |
+Writing fast Metal kernels today means raw MSL — verbose, error-prone, and locked to a single dtype. MetalTile replaces that with a `#[kernel]` proc-macro: write tile-level algorithms in Rust, and the compiler handles thread indexing, dtype monomorphisation (`f32` / `f16` / `bfloat16`), and the simdgroup + threadgroup reduction machinery. A 14-pass optimizing pipeline (const-fold, CSE, LICM, fusion, vectorization) sits between your source and the emitted MSL. Every kernel is benchmarked and verified numerically against its hand-tuned MLX counterpart — and a meaningful slice already outperform MLX by 2–3×+ on Apple Silicon.
 
 ## Supported Operations
 
