@@ -1,12 +1,27 @@
 //! Re-exports and placeholder DSL items for `#[kernel]` functions.
 //!
 //! Import this module with `use metaltile::prelude::*;` in the same Rust module as your kernels.
-//! It provides:
+//! It provides the items you need to **write** and **launch** kernels — types, macros, runtime
+//! bindings, and DSL stubs — without the IR/codegen plumbing that is only needed when building
+//! compiler passes or inspecting generated code.
 //!
-//! - facade macros: `#[kernel]`, `#[constexpr]`, `shape!`, and `tile!`
-//! - IR-facing helper types: [`ConstExpr`], [`DType`], [`Dim`], [`Shape`], [`KernelMode`], and
-//!   [`Context`]
-//! - placeholder syntax items such as [`Tensor`], [`program_id`], [`load`], and [`store`]
+//! For raw IR types (`Op`, `Block`, `ValueId`, etc.) use [`metaltile::core::ir`] directly.
+//! For codegen types (`MslGenerator`, `TileSchedule`, etc.) use [`metaltile::codegen`] directly.
+//!
+//! # What's here
+//!
+//! - **Macros:** [`#[kernel]`], [`#[bench_kernel]`], [`#[constexpr]`], [`#[scalar]`],
+//!   [`#[strided]`], [`shape!`], [`tile!`]
+//! - **IR types (user-facing):** [`ConstExpr`], [`ConstExprValues`], [`DType`], [`Dim`],
+//!   [`DimExpr`], [`Shape`], [`Kernel`], [`KernelMode`], [`UnaryOpKind`], [`BinOpKind`],
+//!   [`ActKind`], [`ReduceKind`], [`AtomicKind`], [`AtomicScope`], [`CoopTileScope`],
+//!   [`CoopTileAccMode`]
+//! - **Runtime:** [`Context`], [`DispatchResult`], [`DispatchSpec`], [`ResidentBuffer`],
+//!   [`MetalTileError`], [`start_gpu_trace`], [`stop_gpu_trace`]
+//! - **Other:** [`GpuFamily`], [`KernelEntry`], [`make_tile`]
+//! - **DSL stubs:** [`Tensor`], [`program_id`], [`load`], [`store`], [`dot`],
+//!   `exp`, `log`, `sqrt`, `rsqrt`, `abs`, `silu`, `gelu`, `relu`, `tanh`,
+//!   `sigmoid`, `sin`, `cos`, `ceil`, `floor`, `recip`
 //!
 //! The exported functions exist so Rust can parse kernel bodies before the proc macro runs. The
 //! `#[kernel]` macro rewrites the function body, so calling these helpers outside a kernel will
@@ -19,16 +34,77 @@ use std::{marker::PhantomData, ops::Index};
 
 /// Compile-time symbolic values used in shape annotations and generated IR.
 pub use metaltile_core::constexpr::ConstExpr;
+/// A collection of resolved constexpr values for a specific kernel launch.
+pub use metaltile_core::constexpr::ConstExprValues;
 /// Scalar and tensor element types supported by the IR and MSL codegen.
 pub use metaltile_core::dtype::DType;
+/// Apple GPU family inference from Metal device name strings.
+pub use metaltile_core::gpu_family::GpuFamily;
+// IR types — user-facing subset (op-kind enums and kernel-level containers).
+// Raw IR plumbing (Op, Block, ValueId, Param, etc.) lives in `metaltile::core::ir`.
+/// Neural activation function kind.
+pub use metaltile_core::ir::ActKind;
+/// Atomic operation kind.
+pub use metaltile_core::ir::AtomicKind;
+/// Memory scope for an atomic op (device vs threadgroup).
+pub use metaltile_core::ir::AtomicScope;
+/// Binary operation kind.
+pub use metaltile_core::ir::BinOpKind;
+/// Accumulation mode for cooperative tile matmul.
+pub use metaltile_core::ir::CoopTileAccMode;
+/// Execution scope for cooperative tile operations (simdgroup vs threadgroup).
+pub use metaltile_core::ir::CoopTileScope;
+/// A complete kernel in the IR.
+pub use metaltile_core::ir::Kernel;
 /// Kernel execution mode metadata for IR/codegen inspection.
 pub use metaltile_core::ir::KernelMode;
-/// Shape-building helpers used in tensor annotations.
-pub use metaltile_core::shape::{Dim, Shape, tile};
-/// Facade macros used in kernel signatures and bodies.
-pub use metaltile_macros::{constexpr, kernel, shape, tile};
-/// Runtime context used by generated `launch` helpers.
+/// Reduction kind.
+pub use metaltile_core::ir::ReduceKind;
+/// Unary math operation kind.
+pub use metaltile_core::ir::UnaryOpKind;
+/// Registry entry for a MetalTile kernel available for cross-kernel calling.
+///
+/// You only need this when registering a kernel for use as an inlined callee via the
+/// `inventory::collect!` mechanism. For ordinary `#[kernel]` definitions this is handled
+/// automatically by the macro.
+pub use metaltile_core::kernel_registry::KernelEntry;
+/// Shape-building helpers.
+pub use metaltile_core::shape::Dim;
+/// Build a 2D tile shape at runtime: `make_tile(rows, cols) -> Shape`.
+///
+/// For a compile-time equivalent use the [`tile!`] macro instead.
+pub use metaltile_core::shape::tile as make_tile;
+/// A single dimension expression used in shape algebra.
+// (grouped by rustfmt)
+pub use metaltile_core::shape::{DimExpr, Shape};
+/// Registers a kernel for automatic benchmarking (place before `#[kernel]`).
+pub use metaltile_macros::bench_kernel;
+/// Marks a kernel parameter as a compile-time constant.
+pub use metaltile_macros::constexpr;
+/// Marks a function as a MetalTile kernel.
+pub use metaltile_macros::kernel;
+/// Marks a `Tensor` parameter for `constant T&` lowering in MSL.
+pub use metaltile_macros::scalar;
+/// Constructs a `Shape` from dimension expressions.
+pub use metaltile_macros::shape;
+/// Marks a `Tensor` parameter for strided lowering (shape + stride arrays emitted).
+pub use metaltile_macros::strided;
+/// Constructs a 2D tile shape at macro-expansion time.
+pub use metaltile_macros::tile;
+/// Metal GPU device and command queue context.
 pub use metaltile_runtime::Context;
+/// Output buffers returned after a kernel dispatch.
+pub use metaltile_runtime::DispatchResult;
+/// Input buffer spec for the launched dispatch pipeline.
+pub use metaltile_runtime::DispatchSpec;
+/// Top-level runtime error.
+pub use metaltile_runtime::MetalTileError;
+/// A resident Metal buffer managed by the context.
+pub use metaltile_runtime::ResidentBuffer;
+/// Start GPU trace capture (Xcode GPU frame capture).
+pub use metaltile_runtime::start_gpu_trace;
+/// Stop GPU trace capture.
+pub use metaltile_runtime::stop_gpu_trace;
 
 /// Placeholder tensor type used in `#[kernel]` signatures.
 ///
