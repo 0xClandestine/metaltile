@@ -79,18 +79,6 @@ The compiler wires up thread indexing and expands tile primitives like `reduce_s
 cargo install --path crates/metaltile-cli
 ```
 
-## Crates
-
-<pre>
-├── <a href="crates/metaltile">metaltile</a>          — facade crate, re-exports the full public API
-├── <a href="crates/metaltile-cli">metaltile-cli</a>      — <code>tile</code> binary (bench, build, inspect, snap, diff)
-├── <a href="crates/metaltile-codegen">metaltile-codegen</a>  — IR → MSL lowering and 14-pass optimization pipeline
-├── <a href="crates/metaltile-core">metaltile-core</a>     — IR types, Op variants, DType, Shape
-├── <a href="crates/metaltile-macros">metaltile-macros</a>   — <code>#[kernel]</code> and <code>#[bench_kernel]</code> proc macros
-├── <a href="crates/metaltile-runtime">metaltile-runtime</a>  — Metal GPU dispatch and buffer management
-└── <a href="crates/metaltile-std">metaltile-std</a>      — kernel standard library and benchmark registry
-</pre>
-
 ## Contributing
 
 Contributions are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) for the issue / PR process and [`docs/developing.md`](docs/developing.md) for the kernel-authoring hazards **before** writing a kernel.
