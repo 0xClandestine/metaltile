@@ -2,6 +2,5 @@ pub mod bench;
 pub mod build;
 pub mod device;
 pub mod diff;
-pub mod emit;
 pub mod inspect;
 pub mod snap;

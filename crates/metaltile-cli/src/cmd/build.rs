@@ -567,3 +567,74 @@ fn run_time_passes(filter: Option<&str>, dtypes_arg: Option<&str>) -> Result<(),
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use metaltile_std::spec::{BenchSpec, effective_mode};
+
+    use super::*;
+
+    /// Collect all registered kernels (unfiltered) with indirect-dispatch
+    /// flags applied. Used only by tests to verify the full kernel corpus.
+    fn collect_all_kernels() -> Vec<Kernel> {
+        let mut by_name: BTreeMap<&str, (&BenchSpec, Vec<DType>)> = BTreeMap::new();
+        for spec in inventory::iter::<BenchSpec> {
+            let entry = by_name.entry(spec.kernel_name).or_insert_with(|| (spec, Vec::new()));
+            for &dt in spec.dtypes {
+                if !entry.1.contains(&dt) {
+                    entry.1.push(dt);
+                }
+            }
+        }
+        let total: usize = by_name.values().map(|(_, dtypes)| dtypes.len()).sum();
+        let mut kernels = Vec::with_capacity(total);
+        for (spec, dtypes) in by_name.values() {
+            let mode = effective_mode(spec);
+            for &dt in dtypes {
+                let mut k = (spec.kernel_ir)(dt);
+                k.name = monomorphized_name(spec.kernel_name, dt, dtypes.len());
+                k.mode = mode;
+                if metaltile_std::ffai::dequant_gemv::dequant_gemv_wants_indirect(&k.name) {
+                    k.wants_indirect_variant = true;
+                }
+                kernels.push(k);
+            }
+        }
+        kernels
+    }
+
+    /// Regression guard for the `_indirect` Swift wrappers.
+    ///
+    /// FFAI's GPU-router dispatches `dequant_gemv_int4` indirectly (grid
+    /// shape from an `MTLBuffer` rather than a host `MTLSize`). If the
+    /// indirect-wrapper flag is dropped or `dequant_gemv_int4` is
+    /// unregistered/renamed, the FFAI build breaks.
+    #[test]
+    fn build_keeps_indirect_wrappers_for_dequant_gemv_int4() {
+        let kernels = collect_all_kernels();
+        assert!(
+            kernels.iter().any(|k| k.name == "dequant_gemv_int4_f16"),
+            "dequant_gemv_int4_f16 missing from kernel set"
+        );
+        assert!(
+            kernels.iter().any(|k| k.name == "dequant_gemv_int4_bf16"),
+            "dequant_gemv_int4_bf16 missing from kernel set"
+        );
+
+        let swift = metaltile_codegen::emit::render_swift_wrappers(&kernels);
+        assert!(
+            swift.contains("func dequant_gemv_int4_f16_indirect("),
+            "indirect Swift wrapper for dequant_gemv_int4_f16 dropped"
+        );
+        assert!(
+            swift.contains("func dequant_gemv_int4_bf16_indirect("),
+            "indirect Swift wrapper for dequant_gemv_int4_bf16 dropped"
+        );
+        assert!(
+            swift.contains("dispatchThreadgroups(indirectBuffer:"),
+            "indirect wrappers must dispatch from an indirect buffer"
+        );
+    }
+}
