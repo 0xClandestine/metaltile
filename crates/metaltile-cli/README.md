@@ -3,7 +3,7 @@
 MetalTile CLI — benchmark, test, and inspect GPU kernels.
 The `tile` binary is the primary developer tool for the MetalTile project:
 run performance benchmarks against MLX, compile kernels to inspect generated
-MSL, emit kernel packages, and manage regression baselines.
+MSL, emit kernel packages via `tile build --emit`, and manage regression baselines.
 
 This is a binary crate only — it has no library API. All functionality is
 exposed through subcommands of the `tile` binary.
@@ -34,11 +34,11 @@ tile bench
 # Compile all kernels and report errors
 tile build
 
+# Emit kernel package (metallib + sources + Swift wrappers)
+tile build --emit all -o /tmp/kernel-pkg
+
 # Inspect one kernel's IR and generated MSL
 tile inspect --kernel mt_rms_norm
-
-# Emit kernel package (metallib + sources + Swift wrappers)
-tile emit --out /tmp/kernel-pkg
 
 # Show GPU device info
 tile device
@@ -55,17 +55,16 @@ Subcommand-specific help:
 ```sh
 tile bench --help
 tile build --help
-tile emit --help
+tile inspect --help
 ```
 
 ## Crate contents
 
 | Module | Purpose |
 |---|---|
-| `cmd` | Subcommand dispatch: `bench`, `build`, `emit`, `inspect`, `device`, `snap`, `diff` |
+| `cmd` | Subcommand dispatch: `bench`, `build`, `inspect`, `device`, `snap`, `diff` |
 | `cmd::bench` | Full benchmark suite: MetalTile vs MLX reference kernels |
-| `cmd::build` | Compile all kernels to MSL and report errors |
-| `cmd::emit` | Emit `kernels.metallib` + per-kernel `.metal` sources + `MetalTileKernels.swift` wrappers + `manifest.json` |
+| `cmd::build` | Compile all kernels to MSL, report errors, and emit artifacts (`--emit msl,metallib,swift,ir,all`) |
 | `cmd::inspect` | Print IR and/or MSL for a single kernel |
 | `cmd::device` | Show GPU device info and supported Metal features |
 | `cmd::snap` | Save benchmark results as a JSON regression baseline |
@@ -82,8 +81,7 @@ tile emit --help
 | Command | Purpose |
 |---|---|
 | `tile bench` | Run the full benchmark suite. MetalTile kernels run against MLX Metal kernel reference. Use `--filter <op>` to narrow. Outputs per-op throughput ratio and correctness. |
-| `tile build` | Compile all registered kernels to MSL and report any errors. Use `--emit` to write `.metal` files and compile a `kernels.metallib`. |
-| `tile emit --out <dir>` | Emit the Swift-consumable kernel package: `kernels.metallib` + per-kernel `.metal` sources + `MetalTileKernels.swift` wrappers + `manifest.json`. |
+| `tile build` | Compile all registered kernels to MSL and report any errors. Use `--emit msl,metallib,swift,ir,all -o <dir>` to write artifacts: `.metal` sources, `kernels.metallib`, `MetalTileKernels.swift` wrappers, and `manifest.json`. |
 | `tile inspect --kernel <name>` | Print the IR (SSA-form) and/or generated MSL for one kernel. Use `--ir` for IR only, `--msl` for MSL only. |
 | `tile device` | Show GPU device info: name, Metal feature set, supported language version, max threadgroup size. |
 | `tile snap -o <file>` | Save current benchmark results as a JSON regression baseline file. |
@@ -128,7 +126,7 @@ project-internal developer tool, not a library.
 All Metal API calls are cfg-gated behind `target_os = "macos"`.
 On other platforms these commands return errors or zero-stub output.
 
-`build`, `emit`, and `inspect` work on any platform — they only need the
+`build` and `inspect` work on any platform — they only need the
 compiler crates, not the GPU runtime.
 
 Rust: nightly (workspace-wide, edition 2024).
