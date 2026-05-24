@@ -823,3 +823,34 @@ pub fn sdpa_decode_2pass_pass2_d256<T>(
         store(out[out_off + 7u32], (r7 * inv_sum).cast::<T>());
     }
 }
+
+// Bagel 2 / ITER 53: standalone registration for pass2 so `tile build
+// --emit swift` produces a Swift wrapper. The combined registration
+// further up in the file (the `SdpaVector2Pass` dispatch variant)
+// carries pass2 alongside pass1 — useful for the bench harness but
+// invisible to the build/emit code path that generates Swift bindings.
+// FFAI consumes the pass2 wrapper to chain pass1 → pass2 in
+// `Ops.sdpaDecode2Pass`.
+//
+// Note: only the base `sdpa_decode_2pass_pass2` kernel gets a
+// dedicated emit registration — the d{64,96,256} pass2 siblings
+// added in PR #157 are reachable through the same Reduction-mode
+// codegen path (they share the kernel body shape) and only the
+// production decode dim (d=128, the base) needs the Swift wrapper
+// at this point. Add per-dim registrations here as FFAI starts
+// dispatching them.
+inventory::submit! {
+    BenchSpec {
+        op: "sdpa",
+        subop: "sdpa_decode_2pass_pass2",
+        kernel_name: "sdpa_decode_2pass_pass2",
+        kernel_ir: sdpa_decode_2pass_pass2::kernel_ir_for,
+        dtypes: &[DType::F32, DType::F16, DType::BF16],
+        tol: 1e-3,
+        mlx_src: None,
+        mlx_pattern: None,
+        shapes: &[],
+        dispatch: BenchDispatch::Generic,
+        kernel_mode: Some(KernelMode::Reduction),
+    }
+}
