@@ -12,6 +12,25 @@
 
 > ⚠️ Early development — APIs are not yet stable. The core DSL, codegen, and runtime work today; the autotuner and type-level shape algebra are planned.
 
+<details>
+  <summary>Table of Contents</summary>
+  <ol>
+    <li><a href="#why-metaltile">Why MetalTile</a></li>
+    <li><a href="#supported-operations">Supported Operations</a></li>
+    <li><a href="#benchmarks">Benchmarks</a></li>
+    <li><a href="#contributing">Contributing</a></li>
+    <li><a href="#license">License</a></li>
+  </ol>
+  <strong>Docs</strong>
+  <ul>
+    <li><a href="docs/getting-started.md">Getting Started</a> — toolchain, crate layout, build, first kernel</li>
+    <li><a href="docs/developing.md">Developing</a> — repo layout, dev loop, kernel-authoring hazards</li>
+    <li><a href="docs/testing.md">Testing</a> — test layers, CI, and test-infra gaps</li>
+    <li><a href="docs/cli.md">CLI</a> — the <code>tile</code> binary</li>
+    <li><a href="docs/publishing.md">Publishing</a> — the release flow</li>
+  </ul>
+</details>
+
 <table>
 <tr>
 <th>Rust DSL — what you write</th>
@@ -119,16 +138,6 @@ tile bench --filter softmax  # one op
 A sample of what to expect: `mt_rms_norm_small` runs at **354% of MLX's hand-tuned `rms` kernel** on an Apple M4 Max (`B=1024 N=64`, f32). Full cross-hardware results live in [`baselines/`](baselines/) — committed snapshots per chip, refreshed as new hardware is benched. CI diffs every PR against the matching baseline.
 
 See [`docs/cli.md`](docs/cli.md) for `-v` / `-vv` profiling, JSON output, and the `snap` / `diff` regression workflow.
-
-## Documentation
-
-Full docs live in [`docs/`](docs/README.md):
-
-- [Getting started](docs/getting-started.md) — toolchain, crate layout, build, first kernel.
-- [Developing](docs/developing.md) — repo layout, dev loop, and the **kernel-authoring hazards** (a wrong dispatch can freeze the machine).
-- [Testing](docs/testing.md) — test layers, CI, and test-infra gaps.
-- [CLI](docs/cli.md) — the `tile` binary.
-- [Publishing](docs/publishing.md) — the release flow.
 
 ## Contributing
 
