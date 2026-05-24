@@ -1,30 +1,29 @@
 # metaltile-core
 
-Core IR types, shape algebra, and DType system for the MetalTile GPU
-kernel compiler. This is the foundation crate — every other crate in
-the workspace depends on it.
+Core IR types, shape algebra, DType system, and GPU-family detection for the
+MetalTile GPU kernel compiler. This is the foundation crate — every other
+crate in the workspace depends on it.
 
 Defines the SSA-form intermediate representation that `#[kernel]`
 functions parse into, that `metaltile-codegen` optimizes and lowers,
-and that `metaltile-runtime` reads for dispatch metadata.
+and that `metaltile-runtime` reads for dispatch metadata. Also provides
+the `inventory`-based kernel registry and Apple GPU family probes.
 
 ## Position in the pipeline
 
 ```
-                    ┌─────────────────────┐
-                    │  metaltile-core      │
-                    │  (this crate)        │
-                    │  IR · DType · Shape  │
-                    └──────┬──────┬───────┘
-                           │      │
-              ┌────────────┘      └────────────┐
-              ▼                                ▼
-    metaltile-macros                  metaltile-codegen
-    (parses Rust → IR)               (lowers IR → MSL)
+metaltile-macros ──► metaltile-core (this crate) ──► metaltile-codegen
+  (parses Rust      (IR · DType · Shape ·              (lowers IR → MSL)
+   → IR)             KernelRegistry)
+                              │
+                    metaltile-runtime
+                    (reads IR for dispatch metadata)
 ```
 
-Every crate depends on `metaltile-core`. The crate itself has no
-dependency on the proc-macro, codegen, or runtime layers.
+`metaltile-core` defines the shared types that flow through the entire
+compiler pipeline. It depends on `metaltile-macros` for the derive macros
+(`OpFlags`, `ValueRefs`, `VariantName`) that annotate the IR types, but
+has no dependency on the codegen or runtime layers.
 
 ## Quick start
 
@@ -55,36 +54,52 @@ block.push_op(Op::Store { dst: "out".into(), indices: vec![], value: sum_id, mas
 kernel.body = block;
 ```
 
+> **Note:** `ParamKind` and `BinOpKind` are defined in `src/ir.rs` but not
+> re-exported from the crate root. Use the full path
+> `metaltile_core::ir::ParamKind` or import from the `ir` module directly.
+
 ## Crate contents
 
 | Module | Purpose |
 |---|---|
-| `ir` | SSA-form kernel IR: `Kernel`, `Block`, `Op`, `ValueId`, `Param`, `ParamKind` |
+| `ir` | SSA-form kernel IR: `Kernel`, `Block`, `Op`, `ValueId`, `Param` |
 | `dtype` | `DType` enum: F32, F16, BF16, I32, U32, I8, U8, I4, U64, I64, Bool |
-| `shape` | `Shape`, `Dim` (Known / ConstExpr), `tile()` constructor |
+| `shape` | `Shape`, `Dim`, `DimExpr`, `tile()` constructor |
 | `constexpr` | `ConstExpr` — symbolic constants resolved at kernel compile time |
 | `error` | `Error` enum and `Result<T>` alias |
+| `gpu_family` | `GpuFamily` — Apple GPU generation detection (M1/M2/M3+/M5) |
+| `kernel_registry` | `KernelEntry` — registry for kernel discovery via `inventory` |
 | `utils` | Internal helpers (bit manipulation, alignment) |
 
 ## API reference
 
 ### Core types
 
-| Type | Purpose | Defined in |
-|---|---|---|
-| `Kernel` | Top-level IR container: params, constexprs, blocks | `src/ir.rs` |
-| `Block` | Sequence of `Op`s; owned by a `Kernel` | `src/ir.rs` |
-| `Op` | A single IR operation (load, store, binary, reduce, loop, etc.) | `src/ir.rs` |
-| `ValueId` | SSA value handle | `src/ir.rs` |
-| `BlockId` | Block handle | `src/ir.rs` |
-| `VarId` | Loop / block-level variable handle | `src/ir.rs` |
-| `Param` | Kernel tensor/scalar parameter descriptor | `src/ir.rs` |
-| `ParamKind` | How a param is bound: `Tensor`, `Strided`, or `Scalar` | `src/ir.rs` |
-| `KernelMode` | Dispatch shape hint: `Elementwise`, `Reduction`, `Grid3D`, `Tile2D` | `src/ir.rs` |
-| `DType` | Numeric type: `F32`, `F16`, `BF16`, `I32`, `U32`, `I8`, `U8`, `I4`, `U64`, `I64`, `Bool` | `src/dtype.rs` |
-| `Shape` | Compile-time dimension tracking (array of `Dim`) | `src/shape.rs` |
-| `Dim` | A single dimension: `Known(usize)`, `ConstExpr(name)`, or `Any` | `src/shape.rs` |
-| `ConstExpr` | Named compile-time constant used in shapes and kernel configs | `src/constexpr.rs` |
+| Type | Purpose | Defined in | Re-exported |
+|---|---|---|---|
+| `Kernel` | Top-level IR container: params, constexprs, blocks | `src/ir.rs` | ✅ |
+| `Block` | Sequence of `Op`s; owned by a `Kernel` | `src/ir.rs` | ✅ |
+| `Op` | A single IR operation (load, store, binary, reduce, loop, etc.) | `src/ir.rs` | ✅ |
+| `ValueId` | SSA value handle | `src/ir.rs` | ✅ |
+| `BlockId` | Block handle | `src/ir.rs` | ✅ |
+| `VarId` | Loop / block-level variable handle | `src/ir.rs` | ✅ |
+| `Param` | Kernel tensor/scalar parameter descriptor | `src/ir.rs` | ✅ |
+| `ParamKind` | How a param is bound: `Tensor`, `Strided`, or `Scalar` | `src/ir.rs` | ❌ (use `ir::ParamKind`) |
+| `KernelMode` | Dispatch shape hint: `Elementwise`, `Reduction`, `Grid3D`, `Tile2D` | `src/ir.rs` | ✅ |
+| `KernelCallArg` | Typed argument for inline kernel calls | `src/ir.rs` | ✅ |
+| `TypedSlot` | Typed hole for inline MSL outputs | `src/ir.rs` | ✅ |
+| `ActKind` | Activation function kind (Silu, Gelu, Relu, Tanh, Sigmoid) | `src/ir.rs` | ✅ |
+| `UnaryOpKind` | Unary operation variant enum | `src/ir.rs` | ✅ |
+| `CoopTileAccMode` | Cooperative tile accumulation mode | `src/ir.rs` | ✅ |
+| `CoopTileScope` | Cooperative tile scope | `src/ir.rs` | ✅ |
+| `DType` | Numeric type: F32, F16, BF16, I32, U32, I8, U8, I4, U64, I64, Bool | `src/dtype.rs` | ✅ |
+| `Shape` | Compile-time dimension tracking (array of `Dim`) | `src/shape.rs` | ✅ |
+| `Dim` | A single dimension: `Known(usize)`, `ConstExpr(name)`, or `Any` | `src/shape.rs` | ✅ |
+| `DimExpr` | Symbolic dimension expression (Scale, Const, Var, Add, Range) | `src/shape.rs` | ✅ |
+| `ConstExpr` | Named compile-time constant used in shapes and kernel configs | `src/constexpr.rs` | ✅ |
+| `GpuFamily` | Apple GPU family level (7=M1, 8=M2, 9=M3/M4, 10=M5) | `src/gpu_family.rs` | ✅ |
+| `KernelEntry` | Inventory-registered kernel metadata | `src/kernel_registry.rs` | ✅ |
+| `Error` / `Result<T>` | Error enum and result alias | `src/error.rs` | ✅ |
 
 ### Op variants
 
@@ -111,18 +126,19 @@ The `Op` enum supports these operation categories:
 
 ### Internal
 
-None — `metaltile-core` is the leaf crate. All other crates depend on it.
+| Crate | Role |
+|---|---|
+| `metaltile-macros` | Derive macros (`OpFlags`, `ValueRefs`, `VariantName`) for IR types |
+| `inventory` | Re-exported for `#[kernel]`-expanded `inventory::submit!` calls |
 
 ### External
 
 | Crate | Role |
 |---|---|
 | `thiserror` | Derive `Error` |
-| `smallvec` | Compact storage in IR structures |
-| `half` | `f16` / `bf16` constant values |
+| `smallvec` | Compact small-vector storage in IR structures |
 | `serde` | Serialization for IR dump and manifest |
-| `bytemuck` | Safe transmutation of byte buffers to typed slices |
-| `bitvec` | Bit-level operations for packed types (I4, Bool) |
+| `rustc-hash` | `FxHashMap` for IR value tracking |
 
 ## MSRV / platform
 

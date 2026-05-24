@@ -21,7 +21,7 @@ metaltile-codegen (MSL) ──► metaltile-runtime (this crate) ──► host 
 `metaltile-runtime` receives MSL source from `metaltile-codegen`, compiles
 it into a Metal compute pipeline, dispatches with user-provided buffers, and
 returns `DispatchResult` with timing and output data. The crate also owns
-the autotuner and its persistent disk cache.
+the autotuner and its persistent disk cache, plus GPU trace capture utilities.
 
 ## Quick start
 
@@ -51,9 +51,10 @@ Most users don't call `metaltile-runtime` directly — they use the facade's
 
 | Module | Purpose |
 |---|---|
-| `context` | `Context` type: device management, PSO compilation, `dispatch` / `dispatch_with_buffers` / `dispatch_with_options` |
+| `context` | `Context` type: device management, PSO compilation, `dispatch` / `dispatch_with_buffers` / `dispatch_with_options` / fused dispatch chains |
 | `autotune` | Persistent autotuner: `TuneConfig`, `ShapeBucket`, `TuneCache`, on-disk cache at `~/.cache/metaltile/` |
 | `buffer` | Typed buffer descriptors: `GpuBuffer` (GPU-side metadata) and `HostData` (host-side data ready for upload) |
+| `capture` | GPU trace capture via `MTLCaptureManager` — `start_gpu_trace`, `stop_gpu_trace` |
 | `error` | `MetalTileError` enum covering all runtime failure modes |
 
 ## API reference
@@ -80,10 +81,29 @@ Context::new() → MslGenerator::generate(kernel) → Metal library compile
 |---|---|
 | `Context` | GPU device handle, command queue, PSO cache. Created once per process. |
 | `DispatchResult` | Timings (`elapsed_us`, `gflops`) and output buffer contents (`outputs: BTreeMap<String, Vec<u8>>`). |
+| `DispatchSpec` | Configuration for a dispatch: buffer bindings, grid size, threadgroup size. |
+| `ResidentBuffer` | Handle for a GPU-side persistent buffer that lives across dispatches. |
 | `MetalTileError` | All error variants: `Metal`, `NoDevice`, `Compilation`, `Buffer`, `Dispatch`, `Autotune`, `Core`, `Codegen`, `UnsupportedPlatform`. |
 | `GridSpec` | Dispatch grid sizing: `Elementwise`, `Reduction`, `Grid3D`. |
 | `GpuBuffer` | Buffer metadata: dtype, shape, element count, byte size. |
 | `HostData` | Host-side data with dtype and shape, ready for GPU upload. |
+
+### GPU trace capture
+
+The `capture` module provides Metal GPU trace capture for profiling:
+
+```rust,ignore
+use metaltile_runtime::{start_gpu_trace, stop_gpu_trace};
+
+start_gpu_trace(&ctx, "/tmp/mytrace.gputrace")?;
+// ... dispatch kernels ...
+stop_gpu_trace()?;
+```
+
+| Function | Purpose |
+|---|---|
+| `start_gpu_trace(&ctx, path)` | Begin capturing Metal GPU commands to a `.gputrace` file |
+| `stop_gpu_trace()` | Finalize and close the current GPU trace |
 
 ### Autotuner
 
@@ -121,11 +141,12 @@ The autotuner searches for the best kernel schedule configuration for each
 | Crate | Role |
 |---|---|
 | `objc2` | Objective-C runtime bindings (macOS only) |
-| `objc2-metal` | Metal framework bindings: `MTLDevice`, `MTLCommandQueue`, `MTLLibrary`, `MTLComputePipelineState`, `MTLBuffer`, etc. |
+| `objc2-metal` | Metal framework bindings: `MTLDevice`, `MTLCommandQueue`, `MTLLibrary`, `MTLComputePipelineState`, `MTLBuffer`, `MTLCaptureManager`, etc. |
 | `objc2-foundation` | Foundation types (`NSString`) for Metal API calls |
-| `parking_lot` | `Mutex` for thread-safe PSO cache |
 | `serde` / `serde_json` | Serialize/deserialize autotune cache to disk |
 | `thiserror` | Derive `Error` for `MetalTileError` |
+| `rustc-hash` | `FxHashMap` for dispatch-cache and autotune internals |
+| `tracing` | Diagnostics and dispatch-level instrumentation |
 
 ## MSRV / platform
 
@@ -146,6 +167,8 @@ Rust: nightly (workspace-wide, for edition 2024).
 - **New buffer type:** `src/buffer.rs` — add a descriptor struct for the
   new allocation pattern.
 - **New error variant:** `src/error.rs` — add to `MetalTileError` enum.
+- **New GPU trace capture mode:** `src/capture.rs` — extend `start_gpu_trace`
+  with additional capture options.
 - **Tests to update:** Integration tests require macOS + Metal. Run
   `make test` on a Mac to exercise the full dispatch path.
 

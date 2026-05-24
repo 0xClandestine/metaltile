@@ -1,8 +1,9 @@
 # metaltile-codegen
 
 Metal Shading Language (MSL) code generator for MetalTile kernels.
-Takes algorithm IR from `metaltile-core`, applies a 14-pass optimization
-pipeline, and emits valid MSL source ready for the Metal compiler.
+Takes algorithm IR from `metaltile-core`, applies optimization passes
+and schedule lowering, and emits valid MSL source ready for the Metal
+compiler.
 
 This crate is the middle of the MetalTile compiler stack: it receives
 `Kernel` IR nodes, lowers tile-level ops into thread-mapped, vectorized
@@ -14,7 +15,7 @@ MSL, and exposes `MslGenerator` for both programmatic use and the
 ```
 metaltile-core (IR) ──► metaltile-codegen (this crate) ──► metaltile-runtime
                                 │
-                         14 opt passes
+                     opt passes + schedule lowering
                          MSL emission
 ```
 
@@ -49,7 +50,7 @@ let msl = MslGenerator::new(config).generate(&kernel)?;
 
 | Module | Purpose |
 |---|---|
-| `msl` | MSL generator and configuration |
+| `msl` | MSL generator, configuration, and per-category emission |
 | `msl::emit_block` | Block-level MSL emission (the main lowering engine) |
 | `msl::fused` | Fused-operation codegen (fused multiply-add, etc.) |
 | `msl::matmul` | Matrix-multiplication MSL patterns |
@@ -59,7 +60,6 @@ let msl = MslGenerator::new(config).generate(&kernel)?;
 | `msl::features` | Metal language feature version detection |
 | `msl::config` | `MslConfig` struct |
 | `passes` | Optimization pass infrastructure and all pass implementations |
-| `passes::mod` | `Pass` trait, `PassRegistry`, `PipelineBuilder` |
 | `emit` | Multi-file .metal + manifest + .metallib emission |
 | `error` | `Error` enum and `Result` alias |
 
@@ -67,8 +67,9 @@ let msl = MslGenerator::new(config).generate(&kernel)?;
 
 ### Optimization pipeline
 
-Passes run in this order. The canonical order is defined in
-`PassRegistry::order()` and `PassRegistry::get()`.
+Passes run in the order defined by `PassRegistry::order()`. The standard
+pipeline includes passes for validation, simplification, lowering, and
+code generation preparation:
 
 ```
 TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM
@@ -92,6 +93,11 @@ TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM
 | 12 | `schedule` | `passes/schedule.rs` | Assigns ops to simdgroup lanes, inserts barriers |
 | 13 | `vectorize` | `passes/vectorize.rs` | Packs scalar ops into vector ops (e.g. `float4`) |
 | 14 | `dead_store_elim` | `passes/dead_store_elim.rs` | Removes stores to outputs that are never read |
+
+> **Additional passes** (not in the standard pipeline but available
+> via `PipelineBuilder` or `PassRegistry`): `block_util` (block merging),
+> `kernel_inline` (inline kernel calls), `occupancy` (occupancy estimation),
+> `register_estimate` (register pressure analysis), `remap` (value-id remapping).
 
 You can customize the pipeline at runtime:
 
@@ -134,8 +140,10 @@ generation failures, and forwarded core errors.
 |---|---|
 | `thiserror` | Derive `Error` for the error enum |
 | `smallvec` | Small-vector optimization in pass internals |
-| `half` | `f16` / `bf16` constant handling |
 | `serde` / `serde_json` | Serialize manifest JSON during `emit` |
+| `rustc-hash` | `FxHashMap` and `FxHashSet` for pass internal maps |
+| `tracing` | Diagnostics and pass-level instrumentation |
+| `inventory` | Pass registry registration |
 
 ## MSRV / platform
 

@@ -58,8 +58,8 @@ metaltile-macros                         metaltile-cli
        │                                    │
        └────────── metaltile-std ───────────┘
                    (this crate)
-                   BenchSpec · ShapeSpec · OpBench
-                   OpResult · suite printer · term
+                   BenchSpec · ShapeSpec · bench_types
+                   runner · run_spec · stats
 ```
 
 `metaltile-std` is the shared vocabulary between kernel definitions and
@@ -99,81 +99,122 @@ discovers it automatically — no manual registration needed.
 
 | Module | Purpose |
 |---|---|
-| `ops` | Kernel definitions registered with `#[bench_kernel]`, organized by category |
-| `spec` | `BenchSpec`, `ShapeSpec`, dispatch enums, buffer init, grid computation |
-| `bench_types` | DType helpers, `OpBench`, `OpResult`, equivalence checking, suite printer |
-| `term` | ANSI terminal formatting — `paint_stdout`, `paint_stderr`, `Style`, `Color` |
+| `mlx` | Kernel definitions benchmarked against MLX reference, organized by category (`mlx::unary`, `mlx::binary`, `mlx::reduce`, etc.) |
+| `ffai` | Beyond-MLX kernels (attention, convolution, MoE, SSM, AURA codec, sampling, etc.) |
+| `probe` | Hardware probing utilities (MMA layout probe, MPP matmul smoke test) |
+| `spec` | `BenchSpec`, `ShapeSpec`, `BenchDispatch`, `ShapeSpec` constants, buffer init specs |
+| `bench_types` | DType helpers, `OpBench`, `OpResult`, equivalence checking, MSL generation helpers |
+| `runner` | GPU dispatch runner: compile MSL, allocate buffers, run kernels, measure GPU time |
+| `run_spec` | Wire a `BenchSpec` through the full compile→dispatch→measure pipeline |
+| `stats` | `BenchStats` struct and throughput calculation |
+| `error` | `StdError` — runner and Metal error types |
 
 ## API reference
 
 ### Op catalog
 
-Ops are organized by category. Each file registers one or more kernels
-via `#[bench_kernel(…)]` + `#[kernel]`.
+Kernels live in two submodules depending on whether they have a side-by-side
+MLX reference:
 
-**Elementwise:** `unary.rs`, `binary.rs`, `binary_two.rs`, `ternary.rs`, `arange.rs`, `copy.rs`, `strided.rs`
+**`mlx/` — MLX-compared kernels** organized by category:
 
-| Op file | Kernel(s) |
+| File | Kernel(s) |
 |---|---|
-| `unary.rs` | `mt_exp`, `mt_log`, `mt_sqrt`, `mt_rsqrt`, `mt_abs`, `mt_silu`, `mt_gelu`, `mt_relu`, `mt_sigmoid`, `mt_sin`, `mt_cos`, `mt_ceil`, `mt_floor`, `mt_recip`, `mt_neg`, `mt_sign`, `mt_round`, `mt_erf`, `mt_exp2`, `mt_log2`, `mt_square`, `mt_log1p`, `mt_softplus` |
-| `binary.rs` | `vector_add`, `mt_mul`, `mt_sub`, `mt_div`, `mt_max_elem`, `mt_min_elem`, `mt_pow`, `mt_logaddexp` |
-| `binary_two.rs` | `mt_binary_two` (fused add + mul, two outputs) |
-| `ternary.rs` | `mt_select` (ternary select) |
-| `arange.rs` | `mt_arange` |
-| `copy.rs` | `mt_copy` |
-| `strided.rs` | Strided (non-contiguous) copy kernels |
+| `mlx/unary.rs` | `mt_exp`, `mt_log`, `mt_sqrt`, `mt_rsqrt`, `mt_abs`, `mt_silu`, `mt_gelu`, `mt_relu`, `mt_sigmoid`, `mt_sin`, `mt_cos`, `mt_ceil`, `mt_floor`, `mt_recip`, `mt_neg`, `mt_sign`, `mt_round`, `mt_erf`, `mt_exp2`, `mt_log2`, `mt_square`, `mt_log1p`, `mt_softplus`, `mt_sinh`, `mt_cosh`, `mt_tan`, `mt_tanh_op`, `mt_asin`, `mt_acos`, `mt_atan`, `mt_asinh`, `mt_acosh`, `mt_atanh`, `mt_expm1`, `mt_log10`, `mt_erfinv`, fused scalar-FMA, sigmoid-mul, add-rms-norm, and more |
+| `mlx/binary.rs` | `vector_add`, `mt_mul`, `mt_sub`, `mt_div`, `mt_max_elem`, `mt_min_elem`, `mt_pow`, `mt_atan2`, `mt_remainder`, `mt_logaddexp` |
+| `mlx/binary_two.rs` | `mt_binary_two` (fused add + mul, two outputs) |
+| `mlx/ternary.rs` | `mt_select` (ternary select) |
+| `mlx/arange.rs` | `mt_arange` |
+| `mlx/copy.rs` | `mt_copy` |
+| `mlx/strided.rs` | Strided (non-contiguous) copy kernels |
+| `mlx/reduce.rs` | `mt_all_reduce`, `mt_all_reduce_max`, `mt_all_reduce_min`, `mt_row_reduce` |
+| `mlx/softmax.rs` | `mt_softmax` |
+| `mlx/rms_norm.rs` | `mt_rms_norm` |
+| `mlx/layer_norm.rs` | `mt_layer_norm` |
+| `mlx/logsumexp.rs` | `mt_logsumexp` |
+| `mlx/gemv.rs` | `mt_gemv` |
+| `mlx/gemv_masked.rs` | `mt_gemv_masked` |
+| `mlx/scan.rs` | `mt_scan_f32` |
+| `mlx/sort.rs` | `mt_sort_f32` |
+| `mlx/arg_reduce.rs` | `mt_argmax_f32` |
+| `mlx/scaled_dot_product_attention.rs` | SDPA vector decode kernel |
+| `mlx/sdpa_vector.rs` | Additional SDPA vector dispatch |
+| `mlx/rope.rs` | `mt_rope_f16` |
+| `mlx/quantized.rs` | Quantized GeMV (int4) |
+| `mlx/quantized_nax.rs` | NAX-accelerated quantized matvec (M4+) |
+| `mlx/quantized_nax_int8.rs` | NAX int8 quantized matvec |
+| `mlx/quantized_mpp.rs` | Quantized MPP matmul |
+| `mlx/quantized_mpp_int8.rs` | Int8 quantized MPP matmul |
+| `mlx/quantized_mma_dynamic_m.rs` | Dynamic-M quantized MMA |
+| `mlx/fp_quantized.rs` | FP4 quantize/dequantize |
+| `mlx/fp_quantized_nax.rs` | NAX FP4 dequantize (M4+) |
+| `mlx/fp_quantized_mma.rs` | FP quantized MMA |
+| `mlx/swiglu.rs` | SwiGLU fused activation |
+| `mlx/fused_gate_activation.rs` | Fused gate activation |
+| `mlx/hadamard.rs` | Hadamard transform (power-of-2) |
+| `mlx/hadamard_m.rs` | Non-power-of-2 Hadamard (M ∈ {12, 20, 28}) |
+| `mlx/gather_axis.rs` | Gather along axis |
+| `mlx/scatter_axis.rs` | Scatter along axis |
+| `mlx/indexing.rs` | Indexing ops |
+| `mlx/random.rs` | `mt_random_hash` |
+| `mlx/sgload_smoke.rs` | SGLoad smoke test |
 
-**Reductions:** `reduce.rs`, `softmax.rs`, `rms_norm.rs`, `layer_norm.rs`, `logsumexp.rs`
+**`ffai/` — beyond-MLX kernels:**
 
-| Op file | Kernel(s) |
+| File | Kernel(s) |
 |---|---|
-| `reduce.rs` | `mt_all_reduce`, `mt_all_reduce_max`, `mt_all_reduce_min`, `mt_row_reduce` |
-| `softmax.rs` | `mt_softmax` |
-| `rms_norm.rs` | `mt_rms_norm` |
-| `layer_norm.rs` | `mt_layer_norm` |
-| `logsumexp.rs` | `mt_logsumexp` |
-
-**Matrix:** `gemv.rs`, `gemv_masked.rs`
-
-| Op file | Kernel(s) |
-|---|---|
-| `gemv.rs` | `mt_gemv` |
-| `gemv_masked.rs` | `mt_gemv_masked` |
-
-**Sequence:** `scan.rs`, `sort.rs`, `arg_reduce.rs`
-
-| Op file | Kernel(s) |
-|---|---|
-| `scan.rs` | `mt_scan_f32` |
-| `sort.rs` | `mt_sort_f32` |
-| `arg_reduce.rs` | `mt_argmax_f32` |
-
-**Attention:** `scaled_dot_product_attention.rs`, `rope.rs`
-
-| Op file | Kernel(s) |
-|---|---|
-| `scaled_dot_product_attention.rs` | SDPA vector decode kernel |
-| `rope.rs` | `mt_rope_f16` |
-
-**Quantized:** `quantized.rs`, `fp_quantized.rs`, `quantized_nax.rs`, `fp_quantized_nax.rs`
-
-| Op file | Kernel(s) |
-|---|---|
-| `quantized.rs` | Quantized GeMV (int4) |
-| `fp_quantized.rs` | FP4 quantize/dequantize |
-| `quantized_nax.rs` | NAX-accelerated quantized matvec (M4+ runtime) |
-| `fp_quantized_nax.rs` | NAX-accelerated FP4 dequantize (M4+ runtime) |
-
-NAX kernels build by default; the runtime dispatcher gates them via `Context::chip_family()` on Apple10+ hardware. Tests use `skip_unless_apple10` to auto-skip on pre-M4 chips.
-
-**Misc:** `random.rs`, `conv.rs`, `fft.rs`, `fence.rs`
-
-| Op file | Kernel(s) |
-|---|---|
-| `random.rs` | `mt_random_hash` |
-| `conv.rs` | *(stub — not yet implemented)* |
-| `fft.rs` | *(stub — not yet implemented)* |
-| `fence.rs` | *(stub — not yet implemented)* |
+| `ffai/arg_reduce.rs` | Arg-reduce (argmax/argmin) |
+| `ffai/audio_conv1d.rs` | 1-D audio convolution |
+| `ffai/aura_encode.rs` | AURA KV-cache encode |
+| `ffai/aura_dequant_rotated.rs` | AURA rotated dequant |
+| `ffai/aura_score.rs` | AURA attention score |
+| `ffai/aura_value.rs` | AURA value aggregation |
+| `ffai/aura_flash_p1.rs` | AURA flash pass 1 |
+| `ffai/aura_flash_pass2.rs` | AURA flash pass 2 |
+| `ffai/aura_flash_sdpa.rs` | AURA flash SDPA |
+| `ffai/batched_qkv_qgemv.rs` | Batched QKV quantized GEMV |
+| `ffai/conv2d.rs` / `ffai/conv2d_mma.rs` | 2-D convolution (scalar + MMA) |
+| `ffai/conv3d.rs` / `ffai/conv3d_mma.rs` | 3-D convolution (scalar + MMA) |
+| `ffai/dequant_gather.rs` | Gather-based dequant |
+| `ffai/dequant_gemv.rs` | Dequant GEMV |
+| `ffai/dequant_gemv_expert_indexed.rs` | Expert-indexed dequant GEMV |
+| `ffai/gated_delta.rs` | GatedDeltaNet core |
+| `ffai/gated_delta_prep.rs` | GatedDelta prep |
+| `ffai/gated_delta_prep_chunk.rs` | GatedDelta chunked prep |
+| `ffai/gated_delta_replay.rs` | GatedDelta tape replay |
+| `ffai/gated_delta_wy.rs` | GatedDelta WY representation |
+| `ffai/gated_rmsnorm.rs` | Gated RMS norm |
+| `ffai/gather.rs` | Gather ops |
+| `ffai/gemm.rs` | GEMM ops |
+| `ffai/kv_cache.rs` | KV-cache management |
+| `ffai/logits_topk.rs` | Top-K logits |
+| `ffai/logits_top_p.rs` | Top-P logits |
+| `ffai/logits_min_p.rs` | Min-P logits |
+| `ffai/logits_processors.rs` | Logit processor pipeline |
+| `ffai/mel_spectrogram.rs` | Mel spectrogram (STT/TTS) |
+| `ffai/moe.rs` | Mixture of Experts |
+| `ffai/moe_mpp.rs` / `ffai/moe_mpp_bm64.rs` / `ffai/moe_mpp_bm8.rs` | MoE MPP matmul |
+| `ffai/moe_mpp_int8.rs` / `ffai/moe_mpp_bm64_int8.rs` / `ffai/moe_mpp_bm8_int8.rs` | MoE MPP int8 matmul |
+| `ffai/patch_embed.rs` / `ffai/patch_embed_mma.rs` | Vision patch embedding |
+| `ffai/rms_norm_qgemv.rs` | RMS norm + quantized GEMV |
+| `ffai/rms_norm_residual.rs` | RMS norm with residual |
+| `ffai/rms_norm_rope.rs` | RMS norm + RoPE fused |
+| `ffai/rope_2d.rs` | 2-D vision RoPE |
+| `ffai/rope_llama.rs` | Llama-3 banded RoPE |
+| `ffai/rope_yarn.rs` | YaRN RoPE scaling |
+| `ffai/sampling.rs` | Categorical sampling |
+| `ffai/sdpa_decode.rs` | SDPA decode (GQA) |
+| `ffai/sdpa_decode_2pass.rs` | SDPA two-pass decode |
+| `ffai/sdpa_decode_d64.rs` / `ffai/sdpa_decode_d256.rs` / `ffai/sdpa_decode_d512.rs` | SDPA per-dim decode |
+| `ffai/sdpa_decode_batched.rs` | SDPA batched decode |
+| `ffai/sdpa_decode_batched_prefill.rs` | Batched prefill decode |
+| `ffai/sdpa_bidirectional.rs` | VLM bidirectional SDPA |
+| `ffai/sdpa_multi.rs` | Multi-head SDPA |
+| `ffai/flash_quantized_sdpa.rs` | Flash quantized SDPA |
+| `ffai/ssm.rs` | Mamba/SSM recurrence |
+| `ffai/ssm_replay.rs` | SSM tape replay |
+| `ffai/vocoder.rs` | Vocoder / iSTFT |
+| `ffai/winograd_conv.rs` | 3×3 Winograd convolution |
 
 ### Benchmark spec reference
 
@@ -239,24 +280,36 @@ NAX kernels build by default; the runtime dispatcher gates them via `Context::ch
 
 ### External
 
-None — all dependencies are internal workspace crates.
+| Crate | Role |
+|---|---|
+| `thiserror` | Derive `Error` for `StdError` |
+| `half` | `f16` / `bf16` roundtrip conversion in benchmark data preparation |
+| `bytemuck` | Zero-copy byte views of benchmark data buffers |
+| `rustc-hash` | `FxHashMap` for spec and runner internals |
+| `objc2` / `objc2-metal` / `objc2-foundation` | Metal GPU API bindings (macOS only, cfg-gated) |
 
 ## MSRV / platform
 
 Rust: nightly (workspace-wide, for edition 2024).
-No platform gating — this crate is pure data types.
-Benchmark execution requires macOS + Metal, but the types compile
-everywhere.
+No platform gating — this crate's types compile everywhere.
+Benchmark execution requires macOS + Metal, but the types and
+`BenchSpec` registration compile on any host.
 
 ### Feature flags
 
-None — the crate has no Cargo features. NAX (Apple cooperative-tensor) kernels build by default; runtime gating happens via `Context::chip_family()`.
+None — the crate has no Cargo features. NAX (Apple cooperative-tensor)
+kernels build by default; runtime gating happens via
+`Context::chip_family()`.
 
 ## Extending
 
-- **New op file:** Create `src/ops/<name>.rs` with `#[bench_kernel(…)]` +
-  `#[kernel]` annotations. Add `pub mod <name>;` to `src/ops/mod.rs`.
+- **New MLX kernel:** Create `src/mlx/<name>.rs` with `#[bench_kernel(…)]` +
+  `#[kernel]` annotations. Add `pub mod <name>;` to `src/mlx/mod.rs`.
   The `tile bench` CLI discovers it automatically via `inventory`.
+
+- **New FFAI kernel (no MLX comparison):** Create `src/ffai/<name>.rs` with
+  `#[bench_kernel(…)]` + `#[kernel]` annotations. Add `pub mod <name>;` to
+  `src/ffai/mod.rs`.
 
 - **New benchmark shape:** `src/spec.rs` — add a `ShapeSpec` constant or
   update the relevant op file's `#[bench_kernel]` annotation. Common shapes
@@ -264,9 +317,9 @@ None — the crate has no Cargo features. NAX (Apple cooperative-tensor) kernels
   `ROW_REDUCE_SHAPES`, etc.).
 
 - **New `BenchDispatch` variant:** `src/spec.rs` — add to the `BenchDispatch`
-  enum. Add a match arm in `metaltile-cli/src/run_spec.rs` for the complex
-  runner. Update the `#[bench_kernel]` proc-macro in `metaltile-macros/src/lib.rs`
-  if a new `ClassKind` variant is needed.
+  enum. Add a match arm in `src/run_spec.rs` for the complex runner. Update
+  the `#[bench_kernel]` proc-macro in `metaltile-macros` if a new
+  `ClassKind` variant is needed.
 
 - **New dtype helper:** `src/bench_types.rs` — add to `dtype_label()`,
   `mlx_tname()`, `elem_bytes()`, and `dtype_tol()` / `dtype_tol_reduce()`.

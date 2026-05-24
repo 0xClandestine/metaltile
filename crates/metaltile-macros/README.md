@@ -65,8 +65,11 @@ pub fn scale<T>(a: Tensor<T>, factor: f32, out: Tensor<T>) {
 
 | Module | Purpose |
 |---|---|
-| `lib.rs` | All proc-macro entry points: `#[kernel]`, `#[autotune]`, `#[bench_kernel]`, `#[constexpr]`, `#[scalar]`, `#[strided]`, `shape!`, `tile!` |
+| `lib.rs` | All proc-macro entry points: `#[kernel]`, `#[autotune]`, `#[bench_kernel]`, `#[constexpr]`, `#[scalar]`, `#[strided]`, `shape!`, `tile!`, `ValueRefs` / `OpFlags` derive macros |
 | `body_parser.rs` | `DslBodyParser` — walks `syn::Expr` trees and translates DSL calls into IR-building token streams |
+| `sig_parser.rs` | Signature parsing: `parse_kernel_params_generic`, `extract_constexprs_typed`, `extract_param_names` |
+| `bench_impl.rs` | `#[bench_kernel]` attribute implementation: `BenchArgs` parsing, `ClassKind` enum, `generate_submit` |
+| `derive_op.rs` | Derive macros: `ValueRefs` (value-id traversal) and `OpFlags` (elementwise/side-effect/etc. predicates) |
 
 ## API reference
 
@@ -82,6 +85,8 @@ pub fn scale<T>(a: Tensor<T>, factor: f32, out: Tensor<T>) {
 | `#[strided]` | attribute | Pass-through: marks a `Tensor` parameter for strided lowering (shape + stride arrays emitted) |
 | `shape!` | function-like | Constructs a `Shape` from dimension expressions: `shape!(M, K)`, `shape!(32, 64)`, `shape!()` |
 | `tile!` | function-like | Constructs a 2D tile shape: `tile!(TILE_M, TILE_N)`, `tile!(32, 64)` |
+| `#[derive(ValueRefs)]` | derive | Derives `Op::value_refs()` and `Op::for_each_value_id_mut()` for IR traversal |
+| `#[derive(OpFlags)]` | derive | Derives op-flag predicates (`is_elementwise`, `has_side_effects`, etc.) from variant attributes |
 
 ### What `#[kernel]` expands to
 
@@ -171,7 +176,6 @@ Attributes placed on the function itself (before or alongside `#[kernel]`):
 | `syn` | Parses user-written Rust functions and DSL bodies |
 | `quote` | Token-stream construction for generated code |
 | `proc-macro2` | Proc-macro token stream API |
-| `darling` | Derive-based attribute parsing (`AutotuneArgs`) |
 
 ## MSRV / platform
 
@@ -192,11 +196,10 @@ Requires `[lib] proc-macro = true` in `Cargo.toml`.
   `#[proc_macro_attribute]` pass-through, parse its args in `expand_kernel`,
   and emit the corresponding token stream into the generated module.
 
-- **New `bench_kernel` class:** `src/lib.rs` — add variant to `ClassKind` enum in
-  `bench_impl`, add a match arm in `generate_submit` with its `ShapeSpec` and
-  `BenchDispatch` variant.
+- **New `bench_kernel` class:** `src/bench_impl.rs` — add variant to `ClassKind` enum,
+  add a match arm in `generate_submit` with its `ShapeSpec` and `BenchDispatch` variant.
 
-- **New `bench_kernel` argument:** `src/lib.rs` — add field to `BenchArgs`, add parse
+- **New `bench_kernel` argument:** `src/bench_impl.rs` — add field to `BenchArgs`, add parse
   arm in `BenchArgs::parse()`, consume in `generate_submit`.
 
 - **New shape/tile constructor syntax:** `src/lib.rs` — add a new `#[proc_macro]`
