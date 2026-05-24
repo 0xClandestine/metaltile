@@ -12,17 +12,6 @@
 
 > ⚠️ Early development — APIs are not yet stable. The core DSL, codegen, and runtime work today; the autotuner and type-level shape algebra are planned.
 
-<pre>
-crates
-├── <a href="crates/metaltile">metaltile</a>          — facade crate, re-exports the full public API
-├── <a href="crates/metaltile-cli">metaltile-cli</a>      — <code>tile</code> binary (bench, build, inspect, snap, diff)
-├── <a href="crates/metaltile-codegen">metaltile-codegen</a>  — IR → MSL lowering and 14-pass optimization pipeline
-├── <a href="crates/metaltile-core">metaltile-core</a>     — IR types, Op variants, DType, Shape
-├── <a href="crates/metaltile-macros">metaltile-macros</a>   — <code>#[kernel]</code> and <code>#[bench_kernel]</code> proc macros
-├── <a href="crates/metaltile-runtime">metaltile-runtime</a>  — Metal GPU dispatch and buffer management
-└── <a href="crates/metaltile-std">metaltile-std</a>      — kernel standard library and benchmark registry
-</pre>
-
 <table>
 <tr>
 <th>Rust DSL — what you write</th>
@@ -72,6 +61,26 @@ kernel void mt_exp(
    The output is optimized MSL — the same thing you'd write by hand, minus the
    toil. Kernels are benchmarked against their MLX equivalents on real
   hardware; a number of them are faster.
+
+<pre>
+crates
+├── <a href="crates/metaltile">metaltile</a>          — facade crate, re-exports the full public API
+├── <a href="crates/metaltile-cli">metaltile-cli</a>      — <code>tile</code> binary (bench, build, inspect, snap, diff)
+├── <a href="crates/metaltile-codegen">metaltile-codegen</a>  — IR → MSL lowering and 14-pass optimization pipeline
+├── <a href="crates/metaltile-core">metaltile-core</a>     — IR types, Op variants, DType, Shape
+├── <a href="crates/metaltile-macros">metaltile-macros</a>   — <code>#[kernel]</code> and <code>#[bench_kernel]</code> proc macros
+├── <a href="crates/metaltile-runtime">metaltile-runtime</a>  — Metal GPU dispatch and buffer management
+└── <a href="crates/metaltile-std">metaltile-std</a>      — kernel standard library and benchmark registry
+</pre>
+
+<pre>
+docs
+├── <a href="docs/getting-started.md">getting-started.md</a> — toolchain, crate layout, build, first kernel
+├── <a href="docs/developing.md">developing.md</a>      — repo layout, dev loop, kernel-authoring hazards
+├── <a href="docs/testing.md">testing.md</a>         — test layers, CI, and test-infra gaps
+├── <a href="docs/cli.md">cli.md</a>             — the <code>tile</code> binary, all flags and subcommands
+└── <a href="docs/publishing.md">publishing.md</a>      — the release flow
+</pre>
 
 ## Benchmarks
 
