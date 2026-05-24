@@ -56,13 +56,7 @@ use metaltile::{bench_kernel, kernel};
 /// pan-and-scan tiles can carry a small pad.
 macro_rules! conv2d_kernel {
     ($name:ident, $subop:literal, $kh:expr, $kw:expr, $sh:expr, $sw:expr) => {
-        #[bench_kernel(
-                            op="conv2d",
-                            subop=$subop,
-                            class=GenericEmpty,
-                            tol=1e-3,
-                            kernel_mode=Grid3D,
-                        )]
+        #[bench_kernel(op="conv2d", subop=$subop, class=GenericEmpty, tol=1e-3, kernel_mode=Grid3D,)]
         #[kernel]
         pub fn $name<T>(
             input: Tensor<T>,

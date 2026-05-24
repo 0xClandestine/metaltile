@@ -57,13 +57,7 @@ pub fn kv_cache_update<T>(
 // arithmetic at PSO creation.
 macro_rules! quantize_kv_kernel {
     ($name:ident, $bits:literal, $subop:literal) => {
-        #[bench_kernel(
-                            op="kv_cache",
-                            subop=$subop,
-                            class=GenericEmpty,
-                            tol=0.0,
-                            kernel_mode=Grid3D,
-                        )]
+        #[bench_kernel(op="kv_cache", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)]
         #[kernel]
         pub fn $name<T>(
             src: Tensor<T>,
@@ -126,13 +120,7 @@ macro_rules! quantize_kv_kernel {
 // Output layout matches raw KVCache: [n_kv_heads, max_seq, head_dim].
 macro_rules! bulk_dequant_kv_kernel {
     ($name:ident, $bits:literal, $subop:literal) => {
-        #[bench_kernel(
-                            op="kv_cache",
-                            subop=$subop,
-                            class=GenericEmpty,
-                            tol=0.0,
-                            kernel_mode=Grid3D,
-                        )]
+        #[bench_kernel(op="kv_cache", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)]
         #[kernel]
         pub fn $name<T>(
             in_w: Tensor<u32>,
@@ -198,13 +186,7 @@ macro_rules! quantize_kv_fp8 {
     ($name:ident, $subop:literal, $mant_f:literal, $mant_i:literal, $emin:literal, $emax:literal, $fp8max:literal) => {
         /// fp8 KV-cache quantize — one thread per group. Stores the group amax
         /// as scale and packs fp8-quantized codes (4 per u32, 8 bits each).
-        #[bench_kernel(
-                            op="kv_cache",
-                            subop=$subop,
-                            class=GenericEmpty,
-                            tol=0.0,
-                            kernel_mode=Grid3D,
-                        )]
+        #[bench_kernel(op="kv_cache", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)]
         #[kernel]
         pub fn $name<T>(
             src: Tensor<T>,
@@ -288,13 +270,7 @@ macro_rules! quantize_kv_fp8 {
 macro_rules! bulk_dequant_kv_fp8 {
     ($name:ident, $subop:literal, $mant_f:literal, $mant_i:literal, $emin:literal, $emax:literal, $fp8max:literal) => {
         /// fp8 KV-cache bulk dequant — one thread per output element.
-        #[bench_kernel(
-                            op="kv_cache",
-                            subop=$subop,
-                            class=GenericEmpty,
-                            tol=0.0,
-                            kernel_mode=Grid3D,
-                        )]
+        #[bench_kernel(op="kv_cache", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)]
         #[kernel]
         pub fn $name<T>(
             in_w: Tensor<u32>,

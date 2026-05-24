@@ -37,13 +37,7 @@ const _: DType = DType::F32;
 
 macro_rules! aura_value_kernel {
     ($name:ident, $bits:literal, $subop:literal) => {
-        #[bench_kernel(
-                            op="aura",
-                            subop=$subop,
-                            class=GenericEmpty,
-                            tol=0.0,
-                            kernel_mode=Grid3D,
-                        )]
+        #[bench_kernel(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)]
         #[kernel]
         pub fn $name<T>(
             weights: Tensor<T>,
