@@ -1,6 +1,13 @@
-# MetalTile
+<p align="center">
+  <h1 align="center">MetalTile</h1>
+  <p align="center">Rust-embedded DSL for Apple Metal GPU kernels — write Rust, get faster-than-MLX MSL</p>
+</p>
 
-A Rust-embedded DSL for writing Apple Metal GPU kernels. Write tile-level algorithms in Rust, get optimized Metal Shading Language out — verified against, and frequently faster than, hand-tuned MLX.
+<p align="center">
+  <img src="https://img.shields.io/badge/platform-Apple%20Silicon-black?logo=apple" alt="Apple Silicon">
+  <img src="https://img.shields.io/badge/language-Rust-orange?logo=rust" alt="Rust">
+  <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
+</p>
 
 <!-- TODO(image): replace this HTML table with a side-by-side graphic of the DSL ↔ MSL. -->
 <table>
@@ -153,6 +160,9 @@ Full walkthrough and crate layout: [`docs/getting-started.md`](docs/getting-star
 
 ## Supported Operations
 
+<details>
+<summary>Kernel coverage is complete — every op in the MLX / FFAI survey is ported. Click to expand the full list.</summary>
+
 | Operation | Status |
 |---|---|
 | Unary elementwise — `exp`, `log`, `sqrt`, trig/hyperbolic, `erf`, `gelu`, `silu`, `sigmoid`, `relu`, … (40+) | ✅ |
@@ -183,10 +193,9 @@ Full walkthrough and crate layout: [`docs/getting-started.md`](docs/getting-star
 | Vision / STT / TTS front-end — patch conv, patch embed, mel-spectrogram, vocoder/iSTFT | ✅ |
 | Sampling — categorical inverse-CDF, top-k / top-p / min-p, temperature, repetition penalty | ✅ |
 
-Kernel coverage is complete — every op in the MLX / FFAI survey is ported.
-See [`docs/KERNEL_AUDIT.md`](docs/KERNEL_AUDIT.md) for the full per-op
-coverage table and [`docs/developing.md`](docs/developing.md) for how
-kernels are organised.
+See [`docs/KERNEL_AUDIT.md`](docs/KERNEL_AUDIT.md) for the full per-op coverage table and [`docs/developing.md`](docs/developing.md) for how kernels are organised.
+
+</details>
 
 ## Benchmarks
 
