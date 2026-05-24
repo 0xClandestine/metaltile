@@ -56,7 +56,7 @@ pub struct Session {
     /// Packed scalar state array (6 × 4 bytes = 24 bytes) for the frequently
     /// updated scalars (token_id, position, n_kv, rms_eps, temperature, uniform).
     /// Eliminates per-token HashMap lookups and Vec<u8> heap allocations.
-    scalars: [u8; SCALAR_BYTES],
+    scalars: ScalarState,
     tokenizer: Tokenizer,
     eos_token_id: u32,
     #[allow(dead_code)]
@@ -85,8 +85,7 @@ impl Session {
 
         // ── Parse model definition ─────────────────────────────────────
         info!("parsing model definition");
-        let def: ModelDef =
-            toml::from_str(toml_src).map_err(|e| InferError::Other(e.to_string()))?;
+        let def: ModelDef = toml::from_str(toml_src)?;
 
         // ── Load weights ───────────────────────────────────────────────
         // Weights are cast to the activation dtype at load time so that
@@ -104,13 +103,13 @@ impl Session {
         }
 
         // ── Build GPU context ──────────────────────────────────────────
-        let ctx = Context::new().map_err(|e| InferError::Other(e.to_string()))?;
+        let ctx = Context::new()?;
 
         // ── Upload weights to GPU-resident buffers ─────────────────────
         info!(n_tensors = weights.len(), "uploading weights to GPU");
         let mut resident: FxHashMap<String, ResidentBuffer> = FxHashMap::default();
         for (name, bytes) in &weights {
-            let rb = ctx.upload_resident(bytes).map_err(|e| InferError::Other(e.to_string()))?;
+            let rb = ctx.upload_resident(bytes)?;
             resident.insert(name.clone(), rb);
         }
 
@@ -121,8 +120,7 @@ impl Session {
         let kv_bytes =
             config.n_kv_heads * config.max_seq_len * config.head_dim * dtype.size_bytes();
         let total_kv_bytes = kv_bytes * 2 * config.n_layers;
-        let kv_base =
-            ctx.alloc_resident(total_kv_bytes).map_err(|e| InferError::Other(e.to_string()))?;
+        let kv_base = ctx.alloc_resident(total_kv_bytes)?;
         for layer in 0..config.n_layers {
             for (ki, key) in ["k", "v"].iter().enumerate() {
                 let name = format!("kv_cache.{layer}.{key}");
@@ -171,8 +169,7 @@ impl Session {
         // ── Build PreparedDispatch ─────────────────────────────────────
         // Builds static binding maps once; only ~82 dynamic entries
         // (position, n_kv, token_id, temperature, uniform) are updated per token.
-        let prepared = PreparedDispatch::build(&ctx, &plan, &resident, &state)
-            .map_err(|e| InferError::Other(e.to_string()))?;
+        let prepared = PreparedDispatch::build(&ctx, &plan, &resident, &state)?;
 
         // ── Tokenizer ─────────────────────────────────────────────────
         let tok_path = model_dir.join("tokenizer.json");
@@ -184,8 +181,7 @@ impl Session {
         let eos_token_id = find_eos_token_id(&tokenizer);
 
         // Initialize packed scalar state from StateMap.
-        let mut scalars = [0u8; SCALAR_BYTES];
-        sync_state_to_scalars(&state, &mut scalars);
+        let scalars = ScalarState::from_state(&state);
 
         info!(
             n_layers = config.n_layers,
@@ -314,24 +310,12 @@ impl Session {
         temperature: f32,
         max_nodes: usize,
     ) -> Result<(u32, f64), InferError> {
-        let pos = scalar_u32(&self.scalars, S_POSITION);
-
-        // Update scalar array in-place (no HashMap/Vec allocation).
-        scalar_write_u32(&mut self.scalars, S_N_KV, pos + 1);
-        scalar_write_u32(&mut self.scalars, S_TOKEN_ID, token_id);
-        // Clamp to a small positive value: the sampling kernel computes
-        // inv_t = 1/T which is +inf for T=0 (IEEE 754), poisoning the
-        // entire softmax with NaN and silently returning token 0.
-        // At T≤1e-5 the distribution is already effectively one-hot at
-        // the argmax, so clamping here gives correct greedy behaviour.
-        scalar_write_f32(&mut self.scalars, S_TEMPERATURE, temperature.max(1e-5));
-        let uniform: f32 = random_uniform();
-        scalar_write_f32(&mut self.scalars, S_UNIFORM, uniform);
-
-        // Sync scalar array to StateMap before dispatch (execute_prepared
-        // reads state for dynamic entries). Single 24-byte memcpy replaces
-        // 4 separate HashMap insertions.
-        sync_scalars_to_state(&self.scalars, &mut self.state);
+        let pos = self.scalars.position();
+        self.scalars.set_n_kv(pos + 1);
+        self.scalars.set_token_id(token_id);
+        self.scalars.set_temperature(temperature.max(1e-5));
+        self.scalars.set_uniform(random_uniform());
+        self.scalars.sync_to_state(&mut self.state);
 
         let t0 = std::time::Instant::now();
         let (out_bytes, _gpu_us) = execute_prepared(
@@ -343,9 +327,7 @@ impl Session {
         )?;
         let wall_secs = t0.elapsed().as_secs_f64();
 
-        // Advance position in scalar array.
-        let new_pos = pos + 1;
-        scalar_write_u32(&mut self.scalars, S_POSITION, new_pos);
+        self.scalars.set_u32(1, pos + 1);
 
         // Partial prefill: output is empty, return sentinel 0.
         if out_bytes.len() < 4 {
@@ -357,78 +339,63 @@ impl Session {
 
     /// Reset KV cache and position counter (start a new conversation).
     pub fn reset(&mut self) {
-        scalar_write_u32(&mut self.scalars, S_POSITION, 0);
-        scalar_write_u32(&mut self.scalars, S_N_KV, 0);
-        write_u32_state(&mut self.state, "position", 0);
-        write_u32_state(&mut self.state, "n_kv", 0);
-    }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────
-
-/// Six scalar values that are updated every token step. Stored as a packed
-/// byte array to avoid per-token HashMap lookups and Vec<u8> heap allocations.
-const SCALAR_BYTES: usize = 24; // 6 × u32/f32 scalars
-
-/// Index constants for scalar state array.
-const S_TOKEN_ID: usize = 0;
-const S_POSITION: usize = 1;
-const S_N_KV: usize = 2;
-const S_TEMPERATURE: usize = 4;
-const S_UNIFORM: usize = 5;
-
-/// Read a u32 slot from the scalar array.
-#[inline]
-fn scalar_u32(arr: &[u8; SCALAR_BYTES], slot: usize) -> u32 {
-    let base = slot * 4;
-    u32::from_le_bytes([arr[base], arr[base + 1], arr[base + 2], arr[base + 3]])
-}
-
-/// Write a u32 value into a scalar slot.
-#[inline]
-fn scalar_write_u32(arr: &mut [u8; SCALAR_BYTES], slot: usize, val: u32) {
-    let base = slot * 4;
-    arr[base..base + 4].copy_from_slice(&val.to_le_bytes());
-}
-
-/// Write an f32 value into a scalar slot.
-#[inline]
-fn scalar_write_f32(arr: &mut [u8; SCALAR_BYTES], slot: usize, val: f32) {
-    let base = slot * 4;
-    arr[base..base + 4].copy_from_slice(&val.to_le_bytes());
-}
-
-/// Synchronize the scalar array back into the StateMap after a forward pass.
-#[inline]
-fn sync_scalars_to_state(arr: &[u8; SCALAR_BYTES], state: &mut StateMap) {
-    const KEYS: [&str; 6] = ["token_id", "position", "n_kv", "rms_eps", "temperature", "uniform"];
-    for (i, key) in KEYS.iter().enumerate() {
-        let base = i * 4;
-        if let Some(buf) = state.get_mut(*key) {
-            buf[..4].copy_from_slice(&arr[base..base + 4]);
+        self.scalars.set_u32(1, 0);
+        self.scalars.set_u32(2, 0);
+        for key in &["position", "n_kv"] {
+            if let Some(buf) = self.state.get_mut(*key) {
+                buf[..4].copy_from_slice(&0u32.to_le_bytes());
+            }
         }
     }
 }
 
-/// Synchronize StateMap values into the scalar array during init.
-#[inline]
-fn sync_state_to_scalars(state: &StateMap, arr: &mut [u8; SCALAR_BYTES]) {
-    const KEYS: [&str; 6] = ["token_id", "position", "n_kv", "rms_eps", "temperature", "uniform"];
-    for (i, key) in KEYS.iter().enumerate() {
-        let base = i * 4;
-        if let Some(buf) = state.get(*key) {
-            let len = buf.len().min(4);
-            arr[base..base + len].copy_from_slice(&buf[..len]);
+/// Packed scalar state (6 × 4 bytes) for frequently updated values
+/// (token_id, position, n_kv, rms_eps, temperature, uniform).
+#[derive(Clone)]
+struct ScalarState([u8; 24]);
+
+impl ScalarState {
+    fn from_state(state: &StateMap) -> Self {
+        const KEYS: [&str; 6] = ["token_id", "position", "n_kv", "rms_eps", "temperature", "uniform"];
+        let mut s = [0u8; 24];
+        for (i, key) in KEYS.iter().enumerate() {
+            if let Some(buf) = state.get(*key) {
+                let len = buf.len().min(4);
+                s[i * 4..i * 4 + len].copy_from_slice(&buf[..len]);
+            }
+        }
+        Self(s)
+    }
+
+    fn position(&self) -> u32 { self.get_u32(1) }
+    fn set_token_id(&mut self, val: u32) { self.set_u32(0, val); }
+    fn set_n_kv(&mut self, val: u32) { self.set_u32(2, val); }
+    fn set_temperature(&mut self, val: f32) { self.set_f32(4, val); }
+    fn set_uniform(&mut self, val: f32) { self.set_f32(5, val); }
+
+    fn sync_to_state(&self, state: &mut StateMap) {
+        const KEYS: [&str; 6] = ["token_id", "position", "n_kv", "rms_eps", "temperature", "uniform"];
+        for (i, key) in KEYS.iter().enumerate() {
+            let base = i * 4;
+            if let Some(buf) = state.get_mut(*key) {
+                buf[..4].copy_from_slice(&self.0[base..base + 4]);
+            }
         }
     }
-}
 
-/// Update a u32 state value in-place, avoiding a Vec<u8> heap allocation on
-/// every token step. Writes into the existing Vec<u8> entry without resizing.
-#[inline]
-fn write_u32_state(state: &mut StateMap, key: &str, val: u32) {
-    if let Some(buf) = state.get_mut(key) {
-        buf[..4].copy_from_slice(&val.to_le_bytes());
+    fn get_u32(&self, slot: usize) -> u32 {
+        let base = slot * 4;
+        u32::from_le_bytes([self.0[base], self.0[base + 1], self.0[base + 2], self.0[base + 3]])
+    }
+
+    fn set_u32(&mut self, slot: usize, val: u32) {
+        let base = slot * 4;
+        self.0[base..base + 4].copy_from_slice(&val.to_le_bytes());
+    }
+
+    fn set_f32(&mut self, slot: usize, val: f32) {
+        let base = slot * 4;
+        self.0[base..base + 4].copy_from_slice(&val.to_le_bytes());
     }
 }
 

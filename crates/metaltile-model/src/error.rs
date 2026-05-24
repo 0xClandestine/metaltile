@@ -1,5 +1,3 @@
-//! Error types for metaltile-model.
-
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -25,30 +23,21 @@ pub enum ModelError {
     #[error("missing required field: {field}")]
     MissingField { field: String },
 
-    /// Dispatch grid would exceed Metal hardware limits or violate kernel
-    /// invariants, potentially causing GPU hangs or out-of-bounds writes.
     #[error("unsafe dispatch for '{op}': {detail}")]
     UnsafeDispatch { op: String, detail: String },
 
     #[error("TOML parse error: {0}")]
     TomlParse(#[from] toml::de::Error),
 
-    #[error(
-        "non-contiguous fuse group '{tag}' declared at node {first_instance} and reused at node {second_start}; fuse groups must be contiguous"
-    )]
+    #[error("non-contiguous fuse group '{tag}' declared at node {first_instance} and reused at node {second_start}; fuse groups must be contiguous")]
     NonContiguousFuseGroup { tag: String, first_instance: usize, second_start: usize },
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("runtime error: {0}")]
+    Runtime(#[from] metaltile_runtime::MetalTileError),
+
     #[error("{0}")]
     Other(String),
-}
-
-impl From<String> for ModelError {
-    fn from(s: String) -> Self { ModelError::Other(s) }
-}
-
-impl From<&str> for ModelError {
-    fn from(s: &str) -> Self { ModelError::Other(s.to_string()) }
 }

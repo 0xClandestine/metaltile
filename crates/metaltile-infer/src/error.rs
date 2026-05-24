@@ -17,6 +17,12 @@ pub enum InferError {
     #[error("model error: {0}")]
     Model(#[from] metaltile_model::ModelError),
 
+    #[error("TOML parse error: {0}")]
+    Toml(#[from] toml::de::Error),
+
+    #[error("runtime error: {0}")]
+    Runtime(#[from] metaltile_runtime::MetalTileError),
+
     #[error("missing config field: {0}")]
     MissingField(&'static str),
 

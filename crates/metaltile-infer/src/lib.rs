@@ -25,7 +25,7 @@ pub mod error;
 pub mod hub;
 pub mod session;
 
-pub use checkpoint::{load_safetensors, load_safetensors_dir, load_weights, remap_hf_llama_names};
+pub use checkpoint::{load_weights, remap_hf_llama_names};
 pub use config::ModelConfig;
 pub use error::InferError;
 pub use metaltile_model::FusionMode;
