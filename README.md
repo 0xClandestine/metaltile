@@ -82,6 +82,16 @@ cargo install --path crates/metaltile-cli
 tile bench --filter exp
 ```
 
+```
+tile bench · Apple M4 Max
+  rms_norm (rms_norm)
+  Shape                                  │  Ref(GB/s) │  MT(GB/s) │   MT% │  ok
+  ────────────────────────────────────────────────────────────────────────────────
+  B=1024 N=4096 f32                      │     1443.2 │    1568.8 │  109% │   ✓
+  B=1024 N=4096 f16                      │     1235.1 │    1266.2 │  103% │   ✓
+  B=1024 N=4096 bf16                     │     1258.3 │    1253.1 │  100% │   ✓
+```
+
 Read the [docs](docs/) to learn more.
 
 ## Contributing
