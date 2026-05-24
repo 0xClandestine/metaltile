@@ -50,12 +50,12 @@ use metaltile::{bench_kernel, kernel};
 macro_rules! dequant_gemv_pow2 {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[bench_kernel(
-                    op="dequant_gemv",
-                    subop=$subop,
-                    class=GenericEmpty,
-                    tol=0.0,
-                    kernel_mode=Reduction,
-                )]
+                            op="dequant_gemv",
+                            subop=$subop,
+                            class=GenericEmpty,
+                            tol=0.0,
+                            kernel_mode=Reduction,
+                        )]
         #[kernel]
         pub fn $name<T>(
             weight: Tensor<u32>,
@@ -114,12 +114,12 @@ macro_rules! dequant_gemv_pow2 {
 macro_rules! dequant_gemv_odd {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[bench_kernel(
-                    op="dequant_gemv",
-                    subop=$subop,
-                    class=GenericEmpty,
-                    tol=0.0,
-                    kernel_mode=Reduction,
-                )]
+                            op="dequant_gemv",
+                            subop=$subop,
+                            class=GenericEmpty,
+                            tol=0.0,
+                            kernel_mode=Reduction,
+                        )]
         #[kernel]
         pub fn $name<T>(
             weight: Tensor<u32>,

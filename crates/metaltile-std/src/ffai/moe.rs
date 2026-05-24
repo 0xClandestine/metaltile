@@ -506,12 +506,12 @@ pub fn mt_moe_gather_qmm_int4<T>(
 macro_rules! gather_qmm_pow2 {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[bench_kernel(
-                    op="moe",
-                    subop=$subop,
-                    class=GenericEmpty,
-                    tol=5e-2,
-                    kernel_mode=Reduction,
-                )]
+                            op="moe",
+                            subop=$subop,
+                            class=GenericEmpty,
+                            tol=5e-2,
+                            kernel_mode=Reduction,
+                        )]
         #[kernel]
         pub fn $name<T>(
             x: Tensor<T>,
@@ -578,12 +578,12 @@ macro_rules! gather_qmm_pow2 {
 macro_rules! gather_qmm_odd {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[bench_kernel(
-                    op="moe",
-                    subop=$subop,
-                    class=GenericEmpty,
-                    tol=5e-2,
-                    kernel_mode=Reduction,
-                )]
+                            op="moe",
+                            subop=$subop,
+                            class=GenericEmpty,
+                            tol=5e-2,
+                            kernel_mode=Reduction,
+                        )]
         #[kernel]
         pub fn $name<T>(
             x: Tensor<T>,
@@ -2743,12 +2743,12 @@ pub fn mt_moe_gather_qmm_mma_int4<T>(
 macro_rules! gather_qmm_mma {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[bench_kernel(
-                    op="moe",
-                    subop=$subop,
-                    class=GenericEmpty,
-                    tol=5e-2,
-                    kernel_mode=Reduction,
-                )]
+                            op="moe",
+                            subop=$subop,
+                            class=GenericEmpty,
+                            tol=5e-2,
+                            kernel_mode=Reduction,
+                        )]
         #[kernel]
         #[allow(clippy::too_many_arguments)]
         pub fn $name<T>(
