@@ -68,22 +68,6 @@ One generic `#[kernel]` fn becomes a monomorphised `f32` / `f16` / `bfloat16` Me
 | **Autotuner** | Per-shape kernel tuning so no performance is left on the table. | 🚧 Planned |
 | **Type-level shape algebra** | Tensor shapes checked at compile time. | 🚧 Planned |
 
-## CLI
-
-`tile` drives benchmarking, building, and inspecting kernels:
-
-| Command | What it does |
-|---|---|
-| `tile bench` | Benchmark every kernel against its MLX reference; reports throughput + a correctness check |
-| `tile build` | Compile all kernels to MSL and report errors; `--emit` writes `.metal` / `.metallib` / Swift / IR |
-| `tile emit` | Emit a Swift-consumable kernel package (`kernels.metallib` + manifest + Swift wrappers) |
-| `tile inspect <kernel>` | Print a kernel's IR and generated MSL (`--ir`, `--pass`, `--stats` for codegen debugging) |
-| `tile device` | Show the GPU device, Metal version, and supported feature flags |
-| `tile snap` | Save bench results as a regression baseline |
-| `tile diff` | Compare bench results against a saved baseline |
-
-Install with `cargo install --path crates/metaltile-cli`, then run `tile <command>`. Full flag reference: [`docs/cli.md`](docs/cli.md).
-
 ## Supported Operations
 
 <details>
