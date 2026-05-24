@@ -100,14 +100,7 @@ Contributions are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) for the iss
 
 ## Acknowledgements
 
-MetalTile's benchmark suite and kernel library stand on the shoulders of the MLX ecosystem. A large portion of the reference kernels — Steel GEMM (fused, split-K, gather, masked, segmented), Steel attention (scalar and MMA paths), Hadamard transform, sort, softmax, RMS norm, layer norm, RoPE, SDPA vector decode, SSM step, scan, and the full quantized / fp-quantized GEMM family — are ports or faithful re-implementations of kernels from the following projects:
-
-- [**ml-explore/mlx**](https://github.com/ml-explore/mlx) — Apple's open-source ML framework for Apple Silicon. The primary source for benchmark reference kernels and the `erf` preamble implementation.
-- [**ekryski/mlx**](https://github.com/ekryski/mlx) (`alpha` branch) — Eric Kryski's MLX fork that carries the FFAI kernel extensions MetalTile pins against: gated-delta network, SSM replay, AURA codec, and related FFAI ops not yet in mainline MLX.
-- [**ml-explore/mlx-lm**](https://github.com/ml-explore/mlx-lm) — The MLX LM inference library. Reference for `GatedDeltaNet` step semantics and model-level operator contracts.
-- [**ml-explore/mlx-swift-lm**](https://github.com/ml-explore/mlx-swift-lm) — The Swift LM inference layer. Reference for MoE routing kernels and the chunked GatedDeltaNet scheduler.
-
-We are grateful to the MLX team at Apple and the broader MLX community for building and open-sourcing these kernels under the MIT licence.
+Many kernels are ported from the MLX ecosystem — [ml-explore/mlx](https://github.com/ml-explore/mlx), [ekryski/mlx](https://github.com/ekryski/mlx) (FFAI extensions), [mlx-lm](https://github.com/ml-explore/mlx-lm), and [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm). Thanks to the MLX team and community.
 
 See [`ACKNOWLEDGEMENTS.md`](ACKNOWLEDGEMENTS.md) for the full list of individual contributors and third-party software.
 
