@@ -30,14 +30,6 @@ cargo install --path crates/metaltile-cli
 
 **1. Write a kernel.** Annotate a generic Rust function with `#[kernel]` and `#[bench_kernel]` — MetalTile generates `f32`, `f16`, and `bfloat16` Metal variants from a single definition and registers it against its MLX reference:
 
-<table>
-<tr>
-<th>Rust DSL — what you write</th>
-<th>Metal Shading Language — what you get</th>
-</tr>
-<tr>
-<td>
-
 ```rust
 #[bench_kernel(
     op    = "unary",
@@ -54,26 +46,6 @@ pub fn mt_exp<T>(a: Tensor<T>, out: Tensor<T>) {
     store(out[idx], exp(load(a[idx])));
 }
 ```
-
-</td>
-<td>
-
-```cpp
-kernel void mt_exp(
-    const device float *a [[buffer(0)]],
-    device float *out [[buffer(1)]],
-    uint tid [[thread_position_in_grid]]
-) {
-    uint v_idx = tid;
-    auto v1 = a[v_idx];
-    auto v2 = exp(v1);
-    out[v_idx] = v2;
-}
-```
-
-</td>
-</tr>
-</table>
 
 **2. Install the CLI and run.**
 
