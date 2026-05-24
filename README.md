@@ -51,11 +51,7 @@ kernel void mt_exp(
 </tr>
 </table>
 
-One generic `#[kernel]` fn becomes a monomorphised `f32` / `f16` / `bfloat16` Metal kernel — the compiler handles thread indexing, dtype lowering, and Metal idioms. Bigger kernels lean on tile-level primitives (`reduce_sum`, `strided_reduce`, `dot`); the codegen emits the simdgroup and threadgroup machinery for you.
-
-## Why MetalTile
-
-Writing fast Metal kernels today means raw MSL — verbose, error-prone, and locked to a single dtype. MetalTile replaces that with a `#[kernel]` proc-macro: write tile-level algorithms in Rust, and the compiler handles thread indexing, dtype monomorphisation (`f32` / `f16` / `bfloat16`), and the simdgroup + threadgroup reduction machinery. A 14-pass optimizing pipeline (const-fold, CSE, LICM, fusion, vectorization) sits between your source and the emitted MSL. Every kernel is benchmarked and verified numerically against its hand-tuned MLX counterpart — and a meaningful slice already outperform MLX by 2–3×+ on Apple Silicon.
+Writing fast Metal kernels today means raw MSL — verbose, error-prone, and locked to a single dtype. MetalTile replaces that with a `#[kernel]` proc-macro: write tile-level algorithms in Rust, and a 14-pass optimizing pipeline (const-fold, CSE, LICM, fusion, vectorization) handles thread indexing, dtype monomorphisation (`f32` / `f16` / `bfloat16`), and the simdgroup + threadgroup reduction machinery for primitives like `reduce_sum`, `strided_reduce`, and `dot`. Every kernel is benchmarked and verified numerically against its hand-tuned MLX counterpart — and a meaningful slice already outperform MLX by 2–3×+ on Apple Silicon.
 
 ## Supported Operations
 
