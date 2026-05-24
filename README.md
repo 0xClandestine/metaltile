@@ -1,13 +1,10 @@
 <div align="center">
   <h1>MetalTile</h1>
 
-  [![CI][ci-badge]][ci-url]
   [![Apple Silicon][platform-badge]][platform-url]
   [![Rust][rust-badge]][rust-url]
   [![License][license-badge]][license-url]
 
-  [ci-badge]: https://img.shields.io/github/actions/workflow/status/0xClandestine/metaltile/ci.yml?branch=main&style=flat-square
-  [ci-url]: https://github.com/0xClandestine/metaltile/actions
   [platform-badge]: https://img.shields.io/badge/platform-Apple%20Silicon-black?logo=apple&style=flat-square
   [platform-url]: https://developer.apple.com/metal/
   [rust-badge]: https://img.shields.io/badge/language-Rust-orange?logo=rust&style=flat-square
