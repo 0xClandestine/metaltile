@@ -91,6 +91,7 @@ mod heuristic_tests {
     pass2_kernel=sdpa_decode_2pass_pass2,
     tol=1e-3,
     mlx="sdpa_vector_{tn}_128_128",
+    metal_file="scaled_dot_product_attention.metal",
     kernel_mode=Reduction,
 )]
 #[kernel]
