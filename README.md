@@ -12,6 +12,17 @@
 
 > ⚠️ Early development — APIs are not yet stable. The core DSL, codegen, and runtime work today; the autotuner and type-level shape algebra are planned.
 
+<pre>
+crates
+├── <a href="crates/metaltile/README.md">metaltile</a>
+├── <a href="crates/metaltile-cli/README.md">metaltile-cli</a>
+├── <a href="crates/metaltile-codegen/README.md">metaltile-codegen</a>
+├── <a href="crates/metaltile-core/README.md">metaltile-core</a>
+├── <a href="crates/metaltile-macros/README.md">metaltile-macros</a>
+├── <a href="crates/metaltile-runtime/README.md">metaltile-runtime</a>
+└── <a href="crates/metaltile-std/README.md">metaltile-std</a>
+</pre>
+
 <table>
 <tr>
 <th>Rust DSL — what you write</th>
