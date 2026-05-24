@@ -51,17 +51,6 @@ kernel void mt_exp(
 
 One generic `#[kernel]` fn becomes a monomorphised `f32` / `f16` / `bfloat16` Metal kernel — the compiler handles thread indexing, dtype lowering, and Metal idioms. Bigger kernels lean on tile-level primitives (`reduce_sum`, `strided_reduce`, `dot`); the codegen emits the simdgroup and threadgroup machinery for you.
 
-## Table of Contents
-
-- [Why MetalTile](#why-metaltile)
-- [Quick Start](#quick-start)
-- [CLI](#cli)
-- [Supported Operations](#supported-operations)
-- [Benchmarks](#benchmarks)
-- [Documentation](#documentation)
-- [Contributing](#contributing)
-- [License](#license)
-
 ## Why MetalTile
 
 | Functionality | Description | Status |
@@ -78,50 +67,6 @@ One generic `#[kernel]` fn becomes a monomorphised `f32` / `f16` / `bfloat16` Me
 | **Type-level shape algebra** | Tensor shapes checked at compile time. | 🚧 Planned |
 
 > ⚠️ Early development — APIs are not yet stable. The core DSL, codegen, and runtime work today; the autotuner and type-level shape algebra are planned.
-
-## Quick Start
-
-Add the crate:
-
-```toml
-[dependencies]
-metaltile = "0.1"
-```
-
-Write a kernel, dispatch it, read the result:
-
-```rust
-use metaltile::prelude::*;
-
-#[kernel]
-fn vector_add(a: Tensor<f32>, b: Tensor<f32>, c: Tensor<f32>) {
-    let idx = program_id::<0>();
-    store(c[idx], load(a[idx]) + load(b[idx]));
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let ctx = Context::new()?;
-    let n = 256usize;
-    let a: Vec<u8> = (0..n).flat_map(|i| (i as f32).to_le_bytes()).collect();
-    let b: Vec<u8> = (0..n).flat_map(|_| 1.0f32.to_le_bytes()).collect();
-    let c = vec![0u8; n * 4];
-
-    let result = vector_add::launch(&ctx)
-        .input("a", a)
-        .input("b", b)
-        .input("c", c)
-        .dispatch()?;
-
-    let out: Vec<f32> = result.outputs["c"]
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
-        .collect();
-    println!("out[0] = {}", out[0]); // 1.0
-    Ok(())
-}
-```
-
-Full walkthrough and crate layout: [`docs/getting-started.md`](docs/getting-started.md).
 
 ## CLI
 
