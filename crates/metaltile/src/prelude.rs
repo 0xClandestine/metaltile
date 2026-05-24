@@ -1,26 +1,24 @@
 //! Re-exports and placeholder DSL items for `#[kernel]` functions.
 //!
 //! Import this module with `use metaltile::prelude::*;` in the same Rust module as your kernels.
-//! It provides **everything** from the `metaltile-core`, `metaltile-macros`,
-//! `metaltile-runtime`, and `metaltile-codegen` crates — types, macros, runtime
-//! bindings, and codegen entry points — plus the placeholder DSL stubs
-//! ([`Tensor`], [`program_id`], [`load`], [`store`], [`dot`], and unary math)
-//! that the `#[kernel]` proc macro rewrites at compile time.
+//! It provides the items you need to **write** and **launch** kernels — types, macros, runtime
+//! bindings, and DSL stubs — without the IR/codegen plumbing that is only needed when building
+//! compiler passes or inspecting generated code.
+//!
+//! For raw IR types (`Op`, `Block`, `ValueId`, etc.) use [`metaltile::core::ir`] directly.
+//! For codegen types (`MslGenerator`, `TileSchedule`, etc.) use [`metaltile::codegen`] directly.
 //!
 //! # What's here
 //!
 //! - **Macros:** [`#[kernel]`], [`#[bench_kernel]`], [`#[constexpr]`], [`#[scalar]`],
 //!   [`#[strided]`], [`shape!`], [`tile!`]
-//! - **IR types:** [`ConstExpr`], [`ConstExprValues`], [`DType`], [`Dim`], [`DimExpr`],
-//!   [`Shape`], [`Kernel`], [`KernelMode`], [`Op`], [`Block`], [`ValueId`], [`BlockId`],
-//!   [`VarId`], [`Param`], [`TypedSlot`], [`UnaryOpKind`], [`BinOpKind`], [`ActKind`],
-//!   [`ReduceKind`], [`AtomicKind`], [`AtomicScope`], [`CoopTileScope`],
-//!   [`CoopTileAccMode`], [`IndexExpr`], [`KernelCallArg`], [`KernelEntry`]
+//! - **IR types (user-facing):** [`ConstExpr`], [`ConstExprValues`], [`DType`], [`Dim`],
+//!   [`DimExpr`], [`Shape`], [`Kernel`], [`KernelMode`], [`UnaryOpKind`], [`BinOpKind`],
+//!   [`ActKind`], [`ReduceKind`], [`AtomicKind`], [`AtomicScope`], [`CoopTileScope`],
+//!   [`CoopTileAccMode`]
 //! - **Runtime:** [`Context`], [`DispatchResult`], [`DispatchSpec`], [`ResidentBuffer`],
 //!   [`MetalTileError`], [`start_gpu_trace`], [`stop_gpu_trace`]
-//! - **Codegen:** [`MslGenerator`], [`TileSchedule`], [`generator_for_mode`],
-//!   [`CodegenError`]
-//! - **Other:** [`GpuFamily`], [`IdCounter`]
+//! - **Other:** [`GpuFamily`], [`KernelEntry`], [`make_tile`]
 //! - **DSL stubs:** [`Tensor`], [`program_id`], [`load`], [`store`], [`dot`],
 //!   `exp`, `log`, `sqrt`, `rsqrt`, `abs`, `silu`, `gelu`, `relu`, `tanh`,
 //!   `sigmoid`, `sin`, `cos`, `ceil`, `floor`, `recip`
@@ -34,22 +32,17 @@
 
 use std::{marker::PhantomData, ops::Index};
 
-// ═══════════════════════════════════════════════════════════════════════════
-// metaltile-core — IR types, shape algebra, DType system
-// ═══════════════════════════════════════════════════════════════════════════
-
 /// Compile-time symbolic values used in shape annotations and generated IR.
 pub use metaltile_core::constexpr::ConstExpr;
 /// A collection of resolved constexpr values for a specific kernel launch.
 pub use metaltile_core::constexpr::ConstExprValues;
 /// Scalar and tensor element types supported by the IR and MSL codegen.
 pub use metaltile_core::dtype::DType;
-/// Core error type.
-pub use metaltile_core::error::Error;
 /// Apple GPU family inference from Metal device name strings.
 pub use metaltile_core::gpu_family::GpuFamily;
 
-// IR types
+// IR types — user-facing subset (op-kind enums and kernel-level containers).
+// Raw IR plumbing (Op, Block, ValueId, Param, etc.) lives in `metaltile::core::ir`.
 /// Neural activation function kind.
 pub use metaltile_core::ir::ActKind;
 /// Atomic operation kind.
@@ -58,52 +51,34 @@ pub use metaltile_core::ir::AtomicKind;
 pub use metaltile_core::ir::AtomicScope;
 /// Binary operation kind.
 pub use metaltile_core::ir::BinOpKind;
-/// A basic block: a sequence of operations.
-pub use metaltile_core::ir::Block;
-/// Unique identifier for a block.
-pub use metaltile_core::ir::BlockId;
 /// Accumulation mode for cooperative tile matmul.
 pub use metaltile_core::ir::CoopTileAccMode;
 /// Execution scope for cooperative tile operations (simdgroup vs threadgroup).
 pub use metaltile_core::ir::CoopTileScope;
-/// Index expression for loads/stores.
-pub use metaltile_core::ir::IndexExpr;
 /// A complete kernel in the IR.
 pub use metaltile_core::ir::Kernel;
-/// An argument to a cross-kernel call.
-pub use metaltile_core::ir::KernelCallArg;
 /// Kernel execution mode metadata for IR/codegen inspection.
 pub use metaltile_core::ir::KernelMode;
-/// A single operation in the IR.
-pub use metaltile_core::ir::Op;
-/// A kernel parameter: a tensor input or output.
-pub use metaltile_core::ir::Param;
 /// Reduction kind.
 pub use metaltile_core::ir::ReduceKind;
-/// A typed slot for inline MSL outputs and other typed holes.
-pub use metaltile_core::ir::TypedSlot;
 /// Unary math operation kind.
 pub use metaltile_core::ir::UnaryOpKind;
-/// Unique identifier for a value in the IR.
-pub use metaltile_core::ir::ValueId;
-/// Unique identifier for a loop/block-level variable.
-pub use metaltile_core::ir::VarId;
 
 /// Registry entry for a MetalTile kernel available for cross-kernel calling.
+///
+/// You only need this when registering a kernel for use as an inlined callee via the
+/// `inventory::collect!` mechanism. For ordinary `#[kernel]` definitions this is handled
+/// automatically by the macro.
 pub use metaltile_core::kernel_registry::KernelEntry;
 
 /// Shape-building helpers.
 pub use metaltile_core::shape::Dim;
 pub use metaltile_core::shape::DimExpr;
 pub use metaltile_core::shape::Shape;
-pub use metaltile_core::shape::tile;
-
-/// A counter for generating unique IDs.
-pub use metaltile_core::utils::IdCounter;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// metaltile-macros — proc-macro attributes and function-like macros
-// ═══════════════════════════════════════════════════════════════════════════
+/// Build a 2D tile shape at runtime: `make_tile(rows, cols) -> Shape`.
+///
+/// For a compile-time equivalent use the [`tile!`] macro instead.
+pub use metaltile_core::shape::tile as make_tile;
 
 /// Marks a function as a MetalTile kernel.
 pub use metaltile_macros::kernel;
@@ -115,14 +90,10 @@ pub use metaltile_macros::scalar;
 pub use metaltile_macros::strided;
 /// Constructs a `Shape` from dimension expressions.
 pub use metaltile_macros::shape;
-/// Constructs a 2D tile shape.
+/// Constructs a 2D tile shape at macro-expansion time.
 pub use metaltile_macros::tile;
 /// Registers a kernel for automatic benchmarking (place before `#[kernel]`).
 pub use metaltile_macros::bench_kernel;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// metaltile-runtime — GPU dispatch, buffering, tracing
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Metal GPU device and command queue context.
 pub use metaltile_runtime::Context;
@@ -138,23 +109,6 @@ pub use metaltile_runtime::MetalTileError;
 pub use metaltile_runtime::start_gpu_trace;
 /// Stop GPU trace capture.
 pub use metaltile_runtime::stop_gpu_trace;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// metaltile-codegen — MSL lowering, schedule config
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// MSL generator for converting kernel IR to Metal Shading Language.
-pub use metaltile_codegen::MslGenerator;
-/// Tile schedule configuration for codegen.
-pub use metaltile_codegen::TileSchedule;
-/// Select the right MSL generator for a given kernel mode.
-pub use metaltile_codegen::generator_for_mode;
-/// Codegen error (aliased to avoid conflict with core `Error`).
-pub use metaltile_codegen::error::Error as CodegenError;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Prelude-local DSL stubs — panic when called outside #[kernel]
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Placeholder tensor type used in `#[kernel]` signatures.
 ///
