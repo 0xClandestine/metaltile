@@ -38,6 +38,7 @@ jobs:
         run: |
           cp target/release/tile tile
           tar czf tile-aarch64-apple-darwin.tar.gz tile
+          cp .github/scripts/install.sh install.sh
 
       - name: Create GitHub Release
         env:
@@ -51,6 +52,8 @@ jobs:
             --title "$TAG" \
             --generate-notes \
             tile-aarch64-apple-darwin.tar.gz \
+            install.sh \
             || gh release upload "$TAG" \
                  tile-aarch64-apple-darwin.tar.gz \
+                 install.sh \
                  --clobber

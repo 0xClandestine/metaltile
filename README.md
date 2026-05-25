@@ -22,26 +22,13 @@ A Rust-embedded DSL for writing Apple Metal GPU kernels. Write tile-level algori
 
 ## Installation
 
-**Download the latest release binary** (macOS Apple Silicon):
-
 ```sh
-curl -fsSL https://github.com/0xClandestine/metaltile/releases/latest/download/tile-aarch64-apple-darwin.tar.gz \
-  | tar xz -C /usr/local/bin
+curl -fsSL https://github.com/0xClandestine/metaltile/releases/latest/download/install.sh | sh
 ```
 
-Or keep it up to date with `tile update` after the first install.
+Run `tile update` at any time to upgrade to the latest release.
 
-**Install from source** (requires Rust nightly):
-
-```sh
-cargo install --git https://github.com/0xClandestine/metaltile metaltile-cli
-```
-
-Or from a local clone:
-
-```sh
-cargo install --path crates/metaltile-cli
-```
+For contributors building from source, see [Getting Started](docs/getting-started.md).
 
 ## Getting Started
 

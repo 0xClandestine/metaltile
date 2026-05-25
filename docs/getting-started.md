@@ -8,6 +8,22 @@ Get a MetalTile checkout building, tested, and emitting a kernel.
 - **macOS + Metal** — only needed to *run* kernels on the GPU (`tile bench`, GPU correctness tests). The DSL, codegen passes, and MSL emission build and test on any platform; non-Mac CI exercises everything except GPU dispatch.
 - **Xcode command-line tools** (`xcrun metal`) on macOS — the codegen smoke step compiles emitted MSL with the Metal toolchain.
 
+## Install from source
+
+If you want to build and install the `tile` CLI from source rather than using
+the release binary:
+
+```bash
+# From a local clone (recommended for contributors):
+cargo install --path crates/metaltile-cli
+
+# Directly from the repository without cloning:
+cargo install --git https://github.com/0xClandestine/metaltile metaltile-cli
+```
+
+Requires Rust nightly — the toolchain is pinned in `rust-toolchain.toml` and
+installed automatically by `rustup` on first build.
+
 ## Clone and set up
 
 ```bash
