@@ -1,0 +1,5 @@
+error: open-ended ranges are not supported in MetalTile loops
+  --> tests/error/open_ended_range_in_loop.rs:10:15
+   |
+10 |     for _i in 0u32.. {
+   |               ^^^^^^

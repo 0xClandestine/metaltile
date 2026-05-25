@@ -1,0 +1,91 @@
+coverage:
+  precision: 1
+  round: down
+  status:
+    project:
+      default:
+        # Workspace floor — never regress, target lifts as new tests land.
+        target: auto
+        threshold: 0.5%
+        if_ci_failed: error
+    patch:
+      default:
+        target: 80%
+        threshold: 1%
+        if_ci_failed: success
+
+# Per-crate gates. Each crate ratchets against its own current % via
+# `target: auto`, so coverage can only go up. Aspirational floors stay
+# documented in CONTRIBUTING.md `Test coverage` section but aren't
+# enforced as numeric targets here — that just produced noisy red checks
+# while crates were still ramping. The ratchet is the real teeth: any
+# PR that drops a crate's coverage by more than `threshold: 0.5%` fails
+# its flag check.
+flag_management:
+  default_rules:
+    carryforward: true
+  individual_flags:
+    - name: codegen
+      paths:
+        - crates/metaltile-codegen/
+      statuses:
+        - type: project
+          target: auto
+          threshold: 0.5%
+          if_ci_failed: success
+    - name: core
+      paths:
+        - crates/metaltile-core/
+      statuses:
+        - type: project
+          target: auto
+          threshold: 0.5%
+          if_ci_failed: success
+    - name: macros
+      paths:
+        - crates/metaltile-macros/
+      statuses:
+        - type: project
+          target: auto
+          threshold: 0.5%
+          if_ci_failed: success
+    - name: runtime
+      paths:
+        - crates/metaltile-runtime/
+      statuses:
+        - type: project
+          target: auto
+          threshold: 0.5%
+          if_ci_failed: success
+    - name: cli
+      paths:
+        - crates/metaltile-cli/
+      statuses:
+        - type: project
+          target: auto
+          threshold: 0.5%
+          if_ci_failed: success
+
+# Files excluded from the line-coverage denominator:
+#   - facade re-exports (no logic)
+#   - kernel-body files (`#[kernel]` proc-macro consumes the body; the Rust
+#     body never executes, so line coverage is meaningless — correctness is
+#     validated end-to-end via `tile bench` numerical-equiv vs MLX)
+#   - tests, benches, build scripts
+ignore:
+  - "crates/metaltile/src/lib.rs"
+  - "crates/metaltile/src/prelude.rs"
+  - "crates/metaltile-std/src/ffai/**"
+  - "crates/metaltile-std/src/mlx/**"
+  - "**/tests/**"
+  - "**/benches/**"
+  - "**/build.rs"
+  - "target/**"
+
+comment:
+  layout: "header, flags, files, footer"
+  require_changes: true
+  show_carryforward_flags: true
+
+github_checks:
+  annotations: true

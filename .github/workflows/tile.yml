@@ -1,0 +1,186 @@
+name: Tile
+
+# Cancel in-progress runs when a new commit is pushed to the same PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# Slow macOS job: `tile build` + `tile bench` together take ~5-6 min
+# on the GitHub-hosted runner. Skip on PRs that can't affect kernel
+# emission, dispatch, or measurement — docs-only PRs, baseline-JSON
+# additions, README/CONTRIBUTING patches.
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - 'crates/**/*.rs'
+      - 'crates/**/Cargo.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'crates/**/*.rs'
+      - 'crates/**/Cargo.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  # Needed so the bench-diff step can drop a comment on the PR. PRs
+  # from forks still get the read-only token regardless — the step
+  # handles that fallback explicitly.
+  pull-requests: write
+
+env:
+  CLICOLOR_FORCE: 1
+
+jobs:
+  tile:
+    name: Suite
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5.0.0
+      # rust-toolchain.toml pins nightly (edition=2024); the action installs
+      # default but cargo will pick up the toml override automatically.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Build the CLI once and add the release binary to PATH so all
+      # subsequent steps call `tile` directly without cargo overhead.
+      - name: Install tile CLI
+        run: |
+          cargo build --profile ci -p metaltile-cli
+          echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: tile build
+
+      # Diff is opt-in (`--diff`); the next step runs `tile diff` separately.
+      # `--allow-dirty` is defensive — CI checks out
+      # clean, but a future codegen step could mutate a tracked file.
+      - name: Bench
+        run: tile bench -vv --allow-dirty --json /tmp/bench.json
+
+      # Snapshot the raw bench JSON into the committed-baseline format.
+      # snap runs *on the runner* so the `device` field reflects the real
+      # chip — letting a maintainer download it and commit it as
+      # `baselines/<chip-slug>.json`.
+      - name: Snapshot bench result
+        run: |
+          tile snap \
+            --from /tmp/bench.json -o /tmp/bench-snapshot.json \
+            --note "CI runner capture @ ${{ github.sha }} (${{ github.ref_name }})"
+
+      - name: Upload bench snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-snapshot
+          path: /tmp/bench-snapshot.json
+          if-no-files-found: error
+
+      # Soft signal: render `tile diff` against whatever baseline matches
+      # the runner's chip slug and post it as a PR comment. Never fails
+      # the job — the runner chip frequently won't match any committed
+      # baseline, and reviewers want a glanceable trend, not a gate.
+      - name: Bench diff
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          DEVICE_NAME=$(tile device --json | jq -r '.device')
+          # Same rule as `cmd::bench::chip_slug` in the Rust code:
+          # lowercase, collapse non-alphanumeric runs to a single dash,
+          # trim leading/trailing dashes.
+          SLUG=$(printf '%s' "$DEVICE_NAME" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')
+          BL="baselines/${SLUG}.json"
+          echo "chip='${DEVICE_NAME}' slug='${SLUG}' baseline='${BL}'"
+          COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
+          COMMIT_SHORT="${COMMIT_SHA:0:7}"
+
+          {
+            echo "<!-- bench-diff:${SLUG} -->"
+            echo "### \`tile bench\` vs \`${BL}\`"
+            echo
+            echo "Runner chip: \`${DEVICE_NAME}\` (slug \`${SLUG}\`) | commit \`${COMMIT_SHORT}\`"
+            echo
+            if [ ! -f "$BL" ]; then
+              echo "_No committed baseline for this runner chip — skipping diff._"
+              if ls baselines/*.json >/dev/null 2>&1; then
+                echo
+                echo "Available baselines: $(ls baselines/*.json | xargs -n1 basename | tr '\n' ' ')"
+              fi
+            else
+              echo "<details>"
+              echo "<summary>tile diff @ commit \`${COMMIT_SHORT}\`</summary>"
+              echo
+              echo '```'
+              # Strip ANSI colour codes so the PR comment renders cleanly.
+              # `|| true` so a regression exit code (1) doesn't kill the job.
+              tile diff "$BL" /tmp/bench.json 2>&1 \
+                | sed 's/\x1b\[[0-9;]*m//g' || true
+              echo '```'
+              echo
+              echo '</details>'
+            fi
+          } > /tmp/bench-diff-comment.md
+
+          echo "---- bench-diff comment body ----"
+          cat /tmp/bench-diff-comment.md
+          echo "---- end bench-diff comment body ----"
+
+          # Find an existing bench-diff comment by its marker and edit it.
+          # If none exists, create a new one.  This keeps PR threads clean
+          # as new commits come in — one rolling comment, not a pile of them.
+          #
+          # Fork PRs get a read-only GITHUB_TOKEN regardless of the
+          # `pull-requests: write` permission above — GitHub blocks
+          # write tokens to mitigate untrusted-fork attacks. Log a
+          # warning instead of failing the job; the comment body is
+          # already in the step log right above.
+          MARKER="<!-- bench-diff:${SLUG} -->"
+          # `gh --jq` takes a jq expression but NOT `--arg` (that's a
+          # jq-binary flag), so we inline the marker via shell
+          # interpolation instead of `--arg marker $MARKER`. The
+          # marker is a known-safe HTML comment with the runner-slug
+          # in it — no shell or jq metachars to escape.
+          #
+          # The trailing `2>/dev/null || echo ""` makes the lookup
+          # graceful: if gh hits a transient API error, a fork-PR
+          # token rejection, or anything else, EXISTING_ID just ends
+          # up empty and we fall through to the "post a new comment"
+          # path below. Better than failing the whole Bench-diff step
+          # because of a comment-dedup lookup. PR #159 first tried
+          # `gh pr view --json comments | jq -r --arg marker ...`
+          # which fixed the `--arg` tokenisation but introduced a
+          # second failure mode (the pipe propagating jq parse errors
+          # back through `set -o pipefail` on the shebang).
+          EXISTING_ID=$(gh pr view "$PR_NUMBER" --json comments --jq \
+            "[.comments[] | select(.body | contains(\"$MARKER\")) | .id] | first" \
+            2>/dev/null || echo "")
+
+          REPO="${{ github.repository }}"
+          if [ -n "$EXISTING_ID" ]; then
+            echo "Updating existing bench-diff comment #${EXISTING_ID}"
+            if ! gh api "repos/${REPO}/issues/comments/${EXISTING_ID}" \
+                 -X PATCH -F body=@/tmp/bench-diff-comment.md --silent; then
+              echo "::warning::Could not update bench-diff comment (likely a fork PR with read-only token)."
+            fi
+          else
+            echo "Creating new bench-diff comment"
+            if ! gh pr comment "$PR_NUMBER" --body-file /tmp/bench-diff-comment.md; then
+              echo "::warning::Could not post bench-diff comment (likely a fork PR with read-only token). Comment body is in this step log."
+            fi
+          fi

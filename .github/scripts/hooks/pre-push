@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+#
+# pre-push — slower checks (~30-90s) that catch the expensive CI
+# failures BEFORE the push round-trips to GitHub. Runs once per push,
+# not per commit, so the latency is amortised.
+#
+# Covers:
+#   - clippy --workspace --all-targets --tests -- -D warnings
+#     Catches `dead_code`, `unused_*`, `too_many_arguments` (without
+#     allow), `doc_overindented_list_items`, etc.
+#   - kernel_registry_consistency
+#     Host-side; catches the regression class that just broke #61 +
+#     #108 (a `#[kernel] pub fn` without a matching `inventory::submit!`).
+#   - cargo build -p metaltile-std
+#     Sanity check — catches the build-breaking macro / use-import
+#     regressions that fmt-check + clippy don't always see.
+#
+# NOT run here (too slow or environment-specific):
+#   - Full `cargo test --workspace` — runs on macOS CI
+#   - GPU correctness suite — needs Metal
+#   - `tile bench` — multi-minute
+#
+# Bypass with `git push --no-verify` only when you know what you're
+# doing.
+
+set -e
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+echo "→ pre-push: clippy + kernel registry consistency"
+
+if ! make clippy 2>&1 | tail -30; then
+    echo
+    echo "✗ clippy failed. Fix the warnings above and re-push."
+    exit 1
+fi
+
+# Sanity build before running the registry test — `cargo test` would
+# do this anyway, but the failure mode is cleaner if we surface it
+# explicitly first.
+if ! cargo build -p metaltile-std 2>&1 | tail -10; then
+    echo
+    echo "✗ cargo build failed. Fix the errors above and re-push."
+    exit 1
+fi
+
+if ! cargo test -p metaltile-std --test kernel_registry_consistency 2>&1 | tail -15; then
+    echo
+    echo "✗ kernel_registry_consistency failed."
+    echo "  This catches kernels with #[kernel] pub fn but no matching"
+    echo "  inventory::submit! — the regression class that broke #61 + #108."
+    echo "  Add an inventory::submit! { BenchSpec { … } } block to the kernel"
+    echo "  file (see crates/metaltile-std/src/mlx/sgload_smoke.rs for the"
+    echo "  smoke-kernel shape, or crates/metaltile-std/src/ffai/gather.rs"
+    echo "  for the standard shape)."
+    exit 1
+fi
+
+echo "✓ pre-push OK"

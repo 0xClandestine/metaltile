@@ -11,6 +11,13 @@ categories = ["compilers", "hardware-support"]
 
 [dependencies]
 metaltile-core.workspace = true
+inventory.workspace = true
 thiserror.workspace = true
 smallvec.workspace = true
-half.workspace = true
+rustc-hash.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

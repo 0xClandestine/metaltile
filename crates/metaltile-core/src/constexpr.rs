@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! ConstExpr: compile-time constant expressions resolved at kernel specialization time.
 //!
 //! These represent variables like `M`, `N`, `K` in kernel signatures that are
@@ -50,22 +52,25 @@ impl ConstExprValues {
         self.values.insert(name.into(), value);
     }
 
-    /// Get a resolved value. Panics if not found.
+    /// Get a resolved value. Returns an error if not found.
     ///
     /// If `name` is a numeric literal (e.g. "256" from `arange::<256>()`),
     /// it is parsed directly without requiring a mapping entry.
-    pub fn get(&self, name: &str) -> usize {
+    pub fn get(&self, name: &str) -> Result<usize, crate::Error> {
         if let Ok(n) = name.parse::<usize>() {
-            return n;
+            return Ok(n);
         }
-        *self.values.get(name).unwrap_or_else(|| panic!("constexpr '{name}' not resolved"))
+        self.values
+            .get(name)
+            .copied()
+            .ok_or_else(|| crate::Error::UnresolvedConstExpr(name.to_string()))
     }
 
     /// Try to get a resolved value.
     pub fn try_get(&self, name: &str) -> Option<usize> { self.values.get(name).copied() }
 
     /// Resolve a [`ConstExpr`] to its concrete value.
-    pub fn resolve(&self, ce: &ConstExpr) -> usize { self.get(ce.name()) }
+    pub fn resolve(&self, ce: &ConstExpr) -> Result<usize, crate::Error> { self.get(ce.name()) }
 
     /// Iterator over all resolved values.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &usize)> { self.values.iter() }
@@ -75,4 +80,103 @@ impl ConstExprValues {
 
     /// Whether there are no resolved values.
     pub fn is_empty(&self) -> bool { self.values.is_empty() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ctor_and_accessors() {
+        let ce = ConstExpr::new("BLOCK_SIZE");
+        assert_eq!(ce.name(), "BLOCK_SIZE");
+        assert_eq!(format!("{ce}"), "BLOCK_SIZE");
+    }
+
+    #[test]
+    fn from_conversions() {
+        let a: ConstExpr = "M".into();
+        let b: ConstExpr = "M".to_string().into();
+        assert_eq!(a, b);
+        assert_eq!(a.name(), "M");
+    }
+
+    #[test]
+    fn equality_and_ordering() {
+        let a = ConstExpr::new("A");
+        let b = ConstExpr::new("B");
+        assert!(a < b);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn hash_consistent_with_equality() {
+        // `derive(Hash)` must agree with `derive(PartialEq)`: equal
+        // instances hash to the same value. Verified by round-trip
+        // through `HashSet::contains` — would miss the lookup if the
+        // hash didn't agree.
+        use std::collections::HashSet;
+        let mut seen: HashSet<ConstExpr> = HashSet::new();
+        seen.insert(ConstExpr::new("BLOCK_SIZE"));
+        assert!(seen.contains(&ConstExpr::new("BLOCK_SIZE")));
+        assert!(!seen.contains(&ConstExpr::new("OTHER")));
+    }
+
+    #[test]
+    fn values_new_default_and_empty() {
+        let v = ConstExprValues::new();
+        assert!(v.is_empty());
+        assert_eq!(v.len(), 0);
+        let v2: ConstExprValues = Default::default();
+        assert!(v2.is_empty());
+    }
+
+    #[test]
+    fn values_insert_get_try_get() {
+        let mut v = ConstExprValues::new();
+        v.insert("M", 64);
+        v.insert("N".to_string(), 128);
+        assert_eq!(v.len(), 2);
+        assert!(!v.is_empty());
+        assert_eq!(v.get("M").unwrap(), 64);
+        assert_eq!(v.try_get("M"), Some(64));
+        assert_eq!(v.try_get("Z"), None);
+    }
+
+    #[test]
+    fn values_resolve_via_constexpr() {
+        let mut v = ConstExprValues::new();
+        v.insert("K", 256);
+        let ce = ConstExpr::new("K");
+        assert_eq!(v.resolve(&ce).unwrap(), 256);
+    }
+
+    #[test]
+    fn values_get_parses_numeric_literals() {
+        // `arange::<256>()` lowers to a constexpr named "256" — get() must
+        // parse it directly without a mapping entry.
+        let v = ConstExprValues::new();
+        assert_eq!(v.get("256").unwrap(), 256);
+        assert_eq!(v.get("0").unwrap(), 0);
+    }
+
+    #[test]
+    fn values_get_returns_err_on_unresolved_non_numeric() {
+        let result = ConstExprValues::new().get("MISSING");
+        assert!(matches!(result, Err(crate::Error::UnresolvedConstExpr(ref s)) if s == "MISSING"));
+    }
+
+    #[test]
+    fn values_iter_yields_inserted_pairs() {
+        let mut v = ConstExprValues::new();
+        v.insert("A", 1);
+        v.insert("B", 2);
+        let collected: Vec<(&String, &usize)> = v.iter().collect();
+        assert_eq!(collected.len(), 2);
+        // BTreeMap → sorted by key, so A then B
+        assert_eq!(collected[0].0, "A");
+        assert_eq!(*collected[0].1, 1);
+        assert_eq!(collected[1].0, "B");
+        assert_eq!(*collected[1].1, 2);
+    }
 }

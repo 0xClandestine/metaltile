@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! MetalTile codegen: lowers the algorithm IR to Metal Shading Language (MSL).
 //!
 //! This crate performs:
@@ -8,10 +10,10 @@
 //! The output is a valid MSL source string that can be compiled by the
 //! Metal runtime.
 
+pub mod emit;
 pub mod error;
 pub mod msl;
 pub mod passes;
 
 pub use error::{Error, Result};
-pub use msl::MslGenerator;
-pub use passes::tile_lowering::TileSchedule;
+pub use msl::{MslGenerator, config::TileSchedule, generator_for_mode};

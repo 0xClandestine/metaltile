@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Utility types for metaltile-core.
 
 /// A counter for generating unique IDs.
@@ -8,10 +10,14 @@ pub struct IdCounter {
 
 impl IdCounter {
     pub fn new() -> Self { IdCounter { next: 0 } }
+}
 
-    pub fn next(&mut self) -> u32 {
+impl Iterator for IdCounter {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<u32> {
         let id = self.next;
         self.next += 1;
-        id
+        Some(id)
     }
 }

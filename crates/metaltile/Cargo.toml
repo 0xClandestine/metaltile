@@ -14,5 +14,7 @@ categories = ["compilers", "hardware-support"]
 metaltile-core.workspace = true
 metaltile-macros.workspace = true
 metaltile-codegen.workspace = true
-metaltile-interp.workspace = true
 metaltile-runtime.workspace = true
+
+[dev-dependencies]
+trybuild.workspace = true

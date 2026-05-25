@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+#
+# pre-commit — fast local checks (~2-5s total) that catch the cheap CI
+# failures BEFORE the diff hits GitHub.
+#
+# Covers:
+#   - fmt-check  (rustfmt --check across the workspace)
+#   - typos      (catches misspellings like `halfs` / `supress` — bit
+#                 3+ PRs; the backticks keep typos from flagging this
+#                 very comment, see .github/configs/typos-cli.toml)
+#
+# Skipped here (live in pre-push or commit-msg instead):
+#   - clippy (slow, runs on push)
+#   - GPU correctness tests (need Metal)
+#   - banned-term scan (runs in commit-msg, sees the actual message)
+#
+# Bypass with `git commit --no-verify` only when you know what you're
+# doing.
+
+set -e
+# Without pipefail, `make fmt-check 2>&1 | tail -20` returns tail's exit
+# status (always 0), so a failing fmt-check would never trip the `if !`
+# guard below — the hook would print the diff and then say "✓ pre-commit
+# OK". Pipefail propagates the leftmost-failing command's status.
+set -o pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+echo "→ pre-commit: fmt-check + typos"
+
+if ! make fmt-check 2>&1 | tail -20; then
+    echo
+    echo "✗ rustfmt failed. Run 'make fmt' and re-stage."
+    exit 1
+fi
+
+if ! make typos 2>&1 | tail -20; then
+    echo
+    echo "✗ typos check failed. Fix the spelling above and re-stage."
+    exit 1
+fi
+
+echo "✓ pre-commit OK"

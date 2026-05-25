@@ -13,8 +13,6 @@ categories = ["compilers", "hardware-support"]
 proc-macro = true
 
 [dependencies]
-metaltile-core.workspace = true
 syn.workspace = true
 quote.workspace = true
 proc-macro2.workspace = true
-darling.workspace = true

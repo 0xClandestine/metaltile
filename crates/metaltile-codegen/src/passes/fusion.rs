@@ -1,20 +1,62 @@
-//! Fusion pass: merge adjacent elementwise operations into a single FusedElementwise op.
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
+//! Operator Fusion — merge adjacent elementwise operations into FusedElementwise.
 //!
-//! Algorithm:
+//! Fuses chains of elementwise ops (arithmetic, activation, cast) where each
+//! intermediate result has exactly one consumer.  The fused chain is emitted as
+//! a single Metal Shading Language expression, avoiding intermediate register
+//! spills and reducing launch overhead.
+//!
+//! This is an instance of the producer-consumer fusion pattern common in
+//! stencil and deep-learning compilers (Halide, TVM, XLA).
+//!
+//! ## Algorithm
 //! 1. Build def-use graph: for each ValueId, which op indices use it?
 //! 2. Find chains where each op produces a value used only by the next op.
 //! 3. Create an `Op::FusedElementwise` containing the whole chain.
 //! 4. Replace the original ops; the MSL emitter then emits a single expression.
+//!
+//! ## Limitations
+//! - Only elementwise ops are fused; reductions, loads, and stores are excluded.
+//! - Fused chains are limited to `MAX_FUSED_OPS` (default 8) to keep MSL
+//!   expressions debuggable.
+//! - Does not fuse across block boundaries or loop iterations.
+//!
+//! ## References
+//! - Ragan-Kelley, Barnes, Adams, Paris, Durand & Amarasinghe (2013),
+//!   "Halide: A Language and Compiler for Optimizing Parallelism, Locality,
+//!   and Recomputation in Image Processing Pipelines", PLDI 2013.
+//!   Introduced the schedule-separated operator fusion model.
+//! - Chen, Moreau, Jiang et al. (2018), "TVM: An Automated End-to-End
+//!   Optimizing Compiler for Deep Learning", OSDI 2018.  Operator fusion
+//!   in the deep-learning compiler context.
+//!   https://arxiv.org/abs/1802.04799
+//! - Google (2017), "XLA: Optimizing Compiler for Machine Learning",
+//!   TensorFlow blog.  Production operator fusion for ML workloads.
+//!   https://developers.googleblog.com/xla-tensorflow-compiled/
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use metaltile_core::{
-    error::Result,
-    ir::{Block, BlockId, IndexExpr, Kernel, Op, ValueId},
-};
+use metaltile_core::ir::{Block, BlockId, Kernel, Op, ValueId};
+use rustc_hash::{FxHashMap, FxHashSet};
+
+use super::remap::op_value_refs;
+use crate::error::{Error, Result};
 
 /// Mask for encoding internal sub-op references within FusedElementwise chains.
 pub const SUB_OP_FLAG: u32 = 0x8000_0000;
+
+/// Tag for loop-variable `ValueId`s (`emit_block` encodes a loop var as
+/// `LOOP_VAR_FLAG | VarId`). It shares `SUB_OP_FLAG`'s top bit, so any
+/// `raw & SUB_OP_FLAG` test must first exclude loop vars via
+/// [`is_sub_op_ref`] — a loop var is *not* a fused sub-op reference.
+pub const LOOP_VAR_FLAG: u32 = 0xC000_0000;
+
+/// True when `raw` is a genuine fused-chain sub-op reference — the top bit
+/// set, but not the loop-var pattern (`0xC000_0000`).
+pub fn is_sub_op_ref(raw: u32) -> bool {
+    raw & SUB_OP_FLAG != 0 && raw & LOOP_VAR_FLAG != LOOP_VAR_FLAG
+}
 
 /// Create a ValueId that references the result of sub-op at position `idx`
 /// within a FusedElementwise chain.
@@ -26,23 +68,20 @@ impl super::Pass for FusionPass {
     fn name(&self) -> &str { "fusion" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
+        let mut total_chains = 0usize;
         // Build a map: ValueId → the BlockId that defines (produces) it.
-        let mut def_block: BTreeMap<ValueId, BlockId> = BTreeMap::new();
-        for result in &kernel.body.results {
-            if let Some(vid) = result {
-                def_block.insert(*vid, kernel.body.id);
-            }
+        let mut def_block: FxHashMap<ValueId, BlockId> = FxHashMap::default();
+        for vid in kernel.body.results.iter().flatten() {
+            def_block.insert(*vid, kernel.body.id);
         }
         for (bid, block) in &kernel.blocks {
-            for result in &block.results {
-                if let Some(vid) = result {
-                    def_block.insert(*vid, *bid);
-                }
+            for vid in block.results.iter().flatten() {
+                def_block.insert(*vid, *bid);
             }
         }
 
         // Build a map: ValueId → set of BlockIds that reference (use) it.
-        let mut used_in: BTreeMap<ValueId, BTreeSet<BlockId>> = BTreeMap::new();
+        let mut used_in: FxHashMap<ValueId, FxHashSet<BlockId>> = FxHashMap::default();
         for op in &kernel.body.ops {
             for vid in op_value_refs(op) {
                 used_in.entry(vid).or_default().insert(kernel.body.id);
@@ -60,7 +99,7 @@ impl super::Pass for FusionPass {
         // defined in B but used in at least one other block (i.e. a child block).
         // Pinned values must not be fused away — they need a standalone declaration
         // so that child blocks can reference the variable by name.
-        let mut pinned_per_block: BTreeMap<BlockId, BTreeSet<ValueId>> = BTreeMap::new();
+        let mut pinned_per_block: FxHashMap<BlockId, BTreeSet<ValueId>> = FxHashMap::default();
         for (vid, def_bid) in &def_block {
             if let Some(use_bids) = used_in.get(vid) {
                 for &use_bid in use_bids {
@@ -74,7 +113,7 @@ impl super::Pass for FusionPass {
 
         // Fuse the kernel body block.
         let body_pins = pinned_per_block.get(&kernel.body.id).cloned().unwrap_or_default();
-        fuse_block(&mut kernel.body, &body_pins);
+        fuse_block(&mut kernel.body, &body_pins)?;
 
         // Fuse all nested blocks (loop bodies, if/else branches) with their own
         // per-block pinned sets so values used in grandchild blocks are preserved.
@@ -82,9 +121,18 @@ impl super::Pass for FusionPass {
         for bid in block_ids {
             let pins = pinned_per_block.get(&bid).cloned().unwrap_or_default();
             if let Some(block) = kernel.blocks.get_mut(&bid) {
-                fuse_block(block, &pins);
+                fuse_block(block, &pins)?;
             }
         }
+
+        // Count total FusedElementwise ops created across all blocks.
+        total_chains +=
+            kernel.body.ops.iter().filter(|op| matches!(op, Op::FusedElementwise { .. })).count();
+        for block in kernel.blocks.values() {
+            total_chains +=
+                block.ops.iter().filter(|op| matches!(op, Op::FusedElementwise { .. })).count();
+        }
+        tracing::debug!(chains = total_chains, "fusion pass complete");
         Ok(())
     }
 }
@@ -93,10 +141,10 @@ impl super::Pass for FusionPass {
 // Fusion on a single block
 // ---------------------------------------------------------------------------
 
-fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
+fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) -> Result<()> {
     // Phase 1: build def-use graph.
     // uses[vid] = set of op indices that reference vid.
-    let mut uses: BTreeMap<ValueId, Vec<usize>> = BTreeMap::new();
+    let mut uses: FxHashMap<ValueId, Vec<usize>> = FxHashMap::default();
     for (i, op) in block.ops.iter().enumerate() {
         for vid in op_value_refs(op) {
             uses.entry(vid).or_default().push(i);
@@ -107,7 +155,7 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
     // A chain ends at an op C where C does NOT have exactly one user.
     // Walk backward from the last op, collecting fusible producers.
     let n = block.ops.len();
-    let mut fused: BTreeSet<usize> = BTreeSet::new(); // op indices already in a fused chain.
+    let mut fused: FxHashSet<usize> = FxHashSet::default(); // op indices already in a fused chain.
     let mut chains: Vec<Vec<usize>> = Vec::new();
 
     for i in (0..n).rev() {
@@ -122,11 +170,7 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
         let mut chain: Vec<usize> = vec![i];
         let mut cursor = i;
 
-        loop {
-            // Find the immediate producer of cursor's first value input.
-            let Some(prev_result) = first_value_input(&block.ops[cursor]) else {
-                break;
-            };
+        while let Some(prev_result) = first_value_input(&block.ops[cursor]) {
             // Find which op in this block produced prev_result.
             let Some(prev_idx) = block.results.iter().position(|r| *r == Some(prev_result)) else {
                 break;
@@ -135,13 +179,8 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
             // - Be fusible
             // - Produce a value used ONLY by cursor (single-use)
             // - Come before cursor in the block
-            if prev_idx >= cursor {
-                break;
-            }
-            if !is_fusible(&block.ops[prev_idx]) {
-                break;
-            }
-            if fused.contains(&prev_idx) {
+            if prev_idx >= cursor || !is_fusible(&block.ops[prev_idx]) || fused.contains(&prev_idx)
+            {
                 break;
             }
             let use_count = uses.get(&prev_result).map(|v| v.len()).unwrap_or(0);
@@ -159,7 +198,7 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
             // FusedElementwise typed by type_env, which may disagree with the Metal
             // compiler's type deduction (e.g., uint arithmetic typed as float).
             let terminal_vid = block.results.get(chain[0]).and_then(|r| *r);
-            if terminal_vid.map_or(false, |v| pinned.contains(&v)) {
+            if terminal_vid.is_some_and(|v| pinned.contains(&v)) {
                 continue;
             }
             // Reverse so ops are in execution order (producer first).
@@ -172,7 +211,7 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
     }
 
     if chains.is_empty() {
-        return;
+        return Ok(());
     }
 
     // Phase 3: rewrite the block — replace chains with FusedElementwise.
@@ -184,7 +223,7 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
 
     // Build a mapping: old op index → new ValueId for its result (if it survives).
     // For ops in fused chains, their results are replaced by the chain's output vid.
-    let mut chain_result_map: BTreeMap<usize, ValueId> = BTreeMap::new();
+    let mut chain_result_map: FxHashMap<usize, ValueId> = FxHashMap::default();
 
     // Pre-compute: for each chain, what is its output ValueId?
     // The output ValueId is the result of the LAST op in the chain.
@@ -199,7 +238,7 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
 
     // Also track which old indices should be skipped (they're in a fused chain,
     // but not the last one — only the last one gets emitted).
-    let mut skip_indices: BTreeSet<usize> = BTreeSet::new();
+    let mut skip_indices: FxHashSet<usize> = FxHashSet::default();
     for chain in &chains {
         for &idx in chain.iter().take(chain.len() - 1) {
             skip_indices.insert(idx);
@@ -211,7 +250,7 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
     // it should reference the chain's output ValueId.
     fn remap_value(
         v: &mut ValueId,
-        chain_map: &BTreeMap<usize, ValueId>,
+        chain_map: &FxHashMap<usize, ValueId>,
         old_results: &[Option<ValueId>],
     ) {
         for (&old_idx, &new_vid) in chain_map {
@@ -222,71 +261,22 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
         }
     }
 
-    fn remap_op(
-        op: &mut Op,
-        chain_map: &BTreeMap<usize, ValueId>,
-        old_results: &[Option<ValueId>],
-    ) {
-        match op {
-            Op::BinOp { lhs, rhs, .. } => {
-                remap_value(lhs, chain_map, old_results);
-                remap_value(rhs, chain_map, old_results);
-            },
-            Op::UnaryOp { value, .. }
-            | Op::Activation { value, .. }
-            | Op::Cast { value, .. }
-            | Op::Reduce { value, .. }
-            | Op::Transpose { value }
-            | Op::Slice { value, .. }
-            | Op::Broadcast { value, .. } => {
-                remap_value(value, chain_map, old_results);
-            },
-            Op::Select { cond, on_true, on_false } => {
-                remap_value(cond, chain_map, old_results);
-                remap_value(on_true, chain_map, old_results);
-                remap_value(on_false, chain_map, old_results);
-            },
-            Op::Dot { a, b } => {
-                remap_value(a, chain_map, old_results);
-                remap_value(b, chain_map, old_results);
-            },
-            Op::Store { value, .. } => {
-                remap_value(value, chain_map, old_results);
-            },
-            Op::Loop { start, end, step, .. } => {
-                remap_value(start, chain_map, old_results);
-                remap_value(end, chain_map, old_results);
-                remap_value(step, chain_map, old_results);
-            },
-            Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => {
-                remap_value(value, chain_map, old_results);
-            },
-            Op::ThreadgroupStore { index, value, .. } => {
-                remap_value(index, chain_map, old_results);
-                remap_value(value, chain_map, old_results);
-            },
-            Op::SimdReduce { value, .. } | Op::ArgReduce { value, .. } => {
-                remap_value(value, chain_map, old_results);
-            },
-            _ => {},
-        }
-    }
-
     let old_ops_snapshot = old_ops.clone();
     for (i, mut op) in old_ops.into_iter().enumerate() {
         if skip_indices.contains(&i) {
             continue; // op is fused into a chain — skip it.
         }
 
-        // Remap value references.
-        remap_op(&mut op, &chain_result_map, &old_results);
+        // Remap value references: replace any ValueId produced by a fused
+        // chain member with the chain's output ValueId.
+        op.for_each_value_id_mut(&mut |v| remap_value(v, &chain_result_map, &old_results));
 
         // If this op is the last in a fused chain, emit the FusedElementwise instead.
         if let Some(chain) = chains.iter().find(|c| c[c.len() - 1] == i) {
             let fused_ops: Vec<Op> = chain
                 .iter()
                 .map(|&idx| build_fused_sub_op(idx, chain, &old_ops_snapshot, &old_results))
-                .collect();
+                .collect::<Result<Vec<Op>>>()?;
             new_ops.push(Op::FusedElementwise { ops: fused_ops });
             new_results.push(old_results.get(i).copied().unwrap_or(None));
         } else {
@@ -297,6 +287,7 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
 
     block.ops = new_ops;
     block.results = new_results;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -304,180 +295,10 @@ fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) {
 // ---------------------------------------------------------------------------
 
 /// Returns true if the op is an elementwise op that can participate in fusion.
-fn is_fusible(op: &Op) -> bool {
-    matches!(
-        op,
-        Op::BinOp { .. }
-            | Op::UnaryOp { .. }
-            | Op::Activation { .. }
-            | Op::Cast { .. }
-            | Op::Select { .. }
-            | Op::Zeros { .. }
-            | Op::Splat { .. }
-            | Op::Broadcast { .. }
-    )
-}
-
-/// Return all ValueId references in an op.
-fn op_value_refs(op: &Op) -> Vec<ValueId> {
-    let mut refs = Vec::new();
-    match op {
-        Op::BinOp { lhs, rhs, .. } => {
-            refs.push(*lhs);
-            refs.push(*rhs);
-        },
-        Op::UnaryOp { value, .. }
-        | Op::Activation { value, .. }
-        | Op::Cast { value, .. }
-        | Op::Reduce { value, .. }
-        | Op::Transpose { value }
-        | Op::Slice { value, .. }
-        | Op::Broadcast { value, .. } => {
-            refs.push(*value);
-        },
-        Op::Select { cond, on_true, on_false } => {
-            refs.push(*cond);
-            refs.push(*on_true);
-            refs.push(*on_false);
-        },
-        Op::Dot { a, b } => {
-            refs.push(*a);
-            refs.push(*b);
-        },
-        Op::Load { indices, mask, .. } => {
-            for ix in indices {
-                if let IndexExpr::Value(v) | IndexExpr::Range(v, _) = ix {
-                    refs.push(*v);
-                }
-            }
-            if let Some(m) = mask {
-                refs.push(*m);
-            }
-        },
-        Op::Store { indices, value, mask, .. } => {
-            for ix in indices {
-                if let IndexExpr::Value(v) | IndexExpr::Range(v, _) = ix {
-                    refs.push(*v);
-                }
-            }
-            refs.push(*value);
-            if let Some(m) = mask {
-                refs.push(*m);
-            }
-        },
-        Op::Loop { start, end, step, .. } => {
-            refs.push(*start);
-            refs.push(*end);
-            refs.push(*step);
-        },
-        Op::InlineMsl { inputs, .. } => {
-            refs.extend(inputs);
-        },
-        Op::FlashAttention { q, k, v, .. } => {
-            refs.push(*q);
-            refs.push(*k);
-            refs.push(*v);
-        },
-        Op::SlidingWindowAttention { q, k, v, .. } => {
-            refs.push(*q);
-            refs.push(*k);
-            refs.push(*v);
-        },
-        Op::RmsNorm { x, scale, .. } => {
-            refs.push(*x);
-            refs.push(*scale);
-        },
-        Op::GatedMlp { x, gate_proj, up_proj, down_proj } => {
-            refs.push(*x);
-            refs.push(*gate_proj);
-            refs.push(*up_proj);
-            refs.push(*down_proj);
-        },
-        Op::FusedElementwise { ops } =>
-            for sub in ops {
-                refs.extend(op_value_refs(sub));
-            },
-        Op::VectorLoad { byte_offset, .. } => {
-            refs.push(*byte_offset);
-        },
-        Op::VectorStore { byte_offset, value, .. } => {
-            refs.push(*byte_offset);
-            refs.push(*value);
-        },
-        Op::StrideReduce { offset, stride, end, .. } => {
-            refs.push(*offset);
-            refs.push(*stride);
-            refs.push(*end);
-        },
-        Op::If { cond, .. } => {
-            refs.push(*cond);
-        },
-        Op::ExpandDims { value, .. } => {
-            refs.push(*value);
-        },
-        Op::Reshape { value, .. } => {
-            refs.push(*value);
-        },
-        Op::Cat { values, .. } => {
-            refs.extend(values);
-        },
-        Op::Gather { indices, .. } => {
-            refs.push(*indices);
-        },
-        Op::Scatter { indices, value, .. } => {
-            refs.push(*indices);
-            refs.push(*value);
-        },
-        Op::Atomic { index, value, .. } => {
-            refs.push(*index);
-            refs.push(*value);
-        },
-        Op::Scan { value, .. } => {
-            refs.push(*value);
-        },
-        Op::StrideScan { offset, end, .. } => {
-            refs.push(*offset);
-            refs.push(*end);
-        },
-        Op::StrideArgReduce { offset, end, .. } => {
-            refs.push(*offset);
-            refs.push(*end);
-        },
-        Op::DeclareLocal { value, .. } | Op::SetLocal { value, .. } => {
-            refs.push(*value);
-        },
-        Op::StrideStore { offset, end, scalar, .. } => {
-            refs.push(*offset);
-            refs.push(*end);
-            refs.push(*scalar);
-        },
-        Op::ThreadgroupLoad { index, .. } => {
-            refs.push(*index);
-        },
-        Op::ThreadgroupStore { index, value, .. } => {
-            refs.push(*index);
-            refs.push(*value);
-        },
-        Op::SimdReduce { value, .. } | Op::ArgReduce { value, .. } => {
-            refs.push(*value);
-        },
-        _ => {},
-    }
-    refs
-}
+fn is_fusible(op: &Op) -> bool { op.is_elementwise() }
 
 /// Return the first ValueId input of an op (used to trace the chain backward).
-fn first_value_input(op: &Op) -> Option<ValueId> {
-    match op {
-        Op::BinOp { lhs, .. }
-        | Op::UnaryOp { value: lhs, .. }
-        | Op::Activation { value: lhs, .. }
-        | Op::Cast { value: lhs, .. }
-        | Op::Select { cond: lhs, .. }
-        | Op::Broadcast { value: lhs, .. } => Some(*lhs),
-        _ => None,
-    }
-}
+fn first_value_input(op: &Op) -> Option<ValueId> { op.value_refs().first().map(|v| **v) }
 
 /// Build a sub-op for a FusedElementwise chain.
 /// Rewrites ValueId references: external ValueIds stay as-is, internal
@@ -487,19 +308,21 @@ fn build_fused_sub_op(
     chain: &[usize],
     old_ops: &[Op],
     old_results: &[Option<ValueId>],
-) -> Op {
+) -> Result<Op> {
     let op = old_ops[idx].clone();
-    let pos_in_chain = chain.iter().position(|&c| c == idx).unwrap();
+    let pos_in_chain = chain
+        .iter()
+        .position(|&c| c == idx)
+        .ok_or_else(|| Error::OpNotFound(format!("chain position for op {idx}")))?;
 
     let map = |v: &mut ValueId| {
         // If this ValueId is produced by a previous op in the same chain,
         // encode it as an internal reference.
         if let Some(producer_pos) =
             chain.iter().position(|&c| c < old_results.len() && old_results[c] == Some(*v))
+            && producer_pos < pos_in_chain
         {
-            if producer_pos < pos_in_chain {
-                *v = sub_op_ref(producer_pos);
-            }
+            *v = sub_op_ref(producer_pos);
         }
     };
 
@@ -526,5 +349,167 @@ fn build_fused_sub_op(
         _ => {},
     }
 
-    new_op
+    Ok(new_op)
+}
+
+#[cfg(test)]
+mod tests {
+    use metaltile_core::{
+        dtype::DType,
+        ir::{ActKind, BinOpKind, UnaryOpKind},
+        shape::Shape,
+    };
+
+    use super::*;
+    use crate::passes::Pass;
+
+    #[test]
+    fn fuses_exp_into_activation() {
+        // UnaryOp(Exp) → Activation(Silu): should fuse into FusedElementwise.
+        let mut k = Kernel::new("fuse_exp_silu");
+        k.body.push_op(
+            Op::Splat { value: 1.0, dtype: DType::F32, shape: Shape::scalar() },
+            ValueId::new(0),
+        );
+        k.body
+            .push_op(Op::UnaryOp { op: UnaryOpKind::Exp, value: ValueId::new(0) }, ValueId::new(1));
+        k.body.push_op(Op::Cast { value: ValueId::new(1), dtype: DType::F32 }, ValueId::new(2));
+        k.body.push_op(
+            Op::Activation { kind: ActKind::Silu, value: ValueId::new(2) },
+            ValueId::new(3),
+        );
+        // Store the result so the chain isn't DCE'd.
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(3),
+            mask: None,
+        });
+        FusionPass.run(&mut k).unwrap();
+        let has_fused = k.body.ops.iter().any(|op| matches!(op, Op::FusedElementwise { .. }));
+        assert!(has_fused, "exp → cast → silu chain should fuse into FusedElementwise");
+    }
+
+    #[test]
+    fn fuses_cast_unary_chain() {
+        let mut k = Kernel::new("fuse_cast_neg");
+        k.body.push_op(
+            Op::Splat { value: 2.0, dtype: DType::F32, shape: Shape::scalar() },
+            ValueId::new(0),
+        );
+        k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::F16 }, ValueId::new(1));
+        k.body
+            .push_op(Op::UnaryOp { op: UnaryOpKind::Neg, value: ValueId::new(1) }, ValueId::new(2));
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(2),
+            mask: None,
+        });
+        FusionPass.run(&mut k).unwrap();
+        let has_fused = k.body.ops.iter().any(|op| matches!(op, Op::FusedElementwise { .. }));
+        assert!(has_fused, "cast → neg chain should fuse");
+    }
+
+    #[test]
+    fn multi_use_breaks_chain() {
+        // When an intermediate value has two users, chain breaks.
+        let mut k = Kernel::new("fuse_multiuse");
+        k.body.push_op(
+            Op::Splat { value: 1.0, dtype: DType::F32, shape: Shape::scalar() },
+            ValueId::new(0),
+        );
+        k.body
+            .push_op(Op::UnaryOp { op: UnaryOpKind::Exp, value: ValueId::new(0) }, ValueId::new(1));
+        // v1 has two users: activation AND a separate add.
+        k.body.push_op(
+            Op::Activation { kind: ActKind::Silu, value: ValueId::new(1) },
+            ValueId::new(2),
+        );
+        k.body.push_op(
+            Op::BinOp { op: BinOpKind::Add, lhs: ValueId::new(1), rhs: ValueId::new(1) },
+            ValueId::new(3),
+        );
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(2),
+            mask: None,
+        });
+        k.body.push_op_no_result(Op::Store {
+            dst: "out2".into(),
+            indices: vec![],
+            value: ValueId::new(3),
+            mask: None,
+        });
+        FusionPass.run(&mut k).unwrap();
+        // Splat+Exp may fuse into one FusedElementwise (v0→v1 is single-use).
+        // But Silu should NOT be fused into the same chain because v1 is multi-use.
+        let has_silu =
+            k.body.ops.iter().any(|op| matches!(op, Op::Activation { kind: ActKind::Silu, .. }));
+        assert!(has_silu, "Silu with multi-use input should not be fused");
+        let has_add =
+            k.body.ops.iter().any(|op| matches!(op, Op::BinOp { op: BinOpKind::Add, .. }));
+        assert!(has_add, "Add should not be fused");
+    }
+
+    #[test]
+    fn non_fusible_op_breaks_chain() {
+        // A Load in the middle should prevent fusion.
+        let mut k = Kernel::new("fuse_load_break");
+        // Note: Load needs a param. But for simplicity, test with non-fusible ops.
+        k.body.push_op(
+            Op::Splat { value: 1.0, dtype: DType::F32, shape: Shape::scalar() },
+            ValueId::new(0),
+        );
+        k.body
+            .push_op(Op::UnaryOp { op: UnaryOpKind::Exp, value: ValueId::new(0) }, ValueId::new(1));
+        // Transpose is not fusible, breaks chain.
+        k.body.push_op(Op::Transpose { value: ValueId::new(1) }, ValueId::new(2));
+        k.body
+            .push_op(Op::UnaryOp { op: UnaryOpKind::Neg, value: ValueId::new(2) }, ValueId::new(3));
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(3),
+            mask: None,
+        });
+        FusionPass.run(&mut k).unwrap();
+        // Exp should not fuse with Neg because Transpose is in between.
+        let has_transpose = k.body.ops.iter().any(|op| matches!(op, Op::Transpose { .. }));
+        assert!(has_transpose, "Transpose should remain as its own op");
+    }
+
+    #[test]
+    fn fuses_select_chain() {
+        let mut k = Kernel::new("fuse_select");
+        k.body.push_op(
+            Op::Splat { value: 1.0, dtype: DType::F32, shape: Shape::scalar() },
+            ValueId::new(0),
+        );
+        k.body.push_op(
+            Op::Splat { value: 2.0, dtype: DType::F32, shape: Shape::scalar() },
+            ValueId::new(1),
+        );
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(2));
+        k.body.push_op(
+            Op::Select {
+                cond: ValueId::new(2),
+                on_true: ValueId::new(0),
+                on_false: ValueId::new(1),
+            },
+            ValueId::new(3),
+        );
+        k.body
+            .push_op(Op::UnaryOp { op: UnaryOpKind::Abs, value: ValueId::new(3) }, ValueId::new(4));
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![],
+            value: ValueId::new(4),
+            mask: None,
+        });
+        FusionPass.run(&mut k).unwrap();
+        let has_fused = k.body.ops.iter().any(|op| matches!(op, Op::FusedElementwise { .. }));
+        assert!(has_fused, "select → abs chain should fuse");
+    }
 }

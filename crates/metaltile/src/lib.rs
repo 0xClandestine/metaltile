@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! MetalTile facade crate.
 //!
 //! `metaltile` re-exports the DSL macros, compile-time placeholder types, IR/codegen crates,
@@ -86,10 +88,8 @@ pub use metaltile_codegen as codegen;
 pub use metaltile_codegen::error::Error as CodegenError;
 /// Core IR, dtype, shape, and constexpr definitions.
 pub use metaltile_core as core;
-/// CPU interpreter for running IR without Metal.
-pub use metaltile_interp as interp;
 /// Proc macros and helper macros used by kernel definitions.
-pub use metaltile_macros::{constexpr, kernel, shape, tile};
+pub use metaltile_macros::{bench_kernel, constexpr, kernel, scalar, shape, strided, tile};
 /// Runtime context, dispatch result, and top-level runtime error.
 pub use metaltile_runtime::{Context, DispatchResult, MetalTileError};
 /// Placeholder tensor marker used in `#[kernel]` signatures.

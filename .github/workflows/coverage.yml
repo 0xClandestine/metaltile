@@ -1,0 +1,74 @@
+name: Coverage
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**/*.rs'
+      - 'crates/**/Cargo.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/configs/codecov.yml'
+      - '.github/workflows/coverage.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CLICOLOR: 1
+  CARGO_INCREMENTAL: "0"     # instrumented builds don't benefit from incremental
+
+jobs:
+  coverage:
+    name: llvm-cov (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5.0.0
+
+      # rust-toolchain.toml pins nightly (edition=2024); the action installs
+      # the default channel but cargo picks up the toml override automatically.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Instrumented artifacts are NOT cache-compatible with the regular
+          # `cargo test` artifacts; key this cache separately so the Tests +
+          # Kernels jobs in check.yml don't get poisoned.
+          key: coverage
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage (codecov format)
+        run: |
+          cargo llvm-cov --workspace --codecov \
+            --output-path coverage.json \
+            --ignore-filename-regex '(crates/metaltile/src/(lib|prelude)\.rs|crates/metaltile-std/src/(ffai|mlx)/.*\.rs|tests/|benches/|build\.rs)'
+
+      - name: Upload to Codecov
+        # No `token:` — this is a public repo, so `codecov-action@v5`
+        # uploads tokenlessly via GitHub OIDC. `fail_ci_if_error: false`
+        # keeps codecov outages from blocking PRs.
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.json
+          codecov_yml_path: .github/configs/codecov.yml
+          fail_ci_if_error: false
+          verbose: true
+
+      - name: Coverage summary in job log
+        if: always()
+        run: cargo llvm-cov report --summary-only

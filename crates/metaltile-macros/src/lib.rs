@@ -1,16 +1,19 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! MetalTile proc macros: `#[kernel]`, `shape!`, `tile!`, `#[autotune]`.
 //!
 //! These macros parse user-written Rust functions and transform them
 //! into MetalTile IR and host-side launch code.
 
+mod bench_impl;
 mod body_parser;
-
-use std::collections::BTreeSet;
+mod derive_op;
+mod sig_parser;
 
 use body_parser::DslBodyParser;
-use darling::FromMeta;
 use proc_macro::TokenStream;
 use quote::quote;
+use sig_parser::{extract_constexprs_typed, extract_param_names, parse_kernel_params_generic};
 use syn::{ItemFn, parse_macro_input};
 
 // ---------------------------------------------------------------------------
@@ -43,6 +46,56 @@ use syn::{ItemFn, parse_macro_input};
 ///     store(c[idx], x + y);
 /// }
 /// ```
+/// Derive `Op::value_refs()` and `Op::for_each_value_id_mut()`.
+///
+/// Annotate `ValueId` fields with `#[vid]`, `#[vid_opt]`, `#[vid_vec]`,
+/// `#[vid_exprs]`, or `#[vid_recursive]`. See `derive_op` module docs for details.
+#[proc_macro_derive(ValueRefs, attributes(vid, vid_opt, vid_vec, vid_exprs, vid_recursive))]
+pub fn derive_value_refs(input: TokenStream) -> TokenStream { derive_op::derive_value_refs(input) }
+
+/// Derive op-flag predicates (`is_elementwise`, `has_side_effects`, etc.).
+///
+/// Annotate variants with `#[elementwise]`, `#[side_effect]`, `#[unpredictable]`,
+/// `#[cheap_alu]`, or `#[op_load]`. See `derive_op` module docs for details.
+#[proc_macro_derive(
+    OpFlags,
+    attributes(
+        elementwise,
+        side_effect,
+        unpredictable,
+        cheap_alu,
+        op_load,
+        op_store,
+        barrier,
+        op_loop,
+        op_if,
+        op_fused,
+        op_const,
+        shape_op,
+        needs_simd_lane,
+        needs_simd_group,
+        needs_simdgroup_matrix,
+        needs_simd_product,
+        no_result,
+        result_u32,
+        result_i32,
+        result_f32_scalar,
+        result_f16_scalar,
+        result_same_type,
+        result_custom
+    )
+)]
+pub fn derive_op_flags(input: TokenStream) -> TokenStream { derive_op::derive_op_flags(input) }
+
+/// Derive `Op::variant_name()` — returns the variant identifier as a &'static str.
+///
+/// Supports `#[variant_name("CustomName")]` on variants that need a display name different
+/// from their Rust identifier.
+#[proc_macro_derive(VariantName, attributes(variant_name))]
+pub fn derive_variant_name(input: TokenStream) -> TokenStream {
+    derive_op::derive_variant_name(input)
+}
+
 #[proc_macro_attribute]
 pub fn constexpr(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // Pass-through: just marks a parameter as a constexpr for #[kernel] to detect
@@ -101,9 +154,9 @@ fn expand_kernel(input_fn: ItemFn) -> TokenStream {
 
     // Parse function signature for tensor parameters and constexprs
     let param_decls = parse_kernel_params_generic(&input_fn.sig, &type_var_map);
-    let param_names: Vec<String> = extract_param_names(&input_fn.sig);
     let constexpr_info = extract_constexprs_typed(&input_fn.sig);
     let constexpr_names: Vec<String> = constexpr_info.iter().map(|(n, _)| n.clone()).collect();
+    let param_names = extract_param_names(&input_fn.sig);
 
     // Parse the DSL body into IR-building token stream
     let body_ir = DslBodyParser::parse_with_type_vars(
@@ -132,7 +185,7 @@ fn expand_kernel(input_fn: ItemFn) -> TokenStream {
     let expanded = quote! {
         #vis mod #fn_name {
             use super::*;
-            use metaltile_core::ir::{Kernel, Block, Op, ValueId, BlockId, VarId, Param, ParamKind, TypedSlot, ConstExprDecl, BinOpKind, ReduceKind, AttnParams, IndexExpr, UnaryOpKind, ActKind};
+            use metaltile_core::ir::{Kernel, Block, Op, ValueId, BlockId, VarId, Param, ParamKind, TypedSlot, ConstExprDecl, BinOpKind, ReduceKind, AtomicKind, AtomicScope, IndexExpr, UnaryOpKind, ActKind, KernelCallArg, CoopTileAccMode, CoopTileScope};
             use metaltile_core::shape::{Shape, Dim};
             use metaltile_core::dtype::DType;
             use metaltile_core::constexpr::ConstExpr;
@@ -199,267 +252,24 @@ fn expand_kernel(input_fn: ItemFn) -> TokenStream {
             pub fn launch(ctx: &metaltile_runtime::Context) -> LaunchBuilder<'_> {
                 LaunchBuilder::new(ctx)
             }
+
+            // Use `const _: ()` hygiene scope so `__build_for_inline` does not
+            // leak into the enclosing module's namespace.
+            const _: () = {
+                fn __build_for_inline(dtypes: &[metaltile_core::dtype::DType]) -> metaltile_core::ir::Kernel {
+                    #[allow(unused_variables)]
+                    let _t = dtypes.first().copied().unwrap_or(metaltile_core::dtype::DType::F32);
+                    kernel_ir_for(#(#arg_var_idents),*)
+                }
+
+                metaltile_core::inventory::submit! {
+                    metaltile_core::KernelEntry::new(#fn_name_str, __build_for_inline)
+                }
+            };
         }
     };
 
     TokenStream::from(expanded)
-}
-
-/// Parse tensor parameters from function signature into IR param declarations.
-/// `type_vars` maps type-param names (e.g. "T") to their DType arg-variable tokens (e.g. `_t`).
-fn parse_kernel_params_generic(
-    sig: &syn::Signature,
-    type_vars: &std::collections::HashMap<String, proc_macro2::TokenStream>,
-) -> proc_macro2::TokenStream {
-    let mut param_builders = Vec::new();
-    let use_explicit_outputs = sig.inputs.iter().any(has_mutable_tensor_param);
-
-    for input in &sig.inputs {
-        if let syn::FnArg::Typed(pat_type) = input {
-            if let syn::Pat::Ident(pat_ident) = &*pat_type.pat {
-                let param_name = pat_ident.ident.to_string();
-                let ty = &pat_type.ty;
-
-                if !is_tensor_type(ty) {
-                    continue;
-                }
-
-                let is_output = if use_explicit_outputs {
-                    pat_ident.mutability.is_some()
-                } else {
-                    is_legacy_output_name(&param_name)
-                };
-                let (dtype, shape, _shape_ces) = parse_tensor_type_generic(ty, type_vars);
-
-                let kind = if has_attr(pat_type, "scalar") {
-                    quote! { ParamKind::Scalar }
-                } else if has_attr(pat_type, "strided") {
-                    quote! { ParamKind::Strided }
-                } else {
-                    quote! { Default::default() }
-                };
-
-                param_builders.push(quote! {
-                    kernel.params.push(Param {
-                        name: #param_name.to_string(),
-                        dtype: #dtype,
-                        shape: #shape,
-                        is_output: #is_output,
-                        kind: #kind,
-                    });
-                });
-            }
-        }
-    }
-
-    if param_builders.is_empty() {
-        quote! {}
-    } else {
-        quote! { #(#param_builders)* }
-    }
-}
-
-fn has_mutable_tensor_param(input: &syn::FnArg) -> bool {
-    if let syn::FnArg::Typed(pat_type) = input {
-        return matches!(&*pat_type.pat, syn::Pat::Ident(pat_ident) if pat_ident.mutability.is_some())
-            && is_tensor_type(&pat_type.ty);
-    }
-    false
-}
-
-fn is_legacy_output_name(name: &str) -> bool { matches!(name, "out" | "c" | "output") }
-
-/// Extract parameter names from the signature.
-fn extract_param_names(sig: &syn::Signature) -> Vec<String> {
-    let mut names = Vec::new();
-    for input in &sig.inputs {
-        if let syn::FnArg::Typed(pat_type) = input {
-            if let syn::Pat::Ident(pat_ident) = &*pat_type.pat {
-                names.push(pat_ident.ident.to_string());
-            }
-        }
-    }
-    names
-}
-
-/// Check if a typed parameter has a given attribute by name.
-fn has_attr(pat_type: &syn::PatType, attr_name: &str) -> bool {
-    pat_type.attrs.iter().any(|a| a.path().is_ident(attr_name))
-}
-
-/// Check if a type looks like a Tensor (contains "Tensor" in its path).
-fn is_tensor_type(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(type_path) = ty {
-        type_path.path.segments.iter().any(|seg| seg.ident == "Tensor")
-    } else {
-        false
-    }
-}
-
-/// Returns (dtype_tokens, shape_tokens, constexpr_names_from_shape).
-/// `type_vars` maps type-param names to their runtime DType arg tokens.
-fn parse_tensor_type_generic(
-    ty: &syn::Type,
-    type_vars: &std::collections::HashMap<String, proc_macro2::TokenStream>,
-) -> (proc_macro2::TokenStream, proc_macro2::TokenStream, Vec<String>) {
-    let mut dtype_tokens = quote! { DType::F32 };
-    let mut shape_tokens = quote! { Shape::scalar() };
-    let mut shape_ces = Vec::new();
-
-    if let syn::Type::Path(type_path) = ty {
-        for seg in &type_path.path.segments {
-            if seg.ident == "Tensor" {
-                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                    let mut iter = args.args.iter();
-                    if let Some(syn::GenericArgument::Type(dtype_ty)) = iter.next() {
-                        dtype_tokens = parse_dtype_generic(dtype_ty, type_vars);
-                    }
-                    if let Some(arg) = iter.next() {
-                        let (tokens, ces) = parse_shape_arg(arg);
-                        shape_tokens = tokens;
-                        shape_ces = ces;
-                    }
-                }
-            }
-        }
-    }
-    (dtype_tokens, shape_tokens, shape_ces)
-}
-
-/// Backwards-compat wrapper with empty type_vars map.
-fn parse_tensor_type(
-    ty: &syn::Type,
-) -> (proc_macro2::TokenStream, proc_macro2::TokenStream, Vec<String>) {
-    parse_tensor_type_generic(ty, &std::collections::HashMap::new())
-}
-
-/// Returns (shape_tokens, constexpr_names_from_dims).
-fn parse_shape_arg(arg: &syn::GenericArgument) -> (proc_macro2::TokenStream, Vec<String>) {
-    let str = quote! { #arg }.to_string();
-    let inner = str.trim();
-    let mut ces = Vec::new();
-
-    if let Some(start) = inner.find('(') {
-        if let Some(end) = inner.rfind(')') {
-            let content = &inner[start + 1..end];
-            let dims: Vec<_> = content
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-
-            if !dims.is_empty() {
-                let dim_tokens: Vec<_> = dims
-                    .iter()
-                    .map(|d| {
-                        if let Ok(n) = d.parse::<usize>() {
-                            quote! { Dim::Known(#n) }
-                        } else {
-                            ces.push(d.clone());
-                            let ident = syn::Ident::new(d, proc_macro2::Span::call_site());
-                            quote! { Dim::ConstExpr(ConstExpr::new(stringify!(#ident))) }
-                        }
-                    })
-                    .collect();
-
-                return (
-                    quote! {
-                        { use metaltile_core::shape::Shape; use metaltile_core::shape::Dim; use metaltile_core::constexpr::ConstExpr;
-                        Shape::new([#(#dim_tokens),*]) }
-                    },
-                    ces,
-                );
-            }
-        }
-    }
-    (quote! { Shape::scalar() }, ces)
-}
-
-fn parse_dtype_generic(
-    ty: &syn::Type,
-    type_vars: &std::collections::HashMap<String, proc_macro2::TokenStream>,
-) -> proc_macro2::TokenStream {
-    if let syn::Type::Path(type_path) = ty {
-        let ident = &type_path.path.segments.last().unwrap().ident;
-        let name = ident.to_string();
-        // If this ident is a known type parameter (T, U, ...), emit the runtime arg variable.
-        if let Some(arg_tok) = type_vars.get(&name) {
-            return arg_tok.clone();
-        }
-        return match name.as_str() {
-            "f32" => quote! { DType::F32 },
-            "f16" => quote! { DType::F16 },
-            "bf16" => quote! { DType::BF16 },
-            "i32" => quote! { DType::I32 },
-            "u32" => quote! { DType::U32 },
-            "i8" => quote! { DType::I8 },
-            "bool" => quote! { DType::Bool },
-            _ => quote! { DType::F32 },
-        };
-    }
-    quote! { DType::F32 }
-}
-
-/// Extract constexpr names from `#[constexpr]` params and tensor shape dims.
-#[cfg(test)]
-fn extract_constexprs(sig: &syn::Signature) -> Vec<String> {
-    extract_constexprs_typed(sig).into_iter().map(|(n, _)| n).collect()
-}
-
-/// Extract constexpr names with their DType tokens from `#[constexpr]` params and tensor shape dims.
-fn extract_constexprs_typed(sig: &syn::Signature) -> Vec<(String, proc_macro2::TokenStream)> {
-    let mut entries: Vec<(String, proc_macro2::TokenStream)> = Vec::new();
-    let mut seen = BTreeSet::new();
-
-    for input in &sig.inputs {
-        if let syn::FnArg::Typed(pat_type) = input {
-            if pat_type.attrs.iter().any(|a| a.path().is_ident("constexpr")) {
-                if let syn::Pat::Ident(pat_ident) = &*pat_type.pat {
-                    let name = pat_ident.ident.to_string();
-                    let dtype = rust_type_to_dtype_tokens(&pat_type.ty);
-                    push_unique_typed(&mut entries, &mut seen, name, dtype);
-                }
-            }
-
-            if is_tensor_type(&pat_type.ty) {
-                let (_, _, shape_ces) = parse_tensor_type(&pat_type.ty);
-                for ce_name in shape_ces {
-                    push_unique_typed(&mut entries, &mut seen, ce_name, quote! { DType::U32 });
-                }
-            }
-        }
-    }
-
-    entries
-}
-
-/// Map a Rust scalar type path to a `DType::*` token stream.
-fn rust_type_to_dtype_tokens(ty: &syn::Type) -> proc_macro2::TokenStream {
-    if let syn::Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
-            return match seg.ident.to_string().as_str() {
-                "f32" => quote! { DType::F32 },
-                "f16" | "half" => quote! { DType::F16 },
-                "f64" => quote! { DType::F64 },
-                "i32" => quote! { DType::I32 },
-                "i64" => quote! { DType::I64 },
-                "u64" => quote! { DType::U64 },
-                _ => quote! { DType::U32 },
-            };
-        }
-    }
-    quote! { DType::U32 }
-}
-
-fn push_unique_typed(
-    entries: &mut Vec<(String, proc_macro2::TokenStream)>,
-    seen: &mut BTreeSet<String>,
-    name: String,
-    dtype: proc_macro2::TokenStream,
-) {
-    if seen.insert(name.clone()) {
-        entries.push((name, dtype));
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -545,14 +355,59 @@ fn parse_dim_expr(s: &str) -> proc_macro2::TokenStream {
 }
 
 // ---------------------------------------------------------------------------
-// #[autotune] attribute — parsed by #[kernel]
+// #[bench_kernel] — declarative benchmark registration
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, FromMeta)]
-#[allow(dead_code)]
-struct AutotuneArgs {
-    configs: Option<String>,
-    key: Option<String>,
+/// Registers a `#[kernel]` function for automatic benchmarking.
+///
+/// Must be placed **before** `#[kernel]` so it sees the original function
+/// signature. Generates an `inventory::submit! { BenchSpec { ... } }` alongside
+/// the kernel, which the bench suite collects via `inventory::iter::<BenchSpec>`.
+///
+/// # Required args
+/// - `op    = "group"` — bench table group (e.g. `"unary"`)
+/// - `subop = "name"`  — sub-operation label (e.g. `"exp"`)
+/// - `class = Unary | Binary | AllReduce | RowReduce`
+/// - `cpu   = fn_ptr`  — CPU reference (named fn, not closure)
+/// - `tol   = 1e-4`    — maximum absolute correctness error
+///
+/// # Optional args
+/// - `input = Signed|Positive|Half|Unit` (Unary default: `Half`)
+/// - `input_a / input_b` (Binary, default: `Half`)
+/// - `metal_file = "foo.metal"` — MLX reference source file (loaded via `include_str!` at compile time)
+/// - `mlx = "pattern"` — kernel name pattern; `{tn}` → MLX type name
+/// - `dtypes = IDENT`  — `&'static [DType]` (default: `FLOAT_DTYPES`)
+///
+/// # Example
+/// ```ignore
+/// fn cpu_exp(x: f32) -> f32 { x.exp() }
+///
+/// #[bench_kernel(op="unary", subop="exp", class=Unary, cpu=cpu_exp,
+///                input=Signed, tol=1e-4, metal_file="unary.metal", mlx="v_Exp{tn}{tn}")]
+/// #[kernel]
+/// pub fn mt_exp<T>(a: Tensor<T>, out: Tensor<T>) { … }
+/// ```
+#[proc_macro_attribute]
+pub fn bench_kernel(attr: TokenStream, item: TokenStream) -> TokenStream {
+    use bench_impl::{BenchArgs, generate_submit};
+
+    let args = match syn::parse::<BenchArgs>(attr) {
+        Ok(a) => a,
+        Err(e) => return e.to_compile_error().into(),
+    };
+
+    let (fn_name, is_generic) = {
+        let f = match syn::parse::<syn::ItemFn>(item.clone()) {
+            Ok(f) => f,
+            Err(e) => return e.to_compile_error().into(),
+        };
+        let generic = !f.sig.generics.params.is_empty();
+        (f.sig.ident.clone(), generic)
+    };
+
+    let submit = generate_submit(&fn_name, &args, is_generic);
+    let item_ts: proc_macro2::TokenStream = item.into();
+    quote! { #item_ts  #submit }.into()
 }
 
 #[cfg(test)]
@@ -560,6 +415,8 @@ mod tests {
     use syn::parse_quote;
 
     use super::*;
+    #[cfg(test)]
+    use crate::sig_parser::extract_constexprs;
 
     #[test]
     fn mutable_tensor_outputs_override_legacy_name_heuristics() {

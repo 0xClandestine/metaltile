@@ -1,0 +1,155 @@
+# metaltile-cli
+
+MetalTile CLI — benchmark, test, and inspect GPU kernels.
+The `tile` binary is the primary developer tool for the MetalTile project:
+run performance benchmarks against MLX, compile kernels to inspect generated
+MSL, emit kernel packages via `tile build --emit`, and manage regression baselines.
+
+This is a binary crate only — it has no library API. All functionality is
+exposed through subcommands of the `tile` binary.
+
+## Position in the pipeline
+
+```
+metaltile (facade) ──┐
+metaltile-core       │
+metaltile-codegen    ├──► metaltile-cli (this crate) ──► terminal / JSON / files
+metaltile-runtime    │         tile binary
+metaltile-std ───────┘
+```
+
+The CLI sits at the top of the stack, consuming every other crate.
+It's the only crate in the workspace that exercises the full
+compile→dispatch→measure loop end-to-end.
+
+## Quick start
+
+```sh
+# Install the tile binary
+cargo install --path crates/metaltile-cli
+
+# Run the full benchmark suite (requires macOS + Metal)
+tile bench
+
+# Compile all kernels and report errors
+tile build
+
+# Emit kernel package (metallib + sources + Swift wrappers)
+tile build --emit all -o /tmp/kernel-pkg
+
+# Inspect one kernel's IR and generated MSL
+tile inspect --kernel mt_rms_norm
+
+# Show GPU device info
+tile device
+
+# Save current bench results as a baseline
+tile snap -o baseline.json
+
+# Compare current bench results to a saved baseline
+tile diff baseline.json
+```
+
+Subcommand-specific help:
+
+```sh
+tile bench --help
+tile build --help
+tile inspect --help
+```
+
+## Crate contents
+
+| Module | Purpose |
+|---|---|
+| `cmd` | Subcommand dispatch: `bench`, `build`, `inspect`, `device`, `snap`, `diff` |
+| `cmd::bench` | Full benchmark suite: MetalTile vs MLX reference kernels |
+| `cmd::build` | Compile all kernels to MSL, report errors, and emit artifacts (`--emit msl,metallib,swift,ir,all`) |
+| `cmd::inspect` | Print IR and/or MSL for a single kernel |
+| `cmd::device` | Show GPU device info and supported Metal features |
+| `cmd::snap` | Save benchmark results as a JSON regression baseline |
+| `cmd::diff` | Compare current benchmark results to a saved baseline |
+| `term` | Terminal styling: colored output, bold text |
+| `suite_printer` | Benchmark results terminal rendering |
+| `error` | `CliError` enum for CLI-specific failures |
+| `git` | Git working-tree checks (dirty detection, baseline-ref resolution) |
+
+## API reference
+
+### Subcommands
+
+| Command | Purpose |
+|---|---|
+| `tile bench` | Run the full benchmark suite. MetalTile kernels run against MLX Metal kernel reference. Use `--filter <op>` to narrow. Outputs per-op throughput ratio and correctness. |
+| `tile build` | Compile all registered kernels to MSL and report any errors. Use `--emit msl,metallib,swift,ir,all -o <dir>` to write artifacts: `.metal` sources, `kernels.metallib`, `MetalTileKernels.swift` wrappers, and `manifest.json`. |
+| `tile inspect --kernel <name>` | Print the IR (SSA-form) and/or generated MSL for one kernel. Use `--ir` for IR only, `--msl` for MSL only. |
+| `tile device` | Show GPU device info: name, Metal feature set, supported language version, max threadgroup size. |
+| `tile snap -o <file>` | Save current benchmark results as a JSON regression baseline file. |
+| `tile diff <file>` | Compare current benchmark results to a saved baseline. Reports regressions (throughput drops below threshold). |
+
+### Installation
+
+```sh
+cargo install --path crates/metaltile-cli
+```
+
+The binary is named `tile`. After installation it's available on your `$PATH`.
+
+This crate is not published to crates.io (`publish = false`). It's a
+project-internal developer tool, not a library.
+
+## Dependencies
+
+### Internal
+
+| Crate | Role in this crate |
+|---|---|
+| `metaltile` | Facade re-exports (macros, `Context`) used by bench/inspect |
+| `metaltile-core` | IR types for kernel iteration and inspect output |
+| `metaltile-codegen` | MSL generation for build, inspect, and bench dispatch |
+| `metaltile-runtime` | GPU dispatch, PSO compilation, buffer management |
+| `metaltile-std` | `BenchSpec` registry via `inventory`, op catalog, benchmark shapes |
+
+### External
+
+| Crate | Role |
+|---|---|
+| `clap` | CLI argument parsing and subcommand dispatch |
+| `serde` / `serde_json` | Serialize/deserialize snap/diff baseline files |
+| `anstyle` / `anstream` | ANSI terminal coloring |
+| `tracing` / `tracing-subscriber` | Diagnostics and structured logging |
+| `objc2` / `objc2-metal` / `objc2-foundation` | Metal GPU API bindings (macOS only, cfg-gated) |
+
+## MSRV / platform
+
+**macOS is required** for GPU commands (`bench`, `device`).
+All Metal API calls are cfg-gated behind `target_os = "macos"`.
+On other platforms these commands return errors or zero-stub output.
+
+`build` and `inspect` work on any platform — they only need the
+compiler crates, not the GPU runtime.
+
+Rust: nightly (workspace-wide, edition 2024).
+
+## Extending
+
+- **New subcommand:** Create `src/cmd/<name>.rs` with the subcommand logic.
+  Add `pub mod <name>;` to `src/cmd/mod.rs`. Add a variant to the `Command`
+  enum in `src/main.rs` and a match arm in `main()`.
+
+- **New benchmark output format:** `src/cmd/bench.rs` — extend the output
+  rendering or add a `--format` flag.
+
+- **Tests to update:** Integration tests in `src/cmd/`. Run `tile bench`
+  on macOS to verify no regressions.
+
+## Related documentation
+
+- [Root README](../../README.md) — project overview and architecture
+- [CONTRIBUTING](../../CONTRIBUTING.md) — dev setup, PR process, CI
+- [`metaltile-std` README](../metaltile-std/README.md) — the `BenchSpec` registry and op catalog this CLI exercises
+- [`metaltile-runtime` README](../metaltile-runtime/README.md) — the GPU dispatch layer used by `runner`
+
+## License
+
+Licensed under the [Apache License, Version 2.0](../../LICENSE).
