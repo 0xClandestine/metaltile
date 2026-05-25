@@ -40,7 +40,7 @@ use metaltile_runtime::Context;
 use metaltile_std::ffai::moe_down_swiglu_accum::ffai_moe_down_swiglu_accum_int4_chain8;
 
 /// Affine per-group int4 quantize of one weight row, nibble-packed.
-/// (Same shape as `batched_qkv_qgemv_gpu_correctness.rs` — the int4
+/// (Same shape as `batched_qkv_qgemv_gpu_correctness.rs`, the int4
 /// pack-strided layout the indexed dequant-gemv consumes.)
 fn quantize_int4_row(row: &[f32], group_size: usize) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
     let in_dim = row.len();
@@ -179,7 +179,7 @@ fn naive_oracle(
     acc
 }
 
-/// Deterministic pseudo-random source — xorshift, gentle range so the
+/// Deterministic pseudo-random source (xorshift), gentle range so the
 /// silu nonlinearity is exercised across both branches (gate < 0 ramps
 /// down, gate > 0 ramps up).
 fn source(n: usize, seed: u64, scale: f32, off: f32) -> Vec<f32> {
@@ -222,12 +222,12 @@ fn run_case(
             .collect()
     });
 
-    // 8 distinct expert ids spread across the full n_experts range —
+    // 8 distinct expert ids spread across the full n_experts range ,
     // catches a constant-expert / off-by-one expert offset bug.
     let expert_indices: [u32; 8] = [3, 17, 41, 58, 72, 89, 104, 121];
     assert!(expert_indices.iter().all(|&e| (e as usize) < n_experts));
 
-    // Slot weights — un-normalised so silent renormalisation surfaces.
+    // Slot weights, un-normalised so silent renormalisation surfaces.
     let slot_weights_f32: [f32; 8] =
         [0.31, 0.19, 0.12, 0.08, 0.06, 0.05, 0.04, 0.03].map(|v| dt.round(v));
 
@@ -272,8 +272,8 @@ fn run_case(
     let mut kernel = ffai_moe_down_swiglu_accum_int4_chain8::kernel_ir_for(dt.to_dtype());
     kernel.mode = KernelMode::Reduction;
 
-    // One TG per output row; 128 lanes per TG (balanced for
-    // n_packs_per_row=96 at in_dim=768 — 1-stride 6-iter inner loop, no
+    // One TG per output row; 128 lanes per TG, balanced for
+    // n_packs_per_row=96 at in_dim=768 (1-stride 6-iter inner loop, no
     // tail-lane idle waste).
     let result = ctx
         .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [out_dim, 1, 1], [128, 1, 1])
@@ -297,7 +297,7 @@ fn run_case(
 }
 
 // Production-shape coverage: hidden=2048, moeIntermediate=768, gs=64,
-// n_experts=128 — Qwen3.6-A3B exactly. Two dtypes per the acceptance
+// n_experts=128: Qwen3.6-A3B exactly. Two dtypes per the acceptance
 // criteria.
 
 #[test]
@@ -310,7 +310,7 @@ fn moe_down_swiglu_accum_qwen36_bf16() {
     run_case(Dt::Bf16, 768, 2048, 64, 128, 5e-2);
 }
 
-// f16 too — confirms the load-side `cast::<f32>()` keeps the chain8
+// f16 too (confirms the load-side `cast::<f32>()` keeps the chain8
 // accumulation stable across the third float dtype the kernel ships.
 #[test]
 fn moe_down_swiglu_accum_qwen36_f16() {

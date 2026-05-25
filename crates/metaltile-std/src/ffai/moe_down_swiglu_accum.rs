@@ -27,7 +27,7 @@
 //!
 //! - Each TG iterates the 8 slots sequentially:
 //!     (a) cooperatively populate `tg_inner[d] = silu(gate[k][d]) * up[k][d]`
-//!         for d in `[0, in_dim)` — every thread writes a strided slice.
+//!         for d in `[0, in_dim)`, every thread writes a strided slice.
 //!     (b) threadgroup_barrier (RAW: qmm reads `tg_inner` filled by all
 //!         lanes in (a)).
 //!     (c) dequant-gemv inner loop against `W_down[expert[k]][row, :]`,
@@ -39,11 +39,11 @@
 //!
 //! ## Threadgroup memory
 //!
-//! `tg_inner: [IN_DIM_MAX] f32` — staged inner activations for the
+//! `tg_inner: [IN_DIM_MAX] f32`, staged inner activations for the
 //! currently-active slot. Reused across all 8 slots (no per-slot copy).
 //!
 //! IN_DIM_MAX is pinned at 768 (Qwen3.6-A3B `moeIntermediate`). At f32,
-//! that's 3 KiB TG memory — comfortably below the 32 KiB Apple9 cap and
+//! that's 3 KiB TG memory, comfortably below the 32 KiB Apple9 cap, and
 //! leaves headroom for concurrent TGs on the same simdgroup-block.
 //! Caller MUST validate `in_dim <= 768`; the kernel reads only the first
 //! `in_dim` entries so smaller intermediates work, but larger ones
@@ -64,9 +64,9 @@
 //!
 //! `expert_indices` and `slot_weights` are the contiguous outputs of
 //! `mt_moe_router_topk` (k=8, packed). The 16 gate/up tensors mirror
-//! FFAI's per-slot scratch caches (one `Tensor.empty([moeIntermediate])`
+//! FFAI's per-slot scratch caches: one `Tensor.empty([moeIntermediate])`
 //! per slot, instance-cached per `MoELayer` per the ITER 32-36
-//! scratch-caching rule — see CLAUDE.md / MEMORY.md).
+//! scratch-caching rule (see CLAUDE.md / MEMORY.md).
 //!
 //! ## Correctness invariant
 //!
@@ -95,7 +95,7 @@
 //! ## Why NOT register-resident `inner`
 //!
 //! Tempting alternative: each thread holds its `inner_k` slice in
-//! registers and reads it during qmm without TG mem. Doesn't work —
+//! registers and reads it during qmm without TG mem. Doesn't work,
 //! the qmm pack-stride pattern means thread `t` needs `inner_k[d]`
 //! values at offsets `pack_idx*8 + i` for i in 0..8, which are
 //! neighbours, not strided slots. Threads can't share registers.
@@ -146,7 +146,7 @@ pub fn ffai_moe_down_swiglu_accum_int4_chain8<T>(
     // accumulation precision.
     threadgroup_alloc("tg_inner", 768, "f32");
 
-    // Int4 dequant constants — match `dequant_gemv_int4_expert_indexed`.
+    // Int4 dequant constants, match `dequant_gemv_int4_expert_indexed`.
     let vals_per_pack = 8u32;
     let mask = 0xFu32;
     let row = program_id::<0>();
@@ -178,7 +178,7 @@ pub fn ffai_moe_down_swiglu_accum_int4_chain8<T>(
     // Final reduce_sum fuses the 8 slots' partials in one fold.
     let mut acc = 0.0f32;
 
-    // Iteration counts — same shape as the indexed-expert dequant-gemv.
+    // Iteration counts, same shape as the indexed-expert dequant-gemv.
     let p_iters = (n_packs_per_row + lsize - 1u32) / lsize;
     let in_iters = (in_dim + lsize - 1u32) / lsize;
 
@@ -189,7 +189,7 @@ pub fn ffai_moe_down_swiglu_accum_int4_chain8<T>(
         if d < in_dim {
             let g = load(gate_0[d]).cast::<f32>();
             let u = load(up_0[d]).cast::<f32>();
-            // Inline silu in f32 — same form as gated_rmsnorm.rs and
+            // Inline silu in f32, same form as gated_rmsnorm.rs and
             // swiglu.rs. Avoids T→f32→T round-trip and keeps the gate
             // precise before the multiply.
             let s = g / (1.0f32 + exp(0.0f32 - g));
@@ -449,7 +449,7 @@ pub fn ffai_moe_down_swiglu_accum_int4_chain8<T>(
             }
         }
     }
-    // No trailing barrier — no further tg_inner access after slot 7.
+    // No trailing barrier: no further tg_inner access after slot 7.
 
     // ── Cross-thread fold + store ────────────────────────────────────
     let total = reduce_sum(acc);
