@@ -39,8 +39,8 @@
 //!   `grid = (nRows * TPG, 1, 1)`, `tg = (TPG, 1, 1)`; Metal slices
 //!   that into `nRows` threadgroups of `TPG` threads each.
 
-use metaltile::{bench_kernel, kernel};
 use metaltile_core::ir::KernelMode;
+use metaltile_macros::{bench_kernel, kernel};
 
 use crate::{
     bench_types::DType,

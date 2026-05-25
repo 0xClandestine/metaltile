@@ -40,7 +40,7 @@
 //! Correctness validated by `tests/moe_gather_qmm_mpp_correctness.rs`
 //! (cosine ≥ 0.999 vs the m1 scalar oracle).
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 /// MPP MoE int4 grouped BGEMM, BM=16 / BN=32 / BK=16, one simdgroup.
 ///

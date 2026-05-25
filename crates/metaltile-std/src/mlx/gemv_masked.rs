@@ -2,7 +2,7 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Masked GEMV benchmark — #[kernel] DSL (no MLX reference)
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="gemv_masked",

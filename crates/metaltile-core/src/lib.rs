@@ -8,6 +8,7 @@
 //! - [`ConstExpr`]: constexpr values resolved at kernel compile time
 //! - Kernel IR nodes: the SSA-form intermediate representation
 
+pub mod bench;
 pub mod constexpr;
 pub mod dtype;
 pub mod error;

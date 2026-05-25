@@ -29,7 +29,7 @@
 //! cheap-to-zero tokens, mirroring the MLX upstream's
 //! flash-pass2-style aggregation guard.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 use crate::bench_types::DType;
 

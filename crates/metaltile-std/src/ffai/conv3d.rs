@@ -49,7 +49,7 @@
 //!
 //! Codegen-only. Correctness validated by `conv3d_gpu_correctness`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 /// Dense 3D convolution — strides and padding, unit dilation, one
 /// channel group.

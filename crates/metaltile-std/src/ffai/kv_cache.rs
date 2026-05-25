@@ -21,7 +21,7 @@
 //! Codegen-only. End-to-end correctness validated in FFAI integration
 //! tests against real model decoding.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 // ─── Raw cache append ────────────────────────────────────────────────
 

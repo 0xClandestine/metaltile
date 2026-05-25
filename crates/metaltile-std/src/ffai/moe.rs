@@ -34,7 +34,7 @@
 //!   └──────────────────┘
 //! ```
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 // ── mt_moe_router_topk ───────────────────────────────────────────────────
 //

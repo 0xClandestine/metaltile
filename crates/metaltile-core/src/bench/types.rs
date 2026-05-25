@@ -2,11 +2,8 @@
 //! SPDX-License-Identifier: Apache-2.0
 use std::{cell::RefCell, ptr::NonNull};
 
-use metaltile_codegen::msl::MslGenerator;
-pub use metaltile_core::dtype::DType;
-use metaltile_core::ir::{Kernel, KernelMode};
-
-use crate::stats::BenchStats;
+use crate::bench::stats::BenchStats;
+pub use crate::dtype::DType;
 
 // ── Dtype variant helpers ─────────────────────────────────────────────────────
 
@@ -458,28 +455,6 @@ pub fn set_result_reporter(reporter: &mut dyn FnMut(&OpResult)) -> ResultReporte
 /// Generate MSL for an elementwise kernel IR produced by `make_ir`.
 ///
 /// Uses default `KernelMode::Elementwise`. `label` is used only in the error message.
-pub fn generate_elementwise_msl<F>(make_ir: F, label: &str) -> String
-where F: Fn() -> Kernel {
-    MslGenerator::default().generate(&make_ir()).unwrap_or_else(|e| {
-        eprintln!("[{label}]: {e}");
-        String::new()
-    })
-}
-
-/// Generate MSL for a reduction kernel IR produced by `make_ir`, setting `Reduction` mode.
-///
-/// `label` is used only in the error message when code generation fails.
-pub fn generate_reduction_msl<F>(make_ir: F, label: &str) -> String
-where F: Fn() -> Kernel {
-    let mut k = make_ir();
-    k.mode = KernelMode::Reduction;
-    MslGenerator::default().generate(&k).unwrap_or_else(|e| {
-        eprintln!("[{label}]: {e}");
-        String::new()
-    })
-}
-
-/// Per-dtype context bundled at the top of every bench function.
 pub struct DtypeCtx {
     pub dt: DType,
     /// MLX template-name suffix (e.g. `"float32"`).
@@ -513,126 +488,5 @@ impl DtypeCtx {
             eb: elem_bytes(dt),
             tol: dtype_tol(dt),
         }
-    }
-}
-
-/// Emit the standard two-test block for a reduction op.
-///
-/// Generates:
-/// - `msl_generates_for_all_dtypes` — calls `$msl_fn(dt)` for each float dtype
-/// - `kernels_compile` (macos only) — compiles the generated MSL
-///
-/// Usage:
-/// ```ignore
-/// bench_tests!(msl_fn: layer_norm_msl_for, kernel_name: "mt_layer_norm");
-/// ```
-#[macro_export]
-macro_rules! bench_tests {
-    (msl_fn: $msl_fn:ident, kernel_name: $name:expr) => {
-        #[cfg(test)]
-        mod tests {
-            use super::*;
-
-            #[test]
-            fn msl_generates_for_all_dtypes() {
-                for &dt in $crate::bench_types::FLOAT_DTYPES {
-                    let msl = $msl_fn(dt);
-                    assert!(!msl.trim().is_empty(), "MSL empty for {dt:?}");
-                }
-            }
-
-            #[cfg(target_os = "macos")]
-            #[test]
-            fn kernels_compile() {
-                // NOTE: GpuRunner is not available in metaltile-std.
-                // This test is only meaningful in metaltile-bench or metaltile-cli.
-                // The MSL generation test above covers the pure path.
-            }
-        }
-    };
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{CorrectnessStatus, EquivResult, OpBench, OpResult, check_equiv, validate_results};
-
-    fn sample_result(mt_perf: Option<f64>, equiv: Option<EquivResult>) -> OpResult {
-        OpBench::new("sample", "GB/s").result("shape", Some(1.0), mt_perf, equiv)
-    }
-
-    #[test]
-    fn correctness_status_distinguishes_unchecked_from_unavailable() {
-        let unchecked = OpResult {
-            op: "sample",
-            subop: None,
-            shape: "shape".into(),
-            metric: "GB/s",
-            ref_perf: Some(1.0),
-            mt_perf: Some(2.0),
-            equiv: None,
-            mt_timing: None,
-            ref_timing: None,
-        };
-        let unavailable = sample_result(None, None);
-        assert_eq!(unchecked.correctness_status(), CorrectnessStatus::Unchecked);
-        assert_eq!(unchecked.correctness_cell(), "! missing-check");
-        assert!(unchecked.is_unchecked());
-        assert_eq!(unavailable.correctness_status(), CorrectnessStatus::Unavailable);
-        assert_eq!(unavailable.correctness_cell(), "—");
-    }
-
-    #[test]
-    fn check_equiv_reports_cosine_similarity() {
-        let equiv = check_equiv(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.001], 1e-2);
-        assert_eq!(equiv.n_checked, 3);
-        assert!(equiv.passed);
-        assert!(equiv.cosine_sim > 0.999_999);
-        assert!(equiv.max_abs_err > 0.0);
-    }
-
-    #[test]
-    fn correctness_status_formats_checked_results() {
-        let passed = sample_result(
-            Some(2.0),
-            Some(EquivResult { n_checked: 16, max_abs_err: 0.0, cosine_sim: 1.0, passed: true }),
-        );
-        let failed = sample_result(
-            Some(2.0),
-            Some(EquivResult { n_checked: 16, max_abs_err: 1.5, cosine_sim: 0.5, passed: false }),
-        );
-
-        assert_eq!(passed.correctness_status(), CorrectnessStatus::Passed {
-            max_abs_err: 0.0,
-            cosine_sim: 1.0
-        });
-        assert_eq!(passed.correctness_cell(), "✓");
-        assert_eq!(failed.correctness_status(), CorrectnessStatus::Failed {
-            max_abs_err: 1.5,
-            cosine_sim: 0.5
-        });
-        assert_eq!(failed.correctness_cell(), "✗ 1.50e0 cos=0.500");
-    }
-
-    #[test]
-    #[should_panic(expected = "missing correctness")]
-    fn op_bench_rejects_implemented_row_without_correctness() {
-        let _ = OpBench::new("sample", "GB/s").result("shape", Some(1.0), Some(2.0), None);
-    }
-
-    #[test]
-    fn validation_reports_unchecked_rows() {
-        let unchecked = OpResult {
-            op: "sample",
-            subop: None,
-            shape: "shape".into(),
-            metric: "GB/s",
-            ref_perf: Some(1.0),
-            mt_perf: Some(2.0),
-            equiv: None,
-            mt_timing: None,
-            ref_timing: None,
-        };
-        let err = validate_results(&[unchecked]).expect_err("unchecked rows should fail");
-        assert!(err.contains("sample [shape]"));
     }
 }

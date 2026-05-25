@@ -74,7 +74,7 @@
 //!
 //! Codegen-only. Correctness validated by `conv2d_mma_gpu_correctness`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 /// MMA-tiled 2D convolution (stride=1, dilation=1, pad=0).
 ///

@@ -31,7 +31,7 @@
 //! are handled in-kernel: out-of-range loads clamp to index 0 and
 //! contribute 0, out-of-range stores are skipped.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="gemm",

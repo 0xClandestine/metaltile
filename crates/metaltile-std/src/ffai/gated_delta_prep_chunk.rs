@@ -53,7 +53,7 @@
 //! per prefill step in state traffic alone. The chunked variant does
 //! 2 MiB × 30 = 60 MiB.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="gated_delta",

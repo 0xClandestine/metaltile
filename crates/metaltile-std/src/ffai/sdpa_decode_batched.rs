@@ -85,7 +85,7 @@
 //! Online-softmax math runs in fp32 throughout (storage stays in T) to
 //! avoid catastrophic cancellation in `exp(max_old - max_new)`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="sdpa",

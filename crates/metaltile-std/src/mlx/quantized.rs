@@ -2,7 +2,7 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Quantized MatVec benchmark — #[kernel] DSL vs MLX metal/quantized.metal
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 // (out_dim, in_dim) pairs. 4096² = baseline reference. Other rows are
 // production hot-paths in Qwen3-class inference:
 //   - 5120²       Qwen3-8B/14B attention proj (Q/K/V/O), MLP.gate/up at hidden

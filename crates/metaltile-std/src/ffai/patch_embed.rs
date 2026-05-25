@@ -43,7 +43,7 @@
 //!
 //! Codegen-only. Correctness validated by `patch_embed_gpu_correctness`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="patch_embed",

@@ -5,31 +5,30 @@
 
 use metaltile_codegen::msl::MslGenerator;
 use metaltile_core::{
+    bench::{
+        spec::{BatchedDecodeVariant, BenchDispatch, BenchSpec, MlxArg, ScalarBufSpec, ShapeSpec},
+        types::{
+            DtypeCtx,
+            EquivResult,
+            EquivTolerance,
+            OpBench,
+            OpResult,
+            check_equiv,
+            check_equiv_with,
+        },
+    },
     dtype::DType,
     ir::{Kernel, KernelMode},
 };
-
-use crate::{
-    bench_types::{
-        DtypeCtx,
-        EquivResult,
-        EquivTolerance,
-        OpBench,
-        OpResult,
-        check_equiv,
-        check_equiv_with,
-    },
-    runner::{
-        GpuBuffer,
-        GpuRunner,
-        bench_gbps,
-        bench_gbps_only,
-        buffer_typed,
-        read_typed,
-        run_typed_once,
-        zeros_typed,
-    },
-    spec::{BatchedDecodeVariant, BenchDispatch, BenchSpec, MlxArg, ScalarBufSpec, ShapeSpec},
+use metaltile_runtime::runner::{
+    GpuBuffer,
+    GpuRunner,
+    bench_gbps,
+    bench_gbps_only,
+    buffer_typed,
+    read_typed,
+    run_typed_once,
+    zeros_typed,
 };
 
 pub fn run(spec: &BenchSpec, runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
@@ -198,7 +197,7 @@ fn msl_reduction(spec: &BenchSpec, dt: DType, tpg: Option<u32>) -> Option<String
     // so we hook the patch here too. See `patch_qmm_mma_dtype_aware_skew`
     // in quantized.rs for details.
     if spec.kernel_name == "mt_qmm_mma" {
-        crate::mlx::quantized::patch_qmm_mma_dtype_aware_skew(&mut k, dt);
+        metaltile_std::mlx::quantized::patch_qmm_mma_dtype_aware_skew(&mut k, dt);
     }
     MslGenerator::new(msl_cfg_for(tpg)).generate(&k).ok()
 }
@@ -219,7 +218,11 @@ fn msl_for_mode(spec: &BenchSpec, dt: DType, mode: KernelMode, tpg: Option<u32>)
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 fn mlx_name(pat: &str, tn: &str) -> String { pat.replace("{tn}", tn) }
-fn compile_mt(runner: &GpuRunner, msl: &str, name: &str) -> Option<crate::runner::CompiledKernel> {
+fn compile_mt(
+    runner: &GpuRunner,
+    msl: &str,
+    name: &str,
+) -> Option<metaltile_runtime::runner::CompiledKernel> {
     match runner.compile(msl, name) {
         Ok(k) => Some(k),
         Err(e) => {
@@ -233,7 +236,7 @@ fn compile_mlx(
     src: Option<&str>,
     pat: Option<&str>,
     tn: &str,
-) -> Option<crate::runner::CompiledKernel> {
+) -> Option<metaltile_runtime::runner::CompiledKernel> {
     let src = src?;
     let pat = pat?;
     runner.compile(src, &mlx_name(pat, tn)).ok()
@@ -251,7 +254,7 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
     // specialization: kernels dispatched at `tpg ≤ simd_size` (single
     // simdgroup) emit a different MSL than those at larger TPGs (see
     // `metaltile-codegen/src/msl/reduce.rs`), so they need distinct PSOs.
-    let mut compiled: std::collections::HashMap<u16, crate::runner::CompiledKernel> =
+    let mut compiled: std::collections::HashMap<u16, metaltile_runtime::runner::CompiledKernel> =
         std::collections::HashMap::new();
     let mode_key = |m: KernelMode| match m {
         KernelMode::Elementwise => 0u16,
@@ -264,7 +267,7 @@ fn run_generic(spec: &BenchSpec, runner: &GpuRunner, dt: DType, bench: &OpBench)
 
     let mut results = Vec::new();
     // Pre-compile MLX ref kernel once (same MSL/function for all shapes).
-    let mlx_compiled: Option<crate::runner::CompiledKernel> = {
+    let mlx_compiled: Option<metaltile_runtime::runner::CompiledKernel> = {
         let ctx0 = DtypeCtx::reduce(dt); // tn is dtype-only, not shape-dependent
         compile_mlx(runner, spec.mlx_src, spec.mlx_pattern, ctx0.tn)
     };
@@ -1565,7 +1568,7 @@ fn run_attention(
             0,
             1,
         );
-        let mt_chk = crate::runner::read_typed(runner, &out_b, ch * d, dt);
+        let mt_chk = metaltile_runtime::runner::read_typed(runner, &out_b, ch * d, dt);
         let equiv = check_equiv_with(&ref_out, &mt_chk, EquivTolerance::new(spec.tol, 0.999));
 
         let vals: Vec<f32> = (0..h * n_kv * d).map(|i| ((i % 17) as f32 - 8.0) * 0.05).collect();
@@ -1835,7 +1838,7 @@ fn run_affine_dequantize(
 
     // Run MT once for correctness; capture output.
     runner.measure(&mk, &mt_bufs, mt_grid, [tpg, 1, 1], 0, 1);
-    let mt_out = crate::runner::read_typed(runner, &mt_out_buf, n_elem, dt);
+    let mt_out = metaltile_runtime::runner::read_typed(runner, &mt_out_buf, n_elem, dt);
 
     // MLX dispatches one thread per byte-pack (`affine_mlx_pack_factor`
     // values per thread), which is 4× more threads than our per-uint32
@@ -1850,7 +1853,7 @@ fn run_affine_dequantize(
         let mlx_out_buf = zeros_typed(runner, n_elem, dt);
         let mlx_bufs: Vec<&GpuBuffer> = vec![&w_buf, &scales_buf, &biases_buf, &mlx_out_buf];
         runner.measure(rk, &mlx_bufs, mlx_grid, [tpg, 1, 1], 0, 1);
-        let ref_out = crate::runner::read_typed(runner, &mlx_out_buf, n_elem, dt);
+        let ref_out = metaltile_runtime::runner::read_typed(runner, &mlx_out_buf, n_elem, dt);
         check_equiv(&ref_out, &mt_out, spec.tol)
     });
 
@@ -1929,8 +1932,10 @@ fn run_affine_quantize(
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
         .collect();
-    let mt_scales = crate::runner::read_typed(runner, &mt_scales_buf, n_total_groups, dt);
-    let mt_biases = crate::runner::read_typed(runner, &mt_biases_buf, n_total_groups, dt);
+    let mt_scales =
+        metaltile_runtime::runner::read_typed(runner, &mt_scales_buf, n_total_groups, dt);
+    let mt_biases =
+        metaltile_runtime::runner::read_typed(runner, &mt_biases_buf, n_total_groups, dt);
 
     // MLX reference: same kernel signature but separate output buffers
     // so we can compare bit-for-bit (packed) and float-for-float
@@ -2074,7 +2079,8 @@ fn run_sdpa_vector(
     let mt_bufs: Vec<&GpuBuffer> =
         vec![&q_buf, &k_buf, &v_buf, &mt_out_buf, &hd_buf, &n_buf, &gqa_buf, &sc_buf];
     runner.measure(&mk, &mt_bufs, [n_q_heads, 1, 1], [tpg, 1, 1], 0, 1);
-    let mt_out = crate::runner::read_typed(runner, &mt_out_buf, n_q_heads * head_dim, dt);
+    let mt_out =
+        metaltile_runtime::runner::read_typed(runner, &mt_out_buf, n_q_heads * head_dim, dt);
 
     // MLX reference dispatch + correctness compare.
     let equiv = rk.as_ref().map(|rk| {
@@ -2091,7 +2097,8 @@ fn run_sdpa_vector(
             0,
             1,
         );
-        let ref_out = crate::runner::read_typed(runner, &mlx_out_buf, n_q_heads * head_dim, dt);
+        let ref_out =
+            metaltile_runtime::runner::read_typed(runner, &mlx_out_buf, n_q_heads * head_dim, dt);
         check_equiv_with(&ref_out, &mt_out, EquivTolerance::new(spec.tol, 0.999))
     });
 
@@ -2227,7 +2234,7 @@ fn run_sdpa_prefill(
     // Grid = (q_tiles, n_q_heads, batch); one TG per Q-tile × head × batch.
     let q_tiles = q_len / bq;
     runner.measure(&mk, &mt_bufs, [q_tiles, n_q_heads, batch], [tpg, 1, 1], 0, 1);
-    let mt_out = crate::runner::read_typed(runner, &mt_out_buf, qsz, dt);
+    let mt_out = metaltile_runtime::runner::read_typed(runner, &mt_out_buf, qsz, dt);
 
     // ── MLX reference: steel_attention_* (Flash-Attention 2 tile) ──
     // bq=32, bk=16, bd=128, wm=4, wn=1, mask type = Q type when no mask
@@ -2534,7 +2541,8 @@ fn run_sdpa_vector_2pass(
     // Run once for correctness.
     runner.measure(&p1_mk, &p1_bufs, p1_grid, p1_tpg, 0, 1);
     runner.measure(&p2_mk, &p2_bufs, p2_grid, p2_tpg, 0, 1);
-    let mt_out = crate::runner::read_typed(runner, &mt_out_buf, n_q_heads * head_dim, dt);
+    let mt_out =
+        metaltile_runtime::runner::read_typed(runner, &mt_out_buf, n_q_heads * head_dim, dt);
 
     // MLX single-pass `sdpa_vector` reference at the same shape.
     const REF_FCS: &[(usize, bool)] =
@@ -2563,7 +2571,8 @@ fn run_sdpa_vector_2pass(
             0,
             1,
         );
-        let ref_out = crate::runner::read_typed(runner, &mlx_out_buf, n_q_heads * head_dim, dt);
+        let ref_out =
+            metaltile_runtime::runner::read_typed(runner, &mlx_out_buf, n_q_heads * head_dim, dt);
         check_equiv_with(&ref_out, &mt_out, EquivTolerance::new(spec.tol, 0.999))
     });
 
@@ -2886,7 +2895,7 @@ fn run_sdpa_batched_decode_form(
     // `tpg=1024` matches the rebased `sdpa_decode` kernel's design
     // threadgroup size (32 simdgroups × 32 lanes).
     let single_tpg = 1024usize;
-    let mut single_kernel = crate::ffai::sdpa_decode::ffai_sdpa_decode::kernel_ir_for(dt);
+    let mut single_kernel = metaltile_std::ffai::sdpa_decode::ffai_sdpa_decode::kernel_ir_for(dt);
     single_kernel.mode = KernelMode::Reduction;
     let single_msl =
         match MslGenerator::new(msl_cfg_for(Some(single_tpg as u32))).generate(&single_kernel) {
@@ -3239,7 +3248,7 @@ fn run_sdpa_batched_decode_prefill_tile(
     // shape for the K-independent baseline. The dispatch is dense-path
     // (sink_end = 0, window_start = 0).
     let single_tpg = 1024usize;
-    let mut single_kernel = crate::ffai::sdpa_decode::ffai_sdpa_decode::kernel_ir_for(dt);
+    let mut single_kernel = metaltile_std::ffai::sdpa_decode::ffai_sdpa_decode::kernel_ir_for(dt);
     single_kernel.mode = KernelMode::Reduction;
     let (ref_perf, ref_timing) = match MslGenerator::new(msl_cfg_for(Some(single_tpg as u32)))
         .generate(&single_kernel)

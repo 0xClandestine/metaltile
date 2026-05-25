@@ -51,7 +51,7 @@
 //!   `m * n`. The `axpby` form additionally reads a `c_in` `[M, N]`
 //!   operand and two scalar constexprs `alpha` / `beta`.
 
-use metaltile::kernel;
+use metaltile_macros::kernel;
 
 // ── Pass 1 — split-K partial GEMM ───────────────────────────────────────
 

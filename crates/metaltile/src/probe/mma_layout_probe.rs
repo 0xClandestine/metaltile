@@ -17,7 +17,7 @@
 //! Run:
 //!   cargo test --release -p metaltile-std --test mma_layout_probe -- --nocapture
 
-use metaltile::kernel;
+use crate::kernel;
 
 #[kernel]
 pub fn mt_mma_probe_a_identity_b_gemm(out: Tensor<f32>) {

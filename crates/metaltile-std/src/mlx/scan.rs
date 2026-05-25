@@ -26,8 +26,8 @@
 //!   `sgs` threadgroup buffer (9 slots) covers every simdgroup plus the
 //!   running-prefix slot at index `n_simd`.
 
-use metaltile::{bench_kernel, kernel};
 use metaltile_core::ir::KernelMode;
+use metaltile_macros::{bench_kernel, kernel};
 
 use crate::{
     bench_types::DType,

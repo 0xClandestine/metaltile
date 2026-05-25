@@ -44,7 +44,7 @@
 //! Codegen-only; correctness pinned by
 //! `tests/rms_norm_qgemv_gpu_correctness.rs`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 /// `y[row] = Σ_i (q[row,i]·scale + bias) · (x[i]·norm_weight[i]·inv_rms)`,
 /// with `inv_rms = rsqrt(mean(x²) + eps)`, weights int4-packed.

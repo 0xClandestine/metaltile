@@ -2,7 +2,7 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Layer normalization benchmark — #[kernel] DSL vs MLX metal/layer_norm.metal
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="layer_norm",

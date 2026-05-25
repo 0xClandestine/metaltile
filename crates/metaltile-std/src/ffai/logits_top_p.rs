@@ -39,7 +39,7 @@
 //! survives; as `top_p → 1` nothing is masked. A typical serving value
 //! is 0.9–0.95.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="logits_processors",

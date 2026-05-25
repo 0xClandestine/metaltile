@@ -15,8 +15,8 @@
 //! The 9 "complex" class types (Sort, Scan, ArgReduce, Random, FpQuantized,
 //! QuantizedMatVec, Rope, Attention, StridedCopy) keep specialized runners.
 
-use metaltile_core::{
-    dtype::DType,
+use crate::{
+    bench::types::DType,
     ir::{Kernel, KernelMode},
 };
 
@@ -480,6 +480,22 @@ pub struct BenchSpec {
 
 inventory::collect!(BenchSpec);
 
+/// Returns all registered `BenchSpec` instances — the single source of truth
+/// for the in-tree kernel registry.
+///
+/// Lazily collects from the inventory-linked registration performed by
+/// `inventory::submit!` calls (manual and macro-generated) on first call.
+/// The result is cached for subsequent calls.
+pub fn bench_specs() -> &'static [&'static BenchSpec] {
+    use std::sync::OnceLock;
+    static SPECS: OnceLock<Vec<&'static BenchSpec>> = OnceLock::new();
+    SPECS.get_or_init(|| {
+        let mut v: Vec<&BenchSpec> = inventory::iter::<BenchSpec>.into_iter().collect();
+        v.sort_unstable_by_key(|s| (s.op, s.subop, s.kernel_name));
+        v
+    })
+}
+
 // ── Standard bytes formulas ──────────────────────────────────────────────
 
 pub fn bytes_elementwise(n: usize, _b: usize, reads: usize, _out: usize, eb: usize) -> usize {
@@ -503,6 +519,6 @@ pub fn bytes_select(n: usize, _b: usize, _reads: usize, _out: usize, eb: usize) 
     n + 3 * n * eb // cond(1 byte) + on_true(eb) + on_false(eb) + out(eb)
 }
 
-pub fn effective_mode(spec: &BenchSpec) -> metaltile_core::ir::KernelMode {
+pub fn effective_mode(spec: &BenchSpec) -> crate::ir::KernelMode {
     spec.kernel_mode.unwrap_or_else(|| spec.dispatch.default_mode(spec.shapes))
 }

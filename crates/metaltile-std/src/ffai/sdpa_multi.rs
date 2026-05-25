@@ -41,7 +41,7 @@
 //! layout `[n_query, n_q_heads, head_dim]`. Online softmax runs in
 //! fp32 throughout (storage stays in T).
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="sdpa",

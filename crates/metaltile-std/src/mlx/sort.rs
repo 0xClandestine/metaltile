@@ -46,8 +46,8 @@
 //! - Input must already hold sorted runs of length `run`; output is a
 //!   *separate* buffer (no in-place — caller ping-pongs).
 
-use metaltile::{bench_kernel, kernel};
 use metaltile_core::ir::KernelMode;
+use metaltile_macros::{bench_kernel, kernel};
 
 use crate::{
     bench_types::DType,

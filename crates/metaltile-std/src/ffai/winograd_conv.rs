@@ -66,7 +66,7 @@
 //!
 //! Codegen-only. Correctness validated by `winograd_conv_gpu_correctness`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 /// Winograd F(2×2, 3×3) convolution. See the module docs for the
 /// algorithm and the dispatch invariants.

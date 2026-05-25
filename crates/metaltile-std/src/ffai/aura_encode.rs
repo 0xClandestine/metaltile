@@ -70,7 +70,7 @@
 //! the `#[kernel]` proc-macro sees it — required because the proc-macro
 //! does not expand inner declarative macros.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 macro_rules! aura_encode_kernel {
     ($name:ident, $bits:literal, $levels:literal, $subop:literal) => {

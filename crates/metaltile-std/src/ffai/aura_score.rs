@@ -45,7 +45,7 @@
 //! tightly enough that this is functionally equivalent — re-evaluate
 //! if `tile profile` shows codebook reads dominating later.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 use crate::bench_types::DType;
 

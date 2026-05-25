@@ -30,7 +30,7 @@
 //! as `min_p → 1` only the argmax (and exact ties) survive. A typical
 //! serving value is 0.05–0.1.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="logits_processors",

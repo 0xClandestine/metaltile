@@ -10,7 +10,7 @@
 //! MetalTile: mt_arange — same one-thread-per-element algorithm via #[kernel] DSL.
 //!   KernelMode::Elementwise
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="arange",

@@ -35,7 +35,7 @@
 //! upstream file about Qwen3.5-9B `!!!!!` decoding regressions when
 //! this was fp32 + caller-side cast.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 use crate::bench_types::DType;
 

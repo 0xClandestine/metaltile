@@ -17,8 +17,8 @@
 //!     (Grid3D). Suits many short segments where the row-reduce
 //!     threadgroup-per-row layout would under-occupy the GPU.
 
-use metaltile::{bench_kernel, kernel};
 use metaltile_core::ir::KernelMode;
+use metaltile_macros::{bench_kernel, kernel};
 
 use crate::{
     bench_types::DType,

@@ -8,7 +8,7 @@
 //!
 //! Codegen-only. Validated end-to-end in FFAI integration tests.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="gather",

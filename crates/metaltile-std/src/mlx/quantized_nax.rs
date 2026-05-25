@@ -30,8 +30,8 @@
 //! - **Group size baked at 64** — Qwen3.6-A3B default.
 //! - **`KernelMode::Reduction`**.
 
-use metaltile::kernel;
 use metaltile_core::ir::KernelMode;
+use metaltile_macros::kernel;
 
 use crate::{
     bench_types::DType,

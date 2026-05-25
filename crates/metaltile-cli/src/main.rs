@@ -2,22 +2,31 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! MetalTile CLI — `tile` binary.
 //!
-//! Subcommands:
-//!   bench     Benchmark suite: MetalTile vs MLX reference
-//!   build     Compile kernels to MSL; emit metallib/Swift/manifest with --emit
-//!   inspect   Print IR and/or MSL for one kernel
-//!   device    Show GPU device info and supported features
-//!   snap      Save bench results as a regression baseline
-//!   diff      Compare bench results to a saved baseline
-//!   update    Install the latest tile binary (or build from a PR / commit)
+//! Subcommands live in `cmd/` and own their own `Args` structs.
+//! This file is pure dispatch.
 
+pub mod bench;
 mod cmd;
+pub mod diff;
 mod error;
 pub mod git;
-pub mod suite_printer;
+pub mod project;
 pub mod term;
+
 use anstyle::AnsiColor;
 use clap::{Parser, builder::Styles};
+pub use cmd::bench::BenchArgs;
+pub use cmd::build::BuildArgs;
+pub use cmd::clean::CleanArgs;
+pub use cmd::completions::CompletionsArgs;
+pub use cmd::config::ConfigArgs;
+pub use cmd::device::DeviceArgs;
+pub use cmd::diff::DiffArgs;
+pub use cmd::init::InitArgs;
+pub use cmd::inspect::InspectArgs;
+pub use cmd::snap::SnapArgs;
+pub use cmd::test::TestArgs;
+pub use cmd::update::UpdateArgs;
 pub use error::CliError;
 
 const CLAP_STYLES: Styles = Styles::styled()
@@ -30,190 +39,90 @@ const CLAP_STYLES: Styles = Styles::styled()
     .invalid(AnsiColor::Red.on_default());
 
 /// MetalTile CLI — benchmark and inspect GPU kernels on Apple Silicon.
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(name = "tile", version, about, styles = CLAP_STYLES)]
-struct Cli {
+pub struct Cli {
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(clap::Subcommand, Debug)]
 enum Command {
-    /// Benchmark suite: MetalTile vs MLX reference
+    /// Benchmark suite: MetalTile vs MLX reference.
     Bench(BenchArgs),
-    /// Compile kernels to MSL; emit metallib/Swift/manifest with --emit
+    /// Compile kernels to MSL; emit metallib/Swift/manifest with --emit.
     Build(BuildArgs),
-    /// Print IR and/or MSL for registered kernels
+    /// Run GPU correctness checks.
+    Test(TestArgs),
+    /// Bootstrap a new MetalTile project.
+    Init(InitArgs),
+    /// Print resolved Tile.toml configuration.
+    Config(ConfigArgs),
+    /// Remove build artifacts and cache.
+    Clean(CleanArgs),
+    /// Print IR and/or MSL for registered kernels.
     Inspect(InspectArgs),
-    /// Show GPU device info and supported feature flags
+    /// Show GPU device info and supported feature flags.
     Device(DeviceArgs),
-    /// Save bench results as a regression baseline
+    /// Save bench results as a regression baseline.
     Snap(SnapArgs),
-    /// Compare bench results against a saved baseline
+    /// Compare bench results against a saved baseline.
     Diff(DiffArgs),
-    /// Install the latest tile binary, or build from a PR / commit
+    /// Install the latest tile binary, or build from a PR / commit.
     Update(UpdateArgs),
+    /// Emit shell completion scripts for bash, zsh, fish, or elvish.
+    Completions(CompletionsArgs),
 }
 
-// ── Bench ────────────────────────────────────────────────────────────────
+// ── Shared filter flags ──────────────────────────────────────────────────
 
-#[derive(clap::Args, Debug)]
-struct BenchArgs {
-    /// Only run kernels whose name contains this text
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct FilterFlags {
+    /// Filter by kernel name (substring, case-insensitive).
     #[arg(long = "filter", short = 'f')]
-    filter: Option<String>,
-    /// Show occupancy and register profile (-v) and GPU timing stats (-vv).
-    #[arg(short = 'v', action = clap::ArgAction::Count)]
-    verbose: u8,
-    /// Write results as JSON to this file
-    #[arg(long = "json", short = 'o')]
-    json: Option<String>,
-    /// Run even if the working tree has tracked-file modifications.
-    /// Without this flag, bench refuses to run on a dirty tree so the
-    /// numbers always tie back to a clean commit SHA.
-    #[arg(long = "allow-dirty")]
-    allow_dirty: bool,
-    /// Opt into the post-bench diff against the target-branch baseline.
-    #[arg(long = "diff")]
-    diff: bool,
-    /// Git ref whose `baselines/<chip>.json` to diff against (default:
-    /// first of `origin/dev`, `upstream/dev`, `dev` that resolves).
-    #[arg(long = "baseline-ref")]
-    baseline_ref: Option<String>,
+    pub filter: Option<String>,
+
+    /// Only include kernels whose name matches this regex.
+    #[arg(long = "match-kernel")]
+    pub match_kernel: Option<String>,
+
+    /// Only include kernels whose op group matches this regex.
+    #[arg(long = "match-module")]
+    pub match_module: Option<String>,
+
+    /// Exclude kernels whose name matches this regex.
+    #[arg(long = "no-match-kernel")]
+    pub no_match_kernel: Option<String>,
+
+    /// Exclude kernels whose op group matches this regex.
+    #[arg(long = "no-match-module")]
+    pub no_match_module: Option<String>,
 }
 
-// ── Build ────────────────────────────────────────────────────────────────
+impl FilterFlags {
+    /// Compile flag strings into a validated `Filters` instance.
+    pub fn to_filters(&self) -> Result<metaltile::harness::Filters, CliError> {
+        metaltile::harness::Filters::build(
+            self.filter.as_deref(),
+            self.match_kernel.as_deref(),
+            self.match_module.as_deref(),
+            self.no_match_kernel.as_deref(),
+            self.no_match_module.as_deref(),
+        )
+        .map_err(|e| CliError::Config(e.to_string()))
+    }
 
-#[derive(clap::Args, Debug)]
-struct BuildArgs {
-    /// Only build kernels whose name contains this text
-    #[arg(long = "filter", short = 'f')]
-    filter: Option<String>,
-    /// Comma-separated list of dtypes to build (f32,f16,bf16)
-    #[arg(long = "dtypes")]
-    dtypes: Option<String>,
-    /// Print generated MSL for each kernel (-v for verbose)
-    #[arg(short = 'v', action = clap::ArgAction::Count)]
-    verbose: u8,
-    /// Comma-separated: msl,metallib,swift,ir,all
-    #[arg(long = "emit")]
-    emit: Option<String>,
-    /// Output directory (required when --emit is set)
-    #[arg(long = "out", short = 'o')]
-    out: Option<String>,
-    /// xcrun SDK (default: macosx)
-    #[arg(long = "sdk", default_value = "macosx")]
-    sdk: String,
-    /// Run the standard pass pipeline 25× per kernel and print per-pass
-    /// median wall_us instead of emitting MSL (after 5 warmup iters).
-    /// Inherits `--filter` and `--dtypes`.
-    #[arg(long = "time-passes", short = 't')]
-    time_passes: bool,
-}
-
-// ── Inspect ──────────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Debug)]
-struct InspectArgs {
-    /// Kernel name to inspect (list all if omitted)
-    kernel: Option<String>,
-    /// Filter kernels by name substring
-    #[arg(long = "filter")]
-    filter: Option<String>,
-    /// Process all kernels
-    #[arg(long = "all")]
-    all: bool,
-    /// Print raw IR before any passes
-    #[arg(long = "ir")]
-    ir: bool,
-    /// Print per-pass op-count reduction table
-    #[arg(long = "stats")]
-    stats: bool,
-    /// Print IR after a specific pass name (or 'all' for every stage)
-    #[arg(long = "pass")]
-    pass: Option<String>,
-    /// Dtype override (f32, f16, bf16, i32, u32)
-    #[arg(long = "dtype")]
-    dtype: Option<String>,
-    /// Write output files to <path> instead of stdout
-    #[arg(long = "dir", short = 'o')]
-    dir: Option<String>,
-}
-
-// ── Device ───────────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Debug)]
-struct DeviceArgs {
-    /// Output as JSON
-    #[arg(long = "json")]
-    json: bool,
-}
-
-// ── Snap ─────────────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Debug)]
-struct SnapArgs {
-    /// Write snapshot to <file> (default: .tile-snapshots/<sha>.json)
-    #[arg(long = "out", short = 'o')]
-    out: Option<String>,
-    /// Promote an existing JSON file instead of re-running bench
-    #[arg(long = "from")]
-    from: Option<String>,
-    /// Attach a note to the snapshot
-    #[arg(long = "note")]
-    note: Option<String>,
-    /// Only include kernels whose name contains this text
-    #[arg(long = "filter", short = 'f')]
-    filter: Option<String>,
-}
-
-// ── Diff ─────────────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Debug)]
-struct DiffArgs {
-    /// Baseline JSON file
-    baseline: String,
-    /// Current JSON file (runs bench if omitted)
-    current: Option<String>,
-    /// Only show kernels whose name contains this text
-    #[arg(long = "filter", short = 'f')]
-    filter: Option<String>,
-    /// Highlight regressions larger than this percentage (default: 5)
-    #[arg(long = "threshold", default_value = "5.0")]
-    threshold: f64,
-    /// Sort by: name, delta, pct (default: name)
-    #[arg(long = "sort", default_value = "name")]
-    sort: String,
-    /// Only show regressions
-    #[arg(long = "only-regressions")]
-    only_regressions: bool,
-    /// Only show improvements
-    #[arg(long = "only-improvements")]
-    only_improvements: bool,
-}
-
-// ── Update ────────────────────────────────────────────────────────────────
-
-#[derive(clap::Args, Debug)]
-struct UpdateArgs {
-    /// Print what would be installed without modifying anything
-    #[arg(long = "check")]
-    check: bool,
-    /// Build and install from the head of this PR number (requires git + cargo)
-    #[arg(long = "pr", value_name = "N", conflicts_with = "commit")]
-    pr: Option<u32>,
-    /// Build and install from this commit SHA (requires git + cargo)
-    #[arg(long = "commit", value_name = "SHA", conflicts_with = "pr")]
-    commit: Option<String>,
+    /// Returns `true` if `label` passes the `--filter` substring check.
+    pub fn matches_filter(&self, label: &str) -> bool {
+        self.filter
+            .as_deref()
+            .is_none_or(|f| label.to_ascii_lowercase().contains(&f.to_ascii_lowercase()))
+    }
 }
 
 // ── Dispatch ─────────────────────────────────────────────────────────────
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialise tracing. METALTILE_DEBUG=1 enables debug-level output for all
-    // metaltile crates; METALTILE_DEBUG=trace enables trace level.
-    // When the env-var is absent the subscriber is still installed but the filter
-    // rejects everything, so library crates pay only the ~1 ns no-subscriber cost.
     let debug_level = std::env::var("METALTILE_DEBUG").ok();
     let filter = match debug_level.as_deref() {
         Some("1") | Some("debug") => "metaltile=debug",
@@ -225,36 +134,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter)),
         )
-        // Diagnostics go to stderr so they don't interleave with bench/build
-        // output on stdout. `with_target` shows which crate/module emitted
-        // each event — useful when tracing spans multiple crates.
         .with_writer(std::io::stderr)
         .with_target(true)
         .with_thread_ids(false)
-        // Print a line when each span closes so you see elapsed wall time.
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .compact()
         .init();
 
     let cli = Cli::parse();
-    let _span = tracing::info_span!("tile", command = ?cli.command).entered();
 
     match cli.command {
-        Command::Bench(args) => cmd::bench::run(&args)?,
-        Command::Build(args) => cmd::build::run(&args)?,
-        Command::Inspect(args) => cmd::inspect::run(&args)?,
-        Command::Device(args) => cmd::device::run(&args)?,
-        Command::Snap(args) => cmd::snap::run(&args)?,
-        Command::Diff(args) => cmd::diff::run(&args)?,
-        Command::Update(args) => cmd::update::run(&args)?,
+        Command::Bench(args) => args.run(),
+        Command::Build(args) => args.run(),
+        Command::Test(args) => args.run(),
+        Command::Init(args) => args.run(),
+        Command::Config(args) => args.run(),
+        Command::Clean(args) => args.run(),
+        Command::Inspect(args) => args.run(),
+        Command::Device(args) => args.run(),
+        Command::Snap(args) => args.run(),
+        Command::Diff(args) => args.run(),
+        Command::Update(args) => args.run(),
+        Command::Completions(args) => args.run(),
     }
-    Ok(())
+    .map_err(Into::into)
 }
 
-/// Filter helper: case-insensitive substring match.
+/// Returns `true` if `label` passes a substring filter (or filter is `None`).
 pub(crate) fn matches_filter(filter: Option<&str>, label: &str) -> bool {
-    let Some(filter) = filter else {
-        return true;
-    };
-    label.to_ascii_lowercase().contains(&filter.to_ascii_lowercase())
+    filter.is_none_or(|f| label.to_ascii_lowercase().contains(&f.to_ascii_lowercase()))
 }

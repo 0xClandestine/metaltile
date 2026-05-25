@@ -2,7 +2,7 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Softmax benchmark — #[kernel] DSL vs MLX metal/softmax.metal
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="softmax",

@@ -40,8 +40,8 @@
 //! integer where bit j = 1 means H_M[t][j] = +1 (otherwise −1).
 //! Verified for orthogonality: H · H^T = M · I.
 
-use metaltile::kernel;
 use metaltile_core::{dtype::DType, ir::Kernel};
+use metaltile_macros::kernel;
 
 use crate::bench_types::DType as BenchDType;
 

@@ -34,7 +34,7 @@
 //!
 //! Correctness: `tests/moe_gather_qmm_mpp_int8_correctness.rs` (cosine ≥ 0.999).
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 /// MPP MoE int8 grouped BGEMM, BM=16 / BN=32 / BK=16, one simdgroup.
 ///

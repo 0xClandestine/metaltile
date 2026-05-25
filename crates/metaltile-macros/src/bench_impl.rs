@@ -1082,8 +1082,30 @@ pub fn generate_submit(fn_name: &syn::Ident, a: &BenchArgs, is_generic: bool) ->
     };
 
     let km_ts = kernel_mode_ts(&a.kernel_mode);
+    let spec_name_ident = spec_static_name(&fn_str);
 
+    // Emit both the named static (for external bench_specs() consumption)
+    // AND the inventory::submit! (for backward compat during migration).
+    // Phase 3 will remove the inventory::submit! once bench_specs() is the
+    // universal discovery mechanism.
     quote! {
+        #[allow(non_upper_case_globals)]
+        pub static #spec_name_ident: crate::spec::BenchSpec = crate::spec::BenchSpec {
+            op:          #op,
+            subop:       #subop,
+            kernel_name: #fn_str,
+            kernel_ir:   #kernel_ir_expr,
+            dtypes:      #dtypes,
+            tol:         #tol as f32,
+            mlx_src:     #mlx_src,
+            mlx_pattern: #mlx_pat,
+            shapes:      #shapes_ts,
+            dispatch:    #dispatch_ts,
+            kernel_mode: #km_ts,
+        };
+
+        // Backward compat: also register via inventory so the in-tree path
+        // (which uses bench_specs() → inventory::iter) still finds this spec.
         ::inventory::submit! {
             crate::spec::BenchSpec {
                 op:          #op,
@@ -1100,4 +1122,18 @@ pub fn generate_submit(fn_name: &syn::Ident, a: &BenchArgs, is_generic: bool) ->
             }
         }
     }
+}
+
+/// Convert a snake_case function name to a SCREAMING_SNAKE_CASE static name
+/// by uppercasing and appending `_SPEC`.
+///
+/// `mt_vector_add` → `MT_VECTOR_ADD_SPEC`
+/// `mt_exp` → `MT_EXP_SPEC`
+fn spec_static_name(fn_name: &str) -> syn::Ident {
+    let screaming = fn_name
+        .chars()
+        .map(|c| if c == '_' { '_' } else { c.to_ascii_uppercase() })
+        .collect::<String>();
+    let name = format!("{screaming}_SPEC");
+    syn::Ident::new(&name, proc_macro2::Span::call_site())
 }

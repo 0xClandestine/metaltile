@@ -73,7 +73,10 @@
 //! - Use `<kernel>::build_kernel_ir()` or `metaltile::codegen::msl::MslGenerator` to inspect the
 //!   generated IR and MSL before dispatching.
 
+pub mod bench;
+pub mod harness;
 pub mod prelude;
+pub mod probe;
 
 /// Crate version from `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

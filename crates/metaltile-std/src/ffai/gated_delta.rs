@@ -47,7 +47,7 @@
 //! recurrence in bf16 drifts after a few dozen decode steps, same
 //! reasoning as `ssm_step`. Activations stay in T.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="gated_delta",

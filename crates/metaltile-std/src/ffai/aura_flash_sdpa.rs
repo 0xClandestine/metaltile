@@ -42,7 +42,7 @@
 //! Codegen-only; correctness pinned by
 //! `tests/aura_flash_sdpa_gpu_correctness.rs`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 macro_rules! aura_flash_sdpa_kernel {
     (

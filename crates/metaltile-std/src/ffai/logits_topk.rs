@@ -35,7 +35,7 @@
 //! - **No `threadgroup_*` / `simd_*` cooperation** — every thread is
 //!   independent. The only invariant is the threshold semantic above.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="logits_processors",

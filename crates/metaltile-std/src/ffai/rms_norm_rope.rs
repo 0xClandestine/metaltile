@@ -32,7 +32,7 @@
 //! Codegen-only; correctness pinned by
 //! `tests/rms_norm_rope_gpu_correctness.rs`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 /// Fused RMSNorm + paired-layout RoPE for one Q/K head per threadgroup.
 #[bench_kernel(

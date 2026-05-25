@@ -87,7 +87,7 @@
 //! to avoid catastrophic cancellation in the `exp(max_old - max_new)`
 //! rescale at long context.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="sdpa",

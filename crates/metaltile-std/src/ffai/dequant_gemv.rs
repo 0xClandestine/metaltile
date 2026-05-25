@@ -43,7 +43,7 @@
 //! previous shape of this file) silently produced empty kernels — the
 //! proc-macro doesn't expand inner declarative macros.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 // ── Pack-strided kernel (int4, int8) ──────────────────────────────────────
 //

@@ -15,7 +15,7 @@
 //! u32-output signature. Correctness validated in FFAI integration
 //! tests against reference decoder output.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 // Tree-reduction strides: 128 → 64 → 32 → 16 → 8 → 4 → 2.
 // Each iteration: threads with `lid < stride` merge the upper half into

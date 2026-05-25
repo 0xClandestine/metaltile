@@ -18,7 +18,7 @@
 //!
 //! head_dim hardcoded to 128; online softmax in fp32 throughout.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 /// MLX-derived `blocks` value for chained 2-pass dispatch on Apple
 /// M5 Max (architecture char `'s'`). Mirrors the curve in upstream

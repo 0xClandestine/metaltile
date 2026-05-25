@@ -2,7 +2,7 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! FP quantized benchmark — #[kernel] DSL vs MLX metal/fp_quantized.metal
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="fp_quantized",

@@ -22,7 +22,7 @@
 //! Codegen-only. Correctness validated end-to-end in FFAI integration
 //! tests against real Mamba/Nemotron decoding.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 // Mamba 2 / Mamba 1D depthwise causal-conv step — streaming-decode form.
 //

@@ -33,7 +33,7 @@
 //!
 //! Correctness validated by `tests/moe_gather_qmm_mpp_bm64_correctness.rs`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 /// MPP MoE int4 grouped BGEMM, BM=BN=64 / BK=32, 4 simdgroups (2×2).
 /// Signature matches `…_bm16_mpp`.

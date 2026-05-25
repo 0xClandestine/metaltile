@@ -57,8 +57,8 @@
 //!
 //! Codegen-only; correctness pinned by `tests/fft_gpu_correctness.rs`.
 
-use metaltile::kernel;
 use metaltile_core::ir::KernelMode;
+use metaltile_macros::kernel;
 
 use crate::{
     bench_types::DType,

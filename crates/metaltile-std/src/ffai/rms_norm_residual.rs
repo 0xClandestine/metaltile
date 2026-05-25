@@ -26,7 +26,7 @@
 //! Codegen-only; correctness pinned by
 //! `tests/rms_norm_residual_gpu_correctness.rs`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 /// `out[r, i] = residual[r, i] + w[i] * x[r, i] * rsqrt(mean(x[r]²) + eps)`.
 #[bench_kernel(

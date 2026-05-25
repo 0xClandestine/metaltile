@@ -2,7 +2,7 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! binary_two benchmark — #[kernel] DSL fused two-output elementwise
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="binary_two",

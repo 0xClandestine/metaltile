@@ -33,7 +33,7 @@
 //!
 //! Wrapping doc: see FFAI/CLAUDE.md §"Wrapping kernels in FFAI".
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="sdpa",

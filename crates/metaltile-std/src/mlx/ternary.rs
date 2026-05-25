@@ -11,7 +11,7 @@
 //! MetalTile: mt_select — same algorithm via #[kernel] DSL.
 //!   KernelMode::Elementwise
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="select",

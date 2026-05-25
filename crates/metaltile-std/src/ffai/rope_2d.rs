@@ -41,7 +41,7 @@
 //!
 //! Codegen-only. Correctness validated by `rope_2d_gpu_correctness`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="rope",

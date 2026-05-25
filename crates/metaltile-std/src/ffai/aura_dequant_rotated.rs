@@ -40,7 +40,7 @@
 //! expand inner `macro_rules!` invocations (see CLAUDE.md note about
 //! PR #19's macro regression).
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 // ── Clean nibble/byte path: bits ∈ {2, 4, 8} ─────────────────────────────
 //

@@ -47,8 +47,8 @@
 //! Correctness vs CPU oracle ≥ cos 0.999 — see
 //! `crates/metaltile-std/tests/steel_gemm_gather_nax_gpu_correctness.rs`.
 
-use metaltile::kernel;
 use metaltile_core::ir::KernelMode;
+use metaltile_macros::kernel;
 
 use crate::{
     bench_types::DType,

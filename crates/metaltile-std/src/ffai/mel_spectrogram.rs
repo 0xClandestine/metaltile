@@ -42,7 +42,7 @@
 //!
 //! Codegen-only. Correctness validated by `mel_spectrogram_gpu_correctness`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 use crate::bench_types::DType;
 

@@ -49,7 +49,7 @@
 //!
 //! Codegen-only. Correctness validated by `conv2d_gpu_correctness`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 /// Emit a conv2d kernel. `$kh / $kw / $stride` are either literals (the
 /// fixed-patch variants) or the `kh / kw / stride_h / stride_w`

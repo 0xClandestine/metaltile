@@ -2,7 +2,7 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Elementwise binary ops — #[kernel] DSL vs MLX metal/binary.metal
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="binary",

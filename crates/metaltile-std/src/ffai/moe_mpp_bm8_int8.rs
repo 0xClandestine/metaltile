@@ -43,7 +43,7 @@
 //!
 //! Correctness validated by `tests/moe_gather_qmm_mpp_bm8_int8_correctness.rs`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 /// MPP MoE int8 grouped BGEMM, BM=8 / BN=32 / BK=16, one simdgroup,
 /// direct-input `matmul2d`. Signature matches `…_int4_bm8_mpp`.

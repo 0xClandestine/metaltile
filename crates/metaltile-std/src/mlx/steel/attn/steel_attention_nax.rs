@@ -53,7 +53,7 @@
 //! Correctness vs CPU oracle ≥ cos 0.999 (f32/f16), ≥ 0.997 (bf16) — see
 //! `crates/metaltile-std/tests/steel_attention_nax_gpu_correctness.rs`.
 
-use metaltile::kernel;
+use metaltile_macros::kernel;
 
 /// Tile geometry — keep in lock-step with the codegen-emitted MSL.
 pub const BQ: u32 = 16;

@@ -203,7 +203,7 @@ fn every_registered_benchspec_codegens() {
     let mut errors: Vec<String> = Vec::new();
     let mut total = 0_usize;
 
-    for spec in inventory::iter::<BenchSpec>() {
+    for spec in metaltile_std::spec::bench_specs().iter().copied() {
         let mode = effective_mode(spec);
         for &dt in spec.dtypes {
             total += 1;
@@ -239,7 +239,10 @@ fn every_registered_benchspec_codegens() {
         }
     }
 
-    assert!(total > 0, "inventory::iter::<BenchSpec>() was empty — link issue?");
+    assert!(
+        total > 0,
+        "metaltile_std::spec::bench_specs().iter().copied() was empty — link issue?"
+    );
     assert!(
         errors.is_empty(),
         "{} of {} (spec, dtype) cells failed codegen:\n  {}",
@@ -254,15 +257,18 @@ fn every_registered_benchspec_codegens() {
 #[test]
 fn no_undefined_mt_symbols_in_emitted_msl() {
     // Build set of known kernel names from the registry.
-    let kernel_names: HashSet<String> =
-        inventory::iter::<BenchSpec>().map(|s| s.kernel_name.to_string()).collect();
+    let kernel_names: HashSet<String> = metaltile_std::spec::bench_specs()
+        .iter()
+        .copied()
+        .map(|s| s.kernel_name.to_string())
+        .collect();
     assert!(!kernel_names.is_empty(), "inventory empty — link issue?");
 
     let builtins: HashSet<&'static str> = DSL_BUILTINS.iter().copied().collect();
 
     let mut errors: Vec<String> = Vec::new();
 
-    for spec in inventory::iter::<BenchSpec>() {
+    for spec in metaltile_std::spec::bench_specs().iter().copied() {
         let mode = effective_mode(spec);
         for &dt in spec.dtypes {
             let mut kernel = (spec.kernel_ir)(dt);
@@ -318,7 +324,7 @@ fn kernel_annotations_have_matching_inventory_submit() {
     // function inside a module of the same name; `inventory::submit!`
     // entries typically point to that via `<name>::kernel_ir_for`.
     let mut registered_kernel_names: HashSet<String> = HashSet::new();
-    for spec in inventory::iter::<BenchSpec>() {
+    for spec in metaltile_std::spec::bench_specs().iter().copied() {
         registered_kernel_names.insert(spec.kernel_name.to_string());
     }
     // Also accept kernels registered as KernelEntry building blocks

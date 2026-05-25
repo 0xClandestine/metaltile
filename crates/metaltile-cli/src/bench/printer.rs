@@ -1,102 +1,116 @@
 //! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
 //! SPDX-License-Identifier: Apache-2.0
-//! Suite printer: formats OpResult batches as terminal tables.
+//! Suite printer: formats BenchRow batches as terminal tables.
 //!
-//! All terminal output logic lives here (and in `term.rs`). The data types
-//! (`OpResult`, `OpBench`, `CorrectnessStatus`) stay in `metaltile-std`.
+//! Uses injectable [`OutputWriter`] for testability.  Table layout
+//! computation is separated from rendering so the printer doesn't
+//! need to track mutable state.
 
-use std::io::Write;
+use std::collections::HashMap;
 
-use metaltile_std::bench_types::{CorrectnessStatus, OpResult};
+use metaltile::harness::BenchRow;
+use crate::bench::profile::ProfileRow;
+use metaltile_core::bench::types::CorrectnessStatus;
 
-use crate::term::{Color, Style, paint_stdout};
+use crate::term::{Color, OutputWriter, Style, paint_stdout};
 
 // ── SuitePrinter ──────────────────────────────────────────────────────────
 
+/// Formats bench rows as terminal tables.
+///
+/// Writes to an injectable [`OutputWriter`] so tests can capture output
+/// without redirecting stdout globally.
 pub struct SuitePrinter {
     show_correctness: bool,
-    started: bool,
-    last_op_display: Option<String>,
-    term_width: usize,
-    cur_metric: Option<&'static str>,
-    /// Shows profile info (occ%, regs, bottleneck) in op headers when Some.
-    profile_map: Option<std::collections::HashMap<(String, String), ProfileRow>>,
-    /// Shows timing columns (p95, p99, cv%) when > 0 and results carry timing.
-    verbose: u8,
-}
-
-/// Compile-time profile snippet for one kernel (used by bench -v).
-#[derive(Clone)]
-pub struct ProfileRow {
-    pub occ_pct: f64,
-    pub regs_per_thread: usize,
-    pub bottleneck: &'static str,
+    writer: OutputWriter,
 }
 
 impl SuitePrinter {
+    /// Create a new printer that writes to stdout.
     pub fn new(show_correctness: bool) -> Self {
-        Self {
-            show_correctness,
-            started: false,
-            last_op_display: None,
-            term_width: term_width(),
-            cur_metric: None,
-            profile_map: None,
-            verbose: 0,
-        }
+        Self { show_correctness, writer: OutputWriter::stdout() }
     }
 
-    pub fn set_verbose(&mut self, v: u8) { self.verbose = v; }
-
-    pub fn set_profile_map(&mut self, m: std::collections::HashMap<(String, String), ProfileRow>) {
-        self.profile_map = Some(m);
+    /// Create a printer with an injectable output writer.
+    pub fn with_writer(show_correctness: bool, writer: OutputWriter) -> Self {
+        Self { show_correctness, writer }
     }
 
-    pub fn set_term_width(&mut self, w: usize) { self.term_width = w.clamp(60, 200); }
-
-    pub fn print_batch(&mut self, results: &[OpResult]) {
+    /// Print a batch of results.
+    pub fn print_batch<'a>(
+        &mut self,
+        results: &[BenchRow],
+        profile_map: Option<&HashMap<(String, String), ProfileRow>>,
+        verbose: u8,
+    ) {
         if results.is_empty() {
             return;
         }
-        if !self.started {
-            self.started = true;
-        }
 
-        for result in results {
-            let new_group = self.last_op_display.as_deref() != Some(&result.op_display());
-            if new_group {
-                if self.cur_metric != Some(result.metric()) {
-                    self.cur_metric = Some(result.metric());
-                }
-                if self.last_op_display.is_some() {
-                    println!();
-                }
-                self.print_op_header(result);
+        let term_width = term_width();
+
+        for chunk in Self::chunk_by_op(results) {
+            // Print op header
+            let m = chunk[0].metric();
+            let (shape_w, ref_w, mt_w, pct_w, ck_w) =
+                table_widths(term_width, &m, self.show_correctness);
+
+            self.print_op_header(
+                &chunk[0],
+                &table_widths(term_width, &m, self.show_correctness),
+                verbose,
+            );
+
+            // Print each data row
+            for result in chunk {
+                self.print_data_row(
+                    result,
+                    &(shape_w, ref_w, mt_w, pct_w, ck_w),
+                    profile_map,
+                    verbose,
+                );
             }
-            self.last_op_display = Some(result.op_display());
-            self.print_data_row(result);
         }
+
         self.flush();
     }
 
-    pub fn finish(&mut self) {
-        if !self.started {
-            return;
-        }
-        println!();
-        self.flush();
+    /// Print summary footer — call once after all batches.
+    pub fn finish(&mut self) { let _ = self.writer.line(""); }
+
+    /// Flush the output writer.
+    pub fn flush(&self) {
+        let mut w = OutputWriter::stdout();
+        let _ = w.flush();
     }
 
-    fn print_op_header(&self, result: &OpResult) {
-        let metric = self.cur_metric.unwrap_or("perf");
-        let (shape_w, ref_w, mt_w, pct_w, ck_w) =
-            sub_table_widths(self.term_width, metric, self.show_correctness);
+    // ── Internal helpers ──────────────────────────────────────────────
 
+    /// Group results by op_display, preserving order.
+    fn chunk_by_op<'a>(results: &'a [BenchRow]) -> Vec<&'a [BenchRow]> {
+        let mut chunks: Vec<&[BenchRow]> = Vec::new();
+        let mut start = 0;
+        for i in 1..=results.len() {
+            if i == results.len() || results[i].op_display() != results[start].op_display() {
+                chunks.push(&results[start..i]);
+                start = i;
+            }
+        }
+        chunks
+    }
+
+    fn print_op_header(
+        &mut self,
+        result: &BenchRow,
+        &(shape_w, ref_w, mt_w, pct_w, ck_w): &TableWidths,
+        verbose: u8,
+    ) {
+        let metric = result.metric();
         let sep = col_sep();
         let bold = Style::new().fg(Color::BrightWhite).bold();
 
         let mut hdr = format!(
-            "  {}  {} {} {} {} {} {}",
+            "  {} {} {} {} {} {} {}",
             paint_stdout(pad_left("Shape", shape_w), bold),
             sep,
             paint_stdout(pad_right(&format!("Ref({})", metric), ref_w), bold),
@@ -106,48 +120,39 @@ impl SuitePrinter {
             paint_stdout(pad_right("MT%", pct_w), bold),
         );
         if self.show_correctness {
-            hdr.push_str(&format!(" {} {}", sep, paint_stdout(pad_right("ok", ck_w), bold),));
+            hdr.push_str(&format!(" {} {}", sep, paint_stdout(pad_right("ok", ck_w), bold)));
         }
-        // -vv: scaling distribution columns
-        if self.verbose >= 2 {
-            let pw = 5;
-            let qw = 5;
-            let cw = 5;
+        if verbose >= 2 {
             hdr.push_str(&format!(
                 " {} {} {} {} {} {}",
                 sep,
-                paint_stdout(pad_right("p95", pw), bold),
+                paint_stdout(pad_right("p95", 5), bold),
                 sep,
-                paint_stdout(pad_right("p99", qw), bold),
+                paint_stdout(pad_right("p99", 5), bold),
                 sep,
-                paint_stdout(pad_right("cv%", cw), bold),
+                paint_stdout(pad_right("cv%", 5), bold),
             ));
         }
-        // -v/-vv: profile columns
-        if self.verbose >= 1 {
-            let ow = 5;
-            let rw = 4;
-            let bw = 17;
+        if verbose >= 1 {
             hdr.push_str(&format!(
                 " {} {} {} {} {} {}",
                 sep,
-                paint_stdout(pad_right("occ%", ow), bold),
+                paint_stdout(pad_right("occ%", 5), bold),
                 sep,
-                paint_stdout(pad_right("regs", rw), bold),
+                paint_stdout(pad_right("regs", 4), bold),
                 sep,
-                paint_stdout(pad_right("bottleneck", bw), bold),
+                paint_stdout(pad_right("bottleneck", 17), bold),
             ));
         }
 
-        // Op line — just the name, no profile
         let op = paint_stdout(result.op_display(), Style::new().fg(Color::Cyan).bold());
-        println!("  {op}");
-        println!("{hdr}");
+        let _ = self.writer.line(&format!("  {op}"));
+        let _ = self.writer.line(&hdr);
 
         let n_cols: usize = if self.show_correctness { 5 } else { 4 };
         let gaps = (n_cols.saturating_sub(1)) * 3;
-        let timing_cols = if self.verbose >= 2 { 5 + 3 + 5 + 3 + 5 + 3 } else { 0 };
-        let profile_cols = if self.verbose >= 1 { 5 + 3 + 4 + 3 + 17 + 3 } else { 0 };
+        let timing_cols = if verbose >= 2 { 5 + 3 + 5 + 3 + 5 + 3 } else { 0 };
+        let profile_cols = if verbose >= 1 { 5 + 3 + 4 + 3 + 17 + 3 } else { 0 };
         let total_w = 4
             + shape_w
             + gaps
@@ -158,57 +163,57 @@ impl SuitePrinter {
             + timing_cols
             + profile_cols;
         let sep_line = paint_stdout("─".repeat(total_w), Style::new().fg(Color::BrightBlack).dim());
-        println!("  {sep_line}");
+        let _ = self.writer.line(&format!("  {sep_line}"));
     }
 
-    fn print_data_row(&self, result: &OpResult) {
-        let metric = self.cur_metric.unwrap_or("perf");
-        let (shape_w, ref_w, mt_w, pct_w, ck_w) =
-            sub_table_widths(self.term_width, metric, self.show_correctness);
+    fn print_data_row(
+        &mut self,
+        result: &BenchRow,
+        &(shape_w, ref_w, mt_w, pct_w, ck_w): &TableWidths,
+        profile_map: Option<&HashMap<(String, String), ProfileRow>>,
+        verbose: u8,
+    ) {
+        let _metric = result.metric();
+        let sep = col_sep();
 
         let shape =
             paint_stdout(pad_left(result.shape(), shape_w), Style::new().fg(Color::BrightWhite));
-        let ref_s = fmt_perf(result.ref_perf(), metric, "—");
-        let mt_s = fmt_perf(result.mt_perf(), metric, "NYI");
+        let ref_s = fmt_perf(result.ref_perf(), "—");
+        let mt_s = fmt_perf(result.mt_perf(), "NYI");
         let pct_s = result.pct().map(|p| format!("{p:.0}%")).unwrap_or_else(|| "—".into());
 
         let ref_cell = style_reference(&pad_right(&ref_s, ref_w), result.ref_perf());
         let mt_cell = style_metaltile(&pad_right(&mt_s, mt_w), result);
         let pct_cell = style_pct(&pad_right(&pct_s, pct_w), result);
-        let sep = col_sep();
 
         let mut row = format!("  {shape} {sep} {ref_cell} {sep} {mt_cell} {sep} {pct_cell}");
         if self.show_correctness {
-            let ck_icon = correctness_icon(&result.correctness_status());
+            let ck_icon = correctness_icon(result.correctness_status());
             let ck_cell =
                 style_correctness(&pad_right(&ck_icon, ck_w), result.correctness_status());
             row.push_str(&format!(" {sep} {ck_cell}"));
         }
-        if self.verbose >= 2 {
+        if verbose >= 2 {
             let t = fmt_timing(result);
             row.push_str(&format!(" {sep} {t}"));
         }
-        if self.verbose >= 1 {
-            let p = fmt_profile(result, &self.profile_map);
+        if verbose >= 1 {
+            let p = fmt_profile(result, profile_map);
             row.push_str(&format!(" {sep} {p}"));
         }
-        println!("{row}");
+        let _ = self.writer.line(&row);
     }
-
-    fn flush(&self) { let _ = std::io::stdout().flush(); }
 }
 
-// ── Table layout helpers ──────────────────────────────────────────────────
+// ── Table layout types ──────────────────────────────────────────────────
+
+type TableWidths = (usize, usize, usize, usize, usize);
 
 fn term_width() -> usize {
     std::env::var("COLUMNS").ok().and_then(|s| s.parse().ok()).unwrap_or(80).clamp(60, 200)
 }
 
-fn sub_table_widths(
-    term_width: usize,
-    metric: &str,
-    show_ck: bool,
-) -> (usize, usize, usize, usize, usize) {
+fn table_widths(term_width: usize, metric: &str, show_ck: bool) -> TableWidths {
     let avail = term_width.saturating_sub(2);
     let ref_w = 4 + metric.len() + 2;
     let mt_w = 3 + metric.len() + 2;
@@ -222,7 +227,9 @@ fn sub_table_widths(
     (shape_w, ref_w, mt_w, pct_w, ck_w)
 }
 
-fn correctness_icon(status: &CorrectnessStatus) -> String {
+// ── Cell styling ─────────────────────────────────────────────────────────
+
+fn correctness_icon(status: CorrectnessStatus) -> String {
     match status {
         CorrectnessStatus::Passed { .. } => "✓".into(),
         CorrectnessStatus::Failed { .. } => "✗".into(),
@@ -231,18 +238,18 @@ fn correctness_icon(status: &CorrectnessStatus) -> String {
     }
 }
 
-fn fmt_perf(v: Option<f64>, _metric: &str, fallback: &str) -> String {
+fn fmt_perf(v: Option<f64>, fallback: &str) -> String {
     match v {
         None => fallback.into(),
         Some(x) => format!("{x:.1}"),
     }
 }
 
-fn col_sep() -> String { paint_stdout("│", Style::new().fg(Color::BrightBlack).dim()) }
+pub(crate) fn col_sep() -> String { paint_stdout("│", Style::new().fg(Color::BrightBlack).dim()) }
 
-fn pad_left(text: &str, width: usize) -> String { format!("{text:<width$}") }
+pub(crate) fn pad_left(text: &str, width: usize) -> String { format!("{text:<width$}") }
 
-fn pad_right(text: &str, width: usize) -> String { format!("{text:>width$}") }
+pub(crate) fn pad_right(text: &str, width: usize) -> String { format!("{text:>width$}") }
 
 fn style_reference(text: &str, value: Option<f64>) -> String {
     let style = if value.is_some() {
@@ -253,7 +260,7 @@ fn style_reference(text: &str, value: Option<f64>) -> String {
     paint_stdout(text, style)
 }
 
-fn style_metaltile(text: &str, result: &OpResult) -> String {
+fn style_metaltile(text: &str, result: &BenchRow) -> String {
     let style = match (result.mt_perf(), result.correctness_status()) {
         (Some(_), CorrectnessStatus::Failed { .. }) => Style::new().fg(Color::Red).bold(),
         (Some(_), _) => Style::new().fg(Color::BrightWhite).bold(),
@@ -262,7 +269,7 @@ fn style_metaltile(text: &str, result: &OpResult) -> String {
     paint_stdout(text, style)
 }
 
-fn style_pct(text: &str, result: &OpResult) -> String {
+fn style_pct(text: &str, result: &BenchRow) -> String {
     let style = match (result.pct(), result.correctness_status()) {
         (_, CorrectnessStatus::Failed { .. }) => Style::new().fg(Color::Red).bold(),
         (Some(p), _) if p >= 90.0 => Style::new().fg(Color::Green).bold(),
@@ -283,36 +290,32 @@ fn style_correctness(text: &str, status: CorrectnessStatus) -> String {
     paint_stdout(text, style)
 }
 
-/// Format timing columns for a result row. Returns "p95 │ p99 │ cv%" or "   — │   — │   —".
-fn fmt_timing(result: &OpResult) -> String {
+fn fmt_timing(row: &BenchRow) -> String {
     let sep = col_sep();
     let dim = Style::new().fg(Color::BrightBlack).dim();
-    match result.mt_timing {
-        Some(ref t) if t.is_valid() => {
-            let p95 =
-                paint_stdout(format!("{:>5.1}", t.p95_us), Style::new().fg(Color::BrightWhite));
-            let p99 =
-                paint_stdout(format!("{:>5.1}", t.p99_us), Style::new().fg(Color::BrightWhite));
-            let cv_str = if t.cv_pct > 5.0 {
-                paint_stdout(format!("{:>4.1}%", t.cv_pct), Style::new().fg(Color::Yellow).bold())
+    match (row.timing_p95_us, row.timing_p99_us, row.timing_cv_pct) {
+        (Some(p95), Some(p99), Some(cv)) => {
+            let p95_s = paint_stdout(format!("{:>5.1}", p95), Style::new().fg(Color::BrightWhite));
+            let p99_s = paint_stdout(format!("{:>5.1}", p99), Style::new().fg(Color::BrightWhite));
+            let cv_str = if cv > 5.0 {
+                paint_stdout(format!("{:>4.1}%", cv), Style::new().fg(Color::Yellow).bold())
             } else {
-                paint_stdout(format!("{:>4.1}%", t.cv_pct), Style::new().fg(Color::Green))
+                paint_stdout(format!("{:>4.1}%", cv), Style::new().fg(Color::Green))
             };
-            format!("{p95} {} {p99} {} {cv_str}", sep, sep)
+            format!("{p95_s} {sep} {p99_s} {sep} {cv_str}")
         },
         _ => {
             let dash = paint_stdout("   —", dim);
             let dash2 = paint_stdout("   —", dim);
             let dash3 = paint_stdout("   —", dim);
-            format!("{dash} {} {dash2} {} {dash3}", sep, sep)
+            format!("{dash} {sep} {dash2} {sep} {dash3}")
         },
     }
 }
 
-/// Format profile columns for a result row. Returns "occ% │ regs │ bottleneck" or "   — │   — │ —".
 fn fmt_profile(
-    result: &OpResult,
-    profile_map: &Option<std::collections::HashMap<(String, String), ProfileRow>>,
+    result: &BenchRow,
+    profile_map: Option<&HashMap<(String, String), ProfileRow>>,
 ) -> String {
     let sep = col_sep();
     let dim = Style::new().fg(Color::BrightBlack).dim();
@@ -326,7 +329,6 @@ fn fmt_profile(
         None => return not_available,
     };
 
-    // Parse dtype label from shape string (last word).
     let dtype_label = result.shape().rsplit_once(' ').map(|(_, last)| last).unwrap_or("f32");
     let key = (result.op_display(), dtype_label.to_string());
     let p = match map.get(&key) {

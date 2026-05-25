@@ -29,7 +29,7 @@
 //!
 //! Codegen-only. Correctness validated by `audio_conv1d_gpu_correctness`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="audio_conv1d",

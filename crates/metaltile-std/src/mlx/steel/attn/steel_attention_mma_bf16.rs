@@ -42,7 +42,7 @@
 //!    fn0 = (qid & 2)*2 + (lane%2)*2, fn1 = fn0 + 1`
 //! Each lane owns 2 elements per frag at positions (fm, fn0) and (fm, fn1).
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="sdpa",

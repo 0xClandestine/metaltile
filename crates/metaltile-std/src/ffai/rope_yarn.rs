@@ -29,7 +29,7 @@
 //! Codegen-only. Validated by `rope_yarn_gpu_correctness` + FFAI
 //! integration tests.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="rope",

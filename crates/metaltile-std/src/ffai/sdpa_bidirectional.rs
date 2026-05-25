@@ -53,7 +53,7 @@
 //! K / V layout:     `[n_kv_heads, kv_stride, head_dim]` row-major.
 //! Online softmax runs in fp32 throughout (storage stays in T).
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 // ─── head_dim = 64 (SigLIP base/large, CLIP-L) ─────────────────────
 

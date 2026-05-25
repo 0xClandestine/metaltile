@@ -15,6 +15,13 @@ metaltile-core.workspace = true
 metaltile-macros.workspace = true
 metaltile-codegen.workspace = true
 metaltile-runtime.workspace = true
+metaltile-std.workspace = true
+inventory = "0.3"
+half.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rustc-hash.workspace = true
 
 [dev-dependencies]
 trybuild.workspace = true

@@ -64,7 +64,7 @@
 //! unroll-pass fix landed alongside this kernel, so the guards are
 //! back in.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 use crate::bench_types::DType;
 

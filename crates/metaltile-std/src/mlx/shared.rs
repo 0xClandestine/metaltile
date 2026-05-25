@@ -3,7 +3,7 @@
 use std::{cell::RefCell, io::Write, ptr::NonNull};
 
 pub use metaltile::core::dtype::DType;
-use metaltile::core::ir::{Kernel, KernelMode};
+use metaltile_macros::core::ir::{Kernel, KernelMode};
 use metaltile_codegen::msl::MslGenerator;
 
 use crate::{

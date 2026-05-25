@@ -26,7 +26,7 @@
 //! A.0: per-TG K read 32 times (once per query), 512 TGs total → 16384× T·BD K-loads.
 //! A.1: per-TG K read 1 time, 2048 TGs total (BQ=4 → 128 q_tiles × 32 heads) → 2048× T·BD = **8× reduction**.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="sdpa",

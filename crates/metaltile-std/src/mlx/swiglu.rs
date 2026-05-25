@@ -40,7 +40,7 @@
 //! the actual f32 arg, so all arithmetic stays in f32 regardless of T.
 //! No T→f32→T precision loss in the silu path.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="swiglu",

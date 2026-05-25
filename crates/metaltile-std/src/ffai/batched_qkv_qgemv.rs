@@ -34,7 +34,7 @@
 //! Codegen-only; correctness pinned by
 //! `tests/batched_qkv_qgemv_gpu_correctness.rs`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 /// Fused Q/K/V int4 quantized GEMV — one output row per TG.
 /// `program_id::<2>()` picks the matrix.

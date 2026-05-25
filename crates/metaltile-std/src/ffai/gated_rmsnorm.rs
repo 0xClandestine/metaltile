@@ -46,7 +46,7 @@
 //! Codegen-only; correctness pinned by
 //! `tests/gated_rmsnorm_gpu_correctness.rs`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 /// `out[r, i] = w[i] · y[r, i] · rsqrt(mean(y[r]²) + eps) · silu(z[r, i])`.
 ///

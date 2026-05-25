@@ -8,7 +8,7 @@
 //! load latency. tpg=1024 regresses −20% on f16 (only 1 iteration,
 //! zero latency hiding). f32/bf16 are flat across tpgs.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="gemv",

@@ -2,8 +2,8 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Strided copy benchmark — #[kernel] DSL vs MLX metal/copy.metal
 
-use metaltile::{bench_kernel, kernel};
 use metaltile_core::ir::KernelMode;
+use metaltile_macros::{bench_kernel, kernel};
 
 use crate::{
     bench_types::DType,

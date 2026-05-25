@@ -55,7 +55,7 @@
 //! ssq + simd_sum + scale into that same pass and stashes the result on
 //! the per-lane stack alongside `decayed` / `k_cache`. fp32 throughout.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 /// Fused GDN prep + recurrence step. See module doc for layout and
 /// dispatch invariants. Drop-in replacement for the

@@ -28,8 +28,8 @@
 //! `coop_stage(T)` = `half` for bf16 (Apple `matmul2d` mishandles
 //! `bfloat` cooperative tensors), else `T`. Accumulation is fp32.
 
-use metaltile::kernel;
 use metaltile_core::ir::KernelMode;
+use metaltile_macros::kernel;
 
 use crate::{
     bench_types::DType,

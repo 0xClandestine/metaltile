@@ -28,7 +28,7 @@
 //! logits accumulate cleanly across the scale and don't drift on the
 //! repeated-token gather. Output dtype matches input dtype.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 // ── Temperature scaling ───────────────────────────────────────────────────
 //

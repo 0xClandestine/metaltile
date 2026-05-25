@@ -39,8 +39,8 @@
 //!   - TG memory: Xs[32×36 T] + Ws[32×36 T]
 //!   - KernelMode::Reduction
 
-use metaltile::kernel;
 use metaltile_core::ir::KernelMode;
+use metaltile_macros::kernel;
 
 use crate::{
     bench_types::DType,

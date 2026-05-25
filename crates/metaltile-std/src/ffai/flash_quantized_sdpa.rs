@@ -62,7 +62,7 @@
 //! Codegen-only; correctness pinned by
 //! `tests/flash_quantized_sdpa_gpu_correctness.rs`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 macro_rules! flash_quantized_sdpa_kernel {
     ($name:ident, $bits:literal, $dim:literal, $dims_per_lane:literal, $subop:literal) => {

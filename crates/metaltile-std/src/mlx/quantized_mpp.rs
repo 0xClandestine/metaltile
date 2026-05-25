@@ -39,8 +39,8 @@
 //! After all K-blocks, each SG stores its 16×16 fp32 ct_c into a per-SG
 //! slot of `OutScratch`, then all 32 lanes coop-write it to `out` (cast to T).
 
-use metaltile::kernel;
 use metaltile_core::ir::KernelMode;
+use metaltile_macros::kernel;
 
 use crate::{
     bench_types::DType,

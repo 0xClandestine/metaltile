@@ -51,7 +51,7 @@
 //! - **`KernelMode::SimdGroup2D`** so `program_id<i>` lowers to the
 //!   threadgroup index `tid.{x,y,z}`, not the global thread index.
 
-use metaltile::kernel;
+use metaltile_macros::kernel;
 
 /// Expand one `(BM, BN, WM, WN)` block-shape instantiation of the
 /// segmented GEMM. The outer `macro_rules!` substitutes the literals

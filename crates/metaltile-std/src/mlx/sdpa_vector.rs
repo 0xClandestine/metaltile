@@ -30,7 +30,7 @@
 //! to both should be ported across — see the `tg_out` occupancy fix
 //! in PR #43 for the precedent.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 // ── d=128 baseline (original, benchmarked against MLX) ──────────────────────
 

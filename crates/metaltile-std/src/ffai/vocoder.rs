@@ -53,7 +53,7 @@
 //!
 //! Codegen-only. Correctness validated by `vocoder_gpu_correctness`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="vocoder",

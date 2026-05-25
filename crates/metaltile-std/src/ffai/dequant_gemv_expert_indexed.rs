@@ -52,7 +52,7 @@
 //! reduce_sum tree. FFAI's `MoELayer` end-to-end equivalence tests
 //! cover both paths once the GPU router is wired.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 #[bench_kernel(
     op="dequant_gemv_expert_indexed",

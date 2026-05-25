@@ -1,22 +1,11 @@
 //! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
 //! SPDX-License-Identifier: Apache-2.0
 //! `tile update` — self-update the tile binary.
-//!
-//! Default (no flags): fetches the latest GitHub Release for the
-//! `metaltile/metaltile` repository, downloads the pre-built binary, and
-//! atomically replaces the running executable.
-//!
-//! `--pr <n>`: clones the repository, checks out the head of PR #n, and
-//! builds from source.  Requires `git` and `cargo` on PATH.
-//!
-//! `--commit <sha>`: same as above but for an arbitrary commit SHA.
-//!
-//! `--check`: print what would be installed without touching the binary.
 
-use std::{fs, os::unix::fs::PermissionsExt as _, path::PathBuf, process::Command};
+use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
 
 use crate::{
-    UpdateArgs,
+    CliError,
     term::{Color, Style, paint_stderr},
 };
 
@@ -24,17 +13,29 @@ const REPO_SLUG: &str = "metaltile/metaltile";
 const REPO_URL: &str = "https://github.com/metaltile/metaltile.git";
 const ASSET_NAME: &str = "tile-aarch64-apple-darwin.tar.gz";
 
-// ── Entry point ──────────────────────────────────────────────────────────────
-
-pub fn run(args: &UpdateArgs) -> Result<(), crate::CliError> {
-    match (&args.pr, &args.commit) {
-        (Some(pr), _) => update_from_source(SourceRef::Pr(*pr), args.check),
-        (_, Some(sha)) => update_from_source(SourceRef::Commit(sha.clone()), args.check),
-        _ => update_from_release(args.check),
-    }
+#[derive(clap::Args, Debug)]
+pub struct UpdateArgs {
+    /// Print what would be installed without modifying anything.
+    #[arg(long = "check")]
+    pub check: bool,
+    /// Build and install from the head of this PR number (requires git + cargo).
+    #[arg(long = "pr", value_name = "N", conflicts_with = "commit")]
+    pub pr: Option<u32>,
+    /// Build and install from this commit SHA (requires git + cargo).
+    #[arg(long = "commit", value_name = "SHA", conflicts_with = "pr")]
+    pub commit: Option<String>,
 }
 
-// ── Source ref ───────────────────────────────────────────────────────────────
+impl UpdateArgs {
+    pub fn run(&self) -> Result<(), CliError> {
+        let args = self;
+        match (&args.pr, &args.commit) {
+            (Some(pr), _) => update_from_source(SourceRef::Pr(*pr), args.check),
+            (_, Some(sha)) => update_from_source(SourceRef::Commit(sha.clone()), args.check),
+            _ => update_from_release(args.check),
+        }
+    }
+}
 
 enum SourceRef {
     Pr(u32),
@@ -42,7 +43,6 @@ enum SourceRef {
 }
 
 impl SourceRef {
-    /// The git fetch refspec to use when cloning.
     fn fetch_refspec(&self) -> String {
         match self {
             SourceRef::Pr(n) => format!("pull/{n}/head"),
@@ -58,15 +58,11 @@ impl SourceRef {
     }
 }
 
-// ── Install path ─────────────────────────────────────────────────────────────
+fn install_path() -> Result<PathBuf, CliError> { std::env::current_exe().map_err(CliError::Io) }
 
-fn install_path() -> Result<PathBuf, crate::CliError> {
-    std::env::current_exe().map_err(crate::CliError::Io)
-}
+// ── Release update (default) ─────────────────────────────────────────────
 
-// ── Release update (default) ─────────────────────────────────────────────────
-
-fn update_from_release(check_only: bool) -> Result<(), crate::CliError> {
+fn update_from_release(check_only: bool) -> Result<(), CliError> {
     header("tile update");
 
     let tag = fetch_latest_release_tag()?;
@@ -110,8 +106,8 @@ fn update_from_release(check_only: bool) -> Result<(), crate::CliError> {
     eprint!("  downloading {}... ", tag);
     download_release_binary(&tag, &dest)?;
     eprintln!("done");
-
     eprintln!();
+
     eprintln!(
         "{}  tile {} installed.",
         paint_stderr("ok", Style::new().fg(Color::Green).bold()),
@@ -120,8 +116,7 @@ fn update_from_release(check_only: bool) -> Result<(), crate::CliError> {
     Ok(())
 }
 
-/// Query the latest release tag via `gh` (preferred) then `curl`.
-fn fetch_latest_release_tag() -> Result<String, crate::CliError> {
+fn fetch_latest_release_tag() -> Result<String, CliError> {
     if let Some(tag) = try_gh_latest_tag() {
         return Ok(tag);
     }
@@ -140,7 +135,7 @@ fn try_gh_latest_tag() -> Option<String> {
     if tag.is_empty() { None } else { Some(tag) }
 }
 
-fn curl_latest_tag() -> Result<String, crate::CliError> {
+fn curl_latest_tag() -> Result<String, CliError> {
     let url = format!("https://api.github.com/repos/{REPO_SLUG}/releases/latest");
     let out = Command::new("curl")
         .args([
@@ -153,19 +148,17 @@ fn curl_latest_tag() -> Result<String, crate::CliError> {
             &url,
         ])
         .output()
-        .map_err(|e| crate::CliError::Other(format!("curl not found: {e}")))?;
+        .map_err(|e| CliError::Subprocess(format!("curl not found: {e}")))?;
 
     if !out.status.success() {
-        // HTTP 404 means no releases have been published yet.
         let body = String::from_utf8_lossy(&out.stdout);
         if body.contains("Not Found") || out.status.code() == Some(22) {
-            return Err(crate::CliError::Other(
-                "No releases published yet.\n\
-                 Use --pr <n> or --commit <sha> to build and install from source."
+            return Err(CliError::Config(
+                "No releases published yet.\nUse --pr <n> or --commit <sha> to build from source."
                     .into(),
             ));
         }
-        return Err(crate::CliError::Other(format!(
+        return Err(CliError::Subprocess(format!(
             "GitHub API request failed (exit {}).",
             out.status.code().unwrap_or(-1),
         )));
@@ -175,24 +168,21 @@ fn curl_latest_tag() -> Result<String, crate::CliError> {
     let tag = json["tag_name"]
         .as_str()
         .ok_or_else(|| {
-            crate::CliError::Other("Unexpected GitHub API response (missing tag_name).".into())
+            CliError::Config("Unexpected GitHub API response (missing tag_name).".into())
         })?
         .to_string();
 
     if tag.is_empty() {
-        return Err(crate::CliError::Other("No releases found.".into()));
+        return Err(CliError::Config("No releases found.".into()));
     }
     Ok(tag)
 }
 
-/// Download the release tarball for `tag` and atomically replace `dest`.
-fn download_release_binary(tag: &str, dest: &PathBuf) -> Result<(), crate::CliError> {
+fn download_release_binary(tag: &str, dest: &PathBuf) -> Result<(), CliError> {
     let asset_url = format!("https://github.com/{REPO_SLUG}/releases/download/{tag}/{ASSET_NAME}");
-
     let tar_path = std::env::temp_dir().join("tile-update.tar.gz");
     let extract_dir = std::env::temp_dir().join("tile-update-extract");
 
-    // Download.
     let status = Command::new("curl")
         .args([
             "--silent",
@@ -203,25 +193,24 @@ fn download_release_binary(tag: &str, dest: &PathBuf) -> Result<(), crate::CliEr
             &asset_url,
         ])
         .status()
-        .map_err(|e| crate::CliError::Other(format!("curl not found: {e}")))?;
+        .map_err(|e| CliError::Subprocess(format!("curl not found: {e}")))?;
 
     if !status.success() {
-        return Err(crate::CliError::Other(format!(
+        return Err(CliError::Subprocess(format!(
             "Failed to download release asset:\n  {asset_url}"
         )));
     }
 
-    // Extract.
     let _ = fs::remove_dir_all(&extract_dir);
-    fs::create_dir_all(&extract_dir).map_err(crate::CliError::Io)?;
+    fs::create_dir_all(&extract_dir).map_err(CliError::Io)?;
 
     let status = Command::new("tar")
         .args(["xzf", tar_path.to_str().unwrap(), "-C", extract_dir.to_str().unwrap()])
         .status()
-        .map_err(|e| crate::CliError::Other(format!("tar not found: {e}")))?;
+        .map_err(|e| CliError::Subprocess(format!("tar not found: {e}")))?;
 
     if !status.success() {
-        return Err(crate::CliError::Other("Failed to extract release archive.".into()));
+        return Err(CliError::Subprocess("Failed to extract release archive.".into()));
     }
 
     install_binary(&extract_dir.join("tile"), dest)?;
@@ -231,9 +220,9 @@ fn download_release_binary(tag: &str, dest: &PathBuf) -> Result<(), crate::CliEr
     Ok(())
 }
 
-// ── Source build (--pr / --commit) ───────────────────────────────────────────
+// ── Source build (--pr / --commit) ───────────────────────────────────────
 
-fn update_from_source(src: SourceRef, check_only: bool) -> Result<(), crate::CliError> {
+fn update_from_source(src: SourceRef, check_only: bool) -> Result<(), CliError> {
     header("tile update");
 
     eprintln!(
@@ -254,33 +243,28 @@ fn update_from_source(src: SourceRef, check_only: bool) -> Result<(), crate::Cli
 
     let dest = install_path()?;
     let tmp_dir = std::env::temp_dir().join("tile-update-src");
-
-    // Remove any stale clone.
     let _ = fs::remove_dir_all(&tmp_dir);
 
-    // Clone.
     eprint!("  cloning repository... ");
     let status = Command::new("git")
         .args(["clone", "--quiet", REPO_URL, tmp_dir.to_str().unwrap()])
         .status()
-        .map_err(|e| crate::CliError::Other(format!("git not found: {e}")))?;
+        .map_err(|e| CliError::Subprocess(format!("git not found: {e}")))?;
     if !status.success() {
-        return Err(crate::CliError::Other("git clone failed.".into()));
+        return Err(CliError::Subprocess("git clone failed.".into()));
     }
     eprintln!("done");
 
-    // Fetch the target ref.
     let refspec = src.fetch_refspec();
     eprint!("  fetching {}... ", src.display());
     let status = Command::new("git")
         .current_dir(&tmp_dir)
         .args(["fetch", "origin", &refspec])
         .status()
-        .map_err(|e| crate::CliError::Other(format!("git not found: {e}")))?;
+        .map_err(|e| CliError::Subprocess(format!("git not found: {e}")))?;
     if !status.success() {
-        return Err(crate::CliError::Other(format!(
-            "git fetch origin {refspec} failed.\n\
-             Make sure the {} exists in the repository.",
+        return Err(CliError::Git(format!(
+            "git fetch origin {refspec} failed.\nMake sure the {} exists in the repository.",
             src.display(),
         )));
     }
@@ -288,31 +272,29 @@ fn update_from_source(src: SourceRef, check_only: bool) -> Result<(), crate::Cli
         .current_dir(&tmp_dir)
         .args(["checkout", "FETCH_HEAD"])
         .status()
-        .map_err(|e| crate::CliError::Other(format!("git not found: {e}")))?;
+        .map_err(|e| CliError::Subprocess(format!("git not found: {e}")))?;
     if !status.success() {
-        return Err(crate::CliError::Other("git checkout FETCH_HEAD failed.".into()));
+        return Err(CliError::Git("git checkout FETCH_HEAD failed.".into()));
     }
     eprintln!("done");
 
-    // Build.
     eprintln!("  compiling (this may take a few minutes)...");
     let status = Command::new("cargo")
         .current_dir(&tmp_dir)
         .args(["build", "--release", "-p", "metaltile-cli"])
         .status()
-        .map_err(|e| crate::CliError::Other(format!("cargo not found: {e}")))?;
+        .map_err(|e| CliError::Subprocess(format!("cargo not found: {e}")))?;
     if !status.success() {
-        return Err(crate::CliError::Other("cargo build failed.".into()));
+        return Err(CliError::Subprocess("cargo build failed.".into()));
     }
 
-    // Install.
     eprint!("  installing to {}... ", dest.display());
     install_binary(&tmp_dir.join("target/release/tile"), &dest)?;
     eprintln!("done");
 
     let _ = fs::remove_dir_all(&tmp_dir);
-
     eprintln!();
+
     eprintln!(
         "{}  tile installed from {}.",
         paint_stderr("ok", Style::new().fg(Color::Green).bold()),
@@ -321,36 +303,29 @@ fn update_from_source(src: SourceRef, check_only: bool) -> Result<(), crate::Cli
     Ok(())
 }
 
-// ── Shared install helper ─────────────────────────────────────────────────────
+// ── Shared install helper ─────────────────────────────────────────────────
 
-/// Copy `src` binary to a temp file beside `dest`, chmod it, then atomically
-/// rename it over `dest`.  Keeps the destination directory consistent so the
-/// rename never crosses a filesystem boundary.
-fn install_binary(src: &PathBuf, dest: &PathBuf) -> Result<(), crate::CliError> {
-    // Write to a sibling temp file to keep the rename on the same filesystem.
+fn install_binary(src: &PathBuf, dest: &PathBuf) -> Result<(), CliError> {
     let tmp = dest.with_extension("update-tmp");
 
-    fs::copy(src, &tmp)
-        .map_err(|e| crate::CliError::Other(format!("failed to copy binary: {e}")))?;
+    fs::copy(src, &tmp).map_err(|e| CliError::Subprocess(format!("failed to copy binary: {e}")))?;
 
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).map_err(crate::CliError::Io)?;
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).map_err(CliError::Io)?;
 
     fs::rename(&tmp, dest).map_err(|e| {
         let _ = fs::remove_file(&tmp);
         if e.kind() == std::io::ErrorKind::PermissionDenied {
-            crate::CliError::Other(format!(
+            CliError::Subprocess(format!(
                 "permission denied writing to {}.\n  Try: sudo tile update",
                 dest.display(),
             ))
         } else {
-            crate::CliError::Io(e)
+            CliError::Io(e)
         }
     })?;
 
     Ok(())
 }
-
-// ── Output helpers ────────────────────────────────────────────────────────────
 
 fn header(title: &str) {
     eprintln!("{}", paint_stderr(title, Style::new().fg(Color::Cyan).bold()));

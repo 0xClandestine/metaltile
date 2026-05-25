@@ -40,7 +40,7 @@
 //! file) silently produced empty kernels — the proc-macro doesn't expand
 //! inner declarative macros.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 macro_rules! dequant_gather_kernel {
     ($name:ident, $bits:literal, $subop:literal) => {

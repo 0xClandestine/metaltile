@@ -5,9 +5,9 @@
 //! All Metal-specific code is gated with `#[cfg(target_os = "macos")]`.
 //! On other platforms every method returns `Err` or a zero-filled stub.
 
-use crate::{
-    bench_types::{DType, OpResult, elem_bytes},
+use metaltile_core::bench::{
     stats::BenchStats,
+    types::{DType, OpResult, elem_bytes},
 };
 
 /// Convert IEEE 754 half-float bits to f32.
@@ -663,5 +663,5 @@ pub fn bench_gbps_only(
 
 pub fn bench_all_dtypes<F>(runner: &GpuRunner, f: F) -> Vec<OpResult>
 where F: Fn(&GpuRunner, DType) -> Vec<OpResult> {
-    crate::bench_types::FLOAT_DTYPES.iter().flat_map(|&dt| f(runner, dt)).collect()
+    metaltile_core::bench::types::FLOAT_DTYPES.iter().flat_map(|&dt| f(runner, dt)).collect()
 }

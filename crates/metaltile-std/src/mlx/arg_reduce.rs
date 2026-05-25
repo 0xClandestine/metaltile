@@ -23,7 +23,7 @@
 //!
 //! Correctness pinned by `tests/arg_reduce_gpu_correctness.rs`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile_macros::{bench_kernel, kernel};
 
 // Tree-reduction strides: 128 → 64 → 32 → 16 → 8 → 4 → 2, then a final
 // inline stride-1 merge. Each iteration merges the upper half into the

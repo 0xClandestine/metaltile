@@ -33,7 +33,7 @@
 //! - **`KernelMode::SimdGroup2D`** so `program_id<i>` lowers to the
 //!   threadgroup index, not the global thread index.
 
-use metaltile::kernel;
+use metaltile_macros::kernel;
 
 /// Expand one `(BM, BN, WM, WN)` block-shape instantiation of the fused GEMM.
 ///
