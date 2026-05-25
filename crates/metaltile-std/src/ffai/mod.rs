@@ -49,6 +49,7 @@ pub mod logits_top_p;
 pub mod logits_topk;
 pub mod mel_spectrogram;
 pub mod moe;
+pub mod moe_down_swiglu_accum;
 pub mod moe_mpp;
 pub mod moe_mpp_bm64;
 pub mod moe_mpp_bm64_int8;
