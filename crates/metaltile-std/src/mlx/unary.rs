@@ -668,6 +668,53 @@ inventory::submit! {
     }
 }
 
+/// Fused elementwise sigmoid-scalar FMA WITH residual add. Computes
+///   `out[i] = residual[i] + base[i] + sigmoid(gate[0]) * value[i]`
+/// in one dispatch. Used by Qwen3.6-A3B's post-MoE-FFN site to
+/// collapse the existing two-dispatch chain:
+///   1. `mt_sigmoid_scalar_fma(gate, sharedOut, routed)` → ffnOut
+///   2. `mt_add(postMix, ffnOut)`                       → result
+/// into a single dispatch that reads `routed`, `sharedOut`, and
+/// `postMix` once each and writes `result` once. Saves one full
+/// `[hidden]` DRAM roundtrip on the intermediate `ffnOut` plus one
+/// dispatch per MoE layer per token (×40 layers for Qwen3.6-A3B).
+///
+/// Same precision contract as `mt_sigmoid_scalar_fma`: model dtype
+/// `T` on the read+write boundary, fp32 accumulation internally so
+/// the sigmoid stays accurate at saturation.
+#[kernel]
+pub fn mt_sigmoid_scalar_fma_residual<T>(
+    gate: Tensor<T>,
+    value: Tensor<T>,
+    base: Tensor<T>,
+    residual: Tensor<T>,
+    out: Tensor<T>,
+) {
+    let idx = program_id(0);
+    let gx = load(gate[0]).cast::<f32>();
+    let g = 1.0f32 / (1.0f32 + exp(0.0f32 - gx));
+    let v = load(value[idx]).cast::<f32>();
+    let b = load(base[idx]).cast::<f32>();
+    let r = load(residual[idx]).cast::<f32>();
+    store(out[idx], (r + b + g * v).cast::<T>());
+}
+
+inventory::submit! {
+    BenchSpec {
+        op: "unary",
+        subop: "sigmoid_scalar_fma_residual",
+        kernel_name: "mt_sigmoid_scalar_fma_residual",
+        kernel_ir: mt_sigmoid_scalar_fma_residual::kernel_ir_for,
+        dtypes: &[DType::F32, DType::F16, DType::BF16],
+        tol: 1e-3,
+        mlx_src: None,
+        mlx_pattern: None,
+        shapes: &[],
+        dispatch: BenchDispatch::Generic,
+        kernel_mode: Some(KernelMode::Elementwise),
+    }
+}
+
 /// Scalar-broadcast FMA. Computes
 ///   `out[i] = base[i] + scalar[0] * value[i]`
 /// for `i in 0..n`, broadcasting a 1-element scalar buffer across the
