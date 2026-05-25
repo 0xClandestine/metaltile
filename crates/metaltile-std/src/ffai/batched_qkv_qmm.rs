@@ -3,11 +3,18 @@
 //!
 //! This is the M>1 sibling of `ffai_batched_qkv_qgemv_fast`. At
 //! `program_id::<1>() = m` we load row `m` of the batched input
-//! `x: [M, in_dim]` and produce row `m` of the output
-//! `out: [M, out_q + out_k + out_v]`. Within each row, the layout is
-//! `[Q row | K row | V row]` concatenated — identical to the decode
-//! (M=1) variant — so callers can slice the output the same way they do
-//! for the GEMV path.
+//! `x: [M, in_dim]` and produce row `m` of THREE separate output
+//! tensors:
+//!   q_buf: [M, out_q] T
+//!   k_buf: [M, out_k] T
+//!   v_buf: [M, out_v] T
+//!
+//! Three buffers (rather than one concatenated output) keep each
+//! projection contiguous in memory so the downstream attention
+//! pipeline reads `[M, dim]` per projection without needing strided
+//! / column-slice tensor views. Callers can still alias all three
+//! into one backing allocation if they want; the kernel only sees
+//! three base pointers.
 //!
 //! Dispatch geometry mirrors `ffai_batched_qkv_qgemv_fast`:
 //!
@@ -66,7 +73,9 @@ pub fn ffai_batched_qkv_qmm_fast<T>(
     w_v: Tensor<u32>,
     scales_v: Tensor<T>,
     biases_v: Tensor<T>,
-    out: Tensor<T>,
+    mut q_buf: Tensor<T>,
+    mut k_buf: Tensor<T>,
+    mut v_buf: Tensor<T>,
     #[constexpr] out_q: u32,
     #[constexpr] out_k: u32,
     #[constexpr] out_v: u32,
@@ -93,10 +102,11 @@ pub fn ffai_batched_qkv_qmm_fast<T>(
     let sb_base1 = row1 * gs_per_row;
     let sb_base2 = row2 * gs_per_row;
     let sb_base3 = row3 * gs_per_row;
-    // Row-m offsets in x / out.
+    // Row-m offsets in x / per-projection output buffers.
     let x_row_off = m * in_dim;
-    let out_row_stride = out_q + out_k + out_v;
-    let out_row_off = m * out_row_stride;
+    let q_row_off = m * out_q;
+    let k_row_off = m * out_k;
+    let v_row_off = m * out_v;
     let mut acc0 = 0.0f32;
     let mut acc1 = 0.0f32;
     let mut acc2 = 0.0f32;
@@ -344,10 +354,10 @@ pub fn ffai_batched_qkv_qmm_fast<T>(
             let r2 = simd_sum(acc2);
             let r3 = simd_sum(acc3);
             if lane == 0u32 {
-                store(out[out_row_off + row0], r0.cast::<T>());
-                store(out[out_row_off + row1], r1.cast::<T>());
-                store(out[out_row_off + row2], r2.cast::<T>());
-                store(out[out_row_off + row3], r3.cast::<T>());
+                store(q_buf[q_row_off + row0], r0.cast::<T>());
+                store(q_buf[q_row_off + row1], r1.cast::<T>());
+                store(q_buf[q_row_off + row2], r2.cast::<T>());
+                store(q_buf[q_row_off + row3], r3.cast::<T>());
             }
         }
     }
@@ -583,10 +593,10 @@ pub fn ffai_batched_qkv_qmm_fast<T>(
             let r2 = simd_sum(acc2);
             let r3 = simd_sum(acc3);
             if lane == 0u32 {
-                store(out[out_row_off + out_q + row0], r0.cast::<T>());
-                store(out[out_row_off + out_q + row1], r1.cast::<T>());
-                store(out[out_row_off + out_q + row2], r2.cast::<T>());
-                store(out[out_row_off + out_q + row3], r3.cast::<T>());
+                store(k_buf[k_row_off + row0], r0.cast::<T>());
+                store(k_buf[k_row_off + row1], r1.cast::<T>());
+                store(k_buf[k_row_off + row2], r2.cast::<T>());
+                store(k_buf[k_row_off + row3], r3.cast::<T>());
             }
         }
     }
@@ -822,10 +832,10 @@ pub fn ffai_batched_qkv_qmm_fast<T>(
             let r2 = simd_sum(acc2);
             let r3 = simd_sum(acc3);
             if lane == 0u32 {
-                store(out[out_row_off + out_q + out_k + row0], r0.cast::<T>());
-                store(out[out_row_off + out_q + out_k + row1], r1.cast::<T>());
-                store(out[out_row_off + out_q + out_k + row2], r2.cast::<T>());
-                store(out[out_row_off + out_q + out_k + row3], r3.cast::<T>());
+                store(v_buf[v_row_off + row0], r0.cast::<T>());
+                store(v_buf[v_row_off + row1], r1.cast::<T>());
+                store(v_buf[v_row_off + row2], r2.cast::<T>());
+                store(v_buf[v_row_off + row3], r3.cast::<T>());
             }
         }
     }

@@ -169,7 +169,9 @@ fn run_qmm_fast(
     buffers.insert("w_v".into(), pack_u32_bytes(wv_p));
     buffers.insert("scales_v".into(), pack_bytes(sv, dt));
     buffers.insert("biases_v".into(), pack_bytes(bv, dt));
-    buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; m * (out_q + out_k + out_v)], dt));
+    buffers.insert("q_buf".into(), pack_bytes(&vec![0.0_f32; m * out_q], dt));
+    buffers.insert("k_buf".into(), pack_bytes(&vec![0.0_f32; m * out_k], dt));
+    buffers.insert("v_buf".into(), pack_bytes(&vec![0.0_f32; m * out_v], dt));
     buffers.insert("out_q".into(), (out_q as u32).to_le_bytes().to_vec());
     buffers.insert("out_k".into(), (out_k as u32).to_le_bytes().to_vec());
     buffers.insert("out_v".into(), (out_v as u32).to_le_bytes().to_vec());
@@ -185,7 +187,19 @@ fn run_qmm_fast(
     let result = ctx
         .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [n_tgs, m, 3], [64, 1, 1])
         .expect("batched_qkv_qmm_fast dispatch");
-    unpack_bytes(result.outputs.get("out").expect("out"), dt)
+    // Reassemble row-major `[M, q | k | v]` from the three separate
+    // output buffers so the existing oracle comparison (which builds the
+    // same concatenated layout) is untouched.
+    let q = unpack_bytes(result.outputs.get("q_buf").expect("q_buf"), dt);
+    let k = unpack_bytes(result.outputs.get("k_buf").expect("k_buf"), dt);
+    let v = unpack_bytes(result.outputs.get("v_buf").expect("v_buf"), dt);
+    let mut out = Vec::with_capacity(m * (out_q + out_k + out_v));
+    for row in 0..m {
+        out.extend_from_slice(&q[row * out_q..(row + 1) * out_q]);
+        out.extend_from_slice(&k[row * out_k..(row + 1) * out_k]);
+        out.extend_from_slice(&v[row * out_v..(row + 1) * out_v]);
+    }
+    out
 }
 
 fn run_case_qmm(
