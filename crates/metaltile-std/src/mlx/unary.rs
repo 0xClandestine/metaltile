@@ -682,6 +682,13 @@ inventory::submit! {
 /// Same precision contract as `mt_sigmoid_scalar_fma`: model dtype
 /// `T` on the read+write boundary, fp32 accumulation internally so
 /// the sigmoid stays accurate at saturation.
+#[bench_kernel(
+    op="unary",
+    subop="sigmoid_scalar_fma_residual",
+    class=GenericEmpty,
+    tol=1e-3,
+    kernel_mode=Elementwise,
+)]
 #[kernel]
 pub fn mt_sigmoid_scalar_fma_residual<T>(
     gate: Tensor<T>,
@@ -697,22 +704,6 @@ pub fn mt_sigmoid_scalar_fma_residual<T>(
     let b = load(base[idx]).cast::<f32>();
     let r = load(residual[idx]).cast::<f32>();
     store(out[idx], (r + b + g * v).cast::<T>());
-}
-
-inventory::submit! {
-    BenchSpec {
-        op: "unary",
-        subop: "sigmoid_scalar_fma_residual",
-        kernel_name: "mt_sigmoid_scalar_fma_residual",
-        kernel_ir: mt_sigmoid_scalar_fma_residual::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 1e-3,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Elementwise),
-    }
 }
 
 /// Scalar-broadcast FMA. Computes
