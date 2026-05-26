@@ -193,70 +193,24 @@ pub fn conv3d_mma<T>(
         let row_a1 = sm * 16u32 + 8u32 + fm;
         let col_b0 = sn * 16u32;
         let col_b1 = sn * 16u32 + 8u32;
-        // k_inner = 0
-        simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + fn0));
-        simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + fn1));
-        simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + fn0));
-        simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + fn1));
-        simdgroup_barrier_mem_none();
-        simdgroup_elem_store(b_f0, 0, threadgroup_load("bs", (col_b0 + fn0) * stride + fm));
-        simdgroup_elem_store(b_f0, 1, threadgroup_load("bs", (col_b0 + fn1) * stride + fm));
-        simdgroup_elem_store(b_f1, 0, threadgroup_load("bs", (col_b1 + fn0) * stride + fm));
-        simdgroup_elem_store(b_f1, 1, threadgroup_load("bs", (col_b1 + fn1) * stride + fm));
-        simdgroup_barrier_mem_none();
-        simdgroup_matmul(a_f0, b_f0, c_f00);
-        simdgroup_matmul(a_f0, b_f1, c_f01);
-        simdgroup_matmul(a_f1, b_f1, c_f11);
-        simdgroup_matmul(a_f1, b_f0, c_f10);
-        simdgroup_barrier_mem_none();
-        // k_inner = 1
-        simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 8u32 + fn0));
-        simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 8u32 + fn1));
-        simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + 8u32 + fn0));
-        simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + 8u32 + fn1));
-        simdgroup_barrier_mem_none();
-        simdgroup_elem_store(b_f0, 0, threadgroup_load("bs", (col_b0 + fn0) * stride + 8u32 + fm));
-        simdgroup_elem_store(b_f0, 1, threadgroup_load("bs", (col_b0 + fn1) * stride + 8u32 + fm));
-        simdgroup_elem_store(b_f1, 0, threadgroup_load("bs", (col_b1 + fn0) * stride + 8u32 + fm));
-        simdgroup_elem_store(b_f1, 1, threadgroup_load("bs", (col_b1 + fn1) * stride + 8u32 + fm));
-        simdgroup_barrier_mem_none();
-        simdgroup_matmul(a_f0, b_f0, c_f00);
-        simdgroup_matmul(a_f0, b_f1, c_f01);
-        simdgroup_matmul(a_f1, b_f1, c_f11);
-        simdgroup_matmul(a_f1, b_f0, c_f10);
-        simdgroup_barrier_mem_none();
-        // k_inner = 2
-        simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 16u32 + fn0));
-        simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 16u32 + fn1));
-        simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + 16u32 + fn0));
-        simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + 16u32 + fn1));
-        simdgroup_barrier_mem_none();
-        simdgroup_elem_store(b_f0, 0, threadgroup_load("bs", (col_b0 + fn0) * stride + 16u32 + fm));
-        simdgroup_elem_store(b_f0, 1, threadgroup_load("bs", (col_b0 + fn1) * stride + 16u32 + fm));
-        simdgroup_elem_store(b_f1, 0, threadgroup_load("bs", (col_b1 + fn0) * stride + 16u32 + fm));
-        simdgroup_elem_store(b_f1, 1, threadgroup_load("bs", (col_b1 + fn1) * stride + 16u32 + fm));
-        simdgroup_barrier_mem_none();
-        simdgroup_matmul(a_f0, b_f0, c_f00);
-        simdgroup_matmul(a_f0, b_f1, c_f01);
-        simdgroup_matmul(a_f1, b_f1, c_f11);
-        simdgroup_matmul(a_f1, b_f0, c_f10);
-        simdgroup_barrier_mem_none();
-        // k_inner = 3
-        simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 24u32 + fn0));
-        simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 24u32 + fn1));
-        simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + 24u32 + fn0));
-        simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + 24u32 + fn1));
-        simdgroup_barrier_mem_none();
-        simdgroup_elem_store(b_f0, 0, threadgroup_load("bs", (col_b0 + fn0) * stride + 24u32 + fm));
-        simdgroup_elem_store(b_f0, 1, threadgroup_load("bs", (col_b0 + fn1) * stride + 24u32 + fm));
-        simdgroup_elem_store(b_f1, 0, threadgroup_load("bs", (col_b1 + fn0) * stride + 24u32 + fm));
-        simdgroup_elem_store(b_f1, 1, threadgroup_load("bs", (col_b1 + fn1) * stride + 24u32 + fm));
-        simdgroup_barrier_mem_none();
-        simdgroup_matmul(a_f0, b_f0, c_f00);
-        simdgroup_matmul(a_f0, b_f1, c_f01);
-        simdgroup_matmul(a_f1, b_f1, c_f11);
-        simdgroup_matmul(a_f1, b_f0, c_f10);
-        simdgroup_barrier_mem_none();
+        for _ki in range(0u32, 4u32, 1u32) {
+            let ko = _ki * 8u32;
+            simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + ko + fn0));
+            simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + ko + fn1));
+            simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + ko + fn0));
+            simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + ko + fn1));
+            simdgroup_barrier_mem_none();
+            simdgroup_elem_store(b_f0, 0, threadgroup_load("bs", (col_b0 + fn0) * stride + ko + fm));
+            simdgroup_elem_store(b_f0, 1, threadgroup_load("bs", (col_b0 + fn1) * stride + ko + fm));
+            simdgroup_elem_store(b_f1, 0, threadgroup_load("bs", (col_b1 + fn0) * stride + ko + fm));
+            simdgroup_elem_store(b_f1, 1, threadgroup_load("bs", (col_b1 + fn1) * stride + ko + fm));
+            simdgroup_barrier_mem_none();
+            simdgroup_matmul(a_f0, b_f0, c_f00);
+            simdgroup_matmul(a_f0, b_f1, c_f01);
+            simdgroup_matmul(a_f1, b_f1, c_f11);
+            simdgroup_matmul(a_f1, b_f0, c_f10);
+            simdgroup_barrier_mem_none();
+        }
         threadgroup_barrier();
     }
     // ── 4. Write 4 C frags to global out ─────────────────────────────────
