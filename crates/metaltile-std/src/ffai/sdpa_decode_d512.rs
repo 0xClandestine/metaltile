@@ -81,12 +81,12 @@ pub fn ffai_sdpa_decode_d512<T>(
     let d0 = lane * 16u32;
     // Pre-scale this lane's 16-element Q stripe once; K/V are streamed.
     // Two banks of 8 (UnrollPass max trip count = 8).
-    stack_alloc("q", 16, "f32");
+    stack_alloc("q_s", 16, "f32");
     for _i in range(0u32, 8u32, 1u32) {
-        stack_store("q", _i, load(q[q_off + d0 + _i]).cast::<f32>() * scale);
+        stack_store("q_s", _i, load(q[q_off + d0 + _i]).cast::<f32>() * scale);
     }
     for _i in range(0u32, 8u32, 1u32) {
-        stack_store("q", _i + 8u32, load(q[q_off + d0 + _i + 8u32]).cast::<f32>() * scale);
+        stack_store("q_s", _i + 8u32, load(q[q_off + d0 + _i + 8u32]).cast::<f32>() * scale);
     }
     let mut run_max = neg_infinity();
     let mut run_sum = 0.0f32;
@@ -102,10 +102,11 @@ pub fn ffai_sdpa_decode_d512<T>(
         let kv0 = base + d0;
         let mut partial = 0.0f32;
         for _i in range(0u32, 8u32, 1u32) {
-            partial = partial + stack_load("q", _i) * load(k[kv0 + _i]).cast::<f32>();
+            partial = partial + stack_load("q_s", _i) * load(k[kv0 + _i]).cast::<f32>();
         }
         for _i in range(0u32, 8u32, 1u32) {
-            partial = partial + stack_load("q", _i + 8u32) * load(k[kv0 + _i + 8u32]).cast::<f32>();
+            partial =
+                partial + stack_load("q_s", _i + 8u32) * load(k[kv0 + _i + 8u32]).cast::<f32>();
         }
         let score = simd_sum(partial);
         let new_max = select(score > run_max, score, run_max);
