@@ -1,7 +1,7 @@
 //! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
 //! SPDX-License-Identifier: Apache-2.0
-//! GPU correctness for `ffai::dequant_gemv_int{4,8,6}` — dequantizing GEMV
-//! kernels used at decode-time output / LM-head projections.
+//! GPU correctness for `ffai::dequant_gemv_int{2,3,4,5,6,8}` — dequantizing
+//! GEMV kernels used at decode-time output / LM-head projections.
 //!
 //! Layout (per dtype, with N = `in_dim`, G = `group_size`):
 //!
@@ -16,19 +16,19 @@
 //! with `input` to produce `output[row]`. Reduction-mode dispatch:
 //! one threadgroup per output row, threads cooperate via `reduce_sum`.
 //!
-//! Coverage gap: before this file the five `dequant_gemv_int{3,4,5,6,8}`
-//! kernels (~205 LOC of source) had zero in-tree GPU coverage — like
+//! Coverage gap: before this file the six `dequant_gemv_int{2,3,4,5,6,8}`
+//! kernels (~210 LOC of source) had zero in-tree GPU coverage — like
 //! the kv_cache quant kernels, they emit from `macro_rules!` shells
 //! (the `#[kernel]` proc-macro doesn't expand inner declarative
 //! macros). An empty kernel body or a wrong index formula would
 //! produce all-zeros / cross-row corruption that only surfaces as
 //! garbage decode in FFAI integration.
 //!
-//! This file pins int4 (pack-strided, nibble-aligned) + int8 (pack-
-//! strided, byte-aligned) + int6 (element-strided, exercises the
-//! odd-bit-width spill path) across f32 / f16 / bf16. int3 / int5
-//! share the int6 codepath shape; covering int6 catches the same
-//! word-spill regression class.
+//! This file pins int2 / int4 / int8 (pack-strided: crumb / nibble /
+//! byte aligned) + int6 (element-strided, exercises the odd-bit-width
+//! spill path) across f32 / f16 / bf16. int3 / int5 share the int6
+//! codepath shape; covering int6 catches the same word-spill
+//! regression class.
 //!
 //! macOS-gated. Shared gpu_lock.
 
@@ -42,6 +42,7 @@ use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
 use metaltile_std::ffai::dequant_gemv::{
+    dequant_gemv_int2,
     dequant_gemv_int3,
     dequant_gemv_int4,
     dequant_gemv_int4_fast,
@@ -169,12 +170,13 @@ fn run_dequant_gemv(
 
     let ctx = Context::new().expect("Context::new on macOS");
     let mut kernel = match kernel_kind {
+        2 => dequant_gemv_int2::kernel_ir_for(dt.to_dtype()),
         3 => dequant_gemv_int3::kernel_ir_for(dt.to_dtype()),
         4 => dequant_gemv_int4::kernel_ir_for(dt.to_dtype()),
         5 => dequant_gemv_int5::kernel_ir_for(dt.to_dtype()),
         6 => dequant_gemv_int6::kernel_ir_for(dt.to_dtype()),
         8 => dequant_gemv_int8::kernel_ir_for(dt.to_dtype()),
-        _ => unreachable!("test covers int3 / int4 / int5 / int6 / int8"),
+        _ => unreachable!("test covers int2 / int3 / int4 / int5 / int6 / int8"),
     };
     kernel.mode = KernelMode::Reduction;
 
@@ -290,6 +292,25 @@ fn run_one_test(bits: u32, dt: Dt, in_dim: usize, group_size: usize, out_dim: us
         dt as u32,
     );
 }
+
+// ── int2 pack-strided pin (16 codes per uint32 word) ──────────────────────
+//
+// int2 is the smallest pack-strided variant: 16 codes per u32, quant step =
+// `range / 3` (only 4 levels). Tolerances widen vs int3 because of the
+// coarser grid.
+
+#[test]
+fn dequant_gemv_int2_qwen_shape_f32() {
+    // group_size must be a multiple of `32/bits = 16`. Use 32 to match the
+    // other pack-strided cases; in_dim=256 → 16 u32 per row.
+    run_one_test(2, Dt::F32, 256, 32, 4, 5e-2);
+}
+
+#[test]
+fn dequant_gemv_int2_qwen_shape_f16() { run_one_test(2, Dt::F16, 256, 32, 4, 6e-2); }
+
+#[test]
+fn dequant_gemv_int2_qwen_shape_bf16() { run_one_test(2, Dt::Bf16, 256, 32, 4, 8e-2); }
 
 #[test]
 fn dequant_gemv_int4_qwen_shape_f32() {
