@@ -282,14 +282,43 @@ pub fn ffai_batched_4_qmm_fast<T>(
         }
         // Cross-lane reduce + store. out_* are multiples of 8 so all four
         // rows are valid whenever base_row < out_limit.
-        for _r in range(0u32, 4u32, 1u32) {
-            let v = stack_load("accs", _r);
-            let r = simd_sum(v);
-            if lane == 0u32 {
-                if matrix == 0u32 { store(a_buf[a_row_off + base_row + _r], r.cast::<T>()); }
-                if matrix == 1u32 { store(b_buf[b_row_off + base_row + _r], r.cast::<T>()); }
-                if matrix == 2u32 { store(c_buf[c_row_off + base_row + _r], r.cast::<T>()); }
-                if matrix == 3u32 { store(d_buf[d_row_off + base_row + _r], r.cast::<T>()); }
+        //
+        // The simd_sums are hoisted into per-row locals BEFORE the lane==0
+        // gate so the per-matrix branches can reference them by name. The
+        // DSL unroller mangles SSA bindings when a `simd_sum` result is
+        // referenced inside a nested `if lane == 0 { if matrix == N { ... } }`
+        // block emitted from a `range(0,4)` body (the cast op keeps a stale
+        // pre-unroll SSA handle), so the 4 reductions are written by hand
+        // here rather than looped. The accumulation loop above keeps the
+        // stack_alloc + range dedup intact.
+        let r0 = simd_sum(stack_load("accs", 0u32));
+        let r1 = simd_sum(stack_load("accs", 1u32));
+        let r2 = simd_sum(stack_load("accs", 2u32));
+        let r3 = simd_sum(stack_load("accs", 3u32));
+        if lane == 0u32 {
+            if matrix == 0u32 {
+                store(a_buf[a_row_off + base_row + 0u32], r0.cast::<T>());
+                store(a_buf[a_row_off + base_row + 1u32], r1.cast::<T>());
+                store(a_buf[a_row_off + base_row + 2u32], r2.cast::<T>());
+                store(a_buf[a_row_off + base_row + 3u32], r3.cast::<T>());
+            }
+            if matrix == 1u32 {
+                store(b_buf[b_row_off + base_row + 0u32], r0.cast::<T>());
+                store(b_buf[b_row_off + base_row + 1u32], r1.cast::<T>());
+                store(b_buf[b_row_off + base_row + 2u32], r2.cast::<T>());
+                store(b_buf[b_row_off + base_row + 3u32], r3.cast::<T>());
+            }
+            if matrix == 2u32 {
+                store(c_buf[c_row_off + base_row + 0u32], r0.cast::<T>());
+                store(c_buf[c_row_off + base_row + 1u32], r1.cast::<T>());
+                store(c_buf[c_row_off + base_row + 2u32], r2.cast::<T>());
+                store(c_buf[c_row_off + base_row + 3u32], r3.cast::<T>());
+            }
+            if matrix == 3u32 {
+                store(d_buf[d_row_off + base_row + 0u32], r0.cast::<T>());
+                store(d_buf[d_row_off + base_row + 1u32], r1.cast::<T>());
+                store(d_buf[d_row_off + base_row + 2u32], r2.cast::<T>());
+                store(d_buf[d_row_off + base_row + 3u32], r3.cast::<T>());
             }
         }
     }
