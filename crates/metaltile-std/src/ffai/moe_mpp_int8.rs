@@ -155,17 +155,12 @@ pub fn mt_moe_gather_qmm_mma_int8_bm16_mpp<T>(
                     let sb_off = sb_expert_base + (n_tile_base + w_row) * groups_per_row + g;
                     let s = load(scales[sb_off]).cast::<f32>();
                     let b = load(biases[sb_off]).cast::<f32>();
-                    // Extract 4 unsigned byte codes (LSB-first).
-                    let q0 = (packed & 255u32).cast::<f32>();
-                    let q1 = ((packed >> 8u32) & 255u32).cast::<f32>();
-                    let q2 = ((packed >> 16u32) & 255u32).cast::<f32>();
-                    let q3 = ((packed >> 24u32) & 255u32).cast::<f32>();
-                    // Write to threadgroup ws at the correct row/col position.
+                    // Extract 4 unsigned byte codes (LSB-first) and dequant.
                     let dst = w_row * 16u32 + pack_col * 4u32;
-                    threadgroup_store("ws", dst, s * q0 + b);
-                    threadgroup_store("ws", dst + 1u32, s * q1 + b);
-                    threadgroup_store("ws", dst + 2u32, s * q2 + b);
-                    threadgroup_store("ws", dst + 3u32, s * q3 + b);
+                    for _j in range(0u32, 4u32, 1u32) {
+                        let q = ((packed >> (_j * 8u32)) & 255u32).cast::<f32>();
+                        threadgroup_store("ws", dst + _j, s * q + b);
+                    }
                 }
                 threadgroup_barrier();
                 // A = xs [M=16, K=16] (ta=false → extents K,M = 16,16).

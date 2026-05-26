@@ -612,46 +612,32 @@ pub fn mt_sdpa_vector_d256<T>(
     let factor_g = exp(run_max - g_max);
     let inv_sum = select(g_sum > 0.0f32, 1.0f32 / g_sum, 0.0f32);
     // 8-phase output reduction — identical single-buffer strategy as d=128.
-    threadgroup_store("tg_out", lane * ns + sg, o0);
-    threadgroup_barrier();
-    let red0 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
-    threadgroup_barrier();
-    threadgroup_store("tg_out", lane * ns + sg, o1);
-    threadgroup_barrier();
-    let red1 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
-    threadgroup_barrier();
-    threadgroup_store("tg_out", lane * ns + sg, o2);
-    threadgroup_barrier();
-    let red2 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
-    threadgroup_barrier();
-    threadgroup_store("tg_out", lane * ns + sg, o3);
-    threadgroup_barrier();
-    let red3 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
-    threadgroup_barrier();
-    threadgroup_store("tg_out", lane * ns + sg, o4);
-    threadgroup_barrier();
-    let red4 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
-    threadgroup_barrier();
-    threadgroup_store("tg_out", lane * ns + sg, o5);
-    threadgroup_barrier();
-    let red5 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
-    threadgroup_barrier();
-    threadgroup_store("tg_out", lane * ns + sg, o6);
-    threadgroup_barrier();
-    let red6 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
-    threadgroup_barrier();
-    threadgroup_store("tg_out", lane * ns + sg, o7);
-    threadgroup_barrier();
-    let red7 = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
+    stack_alloc("os8_lo", 8, "f32");
+    stack_store("os8_lo", 0u32, o0);
+    stack_store("os8_lo", 1u32, o1);
+    stack_store("os8_lo", 2u32, o2);
+    stack_store("os8_lo", 3u32, o3);
+    stack_store("os8_lo", 4u32, o4);
+    stack_store("os8_lo", 5u32, o5);
+    stack_store("os8_lo", 6u32, o6);
+    stack_store("os8_lo", 7u32, o7);
+    stack_alloc("reds8", 8, "f32");
+    for _i in range(0u32, 8u32, 1u32) {
+        threadgroup_store("tg_out", lane * ns + sg, stack_load("os8_lo", _i));
+        threadgroup_barrier();
+        let red = simd_sum(threadgroup_load("tg_out", sg * ns + lane) * factor_g) * inv_sum;
+        threadgroup_barrier();
+        stack_store("reds8", _i, red);
+    }
     if lane == 0u32 {
         let out_off = q_off + sg * 8u32;
-        store(out[out_off], red0);
-        store(out[out_off + 1u32], red1);
-        store(out[out_off + 2u32], red2);
-        store(out[out_off + 3u32], red3);
-        store(out[out_off + 4u32], red4);
-        store(out[out_off + 5u32], red5);
-        store(out[out_off + 6u32], red6);
-        store(out[out_off + 7u32], red7);
+        store(out[out_off], stack_load("reds8", 0u32));
+        store(out[out_off + 1u32], stack_load("reds8", 1u32));
+        store(out[out_off + 2u32], stack_load("reds8", 2u32));
+        store(out[out_off + 3u32], stack_load("reds8", 3u32));
+        store(out[out_off + 4u32], stack_load("reds8", 4u32));
+        store(out[out_off + 5u32], stack_load("reds8", 5u32));
+        store(out[out_off + 6u32], stack_load("reds8", 6u32));
+        store(out[out_off + 7u32], stack_load("reds8", 7u32));
     }
 }
