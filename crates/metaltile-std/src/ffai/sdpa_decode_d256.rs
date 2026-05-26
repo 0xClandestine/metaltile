@@ -95,7 +95,11 @@ pub fn ffai_sdpa_decode_d256<T>(
         run_sum = run_sum * factor + weight;
         run_max = new_max;
         for _i in range(0u32, 8u32, 1u32) {
-            stack_store("o", _i, stack_load("o", _i) * factor + weight * load(v[kv0 + _i]).cast::<f32>());
+            stack_store(
+                "o",
+                _i,
+                stack_load("o", _i) * factor + weight * load(v[kv0 + _i]).cast::<f32>(),
+            );
         }
     }
     // ── Cross-simdgroup reduction: max + sum_exp ────────────────────

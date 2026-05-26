@@ -231,10 +231,26 @@ pub fn conv2d_mma<T>(
             simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + ko + fn0));
             simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + ko + fn1));
             simdgroup_barrier_mem_none();
-            simdgroup_elem_store(b_f0, 0, threadgroup_load("bs", (col_b0 + fn0) * stride + ko + fm));
-            simdgroup_elem_store(b_f0, 1, threadgroup_load("bs", (col_b0 + fn1) * stride + ko + fm));
-            simdgroup_elem_store(b_f1, 0, threadgroup_load("bs", (col_b1 + fn0) * stride + ko + fm));
-            simdgroup_elem_store(b_f1, 1, threadgroup_load("bs", (col_b1 + fn1) * stride + ko + fm));
+            simdgroup_elem_store(
+                b_f0,
+                0,
+                threadgroup_load("bs", (col_b0 + fn0) * stride + ko + fm),
+            );
+            simdgroup_elem_store(
+                b_f0,
+                1,
+                threadgroup_load("bs", (col_b0 + fn1) * stride + ko + fm),
+            );
+            simdgroup_elem_store(
+                b_f1,
+                0,
+                threadgroup_load("bs", (col_b1 + fn0) * stride + ko + fm),
+            );
+            simdgroup_elem_store(
+                b_f1,
+                1,
+                threadgroup_load("bs", (col_b1 + fn1) * stride + ko + fm),
+            );
             simdgroup_barrier_mem_none();
             simdgroup_matmul(a_f0, b_f0, c_f00);
             simdgroup_matmul(a_f0, b_f1, c_f01);
