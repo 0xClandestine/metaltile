@@ -35,8 +35,10 @@ use std::collections::BTreeMap;
 use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
-use metaltile_std::ffai::batched_4_qgemv::ffai_batched_4_qgemv_fast;
-use metaltile_std::ffai::batched_4_qmm::ffai_batched_4_qmm_fast;
+use metaltile_std::ffai::{
+    batched_4_qgemv::ffai_batched_4_qgemv_fast,
+    batched_4_qmm::ffai_batched_4_qmm_fast,
+};
 
 /// Affine per-group int4 quantize of one weight row, nibble-packed.
 fn quantize_int4_row(row: &[f32], group_size: usize) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
@@ -101,7 +103,7 @@ fn run_4_gemv_fast(
     x_row: &[f32],
     wa_p: &[u32],
     sa: &[f32],
-    ba: &[f32],
+    bia: &[f32],
     wb_p: &[u32],
     sb_: &[f32],
     bb: &[f32],
@@ -123,7 +125,7 @@ fn run_4_gemv_fast(
     buffers.insert("x".into(), pack_bytes(x_row, dt));
     buffers.insert("w_a".into(), pack_u32_bytes(wa_p));
     buffers.insert("scales_a".into(), pack_bytes(sa, dt));
-    buffers.insert("biases_a".into(), pack_bytes(ba, dt));
+    buffers.insert("biases_a".into(), pack_bytes(bia, dt));
     buffers.insert("w_b".into(), pack_u32_bytes(wb_p));
     buffers.insert("scales_b".into(), pack_bytes(sb_, dt));
     buffers.insert("biases_b".into(), pack_bytes(bb, dt));
@@ -165,7 +167,7 @@ fn run_4_qmm_fast(
     x: &[f32],
     wa_p: &[u32],
     sa: &[f32],
-    ba: &[f32],
+    bia: &[f32],
     wb_p: &[u32],
     sb_: &[f32],
     bb: &[f32],
@@ -188,7 +190,7 @@ fn run_4_qmm_fast(
     buffers.insert("x".into(), pack_bytes(x, dt));
     buffers.insert("w_a".into(), pack_u32_bytes(wa_p));
     buffers.insert("scales_a".into(), pack_bytes(sa, dt));
-    buffers.insert("biases_a".into(), pack_bytes(ba, dt));
+    buffers.insert("biases_a".into(), pack_bytes(bia, dt));
     buffers.insert("w_b".into(), pack_u32_bytes(wb_p));
     buffers.insert("scales_b".into(), pack_bytes(sb_, dt));
     buffers.insert("biases_b".into(), pack_bytes(bb, dt));
@@ -254,7 +256,7 @@ fn run_case_qmm_4(
     let wc = source(out_c * in_dim, 0x44, 3.0, 0.0);
     let wd = source(out_d * in_dim, 0x55, 3.0, 0.0);
 
-    let (wa_p, sa, ba) = quantize_matrix(&wa, out_a, in_dim, group_size);
+    let (wa_p, sa, bia) = quantize_matrix(&wa, out_a, in_dim, group_size);
     let (wb_p, sb_, bb) = quantize_matrix(&wb, out_b, in_dim, group_size);
     let (wc_p, sc, bc) = quantize_matrix(&wc, out_c, in_dim, group_size);
     let (wd_p, sd, bd) = quantize_matrix(&wd, out_d, in_dim, group_size);
@@ -269,8 +271,8 @@ fn run_case_qmm_4(
     for row in 0..m {
         let x_row = &x[row * in_dim..(row + 1) * in_dim];
         let (ea, eb, ec, ed) = run_4_gemv_fast(
-            x_row, &wa_p, &sa, &ba, &wb_p, &sb_, &bb, &wc_p, &sc, &bc, &wd_p, &sd, &bd, dt, in_dim,
-            group_size, out_a, out_b, out_c, out_d,
+            x_row, &wa_p, &sa, &bia, &wb_p, &sb_, &bb, &wc_p, &sc, &bc, &wd_p, &sd, &bd, dt,
+            in_dim, group_size, out_a, out_b, out_c, out_d,
         );
         expected_a.extend(ea);
         expected_b.extend(eb);
@@ -279,7 +281,7 @@ fn run_case_qmm_4(
     }
 
     let (actual_a, actual_b, actual_c, actual_d) = run_4_qmm_fast(
-        &x, &wa_p, &sa, &ba, &wb_p, &sb_, &bb, &wc_p, &sc, &bc, &wd_p, &sd, &bd, dt, m, in_dim,
+        &x, &wa_p, &sa, &bia, &wb_p, &sb_, &bb, &wc_p, &sc, &bc, &wd_p, &sd, &bd, dt, m, in_dim,
         group_size, out_a, out_b, out_c, out_d,
     );
 
@@ -335,33 +337,21 @@ fn batched_4_qmm_fast_bf16_gdn_m2() {
 // ── M=8 (common prefill chunk granularity) ────────────────────────────
 
 #[test]
-fn batched_4_qmm_fast_f32_mid_m8() {
-    run_case_qmm_4(Dt::F32, 8, 1024, 64, 512, 256, 8, 8, 5e-3);
-}
+fn batched_4_qmm_fast_f32_mid_m8() { run_case_qmm_4(Dt::F32, 8, 1024, 64, 512, 256, 8, 8, 5e-3); }
 
 #[test]
-fn batched_4_qmm_fast_f16_mid_m8() {
-    run_case_qmm_4(Dt::F16, 8, 1024, 64, 512, 256, 8, 8, 2e-2);
-}
+fn batched_4_qmm_fast_f16_mid_m8() { run_case_qmm_4(Dt::F16, 8, 1024, 64, 512, 256, 8, 8, 2e-2); }
 
 #[test]
-fn batched_4_qmm_fast_bf16_mid_m8() {
-    run_case_qmm_4(Dt::Bf16, 8, 1024, 64, 512, 256, 8, 8, 5e-2);
-}
+fn batched_4_qmm_fast_bf16_mid_m8() { run_case_qmm_4(Dt::Bf16, 8, 1024, 64, 512, 256, 8, 8, 5e-2); }
 
 // ── M=32 (larger prefill chunk) ───────────────────────────────────────
 
 #[test]
-fn batched_4_qmm_fast_f32_small_m32() {
-    run_case_qmm_4(Dt::F32, 32, 512, 64, 8, 8, 8, 8, 5e-3);
-}
+fn batched_4_qmm_fast_f32_small_m32() { run_case_qmm_4(Dt::F32, 32, 512, 64, 8, 8, 8, 8, 5e-3); }
 
 #[test]
-fn batched_4_qmm_fast_f16_small_m32() {
-    run_case_qmm_4(Dt::F16, 32, 512, 64, 8, 8, 8, 8, 2e-2);
-}
+fn batched_4_qmm_fast_f16_small_m32() { run_case_qmm_4(Dt::F16, 32, 512, 64, 8, 8, 8, 8, 2e-2); }
 
 #[test]
-fn batched_4_qmm_fast_bf16_small_m32() {
-    run_case_qmm_4(Dt::Bf16, 32, 512, 64, 8, 8, 8, 8, 5e-2);
-}
+fn batched_4_qmm_fast_bf16_small_m32() { run_case_qmm_4(Dt::Bf16, 32, 512, 64, 8, 8, 8, 8, 5e-2); }

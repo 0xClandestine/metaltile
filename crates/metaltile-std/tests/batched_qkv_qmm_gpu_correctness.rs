@@ -29,8 +29,10 @@ use std::collections::BTreeMap;
 use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
-use metaltile_std::ffai::batched_qkv_qgemv::ffai_batched_qkv_qgemv_fast;
-use metaltile_std::ffai::batched_qkv_qmm::ffai_batched_qkv_qmm_fast;
+use metaltile_std::ffai::{
+    batched_qkv_qgemv::ffai_batched_qkv_qgemv_fast,
+    batched_qkv_qmm::ffai_batched_qkv_qmm_fast,
+};
 
 /// Affine per-group int4 quantize of one weight row, nibble-packed.
 fn quantize_int4_row(row: &[f32], group_size: usize) -> (Vec<u32>, Vec<f32>, Vec<f32>) {

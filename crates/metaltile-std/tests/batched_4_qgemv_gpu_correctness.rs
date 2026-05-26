@@ -34,8 +34,10 @@ use std::collections::BTreeMap;
 use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
-use metaltile_std::ffai::batched_4_qgemv::ffai_batched_4_qgemv_fast;
-use metaltile_std::ffai::batched_qkv_qgemv::ffai_batched_qkv_qgemv_fast;
+use metaltile_std::ffai::{
+    batched_4_qgemv::ffai_batched_4_qgemv_fast,
+    batched_qkv_qgemv::ffai_batched_qkv_qgemv_fast,
+};
 
 /// Affine per-group int4 quantize of one weight row, nibble-packed.
 fn quantize_int4_row(row: &[f32], group_size: usize) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
@@ -150,7 +152,7 @@ fn run_4_fast(
     x: &[f32],
     wa_p: &[u32],
     sa: &[f32],
-    ba: &[f32],
+    bia: &[f32],
     wb_p: &[u32],
     sb_: &[f32],
     bb: &[f32],
@@ -172,7 +174,7 @@ fn run_4_fast(
     buffers.insert("x".into(), pack_bytes(x, dt));
     buffers.insert("w_a".into(), pack_u32_bytes(wa_p));
     buffers.insert("scales_a".into(), pack_bytes(sa, dt));
-    buffers.insert("biases_a".into(), pack_bytes(ba, dt));
+    buffers.insert("biases_a".into(), pack_bytes(bia, dt));
     buffers.insert("w_b".into(), pack_u32_bytes(wb_p));
     buffers.insert("scales_b".into(), pack_bytes(sb_, dt));
     buffers.insert("biases_b".into(), pack_bytes(bb, dt));
@@ -236,7 +238,7 @@ fn run_case_fast_4(
     let wc = source(out_c * in_dim, 0x44, 3.0, 0.0);
     let wd = source(out_d * in_dim, 0x55, 3.0, 0.0);
 
-    let (wa_p, sa, ba) = quantize_matrix(&wa, out_a, in_dim, group_size);
+    let (wa_p, sa, bia) = quantize_matrix(&wa, out_a, in_dim, group_size);
     let (wb_p, sb_, bb) = quantize_matrix(&wb, out_b, in_dim, group_size);
     let (wc_p, sc, bc) = quantize_matrix(&wc, out_c, in_dim, group_size);
     let (wd_p, sd, bd) = quantize_matrix(&wd, out_d, in_dim, group_size);
@@ -244,7 +246,7 @@ fn run_case_fast_4(
     // Oracle pass 1: run the 3-output sibling on (A, B, C). Output is
     // the concatenated [A | B | C] slice.
     let abc_oracle = run_qkv_oracle(
-        &x, &wa_p, &sa, &ba, &wb_p, &sb_, &bb, &wc_p, &sc, &bc, dt, in_dim, group_size, out_a,
+        &x, &wa_p, &sa, &bia, &wb_p, &sb_, &bb, &wc_p, &sc, &bc, dt, in_dim, group_size, out_a,
         out_b, out_c,
     );
     let expected_a: Vec<f32> = abc_oracle[..out_a].to_vec();
@@ -255,13 +257,13 @@ fn run_case_fast_4(
     // sibling and reading the first slice. Same inner loop math, just
     // different matrix selector.
     let ddd_oracle = run_qkv_oracle(
-        &x, &wd_p, &sd, &bd, &wd_p, &sd, &bd, &wd_p, &sd, &bd, dt, in_dim, group_size, out_d, out_d,
-        out_d,
+        &x, &wd_p, &sd, &bd, &wd_p, &sd, &bd, &wd_p, &sd, &bd, dt, in_dim, group_size, out_d,
+        out_d, out_d,
     );
     let expected_d: Vec<f32> = ddd_oracle[..out_d].to_vec();
 
     let (actual_a, actual_b, actual_c, actual_d) = run_4_fast(
-        &x, &wa_p, &sa, &ba, &wb_p, &sb_, &bb, &wc_p, &sc, &bc, &wd_p, &sd, &bd, dt, in_dim,
+        &x, &wa_p, &sa, &bia, &wb_p, &sb_, &bb, &wc_p, &sc, &bc, &wd_p, &sd, &bd, dt, in_dim,
         group_size, out_a, out_b, out_c, out_d,
     );
 
@@ -297,22 +299,14 @@ fn run_case_fast_4(
 // the 3-output sibling tests.
 
 #[test]
-fn batched_4_qgemv_fast_f32_gdn() {
-    run_case_fast_4(Dt::F32, 2048, 64, 768, 1024, 64, 64, 5e-3);
-}
+fn batched_4_qgemv_fast_f32_gdn() { run_case_fast_4(Dt::F32, 2048, 64, 768, 1024, 64, 64, 5e-3); }
 
 #[test]
-fn batched_4_qgemv_fast_f16_gdn() {
-    run_case_fast_4(Dt::F16, 2048, 64, 768, 1024, 64, 64, 2e-2);
-}
+fn batched_4_qgemv_fast_f16_gdn() { run_case_fast_4(Dt::F16, 2048, 64, 768, 1024, 64, 64, 2e-2); }
 
 #[test]
-fn batched_4_qgemv_fast_bf16_gdn() {
-    run_case_fast_4(Dt::Bf16, 2048, 64, 768, 1024, 64, 64, 5e-2);
-}
+fn batched_4_qgemv_fast_bf16_gdn() { run_case_fast_4(Dt::Bf16, 2048, 64, 768, 1024, 64, 64, 5e-2); }
 
 // Smaller-shape smoke for fast iteration when isolating geometry bugs.
 #[test]
-fn batched_4_qgemv_fast_f32_small() {
-    run_case_fast_4(Dt::F32, 512, 64, 16, 8, 8, 8, 5e-3);
-}
+fn batched_4_qgemv_fast_f32_small() { run_case_fast_4(Dt::F32, 512, 64, 16, 8, 8, 8, 5e-3); }
