@@ -173,21 +173,15 @@ pub fn sdpa_decode_2pass_pass1<T>(
     // ops like the implicit Load(__ml_oN) the DSL would otherwise
     // emit just before each store).
     let out_block_off = (q_head * blocks + block_idx) * head_dim + d0;
-    let po0 = out_block_off;
-    let po1 = out_block_off + 1u32;
-    let po2 = out_block_off + 2u32;
-    let po3 = out_block_off + 3u32;
-    // f32→T narrowing happens implicitly at the MSL Store (`dst[i] = val`),
-    // so we don't add a Cast op here — that would introduce an extra
-    // rounding step + break the 4-consecutive-Store window vectorize needs.
-    let so0 = o0;
-    let so1 = o1;
-    let so2 = o2;
-    let so3 = o3;
-    store(partial_o[po0], so0);
-    store(partial_o[po1], so1);
-    store(partial_o[po2], so2);
-    store(partial_o[po3], so3);
+    // f32→T narrowing happens implicitly at the MSL Store (`dst[i] = val`).
+    stack_alloc("os", 4, "f32");
+    stack_store("os", 0u32, o0);
+    stack_store("os", 1u32, o1);
+    stack_store("os", 2u32, o2);
+    stack_store("os", 3u32, o3);
+    for _i in range(0u32, 4u32, 1u32) {
+        store(partial_o[out_block_off + _i], stack_load("os", _i));
+    }
     if lane == 0u32 {
         let ml_off = q_head * blocks + block_idx;
         store(partial_m[ml_off], run_max);
@@ -637,22 +631,18 @@ pub fn sdpa_decode_2pass_pass1_d256<T>(
         o7 = o7 * factor + weight * v7;
     }
     let out_block_off = (q_head * blocks + block_idx) * head_dim + d0;
-    let so0 = o0;
-    let so1 = o1;
-    let so2 = o2;
-    let so3 = o3;
-    let so4 = o4;
-    let so5 = o5;
-    let so6 = o6;
-    let so7 = o7;
-    store(partial_o[out_block_off], so0);
-    store(partial_o[out_block_off + 1u32], so1);
-    store(partial_o[out_block_off + 2u32], so2);
-    store(partial_o[out_block_off + 3u32], so3);
-    store(partial_o[out_block_off + 4u32], so4);
-    store(partial_o[out_block_off + 5u32], so5);
-    store(partial_o[out_block_off + 6u32], so6);
-    store(partial_o[out_block_off + 7u32], so7);
+    stack_alloc("os", 8, "f32");
+    stack_store("os", 0u32, o0);
+    stack_store("os", 1u32, o1);
+    stack_store("os", 2u32, o2);
+    stack_store("os", 3u32, o3);
+    stack_store("os", 4u32, o4);
+    stack_store("os", 5u32, o5);
+    stack_store("os", 6u32, o6);
+    stack_store("os", 7u32, o7);
+    for _i in range(0u32, 8u32, 1u32) {
+        store(partial_o[out_block_off + _i], stack_load("os", _i));
+    }
     if lane == 0u32 {
         let ml_off = q_head * blocks + block_idx;
         store(partial_m[ml_off], run_max);
