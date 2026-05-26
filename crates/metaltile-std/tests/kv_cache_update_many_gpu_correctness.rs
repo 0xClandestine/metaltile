@@ -42,8 +42,7 @@ use std::collections::BTreeMap;
 use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
-use metaltile_std::ffai::kv_cache::kv_cache_update;
-use metaltile_std::ffai::kv_cache_update_many::kv_cache_update_many;
+use metaltile_std::ffai::{kv_cache::kv_cache_update, kv_cache_update_many::kv_cache_update_many};
 
 /// Dispatch the batched `kv_cache_update_many` over T rows and read back
 /// the full cache as f32.
@@ -70,8 +69,7 @@ fn run_kv_cache_update_many(
     buffers.insert("out".into(), pack_bytes(init_cache, dt));
     buffers.insert("head_dim".into(), head_dim.to_le_bytes().to_vec());
     buffers.insert("max_seq".into(), max_seq.to_le_bytes().to_vec());
-    buffers
-        .insert("n_kv_heads_x_head_dim".into(), (n_kv_heads * head_dim).to_le_bytes().to_vec());
+    buffers.insert("n_kv_heads_x_head_dim".into(), (n_kv_heads * head_dim).to_le_bytes().to_vec());
 
     let ctx = Context::new().expect("Context::new on macOS");
     let mut kernel = kv_cache_update_many::kernel_ir_for(dt.to_dtype());
@@ -101,6 +99,7 @@ fn run_kv_cache_update_many(
 /// times. This is the "before" state of the prefill T-loop the batched
 /// kernel is replacing — exactly what FFAI's `KVCache.appendRangeOnGPU`
 /// currently calls in a loop.
+#[allow(clippy::too_many_arguments)]
 fn run_kv_cache_update_per_row(
     src: &[f32],
     positions: &[u32],
@@ -174,7 +173,8 @@ fn make_src(n_tokens: u32, n_kv_heads: u32, head_dim: u32, seed: u32) -> Vec<f32
 fn make_positions(n_tokens: u32, max_seq: u32, seed: u32) -> Vec<u32> {
     assert!(n_tokens <= max_seq, "need at least T distinct positions in [0, max_seq)");
     let mut pool: Vec<u32> = (0..max_seq).collect();
-    let mut state = (seed as u64).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    let mut state =
+        (seed as u64).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     // Fisher-Yates with the LCG. Same hash recipe as the SRHT rotation
     // helper in common/mod.rs — keeps the test reproducible.
     for i in (1..pool.len()).rev() {
@@ -187,11 +187,7 @@ fn make_positions(n_tokens: u32, max_seq: u32, seed: u32) -> Vec<u32> {
 }
 
 /// (T, n_kv_heads, head_dim) cases requested in the issue.
-const CASES: &[(u32, u32, u32)] = &[
-    (2, 4, 64),
-    (8, 8, 128),
-    (64, 2, 256),
-];
+const CASES: &[(u32, u32, u32)] = &[(2, 4, 64), (8, 8, 128), (64, 2, 256)];
 
 const MAX_SEQ: u32 = 1024;
 const SENTINEL: f32 = 999.0;

@@ -34,8 +34,7 @@ use std::collections::BTreeMap;
 use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
 use metaltile_core::ir::KernelMode;
 use metaltile_runtime::Context;
-use metaltile_std::ffai::rope_llama::ffai_rope_llama;
-use metaltile_std::ffai::rope_llama_many::ffai_rope_llama_many;
+use metaltile_std::ffai::{rope_llama::ffai_rope_llama, rope_llama_many::ffai_rope_llama_many};
 
 /// Dispatch the batched `ffai_rope_llama_many` over T rows and read back
 /// the rotated tensor as f32. `row_stride` = `n_heads * head_dim` for the
@@ -212,30 +211,10 @@ fn check_dtype_standard(dt: Dt, abs_tol: f32, rel_tol: f32) {
         let positions = make_positions(n_tokens, 0x5678);
 
         let many = run_rope_llama_many(
-            &qk,
-            &positions,
-            dt,
-            n_tokens,
-            n_heads,
-            head_dim,
-            theta_base,
-            scale,
-            low,
-            high,
-            max_pos,
+            &qk, &positions, dt, n_tokens, n_heads, head_dim, theta_base, scale, low, high, max_pos,
         );
         let oracle = run_rope_llama_per_row(
-            &qk,
-            &positions,
-            dt,
-            n_tokens,
-            n_heads,
-            head_dim,
-            theta_base,
-            scale,
-            low,
-            high,
-            max_pos,
+            &qk, &positions, dt, n_tokens, n_heads, head_dim, theta_base, scale, low, high, max_pos,
         );
 
         assert_eq!(many.len(), oracle.len(), "length mismatch");

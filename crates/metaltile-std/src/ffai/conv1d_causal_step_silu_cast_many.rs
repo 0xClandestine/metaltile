@@ -18,6 +18,7 @@
 //!   - this kernel reads state once at start of channel sweep, writes
 //!     once at end → 24 KB per channel sweep, ~12 MB per prefill (30×
 //!     less)
+//!
 //! On top of the bandwidth save the per-channel kernel collapses
 //! `T * (conv_step + silu_cast) = 2T` dispatches per layer into one —
 //! same dispatch-saving pattern as `rope_llama_many` and

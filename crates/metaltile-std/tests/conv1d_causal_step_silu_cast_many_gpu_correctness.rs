@@ -55,6 +55,7 @@ use metaltile_std::ffai::conv1d_causal_step_silu_cast_many::ffai_conv1d_causal_s
 /// bf16) — without this the f16/bf16 oracle would diverge from the
 /// GPU by exactly the load quantisation step and look like a kernel
 /// bug.
+#[allow(clippy::erasing_op, clippy::identity_op)]
 fn cpu_reference(
     src: &[f32],
     w: &[f32],
@@ -187,21 +188,15 @@ const CASES: &[(u32, u32)] = &[
 const CONV_KERNEL: u32 = 4;
 
 #[allow(clippy::too_many_arguments)]
-fn check_one_case(
-    dt: Dt,
-    t_len: u32,
-    conv_dim: u32,
-    abs_tol: f32,
-    rel_tol: f32,
-) {
+fn check_one_case(dt: Dt, t_len: u32, conv_dim: u32, abs_tol: f32, rel_tol: f32) {
     let src = make_data((t_len * conv_dim) as usize, 0x1234, 1.0);
     let w = make_data((CONV_KERNEL * conv_dim) as usize, 0x5678, 0.3);
     let b = make_data(conv_dim as usize, 0x9ABC, 0.1);
     let state_in = make_data(((CONV_KERNEL - 1) * conv_dim) as usize, 0xDEF0, 1.0);
 
-    let (gpu_out, gpu_state) =
-        run_many(&src, &w, &b, &state_in, dt, t_len, conv_dim, CONV_KERNEL);
-    let (cpu_out, cpu_state) = cpu_reference(&src, &w, &b, &state_in, dt, t_len as usize, conv_dim as usize);
+    let (gpu_out, gpu_state) = run_many(&src, &w, &b, &state_in, dt, t_len, conv_dim, CONV_KERNEL);
+    let (cpu_out, cpu_state) =
+        cpu_reference(&src, &w, &b, &state_in, dt, t_len as usize, conv_dim as usize);
 
     assert_eq!(gpu_out.len(), cpu_out.len(), "out length mismatch");
     assert_eq!(gpu_state.len(), cpu_state.len(), "state length mismatch");
@@ -245,9 +240,7 @@ fn check_one_case(
              gpu={a} cpu={e} abs={d:.3e}",
         );
     }
-    eprintln!(
-        "{dt:?} state shape=(T={t_len}, D={conv_dim}): max_abs={max_state_abs:.2e}",
-    );
+    eprintln!("{dt:?} state shape=(T={t_len}, D={conv_dim}): max_abs={max_state_abs:.2e}",);
 }
 
 fn check_dtype(dt: Dt, abs_tol: f32, rel_tol: f32) {
