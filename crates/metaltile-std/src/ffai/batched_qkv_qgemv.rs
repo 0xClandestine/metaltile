@@ -205,8 +205,7 @@ pub fn ffai_batched_qkv_qgemv_fast<T>(
     let s_256 = 0.00390625f32;
     let s_4096 = 0.000244140625f32;
     // Route the row guard to the output size for this matrix slice.
-    let out_limit = select(matrix == 0u32, out_q,
-                    select(matrix == 1u32, out_k, out_v));
+    let out_limit = select(matrix == 0u32, out_q, select(matrix == 1u32, out_k, out_v));
     // Per-row partial-sum accumulators. `stack_alloc` lowers to a
     // thread-private array; DSL unrolls range(0,4) loops at codegen.
     stack_alloc("accs", 4, "f32");
@@ -217,30 +216,52 @@ pub fn ffai_batched_qkv_qgemv_fast<T>(
         for _b in range(0u32, in_dim, 512u32) {
             // 16 x loads per K-block, shared across all three matrix branches.
             let xb = _b + lane_x_off;
-            let x0   = load(x[xb]).cast::<f32>();
-            let x1r  = load(x[xb +  1u32]).cast::<f32>();
-            let x2r  = load(x[xb +  2u32]).cast::<f32>();
-            let x3r  = load(x[xb +  3u32]).cast::<f32>();
-            let x4   = load(x[xb +  4u32]).cast::<f32>();
-            let x5r  = load(x[xb +  5u32]).cast::<f32>();
-            let x6r  = load(x[xb +  6u32]).cast::<f32>();
-            let x7r  = load(x[xb +  7u32]).cast::<f32>();
-            let x8   = load(x[xb +  8u32]).cast::<f32>();
-            let x9r  = load(x[xb +  9u32]).cast::<f32>();
+            let x0 = load(x[xb]).cast::<f32>();
+            let x1r = load(x[xb + 1u32]).cast::<f32>();
+            let x2r = load(x[xb + 2u32]).cast::<f32>();
+            let x3r = load(x[xb + 3u32]).cast::<f32>();
+            let x4 = load(x[xb + 4u32]).cast::<f32>();
+            let x5r = load(x[xb + 5u32]).cast::<f32>();
+            let x6r = load(x[xb + 6u32]).cast::<f32>();
+            let x7r = load(x[xb + 7u32]).cast::<f32>();
+            let x8 = load(x[xb + 8u32]).cast::<f32>();
+            let x9r = load(x[xb + 9u32]).cast::<f32>();
             let x10r = load(x[xb + 10u32]).cast::<f32>();
             let x11r = load(x[xb + 11u32]).cast::<f32>();
-            let x12  = load(x[xb + 12u32]).cast::<f32>();
+            let x12 = load(x[xb + 12u32]).cast::<f32>();
             let x13r = load(x[xb + 13u32]).cast::<f32>();
             let x14r = load(x[xb + 14u32]).cast::<f32>();
             let x15r = load(x[xb + 15u32]).cast::<f32>();
             // xs = Σ x[i] over the 16-element block (bias term).
-            let xs = x0 + x1r + x2r + x3r + x4 + x5r + x6r + x7r
-                   + x8 + x9r + x10r + x11r + x12 + x13r + x14r + x15r;
+            let xs = x0
+                + x1r
+                + x2r
+                + x3r
+                + x4
+                + x5r
+                + x6r
+                + x7r
+                + x8
+                + x9r
+                + x10r
+                + x11r
+                + x12
+                + x13r
+                + x14r
+                + x15r;
             // Pre-scale nibble positions 1/2/3 for mask-without-shift.
-            let x1  = x1r  * s_16;  let x2  = x2r  * s_256;  let x3  = x3r  * s_4096;
-            let x5  = x5r  * s_16;  let x6  = x6r  * s_256;  let x7  = x7r  * s_4096;
-            let x9  = x9r  * s_16;  let x10 = x10r * s_256;  let x11 = x11r * s_4096;
-            let x13 = x13r * s_16;  let x14 = x14r * s_256;  let x15 = x15r * s_4096;
+            let x1 = x1r * s_16;
+            let x2 = x2r * s_256;
+            let x3 = x3r * s_4096;
+            let x5 = x5r * s_16;
+            let x6 = x6r * s_256;
+            let x7 = x7r * s_4096;
+            let x9 = x9r * s_16;
+            let x10 = x10r * s_256;
+            let x11 = x11r * s_4096;
+            let x13 = x13r * s_16;
+            let x14 = x14r * s_256;
+            let x15 = x15r * s_4096;
             let g = xb / group_size;
             let pack_off = _b / 8u32 + lane_pack_off;
             // Per-matrix dispatch. Only tensor names differ across branches.
@@ -253,24 +274,24 @@ pub fn ffai_batched_qkv_qgemv_fast<T>(
                     let p_hi = load(w_q[wb + pack_off + 1u32]);
                     let p_lo_hi = p_lo >> 16u32;
                     let p_hi_hi = p_hi >> 16u32;
-                    let s  = load(scales_q[sb + g]).cast::<f32>();
+                    let s = load(scales_q[sb + g]).cast::<f32>();
                     let bi = load(biases_q[sb + g]).cast::<f32>();
-                    let qd = (p_lo    & 15u32).cast::<f32>() * x0
-                           + (p_lo    & 240u32).cast::<f32>() * x1
-                           + (p_lo    & 3840u32).cast::<f32>() * x2
-                           + (p_lo    & 61440u32).cast::<f32>() * x3
-                           + (p_lo_hi & 15u32).cast::<f32>() * x4
-                           + (p_lo_hi & 240u32).cast::<f32>() * x5
-                           + (p_lo_hi & 3840u32).cast::<f32>() * x6
-                           + (p_lo_hi & 61440u32).cast::<f32>() * x7
-                           + (p_hi    & 15u32).cast::<f32>() * x8
-                           + (p_hi    & 240u32).cast::<f32>() * x9
-                           + (p_hi    & 3840u32).cast::<f32>() * x10
-                           + (p_hi    & 61440u32).cast::<f32>() * x11
-                           + (p_hi_hi & 15u32).cast::<f32>() * x12
-                           + (p_hi_hi & 240u32).cast::<f32>() * x13
-                           + (p_hi_hi & 3840u32).cast::<f32>() * x14
-                           + (p_hi_hi & 61440u32).cast::<f32>() * x15;
+                    let qd = (p_lo & 15u32).cast::<f32>() * x0
+                        + (p_lo & 240u32).cast::<f32>() * x1
+                        + (p_lo & 3840u32).cast::<f32>() * x2
+                        + (p_lo & 61440u32).cast::<f32>() * x3
+                        + (p_lo_hi & 15u32).cast::<f32>() * x4
+                        + (p_lo_hi & 240u32).cast::<f32>() * x5
+                        + (p_lo_hi & 3840u32).cast::<f32>() * x6
+                        + (p_lo_hi & 61440u32).cast::<f32>() * x7
+                        + (p_hi & 15u32).cast::<f32>() * x8
+                        + (p_hi & 240u32).cast::<f32>() * x9
+                        + (p_hi & 3840u32).cast::<f32>() * x10
+                        + (p_hi & 61440u32).cast::<f32>() * x11
+                        + (p_hi_hi & 15u32).cast::<f32>() * x12
+                        + (p_hi_hi & 240u32).cast::<f32>() * x13
+                        + (p_hi_hi & 3840u32).cast::<f32>() * x14
+                        + (p_hi_hi & 61440u32).cast::<f32>() * x15;
                     let prev = stack_load("accs", _r);
                     stack_store("accs", _r, prev + s * qd + bi * xs);
                 }
@@ -284,24 +305,24 @@ pub fn ffai_batched_qkv_qgemv_fast<T>(
                     let p_hi = load(w_k[wb + pack_off + 1u32]);
                     let p_lo_hi = p_lo >> 16u32;
                     let p_hi_hi = p_hi >> 16u32;
-                    let s  = load(scales_k[sb + g]).cast::<f32>();
+                    let s = load(scales_k[sb + g]).cast::<f32>();
                     let bi = load(biases_k[sb + g]).cast::<f32>();
-                    let qd = (p_lo    & 15u32).cast::<f32>() * x0
-                           + (p_lo    & 240u32).cast::<f32>() * x1
-                           + (p_lo    & 3840u32).cast::<f32>() * x2
-                           + (p_lo    & 61440u32).cast::<f32>() * x3
-                           + (p_lo_hi & 15u32).cast::<f32>() * x4
-                           + (p_lo_hi & 240u32).cast::<f32>() * x5
-                           + (p_lo_hi & 3840u32).cast::<f32>() * x6
-                           + (p_lo_hi & 61440u32).cast::<f32>() * x7
-                           + (p_hi    & 15u32).cast::<f32>() * x8
-                           + (p_hi    & 240u32).cast::<f32>() * x9
-                           + (p_hi    & 3840u32).cast::<f32>() * x10
-                           + (p_hi    & 61440u32).cast::<f32>() * x11
-                           + (p_hi_hi & 15u32).cast::<f32>() * x12
-                           + (p_hi_hi & 240u32).cast::<f32>() * x13
-                           + (p_hi_hi & 3840u32).cast::<f32>() * x14
-                           + (p_hi_hi & 61440u32).cast::<f32>() * x15;
+                    let qd = (p_lo & 15u32).cast::<f32>() * x0
+                        + (p_lo & 240u32).cast::<f32>() * x1
+                        + (p_lo & 3840u32).cast::<f32>() * x2
+                        + (p_lo & 61440u32).cast::<f32>() * x3
+                        + (p_lo_hi & 15u32).cast::<f32>() * x4
+                        + (p_lo_hi & 240u32).cast::<f32>() * x5
+                        + (p_lo_hi & 3840u32).cast::<f32>() * x6
+                        + (p_lo_hi & 61440u32).cast::<f32>() * x7
+                        + (p_hi & 15u32).cast::<f32>() * x8
+                        + (p_hi & 240u32).cast::<f32>() * x9
+                        + (p_hi & 3840u32).cast::<f32>() * x10
+                        + (p_hi & 61440u32).cast::<f32>() * x11
+                        + (p_hi_hi & 15u32).cast::<f32>() * x12
+                        + (p_hi_hi & 240u32).cast::<f32>() * x13
+                        + (p_hi_hi & 3840u32).cast::<f32>() * x14
+                        + (p_hi_hi & 61440u32).cast::<f32>() * x15;
                     let prev = stack_load("accs", _r);
                     stack_store("accs", _r, prev + s * qd + bi * xs);
                 }
@@ -315,24 +336,24 @@ pub fn ffai_batched_qkv_qgemv_fast<T>(
                     let p_hi = load(w_v[wb + pack_off + 1u32]);
                     let p_lo_hi = p_lo >> 16u32;
                     let p_hi_hi = p_hi >> 16u32;
-                    let s  = load(scales_v[sb + g]).cast::<f32>();
+                    let s = load(scales_v[sb + g]).cast::<f32>();
                     let bi = load(biases_v[sb + g]).cast::<f32>();
-                    let qd = (p_lo    & 15u32).cast::<f32>() * x0
-                           + (p_lo    & 240u32).cast::<f32>() * x1
-                           + (p_lo    & 3840u32).cast::<f32>() * x2
-                           + (p_lo    & 61440u32).cast::<f32>() * x3
-                           + (p_lo_hi & 15u32).cast::<f32>() * x4
-                           + (p_lo_hi & 240u32).cast::<f32>() * x5
-                           + (p_lo_hi & 3840u32).cast::<f32>() * x6
-                           + (p_lo_hi & 61440u32).cast::<f32>() * x7
-                           + (p_hi    & 15u32).cast::<f32>() * x8
-                           + (p_hi    & 240u32).cast::<f32>() * x9
-                           + (p_hi    & 3840u32).cast::<f32>() * x10
-                           + (p_hi    & 61440u32).cast::<f32>() * x11
-                           + (p_hi_hi & 15u32).cast::<f32>() * x12
-                           + (p_hi_hi & 240u32).cast::<f32>() * x13
-                           + (p_hi_hi & 3840u32).cast::<f32>() * x14
-                           + (p_hi_hi & 61440u32).cast::<f32>() * x15;
+                    let qd = (p_lo & 15u32).cast::<f32>() * x0
+                        + (p_lo & 240u32).cast::<f32>() * x1
+                        + (p_lo & 3840u32).cast::<f32>() * x2
+                        + (p_lo & 61440u32).cast::<f32>() * x3
+                        + (p_lo_hi & 15u32).cast::<f32>() * x4
+                        + (p_lo_hi & 240u32).cast::<f32>() * x5
+                        + (p_lo_hi & 3840u32).cast::<f32>() * x6
+                        + (p_lo_hi & 61440u32).cast::<f32>() * x7
+                        + (p_hi & 15u32).cast::<f32>() * x8
+                        + (p_hi & 240u32).cast::<f32>() * x9
+                        + (p_hi & 3840u32).cast::<f32>() * x10
+                        + (p_hi & 61440u32).cast::<f32>() * x11
+                        + (p_hi_hi & 15u32).cast::<f32>() * x12
+                        + (p_hi_hi & 240u32).cast::<f32>() * x13
+                        + (p_hi_hi & 3840u32).cast::<f32>() * x14
+                        + (p_hi_hi & 61440u32).cast::<f32>() * x15;
                     let prev = stack_load("accs", _r);
                     stack_store("accs", _r, prev + s * qd + bi * xs);
                 }
@@ -344,9 +365,15 @@ pub fn ffai_batched_qkv_qgemv_fast<T>(
             let v = stack_load("accs", _r);
             let r = simd_sum(v);
             if lane == 0u32 {
-                if matrix == 0u32 { store(out[base_row + _r], r.cast::<T>()); }
-                if matrix == 1u32 { store(out[out_q + base_row + _r], r.cast::<T>()); }
-                if matrix == 2u32 { store(out[out_q + out_k + base_row + _r], r.cast::<T>()); }
+                if matrix == 0u32 {
+                    store(out[base_row + _r], r.cast::<T>());
+                }
+                if matrix == 1u32 {
+                    store(out[out_q + base_row + _r], r.cast::<T>());
+                }
+                if matrix == 2u32 {
+                    store(out[out_q + out_k + base_row + _r], r.cast::<T>());
+                }
             }
         }
     }

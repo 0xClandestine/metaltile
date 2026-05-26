@@ -77,29 +77,51 @@ pub fn mt_qmv<T>(
     for _b in range(0u32, k, 512u32) {
         // 16 X loads — consecutive in IR for vectorize fusion (4× float4).
         let xb = _b + lane_x_off;
-        let x0   = load(x[xb]).cast::<f32>();
-        let x1r  = load(x[xb +  1u32]).cast::<f32>();
-        let x2r  = load(x[xb +  2u32]).cast::<f32>();
-        let x3r  = load(x[xb +  3u32]).cast::<f32>();
-        let x4   = load(x[xb +  4u32]).cast::<f32>();
-        let x5r  = load(x[xb +  5u32]).cast::<f32>();
-        let x6r  = load(x[xb +  6u32]).cast::<f32>();
-        let x7r  = load(x[xb +  7u32]).cast::<f32>();
-        let x8   = load(x[xb +  8u32]).cast::<f32>();
-        let x9r  = load(x[xb +  9u32]).cast::<f32>();
+        let x0 = load(x[xb]).cast::<f32>();
+        let x1r = load(x[xb + 1u32]).cast::<f32>();
+        let x2r = load(x[xb + 2u32]).cast::<f32>();
+        let x3r = load(x[xb + 3u32]).cast::<f32>();
+        let x4 = load(x[xb + 4u32]).cast::<f32>();
+        let x5r = load(x[xb + 5u32]).cast::<f32>();
+        let x6r = load(x[xb + 6u32]).cast::<f32>();
+        let x7r = load(x[xb + 7u32]).cast::<f32>();
+        let x8 = load(x[xb + 8u32]).cast::<f32>();
+        let x9r = load(x[xb + 9u32]).cast::<f32>();
         let x10r = load(x[xb + 10u32]).cast::<f32>();
         let x11r = load(x[xb + 11u32]).cast::<f32>();
-        let x12  = load(x[xb + 12u32]).cast::<f32>();
+        let x12 = load(x[xb + 12u32]).cast::<f32>();
         let x13r = load(x[xb + 13u32]).cast::<f32>();
         let x14r = load(x[xb + 14u32]).cast::<f32>();
         let x15r = load(x[xb + 15u32]).cast::<f32>();
         // Incremental xs accumulator (algebraic-split bias hoist).
-        let xs = x0 + x1r + x2r + x3r + x4 + x5r + x6r + x7r
-               + x8 + x9r + x10r + x11r + x12 + x13r + x14r + x15r;
-        let x1  = x1r  * s_16;  let x2  = x2r  * s_256;  let x3  = x3r  * s_4096;
-        let x5  = x5r  * s_16;  let x6  = x6r  * s_256;  let x7  = x7r  * s_4096;
-        let x9  = x9r  * s_16;  let x10 = x10r * s_256;  let x11 = x11r * s_4096;
-        let x13 = x13r * s_16;  let x14 = x14r * s_256;  let x15 = x15r * s_4096;
+        let xs = x0
+            + x1r
+            + x2r
+            + x3r
+            + x4
+            + x5r
+            + x6r
+            + x7r
+            + x8
+            + x9r
+            + x10r
+            + x11r
+            + x12
+            + x13r
+            + x14r
+            + x15r;
+        let x1 = x1r * s_16;
+        let x2 = x2r * s_256;
+        let x3 = x3r * s_4096;
+        let x5 = x5r * s_16;
+        let x6 = x6r * s_256;
+        let x7 = x7r * s_4096;
+        let x9 = x9r * s_16;
+        let x10 = x10r * s_256;
+        let x11 = x11r * s_4096;
+        let x13 = x13r * s_16;
+        let x14 = x14r * s_256;
+        let x15 = x15r * s_4096;
         // Each lane covers 16 X values within a single gs=64 group.
         let g = xb / 64u32;
         let pack_off = _b / 8u32 + lane_pack_off;
@@ -112,24 +134,24 @@ pub fn mt_qmv<T>(
             let p_hi = load(w[wb + pack_off + 1u32]);
             let p_lo_hi = p_lo >> 16u32;
             let p_hi_hi = p_hi >> 16u32;
-            let s  = load(scales[sb + g]).cast::<f32>();
+            let s = load(scales[sb + g]).cast::<f32>();
             let bi = load(biases[sb + g]).cast::<f32>();
-            let qd = (p_lo    & 15u32).cast::<f32>() * x0
-                   + (p_lo    & 240u32).cast::<f32>() * x1
-                   + (p_lo    & 3840u32).cast::<f32>() * x2
-                   + (p_lo    & 61440u32).cast::<f32>() * x3
-                   + (p_lo_hi & 15u32).cast::<f32>() * x4
-                   + (p_lo_hi & 240u32).cast::<f32>() * x5
-                   + (p_lo_hi & 3840u32).cast::<f32>() * x6
-                   + (p_lo_hi & 61440u32).cast::<f32>() * x7
-                   + (p_hi    & 15u32).cast::<f32>() * x8
-                   + (p_hi    & 240u32).cast::<f32>() * x9
-                   + (p_hi    & 3840u32).cast::<f32>() * x10
-                   + (p_hi    & 61440u32).cast::<f32>() * x11
-                   + (p_hi_hi & 15u32).cast::<f32>() * x12
-                   + (p_hi_hi & 240u32).cast::<f32>() * x13
-                   + (p_hi_hi & 3840u32).cast::<f32>() * x14
-                   + (p_hi_hi & 61440u32).cast::<f32>() * x15;
+            let qd = (p_lo & 15u32).cast::<f32>() * x0
+                + (p_lo & 240u32).cast::<f32>() * x1
+                + (p_lo & 3840u32).cast::<f32>() * x2
+                + (p_lo & 61440u32).cast::<f32>() * x3
+                + (p_lo_hi & 15u32).cast::<f32>() * x4
+                + (p_lo_hi & 240u32).cast::<f32>() * x5
+                + (p_lo_hi & 3840u32).cast::<f32>() * x6
+                + (p_lo_hi & 61440u32).cast::<f32>() * x7
+                + (p_hi & 15u32).cast::<f32>() * x8
+                + (p_hi & 240u32).cast::<f32>() * x9
+                + (p_hi & 3840u32).cast::<f32>() * x10
+                + (p_hi & 61440u32).cast::<f32>() * x11
+                + (p_hi_hi & 15u32).cast::<f32>() * x12
+                + (p_hi_hi & 240u32).cast::<f32>() * x13
+                + (p_hi_hi & 3840u32).cast::<f32>() * x14
+                + (p_hi_hi & 61440u32).cast::<f32>() * x15;
             let prev = stack_load("accs", _r);
             stack_store("accs", _r, prev + s * qd + bi * xs);
         }
@@ -232,28 +254,50 @@ pub fn mt_qmm<T>(
     for _b in range(0u32, k, 512u32) {
         // 16 X loads for this M-row — consecutive for vectorize fusion.
         let xb = x_row_base + _b + lane_x_off;
-        let x0   = load(x[xb]).cast::<f32>();
-        let x1r  = load(x[xb +  1u32]).cast::<f32>();
-        let x2r  = load(x[xb +  2u32]).cast::<f32>();
-        let x3r  = load(x[xb +  3u32]).cast::<f32>();
-        let x4   = load(x[xb +  4u32]).cast::<f32>();
-        let x5r  = load(x[xb +  5u32]).cast::<f32>();
-        let x6r  = load(x[xb +  6u32]).cast::<f32>();
-        let x7r  = load(x[xb +  7u32]).cast::<f32>();
-        let x8   = load(x[xb +  8u32]).cast::<f32>();
-        let x9r  = load(x[xb +  9u32]).cast::<f32>();
+        let x0 = load(x[xb]).cast::<f32>();
+        let x1r = load(x[xb + 1u32]).cast::<f32>();
+        let x2r = load(x[xb + 2u32]).cast::<f32>();
+        let x3r = load(x[xb + 3u32]).cast::<f32>();
+        let x4 = load(x[xb + 4u32]).cast::<f32>();
+        let x5r = load(x[xb + 5u32]).cast::<f32>();
+        let x6r = load(x[xb + 6u32]).cast::<f32>();
+        let x7r = load(x[xb + 7u32]).cast::<f32>();
+        let x8 = load(x[xb + 8u32]).cast::<f32>();
+        let x9r = load(x[xb + 9u32]).cast::<f32>();
         let x10r = load(x[xb + 10u32]).cast::<f32>();
         let x11r = load(x[xb + 11u32]).cast::<f32>();
-        let x12  = load(x[xb + 12u32]).cast::<f32>();
+        let x12 = load(x[xb + 12u32]).cast::<f32>();
         let x13r = load(x[xb + 13u32]).cast::<f32>();
         let x14r = load(x[xb + 14u32]).cast::<f32>();
         let x15r = load(x[xb + 15u32]).cast::<f32>();
-        let xs = x0 + x1r + x2r + x3r + x4 + x5r + x6r + x7r
-               + x8 + x9r + x10r + x11r + x12 + x13r + x14r + x15r;
-        let x1  = x1r  * s_16;  let x2  = x2r  * s_256;  let x3  = x3r  * s_4096;
-        let x5  = x5r  * s_16;  let x6  = x6r  * s_256;  let x7  = x7r  * s_4096;
-        let x9  = x9r  * s_16;  let x10 = x10r * s_256;  let x11 = x11r * s_4096;
-        let x13 = x13r * s_16;  let x14 = x14r * s_256;  let x15 = x15r * s_4096;
+        let xs = x0
+            + x1r
+            + x2r
+            + x3r
+            + x4
+            + x5r
+            + x6r
+            + x7r
+            + x8
+            + x9r
+            + x10r
+            + x11r
+            + x12
+            + x13r
+            + x14r
+            + x15r;
+        let x1 = x1r * s_16;
+        let x2 = x2r * s_256;
+        let x3 = x3r * s_4096;
+        let x5 = x5r * s_16;
+        let x6 = x6r * s_256;
+        let x7 = x7r * s_4096;
+        let x9 = x9r * s_16;
+        let x10 = x10r * s_256;
+        let x11 = x11r * s_4096;
+        let x13 = x13r * s_16;
+        let x14 = x14r * s_256;
+        let x15 = x15r * s_4096;
         // Group index against K-local base (xb includes x_row_base offset).
         let g = (_b + lane_x_off) / 64u32;
         let pack_off = _b / 8u32 + lane_pack_off;
@@ -266,24 +310,24 @@ pub fn mt_qmm<T>(
             let p_hi = load(w[wb + pack_off + 1u32]);
             let p_lo_hi = p_lo >> 16u32;
             let p_hi_hi = p_hi >> 16u32;
-            let s  = load(scales[sb + g]).cast::<f32>();
+            let s = load(scales[sb + g]).cast::<f32>();
             let bi = load(biases[sb + g]).cast::<f32>();
-            let qd = (p_lo    & 15u32).cast::<f32>() * x0
-                   + (p_lo    & 240u32).cast::<f32>() * x1
-                   + (p_lo    & 3840u32).cast::<f32>() * x2
-                   + (p_lo    & 61440u32).cast::<f32>() * x3
-                   + (p_lo_hi & 15u32).cast::<f32>() * x4
-                   + (p_lo_hi & 240u32).cast::<f32>() * x5
-                   + (p_lo_hi & 3840u32).cast::<f32>() * x6
-                   + (p_lo_hi & 61440u32).cast::<f32>() * x7
-                   + (p_hi    & 15u32).cast::<f32>() * x8
-                   + (p_hi    & 240u32).cast::<f32>() * x9
-                   + (p_hi    & 3840u32).cast::<f32>() * x10
-                   + (p_hi    & 61440u32).cast::<f32>() * x11
-                   + (p_hi_hi & 15u32).cast::<f32>() * x12
-                   + (p_hi_hi & 240u32).cast::<f32>() * x13
-                   + (p_hi_hi & 3840u32).cast::<f32>() * x14
-                   + (p_hi_hi & 61440u32).cast::<f32>() * x15;
+            let qd = (p_lo & 15u32).cast::<f32>() * x0
+                + (p_lo & 240u32).cast::<f32>() * x1
+                + (p_lo & 3840u32).cast::<f32>() * x2
+                + (p_lo & 61440u32).cast::<f32>() * x3
+                + (p_lo_hi & 15u32).cast::<f32>() * x4
+                + (p_lo_hi & 240u32).cast::<f32>() * x5
+                + (p_lo_hi & 3840u32).cast::<f32>() * x6
+                + (p_lo_hi & 61440u32).cast::<f32>() * x7
+                + (p_hi & 15u32).cast::<f32>() * x8
+                + (p_hi & 240u32).cast::<f32>() * x9
+                + (p_hi & 3840u32).cast::<f32>() * x10
+                + (p_hi & 61440u32).cast::<f32>() * x11
+                + (p_hi_hi & 15u32).cast::<f32>() * x12
+                + (p_hi_hi & 240u32).cast::<f32>() * x13
+                + (p_hi_hi & 3840u32).cast::<f32>() * x14
+                + (p_hi_hi & 61440u32).cast::<f32>() * x15;
             let prev = stack_load("accs", _r);
             stack_store("accs", _r, prev + s * qd + bi * xs);
         }
@@ -393,52 +437,96 @@ pub fn mt_qmm_bm2<T>(
     for _b in range(0u32, k, 512u32) {
         // ── Load 16 X values for M-row A ──
         let xb_a = x_base_a + _b + lane_x_off;
-        let x0_a   = load(x[xb_a]).cast::<f32>();
-        let x1_ar  = load(x[xb_a +  1u32]).cast::<f32>();
-        let x2_ar  = load(x[xb_a +  2u32]).cast::<f32>();
-        let x3_ar  = load(x[xb_a +  3u32]).cast::<f32>();
-        let x4_a   = load(x[xb_a +  4u32]).cast::<f32>();
-        let x5_ar  = load(x[xb_a +  5u32]).cast::<f32>();
-        let x6_ar  = load(x[xb_a +  6u32]).cast::<f32>();
-        let x7_ar  = load(x[xb_a +  7u32]).cast::<f32>();
-        let x8_a   = load(x[xb_a +  8u32]).cast::<f32>();
-        let x9_ar  = load(x[xb_a +  9u32]).cast::<f32>();
+        let x0_a = load(x[xb_a]).cast::<f32>();
+        let x1_ar = load(x[xb_a + 1u32]).cast::<f32>();
+        let x2_ar = load(x[xb_a + 2u32]).cast::<f32>();
+        let x3_ar = load(x[xb_a + 3u32]).cast::<f32>();
+        let x4_a = load(x[xb_a + 4u32]).cast::<f32>();
+        let x5_ar = load(x[xb_a + 5u32]).cast::<f32>();
+        let x6_ar = load(x[xb_a + 6u32]).cast::<f32>();
+        let x7_ar = load(x[xb_a + 7u32]).cast::<f32>();
+        let x8_a = load(x[xb_a + 8u32]).cast::<f32>();
+        let x9_ar = load(x[xb_a + 9u32]).cast::<f32>();
         let x10_ar = load(x[xb_a + 10u32]).cast::<f32>();
         let x11_ar = load(x[xb_a + 11u32]).cast::<f32>();
-        let x12_a  = load(x[xb_a + 12u32]).cast::<f32>();
+        let x12_a = load(x[xb_a + 12u32]).cast::<f32>();
         let x13_ar = load(x[xb_a + 13u32]).cast::<f32>();
         let x14_ar = load(x[xb_a + 14u32]).cast::<f32>();
         let x15_ar = load(x[xb_a + 15u32]).cast::<f32>();
-        let xs_a = x0_a + x1_ar + x2_ar + x3_ar + x4_a + x5_ar + x6_ar + x7_ar
-                 + x8_a + x9_ar + x10_ar + x11_ar + x12_a + x13_ar + x14_ar + x15_ar;
-        let x1_a  = x1_ar  * s_16;  let x2_a  = x2_ar  * s_256;  let x3_a  = x3_ar  * s_4096;
-        let x5_a  = x5_ar  * s_16;  let x6_a  = x6_ar  * s_256;  let x7_a  = x7_ar  * s_4096;
-        let x9_a  = x9_ar  * s_16;  let x10_a = x10_ar * s_256;  let x11_a = x11_ar * s_4096;
-        let x13_a = x13_ar * s_16;  let x14_a = x14_ar * s_256;  let x15_a = x15_ar * s_4096;
+        let xs_a = x0_a
+            + x1_ar
+            + x2_ar
+            + x3_ar
+            + x4_a
+            + x5_ar
+            + x6_ar
+            + x7_ar
+            + x8_a
+            + x9_ar
+            + x10_ar
+            + x11_ar
+            + x12_a
+            + x13_ar
+            + x14_ar
+            + x15_ar;
+        let x1_a = x1_ar * s_16;
+        let x2_a = x2_ar * s_256;
+        let x3_a = x3_ar * s_4096;
+        let x5_a = x5_ar * s_16;
+        let x6_a = x6_ar * s_256;
+        let x7_a = x7_ar * s_4096;
+        let x9_a = x9_ar * s_16;
+        let x10_a = x10_ar * s_256;
+        let x11_a = x11_ar * s_4096;
+        let x13_a = x13_ar * s_16;
+        let x14_a = x14_ar * s_256;
+        let x15_a = x15_ar * s_4096;
         // ── Load 16 X values for M-row B ──
         let xb_b = x_base_b + _b + lane_x_off;
-        let x0_b   = load(x[xb_b]).cast::<f32>();
-        let x1_br  = load(x[xb_b +  1u32]).cast::<f32>();
-        let x2_br  = load(x[xb_b +  2u32]).cast::<f32>();
-        let x3_br  = load(x[xb_b +  3u32]).cast::<f32>();
-        let x4_b   = load(x[xb_b +  4u32]).cast::<f32>();
-        let x5_br  = load(x[xb_b +  5u32]).cast::<f32>();
-        let x6_br  = load(x[xb_b +  6u32]).cast::<f32>();
-        let x7_br  = load(x[xb_b +  7u32]).cast::<f32>();
-        let x8_b   = load(x[xb_b +  8u32]).cast::<f32>();
-        let x9_br  = load(x[xb_b +  9u32]).cast::<f32>();
+        let x0_b = load(x[xb_b]).cast::<f32>();
+        let x1_br = load(x[xb_b + 1u32]).cast::<f32>();
+        let x2_br = load(x[xb_b + 2u32]).cast::<f32>();
+        let x3_br = load(x[xb_b + 3u32]).cast::<f32>();
+        let x4_b = load(x[xb_b + 4u32]).cast::<f32>();
+        let x5_br = load(x[xb_b + 5u32]).cast::<f32>();
+        let x6_br = load(x[xb_b + 6u32]).cast::<f32>();
+        let x7_br = load(x[xb_b + 7u32]).cast::<f32>();
+        let x8_b = load(x[xb_b + 8u32]).cast::<f32>();
+        let x9_br = load(x[xb_b + 9u32]).cast::<f32>();
         let x10_br = load(x[xb_b + 10u32]).cast::<f32>();
         let x11_br = load(x[xb_b + 11u32]).cast::<f32>();
-        let x12_b  = load(x[xb_b + 12u32]).cast::<f32>();
+        let x12_b = load(x[xb_b + 12u32]).cast::<f32>();
         let x13_br = load(x[xb_b + 13u32]).cast::<f32>();
         let x14_br = load(x[xb_b + 14u32]).cast::<f32>();
         let x15_br = load(x[xb_b + 15u32]).cast::<f32>();
-        let xs_b = x0_b + x1_br + x2_br + x3_br + x4_b + x5_br + x6_br + x7_br
-                 + x8_b + x9_br + x10_br + x11_br + x12_b + x13_br + x14_br + x15_br;
-        let x1_b  = x1_br  * s_16;  let x2_b  = x2_br  * s_256;  let x3_b  = x3_br  * s_4096;
-        let x5_b  = x5_br  * s_16;  let x6_b  = x6_br  * s_256;  let x7_b  = x7_br  * s_4096;
-        let x9_b  = x9_br  * s_16;  let x10_b = x10_br * s_256;  let x11_b = x11_br * s_4096;
-        let x13_b = x13_br * s_16;  let x14_b = x14_br * s_256;  let x15_b = x15_br * s_4096;
+        let xs_b = x0_b
+            + x1_br
+            + x2_br
+            + x3_br
+            + x4_b
+            + x5_br
+            + x6_br
+            + x7_br
+            + x8_b
+            + x9_br
+            + x10_br
+            + x11_br
+            + x12_b
+            + x13_br
+            + x14_br
+            + x15_br;
+        let x1_b = x1_br * s_16;
+        let x2_b = x2_br * s_256;
+        let x3_b = x3_br * s_4096;
+        let x5_b = x5_br * s_16;
+        let x6_b = x6_br * s_256;
+        let x7_b = x7_br * s_4096;
+        let x9_b = x9_br * s_16;
+        let x10_b = x10_br * s_256;
+        let x11_b = x11_br * s_4096;
+        let x13_b = x13_br * s_16;
+        let x14_b = x14_br * s_256;
+        let x15_b = x15_br * s_4096;
         let g = (_b + lane_x_off) / 64u32;
         let pack_off = _b / 8u32 + lane_pack_off;
         // 4 N-rows: W loaded once per row, dual qdots reuse nibble extracts.
@@ -450,32 +538,56 @@ pub fn mt_qmm_bm2<T>(
             let p_hi = load(w[wb + pack_off + 1u32]);
             let p_lo_hi = p_lo >> 16u32;
             let p_hi_hi = p_hi >> 16u32;
-            let s  = load(scales[sb + g]).cast::<f32>();
+            let s = load(scales[sb + g]).cast::<f32>();
             let bi = load(biases[sb + g]).cast::<f32>();
-            let q0  = (p_lo    & 15u32).cast::<f32>();
-            let q1  = (p_lo    & 240u32).cast::<f32>();
-            let q2  = (p_lo    & 3840u32).cast::<f32>();
-            let q3  = (p_lo    & 61440u32).cast::<f32>();
-            let q4  = (p_lo_hi & 15u32).cast::<f32>();
-            let q5  = (p_lo_hi & 240u32).cast::<f32>();
-            let q6  = (p_lo_hi & 3840u32).cast::<f32>();
-            let q7  = (p_lo_hi & 61440u32).cast::<f32>();
-            let q8  = (p_hi    & 15u32).cast::<f32>();
-            let q9  = (p_hi    & 240u32).cast::<f32>();
-            let q10 = (p_hi    & 3840u32).cast::<f32>();
-            let q11 = (p_hi    & 61440u32).cast::<f32>();
+            let q0 = (p_lo & 15u32).cast::<f32>();
+            let q1 = (p_lo & 240u32).cast::<f32>();
+            let q2 = (p_lo & 3840u32).cast::<f32>();
+            let q3 = (p_lo & 61440u32).cast::<f32>();
+            let q4 = (p_lo_hi & 15u32).cast::<f32>();
+            let q5 = (p_lo_hi & 240u32).cast::<f32>();
+            let q6 = (p_lo_hi & 3840u32).cast::<f32>();
+            let q7 = (p_lo_hi & 61440u32).cast::<f32>();
+            let q8 = (p_hi & 15u32).cast::<f32>();
+            let q9 = (p_hi & 240u32).cast::<f32>();
+            let q10 = (p_hi & 3840u32).cast::<f32>();
+            let q11 = (p_hi & 61440u32).cast::<f32>();
             let q12 = (p_hi_hi & 15u32).cast::<f32>();
             let q13 = (p_hi_hi & 240u32).cast::<f32>();
             let q14 = (p_hi_hi & 3840u32).cast::<f32>();
             let q15 = (p_hi_hi & 61440u32).cast::<f32>();
-            let qd_a = q0 * x0_a + q1 * x1_a + q2 * x2_a + q3 * x3_a
-                     + q4 * x4_a + q5 * x5_a + q6 * x6_a + q7 * x7_a
-                     + q8 * x8_a + q9 * x9_a + q10 * x10_a + q11 * x11_a
-                     + q12 * x12_a + q13 * x13_a + q14 * x14_a + q15 * x15_a;
-            let qd_b = q0 * x0_b + q1 * x1_b + q2 * x2_b + q3 * x3_b
-                     + q4 * x4_b + q5 * x5_b + q6 * x6_b + q7 * x7_b
-                     + q8 * x8_b + q9 * x9_b + q10 * x10_b + q11 * x11_b
-                     + q12 * x12_b + q13 * x13_b + q14 * x14_b + q15 * x15_b;
+            let qd_a = q0 * x0_a
+                + q1 * x1_a
+                + q2 * x2_a
+                + q3 * x3_a
+                + q4 * x4_a
+                + q5 * x5_a
+                + q6 * x6_a
+                + q7 * x7_a
+                + q8 * x8_a
+                + q9 * x9_a
+                + q10 * x10_a
+                + q11 * x11_a
+                + q12 * x12_a
+                + q13 * x13_a
+                + q14 * x14_a
+                + q15 * x15_a;
+            let qd_b = q0 * x0_b
+                + q1 * x1_b
+                + q2 * x2_b
+                + q3 * x3_b
+                + q4 * x4_b
+                + q5 * x5_b
+                + q6 * x6_b
+                + q7 * x7_b
+                + q8 * x8_b
+                + q9 * x9_b
+                + q10 * x10_b
+                + q11 * x11_b
+                + q12 * x12_b
+                + q13 * x13_b
+                + q14 * x14_b
+                + q15 * x15_b;
             let prev_a = stack_load("accs_a", _r);
             let prev_b = stack_load("accs_b", _r);
             stack_store("accs_a", _r, prev_a + s * qd_a + bi * xs_a);
@@ -601,8 +713,12 @@ pub fn mt_qmm_bm4<T>(
         let x6_ar = load(x[xb_a + 6u32]).cast::<f32>();
         let x7_ar = load(x[xb_a + 7u32]).cast::<f32>();
         let xs_a = x0_a + x1_ar + x2_ar + x3_ar + x4_a + x5_ar + x6_ar + x7_ar;
-        let x1_a = x1_ar * s_16;  let x2_a = x2_ar * s_256;  let x3_a = x3_ar * s_4096;
-        let x5_a = x5_ar * s_16;  let x6_a = x6_ar * s_256;  let x7_a = x7_ar * s_4096;
+        let x1_a = x1_ar * s_16;
+        let x2_a = x2_ar * s_256;
+        let x3_a = x3_ar * s_4096;
+        let x5_a = x5_ar * s_16;
+        let x6_a = x6_ar * s_256;
+        let x7_a = x7_ar * s_4096;
         let xb_b = x_base_b + _b + lane_x_off;
         let x0_b = load(x[xb_b]).cast::<f32>();
         let x1_br = load(x[xb_b + 1u32]).cast::<f32>();
@@ -613,8 +729,12 @@ pub fn mt_qmm_bm4<T>(
         let x6_br = load(x[xb_b + 6u32]).cast::<f32>();
         let x7_br = load(x[xb_b + 7u32]).cast::<f32>();
         let xs_b = x0_b + x1_br + x2_br + x3_br + x4_b + x5_br + x6_br + x7_br;
-        let x1_b = x1_br * s_16;  let x2_b = x2_br * s_256;  let x3_b = x3_br * s_4096;
-        let x5_b = x5_br * s_16;  let x6_b = x6_br * s_256;  let x7_b = x7_br * s_4096;
+        let x1_b = x1_br * s_16;
+        let x2_b = x2_br * s_256;
+        let x3_b = x3_br * s_4096;
+        let x5_b = x5_br * s_16;
+        let x6_b = x6_br * s_256;
+        let x7_b = x7_br * s_4096;
         let xb_c = x_base_c + _b + lane_x_off;
         let x0_c = load(x[xb_c]).cast::<f32>();
         let x1_cr = load(x[xb_c + 1u32]).cast::<f32>();
@@ -625,8 +745,12 @@ pub fn mt_qmm_bm4<T>(
         let x6_cr = load(x[xb_c + 6u32]).cast::<f32>();
         let x7_cr = load(x[xb_c + 7u32]).cast::<f32>();
         let xs_c = x0_c + x1_cr + x2_cr + x3_cr + x4_c + x5_cr + x6_cr + x7_cr;
-        let x1_c = x1_cr * s_16;  let x2_c = x2_cr * s_256;  let x3_c = x3_cr * s_4096;
-        let x5_c = x5_cr * s_16;  let x6_c = x6_cr * s_256;  let x7_c = x7_cr * s_4096;
+        let x1_c = x1_cr * s_16;
+        let x2_c = x2_cr * s_256;
+        let x3_c = x3_cr * s_4096;
+        let x5_c = x5_cr * s_16;
+        let x6_c = x6_cr * s_256;
+        let x7_c = x7_cr * s_4096;
         let xb_d = x_base_d + _b + lane_x_off;
         let x0_d = load(x[xb_d]).cast::<f32>();
         let x1_dr = load(x[xb_d + 1u32]).cast::<f32>();
@@ -637,8 +761,12 @@ pub fn mt_qmm_bm4<T>(
         let x6_dr = load(x[xb_d + 6u32]).cast::<f32>();
         let x7_dr = load(x[xb_d + 7u32]).cast::<f32>();
         let xs_d = x0_d + x1_dr + x2_dr + x3_dr + x4_d + x5_dr + x6_dr + x7_dr;
-        let x1_d = x1_dr * s_16;  let x2_d = x2_dr * s_256;  let x3_d = x3_dr * s_4096;
-        let x5_d = x5_dr * s_16;  let x6_d = x6_dr * s_256;  let x7_d = x7_dr * s_4096;
+        let x1_d = x1_dr * s_16;
+        let x2_d = x2_dr * s_256;
+        let x3_d = x3_dr * s_4096;
+        let x5_d = x5_dr * s_16;
+        let x6_d = x6_dr * s_256;
+        let x7_d = x7_dr * s_4096;
         // Group index: (_b + lane*8) / 64 — constant across lane's 8-elt slice.
         let g = (_b + lane_x_off) / 64u32;
         // 1 pack (8 nibbles) per lane per K-iter.
@@ -650,24 +778,48 @@ pub fn mt_qmm_bm4<T>(
             let sb = row * gs_per_row;
             let p = load(w[wb + pack_off]);
             let p_hi = p >> 16u32;
-            let s  = load(scales[sb + g]).cast::<f32>();
+            let s = load(scales[sb + g]).cast::<f32>();
             let bi = load(biases[sb + g]).cast::<f32>();
-            let q0 = (p    & 15u32).cast::<f32>();
-            let q1 = (p    & 240u32).cast::<f32>();
-            let q2 = (p    & 3840u32).cast::<f32>();
-            let q3 = (p    & 61440u32).cast::<f32>();
+            let q0 = (p & 15u32).cast::<f32>();
+            let q1 = (p & 240u32).cast::<f32>();
+            let q2 = (p & 3840u32).cast::<f32>();
+            let q3 = (p & 61440u32).cast::<f32>();
             let q4 = (p_hi & 15u32).cast::<f32>();
             let q5 = (p_hi & 240u32).cast::<f32>();
             let q6 = (p_hi & 3840u32).cast::<f32>();
             let q7 = (p_hi & 61440u32).cast::<f32>();
-            let qd_a = q0 * x0_a + q1 * x1_a + q2 * x2_a + q3 * x3_a
-                     + q4 * x4_a + q5 * x5_a + q6 * x6_a + q7 * x7_a;
-            let qd_b = q0 * x0_b + q1 * x1_b + q2 * x2_b + q3 * x3_b
-                     + q4 * x4_b + q5 * x5_b + q6 * x6_b + q7 * x7_b;
-            let qd_c = q0 * x0_c + q1 * x1_c + q2 * x2_c + q3 * x3_c
-                     + q4 * x4_c + q5 * x5_c + q6 * x6_c + q7 * x7_c;
-            let qd_d = q0 * x0_d + q1 * x1_d + q2 * x2_d + q3 * x3_d
-                     + q4 * x4_d + q5 * x5_d + q6 * x6_d + q7 * x7_d;
+            let qd_a = q0 * x0_a
+                + q1 * x1_a
+                + q2 * x2_a
+                + q3 * x3_a
+                + q4 * x4_a
+                + q5 * x5_a
+                + q6 * x6_a
+                + q7 * x7_a;
+            let qd_b = q0 * x0_b
+                + q1 * x1_b
+                + q2 * x2_b
+                + q3 * x3_b
+                + q4 * x4_b
+                + q5 * x5_b
+                + q6 * x6_b
+                + q7 * x7_b;
+            let qd_c = q0 * x0_c
+                + q1 * x1_c
+                + q2 * x2_c
+                + q3 * x3_c
+                + q4 * x4_c
+                + q5 * x5_c
+                + q6 * x6_c
+                + q7 * x7_c;
+            let qd_d = q0 * x0_d
+                + q1 * x1_d
+                + q2 * x2_d
+                + q3 * x3_d
+                + q4 * x4_d
+                + q5 * x5_d
+                + q6 * x6_d
+                + q7 * x7_d;
             stack_store("accs_a", _r, stack_load("accs_a", _r) + s * qd_a + bi * xs_a);
             stack_store("accs_b", _r, stack_load("accs_b", _r) + s * qd_b + bi * xs_b);
             stack_store("accs_c", _r, stack_load("accs_c", _r) + s * qd_c + bi * xs_c);
@@ -785,13 +937,13 @@ pub fn mt_qmv_int8_fast<T>(
             let wb = row * packs_per_row;
             let sb = row * gs_per_row;
             let p = load(w[wb + pack_off]);
-            let s  = load(scales[sb + g]).cast::<f32>();
+            let s = load(scales[sb + g]).cast::<f32>();
             let bi = load(biases[sb + g]).cast::<f32>();
             // Explicit byte extract: byte0 = p & 0xFF, byte1 = (p>>8) & 0xFF, etc.
             let qd = (p & 255u32).cast::<f32>() * x0
-                   + ((p >> 8u32)  & 255u32).cast::<f32>() * x1
-                   + ((p >> 16u32) & 255u32).cast::<f32>() * x2
-                   + ((p >> 24u32) & 255u32).cast::<f32>() * x3;
+                + ((p >> 8u32) & 255u32).cast::<f32>() * x1
+                + ((p >> 16u32) & 255u32).cast::<f32>() * x2
+                + ((p >> 24u32) & 255u32).cast::<f32>() * x3;
             let prev = stack_load("accs", _r);
             stack_store("accs", _r, prev + s * qd + bi * xs);
         }
@@ -880,12 +1032,12 @@ pub fn mt_qmm_int8_fast<T>(
             let wb = row * packs_per_row;
             let sb = row * gs_per_row;
             let p = load(w[wb + pack_off]);
-            let s  = load(scales[sb + g]).cast::<f32>();
+            let s = load(scales[sb + g]).cast::<f32>();
             let bi = load(biases[sb + g]).cast::<f32>();
             let qd = (p & 255u32).cast::<f32>() * x0
-                   + ((p >> 8u32)  & 255u32).cast::<f32>() * x1
-                   + ((p >> 16u32) & 255u32).cast::<f32>() * x2
-                   + ((p >> 24u32) & 255u32).cast::<f32>() * x3;
+                + ((p >> 8u32) & 255u32).cast::<f32>() * x1
+                + ((p >> 16u32) & 255u32).cast::<f32>() * x2
+                + ((p >> 24u32) & 255u32).cast::<f32>() * x3;
             let prev = stack_load("accs", _r);
             stack_store("accs", _r, prev + s * qd + bi * xs);
         }
@@ -985,10 +1137,10 @@ pub fn mt_qmm_bm2_int8_fast<T>(
             let wb = row * packs_per_row;
             let sb = row * gs_per_row;
             let p = load(w[wb + pack_off]);
-            let s  = load(scales[sb + g]).cast::<f32>();
+            let s = load(scales[sb + g]).cast::<f32>();
             let bi = load(biases[sb + g]).cast::<f32>();
             let q0 = (p & 255u32).cast::<f32>();
-            let q1 = ((p >> 8u32)  & 255u32).cast::<f32>();
+            let q1 = ((p >> 8u32) & 255u32).cast::<f32>();
             let q2 = ((p >> 16u32) & 255u32).cast::<f32>();
             let q3 = ((p >> 24u32) & 255u32).cast::<f32>();
             let qd_a = q0 * x0_a + q1 * x1_a + q2 * x2_a + q3 * x3_a;
@@ -1118,10 +1270,10 @@ pub fn mt_qmm_bm4_int8_fast<T>(
             let wb = row * packs_per_row;
             let sb = row * gs_per_row;
             let p = load(w[wb + pack_off]);
-            let s  = load(scales[sb + g]).cast::<f32>();
+            let s = load(scales[sb + g]).cast::<f32>();
             let bi = load(biases[sb + g]).cast::<f32>();
             let q0 = (p & 255u32).cast::<f32>();
-            let q1 = ((p >> 8u32)  & 255u32).cast::<f32>();
+            let q1 = ((p >> 8u32) & 255u32).cast::<f32>();
             let q2 = ((p >> 16u32) & 255u32).cast::<f32>();
             let q3 = ((p >> 24u32) & 255u32).cast::<f32>();
             let qd_a = q0 * x0_a + q1 * x1_a + q2 * x2_a + q3 * x3_a;
