@@ -1474,22 +1474,11 @@ pub fn mt_qmm_mma<T>(
         let x_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base;
         let x_ws_base = x_m_row * xs_ld + x_k_base;
         // 8 contiguous device loads → 2× vec4 after vectorize pass.
-        let xv0 = load(x[x_row_dev_base]).cast::<T>();
-        let xv1 = load(x[x_row_dev_base + 1u32]).cast::<T>();
-        let xv2 = load(x[x_row_dev_base + 2u32]).cast::<T>();
-        let xv3 = load(x[x_row_dev_base + 3u32]).cast::<T>();
-        let xv4 = load(x[x_row_dev_base + 4u32]).cast::<T>();
-        let xv5 = load(x[x_row_dev_base + 5u32]).cast::<T>();
-        let xv6 = load(x[x_row_dev_base + 6u32]).cast::<T>();
-        let xv7 = load(x[x_row_dev_base + 7u32]).cast::<T>();
-        threadgroup_store("xs", x_ws_base, xv0);
-        threadgroup_store("xs", x_ws_base + 1u32, xv1);
-        threadgroup_store("xs", x_ws_base + 2u32, xv2);
-        threadgroup_store("xs", x_ws_base + 3u32, xv3);
-        threadgroup_store("xs", x_ws_base + 4u32, xv4);
-        threadgroup_store("xs", x_ws_base + 5u32, xv5);
-        threadgroup_store("xs", x_ws_base + 6u32, xv6);
-        threadgroup_store("xs", x_ws_base + 7u32, xv7);
+        // 8 x values — DSL unrolls range(0,8) at codegen.
+        for _i in range(0u32, 8u32, 1u32) {
+            let xv = load(x[x_row_dev_base + _i]).cast::<T>();
+            threadgroup_store("xs", x_ws_base + _i, xv);
+        }
         // ── 2. Coop W dequant — each lane loads 1 pack and writes 8 fp T ──
         let pack_k_off = kb / 8u32 + pack_in_row;
         let pack = load(w[w_pack_row_base + pack_k_off]);
@@ -2106,22 +2095,11 @@ pub fn mt_qmm_mma_int8<T>(
         // ── 1. Coop X load — 128 lanes × 8 contiguous K elems per lane ──
         let x_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base;
         let x_ws_base = x_m_row * xs_ld + x_k_base;
-        let xv0 = load(x[x_row_dev_base]).cast::<T>();
-        let xv1 = load(x[x_row_dev_base + 1u32]).cast::<T>();
-        let xv2 = load(x[x_row_dev_base + 2u32]).cast::<T>();
-        let xv3 = load(x[x_row_dev_base + 3u32]).cast::<T>();
-        let xv4 = load(x[x_row_dev_base + 4u32]).cast::<T>();
-        let xv5 = load(x[x_row_dev_base + 5u32]).cast::<T>();
-        let xv6 = load(x[x_row_dev_base + 6u32]).cast::<T>();
-        let xv7 = load(x[x_row_dev_base + 7u32]).cast::<T>();
-        threadgroup_store("xs", x_ws_base, xv0);
-        threadgroup_store("xs", x_ws_base + 1u32, xv1);
-        threadgroup_store("xs", x_ws_base + 2u32, xv2);
-        threadgroup_store("xs", x_ws_base + 3u32, xv3);
-        threadgroup_store("xs", x_ws_base + 4u32, xv4);
-        threadgroup_store("xs", x_ws_base + 5u32, xv5);
-        threadgroup_store("xs", x_ws_base + 6u32, xv6);
-        threadgroup_store("xs", x_ws_base + 7u32, xv7);
+        // 8 x values — DSL unrolls range(0,8) at codegen.
+        for _i in range(0u32, 8u32, 1u32) {
+            let xv = load(x[x_row_dev_base + _i]).cast::<T>();
+            threadgroup_store("xs", x_ws_base + _i, xv);
+        }
         // ── 2. Coop W dequant (int8) — 128 lanes × 2 packs each → 1024 fp T ──
         // Pack 0: pack_idx = lane_in_tg ∈ 0..127 (first 128 packs).
         // Pack 1: pack_idx = 128 + lane_in_tg ∈ 128..255 (last 128 packs).
@@ -4021,22 +3999,11 @@ macro_rules! qmm_mma_bitwidth {
                 // ── 1. Coop X load — identical to mt_qmm_mma ──
                 let x_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base;
                 let x_ws_base = x_m_row * xs_ld + x_k_base;
-                let xv0 = load(x[x_row_dev_base]).cast::<T>();
-                let xv1 = load(x[x_row_dev_base + 1u32]).cast::<T>();
-                let xv2 = load(x[x_row_dev_base + 2u32]).cast::<T>();
-                let xv3 = load(x[x_row_dev_base + 3u32]).cast::<T>();
-                let xv4 = load(x[x_row_dev_base + 4u32]).cast::<T>();
-                let xv5 = load(x[x_row_dev_base + 5u32]).cast::<T>();
-                let xv6 = load(x[x_row_dev_base + 6u32]).cast::<T>();
-                let xv7 = load(x[x_row_dev_base + 7u32]).cast::<T>();
-                threadgroup_store("xs", x_ws_base, xv0);
-                threadgroup_store("xs", x_ws_base + 1u32, xv1);
-                threadgroup_store("xs", x_ws_base + 2u32, xv2);
-                threadgroup_store("xs", x_ws_base + 3u32, xv3);
-                threadgroup_store("xs", x_ws_base + 4u32, xv4);
-                threadgroup_store("xs", x_ws_base + 5u32, xv5);
-                threadgroup_store("xs", x_ws_base + 6u32, xv6);
-                threadgroup_store("xs", x_ws_base + 7u32, xv7);
+                // 8 x values — DSL unrolls range(0,8) at codegen.
+                for _i in range(0u32, 8u32, 1u32) {
+                    let xv = load(x[x_row_dev_base + _i]).cast::<T>();
+                    threadgroup_store("xs", x_ws_base + _i, xv);
+                }
 
                 // ── 2. Coop W bit-stream dequant ──
                 // Each lane is responsible for 8 contiguous K positions

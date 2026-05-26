@@ -1255,50 +1255,15 @@ pub fn mt_moe_gather_qmm_mma_int4<T>(
                     (tile_row >= sub_offset) & (tile_row < sub_end) & (global_row < m_total);
                 let x_row_dev_base = global_row * k_in + kb + x_k_base;
                 let x_ws_base = tile_row * xs_ld + x_k_base;
-                let xv0 = select(x_in_run, load(x[x_row_dev_base]).cast::<T>(), 0.0f32.cast::<T>());
-                let xv1 = select(
-                    x_in_run,
-                    load(x[x_row_dev_base + 1u32]).cast::<T>(),
-                    0.0f32.cast::<T>(),
-                );
-                let xv2 = select(
-                    x_in_run,
-                    load(x[x_row_dev_base + 2u32]).cast::<T>(),
-                    0.0f32.cast::<T>(),
-                );
-                let xv3 = select(
-                    x_in_run,
-                    load(x[x_row_dev_base + 3u32]).cast::<T>(),
-                    0.0f32.cast::<T>(),
-                );
-                let xv4 = select(
-                    x_in_run,
-                    load(x[x_row_dev_base + 4u32]).cast::<T>(),
-                    0.0f32.cast::<T>(),
-                );
-                let xv5 = select(
-                    x_in_run,
-                    load(x[x_row_dev_base + 5u32]).cast::<T>(),
-                    0.0f32.cast::<T>(),
-                );
-                let xv6 = select(
-                    x_in_run,
-                    load(x[x_row_dev_base + 6u32]).cast::<T>(),
-                    0.0f32.cast::<T>(),
-                );
-                let xv7 = select(
-                    x_in_run,
-                    load(x[x_row_dev_base + 7u32]).cast::<T>(),
-                    0.0f32.cast::<T>(),
-                );
-                threadgroup_store("xs", x_ws_base, xv0);
-                threadgroup_store("xs", x_ws_base + 1u32, xv1);
-                threadgroup_store("xs", x_ws_base + 2u32, xv2);
-                threadgroup_store("xs", x_ws_base + 3u32, xv3);
-                threadgroup_store("xs", x_ws_base + 4u32, xv4);
-                threadgroup_store("xs", x_ws_base + 5u32, xv5);
-                threadgroup_store("xs", x_ws_base + 6u32, xv6);
-                threadgroup_store("xs", x_ws_base + 7u32, xv7);
+                // 8 x values — DSL unrolls range(0,8) at codegen.
+                for _i in range(0u32, 8u32, 1u32) {
+                    let xv = select(
+                        x_in_run,
+                        load(x[x_row_dev_base + _i]).cast::<T>(),
+                        0.0f32.cast::<T>(),
+                    );
+                    threadgroup_store("xs", x_ws_base + _i, xv);
+                }
                 // Coop W dequant — 128 lanes × 1 pack × 8 nibbles.
                 let pack_k_off = kb / 8u32 + pack_in_row;
                 let pack = load(w[w_pack_row_base + pack_k_off]);
@@ -1546,54 +1511,15 @@ macro_rules! gather_qmm_mma {
                             & (global_row < m_total);
                         let x_row_dev_base = global_row * k_in + kb + x_k_base;
                         let x_ws_base = tile_row * xs_ld + x_k_base;
-                        let xv0 = select(
-                            x_in_run,
-                            load(x[x_row_dev_base]).cast::<T>(),
-                            0.0f32.cast::<T>(),
-                        );
-                        let xv1 = select(
-                            x_in_run,
-                            load(x[x_row_dev_base + 1u32]).cast::<T>(),
-                            0.0f32.cast::<T>(),
-                        );
-                        let xv2 = select(
-                            x_in_run,
-                            load(x[x_row_dev_base + 2u32]).cast::<T>(),
-                            0.0f32.cast::<T>(),
-                        );
-                        let xv3 = select(
-                            x_in_run,
-                            load(x[x_row_dev_base + 3u32]).cast::<T>(),
-                            0.0f32.cast::<T>(),
-                        );
-                        let xv4 = select(
-                            x_in_run,
-                            load(x[x_row_dev_base + 4u32]).cast::<T>(),
-                            0.0f32.cast::<T>(),
-                        );
-                        let xv5 = select(
-                            x_in_run,
-                            load(x[x_row_dev_base + 5u32]).cast::<T>(),
-                            0.0f32.cast::<T>(),
-                        );
-                        let xv6 = select(
-                            x_in_run,
-                            load(x[x_row_dev_base + 6u32]).cast::<T>(),
-                            0.0f32.cast::<T>(),
-                        );
-                        let xv7 = select(
-                            x_in_run,
-                            load(x[x_row_dev_base + 7u32]).cast::<T>(),
-                            0.0f32.cast::<T>(),
-                        );
-                        threadgroup_store("xs", x_ws_base, xv0);
-                        threadgroup_store("xs", x_ws_base + 1u32, xv1);
-                        threadgroup_store("xs", x_ws_base + 2u32, xv2);
-                        threadgroup_store("xs", x_ws_base + 3u32, xv3);
-                        threadgroup_store("xs", x_ws_base + 4u32, xv4);
-                        threadgroup_store("xs", x_ws_base + 5u32, xv5);
-                        threadgroup_store("xs", x_ws_base + 6u32, xv6);
-                        threadgroup_store("xs", x_ws_base + 7u32, xv7);
+                        // 8 x values — DSL unrolls range(0,8) at codegen.
+                        for _i in range(0u32, 8u32, 1u32) {
+                            let xv = select(
+                                x_in_run,
+                                load(x[x_row_dev_base + _i]).cast::<T>(),
+                                0.0f32.cast::<T>(),
+                            );
+                            threadgroup_store("xs", x_ws_base + _i, xv);
+                        }
 
                         // Coop W dequant — 1 group/lane (the 8-K span
                         // `[pack_in_row*8, +8)` is group-aligned), 8 codes
@@ -2254,50 +2180,15 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
                     (tile_row >= sub_offset) & (tile_row < sub_end) & (global_row < m_total);
                 let x_row_dev_base = global_row * k_in + kb + x_k_base;
                 let x_ws_base = tile_row * xs_ld + x_k_base;
-                let xv0 = select(x_in_run, load(x[x_row_dev_base]).cast::<T>(), 0.0f32.cast::<T>());
-                let xv1 = select(
-                    x_in_run,
-                    load(x[x_row_dev_base + 1u32]).cast::<T>(),
-                    0.0f32.cast::<T>(),
-                );
-                let xv2 = select(
-                    x_in_run,
-                    load(x[x_row_dev_base + 2u32]).cast::<T>(),
-                    0.0f32.cast::<T>(),
-                );
-                let xv3 = select(
-                    x_in_run,
-                    load(x[x_row_dev_base + 3u32]).cast::<T>(),
-                    0.0f32.cast::<T>(),
-                );
-                let xv4 = select(
-                    x_in_run,
-                    load(x[x_row_dev_base + 4u32]).cast::<T>(),
-                    0.0f32.cast::<T>(),
-                );
-                let xv5 = select(
-                    x_in_run,
-                    load(x[x_row_dev_base + 5u32]).cast::<T>(),
-                    0.0f32.cast::<T>(),
-                );
-                let xv6 = select(
-                    x_in_run,
-                    load(x[x_row_dev_base + 6u32]).cast::<T>(),
-                    0.0f32.cast::<T>(),
-                );
-                let xv7 = select(
-                    x_in_run,
-                    load(x[x_row_dev_base + 7u32]).cast::<T>(),
-                    0.0f32.cast::<T>(),
-                );
-                threadgroup_store("xs", x_ws_base, xv0);
-                threadgroup_store("xs", x_ws_base + 1u32, xv1);
-                threadgroup_store("xs", x_ws_base + 2u32, xv2);
-                threadgroup_store("xs", x_ws_base + 3u32, xv3);
-                threadgroup_store("xs", x_ws_base + 4u32, xv4);
-                threadgroup_store("xs", x_ws_base + 5u32, xv5);
-                threadgroup_store("xs", x_ws_base + 6u32, xv6);
-                threadgroup_store("xs", x_ws_base + 7u32, xv7);
+                // 8 x values — DSL unrolls range(0,8) at codegen.
+                for _i in range(0u32, 8u32, 1u32) {
+                    let xv = select(
+                        x_in_run,
+                        load(x[x_row_dev_base + _i]).cast::<T>(),
+                        0.0f32.cast::<T>(),
+                    );
+                    threadgroup_store("xs", x_ws_base + _i, xv);
+                }
                 // W int8 dequant — 128 lanes × 2 packs/lane × 4 bytes/pack = 1024 = BN×BK.
                 //
                 // Pass 0 — lanes 0..127 cover BN rows 0..15, all 8 packs per row:
