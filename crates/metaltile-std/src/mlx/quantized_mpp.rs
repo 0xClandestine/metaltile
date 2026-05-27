@@ -141,6 +141,134 @@ pub fn mt_qmm_mma_mpp<T>(
     }
 }
 
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32 => vals.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            DType::F16 =>
+                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
+    fn round_dt(v: f32, dt: DType) -> f32 {
+        match dt {
+            DType::F32 => v,
+            DType::F16 => half::f16::from_f32(v).to_f32(),
+            DType::BF16 => half::bf16::from_f32(v).to_f32(),
+            _ => v,
+        }
+    }
+    fn bpe(dt: DType) -> usize { if dt == DType::F32 { 4 } else { 2 } }
+
+    /// Triple-loop CPU oracle — int4 dequant matmul.
+    #[allow(clippy::too_many_arguments)]
+    fn cpu_qmm_reference(
+        w: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        x: &[f32],
+        m: usize,
+        n: usize,
+        k: usize,
+        gs_per_row: usize,
+        group_size: usize,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; m * n];
+        for m_row in 0..m {
+            for n_col in 0..n {
+                let mut acc = 0.0f32;
+                for g in 0..gs_per_row {
+                    let s = scales[n_col * gs_per_row + g];
+                    let bias = biases[n_col * gs_per_row + g];
+                    let mut q_dot = 0.0f32;
+                    let mut x_sum = 0.0f32;
+                    for p in 0..8usize {
+                        let packed = w[n_col * k / 8 + g * 8 + p];
+                        for bit in 0..8u32 {
+                            let q = ((packed >> (bit * 4)) & 0xF) as f32;
+                            let xv = x[m_row * k + g * group_size + p * 8 + bit as usize];
+                            q_dot += q * xv;
+                            x_sum += xv;
+                        }
+                    }
+                    acc += s * q_dot + bias * x_sum;
+                }
+                out[m_row * n + n_col] = acc;
+            }
+        }
+        out
+    }
+
+    fn build_quant_inputs(
+        m: usize,
+        n: usize,
+        k: usize,
+        gs_per_row: usize,
+    ) -> (Vec<u32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+        let w: Vec<u32> = (0..n * k / 8)
+            .map(|i| {
+                let mut v = 0u32;
+                for bit in 0..8u32 { v |= ((i as u32 + bit) & 0xF) << (bit * 4); }
+                v
+            })
+            .collect();
+        let scales: Vec<f32> = (0..n * gs_per_row).map(|i| 0.1 + (i as f32) * 0.001).collect();
+        let biases: Vec<f32> = (0..n * gs_per_row).map(|i| (i as f32) * 0.0001).collect();
+        let x: Vec<f32> = (0..m * k).map(|i| 1.0 + (i as f32) * 0.001).collect();
+        (w, scales, biases, x)
+    }
+
+    fn make_setup(dt: DType, m: usize, n: usize, k: usize) -> TestSetup {
+        let group_size = 64usize;
+        let gs_per_row = k / group_size;
+        let (w, scales_f32, biases_f32, x_f32) = build_quant_inputs(m, n, k, gs_per_row);
+        let scales: Vec<f32> = scales_f32.iter().map(|&v| round_dt(v, dt)).collect();
+        let biases: Vec<f32> = biases_f32.iter().map(|&v| round_dt(v, dt)).collect();
+        let x: Vec<f32> = x_f32.iter().map(|&v| round_dt(v, dt)).collect();
+        let expected = cpu_qmm_reference(&w, &scales, &biases, &x, m, n, k, gs_per_row, group_size);
+        let be = bpe(dt);
+        let mut kernel = mt_qmm_mma_mpp::kernel_ir_for(dt);
+        kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("w", pack_u32(&w), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack(&scales, dt), dt))
+            .input(TestBuffer::from_vec("biases", pack(&biases, dt), dt))
+            .input(TestBuffer::from_vec("x", pack(&x, dt), dt))
+            .input(TestBuffer::from_vec("out", vec![0u8; m * n * be], dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .constexpr("k", k as u32)
+            .constexpr("n", n as u32)
+            .constexpr("gs_per_row", gs_per_row as u32)
+            .grid_3d((n / 32) as u32, (m / 32) as u32, 1, [128, 1, 1])
+    }
+
+    #[test_kernel(name = "mlx/qmm_mma_mpp_f32_small", dtypes = [f32], tol = 1e-2)]
+    fn test_qmm_mma_mpp_f32_small(dt: DType) -> TestSetup { make_setup(dt, 32, 32, 64) }
+
+    #[test_kernel(name = "mlx/qmm_mma_mpp_f32_multi_k", dtypes = [f32], tol = 1e-2)]
+    fn test_qmm_mma_mpp_f32_multi_k(dt: DType) -> TestSetup { make_setup(dt, 32, 32, 512) }
+
+    #[test_kernel(name = "mlx/qmm_mma_mpp_f32_multi_tile", dtypes = [f32], tol = 1e-2)]
+    fn test_qmm_mma_mpp_f32_multi_tile(dt: DType) -> TestSetup { make_setup(dt, 64, 64, 128) }
+
+    #[test_kernel(name = "mlx/qmm_mma_mpp_f16_small", dtypes = [f16], tol = 5e-1)]
+    fn test_qmm_mma_mpp_f16_small(dt: DType) -> TestSetup { make_setup(dt, 32, 32, 64) }
+
+    #[test_kernel(name = "mlx/qmm_mma_mpp_f16_multi_tile", dtypes = [f16], tol = 5e-1)]
+    fn test_qmm_mma_mpp_f16_multi_tile(dt: DType) -> TestSetup { make_setup(dt, 64, 64, 128) }
+}
+
 #[cfg(test)]
 mod tests {
     use metaltile_codegen::msl::MslGenerator;
