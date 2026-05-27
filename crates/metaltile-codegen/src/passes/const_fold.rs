@@ -228,13 +228,13 @@ fn eval_binop(op: BinOpKind, a: i64, b: i64) -> Option<i64> {
 ///
 /// The kinds folded here all produce an integer answer from an
 /// integer input:
-/// - `Neg`   — two's-complement negation, wrapping on `i64::MIN`.
-/// - `Abs`   — absolute value, wrapping on `i64::MIN` (matches
-///             `i64::wrapping_abs` semantics).
-/// - `Sign`  — `-1` / `0` / `+1` based on the input's sign.
+/// - `Neg` — two's-complement negation, wrapping on `i64::MIN`.
+/// - `Abs` — absolute value, wrapping on `i64::MIN` (matches
+///   `i64::wrapping_abs` semantics).
+/// - `Sign` — `-1` / `0` / `+1` based on the input's sign.
 /// - `Trunc`, `Floor`, `Ceil`, `Round` — no-ops on integers; preserve
-///             the value, drop the float-domain rounding op so
-///             downstream code sees a plain `Op::Const`.
+///   the value, drop the float-domain rounding op so downstream code
+///   sees a plain `Op::Const`.
 fn eval_unary_op(op: UnaryOpKind, a: i64) -> Option<i64> {
     match op {
         UnaryOpKind::Neg => Some(a.wrapping_neg()),
