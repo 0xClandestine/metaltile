@@ -119,7 +119,7 @@
 //! produce no IR. The "wrap the whole fn" pattern is the supported
 //! workaround called out in that same error message.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 /// Build the fused MoE down+SwiGLU+chain8 kernel from 8 slot tuples.
 ///
@@ -153,14 +153,15 @@ macro_rules! define_moe_down_swiglu_accum_chain8 {
             )
         ),* $(,)?
     ) => {
-        #[bench_kernel(
-            op="moe_down_swiglu_accum",
-            subop="int4_chain8",
-            class=GenericEmpty,
-            tol=0.0,
-            kernel_mode=Reduction,
+        #[kernel(
+            bench(
+                        op="moe_down_swiglu_accum",
+                        subop="int4_chain8",
+                        class=GenericEmpty,
+                        tol=0.0,
+                        kernel_mode=Reduction,
+            )
         )]
-        #[kernel]
         #[allow(clippy::too_many_arguments)]
         pub fn ffai_moe_down_swiglu_accum_int4_chain8<T>(
             gate_0: Tensor<T>,

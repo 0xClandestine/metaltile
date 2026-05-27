@@ -15,7 +15,7 @@
 //! u32-output signature. Correctness validated in FFAI integration
 //! tests against reference decoder output.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 // Tree-reduction strides: 128 → 64 → 32 → 16 → 8 → 4 → 2.
 // Each iteration: threads with `lid < stride` merge the upper half into
@@ -28,14 +28,15 @@ use metaltile::{bench_kernel, kernel};
 // expansion silently produced no IR.  A DSL `for` loop over the seven
 // stages yields identical MSL and survives the proc-macro intact.
 
-#[bench_kernel(
-    op="arg_reduce",
-    subop="argmax_u32",
-    class=GenericEmpty,
-    tol=0.0,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="arg_reduce",
+        subop="argmax_u32",
+        class=GenericEmpty,
+        tol=0.0,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn ffai_argmax<T>(inp: Tensor<T>, out: Tensor<u32>, #[constexpr] n: u32) {
     let lid = tid;
     let mut best_val = neg_infinity();

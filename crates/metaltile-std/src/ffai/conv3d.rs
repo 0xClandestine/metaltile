@@ -49,7 +49,7 @@
 //!
 //! Codegen-only. Correctness validated by `conv3d_gpu_correctness`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 /// Dense 3D convolution — strides and padding, unit dilation, one
 /// channel group.
@@ -71,14 +71,15 @@ use metaltile::{bench_kernel, kernel};
 ///   no division happens on the hot path.
 ///
 /// Codegen-only; correctness pinned by `conv3d_gpu_correctness`.
-#[bench_kernel(
-    op="conv3d",
-    subop="generic",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Grid3D,
+#[kernel(
+    bench(
+        op="conv3d",
+        subop="generic",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Grid3D,
+    )
 )]
-#[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn conv3d_generic<T>(
     input: Tensor<T>,
@@ -200,14 +201,15 @@ pub fn conv3d_generic<T>(
 ///   `groups` itself is not needed inside the body.
 ///
 /// Codegen-only; correctness pinned by `conv3d_gpu_correctness`.
-#[bench_kernel(
-    op="conv3d",
-    subop="grouped",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Grid3D,
+#[kernel(
+    bench(
+        op="conv3d",
+        subop="grouped",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Grid3D,
+    )
 )]
-#[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn conv3d_grouped<T>(
     input: Tensor<T>,

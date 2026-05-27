@@ -52,16 +52,17 @@
 //! reduce_sum tree. FFAI's `MoELayer` end-to-end equivalence tests
 //! cover both paths once the GPU router is wired.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="dequant_gemv_expert_indexed",
-    subop="int4",
-    class=GenericEmpty,
-    tol=0.0,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="dequant_gemv_expert_indexed",
+        subop="int4",
+        class=GenericEmpty,
+        tol=0.0,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn dequant_gemv_int4_expert_indexed<T>(
     weights_stacked: Tensor<u32>,
     scales_stacked: Tensor<T>,

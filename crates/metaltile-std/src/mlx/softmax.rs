@@ -2,21 +2,22 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Softmax benchmark — #[kernel] DSL vs MLX metal/softmax.metal
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="softmax",
-    subop="softmax",
-    class=RowNorm,
-    b=1024,
-    n=4096,
-    tpg=256,
-    reads=2,
-    tol=1e-4,
-    mlx="looped_softmax_{tn}",
-    metal_file="softmax.metal",
+#[kernel(
+    bench(
+        op="softmax",
+        subop="softmax",
+        class=RowNorm,
+        b=1024,
+        n=4096,
+        tpg=256,
+        reads=2,
+        tol=1e-4,
+        mlx="looped_softmax_{tn}",
+        metal_file="softmax.metal",
+    )
 )]
-#[kernel]
 pub fn mt_softmax<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
     let row = program_id::<0>();
     let rs = row * n;

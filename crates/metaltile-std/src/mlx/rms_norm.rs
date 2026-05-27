@@ -39,7 +39,7 @@
 //!   `grid = (nRows * TPG, 1, 1)`, `tg = (TPG, 1, 1)`; Metal slices
 //!   that into `nRows` threadgroups of `TPG` threads each.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 use metaltile_core::ir::KernelMode;
 
 use crate::{
@@ -101,21 +101,22 @@ pub fn mt_rms_inv_scalar(
     store(out[0u32], rsqrt(tg_ssq / n + eps));
 }
 
-#[bench_kernel(
-    op="rms_norm",
-    subop="rms_norm",
-    class=RowNorm,
-    b=1024,
-    n=4096,
-    tpg=1024,
-    reads=2,
-    pre_weight=1.0,
-    post_eps=1e-5,
-    tol=1e-4,
-    mlx="rms{tn}",
-    metal_file="rms_norm.metal",
+#[kernel(
+    bench(
+        op="rms_norm",
+        subop="rms_norm",
+        class=RowNorm,
+        b=1024,
+        n=4096,
+        tpg=1024,
+        reads=2,
+        pre_weight=1.0,
+        post_eps=1e-5,
+        tol=1e-4,
+        mlx="rms{tn}",
+        metal_file="rms_norm.metal",
+    )
 )]
-#[kernel]
 pub fn mt_rms_norm<T>(
     x: Tensor<T>,
     w: Tensor<T>,
@@ -174,26 +175,27 @@ pub fn mt_rms_norm<T>(
 /// Algorithm-identical to `mt_rms_norm`: f32 accumulator for the
 /// sum-of-squares, threadgroup-wide `reduce_sum`, `rsqrt(ssq/n + eps)`
 /// scaling, per-element output store rounded through `T`.
-#[bench_kernel(
-    op="rms_norm",
-    subop="rms_norm_small",
-    class=RowNorm,
-    // Per-head dispatch shape: head_dim=64 row count tuned so the bench
-    // walks a representative batched-prefill workload (4 batches × 16
-    // tokens × 16 q heads at head_dim=64 = 1024 rows). Same `n × b`
-    // total element count as the parent `mt_rms_norm` bench so the
-    // GB/s comparison is apples-to-apples.
-    b=1024,
-    n=64,
-    tpg=32,
-    reads=2,
-    pre_weight=1.0,
-    post_eps=1e-5,
-    tol=1e-4,
-    mlx="rms{tn}",
-    metal_file="rms_norm.metal",
+#[kernel(
+    bench(
+        op="rms_norm",
+        subop="rms_norm_small",
+        class=RowNorm,
+        // Per-head dispatch shape: head_dim=64 row count tuned so the bench
+        // walks a representative batched-prefill workload (4 batches × 16
+        // tokens × 16 q heads at head_dim=64 = 1024 rows). Same `n × b`
+        // total element count as the parent `mt_rms_norm` bench so the
+        // GB/s comparison is apples-to-apples.
+        b=1024,
+        n=64,
+        tpg=32,
+        reads=2,
+        pre_weight=1.0,
+        post_eps=1e-5,
+        tol=1e-4,
+        mlx="rms{tn}",
+        metal_file="rms_norm.metal",
+    )
 )]
-#[kernel]
 pub fn mt_rms_norm_small<T>(
     x: Tensor<T>,
     w: Tensor<T>,

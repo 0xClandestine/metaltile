@@ -26,28 +26,29 @@
 //! A.0: per-TG K read 32 times (once per query), 512 TGs total → 16384× T·BD K-loads.
 //! A.1: per-TG K read 1 time, 2048 TGs total (BQ=4 → 128 q_tiles × 32 heads) → 2048× T·BD = **8× reduction**.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="sdpa",
-    subop="sdpa_prefill",
-    class=SdpaPrefill,
-    h=128,
-    n_heads=32,
-    gqa_factor=4,
-    batch=1,
-    q_len=512,
-    k_len=512,
-    bq=32,
-    bk=16,
-    wm=4,
-    wn=1,
-    tpg=128,
-    tol=2e-2,
-    metal_file="steel/attn/steel_attention.metal",
-    mlx="steel_attention_float32_bq32_bk16_bd128_wm4_wn1_maskfloat32",
+#[kernel(
+    bench(
+        op="sdpa",
+        subop="sdpa_prefill",
+        class=SdpaPrefill,
+        h=128,
+        n_heads=32,
+        gqa_factor=4,
+        batch=1,
+        q_len=512,
+        k_len=512,
+        bq=32,
+        bk=16,
+        wm=4,
+        wn=1,
+        tpg=128,
+        tol=2e-2,
+        metal_file="steel/attn/steel_attention.metal",
+        mlx="steel_attention_float32_bq32_bk16_bd128_wm4_wn1_maskfloat32",
+    )
 )]
-#[kernel]
 pub fn mt_sdpa_prefill<T>(
     q: Tensor<T>,
     k: Tensor<T>,

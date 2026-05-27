@@ -34,7 +34,7 @@
 //!   └──────────────────┘
 //! ```
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 // ── mt_moe_router_topk ───────────────────────────────────────────────────
 //
@@ -62,14 +62,15 @@ use metaltile::{bench_kernel, kernel};
 // Bench spec uses BenchDispatch::Generic + shapes: &[] so `tile bench`
 // skips it; correctness lives in unit tests + downstream MoE
 // integration. Same convention as other ffai/ kernels (gather, sampling).
-#[bench_kernel(
-    op="moe",
-    subop="router_topk",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="moe",
+        subop="router_topk",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn mt_moe_router_topk<T>(
     router_logits: Tensor<T>,
     mut indices_out: Tensor<u32>,
@@ -225,14 +226,15 @@ pub fn mt_moe_router_topk<T>(
 // values + k weights, do k FMAs per output column, one store per
 // column. At hidden=2048, k=8 → ~1k FMAs per token. Bandwidth-bound,
 // not ALU-bound.
-#[bench_kernel(
-    op="moe",
-    subop="unpermute",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="moe",
+        subop="unpermute",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn mt_moe_unpermute<T>(
     expert_outputs: Tensor<T>,
     inv_perm: Tensor<u32>,
@@ -293,14 +295,15 @@ pub fn mt_moe_unpermute<T>(
 //
 // Per-permuted-row cost: hidden / 128 = 16 loads + 16 stores (at
 // hidden=2048). Bandwidth-bound — no FMAs, just a vector copy.
-#[bench_kernel(
-    op="moe",
-    subop="permute",
-    class=GenericEmpty,
-    tol=0.0,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="moe",
+        subop="permute",
+        class=GenericEmpty,
+        tol=0.0,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn mt_moe_permute<T>(
     tokens: Tensor<T>,
     sort_token_idx: Tensor<u32>,
@@ -375,14 +378,15 @@ pub fn mt_moe_permute<T>(
 //   3. `simd_sum` reduces 32 partial sums → one output value per TG.
 //
 // Mirrors the per-thread pattern in `dequant_gemv_int4`.
-#[bench_kernel(
-    op="moe",
-    subop="gather_qmm_int4",
-    class=GenericEmpty,
-    tol=5e-2,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="moe",
+        subop="gather_qmm_int4",
+        class=GenericEmpty,
+        tol=5e-2,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn mt_moe_gather_qmm_int4<T>(
     x: Tensor<T>,
     weight_packed: Tensor<u32>,
@@ -488,8 +492,9 @@ pub fn mt_moe_gather_qmm_int4<T>(
 /// Grouped-gather quantized matmul — pow2 bit-widths (8).
 macro_rules! gather_qmm_pow2 {
     ($name:ident, $bits:literal, $subop:literal) => {
-        #[bench_kernel(op="moe", subop=$subop, class=GenericEmpty, tol=5e-2, kernel_mode=Reduction,)]
-        #[kernel]
+        #[kernel(
+            bench(op="moe", subop=$subop, class=GenericEmpty, tol=5e-2, kernel_mode=Reduction,)
+        )]
         pub fn $name<T>(
             x: Tensor<T>,
             weight_packed: Tensor<u32>,
@@ -554,8 +559,9 @@ macro_rules! gather_qmm_pow2 {
 /// Grouped-gather quantized matmul — odd bit-widths (3, 5, 6).
 macro_rules! gather_qmm_odd {
     ($name:ident, $bits:literal, $subop:literal) => {
-        #[bench_kernel(op="moe", subop=$subop, class=GenericEmpty, tol=5e-2, kernel_mode=Reduction,)]
-        #[kernel]
+        #[kernel(
+            bench(op="moe", subop=$subop, class=GenericEmpty, tol=5e-2, kernel_mode=Reduction,)
+        )]
         pub fn $name<T>(
             x: Tensor<T>,
             weight_packed: Tensor<u32>,
@@ -659,14 +665,15 @@ gather_qmm_odd!(mt_moe_gather_qmm_b6, 6u32, "gather_qmm_b6");
 //   - x  : k_in floats (loaded once, used 8 times)
 //   - W  : 8 × (k_in / 8) uint32s = k_in uint32s of weight
 //   - s/b: 8 × (k_in / group_size) × 2 floats
-#[bench_kernel(
-    op="moe",
-    subop="gather_qmm_int4_m8",
-    class=GenericEmpty,
-    tol=5e-2,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="moe",
+        subop="gather_qmm_int4_m8",
+        class=GenericEmpty,
+        tol=5e-2,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_moe_gather_qmm_int4_m8<T>(
     x: Tensor<T>,
@@ -932,14 +939,15 @@ pub fn mt_moe_gather_qmm_int4_m8<T>(
 // DISPATCH:
 //   Grid = [m_out / 16, T_rows, 1]   (m_out must be a multiple of 16)
 //   TG   = [32, 1, 1]
-#[bench_kernel(
-    op="moe",
-    subop="gather_qmm_int4_m16",
-    class=GenericEmpty,
-    tol=5e-2,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="moe",
+        subop="gather_qmm_int4_m16",
+        class=GenericEmpty,
+        tol=5e-2,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_moe_gather_qmm_int4_m16<T>(
     x: Tensor<T>,
@@ -1402,14 +1410,15 @@ pub fn mt_moe_gather_qmm_int4_m16<T>(
 // DISPATCH:
 //   Grid = [m_out / 32, T_rows, 1]   (m_out must be a multiple of 32)
 //   TG   = [32, 1, 1]
-#[bench_kernel(
-    op="moe",
-    subop="gather_qmm_int4_m32",
-    class=GenericEmpty,
-    tol=5e-2,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="moe",
+        subop="gather_qmm_int4_m32",
+        class=GenericEmpty,
+        tol=5e-2,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_moe_gather_qmm_int4_m32<T>(
     x: Tensor<T>,
@@ -2302,14 +2311,15 @@ pub fn mt_moe_gather_qmm_int4_m32<T>(
 // We use 4 SGs (vs MLX's 2) because the existing mt_qmm_mma proves the
 // 4-SG 2×2 warp grid hits ~95% of MLX throughput on the same 8×8 frag
 // path. MoE inherits that geometry.
-#[bench_kernel(
-    op="moe",
-    subop="gather_qmm_mma_int4",
-    class=GenericEmpty,
-    tol=5e-2,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="moe",
+        subop="gather_qmm_mma_int4",
+        class=GenericEmpty,
+        tol=5e-2,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_moe_gather_qmm_mma_int4<T>(
     x: Tensor<T>,
@@ -2609,8 +2619,9 @@ pub fn mt_moe_gather_qmm_mma_int4<T>(
 // per-lane group index is hoistable.
 macro_rules! gather_qmm_mma {
     ($name:ident, $bits:literal, $subop:literal) => {
-        #[bench_kernel(op="moe", subop=$subop, class=GenericEmpty, tol=5e-2, kernel_mode=Reduction,)]
-        #[kernel]
+        #[kernel(
+            bench(op="moe", subop=$subop, class=GenericEmpty, tol=5e-2, kernel_mode=Reduction,)
+        )]
         #[allow(clippy::too_many_arguments)]
         pub fn $name<T>(
             x: Tensor<T>,
@@ -2911,14 +2922,15 @@ gather_qmm_mma!(mt_moe_gather_qmm_mma_b8, 8u32, "gather_qmm_mma_b8");
 //   Per SG per K-block: 4 frags × 4 k_inner = 16 MMAs (32 across TG)
 //
 // Inputs / outputs match the BM=32 sibling — same signature.
-#[bench_kernel(
-    op="moe",
-    subop="gather_qmm_mma_int4_bm16",
-    class=GenericEmpty,
-    tol=5e-2,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="moe",
+        subop="gather_qmm_mma_int4_bm16",
+        class=GenericEmpty,
+        tol=5e-2,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_moe_gather_qmm_mma_int4_bm16<T>(
     x: Tensor<T>,
@@ -3292,14 +3304,15 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16<T>(
 //
 // Dispatch: grid `[N/32, ceil(M/32), 1]`, TG `[128, 1, 1]` (4 SGs).
 // Correctness: `tests/moe_gather_qmm_mma_int8_gpu_correctness.rs`.
-#[bench_kernel(
-    op="moe",
-    subop="gather_qmm_mma_int8",
-    class=GenericEmpty,
-    tol=5e-2,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="moe",
+        subop="gather_qmm_mma_int8",
+        class=GenericEmpty,
+        tol=5e-2,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_moe_gather_qmm_mma_int8<T>(
     x: Tensor<T>,

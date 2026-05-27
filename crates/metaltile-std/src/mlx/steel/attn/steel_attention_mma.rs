@@ -19,28 +19,29 @@
 //!    fn0 = (qid & 2)*2 + (lane%2)*2, fn1 = fn0 + 1`
 //! Each lane owns 2 elements per frag at positions (fm, fn0) and (fm, fn1).
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="sdpa",
-    subop="sdpa_prefill_mma",
-    class=SdpaPrefill,
-    h=128,
-    n_heads=32,
-    gqa_factor=4,
-    batch=1,
-    q_len=512,
-    k_len=512,
-    bq=32,
-    bk=16,
-    wm=4,
-    wn=1,
-    tpg=128,
-    tol=2e-2,
-    metal_file="steel/attn/steel_attention.metal",
-    mlx="steel_attention_float32_bq32_bk16_bd128_wm4_wn1_maskfloat32",
+#[kernel(
+    bench(
+        op="sdpa",
+        subop="sdpa_prefill_mma",
+        class=SdpaPrefill,
+        h=128,
+        n_heads=32,
+        gqa_factor=4,
+        batch=1,
+        q_len=512,
+        k_len=512,
+        bq=32,
+        bk=16,
+        wm=4,
+        wn=1,
+        tpg=128,
+        tol=2e-2,
+        metal_file="steel/attn/steel_attention.metal",
+        mlx="steel_attention_float32_bq32_bk16_bd128_wm4_wn1_maskfloat32",
+    )
 )]
-#[kernel]
 pub fn mt_sdpa_prefill_mma<T>(
     q: Tensor<T>,
     k: Tensor<T>,

@@ -23,7 +23,7 @@
 //!
 //! Correctness pinned by `tests/arg_reduce_gpu_correctness.rs`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 // Tree-reduction strides: 128 → 64 → 32 → 16 → 8 → 4 → 2, then a final
 // inline stride-1 merge. Each iteration merges the upper half into the
@@ -35,18 +35,19 @@ use metaltile::{bench_kernel, kernel};
 // emit no IR (see docs/developing.md kernel-authoring hazards). The
 // `for` loop yields identical MSL and survives the proc-macro intact.
 
-#[bench_kernel(
-    op="arg_reduce",
-    subop="argmax",
-    class=ArgReduce,
-    n=1048576,
-    check_n=4096,
-    tpg=256,
-    tol=0.5,
-    mlx="argmax_{tn}",
-    metal_file="arg_reduce.metal",
+#[kernel(
+    bench(
+        op="arg_reduce",
+        subop="argmax",
+        class=ArgReduce,
+        n=1048576,
+        check_n=4096,
+        tpg=256,
+        tol=0.5,
+        mlx="argmax_{tn}",
+        metal_file="arg_reduce.metal",
+    )
 )]
-#[kernel]
 pub fn mt_argmax<T>(inp: Tensor<T>, out: Tensor<u32>, #[constexpr] n: u32) {
     let lid = tid;
     let mut best_val = neg_infinity();
@@ -95,18 +96,19 @@ pub fn mt_argmax<T>(inp: Tensor<T>, out: Tensor<u32>, #[constexpr] n: u32) {
     }
 }
 
-#[bench_kernel(
-    op="arg_reduce",
-    subop="argmin",
-    class=ArgReduce,
-    n=1048576,
-    check_n=4096,
-    tpg=256,
-    tol=0.5,
-    mlx="argmin_{tn}",
-    metal_file="arg_reduce.metal",
+#[kernel(
+    bench(
+        op="arg_reduce",
+        subop="argmin",
+        class=ArgReduce,
+        n=1048576,
+        check_n=4096,
+        tpg=256,
+        tol=0.5,
+        mlx="argmin_{tn}",
+        metal_file="arg_reduce.metal",
+    )
 )]
-#[kernel]
 pub fn mt_argmin<T>(inp: Tensor<T>, out: Tensor<u32>, #[constexpr] n: u32) {
     let lid = tid;
     // argmin seeds with +infinity so any finite value wins.

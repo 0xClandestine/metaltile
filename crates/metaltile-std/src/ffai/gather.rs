@@ -8,16 +8,17 @@
 //!
 //! Codegen-only. Validated end-to-end in FFAI integration tests.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="gather",
-    subop="gather",
-    class=GenericEmpty,
-    tol=0.0,
-    kernel_mode=Grid3D,
+#[kernel(
+    bench(
+        op="gather",
+        subop="gather",
+        class=GenericEmpty,
+        tol=0.0,
+        kernel_mode=Grid3D,
+    )
 )]
-#[kernel]
 pub fn ffai_gather<T>(
     table: Tensor<T>,
     indices: Tensor<u32>,

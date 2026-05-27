@@ -73,16 +73,17 @@
 //! `conv1d_causal_step` + `mt_silu_cast_to_f32` looped pair in
 //! `tests/conv1d_causal_step_silu_cast_many_gpu_correctness.rs`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="ssm",
-    subop="conv1d_causal_step_silu_cast_many",
-    class=GenericEmpty,
-    tol=0.0,
-    kernel_mode=Grid3D,
+#[kernel(
+    bench(
+        op="ssm",
+        subop="conv1d_causal_step_silu_cast_many",
+        class=GenericEmpty,
+        tol=0.0,
+        kernel_mode=Grid3D,
+    )
 )]
-#[kernel]
 pub fn ffai_conv1d_causal_step_silu_cast_many<T>(
     src: Tensor<T>,
     w: Tensor<T>,

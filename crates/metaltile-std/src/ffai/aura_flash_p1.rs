@@ -64,7 +64,7 @@
 //! unroll-pass fix landed alongside this kernel, so the guards are
 //! back in.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 use crate::bench_types::DType;
 
@@ -84,8 +84,9 @@ macro_rules! aura_flash_p1_kernel {
         $causal:literal,
         $subop:literal
     ) => {
-        #[bench_kernel(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)]
-        #[kernel]
+        #[kernel(
+                    bench(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)
+                )]
         pub fn $name<T>(
             q_rot: Tensor<T>,
             key_packed: Tensor<u32>,

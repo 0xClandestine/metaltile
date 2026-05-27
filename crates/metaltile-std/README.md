@@ -1,10 +1,10 @@
 # metaltile-std
 
 MetalTile kernel standard library — benchmark metadata and type definitions.
-Provides the data types shared between `#[bench_kernel]`-annotated kernel
+Provides the data types shared between `#[kernel(bench(...))]`-annotated kernel
 definitions and the `tile bench` CLI runner. Contains no GPU runtime code.
 
-Each `#[bench_kernel]` attribute (from `metaltile-macros`) generates an
+Each `#[kernel(bench(...))]` attribute (from `metaltile-macros`) generates an
 `inventory::submit! { BenchSpec { ... } }` alongside the kernel. The bench
 CLI collects all registered `BenchSpec` instances via `inventory::iter`,
 then runs each kernel against its MLX reference for throughput and
@@ -53,7 +53,7 @@ See [`docs/KERNEL_AUDIT.md`](../../docs/KERNEL_AUDIT.md) for the full per-op cov
 
 ```
 metaltile-macros                         metaltile-cli
-  (#[bench_kernel]             (tile bench collects
+  (#[kernel(bench(...))]       (tile bench collects
    generates BenchSpec)         inventory::iter::<BenchSpec>)
        │                                    │
        └────────── metaltile-std ───────────┘
@@ -72,19 +72,20 @@ crates to provide DType helpers, MSL generation utilities, and the
 Define a kernel with bench registration:
 
 ```rust,ignore
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 use metaltile_std::bench_types::{FLOAT_DTYPES, OpBench};
 
-#[bench_kernel(
-    op    = "unary",
-    subop = "exp",
-    class = Unary,
-    input = Signed,
-    tol   = 1e-4,
-    mlx   = "v_Exp{tn}{tn}",
-    metal_file = "unary.metal",
+#[kernel(
+    bench(
+        op    = "unary",
+        subop = "exp",
+        class = Unary,
+        input = Signed,
+        tol   = 1e-4,
+        mlx   = "v_Exp{tn}{tn}",
+        metal_file = "unary.metal",
+    )
 )]
-#[kernel]
 pub fn mt_exp<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
     store(out[idx], exp(load(a[idx])));
@@ -219,7 +220,7 @@ MLX reference:
 ### Benchmark spec reference
 
 `BenchSpec` (in `spec.rs`) is the central registration type. Each
-`#[bench_kernel(…)]` annotation populates these fields:
+`#[kernel(bench(…))]` annotation populates these fields:
 
 | Field | Purpose |
 |---|---|
@@ -272,7 +273,7 @@ MLX reference:
 
 | Crate | Role in this crate |
 |---|---|
-| `metaltile` | Facade — `#[kernel]`, `#[bench_kernel]`, `Tensor`, prelude items |
+| `metaltile` | Facade — `#[kernel]`, `Tensor`, prelude items |
 | `metaltile-core` | `DType`, `Kernel`, `KernelMode`, `Shape`, `ConstExpr` |
 | `metaltile-codegen` | `MslGenerator` for MSL generation tests (`generate_elementwise_msl`, `generate_reduction_msl`) |
 | `metaltile-runtime` | Runtime types referenced by bench infrastructure |
@@ -303,22 +304,21 @@ kernels build by default; runtime gating happens via
 
 ## Extending
 
-- **New MLX kernel:** Create `src/mlx/<name>.rs` with `#[bench_kernel(…)]` +
-  `#[kernel]` annotations. Add `pub mod <name>;` to `src/mlx/mod.rs`.
+- **New MLX kernel:** Create `src/mlx/<name>.rs` with `#[kernel(bench(…))]` annotation. Add `pub mod <name>;` to `src/mlx/mod.rs`.
   The `tile bench` CLI discovers it automatically via `inventory`.
 
 - **New FFAI kernel (no MLX comparison):** Create `src/ffai/<name>.rs` with
-  `#[bench_kernel(…)]` + `#[kernel]` annotations. Add `pub mod <name>;` to
+  `#[kernel(bench(…))]` annotation. Add `pub mod <name>;` to
   `src/ffai/mod.rs`.
 
 - **New benchmark shape:** `src/spec.rs` — add a `ShapeSpec` constant or
-  update the relevant op file's `#[bench_kernel]` annotation. Common shapes
+  update the relevant op file's `#[kernel(bench(...))]` annotation. Common shapes
   use the constants at the top of `spec.rs` (`ELEMENTWISE_N_BENCH`,
   `ROW_REDUCE_SHAPES`, etc.).
 
 - **New `BenchDispatch` variant:** `src/spec.rs` — add to the `BenchDispatch`
   enum. Add a match arm in `src/run_spec.rs` for the complex runner. Update
-  the `#[bench_kernel]` proc-macro in `metaltile-macros` if a new
+  the `#[kernel(bench(...))]` proc-macro in `metaltile-macros` if a new
   `ClassKind` variant is needed.
 
 - **New dtype helper:** `src/bench_types.rs` — add to `dtype_label()`,
@@ -331,7 +331,7 @@ kernels build by default; runtime gating happens via
 
 - [Root README](../../README.md) — project overview and architecture
 - [CONTRIBUTING](../../CONTRIBUTING.md) — dev setup, PR process, CI
-- [`metaltile-macros` README](../metaltile-macros/README.md) — the `#[bench_kernel]` attribute that generates `BenchSpec` registration
+- [`metaltile-macros` README](../metaltile-macros/README.md) — the `#[kernel(bench(...))]` attribute that generates `BenchSpec` registration
 - [`metaltile-cli` README](../metaltile-cli/README.md) — the `tile bench` runner that consumes these specs
 
 ## License

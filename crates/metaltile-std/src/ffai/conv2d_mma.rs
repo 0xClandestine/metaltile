@@ -74,7 +74,7 @@
 //!
 //! Codegen-only. Correctness validated by `conv2d_mma_gpu_correctness`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 /// MMA-tiled 2D convolution (stride=1, dilation=1, pad=0).
 ///
@@ -82,14 +82,15 @@ use metaltile::{bench_kernel, kernel};
 /// Each TG computes a 32×32 tile of `out[pixels, out_channels]`.
 ///
 /// Correctness pinned by `conv2d_mma_gpu_correctness`.
-#[bench_kernel(
-    op="conv2d",
-    subop="mma",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="conv2d",
+        subop="mma",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn conv2d_mma<T>(
     input: Tensor<T>,

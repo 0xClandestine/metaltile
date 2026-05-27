@@ -318,10 +318,7 @@ impl Parse for BenchArgs {
                     variant_field = Some(var);
                 },
                 o => {
-                    return Err(syn::Error::new(
-                        key.span(),
-                        format!("unknown bench_kernel arg: `{o}`"),
-                    ));
+                    return Err(syn::Error::new(key.span(), format!("unknown bench arg: `{o}`")));
                 },
             }
             if input.peek(Token![,]) {

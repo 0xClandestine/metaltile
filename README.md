@@ -32,7 +32,7 @@ For contributors building from source, see [Getting Started](docs/getting-starte
 
 ## Getting Started
 
-**1. Write a kernel.** Annotate a generic Rust function with `#[kernel]` and `#[bench_kernel]` — MetalTile generates `f32`, `f16`, and `bfloat16` Metal variants from a single definition and registers it against its MLX reference:
+**1. Write a kernel.** Annotate a generic Rust function with `#[kernel(bench(...))]` — MetalTile generates `f32`, `f16`, and `bfloat16` Metal variants from a single definition and registers it against its MLX reference:
 
 <table>
 <tr>
@@ -43,16 +43,17 @@ For contributors building from source, see [Getting Started](docs/getting-starte
 <td>
 
 ```rust
-#[bench_kernel(
-    op    = "unary",
-    subop = "exp",
-    class = Unary,
-    input = Signed,
-    tol   = 1e-4,
-    mlx   = "v_Exp{tn}{tn}",
-    metal_file = "unary.metal",
+#[kernel(
+    bench(
+        op    = "unary",
+        subop = "exp",
+        class = Unary,
+        input = Signed,
+        tol   = 1e-4,
+        mlx   = "v_Exp{tn}{tn}",
+        metal_file = "unary.metal",
+    )
 )]
-#[kernel]
 pub fn mt_exp<T>(a: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
     store(out[idx], exp(load(a[idx])));

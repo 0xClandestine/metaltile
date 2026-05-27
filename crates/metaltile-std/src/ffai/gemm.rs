@@ -31,16 +31,17 @@
 //! are handled in-kernel: out-of-range loads clamp to index 0 and
 //! contribute 0, out-of-range stores are skipped.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="gemm",
-    subop="gemm",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="gemm",
+        subop="gemm",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn ffai_gemm<T>(
     weight: Tensor<T>,
     input: Tensor<T>,

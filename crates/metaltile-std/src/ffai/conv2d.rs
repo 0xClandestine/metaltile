@@ -49,7 +49,7 @@
 //!
 //! Codegen-only. Correctness validated by `conv2d_gpu_correctness`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 /// Emit a conv2d kernel. `$kh / $kw / $stride` are either literals (the
 /// fixed-patch variants) or the `kh / kw / stride_h / stride_w`
@@ -58,8 +58,9 @@ use metaltile::{bench_kernel, kernel};
 /// pan-and-scan tiles can carry a small pad.
 macro_rules! conv2d_kernel {
     ($name:ident, $subop:literal, $kh:expr, $kw:expr, $sh:expr, $sw:expr) => {
-        #[bench_kernel(op="conv2d", subop=$subop, class=GenericEmpty, tol=1e-3, kernel_mode=Grid3D,)]
-        #[kernel]
+        #[kernel(
+            bench(op="conv2d", subop=$subop, class=GenericEmpty, tol=1e-3, kernel_mode=Grid3D,)
+        )]
         pub fn $name<T>(
             input: Tensor<T>,
             weight: Tensor<T>,
@@ -195,14 +196,15 @@ conv2d_kernel!(conv2d_generic, "generic", kh, kw, stride_h, stride_w);
 ///   constexprs so no division happens on the hot path.
 ///
 /// Codegen-only; correctness pinned by `conv2d_gpu_correctness`.
-#[bench_kernel(
-    op="conv2d",
-    subop="grouped",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Grid3D,
+#[kernel(
+    bench(
+        op="conv2d",
+        subop="grouped",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Grid3D,
+    )
 )]
-#[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn conv2d_grouped<T>(
     input: Tensor<T>,

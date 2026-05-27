@@ -63,21 +63,22 @@
 //!
 //! Codegen-only. Correctness validated by `patch_embed_mma_gpu_correctness`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 /// MMA-tiled patch embedding.
 ///
 /// Grid `[hidden/32, num_patches/32, 1]`, tpg = 128.
 ///
 /// Correctness pinned by `patch_embed_mma_gpu_correctness`.
-#[bench_kernel(
-    op="patch_embed",
-    subop="mma",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="patch_embed",
+        subop="mma",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn patch_embed_mma<T>(
     image: Tensor<T>,

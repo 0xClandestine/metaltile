@@ -105,7 +105,7 @@ fn run_sdpa_vector(
 ) -> Vec<f32> {
     let mut kernel = mt_sdpa_vector::kernel_ir_for(dt.to_dtype());
     // `kernel_ir_for` returns the default Elementwise mode; the proc-
-    // macro `bench_kernel(class=SdpaVector,...)` annotation drives a
+    // macro `#[kernel(bench(class=SdpaVector,...))]` annotation drives a
     // reduction-shaped codegen in the bench path. Mirror that here so
     // the threadgroup_alloc / simd_sum / cross-sg-reduction ops emit
     // the right MSL. Sibling sdpa_decode test does the same.

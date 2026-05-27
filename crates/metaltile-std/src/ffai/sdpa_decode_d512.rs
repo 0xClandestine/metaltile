@@ -41,16 +41,17 @@
 //!
 //! Wrapping doc: see FFAI/CLAUDE.md §"Wrapping kernels in FFAI".
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="sdpa",
-    subop="sdpa_decode_d512",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="sdpa",
+        subop="sdpa_decode_d512",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn ffai_sdpa_decode_d512<T>(
     q: Tensor<T>,
     k: Tensor<T>,

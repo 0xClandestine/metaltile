@@ -1407,7 +1407,7 @@ mod tests {
         (0..10_240).map(|i| (i as u8).wrapping_add(0x42)).collect()
     }
 
-    fn perf_bench_kernel() -> Kernel { key_kernel("sdpa_decode_2pass_pass1", DType::F32) }
+    fn perf_kernel_for_bench() -> Kernel { key_kernel("sdpa_decode_2pass_pass1", DType::F32) }
 
     fn perf_bench_consts() -> BTreeMap<String, u32> {
         let mut consts = BTreeMap::new();
@@ -1512,7 +1512,7 @@ mod tests {
         // point of the PR is that they're different discriminators for the
         // same kernel.
         let msl_bytes = perf_bench_msl_blob();
-        let kernel = perf_bench_kernel();
+        let kernel = perf_kernel_for_bench();
         let consts = perf_bench_consts();
 
         let pre = pre_fix_pass_key(&msl_bytes);
@@ -1539,7 +1539,7 @@ mod tests {
     #[ignore = "perf microbench"]
     fn perf_dispatch_chain_pso_key() {
         let msl_bytes = perf_bench_msl_blob();
-        let kernel = perf_bench_kernel();
+        let kernel = perf_kernel_for_bench();
         let consts = perf_bench_consts();
 
         const ITERS: usize = 1_000_000;

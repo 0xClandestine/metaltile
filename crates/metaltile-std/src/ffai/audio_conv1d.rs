@@ -29,16 +29,17 @@
 //!
 //! Codegen-only. Correctness validated by `audio_conv1d_gpu_correctness`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="audio_conv1d",
-    subop="audio_conv1d",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Grid3D,
+#[kernel(
+    bench(
+        op="audio_conv1d",
+        subop="audio_conv1d",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Grid3D,
+    )
 )]
-#[kernel]
 pub fn audio_conv1d<T>(
     input: Tensor<T>,
     weight: Tensor<T>,

@@ -29,7 +29,7 @@
 //! cheap-to-zero tokens, mirroring the MLX upstream's
 //! flash-pass2-style aggregation guard.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 use crate::bench_types::DType;
 
@@ -39,8 +39,9 @@ const _: DType = DType::F32;
 
 macro_rules! aura_value_kernel {
     ($name:ident, $bits:literal, $subop:literal) => {
-        #[bench_kernel(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)]
-        #[kernel]
+        #[kernel(
+                    bench(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)
+                )]
         pub fn $name<T>(
             weights: Tensor<T>,
             packed: Tensor<u32>,

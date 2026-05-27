@@ -39,16 +39,17 @@
 //! survives; as `top_p → 1` nothing is masked. A typical serving value
 //! is 0.9–0.95.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="logits_processors",
-    subop="top_p_mask",
-    class=GenericEmpty,
-    tol=0.0,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="logits_processors",
+        subop="top_p_mask",
+        class=GenericEmpty,
+        tol=0.0,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn logits_top_p_mask<T>(
     inp: Tensor<T>,
     out: Tensor<T>,

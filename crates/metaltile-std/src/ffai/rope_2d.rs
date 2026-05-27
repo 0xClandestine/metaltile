@@ -41,16 +41,17 @@
 //!
 //! Codegen-only. Correctness validated by `rope_2d_gpu_correctness`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="rope",
-    subop="rope_2d",
-    class=GenericEmpty,
-    tol=0.0,
-    kernel_mode=Grid3D,
+#[kernel(
+    bench(
+        op="rope",
+        subop="rope_2d",
+        class=GenericEmpty,
+        tol=0.0,
+        kernel_mode=Grid3D,
+    )
 )]
-#[kernel]
 pub fn ffai_rope_2d<T>(
     qk: Tensor<T>,
     positions: Tensor<u32>,

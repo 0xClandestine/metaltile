@@ -8,7 +8,7 @@ code.
 This crate is the front door of the MetalTile compiler: user-written
 `#[kernel]` functions enter here, and IR + dispatch surfaces exit. It
 also provides `shape!`/`tile!` constructors for shape annotations and
-`#[bench_kernel]` for declarative benchmark registration.
+`#[kernel(bench(...))]` for declarative benchmark registration.
 
 ## Position in the pipeline
 
@@ -65,10 +65,10 @@ pub fn scale<T>(a: Tensor<T>, factor: f32, out: Tensor<T>) {
 
 | Module | Purpose |
 |---|---|
-| `lib.rs` | All proc-macro entry points: `#[kernel]`, `#[autotune]`, `#[bench_kernel]`, `#[constexpr]`, `#[scalar]`, `#[strided]`, `shape!`, `tile!`, `ValueRefs` / `OpFlags` derive macros |
+| `lib.rs` | All proc-macro entry points: `#[kernel]`, `#[constexpr]`, `#[scalar]`, `#[strided]`, `shape!`, `tile!`, `ValueRefs` / `OpFlags` derive macros |
 | `body_parser.rs` | `DslBodyParser` — walks `syn::Expr` trees and translates DSL calls into IR-building token streams |
 | `sig_parser.rs` | Signature parsing: `parse_kernel_params_generic`, `extract_constexprs_typed`, `extract_param_names` |
-| `bench_impl.rs` | `#[bench_kernel]` attribute implementation: `BenchArgs` parsing, `ClassKind` enum, `generate_submit` |
+| `bench_impl.rs` | `BenchArgs` parsing, `ClassKind` enum, `generate_submit` — used by `#[kernel(bench(...))]` |
 | `derive_op.rs` | Derive macros: `ValueRefs` (value-id traversal) and `OpFlags` (elementwise/side-effect/etc. predicates) |
 
 ## API reference
@@ -79,7 +79,7 @@ pub fn scale<T>(a: Tensor<T>, factor: f32, out: Tensor<T>) {
 |---|---|---|
 | `#[kernel]` | attribute | Parses a Rust function into IR + generates a module with `kernel_ir`, `kernel_ir_for`, `LaunchBuilder`, and `launch()` |
 | `#[autotune]` | attribute | Placed before `#[kernel]` to enable autotuning: `#[autotune(configs = [...], key = [M, N, K])]`. **Not yet implemented** — `AutotuneArgs` struct exists but parsing is a TODO in `expand_kernel`. |
-| `#[bench_kernel]` | attribute | Registers a kernel for automatic benchmarking via `inventory::submit!`. Must be placed *before* `#[kernel]`. |
+| `#[kernel(bench(...))]` | attribute | Registers a kernel for automatic benchmarking via `inventory::submit!`. Pass args inside `bench(...)` |
 | `#[constexpr]` | attribute | Pass-through: marks a function parameter as a compile-time constant detected by `#[kernel]` |
 | `#[scalar]` | attribute | Pass-through: marks a `Tensor` parameter for `constant T&` lowering in MSL |
 | `#[strided]` | attribute | Pass-through: marks a `Tensor` parameter for strided lowering (shape + stride arrays emitted) |
@@ -114,7 +114,7 @@ pub mod my_kernel {
 
 For generic kernels (`fn foo<T>(a: Tensor<T>, …)`), `kernel_ir_for` takes
 one `DType` argument per type parameter (`kernel_ir_for(_t: DType)`).
-The `#[bench_kernel]` macro detects generics and calls `kernel_ir_for`
+Passing `bench(...)` to `#[kernel]` detects generics and calls `kernel_ir_for`
 directly instead of wrapping in a closure.
 
 Output tensors are detected by one of:
@@ -137,7 +137,7 @@ Attributes placed on the function itself (before or alongside `#[kernel]`):
 | `#[scalar]` | Emits the parameter as `constant T& name` in MSL rather than `device T*`. Used for scalar values like `eps` or `scale`. |
 | `#[strided]` | Emits the parameter as `device T*` plus `constant uint* name_shape` and `constant uint* name_strides` in MSL. Used for non-contiguous tensor views. |
 
-### `#[bench_kernel]` arguments
+### `#[kernel(bench(...))]` arguments
 
 | Argument | Required | Purpose |
 |---|---|---|
@@ -196,10 +196,10 @@ Requires `[lib] proc-macro = true` in `Cargo.toml`.
   `#[proc_macro_attribute]` pass-through, parse its args in `expand_kernel`,
   and emit the corresponding token stream into the generated module.
 
-- **New `bench_kernel` class:** `src/bench_impl.rs` — add variant to `ClassKind` enum,
+- **New bench class:** `src/bench_impl.rs` — add variant to `ClassKind` enum,
   add a match arm in `generate_submit` with its `ShapeSpec` and `BenchDispatch` variant.
 
-- **New `bench_kernel` argument:** `src/bench_impl.rs` — add field to `BenchArgs`, add parse
+- **New bench argument:** `src/bench_impl.rs` — add field to `BenchArgs`, add parse
   arm in `BenchArgs::parse()`, consume in `generate_submit`.
 
 - **New shape/tile constructor syntax:** `src/lib.rs` — add a new `#[proc_macro]`
@@ -214,7 +214,7 @@ Requires `[lib] proc-macro = true` in `Cargo.toml`.
 - [CONTRIBUTING](../../CONTRIBUTING.md) — dev setup, PR process, CI
 - [`metaltile-core` README](../metaltile-core/README.md) — the IR types emitted by these macros
 - [`metaltile-codegen` README](../metaltile-codegen/README.md) — the passes that consume the generated IR
-- [`metaltile-std` README](../metaltile-std/README.md) — the `BenchSpec` type that `#[bench_kernel]` submits to
+- [`metaltile-std` README](../metaltile-std/README.md) — the `BenchSpec` type that `#[kernel(bench(...))]` submits to
 - [Crate docs on docs.rs](https://docs.rs/metaltile-macros)
 
 ## License

@@ -26,7 +26,7 @@
 //!   `sgs` threadgroup buffer (9 slots) covers every simdgroup plus the
 //!   running-prefix slot at index `n_simd`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 use metaltile_core::ir::KernelMode;
 
 use crate::{
@@ -36,17 +36,18 @@ use crate::{
 
 static SCAN_SHAPES: &[(usize, usize)] = &[(1_024, 4_096)];
 
-#[bench_kernel(
-    op="scan",
-    subop="scan",
-    class=Scan,
-    shapes=&SCAN_SHAPES,
-    tpg=256,
-    tol=1e-3,
-    mlx="contig_scan_inclusive_sum_{tn}_{tn}",
-    metal_file="scan.metal",
+#[kernel(
+    bench(
+        op="scan",
+        subop="scan",
+        class=Scan,
+        shapes=&SCAN_SHAPES,
+        tpg=256,
+        tol=1e-3,
+        mlx="contig_scan_inclusive_sum_{tn}_{tn}",
+        metal_file="scan.metal",
+    )
 )]
-#[kernel]
 pub fn mt_scan<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
     let row = program_id::<1>();
     let lid = tid;

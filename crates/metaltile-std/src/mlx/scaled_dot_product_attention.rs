@@ -2,20 +2,21 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Scaled dot-product attention benchmark — #[kernel] DSL vs MLX metal/scaled_dot_product_attention.metal
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 static ATTENTION_SHAPES: &[(usize, usize, usize)] = &[(8, 2048, 128), (32, 4096, 128)];
 
-#[bench_kernel(
-    op="sdpa",
-    subop="sdpa",
-    class=Attention,
-    shapes=&ATTENTION_SHAPES,
-    tpg=1024,
-    tol=1e-3,
-    metal_file="scaled_dot_product_attention.metal",
+#[kernel(
+    bench(
+        op="sdpa",
+        subop="sdpa",
+        class=Attention,
+        shapes=&ATTENTION_SHAPES,
+        tpg=1024,
+        tol=1e-3,
+        metal_file="scaled_dot_product_attention.metal",
+    )
 )]
-#[kernel]
 pub fn mt_sdpa<T>(
     q: Tensor<T>,
     k: Tensor<T>,
