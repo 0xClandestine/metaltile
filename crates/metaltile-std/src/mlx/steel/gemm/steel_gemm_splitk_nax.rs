@@ -264,3 +264,138 @@ mod tests {
         }
     }
 }
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+        ir::KernelMode,
+    };
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 =>
+                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn cpu_gemm(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; m * n];
+        for mr in 0..m {
+            for nc in 0..n {
+                let mut acc = 0.0f32;
+                for kk in 0..k { acc += a[mr * k + kk] * b[kk * n + nc]; }
+                out[mr * n + nc] = acc;
+            }
+        }
+        out
+    }
+
+    fn build_inputs(m: usize, n: usize, k: usize) -> (Vec<f32>, Vec<f32>) {
+        let a: Vec<f32> = (0..m * k).map(|i| 0.01 + (i as f32 % 17.0) * 0.013).collect();
+        let b: Vec<f32> = (0..k * n).map(|i| -0.02 + (i as f32 % 13.0) * 0.011).collect();
+        (a, b)
+    }
+
+    /// Test the accum_nax kernel alone with known fp32 partials.
+    fn make_accum_setup(dt: DType, n_splits: usize, m: usize, n: usize) -> TestSetup {
+        let partials: Vec<f32> =
+            (0..n_splits * m * n).map(|i| ((i / (m * n) + 1) as f32) * 0.01).collect();
+        let expected: Vec<f32> = (0..m * n)
+            .map(|_| (1..=n_splits).map(|s| s as f32 * 0.01).sum::<f32>())
+            .collect();
+        let mut kernel = mt_steel_gemm_splitk_accum_nax::kernel_ir_for(dt);
+        kernel.mode = KernelMode::Reduction;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec(
+                "partials",
+                bytemuck::cast_slice::<f32, u8>(&partials).to_vec(),
+                DType::F32,
+            ))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .constexpr("m", m as u32)
+            .constexpr("n", n as u32)
+            .constexpr("n_splits", n_splits as u32)
+            .grid_1d(m * n, 1)
+    }
+
+    /// Test the splitk_nax pass1 kernel: verify partial products.
+    fn make_pass1_setup(
+        dt: DType,
+        m: usize,
+        n: usize,
+        k: usize,
+        n_splits: usize,
+    ) -> TestSetup {
+        let k_per_split = k / n_splits;
+        let (a_f32, b_f32) = build_inputs(m, n, k);
+        let round = |v: f32| match dt {
+            DType::F32 => v,
+            DType::F16 => half::f16::from_f32(v).to_f32(),
+            DType::BF16 => half::bf16::from_f32(v).to_f32(),
+            _ => panic!(),
+        };
+        let a: Vec<f32> = a_f32.iter().map(|&v| round(v)).collect();
+        let b: Vec<f32> = b_f32.iter().map(|&v| round(v)).collect();
+        // Expected partials: one [m, n] block per K-split.
+        let mut expected = vec![0.0f32; n_splits * m * n];
+        for s in 0..n_splits {
+            let k_start = s * k_per_split;
+            let k_end = k_start + k_per_split;
+            for mr in 0..m {
+                for nc in 0..n {
+                    let mut acc = 0.0f32;
+                    for kk in k_start..k_end { acc += a[mr * k + kk] * b[kk * n + nc]; }
+                    expected[s * m * n + mr * n + nc] = acc;
+                }
+            }
+        }
+        let mut kernel = mt_steel_gemm_splitk_nax::kernel_ir_for(dt);
+        kernel.mode = KernelMode::Reduction;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("a", pack(&a, dt), dt))
+            .input(TestBuffer::from_vec("b", pack(&b, dt), dt))
+            .expect(TestBuffer::from_vec(
+                "partials",
+                bytemuck::cast_slice::<f32, u8>(&expected).to_vec(),
+                DType::F32,
+            ))
+            .constexpr("m", m as u32)
+            .constexpr("k", k as u32)
+            .constexpr("n", n as u32)
+            .constexpr("k_per_split", k_per_split as u32)
+            .grid_3d((n / 32) as u32, (m / 32) as u32, n_splits as u32, [128, 1, 1])
+    }
+
+    #[test_kernel(name = "steel/gemm_splitk_nax_accum_f32", dtypes = [f32], tol = 1e-5)]
+    fn test_gemm_splitk_nax_accum_f32(dt: DType) -> TestSetup {
+        make_accum_setup(dt, 2, 32, 32)
+    }
+
+    #[test_kernel(name = "steel/gemm_splitk_nax_accum_f16", dtypes = [f16], tol = 1e-3)]
+    fn test_gemm_splitk_nax_accum_f16(dt: DType) -> TestSetup {
+        make_accum_setup(dt, 2, 32, 32)
+    }
+
+    #[test_kernel(name = "steel/gemm_splitk_nax_pass1_f32_2way", dtypes = [f32], tol = 1e-3)]
+    fn test_gemm_splitk_nax_pass1_f32_2way(dt: DType) -> TestSetup {
+        make_pass1_setup(dt, 32, 32, 256, 2)
+    }
+
+    #[test_kernel(name = "steel/gemm_splitk_nax_pass1_f16", dtypes = [f16], tol = 5e-2)]
+    fn test_gemm_splitk_nax_pass1_f16(dt: DType) -> TestSetup {
+        make_pass1_setup(dt, 64, 64, 256, 2)
+    }
+
+    #[test_kernel(name = "steel/gemm_splitk_nax_pass1_bf16", dtypes = [bf16], tol = 2e-1)]
+    fn test_gemm_splitk_nax_pass1_bf16(dt: DType) -> TestSetup {
+        make_pass1_setup(dt, 64, 64, 256, 2)
+    }
+}

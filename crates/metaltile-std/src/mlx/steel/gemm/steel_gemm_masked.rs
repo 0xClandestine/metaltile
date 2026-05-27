@@ -190,3 +190,126 @@ steel_gemm_masked_kernel!(
     128u32,
     "bm32_bn32_bk16_wm2_wn2"
 );
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+        ir::KernelMode,
+    };
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 =>
+                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn round_dt(v: f32, dt: DType) -> f32 {
+        match dt {
+            DType::F32 => v,
+            DType::F16 => half::f16::from_f32(v).to_f32(),
+            DType::BF16 => half::bf16::from_f32(v).to_f32(),
+            _ => panic!(),
+        }
+    }
+
+    fn ramp(n: usize, modulus: usize, offset: f32) -> Vec<f32> {
+        (0..n).map(|i| ((i % modulus) as f32 - offset) * 0.05).collect()
+    }
+
+    fn naive_masked_matmul(
+        a: &[f32],
+        b: &[f32],
+        out_mask: &[f32],
+        op_mask: &[f32],
+        m: usize,
+        k: usize,
+        n: usize,
+        bm: usize,
+        bn: usize,
+    ) -> Vec<f32> {
+        let n_n_blocks = n / bn;
+        let n_k_blocks = k / 16;
+        let mut out = vec![0.0f32; m * n];
+        for mi in 0..m {
+            for ni in 0..n {
+                let blk = (mi / bm) * n_n_blocks + (ni / bn);
+                if out_mask[blk] == 0.0 {
+                    out[mi * n + ni] = 0.0;
+                    continue;
+                }
+                let mut acc = 0.0f32;
+                for kb in 0..n_k_blocks {
+                    let opm = op_mask[blk * n_k_blocks + kb];
+                    for ki in (kb * 16)..(kb * 16 + 16) {
+                        acc += a[mi * k + ki] * opm * b[ki * n + ni];
+                    }
+                }
+                out[mi * n + ni] = acc;
+            }
+        }
+        out
+    }
+
+    const BM: usize = 64;
+    const BN: usize = 64;
+    const M: usize = BM * 2;
+    const N: usize = BN * 2;
+    const K: usize = 48;
+
+    fn make_setup(dt: DType, out_mask: Vec<f32>, op_mask: Vec<f32>) -> TestSetup {
+        let a_raw = ramp(M * K, 19, 7.0);
+        let b_raw = ramp(K * N, 23, 9.0);
+        let a: Vec<f32> = a_raw.iter().map(|&v| round_dt(v, dt)).collect();
+        let b: Vec<f32> = b_raw.iter().map(|&v| round_dt(v, dt)).collect();
+        let expected =
+            naive_masked_matmul(&a, &b, &out_mask, &op_mask, M, K, N, BM, BN);
+        let mut kernel = mt_steel_gemm_masked_64x64x16_2x2::kernel_ir_for(dt);
+        kernel.mode = KernelMode::SimdGroup2D;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("a", pack(&a_raw, dt), dt))
+            .input(TestBuffer::from_vec("b", pack(&b_raw, dt), dt))
+            .input(TestBuffer::from_vec("out_mask", pack(&out_mask, dt), dt))
+            .input(TestBuffer::from_vec("op_mask", pack(&op_mask, dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .constexpr("m", M as u32)
+            .constexpr("n", N as u32)
+            .constexpr("k", K as u32)
+            .grid_2d((N / BN) as u32, (M / BM) as u32, [128, 1])
+    }
+
+    #[test_kernel(name = "steel/gemm_masked_all_ones_f32", dtypes = [f32], tol = 2e-3)]
+    fn test_gemm_masked_all_ones_f32(dt: DType) -> TestSetup {
+        make_setup(dt, vec![1.0f32; 4], vec![1.0f32; 12])
+    }
+
+    #[test_kernel(name = "steel/gemm_masked_checkerboard_f32", dtypes = [f32], tol = 2e-3)]
+    fn test_gemm_masked_checkerboard_f32(dt: DType) -> TestSetup {
+        make_setup(dt, vec![1.0f32, 0.0, 0.0, 1.0], vec![1.0f32; 12])
+    }
+
+    #[test_kernel(name = "steel/gemm_masked_partial_opmask_f32", dtypes = [f32], tol = 2e-3)]
+    fn test_gemm_masked_partial_opmask_f32(dt: DType) -> TestSetup {
+        let op_mask: Vec<f32> = (0..12).map(|i| if i % 3 == 1 { 0.0 } else { 1.0 }).collect();
+        make_setup(dt, vec![1.0f32; 4], op_mask)
+    }
+
+    #[test_kernel(name = "steel/gemm_masked_checkerboard_f16", dtypes = [f16], tol = 8e-2)]
+    fn test_gemm_masked_checkerboard_f16(dt: DType) -> TestSetup {
+        make_setup(dt, vec![1.0f32, 0.0, 0.0, 1.0], vec![1.0f32; 12])
+    }
+
+    #[test_kernel(name = "steel/gemm_masked_partial_opmask_bf16", dtypes = [bf16], tol = 5e-1)]
+    fn test_gemm_masked_partial_opmask_bf16(dt: DType) -> TestSetup {
+        let op_mask: Vec<f32> = (0..12).map(|i| if i % 3 == 1 { 0.0 } else { 1.0 }).collect();
+        make_setup(dt, vec![1.0f32; 4], op_mask)
+    }
+}
