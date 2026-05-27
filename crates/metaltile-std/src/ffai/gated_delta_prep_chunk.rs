@@ -255,6 +255,29 @@ pub mod tests_support {
     fn sigmoid(x: f32) -> f32 { 1.0 / (1.0 + (-x).exp()) }
 
     fn cpu_chunk_oracle(
+mod tests_support {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}};
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _           => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
+
+    fn softplus(x: f32) -> f32 { (x.exp() + 1.0).ln() }
+    fn sigmoid(x: f32) -> f32 { 1.0 / (1.0 + (-x).exp()) }
+
+    /// CPU oracle for prep_chunk: T sequential prep+recurrence steps with
+    /// state carried forward. Returns (y_all [B,T,Hv,Dv], state_final).
+    fn cpu_prep_chunk_oracle(
         conv_out: &[f32], a_log: &[f32], dt_bias: &[f32], a_raw: &[f32], b_raw: &[f32],
         q_norm_weight: &[f32], k_norm_weight: &[f32], state_in: &[f32],
         b: usize, t: usize, hv: usize, hk: usize, dv: usize, dk: usize,
@@ -297,6 +320,53 @@ pub mod tests_support {
                             let k_normed = conv_out[k_off + s_idx] * k_inv * k_norm_weight[hk_idx * dk + s_idx];
                             k_normed_arr[s_idx] = k_normed;
                             kv_mem += s * k_normed;
+
+        for step in 0..t {
+            for batch in 0..b {
+                let bt = batch * t + step;
+                let conv_base = bt * stride_b;
+                let q_base = conv_base;
+                let k_base = conv_base + hk * dk;
+                let v_base = conv_base + 2 * hk * dk;
+
+                // RMSNorm q/k per head.
+                let mut q_normed = vec![0.0_f32; hk * dk];
+                let mut k_normed = vec![0.0_f32; hk * dk];
+                for hk_idx in 0..hk {
+                    let row = hk_idx * dk;
+                    let mut q_ssq = 0.0_f32;
+                    let mut k_ssq = 0.0_f32;
+                    for d in 0..dk {
+                        let qv = conv_out[q_base + row + d];
+                        let kv = conv_out[k_base + row + d];
+                        q_ssq += qv * qv;
+                        k_ssq += kv * kv;
+                    }
+                    let qi = 1.0 / ((q_ssq / dk as f32) + eps).sqrt();
+                    let ki = 1.0 / ((k_ssq / dk as f32) + eps).sqrt();
+                    for d in 0..dk {
+                        q_normed[row + d] = conv_out[q_base + row + d] * qi * q_norm_weight[hk_idx * dk + d];
+                        k_normed[row + d] = conv_out[k_base + row + d] * ki * k_norm_weight[hk_idx * dk + d];
+                    }
+                }
+
+                for hv_idx in 0..hv {
+                    let n = batch * hv + hv_idx;
+                    let hk_idx = hv_idx / hk_per_hv;
+                    let gbeta_idx = bt * hv + hv_idx;
+                    let dt_v = softplus(a_raw[gbeta_idx] + dt_bias[hv_idx]);
+                    let g_val = (-a_log[hv_idx].exp() * dt_v).exp();
+                    let beta_val = sigmoid(b_raw[gbeta_idx]);
+                    let qk_base = hk_idx * dk;
+                    for dv_idx in 0..dv {
+                        let v_val = conv_out[v_base + hv_idx * dv + dv_idx];
+                        let s_base = n * dv * dk + dv_idx * dk;
+                        let mut kv_mem = 0.0_f32;
+                        let mut decayed = vec![0.0_f32; dk];
+                        for s_idx in 0..dk {
+                            let s = state[s_base + s_idx] * g_val;
+                            decayed[s_idx] = s;
+                            kv_mem += s * k_normed[qk_base + s_idx];
                         }
                         let delta = (v_val - kv_mem) * beta_val;
                         let mut out = 0.0_f32;
@@ -305,6 +375,9 @@ pub mod tests_support {
                             state[s_base + s_idx] = s_new;
                             let q_normed = conv_out[q_off + s_idx] * q_inv * q_norm_weight[hk_idx * dk + s_idx];
                             out += s_new * q_normed;
+                            let s_new = decayed[s_idx] + k_normed[qk_base + s_idx] * delta;
+                            state[s_base + s_idx] = s_new;
+                            out += s_new * q_normed[qk_base + s_idx];
                         }
                         y_all[(bt * hv + hv_idx) * dv + dv_idx] = out;
                     }
@@ -426,5 +499,55 @@ pub mod tests_support {
         let (cy, cs) = run_cell(1, 32, 4, 2, 8, 32, Dt::Bf16, true, 1.0);
         assert!(cy >= 0.995, "bf16 small T=32 y cos = {cy:.6}");
         assert!(cs >= 0.995, "bf16 small T=32 state cos = {cs:.6}");
+    #[test_kernel(name = "ffai/gated_delta/prep_chunk", dtypes = [f32], tol = 1e-3)]
+    fn test_gated_delta_prep_chunk(dt: DType) -> TestSetup {
+        use super::mt_gated_delta_prep_chunk;
+        let b = 1usize;
+        let t = 4usize;
+        let hv = 4usize;
+        let hk = 2usize;
+        let dv = 8usize;
+        let dk = 32usize;
+        let stride_b = 2 * hk * dk + hv * dv;
+        let n_total = b * hv;
+
+        let conv_out: Vec<f32> =
+            (0..b * t * stride_b).map(|i| ((i as f32) * 0.0173).sin() * 0.5).collect();
+        let a_log: Vec<f32> = (0..hv).map(|i| -1.0 + (i as f32) * 0.2).collect();
+        let dt_bias: Vec<f32> = (0..hv).map(|i| (i as f32) * 0.05).collect();
+        let a_raw: Vec<f32> =
+            (0..b * t * hv).map(|i| ((i as f32) * 0.1).sin() * 0.3).collect();
+        let b_raw: Vec<f32> =
+            (0..b * t * hv).map(|i| ((i as f32) * 0.13).cos() * 0.4).collect();
+        let q_norm_weight: Vec<f32> = vec![1.0_f32; hk * dk];
+        let k_norm_weight: Vec<f32> = vec![1.0_f32; hk * dk];
+        let state_in: Vec<f32> =
+            (0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.05).collect();
+
+        let (expected_y, expected_state) = cpu_prep_chunk_oracle(
+            &conv_out, &a_log, &dt_bias, &a_raw, &b_raw, &q_norm_weight, &k_norm_weight,
+            &state_in, b, t, hv, hk, dv, dk,
+        );
+
+        let mut kernel_ir = mt_gated_delta_prep_chunk::kernel_ir_for(dt);
+        kernel_ir.mode = metaltile_core::ir::KernelMode::Reduction;
+
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("conv_out", pack(&conv_out, dt), dt))
+            .input(TestBuffer::from_vec("a_log", pack(&a_log, dt), dt))
+            .input(TestBuffer::from_vec("dt_bias", pack(&dt_bias, dt), dt))
+            .input(TestBuffer::from_vec("a_raw", pack(&a_raw, dt), dt))
+            .input(TestBuffer::from_vec("b_raw", pack(&b_raw, dt), dt))
+            .input(TestBuffer::from_vec("q_norm_weight", pack(&q_norm_weight, dt), dt))
+            .input(TestBuffer::from_vec("k_norm_weight", pack(&k_norm_weight, dt), dt))
+            .input(TestBuffer::from_vec("state_in", pack(&state_in, dt), dt))
+            .input(TestBuffer::from_vec("t_total", u32_le(t as u32), DType::U32))
+            .input(TestBuffer::from_vec("dk", u32_le(dk as u32), DType::U32))
+            .input(TestBuffer::from_vec("dv", u32_le(dv as u32), DType::U32))
+            .input(TestBuffer::from_vec("hv", u32_le(hv as u32), DType::U32))
+            .input(TestBuffer::from_vec("hk", u32_le(hk as u32), DType::U32))
+            .expect(TestBuffer::from_vec("y", pack(&expected_y, dt), dt))
+            .expect(TestBuffer::from_vec("state_out", pack(&expected_state, dt), dt))
+            .grid_3d(dv as u32, n_total as u32, 1, [32, 1, 1])
     }
 }

@@ -68,6 +68,109 @@
 
 use metaltile::kernel;
 
+mod tests_support {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}};
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _           => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
+
+    /// Sequential GDN reference (CPU). Same recurrence as gated_delta_ops.
+    fn sequential_gdn(
+        q: &[f32], k: &[f32], v: &[f32], g: &[f32], beta: &[f32], state: &mut [f32],
+        t_total: usize, hk: usize, hv: usize, dk: usize, dv: usize,
+    ) -> Vec<f32> {
+        let hv_per_hk = hv / hk;
+        let mut y = vec![0.0_f32; t_total * hv * dv];
+        for t in 0..t_total {
+            for h_v in 0..hv {
+                let h_k = h_v / hv_per_hk;
+                let gt = g[t * hv + h_v];
+                let bt = beta[t * hv + h_v];
+                for d_v in 0..dv {
+                    let v_val = v[(t * hv + h_v) * dv + d_v];
+                    let s_base = (h_v * dv + d_v) * dk;
+                    let mut kv_mem = 0.0_f32;
+                    let mut decayed = vec![0.0_f32; dk];
+                    for s_idx in 0..dk {
+                        let s = state[s_base + s_idx] * gt;
+                        decayed[s_idx] = s;
+                        kv_mem += s * k[(t * hk + h_k) * dk + s_idx];
+                    }
+                    let delta = (v_val - kv_mem) * bt;
+                    let mut out = 0.0_f32;
+                    for s_idx in 0..dk {
+                        let s_new = decayed[s_idx] + k[(t * hk + h_k) * dk + s_idx] * delta;
+                        state[s_base + s_idx] = s_new;
+                        out += s_new * q[(t * hk + h_k) * dk + s_idx];
+                    }
+                    y[(t * hv + h_v) * dv + d_v] = out;
+                }
+            }
+        }
+        y
+    }
+
+    #[test_kernel(name = "ffai/gated_delta/wy_chunk", dtypes = [f32], tol = 1e-3)]
+    fn test_gated_delta_wy_chunk(dt: DType) -> TestSetup {
+        use super::mt_gated_delta_wy_chunk;
+        let t = 8usize;
+        let hk = 2usize;
+        let hv = 4usize;
+        let dk = 32usize;
+        let dv = 16usize;
+        // chunk_size must match the kernel's C constexpr (default 64 in the kernel)
+        // but for small T we use T itself as chunk
+        let chunk_size = t;
+
+        let q: Vec<f32> =
+            (0..t * hk * dk).map(|i| ((i as f32) * 0.013).sin() * 0.3).collect();
+        let k: Vec<f32> =
+            (0..t * hk * dk).map(|i| ((i as f32) * 0.017).cos() * 0.3).collect();
+        let v: Vec<f32> =
+            (0..t * hv * dv).map(|i| ((i as f32) * 0.019).sin() * 0.4).collect();
+        let g: Vec<f32> =
+            (0..t * hv).map(|i| 0.8 + 0.1 * ((i as f32) * 0.07).cos()).collect();
+        let beta: Vec<f32> =
+            (0..t * hv).map(|i| 0.3 + 0.1 * ((i as f32) * 0.05).sin()).collect();
+        let state_initial: Vec<f32> =
+            (0..hv * dv * dk).map(|i| ((i as f32) * 0.009).sin() * 0.05).collect();
+
+        let mut state_oracle = state_initial.clone();
+        let expected_y =
+            sequential_gdn(&q, &k, &v, &g, &beta, &mut state_oracle, t, hk, hv, dk, dv);
+
+        let mut kernel_ir = mt_gated_delta_wy_chunk::kernel_ir_for(dt);
+        kernel_ir.mode = metaltile_core::ir::KernelMode::Reduction;
+
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("q", pack(&q, dt), dt))
+            .input(TestBuffer::from_vec("k", pack(&k, dt), dt))
+            .input(TestBuffer::from_vec("v", pack(&v, dt), dt))
+            .input(TestBuffer::from_vec("g", pack(&g, dt), dt))
+            .input(TestBuffer::from_vec("beta", pack(&beta, dt), dt))
+            .input(TestBuffer::from_vec("state_in", pack(&state_initial, dt), dt))
+            .input(TestBuffer::from_vec("t_total", u32_le(t as u32), DType::U32))
+            .input(TestBuffer::from_vec("hk", u32_le(hk as u32), DType::U32))
+            .input(TestBuffer::from_vec("hv", u32_le(hv as u32), DType::U32))
+            .input(TestBuffer::from_vec("dk", u32_le(dk as u32), DType::U32))
+            .input(TestBuffer::from_vec("dv", u32_le(dv as u32), DType::U32))
+            .expect(TestBuffer::from_vec("y", pack(&expected_y, dt), dt))
+            .expect(TestBuffer::from_vec("state_out", pack(&state_oracle, dt), dt))
+            .grid_3d(dv as u32, hv as u32, 1, [32, 1, 1])
+    }
+}
+
 #[kernel]
 pub fn mt_gated_delta_wy_chunk<T>(
     q: Tensor<T>,

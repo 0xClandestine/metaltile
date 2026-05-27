@@ -27,6 +27,98 @@
 
 use metaltile::kernel;
 
+mod tests_support {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}};
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _           => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
+
+    fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
+
+    fn xorshift(s: &mut u64) -> f32 {
+        *s ^= *s << 13; *s ^= *s >> 7; *s ^= *s << 17;
+        (*s % 20_000) as f32 / 20_000.0 - 0.5
+    }
+
+    fn src(n: usize, seed: u64, scale: f32) -> Vec<f32> {
+        let mut s = seed;
+        (0..n).map(|_| xorshift(&mut s) * scale).collect()
+    }
+
+    const DK: usize = 64;
+    const DV: usize = 32;
+    const HK: usize = 2;
+    const HV: usize = 2;
+
+    /// Branchless tape re-fold reference (state_replay).
+    fn naive_replay(
+        delta_log: &[f32], k_log: &[f32], g_log: &[f32], state_in: &[f32],
+        mask: &[u32], batch: usize, t_log: usize, accepted: usize, has_mask: bool,
+    ) -> Vec<f32> {
+        let mut state = state_in.to_vec();
+        for n in 0..batch * HV {
+            let b = n / HV;
+            let hvh = n % HV;
+            for t in 0..t_log {
+                let do_step = t < accepted && (!has_mask || mask[b * t_log + t] != 0);
+                if !do_step { continue; }
+                let dr = (b * t_log + t) * HV * DV + hvh * DV;
+                let kr = (b * t_log + t) * HV * DK + hvh * DK;
+                let g = g_log[(b * t_log + t) * HV + hvh];
+                for dv in 0..DV {
+                    let s0 = (n * DV + dv) * DK;
+                    for dk in 0..DK {
+                        state[s0 + dk] = state[s0 + dk] * g + k_log[kr + dk] * delta_log[dr + dv];
+                    }
+                }
+            }
+        }
+        state
+    }
+
+    #[test_kernel(name = "ffai/gated_delta/replay", dtypes = [f32], tol = 2e-3)]
+    fn test_state_replay(dt: DType) -> TestSetup {
+        use super::state_replay_d64_32_2_2;
+        let batch = 1usize;
+        let t_log = 5usize;
+        let accepted = 3usize;
+
+        let delta_log = src(batch * t_log * HV * DV, 0x21, 0.5);
+        let k_log = src(batch * t_log * HV * DK, 0x22, 0.4);
+        let g_log: Vec<f32> =
+            src(batch * t_log * HV, 0x23, 0.1).iter().map(|v| 0.9 + v).collect();
+        let state_in = src(batch * HV * DV * DK, 0x24, 0.3);
+        let mask: Vec<u32> = vec![1; batch * t_log];
+        let expected = naive_replay(&delta_log, &k_log, &g_log, &state_in, &mask, batch, t_log, accepted, false);
+
+        let mut kernel_ir = state_replay_d64_32_2_2::kernel_ir_for(dt);
+        kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
+
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("delta_log", pack(&delta_log, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("k_log", pack(&k_log, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("g_log", pack(&g_log, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("state_in", pack(&state_in, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("mask", u32_bytes(&mask), DType::U32))
+            .input(TestBuffer::from_vec("t_log", u32_le(t_log as u32), DType::U32))
+            .input(TestBuffer::from_vec("accepted", u32_le(accepted as u32), DType::U32))
+            .input(TestBuffer::from_vec("has_mask", u32_le(0u32), DType::U32))
+            .expect(TestBuffer::from_vec("state_out", pack(&expected, DType::F32), DType::F32))
+            .grid_3d(1, DV as u32, (batch * HV) as u32, [32, 1, 1])
+    }
+}
+
 // ── Forward GatedDelta step with per-step delta-tape capture ────────────────
 #[rustfmt::skip]
 macro_rules! gated_delta_record {

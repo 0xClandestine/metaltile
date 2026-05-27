@@ -24,6 +24,207 @@
 
 use metaltile::kernel;
 
+mod tests_support {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}};
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _           => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
+
+    /// CPU oracle for ssm_step (Mamba 2 SSD-form single-token decode).
+    fn naive_ssm_step(
+        x: &[f32], a: &[f32], b_vec: &[f32], c_vec: &[f32], dt: &[f32],
+        h_state: &mut [f32], n_heads: usize, head_dim: usize, state_dim: usize,
+    ) -> Vec<f32> {
+        let mut y = vec![0.0_f32; n_heads * head_dim];
+        for h in 0..n_heads {
+            let decay = (a[h] * dt[h]).exp();
+            let h_base = h * state_dim * head_dim;
+            for d in 0..head_dim {
+                let x_d = x[h * head_dim + d];
+                let mut y_d = 0.0_f32;
+                for n in 0..state_dim {
+                    let h_idx = h_base + n * head_dim + d;
+                    let h_old = h_state[h_idx];
+                    let new_h = decay * h_old + dt[h] * b_vec[n] * x_d;
+                    h_state[h_idx] = new_h;
+                    y_d += c_vec[n] * new_h;
+                }
+                y[h * head_dim + d] = y_d;
+            }
+        }
+        y
+    }
+
+    /// CPU oracle for conv1d_causal_step.
+    fn naive_conv1d_causal_step(
+        x: &[f32], w: &[f32], b: &[f32], state: &mut [f32],
+        n_channels: usize, kernel_size: usize,
+    ) -> Vec<f32> {
+        let mut y = vec![0.0_f32; n_channels];
+        let k_last = kernel_size - 1;
+        for d in 0..n_channels {
+            let mut acc = b[d] + w[k_last * n_channels + d] * x[d];
+            for k in 0..k_last {
+                acc += w[k * n_channels + d] * state[k * n_channels + d];
+            }
+            y[d] = acc;
+        }
+        for d in 0..n_channels {
+            for k in 0..kernel_size.saturating_sub(2) {
+                state[k * n_channels + d] = state[(k + 1) * n_channels + d];
+            }
+            if kernel_size >= 2 {
+                state[(kernel_size - 2) * n_channels + d] = x[d];
+            }
+        }
+        y
+    }
+
+    #[test_kernel(name = "ffai/ssm/step", dtypes = [f32], tol = 1e-4)]
+    fn test_ssm_step(dt: DType) -> TestSetup {
+        use super::ssm_step;
+        let n_heads = 4usize;
+        let head_dim = 16usize;
+        let state_dim = 8usize;
+
+        let x: Vec<f32> = (0..n_heads * head_dim).map(|i| ((i as f32) * 0.013).sin() * 0.3).collect();
+        let a: Vec<f32> = (0..n_heads).map(|i| -0.5 - (i as f32) * 0.1).collect();
+        let b_vec: Vec<f32> = (0..state_dim).map(|i| 0.1 + (i as f32) * 0.05).collect();
+        let c_vec: Vec<f32> = (0..state_dim).map(|i| 0.2 - (i as f32) * 0.02).collect();
+        let dt_in: Vec<f32> = (0..n_heads).map(|i| 0.01 + (i as f32) * 0.003).collect();
+        let h_initial: Vec<f32> =
+            (0..n_heads * state_dim * head_dim).map(|i| ((i as f32) * 0.011).cos() * 0.1).collect();
+
+        let mut h_oracle = h_initial.clone();
+        let expected_y = naive_ssm_step(&x, &a, &b_vec, &c_vec, &dt_in, &mut h_oracle, n_heads, head_dim, state_dim);
+
+        let mut kernel_ir = ssm_step::kernel_ir_for(dt);
+        kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
+        let total = n_heads * head_dim;
+
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("x", pack(&x, dt), dt))
+            .input(TestBuffer::from_vec("a", pack(&a, dt), dt))
+            .input(TestBuffer::from_vec("b", pack(&b_vec, dt), dt))
+            .input(TestBuffer::from_vec("c", pack(&c_vec, dt), dt))
+            .input(TestBuffer::from_vec("dt", pack(&dt_in, dt), dt))
+            .input(TestBuffer::from_vec("h", pack(&h_initial, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("head_dim", u32_le(head_dim as u32), DType::U32))
+            .input(TestBuffer::from_vec("state_dim", u32_le(state_dim as u32), DType::U32))
+            .expect(TestBuffer::from_vec("y", pack(&expected_y, dt), dt))
+            .expect(TestBuffer::from_vec("h", pack(&h_oracle, DType::F32), DType::F32))
+            .grid_3d(1, 1, 1, [total as u32, 1, 1])
+    }
+
+    #[test_kernel(name = "ffai/ssm/conv1d_causal_step", dtypes = [f32], tol = 1e-4)]
+    fn test_conv1d_causal_step(dt: DType) -> TestSetup {
+        use super::conv1d_causal_step;
+        let n_channels = 64usize;
+        let kernel_size = 4usize;
+
+        let x: Vec<f32> = (0..n_channels).map(|i| ((i as f32) * 0.013).sin()).collect();
+        let w: Vec<f32> =
+            (0..kernel_size * n_channels).map(|i| 0.1 + ((i as f32) * 0.019).cos() * 0.2).collect();
+        let b: Vec<f32> = (0..n_channels).map(|i| (i as f32) * 0.001 - 0.05).collect();
+        let state_initial: Vec<f32> =
+            (0..(kernel_size - 1) * n_channels).map(|i| ((i as f32) * 0.007).sin() * 0.5).collect();
+
+        let mut state_oracle = state_initial.clone();
+        let expected_y = naive_conv1d_causal_step(&x, &w, &b, &mut state_oracle, n_channels, kernel_size);
+
+        let mut kernel_ir = conv1d_causal_step::kernel_ir_for(dt);
+        kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
+
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("x", pack(&x, dt), dt))
+            .input(TestBuffer::from_vec("w", pack(&w, dt), dt))
+            .input(TestBuffer::from_vec("b", pack(&b, dt), dt))
+            .input(TestBuffer::from_vec("state", pack(&state_initial, dt), dt))
+            .input(TestBuffer::from_vec("n_channels", u32_le(n_channels as u32), DType::U32))
+            .input(TestBuffer::from_vec("kernel_size", u32_le(kernel_size as u32), DType::U32))
+            .expect(TestBuffer::from_vec("y", pack(&expected_y, dt), dt))
+            .grid_3d(1, 1, 1, [n_channels as u32, 1, 1])
+    }
+
+    /// CPU oracle for ssm_step_a2d (Mamba 1 / Jamba 2-D A_log variant).
+    fn naive_ssm_step_a2d(
+        x: &[f32], a_log: &[f32], b: &[f32], c: &[f32], dt: &[f32],
+        h: &mut [f32], n_heads: usize, head_dim: usize, state_dim: usize,
+    ) -> Vec<f32> {
+        let mut y = vec![0.0_f32; n_heads * head_dim];
+        for hi in 0..n_heads {
+            let dt_val = dt[hi];
+            let h_base = hi * state_dim * head_dim;
+            for d in 0..head_dim {
+                let x_d = x[hi * head_dim + d];
+                let channel = hi * head_dim + d;
+                let a_log_base = channel * state_dim;
+                let mut y_d = 0.0_f32;
+                for n in 0..state_dim {
+                    let a_val = -a_log[a_log_base + n].exp();
+                    let decay = (a_val * dt_val).exp();
+                    let h_idx = h_base + n * head_dim + d;
+                    let h_old = h[h_idx];
+                    let new_h = decay * h_old + dt_val * b[n] * x_d;
+                    h[h_idx] = new_h;
+                    y_d += c[n] * new_h;
+                }
+                y[hi * head_dim + d] = y_d;
+            }
+        }
+        y
+    }
+
+    #[test_kernel(name = "ffai/ssm/step_a2d", dtypes = [f32], tol = 1e-4)]
+    fn test_ssm_step_a2d(dt: DType) -> TestSetup {
+        use super::ssm_step_a2d;
+        let n_heads = 4usize;
+        let head_dim = 32usize;
+        let state_dim = 16usize;
+
+        let x: Vec<f32> = (0..n_heads * head_dim).map(|i| (((i % 11) as f32 - 5.0) * 0.02)).collect();
+        let a_log: Vec<f32> =
+            (0..n_heads * head_dim * state_dim).map(|i| -1.0 + 0.013 * (i as f32 % 19.0)).collect();
+        let b: Vec<f32> = (0..state_dim).map(|i| ((i % 5) as f32 - 2.0) * 0.05).collect();
+        let c: Vec<f32> = (0..state_dim).map(|i| ((i % 7) as f32 - 3.0) * 0.03).collect();
+        let dt_in: Vec<f32> = (0..n_heads).map(|i| 0.1 + 0.05 * i as f32).collect();
+        let h_initial: Vec<f32> =
+            (0..n_heads * state_dim * head_dim).map(|i| ((i % 13) as f32 - 6.0) * 0.01).collect();
+
+        let mut h_oracle = h_initial.clone();
+        let expected_y =
+            naive_ssm_step_a2d(&x, &a_log, &b, &c, &dt_in, &mut h_oracle, n_heads, head_dim, state_dim);
+
+        let mut kernel_ir = ssm_step_a2d::kernel_ir_for(dt);
+        kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
+        let total = n_heads * head_dim;
+
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("x", pack(&x, dt), dt))
+            .input(TestBuffer::from_vec("a_log", pack(&a_log, dt), dt))
+            .input(TestBuffer::from_vec("b", pack(&b, dt), dt))
+            .input(TestBuffer::from_vec("c", pack(&c, dt), dt))
+            .input(TestBuffer::from_vec("dt", pack(&dt_in, dt), dt))
+            .input(TestBuffer::from_vec("h", pack(&h_initial, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("head_dim", u32_le(head_dim as u32), DType::U32))
+            .input(TestBuffer::from_vec("state_dim", u32_le(state_dim as u32), DType::U32))
+            .expect(TestBuffer::from_vec("y", pack(&expected_y, dt), dt))
+            .expect(TestBuffer::from_vec("h", pack(&h_oracle, DType::F32), DType::F32))
+            .grid_3d(1, 1, 1, [total as u32, 1, 1])
+    }
+}
+
 // Mamba 2 / Mamba 1D depthwise causal-conv step — streaming-decode form.
 //
 //   y[d] = bias[d]
