@@ -540,8 +540,6 @@ pub enum Op {
     },
 
     /// Reduction along an axis.
-    #[needs_simd_lane]
-    #[needs_simd_group]
     #[result_custom]
     Reduce {
         #[vid]
@@ -828,8 +826,6 @@ pub enum Op {
     },
 
     /// Prefix scan along an axis (inclusive or exclusive).
-    #[needs_simd_lane]
-    #[needs_simd_group]
     #[result_same_type]
     Scan {
         #[vid]
@@ -891,8 +887,6 @@ pub enum Op {
     // ---- SIMD-group and threadgroup primitives ----
     /// SIMD-group reduction: reduce all lanes within the SIMD group.
     /// Maps to `simd_sum(v)`, `simd_max(v)`, `simd_min(v)` (Metal 2.1+).
-    #[needs_simd_lane]
-    #[needs_simd_group]
     #[result_same_type]
     SimdReduce {
         #[vid]
@@ -903,8 +897,6 @@ pub enum Op {
     /// SIMD-group butterfly shuffle: `simd_shuffle_xor(value, mask)`.
     /// Used by Steel attention row reductions, where lanes sharing the same
     /// MMA row exchange values through fixed xor masks (for example 1 and 8).
-    #[needs_simd_lane]
-    #[needs_simd_group]
     #[result_same_type]
     SimdShuffleXor {
         #[vid]
@@ -914,16 +906,12 @@ pub enum Op {
 
     /// Allocate a simdgroup matrix of shape M×N with given element type.
     /// Emits `simdgroup_matrix<T, M, N> name;` in MSL.
-    #[needs_simd_lane]
-    #[needs_simd_group]
     #[needs_simdgroup_matrix]
     #[result_f32_scalar]
     SimdgroupAlloc { dtype: DType, m: u32, n: u32 },
 
     /// Load one element from a simdgroup matrix: `result = name.thread_elements()[index]`.
     /// Produces a scalar value.
-    #[needs_simd_lane]
-    #[needs_simd_group]
     #[needs_simdgroup_matrix]
     #[result_f32_scalar]
     SimdgroupElemLoad {
@@ -934,8 +922,6 @@ pub enum Op {
 
     /// Store one element into a simdgroup matrix: `name.thread_elements()[index] = data`.
     /// No result (side-effecting).
-    #[needs_simd_lane]
-    #[needs_simd_group]
     #[needs_simdgroup_matrix]
     #[no_result]
     SimdgroupElemStore {
@@ -959,8 +945,6 @@ pub enum Op {
     /// and column dimensions of the loaded fragment — used to load a B
     /// operand stored row-major `[N, K]` as if it were `[K, N]` for the
     /// standard `C = A * B` MMA layout (MLX `qmm_t` pattern).
-    #[needs_simd_lane]
-    #[needs_simd_group]
     #[needs_simdgroup_matrix]
     #[no_result]
     SimdgroupLoad {
@@ -975,8 +959,6 @@ pub enum Op {
 
     /// simdgroup multiply-accumulate: `C = A * B + C`.
     /// All three operands must be simdgroup matrices of compatible shapes.
-    #[needs_simd_lane]
-    #[needs_simd_group]
     #[needs_simdgroup_matrix]
     #[no_result]
     SimdgroupMatMul {
@@ -1002,8 +984,6 @@ pub enum Op {
 
     /// SIMD-group inclusive prefix scan.
     /// Maps to `simd_scan_inclusive_<op>(v)` (Metal 3.0+).
-    #[needs_simd_lane]
-    #[needs_simd_group]
     #[result_f32_scalar]
     SimdScan {
         #[vid]
