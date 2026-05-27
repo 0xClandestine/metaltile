@@ -98,3 +98,49 @@ pub fn mt_sgload_smoke<T>(src: Tensor<T>, mut dst: Tensor<T>) {
     store(dst[fm * 8u32 + fn0], v0);
     store(dst[fm * 8u32 + fn1], v1);
 }
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 =>
+                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn round_dt(v: f32, dt: DType) -> f32 {
+        match dt {
+            DType::F32 => v,
+            DType::F16 => half::f16::from_f32(v).to_f32(),
+            _ => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn make_round_trip_setup(dt: DType) -> TestSetup {
+        // Values in [0, 8) — representable exactly in both f32 and f16.
+        let src: Vec<f32> =
+            (0..64).map(|i| round_dt(0.125 * (i as f32) + 0.5, dt)).collect();
+        // Expected: bit-exact round-trip (no math, just simdgroup_load/store).
+        TestSetup::new(mt_sgload_smoke::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("src", pack(&src, dt), dt))
+            .expect(TestBuffer::from_vec("dst", pack(&src, dt), dt))
+            .grid_3d(1, 1, 1, [32, 1, 1])
+    }
+
+    #[test_kernel(name = "sgload_smoke/round_trip_f32", dtypes = [f32], tol = 0.0)]
+    fn test_sgload_smoke_round_trip_f32(dt: DType) -> TestSetup { make_round_trip_setup(dt) }
+
+    #[test_kernel(name = "sgload_smoke/round_trip_f16", dtypes = [f16], tol = 0.0)]
+    fn test_sgload_smoke_round_trip_f16(dt: DType) -> TestSetup { make_round_trip_setup(dt) }
+}

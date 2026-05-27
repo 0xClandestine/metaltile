@@ -239,3 +239,110 @@ steel_gemm_fused_kernel!(
     64u32,
     "bm32_bn32_bk16_wm1_wn2"
 );
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 =>
+                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn round_dt(v: f32, dt: DType) -> f32 {
+        match dt {
+            DType::F32 => v,
+            DType::F16 => half::f16::from_f32(v).to_f32(),
+            DType::BF16 => half::bf16::from_f32(v).to_f32(),
+            _ => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn naive_matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; m * n];
+        for mi in 0..m {
+            for ni in 0..n {
+                let mut acc = 0.0f32;
+                for ki in 0..k { acc += a[mi * k + ki] * b[ki * n + ni]; }
+                out[mi * n + ni] = acc;
+            }
+        }
+        out
+    }
+
+    fn make_setup(
+        kernel_ir: fn(DType) -> metaltile_core::ir::Kernel,
+        dt: DType,
+        m: usize,
+        k: usize,
+        n: usize,
+        bm: usize,
+        bn: usize,
+        tpg: u32,
+    ) -> TestSetup {
+        let a: Vec<f32> =
+            (0..m * k).map(|i| round_dt(((i % 19) as f32 - 7.0) * 0.05, dt)).collect();
+        let b: Vec<f32> =
+            (0..k * n).map(|i| round_dt(((i % 23) as f32 - 9.0) * 0.05, dt)).collect();
+        let expected = naive_matmul(&a, &b, m, k, n);
+        let mut kernel = kernel_ir(dt);
+        kernel.mode = metaltile_core::ir::KernelMode::SimdGroup2D;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("a", pack(&a, dt), dt))
+            .input(TestBuffer::from_vec("b", pack(&b, dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .constexpr("m", m as u32)
+            .constexpr("n", n as u32)
+            .constexpr("k", k as u32)
+            .grid_2d((n / bn) as u32, (m / bm) as u32, [tpg, 1])
+    }
+
+    // ── 64×64×16 / 2×2 — bm=64, bn=64, tpg=128 ──────────────────────────
+
+    #[test_kernel(name = "steel/gemm_fused_64x64x16_2x2_f32", dtypes = [f32], tol = 2e-3)]
+    fn test_gemm_fused_64x64x16_2x2_f32(dt: DType) -> TestSetup {
+        make_setup(mt_steel_gemm_64x64x16_2x2::kernel_ir_for, dt, 128, 48, 128, 64, 64, 128)
+    }
+
+    #[test_kernel(name = "steel/gemm_fused_64x64x16_2x2_f16", dtypes = [f16], tol = 8e-2)]
+    fn test_gemm_fused_64x64x16_2x2_f16(dt: DType) -> TestSetup {
+        make_setup(mt_steel_gemm_64x64x16_2x2::kernel_ir_for, dt, 128, 48, 128, 64, 64, 128)
+    }
+
+    #[test_kernel(name = "steel/gemm_fused_64x64x16_2x2_bf16", dtypes = [bf16], tol = 5e-1)]
+    fn test_gemm_fused_64x64x16_2x2_bf16(dt: DType) -> TestSetup {
+        make_setup(mt_steel_gemm_64x64x16_2x2::kernel_ir_for, dt, 128, 48, 128, 64, 64, 128)
+    }
+
+    // ── 32×32×16 / 2×2 — bm=32, bn=32, tpg=128 ──────────────────────────
+
+    #[test_kernel(name = "steel/gemm_fused_32x32x16_2x2_f32", dtypes = [f32], tol = 2e-3)]
+    fn test_gemm_fused_32x32x16_2x2_f32(dt: DType) -> TestSetup {
+        make_setup(mt_steel_gemm_32x32x16_2x2::kernel_ir_for, dt, 64, 48, 64, 32, 32, 128)
+    }
+
+    // ── 64×64×16 / 1×2 — bm=64, bn=64, tpg=64 ───────────────────────────
+
+    #[test_kernel(name = "steel/gemm_fused_64x64x16_1x2_f32", dtypes = [f32], tol = 2e-3)]
+    fn test_gemm_fused_64x64x16_1x2_f32(dt: DType) -> TestSetup {
+        make_setup(mt_steel_gemm_64x64x16_1x2::kernel_ir_for, dt, 128, 48, 128, 64, 64, 64)
+    }
+
+    // ── 32×64×16 / 1×2 — bm=32, bn=64, tpg=64 ───────────────────────────
+
+    #[test_kernel(name = "steel/gemm_fused_32x64x16_1x2_f32", dtypes = [f32], tol = 2e-3)]
+    fn test_gemm_fused_32x64x16_1x2_f32(dt: DType) -> TestSetup {
+        make_setup(mt_steel_gemm_32x64x16_1x2::kernel_ir_for, dt, 64, 48, 128, 32, 64, 64)
+    }
+}
