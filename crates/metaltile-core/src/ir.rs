@@ -1416,17 +1416,24 @@ pub struct Kernel {
 
 impl Kernel {
     pub fn new(name: impl Into<String>) -> Self {
-        let body = Block::new(BlockId::new(0));
-        let mut blocks = FxHashMap::default();
-        blocks.insert(BlockId::new(0), body.clone());
-
         Kernel {
             name: name.into(),
             mode: KernelMode::default(),
             params: Vec::new(),
             constexprs: Vec::new(),
-            body,
-            blocks,
+            body: Block::new(BlockId::new(0)),
+            // `kernel.blocks` holds NESTED blocks only — loop bodies,
+            // if-then/else branches, etc.  The entry block lives at
+            // `kernel.body` and is the canonical source of truth for
+            // block 0.  Earlier versions also inserted a clone of the
+            // entry block here under `BlockId(0)`; that copy was never
+            // updated by passes mutating `kernel.body`, and any code
+            // walking `kernel.blocks.values()` for analysis ended up
+            // reading stale state.  Lookups now go through
+            // `kernel.body` for the entry block and `kernel.blocks`
+            // for everything else — see [`iter_blocks`] for a unified
+            // walk.
+            blocks: FxHashMap::default(),
             return_shapes: Vec::new(),
             tile_annotations: FxHashMap::default(),
             bfloat_reinterpret_cast: false,
@@ -1435,18 +1442,34 @@ impl Kernel {
     }
 
     /// Add a block to the kernel, returning its ID.
+    ///
+    /// Panics if `block.id == self.body.id` — the entry block lives in
+    /// `self.body`, not `self.blocks`.
     pub fn add_block(&mut self, block: Block) -> BlockId {
+        debug_assert_ne!(
+            block.id, self.body.id,
+            "entry block lives in kernel.body, not kernel.blocks"
+        );
         let id = block.id;
         self.blocks.insert(id, block);
         id
     }
 
-    /// Synchronize the canonical entry block into the block map.
-    ///
-    /// The public `body` field is the source of truth for block 0. Some call
-    /// sites still inspect `blocks`, so keep the entry in sync when cloning or
-    /// before handing the block map to consumers.
-    pub fn sync_entry_block(&mut self) { self.blocks.insert(self.body.id, self.body.clone()); }
+    /// Iterate every block in the kernel — entry block first, then
+    /// nested blocks in `kernel.blocks` insertion order.  Use this when
+    /// an analysis needs to walk all SSA defs / uses across the kernel
+    /// (liveness, use-counting, identifier scanning).  Walking only
+    /// `self.blocks.values()` would skip the entry block; walking only
+    /// `self.body` would skip nested loop/if bodies.
+    pub fn iter_blocks(&self) -> impl Iterator<Item = &Block> {
+        std::iter::once(&self.body).chain(self.blocks.values())
+    }
+
+    /// Mutable variant of [`iter_blocks`].  Order matches [`iter_blocks`]:
+    /// entry block first, then nested blocks.
+    pub fn iter_blocks_mut(&mut self) -> impl Iterator<Item = &mut Block> {
+        std::iter::once(&mut self.body).chain(self.blocks.values_mut())
+    }
 
     /// Get a block by ID.
     pub fn get_block(&self, id: BlockId) -> Option<&Block> {
@@ -1467,15 +1490,18 @@ impl Kernel {
 
 impl Clone for Kernel {
     fn clone(&self) -> Self {
-        let mut blocks = self.blocks.clone();
-        blocks.insert(self.body.id, self.body.clone());
+        // `kernel.blocks` no longer holds the entry block — see the
+        // `Kernel::new` comment for the data-structure rationale.  A
+        // plain field-by-field clone is correct now; previously this
+        // re-inserted the entry block under `body.id` to paper over
+        // the stale-copy invariant.
         Kernel {
             name: self.name.clone(),
             mode: self.mode,
             params: self.params.clone(),
             constexprs: self.constexprs.clone(),
             body: self.body.clone(),
-            blocks,
+            blocks: self.blocks.clone(),
             return_shapes: self.return_shapes.clone(),
             tile_annotations: self.tile_annotations.clone(),
             bfloat_reinterpret_cast: self.bfloat_reinterpret_cast,
@@ -1962,18 +1988,26 @@ mod tests {
     use super::{Block, BlockId, Kernel, Op, ValueId};
 
     #[test]
-    fn clone_refreshes_entry_block_snapshot() {
-        let mut kernel = Kernel::new("sync");
-        kernel.body.push_op(Op::Const { value: 7 }, ValueId::new(0));
-        let cloned = kernel.clone();
-        let entry =
-            cloned.blocks.get(&BlockId::new(0)).expect("entry block must exist after clone");
-        assert_eq!(entry.ops, cloned.body.ops);
-        assert_eq!(entry.results, cloned.body.results);
+    fn entry_block_lives_in_body_not_blocks() {
+        // The entry block is `kernel.body`; `kernel.blocks` only holds
+        // nested blocks (loop bodies, if-then/else).  Earlier versions
+        // also kept a never-updated clone of the entry block in
+        // `kernel.blocks[body.id]`; that was the source of the
+        // "stale block" footgun documented in #209/2.
+        let mut kernel = Kernel::new("body");
+        kernel.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
+        assert_eq!(kernel.body.ops.len(), 1);
+        assert!(
+            !kernel.blocks.contains_key(&kernel.body.id),
+            "entry block must NOT be present in kernel.blocks"
+        );
     }
 
     #[test]
     fn getters_treat_body_as_authoritative_entry_block() {
+        // `get_block(body.id)` returns `&kernel.body` directly; pushing
+        // to it is observed both via the field and via the getter (no
+        // stale copy to refresh).
         let mut kernel = Kernel::new("body");
         kernel.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
         assert_eq!(kernel.get_block(BlockId::new(0)).expect("entry block must exist").ops.len(), 1);
@@ -1982,26 +2016,26 @@ mod tests {
         body.push_op(Op::Const { value: 2 }, ValueId::new(1));
         assert_eq!(kernel.body.ops.len(), 2);
         assert_eq!(
-            kernel
-                .blocks
-                .get(&BlockId::new(0))
-                .expect("entry block must exist before sync")
-                .ops
-                .len(),
-            0
+            kernel.get_block(BlockId::new(0)).expect("entry block must exist").ops.len(),
+            2,
+            "get_block(body.id) must reflect post-mutation state"
         );
+    }
 
-        kernel.sync_entry_block();
-        assert_eq!(
-            kernel
-                .blocks
-                .get(&BlockId::new(0))
-                .expect("entry block must exist after sync")
-                .ops
-                .len(),
-            2
-        );
-        let _ = Block::new(BlockId::new(1));
+    #[test]
+    fn iter_blocks_yields_body_then_nested() {
+        // `iter_blocks` is the canonical full-kernel walk: entry block
+        // first, then nested blocks.  Replaces the
+        // `body + kernel.blocks.values()` pattern that callers used to
+        // open-code, where it was easy to forget the body half.
+        let mut kernel = Kernel::new("iter");
+        kernel.body.push_op(Op::Const { value: 10 }, ValueId::new(0));
+        let mut nested = Block::new(BlockId::new(1));
+        nested.push_op(Op::Const { value: 20 }, ValueId::new(1));
+        kernel.add_block(nested);
+
+        let ids: Vec<u32> = kernel.iter_blocks().map(|b| b.id.as_u32()).collect();
+        assert_eq!(ids, vec![0, 1], "iter_blocks yields body first then nested");
     }
 
     #[test]

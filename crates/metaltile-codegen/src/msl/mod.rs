@@ -80,16 +80,6 @@ fn kernel_uses_identifier(kernel: &Kernel, name: &str) -> bool {
 /// runtime-assert hooks even when the kernel body doesn't consult
 /// them, and the body parser keeps those decls on the kernel
 /// signature for ABI consistency.
-///
-/// **Stale-block-copy hazard.**  `Kernel::new` inserts the entry block
-/// at *both* `kernel.body` AND `kernel.blocks[body.id]`, then optimization
-/// passes (Unroll / Schedule / DCE) mutate `kernel.body` in place and
-/// never sync the copy.  Iterating `kernel.blocks.values()` would
-/// resurrect references to ops that the real IR has eliminated — e.g.
-/// a `Load(q_position, [])` that const-fold + algebraic-simplify +
-/// dead-value-elim correctly retired from `kernel.body`.  Skip the
-/// `body.id` entry when walking blocks; same fix as
-/// `passes::dead_value_elim::collect_used_value_ids`.
 fn kernel_references_param(kernel: &Kernel, name: &str) -> bool {
     let op_refs = |op: &Op| -> bool {
         if op.load_src() == Some(name) || op.store_dst() == Some(name) {
@@ -121,16 +111,8 @@ fn kernel_references_param(kernel: &Kernel, name: &str) -> bool {
         }
         false
     };
-    let check = |ops: &[Op]| ops.iter().any(op_refs);
-    if check(&kernel.body.ops) {
-        return true;
-    }
-    let body_id = kernel.body.id;
-    for (bid, block) in kernel.blocks.iter() {
-        if *bid == body_id {
-            continue; // stale copy — see doc comment
-        }
-        if check(&block.ops) {
+    for block in kernel.iter_blocks() {
+        if block.ops.iter().any(op_refs) {
             return true;
         }
     }
