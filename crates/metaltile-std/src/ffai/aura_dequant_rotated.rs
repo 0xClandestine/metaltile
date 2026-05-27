@@ -35,10 +35,9 @@
 //!
 //! Outer `aura_dequant_rotated_clean!` (for bits ∈ {2,4,8}) and
 //! `aura_dequant_rotated_odd!` (for bits=3) emit the entire
-//! `#[kernel] pub fn …` + the `inventory::submit!` registration at
-//! module scope.  Required because the `#[kernel]` proc-macro doesn't
-//! expand inner `macro_rules!` invocations (see CLAUDE.md note about
-//! PR #19's macro regression).
+//! `#[kernel(bench(...))] pub fn …` at module scope.  Required because
+//! the `#[kernel]` proc-macro doesn't expand inner `macro_rules!`
+//! invocations (see CLAUDE.md note about PR #19's macro regression).
 
 use metaltile::kernel;
 
