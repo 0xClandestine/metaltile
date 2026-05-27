@@ -48,8 +48,6 @@
 
 use metaltile::kernel;
 
-use crate::bench_types::DType;
-
 /// Round-trip an 8×8 tile through TG memory + a simdgroup-matrix
 /// fragment via the `simdgroup_load` HW intrinsic. f32 / f16 should
 /// produce byte-exact equality between `src` and `dst`.

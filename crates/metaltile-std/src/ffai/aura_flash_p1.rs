@@ -66,13 +66,6 @@
 
 use metaltile::kernel;
 
-use crate::bench_types::DType;
-
-// Keep `DType` referenced for the inventory submit; `FLOAT_DTYPES`
-// supersedes the old `F32_ONLY` shortlist now that the kernel handles
-// fp32/fp16/bf16 via the generic `T` I/O dtype.
-const _: DType = DType::F32;
-
 macro_rules! aura_flash_p1_kernel {
     (
         $name:ident,
