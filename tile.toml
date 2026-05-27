@@ -1,0 +1,14 @@
+[project]
+name = "metaltile-std"
+
+[runner]
+# Extra cargo args forwarded when spawning the auto-generated runner.
+cargo_args = ["--release"]
+
+[bench]
+warmup_iters = 5
+bench_iters  = 20
+
+[test]
+# Tolerance applied globally unless overridden per-kernel.
+default_tol = 1e-4

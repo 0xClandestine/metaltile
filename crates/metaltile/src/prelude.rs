@@ -13,11 +13,13 @@
 //! # What's here
 //!
 //! - **Macros:** [`#[kernel]`], [`#[constexpr]`], [`#[scalar]`],
-//!   [`#[strided]`], [`shape!`], [`tile!`]
+//!   [`#[strided]`], [`shape!`], [`tile!`], [`register_bench!`], [`register_test!`]
 //! - **IR types (user-facing):** [`ConstExpr`], [`ConstExprValues`], [`DType`], [`Dim`],
 //!   [`DimExpr`], [`Shape`], [`Kernel`], [`KernelMode`], [`UnaryOpKind`], [`BinOpKind`],
 //!   [`ActKind`], [`ReduceKind`], [`AtomicKind`], [`AtomicScope`], [`CoopTileScope`],
 //!   [`CoopTileAccMode`]
+//! - **Toolchain types:** [`KernelBench`], [`KernelTest`], [`BenchSetup`], [`BenchBuffer`],
+//!   [`TestSetup`], [`TestBuffer`], [`ConstValue`], [`Grid`], [`MetalRef`], [`Gbps`], [`Microseconds`]
 //! - **Runtime:** [`Context`], [`DispatchResult`], [`DispatchSpec`], [`ResidentBuffer`],
 //!   [`MetalTileError`], [`start_gpu_trace`], [`stop_gpu_trace`]
 //! - **Other:** [`GpuFamily`], [`KernelEntry`], [`make_tile`]
@@ -34,6 +36,33 @@
 
 use std::{marker::PhantomData, ops::Index};
 
+/// GPU buffer descriptor for benchmarks.
+pub use metaltile_core::BenchBuffer;
+/// Complete benchmark configuration.
+pub use metaltile_core::BenchSetup;
+/// Compile-time constant forwarded to the kernel.
+pub use metaltile_core::ConstValue;
+/// Throughput in GB/s (newtype).
+pub use metaltile_core::Gbps;
+/// Dispatch grid dimensions (threadgroups × threads-per-group).
+pub use metaltile_core::Grid;
+// ── Toolchain bench/test types ──────────────────────────────────────────
+/// Trait for benchmark definitions.
+pub use metaltile_core::KernelBench;
+/// Inventory wrapper for `KernelBench`.
+pub use metaltile_core::KernelBenchEntry;
+/// Trait for correctness test definitions.
+pub use metaltile_core::KernelTest;
+/// Inventory wrapper for `KernelTest`.
+pub use metaltile_core::KernelTestEntry;
+/// Reference Metal kernel descriptor.
+pub use metaltile_core::MetalRef;
+/// Latency in microseconds (newtype).
+pub use metaltile_core::Microseconds;
+/// CPU-side buffer for correctness tests.
+pub use metaltile_core::TestBuffer;
+/// Complete test configuration.
+pub use metaltile_core::TestSetup;
 /// Compile-time symbolic values used in shape annotations and generated IR.
 pub use metaltile_core::constexpr::ConstExpr;
 /// A collection of resolved constexpr values for a specific kernel launch.
@@ -105,6 +134,11 @@ pub use metaltile_runtime::ResidentBuffer;
 pub use metaltile_runtime::start_gpu_trace;
 /// Stop GPU trace capture.
 pub use metaltile_runtime::stop_gpu_trace;
+
+/// Register a `KernelBench` impl in the inventory.
+pub use crate::register_bench;
+/// Register a `KernelTest` impl in the inventory.
+pub use crate::register_test;
 
 /// Placeholder tensor type used in `#[kernel]` signatures.
 ///

@@ -41,6 +41,8 @@ struct Cli {
 enum Command {
     /// Benchmark suite: MetalTile vs MLX reference
     Bench(BenchArgs),
+    /// Run correctness tests on GPU kernels
+    Test(TestArgs),
     /// Compile kernels to MSL; emit metallib/Swift/manifest with --emit
     Build(BuildArgs),
     /// Print IR and/or MSL for registered kernels
@@ -80,6 +82,21 @@ struct BenchArgs {
     /// first of `origin/dev`, `upstream/dev`, `dev` that resolves).
     #[arg(long = "baseline-ref")]
     baseline_ref: Option<String>,
+}
+
+// ── Test ─────────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+struct TestArgs {
+    /// Only run tests whose name contains this text
+    #[arg(long = "filter", short = 'f')]
+    filter: Option<String>,
+    /// Show verbose output.
+    #[arg(short = 'v', action = clap::ArgAction::Count)]
+    verbose: u8,
+    /// Run even if the working tree has tracked-file modifications.
+    #[arg(long = "allow-dirty")]
+    allow_dirty: bool,
 }
 
 // ── Build ────────────────────────────────────────────────────────────────
@@ -240,7 +257,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _span = tracing::info_span!("tile", command = ?cli.command).entered();
 
     match cli.command {
-        Command::Bench(args) => cmd::bench::run(&args)?,
+        Command::Bench(args) => cmd::bench::run(
+            args.filter,
+            args.verbose,
+            args.json,
+            args.allow_dirty,
+            args.diff,
+            args.baseline_ref,
+        )?,
+        Command::Test(args) => cmd::test::run(args.filter, args.verbose, args.allow_dirty)?,
         Command::Build(args) => cmd::build::run(&args)?,
         Command::Inspect(args) => cmd::inspect::run(&args)?,
         Command::Device(args) => cmd::device::run(&args)?,

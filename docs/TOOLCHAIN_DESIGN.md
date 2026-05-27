@@ -24,6 +24,98 @@ The old system compiled all bench logic — buffer allocation strategies, refere
 | **Kernel-local policy** | Every decision about how a kernel is benched or tested (buffer sizes, dtypes, tolerance, reference kernel) is authored next to the kernel, in the user's crate. |
 | **Minimal toolchain surface** | The toolchain provides traits and a protocol. It does not define dispatch classes, buffer init strategies, or anything domain-specific. |
 | **Foundry UX** | `cd my-kernels && tile bench` — the project directory is the unit of operation, like Cargo itself. |
+| **Idiomatic Rust** | All toolchain and kernel-author code follows Rust best practices: builder pattern, opaque types, trait-based polymorphism, `Result`-propagating errors. |
+
+---
+
+## Coding Standards
+
+These conventions apply to both the toolchain crates and kernel-author code.
+
+### Encapsulation — no public fields on configuration types
+
+Configuration structs (`BenchSetup`, `BenchBuffer`, `TestSetup`) have **private fields**. Construction goes through named constructors and builder methods only. This keeps the API stable across breaking internal changes.
+
+```rust
+// ✅ correct
+BenchSetup::new(kernel)
+    .buffer(BenchBuffer::random("input", N, dt))
+    .grid_1d(N, 256)
+
+// ❌ avoid — struct literal breaks on any field addition
+BenchSetup { kernel, buffers: vec![…], grid: [N/256, 1, 1], tpg: [256,1,1] }
+```
+
+### Builder pattern for multi-field configuration
+
+Every type that requires more than two fields to construct exposes a builder. Builders own the object and take `self` (not `&mut self`) so chains compose naturally and the intermediate object is never observable in a partial state.
+
+```rust
+impl BenchSetup {
+    pub fn new(kernel: Kernel) -> Self { … }        // named constructor
+    pub fn buffer(self, b: BenchBuffer) -> Self { … } // consuming chain
+    pub fn grid_1d(self, n: usize, tpg: u32) -> Self { … }
+}
+```
+
+### Traits for polymorphism, not inheritance
+
+Shared behaviour is expressed as traits (`KernelBench`, `KernelTest`), not through struct hierarchies or `dyn Any` downcasts. The `#[bench]` / `#[test_kernel]` macros generate trait impls — the runner only knows the trait. All three macros (`#[kernel]`, `#[bench]`, `#[test_kernel]`) live in the same source file as the kernel they describe.
+
+### Newtype wrappers for domain clarity
+
+Prefer newtypes over raw primitives when the type carries domain meaning:
+
+```rust
+pub struct Gbps(pub f64);   // not f64
+pub struct Microseconds(pub f64);
+```
+
+This prevents accidentally swapping throughput and latency values at call sites.
+
+### Error handling — `Result`, never `panic` in library code
+
+Toolchain library code (`metaltile`, `metaltile-core`) returns `Result<_, E>` and propagates errors with `?`. `unwrap()` and `expect()` are reserved for cases that are genuinely unreachable, with a comment explaining why. Proc-macro code returns `syn::Error` / `compile_error!` on bad input rather than panicking.
+
+### `From` / `Into` for conversions
+
+Implement `From<T> for U` rather than `.to_foo()` conversion methods wherever the target type is clearly the canonical form. This lets callers use `.into()` and enables `?`-based error coercions.
+
+### Visibility — minimal surface
+
+Use `pub(crate)` for cross-module implementation details. Only the stable author-facing API should be `pub`. Internal helpers are `fn` (private by default).
+
+### Documentation — every public item has a doc comment
+
+All `pub` items carry a `///` doc comment. Module files open with a `//!` crate/module-level doc. Doc comments follow this structure:
+
+```rust
+//! Module-level summary — what this module is for and what it contains.
+
+/// One-line summary of what this does.
+///
+/// Longer explanation if the behaviour isn't obvious from the name. Describe
+/// the contract, not the implementation. Note any preconditions, panics, or
+/// edge cases the caller must know about.
+///
+/// # Examples
+///
+/// ```rust
+/// let setup = BenchSetup::new(kernel)
+///     .buffer(BenchBuffer::random("input", N, dt))
+///     .grid_1d(N, 256);
+/// ```
+pub fn something() { … }
+```
+
+Rules:
+- **One-line summary** on the first `///` line. No trailing period. Start with a verb: *Build*, *Return*, *Register*, *Dispatch*.
+- **Blank `///` line** between the summary and any further paragraphs.
+- **`# Examples`** on any public constructor or non-trivial method. The example must compile (`cargo test --doc`).
+- **`# Panics`** section if the function can panic under reachable conditions.
+- **`# Errors`** section if the function returns `Result`.
+- **No implementation details** — describe what, not how.
+- Private helpers use `//` line comments only when the logic isn't self-evident. Do not add `///` to private items.
 
 ---
 
@@ -34,21 +126,22 @@ The old system compiled all bench logic — buffer allocation strategies, refere
 │  User project  (e.g. metaltile-std, or any external     │
 │  crate with #[kernel] functions)                        │
 │                                                         │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐ │
-│  │  kernel.rs   │  │  bench.rs    │  │  test.rs      │ │
-│  │  #[kernel]   │  │  impl Bench  │  │  impl Test    │ │
-│  │  fn mt_exp   │  │  for ExpBench│  │  for ExpTest  │ │
-│  └──────────────┘  └──────────────┘  └───────────────┘ │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │  unary.rs                                         │  │
+│  │  #[kernel]      fn mt_exp<T>(…) { … }             │  │
+│  │  #[bench(…)]    fn exp_bench(dt) -> BenchSetup    │  │
+│  │  #[test_kernel] fn exp_test(dt)  -> TestSetup     │  │
+│  └───────────────────────────────────────────────────┘  │
 │                                                         │
 │  ┌──────────────────────────────────────────────────┐  │
-│  │  src/bin/tile-runner.rs                          │  │
-│  │  Thin binary: parses tile protocol commands,     │  │
+│  │  [auto-generated by tile — never authored]       │  │
+│  │  Thin harness: parses tile protocol commands,    │  │
 │  │  iterates registered Bench/Test impls, streams   │  │
 │  │  JSON results to stdout.                         │  │
 │  └──────────────────────────────────────────────────┘  │
 └──────────┬──────────────────────────────────────────────┘
-           │ cargo run --bin tile-runner -- bench --filter exp
-           │ (JSON lines on stdout)
+           │ cargo run --bin __tile_runner -- bench --filter exp
+           │ (JSON lines on stdout; harness generated in $CARGO_TARGET_DIR)
            ▼
 ┌─────────────────────────────┐
 │  tile CLI  (metaltile-cli)  │
@@ -75,9 +168,7 @@ Every project that uses `tile` has a `tile.toml` at the workspace root:
 name = "metaltile-std"
 
 [runner]
-# The binary in this workspace that implements the tile runner protocol.
-bin = "tile-runner"
-# Optional: extra cargo args forwarded when spawning the runner.
+# Optional: extra cargo args forwarded when spawning the auto-generated runner.
 cargo_args = ["--release"]
 
 [bench]
@@ -111,128 +202,121 @@ The macro generates:
 
 ---
 
-## Bench registration — `KernelBench` trait
+## Bench registration — `#[bench]`
 
-Bench logic lives in the user's crate, next to the kernel, as an implementation of the `KernelBench` trait provided by `metaltile`:
+Bench logic lives in the user's crate, next to the kernel, as an ordinary function annotated with `#[bench]`. No struct, no `impl`, no registration call — the macro generates all of that.
 
 ```rust
-// metaltile-core (or metaltile facade)
-
-pub trait KernelBench: Send + Sync {
-    /// Short dotted identifier: "op/subop" or just "kernel_name".
-    fn name(&self) -> &str;
-
-    /// Dtypes to exercise. Kernel author decides — no hardcoded list.
-    fn dtypes(&self) -> &[DType];
-
-    /// Build an input/output buffer set for one (dtype, iteration).
-    /// Returns a `BenchSetup` that the runner dispatches directly.
-    fn setup(&self, dt: DType) -> BenchSetup;
-
-    /// Optional: name of the Metal reference kernel to compare against.
-    /// The reference is compiled from a `.metal` file the author provides.
-    fn metal_reference(&self) -> Option<MetalRef> { None }
-
-    /// Total bytes moved in one dispatch (used for GB/s reporting).
-    /// Called after `setup` so the impl can consult the allocated sizes.
-    fn bytes_moved(&self, setup: &BenchSetup) -> u64;
+#[bench(name = "unary/exp", dtypes = [f32, f16, bf16])]
+fn exp_bench(dt: DType) -> BenchSetup {
+    const N: usize = 64 << 20;
+    BenchSetup::new(mt_exp::kernel_ir_for(dt))
+        .buffer(BenchBuffer::random("input", N, dt))
+        .buffer(BenchBuffer::zeros("out",    N, dt).output())
+        .constexpr("n", N as u32)
+        .grid_1d(N, 256)
 }
 ```
 
-The runner iterates `inventory::iter::<KernelBenchEntry>`, calls `setup`, dispatches, times, and streams results.
+`#[bench]` expands to an anonymous struct that implements `KernelBench` and submits itself to the inventory. Authors never see or write the trait.
 
-### `BenchSetup`
-
-Everything the runner needs to dispatch one kernel invocation:
+`bytes_moved` defaults to the sum of all buffer sizes. Override with the `bytes` key when the kernel's bandwidth figure differs (e.g. read-only inputs counted once):
 
 ```rust
-pub struct BenchSetup {
-    /// The compiled IR for this kernel at this dtype.
-    pub kernel: Kernel,
-    /// Named GPU buffers (inputs + outputs), in parameter order.
-    pub buffers: Vec<BenchBuffer>,
-    /// Constexpr values keyed by name.
-    pub constexprs: Vec<(String, ConstValue)>,
-    /// Grid dimensions [x, y, z].
-    pub grid: [u32; 3],
-    /// Threads-per-threadgroup [x, y, z].
-    pub tpg: [u32; 3],
+#[bench(name = "unary/exp", dtypes = [f32, f16, bf16], bytes = |s| 2 * s.buffer_bytes("input"))]
+fn exp_bench(dt: DType) -> BenchSetup { … }
+```
+
+### `BenchSetup` and `BenchBuffer`
+
+Both types are **opaque** — fields are private, construction goes through named constructors only. This is intentional: call-site code is insulated from internal layout changes.
+
+```rust
+// BenchSetup — consuming builder
+pub struct BenchSetup { /* private */ }
+
+impl BenchSetup {
+    pub fn new(kernel: Kernel) -> Self;
+    pub fn buffer(self, b: BenchBuffer) -> Self;
+    pub fn constexpr(self, name: &str, v: impl Into<ConstValue>) -> Self;
+    pub fn grid_1d(self, n: usize, tpg: u32) -> Self; // [ceil(n/tpg),1,1] / [tpg,1,1]
+    pub fn grid_2d(self, x: u32, y: u32, tpg: [u32; 2]) -> Self;
+    pub fn grid_3d(self, x: u32, y: u32, z: u32, tpg: [u32; 3]) -> Self;
+    pub fn buffer_bytes(&self, name: &str) -> u64;
 }
 
-pub struct BenchBuffer {
-    pub name: String,
-    pub data: Vec<u8>,        // host-side init; runner uploads to GPU
-    pub dtype: DType,
-    pub is_output: bool,
+// BenchBuffer — named constructors, no public fields
+pub struct BenchBuffer { /* private */ }
+
+impl BenchBuffer {
+    pub fn random(name: &str, len: usize, dt: DType) -> Self;
+    pub fn zeros(name: &str, len: usize, dt: DType) -> Self;
+    pub fn from_vec(name: &str, data: Vec<u8>, dt: DType) -> Self;
+    pub fn output(self) -> Self; // marks buffer as an output slot
 }
 ```
 
 No `ClassKind`. No `ShapeSpec`. No hardcoded rows/columns. The author fills in exactly what the kernel needs.
 
-### Registration
+### Escape hatch — `KernelBench` trait
+
+For kernels that need dynamic dispatch, shared setup logic across many dtypes, or other complexity the macro form can't express, implement the trait directly:
 
 ```rust
-// In the user crate, near the kernel:
-
-struct ExpBench;
-
-impl KernelBench for ExpBench {
-    fn name(&self) -> &str { "unary/exp" }
-    fn dtypes(&self) -> &[DType] { &[DType::F32, DType::F16, DType::BF16] }
-
-    fn setup(&self, dt: DType) -> BenchSetup {
-        const N: usize = 64 * 1024 * 1024;
-        BenchSetup {
-            kernel: mt_exp::kernel_ir_for(dt),
-            buffers: vec![
-                BenchBuffer::random("input",  N, dt),
-                BenchBuffer::zeros("out",     N, dt).output(),
-            ],
-            constexprs: vec![("n".into(), ConstValue::U32(N as u32))],
-            grid: [N.div_ceil(256) as u32, 1, 1],
-            tpg:  [256, 1, 1],
-        }
-    }
-
-    fn bytes_moved(&self, s: &BenchSetup) -> u64 {
-        2 * s.buffers[0].data.len() as u64  // read + write
-    }
+pub trait KernelBench: Send + Sync {
+    fn name(&self) -> &str;
+    fn dtypes(&self) -> &[DType];
+    fn setup(&self, dt: DType) -> BenchSetup;
+    fn metal_reference(&self) -> Option<MetalRef> { None }
+    fn bytes_moved(&self, setup: &BenchSetup) -> u64;
 }
 
-// One macro call registers the impl:
-register_bench!(ExpBench);
+// register_bench!(MyComplexBench) submits the impl to the inventory.
+register_bench!(MyComplexBench);
 ```
+
+The `#[bench]` macro is syntactic sugar over this trait — the runner only knows the trait.
 
 ---
 
-## Test registration — `KernelTest` trait
+## Test registration — `#[test_kernel]`
 
-Same pattern, for CPU-oracle correctness checks:
+Same pattern as `#[bench]`, for CPU-oracle correctness checks:
+
+```rust
+#[test_kernel(name = "unary/exp", dtypes = [f32, f16, bf16])]
+fn exp_test(dt: DType) -> TestSetup {
+    const N: usize = 1024;
+    // CPU oracle: generate input, compute expected output in f32, let the
+    // runner handle dtype casting and element-wise comparison.
+    let input = TestBuffer::random("input", N, dt);
+    let expected = input.map_f32(f32::exp).rename("out");
+    TestSetup::new(mt_exp::kernel_ir_for(dt))
+        .input(input)
+        .expected(expected)
+        .grid_1d(N, 256)
+}
+```
+
+`tolerance` defaults to `1e-4`. Override per-function:
+
+```rust
+#[test_kernel(name = "unary/exp", dtypes = [f32, f16, bf16], tol = 1e-5)]
+fn exp_test(dt: DType) -> TestSetup { … }
+```
+
+The runner dispatches the kernel, reads back outputs, and diffs against `expected` within tolerance.
+
+### Escape hatch — `KernelTest` trait
 
 ```rust
 pub trait KernelTest: Send + Sync {
     fn name(&self) -> &str;
     fn dtypes(&self) -> &[DType];
-
-    /// Build inputs + expected outputs for one dtype.
     fn setup(&self, dt: DType) -> TestSetup;
-
-    /// Element-wise tolerance (absolute).
     fn tolerance(&self, dt: DType) -> f64 { 1e-4 }
 }
-
-pub struct TestSetup {
-    pub kernel: Kernel,
-    pub inputs: Vec<TestBuffer>,
-    /// Expected output values (computed by the CPU oracle).
-    pub expected: Vec<TestBuffer>,
-    pub constexprs: Vec<(String, ConstValue)>,
-    pub grid: [u32; 3],
-    pub tpg: [u32; 3],
-}
 ```
-
-The runner dispatches the kernel, reads back outputs, and diffs against `expected` within tolerance.
 
 ---
 
@@ -254,6 +338,17 @@ pub struct MetalRef {
     /// Constexprs to pass to the reference (may differ from MT spelling).
     pub constexprs: Vec<(String, ConstValue)>,
 }
+```
+
+Pass one via the `ref` key in `#[bench]`:
+
+```rust
+#[bench(
+    name   = "unary/exp",
+    dtypes = [f32, f16, bf16],
+    ref    = MetalRef { metal_file: "metal/exp.metal", function: "mt_exp_ref", constexprs: vec![] },
+)]
+fn exp_bench(dt: DType) -> BenchSetup { … }
 ```
 
 ---
@@ -293,19 +388,27 @@ The protocol is versioned. The CLI negotiates with the runner via the `runner_ve
 
 ---
 
-## The `tile-runner` binary
+## How the CLI discovers your kernels
 
-A runner binary is a thin adapter the user's project provides:
+Kernel authors write zero runner code. The subprocess wiring is entirely owned by the toolchain.
+
+When `tile bench` is invoked, it:
+
+1. Finds `tile.toml` walking up from CWD.
+2. Generates a harness entry-point on the fly (in `$CARGO_TARGET_DIR/tile/`) — exactly like how `cargo test` generates a test harness without you writing a `fn main`.
+3. Compiles it with `cargo build --bin __tile_runner` (the generated bin is invisible to the author).
+4. Spawns the compiled binary and streams JSON.
+
+The harness source is a single generated file:
 
 ```rust
-// src/bin/tile-runner.rs  (user-authored, boilerplate)
-
+// auto-generated by tile — do not edit, do not check in
 fn main() {
     metaltile::runner::run(metaltile::runner::Args::from_env());
 }
 ```
 
-`metaltile::runner::run` iterates the `inventory`, handles `--filter`, `--bench`, `--test` sub-commands, and streams JSON. The user writes zero protocol code — they only implement `KernelBench` / `KernelTest`.
+`metaltile::runner::run` iterates the `inventory`, handles `--filter`, `--bench`, `--test` sub-commands, and streams JSON. **Authors never see, write, or think about this file.**
 
 ---
 
@@ -318,9 +421,10 @@ tile bench [-f <filter>] [-v] [-o results.json]
 ```
 
 1. Find `tile.toml` walking up from CWD.
-2. Spawn `cargo run --bin <runner.bin> [runner.cargo_args] -- bench [--filter …]`.
-3. Stream JSON lines → render live table.
-4. Optionally write `results.json`.
+2. Generate runner harness source into `$CARGO_TARGET_DIR/tile/__runner.rs` if absent or stale.
+3. Spawn `cargo run --bin __tile_runner [runner.cargo_args] -- bench [--filter …]`.
+4. Stream JSON lines → render live table.
+5. Optionally write `results.json`.
 
 ### `tile test`
 
@@ -362,6 +466,7 @@ Invokes `-- inspect`. Same kernel discovery path.
 | Reference kernel | | ✅ `KernelBench::metal_reference` |
 | Tolerance | | ✅ `KernelTest::tolerance` |
 | CPU oracle | | ✅ `TestSetup::expected` |
+| Runner harness / subprocess wiring | ✅ auto-generated by `tile` | |
 | Bench iterations | ✅ `tile.toml [bench]` | override per-bench if needed |
 
 ---
@@ -374,15 +479,13 @@ my-kernels/
 ├── Cargo.toml
 └── src/
     ├── lib.rs
-    ├── bin/
-    │   └── tile-runner.rs     # 2-line boilerplate
     └── ops/
-        ├── unary.rs           # #[kernel] fn mt_exp ...
-        ├── unary_bench.rs     # impl KernelBench for ExpBench
-        └── unary_test.rs      # impl KernelTest for ExpTest
+        └── unary.rs           # #[kernel], #[bench], #[test_kernel] all in one file
 ```
 
-Bench and test code can live in the same file as the kernel, or in neighbouring files — the author decides.
+The kernel, its bench setup, and its correctness test live in the same file. There is no reason to split them — they share the same constants, the same buffer layout, and the same understanding of what the kernel does. Keeping them together makes that knowledge visible in one place.
+
+No runner binary. No `src/bin/`. No protocol code. The harness is generated by `tile` at build time and lives entirely in `$CARGO_TARGET_DIR`.
 
 ---
 
@@ -391,6 +494,7 @@ Bench and test code can live in the same file as the kernel, or in neighbouring 
 1. **`metaltile-core`**: add `KernelBench`, `KernelTest`, `BenchSetup`, `TestSetup`, `BenchBuffer`, `TestBuffer`, `MetalRef`, `ConstValue` types and `KernelBenchEntry` / `KernelTestEntry` inventory wrappers.
 2. **`metaltile`**: re-export the new traits; add `register_bench!` / `register_test!` macros.
 3. **`metaltile`**: implement `runner::run` — the protocol loop.
-4. **`metaltile-cli`**: implement `tile bench`, `tile test` as subprocess launchers.
-5. **`metaltile-std`**: add `src/bin/tile-runner.rs`; port existing bench specs to `impl KernelBench`.
-6. **`tile.toml`**: add to `metaltile-std` root.
+4. **`metaltile-cli`**: implement `tile bench`, `tile test` — harness generation + subprocess launch + JSON rendering.
+5. **`metaltile-std`**: port existing bench specs to `impl KernelBench`; add `tile.toml` at the workspace root.
+
+No step requires kernel authors to create a runner binary. Step 4 owns that entirely.

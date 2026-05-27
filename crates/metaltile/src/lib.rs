@@ -74,6 +74,7 @@
 //!   generated IR and MSL before dispatching.
 
 pub mod prelude;
+pub mod runner;
 
 /// Crate version from `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -94,3 +95,72 @@ pub use metaltile_macros::{constexpr, kernel, scalar, shape, strided, tile};
 pub use metaltile_runtime::{Context, DispatchResult, MetalTileError};
 /// Placeholder tensor marker used in `#[kernel]` signatures.
 pub use prelude::Tensor;
+
+// ---------------------------------------------------------------------------
+// Macros
+// ---------------------------------------------------------------------------
+
+/// Register a [`KernelBench`] implementation in the global inventory.
+///
+/// This is the manual equivalent of the `#[bench]` attribute macro.
+/// Kernel authors should prefer `#[bench]` over this macro in almost
+/// all cases; use this when you need dynamic dispatch or shared setup
+/// logic that the attribute form can't express.
+///
+/// # Example
+///
+/// ```ignore
+/// struct MyBench;
+///
+/// impl KernelBench for MyBench {
+///     fn name(&self) -> &str { "my/complex_bench" }
+///     fn dtypes(&self) -> &[DType] { &[DType::F32, DType::F16] }
+///     fn setup(&self, dt: DType) -> BenchSetup { /* ... */ }
+/// }
+///
+/// register_bench!(MyBench);
+/// ```
+#[macro_export]
+macro_rules! register_bench {
+    ($ty:ty) => {
+        metaltile_core::inventory::submit! {
+            metaltile_core::KernelBenchEntry::new(Box::new(<$ty>::default()))
+        }
+    };
+    ($val:expr) => {
+        metaltile_core::inventory::submit! {
+            metaltile_core::KernelBenchEntry::new(Box::new($val))
+        }
+    };
+}
+
+/// Register a [`KernelTest`] implementation in the global inventory.
+///
+/// This is the manual equivalent of the `#[test_kernel]` attribute macro.
+///
+/// # Example
+///
+/// ```ignore
+/// struct MyTest;
+///
+/// impl KernelTest for MyTest {
+///     fn name(&self) -> &str { "my/complex_test" }
+///     fn dtypes(&self) -> &[DType] { &[DType::F32] }
+///     fn setup(&self, dt: DType) -> TestSetup { /* ... */ }
+/// }
+///
+/// register_test!(MyTest);
+/// ```
+#[macro_export]
+macro_rules! register_test {
+    ($ty:ty) => {
+        metaltile_core::inventory::submit! {
+            metaltile_core::KernelTestEntry::new(Box::new(<$ty>::default()))
+        }
+    };
+    ($val:expr) => {
+        metaltile_core::inventory::submit! {
+            metaltile_core::KernelTestEntry::new(Box::new($val))
+        }
+    };
+}
