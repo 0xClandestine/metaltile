@@ -24,6 +24,7 @@
 
 use metaltile::kernel;
 
+#[rustfmt::skip]
 macro_rules! hadamard_kernel {
     ($name:ident, $n:literal, $log_n:literal, $subop:literal) => {
         #[kernel(

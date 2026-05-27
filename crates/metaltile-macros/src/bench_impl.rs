@@ -50,6 +50,9 @@ pub enum ClassKind {
     /// variant (Decode | PrefillTile), tpg.  For PrefillTile variant,
     /// also requires bq, bk, wm, wn.
     SdpaBatchedDecode,
+    /// Steel GEMM tile geometry.
+    /// Requires: bm, bn, tpg.
+    SteelGemm,
 }
 
 pub enum InputKind {
@@ -127,6 +130,9 @@ pub struct BenchArgs {
     // SdpaBatchedDecode
     pub batch_q: Option<LitInt>,
     pub variant: Option<BatchedDecodeVariantArg>,
+    // SteelGemm
+    pub bm: Option<LitInt>,
+    pub bn: Option<LitInt>,
 }
 
 fn parse_input(s: &str, span: proc_macro2::Span) -> syn::Result<InputKind> {
@@ -190,6 +196,8 @@ impl Parse for BenchArgs {
         let mut pass2_kernel_field: Option<Ident> = None;
         let mut batch_q_field: Option<LitInt> = None;
         let mut variant_field: Option<BatchedDecodeVariantArg> = None;
+        let mut bm_field: Option<LitInt> = None;
+        let mut bn_field: Option<LitInt> = None;
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;

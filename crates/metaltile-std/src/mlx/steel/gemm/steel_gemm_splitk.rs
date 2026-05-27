@@ -58,6 +58,7 @@ use metaltile::kernel;
 /// Expand one `(BM, BN, WM, WN)` block-shape instantiation of the
 /// split-K partial GEMM. The outer `macro_rules!` substitutes the
 /// literals before the `#[kernel]` body parser runs.
+#[rustfmt::skip]
 macro_rules! steel_gemm_splitk_kernel {
     ($name:ident, $bm:literal, $bn:literal, $wm:literal, $wn:literal, $tpg:literal, $subop:literal) => {
         #[kernel(

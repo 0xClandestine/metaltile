@@ -31,6 +31,7 @@
 use metaltile::kernel;
 
 // ── SSD forward step with (dA, dBx) tape capture ────────────────────────────
+#[rustfmt::skip]
 macro_rules! ssm_step_record {
     ($name:ident, $dh:literal, $ds:literal, $h:literal, $g:literal, $n_per_t:literal, $subop:literal) => {
         #[kernel(
@@ -119,6 +120,7 @@ macro_rules! ssm_step_record {
 }
 
 // ── Tape replay: re-fold the first k log entries onto a snapshot ────────────
+#[rustfmt::skip]
 macro_rules! ssm_replay {
     ($name:ident, $dh:literal, $ds:literal, $h:literal, $n_per_t:literal, $subop:literal) => {
         #[kernel(

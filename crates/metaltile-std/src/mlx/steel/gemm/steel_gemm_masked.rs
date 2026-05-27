@@ -57,6 +57,7 @@ use metaltile::kernel;
 /// block-masked GEMM. The outer `macro_rules!` substitutes the literals
 /// before the `#[kernel]` body parser runs — see `steel_gemm_fused.rs`
 /// for why the entire `#[kernel] fn` must be inside the macro.
+#[rustfmt::skip]
 macro_rules! steel_gemm_masked_kernel {
     ($name:ident, $bm:literal, $bn:literal, $wm:literal, $wn:literal, $tpg:literal, $subop:literal) => {
         #[kernel(

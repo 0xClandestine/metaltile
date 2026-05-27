@@ -191,6 +191,7 @@ pub fn mt_row_reduce_min<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32)
 // (an inner macro inside the body would silently emit no IR — see
 // docs/developing.md kernel-authoring hazards).
 
+#[rustfmt::skip]
 macro_rules! col_reduce_kernel {
     ($name:ident, $reduce_op:ident, $subop:literal) => {
         #[kernel(
@@ -236,6 +237,7 @@ col_reduce_kernel!(mt_col_reduce_min, min, "min");
 // threadgroup-per-row form under-occupies the GPU (most lanes idle),
 // whereas one thread per segment keeps every lane busy.
 
+#[rustfmt::skip]
 macro_rules! seg_reduce_kernel {
     ($name:ident, $reduce_op:ident, $subop:literal) => {
         #[kernel(

@@ -43,6 +43,7 @@ use metaltile::kernel;
 /// only ever sees concrete `u32` literals — never an un-expanded inner
 /// macro call (which would silently emit an empty body; see
 /// `docs/developing.md` kernel-authoring hazards).
+#[rustfmt::skip]
 macro_rules! steel_gemm_fused_kernel {
     ($name:ident, $bm:literal, $bn:literal, $wm:literal, $wn:literal, $tpg:literal, $subop:literal) => {
         #[kernel(

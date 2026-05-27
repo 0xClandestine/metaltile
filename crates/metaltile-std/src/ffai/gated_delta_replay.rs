@@ -28,6 +28,7 @@
 use metaltile::kernel;
 
 // ── Forward GatedDelta step with per-step delta-tape capture ────────────────
+#[rustfmt::skip]
 macro_rules! gated_delta_record {
     ($name:ident, $dk:literal, $dv:literal, $hk:literal, $hv:literal, $n_per_t:literal, $subop:literal) => {
         #[kernel(
@@ -115,6 +116,7 @@ macro_rules! gated_delta_record {
 }
 
 // ── Tape replay: re-fold the accepted prefix onto a snapshot ────────────────
+#[rustfmt::skip]
 macro_rules! state_replay {
     ($name:ident, $dk:literal, $dv:literal, $hv:literal, $n_per_t:literal, $subop:literal) => {
         #[kernel(

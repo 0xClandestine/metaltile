@@ -59,6 +59,7 @@
 
 use metaltile::kernel;
 
+#[rustfmt::skip]
 macro_rules! fft_kernel {
     ($name:ident, $n:literal, $log_n:literal, $inv_n:literal, $subop:literal) => {
         /// Radix-2 FFT of one length-`N` row. `in_re` / `in_im` are the

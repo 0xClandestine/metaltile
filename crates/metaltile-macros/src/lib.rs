@@ -589,9 +589,9 @@ mod tests {
             bench(op="unary", subop="exp", class=Unary, tol=1e-4)
         };
         assert_eq!(attr.benches.len(), 1);
-        let ba = &attr.benches[0];
-        assert_eq!(ba.op.value(), "unary");
-        assert_eq!(ba.subop.value(), "exp");
+        let args = &attr.benches[0];
+        assert_eq!(args.op.value(), "unary");
+        assert_eq!(args.subop.value(), "exp");
     }
 
     #[test]

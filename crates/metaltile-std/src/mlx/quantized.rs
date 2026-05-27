@@ -4408,6 +4408,7 @@ pub fn mt_affine_dequantize_int6<T>(
 /// Quantized matvec / matmul (`y = W · x`) — pow2 bit-widths (4, 8).
 /// `mt_qmm_b*` is the M-batched form; `mt_qmv_b*` its M=1 row. W is
 /// `[N, K]` row-major; element `(row, d)` lives in a pack-aligned u32.
+#[rustfmt::skip]
 macro_rules! qmv_pow2 {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[kernel(
@@ -4475,6 +4476,7 @@ macro_rules! qmv_pow2 {
 /// Quantized matvec / matmul (`y = W · x`) — odd bit-widths (3, 5, 6).
 /// W is `[N, K]` bit-stream-packed; element `(row, d)` may straddle two
 /// consecutive u32 words.
+#[rustfmt::skip]
 macro_rules! qmv_odd {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[kernel(
@@ -4546,6 +4548,7 @@ macro_rules! qmv_odd {
 
 /// Quantized vecmat (`y = xᵀ · W`) — pow2 bit-widths. W is `[K, N]`
 /// row-major; output column `c` sums over K, reading element `(d, c)`.
+#[rustfmt::skip]
 macro_rules! qvm_pow2 {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[kernel(
@@ -4608,6 +4611,7 @@ macro_rules! qvm_pow2 {
 
 /// Quantized vecmat (`y = xᵀ · W`) — odd bit-widths. W is `[K, N]`
 /// bit-stream-packed.
+#[rustfmt::skip]
 macro_rules! qvm_odd {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[kernel(
@@ -4891,6 +4895,7 @@ pub fn mt_qvm_int4_fast<T>(
 // block is group-aligned (`pack_in_row*8 % group_size == 0`).
 //
 // Grid: [N/32, M/32, 1], tpg=128 (4 SG × 32 lanes).
+#[rustfmt::skip]
 macro_rules! qmm_mma_bitwidth {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[kernel(
