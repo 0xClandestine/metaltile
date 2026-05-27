@@ -98,6 +98,7 @@ impl super::Pass for ConstFoldPass {
                 dce_block(block, &cross_block_refs);
             }
         }
+        super::dead_value_elim::eliminate_dead_values(kernel)?;
         Ok(())
     }
 }
@@ -315,12 +316,20 @@ mod tests {
         mut results: Vec<Option<ValueId>>,
         used_vid: ValueId,
     ) -> Block {
-        // Append an op that references `used_vid` to prevent DCE from removing it.
-        let ref_vid = ValueId::new(
-            results.iter().filter_map(|r| r.map(|v| v.as_u32())).max().unwrap_or(99) + 1,
-        );
-        ops.push(Op::BinOp { op: BinOpKind::Add, lhs: used_vid, rhs: used_vid });
-        results.push(Some(ref_vid));
+        // Append a Store that consumes `used_vid` so the per-pass DCE
+        // postcondition (#209/1) doesn't sweep the ops we want to
+        // inspect.  Stores have side effects and are never eliminated;
+        // a BinOp ref-op was used pre-#209/1 but is itself DCE-eligible
+        // (its result has no consumer), so cascade-removal would strip
+        // the whole chain.  Using a Store anchors `used_vid` against
+        // the kernel's `out` param.
+        ops.push(metaltile_core::ir::Op::Store {
+            dst: "out".into(),
+            indices: vec![metaltile_core::ir::IndexExpr::Value(used_vid)],
+            value: used_vid,
+            mask: None,
+        });
+        results.push(None);
 
         let mut k = Kernel::new("test");
         k.body.push_op(Op::Const { value: 0 }, ValueId::new(0));

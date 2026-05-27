@@ -117,14 +117,19 @@ impl PassRegistry {
     /// The standard pass order (names, in pipeline sequence).
     ///
     /// TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM
-    ///   → IfConversion → ValueSink → Fusion → Unroll
-    ///   → Schedule → Vectorize → DeadStoreElim → DeadValueElim
+    ///   → IfConversion → ValueSink → Fusion → FmaFusion → Unroll
+    ///   → Schedule → Vectorize → DeadStoreElim
     ///
-    /// `DeadValueElim` runs last because most upstream passes (Vectorize,
-    /// Unroll, CopyProp, CSE, LICM, Schedule, ValueSink) can leave pure
-    /// value-producing ops behind once their consumers are rewired or
-    /// removed.  One fixpoint sweep at the end cleans them all up — see
-    /// `dead_value_elim` module docs.
+    /// Each pass that can produce orphan SSA values (the producer is
+    /// left in the block after the pass removes/redirects its last
+    /// consumer) invokes
+    /// `dead_value_elim::eliminate_dead_values(kernel)` at the end of
+    /// its own `run()` — see #209/1.  Pre-#209/1 a separate
+    /// `dead_value_elim` slot ran last in the pipeline to sweep up
+    /// every pass's accumulated debris; with the per-pass
+    /// postcondition in place, that slot is redundant and removed.
+    /// `DeadValueElimPass` remains a registry-callable pass for tests
+    /// and tooling that want to invoke DCE explicitly.
     pub fn order() -> &'static [&'static str] {
         &[
             "kernel_inline",
@@ -141,13 +146,12 @@ impl PassRegistry {
             // and before Unroll — it rewrites `Add(Mul, c)` → `Fma`
             // in-place and relies on type inference, so it needs to
             // run after `type_check`.  The standalone Mul becomes a
-            // dead value that DCE sweeps at the end.
+            // dead value that the pass's own DCE postcondition sweeps.
             "fma_fusion",
             "unroll",
             "schedule",
             "vectorize",
             "dead_store_elim",
-            "dead_value_elim",
         ]
     }
 

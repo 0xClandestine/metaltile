@@ -91,6 +91,7 @@ impl super::Pass for LicmPass {
         // hoisted into direct child blocks by the inner-block passes above.
         kernel.blocks = blocks;
         licm_block(&mut kernel.body, &mut kernel.blocks, &def_block, &read_only);
+        super::dead_value_elim::eliminate_dead_values(kernel)?;
         Ok(())
     }
 }

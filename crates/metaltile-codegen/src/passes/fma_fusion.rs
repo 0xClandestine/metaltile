@@ -94,6 +94,10 @@ impl super::Pass for FmaFusionPass {
                 fuse_block(block, &is_float);
             }
         }
+        // Per-pass DCE postcondition (#209/1): the rewriter leaves the
+        // standalone Op::Mul behind (its only consumer, the absorbed
+        // Add, was just replaced by Op::Fma).  Sweep it.
+        super::dead_value_elim::eliminate_dead_values(kernel)?;
         Ok(())
     }
 }

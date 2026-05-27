@@ -90,30 +90,65 @@ pub struct DeadValueElimPass;
 impl super::Pass for DeadValueElimPass {
     fn name(&self) -> &str { "dead_value_elim" }
 
-    fn run(&self, kernel: &mut Kernel) -> Result<()> {
-        for _ in 0..MAX_ITERATIONS {
-            let used = collect_used_value_ids(kernel);
-            let mut removed_any = false;
+    fn run(&self, kernel: &mut Kernel) -> Result<()> { force_eliminate_dead_values(kernel) }
+}
 
-            // Entry block — `kernel.body` is the canonical entry block;
-            // `kernel.blocks` only holds nested blocks (post-#209/2).
-            removed_any |= dve_block(&mut kernel.body, &used);
-
-            // Nested blocks.  Snapshot ids so we can iterate-and-mutate.
-            let block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
-            for bid in block_ids {
-                let mut block =
-                    kernel.blocks.remove(&bid).ok_or_else(|| Error::BlockNotFound(bid.as_u32()))?;
-                removed_any |= dve_block(&mut block, &used);
-                kernel.blocks.insert(bid, block);
-            }
-
-            if !removed_any {
-                break;
-            }
-        }
-        Ok(())
+/// Per-pass DCE postcondition (#209/1).  Each orphan-producing pass
+/// (Vectorize, Unroll, CopyProp, CSE, LICM, IfConversion, ValueSink,
+/// Fusion, FmaFusion, AlgebraicSimplify, ConstFold) calls this at
+/// the end of its `run()` to enforce the "if you remove the only
+/// use of a value, you remove the value" invariant *as the pass's
+/// own postcondition* rather than relying on a global DCE sweep at
+/// the end of the pipeline.
+///
+/// **Test-fixture guard.**  Kernels with no side-effecting op (no
+/// Store, no Barrier, no ThreadgroupStore, …) have no liveness
+/// anchor; every value is dead by definition.  Skipping DCE in that
+/// case keeps degenerate pass-level test fixtures working without
+/// forcing every unit test to scaffold an output Store.  Production
+/// kernels always have at least one Store to an output — they hit
+/// the full DCE loop.  Tests that explicitly want to exercise DCE
+/// on an anchorless kernel call [`DeadValueElimPass`] / [`force_eliminate_dead_values`]
+/// instead.
+pub fn eliminate_dead_values(kernel: &mut Kernel) -> Result<()> {
+    let has_anchor = |b: &metaltile_core::ir::Block| b.ops.iter().any(|op| op.has_side_effects());
+    if !kernel.iter_blocks().any(has_anchor) {
+        return Ok(());
     }
+    force_eliminate_dead_values(kernel)
+}
+
+/// Unconditional DCE — runs the full fixpoint sweep regardless of
+/// whether the kernel has a liveness anchor.  Used by
+/// `DeadValueElimPass::run` (the registry entry point) and by tests
+/// that explicitly want to drive DCE without scaffolding a Store.
+///
+/// Most production callers should use [`eliminate_dead_values`] —
+/// the guarded variant correctly skips no-op work on anchorless
+/// fixtures.
+pub fn force_eliminate_dead_values(kernel: &mut Kernel) -> Result<()> {
+    for _ in 0..MAX_ITERATIONS {
+        let used = collect_used_value_ids(kernel);
+        let mut removed_any = false;
+
+        // Entry block — `kernel.body` is the canonical entry block;
+        // `kernel.blocks` only holds nested blocks (post-#209/2).
+        removed_any |= dve_block(&mut kernel.body, &used);
+
+        // Nested blocks.  Snapshot ids so we can iterate-and-mutate.
+        let block_ids: Vec<BlockId> = kernel.blocks.keys().copied().collect();
+        for bid in block_ids {
+            let mut block =
+                kernel.blocks.remove(&bid).ok_or_else(|| Error::BlockNotFound(bid.as_u32()))?;
+            removed_any |= dve_block(&mut block, &used);
+            kernel.blocks.insert(bid, block);
+        }
+
+        if !removed_any {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Walk every op in every block of the kernel; return the union of

@@ -48,7 +48,6 @@ kernel void aura_flash_p1_kb4_vb2_d128(
     auto v16 = v_block_idx * v15;
     auto v_raw_end = v16 + v15;
     auto v18 = tokens;
-    auto v_clamped_end = select(v_raw_end, v18, bool((v_raw_end > v18)));
     uint v33 = 1u;
     uint v31 = 0u;
     uint v32 = 16u;
@@ -138,6 +137,7 @@ kernel void aura_flash_p1_kb4_vb2_d128(
     uint v143 = 4u;
     uint v144 = 1u;
     uint v145 = 32u;
+    auto v_clamped_end = select(v_raw_end, v18, bool((v_raw_end > v18)));
     uint v61 = 1u;
     for (uint i_4 = v16; i_4 < v_clamped_end; i_4 += v61) {
         auto v62 = kv_stride;
