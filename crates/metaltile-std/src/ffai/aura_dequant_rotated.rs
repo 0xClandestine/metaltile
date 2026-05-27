@@ -49,8 +49,8 @@ use metaltile::kernel;
 macro_rules! aura_dequant_rotated_clean {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[kernel(
-                    bench(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)
-                )]
+            bench(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)
+        )]
         pub fn $name<T>(
             packed: Tensor<u32>,
             norms: Tensor<f32>,
@@ -105,8 +105,8 @@ macro_rules! aura_dequant_rotated_clean {
 macro_rules! aura_dequant_rotated_odd {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[kernel(
-                    bench(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)
-                )]
+            bench(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)
+        )]
         pub fn $name<T>(
             packed: Tensor<u32>,
             norms: Tensor<f32>,

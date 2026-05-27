@@ -176,7 +176,7 @@ pub fn mt_rms_norm<T>(
         class=RowNorm,
         // Per-head dispatch shape: head_dim=64 row count tuned so the bench
         // walks a representative batched-prefill workload (4 batches × 16
-        // tokens × 16 q heads at head_dim=64 = 1024 rows). Same `n × b`
+            // tokens × 16 q heads at head_dim=64 = 1024 rows). Same `n × b`
         // total element count as the parent `mt_rms_norm` bench so the
         // GB/s comparison is apples-to-apples.
         b=1024,

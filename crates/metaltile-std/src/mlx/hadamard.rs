@@ -28,14 +28,14 @@ use metaltile::kernel;
 macro_rules! hadamard_kernel {
     ($name:ident, $n:literal, $log_n:literal, $subop:literal) => {
         #[kernel(
-                    bench(
-                        op="hadamard",
-                        subop=$subop,
-                        class=GenericEmpty,
-                        tol=1e-3,
-                        kernel_mode=Reduction,
-                    )
-                )]
+            bench(
+                op="hadamard",
+                subop=$subop,
+                class=GenericEmpty,
+                tol=1e-3,
+                kernel_mode=Reduction,
+            )
+        )]
         pub fn $name<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] scale: f32) {
             let row = program_id::<0>();
             let base = row * $n;

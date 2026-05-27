@@ -26,7 +26,7 @@ use metaltile::kernel;
         class=AllReduce,
         // tol=256.0 — summing 64M signed bf16 values, MT and MLX accumulate
         // in slightly different orders. With bf16 precision (~7-bit
-        // mantissa, ~1% relative) the result drifts by up to ~192 absolute
+            // mantissa, ~1% relative) the result drifts by up to ~192 absolute
         // between the two reduction trees. f32 stays comfortably below 1e-3.
         tol=256.0,
         mlx="all_reduce_sum{tn}",
@@ -195,14 +195,14 @@ pub fn mt_row_reduce_min<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32)
 macro_rules! col_reduce_kernel {
     ($name:ident, $reduce_op:ident, $subop:literal) => {
         #[kernel(
-                    bench(
-                        op="col_reduce",
-                        subop=$subop,
-                        class=GenericEmpty,
-                        tol=128.0,
-                        kernel_mode=Grid3D,
-                    )
-                )]
+            bench(
+                op="col_reduce",
+                subop=$subop,
+                class=GenericEmpty,
+                tol=128.0,
+                kernel_mode=Grid3D,
+            )
+        )]
         pub fn $name<T>(
             inp: Tensor<T>,
             out: Tensor<T>,
@@ -241,14 +241,14 @@ col_reduce_kernel!(mt_col_reduce_min, min, "min");
 macro_rules! seg_reduce_kernel {
     ($name:ident, $reduce_op:ident, $subop:literal) => {
         #[kernel(
-                    bench(
-                        op="seg_reduce",
-                        subop=$subop,
-                        class=GenericEmpty,
-                        tol=128.0,
-                        kernel_mode=Grid3D,
-                    )
-                )]
+            bench(
+                op="seg_reduce",
+                subop=$subop,
+                class=GenericEmpty,
+                tol=128.0,
+                kernel_mode=Grid3D,
+            )
+        )]
         pub fn $name<T>(
             inp: Tensor<T>,
             out: Tensor<T>,

@@ -67,14 +67,14 @@ macro_rules! fft_kernel {
         /// outputs; `inv` is `0` for the forward transform, `1` for the
         /// inverse (conjugated twiddles + `1/N` scale).
         #[kernel(
-                    bench(
-                        op="fft",
-                        subop=$subop,
-                        class=GenericEmpty,
-                        tol=1e-3,
-                        kernel_mode=Reduction,
-                    )
-                )]
+            bench(
+                op="fft",
+                subop=$subop,
+                class=GenericEmpty,
+                tol=1e-3,
+                kernel_mode=Reduction,
+            )
+        )]
         pub fn $name<T>(
             in_re: Tensor<T>,
             in_im: Tensor<T>,

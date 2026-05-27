@@ -62,17 +62,17 @@ use metaltile::kernel;
 macro_rules! steel_gemm_splitk_kernel {
     ($name:ident, $bm:literal, $bn:literal, $wm:literal, $wn:literal, $tpg:literal, $subop:literal) => {
         #[kernel(
-                    bench(
-                        op="steel_gemm_splitk",
-                        subop=$subop,
-                        class=SteelGemm,
-                        tol=1e-2,
-                        kernel_mode=SimdGroup2D,
-                        bm=$bm,
-                        bn=$bn,
-                        tpg=$tpg,
-                    )
-                )]
+            bench(
+                op="steel_gemm_splitk",
+                subop=$subop,
+                class=SteelGemm,
+                tol=1e-2,
+                kernel_mode=SimdGroup2D,
+                bm=$bm,
+                bn=$bn,
+                tpg=$tpg,
+            )
+        )]
         pub fn $name<T>(
             a: Tensor<T>,
             b: Tensor<T>,

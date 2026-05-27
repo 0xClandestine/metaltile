@@ -32,14 +32,14 @@ use metaltile::kernel;
 macro_rules! gated_delta_record {
     ($name:ident, $dk:literal, $dv:literal, $hk:literal, $hv:literal, $n_per_t:literal, $subop:literal) => {
         #[kernel(
-                    bench(
-                        op="gated_delta_replay",
-                        subop=$subop,
-                        class=GenericEmpty,
-                        tol=1e-3,
-                        kernel_mode=Grid3D,
-                    )
-                )]
+            bench(
+                op="gated_delta_replay",
+                subop=$subop,
+                class=GenericEmpty,
+                tol=1e-3,
+                kernel_mode=Grid3D,
+            )
+        )]
         pub fn $name<T>(
             q: Tensor<T>,
             k: Tensor<T>,
@@ -120,14 +120,14 @@ macro_rules! gated_delta_record {
 macro_rules! state_replay {
     ($name:ident, $dk:literal, $dv:literal, $hv:literal, $n_per_t:literal, $subop:literal) => {
         #[kernel(
-                    bench(
-                        op="gated_delta_replay",
-                        subop=$subop,
-                        class=GenericEmpty,
-                        tol=1e-3,
-                        kernel_mode=Grid3D,
-                    )
-                )]
+            bench(
+                op="gated_delta_replay",
+                subop=$subop,
+                class=GenericEmpty,
+                tol=1e-3,
+                kernel_mode=Grid3D,
+            )
+        )]
         pub fn $name<T>(
             delta_log: Tensor<T>,
             k_log: Tensor<T>,

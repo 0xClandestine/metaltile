@@ -78,8 +78,8 @@ macro_rules! aura_flash_p1_kernel {
         $subop:literal
     ) => {
         #[kernel(
-                    bench(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)
-                )]
+            bench(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)
+        )]
         pub fn $name<T>(
             q_rot: Tensor<T>,
             key_packed: Tensor<u32>,
