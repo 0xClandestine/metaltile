@@ -27,7 +27,8 @@
 //! 2. For each block, mark op `i` as dead iff:
 //!    - it produces a result (`block.results[i].is_some()`), AND
 //!    - it has no side effects (`!op.has_side_effects()`), AND
-//!    - it is not a load (`!op.is_load()` — see "Safety" below), AND
+//!    - it is not an *indexed* load (`!(is_load() && !indices.is_empty())`
+//!      — see "Safety" below), AND
 //!    - its result is *not* in the use set.
 //! 3. Remove dead ops with [`block_util::remove_ops`].
 //! 4. Repeat until a pass over all blocks removes nothing.
@@ -37,14 +38,19 @@
 //! - **Side-effecting ops** (`Store`, `Barrier`, `StackStore`,
 //!   `ThreadgroupStore`, etc.) are never removed — `has_side_effects()`
 //!   filters them out.
-//! - **Loads are conservatively preserved.**  In MSL an out-of-bounds load
-//!   returns garbage rather than faulting, so eliding a dead load is
-//!   technically safe — but a Load also synchronises with prior Stores
-//!   through Metal's memory model, and dead-store-elimination has already
-//!   run by the time we get here.  Keeping loads sidesteps any subtle
-//!   ordering interaction; the orphan-arithmetic bug never produces dead
-//!   loads anyway (it's the *index arithmetic* feeding a fused load that
-//!   becomes orphaned, not the load itself).
+//! - **Indexed Loads are conservatively preserved.**  An `Op::Load`
+//!   with non-empty `indices` reads from device/threadgroup memory and
+//!   synchronises with prior `Op::Store`s under Metal's memory model.
+//!   Even if `dead_store_elim` ran before us, eliding such a load near
+//!   a barrier could subtly change observable behaviour, so we leave
+//!   them alone.
+//! - **Scalar Loads are eliminable.**  `Op::Load` with empty `indices`
+//!   is a uniform read — a kernel-builtin identifier (`tid`, `n_simd`,
+//!   …), a named constant (`0.0f`, `INFINITY`, …), or a constexpr
+//!   parameter loaded as a scalar.  None of these participate in
+//!   memory-order dependencies, so when const-folded `select`s or
+//!   dead-branch elimination orphan the load (e.g. `q_position` in the
+//!   non-causal variants of `aura_flash_p1`), we can drop it.
 //! - **No-result ops** (`Store`, `Loop`, `If`, `Barrier`, …) can't be
 //!   "unused" — they're skipped by the `results[i].is_some()` guard.
 //! - **`FusedElementwise` sub-op refs** use the `0x8000_0000` top-bit
@@ -178,7 +184,17 @@ fn dve_block(block: &mut metaltile_core::ir::Block, used: &FxHashSet<u32>) -> bo
         if op.has_side_effects() {
             continue;
         }
-        if op.is_load() {
+        // INDEXED loads (`Op::Load { indices: [_, …], … }`) are
+        // conservatively preserved — they read from device/threadgroup
+        // memory and synchronise with prior Stores under Metal's memory
+        // model.  SCALAR loads (`indices.is_empty()`) are uniform reads:
+        // either a kernel-builtin identifier (`tid`, `n_simd`, …), a
+        // named constant (`0.0f`, `INFINITY`, …), or a constexpr param
+        // loaded as a scalar.  None of these participate in
+        // memory-order dependencies, so they're safe to eliminate when
+        // their result has no consumer (e.g. a const-folded `select`
+        // branch dropped the only user of a constexpr param).
+        if op.is_load() && !op.load_indices().is_empty() {
             continue;
         }
 
@@ -321,11 +337,15 @@ mod tests {
         assert_eq!(k.body.ops.len(), before, "side-effecting Store must not be eliminated");
     }
 
-    /// Loads are conservatively preserved (memory-model interaction).
-    /// Even an unread load with mask=None stays.  See module "Safety".
+    /// INDEXED loads (`Op::Load { indices: [_, …], … }`) are
+    /// conservatively preserved — they read from device/threadgroup
+    /// memory and synchronise with prior Stores under Metal's memory
+    /// model, so eliding an unread tensor load could change observable
+    /// behaviour around a barrier.  Even an unread load with no mask
+    /// stays.
     #[test]
-    fn preserves_unused_loads_conservatively() {
-        let mut k = Kernel::new("dve_keep_load");
+    fn preserves_unused_indexed_loads_conservatively() {
+        let mut k = Kernel::new("dve_keep_indexed_load");
         k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
         // Load whose result is unused — kept regardless.
         k.body.push_op(
@@ -341,8 +361,49 @@ mod tests {
         DeadValueElimPass.run(&mut k).unwrap();
         assert!(
             k.body.ops.iter().any(|op| matches!(op, Op::Load { .. })),
-            "unused Load must be preserved (conservative)"
+            "unused indexed Load must be preserved (conservative)"
         );
+    }
+
+    /// SCALAR loads (`Op::Load { indices: [], … }`) are NOT preserved
+    /// — they're uniform reads of a builtin identifier (`tid`,
+    /// `n_simd`, …), a named constant (`0.0f`, `INFINITY`, …), or a
+    /// constexpr param loaded as a scalar.  None of these participate
+    /// in memory-order dependencies, so DCE can drop them when the
+    /// result is unused.  This is the path that catches `q_position`
+    /// in the non-causal variants of `aura_flash_p1_*`, where const
+    /// folding of `select($causal == 1, q_position + 1, …)` makes the
+    /// load orphan-but-still-present (Load conservatively preserved
+    /// pre-fix → trailing `-Wunused-variable v24 = q_position;` in
+    /// emitted MSL).
+    #[test]
+    fn eliminates_unused_scalar_load() {
+        let mut k = Kernel::new("dve_drop_scalar_load");
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        // Scalar identifier load — empty indices — whose result is
+        // never referenced.  The status quo emits `auto v1 = q_position;`
+        // and the Metal compiler flags it `-Wunused-variable`.
+        k.body.push_op(
+            Op::Load { src: "q_position".into(), indices: Vec::new(), mask: None, other: None },
+            ValueId::new(1),
+        );
+        // Surviving live op so the kernel isn't trivially empty.
+        k.body.push_op(Op::Const { value: 0 }, ValueId::new(2));
+        k.body.push_op_no_result(Op::Store {
+            dst: "out".into(),
+            indices: vec![IndexExpr::Value(ValueId::new(0))],
+            value: ValueId::new(2),
+            mask: None,
+        });
+
+        DeadValueElimPass.run(&mut k).unwrap();
+        // The scalar Load on q_position must be gone.
+        assert!(
+            !k.body.ops.iter().any(|op| matches!(op, Op::Load { .. })),
+            "unused scalar Load (empty indices) must be eliminated"
+        );
+        // The Store still there.
+        assert!(k.body.ops.iter().any(|op| matches!(op, Op::Store { .. })));
     }
 
     /// Uses inside a nested `Op::If` then_block must keep the outer-block

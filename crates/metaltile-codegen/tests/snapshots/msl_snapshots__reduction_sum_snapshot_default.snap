@@ -9,7 +9,6 @@ using namespace metal;
 kernel void reduction_smoke(
     const device float *x [[buffer(0)]],
     device float *out [[buffer(1)]],
-    uint3 _tid3  [[thread_position_in_threadgroup]],
     uint3 _tgid3 [[threadgroup_position_in_grid]],
     uint3 _lsize3 [[threads_per_threadgroup]],
     uint simd_lane [[thread_index_in_simdgroup]],

@@ -30,6 +30,7 @@ impl MslGenerator {
         type_env: &TypeEnv,
         extra_names: &BTreeMap<ValueId, String>,
         hoists: &mut Vec<String>,
+        skip_emit: &rustc_hash::FxHashSet<ValueId>,
     ) -> Result<()> {
         let has_tile = matches!(kernel.mode, KernelMode::Tile2D);
         let pad = "    ".repeat(indent);
@@ -52,6 +53,15 @@ impl MslGenerator {
 
         for (i, op) in block.ops.iter().enumerate() {
             let vid = block.results.get(i).and_then(|x| *x);
+
+            // Suppress emit for `Op::Mul` ops absorbed by the FMA
+            // peephole on a downstream Add/Sub.  See
+            // `compute_fma_absorbed_mul_skips` for why.
+            if let Some(v) = vid
+                && skip_emit.contains(&v)
+            {
+                continue;
+            }
 
             match op {
                 // ---- indexing ------------------------------------------
@@ -507,6 +517,7 @@ impl MslGenerator {
                             type_env,
                             &inner_names,
                             hoists,
+                            skip_emit,
                         )?;
                     }
                     wl!(out, "{pad}}}");
@@ -848,6 +859,7 @@ impl MslGenerator {
                             type_env,
                             &child_names,
                             hoists,
+                            skip_emit,
                         )?;
                     }
                     if let Some(ebid) = else_block {
@@ -862,6 +874,7 @@ impl MslGenerator {
                                 type_env,
                                 &child_names,
                                 hoists,
+                                skip_emit,
                             )?;
                         }
                     }
@@ -1225,4 +1238,137 @@ fn try_get_mul(vid: ValueId, block: &Block) -> Option<(ValueId, ValueId)> {
         }
     }
     None
+}
+
+/// Compute the set of `Op::Mul` result `ValueId`s that the MSL FMA
+/// peephole will absorb into an `fma(ml, mr, c)` expression AND that
+/// have no other consumers — so emitting their `auto vNN = ml * mr;`
+/// line would produce a dead variable and a `-Wunused-variable` warning
+/// under `xcrun metal -W`.
+///
+/// The peephole lives in the `BinOp { Add, … }` and `BinOp { Sub, … }`
+/// arms below; for each candidate Add/Sub it checks one side via
+/// `try_get_mul` (current-block only), and on a hit emits
+/// `fma(ml, mr, c)` instead of `lhs ± rhs`.  The Mul's result VID is
+/// NOT referenced by the emitted `fma(...)` call (it uses `ml` and `mr`
+/// directly), so if no other op anywhere in the kernel references the
+/// Mul's result, the standalone `Op::Mul` line is dead.
+///
+/// We can't fix this at the IR level (DCE) because the `Op::Mul` op
+/// still has a live consumer in the IR — the `Op::BinOp { Add | Sub }`
+/// references its result.  The fusion is a property of the MSL emit,
+/// not of the IR.  So we mirror it: pre-compute the skip set here, then
+/// suppress emission of those Muls in the per-op loop.
+///
+/// Returns a set of `ValueId`s (the Mul results) that the caller
+/// should not emit as standalone MSL lines.
+fn compute_fma_absorbed_mul_skips(kernel: &Kernel) -> rustc_hash::FxHashSet<ValueId> {
+    use rustc_hash::FxHashMap as Map;
+
+    // Kernel-wide use counts: how many distinct ops reference each
+    // ValueId as an operand.  A Mul whose result is referenced exactly
+    // once (by the absorbing Add/Sub) is the only safe skip candidate.
+    let mut use_counts: Map<ValueId, u32> = Map::with_capacity_and_hasher(256, Default::default());
+    let bump = |counts: &mut Map<ValueId, u32>, op: &Op| {
+        for v in op.value_refs() {
+            *counts.entry(*v).or_insert(0) += 1;
+        }
+    };
+    for op in &kernel.body.ops {
+        bump(&mut use_counts, op);
+    }
+    for block in kernel.blocks.values() {
+        // Skip the stale entry-block copy at `body.id` — `Kernel::new`
+        // stores the entry block twice and earlier passes only update
+        // `kernel.body`.  Counting refs from the stale copy keeps Muls
+        // alive that the real IR has already disconnected.
+        if block.id == kernel.body.id {
+            continue;
+        }
+        for op in &block.ops {
+            bump(&mut use_counts, op);
+        }
+    }
+
+    // Walk each block looking for Add/Sub ops where the FMA peephole
+    // will fire on a uniquely-consumed Mul.
+    let mut skips: rustc_hash::FxHashSet<ValueId> =
+        rustc_hash::FxHashSet::with_capacity_and_hasher(64, Default::default());
+    let scan = |block: &Block,
+                type_env: &crate::passes::type_check::TypeEnv,
+                skips: &mut rustc_hash::FxHashSet<ValueId>| {
+        // Mirror the emit-time `fma_ok` predicate EXACTLY: result is
+        // float AND both operands are float.  A weaker check (only
+        // result type) over-fires — the operand-type check can fail
+        // when type inference didn't reach a Cast/Load chain, in which
+        // case the emit peephole stays inactive but a result-only
+        // pre-compute would have already marked the Mul as skipped.
+        // Result: the emitted MSL still references `vNN` for the Add,
+        // but the Mul declaring `vNN` was suppressed → undefined-symbol
+        // failure.  Matching the emit's exact predicate avoids it.
+        let is_float = |id: ValueId| -> bool {
+            type_env
+                .get(&id)
+                .map(|tv| matches!(tv.dtype, DType::F32 | DType::F16 | DType::BF16))
+                .unwrap_or(false)
+        };
+        for (i, op) in block.ops.iter().enumerate() {
+            let Op::BinOp { op: kind, lhs, rhs } = op else { continue };
+            let result_vid = block.results.get(i).and_then(|v| *v);
+            let result_is_float = result_vid.map(is_float).unwrap_or(false);
+            let operands_all_float = is_float(*lhs) && is_float(*rhs);
+            let fma_ok = result_is_float && operands_all_float;
+            if !fma_ok {
+                continue;
+            }
+            // Identify which side (if any) the peephole would absorb.
+            let absorbed: Option<ValueId> = match kind {
+                BinOpKind::Add => {
+                    let lhs_mul = try_get_mul(*lhs, block).is_some();
+                    let rhs_mul = try_get_mul(*rhs, block).is_some();
+                    // Mirrors the emit arm: exactly-one-side-is-Mul → fire.
+                    match (lhs_mul, rhs_mul) {
+                        (true, false) => Some(*lhs),
+                        (false, true) => Some(*rhs),
+                        _ => None,
+                    }
+                },
+                BinOpKind::Sub =>
+                    if try_get_mul(*lhs, block).is_some() {
+                        Some(*lhs)
+                    } else {
+                        None
+                    },
+                _ => None,
+            };
+            let Some(mul_vid) = absorbed else { continue };
+            // Only safe to skip if the absorbed Mul has no other
+            // consumers anywhere in the kernel.
+            if use_counts.get(&mul_vid).copied().unwrap_or(0) == 1 {
+                skips.insert(mul_vid);
+            }
+        }
+    };
+
+    // Type-env is required for the float-result check; emit_msl already
+    // computes it once and reuses it.  We rebuild here rather than plumb
+    // a fourth out-param through the emit signature — type inference
+    // is cheap relative to MSL string building.
+    let Ok(type_env) = crate::passes::type_check::infer_types(kernel) else {
+        // Type-check failures surface later in the emit; bail out with
+        // an empty skip set (status quo — no Muls suppressed).
+        return rustc_hash::FxHashSet::default();
+    };
+    scan(&kernel.body, &type_env, &mut skips);
+    for block in kernel.blocks.values() {
+        if block.id == kernel.body.id {
+            continue;
+        }
+        scan(block, &type_env, &mut skips);
+    }
+    skips
+}
+
+pub(super) fn fma_absorbed_mul_skips(kernel: &Kernel) -> rustc_hash::FxHashSet<ValueId> {
+    compute_fma_absorbed_mul_skips(kernel)
 }

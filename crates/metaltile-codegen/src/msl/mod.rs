@@ -72,6 +72,71 @@ fn kernel_uses_identifier(kernel: &Kernel, name: &str) -> bool {
     check(&kernel.body.ops) || kernel.blocks.values().any(|b| check(&b.ops))
 }
 
+/// Return `true` if `name` is referenced anywhere in the kernel IR as a
+/// load source, store destination, or other named target.  Used to
+/// decide whether a kernel-signature parameter would be flagged
+/// `-Wunused-parameter` at the MSL `metal -W` stage — DSL authors
+/// commonly declare constexpr / scalar params for documentation or
+/// runtime-assert hooks even when the kernel body doesn't consult
+/// them, and the body parser keeps those decls on the kernel
+/// signature for ABI consistency.
+///
+/// **Stale-block-copy hazard.**  `Kernel::new` inserts the entry block
+/// at *both* `kernel.body` AND `kernel.blocks[body.id]`, then optimization
+/// passes (Unroll / Schedule / DCE) mutate `kernel.body` in place and
+/// never sync the copy.  Iterating `kernel.blocks.values()` would
+/// resurrect references to ops that the real IR has eliminated — e.g.
+/// a `Load(q_position, [])` that const-fold + algebraic-simplify +
+/// dead-value-elim correctly retired from `kernel.body`.  Skip the
+/// `body.id` entry when walking blocks; same fix as
+/// `passes::dead_value_elim::collect_used_value_ids`.
+fn kernel_references_param(kernel: &Kernel, name: &str) -> bool {
+    let op_refs = |op: &Op| -> bool {
+        if op.load_src() == Some(name) || op.store_dst() == Some(name) {
+            return true;
+        }
+        // Threadgroup / stack / local ops use a `name` field instead of
+        // `src` / `dst` (e.g. `threadgroup_store("xs", …)`).
+        if match op {
+            Op::ThreadgroupAlloc { name: n, .. }
+            | Op::ThreadgroupStore { name: n, .. }
+            | Op::ThreadgroupLoad { name: n, .. }
+            | Op::StackAlloc { name: n, .. }
+            | Op::StackStore { name: n, .. }
+            | Op::StackLoad { name: n, .. }
+            | Op::DeclareLocal { name: n, .. }
+            | Op::SetLocal { name: n, .. } => n == name,
+            _ => false,
+        } {
+            return true;
+        }
+        // FusedElementwise chains can hide inner Loads — recurse into
+        // the sub-op vector.
+        if let Op::FusedElementwise { ops } = op {
+            for inner in ops {
+                if inner.load_src() == Some(name) {
+                    return true;
+                }
+            }
+        }
+        false
+    };
+    let check = |ops: &[Op]| ops.iter().any(op_refs);
+    if check(&kernel.body.ops) {
+        return true;
+    }
+    let body_id = kernel.body.id;
+    for (bid, block) in kernel.blocks.iter() {
+        if *bid == body_id {
+            continue; // stale copy — see doc comment
+        }
+        if check(&block.ops) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Return `true` if the kernel contains any `Op::StrideReduce`.  In
 /// `Reduction` / `Tile2D` modes the emitter lowers `StrideReduce` to a
 /// vectorized loop that references `tid` and `lsize` (see the `has_tid`
@@ -122,6 +187,114 @@ fn kernel_reduce_uses_n_simd(kernel: &Kernel, config: &MslConfig) -> bool {
     let has_axis0_reduce =
         |ops: &[Op]| ops.iter().any(|op| matches!(op, Op::Reduce { axis: 0, .. }));
     has_axis0_reduce(&kernel.body.ops) || kernel.blocks.values().any(|b| has_axis0_reduce(&b.ops))
+}
+
+/// Precomputed flags for Reduction-mode signature + preamble emission.
+/// Each field is `true` when the corresponding MSL identifier
+/// (`tid`/`tgid_x`/`lsize`/`n_simd`) has a real consumer in the emitted
+/// MSL — both the kernel-parameter attribute AND the preamble alias
+/// gate on the same value so the signature and body stay in sync.
+/// Pre-fix, the signature unconditionally declared `_tid3`/`_tgid3`/
+/// `_lsize3` and the preamble unconditionally emitted their aliases —
+/// any kernel that didn't use them produced `-Wunused-parameter` (on
+/// the attr) AND `-Wunused-variable` (on the alias).  Gating both off
+/// the same predicate eliminates both.
+struct ReductionPreambleGates {
+    needs_tid: bool,
+    needs_tgid_x: bool,
+    needs_tgid_y: bool,
+    needs_tgid_z: bool,
+    needs_lsize: bool,
+    needs_n_simd: bool,
+}
+
+impl ReductionPreambleGates {
+    fn compute(kernel: &Kernel, config: &MslConfig) -> Self {
+        let has_stride_reduce = kernel_has_stride_reduce(kernel);
+        let has_reduce_mean = kernel_has_reduce_mean(kernel);
+        let needs_n_simd =
+            kernel_reduce_uses_n_simd(kernel, config) || kernel_uses_identifier(kernel, "n_simd");
+        let needs_lsize = has_stride_reduce
+            || has_reduce_mean
+            || needs_n_simd
+            || kernel_uses_identifier(kernel, "lsize");
+        let needs_tid = has_stride_reduce || kernel_uses_identifier(kernel, "tid");
+        Self {
+            needs_tid,
+            needs_tgid_x: kernel_uses_program_id_axis(kernel, 0),
+            needs_tgid_y: kernel_uses_program_id_axis(kernel, 1),
+            needs_tgid_z: kernel_uses_program_id_axis(kernel, 2),
+            needs_lsize,
+            needs_n_simd,
+        }
+    }
+
+    /// `_tid3` kernel-attr parameter (`uint3 _tid3
+    /// [[thread_position_in_threadgroup]]`) is consumed only by
+    /// `tid = _tid3.x`.
+    fn needs_tid3_attr(&self) -> bool { self.needs_tid }
+
+    /// `_tgid3` is consumed by `tgid_x` / `tgid_y` / `tgid_z` aliases.
+    fn needs_tgid3_attr(&self) -> bool {
+        self.needs_tgid_x || self.needs_tgid_y || self.needs_tgid_z
+    }
+
+    /// `_lsize3` is consumed by `lsize = _lsize3.x` (and `n_simd` via
+    /// `lsize / 32u`).
+    fn needs_lsize3_attr(&self) -> bool { self.needs_lsize }
+}
+
+/// Return `true` if the kernel actually references `simd_lane` as an
+/// identifier in the emitted MSL.  Tighter than `feat.needs_simd_lane`
+/// (which is set by any op with the `needs_simd_lane` flag, including
+/// `SimdReduce` / `SimdShuffleXor` / `SimdgroupMatMul` whose emit
+/// lowers to a builtin call like `simd_sum(value)` and never names
+/// `simd_lane`).
+///
+/// Real consumers — one row per MSL emit site:
+/// - `Op::SimdLaneId` → `auto vNN = simd_lane;` (emit_block.rs)
+/// - direct `Op::Load { src: "simd_lane", indices: [] }` (DSL identifier)
+/// - `Op::Reduce` slow path → `simd_lane == 0` / `simd_lane < n_simd`
+///   (reduce.rs:100,106) — fires when TPG > simd_size
+/// - matmul / tiled emit (`feat.is_matmul`) → `simd_lane >> 1`
+///   (matmul.rs:311)
+fn kernel_needs_simd_lane_attr(kernel: &Kernel, config: &MslConfig, is_matmul: bool) -> bool {
+    if is_matmul {
+        return true;
+    }
+    let has_simd_lane_id = |ops: &[Op]| ops.iter().any(|op| matches!(op, Op::SimdLaneId));
+    if has_simd_lane_id(&kernel.body.ops)
+        || kernel.blocks.values().any(|b| has_simd_lane_id(&b.ops))
+    {
+        return true;
+    }
+    if kernel_uses_identifier(kernel, "simd_lane") {
+        return true;
+    }
+    // Slow-path Op::Reduce uses simd_lane in the two-level emit.
+    kernel_reduce_uses_n_simd(kernel, config)
+}
+
+/// Symmetric to `kernel_needs_simd_lane_attr`: `simd_group` identifier
+/// is referenced only by `Op::SimdGroupId`, direct loads, slow-path
+/// reductions (reduce.rs:100,103 — `simd_group == 0` and
+/// `tg_name[simd_group]`), and matmul tiled emit (matmul.rs:173-174 —
+/// `sg_x = simd_group % …` / `sg_y = simd_group / …`).
+fn kernel_needs_simd_group_attr(kernel: &Kernel, config: &MslConfig, is_matmul: bool) -> bool {
+    if is_matmul {
+        return true;
+    }
+    let has_simd_group_id = |ops: &[Op]| ops.iter().any(|op| matches!(op, Op::SimdGroupId));
+    if has_simd_group_id(&kernel.body.ops)
+        || kernel.blocks.values().any(|b| has_simd_group_id(&b.ops))
+    {
+        return true;
+    }
+    if kernel_uses_identifier(kernel, "simd_group") || kernel_uses_identifier(kernel, "simd_id") {
+        return true;
+    }
+    // Slow-path Op::Reduce uses simd_group in the two-level emit.
+    kernel_reduce_uses_n_simd(kernel, config)
 }
 
 // ---------------------------------------------------------------------------
@@ -209,14 +382,29 @@ impl MslGenerator {
 
         write!(out, "kernel void {}(", kernel.name).unwrap();
 
+        // `[[maybe_unused]]` attribute decoration: DSL authors commonly
+        // declare constexpr / scalar / tensor params for documentation
+        // or runtime-assert hooks even when the kernel body never
+        // reads them.  Without this attribute the Metal compiler
+        // flags the param under `-Wunused-parameter`.  Detect at
+        // signature time by scanning the post-pipeline IR for any
+        // reference to the param's name (Load/Store/Threadgroup/Stack/
+        // Local ops — see `kernel_references_param`).
+        let attr_for = |name: &str| -> &'static str {
+            if kernel_references_param(kernel, name) { "" } else { "[[maybe_unused]] " }
+        };
+
         // Tensor/Strided/Scalar params.
         for p in &kernel.params {
+            // Output params are always referenced by the Store at the
+            // end of the kernel body — never mark `[[maybe_unused]]`.
+            let attr = if p.is_output { "" } else { attr_for(&p.name) };
             match p.kind {
                 ParamKind::Tensor => {
                     let q = if p.is_output { "device " } else { "const device " };
                     write!(
                         out,
-                        "\n    {q}{} *{} [[buffer({buf_idx})]],",
+                        "\n    {attr}{q}{} *{} [[buffer({buf_idx})]],",
                         self.msl_type_name(p.dtype),
                         p.name
                     )
@@ -227,23 +415,37 @@ impl MslGenerator {
                     let q = if p.is_output { "device " } else { "const device " };
                     write!(
                         out,
-                        "\n    {q}{} *{} [[buffer({buf_idx})]],",
+                        "\n    {attr}{q}{} *{} [[buffer({buf_idx})]],",
                         self.msl_type_name(p.dtype),
                         p.name
                     )
                     .unwrap();
                     buf_idx += 1;
-                    write!(out, "\n    constant uint *{}_shape [[buffer({buf_idx})]],", p.name)
-                        .unwrap();
+                    // The `_shape` / `_strides` companion buffers are
+                    // referenced via `Op::Load { src: "{name}_shape" }`
+                    // etc. at index-emission time.  Each gets its own
+                    // referenced-by-name check.
+                    let shape_attr = attr_for(&format!("{}_shape", p.name));
+                    let strides_attr = attr_for(&format!("{}_strides", p.name));
+                    write!(
+                        out,
+                        "\n    {shape_attr}constant uint *{}_shape [[buffer({buf_idx})]],",
+                        p.name
+                    )
+                    .unwrap();
                     buf_idx += 1;
-                    write!(out, "\n    constant uint *{}_strides [[buffer({buf_idx})]],", p.name)
-                        .unwrap();
+                    write!(
+                        out,
+                        "\n    {strides_attr}constant uint *{}_strides [[buffer({buf_idx})]],",
+                        p.name
+                    )
+                    .unwrap();
                     buf_idx += 1;
                 },
                 ParamKind::Scalar => {
                     write!(
                         out,
-                        "\n    constant {} &{} [[buffer({buf_idx})]],",
+                        "\n    {attr}constant {} &{} [[buffer({buf_idx})]],",
                         self.msl_type_name(p.dtype),
                         p.name
                     )
@@ -264,20 +466,66 @@ impl MslGenerator {
                 DType::U64 => "ulong",
                 _ => "uint",
             };
-            write!(out, "\n    constant {msl_type} &{} [[buffer({buf_idx})]],", ce.name.name())
-                .unwrap();
+            let attr = attr_for(ce.name.name());
+            write!(
+                out,
+                "\n    {attr}constant {msl_type} &{} [[buffer({buf_idx})]],",
+                ce.name.name()
+            )
+            .unwrap();
             buf_idx += 1;
         }
 
-        // Thread / threadgroup position attributes.
+        // Thread / threadgroup position attributes.  For Reduction
+        // mode we gate each kernel-attr decl on the same predicate as
+        // its preamble alias — see `ReductionPreambleGates`.  Pre-fix,
+        // both the signature and preamble were unconditional, so a
+        // kernel that didn't use `tid`/`tgid_*`/`lsize` produced
+        // `-Wunused-parameter` warnings against the attr decls.
+        let reduction_gates = if kernel.mode == KernelMode::Reduction {
+            Some(ReductionPreambleGates::compute(kernel, &self.config))
+        } else {
+            None
+        };
         match kernel.mode {
             KernelMode::Elementwise => {
                 write!(out, "\n    uint tid [[thread_position_in_grid]]").unwrap();
             },
             KernelMode::Reduction => {
-                write!(out, "\n    uint3 _tid3  [[thread_position_in_threadgroup]],").unwrap();
-                write!(out, "\n    uint3 _tgid3 [[threadgroup_position_in_grid]],").unwrap();
-                write!(out, "\n    uint3 _lsize3 [[threads_per_threadgroup]]").unwrap();
+                let gates = reduction_gates.as_ref().expect("set above for Reduction mode");
+                // Each attr is emitted only when its derived alias has
+                // a real consumer.  At least one is virtually always
+                // needed (a kernel with no thread/grid awareness is
+                // degenerate); but a kernel that uses only `tgid_y`
+                // legitimately drops `_tid3` and `_lsize3`.  Track
+                // whether we've written any so we know where to put
+                // the comma separators.
+                let mut wrote_any = false;
+                let mut emit_attr = |line: &str| {
+                    let prefix = if wrote_any { ",\n    " } else { "\n    " };
+                    write!(out, "{prefix}{line}").unwrap();
+                    wrote_any = true;
+                };
+                if gates.needs_tid3_attr() {
+                    emit_attr("uint3 _tid3  [[thread_position_in_threadgroup]]");
+                }
+                if gates.needs_tgid3_attr() {
+                    emit_attr("uint3 _tgid3 [[threadgroup_position_in_grid]]");
+                }
+                if gates.needs_lsize3_attr() {
+                    emit_attr("uint3 _lsize3 [[threads_per_threadgroup]]");
+                }
+                // If none of the above fired the kernel has no
+                // thread/threadgroup attrs.  Emit a degenerate `tid`
+                // attr to keep the signature non-trivial — MSL accepts
+                // a kernel with zero builtin attrs but the parameter
+                // list then needs to end without a leading comma for
+                // the simd_lane/simd_group conditional path below.
+                // `[[maybe_unused]]` keeps `metal -W` quiet about it.
+                if !wrote_any {
+                    write!(out, "\n    [[maybe_unused]] uint _tid3 [[thread_position_in_grid]]")
+                        .unwrap();
+                }
             },
             KernelMode::Grid3D => {
                 write!(out, "\n    uint3 gid [[thread_position_in_grid]]").unwrap();
@@ -287,18 +535,38 @@ impl MslGenerator {
                 write!(out, "\n    uint2 tgid [[threadgroup_position_in_grid]]").unwrap();
             },
             KernelMode::SimdGroup2D => {
-                write!(out, "\n    uint3 lid [[thread_position_in_threadgroup]],").unwrap();
+                // `lid` is referenced only when the DSL reads
+                // `tid_x` / `tid_y` / `tid_z` as a direct identifier
+                // (emit_block.rs maps those loads to `lid.x` / `.y` /
+                // `.z` in SimdGroup2D mode).  Matmul kernels in
+                // SimdGroup2D mode go through `emit_tiled` and never
+                // touch `lid` — they'd emit `-Wunused-parameter` for
+                // an unconditional `lid` attr.
+                let needs_lid = kernel_uses_identifier(kernel, "tid_x")
+                    || kernel_uses_identifier(kernel, "tid_y")
+                    || kernel_uses_identifier(kernel, "tid_z");
+                if needs_lid {
+                    write!(out, "\n    uint3 lid [[thread_position_in_threadgroup]],").unwrap();
+                }
                 write!(out, "\n    uint3 tid [[threadgroup_position_in_grid]]").unwrap();
                 write!(out, ",\n    uint simd_lane [[thread_index_in_simdgroup]]").unwrap();
                 write!(out, ",\n    uint simd_group [[simdgroup_index_in_threadgroup]]").unwrap();
             },
         }
         // NOTE: SimdGroup2D mode emits simd_lane and simd_group inline above.
-        // Other modes add them conditionally here.
-        if feat.needs_simd_lane && !matches!(kernel.mode, KernelMode::SimdGroup2D) {
+        // Other modes add them conditionally here.  Pre-fix, `feat.needs_simd_*`
+        // was over-broad (set by SimdReduce/SimdShuffleXor/etc. whose emits
+        // don't actually reference these identifiers); tightened predicates
+        // gate on actual MSL consumption — see `kernel_needs_simd_lane_attr`
+        // and `kernel_needs_simd_group_attr`.
+        if !matches!(kernel.mode, KernelMode::SimdGroup2D)
+            && kernel_needs_simd_lane_attr(kernel, &self.config, feat.is_matmul)
+        {
             write!(out, ",\n    uint simd_lane [[thread_index_in_simdgroup]]").unwrap();
         }
-        if feat.needs_simd_group && !matches!(kernel.mode, KernelMode::SimdGroup2D) {
+        if !matches!(kernel.mode, KernelMode::SimdGroup2D)
+            && kernel_needs_simd_group_attr(kernel, &self.config, feat.is_matmul)
+        {
             write!(out, ",\n    uint simd_group [[simdgroup_index_in_threadgroup]]").unwrap();
         }
 
@@ -330,33 +598,23 @@ impl MslGenerator {
         //             `…/float(lsize)` in both fast and slow); n_simd's own
         //             definition (`n_simd = lsize / 32u`); direct `lsize` load.
         //   n_simd  ← Op::Reduce slow path (tpg > simd_size); direct `n_simd` load.
-        if kernel.mode == KernelMode::Reduction {
-            let has_stride_reduce = kernel_has_stride_reduce(kernel);
-            let has_reduce_mean = kernel_has_reduce_mean(kernel);
-            let needs_n_simd = kernel_reduce_uses_n_simd(kernel, &self.config)
-                || kernel_uses_identifier(kernel, "n_simd");
-            let needs_lsize = has_stride_reduce
-                || has_reduce_mean
-                || needs_n_simd
-                || kernel_uses_identifier(kernel, "lsize");
-            let needs_tid = has_stride_reduce || kernel_uses_identifier(kernel, "tid");
-
-            if needs_tid {
+        if let Some(gates) = reduction_gates.as_ref() {
+            if gates.needs_tid {
                 wl!(out, "    uint tid    = _tid3.x;");
             }
-            if kernel_uses_program_id_axis(kernel, 0) {
+            if gates.needs_tgid_x {
                 wl!(out, "    uint tgid_x = _tgid3.x;");
             }
-            if kernel_uses_program_id_axis(kernel, 1) {
+            if gates.needs_tgid_y {
                 wl!(out, "    uint tgid_y = _tgid3.y;");
             }
-            if kernel_uses_program_id_axis(kernel, 2) {
+            if gates.needs_tgid_z {
                 wl!(out, "    uint tgid_z = _tgid3.z;");
             }
-            if needs_lsize {
+            if gates.needs_lsize {
                 wl!(out, "    uint lsize  = _lsize3.x;");
             }
-            if needs_n_simd {
+            if gates.needs_n_simd {
                 wl!(out, "    uint n_simd = lsize / 32u;");
             }
         }
@@ -365,6 +623,13 @@ impl MslGenerator {
         let mut body_buf = String::new();
         let mut hoists: Vec<String> = Vec::new();
         let extra_names: BTreeMap<ValueId, String> = BTreeMap::new();
+
+        // Compute the per-kernel skip set ONCE before emitting any
+        // block. `Op::Mul` ops whose result is consumed by an FMA-eligible
+        // Add/Sub (and nowhere else) would otherwise produce
+        // `auto vNN = ml * mr;` orphan lines under the MSL FMA peephole —
+        // see `compute_fma_absorbed_mul_skips` for the full rationale.
+        let skip_emit = emit_block::fma_absorbed_mul_skips(kernel);
 
         if feat.is_matmul {
             self.emit_tiled(&mut body_buf, "    ", kernel, None)?;
@@ -378,6 +643,7 @@ impl MslGenerator {
                 type_env,
                 &extra_names,
                 &mut hoists,
+                &skip_emit,
             )?;
         }
 
@@ -1203,6 +1469,12 @@ mod tests {
             Op::Load { src: "tgid_y".to_string(), indices: Vec::new(), mask: None, other: None },
             ValueId::new(1),
         );
+        // Sink the load result so DCE doesn't eliminate the scalar
+        // Load (which would also drop the preamble decl).  The whole
+        // point of this regression is the parser's direct-identifier
+        // lowering path; with a real consumer present, the decl must
+        // be emitted.
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(
             msl.contains("uint tgid_y = _tgid3.y;"),

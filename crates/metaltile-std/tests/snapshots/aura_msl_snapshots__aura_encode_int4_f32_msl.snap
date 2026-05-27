@@ -16,10 +16,7 @@ kernel void aura_encode_int4(
     constant uint &dim [[buffer(6)]],
     constant uint &packed_width [[buffer(7)]],
     uint3 _tid3  [[thread_position_in_threadgroup]],
-    uint3 _tgid3 [[threadgroup_position_in_grid]],
-    uint3 _lsize3 [[threads_per_threadgroup]],
-    uint simd_lane [[thread_index_in_simdgroup]],
-    uint simd_group [[simdgroup_index_in_threadgroup]]
+    uint3 _tgid3 [[threadgroup_position_in_grid]]
 ) {
     uint tid    = _tid3.x;
     uint tgid_x = _tgid3.x;

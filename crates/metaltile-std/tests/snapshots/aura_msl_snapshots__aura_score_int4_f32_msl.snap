@@ -17,10 +17,7 @@ kernel void aura_score_int4(
     constant uint &tokens [[buffer(7)]],
     constant uint &repeat_count [[buffer(8)]],
     uint3 _tid3  [[thread_position_in_threadgroup]],
-    uint3 _tgid3 [[threadgroup_position_in_grid]],
-    uint3 _lsize3 [[threads_per_threadgroup]],
-    uint simd_lane [[thread_index_in_simdgroup]],
-    uint simd_group [[simdgroup_index_in_threadgroup]]
+    uint3 _tgid3 [[threadgroup_position_in_grid]]
 ) {
     uint tid    = _tid3.x;
     uint tgid_x = _tgid3.x;

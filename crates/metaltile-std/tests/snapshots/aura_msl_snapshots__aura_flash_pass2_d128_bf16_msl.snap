@@ -14,8 +14,7 @@ kernel void aura_flash_pass2_d128(
     constant uint &dim [[buffer(4)]],
     constant uint &num_blocks [[buffer(5)]],
     uint3 _tid3  [[thread_position_in_threadgroup]],
-    uint3 _tgid3 [[threadgroup_position_in_grid]],
-    uint3 _lsize3 [[threads_per_threadgroup]]
+    uint3 _tgid3 [[threadgroup_position_in_grid]]
 ) {
     uint tid    = _tid3.x;
     uint tgid_x = _tgid3.x;

@@ -7,7 +7,7 @@ expression: msl
 using namespace metal;
 
 kernel void bf16_param(
-    const device bfloat *a [[buffer(0)]],
+    [[maybe_unused]] const device bfloat *a [[buffer(0)]],
     uint tid [[thread_position_in_grid]]
 ) {
 }

@@ -25,10 +25,8 @@ kernel void aura_flash_p1_kb4_vb2_d128(
     constant uint &repeat_count [[buffer(15)]],
     constant uint &num_blocks [[buffer(16)]],
     constant uint &block_size [[buffer(17)]],
-    constant uint &q_position [[buffer(18)]],
-    uint3 gid [[thread_position_in_grid]],
-    uint simd_lane [[thread_index_in_simdgroup]],
-    uint simd_group [[simdgroup_index_in_threadgroup]]
+    [[maybe_unused]] constant uint &q_position [[buffer(18)]],
+    uint3 gid [[thread_position_in_grid]]
 ) {
     float key_cb[16];
     float val_cb[4];
@@ -51,7 +49,6 @@ kernel void aura_flash_p1_kb4_vb2_d128(
     auto v_raw_end = v16 + v15;
     auto v18 = tokens;
     auto v_clamped_end = select(v_raw_end, v18, bool((v_raw_end > v18)));
-    auto v24 = q_position;
     uint v31 = 0u;
     uint v32 = 16u;
     uint v33 = 1u;

@@ -95,12 +95,9 @@ pub fn ffai_conv1d_causal_step_silu_cast_many<T>(
     #[constexpr] conv_kernel: u32,
 ) {
     let d = program_id::<0>();
-    // K=4 hardcoded — see file docstring. `conv_kernel` constexpr is
-    // kept in the signature to mirror `conv1d_causal_step`. A non-K=4
-    // model wouldn't hit this kernel anyway (the host wrapper gates on
-    // kernel_size == 4); the constexpr is unused by the body but keeps
-    // the bench spec deterministic.
-    let _unused = conv_kernel;
+    // K=4 hardcoded — see file docstring. `conv_kernel` is kept in the
+    // signature for documentation + the runtime-side `kernel_size == 4`
+    // assert hook; the kernel body never reads it.
     // Bias and the per-channel weights are constant across the T-sweep
     // → load once, keep in registers. The 4 weights `w0..w3` map to
     // state slots: `w0` weights `s0` (oldest prior input), `w1`→`s1`,

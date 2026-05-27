@@ -19,9 +19,7 @@ kernel void mt_steel_gemm_splitk_nax(
     constant uint &k [[buffer(4)]],
     constant uint &n [[buffer(5)]],
     constant uint &k_per_split [[buffer(6)]],
-    uint3 _tid3  [[thread_position_in_threadgroup]],
     uint3 _tgid3 [[threadgroup_position_in_grid]],
-    uint3 _lsize3 [[threads_per_threadgroup]],
     uint simd_lane [[thread_index_in_simdgroup]],
     uint simd_group [[simdgroup_index_in_threadgroup]]
 ) {

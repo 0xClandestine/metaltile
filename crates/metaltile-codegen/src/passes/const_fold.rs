@@ -178,12 +178,19 @@ fn eval_binop(op: BinOpKind, a: i64, b: i64) -> Option<i64> {
         BinOpKind::And => Some((a != 0 && b != 0) as i64),
         BinOpKind::Or => Some((a != 0 || b != 0) as i64),
         BinOpKind::Xor => Some(a ^ b),
-        BinOpKind::CmpLt
-        | BinOpKind::CmpGt
-        | BinOpKind::CmpLe
-        | BinOpKind::CmpGe
-        | BinOpKind::CmpEq
-        | BinOpKind::CmpNe => None,
+        // Integer comparisons fold to 0/1 (matching the convention used
+        // by `And`/`Or` above).  Folding these unblocks downstream
+        // `Select { cond: Const(0|1), … }` simplification in
+        // `algebraic_simplify`, which is the path that retires dead
+        // constexpr-param reads in the non-causal variants of
+        // `aura_flash_p1_*` (where the macro substitutes `$causal == 0`
+        // and the load of `q_position` becomes orphan).
+        BinOpKind::CmpLt => Some((a < b) as i64),
+        BinOpKind::CmpGt => Some((a > b) as i64),
+        BinOpKind::CmpLe => Some((a <= b) as i64),
+        BinOpKind::CmpGe => Some((a >= b) as i64),
+        BinOpKind::CmpEq => Some((a == b) as i64),
+        BinOpKind::CmpNe => Some((a != b) as i64),
         BinOpKind::Pow => None, // floating-point; not folded
         BinOpKind::Shl => Some(a << b),
         BinOpKind::Shr => Some(a >> b),
