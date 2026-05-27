@@ -228,7 +228,7 @@ mod tests {
 }
 
 #[cfg(target_os = "macos")]
-pub mod tests_support {
+pub mod tests_support_ctx {
     //! GPU correctness tests for `mt_gated_delta_prep_step`.
     #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
@@ -395,6 +395,9 @@ pub mod tests_support {
             assert!(cs >= 0.999, "step {step} state cos = {cs:.6}");
             state_gpu = state_gpu_new; state_cpu = state_cpu_new;
         }
+    }
+}
+
 mod tests_support {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 

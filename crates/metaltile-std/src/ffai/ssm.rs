@@ -439,7 +439,7 @@ pub fn mt_ssm_step<T>(
 }
 
 #[cfg(target_os = "macos")]
-pub mod tests_support {
+pub mod tests_support_ctx {
     use std::collections::BTreeMap;
 
     use metaltile_core::{dtype::DType, ir::KernelMode};

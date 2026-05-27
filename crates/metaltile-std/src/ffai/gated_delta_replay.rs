@@ -279,7 +279,7 @@ gated_delta_record!(
 state_replay!(state_replay_d64_32_2_2, 64u32, 32u32, 2u32, 2u32, "replay_d64_32_2_2");
 
 #[cfg(target_os = "macos")]
-pub mod tests_support {
+pub mod tests_support_ctx {
     //! GPU correctness tests for gated_delta_step_record and state_replay.
     #![allow(clippy::too_many_arguments)]
 
