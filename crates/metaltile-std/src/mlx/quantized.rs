@@ -4929,3 +4929,399 @@ mod qmm_selector_tests {
         }
     }
 }
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile_macros::test_kernel;
+    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+
+    fn pack_f32(vals: &[f32]) -> Vec<u8> {
+        bytemuck::cast_slice::<f32, u8>(vals).to_vec()
+    }
+
+    fn pack_u32(vals: &[u32]) -> Vec<u8> {
+        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
+    }
+
+    fn pack_u32_scalar(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
+
+    fn unpack_f32(bytes: &[u8]) -> Vec<f32> {
+        bytes.chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    fn unpack_u32(bytes: &[u8]) -> Vec<u32> {
+        bytes.chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    // ── int2 CPU helpers ─────────────────────────────────────────────────
+
+    /// CPU bit-unpack for int2 (16 two-bit codes per u32).
+    fn cpu_dequant_int2(packed: &[u32], scales: &[f32], biases: &[f32], group_size: usize) -> Vec<f32> {
+        let pack_factor = 16usize;
+        let mut out = Vec::with_capacity(packed.len() * pack_factor);
+        for (pack_idx, &val) in packed.iter().enumerate() {
+            let oindex = pack_idx * pack_factor;
+            let g = oindex / group_size;
+            for k in 0..pack_factor {
+                let q = ((val >> (k * 2)) & 0x3) as f32;
+                out.push(scales[g] * q + biases[g]);
+            }
+        }
+        out
+    }
+
+    /// CPU quantize for int2 (mirrors the GPU kernel logic).
+    fn cpu_quant_int2(
+        vals: &[f32], group_size: usize,
+    ) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
+        let n_groups = vals.len() / group_size;
+        let pack_factor = 16usize;
+        let packs_per_group = group_size / pack_factor;
+        let mut packed = vec![0u32; n_groups * packs_per_group];
+        let mut scales = vec![0.0f32; n_groups];
+        let mut biases = vec![0.0f32; n_groups];
+        let n_bins = 3.0f32;
+        let eps = 1.0e-7f32;
+        for g in 0..n_groups {
+            let base = g * group_size;
+            let slice = &vals[base..base + group_size];
+            let w_min = slice.iter().cloned().fold(f32::INFINITY, f32::min);
+            let w_max = slice.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let raw_scale = (w_max - w_min) / n_bins;
+            let scale = if raw_scale < eps { 1.0 } else { raw_scale };
+            let bias = w_min;
+            scales[g] = scale;
+            biases[g] = bias;
+            let inv_scale = 1.0 / scale;
+            for lane in 0..packs_per_group {
+                let pack_base = base + lane * pack_factor;
+                let mut acc = 0u32;
+                for k in 0..pack_factor {
+                    let v = vals[pack_base + k];
+                    let q_f = (v - bias) * inv_scale + 0.5;
+                    let q_c = q_f.max(0.0).min(3.0) as u32;
+                    acc |= q_c << (k * 2);
+                }
+                packed[g * packs_per_group + lane] = acc;
+            }
+        }
+        (packed, scales, biases)
+    }
+
+    // ── int2 dequantize: deterministic CPU packed data ────────────────────
+
+    #[test_kernel(name = "affine_quant/dequantize_int2_f32", dtypes = [f32], tol = 1e-6)]
+    fn test_dequantize_int2_f32(dt: DType) -> TestSetup {
+        let group_size = 64usize;
+        let n_groups = 5usize;
+        let n_elem = n_groups * group_size;
+        let pack_factor = 16usize;
+        let n_packs = n_elem / pack_factor;
+
+        // Deterministic packed weights — arbitrary bit patterns.
+        let packed: Vec<u32> = (0..n_packs as u32)
+            .map(|i| i.wrapping_mul(0x9e37_79b9) ^ 0x5bd1_e995)
+            .collect();
+        let scales: Vec<f32> = (0..n_groups).map(|g| 0.05 + g as f32 * 0.01).collect();
+        let biases: Vec<f32> = (0..n_groups).map(|g| -0.2 + g as f32 * 0.03).collect();
+
+        let expected = cpu_dequant_int2(&packed, &scales, &biases, group_size);
+
+        let mut k = mt_affine_dequantize_int2::kernel_ir_for(dt);
+        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("w", pack_u32(&packed), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack_f32(&scales), DType::F32))
+            .input(TestBuffer::from_vec("biases", pack_f32(&biases), DType::F32))
+            .input(TestBuffer::from_vec("group_size", pack_u32_scalar(group_size as u32), DType::U32))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), DType::F32))
+            .grid_3d(n_packs.div_ceil(64) as u32, 1, 1, [64, 1, 1])
+    }
+
+    // ── int2 round-trip: CPU quantize → GPU dequantize ───────────────────
+
+    #[test_kernel(name = "affine_quant/roundtrip_int2_f32", dtypes = [f32], tol = 1e-5)]
+    fn test_roundtrip_int2_f32(dt: DType) -> TestSetup {
+        let group_size = 64usize;
+        let n_groups = 4usize;
+        let n_elem = n_groups * group_size;
+        let pack_factor = 16usize;
+        let n_packs = n_elem / pack_factor;
+
+        let vals: Vec<f32> = (0..n_elem).map(|i| ((i % 29) as f32 - 14.0) * 0.07).collect();
+        let (packed, scales, biases) = cpu_quant_int2(&vals, group_size);
+        // Expected: CPU dequantize of CPU-quantized data.
+        let expected = cpu_dequant_int2(&packed, &scales, &biases, group_size);
+
+        let mut k = mt_affine_dequantize_int2::kernel_ir_for(dt);
+        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("w", pack_u32(&packed), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack_f32(&scales), DType::F32))
+            .input(TestBuffer::from_vec("biases", pack_f32(&biases), DType::F32))
+            .input(TestBuffer::from_vec("group_size", pack_u32_scalar(group_size as u32), DType::U32))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), DType::F32))
+            .grid_3d(n_packs.div_ceil(64) as u32, 1, 1, [64, 1, 1])
+    }
+
+    // ── int3 CPU helpers ─────────────────────────────────────────────────
+    //
+    // int3: byte-stream layout, 3 bits per value, group_size=32 → 3 u32 words.
+    // bit_pos = i*3, word_idx = bit_pos/32, bit_shift = bit_pos%32.
+    // Code may span two words when bit_shift > 29.
+
+    fn cpu_quant_int3(vals: &[f32], group_size: usize) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
+        let n_groups = vals.len() / group_size;
+        let words_per_group = (group_size * 3 + 31) / 32; // = 3 for gs=32
+        let mut packed = vec![0u32; n_groups * words_per_group];
+        let mut scales = vec![0.0f32; n_groups];
+        let mut biases = vec![0.0f32; n_groups];
+        let n_bins = 7.0f32;
+        let eps = 1.0e-7f32;
+        for g in 0..n_groups {
+            let base = g * group_size;
+            let slice = &vals[base..base + group_size];
+            let w_min = slice.iter().cloned().fold(f32::INFINITY, f32::min);
+            let w_max = slice.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let raw_scale = (w_max - w_min) / n_bins;
+            let scale = if raw_scale < eps { 1.0 } else { raw_scale };
+            let bias = w_min;
+            scales[g] = scale;
+            biases[g] = bias;
+            let inv_scale = 1.0 / scale;
+            let out_base = g * words_per_group;
+            for i in 0..group_size {
+                let v = vals[base + i];
+                let q_f = (v - bias) * inv_scale + 0.5;
+                let q = (q_f.max(0.0).min(7.0) as u32) & 0x7;
+                let bit_pos = i * 3;
+                let word_idx = bit_pos / 32;
+                let bit_shift = bit_pos % 32;
+                packed[out_base + word_idx] |= q << bit_shift;
+                if bit_shift > 29 {
+                    packed[out_base + word_idx + 1] |= q >> (32 - bit_shift);
+                }
+            }
+        }
+        (packed, scales, biases)
+    }
+
+    fn cpu_dequant_int3(packed: &[u32], scales: &[f32], biases: &[f32], group_size: usize) -> Vec<f32> {
+        let words_per_group = (group_size * 3 + 31) / 32;
+        let n_groups = packed.len() / words_per_group;
+        let mut out = vec![0.0f32; n_groups * group_size];
+        for g in 0..n_groups {
+            let out_base = g * words_per_group;
+            for i in 0..group_size {
+                let bit_pos = i * 3;
+                let word_idx = bit_pos / 32;
+                let bit_shift = bit_pos % 32;
+                let mut q = (packed[out_base + word_idx] >> bit_shift) & 0x7;
+                if bit_shift > 29 {
+                    q |= (packed[out_base + word_idx + 1] << (32 - bit_shift)) & 0x7;
+                }
+                out[g * group_size + i] = scales[g] * q as f32 + biases[g];
+            }
+        }
+        out
+    }
+
+    #[test_kernel(name = "affine_quant/roundtrip_int3_f32", dtypes = [f32], tol = 1e-5)]
+    fn test_roundtrip_int3_f32(dt: DType) -> TestSetup {
+        let group_size = 32usize;
+        let n_groups = 4usize;
+        let n_elem = n_groups * group_size;
+        let words_per_group = 3usize;
+        let n_packs = n_elem / 8; // 8 values per pack (dequant TPG=16, 8 vals/pack)
+
+        let inp: Vec<f32> = (0..n_elem).map(|i| ((i % 17) as f32 - 8.0) * 0.05).collect();
+        let (packed, scales, biases) = cpu_quant_int3(&inp, group_size);
+        let expected = cpu_dequant_int3(&packed, &scales, &biases, group_size);
+
+        let mut k = mt_affine_dequantize_int3::kernel_ir_for(dt);
+        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("w", pack_u32(&packed), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack_f32(&scales), DType::F32))
+            .input(TestBuffer::from_vec("biases", pack_f32(&biases), DType::F32))
+            .input(TestBuffer::from_vec("group_size", pack_u32_scalar(group_size as u32), DType::U32))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), DType::F32))
+            .grid_3d(n_packs.div_ceil(16) as u32, 1, 1, [16, 1, 1])
+    }
+
+    // ── int5 CPU helpers ─────────────────────────────────────────────────
+    //
+    // int5: 5 bits per value, group_size=32 → 5 u32 words per group.
+    // Same byte-stream layout as int3 with 5-bit codes (0..31).
+
+    fn cpu_quant_int5(vals: &[f32], group_size: usize) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
+        let n_groups = vals.len() / group_size;
+        let words_per_group = (group_size * 5 + 31) / 32; // = 5 for gs=32
+        let mut packed = vec![0u32; n_groups * words_per_group];
+        let mut scales = vec![0.0f32; n_groups];
+        let mut biases = vec![0.0f32; n_groups];
+        let n_bins = 31.0f32;
+        let eps = 1.0e-7f32;
+        for g in 0..n_groups {
+            let base = g * group_size;
+            let slice = &vals[base..base + group_size];
+            let w_min = slice.iter().cloned().fold(f32::INFINITY, f32::min);
+            let w_max = slice.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let raw_scale = (w_max - w_min) / n_bins;
+            let scale = if raw_scale < eps { 1.0 } else { raw_scale };
+            let bias = w_min;
+            scales[g] = scale;
+            biases[g] = bias;
+            let inv_scale = 1.0 / scale;
+            let out_base = g * words_per_group;
+            for i in 0..group_size {
+                let v = vals[base + i];
+                let q_f = (v - bias) * inv_scale + 0.5;
+                let q = (q_f.max(0.0).min(31.0) as u32) & 0x1f;
+                let bit_pos = i * 5;
+                let word_idx = bit_pos / 32;
+                let bit_shift = bit_pos % 32;
+                packed[out_base + word_idx] |= q << bit_shift;
+                if bit_shift > 27 {
+                    packed[out_base + word_idx + 1] |= q >> (32 - bit_shift);
+                }
+            }
+        }
+        (packed, scales, biases)
+    }
+
+    fn cpu_dequant_int5(packed: &[u32], scales: &[f32], biases: &[f32], group_size: usize) -> Vec<f32> {
+        let words_per_group = (group_size * 5 + 31) / 32;
+        let n_groups = packed.len() / words_per_group;
+        let mut out = vec![0.0f32; n_groups * group_size];
+        for g in 0..n_groups {
+            let out_base = g * words_per_group;
+            for i in 0..group_size {
+                let bit_pos = i * 5;
+                let word_idx = bit_pos / 32;
+                let bit_shift = bit_pos % 32;
+                let mut q = (packed[out_base + word_idx] >> bit_shift) & 0x1f;
+                if bit_shift > 27 {
+                    q |= (packed[out_base + word_idx + 1] << (32 - bit_shift)) & 0x1f;
+                }
+                out[g * group_size + i] = scales[g] * q as f32 + biases[g];
+            }
+        }
+        out
+    }
+
+    #[test_kernel(name = "affine_quant/roundtrip_int5_f32", dtypes = [f32], tol = 1e-5)]
+    fn test_roundtrip_int5_f32(dt: DType) -> TestSetup {
+        let group_size = 32usize;
+        let n_groups = 4usize;
+        let n_elem = n_groups * group_size;
+        let n_packs = n_elem / 8; // 8 values per pack
+
+        let inp: Vec<f32> = (0..n_elem).map(|i| ((i % 23) as f32 - 11.0) * 0.04).collect();
+        let (packed, scales, biases) = cpu_quant_int5(&inp, group_size);
+        let expected = cpu_dequant_int5(&packed, &scales, &biases, group_size);
+
+        let mut k = mt_affine_dequantize_int5::kernel_ir_for(dt);
+        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("w", pack_u32(&packed), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack_f32(&scales), DType::F32))
+            .input(TestBuffer::from_vec("biases", pack_f32(&biases), DType::F32))
+            .input(TestBuffer::from_vec("group_size", pack_u32_scalar(group_size as u32), DType::U32))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), DType::F32))
+            .grid_3d(n_packs.div_ceil(16) as u32, 1, 1, [16, 1, 1])
+    }
+
+    // ── int6 CPU helpers ─────────────────────────────────────────────────
+    //
+    // int6: 6 bits per value, group_size=32 → 6 u32 words per group.
+    // int6: 4 values per pack (dequant kernel unrolls 4 lanes per thread).
+
+    fn cpu_quant_int6(vals: &[f32], group_size: usize) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
+        let n_groups = vals.len() / group_size;
+        let words_per_group = (group_size * 6 + 31) / 32; // = 6 for gs=32
+        let mut packed = vec![0u32; n_groups * words_per_group];
+        let mut scales = vec![0.0f32; n_groups];
+        let mut biases = vec![0.0f32; n_groups];
+        let n_bins = 63.0f32;
+        let eps = 1.0e-7f32;
+        for g in 0..n_groups {
+            let base = g * group_size;
+            let slice = &vals[base..base + group_size];
+            let w_min = slice.iter().cloned().fold(f32::INFINITY, f32::min);
+            let w_max = slice.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let raw_scale = (w_max - w_min) / n_bins;
+            let scale = if raw_scale < eps { 1.0 } else { raw_scale };
+            let bias = w_min;
+            scales[g] = scale;
+            biases[g] = bias;
+            let inv_scale = 1.0 / scale;
+            let out_base = g * words_per_group;
+            for i in 0..group_size {
+                let v = vals[base + i];
+                let q_f = (v - bias) * inv_scale + 0.5;
+                let q = (q_f.max(0.0).min(63.0) as u32) & 0x3f;
+                let bit_pos = i * 6;
+                let word_idx = bit_pos / 32;
+                let bit_shift = bit_pos % 32;
+                packed[out_base + word_idx] |= q << bit_shift;
+                if bit_shift > 26 {
+                    packed[out_base + word_idx + 1] |= q >> (32 - bit_shift);
+                }
+            }
+        }
+        (packed, scales, biases)
+    }
+
+    fn cpu_dequant_int6(packed: &[u32], scales: &[f32], biases: &[f32], group_size: usize) -> Vec<f32> {
+        let words_per_group = (group_size * 6 + 31) / 32;
+        let n_groups = packed.len() / words_per_group;
+        let mut out = vec![0.0f32; n_groups * group_size];
+        for g in 0..n_groups {
+            let out_base = g * words_per_group;
+            for i in 0..group_size {
+                let bit_pos = i * 6;
+                let word_idx = bit_pos / 32;
+                let bit_shift = bit_pos % 32;
+                let mut q = (packed[out_base + word_idx] >> bit_shift) & 0x3f;
+                if bit_shift > 26 {
+                    q |= (packed[out_base + word_idx + 1] << (32 - bit_shift)) & 0x3f;
+                }
+                out[g * group_size + i] = scales[g] * q as f32 + biases[g];
+            }
+        }
+        out
+    }
+
+    #[test_kernel(name = "affine_quant/roundtrip_int6_f32", dtypes = [f32], tol = 1e-5)]
+    fn test_roundtrip_int6_f32(dt: DType) -> TestSetup {
+        let group_size = 32usize;
+        let n_groups = 4usize;
+        let n_elem = n_groups * group_size;
+        let n_packs = n_elem / 4; // 4 values per pack
+
+        let inp: Vec<f32> = (0..n_elem).map(|i| ((i % 29) as f32 - 14.0) * 0.03).collect();
+        let (packed, scales, biases) = cpu_quant_int6(&inp, group_size);
+        let expected = cpu_dequant_int6(&packed, &scales, &biases, group_size);
+
+        let mut k = mt_affine_dequantize_int6::kernel_ir_for(dt);
+        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("w", pack_u32(&packed), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack_f32(&scales), DType::F32))
+            .input(TestBuffer::from_vec("biases", pack_f32(&biases), DType::F32))
+            .input(TestBuffer::from_vec("group_size", pack_u32_scalar(group_size as u32), DType::U32))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), DType::F32))
+            .grid_3d(n_packs.div_ceil(16) as u32, 1, 1, [16, 1, 1])
+    }
+}

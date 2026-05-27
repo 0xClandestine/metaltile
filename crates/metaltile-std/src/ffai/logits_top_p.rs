@@ -98,3 +98,91 @@ pub fn logits_top_p_mask<T>(
         store(out[_i], select(exp(v - row_max) >= lo, v, neg_inf).cast::<T>());
     }
 }
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile_macros::test_kernel;
+    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _           => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn round(v: f32, dt: DType) -> f32 {
+        match dt {
+            DType::F16  => half::f16::from_f32(v).to_f32(),
+            DType::BF16 => half::bf16::from_f32(v).to_f32(),
+            _           => v,
+        }
+    }
+
+    /// CPU oracle: replays the kernel's sort-free bisection (24 halvings).
+    fn cpu_top_p_mask(logits: &[f32], n: usize, rows: usize, top_p: f32) -> Vec<f32> {
+        let mut out = vec![0.0f32; rows * n];
+        for r in 0..rows {
+            let base = r * n;
+            let row = &logits[base..base + n];
+            let m = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let w: Vec<f32> = row.iter().map(|&v| (v - m).exp()).collect();
+            let z: f32 = w.iter().sum();
+            let target = top_p * z;
+            let mut lo = 0.0f32;
+            let mut hi = 1.0f32;
+            for _ in 0..24 {
+                let mid = (lo + hi) * 0.5;
+                let kept: f32 = w.iter().filter(|&&x| x >= mid).sum();
+                if kept >= target { lo = mid; } else { hi = mid; }
+            }
+            for (i, &wi) in w.iter().enumerate() {
+                out[base + i] = if wi >= lo { row[i] } else { f32::NEG_INFINITY };
+            }
+        }
+        out
+    }
+
+    #[test_kernel(name = "logits/top_p_mask_mid_range", dtypes = [f32, f16, bf16], tol = 1e-4)]
+    fn test_top_p_mask_mid_range(dt: DType) -> TestSetup {
+        let n = 320usize;
+        let rows = 4usize;
+        let top_p = 0.9f32;
+        let logits_raw: Vec<f32> = (0..n * rows).map(|i| (i % 53) as f32 * 0.2 - 5.0).collect();
+        let logits: Vec<f32> = logits_raw.iter().map(|&v| round(v, dt)).collect();
+        let expected = cpu_top_p_mask(&logits, n, rows, top_p);
+
+        let mut k = logits_top_p_mask::kernel_ir_for(dt);
+        k.mode = metaltile_core::ir::KernelMode::Reduction;
+
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("inp", pack(&logits, dt), dt))
+            .input(TestBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("top_p", top_p.to_le_bytes().to_vec(), DType::F32))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .grid_3d(rows as u32, 1, 1, [256, 1, 1])
+    }
+
+    #[test_kernel(name = "logits/top_p_mask_near_zero", dtypes = [f32], tol = 1e-4)]
+    fn test_top_p_mask_near_zero(dt: DType) -> TestSetup {
+        // Strictly increasing logits → unique argmax at last index, top_p=0.01.
+        let n = 64usize;
+        let rows = 1usize;
+        let top_p = 0.01f32;
+        let logits: Vec<f32> = (0..n).map(|i| i as f32 * 0.1).collect();
+        let expected = cpu_top_p_mask(&logits, n, rows, top_p);
+
+        let mut k = logits_top_p_mask::kernel_ir_for(dt);
+        k.mode = metaltile_core::ir::KernelMode::Reduction;
+
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("inp", pack(&logits, dt), dt))
+            .input(TestBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("top_p", top_p.to_le_bytes().to_vec(), DType::F32))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .grid_3d(rows as u32, 1, 1, [256, 1, 1])
+    }
+}

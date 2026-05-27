@@ -10,11 +10,12 @@ publish = true
 metaltile.workspace = true
 rustc-hash.workspace = true
 metaltile-core.workspace = true
+metaltile-macros.workspace = true
 metaltile-codegen.workspace = true
 metaltile-runtime.workspace = true
 inventory.workspace = true
+half.workspace = true
+bytemuck.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
-half.workspace = true
-bytemuck.workspace = true
