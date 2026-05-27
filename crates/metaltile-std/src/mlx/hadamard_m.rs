@@ -224,6 +224,148 @@ pub fn kernel_ir_for(m: u32, dt: DType) -> Kernel {
 // inventory submit needs it (the inventory is registered per-M below).
 const _: &[BenchDType] = &[BenchDType::F32, BenchDType::F16, BenchDType::BF16];
 
+// ── bottom of source file ─────────────────────────────────────────────────
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _           => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn round_dt(v: f32, dt: DType) -> f32 {
+        match dt {
+            DType::F16  => half::f16::from_f32(v).to_f32(),
+            DType::BF16 => half::bf16::from_f32(v).to_f32(),
+            _           => v,
+        }
+    }
+
+    // Sign-bit tables (mirrors hadamard_m.rs constants). Kept here so the
+    // tests_support oracle is independent of the #[cfg(test)] mod tests block.
+    const H12_SIGNS: [u32; 12] =
+        [4093, 1364, 3127, 1681, 223, 2629, 883, 2329, 3523, 1129, 1807, 421];
+
+    const H20_SIGNS: [u32; 20] = [
+        445473, 859202, 702596, 389384, 747024, 641086, 234589, 469147, 938263, 828943, 984492,
+        953176, 889521, 762211, 508614, 34194, 68357, 135722, 270452, 540873,
+    ];
+
+    const H28_SIGNS: [u32; 28] = [
+        53043585, 106070914, 210061060, 153783816, 41229328, 80377888, 160739520, 79265980,
+        156451192, 44483185, 88966243, 177932359, 87445519, 172810270, 125848794, 251697461,
+        237056618, 207758549, 149162411, 31986518, 63972909, 3206502, 4315853, 8631579, 17246902,
+        34477548, 68954969, 135812787,
+    ];
+
+    /// CPU oracle: apply H_M (via sign-bit table) to each M-element row.
+    fn oracle_hadamard_m(data: &[f32], m: usize, signs: &[u32], scale: f32) -> Vec<f32> {
+        let n_rows = data.len() / m;
+        let mut out = vec![0.0f32; data.len()];
+        for row in 0..n_rows {
+            let base = row * m;
+            for t in 0..m {
+                let mut acc = 0.0f32;
+                for j in 0..m {
+                    let sign = if (signs[t] >> j) & 1 == 1 { 1.0f32 } else { -1.0 };
+                    acc += sign * data[base + j];
+                }
+                out[base + t] = acc * scale;
+            }
+        }
+        out
+    }
+
+    #[test_kernel(name = "mlx/hadamard_m12_f32", dtypes = [f32], tol = 1e-4)]
+    fn test_hadamard_m12_f32(dt: DType) -> TestSetup {
+        let (m, n_rows) = (12usize, 16usize);
+        let scale = 1.0f32 / (m as f32).sqrt();
+        let data: Vec<f32> = (0..n_rows * m).map(|i| ((i % 13) as f32 - 6.0) * 0.5).collect();
+        let expected = oracle_hadamard_m(&data, m, &H12_SIGNS, scale);
+        let mut k = kernel_ir_for(m as u32, dt);
+        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("inp", pack(&data, dt), dt))
+            .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; n_rows * m], dt), dt))
+            .constexpr("scale", scale)
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .grid_3d(n_rows as u32, 1, 1, [m as u32, 1, 1])
+    }
+
+    #[test_kernel(name = "mlx/hadamard_m12_f16", dtypes = [f16], tol = 5e-2)]
+    fn test_hadamard_m12_f16(dt: DType) -> TestSetup {
+        let (m, n_rows) = (12usize, 8usize);
+        let scale = 1.0f32;
+        let data: Vec<f32> =
+            (0..n_rows * m).map(|i| round_dt(((i % 17) as f32 - 8.0) * 0.25, dt)).collect();
+        let expected = oracle_hadamard_m(&data, m, &H12_SIGNS, scale);
+        let mut k = kernel_ir_for(m as u32, dt);
+        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("inp", pack(&data, dt), dt))
+            .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; n_rows * m], dt), dt))
+            .constexpr("scale", scale)
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .grid_3d(n_rows as u32, 1, 1, [m as u32, 1, 1])
+    }
+
+    #[test_kernel(name = "mlx/hadamard_m12_bf16", dtypes = [bf16], tol = 1e-1)]
+    fn test_hadamard_m12_bf16(dt: DType) -> TestSetup {
+        let (m, n_rows) = (12usize, 8usize);
+        let scale = 1.0f32;
+        let data: Vec<f32> =
+            (0..n_rows * m).map(|i| round_dt(((i % 17) as f32 - 8.0) * 0.25, dt)).collect();
+        let expected = oracle_hadamard_m(&data, m, &H12_SIGNS, scale);
+        let mut k = kernel_ir_for(m as u32, dt);
+        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("inp", pack(&data, dt), dt))
+            .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; n_rows * m], dt), dt))
+            .constexpr("scale", scale)
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .grid_3d(n_rows as u32, 1, 1, [m as u32, 1, 1])
+    }
+
+    #[test_kernel(name = "mlx/hadamard_m20_f32", dtypes = [f32], tol = 1e-4)]
+    fn test_hadamard_m20_f32(dt: DType) -> TestSetup {
+        let (m, n_rows) = (20usize, 10usize);
+        let scale = 1.0f32 / (m as f32).sqrt();
+        let data: Vec<f32> = (0..n_rows * m).map(|i| ((i % 19) as f32 - 9.0) * 0.3).collect();
+        let expected = oracle_hadamard_m(&data, m, &H20_SIGNS, scale);
+        let mut k = kernel_ir_for(m as u32, dt);
+        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("inp", pack(&data, dt), dt))
+            .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; n_rows * m], dt), dt))
+            .constexpr("scale", scale)
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .grid_3d(n_rows as u32, 1, 1, [m as u32, 1, 1])
+    }
+
+    #[test_kernel(name = "mlx/hadamard_m28_f32", dtypes = [f32], tol = 1e-4)]
+    fn test_hadamard_m28_f32(dt: DType) -> TestSetup {
+        let (m, n_rows) = (28usize, 8usize);
+        let scale = 1.0f32 / (m as f32).sqrt();
+        let data: Vec<f32> = (0..n_rows * m).map(|i| ((i % 23) as f32 - 11.0) * 0.2).collect();
+        let expected = oracle_hadamard_m(&data, m, &H28_SIGNS, scale);
+        let mut k = kernel_ir_for(m as u32, dt);
+        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("inp", pack(&data, dt), dt))
+            .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; n_rows * m], dt), dt))
+            .constexpr("scale", scale)
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .grid_3d(n_rows as u32, 1, 1, [m as u32, 1, 1])
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::needless_range_loop)] // index loops mirror the H_m matrix math
 mod tests {

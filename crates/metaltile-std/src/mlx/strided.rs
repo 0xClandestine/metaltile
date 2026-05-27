@@ -83,3 +83,179 @@ pub fn mt_strided_copy_nd<T>(
     }
     store(out[p], load(src[src_off]));
 }
+
+// ── bottom of source file ─────────────────────────────────────────────────
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+
+    fn pack_f32(vals: &[f32]) -> Vec<u8> {
+        bytemuck::cast_slice::<f32, u8>(vals).to_vec()
+    }
+
+    fn pack_u32_slice(vals: &[u32]) -> Vec<u8> {
+        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
+    }
+
+    /// CPU oracle: extract the `rows × dest_cols` submatrix from a padded source.
+    fn oracle_strided_copy(
+        src: &[f32],
+        rows: usize,
+        src_cols: usize,
+        dest_cols: usize,
+    ) -> Vec<f32> {
+        let mut out = Vec::with_capacity(rows * dest_cols);
+        for r in 0..rows {
+            out.extend_from_slice(&src[r * src_cols..r * src_cols + dest_cols]);
+        }
+        out
+    }
+
+    /// CPU oracle for N-D strided copy.
+    fn oracle_strided_copy_nd(src: &[f32], shape: &[u32], strides: &[u32]) -> Vec<f32> {
+        let n_out: usize = shape.iter().map(|&s| s as usize).product();
+        let rank = shape.len();
+        let mut out = Vec::with_capacity(n_out);
+        for p in 0..n_out {
+            let mut rem = p;
+            let mut src_off = 0usize;
+            for d in (0..rank).rev() {
+                let extent = shape[d] as usize;
+                let coord = rem % extent;
+                rem /= extent;
+                src_off += coord * strides[d] as usize;
+            }
+            out.push(src[src_off]);
+        }
+        out
+    }
+
+    #[test_kernel(name = "mlx/strided_copy_simple_f32", dtypes = [f32], tol = 1e-6)]
+    fn test_strided_copy_simple_f32(dt: DType) -> TestSetup {
+        let rows = 4usize;
+        let src_cols = 8usize;
+        let dest_cols = 4usize;
+        let src: Vec<f32> = (0..rows)
+            .flat_map(|r| {
+                (0..src_cols).map(move |c| {
+                    if c < dest_cols { (r * dest_cols + c) as f32 + 1.0 } else { -999.0 }
+                })
+            })
+            .collect();
+        let expected = oracle_strided_copy(&src, rows, src_cols, dest_cols);
+        let n_out = rows * dest_cols;
+        let mut k = mt_strided_copy::kernel_ir_for(dt);
+        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("src", pack_f32(&src), dt))
+            .input(TestBuffer::from_vec(
+                "src_shape",
+                pack_u32_slice(&[rows as u32, dest_cols as u32]),
+                DType::U32,
+            ))
+            .input(TestBuffer::from_vec(
+                "src_strides",
+                pack_u32_slice(&[src_cols as u32, 1u32]),
+                DType::U32,
+            ))
+            .input(TestBuffer::from_vec("out", pack_f32(&vec![0.0f32; n_out]), dt))
+            .constexpr("cols", dest_cols as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), dt))
+            .grid_3d(rows as u32, dest_cols as u32, 1, [1, 1, 1])
+    }
+
+    #[test_kernel(name = "mlx/strided_copy_identity_f32", dtypes = [f32], tol = 1e-6)]
+    fn test_strided_copy_identity_f32(dt: DType) -> TestSetup {
+        let rows = 4usize;
+        let cols = 6usize;
+        let src: Vec<f32> = (0..rows * cols).map(|i| i as f32 * 0.1).collect();
+        let expected = src.clone();
+        let mut k = mt_strided_copy::kernel_ir_for(dt);
+        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("src", pack_f32(&src), dt))
+            .input(TestBuffer::from_vec(
+                "src_shape",
+                pack_u32_slice(&[rows as u32, cols as u32]),
+                DType::U32,
+            ))
+            .input(TestBuffer::from_vec(
+                "src_strides",
+                pack_u32_slice(&[cols as u32, 1u32]),
+                DType::U32,
+            ))
+            .input(TestBuffer::from_vec("out", pack_f32(&vec![0.0f32; rows * cols]), dt))
+            .constexpr("cols", cols as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), dt))
+            .grid_3d(rows as u32, cols as u32, 1, [1, 1, 1])
+    }
+
+    #[test_kernel(name = "mlx/strided_copy_nd_2d_padded_f32", dtypes = [f32], tol = 1e-6)]
+    fn test_strided_copy_nd_2d_padded_f32(dt: DType) -> TestSetup {
+        let rows = 4u32;
+        let cols = 4u32;
+        let row_stride = 8u32;
+        let shape = [rows, cols];
+        let strides = [row_stride, 1u32];
+        let src: Vec<f32> = (0..rows * row_stride)
+            .map(|i| if i % row_stride < cols { (i as f32) + 1.0 } else { -999.0 })
+            .collect();
+        let expected = oracle_strided_copy_nd(&src, &shape, &strides);
+        let n_out = expected.len();
+        let mut k = mt_strided_copy_nd::kernel_ir_for(dt);
+        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("src", pack_f32(&src), dt))
+            .input(TestBuffer::from_vec("shape", pack_u32_slice(&shape), DType::U32))
+            .input(TestBuffer::from_vec("strides", pack_u32_slice(&strides), DType::U32))
+            .input(TestBuffer::from_vec("out", pack_f32(&vec![0.0f32; n_out]), dt))
+            .constexpr("rank", shape.len() as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), dt))
+            .grid_3d(n_out as u32, 1, 1, [1, 1, 1])
+    }
+
+    #[test_kernel(name = "mlx/strided_copy_nd_3d_f32", dtypes = [f32], tol = 1e-6)]
+    fn test_strided_copy_nd_3d_f32(dt: DType) -> TestSetup {
+        let shape = [2u32, 3u32, 4u32];
+        let phys = [2usize, 3, 6];
+        let strides = [(phys[1] * phys[2]) as u32, phys[2] as u32, 1u32];
+        let total: usize = phys.iter().product();
+        let src: Vec<f32> = (0..total).map(|i| i as f32 * 0.25 - 3.0).collect();
+        let expected = oracle_strided_copy_nd(&src, &shape, &strides);
+        let n_out = expected.len();
+        let mut k = mt_strided_copy_nd::kernel_ir_for(dt);
+        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("src", pack_f32(&src), dt))
+            .input(TestBuffer::from_vec("shape", pack_u32_slice(&shape), DType::U32))
+            .input(TestBuffer::from_vec("strides", pack_u32_slice(&strides), DType::U32))
+            .input(TestBuffer::from_vec("out", pack_f32(&vec![0.0f32; n_out]), dt))
+            .constexpr("rank", shape.len() as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), dt))
+            .grid_3d(n_out as u32, 1, 1, [1, 1, 1])
+    }
+
+    #[test_kernel(name = "mlx/strided_copy_nd_3d_transpose_f32", dtypes = [f32], tol = 1e-6)]
+    fn test_strided_copy_nd_3d_transpose_f32(dt: DType) -> TestSetup {
+        let src_dims = [3usize, 4, 5];
+        let cont = [(src_dims[1] * src_dims[2]) as u32, src_dims[2] as u32, 1u32];
+        let shape = [src_dims[2] as u32, src_dims[1] as u32, src_dims[0] as u32];
+        let strides = [cont[2], cont[1], cont[0]];
+        let total: usize = src_dims.iter().product();
+        let src: Vec<f32> = (0..total).map(|i| i as f32).collect();
+        let expected = oracle_strided_copy_nd(&src, &shape, &strides);
+        let n_out = expected.len();
+        let mut k = mt_strided_copy_nd::kernel_ir_for(dt);
+        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("src", pack_f32(&src), dt))
+            .input(TestBuffer::from_vec("shape", pack_u32_slice(&shape), DType::U32))
+            .input(TestBuffer::from_vec("strides", pack_u32_slice(&strides), DType::U32))
+            .input(TestBuffer::from_vec("out", pack_f32(&vec![0.0f32; n_out]), dt))
+            .constexpr("rank", shape.len() as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), dt))
+            .grid_3d(n_out as u32, 1, 1, [1, 1, 1])
+    }
+}
