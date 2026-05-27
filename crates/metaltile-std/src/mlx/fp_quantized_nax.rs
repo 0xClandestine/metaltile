@@ -226,3 +226,110 @@ mod tests {
         }
     }
 }
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+
+    const GROUP_SIZE: usize = 32;
+    const FP4_LUT: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+
+    fn fp4_dequant(code: u32) -> f32 {
+        let mag = FP4_LUT[(code & 7) as usize];
+        if code & 8 != 0 { -mag } else { mag }
+    }
+
+    fn cpu_fp_qmm_reference(w: &[u32], scales: &[f32], x: &[f32], m: usize, n: usize, k: usize, gs_per_row: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; m * n];
+        for m_row in 0..m {
+            for n_col in 0..n {
+                let mut acc = 0.0f32;
+                for kk in 0..k {
+                    let pack = w[n_col * (k / 8) + kk / 8];
+                    let code = (pack >> ((kk % 8) as u32 * 4)) & 15;
+                    let g = kk / GROUP_SIZE;
+                    let s = scales[n_col * gs_per_row + g];
+                    acc += x[m_row * k + kk] * s * fp4_dequant(code);
+                }
+                out[m_row * n + n_col] = acc;
+            }
+        }
+        out
+    }
+
+    fn build_fp_quant_inputs(m: usize, n: usize, k: usize, gs_per_row: usize) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
+        let w: Vec<u32> = (0..n * k / 8)
+            .map(|i| {
+                let mut v = 0u32;
+                for nibble in 0..8u32 {
+                    v |= ((i as u32 + nibble) & 0xF) << (nibble * 4);
+                }
+                v
+            })
+            .collect();
+        let scales: Vec<f32> = (0..n * gs_per_row).map(|i| 0.05 + (i as f32) * 0.001).collect();
+        let x: Vec<f32> = (0..m * k).map(|i| 0.01 + (i as f32 % 19.0) * 0.011).collect();
+        (w, scales, x)
+    }
+
+    fn cosine(a: &[f32], b: &[f32]) -> f32 {
+        let mut dot = 0.0f64;
+        let mut na = 0.0f64;
+        let mut nb = 0.0f64;
+        for (x, y) in a.iter().zip(b.iter()) {
+            dot += *x as f64 * *y as f64;
+            na += (*x as f64) * (*x as f64);
+            nb += (*y as f64) * (*y as f64);
+        }
+        let denom = (na.sqrt() * nb.sqrt()).max(1e-30);
+        (dot / denom) as f32
+    }
+
+    fn pack_u32_as_bytes(vals: &[u32]) -> Vec<u8> {
+        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
+    }
+
+    fn pack_f32(vals: &[f32]) -> Vec<u8> {
+        bytemuck::cast_slice::<f32, u8>(vals).to_vec()
+    }
+
+    #[test_kernel(name = "mlx/fp_qmm_nax/f32_small", dtypes = [f32], tol = 0.001)]
+    fn test_fp_qmm_nax_f32_small(dt: DType) -> TestSetup {
+        let (m, n, k) = (32usize, 32usize, 32usize);
+        let gs_per_row = k / GROUP_SIZE;
+        let (w, scales, x) = build_fp_quant_inputs(m, n, k, gs_per_row);
+        let expected = cpu_fp_qmm_reference(&w, &scales, &x, m, n, k, gs_per_row);
+        let kernel = mt_fp_qmm_nax::kernel_ir_for(dt);
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("w", pack_u32_as_bytes(&w), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack_f32(&scales), dt))
+            .input(TestBuffer::from_vec("x", pack_f32(&x), dt))
+            .input(TestBuffer::from_vec("out", vec![0u8; m * n * 4], dt))
+            .input(TestBuffer::from_vec("k", (k as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("gs_per_row", (gs_per_row as u32).to_le_bytes().to_vec(), DType::U32))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), dt))
+            .grid_3d(n / 32, m / 32, 1, [128, 1, 1])
+    }
+
+    #[test_kernel(name = "mlx/fp_qmm_nax/f32_multi_k", dtypes = [f32], tol = 0.001)]
+    fn test_fp_qmm_nax_f32_multi_k(dt: DType) -> TestSetup {
+        let (m, n, k) = (32usize, 32usize, 256usize);
+        let gs_per_row = k / GROUP_SIZE;
+        let (w, scales, x) = build_fp_quant_inputs(m, n, k, gs_per_row);
+        let expected = cpu_fp_qmm_reference(&w, &scales, &x, m, n, k, gs_per_row);
+        let kernel = mt_fp_qmm_nax::kernel_ir_for(dt);
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("w", pack_u32_as_bytes(&w), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack_f32(&scales), dt))
+            .input(TestBuffer::from_vec("x", pack_f32(&x), dt))
+            .input(TestBuffer::from_vec("out", vec![0u8; m * n * 4], dt))
+            .input(TestBuffer::from_vec("k", (k as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("gs_per_row", (gs_per_row as u32).to_le_bytes().to_vec(), DType::U32))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), dt))
+            .grid_3d(n / 32, m / 32, 1, [128, 1, 1])
+    }
+}

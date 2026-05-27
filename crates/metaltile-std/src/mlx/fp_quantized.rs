@@ -137,3 +137,169 @@ fp8_kernel!(mt_fp8_e4m3_quant_dequant, "fp8_e4m3", 3.0f32, -6.0f32, 8.0f32, 448.
 // e5m2 — 2 mantissa bits, exponent range [-14, 15] (bias 15), max
 // magnitude 57344.
 fp8_kernel!(mt_fp8_e5m2_quant_dequant, "fp8_e5m2", 2.0f32, -14.0f32, 15.0f32, 57344.0f32);
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+
+    // ── fp4 oracle helpers ───────────────────────────────────────────────────
+
+    const FP4_CODEBOOK: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+
+    fn fp4_snap(norm: f32) -> f32 {
+        if norm < 0.25 { 0.0 }
+        else if norm < 0.75 { 0.5 }
+        else if norm < 1.25 { 1.0 }
+        else if norm < 1.75 { 1.5 }
+        else if norm < 2.5  { 2.0 }
+        else if norm < 3.5  { 3.0 }
+        else if norm < 5.0  { 4.0 }
+        else                { 6.0 }
+    }
+
+    fn oracle_fp4(inp: &[f32]) -> Vec<f32> {
+        assert!(inp.len().is_multiple_of(32), "input length must be a multiple of 32");
+        let mut out = vec![0.0f32; inp.len()];
+        for (gi, group) in inp.chunks_exact(32).enumerate() {
+            let group_max = group.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+            let inv_scale = if group_max > 0.0 { 6.0 / group_max } else { 0.0 };
+            let rescale = group_max / 6.0;
+            for (i, &x) in group.iter().enumerate() {
+                let norm = x.abs() * inv_scale;
+                let q = fp4_snap(norm);
+                let sign = if x < 0.0 { -1.0 } else { 1.0 };
+                out[gi * 32 + i] = sign * q * rescale;
+            }
+        }
+        out
+    }
+
+    fn synthetic_group_fp4(seed: usize) -> Vec<f32> {
+        (0..32).map(|i| {
+            let v = ((i * 7 + seed * 11) % 33) as f32 * 0.03 - 0.46;
+            match i % 4 { 0 => v * 10.0, 1 => v * 0.05, 2 => 0.0, _ => v }
+        }).collect()
+    }
+
+    fn pack_f32(vals: &[f32]) -> Vec<u8> {
+        bytemuck::cast_slice::<f32, u8>(vals).to_vec()
+    }
+
+    // ── fp4 tests ────────────────────────────────────────────────────────────
+
+    #[test_kernel(name = "mlx/fp4_quant_dequant/round_trip", dtypes = [f32], tol = 1e-3)]
+    fn test_fp4_round_trip(dt: DType) -> TestSetup {
+        let inp: Vec<f32> = (0..4).flat_map(|s| synthetic_group_fp4(s)).collect();
+        let n = inp.len() as u32;
+        let expected = oracle_fp4(&inp);
+        let kernel = mt_fp4_quant_dequant::kernel_ir_for();
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("inp", pack_f32(&inp), DType::F32))
+            .input(TestBuffer::from_vec("out", pack_f32(&vec![0.0f32; inp.len()]), DType::F32))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), DType::F32))
+            .constexpr("n", n)
+            .grid_3d((inp.len() / 32) as u32, 1, 1, [32, 1, 1])
+    }
+
+    #[test_kernel(name = "mlx/fp4_quant_dequant/codebook_roundtrip", dtypes = [f32], tol = 1e-4)]
+    fn test_fp4_codebook_roundtrip(dt: DType) -> TestSetup {
+        let scale = 4.0f32;
+        let inp: Vec<f32> = (0..32).map(|i| {
+            let mag = FP4_CODEBOOK[i % 8] * scale;
+            if i % 2 == 0 { mag } else { -mag }
+        }).collect();
+        let n = inp.len() as u32;
+        let expected = oracle_fp4(&inp);
+        let kernel = mt_fp4_quant_dequant::kernel_ir_for();
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("inp", pack_f32(&inp), DType::F32))
+            .input(TestBuffer::from_vec("out", pack_f32(&vec![0.0f32; inp.len()]), DType::F32))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), DType::F32))
+            .constexpr("n", n)
+            .grid_3d(1, 1, 1, [32, 1, 1])
+    }
+
+    #[test_kernel(name = "mlx/fp4_quant_dequant/zero_group", dtypes = [f32], tol = 0.0)]
+    fn test_fp4_zero_group(dt: DType) -> TestSetup {
+        let inp = vec![0.0f32; 32];
+        let n = inp.len() as u32;
+        let expected = oracle_fp4(&inp);
+        let kernel = mt_fp4_quant_dequant::kernel_ir_for();
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("inp", pack_f32(&inp), DType::F32))
+            .input(TestBuffer::from_vec("out", pack_f32(&vec![0.0f32; inp.len()]), DType::F32))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), DType::F32))
+            .constexpr("n", n)
+            .grid_3d(1, 1, 1, [32, 1, 1])
+    }
+
+    // ── fp8 oracle helpers ───────────────────────────────────────────────────
+
+    struct Fp8Fmt { mantissa_bits: f32, e_min: f32, e_max: f32, fp8_max: f32 }
+    const E4M3: Fp8Fmt = Fp8Fmt { mantissa_bits: 3.0, e_min: -6.0, e_max: 8.0, fp8_max: 448.0 };
+    const E5M2: Fp8Fmt = Fp8Fmt { mantissa_bits: 2.0, e_min: -14.0, e_max: 15.0, fp8_max: 57344.0 };
+
+    fn oracle_fp8_round_trip(inp: &[f32], fmt: &Fp8Fmt) -> Vec<f32> {
+        assert!(inp.len().is_multiple_of(32), "input length must be a multiple of 32");
+        let mut out = vec![0.0f32; inp.len()];
+        for (gi, group) in inp.chunks_exact(32).enumerate() {
+            let group_max = group.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+            let inv_scale = if group_max > 0.0 { fmt.fp8_max / group_max } else { 0.0 };
+            let rescale = group_max / fmt.fp8_max;
+            for (i, &x) in group.iter().enumerate() {
+                let norm = x.abs() * inv_scale;
+                let q = if norm > 0.0 {
+                    let raw_e = norm.log2().floor();
+                    let e = raw_e.clamp(fmt.e_min, fmt.e_max);
+                    let quantum = (e - fmt.mantissa_bits).exp2();
+                    (norm / quantum).round() * quantum
+                } else { 0.0 };
+                let q_clamped = q.min(fmt.fp8_max);
+                let sign = if x < 0.0 { -1.0 } else { 1.0 };
+                out[gi * 32 + i] = sign * q_clamped * rescale;
+            }
+        }
+        out
+    }
+
+    fn synthetic_group_fp8(seed: usize) -> Vec<f32> {
+        (0..32).map(|i| {
+            let v = ((i * 37 + seed * 13) % 100) as f32 * 0.01 - 0.5;
+            match i % 4 { 0 => v * 100.0, 1 => v * 0.001, 2 => 0.0, _ => v }
+        }).collect()
+    }
+
+    // ── fp8 e4m3 tests ───────────────────────────────────────────────────────
+
+    #[test_kernel(name = "mlx/fp8_e4m3_quant_dequant/round_trip", dtypes = [f32], tol = 1e-2)]
+    fn test_fp8_e4m3_round_trip(dt: DType) -> TestSetup {
+        let inp: Vec<f32> = (0..4).flat_map(|s| synthetic_group_fp8(s)).collect();
+        let n = inp.len() as u32;
+        let expected = oracle_fp8_round_trip(&inp, &E4M3);
+        let kernel = mt_fp8_e4m3_quant_dequant::kernel_ir_for();
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("inp", pack_f32(&inp), DType::F32))
+            .input(TestBuffer::from_vec("out", pack_f32(&vec![0.0f32; inp.len()]), DType::F32))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), DType::F32))
+            .constexpr("n", n)
+            .grid_3d(inp.len() as u32, 1, 1, [32, 1, 1])
+    }
+
+    // ── fp8 e5m2 tests ───────────────────────────────────────────────────────
+
+    #[test_kernel(name = "mlx/fp8_e5m2_quant_dequant/round_trip", dtypes = [f32], tol = 1e-1)]
+    fn test_fp8_e5m2_round_trip(dt: DType) -> TestSetup {
+        let inp: Vec<f32> = (0..4).flat_map(|s| synthetic_group_fp8(s)).collect();
+        let n = inp.len() as u32;
+        let expected = oracle_fp8_round_trip(&inp, &E5M2);
+        let kernel = mt_fp8_e5m2_quant_dequant::kernel_ir_for();
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("inp", pack_f32(&inp), DType::F32))
+            .input(TestBuffer::from_vec("out", pack_f32(&vec![0.0f32; inp.len()]), DType::F32))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), DType::F32))
+            .constexpr("n", n)
+            .grid_3d(inp.len() as u32, 1, 1, [32, 1, 1])
+    }
+}
