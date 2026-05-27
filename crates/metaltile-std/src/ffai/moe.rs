@@ -3528,3 +3528,1684 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
         sub_offset = sub_end;
     }
 }
+
+#[cfg(target_os = "macos")]
+pub mod tests_support {
+    #![allow(
+        clippy::manual_is_multiple_of,
+        clippy::unnecessary_cast,
+        clippy::needless_range_loop,
+        clippy::too_many_arguments,
+        clippy::doc_lazy_continuation
+    )]
+
+    use std::collections::BTreeMap;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    use metaltile_core::{dtype::DType, ir::KernelMode};
+    use metaltile_runtime::Context;
+
+    use super::{
+        mt_moe_gather_qmm_b3, mt_moe_gather_qmm_b5, mt_moe_gather_qmm_b6,
+        mt_moe_gather_qmm_b8, mt_moe_gather_qmm_int4, mt_moe_gather_qmm_int4_m8,
+        mt_moe_gather_qmm_int4_m16, mt_moe_gather_qmm_int4_m32,
+        mt_moe_gather_qmm_mma_int4, mt_moe_gather_qmm_mma_int4_bm16,
+        mt_moe_gather_qmm_mma_int8, mt_moe_permute, mt_moe_router_topk, mt_moe_unpermute,
+    };
+
+    // ── shared helpers ────────────────────────────────────────────────────────
+
+    pub fn gpu_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Dt { F32, F16, Bf16 }
+
+    impl Dt {
+        pub fn bytes(self) -> usize {
+            match self { Dt::F32 => 4, Dt::F16 | Dt::Bf16 => 2 }
+        }
+        pub fn to_dtype(self) -> DType {
+            match self { Dt::F32 => DType::F32, Dt::F16 => DType::F16, Dt::Bf16 => DType::BF16 }
+        }
+        pub fn round(self, v: f32) -> f32 {
+            match self {
+                Dt::F32 => v,
+                Dt::F16 => half::f16::from_f32(v).to_f32(),
+                Dt::Bf16 => half::bf16::from_f32(v).to_f32(),
+            }
+        }
+    }
+
+    pub fn pack_bytes(vals: &[f32], dt: Dt) -> Vec<u8> {
+        match dt {
+            Dt::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            Dt::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            Dt::Bf16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+        }
+    }
+
+    pub fn unpack_bytes(bytes: &[u8], dt: Dt) -> Vec<f32> {
+        match dt {
+            Dt::F32 => bytemuck::cast_slice::<u8, f32>(bytes).to_vec(),
+            Dt::F16 => bytes
+                .chunks_exact(2)
+                .map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32())
+                .collect(),
+            Dt::Bf16 => bytes
+                .chunks_exact(2)
+                .map(|c| half::bf16::from_le_bytes([c[0], c[1]]).to_f32())
+                .collect(),
+        }
+    }
+
+    fn f32_to_f16_bits(v: f32) -> u16 { half::f16::from_f32(v).to_bits() }
+    fn f16_bits_to_f32(b: u16) -> f32 { half::f16::from_bits(b).to_f32() }
+
+    // ── int4 / bits pack helpers ──────────────────────────────────────────────
+
+    fn pack_int4_row(weights: &[u32]) -> Vec<u32> {
+        assert!(weights.len() % 8 == 0);
+        weights
+            .chunks_exact(8)
+            .map(|chunk| {
+                let mut packed = 0u32;
+                for (i, &q) in chunk.iter().enumerate() {
+                    packed |= (q & 0xf) << (i * 4);
+                }
+                packed
+            })
+            .collect()
+    }
+
+    fn pack_int8_row(codes: &[u32]) -> Vec<u32> {
+        assert!(codes.len() % 4 == 0, "k_in must be divisible by 4 for int8 packing");
+        codes
+            .chunks_exact(4)
+            .map(|chunk| {
+                (chunk[0] & 0xff)
+                    | ((chunk[1] & 0xff) << 8)
+                    | ((chunk[2] & 0xff) << 16)
+                    | ((chunk[3] & 0xff) << 24)
+            })
+            .collect()
+    }
+
+    fn pack_codes_bits(codes: &[u32], bits: u32) -> Vec<u32> {
+        let n_words = (codes.len() as u32 * bits).div_ceil(32) as usize;
+        let mut words = vec![0u32; n_words];
+        for (i, &c) in codes.iter().enumerate() {
+            let bit_off = i as u32 * bits;
+            let word = (bit_off / 32) as usize;
+            let shift = bit_off % 32;
+            words[word] |= (c & ((1u32 << bits) - 1)) << shift;
+            let lo = 32 - shift;
+            if lo < bits {
+                words[word + 1] |= c >> lo;
+            }
+        }
+        words
+    }
+
+    // ── CPU oracles ───────────────────────────────────────────────────────────
+
+    fn cpu_topk_reference(
+        router_logits: &[f32],
+        n_rows: usize,
+        n_experts: usize,
+        k: usize,
+    ) -> (Vec<u32>, Vec<f32>) {
+        let mut indices = vec![0u32; n_rows * k];
+        let mut weights = vec![0.0f32; n_rows * k];
+        for row in 0..n_rows {
+            let row_base = row * n_experts;
+            let mut chosen = Vec::with_capacity(k);
+            let mut chosen_vals = Vec::with_capacity(k);
+            for _ in 0..k {
+                let mut best_val = f32::NEG_INFINITY;
+                let mut best_idx = 0usize;
+                for j in 0..n_experts {
+                    if chosen.contains(&(j as u32)) { continue; }
+                    let v = router_logits[row_base + j];
+                    if v > best_val { best_val = v; best_idx = j; }
+                }
+                chosen.push(best_idx as u32);
+                chosen_vals.push(best_val);
+            }
+            let max_v = chosen_vals.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let exp_vals: Vec<f32> = chosen_vals.iter().map(|&v| (v - max_v).exp()).collect();
+            let sum_exp: f32 = exp_vals.iter().sum();
+            for j in 0..k {
+                indices[row * k + j] = chosen[j];
+                weights[row * k + j] = exp_vals[j] / sum_exp;
+            }
+        }
+        (indices, weights)
+    }
+
+    fn cpu_gather_qmm_int4(
+        x: &[f32],
+        weight_packed: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        expert_offsets: &[u32],
+        t_rows: usize,
+        k_in: usize,
+        m_out: usize,
+        n_experts: usize,
+        group_size: usize,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0_f32; t_rows * m_out];
+        let weight_stride_m = k_in / 8;
+        let groups_per_row = k_in / group_size;
+        for row in 0..t_rows {
+            let mut expert = 0;
+            for e in 0..n_experts {
+                if (row as u32) < expert_offsets[e + 1] { expert = e; break; }
+            }
+            for m in 0..m_out {
+                let weight_row_base = expert * m_out * weight_stride_m + m * weight_stride_m;
+                let scale_row_base = expert * m_out * groups_per_row + m * groups_per_row;
+                let x_row_base = row * k_in;
+                let mut acc = 0.0_f32;
+                for pack_idx in 0..(k_in / 8) {
+                    let packed = weight_packed[weight_row_base + pack_idx];
+                    let k_first = pack_idx * 8;
+                    let g = k_first / group_size;
+                    let scale = scales[scale_row_base + g];
+                    let bias = biases[scale_row_base + g];
+                    for nib in 0..8 {
+                        let q = (packed >> (nib * 4)) & 0xf;
+                        let w = q as f32 * scale + bias;
+                        let xv = x[x_row_base + k_first + nib];
+                        acc += w * xv;
+                    }
+                }
+                out[row * m_out + m] = acc;
+            }
+        }
+        out
+    }
+
+    fn cpu_gather_qmm_bits(
+        x: &[f32],
+        weight_packed: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        expert_offsets: &[u32],
+        t_rows: usize,
+        k_in: usize,
+        m_out: usize,
+        n_experts: usize,
+        group_size: usize,
+        bits: u32,
+    ) -> Vec<f32> {
+        let words_per_row = (k_in as u32 * bits).div_ceil(32) as usize;
+        let groups_per_row = k_in / group_size;
+        let mask = (1u64 << bits) - 1;
+        let mut out = vec![0.0f32; t_rows * m_out];
+        for row in 0..t_rows {
+            let mut expert = 0;
+            for e in 0..n_experts {
+                if (row as u32) < expert_offsets[e + 1] { expert = e; break; }
+            }
+            for m in 0..m_out {
+                let wbase = (expert * m_out + m) * words_per_row;
+                let sbase = (expert * m_out + m) * groups_per_row;
+                let mut acc = 0.0f32;
+                for d in 0..k_in {
+                    let bit_off = d as u32 * bits;
+                    let word = (bit_off / 32) as usize;
+                    let shift = bit_off % 32;
+                    let lo = (weight_packed[wbase + word] as u64) >> shift;
+                    let hi = if 32 - shift < bits {
+                        (weight_packed[wbase + word + 1] as u64) << (32 - shift)
+                    } else {
+                        0
+                    };
+                    let q = ((lo | hi) & mask) as f32;
+                    let g = d / group_size;
+                    let w = q * scales[sbase + g] + biases[sbase + g];
+                    acc += w * x[row * k_in + d];
+                }
+                out[row * m_out + m] = acc;
+            }
+        }
+        out
+    }
+
+    // ── cpu_oracle (m16/m32 variant) ─────────────────────────────────────────
+
+    fn cpu_oracle_m_batch(
+        x: &[f32],
+        weight_packed: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        expert_offsets: &[u32],
+        t_rows: usize,
+        k_in: usize,
+        m_out: usize,
+        n_experts: usize,
+        group_size: usize,
+    ) -> Vec<f32> {
+        let weight_stride_m = k_in / 8;
+        let groups_per_row = k_in / group_size;
+        let mut out = vec![0.0_f32; t_rows * m_out];
+        for row in 0..t_rows {
+            let mut expert = 0usize;
+            for e in 0..n_experts {
+                if (row as u32) < expert_offsets[e + 1] { expert = e; break; }
+            }
+            for m in 0..m_out {
+                let w_base = expert * m_out * weight_stride_m + m * weight_stride_m;
+                let s_base = expert * m_out * groups_per_row + m * groups_per_row;
+                let mut acc = 0.0_f32;
+                for pack_idx in 0..weight_stride_m {
+                    let k_first = pack_idx * 8;
+                    let g = k_first / group_size;
+                    let s = scales[s_base + g];
+                    let b = biases[s_base + g];
+                    let p = weight_packed[w_base + pack_idx];
+                    for i in 0..8usize {
+                        let code = ((p >> (i * 4)) & 0xF) as f32;
+                        let x_val = x[row * k_in + k_first + i];
+                        acc += (code * s + b) * x_val;
+                    }
+                }
+                out[row * m_out + m] = acc;
+            }
+        }
+        let _ = n_experts;
+        out
+    }
+
+    fn cpu_oracle_int8(
+        x: &[f32],
+        codes: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        indices: &[u32],
+        t_rows: usize,
+        n_out: usize,
+        k_in: usize,
+        group_size: usize,
+    ) -> Vec<f32> {
+        let groups = k_in / group_size;
+        let mut out = vec![0.0f32; t_rows * n_out];
+        for t in 0..t_rows {
+            let e = indices[t] as usize;
+            for n in 0..n_out {
+                let mut acc = 0.0f32;
+                for k in 0..k_in {
+                    let code = codes[(e * n_out + n) * k_in + k] as f32;
+                    let g = (e * n_out + n) * groups + k / group_size;
+                    acc += (scales[g] * code + biases[g]) * x[t * k_in + k];
+                }
+                out[t * n_out + n] = acc;
+            }
+        }
+        out
+    }
+
+    // ── cosine similarity ─────────────────────────────────────────────────────
+
+    fn cosine(a: &[f32], b: &[f32]) -> f32 {
+        let mut dot = 0.0f64;
+        let mut na = 0.0f64;
+        let mut nb = 0.0f64;
+        for (x, y) in a.iter().zip(b.iter()) {
+            dot += *x as f64 * *y as f64;
+            na += *x as f64 * *x as f64;
+            nb += *y as f64 * *y as f64;
+        }
+        let denom = (na.sqrt() * nb.sqrt()).max(1e-30);
+        (dot / denom) as f32
+    }
+
+    fn cosine_f64(a: &[f32], b: &[f32]) -> f64 {
+        let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
+        for (&x, &y) in a.iter().zip(b) {
+            dot += x as f64 * y as f64;
+            na += x as f64 * x as f64;
+            nb += y as f64 * y as f64;
+        }
+        dot / (na.sqrt() * nb.sqrt() + 1e-12)
+    }
+
+    // ── run helpers ───────────────────────────────────────────────────────────
+
+    fn run_topk(
+        ctx: &Context,
+        dtype: DType,
+        router_logits_bytes: &[u8],
+        n_rows: usize,
+        n_experts: usize,
+        k: usize,
+        norm_topk_prob: u32,
+        out_w_bytes_per_elem: usize,
+    ) -> (Vec<u32>, Vec<u8>) {
+        assert!(k <= 32, "kernel pins k <= 32");
+        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        buffers.insert("router_logits".into(), router_logits_bytes.to_vec());
+        buffers.insert("indices_out".into(), vec![0u8; n_rows * k * 4]);
+        buffers.insert("weights_out".into(), vec![0u8; n_rows * k * out_w_bytes_per_elem]);
+        buffers.insert("n_experts".into(), (n_experts as u32).to_le_bytes().to_vec());
+        buffers.insert("k".into(), (k as u32).to_le_bytes().to_vec());
+        buffers.insert("norm_topk_prob".into(), norm_topk_prob.to_le_bytes().to_vec());
+        let mut kernel = mt_moe_router_topk::kernel_ir_for(dtype);
+        kernel.mode = KernelMode::Reduction;
+        let result = ctx
+            .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [n_rows, 1, 1], [32, 1, 1])
+            .expect("dispatch_with_grid should succeed");
+        let idx_bytes = result.outputs.get("indices_out").expect("indices_out").clone();
+        let w_bytes = result.outputs.get("weights_out").expect("weights_out").clone();
+        let indices: Vec<u32> = idx_bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        (indices, w_bytes)
+    }
+
+    fn run_unpermute(
+        ctx: &Context,
+        dtype: DType,
+        expert_outputs_bytes: &[u8],
+        inv_perm: &[u32],
+        weights_bytes: &[u8],
+        n_rows: usize,
+        hidden: usize,
+        k: usize,
+        elem_bytes: usize,
+    ) -> Vec<u8> {
+        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        buffers.insert("expert_outputs".into(), expert_outputs_bytes.to_vec());
+        buffers.insert("inv_perm".into(), inv_perm.iter().flat_map(|v| v.to_le_bytes()).collect());
+        buffers.insert("top_k_weights".into(), weights_bytes.to_vec());
+        buffers.insert("out".into(), vec![0u8; n_rows * hidden * elem_bytes]);
+        buffers.insert("hidden".into(), (hidden as u32).to_le_bytes().to_vec());
+        buffers.insert("k".into(), (k as u32).to_le_bytes().to_vec());
+        let mut kernel = mt_moe_unpermute::kernel_ir_for(dtype);
+        kernel.mode = KernelMode::Reduction;
+        let result = ctx
+            .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [n_rows, 1, 1], [128, 1, 1])
+            .expect("dispatch_with_grid should succeed");
+        result.outputs.get("out").expect("out").clone()
+    }
+
+    fn run_permute(
+        ctx: &Context,
+        dtype: DType,
+        tokens_bytes: &[u8],
+        sort_token_idx: &[u32],
+        n_rows: usize,
+        n_permuted: usize,
+        hidden: usize,
+        elem_bytes: usize,
+    ) -> Vec<u8> {
+        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        buffers.insert("tokens".into(), tokens_bytes.to_vec());
+        buffers.insert(
+            "sort_token_idx".into(),
+            sort_token_idx.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        );
+        buffers.insert("permuted".into(), vec![0u8; n_permuted * hidden * elem_bytes]);
+        buffers.insert("hidden".into(), (hidden as u32).to_le_bytes().to_vec());
+        let _ = n_rows;
+        let mut kernel = mt_moe_permute::kernel_ir_for(dtype);
+        kernel.mode = KernelMode::Reduction;
+        let result = ctx
+            .dispatch_with_grid(
+                &kernel,
+                &buffers,
+                &BTreeMap::new(),
+                [n_permuted, 1, 1],
+                [128, 1, 1],
+            )
+            .expect("dispatch_with_grid should succeed");
+        result.outputs.get("permuted").expect("permuted").clone()
+    }
+
+    fn run_small_case_dtype(dt: Dt) {
+        let _g = gpu_lock();
+        let n_experts = 3usize;
+        let k_in = 32usize;
+        let m_out = 8usize;
+        let group_size = 32usize;
+        let t_rows = 6usize;
+        let expert_offsets: Vec<u32> = vec![0, 2, 5, 6];
+        let mut weight_unpacked = vec![0u32; n_experts * m_out * k_in];
+        for (i, w) in weight_unpacked.iter_mut().enumerate() {
+            *w = ((i as u32) * 7 + 3) & 0xf;
+        }
+        let weight_packed: Vec<u32> =
+            weight_unpacked.chunks_exact(k_in).flat_map(pack_int4_row).collect();
+        let scales: Vec<f32> = (0..n_experts * m_out * (k_in / group_size))
+            .map(|i| dt.round(0.01 + 0.001 * (i as f32)))
+            .collect();
+        let biases: Vec<f32> = (0..n_experts * m_out * (k_in / group_size))
+            .map(|i| dt.round(-0.05 + 0.002 * (i as f32)))
+            .collect();
+        let x: Vec<f32> =
+            (0..t_rows * k_in).map(|i| dt.round(0.1 * ((i as f32 * 0.17).sin()))).collect();
+        let y_cpu = cpu_gather_qmm_int4(
+            &x,
+            &weight_packed,
+            &scales,
+            &biases,
+            &expert_offsets,
+            t_rows,
+            k_in,
+            m_out,
+            n_experts,
+            group_size,
+        );
+        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        buffers.insert("x".into(), pack_bytes(&x, dt));
+        buffers.insert(
+            "weight_packed".into(),
+            weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        );
+        buffers.insert("scales".into(), pack_bytes(&scales, dt));
+        buffers.insert("biases".into(), pack_bytes(&biases, dt));
+        buffers.insert(
+            "expert_offsets".into(),
+            expert_offsets.iter().flat_map(|o| o.to_le_bytes()).collect(),
+        );
+        buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * m_out], dt));
+        buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+        buffers.insert("m_out".into(), (m_out as u32).to_le_bytes().to_vec());
+        buffers.insert("n_experts".into(), (n_experts as u32).to_le_bytes().to_vec());
+        buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+        let ctx = Context::new().expect("Context::new on macOS");
+        let mut kernel = mt_moe_gather_qmm_int4::kernel_ir_for(dt.to_dtype());
+        kernel.mode = KernelMode::Reduction;
+        let result = ctx
+            .dispatch_with_grid(
+                &kernel,
+                &buffers,
+                &BTreeMap::new(),
+                [m_out, t_rows, 1],
+                [32, 1, 1],
+            )
+            .expect("mt_moe_gather_qmm_int4 dispatch");
+        let y_gpu = unpack_bytes(result.outputs.get("out").expect("out"), dt);
+        let (tol, label) = match dt {
+            Dt::F32 => (1e-4, "f32"),
+            Dt::F16 => (5e-3, "f16"),
+            Dt::Bf16 => (3e-2, "bf16"),
+        };
+        let max_diff =
+            y_cpu.iter().zip(&y_gpu).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+        assert!(max_diff < tol, "{label}: max |y_cpu - y_gpu| = {max_diff:.2e} (tol {tol:.0e})");
+    }
+
+    fn run_gather_qmm_bits(bits: u32, kernel: metaltile_core::ir::Kernel) {
+        let n_experts = 3usize;
+        let k_in = 64usize;
+        let m_out = 8usize;
+        let group_size = 64usize;
+        let t_rows = 6usize;
+        let expert_offsets: Vec<u32> = vec![0, 2, 5, 6];
+        let max_code = (1u32 << bits) - 1;
+        let n_rows = n_experts * m_out;
+        let mut weight_packed: Vec<u32> = Vec::new();
+        for r in 0..n_rows {
+            let codes: Vec<u32> =
+                (0..k_in).map(|d| (r as u32 * 13 + d as u32 * 7 + 3) % (max_code + 1)).collect();
+            weight_packed.extend(pack_codes_bits(&codes, bits));
+        }
+        let groups_total = n_rows * (k_in / group_size);
+        let scales: Vec<f32> = (0..groups_total).map(|i| 0.01 + 0.001 * (i as f32)).collect();
+        let biases: Vec<f32> =
+            (0..groups_total).map(|i| -0.05 + 0.002 * (i as f32)).collect();
+        let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.1 * ((i as f32 * 0.17).sin())).collect();
+        let y_cpu = cpu_gather_qmm_bits(
+            &x,
+            &weight_packed,
+            &scales,
+            &biases,
+            &expert_offsets,
+            t_rows,
+            k_in,
+            m_out,
+            n_experts,
+            group_size,
+            bits,
+        );
+        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        buffers.insert("x".into(), pack_bytes(&x, Dt::F32));
+        buffers.insert(
+            "weight_packed".into(),
+            weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        );
+        buffers.insert("scales".into(), pack_bytes(&scales, Dt::F32));
+        buffers.insert("biases".into(), pack_bytes(&biases, Dt::F32));
+        buffers.insert(
+            "expert_offsets".into(),
+            expert_offsets.iter().flat_map(|o| o.to_le_bytes()).collect(),
+        );
+        buffers.insert("out".into(), pack_bytes(&vec![0.0f32; t_rows * m_out], Dt::F32));
+        buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+        buffers.insert("m_out".into(), (m_out as u32).to_le_bytes().to_vec());
+        buffers.insert("n_experts".into(), (n_experts as u32).to_le_bytes().to_vec());
+        buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+        let ctx = Context::new().expect("Context::new on macOS");
+        let mut kernel = kernel;
+        kernel.mode = KernelMode::Reduction;
+        let result = ctx
+            .dispatch_with_grid(
+                &kernel,
+                &buffers,
+                &BTreeMap::new(),
+                [m_out, t_rows, 1],
+                [32, 1, 1],
+            )
+            .expect("gather_qmm bits dispatch");
+        let y_gpu = unpack_bytes(result.outputs.get("out").expect("out"), Dt::F32);
+        assert!(
+            y_gpu.iter().any(|&v| v != 0.0),
+            "gather_qmm b{bits}: all-zero output (empty body?)"
+        );
+        let max_diff =
+            y_cpu.iter().zip(&y_gpu).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(max_diff < 1e-3, "gather_qmm b{bits}: max |y_cpu - y_gpu| = {max_diff:.2e}");
+    }
+
+    type MoeInputs = (Vec<u32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<u32>);
+
+    fn build_inputs(
+        n_experts: usize,
+        t_rows: usize,
+        k_in: usize,
+        m_out: usize,
+        group_size: usize,
+    ) -> MoeInputs {
+        let groups_per_row = k_in / group_size;
+        let weight_stride_m = k_in / 8;
+        let total_codes = n_experts * m_out * k_in;
+        let codes_flat: Vec<u32> = (0..total_codes)
+            .map(|i| (i as u32).wrapping_mul(2654435761).wrapping_shr(12) % 14 + 1)
+            .collect();
+        let weight_packed: Vec<u32> =
+            codes_flat.chunks_exact(k_in).flat_map(pack_int4_row).collect();
+        assert_eq!(weight_packed.len(), n_experts * m_out * weight_stride_m);
+        let scales: Vec<f32> = (0..n_experts * m_out * groups_per_row)
+            .map(|i| 0.005 + 0.001 * (i as f32 * 0.03).sin().abs())
+            .collect();
+        let biases: Vec<f32> = (0..n_experts * m_out * groups_per_row)
+            .map(|i| -0.02 + 0.005 * (i as f32 * 0.07).cos())
+            .collect();
+        let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * (i as f32 * 0.013).sin()).collect();
+        let rows_per_expert = t_rows / n_experts;
+        let mut expert_offsets = vec![0u32; n_experts + 1];
+        for e in 0..n_experts {
+            expert_offsets[e + 1] = expert_offsets[e] + rows_per_expert as u32;
+        }
+        expert_offsets[n_experts] = t_rows as u32;
+        (weight_packed, scales, biases, x, expert_offsets)
+    }
+
+    fn run_kernel_m_batch(
+        kernel_ir: fn(metaltile_core::dtype::DType) -> metaltile_core::ir::Kernel,
+        grid_x: usize,
+        x: &[f32],
+        weight_packed: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        expert_offsets: &[u32],
+        t_rows: usize,
+        k_in: usize,
+        m_out: usize,
+        n_experts: usize,
+        group_size: usize,
+    ) -> Vec<f32> {
+        let ctx = Context::new().expect("Context::new on macOS");
+        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        buffers.insert("x".into(), pack_bytes(x, Dt::F32));
+        buffers.insert(
+            "weight_packed".into(),
+            weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        );
+        buffers.insert("scales".into(), pack_bytes(scales, Dt::F32));
+        buffers.insert("biases".into(), pack_bytes(biases, Dt::F32));
+        buffers.insert(
+            "expert_offsets".into(),
+            expert_offsets.iter().flat_map(|o| o.to_le_bytes()).collect(),
+        );
+        buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * m_out], Dt::F32));
+        buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+        buffers.insert("m_out".into(), (m_out as u32).to_le_bytes().to_vec());
+        buffers.insert("n_experts".into(), (n_experts as u32).to_le_bytes().to_vec());
+        buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+        let mut kernel = kernel_ir(Dt::F32.to_dtype());
+        kernel.mode = KernelMode::Reduction;
+        let result = ctx
+            .dispatch_with_grid(
+                &kernel,
+                &buffers,
+                &BTreeMap::new(),
+                [grid_x, t_rows, 1],
+                [32, 1, 1],
+            )
+            .expect("dispatch gather_qmm_int4_m_batch");
+        unpack_bytes(result.outputs.get("out").expect("out"), Dt::F32)
+    }
+
+    fn run_case_m16(
+        n_experts: usize,
+        t_rows: usize,
+        k_in: usize,
+        m_out: usize,
+        group_size: usize,
+    ) {
+        assert!(m_out % 16 == 0, "m16: m_out must be multiple of 16");
+        let (weight_packed, scales, biases, x, expert_offsets) =
+            build_inputs(n_experts, t_rows, k_in, m_out, group_size);
+        let expected = cpu_oracle_m_batch(
+            &x,
+            &weight_packed,
+            &scales,
+            &biases,
+            &expert_offsets,
+            t_rows,
+            k_in,
+            m_out,
+            n_experts,
+            group_size,
+        );
+        let _g = gpu_lock();
+        let y_m8 = run_kernel_m_batch(
+            mt_moe_gather_qmm_int4_m8::kernel_ir_for,
+            m_out / 8,
+            &x, &weight_packed, &scales, &biases, &expert_offsets,
+            t_rows, k_in, m_out, n_experts, group_size,
+        );
+        let y_m16 = run_kernel_m_batch(
+            mt_moe_gather_qmm_int4_m16::kernel_ir_for,
+            m_out / 16,
+            &x, &weight_packed, &scales, &biases, &expert_offsets,
+            t_rows, k_in, m_out, n_experts, group_size,
+        );
+        assert_eq!(y_m16.len(), expected.len());
+        assert!(y_m16.iter().any(|&v| v != 0.0), "m16: all-zero output");
+        let cos = cosine(&expected, &y_m16);
+        let max_diff_vs_m8 =
+            y_m8.iter().zip(&y_m16).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+        assert!(cos >= 0.999, "m16: cosine {cos:.6} < 0.999");
+        assert!(max_diff_vs_m8 < 5e-4, "m16 vs m8: max diff = {max_diff_vs_m8:.2e}");
+    }
+
+    fn run_case_m32(
+        n_experts: usize,
+        t_rows: usize,
+        k_in: usize,
+        m_out: usize,
+        group_size: usize,
+    ) {
+        assert!(m_out % 32 == 0, "m32: m_out must be multiple of 32");
+        let (weight_packed, scales, biases, x, expert_offsets) =
+            build_inputs(n_experts, t_rows, k_in, m_out, group_size);
+        let expected = cpu_oracle_m_batch(
+            &x,
+            &weight_packed,
+            &scales,
+            &biases,
+            &expert_offsets,
+            t_rows,
+            k_in,
+            m_out,
+            n_experts,
+            group_size,
+        );
+        let _g = gpu_lock();
+        let y_m8 = run_kernel_m_batch(
+            mt_moe_gather_qmm_int4_m8::kernel_ir_for,
+            m_out / 8,
+            &x, &weight_packed, &scales, &biases, &expert_offsets,
+            t_rows, k_in, m_out, n_experts, group_size,
+        );
+        let y_m32 = run_kernel_m_batch(
+            mt_moe_gather_qmm_int4_m32::kernel_ir_for,
+            m_out / 32,
+            &x, &weight_packed, &scales, &biases, &expert_offsets,
+            t_rows, k_in, m_out, n_experts, group_size,
+        );
+        assert_eq!(y_m32.len(), expected.len());
+        assert!(y_m32.iter().any(|&v| v != 0.0), "m32: all-zero output");
+        let cos = cosine(&expected, &y_m32);
+        let max_diff_vs_m8 =
+            y_m8.iter().zip(&y_m32).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+        assert!(cos >= 0.999, "m32: cosine {cos:.6} < 0.999");
+        assert!(max_diff_vs_m8 < 5e-4, "m32 vs m8: max diff = {max_diff_vs_m8:.2e}");
+    }
+
+    fn run_int8_mma(
+        x: &[f32],
+        weight_packed: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        indices: &[u32],
+        t_rows: usize,
+        n_out: usize,
+        k_in: usize,
+        group_size: usize,
+        dt: Dt,
+    ) -> Vec<f32> {
+        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        buffers.insert("x".into(), pack_bytes(x, dt));
+        buffers.insert("w".into(), weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect());
+        buffers.insert("scales".into(), pack_bytes(scales, dt));
+        buffers.insert("biases".into(), pack_bytes(biases, dt));
+        buffers.insert("indices".into(), indices.iter().flat_map(|i| i.to_le_bytes()).collect());
+        buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * n_out], dt));
+        buffers.insert("m_total".into(), (t_rows as u32).to_le_bytes().to_vec());
+        buffers.insert("n_out".into(), (n_out as u32).to_le_bytes().to_vec());
+        buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+        buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+        let ctx = Context::new().expect("Context::new");
+        let mut k = mt_moe_gather_qmm_mma_int8::kernel_ir_for(dt.to_dtype());
+        k.mode = KernelMode::Reduction;
+        let r = ctx
+            .dispatch_with_grid(
+                &k,
+                &buffers,
+                &BTreeMap::new(),
+                [n_out / 32, t_rows.div_ceil(32), 1],
+                [128, 1, 1],
+            )
+            .expect("dispatch");
+        unpack_bytes(r.outputs.get("out").expect("out"), dt)
+    }
+
+    fn make_int8_test_data(
+        dt: Dt,
+    ) -> (Vec<u32>, Vec<u32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<u32>) {
+        let n_experts = 4usize;
+        let k_in = 64usize;
+        let n_out = 64usize;
+        let group_size = 32usize;
+        let t_rows = 64usize;
+        let indices: Vec<u32> = (0..t_rows).map(|r| (r / (t_rows / n_experts)) as u32).collect();
+        let total = n_experts * n_out * k_in;
+        let codes: Vec<u32> =
+            (0..total).map(|i| (i as u32).wrapping_mul(2654435761) & 0xff).collect();
+        let weight_packed: Vec<u32> = codes.chunks_exact(k_in).flat_map(pack_int8_row).collect();
+        let groups_total = n_experts * n_out * (k_in / group_size);
+        let scales: Vec<f32> = (0..groups_total)
+            .map(|i| dt.round(0.002 + 0.0005 * (i as f32 * 0.03).sin()))
+            .collect();
+        let biases: Vec<f32> = (0..groups_total)
+            .map(|i| dt.round(-0.05 + 0.01 * (i as f32 * 0.07).cos()))
+            .collect();
+        let x: Vec<f32> = (0..t_rows * k_in)
+            .map(|i| dt.round(0.05 * (i as f32 * 0.013).sin()))
+            .collect();
+        (codes, weight_packed, scales, biases, x, indices)
+    }
+
+    // ── router top-k tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn mt_moe_router_topk_matches_cpu_reference_f32() {
+        let n_rows = 8usize;
+        let n_experts = 64usize;
+        let k = 4usize;
+        let logits: Vec<f32> = (0..n_rows * n_experts)
+            .map(|i| ((i as f32 * 0.13) % 7.0) - 3.5 + (i as f32 * 0.001))
+            .collect();
+        let (ref_idx, ref_w) = cpu_topk_reference(&logits, n_rows, n_experts, k);
+        let logits_bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let _g = gpu_lock();
+        let ctx = Context::new().expect("Context::new on macOS");
+        let (gpu_idx, gpu_w_bytes) =
+            run_topk(&ctx, DType::F32, &logits_bytes, n_rows, n_experts, k, 1, 4);
+        let gpu_w: Vec<f32> = gpu_w_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(gpu_idx, ref_idx, "indices mismatch");
+        let mut max_diff = 0.0f32;
+        for (i, (&g, &r)) in gpu_w.iter().zip(ref_w.iter()).enumerate() {
+            let d = (g - r).abs();
+            if d > max_diff {
+                max_diff = d;
+                assert!(d < 1e-5, "weight[{i}] diverges: gpu={g:.6} ref={r:.6} diff={d:.2e}");
+            }
+        }
+    }
+
+    #[test]
+    fn mt_moe_unpermute_matches_cpu_reference_f32() {
+        let n_rows = 4usize;
+        let hidden = 256usize;
+        let k = 4usize;
+        let total_expert_slots = n_rows * k;
+        let expert_outputs: Vec<f32> =
+            (0..total_expert_slots * hidden).map(|i| ((i as f32 * 0.07) % 11.0) - 5.5).collect();
+        let inv_perm: Vec<u32> = (0..total_expert_slots as u32).collect();
+        let raw_weights: Vec<f32> =
+            (0..n_rows * k).map(|i| 0.1 + (i as f32 * 0.03)).collect();
+        let mut weights = vec![0.0f32; n_rows * k];
+        for row in 0..n_rows {
+            let row_sum: f32 = raw_weights[row * k..(row + 1) * k].iter().sum();
+            for j in 0..k {
+                weights[row * k + j] = raw_weights[row * k + j] / row_sum;
+            }
+        }
+        let mut ref_out = vec![0.0f32; n_rows * hidden];
+        for token in 0..n_rows {
+            for h in 0..hidden {
+                let mut acc = 0.0f32;
+                for j in 0..k {
+                    let pos = inv_perm[token * k + j] as usize;
+                    acc += weights[token * k + j] * expert_outputs[pos * hidden + h];
+                }
+                ref_out[token * hidden + h] = acc;
+            }
+        }
+        let exp_bytes: Vec<u8> = expert_outputs.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let w_bytes: Vec<u8> = weights.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let _g = gpu_lock();
+        let ctx = Context::new().expect("Context::new on macOS");
+        let out_bytes =
+            run_unpermute(&ctx, DType::F32, &exp_bytes, &inv_perm, &w_bytes, n_rows, hidden, k, 4);
+        let gpu_out: Vec<f32> = out_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let max_diff = gpu_out
+            .iter()
+            .zip(ref_out.iter())
+            .map(|(g, r)| (g - r).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_diff < 1e-4, "unpermute mismatch: max |diff| = {max_diff:.2e}");
+    }
+
+    #[test]
+    fn mt_moe_router_topk_qwen3_moe_shape_f32() {
+        let n_rows = 16usize;
+        let n_experts = 128usize;
+        let k = 8usize;
+        let logits: Vec<f32> = (0..n_rows * n_experts)
+            .map(|i| ((i as f32 * 0.0173) % 13.0) - 6.5 + (i as f32 * 0.0001))
+            .collect();
+        let (ref_idx, ref_w) = cpu_topk_reference(&logits, n_rows, n_experts, k);
+        let logits_bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let _g = gpu_lock();
+        let ctx = Context::new().unwrap();
+        let (gpu_idx, gpu_w_bytes) =
+            run_topk(&ctx, DType::F32, &logits_bytes, n_rows, n_experts, k, 1, 4);
+        let gpu_w: Vec<f32> = gpu_w_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(gpu_idx, ref_idx, "Qwen3-MoE shape: indices diverge");
+        for (i, (g, r)) in gpu_w.iter().zip(ref_w.iter()).enumerate() {
+            assert!((g - r).abs() < 1e-5, "Qwen3-MoE weight[{i}] diverges: {g} vs {r}");
+        }
+    }
+
+    #[test]
+    fn mt_moe_router_topk_f16() {
+        let n_rows = 8usize;
+        let n_experts = 64usize;
+        let k = 4usize;
+        let logits_f32: Vec<f32> = (0..n_rows * n_experts)
+            .map(|i| ((i as f32 * 0.13) % 7.0) - 3.5 + (i as f32 * 0.001))
+            .collect();
+        let logits_f16_to_f32: Vec<f32> =
+            logits_f32.iter().map(|&v| f16_bits_to_f32(f32_to_f16_bits(v))).collect();
+        let (ref_idx, ref_w) = cpu_topk_reference(&logits_f16_to_f32, n_rows, n_experts, k);
+        let logits_bytes: Vec<u8> =
+            logits_f32.iter().flat_map(|v| f32_to_f16_bits(*v).to_le_bytes()).collect();
+        let _g = gpu_lock();
+        let ctx = Context::new().unwrap();
+        let (gpu_idx, gpu_w_bytes) =
+            run_topk(&ctx, DType::F16, &logits_bytes, n_rows, n_experts, k, 1, 2);
+        let gpu_w: Vec<f32> = gpu_w_bytes
+            .chunks_exact(2)
+            .map(|c| f16_bits_to_f32(u16::from_le_bytes([c[0], c[1]])))
+            .collect();
+        assert_eq!(gpu_idx, ref_idx, "f16: indices diverge");
+        for (i, (g, r)) in gpu_w.iter().zip(ref_w.iter()).enumerate() {
+            let rel = (g - r).abs() / r.abs().max(1e-3);
+            assert!(rel < 5e-3, "f16 weight[{i}] diverges: rel {rel:.2e}");
+        }
+    }
+
+    #[test]
+    fn mt_moe_router_topk_k_equals_1() {
+        let n_rows = 4usize;
+        let n_experts = 32usize;
+        let k = 1usize;
+        let logits: Vec<f32> = (0..n_rows * n_experts)
+            .map(|i| ((i as f32 * 0.7) % 5.0) - 2.5 + (i as f32 * 0.01))
+            .collect();
+        let (ref_idx, ref_w) = cpu_topk_reference(&logits, n_rows, n_experts, k);
+        for &w in &ref_w { assert!((w - 1.0).abs() < 1e-6, "ref softmax(1)={w}"); }
+        let logits_bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let _g = gpu_lock();
+        let ctx = Context::new().unwrap();
+        let (gpu_idx, gpu_w_bytes) =
+            run_topk(&ctx, DType::F32, &logits_bytes, n_rows, n_experts, k, 1, 4);
+        let gpu_w: Vec<f32> = gpu_w_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(gpu_idx, ref_idx);
+        for &w in &gpu_w {
+            assert!((w - 1.0).abs() < 1e-6, "k=1 weight should be 1.0, got {w}");
+        }
+    }
+
+    #[test]
+    fn mt_moe_router_topk_tie_breaks_to_smaller_idx() {
+        let n_rows = 1usize;
+        let n_experts = 8usize;
+        let k = 2usize;
+        let mut logits = vec![0.0f32; n_experts];
+        logits[2] = 10.0;
+        logits[5] = 10.0;
+        logits[3] = 8.0;
+        let logits_bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let _g = gpu_lock();
+        let ctx = Context::new().unwrap();
+        let (gpu_idx, _) =
+            run_topk(&ctx, DType::F32, &logits_bytes, n_rows, n_experts, k, 1, 4);
+        assert_eq!(gpu_idx, vec![2u32, 5u32], "Tie-break: should pick 2 first then 5");
+    }
+
+    #[test]
+    fn mt_moe_unpermute_shuffled_inv_perm_f32() {
+        let n_rows = 4usize;
+        let hidden = 128usize;
+        let k = 4usize;
+        let total = n_rows * k;
+        let expert_outputs: Vec<f32> =
+            (0..total * hidden).map(|i| ((i as f32 * 0.11) % 9.0) - 4.5).collect();
+        let inv_perm: Vec<u32> = (0..total as u32).map(|i| total as u32 - 1 - i).collect();
+        let raw_weights: Vec<f32> = (0..n_rows * k).map(|i| 0.5 + (i as f32 * 0.07)).collect();
+        let mut weights = vec![0.0f32; n_rows * k];
+        for row in 0..n_rows {
+            let s: f32 = raw_weights[row * k..(row + 1) * k].iter().sum();
+            for j in 0..k { weights[row * k + j] = raw_weights[row * k + j] / s; }
+        }
+        let mut ref_out = vec![0.0f32; n_rows * hidden];
+        for token in 0..n_rows {
+            for h in 0..hidden {
+                let mut acc = 0.0f32;
+                for j in 0..k {
+                    let pos = inv_perm[token * k + j] as usize;
+                    acc += weights[token * k + j] * expert_outputs[pos * hidden + h];
+                }
+                ref_out[token * hidden + h] = acc;
+            }
+        }
+        let exp_bytes: Vec<u8> = expert_outputs.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let w_bytes: Vec<u8> = weights.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let _g = gpu_lock();
+        let ctx = Context::new().unwrap();
+        let out_bytes =
+            run_unpermute(&ctx, DType::F32, &exp_bytes, &inv_perm, &w_bytes, n_rows, hidden, k, 4);
+        let gpu_out: Vec<f32> = out_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        for (i, (g, r)) in gpu_out.iter().zip(ref_out.iter()).enumerate() {
+            assert!((g - r).abs() < 1e-4, "shuffled inv_perm[{i}]: {g} vs {r}");
+        }
+    }
+
+    #[test]
+    fn mt_moe_unpermute_qwen3_moe_shape_f16() {
+        let n_rows = 8usize;
+        let hidden = 2048usize;
+        let k = 8usize;
+        let total = n_rows * k;
+        let expert_outputs_f32: Vec<f32> =
+            (0..total * hidden).map(|i| ((i as f32 * 0.0091) % 6.0) - 3.0).collect();
+        let inv_perm: Vec<u32> = (0..total as u32).map(|i| (i * 7 + 3) % total as u32).collect();
+        let raw_weights: Vec<f32> =
+            (0..n_rows * k).map(|i| 0.4 + (i as f32 * 0.013)).collect();
+        let mut weights_f32 = vec![0.0f32; n_rows * k];
+        for row in 0..n_rows {
+            let s: f32 = raw_weights[row * k..(row + 1) * k].iter().sum();
+            for j in 0..k { weights_f32[row * k + j] = raw_weights[row * k + j] / s; }
+        }
+        let ef16: Vec<f32> = expert_outputs_f32
+            .iter()
+            .map(|&v| f16_bits_to_f32(f32_to_f16_bits(v)))
+            .collect();
+        let wf16: Vec<f32> =
+            weights_f32.iter().map(|&v| f16_bits_to_f32(f32_to_f16_bits(v))).collect();
+        let mut ref_out = vec![0.0f32; n_rows * hidden];
+        for token in 0..n_rows {
+            for h in 0..hidden {
+                let mut acc = 0.0f32;
+                for j in 0..k {
+                    let pos = inv_perm[token * k + j] as usize;
+                    acc += wf16[token * k + j] * ef16[pos * hidden + h];
+                }
+                ref_out[token * hidden + h] = acc;
+            }
+        }
+        let exp_bytes: Vec<u8> = expert_outputs_f32
+            .iter()
+            .flat_map(|v| f32_to_f16_bits(*v).to_le_bytes())
+            .collect();
+        let w_bytes: Vec<u8> =
+            weights_f32.iter().flat_map(|v| f32_to_f16_bits(*v).to_le_bytes()).collect();
+        let _g = gpu_lock();
+        let ctx = Context::new().unwrap();
+        let out_bytes =
+            run_unpermute(&ctx, DType::F16, &exp_bytes, &inv_perm, &w_bytes, n_rows, hidden, k, 2);
+        let gpu_out: Vec<f32> = out_bytes
+            .chunks_exact(2)
+            .map(|c| f16_bits_to_f32(u16::from_le_bytes([c[0], c[1]])))
+            .collect();
+        let mut max_rel = 0.0f32;
+        for (g, r) in gpu_out.iter().zip(ref_out.iter()) {
+            let rel = (g - r).abs() / r.abs().max(1e-3);
+            if rel > max_rel { max_rel = rel; }
+        }
+        assert!(max_rel < 1e-2, "Qwen3-MoE f16 unpermute max rel diff {max_rel:.2e}");
+    }
+
+    #[test]
+    fn mt_moe_router_topk_qwen3_next_mode_f32() {
+        let n_rows = 4usize;
+        let n_experts = 32usize;
+        let k = 4usize;
+        let logits: Vec<f32> =
+            (0..n_rows * n_experts).map(|i| ((i as f32 * 0.31) % 9.0) - 4.5).collect();
+        let mut ref_idx = vec![0u32; n_rows * k];
+        let mut ref_w = vec![0.0f32; n_rows * k];
+        for row in 0..n_rows {
+            let row_logits = &logits[row * n_experts..(row + 1) * n_experts];
+            let max_v = row_logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let exp_vec: Vec<f32> = row_logits.iter().map(|&v| (v - max_v).exp()).collect();
+            let sum_all: f32 = exp_vec.iter().sum();
+            let probs: Vec<f32> = exp_vec.iter().map(|&e| e / sum_all).collect();
+            let mut order: Vec<usize> = (0..n_experts).collect();
+            order.sort_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap());
+            for j in 0..k {
+                ref_idx[row * k + j] = order[j] as u32;
+                ref_w[row * k + j] = probs[order[j]];
+            }
+        }
+        let logits_bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let _g = gpu_lock();
+        let ctx = Context::new().unwrap();
+        let (gpu_idx, gpu_w_bytes) =
+            run_topk(&ctx, DType::F32, &logits_bytes, n_rows, n_experts, k, 0, 4);
+        let gpu_w: Vec<f32> = gpu_w_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(gpu_idx, ref_idx, "Qwen3-Next: indices diverge");
+        for (i, (g, r)) in gpu_w.iter().zip(ref_w.iter()).enumerate() {
+            assert!((g - r).abs() < 1e-5, "Qwen3-Next weight[{i}]: gpu={g:.6} ref={r:.6}");
+        }
+        for row in 0..n_rows {
+            let s: f32 = gpu_w[row * k..(row + 1) * k].iter().sum();
+            assert!(s < 1.0, "Qwen3-Next mode: row {row} sum is {s:.6}, should be < 1.0");
+        }
+    }
+
+    #[test]
+    fn mt_moe_router_topk_bf16() {
+        let n_rows = 4usize;
+        let n_experts = 32usize;
+        let k = 4usize;
+        let logits_f32: Vec<f32> =
+            (0..n_rows * n_experts).map(|i| ((i as f32 * 0.21) % 5.0) - 2.5).collect();
+        let to_bf16_bits = |v: f32| -> u16 { (v.to_bits() >> 16) as u16 };
+        let from_bf16_bits = |b: u16| -> f32 { f32::from_bits((b as u32) << 16) };
+        let logits_round: Vec<f32> =
+            logits_f32.iter().map(|&v| from_bf16_bits(to_bf16_bits(v))).collect();
+        let (ref_idx, ref_w) = cpu_topk_reference(&logits_round, n_rows, n_experts, k);
+        let logits_bytes: Vec<u8> =
+            logits_f32.iter().flat_map(|v| to_bf16_bits(*v).to_le_bytes()).collect();
+        let _g = gpu_lock();
+        let ctx = Context::new().unwrap();
+        let (gpu_idx, gpu_w_bytes) =
+            run_topk(&ctx, DType::BF16, &logits_bytes, n_rows, n_experts, k, 1, 2);
+        let gpu_w: Vec<f32> = gpu_w_bytes
+            .chunks_exact(2)
+            .map(|c| from_bf16_bits(u16::from_le_bytes([c[0], c[1]])))
+            .collect();
+        assert_eq!(gpu_idx, ref_idx, "bf16: indices diverge");
+        for (i, (g, r)) in gpu_w.iter().zip(ref_w.iter()).enumerate() {
+            let rel = (g - r).abs() / r.abs().max(1e-3);
+            assert!(rel < 2e-2, "bf16 weight[{i}]: rel {rel:.2e}");
+        }
+    }
+
+    #[test]
+    fn mt_moe_router_topk_nan_inf_clamp_f32() {
+        let n_rows = 4usize;
+        let n_experts = 16usize;
+        let k = 4usize;
+        let mut logits = vec![0.0f32; n_rows * n_experts];
+        for j in 0..n_experts {
+            logits[j] = j as f32 * 0.1;
+            logits[n_experts + j] = j as f32 * 0.1;
+            logits[2 * n_experts + j] = j as f32 * 0.1;
+            logits[3 * n_experts + j] = j as f32 * 0.1;
+        }
+        logits[5] = f32::NAN;
+        logits[n_experts + 7] = f32::INFINITY;
+        logits[2 * n_experts + 3] = f32::NEG_INFINITY;
+        logits[3 * n_experts + 2] = f32::NAN;
+        logits[3 * n_experts + 11] = f32::INFINITY;
+        let logits_bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let _g = gpu_lock();
+        let ctx = Context::new().unwrap();
+        let (gpu_idx, _) = run_topk(&ctx, DType::F32, &logits_bytes, n_rows, n_experts, k, 1, 4);
+        for row in 0..n_rows {
+            let slice = &gpu_idx[row * k..(row + 1) * k];
+            let mut sorted = slice.to_vec();
+            sorted.sort();
+            sorted.dedup();
+            assert_eq!(sorted.len(), k, "row {row}: duplicate expert in top-k {slice:?}");
+        }
+        assert_eq!(gpu_idx[k], 7, "row 1: +Inf should be top-1");
+        let row2_slice = &gpu_idx[2 * k..3 * k];
+        assert!(
+            !row2_slice.contains(&3u32),
+            "row 2: -Inf at idx 3 should not be chosen"
+        );
+        assert_eq!(gpu_idx[3 * k], 11, "row 3: +Inf at 11 should be top-1");
+        let row0_slice = &gpu_idx[0..k];
+        assert!(
+            !row0_slice.contains(&5u32),
+            "row 0: NaN at idx 5 should not be chosen"
+        );
+        let row3_slice = &gpu_idx[3 * k..4 * k];
+        assert!(
+            !row3_slice.contains(&2u32),
+            "row 3: NaN at idx 2 should not be chosen"
+        );
+    }
+
+    #[test]
+    fn mt_moe_permute_gather_matches_cpu_reference_f32() {
+        let n_rows = 4usize;
+        let hidden = 128usize;
+        let k = 4usize;
+        let n_permuted = n_rows * k;
+        let tokens: Vec<f32> =
+            (0..n_rows * hidden).map(|i| ((i as f32 * 0.11) % 9.0) - 4.5).collect();
+        let sort_token_idx: Vec<u32> =
+            (0..n_permuted as u32).map(|p| (p * 7 + 3) % n_rows as u32).collect();
+        let mut ref_out = vec![0.0f32; n_permuted * hidden];
+        for p in 0..n_permuted {
+            let src = sort_token_idx[p] as usize;
+            ref_out[p * hidden..(p + 1) * hidden]
+                .copy_from_slice(&tokens[src * hidden..(src + 1) * hidden]);
+        }
+        let tokens_bytes: Vec<u8> = tokens.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let _g = gpu_lock();
+        let ctx = Context::new().unwrap();
+        let out_bytes = run_permute(
+            &ctx, DType::F32, &tokens_bytes, &sort_token_idx, n_rows, n_permuted, hidden, 4,
+        );
+        let gpu_out: Vec<f32> = out_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        for (i, (g, r)) in gpu_out.iter().zip(ref_out.iter()).enumerate() {
+            assert_eq!(g, r, "permute[{i}]: {g} != {r}");
+        }
+    }
+
+    #[test]
+    fn mt_moe_permute_qwen3_moe_shape_f16() {
+        let n_rows = 8usize;
+        let hidden = 2048usize;
+        let k = 8usize;
+        let n_permuted = n_rows * k;
+        let tokens_f32: Vec<f32> =
+            (0..n_rows * hidden).map(|i| ((i as f32 * 0.013) % 5.0) - 2.5).collect();
+        let sort_token_idx: Vec<u32> =
+            (0..n_permuted as u32).map(|p| (p * 13 + 5) % n_rows as u32).collect();
+        let mut ref_out_f32 = vec![0.0f32; n_permuted * hidden];
+        for p in 0..n_permuted {
+            let src = sort_token_idx[p] as usize;
+            for h in 0..hidden {
+                ref_out_f32[p * hidden + h] =
+                    half::f16::from_f32(tokens_f32[src * hidden + h]).to_f32();
+            }
+        }
+        let tokens_bytes: Vec<u8> = tokens_f32
+            .iter()
+            .flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes())
+            .collect();
+        let _g = gpu_lock();
+        let ctx = Context::new().unwrap();
+        let out_bytes = run_permute(
+            &ctx, DType::F16, &tokens_bytes, &sort_token_idx, n_rows, n_permuted, hidden, 2,
+        );
+        let gpu_out: Vec<f32> = out_bytes
+            .chunks_exact(2)
+            .map(|c| half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
+            .collect();
+        for (i, (g, r)) in gpu_out.iter().zip(ref_out_f32.iter()).enumerate() {
+            assert_eq!(g, r, "permute[{i}]: {g} != {r}");
+        }
+    }
+
+    // ── int4 gather-qmm tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn moe_gather_qmm_int4_matches_cpu_oracle_f32() {
+        let _g = gpu_lock();
+        let n_experts = 3usize;
+        let k_in = 32usize;
+        let m_out = 8usize;
+        let group_size = 32usize;
+        let t_rows = 6usize;
+        let expert_offsets: Vec<u32> = vec![0, 2, 5, 6];
+        let mut weight_unpacked = vec![0u32; n_experts * m_out * k_in];
+        for (i, w) in weight_unpacked.iter_mut().enumerate() {
+            *w = (((i as u32) * 7 + 3) & 0xf) as u32;
+        }
+        let weight_packed: Vec<u32> =
+            weight_unpacked.chunks_exact(k_in).flat_map(pack_int4_row).collect();
+        let scales: Vec<f32> = (0..n_experts * m_out * (k_in / group_size))
+            .map(|i| 0.01 + 0.001 * (i as f32))
+            .collect();
+        let biases: Vec<f32> = (0..n_experts * m_out * (k_in / group_size))
+            .map(|i| -0.05 + 0.002 * (i as f32))
+            .collect();
+        let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.1 * ((i as f32 * 0.17).sin())).collect();
+        let y_cpu = cpu_gather_qmm_int4(
+            &x, &weight_packed, &scales, &biases, &expert_offsets,
+            t_rows, k_in, m_out, n_experts, group_size,
+        );
+        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        buffers.insert("x".into(), pack_bytes(&x, Dt::F32));
+        buffers.insert("weight_packed".into(), weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect());
+        buffers.insert("scales".into(), pack_bytes(&scales, Dt::F32));
+        buffers.insert("biases".into(), pack_bytes(&biases, Dt::F32));
+        buffers.insert("expert_offsets".into(), expert_offsets.iter().flat_map(|o| o.to_le_bytes()).collect());
+        buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * m_out], Dt::F32));
+        buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+        buffers.insert("m_out".into(), (m_out as u32).to_le_bytes().to_vec());
+        buffers.insert("n_experts".into(), (n_experts as u32).to_le_bytes().to_vec());
+        buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+        let ctx = Context::new().expect("Context::new on macOS");
+        let mut kernel = mt_moe_gather_qmm_int4::kernel_ir_for(Dt::F32.to_dtype());
+        kernel.mode = KernelMode::Reduction;
+        let result = ctx
+            .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [m_out, t_rows, 1], [32, 1, 1])
+            .expect("mt_moe_gather_qmm_int4 dispatch");
+        let y_gpu = unpack_bytes(result.outputs.get("out").expect("out"), Dt::F32);
+        let max_diff =
+            y_cpu.iter().zip(&y_gpu).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+        assert!(max_diff < 1e-4, "max |y_cpu - y_gpu| = {max_diff:.2e}");
+    }
+
+    #[test]
+    fn moe_gather_qmm_int4_matches_cpu_oracle_f16() { run_small_case_dtype(Dt::F16); }
+
+    #[test]
+    fn moe_gather_qmm_int4_matches_cpu_oracle_bf16() { run_small_case_dtype(Dt::Bf16); }
+
+    #[test]
+    fn moe_gather_qmm_b8_matches_oracle_f32() {
+        let _g = gpu_lock();
+        run_gather_qmm_bits(8, mt_moe_gather_qmm_b8::kernel_ir_for(Dt::F32.to_dtype()));
+    }
+
+    #[test]
+    fn moe_gather_qmm_b3_matches_oracle_f32() {
+        let _g = gpu_lock();
+        run_gather_qmm_bits(3, mt_moe_gather_qmm_b3::kernel_ir_for(Dt::F32.to_dtype()));
+    }
+
+    #[test]
+    fn moe_gather_qmm_b5_matches_oracle_f32() {
+        let _g = gpu_lock();
+        run_gather_qmm_bits(5, mt_moe_gather_qmm_b5::kernel_ir_for(Dt::F32.to_dtype()));
+    }
+
+    #[test]
+    fn moe_gather_qmm_b6_matches_oracle_f32() {
+        let _g = gpu_lock();
+        run_gather_qmm_bits(6, mt_moe_gather_qmm_b6::kernel_ir_for(Dt::F32.to_dtype()));
+    }
+
+    #[test]
+    fn moe_gather_qmm_int4_qwen36_shape_f32() {
+        let _g = gpu_lock();
+        let n_experts = 128usize;
+        let k_in = 2048usize;
+        let m_out = 256usize;
+        let group_size = 64usize;
+        let t_rows = 4usize;
+        let mut expert_offsets: Vec<u32> = vec![0; n_experts + 1];
+        for e in 0..=n_experts {
+            let off = if e <= 7 { 0 } else if e <= 42 { 2 } else if e <= 100 { 3 } else { t_rows as u32 };
+            expert_offsets[e] = off;
+        }
+        let total_weights = n_experts * m_out * k_in;
+        let weight_unpacked: Vec<u32> = (0..total_weights).map(|i| ((i as u32) * 7 + 3) & 0xf).collect();
+        let weight_packed: Vec<u32> = weight_unpacked.chunks_exact(k_in).flat_map(pack_int4_row).collect();
+        let groups_total = n_experts * m_out * (k_in / group_size);
+        let scales: Vec<f32> = (0..groups_total).map(|i| 0.005 + 0.0001 * ((i as f32 * 0.03).sin())).collect();
+        let biases: Vec<f32> = (0..groups_total).map(|i| -0.02 + 0.0005 * ((i as f32 * 0.07).cos())).collect();
+        let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * ((i as f32 * 0.013).sin())).collect();
+        let y_cpu = cpu_gather_qmm_int4(&x, &weight_packed, &scales, &biases, &expert_offsets, t_rows, k_in, m_out, n_experts, group_size);
+        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        buffers.insert("x".into(), pack_bytes(&x, Dt::F32));
+        buffers.insert("weight_packed".into(), weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect());
+        buffers.insert("scales".into(), pack_bytes(&scales, Dt::F32));
+        buffers.insert("biases".into(), pack_bytes(&biases, Dt::F32));
+        buffers.insert("expert_offsets".into(), expert_offsets.iter().flat_map(|o| o.to_le_bytes()).collect());
+        buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * m_out], Dt::F32));
+        buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+        buffers.insert("m_out".into(), (m_out as u32).to_le_bytes().to_vec());
+        buffers.insert("n_experts".into(), (n_experts as u32).to_le_bytes().to_vec());
+        buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+        let ctx = Context::new().expect("Context::new on macOS");
+        let mut kernel = mt_moe_gather_qmm_int4::kernel_ir_for(Dt::F32.to_dtype());
+        kernel.mode = KernelMode::Reduction;
+        let result = ctx
+            .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [m_out, t_rows, 1], [32, 1, 1])
+            .expect("dispatch");
+        let y_gpu = unpack_bytes(result.outputs.get("out").expect("out"), Dt::F32);
+        let mut dot = 0.0_f64; let mut nc = 0.0_f64; let mut ng = 0.0_f64;
+        for (a, b) in y_cpu.iter().zip(&y_gpu) {
+            dot += (*a as f64) * (*b as f64);
+            nc += (*a as f64) * (*a as f64);
+            ng += (*b as f64) * (*b as f64);
+        }
+        let cos = dot / (nc.sqrt() * ng.sqrt() + 1e-12);
+        assert!(cos >= 0.999, "cosine vs CPU oracle = {cos:.6} (want >= 0.999)");
+    }
+
+    #[test]
+    fn moe_gather_qmm_int4_m8_matches_m1_qwen36_shape_f32() {
+        let _g = gpu_lock();
+        let n_experts = 128usize; let k_in = 2048usize; let m_out = 256usize;
+        let group_size = 64usize; let t_rows = 4usize;
+        let mut expert_offsets: Vec<u32> = vec![0; n_experts + 1];
+        for e in 0..=n_experts {
+            let off = if e <= 7 { 0 } else if e <= 42 { 2 } else if e <= 100 { 3 } else { t_rows as u32 };
+            expert_offsets[e] = off;
+        }
+        let total_weights = n_experts * m_out * k_in;
+        let weight_unpacked: Vec<u32> = (0..total_weights).map(|i| ((i as u32) * 7 + 3) & 0xf).collect();
+        let weight_packed: Vec<u32> = weight_unpacked.chunks_exact(k_in).flat_map(pack_int4_row).collect();
+        let groups_total = n_experts * m_out * (k_in / group_size);
+        let scales: Vec<f32> = (0..groups_total).map(|i| 0.005 + 0.0001 * ((i as f32 * 0.03).sin())).collect();
+        let biases: Vec<f32> = (0..groups_total).map(|i| -0.02 + 0.0005 * ((i as f32 * 0.07).cos())).collect();
+        let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * ((i as f32 * 0.013).sin())).collect();
+        let run = |kernel_ir: fn(metaltile_core::dtype::DType) -> metaltile_core::ir::Kernel, grid_x: usize| -> Vec<f32> {
+            let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+            buffers.insert("x".into(), pack_bytes(&x, Dt::F32));
+            buffers.insert("weight_packed".into(), weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect());
+            buffers.insert("scales".into(), pack_bytes(&scales, Dt::F32));
+            buffers.insert("biases".into(), pack_bytes(&biases, Dt::F32));
+            buffers.insert("expert_offsets".into(), expert_offsets.iter().flat_map(|o| o.to_le_bytes()).collect());
+            buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * m_out], Dt::F32));
+            buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+            buffers.insert("m_out".into(), (m_out as u32).to_le_bytes().to_vec());
+            buffers.insert("n_experts".into(), (n_experts as u32).to_le_bytes().to_vec());
+            buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+            let ctx = Context::new().expect("Context::new");
+            let mut kernel = kernel_ir(Dt::F32.to_dtype());
+            kernel.mode = KernelMode::Reduction;
+            let result = ctx.dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [grid_x, t_rows, 1], [32, 1, 1]).expect("dispatch");
+            unpack_bytes(result.outputs.get("out").expect("out"), Dt::F32)
+        };
+        let y_m1 = run(mt_moe_gather_qmm_int4::kernel_ir_for, m_out);
+        let y_m8 = run(mt_moe_gather_qmm_int4_m8::kernel_ir_for, m_out / 8);
+        let max_diff = y_m1.iter().zip(&y_m8).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+        assert!(max_diff < 5e-4, "m8 vs m1 max diff = {max_diff:.2e}");
+    }
+
+    #[test]
+    fn moe_gather_qmm_mma_int4_single_expert() {
+        let _g = gpu_lock();
+        let n_experts = 1usize; let k_in = 32usize; let n_out = 32usize;
+        let group_size = 32usize; let t_rows = 32usize;
+        let indices: Vec<u32> = vec![0; t_rows];
+        let total_weights = n_experts * n_out * k_in;
+        let weight_unpacked: Vec<u32> = (0..total_weights).map(|i| ((i as u32) * 7 + 3) & 0xf).collect();
+        let weight_packed: Vec<u32> = weight_unpacked.chunks_exact(k_in).flat_map(pack_int4_row).collect();
+        let groups_total = n_experts * n_out * (k_in / group_size);
+        let scales: Vec<f32> = (0..groups_total).map(|i| 0.005 + 0.001 * (i as f32 * 0.03).sin()).collect();
+        let biases: Vec<f32> = (0..groups_total).map(|i| -0.02 + 0.005 * (i as f32 * 0.07).cos()).collect();
+        let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * (i as f32 * 0.013).sin()).collect();
+        let expert_offsets: Vec<u32> = vec![0, t_rows as u32];
+        let y_m1 = {
+            let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+            buffers.insert("x".into(), pack_bytes(&x, Dt::F32));
+            buffers.insert("weight_packed".into(), weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect());
+            buffers.insert("scales".into(), pack_bytes(&scales, Dt::F32));
+            buffers.insert("biases".into(), pack_bytes(&biases, Dt::F32));
+            buffers.insert("expert_offsets".into(), expert_offsets.iter().flat_map(|o| o.to_le_bytes()).collect());
+            buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * n_out], Dt::F32));
+            buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+            buffers.insert("m_out".into(), (n_out as u32).to_le_bytes().to_vec());
+            buffers.insert("n_experts".into(), (n_experts as u32).to_le_bytes().to_vec());
+            buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+            let ctx = Context::new().unwrap();
+            let mut k = mt_moe_gather_qmm_int4::kernel_ir_for(Dt::F32.to_dtype());
+            k.mode = KernelMode::Reduction;
+            let r = ctx.dispatch_with_grid(&k, &buffers, &BTreeMap::new(), [n_out, t_rows, 1], [32, 1, 1]).unwrap();
+            unpack_bytes(r.outputs.get("out").unwrap(), Dt::F32)
+        };
+        let y_mma = {
+            let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+            buffers.insert("x".into(), pack_bytes(&x, Dt::F32));
+            buffers.insert("w".into(), weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect());
+            buffers.insert("scales".into(), pack_bytes(&scales, Dt::F32));
+            buffers.insert("biases".into(), pack_bytes(&biases, Dt::F32));
+            buffers.insert("indices".into(), indices.iter().flat_map(|i| i.to_le_bytes()).collect());
+            buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * n_out], Dt::F32));
+            buffers.insert("m_total".into(), (t_rows as u32).to_le_bytes().to_vec());
+            buffers.insert("n_out".into(), (n_out as u32).to_le_bytes().to_vec());
+            buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+            buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+            let ctx = Context::new().unwrap();
+            let mut k = mt_moe_gather_qmm_mma_int4::kernel_ir_for(Dt::F32.to_dtype());
+            k.mode = KernelMode::Reduction;
+            let r = ctx.dispatch_with_grid(&k, &buffers, &BTreeMap::new(), [n_out / 32, t_rows.div_ceil(32), 1], [128, 1, 1]).unwrap();
+            unpack_bytes(r.outputs.get("out").unwrap(), Dt::F32)
+        };
+        let mut dot = 0.0_f64; let mut na = 0.0_f64; let mut nb = 0.0_f64;
+        for (a, b) in y_m1.iter().zip(&y_mma) {
+            dot += (*a as f64) * (*b as f64); na += (*a as f64) * (*a as f64); nb += (*b as f64) * (*b as f64);
+        }
+        let cos = dot / (na.sqrt() * nb.sqrt() + 1e-12);
+        assert!(cos >= 0.999, "single-expert MMA vs m1 cosine = {cos:.6}");
+    }
+
+    #[test]
+    fn moe_gather_qmm_mma_int4_matches_m1_clean_tile() {
+        let _g = gpu_lock();
+        let n_experts = 4usize; let k_in = 64usize; let n_out = 64usize;
+        let group_size = 32usize; let t_rows = 64usize;
+        let indices: Vec<u32> = (0..t_rows).map(|r| (r / (t_rows / n_experts)) as u32).collect();
+        let total_weights = n_experts * n_out * k_in;
+        let weight_unpacked: Vec<u32> = (0..total_weights).map(|i| ((i as u32) * 7 + 3) & 0xf).collect();
+        let weight_packed: Vec<u32> = weight_unpacked.chunks_exact(k_in).flat_map(pack_int4_row).collect();
+        let groups_total = n_experts * n_out * (k_in / group_size);
+        let scales: Vec<f32> = (0..groups_total).map(|i| 0.005 + 0.001 * (i as f32 * 0.03).sin()).collect();
+        let biases: Vec<f32> = (0..groups_total).map(|i| -0.02 + 0.005 * (i as f32 * 0.07).cos()).collect();
+        let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * (i as f32 * 0.013).sin()).collect();
+        let mut expert_offsets: Vec<u32> = vec![0; n_experts + 1];
+        for (e_idx, off) in expert_offsets.iter_mut().enumerate().take(n_experts + 1) {
+            *off = indices.iter().position(|&e| e as usize >= e_idx).map(|p| p as u32).unwrap_or(t_rows as u32);
+        }
+        expert_offsets[n_experts] = t_rows as u32;
+        let y_m1 = {
+            let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+            buffers.insert("x".into(), pack_bytes(&x, Dt::F32));
+            buffers.insert("weight_packed".into(), weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect());
+            buffers.insert("scales".into(), pack_bytes(&scales, Dt::F32));
+            buffers.insert("biases".into(), pack_bytes(&biases, Dt::F32));
+            buffers.insert("expert_offsets".into(), expert_offsets.iter().flat_map(|o| o.to_le_bytes()).collect());
+            buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * n_out], Dt::F32));
+            buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+            buffers.insert("m_out".into(), (n_out as u32).to_le_bytes().to_vec());
+            buffers.insert("n_experts".into(), (n_experts as u32).to_le_bytes().to_vec());
+            buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+            let ctx = Context::new().unwrap();
+            let mut k = mt_moe_gather_qmm_int4::kernel_ir_for(Dt::F32.to_dtype());
+            k.mode = KernelMode::Reduction;
+            let r = ctx.dispatch_with_grid(&k, &buffers, &BTreeMap::new(), [n_out, t_rows, 1], [32, 1, 1]).unwrap();
+            unpack_bytes(r.outputs.get("out").unwrap(), Dt::F32)
+        };
+        let y_mma = {
+            let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+            buffers.insert("x".into(), pack_bytes(&x, Dt::F32));
+            buffers.insert("w".into(), weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect());
+            buffers.insert("scales".into(), pack_bytes(&scales, Dt::F32));
+            buffers.insert("biases".into(), pack_bytes(&biases, Dt::F32));
+            buffers.insert("indices".into(), indices.iter().flat_map(|i| i.to_le_bytes()).collect());
+            buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * n_out], Dt::F32));
+            buffers.insert("m_total".into(), (t_rows as u32).to_le_bytes().to_vec());
+            buffers.insert("n_out".into(), (n_out as u32).to_le_bytes().to_vec());
+            buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+            buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+            let ctx = Context::new().unwrap();
+            let mut k = mt_moe_gather_qmm_mma_int4::kernel_ir_for(Dt::F32.to_dtype());
+            k.mode = KernelMode::Reduction;
+            let r = ctx.dispatch_with_grid(&k, &buffers, &BTreeMap::new(), [n_out / 32, t_rows.div_ceil(32), 1], [128, 1, 1]).unwrap();
+            unpack_bytes(r.outputs.get("out").unwrap(), Dt::F32)
+        };
+        let mut dot = 0.0_f64; let mut na = 0.0_f64; let mut nb = 0.0_f64;
+        for (a, b) in y_m1.iter().zip(&y_mma) {
+            dot += (*a as f64) * (*b as f64); na += (*a as f64) * (*a as f64); nb += (*b as f64) * (*b as f64);
+        }
+        let cos = dot / (na.sqrt() * nb.sqrt() + 1e-12);
+        assert!(cos >= 0.999, "MMA vs m1 cosine = {cos:.6}");
+    }
+
+    #[test]
+    fn moe_gather_qmm_mma_int4_bm16_matches_m1_clean_tile() {
+        let _g = gpu_lock();
+        let n_experts = 4usize; let k_in = 64usize; let n_out = 64usize;
+        let group_size = 32usize; let t_rows = 64usize;
+        let indices: Vec<u32> = (0..t_rows).map(|r| (r / (t_rows / n_experts)) as u32).collect();
+        let total_weights = n_experts * n_out * k_in;
+        let weight_unpacked: Vec<u32> = (0..total_weights).map(|i| ((i as u32) * 7 + 3) & 0xf).collect();
+        let weight_packed: Vec<u32> = weight_unpacked.chunks_exact(k_in).flat_map(pack_int4_row).collect();
+        let groups_total = n_experts * n_out * (k_in / group_size);
+        let scales: Vec<f32> = (0..groups_total).map(|i| 0.005 + 0.001 * (i as f32 * 0.03).sin()).collect();
+        let biases: Vec<f32> = (0..groups_total).map(|i| -0.02 + 0.005 * (i as f32 * 0.07).cos()).collect();
+        let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * (i as f32 * 0.013).sin()).collect();
+        let mut expert_offsets: Vec<u32> = vec![0; n_experts + 1];
+        for (e_idx, off) in expert_offsets.iter_mut().enumerate().take(n_experts + 1) {
+            *off = indices.iter().position(|&e| e as usize >= e_idx).map(|p| p as u32).unwrap_or(t_rows as u32);
+        }
+        expert_offsets[n_experts] = t_rows as u32;
+        let y_m1 = {
+            let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+            buffers.insert("x".into(), pack_bytes(&x, Dt::F32));
+            buffers.insert("weight_packed".into(), weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect());
+            buffers.insert("scales".into(), pack_bytes(&scales, Dt::F32));
+            buffers.insert("biases".into(), pack_bytes(&biases, Dt::F32));
+            buffers.insert("expert_offsets".into(), expert_offsets.iter().flat_map(|o| o.to_le_bytes()).collect());
+            buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * n_out], Dt::F32));
+            buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+            buffers.insert("m_out".into(), (n_out as u32).to_le_bytes().to_vec());
+            buffers.insert("n_experts".into(), (n_experts as u32).to_le_bytes().to_vec());
+            buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+            let ctx = Context::new().unwrap();
+            let mut k = mt_moe_gather_qmm_int4::kernel_ir_for(Dt::F32.to_dtype());
+            k.mode = KernelMode::Reduction;
+            let r = ctx.dispatch_with_grid(&k, &buffers, &BTreeMap::new(), [n_out, t_rows, 1], [32, 1, 1]).unwrap();
+            unpack_bytes(r.outputs.get("out").unwrap(), Dt::F32)
+        };
+        let y_bm16 = {
+            let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+            buffers.insert("x".into(), pack_bytes(&x, Dt::F32));
+            buffers.insert("w".into(), weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect());
+            buffers.insert("scales".into(), pack_bytes(&scales, Dt::F32));
+            buffers.insert("biases".into(), pack_bytes(&biases, Dt::F32));
+            buffers.insert("indices".into(), indices.iter().flat_map(|i| i.to_le_bytes()).collect());
+            buffers.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * n_out], Dt::F32));
+            buffers.insert("m_total".into(), (t_rows as u32).to_le_bytes().to_vec());
+            buffers.insert("n_out".into(), (n_out as u32).to_le_bytes().to_vec());
+            buffers.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+            buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+            let ctx = Context::new().unwrap();
+            let mut k = mt_moe_gather_qmm_mma_int4_bm16::kernel_ir_for(Dt::F32.to_dtype());
+            k.mode = KernelMode::Reduction;
+            let r = ctx.dispatch_with_grid(&k, &buffers, &BTreeMap::new(), [n_out / 32, t_rows.div_ceil(16), 1], [64, 1, 1]).unwrap();
+            unpack_bytes(r.outputs.get("out").unwrap(), Dt::F32)
+        };
+        let mut dot = 0.0_f64; let mut na = 0.0_f64; let mut nb = 0.0_f64;
+        for (a, b) in y_m1.iter().zip(&y_bm16) {
+            dot += (*a as f64) * (*b as f64); na += (*a as f64) * (*a as f64); nb += (*b as f64) * (*b as f64);
+        }
+        let cos = dot / (na.sqrt() * nb.sqrt() + 1e-12);
+        assert!(cos >= 0.999, "BM=16 MMA vs m1 cosine = {cos:.6}");
+    }
+
+    // ── m16/m32 batch tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn moe_gather_qmm_int4_m16_f32_small() { run_case_m16(4, 16, 256, 64, 64); }
+
+    #[test]
+    fn moe_gather_qmm_int4_m16_f32_multi_expert() { run_case_m16(8, 32, 512, 64, 64); }
+
+    #[test]
+    fn moe_gather_qmm_int4_m16_f32_wide_m() { run_case_m16(4, 16, 256, 128, 64); }
+
+    #[test]
+    fn moe_gather_qmm_int4_m32_f32_small() { run_case_m32(4, 16, 256, 64, 64); }
+
+    #[test]
+    fn moe_gather_qmm_int4_m32_f32_multi_expert() { run_case_m32(8, 32, 512, 64, 64); }
+
+    #[test]
+    fn moe_gather_qmm_int4_m32_f32_wide_m() { run_case_m32(4, 16, 256, 128, 64); }
+
+    // ── int8 MMA tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn moe_gather_qmm_mma_int8_matches_cpu_oracle_f32() {
+        let _g = gpu_lock();
+        let dt = Dt::F32;
+        let (codes, weight_packed, scales, biases, x, indices) = make_int8_test_data(dt);
+        let k_in = 64usize; let n_out = 64usize; let group_size = 32usize; let t_rows = 64usize;
+        let expected = cpu_oracle_int8(&x, &codes, &scales, &biases, &indices, t_rows, n_out, k_in, group_size);
+        let actual = run_int8_mma(&x, &weight_packed, &scales, &biases, &indices, t_rows, n_out, k_in, group_size, dt);
+        let cos = cosine_f64(&expected, &actual);
+        assert!(actual.iter().any(|&v| v != 0.0), "all-zero output");
+        assert!(cos >= 0.999, "int8 MMA f32 vs CPU oracle cosine = {cos:.6}");
+    }
+
+    #[test]
+    fn moe_gather_qmm_mma_int8_matches_cpu_oracle_f16() {
+        let _g = gpu_lock();
+        let dt = Dt::F16;
+        let (codes, weight_packed, scales, biases, x, indices) = make_int8_test_data(dt);
+        let k_in = 64usize; let n_out = 64usize; let group_size = 32usize; let t_rows = 64usize;
+        let expected = cpu_oracle_int8(&x, &codes, &scales, &biases, &indices, t_rows, n_out, k_in, group_size);
+        let actual = run_int8_mma(&x, &weight_packed, &scales, &biases, &indices, t_rows, n_out, k_in, group_size, dt);
+        let cos = cosine_f64(&expected, &actual);
+        assert!(cos >= 0.999, "int8 MMA f16 vs CPU oracle cosine = {cos:.6}");
+    }
+
+    #[test]
+    fn moe_gather_qmm_mma_int8_matches_cpu_oracle_bf16() {
+        let _g = gpu_lock();
+        let dt = Dt::Bf16;
+        let (codes, weight_packed, scales, biases, x, indices) = make_int8_test_data(dt);
+        let k_in = 64usize; let n_out = 64usize; let group_size = 32usize; let t_rows = 64usize;
+        let expected = cpu_oracle_int8(&x, &codes, &scales, &biases, &indices, t_rows, n_out, k_in, group_size);
+        let actual = run_int8_mma(&x, &weight_packed, &scales, &biases, &indices, t_rows, n_out, k_in, group_size, dt);
+        let cos = cosine_f64(&expected, &actual);
+        assert!(cos >= 0.997, "int8 MMA bf16 vs CPU oracle cosine = {cos:.6}");
+    }
+}

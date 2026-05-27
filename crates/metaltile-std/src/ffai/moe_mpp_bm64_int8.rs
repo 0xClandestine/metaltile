@@ -233,3 +233,178 @@ mod tests {
         assert_eq!(setup, DType::F16, "bf16 activation must stage as half");
     }
 }
+
+#[cfg(target_os = "macos")]
+pub mod tests_support {
+    use std::collections::BTreeMap;
+
+    use metaltile_core::{dtype::DType, ir::KernelMode};
+    use metaltile_runtime::Context;
+
+    use super::mt_moe_gather_qmm_mma_int8_bm64_mpp;
+    use super::super::moe::mt_moe_gather_qmm_b8;
+
+    fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Dt { F32, Bf16 }
+    impl Dt {
+        fn to_dtype(self) -> DType {
+            match self { Dt::F32 => DType::F32, Dt::Bf16 => DType::BF16 }
+        }
+    }
+    fn pack_bytes_f32(vals: &[f32]) -> Vec<u8> { bytemuck::cast_slice::<f32, u8>(vals).to_vec() }
+    fn pack_bytes(vals: &[f32], dt: Dt) -> Vec<u8> {
+        match dt {
+            Dt::F32 => pack_bytes_f32(vals),
+            Dt::Bf16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+        }
+    }
+    fn unpack_bytes(bytes: &[u8], dt: Dt) -> Vec<f32> {
+        match dt {
+            Dt::F32 => bytemuck::cast_slice::<u8, f32>(bytes).to_vec(),
+            Dt::Bf16 => bytes.chunks_exact(2).map(|c| half::bf16::from_le_bytes([c[0],c[1]]).to_f32()).collect(),
+        }
+    }
+    fn pack_int8_row(weights: &[u32]) -> Vec<u32> {
+        assert!(weights.len() % 4 == 0);
+        weights.chunks_exact(4).map(|chunk| {
+            let mut packed = 0u32;
+            for (i, &q) in chunk.iter().enumerate() { packed |= (q & 0xff) << (i * 8); }
+            packed
+        }).collect()
+    }
+    fn skip_unless_apple10(test_name: &str) -> Option<Context> {
+        let ctx = Context::new().expect("Context::new");
+        let family = ctx.chip_family();
+        if family.is_none_or(|lvl| lvl < 10) {
+            eprintln!("skip {test_name}: needs Apple10+ GPU (chip_family={family:?})");
+            return None;
+        }
+        Some(ctx)
+    }
+    fn cosine_f64(a: &[f32], b: &[f32]) -> (f64, usize) {
+        let mut dot = 0.0_f64; let mut na = 0.0_f64; let mut nb = 0.0_f64; let mut nan_count = 0usize;
+        for (x, y) in a.iter().zip(b) {
+            if !x.is_finite() || !y.is_finite() { nan_count += 1; continue; }
+            dot += (*x as f64) * (*y as f64); na += (*x as f64) * (*x as f64); nb += (*y as f64) * (*y as f64);
+        }
+        (dot / (na.sqrt() * nb.sqrt() + 1e-12), nan_count)
+    }
+
+    fn run_b8_ref(weight_packed: &[u32], scales: &[f32], biases: &[f32], x: &[f32], expert_offsets: &[u32], n_out: usize, t_rows: usize, k_in: usize, group_size: usize, n_experts: usize) -> Vec<f32> {
+        let mut b: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        b.insert("x".into(), pack_bytes_f32(x));
+        b.insert("weight_packed".into(), weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect());
+        b.insert("scales".into(), pack_bytes_f32(scales));
+        b.insert("biases".into(), pack_bytes_f32(biases));
+        b.insert("expert_offsets".into(), expert_offsets.iter().flat_map(|o| o.to_le_bytes()).collect());
+        b.insert("out".into(), pack_bytes_f32(&vec![0.0_f32; t_rows * n_out]));
+        b.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+        b.insert("m_out".into(), (n_out as u32).to_le_bytes().to_vec());
+        b.insert("n_experts".into(), (n_experts as u32).to_le_bytes().to_vec());
+        b.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+        let ctx = Context::new().unwrap();
+        let mut k = mt_moe_gather_qmm_b8::kernel_ir_for(DType::F32);
+        k.mode = KernelMode::Reduction;
+        let r = ctx.dispatch_with_grid(&k, &b, &BTreeMap::new(), [n_out, t_rows, 1], [32, 1, 1]).unwrap();
+        unpack_bytes(r.outputs.get("out").unwrap(), Dt::F32)
+    }
+
+    fn run_bm64_int8(weight_packed: &[u32], scales: &[f32], biases: &[f32], x: &[f32], indices: &[u32], n_out: usize, t_rows: usize, k_in: usize, group_size: usize, dt: Dt) -> Vec<f32> {
+        let mut b: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        b.insert("x".into(), pack_bytes(x, dt));
+        b.insert("w".into(), weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect());
+        b.insert("scales".into(), pack_bytes(scales, dt));
+        b.insert("biases".into(), pack_bytes(biases, dt));
+        b.insert("indices".into(), indices.iter().flat_map(|i| i.to_le_bytes()).collect());
+        b.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * n_out], dt));
+        b.insert("m_total".into(), (t_rows as u32).to_le_bytes().to_vec());
+        b.insert("n_out".into(), (n_out as u32).to_le_bytes().to_vec());
+        b.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+        b.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+        let ctx = Context::new().unwrap();
+        let mut k = mt_moe_gather_qmm_mma_int8_bm64_mpp::kernel_ir_for(dt.to_dtype());
+        k.mode = KernelMode::Reduction;
+        let r = ctx.dispatch_with_grid(&k, &b, &BTreeMap::new(), [n_out.div_ceil(64), t_rows.div_ceil(64), 1], [128, 1, 1]).unwrap();
+        unpack_bytes(r.outputs.get("out").unwrap(), dt)
+    }
+
+    #[test]
+    fn moe_gather_qmm_mma_int8_bm64_mpp_matches_b8_clean_tile() {
+        let _g = gpu_lock();
+        let Some(_ctx) = skip_unless_apple10("bm64_int8_mpp_clean_tile") else { return };
+        let n_experts = 4usize; let k_in = 64usize; let n_out = 64usize; let group_size = 32usize; let t_rows = 64usize;
+        let indices: Vec<u32> = (0..t_rows).map(|r| (r / (t_rows / n_experts)) as u32).collect();
+        let total_weights = n_experts * n_out * k_in;
+        let weight_unpacked: Vec<u32> = (0..total_weights).map(|i| ((i as u32) * 7 + 3) & 0xff).collect();
+        let weight_packed: Vec<u32> = weight_unpacked.chunks_exact(k_in).flat_map(pack_int8_row).collect();
+        let groups_total = n_experts * n_out * (k_in / group_size);
+        let scales: Vec<f32> = (0..groups_total).map(|i| 0.005 + 0.001 * (i as f32 * 0.03).sin()).collect();
+        let biases: Vec<f32> = (0..groups_total).map(|i| -0.02 + 0.005 * (i as f32 * 0.07).cos()).collect();
+        let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * (i as f32 * 0.013).sin()).collect();
+        let mut expert_offsets: Vec<u32> = vec![0; n_experts + 1];
+        for (e_idx, off) in expert_offsets.iter_mut().enumerate().take(n_experts + 1) {
+            *off = indices.iter().position(|&e| e as usize >= e_idx).map(|p| p as u32).unwrap_or(t_rows as u32);
+        }
+        expert_offsets[n_experts] = t_rows as u32;
+        let y_ref = run_b8_ref(&weight_packed, &scales, &biases, &x, &expert_offsets, n_out, t_rows, k_in, group_size, n_experts);
+        let y_mpp = run_bm64_int8(&weight_packed, &scales, &biases, &x, &indices, n_out, t_rows, k_in, group_size, Dt::F32);
+        let (cos, nan_count) = cosine_f64(&y_ref, &y_mpp);
+        assert_eq!(nan_count, 0, "MPP BM=64 int8 kernel produced non-finite values");
+        assert!(cos >= 0.999, "MPP MoE BM=64 int8 vs b8 cosine = {cos:.6} (want ≥ 0.999)");
+    }
+
+    #[test]
+    fn moe_gather_qmm_mma_int8_bm64_mpp_matches_b8_multi_tile() {
+        let _g = gpu_lock();
+        let Some(_ctx) = skip_unless_apple10("bm64_int8_mpp_multi_tile") else { return };
+        let n_experts = 8usize; let k_in = 128usize; let n_out = 128usize; let group_size = 64usize; let t_rows = 128usize;
+        let indices: Vec<u32> = (0..t_rows).map(|r| (r / (t_rows / n_experts)) as u32).collect();
+        let total_weights = n_experts * n_out * k_in;
+        let weight_unpacked: Vec<u32> = (0..total_weights).map(|i| ((i as u32) * 11 + 5) & 0xff).collect();
+        let weight_packed: Vec<u32> = weight_unpacked.chunks_exact(k_in).flat_map(pack_int8_row).collect();
+        let groups_total = n_experts * n_out * (k_in / group_size);
+        let scales: Vec<f32> = (0..groups_total).map(|i| 0.005 + 0.001 * (i as f32 * 0.07).sin()).collect();
+        let biases: Vec<f32> = (0..groups_total).map(|i| -0.02 + 0.005 * (i as f32 * 0.11).cos()).collect();
+        let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * (i as f32 * 0.017).sin()).collect();
+        let mut expert_offsets: Vec<u32> = vec![0; n_experts + 1];
+        for (e_idx, off) in expert_offsets.iter_mut().enumerate().take(n_experts + 1) {
+            *off = indices.iter().position(|&e| e as usize >= e_idx).map(|p| p as u32).unwrap_or(t_rows as u32);
+        }
+        expert_offsets[n_experts] = t_rows as u32;
+        let y_ref = run_b8_ref(&weight_packed, &scales, &biases, &x, &expert_offsets, n_out, t_rows, k_in, group_size, n_experts);
+        let y_mpp = run_bm64_int8(&weight_packed, &scales, &biases, &x, &indices, n_out, t_rows, k_in, group_size, Dt::F32);
+        let (cos, nan_count) = cosine_f64(&y_ref, &y_mpp);
+        assert_eq!(nan_count, 0, "MPP BM=64 int8 kernel produced non-finite values (multi-tile)");
+        assert!(cos >= 0.999, "MPP MoE BM=64 int8 vs b8 cosine = {cos:.6} (want ≥ 0.999) (multi-tile)");
+    }
+
+    #[test]
+    fn moe_gather_qmm_mma_int8_bm64_mpp_bf16_matches_b8_clean_tile() {
+        let _g = gpu_lock();
+        let Some(_ctx) = skip_unless_apple10("bm64_int8_mpp_bf16_clean_tile") else { return };
+        let n_experts = 4usize; let k_in = 64usize; let n_out = 64usize; let group_size = 32usize; let t_rows = 64usize;
+        let indices: Vec<u32> = (0..t_rows).map(|r| (r / (t_rows / n_experts)) as u32).collect();
+        let total_weights = n_experts * n_out * k_in;
+        let weight_unpacked: Vec<u32> = (0..total_weights).map(|i| ((i as u32) * 7 + 3) & 0xff).collect();
+        let weight_packed: Vec<u32> = weight_unpacked.chunks_exact(k_in).flat_map(pack_int8_row).collect();
+        let groups_total = n_experts * n_out * (k_in / group_size);
+        let scales: Vec<f32> = (0..groups_total).map(|i| 0.005 + 0.001 * (i as f32 * 0.03).sin()).collect();
+        let biases: Vec<f32> = (0..groups_total).map(|i| -0.02 + 0.005 * (i as f32 * 0.07).cos()).collect();
+        let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * (i as f32 * 0.013).sin()).collect();
+        let mut expert_offsets: Vec<u32> = vec![0; n_experts + 1];
+        for (e_idx, off) in expert_offsets.iter_mut().enumerate().take(n_experts + 1) {
+            *off = indices.iter().position(|&e| e as usize >= e_idx).map(|p| p as u32).unwrap_or(t_rows as u32);
+        }
+        expert_offsets[n_experts] = t_rows as u32;
+        let y_ref = run_b8_ref(&weight_packed, &scales, &biases, &x, &expert_offsets, n_out, t_rows, k_in, group_size, n_experts);
+        let y_mpp = run_bm64_int8(&weight_packed, &scales, &biases, &x, &indices, n_out, t_rows, k_in, group_size, Dt::Bf16);
+        let (cos, nan_count) = cosine_f64(&y_ref, &y_mpp);
+        assert_eq!(nan_count, 0, "MPP BM=64 int8 bf16 kernel produced non-finite values");
+        assert!(cos >= 0.997, "MPP MoE BM=64 int8 bf16 vs b8 cosine = {cos:.6} (want ≥ 0.997)");
+    }
+}
