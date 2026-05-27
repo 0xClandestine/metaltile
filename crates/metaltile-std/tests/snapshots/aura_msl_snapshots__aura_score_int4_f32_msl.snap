@@ -31,8 +31,6 @@ kernel void aura_score_int4(
     auto v_q_idx = tgid_x;
     auto v_k_idx = tgid_y;
     auto v3 = repeat_count;
-    uint v5 = 1u;
-    uint v6 = 4u;
     uint v7 = 16u;
     uint v8 = 1u;
     auto v_mask = v7 - v8;
@@ -43,7 +41,6 @@ kernel void aura_score_int4(
     auto v14 = v13 + v_k_idx;
     auto v15 = packed_width;
     auto v_packed_row = v14 * v15;
-    auto v18 = v13 + v_k_idx;
     auto v19 = norms[v14];
     float v_norm_val = static_cast<float>(v19);
     auto v21 = 0.0f;

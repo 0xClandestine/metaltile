@@ -23,8 +23,6 @@ kernel void aura_value_int4(
     uint v_head_idx = gid.y;
     auto v2 = repeat_count;
     auto v_kv_head = v_head_idx / v2;
-    uint v4 = 1u;
-    uint v5 = 4u;
     uint v6 = 16u;
     uint v7 = 1u;
     auto v_mask = v6 - v7;

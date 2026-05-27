@@ -87,8 +87,6 @@ kernel void aura_encode_int4(
     uint v44 = 0u;
     auto __ml_idx = v44;
     uint v45 = 0u;
-    uint v46 = 16u;
-    uint v47 = 1u;
     uint v48 = 15u;
     uint v49 = 1u;
     for (uint i_2 = v45; i_2 < v48; i_2 += v49) {
@@ -106,8 +104,6 @@ kernel void aura_encode_int4(
     uint v60 = 31u;
     auto v_shift = (v_bit_offset & v60);
     auto v62 = __ml_idx;
-    uint v63 = 1u;
-    uint v64 = 4u;
     uint v65 = 16u;
     uint v66 = 1u;
     auto v67 = v65 - v66;

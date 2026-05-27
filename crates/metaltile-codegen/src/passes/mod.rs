@@ -12,6 +12,7 @@ pub mod const_fold;
 pub mod copy_prop;
 pub mod cse;
 pub mod dead_store_elim;
+pub mod dead_value_elim;
 pub mod fusion;
 pub mod if_conversion;
 pub mod kernel_inline;
@@ -116,7 +117,13 @@ impl PassRegistry {
     ///
     /// TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM
     ///   → IfConversion → ValueSink → Fusion → Unroll
-    ///   → Schedule → Vectorize → DeadStoreElim
+    ///   → Schedule → Vectorize → DeadStoreElim → DeadValueElim
+    ///
+    /// `DeadValueElim` runs last because most upstream passes (Vectorize,
+    /// Unroll, CopyProp, CSE, LICM, Schedule, ValueSink) can leave pure
+    /// value-producing ops behind once their consumers are rewired or
+    /// removed.  One fixpoint sweep at the end cleans them all up — see
+    /// `dead_value_elim` module docs.
     pub fn order() -> &'static [&'static str] {
         &[
             "kernel_inline",
@@ -133,6 +140,7 @@ impl PassRegistry {
             "schedule",
             "vectorize",
             "dead_store_elim",
+            "dead_value_elim",
         ]
     }
 
@@ -156,6 +164,7 @@ impl PassRegistry {
             "cse_2" => Some(Box::new(cse::CsePass)),
             "const_fold_2" => Some(Box::new(const_fold::ConstFoldPass::new())),
             "dead_store_elim" => Some(Box::new(dead_store_elim::DeadStoreElimPass)),
+            "dead_value_elim" => Some(Box::new(dead_value_elim::DeadValueElimPass)),
             _ => None,
         }
     }

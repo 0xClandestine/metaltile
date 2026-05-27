@@ -104,7 +104,6 @@ kernel void mt_fp_qmm_nax(
     uint v79 = 7u;
     uint v81 = 1u;
     uint v83 = 1u;
-    uint v85 = 0u;
     uint v87 = 1u;
     uint v89 = 1u;
     uint v90 = 1u;
@@ -132,7 +131,6 @@ kernel void mt_fp_qmm_nax(
             auto v_mag_bits = (v_code & v79);
             auto v_exp = (v_mag_bits >> v81);
             auto v_mant = (v_mag_bits & v83);
-            auto v_is_subnormal = v_exp == v85;
             auto v91 = (select(v87, v_exp, bool(v_exp)) - v90);
             auto v_pow2 = (v89 << v91);
             auto v_normal_two_m = ((v_mant + v93) * v_pow2);

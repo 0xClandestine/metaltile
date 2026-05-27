@@ -19,13 +19,9 @@ kernel void aura_dequant_rotated_int4(
     uint v_w = gid.x;
     uint v_t = gid.y;
     uint v_bh = gid.z;
-    uint v3 = 1u;
-    uint v4 = 4u;
     uint v5 = 16u;
     uint v6 = 1u;
     auto v_mask = v5 - v6;
-    uint v8 = 32u;
-    uint v9 = 4u;
     uint v_dims_per_word = 8u;
     auto v11 = tokens;
     auto v12 = v_bh * v11;
@@ -33,10 +29,8 @@ kernel void aura_dequant_rotated_int4(
     auto v14 = packed_width;
     auto v16 = ((v13 * v14) + v_w);
     auto v_word = packed[v16];
-    auto v19 = v12 + v_t;
     auto v_norm_val = norms[v13];
     auto v_d_base = v_w * v_dims_per_word;
-    auto v23 = v12 + v_t;
     auto v24 = dim;
     auto v25 = v13 * v24;
     auto v_out_row_base = v25 + v_d_base;

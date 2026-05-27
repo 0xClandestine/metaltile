@@ -357,6 +357,36 @@ mod tests {
 
     use super::*;
 
+    /// Test-only helper: append a sink `Store` so DCE keeps the chain of
+    /// ops that produces `vid` alive.  Without this, kernels constructed
+    /// in unit tests for lowering-pattern verification get cleaned out
+    /// entirely by `DeadValueElimPass` and the assertions can't find the
+    /// MSL substrings they're checking for.  Real DSL kernels always
+    /// terminate in a Store to an output param; this helper mirrors that
+    /// shape minimally.
+    ///
+    /// Allocates `out` as a F32 output param and uses a fresh high
+    /// ValueId for the index Const so it can't collide with the IDs the
+    /// caller has already assigned.
+    fn sink(k: &mut Kernel, vid: ValueId) {
+        const SINK_IDX_VID: u32 = 0x3fff_fffe;
+        k.params.push(Param {
+            name: "_sink".into(),
+            dtype: DType::F32,
+            shape: Shape::scalar(),
+            is_output: true,
+            kind: Default::default(),
+        });
+        let idx_vid = ValueId::new(SINK_IDX_VID);
+        k.body.push_op(Op::Const { value: 0 }, idx_vid);
+        k.body.push_op_no_result(Op::Store {
+            dst: "_sink".into(),
+            indices: vec![IndexExpr::Value(idx_vid)],
+            value: vid,
+            mask: None,
+        });
+    }
+
     fn make_vadd() -> Kernel {
         let mut k = Kernel::new("vector_add");
         k.params.push(Param {
@@ -443,6 +473,7 @@ mod tests {
     fn const_op_emits_uint_for_nonneg() {
         let mut k = Kernel::new("const_test");
         k.body.push_op(Op::Const { value: 42 }, ValueId::new(0));
+        sink(&mut k, ValueId::new(0));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(msl.contains("uint v0 = 42u"), "non-negative Const should emit as uint");
     }
@@ -451,6 +482,7 @@ mod tests {
     fn const_op_emits_int_for_negative() {
         let mut k = Kernel::new("const_neg_test");
         k.body.push_op(Op::Const { value: -7 }, ValueId::new(0));
+        sink(&mut k, ValueId::new(0));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(msl.contains("int v0 = -7"), "negative Const should emit as int");
     }
@@ -460,6 +492,7 @@ mod tests {
         let mut k = Kernel::new("cast_test");
         k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
         k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::F16 }, ValueId::new(1));
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(msl.contains("static_cast<half>"), "cast to f16 should use static_cast<half>");
     }
@@ -492,6 +525,7 @@ mod tests {
         let mut k = Kernel::new("compat_bf16_cast");
         k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
         k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::BF16 }, ValueId::new(1));
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::new(MslConfig {
             native_bfloat: false,
             bfloat_reinterpret_cast: false,
@@ -511,6 +545,7 @@ mod tests {
         let mut k = Kernel::new("native_bf16_cast");
         k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
         k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::BF16 }, ValueId::new(1));
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::new(MslConfig {
             native_bfloat: true,
             bfloat_reinterpret_cast: false,
@@ -537,6 +572,7 @@ mod tests {
         k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
         k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::F32 }, ValueId::new(1));
         k.body.push_op(Op::Cast { value: ValueId::new(1), dtype: DType::BF16 }, ValueId::new(2));
+        sink(&mut k, ValueId::new(2));
         let msl = MslGenerator::new(MslConfig {
             native_bfloat: true,
             bfloat_reinterpret_cast: true,
@@ -566,6 +602,7 @@ mod tests {
         k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
         k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::F32 }, ValueId::new(1));
         k.body.push_op(Op::Cast { value: ValueId::new(1), dtype: DType::BF16 }, ValueId::new(2));
+        sink(&mut k, ValueId::new(2));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(
             !msl.contains("as_type<bfloat2>("),
@@ -588,6 +625,7 @@ mod tests {
         let mut k = Kernel::new("int_to_bf16");
         k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
         k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::BF16 }, ValueId::new(1));
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::new(MslConfig {
             native_bfloat: true,
             bfloat_reinterpret_cast: true,
@@ -610,6 +648,7 @@ mod tests {
         k.body
             .push_op(Op::UnaryOp { op: UnaryOpKind::Exp, value: ValueId::new(0) }, ValueId::new(1));
         k.body.name_value(ValueId::new(1), "r");
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(msl.contains("exp(v0)"), "exp unary op");
         assert!(msl.contains("v_r"), "named result");
@@ -624,6 +663,7 @@ mod tests {
             Op::Activation { kind: ActKind::Silu, value: ValueId::new(0) },
             ValueId::new(1),
         );
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(msl.contains("mt_silu"), "silu helper function name");
         assert!(msl.contains("inline T mt_silu"), "silu helper definition");
@@ -692,10 +732,44 @@ mod tests {
 
     #[test]
     fn select_emit() {
+        // Use a runtime-derived condition (ProgramId) so the
+        // ConstFoldPass can't pick a branch at compile time and remove
+        // the Op::Select entirely.  Same for the arms — load from two
+        // input params so neither side folds away.
         let mut k = Kernel::new("select_test");
-        k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
-        k.body.push_op(Op::Const { value: 2 }, ValueId::new(1));
-        k.body.push_op(Op::Const { value: 3 }, ValueId::new(2));
+        k.params.push(Param {
+            name: "a".into(),
+            dtype: DType::F32,
+            shape: Shape::scalar(),
+            is_output: false,
+            kind: Default::default(),
+        });
+        k.params.push(Param {
+            name: "b".into(),
+            dtype: DType::F32,
+            shape: Shape::scalar(),
+            is_output: false,
+            kind: Default::default(),
+        });
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0)); // cond
+        k.body.push_op(
+            Op::Load {
+                src: "a".into(),
+                mask: None,
+                other: None,
+                indices: vec![IndexExpr::Value(ValueId::new(0))],
+            },
+            ValueId::new(1),
+        );
+        k.body.push_op(
+            Op::Load {
+                src: "b".into(),
+                mask: None,
+                other: None,
+                indices: vec![IndexExpr::Value(ValueId::new(0))],
+            },
+            ValueId::new(2),
+        );
         k.body.push_op(
             Op::Select {
                 cond: ValueId::new(0),
@@ -704,9 +778,10 @@ mod tests {
             },
             ValueId::new(3),
         );
+        sink(&mut k, ValueId::new(3));
         let msl = MslGenerator::default().generate(&k).unwrap();
-        assert!(msl.contains("bool("), "bool cast on condition");
-        assert!(msl.contains("? v1 : v2"), "ternary select");
+        assert!(msl.contains("bool("), "bool cast on condition: {msl}");
+        assert!(msl.contains("? v1 : v2"), "ternary select: {msl}");
     }
 
     #[test]
@@ -772,6 +847,7 @@ mod tests {
             Op::BinOp { op: BinOpKind::Mul, lhs: ValueId::new(2), rhs: ValueId::new(3) },
             ValueId::new(4),
         );
+        sink(&mut k, ValueId::new(4));
         FusionPass.run(&mut k).unwrap();
         let has_fused = k.body.ops.iter().any(|op| matches!(op, Op::FusedElementwise { .. }));
         assert!(has_fused, "fusion pass should create a FusedElementwise op");
@@ -807,6 +883,7 @@ mod tests {
         k.mode = KernelMode::Reduction;
         k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
         k.body.push_op(Op::ProgramId { axis: 1 }, ValueId::new(1));
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(msl.contains("tgid_y"), "tgid_y must be emitted when program_id axis 1 is used");
     }
@@ -820,6 +897,7 @@ mod tests {
         k.mode = KernelMode::Reduction;
         k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
         k.body.push_op(Op::ProgramId { axis: 2 }, ValueId::new(1));
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(
             msl.contains("uint tgid_z = _tgid3.z;"),
@@ -857,6 +935,7 @@ mod tests {
         k.mode = KernelMode::Reduction;
         k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
         k.body.push_op(Op::SimdShuffleXor { value: ValueId::new(0), mask: 1 }, ValueId::new(1));
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(
             msl.contains("simd_shuffle_xor("),
@@ -876,6 +955,7 @@ mod tests {
             Op::SimdBroadcast { value: ValueId::new(0), lane: ValueId::new(1) },
             ValueId::new(2),
         );
+        sink(&mut k, ValueId::new(2));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(msl.contains("simd_broadcast("), "kernel must emit a simd_broadcast call: {msl}");
     }

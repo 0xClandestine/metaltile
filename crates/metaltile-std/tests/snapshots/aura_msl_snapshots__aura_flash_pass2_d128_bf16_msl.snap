@@ -24,9 +24,6 @@ kernel void aura_flash_pass2_d128(
 
     auto v_lane = tid;
     auto v_q_idx = tgid_x;
-    uint v2 = 0u;
-    uint v3 = 4u;
-    uint v4 = 1u;
     uint v1073741828 = 0u;
     auto v1073741829 = 0.0f;
     o[v1073741828] = v1073741829;
@@ -68,9 +65,6 @@ kernel void aura_flash_pass2_d128(
             auto v29 = ((v_q_idx * v9) + i_1);
             auto v_partial_base = v29 * v30;
             uint v35 = 32u;
-            uint v32 = 0u;
-            uint v33 = 4u;
-            uint v34 = 1u;
             uint v1073741868 = 0u;
             auto v1073741869 = v1073741868 * v35;
             auto v1073741870 = v_lane + v1073741869;
@@ -134,9 +128,6 @@ kernel void aura_flash_pass2_d128(
     auto v55 = v53 / v54;
     auto v56 = 0.0f;
     auto v_inv_l = bool(v52) ? v55 : v56;
-    uint v58 = 0u;
-    uint v59 = 4u;
-    uint v60 = 1u;
     uint v61 = 32u;
     uint v1073741836 = 0u;
     auto v1073741837 = v1073741836 * v61;
