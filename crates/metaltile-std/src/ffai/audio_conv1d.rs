@@ -74,3 +74,134 @@ pub fn audio_conv1d<T>(
     }
     store(out[idx], acc.cast::<T>());
 }
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+        ir::KernelMode,
+    };
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => {
+                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect()
+            }
+            DType::BF16 => {
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect()
+            }
+            _ => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn ramp(n: usize, seed: usize, scale: f32) -> Vec<f32> {
+        (0..n).map(|i| ((i + seed) as f32 % scale) / scale * 2.0 - 1.0).collect()
+    }
+
+    fn naive_conv1d(
+        input: &[f32],
+        weight: &[f32],
+        bias: &[f32],
+        batch: usize,
+        in_ch: usize,
+        in_len: usize,
+        out_ch: usize,
+        out_len: usize,
+        k: usize,
+        stride: usize,
+        pad: usize,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; batch * out_ch * out_len];
+        for n in 0..batch {
+            for oc in 0..out_ch {
+                for op in 0..out_len {
+                    let mut acc = bias[oc];
+                    for ic in 0..in_ch {
+                        for kx in 0..k {
+                            let p = op * stride + kx;
+                            if p < pad || p >= pad + in_len {
+                                continue;
+                            }
+                            let ix = p - pad;
+                            let in_idx = (n * in_ch + ic) * in_len + ix;
+                            let w_idx = (oc * in_ch + ic) * k + kx;
+                            acc += input[in_idx] * weight[w_idx];
+                        }
+                    }
+                    out[(n * out_ch + oc) * out_len + op] = acc;
+                }
+            }
+        }
+        out
+    }
+
+    fn make_setup(
+        batch: usize,
+        in_ch: usize,
+        in_len: usize,
+        out_ch: usize,
+        k: usize,
+        stride: usize,
+        pad: usize,
+        dt: DType,
+        input_seed: usize,
+        weight_seed: usize,
+        bias_seed: usize,
+    ) -> TestSetup {
+        let out_len = (in_len + 2 * pad - k) / stride + 1;
+        let n_out = batch * out_ch * out_len;
+        let input_f32 = ramp(batch * in_ch * in_len, input_seed, 18.0);
+        let weight_f32 = ramp(out_ch * in_ch * k, weight_seed, 20.0);
+        let bias_f32 = ramp(out_ch, bias_seed, 3.0);
+        let expected =
+            naive_conv1d(&input_f32, &weight_f32, &bias_f32, batch, in_ch, in_len, out_ch, out_len, k, stride, pad);
+        let mut kernel = audio_conv1d::kernel_ir_for(dt);
+        kernel.mode = KernelMode::Grid3D;
+        let tpg = 256u32;
+        let grid_x = (n_out as u32 + tpg - 1) / tpg;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("input", pack(&input_f32, dt), dt))
+            .input(TestBuffer::from_vec("weight", pack(&weight_f32, dt), dt))
+            .input(TestBuffer::from_vec("bias", pack(&bias_f32, dt), dt))
+            .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; n_out], dt), dt))
+            .constexpr("batch", batch as u32)
+            .constexpr("in_ch", in_ch as u32)
+            .constexpr("in_len", in_len as u32)
+            .constexpr("out_ch", out_ch as u32)
+            .constexpr("out_len", out_len as u32)
+            .constexpr("k", k as u32)
+            .constexpr("stride", stride as u32)
+            .constexpr("pad", pad as u32)
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .grid_3d(grid_x, 1, 1, [tpg, 1, 1])
+    }
+
+    #[test_kernel(name = "ffai/conv/audio_conv1d_stride1", dtypes = [f32], tol = 1e-3)]
+    fn test_audio_conv1d_stride1_f32(dt: DType) -> TestSetup {
+        make_setup(1, 8, 50, 16, 3, 1, 1, dt, 37, 41, 7)
+    }
+
+    #[test_kernel(name = "ffai/conv/audio_conv1d_stride2", dtypes = [f32], tol = 1e-3)]
+    fn test_audio_conv1d_stride2_f32(dt: DType) -> TestSetup {
+        make_setup(2, 12, 64, 12, 3, 2, 1, dt, 29, 31, 5)
+    }
+
+    #[test_kernel(name = "ffai/conv/audio_conv1d_wide_stride", dtypes = [f32], tol = 1e-3)]
+    fn test_audio_conv1d_wide_stride_f32(dt: DType) -> TestSetup {
+        make_setup(1, 4, 100, 8, 10, 5, 0, dt, 23, 17, 3)
+    }
+
+    #[test_kernel(name = "ffai/conv/audio_conv1d_f16", dtypes = [f16], tol = 5e-2)]
+    fn test_audio_conv1d_f16(dt: DType) -> TestSetup {
+        make_setup(1, 8, 40, 8, 3, 2, 1, dt, 37, 41, 7)
+    }
+
+    #[test_kernel(name = "ffai/conv/audio_conv1d_bf16", dtypes = [bf16], tol = 1e-1)]
+    fn test_audio_conv1d_bf16(dt: DType) -> TestSetup {
+        make_setup(1, 6, 32, 6, 3, 1, 1, dt, 23, 17, 3)
+    }
+}

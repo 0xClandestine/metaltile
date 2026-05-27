@@ -122,16 +122,12 @@ pub use prelude::Tensor;
 /// ```
 #[macro_export]
 macro_rules! register_bench {
-    ($ty:ty) => {
+    ($ty:ty) => {{
+        static __IMPL: $ty = <$ty as ::core::default::Default>::default();
         metaltile_core::inventory::submit! {
-            metaltile_core::KernelBenchEntry::new(Box::new(<$ty>::default()))
+            metaltile_core::KernelBenchEntry::new(&__IMPL)
         }
-    };
-    ($val:expr) => {
-        metaltile_core::inventory::submit! {
-            metaltile_core::KernelBenchEntry::new(Box::new($val))
-        }
-    };
+    }};
 }
 
 /// Register a [`KernelTest`] implementation in the global inventory.
@@ -153,14 +149,10 @@ macro_rules! register_bench {
 /// ```
 #[macro_export]
 macro_rules! register_test {
-    ($ty:ty) => {
+    ($ty:ty) => {{
+        static __IMPL: $ty = <$ty as ::core::default::Default>::default();
         metaltile_core::inventory::submit! {
-            metaltile_core::KernelTestEntry::new(Box::new(<$ty>::default()))
+            metaltile_core::KernelTestEntry::new(&__IMPL)
         }
-    };
-    ($val:expr) => {
-        metaltile_core::inventory::submit! {
-            metaltile_core::KernelTestEntry::new(Box::new($val))
-        }
-    };
+    }};
 }

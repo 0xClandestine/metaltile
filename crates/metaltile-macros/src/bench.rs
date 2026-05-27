@@ -129,6 +129,9 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         None => quote! {},
     };
 
+    let static_name =
+        syn::Ident::new(&format!("__STATIC_{fn_name_str}"), fn_name.span());
+
     TokenStream::from(quote! {
         #input_fn
 
@@ -152,12 +155,10 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
             #metal_ref_impl
         }
 
-        const _: () = {
-            ::metaltile_core::inventory::submit! {
-                ::metaltile_core::KernelBenchEntry::new(
-                    ::std::boxed::Box::new(#impl_name)
-                )
-            }
-        };
+        #[allow(non_upper_case_globals)]
+        static #static_name: #impl_name = #impl_name;
+        ::metaltile_core::inventory::submit! {
+            ::metaltile_core::KernelBenchEntry::new(&#static_name)
+        }
     })
 }

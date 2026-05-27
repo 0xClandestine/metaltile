@@ -122,3 +122,182 @@ pub fn vocoder_istft<T>(
     let out_val = select(den > 1e-8f32, num / safe_den, 0.0f32);
     store(out[t], out_val.cast::<T>());
 }
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+        ir::KernelMode,
+    };
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => {
+                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect()
+            }
+            DType::BF16 => {
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect()
+            }
+            _ => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn hann(n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| {
+                let x = 2.0 * std::f32::consts::PI * i as f32 / n as f32;
+                0.5 - 0.5 * x.cos()
+            })
+            .collect()
+    }
+
+    fn forward_stft(
+        signal: &[f32],
+        window: &[f32],
+        n_frames: usize,
+        n_fft: usize,
+        hop_length: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let n_freq = n_fft / 2 + 1;
+        let mut re = vec![0.0f32; n_frames * n_freq];
+        let mut im = vec![0.0f32; n_frames * n_freq];
+        let neg_two_pi_over_n = -2.0 * std::f32::consts::PI / n_fft as f32;
+        for f in 0..n_frames {
+            let start = f * hop_length;
+            for k in 0..n_freq {
+                let angle_step = neg_two_pi_over_n * k as f32;
+                let mut r = 0.0f32;
+                let mut i = 0.0f32;
+                for t in 0..n_fft {
+                    let xw = signal[start + t] * window[t];
+                    let angle = angle_step * t as f32;
+                    r += xw * angle.cos();
+                    i += xw * angle.sin();
+                }
+                re[f * n_freq + k] = r;
+                im[f * n_freq + k] = i;
+            }
+        }
+        (re, im)
+    }
+
+    fn naive_istft(
+        spec_re: &[f32],
+        spec_im: &[f32],
+        window: &[f32],
+        n_frames: usize,
+        n_fft: usize,
+        hop_length: usize,
+    ) -> Vec<f32> {
+        let n_freq = n_fft / 2 + 1;
+        let out_len = (n_frames - 1) * hop_length + n_fft;
+        let nyquist = n_fft / 2;
+        let inv_n = 1.0 / n_fft as f32;
+        let two_pi_over_n = 2.0 * std::f32::consts::PI / n_fft as f32;
+        let mut out = vec![0.0f32; out_len];
+        for (t, o) in out.iter_mut().enumerate() {
+            let f_hi = (t / hop_length).min(n_frames - 1);
+            let f_lo =
+                if t + 1 > n_fft { (t + 1 - n_fft).div_ceil(hop_length) } else { 0 };
+            let mut num = 0.0f32;
+            let mut den = 0.0f32;
+            for f in f_lo..=f_hi {
+                let tau = t - f * hop_length;
+                let angle_step = two_pi_over_n * tau as f32;
+                let row = f * n_freq;
+                let mut sample = 0.0f32;
+                for k in 0..n_freq {
+                    let re = spec_re[row + k];
+                    let im = spec_im[row + k];
+                    let angle = angle_step * k as f32;
+                    let contrib = re * angle.cos() - im * angle.sin();
+                    let w = if k == 0 || k == nyquist { 1.0 } else { 2.0 };
+                    sample += w * contrib;
+                }
+                sample *= inv_n;
+                let win = window[tau];
+                num += sample * win;
+                den += win * win;
+            }
+            *o = if den > 1e-8 { num / den } else { 0.0 };
+        }
+        out
+    }
+
+    fn make_setup(
+        n_frames: usize,
+        n_fft: usize,
+        hop_length: usize,
+        signal: Vec<f32>,
+        dt: DType,
+    ) -> TestSetup {
+        let window = hann(n_fft);
+        let n_freq = n_fft / 2 + 1;
+        let out_len = (n_frames - 1) * hop_length + n_fft;
+        let (re, im) = forward_stft(&signal, &window, n_frames, n_fft, hop_length);
+        let expected = naive_istft(&re, &im, &window, n_frames, n_fft, hop_length);
+        let mut kernel = vocoder_istft::kernel_ir_for(dt);
+        kernel.mode = KernelMode::Grid3D;
+        let tpg = 128u32;
+        let grid_x = (out_len as u32 + tpg - 1) / tpg;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("spec_re", pack(&re, dt), dt))
+            .input(TestBuffer::from_vec("spec_im", pack(&im, dt), dt))
+            .input(TestBuffer::from_vec("window", pack(&window, dt), dt))
+            .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; out_len], dt), dt))
+            .constexpr("n_frames", n_frames as u32)
+            .constexpr("n_fft", n_fft as u32)
+            .constexpr("n_freq", n_freq as u32)
+            .constexpr("hop_length", hop_length as u32)
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .grid_3d(grid_x, 1, 1, [tpg, 1, 1])
+    }
+
+    #[test_kernel(name = "ffai/vocoder/istft_f32", dtypes = [f32], tol = 2e-3)]
+    fn test_vocoder_istft_f32(dt: DType) -> TestSetup {
+        let n_frames = 6usize;
+        let n_fft = 16usize;
+        let hop_length = 4usize;
+        let out_len = (n_frames - 1) * hop_length + n_fft;
+        let signal: Vec<f32> =
+            (0..out_len).map(|i| (i as f32 * 0.21).sin() + (i as f32 * 0.07).cos() * 0.4).collect();
+        make_setup(n_frames, n_fft, hop_length, signal, dt)
+    }
+
+    #[test_kernel(name = "ffai/vocoder/istft_kokoro_f32", dtypes = [f32], tol = 2e-3)]
+    fn test_vocoder_istft_kokoro_f32(dt: DType) -> TestSetup {
+        let n_frames = 10usize;
+        let n_fft = 20usize;
+        let hop_length = 5usize;
+        let out_len = (n_frames - 1) * hop_length + n_fft;
+        let signal: Vec<f32> =
+            (0..out_len).map(|i| (i as f32 * 0.17).sin() * 0.6).collect();
+        make_setup(n_frames, n_fft, hop_length, signal, dt)
+    }
+
+    #[test_kernel(name = "ffai/vocoder/istft_f16", dtypes = [f16], tol = 3e-2)]
+    fn test_vocoder_istft_f16(dt: DType) -> TestSetup {
+        let n_frames = 6usize;
+        let n_fft = 16usize;
+        let hop_length = 4usize;
+        let out_len = (n_frames - 1) * hop_length + n_fft;
+        let signal: Vec<f32> =
+            (0..out_len).map(|i| (i as f32 * 0.21).sin() * 0.5).collect();
+        make_setup(n_frames, n_fft, hop_length, signal, dt)
+    }
+
+    #[test_kernel(name = "ffai/vocoder/istft_bf16", dtypes = [bf16], tol = 1.5e-1)]
+    fn test_vocoder_istft_bf16(dt: DType) -> TestSetup {
+        let n_frames = 6usize;
+        let n_fft = 16usize;
+        let hop_length = 4usize;
+        let out_len = (n_frames - 1) * hop_length + n_fft;
+        let signal: Vec<f32> =
+            (0..out_len).map(|i| (i as f32 * 0.21).sin() * 0.5).collect();
+        make_setup(n_frames, n_fft, hop_length, signal, dt)
+    }
+}
