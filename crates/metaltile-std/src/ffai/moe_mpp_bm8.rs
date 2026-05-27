@@ -204,3 +204,167 @@ mod tests {
         assert_eq!(setup, DType::F16, "bf16 activation must stage as half");
     }
 }
+
+#[cfg(target_os = "macos")]
+pub mod tests_support {
+    use std::collections::BTreeMap;
+
+    use metaltile_core::{dtype::DType, ir::KernelMode};
+    use metaltile_runtime::Context;
+
+    use super::mt_moe_gather_qmm_mma_int4_bm8_mpp;
+    use super::super::moe::mt_moe_gather_qmm_int4;
+
+    fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Dt { F32, F16, Bf16 }
+    impl Dt {
+        fn to_dtype(self) -> DType {
+            match self { Dt::F32 => DType::F32, Dt::F16 => DType::F16, Dt::Bf16 => DType::BF16 }
+        }
+    }
+    fn pack_bytes(vals: &[f32], dt: Dt) -> Vec<u8> {
+        match dt {
+            Dt::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            Dt::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            Dt::Bf16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+        }
+    }
+    fn unpack_bytes(bytes: &[u8], dt: Dt) -> Vec<f32> {
+        match dt {
+            Dt::F32 => bytemuck::cast_slice::<u8, f32>(bytes).to_vec(),
+            Dt::F16 => bytes.chunks_exact(2).map(|c| half::f16::from_le_bytes([c[0],c[1]]).to_f32()).collect(),
+            Dt::Bf16 => bytes.chunks_exact(2).map(|c| half::bf16::from_le_bytes([c[0],c[1]]).to_f32()).collect(),
+        }
+    }
+    fn pack_int4_row(weights: &[u32]) -> Vec<u32> {
+        assert!(weights.len() % 8 == 0);
+        weights.chunks_exact(8).map(|chunk| {
+            let mut packed = 0u32;
+            for (i, &q) in chunk.iter().enumerate() { packed |= (q & 0xf) << (i * 4); }
+            packed
+        }).collect()
+    }
+
+    struct Case {
+        n_experts: usize,
+        t_rows: usize,
+        n_out: usize,
+        k_in: usize,
+        group_size: usize,
+        dt: Dt,
+        indices: Option<Vec<u32>>,
+        min_cos: f64,
+        label: &'static str,
+    }
+    impl Case {
+        fn new(label: &'static str, n_experts: usize, t_rows: usize, n_out: usize, k_in: usize, group_size: usize, dt: Dt) -> Self {
+            Self { n_experts, t_rows, n_out, k_in, group_size, dt, indices: None, min_cos: 0.999, label }
+        }
+    }
+
+    fn run_case(case: &Case) {
+        let _g = gpu_lock();
+        let ctx_probe = Context::new().expect("Context::new");
+        let family = ctx_probe.chip_family();
+        if family.is_none_or(|lvl| lvl < 10) {
+            eprintln!("skip {}: needs Apple10+ GPU (chip_family={family:?})", case.label);
+            return;
+        }
+        drop(ctx_probe);
+        let Case { n_experts, t_rows, n_out, k_in, group_size, dt, .. } = *case;
+        let indices: Vec<u32> = case.indices.clone().unwrap_or_else(|| (0..t_rows).map(|r| ((r * n_experts) / t_rows) as u32).collect());
+        let total_weights = n_experts * n_out * k_in;
+        let weight_unpacked: Vec<u32> = (0..total_weights).map(|i| ((i as u32).wrapping_mul(13).wrapping_add(7)) & 0xf).collect();
+        let weight_packed: Vec<u32> = weight_unpacked.chunks_exact(k_in).flat_map(pack_int4_row).collect();
+        let groups_total = n_experts * n_out * (k_in / group_size);
+        let scales: Vec<f32> = (0..groups_total).map(|i| 0.005 + 0.001 * (i as f32 * 0.041).sin()).collect();
+        let biases: Vec<f32> = (0..groups_total).map(|i| -0.02 + 0.005 * (i as f32 * 0.083).cos()).collect();
+        let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * (i as f32 * 0.019).sin()).collect();
+        let mut expert_offsets: Vec<u32> = vec![0; n_experts + 1];
+        for (e_idx, off) in expert_offsets.iter_mut().enumerate().take(n_experts + 1) {
+            *off = indices.iter().position(|&e| e as usize >= e_idx).map(|p| p as u32).unwrap_or(t_rows as u32);
+        }
+        expert_offsets[n_experts] = t_rows as u32;
+        let y_m1: Vec<f32> = {
+            let mut b: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+            b.insert("x".into(), pack_bytes(&x, Dt::F32));
+            b.insert("weight_packed".into(), weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect());
+            b.insert("scales".into(), pack_bytes(&scales, Dt::F32));
+            b.insert("biases".into(), pack_bytes(&biases, Dt::F32));
+            b.insert("expert_offsets".into(), expert_offsets.iter().flat_map(|o| o.to_le_bytes()).collect());
+            b.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * n_out], Dt::F32));
+            b.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+            b.insert("m_out".into(), (n_out as u32).to_le_bytes().to_vec());
+            b.insert("n_experts".into(), (n_experts as u32).to_le_bytes().to_vec());
+            b.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+            let ctx = Context::new().unwrap();
+            let mut k = mt_moe_gather_qmm_int4::kernel_ir_for(DType::F32);
+            k.mode = KernelMode::Reduction;
+            let r = ctx.dispatch_with_grid(&k, &b, &BTreeMap::new(), [n_out, t_rows, 1], [32, 1, 1]).unwrap();
+            unpack_bytes(r.outputs.get("out").unwrap(), Dt::F32)
+        };
+        let y_mpp: Vec<f32> = {
+            let mut b: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+            b.insert("x".into(), pack_bytes(&x, dt));
+            b.insert("w".into(), weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect());
+            b.insert("scales".into(), pack_bytes(&scales, dt));
+            b.insert("biases".into(), pack_bytes(&biases, dt));
+            b.insert("indices".into(), indices.iter().flat_map(|i| i.to_le_bytes()).collect());
+            b.insert("out".into(), pack_bytes(&vec![0.0_f32; t_rows * n_out], dt));
+            b.insert("m_total".into(), (t_rows as u32).to_le_bytes().to_vec());
+            b.insert("n_out".into(), (n_out as u32).to_le_bytes().to_vec());
+            b.insert("k_in".into(), (k_in as u32).to_le_bytes().to_vec());
+            b.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
+            let ctx = Context::new().unwrap();
+            let mut k = mt_moe_gather_qmm_mma_int4_bm8_mpp::kernel_ir_for(dt.to_dtype());
+            k.mode = KernelMode::Reduction;
+            let r = ctx.dispatch_with_grid(&k, &b, &BTreeMap::new(), [n_out.div_ceil(32), t_rows.div_ceil(8), 1], [32, 1, 1]).unwrap();
+            unpack_bytes(r.outputs.get("out").unwrap(), dt)
+        };
+        let mut dot = 0.0_f64; let mut na = 0.0_f64; let mut nb = 0.0_f64; let mut nan_count = 0usize;
+        for (a, b) in y_m1.iter().zip(&y_mpp) {
+            if !a.is_finite() || !b.is_finite() { nan_count += 1; continue; }
+            dot += (*a as f64) * (*b as f64); na += (*a as f64) * (*a as f64); nb += (*b as f64) * (*b as f64);
+        }
+        let cos = dot / (na.sqrt() * nb.sqrt() + 1e-12);
+        assert_eq!(nan_count, 0, "[{}] MPP BM=8 produced non-finite values", case.label);
+        assert!(cos >= case.min_cos, "[{}] MPP MoE BM=8 vs m1 cosine = {:.6} (want ≥ {:.3})", case.label, cos, case.min_cos);
+    }
+
+    #[test]
+    fn bm8_f32_small_t8() { run_case(&Case::new("f32_small_t8", 4, 8, 64, 64, 32, Dt::F32)); }
+    #[test]
+    fn bm8_f16_small_t8() { run_case(&Case::new("f16_small_t8", 4, 8, 64, 64, 32, Dt::F16)); }
+    #[test]
+    fn bm8_bf16_small_t8() {
+        let mut case = Case::new("bf16_small_t8", 4, 8, 64, 64, 32, Dt::Bf16);
+        case.min_cos = 0.997;
+        run_case(&case);
+    }
+    #[test]
+    fn bm8_f16_multi_tile() { run_case(&Case::new("f16_multi_tile", 8, 16, 128, 128, 64, Dt::F16)); }
+    #[test]
+    fn bm8_f16_ragged_t5() {
+        let mut case = Case::new("f16_ragged_t5", 3, 5, 64, 64, 32, Dt::F16);
+        case.indices = Some(vec![0, 0, 1, 1, 2]);
+        run_case(&case);
+    }
+    #[test]
+    fn bm8_f16_production_shape() {
+        let mut case = Case::new("f16_production_shape", 128, 8, 512, 2048, 64, Dt::F16);
+        case.indices = Some(vec![3, 17, 42, 55, 71, 88, 99, 120]);
+        run_case(&case);
+    }
+    #[test]
+    fn bm8_bf16_production_shape() {
+        let mut case = Case::new("bf16_production_shape", 128, 8, 512, 2048, 64, Dt::Bf16);
+        case.indices = Some(vec![3, 17, 42, 55, 71, 88, 99, 120]);
+        case.min_cos = 0.997;
+        run_case(&case);
+    }
+}

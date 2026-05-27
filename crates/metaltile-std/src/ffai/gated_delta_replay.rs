@@ -185,3 +185,171 @@ gated_delta_record!(
     "record_d64_32_2_2"
 );
 state_replay!(state_replay_d64_32_2_2, 64u32, 32u32, 2u32, 2u32, "replay_d64_32_2_2");
+
+#[cfg(target_os = "macos")]
+pub mod tests_support {
+    //! GPU correctness tests for gated_delta_step_record and state_replay.
+    #![allow(clippy::too_many_arguments)]
+
+    use std::collections::BTreeMap;
+
+    use metaltile_core::{dtype::DType, ir::KernelMode};
+    use metaltile_runtime::Context;
+
+    use super::{gated_delta_step_record_d64_32_2_2, state_replay_d64_32_2_2};
+
+    const DK: usize = 64;
+    const DV: usize = 32;
+    const HK: usize = 2;
+    const HV: usize = 2;
+
+    fn pack_f32(vals: &[f32]) -> Vec<u8> { bytemuck::cast_slice::<f32, u8>(vals).to_vec() }
+    fn unpack_f32(bytes: &[u8]) -> Vec<f32> { bytemuck::cast_slice::<u8, f32>(bytes).to_vec() }
+    fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
+
+    fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
+        a.iter().zip(b).map(|(x,y)|(x-y).abs()).fold(0.0_f32,f32::max)
+    }
+
+    fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn src(n: usize, seed: u64, scale: f32) -> Vec<f32> {
+        let mut s = seed;
+        (0..n).map(|_| {
+            s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+            (s % 20_000) as f32 / 20_000.0 * scale - scale * 0.5
+        }).collect()
+    }
+
+    fn naive_record(
+        q: &[f32], k: &[f32], v: &[f32], g: &[f32], beta: &[f32], state_in: &[f32],
+        batch: usize, t_val: usize,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let mut y = vec![0.0_f32; batch * t_val * HV * DV];
+        let mut delta_log = vec![0.0_f32; batch * t_val * HV * DV];
+        let mut state = state_in.to_vec();
+        for n in 0..batch * HV {
+            let b = n / HV; let hvh = n % HV; let hkh = hvh / (HV / HK);
+            for t in 0..t_val {
+                let qk = (b * t_val + t) * HK * DK + hkh * DK;
+                let vb = (b * t_val + t) * HV * DV + hvh * DV;
+                let gb = (b * t_val + t) * HV + hvh;
+                for dv in 0..DV {
+                    let s0 = (n * DV + dv) * DK;
+                    let mut kv = 0.0_f32;
+                    for dk in 0..DK { state[s0+dk] *= g[gb]; kv += state[s0+dk] * k[qk+dk]; }
+                    let delta = (v[vb+dv] - kv) * beta[gb];
+                    delta_log[vb+dv] = delta;
+                    let mut out = 0.0_f32;
+                    for dk in 0..DK { state[s0+dk] += k[qk+dk] * delta; out += state[s0+dk] * q[qk+dk]; }
+                    y[vb+dv] = out;
+                }
+            }
+        }
+        (y, state, delta_log)
+    }
+
+    fn naive_replay(
+        delta_log: &[f32], k_log: &[f32], g_log: &[f32], state_in: &[f32],
+        mask: &[u32], batch: usize, t_log: usize, accepted: usize, has_mask: bool,
+    ) -> Vec<f32> {
+        let mut state = state_in.to_vec();
+        for n in 0..batch * HV {
+            let b = n / HV; let hvh = n % HV;
+            for t in 0..t_log {
+                let do_step = t < accepted && (!has_mask || mask[b * t_log + t] != 0);
+                if !do_step { continue; }
+                let dr = (b * t_log + t) * HV * DV + hvh * DV;
+                let kr = (b * t_log + t) * HV * DK + hvh * DK;
+                let g = g_log[(b * t_log + t) * HV + hvh];
+                for dv in 0..DV {
+                    let s0 = (n * DV + dv) * DK;
+                    for dk in 0..DK { state[s0+dk] = state[s0+dk] * g + k_log[kr+dk] * delta_log[dr+dv]; }
+                }
+            }
+        }
+        state
+    }
+
+    fn dispatch(
+        kernel_ir: fn(metaltile_core::dtype::DType) -> metaltile_core::ir::Kernel,
+        buffers: &BTreeMap<String, Vec<u8>>,
+        batch: usize,
+        want: &[&str],
+    ) -> Vec<Vec<f32>> {
+        let ctx = Context::new().expect("Context::new on macOS");
+        let mut kernel = kernel_ir(DType::F32);
+        kernel.mode = KernelMode::Grid3D;
+        let result = ctx
+            .dispatch_with_grid(&kernel, buffers, &BTreeMap::new(), [1, DV, batch * HV], [32, 1, 1])
+            .expect("gated_delta_replay dispatch");
+        want.iter().map(|w| unpack_f32(result.outputs.get(*w).expect(w))).collect()
+    }
+
+    #[test]
+    fn gated_delta_record_captures_tape_f32() {
+        let _g = gpu_lock();
+        let (batch, t_val) = (1usize, 3usize);
+        let q = src(batch * t_val * HK * DK, 0x1, 0.4);
+        let k = src(batch * t_val * HK * DK, 0x2, 0.4);
+        let v = src(batch * t_val * HV * DV, 0x3, 1.0);
+        let g: Vec<f32> = src(batch * t_val * HV, 0x4, 0.1).iter().map(|x| 0.9 + x).collect();
+        let beta: Vec<f32> = src(batch * t_val * HV, 0x5, 0.1).iter().map(|x| 0.5 + x).collect();
+        let state_in = src(batch * HV * DV * DK, 0x6, 0.2);
+        let (exp_y, exp_s, exp_d) = naive_record(&q, &k, &v, &g, &beta, &state_in, batch, t_val);
+        let mut b: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        b.insert("q".into(), pack_f32(&q));
+        b.insert("k".into(), pack_f32(&k));
+        b.insert("v".into(), pack_f32(&v));
+        b.insert("g".into(), pack_f32(&g));
+        b.insert("beta".into(), pack_f32(&beta));
+        b.insert("state_in".into(), pack_f32(&state_in));
+        b.insert("mask".into(), u32_bytes(&vec![1; batch * t_val]));
+        b.insert("y".into(), pack_f32(&vec![0.0; exp_y.len()]));
+        b.insert("state_out".into(), pack_f32(&vec![0.0; state_in.len()]));
+        b.insert("delta_log".into(), pack_f32(&vec![0.0; exp_d.len()]));
+        b.insert("t_val".into(), (t_val as u32).to_le_bytes().to_vec());
+        b.insert("has_mask".into(), 0u32.to_le_bytes().to_vec());
+        let got = dispatch(gated_delta_step_record_d64_32_2_2::kernel_ir_for, &b, batch, &["y","state_out","delta_log"]);
+        assert!(got[2].iter().any(|&x| x != 0.0), "tape is all zeros");
+        assert!(max_abs_diff(&got[0], &exp_y) < 2e-3, "y mismatch");
+        assert!(max_abs_diff(&got[1], &exp_s) < 2e-3, "state mismatch");
+        assert!(max_abs_diff(&got[2], &exp_d) < 2e-3, "delta tape mismatch");
+    }
+
+    fn run_replay(accepted: usize, has_mask: bool, mask: &[u32]) {
+        let _g = gpu_lock();
+        let (batch, t_log) = (1usize, 5usize);
+        let delta_log = src(batch * t_log * HV * DV, 0x21, 0.5);
+        let k_log = src(batch * t_log * HV * DK, 0x22, 0.4);
+        let g_log: Vec<f32> = src(batch * t_log * HV, 0x23, 0.1).iter().map(|x| 0.9 + x).collect();
+        let state_in = src(batch * HV * DV * DK, 0x24, 0.3);
+        let expected = naive_replay(&delta_log, &k_log, &g_log, &state_in, mask, batch, t_log, accepted, has_mask);
+        let mut b: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        b.insert("delta_log".into(), pack_f32(&delta_log));
+        b.insert("k_log".into(), pack_f32(&k_log));
+        b.insert("g_log".into(), pack_f32(&g_log));
+        b.insert("state_in".into(), pack_f32(&state_in));
+        b.insert("mask".into(), u32_bytes(mask));
+        b.insert("state_out".into(), pack_f32(&vec![0.0; state_in.len()]));
+        b.insert("t_log".into(), (t_log as u32).to_le_bytes().to_vec());
+        b.insert("accepted".into(), (accepted as u32).to_le_bytes().to_vec());
+        b.insert("has_mask".into(), u32::from(has_mask).to_le_bytes().to_vec());
+        let got = dispatch(state_replay_d64_32_2_2::kernel_ir_for, &b, batch, &["state_out"]);
+        assert!(max_abs_diff(&got[0], &expected) < 2e-3, "replay accepted={accepted} mask={has_mask}: state mismatch");
+    }
+
+    #[test]
+    fn state_replay_full_prefix_f32() { run_replay(5, false, &[1; 5]); }
+
+    #[test]
+    fn state_replay_partial_prefix_f32() { run_replay(3, false, &[1; 5]); }
+
+    #[test]
+    fn state_replay_masked_steps_f32() { run_replay(5, true, &[1, 0, 1, 0, 1]); }
+}
