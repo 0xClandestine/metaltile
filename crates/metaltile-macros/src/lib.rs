@@ -56,6 +56,9 @@ impl syn::parse::Parse for KernelAttr {
 
             if input.peek(Token![,]) {
                 input.parse::<Token![,]>()?;
+                if input.is_empty() {
+                    break; // allow trailing comma after last bench(...)
+                }
             } else {
                 break;
             }
