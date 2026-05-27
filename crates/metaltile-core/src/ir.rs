@@ -497,6 +497,39 @@ pub enum Op {
         rhs: ValueId,
     },
 
+    /// Fused multiply-add: `a * b + c` as a single op.  Lowers to
+    /// `fma(a, b, c)` in MSL.  Floats-only — the GPU FMA path requires
+    /// IEEE float operands.
+    ///
+    /// Created by `FmaFusionPass` from the pattern
+    ///     `Op::Mul(a, b) → v_mul`
+    ///     `Op::Add(v_mul, c) → v_add`   (or `Sub(v_mul, c)` with `c` negated)
+    /// when `v_mul` has no consumers other than the absorbing Add/Sub
+    /// AND all operand types are floats (`Mul` of integers stays as a
+    /// plain BinOp; `Add(i64, i64)` doesn't have an FMA path either).
+    /// The Mul becomes dead and is swept up by the DCE pass.
+    ///
+    /// Pre-fix, this fusion lived as an emit-time peephole in
+    /// `emit_block.rs` that turned the textual `auto v_add = v_mul +
+    /// c;` into `auto v_add = fma(a, b, c);` while leaving the
+    /// upstream `Op::Mul` in the IR — the standalone Mul then emitted
+    /// `auto v_mul = a * b;` as a dead variable in MSL.  #207 worked
+    /// around it with `compute_fma_absorbed_mul_skips` in the emit
+    /// path.  Lifting the fusion into the IR makes the Mul orphan a
+    /// real producer-with-no-consumer and lets DCE handle it
+    /// naturally.
+    #[elementwise]
+    #[cheap_alu]
+    #[result_same_type]
+    Fma {
+        #[vid]
+        a: ValueId,
+        #[vid]
+        b: ValueId,
+        #[vid]
+        c: ValueId,
+    },
+
     /// Tile matrix multiply: `dot(a, b)`.
     #[result_custom]
     Dot {
@@ -1690,6 +1723,9 @@ impl Op {
             },
             Op::BinOp { op, lhs, rhs } => {
                 write!(f, "BinOp({op:?}, v{}, v{})", lhs.as_u32(), rhs.as_u32())
+            },
+            Op::Fma { a, b, c } => {
+                write!(f, "Fma(v{}, v{}, v{})", a.as_u32(), b.as_u32(), c.as_u32())
             },
             Op::Dot { a, b } => write!(f, "Dot(v{}, v{})", a.as_u32(), b.as_u32()),
             Op::Reduce { value, axis, op } => {

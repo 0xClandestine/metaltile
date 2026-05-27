@@ -606,13 +606,6 @@ impl MslGenerator {
         let mut hoists: Vec<String> = Vec::new();
         let extra_names: BTreeMap<ValueId, String> = BTreeMap::new();
 
-        // Compute the per-kernel skip set ONCE before emitting any
-        // block. `Op::Mul` ops whose result is consumed by an FMA-eligible
-        // Add/Sub (and nowhere else) would otherwise produce
-        // `auto vNN = ml * mr;` orphan lines under the MSL FMA peephole —
-        // see `compute_fma_absorbed_mul_skips` for the full rationale.
-        let skip_emit = emit_block::fma_absorbed_mul_skips(kernel);
-
         if feat.is_matmul {
             self.emit_tiled(&mut body_buf, "    ", kernel, None)?;
         } else {
@@ -625,7 +618,6 @@ impl MslGenerator {
                 type_env,
                 &extra_names,
                 &mut hoists,
-                &skip_emit,
             )?;
         }
 
