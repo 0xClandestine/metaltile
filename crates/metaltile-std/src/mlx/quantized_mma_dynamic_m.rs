@@ -108,6 +108,179 @@ pub fn dispatch_grid(t: usize, n: usize) -> [usize; 3] {
     [n / BN_TILE as usize, m_padded / BM_TILE as usize, 1]
 }
 
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    fn pack_f32(vals: &[f32]) -> Vec<u8> { vals.iter().flat_map(|v| v.to_le_bytes()).collect() }
+    fn pack_f16(vals: &[f32]) -> Vec<u8> {
+        vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect()
+    }
+    fn pack_bf16(vals: &[f32]) -> Vec<u8> {
+        vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect()
+    }
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32 => pack_f32(vals),
+            DType::F16 => pack_f16(vals),
+            DType::BF16 => pack_bf16(vals),
+            _ => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn round_dt(v: f32, dt: DType) -> f32 {
+        match dt {
+            DType::F32 => v,
+            DType::F16 => half::f16::from_f32(v).to_f32(),
+            DType::BF16 => half::bf16::from_f32(v).to_f32(),
+            _ => v,
+        }
+    }
+
+    fn bpe(dt: DType) -> usize {
+        match dt {
+            DType::F32 => 4,
+            _ => 2,
+        }
+    }
+
+    /// Triple-loop CPU oracle — same algorithm as the kernel.
+    #[allow(clippy::too_many_arguments)]
+    fn cpu_qmm_reference(
+        w: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        x: &[f32],
+        m: usize,
+        n: usize,
+        k: usize,
+        gs_per_row: usize,
+        group_size: usize,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; m * n];
+        for m_row in 0..m {
+            for n_col in 0..n {
+                let mut acc = 0.0f32;
+                for g in 0..gs_per_row {
+                    let s = scales[n_col * gs_per_row + g];
+                    let bias = biases[n_col * gs_per_row + g];
+                    let mut q_dot = 0.0f32;
+                    let mut x_sum = 0.0f32;
+                    for p in 0..8usize {
+                        let packed = w[n_col * k / 8 + g * 8 + p];
+                        for bit in 0..8u32 {
+                            let q = ((packed >> (bit * 4)) & 0xF) as f32;
+                            let xv = x[m_row * k + g * group_size + p * 8 + bit as usize];
+                            q_dot += q * xv;
+                            x_sum += xv;
+                        }
+                    }
+                    acc += s * q_dot + bias * x_sum;
+                }
+                out[m_row * n + n_col] = acc;
+            }
+        }
+        out
+    }
+
+    fn build_quant_inputs(
+        m: usize,
+        n: usize,
+        k: usize,
+        gs_per_row: usize,
+    ) -> (Vec<u32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+        let w: Vec<u32> = (0..n * k / 8)
+            .map(|i| {
+                let mut v = 0u32;
+                for bit in 0..8u32 { v |= ((i as u32 + bit) & 0xF) << (bit * 4); }
+                v
+            })
+            .collect();
+        let scales: Vec<f32> = (0..n * gs_per_row).map(|i| 0.1 + (i as f32) * 0.001).collect();
+        let biases: Vec<f32> = (0..n * gs_per_row).map(|i| (i as f32) * 0.0001).collect();
+        let x: Vec<f32> = (0..m * k).map(|i| 1.0 + (i as f32) * 0.001).collect();
+        (w, scales, biases, x)
+    }
+
+    fn build_quant_inputs_small_mag(
+        m: usize,
+        n: usize,
+        k: usize,
+        gs_per_row: usize,
+    ) -> (Vec<u32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+        let w: Vec<u32> =
+            (0..n * k / 8).map(|i| ((i as u32) % 17).wrapping_mul(0x12345678u32)).collect();
+        let scales: Vec<f32> =
+            (0..n * gs_per_row).map(|i| 0.005 + ((i % 7) as f32) * 0.0007).collect();
+        let biases: Vec<f32> =
+            (0..n * gs_per_row).map(|i| ((i % 5) as f32) * 0.00005).collect();
+        let x: Vec<f32> = (0..m * k).map(|i| 0.05 + ((i % 23) as f32) * 0.003).collect();
+        (w, scales, biases, x)
+    }
+
+    fn make_setup(dt: DType, t: usize, n: usize, k: usize, small_mag: bool) -> TestSetup {
+        let group_size = 64usize;
+        let gs_per_row = k / group_size;
+        let (w, scales_f32, biases_f32, x_f32) = if small_mag {
+            build_quant_inputs_small_mag(t, n, k, gs_per_row)
+        } else {
+            build_quant_inputs(t, n, k, gs_per_row)
+        };
+        let scales: Vec<f32> = scales_f32.iter().map(|&v| round_dt(v, dt)).collect();
+        let biases: Vec<f32> = biases_f32.iter().map(|&v| round_dt(v, dt)).collect();
+        let x: Vec<f32> = x_f32.iter().map(|&v| round_dt(v, dt)).collect();
+        let expected = cpu_qmm_reference(&w, &scales, &biases, &x, t, n, k, gs_per_row, group_size);
+
+        let m_padded = pad_t_to_bm(t);
+        let be = bpe(dt);
+        let x_padded = pad_x_rows_bytes(&pack(x_f32.as_slice(), dt), t, k, be);
+        let out_zeros = vec![0u8; m_padded * n * be];
+
+        let grid = dispatch_grid(t, n);
+        let (gx, gy, gz) = (grid[0] as u32, grid[1] as u32, grid[2] as u32);
+
+        TestSetup::new(kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("w", pack_u32(&w), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack(&scales, dt), dt))
+            .input(TestBuffer::from_vec("biases", pack(&biases, dt), dt))
+            .input(TestBuffer::from_vec("x", x_padded, dt))
+            .input(TestBuffer::from_vec("out", out_zeros, dt))
+            .expect(TestBuffer::from_vec("out", {
+                // Pad oracle with zeros for trailing rows, then take first T*N
+                let mut out_padded = pack(&vec![0.0f32; m_padded * n], dt);
+                let expected_bytes = pack(&expected, dt);
+                out_padded[..expected_bytes.len()].copy_from_slice(&expected_bytes);
+                out_padded
+            }, dt))
+            .constexpr("k", k as u32)
+            .constexpr("n", n as u32)
+            .constexpr("gs_per_row", gs_per_row as u32)
+            .grid_3d(gx, gy, gz, [128, 1, 1])
+    }
+
+    #[test_kernel(name = "mlx/qmm_mma_dynamic_m_f16_t1", dtypes = [f16], tol = 5e-1)]
+    fn test_dynamic_m_f16_t1(dt: DType) -> TestSetup { make_setup(dt, 1, 128, 128, false) }
+
+    #[test_kernel(name = "mlx/qmm_mma_dynamic_m_f16_t8", dtypes = [f16], tol = 5e-1)]
+    fn test_dynamic_m_f16_t8(dt: DType) -> TestSetup { make_setup(dt, 8, 128, 128, false) }
+
+    #[test_kernel(name = "mlx/qmm_mma_dynamic_m_f16_t64", dtypes = [f16], tol = 5e-1)]
+    fn test_dynamic_m_f16_t64(dt: DType) -> TestSetup { make_setup(dt, 64, 512, 2048, true) }
+
+    #[test_kernel(name = "mlx/qmm_mma_dynamic_m_f32_t32", dtypes = [f32], tol = 1e-2)]
+    fn test_dynamic_m_f32_t32(dt: DType) -> TestSetup { make_setup(dt, 32, 64, 128, false) }
+
+    #[test_kernel(name = "mlx/qmm_mma_dynamic_m_f16_t37_ragged", dtypes = [f16], tol = 5e-1)]
+    fn test_dynamic_m_f16_t37(dt: DType) -> TestSetup { make_setup(dt, 37, 128, 128, false) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
