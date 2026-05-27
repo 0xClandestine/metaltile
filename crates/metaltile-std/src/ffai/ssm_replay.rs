@@ -30,6 +30,96 @@
 
 use metaltile::kernel;
 
+mod tests_support {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}};
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _           => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
+
+    fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
+
+    fn xorshift(s: &mut u64) -> f32 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        (*s % 20_000) as f32 / 20_000.0 - 0.5
+    }
+
+    fn src(n: usize, seed: u64, scale: f32) -> Vec<f32> {
+        let mut s = seed;
+        (0..n).map(|_| xorshift(&mut s) * scale).collect()
+    }
+
+    const DH: usize = 16;
+    const DS: usize = 64;
+    const H: usize = 4;
+    const G: usize = 2;
+
+    /// CPU oracle for ssm_replay (re-fold first k tape entries onto snapshot).
+    fn naive_replay(
+        snapshot: &[f32], da_log: &[f32], dbx_log: &[f32], mask: &[u32],
+        batch: usize, t_total: usize, k: usize, has_mask: bool,
+    ) -> Vec<f32> {
+        let mut state = snapshot.to_vec();
+        for n in 0..batch * H {
+            let b = n / H;
+            let h = n % H;
+            for t in 0..k {
+                let bt = b * t_total + t;
+                if has_mask && mask[bt] == 0 { continue; }
+                let bt_h = bt * H + h;
+                for dh in 0..DH {
+                    for ds in 0..DS {
+                        let s0 = (n * DH + dh) * DS + ds;
+                        state[s0] = da_log[bt_h * DS + ds] * state[s0]
+                            + dbx_log[(bt_h * DH + dh) * DS + ds];
+                    }
+                }
+            }
+        }
+        state
+    }
+
+    #[test_kernel(name = "ffai/ssm/replay", dtypes = [f32], tol = 2e-3)]
+    fn test_ssm_replay(dt: DType) -> TestSetup {
+        use super::ssm_replay_d16_64_4;
+        let batch = 1usize;
+        let t = 5usize;
+        let k = 3usize;
+        let snapshot = src(batch * H * DH * DS, 0x21, 0.3);
+        let da_log: Vec<f32> =
+            src(batch * t * H * DS, 0x22, 0.1).iter().map(|v| 0.9 + v).collect();
+        let dbx_log = src(batch * t * H * DH * DS, 0x23, 0.4);
+        let mask: Vec<u32> = vec![1; batch * t];
+        let expected = naive_replay(&snapshot, &da_log, &dbx_log, &mask, batch, t, k, false);
+
+        let mut kernel_ir = ssm_replay_d16_64_4::kernel_ir_for(dt);
+        kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
+
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("state_snapshot", pack(&snapshot, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("da_log", pack(&da_log, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("dbx_log", pack(&dbx_log, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("mask", u32_bytes(&mask), DType::U32))
+            .input(TestBuffer::from_vec("k_steps", u32_le(k as u32), DType::U32))
+            .input(TestBuffer::from_vec("t_total", u32_le(t as u32), DType::U32))
+            .input(TestBuffer::from_vec("has_mask", u32_le(0u32), DType::U32))
+            .expect(TestBuffer::from_vec("state_after_k", pack(&expected, DType::F32), DType::F32))
+            .grid_3d(1, DH as u32, (batch * H) as u32, [32, 1, 1])
+    }
+}
+
 // ── SSD forward step with (dA, dBx) tape capture ────────────────────────────
 #[rustfmt::skip]
 macro_rules! ssm_step_record {

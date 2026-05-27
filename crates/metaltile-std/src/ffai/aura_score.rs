@@ -47,6 +47,105 @@
 
 use metaltile::kernel;
 
+mod tests_support {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}};
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _           => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
+
+    fn pack_int4_indices(indices: &[u32], kv_heads: usize, tokens: usize, dim: usize) -> Vec<u32> {
+        let bits = 4;
+        let packed_width = (dim * bits).div_ceil(32);
+        let mut packed = vec![0u32; kv_heads * tokens * packed_width];
+        for kvh in 0..kv_heads {
+            for t in 0..tokens {
+                for d in 0..dim {
+                    let idx = indices[(kvh * tokens + t) * dim + d];
+                    let bit_offset = d * bits;
+                    let word_idx = bit_offset / 32;
+                    let shift = bit_offset & 31;
+                    packed[(kvh * tokens + t) * packed_width + word_idx] |= (idx & 0xf) << shift;
+                }
+            }
+        }
+        packed
+    }
+
+    fn pack_u32(vals: &[u32]) -> Vec<u8> {
+        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
+    }
+
+    fn naive_aura_score(
+        q_rot: &[f32], indices: &[u32], norms: &[f32], codebook: &[f32],
+        q_heads: usize, kv_heads: usize, tokens: usize, dim: usize,
+    ) -> Vec<f32> {
+        let repeat = q_heads / kv_heads;
+        let mut scores = vec![0.0_f32; q_heads * tokens];
+        for qh in 0..q_heads {
+            let kvh = qh / repeat;
+            for t in 0..tokens {
+                let norm_val = norms[kvh * tokens + t];
+                let mut acc = 0.0_f32;
+                for d in 0..dim {
+                    let q = indices[(kvh * tokens + t) * dim + d];
+                    let centroid = codebook[q as usize];
+                    acc += q_rot[qh * dim + d] * centroid;
+                }
+                scores[qh * tokens + t] = acc * norm_val;
+            }
+        }
+        scores
+    }
+
+    #[test_kernel(name = "ffai/aura/score_int4", dtypes = [f32], tol = 1e-3)]
+    fn test_aura_score_int4(dt: DType) -> TestSetup {
+        use super::aura_score_int4;
+        let dim = 128usize;
+        let bits = 4usize;
+        let packed_width = (dim * bits).div_ceil(32);
+        let q_heads = 4usize;
+        let kv_heads = 2usize;
+        let tokens = 8usize;
+        let repeat = q_heads / kv_heads;
+
+        let codebook: Vec<f32> = (0..16).map(|i| -1.0 + 2.0 * i as f32 / 15.0).collect();
+        let indices: Vec<u32> =
+            (0..kv_heads * tokens * dim).map(|i| ((i * 11 + 7) % 16) as u32).collect();
+        let packed = pack_int4_indices(&indices, kv_heads, tokens, dim);
+        let norms: Vec<f32> = (0..kv_heads * tokens).map(|i| 0.3 + 0.05 * i as f32).collect();
+        let q_rot: Vec<f32> =
+            (0..q_heads * dim).map(|i| (((i * 13) % 21) as f32 - 10.0) * 0.02).collect();
+
+        let expected = naive_aura_score(&q_rot, &indices, &norms, &codebook, q_heads, kv_heads, tokens, dim);
+
+        let mut kernel_ir = aura_score_int4::kernel_ir_for(dt);
+        kernel_ir.mode = metaltile_core::ir::KernelMode::Reduction;
+
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("q_rot", pack(&q_rot, dt), dt))
+            .input(TestBuffer::from_vec("packed", pack_u32(&packed), DType::U32))
+            .input(TestBuffer::from_vec("norms", pack(&norms, dt), dt))
+            .input(TestBuffer::from_vec("codebook", pack(&codebook, dt), dt))
+            .input(TestBuffer::from_vec("dim", u32_le(dim as u32), DType::U32))
+            .input(TestBuffer::from_vec("packed_width", u32_le(packed_width as u32), DType::U32))
+            .input(TestBuffer::from_vec("tokens", u32_le(tokens as u32), DType::U32))
+            .input(TestBuffer::from_vec("repeat_count", u32_le(repeat as u32), DType::U32))
+            .expect(TestBuffer::from_vec("scores", pack(&expected, dt), dt))
+            .grid_3d(q_heads as u32, tokens as u32, 1, [32, 1, 1])
+    }
+}
+
 macro_rules! aura_score_kernel {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[kernel]

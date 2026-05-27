@@ -41,6 +41,83 @@
 
 use metaltile::kernel;
 
+mod tests_support {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}};
+
+    fn pack_f32(vals: &[f32]) -> Vec<u8> { bytemuck::cast_slice::<f32, u8>(vals).to_vec() }
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
+    fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
+
+    fn pack_int4_indices(indices: &[u32], bh: usize, tokens: usize, dim: usize) -> Vec<u32> {
+        let bits = 4;
+        let packed_width = (dim * bits).div_ceil(32);
+        let mut packed = vec![0u32; bh * tokens * packed_width];
+        for b in 0..bh {
+            for t in 0..tokens {
+                for d in 0..dim {
+                    let idx = indices[(b * tokens + t) * dim + d];
+                    let bit_offset = d * bits;
+                    let word_idx = bit_offset / 32;
+                    let shift = bit_offset & 31;
+                    packed[(b * tokens + t) * packed_width + word_idx] |= (idx & 0xf) << shift;
+                }
+            }
+        }
+        packed
+    }
+
+    fn naive_aura_dequant(
+        indices: &[u32], norms: &[f32], codebook: &[f32],
+        bh: usize, tokens: usize, dim: usize,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0_f32; bh * tokens * dim];
+        for b in 0..bh {
+            for t in 0..tokens {
+                let norm_val = norms[b * tokens + t];
+                for d in 0..dim {
+                    let q = indices[(b * tokens + t) * dim + d];
+                    out[(b * tokens + t) * dim + d] = codebook[q as usize] * norm_val;
+                }
+            }
+        }
+        out
+    }
+
+    #[test_kernel(name = "ffai/aura/dequant_rotated_int4", dtypes = [f32], tol = 1e-5)]
+    fn test_aura_dequant_rotated_int4(dt: DType) -> TestSetup {
+        use super::aura_dequant_rotated_int4;
+        let dim = 128usize;
+        let bits = 4usize;
+        let packed_width = (dim * bits).div_ceil(32);
+        let bh = 2usize;
+        let tokens = 3usize;
+
+        let codebook: Vec<f32> = (0..16).map(|i| -1.0 + 2.0 * i as f32 / 15.0).collect();
+        let indices: Vec<u32> =
+            (0..bh * tokens * dim).map(|i| ((i * 7 + 3) % 16) as u32).collect();
+        let packed = pack_int4_indices(&indices, bh, tokens, dim);
+        let norms: Vec<f32> = (0..bh * tokens).map(|i| 0.5 + 0.1 * i as f32).collect();
+
+        let expected = naive_aura_dequant(&indices, &norms, &codebook, bh, tokens, dim);
+
+        let mut kernel_ir = aura_dequant_rotated_int4::kernel_ir_for(dt);
+        kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
+
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("packed", pack_u32(&packed), DType::U32))
+            .input(TestBuffer::from_vec("norms", pack_f32(&norms), DType::F32))
+            .input(TestBuffer::from_vec("codebook", pack_f32(&codebook), DType::F32))
+            .input(TestBuffer::from_vec("dim", u32_le(dim as u32), DType::U32))
+            .input(TestBuffer::from_vec("packed_width", u32_le(packed_width as u32), DType::U32))
+            .input(TestBuffer::from_vec("tokens", u32_le(tokens as u32), DType::U32))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), DType::F32))
+            .grid_3d(1, tokens as u32, bh as u32, [packed_width as u32, 1, 1])
+    }
+}
+
 // ── Clean nibble/byte path: bits ∈ {2, 4, 8} ─────────────────────────────
 //
 // Each thread owns one packed word w covering DIMS_PER_WORD = 32/bits

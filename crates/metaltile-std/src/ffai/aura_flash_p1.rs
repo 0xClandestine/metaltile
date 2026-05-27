@@ -66,6 +66,214 @@
 
 use metaltile::kernel;
 
+mod tests_support {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}};
+
+    fn pack_f32(vals: &[f32]) -> Vec<u8> { bytemuck::cast_slice::<f32, u8>(vals).to_vec() }
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
+    fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
+
+    fn pack_int_indices(
+        indices: &[u32], kv_heads: usize, tokens: usize, dim: usize, bits: usize,
+    ) -> Vec<u32> {
+        let mask = (1u32 << bits) - 1;
+        let pw = (dim * bits).div_ceil(32);
+        let mut packed = vec![0u32; kv_heads * tokens * pw];
+        for kvh in 0..kv_heads {
+            for t in 0..tokens {
+                for d in 0..dim {
+                    let idx = indices[(kvh * tokens + t) * dim + d] & mask;
+                    let bit = d * bits;
+                    let word = bit / 32;
+                    let shift = bit & 31;
+                    packed[(kvh * tokens + t) * pw + word] |= idx << shift;
+                    let spill = (shift + bits) as i32 - 32;
+                    if spill > 0 {
+                        packed[(kvh * tokens + t) * pw + word + 1] |=
+                            idx >> (bits as u32 - spill as u32);
+                    }
+                }
+            }
+        }
+        packed
+    }
+
+    /// CPU online-softmax reference for P1 partials.
+    fn naive_aura_flash_p1(
+        q_rot: &[f32], key_idx: &[u32], val_idx: &[u32],
+        key_norms: &[f32], val_norms: &[f32], key_cb: &[f32], val_cb: &[f32],
+        q_heads: usize, kv_heads: usize, tokens: usize, dim: usize,
+        block_size: usize, q_position: usize, causal: bool,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let repeat = q_heads / kv_heads;
+        let num_blocks = tokens.div_ceil(block_size);
+        let mut o_p = vec![0.0_f32; q_heads * num_blocks * dim];
+        let mut m_p = vec![f32::NEG_INFINITY; q_heads * num_blocks];
+        let mut l_p = vec![0.0_f32; q_heads * num_blocks];
+        for qh in 0..q_heads {
+            let kvh = qh / repeat;
+            for blk in 0..num_blocks {
+                let t_start = blk * block_size;
+                let t_end_raw = t_start + block_size;
+                let clamped = t_end_raw.min(tokens);
+                let t_end = if causal { clamped.min(q_position + 1) } else { clamped };
+                let mut m_acc = f32::NEG_INFINITY;
+                let mut l_acc = 0.0_f32;
+                let mut o_acc = vec![0.0_f32; dim];
+                for t in t_start..t_end {
+                    let mut dot = 0.0_f32;
+                    for d in 0..dim {
+                        let q = key_idx[(kvh * tokens + t) * dim + d];
+                        dot += q_rot[qh * dim + d] * key_cb[q as usize];
+                    }
+                    let score = dot * key_norms[kvh * tokens + t];
+                    let new_m = m_acc.max(score);
+                    let exp_diff = (m_acc - new_m).exp();
+                    let exp_score = (score - new_m).exp();
+                    let v_norm = val_norms[kvh * tokens + t];
+                    for d in 0..dim {
+                        let v = val_idx[(kvh * tokens + t) * dim + d];
+                        o_acc[d] = o_acc[d] * exp_diff + exp_score * val_cb[v as usize] * v_norm;
+                    }
+                    l_acc = l_acc * exp_diff + exp_score;
+                    m_acc = new_m;
+                }
+                let base = (qh * num_blocks + blk) * dim;
+                for d in 0..dim { o_p[base + d] = o_acc[d]; }
+                m_p[qh * num_blocks + blk] = m_acc;
+                l_p[qh * num_blocks + blk] = l_acc;
+            }
+        }
+        (o_p, m_p, l_p)
+    }
+
+    fn build_inputs(
+        q_heads: usize, kv_heads: usize, tokens: usize, dim: usize,
+        key_bits: usize, value_bits: usize,
+    ) -> (Vec<f32>, Vec<u32>, Vec<u32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>,
+          Vec<u32>, Vec<u32>) {
+        let key_codebook: Vec<f32> = (0..16).map(|i| -1.0 + 2.0 * i as f32 / 15.0).collect();
+        let val_codebook: Vec<f32> = (0..4).map(|i| -1.0 + 2.0 * i as f32 / 3.0).collect();
+        let key_indices: Vec<u32> =
+            (0..kv_heads * tokens * dim).map(|i| ((i * 7 + 3) % 16) as u32).collect();
+        let val_indices: Vec<u32> =
+            (0..kv_heads * tokens * dim).map(|i| ((i * 11 + 5) % 4) as u32).collect();
+        let key_packed = pack_int_indices(&key_indices, kv_heads, tokens, dim, key_bits);
+        let val_packed = pack_int_indices(&val_indices, kv_heads, tokens, dim, value_bits);
+        let key_norms: Vec<f32> = (0..kv_heads * tokens).map(|i| 0.5 + 0.05 * i as f32).collect();
+        let val_norms: Vec<f32> = (0..kv_heads * tokens).map(|i| 0.3 + 0.07 * i as f32).collect();
+        let q_rot: Vec<f32> =
+            (0..q_heads * dim).map(|i| (((i * 13) % 19) as f32 - 9.0) * 0.02).collect();
+        (q_rot, key_packed, val_packed, key_norms, val_norms, key_codebook, val_codebook,
+         key_indices, val_indices)
+    }
+
+    #[test_kernel(name = "ffai/aura/flash_p1_kb4_vb2_d128", dtypes = [f32], tol = 1e-4)]
+    fn test_aura_flash_p1(dt: DType) -> TestSetup {
+        use super::aura_flash_p1_kb4_vb2_d128;
+        let dim = 128usize;
+        let key_bits = 4usize;
+        let value_bits = 2usize;
+        let key_packed_width = (dim * key_bits).div_ceil(32);
+        let value_packed_width = (dim * value_bits).div_ceil(32);
+        let q_heads = 2usize;
+        let kv_heads = 1usize;
+        let tokens = 8usize;
+        let block_size = 4usize;
+        let num_blocks = tokens.div_ceil(block_size);
+        let repeat = q_heads / kv_heads;
+
+        let (q_rot, key_packed, val_packed, key_norms, val_norms, key_cb, val_cb,
+             key_indices, val_indices) =
+            build_inputs(q_heads, kv_heads, tokens, dim, key_bits, value_bits);
+
+        let (exp_o, exp_m, exp_l) = naive_aura_flash_p1(
+            &q_rot, &key_indices, &val_indices, &key_norms, &val_norms, &key_cb, &val_cb,
+            q_heads, kv_heads, tokens, dim, block_size, tokens - 1, false,
+        );
+
+        let mut kernel_ir = aura_flash_p1_kb4_vb2_d128::kernel_ir_for(dt);
+        kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
+
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("q_rot", pack_f32(&q_rot), DType::F32))
+            .input(TestBuffer::from_vec("key_packed", pack_u32(&key_packed), DType::U32))
+            .input(TestBuffer::from_vec("key_norms", pack_f32(&key_norms), DType::F32))
+            .input(TestBuffer::from_vec("key_codebook", pack_f32(&key_cb), DType::F32))
+            .input(TestBuffer::from_vec("val_packed", pack_u32(&val_packed), DType::U32))
+            .input(TestBuffer::from_vec("val_norms", pack_f32(&val_norms), DType::F32))
+            .input(TestBuffer::from_vec("val_codebook", pack_f32(&val_cb), DType::F32))
+            .input(TestBuffer::from_vec("dim", u32_le(dim as u32), DType::U32))
+            .input(TestBuffer::from_vec("key_packed_width", u32_le(key_packed_width as u32), DType::U32))
+            .input(TestBuffer::from_vec("value_packed_width", u32_le(value_packed_width as u32), DType::U32))
+            .input(TestBuffer::from_vec("tokens", u32_le(tokens as u32), DType::U32))
+            .input(TestBuffer::from_vec("kv_stride", u32_le(tokens as u32), DType::U32))
+            .input(TestBuffer::from_vec("repeat_count", u32_le(repeat as u32), DType::U32))
+            .input(TestBuffer::from_vec("num_blocks", u32_le(num_blocks as u32), DType::U32))
+            .input(TestBuffer::from_vec("block_size", u32_le(block_size as u32), DType::U32))
+            .input(TestBuffer::from_vec("q_position", u32_le((tokens - 1) as u32), DType::U32))
+            .expect(TestBuffer::from_vec("o_partials", pack_f32(&exp_o), DType::F32))
+            .expect(TestBuffer::from_vec("m_partials", pack_f32(&exp_m), DType::F32))
+            .expect(TestBuffer::from_vec("l_partials", pack_f32(&exp_l), DType::F32))
+            .grid_3d(1, q_heads as u32, num_blocks as u32, [32, 1, 1])
+    }
+
+    #[test_kernel(name = "ffai/aura/flash_p1_causal_kb4_vb2_d128", dtypes = [f32], tol = 1e-4)]
+    fn test_aura_flash_p1_causal(dt: DType) -> TestSetup {
+        use super::aura_flash_p1_causal_kb4_vb2_d128;
+        let dim = 128usize;
+        let key_bits = 4usize;
+        let value_bits = 2usize;
+        let key_packed_width = (dim * key_bits).div_ceil(32);
+        let value_packed_width = (dim * value_bits).div_ceil(32);
+        let q_heads = 2usize;
+        let kv_heads = 1usize;
+        let tokens = 8usize;
+        let block_size = 4usize;
+        let num_blocks = tokens.div_ceil(block_size);
+        let repeat = q_heads / kv_heads;
+        // q_position = 3: block 0 (tokens 0..4) is fully visible; block 1 (tokens 4..8) is masked.
+        let q_position = 3usize;
+
+        let (q_rot, key_packed, val_packed, key_norms, val_norms, key_cb, val_cb,
+             key_indices, val_indices) =
+            build_inputs(q_heads, kv_heads, tokens, dim, key_bits, value_bits);
+
+        let (exp_o, exp_m, exp_l) = naive_aura_flash_p1(
+            &q_rot, &key_indices, &val_indices, &key_norms, &val_norms, &key_cb, &val_cb,
+            q_heads, kv_heads, tokens, dim, block_size, q_position, true,
+        );
+
+        let mut kernel_ir = aura_flash_p1_causal_kb4_vb2_d128::kernel_ir_for(dt);
+        kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
+
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("q_rot", pack_f32(&q_rot), DType::F32))
+            .input(TestBuffer::from_vec("key_packed", pack_u32(&key_packed), DType::U32))
+            .input(TestBuffer::from_vec("key_norms", pack_f32(&key_norms), DType::F32))
+            .input(TestBuffer::from_vec("key_codebook", pack_f32(&key_cb), DType::F32))
+            .input(TestBuffer::from_vec("val_packed", pack_u32(&val_packed), DType::U32))
+            .input(TestBuffer::from_vec("val_norms", pack_f32(&val_norms), DType::F32))
+            .input(TestBuffer::from_vec("val_codebook", pack_f32(&val_cb), DType::F32))
+            .input(TestBuffer::from_vec("dim", u32_le(dim as u32), DType::U32))
+            .input(TestBuffer::from_vec("key_packed_width", u32_le(key_packed_width as u32), DType::U32))
+            .input(TestBuffer::from_vec("value_packed_width", u32_le(value_packed_width as u32), DType::U32))
+            .input(TestBuffer::from_vec("tokens", u32_le(tokens as u32), DType::U32))
+            .input(TestBuffer::from_vec("kv_stride", u32_le(tokens as u32), DType::U32))
+            .input(TestBuffer::from_vec("repeat_count", u32_le(repeat as u32), DType::U32))
+            .input(TestBuffer::from_vec("num_blocks", u32_le(num_blocks as u32), DType::U32))
+            .input(TestBuffer::from_vec("block_size", u32_le(block_size as u32), DType::U32))
+            .input(TestBuffer::from_vec("q_position", u32_le(q_position as u32), DType::U32))
+            .expect(TestBuffer::from_vec("o_partials", pack_f32(&exp_o), DType::F32))
+            .expect(TestBuffer::from_vec("m_partials", pack_f32(&exp_m), DType::F32))
+            .expect(TestBuffer::from_vec("l_partials", pack_f32(&exp_l), DType::F32))
+            .grid_3d(1, q_heads as u32, num_blocks as u32, [32, 1, 1])
+    }
+}
+
 #[rustfmt::skip]
 macro_rules! aura_flash_p1_kernel {
     (

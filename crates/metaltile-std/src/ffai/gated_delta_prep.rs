@@ -226,3 +226,160 @@ mod tests {
         println!("===== BEGIN MSL =====\n{}\n===== END MSL =====", msl);
     }
 }
+
+mod tests_support {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}};
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _           => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
+
+    fn softplus(x: f32) -> f32 { (x.exp() + 1.0).ln() }
+    fn sigmoid(x: f32) -> f32 { 1.0 / (1.0 + (-x).exp()) }
+
+    /// Fused prep + recurrence reference. Returns (y, state_out).
+    fn cpu_prep_step(
+        conv_out: &[f32], a_log: &[f32], dt_bias: &[f32], a_raw: &[f32], b_raw: &[f32],
+        q_norm_weight: &[f32], k_norm_weight: &[f32], state_in: &[f32],
+        b: usize, hv: usize, hk: usize, dv: usize, dk: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let eps = 1e-6_f32;
+        let stride_b = 2 * hk * dk + hv * dv;
+        let hk_per_hv = hv / hk;
+
+        // Build q_normed, k_normed, v_flat, g, beta.
+        let mut q_normed = vec![0.0_f32; b * hk * dk];
+        let mut k_normed = vec![0.0_f32; b * hk * dk];
+        let mut v_flat = vec![0.0_f32; b * hv * dv];
+        let mut g = vec![0.0_f32; b * hv];
+        let mut beta = vec![0.0_f32; b * hv];
+
+        for batch in 0..b {
+            let q_base = batch * stride_b;
+            let k_base = q_base + hk * dk;
+            let v_base = q_base + 2 * hk * dk;
+            for hk_idx in 0..hk {
+                let row_off = hk_idx * dk;
+                let mut q_ssq = 0.0_f32;
+                let mut k_ssq = 0.0_f32;
+                for d in 0..dk {
+                    let qv = conv_out[q_base + row_off + d];
+                    let kv = conv_out[k_base + row_off + d];
+                    q_ssq += qv * qv;
+                    k_ssq += kv * kv;
+                }
+                let q_inv = 1.0 / ((q_ssq / dk as f32) + eps).sqrt();
+                let k_inv = 1.0 / ((k_ssq / dk as f32) + eps).sqrt();
+                for d in 0..dk {
+                    let qv = conv_out[q_base + row_off + d];
+                    let kv = conv_out[k_base + row_off + d];
+                    q_normed[batch * hk * dk + row_off + d] = qv * q_inv * q_norm_weight[hk_idx * dk + d];
+                    k_normed[batch * hk * dk + row_off + d] = kv * k_inv * k_norm_weight[hk_idx * dk + d];
+                }
+            }
+            for hv_idx in 0..hv {
+                for dv_idx in 0..dv {
+                    v_flat[(batch * hv + hv_idx) * dv + dv_idx] =
+                        conv_out[v_base + hv_idx * dv + dv_idx];
+                }
+            }
+            for hv_idx in 0..hv {
+                let n = batch * hv + hv_idx;
+                let dt = softplus(a_raw[n] + dt_bias[hv_idx]);
+                g[n] = (-a_log[hv_idx].exp() * dt).exp();
+                beta[n] = sigmoid(b_raw[n]);
+            }
+        }
+
+        // Recurrence.
+        let mut y = vec![0.0_f32; b * hv * dv];
+        let mut state_out = vec![0.0_f32; b * hv * dv * dk];
+        for batch in 0..b {
+            for hv_idx in 0..hv {
+                let n = batch * hv + hv_idx;
+                let hk_idx = hv_idx / hk_per_hv;
+                let g_val = g[n];
+                let beta_val = beta[n];
+                let qk_base = (batch * hk + hk_idx) * dk;
+                for dv_idx in 0..dv {
+                    let v_val = v_flat[n * dv + dv_idx];
+                    let s_base = n * dv * dk + dv_idx * dk;
+                    let mut kv_mem = 0.0_f32;
+                    let mut decayed = vec![0.0_f32; dk];
+                    for s_idx in 0..dk {
+                        let s = state_in[s_base + s_idx] * g_val;
+                        decayed[s_idx] = s;
+                        kv_mem += s * k_normed[qk_base + s_idx];
+                    }
+                    let delta = (v_val - kv_mem) * beta_val;
+                    let mut out = 0.0_f32;
+                    for s_idx in 0..dk {
+                        let s_new = decayed[s_idx] + k_normed[qk_base + s_idx] * delta;
+                        state_out[s_base + s_idx] = s_new;
+                        out += s_new * q_normed[qk_base + s_idx];
+                    }
+                    y[n * dv + dv_idx] = out;
+                }
+            }
+        }
+        (y, state_out)
+    }
+
+    #[test_kernel(name = "ffai/gated_delta/prep_step", dtypes = [f32], tol = 1e-3)]
+    fn test_gated_delta_prep_step(dt: DType) -> TestSetup {
+        use super::mt_gated_delta_prep_step;
+        let b = 1usize;
+        let hv = 4usize;
+        let hk = 2usize;
+        let dv = 8usize;
+        let dk = 32usize;
+        let stride_b = 2 * hk * dk + hv * dv;
+        let n_total = b * hv;
+
+        let conv_out: Vec<f32> =
+            (0..b * stride_b).map(|i| ((i as f32) * 0.0173).sin() * 0.5).collect();
+        let a_log: Vec<f32> = (0..hv).map(|i| -1.0 + (i as f32) * 0.2).collect();
+        let dt_bias: Vec<f32> = (0..hv).map(|i| (i as f32) * 0.05).collect();
+        let a_raw: Vec<f32> = (0..b * hv).map(|i| ((i as f32) * 0.1).sin() * 0.3).collect();
+        let b_raw: Vec<f32> = (0..b * hv).map(|i| ((i as f32) * 0.13).cos() * 0.4).collect();
+        let q_norm_weight: Vec<f32> = vec![1.0_f32; hk * dk];
+        let k_norm_weight: Vec<f32> = vec![1.0_f32; hk * dk];
+        let state_in: Vec<f32> =
+            (0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.05).collect();
+
+        let (expected_y, expected_state) = cpu_prep_step(
+            &conv_out, &a_log, &dt_bias, &a_raw, &b_raw, &q_norm_weight, &k_norm_weight,
+            &state_in, b, hv, hk, dv, dk,
+        );
+
+        let mut kernel_ir = mt_gated_delta_prep_step::kernel_ir_for(dt);
+        kernel_ir.mode = metaltile_core::ir::KernelMode::Reduction;
+
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("conv_out", pack(&conv_out, dt), dt))
+            .input(TestBuffer::from_vec("a_log", pack(&a_log, dt), dt))
+            .input(TestBuffer::from_vec("dt_bias", pack(&dt_bias, dt), dt))
+            .input(TestBuffer::from_vec("a_raw", pack(&a_raw, dt), dt))
+            .input(TestBuffer::from_vec("b_raw", pack(&b_raw, dt), dt))
+            .input(TestBuffer::from_vec("q_norm_weight", pack(&q_norm_weight, dt), dt))
+            .input(TestBuffer::from_vec("k_norm_weight", pack(&k_norm_weight, dt), dt))
+            .input(TestBuffer::from_vec("state_in", pack(&state_in, dt), dt))
+            .input(TestBuffer::from_vec("dk", u32_le(dk as u32), DType::U32))
+            .input(TestBuffer::from_vec("dv", u32_le(dv as u32), DType::U32))
+            .input(TestBuffer::from_vec("hv", u32_le(hv as u32), DType::U32))
+            .input(TestBuffer::from_vec("hk", u32_le(hk as u32), DType::U32))
+            .expect(TestBuffer::from_vec("y", pack(&expected_y, dt), dt))
+            .expect(TestBuffer::from_vec("state_out", pack(&expected_state, dt), dt))
+            .grid_3d(dv as u32, n_total as u32, 1, [32, 1, 1])
+    }
+}

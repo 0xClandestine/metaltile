@@ -37,6 +37,92 @@
 
 use metaltile::kernel;
 
+mod tests_support {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}};
+
+    fn pack_f32(vals: &[f32]) -> Vec<u8> { bytemuck::cast_slice::<f32, u8>(vals).to_vec() }
+    fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
+
+    /// CPU reference for pass2: merge per-block (o, m, l) partials into
+    /// a single normalised output.
+    fn naive_flash_pass2(
+        o_partials: &[f32], m_partials: &[f32], l_partials: &[f32],
+        q_heads: usize, num_blocks: usize, dim: usize,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0_f32; q_heads * dim];
+        for qh in 0..q_heads {
+            let mut m_acc = f32::NEG_INFINITY;
+            let mut l_acc = 0.0_f32;
+            let mut o_acc = vec![0.0_f32; dim];
+            for b in 0..num_blocks {
+                let idx = qh * num_blocks + b;
+                let block_m = m_partials[idx];
+                let block_l = l_partials[idx];
+                if block_l != 0.0 {
+                    let new_m = m_acc.max(block_m);
+                    let exp_old = (m_acc - new_m).exp();
+                    let exp_block = (block_m - new_m).exp();
+                    let base = (qh * num_blocks + b) * dim;
+                    for d in 0..dim {
+                        o_acc[d] = o_acc[d] * exp_old + o_partials[base + d] * exp_block;
+                    }
+                    l_acc = l_acc * exp_old + block_l * exp_block;
+                    m_acc = new_m;
+                }
+            }
+            let inv_l = if l_acc > 0.0 { 1.0 / l_acc } else { 0.0 };
+            for d in 0..dim {
+                out[qh * dim + d] = o_acc[d] * inv_l;
+            }
+        }
+        out
+    }
+
+    #[test_kernel(name = "ffai/aura/flash_pass2_d128", dtypes = [f32], tol = 1e-4)]
+    fn test_aura_flash_pass2(dt: DType) -> TestSetup {
+        use super::aura_flash_pass2_d128;
+        let dim = 128usize;
+        let q_heads = 2usize;
+        let num_blocks = 2usize;
+
+        // Build synthetic partials: two blocks with distinct running-max values.
+        // Block 0: m = 0.5, l = 1.2, uniform o = 0.1
+        // Block 1: m = 0.8, l = 0.9, uniform o = 0.3
+        let mut m_partials = vec![0.0_f32; q_heads * num_blocks];
+        let mut l_partials = vec![0.0_f32; q_heads * num_blocks];
+        let mut o_partials = vec![0.0_f32; q_heads * num_blocks * dim];
+        for qh in 0..q_heads {
+            m_partials[qh * num_blocks + 0] = 0.5 + 0.1 * qh as f32;
+            l_partials[qh * num_blocks + 0] = 1.2;
+            m_partials[qh * num_blocks + 1] = 0.8 + 0.1 * qh as f32;
+            l_partials[qh * num_blocks + 1] = 0.9;
+            for d in 0..dim {
+                o_partials[(qh * num_blocks + 0) * dim + d] = 0.1 + 0.01 * d as f32;
+                o_partials[(qh * num_blocks + 1) * dim + d] = 0.3 + 0.02 * d as f32;
+            }
+        }
+
+        let expected = naive_flash_pass2(
+            &o_partials, &m_partials, &l_partials, q_heads, num_blocks, dim,
+        );
+
+        let mut kernel_ir = aura_flash_pass2_d128::kernel_ir_for(dt);
+        kernel_ir.mode = metaltile_core::ir::KernelMode::Reduction;
+
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("o_partials", pack_f32(&o_partials), DType::F32))
+            .input(TestBuffer::from_vec("m_partials", pack_f32(&m_partials), DType::F32))
+            .input(TestBuffer::from_vec("l_partials", pack_f32(&l_partials), DType::F32))
+            .input(TestBuffer::from_vec("dim", u32_le(dim as u32), DType::U32))
+            .input(TestBuffer::from_vec("num_blocks", u32_le(num_blocks as u32), DType::U32))
+            .expect(TestBuffer::from_vec("output", pack_f32(&expected), DType::F32))
+            .grid_3d(q_heads as u32, 1, 1, [32, 1, 1])
+    }
+}
+
 macro_rules! aura_flash_pass2_kernel {
     ($name:ident, $dims_per_lane:literal, $subop:literal) => {
         #[kernel]
