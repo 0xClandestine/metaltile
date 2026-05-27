@@ -523,3 +523,249 @@ pub fn mt_add_rms_norm<T>(
         store(normed_out[base + 3u32], n3.cast::<T>());
     }
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{
+        DType,
+        bench::{TestSetup, TestBuffer},
+    };
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _           => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn unpack(bytes: &[u8], dt: DType) -> Vec<f32> {
+        match dt {
+            DType::F32  => bytemuck::cast_slice::<u8, f32>(bytes).to_vec(),
+            DType::F16  => bytes.chunks_exact(2).map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32()).collect(),
+            DType::BF16 => bytes.chunks_exact(2).map(|c| half::bf16::from_le_bytes([c[0], c[1]]).to_f32()).collect(),
+            _           => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn round_dt(v: f32, dt: DType) -> f32 {
+        match dt {
+            DType::F32  => v,
+            DType::F16  => half::f16::from_f32(v).to_f32(),
+            DType::BF16 => half::bf16::from_f32(v).to_f32(),
+            _           => v,
+        }
+    }
+
+    // ── mlx/unary: exp ────────────────────────────────────────────────────
+
+    #[test_kernel(name = "mlx/unary/exp", dtypes = [f32, f16], tol = 5e-3)]
+    fn test_exp(dt: DType) -> TestSetup {
+        let n = 512usize;
+        let a: Vec<f32> = (0..n).map(|i| (i % 11) as f32 * 0.2 - 1.0).collect();
+        let a_q: Vec<f32> = a.iter().map(|&v| round_dt(v, dt)).collect();
+        let expected: Vec<f32> = a_q.iter().map(|x| x.exp()).collect();
+        TestSetup::new(mt_exp::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("a", pack(&a, dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, DType::F32), DType::F32))
+            .grid_1d(n, 256)
+    }
+
+    // ── mlx/unary: log ────────────────────────────────────────────────────
+
+    #[test_kernel(name = "mlx/unary/log", dtypes = [f32], tol = 1e-4)]
+    fn test_log(dt: DType) -> TestSetup {
+        let n = 1024usize;
+        let a: Vec<f32> = (0..n).map(|i| (i % 17) as f32 * 0.1 + 0.1).collect();
+        let expected: Vec<f32> = a.iter().map(|x| x.ln()).collect();
+        TestSetup::new(mt_log::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("a", pack(&a, dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, DType::F32), DType::F32))
+            .grid_1d(n, 256)
+    }
+
+    // ── mlx/unary: sqrt ───────────────────────────────────────────────────
+
+    #[test_kernel(name = "mlx/unary/sqrt", dtypes = [f32], tol = 1e-5)]
+    fn test_sqrt(dt: DType) -> TestSetup {
+        let n = 512usize;
+        let a: Vec<f32> = (0..n).map(|i| (i % 19) as f32 * 0.1 + 0.05).collect();
+        let expected: Vec<f32> = a.iter().map(|x| x.sqrt()).collect();
+        TestSetup::new(mt_sqrt::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("a", pack(&a, dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, DType::F32), DType::F32))
+            .grid_1d(n, 256)
+    }
+
+    // ── mlx/unary: rsqrt ──────────────────────────────────────────────────
+
+    #[test_kernel(name = "mlx/unary/rsqrt", dtypes = [f32], tol = 1e-4)]
+    fn test_rsqrt(dt: DType) -> TestSetup {
+        let n = 512usize;
+        let a: Vec<f32> = (0..n).map(|i| (i % 17) as f32 * 0.1 + 0.2).collect();
+        let expected: Vec<f32> = a.iter().map(|x| 1.0 / x.sqrt()).collect();
+        TestSetup::new(mt_rsqrt::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("a", pack(&a, dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, DType::F32), DType::F32))
+            .grid_1d(n, 256)
+    }
+
+    // ── mlx/unary: abs ────────────────────────────────────────────────────
+
+    #[test_kernel(name = "mlx/unary/abs", dtypes = [f32], tol = 1e-6)]
+    fn test_abs(dt: DType) -> TestSetup {
+        let n = 1024usize;
+        let a: Vec<f32> = (0..n).map(|i| (i % 23) as f32 * 0.1 - 1.1).collect();
+        let expected: Vec<f32> = a.iter().map(|x| x.abs()).collect();
+        TestSetup::new(mt_abs::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("a", pack(&a, dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, DType::F32), DType::F32))
+            .grid_1d(n, 256)
+    }
+
+    // ── mlx/unary: silu ───────────────────────────────────────────────────
+
+    #[test_kernel(name = "mlx/unary/silu", dtypes = [f32, f16], tol = 5e-3)]
+    fn test_silu(dt: DType) -> TestSetup {
+        let n = 512usize;
+        let a: Vec<f32> = (0..n).map(|i| (i % 13) as f32 * 0.3 - 2.0).collect();
+        let a_q: Vec<f32> = a.iter().map(|&v| round_dt(v, dt)).collect();
+        let expected: Vec<f32> = a_q.iter().map(|x| x / (1.0 + (-x).exp())).collect();
+        TestSetup::new(mt_silu::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("a", pack(&a, dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, DType::F32), DType::F32))
+            .grid_1d(n, 256)
+    }
+
+    // ── mlx/unary: relu ───────────────────────────────────────────────────
+
+    #[test_kernel(name = "mlx/unary/relu", dtypes = [f32], tol = 1e-6)]
+    fn test_relu(dt: DType) -> TestSetup {
+        let n = 512usize;
+        let a: Vec<f32> = (0..n).map(|i| (i % 19) as f32 * 0.15 - 1.4).collect();
+        let expected: Vec<f32> = a.iter().map(|x| x.max(0.0)).collect();
+        TestSetup::new(mt_relu::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("a", pack(&a, dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, DType::F32), DType::F32))
+            .grid_1d(n, 256)
+    }
+
+    // ── mlx/unary: sigmoid ────────────────────────────────────────────────
+
+    #[test_kernel(name = "mlx/unary/sigmoid", dtypes = [f32, bf16], tol = 2e-2)]
+    fn test_sigmoid(dt: DType) -> TestSetup {
+        let n = 512usize;
+        let a: Vec<f32> = (0..n).map(|i| (i % 11) as f32 * 0.5 - 3.0).collect();
+        let a_q: Vec<f32> = a.iter().map(|&v| round_dt(v, dt)).collect();
+        let expected: Vec<f32> = a_q.iter().map(|x| 1.0 / (1.0 + (-x).exp())).collect();
+        TestSetup::new(mt_sigmoid::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("a", pack(&a, dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, DType::F32), DType::F32))
+            .grid_1d(n, 256)
+    }
+
+    // ── mlx/cast_to_f32 ───────────────────────────────────────────────────
+
+    #[test_kernel(name = "mlx/cast_to_f32/bf16", dtypes = [bf16], tol = 0.0)]
+    fn test_cast_to_f32_bf16(dt: DType) -> TestSetup {
+        let n = 1024usize;
+        let vals: Vec<f32> = (0..n)
+            .map(|i| {
+                let x = (i as f32) * 0.137 - (n as f32) * 0.068;
+                x * (1.0 + ((i % 5) as f32) * 0.01)
+            })
+            .collect();
+        let expected: Vec<f32> = vals.iter().map(|&v| half::bf16::from_f32(v).to_f32()).collect();
+        TestSetup::new(mt_cast_to_f32::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("input", pack(&vals, dt), dt))
+            .expect(TestBuffer::from_vec("out", bytemuck::cast_slice::<f32, u8>(&expected).to_vec(), DType::F32))
+            .grid_1d(n, 256)
+    }
+
+    #[test_kernel(name = "mlx/cast_to_f32/f16", dtypes = [f16], tol = 0.0)]
+    fn test_cast_to_f32_f16(dt: DType) -> TestSetup {
+        let n = 1024usize;
+        let vals: Vec<f32> = (0..n).map(|i| (i as f32) * 0.041 - (n as f32) * 0.020).collect();
+        let expected: Vec<f32> = vals.iter().map(|&v| half::f16::from_f32(v).to_f32()).collect();
+        TestSetup::new(mt_cast_to_f32::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("input", pack(&vals, dt), dt))
+            .expect(TestBuffer::from_vec("out", bytemuck::cast_slice::<f32, u8>(&expected).to_vec(), DType::F32))
+            .grid_1d(n, 256)
+    }
+
+    #[test_kernel(name = "mlx/cast_to_f32/f32_identity", dtypes = [f32], tol = 0.0)]
+    fn test_cast_to_f32_f32(dt: DType) -> TestSetup {
+        let n = 256usize;
+        let vals: Vec<f32> = (0..n).map(|i| (i as f32) * 0.5 - 64.0).collect();
+        TestSetup::new(mt_cast_to_f32::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("input", pack(&vals, dt), dt))
+            .expect(TestBuffer::from_vec("out", bytemuck::cast_slice::<f32, u8>(&vals).to_vec(), DType::F32))
+            .grid_1d(n, 256)
+    }
+
+    // ── mlx/sigmoid_scalar_fma ────────────────────────────────────────────
+
+    fn sigmoid_fma_oracle(gate: f32, value: &[f32], base: &[f32], dt: DType) -> Vec<f32> {
+        let g_q = round_dt(gate, dt);
+        let s = 1.0 / (1.0 + (-g_q).exp());
+        value.iter().zip(base.iter()).map(|(&v, &b)| {
+            let vq = round_dt(v, dt);
+            let bq = round_dt(b, dt);
+            round_dt(bq + s * vq, dt)
+        }).collect()
+    }
+
+    fn ramp(n: usize, modulus: usize, offset: f32) -> Vec<f32> {
+        (0..n).map(|i| ((i % modulus) as f32 - offset) * 0.05).collect()
+    }
+
+    #[test_kernel(name = "mlx/sigmoid_scalar_fma/f32", dtypes = [f32], tol = 1e-5)]
+    fn test_sigmoid_scalar_fma_f32(dt: DType) -> TestSetup {
+        let n = 2048usize;
+        let gate = 0.5f32;
+        let value: Vec<f32> = ramp(n, 11, 5.0).iter().map(|v| 0.2 * v - 1.0).collect();
+        let base:  Vec<f32> = ramp(n, 17, 8.0).iter().map(|v| 0.1 * v).collect();
+        let expected = sigmoid_fma_oracle(gate, &value, &base, dt);
+        TestSetup::new(mt_sigmoid_scalar_fma::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("gate",  pack(&[gate, 0.0], dt), dt))
+            .input(TestBuffer::from_vec("value", pack(&value, dt), dt))
+            .input(TestBuffer::from_vec("base",  pack(&base, dt), dt))
+            .expect(TestBuffer::from_vec("out",  pack(&expected, dt), dt))
+            .grid_1d(n, 256)
+    }
+
+    #[test_kernel(name = "mlx/sigmoid_scalar_fma/f16", dtypes = [f16], tol = 5e-4)]
+    fn test_sigmoid_scalar_fma_f16(dt: DType) -> TestSetup {
+        let n = 2048usize;
+        let gate = 0.5f32;
+        let value: Vec<f32> = ramp(n, 11, 5.0).iter().map(|v| 0.2 * v - 1.0).collect();
+        let base:  Vec<f32> = ramp(n, 17, 8.0).iter().map(|v| 0.1 * v).collect();
+        let expected = sigmoid_fma_oracle(gate, &value, &base, dt);
+        TestSetup::new(mt_sigmoid_scalar_fma::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("gate",  pack(&[gate, 0.0], dt), dt))
+            .input(TestBuffer::from_vec("value", pack(&value, dt), dt))
+            .input(TestBuffer::from_vec("base",  pack(&base, dt), dt))
+            .expect(TestBuffer::from_vec("out",  pack(&expected, dt), dt))
+            .grid_1d(n, 256)
+    }
+
+    #[test_kernel(name = "mlx/sigmoid_scalar_fma/bf16", dtypes = [bf16], tol = 5e-3)]
+    fn test_sigmoid_scalar_fma_bf16(dt: DType) -> TestSetup {
+        let n = 2048usize;
+        let gate = 0.5f32;
+        let value: Vec<f32> = ramp(n, 11, 5.0).iter().map(|v| 0.2 * v - 1.0).collect();
+        let base:  Vec<f32> = ramp(n, 17, 8.0).iter().map(|v| 0.1 * v).collect();
+        let expected = sigmoid_fma_oracle(gate, &value, &base, dt);
+        TestSetup::new(mt_sigmoid_scalar_fma::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("gate",  pack(&[gate, 0.0], dt), dt))
+            .input(TestBuffer::from_vec("value", pack(&value, dt), dt))
+            .input(TestBuffer::from_vec("base",  pack(&base, dt), dt))
+            .expect(TestBuffer::from_vec("out",  pack(&expected, dt), dt))
+            .grid_1d(n, 256)
+    }
+}

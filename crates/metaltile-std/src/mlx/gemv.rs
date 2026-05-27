@@ -19,3 +19,69 @@ pub fn mt_gemv<T>(mat: Tensor<T>, vec: Tensor<T>, out: Tensor<T>, #[constexpr] k
     let result = reduce_sum(acc);
     store(out[row], result);
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{
+        DType,
+        bench::{TestSetup, TestBuffer},
+        ir::KernelMode,
+    };
+
+    fn pack_f32(vals: &[f32]) -> Vec<u8> {
+        bytemuck::cast_slice::<f32, u8>(vals).to_vec()
+    }
+
+    fn naive_matvec(mat: &[f32], vec: &[f32], m: usize, k: usize) -> Vec<f32> {
+        assert_eq!(mat.len(), m * k);
+        assert_eq!(vec.len(), k);
+        let mut out = vec![0.0_f32; m];
+        for i in 0..m {
+            let mut acc = 0.0_f32;
+            for j in 0..k {
+                acc += mat[i * k + j] * vec[j];
+            }
+            out[i] = acc;
+        }
+        out
+    }
+
+    #[test_kernel(name = "mlx/gemv/small", dtypes = [f32], tol = 1e-3)]
+    fn test_gemv_small(dt: DType) -> TestSetup {
+        let m = 16usize;
+        let k = 256usize;
+        let mat: Vec<f32> = (0..m * k).map(|i| ((i as f32 % 13.0) - 6.0) * 0.01).collect();
+        let vec: Vec<f32> = (0..k).map(|j| ((j as f32 % 7.0) - 3.0) * 0.02).collect();
+        let expected = naive_matvec(&mat, &vec, m, k);
+        let mut kernel = mt_gemv::kernel_ir_for(dt);
+        kernel.mode = KernelMode::Reduction;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("mat", pack_f32(&mat), DType::F32))
+            .input(TestBuffer::from_vec("vec", pack_f32(&vec), DType::F32))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), DType::F32))
+            .constexpr("k", k as u32)
+            .grid_3d(m as u32, 1, 1, [256, 1, 1])
+    }
+
+    #[test_kernel(name = "mlx/gemv/production", dtypes = [f32], tol = 5e-3)]
+    fn test_gemv_production(dt: DType) -> TestSetup {
+        let m = 32usize;
+        let k = 4096usize;
+        let mat: Vec<f32> =
+            (0..m * k).map(|i| (((i * 31 + 17) % 200) as f32 - 100.0) * 0.001).collect();
+        let vec: Vec<f32> = (0..k).map(|j| (((j * 13 + 5) % 100) as f32 - 50.0) * 0.002).collect();
+        let expected = naive_matvec(&mat, &vec, m, k);
+        let mut kernel = mt_gemv::kernel_ir_for(dt);
+        kernel.mode = KernelMode::Reduction;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("mat", pack_f32(&mat), DType::F32))
+            .input(TestBuffer::from_vec("vec", pack_f32(&vec), DType::F32))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), DType::F32))
+            .constexpr("k", k as u32)
+            .grid_3d(m as u32, 1, 1, [256, 1, 1])
+    }
+}
