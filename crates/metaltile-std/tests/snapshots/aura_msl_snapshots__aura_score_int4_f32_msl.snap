@@ -25,8 +25,6 @@ kernel void aura_score_int4(
     uint tid    = _tid3.x;
     uint tgid_x = _tgid3.x;
     uint tgid_y = _tgid3.y;
-    uint lsize  = _lsize3.x;
-    uint n_simd = lsize / 32u;
     auto v_lane = tid;
     auto v_q_idx = tgid_x;
     auto v_k_idx = tgid_y;

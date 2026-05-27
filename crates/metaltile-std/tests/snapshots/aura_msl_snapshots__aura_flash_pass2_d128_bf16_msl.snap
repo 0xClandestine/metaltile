@@ -19,7 +19,6 @@ kernel void aura_flash_pass2_d128(
 ) {
     uint tid    = _tid3.x;
     uint tgid_x = _tgid3.x;
-    uint lsize  = _lsize3.x;
     float o[4];
 
     auto v_lane = tid;

@@ -23,8 +23,6 @@ kernel void aura_encode_int4(
 ) {
     uint tid    = _tid3.x;
     uint tgid_x = _tgid3.x;
-    uint lsize  = _lsize3.x;
-    uint n_simd = lsize / 32u;
     threadgroup float shared_norm[16];
     threadgroup float shared_unit[1024];
     threadgroup uint shared_packed[128];

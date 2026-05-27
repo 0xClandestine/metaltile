@@ -15,9 +15,7 @@ kernel void mt_hadamard_m20(
     uint3 _lsize3 [[threads_per_threadgroup]],
     uint simd_lane [[thread_index_in_simdgroup]]
 ) {
-    uint tid    = _tid3.x;
     uint tgid_x = _tgid3.x;
-    uint lsize  = _lsize3.x;
     threadgroup float buf[20];
     uint signs[20];
 

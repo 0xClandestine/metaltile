@@ -26,12 +26,9 @@ kernel void mt_steel_gemm_splitk_nax(
     uint simd_group [[simdgroup_index_in_threadgroup]]
 ) {
 #if defined(__METAL_VERSION__) && __METAL_VERSION__ >= 400
-    uint tid    = _tid3.x;
     uint tgid_x = _tgid3.x;
     uint tgid_y = _tgid3.y;
     uint tgid_z = _tgid3.z;
-    uint lsize  = _lsize3.x;
-    uint n_simd = lsize / 32u;
     threadgroup half Xs[1152];
     threadgroup half Ws[1152];
     threadgroup float OutScratch[1024];

@@ -61,6 +61,69 @@ fn kernel_uses_program_id_axis(kernel: &Kernel, axis: u32) -> bool {
     check(&kernel.body.ops) || kernel.blocks.values().any(|b| check(&b.ops))
 }
 
+/// Return `true` if the kernel directly reads the named scalar identifier
+/// — i.e. it has an `Op::Load { src: name, indices: [] }` somewhere. This
+/// is how the DSL parser lowers a bare identifier read (`let x = tid;` →
+/// `Op::Load { src: "tid", indices: [] }`).
+fn kernel_uses_identifier(kernel: &Kernel, name: &str) -> bool {
+    let check = |ops: &[Op]| {
+        ops.iter().any(|op| op.load_src() == Some(name) && op.load_indices().is_empty())
+    };
+    check(&kernel.body.ops) || kernel.blocks.values().any(|b| check(&b.ops))
+}
+
+/// Return `true` if the kernel contains any `Op::StrideReduce`.  In
+/// `Reduction` / `Tile2D` modes the emitter lowers `StrideReduce` to a
+/// vectorized loop that references `tid` and `lsize` (see the `has_tid`
+/// branch of the `Op::StrideReduce` arm in `emit_block.rs`).  Outside
+/// those modes the lowering is a plain serial loop and references
+/// neither — but `Reduction` is the only mode whose preamble is gated
+/// by these predicates, so we can use the unqualified "is any
+/// StrideReduce present" check and let the mode guard at the call site
+/// do the rest.
+fn kernel_has_stride_reduce(kernel: &Kernel) -> bool {
+    let check = |ops: &[Op]| ops.iter().any(|op| matches!(op, Op::StrideReduce { .. }));
+    check(&kernel.body.ops) || kernel.blocks.values().any(|b| check(&b.ops))
+}
+
+/// Return `true` if the kernel contains any `Op::Reduce` with kind
+/// `Mean`.  `lsize` is referenced in the reduce emit ONLY for the Mean
+/// kind: the final step divides the simdgroup/threadgroup total by
+/// `float(lsize)` in both the fast and slow paths (see `reduce.rs`).
+/// Other reduce kinds (Sum/Max/Min/Product) lower to a bare
+/// `simd_*(value)` / `__mt_simd_product(value)` call with no `lsize`
+/// reference.
+fn kernel_has_reduce_mean(kernel: &Kernel) -> bool {
+    let check = |ops: &[Op]| {
+        ops.iter()
+            .any(|op| matches!(op, Op::Reduce { op: metaltile_core::ir::ReduceKind::Mean, .. }))
+    };
+    check(&kernel.body.ops) || kernel.blocks.values().any(|b| check(&b.ops))
+}
+
+/// Return `true` if any `Op::Reduce` in the kernel will go through the
+/// two-level threadgroup reduction path that references `n_simd`.  That
+/// path fires for `axis == 0` in `Reduction` / `Tile2D` mode when
+/// `expected_tpg` is `None` or greater than the simd width — see
+/// `MslGenerator::emit_reduce` in `reduce.rs`.
+fn kernel_reduce_uses_n_simd(kernel: &Kernel, config: &MslConfig) -> bool {
+    let tg_modes = matches!(
+        kernel.mode,
+        metaltile_core::ir::KernelMode::Reduction | metaltile_core::ir::KernelMode::Tile2D
+    );
+    if !tg_modes {
+        return false;
+    }
+    // Slow path fires unless we statically know TPG fits in one simdgroup.
+    let single_simdgroup = matches!(config.expected_tpg, Some(t) if t <= config.simd_size);
+    if single_simdgroup {
+        return false;
+    }
+    let has_axis0_reduce =
+        |ops: &[Op]| ops.iter().any(|op| matches!(op, Op::Reduce { axis: 0, .. }));
+    has_axis0_reduce(&kernel.body.ops) || kernel.blocks.values().any(|b| has_axis0_reduce(&b.ops))
+}
+
 // ---------------------------------------------------------------------------
 // Generator
 // ---------------------------------------------------------------------------
@@ -252,20 +315,48 @@ impl MslGenerator {
             wl!(out, "#if defined(__METAL_VERSION__) && __METAL_VERSION__ >= 400");
         }
 
-        // Inject scalar aliases for Reduction mode.
-        // `tgid_y` is only emitted when the kernel references program_id::<1>(),
-        // avoiding -Wunused-variable on single-axis reduction kernels.
+        // Inject scalar aliases for Reduction mode.  Each alias is gated
+        // on actual consumption — these decls show up in `swift build`'s
+        // shader-compile pass as `-Wunused-variable` warnings when they
+        // aren't referenced, and a single kernel-suite emit at the >5000
+        // warning level scales linearly with kernel count.
+        //
+        // Consumer summary (one MSL emit site per row):
+        //   tid     ← Op::ProgramId{axis:0} in Elementwise (n/a in Reduction);
+        //             Op::StrideReduce vectorized-loop path (`{has_tid}` branch
+        //             in emit_block.rs); direct identifier `Op::Load { src:"tid" }`.
+        //   tgid_x  ← Op::ProgramId{axis:0} in Reduction; direct `tgid_x` load.
+        //   lsize   ← Op::StrideReduce; Op::Reduce (Mean path emits
+        //             `…/float(lsize)` in both fast and slow); n_simd's own
+        //             definition (`n_simd = lsize / 32u`); direct `lsize` load.
+        //   n_simd  ← Op::Reduce slow path (tpg > simd_size); direct `n_simd` load.
         if kernel.mode == KernelMode::Reduction {
-            wl!(out, "    uint tid    = _tid3.x;");
-            wl!(out, "    uint tgid_x = _tgid3.x;");
+            let has_stride_reduce = kernel_has_stride_reduce(kernel);
+            let has_reduce_mean = kernel_has_reduce_mean(kernel);
+            let needs_n_simd = kernel_reduce_uses_n_simd(kernel, &self.config)
+                || kernel_uses_identifier(kernel, "n_simd");
+            let needs_lsize = has_stride_reduce
+                || has_reduce_mean
+                || needs_n_simd
+                || kernel_uses_identifier(kernel, "lsize");
+            let needs_tid = has_stride_reduce || kernel_uses_identifier(kernel, "tid");
+
+            if needs_tid {
+                wl!(out, "    uint tid    = _tid3.x;");
+            }
+            if kernel_uses_program_id_axis(kernel, 0) {
+                wl!(out, "    uint tgid_x = _tgid3.x;");
+            }
             if kernel_uses_program_id_axis(kernel, 1) {
                 wl!(out, "    uint tgid_y = _tgid3.y;");
             }
             if kernel_uses_program_id_axis(kernel, 2) {
                 wl!(out, "    uint tgid_z = _tgid3.z;");
             }
-            wl!(out, "    uint lsize  = _lsize3.x;");
-            if feat.needs_simd_group {
+            if needs_lsize {
+                wl!(out, "    uint lsize  = _lsize3.x;");
+            }
+            if needs_n_simd {
                 wl!(out, "    uint n_simd = lsize / 32u;");
             }
         }
@@ -904,6 +995,199 @@ mod tests {
             "preamble must declare tgid_z when program_id axis 2 is used: {msl}"
         );
         assert!(msl.contains("= tgid_z;"), "axis 2 must lower to tgid_z, not a constant: {msl}");
+    }
+
+    // ── Preamble-emission gates ─────────────────────────────────────────
+    //
+    // Each preamble decl (`tid` / `tgid_x` / `lsize` / `n_simd`) gets a
+    // matching "used → emit" / "unused → omit" pair below. Pre-fix the
+    // unconditional emits produced thousands of `-Wunused-variable`
+    // warnings against the full kernel suite; these pin the gates the
+    // fix introduced so the warnings can't silently come back.
+
+    /// `tgid_x` must be omitted when the kernel doesn't reference
+    /// `program_id::<0>()` and doesn't read the identifier directly —
+    /// some kernels only iterate `tgid_y`/`tgid_z` and don't touch x.
+    #[test]
+    fn reduction_preamble_omits_tgid_x_when_unused() {
+        let mut k = Kernel::new("reduction_no_x");
+        k.mode = KernelMode::Reduction;
+        // axis 1 only — no Op::ProgramId axis 0, no direct `tgid_x` load.
+        k.body.push_op(Op::ProgramId { axis: 1 }, ValueId::new(0));
+        sink(&mut k, ValueId::new(0));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            !msl.contains("uint tgid_x = _tgid3.x;"),
+            "tgid_x decl must be omitted when program_id axis 0 is unused: {msl}"
+        );
+    }
+
+    /// `tid` is consumed by `Op::StrideReduce` (in Reduction mode it
+    /// lowers to a vectorized loop indexed by `tid * 4u`). When no
+    /// `StrideReduce` exists *and* nothing reads `tid` directly, the
+    /// preamble must drop the decl.
+    #[test]
+    fn reduction_preamble_omits_tid_when_unused() {
+        let mut k = Kernel::new("reduction_no_tid");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        sink(&mut k, ValueId::new(0));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            !msl.contains("uint tid    = _tid3.x;"),
+            "tid decl must be omitted when nothing references it: {msl}"
+        );
+    }
+
+    /// Symmetric: a direct DSL identifier read (`Op::Load { src: "tid"
+    /// }`) keeps the `tid` decl alive.
+    #[test]
+    fn reduction_preamble_emits_tid_when_used_as_identifier() {
+        let mut k = Kernel::new("reduction_with_tid_load");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(
+            Op::Load { src: "tid".into(), indices: Vec::new(), mask: None, other: None },
+            ValueId::new(1),
+        );
+        sink(&mut k, ValueId::new(1));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("uint tid    = _tid3.x;"),
+            "preamble must declare tid when read via direct identifier: {msl}"
+        );
+    }
+
+    /// `lsize` is consumed by `Op::StrideReduce`, by `Op::Reduce` (the
+    /// `Mean` path divides the simdgroup total by `float(lsize)`), and
+    /// by the `n_simd = lsize / 32u` derivation. When none of those
+    /// fire, drop the decl.
+    #[test]
+    fn reduction_preamble_omits_lsize_when_unused() {
+        let mut k = Kernel::new("reduction_no_lsize");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        sink(&mut k, ValueId::new(0));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            !msl.contains("uint lsize  = _lsize3.x;"),
+            "lsize decl must be omitted when no StrideReduce/Reduce/n_simd needs it: {msl}"
+        );
+    }
+
+    /// `lsize` survives only when something actually references it.
+    /// `Op::Reduce` with `Sum` lowers to a bare `simd_sum(value)` — no
+    /// `lsize`.  Pre-fix, every Op::Reduce dragged `lsize` in
+    /// unconditionally; this case ensures we don't over-emit on the
+    /// cheap path (`mt_rms_norm_small` etc.).
+    #[test]
+    fn reduction_preamble_omits_lsize_for_simd_only_reduce_sum() {
+        use metaltile_core::ir::ReduceKind;
+        let mut k = Kernel::new("reduction_reduce_sum");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(1));
+        k.body.push_op(
+            Op::Reduce { value: ValueId::new(1), axis: 0, op: ReduceKind::Sum },
+            ValueId::new(2),
+        );
+        sink(&mut k, ValueId::new(2));
+        // Single-simdgroup config → fast path emits only `simd_sum`; no
+        // lsize divisor exists in the lowering.
+        let msl = MslGenerator::new(MslConfig { expected_tpg: Some(32), ..MslConfig::default() })
+            .generate(&k)
+            .unwrap();
+        assert!(
+            !msl.contains("uint lsize"),
+            "Sum reduce on the fast path must not pull lsize in: {msl}"
+        );
+        // And it must not get pulled in by the slow-path n_simd
+        // requirement either, since we're explicitly single-simdgroup.
+        assert!(!msl.contains("uint n_simd"), "fast path must not declare n_simd: {msl}");
+    }
+
+    /// `Op::Reduce` with `Mean` divides by `float(lsize)` in both fast
+    /// and slow paths — `lsize` must be in the preamble.
+    #[test]
+    fn reduction_preamble_emits_lsize_when_reduce_mean_present() {
+        use metaltile_core::ir::ReduceKind;
+        let mut k = Kernel::new("reduction_reduce_mean");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(1));
+        k.body.push_op(
+            Op::Reduce { value: ValueId::new(1), axis: 0, op: ReduceKind::Mean },
+            ValueId::new(2),
+        );
+        sink(&mut k, ValueId::new(2));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("uint lsize  = _lsize3.x;"),
+            "Op::Reduce Mean must keep lsize in the preamble: {msl}"
+        );
+    }
+
+    /// `n_simd` is consumed by the slow-path two-level reduction (TPG >
+    /// simd width) and by direct identifier reads. A bare `Op::Reduce`
+    /// at default config (no `expected_tpg`) routes through the slow
+    /// path → `n_simd` must be emitted. A kernel without `Op::Reduce`
+    /// and without an `n_simd` identifier load must omit it.
+    #[test]
+    fn reduction_preamble_omits_n_simd_when_unused() {
+        let mut k = Kernel::new("reduction_no_n_simd");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        // `Op::SimdGroupId` sets `feat.needs_simd_group` but does NOT
+        // need n_simd — pre-fix this case triggered an unused n_simd
+        // decl.
+        k.body.push_op(Op::SimdGroupId, ValueId::new(1));
+        sink(&mut k, ValueId::new(1));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            !msl.contains("uint n_simd"),
+            "n_simd decl must be omitted when only simd_group is read: {msl}"
+        );
+    }
+
+    /// Symmetric: an `Op::Reduce` on the slow path keeps `n_simd`.
+    #[test]
+    fn reduction_preamble_emits_n_simd_when_reduce_slow_path() {
+        use metaltile_core::ir::ReduceKind;
+        let mut k = Kernel::new("reduction_reduce_slow");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(1));
+        k.body.push_op(
+            Op::Reduce { value: ValueId::new(1), axis: 0, op: ReduceKind::Sum },
+            ValueId::new(2),
+        );
+        sink(&mut k, ValueId::new(2));
+        // `MslGenerator::default()` has `expected_tpg = None`, so the
+        // slow path fires; the reduce emit will reference `n_simd`.
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("uint n_simd = lsize / 32u;"),
+            "slow-path Op::Reduce must keep n_simd in the preamble: {msl}"
+        );
+    }
+
+    /// Direct `n_simd` identifier read keeps the decl regardless of
+    /// reduce presence.
+    #[test]
+    fn reduction_preamble_emits_n_simd_when_used_as_identifier() {
+        let mut k = Kernel::new("reduction_n_simd_load");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(
+            Op::Load { src: "n_simd".into(), indices: Vec::new(), mask: None, other: None },
+            ValueId::new(1),
+        );
+        sink(&mut k, ValueId::new(1));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("uint n_simd = lsize / 32u;"),
+            "direct n_simd identifier load must keep the decl: {msl}"
+        );
     }
 
     /// Regression: `ssm_step` and similar kernels reference `tgid_y` via the
