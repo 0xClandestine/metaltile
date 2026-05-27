@@ -288,3 +288,156 @@ pub fn patch_embed_mma<T>(
         (simdgroup_elem_load(c_f11, 1) + b11).cast::<T>(),
     );
 }
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile_macros::test_kernel;
+    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _           => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn round(v: f32, dt: DType) -> f32 {
+        match dt {
+            DType::F16  => half::f16::from_f32(v).to_f32(),
+            DType::BF16 => half::bf16::from_f32(v).to_f32(),
+            _           => v,
+        }
+    }
+
+    fn pack_u32_scalar(v: usize) -> Vec<u8> { (v as u32).to_le_bytes().to_vec() }
+
+    fn ramp(n: usize, modulus: usize, offset: f32) -> Vec<f32> {
+        (0..n).map(|i| ((i % modulus) as f32 - offset) * 0.05).collect()
+    }
+
+    /// CPU reference for patch_embed_mma: explicit unfold + projection.
+    fn naive_patch_embed_mma(
+        image: &[f32], weight: &[f32], bias: &[f32],
+        in_ch: usize, in_h: usize, in_w: usize,
+        patch_h: usize, patch_w: usize, hidden: usize,
+    ) -> Vec<f32> {
+        let patches_h = in_h / patch_h;
+        let patches_w = in_w / patch_w;
+        let num_patches = patches_h * patches_w;
+        let patch_dim = in_ch * patch_h * patch_w;
+        let input_plane = in_h * in_w;
+        let mut out = vec![0.0f32; num_patches * hidden];
+        for ph in 0..patches_h {
+            for pw in 0..patches_w {
+                let pat = ph * patches_w + pw;
+                let py0 = ph * patch_h;
+                let px0 = pw * patch_w;
+                for h in 0..hidden {
+                    let mut acc = bias[h];
+                    for ic in 0..in_ch {
+                        for py in 0..patch_h {
+                            for px in 0..patch_w {
+                                let img_idx = ic * input_plane + (py0 + py) * in_w + (px0 + px);
+                                let w_idx = h * patch_dim + ic * patch_h * patch_w + py * patch_w + px;
+                                acc += image[img_idx] * weight[w_idx];
+                            }
+                        }
+                    }
+                    out[pat * hidden + h] = acc;
+                }
+            }
+        }
+        out
+    }
+
+    #[test_kernel(name = "patch_embed_mma/f32_8x8", dtypes = [f32], tol = 1e-2)]
+    fn test_patch_embed_mma_f32_8x8(dt: DType) -> TestSetup {
+        // 8×8 patch, 4-channel, hidden=32, in_h=64, in_w=64 → 64 patches.
+        // patch_dim = 4*8*8=256; num_patches=64; hidden=32. All divisible by 32.
+        let (in_ch, in_h, in_w, patch_h, patch_w, hidden) = (4, 64, 64, 8, 8, 32);
+        let num_patches = (in_h / patch_h) * (in_w / patch_w);
+        let n_out = num_patches * hidden;
+        let image = ramp(in_ch * in_h * in_w, 37, 18.0);
+        let weight = ramp(hidden * in_ch * patch_h * patch_w, 41, 20.0);
+        let bias = ramp(hidden, 11, 5.0);
+        let expected = naive_patch_embed_mma(&image, &weight, &bias, in_ch, in_h, in_w, patch_h, patch_w, hidden);
+
+        let mut k = patch_embed_mma::kernel_ir_for(dt);
+        k.mode = metaltile_core::ir::KernelMode::Reduction;
+
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("image", pack(&image, dt), dt))
+            .input(TestBuffer::from_vec("weight", pack(&weight, dt), dt))
+            .input(TestBuffer::from_vec("bias", pack(&bias, dt), dt))
+            .input(TestBuffer::from_vec("in_ch", pack_u32_scalar(in_ch), DType::U32))
+            .input(TestBuffer::from_vec("in_h", pack_u32_scalar(in_h), DType::U32))
+            .input(TestBuffer::from_vec("in_w", pack_u32_scalar(in_w), DType::U32))
+            .input(TestBuffer::from_vec("patch_h", pack_u32_scalar(patch_h), DType::U32))
+            .input(TestBuffer::from_vec("patch_w", pack_u32_scalar(patch_w), DType::U32))
+            .input(TestBuffer::from_vec("hidden", pack_u32_scalar(hidden), DType::U32))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            // Grid: [hidden/32, num_patches/32, 1], tpg=128
+            .grid_3d((hidden / 32) as u32, (num_patches / 32) as u32, 1, [128, 1, 1])
+    }
+
+    #[test_kernel(name = "patch_embed_mma/f32_4x4", dtypes = [f32], tol = 1e-2)]
+    fn test_patch_embed_mma_f32_4x4(dt: DType) -> TestSetup {
+        // 4×4 patch, 8-channel, patch_dim=128, hidden=32, in=32×32 → 64 patches.
+        let (in_ch, in_h, in_w, patch_h, patch_w, hidden) = (8, 32, 32, 4, 4, 32);
+        let num_patches = (in_h / patch_h) * (in_w / patch_w);
+        let n_out = num_patches * hidden;
+        let image = ramp(in_ch * in_h * in_w, 23, 11.0);
+        let weight = ramp(hidden * in_ch * patch_h * patch_w, 17, 8.0);
+        let bias = ramp(hidden, 5, 2.0);
+        let expected = naive_patch_embed_mma(&image, &weight, &bias, in_ch, in_h, in_w, patch_h, patch_w, hidden);
+
+        let mut k = patch_embed_mma::kernel_ir_for(dt);
+        k.mode = metaltile_core::ir::KernelMode::Reduction;
+
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("image", pack(&image, dt), dt))
+            .input(TestBuffer::from_vec("weight", pack(&weight, dt), dt))
+            .input(TestBuffer::from_vec("bias", pack(&bias, dt), dt))
+            .input(TestBuffer::from_vec("in_ch", pack_u32_scalar(in_ch), DType::U32))
+            .input(TestBuffer::from_vec("in_h", pack_u32_scalar(in_h), DType::U32))
+            .input(TestBuffer::from_vec("in_w", pack_u32_scalar(in_w), DType::U32))
+            .input(TestBuffer::from_vec("patch_h", pack_u32_scalar(patch_h), DType::U32))
+            .input(TestBuffer::from_vec("patch_w", pack_u32_scalar(patch_w), DType::U32))
+            .input(TestBuffer::from_vec("hidden", pack_u32_scalar(hidden), DType::U32))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .grid_3d((hidden / 32) as u32, (num_patches / 32) as u32, 1, [128, 1, 1])
+    }
+
+    #[test_kernel(name = "patch_embed_mma/f16_8x8", dtypes = [f16], tol = 1e-2)]
+    fn test_patch_embed_mma_f16_8x8(dt: DType) -> TestSetup {
+        let (in_ch, in_h, in_w, patch_h, patch_w, hidden) = (4, 64, 64, 8, 8, 32);
+        let num_patches = (in_h / patch_h) * (in_w / patch_w);
+        let n_out = num_patches * hidden;
+        let image_r: Vec<f32> =
+            (0..in_ch * in_h * in_w).map(|i| round(((i % 11) as f32 - 5.0) * 0.005, dt)).collect();
+        let weight_r: Vec<f32> =
+            (0..hidden * in_ch * patch_h * patch_w).map(|i| round(((i % 7) as f32 - 3.0) * 0.005, dt)).collect();
+        let bias_r: Vec<f32> =
+            (0..hidden).map(|i| round(((i % 5) as f32 - 2.0) * 0.01, dt)).collect();
+        let expected = naive_patch_embed_mma(&image_r, &weight_r, &bias_r, in_ch, in_h, in_w, patch_h, patch_w, hidden);
+
+        let mut k = patch_embed_mma::kernel_ir_for(dt);
+        k.mode = metaltile_core::ir::KernelMode::Reduction;
+
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("image", pack(&image_r, dt), dt))
+            .input(TestBuffer::from_vec("weight", pack(&weight_r, dt), dt))
+            .input(TestBuffer::from_vec("bias", pack(&bias_r, dt), dt))
+            .input(TestBuffer::from_vec("in_ch", pack_u32_scalar(in_ch), DType::U32))
+            .input(TestBuffer::from_vec("in_h", pack_u32_scalar(in_h), DType::U32))
+            .input(TestBuffer::from_vec("in_w", pack_u32_scalar(in_w), DType::U32))
+            .input(TestBuffer::from_vec("patch_h", pack_u32_scalar(patch_h), DType::U32))
+            .input(TestBuffer::from_vec("patch_w", pack_u32_scalar(patch_w), DType::U32))
+            .input(TestBuffer::from_vec("hidden", pack_u32_scalar(hidden), DType::U32))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .grid_3d((hidden / 32) as u32, (num_patches / 32) as u32, 1, [128, 1, 1])
+    }
+}

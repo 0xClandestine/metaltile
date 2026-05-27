@@ -55,3 +55,100 @@ pub fn logits_min_p_mask<T>(
         store(out[_i], select(exp(v - row_max) >= min_p, v, neg_inf).cast::<T>());
     }
 }
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile_macros::test_kernel;
+    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _           => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn round(v: f32, dt: DType) -> f32 {
+        match dt {
+            DType::F32  => v,
+            DType::F16  => half::f16::from_f32(v).to_f32(),
+            DType::BF16 => half::bf16::from_f32(v).to_f32(),
+            _           => v,
+        }
+    }
+
+    /// CPU oracle: keep `v` iff `exp(v − row_max) ≥ min_p`, else `-inf`.
+    fn cpu_min_p_mask(logits: &[f32], n: usize, rows: usize, min_p: f32) -> Vec<f32> {
+        let mut out = vec![0.0f32; rows * n];
+        for r in 0..rows {
+            let base = r * n;
+            let row = &logits[base..base + n];
+            let m = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            for (i, &v) in row.iter().enumerate() {
+                out[base + i] = if (v - m).exp() >= min_p { v } else { f32::NEG_INFINITY };
+            }
+        }
+        out
+    }
+
+    #[test_kernel(name = "logits/min_p_mask_mid_range", dtypes = [f32, f16, bf16], tol = 1e-4)]
+    fn test_min_p_mask_mid_range(dt: DType) -> TestSetup {
+        let n = 320usize;
+        let rows = 4usize;
+        let min_p = 0.1f32;
+        let logits_raw: Vec<f32> = (0..n * rows).map(|i| (i % 53) as f32 * 0.2 - 5.0).collect();
+        let logits: Vec<f32> = logits_raw.iter().map(|&v| round(v, dt)).collect();
+        let expected = cpu_min_p_mask(&logits, n, rows, min_p);
+
+        let mut k = logits_min_p_mask::kernel_ir_for(dt);
+        k.mode = metaltile_core::ir::KernelMode::Reduction;
+
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("inp", pack(&logits, dt), dt))
+            .input(TestBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("min_p", min_p.to_le_bytes().to_vec(), DType::F32))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .grid_3d(rows as u32, 1, 1, [256, 1, 1])
+    }
+
+    #[test_kernel(name = "logits/min_p_mask_near_zero", dtypes = [f32], tol = 1e-4)]
+    fn test_min_p_mask_near_zero(dt: DType) -> TestSetup {
+        let n = 320usize;
+        let rows = 3usize;
+        let min_p = 1e-6f32;
+        let logits: Vec<f32> = (0..n * rows).map(|i| (i % 53) as f32 * 0.2 - 5.0).collect();
+        let expected = cpu_min_p_mask(&logits, n, rows, min_p);
+
+        let mut k = logits_min_p_mask::kernel_ir_for(dt);
+        k.mode = metaltile_core::ir::KernelMode::Reduction;
+
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("inp", pack(&logits, dt), dt))
+            .input(TestBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("min_p", min_p.to_le_bytes().to_vec(), DType::F32))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .grid_3d(rows as u32, 1, 1, [256, 1, 1])
+    }
+
+    #[test_kernel(name = "logits/min_p_mask_near_one", dtypes = [f32], tol = 1e-4)]
+    fn test_min_p_mask_near_one(dt: DType) -> TestSetup {
+        let n = 64usize;
+        let rows = 1usize;
+        let min_p = 0.999f32;
+        let logits: Vec<f32> = (0..n).map(|i| i as f32 * 0.1).collect();
+        let expected = cpu_min_p_mask(&logits, n, rows, min_p);
+
+        let mut k = logits_min_p_mask::kernel_ir_for(dt);
+        k.mode = metaltile_core::ir::KernelMode::Reduction;
+
+        TestSetup::new(k)
+            .input(TestBuffer::from_vec("inp", pack(&logits, dt), dt))
+            .input(TestBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("min_p", min_p.to_le_bytes().to_vec(), DType::F32))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .grid_3d(rows as u32, 1, 1, [256, 1, 1])
+    }
+}
