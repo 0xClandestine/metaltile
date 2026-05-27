@@ -133,3 +133,90 @@ pub fn mt_argmin<T>(inp: Tensor<T>, out: Tensor<u32>, #[constexpr] n: u32) {
         store(out[0], final_idx);
     }
 }
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _           => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn cpu_argmax(vals: &[f32]) -> u32 {
+        let mut best_val = f32::NEG_INFINITY; let mut best_idx = 0u32;
+        for (i, &v) in vals.iter().enumerate() { if v > best_val { best_val = v; best_idx = i as u32; } }
+        best_idx
+    }
+
+    fn cpu_argmin(vals: &[f32]) -> u32 {
+        let mut best_val = f32::INFINITY; let mut best_idx = 0u32;
+        for (i, &v) in vals.iter().enumerate() { if v < best_val { best_val = v; best_idx = i as u32; } }
+        best_idx
+    }
+
+    fn make_argreduce_setup(
+        vals: Vec<f32>, expected_idx: u32, dt: DType,
+        kernel_ir_for: fn(DType) -> metaltile_core::ir::Kernel,
+    ) -> TestSetup {
+        let n = vals.len();
+        let mut kernel = kernel_ir_for(dt);
+        kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("inp", pack(&vals, dt), dt))
+            .input(TestBuffer::from_vec("out", vec![0u8; 4], DType::U32))
+            .input(TestBuffer::from_vec("n",   (n as u32).to_le_bytes().to_vec(), DType::U32))
+            .expect(TestBuffer::from_vec("out", expected_idx.to_le_bytes().to_vec(), DType::U32))
+            .grid_3d(1, 1, 1, [256, 1, 1])
+    }
+
+    #[test_kernel(name = "mlx/argmax_f32", dtypes = [f32], tol = 0.0)]
+    fn test_argmax_f32(dt: DType) -> TestSetup {
+        let mut vals: Vec<f32> = (0..1024).map(|i| ((i as f32) * 0.013).sin() * 0.5).collect();
+        vals[517] = 9.0;
+        make_argreduce_setup(vals, 517, dt, mt_argmax::kernel_ir_for)
+    }
+
+    #[test_kernel(name = "mlx/argmin_f32", dtypes = [f32], tol = 0.0)]
+    fn test_argmin_f32(dt: DType) -> TestSetup {
+        let mut vals: Vec<f32> = (0..1024).map(|i| ((i as f32) * 0.013).sin() * 0.5).collect();
+        vals[842] = -9.0;
+        make_argreduce_setup(vals, 842, dt, mt_argmin::kernel_ir_for)
+    }
+
+    #[test_kernel(name = "mlx/argmax_ties_f32", dtypes = [f32], tol = 0.0)]
+    fn test_argmax_ties_f32(dt: DType) -> TestSetup {
+        let vals: Vec<f32> = vec![-1.0, -2.0, -3.0, -4.0, 5.0, 5.0, 5.0, 5.0];
+        make_argreduce_setup(vals, 4, dt, mt_argmax::kernel_ir_for)
+    }
+
+    #[test_kernel(name = "mlx/argmin_ties_f32", dtypes = [f32], tol = 0.0)]
+    fn test_argmin_ties_f32(dt: DType) -> TestSetup {
+        let vals: Vec<f32> = vec![-5.0, -5.0, -5.0, -5.0, 1.0, 2.0, 3.0, 4.0];
+        make_argreduce_setup(vals, 0, dt, mt_argmin::kernel_ir_for)
+    }
+
+    #[test_kernel(name = "mlx/argmax_f16", dtypes = [f16], tol = 0.0)]
+    fn test_argmax_f16(dt: DType) -> TestSetup {
+        let mut vals_f32: Vec<f32> = (0..1024).map(|i| ((i as f32) * 0.013).sin() * 0.5).collect();
+        vals_f32[517] = 9.0;
+        let vals: Vec<f32> = vals_f32.iter().map(|&v| half::f16::from_f32(v).to_f32()).collect();
+        let expected = cpu_argmax(&vals);
+        make_argreduce_setup(vals, expected, dt, mt_argmax::kernel_ir_for)
+    }
+
+    #[test_kernel(name = "mlx/argmax_bf16", dtypes = [bf16], tol = 0.0)]
+    fn test_argmax_bf16(dt: DType) -> TestSetup {
+        let mut vals_f32: Vec<f32> = (0..1024).map(|i| ((i as f32) * 0.013).sin() * 0.5).collect();
+        vals_f32[517] = 9.0;
+        let vals: Vec<f32> = vals_f32.iter().map(|&v| half::bf16::from_f32(v).to_f32()).collect();
+        let expected = cpu_argmax(&vals);
+        make_argreduce_setup(vals, expected, dt, mt_argmax::kernel_ir_for)
+    }
+}

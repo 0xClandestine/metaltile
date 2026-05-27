@@ -126,3 +126,96 @@ pub fn mt_masked_scatter<T>(
         store(out[idx], chosen);
     }
 }
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+
+    fn pack_f32(vals: &[f32]) -> Vec<u8> {
+        bytemuck::cast_slice::<f32, u8>(vals).to_vec()
+    }
+
+    fn pack_u32(vals: &[u32]) -> Vec<u8> {
+        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
+    }
+
+    #[test_kernel(name = "mlx/gather_front_f32", dtypes = [f32], tol = 1e-6)]
+    fn test_gather_front_f32(dt: DType) -> TestSetup {
+        let (n_src_rows, n_out_rows, row_width) = (6usize, 9usize, 5usize);
+        let src: Vec<f32> = (0..n_src_rows * row_width).map(|i| i as f32 * 0.5 - 3.0).collect();
+        let indices: Vec<u32> = (0..n_out_rows).map(|r| ((r * 5 + 1) % n_src_rows) as u32).collect();
+        let mut expected = vec![0.0f32; n_out_rows * row_width];
+        for r in 0..n_out_rows {
+            let s = indices[r] as usize;
+            for i in 0..row_width {
+                expected[r * row_width + i] = src[s * row_width + i];
+            }
+        }
+        let total = n_out_rows * row_width;
+        let mut kernel = mt_gather_front::kernel_ir_for(dt);
+        kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("src",       pack_f32(&src),         dt))
+            .input(TestBuffer::from_vec("indices",   pack_u32(&indices),     DType::U32))
+            .input(TestBuffer::from_vec("out",       pack_f32(&vec![0.0f32; expected.len()]), dt))
+            .input(TestBuffer::from_vec("row_width", (row_width as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("n_elems",   (total as u32).to_le_bytes().to_vec(),     DType::U32))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), dt))
+            .grid_1d(total, 64)
+    }
+
+    #[test_kernel(name = "mlx/scatter_f16", dtypes = [f16], tol = 1e-2)]
+    fn test_scatter_f16(dt: DType) -> TestSetup {
+        let (n_upd_rows, n_out_rows, row_width) = (4usize, 7usize, 6usize);
+        let updates: Vec<f32> = (0..n_upd_rows * row_width).map(|i| i as f32 * 0.25 - 1.0).collect();
+        let indices: Vec<u32> = vec![5, 1, 6, 2];
+        let out_init: Vec<f32> = (0..n_out_rows * row_width).map(|i| 100.0 + i as f32).collect();
+        // Round expected through f16 to match GPU round-trip.
+        let mut expected: Vec<f32> = out_init.iter().map(|&v| half::f16::from_f32(v).to_f32()).collect();
+        for (r, &tgt) in indices.iter().enumerate() {
+            for i in 0..row_width {
+                expected[tgt as usize * row_width + i] = half::f16::from_f32(updates[r * row_width + i]).to_f32();
+            }
+        }
+        let total = n_upd_rows * row_width;
+        let pack_dt = |vals: &[f32]| -> Vec<u8> {
+            vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect()
+        };
+        let mut kernel = mt_scatter::kernel_ir_for(dt);
+        kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("updates",   pack_dt(&updates),  dt))
+            .input(TestBuffer::from_vec("indices",   pack_u32(&indices), DType::U32))
+            .input(TestBuffer::from_vec("out",       pack_dt(&out_init), dt))
+            .input(TestBuffer::from_vec("row_width", (row_width as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("n_elems",   (total as u32).to_le_bytes().to_vec(),     DType::U32))
+            .expect(TestBuffer::from_vec("out", pack_dt(&expected), dt))
+            .grid_1d(total, 64)
+    }
+
+    #[test_kernel(name = "mlx/masked_scatter_f32", dtypes = [f32], tol = 1e-6)]
+    fn test_masked_scatter_f32(dt: DType) -> TestSetup {
+        let n = 32usize;
+        let n_src = 16usize;
+        let src: Vec<f32> = (0..n_src).map(|i| i as f32 * 2.0 - 10.0).collect();
+        let mask: Vec<u32> = (0..n).map(|i| u32::from(i % 3 == 0)).collect();
+        let offsets: Vec<u32> = (0..n).map(|i| if i % 3 == 0 { ((i * 7 + 2) % n_src) as u32 } else { 0 }).collect();
+        let out_init: Vec<f32> = (0..n).map(|i| 1000.0 + i as f32).collect();
+        let mut expected = out_init.clone();
+        for i in 0..n {
+            if mask[i] != 0 { expected[i] = src[offsets[i] as usize]; }
+        }
+        let mut kernel = mt_masked_scatter::kernel_ir_for(dt);
+        kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("mask",    pack_u32(&mask),    DType::U32))
+            .input(TestBuffer::from_vec("offsets", pack_u32(&offsets), DType::U32))
+            .input(TestBuffer::from_vec("src",     pack_f32(&src),     dt))
+            .input(TestBuffer::from_vec("out",     pack_f32(&out_init), dt))
+            .input(TestBuffer::from_vec("n_elems", (n as u32).to_le_bytes().to_vec(), DType::U32))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected), dt))
+            .grid_1d(n, 64)
+    }
+}
