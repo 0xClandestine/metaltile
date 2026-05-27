@@ -362,3 +362,22 @@ fn has_attr(field: &syn::Field, name: &str) -> bool {
 fn has_variant_attr(variant: &syn::Variant, name: &str) -> bool {
     variant.attrs.iter().any(|a| a.path().is_ident(name))
 }
+
+// ---------------------------------------------------------------------------
+// Module-level re-exports used by lib.rs
+// ---------------------------------------------------------------------------
+
+/// Expand `#[derive(ValueRefs)]`.
+pub(crate) fn value_refs(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    derive_value_refs(input)
+}
+
+/// Expand `#[derive(OpFlags)]`.
+pub(crate) fn op_flags(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    derive_op_flags(input)
+}
+
+/// Expand `#[derive(VariantName)]`.
+pub(crate) fn variant_name(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    derive_variant_name(input)
+}
