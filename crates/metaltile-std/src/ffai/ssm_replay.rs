@@ -270,7 +270,7 @@ ssm_step_record!(
 ssm_replay!(ssm_replay_d128_128_32, 128u32, 128u32, 32u32, 4u32, "replay_d128_128_32");
 
 #[cfg(target_os = "macos")]
-pub mod tests_support {
+pub mod tests_support_ctx {
     use std::collections::BTreeMap;
 
     use metaltile_core::{dtype::DType, ir::KernelMode};

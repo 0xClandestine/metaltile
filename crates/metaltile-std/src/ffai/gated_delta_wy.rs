@@ -442,7 +442,7 @@ pub fn mt_gated_delta_wy_chunk<T>(
 }
 
 #[cfg(target_os = "macos")]
-pub mod tests_support {
+pub mod tests_support_ctx {
     //! GPU correctness tests for `mt_gated_delta_wy_chunk`.
     #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
