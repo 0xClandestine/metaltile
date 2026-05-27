@@ -75,3 +75,83 @@ pub fn ffai_argmax<T>(inp: Tensor<T>, out: Tensor<u32>, #[constexpr] n: u32) {
         store(out[0], final_idx);
     }
 }
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _           => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn pack_u32_single(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
+
+    fn argmax(vals: &[f32]) -> u32 {
+        let mut best_val = f32::NEG_INFINITY;
+        let mut best_idx = 0u32;
+        for (i, &v) in vals.iter().enumerate() {
+            if v > best_val { best_val = v; best_idx = i as u32; }
+        }
+        best_idx
+    }
+
+    fn make_argmax_setup(logits: Vec<f32>, expected_idx: u32, dt: DType) -> TestSetup {
+        let n = logits.len();
+        let mut kernel = ffai_argmax::kernel_ir_for(dt);
+        kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("inp", pack(&logits, dt), dt))
+            .input(TestBuffer::from_vec("out", vec![0u8; 4],      DType::U32))
+            .input(TestBuffer::from_vec("n",   (n as u32).to_le_bytes().to_vec(), DType::U32))
+            .expect(TestBuffer::from_vec("out", pack_u32_single(expected_idx), DType::U32))
+            .grid_3d(1, 1, 1, [256, 1, 1])
+    }
+
+    #[test_kernel(name = "ffai/argmax_peak_f32", dtypes = [f32], tol = 0.0)]
+    fn test_argmax_peak_f32(dt: DType) -> TestSetup {
+        let mut logits = vec![0.0_f32; 1024];
+        logits[777] = 100.0;
+        make_argmax_setup(logits, 777, dt)
+    }
+
+    #[test_kernel(name = "ffai/argmax_ties_f32", dtypes = [f32], tol = 0.0)]
+    fn test_argmax_ties_f32(dt: DType) -> TestSetup {
+        let mut logits = vec![0.0_f32; 512];
+        logits[42] = 10.0;
+        logits[300] = 10.0;
+        logits[500] = 10.0;
+        make_argmax_setup(logits, 42, dt)
+    }
+
+    #[test_kernel(name = "ffai/argmax_random_f32", dtypes = [f32], tol = 0.0)]
+    fn test_argmax_random_f32(dt: DType) -> TestSetup {
+        let mut logits: Vec<f32> = (0..1024).map(|i| ((i as f32) * 0.013).sin() * 0.5).collect();
+        logits[731] = 5.0;
+        make_argmax_setup(logits, 731, dt)
+    }
+
+    #[test_kernel(name = "ffai/argmax_random_f16", dtypes = [f16], tol = 0.0)]
+    fn test_argmax_random_f16(dt: DType) -> TestSetup {
+        let mut logits_f32: Vec<f32> = (0..1024).map(|i| ((i as f32) * 0.013).sin() * 0.5).collect();
+        logits_f32[731] = 5.0;
+        let logits: Vec<f32> = logits_f32.iter().map(|&v| half::f16::from_f32(v).to_f32()).collect();
+        let expected = argmax(&logits);
+        make_argmax_setup(logits, expected, dt)
+    }
+
+    #[test_kernel(name = "ffai/argmax_random_bf16", dtypes = [bf16], tol = 0.0)]
+    fn test_argmax_random_bf16(dt: DType) -> TestSetup {
+        let mut logits_f32: Vec<f32> = (0..1024).map(|i| ((i as f32) * 0.013).sin() * 0.5).collect();
+        logits_f32[731] = 5.0;
+        let logits: Vec<f32> = logits_f32.iter().map(|&v| half::bf16::from_f32(v).to_f32()).collect();
+        let expected = argmax(&logits);
+        make_argmax_setup(logits, expected, dt)
+    }
+}
