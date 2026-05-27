@@ -4,19 +4,7 @@
 
 use metaltile::kernel;
 
-#[kernel(
-    bench(
-        op="fp_quantized",
-        subop="fp4_quant_dequant",
-        class=FpQuantized,
-        n=1048576,
-        tpg=32,
-        tol=0.5,
-        mlx="nvfp4_quantize_dequantize_float_gs_16_b_4",
-        metal_file="fp_quantized.metal",
-        dtypes=crate::spec::F32_ONLY,
-    )
-)]
+#[kernel]
 pub fn mt_fp4_quant_dequant(inp: Tensor<f32>, out: Tensor<f32>, #[constexpr] n: u32) {
     let gid = program_id::<0>();
     let x = load(inp[gid]);
@@ -107,9 +95,7 @@ macro_rules! fp8_kernel {
         // Single-line `#[kernel(bench(...))]` — rustfmt's indent tracking inside
         // `macro_rules!` bodies is non-idempotent for multi-line attributes
         // (it adds 8 spaces every `fmt` run); a single line is stable.
-        #[kernel(
-            bench(op = "fp_quantized", subop = $subop, class = FpQuantized, n = 1048576, tpg = 32, tol = 0.05, dtypes = crate::spec::F32_ONLY)
-        )]
+        #[kernel]
         pub fn $name(inp: Tensor<f32>, out: Tensor<f32>, #[constexpr] n: u32) {
             let gid = program_id::<0>();
             let x = load(inp[gid]);

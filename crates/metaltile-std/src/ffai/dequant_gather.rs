@@ -43,9 +43,7 @@ use metaltile::kernel;
 
 macro_rules! dequant_gather_kernel {
     ($name:ident, $bits:literal, $subop:literal) => {
-        #[kernel(
-            bench(op="dequant_gather", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)
-        )]
+        #[kernel]
         pub fn $name<T>(
             weight: Tensor<u32>,
             scales: Tensor<T>,
