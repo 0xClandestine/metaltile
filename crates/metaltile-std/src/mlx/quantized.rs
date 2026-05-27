@@ -4929,3 +4929,153 @@ mod qmm_selector_tests {
         }
     }
 }
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+
+    fn pack_codes(codes: &[u32], bits: u32) -> Vec<u32> {
+        let total_bits = codes.len() as u32 * bits;
+        let n_words = total_bits.div_ceil(32) as usize;
+        let mut words = vec![0u32; n_words];
+        for (i, &c) in codes.iter().enumerate() {
+            let bit_off = i as u32 * bits;
+            let word = (bit_off / 32) as usize;
+            let shift = bit_off % 32;
+            words[word] |= (c & ((1u32 << bits) - 1)) << shift;
+            let lo = 32 - shift;
+            if lo < bits {
+                words[word + 1] |= c >> lo;
+            }
+        }
+        words
+    }
+
+    fn quantize_group(group: &[f32], bits: u32) -> (Vec<u32>, f32, f32) {
+        let max_code = ((1u32 << bits) - 1) as f32;
+        let mn = group.iter().copied().fold(f32::INFINITY, f32::min);
+        let mx = group.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let scale = if (mx - mn).abs() < 1e-10 { 1.0 } else { (mx - mn) / max_code };
+        let bias = mn;
+        let codes = group.iter().map(|&v| ((v - bias) / scale).round().clamp(0.0, max_code) as u32).collect();
+        (codes, scale, bias)
+    }
+
+    fn quantize_matrix(mat: &[f32], rows: usize, cols: usize, group_size: usize, bits: u32) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
+        let n_groups = cols / group_size;
+        let words_per_row = (cols as u32 * bits).div_ceil(32) as usize;
+        let mut packed = vec![0u32; rows * words_per_row];
+        let mut scales = vec![0.0f32; rows * n_groups];
+        let mut biases = vec![0.0f32; rows * n_groups];
+        for r in 0..rows {
+            let mut codes = vec![0u32; cols];
+            for g in 0..n_groups {
+                let off = g * group_size;
+                let slice = &mat[r * cols + off..r * cols + off + group_size];
+                let (c, s, b) = quantize_group(slice, bits);
+                scales[r * n_groups + g] = s;
+                biases[r * n_groups + g] = b;
+                codes[off..off + group_size].copy_from_slice(&c);
+            }
+            let w = pack_codes(&codes, bits);
+            packed[r * words_per_row..r * words_per_row + w.len()].copy_from_slice(&w);
+        }
+        (packed, scales, biases)
+    }
+
+    fn dequant_matrix(packed: &[u32], scales: &[f32], biases: &[f32], rows: usize, cols: usize, group_size: usize, bits: u32) -> Vec<f32> {
+        let n_groups = cols / group_size;
+        let words_per_row = (cols as u32 * bits).div_ceil(32) as usize;
+        let mask = (1u64 << bits) - 1;
+        let mut out = vec![0.0f32; rows * cols];
+        for r in 0..rows {
+            for c in 0..cols {
+                let bit_off = c as u32 * bits;
+                let word = (bit_off / 32) as usize;
+                let shift = bit_off % 32;
+                let base = r * words_per_row;
+                let lo = (packed[base + word] as u64) >> shift;
+                let hi = if 32 - shift < bits { (packed[base + word + 1] as u64) << (32 - shift) } else { 0 };
+                let code = ((lo | hi) & mask) as f32;
+                let g = c / group_size;
+                out[r * cols + c] = code * scales[r * n_groups + g] + biases[r * n_groups + g];
+            }
+        }
+        out
+    }
+
+    fn oracle_matvec(w_deq: &[f32], x: &[f32], n: usize, k: usize) -> Vec<f32> {
+        (0..n).map(|row| (0..k).map(|d| w_deq[row * k + d] * x[d]).sum()).collect()
+    }
+
+    fn pack_f32_dt(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+        }
+    }
+
+    fn pack_u32_bytes(vals: &[u32]) -> Vec<u8> {
+        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
+    }
+
+    fn unpack_dt(bytes: &[u8], dt: DType) -> Vec<f32> {
+        match dt {
+            DType::F16 => bytes.chunks_exact(2).map(|c| half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32()).collect(),
+            DType::BF16 => bytes.chunks_exact(2).map(|c| half::bf16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32()).collect(),
+            _ => bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect(),
+        }
+    }
+
+    fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
+        a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
+    }
+
+    // qmv tests (W [N,K] matvec)
+    #[test_kernel(name = "mlx/qmv_b4/f32", dtypes = [f32], tol = 1e-3)]
+    fn test_qmv_b4_f32(dt: DType) -> TestSetup {
+        let (n, k, group_size) = (64usize, 256usize, 64usize);
+        let w: Vec<f32> = (0..n * k).map(|i| (((i * 31 + 7) % 53) as f32 - 26.0) * 0.03).collect();
+        let x: Vec<f32> = (0..k).map(|d| (((d * 17 + 3) % 19) as f32 - 9.0) * 0.05).collect();
+        let (packed, scales, biases) = quantize_matrix(&w, n, k, group_size, 4);
+        let w_deq = dequant_matrix(&packed, &scales, &biases, n, k, group_size, 4);
+        let expected = oracle_matvec(&w_deq, &x, n, k);
+        let kernel = mt_qmv_b4::kernel_ir_for(dt);
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("w", pack_u32_bytes(&packed), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack_f32_dt(&scales, dt), dt))
+            .input(TestBuffer::from_vec("biases", pack_f32_dt(&biases, dt), dt))
+            .input(TestBuffer::from_vec("x", pack_f32_dt(&x, dt), dt))
+            .input(TestBuffer::from_vec("out", pack_f32_dt(&vec![0.0f32; n], dt), dt))
+            .input(TestBuffer::from_vec("k", (k as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("group_size", (group_size as u32).to_le_bytes().to_vec(), DType::U32))
+            .expect(TestBuffer::from_vec("out", pack_f32_dt(&expected, dt), dt))
+            .grid_3d(n, 1, 1, [32, 1, 1])
+    }
+
+    #[test_kernel(name = "mlx/qmv_b8/f32", dtypes = [f32], tol = 1e-3)]
+    fn test_qmv_b8_f32(dt: DType) -> TestSetup {
+        let (n, k, group_size) = (64usize, 256usize, 64usize);
+        let w: Vec<f32> = (0..n * k).map(|i| (((i * 31 + 7) % 53) as f32 - 26.0) * 0.03).collect();
+        let x: Vec<f32> = (0..k).map(|d| (((d * 17 + 3) % 19) as f32 - 9.0) * 0.05).collect();
+        let (packed, scales, biases) = quantize_matrix(&w, n, k, group_size, 8);
+        let w_deq = dequant_matrix(&packed, &scales, &biases, n, k, group_size, 8);
+        let expected = oracle_matvec(&w_deq, &x, n, k);
+        let kernel = mt_qmv_b8::kernel_ir_for(dt);
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("w", pack_u32_bytes(&packed), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack_f32_dt(&scales, dt), dt))
+            .input(TestBuffer::from_vec("biases", pack_f32_dt(&biases, dt), dt))
+            .input(TestBuffer::from_vec("x", pack_f32_dt(&x, dt), dt))
+            .input(TestBuffer::from_vec("out", pack_f32_dt(&vec![0.0f32; n], dt), dt))
+            .input(TestBuffer::from_vec("k", (k as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("group_size", (group_size as u32).to_le_bytes().to_vec(), DType::U32))
+            .expect(TestBuffer::from_vec("out", pack_f32_dt(&expected, dt), dt))
+            .grid_3d(n, 1, 1, [32, 1, 1])
+    }
+}

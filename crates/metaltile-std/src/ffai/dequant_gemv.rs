@@ -353,3 +353,159 @@ pub fn dequant_gemv_int4_fast<T>(
 pub fn dequant_gemv_wants_indirect(kernel_name: &str) -> bool {
     matches!(kernel_name, "dequant_gemv_int4_f16" | "dequant_gemv_int4_bf16")
 }
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+
+    fn quantize_row(row: &[f32], group_size: usize, bits: u32) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
+        let in_dim = row.len();
+        let n_groups = in_dim / group_size;
+        let n_u32 = in_dim * bits as usize / 32;
+        let mut packed = vec![0u32; n_u32];
+        let mut scales = vec![0.0_f32; n_groups];
+        let mut biases = vec![0.0_f32; n_groups];
+        let max_q = (1u32 << bits) - 1;
+        for g in 0..n_groups {
+            let g_slice = &row[g * group_size..(g + 1) * group_size];
+            let mn = g_slice.iter().copied().fold(f32::INFINITY, f32::min);
+            let mx = g_slice.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let range = mx - mn;
+            let scale = if range.abs() < 1e-10 { 1.0 } else { range / max_q as f32 };
+            scales[g] = scale;
+            biases[g] = mn;
+            for (i, &v) in g_slice.iter().enumerate() {
+                let q = ((v - mn) / scale).round().clamp(0.0, max_q as f32) as u32;
+                let bit_off = ((g * group_size + i) * bits as usize) as u32;
+                let word = (bit_off / 32) as usize;
+                let in_w = bit_off & 31;
+                let bits_in_w0 = 32 - in_w;
+                if bits_in_w0 >= bits { packed[word] |= q << in_w; }
+                else { packed[word] |= q << in_w; packed[word + 1] |= q >> bits_in_w0; }
+            }
+        }
+        (packed, scales, biases)
+    }
+
+    fn naive_dequant_gemv(weight: &[u32], scales: &[f32], biases: &[f32], input: &[f32], in_dim: usize, group_size: usize, bits: u32, out_dim: usize) -> Vec<f32> {
+        let u32_per_row = in_dim * bits as usize / 32;
+        let n_groups = in_dim / group_size;
+        let max_q_mask: u64 = (1u64 << bits) - 1;
+        let mut out = vec![0.0_f32; out_dim];
+        for row in 0..out_dim {
+            let mut acc = 0.0_f32;
+            let row_w = &weight[row * u32_per_row..(row + 1) * u32_per_row];
+            let row_s = &scales[row * n_groups..(row + 1) * n_groups];
+            let row_b = &biases[row * n_groups..(row + 1) * n_groups];
+            for (d, &x_d) in input.iter().enumerate().take(in_dim) {
+                let bit_off = (d * bits as usize) as u32;
+                let word = (bit_off / 32) as usize;
+                let in_w = bit_off & 31;
+                let bits_in_w0 = 32 - in_w;
+                let q = if bits_in_w0 >= bits {
+                    ((row_w[word] as u64) >> in_w) & max_q_mask
+                } else {
+                    let lo_bits = bits_in_w0;
+                    let lo = ((row_w[word] as u64) >> in_w) & ((1u64 << lo_bits) - 1);
+                    let hi = ((row_w[word + 1] as u64) & ((1u64 << (bits - lo_bits)) - 1)) << lo_bits;
+                    lo | hi
+                };
+                acc += (q as f32 * row_s[d / group_size] + row_b[d / group_size]) * x_d;
+            }
+            out[row] = acc;
+        }
+        out
+    }
+
+    fn build_source(out_dim: usize, in_dim: usize, seed: u64) -> Vec<f32> {
+        let mut s = seed;
+        (0..out_dim * in_dim).map(|i| {
+            s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+            let raw = ((s as i64 % 20_000) as f32) / 10_000.0;
+            let group_offset = (((i / 32) as f32) * 0.7).sin();
+            raw + group_offset
+        }).collect()
+    }
+
+    fn build_input(in_dim: usize, seed: u64) -> Vec<f32> {
+        let mut s = seed;
+        (0..in_dim).map(|_| {
+            s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+            ((s as i64 % 10_000) as f32) / 10_000.0 - 0.5
+        }).collect()
+    }
+
+    fn dequantize_full(rows: &[f32], out_dim: usize, in_dim: usize, group_size: usize, bits: u32) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
+        let u32_per_row = in_dim * bits as usize / 32;
+        let n_groups = in_dim / group_size;
+        let mut weight = Vec::with_capacity(u32_per_row * out_dim);
+        let mut scales = Vec::with_capacity(n_groups * out_dim);
+        let mut biases = Vec::with_capacity(n_groups * out_dim);
+        for row in 0..out_dim {
+            let r = &rows[row * in_dim..(row + 1) * in_dim];
+            let (w, s, b) = quantize_row(r, group_size, bits);
+            weight.extend(w); scales.extend(s); biases.extend(b);
+        }
+        (weight, scales, biases)
+    }
+
+    fn pack_f32_dt(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+        }
+    }
+    fn pack_u32_bytes(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
+    fn round_dt(v: f32, dt: DType) -> f32 {
+        match dt { DType::F16 => half::f16::from_f32(v).to_f32(), DType::BF16 => half::bf16::from_f32(v).to_f32(), _ => v }
+    }
+
+    #[test_kernel(name = "ffai/dequant_gemv_int4/f32", dtypes = [f32], tol = 5e-3)]
+    fn test_dequant_gemv_int4_f32(dt: DType) -> TestSetup {
+        let (bits, in_dim, group_size, out_dim) = (4u32, 256usize, 32usize, 4usize);
+        let rows = build_source(out_dim, in_dim, 0x9E3779B9 ^ ((bits as u64) << 16));
+        let input_raw = build_input(in_dim, 0xDEADBEEF ^ ((bits as u64) << 16));
+        let input: Vec<f32> = input_raw.iter().map(|&v| round_dt(v, dt)).collect();
+        let (weight, scales, biases) = dequantize_full(&rows, out_dim, in_dim, group_size, bits);
+        let scales_r: Vec<f32> = scales.iter().map(|&v| round_dt(v, dt)).collect();
+        let biases_r: Vec<f32> = biases.iter().map(|&v| round_dt(v, dt)).collect();
+        let expected = naive_dequant_gemv(&weight, &scales_r, &biases_r, &input, in_dim, group_size, bits, out_dim);
+        let kernel = dequant_gemv_int4::kernel_ir_for(dt);
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("weight", pack_u32_bytes(&weight), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack_f32_dt(&scales, dt), dt))
+            .input(TestBuffer::from_vec("biases", pack_f32_dt(&biases, dt), dt))
+            .input(TestBuffer::from_vec("input", pack_f32_dt(&input, dt), dt))
+            .input(TestBuffer::from_vec("output", pack_f32_dt(&vec![0.0f32; out_dim], dt), dt))
+            .input(TestBuffer::from_vec("in_dim", (in_dim as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("group_size", (group_size as u32).to_le_bytes().to_vec(), DType::U32))
+            .expect(TestBuffer::from_vec("output", pack_f32_dt(&expected, dt), dt))
+            .grid_3d(out_dim, 1, 1, [128, 1, 1])
+    }
+
+    #[test_kernel(name = "ffai/dequant_gemv_int8/f32", dtypes = [f32], tol = 5e-4)]
+    fn test_dequant_gemv_int8_f32(dt: DType) -> TestSetup {
+        let (bits, in_dim, group_size, out_dim) = (8u32, 256usize, 32usize, 4usize);
+        let rows = build_source(out_dim, in_dim, 0x9E3779B9 ^ ((bits as u64) << 16));
+        let input_raw = build_input(in_dim, 0xDEADBEEF ^ ((bits as u64) << 16));
+        let input: Vec<f32> = input_raw.iter().map(|&v| round_dt(v, dt)).collect();
+        let (weight, scales, biases) = dequantize_full(&rows, out_dim, in_dim, group_size, bits);
+        let scales_r: Vec<f32> = scales.iter().map(|&v| round_dt(v, dt)).collect();
+        let biases_r: Vec<f32> = biases.iter().map(|&v| round_dt(v, dt)).collect();
+        let expected = naive_dequant_gemv(&weight, &scales_r, &biases_r, &input, in_dim, group_size, bits, out_dim);
+        let kernel = dequant_gemv_int8::kernel_ir_for(dt);
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("weight", pack_u32_bytes(&weight), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack_f32_dt(&scales, dt), dt))
+            .input(TestBuffer::from_vec("biases", pack_f32_dt(&biases, dt), dt))
+            .input(TestBuffer::from_vec("input", pack_f32_dt(&input, dt), dt))
+            .input(TestBuffer::from_vec("output", pack_f32_dt(&vec![0.0f32; out_dim], dt), dt))
+            .input(TestBuffer::from_vec("in_dim", (in_dim as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("group_size", (group_size as u32).to_le_bytes().to_vec(), DType::U32))
+            .expect(TestBuffer::from_vec("output", pack_f32_dt(&expected, dt), dt))
+            .grid_3d(out_dim, 1, 1, [128, 1, 1])
+    }
+}
