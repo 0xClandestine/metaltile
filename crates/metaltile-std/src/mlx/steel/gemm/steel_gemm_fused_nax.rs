@@ -47,16 +47,18 @@
 //! `crates/metaltile-std/tests/steel_gemm_fused_nax_gpu_correctness.rs`.
 
 use metaltile::kernel;
-use metaltile_core::ir::KernelMode;
-
-use crate::{
-    bench_types::DType,
-    spec::{BenchDispatch, BenchSpec},
-};
 
 /// NAX fused GEMM `C = A · B`. Params:
 ///   `a [m, k]`, `b [k, n]`, `out [m, n]`.
-#[kernel]
+#[kernel(
+    bench(
+        op="steel_gemm",
+        subop="fused_nax",
+        class=GenericEmpty,
+        tol=5e-2,
+        kernel_mode=Reduction,
+    )
+)]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_steel_gemm_fused_nax<T>(
     a: Tensor<T>,
@@ -144,22 +146,6 @@ pub fn mt_steel_gemm_fused_nax<T>(
         let col = o_col_base + _i;
         let v = threadgroup_load("OutScratch", sg_scratch_off + o_row * 16u32 + col);
         store(out[(out_m_base + o_row) * n + (out_n_base + col)], v.cast::<T>());
-    }
-}
-
-inventory::submit! {
-    BenchSpec {
-        op: "steel_gemm",
-        subop: "fused_nax",
-        kernel_name: "mt_steel_gemm_fused_nax",
-        kernel_ir: mt_steel_gemm_fused_nax::kernel_ir_for,
-        dtypes: &[DType::F32, DType::F16, DType::BF16],
-        tol: 5e-2,
-        mlx_src: None,
-        mlx_pattern: None,
-        shapes: &[],
-        dispatch: BenchDispatch::Generic,
-        kernel_mode: Some(KernelMode::Reduction),
     }
 }
 

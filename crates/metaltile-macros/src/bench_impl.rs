@@ -227,6 +227,7 @@ impl Parse for BenchArgs {
                         "GenericEmpty" => ClassKind::GenericEmpty,
                         "SdpaVector2Pass" => ClassKind::SdpaVector2Pass,
                         "SdpaBatchedDecode" => ClassKind::SdpaBatchedDecode,
+                        "SteelGemm" => ClassKind::SteelGemm,
                         o => {
                             return Err(syn::Error::new(id.span(), format!("unknown class `{o}`")));
                         },
@@ -317,6 +318,8 @@ impl Parse for BenchArgs {
                     };
                     variant_field = Some(var);
                 },
+                "bm" => bm_field = Some(input.parse()?),
+                "bn" => bn_field = Some(input.parse()?),
                 o => {
                     return Err(syn::Error::new(key.span(), format!("unknown bench arg: `{o}`")));
                 },
@@ -373,6 +376,8 @@ impl Parse for BenchArgs {
             pass2_kernel: pass2_kernel_field,
             batch_q: batch_q_field,
             variant: variant_field,
+            bm: bm_field,
+            bn: bn_field,
         })
     }
 }
@@ -1072,6 +1077,25 @@ pub fn generate_submit(fn_name: &syn::Ident, a: &BenchArgs, is_generic: bool) ->
                     gqa_factor: #gqa as usize,
                     batch_q: #bq as usize,
                     variant: #variant_dispatch,
+                    tpg: #tpg_val as usize,
+                }
+            })
+        },
+        // ── Complex: SteelGemm ────────────────────────────────
+        ClassKind::SteelGemm => {
+            let bm_val = a.bm.as_ref().expect("SteelGemm requires bm");
+            let bn_val = a.bn.as_ref().expect("SteelGemm requires bn");
+            let tpg_val = a.tpg.as_ref().expect("SteelGemm requires tpg");
+            (quote! { &[] }, quote! {
+                crate::spec::BenchDispatch::SteelGemm {
+                    m: 4096usize,
+                    n: 4096usize,
+                    k: 4096usize,
+                    check_m: #bm_val as usize,
+                    check_n: #bn_val as usize,
+                    check_k: 16usize,
+                    bm: #bm_val as usize,
+                    bn: #bn_val as usize,
                     tpg: #tpg_val as usize,
                 }
             })

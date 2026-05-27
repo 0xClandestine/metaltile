@@ -4405,37 +4405,20 @@ pub fn mt_affine_dequantize_int6<T>(
 // - **`K` must be a multiple of 32** and **`G` must divide `K`**.
 //   Every Qwen3 / Qwen3.6 quantized shape satisfies both.
 
-/// `BenchSpec` for a kernel in the multi-bit qmv/qvm/qmm family.
-macro_rules! quantized_family_spec {
-    ($name:ident, $subop:literal) => {
-        inventory::submit! {
-            crate::spec::BenchSpec {
-                op: "quantized",
-                subop: $subop,
-                kernel_name: stringify!($name),
-                kernel_ir: $name::kernel_ir_for,
-                dtypes: &[
-                    metaltile_core::dtype::DType::F32,
-                    metaltile_core::dtype::DType::F16,
-                    metaltile_core::dtype::DType::BF16,
-                ],
-                tol: 5e-2, // int-quant — wide tolerance vs full-precision oracle
-                mlx_src: None,
-                mlx_pattern: None,
-                shapes: &[],
-                dispatch: crate::spec::BenchDispatch::Generic,
-                kernel_mode: Some(metaltile_core::ir::KernelMode::Reduction),
-            }
-        }
-    };
-}
-
 /// Quantized matvec / matmul (`y = W · x`) — pow2 bit-widths (4, 8).
 /// `mt_qmm_b*` is the M-batched form; `mt_qmv_b*` its M=1 row. W is
 /// `[N, K]` row-major; element `(row, d)` lives in a pack-aligned u32.
 macro_rules! qmv_pow2 {
     ($name:ident, $bits:literal, $subop:literal) => {
-        #[kernel]
+        #[kernel(
+                    bench(
+                        op="quantized",
+                        subop=$subop,
+                        class=GenericEmpty,
+                        tol=5e-2,
+                        kernel_mode=Reduction,
+                    )
+                )]
         pub fn $name<T>(
             w: Tensor<u32>,
             scales: Tensor<T>,
@@ -4486,7 +4469,6 @@ macro_rules! qmv_pow2 {
                 store(out[m_row * n + row], total.cast::<T>());
             }
         }
-        quantized_family_spec!($name, $subop);
     };
 }
 
@@ -4495,7 +4477,15 @@ macro_rules! qmv_pow2 {
 /// consecutive u32 words.
 macro_rules! qmv_odd {
     ($name:ident, $bits:literal, $subop:literal) => {
-        #[kernel]
+        #[kernel(
+                    bench(
+                        op="quantized",
+                        subop=$subop,
+                        class=GenericEmpty,
+                        tol=5e-2,
+                        kernel_mode=Reduction,
+                    )
+                )]
         pub fn $name<T>(
             w: Tensor<u32>,
             scales: Tensor<T>,
@@ -4551,7 +4541,6 @@ macro_rules! qmv_odd {
                 store(out[m_row * n + row], total.cast::<T>());
             }
         }
-        quantized_family_spec!($name, $subop);
     };
 }
 
@@ -4559,7 +4548,15 @@ macro_rules! qmv_odd {
 /// row-major; output column `c` sums over K, reading element `(d, c)`.
 macro_rules! qvm_pow2 {
     ($name:ident, $bits:literal, $subop:literal) => {
-        #[kernel]
+        #[kernel(
+                    bench(
+                        op="quantized",
+                        subop=$subop,
+                        class=GenericEmpty,
+                        tol=5e-2,
+                        kernel_mode=Reduction,
+                    )
+                )]
         pub fn $name<T>(
             w: Tensor<u32>,
             scales: Tensor<T>,
@@ -4606,7 +4603,6 @@ macro_rules! qvm_pow2 {
                 store(out[m_row * n + col], total.cast::<T>());
             }
         }
-        quantized_family_spec!($name, $subop);
     };
 }
 
@@ -4614,7 +4610,15 @@ macro_rules! qvm_pow2 {
 /// bit-stream-packed.
 macro_rules! qvm_odd {
     ($name:ident, $bits:literal, $subop:literal) => {
-        #[kernel]
+        #[kernel(
+                    bench(
+                        op="quantized",
+                        subop=$subop,
+                        class=GenericEmpty,
+                        tol=5e-2,
+                        kernel_mode=Reduction,
+                    )
+                )]
         pub fn $name<T>(
             w: Tensor<u32>,
             scales: Tensor<T>,
@@ -4666,7 +4670,6 @@ macro_rules! qvm_odd {
                 store(out[m_row * n + col], total.cast::<T>());
             }
         }
-        quantized_family_spec!($name, $subop);
     };
 }
 
@@ -4742,7 +4745,15 @@ qvm_odd!(mt_qvm_b6, 6u32, "qvm_b6");
 /// Each simdgroup handles 4 consecutive output columns. Lane-strided over
 /// K: each lane covers `K/32` K-positions. Grid: `[N/8, 1, 1]`, TPG = 64,
 /// group_size = 64.
-#[kernel]
+#[kernel(
+    bench(
+        op="quantized",
+        subop="qvm_int4_fast",
+        class=GenericEmpty,
+        tol=5e-2,
+        kernel_mode=Reduction,
+    )
+)]
 pub fn mt_qvm_int4_fast<T>(
     w: Tensor<u32>,
     scales: Tensor<T>,
@@ -4863,8 +4874,6 @@ pub fn mt_qvm_int4_fast<T>(
     }
 }
 
-quantized_family_spec!(mt_qvm_int4_fast, "qvm_int4_fast");
-
 // ─── mt_qmm_mma_b{3,5,6} — bit-stream MMA for odd bit-widths ────────────────
 //
 // Bit-width-generalized siblings of `mt_qmm_mma` for int3 / int5 / int6
@@ -4884,7 +4893,15 @@ quantized_family_spec!(mt_qvm_int4_fast, "qvm_int4_fast");
 // Grid: [N/32, M/32, 1], tpg=128 (4 SG × 32 lanes).
 macro_rules! qmm_mma_bitwidth {
     ($name:ident, $bits:literal, $subop:literal) => {
-        #[kernel]
+        #[kernel(
+                    bench(
+                        op="quantized",
+                        subop=$subop,
+                        class=GenericEmpty,
+                        tol=5e-2,
+                        kernel_mode=Reduction,
+                    )
+                )]
         #[allow(clippy::too_many_arguments)]
         pub fn $name<T>(
             w: Tensor<u32>,
@@ -5168,26 +5185,6 @@ macro_rules! qmm_mma_bitwidth {
                 out[(out_m_base + 8u32 + fm) * n + out_n_base + 8u32 + fn1],
                 simdgroup_elem_load(c_f11, 1).cast::<T>(),
             );
-        }
-
-        inventory::submit! {
-            crate::spec::BenchSpec {
-                op: "quantized",
-                subop: $subop,
-                kernel_name: stringify!($name),
-                kernel_ir: $name::kernel_ir_for,
-                dtypes: &[
-                    metaltile_core::dtype::DType::F32,
-                    metaltile_core::dtype::DType::F16,
-                    metaltile_core::dtype::DType::BF16,
-                ],
-                tol: 5e-2,
-                mlx_src: None,
-                mlx_pattern: None,
-                shapes: &[],
-                dispatch: crate::spec::BenchDispatch::Generic,
-                kernel_mode: Some(metaltile_core::ir::KernelMode::Reduction),
-            }
         }
     };
 }
