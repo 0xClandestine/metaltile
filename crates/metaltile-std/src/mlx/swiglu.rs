@@ -54,3 +54,85 @@ pub fn mt_swiglu<T>(gate: Tensor<T>, up: Tensor<T>, out: Tensor<T>) {
     let s = mt_silu(g);
     store(out[idx], (s * u).cast::<T>());
 }
+
+// ── bottom of source file ────────────────────────────────────────────────
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        use DType::*;
+        match dt {
+            F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _    => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn round(v: f32, dt: DType) -> f32 {
+        match dt {
+            DType::F32 => v,
+            DType::F16 => half::f16::from_f32(v).to_f32(),
+            DType::BF16 => half::bf16::from_f32(v).to_f32(),
+            _ => v,
+        }
+    }
+
+    fn cpu_swiglu(gate: &[f32], up: &[f32]) -> Vec<f32> {
+        gate.iter()
+            .zip(up.iter())
+            .map(|(&g, &u)| {
+                // silu(x) = x * sigmoid(x) = x / (1 + exp(-x))
+                let silu_g = g / (1.0 + (-g).exp());
+                silu_g * u
+            })
+            .collect()
+    }
+
+    #[test_kernel(name = "mlx/swiglu", dtypes = [f32], tol = 1e-5)]
+    fn test_swiglu_f32(dt: DType) -> TestSetup {
+        let n = 1024usize;
+        let gate: Vec<f32> = (0..n).map(|i| (i as f32 * 0.017) % 6.0 - 3.0).collect();
+        let up: Vec<f32> = (0..n).map(|i| (i as f32 * 0.029) % 4.0 - 2.0).collect();
+        let expected = cpu_swiglu(&gate, &up);
+        TestSetup::new(mt_swiglu::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("gate", pack(&gate, dt), dt))
+            .input(TestBuffer::from_vec("up", pack(&up, dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .grid_1d(n, 256)
+    }
+
+    #[test_kernel(name = "mlx/swiglu_f16", dtypes = [f16], tol = 5e-3)]
+    fn test_swiglu_f16(dt: DType) -> TestSetup {
+        let n = 2048usize;
+        let gate: Vec<f32> =
+            (0..n).map(|i| round((i as f32 * 0.013) % 8.0 - 4.0, dt)).collect();
+        let up: Vec<f32> =
+            (0..n).map(|i| round((i as f32 * 0.021) % 3.0 - 1.5, dt)).collect();
+        let expected = cpu_swiglu(&gate, &up);
+        TestSetup::new(mt_swiglu::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("gate", pack(&gate, dt), dt))
+            .input(TestBuffer::from_vec("up", pack(&up, dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .grid_1d(n, 256)
+    }
+
+    #[test_kernel(name = "mlx/swiglu_bf16", dtypes = [bf16], tol = 2e-2)]
+    fn test_swiglu_bf16(dt: DType) -> TestSetup {
+        let n = 1024usize;
+        let gate: Vec<f32> =
+            (0..n).map(|i| round((i as f32 * 0.019) % 6.0 - 3.0, dt)).collect();
+        let up: Vec<f32> =
+            (0..n).map(|i| round((i as f32 * 0.023) % 4.0 - 2.0, dt)).collect();
+        let expected = cpu_swiglu(&gate, &up);
+        TestSetup::new(mt_swiglu::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("gate", pack(&gate, dt), dt))
+            .input(TestBuffer::from_vec("up", pack(&up, dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .grid_1d(n, 256)
+    }
+}
