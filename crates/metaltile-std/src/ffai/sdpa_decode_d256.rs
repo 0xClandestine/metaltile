@@ -218,3 +218,100 @@ mod tests {
         }
     }
 }
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile::test_kernel;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 =>
+                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn ramp(n: usize, modulus: usize, offset: f32) -> Vec<f32> {
+        (0..n).map(|i| ((i % modulus) as f32 - offset) * 0.05).collect()
+    }
+
+    fn naive_sdpa(
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        n_q_heads: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+        n_kv: usize,
+        scale: f32,
+    ) -> Vec<f32> {
+        let gqa = n_q_heads / n_kv_heads;
+        let mut out = vec![0.0f32; n_q_heads * head_dim];
+        for qh in 0..n_q_heads {
+            let kvh = qh / gqa;
+            let q_off = qh * head_dim;
+            let kv_slab = kvh * n_kv * head_dim;
+            let mut scores = vec![0.0f32; n_kv];
+            for (t, score) in scores.iter_mut().enumerate() {
+                let k_off = kv_slab + t * head_dim;
+                let mut dot = 0.0f32;
+                for d in 0..head_dim {
+                    dot += q[q_off + d] * k[k_off + d];
+                }
+                *score = dot * scale;
+            }
+            let m = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut sum = 0.0f32;
+            for s in scores.iter_mut() {
+                *s = (*s - m).exp();
+                sum += *s;
+            }
+            let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+            for (t, s) in scores.iter().enumerate() {
+                let w = s * inv;
+                let v_off = kv_slab + t * head_dim;
+                for d in 0..head_dim {
+                    out[q_off + d] += w * v[v_off + d];
+                }
+            }
+        }
+        out
+    }
+
+    #[test_kernel(name = "ffai/sdpa_decode_d256/f32", dtypes = [f32], tol = 1e-3)]
+    fn test_sdpa_decode_d256(dt: DType) -> TestSetup {
+        use metaltile_core::ir::KernelMode;
+        let n_q_heads = 4usize;
+        let n_kv_heads = 1usize;
+        let head_dim = 256usize;
+        let n_kv = 8usize;
+        let kv_stride = 8usize;
+        let heads_per_group = n_q_heads / n_kv_heads;
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+        let q = ramp(n_q_heads * head_dim, 19, 9.0);
+        let k = ramp(n_kv_heads * kv_stride * head_dim, 23, 7.0);
+        let v = ramp(n_kv_heads * kv_stride * head_dim, 29, 5.0);
+        let expected = naive_sdpa(&q, &k, &v, n_q_heads, n_kv_heads, head_dim, n_kv, scale);
+        let mut kernel = ffai_sdpa_decode_d256::kernel_ir_for(dt);
+        kernel.mode = KernelMode::Reduction;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("q", pack(&q, dt), dt))
+            .input(TestBuffer::from_vec("k", pack(&k, dt), dt))
+            .input(TestBuffer::from_vec("v", pack(&v, dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .constexpr("head_dim", head_dim as u32)
+            .constexpr("n_kv", n_kv as u32)
+            .constexpr("kv_stride", kv_stride as u32)
+            .constexpr("heads_per_group", heads_per_group as u32)
+            .constexpr("scale", scale)
+            .grid_3d(n_q_heads as u32, 1, 1, [1024, 1, 1])
+    }
+}
