@@ -1113,20 +1113,24 @@ pub fn generate_submit(fn_name: &syn::Ident, a: &BenchArgs, is_generic: bool) ->
     let km_ts = kernel_mode_ts(&a.kernel_mode);
 
     quote! {
-        ::inventory::submit! {
-            crate::spec::BenchSpec {
-                op:          #op,
-                subop:       #subop,
-                kernel_name: #fn_str,
-                kernel_ir:   #kernel_ir_expr,
-                dtypes:      #dtypes,
-                tol:         #tol as f32,
-                mlx_src:     #mlx_src,
-                mlx_pattern: #mlx_pat,
-                shapes:      #shapes_ts,
-                dispatch:    #dispatch_ts,
-                kernel_mode: #km_ts,
+        const _: () = {
+            #[allow(unused_imports)]
+            use crate::bench_types::DType;
+            ::inventory::submit! {
+                crate::spec::BenchSpec {
+                    op:          #op,
+                    subop:       #subop,
+                    kernel_name: #fn_str,
+                    kernel_ir:   #kernel_ir_expr,
+                    dtypes:      #dtypes,
+                    tol:         #tol as f32,
+                    mlx_src:     #mlx_src,
+                    mlx_pattern: #mlx_pat,
+                    shapes:      #shapes_ts,
+                    dispatch:    #dispatch_ts,
+                    kernel_mode: #km_ts,
+                }
             }
-        }
+        };
     }
 }

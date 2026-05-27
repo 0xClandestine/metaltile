@@ -151,7 +151,7 @@ pub fn mt_steel_gemm_gather_nax<T>(
 #[cfg(test)]
 mod tests {
     use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::ir::Op;
+    use metaltile_core::{dtype::DType, ir::Op};
 
     use super::*;
 
