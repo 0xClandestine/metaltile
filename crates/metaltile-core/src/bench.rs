@@ -635,15 +635,15 @@ pub trait KernelTest: Send + Sync {
 ///
 /// Submitted to the inventory by `register_bench!` or the `#[bench]` macro.
 pub struct KernelBenchEntry {
-    pub(crate) inner: Box<dyn KernelBench>,
+    pub(crate) inner: &'static dyn KernelBench,
 }
 
 impl KernelBenchEntry {
     /// Wrap a `KernelBench` impl for inventory submission.
-    pub fn new(inner: Box<dyn KernelBench>) -> Self { KernelBenchEntry { inner } }
+    pub const fn new(inner: &'static dyn KernelBench) -> Self { KernelBenchEntry { inner } }
 
     /// Access the inner `KernelBench` trait object.
-    pub fn as_ref(&self) -> &dyn KernelBench { &*self.inner }
+    pub fn as_ref(&self) -> &dyn KernelBench { self.inner }
 }
 
 inventory::collect!(KernelBenchEntry);
@@ -652,15 +652,15 @@ inventory::collect!(KernelBenchEntry);
 ///
 /// Submitted to the inventory by `register_test!` or the `#[test_kernel]` macro.
 pub struct KernelTestEntry {
-    pub(crate) inner: Box<dyn KernelTest>,
+    pub(crate) inner: &'static dyn KernelTest,
 }
 
 impl KernelTestEntry {
     /// Wrap a `KernelTest` impl for inventory submission.
-    pub fn new(inner: Box<dyn KernelTest>) -> Self { KernelTestEntry { inner } }
+    pub const fn new(inner: &'static dyn KernelTest) -> Self { KernelTestEntry { inner } }
 
     /// Access the inner `KernelTest` trait object.
-    pub fn as_ref(&self) -> &dyn KernelTest { &*self.inner }
+    pub fn as_ref(&self) -> &dyn KernelTest { self.inner }
 }
 
 inventory::collect!(KernelTestEntry);

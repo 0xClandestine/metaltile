@@ -90,7 +90,7 @@ pub use metaltile_codegen::error::Error as CodegenError;
 /// Core IR, dtype, shape, and constexpr definitions.
 pub use metaltile_core as core;
 /// Proc macros and helper macros used by kernel definitions.
-pub use metaltile_macros::{constexpr, kernel, scalar, shape, strided, tile};
+pub use metaltile_macros::{constexpr, kernel, scalar, shape, strided, test_kernel, tile};
 /// Runtime context, dispatch result, and top-level runtime error.
 pub use metaltile_runtime::{Context, DispatchResult, MetalTileError};
 /// Placeholder tensor marker used in `#[kernel]` signatures.
@@ -122,16 +122,12 @@ pub use prelude::Tensor;
 /// ```
 #[macro_export]
 macro_rules! register_bench {
-    ($ty:ty) => {
+    ($ty:ty) => {{
+        static __IMPL: $ty = <$ty as ::core::default::Default>::default();
         metaltile_core::inventory::submit! {
-            metaltile_core::KernelBenchEntry::new(Box::new(<$ty>::default()))
+            metaltile_core::KernelBenchEntry::new(&__IMPL)
         }
-    };
-    ($val:expr) => {
-        metaltile_core::inventory::submit! {
-            metaltile_core::KernelBenchEntry::new(Box::new($val))
-        }
-    };
+    }};
 }
 
 /// Register a [`KernelTest`] implementation in the global inventory.
@@ -153,14 +149,10 @@ macro_rules! register_bench {
 /// ```
 #[macro_export]
 macro_rules! register_test {
-    ($ty:ty) => {
+    ($ty:ty) => {{
+        static __IMPL: $ty = <$ty as ::core::default::Default>::default();
         metaltile_core::inventory::submit! {
-            metaltile_core::KernelTestEntry::new(Box::new(<$ty>::default()))
+            metaltile_core::KernelTestEntry::new(&__IMPL)
         }
-    };
-    ($val:expr) => {
-        metaltile_core::inventory::submit! {
-            metaltile_core::KernelTestEntry::new(Box::new($val))
-        }
-    };
+    }};
 }
