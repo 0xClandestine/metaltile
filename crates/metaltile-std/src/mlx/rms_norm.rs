@@ -339,3 +339,265 @@ mod wide_tests {
         }
     }
 }
+
+mod tests_support {
+    #![allow(unused, dead_code)]
+    use super::*;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+        ir::KernelMode,
+    };
+    use metaltile::test_kernel;
+
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => {
+                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect()
+            },
+            DType::BF16 => {
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect()
+            },
+            _ => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn dt_round(v: f32, dt: DType) -> f32 {
+        match dt {
+            DType::F32 => v,
+            DType::F16 => half::f16::from_f32(v).to_f32(),
+            DType::BF16 => half::bf16::from_f32(v).to_f32(),
+            _ => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+
+    fn ramp(n: usize, modulus: usize, offset: f32) -> Vec<f32> {
+        (0..n).map(|i| ((i % modulus) as f32 - offset) * 0.05).collect()
+    }
+
+    fn naive_rms_norm(x: &[f32], w: &[f32], n: usize, eps: f32) -> Vec<f32> {
+        assert_eq!(x.len() % n, 0);
+        assert_eq!(w.len(), n);
+        let rows = x.len() / n;
+        let mut out = vec![0.0f32; x.len()];
+        for r in 0..rows {
+            let base = r * n;
+            let ssq: f32 = x[base..base + n].iter().map(|v| v * v).sum();
+            let rms = (ssq / n as f32 + eps).sqrt().recip();
+            for d in 0..n {
+                out[base + d] = x[base + d] * rms * w[d];
+            }
+        }
+        out
+    }
+
+    fn make_rms_norm_setup(n: usize, rows: usize, eps: f32, dt: DType) -> TestSetup {
+        let tpg = n / 4;
+        let x: Vec<f32> = (0..rows * n)
+            .map(|i| dt_round(((i % 23) as f32 - 11.0) * 0.3, dt))
+            .collect();
+        let w: Vec<f32> =
+            (0..n).map(|i| dt_round(1.0 + (i % 7) as f32 * 0.05, dt)).collect();
+        let expected = naive_rms_norm(&x, &w, n, eps);
+        let mut kernel = mt_rms_norm::kernel_ir_for(dt);
+        kernel.mode = KernelMode::Reduction;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("x", pack(&x, dt), dt))
+            .input(TestBuffer::from_vec("w", pack(&w, dt), dt))
+            .input(TestBuffer::from_vec("eps_buf", eps.to_le_bytes().to_vec(), DType::F32))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .constexpr("n", n as u32)
+            .grid_3d(rows as u32, 1, 1, [tpg as u32, 1, 1])
+    }
+
+    fn make_rms_norm_small_setup(n: usize, rows: usize, eps: f32, dt: DType) -> TestSetup {
+        let tpg = n / 2;
+        let x: Vec<f32> = (0..rows * n)
+            .map(|i| dt_round(0.5 + ((i % 17) as f32) * 0.03 - ((i % 11) as f32) * 0.02, dt))
+            .collect();
+        let w: Vec<f32> =
+            (0..n).map(|i| dt_round(1.0 + (i % 13) as f32 * 0.01, dt)).collect();
+        let expected = naive_rms_norm(&x, &w, n, eps);
+        let mut kernel = mt_rms_norm_small::kernel_ir_for(dt);
+        kernel.mode = KernelMode::Reduction;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("x", pack(&x, dt), dt))
+            .input(TestBuffer::from_vec("w", pack(&w, dt), dt))
+            .input(TestBuffer::from_vec("eps_buf", eps.to_le_bytes().to_vec(), DType::F32))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .constexpr("n", n as u32)
+            .grid_3d(rows as u32, 1, 1, [tpg as u32, 1, 1])
+    }
+
+    fn make_rms_norm_wide_setup(n: usize, rows: usize, eps: f32, dt: DType) -> TestSetup {
+        const TPG: usize = 1024;
+        let x: Vec<f32> = (0..rows * n)
+            .map(|i| dt_round(((i % 37) as f32 - 18.0) * 0.05, dt))
+            .collect();
+        let w: Vec<f32> =
+            (0..n).map(|i| dt_round(1.0 + (i % 23) as f32 * 0.02, dt)).collect();
+        let expected = naive_rms_norm(&x, &w, n, eps);
+        let mut kernel = mt_rms_norm_wide::kernel_ir_for(dt);
+        kernel.mode = KernelMode::Reduction;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("x", pack(&x, dt), dt))
+            .input(TestBuffer::from_vec("w", pack(&w, dt), dt))
+            .input(TestBuffer::from_vec("eps_buf", eps.to_le_bytes().to_vec(), DType::F32))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .constexpr("n", n as u32)
+            .grid_3d(rows as u32, 1, 1, [TPG as u32, 1, 1])
+    }
+
+    fn oracle_gated_mixer_norm(
+        y: &[f32],
+        z: &[f32],
+        w: &[f32],
+        hv: usize,
+        dv: usize,
+        eps: f32,
+        dt: DType,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; hv * dv];
+        for h in 0..hv {
+            let base = h * dv;
+            let mut ssq = 0.0f32;
+            for i in 0..dv {
+                let v = y[base + i];
+                ssq += v * v;
+            }
+            let inv = 1.0 / (ssq / dv as f32 + eps).sqrt();
+            for i in 0..dv {
+                let normed = y[base + i] * inv * dt_round(w[i], dt);
+                let zq = dt_round(z[base + i], dt);
+                let silu = zq / (1.0 + (-zq).exp());
+                out[base + i] = dt_round(normed * silu, dt);
+            }
+        }
+        out
+    }
+
+    fn make_gated_mixer_norm_setup(hv: usize, dv: usize, eps: f32, dt: DType) -> TestSetup {
+        let tpg = dv / 4;
+        let y: Vec<f32> = ramp(hv * dv, 17, 8.0).iter().map(|v| 0.1 * v).collect();
+        let z: Vec<f32> = ramp(hv * dv, 11, 5.0).iter().map(|v| 0.2 * v - 1.0).collect();
+        let w: Vec<f32> = ramp(dv, 7, 3.0).iter().map(|v| 1.0 + 0.05 * v).collect();
+        let expected = oracle_gated_mixer_norm(&y, &z, &w, hv, dv, eps, dt);
+        let mut kernel = mt_gated_mixer_norm::kernel_ir_for(dt);
+        kernel.mode = KernelMode::Reduction;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("y", pack(&y, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("z", pack(&z, dt), dt))
+            .input(TestBuffer::from_vec("w", pack(&w, dt), dt))
+            .input(TestBuffer::from_vec("eps_buf", eps.to_le_bytes().to_vec(), DType::F32))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .constexpr("n", dv as u32)
+            .grid_3d(hv as u32, 1, 1, [tpg as u32, 1, 1])
+    }
+
+    // ── rms_norm: n=128 (minimum), single row, f32 ────────────────────
+    #[test_kernel(name = "mlx/rms_norm/n128_f32", dtypes = [f32], tol = 1e-4)]
+    fn test_rms_norm_n128_f32(dt: DType) -> TestSetup {
+        make_rms_norm_setup(128, 1, 1e-5, dt)
+    }
+
+    // ── rms_norm: n=512, 4 rows, f32 ─────────────────────────────────
+    #[test_kernel(name = "mlx/rms_norm/n512_rows4_f32", dtypes = [f32], tol = 1e-4)]
+    fn test_rms_norm_n512_rows4_f32(dt: DType) -> TestSetup {
+        make_rms_norm_setup(512, 4, 1e-5, dt)
+    }
+
+    // ── rms_norm: n=4096 (max), single row, f32 ──────────────────────
+    #[test_kernel(name = "mlx/rms_norm/n4096_f32", dtypes = [f32], tol = 5e-4)]
+    fn test_rms_norm_n4096_f32(dt: DType) -> TestSetup {
+        make_rms_norm_setup(4096, 1, 1e-5, dt)
+    }
+
+    // ── rms_norm_small: head_dim=64 (older 7B architectures), f32/f16/bf16 ─
+    #[test_kernel(name = "mlx/rms_norm_small/hd64_f32", dtypes = [f32], tol = 1e-4)]
+    fn test_rms_norm_small_hd64_f32(dt: DType) -> TestSetup {
+        make_rms_norm_small_setup(64, 512, 1e-6, dt)
+    }
+
+    #[test_kernel(name = "mlx/rms_norm_small/hd64_f16", dtypes = [f16], tol = 5e-3)]
+    fn test_rms_norm_small_hd64_f16(dt: DType) -> TestSetup {
+        make_rms_norm_small_setup(64, 512, 1e-6, dt)
+    }
+
+    #[test_kernel(name = "mlx/rms_norm_small/hd64_bf16", dtypes = [bf16], tol = 5e-2)]
+    fn test_rms_norm_small_hd64_bf16(dt: DType) -> TestSetup {
+        make_rms_norm_small_setup(64, 512, 1e-6, dt)
+    }
+
+    // ── rms_norm: head_dim=128 (Qwen3-class), f32/f16/bf16 ───────────
+    #[test_kernel(name = "mlx/rms_norm/hd128_f32", dtypes = [f32], tol = 1e-4)]
+    fn test_rms_norm_hd128_f32(dt: DType) -> TestSetup {
+        make_rms_norm_setup(128, 1024, 1e-6, dt)
+    }
+
+    #[test_kernel(name = "mlx/rms_norm/hd128_f16", dtypes = [f16], tol = 5e-3)]
+    fn test_rms_norm_hd128_f16(dt: DType) -> TestSetup {
+        make_rms_norm_setup(128, 1024, 1e-6, dt)
+    }
+
+    #[test_kernel(name = "mlx/rms_norm/hd128_bf16", dtypes = [bf16], tol = 5e-2)]
+    fn test_rms_norm_hd128_bf16(dt: DType) -> TestSetup {
+        make_rms_norm_setup(128, 1024, 1e-6, dt)
+    }
+
+    // ── rms_norm: head_dim=256 (Gemma-2/3, Phi-3-medium), f32/f16/bf16
+    #[test_kernel(name = "mlx/rms_norm/hd256_f32", dtypes = [f32], tol = 1e-4)]
+    fn test_rms_norm_hd256_f32(dt: DType) -> TestSetup {
+        make_rms_norm_setup(256, 256, 1e-6, dt)
+    }
+
+    #[test_kernel(name = "mlx/rms_norm/hd256_f16", dtypes = [f16], tol = 5e-3)]
+    fn test_rms_norm_hd256_f16(dt: DType) -> TestSetup {
+        make_rms_norm_setup(256, 256, 1e-6, dt)
+    }
+
+    #[test_kernel(name = "mlx/rms_norm/hd256_bf16", dtypes = [bf16], tol = 5e-2)]
+    fn test_rms_norm_hd256_bf16(dt: DType) -> TestSetup {
+        make_rms_norm_setup(256, 256, 1e-6, dt)
+    }
+
+    // ── rms_norm_wide: Gemma 4 31B hidden (n=5376), single row ────────
+    #[test_kernel(name = "mlx/rms_norm_wide/n5376_f32", dtypes = [f32], tol = 5e-4)]
+    fn test_rms_norm_wide_n5376_f32(dt: DType) -> TestSetup {
+        make_rms_norm_wide_setup(5376, 1, 1e-6, dt)
+    }
+
+    // ── rms_norm_wide: n=5376, 3 rows ─────────────────────────────────
+    #[test_kernel(name = "mlx/rms_norm_wide/n5376_rows3_f32", dtypes = [f32], tol = 5e-4)]
+    fn test_rms_norm_wide_n5376_rows3_f32(dt: DType) -> TestSetup {
+        make_rms_norm_wide_setup(5376, 3, 1e-6, dt)
+    }
+
+    // ── rms_norm_wide: n=8192 (exact TPG multiple) ────────────────────
+    #[test_kernel(name = "mlx/rms_norm_wide/n8192_f32", dtypes = [f32], tol = 5e-4)]
+    fn test_rms_norm_wide_n8192_f32(dt: DType) -> TestSetup {
+        make_rms_norm_wide_setup(8192, 1, 1e-6, dt)
+    }
+
+    // ── gated_mixer_norm: Qwen3.6-A3B (Hv=32, Dv=128), f32/f16/bf16 ─
+    #[test_kernel(name = "mlx/gated_mixer_norm/qwen36_f32", dtypes = [f32], tol = 1e-5)]
+    fn test_gated_mixer_norm_qwen36_f32(dt: DType) -> TestSetup {
+        make_gated_mixer_norm_setup(32, 128, 1e-5, dt)
+    }
+
+    #[test_kernel(name = "mlx/gated_mixer_norm/qwen36_f16", dtypes = [f16], tol = 5e-4)]
+    fn test_gated_mixer_norm_qwen36_f16(dt: DType) -> TestSetup {
+        make_gated_mixer_norm_setup(32, 128, 1e-5, dt)
+    }
+
+    #[test_kernel(name = "mlx/gated_mixer_norm/qwen36_bf16", dtypes = [bf16], tol = 5e-3)]
+    fn test_gated_mixer_norm_qwen36_bf16(dt: DType) -> TestSetup {
+        make_gated_mixer_norm_setup(32, 128, 1e-5, dt)
+    }
+
+    // ── gated_mixer_norm: wider Dv=256 ────────────────────────────────
+    #[test_kernel(name = "mlx/gated_mixer_norm/dv256_bf16", dtypes = [bf16], tol = 5e-3)]
+    fn test_gated_mixer_norm_dv256_bf16(dt: DType) -> TestSetup {
+        make_gated_mixer_norm_setup(8, 256, 1e-5, dt)
+    }
+}
