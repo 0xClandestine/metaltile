@@ -46,6 +46,7 @@ use metaltile::kernel;
 // Each thread owns one packed word w covering DIMS_PER_WORD = 32/bits
 // dim slots starting at `d_base = w * DIMS_PER_WORD`.  One u32 load
 // amortises across all dims in the pack.
+#[rustfmt::skip]
 macro_rules! aura_dequant_rotated_clean {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[kernel(
@@ -102,6 +103,7 @@ macro_rules! aura_dequant_rotated_clean {
 // `ceil(32 / bits)` outputs per thread; `d_base = w * DIMS_PER_WORD`
 // for the iteration but the bit-offset arithmetic is keyed on the
 // absolute dim index `d`, so cross-word spills resolve correctly.
+#[rustfmt::skip]
 macro_rules! aura_dequant_rotated_odd {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[kernel(

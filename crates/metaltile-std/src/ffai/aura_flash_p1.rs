@@ -66,6 +66,7 @@
 
 use metaltile::kernel;
 
+#[rustfmt::skip]
 macro_rules! aura_flash_p1_kernel {
     (
         $name:ident,

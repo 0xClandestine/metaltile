@@ -31,6 +31,7 @@
 
 use metaltile::kernel;
 
+#[rustfmt::skip]
 macro_rules! aura_value_kernel {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[kernel(
