@@ -1147,7 +1147,16 @@ fn run_quantized_mat_mul(
     bits: u32,
 ) -> Vec<OpResult> {
     // See `run_quantized_mat_vec` for the bits-vs-pack-factor rationale.
-    assert!(bits == 4 || bits == 8, "QuantizedMatMul bench currently supports bits ∈ {{4, 8}}");
+    // Pack-strided variants supported: int2 (16 codes / u32), int4 (8
+    // nibbles / u32), int8 (4 bytes / u32). MLX may not ship a matching
+    // reference kernel for every bit-width (int2 in particular has no
+    // `affine_qmm_t_*_b_2_*` instantiation today) — that path falls
+    // through gracefully because `compile_mlx` returns `None` and the
+    // bench still runs the MT-only timing.
+    assert!(
+        bits == 2 || bits == 4 || bits == 8,
+        "QuantizedMatMul bench currently supports bits ∈ {{2, 4, 8}}"
+    );
     let vals_per_pack: usize = 32 / bits as usize;
     let msl = match msl_reduction(spec, dt, Some(tpg as u32)) {
         Some(s) => s,
@@ -1247,7 +1256,7 @@ fn run_quantized_mat_mul(
         // int8 perf siblings share the int4 geometry — only the W pack
         // factor differs (handled above by `bits`); grid dims are identical.
         let (n_per_tg, bm) = match spec.kernel_name {
-            "mt_qmm_mma" | "mt_qmm_mma_int8" => (32usize, 32usize),
+            "mt_qmm_mma" | "mt_qmm_mma_int8" | "mt_qmm_mma_int2" => (32usize, 32usize),
             "mt_qmm_mma_m16" | "mt_qmm_mma_m16_int8" => (32usize, 16usize),
             "mt_qmm_bm4" | "mt_qmm_bm4_int8_fast" => (8usize, 4usize),
             "mt_qmm_bm2" | "mt_qmm_bm2_int8_fast" => (8usize, 2usize),

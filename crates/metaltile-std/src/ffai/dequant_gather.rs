@@ -89,6 +89,7 @@ macro_rules! dequant_gather_kernel {
     };
 }
 
+dequant_gather_kernel!(dequant_gather_int2, 2u32, "int2");
 dequant_gather_kernel!(dequant_gather_int3, 3u32, "int3");
 dequant_gather_kernel!(dequant_gather_int4, 4u32, "int4");
 dequant_gather_kernel!(dequant_gather_int5, 5u32, "int5");

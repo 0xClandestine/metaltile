@@ -48,7 +48,7 @@ use metaltile::{bench_kernel, kernel};
 // ── Pack-strided kernel (int4, int8) ──────────────────────────────────────
 //
 // Each thread strides over u32 packs. One pack load → (32/$bits) extractions.
-// `$bits` must divide 32 evenly (i.e. 4 or 8).
+// `$bits` must divide 32 evenly (i.e. 2, 4, or 8).
 macro_rules! dequant_gemv_pow2 {
     ($name:ident, $bits:literal, $subop:literal) => {
         #[bench_kernel(op="dequant_gemv", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Reduction,)]
@@ -162,6 +162,7 @@ macro_rules! dequant_gemv_odd {
     };
 }
 
+dequant_gemv_pow2!(dequant_gemv_int2, 2u32, "int2");
 dequant_gemv_pow2!(dequant_gemv_int4, 4u32, "int4");
 dequant_gemv_pow2!(dequant_gemv_int8, 8u32, "int8");
 dequant_gemv_odd!(dequant_gemv_int3, 3u32, "int3");
