@@ -2,22 +2,23 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! RoPE benchmark — #[kernel] DSL vs MLX metal/rope.metal
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="rope",
-    subop="rope",
-    class=Rope,
-    b=1,
-    h=32,
-    l=512,
-    d=128,
-    n_per_group=4,
-    tol=0.01,
-    mlx="rope_{tn}",
-    metal_file="rope.metal",
+#[kernel(
+    bench(
+        op="rope",
+        subop="rope",
+        class=Rope,
+        b=1,
+        h=32,
+        l=512,
+        d=128,
+        n_per_group=4,
+        tol=0.01,
+        mlx="rope_{tn}",
+        metal_file="rope.metal",
+    )
 )]
-#[kernel]
 pub fn mt_rope<T>(
     inp: Tensor<T>,
     out: Tensor<T>,

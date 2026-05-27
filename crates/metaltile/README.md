@@ -92,8 +92,8 @@ println!("{msl}");
 
 | Macro | Kind | What it does |
 |---|---|---|
-| `#[kernel]` | attribute | Transforms a Rust function into IR + host-side `LaunchBuilder` |
-| `#[bench_kernel]` | attribute | Registers a kernel for automatic benchmarking via `inventory::submit!` |
+| `#[kernel]` | attribute | Transforms a Rust function into IR + host-side `LaunchBuilder`. Pass `bench(...)` to also register for `tile bench` |
+| `#[kernel(bench(...))]` | attribute | Registers a kernel for automatic benchmarking via `inventory::submit!` |
 | `#[constexpr]` | attribute | Marks a kernel parameter as a compile-time constant |
 | `#[scalar]` | attribute | Marks a `Tensor` parameter for `constant T&` lowering in MSL |
 | `#[strided]` | attribute | Marks a `Tensor` parameter for strided lowering (shape + stride arrays emitted) |
@@ -181,7 +181,7 @@ Directly accessible from `metaltile::`:
 | Path | What it re-exports |
 |---|---|
 | `metaltile::kernel` | `#[kernel]` proc-macro attribute |
-| `metaltile::bench_kernel` | `#[bench_kernel]` proc-macro attribute |
+| `metaltile::kernel` | `#[kernel]` / `#[kernel(bench(...))]` proc-macro attribute |
 | `metaltile::constexpr` | `#[constexpr]` proc-macro attribute |
 | `metaltile::scalar` | `#[scalar]` proc-macro attribute |
 | `metaltile::strided` | `#[strided]` proc-macro attribute |
@@ -204,7 +204,7 @@ Directly accessible from `metaltile::`:
 | Crate | Role in this crate |
 |---|---|
 | `metaltile-core` | Re-exported as `metaltile::core`; provides IR types and DType for the prelude |
-| `metaltile-macros` | Re-exported as individual proc macros (`kernel`, `bench_kernel`, `constexpr`, `scalar`, `strided`, `shape`, `tile`) |
+| `metaltile-macros` | Re-exported as individual proc macros (`kernel`, `constexpr`, `scalar`, `strided`, `shape`, `tile`) |
 | `metaltile-codegen` | Re-exported as `metaltile::codegen`; provides MSL generation for inspection |
 | `metaltile-runtime` | Re-exported as `Context`, `DispatchResult`, `MetalTileError`; provides GPU dispatch |
 

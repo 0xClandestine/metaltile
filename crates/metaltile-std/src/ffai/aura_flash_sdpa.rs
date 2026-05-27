@@ -42,7 +42,7 @@
 //! Codegen-only; correctness pinned by
 //! `tests/aura_flash_sdpa_gpu_correctness.rs`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 macro_rules! aura_flash_sdpa_kernel {
     (
@@ -54,8 +54,9 @@ macro_rules! aura_flash_sdpa_kernel {
         $dims_per_lane:literal,
         $subop:literal
     ) => {
-        #[bench_kernel(op="aura", subop=$subop, class=GenericEmpty, tol=1e-3, kernel_mode=Grid3D,)]
-        #[kernel]
+        #[kernel(
+            bench(op="aura", subop=$subop, class=GenericEmpty, tol=1e-3, kernel_mode=Grid3D,)
+        )]
         pub fn $name<T>(
             q_rot: Tensor<f32>,
             key_packed: Tensor<u32>,

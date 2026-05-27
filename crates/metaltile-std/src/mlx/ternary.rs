@@ -11,17 +11,18 @@
 //! MetalTile: mt_select — same algorithm via #[kernel] DSL.
 //!   KernelMode::Elementwise
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="select",
-    subop="select",
-    class=Select,
-    tol=1e-4,
-    mlx="v_Select{tn}",
-    metal_file="ternary.metal",
+#[kernel(
+    bench(
+        op="select",
+        subop="select",
+        class=Select,
+        tol=1e-4,
+        mlx="v_Select{tn}",
+        metal_file="ternary.metal",
+    )
 )]
-#[kernel]
 pub fn mt_select<T>(cond: Tensor<u8>, on_true: Tensor<T>, on_false: Tensor<T>, out: Tensor<T>) {
     let idx = program_id(0);
     let c = load(cond[idx]);

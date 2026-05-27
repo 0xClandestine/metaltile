@@ -50,21 +50,22 @@
 //! Codegen-only; correctness pinned by
 //! `tests/batched_4_qmm_gpu_correctness.rs`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 /// Perf-tuned fused 4-output int4 QMM (M>1) — 8 output rows per TG.
 ///
 /// Grid: `[ceil(max(out_a,out_b,out_c,out_d)/8), M, 4]`. See module
 /// docs for the full geometry contract. TGs past a matrix's `out_*`
 /// rows no-op.
-#[bench_kernel(
-    op="batched_4_qmm",
-    subop="batched_4_qmm_fast",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="batched_4_qmm",
+        subop="batched_4_qmm_fast",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn ffai_batched_4_qmm_fast<T>(
     x: Tensor<T>,
     w_a: Tensor<u32>,

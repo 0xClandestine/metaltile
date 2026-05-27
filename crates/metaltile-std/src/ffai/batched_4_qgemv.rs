@@ -45,7 +45,7 @@
 //! Codegen-only; correctness pinned by
 //! `tests/batched_4_qgemv_gpu_correctness.rs`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 /// Perf-tuned fused 4-output int4 quantized GEMV. 8 output rows per TG.
 ///
@@ -56,14 +56,15 @@ use metaltile::{bench_kernel, kernel};
 ///
 /// Grid: `[ceil(max(out_a,out_b,out_c,out_d)/8), 1, 4]`. All out_*
 /// must be multiples of 8; in_dim a multiple of 512; group_size = 64.
-#[bench_kernel(
-    op="batched_4_qgemv",
-    subop="batched_4_qgemv_fast",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="batched_4_qgemv",
+        subop="batched_4_qgemv_fast",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn ffai_batched_4_qgemv_fast<T>(
     x: Tensor<T>,
     w_a: Tensor<u32>,

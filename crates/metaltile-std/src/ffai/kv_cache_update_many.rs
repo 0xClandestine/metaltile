@@ -42,16 +42,17 @@
 //! Codegen-only. Correctness validated against `kv_cache_update` looped
 //! per-row in `tests/kv_cache_update_many_gpu_correctness.rs`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="kv_cache",
-    subop="update_many",
-    class=GenericEmpty,
-    tol=0.0,
-    kernel_mode=Grid3D,
+#[kernel(
+    bench(
+        op="kv_cache",
+        subop="update_many",
+        class=GenericEmpty,
+        tol=0.0,
+        kernel_mode=Grid3D,
+    )
 )]
-#[kernel]
 pub fn kv_cache_update_many<T>(
     src: Tensor<T>,
     positions: Tensor<u32>,

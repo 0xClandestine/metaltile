@@ -30,16 +30,17 @@
 //! as `min_p → 1` only the argmax (and exact ties) survive. A typical
 //! serving value is 0.05–0.1.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="logits_processors",
-    subop="min_p_mask",
-    class=GenericEmpty,
-    tol=0.0,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="logits_processors",
+        subop="min_p_mask",
+        class=GenericEmpty,
+        tol=0.0,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn logits_min_p_mask<T>(
     inp: Tensor<T>,
     out: Tensor<T>,

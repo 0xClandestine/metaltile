@@ -1,6 +1,6 @@
 //! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
 //! SPDX-License-Identifier: Apache-2.0
-//! MetalTile proc macros: `#[kernel]`, `shape!`, `tile!`, `#[autotune]`.
+//! MetalTile proc macros: `#[kernel]`, `#[kernel(bench(...))]`, `shape!`, `tile!`.
 //!
 //! These macros parse user-written Rust functions and transform them
 //! into MetalTile IR and host-side launch code.
@@ -10,42 +10,308 @@ mod body_parser;
 mod derive_op;
 mod sig_parser;
 
+use std::collections::HashMap;
+
+use bench_impl::{BenchArgs, generate_submit};
 use body_parser::DslBodyParser;
 use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use sig_parser::{extract_constexprs_typed, extract_param_names, parse_kernel_params_generic};
 use syn::{ItemFn, parse_macro_input};
 
 // ---------------------------------------------------------------------------
-// #[kernel] — the main macro
+// Attribute parsing — unified #[kernel(bench(...))]
 // ---------------------------------------------------------------------------
 
-/// Marks a function as a MetalTile kernel.
+/// Arguments parsed from the `#[kernel(...)]` attribute.
 ///
-/// The function body uses the MetalTile DSL (load, store, dot, etc.) and
-/// is parsed into IR at compile time. A host-side `launch` method is
-/// also generated.
+/// Supports two forms:
+/// - `#[kernel]` — no bench args, just kernel expansion
+/// - `#[kernel(bench(op="...", subop="...", ...))]` — kernel expansion + BenchSpec submission
+struct KernelAttr {
+    bench: Option<BenchArgs>,
+}
+
+impl syn::parse::Parse for KernelAttr {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        if input.is_empty() {
+            return Ok(KernelAttr { bench: None });
+        }
+
+        let ident: syn::Ident = input.parse()?;
+        if ident != "bench" {
+            return Err(syn::Error::new(
+                ident.span(),
+                "expected `bench(...)` as the only #[kernel] argument",
+            ));
+        }
+
+        let content;
+        syn::parenthesized!(content in input);
+        let bench_args = content.parse::<BenchArgs>()?;
+
+        if !input.is_empty() {
+            return Err(syn::Error::new(input.span(), "unexpected tokens after `bench(...)`"));
+        }
+
+        Ok(KernelAttr { bench: Some(bench_args) })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KernelMacroBuilder — object-oriented expansion orchestrator
+// ---------------------------------------------------------------------------
+
+/// Builder that orchestrates the full `#[kernel]` macro expansion.
 ///
-/// # Attributes
-///
-/// - `#[autotune(configs = [...], key = [M, N, K])]` — enable autotuning
-///   with the given configs and bucketing keys.
-///
-/// # Example
-///
-/// ```ignore
-/// #[kernel]
-/// pub fn vector_add(
-///     a: Tensor<f16>,
-///     b: Tensor<f16>,
-///     c: Tensor<f16>,
-/// ) {
-///     let idx = program_id::<0>();
-///     let x = load(a[idx]);
-///     let y = load(b[idx]);
-///     store(c[idx], x + y);
-/// }
-/// ```
+/// Owns the parsed function and optional bench configuration, then
+/// generates all output token streams: the kernel-IR module, launch
+/// builder, inventory registration, and (optionally) the BenchSpec
+/// submission for `tile bench`.
+struct KernelMacroBuilder {
+    /// The parsed kernel function.
+    input_fn: ItemFn,
+    /// Optional bench args for automatic benchmark registration.
+    bench_args: Option<BenchArgs>,
+}
+
+impl KernelMacroBuilder {
+    /// Create a new builder from the parsed function and optional bench args.
+    fn new(input_fn: ItemFn, bench_args: Option<BenchArgs>) -> Self {
+        KernelMacroBuilder { input_fn, bench_args }
+    }
+
+    /// Run the full expansion pipeline and return the generated token stream.
+    fn expand(self) -> TokenStream2 {
+        let fn_name = &self.input_fn.sig.ident;
+        let fn_name_str = fn_name.to_string();
+        let vis = &self.input_fn.vis;
+        let is_generic = !self.input_fn.sig.generics.params.is_empty();
+
+        // ── 1. Extract type-param → DType-arg mapping ──────────────────
+        let type_param_names = self.extract_type_param_names();
+        let arg_var_names = self.build_arg_var_names(&type_param_names);
+        let type_var_map = self.build_type_var_map(&type_param_names, &arg_var_names);
+
+        // ── 2. Parse signature: tensor params + constexprs ─────────────
+        let param_decls = parse_kernel_params_generic(&self.input_fn.sig, &type_var_map);
+        let constexpr_info = extract_constexprs_typed(&self.input_fn.sig);
+        let constexpr_names: Vec<String> = constexpr_info.iter().map(|(n, _)| n.clone()).collect();
+        let param_names = extract_param_names(&self.input_fn.sig);
+
+        // ── 3. Parse the DSL body into IR-building token streams ──────
+        let body_ir = DslBodyParser::parse_with_type_vars(
+            &self.input_fn.block,
+            &param_names,
+            &constexpr_names,
+            &type_var_map,
+        );
+
+        // ── 4. Build kernel_ir_for / kernel_ir signatures ──────────────
+        let constexpr_idents: Vec<_> = constexpr_names
+            .iter()
+            .map(|n| syn::Ident::new(n, proc_macro2::Span::call_site()))
+            .collect();
+        let constexpr_dtypes: Vec<TokenStream2> =
+            constexpr_info.iter().map(|(_, d)| d.clone()).collect();
+
+        let arg_var_idents: Vec<_> = arg_var_names
+            .iter()
+            .map(|n| syn::Ident::new(n, proc_macro2::Span::call_site()))
+            .collect();
+        let kernel_ir_for_sig = quote! {
+            pub fn kernel_ir_for(#(#arg_var_idents: DType),*) -> Kernel
+        };
+        let f32_defaults: Vec<_> = arg_var_idents.iter().map(|_| quote! { DType::F32 }).collect();
+
+        // ── 5. Generate the kernel module ──────────────────────────────
+        let kernel_module = self.generate_kernel_module(
+            fn_name,
+            &fn_name_str,
+            vis,
+            &arg_var_idents,
+            &kernel_ir_for_sig,
+            &f32_defaults,
+            &constexpr_idents,
+            &constexpr_dtypes,
+            &param_decls,
+            &body_ir,
+        );
+
+        // ── 6. Optionally generate the BenchSpec submission ───────────
+        let bench_submit = match &self.bench_args {
+            Some(args) => generate_submit(fn_name, args, is_generic),
+            None => TokenStream2::new(),
+        };
+
+        quote! {
+            #kernel_module
+            #bench_submit
+        }
+    }
+
+    /// Extract the list of type parameter names from generics (e.g. `["T", "U"]`).
+    fn extract_type_param_names(&self) -> Vec<String> {
+        self.input_fn
+            .sig
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| {
+                if let syn::GenericParam::Type(tp) = p { Some(tp.ident.to_string()) } else { None }
+            })
+            .collect()
+    }
+
+    /// Map each type param to its DType arg variable name: `T → _t`, `U → _u`, etc.
+    fn build_arg_var_names(&self, type_param_names: &[String]) -> Vec<String> {
+        type_param_names
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("_{}", ['t', 'u', 'v', 'w'].get(i).copied().unwrap_or('x')))
+            .collect()
+    }
+
+    /// Build a name→TokenStream map from type-param names to their DType arg idents.
+    fn build_type_var_map(
+        &self,
+        type_param_names: &[String],
+        arg_var_names: &[String],
+    ) -> HashMap<String, TokenStream2> {
+        type_param_names
+            .iter()
+            .zip(arg_var_names.iter())
+            .map(|(tp, av)| {
+                let ident = syn::Ident::new(av, proc_macro2::Span::call_site());
+                (tp.clone(), quote! { #ident })
+            })
+            .collect()
+    }
+
+    /// Generate the kernel module containing IR, launch builder, and inventory entry.
+    #[allow(clippy::too_many_arguments)]
+    fn generate_kernel_module(
+        &self,
+        fn_name: &syn::Ident,
+        fn_name_str: &str,
+        vis: &syn::Visibility,
+        arg_var_idents: &[syn::Ident],
+        kernel_ir_for_sig: &TokenStream2,
+        f32_defaults: &[TokenStream2],
+        constexpr_idents: &[syn::Ident],
+        constexpr_dtypes: &[TokenStream2],
+        param_decls: &TokenStream2,
+        body_ir: &TokenStream2,
+    ) -> TokenStream2 {
+        quote! {
+            #vis mod #fn_name {
+                use super::*;
+                use metaltile_core::ir::{
+                    Kernel, Block, Op, ValueId, BlockId, VarId, Param, ParamKind,
+                    TypedSlot, ConstExprDecl, BinOpKind, ReduceKind, AtomicKind,
+                    AtomicScope, IndexExpr, UnaryOpKind, ActKind, KernelCallArg,
+                    CoopTileAccMode, CoopTileScope,
+                };
+                use metaltile_core::shape::{Shape, Dim};
+                use metaltile_core::dtype::DType;
+                use metaltile_core::constexpr::ConstExpr;
+
+                /// Build the kernel IR for specific dtype(s).
+                /// For non-generic kernels this takes no arguments.
+                /// For generic kernels (e.g. `fn foo<T>`) call `kernel_ir_for(DType::F16)`.
+                #kernel_ir_for_sig {
+                    let mut kernel = Kernel::new(#fn_name_str);
+
+                    // Constexpr declarations
+                    #(
+                        kernel.constexprs.push(ConstExprDecl {
+                            name: ConstExpr::new(stringify!(#constexpr_idents)),
+                            dtype: #constexpr_dtypes,
+                            value: None,
+                        });
+                    )*
+
+                    // Tensor parameters parsed from the signature
+                    #param_decls
+
+                    // DSL body translated to IR ops
+                    #body_ir
+
+                    kernel
+                }
+
+                /// The kernel IR, defaulting all type params to f32.
+                pub fn kernel_ir() -> Kernel {
+                    kernel_ir_for(#(#f32_defaults),*)
+                }
+
+                /// Host-side launch builder.
+                /// Accepts a context and named input buffers.
+                pub struct LaunchBuilder<'a> {
+                    ctx: &'a metaltile_runtime::Context,
+                    /// Named input buffers.
+                    buffers: std::collections::BTreeMap<String, Vec<u8>>,
+                }
+
+                impl<'a> LaunchBuilder<'a> {
+                    pub fn new(ctx: &'a metaltile_runtime::Context) -> Self {
+                        LaunchBuilder {
+                            ctx,
+                            buffers: std::collections::BTreeMap::new(),
+                        }
+                    }
+
+                    /// Bind a named input buffer.
+                    pub fn input(mut self, name: &str, data: Vec<u8>) -> Self {
+                        self.buffers.insert(name.to_string(), data);
+                        self
+                    }
+
+                    /// Dispatch the kernel.
+                    pub fn dispatch(
+                        self,
+                    ) -> std::result::Result<
+                        metaltile_runtime::DispatchResult,
+                        metaltile_runtime::MetalTileError,
+                    > {
+                        let kernel = kernel_ir();
+                        self.ctx.dispatch_with_buffers(&kernel, &self.buffers)
+                    }
+                }
+
+                /// Launch method on the module.
+                pub fn launch(ctx: &metaltile_runtime::Context) -> LaunchBuilder<'_> {
+                    LaunchBuilder::new(ctx)
+                }
+
+                // Use `const _: ()` hygiene scope so `__build_for_inline` does not
+                // leak into the enclosing module's namespace.
+                const _: () = {
+                    fn __build_for_inline(
+                        dtypes: &[metaltile_core::dtype::DType],
+                    ) -> metaltile_core::ir::Kernel {
+                        #[allow(unused_variables)]
+                        let _t = dtypes
+                            .first()
+                            .copied()
+                            .unwrap_or(metaltile_core::dtype::DType::F32);
+                        kernel_ir_for(#(#arg_var_idents),*)
+                    }
+
+                    metaltile_core::inventory::submit! {
+                        metaltile_core::KernelEntry::new(#fn_name_str, __build_for_inline)
+                    }
+                };
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Proc-macro derive helpers (unchanged from upstream)
+// ---------------------------------------------------------------------------
+
 /// Derive `Op::value_refs()` and `Op::for_each_value_id_mut()`.
 ///
 /// Annotate `ValueId` fields with `#[vid]`, `#[vid_opt]`, `#[vid_vec]`,
@@ -96,180 +362,75 @@ pub fn derive_variant_name(input: TokenStream) -> TokenStream {
     derive_op::derive_variant_name(input)
 }
 
+/// Pass-through attribute that marks a parameter as a compile-time constant.
+///
+/// The `#[kernel]` macro detects this attribute during signature parsing.
 #[proc_macro_attribute]
-pub fn constexpr(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    // Pass-through: just marks a parameter as a constexpr for #[kernel] to detect
-    item
-}
+pub fn constexpr(_attr: TokenStream, item: TokenStream) -> TokenStream { item }
 
+/// Pass-through attribute that marks a `Tensor` param as scalar (`constant T&` in MSL).
+///
+/// The `#[kernel]` macro detects this attribute during signature parsing.
 #[proc_macro_attribute]
-pub fn scalar(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    // Pass-through: marks a Tensor param as a scalar (constant T& in MSL)
-    item
-}
+pub fn scalar(_attr: TokenStream, item: TokenStream) -> TokenStream { item }
 
+/// Pass-through attribute that marks a `Tensor` param as strided (emits shape/strides arrays).
+///
+/// The `#[kernel]` macro detects this attribute during signature parsing.
 #[proc_macro_attribute]
-pub fn strided(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    // Pass-through: marks a Tensor param as strided (emits shape/strides arrays)
-    item
-}
+pub fn strided(_attr: TokenStream, item: TokenStream) -> TokenStream { item }
 
+// ---------------------------------------------------------------------------
+// #[kernel] — the main macro (unified)
+// ---------------------------------------------------------------------------
+
+/// Marks a function as a MetalTile kernel.
+///
+/// The function body uses the MetalTile DSL (load, store, dot, etc.) and
+/// is parsed into IR at compile time. A host-side `launch` method is
+/// also generated, and a `KernelEntry` is registered in the inventory.
+///
+/// # Bench registration
+///
+/// To automatically register the kernel for `tile bench`, pass `bench(...)`:
+///
+/// ```ignore
+/// #[kernel(
+///     bench(
+///         op = "unary",
+///         subop = "exp",
+///         class = Unary,
+///         tol = 1e-4,
+///         metal_file = "unary.metal",
+///         mlx = "v_Exp{tn}{tn}",
+///     )
+/// )]
+/// pub fn mt_exp<T>(a: Tensor<T>, out: Tensor<T>) { … }
+/// ```
+///
+/// This is the unified syntax — bench registration is built into `#[kernel]`.
+///
+/// # Example
+///
+/// ```ignore
+/// #[kernel]
+/// pub fn vector_add(
+///     a: Tensor<f16>,
+///     b: Tensor<f16>,
+///     c: Tensor<f16>,
+/// ) {
+///     let idx = program_id::<0>();
+///     let x = load(a[idx]);
+///     let y = load(b[idx]);
+///     store(c[idx], x + y);
+/// }
+/// ```
 #[proc_macro_attribute]
-pub fn kernel(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn kernel(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let kernel_attr = parse_macro_input!(attr as KernelAttr);
     let input_fn = parse_macro_input!(item as ItemFn);
-    expand_kernel(input_fn)
-}
-
-fn expand_kernel(input_fn: ItemFn) -> TokenStream {
-    let fn_name = &input_fn.sig.ident;
-    let fn_name_str = fn_name.to_string();
-    let vis = &input_fn.vis;
-
-    // Extract type parameters from generics: <T>, <T, U>, etc.
-    // Each type param gets a corresponding DType arg variable: T→_t, U→_u, V→_v, W→_w.
-    let type_param_names: Vec<String> = input_fn
-        .sig
-        .generics
-        .params
-        .iter()
-        .filter_map(|p| {
-            if let syn::GenericParam::Type(tp) = p { Some(tp.ident.to_string()) } else { None }
-        })
-        .collect();
-    let arg_var_names: Vec<String> = type_param_names
-        .iter()
-        .enumerate()
-        .map(|(i, _)| format!("_{}", ['t', 'u', 'v', 'w'].get(i).copied().unwrap_or('x')))
-        .collect();
-    // Map from type-param name ("T") to the DType arg ident token (_t).
-    let type_var_map: std::collections::HashMap<String, proc_macro2::TokenStream> =
-        type_param_names
-            .iter()
-            .zip(arg_var_names.iter())
-            .map(|(tp, av)| {
-                let ident = syn::Ident::new(av, proc_macro2::Span::call_site());
-                (tp.clone(), quote! { #ident })
-            })
-            .collect();
-
-    // Parse function signature for tensor parameters and constexprs
-    let param_decls = parse_kernel_params_generic(&input_fn.sig, &type_var_map);
-    let constexpr_info = extract_constexprs_typed(&input_fn.sig);
-    let constexpr_names: Vec<String> = constexpr_info.iter().map(|(n, _)| n.clone()).collect();
-    let param_names = extract_param_names(&input_fn.sig);
-
-    // Parse the DSL body into IR-building token stream
-    let body_ir = DslBodyParser::parse_with_type_vars(
-        &input_fn.block,
-        &param_names,
-        &constexpr_names,
-        &type_var_map,
-    );
-
-    let constexpr_idents: Vec<_> = constexpr_names
-        .iter()
-        .map(|n| syn::Ident::new(n, proc_macro2::Span::call_site()))
-        .collect();
-    let constexpr_dtypes: Vec<proc_macro2::TokenStream> =
-        constexpr_info.iter().map(|(_, d)| d.clone()).collect();
-
-    // Build kernel_ir_for signature and kernel_ir() default call.
-    // For non-generic kernels, kernel_ir_for takes no args (same as today).
-    let arg_var_idents: Vec<_> =
-        arg_var_names.iter().map(|n| syn::Ident::new(n, proc_macro2::Span::call_site())).collect();
-    let kernel_ir_for_sig = quote! { pub fn kernel_ir_for(#(#arg_var_idents: DType),*) -> Kernel };
-    // kernel_ir() calls kernel_ir_for with F32 defaults for each type param.
-    let f32_defaults = arg_var_idents.iter().map(|_| quote! { DType::F32 });
-
-    // Generate the expanded output: both the IR constant and the launch builder.
-    let expanded = quote! {
-        #vis mod #fn_name {
-            use super::*;
-            use metaltile_core::ir::{Kernel, Block, Op, ValueId, BlockId, VarId, Param, ParamKind, TypedSlot, ConstExprDecl, BinOpKind, ReduceKind, AtomicKind, AtomicScope, IndexExpr, UnaryOpKind, ActKind, KernelCallArg, CoopTileAccMode, CoopTileScope};
-            use metaltile_core::shape::{Shape, Dim};
-            use metaltile_core::dtype::DType;
-            use metaltile_core::constexpr::ConstExpr;
-
-            /// Build the kernel IR for specific dtype(s).
-            /// For non-generic kernels this takes no arguments.
-            /// For generic kernels (e.g. `fn foo<T>`) call `kernel_ir_for(DType::F16)`.
-            #kernel_ir_for_sig {
-                let mut kernel = Kernel::new(#fn_name_str);
-
-                // Constexpr declarations
-                #(
-                    kernel.constexprs.push(ConstExprDecl {
-                        name: ConstExpr::new(stringify!(#constexpr_idents)),
-                        dtype: #constexpr_dtypes,
-                        value: None,
-                    });
-                )*
-
-                // Tensor parameters parsed from the signature
-                #param_decls
-
-                // DSL body translated to IR ops
-                #body_ir
-
-                kernel
-            }
-
-            /// The kernel IR, defaulting all type params to f32.
-            pub fn kernel_ir() -> Kernel {
-                kernel_ir_for(#(#f32_defaults),*)
-            }
-
-            /// Host-side launch builder.
-            /// Accepts a context and named input buffers.
-            pub struct LaunchBuilder<'a> {
-                ctx: &'a metaltile_runtime::Context,
-                /// Named input buffers.
-                buffers: std::collections::BTreeMap<String, Vec<u8>>,
-            }
-
-            impl<'a> LaunchBuilder<'a> {
-                pub fn new(ctx: &'a metaltile_runtime::Context) -> Self {
-                    LaunchBuilder {
-                        ctx,
-                        buffers: std::collections::BTreeMap::new(),
-                    }
-                }
-
-                /// Bind a named input buffer.
-                pub fn input(mut self, name: &str, data: Vec<u8>) -> Self {
-                    self.buffers.insert(name.to_string(), data);
-                    self
-                }
-
-                /// Dispatch the kernel.
-                pub fn dispatch(self) -> std::result::Result<metaltile_runtime::DispatchResult, metaltile_runtime::MetalTileError> {
-                    let kernel = kernel_ir();
-                    self.ctx.dispatch_with_buffers(&kernel, &self.buffers)
-                }
-            }
-
-            /// Launch method on the module.
-            pub fn launch(ctx: &metaltile_runtime::Context) -> LaunchBuilder<'_> {
-                LaunchBuilder::new(ctx)
-            }
-
-            // Use `const _: ()` hygiene scope so `__build_for_inline` does not
-            // leak into the enclosing module's namespace.
-            const _: () = {
-                fn __build_for_inline(dtypes: &[metaltile_core::dtype::DType]) -> metaltile_core::ir::Kernel {
-                    #[allow(unused_variables)]
-                    let _t = dtypes.first().copied().unwrap_or(metaltile_core::dtype::DType::F32);
-                    kernel_ir_for(#(#arg_var_idents),*)
-                }
-
-                metaltile_core::inventory::submit! {
-                    metaltile_core::KernelEntry::new(#fn_name_str, __build_for_inline)
-                }
-            };
-        }
-    };
-
-    TokenStream::from(expanded)
+    let builder = KernelMacroBuilder::new(input_fn, kernel_attr.bench);
+    TokenStream::from(builder.expand())
 }
 
 // ---------------------------------------------------------------------------
@@ -345,7 +506,7 @@ pub fn tile(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-fn parse_dim_expr(s: &str) -> proc_macro2::TokenStream {
+fn parse_dim_expr(s: &str) -> TokenStream2 {
     if let Ok(n) = s.parse::<usize>() {
         quote! { Dim::Known(#n) }
     } else {
@@ -355,60 +516,8 @@ fn parse_dim_expr(s: &str) -> proc_macro2::TokenStream {
 }
 
 // ---------------------------------------------------------------------------
-// #[bench_kernel] — declarative benchmark registration
+// Tests
 // ---------------------------------------------------------------------------
-
-/// Registers a `#[kernel]` function for automatic benchmarking.
-///
-/// Must be placed **before** `#[kernel]` so it sees the original function
-/// signature. Generates an `inventory::submit! { BenchSpec { ... } }` alongside
-/// the kernel, which the bench suite collects via `inventory::iter::<BenchSpec>`.
-///
-/// # Required args
-/// - `op    = "group"` — bench table group (e.g. `"unary"`)
-/// - `subop = "name"`  — sub-operation label (e.g. `"exp"`)
-/// - `class = Unary | Binary | AllReduce | RowReduce`
-/// - `cpu   = fn_ptr`  — CPU reference (named fn, not closure)
-/// - `tol   = 1e-4`    — maximum absolute correctness error
-///
-/// # Optional args
-/// - `input = Signed|Positive|Half|Unit` (Unary default: `Half`)
-/// - `input_a / input_b` (Binary, default: `Half`)
-/// - `metal_file = "foo.metal"` — MLX reference source file (loaded via `include_str!` at compile time)
-/// - `mlx = "pattern"` — kernel name pattern; `{tn}` → MLX type name
-/// - `dtypes = IDENT`  — `&'static [DType]` (default: `FLOAT_DTYPES`)
-///
-/// # Example
-/// ```ignore
-/// fn cpu_exp(x: f32) -> f32 { x.exp() }
-///
-/// #[bench_kernel(op="unary", subop="exp", class=Unary, cpu=cpu_exp,
-///                input=Signed, tol=1e-4, metal_file="unary.metal", mlx="v_Exp{tn}{tn}")]
-/// #[kernel]
-/// pub fn mt_exp<T>(a: Tensor<T>, out: Tensor<T>) { … }
-/// ```
-#[proc_macro_attribute]
-pub fn bench_kernel(attr: TokenStream, item: TokenStream) -> TokenStream {
-    use bench_impl::{BenchArgs, generate_submit};
-
-    let args = match syn::parse::<BenchArgs>(attr) {
-        Ok(a) => a,
-        Err(e) => return e.to_compile_error().into(),
-    };
-
-    let (fn_name, is_generic) = {
-        let f = match syn::parse::<syn::ItemFn>(item.clone()) {
-            Ok(f) => f,
-            Err(e) => return e.to_compile_error().into(),
-        };
-        let generic = !f.sig.generics.params.is_empty();
-        (f.sig.ident.clone(), generic)
-    };
-
-    let submit = generate_submit(&fn_name, &args, is_generic);
-    let item_ts: proc_macro2::TokenStream = item.into();
-    quote! { #item_ts  #submit }.into()
-}
 
 #[cfg(test)]
 mod tests {
@@ -458,6 +567,23 @@ mod tests {
         };
 
         assert_eq!(extract_constexprs(&item.sig), vec!["M", "N", "K"]);
+    }
+
+    #[test]
+    fn kernel_attr_parses_empty() {
+        let attr: KernelAttr = syn::parse_quote! {};
+        assert!(attr.bench.is_none());
+    }
+
+    #[test]
+    fn kernel_attr_parses_bench() {
+        let attr: KernelAttr = syn::parse_quote! {
+            bench(op="unary", subop="exp", class=Unary, tol=1e-4)
+        };
+        assert!(attr.bench.is_some());
+        let ba = attr.bench.unwrap();
+        assert_eq!(ba.op.value(), "unary");
+        assert_eq!(ba.subop.value(), "exp");
     }
 
     fn assert_param_output(tokens: &str, name: &str, expected: bool) {

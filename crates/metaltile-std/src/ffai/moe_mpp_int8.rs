@@ -34,7 +34,7 @@
 //!
 //! Correctness: `tests/moe_gather_qmm_mpp_int8_correctness.rs` (cosine ≥ 0.999).
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 /// MPP MoE int8 grouped BGEMM, BM=16 / BN=32 / BK=16, one simdgroup.
 ///
@@ -42,14 +42,15 @@ use metaltile::{bench_kernel, kernel};
 /// packed, 4 bytes/uint32), `scales`/`biases [n_experts, n_out,
 /// k_in/group]`, `indices [m_total]` (per-row expert id), `out
 /// [m_total, n_out]`.
-#[bench_kernel(
-    op="moe",
-    subop="gather_qmm_mma_int8_bm16_mpp",
-    class=GenericEmpty,
-    tol=5e-2,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="moe",
+        subop="gather_qmm_mma_int8_bm16_mpp",
+        class=GenericEmpty,
+        tol=5e-2,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_moe_gather_qmm_mma_int8_bm16_mpp<T>(
     x: Tensor<T>,

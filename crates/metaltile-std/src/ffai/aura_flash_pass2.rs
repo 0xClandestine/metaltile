@@ -35,7 +35,7 @@
 //! upstream file about Qwen3.5-9B `!!!!!` decoding regressions when
 //! this was fp32 + caller-side cast.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 use crate::bench_types::DType;
 
@@ -46,8 +46,9 @@ const _: DType = DType::F32;
 
 macro_rules! aura_flash_pass2_kernel {
     ($name:ident, $dims_per_lane:literal, $subop:literal) => {
-        #[bench_kernel(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Reduction,)]
-        #[kernel]
+        #[kernel(
+            bench(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Reduction,)
+        )]
         pub fn $name<T>(
             o_partials: Tensor<T>,
             m_partials: Tensor<T>,

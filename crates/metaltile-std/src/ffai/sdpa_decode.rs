@@ -87,16 +87,17 @@
 //! to avoid catastrophic cancellation in the `exp(max_old - max_new)`
 //! rescale at long context.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="sdpa",
-    subop="sdpa_decode",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="sdpa",
+        subop="sdpa_decode",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn ffai_sdpa_decode<T>(
     q: Tensor<T>,
     k: Tensor<T>,

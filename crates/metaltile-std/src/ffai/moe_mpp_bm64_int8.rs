@@ -41,18 +41,19 @@
 //!
 //! Correctness validated by `tests/moe_gather_qmm_mpp_bm64_int8_correctness.rs`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 /// MPP MoE int8 grouped BGEMM, BM=BN=64 / BK=32, 4 simdgroups (2×2).
 /// Signature matches `…_int4_bm64_mpp`.
-#[bench_kernel(
-    op="moe",
-    subop="gather_qmm_mma_int8_bm64_mpp",
-    class=GenericEmpty,
-    tol=5e-2,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="moe",
+        subop="gather_qmm_mma_int8_bm64_mpp",
+        class=GenericEmpty,
+        tol=5e-2,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_moe_gather_qmm_mma_int8_bm64_mpp<T>(
     x: Tensor<T>,

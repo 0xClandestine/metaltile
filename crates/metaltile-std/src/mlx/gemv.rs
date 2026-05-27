@@ -8,20 +8,21 @@
 //! load latency. tpg=1024 regresses −20% on f16 (only 1 iteration,
 //! zero latency hiding). f32/bf16 are flat across tpgs.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="gemv",
-    subop="gemv",
-    class=MatVec,
-    b=4096,
-    n=4096,
-    tpg=512,
-    tol=1e-2,
-    mlx="gemv_{tn}_bm4_bn1_sm1_sn32_tm4_tn4_nc0_axpby0",
-    metal_file="gemv.metal",
+#[kernel(
+    bench(
+        op="gemv",
+        subop="gemv",
+        class=MatVec,
+        b=4096,
+        n=4096,
+        tpg=512,
+        tol=1e-2,
+        mlx="gemv_{tn}_bm4_bn1_sm1_sn32_tm4_tn4_nc0_axpby0",
+        metal_file="gemv.metal",
+    )
 )]
-#[kernel]
 pub fn mt_gemv<T>(mat: Tensor<T>, vec: Tensor<T>, out: Tensor<T>, #[constexpr] k: u32) {
     let row = program_id::<0>();
     let rs = row * k;

@@ -114,7 +114,7 @@ pub fn run(args: &BenchArgs) -> Result<(), crate::CliError> {
         };
         let _reporter = set_result_reporter(&mut report);
 
-        // All ops — inventory-registered via #[bench_kernel]
+        // All ops — inventory-registered via #[kernel(bench(...))]
         {
             let mut specs: Vec<&BenchSpec> = inventory::iter::<BenchSpec>.into_iter().collect();
             specs.sort_unstable_by_key(|s| (s.op, s.subop));

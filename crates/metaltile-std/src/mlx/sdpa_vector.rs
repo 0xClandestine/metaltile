@@ -30,24 +30,25 @@
 //! to both should be ported across — see the `tg_out` occupancy fix
 //! in PR #43 for the precedent.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 // ── d=128 baseline (original, benchmarked against MLX) ──────────────────────
 
-#[bench_kernel(
-    op="sdpa",
-    subop="sdpa_vector",
-    class=SdpaVector,
-    h=128,        // head_dim
-    n_kv=4096,
-    n_heads=32,   // n_q_heads
-    gqa_factor=4, // 32 Q heads grouped onto 8 KV heads
-    batch=1,
-    tpg=1024,     // BN × BD = 32 × 32
-    tol=1e-3,
-    metal_file="scaled_dot_product_attention.metal",
+#[kernel(
+    bench(
+        op="sdpa",
+        subop="sdpa_vector",
+        class=SdpaVector,
+        h=128,        // head_dim
+        n_kv=4096,
+        n_heads=32,   // n_q_heads
+        gqa_factor=4, // 32 Q heads grouped onto 8 KV heads
+        batch=1,
+        tpg=1024,     // BN × BD = 32 × 32
+        tol=1e-3,
+        metal_file="scaled_dot_product_attention.metal",
+    )
 )]
-#[kernel]
 pub fn mt_sdpa_vector<T>(
     q: Tensor<T>,
     k: Tensor<T>,

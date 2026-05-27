@@ -2,20 +2,21 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! FP quantized benchmark — #[kernel] DSL vs MLX metal/fp_quantized.metal
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="fp_quantized",
-    subop="fp4_quant_dequant",
-    class=FpQuantized,
-    n=1048576,
-    tpg=32,
-    tol=0.5,
-    mlx="nvfp4_quantize_dequantize_float_gs_16_b_4",
-    metal_file="fp_quantized.metal",
-    dtypes=crate::spec::F32_ONLY,
+#[kernel(
+    bench(
+        op="fp_quantized",
+        subop="fp4_quant_dequant",
+        class=FpQuantized,
+        n=1048576,
+        tpg=32,
+        tol=0.5,
+        mlx="nvfp4_quantize_dequantize_float_gs_16_b_4",
+        metal_file="fp_quantized.metal",
+        dtypes=crate::spec::F32_ONLY,
+    )
 )]
-#[kernel]
 pub fn mt_fp4_quant_dequant(inp: Tensor<f32>, out: Tensor<f32>, #[constexpr] n: u32) {
     let gid = program_id::<0>();
     let x = load(inp[gid]);
@@ -98,16 +99,17 @@ pub fn mt_fp4_quant_dequant(inp: Tensor<f32>, out: Tensor<f32>, #[constexpr] n: 
 //   format by the `fp8_kernel!` macro — a wrong set silently rounds wrong.
 macro_rules! fp8_kernel {
     ($name:ident, $subop:literal, $mant:literal, $emin:literal, $emax:literal, $fp8max:literal) => {
-        // `#[bench_kernel]` placed before `#[kernel]` registers a BenchSpec
+        // `#[kernel(bench(...))]` registers both the kernel and BenchSpec
         // for this non-generic kernel (the attribute handles the
         // no-DType `kernel_ir_for` signature) — so each fp8 format gets
         // its own bench row, like `mt_fp4_quant_dequant`. No `mlx=` /
         // `metal_file=`: fp8 has no MLX side-by-side counterpart.
-        // Single-line `#[bench_kernel]` — rustfmt's indent tracking inside
+        // Single-line `#[kernel(bench(...))]` — rustfmt's indent tracking inside
         // `macro_rules!` bodies is non-idempotent for multi-line attributes
         // (it adds 8 spaces every `fmt` run); a single line is stable.
-        #[bench_kernel(op = "fp_quantized", subop = $subop, class = FpQuantized, n = 1048576, tpg = 32, tol = 0.05, dtypes = crate::spec::F32_ONLY)]
-        #[kernel]
+        #[kernel(
+            bench(op = "fp_quantized", subop = $subop, class = FpQuantized, n = 1048576, tpg = 32, tol = 0.05, dtypes = crate::spec::F32_ONLY)
+        )]
         pub fn $name(inp: Tensor<f32>, out: Tensor<f32>, #[constexpr] n: u32) {
             let gid = program_id::<0>();
             let x = load(inp[gid]);

@@ -46,19 +46,20 @@
 //! Codegen-only; correctness pinned by
 //! `tests/gated_rmsnorm_gpu_correctness.rs`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 /// `out[r, i] = w[i] · y[r, i] · rsqrt(mean(y[r]²) + eps) · silu(z[r, i])`.
 ///
 /// `y` is fp32 (the GDN recurrence output); `z`, `w`, `out` are `T`.
-#[bench_kernel(
-    op="gated_rmsnorm",
-    subop="gated_rmsnorm",
-    class=GenericEmpty,
-    tol=1e-4,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="gated_rmsnorm",
+        subop="gated_rmsnorm",
+        class=GenericEmpty,
+        tol=1e-4,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn ffai_gated_rmsnorm<T>(
     y: Tensor<f32>,
     z: Tensor<T>,

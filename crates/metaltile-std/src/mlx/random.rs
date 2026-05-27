@@ -2,20 +2,21 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Random benchmark — #[kernel] DSL vs MLX metal/random.metal
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="random",
-    subop="random_hash",
-    class=Random,
-    n=1048576,
-    tpg=1024,
-    tol=0.0,
-    mlx="rbitsc",
-    metal_file="random.metal",
-    dtypes=crate::spec::F32_ONLY,
+#[kernel(
+    bench(
+        op="random",
+        subop="random_hash",
+        class=Random,
+        n=1048576,
+        tpg=1024,
+        tol=0.0,
+        mlx="rbitsc",
+        metal_file="random.metal",
+        dtypes=crate::spec::F32_ONLY,
+    )
 )]
-#[kernel]
 pub fn mt_random_hash(out: Tensor<u32>, #[constexpr] n: u32) {
     let gid = program_id::<0>();
     let mut s = gid + 1u32;

@@ -46,7 +46,7 @@
 //! - Input must already hold sorted runs of length `run`; output is a
 //!   *separate* buffer (no in-place — caller ping-pongs).
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 use metaltile_core::ir::KernelMode;
 
 use crate::{
@@ -54,18 +54,19 @@ use crate::{
     spec::{BenchDispatch, BenchSpec},
 };
 
-#[bench_kernel(
-    op="sort",
-    subop="sort",
-    class=Sort,
-    b=1024,
-    n=1024,
-    tpg=256,
-    tol=0.0,
-    mlx="c_block_sort_{tn}_{tn}_bn256_tn4",
-    metal_file="sort.metal",
+#[kernel(
+    bench(
+        op="sort",
+        subop="sort",
+        class=Sort,
+        b=1024,
+        n=1024,
+        tpg=256,
+        tol=0.0,
+        mlx="c_block_sort_{tn}_{tn}_bn256_tn4",
+        metal_file="sort.metal",
+    )
 )]
-#[kernel]
 pub fn mt_sort<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
     let block_id = program_id::<0>();
     let t = tid;

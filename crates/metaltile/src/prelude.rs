@@ -12,7 +12,7 @@
 //!
 //! # What's here
 //!
-//! - **Macros:** [`#[kernel]`], [`#[bench_kernel]`], [`#[constexpr]`], [`#[scalar]`],
+//! - **Macros:** [`#[kernel]`], [`#[constexpr]`], [`#[scalar]`],
 //!   [`#[strided]`], [`shape!`], [`tile!`]
 //! - **IR types (user-facing):** [`ConstExpr`], [`ConstExprValues`], [`DType`], [`Dim`],
 //!   [`DimExpr`], [`Shape`], [`Kernel`], [`KernelMode`], [`UnaryOpKind`], [`BinOpKind`],
@@ -79,8 +79,6 @@ pub use metaltile_core::shape::tile as make_tile;
 /// A single dimension expression used in shape algebra.
 // (grouped by rustfmt)
 pub use metaltile_core::shape::{DimExpr, Shape};
-/// Registers a kernel for automatic benchmarking (place before `#[kernel]`).
-pub use metaltile_macros::bench_kernel;
 /// Marks a kernel parameter as a compile-time constant.
 pub use metaltile_macros::constexpr;
 /// Marks a function as a MetalTile kernel.

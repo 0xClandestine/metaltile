@@ -26,7 +26,7 @@ licenses are listed below.
 - **clap** — Command-line argument parsing for the `tile` binary. [MIT / Apache-2.0](https://github.com/clap-rs/clap)
 - **half** — Host-side `f16` and `bf16` types used in bench and buffer utilities. [MIT / Apache-2.0](https://github.com/starkat99/half-rs)
 - **bytemuck** — Safe byte-reinterpretation for buffer uploads and downloads. [MIT / Apache-2.0 / Zlib](https://github.com/Lokathor/bytemuck)
-- **inventory** — Compile-time kernel registry powering `tile build` and `#[bench_kernel]`. [MIT / Apache-2.0](https://github.com/dtolnay/inventory)
+- **inventory** — Compile-time kernel registry powering `tile build` and `#[kernel(bench(...))]`. [MIT / Apache-2.0](https://github.com/dtolnay/inventory)
 - **serde / serde_json** — Serialisation for bench snapshots, baseline files, and IR manifests. [MIT / Apache-2.0](https://github.com/serde-rs/serde)
 - **tracing / tracing-subscriber** — Structured diagnostics and event logging. [MIT](https://github.com/tokio-rs/tracing)
 - **thiserror** — Error type derivation across MetalTile crates. [MIT / Apache-2.0](https://github.com/dtolnay/thiserror)

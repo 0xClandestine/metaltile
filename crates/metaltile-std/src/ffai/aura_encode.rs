@@ -70,7 +70,7 @@
 //! the `#[kernel]` proc-macro sees it — required because the proc-macro
 //! does not expand inner declarative macros.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 macro_rules! aura_encode_kernel {
     ($name:ident, $bits:literal, $levels:literal, $subop:literal) => {
@@ -78,8 +78,9 @@ macro_rules! aura_encode_kernel {
         // production, f32 in tests). All internal math runs in f32 —
         // we cast at the load. Everything else stays f32-only because
         // rotation, codebook, and norm-correction need the precision.
-        #[bench_kernel(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Reduction,)]
-        #[kernel]
+        #[kernel(
+            bench(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Reduction,)
+        )]
         pub fn $name<T>(
             input: Tensor<T>,
             rotation: Tensor<f32>,

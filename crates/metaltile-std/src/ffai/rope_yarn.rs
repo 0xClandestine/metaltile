@@ -29,16 +29,17 @@
 //! Codegen-only. Validated by `rope_yarn_gpu_correctness` + FFAI
 //! integration tests.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="rope",
-    subop="rope_yarn",
-    class=GenericEmpty,
-    tol=0.0,
-    kernel_mode=Grid3D,
+#[kernel(
+    bench(
+        op="rope",
+        subop="rope_yarn",
+        class=GenericEmpty,
+        tol=0.0,
+        kernel_mode=Grid3D,
+    )
 )]
-#[kernel]
 pub fn ffai_rope_yarn<T>(
     qk: Tensor<T>,
     out: Tensor<T>,

@@ -40,17 +40,18 @@
 //! the actual f32 arg, so all arithmetic stays in f32 regardless of T.
 //! No T→f32→T precision loss in the silu path.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="swiglu",
-    subop="swiglu",
-    class=Binary,
-    input_a=Signed,
-    input_b=Signed,
-    tol=1e-3,
+#[kernel(
+    bench(
+        op="swiglu",
+        subop="swiglu",
+        class=Binary,
+        input_a=Signed,
+        input_b=Signed,
+        tol=1e-3,
+    )
 )]
-#[kernel]
 pub fn mt_swiglu<T>(gate: Tensor<T>, up: Tensor<T>, out: Tensor<T>) {
     let idx = tid;
     let g = load(gate[idx]).cast::<f32>();

@@ -35,16 +35,17 @@
 //! - **No `threadgroup_*` / `simd_*` cooperation** — every thread is
 //!   independent. The only invariant is the threshold semantic above.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="logits_processors",
-    subop="topk_mask",
-    class=GenericEmpty,
-    tol=0.0,
-    kernel_mode=Grid3D,
+#[kernel(
+    bench(
+        op="logits_processors",
+        subop="topk_mask",
+        class=GenericEmpty,
+        tol=0.0,
+        kernel_mode=Grid3D,
+    )
 )]
-#[kernel]
 pub fn logits_topk_mask<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] threshold: f32) {
     let i = program_id::<0>();
     let v = load(inp[i]).cast::<f32>();

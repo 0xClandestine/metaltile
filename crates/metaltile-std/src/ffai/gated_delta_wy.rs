@@ -66,16 +66,17 @@
 
 #![allow(clippy::too_many_arguments)]
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="gated_delta",
-    subop="wy_chunk",
-    class=GenericEmpty,
-    tol=0.0,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="gated_delta",
+        subop="wy_chunk",
+        class=GenericEmpty,
+        tol=0.0,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn mt_gated_delta_wy_chunk<T>(
     q: Tensor<T>,
     k: Tensor<T>,

@@ -66,18 +66,19 @@
 //!
 //! Codegen-only. Correctness validated by `winograd_conv_gpu_correctness`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 /// Winograd F(2×2, 3×3) convolution. See the module docs for the
 /// algorithm and the dispatch invariants.
-#[bench_kernel(
-    op="conv2d",
-    subop="winograd_3x3",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Grid3D,
+#[kernel(
+    bench(
+        op="conv2d",
+        subop="winograd_3x3",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Grid3D,
+    )
 )]
-#[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn winograd_conv2d_3x3<T>(
     input: Tensor<T>,
@@ -326,14 +327,15 @@ pub fn winograd_conv2d_3x3<T>(
 /// `U = G·g·Gᵀ`. One thread per `(oc, ic)` pair; `u` is `[out_ch, in_ch,
 /// 4, 4]` row-major. Dispatch: Grid3D, `program_id<0>` over
 /// `out_ch · in_ch`.
-#[bench_kernel(
-    op="conv2d",
-    subop="winograd_filter_transform_3x3",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Grid3D,
+#[kernel(
+    bench(
+        op="conv2d",
+        subop="winograd_filter_transform_3x3",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Grid3D,
+    )
 )]
-#[kernel]
 pub fn winograd_filter_transform_3x3<T>(
     weight: Tensor<T>,
     out: Tensor<T>,
@@ -392,14 +394,15 @@ pub fn winograd_filter_transform_3x3<T>(
 /// `winograd_filter_transform_3x3`). Identical to `winograd_conv2d_3x3`
 /// except the per-`(oc, ic)` filter transform is replaced by 16 loads of
 /// the precomputed `U`. Pair them: filter-transform once, then this.
-#[bench_kernel(
-    op="conv2d",
-    subop="winograd_3x3_split",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Grid3D,
+#[kernel(
+    bench(
+        op="conv2d",
+        subop="winograd_3x3_split",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Grid3D,
+    )
 )]
-#[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn winograd_conv2d_3x3_split<T>(
     input: Tensor<T>,

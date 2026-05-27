@@ -54,18 +54,19 @@
 //! K / V layout:     `[n_kv_heads, kv_stride, head_dim]` row-major.
 //! Online softmax runs in fp32 throughout (storage stays in T).
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 // ─── head_dim = 64 (SigLIP base/large, CLIP-L) ─────────────────────
 
-#[bench_kernel(
-    op="sdpa",
-    subop="sdpa_bidirectional_d64",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="sdpa",
+        subop="sdpa_bidirectional_d64",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn ffai_sdpa_bidirectional_d64<T>(
     q: Tensor<T>,
     k: Tensor<T>,
@@ -171,14 +172,15 @@ pub fn ffai_sdpa_bidirectional_d64<T>(
 
 // ─── head_dim = 32 (FastViT-HD) ────────────────────────────────────
 
-#[bench_kernel(
-    op="sdpa",
-    subop="sdpa_bidirectional_d32",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="sdpa",
+        subop="sdpa_bidirectional_d32",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn ffai_sdpa_bidirectional_d32<T>(
     q: Tensor<T>,
     k: Tensor<T>,
@@ -274,14 +276,15 @@ pub fn ffai_sdpa_bidirectional_d32<T>(
 // `simd_sum` / `simd_max`, which is what makes the geometry valid on
 // a 32-wide simdgroup.
 
-#[bench_kernel(
-    op="sdpa",
-    subop="sdpa_bidirectional_d72",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="sdpa",
+        subop="sdpa_bidirectional_d72",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn ffai_sdpa_bidirectional_d72<T>(
     q: Tensor<T>,
     k: Tensor<T>,
@@ -414,14 +417,15 @@ pub fn ffai_sdpa_bidirectional_d72<T>(
 // `head_dim` differs at the call site, and that's already gated by
 // the same per-element bounds masks.
 
-#[bench_kernel(
-    op="sdpa",
-    subop="sdpa_bidirectional_d80",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="sdpa",
+        subop="sdpa_bidirectional_d80",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn ffai_sdpa_bidirectional_d80<T>(
     q: Tensor<T>,
     k: Tensor<T>,
@@ -539,14 +543,15 @@ pub fn ffai_sdpa_bidirectional_d80<T>(
 // per lane. Distinct from d72 because that variant has the ragged
 // 24-active-lane geometry; here every lane participates.
 
-#[bench_kernel(
-    op = "sdpa",
-    subop = "sdpa_bidirectional_d96",
-    class = GenericEmpty,
-    tol = 1e-3,
-    kernel_mode = Reduction,
+#[kernel(
+    bench(
+        op = "sdpa",
+        subop = "sdpa_bidirectional_d96",
+        class = GenericEmpty,
+        tol = 1e-3,
+        kernel_mode = Reduction,
+    )
 )]
-#[kernel]
 pub fn ffai_sdpa_bidirectional_d96<T>(
     q: Tensor<T>,
     k: Tensor<T>,

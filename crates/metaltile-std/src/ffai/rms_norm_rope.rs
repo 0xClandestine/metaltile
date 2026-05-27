@@ -32,17 +32,18 @@
 //! Codegen-only; correctness pinned by
 //! `tests/rms_norm_rope_gpu_correctness.rs`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 /// Fused RMSNorm + paired-layout RoPE for one Q/K head per threadgroup.
-#[bench_kernel(
-    op="rms_norm_rope",
-    subop="rms_norm_rope",
-    class=GenericEmpty,
-    tol=1e-4,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="rms_norm_rope",
+        subop="rms_norm_rope",
+        class=GenericEmpty,
+        tol=1e-4,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn ffai_rms_norm_rope<T>(
     x: Tensor<T>,
     w: Tensor<T>,

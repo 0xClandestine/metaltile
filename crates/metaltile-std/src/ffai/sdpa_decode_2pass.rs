@@ -18,7 +18,7 @@
 //!
 //! head_dim hardcoded to 128; online softmax in fp32 throughout.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 /// MLX-derived `blocks` value for chained 2-pass dispatch on Apple
 /// M5 Max (architecture char `'s'`). Mirrors the curve in upstream
@@ -80,23 +80,24 @@ mod heuristic_tests {
 
 // ── Pass 1: per-block partials, GQA co-load ──────────────────────────────
 
-#[bench_kernel(
-    op="sdpa",
-    subop="sdpa_decode_2pass",
-    class=SdpaVector2Pass,
-    h=128,
-    n_kv=4096,
-    n_heads=32,
-    gqa_factor=4,
-    batch=1,
-    blocks=32,
-    pass2_kernel=sdpa_decode_2pass_pass2,
-    tol=1e-3,
-    mlx="sdpa_vector_{tn}_128_128",
-    metal_file="scaled_dot_product_attention.metal",
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="sdpa",
+        subop="sdpa_decode_2pass",
+        class=SdpaVector2Pass,
+        h=128,
+        n_kv=4096,
+        n_heads=32,
+        gqa_factor=4,
+        batch=1,
+        blocks=32,
+        pass2_kernel=sdpa_decode_2pass_pass2,
+        tol=1e-3,
+        mlx="sdpa_vector_{tn}_128_128",
+        metal_file="scaled_dot_product_attention.metal",
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn sdpa_decode_2pass_pass1<T>(
     q: Tensor<T>,
     k: Tensor<T>,
@@ -197,14 +198,15 @@ pub fn sdpa_decode_2pass_pass1<T>(
 
 // ── Pass 2: 32-sg × 32-lane merge, MLX-style ─────────────────────────────
 
-#[bench_kernel(
-    op="sdpa",
-    subop="sdpa_decode_2pass_pass2",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Reduction,
+#[kernel(
+    bench(
+        op="sdpa",
+        subop="sdpa_decode_2pass_pass2",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Reduction,
+    )
 )]
-#[kernel]
 pub fn sdpa_decode_2pass_pass2<T>(
     partial_o: Tensor<T>,
     partial_m: Tensor<f32>,

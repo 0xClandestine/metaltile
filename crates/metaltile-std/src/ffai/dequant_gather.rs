@@ -40,12 +40,13 @@
 //! file) silently produced empty kernels — the proc-macro doesn't expand
 //! inner declarative macros.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 macro_rules! dequant_gather_kernel {
     ($name:ident, $bits:literal, $subop:literal) => {
-        #[bench_kernel(op="dequant_gather", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)]
-        #[kernel]
+        #[kernel(
+            bench(op="dequant_gather", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)
+        )]
         pub fn $name<T>(
             weight: Tensor<u32>,
             scales: Tensor<T>,

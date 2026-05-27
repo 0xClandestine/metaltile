@@ -40,7 +40,7 @@
 //! expand inner `macro_rules!` invocations (see CLAUDE.md note about
 //! PR #19's macro regression).
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
 // ── Clean nibble/byte path: bits ∈ {2, 4, 8} ─────────────────────────────
 //
@@ -49,8 +49,9 @@ use metaltile::{bench_kernel, kernel};
 // amortises across all dims in the pack.
 macro_rules! aura_dequant_rotated_clean {
     ($name:ident, $bits:literal, $subop:literal) => {
-        #[bench_kernel(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)]
-        #[kernel]
+        #[kernel(
+                    bench(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)
+                )]
         pub fn $name<T>(
             packed: Tensor<u32>,
             norms: Tensor<f32>,
@@ -104,8 +105,9 @@ macro_rules! aura_dequant_rotated_clean {
 // absolute dim index `d`, so cross-word spills resolve correctly.
 macro_rules! aura_dequant_rotated_odd {
     ($name:ident, $bits:literal, $subop:literal) => {
-        #[bench_kernel(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)]
-        #[kernel]
+        #[kernel(
+                    bench(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Grid3D,)
+                )]
         pub fn $name<T>(
             packed: Tensor<u32>,
             norms: Tensor<f32>,

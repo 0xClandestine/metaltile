@@ -2,7 +2,7 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! `BenchSpec` — declarative kernel benchmark descriptors.
 //!
-//! Each `#[bench_kernel(...)]` annotation on a `#[kernel]` fn generates one
+//! Each `#[kernel(bench(...))]` annotation generates one
 //! `BenchSpec` and registers it via `inventory::submit!`. The bench runner
 //! iterates `inventory::iter::<BenchSpec>`, sorts by `(op, subop)`, then calls
 //! `run_spec(spec, runner, dt)` per dtype (run_spec lives in metaltile-cli).

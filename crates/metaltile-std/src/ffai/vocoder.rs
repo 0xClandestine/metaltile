@@ -53,16 +53,17 @@
 //!
 //! Codegen-only. Correctness validated by `vocoder_gpu_correctness`.
 
-use metaltile::{bench_kernel, kernel};
+use metaltile::kernel;
 
-#[bench_kernel(
-    op="vocoder",
-    subop="istft",
-    class=GenericEmpty,
-    tol=1e-3,
-    kernel_mode=Grid3D,
+#[kernel(
+    bench(
+        op="vocoder",
+        subop="istft",
+        class=GenericEmpty,
+        tol=1e-3,
+        kernel_mode=Grid3D,
+    )
 )]
-#[kernel]
 pub fn vocoder_istft<T>(
     spec_re: Tensor<T>,
     spec_im: Tensor<T>,
