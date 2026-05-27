@@ -41,9 +41,7 @@
 //! Verified for orthogonality: H · H^T = M · I.
 
 use metaltile::kernel;
-use metaltile_core::{dtype::DType, ir::Kernel};
-
-use crate::bench_types::DType as BenchDType;
+use metaltile_core::{DType as BenchDType, dtype::DType, ir::Kernel};
 
 // ── H_M sign-bit encodings ─────────────────────────────────────────────────
 //

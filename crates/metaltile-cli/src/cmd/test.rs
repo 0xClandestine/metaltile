@@ -8,16 +8,19 @@ use std::{
     process::{Command, Stdio},
 };
 
-use anstyle::AnsiColor;
 use metaltile_core::{protocol::ProtocolMessage, tile_config::TileConfig};
 
-use crate::CliError;
+use crate::{
+    CliError,
+    term::{Color, Style, paint_stderr},
+};
 
 /// Run the test subcommand.
 pub fn run(filter: Option<String>, verbose: u8, allow_dirty: bool) -> Result<(), CliError> {
     // ── 1. Find tile.toml ───────────────────────────────────────────────
     let cwd = std::env::current_dir()?;
-    let config = TileConfig::discover(&cwd)?.unwrap_or_default();
+    let config =
+        TileConfig::discover(&cwd).map_err(|e| CliError::Other(e.to_string()))?.unwrap_or_default();
 
     // ── 2. Check dirty tree ─────────────────────────────────────────────
     if !allow_dirty {
@@ -26,8 +29,8 @@ pub fn run(filter: Option<String>, verbose: u8, allow_dirty: bool) -> Result<(),
             eprintln!(
                 "{} Working tree has tracked-file modifications.\n  \
                  Pass {} to proceed anyway, or commit/stash first.",
-                AnsiColor::Yellow.render().style("warning:"),
-                AnsiColor::Green.render().style("--allow-dirty"),
+                paint_stderr("warning:", Style::new().fg(Color::Yellow).bold()),
+                paint_stderr("--allow-dirty", Style::new().fg(Color::Green).bold()),
             );
             return Err(CliError::Other(
                 "dirty working tree (pass --allow-dirty to override)".into(),
@@ -73,7 +76,7 @@ pub fn run(filter: Option<String>, verbose: u8, allow_dirty: bool) -> Result<(),
             Err(e) => {
                 eprintln!(
                     "{} Failed to parse runner output: {e}",
-                    AnsiColor::Red.render().style("error:")
+                    paint_stderr("error:", Style::new().fg(Color::Red).bold())
                 );
             },
         }
@@ -99,7 +102,7 @@ fn render_message(msg: &ProtocolMessage, _verbose: u8) {
         ProtocolMessage::Start { runner_version, total_benches: _, total_tests } => {
             eprintln!(
                 "{} runner v{}, {} tests",
-                AnsiColor::Cyan.render().style("start"),
+                paint_stderr("start", Style::new().fg(Color::Cyan).bold()),
                 runner_version,
                 total_tests,
             );
@@ -108,11 +111,11 @@ fn render_message(msg: &ProtocolMessage, _verbose: u8) {
             // Tests don't emit bench results — silently ignore.
         },
         ProtocolMessage::TestResult(t) => {
-            let color = if t.passed { AnsiColor::Green } else { AnsiColor::Red };
+            let color = if t.passed { Color::Green } else { Color::Red };
             let status = if t.passed { "PASS" } else { "FAIL" };
             eprintln!(
                 "  {} {:<30} {:>6}  {:<4}  max_err={:.2e}",
-                color.render().style("test"),
+                paint_stderr("test", Style::new().fg(color).bold()),
                 t.name,
                 t.dtype,
                 status,
@@ -122,7 +125,7 @@ fn render_message(msg: &ProtocolMessage, _verbose: u8) {
         ProtocolMessage::ProtocolError { name, dtype, message } => {
             eprintln!(
                 "  {} {:<30} {:>6}  {message}",
-                AnsiColor::Red.render().style("error"),
+                paint_stderr("error", Style::new().fg(Color::Red).bold()),
                 name,
                 dtype,
             );
@@ -130,7 +133,7 @@ fn render_message(msg: &ProtocolMessage, _verbose: u8) {
         ProtocolMessage::Done { bench_passed: _, bench_failed: _, test_passed, test_failed } => {
             eprintln!(
                 "{} tests: {} passed, {} failed",
-                AnsiColor::Cyan.render().style("done"),
+                paint_stderr("done", Style::new().fg(Color::Cyan).bold()),
                 test_passed,
                 test_failed,
             );

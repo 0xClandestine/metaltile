@@ -3,7 +3,7 @@
 //! `tile device` — Show GPU device info and supported feature flags.
 
 use metaltile_core::GpuFamily;
-use metaltile_std::runner::GpuRunner;
+use metaltile_runtime::Context;
 
 use crate::{
     DeviceArgs,
@@ -14,8 +14,8 @@ pub fn run(args: &DeviceArgs) -> Result<(), crate::CliError> {
     let _span = tracing::info_span!("device", json = args.json).entered();
     let json_out = args.json;
 
-    let runner = match GpuRunner::new() {
-        Ok(r) => r,
+    let ctx = match Context::new() {
+        Ok(c) => c,
         Err(e) => {
             if json_out {
                 println!("{{\"error\":{:?}}}", e);
@@ -24,16 +24,16 @@ pub fn run(args: &DeviceArgs) -> Result<(), crate::CliError> {
             eprintln!(
                 "{} {}",
                 paint_stdout("error:", Style::new().fg(Color::Red).bold()),
-                paint_stdout(&e, Style::new().fg(Color::BrightWhite)),
+                paint_stdout(e.to_string(), Style::new().fg(Color::BrightWhite)),
             );
-            return Err(crate::CliError::GpuInit(e));
+            return Err(crate::CliError::GpuInit(e.to_string()));
         },
     };
 
-    let device_name = &runner.device_name;
-    let simd = runner.supports_simd_matrix();
+    let device_name = ctx.device_name();
+    let simd = ctx.supports_simd_matrix();
 
-    let gpu_family = GpuFamily::from_device_name(device_name);
+    let gpu_family = GpuFamily::from_device_name(&device_name);
 
     // Native bfloat (Metal 3.1 `bfloat` type) and async threadgroup copy both
     // require Apple9 (M3 / A17) or later, independent of SIMD matrix support.
@@ -63,7 +63,7 @@ pub fn run(args: &DeviceArgs) -> Result<(), crate::CliError> {
     eprintln!(
         "  {}  {}",
         paint_stdout(format!("{:<16}", "Device"), label_style),
-        paint_stdout(device_name, Style::new().fg(Color::BrightWhite)),
+        paint_stdout(&device_name, Style::new().fg(Color::BrightWhite)),
     );
     println!(
         "  {}  {}",
@@ -105,7 +105,7 @@ pub fn run(args: &DeviceArgs) -> Result<(), crate::CliError> {
     println!(
         "  {}  {}",
         paint_stdout(format!("{:<16}", "SLC"), label_style),
-        paint_stdout(GpuFamily::slc_label(device_name), Style::new().fg(Color::BrightWhite)),
+        paint_stdout(GpuFamily::slc_label(&device_name), Style::new().fg(Color::BrightWhite)),
     );
     println!();
     Ok(())

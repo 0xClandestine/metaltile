@@ -13,10 +13,12 @@ use std::{
     process::{Command, Stdio},
 };
 
-use anstyle::AnsiColor;
 use metaltile_core::{protocol::ProtocolMessage, tile_config::TileConfig};
 
-use crate::CliError;
+use crate::{
+    CliError,
+    term::{Color, Style, paint_stderr},
+};
 
 /// Run the bench subcommand.
 pub fn run(
@@ -29,7 +31,8 @@ pub fn run(
 ) -> Result<(), CliError> {
     // ── 1. Find tile.toml ───────────────────────────────────────────────
     let cwd = std::env::current_dir()?;
-    let config = TileConfig::discover(&cwd)?.unwrap_or_default();
+    let config =
+        TileConfig::discover(&cwd).map_err(|e| CliError::Other(e.to_string()))?.unwrap_or_default();
 
     // ── 2. Check dirty tree ─────────────────────────────────────────────
     if !allow_dirty {
@@ -39,8 +42,8 @@ pub fn run(
                 "{} Working tree has tracked-file modifications.\n  \
                  Pass {} to bench anyway, or commit/stash your changes first.\n  \
                  Bench results tie back to a clean commit SHA.",
-                AnsiColor::Yellow.render().style("warning:"),
-                AnsiColor::Green.render().style("--allow-dirty"),
+                paint_stderr("warning:", Style::new().fg(Color::Yellow).bold()),
+                paint_stderr("--allow-dirty", Style::new().fg(Color::Green).bold()),
             );
             return Err(CliError::Other(
                 "dirty working tree (pass --allow-dirty to override)".into(),
@@ -91,7 +94,7 @@ pub fn run(
             Err(e) => {
                 eprintln!(
                     "{} Failed to parse runner output: {e}",
-                    AnsiColor::Red.render().style("error:")
+                    paint_stderr("error:", Style::new().fg(Color::Red).bold())
                 );
                 eprintln!("  Raw line: {line:.100}");
             },
@@ -118,7 +121,7 @@ pub fn run(
         }
         eprintln!(
             "{} wrote {} messages to {}",
-            AnsiColor::Green.render().style("saved:"),
+            paint_stderr("saved:", Style::new().fg(Color::Green).bold()),
             results.len(),
             out_path.display(),
         );
@@ -133,17 +136,17 @@ fn render_message(msg: &ProtocolMessage, _verbose: u8) {
         ProtocolMessage::Start { runner_version, total_benches, total_tests } => {
             eprintln!(
                 "{} runner v{}, {} benches, {} tests",
-                AnsiColor::Cyan.render().style("start"),
+                paint_stderr("start", Style::new().fg(Color::Cyan).bold()),
                 runner_version,
                 total_benches,
                 total_tests,
             );
         },
         ProtocolMessage::BenchResult(b) => {
-            let color = if b.correct { AnsiColor::Green } else { AnsiColor::Red };
+            let color = if b.correct { Color::Green } else { Color::Red };
             eprintln!(
                 "  {} {:<30} {:>6}  {:>8.1} GB/s  {:>7.1} µs",
-                color.render().style("bench"),
+                paint_stderr("bench", Style::new().fg(color).bold()),
                 b.name,
                 b.dtype,
                 b.mt_gbps,
@@ -155,11 +158,11 @@ fn render_message(msg: &ProtocolMessage, _verbose: u8) {
             }
         },
         ProtocolMessage::TestResult(t) => {
-            let color = if t.passed { AnsiColor::Green } else { AnsiColor::Red };
+            let color = if t.passed { Color::Green } else { Color::Red };
             let status = if t.passed { "PASS" } else { "FAIL" };
             eprintln!(
                 "  {} {:<30} {:>6}  {:<4}  max_err={:.2e}",
-                color.render().style("test"),
+                paint_stderr("test", Style::new().fg(color).bold()),
                 t.name,
                 t.dtype,
                 status,
@@ -169,7 +172,7 @@ fn render_message(msg: &ProtocolMessage, _verbose: u8) {
         ProtocolMessage::ProtocolError { name, dtype, message } => {
             eprintln!(
                 "  {} {:<30} {:>6}  {message}",
-                AnsiColor::Red.render().style("error"),
+                paint_stderr("error", Style::new().fg(Color::Red).bold()),
                 name,
                 dtype,
             );
@@ -177,7 +180,7 @@ fn render_message(msg: &ProtocolMessage, _verbose: u8) {
         ProtocolMessage::Done { bench_passed, bench_failed, test_passed, test_failed } => {
             eprintln!(
                 "{} benches: {} passed, {} failed  |  tests: {} passed, {} failed",
-                AnsiColor::Cyan.render().style("done"),
+                paint_stderr("done", Style::new().fg(Color::Cyan).bold()),
                 bench_passed,
                 bench_failed,
                 test_passed,

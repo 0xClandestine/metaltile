@@ -354,6 +354,21 @@ impl Context {
     /// off macOS. See the field doc for the level → chip mapping.
     pub fn chip_family(&self) -> Option<u32> { self.chip_family }
 
+    /// Metal device name string (e.g. `"Apple M4 Max"`), or `"N/A"` off macOS.
+    pub fn device_name(&self) -> String {
+        #[cfg(target_os = "macos")]
+        {
+            use objc2_metal::MTLDevice;
+            if let Some(dev) = objc2_metal::MTLCreateSystemDefaultDevice() {
+                return dev.name().to_string();
+            }
+        }
+        "N/A".to_string()
+    }
+
+    /// True when the GPU supports simdgroup matrix multiply (Apple7 / M1 and later).
+    pub fn supports_simd_matrix(&self) -> bool { self.chip_family.map(|f| f >= 7).unwrap_or(false) }
+
     pub fn dispatch(&self, kernel: &Kernel) -> Result<DispatchResult, MetalTileError> {
         self.dispatch_with_buffers(kernel, &BTreeMap::new())
     }

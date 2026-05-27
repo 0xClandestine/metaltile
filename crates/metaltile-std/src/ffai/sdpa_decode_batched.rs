@@ -1295,10 +1295,9 @@ pub fn sdpa_decode_batched_q8<T>(
 #[cfg(test)]
 mod tests {
     use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::ir::KernelMode;
+    use metaltile_core::{DType, ir::KernelMode};
 
     use super::sdpa_decode_batched_q2;
-    use crate::bench_types::DType;
 
     fn msl_for(dt: DType) -> String {
         let mut k = sdpa_decode_batched_q2::kernel_ir_for(dt);
