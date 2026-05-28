@@ -25,7 +25,7 @@ pub mod kernel_tests {
             .input(TestBuffer::from_vec("start", scalar_bytes(start, dt), dt))
             .input(TestBuffer::from_vec("step",  scalar_bytes(step,  dt), dt))
             .constexpr("n", n as u32)
-            .expect(TestBuffer::from_vec("out",  pack_f32(&expected, dt), dt))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
             .grid_1d(n, 256)
     }
 

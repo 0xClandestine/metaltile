@@ -8,7 +8,8 @@ use std::{collections::BTreeMap, io::Write as IoWrite, path::PathBuf, time::Inst
 
 use metaltile_core::{
     DType,
-    all_benches, all_tests,
+    all_benches,
+    all_tests,
     bench::{BenchBuffer, ConstValue, KernelBench, KernelTest, RefKernel, TestBuffer},
     protocol::{BenchResult, ProtocolMessage, TestResult},
 };
@@ -22,9 +23,7 @@ const REF_METAL_PATH_ENV: &str = "TILE_REF_METAL_PATH";
 // ---------------------------------------------------------------------------
 
 /// Top-level entry point called by `__tile_runner`.
-pub fn run(args: Args) {
-    Runner::new(args).run();
-}
+pub fn run(args: Args) { Runner::new(args).run(); }
 
 // ---------------------------------------------------------------------------
 // Args
@@ -48,10 +47,8 @@ impl Args {
     /// Expected format: `__tile_runner bench|test [--filter <pattern>]`
     pub fn from_env() -> Self {
         let raw: Vec<String> = std::env::args().collect();
-        let command = raw
-            .iter()
-            .find(|a| *a == "bench" || *a == "test")
-            .map_or(Command::Bench, |a| {
+        let command =
+            raw.iter().find(|a| *a == "bench" || *a == "test").map_or(Command::Bench, |a| {
                 if a == "test" { Command::Test } else { Command::Bench }
             });
         let filter =
@@ -118,14 +115,11 @@ impl Runner {
         let benches = self.filtered_benches();
         let tests = self.filtered_tests();
 
-        self.emit(
-            &mut out,
-            ProtocolMessage::Start {
-                runner_version: "0.1".to_string(),
-                total_benches: benches.len() as u32,
-                total_tests: tests.len() as u32,
-            },
-        );
+        self.emit(&mut out, ProtocolMessage::Start {
+            runner_version: "0.1".to_string(),
+            total_benches: benches.len() as u32,
+            total_tests: tests.len() as u32,
+        });
 
         let (bench_passed, bench_failed) = match self.command {
             Command::Bench => self.run_all_benches(&mut out, &benches),
@@ -137,10 +131,12 @@ impl Runner {
             Command::Bench => (0, 0),
         };
 
-        self.emit(
-            &mut out,
-            ProtocolMessage::Done { bench_passed, bench_failed, test_passed, test_failed },
-        );
+        self.emit(&mut out, ProtocolMessage::Done {
+            bench_passed,
+            bench_failed,
+            test_passed,
+            test_failed,
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -178,7 +174,7 @@ impl Runner {
                     Ok(result) => {
                         self.emit(out, ProtocolMessage::BenchResult(result));
                         passed += 1;
-                    }
+                    },
                     Err(e) => {
                         self.emit(out, ProtocolMessage::ProtocolError {
                             name: bench.name().to_string(),
@@ -186,7 +182,7 @@ impl Runner {
                             message: e.to_string(),
                         });
                         failed += 1;
-                    }
+                    },
                 }
                 let _ = out.flush();
             }
@@ -202,11 +198,8 @@ impl Runner {
         let setup = bench.setup(dt);
         let bytes_moved = bench.bytes_moved(&setup);
         let mt_min_us = self.time_bench_setup(&setup)?;
-        let mt_gbps = if mt_min_us > 0.0 {
-            (bytes_moved as f64 / 1e9) / (mt_min_us * 1e-6)
-        } else {
-            0.0
-        };
+        let mt_gbps =
+            if mt_min_us > 0.0 { (bytes_moved as f64 / 1e9) / (mt_min_us * 1e-6) } else { 0.0 };
 
         // If the setup names a reference Metal kernel and we have a path, time it.
         let (ref_gbps, mt_pct) = if let Some(ref_k) = setup.ref_kernel() {
@@ -220,11 +213,11 @@ impl Runner {
                     };
                     let pct = if rgbps > 0.0 { (mt_gbps / rgbps - 1.0) * 100.0 } else { 0.0 };
                     (Some(rgbps), Some(pct))
-                }
+                },
                 Err(e) => {
                     eprintln!("warn: reference kernel '{}' failed: {e}", ref_k.fn_name);
                     (None, None)
-                }
+                },
             }
         } else {
             (None, None)
@@ -249,7 +242,8 @@ impl Runner {
         &self,
         setup: &metaltile_core::bench::BenchSetup,
     ) -> Result<f64, Box<dyn std::error::Error>> {
-        let dispatch = DispatchParams::from_bench_buffers(setup.buffers(), setup.constexprs(), setup.grid());
+        let dispatch =
+            DispatchParams::from_bench_buffers(setup.buffers(), setup.constexprs(), setup.grid());
 
         for _ in 0..self.bench_cfg.warmup_iters {
             self.ctx.dispatch_with_grid(
@@ -284,18 +278,14 @@ impl Runner {
     ///
     /// Returns the minimum wall-clock time in microseconds, or an error if
     /// `ref_metal_path` is not configured or the source file can't be read.
-    fn time_ref_kernel(
-        &self,
-        ref_k: &RefKernel,
-    ) -> Result<f64, Box<dyn std::error::Error>> {
-        let base = self.ref_metal_path.as_ref().ok_or(
-            "no reference_metal_path configured in tile.toml [bench]"
-        )?;
+    fn time_ref_kernel(&self, ref_k: &RefKernel) -> Result<f64, Box<dyn std::error::Error>> {
+        let base = self
+            .ref_metal_path
+            .as_ref()
+            .ok_or("no reference_metal_path configured in tile.toml [bench]")?;
         let msl_source = std::fs::read_to_string(base.join(&ref_k.metal_file))?;
-        let buffers: Vec<(&str, Vec<u8>)> = ref_k.buffers
-            .iter()
-            .map(|b| (b.name(), b.initial_bytes()))
-            .collect();
+        let buffers: Vec<(&str, Vec<u8>)> =
+            ref_k.buffers.iter().map(|b| (b.name(), b.initial_bytes())).collect();
         let [gx, gy, gz] = ref_k.grid.grid;
         let [tx, ty, tz] = ref_k.grid.tpg;
         let grid_groups = [gx as usize, gy as usize, gz as usize];
@@ -342,8 +332,12 @@ impl Runner {
                     Ok(result) => {
                         let ok = result.passed;
                         self.emit(out, ProtocolMessage::TestResult(result));
-                        if ok { passed += 1; } else { failed += 1; }
-                    }
+                        if ok {
+                            passed += 1;
+                        } else {
+                            failed += 1;
+                        }
+                    },
                     Err(e) => {
                         self.emit(out, ProtocolMessage::ProtocolError {
                             name: test.name().to_string(),
@@ -351,7 +345,7 @@ impl Runner {
                             message: e.to_string(),
                         });
                         failed += 1;
-                    }
+                    },
                 }
                 let _ = out.flush();
             }
@@ -366,7 +360,8 @@ impl Runner {
     ) -> Result<TestResult, Box<dyn std::error::Error>> {
         let setup = test.setup(dt);
         let tol = test.tolerance(dt);
-        let dispatch = DispatchParams::from_test_buffers(setup.inputs(), setup.constexprs(), setup.grid());
+        let dispatch =
+            DispatchParams::from_test_buffers(setup.inputs(), setup.constexprs(), setup.grid());
 
         // Generate expected values — from a GPU reference kernel if present,
         // otherwise from the CPU-side buffers supplied by the test author.
@@ -400,7 +395,12 @@ impl Runner {
         )?;
 
         let (passed, max_err) = compare_outputs(&result.outputs, &expected, dt, tol);
-        Ok(TestResult { name: test.name().to_string(), dtype: dt.label().to_string(), passed, max_err })
+        Ok(TestResult {
+            name: test.name().to_string(),
+            dtype: dt.label().to_string(),
+            passed,
+            max_err,
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -429,10 +429,7 @@ impl DispatchParams {
         constexprs: &[(String, ConstValue)],
         grid: &metaltile_core::bench::Grid,
     ) -> Self {
-        let buffers = buffers
-            .iter()
-            .map(|b| (b.name().to_string(), b.initial_bytes()))
-            .collect();
+        let buffers = buffers.iter().map(|b| (b.name().to_string(), b.initial_bytes())).collect();
         Self::new(buffers, constexprs, grid)
     }
 
@@ -441,10 +438,7 @@ impl DispatchParams {
         constexprs: &[(String, ConstValue)],
         grid: &metaltile_core::bench::Grid,
     ) -> Self {
-        let buffers = buffers
-            .iter()
-            .map(|b| (b.name().to_string(), b.data().to_vec()))
-            .collect();
+        let buffers = buffers.iter().map(|b| (b.name().to_string(), b.data().to_vec())).collect();
         Self::new(buffers, constexprs, grid)
     }
 
@@ -486,8 +480,12 @@ fn compare_outputs(
             continue;
         };
         let err = max_abs_err(got_bytes, exp_bytes, dt);
-        if err > max_err { max_err = err; }
-        if max_err > tol { passed = false; }
+        if err > max_err {
+            max_err = err;
+        }
+        if max_err > tol {
+            passed = false;
+        }
     }
     (passed, max_err)
 }
@@ -497,7 +495,9 @@ fn compare_outputs(
 /// Returns a large finite value on size mismatch so JSON serialization stays
 /// well-formed (`f64::INFINITY` serialises as `null` in serde_json).
 fn max_abs_err(got: &[u8], exp: &[u8], dt: DType) -> f64 {
-    if got.len() != exp.len() { return 1e38; }
+    if got.len() != exp.len() {
+        return 1e38;
+    }
     let elem = dt.size_bytes();
     let n = got.len() / elem;
     (0..n)
@@ -512,13 +512,13 @@ fn elem_as_f64(bytes: &[u8], idx: usize, elem_size: usize, dt: DType) -> f64 {
     let off = idx * elem_size;
     let s = &bytes[off..off + elem_size];
     match dt {
-        DType::F32  => f32::from_le_bytes(s.try_into().unwrap()) as f64,
-        DType::F16  => half::f16::from_le_bytes(s.try_into().unwrap()).to_f64(),
+        DType::F32 => f32::from_le_bytes(s.try_into().unwrap()) as f64,
+        DType::F16 => half::f16::from_le_bytes(s.try_into().unwrap()).to_f64(),
         DType::BF16 => half::bf16::from_le_bytes(s.try_into().unwrap()).to_f64(),
-        DType::I32  => i32::from_le_bytes(s.try_into().unwrap()) as f64,
-        DType::U32  => u32::from_le_bytes(s.try_into().unwrap()) as f64,
-        DType::I8   => s[0] as i8 as f64,
-        DType::U8   => s[0] as f64,
-        _           => 0.0,
+        DType::I32 => i32::from_le_bytes(s.try_into().unwrap()) as f64,
+        DType::U32 => u32::from_le_bytes(s.try_into().unwrap()) as f64,
+        DType::I8 => s[0] as i8 as f64,
+        DType::U8 => s[0] as f64,
+        _ => 0.0,
     }
 }

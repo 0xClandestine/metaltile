@@ -22,6 +22,6 @@ pub use metaltile_core::{
     DType,
     TestBuffer,
     TestSetup,
+    bench::{Grid, RefKernel},
 };
-pub use metaltile_core::bench::{Grid, RefKernel};
 pub use metaltile_macros::test_kernel;

@@ -69,10 +69,7 @@ fn validate_tolerance(dtypes: &[Ident], tol: &Tolerance) -> syn::Result<()> {
         Tolerance::Array(vals) => {
             if vals.len() != dtypes.len() {
                 return Err(syn::Error::new(
-                    dtypes.last().map_or_else(
-                        || proc_macro2::Span::call_site(),
-                        Ident::span,
-                    ),
+                    dtypes.last().map_or_else(|| proc_macro2::Span::call_site(), Ident::span),
                     format!(
                         "tol array has {} values but dtypes has {} entries",
                         vals.len(),
@@ -81,21 +78,17 @@ fn validate_tolerance(dtypes: &[Ident], tol: &Tolerance) -> syn::Result<()> {
                 ));
             }
             return Ok(());
-        }
+        },
         Tolerance::Table(table) => {
-            let dtypes_set = dtypes
-                .iter()
-                .map(ToString::to_string)
-                .collect::<std::collections::BTreeSet<_>>();
+            let dtypes_set =
+                dtypes.iter().map(ToString::to_string).collect::<std::collections::BTreeSet<_>>();
             let mut seen = std::collections::BTreeSet::new();
             for (dtype, _) in table {
                 let name = dtype.to_string();
                 if !dtypes_set.contains(&name) {
                     return Err(syn::Error::new(
                         dtype.span(),
-                        format!(
-                            "tol table includes dtype `{name}` not listed in `dtypes = [...]`"
-                        ),
+                        format!("tol table includes dtype `{name}` not listed in `dtypes = [...]`"),
                     ));
                 }
                 if !seen.insert(name.clone()) {
@@ -117,7 +110,7 @@ fn validate_tolerance(dtypes: &[Ident], tol: &Tolerance) -> syn::Result<()> {
             }
 
             Ok(())
-        }
+        },
     }
 }
 
@@ -272,8 +265,7 @@ mod tests {
 
     #[test]
     fn parses_scalar_tolerance() {
-        let attr: TestAttr =
-            syn::parse_str(r#"dtypes = [f32, f16], tol = 1e-4"#).unwrap();
+        let attr: TestAttr = syn::parse_str(r#"dtypes = [f32, f16], tol = 1e-4"#).unwrap();
         assert!(matches!(attr.tol, Some(Tolerance::Scalar(t)) if (t - 1e-4).abs() < f64::EPSILON));
     }
 
@@ -286,10 +278,9 @@ mod tests {
 
     #[test]
     fn rejects_incomplete_tolerance_table() {
-        let err =
-            syn::parse_str::<TestAttr>(r#"dtypes = [f32, f16], tol = { f32: 1e-6 }"#)
-                .err()
-                .unwrap();
+        let err = syn::parse_str::<TestAttr>(r#"dtypes = [f32, f16], tol = { f32: 1e-6 }"#)
+            .err()
+            .unwrap();
         assert!(err.to_string().contains("missing dtype `f16`"));
     }
 
@@ -307,10 +298,9 @@ mod tests {
 
     #[test]
     fn rejects_array_tolerance_wrong_length() {
-        let err =
-            syn::parse_str::<TestAttr>(r#"dtypes = [f32, f16, bf16], tol = [1e-6, 1e-3]"#)
-                .err()
-                .unwrap();
+        let err = syn::parse_str::<TestAttr>(r#"dtypes = [f32, f16, bf16], tol = [1e-6, 1e-3]"#)
+            .err()
+            .unwrap();
         assert!(err.to_string().contains("tol array has 2 values but dtypes has 3"));
     }
 }
