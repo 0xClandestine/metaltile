@@ -42,34 +42,24 @@ Rules:
 Correctness tests live in a single sub-module.  The module is `pub` so the
 test runner discovers it via `metaltile-std`'s public surface.
 
+All imports are declared with `pub use` at the **file top** so that the inner
+modules need only `use super::*` — no per-module import lists.
+
 ```rust
+// ── file top (section 1) ──────────────────────────────────────────────────────
+use metaltile::kernel;
+pub use metaltile::test::*;         // test_kernel + DType + TestBuffer/Setup + BenchBuffer/Setup
+pub use crate::utils::{pack_f32, scalar_bytes};
+
+// … kernel definitions …
+
+// ── section 2 ────────────────────────────────────────────────────────────────
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
+    use super::*;
 
-    use metaltile::test_kernel;
-    use metaltile::core::{
-        DType,
-        bench::{TestBuffer, TestSetup},
-    };
-
-    use super::*;          // brings mt_exp, mt_log, … into scope
-
-    // ── helpers ──────────────────────────────────────────────────────────
-
-    fn pack_f32(vals: &[f32], dt: DType) -> Vec<u8> {
-        match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _ => panic!("unsupported dtype {dt:?}"),
-        }
-    }
-
-    // ── tests ─────────────────────────────────────────────────────────────
-
-    /// `name` maps to the baseline JSON's `"op/subop"` key.
     /// Keep N small (≤ 8 192) — tests run on every CI push.
-    #[test_kernel(name = "mlx/unary/exp", dtypes = [f32, f16, bf16], tol = 1e-3)]
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-3)]
     fn test_exp(dt: DType) -> TestSetup {
         let n = 512usize;
         let inp: Vec<f32> = (0..n).map(|i| (i % 32) as f32 * 0.1 - 1.6).collect();
@@ -85,10 +75,15 @@ pub mod kernel_tests {
 Rules:
 - `#![allow(unused, dead_code, clippy::too_many_arguments)]` at the top of
   the module — auto-generated impls trigger these lints.
-- `use super::*` pulls in all kernels defined above.
+- `use super::*` is the only import line needed — it pulls in the `pub use`
+  re-exports declared at the file top, plus the kernel modules (`mt_exp`, …).
 - `dtypes = [f32]` / `[f16, bf16]` / `[f32, f16, bf16]` — list only the
   dtypes actually tested; the macro expands one entry per dtype.
-- `tol` is the max element-wise absolute error.  Typical values:
+- `tol` is the max element-wise absolute error. Three forms are accepted:
+  - **Scalar** `tol = 1e-4` — same threshold for every dtype.
+  - **Array** `tol = [1e-6, 1e-3, 1e-2]` — one value per dtype, same order as `dtypes`.
+  - **Table** `tol = { f32: 1e-6, f16: 1e-3, bf16: 1e-2 }` — keyed by dtype name.
+  Typical values:
   - f32 exact copies: `1e-6`
   - f32 transcendentals: `1e-4`
   - f16: `1e-3`
@@ -113,11 +108,8 @@ Performance benchmarks live in a second sub-module.
 ```rust
 pub mod kernel_benches {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
-
-    use metaltile::bench;
-    use metaltile::core::{DType, bench::{BenchBuffer, BenchSetup}};
-
     use super::*;
+    use metaltile::bench; // explicit: `bench` conflicts with std's built-in #[bench] via glob
 
     /// Bench sizes should match MLX for a fair side-by-side GB/s comparison.
     /// `name` maps to `"op/subop"` in the baseline JSON (baselines/*.json).
@@ -266,7 +258,7 @@ The two canonical use-cases are:
 ### Example
 
 ```rust
-#[test_kernel(name = "mlx/moe/mma_m8", dtypes = [f16, bf16], tol = 1e-2)]
+#[test_kernel(dtypes = [f16, bf16], tol = 1e-2)]
 fn test_moe_mma_m8(dt: DType) -> TestSetup {
     let n = 512usize;
     let x: Vec<f32> = (0..n).map(|i| 0.05 * (i as f32 * 0.013).sin()).collect();

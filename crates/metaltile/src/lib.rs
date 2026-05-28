@@ -75,6 +75,7 @@
 
 pub mod prelude;
 pub mod runner;
+pub mod test;
 
 /// Crate version from `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
