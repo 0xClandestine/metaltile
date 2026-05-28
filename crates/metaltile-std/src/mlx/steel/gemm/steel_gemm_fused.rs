@@ -244,7 +244,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -285,7 +285,7 @@ pub mod kernel_tests {
     }
 
     fn make_setup(
-        kernel_ir: fn(DType) -> metaltile_core::ir::Kernel,
+        kernel_ir: fn(DType) -> metaltile::core::ir::Kernel,
         dt: DType,
         m: usize,
         k: usize,
@@ -300,7 +300,7 @@ pub mod kernel_tests {
             (0..k * n).map(|i| round_dt(((i % 23) as f32 - 9.0) * 0.05, dt)).collect();
         let expected = naive_matmul(&a, &b, m, k, n);
         let mut kernel = kernel_ir(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::SimdGroup2D;
+        kernel.mode = metaltile::core::ir::KernelMode::SimdGroup2D;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("a", pack(&a, dt), dt))
             .input(TestBuffer::from_vec("b", pack(&b, dt), dt))

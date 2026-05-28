@@ -90,7 +90,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -149,7 +149,7 @@ pub mod kernel_tests {
         let expected = oracle_strided_copy(&src, rows, src_cols, dest_cols);
         let n_out = rows * dest_cols;
         let mut k = mt_strided_copy::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        k.mode = metaltile::core::ir::KernelMode::Grid3D;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("src", pack_f32(&src), dt))
             .input(TestBuffer::from_vec(
@@ -175,7 +175,7 @@ pub mod kernel_tests {
         let src: Vec<f32> = (0..rows * cols).map(|i| i as f32 * 0.1).collect();
         let expected = src.clone();
         let mut k = mt_strided_copy::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        k.mode = metaltile::core::ir::KernelMode::Grid3D;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("src", pack_f32(&src), dt))
             .input(TestBuffer::from_vec(
@@ -207,7 +207,7 @@ pub mod kernel_tests {
         let expected = oracle_strided_copy_nd(&src, &shape, &strides);
         let n_out = expected.len();
         let mut k = mt_strided_copy_nd::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        k.mode = metaltile::core::ir::KernelMode::Grid3D;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("src", pack_f32(&src), dt))
             .input(TestBuffer::from_vec("shape", pack_u32_slice(&shape), DType::U32))
@@ -228,7 +228,7 @@ pub mod kernel_tests {
         let expected = oracle_strided_copy_nd(&src, &shape, &strides);
         let n_out = expected.len();
         let mut k = mt_strided_copy_nd::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        k.mode = metaltile::core::ir::KernelMode::Grid3D;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("src", pack_f32(&src), dt))
             .input(TestBuffer::from_vec("shape", pack_u32_slice(&shape), DType::U32))
@@ -250,7 +250,7 @@ pub mod kernel_tests {
         let expected = oracle_strided_copy_nd(&src, &shape, &strides);
         let n_out = expected.len();
         let mut k = mt_strided_copy_nd::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        k.mode = metaltile::core::ir::KernelMode::Grid3D;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("src", pack_f32(&src), dt))
             .input(TestBuffer::from_vec("shape", pack_u32_slice(&shape), DType::U32))
@@ -266,7 +266,7 @@ pub mod kernel_benches {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::bench;
-    use metaltile_core::{DType, bench::BenchSetup};
+    use metaltile::core::{DType, bench::BenchSetup};
 
     use super::*;
 

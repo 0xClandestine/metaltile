@@ -93,11 +93,11 @@ pub fn patch_embed<T>(
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
-    use metaltile_macros::test_kernel;
+    use metaltile::test_kernel;
 
     use super::*;
 
@@ -177,7 +177,7 @@ pub mod kernel_tests {
             naive_patch_embed(&image, &weight, &bias, in_ch, in_h, in_w, patch_h, patch_w, hidden);
 
         let mut k = patch_embed::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        k.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(k)
             .input(TestBuffer::from_vec("image", pack(&image, dt), dt))
@@ -204,7 +204,7 @@ pub mod kernel_tests {
             naive_patch_embed(&image, &weight, &bias, in_ch, in_h, in_w, patch_h, patch_w, hidden);
 
         let mut k = patch_embed::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        k.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(k)
             .input(TestBuffer::from_vec("image", pack(&image, dt), dt))
@@ -236,7 +236,7 @@ pub mod kernel_tests {
         );
 
         let mut k = patch_embed::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        k.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(k)
             .input(TestBuffer::from_vec("image", pack(&image_r, dt), dt))
@@ -268,7 +268,7 @@ pub mod kernel_tests {
         );
 
         let mut k = patch_embed::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        k.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(k)
             .input(TestBuffer::from_vec("image", pack(&image_r, dt), dt))

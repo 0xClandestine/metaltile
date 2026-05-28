@@ -193,7 +193,7 @@ pub mod kernel_tests {
     //! GPU correctness tests for gated_delta_step_record and state_replay.
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
         ir::KernelMode,
@@ -451,7 +451,7 @@ pub mod kernel_tests {
         );
 
         let mut kernel_ir = state_replay_d64_32_2_2::kernel_ir_for(dt);
-        kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel_ir.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(kernel_ir)
             .input(TestBuffer::from_vec("delta_log", pack(&delta_log, DType::F32), DType::F32))

@@ -103,7 +103,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };

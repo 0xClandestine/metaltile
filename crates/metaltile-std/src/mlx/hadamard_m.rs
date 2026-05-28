@@ -41,7 +41,7 @@
 //! Verified for orthogonality: H · H^T = M · I.
 
 use metaltile::kernel;
-use metaltile_core::{DType as BenchDType, dtype::DType, ir::Kernel};
+use metaltile::core::{DType as BenchDType, dtype::DType, ir::Kernel};
 
 // ── H_M sign-bit encodings ─────────────────────────────────────────────────
 //
@@ -229,8 +229,8 @@ const _: &[BenchDType] = &[BenchDType::F32, BenchDType::F16, BenchDType::BF16];
 #[cfg(test)]
 #[allow(clippy::needless_range_loop)] // index loops mirror the H_m matrix math
 mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::ir::Op;
+    use metaltile::codegen::msl::MslGenerator;
+    use metaltile::core::ir::Op;
 
     use super::*;
 
@@ -342,7 +342,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -409,7 +409,7 @@ pub mod kernel_tests {
         let data: Vec<f32> = (0..n_rows * m).map(|i| ((i % 13) as f32 - 6.0) * 0.5).collect();
         let expected = oracle_hadamard_m(&data, m, &H12_SIGNS, scale);
         let mut k = kernel_ir_for(m as u32, dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("inp", pack(&data, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; n_rows * m], dt), dt))
@@ -426,7 +426,7 @@ pub mod kernel_tests {
             (0..n_rows * m).map(|i| round_dt(((i % 17) as f32 - 8.0) * 0.25, dt)).collect();
         let expected = oracle_hadamard_m(&data, m, &H12_SIGNS, scale);
         let mut k = kernel_ir_for(m as u32, dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("inp", pack(&data, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; n_rows * m], dt), dt))
@@ -443,7 +443,7 @@ pub mod kernel_tests {
             (0..n_rows * m).map(|i| round_dt(((i % 17) as f32 - 8.0) * 0.25, dt)).collect();
         let expected = oracle_hadamard_m(&data, m, &H12_SIGNS, scale);
         let mut k = kernel_ir_for(m as u32, dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("inp", pack(&data, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; n_rows * m], dt), dt))
@@ -459,7 +459,7 @@ pub mod kernel_tests {
         let data: Vec<f32> = (0..n_rows * m).map(|i| ((i % 19) as f32 - 9.0) * 0.3).collect();
         let expected = oracle_hadamard_m(&data, m, &H20_SIGNS, scale);
         let mut k = kernel_ir_for(m as u32, dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("inp", pack(&data, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; n_rows * m], dt), dt))
@@ -475,7 +475,7 @@ pub mod kernel_tests {
         let data: Vec<f32> = (0..n_rows * m).map(|i| ((i % 23) as f32 - 11.0) * 0.2).collect();
         let expected = oracle_hadamard_m(&data, m, &H28_SIGNS, scale);
         let mut k = kernel_ir_for(m as u32, dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("inp", pack(&data, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; n_rows * m], dt), dt))

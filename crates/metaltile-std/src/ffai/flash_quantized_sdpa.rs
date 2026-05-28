@@ -523,7 +523,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
         ir::KernelMode,
@@ -659,7 +659,7 @@ pub mod kernel_tests {
     }
 
     fn make_setup(
-        kernel_ir_fn: fn(DType) -> metaltile_core::ir::Kernel,
+        kernel_ir_fn: fn(DType) -> metaltile::core::ir::Kernel,
         bits: u32,
         dim: usize,
         dt: DType,

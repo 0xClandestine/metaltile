@@ -31,7 +31,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -65,7 +65,7 @@ pub mod kernel_tests {
             }
         }
         let mut k = ffai_gather::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        k.mode = metaltile::core::ir::KernelMode::Grid3D;
         let total = n_tokens * dim;
         let tpg = 256usize;
         let groups = total.div_ceil(tpg);
@@ -94,7 +94,7 @@ pub mod kernel_tests {
             }
         }
         let mut k = ffai_gather::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        k.mode = metaltile::core::ir::KernelMode::Grid3D;
         let total = n_tokens * dim;
         let tpg = 256usize;
         let groups = total.div_ceil(tpg);
@@ -123,7 +123,7 @@ pub mod kernel_tests {
             }
         }
         let mut k = ffai_gather::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        k.mode = metaltile::core::ir::KernelMode::Grid3D;
         let total = n_tokens * dim;
         let tpg = 256usize;
         let groups = total.div_ceil(tpg);

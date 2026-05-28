@@ -318,8 +318,8 @@ pub fn ffai_sdpa_decode<T>(
 
 #[cfg(test)]
 mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::{DType, ir::KernelMode};
+    use metaltile::codegen::msl::MslGenerator;
+    use metaltile::core::{DType, ir::KernelMode};
 
     use super::ffai_sdpa_decode;
 
@@ -378,7 +378,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -557,7 +557,7 @@ pub mod kernel_tests {
         sink_logit: f32,
         scale: f32,
     ) -> TestSetup {
-        use metaltile_core::ir::KernelMode;
+        use metaltile::core::ir::KernelMode;
         let mut kernel = ffai_sdpa_decode::kernel_ir_for(dt);
         kernel.mode = KernelMode::Reduction;
         TestSetup::new(kernel)

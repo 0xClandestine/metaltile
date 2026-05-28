@@ -309,8 +309,8 @@ pub fn ffai_sdpa_decode_d512<T>(
 
 #[cfg(test)]
 mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::{DType, ir::KernelMode};
+    use metaltile::codegen::msl::MslGenerator;
+    use metaltile::core::{DType, ir::KernelMode};
 
     use super::ffai_sdpa_decode_d512;
 
@@ -337,7 +337,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -403,7 +403,7 @@ pub mod kernel_tests {
 
     #[test_kernel(name = "ffai/sdpa_decode_d512/f32", dtypes = [f32], tol = 1e-3)]
     fn test_sdpa_decode_d512(dt: DType) -> TestSetup {
-        use metaltile_core::ir::KernelMode;
+        use metaltile::core::ir::KernelMode;
         let n_q_heads = 4usize;
         let n_kv_heads = 1usize;
         let head_dim = 512usize;

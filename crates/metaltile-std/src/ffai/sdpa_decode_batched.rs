@@ -1294,8 +1294,8 @@ pub fn sdpa_decode_batched_q8<T>(
 
 #[cfg(test)]
 mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::{DType, ir::KernelMode};
+    use metaltile::codegen::msl::MslGenerator;
+    use metaltile::core::{DType, ir::KernelMode};
 
     use super::sdpa_decode_batched_q2;
 
@@ -1444,7 +1444,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -1536,7 +1536,7 @@ pub mod kernel_tests {
 
     #[test_kernel(name = "ffai/sdpa_decode_batched_q2/dense_f32", dtypes = [f32], tol = 1e-4)]
     fn test_sdpa_decode_batched_q2_dense(dt: DType) -> TestSetup {
-        use metaltile_core::ir::KernelMode;
+        use metaltile::core::ir::KernelMode;
         let n_q_heads = 2usize;
         let n_kv_heads = 1usize;
         let head_dim = 128usize;
@@ -1569,7 +1569,7 @@ pub mod kernel_tests {
 
     #[test_kernel(name = "ffai/sdpa_decode_batched_q2/large_n_kv_f32", dtypes = [f32], tol = 5e-4)]
     fn test_sdpa_decode_batched_q2_large_n_kv(dt: DType) -> TestSetup {
-        use metaltile_core::ir::KernelMode;
+        use metaltile::core::ir::KernelMode;
         let n_q_heads = 8usize;
         let n_kv_heads = 2usize;
         let head_dim = 128usize;
@@ -1602,7 +1602,7 @@ pub mod kernel_tests {
 
     #[test_kernel(name = "ffai/sdpa_decode_batched_q4/dense_f32", dtypes = [f32], tol = 1e-4)]
     fn test_sdpa_decode_batched_q4_dense(dt: DType) -> TestSetup {
-        use metaltile_core::ir::KernelMode;
+        use metaltile::core::ir::KernelMode;
         let n_q_heads = 2usize;
         let n_kv_heads = 1usize;
         let head_dim = 128usize;
@@ -1639,7 +1639,7 @@ pub mod kernel_tests {
 
     #[test_kernel(name = "ffai/sdpa_decode_batched_q4/large_n_kv_f32", dtypes = [f32], tol = 5e-4)]
     fn test_sdpa_decode_batched_q4_large_n_kv(dt: DType) -> TestSetup {
-        use metaltile_core::ir::KernelMode;
+        use metaltile::core::ir::KernelMode;
         let n_q_heads = 8usize;
         let n_kv_heads = 2usize;
         let head_dim = 128usize;

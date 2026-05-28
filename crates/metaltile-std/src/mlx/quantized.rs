@@ -4770,8 +4770,8 @@ qmm_mma_bitwidth!(mt_qmm_mma_b6, 6u32, "qmm_mma_b6");
 /// At M=32, mma f32 essentially at MLX parity; f16 remains 9-16pt
 /// below MLX (open follow-up — 4 layered tweaks identified by the
 /// MLX archaeology study at `/tmp/mlx_archaeology.md`).
-pub fn mt_qmm_for(dtype: metaltile_core::dtype::DType, m: u32) -> metaltile_core::ir::Kernel {
-    use metaltile_core::ir::KernelMode;
+pub fn mt_qmm_for(dtype: metaltile::core::dtype::DType, m: u32) -> metaltile::core::ir::Kernel {
+    use metaltile::core::ir::KernelMode;
     let mut k = if m >= 32 && m.is_multiple_of(32) {
         // Full simdgroup-matrix MMA path (M=32, 64, 96, ...).
         let mut kk = mt_qmm_mma::kernel_ir_for(dtype);
@@ -4815,10 +4815,10 @@ pub fn mt_qmm_for(dtype: metaltile_core::dtype::DType, m: u32) -> metaltile_core
 /// (3-barrier MMA, vectorized X load, serpentine MMA order) it is
 /// expected to land the missing 9-16pt.
 pub fn patch_qmm_mma_dtype_aware_skew(
-    kernel: &mut metaltile_core::ir::Kernel,
-    dtype: metaltile_core::dtype::DType,
+    kernel: &mut metaltile::core::ir::Kernel,
+    dtype: metaltile::core::dtype::DType,
 ) {
-    use metaltile_core::dtype::DType;
+    use metaltile::core::dtype::DType;
     // f32 keeps its default 36 stride — nothing to do.
     let bytes = match dtype {
         DType::F32 => 4,
@@ -4859,7 +4859,7 @@ pub fn patch_qmm_mma_dtype_aware_skew(
 
 #[cfg(test)]
 mod qmm_selector_tests {
-    use metaltile_core::dtype::DType;
+    use metaltile::core::dtype::DType;
 
     use super::*;
 
@@ -4924,7 +4924,7 @@ mod qmm_selector_tests {
             let k = mt_qmm_for(DType::F32, m);
             assert_eq!(
                 k.mode,
-                metaltile_core::ir::KernelMode::Reduction,
+                metaltile::core::ir::KernelMode::Reduction,
                 "m={m}: missing Reduction mode",
             );
         }
@@ -4934,7 +4934,7 @@ mod qmm_selector_tests {
 mod tests_bitwidth {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
         ir::KernelMode,
@@ -5016,7 +5016,7 @@ mod tests_bitwidth {
         k: usize,
         gs_per_row: usize,
         dt: DType,
-        kernel_ir_fn: fn(DType) -> metaltile_core::ir::Kernel,
+        kernel_ir_fn: fn(DType) -> metaltile::core::ir::Kernel,
     ) -> TestSetup {
         let max_code = (1u32 << bits) - 1;
         let group_size = k / gs_per_row;

@@ -407,7 +407,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -468,7 +468,7 @@ pub mod kernel_tests {
         let im = vec![0.0_f32; rows * n];
         let (exp_re, exp_im) = naive_dft(&re, &im, rows, n, false);
         let mut k = mt_fft_n32::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("in_re", pack(&re, dt), dt))
             .input(TestBuffer::from_vec("in_im", pack(&im, dt), dt))
@@ -487,7 +487,7 @@ pub mod kernel_tests {
         let im = vec![0.0_f32; rows * n];
         let (exp_re, exp_im) = naive_dft(&re, &im, rows, n, false);
         let mut k = mt_fft_n64::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("in_re", pack(&re, dt), dt))
             .input(TestBuffer::from_vec("in_im", pack(&im, dt), dt))
@@ -506,7 +506,7 @@ pub mod kernel_tests {
         let im: Vec<f32> = (0..rows * n).map(|i| ((i % 13) as f32 - 6.0) * 0.07).collect();
         let (exp_re, exp_im) = naive_dft(&re, &im, rows, n, false);
         let mut k = mt_fft_n128::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("in_re", pack(&re, dt), dt))
             .input(TestBuffer::from_vec("in_im", pack(&im, dt), dt))
@@ -529,7 +529,7 @@ pub mod kernel_tests {
         let im: Vec<f32> = (0..rows * n).map(|i| ((i % 11) as f32 - 5.0) * 0.05).collect();
         let (exp_re, exp_im) = naive_dft(&re, &im, rows, n, true);
         let mut k = mt_fft_n64::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("in_re", pack(&re, dt), dt))
             .input(TestBuffer::from_vec("in_im", pack(&im, dt), dt))
@@ -554,7 +554,7 @@ pub mod kernel_tests {
         let (fwd_re, fwd_im) = naive_dft(&re, &im, rows, n, false);
         // The inverse FFT kernel receives fwd output, should recover original signal.
         let mut k = mt_fft_n256::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("in_re", pack(&fwd_re, dt), dt))
             .input(TestBuffer::from_vec("in_im", pack(&fwd_im, dt), dt))
@@ -573,7 +573,7 @@ pub mod kernel_tests {
         let im = vec![0.0_f32; rows * n];
         let (fwd_re, fwd_im) = naive_dft(&re, &im, rows, n, false);
         let mut k = mt_fft_n32::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("in_re", pack(&fwd_re, dt), dt))
             .input(TestBuffer::from_vec("in_im", pack(&fwd_im, dt), dt))
@@ -592,7 +592,7 @@ pub mod kernel_tests {
         let im = vec![0.0_f32; rows * n];
         let (fwd_re, fwd_im) = naive_dft(&re, &im, rows, n, false);
         let mut k = mt_fft_n64::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("in_re", pack(&fwd_re, dt), dt))
             .input(TestBuffer::from_vec("in_im", pack(&fwd_im, dt), dt))
@@ -630,7 +630,7 @@ pub mod kernel_tests {
         let k = mt_fft_bluestein_chirp_filter::kernel_ir_for();
         // Use Grid3D dispatch: one thread per M element.
         let mut ks = k;
-        ks.mode = metaltile_core::ir::KernelMode::Grid3D;
+        ks.mode = metaltile::core::ir::KernelMode::Grid3D;
         TestSetup::new(ks)
             .input(TestBuffer::from_vec(
                 "filter_re",

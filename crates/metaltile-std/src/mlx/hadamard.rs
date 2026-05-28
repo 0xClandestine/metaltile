@@ -64,7 +64,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -107,7 +107,7 @@ pub mod kernel_tests {
         let x = ramp(rows, n);
         let expected = naive_hadamard(&x, rows, n, scale);
         let mut k = mt_hadamard_n64::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("inp", pack(&x, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; rows * n], dt), dt))
@@ -123,7 +123,7 @@ pub mod kernel_tests {
         let x = ramp(rows, n);
         let expected = naive_hadamard(&x, rows, n, scale);
         let mut k = mt_hadamard_n128::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("inp", pack(&x, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; rows * n], dt), dt))
@@ -139,7 +139,7 @@ pub mod kernel_tests {
         let x = ramp(rows, n);
         let expected = naive_hadamard(&x, rows, n, scale);
         let mut k = mt_hadamard_n256::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("inp", pack(&x, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; rows * n], dt), dt))
@@ -155,7 +155,7 @@ pub mod kernel_tests {
         let x: Vec<f32> = (0..rows * n).map(|i| ((i % 17) as f32 - 8.0) * 0.02).collect();
         let expected = naive_hadamard(&x, rows, n, scale);
         let mut k = mt_hadamard_n64::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("inp", pack(&x, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; rows * n], dt), dt))
@@ -171,7 +171,7 @@ pub mod kernel_tests {
         let x: Vec<f32> = (0..rows * n).map(|i| ((i % 17) as f32 - 8.0) * 0.02).collect();
         let expected = naive_hadamard(&x, rows, n, scale);
         let mut k = mt_hadamard_n128::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("inp", pack(&x, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; rows * n], dt), dt))

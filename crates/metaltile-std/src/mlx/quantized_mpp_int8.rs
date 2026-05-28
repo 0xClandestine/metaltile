@@ -148,8 +148,8 @@ pub fn mt_qmm_mma_mpp_int8<T>(
 
 #[cfg(test)]
 mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::{dtype::DType, ir::Op};
+    use metaltile::codegen::msl::MslGenerator;
+    use metaltile::core::{dtype::DType, ir::Op};
 
     use super::*;
 
@@ -223,7 +223,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -321,7 +321,7 @@ pub mod kernel_tests {
             cpu_qmm_int8_reference(&w, &scales, &biases, &x, m, n, k, gs_per_row, group_size);
         let be = bpe(dt);
         let mut kernel = mt_qmm_mma_mpp_int8::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+        kernel.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("w", pack_u32(&w), DType::U32))
             .input(TestBuffer::from_vec("scales", pack(&scales, dt), dt))

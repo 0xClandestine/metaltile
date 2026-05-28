@@ -94,7 +94,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -187,7 +187,7 @@ pub mod kernel_tests {
             naive_rope_2d(&qk_rounded, &positions, n_tokens, n_heads, head_dim, theta_base);
 
         let mut kernel = ffai_rope_2d::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("qk", pack(&qk_f32, dt), dt))

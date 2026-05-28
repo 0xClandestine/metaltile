@@ -241,7 +241,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -349,7 +349,7 @@ pub mod kernel_tests {
         );
 
         let mut kernel_ir = ssm_step::kernel_ir_for(dt);
-        kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel_ir.mode = metaltile::core::ir::KernelMode::Grid3D;
         let total = n_heads * head_dim;
 
         TestSetup::new(kernel_ir)
@@ -404,7 +404,7 @@ pub mod kernel_tests {
             naive_conv1d_causal_step(&x, &w, &b, &mut state_oracle, n_channels, kernel_size);
 
         let mut kernel_ir = conv1d_causal_step::kernel_ir_for(dt);
-        kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel_ir.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(kernel_ir)
             .input(TestBuffer::from_vec("x", pack(&x, dt), dt))
@@ -485,7 +485,7 @@ pub mod kernel_tests {
         );
 
         let mut kernel_ir = ssm_step_a2d::kernel_ir_for(dt);
-        kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel_ir.mode = metaltile::core::ir::KernelMode::Grid3D;
         let total = n_heads * head_dim;
 
         TestSetup::new(kernel_ir)
@@ -531,7 +531,7 @@ pub mod kernel_tests {
         );
 
         let mut kernel_ir = ssm_step::kernel_ir_for(dt);
-        kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel_ir.mode = metaltile::core::ir::KernelMode::Grid3D;
         let total = n_heads * head_dim;
 
         TestSetup::new(kernel_ir)
@@ -623,7 +623,7 @@ pub mod kernel_tests {
         );
 
         let mut kernel_ir = mt_ssm_step::kernel_ir_for(dt);
-        kernel_ir.mode = metaltile_core::ir::KernelMode::Reduction;
+        kernel_ir.mode = metaltile::core::ir::KernelMode::Reduction;
 
         TestSetup::new(kernel_ir)
             .input(TestBuffer::from_vec("x", pack(&x, dt), dt))
@@ -683,7 +683,7 @@ pub mod kernel_tests {
         );
 
         let mut kernel_ir = mt_ssm_step::kernel_ir_for(dt);
-        kernel_ir.mode = metaltile_core::ir::KernelMode::Reduction;
+        kernel_ir.mode = metaltile::core::ir::KernelMode::Reduction;
 
         TestSetup::new(kernel_ir)
             .input(TestBuffer::from_vec("x", pack(&x, dt), dt))
@@ -753,7 +753,7 @@ pub mod kernel_tests {
         );
 
         let mut kernel_ir = mt_ssm_step::kernel_ir_for(dt);
-        kernel_ir.mode = metaltile_core::ir::KernelMode::Reduction;
+        kernel_ir.mode = metaltile::core::ir::KernelMode::Reduction;
 
         TestSetup::new(kernel_ir)
             .input(TestBuffer::from_vec("x", pack(&x, dt), dt))

@@ -619,7 +619,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -703,7 +703,7 @@ pub mod kernel_tests {
         kv_stride: usize,
         scale: f32,
     ) -> TestSetup {
-        use metaltile_core::ir::KernelMode;
+        use metaltile::core::ir::KernelMode;
         let heads_per_group = n_q_heads / n_kv_heads;
         let mut kernel = ffai_sdpa_bidirectional_d64::kernel_ir_for(dt);
         kernel.mode = KernelMode::Reduction;
@@ -736,7 +736,7 @@ pub mod kernel_tests {
         kv_stride: usize,
         scale: f32,
     ) -> TestSetup {
-        use metaltile_core::ir::KernelMode;
+        use metaltile::core::ir::KernelMode;
         let heads_per_group = n_q_heads / n_kv_heads;
         let mut kernel = ffai_sdpa_bidirectional_d32::kernel_ir_for(dt);
         kernel.mode = KernelMode::Reduction;
@@ -769,7 +769,7 @@ pub mod kernel_tests {
         kv_stride: usize,
         scale: f32,
     ) -> TestSetup {
-        use metaltile_core::ir::KernelMode;
+        use metaltile::core::ir::KernelMode;
         let heads_per_group = n_q_heads / n_kv_heads;
         let mut kernel = ffai_sdpa_bidirectional_d72::kernel_ir_for(dt);
         kernel.mode = KernelMode::Reduction;

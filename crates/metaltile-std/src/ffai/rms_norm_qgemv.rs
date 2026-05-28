@@ -664,11 +664,11 @@ pub fn ffai_rms_norm_qgemv_int8_fast<T>(
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
-    use metaltile_macros::test_kernel;
+    use metaltile::test_kernel;
 
     use super::*;
 
@@ -930,7 +930,7 @@ pub mod kernel_tests {
         let (x_b, nw_b, w_b, s_b, bi_b, expected) =
             build_qgemv_buffers(in_dim, group_size, out_dim, dt, eps);
         let mut k = ffai_rms_norm_qgemv::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         common_inputs(
             TestSetup::new(k).grid_3d(out_dim as u32, 1, 1, [128, 1, 1]),
             x_b,
@@ -951,7 +951,7 @@ pub mod kernel_tests {
         let (x_b, nw_b, w_b, s_b, bi_b, expected) =
             build_qgemv_buffers(in_dim, group_size, out_dim, dt, eps);
         let mut k = ffai_rms_norm_qgemv::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         common_inputs(
             TestSetup::new(k).grid_3d(out_dim as u32, 1, 1, [128, 1, 1]),
             x_b,
@@ -972,7 +972,7 @@ pub mod kernel_tests {
         let (x_b, nw_b, w_b, s_b, bi_b, expected) =
             build_qgemv_buffers(in_dim, group_size, out_dim, dt, eps);
         let mut k = ffai_rms_norm_qgemv::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         common_inputs(
             TestSetup::new(k).grid_3d(out_dim as u32, 1, 1, [128, 1, 1]),
             x_b,
@@ -995,7 +995,7 @@ pub mod kernel_tests {
         let (x_b, nw_b, w_b, s_b, bi_b, expected) =
             build_qgemv_buffers(in_dim, group_size, out_dim, dt, eps);
         let mut k = ffai_rms_norm_qgemv_fast::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         common_inputs(
             TestSetup::new(k).grid_3d((out_dim / 8) as u32, 1, 1, [64, 1, 1]),
             x_b,
@@ -1016,7 +1016,7 @@ pub mod kernel_tests {
         let (x_b, nw_b, w_b, s_b, bi_b, expected) =
             build_qgemv_buffers(in_dim, group_size, out_dim, dt, eps);
         let mut k = ffai_rms_norm_qgemv_fast::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         common_inputs(
             TestSetup::new(k).grid_3d((out_dim / 8) as u32, 1, 1, [64, 1, 1]),
             x_b,
@@ -1037,7 +1037,7 @@ pub mod kernel_tests {
         let (x_b, nw_b, w_b, s_b, bi_b, expected) =
             build_qgemv_buffers(in_dim, group_size, out_dim, dt, eps);
         let mut k = ffai_rms_norm_qgemv_fast::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         common_inputs(
             TestSetup::new(k).grid_3d((out_dim / 8) as u32, 1, 1, [64, 1, 1]),
             x_b,
@@ -1060,7 +1060,7 @@ pub mod kernel_tests {
         let (x_b, nw_b, w_b, s_b, bi_b, expected) =
             build_int8_buffers(in_dim, group_size, out_dim, dt, eps);
         let mut k = ffai_rms_norm_qgemv_int8_fast::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         common_inputs(
             TestSetup::new(k).grid_3d((out_dim / 8) as u32, 1, 1, [64, 1, 1]),
             x_b,
@@ -1081,7 +1081,7 @@ pub mod kernel_tests {
         let (x_b, nw_b, w_b, s_b, bi_b, expected) =
             build_int8_buffers(in_dim, group_size, out_dim, dt, eps);
         let mut k = ffai_rms_norm_qgemv_int8_fast::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         common_inputs(
             TestSetup::new(k).grid_3d((out_dim / 8) as u32, 1, 1, [64, 1, 1]),
             x_b,
@@ -1102,7 +1102,7 @@ pub mod kernel_tests {
         let (x_b, nw_b, w_b, s_b, bi_b, expected) =
             build_int8_buffers(in_dim, group_size, out_dim, dt, eps);
         let mut k = ffai_rms_norm_qgemv_int8_fast::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         common_inputs(
             TestSetup::new(k).grid_3d((out_dim / 8) as u32, 1, 1, [64, 1, 1]),
             x_b,

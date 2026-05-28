@@ -211,8 +211,8 @@ pub fn ffai_sdpa_multi_d256<T>(
 
 #[cfg(test)]
 mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::{DType, ir::KernelMode};
+    use metaltile::codegen::msl::MslGenerator;
+    use metaltile::core::{DType, ir::KernelMode};
 
     use super::ffai_sdpa_multi_d256;
 

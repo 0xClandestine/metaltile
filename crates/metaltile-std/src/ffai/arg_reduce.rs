@@ -80,7 +80,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -114,7 +114,7 @@ pub mod kernel_tests {
     fn make_argmax_setup(logits: Vec<f32>, expected_idx: u32, dt: DType) -> TestSetup {
         let n = logits.len();
         let mut kernel = ffai_argmax::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+        kernel.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("inp", pack(&logits, dt), dt))
             .input(TestBuffer::from_vec("out", vec![0u8; 4], DType::U32))

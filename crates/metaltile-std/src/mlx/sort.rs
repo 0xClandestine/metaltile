@@ -312,7 +312,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -351,7 +351,7 @@ pub mod kernel_tests {
         let inp: Vec<f32> = (0..N).rev().map(|i| i as f32 * 0.1).collect();
         let expected = cpu_sort(&inp);
         let mut kernel = mt_sort::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+        kernel.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("inp", pack(&inp, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; N], dt), dt))
@@ -371,7 +371,7 @@ pub mod kernel_tests {
             .collect();
         let expected = cpu_sort(&inp);
         let mut kernel = mt_sort::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+        kernel.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("inp", pack(&inp, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; N], dt), dt))
@@ -388,7 +388,7 @@ pub mod kernel_tests {
         let inp: Vec<f32> = (0..n).rev().map(|i| i as f32 * 0.1).collect();
         let expected = cpu_sort_segmented(&inp, batch, n);
         let mut kernel = mt_sort_segmented::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+        kernel.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("inp", pack(&inp, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; batch * n], dt), dt))
@@ -405,7 +405,7 @@ pub mod kernel_tests {
         let inp: Vec<f32> = row0.iter().chain(row1.iter()).copied().collect();
         let expected = cpu_sort_segmented(&inp, batch, n);
         let mut kernel = mt_sort_segmented::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+        kernel.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("inp", pack(&inp, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; batch * n], dt), dt))
@@ -422,7 +422,7 @@ pub mod kernel_tests {
             .collect();
         let expected = cpu_sort_segmented(&inp, batch, n);
         let mut kernel = mt_sort_segmented::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+        kernel.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("inp", pack(&inp, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; batch * n], dt), dt))
@@ -436,7 +436,7 @@ pub mod kernel_benches {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::bench;
-    use metaltile_core::{DType, bench::BenchSetup};
+    use metaltile::core::{DType, bench::BenchSetup};
 
     use super::*;
 

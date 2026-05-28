@@ -345,7 +345,7 @@ pub mod kernel_tests {
     //! GPU correctness tests for `mt_gated_delta_wy_chunk`.
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
         ir::KernelMode,
@@ -614,7 +614,7 @@ pub mod kernel_tests {
             sequential_gdn(&q, &k, &v, &g, &beta, &mut state_oracle, t, hk, hv, dk, dv);
 
         let mut kernel_ir = mt_gated_delta_wy_chunk::kernel_ir_for(dt);
-        kernel_ir.mode = metaltile_core::ir::KernelMode::Reduction;
+        kernel_ir.mode = metaltile::core::ir::KernelMode::Reduction;
 
         TestSetup::new(kernel_ir)
             .input(TestBuffer::from_vec("q", pack(&q, dt), dt))

@@ -172,7 +172,7 @@ pub fn mt_moe_gather_qmm_mma_int4_bm8_mpp<T>(
 
 #[cfg(test)]
 mod tests {
-    use metaltile_core::{DType, ir::Op};
+    use metaltile::core::{DType, ir::Op};
 
     use super::*;
 
@@ -210,7 +210,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
         ir::KernelMode,

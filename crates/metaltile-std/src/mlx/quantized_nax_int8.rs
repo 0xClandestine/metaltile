@@ -135,8 +135,8 @@ pub fn mt_qmm_nax_int8<T>(
 
 #[cfg(test)]
 mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::{dtype::DType, ir::Op};
+    use metaltile::codegen::msl::MslGenerator;
+    use metaltile::core::{dtype::DType, ir::Op};
 
     use super::*;
 
@@ -197,7 +197,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };

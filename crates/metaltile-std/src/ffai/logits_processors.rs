@@ -104,11 +104,11 @@ pub fn logits_repetition_penalty<T>(
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
-    use metaltile_macros::test_kernel;
+    use metaltile::test_kernel;
 
     use super::*;
 
@@ -139,7 +139,7 @@ pub mod kernel_tests {
         let expected = cpu_temperature(&logits, temperature);
 
         let mut k = logits_temperature::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        k.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(k)
             .input(TestBuffer::from_vec("inp", pack(&logits, dt), dt))
@@ -160,7 +160,7 @@ pub mod kernel_tests {
         let expected = cpu_temperature(&logits, temperature);
 
         let mut k = logits_temperature::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        k.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(k)
             .input(TestBuffer::from_vec("inp", pack(&logits, dt), dt))
@@ -196,7 +196,7 @@ pub mod kernel_tests {
         let n_tokens = token_ids.len();
 
         let mut k = logits_repetition_penalty::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        k.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(k)
             .input(TestBuffer::from_vec("logits", pack(&logits, dt), dt))
@@ -216,7 +216,7 @@ pub mod kernel_tests {
         let n_tokens = token_ids.len();
 
         let mut k = logits_repetition_penalty::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        k.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(k)
             .input(TestBuffer::from_vec("logits", pack(&logits, dt), dt))
@@ -236,7 +236,7 @@ pub mod kernel_tests {
         let n_tokens = token_ids.len();
 
         let mut k = logits_repetition_penalty::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        k.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(k)
             .input(TestBuffer::from_vec("logits", pack(&logits, dt), dt))

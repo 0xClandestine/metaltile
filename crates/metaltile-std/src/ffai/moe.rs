@@ -3533,7 +3533,7 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
 mod tests_mma_bitwidth {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
         ir::KernelMode,
@@ -3600,7 +3600,7 @@ mod tests_mma_bitwidth {
     fn make_bitwidth_setup(
         bits: u32,
         dt: DType,
-        kernel_ir_fn: fn(DType) -> metaltile_core::ir::Kernel,
+        kernel_ir_fn: fn(DType) -> metaltile::core::ir::Kernel,
     ) -> TestSetup {
         let n_experts = 4usize;
         let k_in = 64usize;
@@ -3675,7 +3675,7 @@ pub mod kernel_tests {
     )]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
         ir::KernelMode,
@@ -4162,7 +4162,7 @@ pub mod kernel_tests {
         mma_grid_x: u32,
         mma_grid_y: u32,
         mma_tpg: [u32; 3],
-        mma_kernel_ir_fn: fn(DType) -> metaltile_core::ir::Kernel,
+        mma_kernel_ir_fn: fn(DType) -> metaltile::core::ir::Kernel,
     ) -> TestSetup {
         // Build the m1 reference kernel setup
         let mut expert_offsets: Vec<u32> = vec![0; n_experts + 1];
@@ -4216,7 +4216,7 @@ pub mod kernel_tests {
         k_in: usize,
         m_out: usize,
         group_size: usize,
-        batch_kernel_ir_fn: fn(DType) -> metaltile_core::ir::Kernel,
+        batch_kernel_ir_fn: fn(DType) -> metaltile::core::ir::Kernel,
         batch_grid_x: u32,
     ) -> TestSetup {
         let groups_per_row = k_in / group_size;
@@ -4716,7 +4716,7 @@ pub mod kernel_tests {
     fn make_gather_qmm_bits_setup(
         bits: u32,
         dt: DType,
-        kernel: metaltile_core::ir::Kernel,
+        kernel: metaltile::core::ir::Kernel,
     ) -> TestSetup {
         let n_experts = 3usize;
         let k_in = 64usize;

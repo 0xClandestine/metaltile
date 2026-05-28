@@ -51,11 +51,11 @@ pub fn logits_topk_mask<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] threshol
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
-    use metaltile_macros::test_kernel;
+    use metaltile::test_kernel;
 
     use super::*;
 
@@ -96,7 +96,7 @@ pub mod kernel_tests {
         let expected = cpu_topk_mask(&logits, threshold);
 
         let mut ker = logits_topk_mask::kernel_ir_for(dt);
-        ker.mode = metaltile_core::ir::KernelMode::Grid3D;
+        ker.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(ker)
             .input(TestBuffer::from_vec("inp", pack(&logits, dt), dt))
@@ -113,7 +113,7 @@ pub mod kernel_tests {
         let expected = cpu_topk_mask(&logits, threshold);
 
         let mut ker = logits_topk_mask::kernel_ir_for(dt);
-        ker.mode = metaltile_core::ir::KernelMode::Grid3D;
+        ker.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(ker)
             .input(TestBuffer::from_vec("inp", pack(&logits, dt), dt))
@@ -132,7 +132,7 @@ pub mod kernel_tests {
         let expected = cpu_topk_mask(&logits, threshold);
 
         let mut ker = logits_topk_mask::kernel_ir_for(dt);
-        ker.mode = metaltile_core::ir::KernelMode::Grid3D;
+        ker.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(ker)
             .input(TestBuffer::from_vec("inp", pack(&logits, dt), dt))

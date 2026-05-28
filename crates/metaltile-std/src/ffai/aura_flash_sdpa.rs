@@ -242,7 +242,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -368,7 +368,7 @@ pub mod kernel_tests {
         );
 
         let mut kernel_ir = aura_flash_sdpa_kb4_vb2_d128::kernel_ir_for(dt);
-        kernel_ir.mode = metaltile_core::ir::KernelMode::Reduction;
+        kernel_ir.mode = metaltile::core::ir::KernelMode::Reduction;
 
         TestSetup::new(kernel_ir)
             .input(TestBuffer::from_vec("q_rot", pack_f32(&q_rot), DType::F32))

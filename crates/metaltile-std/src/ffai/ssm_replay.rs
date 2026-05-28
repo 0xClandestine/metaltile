@@ -183,7 +183,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -265,7 +265,7 @@ pub mod kernel_tests {
         let expected = naive_replay(&snapshot, &da_log, &dbx_log, &mask, batch, t, k, false);
 
         let mut kernel_ir = ssm_replay_d16_64_4::kernel_ir_for(dt);
-        kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel_ir.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(kernel_ir)
             .input(TestBuffer::from_vec("state_snapshot", pack(&snapshot, DType::F32), DType::F32))
@@ -293,7 +293,7 @@ pub mod kernel_tests {
         let expected = naive_replay(&snapshot, &da_log, &dbx_log, &mask, batch, t, k, false);
 
         let mut kernel_ir = ssm_replay_d16_64_4::kernel_ir_for(dt);
-        kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel_ir.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(kernel_ir)
             .input(TestBuffer::from_vec("state_snapshot", pack(&snapshot, DType::F32), DType::F32))
@@ -321,7 +321,7 @@ pub mod kernel_tests {
         let expected = naive_replay(&snapshot, &da_log, &dbx_log, &mask, batch, t, k, true);
 
         let mut kernel_ir = ssm_replay_d16_64_4::kernel_ir_for(dt);
-        kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel_ir.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(kernel_ir)
             .input(TestBuffer::from_vec("state_snapshot", pack(&snapshot, DType::F32), DType::F32))
@@ -411,7 +411,7 @@ pub mod kernel_tests {
         );
 
         let mut kernel_ir = ssm_step_record_d16_64_4_2::kernel_ir_for(dt);
-        kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel_ir.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(kernel_ir)
             .input(TestBuffer::from_vec("x", pack(&x, DType::F32), DType::F32))

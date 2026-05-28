@@ -96,7 +96,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -202,7 +202,7 @@ pub mod kernel_tests {
         );
 
         let mut kernel_ir = aura_value_int4::kernel_ir_for(dt);
-        kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel_ir.mode = metaltile::core::ir::KernelMode::Grid3D;
 
         TestSetup::new(kernel_ir)
             .input(TestBuffer::from_vec("weights", pack(&weights, dt), dt))

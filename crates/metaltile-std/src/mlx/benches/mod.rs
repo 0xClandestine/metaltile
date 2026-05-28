@@ -17,7 +17,7 @@
 //! | MatVec         | 4096 × 4096   | 512         |
 //! | Sort/Scan      | 1024 rows × N | 256         |
 
-use metaltile_core::{
+use metaltile::core::{
     DType,
     bench::{BenchBuffer, BenchSetup},
     ir::Kernel,

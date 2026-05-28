@@ -591,7 +591,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -701,7 +701,7 @@ pub mod kernel_tests {
         expected: Vec<f32>,
         rows: usize,
         n: usize,
-        kernel: metaltile_core::ir::Kernel,
+        kernel: metaltile::core::ir::Kernel,
     ) -> TestSetup {
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("inp", pack_f32(&inp), DType::F32))
@@ -711,8 +711,8 @@ pub mod kernel_tests {
             .grid_3d(1, rows as u32, 1, [256, 1, 1])
     }
 
-    fn reduction_kernel(mut k: metaltile_core::ir::Kernel) -> metaltile_core::ir::Kernel {
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+    fn reduction_kernel(mut k: metaltile::core::ir::Kernel) -> metaltile::core::ir::Kernel {
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
         k
     }
 
@@ -823,7 +823,7 @@ pub mod kernel_benches {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::bench;
-    use metaltile_core::{DType, bench::BenchSetup};
+    use metaltile::core::{DType, bench::BenchSetup};
 
     use super::*;
 

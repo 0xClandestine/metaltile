@@ -31,7 +31,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -69,7 +69,7 @@ pub mod kernel_tests {
         let mask: Vec<f32> = (0..k).map(|j| if j % 2 == 0 { 1.0 } else { 0.0 }).collect();
         let expected = naive_masked_matvec(&mat, &vec, &mask, m, k);
         let mut kernel = mt_gemv_masked::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+        kernel.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("mat", pack(&mat, dt), dt))
             .input(TestBuffer::from_vec("vec", pack(&vec, dt), dt))
@@ -88,7 +88,7 @@ pub mod kernel_tests {
         let mask = vec![1.0f32; k];
         let expected = naive_masked_matvec(&mat, &vec, &mask, m, k);
         let mut kernel = mt_gemv_masked::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+        kernel.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("mat", pack(&mat, dt), dt))
             .input(TestBuffer::from_vec("vec", pack(&vec, dt), dt))
@@ -107,7 +107,7 @@ pub mod kernel_tests {
         let mask: Vec<f32> = (0..k).map(|j| if j % 4 != 3 { 1.0 } else { 0.0 }).collect();
         let expected = naive_masked_matvec(&mat, &vec, &mask, m, k);
         let mut kernel = mt_gemv_masked::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+        kernel.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("mat", pack(&mat, dt), dt))
             .input(TestBuffer::from_vec("vec", pack(&vec, dt), dt))
@@ -122,7 +122,7 @@ pub mod kernel_benches {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::bench;
-    use metaltile_core::{DType, bench::BenchSetup};
+    use metaltile::core::{DType, bench::BenchSetup};
 
     use super::*;
 

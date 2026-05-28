@@ -152,15 +152,15 @@ impl KernelMacroBuilder {
         quote! {
             #vis mod #fn_name {
                 use super::*;
-                use metaltile_core::ir::{
+                use metaltile::core::ir::{
                     Kernel, Block, Op, ValueId, BlockId, VarId, Param, ParamKind,
                     TypedSlot, ConstExprDecl, BinOpKind, ReduceKind, AtomicKind,
                     AtomicScope, IndexExpr, UnaryOpKind, ActKind, KernelCallArg,
                     CoopTileAccMode, CoopTileScope,
                 };
-                use metaltile_core::shape::{Shape, Dim};
-                use metaltile_core::dtype::DType;
-                use metaltile_core::constexpr::ConstExpr;
+                use metaltile::core::shape::{Shape, Dim};
+                use metaltile::core::dtype::DType;
+                use metaltile::core::constexpr::ConstExpr;
 
                 /// Build the kernel IR for specific dtype(s).
                 ///
@@ -191,13 +191,13 @@ impl KernelMacroBuilder {
 
                 /// Host-side launch builder.
                 pub struct LaunchBuilder<'a> {
-                    ctx: &'a metaltile_runtime::Context,
+                    ctx: &'a metaltile::Context,
                     buffers: std::collections::BTreeMap<String, Vec<u8>>,
                 }
 
                 impl<'a> LaunchBuilder<'a> {
                     /// Create a new builder for the given runtime context.
-                    pub fn new(ctx: &'a metaltile_runtime::Context) -> Self {
+                    pub fn new(ctx: &'a metaltile::Context) -> Self {
                         LaunchBuilder {
                             ctx,
                             buffers: std::collections::BTreeMap::new(),
@@ -214,8 +214,8 @@ impl KernelMacroBuilder {
                     pub fn dispatch(
                         self,
                     ) -> std::result::Result<
-                        metaltile_runtime::DispatchResult,
-                        metaltile_runtime::MetalTileError,
+                        metaltile::DispatchResult,
+                        metaltile::MetalTileError,
                     > {
                         let kernel = kernel_ir();
                         self.ctx.dispatch_with_buffers(&kernel, &self.buffers)
@@ -223,24 +223,24 @@ impl KernelMacroBuilder {
                 }
 
                 /// Create a launch builder for the given runtime context.
-                pub fn launch(ctx: &metaltile_runtime::Context) -> LaunchBuilder<'_> {
+                pub fn launch(ctx: &metaltile::Context) -> LaunchBuilder<'_> {
                     LaunchBuilder::new(ctx)
                 }
 
                 const _: () = {
                     fn __build_for_inline(
-                        dtypes: &[metaltile_core::dtype::DType],
-                    ) -> metaltile_core::ir::Kernel {
+                        dtypes: &[metaltile::core::dtype::DType],
+                    ) -> metaltile::core::ir::Kernel {
                         #[allow(unused_variables)]
                         let _t = dtypes
                             .first()
                             .copied()
-                            .unwrap_or(metaltile_core::dtype::DType::F32);
+                            .unwrap_or(metaltile::core::dtype::DType::F32);
                         kernel_ir_for(#(#arg_var_idents),*)
                     }
 
-                    metaltile_core::inventory::submit! {
-                        metaltile_core::KernelEntry::new(#fn_name_str, __build_for_inline)
+                    metaltile::core::inventory::submit! {
+                        metaltile::core::KernelEntry::new(#fn_name_str, __build_for_inline)
                     }
                 };
             }

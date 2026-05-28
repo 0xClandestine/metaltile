@@ -59,11 +59,11 @@ pub fn logits_min_p_mask<T>(
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
-    use metaltile_macros::test_kernel;
+    use metaltile::test_kernel;
 
     use super::*;
 
@@ -110,7 +110,7 @@ pub mod kernel_tests {
         let expected = cpu_min_p_mask(&logits, n, rows, min_p);
 
         let mut k = logits_min_p_mask::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
 
         TestSetup::new(k)
             .input(TestBuffer::from_vec("inp", pack(&logits, dt), dt))
@@ -129,7 +129,7 @@ pub mod kernel_tests {
         let expected = cpu_min_p_mask(&logits, n, rows, min_p);
 
         let mut k = logits_min_p_mask::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
 
         TestSetup::new(k)
             .input(TestBuffer::from_vec("inp", pack(&logits, dt), dt))
@@ -148,7 +148,7 @@ pub mod kernel_tests {
         let expected = cpu_min_p_mask(&logits, n, rows, min_p);
 
         let mut k = logits_min_p_mask::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
 
         TestSetup::new(k)
             .input(TestBuffer::from_vec("inp", pack(&logits, dt), dt))

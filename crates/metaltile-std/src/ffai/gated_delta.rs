@@ -258,7 +258,7 @@ pub mod kernel_tests {
     //! GPU correctness tests for `mt_gated_delta_step` and `mt_gated_delta_chunk`.
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
         ir::KernelMode,
@@ -910,7 +910,7 @@ pub mod kernel_tests {
             naive_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, b, hv, hk, dv, dk);
 
         let mut kernel_ir = mt_gated_delta_step::kernel_ir_for(dt);
-        kernel_ir.mode = metaltile_core::ir::KernelMode::Reduction;
+        kernel_ir.mode = metaltile::core::ir::KernelMode::Reduction;
 
         TestSetup::new(kernel_ir)
             .input(TestBuffer::from_vec("q", pack(&q, dt), dt))

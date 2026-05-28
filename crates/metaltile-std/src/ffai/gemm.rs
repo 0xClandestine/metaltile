@@ -93,7 +93,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -156,7 +156,7 @@ pub mod kernel_tests {
         let n_tiles = out_dim.div_ceil(32) as u32;
         let m_tiles = n_rows.div_ceil(32) as u32;
         let mut kernel = ffai_gemm::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+        kernel.mode = metaltile::core::ir::KernelMode::Reduction;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("weight", pack(weight, dt), dt))
             .input(TestBuffer::from_vec("input", pack(input, dt), dt))

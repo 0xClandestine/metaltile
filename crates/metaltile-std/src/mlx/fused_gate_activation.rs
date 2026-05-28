@@ -97,7 +97,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -156,7 +156,7 @@ pub mod kernel_tests {
         let up: Vec<f32> = (0..n).map(|i| (i as f32 * 0.029) % 4.0 - 2.0).collect();
         let expected = cpu_gelu_approx(&gate, &up);
         let mut kernel = mt_fused_gate_gelu::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel.mode = metaltile::core::ir::KernelMode::Grid3D;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("gate", pack(&gate, dt), dt))
             .input(TestBuffer::from_vec("up", pack(&up, dt), dt))
@@ -171,7 +171,7 @@ pub mod kernel_tests {
         let up: Vec<f32> = (0..n).map(|i| round((i as f32 * 0.021) % 3.0 - 1.5, dt)).collect();
         let expected = cpu_gelu_approx(&gate, &up);
         let mut kernel = mt_fused_gate_gelu::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel.mode = metaltile::core::ir::KernelMode::Grid3D;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("gate", pack(&gate, dt), dt))
             .input(TestBuffer::from_vec("up", pack(&up, dt), dt))
@@ -186,7 +186,7 @@ pub mod kernel_tests {
         let up: Vec<f32> = (0..n).map(|i| round((i as f32 * 0.023) % 4.0 - 2.0, dt)).collect();
         let expected = cpu_gelu_approx(&gate, &up);
         let mut kernel = mt_fused_gate_gelu::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel.mode = metaltile::core::ir::KernelMode::Grid3D;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("gate", pack(&gate, dt), dt))
             .input(TestBuffer::from_vec("up", pack(&up, dt), dt))
@@ -204,7 +204,7 @@ pub mod kernel_tests {
         let up: Vec<f32> = (0..n).map(|i| (i as f32 * 0.037) % 20.0 - 10.0).collect();
         let expected = cpu_clipped_swiglu(&gate, &up);
         let mut kernel = mt_fused_gate_clipped_swiglu::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel.mode = metaltile::core::ir::KernelMode::Grid3D;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("gate", pack(&gate, dt), dt))
             .input(TestBuffer::from_vec("up", pack(&up, dt), dt))
@@ -219,7 +219,7 @@ pub mod kernel_tests {
         let up: Vec<f32> = (0..n).map(|i| round((i as f32 * 0.031) % 18.0 - 9.0, dt)).collect();
         let expected = cpu_clipped_swiglu(&gate, &up);
         let mut kernel = mt_fused_gate_clipped_swiglu::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel.mode = metaltile::core::ir::KernelMode::Grid3D;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("gate", pack(&gate, dt), dt))
             .input(TestBuffer::from_vec("up", pack(&up, dt), dt))
@@ -234,7 +234,7 @@ pub mod kernel_tests {
         let up: Vec<f32> = (0..n).map(|i| round((i as f32 * 0.039) % 20.0 - 10.0, dt)).collect();
         let expected = cpu_clipped_swiglu(&gate, &up);
         let mut kernel = mt_fused_gate_clipped_swiglu::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel.mode = metaltile::core::ir::KernelMode::Grid3D;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("gate", pack(&gate, dt), dt))
             .input(TestBuffer::from_vec("up", pack(&up, dt), dt))

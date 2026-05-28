@@ -216,7 +216,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -309,7 +309,7 @@ pub mod kernel_tests {
             naive_aura_encode_f32(&input, &rotation, &boundaries, &codebook, rows, dim, bits);
 
         let mut kernel_ir = aura_encode_int4::kernel_ir_for(dt);
-        kernel_ir.mode = metaltile_core::ir::KernelMode::Reduction;
+        kernel_ir.mode = metaltile::core::ir::KernelMode::Reduction;
 
         // One TG per row, dim threads per TG.
         TestSetup::new(kernel_ir)

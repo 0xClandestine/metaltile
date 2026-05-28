@@ -73,11 +73,11 @@ pub fn ffai_rms_norm_rope<T>(
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
-    use metaltile_macros::test_kernel;
+    use metaltile::test_kernel;
 
     use super::*;
 
@@ -149,7 +149,7 @@ pub mod kernel_tests {
             naive_rms_norm_rope(&x, &w, &inv_freqs, rows, axis, n_heads, seq_len, offset, eps);
 
         let mut k = ffai_rms_norm_rope::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
 
         let tpg = (axis / 2) as u32;
         TestSetup::new(k)
@@ -181,7 +181,7 @@ pub mod kernel_tests {
             naive_rms_norm_rope(&x, &w, &inv_freqs, rows, axis, n_heads, seq_len, offset, eps);
 
         let mut k = ffai_rms_norm_rope::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
 
         let tpg = (axis / 2) as u32;
         TestSetup::new(k)
@@ -215,7 +215,7 @@ pub mod kernel_tests {
             naive_rms_norm_rope(&x, &w, &inv_freqs, rows, axis, n_heads, seq_len, offset, eps);
 
         let mut k = ffai_rms_norm_rope::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Reduction;
+        k.mode = metaltile::core::ir::KernelMode::Reduction;
 
         let tpg = (axis / 2) as u32;
         TestSetup::new(k)

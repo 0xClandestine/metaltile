@@ -339,7 +339,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -425,7 +425,7 @@ pub mod kernel_tests {
         causal: bool,
         scale: f32,
     ) -> TestSetup {
-        use metaltile_core::ir::KernelMode;
+        use metaltile::core::ir::KernelMode;
         let heads_per_group = n_q_heads / n_kv_heads;
         let mut kernel = ffai_sdpa_multi::kernel_ir_for(dt);
         kernel.mode = KernelMode::Reduction;

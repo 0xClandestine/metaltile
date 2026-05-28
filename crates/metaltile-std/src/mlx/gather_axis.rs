@@ -51,7 +51,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -80,7 +80,7 @@ pub mod kernel_tests {
         }
         let total = outer * axis_out * inner;
         let mut k = mt_gather_axis::kernel_ir_for(dt);
-        k.mode = metaltile_core::ir::KernelMode::Grid3D;
+        k.mode = metaltile::core::ir::KernelMode::Grid3D;
         TestSetup::new(k)
             .input(TestBuffer::from_vec("src", pack_f32(&src), dt))
             .input(TestBuffer::from_vec("indices", pack_u32(&indices), DType::U32))

@@ -90,7 +90,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let tol_impl: TokenStream2 = match test_attr.tol {
         Some(tol) => quote! {
-            fn tolerance(&self, _dt: ::metaltile_core::DType) -> f64 { #tol }
+            fn tolerance(&self, _dt: ::metaltile::core::DType) -> f64 { #tol }
         },
         None => quote! {},
     };
@@ -103,17 +103,17 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[allow(non_camel_case_types)]
         struct #impl_name;
 
-        impl ::metaltile_core::bench::KernelTest for #impl_name {
+        impl ::metaltile::core::bench::KernelTest for #impl_name {
             fn name(&self) -> &str { #name_lit }
 
-            fn dtypes(&self) -> &[::metaltile_core::DType] {
+            fn dtypes(&self) -> &[::metaltile::core::DType] {
                 &[#(#dtype_tokens),*]
             }
 
             fn setup(
                 &self,
-                dt: ::metaltile_core::DType,
-            ) -> ::metaltile_core::bench::TestSetup {
+                dt: ::metaltile::core::DType,
+            ) -> ::metaltile::core::bench::TestSetup {
                 #fn_name(dt)
             }
 
@@ -122,8 +122,8 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         #[allow(non_upper_case_globals)]
         static #static_name: #impl_name = #impl_name;
-        ::metaltile_core::inventory::submit! {
-            ::metaltile_core::KernelTestEntry::new(&#static_name)
+        ::metaltile::core::inventory::submit! {
+            ::metaltile::core::KernelTestEntry::new(&#static_name)
         }
     })
 }

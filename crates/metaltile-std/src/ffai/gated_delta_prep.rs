@@ -211,7 +211,7 @@ pub fn mt_gated_delta_prep_step<T>(
 
 #[cfg(test)]
 mod tests {
-    use metaltile_core::{DType, ir::KernelMode};
+    use metaltile::core::{DType, ir::KernelMode};
 
     use super::*;
 
@@ -219,7 +219,7 @@ mod tests {
     /// `cargo test -p metaltile-std --lib --release -- ffai::gated_delta_prep::tests::dump --nocapture`
     #[test]
     fn dump() {
-        use metaltile_codegen::msl::MslGenerator;
+        use metaltile::codegen::msl::MslGenerator;
         let mut k = mt_gated_delta_prep_step::kernel_ir_for(DType::F32);
         k.mode = KernelMode::Reduction;
         let msl = MslGenerator::default().generate(&k).expect("codegen");
@@ -232,7 +232,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
         ir::KernelMode,
@@ -394,7 +394,7 @@ pub mod kernel_tests {
         );
 
         let mut kernel_ir = mt_gated_delta_prep_step::kernel_ir_for(dt);
-        kernel_ir.mode = metaltile_core::ir::KernelMode::Reduction;
+        kernel_ir.mode = metaltile::core::ir::KernelMode::Reduction;
 
         TestSetup::new(kernel_ir)
             .input(TestBuffer::from_vec("conv_out", pack(&conv_out, dt), dt))

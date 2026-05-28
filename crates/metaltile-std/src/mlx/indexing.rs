@@ -131,7 +131,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -157,7 +157,7 @@ pub mod kernel_tests {
         }
         let total = n_out_rows * row_width;
         let mut kernel = mt_gather_front::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel.mode = metaltile::core::ir::KernelMode::Grid3D;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("src", pack_f32(&src), dt))
             .input(TestBuffer::from_vec("indices", pack_u32(&indices), DType::U32))
@@ -197,7 +197,7 @@ pub mod kernel_tests {
             vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect()
         };
         let mut kernel = mt_scatter::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel.mode = metaltile::core::ir::KernelMode::Grid3D;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("updates", pack_dt(&updates), dt))
             .input(TestBuffer::from_vec("indices", pack_u32(&indices), DType::U32))
@@ -232,7 +232,7 @@ pub mod kernel_tests {
             }
         }
         let mut kernel = mt_masked_scatter::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel.mode = metaltile::core::ir::KernelMode::Grid3D;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("mask", pack_u32(&mask), DType::U32))
             .input(TestBuffer::from_vec("offsets", pack_u32(&offsets), DType::U32))

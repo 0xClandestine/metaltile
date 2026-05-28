@@ -77,7 +77,7 @@ pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{
+    use metaltile::core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
@@ -167,7 +167,7 @@ pub mod kernel_tests {
             attn_factor,
         );
         let mut kernel = ffai_rope_yarn::kernel_ir_for(dt);
-        kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
+        kernel.mode = metaltile::core::ir::KernelMode::Grid3D;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("qk", pack(&qk_f32, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0_f32; n], dt), dt))

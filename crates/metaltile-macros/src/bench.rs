@@ -78,13 +78,13 @@ impl syn::parse::Parse for BenchAttr {
 /// Map a dtype identifier string to its `DType::*` token stream.
 pub(crate) fn dtype_token(ident: &str) -> TokenStream2 {
     match ident {
-        "f32" => quote! { ::metaltile_core::DType::F32 },
-        "f16" => quote! { ::metaltile_core::DType::F16 },
-        "bf16" => quote! { ::metaltile_core::DType::BF16 },
-        "i32" => quote! { ::metaltile_core::DType::I32 },
-        "u32" => quote! { ::metaltile_core::DType::U32 },
-        "i8" => quote! { ::metaltile_core::DType::I8 },
-        "u8" => quote! { ::metaltile_core::DType::U8 },
+        "f32" => quote! { ::metaltile::core::DType::F32 },
+        "f16" => quote! { ::metaltile::core::DType::F16 },
+        "bf16" => quote! { ::metaltile::core::DType::BF16 },
+        "i32" => quote! { ::metaltile::core::DType::I32 },
+        "u32" => quote! { ::metaltile::core::DType::U32 },
+        "i8" => quote! { ::metaltile::core::DType::I8 },
+        "u8" => quote! { ::metaltile::core::DType::U8 },
         other => {
             let msg = format!("unknown dtype `{other}` in dtypes = [...]");
             quote! { compile_error!(#msg) }
@@ -110,7 +110,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         Some(expr) => quote! {
             fn bytes_moved(
                 &self,
-                setup: &::metaltile_core::bench::BenchSetup,
+                setup: &::metaltile::core::bench::BenchSetup,
             ) -> u64 {
                 (#expr)(setup)
             }
@@ -122,7 +122,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         Some(expr) => quote! {
             fn metal_reference(
                 &self,
-            ) -> ::std::option::Option<::metaltile_core::bench::MetalRef> {
+            ) -> ::std::option::Option<::metaltile::core::bench::MetalRef> {
                 ::std::option::Option::Some(#expr)
             }
         },
@@ -137,17 +137,17 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[allow(non_camel_case_types)]
         struct #impl_name;
 
-        impl ::metaltile_core::bench::KernelBench for #impl_name {
+        impl ::metaltile::core::bench::KernelBench for #impl_name {
             fn name(&self) -> &str { #name_lit }
 
-            fn dtypes(&self) -> &[::metaltile_core::DType] {
+            fn dtypes(&self) -> &[::metaltile::core::DType] {
                 &[#(#dtype_tokens),*]
             }
 
             fn setup(
                 &self,
-                dt: ::metaltile_core::DType,
-            ) -> ::metaltile_core::bench::BenchSetup {
+                dt: ::metaltile::core::DType,
+            ) -> ::metaltile::core::bench::BenchSetup {
                 #fn_name(dt)
             }
 
@@ -157,8 +157,8 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         #[allow(non_upper_case_globals)]
         static #static_name: #impl_name = #impl_name;
-        ::metaltile_core::inventory::submit! {
-            ::metaltile_core::KernelBenchEntry::new(&#static_name)
+        ::metaltile::core::inventory::submit! {
+            ::metaltile::core::KernelBenchEntry::new(&#static_name)
         }
     })
 }
