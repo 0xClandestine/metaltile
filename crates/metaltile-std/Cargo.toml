@@ -6,6 +6,10 @@ license.workspace = true
 description = "MetalTile kernel standard library"
 publish = true
 
+[[bin]]
+name = "__tile_runner"
+path = "src/runner_main.rs"
+
 [dependencies]
 metaltile.workspace = true
 rustc-hash.workspace = true
