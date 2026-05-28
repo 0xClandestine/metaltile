@@ -128,6 +128,6 @@ pub mod kernel_benches {
 
     #[bench(name = "gemv_masked/gemv_masked", dtypes = [f32, f16, bf16])]
     fn bench_mt_gemv_masked(dt: DType) -> BenchSetup {
-        crate::benches::bench_mat_vec_masked(mt_gemv_masked::kernel_ir_for(dt), dt, 4096, 4096, 256)
+        crate::mlx::benches::bench_mat_vec_masked(mt_gemv_masked::kernel_ir_for(dt), dt, 4096, 4096, 256)
     }
 }

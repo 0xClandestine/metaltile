@@ -828,6 +828,6 @@ pub mod kernel_benches {
 
     #[bench(name = "scan/scan", dtypes = [f32, f16, bf16])]
     fn bench_mt_scan(dt: DType) -> BenchSetup {
-        crate::benches::bench_row_op_y(mt_scan::kernel_ir_for(dt), dt, 1024, 4096, 256)
+        crate::mlx::benches::bench_row_op_y(mt_scan::kernel_ir_for(dt), dt, 1024, 4096, 256)
     }
 }

@@ -442,6 +442,6 @@ pub mod kernel_benches {
 
     #[bench(name = "sort/sort", dtypes = [f32, f16, bf16])]
     fn bench_mt_sort(dt: DType) -> BenchSetup {
-        crate::benches::bench_row_op_y(mt_sort::kernel_ir_for(dt), dt, 1024, 1024, 256)
+        crate::mlx::benches::bench_row_op_y(mt_sort::kernel_ir_for(dt), dt, 1024, 1024, 256)
     }
 }

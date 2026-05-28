@@ -251,11 +251,11 @@ pub mod kernel_benches {
 
     #[bench(name = "arg_reduce/argmax", dtypes = [f32, f16, bf16])]
     fn bench_mt_argmax(dt: DType) -> BenchSetup {
-        crate::benches::bench_arg_reduce(mt_argmax::kernel_ir_for(dt), dt, 1048576, 256)
+        crate::mlx::benches::bench_arg_reduce(mt_argmax::kernel_ir_for(dt), dt, 1048576, 256)
     }
 
     #[bench(name = "arg_reduce/argmin", dtypes = [f32, f16, bf16])]
     fn bench_mt_argmin(dt: DType) -> BenchSetup {
-        crate::benches::bench_arg_reduce(mt_argmin::kernel_ir_for(dt), dt, 1048576, 256)
+        crate::mlx::benches::bench_arg_reduce(mt_argmin::kernel_ir_for(dt), dt, 1048576, 256)
     }
 }

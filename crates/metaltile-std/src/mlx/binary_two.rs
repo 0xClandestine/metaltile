@@ -111,6 +111,6 @@ pub mod kernel_benches {
 
     #[bench(name = "binary_two/add_mul", dtypes = [f32, f16, bf16])]
     fn bench_mt_binary_two(dt: DType) -> BenchSetup {
-        crate::benches::bench_binary_two(mt_binary_two::kernel_ir_for(dt), dt, crate::benches::ELEMENTWISE_N, crate::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_binary_two(mt_binary_two::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
     }
 }

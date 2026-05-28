@@ -116,6 +116,6 @@ pub mod kernel_benches {
 
     #[bench(name = "logsumexp/logsumexp", dtypes = [f32, f16, bf16])]
     fn bench_mt_logsumexp(dt: DType) -> BenchSetup {
-        crate::benches::bench_row_norm(mt_logsumexp::kernel_ir_for(dt), dt, 1024, 4096, 256, 1)
+        crate::mlx::benches::bench_row_norm(mt_logsumexp::kernel_ir_for(dt), dt, 1024, 4096, 256, 1)
     }
 }

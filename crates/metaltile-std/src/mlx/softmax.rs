@@ -136,6 +136,6 @@ pub mod kernel_benches {
 
     #[bench(name = "softmax/softmax", dtypes = [f32, f16, bf16])]
     fn bench_mt_softmax(dt: DType) -> BenchSetup {
-        crate::benches::bench_row_norm(mt_softmax::kernel_ir_for(dt), dt, 1024, 4096, 256, 4096)
+        crate::mlx::benches::bench_row_norm(mt_softmax::kernel_ir_for(dt), dt, 1024, 4096, 256, 4096)
     }
 }

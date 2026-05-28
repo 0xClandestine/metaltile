@@ -590,11 +590,11 @@ pub mod kernel_benches {
 
     #[bench(name = "rms_norm/rms_norm", dtypes = [f32, f16, bf16])]
     fn bench_mt_rms_norm(dt: DType) -> BenchSetup {
-        crate::benches::bench_rms_norm(mt_rms_norm::kernel_ir_for(dt), dt, 1024, 4096, 1024)
+        crate::mlx::benches::bench_rms_norm(mt_rms_norm::kernel_ir_for(dt), dt, 1024, 4096, 1024)
     }
 
     #[bench(name = "rms_norm/rms_norm_small", dtypes = [f32, f16, bf16])]
     fn bench_mt_rms_norm_small(dt: DType) -> BenchSetup {
-        crate::benches::bench_rms_norm(mt_rms_norm_small::kernel_ir_for(dt), dt, 1024, 64, 32)
+        crate::mlx::benches::bench_rms_norm(mt_rms_norm_small::kernel_ir_for(dt), dt, 1024, 64, 32)
     }
 }

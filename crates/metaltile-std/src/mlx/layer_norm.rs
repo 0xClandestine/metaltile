@@ -153,6 +153,6 @@ pub mod kernel_benches {
 
     #[bench(name = "layer_norm/layer_norm", dtypes = [f32, f16, bf16])]
     fn bench_mt_layer_norm(dt: DType) -> BenchSetup {
-        crate::benches::bench_layer_norm(mt_layer_norm::kernel_ir_for(dt), dt, 1024, 4096, 1024)
+        crate::mlx::benches::bench_layer_norm(mt_layer_norm::kernel_ir_for(dt), dt, 1024, 4096, 1024)
     }
 }

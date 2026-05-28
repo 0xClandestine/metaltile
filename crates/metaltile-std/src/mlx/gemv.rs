@@ -96,6 +96,6 @@ pub mod kernel_benches {
 
     #[bench(name = "gemv/gemv", dtypes = [f32, f16, bf16])]
     fn bench_mt_gemv(dt: DType) -> BenchSetup {
-        crate::benches::bench_mat_vec(mt_gemv::kernel_ir_for(dt), dt, 4096, 4096, 512)
+        crate::mlx::benches::bench_mat_vec(mt_gemv::kernel_ir_for(dt), dt, 4096, 4096, 512)
     }
 }

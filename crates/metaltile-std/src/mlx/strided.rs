@@ -272,6 +272,6 @@ pub mod kernel_benches {
 
     #[bench(name = "strided_copy/strided_copy", dtypes = [f32, f16, bf16])]
     fn bench_mt_strided_copy(dt: DType) -> BenchSetup {
-        crate::benches::bench_strided_copy(mt_strided_copy::kernel_ir_for(dt), dt, 1024, 4096, 256)
+        crate::mlx::benches::bench_strided_copy(mt_strided_copy::kernel_ir_for(dt), dt, 1024, 4096, 256)
     }
 }

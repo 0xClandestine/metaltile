@@ -147,6 +147,6 @@ pub mod kernel_benches {
 
     #[bench(name = "select/select", dtypes = [f32, f16, bf16])]
     fn bench_mt_select(dt: DType) -> BenchSetup {
-        crate::benches::bench_select(mt_select::kernel_ir_for(dt), dt, crate::benches::ELEMENTWISE_N, crate::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_select(mt_select::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
     }
 }
