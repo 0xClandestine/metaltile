@@ -210,7 +210,7 @@ pub mod kernel_tests {
 
     #[test_kernel(name = "mlx/fp4_quant_dequant/round_trip", dtypes = [f32], tol = 1e-3)]
     fn test_fp4_round_trip(dt: DType) -> TestSetup {
-        let inp: Vec<f32> = (0..4).flat_map(|s| synthetic_group_fp4(s)).collect();
+        let inp: Vec<f32> = (0..4).flat_map(synthetic_group_fp4).collect();
         let n = inp.len() as u32;
         let expected = oracle_fp4(&inp);
         let kernel = mt_fp4_quant_dequant::kernel_ir_for();
@@ -310,7 +310,7 @@ pub mod kernel_tests {
 
     #[test_kernel(name = "mlx/fp8_e4m3_quant_dequant/round_trip", dtypes = [f32], tol = 1e-2)]
     fn test_fp8_e4m3_round_trip(dt: DType) -> TestSetup {
-        let inp: Vec<f32> = (0..4).flat_map(|s| synthetic_group_fp8(s)).collect();
+        let inp: Vec<f32> = (0..4).flat_map(synthetic_group_fp8).collect();
         let n = inp.len() as u32;
         let expected = oracle_fp8_round_trip(&inp, &E4M3);
         let kernel = mt_fp8_e4m3_quant_dequant::kernel_ir_for();
@@ -326,7 +326,7 @@ pub mod kernel_tests {
 
     #[test_kernel(name = "mlx/fp8_e5m2_quant_dequant/round_trip", dtypes = [f32], tol = 1e-1)]
     fn test_fp8_e5m2_round_trip(dt: DType) -> TestSetup {
-        let inp: Vec<f32> = (0..4).flat_map(|s| synthetic_group_fp8(s)).collect();
+        let inp: Vec<f32> = (0..4).flat_map(synthetic_group_fp8).collect();
         let n = inp.len() as u32;
         let expected = oracle_fp8_round_trip(&inp, &E5M2);
         let kernel = mt_fp8_e5m2_quant_dequant::kernel_ir_for();

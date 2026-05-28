@@ -172,7 +172,7 @@ pub mod kernel_tests {
         let mut kernel = audio_conv1d::kernel_ir_for(dt);
         kernel.mode = KernelMode::Grid3D;
         let tpg = 256u32;
-        let grid_x = (n_out as u32 + tpg - 1) / tpg;
+        let grid_x = (n_out as u32).div_ceil(tpg);
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("input", pack(&input_f32, dt), dt))
             .input(TestBuffer::from_vec("weight", pack(&weight_f32, dt), dt))

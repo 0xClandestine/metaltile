@@ -4121,6 +4121,7 @@ pub mod kernel_tests {
             .grid_3d(m_out as u32, t_rows as u32, 1, [32, 1, 1])
     }
 
+    #[allow(clippy::type_complexity)]
     fn build_int8_test_data(
         dt: DType,
     ) -> (Vec<u32>, Vec<u32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<u32>) {

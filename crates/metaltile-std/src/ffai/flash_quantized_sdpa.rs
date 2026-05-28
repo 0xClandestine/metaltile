@@ -668,7 +668,7 @@ pub mod kernel_tests {
         tol: f64,
     ) -> TestSetup {
         let (q_heads, kv_heads, tokens) = (2usize, 1usize, 8usize);
-        let group_size = if dim % 64 == 0 { 64usize } else { 32usize };
+        let group_size = if dim.is_multiple_of(64) { 64usize } else { 32usize };
         let attn_scale = 1.0_f32 / (dim as f32).sqrt();
         let q_raw = source_vec(q_heads * dim, 0x51, 2.0);
         let q: Vec<f32> = q_raw.iter().map(|&v| round_dt(v, dt)).collect();

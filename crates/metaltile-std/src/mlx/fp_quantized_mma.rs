@@ -529,7 +529,7 @@ pub mod kernel_tests {
     }
 
     fn pack_fp4_row(codes: &[u32]) -> Vec<u32> {
-        assert!(codes.len() % 8 == 0);
+        assert!(codes.len().is_multiple_of(8));
         codes
             .chunks_exact(8)
             .map(|ch| ch.iter().enumerate().fold(0u32, |acc, (i, &c)| acc | ((c & 0xF) << (i * 4))))
@@ -546,7 +546,7 @@ pub mod kernel_tests {
             .map(|i| (i as u32).wrapping_mul(2654435761).wrapping_shr(12) & 0xF)
             .collect();
         let packed: Vec<u32> =
-            codes_flat.chunks_exact(k).flat_map(|row| pack_fp4_row(row)).collect();
+            codes_flat.chunks_exact(k).flat_map(pack_fp4_row).collect();
         let scales: Vec<f32> =
             (0..n * gs_per_row).map(|i| 0.5 + 0.1 * (i as f32 * 0.07).sin().abs()).collect();
         let x: Vec<f32> = (0..m * k).map(|i| 0.1 * (i as f32 * 0.017).sin()).collect();
@@ -594,7 +594,7 @@ pub mod kernel_tests {
     }
 
     fn pack_fp8_row(codes: &[u32]) -> Vec<u32> {
-        assert!(codes.len() % 4 == 0);
+        assert!(codes.len().is_multiple_of(4));
         codes
             .chunks_exact(4)
             .map(|ch| {
@@ -618,7 +618,7 @@ pub mod kernel_tests {
             })
             .collect();
         let packed: Vec<u32> =
-            codes_flat.chunks_exact(k).flat_map(|row| pack_fp8_row(row)).collect();
+            codes_flat.chunks_exact(k).flat_map(pack_fp8_row).collect();
         let scales: Vec<f32> =
             (0..n * gs_per_row).map(|i| 0.1 + 0.05 * (i as f32 * 0.11).sin().abs()).collect();
         let x: Vec<f32> = (0..m * k).map(|i| 0.05 * (i as f32 * 0.019).cos()).collect();

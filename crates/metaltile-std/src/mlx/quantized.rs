@@ -9,6 +9,7 @@ use metaltile::kernel;
 //   - 14336×5120  Qwen3-8B/14B MLP up_proj
 //   - 5120×14336  Qwen3-8B/14B MLP down_proj
 //   - 27648×5120  Qwen3-coder-30B MoE expert up_proj
+#[allow(dead_code)]
 static QUANTIZED_SHAPES: &[(usize, usize)] =
     &[(4096, 4096), (5120, 5120), (14336, 5120), (5120, 14336), (27648, 5120)];
 

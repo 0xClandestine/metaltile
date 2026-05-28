@@ -109,7 +109,7 @@ pub mod kernel_tests {
         theta_base: f32,
         dt: DType,
     ) -> TestSetup {
-        assert!(n_heads % 4 == 0 && head_dim % 2 == 0);
+        assert!(n_heads.is_multiple_of(4) && head_dim.is_multiple_of(2));
         let grid_x = head_dim / 2;
         let h_stride = seq_len * head_dim;
         let seq_stride = head_dim;

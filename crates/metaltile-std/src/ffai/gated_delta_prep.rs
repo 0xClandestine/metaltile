@@ -507,6 +507,7 @@ pub mod kernel_tests {
         (y, state_out)
     }
 
+    #[allow(clippy::type_complexity)]
     fn make_inputs(
         b: usize,
         hv: usize,

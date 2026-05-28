@@ -28,6 +28,7 @@
 
 use metaltile::kernel;
 
+#[allow(dead_code)]
 static SCAN_SHAPES: &[(usize, usize)] = &[(1_024, 4_096)];
 
 #[kernel]

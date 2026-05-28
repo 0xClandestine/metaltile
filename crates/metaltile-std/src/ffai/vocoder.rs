@@ -241,7 +241,7 @@ pub mod kernel_tests {
         let mut kernel = vocoder_istft::kernel_ir_for(dt);
         kernel.mode = KernelMode::Grid3D;
         let tpg = 128u32;
-        let grid_x = (out_len as u32 + tpg - 1) / tpg;
+        let grid_x = (out_len as u32).div_ceil(tpg);
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("spec_re", pack(&re, dt), dt))
             .input(TestBuffer::from_vec("spec_im", pack(&im, dt), dt))

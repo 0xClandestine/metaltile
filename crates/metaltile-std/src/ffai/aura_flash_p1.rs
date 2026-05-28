@@ -435,9 +435,7 @@ pub mod kernel_tests {
                     m_acc = new_m;
                 }
                 let base = (qh * num_blocks + blk) * dim;
-                for d in 0..dim {
-                    o_p[base + d] = o_acc[d];
-                }
+                o_p[base..(base + dim)].copy_from_slice(&o_acc[..dim]);
                 m_p[qh * num_blocks + blk] = m_acc;
                 l_p[qh * num_blocks + blk] = l_acc;
             }
@@ -445,6 +443,7 @@ pub mod kernel_tests {
         (o_p, m_p, l_p)
     }
 
+    #[allow(clippy::type_complexity)]
     fn build_inputs(
         q_heads: usize,
         kv_heads: usize,

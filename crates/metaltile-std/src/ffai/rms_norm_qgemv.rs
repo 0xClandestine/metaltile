@@ -818,6 +818,7 @@ pub mod kernel_tests {
             .collect()
     }
 
+    #[allow(clippy::type_complexity)]
     fn build_qgemv_buffers(
         in_dim: usize,
         group_size: usize,
@@ -853,6 +854,7 @@ pub mod kernel_tests {
         )
     }
 
+    #[allow(clippy::type_complexity)]
     fn build_int8_buffers(
         in_dim: usize,
         group_size: usize,

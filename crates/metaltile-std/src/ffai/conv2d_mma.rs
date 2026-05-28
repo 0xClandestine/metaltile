@@ -441,29 +441,29 @@ pub mod kernel_tests {
 
     #[test_kernel(name = "ffai/conv/conv2d_mma_f32_3x3", dtypes = [f32], tol = 1e-2)]
     fn test_conv2d_mma_f32_3x3(dt: DType) -> TestSetup {
-        let input = ramp(1 * 4 * 10 * 10, 37, 18.0);
+        let input = ramp(4 * 10 * 10, 37, 18.0);
         let weight = ramp(32 * 4 * 3 * 3, 41, 20.0);
         make_setup(1, 4, 10, 10, 32, 3, 3, dt, input, weight)
     }
 
     #[test_kernel(name = "ffai/conv/conv2d_mma_f32_1x1", dtypes = [f32], tol = 1e-2)]
     fn test_conv2d_mma_f32_1x1(dt: DType) -> TestSetup {
-        let input = ramp(1 * 8 * 8 * 8, 23, 11.0);
-        let weight = ramp(32 * 8 * 1 * 1, 17, 8.0);
+        let input = ramp(8 * 8 * 8, 23, 11.0);
+        let weight = ramp((32 * 8), 17, 8.0);
         make_setup(1, 8, 8, 8, 32, 1, 1, dt, input, weight)
     }
 
     #[test_kernel(name = "ffai/conv/conv2d_mma_f16_3x3", dtypes = [f16], tol = 1e-2)]
     fn test_conv2d_mma_f16_3x3(dt: DType) -> TestSetup {
-        let input: Vec<f32> = small_vals(1 * 4 * 10 * 10, 11, -5.0, 0.02);
+        let input: Vec<f32> = small_vals(4 * 10 * 10, 11, -5.0, 0.02);
         let weight: Vec<f32> = small_vals(32 * 4 * 3 * 3, 7, -3.0, 0.05);
         make_setup(1, 4, 10, 10, 32, 3, 3, dt, input, weight)
     }
 
     #[test_kernel(name = "ffai/conv/conv2d_mma_bf16_1x1", dtypes = [bf16], tol = 2e-2)]
     fn test_conv2d_mma_bf16_1x1(dt: DType) -> TestSetup {
-        let input: Vec<f32> = small_vals(1 * 8 * 8 * 8, 9, -4.0, 0.03);
-        let weight: Vec<f32> = small_vals(32 * 8 * 1 * 1, 5, -2.0, 0.04);
+        let input: Vec<f32> = small_vals(8 * 8 * 8, 9, -4.0, 0.03);
+        let weight: Vec<f32> = small_vals((32 * 8), 5, -2.0, 0.04);
         make_setup(1, 8, 8, 8, 32, 1, 1, dt, input, weight)
     }
 }

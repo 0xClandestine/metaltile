@@ -267,7 +267,7 @@ pub mod kernel_tests {
     }
     fn pack_u32(vals: &[u32]) -> Vec<u8> { vals.iter().flat_map(|v| v.to_le_bytes()).collect() }
     fn pack_int8_row(codes: &[u32]) -> Vec<u32> {
-        assert!(codes.len() % 4 == 0);
+        assert!(codes.len().is_multiple_of(4));
         codes
             .chunks_exact(4)
             .map(|chunk| {

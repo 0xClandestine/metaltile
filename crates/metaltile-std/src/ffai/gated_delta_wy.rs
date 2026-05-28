@@ -409,6 +409,7 @@ pub mod kernel_tests {
         y
     }
 
+    #[allow(clippy::type_complexity)]
     fn make_inputs(
         seed_phase: f32,
         t: usize,

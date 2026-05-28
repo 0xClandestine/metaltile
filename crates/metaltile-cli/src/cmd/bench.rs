@@ -26,8 +26,8 @@ pub fn run(
     verbose: u8,
     json_path: Option<String>,
     allow_dirty: bool,
-    diff: bool,
-    baseline_ref: Option<String>,
+    _diff: bool,
+    _baseline_ref: Option<String>,
 ) -> Result<(), CliError> {
     // ── 1. Find tile.toml ───────────────────────────────────────────────
     let cwd = std::env::current_dir()?;
@@ -63,7 +63,7 @@ pub fn run(
     let mut cmd = Command::new("cargo");
     cmd.args(["run", "--bin", "__tile_runner"]);
     for arg in cargo_args {
-        cmd.arg(&arg);
+        cmd.arg(arg);
     }
     cmd.arg("--");
     cmd.arg("bench");

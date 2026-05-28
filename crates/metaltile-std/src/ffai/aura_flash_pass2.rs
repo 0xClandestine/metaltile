@@ -185,12 +185,12 @@ pub mod kernel_tests {
         let mut l_partials = vec![0.0_f32; q_heads * num_blocks];
         let mut o_partials = vec![0.0_f32; q_heads * num_blocks * dim];
         for qh in 0..q_heads {
-            m_partials[qh * num_blocks + 0] = 0.5 + 0.1 * qh as f32;
-            l_partials[qh * num_blocks + 0] = 1.2;
+            m_partials[(qh * num_blocks)] = 0.5 + 0.1 * qh as f32;
+            l_partials[(qh * num_blocks)] = 1.2;
             m_partials[qh * num_blocks + 1] = 0.8 + 0.1 * qh as f32;
             l_partials[qh * num_blocks + 1] = 0.9;
             for d in 0..dim {
-                o_partials[(qh * num_blocks + 0) * dim + d] = 0.1 + 0.01 * d as f32;
+                o_partials[(qh * num_blocks) * dim + d] = 0.1 + 0.01 * d as f32;
                 o_partials[(qh * num_blocks + 1) * dim + d] = 0.3 + 0.02 * d as f32;
             }
         }

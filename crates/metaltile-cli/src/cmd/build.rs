@@ -112,6 +112,7 @@ pub fn run(args: &BuildArgs) -> Result<(), CliError> {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     let mut sorted: Vec<(&str, (&'static dyn KernelBench, Vec<DType>))> =
         kernels.into_iter().collect();
     sorted.sort_unstable_by_key(|(name, _)| *name);

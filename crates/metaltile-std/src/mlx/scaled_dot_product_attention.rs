@@ -4,6 +4,7 @@
 
 use metaltile::kernel;
 
+#[allow(dead_code)]
 static ATTENTION_SHAPES: &[(usize, usize, usize)] = &[(8, 2048, 128), (32, 4096, 128)];
 
 #[kernel]
