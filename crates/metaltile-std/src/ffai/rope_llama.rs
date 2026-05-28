@@ -70,32 +70,43 @@ pub fn ffai_rope_llama<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
     fn round_dt(v: f32, dt: DType) -> f32 {
         match dt {
-            DType::F16  => half::f16::from_f32(v).to_f32(),
+            DType::F16 => half::f16::from_f32(v).to_f32(),
             DType::BF16 => half::bf16::from_f32(v).to_f32(),
-            _           => v,
+            _ => v,
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     fn naive_rope_llama(
-        qk: &[f32], head_dim: u32, n_heads: u32, position: u32,
-        theta_base: f32, scale_factor: f32,
-        low_freq_factor: f32, high_freq_factor: f32, original_max_position: f32,
+        qk: &[f32],
+        head_dim: u32,
+        n_heads: u32,
+        position: u32,
+        theta_base: f32,
+        scale_factor: f32,
+        low_freq_factor: f32,
+        high_freq_factor: f32,
+        original_max_position: f32,
     ) -> Vec<f32> {
         let half_dim = head_dim / 2;
         let half_f = half_dim as f32;
@@ -126,7 +137,8 @@ mod tests_support {
                 let sin_t = theta.sin();
                 let i1 = base + i as usize;
                 let i2 = base + (i + half_dim) as usize;
-                let x1 = qk[i1]; let x2 = qk[i2];
+                let x1 = qk[i1];
+                let x2 = qk[i2];
                 out[i1] = x1 * cos_t - x2 * sin_t;
                 out[i2] = x1 * sin_t + x2 * cos_t;
             }
@@ -135,9 +147,14 @@ mod tests_support {
     }
 
     fn make_setup(
-        n_heads: u32, head_dim: u32, position: u32,
-        theta_base: f32, scale_factor: f32,
-        low_freq_factor: f32, high_freq_factor: f32, original_max_position: f32,
+        n_heads: u32,
+        head_dim: u32,
+        position: u32,
+        theta_base: f32,
+        scale_factor: f32,
+        low_freq_factor: f32,
+        high_freq_factor: f32,
+        original_max_position: f32,
         dt: DType,
     ) -> TestSetup {
         let half_dim = head_dim / 2;
@@ -145,22 +162,49 @@ mod tests_support {
         let qk_f32: Vec<f32> = (0..n).map(|i| ((i % 41) as f32 - 20.0) * 0.05).collect();
         let qk_rounded: Vec<f32> = qk_f32.iter().map(|&v| round_dt(v, dt)).collect();
         let expected = naive_rope_llama(
-            &qk_rounded, head_dim, n_heads, position,
-            theta_base, scale_factor, low_freq_factor, high_freq_factor, original_max_position,
+            &qk_rounded,
+            head_dim,
+            n_heads,
+            position,
+            theta_base,
+            scale_factor,
+            low_freq_factor,
+            high_freq_factor,
+            original_max_position,
         );
         let mut kernel = ffai_rope_llama::kernel_ir_for(dt);
         kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
         TestSetup::new(kernel)
-            .input(TestBuffer::from_vec("qk",  pack(&qk_f32, dt), dt))
+            .input(TestBuffer::from_vec("qk", pack(&qk_f32, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0_f32; n], dt), dt))
-            .input(TestBuffer::from_vec("head_dim",              head_dim.to_le_bytes().to_vec(),             DType::U32))
-            .input(TestBuffer::from_vec("half_dim",              half_dim.to_le_bytes().to_vec(),             DType::U32))
-            .input(TestBuffer::from_vec("position",              position.to_le_bytes().to_vec(),             DType::U32))
-            .input(TestBuffer::from_vec("theta_base",            theta_base.to_le_bytes().to_vec(),           DType::F32))
-            .input(TestBuffer::from_vec("scale_factor",          scale_factor.to_le_bytes().to_vec(),         DType::F32))
-            .input(TestBuffer::from_vec("low_freq_factor",       low_freq_factor.to_le_bytes().to_vec(),      DType::F32))
-            .input(TestBuffer::from_vec("high_freq_factor",      high_freq_factor.to_le_bytes().to_vec(),     DType::F32))
-            .input(TestBuffer::from_vec("original_max_position", original_max_position.to_le_bytes().to_vec(), DType::F32))
+            .input(TestBuffer::from_vec("head_dim", head_dim.to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("half_dim", half_dim.to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("position", position.to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec(
+                "theta_base",
+                theta_base.to_le_bytes().to_vec(),
+                DType::F32,
+            ))
+            .input(TestBuffer::from_vec(
+                "scale_factor",
+                scale_factor.to_le_bytes().to_vec(),
+                DType::F32,
+            ))
+            .input(TestBuffer::from_vec(
+                "low_freq_factor",
+                low_freq_factor.to_le_bytes().to_vec(),
+                DType::F32,
+            ))
+            .input(TestBuffer::from_vec(
+                "high_freq_factor",
+                high_freq_factor.to_le_bytes().to_vec(),
+                DType::F32,
+            ))
+            .input(TestBuffer::from_vec(
+                "original_max_position",
+                original_max_position.to_le_bytes().to_vec(),
+                DType::F32,
+            ))
             .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
             .grid_3d(n_heads, half_dim, 1, [n_heads, half_dim, 1])
     }

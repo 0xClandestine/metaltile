@@ -187,7 +187,6 @@ steel_gemm_segmented_kernel!(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
@@ -195,20 +194,19 @@ mod tests_support {
         ir::KernelMode,
     };
 
+    use super::*;
+
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 =>
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
             DType::BF16 =>
                 vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
-    fn pack_u32(vals: &[u32]) -> Vec<u8> {
-        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
-    }
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
 
     fn round_dt(v: f32, dt: DType) -> f32 {
         match dt {

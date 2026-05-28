@@ -29,17 +29,21 @@ pub fn mt_gemv_masked<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         use DType::*;
         match dt {
-            F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
             BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _    => panic!("unsupported dtype {dt:?}"),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
@@ -79,8 +83,7 @@ mod tests_support {
         let (m, k) = (8usize, 512usize);
         let mat: Vec<f32> =
             (0..m * k).map(|i| (((i * 31 + 17) % 100) as f32 - 50.0) * 0.001).collect();
-        let vec: Vec<f32> =
-            (0..k).map(|j| (((j * 13 + 5) % 50) as f32 - 25.0) * 0.002).collect();
+        let vec: Vec<f32> = (0..k).map(|j| (((j * 13 + 5) % 50) as f32 - 25.0) * 0.002).collect();
         let mask = vec![1.0f32; k];
         let expected = naive_masked_matvec(&mat, &vec, &mask, m, k);
         let mut kernel = mt_gemv_masked::kernel_ir_for(dt);
@@ -99,8 +102,7 @@ mod tests_support {
         let (m, k) = (32usize, 4096usize);
         let mat: Vec<f32> =
             (0..m * k).map(|i| (((i * 31 + 17) % 200) as f32 - 100.0) * 0.001).collect();
-        let vec: Vec<f32> =
-            (0..k).map(|j| (((j * 13 + 5) % 100) as f32 - 50.0) * 0.002).collect();
+        let vec: Vec<f32> = (0..k).map(|j| (((j * 13 + 5) % 100) as f32 - 50.0) * 0.002).collect();
         let mask: Vec<f32> = (0..k).map(|j| if j % 4 != 3 { 1.0 } else { 0.0 }).collect();
         let expected = naive_masked_matvec(&mat, &vec, &mask, m, k);
         let mut kernel = mt_gemv_masked::kernel_ir_for(dt);

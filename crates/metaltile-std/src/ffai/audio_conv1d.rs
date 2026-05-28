@@ -77,7 +77,6 @@ pub fn audio_conv1d<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
@@ -85,15 +84,14 @@ mod tests_support {
         ir::KernelMode,
     };
 
+    use super::*;
+
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 => {
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect()
-            }
-            DType::BF16 => {
-                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect()
-            }
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
         }
     }
@@ -157,8 +155,19 @@ mod tests_support {
         let input_f32 = ramp(batch * in_ch * in_len, input_seed, 18.0);
         let weight_f32 = ramp(out_ch * in_ch * k, weight_seed, 20.0);
         let bias_f32 = ramp(out_ch, bias_seed, 3.0);
-        let expected =
-            naive_conv1d(&input_f32, &weight_f32, &bias_f32, batch, in_ch, in_len, out_ch, out_len, k, stride, pad);
+        let expected = naive_conv1d(
+            &input_f32,
+            &weight_f32,
+            &bias_f32,
+            batch,
+            in_ch,
+            in_len,
+            out_ch,
+            out_len,
+            k,
+            stride,
+            pad,
+        );
         let mut kernel = audio_conv1d::kernel_ir_for(dt);
         kernel.mode = KernelMode::Grid3D;
         let tpg = 256u32;

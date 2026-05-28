@@ -110,12 +110,13 @@ pub fn dispatch_grid(t: usize, n: usize) -> [usize; 3] {
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
+
+    use super::*;
 
     fn pack_f32(vals: &[f32]) -> Vec<u8> { vals.iter().flat_map(|v| v.to_le_bytes()).collect() }
     fn pack_f16(vals: &[f32]) -> Vec<u8> {
@@ -199,7 +200,9 @@ mod tests_support {
         let w: Vec<u32> = (0..n * k / 8)
             .map(|i| {
                 let mut v = 0u32;
-                for bit in 0..8u32 { v |= ((i as u32 + bit) & 0xF) << (bit * 4); }
+                for bit in 0..8u32 {
+                    v |= ((i as u32 + bit) & 0xF) << (bit * 4);
+                }
                 v
             })
             .collect();
@@ -219,8 +222,7 @@ mod tests_support {
             (0..n * k / 8).map(|i| ((i as u32) % 17).wrapping_mul(0x12345678u32)).collect();
         let scales: Vec<f32> =
             (0..n * gs_per_row).map(|i| 0.005 + ((i % 7) as f32) * 0.0007).collect();
-        let biases: Vec<f32> =
-            (0..n * gs_per_row).map(|i| ((i % 5) as f32) * 0.00005).collect();
+        let biases: Vec<f32> = (0..n * gs_per_row).map(|i| ((i % 5) as f32) * 0.00005).collect();
         let x: Vec<f32> = (0..m * k).map(|i| 0.05 + ((i % 23) as f32) * 0.003).collect();
         (w, scales, biases, x)
     }
@@ -252,13 +254,17 @@ mod tests_support {
             .input(TestBuffer::from_vec("biases", pack(&biases, dt), dt))
             .input(TestBuffer::from_vec("x", x_padded, dt))
             .input(TestBuffer::from_vec("out", out_zeros, dt))
-            .expect(TestBuffer::from_vec("out", {
-                // Pad oracle with zeros for trailing rows, then take first T*N
-                let mut out_padded = pack(&vec![0.0f32; m_padded * n], dt);
-                let expected_bytes = pack(&expected, dt);
-                out_padded[..expected_bytes.len()].copy_from_slice(&expected_bytes);
-                out_padded
-            }, dt))
+            .expect(TestBuffer::from_vec(
+                "out",
+                {
+                    // Pad oracle with zeros for trailing rows, then take first T*N
+                    let mut out_padded = pack(&vec![0.0f32; m_padded * n], dt);
+                    let expected_bytes = pack(&expected, dt);
+                    out_padded[..expected_bytes.len()].copy_from_slice(&expected_bytes);
+                    out_padded
+                },
+                dt,
+            ))
             .constexpr("k", k as u32)
             .constexpr("n", n as u32)
             .constexpr("gs_per_row", gs_per_row as u32)

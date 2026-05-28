@@ -193,7 +193,6 @@ steel_gemm_masked_kernel!(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
@@ -201,11 +200,12 @@ mod tests_support {
         ir::KernelMode,
     };
 
+    use super::*;
+
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 =>
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
             DType::BF16 =>
                 vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
@@ -270,8 +270,7 @@ mod tests_support {
         let b_raw = ramp(K * N, 23, 9.0);
         let a: Vec<f32> = a_raw.iter().map(|&v| round_dt(v, dt)).collect();
         let b: Vec<f32> = b_raw.iter().map(|&v| round_dt(v, dt)).collect();
-        let expected =
-            naive_masked_matmul(&a, &b, &out_mask, &op_mask, M, K, N, BM, BN);
+        let expected = naive_masked_matmul(&a, &b, &out_mask, &op_mask, M, K, N, BM, BN);
         let mut kernel = mt_steel_gemm_masked_64x64x16_2x2::kernel_ir_for(dt);
         kernel.mode = KernelMode::SimdGroup2D;
         TestSetup::new(kernel)

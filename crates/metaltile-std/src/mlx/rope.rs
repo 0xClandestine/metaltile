@@ -39,21 +39,32 @@ pub fn mt_rope<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
     /// CPU oracle for rotate-half RoPE — matches the kernel's exp2 arithmetic exactly.
-    fn naive_rope(inp: &[f32], n_heads: u32, seq_len: u32, head_dim: u32, theta_base: f32) -> Vec<f32> {
+    fn naive_rope(
+        inp: &[f32],
+        n_heads: u32,
+        seq_len: u32,
+        head_dim: u32,
+        theta_base: f32,
+    ) -> Vec<f32> {
         let grid_x = head_dim / 2;
         let h_stride = seq_len * head_dim;
         let seq_stride = head_dim;
@@ -84,18 +95,22 @@ mod tests_support {
 
     fn round_dt(v: f32, dt: DType) -> f32 {
         match dt {
-            DType::F16  => half::f16::from_f32(v).to_f32(),
+            DType::F16 => half::f16::from_f32(v).to_f32(),
             DType::BF16 => half::bf16::from_f32(v).to_f32(),
-            _           => v,
+            _ => v,
         }
     }
 
     fn make_rope_setup(
-        n_heads: u32, seq_len: u32, head_dim: u32, theta_base: f32, dt: DType,
+        n_heads: u32,
+        seq_len: u32,
+        head_dim: u32,
+        theta_base: f32,
+        dt: DType,
     ) -> TestSetup {
         assert!(n_heads % 4 == 0 && head_dim % 2 == 0);
-        let grid_x  = head_dim / 2;
-        let h_stride   = seq_len * head_dim;
+        let grid_x = head_dim / 2;
+        let h_stride = seq_len * head_dim;
         let seq_stride = head_dim;
         let base = theta_base.log2();
         let n = (n_heads * seq_len * head_dim) as usize;
@@ -107,28 +122,26 @@ mod tests_support {
         kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
 
         TestSetup::new(kernel)
-            .input(TestBuffer::from_vec("inp",  pack(&inp_f32, dt), dt))
-            .input(TestBuffer::from_vec("out",  pack(&vec![0.0f32; n], dt), dt))
-            .input(TestBuffer::from_vec("h_stride",   h_stride.to_le_bytes().to_vec(),   DType::U32))
-            .input(TestBuffer::from_vec("seq_stride",  seq_stride.to_le_bytes().to_vec(), DType::U32))
-            .input(TestBuffer::from_vec("grid_x",     grid_x.to_le_bytes().to_vec(),     DType::U32))
-            .input(TestBuffer::from_vec("base",       base.to_le_bytes().to_vec(),        DType::F32))
+            .input(TestBuffer::from_vec("inp", pack(&inp_f32, dt), dt))
+            .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; n], dt), dt))
+            .input(TestBuffer::from_vec("h_stride", h_stride.to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec(
+                "seq_stride",
+                seq_stride.to_le_bytes().to_vec(),
+                DType::U32,
+            ))
+            .input(TestBuffer::from_vec("grid_x", grid_x.to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("base", base.to_le_bytes().to_vec(), DType::F32))
             .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
             .grid_3d(grid_x, seq_len, n_heads / 4, [grid_x, seq_len, n_heads / 4])
     }
 
     #[test_kernel(name = "mlx/rope_f32", dtypes = [f32], tol = 5e-5)]
-    fn test_rope_f32(dt: DType) -> TestSetup {
-        make_rope_setup(8, 6, 16, 10000.0, dt)
-    }
+    fn test_rope_f32(dt: DType) -> TestSetup { make_rope_setup(8, 6, 16, 10000.0, dt) }
 
     #[test_kernel(name = "mlx/rope_f16", dtypes = [f16], tol = 0.005)]
-    fn test_rope_f16(dt: DType) -> TestSetup {
-        make_rope_setup(8, 6, 16, 10000.0, dt)
-    }
+    fn test_rope_f16(dt: DType) -> TestSetup { make_rope_setup(8, 6, 16, 10000.0, dt) }
 
     #[test_kernel(name = "mlx/rope_bf16", dtypes = [bf16], tol = 0.02)]
-    fn test_rope_bf16(dt: DType) -> TestSetup {
-        make_rope_setup(8, 6, 16, 10000.0, dt)
-    }
+    fn test_rope_bf16(dt: DType) -> TestSetup { make_rope_setup(8, 6, 16, 10000.0, dt) }
 }

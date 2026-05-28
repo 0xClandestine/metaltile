@@ -217,7 +217,6 @@ mod tests {
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
@@ -225,11 +224,12 @@ mod tests_support {
         ir::KernelMode,
     };
 
+    use super::*;
+
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 =>
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
             DType::BF16 =>
                 vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
@@ -241,7 +241,9 @@ mod tests_support {
         for mr in 0..m {
             for nc in 0..n {
                 let mut acc = 0.0f32;
-                for kk in 0..k { acc += a[mr * k + kk] * b[kk * n + nc]; }
+                for kk in 0..k {
+                    acc += a[mr * k + kk] * b[kk * n + nc];
+                }
                 out[mr * n + nc] = acc;
             }
         }
@@ -283,17 +285,11 @@ mod tests_support {
     fn test_gemm_fused_nax_f32_multi_k(dt: DType) -> TestSetup { make_setup(dt, 32, 32, 256) }
 
     #[test_kernel(name = "steel/gemm_fused_nax_f32_multi_tile", dtypes = [f32], tol = 1e-3)]
-    fn test_gemm_fused_nax_f32_multi_tile(dt: DType) -> TestSetup {
-        make_setup(dt, 64, 64, 128)
-    }
+    fn test_gemm_fused_nax_f32_multi_tile(dt: DType) -> TestSetup { make_setup(dt, 64, 64, 128) }
 
     #[test_kernel(name = "steel/gemm_fused_nax_f16_multi_tile", dtypes = [f16], tol = 5e-2)]
-    fn test_gemm_fused_nax_f16_multi_tile(dt: DType) -> TestSetup {
-        make_setup(dt, 64, 64, 128)
-    }
+    fn test_gemm_fused_nax_f16_multi_tile(dt: DType) -> TestSetup { make_setup(dt, 64, 64, 128) }
 
     #[test_kernel(name = "steel/gemm_fused_nax_bf16_multi_tile", dtypes = [bf16], tol = 2e-1)]
-    fn test_gemm_fused_nax_bf16_multi_tile(dt: DType) -> TestSetup {
-        make_setup(dt, 64, 64, 128)
-    }
+    fn test_gemm_fused_nax_bf16_multi_tile(dt: DType) -> TestSetup { make_setup(dt, 64, 64, 128) }
 }

@@ -125,7 +125,6 @@ pub fn vocoder_istft<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
@@ -133,15 +132,14 @@ mod tests_support {
         ir::KernelMode,
     };
 
+    use super::*;
+
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 => {
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect()
-            }
-            DType::BF16 => {
-                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect()
-            }
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
         }
     }
@@ -201,8 +199,7 @@ mod tests_support {
         let mut out = vec![0.0f32; out_len];
         for (t, o) in out.iter_mut().enumerate() {
             let f_hi = (t / hop_length).min(n_frames - 1);
-            let f_lo =
-                if t + 1 > n_fft { (t + 1 - n_fft).div_ceil(hop_length) } else { 0 };
+            let f_lo = if t + 1 > n_fft { (t + 1 - n_fft).div_ceil(hop_length) } else { 0 };
             let mut num = 0.0f32;
             let mut den = 0.0f32;
             for f in f_lo..=f_hi {
@@ -274,8 +271,7 @@ mod tests_support {
         let n_fft = 20usize;
         let hop_length = 5usize;
         let out_len = (n_frames - 1) * hop_length + n_fft;
-        let signal: Vec<f32> =
-            (0..out_len).map(|i| (i as f32 * 0.17).sin() * 0.6).collect();
+        let signal: Vec<f32> = (0..out_len).map(|i| (i as f32 * 0.17).sin() * 0.6).collect();
         make_setup(n_frames, n_fft, hop_length, signal, dt)
     }
 
@@ -285,8 +281,7 @@ mod tests_support {
         let n_fft = 16usize;
         let hop_length = 4usize;
         let out_len = (n_frames - 1) * hop_length + n_fft;
-        let signal: Vec<f32> =
-            (0..out_len).map(|i| (i as f32 * 0.21).sin() * 0.5).collect();
+        let signal: Vec<f32> = (0..out_len).map(|i| (i as f32 * 0.21).sin() * 0.5).collect();
         make_setup(n_frames, n_fft, hop_length, signal, dt)
     }
 
@@ -296,8 +291,7 @@ mod tests_support {
         let n_fft = 16usize;
         let hop_length = 4usize;
         let out_len = (n_frames - 1) * hop_length + n_fft;
-        let signal: Vec<f32> =
-            (0..out_len).map(|i| (i as f32 * 0.21).sin() * 0.5).collect();
+        let signal: Vec<f32> = (0..out_len).map(|i| (i as f32 * 0.21).sin() * 0.5).collect();
         make_setup(n_frames, n_fft, hop_length, signal, dt)
     }
 }

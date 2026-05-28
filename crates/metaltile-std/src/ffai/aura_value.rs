@@ -35,22 +35,24 @@ mod tests_support {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
     fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
 
-    fn pack_u32(vals: &[u32]) -> Vec<u8> {
-        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
-    }
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
 
     fn pack_int4_indices(indices: &[u32], kv_heads: usize, tokens: usize, dim: usize) -> Vec<u32> {
         let bits = 4;
@@ -71,8 +73,15 @@ mod tests_support {
     }
 
     fn naive_aura_value(
-        weights: &[f32], indices: &[u32], norms: &[f32], codebook: &[f32],
-        q_heads: usize, kv_heads: usize, tokens: usize, dim: usize, sparse_threshold: f32,
+        weights: &[f32],
+        indices: &[u32],
+        norms: &[f32],
+        codebook: &[f32],
+        q_heads: usize,
+        kv_heads: usize,
+        tokens: usize,
+        dim: usize,
+        sparse_threshold: f32,
     ) -> Vec<f32> {
         let repeat = q_heads / kv_heads;
         let mut out = vec![0.0_f32; q_heads * dim];
@@ -113,11 +122,22 @@ mod tests_support {
         let packed = pack_int4_indices(&indices, kv_heads, tokens, dim);
         let norms: Vec<f32> = (0..kv_heads * tokens).map(|i| 0.4 + 0.07 * i as f32).collect();
         let weights: Vec<f32> = (0..q_heads * tokens)
-            .map(|i| { let phase = (i * 7 + 3) % 10; phase as f32 * 0.04 })
+            .map(|i| {
+                let phase = (i * 7 + 3) % 10;
+                phase as f32 * 0.04
+            })
             .collect();
 
         let expected = naive_aura_value(
-            &weights, &indices, &norms, &codebook, q_heads, kv_heads, tokens, dim, sparse_threshold,
+            &weights,
+            &indices,
+            &norms,
+            &codebook,
+            q_heads,
+            kv_heads,
+            tokens,
+            dim,
+            sparse_threshold,
         );
 
         let mut kernel_ir = aura_value_int4::kernel_ir_for(dt);
@@ -132,7 +152,11 @@ mod tests_support {
             .input(TestBuffer::from_vec("packed_width", u32_le(packed_width as u32), DType::U32))
             .input(TestBuffer::from_vec("tokens", u32_le(tokens as u32), DType::U32))
             .input(TestBuffer::from_vec("repeat_count", u32_le(repeat as u32), DType::U32))
-            .input(TestBuffer::from_vec("sparse_threshold", sparse_threshold.to_le_bytes().to_vec(), DType::F32))
+            .input(TestBuffer::from_vec(
+                "sparse_threshold",
+                sparse_threshold.to_le_bytes().to_vec(),
+                DType::F32,
+            ))
             .expect(TestBuffer::from_vec("output", pack(&expected, dt), dt))
             .grid_3d(1, q_heads as u32, 1, [dim as u32, 1, 1])
     }

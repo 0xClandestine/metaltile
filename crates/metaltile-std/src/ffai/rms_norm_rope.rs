@@ -72,24 +72,29 @@ pub fn ffai_rms_norm_rope<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
     use metaltile_macros::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
     fn round(v: f32, dt: DType) -> f32 {
         match dt {
-            DType::F16  => half::f16::from_f32(v).to_f32(),
+            DType::F16 => half::f16::from_f32(v).to_f32(),
             DType::BF16 => half::bf16::from_f32(v).to_f32(),
-            _           => v,
+            _ => v,
         }
     }
 
@@ -102,9 +107,15 @@ mod tests_support {
 
     /// CPU oracle: fused RMSNorm + paired-layout RoPE.
     fn naive_rms_norm_rope(
-        x: &[f32], w: &[f32], inv_freqs: &[f32],
-        rows: usize, axis: usize, n_heads: usize, seq_len: usize,
-        offset: usize, eps: f32,
+        x: &[f32],
+        w: &[f32],
+        inv_freqs: &[f32],
+        rows: usize,
+        axis: usize,
+        n_heads: usize,
+        seq_len: usize,
+        offset: usize,
+        eps: f32,
     ) -> Vec<f32> {
         let half = axis / 2;
         let mut out = vec![0.0f32; rows * axis];
@@ -133,7 +144,8 @@ mod tests_support {
         let x: Vec<f32> = (0..rows * axis).map(|i| ((i % 53) as f32) * 0.07 - 1.8).collect();
         let w: Vec<f32> = (0..axis).map(|i| 1.0 + 0.02 * ((i % 11) as f32 - 5.0)).collect();
         let inv_freqs = inv_freq_table(half);
-        let expected = naive_rms_norm_rope(&x, &w, &inv_freqs, rows, axis, n_heads, seq_len, offset, eps);
+        let expected =
+            naive_rms_norm_rope(&x, &w, &inv_freqs, rows, axis, n_heads, seq_len, offset, eps);
 
         let mut k = ffai_rms_norm_rope::kernel_ir_for(dt);
         k.mode = metaltile_core::ir::KernelMode::Reduction;
@@ -142,7 +154,11 @@ mod tests_support {
         TestSetup::new(k)
             .input(TestBuffer::from_vec("x", pack(&x, dt), dt))
             .input(TestBuffer::from_vec("w", pack(&w, dt), dt))
-            .input(TestBuffer::from_vec("inv_freqs", bytemuck::cast_slice::<f32, u8>(&inv_freqs).to_vec(), DType::F32))
+            .input(TestBuffer::from_vec(
+                "inv_freqs",
+                bytemuck::cast_slice::<f32, u8>(&inv_freqs).to_vec(),
+                DType::F32,
+            ))
             .input(TestBuffer::from_vec("eps_buf", pack_f32_scalar(eps), DType::F32))
             .input(TestBuffer::from_vec("axis_size", pack_u32_scalar(axis as u32), DType::U32))
             .input(TestBuffer::from_vec("offset", pack_u32_scalar(offset as u32), DType::U32))
@@ -160,7 +176,8 @@ mod tests_support {
         let x: Vec<f32> = (0..rows * axis).map(|i| ((i % 41) as f32) * 0.09 - 1.5).collect();
         let w: Vec<f32> = (0..axis).map(|i| 1.0 + 0.03 * ((i % 7) as f32 - 3.0)).collect();
         let inv_freqs = inv_freq_table(half);
-        let expected = naive_rms_norm_rope(&x, &w, &inv_freqs, rows, axis, n_heads, seq_len, offset, eps);
+        let expected =
+            naive_rms_norm_rope(&x, &w, &inv_freqs, rows, axis, n_heads, seq_len, offset, eps);
 
         let mut k = ffai_rms_norm_rope::kernel_ir_for(dt);
         k.mode = metaltile_core::ir::KernelMode::Reduction;
@@ -169,7 +186,11 @@ mod tests_support {
         TestSetup::new(k)
             .input(TestBuffer::from_vec("x", pack(&x, dt), dt))
             .input(TestBuffer::from_vec("w", pack(&w, dt), dt))
-            .input(TestBuffer::from_vec("inv_freqs", bytemuck::cast_slice::<f32, u8>(&inv_freqs).to_vec(), DType::F32))
+            .input(TestBuffer::from_vec(
+                "inv_freqs",
+                bytemuck::cast_slice::<f32, u8>(&inv_freqs).to_vec(),
+                DType::F32,
+            ))
             .input(TestBuffer::from_vec("eps_buf", pack_f32_scalar(eps), DType::F32))
             .input(TestBuffer::from_vec("axis_size", pack_u32_scalar(axis as u32), DType::U32))
             .input(TestBuffer::from_vec("offset", pack_u32_scalar(offset as u32), DType::U32))
@@ -184,12 +205,13 @@ mod tests_support {
         let (axis, n_heads, seq_len, offset, eps) = (128usize, 4usize, 8usize, 3usize, 1e-5_f32);
         let rows = n_heads * seq_len;
         let half = axis / 2;
-        let x: Vec<f32> = (0..rows * axis)
-            .map(|i| round(((i % 53) as f32) * 0.07 - 1.8, dt)).collect();
-        let w: Vec<f32> = (0..axis)
-            .map(|i| round(1.0 + 0.02 * ((i % 11) as f32 - 5.0), dt)).collect();
+        let x: Vec<f32> =
+            (0..rows * axis).map(|i| round(((i % 53) as f32) * 0.07 - 1.8, dt)).collect();
+        let w: Vec<f32> =
+            (0..axis).map(|i| round(1.0 + 0.02 * ((i % 11) as f32 - 5.0), dt)).collect();
         let inv_freqs = inv_freq_table(half);
-        let expected = naive_rms_norm_rope(&x, &w, &inv_freqs, rows, axis, n_heads, seq_len, offset, eps);
+        let expected =
+            naive_rms_norm_rope(&x, &w, &inv_freqs, rows, axis, n_heads, seq_len, offset, eps);
 
         let mut k = ffai_rms_norm_rope::kernel_ir_for(dt);
         k.mode = metaltile_core::ir::KernelMode::Reduction;
@@ -198,7 +220,11 @@ mod tests_support {
         TestSetup::new(k)
             .input(TestBuffer::from_vec("x", pack(&x, dt), dt))
             .input(TestBuffer::from_vec("w", pack(&w, dt), dt))
-            .input(TestBuffer::from_vec("inv_freqs", bytemuck::cast_slice::<f32, u8>(&inv_freqs).to_vec(), DType::F32))
+            .input(TestBuffer::from_vec(
+                "inv_freqs",
+                bytemuck::cast_slice::<f32, u8>(&inv_freqs).to_vec(),
+                DType::F32,
+            ))
             .input(TestBuffer::from_vec("eps_buf", pack_f32_scalar(eps), DType::F32))
             .input(TestBuffer::from_vec("axis_size", pack_u32_scalar(axis as u32), DType::U32))
             .input(TestBuffer::from_vec("offset", pack_u32_scalar(offset as u32), DType::U32))

@@ -367,8 +367,9 @@ bulk_dequant_kv_fp8!(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile_core::DType;
+
+    use super::*;
 
     struct Shape {
         n_kv_heads: usize,
@@ -381,19 +382,30 @@ mod tests_support {
 
     impl Shape {
         fn qwen_decode() -> Self {
-            Self { n_kv_heads: 8, head_dim: 128, max_seq: 64, group_size: 32, position: 7, n_positions: 16 }
+            Self {
+                n_kv_heads: 8,
+                head_dim: 128,
+                max_seq: 64,
+                group_size: 32,
+                position: 7,
+                n_positions: 16,
+            }
         }
     }
 
     fn build_source(shape: &Shape, seed: u64) -> Vec<f32> {
         let mut s = seed;
         let n = shape.n_kv_heads * shape.head_dim;
-        (0..n).map(|i| {
-            s ^= s << 13; s ^= s >> 7; s ^= s << 17;
-            let raw = ((s as i64 % 20_000) as f32) / 10_000.0;
-            let group_offset = ((i / shape.group_size) as f32 * 0.7).sin();
-            raw + group_offset
-        }).collect()
+        (0..n)
+            .map(|i| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                let raw = ((s as i64 % 20_000) as f32) / 10_000.0;
+                let group_offset = ((i / shape.group_size) as f32 * 0.7).sin();
+                raw + group_offset
+            })
+            .collect()
     }
 
     // kv_cache tests require two-pass dispatch (quantize then dequantize).

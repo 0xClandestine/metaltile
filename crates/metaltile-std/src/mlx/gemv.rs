@@ -24,17 +24,16 @@ pub fn mt_gemv<T>(mat: Tensor<T>, vec: Tensor<T>, out: Tensor<T>, #[constexpr] k
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
-        bench::{TestSetup, TestBuffer},
+        bench::{TestBuffer, TestSetup},
         ir::KernelMode,
     };
 
-    fn pack_f32(vals: &[f32]) -> Vec<u8> {
-        bytemuck::cast_slice::<f32, u8>(vals).to_vec()
-    }
+    use super::*;
+
+    fn pack_f32(vals: &[f32]) -> Vec<u8> { bytemuck::cast_slice::<f32, u8>(vals).to_vec() }
 
     fn naive_matvec(mat: &[f32], vec: &[f32], m: usize, k: usize) -> Vec<f32> {
         assert_eq!(mat.len(), m * k);

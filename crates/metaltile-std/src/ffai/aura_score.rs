@@ -51,14 +51,18 @@ mod tests_support {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
@@ -82,13 +86,17 @@ mod tests_support {
         packed
     }
 
-    fn pack_u32(vals: &[u32]) -> Vec<u8> {
-        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
-    }
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
 
     fn naive_aura_score(
-        q_rot: &[f32], indices: &[u32], norms: &[f32], codebook: &[f32],
-        q_heads: usize, kv_heads: usize, tokens: usize, dim: usize,
+        q_rot: &[f32],
+        indices: &[u32],
+        norms: &[f32],
+        codebook: &[f32],
+        q_heads: usize,
+        kv_heads: usize,
+        tokens: usize,
+        dim: usize,
     ) -> Vec<f32> {
         let repeat = q_heads / kv_heads;
         let mut scores = vec![0.0_f32; q_heads * tokens];
@@ -127,7 +135,8 @@ mod tests_support {
         let q_rot: Vec<f32> =
             (0..q_heads * dim).map(|i| (((i * 13) % 21) as f32 - 10.0) * 0.02).collect();
 
-        let expected = naive_aura_score(&q_rot, &indices, &norms, &codebook, q_heads, kv_heads, tokens, dim);
+        let expected =
+            naive_aura_score(&q_rot, &indices, &norms, &codebook, q_heads, kv_heads, tokens, dim);
 
         let mut kernel_ir = aura_score_int4::kernel_ir_for(dt);
         kernel_ir.mode = metaltile_core::ir::KernelMode::Reduction;

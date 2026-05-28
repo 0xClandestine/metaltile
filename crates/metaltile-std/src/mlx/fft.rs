@@ -404,33 +404,30 @@ pub fn mt_fft_bluestein_postprocess<T>(
 // ── bottom of source file ─────────────────────────────────────────────────
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
-    fn pack_f32_raw(vals: &[f32]) -> Vec<u8> {
-        bytemuck::cast_slice::<f32, u8>(vals).to_vec()
-    }
+    fn pack_f32_raw(vals: &[f32]) -> Vec<u8> { bytemuck::cast_slice::<f32, u8>(vals).to_vec() }
 
     fn pack_u32_raw(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
 
     /// Direct O(N²) DFT reference, per row.
-    fn naive_dft(
-        re: &[f32],
-        im: &[f32],
-        rows: usize,
-        n: usize,
-        inv: bool,
-    ) -> (Vec<f32>, Vec<f32>) {
+    fn naive_dft(re: &[f32], im: &[f32], rows: usize, n: usize, inv: bool) -> (Vec<f32>, Vec<f32>) {
         let mut out_re = vec![0.0_f32; rows * n];
         let mut out_im = vec![0.0_f32; rows * n];
         let sign = if inv { 1.0_f32 } else { -1.0_f32 };

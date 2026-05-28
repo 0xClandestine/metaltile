@@ -95,9 +95,13 @@ dequant_gather_kernel!(dequant_gather_int8, 8u32, "int8");
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    use super::*;
 
     fn quantize_row_int4(row: &[f32], group_size: usize) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
         let hidden = row.len();
@@ -121,7 +125,14 @@ mod tests_support {
         (packed, scales, biases)
     }
 
-    fn naive_dequant_gather(weight: &[u32], scales: &[f32], biases: &[f32], indices: &[u32], hidden: usize, group_size: usize) -> Vec<f32> {
+    fn naive_dequant_gather(
+        weight: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        indices: &[u32],
+        hidden: usize,
+        group_size: usize,
+    ) -> Vec<f32> {
         let n_tokens = indices.len();
         let groups_per_row = hidden / group_size;
         let u32_per_row = hidden / 8;
@@ -132,7 +143,8 @@ mod tests_support {
                 let word = weight[token_id * u32_per_row + d / 8];
                 let q = ((word >> ((d % 8) * 4)) & 0xf) as f32;
                 let g = d / group_size;
-                out[token * hidden + d] = q * scales[token_id * groups_per_row + g] + biases[token_id * groups_per_row + g];
+                out[token * hidden + d] = q * scales[token_id * groups_per_row + g]
+                    + biases[token_id * groups_per_row + g];
             }
         }
         out
@@ -159,7 +171,8 @@ mod tests_support {
         }
         let indices: Vec<u32> = vec![3, 0, 7, 1, 4, 4];
         let n_tokens = indices.len();
-        let expected = naive_dequant_gather(&weight, &scales, &biases, &indices, hidden, group_size);
+        let expected =
+            naive_dequant_gather(&weight, &scales, &biases, &indices, hidden, group_size);
         let kernel = dequant_gather_int4::kernel_ir_for(dt);
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("weight", pack_u32_bytes(&weight), DType::U32))
@@ -167,8 +180,16 @@ mod tests_support {
             .input(TestBuffer::from_vec("biases", pack_f32(&biases), dt))
             .input(TestBuffer::from_vec("indices", pack_u32_bytes(&indices), DType::U32))
             .input(TestBuffer::from_vec("out", vec![0u8; n_tokens * hidden * 4], dt))
-            .input(TestBuffer::from_vec("hidden", (hidden as u32).to_le_bytes().to_vec(), DType::U32))
-            .input(TestBuffer::from_vec("group_size", (group_size as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec(
+                "hidden",
+                (hidden as u32).to_le_bytes().to_vec(),
+                DType::U32,
+            ))
+            .input(TestBuffer::from_vec(
+                "group_size",
+                (group_size as u32).to_le_bytes().to_vec(),
+                DType::U32,
+            ))
             .expect(TestBuffer::from_vec("out", pack_f32(&expected), dt))
             .grid_3d(n_tokens, 1, 1, [hidden, 1, 1])
     }

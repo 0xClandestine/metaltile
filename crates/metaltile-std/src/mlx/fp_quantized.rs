@@ -140,23 +140,36 @@ fp8_kernel!(mt_fp8_e5m2_quant_dequant, "fp8_e5m2", 2.0f32, -14.0f32, 15.0f32, 57
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    use super::*;
 
     // ── fp4 oracle helpers ───────────────────────────────────────────────────
 
     const FP4_CODEBOOK: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
 
     fn fp4_snap(norm: f32) -> f32 {
-        if norm < 0.25 { 0.0 }
-        else if norm < 0.75 { 0.5 }
-        else if norm < 1.25 { 1.0 }
-        else if norm < 1.75 { 1.5 }
-        else if norm < 2.5  { 2.0 }
-        else if norm < 3.5  { 3.0 }
-        else if norm < 5.0  { 4.0 }
-        else                { 6.0 }
+        if norm < 0.25 {
+            0.0
+        } else if norm < 0.75 {
+            0.5
+        } else if norm < 1.25 {
+            1.0
+        } else if norm < 1.75 {
+            1.5
+        } else if norm < 2.5 {
+            2.0
+        } else if norm < 3.5 {
+            3.0
+        } else if norm < 5.0 {
+            4.0
+        } else {
+            6.0
+        }
     }
 
     fn oracle_fp4(inp: &[f32]) -> Vec<f32> {
@@ -177,15 +190,20 @@ mod tests_support {
     }
 
     fn synthetic_group_fp4(seed: usize) -> Vec<f32> {
-        (0..32).map(|i| {
-            let v = ((i * 7 + seed * 11) % 33) as f32 * 0.03 - 0.46;
-            match i % 4 { 0 => v * 10.0, 1 => v * 0.05, 2 => 0.0, _ => v }
-        }).collect()
+        (0..32)
+            .map(|i| {
+                let v = ((i * 7 + seed * 11) % 33) as f32 * 0.03 - 0.46;
+                match i % 4 {
+                    0 => v * 10.0,
+                    1 => v * 0.05,
+                    2 => 0.0,
+                    _ => v,
+                }
+            })
+            .collect()
     }
 
-    fn pack_f32(vals: &[f32]) -> Vec<u8> {
-        bytemuck::cast_slice::<f32, u8>(vals).to_vec()
-    }
+    fn pack_f32(vals: &[f32]) -> Vec<u8> { bytemuck::cast_slice::<f32, u8>(vals).to_vec() }
 
     // ── fp4 tests ────────────────────────────────────────────────────────────
 
@@ -206,10 +224,12 @@ mod tests_support {
     #[test_kernel(name = "mlx/fp4_quant_dequant/codebook_roundtrip", dtypes = [f32], tol = 1e-4)]
     fn test_fp4_codebook_roundtrip(dt: DType) -> TestSetup {
         let scale = 4.0f32;
-        let inp: Vec<f32> = (0..32).map(|i| {
-            let mag = FP4_CODEBOOK[i % 8] * scale;
-            if i % 2 == 0 { mag } else { -mag }
-        }).collect();
+        let inp: Vec<f32> = (0..32)
+            .map(|i| {
+                let mag = FP4_CODEBOOK[i % 8] * scale;
+                if i % 2 == 0 { mag } else { -mag }
+            })
+            .collect();
         let n = inp.len() as u32;
         let expected = oracle_fp4(&inp);
         let kernel = mt_fp4_quant_dequant::kernel_ir_for();
@@ -237,7 +257,12 @@ mod tests_support {
 
     // ── fp8 oracle helpers ───────────────────────────────────────────────────
 
-    struct Fp8Fmt { mantissa_bits: f32, e_min: f32, e_max: f32, fp8_max: f32 }
+    struct Fp8Fmt {
+        mantissa_bits: f32,
+        e_min: f32,
+        e_max: f32,
+        fp8_max: f32,
+    }
     const E4M3: Fp8Fmt = Fp8Fmt { mantissa_bits: 3.0, e_min: -6.0, e_max: 8.0, fp8_max: 448.0 };
     const E5M2: Fp8Fmt = Fp8Fmt { mantissa_bits: 2.0, e_min: -14.0, e_max: 15.0, fp8_max: 57344.0 };
 
@@ -255,7 +280,9 @@ mod tests_support {
                     let e = raw_e.clamp(fmt.e_min, fmt.e_max);
                     let quantum = (e - fmt.mantissa_bits).exp2();
                     (norm / quantum).round() * quantum
-                } else { 0.0 };
+                } else {
+                    0.0
+                };
                 let q_clamped = q.min(fmt.fp8_max);
                 let sign = if x < 0.0 { -1.0 } else { 1.0 };
                 out[gi * 32 + i] = sign * q_clamped * rescale;
@@ -265,10 +292,17 @@ mod tests_support {
     }
 
     fn synthetic_group_fp8(seed: usize) -> Vec<f32> {
-        (0..32).map(|i| {
-            let v = ((i * 37 + seed * 13) % 100) as f32 * 0.01 - 0.5;
-            match i % 4 { 0 => v * 100.0, 1 => v * 0.001, 2 => 0.0, _ => v }
-        }).collect()
+        (0..32)
+            .map(|i| {
+                let v = ((i * 37 + seed * 13) % 100) as f32 * 0.01 - 0.5;
+                match i % 4 {
+                    0 => v * 100.0,
+                    1 => v * 0.001,
+                    2 => 0.0,
+                    _ => v,
+                }
+            })
+            .collect()
     }
 
     // ── fp8 e4m3 tests ───────────────────────────────────────────────────────

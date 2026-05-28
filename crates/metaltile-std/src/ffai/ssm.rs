@@ -28,14 +28,18 @@ mod tests_support {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
@@ -43,8 +47,15 @@ mod tests_support {
 
     /// CPU oracle for ssm_step (Mamba 2 SSD-form single-token decode).
     fn naive_ssm_step(
-        x: &[f32], a: &[f32], b_vec: &[f32], c_vec: &[f32], dt: &[f32],
-        h_state: &mut [f32], n_heads: usize, head_dim: usize, state_dim: usize,
+        x: &[f32],
+        a: &[f32],
+        b_vec: &[f32],
+        c_vec: &[f32],
+        dt: &[f32],
+        h_state: &mut [f32],
+        n_heads: usize,
+        head_dim: usize,
+        state_dim: usize,
     ) -> Vec<f32> {
         let mut y = vec![0.0_f32; n_heads * head_dim];
         for h in 0..n_heads {
@@ -68,8 +79,12 @@ mod tests_support {
 
     /// CPU oracle for conv1d_causal_step.
     fn naive_conv1d_causal_step(
-        x: &[f32], w: &[f32], b: &[f32], state: &mut [f32],
-        n_channels: usize, kernel_size: usize,
+        x: &[f32],
+        w: &[f32],
+        b: &[f32],
+        state: &mut [f32],
+        n_channels: usize,
+        kernel_size: usize,
     ) -> Vec<f32> {
         let mut y = vec![0.0_f32; n_channels];
         let k_last = kernel_size - 1;
@@ -98,7 +113,8 @@ mod tests_support {
         let head_dim = 16usize;
         let state_dim = 8usize;
 
-        let x: Vec<f32> = (0..n_heads * head_dim).map(|i| ((i as f32) * 0.013).sin() * 0.3).collect();
+        let x: Vec<f32> =
+            (0..n_heads * head_dim).map(|i| ((i as f32) * 0.013).sin() * 0.3).collect();
         let a: Vec<f32> = (0..n_heads).map(|i| -0.5 - (i as f32) * 0.1).collect();
         let b_vec: Vec<f32> = (0..state_dim).map(|i| 0.1 + (i as f32) * 0.05).collect();
         let c_vec: Vec<f32> = (0..state_dim).map(|i| 0.2 - (i as f32) * 0.02).collect();
@@ -107,7 +123,17 @@ mod tests_support {
             (0..n_heads * state_dim * head_dim).map(|i| ((i as f32) * 0.011).cos() * 0.1).collect();
 
         let mut h_oracle = h_initial.clone();
-        let expected_y = naive_ssm_step(&x, &a, &b_vec, &c_vec, &dt_in, &mut h_oracle, n_heads, head_dim, state_dim);
+        let expected_y = naive_ssm_step(
+            &x,
+            &a,
+            &b_vec,
+            &c_vec,
+            &dt_in,
+            &mut h_oracle,
+            n_heads,
+            head_dim,
+            state_dim,
+        );
 
         let mut kernel_ir = ssm_step::kernel_ir_for(dt);
         kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
@@ -141,7 +167,8 @@ mod tests_support {
             (0..(kernel_size - 1) * n_channels).map(|i| ((i as f32) * 0.007).sin() * 0.5).collect();
 
         let mut state_oracle = state_initial.clone();
-        let expected_y = naive_conv1d_causal_step(&x, &w, &b, &mut state_oracle, n_channels, kernel_size);
+        let expected_y =
+            naive_conv1d_causal_step(&x, &w, &b, &mut state_oracle, n_channels, kernel_size);
 
         let mut kernel_ir = conv1d_causal_step::kernel_ir_for(dt);
         kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
@@ -159,8 +186,15 @@ mod tests_support {
 
     /// CPU oracle for ssm_step_a2d (Mamba 1 / Jamba 2-D A_log variant).
     fn naive_ssm_step_a2d(
-        x: &[f32], a_log: &[f32], b: &[f32], c: &[f32], dt: &[f32],
-        h: &mut [f32], n_heads: usize, head_dim: usize, state_dim: usize,
+        x: &[f32],
+        a_log: &[f32],
+        b: &[f32],
+        c: &[f32],
+        dt: &[f32],
+        h: &mut [f32],
+        n_heads: usize,
+        head_dim: usize,
+        state_dim: usize,
     ) -> Vec<f32> {
         let mut y = vec![0.0_f32; n_heads * head_dim];
         for hi in 0..n_heads {
@@ -193,7 +227,8 @@ mod tests_support {
         let head_dim = 32usize;
         let state_dim = 16usize;
 
-        let x: Vec<f32> = (0..n_heads * head_dim).map(|i| (((i % 11) as f32 - 5.0) * 0.02)).collect();
+        let x: Vec<f32> =
+            (0..n_heads * head_dim).map(|i| (((i % 11) as f32 - 5.0) * 0.02)).collect();
         let a_log: Vec<f32> =
             (0..n_heads * head_dim * state_dim).map(|i| -1.0 + 0.013 * (i as f32 % 19.0)).collect();
         let b: Vec<f32> = (0..state_dim).map(|i| ((i % 5) as f32 - 2.0) * 0.05).collect();
@@ -203,8 +238,17 @@ mod tests_support {
             (0..n_heads * state_dim * head_dim).map(|i| ((i % 13) as f32 - 6.0) * 0.01).collect();
 
         let mut h_oracle = h_initial.clone();
-        let expected_y =
-            naive_ssm_step_a2d(&x, &a_log, &b, &c, &dt_in, &mut h_oracle, n_heads, head_dim, state_dim);
+        let expected_y = naive_ssm_step_a2d(
+            &x,
+            &a_log,
+            &b,
+            &c,
+            &dt_in,
+            &mut h_oracle,
+            n_heads,
+            head_dim,
+            state_dim,
+        );
 
         let mut kernel_ir = ssm_step_a2d::kernel_ir_for(dt);
         kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
@@ -470,7 +514,7 @@ pub mod tests_support_ctx {
                 Dt::Bf16 => {
                     let bits = v.to_bits();
                     f32::from_bits((bits + 0x8000) & 0xffff0000)
-                }
+                },
             }
         }
     }
@@ -478,10 +522,8 @@ pub mod tests_support_ctx {
     fn pack_bytes(vals: &[f32], dt: Dt) -> Vec<u8> {
         match dt {
             Dt::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            Dt::F16 => vals
-                .iter()
-                .flat_map(|&v| half::f16::from_f32(v).to_bits().to_le_bytes())
-                .collect(),
+            Dt::F16 =>
+                vals.iter().flat_map(|&v| half::f16::from_f32(v).to_bits().to_le_bytes()).collect(),
             Dt::Bf16 => vals
                 .iter()
                 .flat_map(|&v| {
@@ -767,8 +809,15 @@ pub mod tests_support_ctx {
         let mut state_oracle = round(&state_f32);
         let y_expected =
             naive_conv1d_causal_step(&x, &w, &b, &mut state_oracle, n_channels, kernel_size);
-        let (y_actual, _state_actual) =
-            run_conv1d_causal_step(&x, &w, &b, &round(&state_f32), Dt::F16, n_channels, kernel_size);
+        let (y_actual, _state_actual) = run_conv1d_causal_step(
+            &x,
+            &w,
+            &b,
+            &round(&state_f32),
+            Dt::F16,
+            n_channels,
+            kernel_size,
+        );
         let mut max_rel = 0.0_f32;
         for (a, e) in y_actual.iter().zip(y_expected.iter()) {
             let rel = (a - e).abs() / e.abs().max(1e-3);
@@ -795,8 +844,15 @@ pub mod tests_support_ctx {
         let mut state_oracle = round(&state_f32);
         let y_expected =
             naive_conv1d_causal_step(&x, &w, &b, &mut state_oracle, n_channels, kernel_size);
-        let (y_actual, _state_actual) =
-            run_conv1d_causal_step(&x, &w, &b, &round(&state_f32), Dt::Bf16, n_channels, kernel_size);
+        let (y_actual, _state_actual) = run_conv1d_causal_step(
+            &x,
+            &w,
+            &b,
+            &round(&state_f32),
+            Dt::Bf16,
+            n_channels,
+            kernel_size,
+        );
         let mut max_rel = 0.0_f32;
         for (a, e) in y_actual.iter().zip(y_expected.iter()) {
             let rel = (a - e).abs() / e.abs().max(1e-3);
@@ -918,12 +974,33 @@ pub mod tests_support_ctx {
         let state_in: Vec<f32> =
             (0..n_total * dh * ds).map(|i| ((i as f32) * 0.009).cos() * 0.2).collect();
         let (state_expected, out_expected) = naive_mt_ssm_step(
-            &x, &a_log, &b_mat, &c_mat, &d_skip, &dt_in, &state_in, n_total, dh, ds, n_heads,
+            &x,
+            &a_log,
+            &b_mat,
+            &c_mat,
+            &d_skip,
+            &dt_in,
+            &state_in,
+            n_total,
+            dh,
+            ds,
+            n_heads,
             heads_per_group,
         );
         let (state_actual, out_actual) = run_mt_ssm_step(
-            &x, &a_log, &b_mat, &c_mat, &d_skip, &dt_in, &state_in, Dt::F32, n_total, dh, ds,
-            n_heads, heads_per_group,
+            &x,
+            &a_log,
+            &b_mat,
+            &c_mat,
+            &d_skip,
+            &dt_in,
+            &state_in,
+            Dt::F32,
+            n_total,
+            dh,
+            ds,
+            n_heads,
+            heads_per_group,
         );
         let mut max_state_diff = 0.0_f32;
         for (a, e) in state_actual.iter().zip(state_expected.iter()) {
@@ -956,12 +1033,33 @@ pub mod tests_support_ctx {
         let state_in: Vec<f32> =
             (0..n_total * dh * ds).map(|i| ((i as f32) * 0.009).cos() * 0.2).collect();
         let (state_expected, out_expected) = naive_mt_ssm_step(
-            &x, &a_log, &b_mat, &c_mat, &d_skip, &dt_in, &state_in, n_total, dh, ds, n_heads,
+            &x,
+            &a_log,
+            &b_mat,
+            &c_mat,
+            &d_skip,
+            &dt_in,
+            &state_in,
+            n_total,
+            dh,
+            ds,
+            n_heads,
             heads_per_group,
         );
         let (state_actual, out_actual) = run_mt_ssm_step(
-            &x, &a_log, &b_mat, &c_mat, &d_skip, &dt_in, &state_in, Dt::F32, n_total, dh, ds,
-            n_heads, heads_per_group,
+            &x,
+            &a_log,
+            &b_mat,
+            &c_mat,
+            &d_skip,
+            &dt_in,
+            &state_in,
+            Dt::F32,
+            n_total,
+            dh,
+            ds,
+            n_heads,
+            heads_per_group,
         );
         let mut max_state_diff = 0.0_f32;
         for (a, e) in state_actual.iter().zip(state_expected.iter()) {
@@ -985,32 +1083,45 @@ pub mod tests_support_ctx {
         let dh = 4usize;
         let ds = 32usize;
         let groups = n_total / heads_per_group;
-        let round =
-            |v: &[f32]| v.iter().map(|&x| Dt::Bf16.round(x)).collect::<Vec<f32>>();
+        let round = |v: &[f32]| v.iter().map(|&x| Dt::Bf16.round(x)).collect::<Vec<f32>>();
         let x =
             round(&(0..n_total * dh).map(|i| ((i as f32) * 0.017).sin() * 0.3).collect::<Vec<_>>());
-        let a_log =
-            round(&(0..n_heads).map(|i| -1.0 + (i as f32) * 0.2).collect::<Vec<_>>());
-        let b_mat =
-            round(&(0..groups * ds).map(|i| 0.05 + (i as f32) * 0.003).collect::<Vec<_>>());
-        let c_mat =
-            round(&(0..groups * ds).map(|i| 0.1 - (i as f32) * 0.001).collect::<Vec<_>>());
-        let d_skip =
-            round(&(0..n_heads).map(|i| 0.05 + (i as f32) * 0.01).collect::<Vec<_>>());
-        let dt_in =
-            round(&(0..n_total).map(|i| 0.02 + (i as f32) * 0.005).collect::<Vec<_>>());
+        let a_log = round(&(0..n_heads).map(|i| -1.0 + (i as f32) * 0.2).collect::<Vec<_>>());
+        let b_mat = round(&(0..groups * ds).map(|i| 0.05 + (i as f32) * 0.003).collect::<Vec<_>>());
+        let c_mat = round(&(0..groups * ds).map(|i| 0.1 - (i as f32) * 0.001).collect::<Vec<_>>());
+        let d_skip = round(&(0..n_heads).map(|i| 0.05 + (i as f32) * 0.01).collect::<Vec<_>>());
+        let dt_in = round(&(0..n_total).map(|i| 0.02 + (i as f32) * 0.005).collect::<Vec<_>>());
         let state_in = round(
-            &(0..n_total * dh * ds)
-                .map(|i| ((i as f32) * 0.009).cos() * 0.2)
-                .collect::<Vec<_>>(),
+            &(0..n_total * dh * ds).map(|i| ((i as f32) * 0.009).cos() * 0.2).collect::<Vec<_>>(),
         );
         let (_state_expected, out_expected) = naive_mt_ssm_step(
-            &x, &a_log, &b_mat, &c_mat, &d_skip, &dt_in, &state_in, n_total, dh, ds, n_heads,
+            &x,
+            &a_log,
+            &b_mat,
+            &c_mat,
+            &d_skip,
+            &dt_in,
+            &state_in,
+            n_total,
+            dh,
+            ds,
+            n_heads,
             heads_per_group,
         );
         let (_state_actual, out_actual) = run_mt_ssm_step(
-            &x, &a_log, &b_mat, &c_mat, &d_skip, &dt_in, &state_in, Dt::Bf16, n_total, dh, ds,
-            n_heads, heads_per_group,
+            &x,
+            &a_log,
+            &b_mat,
+            &c_mat,
+            &d_skip,
+            &dt_in,
+            &state_in,
+            Dt::Bf16,
+            n_total,
+            dh,
+            ds,
+            n_heads,
+            heads_per_group,
         );
         let mut max_rel = 0.0_f32;
         for (a, e) in out_actual.iter().zip(out_expected.iter()) {

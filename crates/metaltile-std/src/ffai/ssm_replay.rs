@@ -34,14 +34,18 @@ mod tests_support {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
@@ -68,8 +72,14 @@ mod tests_support {
 
     /// CPU oracle for ssm_replay (re-fold first k tape entries onto snapshot).
     fn naive_replay(
-        snapshot: &[f32], da_log: &[f32], dbx_log: &[f32], mask: &[u32],
-        batch: usize, t_total: usize, k: usize, has_mask: bool,
+        snapshot: &[f32],
+        da_log: &[f32],
+        dbx_log: &[f32],
+        mask: &[u32],
+        batch: usize,
+        t_total: usize,
+        k: usize,
+        has_mask: bool,
     ) -> Vec<f32> {
         let mut state = snapshot.to_vec();
         for n in 0..batch * H {
@@ -77,7 +87,9 @@ mod tests_support {
             let h = n % H;
             for t in 0..k {
                 let bt = b * t_total + t;
-                if has_mask && mask[bt] == 0 { continue; }
+                if has_mask && mask[bt] == 0 {
+                    continue;
+                }
                 let bt_h = bt * H + h;
                 for dh in 0..DH {
                     for ds in 0..DS {
@@ -98,8 +110,7 @@ mod tests_support {
         let t = 5usize;
         let k = 3usize;
         let snapshot = src(batch * H * DH * DS, 0x21, 0.3);
-        let da_log: Vec<f32> =
-            src(batch * t * H * DS, 0x22, 0.1).iter().map(|v| 0.9 + v).collect();
+        let da_log: Vec<f32> = src(batch * t * H * DS, 0x22, 0.1).iter().map(|v| 0.9 + v).collect();
         let dbx_log = src(batch * t * H * DH * DS, 0x23, 0.4);
         let mask: Vec<u32> = vec![1; batch * t];
         let expected = naive_replay(&snapshot, &da_log, &dbx_log, &mask, batch, t, k, false);
@@ -409,13 +420,7 @@ pub mod tests_support_ctx {
         let mut kernel = kernel_ir(DType::F32);
         kernel.mode = KernelMode::Grid3D;
         let result = ctx
-            .dispatch_with_grid(
-                &kernel,
-                buffers,
-                &BTreeMap::new(),
-                [1, DH, batch * H],
-                [32, 1, 1],
-            )
+            .dispatch_with_grid(&kernel, buffers, &BTreeMap::new(), [1, DH, batch * H], [32, 1, 1])
             .expect("ssm_replay dispatch");
         want.iter().map(|w| unpack_f32(result.outputs.get(*w).expect(w))).collect()
     }
@@ -448,12 +453,12 @@ pub mod tests_support_ctx {
         b.insert("dbx_log".into(), pack_f32(&vec![0.0; exp.dbx_log.len()]));
         b.insert("t_total".into(), (t as u32).to_le_bytes().to_vec());
         b.insert("has_mask".into(), 0u32.to_le_bytes().to_vec());
-        let got = dispatch(
-            ssm_step_record_d16_64_4_2::kernel_ir_for,
-            &b,
-            batch,
-            &["y", "state_out", "da_log", "dbx_log"],
-        );
+        let got = dispatch(ssm_step_record_d16_64_4_2::kernel_ir_for, &b, batch, &[
+            "y",
+            "state_out",
+            "da_log",
+            "dbx_log",
+        ]);
         assert!(got[3].iter().any(|&v| v != 0.0), "dBx tape all zeros");
         assert!(max_abs_diff(&got[0], &exp.y) < 2e-3, "y mismatch");
         assert!(max_abs_diff(&got[1], &exp.state_out) < 2e-3, "state mismatch");
@@ -465,8 +470,7 @@ pub mod tests_support_ctx {
         let _g = gpu_lock();
         let (batch, t) = (1usize, 5usize);
         let snapshot = src(batch * H * DH * DS, 0x21, 0.3);
-        let da_log: Vec<f32> =
-            src(batch * t * H * DS, 0x22, 0.1).iter().map(|v| 0.9 + v).collect();
+        let da_log: Vec<f32> = src(batch * t * H * DS, 0x22, 0.1).iter().map(|v| 0.9 + v).collect();
         let dbx_log = src(batch * t * H * DH * DS, 0x23, 0.4);
         let expected = naive_replay(&snapshot, &da_log, &dbx_log, mask, batch, t, k, has_mask);
         let mut b: BTreeMap<String, Vec<u8>> = BTreeMap::new();

@@ -53,14 +53,18 @@ mod tests_support {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
@@ -68,8 +72,17 @@ mod tests_support {
 
     /// CPU oracle: matches `_gated_delta_step_ops` from mlx_lm/models/gated_delta.py.
     fn naive_gated_delta_step(
-        q: &[f32], k: &[f32], v: &[f32], g: &[f32], beta: &[f32], state_in: &[f32],
-        b: usize, hv: usize, hk: usize, dv: usize, dk: usize,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        g: &[f32],
+        beta: &[f32],
+        state_in: &[f32],
+        b: usize,
+        hv: usize,
+        hk: usize,
+        dv: usize,
+        dk: usize,
     ) -> (Vec<f32>, Vec<f32>) {
         let mut y = vec![0.0_f32; b * hv * dv];
         let mut state_out = vec![0.0_f32; b * hv * dv * dk];
@@ -363,12 +376,25 @@ pub mod tests_support_ctx {
     // ── dtype helpers (mirrors tests/common/mod.rs) ───────────────────────
 
     #[derive(Clone, Copy, Debug)]
-    enum Dt { F32, F16, Bf16 }
+    enum Dt {
+        F32,
+        F16,
+        Bf16,
+    }
 
     impl Dt {
-        fn bytes(self) -> usize { match self { Dt::F32 => 4, _ => 2 } }
+        fn bytes(self) -> usize {
+            match self {
+                Dt::F32 => 4,
+                _ => 2,
+            }
+        }
         fn to_dtype(self) -> DType {
-            match self { Dt::F32 => DType::F32, Dt::F16 => DType::F16, Dt::Bf16 => DType::BF16 }
+            match self {
+                Dt::F32 => DType::F32,
+                Dt::F16 => DType::F16,
+                Dt::Bf16 => DType::BF16,
+            }
         }
         fn round(self, v: f32) -> f32 {
             match self {
@@ -403,16 +429,23 @@ pub mod tests_support_ctx {
 
     fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
     }
 
     // ── CPU oracle ────────────────────────────────────────────────────────
 
     fn naive_gated_delta_step(
-        q: &[f32], k: &[f32], v: &[f32], g: &[f32], beta: &[f32], state_in: &[f32],
-        b: usize, hv: usize, hk: usize, dv: usize, dk: usize,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        g: &[f32],
+        beta: &[f32],
+        state_in: &[f32],
+        b: usize,
+        hv: usize,
+        hk: usize,
+        dv: usize,
+        dk: usize,
     ) -> (Vec<f32>, Vec<f32>) {
         let mut y = vec![0.0_f32; b * hv * dv];
         let mut state_out = vec![0.0_f32; b * hv * dv * dk];
@@ -449,8 +482,18 @@ pub mod tests_support_ctx {
     }
 
     fn naive_gated_delta_chunk(
-        q: &[f32], k: &[f32], v: &[f32], g: &[f32], beta: &[f32], state_in: &[f32],
-        b: usize, t: usize, hv: usize, hk: usize, dv: usize, dk: usize,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        g: &[f32],
+        beta: &[f32],
+        state_in: &[f32],
+        b: usize,
+        t: usize,
+        hv: usize,
+        hk: usize,
+        dv: usize,
+        dk: usize,
     ) -> (Vec<f32>, Vec<f32>) {
         let mut state = state_in.to_vec();
         let mut y_all = vec![0.0_f32; b * t * hv * dv];
@@ -496,8 +539,18 @@ pub mod tests_support_ctx {
     // ── dispatch helpers ──────────────────────────────────────────────────
 
     fn run_gated_delta_step(
-        q: &[f32], k: &[f32], v: &[f32], g: &[f32], beta: &[f32], state_in: &[f32],
-        dt: Dt, b: usize, hv: usize, hk: usize, dv: usize, dk: usize,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        g: &[f32],
+        beta: &[f32],
+        state_in: &[f32],
+        dt: Dt,
+        b: usize,
+        hv: usize,
+        hk: usize,
+        dv: usize,
+        dk: usize,
     ) -> (Vec<f32>, Vec<f32>) {
         let n_total = b * hv;
         let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -526,8 +579,19 @@ pub mod tests_support_ctx {
     }
 
     fn run_gated_delta_chunk(
-        q: &[f32], k: &[f32], v: &[f32], g: &[f32], beta: &[f32], state_in: &[f32],
-        dt: Dt, b: usize, t: usize, hv: usize, hk: usize, dv: usize, dk: usize,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        g: &[f32],
+        beta: &[f32],
+        state_in: &[f32],
+        dt: Dt,
+        b: usize,
+        t: usize,
+        hv: usize,
+        hk: usize,
+        dv: usize,
+        dk: usize,
     ) -> (Vec<f32>, Vec<f32>) {
         let n_total = b * hv;
         let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -561,7 +625,11 @@ pub mod tests_support_ctx {
     #[test]
     fn gated_delta_step_identity_at_g1_beta0_f32() {
         let _g = gpu_lock();
-        let b = 1; let hv = 2; let hk = 1; let dv = 4; let dk = 32;
+        let b = 1;
+        let hv = 2;
+        let hk = 1;
+        let dv = 4;
+        let dk = 32;
         let n_total = b * hv;
         let q = vec![1.0_f32; b * hk * dk];
         let k = vec![1.0_f32; b * hk * dk];
@@ -569,7 +637,8 @@ pub mod tests_support_ctx {
         let g = vec![1.0_f32; b * hv];
         let beta = vec![0.0_f32; b * hv];
         let state_in = vec![0.0_f32; n_total * dv * dk];
-        let (y, _) = run_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, hv, hk, dv, dk);
+        let (y, _) =
+            run_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, hv, hk, dv, dk);
         for (i, &yv) in y.iter().enumerate() {
             assert!(yv.is_finite(), "y[{i}] non-finite: {yv}");
         }
@@ -578,7 +647,11 @@ pub mod tests_support_ctx {
     #[test]
     fn gated_delta_step_matches_cpu_oracle_f32() {
         let _g = gpu_lock();
-        let b = 1; let hv = 4; let hk = 2; let dv = 4; let dk = 32;
+        let b = 1;
+        let hv = 4;
+        let hk = 2;
+        let dv = 4;
+        let dk = 32;
         let n_total = b * hv;
         let q: Vec<f32> = (0..b * hk * dk).map(|i| ((i as f32) * 0.013).sin() * 0.4).collect();
         let k: Vec<f32> = (0..b * hk * dk).map(|i| ((i as f32) * 0.017).cos() * 0.4).collect();
@@ -591,16 +664,25 @@ pub mod tests_support_ctx {
             naive_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, b, hv, hk, dv, dk);
         let (y_actual, state_actual) =
             run_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, hv, hk, dv, dk);
-        let max_y = y_actual.iter().zip(&y_expected).map(|(a,e)|(a-e).abs()).fold(0.0_f32,f32::max);
+        let max_y =
+            y_actual.iter().zip(&y_expected).map(|(a, e)| (a - e).abs()).fold(0.0_f32, f32::max);
         assert!(max_y < 1e-5, "y max |diff| = {max_y:.2e}");
-        let max_s = state_actual.iter().zip(&state_expected).map(|(a,e)|(a-e).abs()).fold(0.0_f32,f32::max);
+        let max_s = state_actual
+            .iter()
+            .zip(&state_expected)
+            .map(|(a, e)| (a - e).abs())
+            .fold(0.0_f32, f32::max);
         assert!(max_s < 1e-5, "state max |diff| = {max_s:.2e}");
     }
 
     #[test]
     fn gated_delta_step_gqa_matches_oracle_f32() {
         let _g = gpu_lock();
-        let b = 1; let hv = 4; let hk = 1; let dv = 4; let dk = 32;
+        let b = 1;
+        let hv = 4;
+        let hk = 1;
+        let dv = 4;
+        let dk = 32;
         let n_total = b * hv;
         let q: Vec<f32> = (0..b * hk * dk).map(|i| ((i as f32) * 0.011).sin() * 0.5).collect();
         let k: Vec<f32> = (0..b * hk * dk).map(|i| ((i as f32) * 0.013).cos() * 0.5).collect();
@@ -609,18 +691,24 @@ pub mod tests_support_ctx {
         let beta: Vec<f32> = (0..b * hv).map(|i| 0.3 + (i as f32) * 0.02).collect();
         let state_in: Vec<f32> =
             (0..n_total * dv * dk).map(|i| ((i as f32) * 0.009).cos() * 0.2).collect();
-        let (y_exp, s_exp) = naive_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, b, hv, hk, dv, dk);
-        let (y_act, s_act) = run_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, hv, hk, dv, dk);
-        let max_y = y_act.iter().zip(&y_exp).map(|(a,e)|(a-e).abs()).fold(0.0_f32,f32::max);
+        let (y_exp, s_exp) =
+            naive_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, b, hv, hk, dv, dk);
+        let (y_act, s_act) =
+            run_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, hv, hk, dv, dk);
+        let max_y = y_act.iter().zip(&y_exp).map(|(a, e)| (a - e).abs()).fold(0.0_f32, f32::max);
         assert!(max_y < 1e-5, "GQA y max |diff| = {max_y:.2e}");
-        let max_s = s_act.iter().zip(&s_exp).map(|(a,e)|(a-e).abs()).fold(0.0_f32,f32::max);
+        let max_s = s_act.iter().zip(&s_exp).map(|(a, e)| (a - e).abs()).fold(0.0_f32, f32::max);
         assert!(max_s < 1e-5, "GQA state max |diff| = {max_s:.2e}");
     }
 
     #[test]
     fn gated_delta_step_v_zero_state_only_decays_f32() {
         let _g = gpu_lock();
-        let b = 1; let hv = 2; let hk = 1; let dv = 4; let dk = 32;
+        let b = 1;
+        let hv = 2;
+        let hk = 1;
+        let dv = 4;
+        let dk = 32;
         let n_total = b * hv;
         let q: Vec<f32> = vec![0.1_f32; b * hk * dk];
         let k: Vec<f32> = vec![0.1_f32; b * hk * dk];
@@ -628,104 +716,157 @@ pub mod tests_support_ctx {
         let g = vec![0.9_f32; b * hv];
         let beta = vec![0.5_f32; b * hv];
         let state_in: Vec<f32> = (0..n_total * dv * dk).map(|i| i as f32 * 0.01).collect();
-        let (y_exp, _) = naive_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, b, hv, hk, dv, dk);
-        let (y_act, _) = run_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, hv, hk, dv, dk);
-        let max_y = y_act.iter().zip(&y_exp).map(|(a,e)|(a-e).abs()).fold(0.0_f32,f32::max);
+        let (y_exp, _) =
+            naive_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, b, hv, hk, dv, dk);
+        let (y_act, _) =
+            run_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, hv, hk, dv, dk);
+        let max_y = y_act.iter().zip(&y_exp).map(|(a, e)| (a - e).abs()).fold(0.0_f32, f32::max);
         assert!(max_y < 1e-5, "v=0 decay y max |diff| = {max_y:.2e}");
     }
 
     #[test]
     fn gated_delta_step_f16_matches_oracle() {
         let _g = gpu_lock();
-        let b = 1; let hv = 2; let hk = 1; let dv = 4; let dk = 32;
+        let b = 1;
+        let hv = 2;
+        let hk = 1;
+        let dv = 4;
+        let dk = 32;
         let n_total = b * hv;
-        let q_f32: Vec<f32> = (0..b*hk*dk).map(|i| ((i as f32)*0.013).sin()*0.4).collect();
-        let k_f32: Vec<f32> = (0..b*hk*dk).map(|i| ((i as f32)*0.017).cos()*0.4).collect();
-        let v_f32: Vec<f32> = (0..b*hv*dv).map(|i| ((i as f32)*0.029).sin()*0.3).collect();
-        let g_f32: Vec<f32> = (0..b*hv).map(|i| 0.9-(i as f32)*0.01).collect();
-        let beta_f32: Vec<f32> = (0..b*hv).map(|i| 0.5+(i as f32)*0.01).collect();
-        let state_f32: Vec<f32> = (0..n_total*dv*dk).map(|i| ((i as f32)*0.011).sin()*0.1).collect();
+        let q_f32: Vec<f32> = (0..b * hk * dk).map(|i| ((i as f32) * 0.013).sin() * 0.4).collect();
+        let k_f32: Vec<f32> = (0..b * hk * dk).map(|i| ((i as f32) * 0.017).cos() * 0.4).collect();
+        let v_f32: Vec<f32> = (0..b * hv * dv).map(|i| ((i as f32) * 0.029).sin() * 0.3).collect();
+        let g_f32: Vec<f32> = (0..b * hv).map(|i| 0.9 - (i as f32) * 0.01).collect();
+        let beta_f32: Vec<f32> = (0..b * hv).map(|i| 0.5 + (i as f32) * 0.01).collect();
+        let state_f32: Vec<f32> =
+            (0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.1).collect();
         let round = |v: &[f32]| v.iter().map(|&x| Dt::F16.round(x)).collect::<Vec<_>>();
-        let q = round(&q_f32); let k = round(&k_f32); let v = round(&v_f32);
-        let g = round(&g_f32); let beta = round(&beta_f32); let state_in = round(&state_f32);
-        let (y_exp, _) = naive_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, b, hv, hk, dv, dk);
-        let (y_act, _) = run_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, Dt::F16, b, hv, hk, dv, dk);
-        let max_rel = y_act.iter().zip(&y_exp).map(|(a,e)|(a-e).abs()/e.abs().max(1e-3)).fold(0.0_f32,f32::max);
+        let q = round(&q_f32);
+        let k = round(&k_f32);
+        let v = round(&v_f32);
+        let g = round(&g_f32);
+        let beta = round(&beta_f32);
+        let state_in = round(&state_f32);
+        let (y_exp, _) =
+            naive_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, b, hv, hk, dv, dk);
+        let (y_act, _) =
+            run_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, Dt::F16, b, hv, hk, dv, dk);
+        let max_rel = y_act
+            .iter()
+            .zip(&y_exp)
+            .map(|(a, e)| (a - e).abs() / e.abs().max(1e-3))
+            .fold(0.0_f32, f32::max);
         assert!(max_rel < 5e-3, "f16 step max rel = {max_rel:.2e}");
     }
 
     #[test]
     fn gated_delta_step_qwen36_dk_256_f32() {
         let _g = gpu_lock();
-        let b = 1; let hv = 4; let hk = 2; let dv = 4; let dk = 256;
+        let b = 1;
+        let hv = 4;
+        let hk = 2;
+        let dv = 4;
+        let dk = 256;
         let n_total = b * hv;
-        let q: Vec<f32> = (0..b*hk*dk).map(|i| ((i as f32)*0.0019).sin()*0.2).collect();
-        let k: Vec<f32> = (0..b*hk*dk).map(|i| ((i as f32)*0.0023).cos()*0.2).collect();
-        let v: Vec<f32> = (0..b*hv*dv).map(|i| ((i as f32)*0.029).sin()*0.3).collect();
+        let q: Vec<f32> = (0..b * hk * dk).map(|i| ((i as f32) * 0.0019).sin() * 0.2).collect();
+        let k: Vec<f32> = (0..b * hk * dk).map(|i| ((i as f32) * 0.0023).cos() * 0.2).collect();
+        let v: Vec<f32> = (0..b * hv * dv).map(|i| ((i as f32) * 0.029).sin() * 0.3).collect();
         let g: Vec<f32> = vec![0.92_f32; b * hv];
         let beta: Vec<f32> = vec![0.4_f32; b * hv];
-        let state_in: Vec<f32> = (0..n_total*dv*dk).map(|i| ((i as f32)*0.011).sin()*0.05).collect();
-        let (y_exp, s_exp) = naive_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, b, hv, hk, dv, dk);
-        let (y_act, s_act) = run_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, hv, hk, dv, dk);
-        let max_y = y_act.iter().zip(&y_exp).map(|(a,e)|(a-e).abs()).fold(0.0_f32,f32::max);
+        let state_in: Vec<f32> =
+            (0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.05).collect();
+        let (y_exp, s_exp) =
+            naive_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, b, hv, hk, dv, dk);
+        let (y_act, s_act) =
+            run_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, hv, hk, dv, dk);
+        let max_y = y_act.iter().zip(&y_exp).map(|(a, e)| (a - e).abs()).fold(0.0_f32, f32::max);
         assert!(max_y < 1e-4, "Dk=256 y max |diff| = {max_y:.2e}");
-        let max_s = s_act.iter().zip(&s_exp).map(|(a,e)|(a-e).abs()).fold(0.0_f32,f32::max);
+        let max_s = s_act.iter().zip(&s_exp).map(|(a, e)| (a - e).abs()).fold(0.0_f32, f32::max);
         assert!(max_s < 1e-4, "Dk=256 state max |diff| = {max_s:.2e}");
     }
 
     #[test]
     fn gated_delta_step_no_gqa_f32() {
         let _g = gpu_lock();
-        let b = 1; let hv = 4; let hk = 4; let dv = 4; let dk = 32;
+        let b = 1;
+        let hv = 4;
+        let hk = 4;
+        let dv = 4;
+        let dk = 32;
         let n_total = b * hv;
-        let q: Vec<f32> = (0..b*hk*dk).map(|i| ((i as f32)*0.013).sin()*0.4).collect();
-        let k: Vec<f32> = (0..b*hk*dk).map(|i| ((i as f32)*0.017).cos()*0.4).collect();
-        let v: Vec<f32> = (0..b*hv*dv).map(|i| ((i as f32)*0.029).sin()*0.3).collect();
-        let g: Vec<f32> = (0..b*hv).map(|i| 0.88+(i as f32)*0.01).collect();
-        let beta: Vec<f32> = (0..b*hv).map(|i| 0.4+(i as f32)*0.02).collect();
-        let state_in: Vec<f32> = (0..n_total*dv*dk).map(|i| ((i as f32)*0.009).cos()*0.15).collect();
-        let (y_exp, s_exp) = naive_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, b, hv, hk, dv, dk);
-        let (y_act, s_act) = run_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, hv, hk, dv, dk);
-        let max_y = y_act.iter().zip(&y_exp).map(|(a,e)|(a-e).abs()).fold(0.0_f32,f32::max);
+        let q: Vec<f32> = (0..b * hk * dk).map(|i| ((i as f32) * 0.013).sin() * 0.4).collect();
+        let k: Vec<f32> = (0..b * hk * dk).map(|i| ((i as f32) * 0.017).cos() * 0.4).collect();
+        let v: Vec<f32> = (0..b * hv * dv).map(|i| ((i as f32) * 0.029).sin() * 0.3).collect();
+        let g: Vec<f32> = (0..b * hv).map(|i| 0.88 + (i as f32) * 0.01).collect();
+        let beta: Vec<f32> = (0..b * hv).map(|i| 0.4 + (i as f32) * 0.02).collect();
+        let state_in: Vec<f32> =
+            (0..n_total * dv * dk).map(|i| ((i as f32) * 0.009).cos() * 0.15).collect();
+        let (y_exp, s_exp) =
+            naive_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, b, hv, hk, dv, dk);
+        let (y_act, s_act) =
+            run_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, hv, hk, dv, dk);
+        let max_y = y_act.iter().zip(&y_exp).map(|(a, e)| (a - e).abs()).fold(0.0_f32, f32::max);
         assert!(max_y < 1e-5, "no-GQA y max |diff| = {max_y:.2e}");
-        let max_s = s_act.iter().zip(&s_exp).map(|(a,e)|(a-e).abs()).fold(0.0_f32,f32::max);
+        let max_s = s_act.iter().zip(&s_exp).map(|(a, e)| (a - e).abs()).fold(0.0_f32, f32::max);
         assert!(max_s < 1e-5, "no-GQA state max |diff| = {max_s:.2e}");
     }
 
     #[test]
     fn gated_delta_step_batch_4_f32() {
         let _g = gpu_lock();
-        let b = 4; let hv = 2; let hk = 1; let dv = 4; let dk = 32;
+        let b = 4;
+        let hv = 2;
+        let hk = 1;
+        let dv = 4;
+        let dk = 32;
         let n_total = b * hv;
-        let q: Vec<f32> = (0..b*hk*dk).map(|i| ((i as f32)*0.013).sin()*0.4).collect();
-        let k: Vec<f32> = (0..b*hk*dk).map(|i| ((i as f32)*0.017).cos()*0.4).collect();
-        let v: Vec<f32> = (0..b*hv*dv).map(|i| ((i as f32)*0.029).sin()*0.3).collect();
-        let g: Vec<f32> = (0..b*hv).map(|i| 0.9-(i as f32)*0.01).collect();
-        let beta: Vec<f32> = (0..b*hv).map(|i| 0.5+(i as f32)*0.01).collect();
-        let state_in: Vec<f32> = (0..n_total*dv*dk).map(|i| ((i as f32)*0.011).sin()*0.1).collect();
-        let (y_exp, s_exp) = naive_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, b, hv, hk, dv, dk);
-        let (y_act, s_act) = run_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, hv, hk, dv, dk);
-        let max_y = y_act.iter().zip(&y_exp).map(|(a,e)|(a-e).abs()).fold(0.0_f32,f32::max);
+        let q: Vec<f32> = (0..b * hk * dk).map(|i| ((i as f32) * 0.013).sin() * 0.4).collect();
+        let k: Vec<f32> = (0..b * hk * dk).map(|i| ((i as f32) * 0.017).cos() * 0.4).collect();
+        let v: Vec<f32> = (0..b * hv * dv).map(|i| ((i as f32) * 0.029).sin() * 0.3).collect();
+        let g: Vec<f32> = (0..b * hv).map(|i| 0.9 - (i as f32) * 0.01).collect();
+        let beta: Vec<f32> = (0..b * hv).map(|i| 0.5 + (i as f32) * 0.01).collect();
+        let state_in: Vec<f32> =
+            (0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.1).collect();
+        let (y_exp, s_exp) =
+            naive_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, b, hv, hk, dv, dk);
+        let (y_act, s_act) =
+            run_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, hv, hk, dv, dk);
+        let max_y = y_act.iter().zip(&y_exp).map(|(a, e)| (a - e).abs()).fold(0.0_f32, f32::max);
         assert!(max_y < 1e-5, "B=4 y max |diff| = {max_y:.2e}");
-        let max_s = s_act.iter().zip(&s_exp).map(|(a,e)|(a-e).abs()).fold(0.0_f32,f32::max);
+        let max_s = s_act.iter().zip(&s_exp).map(|(a, e)| (a - e).abs()).fold(0.0_f32, f32::max);
         assert!(max_s < 1e-5, "B=4 state max |diff| = {max_s:.2e}");
     }
 
     #[test]
     fn gated_delta_step_bf16_matches_oracle() {
         let _g = gpu_lock();
-        let b = 1; let hv = 2; let hk = 1; let dv = 4; let dk = 32;
+        let b = 1;
+        let hv = 2;
+        let hk = 1;
+        let dv = 4;
+        let dk = 32;
         let n_total = b * hv;
         let round = |v: &[f32]| v.iter().map(|&x| Dt::Bf16.round(x)).collect::<Vec<_>>();
-        let q = round(&(0..b*hk*dk).map(|i| ((i as f32)*0.013).sin()*0.4).collect::<Vec<_>>());
-        let k = round(&(0..b*hk*dk).map(|i| ((i as f32)*0.017).cos()*0.4).collect::<Vec<_>>());
-        let v = round(&(0..b*hv*dv).map(|i| ((i as f32)*0.029).sin()*0.3).collect::<Vec<_>>());
-        let g = round(&(0..b*hv).map(|i| 0.9-(i as f32)*0.01).collect::<Vec<_>>());
-        let beta = round(&(0..b*hv).map(|i| 0.5+(i as f32)*0.01).collect::<Vec<_>>());
-        let state_in = round(&(0..n_total*dv*dk).map(|i| ((i as f32)*0.011).sin()*0.1).collect::<Vec<_>>());
-        let (y_exp, _) = naive_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, b, hv, hk, dv, dk);
-        let (y_act, _) = run_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, Dt::Bf16, b, hv, hk, dv, dk);
-        let max_rel = y_act.iter().zip(&y_exp).map(|(a,e)|(a-e).abs()/e.abs().max(1e-3)).fold(0.0_f32,f32::max);
+        let q =
+            round(&(0..b * hk * dk).map(|i| ((i as f32) * 0.013).sin() * 0.4).collect::<Vec<_>>());
+        let k =
+            round(&(0..b * hk * dk).map(|i| ((i as f32) * 0.017).cos() * 0.4).collect::<Vec<_>>());
+        let v =
+            round(&(0..b * hv * dv).map(|i| ((i as f32) * 0.029).sin() * 0.3).collect::<Vec<_>>());
+        let g = round(&(0..b * hv).map(|i| 0.9 - (i as f32) * 0.01).collect::<Vec<_>>());
+        let beta = round(&(0..b * hv).map(|i| 0.5 + (i as f32) * 0.01).collect::<Vec<_>>());
+        let state_in = round(
+            &(0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.1).collect::<Vec<_>>(),
+        );
+        let (y_exp, _) =
+            naive_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, b, hv, hk, dv, dk);
+        let (y_act, _) =
+            run_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, Dt::Bf16, b, hv, hk, dv, dk);
+        let max_rel = y_act
+            .iter()
+            .zip(&y_exp)
+            .map(|(a, e)| (a - e).abs() / e.abs().max(1e-3))
+            .fold(0.0_f32, f32::max);
         assert!(max_rel < 5e-2, "bf16 step max rel = {max_rel:.2e}");
     }
 
@@ -734,55 +875,83 @@ pub mod tests_support_ctx {
     #[test]
     fn gated_delta_chunk_t1_matches_decode_form_f32() {
         let _g = gpu_lock();
-        let b = 1; let t = 1; let hv = 4; let hk = 2; let dv = 4; let dk = 32;
+        let b = 1;
+        let t = 1;
+        let hv = 4;
+        let hk = 2;
+        let dv = 4;
+        let dk = 32;
         let n_total = b * hv;
-        let q: Vec<f32> = (0..b*t*hk*dk).map(|i| ((i as f32)*0.013).sin()*0.4).collect();
-        let k: Vec<f32> = (0..b*t*hk*dk).map(|i| ((i as f32)*0.017).cos()*0.4).collect();
-        let v: Vec<f32> = (0..b*t*hv*dv).map(|i| ((i as f32)*0.029).sin()*0.3).collect();
-        let g: Vec<f32> = (0..b*t*hv).map(|i| 0.9-(i as f32)*0.01).collect();
-        let beta: Vec<f32> = (0..b*t*hv).map(|i| 0.5+(i as f32)*0.01).collect();
-        let state_in: Vec<f32> = (0..n_total*dv*dk).map(|i| ((i as f32)*0.011).sin()*0.1).collect();
-        let (y_chunk, s_chunk) = run_gated_delta_chunk(&q,&k,&v,&g,&beta,&state_in,Dt::F32,b,t,hv,hk,dv,dk);
-        let (y_decode, s_decode) = run_gated_delta_step(&q,&k,&v,&g,&beta,&state_in,Dt::F32,b,hv,hk,dv,dk);
-        let max_y = y_chunk.iter().zip(&y_decode).map(|(a,e)|(a-e).abs()).fold(0.0_f32,f32::max);
+        let q: Vec<f32> = (0..b * t * hk * dk).map(|i| ((i as f32) * 0.013).sin() * 0.4).collect();
+        let k: Vec<f32> = (0..b * t * hk * dk).map(|i| ((i as f32) * 0.017).cos() * 0.4).collect();
+        let v: Vec<f32> = (0..b * t * hv * dv).map(|i| ((i as f32) * 0.029).sin() * 0.3).collect();
+        let g: Vec<f32> = (0..b * t * hv).map(|i| 0.9 - (i as f32) * 0.01).collect();
+        let beta: Vec<f32> = (0..b * t * hv).map(|i| 0.5 + (i as f32) * 0.01).collect();
+        let state_in: Vec<f32> =
+            (0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.1).collect();
+        let (y_chunk, s_chunk) =
+            run_gated_delta_chunk(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, t, hv, hk, dv, dk);
+        let (y_decode, s_decode) =
+            run_gated_delta_step(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, hv, hk, dv, dk);
+        let max_y =
+            y_chunk.iter().zip(&y_decode).map(|(a, e)| (a - e).abs()).fold(0.0_f32, f32::max);
         assert!(max_y < 1e-5, "chunk T=1 vs decode y max |diff| = {max_y:.2e}");
-        let max_s = s_chunk.iter().zip(&s_decode).map(|(a,e)|(a-e).abs()).fold(0.0_f32,f32::max);
+        let max_s =
+            s_chunk.iter().zip(&s_decode).map(|(a, e)| (a - e).abs()).fold(0.0_f32, f32::max);
         assert!(max_s < 1e-5, "chunk T=1 vs decode state max |diff| = {max_s:.2e}");
     }
 
     #[test]
     fn gated_delta_chunk_t_64_matches_oracle_f32() {
         let _g = gpu_lock();
-        let b = 1; let t = 64; let hv = 4; let hk = 2; let dv = 4; let dk = 32;
+        let b = 1;
+        let t = 64;
+        let hv = 4;
+        let hk = 2;
+        let dv = 4;
+        let dk = 32;
         let n_total = b * hv;
-        let q: Vec<f32> = (0..b*t*hk*dk).map(|i| ((i as f32)*0.013).sin()*0.4).collect();
-        let k: Vec<f32> = (0..b*t*hk*dk).map(|i| ((i as f32)*0.017).cos()*0.4).collect();
-        let v: Vec<f32> = (0..b*t*hv*dv).map(|i| ((i as f32)*0.029).sin()*0.3).collect();
-        let g: Vec<f32> = (0..b*t*hv).map(|i| 0.92+((i as f32)*0.0001).sin()*0.05).collect();
-        let beta: Vec<f32> = (0..b*t*hv).map(|i| 0.4+((i as f32)*0.0001).cos()*0.1).collect();
-        let state_in: Vec<f32> = (0..n_total*dv*dk).map(|i| ((i as f32)*0.011).sin()*0.1).collect();
-        let (y_exp, s_exp) = naive_gated_delta_chunk(&q,&k,&v,&g,&beta,&state_in,b,t,hv,hk,dv,dk);
-        let (y_act, s_act) = run_gated_delta_chunk(&q,&k,&v,&g,&beta,&state_in,Dt::F32,b,t,hv,hk,dv,dk);
-        let max_y = y_act.iter().zip(&y_exp).map(|(a,e)|(a-e).abs()).fold(0.0_f32,f32::max);
+        let q: Vec<f32> = (0..b * t * hk * dk).map(|i| ((i as f32) * 0.013).sin() * 0.4).collect();
+        let k: Vec<f32> = (0..b * t * hk * dk).map(|i| ((i as f32) * 0.017).cos() * 0.4).collect();
+        let v: Vec<f32> = (0..b * t * hv * dv).map(|i| ((i as f32) * 0.029).sin() * 0.3).collect();
+        let g: Vec<f32> =
+            (0..b * t * hv).map(|i| 0.92 + ((i as f32) * 0.0001).sin() * 0.05).collect();
+        let beta: Vec<f32> =
+            (0..b * t * hv).map(|i| 0.4 + ((i as f32) * 0.0001).cos() * 0.1).collect();
+        let state_in: Vec<f32> =
+            (0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.1).collect();
+        let (y_exp, s_exp) =
+            naive_gated_delta_chunk(&q, &k, &v, &g, &beta, &state_in, b, t, hv, hk, dv, dk);
+        let (y_act, s_act) =
+            run_gated_delta_chunk(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, t, hv, hk, dv, dk);
+        let max_y = y_act.iter().zip(&y_exp).map(|(a, e)| (a - e).abs()).fold(0.0_f32, f32::max);
         assert!(max_y < 1e-3, "chunk T=64 y max |diff| = {max_y:.2e}");
-        let max_s = s_act.iter().zip(&s_exp).map(|(a,e)|(a-e).abs()).fold(0.0_f32,f32::max);
+        let max_s = s_act.iter().zip(&s_exp).map(|(a, e)| (a - e).abs()).fold(0.0_f32, f32::max);
         assert!(max_s < 1e-3, "chunk T=64 state max |diff| = {max_s:.2e}");
     }
 
     #[test]
     fn gated_delta_chunk_qwen36_dk_256_f32() {
         let _g = gpu_lock();
-        let b = 1; let t = 8; let hv = 2; let hk = 1; let dv = 2; let dk = 256;
+        let b = 1;
+        let t = 8;
+        let hv = 2;
+        let hk = 1;
+        let dv = 2;
+        let dk = 256;
         let n_total = b * hv;
-        let q: Vec<f32> = (0..b*t*hk*dk).map(|i| ((i as f32)*0.0019).sin()*0.2).collect();
-        let k: Vec<f32> = (0..b*t*hk*dk).map(|i| ((i as f32)*0.0023).cos()*0.2).collect();
-        let v: Vec<f32> = (0..b*t*hv*dv).map(|i| ((i as f32)*0.029).sin()*0.3).collect();
+        let q: Vec<f32> = (0..b * t * hk * dk).map(|i| ((i as f32) * 0.0019).sin() * 0.2).collect();
+        let k: Vec<f32> = (0..b * t * hk * dk).map(|i| ((i as f32) * 0.0023).cos() * 0.2).collect();
+        let v: Vec<f32> = (0..b * t * hv * dv).map(|i| ((i as f32) * 0.029).sin() * 0.3).collect();
         let g: Vec<f32> = vec![0.92_f32; b * t * hv];
         let beta: Vec<f32> = vec![0.4_f32; b * t * hv];
-        let state_in: Vec<f32> = (0..n_total*dv*dk).map(|i| ((i as f32)*0.011).sin()*0.05).collect();
-        let (y_exp, _) = naive_gated_delta_chunk(&q,&k,&v,&g,&beta,&state_in,b,t,hv,hk,dv,dk);
-        let (y_act, _) = run_gated_delta_chunk(&q,&k,&v,&g,&beta,&state_in,Dt::F32,b,t,hv,hk,dv,dk);
-        let max_diff = y_act.iter().zip(&y_exp).map(|(a,e)|(a-e).abs()).fold(0.0_f32,f32::max);
+        let state_in: Vec<f32> =
+            (0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.05).collect();
+        let (y_exp, _) =
+            naive_gated_delta_chunk(&q, &k, &v, &g, &beta, &state_in, b, t, hv, hk, dv, dk);
+        let (y_act, _) =
+            run_gated_delta_chunk(&q, &k, &v, &g, &beta, &state_in, Dt::F32, b, t, hv, hk, dv, dk);
+        let max_diff = y_act.iter().zip(&y_exp).map(|(a, e)| (a - e).abs()).fold(0.0_f32, f32::max);
         assert!(max_diff < 2e-3, "Dk=256 T=8 y max |diff| = {max_diff:.2e}");
     }
 }

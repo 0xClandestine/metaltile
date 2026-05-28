@@ -143,18 +143,18 @@ pub fn mt_qmm_mma_mpp<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
 
+    use super::*;
+
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => vals.iter().flat_map(|v| v.to_le_bytes()).collect(),
-            DType::F16 =>
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
             DType::BF16 =>
                 vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
@@ -219,7 +219,9 @@ mod tests_support {
         let w: Vec<u32> = (0..n * k / 8)
             .map(|i| {
                 let mut v = 0u32;
-                for bit in 0..8u32 { v |= ((i as u32 + bit) & 0xF) << (bit * 4); }
+                for bit in 0..8u32 {
+                    v |= ((i as u32 + bit) & 0xF) << (bit * 4);
+                }
                 v
             })
             .collect();

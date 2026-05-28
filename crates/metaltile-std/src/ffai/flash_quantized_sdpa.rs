@@ -521,7 +521,6 @@ flash_quantized_sdpa_float_mask_kernel!(
 
 mod tests_support {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
@@ -529,32 +528,40 @@ mod tests_support {
         ir::KernelMode,
     };
 
+    use super::*;
+
     fn pack_dt(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
             DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => {
-                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect()
-            }
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
-    fn pack_u32(vals: &[u32]) -> Vec<u8> {
-        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
-    }
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
 
     fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
     fn f32_le(v: f32) -> Vec<u8> { v.to_le_bytes().to_vec() }
 
     fn xorshift(s: &mut u64) -> f32 {
-        *s ^= *s << 13; *s ^= *s >> 7; *s ^= *s << 17;
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
         (*s % 20_000) as f32 / 20_000.0 * 2.0 - 1.0
     }
 
     fn source_vec(n: usize, seed: u64, scale: f32) -> Vec<f32> {
         let mut s = seed;
-        (0..n).map(|_| { s ^= s << 13; s ^= s >> 7; s ^= s << 17; (s % 20_000) as f32 / 20_000.0 * scale - scale * 0.5 }).collect()
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                (s % 20_000) as f32 / 20_000.0 * scale - scale * 0.5
+            })
+            .collect()
     }
 
     fn round_dt(v: f32, dt: DType) -> f32 {
@@ -567,7 +574,13 @@ mod tests_support {
     }
 
     /// Affine per-group quantize. Returns (packed, scales, biases, deq).
-    fn quantize_kv(vals: &[f32], rows: usize, dim: usize, group_size: usize, bits: u32) -> (Vec<u32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+    fn quantize_kv(
+        vals: &[f32],
+        rows: usize,
+        dim: usize,
+        group_size: usize,
+        bits: u32,
+    ) -> (Vec<u32>, Vec<f32>, Vec<f32>, Vec<f32>) {
         let pack_factor = 32 / bits as usize;
         let n_groups = dim / group_size;
         let max_q = ((1u32 << bits) - 1) as f32;
@@ -595,7 +608,20 @@ mod tests_support {
     }
 
     /// Naive causal softmax attention oracle.
-    fn naive_sdpa(q: &[f32], k_deq: &[f32], v_deq: &[f32], sinks: &[f32], q_heads: usize, kv_heads: usize, tokens: usize, dim: usize, attn_scale: f32, has_sinks: bool, window: usize, num_q_heads: usize) -> Vec<f32> {
+    fn naive_sdpa(
+        q: &[f32],
+        k_deq: &[f32],
+        v_deq: &[f32],
+        sinks: &[f32],
+        q_heads: usize,
+        kv_heads: usize,
+        tokens: usize,
+        dim: usize,
+        attn_scale: f32,
+        has_sinks: bool,
+        window: usize,
+        num_q_heads: usize,
+    ) -> Vec<f32> {
         let repeat = q_heads / kv_heads;
         let causal = tokens - 1;
         let mut out = vec![0.0_f32; q_heads * dim];
@@ -604,21 +630,29 @@ mod tests_support {
             let mut kept: Vec<(usize, f32)> = Vec::new();
             for t in 0..tokens {
                 if window == 0 || t + window > causal {
-                    let dot: f32 = (0..dim).map(|d| attn_scale * q[qh * dim + d] * k_deq[(kvh * tokens + t) * dim + d]).sum();
+                    let dot: f32 = (0..dim)
+                        .map(|d| attn_scale * q[qh * dim + d] * k_deq[(kvh * tokens + t) * dim + d])
+                        .sum();
                     kept.push((t, dot));
                 }
             }
             let mut m = if has_sinks { sinks[qh % num_q_heads] } else { f32::NEG_INFINITY };
-            for &(_, s) in &kept { m = m.max(s); }
+            for &(_, s) in &kept {
+                m = m.max(s);
+            }
             let mut sum_w = if has_sinks { (sinks[qh % num_q_heads] - m).exp() } else { 0.0 };
             let mut acc = vec![0.0_f32; dim];
             for &(t, s) in &kept {
                 let w = (s - m).exp();
                 sum_w += w;
-                for d in 0..dim { acc[d] += w * v_deq[(kvh * tokens + t) * dim + d]; }
+                for d in 0..dim {
+                    acc[d] += w * v_deq[(kvh * tokens + t) * dim + d];
+                }
             }
             let inv = if sum_w > 0.0 { 1.0 / sum_w } else { 0.0 };
-            for d in 0..dim { out[qh * dim + d] = acc[d] * inv; }
+            for d in 0..dim {
+                out[qh * dim + d] = acc[d] * inv;
+            }
         }
         out
     }
@@ -642,7 +676,10 @@ mod tests_support {
         let sinks: Vec<f32> = (0..q_heads).map(|i| -0.4 + 0.3 * i as f32).collect();
         let (kp, ks, kb, k_deq) = quantize_kv(&k_raw, kv_heads * tokens, dim, group_size, bits);
         let (vp, vs, vb, v_deq) = quantize_kv(&v_raw, kv_heads * tokens, dim, group_size, bits);
-        let expected = naive_sdpa(&q, &k_deq, &v_deq, &sinks, q_heads, kv_heads, tokens, dim, attn_scale, has_sinks, window, q_heads);
+        let expected = naive_sdpa(
+            &q, &k_deq, &v_deq, &sinks, q_heads, kv_heads, tokens, dim, attn_scale, has_sinks,
+            window, q_heads,
+        );
         let repeat = q_heads / kv_heads;
         let out_size = q_heads * dim * if dt == DType::F32 { 4 } else { 2 };
         let mut kernel = kernel_ir_fn(dt);
@@ -655,7 +692,11 @@ mod tests_support {
             .input(TestBuffer::from_vec("v_packed", pack_u32(&vp), DType::U32))
             .input(TestBuffer::from_vec("v_scales", pack_dt(&vs, dt), dt))
             .input(TestBuffer::from_vec("v_biases", pack_dt(&vb, dt), dt))
-            .input(TestBuffer::from_vec("sinks", bytemuck::cast_slice::<f32, u8>(&sinks).to_vec(), DType::F32))
+            .input(TestBuffer::from_vec(
+                "sinks",
+                bytemuck::cast_slice::<f32, u8>(&sinks).to_vec(),
+                DType::F32,
+            ))
             .input(TestBuffer::from_vec("out", vec![0u8; out_size], dt))
             .input(TestBuffer::from_vec("dim", u32_le(dim as u32), DType::U32))
             .input(TestBuffer::from_vec("tokens", u32_le(tokens as u32), DType::U32))

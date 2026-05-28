@@ -68,23 +68,21 @@ pub fn mt_layer_norm<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
         ir::KernelMode,
     };
-    use metaltile::test_kernel;
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 => {
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect()
-            },
-            DType::BF16 => {
-                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect()
-            },
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
         }
     }
@@ -119,10 +117,8 @@ mod tests_support {
         let tpg = n / 4;
         let x: Vec<f32> =
             (0..rows * n).map(|i| dt_round(((i % 23) as f32 - 11.0) * 0.1, dt)).collect();
-        let w: Vec<f32> =
-            (0..n).map(|i| dt_round(1.0 + (i % 7) as f32 * 0.1, dt)).collect();
-        let b: Vec<f32> =
-            (0..n).map(|i| dt_round((i % 5) as f32 * 0.02 - 0.04, dt)).collect();
+        let w: Vec<f32> = (0..n).map(|i| dt_round(1.0 + (i % 7) as f32 * 0.1, dt)).collect();
+        let b: Vec<f32> = (0..n).map(|i| dt_round((i % 5) as f32 * 0.02 - 0.04, dt)).collect();
         let expected = cpu_layer_norm(&x, &w, &b, n, eps);
         let mut kernel = mt_layer_norm::kernel_ir_for(dt);
         kernel.mode = KernelMode::Reduction;
@@ -137,17 +133,11 @@ mod tests_support {
     }
 
     #[test_kernel(name = "mlx/layer_norm/n128_rows4_f32", dtypes = [f32], tol = 1e-4)]
-    fn test_layer_norm_n128_rows4_f32(dt: DType) -> TestSetup {
-        make_setup(128, 4, 1e-5, dt)
-    }
+    fn test_layer_norm_n128_rows4_f32(dt: DType) -> TestSetup { make_setup(128, 4, 1e-5, dt) }
 
     #[test_kernel(name = "mlx/layer_norm/n512_rows3_f32", dtypes = [f32], tol = 5e-4)]
-    fn test_layer_norm_n512_rows3_f32(dt: DType) -> TestSetup {
-        make_setup(512, 3, 1e-5, dt)
-    }
+    fn test_layer_norm_n512_rows3_f32(dt: DType) -> TestSetup { make_setup(512, 3, 1e-5, dt) }
 
     #[test_kernel(name = "mlx/layer_norm/n256_rows2_f16", dtypes = [f16], tol = 5e-2)]
-    fn test_layer_norm_n256_rows2_f16(dt: DType) -> TestSetup {
-        make_setup(256, 2, 1e-5, dt)
-    }
+    fn test_layer_norm_n256_rows2_f16(dt: DType) -> TestSetup { make_setup(256, 2, 1e-5, dt) }
 }

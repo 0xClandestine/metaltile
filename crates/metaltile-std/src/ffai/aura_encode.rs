@@ -75,7 +75,10 @@ mod tests_support {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
 
     fn pack_f32(vals: &[f32]) -> Vec<u8> { bytemuck::cast_slice::<f32, u8>(vals).to_vec() }
     fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
@@ -83,14 +86,21 @@ mod tests_support {
 
     fn identity_rotation(dim: usize) -> Vec<f32> {
         let mut r = vec![0.0_f32; dim * dim];
-        for d in 0..dim { r[d * dim + d] = 1.0; }
+        for d in 0..dim {
+            r[d * dim + d] = 1.0;
+        }
         r
     }
 
     /// CPU reference for aura_encode (identity rotation, int4 Lloyd-Max codebook).
     fn naive_aura_encode_f32(
-        input: &[f32], rotation: &[f32], boundaries: &[f32], codebook: &[f32],
-        rows: usize, dim: usize, bits: usize,
+        input: &[f32],
+        rotation: &[f32],
+        boundaries: &[f32],
+        codebook: &[f32],
+        rows: usize,
+        dim: usize,
+        bits: usize,
     ) -> (Vec<u32>, Vec<f32>) {
         let levels = 1usize << bits;
         let packed_width = (dim * bits).div_ceil(32);
@@ -113,7 +123,9 @@ mod tests_support {
             for d in 0..dim {
                 let mut idx = 0u32;
                 for &bound in boundaries.iter().take(levels - 1) {
-                    if y[d] > bound { idx += 1; }
+                    if y[d] > bound {
+                        idx += 1;
+                    }
                 }
                 indices[d] = idx;
             }
@@ -126,8 +138,7 @@ mod tests_support {
                 let spill_bits = (shift + bits) as i32 - 32;
                 if spill_bits > 0 {
                     let spill = spill_bits as u32;
-                    packed_out[r * packed_width + word_idx + 1] |=
-                        masked >> (bits as u32 - spill);
+                    packed_out[r * packed_width + word_idx + 1] |= masked >> (bits as u32 - spill);
                 }
             }
             let recon_sq: f32 = indices.iter().map(|&i| codebook[i as usize].powi(2)).sum();
@@ -151,8 +162,7 @@ mod tests_support {
         let boundaries: Vec<f32> =
             (0..levels - 1).map(|i| 0.5 * (codebook[i] + codebook[i + 1])).collect();
         let rotation = identity_rotation(dim);
-        let input: Vec<f32> =
-            (0..rows * dim).map(|i| (((i % 17) as f32 - 8.0) * 0.07)).collect();
+        let input: Vec<f32> = (0..rows * dim).map(|i| (((i % 17) as f32 - 8.0) * 0.07)).collect();
 
         let (expected_packed, expected_norms) =
             naive_aura_encode_f32(&input, &rotation, &boundaries, &codebook, rows, dim, bits);

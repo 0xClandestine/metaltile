@@ -1442,18 +1442,18 @@ mod tests {
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
 
+    use super::*;
+
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 =>
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
             DType::BF16 =>
                 vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
@@ -1522,11 +1522,7 @@ mod tests_support {
 
     /// Interleave K independent expected outputs `[n_q_heads, head_dim]` into
     /// `[n_q_heads, K, head_dim]` — the batched kernel's output layout.
-    fn interleave_expected(
-        expected: &[&[f32]],
-        n_q_heads: usize,
-        head_dim: usize,
-    ) -> Vec<f32> {
+    fn interleave_expected(expected: &[&[f32]], n_q_heads: usize, head_dim: usize) -> Vec<f32> {
         let k = expected.len();
         let mut out = Vec::with_capacity(n_q_heads * k * head_dim);
         for h in 0..n_q_heads {
@@ -1624,8 +1620,7 @@ mod tests_support {
         let exp_c = naive_sdpa(&q_c, &k, &v, n_q_heads, n_kv_heads, head_dim, n_kv, scale);
         let exp_d = naive_sdpa(&q_d, &k, &v, n_q_heads, n_kv_heads, head_dim, n_kv, scale);
         let q_batched = interleave_qs(&[&q_a, &q_b, &q_c, &q_d], n_q_heads, head_dim);
-        let expected =
-            interleave_expected(&[&exp_a, &exp_b, &exp_c, &exp_d], n_q_heads, head_dim);
+        let expected = interleave_expected(&[&exp_a, &exp_b, &exp_c, &exp_d], n_q_heads, head_dim);
         let mut kernel = sdpa_decode_batched_q4::kernel_ir_for(dt);
         kernel.mode = KernelMode::Reduction;
         TestSetup::new(kernel)
@@ -1662,8 +1657,7 @@ mod tests_support {
         let exp_c = naive_sdpa(&q_c, &k, &v, n_q_heads, n_kv_heads, head_dim, n_kv, scale);
         let exp_d = naive_sdpa(&q_d, &k, &v, n_q_heads, n_kv_heads, head_dim, n_kv, scale);
         let q_batched = interleave_qs(&[&q_a, &q_b, &q_c, &q_d], n_q_heads, head_dim);
-        let expected =
-            interleave_expected(&[&exp_a, &exp_b, &exp_c, &exp_d], n_q_heads, head_dim);
+        let expected = interleave_expected(&[&exp_a, &exp_b, &exp_c, &exp_d], n_q_heads, head_dim);
         let mut kernel = sdpa_decode_batched_q4::kernel_ir_for(dt);
         kernel.mode = KernelMode::Reduction;
         TestSetup::new(kernel)

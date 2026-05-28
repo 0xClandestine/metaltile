@@ -18,12 +18,13 @@ pub fn mt_random_hash(out: Tensor<u32>, #[constexpr] n: u32) {
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
-        bench::{TestSetup, TestBuffer},
+        bench::{TestBuffer, TestSetup},
     };
+
+    use super::*;
 
     fn cpu_random_hash(n: usize) -> Vec<u32> {
         (0..n)
@@ -37,9 +38,7 @@ mod tests_support {
             .collect()
     }
 
-    fn pack_u32(vals: &[u32]) -> Vec<u8> {
-        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
-    }
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
 
     #[test_kernel(name = "mlx/random/hash_oracle", dtypes = [u32], tol = 0.0)]
     fn test_random_hash_oracle(dt: DType) -> TestSetup {

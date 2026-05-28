@@ -528,37 +528,45 @@ pub fn mt_add_rms_norm<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
-        bench::{TestSetup, TestBuffer},
+        bench::{TestBuffer, TestSetup},
     };
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
     fn unpack(bytes: &[u8], dt: DType) -> Vec<f32> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<u8, f32>(bytes).to_vec(),
-            DType::F16  => bytes.chunks_exact(2).map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32()).collect(),
-            DType::BF16 => bytes.chunks_exact(2).map(|c| half::bf16::from_le_bytes([c[0], c[1]]).to_f32()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<u8, f32>(bytes).to_vec(),
+            DType::F16 => bytes
+                .chunks_exact(2)
+                .map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32())
+                .collect(),
+            DType::BF16 => bytes
+                .chunks_exact(2)
+                .map(|c| half::bf16::from_le_bytes([c[0], c[1]]).to_f32())
+                .collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
     fn round_dt(v: f32, dt: DType) -> f32 {
         match dt {
-            DType::F32  => v,
-            DType::F16  => half::f16::from_f32(v).to_f32(),
+            DType::F32 => v,
+            DType::F16 => half::f16::from_f32(v).to_f32(),
             DType::BF16 => half::bf16::from_f32(v).to_f32(),
-            _           => v,
+            _ => v,
         }
     }
 
@@ -683,7 +691,11 @@ mod tests_support {
         let expected: Vec<f32> = vals.iter().map(|&v| half::bf16::from_f32(v).to_f32()).collect();
         TestSetup::new(mt_cast_to_f32::kernel_ir_for(dt))
             .input(TestBuffer::from_vec("input", pack(&vals, dt), dt))
-            .expect(TestBuffer::from_vec("out", bytemuck::cast_slice::<f32, u8>(&expected).to_vec(), DType::F32))
+            .expect(TestBuffer::from_vec(
+                "out",
+                bytemuck::cast_slice::<f32, u8>(&expected).to_vec(),
+                DType::F32,
+            ))
             .grid_1d(n, 256)
     }
 
@@ -694,7 +706,11 @@ mod tests_support {
         let expected: Vec<f32> = vals.iter().map(|&v| half::f16::from_f32(v).to_f32()).collect();
         TestSetup::new(mt_cast_to_f32::kernel_ir_for(dt))
             .input(TestBuffer::from_vec("input", pack(&vals, dt), dt))
-            .expect(TestBuffer::from_vec("out", bytemuck::cast_slice::<f32, u8>(&expected).to_vec(), DType::F32))
+            .expect(TestBuffer::from_vec(
+                "out",
+                bytemuck::cast_slice::<f32, u8>(&expected).to_vec(),
+                DType::F32,
+            ))
             .grid_1d(n, 256)
     }
 
@@ -704,7 +720,11 @@ mod tests_support {
         let vals: Vec<f32> = (0..n).map(|i| (i as f32) * 0.5 - 64.0).collect();
         TestSetup::new(mt_cast_to_f32::kernel_ir_for(dt))
             .input(TestBuffer::from_vec("input", pack(&vals, dt), dt))
-            .expect(TestBuffer::from_vec("out", bytemuck::cast_slice::<f32, u8>(&vals).to_vec(), DType::F32))
+            .expect(TestBuffer::from_vec(
+                "out",
+                bytemuck::cast_slice::<f32, u8>(&vals).to_vec(),
+                DType::F32,
+            ))
             .grid_1d(n, 256)
     }
 
@@ -713,11 +733,15 @@ mod tests_support {
     fn sigmoid_fma_oracle(gate: f32, value: &[f32], base: &[f32], dt: DType) -> Vec<f32> {
         let g_q = round_dt(gate, dt);
         let s = 1.0 / (1.0 + (-g_q).exp());
-        value.iter().zip(base.iter()).map(|(&v, &b)| {
-            let vq = round_dt(v, dt);
-            let bq = round_dt(b, dt);
-            round_dt(bq + s * vq, dt)
-        }).collect()
+        value
+            .iter()
+            .zip(base.iter())
+            .map(|(&v, &b)| {
+                let vq = round_dt(v, dt);
+                let bq = round_dt(b, dt);
+                round_dt(bq + s * vq, dt)
+            })
+            .collect()
     }
 
     fn ramp(n: usize, modulus: usize, offset: f32) -> Vec<f32> {
@@ -729,13 +753,13 @@ mod tests_support {
         let n = 2048usize;
         let gate = 0.5f32;
         let value: Vec<f32> = ramp(n, 11, 5.0).iter().map(|v| 0.2 * v - 1.0).collect();
-        let base:  Vec<f32> = ramp(n, 17, 8.0).iter().map(|v| 0.1 * v).collect();
+        let base: Vec<f32> = ramp(n, 17, 8.0).iter().map(|v| 0.1 * v).collect();
         let expected = sigmoid_fma_oracle(gate, &value, &base, dt);
         TestSetup::new(mt_sigmoid_scalar_fma::kernel_ir_for(dt))
-            .input(TestBuffer::from_vec("gate",  pack(&[gate, 0.0], dt), dt))
+            .input(TestBuffer::from_vec("gate", pack(&[gate, 0.0], dt), dt))
             .input(TestBuffer::from_vec("value", pack(&value, dt), dt))
-            .input(TestBuffer::from_vec("base",  pack(&base, dt), dt))
-            .expect(TestBuffer::from_vec("out",  pack(&expected, dt), dt))
+            .input(TestBuffer::from_vec("base", pack(&base, dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
             .grid_1d(n, 256)
     }
 
@@ -744,13 +768,13 @@ mod tests_support {
         let n = 2048usize;
         let gate = 0.5f32;
         let value: Vec<f32> = ramp(n, 11, 5.0).iter().map(|v| 0.2 * v - 1.0).collect();
-        let base:  Vec<f32> = ramp(n, 17, 8.0).iter().map(|v| 0.1 * v).collect();
+        let base: Vec<f32> = ramp(n, 17, 8.0).iter().map(|v| 0.1 * v).collect();
         let expected = sigmoid_fma_oracle(gate, &value, &base, dt);
         TestSetup::new(mt_sigmoid_scalar_fma::kernel_ir_for(dt))
-            .input(TestBuffer::from_vec("gate",  pack(&[gate, 0.0], dt), dt))
+            .input(TestBuffer::from_vec("gate", pack(&[gate, 0.0], dt), dt))
             .input(TestBuffer::from_vec("value", pack(&value, dt), dt))
-            .input(TestBuffer::from_vec("base",  pack(&base, dt), dt))
-            .expect(TestBuffer::from_vec("out",  pack(&expected, dt), dt))
+            .input(TestBuffer::from_vec("base", pack(&base, dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
             .grid_1d(n, 256)
     }
 
@@ -759,13 +783,13 @@ mod tests_support {
         let n = 2048usize;
         let gate = 0.5f32;
         let value: Vec<f32> = ramp(n, 11, 5.0).iter().map(|v| 0.2 * v - 1.0).collect();
-        let base:  Vec<f32> = ramp(n, 17, 8.0).iter().map(|v| 0.1 * v).collect();
+        let base: Vec<f32> = ramp(n, 17, 8.0).iter().map(|v| 0.1 * v).collect();
         let expected = sigmoid_fma_oracle(gate, &value, &base, dt);
         TestSetup::new(mt_sigmoid_scalar_fma::kernel_ir_for(dt))
-            .input(TestBuffer::from_vec("gate",  pack(&[gate, 0.0], dt), dt))
+            .input(TestBuffer::from_vec("gate", pack(&[gate, 0.0], dt), dt))
             .input(TestBuffer::from_vec("value", pack(&value, dt), dt))
-            .input(TestBuffer::from_vec("base",  pack(&base, dt), dt))
-            .expect(TestBuffer::from_vec("out",  pack(&expected, dt), dt))
+            .input(TestBuffer::from_vec("base", pack(&base, dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
             .grid_1d(n, 256)
     }
 }

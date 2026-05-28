@@ -26,17 +26,21 @@ pub fn mt_select<T>(cond: Tensor<u8>, on_true: Tensor<T>, on_false: Tensor<T>, o
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         use DType::*;
         match dt {
-            F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
             BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _    => panic!("unsupported dtype {dt:?}"),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
@@ -104,10 +108,8 @@ mod tests_support {
     #[test_kernel(name = "mlx/select/mixed_f16", dtypes = [f16], tol = 1e-3)]
     fn test_select_mixed_f16(dt: DType) -> TestSetup {
         let n = 512usize;
-        let on_true: Vec<f32> =
-            (0..n).map(|i| round((i % 13) as f32 * 0.1 - 0.5, dt)).collect();
-        let on_false: Vec<f32> =
-            (0..n).map(|i| round((i % 11) as f32 * 0.2 - 1.0, dt)).collect();
+        let on_true: Vec<f32> = (0..n).map(|i| round((i % 13) as f32 * 0.1 - 0.5, dt)).collect();
+        let on_false: Vec<f32> = (0..n).map(|i| round((i % 11) as f32 * 0.2 - 1.0, dt)).collect();
         let cond: Vec<u8> = (0..n).map(|i| (i % 3 != 0) as u8).collect();
         let expected = cpu_select(&on_true, &on_false, &cond);
         TestSetup::new(mt_select::kernel_ir_for(dt))
@@ -121,10 +123,8 @@ mod tests_support {
     #[test_kernel(name = "mlx/select/mixed_bf16", dtypes = [bf16], tol = 1e-2)]
     fn test_select_mixed_bf16(dt: DType) -> TestSetup {
         let n = 256usize;
-        let on_true: Vec<f32> =
-            (0..n).map(|i| round((i % 7) as f32 * 0.3 - 1.0, dt)).collect();
-        let on_false: Vec<f32> =
-            (0..n).map(|i| round((i % 9) as f32 * 0.2 - 0.8, dt)).collect();
+        let on_true: Vec<f32> = (0..n).map(|i| round((i % 7) as f32 * 0.3 - 1.0, dt)).collect();
+        let on_false: Vec<f32> = (0..n).map(|i| round((i % 9) as f32 * 0.2 - 0.8, dt)).collect();
         let cond: Vec<u8> = (0..n).map(|i| (i % 4 < 2) as u8).collect();
         let expected = cpu_select(&on_true, &on_false, &cond);
         TestSetup::new(mt_select::kernel_ir_for(dt))

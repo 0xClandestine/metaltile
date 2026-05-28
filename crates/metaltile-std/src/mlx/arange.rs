@@ -24,19 +24,21 @@ pub fn mt_arange<T>(out: Tensor<T>, start: Tensor<T>, step: Tensor<T>, #[constex
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
-        bench::{TestSetup, TestBuffer},
+        bench::{TestBuffer, TestSetup},
     };
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
@@ -50,8 +52,8 @@ mod tests_support {
         let expected = cpu_arange(start, step, n);
         TestSetup::new(mt_arange::kernel_ir_for(dt))
             .input(TestBuffer::from_vec("start", pack(&[start], dt), dt))
-            .input(TestBuffer::from_vec("step",  pack(&[step], dt), dt))
-            .expect(TestBuffer::from_vec("out",  pack(&expected, dt), dt))
+            .input(TestBuffer::from_vec("step", pack(&[step], dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
             .constexpr("n", n as u32)
             .grid_1d(n, 256)
     }
@@ -62,8 +64,8 @@ mod tests_support {
         let expected = cpu_arange(start, step, n);
         TestSetup::new(mt_arange::kernel_ir_for(dt))
             .input(TestBuffer::from_vec("start", pack(&[start], dt), dt))
-            .input(TestBuffer::from_vec("step",  pack(&[step], dt), dt))
-            .expect(TestBuffer::from_vec("out",  pack(&expected, dt), dt))
+            .input(TestBuffer::from_vec("step", pack(&[step], dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
             .constexpr("n", n as u32)
             .grid_1d(n, 256)
     }
@@ -74,8 +76,8 @@ mod tests_support {
         let expected = cpu_arange(start, step, n);
         TestSetup::new(mt_arange::kernel_ir_for(dt))
             .input(TestBuffer::from_vec("start", pack(&[start], dt), dt))
-            .input(TestBuffer::from_vec("step",  pack(&[step], dt), dt))
-            .expect(TestBuffer::from_vec("out",  pack(&expected, dt), dt))
+            .input(TestBuffer::from_vec("step", pack(&[step], dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
             .constexpr("n", n as u32)
             .grid_1d(n, 256)
     }

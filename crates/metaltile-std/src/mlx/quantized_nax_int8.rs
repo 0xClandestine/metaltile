@@ -195,11 +195,25 @@ mod tests {
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
 
-    fn cpu_qmm_int8_reference(w: &[u32], scales: &[f32], biases: &[f32], x: &[f32], m: usize, n: usize, k: usize, gs_per_row: usize, group_size: usize) -> Vec<f32> {
+    use super::*;
+
+    fn cpu_qmm_int8_reference(
+        w: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        x: &[f32],
+        m: usize,
+        n: usize,
+        k: usize,
+        gs_per_row: usize,
+        group_size: usize,
+    ) -> Vec<f32> {
         let mut out = vec![0.0f32; m * n];
         let packs_per_row = k / 4;
         for m_row in 0..m {
@@ -211,7 +225,9 @@ mod tests_support {
                         let byte_val = ((packed >> (b * 8)) & 0xFF) as f32;
                         let k_idx = p * 4 + b;
                         let g = k_idx / group_size;
-                        acc += (byte_val * scales[n_col * gs_per_row + g] + biases[n_col * gs_per_row + g]) * x[m_row * k + k_idx];
+                        acc += (byte_val * scales[n_col * gs_per_row + g]
+                            + biases[n_col * gs_per_row + g])
+                            * x[m_row * k + k_idx];
                     }
                 }
                 out[m_row * n + n_col] = acc;
@@ -220,10 +236,22 @@ mod tests_support {
         out
     }
 
-    fn build_int8_quant_inputs(m: usize, n: usize, k: usize, gs_per_row: usize) -> (Vec<u32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+    fn build_int8_quant_inputs(
+        m: usize,
+        n: usize,
+        k: usize,
+        gs_per_row: usize,
+    ) -> (Vec<u32>, Vec<f32>, Vec<f32>, Vec<f32>) {
         let packs_per_row = k / 4;
         let w: Vec<u32> = (0..n * packs_per_row)
-            .map(|i| { let mut v = 0u32; for b in 0..4u32 { let code = (i as u32 * 4 + b) % 256; v |= code << (b * 8); } v })
+            .map(|i| {
+                let mut v = 0u32;
+                for b in 0..4u32 {
+                    let code = (i as u32 * 4 + b) % 256;
+                    v |= code << (b * 8);
+                }
+                v
+            })
             .collect();
         let scales: Vec<f32> = (0..n * gs_per_row).map(|i| 0.01 + (i as f32) * 0.0001).collect();
         let biases: Vec<f32> = (0..n * gs_per_row).map(|i| (i as f32) * 0.00001).collect();
@@ -235,9 +263,13 @@ mod tests_support {
     fn pack_u32_bytes(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
 
     fn cosine(a: &[f32], b: &[f32]) -> f32 {
-        let mut dot = 0.0f64; let mut na = 0.0f64; let mut nb = 0.0f64;
+        let mut dot = 0.0f64;
+        let mut na = 0.0f64;
+        let mut nb = 0.0f64;
         for (x, y) in a.iter().zip(b.iter()) {
-            dot += *x as f64 * *y as f64; na += (*x as f64) * (*x as f64); nb += (*y as f64) * (*y as f64);
+            dot += *x as f64 * *y as f64;
+            na += (*x as f64) * (*x as f64);
+            nb += (*y as f64) * (*y as f64);
         }
         (dot / (na.sqrt() * nb.sqrt()).max(1e-30)) as f32
     }
@@ -247,7 +279,8 @@ mod tests_support {
         let (m, n, k, group_size) = (32usize, 32usize, 64usize, 32usize);
         let gs_per_row = k / group_size;
         let (w, scales, biases, x) = build_int8_quant_inputs(m, n, k, gs_per_row);
-        let expected = cpu_qmm_int8_reference(&w, &scales, &biases, &x, m, n, k, gs_per_row, group_size);
+        let expected =
+            cpu_qmm_int8_reference(&w, &scales, &biases, &x, m, n, k, gs_per_row, group_size);
         let kernel = mt_qmm_nax_int8::kernel_ir_for(dt);
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("w", pack_u32_bytes(&w), DType::U32))
@@ -257,7 +290,11 @@ mod tests_support {
             .input(TestBuffer::from_vec("out", vec![0u8; m * n * 4], dt))
             .input(TestBuffer::from_vec("k", (k as u32).to_le_bytes().to_vec(), DType::U32))
             .input(TestBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
-            .input(TestBuffer::from_vec("gs_per_row", (gs_per_row as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec(
+                "gs_per_row",
+                (gs_per_row as u32).to_le_bytes().to_vec(),
+                DType::U32,
+            ))
             .expect(TestBuffer::from_vec("out", pack_f32(&expected), dt))
             .grid_3d(n / 32, m / 32, 1, [128, 1, 1])
     }

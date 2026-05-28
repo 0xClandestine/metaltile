@@ -136,33 +136,52 @@ pub fn mt_argmin<T>(inp: Tensor<T>, out: Tensor<u32>, #[constexpr] n: u32) {
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
     fn cpu_argmax(vals: &[f32]) -> u32 {
-        let mut best_val = f32::NEG_INFINITY; let mut best_idx = 0u32;
-        for (i, &v) in vals.iter().enumerate() { if v > best_val { best_val = v; best_idx = i as u32; } }
+        let mut best_val = f32::NEG_INFINITY;
+        let mut best_idx = 0u32;
+        for (i, &v) in vals.iter().enumerate() {
+            if v > best_val {
+                best_val = v;
+                best_idx = i as u32;
+            }
+        }
         best_idx
     }
 
     fn cpu_argmin(vals: &[f32]) -> u32 {
-        let mut best_val = f32::INFINITY; let mut best_idx = 0u32;
-        for (i, &v) in vals.iter().enumerate() { if v < best_val { best_val = v; best_idx = i as u32; } }
+        let mut best_val = f32::INFINITY;
+        let mut best_idx = 0u32;
+        for (i, &v) in vals.iter().enumerate() {
+            if v < best_val {
+                best_val = v;
+                best_idx = i as u32;
+            }
+        }
         best_idx
     }
 
     fn make_argreduce_setup(
-        vals: Vec<f32>, expected_idx: u32, dt: DType,
+        vals: Vec<f32>,
+        expected_idx: u32,
+        dt: DType,
         kernel_ir_for: fn(DType) -> metaltile_core::ir::Kernel,
     ) -> TestSetup {
         let n = vals.len();
@@ -171,7 +190,7 @@ mod tests_support {
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("inp", pack(&vals, dt), dt))
             .input(TestBuffer::from_vec("out", vec![0u8; 4], DType::U32))
-            .input(TestBuffer::from_vec("n",   (n as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
             .expect(TestBuffer::from_vec("out", expected_idx.to_le_bytes().to_vec(), DType::U32))
             .grid_3d(1, 1, 1, [256, 1, 1])
     }

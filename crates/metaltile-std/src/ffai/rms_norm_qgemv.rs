@@ -663,37 +663,44 @@ pub fn ffai_rms_norm_qgemv_int8_fast<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
     use metaltile_macros::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
-    fn pack_u32(vals: &[u32]) -> Vec<u8> {
-        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
-    }
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
 
     fn round(v: f32, dt: DType) -> f32 {
         match dt {
-            DType::F16  => half::f16::from_f32(v).to_f32(),
+            DType::F16 => half::f16::from_f32(v).to_f32(),
             DType::BF16 => half::bf16::from_f32(v).to_f32(),
-            _           => v,
+            _ => v,
         }
     }
 
     fn source(n: usize, seed: u64, scale: f32, off: f32) -> Vec<f32> {
         let mut s = seed;
-        (0..n).map(|_| {
-            s ^= s << 13; s ^= s >> 7; s ^= s << 17;
-            ((s % 20_000) as f32 / 20_000.0 - 0.5) * scale + off
-        }).collect()
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                ((s % 20_000) as f32 / 20_000.0 - 0.5) * scale + off
+            })
+            .collect()
     }
 
     /// Affine per-group int4 quantize of one weight row (8 values per u32).
@@ -745,53 +752,77 @@ mod tests_support {
     }
 
     fn naive_rms_norm_qgemv_int4(
-        weight: &[u32], scales: &[f32], biases: &[f32],
-        x: &[f32], norm_weight: &[f32],
-        in_dim: usize, group_size: usize, out_dim: usize, eps: f32,
+        weight: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        x: &[f32],
+        norm_weight: &[f32],
+        in_dim: usize,
+        group_size: usize,
+        out_dim: usize,
+        eps: f32,
     ) -> Vec<f32> {
         let ssq: f32 = x.iter().map(|&v| v * v).sum();
         let inv_rms = 1.0 / (ssq / in_dim as f32 + eps).sqrt();
         let u32_per_row = in_dim / 8;
         let n_groups = in_dim / group_size;
-        (0..out_dim).map(|row| {
-            let rw = &weight[row * u32_per_row..(row + 1) * u32_per_row];
-            let rs = &scales[row * n_groups..(row + 1) * n_groups];
-            let rb = &biases[row * n_groups..(row + 1) * n_groups];
-            let mut acc = 0.0_f32;
-            for d in 0..in_dim {
-                let q = (rw[d / 8] >> ((d % 8) * 4)) & 0xf;
-                acc += (q as f32 * rs[d / group_size] + rb[d / group_size])
-                    * x[d] * norm_weight[d] * inv_rms;
-            }
-            acc
-        }).collect()
+        (0..out_dim)
+            .map(|row| {
+                let rw = &weight[row * u32_per_row..(row + 1) * u32_per_row];
+                let rs = &scales[row * n_groups..(row + 1) * n_groups];
+                let rb = &biases[row * n_groups..(row + 1) * n_groups];
+                let mut acc = 0.0_f32;
+                for d in 0..in_dim {
+                    let q = (rw[d / 8] >> ((d % 8) * 4)) & 0xf;
+                    acc += (q as f32 * rs[d / group_size] + rb[d / group_size])
+                        * x[d]
+                        * norm_weight[d]
+                        * inv_rms;
+                }
+                acc
+            })
+            .collect()
     }
 
     fn naive_rms_norm_qgemv_int8(
-        weight: &[u32], scales: &[f32], biases: &[f32],
-        x: &[f32], norm_weight: &[f32],
-        in_dim: usize, group_size: usize, out_dim: usize, eps: f32,
+        weight: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        x: &[f32],
+        norm_weight: &[f32],
+        in_dim: usize,
+        group_size: usize,
+        out_dim: usize,
+        eps: f32,
     ) -> Vec<f32> {
         let ssq: f32 = x.iter().map(|&v| v * v).sum();
         let inv_rms = 1.0 / (ssq / in_dim as f32 + eps).sqrt();
         let packs_per_row = in_dim / 4;
         let n_groups = in_dim / group_size;
-        (0..out_dim).map(|row| {
-            let rw = &weight[row * packs_per_row..(row + 1) * packs_per_row];
-            let rs = &scales[row * n_groups..(row + 1) * n_groups];
-            let rb = &biases[row * n_groups..(row + 1) * n_groups];
-            let mut acc = 0.0_f32;
-            for d in 0..in_dim {
-                let q = (rw[d / 4] >> ((d % 4) * 8)) & 0xFF;
-                acc += (q as f32 * rs[d / group_size] + rb[d / group_size])
-                    * x[d] * norm_weight[d] * inv_rms;
-            }
-            acc
-        }).collect()
+        (0..out_dim)
+            .map(|row| {
+                let rw = &weight[row * packs_per_row..(row + 1) * packs_per_row];
+                let rs = &scales[row * n_groups..(row + 1) * n_groups];
+                let rb = &biases[row * n_groups..(row + 1) * n_groups];
+                let mut acc = 0.0_f32;
+                for d in 0..in_dim {
+                    let q = (rw[d / 4] >> ((d % 4) * 8)) & 0xFF;
+                    acc += (q as f32 * rs[d / group_size] + rb[d / group_size])
+                        * x[d]
+                        * norm_weight[d]
+                        * inv_rms;
+                }
+                acc
+            })
+            .collect()
     }
 
     fn build_qgemv_buffers(
-        in_dim: usize, group_size: usize, out_dim: usize, dt: DType, eps: f32,
+        in_dim: usize,
+        group_size: usize,
+        out_dim: usize,
+        dt: DType,
+        eps: f32,
     ) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<f32>) {
         let x: Vec<f32> = source(in_dim, 0xA1, 2.0, 0.1).iter().map(|&v| round(v, dt)).collect();
         let nw: Vec<f32> = source(in_dim, 0xB2, 0.4, 1.0).iter().map(|&v| round(v, dt)).collect();
@@ -802,17 +833,31 @@ mod tests_support {
         let mut scales = Vec::with_capacity(n_groups * out_dim);
         let mut biases = Vec::with_capacity(n_groups * out_dim);
         for row in 0..out_dim {
-            let (w, s, b) = quantize_int4_row(&w_rows[row * in_dim..(row + 1) * in_dim], group_size);
+            let (w, s, b) =
+                quantize_int4_row(&w_rows[row * in_dim..(row + 1) * in_dim], group_size);
             weight.extend(w);
             scales.extend(s.iter().map(|&v| round(v, dt)));
             biases.extend(b.iter().map(|&v| round(v, dt)));
         }
-        let expected = naive_rms_norm_qgemv_int4(&weight, &scales, &biases, &x, &nw, in_dim, group_size, out_dim, eps);
-        (pack(&x, dt), pack(&nw, dt), pack_u32(&weight), pack(&scales, dt), pack(&biases, dt), expected)
+        let expected = naive_rms_norm_qgemv_int4(
+            &weight, &scales, &biases, &x, &nw, in_dim, group_size, out_dim, eps,
+        );
+        (
+            pack(&x, dt),
+            pack(&nw, dt),
+            pack_u32(&weight),
+            pack(&scales, dt),
+            pack(&biases, dt),
+            expected,
+        )
     }
 
     fn build_int8_buffers(
-        in_dim: usize, group_size: usize, out_dim: usize, dt: DType, eps: f32,
+        in_dim: usize,
+        group_size: usize,
+        out_dim: usize,
+        dt: DType,
+        eps: f32,
     ) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<f32>) {
         let x: Vec<f32> = source(in_dim, 0xA1, 2.0, 0.1).iter().map(|&v| round(v, dt)).collect();
         let nw: Vec<f32> = source(in_dim, 0xB2, 0.4, 1.0).iter().map(|&v| round(v, dt)).collect();
@@ -823,30 +868,54 @@ mod tests_support {
         let mut scales = Vec::with_capacity(n_groups * out_dim);
         let mut biases = Vec::with_capacity(n_groups * out_dim);
         for row in 0..out_dim {
-            let (w, s, b) = quantize_int8_row(&w_rows[row * in_dim..(row + 1) * in_dim], group_size);
+            let (w, s, b) =
+                quantize_int8_row(&w_rows[row * in_dim..(row + 1) * in_dim], group_size);
             weight.extend(w);
             scales.extend(s.iter().map(|&v| round(v, dt)));
             biases.extend(b.iter().map(|&v| round(v, dt)));
         }
-        let expected = naive_rms_norm_qgemv_int8(&weight, &scales, &biases, &x, &nw, in_dim, group_size, out_dim, eps);
-        (pack(&x, dt), pack(&nw, dt), pack_u32(&weight), pack(&scales, dt), pack(&biases, dt), expected)
+        let expected = naive_rms_norm_qgemv_int8(
+            &weight, &scales, &biases, &x, &nw, in_dim, group_size, out_dim, eps,
+        );
+        (
+            pack(&x, dt),
+            pack(&nw, dt),
+            pack_u32(&weight),
+            pack(&scales, dt),
+            pack(&biases, dt),
+            expected,
+        )
     }
 
     fn common_inputs(
-        ts: TestSetup, x_b: Vec<u8>, nw_b: Vec<u8>, w_b: Vec<u8>,
-        s_b: Vec<u8>, bi_b: Vec<u8>, expected: Vec<f32>,
-        dt: DType, in_dim: usize, group_size: usize,
+        ts: TestSetup,
+        x_b: Vec<u8>,
+        nw_b: Vec<u8>,
+        w_b: Vec<u8>,
+        s_b: Vec<u8>,
+        bi_b: Vec<u8>,
+        expected: Vec<f32>,
+        dt: DType,
+        in_dim: usize,
+        group_size: usize,
     ) -> TestSetup {
         let eps = 1e-5_f32;
-        ts
-            .input(TestBuffer::from_vec("x", x_b, dt))
+        ts.input(TestBuffer::from_vec("x", x_b, dt))
             .input(TestBuffer::from_vec("norm_weight", nw_b, dt))
             .input(TestBuffer::from_vec("weight", w_b, DType::U32))
             .input(TestBuffer::from_vec("scales", s_b, dt))
             .input(TestBuffer::from_vec("biases", bi_b, dt))
             .input(TestBuffer::from_vec("eps_buf", eps.to_le_bytes().to_vec(), DType::F32))
-            .input(TestBuffer::from_vec("in_dim", (in_dim as u32).to_le_bytes().to_vec(), DType::U32))
-            .input(TestBuffer::from_vec("group_size", (group_size as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec(
+                "in_dim",
+                (in_dim as u32).to_le_bytes().to_vec(),
+                DType::U32,
+            ))
+            .input(TestBuffer::from_vec(
+                "group_size",
+                (group_size as u32).to_le_bytes().to_vec(),
+                DType::U32,
+            ))
             .expect(TestBuffer::from_vec("output", pack(&expected, dt), dt))
     }
 
@@ -855,36 +924,63 @@ mod tests_support {
     #[test_kernel(name = "rms_norm_qgemv/f32_gs64", dtypes = [f32], tol = 5e-3)]
     fn test_rms_norm_qgemv_f32_gs64(dt: DType) -> TestSetup {
         let (in_dim, group_size, out_dim, eps) = (256, 64, 8, 1e-5_f32);
-        let (x_b, nw_b, w_b, s_b, bi_b, expected) = build_qgemv_buffers(in_dim, group_size, out_dim, dt, eps);
+        let (x_b, nw_b, w_b, s_b, bi_b, expected) =
+            build_qgemv_buffers(in_dim, group_size, out_dim, dt, eps);
         let mut k = ffai_rms_norm_qgemv::kernel_ir_for(dt);
         k.mode = metaltile_core::ir::KernelMode::Reduction;
         common_inputs(
             TestSetup::new(k).grid_3d(out_dim as u32, 1, 1, [128, 1, 1]),
-            x_b, nw_b, w_b, s_b, bi_b, expected, dt, in_dim, group_size,
+            x_b,
+            nw_b,
+            w_b,
+            s_b,
+            bi_b,
+            expected,
+            dt,
+            in_dim,
+            group_size,
         )
     }
 
     #[test_kernel(name = "rms_norm_qgemv/f16_gs64", dtypes = [f16], tol = 2e-2)]
     fn test_rms_norm_qgemv_f16_gs64(dt: DType) -> TestSetup {
         let (in_dim, group_size, out_dim, eps) = (256, 64, 8, 1e-5_f32);
-        let (x_b, nw_b, w_b, s_b, bi_b, expected) = build_qgemv_buffers(in_dim, group_size, out_dim, dt, eps);
+        let (x_b, nw_b, w_b, s_b, bi_b, expected) =
+            build_qgemv_buffers(in_dim, group_size, out_dim, dt, eps);
         let mut k = ffai_rms_norm_qgemv::kernel_ir_for(dt);
         k.mode = metaltile_core::ir::KernelMode::Reduction;
         common_inputs(
             TestSetup::new(k).grid_3d(out_dim as u32, 1, 1, [128, 1, 1]),
-            x_b, nw_b, w_b, s_b, bi_b, expected, dt, in_dim, group_size,
+            x_b,
+            nw_b,
+            w_b,
+            s_b,
+            bi_b,
+            expected,
+            dt,
+            in_dim,
+            group_size,
         )
     }
 
     #[test_kernel(name = "rms_norm_qgemv/bf16_gs64", dtypes = [bf16], tol = 5e-2)]
     fn test_rms_norm_qgemv_bf16_gs64(dt: DType) -> TestSetup {
         let (in_dim, group_size, out_dim, eps) = (256, 64, 8, 1e-5_f32);
-        let (x_b, nw_b, w_b, s_b, bi_b, expected) = build_qgemv_buffers(in_dim, group_size, out_dim, dt, eps);
+        let (x_b, nw_b, w_b, s_b, bi_b, expected) =
+            build_qgemv_buffers(in_dim, group_size, out_dim, dt, eps);
         let mut k = ffai_rms_norm_qgemv::kernel_ir_for(dt);
         k.mode = metaltile_core::ir::KernelMode::Reduction;
         common_inputs(
             TestSetup::new(k).grid_3d(out_dim as u32, 1, 1, [128, 1, 1]),
-            x_b, nw_b, w_b, s_b, bi_b, expected, dt, in_dim, group_size,
+            x_b,
+            nw_b,
+            w_b,
+            s_b,
+            bi_b,
+            expected,
+            dt,
+            in_dim,
+            group_size,
         )
     }
 
@@ -893,36 +989,63 @@ mod tests_support {
     #[test_kernel(name = "rms_norm_qgemv_fast/f32_gs64", dtypes = [f32], tol = 5e-3)]
     fn test_rms_norm_qgemv_fast_f32(dt: DType) -> TestSetup {
         let (in_dim, group_size, out_dim, eps) = (512, 64, 16, 1e-5_f32);
-        let (x_b, nw_b, w_b, s_b, bi_b, expected) = build_qgemv_buffers(in_dim, group_size, out_dim, dt, eps);
+        let (x_b, nw_b, w_b, s_b, bi_b, expected) =
+            build_qgemv_buffers(in_dim, group_size, out_dim, dt, eps);
         let mut k = ffai_rms_norm_qgemv_fast::kernel_ir_for(dt);
         k.mode = metaltile_core::ir::KernelMode::Reduction;
         common_inputs(
             TestSetup::new(k).grid_3d((out_dim / 8) as u32, 1, 1, [64, 1, 1]),
-            x_b, nw_b, w_b, s_b, bi_b, expected, dt, in_dim, group_size,
+            x_b,
+            nw_b,
+            w_b,
+            s_b,
+            bi_b,
+            expected,
+            dt,
+            in_dim,
+            group_size,
         )
     }
 
     #[test_kernel(name = "rms_norm_qgemv_fast/f16_gs64", dtypes = [f16], tol = 2e-2)]
     fn test_rms_norm_qgemv_fast_f16(dt: DType) -> TestSetup {
         let (in_dim, group_size, out_dim, eps) = (512, 64, 16, 1e-5_f32);
-        let (x_b, nw_b, w_b, s_b, bi_b, expected) = build_qgemv_buffers(in_dim, group_size, out_dim, dt, eps);
+        let (x_b, nw_b, w_b, s_b, bi_b, expected) =
+            build_qgemv_buffers(in_dim, group_size, out_dim, dt, eps);
         let mut k = ffai_rms_norm_qgemv_fast::kernel_ir_for(dt);
         k.mode = metaltile_core::ir::KernelMode::Reduction;
         common_inputs(
             TestSetup::new(k).grid_3d((out_dim / 8) as u32, 1, 1, [64, 1, 1]),
-            x_b, nw_b, w_b, s_b, bi_b, expected, dt, in_dim, group_size,
+            x_b,
+            nw_b,
+            w_b,
+            s_b,
+            bi_b,
+            expected,
+            dt,
+            in_dim,
+            group_size,
         )
     }
 
     #[test_kernel(name = "rms_norm_qgemv_fast/bf16_gs64", dtypes = [bf16], tol = 5e-2)]
     fn test_rms_norm_qgemv_fast_bf16(dt: DType) -> TestSetup {
         let (in_dim, group_size, out_dim, eps) = (512, 64, 16, 1e-5_f32);
-        let (x_b, nw_b, w_b, s_b, bi_b, expected) = build_qgemv_buffers(in_dim, group_size, out_dim, dt, eps);
+        let (x_b, nw_b, w_b, s_b, bi_b, expected) =
+            build_qgemv_buffers(in_dim, group_size, out_dim, dt, eps);
         let mut k = ffai_rms_norm_qgemv_fast::kernel_ir_for(dt);
         k.mode = metaltile_core::ir::KernelMode::Reduction;
         common_inputs(
             TestSetup::new(k).grid_3d((out_dim / 8) as u32, 1, 1, [64, 1, 1]),
-            x_b, nw_b, w_b, s_b, bi_b, expected, dt, in_dim, group_size,
+            x_b,
+            nw_b,
+            w_b,
+            s_b,
+            bi_b,
+            expected,
+            dt,
+            in_dim,
+            group_size,
         )
     }
 
@@ -931,36 +1054,63 @@ mod tests_support {
     #[test_kernel(name = "rms_norm_qgemv_int8_fast/f32_small", dtypes = [f32], tol = 5e-3)]
     fn test_rms_norm_qgemv_int8_fast_f32_small(dt: DType) -> TestSetup {
         let (in_dim, group_size, out_dim, eps) = (512, 64, 8, 1e-5_f32);
-        let (x_b, nw_b, w_b, s_b, bi_b, expected) = build_int8_buffers(in_dim, group_size, out_dim, dt, eps);
+        let (x_b, nw_b, w_b, s_b, bi_b, expected) =
+            build_int8_buffers(in_dim, group_size, out_dim, dt, eps);
         let mut k = ffai_rms_norm_qgemv_int8_fast::kernel_ir_for(dt);
         k.mode = metaltile_core::ir::KernelMode::Reduction;
         common_inputs(
             TestSetup::new(k).grid_3d((out_dim / 8) as u32, 1, 1, [64, 1, 1]),
-            x_b, nw_b, w_b, s_b, bi_b, expected, dt, in_dim, group_size,
+            x_b,
+            nw_b,
+            w_b,
+            s_b,
+            bi_b,
+            expected,
+            dt,
+            in_dim,
+            group_size,
         )
     }
 
     #[test_kernel(name = "rms_norm_qgemv_int8_fast/f16_gs64", dtypes = [f16], tol = 2e-2)]
     fn test_rms_norm_qgemv_int8_fast_f16(dt: DType) -> TestSetup {
         let (in_dim, group_size, out_dim, eps) = (512, 64, 16, 1e-5_f32);
-        let (x_b, nw_b, w_b, s_b, bi_b, expected) = build_int8_buffers(in_dim, group_size, out_dim, dt, eps);
+        let (x_b, nw_b, w_b, s_b, bi_b, expected) =
+            build_int8_buffers(in_dim, group_size, out_dim, dt, eps);
         let mut k = ffai_rms_norm_qgemv_int8_fast::kernel_ir_for(dt);
         k.mode = metaltile_core::ir::KernelMode::Reduction;
         common_inputs(
             TestSetup::new(k).grid_3d((out_dim / 8) as u32, 1, 1, [64, 1, 1]),
-            x_b, nw_b, w_b, s_b, bi_b, expected, dt, in_dim, group_size,
+            x_b,
+            nw_b,
+            w_b,
+            s_b,
+            bi_b,
+            expected,
+            dt,
+            in_dim,
+            group_size,
         )
     }
 
     #[test_kernel(name = "rms_norm_qgemv_int8_fast/bf16_gs64", dtypes = [bf16], tol = 5e-2)]
     fn test_rms_norm_qgemv_int8_fast_bf16(dt: DType) -> TestSetup {
         let (in_dim, group_size, out_dim, eps) = (512, 64, 16, 1e-5_f32);
-        let (x_b, nw_b, w_b, s_b, bi_b, expected) = build_int8_buffers(in_dim, group_size, out_dim, dt, eps);
+        let (x_b, nw_b, w_b, s_b, bi_b, expected) =
+            build_int8_buffers(in_dim, group_size, out_dim, dt, eps);
         let mut k = ffai_rms_norm_qgemv_int8_fast::kernel_ir_for(dt);
         k.mode = metaltile_core::ir::KernelMode::Reduction;
         common_inputs(
             TestSetup::new(k).grid_3d((out_dim / 8) as u32, 1, 1, [64, 1, 1]),
-            x_b, nw_b, w_b, s_b, bi_b, expected, dt, in_dim, group_size,
+            x_b,
+            nw_b,
+            w_b,
+            s_b,
+            bi_b,
+            expected,
+            dt,
+            in_dim,
+            group_size,
         )
     }
 }

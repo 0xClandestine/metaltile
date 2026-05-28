@@ -103,22 +103,25 @@ pub fn logits_repetition_penalty<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
     use metaltile_macros::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
-    fn pack_u32(vals: &[u32]) -> Vec<u8> {
-        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
-    }
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
 
     // ── logits_temperature ────────────────────────────────────────────────
 
@@ -139,7 +142,11 @@ mod tests_support {
 
         TestSetup::new(k)
             .input(TestBuffer::from_vec("inp", pack(&logits, dt), dt))
-            .input(TestBuffer::from_vec("temperature", temperature.to_le_bytes().to_vec(), DType::F32))
+            .input(TestBuffer::from_vec(
+                "temperature",
+                temperature.to_le_bytes().to_vec(),
+                DType::F32,
+            ))
             .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
             .grid_1d(n, 256)
     }
@@ -156,7 +163,11 @@ mod tests_support {
 
         TestSetup::new(k)
             .input(TestBuffer::from_vec("inp", pack(&logits, dt), dt))
-            .input(TestBuffer::from_vec("temperature", temperature.to_le_bytes().to_vec(), DType::F32))
+            .input(TestBuffer::from_vec(
+                "temperature",
+                temperature.to_le_bytes().to_vec(),
+                DType::F32,
+            ))
             .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
             .grid_1d(n, 256)
     }

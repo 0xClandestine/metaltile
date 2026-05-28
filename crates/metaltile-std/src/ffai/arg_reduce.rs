@@ -78,16 +78,21 @@ pub fn ffai_argmax<T>(inp: Tensor<T>, out: Tensor<u32>, #[constexpr] n: u32) {
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
@@ -97,7 +102,10 @@ mod tests_support {
         let mut best_val = f32::NEG_INFINITY;
         let mut best_idx = 0u32;
         for (i, &v) in vals.iter().enumerate() {
-            if v > best_val { best_val = v; best_idx = i as u32; }
+            if v > best_val {
+                best_val = v;
+                best_idx = i as u32;
+            }
         }
         best_idx
     }
@@ -108,8 +116,8 @@ mod tests_support {
         kernel.mode = metaltile_core::ir::KernelMode::Reduction;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("inp", pack(&logits, dt), dt))
-            .input(TestBuffer::from_vec("out", vec![0u8; 4],      DType::U32))
-            .input(TestBuffer::from_vec("n",   (n as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("out", vec![0u8; 4], DType::U32))
+            .input(TestBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
             .expect(TestBuffer::from_vec("out", pack_u32_single(expected_idx), DType::U32))
             .grid_3d(1, 1, 1, [256, 1, 1])
     }
@@ -139,18 +147,22 @@ mod tests_support {
 
     #[test_kernel(name = "ffai/argmax_random_f16", dtypes = [f16], tol = 0.0)]
     fn test_argmax_random_f16(dt: DType) -> TestSetup {
-        let mut logits_f32: Vec<f32> = (0..1024).map(|i| ((i as f32) * 0.013).sin() * 0.5).collect();
+        let mut logits_f32: Vec<f32> =
+            (0..1024).map(|i| ((i as f32) * 0.013).sin() * 0.5).collect();
         logits_f32[731] = 5.0;
-        let logits: Vec<f32> = logits_f32.iter().map(|&v| half::f16::from_f32(v).to_f32()).collect();
+        let logits: Vec<f32> =
+            logits_f32.iter().map(|&v| half::f16::from_f32(v).to_f32()).collect();
         let expected = argmax(&logits);
         make_argmax_setup(logits, expected, dt)
     }
 
     #[test_kernel(name = "ffai/argmax_random_bf16", dtypes = [bf16], tol = 0.0)]
     fn test_argmax_random_bf16(dt: DType) -> TestSetup {
-        let mut logits_f32: Vec<f32> = (0..1024).map(|i| ((i as f32) * 0.013).sin() * 0.5).collect();
+        let mut logits_f32: Vec<f32> =
+            (0..1024).map(|i| ((i as f32) * 0.013).sin() * 0.5).collect();
         logits_f32[731] = 5.0;
-        let logits: Vec<f32> = logits_f32.iter().map(|&v| half::bf16::from_f32(v).to_f32()).collect();
+        let logits: Vec<f32> =
+            logits_f32.iter().map(|&v| half::bf16::from_f32(v).to_f32()).collect();
         let expected = argmax(&logits);
         make_argmax_setup(logits, expected, dt)
     }

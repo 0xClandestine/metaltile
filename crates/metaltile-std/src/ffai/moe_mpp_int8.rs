@@ -258,10 +258,18 @@ pub mod tests_support {
     }
 
     #[derive(Clone, Copy, Debug)]
-    enum Dt { F32, F16, Bf16 }
+    enum Dt {
+        F32,
+        F16,
+        Bf16,
+    }
     impl Dt {
         fn to_dtype(self) -> DType {
-            match self { Dt::F32 => DType::F32, Dt::F16 => DType::F16, Dt::Bf16 => DType::BF16 }
+            match self {
+                Dt::F32 => DType::F32,
+                Dt::F16 => DType::F16,
+                Dt::Bf16 => DType::BF16,
+            }
         }
         fn round(self, v: f32) -> f32 {
             match self {
@@ -281,19 +289,41 @@ pub mod tests_support {
     fn unpack_bytes(bytes: &[u8], dt: Dt) -> Vec<f32> {
         match dt {
             Dt::F32 => bytemuck::cast_slice::<u8, f32>(bytes).to_vec(),
-            Dt::F16 => bytes.chunks_exact(2).map(|c| half::f16::from_le_bytes([c[0],c[1]]).to_f32()).collect(),
-            Dt::Bf16 => bytes.chunks_exact(2).map(|c| half::bf16::from_le_bytes([c[0],c[1]]).to_f32()).collect(),
+            Dt::F16 => bytes
+                .chunks_exact(2)
+                .map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32())
+                .collect(),
+            Dt::Bf16 => bytes
+                .chunks_exact(2)
+                .map(|c| half::bf16::from_le_bytes([c[0], c[1]]).to_f32())
+                .collect(),
         }
     }
     fn pack_int8_row(codes: &[u32]) -> Vec<u32> {
         assert!(codes.len() % 4 == 0);
-        codes.chunks_exact(4).map(|chunk| {
-            (chunk[0] & 0xff) | ((chunk[1] & 0xff) << 8) | ((chunk[2] & 0xff) << 16) | ((chunk[3] & 0xff) << 24)
-        }).collect()
+        codes
+            .chunks_exact(4)
+            .map(|chunk| {
+                (chunk[0] & 0xff)
+                    | ((chunk[1] & 0xff) << 8)
+                    | ((chunk[2] & 0xff) << 16)
+                    | ((chunk[3] & 0xff) << 24)
+            })
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn cpu_oracle_int8(x: &[f32], codes: &[u32], scales: &[f32], biases: &[f32], indices: &[u32], t_rows: usize, n_out: usize, k_in: usize, group_size: usize) -> Vec<f32> {
+    fn cpu_oracle_int8(
+        x: &[f32],
+        codes: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        indices: &[u32],
+        t_rows: usize,
+        n_out: usize,
+        k_in: usize,
+        group_size: usize,
+    ) -> Vec<f32> {
         let groups = k_in / group_size;
         let mut out = vec![0.0f32; t_rows * n_out];
         for t in 0..t_rows {
@@ -315,8 +345,13 @@ pub mod tests_support {
         let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
         let mut nan_count = 0usize;
         for (&x, &y) in a.iter().zip(b) {
-            if !x.is_finite() || !y.is_finite() { nan_count += 1; continue; }
-            dot += x as f64 * y as f64; na += x as f64 * x as f64; nb += y as f64 * y as f64;
+            if !x.is_finite() || !y.is_finite() {
+                nan_count += 1;
+                continue;
+            }
+            dot += x as f64 * y as f64;
+            na += x as f64 * x as f64;
+            nb += y as f64 * y as f64;
         }
         assert_eq!(nan_count, 0, "non-finite values in output (kernel wrote NaN/Inf)");
         dot / (na.sqrt() * nb.sqrt() + 1e-12)
@@ -328,11 +363,24 @@ pub mod tests_support {
         if family.is_none_or(|lvl| lvl < 10) {
             eprintln!("skip moe_mpp_int8: needs Apple10+ GPU (chip_family={family:?})");
             true
-        } else { false }
+        } else {
+            false
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run_mpp_int8(x: &[f32], weight_packed: &[u32], scales: &[f32], biases: &[f32], indices: &[u32], t_rows: usize, n_out: usize, k_in: usize, group_size: usize, dt: Dt) -> Vec<f32> {
+    fn run_mpp_int8(
+        x: &[f32],
+        weight_packed: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        indices: &[u32],
+        t_rows: usize,
+        n_out: usize,
+        k_in: usize,
+        group_size: usize,
+        dt: Dt,
+    ) -> Vec<f32> {
         let mut b: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         b.insert("x".into(), pack_bytes(x, dt));
         b.insert("w".into(), weight_packed.iter().flat_map(|w| w.to_le_bytes()).collect());
@@ -347,33 +395,63 @@ pub mod tests_support {
         let ctx = Context::new().expect("Context::new");
         let mut k = mt_moe_gather_qmm_mma_int8_bm16_mpp::kernel_ir_for(dt.to_dtype());
         k.mode = KernelMode::Reduction;
-        let r = ctx.dispatch_with_grid(&k, &b, &BTreeMap::new(), [n_out / 32, t_rows.div_ceil(16), 1], [32, 1, 1]).expect("dispatch");
+        let r = ctx
+            .dispatch_with_grid(&k, &b, &BTreeMap::new(), [n_out / 32, t_rows.div_ceil(16), 1], [
+                32, 1, 1,
+            ])
+            .expect("dispatch");
         unpack_bytes(r.outputs.get("out").expect("out"), dt)
     }
 
     #[allow(clippy::type_complexity)]
     fn make_test_data(dt: Dt) -> (Vec<u32>, Vec<u32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<u32>) {
-        let n_experts = 4usize; let k_in = 64usize; let n_out = 64usize; let group_size = 32usize; let t_rows = 64usize;
+        let n_experts = 4usize;
+        let k_in = 64usize;
+        let n_out = 64usize;
+        let group_size = 32usize;
+        let t_rows = 64usize;
         let indices: Vec<u32> = (0..t_rows).map(|r| (r / (t_rows / n_experts)) as u32).collect();
         let total = n_experts * n_out * k_in;
-        let codes: Vec<u32> = (0..total).map(|i| (i as u32).wrapping_mul(2654435761) & 0xff).collect();
+        let codes: Vec<u32> =
+            (0..total).map(|i| (i as u32).wrapping_mul(2654435761) & 0xff).collect();
         let weight_packed: Vec<u32> = codes.chunks_exact(k_in).flat_map(pack_int8_row).collect();
         let groups_total = n_experts * n_out * (k_in / group_size);
-        let scales: Vec<f32> = (0..groups_total).map(|i| dt.round(0.002 + 0.0005 * (i as f32 * 0.03).sin())).collect();
-        let biases: Vec<f32> = (0..groups_total).map(|i| dt.round(-0.05 + 0.01 * (i as f32 * 0.07).cos())).collect();
-        let x: Vec<f32> = (0..t_rows * k_in).map(|i| dt.round(0.05 * (i as f32 * 0.013).sin())).collect();
+        let scales: Vec<f32> =
+            (0..groups_total).map(|i| dt.round(0.002 + 0.0005 * (i as f32 * 0.03).sin())).collect();
+        let biases: Vec<f32> =
+            (0..groups_total).map(|i| dt.round(-0.05 + 0.01 * (i as f32 * 0.07).cos())).collect();
+        let x: Vec<f32> =
+            (0..t_rows * k_in).map(|i| dt.round(0.05 * (i as f32 * 0.013).sin())).collect();
         (codes, weight_packed, scales, biases, x, indices)
     }
 
     #[test]
     fn moe_gather_qmm_mma_int8_bm16_mpp_matches_cpu_oracle_f32() {
         let _g = gpu_lock();
-        if skip_unless_apple10() { return; }
+        if skip_unless_apple10() {
+            return;
+        }
         let dt = Dt::F32;
         let (codes, weight_packed, scales, biases, x, indices) = make_test_data(dt);
-        let k_in = 64usize; let n_out = 64usize; let group_size = 32usize; let t_rows = 64usize;
-        let expected = cpu_oracle_int8(&x, &codes, &scales, &biases, &indices, t_rows, n_out, k_in, group_size);
-        let actual = run_mpp_int8(&x, &weight_packed, &scales, &biases, &indices, t_rows, n_out, k_in, group_size, dt);
+        let k_in = 64usize;
+        let n_out = 64usize;
+        let group_size = 32usize;
+        let t_rows = 64usize;
+        let expected = cpu_oracle_int8(
+            &x, &codes, &scales, &biases, &indices, t_rows, n_out, k_in, group_size,
+        );
+        let actual = run_mpp_int8(
+            &x,
+            &weight_packed,
+            &scales,
+            &biases,
+            &indices,
+            t_rows,
+            n_out,
+            k_in,
+            group_size,
+            dt,
+        );
         let cos = cosine(&expected, &actual);
         assert!(actual.iter().any(|&v| v != 0.0), "all-zero output");
         assert!(cos >= 0.999, "int8 MPP f32 vs CPU oracle cosine = {cos:.6} (want ≥ 0.999)");
@@ -382,12 +460,30 @@ pub mod tests_support {
     #[test]
     fn moe_gather_qmm_mma_int8_bm16_mpp_matches_cpu_oracle_f16() {
         let _g = gpu_lock();
-        if skip_unless_apple10() { return; }
+        if skip_unless_apple10() {
+            return;
+        }
         let dt = Dt::F16;
         let (codes, weight_packed, scales, biases, x, indices) = make_test_data(dt);
-        let k_in = 64usize; let n_out = 64usize; let group_size = 32usize; let t_rows = 64usize;
-        let expected = cpu_oracle_int8(&x, &codes, &scales, &biases, &indices, t_rows, n_out, k_in, group_size);
-        let actual = run_mpp_int8(&x, &weight_packed, &scales, &biases, &indices, t_rows, n_out, k_in, group_size, dt);
+        let k_in = 64usize;
+        let n_out = 64usize;
+        let group_size = 32usize;
+        let t_rows = 64usize;
+        let expected = cpu_oracle_int8(
+            &x, &codes, &scales, &biases, &indices, t_rows, n_out, k_in, group_size,
+        );
+        let actual = run_mpp_int8(
+            &x,
+            &weight_packed,
+            &scales,
+            &biases,
+            &indices,
+            t_rows,
+            n_out,
+            k_in,
+            group_size,
+            dt,
+        );
         let cos = cosine(&expected, &actual);
         assert!(cos >= 0.999, "int8 MPP f16 vs CPU oracle cosine = {cos:.6} (want ≥ 0.999)");
     }
@@ -395,12 +491,30 @@ pub mod tests_support {
     #[test]
     fn moe_gather_qmm_mma_int8_bm16_mpp_matches_cpu_oracle_bf16() {
         let _g = gpu_lock();
-        if skip_unless_apple10() { return; }
+        if skip_unless_apple10() {
+            return;
+        }
         let dt = Dt::Bf16;
         let (codes, weight_packed, scales, biases, x, indices) = make_test_data(dt);
-        let k_in = 64usize; let n_out = 64usize; let group_size = 32usize; let t_rows = 64usize;
-        let expected = cpu_oracle_int8(&x, &codes, &scales, &biases, &indices, t_rows, n_out, k_in, group_size);
-        let actual = run_mpp_int8(&x, &weight_packed, &scales, &biases, &indices, t_rows, n_out, k_in, group_size, dt);
+        let k_in = 64usize;
+        let n_out = 64usize;
+        let group_size = 32usize;
+        let t_rows = 64usize;
+        let expected = cpu_oracle_int8(
+            &x, &codes, &scales, &biases, &indices, t_rows, n_out, k_in, group_size,
+        );
+        let actual = run_mpp_int8(
+            &x,
+            &weight_packed,
+            &scales,
+            &biases,
+            &indices,
+            t_rows,
+            n_out,
+            k_in,
+            group_size,
+            dt,
+        );
         let cos = cosine(&expected, &actual);
         assert!(cos >= 0.997, "int8 MPP bf16 vs CPU oracle cosine = {cos:.6} (want ≥ 0.997)");
     }

@@ -310,16 +310,21 @@ pub fn mt_sort_segmented<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32)
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
@@ -331,7 +336,9 @@ mod tests_support {
 
     fn cpu_sort_segmented(inp: &[f32], batch: usize, n: usize) -> Vec<f32> {
         let mut out = inp.to_vec();
-        for r in 0..batch { out[r * n..(r + 1) * n].sort_unstable_by(f32::total_cmp); }
+        for r in 0..batch {
+            out[r * n..(r + 1) * n].sort_unstable_by(f32::total_cmp);
+        }
         out
     }
 
@@ -347,7 +354,7 @@ mod tests_support {
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("inp", pack(&inp, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; N], dt), dt))
-            .input(TestBuffer::from_vec("n",   (N as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("n", (N as u32).to_le_bytes().to_vec(), DType::U32))
             .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
             .grid_3d(1, 1, 1, [256, 1, 1])
     }
@@ -355,17 +362,19 @@ mod tests_support {
     #[test_kernel(name = "mlx/sort_f16", dtypes = [f16], tol = 1e-2)]
     fn test_sort_f16(dt: DType) -> TestSetup {
         const N: usize = 1024;
-        let inp: Vec<f32> = (0..N).map(|i| {
-            let v = ((N - 1 - i) as f32) * 0.1;
-            half::f16::from_f32(v).to_f32()
-        }).collect();
+        let inp: Vec<f32> = (0..N)
+            .map(|i| {
+                let v = ((N - 1 - i) as f32) * 0.1;
+                half::f16::from_f32(v).to_f32()
+            })
+            .collect();
         let expected = cpu_sort(&inp);
         let mut kernel = mt_sort::kernel_ir_for(dt);
         kernel.mode = metaltile_core::ir::KernelMode::Reduction;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("inp", pack(&inp, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; N], dt), dt))
-            .input(TestBuffer::from_vec("n",   (N as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("n", (N as u32).to_le_bytes().to_vec(), DType::U32))
             .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
             .grid_3d(1, 1, 1, [256, 1, 1])
     }
@@ -382,7 +391,7 @@ mod tests_support {
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("inp", pack(&inp, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; batch * n], dt), dt))
-            .input(TestBuffer::from_vec("n",   (n as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
             .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
             .grid_3d(batch as u32, 1, 1, [256, 1, 1])
     }
@@ -399,7 +408,7 @@ mod tests_support {
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("inp", pack(&inp, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; batch * n], dt), dt))
-            .input(TestBuffer::from_vec("n",   (n as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
             .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
             .grid_3d(batch as u32, 1, 1, [256, 1, 1])
     }
@@ -407,16 +416,16 @@ mod tests_support {
     #[test_kernel(name = "mlx/sort_segmented_n1024_f16", dtypes = [f16], tol = 1e-2)]
     fn test_sort_segmented_n1024_f16(dt: DType) -> TestSetup {
         let (n, batch) = (1024usize, 2usize);
-        let inp: Vec<f32> = (0..batch * n).map(|i| {
-            half::f16::from_f32(((batch * n - 1 - i) as f32) * 0.25).to_f32()
-        }).collect();
+        let inp: Vec<f32> = (0..batch * n)
+            .map(|i| half::f16::from_f32(((batch * n - 1 - i) as f32) * 0.25).to_f32())
+            .collect();
         let expected = cpu_sort_segmented(&inp, batch, n);
         let mut kernel = mt_sort_segmented::kernel_ir_for(dt);
         kernel.mode = metaltile_core::ir::KernelMode::Reduction;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("inp", pack(&inp, dt), dt))
             .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; batch * n], dt), dt))
-            .input(TestBuffer::from_vec("n",   (n as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
             .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
             .grid_3d(batch as u32, 1, 1, [256, 1, 1])
     }

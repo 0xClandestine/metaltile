@@ -45,7 +45,10 @@ mod tests_support {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
 
     fn pack_f32(vals: &[f32]) -> Vec<u8> { bytemuck::cast_slice::<f32, u8>(vals).to_vec() }
     fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
@@ -70,8 +73,12 @@ mod tests_support {
     }
 
     fn naive_aura_dequant(
-        indices: &[u32], norms: &[f32], codebook: &[f32],
-        bh: usize, tokens: usize, dim: usize,
+        indices: &[u32],
+        norms: &[f32],
+        codebook: &[f32],
+        bh: usize,
+        tokens: usize,
+        dim: usize,
     ) -> Vec<f32> {
         let mut out = vec![0.0_f32; bh * tokens * dim];
         for b in 0..bh {
@@ -96,8 +103,7 @@ mod tests_support {
         let tokens = 3usize;
 
         let codebook: Vec<f32> = (0..16).map(|i| -1.0 + 2.0 * i as f32 / 15.0).collect();
-        let indices: Vec<u32> =
-            (0..bh * tokens * dim).map(|i| ((i * 7 + 3) % 16) as u32).collect();
+        let indices: Vec<u32> = (0..bh * tokens * dim).map(|i| ((i * 7 + 3) % 16) as u32).collect();
         let packed = pack_int4_indices(&indices, bh, tokens, dim);
         let norms: Vec<f32> = (0..bh * tokens).map(|i| 0.5 + 0.1 * i as f32).collect();
 

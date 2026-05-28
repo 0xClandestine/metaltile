@@ -645,7 +645,6 @@ pub fn mt_sdpa_vector_d256<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
@@ -653,11 +652,12 @@ mod tests_support {
         ir::KernelMode,
     };
 
+    use super::*;
+
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 =>
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
             DType::BF16 =>
                 vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
@@ -673,14 +673,8 @@ mod tests_support {
     fn round_through(vals: &[f32], dt: DType) -> Vec<f32> {
         match dt {
             DType::F32 => vals.to_vec(),
-            DType::F16 => vals
-                .iter()
-                .map(|&v| half::f16::from_f32(v).to_f32())
-                .collect(),
-            DType::BF16 => vals
-                .iter()
-                .map(|&v| half::bf16::from_f32(v).to_f32())
-                .collect(),
+            DType::F16 => vals.iter().map(|&v| half::f16::from_f32(v).to_f32()).collect(),
+            DType::BF16 => vals.iter().map(|&v| half::bf16::from_f32(v).to_f32()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
         }
     }
@@ -705,8 +699,7 @@ mod tests_support {
             for (j, score) in scores.iter_mut().enumerate() {
                 let mut dot = 0.0_f32;
                 for d in 0..head_dim {
-                    dot += q[h * head_dim + d]
-                        * k[kv_h * n_kv * head_dim + j * head_dim + d];
+                    dot += q[h * head_dim + d] * k[kv_h * n_kv * head_dim + j * head_dim + d];
                 }
                 *score = dot * scale;
             }

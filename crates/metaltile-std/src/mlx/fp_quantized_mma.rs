@@ -495,9 +495,13 @@ pub fn mt_fp8_e4m3_qmm_mma<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    use super::*;
 
     fn cosine(a: &[f32], b: &[f32]) -> f32 {
         let mut dot = 0.0f64;
@@ -531,17 +535,32 @@ mod tests_support {
             .collect()
     }
 
-    fn build_fp4_inputs(m: usize, n: usize, k: usize, gs_per_row: usize) -> (Vec<u32>, Vec<f32>, Vec<f32>, Vec<u32>) {
-        let codes_flat: Vec<u32> =
-            (0..n * k).map(|i| (i as u32).wrapping_mul(2654435761).wrapping_shr(12) & 0xF).collect();
-        let packed: Vec<u32> = codes_flat.chunks_exact(k).flat_map(|row| pack_fp4_row(row)).collect();
+    fn build_fp4_inputs(
+        m: usize,
+        n: usize,
+        k: usize,
+        gs_per_row: usize,
+    ) -> (Vec<u32>, Vec<f32>, Vec<f32>, Vec<u32>) {
+        let codes_flat: Vec<u32> = (0..n * k)
+            .map(|i| (i as u32).wrapping_mul(2654435761).wrapping_shr(12) & 0xF)
+            .collect();
+        let packed: Vec<u32> =
+            codes_flat.chunks_exact(k).flat_map(|row| pack_fp4_row(row)).collect();
         let scales: Vec<f32> =
             (0..n * gs_per_row).map(|i| 0.5 + 0.1 * (i as f32 * 0.07).sin().abs()).collect();
         let x: Vec<f32> = (0..m * k).map(|i| 0.1 * (i as f32 * 0.017).sin()).collect();
         (packed, scales, x, codes_flat)
     }
 
-    fn cpu_fp4_qmm_reference(codes_flat: &[u32], scales: &[f32], x: &[f32], m: usize, n: usize, k: usize, gs_per_row: usize) -> Vec<f32> {
+    fn cpu_fp4_qmm_reference(
+        codes_flat: &[u32],
+        scales: &[f32],
+        x: &[f32],
+        m: usize,
+        n: usize,
+        k: usize,
+        gs_per_row: usize,
+    ) -> Vec<f32> {
         let group_size = k / gs_per_row;
         let mut out = vec![0.0f32; m * n];
         for m_row in 0..m {
@@ -577,11 +596,18 @@ mod tests_support {
         assert!(codes.len() % 4 == 0);
         codes
             .chunks_exact(4)
-            .map(|ch| ch.iter().enumerate().fold(0u32, |acc, (i, &c)| acc | ((c & 0xFF) << (i * 8))))
+            .map(|ch| {
+                ch.iter().enumerate().fold(0u32, |acc, (i, &c)| acc | ((c & 0xFF) << (i * 8)))
+            })
             .collect()
     }
 
-    fn build_fp8_e4m3_inputs(m: usize, n: usize, k: usize, gs_per_row: usize) -> (Vec<u32>, Vec<f32>, Vec<f32>, Vec<u32>) {
+    fn build_fp8_e4m3_inputs(
+        m: usize,
+        n: usize,
+        k: usize,
+        gs_per_row: usize,
+    ) -> (Vec<u32>, Vec<f32>, Vec<f32>, Vec<u32>) {
         let codes_flat: Vec<u32> = (0..n * k)
             .map(|i| {
                 let c = (i as u32).wrapping_mul(2654435761).wrapping_shr(11) & 0x7F;
@@ -590,14 +616,23 @@ mod tests_support {
                 (e << 3) | m
             })
             .collect();
-        let packed: Vec<u32> = codes_flat.chunks_exact(k).flat_map(|row| pack_fp8_row(row)).collect();
+        let packed: Vec<u32> =
+            codes_flat.chunks_exact(k).flat_map(|row| pack_fp8_row(row)).collect();
         let scales: Vec<f32> =
             (0..n * gs_per_row).map(|i| 0.1 + 0.05 * (i as f32 * 0.11).sin().abs()).collect();
         let x: Vec<f32> = (0..m * k).map(|i| 0.05 * (i as f32 * 0.019).cos()).collect();
         (packed, scales, x, codes_flat)
     }
 
-    fn cpu_fp8_e4m3_qmm_reference(codes_flat: &[u32], scales: &[f32], x: &[f32], m: usize, n: usize, k: usize, gs_per_row: usize) -> Vec<f32> {
+    fn cpu_fp8_e4m3_qmm_reference(
+        codes_flat: &[u32],
+        scales: &[f32],
+        x: &[f32],
+        m: usize,
+        n: usize,
+        k: usize,
+        gs_per_row: usize,
+    ) -> Vec<f32> {
         let group_size = k / gs_per_row;
         let mut out = vec![0.0f32; m * n];
         for m_row in 0..m {
@@ -619,7 +654,8 @@ mod tests_support {
         match dtype {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
             DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
         }
     }
@@ -632,16 +668,26 @@ mod tests_support {
         }
     }
 
-    fn pack_u32_as_bytes(vals: &[u32]) -> Vec<u8> {
-        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
-    }
+    fn pack_u32_as_bytes(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
 
     fn unpack_dtype_as_f32(bytes: &[u8], dtype: DType) -> Vec<f32> {
         match dtype {
-            DType::F32 => bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect(),
-            DType::F16 => bytes.chunks_exact(2).map(|c| half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32()).collect(),
-            DType::BF16 => bytes.chunks_exact(2).map(|c| half::bf16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32()).collect(),
-            _ => bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect(),
+            DType::F32 => bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+            DType::F16 => bytes
+                .chunks_exact(2)
+                .map(|c| half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
+                .collect(),
+            DType::BF16 => bytes
+                .chunks_exact(2)
+                .map(|c| half::bf16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
+                .collect(),
+            _ => bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
         }
     }
 
@@ -661,7 +707,11 @@ mod tests_support {
             .input(TestBuffer::from_vec("out", vec![0u8; m * n * bytes_per_elem], dt))
             .input(TestBuffer::from_vec("k", (k as u32).to_le_bytes().to_vec(), DType::U32))
             .input(TestBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
-            .input(TestBuffer::from_vec("gs_per_row", (gs_per_row as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec(
+                "gs_per_row",
+                (gs_per_row as u32).to_le_bytes().to_vec(),
+                DType::U32,
+            ))
             .expect(TestBuffer::from_vec("out", pack_f32_as_dtype(&expected, dt), dt))
             .grid_3d(n / 32, m / 32, 1, [128, 1, 1])
     }
@@ -680,7 +730,11 @@ mod tests_support {
             .input(TestBuffer::from_vec("out", vec![0u8; m * n * bytes_per_elem], dt))
             .input(TestBuffer::from_vec("k", (k as u32).to_le_bytes().to_vec(), DType::U32))
             .input(TestBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
-            .input(TestBuffer::from_vec("gs_per_row", (gs_per_row as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec(
+                "gs_per_row",
+                (gs_per_row as u32).to_le_bytes().to_vec(),
+                DType::U32,
+            ))
             .expect(TestBuffer::from_vec("out", pack_f32_as_dtype(&expected, dt), dt))
             .grid_3d(n / 32, m / 32, 1, [128, 1, 1])
     }

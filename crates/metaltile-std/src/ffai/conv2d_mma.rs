@@ -329,7 +329,6 @@ pub fn conv2d_mma<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
@@ -337,15 +336,14 @@ mod tests_support {
         ir::KernelMode,
     };
 
+    use super::*;
+
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 => {
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect()
-            }
-            DType::BF16 => {
-                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect()
-            }
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
         }
     }
@@ -388,10 +386,8 @@ mod tests_support {
                                 for kx in 0..kw {
                                     let ih = oh + ky;
                                     let iw = ow + kx;
-                                    let in_idx =
-                                        ((n * in_ch + ic) * in_h + ih) * in_w + iw;
-                                    let w_idx =
-                                        ((oc * in_ch + ic) * kh + ky) * kw + kx;
+                                    let in_idx = ((n * in_ch + ic) * in_h + ih) * in_w + iw;
+                                    let w_idx = ((oc * in_ch + ic) * kh + ky) * kw + kx;
                                     acc += input[in_idx] * weight[w_idx];
                                 }
                             }
@@ -420,7 +416,8 @@ mod tests_support {
         let out_w = in_w - kw + 1;
         let n_pixels = batch * out_h * out_w;
         let n_out = n_pixels * out_ch;
-        let expected = naive_conv2d_mma(&input_vals, &weight_vals, batch, in_ch, in_h, in_w, out_ch, kh, kw);
+        let expected =
+            naive_conv2d_mma(&input_vals, &weight_vals, batch, in_ch, in_h, in_w, out_ch, kh, kw);
         let mut kernel = conv2d_mma::kernel_ir_for(dt);
         kernel.mode = KernelMode::Reduction;
         let grid_x = out_ch / 32;
@@ -457,19 +454,15 @@ mod tests_support {
 
     #[test_kernel(name = "ffai/conv/conv2d_mma_f16_3x3", dtypes = [f16], tol = 1e-2)]
     fn test_conv2d_mma_f16_3x3(dt: DType) -> TestSetup {
-        let input: Vec<f32> =
-            small_vals(1 * 4 * 10 * 10, 11, -5.0, 0.02);
-        let weight: Vec<f32> =
-            small_vals(32 * 4 * 3 * 3, 7, -3.0, 0.05);
+        let input: Vec<f32> = small_vals(1 * 4 * 10 * 10, 11, -5.0, 0.02);
+        let weight: Vec<f32> = small_vals(32 * 4 * 3 * 3, 7, -3.0, 0.05);
         make_setup(1, 4, 10, 10, 32, 3, 3, dt, input, weight)
     }
 
     #[test_kernel(name = "ffai/conv/conv2d_mma_bf16_1x1", dtypes = [bf16], tol = 2e-2)]
     fn test_conv2d_mma_bf16_1x1(dt: DType) -> TestSetup {
-        let input: Vec<f32> =
-            small_vals(1 * 8 * 8 * 8, 9, -4.0, 0.03);
-        let weight: Vec<f32> =
-            small_vals(32 * 8 * 1 * 1, 5, -2.0, 0.04);
+        let input: Vec<f32> = small_vals(1 * 8 * 8 * 8, 9, -4.0, 0.03);
+        let weight: Vec<f32> = small_vals(32 * 8 * 1 * 1, 5, -2.0, 0.04);
         make_setup(1, 8, 8, 8, 32, 1, 1, dt, input, weight)
     }
 }

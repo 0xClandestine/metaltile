@@ -376,18 +376,18 @@ mod tests {
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
 
+    use super::*;
+
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 =>
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
             DType::BF16 =>
                 vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
@@ -588,8 +588,7 @@ mod tests_support {
         let q = ramp(n_q_heads * head_dim, 17, 8.0);
         let k = ramp(n_kv_heads * kv_stride * head_dim, 13, 6.0);
         let v = ramp(n_kv_heads * kv_stride * head_dim, 11, 5.0);
-        let expected =
-            naive_sdpa_dense(&q, &k, &v, n_q_heads, n_kv_heads, head_dim, n_kv, scale);
+        let expected = naive_sdpa_dense(&q, &k, &v, n_q_heads, n_kv_heads, head_dim, n_kv, scale);
         make_setup(
             dt,
             q,
@@ -713,15 +712,7 @@ mod tests_support {
         let k = ramp(n_kv_heads * kv_stride * head_dim, 13, 6.0);
         let v = ramp(n_kv_heads * kv_stride * head_dim, 11, 5.0);
         let expected = naive_sdpa_learned_sink(
-            &q,
-            &k,
-            &v,
-            n_q_heads,
-            n_kv_heads,
-            head_dim,
-            n_kv,
-            scale,
-            sink_logit,
+            &q, &k, &v, n_q_heads, n_kv_heads, head_dim, n_kv, scale, sink_logit,
         );
         make_setup(
             dt,
@@ -755,8 +746,7 @@ mod tests_support {
         let q = ramp(n_q_heads * head_dim, 17, 8.0);
         let k = ramp(n_kv_heads * kv_stride * head_dim, 13, 6.0);
         let v = ramp(n_kv_heads * kv_stride * head_dim, 11, 5.0);
-        let expected =
-            naive_sdpa_dense(&q, &k, &v, n_q_heads, n_kv_heads, head_dim, n_kv, scale);
+        let expected = naive_sdpa_dense(&q, &k, &v, n_q_heads, n_kv_heads, head_dim, n_kv, scale);
         make_setup(
             dt,
             q,

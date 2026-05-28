@@ -48,17 +48,17 @@ pub fn mt_gather_axis<T>(
 // ── bottom of source file ─────────────────────────────────────────────────
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
 
-    fn pack_f32(vals: &[f32]) -> Vec<u8> {
-        bytemuck::cast_slice::<f32, u8>(vals).to_vec()
-    }
+    use super::*;
 
-    fn pack_u32(vals: &[u32]) -> Vec<u8> {
-        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
-    }
+    fn pack_f32(vals: &[f32]) -> Vec<u8> { bytemuck::cast_slice::<f32, u8>(vals).to_vec() }
+
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
 
     #[test_kernel(name = "mlx/gather_axis_f32", dtypes = [f32], tol = 1e-6)]
     fn test_gather_axis_matches_naive_f32(dt: DType) -> TestSetup {

@@ -187,7 +187,6 @@ steel_gemm_gather_kernel!(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
@@ -195,20 +194,19 @@ mod tests_support {
         ir::KernelMode,
     };
 
+    use super::*;
+
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 =>
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
             DType::BF16 =>
                 vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
-    fn pack_u32(vals: &[u32]) -> Vec<u8> {
-        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
-    }
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
 
     fn round_dt(v: f32, dt: DType) -> f32 {
         match dt {
@@ -235,7 +233,9 @@ mod tests_support {
             for c in 0..n {
                 let b_base = rhs_indices[c / bn] as usize * k * n;
                 let mut acc = 0.0f32;
-                for ki in 0..k { acc += a[a_row * k + ki] * b[b_base + ki * n + c]; }
+                for ki in 0..k {
+                    acc += a[a_row * k + ki] * b[b_base + ki * n + c];
+                }
                 out[r * n + c] = acc;
             }
         }
@@ -264,23 +264,14 @@ mod tests_support {
         let b_raw = ramp(n_b_mats * K * N, 23, 9.0);
         let a: Vec<f32> = a_raw.iter().map(|&v| round_dt(v, dt)).collect();
         let b: Vec<f32> = b_raw.iter().map(|&v| round_dt(v, dt)).collect();
-        let expected =
-            naive_gather_matmul(&a, &b, &lhs_indices, &rhs_indices, M, K, N, BN);
+        let expected = naive_gather_matmul(&a, &b, &lhs_indices, &rhs_indices, M, K, N, BN);
         let mut kernel = mt_steel_gemm_gather_64x64x16_2x2::kernel_ir_for(dt);
         kernel.mode = KernelMode::SimdGroup2D;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("a", pack(&a_raw, dt), dt))
             .input(TestBuffer::from_vec("b", pack(&b_raw, dt), dt))
-            .input(TestBuffer::from_vec(
-                "lhs_indices",
-                pack_u32(&lhs_indices),
-                DType::U32,
-            ))
-            .input(TestBuffer::from_vec(
-                "rhs_indices",
-                pack_u32(&rhs_indices),
-                DType::U32,
-            ))
+            .input(TestBuffer::from_vec("lhs_indices", pack_u32(&lhs_indices), DType::U32))
+            .input(TestBuffer::from_vec("rhs_indices", pack_u32(&rhs_indices), DType::U32))
             .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
             .constexpr("m", M as u32)
             .constexpr("n", N as u32)

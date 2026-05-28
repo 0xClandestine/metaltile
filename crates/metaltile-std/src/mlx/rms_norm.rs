@@ -342,23 +342,21 @@ mod wide_tests {
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
         ir::KernelMode,
     };
-    use metaltile::test_kernel;
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 => {
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect()
-            },
-            DType::BF16 => {
-                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect()
-            },
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
         }
     }
@@ -394,11 +392,9 @@ mod tests_support {
 
     fn make_rms_norm_setup(n: usize, rows: usize, eps: f32, dt: DType) -> TestSetup {
         let tpg = n / 4;
-        let x: Vec<f32> = (0..rows * n)
-            .map(|i| dt_round(((i % 23) as f32 - 11.0) * 0.3, dt))
-            .collect();
-        let w: Vec<f32> =
-            (0..n).map(|i| dt_round(1.0 + (i % 7) as f32 * 0.05, dt)).collect();
+        let x: Vec<f32> =
+            (0..rows * n).map(|i| dt_round(((i % 23) as f32 - 11.0) * 0.3, dt)).collect();
+        let w: Vec<f32> = (0..n).map(|i| dt_round(1.0 + (i % 7) as f32 * 0.05, dt)).collect();
         let expected = naive_rms_norm(&x, &w, n, eps);
         let mut kernel = mt_rms_norm::kernel_ir_for(dt);
         kernel.mode = KernelMode::Reduction;
@@ -416,8 +412,7 @@ mod tests_support {
         let x: Vec<f32> = (0..rows * n)
             .map(|i| dt_round(0.5 + ((i % 17) as f32) * 0.03 - ((i % 11) as f32) * 0.02, dt))
             .collect();
-        let w: Vec<f32> =
-            (0..n).map(|i| dt_round(1.0 + (i % 13) as f32 * 0.01, dt)).collect();
+        let w: Vec<f32> = (0..n).map(|i| dt_round(1.0 + (i % 13) as f32 * 0.01, dt)).collect();
         let expected = naive_rms_norm(&x, &w, n, eps);
         let mut kernel = mt_rms_norm_small::kernel_ir_for(dt);
         kernel.mode = KernelMode::Reduction;
@@ -432,11 +427,9 @@ mod tests_support {
 
     fn make_rms_norm_wide_setup(n: usize, rows: usize, eps: f32, dt: DType) -> TestSetup {
         const TPG: usize = 1024;
-        let x: Vec<f32> = (0..rows * n)
-            .map(|i| dt_round(((i % 37) as f32 - 18.0) * 0.05, dt))
-            .collect();
-        let w: Vec<f32> =
-            (0..n).map(|i| dt_round(1.0 + (i % 23) as f32 * 0.02, dt)).collect();
+        let x: Vec<f32> =
+            (0..rows * n).map(|i| dt_round(((i % 37) as f32 - 18.0) * 0.05, dt)).collect();
+        let w: Vec<f32> = (0..n).map(|i| dt_round(1.0 + (i % 23) as f32 * 0.02, dt)).collect();
         let expected = naive_rms_norm(&x, &w, n, eps);
         let mut kernel = mt_rms_norm_wide::kernel_ir_for(dt);
         kernel.mode = KernelMode::Reduction;
@@ -497,9 +490,7 @@ mod tests_support {
 
     // ── rms_norm: n=128 (minimum), single row, f32 ────────────────────
     #[test_kernel(name = "mlx/rms_norm/n128_f32", dtypes = [f32], tol = 1e-4)]
-    fn test_rms_norm_n128_f32(dt: DType) -> TestSetup {
-        make_rms_norm_setup(128, 1, 1e-5, dt)
-    }
+    fn test_rms_norm_n128_f32(dt: DType) -> TestSetup { make_rms_norm_setup(128, 1, 1e-5, dt) }
 
     // ── rms_norm: n=512, 4 rows, f32 ─────────────────────────────────
     #[test_kernel(name = "mlx/rms_norm/n512_rows4_f32", dtypes = [f32], tol = 1e-4)]
@@ -509,9 +500,7 @@ mod tests_support {
 
     // ── rms_norm: n=4096 (max), single row, f32 ──────────────────────
     #[test_kernel(name = "mlx/rms_norm/n4096_f32", dtypes = [f32], tol = 5e-4)]
-    fn test_rms_norm_n4096_f32(dt: DType) -> TestSetup {
-        make_rms_norm_setup(4096, 1, 1e-5, dt)
-    }
+    fn test_rms_norm_n4096_f32(dt: DType) -> TestSetup { make_rms_norm_setup(4096, 1, 1e-5, dt) }
 
     // ── rms_norm_small: head_dim=64 (older 7B architectures), f32/f16/bf16 ─
     #[test_kernel(name = "mlx/rms_norm_small/hd64_f32", dtypes = [f32], tol = 1e-4)]
@@ -531,35 +520,23 @@ mod tests_support {
 
     // ── rms_norm: head_dim=128 (Qwen3-class), f32/f16/bf16 ───────────
     #[test_kernel(name = "mlx/rms_norm/hd128_f32", dtypes = [f32], tol = 1e-4)]
-    fn test_rms_norm_hd128_f32(dt: DType) -> TestSetup {
-        make_rms_norm_setup(128, 1024, 1e-6, dt)
-    }
+    fn test_rms_norm_hd128_f32(dt: DType) -> TestSetup { make_rms_norm_setup(128, 1024, 1e-6, dt) }
 
     #[test_kernel(name = "mlx/rms_norm/hd128_f16", dtypes = [f16], tol = 5e-3)]
-    fn test_rms_norm_hd128_f16(dt: DType) -> TestSetup {
-        make_rms_norm_setup(128, 1024, 1e-6, dt)
-    }
+    fn test_rms_norm_hd128_f16(dt: DType) -> TestSetup { make_rms_norm_setup(128, 1024, 1e-6, dt) }
 
     #[test_kernel(name = "mlx/rms_norm/hd128_bf16", dtypes = [bf16], tol = 5e-2)]
-    fn test_rms_norm_hd128_bf16(dt: DType) -> TestSetup {
-        make_rms_norm_setup(128, 1024, 1e-6, dt)
-    }
+    fn test_rms_norm_hd128_bf16(dt: DType) -> TestSetup { make_rms_norm_setup(128, 1024, 1e-6, dt) }
 
     // ── rms_norm: head_dim=256 (Gemma-2/3, Phi-3-medium), f32/f16/bf16
     #[test_kernel(name = "mlx/rms_norm/hd256_f32", dtypes = [f32], tol = 1e-4)]
-    fn test_rms_norm_hd256_f32(dt: DType) -> TestSetup {
-        make_rms_norm_setup(256, 256, 1e-6, dt)
-    }
+    fn test_rms_norm_hd256_f32(dt: DType) -> TestSetup { make_rms_norm_setup(256, 256, 1e-6, dt) }
 
     #[test_kernel(name = "mlx/rms_norm/hd256_f16", dtypes = [f16], tol = 5e-3)]
-    fn test_rms_norm_hd256_f16(dt: DType) -> TestSetup {
-        make_rms_norm_setup(256, 256, 1e-6, dt)
-    }
+    fn test_rms_norm_hd256_f16(dt: DType) -> TestSetup { make_rms_norm_setup(256, 256, 1e-6, dt) }
 
     #[test_kernel(name = "mlx/rms_norm/hd256_bf16", dtypes = [bf16], tol = 5e-2)]
-    fn test_rms_norm_hd256_bf16(dt: DType) -> TestSetup {
-        make_rms_norm_setup(256, 256, 1e-6, dt)
-    }
+    fn test_rms_norm_hd256_bf16(dt: DType) -> TestSetup { make_rms_norm_setup(256, 256, 1e-6, dt) }
 
     // ── rms_norm_wide: Gemma 4 31B hidden (n=5376), single row ────────
     #[test_kernel(name = "mlx/rms_norm_wide/n5376_f32", dtypes = [f32], tol = 5e-4)]

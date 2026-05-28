@@ -588,13 +588,15 @@ pub fn mt_scan_min_exclusive<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: 
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
 
-    fn pack_f32(vals: &[f32]) -> Vec<u8> {
-        bytemuck::cast_slice::<f32, u8>(vals).to_vec()
-    }
+    use super::*;
+
+    fn pack_f32(vals: &[f32]) -> Vec<u8> { bytemuck::cast_slice::<f32, u8>(vals).to_vec() }
 
     // ── CPU oracles ──────────────────────────────────────────────────────
 
@@ -602,7 +604,10 @@ mod tests_support {
         let mut out = vec![0.0f32; rows * n];
         for r in 0..rows {
             let mut acc = 0.0f32;
-            for c in 0..n { out[r * n + c] = acc; acc += inp[r * n + c]; }
+            for c in 0..n {
+                out[r * n + c] = acc;
+                acc += inp[r * n + c];
+            }
         }
         out
     }
@@ -611,7 +616,10 @@ mod tests_support {
         let mut out = vec![0.0f32; rows * n];
         for r in 0..rows {
             let mut acc = 1.0f32;
-            for c in 0..n { acc *= inp[r * n + c]; out[r * n + c] = acc; }
+            for c in 0..n {
+                acc *= inp[r * n + c];
+                out[r * n + c] = acc;
+            }
         }
         out
     }
@@ -620,7 +628,10 @@ mod tests_support {
         let mut out = vec![0.0f32; rows * n];
         for r in 0..rows {
             let mut acc = 1.0f32;
-            for c in 0..n { out[r * n + c] = acc; acc *= inp[r * n + c]; }
+            for c in 0..n {
+                out[r * n + c] = acc;
+                acc *= inp[r * n + c];
+            }
         }
         out
     }
@@ -629,7 +640,12 @@ mod tests_support {
         let mut out = vec![0.0f32; rows * n];
         for r in 0..rows {
             let mut acc = f32::NEG_INFINITY;
-            for c in 0..n { if inp[r * n + c] > acc { acc = inp[r * n + c]; } out[r * n + c] = acc; }
+            for c in 0..n {
+                if inp[r * n + c] > acc {
+                    acc = inp[r * n + c];
+                }
+                out[r * n + c] = acc;
+            }
         }
         out
     }
@@ -638,7 +654,12 @@ mod tests_support {
         let mut out = vec![0.0f32; rows * n];
         for r in 0..rows {
             let mut acc = f32::NEG_INFINITY;
-            for c in 0..n { out[r * n + c] = acc; if inp[r * n + c] > acc { acc = inp[r * n + c]; } }
+            for c in 0..n {
+                out[r * n + c] = acc;
+                if inp[r * n + c] > acc {
+                    acc = inp[r * n + c];
+                }
+            }
         }
         out
     }
@@ -647,7 +668,12 @@ mod tests_support {
         let mut out = vec![0.0f32; rows * n];
         for r in 0..rows {
             let mut acc = f32::INFINITY;
-            for c in 0..n { if inp[r * n + c] < acc { acc = inp[r * n + c]; } out[r * n + c] = acc; }
+            for c in 0..n {
+                if inp[r * n + c] < acc {
+                    acc = inp[r * n + c];
+                }
+                out[r * n + c] = acc;
+            }
         }
         out
     }
@@ -656,7 +682,12 @@ mod tests_support {
         let mut out = vec![0.0f32; rows * n];
         for r in 0..rows {
             let mut acc = f32::INFINITY;
-            for c in 0..n { out[r * n + c] = acc; if inp[r * n + c] < acc { acc = inp[r * n + c]; } }
+            for c in 0..n {
+                out[r * n + c] = acc;
+                if inp[r * n + c] < acc {
+                    acc = inp[r * n + c];
+                }
+            }
         }
         out
     }
@@ -664,14 +695,16 @@ mod tests_support {
     // ── Helper to build a scan TestSetup ─────────────────────────────────
 
     fn make_scan_setup(
-        inp: Vec<f32>, expected: Vec<f32>,
-        rows: usize, n: usize,
+        inp: Vec<f32>,
+        expected: Vec<f32>,
+        rows: usize,
+        n: usize,
         kernel: metaltile_core::ir::Kernel,
     ) -> TestSetup {
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("inp", pack_f32(&inp), DType::F32))
             .input(TestBuffer::from_vec("out", pack_f32(&vec![0.0f32; rows * n]), DType::F32))
-            .input(TestBuffer::from_vec("n",   (n as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
             .expect(TestBuffer::from_vec("out", pack_f32(&expected), DType::F32))
             .grid_3d(1, rows as u32, 1, [256, 1, 1])
     }
@@ -688,7 +721,13 @@ mod tests_support {
         let (rows, n) = (3usize, 2048usize);
         let inp: Vec<f32> = (0..rows * n).map(|i| ((i % 31) as f32 - 15.0) * 0.0625).collect();
         let expected = cpu_scan_sum_exclusive(&inp, rows, n);
-        make_scan_setup(inp, expected, rows, n, reduction_kernel(mt_scan_exclusive::kernel_ir_for(dt)))
+        make_scan_setup(
+            inp,
+            expected,
+            rows,
+            n,
+            reduction_kernel(mt_scan_exclusive::kernel_ir_for(dt)),
+        )
     }
 
     #[test_kernel(name = "mlx/scan_exclusive_ragged", dtypes = [f32], tol = 3e-3)]
@@ -696,7 +735,13 @@ mod tests_support {
         let (rows, n) = (2usize, 3000usize);
         let inp: Vec<f32> = (0..rows * n).map(|i| ((i % 17) as f32 - 8.0) * 0.05).collect();
         let expected = cpu_scan_sum_exclusive(&inp, rows, n);
-        make_scan_setup(inp, expected, rows, n, reduction_kernel(mt_scan_exclusive::kernel_ir_for(dt)))
+        make_scan_setup(
+            inp,
+            expected,
+            rows,
+            n,
+            reduction_kernel(mt_scan_exclusive::kernel_ir_for(dt)),
+        )
     }
 
     // ── Product scan ──────────────────────────────────────────────────────
@@ -714,7 +759,13 @@ mod tests_support {
         let (rows, n) = (2, 512);
         let inp: Vec<f32> = (0..rows * n).map(|i| 0.9 + (i % 7) as f32 * 0.03).collect();
         let expected = cpu_scan_prod_exclusive(&inp, rows, n);
-        make_scan_setup(inp, expected, rows, n, reduction_kernel(mt_scan_prod_exclusive::kernel_ir_for(dt)))
+        make_scan_setup(
+            inp,
+            expected,
+            rows,
+            n,
+            reduction_kernel(mt_scan_prod_exclusive::kernel_ir_for(dt)),
+        )
     }
 
     // ── Max scan ──────────────────────────────────────────────────────────
@@ -732,7 +783,13 @@ mod tests_support {
         let (rows, n) = (2, 512);
         let inp: Vec<f32> = (0..rows * n).map(|i| ((i * 53 + 7) % 200) as f32 - 100.0).collect();
         let expected = cpu_scan_max_exclusive(&inp, rows, n);
-        make_scan_setup(inp, expected, rows, n, reduction_kernel(mt_scan_max_exclusive::kernel_ir_for(dt)))
+        make_scan_setup(
+            inp,
+            expected,
+            rows,
+            n,
+            reduction_kernel(mt_scan_max_exclusive::kernel_ir_for(dt)),
+        )
     }
 
     // ── Min scan ──────────────────────────────────────────────────────────
@@ -750,6 +807,12 @@ mod tests_support {
         let (rows, n) = (2, 512);
         let inp: Vec<f32> = (0..rows * n).map(|i| ((i * 53 + 7) % 200) as f32 - 100.0).collect();
         let expected = cpu_scan_min_exclusive(&inp, rows, n);
-        make_scan_setup(inp, expected, rows, n, reduction_kernel(mt_scan_min_exclusive::kernel_ir_for(dt)))
+        make_scan_setup(
+            inp,
+            expected,
+            rows,
+            n,
+            reduction_kernel(mt_scan_min_exclusive::kernel_ir_for(dt)),
+        )
     }
 }

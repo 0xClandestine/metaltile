@@ -279,34 +279,40 @@ pub fn ffai_gated_rms_norm_qgemv_int4_fast<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}, ir::KernelMode};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+        ir::KernelMode,
+    };
 
-    fn pack_f32(vals: &[f32]) -> Vec<u8> {
-        bytemuck::cast_slice::<f32, u8>(vals).to_vec()
-    }
+    use super::*;
 
-    fn pack_u32(vals: &[u32]) -> Vec<u8> {
-        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
-    }
+    fn pack_f32(vals: &[f32]) -> Vec<u8> { bytemuck::cast_slice::<f32, u8>(vals).to_vec() }
+
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
     /// Deterministic pseudo-random f32 in (-scale/2, scale/2) + off
     fn source(n: usize, seed: u64, scale: f32, off: f32) -> Vec<f32> {
         let mut s = seed;
-        (0..n).map(|_| {
-            s ^= s << 13; s ^= s >> 7; s ^= s << 17;
-            ((s % 20_000) as f32 / 20_000.0 - 0.5) * scale + off
-        }).collect()
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                ((s % 20_000) as f32 / 20_000.0 - 0.5) * scale + off
+            })
+            .collect()
     }
 
     /// Affine int4 quantize a row into nibble-packed u32s + scales + biases
@@ -335,9 +341,17 @@ mod tests_support {
 
     /// CPU reference: gated-rms-norm + int4 GEMV
     fn oracle(
-        y: &[f32], z: &[f32], norm_w: &[f32],
-        weight_packed: &[u32], scales: &[f32], biases: &[f32],
-        hv: usize, dv: usize, out_dim: usize, group_size: usize, eps: f32,
+        y: &[f32],
+        z: &[f32],
+        norm_w: &[f32],
+        weight_packed: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        hv: usize,
+        dv: usize,
+        out_dim: usize,
+        group_size: usize,
+        eps: f32,
     ) -> Vec<f32> {
         let in_dim = hv * dv;
         let mut inner = vec![0.0f32; in_dim];
@@ -353,27 +367,29 @@ mod tests_support {
         }
         let u32_per_row = in_dim / 8;
         let n_groups = in_dim / group_size;
-        (0..out_dim).map(|row| {
-            let rw = &weight_packed[row * u32_per_row..(row + 1) * u32_per_row];
-            let rs = &scales[row * n_groups..(row + 1) * n_groups];
-            let rb = &biases[row * n_groups..(row + 1) * n_groups];
-            let mut acc = 0.0f32;
-            for d in 0..in_dim {
-                let q = (rw[d / 8] >> ((d % 8) * 4)) & 0xf;
-                let g = d / group_size;
-                acc += (q as f32 * rs[g] + rb[g]) * inner[d];
-            }
-            acc
-        }).collect()
+        (0..out_dim)
+            .map(|row| {
+                let rw = &weight_packed[row * u32_per_row..(row + 1) * u32_per_row];
+                let rs = &scales[row * n_groups..(row + 1) * n_groups];
+                let rb = &biases[row * n_groups..(row + 1) * n_groups];
+                let mut acc = 0.0f32;
+                for d in 0..in_dim {
+                    let q = (rw[d / 8] >> ((d % 8) * 4)) & 0xf;
+                    let g = d / group_size;
+                    acc += (q as f32 * rs[g] + rb[g]) * inner[d];
+                }
+                acc
+            })
+            .collect()
     }
 
     fn make_setup(dt: DType, hv: usize, dv: usize, out_dim: usize, group_size: usize) -> TestSetup {
         let in_dim = hv * dv;
         let eps = 1e-5f32;
-        let y         = source(in_dim, 1, 1.0, 0.0);
-        let z         = source(in_dim, 2, 1.0, 0.0);
-        let norm_w    = source(dv, 3, 0.5, 1.0);
-        let n_groups  = in_dim / group_size;
+        let y = source(in_dim, 1, 1.0, 0.0);
+        let z = source(in_dim, 2, 1.0, 0.0);
+        let norm_w = source(dv, 3, 0.5, 1.0);
+        let n_groups = in_dim / group_size;
         let (mut w_packed, mut w_scales, mut w_biases) = (
             vec![0u32; out_dim * in_dim / 8],
             vec![0.0f32; out_dim * n_groups],
@@ -387,39 +403,34 @@ mod tests_support {
             w_scales[r * n_groups..(r + 1) * n_groups].copy_from_slice(&rs);
             w_biases[r * n_groups..(r + 1) * n_groups].copy_from_slice(&rb);
         }
-        let expected = oracle(&y, &z, &norm_w, &w_packed, &w_scales, &w_biases,
-                              hv, dv, out_dim, group_size, eps);
+        let expected = oracle(
+            &y, &z, &norm_w, &w_packed, &w_scales, &w_biases, hv, dv, out_dim, group_size, eps,
+        );
         let mut kernel = ffai_gated_rms_norm_qgemv_int4_fast::kernel_ir_for(dt);
         kernel.mode = KernelMode::Reduction;
         TestSetup::new(kernel)
-            .input(TestBuffer::from_vec("y",          pack_f32(&y),        DType::F32))
-            .input(TestBuffer::from_vec("z",          pack(&z, dt),        dt))
-            .input(TestBuffer::from_vec("norm_weight",pack(&norm_w, dt),   dt))
-            .input(TestBuffer::from_vec("eps_buf",    eps.to_le_bytes().to_vec(), DType::F32))
-            .input(TestBuffer::from_vec("q_weight",   pack_u32(&w_packed), DType::U32))
-            .input(TestBuffer::from_vec("q_scales",   pack(&w_scales, dt), dt))
-            .input(TestBuffer::from_vec("q_biases",   pack(&w_biases, dt), dt))
-            .input(TestBuffer::from_vec("out",        pack(&vec![0.0f32; out_dim], dt), dt))
-            .expect(TestBuffer::from_vec("out",       pack(&expected, dt), dt))
-            .constexpr("hv",         hv as u32)
-            .constexpr("dv",         dv as u32)
-            .constexpr("out_dim",    out_dim as u32)
+            .input(TestBuffer::from_vec("y", pack_f32(&y), DType::F32))
+            .input(TestBuffer::from_vec("z", pack(&z, dt), dt))
+            .input(TestBuffer::from_vec("norm_weight", pack(&norm_w, dt), dt))
+            .input(TestBuffer::from_vec("eps_buf", eps.to_le_bytes().to_vec(), DType::F32))
+            .input(TestBuffer::from_vec("q_weight", pack_u32(&w_packed), DType::U32))
+            .input(TestBuffer::from_vec("q_scales", pack(&w_scales, dt), dt))
+            .input(TestBuffer::from_vec("q_biases", pack(&w_biases, dt), dt))
+            .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; out_dim], dt), dt))
+            .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
+            .constexpr("hv", hv as u32)
+            .constexpr("dv", dv as u32)
+            .constexpr("out_dim", out_dim as u32)
             .constexpr("group_size", group_size as u32)
             .grid_3d(out_dim / 8, 1, 1, 64)
     }
 
     #[test_kernel(name = "ffai/gated_rms_norm_qgemv/int4_fast_f32_small", dtypes = [f32], tol = 5e-3)]
-    fn test_int4_fast_f32_small(dt: DType) -> TestSetup {
-        make_setup(dt, 4, 128, 512, 64)
-    }
+    fn test_int4_fast_f32_small(dt: DType) -> TestSetup { make_setup(dt, 4, 128, 512, 64) }
 
     #[test_kernel(name = "ffai/gated_rms_norm_qgemv/int4_fast_f16", dtypes = [f16], tol = 3e-2)]
-    fn test_int4_fast_f16(dt: DType) -> TestSetup {
-        make_setup(dt, 4, 128, 512, 64)
-    }
+    fn test_int4_fast_f16(dt: DType) -> TestSetup { make_setup(dt, 4, 128, 512, 64) }
 
     #[test_kernel(name = "ffai/gated_rms_norm_qgemv/int4_fast_bf16", dtypes = [bf16], tol = 6e-2)]
-    fn test_int4_fast_bf16(dt: DType) -> TestSetup {
-        make_setup(dt, 4, 128, 512, 64)
-    }
+    fn test_int4_fast_bf16(dt: DType) -> TestSetup { make_setup(dt, 4, 128, 512, 64) }
 }

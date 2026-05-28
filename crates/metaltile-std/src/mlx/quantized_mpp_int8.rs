@@ -148,18 +148,18 @@ pub fn mt_qmm_mma_mpp_int8<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
 
+    use super::*;
+
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => vals.iter().flat_map(|v| v.to_le_bytes()).collect(),
-            DType::F16 =>
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
             DType::BF16 =>
                 vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
@@ -224,7 +224,9 @@ mod tests_support {
         let w: Vec<u32> = (0..n * packs_per_row)
             .map(|i| {
                 let mut v = 0u32;
-                for b in 0..4u32 { v |= ((i as u32 * 4 + b) % 256) << (b * 8); }
+                for b in 0..4u32 {
+                    v |= ((i as u32 * 4 + b) % 256) << (b * 8);
+                }
                 v
             })
             .collect();
@@ -272,9 +274,7 @@ mod tests_support {
     fn test_qmm_mma_mpp_int8_f16_small(dt: DType) -> TestSetup { make_setup(dt, 32, 32, 64) }
 
     #[test_kernel(name = "mlx/qmm_mma_mpp_int8_f16_multi_tile", dtypes = [f16], tol = 5e-1)]
-    fn test_qmm_mma_mpp_int8_f16_multi_tile(dt: DType) -> TestSetup {
-        make_setup(dt, 64, 64, 128)
-    }
+    fn test_qmm_mma_mpp_int8_f16_multi_tile(dt: DType) -> TestSetup { make_setup(dt, 64, 64, 128) }
 
     #[test_kernel(name = "mlx/qmm_mma_mpp_int8_bf16_small", dtypes = [bf16], tol = 1e0)]
     fn test_qmm_mma_mpp_int8_bf16_small(dt: DType) -> TestSetup { make_setup(dt, 32, 32, 64) }

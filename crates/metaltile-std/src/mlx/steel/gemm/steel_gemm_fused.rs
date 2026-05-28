@@ -242,18 +242,18 @@ steel_gemm_fused_kernel!(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
 
+    use super::*;
+
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 =>
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
             DType::BF16 =>
                 vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
@@ -274,7 +274,9 @@ mod tests_support {
         for mi in 0..m {
             for ni in 0..n {
                 let mut acc = 0.0f32;
-                for ki in 0..k { acc += a[mi * k + ki] * b[ki * n + ni]; }
+                for ki in 0..k {
+                    acc += a[mi * k + ki] * b[ki * n + ni];
+                }
                 out[mi * n + ni] = acc;
             }
         }

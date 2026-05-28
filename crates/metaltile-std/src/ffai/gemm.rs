@@ -91,17 +91,21 @@ pub fn ffai_gemm<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         use DType::*;
         match dt {
-            F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
             BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _    => panic!("unsupported dtype {dt:?}"),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 

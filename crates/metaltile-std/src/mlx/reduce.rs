@@ -181,22 +181,20 @@ seg_reduce_kernel!(mt_seg_reduce_min, min, "min");
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
-    use metaltile::test_kernel;
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 => {
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect()
-            },
-            DType::BF16 => {
-                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect()
-            },
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
         }
     }
@@ -258,9 +256,8 @@ mod tests_support {
         kernel_ir: fn(DType) -> metaltile_core::ir::Kernel,
         expected: Vec<f32>,
     ) -> TestSetup {
-        let inp: Vec<f32> = (0..n_seg * seg_len)
-            .map(|i| dt_round(((i % 23) as f32 - 11.0) * 0.07, dt))
-            .collect();
+        let inp: Vec<f32> =
+            (0..n_seg * seg_len).map(|i| dt_round(((i % 23) as f32 - 11.0) * 0.07, dt)).collect();
         let grid_x = n_seg.div_ceil(256) as u32;
         TestSetup::new(kernel_ir(dt))
             .input(TestBuffer::from_vec("inp", pack(&inp, dt), dt))
@@ -274,8 +271,7 @@ mod tests_support {
     #[test_kernel(name = "mlx/col_reduce/sum_f32", dtypes = [f32], tol = 1e-3)]
     fn test_col_reduce_sum_f32(dt: DType) -> TestSetup {
         let (rows, cols) = (37, 100);
-        let inp: Vec<f32> =
-            (0..rows * cols).map(|i| ((i % 19) as f32 - 9.0) * 0.1).collect();
+        let inp: Vec<f32> = (0..rows * cols).map(|i| ((i % 19) as f32 - 9.0) * 0.1).collect();
         let expected = cpu_col_reduce(&inp, rows, cols, 0.0, |a, b| a + b);
         make_col_setup(rows, cols, dt, mt_col_reduce::kernel_ir_for, expected)
     }
@@ -304,8 +300,7 @@ mod tests_support {
     #[test_kernel(name = "mlx/col_reduce/prod_f32", dtypes = [f32], tol = 1e-4)]
     fn test_col_reduce_prod_f32(dt: DType) -> TestSetup {
         let (rows, cols) = (8, 40);
-        let inp: Vec<f32> =
-            (0..rows * cols).map(|i| 1.0 + ((i % 7) as f32 - 3.0) * 0.02).collect();
+        let inp: Vec<f32> = (0..rows * cols).map(|i| 1.0 + ((i % 7) as f32 - 3.0) * 0.02).collect();
         let expected = cpu_col_reduce(&inp, rows, cols, 1.0, |a, b| a * b);
         make_col_setup(rows, cols, dt, mt_col_reduce_prod::kernel_ir_for, expected)
     }
@@ -314,9 +309,8 @@ mod tests_support {
     #[test_kernel(name = "mlx/col_reduce/sum_f16", dtypes = [f16], tol = 5e-2)]
     fn test_col_reduce_sum_f16(dt: DType) -> TestSetup {
         let (rows, cols) = (20, 64);
-        let inp: Vec<f32> = (0..rows * cols)
-            .map(|i| dt_round(((i % 13) as f32 - 6.0) * 0.05, dt))
-            .collect();
+        let inp: Vec<f32> =
+            (0..rows * cols).map(|i| dt_round(((i % 13) as f32 - 6.0) * 0.05, dt)).collect();
         let expected = cpu_col_reduce(&inp, rows, cols, 0.0, |a, b| a + b);
         make_col_setup(rows, cols, dt, mt_col_reduce::kernel_ir_for, expected)
     }
@@ -325,9 +319,8 @@ mod tests_support {
     #[test_kernel(name = "mlx/col_reduce/sum_bf16", dtypes = [bf16], tol = 2e-1)]
     fn test_col_reduce_sum_bf16(dt: DType) -> TestSetup {
         let (rows, cols) = (20, 64);
-        let inp: Vec<f32> = (0..rows * cols)
-            .map(|i| dt_round(((i % 13) as f32 - 6.0) * 0.05, dt))
-            .collect();
+        let inp: Vec<f32> =
+            (0..rows * cols).map(|i| dt_round(((i % 13) as f32 - 6.0) * 0.05, dt)).collect();
         let expected = cpu_col_reduce(&inp, rows, cols, 0.0, |a, b| a + b);
         make_col_setup(rows, cols, dt, mt_col_reduce::kernel_ir_for, expected)
     }
@@ -336,8 +329,7 @@ mod tests_support {
     #[test_kernel(name = "mlx/seg_reduce/sum_f32", dtypes = [f32], tol = 1e-3)]
     fn test_seg_reduce_sum_f32(dt: DType) -> TestSetup {
         let (n_seg, seg_len) = (300, 17);
-        let inp: Vec<f32> =
-            (0..n_seg * seg_len).map(|i| ((i % 23) as f32 - 11.0) * 0.07).collect();
+        let inp: Vec<f32> = (0..n_seg * seg_len).map(|i| ((i % 23) as f32 - 11.0) * 0.07).collect();
         let expected = cpu_seg_reduce(&inp, n_seg, seg_len, 0.0, |a, b| a + b);
         make_seg_setup(n_seg, seg_len, dt, mt_seg_reduce::kernel_ir_for, expected)
     }
@@ -376,9 +368,8 @@ mod tests_support {
     #[test_kernel(name = "mlx/seg_reduce/sum_bf16", dtypes = [bf16], tol = 1e-1)]
     fn test_seg_reduce_sum_bf16(dt: DType) -> TestSetup {
         let (n_seg, seg_len) = (100, 24);
-        let inp: Vec<f32> = (0..n_seg * seg_len)
-            .map(|i| dt_round(((i % 11) as f32 - 5.0) * 0.04, dt))
-            .collect();
+        let inp: Vec<f32> =
+            (0..n_seg * seg_len).map(|i| dt_round(((i % 11) as f32 - 5.0) * 0.04, dt)).collect();
         let expected = cpu_seg_reduce(&inp, n_seg, seg_len, 0.0, |a, b| a + b);
         make_seg_setup(n_seg, seg_len, dt, mt_seg_reduce::kernel_ir_for, expected)
     }

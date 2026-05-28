@@ -57,23 +57,21 @@ pub fn mt_softmax<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
         ir::KernelMode,
     };
-    use metaltile::test_kernel;
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 => {
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect()
-            },
-            DType::BF16 => {
-                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect()
-            },
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
         }
     }
@@ -118,17 +116,11 @@ mod tests_support {
     }
 
     #[test_kernel(name = "mlx/softmax/n1024_rows4_f32", dtypes = [f32], tol = 1e-4)]
-    fn test_softmax_n1024_rows4_f32(dt: DType) -> TestSetup {
-        make_setup(1024, 4, dt)
-    }
+    fn test_softmax_n1024_rows4_f32(dt: DType) -> TestSetup { make_setup(1024, 4, dt) }
 
     #[test_kernel(name = "mlx/softmax/n256_rows3_f32", dtypes = [f32], tol = 1e-4)]
-    fn test_softmax_n256_rows3_f32(dt: DType) -> TestSetup {
-        make_setup(256, 3, dt)
-    }
+    fn test_softmax_n256_rows3_f32(dt: DType) -> TestSetup { make_setup(256, 3, dt) }
 
     #[test_kernel(name = "mlx/softmax/n1024_rows2_f16", dtypes = [f16], tol = 5e-3)]
-    fn test_softmax_n1024_rows2_f16(dt: DType) -> TestSetup {
-        make_setup(1024, 2, dt)
-    }
+    fn test_softmax_n1024_rows2_f16(dt: DType) -> TestSetup { make_setup(1024, 2, dt) }
 }

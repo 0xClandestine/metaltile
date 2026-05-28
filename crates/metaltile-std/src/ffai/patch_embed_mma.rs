@@ -291,24 +291,29 @@ pub fn patch_embed_mma<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
     use metaltile_macros::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
     fn round(v: f32, dt: DType) -> f32 {
         match dt {
-            DType::F16  => half::f16::from_f32(v).to_f32(),
+            DType::F16 => half::f16::from_f32(v).to_f32(),
             DType::BF16 => half::bf16::from_f32(v).to_f32(),
-            _           => v,
+            _ => v,
         }
     }
 
@@ -320,9 +325,15 @@ mod tests_support {
 
     /// CPU reference for patch_embed_mma: explicit unfold + projection.
     fn naive_patch_embed_mma(
-        image: &[f32], weight: &[f32], bias: &[f32],
-        in_ch: usize, in_h: usize, in_w: usize,
-        patch_h: usize, patch_w: usize, hidden: usize,
+        image: &[f32],
+        weight: &[f32],
+        bias: &[f32],
+        in_ch: usize,
+        in_h: usize,
+        in_w: usize,
+        patch_h: usize,
+        patch_w: usize,
+        hidden: usize,
     ) -> Vec<f32> {
         let patches_h = in_h / patch_h;
         let patches_w = in_w / patch_w;
@@ -341,7 +352,8 @@ mod tests_support {
                         for py in 0..patch_h {
                             for px in 0..patch_w {
                                 let img_idx = ic * input_plane + (py0 + py) * in_w + (px0 + px);
-                                let w_idx = h * patch_dim + ic * patch_h * patch_w + py * patch_w + px;
+                                let w_idx =
+                                    h * patch_dim + ic * patch_h * patch_w + py * patch_w + px;
                                 acc += image[img_idx] * weight[w_idx];
                             }
                         }
@@ -363,7 +375,9 @@ mod tests_support {
         let image = ramp(in_ch * in_h * in_w, 37, 18.0);
         let weight = ramp(hidden * in_ch * patch_h * patch_w, 41, 20.0);
         let bias = ramp(hidden, 11, 5.0);
-        let expected = naive_patch_embed_mma(&image, &weight, &bias, in_ch, in_h, in_w, patch_h, patch_w, hidden);
+        let expected = naive_patch_embed_mma(
+            &image, &weight, &bias, in_ch, in_h, in_w, patch_h, patch_w, hidden,
+        );
 
         let mut k = patch_embed_mma::kernel_ir_for(dt);
         k.mode = metaltile_core::ir::KernelMode::Reduction;
@@ -392,7 +406,9 @@ mod tests_support {
         let image = ramp(in_ch * in_h * in_w, 23, 11.0);
         let weight = ramp(hidden * in_ch * patch_h * patch_w, 17, 8.0);
         let bias = ramp(hidden, 5, 2.0);
-        let expected = naive_patch_embed_mma(&image, &weight, &bias, in_ch, in_h, in_w, patch_h, patch_w, hidden);
+        let expected = naive_patch_embed_mma(
+            &image, &weight, &bias, in_ch, in_h, in_w, patch_h, patch_w, hidden,
+        );
 
         let mut k = patch_embed_mma::kernel_ir_for(dt);
         k.mode = metaltile_core::ir::KernelMode::Reduction;
@@ -418,11 +434,14 @@ mod tests_support {
         let n_out = num_patches * hidden;
         let image_r: Vec<f32> =
             (0..in_ch * in_h * in_w).map(|i| round(((i % 11) as f32 - 5.0) * 0.005, dt)).collect();
-        let weight_r: Vec<f32> =
-            (0..hidden * in_ch * patch_h * patch_w).map(|i| round(((i % 7) as f32 - 3.0) * 0.005, dt)).collect();
+        let weight_r: Vec<f32> = (0..hidden * in_ch * patch_h * patch_w)
+            .map(|i| round(((i % 7) as f32 - 3.0) * 0.005, dt))
+            .collect();
         let bias_r: Vec<f32> =
             (0..hidden).map(|i| round(((i % 5) as f32 - 2.0) * 0.01, dt)).collect();
-        let expected = naive_patch_embed_mma(&image_r, &weight_r, &bias_r, in_ch, in_h, in_w, patch_h, patch_w, hidden);
+        let expected = naive_patch_embed_mma(
+            &image_r, &weight_r, &bias_r, in_ch, in_h, in_w, patch_h, patch_w, hidden,
+        );
 
         let mut k = patch_embed_mma::kernel_ir_for(dt);
         k.mode = metaltile_core::ir::KernelMode::Reduction;

@@ -343,8 +343,9 @@ pub fn ffai_batched_4_qmm_fast<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile_core::DType;
+
+    use super::*;
 
     fn quantize_int4_row(row: &[f32], group_size: usize) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
         let in_dim = row.len();
@@ -357,7 +358,8 @@ mod tests_support {
             let mn = gs.iter().copied().fold(f32::INFINITY, f32::min);
             let mx = gs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             let scale = if (mx - mn).abs() < 1e-10 { 1.0 } else { (mx - mn) / 15.0 };
-            scales[g] = scale; biases[g] = mn;
+            scales[g] = scale;
+            biases[g] = mn;
             for (i, &v) in gs.iter().enumerate() {
                 let q = ((v - mn) / scale).round().clamp(0.0, 15.0) as u32;
                 let d = g * group_size + i;
@@ -367,18 +369,35 @@ mod tests_support {
         (packed, scales, biases)
     }
 
-    fn quantize_matrix(rows: &[f32], out_dim: usize, in_dim: usize, group_size: usize) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
-        let mut w = Vec::new(); let mut s = Vec::new(); let mut b = Vec::new();
+    fn quantize_matrix(
+        rows: &[f32],
+        out_dim: usize,
+        in_dim: usize,
+        group_size: usize,
+    ) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
+        let mut w = Vec::new();
+        let mut s = Vec::new();
+        let mut b = Vec::new();
         for row in 0..out_dim {
-            let (pw, ps, pb) = quantize_int4_row(&rows[row * in_dim..(row + 1) * in_dim], group_size);
-            w.extend(pw); s.extend(ps); b.extend(pb);
+            let (pw, ps, pb) =
+                quantize_int4_row(&rows[row * in_dim..(row + 1) * in_dim], group_size);
+            w.extend(pw);
+            s.extend(ps);
+            b.extend(pb);
         }
         (w, s, b)
     }
 
     fn source(n: usize, seed: u64, scale: f32, off: f32) -> Vec<f32> {
         let mut s = seed;
-        (0..n).map(|_| { s ^= s << 13; s ^= s >> 7; s ^= s << 17; ((s % 20_000) as f32 / 20_000.0 - 0.5) * scale + off }).collect()
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                ((s % 20_000) as f32 / 20_000.0 - 0.5) * scale + off
+            })
+            .collect()
     }
 
     // Multi-dispatch test: oracle dispatches ffai_batched_4_qgemv_fast M times.

@@ -4932,7 +4932,6 @@ mod qmm_selector_tests {
 
 mod tests_bitwidth {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
@@ -4940,13 +4939,14 @@ mod tests_bitwidth {
         ir::KernelMode,
     };
 
+    use super::*;
+
     fn pack_dt(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
             DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => {
-                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect()
-            }
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
         }
     }
@@ -5035,11 +5035,18 @@ mod tests_bitwidth {
         let biases_f32: Vec<f32> = (0..n * gs_per_row)
             .map(|i| round_dt(-0.02 + 0.005 * (i as f32 * 0.07).cos(), dt))
             .collect();
-        let x_f32: Vec<f32> = (0..m * k)
-            .map(|i| round_dt(0.05 * (i as f32 * 0.013).sin(), dt))
-            .collect();
+        let x_f32: Vec<f32> =
+            (0..m * k).map(|i| round_dt(0.05 * (i as f32 * 0.013).sin(), dt)).collect();
         let ref_out = cpu_qmm_bitstream(
-            &codes_flat, &scales_f32, &biases_f32, &x_f32, m, n, k, gs_per_row, group_size,
+            &codes_flat,
+            &scales_f32,
+            &biases_f32,
+            &x_f32,
+            m,
+            n,
+            k,
+            gs_per_row,
+            group_size,
         );
         let out_size = m * n * if dt == DType::F32 { 4 } else { 2 };
         let mut kernel = kernel_ir_fn(dt);

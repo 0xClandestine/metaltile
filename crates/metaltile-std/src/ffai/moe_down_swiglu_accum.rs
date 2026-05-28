@@ -323,10 +323,18 @@ pub mod tests_support {
     }
 
     #[derive(Clone, Copy, Debug)]
-    enum Dt { F32, F16, Bf16 }
+    enum Dt {
+        F32,
+        F16,
+        Bf16,
+    }
     impl Dt {
         fn to_dtype(self) -> DType {
-            match self { Dt::F32 => DType::F32, Dt::F16 => DType::F16, Dt::Bf16 => DType::BF16 }
+            match self {
+                Dt::F32 => DType::F32,
+                Dt::F16 => DType::F16,
+                Dt::Bf16 => DType::BF16,
+            }
         }
         fn round(self, v: f32) -> f32 {
             match self {
@@ -346,8 +354,14 @@ pub mod tests_support {
     fn unpack_bytes(bytes: &[u8], dt: Dt) -> Vec<f32> {
         match dt {
             Dt::F32 => bytemuck::cast_slice::<u8, f32>(bytes).to_vec(),
-            Dt::F16 => bytes.chunks_exact(2).map(|c| half::f16::from_le_bytes([c[0],c[1]]).to_f32()).collect(),
-            Dt::Bf16 => bytes.chunks_exact(2).map(|c| half::bf16::from_le_bytes([c[0],c[1]]).to_f32()).collect(),
+            Dt::F16 => bytes
+                .chunks_exact(2)
+                .map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32())
+                .collect(),
+            Dt::Bf16 => bytes
+                .chunks_exact(2)
+                .map(|c| half::bf16::from_le_bytes([c[0], c[1]]).to_f32())
+                .collect(),
         }
     }
     fn pack_u32_bytes(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
@@ -375,86 +389,161 @@ pub mod tests_support {
         (packed, scales, biases)
     }
 
-    fn quantize_stacked(flat: &[f32], n_experts: usize, out_dim: usize, in_dim: usize, group_size: usize) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
-        let mut w = Vec::new(); let mut s = Vec::new(); let mut b = Vec::new();
+    fn quantize_stacked(
+        flat: &[f32],
+        n_experts: usize,
+        out_dim: usize,
+        in_dim: usize,
+        group_size: usize,
+    ) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
+        let mut w = Vec::new();
+        let mut s = Vec::new();
+        let mut b = Vec::new();
         for e in 0..n_experts {
             for row in 0..out_dim {
                 let base = e * out_dim * in_dim + row * in_dim;
                 let (pw, ps, pb) = quantize_int4_row(&flat[base..base + in_dim], group_size);
-                w.extend(pw); s.extend(ps); b.extend(pb);
+                w.extend(pw);
+                s.extend(ps);
+                b.extend(pb);
             }
         }
         (w, s, b)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn dequant_gemv_one_expert(weights_stacked: &[u32], scales_stacked: &[f32], biases_stacked: &[f32], inner: &[f32], expert: usize, in_dim: usize, out_dim: usize, group_size: usize) -> Vec<f32> {
+    fn dequant_gemv_one_expert(
+        weights_stacked: &[u32],
+        scales_stacked: &[f32],
+        biases_stacked: &[f32],
+        inner: &[f32],
+        expert: usize,
+        in_dim: usize,
+        out_dim: usize,
+        group_size: usize,
+    ) -> Vec<f32> {
         let n_packs_per_row = in_dim / 8;
         let n_groups = in_dim / group_size;
         let weight_expert_off = expert * out_dim * n_packs_per_row;
         let scale_expert_off = expert * out_dim * n_groups;
-        (0..out_dim).map(|row| {
-            let rpo = weight_expert_off + row * n_packs_per_row;
-            let rgo = scale_expert_off + row * n_groups;
-            let mut acc = 0.0_f32;
-            for pack_idx in 0..n_packs_per_row {
-                let g = pack_idx / (group_size / 8);
-                let scale = scales_stacked[rgo + g];
-                let bias = biases_stacked[rgo + g];
-                let packed = weights_stacked[rpo + pack_idx];
-                let p_off = pack_idx * 8;
-                for i in 0..8 {
-                    let q = (packed >> (i * 4)) & 0xF;
-                    acc += (q as f32 * scale + bias) * inner[p_off + i];
+        (0..out_dim)
+            .map(|row| {
+                let rpo = weight_expert_off + row * n_packs_per_row;
+                let rgo = scale_expert_off + row * n_groups;
+                let mut acc = 0.0_f32;
+                for pack_idx in 0..n_packs_per_row {
+                    let g = pack_idx / (group_size / 8);
+                    let scale = scales_stacked[rgo + g];
+                    let bias = biases_stacked[rgo + g];
+                    let packed = weights_stacked[rpo + pack_idx];
+                    let p_off = pack_idx * 8;
+                    for i in 0..8 {
+                        let q = (packed >> (i * 4)) & 0xF;
+                        acc += (q as f32 * scale + bias) * inner[p_off + i];
+                    }
                 }
-            }
-            acc
-        }).collect()
+                acc
+            })
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn naive_oracle(gates: &[Vec<f32>; 8], ups: &[Vec<f32>; 8], expert_indices: &[u32; 8], slot_weights: &[f32; 8], weights_stacked: &[u32], scales_stacked: &[f32], biases_stacked: &[f32], in_dim: usize, out_dim: usize, group_size: usize) -> Vec<f32> {
+    fn naive_oracle(
+        gates: &[Vec<f32>; 8],
+        ups: &[Vec<f32>; 8],
+        expert_indices: &[u32; 8],
+        slot_weights: &[f32; 8],
+        weights_stacked: &[u32],
+        scales_stacked: &[f32],
+        biases_stacked: &[f32],
+        in_dim: usize,
+        out_dim: usize,
+        group_size: usize,
+    ) -> Vec<f32> {
         let mut acc = vec![0.0_f32; out_dim];
         for k in 0..8 {
-            let inner: Vec<f32> = (0..in_dim).map(|d| {
-                let g = gates[k][d];
-                let u = ups[k][d];
-                let silu = g / (1.0 + (-g).exp());
-                silu * u
-            }).collect();
-            let down = dequant_gemv_one_expert(weights_stacked, scales_stacked, biases_stacked, &inner, expert_indices[k] as usize, in_dim, out_dim, group_size);
-            for i in 0..out_dim { acc[i] += slot_weights[k] * down[i]; }
+            let inner: Vec<f32> = (0..in_dim)
+                .map(|d| {
+                    let g = gates[k][d];
+                    let u = ups[k][d];
+                    let silu = g / (1.0 + (-g).exp());
+                    silu * u
+                })
+                .collect();
+            let down = dequant_gemv_one_expert(
+                weights_stacked,
+                scales_stacked,
+                biases_stacked,
+                &inner,
+                expert_indices[k] as usize,
+                in_dim,
+                out_dim,
+                group_size,
+            );
+            for i in 0..out_dim {
+                acc[i] += slot_weights[k] * down[i];
+            }
         }
         acc
     }
 
     fn source(n: usize, seed: u64, scale: f32, off: f32) -> Vec<f32> {
         let mut s = seed;
-        (0..n).map(|_| {
-            s ^= s << 13; s ^= s >> 7; s ^= s << 17;
-            ((s % 20_000) as f32 / 20_000.0 - 0.5) * scale + off
-        }).collect()
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                ((s % 20_000) as f32 / 20_000.0 - 0.5) * scale + off
+            })
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run_case(dt: Dt, in_dim: usize, out_dim: usize, group_size: usize, n_experts: usize, tol: f32) {
+    fn run_case(
+        dt: Dt,
+        in_dim: usize,
+        out_dim: usize,
+        group_size: usize,
+        n_experts: usize,
+        tol: f32,
+    ) {
         let _g = gpu_lock();
         assert_eq!(in_dim, 768, "kernel pins tg_inner alloc at 768");
         assert!(n_experts >= 8);
         let gates: [Vec<f32>; 8] = std::array::from_fn(|k| {
-            source(in_dim, 0x1001 + k as u64 * 0x91, 3.0, 0.0).iter().map(|&v| dt.round(v)).collect()
+            source(in_dim, 0x1001 + k as u64 * 0x91, 3.0, 0.0)
+                .iter()
+                .map(|&v| dt.round(v))
+                .collect()
         });
         let ups: [Vec<f32>; 8] = std::array::from_fn(|k| {
-            source(in_dim, 0x2002 + k as u64 * 0x91, 2.0, 0.05).iter().map(|&v| dt.round(v)).collect()
+            source(in_dim, 0x2002 + k as u64 * 0x91, 2.0, 0.05)
+                .iter()
+                .map(|&v| dt.round(v))
+                .collect()
         });
         let expert_indices: [u32; 8] = [3, 17, 41, 58, 72, 89, 104, 121];
         assert!(expert_indices.iter().all(|&e| (e as usize) < n_experts));
-        let slot_weights_f32: [f32; 8] = [0.31, 0.19, 0.12, 0.08, 0.06, 0.05, 0.04, 0.03].map(|v| dt.round(v));
+        let slot_weights_f32: [f32; 8] =
+            [0.31, 0.19, 0.12, 0.08, 0.06, 0.05, 0.04, 0.03].map(|v| dt.round(v));
         let w_stacked_f32 = source(n_experts * out_dim * in_dim, 0x3003, 0.5, 0.0);
-        let (w_packed, scales_f32, biases_f32) = quantize_stacked(&w_stacked_f32, n_experts, out_dim, in_dim, group_size);
+        let (w_packed, scales_f32, biases_f32) =
+            quantize_stacked(&w_stacked_f32, n_experts, out_dim, in_dim, group_size);
         let scales_dt: Vec<f32> = scales_f32.iter().map(|&v| dt.round(v)).collect();
         let biases_dt: Vec<f32> = biases_f32.iter().map(|&v| dt.round(v)).collect();
-        let expected = naive_oracle(&gates, &ups, &expert_indices, &slot_weights_f32, &w_packed, &scales_dt, &biases_dt, in_dim, out_dim, group_size);
+        let expected = naive_oracle(
+            &gates,
+            &ups,
+            &expert_indices,
+            &slot_weights_f32,
+            &w_packed,
+            &scales_dt,
+            &biases_dt,
+            in_dim,
+            out_dim,
+            group_size,
+        );
         let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         for k in 0..8 {
             buffers.insert(format!("gate_{k}"), pack_bytes(&gates[k], dt));
@@ -472,11 +561,17 @@ pub mod tests_support {
         let ctx = Context::new().expect("Context::new on macOS");
         let mut kernel = ffai_moe_down_swiglu_accum_int4_chain8::kernel_ir_for(dt.to_dtype());
         kernel.mode = KernelMode::Reduction;
-        let result = ctx.dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [out_dim, 1, 1], [128, 1, 1]).expect("dispatch");
+        let result = ctx
+            .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [out_dim, 1, 1], [128, 1, 1])
+            .expect("dispatch");
         let actual = unpack_bytes(result.outputs.get("output").expect("output"), dt);
         assert_eq!(actual.len(), out_dim);
         assert!(actual.iter().any(|&v| v != 0.0), "output is all zeros");
-        let max_rel = actual.iter().zip(&expected).map(|(a, e)| (a - e).abs() / e.abs().max(1e-3)).fold(0.0_f32, f32::max);
+        let max_rel = actual
+            .iter()
+            .zip(&expected)
+            .map(|(a, e)| (a - e).abs() / e.abs().max(1e-3))
+            .fold(0.0_f32, f32::max);
         assert!(max_rel <= tol, "dt={dt:?}: max rel = {max_rel:.3e} > {tol:.3e}");
     }
 

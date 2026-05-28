@@ -28,22 +28,25 @@ pub fn ffai_gather<T>(
 // ── bottom of source file ─────────────────────────────────────────────────
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
-    fn pack_u32(vals: &[u32]) -> Vec<u8> {
-        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
-    }
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
 
     #[test_kernel(name = "ffai/gather_f32", dtypes = [f32], tol = 1e-6)]
     fn test_gather_copies_correct_rows_f32(dt: DType) -> TestSetup {
@@ -78,10 +81,9 @@ mod tests_support {
         let vocab = 64usize;
         let dim = 32usize;
         let n_tokens = 4usize;
-        let table: Vec<f32> =
-            (0..vocab * dim)
-                .map(|i| half::f16::from_f32((i % 257) as f32 * 0.01 - 1.0).to_f32())
-                .collect();
+        let table: Vec<f32> = (0..vocab * dim)
+            .map(|i| half::f16::from_f32((i % 257) as f32 * 0.01 - 1.0).to_f32())
+            .collect();
         let indices: Vec<u32> = vec![31, 0, 63, 17];
         let mut expected = vec![0.0f32; n_tokens * dim];
         for (token_i, &id) in indices.iter().enumerate() {
@@ -108,10 +110,9 @@ mod tests_support {
         let vocab = 32usize;
         let dim = 16usize;
         let n_tokens = 3usize;
-        let table: Vec<f32> =
-            (0..vocab * dim)
-                .map(|i| half::bf16::from_f32((i % 257) as f32 * 0.01 - 1.0).to_f32())
-                .collect();
+        let table: Vec<f32> = (0..vocab * dim)
+            .map(|i| half::bf16::from_f32((i % 257) as f32 * 0.01 - 1.0).to_f32())
+            .collect();
         let indices: Vec<u32> = vec![17, 0, 31];
         let mut expected = vec![0.0f32; n_tokens * dim];
         for (token_i, &id) in indices.iter().enumerate() {

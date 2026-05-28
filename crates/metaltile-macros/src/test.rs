@@ -95,8 +95,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         None => quote! {},
     };
 
-    let static_name =
-        syn::Ident::new(&format!("__STATIC_{fn_name_str}"), fn_name.span());
+    let static_name = syn::Ident::new(&format!("__STATIC_{fn_name_str}"), fn_name.span());
 
     TokenStream::from(quote! {
         #input_fn

@@ -267,7 +267,6 @@ mod tests {
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
@@ -275,11 +274,12 @@ mod tests_support {
         ir::KernelMode,
     };
 
+    use super::*;
+
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 =>
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
             DType::BF16 =>
                 vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
@@ -291,7 +291,9 @@ mod tests_support {
         for mr in 0..m {
             for nc in 0..n {
                 let mut acc = 0.0f32;
-                for kk in 0..k { acc += a[mr * k + kk] * b[kk * n + nc]; }
+                for kk in 0..k {
+                    acc += a[mr * k + kk] * b[kk * n + nc];
+                }
                 out[mr * n + nc] = acc;
             }
         }
@@ -308,9 +310,8 @@ mod tests_support {
     fn make_accum_setup(dt: DType, n_splits: usize, m: usize, n: usize) -> TestSetup {
         let partials: Vec<f32> =
             (0..n_splits * m * n).map(|i| ((i / (m * n) + 1) as f32) * 0.01).collect();
-        let expected: Vec<f32> = (0..m * n)
-            .map(|_| (1..=n_splits).map(|s| s as f32 * 0.01).sum::<f32>())
-            .collect();
+        let expected: Vec<f32> =
+            (0..m * n).map(|_| (1..=n_splits).map(|s| s as f32 * 0.01).sum::<f32>()).collect();
         let mut kernel = mt_steel_gemm_splitk_accum_nax::kernel_ir_for(dt);
         kernel.mode = KernelMode::Reduction;
         TestSetup::new(kernel)
@@ -327,13 +328,7 @@ mod tests_support {
     }
 
     /// Test the splitk_nax pass1 kernel: verify partial products.
-    fn make_pass1_setup(
-        dt: DType,
-        m: usize,
-        n: usize,
-        k: usize,
-        n_splits: usize,
-    ) -> TestSetup {
+    fn make_pass1_setup(dt: DType, m: usize, n: usize, k: usize, n_splits: usize) -> TestSetup {
         let k_per_split = k / n_splits;
         let (a_f32, b_f32) = build_inputs(m, n, k);
         let round = |v: f32| match dt {
@@ -352,7 +347,9 @@ mod tests_support {
             for mr in 0..m {
                 for nc in 0..n {
                     let mut acc = 0.0f32;
-                    for kk in k_start..k_end { acc += a[mr * k + kk] * b[kk * n + nc]; }
+                    for kk in k_start..k_end {
+                        acc += a[mr * k + kk] * b[kk * n + nc];
+                    }
                     expected[s * m * n + mr * n + nc] = acc;
                 }
             }
@@ -375,14 +372,10 @@ mod tests_support {
     }
 
     #[test_kernel(name = "steel/gemm_splitk_nax_accum_f32", dtypes = [f32], tol = 1e-5)]
-    fn test_gemm_splitk_nax_accum_f32(dt: DType) -> TestSetup {
-        make_accum_setup(dt, 2, 32, 32)
-    }
+    fn test_gemm_splitk_nax_accum_f32(dt: DType) -> TestSetup { make_accum_setup(dt, 2, 32, 32) }
 
     #[test_kernel(name = "steel/gemm_splitk_nax_accum_f16", dtypes = [f16], tol = 1e-3)]
-    fn test_gemm_splitk_nax_accum_f16(dt: DType) -> TestSetup {
-        make_accum_setup(dt, 2, 32, 32)
-    }
+    fn test_gemm_splitk_nax_accum_f16(dt: DType) -> TestSetup { make_accum_setup(dt, 2, 32, 32) }
 
     #[test_kernel(name = "steel/gemm_splitk_nax_pass1_f32_2way", dtypes = [f32], tol = 1e-3)]
     fn test_gemm_splitk_nax_pass1_f32_2way(dt: DType) -> TestSetup {

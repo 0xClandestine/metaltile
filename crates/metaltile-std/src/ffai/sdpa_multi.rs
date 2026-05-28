@@ -337,18 +337,18 @@ pub fn ffai_sdpa_multi_tree_mask<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };
 
+    use super::*;
+
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 =>
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
             DType::BF16 =>
                 vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
@@ -454,11 +454,12 @@ mod tests_support {
         let k = ramp(n_kv_heads * kv_stride * head_dim, 13, 6.0);
         let v = ramp(n_kv_heads * kv_stride * head_dim, 11, 5.0);
         let expected = naive_sdpa_multi(
-            &q, &k, &v, n_q_heads, n_kv_heads, head_dim, base_kv, n_query, kv_stride, false,
-            scale,
+            &q, &k, &v, n_q_heads, n_kv_heads, head_dim, base_kv, n_query, kv_stride, false, scale,
         );
-        make_setup(dt, q, k, v, expected, n_q_heads, n_kv_heads, head_dim, base_kv, n_query,
-            kv_stride, false, scale)
+        make_setup(
+            dt, q, k, v, expected, n_q_heads, n_kv_heads, head_dim, base_kv, n_query, kv_stride,
+            false, scale,
+        )
     }
 
     #[test_kernel(name = "ffai/sdpa_multi/causal_f32", dtypes = [f32], tol = 1e-4)]
@@ -471,11 +472,12 @@ mod tests_support {
         let k = ramp(n_kv_heads * kv_stride * head_dim, 13, 6.0);
         let v = ramp(n_kv_heads * kv_stride * head_dim, 11, 5.0);
         let expected = naive_sdpa_multi(
-            &q, &k, &v, n_q_heads, n_kv_heads, head_dim, base_kv, n_query, kv_stride, true,
-            scale,
+            &q, &k, &v, n_q_heads, n_kv_heads, head_dim, base_kv, n_query, kv_stride, true, scale,
         );
-        make_setup(dt, q, k, v, expected, n_q_heads, n_kv_heads, head_dim, base_kv, n_query,
-            kv_stride, true, scale)
+        make_setup(
+            dt, q, k, v, expected, n_q_heads, n_kv_heads, head_dim, base_kv, n_query, kv_stride,
+            true, scale,
+        )
     }
 
     #[test_kernel(name = "ffai/sdpa_multi/prefix_gqa_causal_f32", dtypes = [f32], tol = 1e-4)]
@@ -488,11 +490,12 @@ mod tests_support {
         let k = ramp(n_kv_heads * kv_stride * head_dim, 13, 6.0);
         let v = ramp(n_kv_heads * kv_stride * head_dim, 11, 5.0);
         let expected = naive_sdpa_multi(
-            &q, &k, &v, n_q_heads, n_kv_heads, head_dim, base_kv, n_query, kv_stride, true,
-            scale,
+            &q, &k, &v, n_q_heads, n_kv_heads, head_dim, base_kv, n_query, kv_stride, true, scale,
         );
-        make_setup(dt, q, k, v, expected, n_q_heads, n_kv_heads, head_dim, base_kv, n_query,
-            kv_stride, true, scale)
+        make_setup(
+            dt, q, k, v, expected, n_q_heads, n_kv_heads, head_dim, base_kv, n_query, kv_stride,
+            true, scale,
+        )
     }
 
     #[test_kernel(name = "ffai/sdpa_multi/full_f16", dtypes = [f16], tol = 5e-3)]
@@ -504,17 +507,19 @@ mod tests_support {
         let q_raw = ramp(n_query * n_q_heads * head_dim, 23, 9.0);
         let k_raw = ramp(n_kv_heads * kv_stride * head_dim, 13, 6.0);
         let v_raw = ramp(n_kv_heads * kv_stride * head_dim, 11, 5.0);
-        let round_f16 =
-            |xs: &[f32]| -> Vec<f32> { xs.iter().map(|&x| half::f16::from_f32(x).to_f32()).collect() };
+        let round_f16 = |xs: &[f32]| -> Vec<f32> {
+            xs.iter().map(|&x| half::f16::from_f32(x).to_f32()).collect()
+        };
         let q = round_f16(&q_raw);
         let k = round_f16(&k_raw);
         let v = round_f16(&v_raw);
         let expected = naive_sdpa_multi(
-            &q, &k, &v, n_q_heads, n_kv_heads, head_dim, base_kv, n_query, kv_stride, false,
-            scale,
+            &q, &k, &v, n_q_heads, n_kv_heads, head_dim, base_kv, n_query, kv_stride, false, scale,
         );
-        make_setup(dt, q_raw, k_raw, v_raw, expected, n_q_heads, n_kv_heads, head_dim, base_kv,
-            n_query, kv_stride, false, scale)
+        make_setup(
+            dt, q_raw, k_raw, v_raw, expected, n_q_heads, n_kv_heads, head_dim, base_kv, n_query,
+            kv_stride, false, scale,
+        )
     }
 
     #[test_kernel(name = "ffai/sdpa_multi/causal_bf16", dtypes = [bf16], tol = 2e-2)]
@@ -533,10 +538,11 @@ mod tests_support {
         let k = round_bf16(&k_raw);
         let v = round_bf16(&v_raw);
         let expected = naive_sdpa_multi(
-            &q, &k, &v, n_q_heads, n_kv_heads, head_dim, base_kv, n_query, kv_stride, true,
-            scale,
+            &q, &k, &v, n_q_heads, n_kv_heads, head_dim, base_kv, n_query, kv_stride, true, scale,
         );
-        make_setup(dt, q_raw, k_raw, v_raw, expected, n_q_heads, n_kv_heads, head_dim, base_kv,
-            n_query, kv_stride, true, scale)
+        make_setup(
+            dt, q_raw, k_raw, v_raw, expected, n_q_heads, n_kv_heads, head_dim, base_kv, n_query,
+            kv_stride, true, scale,
+        )
     }
 }

@@ -95,17 +95,21 @@ pub fn mt_fused_gate_clipped_swiglu<T>(gate: Tensor<T>, up: Tensor<T>, out: Tens
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         use DType::*;
         match dt {
-            F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
             BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _    => panic!("unsupported dtype {dt:?}"),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
@@ -162,10 +166,8 @@ mod tests_support {
     #[test_kernel(name = "mlx/fused_gate_gelu_f16", dtypes = [f16], tol = 8e-3)]
     fn test_fused_gate_gelu_f16(dt: DType) -> TestSetup {
         let n = 2048usize;
-        let gate: Vec<f32> =
-            (0..n).map(|i| round((i as f32 * 0.013) % 8.0 - 4.0, dt)).collect();
-        let up: Vec<f32> =
-            (0..n).map(|i| round((i as f32 * 0.021) % 3.0 - 1.5, dt)).collect();
+        let gate: Vec<f32> = (0..n).map(|i| round((i as f32 * 0.013) % 8.0 - 4.0, dt)).collect();
+        let up: Vec<f32> = (0..n).map(|i| round((i as f32 * 0.021) % 3.0 - 1.5, dt)).collect();
         let expected = cpu_gelu_approx(&gate, &up);
         let mut kernel = mt_fused_gate_gelu::kernel_ir_for(dt);
         kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
@@ -179,10 +181,8 @@ mod tests_support {
     #[test_kernel(name = "mlx/fused_gate_gelu_bf16", dtypes = [bf16], tol = 3e-2)]
     fn test_fused_gate_gelu_bf16(dt: DType) -> TestSetup {
         let n = 1024usize;
-        let gate: Vec<f32> =
-            (0..n).map(|i| round((i as f32 * 0.019) % 6.0 - 3.0, dt)).collect();
-        let up: Vec<f32> =
-            (0..n).map(|i| round((i as f32 * 0.023) % 4.0 - 2.0, dt)).collect();
+        let gate: Vec<f32> = (0..n).map(|i| round((i as f32 * 0.019) % 6.0 - 3.0, dt)).collect();
+        let up: Vec<f32> = (0..n).map(|i| round((i as f32 * 0.023) % 4.0 - 2.0, dt)).collect();
         let expected = cpu_gelu_approx(&gate, &up);
         let mut kernel = mt_fused_gate_gelu::kernel_ir_for(dt);
         kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
@@ -214,10 +214,8 @@ mod tests_support {
     #[test_kernel(name = "mlx/fused_gate_clipped_swiglu_f16", dtypes = [f16], tol = 8e-3)]
     fn test_fused_gate_clipped_swiglu_f16(dt: DType) -> TestSetup {
         let n = 2048usize;
-        let gate: Vec<f32> =
-            (0..n).map(|i| round((i as f32 * 0.043) % 22.0 - 11.0, dt)).collect();
-        let up: Vec<f32> =
-            (0..n).map(|i| round((i as f32 * 0.031) % 18.0 - 9.0, dt)).collect();
+        let gate: Vec<f32> = (0..n).map(|i| round((i as f32 * 0.043) % 22.0 - 11.0, dt)).collect();
+        let up: Vec<f32> = (0..n).map(|i| round((i as f32 * 0.031) % 18.0 - 9.0, dt)).collect();
         let expected = cpu_clipped_swiglu(&gate, &up);
         let mut kernel = mt_fused_gate_clipped_swiglu::kernel_ir_for(dt);
         kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
@@ -231,10 +229,8 @@ mod tests_support {
     #[test_kernel(name = "mlx/fused_gate_clipped_swiglu_bf16", dtypes = [bf16], tol = 3e-2)]
     fn test_fused_gate_clipped_swiglu_bf16(dt: DType) -> TestSetup {
         let n = 1024usize;
-        let gate: Vec<f32> =
-            (0..n).map(|i| round((i as f32 * 0.047) % 24.0 - 12.0, dt)).collect();
-        let up: Vec<f32> =
-            (0..n).map(|i| round((i as f32 * 0.039) % 20.0 - 10.0, dt)).collect();
+        let gate: Vec<f32> = (0..n).map(|i| round((i as f32 * 0.047) % 24.0 - 12.0, dt)).collect();
+        let up: Vec<f32> = (0..n).map(|i| round((i as f32 * 0.039) % 20.0 - 10.0, dt)).collect();
         let expected = cpu_clipped_swiglu(&gate, &up);
         let mut kernel = mt_fused_gate_clipped_swiglu::kernel_ir_for(dt);
         kernel.mode = metaltile_core::ir::KernelMode::Grid3D;

@@ -109,23 +109,21 @@ pub fn ffai_gated_rmsnorm<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
         ir::KernelMode,
     };
-    use metaltile::test_kernel;
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 => {
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect()
-            },
-            DType::BF16 => {
-                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect()
-            },
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
         }
     }
@@ -162,14 +160,9 @@ mod tests_support {
     fn make_setup(n: usize, rows: usize, eps: f32, dt: DType) -> TestSetup {
         let tpg = n / 4;
         let y: Vec<f32> = ramp(rows * n, 23, 9.0);
-        let z: Vec<f32> = ramp(rows * n, 29, 7.0)
-            .into_iter()
-            .map(|v| dt_round(v, dt))
-            .collect();
-        let w: Vec<f32> = ramp(n, 13, 6.0)
-            .into_iter()
-            .map(|v| dt_round(1.0 + 0.05 * v, dt))
-            .collect();
+        let z: Vec<f32> = ramp(rows * n, 29, 7.0).into_iter().map(|v| dt_round(v, dt)).collect();
+        let w: Vec<f32> =
+            ramp(n, 13, 6.0).into_iter().map(|v| dt_round(1.0 + 0.05 * v, dt)).collect();
         let expected = naive_gated_rmsnorm(&y, &z, &w, n, eps);
         let mut kernel = ffai_gated_rmsnorm::kernel_ir_for(dt);
         kernel.mode = KernelMode::Reduction;
@@ -184,27 +177,17 @@ mod tests_support {
     }
 
     #[test_kernel(name = "ffai/gated_rmsnorm/n128_f32", dtypes = [f32], tol = 1e-4)]
-    fn test_gated_rmsnorm_n128_f32(dt: DType) -> TestSetup {
-        make_setup(128, 1, 1e-5, dt)
-    }
+    fn test_gated_rmsnorm_n128_f32(dt: DType) -> TestSetup { make_setup(128, 1, 1e-5, dt) }
 
     #[test_kernel(name = "ffai/gated_rmsnorm/n512_rows4_f32", dtypes = [f32], tol = 1e-4)]
-    fn test_gated_rmsnorm_n512_rows4_f32(dt: DType) -> TestSetup {
-        make_setup(512, 4, 1e-5, dt)
-    }
+    fn test_gated_rmsnorm_n512_rows4_f32(dt: DType) -> TestSetup { make_setup(512, 4, 1e-5, dt) }
 
     #[test_kernel(name = "ffai/gated_rmsnorm/n4096_f32", dtypes = [f32], tol = 5e-4)]
-    fn test_gated_rmsnorm_n4096_f32(dt: DType) -> TestSetup {
-        make_setup(4096, 1, 1e-5, dt)
-    }
+    fn test_gated_rmsnorm_n4096_f32(dt: DType) -> TestSetup { make_setup(4096, 1, 1e-5, dt) }
 
     #[test_kernel(name = "ffai/gated_rmsnorm/n512_f16", dtypes = [f16], tol = 2e-2)]
-    fn test_gated_rmsnorm_n512_f16(dt: DType) -> TestSetup {
-        make_setup(512, 2, 1e-5, dt)
-    }
+    fn test_gated_rmsnorm_n512_f16(dt: DType) -> TestSetup { make_setup(512, 2, 1e-5, dt) }
 
     #[test_kernel(name = "ffai/gated_rmsnorm/n512_bf16", dtypes = [bf16], tol = 8e-2)]
-    fn test_gated_rmsnorm_n512_bf16(dt: DType) -> TestSetup {
-        make_setup(512, 2, 1e-5, dt)
-    }
+    fn test_gated_rmsnorm_n512_bf16(dt: DType) -> TestSetup { make_setup(512, 2, 1e-5, dt) }
 }

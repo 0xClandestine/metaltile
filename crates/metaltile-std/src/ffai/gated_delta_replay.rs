@@ -31,14 +31,18 @@ mod tests_support {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
@@ -47,7 +51,9 @@ mod tests_support {
     fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
 
     fn xorshift(s: &mut u64) -> f32 {
-        *s ^= *s << 13; *s ^= *s >> 7; *s ^= *s << 17;
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
         (*s % 20_000) as f32 / 20_000.0 - 0.5
     }
 
@@ -63,8 +69,15 @@ mod tests_support {
 
     /// Branchless tape re-fold reference (state_replay).
     fn naive_replay(
-        delta_log: &[f32], k_log: &[f32], g_log: &[f32], state_in: &[f32],
-        mask: &[u32], batch: usize, t_log: usize, accepted: usize, has_mask: bool,
+        delta_log: &[f32],
+        k_log: &[f32],
+        g_log: &[f32],
+        state_in: &[f32],
+        mask: &[u32],
+        batch: usize,
+        t_log: usize,
+        accepted: usize,
+        has_mask: bool,
     ) -> Vec<f32> {
         let mut state = state_in.to_vec();
         for n in 0..batch * HV {
@@ -72,7 +85,9 @@ mod tests_support {
             let hvh = n % HV;
             for t in 0..t_log {
                 let do_step = t < accepted && (!has_mask || mask[b * t_log + t] != 0);
-                if !do_step { continue; }
+                if !do_step {
+                    continue;
+                }
                 let dr = (b * t_log + t) * HV * DV + hvh * DV;
                 let kr = (b * t_log + t) * HV * DK + hvh * DK;
                 let g = g_log[(b * t_log + t) * HV + hvh];
@@ -96,11 +111,12 @@ mod tests_support {
 
         let delta_log = src(batch * t_log * HV * DV, 0x21, 0.5);
         let k_log = src(batch * t_log * HV * DK, 0x22, 0.4);
-        let g_log: Vec<f32> =
-            src(batch * t_log * HV, 0x23, 0.1).iter().map(|v| 0.9 + v).collect();
+        let g_log: Vec<f32> = src(batch * t_log * HV, 0x23, 0.1).iter().map(|v| 0.9 + v).collect();
         let state_in = src(batch * HV * DV * DK, 0x24, 0.3);
         let mask: Vec<u32> = vec![1; batch * t_log];
-        let expected = naive_replay(&delta_log, &k_log, &g_log, &state_in, &mask, batch, t_log, accepted, false);
+        let expected = naive_replay(
+            &delta_log, &k_log, &g_log, &state_in, &mask, batch, t_log, accepted, false,
+        );
 
         let mut kernel_ir = state_replay_d64_32_2_2::kernel_ir_for(dt);
         kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
@@ -300,33 +316,43 @@ pub mod tests_support_ctx {
     fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
 
     fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-        a.iter().zip(b).map(|(x,y)|(x-y).abs()).fold(0.0_f32,f32::max)
+        a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max)
     }
 
     fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn src(n: usize, seed: u64, scale: f32) -> Vec<f32> {
         let mut s = seed;
-        (0..n).map(|_| {
-            s ^= s << 13; s ^= s >> 7; s ^= s << 17;
-            (s % 20_000) as f32 / 20_000.0 * scale - scale * 0.5
-        }).collect()
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                (s % 20_000) as f32 / 20_000.0 * scale - scale * 0.5
+            })
+            .collect()
     }
 
     fn naive_record(
-        q: &[f32], k: &[f32], v: &[f32], g: &[f32], beta: &[f32], state_in: &[f32],
-        batch: usize, t_val: usize,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        g: &[f32],
+        beta: &[f32],
+        state_in: &[f32],
+        batch: usize,
+        t_val: usize,
     ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let mut y = vec![0.0_f32; batch * t_val * HV * DV];
         let mut delta_log = vec![0.0_f32; batch * t_val * HV * DV];
         let mut state = state_in.to_vec();
         for n in 0..batch * HV {
-            let b = n / HV; let hvh = n % HV; let hkh = hvh / (HV / HK);
+            let b = n / HV;
+            let hvh = n % HV;
+            let hkh = hvh / (HV / HK);
             for t in 0..t_val {
                 let qk = (b * t_val + t) * HK * DK + hkh * DK;
                 let vb = (b * t_val + t) * HV * DV + hvh * DV;
@@ -334,12 +360,18 @@ pub mod tests_support_ctx {
                 for dv in 0..DV {
                     let s0 = (n * DV + dv) * DK;
                     let mut kv = 0.0_f32;
-                    for dk in 0..DK { state[s0+dk] *= g[gb]; kv += state[s0+dk] * k[qk+dk]; }
-                    let delta = (v[vb+dv] - kv) * beta[gb];
-                    delta_log[vb+dv] = delta;
+                    for dk in 0..DK {
+                        state[s0 + dk] *= g[gb];
+                        kv += state[s0 + dk] * k[qk + dk];
+                    }
+                    let delta = (v[vb + dv] - kv) * beta[gb];
+                    delta_log[vb + dv] = delta;
                     let mut out = 0.0_f32;
-                    for dk in 0..DK { state[s0+dk] += k[qk+dk] * delta; out += state[s0+dk] * q[qk+dk]; }
-                    y[vb+dv] = out;
+                    for dk in 0..DK {
+                        state[s0 + dk] += k[qk + dk] * delta;
+                        out += state[s0 + dk] * q[qk + dk];
+                    }
+                    y[vb + dv] = out;
                 }
             }
         }
@@ -347,21 +379,33 @@ pub mod tests_support_ctx {
     }
 
     fn naive_replay(
-        delta_log: &[f32], k_log: &[f32], g_log: &[f32], state_in: &[f32],
-        mask: &[u32], batch: usize, t_log: usize, accepted: usize, has_mask: bool,
+        delta_log: &[f32],
+        k_log: &[f32],
+        g_log: &[f32],
+        state_in: &[f32],
+        mask: &[u32],
+        batch: usize,
+        t_log: usize,
+        accepted: usize,
+        has_mask: bool,
     ) -> Vec<f32> {
         let mut state = state_in.to_vec();
         for n in 0..batch * HV {
-            let b = n / HV; let hvh = n % HV;
+            let b = n / HV;
+            let hvh = n % HV;
             for t in 0..t_log {
                 let do_step = t < accepted && (!has_mask || mask[b * t_log + t] != 0);
-                if !do_step { continue; }
+                if !do_step {
+                    continue;
+                }
                 let dr = (b * t_log + t) * HV * DV + hvh * DV;
                 let kr = (b * t_log + t) * HV * DK + hvh * DK;
                 let g = g_log[(b * t_log + t) * HV + hvh];
                 for dv in 0..DV {
                     let s0 = (n * DV + dv) * DK;
-                    for dk in 0..DK { state[s0+dk] = state[s0+dk] * g + k_log[kr+dk] * delta_log[dr+dv]; }
+                    for dk in 0..DK {
+                        state[s0 + dk] = state[s0 + dk] * g + k_log[kr + dk] * delta_log[dr + dv];
+                    }
                 }
             }
         }
@@ -407,7 +451,11 @@ pub mod tests_support_ctx {
         b.insert("delta_log".into(), pack_f32(&vec![0.0; exp_d.len()]));
         b.insert("t_val".into(), (t_val as u32).to_le_bytes().to_vec());
         b.insert("has_mask".into(), 0u32.to_le_bytes().to_vec());
-        let got = dispatch(gated_delta_step_record_d64_32_2_2::kernel_ir_for, &b, batch, &["y","state_out","delta_log"]);
+        let got = dispatch(gated_delta_step_record_d64_32_2_2::kernel_ir_for, &b, batch, &[
+            "y",
+            "state_out",
+            "delta_log",
+        ]);
         assert!(got[2].iter().any(|&x| x != 0.0), "tape is all zeros");
         assert!(max_abs_diff(&got[0], &exp_y) < 2e-3, "y mismatch");
         assert!(max_abs_diff(&got[1], &exp_s) < 2e-3, "state mismatch");
@@ -421,7 +469,9 @@ pub mod tests_support_ctx {
         let k_log = src(batch * t_log * HV * DK, 0x22, 0.4);
         let g_log: Vec<f32> = src(batch * t_log * HV, 0x23, 0.1).iter().map(|x| 0.9 + x).collect();
         let state_in = src(batch * HV * DV * DK, 0x24, 0.3);
-        let expected = naive_replay(&delta_log, &k_log, &g_log, &state_in, mask, batch, t_log, accepted, has_mask);
+        let expected = naive_replay(
+            &delta_log, &k_log, &g_log, &state_in, mask, batch, t_log, accepted, has_mask,
+        );
         let mut b: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         b.insert("delta_log".into(), pack_f32(&delta_log));
         b.insert("k_log".into(), pack_f32(&k_log));
@@ -433,7 +483,10 @@ pub mod tests_support_ctx {
         b.insert("accepted".into(), (accepted as u32).to_le_bytes().to_vec());
         b.insert("has_mask".into(), u32::from(has_mask).to_le_bytes().to_vec());
         let got = dispatch(state_replay_d64_32_2_2::kernel_ir_for, &b, batch, &["state_out"]);
-        assert!(max_abs_diff(&got[0], &expected) < 2e-3, "replay accepted={accepted} mask={has_mask}: state mismatch");
+        assert!(
+            max_abs_diff(&got[0], &expected) < 2e-3,
+            "replay accepted={accepted} mask={has_mask}: state mismatch"
+        );
     }
 
     #[test]

@@ -41,7 +41,10 @@ mod tests_support {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestBuffer, TestSetup}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
 
     fn pack_f32(vals: &[f32]) -> Vec<u8> { bytemuck::cast_slice::<f32, u8>(vals).to_vec() }
     fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
@@ -49,8 +52,12 @@ mod tests_support {
     /// CPU reference for pass2: merge per-block (o, m, l) partials into
     /// a single normalised output.
     fn naive_flash_pass2(
-        o_partials: &[f32], m_partials: &[f32], l_partials: &[f32],
-        q_heads: usize, num_blocks: usize, dim: usize,
+        o_partials: &[f32],
+        m_partials: &[f32],
+        l_partials: &[f32],
+        q_heads: usize,
+        num_blocks: usize,
+        dim: usize,
     ) -> Vec<f32> {
         let mut out = vec![0.0_f32; q_heads * dim];
         for qh in 0..q_heads {
@@ -105,9 +112,8 @@ mod tests_support {
             }
         }
 
-        let expected = naive_flash_pass2(
-            &o_partials, &m_partials, &l_partials, q_heads, num_blocks, dim,
-        );
+        let expected =
+            naive_flash_pass2(&o_partials, &m_partials, &l_partials, q_heads, num_blocks, dim);
 
         let mut kernel_ir = aura_flash_pass2_d128::kernel_ir_for(dt);
         kernel_ir.mode = metaltile_core::ir::KernelMode::Reduction;

@@ -92,34 +92,41 @@ pub fn ffai_rope_2d<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
     use metaltile::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
-    fn pack_u32(vals: &[u32]) -> Vec<u8> {
-        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
-    }
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
 
     fn round_dt(v: f32, dt: DType) -> f32 {
         match dt {
-            DType::F16  => half::f16::from_f32(v).to_f32(),
+            DType::F16 => half::f16::from_f32(v).to_f32(),
             DType::BF16 => half::bf16::from_f32(v).to_f32(),
-            _           => v,
+            _ => v,
         }
     }
 
     fn naive_rope_2d(
-        qk: &[f32], positions: &[u32],
-        n_tokens: u32, n_heads: u32, head_dim: u32, theta_base: f32,
+        qk: &[f32],
+        positions: &[u32],
+        n_tokens: u32,
+        n_heads: u32,
+        head_dim: u32,
+        theta_base: f32,
     ) -> Vec<f32> {
         let half_dim = head_dim / 2;
         let quarter_dim = head_dim / 4;
@@ -132,16 +139,24 @@ mod tests_support {
                 let head_base = (token * n_heads * head_dim + head * head_dim) as usize;
                 for j in 0..quarter_dim {
                     let inv_freq = (-2.0 * j as f32 * theta_base.log2() / half_f).exp2();
-                    let (cos_r, sin_r) = { let t = row * inv_freq; (t.cos(), t.sin()) };
-                    let (cos_c, sin_c) = { let t = col * inv_freq; (t.cos(), t.sin()) };
+                    let (cos_r, sin_r) = {
+                        let t = row * inv_freq;
+                        (t.cos(), t.sin())
+                    };
+                    let (cos_c, sin_c) = {
+                        let t = col * inv_freq;
+                        (t.cos(), t.sin())
+                    };
                     let r1 = head_base + j as usize;
                     let r2 = head_base + (j + quarter_dim) as usize;
-                    let xr1 = qk[r1]; let xr2 = qk[r2];
+                    let xr1 = qk[r1];
+                    let xr2 = qk[r2];
                     out[r1] = xr1 * cos_r - xr2 * sin_r;
                     out[r2] = xr1 * sin_r + xr2 * cos_r;
                     let c1 = head_base + (half_dim + j) as usize;
                     let c2 = head_base + (half_dim + j + quarter_dim) as usize;
-                    let xc1 = qk[c1]; let xc2 = qk[c2];
+                    let xc1 = qk[c1];
+                    let xc2 = qk[c2];
                     out[c1] = xc1 * cos_c - xc2 * sin_c;
                     out[c2] = xc1 * sin_c + xc2 * cos_c;
                 }
@@ -150,28 +165,46 @@ mod tests_support {
         out
     }
 
-    fn make_setup(n_tokens: u32, n_heads: u32, head_dim: u32, theta_base: f32, dt: DType) -> TestSetup {
-        let half_dim   = head_dim / 2;
+    fn make_setup(
+        n_tokens: u32,
+        n_heads: u32,
+        head_dim: u32,
+        theta_base: f32,
+        dt: DType,
+    ) -> TestSetup {
+        let half_dim = head_dim / 2;
         let quarter_dim = head_dim / 4;
         let n = (n_tokens * n_heads * head_dim) as usize;
         let qk_f32: Vec<f32> = (0..n).map(|i| ((i % 41) as f32 - 20.0) * 0.05).collect();
         let qk_rounded: Vec<f32> = qk_f32.iter().map(|&v| round_dt(v, dt)).collect();
         let mut positions = Vec::with_capacity((n_tokens * 2) as usize);
-        for token in 0..n_tokens { positions.push(token / 2); positions.push(token % 2); }
-        let expected = naive_rope_2d(&qk_rounded, &positions, n_tokens, n_heads, head_dim, theta_base);
+        for token in 0..n_tokens {
+            positions.push(token / 2);
+            positions.push(token % 2);
+        }
+        let expected =
+            naive_rope_2d(&qk_rounded, &positions, n_tokens, n_heads, head_dim, theta_base);
 
         let mut kernel = ffai_rope_2d::kernel_ir_for(dt);
         kernel.mode = metaltile_core::ir::KernelMode::Grid3D;
 
         TestSetup::new(kernel)
-            .input(TestBuffer::from_vec("qk",          pack(&qk_f32, dt), dt))
-            .input(TestBuffer::from_vec("positions",   pack_u32(&positions), DType::U32))
-            .input(TestBuffer::from_vec("out",         pack(&vec![0.0f32; n], dt), dt))
-            .input(TestBuffer::from_vec("n_heads",     n_heads.to_le_bytes().to_vec(),     DType::U32))
-            .input(TestBuffer::from_vec("head_dim",    head_dim.to_le_bytes().to_vec(),    DType::U32))
-            .input(TestBuffer::from_vec("half_dim",    half_dim.to_le_bytes().to_vec(),    DType::U32))
-            .input(TestBuffer::from_vec("quarter_dim", quarter_dim.to_le_bytes().to_vec(), DType::U32))
-            .input(TestBuffer::from_vec("theta_base",  theta_base.to_le_bytes().to_vec(),  DType::F32))
+            .input(TestBuffer::from_vec("qk", pack(&qk_f32, dt), dt))
+            .input(TestBuffer::from_vec("positions", pack_u32(&positions), DType::U32))
+            .input(TestBuffer::from_vec("out", pack(&vec![0.0f32; n], dt), dt))
+            .input(TestBuffer::from_vec("n_heads", n_heads.to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("head_dim", head_dim.to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("half_dim", half_dim.to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec(
+                "quarter_dim",
+                quarter_dim.to_le_bytes().to_vec(),
+                DType::U32,
+            ))
+            .input(TestBuffer::from_vec(
+                "theta_base",
+                theta_base.to_le_bytes().to_vec(),
+                DType::F32,
+            ))
             .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
             .grid_3d(n_tokens, n_heads, quarter_dim, [n_tokens, n_heads, quarter_dim])
     }

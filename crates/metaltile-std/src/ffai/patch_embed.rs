@@ -92,24 +92,29 @@ pub fn patch_embed<T>(
 
 mod tests_support {
     #![allow(unused, dead_code)]
-    use super::*;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+    };
     use metaltile_macros::test_kernel;
-    use metaltile_core::{DType, bench::{TestSetup, TestBuffer}};
+
+    use super::*;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            DType::F32  => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16  => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _           => panic!("unsupported dtype {dt:?}"),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
 
     fn round(v: f32, dt: DType) -> f32 {
         match dt {
-            DType::F16  => half::f16::from_f32(v).to_f32(),
+            DType::F16 => half::f16::from_f32(v).to_f32(),
             DType::BF16 => half::bf16::from_f32(v).to_f32(),
-            _           => v,
+            _ => v,
         }
     }
 
@@ -121,9 +126,15 @@ mod tests_support {
 
     /// CPU reference: explicit unfold then projection.
     fn naive_patch_embed(
-        image: &[f32], weight: &[f32], bias: &[f32],
-        in_ch: usize, in_h: usize, in_w: usize,
-        patch_h: usize, patch_w: usize, hidden: usize,
+        image: &[f32],
+        weight: &[f32],
+        bias: &[f32],
+        in_ch: usize,
+        in_h: usize,
+        in_w: usize,
+        patch_h: usize,
+        patch_w: usize,
+        hidden: usize,
     ) -> Vec<f32> {
         let patches_h = in_h / patch_h;
         let patches_w = in_w / patch_w;
@@ -161,7 +172,8 @@ mod tests_support {
         let image = ramp(in_ch * in_h * in_w, 37, 18.0);
         let weight = ramp(hidden * in_ch * patch_h * patch_w, 41, 20.0);
         let bias = ramp(hidden, 11, 5.0);
-        let expected = naive_patch_embed(&image, &weight, &bias, in_ch, in_h, in_w, patch_h, patch_w, hidden);
+        let expected =
+            naive_patch_embed(&image, &weight, &bias, in_ch, in_h, in_w, patch_h, patch_w, hidden);
 
         let mut k = patch_embed::kernel_ir_for(dt);
         k.mode = metaltile_core::ir::KernelMode::Grid3D;
@@ -187,7 +199,8 @@ mod tests_support {
         let image = ramp(in_ch * in_h * in_w, 29, 14.0);
         let weight = ramp(hidden * in_ch * patch_h * patch_w, 31, 15.0);
         let bias = ramp(hidden, 7, 3.0);
-        let expected = naive_patch_embed(&image, &weight, &bias, in_ch, in_h, in_w, patch_h, patch_w, hidden);
+        let expected =
+            naive_patch_embed(&image, &weight, &bias, in_ch, in_h, in_w, patch_h, patch_w, hidden);
 
         let mut k = patch_embed::kernel_ir_for(dt);
         k.mode = metaltile_core::ir::KernelMode::Grid3D;
@@ -210,10 +223,16 @@ mod tests_support {
     fn test_patch_embed_f16(dt: DType) -> TestSetup {
         let (in_ch, in_h, in_w, patch_h, patch_w, hidden) = (3, 28, 28, 14, 14, 16);
         let n_out = (in_h / patch_h) * (in_w / patch_w) * hidden;
-        let image_r: Vec<f32> = ramp(in_ch * in_h * in_w, 37, 18.0).iter().map(|&x| round(x, dt)).collect();
-        let weight_r: Vec<f32> = ramp(hidden * in_ch * patch_h * patch_w, 41, 20.0).iter().map(|&x| round(x, dt)).collect();
+        let image_r: Vec<f32> =
+            ramp(in_ch * in_h * in_w, 37, 18.0).iter().map(|&x| round(x, dt)).collect();
+        let weight_r: Vec<f32> = ramp(hidden * in_ch * patch_h * patch_w, 41, 20.0)
+            .iter()
+            .map(|&x| round(x, dt))
+            .collect();
         let bias_r: Vec<f32> = ramp(hidden, 11, 5.0).iter().map(|&x| round(x, dt)).collect();
-        let expected = naive_patch_embed(&image_r, &weight_r, &bias_r, in_ch, in_h, in_w, patch_h, patch_w, hidden);
+        let expected = naive_patch_embed(
+            &image_r, &weight_r, &bias_r, in_ch, in_h, in_w, patch_h, patch_w, hidden,
+        );
 
         let mut k = patch_embed::kernel_ir_for(dt);
         k.mode = metaltile_core::ir::KernelMode::Grid3D;
@@ -236,10 +255,16 @@ mod tests_support {
     fn test_patch_embed_bf16(dt: DType) -> TestSetup {
         let (in_ch, in_h, in_w, patch_h, patch_w, hidden) = (2, 16, 16, 8, 8, 12);
         let n_out = (in_h / patch_h) * (in_w / patch_w) * hidden;
-        let image_r: Vec<f32> = ramp(in_ch * in_h * in_w, 23, 11.0).iter().map(|&x| round(x, dt)).collect();
-        let weight_r: Vec<f32> = ramp(hidden * in_ch * patch_h * patch_w, 17, 8.0).iter().map(|&x| round(x, dt)).collect();
+        let image_r: Vec<f32> =
+            ramp(in_ch * in_h * in_w, 23, 11.0).iter().map(|&x| round(x, dt)).collect();
+        let weight_r: Vec<f32> = ramp(hidden * in_ch * patch_h * patch_w, 17, 8.0)
+            .iter()
+            .map(|&x| round(x, dt))
+            .collect();
         let bias_r: Vec<f32> = ramp(hidden, 5, 2.0).iter().map(|&x| round(x, dt)).collect();
-        let expected = naive_patch_embed(&image_r, &weight_r, &bias_r, in_ch, in_h, in_w, patch_h, patch_w, hidden);
+        let expected = naive_patch_embed(
+            &image_r, &weight_r, &bias_r, in_ch, in_h, in_w, patch_h, patch_w, hidden,
+        );
 
         let mut k = patch_embed::kernel_ir_for(dt);
         k.mode = metaltile_core::ir::KernelMode::Grid3D;
