@@ -8,8 +8,7 @@ publish = true
 
 [dependencies]
 metaltile.workspace = true
-# half.workspace = true
-# bytemuck.workspace = true
+half.workspace = true
+bytemuck.workspace = true
 
 [dev-dependencies]
-insta.workspace = true
