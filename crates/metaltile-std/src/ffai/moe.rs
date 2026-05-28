@@ -3530,6 +3530,140 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
 }
 
 #[cfg(target_os = "macos")]
+
+mod tests_mma_bitwidth {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+    use metaltile::test_kernel;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+        ir::KernelMode,
+    };
+
+    use super::*;
+
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
+    fn pack_dt(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
+        }
+    }
+    fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
+
+    /// Pack one MoE weight row (`k_in` codes) into a LSB-first bit-stream.
+    fn pack_bitstream_row(codes: &[u32], bits: u32) -> Vec<u32> {
+        let nwords = codes.len() * bits as usize / 32;
+        let mut w = vec![0u32; nwords];
+        for (c, &code) in codes.iter().enumerate() {
+            let bo = c * bits as usize;
+            for bi in 0..bits as usize {
+                if (code >> bi) & 1 == 1 {
+                    let abs = bo + bi;
+                    w[abs / 32] |= 1u32 << (abs % 32);
+                }
+            }
+        }
+        w
+    }
+
+    fn cpu_oracle(
+        codes: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        x: &[f32],
+        indices: &[u32],
+        t_rows: usize,
+        n_out: usize,
+        k_in: usize,
+        group_size: usize,
+    ) -> Vec<f32> {
+        let groups = k_in / group_size;
+        let mut out = vec![0.0_f32; t_rows * n_out];
+        for t in 0..t_rows {
+            let e = indices[t] as usize;
+            for n in 0..n_out {
+                let mut acc = 0.0_f32;
+                for k in 0..k_in {
+                    let code = codes[(e * n_out + n) * k_in + k] as f32;
+                    let g = (e * n_out + n) * groups + k / group_size;
+                    acc += (scales[g] * code + biases[g]) * x[t * k_in + k];
+                }
+                out[t * n_out + n] = acc;
+            }
+        }
+        out
+    }
+
+    fn make_bitwidth_setup(
+        bits: u32,
+        dt: DType,
+        kernel_ir_fn: fn(DType) -> metaltile_core::ir::Kernel,
+    ) -> TestSetup {
+        let n_experts = 4usize;
+        let k_in = 64usize;
+        let n_out = 64usize;
+        let group_size = 32usize;
+        let t_rows = 64usize;
+        let max_code = (1u32 << bits) - 1;
+        let indices: Vec<u32> = (0..t_rows).map(|r| (r / (t_rows / n_experts)) as u32).collect();
+        let total = n_experts * n_out * k_in;
+        let codes: Vec<u32> = (0..total)
+            .map(|i| (i as u32).wrapping_mul(2654435761).wrapping_shr(13) & max_code)
+            .collect();
+        let packed: Vec<u32> =
+            codes.chunks_exact(k_in).flat_map(|row| pack_bitstream_row(row, bits)).collect();
+        let groups_total = n_experts * n_out * (k_in / group_size);
+        let scales: Vec<f32> =
+            (0..groups_total).map(|i| 0.005 + 0.001 * (i as f32 * 0.03).sin()).collect();
+        let biases: Vec<f32> =
+            (0..groups_total).map(|i| -0.02 + 0.005 * (i as f32 * 0.07).cos()).collect();
+        let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * (i as f32 * 0.013).sin()).collect();
+        let ref_out =
+            cpu_oracle(&codes, &scales, &biases, &x, &indices, t_rows, n_out, k_in, group_size);
+        let out_size = t_rows * n_out * if dt == DType::F32 { 4 } else { 2 };
+        let mut kernel = kernel_ir_fn(dt);
+        kernel.mode = KernelMode::Reduction;
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("x", pack_dt(&x, dt), dt))
+            .input(TestBuffer::from_vec("w", pack_u32(&packed), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack_dt(&scales, dt), dt))
+            .input(TestBuffer::from_vec("biases", pack_dt(&biases, dt), dt))
+            .input(TestBuffer::from_vec("indices", pack_u32(&indices), DType::U32))
+            .input(TestBuffer::from_vec("out", vec![0u8; out_size], dt))
+            .input(TestBuffer::from_vec("m_total", u32_le(t_rows as u32), DType::U32))
+            .input(TestBuffer::from_vec("n_out", u32_le(n_out as u32), DType::U32))
+            .input(TestBuffer::from_vec("k_in", u32_le(k_in as u32), DType::U32))
+            .input(TestBuffer::from_vec("group_size", u32_le(group_size as u32), DType::U32))
+            .expect(TestBuffer::from_vec("out", pack_dt(&ref_out, dt), dt))
+            // BM=BN=32 → grid [N/32, T/32, 1] × [128, 1, 1]
+            .grid_3d((n_out / 32) as u32, (t_rows / 32) as u32, 1, [128, 1, 1])
+    }
+
+    #[test_kernel(name = "ffai/moe/gather_qmm_mma_b3_f32", dtypes = [f32], tol = 5e-2)]
+    fn test_moe_gather_qmm_mma_b3_f32(dt: DType) -> TestSetup {
+        make_bitwidth_setup(3, dt, mt_moe_gather_qmm_mma_b3::kernel_ir_for)
+    }
+
+    #[test_kernel(name = "ffai/moe/gather_qmm_mma_b5_f32", dtypes = [f32], tol = 5e-2)]
+    fn test_moe_gather_qmm_mma_b5_f32(dt: DType) -> TestSetup {
+        make_bitwidth_setup(5, dt, mt_moe_gather_qmm_mma_b5::kernel_ir_for)
+    }
+
+    #[test_kernel(name = "ffai/moe/gather_qmm_mma_b6_f32", dtypes = [f32], tol = 5e-2)]
+    fn test_moe_gather_qmm_mma_b6_f32(dt: DType) -> TestSetup {
+        make_bitwidth_setup(6, dt, mt_moe_gather_qmm_mma_b6::kernel_ir_for)
+    }
+
+    #[test_kernel(name = "ffai/moe/gather_qmm_mma_b8_f32", dtypes = [f32], tol = 5e-2)]
+    fn test_moe_gather_qmm_mma_b8_f32(dt: DType) -> TestSetup {
+        make_bitwidth_setup(8, dt, mt_moe_gather_qmm_mma_b8::kernel_ir_for)
+    }
+}
+
 pub mod tests_support {
     #![allow(
         clippy::manual_is_multiple_of,
@@ -4813,137 +4947,4 @@ pub mod tests_support {
 
     #[test_kernel(name = "ffai/moe/gather_qmm_mma_int8_bf16", dtypes = [bf16], tol = 3e-2)]
     fn test_gather_qmm_mma_int8_bf16(dt: DType) -> TestSetup { make_int8_mma_setup(dt) }
-}
-
-mod tests_mma_bitwidth {
-    #![allow(unused, dead_code, clippy::too_many_arguments)]
-    use metaltile::test_kernel;
-    use metaltile_core::{
-        DType,
-        bench::{TestBuffer, TestSetup},
-        ir::KernelMode,
-    };
-
-    use super::*;
-
-    fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
-    fn pack_dt(vals: &[f32], dt: DType) -> Vec<u8> {
-        match dt {
-            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 =>
-                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _ => panic!("unsupported dtype {dt:?}"),
-        }
-    }
-    fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
-
-    /// Pack one MoE weight row (`k_in` codes) into a LSB-first bit-stream.
-    fn pack_bitstream_row(codes: &[u32], bits: u32) -> Vec<u32> {
-        let nwords = codes.len() * bits as usize / 32;
-        let mut w = vec![0u32; nwords];
-        for (c, &code) in codes.iter().enumerate() {
-            let bo = c * bits as usize;
-            for bi in 0..bits as usize {
-                if (code >> bi) & 1 == 1 {
-                    let abs = bo + bi;
-                    w[abs / 32] |= 1u32 << (abs % 32);
-                }
-            }
-        }
-        w
-    }
-
-    fn cpu_oracle(
-        codes: &[u32],
-        scales: &[f32],
-        biases: &[f32],
-        x: &[f32],
-        indices: &[u32],
-        t_rows: usize,
-        n_out: usize,
-        k_in: usize,
-        group_size: usize,
-    ) -> Vec<f32> {
-        let groups = k_in / group_size;
-        let mut out = vec![0.0_f32; t_rows * n_out];
-        for t in 0..t_rows {
-            let e = indices[t] as usize;
-            for n in 0..n_out {
-                let mut acc = 0.0_f32;
-                for k in 0..k_in {
-                    let code = codes[(e * n_out + n) * k_in + k] as f32;
-                    let g = (e * n_out + n) * groups + k / group_size;
-                    acc += (scales[g] * code + biases[g]) * x[t * k_in + k];
-                }
-                out[t * n_out + n] = acc;
-            }
-        }
-        out
-    }
-
-    fn make_bitwidth_setup(
-        bits: u32,
-        dt: DType,
-        kernel_ir_fn: fn(DType) -> metaltile_core::ir::Kernel,
-    ) -> TestSetup {
-        let n_experts = 4usize;
-        let k_in = 64usize;
-        let n_out = 64usize;
-        let group_size = 32usize;
-        let t_rows = 64usize;
-        let max_code = (1u32 << bits) - 1;
-        let indices: Vec<u32> = (0..t_rows).map(|r| (r / (t_rows / n_experts)) as u32).collect();
-        let total = n_experts * n_out * k_in;
-        let codes: Vec<u32> = (0..total)
-            .map(|i| (i as u32).wrapping_mul(2654435761).wrapping_shr(13) & max_code)
-            .collect();
-        let packed: Vec<u32> =
-            codes.chunks_exact(k_in).flat_map(|row| pack_bitstream_row(row, bits)).collect();
-        let groups_total = n_experts * n_out * (k_in / group_size);
-        let scales: Vec<f32> =
-            (0..groups_total).map(|i| 0.005 + 0.001 * (i as f32 * 0.03).sin()).collect();
-        let biases: Vec<f32> =
-            (0..groups_total).map(|i| -0.02 + 0.005 * (i as f32 * 0.07).cos()).collect();
-        let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * (i as f32 * 0.013).sin()).collect();
-        let ref_out =
-            cpu_oracle(&codes, &scales, &biases, &x, &indices, t_rows, n_out, k_in, group_size);
-        let out_size = t_rows * n_out * if dt == DType::F32 { 4 } else { 2 };
-        let mut kernel = kernel_ir_fn(dt);
-        kernel.mode = KernelMode::Reduction;
-        TestSetup::new(kernel)
-            .input(TestBuffer::from_vec("x", pack_dt(&x, dt), dt))
-            .input(TestBuffer::from_vec("w", pack_u32(&packed), DType::U32))
-            .input(TestBuffer::from_vec("scales", pack_dt(&scales, dt), dt))
-            .input(TestBuffer::from_vec("biases", pack_dt(&biases, dt), dt))
-            .input(TestBuffer::from_vec("indices", pack_u32(&indices), DType::U32))
-            .input(TestBuffer::from_vec("out", vec![0u8; out_size], dt))
-            .input(TestBuffer::from_vec("m_total", u32_le(t_rows as u32), DType::U32))
-            .input(TestBuffer::from_vec("n_out", u32_le(n_out as u32), DType::U32))
-            .input(TestBuffer::from_vec("k_in", u32_le(k_in as u32), DType::U32))
-            .input(TestBuffer::from_vec("group_size", u32_le(group_size as u32), DType::U32))
-            .expect(TestBuffer::from_vec("out", pack_dt(&ref_out, dt), dt))
-            // BM=BN=32 → grid [N/32, T/32, 1] × [128, 1, 1]
-            .grid_3d((n_out / 32) as u32, (t_rows / 32) as u32, 1, [128, 1, 1])
-    }
-
-    #[test_kernel(name = "ffai/moe/gather_qmm_mma_b3_f32", dtypes = [f32], tol = 5e-2)]
-    fn test_moe_gather_qmm_mma_b3_f32(dt: DType) -> TestSetup {
-        make_bitwidth_setup(3, dt, mt_moe_gather_qmm_mma_b3::kernel_ir_for)
-    }
-
-    #[test_kernel(name = "ffai/moe/gather_qmm_mma_b5_f32", dtypes = [f32], tol = 5e-2)]
-    fn test_moe_gather_qmm_mma_b5_f32(dt: DType) -> TestSetup {
-        make_bitwidth_setup(5, dt, mt_moe_gather_qmm_mma_b5::kernel_ir_for)
-    }
-
-    #[test_kernel(name = "ffai/moe/gather_qmm_mma_b6_f32", dtypes = [f32], tol = 5e-2)]
-    fn test_moe_gather_qmm_mma_b6_f32(dt: DType) -> TestSetup {
-        make_bitwidth_setup(6, dt, mt_moe_gather_qmm_mma_b6::kernel_ir_for)
-    }
-
-    #[test_kernel(name = "ffai/moe/gather_qmm_mma_b8_f32", dtypes = [f32], tol = 5e-2)]
-    fn test_moe_gather_qmm_mma_b8_f32(dt: DType) -> TestSetup {
-        make_bitwidth_setup(8, dt, mt_moe_gather_qmm_mma_b8::kernel_ir_for)
-    }
 }

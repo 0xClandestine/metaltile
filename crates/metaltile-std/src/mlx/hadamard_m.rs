@@ -225,6 +225,119 @@ pub fn kernel_ir_for(m: u32, dt: DType) -> Kernel {
 const _: &[BenchDType] = &[BenchDType::F32, BenchDType::F16, BenchDType::BF16];
 
 // ── bottom of source file ─────────────────────────────────────────────────
+
+#[cfg(test)]
+#[allow(clippy::needless_range_loop)] // index loops mirror the H_m matrix math
+mod tests {
+    use metaltile_codegen::msl::MslGenerator;
+    use metaltile_core::ir::Op;
+
+    use super::*;
+
+    #[test]
+    fn kernel_ir_constructs_for_all_m_and_dtypes() {
+        for m in [12u32, 20, 28] {
+            for dt in [DType::F32, DType::F16, DType::BF16] {
+                let k = kernel_ir_for(m, dt);
+                assert_eq!(k.name, format!("mt_hadamard_m{m}"));
+                assert_eq!(k.params.len(), 2);
+                assert_eq!(k.params[0].name, "inp");
+                assert!(!k.params[0].is_output);
+                assert_eq!(k.params[1].name, "out");
+                assert!(k.params[1].is_output);
+                assert_eq!(k.constexprs.len(), 1);
+                assert_eq!(k.constexprs[0].name.name(), "scale");
+                let all_ops =
+                    || std::iter::once(&k.body).chain(k.blocks.values()).flat_map(|b| b.ops.iter());
+                assert!(!all_ops().any(|op| matches!(op, Op::InlineMsl { .. })));
+                assert!(all_ops().any(|op| matches!(op, Op::StackAlloc { .. })));
+                assert!(all_ops().any(|op| matches!(op, Op::StackLoad { .. })));
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "only supports M")]
+    fn kernel_ir_rejects_invalid_m() { let _ = kernel_ir_for(16, DType::F32); }
+
+    /// Codegen sanity — the generated MSL builds and carries the sign table.
+    #[test]
+    fn codegen_emits_kernel_decl() {
+        for m in [12u32, 20, 28] {
+            for dt in [DType::F32, DType::F16, DType::BF16] {
+                let mut k = kernel_ir_for(m, dt);
+                let suffix = match dt {
+                    DType::F32 => "f32",
+                    DType::F16 => "f16",
+                    DType::BF16 => "bf16",
+                    _ => unreachable!(),
+                };
+                k.name = format!("mt_hadamard_m{m}_{suffix}");
+                let msl = MslGenerator::default().generate(&k).expect("codegen");
+                assert!(msl.contains(&format!("kernel void mt_hadamard_m{m}_{suffix}")));
+                assert!(!msl.contains("InlineMsl"));
+            }
+        }
+    }
+
+    /// Verify H_12 is orthogonal: H · H^T = 12 · I.
+    #[test]
+    fn h12_is_orthogonal() {
+        let m = 12usize;
+        for i in 0..m {
+            for j in 0..m {
+                let dot: i32 = (0..m)
+                    .map(|k| {
+                        let si = if (H12_SIGNS[i] >> k) & 1 == 1 { 1i32 } else { -1 };
+                        let sj = if (H12_SIGNS[j] >> k) & 1 == 1 { 1i32 } else { -1 };
+                        si * sj
+                    })
+                    .sum();
+                let expected = if i == j { m as i32 } else { 0 };
+                assert_eq!(dot, expected, "H12[{i}]·H12[{j}] = {dot}, expected {expected}");
+            }
+        }
+    }
+
+    /// Verify H_20 is orthogonal: H · H^T = 20 · I.
+    #[test]
+    fn h20_is_orthogonal() {
+        let m = 20usize;
+        for i in 0..m {
+            for j in 0..m {
+                let dot: i32 = (0..m)
+                    .map(|k| {
+                        let si = if (H20_SIGNS[i] >> k) & 1 == 1 { 1i32 } else { -1 };
+                        let sj = if (H20_SIGNS[j] >> k) & 1 == 1 { 1i32 } else { -1 };
+                        si * sj
+                    })
+                    .sum();
+                let expected = if i == j { m as i32 } else { 0 };
+                assert_eq!(dot, expected, "H20[{i}]·H20[{j}] = {dot}, expected {expected}");
+            }
+        }
+    }
+
+    /// Verify H_28 is orthogonal: H · H^T = 28 · I.
+    #[test]
+    fn h28_is_orthogonal() {
+        let m = 28usize;
+        for i in 0..m {
+            for j in 0..m {
+                let dot: i32 = (0..m)
+                    .map(|k| {
+                        let si = if (H28_SIGNS[i] >> k) & 1 == 1 { 1i32 } else { -1 };
+                        let sj = if (H28_SIGNS[j] >> k) & 1 == 1 { 1i32 } else { -1 };
+                        si * sj
+                    })
+                    .sum();
+                let expected = if i == j { m as i32 } else { 0 };
+                assert_eq!(dot, expected, "H28[{i}]·H28[{j}] = {dot}, expected {expected}");
+            }
+        }
+    }
+}
+
 mod tests_support {
     #![allow(unused, dead_code)]
     use metaltile::test_kernel;
@@ -368,117 +481,5 @@ mod tests_support {
             .constexpr("scale", scale)
             .expect(TestBuffer::from_vec("out", pack(&expected, dt), dt))
             .grid_3d(n_rows as u32, 1, 1, [m as u32, 1, 1])
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::needless_range_loop)] // index loops mirror the H_m matrix math
-mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::ir::Op;
-
-    use super::*;
-
-    #[test]
-    fn kernel_ir_constructs_for_all_m_and_dtypes() {
-        for m in [12u32, 20, 28] {
-            for dt in [DType::F32, DType::F16, DType::BF16] {
-                let k = kernel_ir_for(m, dt);
-                assert_eq!(k.name, format!("mt_hadamard_m{m}"));
-                assert_eq!(k.params.len(), 2);
-                assert_eq!(k.params[0].name, "inp");
-                assert!(!k.params[0].is_output);
-                assert_eq!(k.params[1].name, "out");
-                assert!(k.params[1].is_output);
-                assert_eq!(k.constexprs.len(), 1);
-                assert_eq!(k.constexprs[0].name.name(), "scale");
-                let all_ops =
-                    || std::iter::once(&k.body).chain(k.blocks.values()).flat_map(|b| b.ops.iter());
-                assert!(!all_ops().any(|op| matches!(op, Op::InlineMsl { .. })));
-                assert!(all_ops().any(|op| matches!(op, Op::StackAlloc { .. })));
-                assert!(all_ops().any(|op| matches!(op, Op::StackLoad { .. })));
-            }
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "only supports M")]
-    fn kernel_ir_rejects_invalid_m() { let _ = kernel_ir_for(16, DType::F32); }
-
-    /// Codegen sanity — the generated MSL builds and carries the sign table.
-    #[test]
-    fn codegen_emits_kernel_decl() {
-        for m in [12u32, 20, 28] {
-            for dt in [DType::F32, DType::F16, DType::BF16] {
-                let mut k = kernel_ir_for(m, dt);
-                let suffix = match dt {
-                    DType::F32 => "f32",
-                    DType::F16 => "f16",
-                    DType::BF16 => "bf16",
-                    _ => unreachable!(),
-                };
-                k.name = format!("mt_hadamard_m{m}_{suffix}");
-                let msl = MslGenerator::default().generate(&k).expect("codegen");
-                assert!(msl.contains(&format!("kernel void mt_hadamard_m{m}_{suffix}")));
-                assert!(!msl.contains("InlineMsl"));
-            }
-        }
-    }
-
-    /// Verify H_12 is orthogonal: H · H^T = 12 · I.
-    #[test]
-    fn h12_is_orthogonal() {
-        let m = 12usize;
-        for i in 0..m {
-            for j in 0..m {
-                let dot: i32 = (0..m)
-                    .map(|k| {
-                        let si = if (H12_SIGNS[i] >> k) & 1 == 1 { 1i32 } else { -1 };
-                        let sj = if (H12_SIGNS[j] >> k) & 1 == 1 { 1i32 } else { -1 };
-                        si * sj
-                    })
-                    .sum();
-                let expected = if i == j { m as i32 } else { 0 };
-                assert_eq!(dot, expected, "H12[{i}]·H12[{j}] = {dot}, expected {expected}");
-            }
-        }
-    }
-
-    /// Verify H_20 is orthogonal: H · H^T = 20 · I.
-    #[test]
-    fn h20_is_orthogonal() {
-        let m = 20usize;
-        for i in 0..m {
-            for j in 0..m {
-                let dot: i32 = (0..m)
-                    .map(|k| {
-                        let si = if (H20_SIGNS[i] >> k) & 1 == 1 { 1i32 } else { -1 };
-                        let sj = if (H20_SIGNS[j] >> k) & 1 == 1 { 1i32 } else { -1 };
-                        si * sj
-                    })
-                    .sum();
-                let expected = if i == j { m as i32 } else { 0 };
-                assert_eq!(dot, expected, "H20[{i}]·H20[{j}] = {dot}, expected {expected}");
-            }
-        }
-    }
-
-    /// Verify H_28 is orthogonal: H · H^T = 28 · I.
-    #[test]
-    fn h28_is_orthogonal() {
-        let m = 28usize;
-        for i in 0..m {
-            for j in 0..m {
-                let dot: i32 = (0..m)
-                    .map(|k| {
-                        let si = if (H28_SIGNS[i] >> k) & 1 == 1 { 1i32 } else { -1 };
-                        let sj = if (H28_SIGNS[j] >> k) & 1 == 1 { 1i32 } else { -1 };
-                        si * sj
-                    })
-                    .sum();
-                let expected = if i == j { m as i32 } else { 0 };
-                assert_eq!(dot, expected, "H28[{i}]·H28[{j}] = {dot}, expected {expected}");
-            }
-        }
     }
 }

@@ -141,6 +141,79 @@ pub fn mt_qmm_mma_mpp<T>(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use metaltile_codegen::msl::MslGenerator;
+    use metaltile_core::{dtype::DType, ir::Op};
+
+    use super::*;
+
+    #[test]
+    fn kernel_ir_constructs_and_uses_coop_tile_ops() {
+        for dt in [DType::F32, DType::F16, DType::BF16] {
+            let k = mt_qmm_mma_mpp::kernel_ir_for(dt);
+            assert_eq!(k.name, "mt_qmm_mma_mpp");
+            assert_eq!(k.params.len(), 5);
+            assert_eq!(k.params[0].name, "w");
+            assert_eq!(k.params[1].name, "scales");
+            assert_eq!(k.params[2].name, "biases");
+            assert_eq!(k.params[3].name, "x");
+            assert_eq!(k.params[4].name, "out");
+            assert!(k.params[4].is_output);
+            assert_eq!(k.constexprs.len(), 3);
+            assert_eq!(k.constexprs[0].name.name(), "k");
+            assert_eq!(k.constexprs[1].name.name(), "n");
+            assert_eq!(k.constexprs[2].name.name(), "gs_per_row");
+
+            let all_ops =
+                || std::iter::once(&k.body).chain(k.blocks.values()).flat_map(|b| b.ops.iter());
+            assert!(!all_ops().any(|op| matches!(op, Op::InlineMsl { .. })));
+            assert!(all_ops().any(|op| matches!(op, Op::CoopTileSetup { .. })));
+            assert!(all_ops().any(|op| matches!(op, Op::CoopTileLoadA { .. })));
+            assert!(all_ops().any(|op| matches!(op, Op::CoopTileLoadB { .. })));
+            assert!(all_ops().any(|op| matches!(op, Op::CoopTileRun { .. })));
+            assert!(all_ops().any(|op| matches!(op, Op::CoopTileStoreC { .. })));
+        }
+    }
+
+    /// bf16 must stage through `half` for matmul2d compatibility.
+    #[test]
+    fn bf16_stages_through_half() {
+        let k = mt_qmm_mma_mpp::kernel_ir_for(DType::BF16);
+        let setup = std::iter::once(&k.body)
+            .chain(k.blocks.values())
+            .flat_map(|b| b.ops.iter())
+            .find_map(|op| match op {
+                Op::CoopTileSetup { act_dtype, .. } => Some(*act_dtype),
+                _ => None,
+            })
+            .expect("CoopTileSetup present");
+        assert_eq!(setup, DType::F16, "bf16 activation must stage as half for matmul2d");
+    }
+
+    #[test]
+    fn codegen_emits_mpp_include_and_kernel_decl() {
+        for (dt, t_name) in [(DType::F32, "float"), (DType::F16, "half"), (DType::BF16, "half")] {
+            let mut k = mt_qmm_mma_mpp::kernel_ir_for(dt);
+            let suffix = match dt {
+                DType::F32 => "f32",
+                DType::F16 => "f16",
+                DType::BF16 => "bf16",
+                _ => unreachable!(),
+            };
+            k.name = format!("mt_qmm_mma_mpp_{suffix}");
+            let msl = MslGenerator::default().generate(&k).expect("codegen");
+            assert!(
+                msl.contains("MetalPerformancePrimitives/MetalPerformancePrimitives.h"),
+                "MPP include missing:\n{msl}"
+            );
+            assert!(msl.contains("mpp::tensor_ops::matmul2d_descriptor"));
+            assert!(msl.contains(&format!("kernel void mt_qmm_mma_mpp_{suffix}")));
+            assert!(msl.contains(&format!("threadgroup {t_name} Xs")));
+        }
+    }
+}
+
 mod tests_support {
     #![allow(unused, dead_code)]
     use metaltile::test_kernel;
@@ -269,77 +342,4 @@ mod tests_support {
 
     #[test_kernel(name = "mlx/qmm_mma_mpp_f16_multi_tile", dtypes = [f16], tol = 5e-1)]
     fn test_qmm_mma_mpp_f16_multi_tile(dt: DType) -> TestSetup { make_setup(dt, 64, 64, 128) }
-}
-
-#[cfg(test)]
-mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::{dtype::DType, ir::Op};
-
-    use super::*;
-
-    #[test]
-    fn kernel_ir_constructs_and_uses_coop_tile_ops() {
-        for dt in [DType::F32, DType::F16, DType::BF16] {
-            let k = mt_qmm_mma_mpp::kernel_ir_for(dt);
-            assert_eq!(k.name, "mt_qmm_mma_mpp");
-            assert_eq!(k.params.len(), 5);
-            assert_eq!(k.params[0].name, "w");
-            assert_eq!(k.params[1].name, "scales");
-            assert_eq!(k.params[2].name, "biases");
-            assert_eq!(k.params[3].name, "x");
-            assert_eq!(k.params[4].name, "out");
-            assert!(k.params[4].is_output);
-            assert_eq!(k.constexprs.len(), 3);
-            assert_eq!(k.constexprs[0].name.name(), "k");
-            assert_eq!(k.constexprs[1].name.name(), "n");
-            assert_eq!(k.constexprs[2].name.name(), "gs_per_row");
-
-            let all_ops =
-                || std::iter::once(&k.body).chain(k.blocks.values()).flat_map(|b| b.ops.iter());
-            assert!(!all_ops().any(|op| matches!(op, Op::InlineMsl { .. })));
-            assert!(all_ops().any(|op| matches!(op, Op::CoopTileSetup { .. })));
-            assert!(all_ops().any(|op| matches!(op, Op::CoopTileLoadA { .. })));
-            assert!(all_ops().any(|op| matches!(op, Op::CoopTileLoadB { .. })));
-            assert!(all_ops().any(|op| matches!(op, Op::CoopTileRun { .. })));
-            assert!(all_ops().any(|op| matches!(op, Op::CoopTileStoreC { .. })));
-        }
-    }
-
-    /// bf16 must stage through `half` for matmul2d compatibility.
-    #[test]
-    fn bf16_stages_through_half() {
-        let k = mt_qmm_mma_mpp::kernel_ir_for(DType::BF16);
-        let setup = std::iter::once(&k.body)
-            .chain(k.blocks.values())
-            .flat_map(|b| b.ops.iter())
-            .find_map(|op| match op {
-                Op::CoopTileSetup { act_dtype, .. } => Some(*act_dtype),
-                _ => None,
-            })
-            .expect("CoopTileSetup present");
-        assert_eq!(setup, DType::F16, "bf16 activation must stage as half for matmul2d");
-    }
-
-    #[test]
-    fn codegen_emits_mpp_include_and_kernel_decl() {
-        for (dt, t_name) in [(DType::F32, "float"), (DType::F16, "half"), (DType::BF16, "half")] {
-            let mut k = mt_qmm_mma_mpp::kernel_ir_for(dt);
-            let suffix = match dt {
-                DType::F32 => "f32",
-                DType::F16 => "f16",
-                DType::BF16 => "bf16",
-                _ => unreachable!(),
-            };
-            k.name = format!("mt_qmm_mma_mpp_{suffix}");
-            let msl = MslGenerator::default().generate(&k).expect("codegen");
-            assert!(
-                msl.contains("MetalPerformancePrimitives/MetalPerformancePrimitives.h"),
-                "MPP include missing:\n{msl}"
-            );
-            assert!(msl.contains("mpp::tensor_ops::matmul2d_descriptor"));
-            assert!(msl.contains(&format!("kernel void mt_qmm_mma_mpp_{suffix}")));
-            assert!(msl.contains(&format!("threadgroup {t_name} Xs")));
-        }
-    }
 }

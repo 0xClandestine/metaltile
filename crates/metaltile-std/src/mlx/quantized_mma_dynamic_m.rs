@@ -108,6 +108,56 @@ pub fn dispatch_grid(t: usize, n: usize) -> [usize; 3] {
     [n / BN_TILE as usize, m_padded / BM_TILE as usize, 1]
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pad_t_to_bm_rounds_up_to_multiple_of_32() {
+        assert_eq!(pad_t_to_bm(0), 0);
+        assert_eq!(pad_t_to_bm(1), 32);
+        assert_eq!(pad_t_to_bm(31), 32);
+        assert_eq!(pad_t_to_bm(32), 32);
+        assert_eq!(pad_t_to_bm(33), 64);
+        assert_eq!(pad_t_to_bm(37), 64);
+        assert_eq!(pad_t_to_bm(64), 64);
+        assert_eq!(pad_t_to_bm(4096), 4096);
+        assert_eq!(pad_t_to_bm(4097), 4128);
+    }
+
+    #[test]
+    fn dispatch_grid_pads_m_axis() {
+        // T=1 decode → 1 TG in M, N/32 TGs in N.
+        assert_eq!(dispatch_grid(1, 128), [4, 1, 1]);
+        // T=37 ragged → ceil(37/32) = 2 TGs in M.
+        assert_eq!(dispatch_grid(37, 128), [4, 2, 1]);
+        // T=4096 production → 128 TGs in M.
+        assert_eq!(dispatch_grid(4096, 2048), [64, 128, 1]);
+    }
+
+    #[test]
+    fn pad_x_rows_zero_fills_trailing() {
+        // T=2, K=4, 2 bytes/elem (f16/bf16) → 16 bytes input.
+        let x = vec![0x01u8; 16];
+        let padded = pad_x_rows_bytes(&x, 2, 4, 2);
+        // m_padded = 32, k=4, 2B → 256 bytes total.
+        assert_eq!(padded.len(), 32 * 4 * 2);
+        // First 16 bytes preserved.
+        assert!(padded[..16].iter().all(|&b| b == 0x01));
+        // Rest zero.
+        assert!(padded[16..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn kernel_ir_for_returns_mt_qmm_mma_per_dtype() {
+        for dt in [DType::F32, DType::F16, DType::BF16] {
+            let k = kernel_ir_for(dt);
+            assert_eq!(k.name, "mt_qmm_mma", "dynamic-M routes to mt_qmm_mma for dtype {:?}", dt);
+            assert_eq!(k.mode, metaltile_core::ir::KernelMode::Reduction);
+        }
+    }
+}
+
 mod tests_support {
     #![allow(unused, dead_code)]
     use metaltile::test_kernel;
@@ -285,54 +335,4 @@ mod tests_support {
 
     #[test_kernel(name = "mlx/qmm_mma_dynamic_m_f16_t37_ragged", dtypes = [f16], tol = 5e-1)]
     fn test_dynamic_m_f16_t37(dt: DType) -> TestSetup { make_setup(dt, 37, 128, 128, false) }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pad_t_to_bm_rounds_up_to_multiple_of_32() {
-        assert_eq!(pad_t_to_bm(0), 0);
-        assert_eq!(pad_t_to_bm(1), 32);
-        assert_eq!(pad_t_to_bm(31), 32);
-        assert_eq!(pad_t_to_bm(32), 32);
-        assert_eq!(pad_t_to_bm(33), 64);
-        assert_eq!(pad_t_to_bm(37), 64);
-        assert_eq!(pad_t_to_bm(64), 64);
-        assert_eq!(pad_t_to_bm(4096), 4096);
-        assert_eq!(pad_t_to_bm(4097), 4128);
-    }
-
-    #[test]
-    fn dispatch_grid_pads_m_axis() {
-        // T=1 decode → 1 TG in M, N/32 TGs in N.
-        assert_eq!(dispatch_grid(1, 128), [4, 1, 1]);
-        // T=37 ragged → ceil(37/32) = 2 TGs in M.
-        assert_eq!(dispatch_grid(37, 128), [4, 2, 1]);
-        // T=4096 production → 128 TGs in M.
-        assert_eq!(dispatch_grid(4096, 2048), [64, 128, 1]);
-    }
-
-    #[test]
-    fn pad_x_rows_zero_fills_trailing() {
-        // T=2, K=4, 2 bytes/elem (f16/bf16) → 16 bytes input.
-        let x = vec![0x01u8; 16];
-        let padded = pad_x_rows_bytes(&x, 2, 4, 2);
-        // m_padded = 32, k=4, 2B → 256 bytes total.
-        assert_eq!(padded.len(), 32 * 4 * 2);
-        // First 16 bytes preserved.
-        assert!(padded[..16].iter().all(|&b| b == 0x01));
-        // Rest zero.
-        assert!(padded[16..].iter().all(|&b| b == 0));
-    }
-
-    #[test]
-    fn kernel_ir_for_returns_mt_qmm_mma_per_dtype() {
-        for dt in [DType::F32, DType::F16, DType::BF16] {
-            let k = kernel_ir_for(dt);
-            assert_eq!(k.name, "mt_qmm_mma", "dynamic-M routes to mt_qmm_mma for dtype {:?}", dt);
-            assert_eq!(k.mode, metaltile_core::ir::KernelMode::Reduction);
-        }
-    }
 }
