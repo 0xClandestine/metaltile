@@ -423,7 +423,19 @@ impl DispatchParams {
         constexprs: &[(String, ConstValue)],
         grid: &metaltile_core::bench::Grid,
     ) -> Self {
-        let buffers = buffers.iter().map(|b| (b.name().to_string(), b.initial_bytes())).collect();
+        // Output buffers: pass empty bytes so dispatch_metal allocates the correct
+        // size but skips the CPU memcpy on every iteration.  Re-initialising a
+        // large output buffer (e.g. 256 MB) before each GPU dispatch pollutes the
+        // unified-memory cache and dramatically underestimates GPU throughput.
+        // Input buffers are typically tiny (scalars, small weight tiles) and must
+        // be initialised so the kernel sees correct values.
+        let buffers = buffers
+            .iter()
+            .map(|b| {
+                let bytes = if b.is_output() { Vec::new() } else { b.initial_bytes() };
+                (b.name().to_string(), bytes)
+            })
+            .collect();
         Self::new(buffers, constexprs, grid)
     }
 
