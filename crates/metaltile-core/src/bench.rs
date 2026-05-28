@@ -500,6 +500,9 @@ pub struct TestSetup {
     pub(crate) expected: Vec<TestBuffer>,
     pub(crate) constexprs: Vec<(String, ConstValue)>,
     pub(crate) grid: Grid,
+    /// When set, the runner dispatches this reference setup first and uses its
+    /// output buffers as the expected values for the main kernel.
+    pub(crate) ref_setup: Option<Box<TestSetup>>,
 }
 
 impl TestSetup {
@@ -514,6 +517,7 @@ impl TestSetup {
             expected: Vec::new(),
             constexprs: Vec::new(),
             grid: Grid { grid: [1, 1, 1], tpg: [1, 1, 1] },
+            ref_setup: None,
         }
     }
 
@@ -553,6 +557,18 @@ impl TestSetup {
         self
     }
 
+    /// Set a GPU-vs-GPU reference setup.
+    ///
+    /// When provided, the runner dispatches `ref_setup` first and uses its
+    /// output buffers as the expected values for the main kernel — no CPU
+    /// oracle needed.  The reference setup should use `.input()` for all its
+    /// buffers (including the output buffer, zeroed); `.expect()` is not used
+    /// on either setup when `compare_against` is set.
+    pub fn compare_against(mut self, ref_setup: TestSetup) -> Self {
+        self.ref_setup = Some(Box::new(ref_setup));
+        self
+    }
+
     /// The kernel IR for this test.
     pub fn kernel(&self) -> &Kernel { &self.kernel }
 
@@ -567,6 +583,9 @@ impl TestSetup {
 
     /// Constexpr values.
     pub fn constexprs(&self) -> &[(String, ConstValue)] { &self.constexprs }
+
+    /// Optional GPU-vs-GPU reference setup (set via [`compare_against`](Self::compare_against)).
+    pub fn ref_setup(&self) -> Option<&TestSetup> { self.ref_setup.as_deref() }
 }
 
 // ---------------------------------------------------------------------------
