@@ -822,24 +822,6 @@ pub mod kernel_tests {
             .grid_3d(dv as u32, n_total as u32, 1, [32, 1, 1])
     }
 
-use metaltile::test_kernel;
-    use metaltile_core::{
-        DType,
-        bench::{TestBuffer, TestSetup},
-    };
-
-    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
-        match dt {
-            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 =>
-                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _ => panic!("unsupported dtype {dt:?}"),
-        }
-    }
-
-    fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
-
     /// CPU oracle: matches `_gated_delta_step_ops` from mlx_lm/models/gated_delta.py.
     fn naive_gated_delta_step(
         q: &[f32],

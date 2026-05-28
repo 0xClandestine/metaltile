@@ -105,3 +105,17 @@ use metaltile::test_kernel;
     #[test_kernel(name = "mlx/logsumexp/n1024_rows2_f16", dtypes = [f16], tol = 5e-2)]
     fn test_logsumexp_n1024_rows2_f16(dt: DType) -> TestSetup { make_setup(1024, 2, dt) }
 }
+
+pub mod kernel_benches {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+    use metaltile::bench;
+    use metaltile_core::{DType, bench::BenchSetup};
+
+    use super::*;
+
+    #[bench(name = "logsumexp/logsumexp", dtypes = [f32, f16, bf16])]
+    fn bench_mt_logsumexp(dt: DType) -> BenchSetup {
+        crate::benches::bench_row_norm(mt_logsumexp::kernel_ir_for(dt), dt, 1024, 4096, 256, 1)
+    }
+}

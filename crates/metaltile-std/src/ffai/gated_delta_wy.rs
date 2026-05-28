@@ -594,69 +594,6 @@ pub mod kernel_tests {
         build_setup(dt, &q, &k, &v, &g, &beta, &state_in, &y_seq, &s_seq, hv, dk, dv, hk, t, c)
     }
 
-use metaltile::test_kernel;
-    use metaltile_core::{
-        DType,
-        bench::{TestBuffer, TestSetup},
-    };
-
-    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
-        match dt {
-            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 =>
-                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _ => panic!("unsupported dtype {dt:?}"),
-        }
-    }
-
-    fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
-
-    /// Sequential GDN reference (CPU). Same recurrence as gated_delta_ops.
-    fn sequential_gdn(
-        q: &[f32],
-        k: &[f32],
-        v: &[f32],
-        g: &[f32],
-        beta: &[f32],
-        state: &mut [f32],
-        t_total: usize,
-        hk: usize,
-        hv: usize,
-        dk: usize,
-        dv: usize,
-    ) -> Vec<f32> {
-        let hv_per_hk = hv / hk;
-        let mut y = vec![0.0_f32; t_total * hv * dv];
-        for t in 0..t_total {
-            for h_v in 0..hv {
-                let h_k = h_v / hv_per_hk;
-                let gt = g[t * hv + h_v];
-                let bt = beta[t * hv + h_v];
-                for d_v in 0..dv {
-                    let v_val = v[(t * hv + h_v) * dv + d_v];
-                    let s_base = (h_v * dv + d_v) * dk;
-                    let mut kv_mem = 0.0_f32;
-                    let mut decayed = vec![0.0_f32; dk];
-                    for s_idx in 0..dk {
-                        let s = state[s_base + s_idx] * gt;
-                        decayed[s_idx] = s;
-                        kv_mem += s * k[(t * hk + h_k) * dk + s_idx];
-                    }
-                    let delta = (v_val - kv_mem) * bt;
-                    let mut out = 0.0_f32;
-                    for s_idx in 0..dk {
-                        let s_new = decayed[s_idx] + k[(t * hk + h_k) * dk + s_idx] * delta;
-                        state[s_base + s_idx] = s_new;
-                        out += s_new * q[(t * hk + h_k) * dk + s_idx];
-                    }
-                    y[(t * hv + h_v) * dv + d_v] = out;
-                }
-            }
-        }
-        y
-    }
-
     #[test_kernel(name = "ffai/gated_delta/wy_chunk", dtypes = [f32], tol = 1e-3)]
     fn test_gated_delta_wy_chunk(dt: DType) -> TestSetup {
         use super::mt_gated_delta_wy_chunk;

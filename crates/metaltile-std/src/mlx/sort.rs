@@ -431,3 +431,17 @@ use metaltile::test_kernel;
             .grid_3d(batch as u32, 1, 1, [256, 1, 1])
     }
 }
+
+pub mod kernel_benches {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+    use metaltile::bench;
+    use metaltile_core::{DType, bench::BenchSetup};
+
+    use super::*;
+
+    #[bench(name = "sort/sort", dtypes = [f32, f16, bf16])]
+    fn bench_mt_sort(dt: DType) -> BenchSetup {
+        crate::benches::bench_row_op_y(mt_sort::kernel_ir_for(dt), dt, 1024, 1024, 256)
+    }
+}

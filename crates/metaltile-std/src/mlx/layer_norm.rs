@@ -142,3 +142,17 @@ use metaltile::test_kernel;
     #[test_kernel(name = "mlx/layer_norm/n256_rows2_f16", dtypes = [f16], tol = 5e-2)]
     fn test_layer_norm_n256_rows2_f16(dt: DType) -> TestSetup { make_setup(256, 2, 1e-5, dt) }
 }
+
+pub mod kernel_benches {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+    use metaltile::bench;
+    use metaltile_core::{DType, bench::BenchSetup};
+
+    use super::*;
+
+    #[bench(name = "layer_norm/layer_norm", dtypes = [f32, f16, bf16])]
+    fn bench_mt_layer_norm(dt: DType) -> BenchSetup {
+        crate::benches::bench_layer_norm(mt_layer_norm::kernel_ir_for(dt), dt, 1024, 4096, 1024)
+    }
+}

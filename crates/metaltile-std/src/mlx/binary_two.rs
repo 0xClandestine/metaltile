@@ -100,3 +100,17 @@ use metaltile::test_kernel;
             .grid_1d(n, 256)
     }
 }
+
+pub mod kernel_benches {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+    use metaltile::bench;
+    use metaltile_core::{DType, bench::BenchSetup};
+
+    use super::*;
+
+    #[bench(name = "binary_two/add_mul", dtypes = [f32, f16, bf16])]
+    fn bench_mt_binary_two(dt: DType) -> BenchSetup {
+        crate::benches::bench_binary_two(mt_binary_two::kernel_ir_for(dt), dt, crate::benches::ELEMENTWISE_N, crate::benches::ELEMENTWISE_TPG)
+    }
+}

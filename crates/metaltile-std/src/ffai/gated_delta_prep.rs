@@ -231,11 +231,14 @@ mod tests {
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-use metaltile::test_kernel;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
+        ir::KernelMode,
     };
+
+    use super::mt_gated_delta_prep_step;
 
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
@@ -411,31 +414,7 @@ use metaltile::test_kernel;
             .grid_3d(dv as u32, n_total as u32, 1, [32, 1, 1])
     }
 
-//! GPU correctness tests for `mt_gated_delta_prep_step`.
-
-    use metaltile::test_kernel;
-    use metaltile_core::{
-        DType,
-        bench::{TestBuffer, TestSetup},
-        ir::KernelMode,
-    };
-
-    use super::mt_gated_delta_prep_step;
-
-    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
-        match dt {
-            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            DType::BF16 =>
-                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
-            _ => panic!("unsupported dtype {dt:?}"),
-        }
-    }
-
-    fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
-
-    fn softplus(x: f32) -> f32 { (x.exp() + 1.0).ln() }
-    fn sigmoid(x: f32) -> f32 { 1.0 / (1.0 + (-x).exp()) }
+    /// GPU correctness tests for `mt_gated_delta_prep_step`.
 
     fn cpu_fused_oracle(
         conv_out: &[f32],

@@ -579,3 +579,22 @@ use metaltile::test_kernel;
         make_gated_mixer_norm_setup(8, 256, 1e-5, dt)
     }
 }
+
+pub mod kernel_benches {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+    use metaltile::bench;
+    use metaltile_core::{DType, bench::BenchSetup};
+
+    use super::*;
+
+    #[bench(name = "rms_norm/rms_norm", dtypes = [f32, f16, bf16])]
+    fn bench_mt_rms_norm(dt: DType) -> BenchSetup {
+        crate::benches::bench_rms_norm(mt_rms_norm::kernel_ir_for(dt), dt, 1024, 4096, 1024)
+    }
+
+    #[bench(name = "rms_norm/rms_norm_small", dtypes = [f32, f16, bf16])]
+    fn bench_mt_rms_norm_small(dt: DType) -> BenchSetup {
+        crate::benches::bench_rms_norm(mt_rms_norm_small::kernel_ir_for(dt), dt, 1024, 64, 32)
+    }
+}

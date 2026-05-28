@@ -261,3 +261,17 @@ use metaltile::test_kernel;
             .grid_3d(n_out as u32, 1, 1, [1, 1, 1])
     }
 }
+
+pub mod kernel_benches {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+    use metaltile::bench;
+    use metaltile_core::{DType, bench::BenchSetup};
+
+    use super::*;
+
+    #[bench(name = "strided_copy/strided_copy", dtypes = [f32, f16, bf16])]
+    fn bench_mt_strided_copy(dt: DType) -> BenchSetup {
+        crate::benches::bench_strided_copy(mt_strided_copy::kernel_ir_for(dt), dt, 1024, 4096, 256)
+    }
+}

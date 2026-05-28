@@ -407,12 +407,6 @@ pub mod kernel_tests {
             .grid_3d(1, DV as u32, (batch * HV) as u32, [32, 1, 1])
     }
 
-use metaltile::test_kernel;
-    use metaltile_core::{
-        DType,
-        bench::{TestBuffer, TestSetup},
-    };
-
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
@@ -424,60 +418,6 @@ use metaltile::test_kernel;
     }
 
     fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
-
-    fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
-
-    fn xorshift(s: &mut u64) -> f32 {
-        *s ^= *s << 13;
-        *s ^= *s >> 7;
-        *s ^= *s << 17;
-        (*s % 20_000) as f32 / 20_000.0 - 0.5
-    }
-
-    fn src(n: usize, seed: u64, scale: f32) -> Vec<f32> {
-        let mut s = seed;
-        (0..n).map(|_| xorshift(&mut s) * scale).collect()
-    }
-
-    const DK: usize = 64;
-    const DV: usize = 32;
-    const HK: usize = 2;
-    const HV: usize = 2;
-
-    /// Branchless tape re-fold reference (state_replay).
-    fn naive_replay(
-        delta_log: &[f32],
-        k_log: &[f32],
-        g_log: &[f32],
-        state_in: &[f32],
-        mask: &[u32],
-        batch: usize,
-        t_log: usize,
-        accepted: usize,
-        has_mask: bool,
-    ) -> Vec<f32> {
-        let mut state = state_in.to_vec();
-        for n in 0..batch * HV {
-            let b = n / HV;
-            let hvh = n % HV;
-            for t in 0..t_log {
-                let do_step = t < accepted && (!has_mask || mask[b * t_log + t] != 0);
-                if !do_step {
-                    continue;
-                }
-                let dr = (b * t_log + t) * HV * DV + hvh * DV;
-                let kr = (b * t_log + t) * HV * DK + hvh * DK;
-                let g = g_log[(b * t_log + t) * HV + hvh];
-                for dv in 0..DV {
-                    let s0 = (n * DV + dv) * DK;
-                    for dk in 0..DK {
-                        state[s0 + dk] = state[s0 + dk] * g + k_log[kr + dk] * delta_log[dr + dv];
-                    }
-                }
-            }
-        }
-        state
-    }
 
     #[test_kernel(name = "ffai/gated_delta/replay", dtypes = [f32], tol = 2e-3)]
     fn test_state_replay(dt: DType) -> TestSetup {

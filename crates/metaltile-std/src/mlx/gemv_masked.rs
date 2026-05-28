@@ -117,3 +117,17 @@ use metaltile::test_kernel;
             .grid_2d(m as u32, 1, [256, 1])
     }
 }
+
+pub mod kernel_benches {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+    use metaltile::bench;
+    use metaltile_core::{DType, bench::BenchSetup};
+
+    use super::*;
+
+    #[bench(name = "gemv_masked/gemv_masked", dtypes = [f32, f16, bf16])]
+    fn bench_mt_gemv_masked(dt: DType) -> BenchSetup {
+        crate::benches::bench_mat_vec_masked(mt_gemv_masked::kernel_ir_for(dt), dt, 4096, 4096, 256)
+    }
+}
