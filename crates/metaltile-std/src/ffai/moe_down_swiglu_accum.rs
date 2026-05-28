@@ -307,5 +307,3 @@ define_moe_down_swiglu_accum_chain8!(
     }),
     (gate_7, up_7, exp_7, sw_7, we_7, se_7, rpo_7, rgo_7, {}),
 );
-
-#[cfg(target_os = "macos")]

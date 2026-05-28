@@ -185,5 +185,3 @@ gated_delta_record!(
     "record_d64_32_2_2"
 );
 state_replay!(state_replay_d64_32_2_2, 64u32, 32u32, 2u32, 2u32, "replay_d64_32_2_2");
-
-#[cfg(target_os = "macos")]

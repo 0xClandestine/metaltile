@@ -250,5 +250,3 @@ pub fn mt_gated_delta_chunk<T>(
         store(state_out[state_base + s_idx], stack_load("state_reg", i).cast::<T>());
     }
 }
-
-#[cfg(target_os = "macos")]

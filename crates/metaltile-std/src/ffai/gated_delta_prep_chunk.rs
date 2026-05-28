@@ -199,5 +199,3 @@ mod tests {
         println!("===== BEGIN MSL =====\n{}\n===== END MSL =====", msl);
     }
 }
-
-#[cfg(target_os = "macos")]

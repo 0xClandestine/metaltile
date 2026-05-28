@@ -337,5 +337,3 @@ pub fn mt_gated_delta_wy_chunk<T>(
         store(state_out[state_base + ii], s.cast::<T>());
     }
 }
-
-#[cfg(target_os = "macos")]

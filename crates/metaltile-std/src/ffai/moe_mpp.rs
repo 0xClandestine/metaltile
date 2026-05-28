@@ -234,5 +234,3 @@ mod tests {
         assert!(msl.contains("kernel void mt_moe_gather_qmm_mma_int4_bm16_mpp_f32"));
     }
 }
-
-#[cfg(target_os = "macos")]

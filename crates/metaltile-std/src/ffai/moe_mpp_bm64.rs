@@ -209,5 +209,3 @@ mod tests {
         assert_eq!(setup, DType::F16, "bf16 activation must stage as half");
     }
 }
-
-#[cfg(target_os = "macos")]
