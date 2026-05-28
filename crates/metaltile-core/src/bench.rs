@@ -253,6 +253,19 @@ impl BenchBuffer {
 
     /// Total size in bytes.
     pub fn size_bytes(&self) -> u64 { (self.len * self.dtype.size_bytes()) as u64 }
+
+    /// Allocate and fill the initial byte content for this buffer.
+    ///
+    /// Callers (e.g. the runner) use this instead of inspecting `init` directly,
+    /// keeping the initialisation strategy encapsulated in this crate.
+    pub fn initial_bytes(&self) -> Vec<u8> {
+        let n = self.size_bytes() as usize;
+        match &self.init {
+            BufferInit::Random => crate::utils::random_bytes(n),
+            BufferInit::Zeros => vec![0u8; n],
+            BufferInit::FromVec(v) => v.clone(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

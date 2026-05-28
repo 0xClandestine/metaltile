@@ -15,6 +15,7 @@ metaltile-core.workspace = true
 metaltile-macros.workspace = true
 metaltile-codegen.workspace = true
 metaltile-runtime.workspace = true
+half.workspace = true
 
 [dev-dependencies]
 trybuild.workspace = true
