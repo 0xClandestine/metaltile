@@ -65,4 +65,7 @@ pub enum MetalTileError {
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("GPU dispatch timed out after {secs}s (kernel: {kernel})")]
+    Timeout { kernel: String, secs: u64 },
 }

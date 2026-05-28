@@ -404,6 +404,33 @@ pub struct BenchSetup {
     pub(crate) constexprs: Vec<(String, ConstValue)>,
     pub(crate) grid: Grid,
     pub(crate) bytes_moved: Option<u64>,
+    /// Optional reference Metal kernel timed live alongside the main kernel.
+    /// The runner reads the `.metal` source from the path configured in
+    /// `tile.toml` `[bench] reference_metal_path` and compiles + dispatches
+    /// it, populating `BenchResult::ref_gbps` / `mt_pct` from real GPU
+    /// measurements.
+    pub(crate) ref_kernel: Option<RefKernel>,
+}
+
+/// A reference Metal kernel to benchmark alongside a MetalTile kernel.
+///
+/// The `.metal` source is **not** embedded here — it is loaded at bench time
+/// from the directory specified by `[bench] reference_metal_path` in
+/// `tile.toml`.  This keeps kernel files small and lets different projects
+/// point at their own reference implementations.
+#[derive(Debug, Clone)]
+pub struct RefKernel {
+    /// The Metal kernel function name to dispatch, e.g. `"vvn_expfloat32"`.
+    pub fn_name: String,
+    /// Path to the `.metal` source file, relative to `reference_metal_path`.
+    /// For MLX kernels this is typically just the filename, e.g. `"unary.metal"`.
+    pub metal_file: String,
+    /// Buffers for the reference kernel.  Bound **positionally** — index 0
+    /// maps to `[[buffer(0)]]`, index 1 to `[[buffer(1)]]`, etc.  Order must
+    /// match the Metal function's argument list.
+    pub buffers: Vec<BenchBuffer>,
+    /// Dispatch grid for the reference kernel.
+    pub grid: Grid,
 }
 
 impl BenchSetup {
@@ -418,6 +445,7 @@ impl BenchSetup {
             constexprs: Vec::new(),
             grid: Grid { grid: [1, 1, 1], tpg: [1, 1, 1] },
             bytes_moved: None,
+            ref_kernel: None,
         }
     }
 
@@ -459,6 +487,21 @@ impl BenchSetup {
         self
     }
 
+    /// Attach a reference Metal kernel to benchmark alongside this kernel.
+    ///
+    /// The runner loads `ref.metal_file` from the directory set by
+    /// `[bench] reference_metal_path` in `tile.toml`, compiles it, and
+    /// dispatches `ref.fn_name` with the same warmup/timed-iteration
+    /// parameters as the main kernel.  The minimum observed time feeds
+    /// `BenchResult::ref_gbps`; `mt_pct` is `(mt / ref − 1) × 100`.
+    ///
+    /// If `tile.toml` has no `reference_metal_path` the reference timing is
+    /// silently skipped and `ref_gbps` stays `None`.
+    pub fn with_reference(mut self, ref_kernel: RefKernel) -> Self {
+        self.ref_kernel = Some(ref_kernel);
+        self
+    }
+
     /// The kernel IR for this benchmark.
     pub fn kernel(&self) -> &Kernel { &self.kernel }
 
@@ -486,6 +529,9 @@ impl BenchSetup {
     pub fn buffer_bytes(&self, name: &str) -> u64 {
         self.buffers.iter().find(|b| b.name == name).map(|b| b.size_bytes()).unwrap_or(0)
     }
+
+    /// Optional reference Metal kernel (set via [`with_reference`](Self::with_reference)).
+    pub fn ref_kernel(&self) -> Option<&RefKernel> { self.ref_kernel.as_ref() }
 }
 
 // ---------------------------------------------------------------------------

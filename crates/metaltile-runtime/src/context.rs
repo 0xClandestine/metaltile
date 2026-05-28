@@ -45,6 +45,11 @@ pub struct Context {
     /// no Metal device is available. Apple GPU families are cumulative,
     /// so this is the highest level that returned true.
     chip_family: Option<u32>,
+    /// When `Some(secs)`, dispatch uses a polling timeout instead of
+    /// `waitUntilCompleted`.  Set this on the runner for `tile test` to
+    /// prevent GPU hangs; leave as `None` (the default) for bench and
+    /// inference so wall-clock timing and decode throughput are unaffected.
+    dispatch_timeout_secs: Option<u64>,
 }
 
 /// One pass in a fused dispatch chain. See [`Context::dispatch_chain`].
@@ -339,13 +344,51 @@ fn resolve_strided_metadata<'a>(
     Ok((shape_data, strides_data))
 }
 
+/// Poll a committed `MTLCommandBuffer` for completion, returning `Err(Timeout)` if the
+/// GPU has not finished within `secs` seconds.  This replaces `waitUntilCompleted` to
+/// prevent the process from hanging indefinitely when a shader loops forever or when
+/// a malformed dispatch grid makes the GPU workload enormous.
+#[cfg(target_os = "macos")]
+fn wait_with_timeout(
+    cb: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLCommandBuffer>,
+    kernel_name: &str,
+    secs: u64,
+) -> Result<(), MetalTileError> {
+    use objc2_metal::{MTLCommandBuffer as _, MTLCommandBufferStatus};
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        let st = cb.status();
+        if st == MTLCommandBufferStatus::Completed {
+            return Ok(());
+        }
+        if st == MTLCommandBufferStatus::Error {
+            return Err(MetalTileError::Dispatch(format!(
+                "GPU command buffer error (kernel: {kernel_name})"
+            )));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(MetalTileError::Timeout { kernel: kernel_name.to_string(), secs });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 impl Context {
     pub fn new() -> Result<Self, MetalTileError> {
         let has_metal = cfg!(target_os = "macos");
         let chip_family = detect_apple_family();
         let tuner = Autotuner::new(Autotuner::default_cache_dir(), has_metal);
         tracing::info!(has_metal, chip_family = ?chip_family, "runtime context initialized");
-        Ok(Context { tuner, has_metal, chip_family })
+        Ok(Context { tuner, has_metal, chip_family, dispatch_timeout_secs: None })
+    }
+
+    /// Enable a per-dispatch GPU timeout.  When `Some(secs)`, every
+    /// `dispatch_metal` / `dispatch_chain` call polls for completion and
+    /// returns `Err(Timeout)` if the GPU hasn't finished within `secs`
+    /// seconds.  Pass `None` (the default) to restore the fast
+    /// `waitUntilCompleted` path used by bench and inference.
+    pub fn set_dispatch_timeout(&mut self, secs: Option<u64>) {
+        self.dispatch_timeout_secs = secs;
     }
 
     pub fn has_gpu(&self) -> bool { self.has_metal }
@@ -426,6 +469,27 @@ impl Context {
                 fn_consts,
                 Some((grid_groups, threads_per_group)),
             )
+        } else {
+            Ok(DispatchResult { elapsed_us: 0.0, gflops: 0.0, outputs: BTreeMap::new() })
+        }
+    }
+
+    /// Compile `msl_source`, look up `fn_name`, and dispatch it with
+    /// `buffers` bound positionally (index 0 → `[[buffer(0)]]`, etc.).
+    ///
+    /// This is the path used for reference Metal kernels loaded from the
+    /// directory specified by `[bench] reference_metal_path` in `tile.toml`.
+    /// The caller owns the source string — no MetalTile codegen is involved.
+    pub fn dispatch_raw_msl(
+        &self,
+        fn_name: &str,
+        msl_source: &str,
+        buffers: &[(&str, Vec<u8>)],
+        grid_groups: [usize; 3],
+        threads_per_group: [usize; 3],
+    ) -> Result<DispatchResult, MetalTileError> {
+        if self.has_metal {
+            self.dispatch_raw_metal(fn_name, msl_source, buffers, grid_groups, threads_per_group)
         } else {
             Ok(DispatchResult { elapsed_us: 0.0, gflops: 0.0, outputs: BTreeMap::new() })
         }
@@ -678,7 +742,11 @@ impl Context {
         enc.dispatchThreadgroups_threadsPerThreadgroup(tgs, tpg);
         (*enc).endEncoding();
         (*cb).commit();
-        (*cb).waitUntilCompleted();
+        if let Some(secs) = self.dispatch_timeout_secs {
+            wait_with_timeout(&*cb, &kernel.name, secs)?;
+        } else {
+            (*cb).waitUntilCompleted();
+        }
 
         let mut outputs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         for (param, binding) in kernel.params.iter().zip(&binding_plans) {
@@ -709,6 +777,156 @@ impl Context {
         _b: &BTreeMap<String, Vec<u8>>,
         _fn_consts: &BTreeMap<String, u32>,
         _grid_override: Option<([usize; 3], [usize; 3])>,
+    ) -> Result<DispatchResult, MetalTileError> {
+        Ok(DispatchResult { elapsed_us: 0.0, gflops: 0.0, outputs: BTreeMap::new() })
+    }
+
+    /// Compile `msl_source`, look up `fn_name`, bind `buffers` positionally,
+    /// and dispatch.  Used for reference Metal kernels (e.g. MLX source).
+    #[cfg(target_os = "macos")]
+    fn dispatch_raw_metal(
+        &self,
+        fn_name: &str,
+        msl_source: &str,
+        buffers: &[(&str, Vec<u8>)],
+        grid_groups: [usize; 3],
+        threads_per_group: [usize; 3],
+    ) -> Result<DispatchResult, MetalTileError> {
+        use std::sync::{Mutex, OnceLock};
+
+        use objc2::{rc::Retained, runtime::ProtocolObject};
+        use objc2_foundation::NSString;
+        use objc2_metal::{
+            MTLCommandBuffer,
+            MTLCommandEncoder,
+            MTLCommandQueue,
+            MTLComputePipelineDescriptor,
+            MTLComputePipelineState,
+            MTLCreateSystemDefaultDevice,
+            MTLDevice,
+            MTLLibrary,
+            MTLPipelineOption,
+            MTLResourceOptions,
+            MTLSize,
+        };
+        use rustc_hash::FxHashMap;
+
+        type Dev = ProtocolObject<dyn MTLDevice>;
+        type Pso = ProtocolObject<dyn MTLComputePipelineState>;
+        type Queue = ProtocolObject<dyn MTLCommandQueue>;
+
+        static DEV: OnceLock<Option<Retained<Dev>>> = OnceLock::new();
+        static PSO_CACHE: OnceLock<Mutex<FxHashMap<u64, Retained<Pso>>>> = OnceLock::new();
+        static QUEUE: OnceLock<Option<Retained<Queue>>> = OnceLock::new();
+
+        let dev = DEV
+            .get_or_init(|| MTLCreateSystemDefaultDevice())
+            .as_deref()
+            .ok_or(MetalTileError::NoDevice)?;
+
+        let queue = QUEUE
+            .get_or_init(|| {
+                use objc2_metal::MTLDevice as _;
+                dev.newCommandQueue()
+            })
+            .as_deref()
+            .ok_or(MetalTileError::QueueCreation)?;
+
+        // Cache PSOs keyed by (fn_name hash ^ first-128-bytes-of-source hash).
+        let cache = PSO_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
+        let pso_key = {
+            let mut h = FNV_OFFSET;
+            fnv1a_extend(&mut h, fn_name.as_bytes());
+            fnv1a_extend(&mut h, msl_source[..msl_source.len().min(128)].as_bytes());
+            h
+        };
+
+        let pso = {
+            let mut guard = cache.lock().map_err(|e| MetalTileError::LockPoisoned(e.to_string()))?;
+            if let Some(p) = guard.get(&pso_key) {
+                p.clone()
+            } else {
+                use objc2_metal::MTLDevice as _;
+                let ns_src = NSString::from_str(msl_source);
+                let library = dev.newLibraryWithSource_options_error(&ns_src, None)
+                    .map_err(|e| MetalTileError::MslCompilation(e.to_string()))?;
+                let fn_ns = NSString::from_str(fn_name);
+                let mtl_fn = library
+                    .newFunctionWithName(&fn_ns)
+                    .ok_or_else(|| MetalTileError::FunctionNotFound { name: fn_name.to_string() })?;
+                let desc = MTLComputePipelineDescriptor::new();
+                desc.setComputeFunction(Some(&mtl_fn));
+                let pso = dev
+                    .newComputePipelineStateWithDescriptor_options_reflection_error(
+                        &desc,
+                        MTLPipelineOption::None,
+                        None,
+                    )
+                    .map_err(|e| MetalTileError::PipelineCreation {
+                        name: fn_name.to_string(),
+                        reason: e.to_string(),
+                    })?;
+                guard.insert(pso_key, pso.clone());
+                pso
+            }
+        };
+
+        // Allocate and fill buffers.
+        let metal_bufs: Vec<BufRc> = buffers
+            .iter()
+            .map(|(_, data)| {
+                let buf = pool_acquire(dev, data.len(), MTLResourceOptions::StorageModeShared)?;
+                if !data.is_empty() {
+                    use objc2_metal::MTLBuffer as _;
+                    let dst = buf.contents();
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            data.as_ptr(),
+                            dst.as_ptr() as *mut u8,
+                            data.len(),
+                        );
+                    }
+                }
+                Ok(buf)
+            })
+            .collect::<Result<_, MetalTileError>>()?;
+
+        // Encode and dispatch.
+        use objc2_metal::MTLComputeCommandEncoder as _;
+        let cb = queue.commandBuffer().ok_or(MetalTileError::NoDevice)?;
+        let enc = cb.computeCommandEncoder().ok_or(MetalTileError::NoDevice)?;
+        enc.setComputePipelineState(&pso);
+        let [gx, gy, gz] = grid_groups;
+        let [tx, ty, tz] = threads_per_group;
+        unsafe {
+            for (idx, buf) in metal_bufs.iter().enumerate() {
+                enc.setBuffer_offset_atIndex(Some(&**buf), 0, idx);
+            }
+            enc.dispatchThreadgroups_threadsPerThreadgroup(
+                MTLSize { width: gx, height: gy, depth: gz },
+                MTLSize { width: tx, height: ty, depth: tz },
+            );
+            (*enc).endEncoding();
+            (*cb).commit();
+        }
+        if let Some(secs) = self.dispatch_timeout_secs {
+            wait_with_timeout(&*cb, fn_name, secs)?;
+        } else {
+            (*cb).waitUntilCompleted();
+        }
+
+        let elapsed_us = ((*cb).GPUEndTime() - (*cb).GPUStartTime()) * 1_000_000.0;
+        Ok(DispatchResult { elapsed_us, gflops: 0.0, outputs: BTreeMap::new() })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn dispatch_raw_metal(
+        &self,
+        _fn_name: &str,
+        _msl_source: &str,
+        _buffers: &[(&str, Vec<u8>)],
+        _grid_groups: [usize; 3],
+        _threads_per_group: [usize; 3],
     ) -> Result<DispatchResult, MetalTileError> {
         Ok(DispatchResult { elapsed_us: 0.0, gflops: 0.0, outputs: BTreeMap::new() })
     }
@@ -1085,7 +1303,12 @@ impl Context {
 
         tracing::debug!(spec_count = specs.len(), "chain dispatch committed");
         (*cb).commit();
-        (*cb).waitUntilCompleted();
+        if let Some(secs) = self.dispatch_timeout_secs {
+            let chain_name = specs.first().map_or("chain", |s| s.kernel.name.as_str());
+            wait_with_timeout(&*cb, chain_name, secs)?;
+        } else {
+            (*cb).waitUntilCompleted();
+        }
 
         // Read back outputs from each spec, but only for params NOT
         // consumed as input by a later spec (the aliased ones live in

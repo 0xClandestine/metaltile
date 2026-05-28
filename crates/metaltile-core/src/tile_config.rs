@@ -48,11 +48,33 @@ pub struct BenchConfig {
     /// Number of measured iterations for timing.
     #[serde(default = "default_bench_iters")]
     pub bench_iters: u32,
+    /// Directory containing reference `.metal` source files.
+    ///
+    /// When set, `#[bench]` functions that call `.with_reference()` can name
+    /// a file relative to this directory (e.g. `"unary.metal"`) and the
+    /// runner will compile and time that Metal kernel alongside the MetalTile
+    /// kernel, reporting live `ref_gbps` / `mt_pct`.
+    ///
+    /// For MetalTile itself this points at the checked-out MLX source tree:
+    ///
+    /// ```toml
+    /// [bench]
+    /// reference_metal_path = ".cache/mlx/mlx/backend/metal/kernels"
+    /// ```
+    ///
+    /// Any project with its own reference kernels can point here instead.
+    /// Omit the field entirely if you have no reference kernels.
+    #[serde(default)]
+    pub reference_metal_path: Option<std::path::PathBuf>,
 }
 
 impl Default for BenchConfig {
     fn default() -> Self {
-        BenchConfig { warmup_iters: default_warmup_iters(), bench_iters: default_bench_iters() }
+        BenchConfig {
+            warmup_iters: default_warmup_iters(),
+            bench_iters: default_bench_iters(),
+            reference_metal_path: None,
+        }
     }
 }
 

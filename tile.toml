@@ -8,6 +8,7 @@ cargo_args = ["--release"]
 [bench]
 warmup_iters = 5
 bench_iters  = 20
+reference_metal_path = ".cache/mlx/mlx/backend/metal/kernels"
 
 [test]
 # Tolerance applied globally unless overridden per-kernel.

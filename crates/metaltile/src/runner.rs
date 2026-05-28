@@ -4,15 +4,18 @@
 //! streaming [`ProtocolMessage`] JSON lines to stdout for `tile bench` /
 //! `tile test` to consume.
 
-use std::{collections::BTreeMap, io::Write as IoWrite, time::Instant};
+use std::{collections::BTreeMap, io::Write as IoWrite, path::PathBuf, time::Instant};
 
 use metaltile_core::{
     DType,
     all_benches, all_tests,
-    bench::{BenchBuffer, ConstValue, KernelBench, KernelTest, TestBuffer},
+    bench::{BenchBuffer, ConstValue, KernelBench, KernelTest, RefKernel, TestBuffer},
     protocol::{BenchResult, ProtocolMessage, TestResult},
 };
 use metaltile_runtime::Context;
+
+/// Env var the CLI sets to the resolved `reference_metal_path` from tile.toml.
+const REF_METAL_PATH_ENV: &str = "TILE_REF_METAL_PATH";
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -77,19 +80,34 @@ struct Runner {
     command: Command,
     filter: Option<String>,
     bench_cfg: BenchConfig,
+    /// Resolved path to reference `.metal` source files, read from the
+    /// `TILE_REF_METAL_PATH` env var (set by the CLI from tile.toml).
+    ref_metal_path: Option<PathBuf>,
 }
 
 impl Runner {
     fn new(args: Args) -> Self {
-        let ctx = Context::new().unwrap_or_else(|e| {
+        let mut ctx = Context::new().unwrap_or_else(|e| {
             eprintln!("error: failed to create Metal context: {e}");
             std::process::exit(1);
         });
+        // Enable a GPU timeout for both test and bench to prevent hangs.
+        // Tests get 10 s (small N, should finish in milliseconds).
+        // Benches get 60 s (large N, many timed iterations).
+        // Inference uses waitUntilCompleted (zero overhead) by default.
+        let timeout_secs = match args.command {
+            Command::Test => 10,
+            Command::Bench => 60,
+        };
+        ctx.set_dispatch_timeout(Some(timeout_secs));
+        let ref_metal_path = std::env::var(REF_METAL_PATH_ENV).ok().map(PathBuf::from);
+
         Runner {
             ctx,
             command: args.command,
             filter: args.filter,
             bench_cfg: BenchConfig::default(),
+            ref_metal_path,
         }
     }
 
@@ -183,9 +201,56 @@ impl Runner {
     ) -> Result<BenchResult, Box<dyn std::error::Error>> {
         let setup = bench.setup(dt);
         let bytes_moved = bench.bytes_moved(&setup);
+        let mt_min_us = self.time_bench_setup(&setup)?;
+        let mt_gbps = if mt_min_us > 0.0 {
+            (bytes_moved as f64 / 1e9) / (mt_min_us * 1e-6)
+        } else {
+            0.0
+        };
+
+        // If the setup names a reference Metal kernel and we have a path, time it.
+        let (ref_gbps, mt_pct) = if let Some(ref_k) = setup.ref_kernel() {
+            match self.time_ref_kernel(ref_k) {
+                Ok(ref_min_us) => {
+                    let ref_bytes: u64 = ref_k.buffers.iter().map(|b| b.size_bytes()).sum();
+                    let rgbps = if ref_min_us > 0.0 {
+                        (ref_bytes as f64 / 1e9) / (ref_min_us * 1e-6)
+                    } else {
+                        0.0
+                    };
+                    let pct = if rgbps > 0.0 { (mt_gbps / rgbps - 1.0) * 100.0 } else { 0.0 };
+                    (Some(rgbps), Some(pct))
+                }
+                Err(e) => {
+                    eprintln!("warn: reference kernel '{}' failed: {e}", ref_k.fn_name);
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+
+        let mean_us = 0.0; // mean not tracked separately; min_us is what matters
+        Ok(BenchResult {
+            name: bench.name().to_string(),
+            dtype: dt.label().to_string(),
+            mt_gbps,
+            ref_gbps,
+            mt_pct,
+            correct: true,
+            min_us: mt_min_us,
+            mean_us,
+        })
+    }
+
+    /// Run warmup + timed iterations for a `BenchSetup` and return the minimum
+    /// wall-clock time in microseconds.
+    fn time_bench_setup(
+        &self,
+        setup: &metaltile_core::bench::BenchSetup,
+    ) -> Result<f64, Box<dyn std::error::Error>> {
         let dispatch = DispatchParams::from_bench_buffers(setup.buffers(), setup.constexprs(), setup.grid());
 
-        // Warm up (also compiles the PSO on the first call).
         for _ in 0..self.bench_cfg.warmup_iters {
             self.ctx.dispatch_with_grid(
                 setup.kernel(),
@@ -196,8 +261,7 @@ impl Runner {
             )?;
         }
 
-        // Timed iterations.
-        let times_us: Vec<f64> = (0..self.bench_cfg.timed_iters)
+        let min_us = (0..self.bench_cfg.timed_iters)
             .map(|_| {
                 let t0 = Instant::now();
                 self.ctx.dispatch_with_grid(
@@ -209,23 +273,56 @@ impl Runner {
                 )?;
                 Ok(t0.elapsed().as_secs_f64() * 1e6)
             })
-            .collect::<Result<_, Box<dyn std::error::Error>>>()?;
+            .collect::<Result<Vec<f64>, Box<dyn std::error::Error>>>()?
+            .into_iter()
+            .fold(f64::INFINITY, f64::min);
 
-        let min_us = times_us.iter().cloned().fold(f64::INFINITY, f64::min);
-        let mean_us = times_us.iter().sum::<f64>() / times_us.len() as f64;
-        let mt_gbps =
-            if min_us > 0.0 { (bytes_moved as f64 / 1e9) / (min_us * 1e-6) } else { 0.0 };
+        Ok(min_us)
+    }
 
-        Ok(BenchResult {
-            name: bench.name().to_string(),
-            dtype: dt.label().to_string(),
-            mt_gbps,
-            ref_gbps: None,
-            mt_pct: None,
-            correct: true,
-            min_us,
-            mean_us,
-        })
+    /// Load, compile, and time a reference Metal kernel.
+    ///
+    /// Returns the minimum wall-clock time in microseconds, or an error if
+    /// `ref_metal_path` is not configured or the source file can't be read.
+    fn time_ref_kernel(
+        &self,
+        ref_k: &RefKernel,
+    ) -> Result<f64, Box<dyn std::error::Error>> {
+        let base = self.ref_metal_path.as_ref().ok_or(
+            "no reference_metal_path configured in tile.toml [bench]"
+        )?;
+        let msl_source = std::fs::read_to_string(base.join(&ref_k.metal_file))?;
+        let buffers: Vec<(&str, Vec<u8>)> = ref_k.buffers
+            .iter()
+            .map(|b| (b.name(), b.initial_bytes()))
+            .collect();
+        let [gx, gy, gz] = ref_k.grid.grid;
+        let [tx, ty, tz] = ref_k.grid.tpg;
+        let grid_groups = [gx as usize, gy as usize, gz as usize];
+        let tpg = [tx as usize, ty as usize, tz as usize];
+
+        // Warmup (also compiles and caches the PSO).
+        for _ in 0..self.bench_cfg.warmup_iters {
+            self.ctx.dispatch_raw_msl(&ref_k.fn_name, &msl_source, &buffers, grid_groups, tpg)?;
+        }
+
+        let min_us = (0..self.bench_cfg.timed_iters)
+            .map(|_| {
+                let t0 = Instant::now();
+                self.ctx.dispatch_raw_msl(
+                    &ref_k.fn_name,
+                    &msl_source,
+                    &buffers,
+                    grid_groups,
+                    tpg,
+                )?;
+                Ok(t0.elapsed().as_secs_f64() * 1e6)
+            })
+            .collect::<Result<Vec<f64>, Box<dyn std::error::Error>>>()?
+            .into_iter()
+            .fold(f64::INFINITY, f64::min);
+
+        Ok(min_us)
     }
 
     // -----------------------------------------------------------------------

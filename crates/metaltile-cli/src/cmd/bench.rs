@@ -70,6 +70,10 @@ pub fn run(
     if let Some(ref f) = filter {
         cmd.args(["--filter", f]);
     }
+    // Forward reference_metal_path so the runner can locate reference kernels.
+    if let Some(ref path) = config.bench.reference_metal_path {
+        cmd.env("TILE_REF_METAL_PATH", cwd.join(path));
+    }
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::inherit()); // compiler errors go to stderr
 

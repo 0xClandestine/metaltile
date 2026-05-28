@@ -101,7 +101,8 @@ Rules:
 - Use deterministic, bounded inputs (not `TestBuffer::random`) so failures
   reproduce reliably.
 - Use `compare_against(ref_setup)` when comparing a new kernel against an
-  existing one rather than computing CPU expected values.
+  existing reference kernel rather than computing CPU expected values.  See
+  the section below for the full pattern.
 
 ---
 
@@ -144,6 +145,153 @@ Rules:
   runtime-computed bandwidth is accurate.
 - Use `grid_1d(n, tpg)` for elementwise, `grid_3d(rows, 1, 1, [tpg,1,1])`
   for row-parallel reductions, matching the dispatch used by the kernel.
+- **When an MLX reference kernel exists, attach it with `.with_reference()`**
+  so the bench runner times both kernels live and reports `ref_gbps` /
+  `mt_pct` without relying on a static JSON baseline.  See the section below.
+
+---
+
+## Live reference benchmarking (`.with_reference()`)
+
+For every op that has a corresponding kernel in the reference source tree,
+attach a `RefKernel` so `tile bench` can show a live side-by-side comparison:
+
+```
+bench  copy/copy              f32    278.2 GB/s    3.6 µs
+                              ref    274.1 GB/s  +1.5%
+```
+
+The runner reads the `.metal` source from the directory set by
+`[bench] reference_metal_path` in `tile.toml`, compiles it (PSO is cached
+after the first run), and times it with the same warmup / iteration count as
+the MetalTile kernel.
+
+The path is **project-level config** — nothing is hardcoded in kernel files.
+For MetalTile the `tile.toml` points at the checked-out MLX source tree:
+
+```toml
+[bench]
+reference_metal_path = ".cache/mlx/mlx/backend/metal/kernels"
+```
+
+Any project can set this to its own reference kernel directory instead.
+
+### Pattern
+
+```rust
+use metaltile::core::bench::{BenchBuffer, BenchSetup, RefKernel};
+
+pub mod kernel_benches {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+    use metaltile::bench;
+    use metaltile::core::{DType, bench::{BenchBuffer, BenchSetup, RefKernel}};
+
+    use super::*;
+
+    #[bench(name = "copy/copy", dtypes = [f32, f16, bf16])]
+    fn bench_mt_copy(dt: DType) -> BenchSetup {
+        let n = 64 * 1024 * 1024usize;
+
+        // ── MLX reference kernel ─────────────────────────────────────────
+        // fn_name: the exact Metal kernel function name in the .metal file.
+        // metal_file: path relative to reference_metal_path in tile.toml.
+        // buffers: positional — index 0 = [[buffer(0)]], etc.
+        let ref_kernel = RefKernel {
+            fn_name: format!("copy{}", dt.mlx_type_suffix()),
+            metal_file: "copy.metal".to_string(),
+            buffers: vec![
+                BenchBuffer::random("src", n, dt),
+                BenchBuffer::zeros("dst", n, dt).output(),
+            ],
+            grid: metaltile::core::bench::Grid::new_1d(n, 256),
+        };
+
+        // ── MetalTile DSL kernel ─────────────────────────────────────────
+        BenchSetup::new(mt_copy::kernel_ir_for(dt))
+            .buffer(BenchBuffer::random("a",   n, dt))
+            .buffer(BenchBuffer::zeros("out",  n, dt).output())
+            .grid_1d(n, 256)
+            .with_reference(ref_kernel)   // ← runner times both, reports pct
+    }
+}
+```
+
+### Rules
+
+- `fn_name` must be the **exact** Metal compute kernel function name as it
+  appears in the `.metal` source (not a C++ template instantiation name —
+  check the `.metal` file directly).
+- `metal_file` is relative to `reference_metal_path`.  For MLX kernels this
+  is usually the filename at the top of the kernels directory, e.g.
+  `"unary.metal"`, `"binary.metal"`, `"copy.metal"`.
+- Buffers are bound **positionally**.  Match the order of `[[buffer(N)]]`
+  arguments in the Metal function signature exactly.
+- Use the **same N** as the main kernel so bandwidth figures are comparable.
+- If `tile.toml` has no `reference_metal_path`, the reference is silently
+  skipped — `ref_gbps` stays `None` and the CLI omits the ref line.
+- Omit `.with_reference()` for ops with no reference equivalent (fused ops,
+  custom ffai kernels, stubs).  The runner still reports `mt_gbps`.
+
+---
+
+## GPU-vs-GPU reference testing (`compare_against`)
+
+When computing expected values on the CPU is expensive or impractical, use
+`.compare_against(ref_setup)` to run a known-correct reference kernel on the
+GPU and compare its output against the kernel under test.
+
+The two canonical use-cases are:
+
+1. **Optimised variant vs scalar baseline** — an MMA / batched / tiled
+   variant tested against the scalar m1 kernel that is already known-correct.
+2. **New kernel vs existing kernel** — a new MetalTile kernel for an op that
+   already has a working kernel; validate the new one matches the old before
+   switching over.
+
+### Rules
+
+- The `ref_setup` uses `.input()` for **all** buffers, including the zeroed
+  output buffer.  Do not call `.expect()` on either setup — the runner uses
+  the reference kernel's GPU outputs as the expected values.
+- Both setups must receive **identical input data** (same bytes, same
+  shapes).  Build the input vecs once and share them.
+- The reference kernel must itself be correct.  If the reference is broken,
+  the test will always pass vacuously — pick the simplest, most-audited
+  variant as the reference (usually m1 / scalar / f32).
+- Reference kernels may use a different dtype from the kernel under test.
+  Convert the inputs accordingly (e.g. pack as f32 for the reference, as
+  bf16 for the main kernel).
+
+### Example
+
+```rust
+#[test_kernel(name = "mlx/moe/mma_m8", dtypes = [f16, bf16], tol = 1e-2)]
+fn test_moe_mma_m8(dt: DType) -> TestSetup {
+    let n = 512usize;
+    let x: Vec<f32> = (0..n).map(|i| 0.05 * (i as f32 * 0.013).sin()).collect();
+
+    // ── reference: scalar m1 kernel running in f32 ──────────────────────
+    let mut ref_kernel = mt_moe_m1::kernel_ir_for(DType::F32);
+    ref_kernel.mode = KernelMode::Reduction;
+    let ref_setup = TestSetup::new(ref_kernel)
+        .input(TestBuffer::from_vec("x",   pack_f32(&x, DType::F32), DType::F32))
+        .input(TestBuffer::from_vec("out", vec![0u8; n * 4],          DType::F32))
+        .constexpr("n", n as u32)
+        .grid_3d(n as u32, 1, 1, [32, 1, 1]);
+
+    // ── kernel under test: MMA m8 variant ───────────────────────────────
+    let mut kernel = mt_moe_mma_m8::kernel_ir_for(dt);
+    kernel.mode = KernelMode::Reduction;
+    TestSetup::new(kernel)
+        .input(TestBuffer::from_vec("x",   pack_f32(&x, dt),         dt))
+        .input(TestBuffer::from_vec("out", vec![0u8; n * dt.size_bytes()], dt))
+        .constexpr("n", n as u32)
+        .grid_3d(n as u32, 1, 1, [256, 1, 1])
+        .compare_against(ref_setup)    // ← runner dispatches ref first,
+                                       //   uses its outputs as expected
+}
+```
 
 ---
 
