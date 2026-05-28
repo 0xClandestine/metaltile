@@ -26,7 +26,7 @@ pub mod kernel_tests {
             .input(TestBuffer::from_vec("step",  scalar_bytes(step,  dt), dt))
             .constexpr("n", n as u32)
             .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
-            .grid_1d(n, 256)
+            .grid_1d(n, 1024)
     }
 
     // Power-of-2 step (0.5) — exactly representable in every dtype; all
@@ -60,7 +60,7 @@ pub mod kernel_benches {
             .buffer(BenchBuffer::from_vec("start", scalar_bytes(0.0, dt), dt))
             .buffer(BenchBuffer::from_vec("step",  scalar_bytes(1.0, dt), dt))
             .constexpr("n", n as u32)
-            .grid_1d(n, 256)
+            .grid_1d(n, 1024)
             .bytes_moved((n * dt.size_bytes()) as u64)
     }
 }

@@ -728,7 +728,7 @@ impl Context {
         }
 
         let n_threads = n_threads.max(1);
-        let tpg_w = pipe.maxTotalThreadsPerThreadgroup().min(256);
+        let tpg_w = pipe.maxTotalThreadsPerThreadgroup().min(1024);
         let (tgs, tpg) = match grid_override {
             Some((g, t)) => (MTLSize { width: g[0], height: g[1], depth: g[2] }, MTLSize {
                 width: t[0],

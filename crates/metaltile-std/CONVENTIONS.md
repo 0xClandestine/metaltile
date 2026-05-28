@@ -67,7 +67,7 @@ pub mod kernel_tests {
         TestSetup::new(mt_exp::kernel_ir_for(dt))
             .input(TestBuffer::from_vec("a",   pack_f32(&inp,     dt), dt))
             .expect(TestBuffer::from_vec("out", pack_f32(&exp_out, dt), dt))
-            .grid_1d(n, 256)
+            .grid_1d(n, 1024)
     }
 }
 ```
@@ -119,7 +119,7 @@ pub mod kernel_benches {
         BenchSetup::new(mt_exp::kernel_ir_for(dt))
             .buffer(BenchBuffer::random("a",   n, dt))
             .buffer(BenchBuffer::zeros("out",  n, dt).output())
-            .grid_1d(n, 256)
+            .grid_1d(n, 1024)
     }
 }
 ```
@@ -203,7 +203,7 @@ pub mod kernel_benches {
         BenchSetup::new(mt_copy::kernel_ir_for(dt))
             .buffer(BenchBuffer::random("a",   n, dt))
             .buffer(BenchBuffer::zeros("out",  n, dt).output())
-            .grid_1d(n, 256)
+            .grid_1d(n, 1024)
             .with_reference(ref_kernel)   // ← runner times both, reports pct
     }
 }
