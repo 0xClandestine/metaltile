@@ -242,7 +242,7 @@ impl Runner {
             DispatchParams::from_bench_buffers(setup.buffers(), setup.constexprs(), setup.grid());
 
         for _ in 0..self.bench_cfg.warmup_iters {
-            self.ctx.dispatch_with_grid(
+            self.ctx.bench_dispatch_with_grid(
                 setup.kernel(),
                 &dispatch.buffers,
                 &dispatch.fn_consts,
@@ -253,14 +253,14 @@ impl Runner {
 
         let min_us = (0..self.bench_cfg.timed_iters)
             .map(|_| {
-                let result = self.ctx.dispatch_with_grid(
+                let elapsed_us = self.ctx.bench_dispatch_with_grid(
                     setup.kernel(),
                     &dispatch.buffers,
                     &dispatch.fn_consts,
                     dispatch.grid_groups,
                     dispatch.tpg,
                 )?;
-                Ok(result.elapsed_us)
+                Ok(elapsed_us)
             })
             .collect::<Result<Vec<f64>, Box<dyn std::error::Error>>>()?
             .into_iter()
@@ -423,19 +423,7 @@ impl DispatchParams {
         constexprs: &[(String, ConstValue)],
         grid: &metaltile_core::bench::Grid,
     ) -> Self {
-        // Output buffers: pass empty bytes so dispatch_metal allocates the correct
-        // size but skips the CPU memcpy on every iteration.  Re-initialising a
-        // large output buffer (e.g. 256 MB) before each GPU dispatch pollutes the
-        // unified-memory cache and dramatically underestimates GPU throughput.
-        // Input buffers are typically tiny (scalars, small weight tiles) and must
-        // be initialised so the kernel sees correct values.
-        let buffers = buffers
-            .iter()
-            .map(|b| {
-                let bytes = if b.is_output() { Vec::new() } else { b.initial_bytes() };
-                (b.name().to_string(), bytes)
-            })
-            .collect();
+        let buffers = buffers.iter().map(|b| (b.name().to_string(), b.initial_bytes())).collect();
         Self::new(buffers, constexprs, grid)
     }
 

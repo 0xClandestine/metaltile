@@ -434,7 +434,7 @@ impl Context {
     ) -> Result<DispatchResult, MetalTileError> {
         let msl_source = MslGenerator::default().generate(kernel)?;
         if self.has_metal {
-            self.dispatch_metal(kernel, &msl_source, buffers, fn_consts, None)
+            self.dispatch_metal(kernel, &msl_source, buffers, fn_consts, None, false)
         } else {
             Ok(DispatchResult { elapsed_us: 0.0, gflops: 0.0, outputs: BTreeMap::new() })
         }
@@ -466,9 +466,43 @@ impl Context {
                 buffers,
                 fn_consts,
                 Some((grid_groups, threads_per_group)),
+                false,
             )
         } else {
             Ok(DispatchResult { elapsed_us: 0.0, gflops: 0.0, outputs: BTreeMap::new() })
+        }
+    }
+
+    /// Like `dispatch_with_grid` but optimised for benchmark timing: output
+    /// buffers are allocated at the correct size but NOT initialised from CPU
+    /// memory, and output data is NOT read back after dispatch.  This keeps
+    /// the output pages GPU-owned across iterations, eliminating the
+    /// CPU↔GPU cache-coherency round-trip that would otherwise inflate the
+    /// measured GPU time.
+    ///
+    /// Returns only `elapsed_us` (GPU timer: `GPUEndTime − GPUStartTime`).
+    pub fn bench_dispatch_with_grid(
+        &self,
+        kernel: &Kernel,
+        buffers: &BTreeMap<String, Vec<u8>>,
+        fn_consts: &BTreeMap<String, u32>,
+        grid_groups: [usize; 3],
+        threads_per_group: [usize; 3],
+    ) -> Result<f64, MetalTileError> {
+        let msl_source = MslGenerator::default().generate(kernel)?;
+        if self.has_metal {
+            Ok(self
+                .dispatch_metal(
+                    kernel,
+                    &msl_source,
+                    buffers,
+                    fn_consts,
+                    Some((grid_groups, threads_per_group)),
+                    true,
+                )?
+                .elapsed_us)
+        } else {
+            Ok(0.0)
         }
     }
 
@@ -502,6 +536,10 @@ impl Context {
         fn_consts: &BTreeMap<String, u32>,
         // When `Some`, overrides the auto-derived grid: `(groups, threads_per_group)`.
         grid_override: Option<([usize; 3], [usize; 3])>,
+        // When `true`: skips CPU→GPU memcpy and GPU→CPU readback for output buffers.
+        // Use for bench timing — keeps output pages GPU-owned across iterations so
+        // the GPU writes to cache lines it already owns (no coherency overhead).
+        bench_mode: bool,
     ) -> Result<DispatchResult, MetalTileError> {
         use std::{
             ptr::NonNull,
@@ -644,7 +682,16 @@ impl Context {
         let mut metal_bufs: Vec<BufRc> = Vec::with_capacity(kernel.params.len() * 2);
         let mut n_threads = 1usize;
         for (param, binding) in kernel.params.iter().zip(&binding_plans) {
-            let data = buffers.get(&param.name).map(Vec::as_slice);
+            // In bench mode, skip the CPU→GPU memcpy for output buffers.  The
+            // buffer is still allocated at the correct size (from binding.data_len)
+            // so the kernel has valid memory to write into; we just don't populate
+            // it with initial bytes.  After the first dispatch the GPU owns those
+            // pages and subsequent dispatches incur no cache-coherency overhead.
+            let data = if bench_mode && param.is_output {
+                None
+            } else {
+                buffers.get(&param.name).map(Vec::as_slice)
+            };
             if param.is_output {
                 let elem_bytes = param.dtype.size_bytes();
                 if let Some(quot) = binding.data_len.checked_div(elem_bytes) {
@@ -747,19 +794,24 @@ impl Context {
         }
 
         let mut outputs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-        for (param, binding) in kernel.params.iter().zip(&binding_plans) {
-            if param.is_output
-                && binding.data_len > 0
-                && let Some(buf) = metal_bufs.get(binding.data_binding_index)
-            {
-                use objc2_metal::MTLBuffer as _;
-                // buf: &BufRc; deref through Rc<Retained<P>> to reach P::contents().
-                let ptr = (**buf).contents();
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(ptr.as_ptr() as *const u8, binding.data_len)
+        // In bench mode, skip the GPU→CPU readback: we don't need output values
+        // for timing and avoiding the readback keeps output pages GPU-owned so the
+        // next iteration has no coherency overhead.
+        if !bench_mode {
+            for (param, binding) in kernel.params.iter().zip(&binding_plans) {
+                if param.is_output
+                    && binding.data_len > 0
+                    && let Some(buf) = metal_bufs.get(binding.data_binding_index)
+                {
+                    use objc2_metal::MTLBuffer as _;
+                    // buf: &BufRc; deref through Rc<Retained<P>> to reach P::contents().
+                    let ptr = (**buf).contents();
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts(ptr.as_ptr() as *const u8, binding.data_len)
+                    }
+                    .to_vec();
+                    outputs.insert(param.name.clone(), bytes);
                 }
-                .to_vec();
-                outputs.insert(param.name.clone(), bytes);
             }
         }
 
@@ -775,6 +827,7 @@ impl Context {
         _b: &BTreeMap<String, Vec<u8>>,
         _fn_consts: &BTreeMap<String, u32>,
         _grid_override: Option<([usize; 3], [usize; 3])>,
+        _bench_mode: bool,
     ) -> Result<DispatchResult, MetalTileError> {
         Ok(DispatchResult { elapsed_us: 0.0, gflops: 0.0, outputs: BTreeMap::new() })
     }
