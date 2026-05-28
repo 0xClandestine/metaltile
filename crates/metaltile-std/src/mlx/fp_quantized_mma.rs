@@ -545,8 +545,7 @@ pub mod kernel_tests {
         let codes_flat: Vec<u32> = (0..n * k)
             .map(|i| (i as u32).wrapping_mul(2654435761).wrapping_shr(12) & 0xF)
             .collect();
-        let packed: Vec<u32> =
-            codes_flat.chunks_exact(k).flat_map(pack_fp4_row).collect();
+        let packed: Vec<u32> = codes_flat.chunks_exact(k).flat_map(pack_fp4_row).collect();
         let scales: Vec<f32> =
             (0..n * gs_per_row).map(|i| 0.5 + 0.1 * (i as f32 * 0.07).sin().abs()).collect();
         let x: Vec<f32> = (0..m * k).map(|i| 0.1 * (i as f32 * 0.017).sin()).collect();
@@ -617,8 +616,7 @@ pub mod kernel_tests {
                 (e << 3) | m
             })
             .collect();
-        let packed: Vec<u32> =
-            codes_flat.chunks_exact(k).flat_map(pack_fp8_row).collect();
+        let packed: Vec<u32> = codes_flat.chunks_exact(k).flat_map(pack_fp8_row).collect();
         let scales: Vec<f32> =
             (0..n * gs_per_row).map(|i| 0.1 + 0.05 * (i as f32 * 0.11).sin().abs()).collect();
         let x: Vec<f32> = (0..m * k).map(|i| 0.05 * (i as f32 * 0.019).cos()).collect();
