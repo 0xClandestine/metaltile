@@ -342,7 +342,7 @@ pub fn mt_gated_delta_wy_chunk<T>(
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-//! GPU correctness tests for `mt_gated_delta_wy_chunk`.
+    //! GPU correctness tests for `mt_gated_delta_wy_chunk`.
 
     use metaltile::test_kernel;
     use metaltile_core::{
@@ -356,8 +356,7 @@ pub mod kernel_tests {
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 =>
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
             DType::BF16 =>
                 vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
@@ -512,8 +511,7 @@ pub mod kernel_tests {
 
     #[test_kernel(name = "ffai/gated_delta/wy_chunk_multi_chunk", dtypes = [f32], tol = 1e-2)]
     fn wy_chunk_matches_oracle_multi_chunk_f32(dt: DType) -> TestSetup {
-        let (b, t, hk, hv, dk, dv, c) =
-            (1usize, 32usize, 1usize, 1usize, 32usize, 16usize, 8usize);
+        let (b, t, hk, hv, dk, dv, c) = (1usize, 32usize, 1usize, 1usize, 32usize, 16usize, 8usize);
         let n_total = b * hv;
         let kscale = (2.0_f32 / dk as f32).sqrt();
         let q: Vec<f32> = (0..t * hk * dk).map(|i| ((i as f32) * 0.0173).sin() * kscale).collect();
@@ -543,8 +541,7 @@ pub mod kernel_tests {
 
     #[test_kernel(name = "ffai/gated_delta/wy_chunk_two_chunk_chain", dtypes = [f32], tol = 5e-3)]
     fn wy_chunk_two_chunk_chain_f32(dt: DType) -> TestSetup {
-        let (b, t, hk, hv, dk, dv, c) =
-            (1usize, 16usize, 1usize, 1usize, 32usize, 16usize, 8usize);
+        let (b, t, hk, hv, dk, dv, c) = (1usize, 16usize, 1usize, 1usize, 32usize, 16usize, 8usize);
         let _ = b;
         let (q, k, v, g, beta, state_in) = make_inputs(7.0, t, hk, hv, dk, dv);
         let mut s_seq = state_in.clone();
@@ -554,8 +551,7 @@ pub mod kernel_tests {
 
     #[test_kernel(name = "ffai/gated_delta/wy_chunk_aggressive_decay", dtypes = [f32], tol = 5e-3)]
     fn wy_chunk_aggressive_decay_f32(dt: DType) -> TestSetup {
-        let (b, t, hk, hv, dk, dv, c) =
-            (1usize, 16usize, 1usize, 1usize, 32usize, 16usize, 8usize);
+        let (b, t, hk, hv, dk, dv, c) = (1usize, 16usize, 1usize, 1usize, 32usize, 16usize, 8usize);
         let n_total = b * hv;
         let kscale = (2.0_f32 / dk as f32).sqrt();
         let q: Vec<f32> = (0..t * hk * dk).map(|i| ((i as f32) * 0.0173).sin() * kscale).collect();
@@ -574,8 +570,7 @@ pub mod kernel_tests {
 
     #[test_kernel(name = "ffai/gated_delta/wy_chunk_multi_chunk_f16", dtypes = [f16], tol = 5e-2)]
     fn wy_chunk_matches_oracle_multi_chunk_f16(dt: DType) -> TestSetup {
-        let (b, t, hk, hv, dk, dv, c) =
-            (1usize, 16usize, 1usize, 1usize, 32usize, 16usize, 8usize);
+        let (b, t, hk, hv, dk, dv, c) = (1usize, 16usize, 1usize, 1usize, 32usize, 16usize, 8usize);
         let _ = b;
         let (q, k, v, g, beta, state_in) = make_inputs(3.0, t, hk, hv, dk, dv);
         let mut s_seq = state_in.clone();
@@ -585,8 +580,7 @@ pub mod kernel_tests {
 
     #[test_kernel(name = "ffai/gated_delta/wy_chunk_multi_chunk_bf16", dtypes = [bf16], tol = 2e-1)]
     fn wy_chunk_matches_oracle_multi_chunk_bf16(dt: DType) -> TestSetup {
-        let (b, t, hk, hv, dk, dv, c) =
-            (1usize, 16usize, 1usize, 1usize, 32usize, 16usize, 8usize);
+        let (b, t, hk, hv, dk, dv, c) = (1usize, 16usize, 1usize, 1usize, 32usize, 16usize, 8usize);
         let _ = b;
         let (q, k, v, g, beta, state_in) = make_inputs(5.0, t, hk, hv, dk, dv);
         let mut s_seq = state_in.clone();

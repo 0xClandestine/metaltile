@@ -42,7 +42,7 @@ pub fn mt_logsumexp<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-use metaltile::test_kernel;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},

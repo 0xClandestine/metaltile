@@ -529,7 +529,7 @@ pub fn mt_add_rms_norm<T>(
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-use metaltile::test_kernel;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
@@ -805,186 +805,371 @@ pub mod kernel_benches {
 
     #[bench(name = "unary/exp", dtypes = [f32, f16, bf16])]
     fn bench_mt_exp(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_exp::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_exp::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/log", dtypes = [f32, f16, bf16])]
     fn bench_mt_log(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_log::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_log::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/sqrt", dtypes = [f32, f16, bf16])]
     fn bench_mt_sqrt(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_sqrt::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_sqrt::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/rsqrt", dtypes = [f32, f16, bf16])]
     fn bench_mt_rsqrt(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_rsqrt::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_rsqrt::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/abs", dtypes = [f32, f16, bf16])]
     fn bench_mt_abs(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_abs::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_abs::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/silu", dtypes = [f32, f16, bf16])]
     fn bench_mt_silu(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_silu::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_silu::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/gelu", dtypes = [f32, f16, bf16])]
     fn bench_mt_gelu(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_gelu::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_gelu::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/relu", dtypes = [f32, f16, bf16])]
     fn bench_mt_relu(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_relu::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_relu::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/cos", dtypes = [f32, f16, bf16])]
     fn bench_mt_cos(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_cos::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_cos::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/sin", dtypes = [f32, f16, bf16])]
     fn bench_mt_sin(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_sin::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_sin::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/ceil", dtypes = [f32, f16, bf16])]
     fn bench_mt_ceil(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_ceil::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_ceil::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/floor", dtypes = [f32, f16, bf16])]
     fn bench_mt_floor(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_floor::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_floor::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/erf", dtypes = [f32, f16, bf16])]
     fn bench_mt_erf(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_erf::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_erf::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/exp2", dtypes = [f32, f16, bf16])]
     fn bench_mt_exp2(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_exp2::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_exp2::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/log2", dtypes = [f32, f16, bf16])]
     fn bench_mt_log2(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_log2::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_log2::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/sign", dtypes = [f32, f16, bf16])]
     fn bench_mt_sign(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_sign::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_sign::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/round", dtypes = [f32, f16, bf16])]
     fn bench_mt_round(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_round::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_round::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/neg", dtypes = [f32, f16, bf16])]
     fn bench_mt_neg(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_neg::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_neg::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/recip", dtypes = [f32, f16, bf16])]
     fn bench_mt_recip(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_recip::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_recip::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/square", dtypes = [f32, f16, bf16])]
     fn bench_mt_square(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_square::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_square::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/sigmoid", dtypes = [f32, f16, bf16])]
     fn bench_mt_sigmoid(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_sigmoid::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_sigmoid::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/log1p", dtypes = [f32, f16, bf16])]
     fn bench_mt_log1p(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_log1p::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_log1p::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/sinh", dtypes = [f32, f16, bf16])]
     fn bench_mt_sinh(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_sinh::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_sinh::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/cosh", dtypes = [f32, f16, bf16])]
     fn bench_mt_cosh(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_cosh::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_cosh::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/tan", dtypes = [f32, f16, bf16])]
     fn bench_mt_tan(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_tan::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_tan::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/tanh", dtypes = [f32, f16, bf16])]
     fn bench_mt_tanh_op(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_tanh_op::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_tanh_op::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/asin", dtypes = [f32, f16, bf16])]
     fn bench_mt_asin(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_asin::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_asin::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/atan", dtypes = [f32, f16, bf16])]
     fn bench_mt_atan(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_atan::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_atan::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/asinh", dtypes = [f32, f16, bf16])]
     fn bench_mt_asinh(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_asinh::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_asinh::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/acos", dtypes = [f32, f16, bf16])]
     fn bench_mt_acos(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_acos::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_acos::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/trunc", dtypes = [f32, f16, bf16])]
     fn bench_mt_trunc(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_trunc::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_trunc::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/acosh", dtypes = [f32, f16, bf16])]
     fn bench_mt_acosh(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_acosh::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_acosh::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/atanh", dtypes = [f32, f16, bf16])]
     fn bench_mt_atanh(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_atanh::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_atanh::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/expm1", dtypes = [f32, f16, bf16])]
     fn bench_mt_expm1(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_expm1::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_expm1::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/log10", dtypes = [f32, f16, bf16])]
     fn bench_mt_log10(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_log10::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_log10::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/erfinv", dtypes = [f32, f16, bf16])]
     fn bench_mt_erfinv(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_erfinv::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_erfinv::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 
     #[bench(name = "unary/softplus", dtypes = [f32, f16, bf16])]
     fn bench_mt_softplus(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_unary(mt_softplus::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_unary(
+            mt_softplus::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 }

@@ -190,7 +190,7 @@ state_replay!(state_replay_d64_32_2_2, 64u32, 32u32, 2u32, 2u32, "replay_d64_32_
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-//! GPU correctness tests for gated_delta_step_record and state_replay.
+    //! GPU correctness tests for gated_delta_step_record and state_replay.
 
     use metaltile::test_kernel;
     use metaltile_core::{
@@ -336,8 +336,9 @@ pub mod kernel_tests {
         let k_log = src(batch * t_log * HV * DK, 0x22, 0.4);
         let g_log: Vec<f32> = src(batch * t_log * HV, 0x23, 0.1).iter().map(|x| 0.9 + x).collect();
         let state_in = src(batch * HV * DV * DK, 0x24, 0.3);
-        let expected =
-            naive_replay(&delta_log, &k_log, &g_log, &state_in, &mask, batch, t_log, accepted, false);
+        let expected = naive_replay(
+            &delta_log, &k_log, &g_log, &state_in, &mask, batch, t_log, accepted, false,
+        );
         let mut kernel_ir = state_replay_d64_32_2_2::kernel_ir_for(dt);
         kernel_ir.mode = KernelMode::Grid3D;
         TestSetup::new(kernel_ir)
@@ -347,7 +348,11 @@ pub mod kernel_tests {
             .input(TestBuffer::from_vec("state_in", pack_f32(&state_in), DType::F32))
             .input(TestBuffer::from_vec("mask", u32_bytes(&mask), DType::U32))
             .input(TestBuffer::from_vec("t_log", (t_log as u32).to_le_bytes().to_vec(), DType::U32))
-            .input(TestBuffer::from_vec("accepted", (accepted as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec(
+                "accepted",
+                (accepted as u32).to_le_bytes().to_vec(),
+                DType::U32,
+            ))
             .input(TestBuffer::from_vec("has_mask", 0u32.to_le_bytes().to_vec(), DType::U32))
             .expect(TestBuffer::from_vec("state_out", pack_f32(&expected), DType::F32))
             .grid_3d(1, DV as u32, (batch * HV) as u32, [32, 1, 1])
@@ -363,8 +368,9 @@ pub mod kernel_tests {
         let k_log = src(batch * t_log * HV * DK, 0x22, 0.4);
         let g_log: Vec<f32> = src(batch * t_log * HV, 0x23, 0.1).iter().map(|x| 0.9 + x).collect();
         let state_in = src(batch * HV * DV * DK, 0x24, 0.3);
-        let expected =
-            naive_replay(&delta_log, &k_log, &g_log, &state_in, &mask, batch, t_log, accepted, false);
+        let expected = naive_replay(
+            &delta_log, &k_log, &g_log, &state_in, &mask, batch, t_log, accepted, false,
+        );
         let mut kernel_ir = state_replay_d64_32_2_2::kernel_ir_for(dt);
         kernel_ir.mode = KernelMode::Grid3D;
         TestSetup::new(kernel_ir)
@@ -374,7 +380,11 @@ pub mod kernel_tests {
             .input(TestBuffer::from_vec("state_in", pack_f32(&state_in), DType::F32))
             .input(TestBuffer::from_vec("mask", u32_bytes(&mask), DType::U32))
             .input(TestBuffer::from_vec("t_log", (t_log as u32).to_le_bytes().to_vec(), DType::U32))
-            .input(TestBuffer::from_vec("accepted", (accepted as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec(
+                "accepted",
+                (accepted as u32).to_le_bytes().to_vec(),
+                DType::U32,
+            ))
             .input(TestBuffer::from_vec("has_mask", 0u32.to_le_bytes().to_vec(), DType::U32))
             .expect(TestBuffer::from_vec("state_out", pack_f32(&expected), DType::F32))
             .grid_3d(1, DV as u32, (batch * HV) as u32, [32, 1, 1])
@@ -390,8 +400,9 @@ pub mod kernel_tests {
         let k_log = src(batch * t_log * HV * DK, 0x22, 0.4);
         let g_log: Vec<f32> = src(batch * t_log * HV, 0x23, 0.1).iter().map(|x| 0.9 + x).collect();
         let state_in = src(batch * HV * DV * DK, 0x24, 0.3);
-        let expected =
-            naive_replay(&delta_log, &k_log, &g_log, &state_in, &mask, batch, t_log, accepted, true);
+        let expected = naive_replay(
+            &delta_log, &k_log, &g_log, &state_in, &mask, batch, t_log, accepted, true,
+        );
         let mut kernel_ir = state_replay_d64_32_2_2::kernel_ir_for(dt);
         kernel_ir.mode = KernelMode::Grid3D;
         TestSetup::new(kernel_ir)
@@ -401,7 +412,11 @@ pub mod kernel_tests {
             .input(TestBuffer::from_vec("state_in", pack_f32(&state_in), DType::F32))
             .input(TestBuffer::from_vec("mask", u32_bytes(&mask), DType::U32))
             .input(TestBuffer::from_vec("t_log", (t_log as u32).to_le_bytes().to_vec(), DType::U32))
-            .input(TestBuffer::from_vec("accepted", (accepted as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec(
+                "accepted",
+                (accepted as u32).to_le_bytes().to_vec(),
+                DType::U32,
+            ))
             .input(TestBuffer::from_vec("has_mask", 1u32.to_le_bytes().to_vec(), DType::U32))
             .expect(TestBuffer::from_vec("state_out", pack_f32(&expected), DType::F32))
             .grid_3d(1, DV as u32, (batch * HV) as u32, [32, 1, 1])

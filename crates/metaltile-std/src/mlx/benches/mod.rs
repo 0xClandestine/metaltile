@@ -162,13 +162,7 @@ pub fn bench_rms_norm(kernel: Kernel, dt: DType, rows: usize, n: usize, tpg: u32
 /// Layer-norm: `(x, w, b, out, eps_buf, n)`.
 ///
 /// `x` is `rows × n`, `w` / `b` are `n`, `out` is `rows × n`.
-pub fn bench_layer_norm(
-    kernel: Kernel,
-    dt: DType,
-    rows: usize,
-    n: usize,
-    tpg: u32,
-) -> BenchSetup {
+pub fn bench_layer_norm(kernel: Kernel, dt: DType, rows: usize, n: usize, tpg: u32) -> BenchSetup {
     let eps_bytes: Vec<u8> = 1e-5f32.to_le_bytes().to_vec();
     BenchSetup::new(kernel)
         .buffer(BenchBuffer::random("x", rows * n, dt))
@@ -225,13 +219,7 @@ pub fn bench_row_op_y(kernel: Kernel, dt: DType, rows: usize, n: usize, tpg: u32
 ///
 /// The `#[strided]` attribute on `src` makes the runner add shape/stride
 /// buffers automatically. Here we provide the data buffer + output only.
-pub fn bench_strided_copy(
-    kernel: Kernel,
-    dt: DType,
-    m: usize,
-    n: usize,
-    tpg: u32,
-) -> BenchSetup {
+pub fn bench_strided_copy(kernel: Kernel, dt: DType, m: usize, n: usize, tpg: u32) -> BenchSetup {
     BenchSetup::new(kernel)
         .buffer(BenchBuffer::random("src", m * n, dt))
         .buffer(BenchBuffer::zeros("out", m * n, dt).output())

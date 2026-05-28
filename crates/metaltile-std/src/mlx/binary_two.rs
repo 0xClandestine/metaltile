@@ -18,7 +18,7 @@ pub fn mt_binary_two<T>(a: Tensor<T>, b: Tensor<T>, mut c: Tensor<T>, mut d: Ten
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-use metaltile::test_kernel;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
@@ -111,6 +111,11 @@ pub mod kernel_benches {
 
     #[bench(name = "binary_two/add_mul", dtypes = [f32, f16, bf16])]
     fn bench_mt_binary_two(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_binary_two(mt_binary_two::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_binary_two(
+            mt_binary_two::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 }

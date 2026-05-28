@@ -406,7 +406,7 @@ pub fn mt_fft_bluestein_postprocess<T>(
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-use metaltile::test_kernel;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},

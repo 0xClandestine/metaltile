@@ -27,7 +27,7 @@ pub fn mt_select<T>(cond: Tensor<u8>, on_true: Tensor<T>, on_false: Tensor<T>, o
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-use metaltile::test_kernel;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
@@ -147,6 +147,11 @@ pub mod kernel_benches {
 
     #[bench(name = "select/select", dtypes = [f32, f16, bf16])]
     fn bench_mt_select(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_select(mt_select::kernel_ir_for(dt), dt, crate::mlx::benches::ELEMENTWISE_N, crate::mlx::benches::ELEMENTWISE_TPG)
+        crate::mlx::benches::bench_select(
+            mt_select::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ELEMENTWISE_N,
+            crate::mlx::benches::ELEMENTWISE_TPG,
+        )
     }
 }

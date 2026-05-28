@@ -3719,9 +3719,7 @@ pub mod kernel_tests {
         }
     }
 
-    fn pack_u32_buf(vals: &[u32]) -> Vec<u8> {
-        bytemuck::cast_slice::<u32, u8>(vals).to_vec()
-    }
+    fn pack_u32_buf(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
 
     fn u32_le_bytes(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
 
@@ -4029,11 +4027,7 @@ pub mod kernel_tests {
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("router_logits", logits_bytes, dt))
             .input(TestBuffer::from_vec("indices_out", vec![0u8; n_rows * k * 4], DType::U32))
-            .input(TestBuffer::from_vec(
-                "weights_out",
-                vec![0u8; n_rows * k * dt.size_bytes()],
-                dt,
-            ))
+            .input(TestBuffer::from_vec("weights_out", vec![0u8; n_rows * k * dt.size_bytes()], dt))
             .constexpr("n_experts", n_experts as u32)
             .constexpr("k", k as u32)
             .constexpr("norm_topk_prob", norm_topk_prob)
@@ -4058,11 +4052,7 @@ pub mod kernel_tests {
             .input(TestBuffer::from_vec("expert_outputs", pack_dt(&expert_outputs, dt), dt))
             .input(TestBuffer::from_vec("inv_perm", pack_u32_buf(&inv_perm), DType::U32))
             .input(TestBuffer::from_vec("top_k_weights", pack_dt(&weights, dt), dt))
-            .input(TestBuffer::from_vec(
-                "out",
-                vec![0u8; n_rows * hidden * dt.size_bytes()],
-                dt,
-            ))
+            .input(TestBuffer::from_vec("out", vec![0u8; n_rows * hidden * dt.size_bytes()], dt))
             .constexpr("hidden", hidden as u32)
             .constexpr("k", k as u32)
             .expect(TestBuffer::from_vec("out", pack_dt(&ref_out, dt), dt))
@@ -4081,7 +4071,11 @@ pub mod kernel_tests {
         kernel.mode = KernelMode::Reduction;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("tokens", pack_dt(&tokens, dt), dt))
-            .input(TestBuffer::from_vec("sort_token_idx", pack_u32_buf(&sort_token_idx), DType::U32))
+            .input(TestBuffer::from_vec(
+                "sort_token_idx",
+                pack_u32_buf(&sort_token_idx),
+                DType::U32,
+            ))
             .input(TestBuffer::from_vec(
                 "permuted",
                 vec![0u8; n_permuted * hidden * dt.size_bytes()],
@@ -4110,11 +4104,7 @@ pub mod kernel_tests {
         kernel.mode = KernelMode::Reduction;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("x", pack_dt(&x, dt), dt))
-            .input(TestBuffer::from_vec(
-                "weight_packed",
-                pack_u32_buf(&weight_packed),
-                DType::U32,
-            ))
+            .input(TestBuffer::from_vec("weight_packed", pack_u32_buf(&weight_packed), DType::U32))
             .input(TestBuffer::from_vec("scales", pack_dt(&scales, dt), dt))
             .input(TestBuffer::from_vec("biases", pack_dt(&biases, dt), dt))
             .input(TestBuffer::from_vec(
@@ -4122,11 +4112,7 @@ pub mod kernel_tests {
                 pack_u32_buf(&expert_offsets),
                 DType::U32,
             ))
-            .input(TestBuffer::from_vec(
-                "out",
-                vec![0u8; t_rows * m_out * dt.size_bytes()],
-                dt,
-            ))
+            .input(TestBuffer::from_vec("out", vec![0u8; t_rows * m_out * dt.size_bytes()], dt))
             .constexpr("k_in", k_in as u32)
             .constexpr("m_out", m_out as u32)
             .constexpr("n_experts", n_experts as u32)
@@ -4155,9 +4141,8 @@ pub mod kernel_tests {
         let biases: Vec<f32> = (0..groups_total)
             .map(|i| dt_round(dt, -0.05 + 0.01 * (i as f32 * 0.07).cos()))
             .collect();
-        let x: Vec<f32> = (0..t_rows * k_in)
-            .map(|i| dt_round(dt, 0.05 * (i as f32 * 0.013).sin()))
-            .collect();
+        let x: Vec<f32> =
+            (0..t_rows * k_in).map(|i| dt_round(dt, 0.05 * (i as f32 * 0.013).sin())).collect();
         (codes, weight_packed, scales, biases, x, indices)
     }
 
@@ -4192,11 +4177,7 @@ pub mod kernel_tests {
         ref_kernel.mode = KernelMode::Reduction;
         let ref_setup = TestSetup::new(ref_kernel)
             .input(TestBuffer::from_vec("x", pack_dt(&x, DType::F32), DType::F32))
-            .input(TestBuffer::from_vec(
-                "weight_packed",
-                pack_u32_buf(&weight_packed),
-                DType::U32,
-            ))
+            .input(TestBuffer::from_vec("weight_packed", pack_u32_buf(&weight_packed), DType::U32))
             .input(TestBuffer::from_vec("scales", pack_dt(&scales, DType::F32), DType::F32))
             .input(TestBuffer::from_vec("biases", pack_dt(&biases, DType::F32), DType::F32))
             .input(TestBuffer::from_vec(
@@ -4263,11 +4244,7 @@ pub mod kernel_tests {
         ref_kernel.mode = KernelMode::Reduction;
         let ref_setup = TestSetup::new(ref_kernel)
             .input(TestBuffer::from_vec("x", pack_dt(&x, DType::F32), DType::F32))
-            .input(TestBuffer::from_vec(
-                "weight_packed",
-                pack_u32_buf(&weight_packed),
-                DType::U32,
-            ))
+            .input(TestBuffer::from_vec("weight_packed", pack_u32_buf(&weight_packed), DType::U32))
             .input(TestBuffer::from_vec("scales", pack_dt(&scales, DType::F32), DType::F32))
             .input(TestBuffer::from_vec("biases", pack_dt(&biases, DType::F32), DType::F32))
             .input(TestBuffer::from_vec(
@@ -4285,11 +4262,7 @@ pub mod kernel_tests {
         kernel.mode = KernelMode::Reduction;
         TestSetup::new(kernel)
             .input(TestBuffer::from_vec("x", pack_dt(&x, DType::F32), DType::F32))
-            .input(TestBuffer::from_vec(
-                "weight_packed",
-                pack_u32_buf(&weight_packed),
-                DType::U32,
-            ))
+            .input(TestBuffer::from_vec("weight_packed", pack_u32_buf(&weight_packed), DType::U32))
             .input(TestBuffer::from_vec("scales", pack_dt(&scales, DType::F32), DType::F32))
             .input(TestBuffer::from_vec("biases", pack_dt(&biases, DType::F32), DType::F32))
             .input(TestBuffer::from_vec(
@@ -4519,12 +4492,9 @@ pub mod kernel_tests {
             }
         }
         // Round-trip through f16 so CPU reference matches GPU
-        let ef16: Vec<f32> = expert_outputs_f32
-            .iter()
-            .map(|&v| half::f16::from_f32(v).to_f32())
-            .collect();
-        let wf16: Vec<f32> =
-            weights_f32.iter().map(|&v| half::f16::from_f32(v).to_f32()).collect();
+        let ef16: Vec<f32> =
+            expert_outputs_f32.iter().map(|&v| half::f16::from_f32(v).to_f32()).collect();
+        let wf16: Vec<f32> = weights_f32.iter().map(|&v| half::f16::from_f32(v).to_f32()).collect();
         let mut ref_out = vec![0.0f32; n_rows * hidden];
         for token in 0..n_rows {
             for h in 0..hidden {
@@ -4627,8 +4597,18 @@ pub mod kernel_tests {
             group_size,
         );
         make_gather_qmm_int4_setup(
-            dt, x, weight_packed, scales, biases, expert_offsets, t_rows, k_in, m_out, n_experts,
-            group_size, ref_out,
+            dt,
+            x,
+            weight_packed,
+            scales,
+            biases,
+            expert_offsets,
+            t_rows,
+            k_in,
+            m_out,
+            n_experts,
+            group_size,
+            ref_out,
         )
     }
 
@@ -4655,12 +4635,30 @@ pub mod kernel_tests {
         let x: Vec<f32> =
             (0..t_rows * k_in).map(|i| dt_round(dt, 0.1 * ((i as f32 * 0.17).sin()))).collect();
         let ref_out = cpu_gather_qmm_int4(
-            &x, &weight_packed, &scales, &biases, &expert_offsets, t_rows, k_in, m_out,
-            n_experts, group_size,
+            &x,
+            &weight_packed,
+            &scales,
+            &biases,
+            &expert_offsets,
+            t_rows,
+            k_in,
+            m_out,
+            n_experts,
+            group_size,
         );
         make_gather_qmm_int4_setup(
-            dt, x, weight_packed, scales, biases, expert_offsets, t_rows, k_in, m_out, n_experts,
-            group_size, ref_out,
+            dt,
+            x,
+            weight_packed,
+            scales,
+            biases,
+            expert_offsets,
+            t_rows,
+            k_in,
+            m_out,
+            n_experts,
+            group_size,
+            ref_out,
         )
     }
 
@@ -4687,16 +4685,38 @@ pub mod kernel_tests {
         let x: Vec<f32> =
             (0..t_rows * k_in).map(|i| dt_round(dt, 0.1 * ((i as f32 * 0.17).sin()))).collect();
         let ref_out = cpu_gather_qmm_int4(
-            &x, &weight_packed, &scales, &biases, &expert_offsets, t_rows, k_in, m_out,
-            n_experts, group_size,
+            &x,
+            &weight_packed,
+            &scales,
+            &biases,
+            &expert_offsets,
+            t_rows,
+            k_in,
+            m_out,
+            n_experts,
+            group_size,
         );
         make_gather_qmm_int4_setup(
-            dt, x, weight_packed, scales, biases, expert_offsets, t_rows, k_in, m_out, n_experts,
-            group_size, ref_out,
+            dt,
+            x,
+            weight_packed,
+            scales,
+            biases,
+            expert_offsets,
+            t_rows,
+            k_in,
+            m_out,
+            n_experts,
+            group_size,
+            ref_out,
         )
     }
 
-    fn make_gather_qmm_bits_setup(bits: u32, dt: DType, kernel: metaltile_core::ir::Kernel) -> TestSetup {
+    fn make_gather_qmm_bits_setup(
+        bits: u32,
+        dt: DType,
+        kernel: metaltile_core::ir::Kernel,
+    ) -> TestSetup {
         let n_experts = 3usize;
         let k_in = 64usize;
         let m_out = 8usize;
@@ -4716,8 +4736,17 @@ pub mod kernel_tests {
         let biases: Vec<f32> = (0..groups_total).map(|i| -0.05 + 0.002 * (i as f32)).collect();
         let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.1 * ((i as f32 * 0.17).sin())).collect();
         let ref_out = cpu_gather_qmm_bits(
-            &x, &weight_packed, &scales, &biases, &expert_offsets, t_rows, k_in, m_out,
-            n_experts, group_size, bits,
+            &x,
+            &weight_packed,
+            &scales,
+            &biases,
+            &expert_offsets,
+            t_rows,
+            k_in,
+            m_out,
+            n_experts,
+            group_size,
+            bits,
         );
         let mut k = kernel;
         k.mode = KernelMode::Reduction;
@@ -4794,12 +4823,30 @@ pub mod kernel_tests {
             (0..groups_total).map(|i| -0.02 + 0.0005 * ((i as f32 * 0.07).cos())).collect();
         let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * ((i as f32 * 0.013).sin())).collect();
         let ref_out = cpu_gather_qmm_int4(
-            &x, &weight_packed, &scales, &biases, &expert_offsets, t_rows, k_in, m_out,
-            n_experts, group_size,
+            &x,
+            &weight_packed,
+            &scales,
+            &biases,
+            &expert_offsets,
+            t_rows,
+            k_in,
+            m_out,
+            n_experts,
+            group_size,
         );
         make_gather_qmm_int4_setup(
-            dt, x, weight_packed, scales, biases, expert_offsets, t_rows, k_in, m_out, n_experts,
-            group_size, ref_out,
+            dt,
+            x,
+            weight_packed,
+            scales,
+            biases,
+            expert_offsets,
+            t_rows,
+            k_in,
+            m_out,
+            n_experts,
+            group_size,
+            ref_out,
         )
     }
 
@@ -4811,7 +4858,11 @@ pub mod kernel_tests {
         // make_m_batch_vs_m1_setup generates its own data deterministically and compares
         // the m8 kernel against the m1 reference via compare_against.
         make_m_batch_vs_m1_setup(
-            128, 4, 2048, 256, 64,
+            128,
+            4,
+            2048,
+            256,
+            64,
             mt_moe_gather_qmm_int4_m8::kernel_ir_for,
             (256 / 8) as u32,
         )
@@ -4839,9 +4890,20 @@ pub mod kernel_tests {
             (0..groups_total).map(|i| -0.02 + 0.005 * (i as f32 * 0.07).cos()).collect();
         let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * (i as f32 * 0.013).sin()).collect();
         make_mma_int4_setup_vs_m1(
-            dt, n_experts, k_in, n_out, group_size, t_rows,
-            indices, weight_packed, scales, biases, x,
-            (n_out / 32) as u32, t_rows.div_ceil(32) as u32, [128, 1, 1],
+            dt,
+            n_experts,
+            k_in,
+            n_out,
+            group_size,
+            t_rows,
+            indices,
+            weight_packed,
+            scales,
+            biases,
+            x,
+            (n_out / 32) as u32,
+            t_rows.div_ceil(32) as u32,
+            [128, 1, 1],
             mt_moe_gather_qmm_mma_int4::kernel_ir_for,
         )
     }
@@ -4866,9 +4928,20 @@ pub mod kernel_tests {
             (0..groups_total).map(|i| -0.02 + 0.005 * (i as f32 * 0.07).cos()).collect();
         let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * (i as f32 * 0.013).sin()).collect();
         make_mma_int4_setup_vs_m1(
-            dt, n_experts, k_in, n_out, group_size, t_rows,
-            indices, weight_packed, scales, biases, x,
-            (n_out / 32) as u32, t_rows.div_ceil(32) as u32, [128, 1, 1],
+            dt,
+            n_experts,
+            k_in,
+            n_out,
+            group_size,
+            t_rows,
+            indices,
+            weight_packed,
+            scales,
+            biases,
+            x,
+            (n_out / 32) as u32,
+            t_rows.div_ceil(32) as u32,
+            [128, 1, 1],
             mt_moe_gather_qmm_mma_int4::kernel_ir_for,
         )
     }
@@ -4893,9 +4966,20 @@ pub mod kernel_tests {
             (0..groups_total).map(|i| -0.02 + 0.005 * (i as f32 * 0.07).cos()).collect();
         let x: Vec<f32> = (0..t_rows * k_in).map(|i| 0.05 * (i as f32 * 0.013).sin()).collect();
         make_mma_int4_setup_vs_m1(
-            dt, n_experts, k_in, n_out, group_size, t_rows,
-            indices, weight_packed, scales, biases, x,
-            (n_out / 32) as u32, t_rows.div_ceil(16) as u32, [64, 1, 1],
+            dt,
+            n_experts,
+            k_in,
+            n_out,
+            group_size,
+            t_rows,
+            indices,
+            weight_packed,
+            scales,
+            biases,
+            x,
+            (n_out / 32) as u32,
+            t_rows.div_ceil(16) as u32,
+            [64, 1, 1],
             mt_moe_gather_qmm_mma_int4_bm16::kernel_ir_for,
         )
     }
@@ -4905,37 +4989,85 @@ pub mod kernel_tests {
     #[test_kernel(name = "ffai/moe/gather_qmm_int4_m16_small_f32", dtypes = [f32], tol = 5e-4)]
     fn test_gather_qmm_int4_m16_small(dt: DType) -> TestSetup {
         let _ = dt;
-        make_m_batch_vs_m1_setup(4, 16, 256, 64, 64, mt_moe_gather_qmm_int4_m16::kernel_ir_for, (64 / 16) as u32)
+        make_m_batch_vs_m1_setup(
+            4,
+            16,
+            256,
+            64,
+            64,
+            mt_moe_gather_qmm_int4_m16::kernel_ir_for,
+            (64 / 16) as u32,
+        )
     }
 
     #[test_kernel(name = "ffai/moe/gather_qmm_int4_m16_multi_expert_f32", dtypes = [f32], tol = 5e-4)]
     fn test_gather_qmm_int4_m16_multi_expert(dt: DType) -> TestSetup {
         let _ = dt;
-        make_m_batch_vs_m1_setup(8, 32, 512, 64, 64, mt_moe_gather_qmm_int4_m16::kernel_ir_for, (64 / 16) as u32)
+        make_m_batch_vs_m1_setup(
+            8,
+            32,
+            512,
+            64,
+            64,
+            mt_moe_gather_qmm_int4_m16::kernel_ir_for,
+            (64 / 16) as u32,
+        )
     }
 
     #[test_kernel(name = "ffai/moe/gather_qmm_int4_m16_wide_m_f32", dtypes = [f32], tol = 5e-4)]
     fn test_gather_qmm_int4_m16_wide_m(dt: DType) -> TestSetup {
         let _ = dt;
-        make_m_batch_vs_m1_setup(4, 16, 256, 128, 64, mt_moe_gather_qmm_int4_m16::kernel_ir_for, (128 / 16) as u32)
+        make_m_batch_vs_m1_setup(
+            4,
+            16,
+            256,
+            128,
+            64,
+            mt_moe_gather_qmm_int4_m16::kernel_ir_for,
+            (128 / 16) as u32,
+        )
     }
 
     #[test_kernel(name = "ffai/moe/gather_qmm_int4_m32_small_f32", dtypes = [f32], tol = 5e-4)]
     fn test_gather_qmm_int4_m32_small(dt: DType) -> TestSetup {
         let _ = dt;
-        make_m_batch_vs_m1_setup(4, 16, 256, 64, 64, mt_moe_gather_qmm_int4_m32::kernel_ir_for, (64 / 32) as u32)
+        make_m_batch_vs_m1_setup(
+            4,
+            16,
+            256,
+            64,
+            64,
+            mt_moe_gather_qmm_int4_m32::kernel_ir_for,
+            (64 / 32) as u32,
+        )
     }
 
     #[test_kernel(name = "ffai/moe/gather_qmm_int4_m32_multi_expert_f32", dtypes = [f32], tol = 5e-4)]
     fn test_gather_qmm_int4_m32_multi_expert(dt: DType) -> TestSetup {
         let _ = dt;
-        make_m_batch_vs_m1_setup(8, 32, 512, 64, 64, mt_moe_gather_qmm_int4_m32::kernel_ir_for, (64 / 32) as u32)
+        make_m_batch_vs_m1_setup(
+            8,
+            32,
+            512,
+            64,
+            64,
+            mt_moe_gather_qmm_int4_m32::kernel_ir_for,
+            (64 / 32) as u32,
+        )
     }
 
     #[test_kernel(name = "ffai/moe/gather_qmm_int4_m32_wide_m_f32", dtypes = [f32], tol = 5e-4)]
     fn test_gather_qmm_int4_m32_wide_m(dt: DType) -> TestSetup {
         let _ = dt;
-        make_m_batch_vs_m1_setup(4, 16, 256, 128, 64, mt_moe_gather_qmm_int4_m32::kernel_ir_for, (128 / 32) as u32)
+        make_m_batch_vs_m1_setup(
+            4,
+            16,
+            256,
+            128,
+            64,
+            mt_moe_gather_qmm_int4_m32::kernel_ir_for,
+            (128 / 32) as u32,
+        )
     }
 
     // ── int8 MMA tests ────────────────────────────────────────────────────────

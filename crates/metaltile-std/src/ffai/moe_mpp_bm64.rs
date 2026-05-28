@@ -214,7 +214,7 @@ mod tests {
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-use metaltile::test_kernel;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
@@ -226,15 +226,12 @@ use metaltile::test_kernel;
     fn pack_bytes(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::BF16 => {
-                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect()
-            },
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype"),
         }
     }
-    fn pack_u32(vals: &[u32]) -> Vec<u8> {
-        vals.iter().flat_map(|v| v.to_le_bytes()).collect()
-    }
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { vals.iter().flat_map(|v| v.to_le_bytes()).collect() }
     fn pack_int4_row(weights: &[u32]) -> Vec<u32> {
         assert!(weights.len() % 8 == 0);
         weights
@@ -258,8 +255,7 @@ use metaltile::test_kernel;
         w_seed: u32,
         x_seed: f32,
     ) -> (Vec<f32>, Vec<u32>, Vec<f32>, Vec<f32>, Vec<u32>, Vec<u32>) {
-        let indices: Vec<u32> =
-            (0..t_rows).map(|r| (r / (t_rows / n_experts)) as u32).collect();
+        let indices: Vec<u32> = (0..t_rows).map(|r| (r / (t_rows / n_experts)) as u32).collect();
         let total_weights = n_experts * n_out * k_in;
         let weight_unpacked: Vec<u32> =
             (0..total_weights).map(|i| ((i as u32).wrapping_mul(w_seed) + 5) & 0xf).collect();
@@ -270,8 +266,7 @@ use metaltile::test_kernel;
             (0..groups_total).map(|i| 0.005 + 0.001 * (i as f32 * 0.03).sin()).collect();
         let biases: Vec<f32> =
             (0..groups_total).map(|i| -0.02 + 0.005 * (i as f32 * 0.07).cos()).collect();
-        let x: Vec<f32> =
-            (0..t_rows * k_in).map(|i| x_seed * (i as f32 * 0.013).sin()).collect();
+        let x: Vec<f32> = (0..t_rows * k_in).map(|i| x_seed * (i as f32 * 0.013).sin()).collect();
         let mut expert_offsets: Vec<u32> = vec![0; n_experts + 1];
         for (e_idx, off) in expert_offsets.iter_mut().enumerate().take(n_experts + 1) {
             *off = indices
@@ -305,11 +300,7 @@ use metaltile::test_kernel;
             .input(TestBuffer::from_vec("weight_packed", pack_u32(&weight_packed), DType::U32))
             .input(TestBuffer::from_vec("scales", pack_bytes(&scales, DType::F32), DType::F32))
             .input(TestBuffer::from_vec("biases", pack_bytes(&biases, DType::F32), DType::F32))
-            .input(TestBuffer::from_vec(
-                "expert_offsets",
-                pack_u32(&expert_offsets),
-                DType::U32,
-            ))
+            .input(TestBuffer::from_vec("expert_offsets", pack_u32(&expert_offsets), DType::U32))
             .input(TestBuffer::from_vec("out", vec![0u8; out_size_f32], DType::F32))
             .constexpr("k_in", k_in as u32)
             .constexpr("m_out", n_out as u32)

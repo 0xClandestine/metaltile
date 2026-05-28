@@ -14,9 +14,9 @@
 //! expected to wire up eventually, it lives in `ffai/` until the
 //! comparison lands.
 
-pub mod benches;
 pub mod arange;
 pub mod arg_reduce;
+pub mod benches;
 pub mod binary;
 pub mod binary_two;
 pub mod copy;

@@ -89,7 +89,7 @@ pub fn mt_strided_copy_nd<T>(
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-use metaltile::test_kernel;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
@@ -272,6 +272,12 @@ pub mod kernel_benches {
 
     #[bench(name = "strided_copy/strided_copy", dtypes = [f32, f16, bf16])]
     fn bench_mt_strided_copy(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_strided_copy(mt_strided_copy::kernel_ir_for(dt), dt, 1024, 4096, 256)
+        crate::mlx::benches::bench_strided_copy(
+            mt_strided_copy::kernel_ir_for(dt),
+            dt,
+            1024,
+            4096,
+            256,
+        )
     }
 }

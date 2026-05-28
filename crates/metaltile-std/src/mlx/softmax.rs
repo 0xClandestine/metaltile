@@ -58,7 +58,7 @@ pub fn mt_softmax<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-use metaltile::test_kernel;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
@@ -136,6 +136,13 @@ pub mod kernel_benches {
 
     #[bench(name = "softmax/softmax", dtypes = [f32, f16, bf16])]
     fn bench_mt_softmax(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_row_norm(mt_softmax::kernel_ir_for(dt), dt, 1024, 4096, 256, 4096)
+        crate::mlx::benches::bench_row_norm(
+            mt_softmax::kernel_ir_for(dt),
+            dt,
+            1024,
+            4096,
+            256,
+            4096,
+        )
     }
 }

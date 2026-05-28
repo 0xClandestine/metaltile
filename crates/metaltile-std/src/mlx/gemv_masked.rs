@@ -30,7 +30,7 @@ pub fn mt_gemv_masked<T>(
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-use metaltile::test_kernel;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
@@ -128,6 +128,12 @@ pub mod kernel_benches {
 
     #[bench(name = "gemv_masked/gemv_masked", dtypes = [f32, f16, bf16])]
     fn bench_mt_gemv_masked(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_mat_vec_masked(mt_gemv_masked::kernel_ir_for(dt), dt, 4096, 4096, 256)
+        crate::mlx::benches::bench_mat_vec_masked(
+            mt_gemv_masked::kernel_ir_for(dt),
+            dt,
+            4096,
+            4096,
+            256,
+        )
     }
 }

@@ -685,25 +685,12 @@ pub mod kernel_tests {
             let conv_out: Vec<f32> = (0..b * stride_b)
                 .map(|i| (((i + step * 17) as f32) * 0.0131).sin() * 0.4)
                 .collect();
-            let a_raw: Vec<f32> =
-                (0..b * hv).map(|i| -0.3 + ((i + step) as f32) * 0.04).collect();
-            let b_raw: Vec<f32> =
-                (0..b * hv).map(|i| -0.2 + ((i + step) as f32) * 0.03).collect();
+            let a_raw: Vec<f32> = (0..b * hv).map(|i| -0.3 + ((i + step) as f32) * 0.04).collect();
+            let b_raw: Vec<f32> = (0..b * hv).map(|i| -0.2 + ((i + step) as f32) * 0.03).collect();
             penultimate_state = state_cpu.clone();
             let (_, state_new) = cpu_fused_oracle(
-                &conv_out,
-                &a_log,
-                &dt_bias,
-                &a_raw,
-                &b_raw,
-                &weights_q,
-                &weights_k,
-                &state_cpu,
-                b,
-                hv,
-                hk,
-                dv,
-                dk,
+                &conv_out, &a_log, &dt_bias, &a_raw, &b_raw, &weights_q, &weights_k, &state_cpu, b,
+                hv, hk, dv, dk,
             );
             last_conv_out = conv_out;
             last_a_raw = a_raw;

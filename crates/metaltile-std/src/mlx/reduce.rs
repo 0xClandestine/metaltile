@@ -182,7 +182,7 @@ seg_reduce_kernel!(mt_seg_reduce_min, min, "min");
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-use metaltile::test_kernel;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
@@ -386,41 +386,85 @@ pub mod kernel_benches {
 
     #[bench(name = "all_reduce/sum", dtypes = [f32, f16, bf16])]
     fn bench_mt_all_reduce(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_all_reduce(mt_all_reduce::kernel_ir_for(dt), dt, crate::mlx::benches::ALL_REDUCE_N, crate::mlx::benches::ALL_REDUCE_TPG)
+        crate::mlx::benches::bench_all_reduce(
+            mt_all_reduce::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ALL_REDUCE_N,
+            crate::mlx::benches::ALL_REDUCE_TPG,
+        )
     }
 
     #[bench(name = "all_reduce/prod", dtypes = [f32, f16, bf16])]
     fn bench_mt_all_reduce_prod(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_all_reduce(mt_all_reduce_prod::kernel_ir_for(dt), dt, crate::mlx::benches::ALL_REDUCE_N, crate::mlx::benches::ALL_REDUCE_TPG)
+        crate::mlx::benches::bench_all_reduce(
+            mt_all_reduce_prod::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ALL_REDUCE_N,
+            crate::mlx::benches::ALL_REDUCE_TPG,
+        )
     }
 
     #[bench(name = "all_reduce/max", dtypes = [f32, f16, bf16])]
     fn bench_mt_all_reduce_max(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_all_reduce(mt_all_reduce_max::kernel_ir_for(dt), dt, crate::mlx::benches::ALL_REDUCE_N, crate::mlx::benches::ALL_REDUCE_TPG)
+        crate::mlx::benches::bench_all_reduce(
+            mt_all_reduce_max::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ALL_REDUCE_N,
+            crate::mlx::benches::ALL_REDUCE_TPG,
+        )
     }
 
     #[bench(name = "all_reduce/min", dtypes = [f32, f16, bf16])]
     fn bench_mt_all_reduce_min(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_all_reduce(mt_all_reduce_min::kernel_ir_for(dt), dt, crate::mlx::benches::ALL_REDUCE_N, crate::mlx::benches::ALL_REDUCE_TPG)
+        crate::mlx::benches::bench_all_reduce(
+            mt_all_reduce_min::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ALL_REDUCE_N,
+            crate::mlx::benches::ALL_REDUCE_TPG,
+        )
     }
 
     #[bench(name = "row_reduce/sum", dtypes = [f32, f16, bf16])]
     fn bench_mt_row_reduce(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_row_reduce(mt_row_reduce::kernel_ir_for(dt), dt, crate::mlx::benches::ROW_REDUCE_B, crate::mlx::benches::ROW_REDUCE_N, crate::mlx::benches::ROW_REDUCE_TPG)
+        crate::mlx::benches::bench_row_reduce(
+            mt_row_reduce::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ROW_REDUCE_B,
+            crate::mlx::benches::ROW_REDUCE_N,
+            crate::mlx::benches::ROW_REDUCE_TPG,
+        )
     }
 
     #[bench(name = "row_reduce/prod", dtypes = [f32, f16, bf16])]
     fn bench_mt_row_reduce_prod(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_row_reduce(mt_row_reduce_prod::kernel_ir_for(dt), dt, crate::mlx::benches::ROW_REDUCE_B, crate::mlx::benches::ROW_REDUCE_N, crate::mlx::benches::ROW_REDUCE_TPG)
+        crate::mlx::benches::bench_row_reduce(
+            mt_row_reduce_prod::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ROW_REDUCE_B,
+            crate::mlx::benches::ROW_REDUCE_N,
+            crate::mlx::benches::ROW_REDUCE_TPG,
+        )
     }
 
     #[bench(name = "row_reduce/max", dtypes = [f32, f16, bf16])]
     fn bench_mt_row_reduce_max(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_row_reduce(mt_row_reduce_max::kernel_ir_for(dt), dt, crate::mlx::benches::ROW_REDUCE_B, crate::mlx::benches::ROW_REDUCE_N, crate::mlx::benches::ROW_REDUCE_TPG)
+        crate::mlx::benches::bench_row_reduce(
+            mt_row_reduce_max::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ROW_REDUCE_B,
+            crate::mlx::benches::ROW_REDUCE_N,
+            crate::mlx::benches::ROW_REDUCE_TPG,
+        )
     }
 
     #[bench(name = "row_reduce/min", dtypes = [f32, f16, bf16])]
     fn bench_mt_row_reduce_min(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_row_reduce(mt_row_reduce_min::kernel_ir_for(dt), dt, crate::mlx::benches::ROW_REDUCE_B, crate::mlx::benches::ROW_REDUCE_N, crate::mlx::benches::ROW_REDUCE_TPG)
+        crate::mlx::benches::bench_row_reduce(
+            mt_row_reduce_min::kernel_ir_for(dt),
+            dt,
+            crate::mlx::benches::ROW_REDUCE_B,
+            crate::mlx::benches::ROW_REDUCE_N,
+            crate::mlx::benches::ROW_REDUCE_TPG,
+        )
     }
 }

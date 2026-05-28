@@ -59,7 +59,7 @@ pub fn logits_min_p_mask<T>(
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-use metaltile_core::{
+    use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };

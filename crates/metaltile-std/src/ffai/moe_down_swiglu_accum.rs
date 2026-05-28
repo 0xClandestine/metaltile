@@ -312,7 +312,7 @@ define_moe_down_swiglu_accum_chain8!(
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-use metaltile::test_kernel;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
@@ -324,8 +324,7 @@ use metaltile::test_kernel;
     fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 =>
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
             DType::BF16 =>
                 vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype {dt:?}"),
@@ -522,25 +521,14 @@ use metaltile::test_kernel;
         kernel.mode = KernelMode::Reduction;
         let mut setup = TestSetup::new(kernel);
         for k in 0..8usize {
-            setup = setup.input(TestBuffer::from_vec(
-                &format!("gate_{k}"),
-                pack(&gates[k], dt),
-                dt,
-            ));
+            setup =
+                setup.input(TestBuffer::from_vec(&format!("gate_{k}"), pack(&gates[k], dt), dt));
             setup = setup.input(TestBuffer::from_vec(&format!("up_{k}"), pack(&ups[k], dt), dt));
         }
         setup
-            .input(TestBuffer::from_vec(
-                "expert_indices",
-                pack_u32(&expert_indices),
-                DType::U32,
-            ))
+            .input(TestBuffer::from_vec("expert_indices", pack_u32(&expert_indices), DType::U32))
             .input(TestBuffer::from_vec("slot_weights", pack(&slot_weights_f32, dt), dt))
-            .input(TestBuffer::from_vec(
-                "weights_stacked",
-                pack_u32(&w_packed),
-                DType::U32,
-            ))
+            .input(TestBuffer::from_vec("weights_stacked", pack_u32(&w_packed), DType::U32))
             .input(TestBuffer::from_vec("scales_stacked", pack(&scales_dt, dt), dt))
             .input(TestBuffer::from_vec("biases_stacked", pack(&biases_dt, dt), dt))
             .input(TestBuffer::from_vec(

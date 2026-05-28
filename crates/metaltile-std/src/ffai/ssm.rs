@@ -240,7 +240,7 @@ pub fn mt_ssm_step<T>(
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-use metaltile::test_kernel;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
@@ -370,10 +370,8 @@ use metaltile::test_kernel;
     fn round_to(vals: &[f32], dt: DType) -> Vec<f32> {
         match dt {
             DType::F32 => vals.to_vec(),
-            DType::F16 =>
-                vals.iter().map(|&v| half::f16::from_f32(v).to_f32()).collect(),
-            DType::BF16 =>
-                vals.iter().map(|&v| half::bf16::from_f32(v).to_f32()).collect(),
+            DType::F16 => vals.iter().map(|&v| half::f16::from_f32(v).to_f32()).collect(),
+            DType::BF16 => vals.iter().map(|&v| half::bf16::from_f32(v).to_f32()).collect(),
             _ => vals.to_vec(),
         }
     }
@@ -384,20 +382,16 @@ use metaltile::test_kernel;
         let n_channels = 64usize;
         let kernel_size = 4usize;
 
-        let x = round_to(
-            &(0..n_channels).map(|i| ((i as f32) * 0.013).sin()).collect::<Vec<_>>(),
-            dt,
-        );
+        let x =
+            round_to(&(0..n_channels).map(|i| ((i as f32) * 0.013).sin()).collect::<Vec<_>>(), dt);
         let w = round_to(
             &(0..kernel_size * n_channels)
                 .map(|i| 0.1 + ((i as f32) * 0.019).cos() * 0.2)
                 .collect::<Vec<_>>(),
             dt,
         );
-        let b = round_to(
-            &(0..n_channels).map(|i| (i as f32) * 0.001 - 0.05).collect::<Vec<_>>(),
-            dt,
-        );
+        let b =
+            round_to(&(0..n_channels).map(|i| (i as f32) * 0.001 - 0.05).collect::<Vec<_>>(), dt);
         let state_initial = round_to(
             &(0..(kernel_size - 1) * n_channels)
                 .map(|i| ((i as f32) * 0.007).sin() * 0.5)
@@ -525,7 +519,15 @@ use metaltile::test_kernel;
 
         let mut h_oracle = h_initial.clone();
         let expected_y = naive_ssm_step(
-            &x, &a, &b_vec, &c_vec, &dt_in, &mut h_oracle, n_heads, head_dim, state_dim,
+            &x,
+            &a,
+            &b_vec,
+            &c_vec,
+            &dt_in,
+            &mut h_oracle,
+            n_heads,
+            head_dim,
+            state_dim,
         );
 
         let mut kernel_ir = ssm_step::kernel_ir_for(dt);
@@ -606,8 +608,18 @@ use metaltile::test_kernel;
             (0..n_total * dh * ds).map(|i| ((i as f32) * 0.009).cos() * 0.2).collect();
 
         let (state_expected, out_expected) = naive_mt_ssm_step(
-            &x, &a_log, &b_mat, &c_mat, &d_skip, &dt_in, &state_in,
-            n_total, dh, ds, n_heads, heads_per_group,
+            &x,
+            &a_log,
+            &b_mat,
+            &c_mat,
+            &d_skip,
+            &dt_in,
+            &state_in,
+            n_total,
+            dh,
+            ds,
+            n_heads,
+            heads_per_group,
         );
 
         let mut kernel_ir = mt_ssm_step::kernel_ir_for(dt);
@@ -656,8 +668,18 @@ use metaltile::test_kernel;
             (0..n_total * dh * ds).map(|i| ((i as f32) * 0.009).cos() * 0.2).collect();
 
         let (state_expected, out_expected) = naive_mt_ssm_step(
-            &x, &a_log, &b_mat, &c_mat, &d_skip, &dt_in, &state_in,
-            n_total, dh, ds, n_heads, heads_per_group,
+            &x,
+            &a_log,
+            &b_mat,
+            &c_mat,
+            &d_skip,
+            &dt_in,
+            &state_in,
+            n_total,
+            dh,
+            ds,
+            n_heads,
+            heads_per_group,
         );
 
         let mut kernel_ir = mt_ssm_step::kernel_ir_for(dt);
@@ -700,34 +722,34 @@ use metaltile::test_kernel;
             &(0..n_total * dh).map(|i| ((i as f32) * 0.017).sin() * 0.3).collect::<Vec<_>>(),
             dt,
         );
-        let a_log = round_to(
-            &(0..n_heads).map(|i| -1.0 + (i as f32) * 0.2).collect::<Vec<_>>(),
-            dt,
-        );
-        let b_mat = round_to(
-            &(0..groups * ds).map(|i| 0.05 + (i as f32) * 0.003).collect::<Vec<_>>(),
-            dt,
-        );
-        let c_mat = round_to(
-            &(0..groups * ds).map(|i| 0.1 - (i as f32) * 0.001).collect::<Vec<_>>(),
-            dt,
-        );
-        let d_skip = round_to(
-            &(0..n_heads).map(|i| 0.05 + (i as f32) * 0.01).collect::<Vec<_>>(),
-            dt,
-        );
-        let dt_in = round_to(
-            &(0..n_total).map(|i| 0.02 + (i as f32) * 0.005).collect::<Vec<_>>(),
-            dt,
-        );
+        let a_log =
+            round_to(&(0..n_heads).map(|i| -1.0 + (i as f32) * 0.2).collect::<Vec<_>>(), dt);
+        let b_mat =
+            round_to(&(0..groups * ds).map(|i| 0.05 + (i as f32) * 0.003).collect::<Vec<_>>(), dt);
+        let c_mat =
+            round_to(&(0..groups * ds).map(|i| 0.1 - (i as f32) * 0.001).collect::<Vec<_>>(), dt);
+        let d_skip =
+            round_to(&(0..n_heads).map(|i| 0.05 + (i as f32) * 0.01).collect::<Vec<_>>(), dt);
+        let dt_in =
+            round_to(&(0..n_total).map(|i| 0.02 + (i as f32) * 0.005).collect::<Vec<_>>(), dt);
         let state_in = round_to(
             &(0..n_total * dh * ds).map(|i| ((i as f32) * 0.009).cos() * 0.2).collect::<Vec<_>>(),
             dt,
         );
 
         let (_state_expected, out_expected) = naive_mt_ssm_step(
-            &x, &a_log, &b_mat, &c_mat, &d_skip, &dt_in, &state_in,
-            n_total, dh, ds, n_heads, heads_per_group,
+            &x,
+            &a_log,
+            &b_mat,
+            &c_mat,
+            &d_skip,
+            &dt_in,
+            &state_in,
+            n_total,
+            dh,
+            ds,
+            n_heads,
+            heads_per_group,
         );
 
         let mut kernel_ir = mt_ssm_step::kernel_ir_for(dt);

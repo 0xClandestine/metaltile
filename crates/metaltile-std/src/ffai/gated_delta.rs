@@ -255,7 +255,7 @@ pub fn mt_gated_delta_chunk<T>(
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-//! GPU correctness tests for `mt_gated_delta_step` and `mt_gated_delta_chunk`.
+    //! GPU correctness tests for `mt_gated_delta_step` and `mt_gated_delta_chunk`.
 
     use metaltile::test_kernel;
     use metaltile_core::{
@@ -540,12 +540,17 @@ pub mod kernel_tests {
         let dk = 32usize;
         let n_total = b * hv;
         let round = |v: &[f32]| v.iter().map(|&x| round_dt(x, dt)).collect::<Vec<_>>();
-        let q = round(&(0..b * hk * dk).map(|i| ((i as f32) * 0.013).sin() * 0.4).collect::<Vec<_>>());
-        let k = round(&(0..b * hk * dk).map(|i| ((i as f32) * 0.017).cos() * 0.4).collect::<Vec<_>>());
-        let v = round(&(0..b * hv * dv).map(|i| ((i as f32) * 0.029).sin() * 0.3).collect::<Vec<_>>());
+        let q =
+            round(&(0..b * hk * dk).map(|i| ((i as f32) * 0.013).sin() * 0.4).collect::<Vec<_>>());
+        let k =
+            round(&(0..b * hk * dk).map(|i| ((i as f32) * 0.017).cos() * 0.4).collect::<Vec<_>>());
+        let v =
+            round(&(0..b * hv * dv).map(|i| ((i as f32) * 0.029).sin() * 0.3).collect::<Vec<_>>());
         let g = round(&(0..b * hv).map(|i| 0.9 - (i as f32) * 0.01).collect::<Vec<_>>());
         let beta = round(&(0..b * hv).map(|i| 0.5 + (i as f32) * 0.01).collect::<Vec<_>>());
-        let state_in = round(&(0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.1).collect::<Vec<_>>());
+        let state_in = round(
+            &(0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.1).collect::<Vec<_>>(),
+        );
         let (expected_y, expected_state) =
             naive_step(&q, &k, &v, &g, &beta, &state_in, b, hv, hk, dv, dk);
         let mut kernel_ir = mt_gated_delta_step::kernel_ir_for(dt);
@@ -562,7 +567,11 @@ pub mod kernel_tests {
             .input(TestBuffer::from_vec("hv", u32_le(hv as u32), DType::U32))
             .input(TestBuffer::from_vec("hk", u32_le(hk as u32), DType::U32))
             .expect(TestBuffer::from_vec("y", pack(&expected_y, DType::F32), DType::F32))
-            .expect(TestBuffer::from_vec("state_out", pack(&expected_state, DType::F32), DType::F32))
+            .expect(TestBuffer::from_vec(
+                "state_out",
+                pack(&expected_state, DType::F32),
+                DType::F32,
+            ))
             .grid_3d(dv as u32, n_total as u32, 1, [32, 1, 1])
     }
 
@@ -680,12 +689,17 @@ pub mod kernel_tests {
         let dk = 32usize;
         let n_total = b * hv;
         let round = |v: &[f32]| v.iter().map(|&x| round_dt(x, dt)).collect::<Vec<_>>();
-        let q = round(&(0..b * hk * dk).map(|i| ((i as f32) * 0.013).sin() * 0.4).collect::<Vec<_>>());
-        let k = round(&(0..b * hk * dk).map(|i| ((i as f32) * 0.017).cos() * 0.4).collect::<Vec<_>>());
-        let v = round(&(0..b * hv * dv).map(|i| ((i as f32) * 0.029).sin() * 0.3).collect::<Vec<_>>());
+        let q =
+            round(&(0..b * hk * dk).map(|i| ((i as f32) * 0.013).sin() * 0.4).collect::<Vec<_>>());
+        let k =
+            round(&(0..b * hk * dk).map(|i| ((i as f32) * 0.017).cos() * 0.4).collect::<Vec<_>>());
+        let v =
+            round(&(0..b * hv * dv).map(|i| ((i as f32) * 0.029).sin() * 0.3).collect::<Vec<_>>());
         let g = round(&(0..b * hv).map(|i| 0.9 - (i as f32) * 0.01).collect::<Vec<_>>());
         let beta = round(&(0..b * hv).map(|i| 0.5 + (i as f32) * 0.01).collect::<Vec<_>>());
-        let state_in = round(&(0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.1).collect::<Vec<_>>());
+        let state_in = round(
+            &(0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.1).collect::<Vec<_>>(),
+        );
         let (expected_y, expected_state) =
             naive_step(&q, &k, &v, &g, &beta, &state_in, b, hv, hk, dv, dk);
         let mut kernel_ir = mt_gated_delta_step::kernel_ir_for(dt);
@@ -702,7 +716,11 @@ pub mod kernel_tests {
             .input(TestBuffer::from_vec("hv", u32_le(hv as u32), DType::U32))
             .input(TestBuffer::from_vec("hk", u32_le(hk as u32), DType::U32))
             .expect(TestBuffer::from_vec("y", pack(&expected_y, DType::F32), DType::F32))
-            .expect(TestBuffer::from_vec("state_out", pack(&expected_state, DType::F32), DType::F32))
+            .expect(TestBuffer::from_vec(
+                "state_out",
+                pack(&expected_state, DType::F32),
+                DType::F32,
+            ))
             .grid_3d(dv as u32, n_total as u32, 1, [32, 1, 1])
     }
 

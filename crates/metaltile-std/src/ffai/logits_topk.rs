@@ -51,7 +51,7 @@ pub fn logits_topk_mask<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] threshol
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-use metaltile_core::{
+    use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };

@@ -69,7 +69,7 @@ pub fn mt_layer_norm<T>(
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-use metaltile::test_kernel;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
@@ -153,6 +153,12 @@ pub mod kernel_benches {
 
     #[bench(name = "layer_norm/layer_norm", dtypes = [f32, f16, bf16])]
     fn bench_mt_layer_norm(dt: DType) -> BenchSetup {
-        crate::mlx::benches::bench_layer_norm(mt_layer_norm::kernel_ir_for(dt), dt, 1024, 4096, 1024)
+        crate::mlx::benches::bench_layer_norm(
+            mt_layer_norm::kernel_ir_for(dt),
+            dt,
+            1024,
+            4096,
+            1024,
+        )
     }
 }

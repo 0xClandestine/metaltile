@@ -247,7 +247,7 @@ mod tests {
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-use metaltile::test_kernel;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
@@ -259,18 +259,13 @@ use metaltile::test_kernel;
     fn pack_bytes(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
             DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            DType::F16 => {
-                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect()
-            },
-            DType::BF16 => {
-                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect()
-            },
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
             _ => panic!("unsupported dtype"),
         }
     }
-    fn pack_u32(vals: &[u32]) -> Vec<u8> {
-        vals.iter().flat_map(|v| v.to_le_bytes()).collect()
-    }
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { vals.iter().flat_map(|v| v.to_le_bytes()).collect() }
     fn pack_int8_row(codes: &[u32]) -> Vec<u32> {
         assert!(codes.len() % 4 == 0);
         codes
@@ -327,29 +322,24 @@ use metaltile::test_kernel;
         let n_out = 64usize;
         let group_size = 32usize;
         let t_rows = 64usize;
-        let indices: Vec<u32> =
-            (0..t_rows).map(|r| (r / (t_rows / n_experts)) as u32).collect();
+        let indices: Vec<u32> = (0..t_rows).map(|r| (r / (t_rows / n_experts)) as u32).collect();
         let total = n_experts * n_out * k_in;
         let codes: Vec<u32> =
             (0..total).map(|i| (i as u32).wrapping_mul(2654435761) & 0xff).collect();
-        let weight_packed: Vec<u32> =
-            codes.chunks_exact(k_in).flat_map(pack_int8_row).collect();
+        let weight_packed: Vec<u32> = codes.chunks_exact(k_in).flat_map(pack_int8_row).collect();
         let groups_total = n_experts * n_out * (k_in / group_size);
-        let scales: Vec<f32> =
-            (0..groups_total)
-                .map(|i| round_dt(0.002 + 0.0005 * (i as f32 * 0.03).sin(), dt))
-                .collect();
-        let biases: Vec<f32> =
-            (0..groups_total)
-                .map(|i| round_dt(-0.05 + 0.01 * (i as f32 * 0.07).cos(), dt))
-                .collect();
+        let scales: Vec<f32> = (0..groups_total)
+            .map(|i| round_dt(0.002 + 0.0005 * (i as f32 * 0.03).sin(), dt))
+            .collect();
+        let biases: Vec<f32> = (0..groups_total)
+            .map(|i| round_dt(-0.05 + 0.01 * (i as f32 * 0.07).cos(), dt))
+            .collect();
         let x: Vec<f32> =
-            (0..t_rows * k_in)
-                .map(|i| round_dt(0.05 * (i as f32 * 0.013).sin(), dt))
-                .collect();
+            (0..t_rows * k_in).map(|i| round_dt(0.05 * (i as f32 * 0.013).sin(), dt)).collect();
 
-        let expected_f32 =
-            cpu_oracle_int8(&x, &codes, &scales, &biases, &indices, t_rows, n_out, k_in, group_size);
+        let expected_f32 = cpu_oracle_int8(
+            &x, &codes, &scales, &biases, &indices, t_rows, n_out, k_in, group_size,
+        );
         // Re-encode expected values in the target dtype so the runner can compare
         // byte-for-byte with kernel output.
         let expected_bytes = pack_bytes(&expected_f32, dt);

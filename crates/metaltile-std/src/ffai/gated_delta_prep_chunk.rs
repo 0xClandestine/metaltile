@@ -204,7 +204,7 @@ mod tests {
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-//! GPU correctness tests for `mt_gated_delta_prep_chunk`.
+    //! GPU correctness tests for `mt_gated_delta_prep_chunk`.
 
     use metaltile::test_kernel;
     use metaltile_core::{

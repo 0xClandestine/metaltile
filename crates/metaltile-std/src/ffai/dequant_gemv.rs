@@ -357,7 +357,7 @@ pub fn dequant_gemv_wants_indirect(kernel_name: &str) -> bool {
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-use metaltile::test_kernel;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},

@@ -182,7 +182,7 @@ ssm_replay!(ssm_replay_d128_128_32, 128u32, 128u32, 32u32, 4u32, "replay_d128_12
 pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-use metaltile::test_kernel;
+    use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
@@ -406,8 +406,9 @@ use metaltile::test_kernel;
         let dt_in: Vec<f32> = src(batch * t * H, 0x6, 0.1).iter().map(|v| 0.2 + v).collect();
         let state_in = src(batch * H * DH * DS, 0x7, 0.3);
         let mask: Vec<u32> = vec![1; batch * t];
-        let exp =
-            naive_record(&x, &a_log, &bmat, &cmat, &dvec, &dt_in, &state_in, &mask, batch, t, false);
+        let exp = naive_record(
+            &x, &a_log, &bmat, &cmat, &dvec, &dt_in, &state_in, &mask, batch, t, false,
+        );
 
         let mut kernel_ir = ssm_step_record_d16_64_4_2::kernel_ir_for(dt);
         kernel_ir.mode = metaltile_core::ir::KernelMode::Grid3D;
