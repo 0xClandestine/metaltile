@@ -387,9 +387,7 @@ impl Context {
     /// returns `Err(Timeout)` if the GPU hasn't finished within `secs`
     /// seconds.  Pass `None` (the default) to restore the fast
     /// `waitUntilCompleted` path used by bench and inference.
-    pub fn set_dispatch_timeout(&mut self, secs: Option<u64>) {
-        self.dispatch_timeout_secs = secs;
-    }
+    pub fn set_dispatch_timeout(&mut self, secs: Option<u64>) { self.dispatch_timeout_secs = secs; }
 
     pub fn has_gpu(&self) -> bool { self.has_metal }
 
@@ -842,18 +840,20 @@ impl Context {
         };
 
         let pso = {
-            let mut guard = cache.lock().map_err(|e| MetalTileError::LockPoisoned(e.to_string()))?;
+            let mut guard =
+                cache.lock().map_err(|e| MetalTileError::LockPoisoned(e.to_string()))?;
             if let Some(p) = guard.get(&pso_key) {
                 p.clone()
             } else {
                 use objc2_metal::MTLDevice as _;
                 let ns_src = NSString::from_str(msl_source);
-                let library = dev.newLibraryWithSource_options_error(&ns_src, None)
+                let library = dev
+                    .newLibraryWithSource_options_error(&ns_src, None)
                     .map_err(|e| MetalTileError::MslCompilation(e.to_string()))?;
                 let fn_ns = NSString::from_str(fn_name);
-                let mtl_fn = library
-                    .newFunctionWithName(&fn_ns)
-                    .ok_or_else(|| MetalTileError::FunctionNotFound { name: fn_name.to_string() })?;
+                let mtl_fn = library.newFunctionWithName(&fn_ns).ok_or_else(|| {
+                    MetalTileError::FunctionNotFound { name: fn_name.to_string() }
+                })?;
                 let desc = MTLComputePipelineDescriptor::new();
                 desc.setComputeFunction(Some(&mtl_fn));
                 let pso = dev

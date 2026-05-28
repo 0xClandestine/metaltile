@@ -4,6 +4,4 @@
 // land in a single object; this const reference pulls that object in.
 const _: &() = &metaltile_std::__STD_LINK_ANCHOR;
 
-fn main() {
-    metaltile::runner::run(metaltile::runner::Args::from_env());
-}
+fn main() { metaltile::runner::run(metaltile::runner::Args::from_env()); }
