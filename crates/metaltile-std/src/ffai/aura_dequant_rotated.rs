@@ -12,8 +12,10 @@
 //! Input:
 //! - `packed [B*H, T, packed_width]` u32  — bit-packed codebook indices.
 //!   `packed_width = ceil(dim * bits / 32)`.
-//! - `norms  [B*H, T]`               f32  — per-token norm correction.
-//! - `codebook [2**bits]`            f32  — Lloyd-Max centroids.
+//! - `norms  [B*H, T]`               T    — per-token norm correction; cast-
+//!   at-load to f32 internally.
+//! - `codebook [2**bits]`            T    — Lloyd-Max centroids; cast-at-load
+//!   to f32 internally.
 //!
 //! Output:
 //! - `out  [B*H, T, dim]`            T    — fp16 / bf16 / fp32 in rotated
@@ -54,8 +56,8 @@ macro_rules! aura_dequant_rotated_clean {
                 )]
         pub fn $name<T>(
             packed: Tensor<u32>,
-            norms: Tensor<f32>,
-            codebook: Tensor<f32>,
+            norms: Tensor<T>,
+            codebook: Tensor<T>,
             mut out: Tensor<T>,
             #[constexpr] dim: u32,
             #[constexpr] packed_width: u32,
@@ -77,7 +79,7 @@ macro_rules! aura_dequant_rotated_clean {
 
             let base = (bh * tokens + t) * packed_width;
             let word = load(packed[base + w]);
-            let norm_val = load(norms[bh * tokens + t]);
+            let norm_val = load(norms[bh * tokens + t]).cast::<f32>();
 
             let d_base = w * dims_per_word;
             let out_row_base = (bh * tokens + t) * dim + d_base;
@@ -85,7 +87,7 @@ macro_rules! aura_dequant_rotated_clean {
                 let d = d_base + k;
                 if d < dim {
                     let val = (word >> (k * $bits)) & mask;
-                    let centroid = load(codebook[val]);
+                    let centroid = load(codebook[val]).cast::<f32>();
                     let result = centroid * norm_val;
                     store(out[out_row_base + k], result.cast::<T>());
                 }
@@ -110,8 +112,8 @@ macro_rules! aura_dequant_rotated_odd {
                 )]
         pub fn $name<T>(
             packed: Tensor<u32>,
-            norms: Tensor<f32>,
-            codebook: Tensor<f32>,
+            norms: Tensor<T>,
+            codebook: Tensor<T>,
             mut out: Tensor<T>,
             #[constexpr] dim: u32,
             #[constexpr] packed_width: u32,
@@ -132,7 +134,7 @@ macro_rules! aura_dequant_rotated_odd {
             let dims_per_word = (32u32 + $bits - 1u32) / $bits;
 
             let base = (bh * tokens + t) * packed_width;
-            let norm_val = load(norms[bh * tokens + t]);
+            let norm_val = load(norms[bh * tokens + t]).cast::<f32>();
 
             let d_base = w * dims_per_word;
             for k in range(0u32, dims_per_word, 1u32) {
@@ -153,7 +155,7 @@ macro_rules! aura_dequant_rotated_odd {
                     let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
                     let val = (lo | hi) & mask;
 
-                    let centroid = load(codebook[val]);
+                    let centroid = load(codebook[val]).cast::<f32>();
                     let result = centroid * norm_val;
                     store(out[(bh * tokens + t) * dim + d], result.cast::<T>());
                 }

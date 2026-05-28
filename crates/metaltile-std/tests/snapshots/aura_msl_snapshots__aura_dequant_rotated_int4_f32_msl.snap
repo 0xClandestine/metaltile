@@ -29,24 +29,25 @@ kernel void aura_dequant_rotated_int4(
     auto v16 = (((v12 + v_t) * v14) + v_w);
     auto v_word = packed[v16];
     auto v19 = v12 + v_t;
-    auto v_norm_val = norms[v19];
+    auto v20 = norms[v19];
+    float v_norm_val = static_cast<float>(v20);
     auto v_d_base = v_w * v_dims_per_word;
-    auto v24 = dim;
-    auto v25 = ((v12 + v_t) * v24);
-    auto v_out_row_base = v25 + v_d_base;
-    uint v28 = 1u;
-    uint v27 = 0u;
-    for (uint i_0 = v27; i_0 < v_dims_per_word; i_0 += v28) {
+    auto v25 = dim;
+    auto v26 = ((v12 + v_t) * v25);
+    auto v_out_row_base = v26 + v_d_base;
+    uint v29 = 1u;
+    uint v28 = 0u;
+    for (uint i_0 = v28; i_0 < v_dims_per_word; i_0 += v29) {
         auto v_d = v_d_base + i_0;
-        auto v30 = v24 > v_d;
-        if (v30) {
-            uint v31 = 4u;
-            auto v32 = i_0 * v31;
-            auto v_val = ((v_word >> v32) & v_mask);
-            auto v_centroid = codebook[v_val];
-            auto v38 = static_cast<float>((v_centroid * v_norm_val));
-            auto v37 = v_out_row_base + i_0;
-            out[v37] = v38;
+        auto v31 = v25 > v_d;
+        if (v31) {
+            uint v32 = 4u;
+            auto v33 = i_0 * v32;
+            auto v_val = ((v_word >> v33) & v_mask);
+            auto v36 = codebook[v_val];
+            auto v40 = static_cast<float>((static_cast<float>(v36) * v_norm_val));
+            auto v39 = v_out_row_base + i_0;
+            out[v39] = v40;
         }
     }
 }
