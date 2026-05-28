@@ -17,5 +17,12 @@ pub fn pack_f32(vals: &[f32], dt: DType) -> Vec<u8> {
 /// Pack a single `f32` scalar into the byte representation of `dt`.
 ///
 /// Convenience wrapper around [`pack_f32`] for 1-element constant buffers
-/// (e.g. the `start` and `step` scalars in `mt_arange`).
-pub fn scalar_bytes(v: f32, dt: DType) -> Vec<u8> { pack_f32(&[v], dt) }
+/// (e.g. the `start` and `step` scalars in `mt_arange`). Always returns at
+/// least 4 bytes — Metal rejects sub-4-byte buffer allocations.
+pub fn scalar_bytes(v: f32, dt: DType) -> Vec<u8> {
+    let mut bytes = pack_f32(&[v], dt);
+    if bytes.len() < 4 {
+        bytes.resize(4, 0);
+    }
+    bytes
+}
