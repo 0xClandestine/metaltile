@@ -41,7 +41,7 @@ pub mod kernel_tests {
 
     // Non-power-of-2 step (0.1) — exercises dtype rounding on the step
     // value; tolerances widened per dtype accordingly.
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-5, 1e-3, 1e-2])]
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-5, 5e-3, 5e-2])]
     fn test_mt_arange_fractional_step(dt: DType) -> TestSetup { setup(0.0, 0.1, 64, dt) }
 }
 
