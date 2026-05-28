@@ -3642,22 +3642,22 @@ mod tests_mma_bitwidth {
             .grid_3d((n_out / 32) as u32, (t_rows / 32) as u32, 1, [128, 1, 1])
     }
 
-    #[test_kernel(name = "ffai/moe/gather_qmm_mma_b3_f32", dtypes = [f32], tol = 5e-2)]
+    #[test_kernel(dtypes = [f32], tol = 5e-2)]
     fn test_moe_gather_qmm_mma_b3_f32(dt: DType) -> TestSetup {
         make_bitwidth_setup(3, dt, mt_moe_gather_qmm_mma_b3::kernel_ir_for)
     }
 
-    #[test_kernel(name = "ffai/moe/gather_qmm_mma_b5_f32", dtypes = [f32], tol = 5e-2)]
+    #[test_kernel(dtypes = [f32], tol = 5e-2)]
     fn test_moe_gather_qmm_mma_b5_f32(dt: DType) -> TestSetup {
         make_bitwidth_setup(5, dt, mt_moe_gather_qmm_mma_b5::kernel_ir_for)
     }
 
-    #[test_kernel(name = "ffai/moe/gather_qmm_mma_b6_f32", dtypes = [f32], tol = 5e-2)]
+    #[test_kernel(dtypes = [f32], tol = 5e-2)]
     fn test_moe_gather_qmm_mma_b6_f32(dt: DType) -> TestSetup {
         make_bitwidth_setup(6, dt, mt_moe_gather_qmm_mma_b6::kernel_ir_for)
     }
 
-    #[test_kernel(name = "ffai/moe/gather_qmm_mma_b8_f32", dtypes = [f32], tol = 5e-2)]
+    #[test_kernel(dtypes = [f32], tol = 5e-2)]
     fn test_moe_gather_qmm_mma_b8_f32(dt: DType) -> TestSetup {
         make_bitwidth_setup(8, dt, mt_moe_gather_qmm_mma_b8::kernel_ir_for)
     }

@@ -5066,35 +5066,35 @@ mod tests_bitwidth {
             .grid_3d((n / 32) as u32, (m / 32) as u32, 1, [128, 1, 1])
     }
 
-    #[test_kernel(name = "mlx/qmm_mma_b3/f32", dtypes = [f32], tol = 5e-2)]
+    #[test_kernel(dtypes = [f32], tol = 5e-2)]
     fn test_qmm_mma_b3_f32(dt: DType) -> TestSetup {
         // k=128, 128*3=384 bits=12 words per row; group_size=32, gs_per_row=4
         make_bitstream_setup(3, 32, 32, 128, 4, dt, mt_qmm_mma_b3::kernel_ir_for)
     }
 
-    #[test_kernel(name = "mlx/qmm_mma_b3/f16", dtypes = [f16], tol = 5e-2)]
+    #[test_kernel(dtypes = [f16], tol = 5e-2)]
     fn test_qmm_mma_b3_f16(dt: DType) -> TestSetup {
         make_bitstream_setup(3, 32, 32, 128, 4, dt, mt_qmm_mma_b3::kernel_ir_for)
     }
 
-    #[test_kernel(name = "mlx/qmm_mma_b5/f32", dtypes = [f32], tol = 5e-2)]
+    #[test_kernel(dtypes = [f32], tol = 5e-2)]
     fn test_qmm_mma_b5_f32(dt: DType) -> TestSetup {
         // k=256, 256*5=1280 bits=40 words per row; group_size=32, gs_per_row=8
         make_bitstream_setup(5, 32, 32, 256, 8, dt, mt_qmm_mma_b5::kernel_ir_for)
     }
 
-    #[test_kernel(name = "mlx/qmm_mma_b5/f16", dtypes = [f16], tol = 5e-2)]
+    #[test_kernel(dtypes = [f16], tol = 5e-2)]
     fn test_qmm_mma_b5_f16(dt: DType) -> TestSetup {
         make_bitstream_setup(5, 32, 32, 256, 8, dt, mt_qmm_mma_b5::kernel_ir_for)
     }
 
-    #[test_kernel(name = "mlx/qmm_mma_b6/f32", dtypes = [f32], tol = 5e-2)]
+    #[test_kernel(dtypes = [f32], tol = 5e-2)]
     fn test_qmm_mma_b6_f32(dt: DType) -> TestSetup {
         // k=64, 64*6=384 bits=12 words per row; group_size=32, gs_per_row=2
         make_bitstream_setup(6, 32, 32, 64, 2, dt, mt_qmm_mma_b6::kernel_ir_for)
     }
 
-    #[test_kernel(name = "mlx/qmm_mma_b6/f16", dtypes = [f16], tol = 5e-2)]
+    #[test_kernel(dtypes = [f16], tol = 5e-2)]
     fn test_qmm_mma_b6_f16(dt: DType) -> TestSetup {
         make_bitstream_setup(6, 32, 32, 64, 2, dt, mt_qmm_mma_b6::kernel_ir_for)
     }

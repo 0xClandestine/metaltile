@@ -3,28 +3,140 @@
 //! `#[test_kernel]` proc-macro attribute implementation.
 //!
 //! Generates a `KernelTest` impl and inventory submission from a plain
-//! setup function annotated with `#[test_kernel(name = "...", dtypes = [...])]`.
+//! setup function annotated with `#[test_kernel(dtypes = [...])]`.
+//! The test name is taken from the annotated function's identifier.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{Ident, ItemFn, LitFloat, LitStr, Token, parse::ParseStream};
+use syn::{Ident, ItemFn, LitFloat, Token, parse::ParseStream};
 
 use crate::bench::dtype_token;
 
+enum Tolerance {
+    Scalar(f64),
+    Table(Vec<(Ident, f64)>),
+    Array(Vec<f64>),
+}
+
 /// Parsed arguments for the `#[test_kernel]` attribute.
 struct TestAttr {
-    /// Test name, e.g. `"unary/exp"`.
-    name: LitStr,
     /// Data types to test, e.g. `[f32, f16, bf16]`.
     dtypes: Vec<Ident>,
     /// Element-wise tolerance override (default: `1e-4`).
-    tol: Option<f64>,
+    tol: Option<Tolerance>,
+}
+
+fn parse_tol_value(input: ParseStream) -> syn::Result<f64> {
+    let lit = input.parse::<LitFloat>()?;
+    lit.base10_parse::<f64>()
+        .map_err(|_| syn::Error::new(lit.span(), "tol must be a float literal, e.g. 1e-4"))
+}
+
+fn parse_tolerance(input: ParseStream) -> syn::Result<Tolerance> {
+    if input.peek(syn::token::Bracket) {
+        let content;
+        syn::bracketed!(content in input);
+        let mut vals = Vec::new();
+        while !content.is_empty() {
+            vals.push(parse_tol_value(&content)?);
+            if content.peek(Token![,]) {
+                content.parse::<Token![,]>()?;
+            }
+        }
+        return Ok(Tolerance::Array(vals));
+    }
+    if input.peek(syn::token::Brace) {
+        let content;
+        syn::braced!(content in input);
+        let mut table = Vec::new();
+        while !content.is_empty() {
+            let dtype: Ident = content.parse()?;
+            content.parse::<Token![:]>()?;
+            table.push((dtype, parse_tol_value(&content)?));
+            if content.peek(Token![,]) {
+                content.parse::<Token![,]>()?;
+            }
+        }
+        return Ok(Tolerance::Table(table));
+    }
+    parse_tol_value(input).map(Tolerance::Scalar)
+}
+
+fn validate_tolerance(dtypes: &[Ident], tol: &Tolerance) -> syn::Result<()> {
+    match tol {
+        Tolerance::Scalar(_) => return Ok(()),
+        Tolerance::Array(vals) => {
+            if vals.len() != dtypes.len() {
+                return Err(syn::Error::new(
+                    dtypes.last().map_or_else(
+                        || proc_macro2::Span::call_site(),
+                        Ident::span,
+                    ),
+                    format!(
+                        "tol array has {} values but dtypes has {} entries",
+                        vals.len(),
+                        dtypes.len()
+                    ),
+                ));
+            }
+            return Ok(());
+        }
+        Tolerance::Table(table) => {
+            let dtypes_set = dtypes
+                .iter()
+                .map(ToString::to_string)
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut seen = std::collections::BTreeSet::new();
+            for (dtype, _) in table {
+                let name = dtype.to_string();
+                if !dtypes_set.contains(&name) {
+                    return Err(syn::Error::new(
+                        dtype.span(),
+                        format!(
+                            "tol table includes dtype `{name}` not listed in `dtypes = [...]`"
+                        ),
+                    ));
+                }
+                if !seen.insert(name.clone()) {
+                    return Err(syn::Error::new(
+                        dtype.span(),
+                        format!("duplicate tol entry for dtype `{name}`"),
+                    ));
+                }
+            }
+
+            for dtype in dtypes {
+                let name = dtype.to_string();
+                if !seen.contains(&name) {
+                    return Err(syn::Error::new(
+                        dtype.span(),
+                        format!("tol table missing dtype `{name}` listed in `dtypes = [...]`"),
+                    ));
+                }
+            }
+
+            Ok(())
+        }
+    }
+}
+
+fn dtype_match_token(dtype: &Ident) -> syn::Result<TokenStream2> {
+    match dtype.to_string().as_str() {
+        "f32" => Ok(quote! { ::metaltile::core::DType::F32 }),
+        "f16" => Ok(quote! { ::metaltile::core::DType::F16 }),
+        "bf16" => Ok(quote! { ::metaltile::core::DType::BF16 }),
+        "i32" => Ok(quote! { ::metaltile::core::DType::I32 }),
+        "u32" => Ok(quote! { ::metaltile::core::DType::U32 }),
+        "i8" => Ok(quote! { ::metaltile::core::DType::I8 }),
+        "u8" => Ok(quote! { ::metaltile::core::DType::U8 }),
+        other =>
+            Err(syn::Error::new(dtype.span(), format!("unknown dtype `{other}` in tol table"))),
+    }
 }
 
 impl syn::parse::Parse for TestAttr {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let mut name = None;
         let mut dtypes = None;
         let mut tol = None;
 
@@ -32,22 +144,17 @@ impl syn::parse::Parse for TestAttr {
             let key: Ident = input.parse()?;
             input.parse::<Token![=]>()?;
 
-            if key == "name" {
-                name = Some(input.parse::<LitStr>()?);
-            } else if key == "dtypes" {
+            if key == "dtypes" {
                 let content;
                 syn::bracketed!(content in input);
                 let list = content.parse_terminated(Ident::parse, Token![,])?;
                 dtypes = Some(list.into_iter().collect::<Vec<_>>());
             } else if key == "tol" {
-                let lit = input.parse::<LitFloat>()?;
-                tol = Some(lit.base10_parse::<f64>().map_err(|_| {
-                    syn::Error::new(lit.span(), "tol must be a float literal, e.g. 1e-4")
-                })?);
+                tol = Some(parse_tolerance(input)?);
             } else {
                 return Err(syn::Error::new(
                     key.span(),
-                    format!("unknown #[test_kernel] key `{key}` — valid keys: name, dtypes, tol"),
+                    format!("unknown #[test_kernel] key `{key}` — valid keys: dtypes, tol"),
                 ));
             }
 
@@ -56,13 +163,7 @@ impl syn::parse::Parse for TestAttr {
             }
         }
 
-        Ok(TestAttr {
-            name: name.ok_or_else(|| {
-                syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    "#[test_kernel] requires `name = \"...\"`",
-                )
-            })?,
+        let attr = TestAttr {
             dtypes: dtypes.ok_or_else(|| {
                 syn::Error::new(
                     proc_macro2::Span::call_site(),
@@ -70,7 +171,11 @@ impl syn::parse::Parse for TestAttr {
                 )
             })?,
             tol,
-        })
+        };
+        if let Some(tol) = &attr.tol {
+            validate_tolerance(&attr.dtypes, tol)?;
+        }
+        Ok(attr)
     }
 }
 
@@ -84,13 +189,46 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Private impl struct — unique per function name within the module.
     let impl_name = syn::Ident::new(&format!("__TestImpl_{fn_name_str}"), fn_name.span());
 
-    let name_lit = &test_attr.name;
+    let name_lit = syn::LitStr::new(&fn_name_str, fn_name.span());
     let dtype_tokens: Vec<TokenStream2> =
         test_attr.dtypes.iter().map(|id| dtype_token(&id.to_string())).collect();
 
     let tol_impl: TokenStream2 = match test_attr.tol {
-        Some(tol) => quote! {
+        Some(Tolerance::Scalar(tol)) => quote! {
             fn tolerance(&self, _dt: ::metaltile::core::DType) -> f64 { #tol }
+        },
+        Some(Tolerance::Array(vals)) => {
+            let arms = test_attr.dtypes.iter().zip(vals.iter()).map(|(dtype, tol)| {
+                let dt = dtype_token(&dtype.to_string());
+                quote! { #dt => #tol }
+            });
+            quote! {
+                fn tolerance(&self, dt: ::metaltile::core::DType) -> f64 {
+                    match dt {
+                        #(#arms,)*
+                        _ => unreachable!("dtype {:?} missing from tol array for {}", dt, #name_lit),
+                    }
+                }
+            }
+        },
+        Some(Tolerance::Table(table)) => {
+            let arms = match table
+                .iter()
+                .map(|(dtype, tol)| Ok((dtype_match_token(dtype)?, *tol)))
+                .collect::<syn::Result<Vec<_>>>()
+            {
+                Ok(arms) => arms,
+                Err(err) => return err.into_compile_error().into(),
+            };
+            let arms = arms.iter().map(|(dtype, tol)| quote! { #dtype => #tol });
+            quote! {
+                fn tolerance(&self, dt: ::metaltile::core::DType) -> f64 {
+                    match dt {
+                        #(#arms,)*
+                        _ => unreachable!("dtype {:?} missing from tol table for {}", dt, #name_lit),
+                    }
+                }
+            }
         },
         None => quote! {},
     };
@@ -126,4 +264,53 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
             ::metaltile::core::KernelTestEntry::new(&#static_name)
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TestAttr, Tolerance};
+
+    #[test]
+    fn parses_scalar_tolerance() {
+        let attr: TestAttr =
+            syn::parse_str(r#"dtypes = [f32, f16], tol = 1e-4"#).unwrap();
+        assert!(matches!(attr.tol, Some(Tolerance::Scalar(t)) if (t - 1e-4).abs() < f64::EPSILON));
+    }
+
+    #[test]
+    fn parses_dtype_tolerance_table() {
+        let attr: TestAttr =
+            syn::parse_str(r#"dtypes = [f32, f16], tol = { f32: 1e-6, f16: 1e-3 }"#).unwrap();
+        assert!(matches!(attr.tol, Some(Tolerance::Table(table)) if table.len() == 2));
+    }
+
+    #[test]
+    fn rejects_incomplete_tolerance_table() {
+        let err =
+            syn::parse_str::<TestAttr>(r#"dtypes = [f32, f16], tol = { f32: 1e-6 }"#)
+                .err()
+                .unwrap();
+        assert!(err.to_string().contains("missing dtype `f16`"));
+    }
+
+    #[test]
+    fn parses_array_tolerance() {
+        let attr: TestAttr =
+            syn::parse_str(r#"dtypes = [f32, f16, bf16], tol = [1e-6, 1e-3, 1e0]"#).unwrap();
+        assert!(matches!(&attr.tol, Some(Tolerance::Array(vals)) if vals.len() == 3));
+        if let Some(Tolerance::Array(vals)) = &attr.tol {
+            assert!((vals[0] - 1e-6).abs() < f64::EPSILON);
+            assert!((vals[1] - 1e-3).abs() < f64::EPSILON);
+            assert!((vals[2] - 1e0).abs() < f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn rejects_array_tolerance_wrong_length() {
+        let err =
+            syn::parse_str::<TestAttr>(r#"dtypes = [f32, f16, bf16], tol = [1e-6, 1e-3]"#)
+                .err()
+                .unwrap();
+        assert!(err.to_string().contains("tol array has 2 values but dtypes has 3"));
+    }
 }

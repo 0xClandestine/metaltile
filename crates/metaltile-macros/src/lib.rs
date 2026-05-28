@@ -160,23 +160,30 @@ pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream { bench::expan
 
 /// Registers a setup function as a `KernelTest` in the `tile test` inventory.
 ///
+/// The test name is taken from the annotated function's name — no `name` key needed.
+///
 /// # Required keys
 ///
-/// | Key      | Type               | Description                            |
-/// |----------|--------------------|----------------------------------------|
-/// | `name`   | `"op/subop"`       | Slash-separated test name              |
-/// | `dtypes` | `[f32, f16, bf16]` | Data types to test                     |
+/// | Key      | Type               | Description        |
+/// |----------|--------------------|--------------------|
+/// | `dtypes` | `[f32, f16, bf16]` | Data types to test |
 ///
 /// # Optional keys
 ///
-/// | Key   | Type    | Description                                     |
-/// |-------|---------|-------------------------------------------------|
-/// | `tol` | `f64`   | Element-wise tolerance override (default: 1e-4) |
+/// | Key   | Type                                          | Description                                     |
+/// |-------|-----------------------------------------------|-------------------------------------------------|
+/// | `tol` | `f64`, `[f64, ...]`, or `{ dtype: f64, ... }` | Element-wise tolerance override (default: 1e-4) |
+///
+/// `tol` accepts three forms:
+/// - **Scalar** `tol = 1e-4` — same threshold for every dtype.
+/// - **Array** `tol = [1e-6, 1e-3, 1e-2]` — one value per dtype, in the same order as `dtypes`.
+/// - **Table** `tol = { f32: 1e-6, f16: 1e-3, bf16: 1e-2 }` — keyed by dtype name; every dtype
+///   in `dtypes` must appear exactly once.
 ///
 /// # Example
 ///
 /// ```ignore
-/// #[test_kernel(name = "unary/exp", dtypes = [f32], tol = 1e-4)]
+/// #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-6, 1e-3, 1e-2])]
 /// fn exp_test(dt: DType) -> TestSetup {
 ///     let n = 256;
 ///     let input: Vec<f32> = (0..n).map(|i| i as f32 * 0.01).collect();
