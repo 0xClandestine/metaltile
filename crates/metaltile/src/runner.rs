@@ -4,7 +4,7 @@
 //! streaming [`ProtocolMessage`] JSON lines to stdout for `tile bench` /
 //! `tile test` to consume.
 
-use std::{collections::BTreeMap, io::Write as IoWrite, path::PathBuf, time::Instant};
+use std::{collections::BTreeMap, io::Write as IoWrite, path::PathBuf};
 
 use metaltile_core::{
     DType,
@@ -88,15 +88,12 @@ impl Runner {
             eprintln!("error: failed to create Metal context: {e}");
             std::process::exit(1);
         });
-        // Enable a GPU timeout for both test and bench to prevent hangs.
-        // Tests get 10 s (small N, should finish in milliseconds).
-        // Benches get 60 s (large N, many timed iterations).
-        // Inference uses waitUntilCompleted (zero overhead) by default.
-        let timeout_secs = match args.command {
-            Command::Test => 10,
-            Command::Bench => 60,
-        };
-        ctx.set_dispatch_timeout(Some(timeout_secs));
+        // Tests use a 10 s polling timeout to prevent GPU hangs on bad kernels.
+        // Benches use waitUntilCompleted (None) so GPU timer is unobstructed and
+        // elapsed_us = GPUEndTime - GPUStartTime gives true GPU execution time.
+        if let Command::Test = args.command {
+            ctx.set_dispatch_timeout(Some(10));
+        }
         let ref_metal_path = std::env::var(REF_METAL_PATH_ENV).ok().map(PathBuf::from);
 
         Runner {
@@ -257,15 +254,14 @@ impl Runner {
 
         let min_us = (0..self.bench_cfg.timed_iters)
             .map(|_| {
-                let t0 = Instant::now();
-                self.ctx.dispatch_with_grid(
+                let result = self.ctx.dispatch_with_grid(
                     setup.kernel(),
                     &dispatch.buffers,
                     &dispatch.fn_consts,
                     dispatch.grid_groups,
                     dispatch.tpg,
                 )?;
-                Ok(t0.elapsed().as_secs_f64() * 1e6)
+                Ok(result.elapsed_us)
             })
             .collect::<Result<Vec<f64>, Box<dyn std::error::Error>>>()?
             .into_iter()
@@ -276,8 +272,8 @@ impl Runner {
 
     /// Load, compile, and time a reference Metal kernel.
     ///
-    /// Returns the minimum wall-clock time in microseconds, or an error if
-    /// `ref_metal_path` is not configured or the source file can't be read.
+    /// Returns the minimum GPU time in microseconds (from `GPUEndTime - GPUStartTime`),
+    /// or an error if `ref_metal_path` is not configured or the source file can't be read.
     fn time_ref_kernel(&self, ref_k: &RefKernel) -> Result<f64, Box<dyn std::error::Error>> {
         let base = self
             .ref_metal_path
@@ -298,15 +294,14 @@ impl Runner {
 
         let min_us = (0..self.bench_cfg.timed_iters)
             .map(|_| {
-                let t0 = Instant::now();
-                self.ctx.dispatch_raw_msl(
+                let result = self.ctx.dispatch_raw_msl(
                     &ref_k.fn_name,
                     &msl_source,
                     &buffers,
                     grid_groups,
                     tpg,
                 )?;
-                Ok(t0.elapsed().as_secs_f64() * 1e6)
+                Ok(result.elapsed_us)
             })
             .collect::<Result<Vec<f64>, Box<dyn std::error::Error>>>()?
             .into_iter()
