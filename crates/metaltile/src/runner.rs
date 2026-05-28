@@ -220,7 +220,6 @@ impl Runner {
             (None, None)
         };
 
-        let mean_us = 0.0; // mean not tracked separately; min_us is what matters
         Ok(BenchResult {
             name: bench.name().to_string(),
             dtype: dt.label().to_string(),
@@ -229,7 +228,7 @@ impl Runner {
             mt_pct,
             correct: true,
             min_us: mt_min_us,
-            mean_us,
+            mean_us: 0.0,
         })
     }
 

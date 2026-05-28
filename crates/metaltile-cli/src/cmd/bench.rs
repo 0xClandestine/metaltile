@@ -154,7 +154,7 @@ fn render_message(msg: &ProtocolMessage, _verbose: u8) {
                 b.name,
                 b.dtype,
                 b.mt_gbps,
-                b.mean_us,
+                b.min_us,
             );
             if let Some(ref_gbps) = b.ref_gbps {
                 let pct = b.mt_pct.unwrap_or(0.0);
