@@ -533,7 +533,7 @@ use metaltile::test_kernel;
                 DType::U32,
             ))
             .expect(TestBuffer::from_vec("output", pack_f32_dt(&expected, dt), dt))
-            .grid_3d(out_dim, 1, 1, [128, 1, 1])
+            .grid_3d(out_dim as u32, 1, 1, [128, 1, 1])
     }
 
     #[test_kernel(name = "ffai/dequant_gemv_int8/f32", dtypes = [f32], tol = 5e-4)]
@@ -566,6 +566,6 @@ use metaltile::test_kernel;
                 DType::U32,
             ))
             .expect(TestBuffer::from_vec("output", pack_f32_dt(&expected, dt), dt))
-            .grid_3d(out_dim, 1, 1, [128, 1, 1])
+            .grid_3d(out_dim as u32, 1, 1, [128, 1, 1])
     }
 }

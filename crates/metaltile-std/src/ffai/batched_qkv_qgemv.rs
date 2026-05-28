@@ -1078,6 +1078,6 @@ use metaltile::test_kernel;
                 DType::U32,
             ))
             .expect(TestBuffer::from_vec("out", pack_f32_dt(&expected, dt), dt))
-            .grid_3d(max_rows, 1, 3, [128, 1, 1])
+            .grid_3d(max_rows as u32, 1, 3, [128, 1, 1])
     }
 }

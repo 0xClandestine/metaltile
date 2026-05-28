@@ -423,7 +423,7 @@ use metaltile::test_kernel;
             .constexpr("dv", dv as u32)
             .constexpr("out_dim", out_dim as u32)
             .constexpr("group_size", group_size as u32)
-            .grid_3d(out_dim / 8, 1, 1, 64)
+            .grid_3d(out_dim as u32 / 8, 1, 1, [64, 1, 1])
     }
 
     #[test_kernel(name = "ffai/gated_rms_norm_qgemv/int4_fast_f32_small", dtypes = [f32], tol = 5e-3)]

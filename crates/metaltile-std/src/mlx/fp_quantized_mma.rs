@@ -714,7 +714,7 @@ use metaltile::test_kernel;
                 DType::U32,
             ))
             .expect(TestBuffer::from_vec("out", pack_f32_as_dtype(&expected, dt), dt))
-            .grid_3d(n / 32, m / 32, 1, [128, 1, 1])
+            .grid_3d(n as u32 / 32, m as u32 / 32, 1, [128, 1, 1])
     }
 
     #[test_kernel(name = "mlx/fp8_e4m3_qmm_mma/f32_small", dtypes = [f32], tol = 0.001)]
@@ -737,6 +737,6 @@ use metaltile::test_kernel;
                 DType::U32,
             ))
             .expect(TestBuffer::from_vec("out", pack_f32_as_dtype(&expected, dt), dt))
-            .grid_3d(n / 32, m / 32, 1, [128, 1, 1])
+            .grid_3d(n as u32 / 32, m as u32 / 32, 1, [128, 1, 1])
     }
 }

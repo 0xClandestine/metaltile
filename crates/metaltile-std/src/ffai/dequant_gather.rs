@@ -192,6 +192,6 @@ use metaltile::test_kernel;
                 DType::U32,
             ))
             .expect(TestBuffer::from_vec("out", pack_f32(&expected), dt))
-            .grid_3d(n_tokens, 1, 1, [hidden, 1, 1])
+            .grid_3d(n_tokens as u32, 1, 1, [hidden as u32, 1, 1])
     }
 }
