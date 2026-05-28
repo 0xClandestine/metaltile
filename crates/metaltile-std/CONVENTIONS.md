@@ -93,8 +93,11 @@ Rules:
   - f32 transcendentals: `1e-4`
   - f16: `1e-3`
   - bf16: `1e-2`
-- Keep `N ≤ 8_192` in tests.  Large allocations cause display flicker on
-  Apple Silicon because Metal and the display compositor share VRAM.
+- Keep `N ≤ 8_192` in tests.  The runtime pools `MTLBuffer` allocations
+  across dispatches so there are no per-test alloc/free cycles, but very
+  large pool buckets still stress the unified DRAM bandwidth shared between
+  the GPU and the display compositor on Apple Silicon.  Small N → small
+  pool buckets → no display pressure.
 - Use deterministic, bounded inputs (not `TestBuffer::random`) so failures
   reproduce reliably.
 - Use `compare_against(ref_setup)` when comparing a new kernel against an
