@@ -48,9 +48,10 @@ pub fn logits_topk_mask<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] threshol
     store(out[i], masked.cast::<T>());
 }
 
-mod tests_support {
-    #![allow(unused, dead_code)]
-    use metaltile_core::{
+pub mod kernel_tests {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},
     };

@@ -93,9 +93,10 @@ dequant_gather_kernel!(dequant_gather_int5, 5u32, "int5");
 dequant_gather_kernel!(dequant_gather_int6, 6u32, "int6");
 dequant_gather_kernel!(dequant_gather_int8, 8u32, "int8");
 
-mod tests_support {
-    #![allow(unused, dead_code)]
-    use metaltile::test_kernel;
+pub mod kernel_tests {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},

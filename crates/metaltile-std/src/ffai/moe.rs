@@ -3664,9 +3664,10 @@ mod tests_mma_bitwidth {
     }
 }
 
-pub mod tests_support {
-    #![allow(
-        clippy::manual_is_multiple_of,
+pub mod kernel_tests {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+clippy::manual_is_multiple_of,
         clippy::unnecessary_cast,
         clippy::needless_range_loop,
         clippy::too_many_arguments,

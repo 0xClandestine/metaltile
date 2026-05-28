@@ -120,10 +120,10 @@ aura_flash_pass2_kernel!(aura_flash_pass2_d128, 4u32, "flash_pass2_d128");
 aura_flash_pass2_kernel!(aura_flash_pass2_d256, 8u32, "flash_pass2_d256");
 aura_flash_pass2_kernel!(aura_flash_pass2_d512, 16u32, "flash_pass2_d512");
 
-mod tests_support {
+pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-    use metaltile::test_kernel;
+use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},

@@ -179,10 +179,10 @@ ssm_step_record!(
 );
 ssm_replay!(ssm_replay_d128_128_32, 128u32, 128u32, 32u32, 4u32, "replay_d128_128_32");
 
-mod tests_support {
+pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-    use metaltile::test_kernel;
+use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},

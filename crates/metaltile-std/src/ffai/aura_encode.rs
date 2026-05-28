@@ -212,10 +212,10 @@ aura_encode_kernel!(aura_encode_int4, 4u32, 16u32, "encode_int4");
 aura_encode_kernel!(aura_encode_int6, 6u32, 64u32, "encode_int6");
 aura_encode_kernel!(aura_encode_int8, 8u32, 256u32, "encode_int8");
 
-mod tests_support {
+pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-    use metaltile::test_kernel;
+use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},

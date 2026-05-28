@@ -339,9 +339,10 @@ pub fn mt_gated_delta_wy_chunk<T>(
 }
 
 #[cfg(target_os = "macos")]
-pub mod tests_support_ctx {
-    //! GPU correctness tests for `mt_gated_delta_wy_chunk`.
-    #![allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub mod kernel_tests {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+//! GPU correctness tests for `mt_gated_delta_wy_chunk`.
 
     use metaltile::test_kernel;
     use metaltile_core::{
@@ -592,12 +593,8 @@ pub mod tests_support_ctx {
         let y_seq = sequential_gdn(&q, &k, &v, &g, &beta, &mut s_seq, t, hk, hv, dk, dv);
         build_setup(dt, &q, &k, &v, &g, &beta, &state_in, &y_seq, &s_seq, hv, dk, dv, hk, t, c)
     }
-}
 
-mod tests_support {
-    #![allow(unused, dead_code, clippy::too_many_arguments)]
-
-    use metaltile::test_kernel;
+use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},

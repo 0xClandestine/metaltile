@@ -22,9 +22,10 @@ pub fn mt_arange<T>(out: Tensor<T>, start: Tensor<T>, step: Tensor<T>, #[constex
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-mod tests_support {
-    #![allow(unused, dead_code)]
-    use metaltile::test_kernel;
+pub mod kernel_tests {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},

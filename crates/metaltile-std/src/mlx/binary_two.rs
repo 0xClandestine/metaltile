@@ -15,9 +15,10 @@ pub fn mt_binary_two<T>(a: Tensor<T>, b: Tensor<T>, mut c: Tensor<T>, mut d: Ten
 
 // ── bottom of source file ────────────────────────────────────────────────
 
-mod tests_support {
-    #![allow(unused, dead_code)]
-    use metaltile::test_kernel;
+pub mod kernel_tests {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},

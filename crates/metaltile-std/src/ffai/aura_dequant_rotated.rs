@@ -168,10 +168,10 @@ aura_dequant_rotated_clean!(aura_dequant_rotated_int8, 8u32, "dequant_rotated_in
 aura_dequant_rotated_odd!(aura_dequant_rotated_int3, 3u32, "dequant_rotated_int3");
 aura_dequant_rotated_odd!(aura_dequant_rotated_int6, 6u32, "dequant_rotated_int6");
 
-mod tests_support {
+pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-    use metaltile::test_kernel;
+use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},

@@ -187,9 +187,10 @@ gated_delta_record!(
 state_replay!(state_replay_d64_32_2_2, 64u32, 32u32, 2u32, 2u32, "replay_d64_32_2_2");
 
 #[cfg(target_os = "macos")]
-pub mod tests_support_ctx {
-    //! GPU correctness tests for gated_delta_step_record and state_replay.
-    #![allow(clippy::too_many_arguments)]
+pub mod kernel_tests {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+//! GPU correctness tests for gated_delta_step_record and state_replay.
 
     use metaltile::test_kernel;
     use metaltile_core::{
@@ -405,12 +406,8 @@ pub mod tests_support_ctx {
             .expect(TestBuffer::from_vec("state_out", pack_f32(&expected), DType::F32))
             .grid_3d(1, DV as u32, (batch * HV) as u32, [32, 1, 1])
     }
-}
 
-mod tests_support {
-    #![allow(unused, dead_code, clippy::too_many_arguments)]
-
-    use metaltile::test_kernel;
+use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},

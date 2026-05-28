@@ -120,10 +120,10 @@ aura_score_kernel!(aura_score_int4, 4u32, "score_int4");
 aura_score_kernel!(aura_score_int6, 6u32, "score_int6");
 aura_score_kernel!(aura_score_int8, 8u32, "score_int8");
 
-mod tests_support {
+pub mod kernel_tests {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
 
-    use metaltile::test_kernel;
+use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},

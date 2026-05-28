@@ -179,9 +179,10 @@ seg_reduce_kernel!(mt_seg_reduce_prod, product, "prod");
 seg_reduce_kernel!(mt_seg_reduce_max, max, "max");
 seg_reduce_kernel!(mt_seg_reduce_min, min, "min");
 
-mod tests_support {
-    #![allow(unused, dead_code)]
-    use metaltile::test_kernel;
+pub mod kernel_tests {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},

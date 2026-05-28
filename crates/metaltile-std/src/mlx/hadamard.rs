@@ -59,9 +59,11 @@ hadamard_kernel!(mt_hadamard_n512, 512u32, 9u32, "n512");
 hadamard_kernel!(mt_hadamard_n1024, 1024u32, 10u32, "n1024");
 
 // ── bottom of source file ─────────────────────────────────────────────────
-mod tests_support {
-    #![allow(unused, dead_code)]
-    use metaltile::test_kernel;
+
+pub mod kernel_tests {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},

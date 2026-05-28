@@ -282,9 +282,10 @@ pub fn ffai_batched_qkv_qmm_fast<T>(
     }
 }
 
-mod tests_support {
-    #![allow(unused, dead_code)]
-    use metaltile_core::DType;
+pub mod kernel_tests {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+use metaltile_core::DType;
 
     use super::*;
 

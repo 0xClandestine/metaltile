@@ -99,9 +99,10 @@ pub fn mt_sgload_smoke<T>(src: Tensor<T>, mut dst: Tensor<T>) {
     store(dst[fm * 8u32 + fn1], v1);
 }
 
-mod tests_support {
-    #![allow(unused, dead_code)]
-    use metaltile::test_kernel;
+pub mod kernel_tests {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+use metaltile::test_kernel;
     use metaltile_core::{
         DType,
         bench::{TestBuffer, TestSetup},

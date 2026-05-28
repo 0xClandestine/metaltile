@@ -365,9 +365,10 @@ bulk_dequant_kv_fp8!(
     57344.0f32
 );
 
-mod tests_support {
-    #![allow(unused, dead_code)]
-    use metaltile_core::DType;
+pub mod kernel_tests {
+    #![allow(unused, dead_code, clippy::too_many_arguments)]
+
+use metaltile_core::DType;
 
     use super::*;
 
