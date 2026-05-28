@@ -299,10 +299,12 @@ pub mod tests_support_ctx {
     //! GPU correctness tests for gated_delta_step_record and state_replay.
     #![allow(clippy::too_many_arguments)]
 
-    use std::collections::BTreeMap;
-
-    use metaltile_core::{dtype::DType, ir::KernelMode};
-    use metaltile_runtime::Context;
+    use metaltile::test_kernel;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+        ir::KernelMode,
+    };
 
     use super::{gated_delta_step_record_d64_32_2_2, state_replay_d64_32_2_2};
 
@@ -312,17 +314,7 @@ pub mod tests_support_ctx {
     const HV: usize = 2;
 
     fn pack_f32(vals: &[f32]) -> Vec<u8> { bytemuck::cast_slice::<f32, u8>(vals).to_vec() }
-    fn unpack_f32(bytes: &[u8]) -> Vec<f32> { bytemuck::cast_slice::<u8, f32>(bytes).to_vec() }
     fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
-
-    fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-        a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max)
-    }
-
-    fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
-    }
 
     fn src(n: usize, seed: u64, scale: f32) -> Vec<f32> {
         let mut s = seed;
@@ -412,25 +404,10 @@ pub mod tests_support_ctx {
         state
     }
 
-    fn dispatch(
-        kernel_ir: fn(metaltile_core::dtype::DType) -> metaltile_core::ir::Kernel,
-        buffers: &BTreeMap<String, Vec<u8>>,
-        batch: usize,
-        want: &[&str],
-    ) -> Vec<Vec<f32>> {
-        let ctx = Context::new().expect("Context::new on macOS");
-        let mut kernel = kernel_ir(DType::F32);
-        kernel.mode = KernelMode::Grid3D;
-        let result = ctx
-            .dispatch_with_grid(&kernel, buffers, &BTreeMap::new(), [1, DV, batch * HV], [32, 1, 1])
-            .expect("gated_delta_replay dispatch");
-        want.iter().map(|w| unpack_f32(result.outputs.get(*w).expect(w))).collect()
-    }
-
-    #[test]
-    fn gated_delta_record_captures_tape_f32() {
-        let _g = gpu_lock();
-        let (batch, t_val) = (1usize, 3usize);
+    #[test_kernel(name = "ffai/gated_delta/record_captures_tape_f32", dtypes = [f32], tol = 2e-3)]
+    fn gated_delta_record_captures_tape_f32(dt: DType) -> TestSetup {
+        let batch = 1usize;
+        let t_val = 3usize;
         let q = src(batch * t_val * HK * DK, 0x1, 0.4);
         let k = src(batch * t_val * HK * DK, 0x2, 0.4);
         let v = src(batch * t_val * HV * DV, 0x3, 1.0);
@@ -438,63 +415,102 @@ pub mod tests_support_ctx {
         let beta: Vec<f32> = src(batch * t_val * HV, 0x5, 0.1).iter().map(|x| 0.5 + x).collect();
         let state_in = src(batch * HV * DV * DK, 0x6, 0.2);
         let (exp_y, exp_s, exp_d) = naive_record(&q, &k, &v, &g, &beta, &state_in, batch, t_val);
-        let mut b: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-        b.insert("q".into(), pack_f32(&q));
-        b.insert("k".into(), pack_f32(&k));
-        b.insert("v".into(), pack_f32(&v));
-        b.insert("g".into(), pack_f32(&g));
-        b.insert("beta".into(), pack_f32(&beta));
-        b.insert("state_in".into(), pack_f32(&state_in));
-        b.insert("mask".into(), u32_bytes(&vec![1; batch * t_val]));
-        b.insert("y".into(), pack_f32(&vec![0.0; exp_y.len()]));
-        b.insert("state_out".into(), pack_f32(&vec![0.0; state_in.len()]));
-        b.insert("delta_log".into(), pack_f32(&vec![0.0; exp_d.len()]));
-        b.insert("t_val".into(), (t_val as u32).to_le_bytes().to_vec());
-        b.insert("has_mask".into(), 0u32.to_le_bytes().to_vec());
-        let got = dispatch(gated_delta_step_record_d64_32_2_2::kernel_ir_for, &b, batch, &[
-            "y",
-            "state_out",
-            "delta_log",
-        ]);
-        assert!(got[2].iter().any(|&x| x != 0.0), "tape is all zeros");
-        assert!(max_abs_diff(&got[0], &exp_y) < 2e-3, "y mismatch");
-        assert!(max_abs_diff(&got[1], &exp_s) < 2e-3, "state mismatch");
-        assert!(max_abs_diff(&got[2], &exp_d) < 2e-3, "delta tape mismatch");
+        let mut kernel_ir = gated_delta_step_record_d64_32_2_2::kernel_ir_for(dt);
+        kernel_ir.mode = KernelMode::Grid3D;
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("q", pack_f32(&q), DType::F32))
+            .input(TestBuffer::from_vec("k", pack_f32(&k), DType::F32))
+            .input(TestBuffer::from_vec("v", pack_f32(&v), DType::F32))
+            .input(TestBuffer::from_vec("g", pack_f32(&g), DType::F32))
+            .input(TestBuffer::from_vec("beta", pack_f32(&beta), DType::F32))
+            .input(TestBuffer::from_vec("state_in", pack_f32(&state_in), DType::F32))
+            .input(TestBuffer::from_vec("mask", u32_bytes(&vec![1; batch * t_val]), DType::U32))
+            .input(TestBuffer::from_vec("t_val", (t_val as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("has_mask", 0u32.to_le_bytes().to_vec(), DType::U32))
+            .expect(TestBuffer::from_vec("y", pack_f32(&exp_y), DType::F32))
+            .expect(TestBuffer::from_vec("state_out", pack_f32(&exp_s), DType::F32))
+            .expect(TestBuffer::from_vec("delta_log", pack_f32(&exp_d), DType::F32))
+            .grid_3d(1, DV as u32, (batch * HV) as u32, [32, 1, 1])
     }
 
-    fn run_replay(accepted: usize, has_mask: bool, mask: &[u32]) {
-        let _g = gpu_lock();
-        let (batch, t_log) = (1usize, 5usize);
+    #[test_kernel(name = "ffai/gated_delta/replay_full_prefix_f32", dtypes = [f32], tol = 2e-3)]
+    fn state_replay_full_prefix_f32(dt: DType) -> TestSetup {
+        let batch = 1usize;
+        let t_log = 5usize;
+        let accepted = 5usize;
+        let mask: Vec<u32> = vec![1; batch * t_log];
         let delta_log = src(batch * t_log * HV * DV, 0x21, 0.5);
         let k_log = src(batch * t_log * HV * DK, 0x22, 0.4);
         let g_log: Vec<f32> = src(batch * t_log * HV, 0x23, 0.1).iter().map(|x| 0.9 + x).collect();
         let state_in = src(batch * HV * DV * DK, 0x24, 0.3);
-        let expected = naive_replay(
-            &delta_log, &k_log, &g_log, &state_in, mask, batch, t_log, accepted, has_mask,
-        );
-        let mut b: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-        b.insert("delta_log".into(), pack_f32(&delta_log));
-        b.insert("k_log".into(), pack_f32(&k_log));
-        b.insert("g_log".into(), pack_f32(&g_log));
-        b.insert("state_in".into(), pack_f32(&state_in));
-        b.insert("mask".into(), u32_bytes(mask));
-        b.insert("state_out".into(), pack_f32(&vec![0.0; state_in.len()]));
-        b.insert("t_log".into(), (t_log as u32).to_le_bytes().to_vec());
-        b.insert("accepted".into(), (accepted as u32).to_le_bytes().to_vec());
-        b.insert("has_mask".into(), u32::from(has_mask).to_le_bytes().to_vec());
-        let got = dispatch(state_replay_d64_32_2_2::kernel_ir_for, &b, batch, &["state_out"]);
-        assert!(
-            max_abs_diff(&got[0], &expected) < 2e-3,
-            "replay accepted={accepted} mask={has_mask}: state mismatch"
-        );
+        let expected =
+            naive_replay(&delta_log, &k_log, &g_log, &state_in, &mask, batch, t_log, accepted, false);
+        let mut kernel_ir = state_replay_d64_32_2_2::kernel_ir_for(dt);
+        kernel_ir.mode = KernelMode::Grid3D;
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("delta_log", pack_f32(&delta_log), DType::F32))
+            .input(TestBuffer::from_vec("k_log", pack_f32(&k_log), DType::F32))
+            .input(TestBuffer::from_vec("g_log", pack_f32(&g_log), DType::F32))
+            .input(TestBuffer::from_vec("state_in", pack_f32(&state_in), DType::F32))
+            .input(TestBuffer::from_vec("mask", u32_bytes(&mask), DType::U32))
+            .input(TestBuffer::from_vec("t_log", (t_log as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("accepted", (accepted as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("has_mask", 0u32.to_le_bytes().to_vec(), DType::U32))
+            .expect(TestBuffer::from_vec("state_out", pack_f32(&expected), DType::F32))
+            .grid_3d(1, DV as u32, (batch * HV) as u32, [32, 1, 1])
     }
 
-    #[test]
-    fn state_replay_full_prefix_f32() { run_replay(5, false, &[1; 5]); }
+    #[test_kernel(name = "ffai/gated_delta/replay_partial_prefix_f32", dtypes = [f32], tol = 2e-3)]
+    fn state_replay_partial_prefix_f32(dt: DType) -> TestSetup {
+        let batch = 1usize;
+        let t_log = 5usize;
+        let accepted = 3usize;
+        let mask: Vec<u32> = vec![1; batch * t_log];
+        let delta_log = src(batch * t_log * HV * DV, 0x21, 0.5);
+        let k_log = src(batch * t_log * HV * DK, 0x22, 0.4);
+        let g_log: Vec<f32> = src(batch * t_log * HV, 0x23, 0.1).iter().map(|x| 0.9 + x).collect();
+        let state_in = src(batch * HV * DV * DK, 0x24, 0.3);
+        let expected =
+            naive_replay(&delta_log, &k_log, &g_log, &state_in, &mask, batch, t_log, accepted, false);
+        let mut kernel_ir = state_replay_d64_32_2_2::kernel_ir_for(dt);
+        kernel_ir.mode = KernelMode::Grid3D;
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("delta_log", pack_f32(&delta_log), DType::F32))
+            .input(TestBuffer::from_vec("k_log", pack_f32(&k_log), DType::F32))
+            .input(TestBuffer::from_vec("g_log", pack_f32(&g_log), DType::F32))
+            .input(TestBuffer::from_vec("state_in", pack_f32(&state_in), DType::F32))
+            .input(TestBuffer::from_vec("mask", u32_bytes(&mask), DType::U32))
+            .input(TestBuffer::from_vec("t_log", (t_log as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("accepted", (accepted as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("has_mask", 0u32.to_le_bytes().to_vec(), DType::U32))
+            .expect(TestBuffer::from_vec("state_out", pack_f32(&expected), DType::F32))
+            .grid_3d(1, DV as u32, (batch * HV) as u32, [32, 1, 1])
+    }
 
-    #[test]
-    fn state_replay_partial_prefix_f32() { run_replay(3, false, &[1; 5]); }
-
-    #[test]
-    fn state_replay_masked_steps_f32() { run_replay(5, true, &[1, 0, 1, 0, 1]); }
+    #[test_kernel(name = "ffai/gated_delta/replay_masked_steps_f32", dtypes = [f32], tol = 2e-3)]
+    fn state_replay_masked_steps_f32(dt: DType) -> TestSetup {
+        let batch = 1usize;
+        let t_log = 5usize;
+        let accepted = 5usize;
+        let mask: Vec<u32> = vec![1, 0, 1, 0, 1];
+        let delta_log = src(batch * t_log * HV * DV, 0x21, 0.5);
+        let k_log = src(batch * t_log * HV * DK, 0x22, 0.4);
+        let g_log: Vec<f32> = src(batch * t_log * HV, 0x23, 0.1).iter().map(|x| 0.9 + x).collect();
+        let state_in = src(batch * HV * DV * DK, 0x24, 0.3);
+        let expected =
+            naive_replay(&delta_log, &k_log, &g_log, &state_in, &mask, batch, t_log, accepted, true);
+        let mut kernel_ir = state_replay_d64_32_2_2::kernel_ir_for(dt);
+        kernel_ir.mode = KernelMode::Grid3D;
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("delta_log", pack_f32(&delta_log), DType::F32))
+            .input(TestBuffer::from_vec("k_log", pack_f32(&k_log), DType::F32))
+            .input(TestBuffer::from_vec("g_log", pack_f32(&g_log), DType::F32))
+            .input(TestBuffer::from_vec("state_in", pack_f32(&state_in), DType::F32))
+            .input(TestBuffer::from_vec("mask", u32_bytes(&mask), DType::U32))
+            .input(TestBuffer::from_vec("t_log", (t_log as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("accepted", (accepted as u32).to_le_bytes().to_vec(), DType::U32))
+            .input(TestBuffer::from_vec("has_mask", 1u32.to_le_bytes().to_vec(), DType::U32))
+            .expect(TestBuffer::from_vec("state_out", pack_f32(&expected), DType::F32))
+            .grid_3d(1, DV as u32, (batch * HV) as u32, [32, 1, 1])
+    }
 }

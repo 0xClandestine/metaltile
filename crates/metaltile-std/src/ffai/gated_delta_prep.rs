@@ -232,75 +232,31 @@ pub mod tests_support_ctx {
     //! GPU correctness tests for `mt_gated_delta_prep_step`.
     #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
-    use std::collections::BTreeMap;
-
-    use metaltile_core::{dtype::DType, ir::KernelMode};
-    use metaltile_runtime::Context;
+    use metaltile::test_kernel;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+        ir::KernelMode,
+    };
 
     use super::mt_gated_delta_prep_step;
 
-    #[derive(Clone, Copy, Debug)]
-    enum Dt {
-        F32,
-        F16,
-        Bf16,
-    }
-    impl Dt {
-        fn to_dtype(self) -> DType {
-            match self {
-                Dt::F32 => DType::F32,
-                Dt::F16 => DType::F16,
-                Dt::Bf16 => DType::BF16,
-            }
-        }
-        fn round(self, v: f32) -> f32 {
-            match self {
-                Dt::F32 => v,
-                Dt::F16 => half::f16::from_f32(v).to_f32(),
-                Dt::Bf16 => half::bf16::from_f32(v).to_f32(),
-            }
-        }
-    }
-    fn pack_bytes(vals: &[f32], dt: Dt) -> Vec<u8> {
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            Dt::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            Dt::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            Dt::Bf16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
-    }
-    fn unpack_bytes(bytes: &[u8], dt: Dt) -> Vec<f32> {
-        match dt {
-            Dt::F32 => bytemuck::cast_slice::<u8, f32>(bytes).to_vec(),
-            Dt::F16 => bytes
-                .chunks_exact(2)
-                .map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32())
-                .collect(),
-            Dt::Bf16 => bytes
-                .chunks_exact(2)
-                .map(|c| half::bf16::from_le_bytes([c[0], c[1]]).to_f32())
-                .collect(),
-        }
-    }
-    fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
-    }
-    fn cosine(a: &[f32], b: &[f32]) -> f32 {
-        let mut dot = 0.0_f64;
-        let mut na = 0.0_f64;
-        let mut nb = 0.0_f64;
-        for (av, bv) in a.iter().zip(b.iter()) {
-            dot += *av as f64 * *bv as f64;
-            na += *av as f64 * *av as f64;
-            nb += *bv as f64 * *bv as f64;
-        }
-        (dot / (na.sqrt() * nb.sqrt())) as f32
     }
 
-    fn softplus_unclamped(x: f32) -> f32 { (x.exp() + 1.0).ln() }
+    fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
+
+    fn softplus(x: f32) -> f32 { (x.exp() + 1.0).ln() }
     fn sigmoid(x: f32) -> f32 { 1.0 / (1.0 + (-x).exp()) }
 
-    fn cpu_prep(
+    fn cpu_fused_oracle(
         conv_out: &[f32],
         a_log: &[f32],
         dt_bias: &[f32],
@@ -308,19 +264,21 @@ pub mod tests_support_ctx {
         b_raw: &[f32],
         q_norm_weight: &[f32],
         k_norm_weight: &[f32],
+        state_in: &[f32],
         b: usize,
         hv: usize,
         hk: usize,
         dv: usize,
         dk: usize,
-    ) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+    ) -> (Vec<f32>, Vec<f32>) {
         let eps = 1e-6_f32;
         let stride_b = 2 * hk * dk + hv * dv;
+        let hk_per_hv = hv / hk;
         let mut q_normed = vec![0.0_f32; b * hk * dk];
         let mut k_normed = vec![0.0_f32; b * hk * dk];
         let mut v_flat = vec![0.0_f32; b * hv * dv];
         let mut g = vec![0.0_f32; b * hv];
-        let mut beta = vec![0.0_f32; b * hv];
+        let mut beta_arr = vec![0.0_f32; b * hv];
         for batch in 0..b {
             let q_base = batch * stride_b;
             let k_base = q_base + hk * dk;
@@ -330,8 +288,10 @@ pub mod tests_support_ctx {
                 let mut q_ssq = 0.0_f32;
                 let mut k_ssq = 0.0_f32;
                 for d in 0..dk {
-                    q_ssq += conv_out[q_base + row_off + d] * conv_out[q_base + row_off + d];
-                    k_ssq += conv_out[k_base + row_off + d] * conv_out[k_base + row_off + d];
+                    let qv = conv_out[q_base + row_off + d];
+                    let kv = conv_out[k_base + row_off + d];
+                    q_ssq += qv * qv;
+                    k_ssq += kv * kv;
                 }
                 let q_inv = 1.0 / ((q_ssq / dk as f32) + eps).sqrt();
                 let k_inv = 1.0 / ((k_ssq / dk as f32) + eps).sqrt();
@@ -350,53 +310,36 @@ pub mod tests_support_ctx {
             }
             for hv_idx in 0..hv {
                 let n = batch * hv + hv_idx;
-                let dt_v = softplus_unclamped(a_raw[n] + dt_bias[hv_idx]);
+                let dt_v = softplus(a_raw[n] + dt_bias[hv_idx]);
                 g[n] = (-a_log[hv_idx].exp() * dt_v).exp();
-                beta[n] = sigmoid(b_raw[n]);
+                beta_arr[n] = sigmoid(b_raw[n]);
             }
         }
-        (q_normed, k_normed, v_flat, g, beta)
-    }
-
-    fn cpu_step(
-        q: &[f32],
-        k: &[f32],
-        v: &[f32],
-        g: &[f32],
-        beta: &[f32],
-        state_in: &[f32],
-        b: usize,
-        hv: usize,
-        hk: usize,
-        dv: usize,
-        dk: usize,
-    ) -> (Vec<f32>, Vec<f32>) {
         let mut y = vec![0.0_f32; b * hv * dv];
         let mut state_out = vec![0.0_f32; b * hv * dv * dk];
-        let hk_per_hv = hv / hk;
         for batch in 0..b {
             for hv_idx in 0..hv {
                 let n = batch * hv + hv_idx;
                 let hk_idx = hv_idx / hk_per_hv;
                 let g_val = g[n];
-                let beta_val = beta[n];
+                let beta_val = beta_arr[n];
                 let qk_base = (batch * hk + hk_idx) * dk;
                 for dv_idx in 0..dv {
-                    let v_val = v[n * dv + dv_idx];
+                    let v_val = v_flat[n * dv + dv_idx];
                     let s_base = n * dv * dk + dv_idx * dk;
                     let mut kv_mem = 0.0_f32;
                     let mut decayed = vec![0.0_f32; dk];
                     for s_idx in 0..dk {
                         let s = state_in[s_base + s_idx] * g_val;
                         decayed[s_idx] = s;
-                        kv_mem += s * k[qk_base + s_idx];
+                        kv_mem += s * k_normed[qk_base + s_idx];
                     }
                     let delta = (v_val - kv_mem) * beta_val;
                     let mut out = 0.0_f32;
                     for s_idx in 0..dk {
-                        let s_new = decayed[s_idx] + k[qk_base + s_idx] * delta;
+                        let s_new = decayed[s_idx] + k_normed[qk_base + s_idx] * delta;
                         state_out[s_base + s_idx] = s_new;
-                        out += s_new * q[qk_base + s_idx];
+                        out += s_new * q_normed[qk_base + s_idx];
                     }
                     y[n * dv + dv_idx] = out;
                 }
@@ -405,50 +348,7 @@ pub mod tests_support_ctx {
         (y, state_out)
     }
 
-    fn cpu_fused_oracle(
-        conv_out: &[f32],
-        a_log: &[f32],
-        dt_bias: &[f32],
-        a_raw: &[f32],
-        b_raw: &[f32],
-        q_norm_weight: &[f32],
-        k_norm_weight: &[f32],
-        state_in: &[f32],
-        b: usize,
-        hv: usize,
-        hk: usize,
-        dv: usize,
-        dk: usize,
-    ) -> (Vec<f32>, Vec<f32>) {
-        let (q, k, v, g, beta) = cpu_prep(
-            conv_out,
-            a_log,
-            dt_bias,
-            a_raw,
-            b_raw,
-            q_norm_weight,
-            k_norm_weight,
-            b,
-            hv,
-            hk,
-            dv,
-            dk,
-        );
-        cpu_step(&q, &k, &v, &g, &beta, state_in, b, hv, hk, dv, dk)
-    }
-
-    struct Fixture {
-        conv_out: Vec<f32>,
-        a_log: Vec<f32>,
-        dt_bias: Vec<f32>,
-        a_raw: Vec<f32>,
-        b_raw: Vec<f32>,
-        q_norm_weight: Vec<f32>,
-        k_norm_weight: Vec<f32>,
-        state_in: Vec<f32>,
-    }
-
-    fn make_fixture(
+    fn make_inputs(
         b: usize,
         hv: usize,
         hk: usize,
@@ -457,230 +357,244 @@ pub mod tests_support_ctx {
         identity: bool,
         ws: f32,
         seed_offset: usize,
-    ) -> Fixture {
+        dt: DType,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
         let stride_b = 2 * hk * dk + hv * dv;
-        let conv_out =
-            (0..b * stride_b).map(|i| (((i + seed_offset) as f32) * 0.0131).sin() * 0.4).collect();
-        let a_log = (0..hv).map(|i| -1.5 - (i as f32) * 0.1).collect();
-        let dt_bias = (0..hv).map(|i| -0.5 + (i as f32) * 0.05).collect();
-        let a_raw = (0..b * hv).map(|i| -0.3 + (i as f32) * 0.04).collect();
-        let b_raw = (0..b * hv).map(|i| -0.2 + (i as f32) * 0.03).collect();
-        let q_norm_weight = if identity {
-            vec![ws; hk * dk]
-        } else {
-            (0..hk * dk).map(|i| ws * (1.0 + ((i % 11) as f32) * 0.05)).collect()
+        let round = |v: f32| match dt {
+            DType::F16 => half::f16::from_f32(v).to_f32(),
+            DType::BF16 => half::bf16::from_f32(v).to_f32(),
+            _ => v,
         };
-        let k_norm_weight = if identity {
-            vec![ws; hk * dk]
-        } else {
-            (0..hk * dk).map(|i| ws * (1.0 + ((i % 13) as f32) * 0.04)).collect()
-        };
-        let state_in = (0..b * hv * dv * dk)
-            .map(|i| (((i + seed_offset) as f32) * 0.0073).cos() * 0.1)
+        let conv_out: Vec<f32> = (0..b * stride_b)
+            .map(|i| round((((i + seed_offset) as f32) * 0.0131).sin() * 0.4))
             .collect();
-        Fixture { conv_out, a_log, dt_bias, a_raw, b_raw, q_norm_weight, k_norm_weight, state_in }
+        let a_log: Vec<f32> = (0..hv).map(|i| round(-1.5 - (i as f32) * 0.1)).collect();
+        let dt_bias: Vec<f32> = (0..hv).map(|i| round(-0.5 + (i as f32) * 0.05)).collect();
+        let a_raw: Vec<f32> = (0..b * hv).map(|i| round(-0.3 + (i as f32) * 0.04)).collect();
+        let b_raw: Vec<f32> = (0..b * hv).map(|i| round(-0.2 + (i as f32) * 0.03)).collect();
+        let q_norm_weight: Vec<f32> = if identity {
+            vec![round(ws); hk * dk]
+        } else {
+            (0..hk * dk).map(|i| round(ws * (1.0 + ((i % 11) as f32) * 0.05))).collect()
+        };
+        let k_norm_weight: Vec<f32> = if identity {
+            vec![round(ws); hk * dk]
+        } else {
+            (0..hk * dk).map(|i| round(ws * (1.0 + ((i % 13) as f32) * 0.04))).collect()
+        };
+        let state_in: Vec<f32> = (0..b * hv * dv * dk)
+            .map(|i| round((((i + seed_offset) as f32) * 0.0073).cos() * 0.1))
+            .collect();
+        (conv_out, a_log, dt_bias, a_raw, b_raw, q_norm_weight, k_norm_weight, state_in)
     }
 
-    fn round_fixture(f: &Fixture, dt: Dt) -> Fixture {
-        let r = |xs: &[f32]| xs.iter().map(|&v| dt.round(v)).collect::<Vec<_>>();
-        Fixture {
-            conv_out: r(&f.conv_out),
-            a_log: r(&f.a_log),
-            dt_bias: r(&f.dt_bias),
-            a_raw: r(&f.a_raw),
-            b_raw: r(&f.b_raw),
-            q_norm_weight: r(&f.q_norm_weight),
-            k_norm_weight: r(&f.k_norm_weight),
-            state_in: r(&f.state_in),
-        }
-    }
-
-    fn run_gpu(
-        f: &Fixture,
-        dt: Dt,
+    fn build_setup(
         b: usize,
         hv: usize,
         hk: usize,
         dv: usize,
         dk: usize,
-    ) -> (Vec<f32>, Vec<f32>) {
-        assert!(dk.is_multiple_of(32));
-        let n_total = b * hv;
-        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-        buffers.insert("conv_out".into(), pack_bytes(&f.conv_out, dt));
-        buffers.insert("a_log".into(), pack_bytes(&f.a_log, dt));
-        buffers.insert("dt_bias".into(), pack_bytes(&f.dt_bias, dt));
-        buffers.insert("a_raw".into(), pack_bytes(&f.a_raw, dt));
-        buffers.insert("b_raw".into(), pack_bytes(&f.b_raw, dt));
-        buffers.insert("q_norm_weight".into(), pack_bytes(&f.q_norm_weight, dt));
-        buffers.insert("k_norm_weight".into(), pack_bytes(&f.k_norm_weight, dt));
-        buffers.insert("state_in".into(), pack_bytes(&f.state_in, dt));
-        buffers.insert("state_out".into(), pack_bytes(&vec![0.0_f32; f.state_in.len()], dt));
-        buffers.insert("y".into(), pack_bytes(&vec![0.0_f32; n_total * dv], dt));
-        buffers.insert("dk".into(), (dk as u32).to_le_bytes().to_vec());
-        buffers.insert("dv".into(), (dv as u32).to_le_bytes().to_vec());
-        buffers.insert("hv".into(), (hv as u32).to_le_bytes().to_vec());
-        buffers.insert("hk".into(), (hk as u32).to_le_bytes().to_vec());
-        let ctx = Context::new().expect("Context::new");
-        let mut kernel = mt_gated_delta_prep_step::kernel_ir_for(dt.to_dtype());
-        kernel.mode = KernelMode::Reduction;
-        let result = ctx
-            .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [dv, n_total, 1], [32, 1, 1])
-            .expect("dispatch");
-        let y = unpack_bytes(result.outputs.get("y").expect("y"), dt);
-        let state_out = unpack_bytes(result.outputs.get("state_out").expect("state_out"), dt);
-        (y, state_out)
-    }
-
-    fn run_cell(
-        b: usize,
-        hv: usize,
-        hk: usize,
-        dv: usize,
-        dk: usize,
-        dt: Dt,
         identity: bool,
         ws: f32,
-    ) -> (f32, f32) {
-        let _g = gpu_lock();
-        let raw = make_fixture(b, hv, hk, dv, dk, identity, ws, 0);
-        let f = round_fixture(&raw, dt);
-        let (y_cpu, state_cpu) = cpu_fused_oracle(
-            &f.conv_out,
-            &f.a_log,
-            &f.dt_bias,
-            &f.a_raw,
-            &f.b_raw,
-            &f.q_norm_weight,
-            &f.k_norm_weight,
-            &f.state_in,
+        seed_offset: usize,
+        dt: DType,
+    ) -> TestSetup {
+        let (conv_out, a_log, dt_bias, a_raw, b_raw, q_norm_weight, k_norm_weight, state_in) =
+            make_inputs(b, hv, hk, dv, dk, identity, ws, seed_offset, dt);
+        let n_total = b * hv;
+        let (expected_y, expected_state) = cpu_fused_oracle(
+            &conv_out,
+            &a_log,
+            &dt_bias,
+            &a_raw,
+            &b_raw,
+            &q_norm_weight,
+            &k_norm_weight,
+            &state_in,
             b,
             hv,
             hk,
             dv,
             dk,
         );
-        let (y_gpu, state_gpu) = run_gpu(&f, dt, b, hv, hk, dv, dk);
-        (cosine(&y_gpu, &y_cpu), cosine(&state_gpu, &state_cpu))
+        let mut kernel_ir = mt_gated_delta_prep_step::kernel_ir_for(dt);
+        kernel_ir.mode = KernelMode::Reduction;
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("conv_out", pack(&conv_out, dt), dt))
+            .input(TestBuffer::from_vec("a_log", pack(&a_log, dt), dt))
+            .input(TestBuffer::from_vec("dt_bias", pack(&dt_bias, dt), dt))
+            .input(TestBuffer::from_vec("a_raw", pack(&a_raw, dt), dt))
+            .input(TestBuffer::from_vec("b_raw", pack(&b_raw, dt), dt))
+            .input(TestBuffer::from_vec("q_norm_weight", pack(&q_norm_weight, dt), dt))
+            .input(TestBuffer::from_vec("k_norm_weight", pack(&k_norm_weight, dt), dt))
+            .input(TestBuffer::from_vec("state_in", pack(&state_in, dt), dt))
+            .input(TestBuffer::from_vec("dk", u32_le(dk as u32), DType::U32))
+            .input(TestBuffer::from_vec("dv", u32_le(dv as u32), DType::U32))
+            .input(TestBuffer::from_vec("hv", u32_le(hv as u32), DType::U32))
+            .input(TestBuffer::from_vec("hk", u32_le(hk as u32), DType::U32))
+            .expect(TestBuffer::from_vec("y", pack(&expected_y, dt), dt))
+            .expect(TestBuffer::from_vec("state_out", pack(&expected_state, dt), dt))
+            .grid_3d(dv as u32, n_total as u32, 1, [32, 1, 1])
     }
 
-    #[test]
-    fn prep_step_f32_qwen36_shape_identity_weights() {
-        let (cy, cs) = run_cell(1, 32, 16, 128, 128, Dt::F32, true, 1.0);
-        assert!(cy >= 0.999, "f32 identity y={cy:.6}");
-        assert!(cs >= 0.999, "f32 identity s={cs:.6}");
-    }
-    #[test]
-    fn prep_step_f32_qwen36_shape_nonidentity_weights() {
-        let (cy, cs) = run_cell(1, 32, 16, 128, 128, Dt::F32, false, 0.5);
-        assert!(cy >= 0.999, "f32 weighted y={cy:.6}");
-        assert!(cs >= 0.999, "f32 weighted s={cs:.6}");
-    }
-    #[test]
-    fn prep_step_f32_no_gqa() {
-        let (cy, cs) = run_cell(1, 4, 4, 32, 64, Dt::F32, true, 1.0);
-        assert!(cy >= 0.999, "f32 no-GQA y={cy:.6}");
-        assert!(cs >= 0.999, "f32 no-GQA s={cs:.6}");
-    }
-    #[test]
-    fn prep_step_f32_dk_256_full_n_per_t_slot_usage() {
-        let (cy, cs) = run_cell(1, 4, 2, 8, 256, Dt::F32, true, 1.0);
-        assert!(cy >= 0.999, "f32 Dk=256 y={cy:.6}");
-        assert!(cs >= 0.999, "f32 Dk=256 s={cs:.6}");
-    }
-    #[test]
-    fn prep_step_f32_batch_2() {
-        let (cy, cs) = run_cell(2, 4, 2, 8, 64, Dt::F32, false, 0.7);
-        assert!(cy >= 0.999, "f32 B=2 y={cy:.6}");
-        assert!(cs >= 0.999, "f32 B=2 s={cs:.6}");
-    }
-    #[test]
-    fn prep_step_f16_qwen36_shape_identity_weights() {
-        let (cy, cs) = run_cell(1, 32, 16, 128, 128, Dt::F16, true, 1.0);
-        assert!(cy >= 0.999, "f16 identity y={cy:.6}");
-        assert!(cs >= 0.999, "f16 identity s={cs:.6}");
-    }
-    #[test]
-    fn prep_step_f16_qwen36_shape_nonidentity_weights() {
-        let (cy, cs) = run_cell(1, 32, 16, 128, 128, Dt::F16, false, 0.5);
-        assert!(cy >= 0.999, "f16 weighted y={cy:.6}");
-        assert!(cs >= 0.999, "f16 weighted s={cs:.6}");
-    }
-    #[test]
-    fn prep_step_f16_no_gqa() {
-        let (cy, cs) = run_cell(1, 4, 4, 32, 64, Dt::F16, true, 1.0);
-        assert!(cy >= 0.999, "f16 no-GQA y={cy:.6}");
-        assert!(cs >= 0.999, "f16 no-GQA s={cs:.6}");
-    }
-    #[test]
-    fn prep_step_bf16_qwen36_shape_identity_weights() {
-        let (cy, cs) = run_cell(1, 32, 16, 128, 128, Dt::Bf16, true, 1.0);
-        assert!(cy >= 0.999, "bf16 identity y={cy:.6}");
-        assert!(cs >= 0.999, "bf16 identity s={cs:.6}");
-    }
-    #[test]
-    fn prep_step_bf16_qwen36_shape_nonidentity_weights() {
-        let (cy, cs) = run_cell(1, 32, 16, 128, 128, Dt::Bf16, false, 0.5);
-        assert!(cy >= 0.999, "bf16 weighted y={cy:.6}");
-        assert!(cs >= 0.999, "bf16 weighted s={cs:.6}");
-    }
-    #[test]
-    fn prep_step_bf16_no_gqa() {
-        let (cy, cs) = run_cell(1, 4, 4, 32, 64, Dt::Bf16, true, 1.0);
-        assert!(cy >= 0.999, "bf16 no-GQA y={cy:.6}");
-        assert!(cs >= 0.999, "bf16 no-GQA s={cs:.6}");
-    }
-    #[test]
-    fn prep_step_f32_matches_unfused_path_when_weights_identity() {
-        let (cy, cs) = run_cell(1, 8, 4, 16, 64, Dt::F32, true, 1.0);
-        assert!(cy >= 0.999, "f32 unfused-equiv y={cy:.6}");
-        assert!(cs >= 0.999, "f32 unfused-equiv s={cs:.6}");
+    #[test_kernel(name = "ffai/gated_delta_prep/step_f32_qwen36_identity", dtypes = [f32], tol = 1e-3)]
+    fn prep_step_f32_qwen36_shape_identity_weights(dt: DType) -> TestSetup {
+        build_setup(1, 32, 16, 128, 128, true, 1.0, 0, dt)
     }
 
-    #[test]
-    fn prep_step_f32_multi_step_8_consecutive() {
-        let _g = gpu_lock();
-        let b = 1;
-        let hv = 4;
-        let hk = 2;
-        let dv = 8;
-        let dk = 64;
-        let n_steps = 8;
+    #[test_kernel(name = "ffai/gated_delta_prep/step_f32_qwen36_weighted", dtypes = [f32], tol = 1e-3)]
+    fn prep_step_f32_qwen36_shape_nonidentity_weights(dt: DType) -> TestSetup {
+        build_setup(1, 32, 16, 128, 128, false, 0.5, 0, dt)
+    }
+
+    #[test_kernel(name = "ffai/gated_delta_prep/step_f32_no_gqa", dtypes = [f32], tol = 1e-3)]
+    fn prep_step_f32_no_gqa(dt: DType) -> TestSetup {
+        build_setup(1, 4, 4, 32, 64, true, 1.0, 0, dt)
+    }
+
+    #[test_kernel(name = "ffai/gated_delta_prep/step_f32_dk256", dtypes = [f32], tol = 1e-3)]
+    fn prep_step_f32_dk_256_full_n_per_t_slot_usage(dt: DType) -> TestSetup {
+        build_setup(1, 4, 2, 8, 256, true, 1.0, 0, dt)
+    }
+
+    #[test_kernel(name = "ffai/gated_delta_prep/step_f32_batch2", dtypes = [f32], tol = 1e-3)]
+    fn prep_step_f32_batch_2(dt: DType) -> TestSetup {
+        build_setup(2, 4, 2, 8, 64, false, 0.7, 0, dt)
+    }
+
+    #[test_kernel(name = "ffai/gated_delta_prep/step_f16_qwen36_identity", dtypes = [f16], tol = 1e-3)]
+    fn prep_step_f16_qwen36_shape_identity_weights(dt: DType) -> TestSetup {
+        build_setup(1, 32, 16, 128, 128, true, 1.0, 0, dt)
+    }
+
+    #[test_kernel(name = "ffai/gated_delta_prep/step_f16_qwen36_weighted", dtypes = [f16], tol = 1e-3)]
+    fn prep_step_f16_qwen36_shape_nonidentity_weights(dt: DType) -> TestSetup {
+        build_setup(1, 32, 16, 128, 128, false, 0.5, 0, dt)
+    }
+
+    #[test_kernel(name = "ffai/gated_delta_prep/step_f16_no_gqa", dtypes = [f16], tol = 1e-3)]
+    fn prep_step_f16_no_gqa(dt: DType) -> TestSetup {
+        build_setup(1, 4, 4, 32, 64, true, 1.0, 0, dt)
+    }
+
+    #[test_kernel(name = "ffai/gated_delta_prep/step_bf16_qwen36_identity", dtypes = [bf16], tol = 1e-3)]
+    fn prep_step_bf16_qwen36_shape_identity_weights(dt: DType) -> TestSetup {
+        build_setup(1, 32, 16, 128, 128, true, 1.0, 0, dt)
+    }
+
+    #[test_kernel(name = "ffai/gated_delta_prep/step_bf16_qwen36_weighted", dtypes = [bf16], tol = 1e-3)]
+    fn prep_step_bf16_qwen36_shape_nonidentity_weights(dt: DType) -> TestSetup {
+        build_setup(1, 32, 16, 128, 128, false, 0.5, 0, dt)
+    }
+
+    #[test_kernel(name = "ffai/gated_delta_prep/step_bf16_no_gqa", dtypes = [bf16], tol = 1e-3)]
+    fn prep_step_bf16_no_gqa(dt: DType) -> TestSetup {
+        build_setup(1, 4, 4, 32, 64, true, 1.0, 0, dt)
+    }
+
+    #[test_kernel(name = "ffai/gated_delta_prep/step_f32_unfused_equiv", dtypes = [f32], tol = 1e-3)]
+    fn prep_step_f32_matches_unfused_path_when_weights_identity(dt: DType) -> TestSetup {
+        build_setup(1, 8, 4, 16, 64, true, 1.0, 0, dt)
+    }
+
+    /// Multi-step recurrence test: runs 8 CPU steps to accumulate state, then
+    /// verifies the GPU output on the final step against the CPU oracle.
+    #[test_kernel(name = "ffai/gated_delta_prep/step_f32_multi_step8_final", dtypes = [f32], tol = 1e-3)]
+    fn prep_step_f32_multi_step_8_consecutive(dt: DType) -> TestSetup {
+        let b = 1usize;
+        let hv = 4usize;
+        let hk = 2usize;
+        let dv = 8usize;
+        let dk = 64usize;
+        let n_steps = 8usize;
         let weights_q = vec![0.7_f32; hk * dk];
         let weights_k = vec![0.7_f32; hk * dk];
         let a_log: Vec<f32> = (0..hv).map(|i| -1.0 - (i as f32) * 0.1).collect();
         let dt_bias: Vec<f32> = (0..hv).map(|i| -0.3 + (i as f32) * 0.05).collect();
-        let mut state_gpu = vec![0.0_f32; b * hv * dv * dk];
-        let mut state_cpu = state_gpu.clone();
+        let stride_b = 2 * hk * dk + hv * dv;
+        let n_total = b * hv;
+
+        // Advance CPU state through all steps; use the last step's inputs as
+        // the GPU test case with the penultimate CPU state as state_in.
+        let mut state_cpu = vec![0.0_f32; b * hv * dv * dk];
+        let mut last_conv_out = vec![0.0_f32; b * stride_b];
+        let mut last_a_raw = vec![0.0_f32; b * hv];
+        let mut last_b_raw = vec![0.0_f32; b * hv];
+        let mut penultimate_state = state_cpu.clone();
+
         for step in 0..n_steps {
-            let stride_b = 2 * hk * dk + hv * dv;
             let conv_out: Vec<f32> = (0..b * stride_b)
                 .map(|i| (((i + step * 17) as f32) * 0.0131).sin() * 0.4)
                 .collect();
-            let a_raw: Vec<f32> = (0..b * hv).map(|i| -0.3 + ((i + step) as f32) * 0.04).collect();
-            let b_raw: Vec<f32> = (0..b * hv).map(|i| -0.2 + ((i + step) as f32) * 0.03).collect();
-            let (y_cpu, state_cpu_new) = cpu_fused_oracle(
-                &conv_out, &a_log, &dt_bias, &a_raw, &b_raw, &weights_q, &weights_k, &state_cpu, b,
-                hv, hk, dv, dk,
+            let a_raw: Vec<f32> =
+                (0..b * hv).map(|i| -0.3 + ((i + step) as f32) * 0.04).collect();
+            let b_raw: Vec<f32> =
+                (0..b * hv).map(|i| -0.2 + ((i + step) as f32) * 0.03).collect();
+            penultimate_state = state_cpu.clone();
+            let (_, state_new) = cpu_fused_oracle(
+                &conv_out,
+                &a_log,
+                &dt_bias,
+                &a_raw,
+                &b_raw,
+                &weights_q,
+                &weights_k,
+                &state_cpu,
+                b,
+                hv,
+                hk,
+                dv,
+                dk,
             );
-            let f = Fixture {
-                conv_out: conv_out.clone(),
-                a_log: a_log.clone(),
-                dt_bias: dt_bias.clone(),
-                a_raw: a_raw.clone(),
-                b_raw: b_raw.clone(),
-                q_norm_weight: weights_q.clone(),
-                k_norm_weight: weights_k.clone(),
-                state_in: state_gpu.clone(),
-            };
-            let (y_gpu, state_gpu_new) = run_gpu(&f, Dt::F32, b, hv, hk, dv, dk);
-            let cy = cosine(&y_gpu, &y_cpu);
-            let cs = cosine(&state_gpu_new, &state_cpu_new);
-            assert!(cy >= 0.999, "step {step} y cos = {cy:.6}");
-            assert!(cs >= 0.999, "step {step} state cos = {cs:.6}");
-            state_gpu = state_gpu_new;
-            state_cpu = state_cpu_new;
+            last_conv_out = conv_out;
+            last_a_raw = a_raw;
+            last_b_raw = b_raw;
+            state_cpu = state_new;
         }
+
+        // Final step: GPU takes penultimate_state as input, should match state_cpu.
+        let last_step = n_steps - 1;
+        let final_conv_out: Vec<f32> = (0..b * stride_b)
+            .map(|i| (((i + last_step * 17) as f32) * 0.0131).sin() * 0.4)
+            .collect();
+        let final_a_raw: Vec<f32> =
+            (0..b * hv).map(|i| -0.3 + ((i + last_step) as f32) * 0.04).collect();
+        let final_b_raw: Vec<f32> =
+            (0..b * hv).map(|i| -0.2 + ((i + last_step) as f32) * 0.03).collect();
+        let (expected_y, expected_state) = cpu_fused_oracle(
+            &final_conv_out,
+            &a_log,
+            &dt_bias,
+            &final_a_raw,
+            &final_b_raw,
+            &weights_q,
+            &weights_k,
+            &penultimate_state,
+            b,
+            hv,
+            hk,
+            dv,
+            dk,
+        );
+
+        let mut kernel_ir = mt_gated_delta_prep_step::kernel_ir_for(dt);
+        kernel_ir.mode = KernelMode::Reduction;
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("conv_out", pack(&final_conv_out, dt), dt))
+            .input(TestBuffer::from_vec("a_log", pack(&a_log, dt), dt))
+            .input(TestBuffer::from_vec("dt_bias", pack(&dt_bias, dt), dt))
+            .input(TestBuffer::from_vec("a_raw", pack(&final_a_raw, dt), dt))
+            .input(TestBuffer::from_vec("b_raw", pack(&final_b_raw, dt), dt))
+            .input(TestBuffer::from_vec("q_norm_weight", pack(&weights_q, dt), dt))
+            .input(TestBuffer::from_vec("k_norm_weight", pack(&weights_k, dt), dt))
+            .input(TestBuffer::from_vec("state_in", pack(&penultimate_state, dt), dt))
+            .input(TestBuffer::from_vec("dk", u32_le(dk as u32), DType::U32))
+            .input(TestBuffer::from_vec("dv", u32_le(dv as u32), DType::U32))
+            .input(TestBuffer::from_vec("hv", u32_le(hv as u32), DType::U32))
+            .input(TestBuffer::from_vec("hk", u32_le(hk as u32), DType::U32))
+            .expect(TestBuffer::from_vec("y", pack(&expected_y, dt), dt))
+            .expect(TestBuffer::from_vec("state_out", pack(&expected_state, dt), dt))
+            .grid_3d(dv as u32, n_total as u32, 1, [32, 1, 1])
     }
 }
 

@@ -454,52 +454,27 @@ pub mod tests_support_ctx {
     //! GPU correctness tests for `mt_gated_delta_wy_chunk`.
     #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
-    use std::collections::BTreeMap;
-
-    use metaltile_core::{dtype::DType, ir::KernelMode};
-    use metaltile_runtime::Context;
+    use metaltile::test_kernel;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+        ir::KernelMode,
+    };
 
     use super::mt_gated_delta_wy_chunk;
 
-    #[derive(Clone, Copy, Debug)]
-    enum Dt {
-        F32,
-        F16,
-        Bf16,
-    }
-    impl Dt {
-        fn to_dtype(self) -> DType {
-            match self {
-                Dt::F32 => DType::F32,
-                Dt::F16 => DType::F16,
-                Dt::Bf16 => DType::BF16,
-            }
-        }
-    }
-    fn pack_bytes(vals: &[f32], dt: Dt) -> Vec<u8> {
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
         match dt {
-            Dt::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            Dt::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            Dt::Bf16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 =>
+                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
         }
     }
-    fn unpack_bytes(bytes: &[u8], dt: Dt) -> Vec<f32> {
-        match dt {
-            Dt::F32 => bytemuck::cast_slice::<u8, f32>(bytes).to_vec(),
-            Dt::F16 => bytes
-                .chunks_exact(2)
-                .map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32())
-                .collect(),
-            Dt::Bf16 => bytes
-                .chunks_exact(2)
-                .map(|c| half::bf16::from_le_bytes([c[0], c[1]]).to_f32())
-                .collect(),
-        }
-    }
-    fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
-    }
+
+    fn u32_le(v: u32) -> Vec<u8> { v.to_le_bytes().to_vec() }
 
     fn sequential_gdn(
         q: &[f32],
@@ -545,50 +520,6 @@ pub mod tests_support_ctx {
         y
     }
 
-    fn run_gated_delta_wy_chunk(
-        q: &[f32],
-        k: &[f32],
-        v: &[f32],
-        g: &[f32],
-        beta: &[f32],
-        state_in: &[f32],
-        dt: Dt,
-        b: usize,
-        t_total: usize,
-        hk: usize,
-        hv: usize,
-        dk: usize,
-        dv: usize,
-        c: usize,
-    ) -> (Vec<f32>, Vec<f32>) {
-        assert!(t_total.is_multiple_of(c));
-        let n_total = b * hv;
-        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-        buffers.insert("q".into(), pack_bytes(q, dt));
-        buffers.insert("k".into(), pack_bytes(k, dt));
-        buffers.insert("v".into(), pack_bytes(v, dt));
-        buffers.insert("g".into(), pack_bytes(g, dt));
-        buffers.insert("beta".into(), pack_bytes(beta, dt));
-        buffers.insert("state_in".into(), pack_bytes(state_in, dt));
-        buffers.insert("state_out".into(), pack_bytes(&vec![0.0_f32; state_in.len()], dt));
-        buffers.insert("y".into(), pack_bytes(&vec![0.0_f32; t_total * n_total * dv], dt));
-        buffers.insert("dk".into(), (dk as u32).to_le_bytes().to_vec());
-        buffers.insert("dv".into(), (dv as u32).to_le_bytes().to_vec());
-        buffers.insert("hv".into(), (hv as u32).to_le_bytes().to_vec());
-        buffers.insert("hk".into(), (hk as u32).to_le_bytes().to_vec());
-        buffers.insert("c".into(), (c as u32).to_le_bytes().to_vec());
-        buffers.insert("t_len".into(), (t_total as u32).to_le_bytes().to_vec());
-        let ctx = Context::new().expect("Context::new on macOS");
-        let mut kernel = mt_gated_delta_wy_chunk::kernel_ir_for(dt.to_dtype());
-        kernel.mode = KernelMode::Reduction;
-        let result = ctx
-            .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [1, n_total, 1], [32, 1, 1])
-            .expect("mt_gated_delta_wy_chunk dispatch");
-        let y = unpack_bytes(result.outputs.get("y").expect("y"), dt);
-        let state_out = unpack_bytes(result.outputs.get("state_out").expect("state_out"), dt);
-        (y, state_out)
-    }
-
     fn make_inputs(
         seed_phase: f32,
         t: usize,
@@ -615,10 +546,46 @@ pub mod tests_support_ctx {
         (q, k, v, g, beta, state_in)
     }
 
-    #[test]
-    fn wy_chunk_identity_at_g1_beta0_f32() {
-        let _g = gpu_lock();
-        let (b, t, hk, hv, dk, dv, c) = (1, 8, 1, 1, 32, 32, 8);
+    fn build_setup(
+        dt: DType,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        g: &[f32],
+        beta: &[f32],
+        state_in: &[f32],
+        expected_y: &[f32],
+        expected_state: &[f32],
+        hv: usize,
+        dk: usize,
+        dv: usize,
+        hk: usize,
+        t: usize,
+        c: usize,
+    ) -> TestSetup {
+        let mut kernel_ir = mt_gated_delta_wy_chunk::kernel_ir_for(dt);
+        kernel_ir.mode = KernelMode::Reduction;
+        TestSetup::new(kernel_ir)
+            .input(TestBuffer::from_vec("q", pack(q, dt), dt))
+            .input(TestBuffer::from_vec("k", pack(k, dt), dt))
+            .input(TestBuffer::from_vec("v", pack(v, dt), dt))
+            .input(TestBuffer::from_vec("g", pack(g, dt), dt))
+            .input(TestBuffer::from_vec("beta", pack(beta, dt), dt))
+            .input(TestBuffer::from_vec("state_in", pack(state_in, dt), dt))
+            .input(TestBuffer::from_vec("dk", u32_le(dk as u32), DType::U32))
+            .input(TestBuffer::from_vec("dv", u32_le(dv as u32), DType::U32))
+            .input(TestBuffer::from_vec("hv", u32_le(hv as u32), DType::U32))
+            .input(TestBuffer::from_vec("hk", u32_le(hk as u32), DType::U32))
+            .input(TestBuffer::from_vec("c", u32_le(c as u32), DType::U32))
+            .input(TestBuffer::from_vec("t_len", u32_le(t as u32), DType::U32))
+            .expect(TestBuffer::from_vec("y", pack(expected_y, dt), dt))
+            .expect(TestBuffer::from_vec("state_out", pack(expected_state, dt), dt))
+            .grid_3d(1, hv as u32, 1, [32, 1, 1])
+    }
+
+    #[test_kernel(name = "ffai/gated_delta/wy_chunk_identity_g1_beta0", dtypes = [f32], tol = 1e-4)]
+    fn wy_chunk_identity_at_g1_beta0_f32(dt: DType) -> TestSetup {
+        let (b, t, hk, hv, dk, dv, c) = (1usize, 8usize, 1usize, 1usize, 32usize, 32usize, 8usize);
         let n_total = b * hv;
         let kscale = (2.0_f32 / dk as f32).sqrt();
         let q: Vec<f32> = (0..t * hk * dk).map(|i| ((i as f32) * 0.0173).sin() * kscale).collect();
@@ -630,32 +597,13 @@ pub mod tests_support_ctx {
             (0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.1).collect();
         let mut s_seq = state_in.clone();
         let y_seq = sequential_gdn(&q, &k, &v, &g, &beta, &mut s_seq, t, hk, hv, dk, dv);
-        let (y_wy, s_wy) = run_gated_delta_wy_chunk(
-            &q,
-            &k,
-            &v,
-            &g,
-            &beta,
-            &state_in,
-            Dt::F32,
-            b,
-            t,
-            hk,
-            hv,
-            dk,
-            dv,
-            c,
-        );
-        let max_y = y_seq.iter().zip(&y_wy).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-        let max_s = s_seq.iter().zip(&s_wy).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-        assert!(max_y < 1e-4, "identity y max |diff| = {max_y:.2e}");
-        assert!(max_s < 1e-4, "identity state max |diff| = {max_s:.2e}");
+        build_setup(dt, &q, &k, &v, &g, &beta, &state_in, &y_seq, &s_seq, hv, dk, dv, hk, t, c)
     }
 
-    #[test]
-    fn wy_chunk_matches_oracle_one_chunk_f32() {
-        let _g = gpu_lock();
-        let (b, t, hk, hv, dk, dv, c) = (1, 16, 1, 1, 32, 16, 16);
+    #[test_kernel(name = "ffai/gated_delta/wy_chunk_one_chunk", dtypes = [f32], tol = 5e-3)]
+    fn wy_chunk_matches_oracle_one_chunk_f32(dt: DType) -> TestSetup {
+        let (b, t, hk, hv, dk, dv, c) =
+            (1usize, 16usize, 1usize, 1usize, 32usize, 16usize, 16usize);
         let n_total = b * hv;
         let kscale = (2.0_f32 / dk as f32).sqrt();
         let q: Vec<f32> = (0..t * hk * dk).map(|i| ((i as f32) * 0.0173).sin() * kscale).collect();
@@ -669,32 +617,13 @@ pub mod tests_support_ctx {
             (0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.1).collect();
         let mut s_seq = state_in.clone();
         let y_seq = sequential_gdn(&q, &k, &v, &g, &beta, &mut s_seq, t, hk, hv, dk, dv);
-        let (y_wy, s_wy) = run_gated_delta_wy_chunk(
-            &q,
-            &k,
-            &v,
-            &g,
-            &beta,
-            &state_in,
-            Dt::F32,
-            b,
-            t,
-            hk,
-            hv,
-            dk,
-            dv,
-            c,
-        );
-        let max_y = y_seq.iter().zip(&y_wy).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-        let max_s = s_seq.iter().zip(&s_wy).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-        assert!(max_y < 5e-3, "one-chunk y max |diff| = {max_y:.2e}");
-        assert!(max_s < 5e-3, "one-chunk state max |diff| = {max_s:.2e}");
+        build_setup(dt, &q, &k, &v, &g, &beta, &state_in, &y_seq, &s_seq, hv, dk, dv, hk, t, c)
     }
 
-    #[test]
-    fn wy_chunk_matches_oracle_multi_chunk_f32() {
-        let _g = gpu_lock();
-        let (b, t, hk, hv, dk, dv, c) = (1, 32, 1, 1, 32, 16, 8);
+    #[test_kernel(name = "ffai/gated_delta/wy_chunk_multi_chunk", dtypes = [f32], tol = 1e-2)]
+    fn wy_chunk_matches_oracle_multi_chunk_f32(dt: DType) -> TestSetup {
+        let (b, t, hk, hv, dk, dv, c) =
+            (1usize, 32usize, 1usize, 1usize, 32usize, 16usize, 8usize);
         let n_total = b * hv;
         let kscale = (2.0_f32 / dk as f32).sqrt();
         let q: Vec<f32> = (0..t * hk * dk).map(|i| ((i as f32) * 0.0173).sin() * kscale).collect();
@@ -708,90 +637,35 @@ pub mod tests_support_ctx {
             (0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.1).collect();
         let mut s_seq = state_in.clone();
         let y_seq = sequential_gdn(&q, &k, &v, &g, &beta, &mut s_seq, t, hk, hv, dk, dv);
-        let (y_wy, s_wy) = run_gated_delta_wy_chunk(
-            &q,
-            &k,
-            &v,
-            &g,
-            &beta,
-            &state_in,
-            Dt::F32,
-            b,
-            t,
-            hk,
-            hv,
-            dk,
-            dv,
-            c,
-        );
-        let max_y = y_seq.iter().zip(&y_wy).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-        let max_s = s_seq.iter().zip(&s_wy).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-        assert!(max_y < 1e-2, "multi-chunk y max |diff| = {max_y:.2e}");
-        assert!(max_s < 1e-2, "multi-chunk state max |diff| = {max_s:.2e}");
+        build_setup(dt, &q, &k, &v, &g, &beta, &state_in, &y_seq, &s_seq, hv, dk, dv, hk, t, c)
     }
 
-    #[test]
-    fn wy_chunk_dk_equals_dv_square_state_f32() {
-        let _g = gpu_lock();
-        let (b, t, hk, hv, dk, dv, c) = (1, 16, 1, 1, 32, 32, 16);
+    #[test_kernel(name = "ffai/gated_delta/wy_chunk_square_state", dtypes = [f32], tol = 5e-3)]
+    fn wy_chunk_dk_equals_dv_square_state_f32(dt: DType) -> TestSetup {
+        let (b, t, hk, hv, dk, dv, c) =
+            (1usize, 16usize, 1usize, 1usize, 32usize, 32usize, 16usize);
+        let _ = b;
         let (q, k, v, g, beta, state_in) = make_inputs(0.0, t, hk, hv, dk, dv);
         let mut s_seq = state_in.clone();
         let y_seq = sequential_gdn(&q, &k, &v, &g, &beta, &mut s_seq, t, hk, hv, dk, dv);
-        let (y_wy, s_wy) = run_gated_delta_wy_chunk(
-            &q,
-            &k,
-            &v,
-            &g,
-            &beta,
-            &state_in,
-            Dt::F32,
-            b,
-            t,
-            hk,
-            hv,
-            dk,
-            dv,
-            c,
-        );
-        let max_y = y_seq.iter().zip(&y_wy).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-        let max_s = s_seq.iter().zip(&s_wy).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-        assert!(max_y < 5e-3, "square-state y = {max_y:.2e}");
-        assert!(max_s < 5e-3, "square-state s = {max_s:.2e}");
+        build_setup(dt, &q, &k, &v, &g, &beta, &state_in, &y_seq, &s_seq, hv, dk, dv, hk, t, c)
     }
 
-    #[test]
-    fn wy_chunk_two_chunk_chain_f32() {
-        let _g = gpu_lock();
-        let (b, t, hk, hv, dk, dv, c) = (1, 16, 1, 1, 32, 16, 8);
+    #[test_kernel(name = "ffai/gated_delta/wy_chunk_two_chunk_chain", dtypes = [f32], tol = 5e-3)]
+    fn wy_chunk_two_chunk_chain_f32(dt: DType) -> TestSetup {
+        let (b, t, hk, hv, dk, dv, c) =
+            (1usize, 16usize, 1usize, 1usize, 32usize, 16usize, 8usize);
+        let _ = b;
         let (q, k, v, g, beta, state_in) = make_inputs(7.0, t, hk, hv, dk, dv);
         let mut s_seq = state_in.clone();
         let y_seq = sequential_gdn(&q, &k, &v, &g, &beta, &mut s_seq, t, hk, hv, dk, dv);
-        let (y_wy, s_wy) = run_gated_delta_wy_chunk(
-            &q,
-            &k,
-            &v,
-            &g,
-            &beta,
-            &state_in,
-            Dt::F32,
-            b,
-            t,
-            hk,
-            hv,
-            dk,
-            dv,
-            c,
-        );
-        let max_y = y_seq.iter().zip(&y_wy).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-        let max_s = s_seq.iter().zip(&s_wy).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-        assert!(max_y < 5e-3, "two-chunk y = {max_y:.2e}");
-        assert!(max_s < 5e-3, "two-chunk s = {max_s:.2e}");
+        build_setup(dt, &q, &k, &v, &g, &beta, &state_in, &y_seq, &s_seq, hv, dk, dv, hk, t, c)
     }
 
-    #[test]
-    fn wy_chunk_aggressive_decay_f32() {
-        let _g = gpu_lock();
-        let (b, t, hk, hv, dk, dv, c) = (1, 16, 1, 1, 32, 16, 8);
+    #[test_kernel(name = "ffai/gated_delta/wy_chunk_aggressive_decay", dtypes = [f32], tol = 5e-3)]
+    fn wy_chunk_aggressive_decay_f32(dt: DType) -> TestSetup {
+        let (b, t, hk, hv, dk, dv, c) =
+            (1usize, 16usize, 1usize, 1usize, 32usize, 16usize, 8usize);
         let n_total = b * hv;
         let kscale = (2.0_f32 / dk as f32).sqrt();
         let q: Vec<f32> = (0..t * hk * dk).map(|i| ((i as f32) * 0.0173).sin() * kscale).collect();
@@ -805,83 +679,28 @@ pub mod tests_support_ctx {
             (0..n_total * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.1).collect();
         let mut s_seq = state_in.clone();
         let y_seq = sequential_gdn(&q, &k, &v, &g, &beta, &mut s_seq, t, hk, hv, dk, dv);
-        let (y_wy, s_wy) = run_gated_delta_wy_chunk(
-            &q,
-            &k,
-            &v,
-            &g,
-            &beta,
-            &state_in,
-            Dt::F32,
-            b,
-            t,
-            hk,
-            hv,
-            dk,
-            dv,
-            c,
-        );
-        let max_y = y_seq.iter().zip(&y_wy).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-        let max_s = s_seq.iter().zip(&s_wy).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-        assert!(max_y < 5e-3, "aggressive-decay y = {max_y:.2e}");
-        assert!(max_s < 5e-3, "aggressive-decay s = {max_s:.2e}");
+        build_setup(dt, &q, &k, &v, &g, &beta, &state_in, &y_seq, &s_seq, hv, dk, dv, hk, t, c)
     }
 
-    #[test]
-    fn wy_chunk_matches_oracle_multi_chunk_f16() {
-        let _g = gpu_lock();
-        let (b, t, hk, hv, dk, dv, c) = (1, 16, 1, 1, 32, 16, 8);
+    #[test_kernel(name = "ffai/gated_delta/wy_chunk_multi_chunk_f16", dtypes = [f16], tol = 5e-2)]
+    fn wy_chunk_matches_oracle_multi_chunk_f16(dt: DType) -> TestSetup {
+        let (b, t, hk, hv, dk, dv, c) =
+            (1usize, 16usize, 1usize, 1usize, 32usize, 16usize, 8usize);
+        let _ = b;
         let (q, k, v, g, beta, state_in) = make_inputs(3.0, t, hk, hv, dk, dv);
         let mut s_seq = state_in.clone();
         let y_seq = sequential_gdn(&q, &k, &v, &g, &beta, &mut s_seq, t, hk, hv, dk, dv);
-        let (y_wy, s_wy) = run_gated_delta_wy_chunk(
-            &q,
-            &k,
-            &v,
-            &g,
-            &beta,
-            &state_in,
-            Dt::F16,
-            b,
-            t,
-            hk,
-            hv,
-            dk,
-            dv,
-            c,
-        );
-        let max_y = y_seq.iter().zip(&y_wy).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-        let max_s = s_seq.iter().zip(&s_wy).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-        assert!(max_y < 5e-2, "f16 y = {max_y:.2e}");
-        assert!(max_s < 5e-2, "f16 s = {max_s:.2e}");
+        build_setup(dt, &q, &k, &v, &g, &beta, &state_in, &y_seq, &s_seq, hv, dk, dv, hk, t, c)
     }
 
-    #[test]
-    fn wy_chunk_matches_oracle_multi_chunk_bf16() {
-        let _g = gpu_lock();
-        let (b, t, hk, hv, dk, dv, c) = (1, 16, 1, 1, 32, 16, 8);
+    #[test_kernel(name = "ffai/gated_delta/wy_chunk_multi_chunk_bf16", dtypes = [bf16], tol = 2e-1)]
+    fn wy_chunk_matches_oracle_multi_chunk_bf16(dt: DType) -> TestSetup {
+        let (b, t, hk, hv, dk, dv, c) =
+            (1usize, 16usize, 1usize, 1usize, 32usize, 16usize, 8usize);
+        let _ = b;
         let (q, k, v, g, beta, state_in) = make_inputs(5.0, t, hk, hv, dk, dv);
         let mut s_seq = state_in.clone();
         let y_seq = sequential_gdn(&q, &k, &v, &g, &beta, &mut s_seq, t, hk, hv, dk, dv);
-        let (y_wy, s_wy) = run_gated_delta_wy_chunk(
-            &q,
-            &k,
-            &v,
-            &g,
-            &beta,
-            &state_in,
-            Dt::Bf16,
-            b,
-            t,
-            hk,
-            hv,
-            dk,
-            dv,
-            c,
-        );
-        let max_y = y_seq.iter().zip(&y_wy).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-        let max_s = s_seq.iter().zip(&s_wy).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-        assert!(max_y < 2e-1, "bf16 y = {max_y:.2e}");
-        assert!(max_s < 2e-1, "bf16 s = {max_s:.2e}");
+        build_setup(dt, &q, &k, &v, &g, &beta, &state_in, &y_seq, &s_seq, hv, dk, dv, hk, t, c)
     }
 }

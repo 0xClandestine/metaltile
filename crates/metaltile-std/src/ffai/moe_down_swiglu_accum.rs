@@ -310,61 +310,36 @@ define_moe_down_swiglu_accum_chain8!(
 
 #[cfg(target_os = "macos")]
 pub mod tests_support {
-    use std::collections::BTreeMap;
-
-    use metaltile_core::{dtype::DType, ir::KernelMode};
-    use metaltile_runtime::Context;
+    use metaltile::test_kernel;
+    use metaltile_core::{
+        DType,
+        bench::{TestBuffer, TestSetup},
+        ir::KernelMode,
+    };
 
     use super::ffai_moe_down_swiglu_accum_int4_chain8;
 
-    fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+    fn pack(vals: &[f32], dt: DType) -> Vec<u8> {
+        match dt {
+            DType::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
+            DType::F16 =>
+                vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            DType::BF16 =>
+                vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            _ => panic!("unsupported dtype {dt:?}"),
+        }
     }
 
-    #[derive(Clone, Copy, Debug)]
-    enum Dt {
-        F32,
-        F16,
-        Bf16,
-    }
-    impl Dt {
-        fn to_dtype(self) -> DType {
-            match self {
-                Dt::F32 => DType::F32,
-                Dt::F16 => DType::F16,
-                Dt::Bf16 => DType::BF16,
-            }
-        }
-        fn round(self, v: f32) -> f32 {
-            match self {
-                Dt::F32 => v,
-                Dt::F16 => half::f16::from_f32(v).to_f32(),
-                Dt::Bf16 => half::bf16::from_f32(v).to_f32(),
-            }
-        }
-    }
-    fn pack_bytes(vals: &[f32], dt: Dt) -> Vec<u8> {
+    fn round_to_dt(v: f32, dt: DType) -> f32 {
         match dt {
-            Dt::F32 => bytemuck::cast_slice::<f32, u8>(vals).to_vec(),
-            Dt::F16 => vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
-            Dt::Bf16 => vals.iter().flat_map(|v| half::bf16::from_f32(*v).to_le_bytes()).collect(),
+            DType::F32 => v,
+            DType::F16 => half::f16::from_f32(v).to_f32(),
+            DType::BF16 => half::bf16::from_f32(v).to_f32(),
+            _ => v,
         }
     }
-    fn unpack_bytes(bytes: &[u8], dt: Dt) -> Vec<f32> {
-        match dt {
-            Dt::F32 => bytemuck::cast_slice::<u8, f32>(bytes).to_vec(),
-            Dt::F16 => bytes
-                .chunks_exact(2)
-                .map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32())
-                .collect(),
-            Dt::Bf16 => bytes
-                .chunks_exact(2)
-                .map(|c| half::bf16::from_le_bytes([c[0], c[1]]).to_f32())
-                .collect(),
-        }
-    }
-    fn pack_u32_bytes(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
+
+    fn pack_u32(vals: &[u32]) -> Vec<u8> { bytemuck::cast_slice::<u32, u8>(vals).to_vec() }
 
     fn quantize_int4_row(row: &[f32], group_size: usize) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
         let in_dim = row.len();
@@ -499,39 +474,36 @@ pub mod tests_support {
             .collect()
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn run_case(
-        dt: Dt,
+    fn build_setup(
+        dt: DType,
         in_dim: usize,
         out_dim: usize,
         group_size: usize,
         n_experts: usize,
-        tol: f32,
-    ) {
-        let _g = gpu_lock();
+    ) -> TestSetup {
         assert_eq!(in_dim, 768, "kernel pins tg_inner alloc at 768");
         assert!(n_experts >= 8);
         let gates: [Vec<f32>; 8] = std::array::from_fn(|k| {
             source(in_dim, 0x1001 + k as u64 * 0x91, 3.0, 0.0)
                 .iter()
-                .map(|&v| dt.round(v))
+                .map(|&v| round_to_dt(v, dt))
                 .collect()
         });
         let ups: [Vec<f32>; 8] = std::array::from_fn(|k| {
             source(in_dim, 0x2002 + k as u64 * 0x91, 2.0, 0.05)
                 .iter()
-                .map(|&v| dt.round(v))
+                .map(|&v| round_to_dt(v, dt))
                 .collect()
         });
         let expert_indices: [u32; 8] = [3, 17, 41, 58, 72, 89, 104, 121];
         assert!(expert_indices.iter().all(|&e| (e as usize) < n_experts));
         let slot_weights_f32: [f32; 8] =
-            [0.31, 0.19, 0.12, 0.08, 0.06, 0.05, 0.04, 0.03].map(|v| dt.round(v));
+            [0.31, 0.19, 0.12, 0.08, 0.06, 0.05, 0.04, 0.03].map(|v| round_to_dt(v, dt));
         let w_stacked_f32 = source(n_experts * out_dim * in_dim, 0x3003, 0.5, 0.0);
         let (w_packed, scales_f32, biases_f32) =
             quantize_stacked(&w_stacked_f32, n_experts, out_dim, in_dim, group_size);
-        let scales_dt: Vec<f32> = scales_f32.iter().map(|&v| dt.round(v)).collect();
-        let biases_dt: Vec<f32> = biases_f32.iter().map(|&v| dt.round(v)).collect();
+        let scales_dt: Vec<f32> = scales_f32.iter().map(|&v| round_to_dt(v, dt)).collect();
+        let biases_dt: Vec<f32> = biases_f32.iter().map(|&v| round_to_dt(v, dt)).collect();
         let expected = naive_oracle(
             &gates,
             &ups,
@@ -544,41 +516,62 @@ pub mod tests_support {
             out_dim,
             group_size,
         );
-        let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-        for k in 0..8 {
-            buffers.insert(format!("gate_{k}"), pack_bytes(&gates[k], dt));
-            buffers.insert(format!("up_{k}"), pack_bytes(&ups[k], dt));
-        }
-        buffers.insert("expert_indices".into(), pack_u32_bytes(&expert_indices));
-        buffers.insert("slot_weights".into(), pack_bytes(&slot_weights_f32, dt));
-        buffers.insert("weights_stacked".into(), pack_u32_bytes(&w_packed));
-        buffers.insert("scales_stacked".into(), pack_bytes(&scales_dt, dt));
-        buffers.insert("biases_stacked".into(), pack_bytes(&biases_dt, dt));
-        buffers.insert("output".into(), pack_bytes(&vec![0.0_f32; out_dim], dt));
-        buffers.insert("in_dim".into(), (in_dim as u32).to_le_bytes().to_vec());
-        buffers.insert("out_dim".into(), (out_dim as u32).to_le_bytes().to_vec());
-        buffers.insert("group_size".into(), (group_size as u32).to_le_bytes().to_vec());
-        let ctx = Context::new().expect("Context::new on macOS");
-        let mut kernel = ffai_moe_down_swiglu_accum_int4_chain8::kernel_ir_for(dt.to_dtype());
+        let mut kernel = ffai_moe_down_swiglu_accum_int4_chain8::kernel_ir_for(dt);
         kernel.mode = KernelMode::Reduction;
-        let result = ctx
-            .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [out_dim, 1, 1], [128, 1, 1])
-            .expect("dispatch");
-        let actual = unpack_bytes(result.outputs.get("output").expect("output"), dt);
-        assert_eq!(actual.len(), out_dim);
-        assert!(actual.iter().any(|&v| v != 0.0), "output is all zeros");
-        let max_rel = actual
-            .iter()
-            .zip(&expected)
-            .map(|(a, e)| (a - e).abs() / e.abs().max(1e-3))
-            .fold(0.0_f32, f32::max);
-        assert!(max_rel <= tol, "dt={dt:?}: max rel = {max_rel:.3e} > {tol:.3e}");
+        let mut setup = TestSetup::new(kernel);
+        for k in 0..8usize {
+            setup = setup.input(TestBuffer::from_vec(
+                &format!("gate_{k}"),
+                pack(&gates[k], dt),
+                dt,
+            ));
+            setup = setup.input(TestBuffer::from_vec(&format!("up_{k}"), pack(&ups[k], dt), dt));
+        }
+        setup
+            .input(TestBuffer::from_vec(
+                "expert_indices",
+                pack_u32(&expert_indices),
+                DType::U32,
+            ))
+            .input(TestBuffer::from_vec("slot_weights", pack(&slot_weights_f32, dt), dt))
+            .input(TestBuffer::from_vec(
+                "weights_stacked",
+                pack_u32(&w_packed),
+                DType::U32,
+            ))
+            .input(TestBuffer::from_vec("scales_stacked", pack(&scales_dt, dt), dt))
+            .input(TestBuffer::from_vec("biases_stacked", pack(&biases_dt, dt), dt))
+            .input(TestBuffer::from_vec(
+                "in_dim",
+                (in_dim as u32).to_le_bytes().to_vec(),
+                DType::U32,
+            ))
+            .input(TestBuffer::from_vec(
+                "out_dim",
+                (out_dim as u32).to_le_bytes().to_vec(),
+                DType::U32,
+            ))
+            .input(TestBuffer::from_vec(
+                "group_size",
+                (group_size as u32).to_le_bytes().to_vec(),
+                DType::U32,
+            ))
+            .expect(TestBuffer::from_vec("output", pack(&expected, dt), dt))
+            .grid_3d(out_dim as u32, 1, 1, [128, 1, 1])
     }
 
-    #[test]
-    fn moe_down_swiglu_accum_qwen36_f32() { run_case(Dt::F32, 768, 2048, 64, 128, 1e-3); }
-    #[test]
-    fn moe_down_swiglu_accum_qwen36_bf16() { run_case(Dt::Bf16, 768, 2048, 64, 128, 5e-2); }
-    #[test]
-    fn moe_down_swiglu_accum_qwen36_f16() { run_case(Dt::F16, 768, 2048, 64, 128, 5e-2); }
+    #[test_kernel(name = "ffai/moe_down_swiglu_accum/qwen36_f32", dtypes = [f32], tol = 1e-3)]
+    fn moe_down_swiglu_accum_qwen36_f32(dt: DType) -> TestSetup {
+        build_setup(dt, 768, 2048, 64, 128)
+    }
+
+    #[test_kernel(name = "ffai/moe_down_swiglu_accum/qwen36_bf16", dtypes = [bf16], tol = 5e-2)]
+    fn moe_down_swiglu_accum_qwen36_bf16(dt: DType) -> TestSetup {
+        build_setup(dt, 768, 2048, 64, 128)
+    }
+
+    #[test_kernel(name = "ffai/moe_down_swiglu_accum/qwen36_f16", dtypes = [f16], tol = 5e-2)]
+    fn moe_down_swiglu_accum_qwen36_f16(dt: DType) -> TestSetup {
+        build_setup(dt, 768, 2048, 64, 128)
+    }
 }
