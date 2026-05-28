@@ -415,7 +415,6 @@ pub mod kernel_tests {
     }
 
     /// GPU correctness tests for `mt_gated_delta_prep_step`.
-
     fn cpu_fused_oracle(
         conv_out: &[f32],
         a_log: &[f32],

@@ -3530,7 +3530,6 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
 }
 
 #[cfg(target_os = "macos")]
-
 mod tests_mma_bitwidth {
     #![allow(unused, dead_code, clippy::too_many_arguments)]
     use metaltile::test_kernel;

@@ -24,7 +24,6 @@ impl Iterator for IdCounter {
 
 /// Generate `len` random bytes using a fast non-cryptographic RNG.
 pub fn random_bytes(len: usize) -> Vec<u8> {
-    use std::hash::{Hash, Hasher};
     // Use a simple xorshift PRNG seeded from high-resolution time.
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

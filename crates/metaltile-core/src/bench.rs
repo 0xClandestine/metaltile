@@ -126,7 +126,7 @@ impl Grid {
     ///
     /// The grid x-dimension is `ceil(n / tpg)`, y=1, z=1.
     pub fn new_1d(n: usize, tpg: u32) -> Self {
-        let grid_x = (n as u32 + tpg - 1) / tpg;
+        let grid_x = (n as u32).div_ceil(tpg);
         Grid { grid: [grid_x, 1, 1], tpg: [tpg, 1, 1] }
     }
 
@@ -161,6 +161,7 @@ pub(crate) enum BufferInit {
     /// Fill with zeros.
     Zeros,
     /// Use the provided byte data.
+    #[allow(dead_code)]
     FromVec(Vec<u8>),
 }
 
@@ -187,6 +188,7 @@ pub struct BenchBuffer {
     pub(crate) len: usize,
     pub(crate) dtype: DType,
     pub(crate) is_output: bool,
+    #[allow(dead_code)]
     pub(crate) init: BufferInit,
 }
 
@@ -660,9 +662,10 @@ pub struct KernelBenchEntry {
 impl KernelBenchEntry {
     /// Wrap a `KernelBench` impl for inventory submission.
     pub const fn new(inner: &'static dyn KernelBench) -> Self { KernelBenchEntry { inner } }
+}
 
-    /// Access the inner `KernelBench` trait object.
-    pub fn as_ref(&self) -> &dyn KernelBench { self.inner }
+impl AsRef<dyn KernelBench + 'static> for KernelBenchEntry {
+    fn as_ref(&self) -> &(dyn KernelBench + 'static) { self.inner }
 }
 
 inventory::collect!(KernelBenchEntry);
@@ -677,9 +680,10 @@ pub struct KernelTestEntry {
 impl KernelTestEntry {
     /// Wrap a `KernelTest` impl for inventory submission.
     pub const fn new(inner: &'static dyn KernelTest) -> Self { KernelTestEntry { inner } }
+}
 
-    /// Access the inner `KernelTest` trait object.
-    pub fn as_ref(&self) -> &dyn KernelTest { self.inner }
+impl AsRef<dyn KernelTest + 'static> for KernelTestEntry {
+    fn as_ref(&self) -> &(dyn KernelTest + 'static) { self.inner }
 }
 
 inventory::collect!(KernelTestEntry);

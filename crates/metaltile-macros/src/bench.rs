@@ -134,6 +134,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(quote! {
         #input_fn
 
+        #[allow(non_camel_case_types)]
         struct #impl_name;
 
         impl ::metaltile_core::bench::KernelBench for #impl_name {

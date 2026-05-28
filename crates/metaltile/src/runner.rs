@@ -16,7 +16,7 @@
 //! }
 //! ```
 
-use std::io::{BufRead, Write};
+use std::io::Write;
 
 use metaltile_core::{
     DType,
@@ -81,7 +81,7 @@ pub fn run(args: Args) {
     // Collect benches and tests, applying filter.
     let benches: Vec<&'static metaltile_core::KernelBenchEntry> = all_benches()
         .filter(|entry| {
-            args.filter.as_ref().map_or(true, |f| {
+            args.filter.as_ref().is_none_or(|f| {
                 entry.as_ref().name().to_ascii_lowercase().contains(&f.to_ascii_lowercase())
             })
         })
@@ -89,7 +89,7 @@ pub fn run(args: Args) {
 
     let tests: Vec<&'static metaltile_core::KernelTestEntry> = all_tests()
         .filter(|entry| {
-            args.filter.as_ref().map_or(true, |f| {
+            args.filter.as_ref().is_none_or(|f| {
                 entry.as_ref().name().to_ascii_lowercase().contains(&f.to_ascii_lowercase())
             })
         })
