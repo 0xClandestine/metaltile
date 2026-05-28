@@ -554,31 +554,32 @@ impl Context {
             }
         };
 
-        let alloc_buf = |data: Option<&[u8]>, len: usize| -> Result<_, MetalTileError> {
+        // Route all per-dispatch buffer allocations through the thread-local
+        // pool.  On the first call, `pool_acquire` allocates new MTLBuffers;
+        // on every subsequent call for the same size bucket the same physical
+        // pages are reused.  This eliminates the rapid MTLBuffer alloc/free
+        // cycle that caused TLB shootdowns and display-compositor stalls
+        // (screen flicker) when running hundreds of tests back-to-back.
+        let alloc_buf = |data: Option<&[u8]>, len: usize| -> Result<BufRc, MetalTileError> {
+            use objc2_metal::MTLBuffer as _;
             let len = len.max(4);
-            if let Some(bytes) = data.filter(|bytes| !bytes.is_empty()) {
+            let buf = pool_acquire(dev, len, MTLResourceOptions::StorageModeShared)?;
+            if let Some(bytes) = data.filter(|b| !b.is_empty()) {
                 if bytes.len() < len {
                     return Err(MetalTileError::Buffer(format!(
                         "buffer allocation expected {len} bytes but received {}",
                         bytes.len()
                     )));
                 }
+                let dst = buf.contents();
                 unsafe {
-                    dev.newBufferWithBytes_length_options(
-                        NonNull::new(bytes.as_ptr() as *mut _)
-                            .ok_or_else(|| MetalTileError::Buffer("null data pointer".into()))?,
-                        len,
-                        MTLResourceOptions::StorageModeShared,
-                    )
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.as_ptr() as *mut u8, len);
                 }
-                .ok_or(MetalTileError::NoDevice)
-            } else {
-                dev.newBufferWithLength_options(len, MTLResourceOptions::StorageModeShared)
-                    .ok_or(MetalTileError::NoDevice)
             }
+            Ok(buf)
         };
 
-        let mut metal_bufs = Vec::with_capacity(kernel.params.len() * 2);
+        let mut metal_bufs: Vec<BufRc> = Vec::with_capacity(kernel.params.len() * 2);
         let mut n_threads = 1usize;
         for (param, binding) in kernel.params.iter().zip(&binding_plans) {
             let data = buffers.get(&param.name).map(Vec::as_slice);
@@ -613,7 +614,8 @@ impl Context {
         let enc = (*cb).computeCommandEncoder().ok_or(MetalTileError::NoDevice)?;
         enc.setComputePipelineState(&pipe);
         for (i, buf) in metal_bufs.iter().enumerate() {
-            unsafe { enc.setBuffer_offset_atIndex(Some(buf), 0, i) };
+            // buf: &BufRc = &Rc<Retained<P>>; deref twice to reach &P.
+            unsafe { enc.setBuffer_offset_atIndex(Some(&**buf), 0, i) };
         }
 
         let n_threads = n_threads.max(1);
@@ -684,8 +686,9 @@ impl Context {
                 && binding.data_len > 0
                 && let Some(buf) = metal_bufs.get(binding.data_binding_index)
             {
-                use objc2_metal::MTLBuffer;
-                let ptr = buf.contents();
+                use objc2_metal::MTLBuffer as _;
+                // buf: &BufRc; deref through Rc<Retained<P>> to reach P::contents().
+                let ptr = (**buf).contents();
                 let bytes = unsafe {
                     std::slice::from_raw_parts(ptr.as_ptr() as *const u8, binding.data_len)
                 }
