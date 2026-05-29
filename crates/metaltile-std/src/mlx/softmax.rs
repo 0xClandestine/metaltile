@@ -67,3 +67,57 @@ pub fn mt_softmax<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
         store(out[_i], fi.cast::<T>());
     }
 }
+
+/// New-syntax correctness for `mt_softmax` (Reduction mode, one threadgroup per
+/// row, tpg=256 — `n` must be a multiple of 1024 for the 4-elems/thread loop).
+/// Per-row oracle: `exp(x - max) / sum(exp(x - max))` over dtype-rounded inputs.
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::mt_softmax;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    fn setup(rows: usize, n: usize, dt: DType) -> TestSetup {
+        let mut inp = Vec::with_capacity(rows * n);
+        let mut expected = Vec::with_capacity(rows * n);
+        for r in 0..rows {
+            let row: Vec<f32> =
+                (0..n).map(|i| ((i % 17) as f32 - 8.0) * 0.1 + r as f32 * 0.05).collect();
+            let rd = unpack_f32(&pack_f32(&row, dt), dt);
+            let m = rd.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> = rd.iter().map(|&x| (x - m).exp()).collect();
+            let s: f32 = exps.iter().sum();
+            expected.extend(exps.iter().map(|&e| e / s));
+            inp.extend_from_slice(&row);
+        }
+        TestSetup::new(mt_softmax::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("inp", pack_f32(&inp, dt), dt))
+            .input(TestBuffer::zeros("out", rows * n, dt))
+            .constexpr("n", n as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(rows as u32, 1, 1, [256, 1, 1])
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 5e-2])]
+    fn test_mt_softmax(dt: DType) -> TestSetup { setup(4, 1024, dt) }
+}
+
+/// New-syntax benchmark for `mt_softmax` (vs MLX `metal/softmax.metal`).
+pub mod kernel_benches {
+    use metaltile::{bench, test::*};
+
+    use super::mt_softmax;
+
+    #[bench(name = "mlx/softmax", dtypes = [f32, f16, bf16])]
+    fn bench_softmax(dt: DType) -> BenchSetup {
+        let (rows, n) = (4096usize, 1024usize);
+        BenchSetup::new(mt_softmax::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("inp", rows * n, dt))
+            .buffer(BenchBuffer::zeros("out", rows * n, dt).output())
+            .constexpr("n", n as u32)
+            .grid_3d(rows as u32, 1, 1, [256, 1, 1])
+            .bytes_moved((2 * rows * n * dt.size_bytes()) as u64)
+    }
+}
