@@ -21,9 +21,6 @@ pub enum MetalTileError {
     #[error("dispatch failed: {0}")]
     Dispatch(String),
 
-    #[error("autotune error: {0}")]
-    Autotune(String),
-
     #[error("core error: {0}")]
     Core(#[from] metaltile_core::error::Error),
 
@@ -56,13 +53,4 @@ pub enum MetalTileError {
 
     #[error("mutex poisoned: {0}")]
     LockPoisoned(String),
-
-    #[error("GPU frame capture not supported: {0}")]
-    CaptureNotSupported(String),
-
-    #[error("GPU frame capture failed: {0}")]
-    CaptureFailed(String),
-
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
 }

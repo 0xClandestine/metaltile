@@ -24,7 +24,7 @@ use std::{
 
 use common::{Dt, SdpaShape, max_abs_diff, naive_sdpa_f32, pack_bytes, ramp, unpack_bytes};
 use metaltile_core::ir::KernelMode;
-use metaltile_runtime::{Context, DispatchSpec, ResidentBuffer, start_gpu_trace, stop_gpu_trace};
+use metaltile_runtime::{Context, DispatchSpec, ResidentBuffer};
 use metaltile_std::ffai::sdpa_decode_2pass::{sdpa_decode_2pass_pass1, sdpa_decode_2pass_pass2};
 
 /// Serialise GPU dispatches across tests in this file. Cargo runs `#[test]`
@@ -427,7 +427,7 @@ fn sdpa_decode_2pass_capture() {
         return;
     };
     let _ = std::fs::remove_dir_all(&path);
-    start_gpu_trace(&path).expect("startCapture (is MTL_CAPTURE_ENABLED=1 set?)");
+    eprintln!("GPU trace capture API removed in refactor; skipping");
 
     let head_dim = 128usize;
     let scale = 1.0_f32 / (head_dim as f32).sqrt();
@@ -483,8 +483,7 @@ fn sdpa_decode_2pass_capture() {
             );
         }
     }
-    stop_gpu_trace();
-    println!("captured to {path} — open in Xcode for counters");
+    eprintln!("GPU trace capture API removed in refactor; skipping stop_gpu_trace");
 }
 
 // ── Additional head_dim correctness tests: d={64,96,256} ─────────────────────
