@@ -49,6 +49,7 @@ pub mod gated_rms_norm_qgemv;
 pub mod gated_rmsnorm;
 pub mod gather;
 pub mod gemm;
+pub mod kokoro;
 pub mod kv_cache;
 pub mod kv_cache_update_many;
 pub mod logits_min_p;

@@ -231,7 +231,7 @@ pub mod kernel_tests {
                                 continue;
                             }
                             let num = opp - tap;
-                            if num % stride != 0 {
+                            if !num.is_multiple_of(stride) {
                                 continue;
                             }
                             let ip = num / stride;
