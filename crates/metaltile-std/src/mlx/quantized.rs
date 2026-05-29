@@ -5679,3 +5679,105 @@ mod qmm_selector_tests {
         }
     }
 }
+
+/// New-syntax correctness for the affine **dequantize** kernels (int2/4/8;
+/// Grid3D, one thread per packed u32 → `pack_factor` outputs). Oracle unpacks
+/// each `bits`-wide code and applies `scale[g]·q + bias[g]` on dtype-rounded
+/// scales/biases. The affine **quantize** kernels (min/max + pack, 3 outputs)
+/// and the qmv/qmm matmul family (tiled MMA) stay for a focused follow-up.
+pub mod kernel_tests {
+    use metaltile::{core::ir::Kernel, test::*, test_kernel};
+
+    use super::*;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
+
+    // bits ∈ {2,4,8}; pack_factor = 32/bits. Single output `out`, Grid3D, one
+    // thread per packed u32. n_packs chosen a multiple of 64 (no over-dispatch).
+    fn dequant_setup(
+        kernel: Kernel,
+        bits: u32,
+        group_size: usize,
+        n_groups: usize,
+        dt: DType,
+    ) -> TestSetup {
+        let pack_factor = (32 / bits) as usize;
+        let mask = (1u32 << bits) - 1;
+        let n_elem = n_groups * group_size;
+        let n_packs = n_elem / pack_factor;
+        // Deterministic packed weights.
+        let w: Vec<u32> = (0..n_packs).map(|i| (i as u32).wrapping_mul(2_654_435_761)).collect();
+        let scales: Vec<f32> = (0..n_groups).map(|g| 0.05 + g as f32 * 0.01).collect();
+        let biases: Vec<f32> = (0..n_groups).map(|g| -0.2 + g as f32 * 0.03).collect();
+        let sd = unpack_f32(&pack_f32(&scales, dt), dt);
+        let bd = unpack_f32(&pack_f32(&biases, dt), dt);
+        let mut expected = vec![0.0f32; n_elem];
+        for (pack_idx, &val) in w.iter().enumerate() {
+            let oindex = pack_idx * pack_factor;
+            let g = oindex / group_size;
+            for k in 0..pack_factor {
+                let q = ((val >> (k as u32 * bits)) & mask) as f32;
+                expected[oindex + k] = sd[g] * q + bd[g];
+            }
+        }
+        TestSetup::new(kernel)
+            .mode(KernelMode::Grid3D)
+            .input(TestBuffer::from_vec("w", u32_bytes(&w), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack_f32(&scales, dt), dt))
+            .input(TestBuffer::from_vec("biases", pack_f32(&biases, dt), dt))
+            .input(TestBuffer::zeros("out", n_elem, dt))
+            .constexpr("group_size", group_size as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_1d(n_packs, 64)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 1e-1])]
+    fn test_affine_dequantize_int4(dt: DType) -> TestSetup {
+        dequant_setup(mt_affine_dequantize_int4::kernel_ir_for(dt), 4, 64, 8, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-2, 5e-1])]
+    fn test_affine_dequantize_int8(dt: DType) -> TestSetup {
+        // int8 codes span 0..255 → larger dequant magnitudes, wider tol.
+        dequant_setup(mt_affine_dequantize_int8::kernel_ir_for(dt), 8, 64, 4, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 1e-1])]
+    fn test_affine_dequantize_int2(dt: DType) -> TestSetup {
+        dequant_setup(mt_affine_dequantize_int2::kernel_ir_for(dt), 2, 64, 16, dt)
+    }
+}
+
+/// New-syntax benchmarks for the affine dequantize kernels.
+pub mod kernel_benches {
+    use metaltile::{bench, core::ir::Kernel, test::*};
+
+    use super::*;
+
+    fn db(kernel: Kernel, bits: u32, group_size: usize, n_groups: usize, dt: DType) -> BenchSetup {
+        let pack_factor = (32 / bits) as usize;
+        let n_elem = n_groups * group_size;
+        let n_packs = n_elem / pack_factor;
+        BenchSetup::new(kernel)
+            .mode(KernelMode::Grid3D)
+            .buffer(BenchBuffer::random("w", n_packs, DType::U32))
+            .buffer(BenchBuffer::random("scales", n_groups, dt))
+            .buffer(BenchBuffer::random("biases", n_groups, dt))
+            .buffer(BenchBuffer::zeros("out", n_elem, dt).output())
+            .constexpr("group_size", group_size as u32)
+            .grid_1d(n_packs, 64)
+            .bytes_moved((n_elem * dt.size_bytes()) as u64)
+    }
+
+    #[bench(name = "mlx/affine/dequantize_int4", dtypes = [f32, f16, bf16])]
+    fn bench_dequant_int4(dt: DType) -> BenchSetup {
+        db(mt_affine_dequantize_int4::kernel_ir_for(dt), 4, 64, 65536, dt)
+    }
+    #[bench(name = "mlx/affine/dequantize_int8", dtypes = [f32, f16, bf16])]
+    fn bench_dequant_int8(dt: DType) -> BenchSetup {
+        db(mt_affine_dequantize_int8::kernel_ir_for(dt), 8, 64, 65536, dt)
+    }
+    #[bench(name = "mlx/affine/dequantize_int2", dtypes = [f32, f16, bf16])]
+    fn bench_dequant_int2(dt: DType) -> BenchSetup {
+        db(mt_affine_dequantize_int2::kernel_ir_for(dt), 2, 64, 65536, dt)
+    }
+}
