@@ -65,3 +65,80 @@ hadamard_kernel!(mt_hadamard_n128, 128u32, 7u32, "n128");
 hadamard_kernel!(mt_hadamard_n256, 256u32, 8u32, "n256");
 hadamard_kernel!(mt_hadamard_n512, 512u32, 9u32, "n512");
 hadamard_kernel!(mt_hadamard_n1024, 1024u32, 10u32, "n1024");
+
+/// New-syntax correctness for the Walsh–Hadamard transforms (Reduction mode,
+/// one threadgroup per row, tpg=N). Oracle is the algorithm-independent
+/// `scale·Σ_j (-1)^popcount(i&j)·x[j]` on dtype-rounded inputs, scale = 1/√N.
+pub mod kernel_tests {
+    use metaltile::{core::ir::Kernel, test::*, test_kernel};
+
+    use super::*;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    fn setup(kernel: Kernel, n: usize, dt: DType) -> TestSetup {
+        let rows = 2usize;
+        let scale = 1.0f32 / (n as f32).sqrt();
+        let x: Vec<f32> = (0..rows * n).map(|i| ((i % 23) as f32 - 11.0) * 0.05).collect();
+        let xd = unpack_f32(&pack_f32(&x, dt), dt);
+        let mut expected = vec![0.0f32; rows * n];
+        for r in 0..rows {
+            for i in 0..n {
+                let acc: f32 = (0..n)
+                    .map(|j| {
+                        let sign = if (i & j).count_ones() % 2 == 0 { 1.0 } else { -1.0 };
+                        sign * xd[r * n + j]
+                    })
+                    .sum();
+                expected[r * n + i] = acc * scale;
+            }
+        }
+        TestSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("inp", pack_f32(&x, dt), dt))
+            .input(TestBuffer::zeros("out", rows * n, dt))
+            .constexpr("scale", scale)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(rows as u32, 1, 1, [n as u32, 1, 1])
+    }
+
+    macro_rules! had_test {
+        ($name:ident, $kernel:ident, $n:literal) => {
+            #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 5e-3, 5e-2])]
+            fn $name(dt: DType) -> TestSetup { setup($kernel::kernel_ir_for(dt), $n, dt) }
+        };
+    }
+    had_test!(test_hadamard_n64, mt_hadamard_n64, 64);
+    had_test!(test_hadamard_n128, mt_hadamard_n128, 128);
+    had_test!(test_hadamard_n256, mt_hadamard_n256, 256);
+    had_test!(test_hadamard_n512, mt_hadamard_n512, 512);
+    had_test!(test_hadamard_n1024, mt_hadamard_n1024, 1024);
+}
+
+/// New-syntax benchmarks for the Walsh–Hadamard transforms.
+pub mod kernel_benches {
+    use metaltile::{bench, test::*};
+
+    use super::*;
+
+    macro_rules! had_bench {
+        ($name:ident, $full:literal, $kernel:ident, $n:literal) => {
+            #[bench(name = $full, dtypes = [f32, f16, bf16])]
+            fn $name(dt: DType) -> BenchSetup {
+                let rows = 8192usize;
+                let n = $n;
+                BenchSetup::new($kernel::kernel_ir_for(dt))
+                    .mode(KernelMode::Reduction)
+                    .buffer(BenchBuffer::random("inp", rows * n, dt))
+                    .buffer(BenchBuffer::zeros("out", rows * n, dt).output())
+                    .constexpr("scale", 1.0f32 / (n as f32).sqrt())
+                    .grid_3d(rows as u32, 1, 1, [n as u32, 1, 1])
+                    .bytes_moved((2 * rows * n * dt.size_bytes()) as u64)
+            }
+        };
+    }
+    had_bench!(bench_hadamard_n64, "mlx/hadamard/n64", mt_hadamard_n64, 64);
+    had_bench!(bench_hadamard_n128, "mlx/hadamard/n128", mt_hadamard_n128, 128);
+    had_bench!(bench_hadamard_n256, "mlx/hadamard/n256", mt_hadamard_n256, 256);
+    had_bench!(bench_hadamard_n512, "mlx/hadamard/n512", mt_hadamard_n512, 512);
+    had_bench!(bench_hadamard_n1024, "mlx/hadamard/n1024", mt_hadamard_n1024, 1024);
+}
