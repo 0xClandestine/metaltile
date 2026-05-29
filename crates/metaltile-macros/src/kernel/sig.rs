@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
 //! SPDX-License-Identifier: Apache-2.0
 use std::collections::BTreeSet;

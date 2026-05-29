@@ -6,7 +6,6 @@
 
 mod bench_impl;
 mod body_parser;
-mod derive_op;
 mod sig_parser;
 
 use std::collections::HashMap;

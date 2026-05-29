@@ -65,11 +65,11 @@ fn parse_tolerance(input: ParseStream) -> syn::Result<Tolerance> {
 
 fn validate_tolerance(dtypes: &[Ident], tol: &Tolerance) -> syn::Result<()> {
     match tol {
-        Tolerance::Scalar(_) => return Ok(()),
+        Tolerance::Scalar(_) => Ok(()),
         Tolerance::Array(vals) => {
             if vals.len() != dtypes.len() {
                 return Err(syn::Error::new(
-                    dtypes.last().map_or_else(|| proc_macro2::Span::call_site(), Ident::span),
+                    dtypes.last().map_or(proc_macro2::Span::call_site(), Ident::span),
                     format!(
                         "tol array has {} values but dtypes has {} entries",
                         vals.len(),
@@ -77,7 +77,7 @@ fn validate_tolerance(dtypes: &[Ident], tol: &Tolerance) -> syn::Result<()> {
                     ),
                 ));
             }
-            return Ok(());
+            Ok(())
         },
         Tolerance::Table(table) => {
             let dtypes_set =
