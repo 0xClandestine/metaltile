@@ -336,15 +336,62 @@ pub fn mt_sort_segmented<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32)
     }
 }
 
-/// New-syntax correctness for `mt_sort` (single-block bitonic sort, Reduction
-/// mode, one threadgroup per `n=1024` block, tpg=256). Oracle sorts each block
-/// ascending; exact (same multiset). `mt_merge` / `mt_sort_segmented` (the
-/// multi-block + segmented paths) go to the hard-tier PR.
+/// New-syntax correctness for the sort family. `mt_sort` (single-block bitonic,
+/// Reduction, one TG per 1024-block), `mt_merge` (one bottom-up merge pass,
+/// Grid3D — input holds sorted runs of `run`, output sorts each `2*run` block),
+/// and `mt_sort_segmented` (Reduction, per-row sort, n ≤ 1024). All exact on the
+/// multiset; oracles sort the relevant chunk.
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::mt_sort;
+    use super::{mt_merge, mt_sort, mt_sort_segmented};
     use crate::utils::{pack_f32, unpack_f32};
+
+    fn sorted_chunks(v: &[f32], chunk: usize) -> Vec<f32> {
+        let mut out = v.to_vec();
+        for c in out.chunks_mut(chunk) {
+            c.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        }
+        out
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-6)]
+    fn test_mt_merge(dt: DType) -> TestSetup {
+        let (run, n) = (64usize, 256usize); // 4 runs → 2 merged 128-blocks
+        let raw: Vec<f32> =
+            (0..n).map(|i| (((i * 2_654_435_761) % 9973) as f32) * 0.01 - 50.0).collect();
+        // Input must already hold sorted runs of length `run`.
+        let inp = sorted_chunks(&raw, run);
+        let inp_dt = unpack_f32(&pack_f32(&inp, dt), dt);
+        // A merge pass turns each pair of `run`-runs into one sorted `2*run` run.
+        let expected = sorted_chunks(&inp_dt, 2 * run);
+        TestSetup::new(mt_merge::kernel_ir_for(dt))
+            .mode(KernelMode::Grid3D)
+            .input(TestBuffer::from_vec("inp", pack_f32(&inp, dt), dt))
+            .input(TestBuffer::zeros("out", n, dt))
+            .constexpr("n", n as u32)
+            .constexpr("run", run as u32)
+            .constexpr("log_steps", 8u32) // 2^8 >= 2*run
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_1d(n, 256)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-6)]
+    fn test_mt_sort_segmented(dt: DType) -> TestSetup {
+        let (batch, n) = (3usize, 512usize); // n ≤ 1024
+        let raw: Vec<f32> = (0..batch * n)
+            .map(|i| (((i * 2_654_435_761 + 7) % 9973) as f32) * 0.01 - 50.0)
+            .collect();
+        let raw_dt = unpack_f32(&pack_f32(&raw, dt), dt);
+        let expected = sorted_chunks(&raw_dt, n); // each row sorted
+        TestSetup::new(mt_sort_segmented::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("inp", pack_f32(&raw, dt), dt))
+            .input(TestBuffer::zeros("out", batch * n, dt))
+            .constexpr("n", n as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(batch as u32, 1, 1, [256, 1, 1])
+    }
 
     #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-6)]
     fn test_mt_sort(dt: DType) -> TestSetup {
@@ -376,7 +423,7 @@ pub mod kernel_tests {
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    use super::mt_sort;
+    use super::{mt_merge, mt_sort, mt_sort_segmented};
 
     #[bench(name = "mlx/sort", dtypes = [f32, f16, bf16])]
     fn bench_sort(dt: DType) -> BenchSetup {
@@ -388,5 +435,31 @@ pub mod kernel_benches {
             .constexpr("n", n as u32)
             .grid_3d(n_blocks as u32, 1, 1, [256, 1, 1])
             .bytes_moved((2 * n_blocks * n * dt.size_bytes()) as u64)
+    }
+
+    #[bench(name = "mlx/sort/merge", dtypes = [f32, f16, bf16])]
+    fn bench_merge(dt: DType) -> BenchSetup {
+        let (run, n) = (1024usize, 16 * 1024 * 1024usize);
+        BenchSetup::new(mt_merge::kernel_ir_for(dt))
+            .mode(KernelMode::Grid3D)
+            .buffer(BenchBuffer::random("inp", n, dt))
+            .buffer(BenchBuffer::zeros("out", n, dt).output())
+            .constexpr("n", n as u32)
+            .constexpr("run", run as u32)
+            .constexpr("log_steps", 12u32) // 2^12 >= 2*run
+            .grid_1d(n, 256)
+            .bytes_moved((2 * n * dt.size_bytes()) as u64)
+    }
+
+    #[bench(name = "mlx/sort/segmented", dtypes = [f32, f16, bf16])]
+    fn bench_segmented(dt: DType) -> BenchSetup {
+        let (batch, n) = (16384usize, 1024usize);
+        BenchSetup::new(mt_sort_segmented::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("inp", batch * n, dt))
+            .buffer(BenchBuffer::zeros("out", batch * n, dt).output())
+            .constexpr("n", n as u32)
+            .grid_3d(batch as u32, 1, 1, [256, 1, 1])
+            .bytes_moved((2 * batch * n * dt.size_bytes()) as u64)
     }
 }
