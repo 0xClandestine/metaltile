@@ -21,7 +21,6 @@ metaltile-core.workspace = true
 metaltile-runtime.workspace = true
 metaltile-codegen.workspace = true
 metaltile-std.workspace = true
-inventory.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 clap.workspace = true
