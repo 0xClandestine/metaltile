@@ -1,121 +1,19 @@
-//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
-//! SPDX-License-Identifier: Apache-2.0
-//! MetalTile IR: SSA-form intermediate representation for tile-level kernels.
+//! The [`Op`] enum and all supporting kinds.
 //!
-//! The IR is the central data structure of the compiler. It is:
-//! - **SSA-form**: every value is produced once, by one operation.
-//! - **Explicit**: no implicit broadcasts, no hidden state.
-//! - **Small**: designed to be traversed and transformed efficiently.
-//!
-//! ## Structure
-//!
-//! A [`Kernel`] contains:
-//! - Parameters (tensor inputs/outputs with shapes)
-//! - Constexpr declarations
-//! - A body [`Block`] with a sequence of [`Op`]s
-//!
-//! ## Algorithm vs Schedule IR
-//!
-//! The algorithm IR (defined here) describes *what* to compute.
-//! The schedule IR (in `metaltile-codegen`) annotates ops with *how* to compute it:
-//! thread mapping, tile sizes, unroll factors, pipelining.
-
-use std::{collections::BTreeMap, fmt};
+//! This is the largest single piece of the IR: every operation a kernel can
+//! express lives here as a variant of [`Op`].
 
 use metaltile_macros::{OpFlags, ValueRefs, VariantName};
-use rustc_hash::FxHashMap;
 
-use crate::{constexpr::ConstExpr, dtype::DType, shape::Shape};
+use crate::dsl::{constexpr::ConstExpr, dtype::DType, shape::Shape};
 
-// ---------------------------------------------------------------------------
-// ID types
-// ---------------------------------------------------------------------------
-
-/// Unique identifier for a value in the IR.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct ValueId(u32);
-
-impl ValueId {
-    pub const fn new(id: u32) -> Self { ValueId(id) }
-
-    pub const fn as_u32(self) -> u32 { self.0 }
-}
-
-impl std::fmt::Display for ValueId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "%{}", self.0) }
-}
-
-/// Unique identifier for a block in the IR.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct BlockId(u32);
-
-impl BlockId {
-    pub const fn new(id: u32) -> Self { BlockId(id) }
-
-    pub const fn as_u32(self) -> u32 { self.0 }
-}
-
-/// Unique identifier for a loop/block-level variable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct VarId(u32);
-
-impl VarId {
-    pub const fn new(id: u32) -> Self { VarId(id) }
-
-    pub const fn as_u32(self) -> u32 { self.0 }
-}
+use super::{
+    ids::{BlockId, ValueId, VarId},
+    param::TypedSlot,
+};
 
 // ---------------------------------------------------------------------------
-// Kernel-level types
-// ---------------------------------------------------------------------------
-
-/// How a kernel parameter is bound and represented in MSL.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum ParamKind {
-    /// `device T*` — a flat tensor buffer (default).
-    #[default]
-    Tensor,
-    /// `device T*` + `constant uint* name_shape` + `constant uint* name_strides`
-    /// — a strided tensor that also passes its shape and stride arrays.
-    Strided,
-    /// `constant T& name` — a single scalar value (e.g., `eps`, `scale`, `n`).
-    Scalar,
-}
-
-/// A kernel parameter: a tensor input or output.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Param {
-    /// Human-readable name.
-    pub name: String,
-    /// Data type of the tensor elements.
-    pub dtype: DType,
-    /// Shape of the tensor.
-    pub shape: Shape,
-    /// Whether this is read-write (output) or read-only (input).
-    pub is_output: bool,
-    /// How this parameter is bound in Metal.
-    pub kind: ParamKind,
-}
-
-/// A typed slot: used for inline MSL outputs and other typed holes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypedSlot {
-    pub dtype: DType,
-    pub shape: Shape,
-}
-
-/// A constexpr declaration in the kernel signature.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConstExprDecl {
-    pub name: ConstExpr,
-    /// The scalar type of this constexpr (default `U32`).
-    pub dtype: DType,
-    /// Optional fixed value if known at definition time.
-    pub value: Option<usize>,
-}
-
-// ---------------------------------------------------------------------------
-// Operations
+// Op-kind enums
 // ---------------------------------------------------------------------------
 
 /// Unary math operation kind.
@@ -430,6 +328,32 @@ impl KernelCallArg {
         if let KernelCallArg::Value(v) = self { Some(v) } else { None }
     }
 }
+
+/// Execution scope for cooperative tile operations.
+///
+/// Maps to `metal::execution_simdgroup` / `metal::execution_threadgroup` in
+/// Metal 4 but is named hardware-agnostically so the same IR works with other
+/// backends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoopTileScope {
+    /// One simdgroup (32 lanes) cooperates per tile.
+    SimdGroup,
+    /// The whole threadgroup cooperates per tile.
+    Threadgroup,
+}
+
+/// Accumulation mode for a cooperative tile matmul.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoopTileAccMode {
+    /// C tile is overwritten with A·B (no prior accumulation).
+    Overwrite,
+    /// C tile accumulates: `C += A·B` across K-block iterations.
+    MultiplyAccumulate,
+}
+
+// ---------------------------------------------------------------------------
+// Op
+// ---------------------------------------------------------------------------
 
 /// A single operation in the IR.
 #[derive(Debug, Clone, PartialEq, ValueRefs, OpFlags, VariantName)]
@@ -895,8 +819,6 @@ pub enum Op {
     },
 
     /// SIMD-group butterfly shuffle: `simd_shuffle_xor(value, mask)`.
-    /// Used by Steel attention row reductions, where lanes sharing the same
-    /// MMA row exchange values through fixed xor masks (for example 1 and 8).
     #[result_same_type]
     SimdShuffleXor {
         #[vid]
@@ -911,7 +833,6 @@ pub enum Op {
     SimdgroupAlloc { dtype: DType, m: u32, n: u32 },
 
     /// Load one element from a simdgroup matrix: `result = name.thread_elements()[index]`.
-    /// Produces a scalar value.
     #[needs_simdgroup_matrix]
     #[result_f32_scalar]
     SimdgroupElemLoad {
@@ -921,7 +842,6 @@ pub enum Op {
     },
 
     /// Store one element into a simdgroup matrix: `name.thread_elements()[index] = data`.
-    /// No result (side-effecting).
     #[needs_simdgroup_matrix]
     #[no_result]
     SimdgroupElemStore {
@@ -932,19 +852,7 @@ pub enum Op {
         data: ValueId,
     },
 
-    /// Hardware-fused simdgroup load: fill all 64 elements of an 8×8
-    /// `simdgroup_matrix<T,M,N>` from a contiguous threadgroup-memory tile
-    /// in one MSL `simdgroup_load(matrix, &tg[offset], stride, origin,
-    /// transpose)` instruction.
-    /// Bypasses the per-lane scatter of repeated `simdgroup_elem_store(
-    /// frag, idx, threadgroup_load(...))`, which suffers TG-bank conflicts
-    /// at f16 stride geometries (see `qmm_mma_ftrans_report.md` §7).
-    /// `offset` is a ValueId computing the starting element offset of the
-    /// fragment's top-left corner inside the named TG array. `stride` is
-    /// the row stride in elements (const). `transpose=true` swaps the row
-    /// and column dimensions of the loaded fragment — used to load a B
-    /// operand stored row-major `[N, K]` as if it were `[K, N]` for the
-    /// standard `C = A * B` MMA layout (MLX `qmm_t` pattern).
+    /// Hardware-fused simdgroup load from a contiguous threadgroup-memory tile.
     #[needs_simdgroup_matrix]
     #[no_result]
     SimdgroupLoad {
@@ -958,7 +866,6 @@ pub enum Op {
     },
 
     /// simdgroup multiply-accumulate: `C = A * B + C`.
-    /// All three operands must be simdgroup matrices of compatible shapes.
     #[needs_simdgroup_matrix]
     #[no_result]
     SimdgroupMatMul {
@@ -992,11 +899,7 @@ pub enum Op {
         exclusive: bool,
     },
 
-    /// SIMD-group broadcast: every lane receives the value held by the
-    /// specified `lane` (a u32 index 0..simd_size). Maps to
-    /// `simd_broadcast(v, lane)` (Metal 2.1+). Cooperative codebook hoist
-    /// in AURA score/value kernels uses this to share one lane's loaded
-    /// codebook word across the group.
+    /// SIMD-group broadcast: every lane receives the value held by the specified lane.
     #[result_same_type]
     SimdBroadcast {
         #[vid]
@@ -1006,7 +909,6 @@ pub enum Op {
     },
 
     /// Allocate a named threadgroup (shared) memory array.
-    /// Emits `threadgroup T name[size]` in the kernel body.
     #[side_effect]
     #[unpredictable]
     #[no_result]
@@ -1039,20 +941,13 @@ pub enum Op {
         value: ValueId,
     },
 
-    /// Allocate a per-thread stack-resident array.  Emits `T name[size];`
-    /// inside the kernel body (no `threadgroup` qualifier — each thread
-    /// gets its own copy).  Metal keeps small fixed-size stack arrays in
-    /// registers; AURA flash kernels need this for `q_vals[DIMS_PER_LANE]`,
-    /// `o[DIMS_PER_LANE]`, and the per-thread codebook cache that
-    /// amortises lookup across the dim-strided inner loop.
+    /// Allocate a per-thread stack-resident array.
     #[side_effect]
     #[unpredictable]
     #[no_result]
     StackAlloc { dtype: DType, size: u32, name: String },
 
     /// Load one element from a per-thread stack array: `val = name[index]`.
-    /// Identical emission to `ThreadgroupLoad`; kept distinct in the IR so
-    /// liveness / scoping passes know the buffer is thread-private.
     #[op_load]
     #[result_custom]
     StackLoad {
@@ -1073,8 +968,6 @@ pub enum Op {
     },
 
     /// Threadgroup barrier: `threadgroup_barrier(mem_flags::mem_threadgroup)`.
-    /// Ensures all prior threadgroup stores are visible to all threads before
-    /// any subsequent threadgroup loads.
     #[side_effect]
     #[unpredictable]
     #[barrier]
@@ -1082,11 +975,6 @@ pub enum Op {
     Barrier,
 
     /// Compiler-only simdgroup barrier: `simdgroup_barrier(mem_flags::mem_none)`.
-    /// Zero-cost at runtime — pins instruction ordering across the simdgroup
-    /// so the compiler can't hoist a subsequent matmul/load past a prior one.
-    /// Apple MLX uses these around V-tile loads when BD≥128
-    /// (`steel_attention.h:431-443`) to keep `simdgroup_load → simdgroup_mma`
-    /// ordering stable through aggressive scheduling.
     #[side_effect]
     #[unpredictable]
     #[barrier]
@@ -1095,7 +983,6 @@ pub enum Op {
 
     /// Declare a mutable register-local scalar variable.
     /// Emits: `auto __ml_{name} = {init_value};`
-    /// Used for loop-carried state (running prefix, best_val/best_idx, etc.).
     #[unpredictable]
     #[result_custom]
     DeclareLocal {
@@ -1128,80 +1015,36 @@ pub enum Op {
     ///
     /// Resolved by `KernelInlinePass` (runs as the first pass in the
     /// standard pipeline) so all subsequent passes see only flat scalar ops.
-    /// `callee` is the registered kernel name; `args` are positionally
-    /// matched to the callee's params; `dtype` is the generic type.
     #[result_custom]
     KernelCall { callee: String, args: Vec<KernelCallArg>, dtype: DType },
 
-    // ---- Cooperative register-tile matmul primitives ----
-    //
-    // These six ops model tile-level matrix multiply using a "cooperative
-    // register tile" — a matrix fragment distributed across all threads in a
-    // simdgroup / threadgroup.  Together they can express any tiled matmul
-    // kernel, including multi-K-block loops, quantized weights, and MoE
-    // expert routing.  Control flow (K-loops, barriers, dequant, gating)
-    // stays as ordinary DSL ops; only the tile-matmul operations themselves
-    // need these primitives.
-    //
-    // Codegen mapping:
-    //   Metal 4 (macOS 26+, gen ≥17): `mpp::tensor_ops::matmul2d` + `cooperative_tensor`
-    //   Metal 2/3 fallback:            zero-fill stub (metallib links but gives zeros)
-    //
-    // All six ops emit `#if __METAL_VERSION__ >= 400` guards so that
-    // metallibs still link on older toolchains.
+    // ---- Cooperative register-tile matmul primitives (Metal 4+) ----
     /// Declare descriptor + A/B/C register tiles as kernel-local variables.
-    ///
-    /// `name` is a logical prefix: `{name}_op`, `{name}_ct_a`, `{name}_ct_b`, `{name}_ct_c`.
-    /// Must appear in the kernel body before any other `CoopTile*` op with the same name.
     CoopTileSetup {
         name: String,
         m: u32,
         n: u32,
         k: u32,
-        /// Transpose A before multiplying.
         ta: bool,
-        /// Transpose B before multiplying.
         tb: bool,
-        /// Transpose C on store.
         tc: bool,
-        /// Whether C accumulates across calls or is overwritten on each run.
         acc_mode: CoopTileAccMode,
-        /// How many threads cooperate per tile operation.
         exec_scope: CoopTileScope,
-        /// Element type for A and B tiles.
         act_dtype: DType,
-        /// Accumulator element type for C (typically F32).
         acc_dtype: DType,
-        /// When `true`, A and B are passed as direct `metal::tensor` views instead of
-        /// cooperative tensors (required when M ∉ {16, 32}, e.g. M=8).
-        /// The setup emits `using {name}_tA_t` / `{name}_tB_t` type aliases and only
-        /// `{name}_ct_c` (no ct_a/ct_b).
         direct_inputs: bool,
-        /// Address space for the A type alias when `direct_inputs = true`.
         a_is_tg: bool,
-        /// Inner extent for the A type alias (`metal::extents<int, A_EI, A_EO>`).
         a_ei: u32,
-        /// Outer extent for the A type alias.
         a_eo: u32,
-        /// Address space for the B type alias when `direct_inputs = true`.
         b_is_tg: bool,
-        /// Inner extent for the B type alias.
         b_ei: u32,
-        /// Outer extent for the B type alias.
         b_eo: u32,
     },
 
     /// Zero every element of the C accumulator tile.
-    /// Call once before the K-loop when `acc_mode = Accumulate`.
     CoopTileZero { name: String },
 
-    /// Load the A register tile from a `tensor_inline` view over `ptr_name[+ptr_offset]`.
-    ///
-    /// `dtype` is the element type of the A/B buffers (must match `act_dtype` in the setup).
-    /// `ei` / `eo` are the inner and outer extents for `metal::extents<int, EI, EO>`.
-    ///
-    /// When `direct = true` (direct-input mode), emits only the `{name}_tA_t {name}_tA(...)`
-    /// tensor-view declaration without calling `{name}_ct_a.load()`.
+    /// Load the A register tile from a `tensor_inline` view.
     CoopTileLoadA {
         name: String,
         ptr_name: String,
@@ -1211,13 +1054,10 @@ pub enum Op {
         dtype: DType,
         ei: u32,
         eo: u32,
-        /// See `CoopTileSetup::direct_inputs`.
         direct: bool,
     },
 
     /// Load the B register tile from a `tensor_inline` view.
-    ///
-    /// When `direct = true`, emits only `{name}_tB_t {name}_tB(...)` without `.load()`.
     CoopTileLoadB {
         name: String,
         ptr_name: String,
@@ -1227,23 +1067,16 @@ pub enum Op {
         dtype: DType,
         ei: u32,
         eo: u32,
-        /// See `CoopTileSetup::direct_inputs`.
         direct: bool,
     },
 
-    /// Execute A·B → C (accumulates if `acc_mode = Accumulate`).
-    ///
-    /// When `direct = true`, calls `{name}_op.run({name}_tA, {name}_tB, {name}_ct_c)`
-    /// (direct tensor views) instead of the cooperative-tensor overload.
+    /// Execute A·B → C.
     CoopTileRun {
         name: String,
-        /// See `CoopTileSetup::direct_inputs`.
         direct: bool,
     },
 
-    /// Store the C register tile through a `tensor_inline` view into `ptr_name[+ptr_offset]`.
-    ///
-    /// `dtype` is the accumulator element type (must match `acc_dtype` in the setup).
+    /// Store the C register tile through a `tensor_inline` view.
     CoopTileStoreC {
         name: String,
         ptr_name: String,
@@ -1254,330 +1087,6 @@ pub enum Op {
         ei: u32,
         eo: u32,
     },
-}
-
-// ---------------------------------------------------------------------------
-// CoopTile enums
-// ---------------------------------------------------------------------------
-
-/// Execution scope for cooperative tile operations.
-///
-/// Maps to `metal::execution_simdgroup` / `metal::execution_threadgroup` in
-/// Metal 4 but is named hardware-agnostically so the same IR works with other
-/// backends.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CoopTileScope {
-    /// One simdgroup (32 lanes) cooperates per tile.
-    SimdGroup,
-    /// The whole threadgroup cooperates per tile.
-    Threadgroup,
-}
-
-/// Accumulation mode for a cooperative tile matmul.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CoopTileAccMode {
-    /// C tile is overwritten with A·B (no prior accumulation).
-    Overwrite,
-    /// C tile accumulates: `C += A·B` across K-block iterations.
-    MultiplyAccumulate,
-}
-
-// ---------------------------------------------------------------------------
-// KernelMode
-// ---------------------------------------------------------------------------
-
-/// Controls which Metal built-in position attributes are emitted in the
-/// kernel signature.  All built-in attributes **must** share the same vector
-/// width (Metal constraint), so each mode is self-contained.
-///
-/// ## Which mode emits which alias
-///
-/// Kernel bodies refer to position aliases by name (`tid`, `tgid_x`,
-/// `tgid_y`, `tgid_z`, `lsize`, `simd_lane`, `simd_group`, `n_simd`).
-/// Each mode emits a different subset of those:
-///
-/// | mode         | tid | tgid_x | tgid_y | tgid_z | lsize | simd_lane | simd_group |
-/// |--------------|:---:|:------:|:------:|:------:|:-----:|:---------:|:----------:|
-/// | Elementwise  |  ✓  |        |        |        |       |           |            |
-/// | Reduction    |  ✓  |   ✓    |   ✓ †  |        |   ✓   |           |            |
-/// | Grid3D       |  ✓  |        |        |        |       |           |            |
-/// | Tile2D       |  ✓  |   ✓    |   ✓    |        |       |           |            |
-/// | SimdGroup2D  |     |   ✓    |   ✓    |   ✓    |       |     ✓     |     ✓      |
-///
-/// † Reduction emits `tgid_y` only when the kernel actually references
-/// axis 1 (avoids `-Wunused-variable`). Reduction does **not** emit
-/// `tgid_z` — kernels needing 3-axis grid + simdgroup primitives must
-/// use SimdGroup2D.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum KernelMode {
-    /// `uint tid [[thread_position_in_grid]]`
-    /// Used for flat elementwise kernels.
-    #[default]
-    Elementwise,
-    /// `uint3 _tid3/tgid3/lsize3` with `.x`/`.y` aliases injected.
-    /// Used for row-reduction kernels (softmax, rms_norm, layer_norm, …).
-    Reduction,
-    /// `uint3 gid [[thread_position_in_grid]]`
-    /// Used for 3-axis grid kernels (rope).
-    Grid3D,
-    /// `uint2 tid [[thread_position_in_threadgroup]] + uint2 tgid`
-    /// Used for tiled 2-D kernels (gemv, matmul).
-    Tile2D,
-    /// `uint3 tid [[threadgroup_position_in_grid]]` + `uint3 lid` +
-    /// `uint simd_lane` + `uint simd_group`.
-    /// Used for tiled simdgroup-matmul kernels (steel GEMM) and
-    /// any 3-axis kernel that needs `tgid_z` (e.g. batched SDPA
-    /// prefill).
-    SimdGroup2D,
-}
-
-impl fmt::Display for KernelMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            KernelMode::Elementwise => "Elementwise",
-            KernelMode::Reduction => "Reduction",
-            KernelMode::Grid3D => "Grid3D",
-            KernelMode::Tile2D => "Tile2D",
-            KernelMode::SimdGroup2D => "SimdGroup",
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Block & Kernel
-// ---------------------------------------------------------------------------
-
-/// A basic block: a sequence of operations with a terminator.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Block {
-    pub id: BlockId,
-    /// Operations in this block.
-    pub ops: Vec<Op>,
-    /// Parallel to `ops`: the SSA value ID produced by each op, or `None` for
-    /// no-result ops (Store, Loop, Barrier, etc.).
-    /// Invariant: `results.len() == ops.len()`.
-    pub results: Vec<Option<ValueId>>,
-    /// Name hints for values (for debugging and MSL variables).
-    pub names: BTreeMap<ValueId, String>,
-}
-
-impl Block {
-    pub fn new(id: BlockId) -> Self {
-        Block { id, ops: Vec::new(), results: Vec::new(), names: BTreeMap::new() }
-    }
-
-    /// Push an op that produces a value.
-    pub fn push_op(&mut self, op: Op, value_id: ValueId) {
-        self.ops.push(op);
-        self.results.push(Some(value_id));
-    }
-
-    /// Push an op that does not produce a value (Store, Loop, Barrier, etc.).
-    pub fn push_op_no_result(&mut self, op: Op) {
-        self.ops.push(op);
-        self.results.push(None);
-    }
-
-    /// Give a name hint to a value for prettier MSL output.
-    pub fn name_value(&mut self, id: ValueId, name: impl Into<String>) {
-        self.names.insert(id, name.into());
-    }
-}
-
-/// A complete kernel in the IR.
-#[derive(Debug, PartialEq)]
-pub struct Kernel {
-    /// Kernel name.
-    pub name: String,
-    /// Thread-indexing mode — controls which Metal built-in attributes are emitted.
-    pub mode: KernelMode,
-    /// Input/output parameters (tensors).
-    pub params: Vec<Param>,
-    /// Constexpr declarations.
-    pub constexprs: Vec<ConstExprDecl>,
-    /// Entry block of the kernel body.
-    pub body: Block,
-    /// All blocks in this kernel (including nested loop bodies, etc.).
-    pub blocks: FxHashMap<BlockId, Block>,
-    /// Return shapes — for each output tensor, the shape of the written region.
-    pub return_shapes: Vec<Shape>,
-    /// Tile schedule annotations set by SchedulePass.
-    /// Keys are ValueId of Dot ops; values are (tile_m, tile_n, tile_k).
-    pub tile_annotations: FxHashMap<ValueId, (u32, u32, u32)>,
-    /// Per-kernel opt-in for the MFA-style f32→bf16 reinterpret cast.
-    /// Overrides `MslConfig::bfloat_reinterpret_cast` when set true:
-    /// the codegen emits `as_type<bfloat2>(fp32)[1]` (truncation, fast)
-    /// instead of `bfloat(fp32)` (round-to-nearest, IEEE-correct). Off
-    /// by default — kernels that can prove the ≤1 ULP truncation drift
-    /// is acceptable for their numeric profile (heavy-tailed attention
-    /// mass, accumulated dot products with limited final-cast count)
-    /// opt in via the kernel module's wrapper. Currently used by the
-    /// SDPA-prefill MMA family on M2 where it buys ~2pts bf16.
-    pub bfloat_reinterpret_cast: bool,
-    /// Per-kernel opt-in for the indirect-dispatch Swift wrapper variant.
-    /// When `true`, `render_swift_wrappers` emits a `<name>_indirect`
-    /// alongside the regular wrapper that takes an `MTLBuffer` carrying
-    /// `MTLDispatchThreadgroupsIndirectArguments` instead of an `MTLSize`
-    /// grid. Used by FFAI's GPU-router work to chain successive MoE-layer
-    /// dispatches without per-layer host stalls. Replaces the previous
-    /// hardcoded kernel-name allowlist in `metaltile-codegen::emit` —
-    /// kernels now declare their own indirect-dispatch eligibility via
-    /// the DSL / IR rather than the codegen having a special-case match
-    /// on `name`.
-    pub wants_indirect_variant: bool,
-}
-
-impl Kernel {
-    pub fn new(name: impl Into<String>) -> Self {
-        Kernel {
-            name: name.into(),
-            mode: KernelMode::default(),
-            params: Vec::new(),
-            constexprs: Vec::new(),
-            body: Block::new(BlockId::new(0)),
-            // `kernel.blocks` holds NESTED blocks only — loop bodies,
-            // if-then/else branches, etc.  The entry block lives at
-            // `kernel.body` and is the canonical source of truth for
-            // block 0.  Earlier versions also inserted a clone of the
-            // entry block here under `BlockId(0)`; that copy was never
-            // updated by passes mutating `kernel.body`, and any code
-            // walking `kernel.blocks.values()` for analysis ended up
-            // reading stale state.  Lookups now go through
-            // `kernel.body` for the entry block and `kernel.blocks`
-            // for everything else — see [`iter_blocks`] for a unified
-            // walk.
-            blocks: FxHashMap::default(),
-            return_shapes: Vec::new(),
-            tile_annotations: FxHashMap::default(),
-            bfloat_reinterpret_cast: false,
-            wants_indirect_variant: false,
-        }
-    }
-
-    /// Add a block to the kernel, returning its ID.
-    ///
-    /// Panics if `block.id == self.body.id` — the entry block lives in
-    /// `self.body`, not `self.blocks`.
-    pub fn add_block(&mut self, block: Block) -> BlockId {
-        debug_assert_ne!(
-            block.id, self.body.id,
-            "entry block lives in kernel.body, not kernel.blocks"
-        );
-        let id = block.id;
-        self.blocks.insert(id, block);
-        id
-    }
-
-    /// Iterate every block in the kernel — entry block first, then
-    /// nested blocks in `kernel.blocks` insertion order.  Use this when
-    /// an analysis needs to walk all SSA defs / uses across the kernel
-    /// (liveness, use-counting, identifier scanning).  Walking only
-    /// `self.blocks.values()` would skip the entry block; walking only
-    /// `self.body` would skip nested loop/if bodies.
-    pub fn iter_blocks(&self) -> impl Iterator<Item = &Block> {
-        std::iter::once(&self.body).chain(self.blocks.values())
-    }
-
-    /// Mutable variant of [`iter_blocks`].  Order matches [`iter_blocks`]:
-    /// entry block first, then nested blocks.
-    pub fn iter_blocks_mut(&mut self) -> impl Iterator<Item = &mut Block> {
-        std::iter::once(&mut self.body).chain(self.blocks.values_mut())
-    }
-
-    /// Get a block by ID.
-    pub fn get_block(&self, id: BlockId) -> Option<&Block> {
-        if id == self.body.id {
-            return Some(&self.body);
-        }
-        self.blocks.get(&id)
-    }
-
-    /// Get a mutable block by ID.
-    pub fn get_block_mut(&mut self, id: BlockId) -> Option<&mut Block> {
-        if id == self.body.id {
-            return Some(&mut self.body);
-        }
-        self.blocks.get_mut(&id)
-    }
-}
-
-impl Clone for Kernel {
-    fn clone(&self) -> Self {
-        // `kernel.blocks` no longer holds the entry block — see the
-        // `Kernel::new` comment for the data-structure rationale.  A
-        // plain field-by-field clone is correct now; previously this
-        // re-inserted the entry block under `body.id` to paper over
-        // the stale-copy invariant.
-        Kernel {
-            name: self.name.clone(),
-            mode: self.mode,
-            params: self.params.clone(),
-            constexprs: self.constexprs.clone(),
-            body: self.body.clone(),
-            blocks: self.blocks.clone(),
-            return_shapes: self.return_shapes.clone(),
-            tile_annotations: self.tile_annotations.clone(),
-            bfloat_reinterpret_cast: self.bfloat_reinterpret_cast,
-            wants_indirect_variant: self.wants_indirect_variant,
-        }
-    }
-}
-
-// ── Display / pretty-printing ────────────────────────────────────────────────
-
-impl std::fmt::Display for Kernel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Header
-        let mode_str = match self.mode {
-            KernelMode::Elementwise => "Elementwise",
-            KernelMode::Reduction => "Reduction",
-            KernelMode::Grid3D => "Grid3D",
-            KernelMode::Tile2D => "Tile2D",
-            KernelMode::SimdGroup2D => "SimdGroup2D",
-        };
-        let params_str: Vec<String> = self
-            .params
-            .iter()
-            .map(|p| {
-                let io = if p.is_output { "out:" } else { "" };
-                format!("{io}{}:{:?}", p.name, p.dtype)
-            })
-            .collect();
-        writeln!(f, "kernel {}  mode={mode_str}  params=[{}]", self.name, params_str.join(", "))?;
-
-        // Entry block
-        write!(f, "{}", self.body)?;
-
-        // Nested blocks (sorted by ID)
-        let mut block_ids: Vec<BlockId> = self.blocks.keys().copied().collect();
-        block_ids.sort_unstable();
-        for id in block_ids {
-            if id == self.body.id {
-                continue;
-            }
-            if let Some(block) = self.blocks.get(&id) {
-                write!(f, "{}", block)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl std::fmt::Display for Block {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "  block b{}:", self.id.as_u32())?;
-        for (i, op) in self.ops.iter().enumerate() {
-            let result_id = self.results.get(i).and_then(|r| *r);
-            if let Some(vid) = result_id {
-                write!(f, "    v{:<4} = ", vid.as_u32())?;
-            } else {
-                write!(f, "         ")?;
-            }
-            op.fmt_ir(f)?;
-            writeln!(f)?;
-        }
-        Ok(())
-    }
 }
 
 impl Op {
@@ -1673,7 +1182,7 @@ impl Op {
     // -----------------------------------------------------------------------
 
     /// Write a compact IR representation of this op.
-    fn fmt_ir(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    pub(crate) fn fmt_ir(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Op::ProgramId { axis } => write!(f, "ProgramId(axis={axis})"),
             Op::Const { value } => write!(f, "Const({value})"),
@@ -1868,7 +1377,12 @@ impl Op {
                 write!(f, "Gather({src}, v{}, axis={axis})", indices.as_u32())
             },
             Op::Scatter { dst, indices, value, axis } => {
-                write!(f, "Scatter({dst}, v{}, v{}, axis={axis})", indices.as_u32(), value.as_u32())
+                write!(
+                    f,
+                    "Scatter({dst}, v{}, v{}, axis={axis})",
+                    indices.as_u32(),
+                    value.as_u32()
+                )
             },
             Op::Atomic { op, scope, dst, index, value } => {
                 write!(
@@ -1968,7 +1482,12 @@ impl Op {
                 write!(f, "SimdgroupElemLoad(v{}, [{index}])", value.as_u32())
             },
             Op::SimdgroupElemStore { value, index, data } => {
-                write!(f, "SimdgroupElemStore(v{}, [{index}], v{})", value.as_u32(), data.as_u32())
+                write!(
+                    f,
+                    "SimdgroupElemStore(v{}, [{index}], v{})",
+                    value.as_u32(),
+                    data.as_u32()
+                )
             },
             Op::SimdgroupLoad { dest, tg, offset, stride, transpose } => {
                 write!(
@@ -1996,127 +1515,5 @@ fn fmt_index(idx: &IndexExpr) -> String {
         IndexExpr::Value(v) => format!("v{}", v.as_u32()),
         IndexExpr::Const(n) => format!("{n}"),
         IndexExpr::Range(v, offset) => format!("v{}..v{}+{offset}", v.as_u32(), v.as_u32()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Block, BlockId, Kernel, Op, ValueId};
-
-    #[test]
-    fn entry_block_lives_in_body_not_blocks() {
-        // The entry block is `kernel.body`; `kernel.blocks` only holds
-        // nested blocks (loop bodies, if-then/else).  Earlier versions
-        // also kept a never-updated clone of the entry block in
-        // `kernel.blocks[body.id]`; that was the source of the
-        // "stale block" footgun documented in #209/2.
-        let mut kernel = Kernel::new("body");
-        kernel.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
-        assert_eq!(kernel.body.ops.len(), 1);
-        assert!(
-            !kernel.blocks.contains_key(&kernel.body.id),
-            "entry block must NOT be present in kernel.blocks"
-        );
-    }
-
-    #[test]
-    fn getters_treat_body_as_authoritative_entry_block() {
-        // `get_block(body.id)` returns `&kernel.body` directly; pushing
-        // to it is observed both via the field and via the getter (no
-        // stale copy to refresh).
-        let mut kernel = Kernel::new("body");
-        kernel.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
-        assert_eq!(kernel.get_block(BlockId::new(0)).expect("entry block must exist").ops.len(), 1);
-
-        let body = kernel.get_block_mut(BlockId::new(0)).expect("entry block must be mutable");
-        body.push_op(Op::Const { value: 2 }, ValueId::new(1));
-        assert_eq!(kernel.body.ops.len(), 2);
-        assert_eq!(
-            kernel.get_block(BlockId::new(0)).expect("entry block must exist").ops.len(),
-            2,
-            "get_block(body.id) must reflect post-mutation state"
-        );
-    }
-
-    #[test]
-    fn iter_blocks_yields_body_then_nested() {
-        // `iter_blocks` is the canonical full-kernel walk: entry block
-        // first, then nested blocks.  Replaces the
-        // `body + kernel.blocks.values()` pattern that callers used to
-        // open-code, where it was easy to forget the body half.
-        let mut kernel = Kernel::new("iter");
-        kernel.body.push_op(Op::Const { value: 10 }, ValueId::new(0));
-        let mut nested = Block::new(BlockId::new(1));
-        nested.push_op(Op::Const { value: 20 }, ValueId::new(1));
-        kernel.add_block(nested);
-
-        let ids: Vec<u32> = kernel.iter_blocks().map(|b| b.id.as_u32()).collect();
-        assert_eq!(ids, vec![0, 1], "iter_blocks yields body first then nested");
-    }
-
-    #[test]
-    fn display_format_shows_kernel_structure() {
-        use super::{BinOpKind, IndexExpr, KernelMode, Param, ParamKind};
-        use crate::{dtype::DType, shape::Shape};
-
-        let mut k = Kernel::new("mt_vadd");
-        k.mode = KernelMode::Elementwise;
-        k.params.push(Param {
-            name: "a".into(),
-            dtype: DType::F32,
-            shape: Shape::scalar(),
-            is_output: false,
-            kind: ParamKind::Tensor,
-        });
-        k.params.push(Param {
-            name: "b".into(),
-            dtype: DType::F32,
-            shape: Shape::scalar(),
-            is_output: false,
-            kind: ParamKind::Tensor,
-        });
-        k.params.push(Param {
-            name: "out".into(),
-            dtype: DType::F32,
-            shape: Shape::scalar(),
-            is_output: true,
-            kind: ParamKind::Tensor,
-        });
-        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
-        k.body.push_op(
-            Op::Load {
-                src: "a".into(),
-                indices: vec![IndexExpr::Value(ValueId::new(0))],
-                mask: None,
-                other: None,
-            },
-            ValueId::new(1),
-        );
-        k.body.push_op(
-            Op::Load {
-                src: "b".into(),
-                indices: vec![IndexExpr::Value(ValueId::new(0))],
-                mask: None,
-                other: None,
-            },
-            ValueId::new(2),
-        );
-        k.body.push_op(
-            Op::BinOp { op: BinOpKind::Add, lhs: ValueId::new(1), rhs: ValueId::new(2) },
-            ValueId::new(3),
-        );
-        k.body.push_op_no_result(Op::Store {
-            dst: "out".into(),
-            indices: vec![IndexExpr::Value(ValueId::new(0))],
-            value: ValueId::new(3),
-            mask: None,
-        });
-
-        let output = format!("{k}");
-        assert!(output.contains("kernel mt_vadd"), "should show kernel name: {output}");
-        assert!(output.contains("mode=Elementwise"), "should show mode: {output}");
-        assert!(output.contains("v0    = ProgramId(axis=0)"), "should show ProgramId: {output}");
-        assert!(output.contains("BinOp(Add, v1, v2)"), "should show BinOp: {output}");
-        assert!(output.contains("Store(out, v3, [v0])"), "should show Store: {output}");
     }
 }
