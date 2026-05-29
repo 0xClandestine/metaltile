@@ -48,6 +48,10 @@ fn pad_left(text: &str, width: usize) -> String { format!("{text:<width$}") }
 
 fn pad_right(text: &str, width: usize) -> String { format!("{text:>width$}") }
 
+/// A kernel to emit: its bench (carrying IR + mode + grid) and the union of
+/// dtypes it should be monomorphized over.
+type EmitKernel = (&'static dyn KernelBench, Vec<DType>);
+
 pub fn run(args: &BuildArgs) -> Result<(), CliError> {
     let _span = tracing::info_span!("build", filter = ?args.filter, emit = ?args.emit).entered();
     let filter = &args.filter;
@@ -103,7 +107,7 @@ pub fn run(args: &BuildArgs) -> Result<(), CliError> {
     // (`BenchBuffer`s are lazy metadata, so building a setup just to read its
     // kernel/grid is cheap.) Keyed by the kernel's generic name; a kernel with
     // multiple benches unions their dtype sets.
-    let mut kernels: BTreeMap<String, (&'static dyn KernelBench, Vec<DType>)> = BTreeMap::new();
+    let mut kernels: BTreeMap<String, EmitKernel> = BTreeMap::new();
     for entry in all_benches() {
         let bench = entry.bench();
         let Some(&first_dt) = bench.dtypes().first() else { continue };
@@ -116,8 +120,7 @@ pub fn run(args: &BuildArgs) -> Result<(), CliError> {
         }
     }
 
-    let mut sorted: Vec<(String, (&'static dyn KernelBench, Vec<DType>))> =
-        kernels.into_iter().collect();
+    let mut sorted: Vec<(String, EmitKernel)> = kernels.into_iter().collect();
     sorted.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
     // Header.
