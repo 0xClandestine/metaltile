@@ -53,6 +53,14 @@ pub fn ffai_sdpa_decode_d256<T>(
     #[constexpr] n_kv: u32,
     #[constexpr] kv_stride: u32,
     #[constexpr] heads_per_group: u32,
+    // Learned per-head attention sink. When `has_sink == 1` the softmax
+    // denominator gains a virtual key with score `sink_logit` and value
+    // 0 — it contributes `exp(sink_logit - g_max)` to the running sum
+    // but nothing to the output accumulator. `has_sink == 0` masks the
+    // term out, so the dense path is bit-identical to the pre-sink
+    // kernel. See `sdpa_decode.rs` (head_dim=128) for the rationale.
+    #[constexpr] has_sink: u32,
+    #[constexpr] sink_logit: f32,
     #[constexpr] scale: f32,
 ) {
     let q_head = tgid_x;
@@ -132,11 +140,20 @@ pub fn ffai_sdpa_decode_d256<T>(
     }
     threadgroup_barrier();
     if sg == 0 {
-        let g_max_in = select(lane < ns, threadgroup_load("tg_max", lane), neg_infinity());
+        let g_max_raw = select(lane < ns, threadgroup_load("tg_max", lane), neg_infinity());
+        // Fold the learned sink logit into the cross-simdgroup max (see
+        // d64 / d128 kernels for the rationale): carry it on lane 0 only
+        // so simd_max sees it exactly once. Masked to -inf when no sink.
+        let sink_max = select(has_sink > 0u32, sink_logit, neg_infinity());
+        let g_max_in =
+            select(lane == 0u32, select(g_max_raw > sink_max, g_max_raw, sink_max), g_max_raw);
         let g_max = simd_max(g_max_in);
+        // Rescale uses each simdgroup's own raw max, not the sink-combined one.
         let g_sum_in =
-            select(lane < ns, threadgroup_load("tg_sum", lane) * exp(g_max_in - g_max), 0.0f32);
-        let g_sum = simd_sum(g_sum_in);
+            select(lane < ns, threadgroup_load("tg_sum", lane) * exp(g_max_raw - g_max), 0.0f32);
+        // Sink adds `exp(sink_logit - g_max)` to the denominator only.
+        let sink_sum = select(has_sink > 0u32, exp(sink_logit - g_max), 0.0f32);
+        let g_sum = simd_sum(g_sum_in + select(lane == 0u32, sink_sum, 0.0f32));
         if lane == 0 {
             threadgroup_store("tg_max", 0, g_max);
             threadgroup_store("tg_sum", 0, g_sum);
@@ -245,6 +262,7 @@ pub mod kernel_tests {
         n_kv: usize,
         kv_stride: usize,
         scale: f32,
+        sink_logit: Option<f32>,
     ) -> Vec<f32> {
         let gqa = n_q_heads / n_kv_heads;
         let mut out = vec![0.0f32; n_q_heads * head_dim];
@@ -261,11 +279,19 @@ pub mod kernel_tests {
                 }
                 *score = dot * scale;
             }
-            let m = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            // Learned sink: virtual key with logit `sink_logit`, value 0
+            // — joins the max + denominator, never the value accumulator.
+            let mut m = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            if let Some(s) = sink_logit {
+                m = m.max(s);
+            }
             let mut sum = 0.0f32;
             for s in scores.iter_mut() {
                 *s = (*s - m).exp();
                 sum += *s;
+            }
+            if let Some(s) = sink_logit {
+                sum += (s - m).exp();
             }
             let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
             for d in 0..head_dim {
@@ -283,20 +309,30 @@ pub mod kernel_tests {
         (0..n).map(|i| ((start + i as f32 * step) % 2.0) - 1.0).collect()
     }
 
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-3, 1e-2])]
-    fn test_ffai_sdpa_decode_d256(dt: DType) -> TestSetup {
+    fn setup(dt: DType, has_sink: bool) -> TestSetup {
         let (n_q_heads, n_kv_heads, head_dim) = (8usize, 4usize, 256usize);
         let (n_kv, kv_stride) = (64usize, 64usize);
         let heads_per_group = n_q_heads / n_kv_heads;
         let scale = 1.0f32 / (head_dim as f32).sqrt();
+        let sink_logit = 0.5f32;
 
         let q = unpack_f32(&pack_f32(&ramp(n_q_heads * head_dim, 0.013, -0.4), dt), dt);
         let k =
             unpack_f32(&pack_f32(&ramp(n_kv_heads * kv_stride * head_dim, 0.011, -0.5), dt), dt);
         let v =
             unpack_f32(&pack_f32(&ramp(n_kv_heads * kv_stride * head_dim, 0.007, -0.3), dt), dt);
-        let expected =
-            naive_sdpa(&q, &k, &v, n_q_heads, n_kv_heads, head_dim, n_kv, kv_stride, scale);
+        let expected = naive_sdpa(
+            &q,
+            &k,
+            &v,
+            n_q_heads,
+            n_kv_heads,
+            head_dim,
+            n_kv,
+            kv_stride,
+            scale,
+            has_sink.then_some(sink_logit),
+        );
 
         TestSetup::new(ffai_sdpa_decode_d256::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
@@ -308,10 +344,18 @@ pub mod kernel_tests {
             .constexpr("n_kv", n_kv as u32)
             .constexpr("kv_stride", kv_stride as u32)
             .constexpr("heads_per_group", heads_per_group as u32)
+            .constexpr("has_sink", u32::from(has_sink))
+            .constexpr("sink_logit", sink_logit)
             .constexpr("scale", scale)
             .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
             .grid_3d(n_q_heads as u32, 1, 1, [1024, 1, 1])
     }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-3, 1e-2])]
+    fn test_ffai_sdpa_decode_d256(dt: DType) -> TestSetup { setup(dt, false) }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-3, 1e-2])]
+    fn test_ffai_sdpa_decode_d256_sink(dt: DType) -> TestSetup { setup(dt, true) }
 }
 
 /// New-syntax benchmark for `ffai_sdpa_decode_d256` (`class=GenericEmpty`).
@@ -337,6 +381,8 @@ pub mod kernel_benches {
             .constexpr("n_kv", n_kv as u32)
             .constexpr("kv_stride", kv_stride as u32)
             .constexpr("heads_per_group", heads_per_group as u32)
+            .constexpr("has_sink", 0u32)
+            .constexpr("sink_logit", 0.0f32)
             .constexpr("scale", scale)
             .grid_3d(n_q_heads as u32, 1, 1, [1024, 1, 1])
             .bytes_moved(bytes as u64)

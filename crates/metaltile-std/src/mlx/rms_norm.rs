@@ -399,24 +399,43 @@ mod wide_tests {
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::mt_rms_norm;
+    use super::{mt_rms_norm, mt_rms_norm_wide};
     use crate::utils::{pack_f32, unpack_f32};
+
+    // Per-row oracle: out_i = x_i / sqrt(mean(x²) + eps) * w_i, on
+    // dtype-rounded inputs.
+    fn expected_rms(
+        x: &[f32],
+        w_dt: &[f32],
+        rows: usize,
+        n: usize,
+        eps: f32,
+        dt: DType,
+    ) -> Vec<f32> {
+        let mut expected = Vec::with_capacity(rows * n);
+        for r in 0..rows {
+            let xr = unpack_f32(&pack_f32(&x[r * n..(r + 1) * n], dt), dt);
+            let ms: f32 = xr.iter().map(|&v| v * v).sum::<f32>() / n as f32;
+            let inv = 1.0 / (ms + eps).sqrt();
+            expected.extend(xr.iter().zip(w_dt).map(|(&xi, &wi)| xi * inv * wi));
+        }
+        expected
+    }
+
+    fn make_inputs(rows: usize, n: usize) -> (Vec<f32>, Vec<f32>) {
+        let w: Vec<f32> = (0..n).map(|i| 1.0 + ((i % 11) as f32 - 5.0) * 0.02).collect();
+        let mut x = Vec::with_capacity(rows * n);
+        for r in 0..rows {
+            x.extend((0..n).map(|i| ((i % 17) as f32 - 8.0) * 0.1 + r as f32 * 0.03));
+        }
+        (w, x)
+    }
 
     fn setup(rows: usize, n: usize, dt: DType) -> TestSetup {
         let eps = 1e-5f32;
-        let w: Vec<f32> = (0..n).map(|i| 1.0 + ((i % 11) as f32 - 5.0) * 0.02).collect();
+        let (w, x) = make_inputs(rows, n);
         let w_dt = unpack_f32(&pack_f32(&w, dt), dt);
-        let mut x = Vec::with_capacity(rows * n);
-        let mut expected = Vec::with_capacity(rows * n);
-        for r in 0..rows {
-            let row: Vec<f32> =
-                (0..n).map(|i| ((i % 17) as f32 - 8.0) * 0.1 + r as f32 * 0.03).collect();
-            let xr = unpack_f32(&pack_f32(&row, dt), dt);
-            let ms: f32 = xr.iter().map(|&v| v * v).sum::<f32>() / n as f32;
-            let inv = 1.0 / (ms + eps).sqrt();
-            expected.extend(xr.iter().zip(&w_dt).map(|(&xi, &wi)| xi * inv * wi));
-            x.extend_from_slice(&row);
-        }
+        let expected = expected_rms(&x, &w_dt, rows, n, eps, dt);
         TestSetup::new(mt_rms_norm::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
             .input(TestBuffer::from_vec("x", pack_f32(&x, dt), dt))
@@ -430,6 +449,31 @@ pub mod kernel_tests {
 
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 2e-2, 1e-1])]
     fn test_mt_rms_norm(dt: DType) -> TestSetup { setup(4, 512, dt) }
+
+    // Non-128-aligned wide-row coverage (SmolVLM2 d=960; 960 = 7·128 +
+    // 64 is NOT a multiple of 128, so `mt_rms_norm` can't dispatch it).
+    // `mt_rms_norm_wide` strides over the row with a fixed TPG=1024 and
+    // imposes no `N = TPG·k` / 128-alignment constraint, so it covers
+    // arbitrary widths. One threadgroup per row, TPG=1024.
+    fn setup_wide(rows: usize, n: usize, dt: DType) -> TestSetup {
+        let eps = 1e-5f32;
+        const TPG: u32 = 1024;
+        let (w, x) = make_inputs(rows, n);
+        let w_dt = unpack_f32(&pack_f32(&w, dt), dt);
+        let expected = expected_rms(&x, &w_dt, rows, n, eps, dt);
+        TestSetup::new(mt_rms_norm_wide::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("x", pack_f32(&x, dt), dt))
+            .input(TestBuffer::from_vec("w", pack_f32(&w, dt), dt))
+            .input(TestBuffer::zeros("out", rows * n, dt))
+            .input(TestBuffer::from_vec("eps_buf", eps.to_le_bytes().to_vec(), DType::F32))
+            .constexpr("n", n as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(rows as u32, 1, 1, [TPG, 1, 1])
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-4, 2e-2, 1e-1])]
+    fn test_mt_rms_norm_wide_d960(dt: DType) -> TestSetup { setup_wide(3, 960, dt) }
 }
 
 /// New-syntax benchmark for `mt_rms_norm` (vs MLX `metal/rms_norm.metal`).

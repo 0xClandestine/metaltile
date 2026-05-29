@@ -760,6 +760,53 @@ pub mod kernel_tests {
     fn test_ffai_sdpa_bidirectional_d96(dt: DType) -> TestSetup {
         setup(ffai_sdpa_bidirectional_d96::kernel_ir_for(dt), 96, dt)
     }
+
+    // Production vision-tower self-attention shape that previously
+    // CPU-pinned in FFAI (PaliGemma SigLIP / FastVLM): n_q_heads=16,
+    // n_query=576 patches all attending each other (base_kv=0,
+    // kv_stride=576), MHA (n_kv_heads=16, heads_per_group=1), head_dim=64.
+    // The grid is `n_q_heads * n_query = 9216` threadgroups of 1024 — this
+    // pins the contract that the d64 kernel produces a correct dense
+    // bidirectional softmax at that shape (no GPU pin, matches the CPU
+    // oracle). f32-only: the O(n_query·n_q_heads·n_kv·head_dim) ≈ 340M-flop
+    // oracle is the same in every dtype, so one dtype suffices here and
+    // the small-shape tests above cover f16/bf16 rounding.
+    fn setup_prod(dt: DType) -> TestSetup {
+        let head_dim = 64usize;
+        let (n_q_heads, n_kv_heads) = (16usize, 16usize);
+        let (base_kv, n_query) = (0usize, 576usize);
+        let kv_stride = base_kv + n_query;
+        let heads_per_group = n_q_heads / n_kv_heads;
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+        let q = unpack_f32(&pack_f32(&ramp(n_query * n_q_heads * head_dim, 0.013, -0.4), dt), dt);
+        let k =
+            unpack_f32(&pack_f32(&ramp(n_kv_heads * kv_stride * head_dim, 0.011, -0.5), dt), dt);
+        let v =
+            unpack_f32(&pack_f32(&ramp(n_kv_heads * kv_stride * head_dim, 0.007, -0.3), dt), dt);
+        let expected = naive_sdpa_bidirectional(
+            &q, &k, &v, n_q_heads, n_kv_heads, head_dim, base_kv, n_query, kv_stride, scale,
+        );
+
+        TestSetup::new(ffai_sdpa_bidirectional_d64::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("q", pack_f32(&q, dt), dt))
+            .input(TestBuffer::from_vec("k", pack_f32(&k, dt), dt))
+            .input(TestBuffer::from_vec("v", pack_f32(&v, dt), dt))
+            .input(TestBuffer::zeros("out", n_query * n_q_heads * head_dim, dt))
+            .constexpr("head_dim", head_dim as u32)
+            .constexpr("n_q_heads", n_q_heads as u32)
+            .constexpr("base_kv", base_kv as u32)
+            .constexpr("n_query", n_query as u32)
+            .constexpr("kv_stride", kv_stride as u32)
+            .constexpr("heads_per_group", heads_per_group as u32)
+            .constexpr("scale", scale)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d((n_q_heads * n_query) as u32, 1, 1, [1024, 1, 1])
+    }
+
+    #[test_kernel(dtypes = [f32], tol = [2e-3])]
+    fn test_ffai_sdpa_bidirectional_d64_vision_tower(dt: DType) -> TestSetup { setup_prod(dt) }
 }
 
 /// New-syntax benchmarks for the bidirectional SDPA family (all head dims,
