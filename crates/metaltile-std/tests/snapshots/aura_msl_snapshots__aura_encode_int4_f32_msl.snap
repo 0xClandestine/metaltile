@@ -133,34 +133,36 @@ kernel void aura_encode_int4(
         packed_out[v86] = v87;
     }
     auto v88 = __ml_idx;
-    auto v_centroid_val = codebook[v88];
+    auto v89 = codebook[v88];
+    float v_centroid_val = static_cast<float>(v89);
     auto v_recon_sq = v_centroid_val * v_centroid_val;
     float v_simd_recon_sq = simd_sum(float(v_recon_sq));
-    uint v92 = 0u;
-    auto v93 = v_lane == v92;
-    if (v93) {
+    uint v93 = 0u;
+    auto v94 = v_lane == v93;
+    if (v94) {
         shared_norm[v_sg_id] = v_simd_recon_sq;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    auto v94 = 0.0f;
-    auto __ml_total_recon_sq = v94;
-    uint v96 = 1u;
-    uint v95 = 0u;
-    for (uint i_3 = v95; i_3 < v_num_groups; i_3 += v96) {
-        auto v97 = __ml_total_recon_sq;
-        auto v98 = shared_norm[i_3];
-        auto v99 = v97 + v98;
-        __ml_total_recon_sq = v99;
+    auto v95 = 0.0f;
+    auto __ml_total_recon_sq = v95;
+    uint v97 = 1u;
+    uint v96 = 0u;
+    for (uint i_3 = v96; i_3 < v_num_groups; i_3 += v97) {
+        auto v98 = __ml_total_recon_sq;
+        auto v99 = shared_norm[i_3];
+        auto v100 = v98 + v99;
+        __ml_total_recon_sq = v100;
     }
-    auto v100 = __ml_total_recon_sq;
-    auto v_recon_norm = sqrt(v100);
-    auto v102 = 0.00000001f;
-    auto v104 = v_norm_val / v_recon_norm;
-    auto v103 = v_recon_norm > v102;
-    auto v_corrected_norm = bool(v103) ? v104 : v_norm_val;
-    uint v106 = 0u;
-    auto v107 = v_d == v106;
-    if (v107) {
-        norms_out[v_row] = v_corrected_norm;
+    auto v101 = __ml_total_recon_sq;
+    auto v_recon_norm = sqrt(v101);
+    auto v103 = 0.00000001f;
+    auto v105 = v_norm_val / v_recon_norm;
+    auto v104 = v_recon_norm > v103;
+    auto v_corrected_norm = bool(v104) ? v105 : v_norm_val;
+    uint v107 = 0u;
+    auto v108 = v_d == v107;
+    if (v108) {
+        float v109 = static_cast<float>(v_corrected_norm);
+        norms_out[v_row] = v109;
     }
 }

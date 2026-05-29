@@ -12,8 +12,10 @@
 //! Input:
 //! - `packed [B*H, T, packed_width]` u32  — bit-packed codebook indices.
 //!   `packed_width = ceil(dim * bits / 32)`.
-//! - `norms  [B*H, T]`               f32  — per-token norm correction.
-//! - `codebook [2**bits]`            f32  — Lloyd-Max centroids.
+//! - `norms  [B*H, T]`               T    — per-token norm correction; cast-
+//!   at-load to f32 internally.
+//! - `codebook [2**bits]`            T    — Lloyd-Max centroids; cast-at-load
+//!   to f32 internally.
 //!
 //! Output:
 //! - `out  [B*H, T, dim]`            T    — fp16 / bf16 / fp32 in rotated
@@ -54,8 +56,8 @@ macro_rules! aura_dequant_rotated_clean {
         )]
         pub fn $name<T>(
             packed: Tensor<u32>,
-            norms: Tensor<f32>,
-            codebook: Tensor<f32>,
+            norms: Tensor<T>,
+            codebook: Tensor<T>,
             mut out: Tensor<T>,
             #[constexpr] dim: u32,
             #[constexpr] packed_width: u32,
@@ -77,7 +79,7 @@ macro_rules! aura_dequant_rotated_clean {
 
             let base = (bh * tokens + t) * packed_width;
             let word = load(packed[base + w]);
-            let norm_val = load(norms[bh * tokens + t]);
+            let norm_val = load(norms[bh * tokens + t]).cast::<f32>();
 
             let d_base = w * dims_per_word;
             let out_row_base = (bh * tokens + t) * dim + d_base;
@@ -85,7 +87,7 @@ macro_rules! aura_dequant_rotated_clean {
                 let d = d_base + k;
                 if d < dim {
                     let val = (word >> (k * $bits)) & mask;
-                    let centroid = load(codebook[val]);
+                    let centroid = load(codebook[val]).cast::<f32>();
                     let result = centroid * norm_val;
                     store(out[out_row_base + k], result.cast::<T>());
                 }
@@ -111,8 +113,8 @@ macro_rules! aura_dequant_rotated_odd {
         )]
         pub fn $name<T>(
             packed: Tensor<u32>,
-            norms: Tensor<f32>,
-            codebook: Tensor<f32>,
+            norms: Tensor<T>,
+            codebook: Tensor<T>,
             mut out: Tensor<T>,
             #[constexpr] dim: u32,
             #[constexpr] packed_width: u32,
@@ -133,7 +135,7 @@ macro_rules! aura_dequant_rotated_odd {
             let dims_per_word = (32u32 + $bits - 1u32) / $bits;
 
             let base = (bh * tokens + t) * packed_width;
-            let norm_val = load(norms[bh * tokens + t]);
+            let norm_val = load(norms[bh * tokens + t]).cast::<f32>();
 
             let d_base = w * dims_per_word;
             for k in range(0u32, dims_per_word, 1u32) {
@@ -154,7 +156,7 @@ macro_rules! aura_dequant_rotated_odd {
                     let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
                     let val = (lo | hi) & mask;
 
-                    let centroid = load(codebook[val]);
+                    let centroid = load(codebook[val]).cast::<f32>();
                     let result = centroid * norm_val;
                     store(out[(bh * tokens + t) * dim + d], result.cast::<T>());
                 }
@@ -176,7 +178,7 @@ pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
     use super::aura_dequant_rotated_int4;
-    use crate::utils::pack_f32;
+    use crate::utils::{pack_f32, unpack_f32};
 
     /// Bit-pack a flat `[bh, t, dim]` int4 index array into
     /// `[bh, t, packed_width]` u32 words — what `aura_encode` produces.
@@ -205,23 +207,28 @@ pub mod kernel_tests {
         // bits=4, dim=128, packed_width=16, 2 heads × 3 tokens.
         let (dim, bh, tokens) = (128usize, 2usize, 3usize);
         let packed_width = (dim * 4).div_ceil(32);
-        // 16-level symmetric codebook in [-1, 1] (always f32).
+        // 16-level symmetric codebook in [-1, 1]. Now T-typed (#212): the
+        // buffer follows the activation dtype so the same codebook feeds the
+        // encoder and decoder with no per-call cast.
         let codebook: Vec<f32> = (0..16).map(|i| -1.0 + 2.0 * i as f32 / 15.0).collect();
         let indices: Vec<u32> = (0..bh * tokens * dim).map(|i| ((i * 7 + 3) % 16) as u32).collect();
         let packed = pack_int4_indices(&indices, bh, tokens, dim);
         let norms: Vec<f32> = (0..bh * tokens).map(|i| 0.5 + 0.1 * i as f32).collect();
 
-        // Oracle (built in f32, then rounded through the output dtype so the
-        // expectation matches the kernel's store-cast).
+        // `norms` and `codebook` are now `Tensor<T>` — round them through the
+        // GPU dtype so the oracle sees the same cast-at-load values the kernel
+        // does. Output is also rounded through `dt` to match the store-cast.
+        let codebook_r = unpack_f32(&pack_f32(&codebook, dt), dt);
+        let norms_r = unpack_f32(&pack_f32(&norms, dt), dt);
         let expected: Vec<f32> = (0..bh * tokens * dim)
-            .map(|i| codebook[indices[i] as usize] * norms[i / dim])
+            .map(|i| codebook_r[indices[i] as usize] * norms_r[i / dim])
             .collect();
 
         TestSetup::new(aura_dequant_rotated_int4::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
             .input(TestBuffer::from_vec("packed", pack_u32(&packed), DType::U32))
-            .input(TestBuffer::from_vec("norms", pack_f32(&norms, DType::F32), DType::F32))
-            .input(TestBuffer::from_vec("codebook", pack_f32(&codebook, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("norms", pack_f32(&norms, dt), dt))
+            .input(TestBuffer::from_vec("codebook", pack_f32(&codebook, dt), dt))
             .input(TestBuffer::zeros("out", bh * tokens * dim, dt))
             .constexpr("dim", dim as u32)
             .constexpr("packed_width", packed_width as u32)
@@ -257,8 +264,8 @@ pub mod kernel_benches {
         let levels = 1usize << bits;
         s.mode(KernelMode::Grid3D)
             .buffer(BenchBuffer::random("packed", bh * tokens * packed_width, DType::U32))
-            .buffer(BenchBuffer::random("norms", bh * tokens, DType::F32))
-            .buffer(BenchBuffer::random("codebook", levels, DType::F32))
+            .buffer(BenchBuffer::random("norms", bh * tokens, dt))
+            .buffer(BenchBuffer::random("codebook", levels, dt))
             .buffer(BenchBuffer::zeros("out", bh * tokens * dim, dt).output())
             .constexpr("dim", dim as u32)
             .constexpr("packed_width", packed_width as u32)

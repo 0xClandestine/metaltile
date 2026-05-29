@@ -23,14 +23,17 @@
 //! ## Layout
 //!
 //! Inputs:
-//! - `input      [rows, dim]`           f32
-//! - `rotation   [dim, dim]`            f32
-//! - `boundaries [2**bits - 1]`         f32  — Lloyd-Max thresholds.
-//! - `codebook   [2**bits]`             f32  — centroid values.
+//! - `input      [rows, dim]`           T    — model dtype (bf16/f16/f32).
+//! - `rotation   [dim, dim]`            f32  — encoder-only; Π precision matters.
+//! - `boundaries [2**bits - 1]`         f32  — Lloyd-Max thresholds; encoder-only.
+//! - `codebook   [2**bits]`             T    — centroid values, dtype matched
+//!   to the decoder cache so the same buffer feeds both paths with no
+//!   per-call cast.
 //!
 //! Outputs:
 //! - `packed_out [rows, packed_width]`  u32
-//! - `norms_out  [rows]`                f32  — norm-correction factor.
+//! - `norms_out  [rows]`                T    — norm-correction factor; cast at
+//!   the final store (the internal reduction stays f32).
 //!
 //! ## Constexpr params
 //!
@@ -75,8 +78,11 @@ macro_rules! aura_encode_kernel {
     ($name:ident, $bits:literal, $levels:literal, $subop:literal) => {
         // `input` is the model-dtype K or V row (typically bf16/f16 in
         // production, f32 in tests). All internal math runs in f32 —
-        // we cast at the load. Everything else stays f32-only because
-        // rotation, codebook, and norm-correction need the precision.
+        // we cast at the load. `rotation` + `boundaries` stay f32
+        // because the rotation matmul and Lloyd-Max comparison need the
+        // precision. `codebook` and `norms_out` follow the model dtype
+        // so the same buffers serve both encoder and decoder paths —
+        // see the AURA dtype unification note in `aura_flash_sdpa.rs`.
         #[kernel(
             bench(op="aura", subop=$subop, class=GenericEmpty, tol=0.0, kernel_mode=Reduction,)
         )]
@@ -84,9 +90,9 @@ macro_rules! aura_encode_kernel {
             input: Tensor<T>,
             rotation: Tensor<f32>,
             boundaries: Tensor<f32>,
-            codebook: Tensor<f32>,
+            codebook: Tensor<T>,
             mut packed_out: Tensor<u32>,
-            mut norms_out: Tensor<f32>,
+            mut norms_out: Tensor<T>,
             #[constexpr] dim: u32,
             #[constexpr] packed_width: u32,
         ) {
@@ -187,7 +193,7 @@ macro_rules! aura_encode_kernel {
             // L2 norm of the reconstructed vector, and
             // `corrected = norm_val / recon_norm` is what the decoder
             // multiplies back through.
-            let centroid_val = load(codebook[idx]);
+            let centroid_val = load(codebook[idx]).cast::<f32>();
             let recon_sq = centroid_val * centroid_val;
             let simd_recon_sq = simd_sum(recon_sq);
             if lane == 0u32 {
@@ -202,7 +208,7 @@ macro_rules! aura_encode_kernel {
             let corrected_norm = select(recon_norm > 1.0e-8f32, norm_val / recon_norm, norm_val);
 
             if d == 0u32 {
-                store(norms_out[row], corrected_norm);
+                store(norms_out[row], corrected_norm.cast::<T>());
             }
         }
     };
@@ -226,9 +232,10 @@ aura_encode_kernel!(aura_encode_int8, 8u32, 256u32, "encode_int8");
 /// unit_val` exactly (no reorder ambiguity in the quant index), and a smooth
 /// input chosen to land each rotated coordinate comfortably mid-bin — so the
 /// codebook index feeding `norms_out` is stable under input dtype rounding.
-/// Only `input` is dtype-rounded (rotation/codebook/boundaries are f32 always);
-/// `norms_out` is f32 output, compared at the per-dtype tol. `packed_out` is
-/// provided but NOT expected (fast-math packing — legacy A/B test owns it).
+/// `input` and `codebook` are dtype-rounded (#212 made `codebook`/`norms_out`
+/// `Tensor<T>`); `rotation`/`boundaries` stay f32. `norms_out` is now `T`
+/// output, compared at the per-dtype tol. `packed_out` is provided but NOT
+/// expected (fast-math packing — legacy A/B test owns it).
 ///
 /// Grid (Reduction, TPG = dim): `grid_3d(rows, 1, 1, [dim,1,1])`.
 pub mod kernel_tests {
@@ -306,31 +313,31 @@ pub mod kernel_tests {
         // from the 15 midpoint boundaries) — keeps the quant index stable under
         // input dtype rounding.
         let input: Vec<f32> = (0..rows * dim).map(|i| ((i as f32) * 0.013).sin() * 0.6).collect();
-        // Only `input` is dtype-rounded; the oracle then matches the GPU load.
+        // `input` and `codebook` are dtype-rounded (both `Tensor<T>` now); the
+        // oracle then matches the GPU's cast-at-load. `norms_out` is stored
+        // through `dt`, so round the expectation through `dt` too.
         let input_r = unpack_f32(&pack_f32(&input, dt), dt);
-        let expected_norms = norms_oracle(&input_r, &boundaries, &codebook, rows, dim);
+        let codebook_r = unpack_f32(&pack_f32(&codebook, dt), dt);
+        let expected_norms_f32 = norms_oracle(&input_r, &boundaries, &codebook_r, rows, dim);
+        let expected_norms = unpack_f32(&pack_f32(&expected_norms_f32, dt), dt);
 
         TestSetup::new(aura_encode_int4::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
             .input(TestBuffer::from_vec("input", pack_f32(&input, dt), dt))
             .input(TestBuffer::from_vec("rotation", pack_f32(&rotation, DType::F32), DType::F32))
             .input(TestBuffer::from_vec("boundaries", pack_f32(&boundaries, DType::F32), DType::F32))
-            .input(TestBuffer::from_vec("codebook", pack_f32(&codebook, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("codebook", pack_f32(&codebook, dt), dt))
             .input(TestBuffer::from_vec(
                 "packed_out",
                 u32_bytes(&vec![0u32; rows * packed_width]),
                 DType::U32,
             ))
-            .input(TestBuffer::zeros("norms_out", rows, DType::F32))
+            .input(TestBuffer::zeros("norms_out", rows, dt))
             .constexpr("dim", dim as u32)
             .constexpr("packed_width", packed_width as u32)
-            // Only verify the norm-correction factor (f32). `packed_out` is
+            // Only verify the norm-correction factor (now `T`). `packed_out` is
             // fast-math-sensitive — covered bit-exact by the legacy A/B test.
-            .expect(TestBuffer::from_vec(
-                "norms_out",
-                pack_f32(&expected_norms, DType::F32),
-                DType::F32,
-            ))
+            .expect(TestBuffer::from_vec("norms_out", pack_f32(&expected_norms, dt), dt))
             .grid_3d(rows as u32, 1, 1, [dim as u32, 1, 1])
     }
 
@@ -364,9 +371,9 @@ pub mod kernel_benches {
             .buffer(BenchBuffer::random("input", rows * dim, dt))
             .buffer(BenchBuffer::random("rotation", dim * dim, DType::F32))
             .buffer(BenchBuffer::random("boundaries", levels - 1, DType::F32))
-            .buffer(BenchBuffer::random("codebook", levels, DType::F32))
+            .buffer(BenchBuffer::random("codebook", levels, dt))
             .buffer(BenchBuffer::zeros("packed_out", rows * packed_width, DType::U32).output())
-            .buffer(BenchBuffer::zeros("norms_out", rows, DType::F32).output())
+            .buffer(BenchBuffer::zeros("norms_out", rows, dt).output())
             .constexpr("dim", dim as u32)
             .constexpr("packed_width", packed_width as u32)
             // Rotation matmul dominates: rows reads of a dim×dim f32 matrix.
