@@ -5745,6 +5745,80 @@ pub mod kernel_tests {
     fn test_affine_dequantize_int2(dt: DType) -> TestSetup {
         dequant_setup(mt_affine_dequantize_int2::kernel_ir_for(dt), 2, 64, 16, dt)
     }
+
+    // ── affine quantize (float → bit-stream) ──────────────────────────────
+    //
+    // The quantize kernels write three outputs: the packed codes (`out`),
+    // per-group `scales`, and per-group `biases`. The packed codes go through
+    // a `round((v-bias)*inv_scale)` snap whose last bit is sensitive to Metal
+    // fast-math FMA fusion (the legacy round-trip test in
+    // `affine_int356_quantize_gpu_correctness.rs` sidesteps this by checking a
+    // quantize→dequantize round-trip within one step). Here we pin the part
+    // that is exact and the genuinely parallel hard part — the per-group
+    // `simd_min`/`simd_max` reduction and the `scale=(max-min)/n_bins`,
+    // `bias=min` derivation. Inputs are dtype-rounded so the GPU's f32 min/max
+    // match the oracle bit-for-bit; the stored scale/bias are then cast to T,
+    // exactly as `pack_f32(_, dt)` rounds the oracle. Packing stays covered by
+    // the legacy round-trip A/B test.
+    fn quantize_setup(
+        kernel: Kernel,
+        bits: u32,
+        group_size: usize,
+        n_groups: usize,
+        dt: DType,
+    ) -> TestSetup {
+        let n_bins = ((1u32 << bits) - 1) as f32;
+        let n_elem = n_groups * group_size;
+        let out_words = n_elem * bits as usize / 32;
+        // Deterministic ramp; dtype-rounded so f32 min/max are exact on the GPU.
+        let w: Vec<f32> = (0..n_elem).map(|i| ((i % 37) as f32 - 18.0) * 0.05).collect();
+        let wd = unpack_f32(&pack_f32(&w, dt), dt);
+        let mut scales = vec![0.0f32; n_groups];
+        let mut biases = vec![0.0f32; n_groups];
+        for g in 0..n_groups {
+            let s = &wd[g * group_size..(g + 1) * group_size];
+            let mn = s.iter().copied().fold(f32::INFINITY, f32::min);
+            let mx = s.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let raw = (mx - mn) / n_bins;
+            scales[g] = if raw < 1.0e-7 { 1.0 } else { raw };
+            biases[g] = mn;
+        }
+        TestSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("w", pack_f32(&w, dt), dt))
+            .input(TestBuffer::zeros("out", out_words, DType::U32))
+            .input(TestBuffer::zeros("scales", n_groups, dt))
+            .input(TestBuffer::zeros("biases", n_groups, dt))
+            .constexpr("group_size", group_size as u32)
+            .expect(TestBuffer::from_vec("scales", pack_f32(&scales, dt), dt))
+            .expect(TestBuffer::from_vec("biases", pack_f32(&biases, dt), dt))
+            .grid_3d(n_groups as u32, 1, 1, [32, 1, 1])
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-3, 1e-2])]
+    fn test_affine_quantize_int2(dt: DType) -> TestSetup {
+        quantize_setup(mt_affine_quantize_int2::kernel_ir_for(dt), 2, 64, 8, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-3, 1e-2])]
+    fn test_affine_quantize_int3(dt: DType) -> TestSetup {
+        quantize_setup(mt_affine_quantize_int3::kernel_ir_for(dt), 3, 32, 8, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-3, 1e-2])]
+    fn test_affine_quantize_int4(dt: DType) -> TestSetup {
+        quantize_setup(mt_affine_quantize_int4::kernel_ir_for(dt), 4, 64, 8, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-3, 1e-2])]
+    fn test_affine_quantize_int5(dt: DType) -> TestSetup {
+        quantize_setup(mt_affine_quantize_int5::kernel_ir_for(dt), 5, 32, 8, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-3, 1e-2])]
+    fn test_affine_quantize_int6(dt: DType) -> TestSetup {
+        quantize_setup(mt_affine_quantize_int6::kernel_ir_for(dt), 6, 32, 8, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-3, 1e-2])]
+    fn test_affine_quantize_int8(dt: DType) -> TestSetup {
+        quantize_setup(mt_affine_quantize_int8::kernel_ir_for(dt), 8, 64, 8, dt)
+    }
 }
 
 /// New-syntax benchmarks for the affine dequantize kernels.
@@ -5779,5 +5853,47 @@ pub mod kernel_benches {
     #[bench(name = "mlx/affine/dequantize_int2", dtypes = [f32, f16, bf16])]
     fn bench_dequant_int2(dt: DType) -> BenchSetup {
         db(mt_affine_dequantize_int2::kernel_ir_for(dt), 2, 64, 65536, dt)
+    }
+
+    // ── affine quantize benches ───────────────────────────────────────────
+    // One TG per group (tpg=32), `simd_min`/`simd_max` reduction → Reduction
+    // mode. bytes_moved = input float stream + packed code output.
+    fn qb(kernel: Kernel, bits: u32, group_size: usize, n_groups: usize, dt: DType) -> BenchSetup {
+        let n_elem = n_groups * group_size;
+        let out_words = n_elem * bits as usize / 32;
+        BenchSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("w", n_elem, dt))
+            .buffer(BenchBuffer::zeros("out", out_words, DType::U32).output())
+            .buffer(BenchBuffer::zeros("scales", n_groups, dt).output())
+            .buffer(BenchBuffer::zeros("biases", n_groups, dt).output())
+            .constexpr("group_size", group_size as u32)
+            .grid_3d(n_groups as u32, 1, 1, [32, 1, 1])
+            .bytes_moved((n_elem * dt.size_bytes() + out_words * 4) as u64)
+    }
+
+    #[bench(name = "mlx/affine/quantize_int2", dtypes = [f32, f16, bf16])]
+    fn bench_quant_int2(dt: DType) -> BenchSetup {
+        qb(mt_affine_quantize_int2::kernel_ir_for(dt), 2, 64, 65536, dt)
+    }
+    #[bench(name = "mlx/affine/quantize_int3", dtypes = [f32, f16, bf16])]
+    fn bench_quant_int3(dt: DType) -> BenchSetup {
+        qb(mt_affine_quantize_int3::kernel_ir_for(dt), 3, 32, 65536, dt)
+    }
+    #[bench(name = "mlx/affine/quantize_int4", dtypes = [f32, f16, bf16])]
+    fn bench_quant_int4(dt: DType) -> BenchSetup {
+        qb(mt_affine_quantize_int4::kernel_ir_for(dt), 4, 64, 65536, dt)
+    }
+    #[bench(name = "mlx/affine/quantize_int5", dtypes = [f32, f16, bf16])]
+    fn bench_quant_int5(dt: DType) -> BenchSetup {
+        qb(mt_affine_quantize_int5::kernel_ir_for(dt), 5, 32, 65536, dt)
+    }
+    #[bench(name = "mlx/affine/quantize_int6", dtypes = [f32, f16, bf16])]
+    fn bench_quant_int6(dt: DType) -> BenchSetup {
+        qb(mt_affine_quantize_int6::kernel_ir_for(dt), 6, 32, 65536, dt)
+    }
+    #[bench(name = "mlx/affine/quantize_int8", dtypes = [f32, f16, bf16])]
+    fn bench_quant_int8(dt: DType) -> BenchSetup {
+        qb(mt_affine_quantize_int8::kernel_ir_for(dt), 8, 64, 65536, dt)
     }
 }
