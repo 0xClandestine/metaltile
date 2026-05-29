@@ -107,3 +107,46 @@ pub fn mt_sgload_smoke<T>(src: Tensor<T>, mut dst: Tensor<T>) {
     store(dst[fm * 8u32 + fn0], v0);
     store(dst[fm * 8u32 + fn1], v1);
 }
+
+/// New-syntax correctness for the `simdgroup_load` plumbing smoke kernel: a
+/// flat 8×8 tile staged through threadgroup memory and a simdgroup-matrix
+/// fragment must round-trip byte-exact (`dst == src`) for f32 / f16 — proving
+/// the parser → IR → codegen chain for `Op::SimdgroupLoad` is wired up. One
+/// simdgroup (grid `[1,1,1]`, tpg `[32,1,1]`). bf16 is excluded, matching the
+/// legacy spec (simdgroup-matrix staging differs for bf16).
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::mt_sgload_smoke;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    #[test_kernel(dtypes = [f32, f16], tol = 0.0)]
+    fn test_sgload_smoke(dt: DType) -> TestSetup {
+        // Distinct, dtype-representable values so a dropped/garbled lane shows.
+        let src_f: Vec<f32> = (0..64).map(|i| (i as f32 - 32.0) * 0.5).collect();
+        TestSetup::new(mt_sgload_smoke::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("src", pack_f32(&src_f, dt), dt))
+            .input(TestBuffer::zeros("dst", 64, dt))
+            // Identity round-trip: expected == dtype-rounded src.
+            .expect(TestBuffer::from_vec("dst", pack_f32(&unpack_f32(&pack_f32(&src_f, dt), dt), dt), dt))
+            .grid_3d(1, 1, 1, [32, 1, 1])
+    }
+}
+
+/// New-syntax benchmark for the `simdgroup_load` smoke kernel.
+pub mod kernel_benches {
+    use metaltile::{bench, test::*};
+
+    use super::mt_sgload_smoke;
+
+    #[bench(name = "mlx/sgload/smoke", dtypes = [f32, f16])]
+    fn bench_sgload_smoke(dt: DType) -> BenchSetup {
+        BenchSetup::new(mt_sgload_smoke::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("src", 64, dt))
+            .buffer(BenchBuffer::zeros("dst", 64, dt).output())
+            .grid_3d(1, 1, 1, [32, 1, 1])
+            .bytes_moved((2 * 64 * dt.size_bytes()) as u64)
+    }
+}
