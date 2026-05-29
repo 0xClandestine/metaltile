@@ -121,3 +121,26 @@ aura_flash_pass2_kernel!(aura_flash_pass2_d96, 3u32, "flash_pass2_d96");
 aura_flash_pass2_kernel!(aura_flash_pass2_d128, 4u32, "flash_pass2_d128");
 aura_flash_pass2_kernel!(aura_flash_pass2_d256, 8u32, "flash_pass2_d256");
 aura_flash_pass2_kernel!(aura_flash_pass2_d512, 16u32, "flash_pass2_d512");
+
+pub mod kernel_benches {
+    use metaltile::{bench, test::*};
+
+    use super::aura_flash_pass2_d128;
+
+    #[bench(name = "ffai/aura_flash_pass2_d128", dtypes = [f32, f16, bf16])]
+    fn bench_flash_pass2(dt: DType) -> BenchSetup {
+        // head_dim 128, decode-time KV of 4096 tokens / block 256 = 16 blocks.
+        let (dim, q_heads, num_blocks) = (128usize, 32usize, 16usize);
+        BenchSetup::new(aura_flash_pass2_d128::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("o_partials", q_heads * num_blocks * dim, dt))
+            .buffer(BenchBuffer::random("m_partials", q_heads * num_blocks, dt))
+            .buffer(BenchBuffer::random("l_partials", q_heads * num_blocks, dt))
+            .buffer(BenchBuffer::zeros("output", q_heads * dim, dt).output())
+            .constexpr("dim", dim as u32)
+            .constexpr("num_blocks", num_blocks as u32)
+            // o_partials read dominates the merge.
+            .bytes_moved((q_heads * num_blocks * dim * dt.size_bytes()) as u64)
+            .grid_3d(q_heads as u32, 1, 1, [32, 1, 1])
+    }
+}

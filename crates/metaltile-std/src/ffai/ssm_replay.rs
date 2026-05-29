@@ -194,3 +194,60 @@ ssm_step_record!(
     "record_d128_128_32_2"
 );
 ssm_replay!(ssm_replay_d128_128_32, 128u32, 128u32, 32u32, 4u32, "replay_d128_128_32");
+
+pub mod kernel_benches {
+    use metaltile::{bench, test::*};
+
+    use super::{ssm_replay_d16_64_4, ssm_step_record_d16_64_4_2};
+
+    const DH: usize = 16;
+    const DS: usize = 64;
+    const H: usize = 4;
+    const G: usize = 2;
+
+    fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
+
+    // Sequential SSD forward with (dA, dBx) tape capture over `t_total` steps.
+    #[bench(name = "ffai/ssm_record", dtypes = [f32, f16, bf16])]
+    fn bench_ssm_record(dt: DType) -> BenchSetup {
+        let (batch, t) = (1usize, 8usize);
+        let n_total = batch * H;
+        BenchSetup::new(ssm_step_record_d16_64_4_2::kernel_ir_for(dt))
+            .mode(KernelMode::Grid3D)
+            .buffer(BenchBuffer::random("x", batch * t * H * DH, dt))
+            .buffer(BenchBuffer::random("a_log", H, dt))
+            .buffer(BenchBuffer::random("b", batch * t * G * DS, dt))
+            .buffer(BenchBuffer::random("c", batch * t * G * DS, dt))
+            .buffer(BenchBuffer::random("d", H, dt))
+            .buffer(BenchBuffer::random("dt", batch * t * H, dt))
+            .buffer(BenchBuffer::random("state_in", n_total * DH * DS, dt))
+            .buffer(BenchBuffer::from_vec("mask", u32_bytes(&vec![1u32; batch * t]), DType::U32))
+            .buffer(BenchBuffer::zeros("y", batch * t * H * DH, dt).output())
+            .buffer(BenchBuffer::zeros("state_out", n_total * DH * DS, dt).output())
+            .buffer(BenchBuffer::zeros("da_log", batch * t * H * DS, dt).output())
+            .buffer(BenchBuffer::zeros("dbx_log", batch * t * H * DH * DS, dt).output())
+            .constexpr("t_total", t as u32)
+            .constexpr("has_mask", 0u32)
+            .grid_3d(1, DH as u32, (batch * H) as u32, [32, 1, 1])
+            .bytes_moved((batch * t * H * DH * DS * dt.size_bytes()) as u64)
+    }
+
+    // Re-fold the first `k_steps` tape entries onto a recurrent-state snapshot.
+    #[bench(name = "ffai/ssm_replay", dtypes = [f32, f16, bf16])]
+    fn bench_ssm_replay(dt: DType) -> BenchSetup {
+        let (batch, t, k_steps) = (1usize, 8usize, 8usize);
+        let n_total = batch * H;
+        BenchSetup::new(ssm_replay_d16_64_4::kernel_ir_for(dt))
+            .mode(KernelMode::Grid3D)
+            .buffer(BenchBuffer::random("state_snapshot", n_total * DH * DS, dt))
+            .buffer(BenchBuffer::random("da_log", batch * t * H * DS, dt))
+            .buffer(BenchBuffer::random("dbx_log", batch * t * H * DH * DS, dt))
+            .buffer(BenchBuffer::from_vec("mask", u32_bytes(&vec![1u32; batch * t]), DType::U32))
+            .buffer(BenchBuffer::zeros("state_after_k", n_total * DH * DS, dt).output())
+            .constexpr("k_steps", k_steps as u32)
+            .constexpr("t_total", t as u32)
+            .constexpr("has_mask", 0u32)
+            .grid_3d(1, DH as u32, (batch * H) as u32, [32, 1, 1])
+            .bytes_moved((batch * t * H * DH * DS * dt.size_bytes()) as u64)
+    }
+}
