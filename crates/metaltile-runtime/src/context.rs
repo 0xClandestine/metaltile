@@ -37,6 +37,41 @@ pub struct DispatchResult {
     pub outputs: BTreeMap<String, Vec<u8>>,
 }
 
+impl DispatchResult {
+    /// Borrow the raw bytes of an output buffer by parameter name.
+    ///
+    /// Returns `None` if no output with that name was produced. Prefer this
+    /// over indexing `outputs` directly so callers don't panic on a typo'd
+    /// or absent name.
+    pub fn output(&self, name: &str) -> Option<&[u8]> { self.outputs.get(name).map(Vec::as_slice) }
+
+    /// Read an output buffer as little-endian `f32` values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the named output is absent. Interprets the bytes as
+    /// 4-byte `f32`; for half-precision outputs use [`output`](Self::output)
+    /// plus a dtype-aware unpack helper instead.
+    pub fn output_f32(&self, name: &str) -> Result<Vec<f32>, MetalTileError> {
+        let bytes = self
+            .output(name)
+            .ok_or_else(|| MetalTileError::Dispatch(format!("output '{name}' not found")))?;
+        Ok(bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+    }
+
+    /// Read an output buffer as little-endian `u32` values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the named output is absent.
+    pub fn output_u32(&self, name: &str) -> Result<Vec<u32>, MetalTileError> {
+        let bytes = self
+            .output(name)
+            .ok_or_else(|| MetalTileError::Dispatch(format!("output '{name}' not found")))?;
+        Ok(bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+    }
+}
+
 pub struct Context {
     tuner: Autotuner,
     has_metal: bool,
@@ -539,26 +574,45 @@ impl Context {
             }
         };
 
-        let alloc_buf = |data: Option<&[u8]>, len: usize| -> Result<_, MetalTileError> {
-            let len = len.max(4);
-            if let Some(bytes) = data.filter(|bytes| !bytes.is_empty()) {
-                if bytes.len() < len {
-                    return Err(MetalTileError::Buffer(format!(
-                        "buffer allocation expected {len} bytes but received {}",
-                        bytes.len()
-                    )));
-                }
+        // `required` is the param's true byte size; `alloc_len` adds Metal's
+        // minimum-allocation floor. Keeping them distinct lets a buffer smaller
+        // than the floor — e.g. a 2-byte f16/bf16 `constant T&` scalar — bind
+        // correctly: we still reject genuine under-provisioning (`< required`),
+        // but zero-pad a legitimately-small buffer up to the floor so the GPU's
+        // read stays in bounds (the kernel only reads its declared element).
+        let alloc_buf = |data: Option<&[u8]>, required: usize| -> Result<_, MetalTileError> {
+            let alloc_len = required.max(4);
+            let make = |ptr: NonNull<std::ffi::c_void>| {
                 unsafe {
                     dev.newBufferWithBytes_length_options(
-                        NonNull::new(bytes.as_ptr() as *mut _)
-                            .ok_or_else(|| MetalTileError::Buffer("null data pointer".into()))?,
-                        len,
+                        ptr,
+                        alloc_len,
                         MTLResourceOptions::StorageModeShared,
                     )
                 }
                 .ok_or(MetalTileError::NoDevice)
+            };
+            if let Some(bytes) = data.filter(|bytes| !bytes.is_empty()) {
+                if bytes.len() < required {
+                    return Err(MetalTileError::Buffer(format!(
+                        "buffer allocation expected {required} bytes but received {}",
+                        bytes.len()
+                    )));
+                }
+                if bytes.len() >= alloc_len {
+                    let ptr = NonNull::new(bytes.as_ptr() as *mut _)
+                        .ok_or_else(|| MetalTileError::Buffer("null data pointer".into()))?;
+                    make(ptr)
+                } else {
+                    // bytes.len() ∈ [required, alloc_len): pad up to the floor.
+                    let mut padded = bytes.to_vec();
+                    padded.resize(alloc_len, 0);
+                    let ptr = NonNull::new(padded.as_ptr() as *mut _)
+                        .ok_or_else(|| MetalTileError::Buffer("null data pointer".into()))?;
+                    make(ptr)
+                }
             } else {
-                dev.newBufferWithLength_options(len, MTLResourceOptions::StorageModeShared)
+                dev.newBufferWithLength_options(alloc_len, MTLResourceOptions::StorageModeShared)
                     .ok_or(MetalTileError::NoDevice)
             }
         };
@@ -1149,6 +1203,41 @@ mod tests {
     use metaltile_core::{dtype::DType, shape::Shape};
 
     use super::*;
+
+    fn sample_result() -> DispatchResult {
+        let mut outputs = BTreeMap::new();
+        // 1.0f32 then 2.0f32, little-endian.
+        outputs.insert("out".to_string(), vec![0, 0, 128, 63, 0, 0, 0, 64]);
+        DispatchResult { elapsed_us: 0.0, gflops: 0.0, outputs }
+    }
+
+    #[test]
+    fn dispatch_result_output_borrows_raw_bytes() {
+        let r = sample_result();
+        assert_eq!(r.output("out").unwrap().len(), 8);
+        assert!(r.output("missing").is_none());
+    }
+
+    #[test]
+    fn dispatch_result_output_f32_decodes_le() {
+        let r = sample_result();
+        assert_eq!(r.output_f32("out").unwrap(), vec![1.0f32, 2.0]);
+    }
+
+    #[test]
+    fn dispatch_result_output_u32_decodes_le() {
+        let mut outputs = BTreeMap::new();
+        outputs.insert("c".to_string(), vec![1, 0, 0, 0, 255, 255, 255, 255]);
+        let r = DispatchResult { elapsed_us: 0.0, gflops: 0.0, outputs };
+        assert_eq!(r.output_u32("c").unwrap(), vec![1u32, u32::MAX]);
+    }
+
+    #[test]
+    fn dispatch_result_accessors_error_on_missing_name() {
+        let r = sample_result();
+        assert!(r.output_f32("nope").is_err());
+        assert!(r.output_u32("nope").is_err());
+    }
 
     fn tensor_param(
         name: &str,

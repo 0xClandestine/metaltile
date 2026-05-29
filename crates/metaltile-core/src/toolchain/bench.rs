@@ -390,6 +390,12 @@ pub struct KernelBenchEntry {
 impl KernelBenchEntry {
     /// Wrap a `KernelBench` impl for inventory submission.
     pub const fn new(inner: &'static dyn KernelBench) -> Self { KernelBenchEntry { inner } }
+
+    /// The wrapped `KernelBench` with its `'static` lifetime preserved.
+    ///
+    /// Unlike `AsRef`, this returns the stored `&'static` reference by copy,
+    /// so callers (e.g. a runner) can hold it independently of the entry borrow.
+    pub fn bench(&self) -> &'static dyn KernelBench { self.inner }
 }
 
 impl AsRef<dyn KernelBench + 'static> for KernelBenchEntry {

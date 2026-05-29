@@ -32,8 +32,11 @@ use crate::{
     spec::{BatchedDecodeVariant, BenchDispatch, BenchSpec, MlxArg, ScalarBufSpec, ShapeSpec},
 };
 
-pub fn run(spec: &BenchSpec, runner: &GpuRunner, dt: DType) -> Vec<OpResult> {
-    let bench = OpBench::new(spec.op, "GB/s");
+/// Run a legacy `BenchSpec`. `legacy` tags the rows "(legacy)" when this
+/// kernel has also been ported to a new `#[bench]`, so old and new are
+/// visually distinct in the same `tile bench` table during migration.
+pub fn run(spec: &BenchSpec, runner: &GpuRunner, dt: DType, legacy: bool) -> Vec<OpResult> {
+    let bench = OpBench::new(spec.op, "GB/s").legacy(legacy);
     match &spec.dispatch {
         BenchDispatch::Generic => run_generic(spec, runner, dt, &bench),
         BenchDispatch::Sort { b, n, tpg } => run_sort(spec, runner, dt, &bench, *b, *n, *tpg),
