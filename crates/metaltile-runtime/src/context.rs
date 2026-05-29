@@ -21,13 +21,13 @@ use std::collections::BTreeMap;
 
 use metaltile_core::ir::Kernel;
 
-use crate::{device::gpu_family::GpuFamily, error::MetalTileError};
 #[cfg(target_os = "macos")]
 use crate::{
     cache::pso_cache::pso_cache_key,
     device::metal_device::MetalDevice,
     dispatch::{chain_dispatch::ChainDispatch, single_dispatch::SingleDispatch},
 };
+use crate::{device::gpu_family::GpuFamily, error::MetalTileError};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -194,9 +194,13 @@ impl Context {
     /// True when a Metal GPU is available.
     pub fn has_gpu(&self) -> bool {
         #[cfg(target_os = "macos")]
-        { self.device.is_some() }
+        {
+            self.device.is_some()
+        }
         #[cfg(not(target_os = "macos"))]
-        { false }
+        {
+            false
+        }
     }
 
     /// The GPU family classifier.
@@ -396,48 +400,18 @@ impl Context {
 
 #[cfg(test)]
 mod tests {
+    use metaltile_core::{DType, Dim, Param, Shape, ir::ParamKind};
+
     use super::*;
-    use metaltile_core::{DType, Dim, Param, Shape};
-    use metaltile_core::ir::ParamKind;
-    use crate::cache::pso_cache::{FNV_OFFSET, fnv1a_extend, pso_cache_key};
-    use crate::dispatch::buffer_plan::{
-        ParamBufferPlan, build_param_buffer_plans, encode_u32s, resolve_strided_metadata,
+    use crate::{
+        cache::pso_cache::{FNV_OFFSET, fnv1a_extend, pso_cache_key},
+        dispatch::buffer_plan::{
+            ParamBufferPlan,
+            build_param_buffer_plans,
+            encode_u32s,
+            resolve_strided_metadata,
+        },
     };
-
-    fn sample_result() -> DispatchResult {
-        let mut outputs = BTreeMap::new();
-        // 1.0f32 then 2.0f32, little-endian.
-        outputs.insert("out".to_string(), vec![0, 0, 128, 63, 0, 0, 0, 64]);
-        DispatchResult { elapsed_us: 0.0, gflops: 0.0, outputs }
-    }
-
-    #[test]
-    fn dispatch_result_output_borrows_raw_bytes() {
-        let r = sample_result();
-        assert_eq!(r.output("out").unwrap().len(), 8);
-        assert!(r.output("missing").is_none());
-    }
-
-    #[test]
-    fn dispatch_result_output_f32_decodes_le() {
-        let r = sample_result();
-        assert_eq!(r.output_f32("out").unwrap(), vec![1.0f32, 2.0]);
-    }
-
-    #[test]
-    fn dispatch_result_output_u32_decodes_le() {
-        let mut outputs = BTreeMap::new();
-        outputs.insert("c".to_string(), vec![1, 0, 0, 0, 255, 255, 255, 255]);
-        let r = DispatchResult { elapsed_us: 0.0, gflops: 0.0, outputs };
-        assert_eq!(r.output_u32("c").unwrap(), vec![1u32, u32::MAX]);
-    }
-
-    #[test]
-    fn dispatch_result_accessors_error_on_missing_name() {
-        let r = sample_result();
-        assert!(r.output_f32("nope").is_err());
-        assert!(r.output_u32("nope").is_err());
-    }
 
     fn sample_result() -> DispatchResult {
         let mut outputs = BTreeMap::new();
