@@ -295,8 +295,7 @@ pub(crate) fn expand_kernel(attr: TokenStream, item: TokenStream) -> TokenStream
 mod tests {
     use syn::parse_quote;
 
-    use super::*;
-    use crate::legacy::sig_parser::extract_constexprs;
+    use super::{sig_parser::extract_constexprs, *};
 
     #[test]
     fn mutable_tensor_outputs_override_legacy_name_heuristics() {

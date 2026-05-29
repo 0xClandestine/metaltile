@@ -20,23 +20,6 @@ pub mod shape;
 pub mod tile_config;
 pub mod utils;
 
-pub use bench::{
-    BenchBuffer,
-    BenchSetup,
-    ConstValue,
-    Gbps,
-    Grid,
-    KernelBench,
-    KernelBenchEntry,
-    KernelTest,
-    KernelTestEntry,
-    MetalRef,
-    Microseconds,
-    TestBuffer,
-    TestSetup,
-    all_benches,
-    all_tests,
-};
 pub use constexpr::ConstExpr;
 pub use dtype::DType;
 pub use error::{Error, Result};

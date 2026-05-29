@@ -108,8 +108,8 @@ impl ProtocolMessage {
     }
 
     /// Parse a JSON line from a byte slice.
-    pub fn from_json_line(data: &[u8]) -> Result<Self, serde_json::Error> {
-        serde_json::from_slice(data)
+    pub fn from_json_line(data: &[u8]) -> crate::Result<Self> {
+        serde_json::from_slice(data).map_err(|e| crate::Error::Internal(e.to_string()))
     }
 }
 

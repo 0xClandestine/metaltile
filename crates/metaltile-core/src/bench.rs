@@ -7,25 +7,16 @@
 //! The types are:
 //! - [`BenchBuffer`] — describes a GPU buffer (size, dtype, initialisation)
 //! - [`TestBuffer`] — describes a CPU-side buffer with concrete data
-//! - [`BenchSetup`] — complete bench configuration (kernel + buffers + dispatch)
-//! - [`TestSetup`] — complete test configuration
-//! - [`ConstValue`] — a compile-time constant forwarded to the kernel
-//! - [`Grid`] — dispatch dimensions (threadgroups × threads-per-group)
-//! - [`MetalRef`] — reference implementation for comparison
-//! - [`Gbps`] / [`Microseconds`] — newtype wrappers for domain clarity
-//! - [`KernelBench`] — trait for benchmark definitions
-//! - [`KernelTest`] — trait for test definitions
-//! - [`KernelBenchEntry`] / [`KernelTestEntry`] — inventory wrappers
+//! - [`BenchSetup`] — complete benchmark configuration for one kernel × dtype
+//! - [`TestSetup`] — complete correctness test configuration
+//! - [`KernelBench`] / [`KernelTest`] — traits implemented by `#[bench]` / `#[test_kernel]`
+//! - [`KernelBenchEntry`] / [`KernelTestEntry`] — inventory wrappers for discovery
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
 use crate::{dtype::DType, ir::Kernel};
-
-// ---------------------------------------------------------------------------
-// Newtypes
-// ---------------------------------------------------------------------------
 
 /// Throughput in gigabytes per second.
 ///
@@ -46,10 +37,6 @@ pub struct Microseconds(pub f64);
 impl fmt::Display for Microseconds {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{:.1} µs", self.0) }
 }
-
-// ---------------------------------------------------------------------------
-// ConstValue
-// ---------------------------------------------------------------------------
 
 /// A compile-time constant value forwarded to a kernel at dispatch time.
 ///
@@ -105,14 +92,7 @@ impl From<usize> for ConstValue {
     fn from(v: usize) -> Self { ConstValue::Usize(v) }
 }
 
-// ---------------------------------------------------------------------------
-// Grid
-// ---------------------------------------------------------------------------
-
 /// Dispatch dimensions for a kernel launch.
-///
-/// Composed of a grid size (number of threadgroups in each axis) and
-/// threads-per-group (threads in each axis within a threadgroup).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Grid {
     /// Threadgroups per grid axis (x, y, z).
@@ -123,8 +103,6 @@ pub struct Grid {
 
 impl Grid {
     /// Create a 1D grid from total elements and threads-per-group.
-    ///
-    /// The grid x-dimension is `ceil(n / tpg)`, y=1, z=1.
     pub fn new_1d(n: usize, tpg: u32) -> Self {
         let grid_x = (n as u32).div_ceil(tpg);
         Grid { grid: [grid_x, 1, 1], tpg: [tpg, 1, 1] }
@@ -149,25 +127,13 @@ impl fmt::Display for Grid {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Buffer initialisation strategy
-// ---------------------------------------------------------------------------
-
 /// How a GPU buffer should be initialised before running a benchmark.
 #[derive(Debug, Clone)]
-pub(crate) enum BufferInit {
-    /// Fill with random data.
+enum BufferInit {
     Random,
-    /// Fill with zeros.
     Zeros,
-    /// Use the provided byte data.
-    #[allow(dead_code)]
     FromVec(Vec<u8>),
 }
-
-// ---------------------------------------------------------------------------
-// BenchBuffer
-// ---------------------------------------------------------------------------
 
 /// Describes a GPU buffer for a benchmark run.
 ///
@@ -184,12 +150,11 @@ pub(crate) enum BufferInit {
 /// ```
 #[derive(Debug, Clone)]
 pub struct BenchBuffer {
-    pub(crate) name: String,
-    pub(crate) len: usize,
-    pub(crate) dtype: DType,
-    pub(crate) is_output: bool,
-    #[allow(dead_code)]
-    pub(crate) init: BufferInit,
+    name: String,
+    len: usize,
+    dtype: DType,
+    is_output: bool,
+    init: BufferInit,
 }
 
 impl BenchBuffer {
@@ -228,9 +193,6 @@ impl BenchBuffer {
     }
 
     /// Mark this buffer as an output slot.
-    ///
-    /// Output buffers are writable and their content is read back after
-    /// dispatch for correctness checking or bandwidth measurement.
     pub fn output(mut self) -> Self {
         self.is_output = true;
         self
@@ -255,9 +217,6 @@ impl BenchBuffer {
     pub fn size_bytes(&self) -> u64 { (self.len * self.dtype.size_bytes()) as u64 }
 
     /// Allocate and fill the initial byte content for this buffer.
-    ///
-    /// Callers (e.g. the runner) use this instead of inspecting `init` directly,
-    /// keeping the initialisation strategy encapsulated in this crate.
     pub fn initial_bytes(&self) -> Vec<u8> {
         let n = self.size_bytes() as usize;
         match &self.init {
@@ -267,10 +226,6 @@ impl BenchBuffer {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// TestBuffer
-// ---------------------------------------------------------------------------
 
 /// Describes a CPU-side buffer used as input or expected output in correctness tests.
 ///
@@ -284,17 +239,15 @@ impl BenchBuffer {
 /// ```
 #[derive(Debug, Clone)]
 pub struct TestBuffer {
-    pub(crate) name: String,
-    pub(crate) data: Vec<u8>,
-    pub(crate) dtype: DType,
+    name: String,
+    data: Vec<u8>,
+    dtype: DType,
 }
 
 impl TestBuffer {
     /// Create a test buffer filled with random data.
     pub fn random(name: &str, len: usize, dtype: DType) -> Self {
-        use crate::utils;
-        let byte_count = len * dtype.size_bytes();
-        let data = utils::random_bytes(byte_count);
+        let data = crate::utils::random_bytes(len * dtype.size_bytes());
         TestBuffer { name: name.to_string(), data, dtype }
     }
 
@@ -303,40 +256,39 @@ impl TestBuffer {
         TestBuffer { name: name.to_string(), data, dtype }
     }
 
-    /// Map each element (interpreted as f32) through a CPU function,
-    /// producing a new `TestBuffer` with the same name and dtype.
-    ///
-    /// This is the primary mechanism for computing expected outputs from
-    /// inputs: read the input buffer as f32 values, apply a pure function,
-    /// and produce the expected output buffer.
+    /// Map each element (interpreted as f32) through a CPU function.
     ///
     /// # Panics
     ///
-    /// Panics if the buffer's element size is not 4 bytes (f32-compatible dtypes
-    /// only: F32, I32, U32). Use [`map_raw`](Self::map_raw) for other dtypes.
+    /// Panics if the buffer's element size is not 4 bytes (f32/i32/u32 only).
+    /// Use [`map_raw`](Self::map_raw) for other dtypes.
     pub fn map_f32<F>(&self, f: F) -> Self
     where F: Fn(f32) -> f32 {
-        assert_eq!(self.dtype.size_bytes(), 4, "map_f32 requires 4-byte dtype");
-        let elements: Vec<f32> = self
+        assert_eq!(
+            self.dtype.size_bytes(),
+            4,
+            "map_f32 requires 4-byte dtype, but buffer '{}' has {:?}",
+            self.name,
+            self.dtype
+        );
+        let out_bytes: Vec<u8> = self
             .data
             .chunks_exact(4)
-            .map(|chunk| {
+            .flat_map(|chunk| {
                 let val = f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                f(val)
+                f(val).to_ne_bytes()
             })
             .collect();
-        let out_bytes: Vec<u8> = elements.iter().flat_map(|v| v.to_ne_bytes()).collect();
         TestBuffer { name: self.name.clone(), data: out_bytes, dtype: self.dtype }
     }
 
     /// Map bytes through a raw function (for non-f32 dtypes).
     pub fn map_raw<F>(&self, f: F) -> Self
     where F: Fn(&[u8]) -> Vec<u8> {
-        let out_data = f(&self.data);
-        TestBuffer { name: self.name.clone(), data: out_data, dtype: self.dtype }
+        TestBuffer { name: self.name.clone(), data: f(&self.data), dtype: self.dtype }
     }
 
-    /// Rename this buffer (e.g., from "input" to "out" when computing expected output).
+    /// Rename this buffer.
     pub fn rename(mut self, name: &str) -> Self {
         self.name = name.to_string();
         self
@@ -358,226 +310,168 @@ impl TestBuffer {
     pub fn is_empty(&self) -> bool { self.data.is_empty() }
 }
 
-// ---------------------------------------------------------------------------
-// MetalRef
-// ---------------------------------------------------------------------------
-
-/// Describes a reference Metal kernel implementation for bandwidth comparison.
+/// A reference Metal kernel to benchmark or compare against a MetalTile kernel.
 ///
-/// When provided, the runner compiles the reference `.metal` file, dispatches
-/// it with the same inputs, and compares GB/s and correctness.
-#[derive(Debug, Clone)]
-pub struct MetalRef {
-    /// Path to the `.metal` source file, relative to the project root.
-    pub metal_file: &'static str,
-    /// Kernel function name inside the metal file.
-    pub function: &'static str,
-    /// Constexpr values to pass to the reference kernel.
-    pub constexprs: Vec<(String, ConstValue)>,
-}
-
-// ---------------------------------------------------------------------------
-// BenchSetup
-// ---------------------------------------------------------------------------
-
-/// Complete benchmark configuration for a single kernel/dtype combination.
-///
-/// Built via a consuming builder pattern — fields are private.
-///
-/// # Examples
-///
-/// ```rust
-/// use metaltile_core::bench::{BenchSetup, BenchBuffer, Grid};
-/// use metaltile_core::DType;
-/// use metaltile_core::ir::Kernel;
-///
-/// // BenchSetup requires a Kernel -- shown here with a placeholder.
-/// // In real usage it comes from `my_kernel::kernel_ir_for(dt)`:
-/// // BenchSetup::new(kernel).buffer(BenchBuffer::random("input", 64 << 20, DType::F32))
-/// //     .buffer(BenchBuffer::zeros("out", 64 << 20, DType::F32).output())
-/// //     .grid_1d(64 << 20, 256)
-/// ```
-#[derive(Debug, Clone)]
-pub struct BenchSetup {
-    pub(crate) kernel: Kernel,
-    pub(crate) buffers: Vec<BenchBuffer>,
-    pub(crate) constexprs: Vec<(String, ConstValue)>,
-    pub(crate) grid: Grid,
-    pub(crate) bytes_moved: Option<u64>,
-    /// Optional reference Metal kernel timed live alongside the main kernel.
-    /// The runner reads the `.metal` source from the path configured in
-    /// `tile.toml` `[bench] reference_metal_path` and compiles + dispatches
-    /// it, populating `BenchResult::ref_gbps` / `mt_pct` from real GPU
-    /// measurements.
-    pub(crate) ref_kernel: Option<RefKernel>,
-}
-
-/// A reference Metal kernel to benchmark alongside a MetalTile kernel.
-///
-/// The `.metal` source is **not** embedded here — it is loaded at bench time
-/// from the directory specified by `[bench] reference_metal_path` in
-/// `tile.toml`.  This keeps kernel files small and lets different projects
-/// point at their own reference implementations.
+/// Used in both `BenchSetup::with_reference` and `KernelBench::reference_kernel`.
+/// The `.metal` source is loaded at bench time from the directory specified by
+/// `[bench] reference_metal_path` in `tile.toml`.
 #[derive(Debug, Clone)]
 pub struct RefKernel {
     /// The Metal kernel function name to dispatch, e.g. `"vvn_expfloat32"`.
     pub fn_name: String,
     /// Path to the `.metal` source file, relative to `reference_metal_path`.
-    /// For MLX kernels this is typically just the filename, e.g. `"unary.metal"`.
     pub metal_file: String,
-    /// Buffers for the reference kernel.  Bound **positionally** — index 0
-    /// maps to `[[buffer(0)]]`, index 1 to `[[buffer(1)]]`, etc.  Order must
-    /// match the Metal function's argument list.
+    /// Buffers bound positionally (`[[buffer(0)]]`, `[[buffer(1)]]`, etc.).
     pub buffers: Vec<BenchBuffer>,
     /// Dispatch grid for the reference kernel.
     pub grid: Grid,
 }
 
+/// Complete benchmark configuration for a single kernel/dtype combination.
+///
+/// Built via a consuming builder pattern. Call `build()` to finalise —
+/// it returns an error if no grid was set.
+///
+/// # Examples
+///
+/// ```rust
+/// use metaltile_core::bench::{BenchBuffer, BenchSetup};
+/// use metaltile_core::ir::Kernel;
+/// use metaltile_core::DType;
+///
+/// let setup = BenchSetup::new(Kernel::new("k"))
+///     .buffer(BenchBuffer::random("in", 1024, DType::F32))
+///     .buffer(BenchBuffer::zeros("out", 1024, DType::F32).output())
+///     .grid_1d(1024, 256)
+///     .build()
+///     .unwrap();
+/// ```
+#[derive(Debug, Clone)]
+pub struct BenchSetup {
+    kernel: Kernel,
+    buffers: Vec<BenchBuffer>,
+    constexprs: Vec<(String, ConstValue)>,
+    grid: Option<Grid>,
+    bytes_moved: Option<u64>,
+    ref_kernel: Option<RefKernel>,
+}
+
 impl BenchSetup {
-    /// Create a new `BenchSetup` for the given kernel IR.
-    ///
-    /// The grid defaults to a 1×1×1 / 1×1×1 dispatch — you **must** call
-    /// one of the `grid_*` methods before using the setup.
+    /// Create a new `BenchSetup` builder for the given kernel IR.
     pub fn new(kernel: Kernel) -> Self {
         BenchSetup {
             kernel,
             buffers: Vec::new(),
             constexprs: Vec::new(),
-            grid: Grid { grid: [1, 1, 1], tpg: [1, 1, 1] },
+            grid: None,
             bytes_moved: None,
             ref_kernel: None,
         }
     }
 
-    /// Add a GPU buffer to the benchmark.
+    /// Add a GPU buffer.
     pub fn buffer(mut self, b: BenchBuffer) -> Self {
         self.buffers.push(b);
         self
     }
 
-    /// Add a compile-time constant value for the kernel.
+    /// Add a compile-time constant.
     pub fn constexpr(mut self, name: &str, v: impl Into<ConstValue>) -> Self {
         self.constexprs.push((name.to_string(), v.into()));
         self
     }
 
-    /// Set a 1D grid: `ceil(n / tpg)` threadgroups × `tpg` threads.
+    /// Set a 1D grid.
     pub fn grid_1d(mut self, n: usize, tpg: u32) -> Self {
-        self.grid = Grid::new_1d(n, tpg);
+        self.grid = Some(Grid::new_1d(n, tpg));
         self
     }
 
     /// Set a 2D grid.
     pub fn grid_2d(mut self, x: u32, y: u32, tpg: [u32; 2]) -> Self {
-        self.grid = Grid::new_2d(x, y, tpg);
+        self.grid = Some(Grid::new_2d(x, y, tpg));
         self
     }
 
     /// Set a 3D grid.
     pub fn grid_3d(mut self, x: u32, y: u32, z: u32, tpg: [u32; 3]) -> Self {
-        self.grid = Grid::new_3d(x, y, z, tpg);
+        self.grid = Some(Grid::new_3d(x, y, z, tpg));
         self
     }
 
-    /// Override the bytes-moved figure used for bandwidth computation.
-    ///
-    /// If not set, defaults to the sum of all buffer sizes.
+    /// Override the bytes-moved figure for bandwidth computation.
     pub fn bytes_moved(mut self, bytes: u64) -> Self {
         self.bytes_moved = Some(bytes);
         self
     }
 
-    /// Attach a reference Metal kernel to benchmark alongside this kernel.
-    ///
-    /// The runner loads `ref.metal_file` from the directory set by
-    /// `[bench] reference_metal_path` in `tile.toml`, compiles it, and
-    /// dispatches `ref.fn_name` with the same warmup/timed-iteration
-    /// parameters as the main kernel.  The minimum observed time feeds
-    /// `BenchResult::ref_gbps`; `mt_pct` is `(mt / ref − 1) × 100`.
-    ///
-    /// If `tile.toml` has no `reference_metal_path` the reference timing is
-    /// silently skipped and `ref_gbps` stays `None`.
+    /// Attach a reference Metal kernel.
     pub fn with_reference(mut self, ref_kernel: RefKernel) -> Self {
         self.ref_kernel = Some(ref_kernel);
         self
     }
 
+    /// Finalise the builder. Returns an error if no grid was set.
+    pub fn build(self) -> crate::Result<BenchSetup> {
+        if self.grid.is_none() {
+            return Err(crate::Error::Internal(
+                "BenchSetup missing grid — call grid_1d(), grid_2d(), or grid_3d()".into(),
+            ));
+        }
+        Ok(self)
+    }
+
     /// The kernel IR for this benchmark.
     pub fn kernel(&self) -> &Kernel { &self.kernel }
 
-    /// The buffers to allocate for this benchmark.
+    /// The buffers to allocate.
     pub fn buffers(&self) -> &[BenchBuffer] { &self.buffers }
 
-    /// Returns a mutable reference to the buffer list.
-    pub fn buffers_mut(&mut self) -> &mut Vec<BenchBuffer> { &mut self.buffers }
-
-    /// Dispatch grid and threads-per-group.
-    pub fn grid(&self) -> &Grid { &self.grid }
+    /// Dispatch grid. Panics if `build()` was not called.
+    pub fn grid(&self) -> &Grid {
+        self.grid.as_ref().expect("BenchSetup grid accessed before build()")
+    }
 
     /// Constexpr values for the kernel.
     pub fn constexprs(&self) -> &[(String, ConstValue)] { &self.constexprs }
 
-    /// Compute the total bytes moved for bandwidth calculation.
-    ///
-    /// If `bytes_moved` was explicitly set, returns that; otherwise
-    /// returns the sum of all buffer sizes.
+    /// Total bytes moved for bandwidth calculation.
     pub fn compute_bytes_moved(&self) -> u64 {
         self.bytes_moved.unwrap_or_else(|| self.buffers.iter().map(|b| b.size_bytes()).sum())
     }
 
-    /// Look up a buffer's byte size by name.
+    /// Byte size of a named buffer, or 0 if not found.
     pub fn buffer_bytes(&self, name: &str) -> u64 {
         self.buffers.iter().find(|b| b.name == name).map(|b| b.size_bytes()).unwrap_or(0)
     }
 
-    /// Optional reference Metal kernel (set via [`with_reference`](Self::with_reference)).
+    /// Optional reference Metal kernel.
     pub fn ref_kernel(&self) -> Option<&RefKernel> { self.ref_kernel.as_ref() }
 }
 
-// ---------------------------------------------------------------------------
-// TestSetup
-// ---------------------------------------------------------------------------
-
 /// Complete test configuration for verifying kernel correctness.
 ///
-/// Built via a consuming builder pattern — fields are private.
-///
-/// # Examples
-///
-/// ```rust
-/// use metaltile_core::bench::{TestSetup, TestBuffer};
-/// use metaltile_core::DType;
-///
-/// // TestSetup requires a Kernel -- shown here as a conceptual example:
-/// // TestSetup::new(kernel)
-/// //     .input(TestBuffer::random("input", 1024, DType::F32))
-/// //     .expected(TestBuffer::random("out", 1024, DType::F32))
-/// //     .grid_1d(1024, 256)
-/// ```
+/// Built via a consuming builder pattern. Call `build()` to finalise —
+/// it returns an error if no grid was set.
 #[derive(Debug, Clone)]
 pub struct TestSetup {
-    pub(crate) kernel: Kernel,
-    pub(crate) inputs: Vec<TestBuffer>,
-    pub(crate) expected: Vec<TestBuffer>,
-    pub(crate) constexprs: Vec<(String, ConstValue)>,
-    pub(crate) grid: Grid,
-    /// When set, the runner dispatches this reference setup first and uses its
-    /// output buffers as the expected values for the main kernel.
-    pub(crate) ref_setup: Option<Box<TestSetup>>,
+    kernel: Kernel,
+    inputs: Vec<TestBuffer>,
+    expected: Vec<TestBuffer>,
+    constexprs: Vec<(String, ConstValue)>,
+    grid: Option<Grid>,
+    ref_setup: Option<Box<TestSetup>>,
 }
 
 impl TestSetup {
-    /// Create a new `TestSetup` for the given kernel IR.
-    ///
-    /// The grid defaults to a 1×1×1 / 1×1×1 dispatch — you **must** call
-    /// one of the `grid_*` methods before using the setup.
+    /// Create a new `TestSetup` builder for the given kernel IR.
     pub fn new(kernel: Kernel) -> Self {
         TestSetup {
             kernel,
             inputs: Vec::new(),
             expected: Vec::new(),
             constexprs: Vec::new(),
-            grid: Grid { grid: [1, 1, 1], tpg: [1, 1, 1] },
+            grid: None,
             ref_setup: None,
         }
     }
@@ -594,40 +488,44 @@ impl TestSetup {
         self
     }
 
-    /// Add a compile-time constant value for the kernel.
+    /// Add a compile-time constant.
     pub fn constexpr(mut self, name: &str, v: impl Into<ConstValue>) -> Self {
         self.constexprs.push((name.to_string(), v.into()));
         self
     }
 
-    /// Set a 1D grid: `ceil(n / tpg)` threadgroups × `tpg` threads.
+    /// Set a 1D grid.
     pub fn grid_1d(mut self, n: usize, tpg: u32) -> Self {
-        self.grid = Grid::new_1d(n, tpg);
+        self.grid = Some(Grid::new_1d(n, tpg));
         self
     }
 
     /// Set a 2D grid.
     pub fn grid_2d(mut self, x: u32, y: u32, tpg: [u32; 2]) -> Self {
-        self.grid = Grid::new_2d(x, y, tpg);
+        self.grid = Some(Grid::new_2d(x, y, tpg));
         self
     }
 
     /// Set a 3D grid.
     pub fn grid_3d(mut self, x: u32, y: u32, z: u32, tpg: [u32; 3]) -> Self {
-        self.grid = Grid::new_3d(x, y, z, tpg);
+        self.grid = Some(Grid::new_3d(x, y, z, tpg));
         self
     }
 
-    /// Set a GPU-vs-GPU reference setup.
-    ///
-    /// When provided, the runner dispatches `ref_setup` first and uses its
-    /// output buffers as the expected values for the main kernel — no CPU
-    /// oracle needed.  The reference setup should use `.input()` for all its
-    /// buffers (including the output buffer, zeroed); `.expect()` is not used
-    /// on either setup when `compare_against` is set.
+    /// Set a GPU-vs-GPU reference setup (no CPU oracle needed).
     pub fn compare_against(mut self, ref_setup: TestSetup) -> Self {
         self.ref_setup = Some(Box::new(ref_setup));
         self
+    }
+
+    /// Finalise the builder. Returns an error if no grid was set.
+    pub fn build(self) -> crate::Result<TestSetup> {
+        if self.grid.is_none() {
+            return Err(crate::Error::Internal(
+                "TestSetup missing grid — call grid_1d(), grid_2d(), or grid_3d()".into(),
+            ));
+        }
+        Ok(self)
     }
 
     /// The kernel IR for this test.
@@ -639,31 +537,21 @@ impl TestSetup {
     /// Expected output buffers.
     pub fn expected(&self) -> &[TestBuffer] { &self.expected }
 
-    /// Dispatch grid.
-    pub fn grid(&self) -> &Grid { &self.grid }
+    /// Dispatch grid. Panics if `build()` was not called.
+    pub fn grid(&self) -> &Grid {
+        self.grid.as_ref().expect("TestSetup grid accessed before build()")
+    }
 
     /// Constexpr values.
     pub fn constexprs(&self) -> &[(String, ConstValue)] { &self.constexprs }
 
-    /// Optional GPU-vs-GPU reference setup (set via [`compare_against`](Self::compare_against)).
+    /// Optional GPU-vs-GPU reference setup.
     pub fn ref_setup(&self) -> Option<&TestSetup> { self.ref_setup.as_deref() }
 }
 
-// ---------------------------------------------------------------------------
-// KernelBench trait
-// ---------------------------------------------------------------------------
-
 /// Trait for benchmark definitions.
 ///
-/// Implement this directly (or use the `#[bench]` macro) to describe how a
-/// kernel should be benchmarked.  The runner discovers impls via the
-/// [`KernelBenchEntry`] inventory.
-///
-/// # Note for kernel authors
-///
-/// Prefer using the `#[bench]` macro over implementing this trait directly.
-/// Implement it directly only when you need dynamic dispatch, shared setup
-/// logic across many dtypes, or other complexity the macro form can't express.
+/// Prefer the `#[bench]` macro over implementing this directly.
 pub trait KernelBench: Send + Sync {
     /// Unique benchmark name (e.g. `"unary/exp"`).
     fn name(&self) -> &str;
@@ -674,25 +562,16 @@ pub trait KernelBench: Send + Sync {
     /// Build the `BenchSetup` for a specific dtype.
     fn setup(&self, dt: DType) -> BenchSetup;
 
-    /// Optional reference Metal kernel for comparison.
-    fn metal_reference(&self) -> Option<MetalRef> { None }
+    /// Optional reference Metal kernel for live comparison.
+    fn reference_kernel(&self) -> Option<RefKernel> { None }
 
-    /// Compute the bytes-moved figure for bandwidth calculation.
-    ///
-    /// The default sums all buffer sizes. Override when the kernel's
-    /// true bandwidth differs (e.g. read-only inputs counted once).
+    /// Bytes moved for bandwidth calculation (default: sum of all buffer sizes).
     fn bytes_moved(&self, setup: &BenchSetup) -> u64 { setup.compute_bytes_moved() }
 }
 
-// ---------------------------------------------------------------------------
-// KernelTest trait
-// ---------------------------------------------------------------------------
-
 /// Trait for correctness test definitions.
 ///
-/// Implement this directly (or use the `#[test_kernel]` macro) to describe
-/// how a kernel's correctness should be verified.  The runner discovers
-/// impls via the [`KernelTestEntry`] inventory.
+/// Prefer the `#[test_kernel]` macro over implementing this directly.
 pub trait KernelTest: Send + Sync {
     /// Unique test name (e.g. `"unary/exp"`).
     fn name(&self) -> &str;
@@ -707,13 +586,7 @@ pub trait KernelTest: Send + Sync {
     fn tolerance(&self, _dt: DType) -> f64 { 1e-4 }
 }
 
-// ---------------------------------------------------------------------------
-// Inventory wrappers
-// ---------------------------------------------------------------------------
-
 /// Inventory wrapper for a [`KernelBench`] implementation.
-///
-/// Submitted to the inventory by `register_bench!` or the `#[bench]` macro.
 pub struct KernelBenchEntry {
     pub(crate) inner: &'static dyn KernelBench,
 }
@@ -730,8 +603,6 @@ impl AsRef<dyn KernelBench + 'static> for KernelBenchEntry {
 inventory::collect!(KernelBenchEntry);
 
 /// Inventory wrapper for a [`KernelTest`] implementation.
-///
-/// Submitted to the inventory by `register_test!` or the `#[test_kernel]` macro.
 pub struct KernelTestEntry {
     pub(crate) inner: &'static dyn KernelTest,
 }
@@ -746,10 +617,6 @@ impl AsRef<dyn KernelTest + 'static> for KernelTestEntry {
 }
 
 inventory::collect!(KernelTestEntry);
-
-// ---------------------------------------------------------------------------
-// Helper: collect registered benchmarks/tests
-// ---------------------------------------------------------------------------
 
 /// Return an iterator over all registered `KernelBench` impls.
 pub fn all_benches() -> impl Iterator<Item = &'static KernelBenchEntry> {
@@ -786,25 +653,42 @@ mod tests {
 
     #[test]
     fn bench_setup_consuming_builder() {
-        let kernel = Kernel::new("test_kernel");
-        let setup = BenchSetup::new(kernel)
+        let setup = BenchSetup::new(Kernel::new("k"))
             .buffer(BenchBuffer::random("in", 64, DType::F32))
             .buffer(BenchBuffer::zeros("out", 64, DType::F32).output())
             .constexpr("n", 64u32)
-            .grid_1d(64, 16);
+            .grid_1d(64, 16)
+            .build()
+            .unwrap();
 
-        assert_eq!(setup.buffers.len(), 2);
-        assert_eq!(setup.constexprs.len(), 1);
-        assert_eq!(setup.grid.grid[0], 4); // ceil(64/16) = 4
-        assert_eq!(setup.grid.tpg[0], 16);
+        assert_eq!(setup.buffers().len(), 2);
+        assert_eq!(setup.constexprs().len(), 1);
+        assert_eq!(setup.grid().grid[0], 4);
+        assert_eq!(setup.grid().tpg[0], 16);
     }
 
     #[test]
-    fn test_buffer_random_and_map_f32() {
+    fn bench_setup_build_requires_grid() {
+        let err = BenchSetup::new(Kernel::new("k"))
+            .buffer(BenchBuffer::random("in", 64, DType::F32))
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("missing grid"));
+    }
+
+    #[test]
+    fn test_setup_build_requires_grid() {
+        let err = TestSetup::new(Kernel::new("k"))
+            .input(TestBuffer::random("x", 64, DType::F32))
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("missing grid"));
+    }
+
+    #[test]
+    fn test_buffer_map_f32() {
         let input = TestBuffer::random("input", 100, DType::F32);
         assert_eq!(input.len(), 100);
-        assert_eq!(input.name(), "input");
-
         let expected = input.map_f32(|x| x * 2.0).rename("out");
         assert_eq!(expected.name(), "out");
         assert_eq!(expected.len(), 100);
@@ -813,7 +697,7 @@ mod tests {
     #[test]
     fn grid_1d_computes_correctly() {
         let g = Grid::new_1d(1000, 256);
-        assert_eq!(g.grid[0], 4); // ceil(1000/256) = 4
+        assert_eq!(g.grid[0], 4);
         assert_eq!(g.grid[1], 1);
         assert_eq!(g.grid[2], 1);
         assert_eq!(g.tpg[0], 256);
@@ -823,9 +707,6 @@ mod tests {
     fn grid_display() {
         let g = Grid::new_2d(8, 4, [16, 8]);
         let s = format!("{g}");
-        assert!(s.contains("8"));
-        assert!(s.contains("4"));
-        assert!(s.contains("16"));
-        assert!(s.contains("8"));
+        assert!(s.contains("8") && s.contains("4") && s.contains("16"));
     }
 }

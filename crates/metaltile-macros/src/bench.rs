@@ -97,6 +97,15 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let bench_attr = syn::parse_macro_input!(attr as BenchAttr);
     let input_fn = syn::parse_macro_input!(item as ItemFn);
 
+    if input_fn.sig.inputs.len() != 1 {
+        return syn::Error::new_spanned(
+            &input_fn.sig,
+            "#[bench] setup function must take exactly one argument: `dt: DType`",
+        )
+        .into_compile_error()
+        .into();
+    }
+
     let fn_name = &input_fn.sig.ident;
     let fn_name_str = fn_name.to_string();
     // Private impl struct — unique per function name within the module.
@@ -120,9 +129,9 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let metal_ref_impl: TokenStream2 = match &bench_attr.metal_ref {
         Some(expr) => quote! {
-            fn metal_reference(
+            fn reference_kernel(
                 &self,
-            ) -> ::std::option::Option<::metaltile::core::bench::MetalRef> {
+            ) -> ::std::option::Option<::metaltile::core::bench::RefKernel> {
                 ::std::option::Option::Some(#expr)
             }
         },

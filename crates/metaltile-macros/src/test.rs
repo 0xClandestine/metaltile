@@ -21,6 +21,8 @@ enum Tolerance {
 
 /// Parsed arguments for the `#[test_kernel]` attribute.
 struct TestAttr {
+    /// Optional explicit test name; if absent the function name is used.
+    name: Option<syn::LitStr>,
     /// Data types to test, e.g. `[f32, f16, bf16]`.
     dtypes: Vec<Ident>,
     /// Element-wise tolerance override (default: `1e-4`).
@@ -115,14 +117,9 @@ fn validate_tolerance(dtypes: &[Ident], tol: &Tolerance) -> syn::Result<()> {
 }
 
 fn dtype_match_token(dtype: &Ident) -> syn::Result<TokenStream2> {
-    match dtype.to_string().as_str() {
-        "f32" => Ok(quote! { ::metaltile::core::DType::F32 }),
-        "f16" => Ok(quote! { ::metaltile::core::DType::F16 }),
-        "bf16" => Ok(quote! { ::metaltile::core::DType::BF16 }),
-        "i32" => Ok(quote! { ::metaltile::core::DType::I32 }),
-        "u32" => Ok(quote! { ::metaltile::core::DType::U32 }),
-        "i8" => Ok(quote! { ::metaltile::core::DType::I8 }),
-        "u8" => Ok(quote! { ::metaltile::core::DType::U8 }),
+    let s = dtype.to_string();
+    match s.as_str() {
+        "f32" | "f16" | "bf16" | "i32" | "u32" | "i8" | "u8" => Ok(dtype_token(&s)),
         other =>
             Err(syn::Error::new(dtype.span(), format!("unknown dtype `{other}` in tol table"))),
     }
@@ -130,6 +127,7 @@ fn dtype_match_token(dtype: &Ident) -> syn::Result<TokenStream2> {
 
 impl syn::parse::Parse for TestAttr {
     fn parse(input: ParseStream) -> syn::Result<Self> {
+        let mut name = None;
         let mut dtypes = None;
         let mut tol = None;
 
@@ -137,7 +135,9 @@ impl syn::parse::Parse for TestAttr {
             let key: Ident = input.parse()?;
             input.parse::<Token![=]>()?;
 
-            if key == "dtypes" {
+            if key == "name" {
+                name = Some(input.parse::<syn::LitStr>()?);
+            } else if key == "dtypes" {
                 let content;
                 syn::bracketed!(content in input);
                 let list = content.parse_terminated(Ident::parse, Token![,])?;
@@ -147,7 +147,7 @@ impl syn::parse::Parse for TestAttr {
             } else {
                 return Err(syn::Error::new(
                     key.span(),
-                    format!("unknown #[test_kernel] key `{key}` — valid keys: dtypes, tol"),
+                    format!("unknown #[test_kernel] key `{key}` — valid keys: name, dtypes, tol"),
                 ));
             }
 
@@ -157,6 +157,7 @@ impl syn::parse::Parse for TestAttr {
         }
 
         let attr = TestAttr {
+            name,
             dtypes: dtypes.ok_or_else(|| {
                 syn::Error::new(
                     proc_macro2::Span::call_site(),
@@ -177,12 +178,22 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let test_attr = syn::parse_macro_input!(attr as TestAttr);
     let input_fn = syn::parse_macro_input!(item as ItemFn);
 
+    if input_fn.sig.inputs.len() != 1 {
+        return syn::Error::new_spanned(
+            &input_fn.sig,
+            "#[test_kernel] setup function must take exactly one argument: `dt: DType`",
+        )
+        .into_compile_error()
+        .into();
+    }
+
     let fn_name = &input_fn.sig.ident;
     let fn_name_str = fn_name.to_string();
     // Private impl struct — unique per function name within the module.
     let impl_name = syn::Ident::new(&format!("__TestImpl_{fn_name_str}"), fn_name.span());
 
-    let name_lit = syn::LitStr::new(&fn_name_str, fn_name.span());
+    // Use explicit name if given, otherwise fall back to the function name.
+    let name_lit = test_attr.name.unwrap_or_else(|| syn::LitStr::new(&fn_name_str, fn_name.span()));
     let dtype_tokens: Vec<TokenStream2> =
         test_attr.dtypes.iter().map(|id| dtype_token(&id.to_string())).collect();
 
