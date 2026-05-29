@@ -396,13 +396,6 @@ impl AsRef<dyn KernelBench + 'static> for KernelBenchEntry {
     fn as_ref(&self) -> &(dyn KernelBench + 'static) { self.inner }
 }
 
-inventory::collect!(KernelBenchEntry);
-
-/// Return an iterator over all registered `KernelBench` impls.
-pub fn all_benches() -> impl Iterator<Item = &'static KernelBenchEntry> {
-    inventory::iter::<KernelBenchEntry>.into_iter()
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

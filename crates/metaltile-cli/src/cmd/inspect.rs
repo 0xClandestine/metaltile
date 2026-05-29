@@ -17,7 +17,7 @@ use std::{collections::BTreeMap, str::FromStr};
 use metaltile_codegen::generator_for_mode;
 use metaltile_std::{
     bench_types::DType,
-    spec::{BenchSpec, effective_mode},
+    spec::{BenchSpec, all_specs, effective_mode},
 };
 
 use crate::{
@@ -47,7 +47,7 @@ pub fn run(args: &InspectArgs) -> Result<(), CliError> {
 
     // Collect all specs and group by kernel_name.
     let mut kernels: BTreeMap<&str, (&BenchSpec, Vec<DType>)> = BTreeMap::new();
-    for spec in inventory::iter::<BenchSpec> {
+    for spec in all_specs() {
         let entry = kernels.entry(spec.kernel_name).or_insert_with(|| (spec, Vec::new()));
         for &dt in spec.dtypes {
             if !entry.1.contains(&dt) {

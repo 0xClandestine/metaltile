@@ -220,12 +220,6 @@ impl AsRef<dyn KernelTest + 'static> for KernelTestEntry {
     fn as_ref(&self) -> &(dyn KernelTest + 'static) { self.inner }
 }
 
-inventory::collect!(KernelTestEntry);
-
-/// Return an iterator over all registered `KernelTest` impls.
-pub fn all_tests() -> impl Iterator<Item = &'static KernelTestEntry> {
-    inventory::iter::<KernelTestEntry>.into_iter()
-}
 
 // ---------------------------------------------------------------------------
 // Tests

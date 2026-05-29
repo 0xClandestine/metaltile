@@ -11,7 +11,6 @@
 pub mod dsl;
 pub mod error;
 pub mod ir;
-pub mod kernel_registry;
 pub mod toolchain;
 
 /// Backward-compat re-export: `metaltile_core::bench` still works.
@@ -48,4 +47,4 @@ pub use ir::{
     ValueId,
     VarId,
 };
-pub use kernel_registry::KernelEntry;
+pub use toolchain::registry::{KernelEntry, all_benches, all_kernels, all_tests};

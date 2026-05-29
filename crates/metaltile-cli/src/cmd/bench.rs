@@ -12,7 +12,7 @@ use metaltile_std::{
     bench_types::{CorrectnessStatus, OpResult, set_result_reporter, validate_results},
     run_spec::run as run_spec,
     runner::GpuRunner,
-    spec::BenchSpec,
+    spec::{BenchSpec, all_specs},
 };
 use serde_json::Value;
 
@@ -116,7 +116,7 @@ pub fn run(args: &BenchArgs) -> Result<(), crate::CliError> {
 
         // All ops — inventory-registered via #[kernel(bench(...))]
         {
-            let mut specs: Vec<&BenchSpec> = inventory::iter::<BenchSpec>.into_iter().collect();
+            let mut specs: Vec<&BenchSpec> = all_specs().collect();
             specs.sort_unstable_by_key(|s| (s.op, s.subop));
             for spec in specs {
                 if matches_filter(filter.as_deref(), spec.op) {
@@ -483,7 +483,7 @@ fn pct_style(pct: f64) -> Style {
 fn compute_profiles(filter: Option<&str>) -> HashMap<(String, String), ProfileRow> {
     // Key: (op_display, dtype_label), e.g. ("unary (acos)", "f32")
     let mut map = HashMap::new();
-    let mut specs: Vec<&BenchSpec> = inventory::iter::<BenchSpec>.into_iter().collect();
+    let mut specs: Vec<&BenchSpec> = all_specs().collect();
     specs.sort_unstable_by_key(|s| (s.op, s.subop));
     for spec in specs {
         if !matches_filter(filter, spec.op) {

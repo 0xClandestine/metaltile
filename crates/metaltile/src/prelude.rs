@@ -69,7 +69,7 @@ pub use metaltile_core::ir::UnaryOpKind;
 /// You only need this when registering a kernel for use as an inlined callee via the
 /// `inventory::collect!` mechanism. For ordinary `#[kernel]` definitions this is handled
 /// automatically by the macro.
-pub use metaltile_core::kernel_registry::KernelEntry;
+pub use metaltile_core::KernelEntry;
 /// Shape-building helpers.
 pub use metaltile_core::shape::Dim;
 /// Build a 2D tile shape at runtime: `make_tile(rows, cols) -> Shape`.

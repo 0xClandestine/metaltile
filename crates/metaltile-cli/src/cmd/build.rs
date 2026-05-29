@@ -33,7 +33,7 @@ use metaltile_codegen::{
 use metaltile_core::ir::Kernel;
 use metaltile_std::{
     bench_types::DType,
-    spec::{BenchSpec, effective_mode},
+    spec::{BenchSpec, all_specs, effective_mode},
 };
 
 use crate::{
@@ -101,7 +101,7 @@ pub fn run(args: &BuildArgs) -> Result<(), CliError> {
 
     // Collect unique kernel specs.
     let mut kernels: BTreeMap<&str, (&BenchSpec, Vec<DType>)> = BTreeMap::new();
-    for spec in inventory::iter::<BenchSpec> {
+    for spec in all_specs() {
         let entry = kernels.entry(spec.kernel_name).or_insert_with(|| (spec, Vec::new()));
         for &dt in spec.dtypes {
             if !entry.1.contains(&dt) {
@@ -497,7 +497,7 @@ fn run_time_passes(filter: Option<&str>, dtypes_arg: Option<&str>) -> Result<(),
     let dtypes_filter: Option<Vec<DType>> =
         dtypes_arg.map(|s| s.split(',').filter_map(|t| t.trim().parse::<DType>().ok()).collect());
 
-    let kernels: Vec<_> = inventory::iter::<BenchSpec>()
+    let kernels: Vec<_> = all_specs()
         .filter(|s| matches_filter(filter, s.kernel_name))
         .flat_map(|s| {
             s.dtypes
@@ -582,7 +582,7 @@ mod tests {
     /// flags applied. Used only by tests to verify the full kernel corpus.
     fn collect_all_kernels() -> Vec<Kernel> {
         let mut by_name: BTreeMap<&str, (&BenchSpec, Vec<DType>)> = BTreeMap::new();
-        for spec in inventory::iter::<BenchSpec> {
+        for spec in all_specs() {
             let entry = by_name.entry(spec.kernel_name).or_insert_with(|| (spec, Vec::new()));
             for &dt in spec.dtypes {
                 if !entry.1.contains(&dt) {

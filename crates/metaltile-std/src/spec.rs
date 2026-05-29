@@ -480,6 +480,11 @@ pub struct BenchSpec {
 
 inventory::collect!(BenchSpec);
 
+/// Iterate all registered [`BenchSpec`] entries.
+pub fn all_specs() -> impl Iterator<Item = &'static BenchSpec> {
+    inventory::iter::<BenchSpec>.into_iter()
+}
+
 // ── Standard bytes formulas ──────────────────────────────────────────────
 
 pub fn bytes_elementwise(n: usize, _b: usize, reads: usize, _out: usize, eb: usize) -> usize {
