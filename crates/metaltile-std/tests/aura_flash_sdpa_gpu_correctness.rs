@@ -131,14 +131,16 @@ fn run(
     let kpw = (dim * 4).div_ceil(32);
     let vpw = (dim * 2).div_ceil(32);
     let mut b: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    b.insert("q_rot".into(), pack_bytes(q_rot, Dt::F32));
+    // q_rot / norms / codebooks / sinks are Tensor<T> (genericized in the
+    // #212 supersede) — upload them in the kernel's dtype, not always f32.
+    b.insert("q_rot".into(), pack_bytes(q_rot, dt));
     b.insert("key_packed".into(), pack_u32_bytes(key_packed));
-    b.insert("key_norms".into(), pack_bytes(key_norms, Dt::F32));
-    b.insert("key_codebook".into(), pack_bytes(key_cb, Dt::F32));
+    b.insert("key_norms".into(), pack_bytes(key_norms, dt));
+    b.insert("key_codebook".into(), pack_bytes(key_cb, dt));
     b.insert("val_packed".into(), pack_u32_bytes(val_packed));
-    b.insert("val_norms".into(), pack_bytes(val_norms, Dt::F32));
-    b.insert("val_codebook".into(), pack_bytes(val_cb, Dt::F32));
-    b.insert("sinks".into(), pack_bytes(sinks, Dt::F32));
+    b.insert("val_norms".into(), pack_bytes(val_norms, dt));
+    b.insert("val_codebook".into(), pack_bytes(val_cb, dt));
+    b.insert("sinks".into(), pack_bytes(sinks, dt));
     b.insert("out".into(), pack_bytes(&vec![0.0_f32; q_heads * dim], dt));
     for (k, v) in [
         ("dim", dim as u32),
@@ -205,15 +207,27 @@ fn check(dt: Dt, has_sinks: bool, window: usize, tol: f32) {
     let _g = gpu_lock();
     let (q_heads, kv_heads, tokens, dim) = (2usize, 1usize, 8usize, 128usize);
     let f = fixture(q_heads, kv_heads, tokens, dim);
+    // The kernel loads the Tensor<T> operands rounded to `dt` then casts to
+    // f32; round the oracle's copies the same way so the comparison is fair
+    // at f16/bf16 (identity at f32).
+    let rd = |v: &[f32]| unpack_bytes(&pack_bytes(v, dt), dt);
+    let (q_rot_r, key_norms_r, val_norms_r, key_cb_r, val_cb_r, sinks_r) = (
+        rd(&f.q_rot),
+        rd(&f.key_norms),
+        rd(&f.val_norms),
+        rd(&f.key_cb),
+        rd(&f.val_cb),
+        rd(&f.sinks),
+    );
     let expected = naive(
-        &f.q_rot,
+        &q_rot_r,
         &f.key_idx,
         &f.val_idx,
-        &f.key_norms,
-        &f.val_norms,
-        &f.key_cb,
-        &f.val_cb,
-        &f.sinks,
+        &key_norms_r,
+        &val_norms_r,
+        &key_cb_r,
+        &val_cb_r,
+        &sinks_r,
         q_heads,
         kv_heads,
         tokens,
