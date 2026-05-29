@@ -217,7 +217,13 @@ aura_encode_kernel!(aura_encode_int8, 8u32, 256u32, "encode_int8");
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    use super::{aura_encode_int2, aura_encode_int3, aura_encode_int4, aura_encode_int8};
+    use super::{
+        aura_encode_int2,
+        aura_encode_int3,
+        aura_encode_int4,
+        aura_encode_int6,
+        aura_encode_int8,
+    };
 
     fn setup(s: BenchSetup, dim: usize, bits: usize, rows: usize, dt: DType) -> BenchSetup {
         let packed_width = (dim * bits).div_ceil(32);
@@ -249,6 +255,11 @@ pub mod kernel_benches {
     #[bench(name = "ffai/aura_encode_int4", dtypes = [f32, f16, bf16])]
     fn bench_int4(dt: DType) -> BenchSetup {
         setup(BenchSetup::new(aura_encode_int4::kernel_ir_for(dt)), 128, 4, 256, dt)
+    }
+
+    #[bench(name = "ffai/aura_encode_int6", dtypes = [f32, f16, bf16])]
+    fn bench_int6(dt: DType) -> BenchSetup {
+        setup(BenchSetup::new(aura_encode_int6::kernel_ir_for(dt)), 128, 6, 256, dt)
     }
 
     #[bench(name = "ffai/aura_encode_int8", dtypes = [f32, f16, bf16])]
