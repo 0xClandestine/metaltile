@@ -25,10 +25,8 @@ kernel void aura_flash_p1_kb4_vb2_d128(
     constant uint &repeat_count [[buffer(15)]],
     constant uint &num_blocks [[buffer(16)]],
     constant uint &block_size [[buffer(17)]],
-    constant uint &q_position [[buffer(18)]],
-    uint3 gid [[thread_position_in_grid]],
-    uint simd_lane [[thread_index_in_simdgroup]],
-    uint simd_group [[simdgroup_index_in_threadgroup]]
+    [[maybe_unused]] constant uint &q_position [[buffer(18)]],
+    uint3 gid [[thread_position_in_grid]]
 ) {
     float key_cb[16];
     float val_cb[4];
@@ -40,39 +38,24 @@ kernel void aura_flash_p1_kb4_vb2_d128(
     uint v_block_idx = gid.z;
     auto v3 = repeat_count;
     auto v_kv_idx = v_q_idx / v3;
-    uint v5 = 1u;
-    uint v6 = 4u;
-    uint v7 = 16u;
     uint v8 = 1u;
+    uint v7 = 16u;
     auto v_key_mask = v7 - v8;
-    uint v10 = 1u;
-    uint v11 = 2u;
-    uint v12 = 4u;
     uint v13 = 1u;
+    uint v12 = 4u;
     auto v_val_mask = v12 - v13;
     auto v15 = block_size;
     auto v16 = v_block_idx * v15;
     auto v_raw_end = v16 + v15;
     auto v18 = tokens;
-    auto v_clamped_end = select(v_raw_end, v18, bool((v_raw_end > v18)));
-    uint v21 = 0u;
-    uint v22 = 1u;
-    auto v23 = v21 == v22;
-    auto v24 = q_position;
-    uint v25 = 1u;
-    auto v26 = v24 + v25;
-    auto v28 = v_clamped_end > v_clamped_end;
+    uint v33 = 1u;
     uint v31 = 0u;
     uint v32 = 16u;
-    uint v33 = 1u;
     for (uint i_0 = v31; i_0 < v32; i_0 += v33) {
         auto v34 = key_codebook[i_0];
         float v35 = static_cast<float>(v34);
         key_cb[i_0] = v35;
     }
-    uint v36 = 0u;
-    uint v37 = 4u;
-    uint v38 = 1u;
     uint v1073741832 = 0u;
     auto v1073741833 = val_codebook[v1073741832];
     float v1073741834 = static_cast<float>(v1073741833);
@@ -89,9 +72,6 @@ kernel void aura_flash_p1_kb4_vb2_d128(
     auto v1073741842 = val_codebook[v1073741841];
     float v1073741843 = static_cast<float>(v1073741842);
     val_cb[v1073741841] = v1073741843;
-    uint v41 = 0u;
-    uint v42 = 4u;
-    uint v43 = 1u;
     uint v44 = 32u;
     uint v1073741844 = 0u;
     auto v1073741845 = v1073741844 * v44;
@@ -137,9 +117,6 @@ kernel void aura_flash_p1_kb4_vb2_d128(
     auto __ml_m_acc = v55;
     auto v56 = 0.0f;
     auto __ml_l_acc = v56;
-    uint v57 = 0u;
-    uint v58 = 4u;
-    uint v59 = 1u;
     uint v1073741880 = 0u;
     auto v1073741881 = 0.0f;
     o[v1073741880] = v1073741881;
@@ -152,7 +129,6 @@ kernel void aura_flash_p1_kb4_vb2_d128(
     uint v1073741886 = 3u;
     auto v1073741887 = 0.0f;
     o[v1073741886] = v1073741887;
-    uint v61 = 1u;
     uint v72 = 0u;
     uint v73 = 4u;
     uint v74 = 1u;
@@ -161,6 +137,8 @@ kernel void aura_flash_p1_kb4_vb2_d128(
     uint v143 = 4u;
     uint v144 = 1u;
     uint v145 = 32u;
+    auto v_clamped_end = select(v_raw_end, v18, bool((v_raw_end > v18)));
+    uint v61 = 1u;
     for (uint i_4 = v16; i_4 < v_clamped_end; i_4 += v61) {
         auto v62 = kv_stride;
         auto v63 = v_kv_idx * v62;
@@ -280,12 +258,9 @@ kernel void aura_flash_p1_kb4_vb2_d128(
         __ml_m_acc = v_new_m;
     }
     auto v196 = num_blocks;
-    auto v198 = ((v_q_idx * v196) + v_block_idx);
     auto v199 = dim;
+    auto v198 = ((v_q_idx * v196) + v_block_idx);
     auto v_partial_base = v198 * v199;
-    uint v201 = 0u;
-    uint v202 = 4u;
-    uint v203 = 1u;
     uint v204 = 32u;
     uint v1073741888 = 0u;
     auto v1073741889 = v1073741888 * v204;

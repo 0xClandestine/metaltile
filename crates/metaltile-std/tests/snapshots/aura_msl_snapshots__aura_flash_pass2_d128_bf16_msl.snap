@@ -14,19 +14,14 @@ kernel void aura_flash_pass2_d128(
     constant uint &dim [[buffer(4)]],
     constant uint &num_blocks [[buffer(5)]],
     uint3 _tid3  [[thread_position_in_threadgroup]],
-    uint3 _tgid3 [[threadgroup_position_in_grid]],
-    uint3 _lsize3 [[threads_per_threadgroup]]
+    uint3 _tgid3 [[threadgroup_position_in_grid]]
 ) {
     uint tid    = _tid3.x;
     uint tgid_x = _tgid3.x;
-    uint lsize  = _lsize3.x;
     float o[4];
 
     auto v_lane = tid;
     auto v_q_idx = tgid_x;
-    uint v2 = 0u;
-    uint v3 = 4u;
-    uint v4 = 1u;
     uint v1073741828 = 0u;
     auto v1073741829 = 0.0f;
     o[v1073741828] = v1073741829;
@@ -43,10 +38,10 @@ kernel void aura_flash_pass2_d128(
     auto __ml_m_acc = v6;
     auto v7 = 0.0f;
     auto __ml_l_acc = v7;
-    uint v8 = 0u;
     auto v9 = num_blocks;
-    uint v10 = 1u;
     auto v11 = v_q_idx * v9;
+    uint v8 = 0u;
+    uint v10 = 1u;
     for (uint i_1 = v8; i_1 < v9; i_1 += v10) {
         auto v_ml_idx = v11 + i_1;
         auto v13 = m_partials[v_ml_idx];
@@ -68,9 +63,6 @@ kernel void aura_flash_pass2_d128(
             auto v29 = ((v_q_idx * v9) + i_1);
             auto v_partial_base = v29 * v30;
             uint v35 = 32u;
-            uint v32 = 0u;
-            uint v33 = 4u;
-            uint v34 = 1u;
             uint v1073741868 = 0u;
             auto v1073741869 = v1073741868 * v35;
             auto v1073741870 = v_lane + v1073741869;
@@ -128,15 +120,12 @@ kernel void aura_flash_pass2_d128(
     }
     auto v50 = __ml_l_acc;
     auto v51 = 0.0f;
-    auto v52 = v50 > v51;
     auto v53 = 1.0f;
     auto v54 = __ml_l_acc;
-    auto v55 = v53 / v54;
     auto v56 = 0.0f;
+    auto v52 = v50 > v51;
+    auto v55 = v53 / v54;
     auto v_inv_l = bool(v52) ? v55 : v56;
-    uint v58 = 0u;
-    uint v59 = 4u;
-    uint v60 = 1u;
     uint v61 = 32u;
     uint v1073741836 = 0u;
     auto v1073741837 = v1073741836 * v61;

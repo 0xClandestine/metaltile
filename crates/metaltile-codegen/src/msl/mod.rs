@@ -61,6 +61,178 @@ fn kernel_uses_program_id_axis(kernel: &Kernel, axis: u32) -> bool {
     check(&kernel.body.ops) || kernel.blocks.values().any(|b| check(&b.ops))
 }
 
+/// Return `true` if the kernel directly reads the named scalar identifier
+/// — i.e. it has an `Op::Load { src: name, indices: [] }` somewhere. This
+/// is how the DSL parser lowers a bare identifier read (`let x = tid;` →
+/// `Op::Load { src: "tid", indices: [] }`).
+fn kernel_uses_identifier(kernel: &Kernel, name: &str) -> bool {
+    let check = |ops: &[Op]| {
+        ops.iter().any(|op| op.load_src() == Some(name) && op.load_indices().is_empty())
+    };
+    check(&kernel.body.ops) || kernel.blocks.values().any(|b| check(&b.ops))
+}
+
+/// Return `true` if `name` is referenced anywhere in the kernel IR as a
+/// load source, store destination, or other named target.  Used to
+/// decide whether a kernel-signature parameter would be flagged
+/// `-Wunused-parameter` at the MSL `metal -W` stage — DSL authors
+/// commonly declare constexpr / scalar params for documentation or
+/// runtime-assert hooks even when the kernel body doesn't consult
+/// them, and the body parser keeps those decls on the kernel
+/// signature for ABI consistency.
+fn kernel_references_param(kernel: &Kernel, name: &str) -> bool {
+    let op_refs = |op: &Op| -> bool {
+        if op.load_src() == Some(name) || op.store_dst() == Some(name) {
+            return true;
+        }
+        // Threadgroup / stack / local ops use a `name` field instead of
+        // `src` / `dst` (e.g. `threadgroup_store("xs", …)`).
+        if match op {
+            Op::ThreadgroupAlloc { name: n, .. }
+            | Op::ThreadgroupStore { name: n, .. }
+            | Op::ThreadgroupLoad { name: n, .. }
+            | Op::StackAlloc { name: n, .. }
+            | Op::StackStore { name: n, .. }
+            | Op::StackLoad { name: n, .. }
+            | Op::DeclareLocal { name: n, .. }
+            | Op::SetLocal { name: n, .. } => n == name,
+            _ => false,
+        } {
+            return true;
+        }
+        // FusedElementwise chains can hide inner Loads — recurse into
+        // the sub-op vector.
+        if let Op::FusedElementwise { ops } = op {
+            for inner in ops {
+                if inner.load_src() == Some(name) {
+                    return true;
+                }
+            }
+        }
+        false
+    };
+    for block in kernel.iter_blocks() {
+        if block.ops.iter().any(op_refs) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Return `true` if the kernel contains any `Op::StrideReduce`.  In
+/// `Reduction` / `Tile2D` modes the emitter lowers `StrideReduce` to a
+/// vectorized loop that references `tid` and `lsize` (see the `has_tid`
+/// branch of the `Op::StrideReduce` arm in `emit_block.rs`).  Outside
+/// those modes the lowering is a plain serial loop and references
+/// neither — but `Reduction` is the only mode whose preamble is gated
+/// by these predicates, so we can use the unqualified "is any
+/// StrideReduce present" check and let the mode guard at the call site
+/// do the rest.
+fn kernel_has_stride_reduce(kernel: &Kernel) -> bool {
+    let check = |ops: &[Op]| ops.iter().any(|op| matches!(op, Op::StrideReduce { .. }));
+    check(&kernel.body.ops) || kernel.blocks.values().any(|b| check(&b.ops))
+}
+
+/// Return `true` if the kernel contains any `Op::Reduce` with kind
+/// `Mean`.  `lsize` is referenced in the reduce emit ONLY for the Mean
+/// kind: the final step divides the simdgroup/threadgroup total by
+/// `float(lsize)` in both the fast and slow paths (see `reduce.rs`).
+/// Other reduce kinds (Sum/Max/Min/Product) lower to a bare
+/// `simd_*(value)` / `__mt_simd_product(value)` call with no `lsize`
+/// reference.
+fn kernel_has_reduce_mean(kernel: &Kernel) -> bool {
+    let check = |ops: &[Op]| {
+        ops.iter()
+            .any(|op| matches!(op, Op::Reduce { op: metaltile_core::ir::ReduceKind::Mean, .. }))
+    };
+    check(&kernel.body.ops) || kernel.blocks.values().any(|b| check(&b.ops))
+}
+
+/// Return `true` if any `Op::Reduce` in the kernel will go through the
+/// two-level threadgroup reduction path that references `n_simd`.  That
+/// path fires for `axis == 0` in `Reduction` / `Tile2D` mode when
+/// `expected_tpg` is `None` or greater than the simd width — see
+/// `MslGenerator::emit_reduce` in `reduce.rs`.
+pub(super) fn kernel_reduce_uses_n_simd(kernel: &Kernel, config: &MslConfig) -> bool {
+    let tg_modes = matches!(
+        kernel.mode,
+        metaltile_core::ir::KernelMode::Reduction | metaltile_core::ir::KernelMode::Tile2D
+    );
+    if !tg_modes {
+        return false;
+    }
+    // Slow path fires unless we statically know TPG fits in one simdgroup.
+    let single_simdgroup = matches!(config.expected_tpg, Some(t) if t <= config.simd_size);
+    if single_simdgroup {
+        return false;
+    }
+    let has_axis0_reduce =
+        |ops: &[Op]| ops.iter().any(|op| matches!(op, Op::Reduce { axis: 0, .. }));
+    has_axis0_reduce(&kernel.body.ops) || kernel.blocks.values().any(|b| has_axis0_reduce(&b.ops))
+}
+
+/// Precomputed flags for Reduction-mode signature + preamble emission.
+/// Each field is `true` when the corresponding MSL identifier
+/// (`tid`/`tgid_x`/`lsize`/`n_simd`) has a real consumer in the emitted
+/// MSL — both the kernel-parameter attribute AND the preamble alias
+/// gate on the same value so the signature and body stay in sync.
+/// Pre-fix, the signature unconditionally declared `_tid3`/`_tgid3`/
+/// `_lsize3` and the preamble unconditionally emitted their aliases —
+/// any kernel that didn't use them produced `-Wunused-parameter` (on
+/// the attr) AND `-Wunused-variable` (on the alias).  Gating both off
+/// the same predicate eliminates both.
+struct ReductionPreambleGates {
+    needs_tid: bool,
+    needs_tgid_x: bool,
+    needs_tgid_y: bool,
+    needs_tgid_z: bool,
+    needs_lsize: bool,
+    needs_n_simd: bool,
+}
+
+impl ReductionPreambleGates {
+    fn compute(kernel: &Kernel, config: &MslConfig) -> Self {
+        let has_stride_reduce = kernel_has_stride_reduce(kernel);
+        let has_reduce_mean = kernel_has_reduce_mean(kernel);
+        let needs_n_simd =
+            kernel_reduce_uses_n_simd(kernel, config) || kernel_uses_identifier(kernel, "n_simd");
+        let needs_lsize = has_stride_reduce
+            || has_reduce_mean
+            || needs_n_simd
+            || kernel_uses_identifier(kernel, "lsize");
+        let needs_tid = has_stride_reduce || kernel_uses_identifier(kernel, "tid");
+        Self {
+            needs_tid,
+            needs_tgid_x: kernel_uses_program_id_axis(kernel, 0),
+            needs_tgid_y: kernel_uses_program_id_axis(kernel, 1),
+            needs_tgid_z: kernel_uses_program_id_axis(kernel, 2),
+            needs_lsize,
+            needs_n_simd,
+        }
+    }
+
+    /// `_tid3` kernel-attr parameter (`uint3 _tid3
+    /// [[thread_position_in_threadgroup]]`) is consumed only by
+    /// `tid = _tid3.x`.
+    fn needs_tid3_attr(&self) -> bool { self.needs_tid }
+
+    /// `_tgid3` is consumed by `tgid_x` / `tgid_y` / `tgid_z` aliases.
+    fn needs_tgid3_attr(&self) -> bool {
+        self.needs_tgid_x || self.needs_tgid_y || self.needs_tgid_z
+    }
+
+    /// `_lsize3` is consumed by `lsize = _lsize3.x` (and `n_simd` via
+    /// `lsize / 32u`).
+    fn needs_lsize3_attr(&self) -> bool { self.needs_lsize }
+}
+
+// Signature gating for `uint simd_lane [[thread_index_in_simdgroup]]`
+// and `uint simd_group [[simdgroup_index_in_threadgroup]]` lives on
+// `KernelFeatures::needs_simd_lane` / `needs_simd_group` (see
+// `features.rs`).  Pre-#209/4 hand-rolled `kernel_needs_simd_*_attr`
+// predicates duplicated the work; the OpFlag layer now reflects actual
+// MSL identifier consumption directly.
+
 // ---------------------------------------------------------------------------
 // Generator
 // ---------------------------------------------------------------------------
@@ -146,14 +318,29 @@ impl MslGenerator {
 
         write!(out, "kernel void {}(", kernel.name).unwrap();
 
+        // `[[maybe_unused]]` attribute decoration: DSL authors commonly
+        // declare constexpr / scalar / tensor params for documentation
+        // or runtime-assert hooks even when the kernel body never
+        // reads them.  Without this attribute the Metal compiler
+        // flags the param under `-Wunused-parameter`.  Detect at
+        // signature time by scanning the post-pipeline IR for any
+        // reference to the param's name (Load/Store/Threadgroup/Stack/
+        // Local ops — see `kernel_references_param`).
+        let attr_for = |name: &str| -> &'static str {
+            if kernel_references_param(kernel, name) { "" } else { "[[maybe_unused]] " }
+        };
+
         // Tensor/Strided/Scalar params.
         for p in &kernel.params {
+            // Output params are always referenced by the Store at the
+            // end of the kernel body — never mark `[[maybe_unused]]`.
+            let attr = if p.is_output { "" } else { attr_for(&p.name) };
             match p.kind {
                 ParamKind::Tensor => {
                     let q = if p.is_output { "device " } else { "const device " };
                     write!(
                         out,
-                        "\n    {q}{} *{} [[buffer({buf_idx})]],",
+                        "\n    {attr}{q}{} *{} [[buffer({buf_idx})]],",
                         self.msl_type_name(p.dtype),
                         p.name
                     )
@@ -164,23 +351,37 @@ impl MslGenerator {
                     let q = if p.is_output { "device " } else { "const device " };
                     write!(
                         out,
-                        "\n    {q}{} *{} [[buffer({buf_idx})]],",
+                        "\n    {attr}{q}{} *{} [[buffer({buf_idx})]],",
                         self.msl_type_name(p.dtype),
                         p.name
                     )
                     .unwrap();
                     buf_idx += 1;
-                    write!(out, "\n    constant uint *{}_shape [[buffer({buf_idx})]],", p.name)
-                        .unwrap();
+                    // The `_shape` / `_strides` companion buffers are
+                    // referenced via `Op::Load { src: "{name}_shape" }`
+                    // etc. at index-emission time.  Each gets its own
+                    // referenced-by-name check.
+                    let shape_attr = attr_for(&format!("{}_shape", p.name));
+                    let strides_attr = attr_for(&format!("{}_strides", p.name));
+                    write!(
+                        out,
+                        "\n    {shape_attr}constant uint *{}_shape [[buffer({buf_idx})]],",
+                        p.name
+                    )
+                    .unwrap();
                     buf_idx += 1;
-                    write!(out, "\n    constant uint *{}_strides [[buffer({buf_idx})]],", p.name)
-                        .unwrap();
+                    write!(
+                        out,
+                        "\n    {strides_attr}constant uint *{}_strides [[buffer({buf_idx})]],",
+                        p.name
+                    )
+                    .unwrap();
                     buf_idx += 1;
                 },
                 ParamKind::Scalar => {
                     write!(
                         out,
-                        "\n    constant {} &{} [[buffer({buf_idx})]],",
+                        "\n    {attr}constant {} &{} [[buffer({buf_idx})]],",
                         self.msl_type_name(p.dtype),
                         p.name
                     )
@@ -201,20 +402,66 @@ impl MslGenerator {
                 DType::U64 => "ulong",
                 _ => "uint",
             };
-            write!(out, "\n    constant {msl_type} &{} [[buffer({buf_idx})]],", ce.name.name())
-                .unwrap();
+            let attr = attr_for(ce.name.name());
+            write!(
+                out,
+                "\n    {attr}constant {msl_type} &{} [[buffer({buf_idx})]],",
+                ce.name.name()
+            )
+            .unwrap();
             buf_idx += 1;
         }
 
-        // Thread / threadgroup position attributes.
+        // Thread / threadgroup position attributes.  For Reduction
+        // mode we gate each kernel-attr decl on the same predicate as
+        // its preamble alias — see `ReductionPreambleGates`.  Pre-fix,
+        // both the signature and preamble were unconditional, so a
+        // kernel that didn't use `tid`/`tgid_*`/`lsize` produced
+        // `-Wunused-parameter` warnings against the attr decls.
+        let reduction_gates = if kernel.mode == KernelMode::Reduction {
+            Some(ReductionPreambleGates::compute(kernel, &self.config))
+        } else {
+            None
+        };
         match kernel.mode {
             KernelMode::Elementwise => {
                 write!(out, "\n    uint tid [[thread_position_in_grid]]").unwrap();
             },
             KernelMode::Reduction => {
-                write!(out, "\n    uint3 _tid3  [[thread_position_in_threadgroup]],").unwrap();
-                write!(out, "\n    uint3 _tgid3 [[threadgroup_position_in_grid]],").unwrap();
-                write!(out, "\n    uint3 _lsize3 [[threads_per_threadgroup]]").unwrap();
+                let gates = reduction_gates.as_ref().expect("set above for Reduction mode");
+                // Each attr is emitted only when its derived alias has
+                // a real consumer.  At least one is virtually always
+                // needed (a kernel with no thread/grid awareness is
+                // degenerate); but a kernel that uses only `tgid_y`
+                // legitimately drops `_tid3` and `_lsize3`.  Track
+                // whether we've written any so we know where to put
+                // the comma separators.
+                let mut wrote_any = false;
+                let mut emit_attr = |line: &str| {
+                    let prefix = if wrote_any { ",\n    " } else { "\n    " };
+                    write!(out, "{prefix}{line}").unwrap();
+                    wrote_any = true;
+                };
+                if gates.needs_tid3_attr() {
+                    emit_attr("uint3 _tid3  [[thread_position_in_threadgroup]]");
+                }
+                if gates.needs_tgid3_attr() {
+                    emit_attr("uint3 _tgid3 [[threadgroup_position_in_grid]]");
+                }
+                if gates.needs_lsize3_attr() {
+                    emit_attr("uint3 _lsize3 [[threads_per_threadgroup]]");
+                }
+                // If none of the above fired the kernel has no
+                // thread/threadgroup attrs.  Emit a degenerate `tid`
+                // attr to keep the signature non-trivial — MSL accepts
+                // a kernel with zero builtin attrs but the parameter
+                // list then needs to end without a leading comma for
+                // the simd_lane/simd_group conditional path below.
+                // `[[maybe_unused]]` keeps `metal -W` quiet about it.
+                if !wrote_any {
+                    write!(out, "\n    [[maybe_unused]] uint _tid3 [[thread_position_in_grid]]")
+                        .unwrap();
+                }
             },
             KernelMode::Grid3D => {
                 write!(out, "\n    uint3 gid [[thread_position_in_grid]]").unwrap();
@@ -224,18 +471,34 @@ impl MslGenerator {
                 write!(out, "\n    uint2 tgid [[threadgroup_position_in_grid]]").unwrap();
             },
             KernelMode::SimdGroup2D => {
-                write!(out, "\n    uint3 lid [[thread_position_in_threadgroup]],").unwrap();
+                // `lid` is referenced only when the DSL reads
+                // `tid_x` / `tid_y` / `tid_z` as a direct identifier
+                // (emit_block.rs maps those loads to `lid.x` / `.y` /
+                // `.z` in SimdGroup2D mode).  Matmul kernels in
+                // SimdGroup2D mode go through `emit_tiled` and never
+                // touch `lid` — they'd emit `-Wunused-parameter` for
+                // an unconditional `lid` attr.
+                let needs_lid = kernel_uses_identifier(kernel, "tid_x")
+                    || kernel_uses_identifier(kernel, "tid_y")
+                    || kernel_uses_identifier(kernel, "tid_z");
+                if needs_lid {
+                    write!(out, "\n    uint3 lid [[thread_position_in_threadgroup]],").unwrap();
+                }
                 write!(out, "\n    uint3 tid [[threadgroup_position_in_grid]]").unwrap();
                 write!(out, ",\n    uint simd_lane [[thread_index_in_simdgroup]]").unwrap();
                 write!(out, ",\n    uint simd_group [[simdgroup_index_in_threadgroup]]").unwrap();
             },
         }
         // NOTE: SimdGroup2D mode emits simd_lane and simd_group inline above.
-        // Other modes add them conditionally here.
-        if feat.needs_simd_lane && !matches!(kernel.mode, KernelMode::SimdGroup2D) {
+        // Other modes add them conditionally here.  `feat.needs_simd_*`
+        // now reflects actual MSL identifier consumption directly (post-#209/4):
+        // the `needs_simd_lane`/`needs_simd_group` OpFlags live only on
+        // `Op::SimdLaneId`/`Op::SimdGroupId`, plus the per-feature multi-op
+        // cases (matmul / Reduce slow path) handled in `features.rs`.
+        if !matches!(kernel.mode, KernelMode::SimdGroup2D) && feat.needs_simd_lane {
             write!(out, ",\n    uint simd_lane [[thread_index_in_simdgroup]]").unwrap();
         }
-        if feat.needs_simd_group && !matches!(kernel.mode, KernelMode::SimdGroup2D) {
+        if !matches!(kernel.mode, KernelMode::SimdGroup2D) && feat.needs_simd_group {
             write!(out, ",\n    uint simd_group [[simdgroup_index_in_threadgroup]]").unwrap();
         }
 
@@ -252,20 +515,38 @@ impl MslGenerator {
             wl!(out, "#if defined(__METAL_VERSION__) && __METAL_VERSION__ >= 400");
         }
 
-        // Inject scalar aliases for Reduction mode.
-        // `tgid_y` is only emitted when the kernel references program_id::<1>(),
-        // avoiding -Wunused-variable on single-axis reduction kernels.
-        if kernel.mode == KernelMode::Reduction {
-            wl!(out, "    uint tid    = _tid3.x;");
-            wl!(out, "    uint tgid_x = _tgid3.x;");
-            if kernel_uses_program_id_axis(kernel, 1) {
+        // Inject scalar aliases for Reduction mode.  Each alias is gated
+        // on actual consumption — these decls show up in `swift build`'s
+        // shader-compile pass as `-Wunused-variable` warnings when they
+        // aren't referenced, and a single kernel-suite emit at the >5000
+        // warning level scales linearly with kernel count.
+        //
+        // Consumer summary (one MSL emit site per row):
+        //   tid     ← Op::ProgramId{axis:0} in Elementwise (n/a in Reduction);
+        //             Op::StrideReduce vectorized-loop path (`{has_tid}` branch
+        //             in emit_block.rs); direct identifier `Op::Load { src:"tid" }`.
+        //   tgid_x  ← Op::ProgramId{axis:0} in Reduction; direct `tgid_x` load.
+        //   lsize   ← Op::StrideReduce; Op::Reduce (Mean path emits
+        //             `…/float(lsize)` in both fast and slow); n_simd's own
+        //             definition (`n_simd = lsize / 32u`); direct `lsize` load.
+        //   n_simd  ← Op::Reduce slow path (tpg > simd_size); direct `n_simd` load.
+        if let Some(gates) = reduction_gates.as_ref() {
+            if gates.needs_tid {
+                wl!(out, "    uint tid    = _tid3.x;");
+            }
+            if gates.needs_tgid_x {
+                wl!(out, "    uint tgid_x = _tgid3.x;");
+            }
+            if gates.needs_tgid_y {
                 wl!(out, "    uint tgid_y = _tgid3.y;");
             }
-            if kernel_uses_program_id_axis(kernel, 2) {
+            if gates.needs_tgid_z {
                 wl!(out, "    uint tgid_z = _tgid3.z;");
             }
-            wl!(out, "    uint lsize  = _lsize3.x;");
-            if feat.needs_simd_group {
+            if gates.needs_lsize {
+                wl!(out, "    uint lsize  = _lsize3.x;");
+            }
+            if gates.needs_n_simd {
                 wl!(out, "    uint n_simd = lsize / 32u;");
             }
         }
@@ -357,6 +638,36 @@ mod tests {
 
     use super::*;
 
+    /// Test-only helper: append a sink `Store` so DCE keeps the chain of
+    /// ops that produces `vid` alive.  Without this, kernels constructed
+    /// in unit tests for lowering-pattern verification get cleaned out
+    /// entirely by `DeadValueElimPass` and the assertions can't find the
+    /// MSL substrings they're checking for.  Real DSL kernels always
+    /// terminate in a Store to an output param; this helper mirrors that
+    /// shape minimally.
+    ///
+    /// Allocates `out` as a F32 output param and uses a fresh high
+    /// ValueId for the index Const so it can't collide with the IDs the
+    /// caller has already assigned.
+    fn sink(k: &mut Kernel, vid: ValueId) {
+        const SINK_IDX_VID: u32 = 0x3fff_fffe;
+        k.params.push(Param {
+            name: "_sink".into(),
+            dtype: DType::F32,
+            shape: Shape::scalar(),
+            is_output: true,
+            kind: Default::default(),
+        });
+        let idx_vid = ValueId::new(SINK_IDX_VID);
+        k.body.push_op(Op::Const { value: 0 }, idx_vid);
+        k.body.push_op_no_result(Op::Store {
+            dst: "_sink".into(),
+            indices: vec![IndexExpr::Value(idx_vid)],
+            value: vid,
+            mask: None,
+        });
+    }
+
     fn make_vadd() -> Kernel {
         let mut k = Kernel::new("vector_add");
         k.params.push(Param {
@@ -443,6 +754,7 @@ mod tests {
     fn const_op_emits_uint_for_nonneg() {
         let mut k = Kernel::new("const_test");
         k.body.push_op(Op::Const { value: 42 }, ValueId::new(0));
+        sink(&mut k, ValueId::new(0));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(msl.contains("uint v0 = 42u"), "non-negative Const should emit as uint");
     }
@@ -451,6 +763,7 @@ mod tests {
     fn const_op_emits_int_for_negative() {
         let mut k = Kernel::new("const_neg_test");
         k.body.push_op(Op::Const { value: -7 }, ValueId::new(0));
+        sink(&mut k, ValueId::new(0));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(msl.contains("int v0 = -7"), "negative Const should emit as int");
     }
@@ -460,6 +773,7 @@ mod tests {
         let mut k = Kernel::new("cast_test");
         k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
         k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::F16 }, ValueId::new(1));
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(msl.contains("static_cast<half>"), "cast to f16 should use static_cast<half>");
     }
@@ -492,6 +806,7 @@ mod tests {
         let mut k = Kernel::new("compat_bf16_cast");
         k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
         k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::BF16 }, ValueId::new(1));
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::new(MslConfig {
             native_bfloat: false,
             bfloat_reinterpret_cast: false,
@@ -511,6 +826,7 @@ mod tests {
         let mut k = Kernel::new("native_bf16_cast");
         k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
         k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::BF16 }, ValueId::new(1));
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::new(MslConfig {
             native_bfloat: true,
             bfloat_reinterpret_cast: false,
@@ -537,6 +853,7 @@ mod tests {
         k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
         k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::F32 }, ValueId::new(1));
         k.body.push_op(Op::Cast { value: ValueId::new(1), dtype: DType::BF16 }, ValueId::new(2));
+        sink(&mut k, ValueId::new(2));
         let msl = MslGenerator::new(MslConfig {
             native_bfloat: true,
             bfloat_reinterpret_cast: true,
@@ -566,6 +883,7 @@ mod tests {
         k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
         k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::F32 }, ValueId::new(1));
         k.body.push_op(Op::Cast { value: ValueId::new(1), dtype: DType::BF16 }, ValueId::new(2));
+        sink(&mut k, ValueId::new(2));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(
             !msl.contains("as_type<bfloat2>("),
@@ -588,6 +906,7 @@ mod tests {
         let mut k = Kernel::new("int_to_bf16");
         k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
         k.body.push_op(Op::Cast { value: ValueId::new(0), dtype: DType::BF16 }, ValueId::new(1));
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::new(MslConfig {
             native_bfloat: true,
             bfloat_reinterpret_cast: true,
@@ -610,6 +929,7 @@ mod tests {
         k.body
             .push_op(Op::UnaryOp { op: UnaryOpKind::Exp, value: ValueId::new(0) }, ValueId::new(1));
         k.body.name_value(ValueId::new(1), "r");
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(msl.contains("exp(v0)"), "exp unary op");
         assert!(msl.contains("v_r"), "named result");
@@ -624,6 +944,7 @@ mod tests {
             Op::Activation { kind: ActKind::Silu, value: ValueId::new(0) },
             ValueId::new(1),
         );
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(msl.contains("mt_silu"), "silu helper function name");
         assert!(msl.contains("inline T mt_silu"), "silu helper definition");
@@ -692,10 +1013,44 @@ mod tests {
 
     #[test]
     fn select_emit() {
+        // Use a runtime-derived condition (ProgramId) so the
+        // ConstFoldPass can't pick a branch at compile time and remove
+        // the Op::Select entirely.  Same for the arms — load from two
+        // input params so neither side folds away.
         let mut k = Kernel::new("select_test");
-        k.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
-        k.body.push_op(Op::Const { value: 2 }, ValueId::new(1));
-        k.body.push_op(Op::Const { value: 3 }, ValueId::new(2));
+        k.params.push(Param {
+            name: "a".into(),
+            dtype: DType::F32,
+            shape: Shape::scalar(),
+            is_output: false,
+            kind: Default::default(),
+        });
+        k.params.push(Param {
+            name: "b".into(),
+            dtype: DType::F32,
+            shape: Shape::scalar(),
+            is_output: false,
+            kind: Default::default(),
+        });
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0)); // cond
+        k.body.push_op(
+            Op::Load {
+                src: "a".into(),
+                mask: None,
+                other: None,
+                indices: vec![IndexExpr::Value(ValueId::new(0))],
+            },
+            ValueId::new(1),
+        );
+        k.body.push_op(
+            Op::Load {
+                src: "b".into(),
+                mask: None,
+                other: None,
+                indices: vec![IndexExpr::Value(ValueId::new(0))],
+            },
+            ValueId::new(2),
+        );
         k.body.push_op(
             Op::Select {
                 cond: ValueId::new(0),
@@ -704,9 +1059,10 @@ mod tests {
             },
             ValueId::new(3),
         );
+        sink(&mut k, ValueId::new(3));
         let msl = MslGenerator::default().generate(&k).unwrap();
-        assert!(msl.contains("bool("), "bool cast on condition");
-        assert!(msl.contains("? v1 : v2"), "ternary select");
+        assert!(msl.contains("bool("), "bool cast on condition: {msl}");
+        assert!(msl.contains("? v1 : v2"), "ternary select: {msl}");
     }
 
     #[test]
@@ -772,6 +1128,7 @@ mod tests {
             Op::BinOp { op: BinOpKind::Mul, lhs: ValueId::new(2), rhs: ValueId::new(3) },
             ValueId::new(4),
         );
+        sink(&mut k, ValueId::new(4));
         FusionPass.run(&mut k).unwrap();
         let has_fused = k.body.ops.iter().any(|op| matches!(op, Op::FusedElementwise { .. }));
         assert!(has_fused, "fusion pass should create a FusedElementwise op");
@@ -807,6 +1164,7 @@ mod tests {
         k.mode = KernelMode::Reduction;
         k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
         k.body.push_op(Op::ProgramId { axis: 1 }, ValueId::new(1));
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(msl.contains("tgid_y"), "tgid_y must be emitted when program_id axis 1 is used");
     }
@@ -820,12 +1178,206 @@ mod tests {
         k.mode = KernelMode::Reduction;
         k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
         k.body.push_op(Op::ProgramId { axis: 2 }, ValueId::new(1));
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(
             msl.contains("uint tgid_z = _tgid3.z;"),
             "preamble must declare tgid_z when program_id axis 2 is used: {msl}"
         );
         assert!(msl.contains("= tgid_z;"), "axis 2 must lower to tgid_z, not a constant: {msl}");
+    }
+
+    // ── Preamble-emission gates ─────────────────────────────────────────
+    //
+    // Each preamble decl (`tid` / `tgid_x` / `lsize` / `n_simd`) gets a
+    // matching "used → emit" / "unused → omit" pair below. Pre-fix the
+    // unconditional emits produced thousands of `-Wunused-variable`
+    // warnings against the full kernel suite; these pin the gates the
+    // fix introduced so the warnings can't silently come back.
+
+    /// `tgid_x` must be omitted when the kernel doesn't reference
+    /// `program_id::<0>()` and doesn't read the identifier directly —
+    /// some kernels only iterate `tgid_y`/`tgid_z` and don't touch x.
+    #[test]
+    fn reduction_preamble_omits_tgid_x_when_unused() {
+        let mut k = Kernel::new("reduction_no_x");
+        k.mode = KernelMode::Reduction;
+        // axis 1 only — no Op::ProgramId axis 0, no direct `tgid_x` load.
+        k.body.push_op(Op::ProgramId { axis: 1 }, ValueId::new(0));
+        sink(&mut k, ValueId::new(0));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            !msl.contains("uint tgid_x = _tgid3.x;"),
+            "tgid_x decl must be omitted when program_id axis 0 is unused: {msl}"
+        );
+    }
+
+    /// `tid` is consumed by `Op::StrideReduce` (in Reduction mode it
+    /// lowers to a vectorized loop indexed by `tid * 4u`). When no
+    /// `StrideReduce` exists *and* nothing reads `tid` directly, the
+    /// preamble must drop the decl.
+    #[test]
+    fn reduction_preamble_omits_tid_when_unused() {
+        let mut k = Kernel::new("reduction_no_tid");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        sink(&mut k, ValueId::new(0));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            !msl.contains("uint tid    = _tid3.x;"),
+            "tid decl must be omitted when nothing references it: {msl}"
+        );
+    }
+
+    /// Symmetric: a direct DSL identifier read (`Op::Load { src: "tid"
+    /// }`) keeps the `tid` decl alive.
+    #[test]
+    fn reduction_preamble_emits_tid_when_used_as_identifier() {
+        let mut k = Kernel::new("reduction_with_tid_load");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(
+            Op::Load { src: "tid".into(), indices: Vec::new(), mask: None, other: None },
+            ValueId::new(1),
+        );
+        sink(&mut k, ValueId::new(1));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("uint tid    = _tid3.x;"),
+            "preamble must declare tid when read via direct identifier: {msl}"
+        );
+    }
+
+    /// `lsize` is consumed by `Op::StrideReduce`, by `Op::Reduce` (the
+    /// `Mean` path divides the simdgroup total by `float(lsize)`), and
+    /// by the `n_simd = lsize / 32u` derivation. When none of those
+    /// fire, drop the decl.
+    #[test]
+    fn reduction_preamble_omits_lsize_when_unused() {
+        let mut k = Kernel::new("reduction_no_lsize");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        sink(&mut k, ValueId::new(0));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            !msl.contains("uint lsize  = _lsize3.x;"),
+            "lsize decl must be omitted when no StrideReduce/Reduce/n_simd needs it: {msl}"
+        );
+    }
+
+    /// `lsize` survives only when something actually references it.
+    /// `Op::Reduce` with `Sum` lowers to a bare `simd_sum(value)` — no
+    /// `lsize`.  Pre-fix, every Op::Reduce dragged `lsize` in
+    /// unconditionally; this case ensures we don't over-emit on the
+    /// cheap path (`mt_rms_norm_small` etc.).
+    #[test]
+    fn reduction_preamble_omits_lsize_for_simd_only_reduce_sum() {
+        use metaltile_core::ir::ReduceKind;
+        let mut k = Kernel::new("reduction_reduce_sum");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(1));
+        k.body.push_op(
+            Op::Reduce { value: ValueId::new(1), axis: 0, op: ReduceKind::Sum },
+            ValueId::new(2),
+        );
+        sink(&mut k, ValueId::new(2));
+        // Single-simdgroup config → fast path emits only `simd_sum`; no
+        // lsize divisor exists in the lowering.
+        let msl = MslGenerator::new(MslConfig { expected_tpg: Some(32), ..MslConfig::default() })
+            .generate(&k)
+            .unwrap();
+        assert!(
+            !msl.contains("uint lsize"),
+            "Sum reduce on the fast path must not pull lsize in: {msl}"
+        );
+        // And it must not get pulled in by the slow-path n_simd
+        // requirement either, since we're explicitly single-simdgroup.
+        assert!(!msl.contains("uint n_simd"), "fast path must not declare n_simd: {msl}");
+    }
+
+    /// `Op::Reduce` with `Mean` divides by `float(lsize)` in both fast
+    /// and slow paths — `lsize` must be in the preamble.
+    #[test]
+    fn reduction_preamble_emits_lsize_when_reduce_mean_present() {
+        use metaltile_core::ir::ReduceKind;
+        let mut k = Kernel::new("reduction_reduce_mean");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(1));
+        k.body.push_op(
+            Op::Reduce { value: ValueId::new(1), axis: 0, op: ReduceKind::Mean },
+            ValueId::new(2),
+        );
+        sink(&mut k, ValueId::new(2));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("uint lsize  = _lsize3.x;"),
+            "Op::Reduce Mean must keep lsize in the preamble: {msl}"
+        );
+    }
+
+    /// `n_simd` is consumed by the slow-path two-level reduction (TPG >
+    /// simd width) and by direct identifier reads. A bare `Op::Reduce`
+    /// at default config (no `expected_tpg`) routes through the slow
+    /// path → `n_simd` must be emitted. A kernel without `Op::Reduce`
+    /// and without an `n_simd` identifier load must omit it.
+    #[test]
+    fn reduction_preamble_omits_n_simd_when_unused() {
+        let mut k = Kernel::new("reduction_no_n_simd");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        // `Op::SimdGroupId` sets `feat.needs_simd_group` but does NOT
+        // need n_simd — pre-fix this case triggered an unused n_simd
+        // decl.
+        k.body.push_op(Op::SimdGroupId, ValueId::new(1));
+        sink(&mut k, ValueId::new(1));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            !msl.contains("uint n_simd"),
+            "n_simd decl must be omitted when only simd_group is read: {msl}"
+        );
+    }
+
+    /// Symmetric: an `Op::Reduce` on the slow path keeps `n_simd`.
+    #[test]
+    fn reduction_preamble_emits_n_simd_when_reduce_slow_path() {
+        use metaltile_core::ir::ReduceKind;
+        let mut k = Kernel::new("reduction_reduce_slow");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(Op::Const { value: 1 }, ValueId::new(1));
+        k.body.push_op(
+            Op::Reduce { value: ValueId::new(1), axis: 0, op: ReduceKind::Sum },
+            ValueId::new(2),
+        );
+        sink(&mut k, ValueId::new(2));
+        // `MslGenerator::default()` has `expected_tpg = None`, so the
+        // slow path fires; the reduce emit will reference `n_simd`.
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("uint n_simd = lsize / 32u;"),
+            "slow-path Op::Reduce must keep n_simd in the preamble: {msl}"
+        );
+    }
+
+    /// Direct `n_simd` identifier read keeps the decl regardless of
+    /// reduce presence.
+    #[test]
+    fn reduction_preamble_emits_n_simd_when_used_as_identifier() {
+        let mut k = Kernel::new("reduction_n_simd_load");
+        k.mode = KernelMode::Reduction;
+        k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        k.body.push_op(
+            Op::Load { src: "n_simd".into(), indices: Vec::new(), mask: None, other: None },
+            ValueId::new(1),
+        );
+        sink(&mut k, ValueId::new(1));
+        let msl = MslGenerator::default().generate(&k).unwrap();
+        assert!(
+            msl.contains("uint n_simd = lsize / 32u;"),
+            "direct n_simd identifier load must keep the decl: {msl}"
+        );
     }
 
     /// Regression: `ssm_step` and similar kernels reference `tgid_y` via the
@@ -841,6 +1393,12 @@ mod tests {
             Op::Load { src: "tgid_y".to_string(), indices: Vec::new(), mask: None, other: None },
             ValueId::new(1),
         );
+        // Sink the load result so DCE doesn't eliminate the scalar
+        // Load (which would also drop the preamble decl).  The whole
+        // point of this regression is the parser's direct-identifier
+        // lowering path; with a real consumer present, the decl must
+        // be emitted.
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(
             msl.contains("uint tgid_y = _tgid3.y;"),
@@ -857,6 +1415,7 @@ mod tests {
         k.mode = KernelMode::Reduction;
         k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
         k.body.push_op(Op::SimdShuffleXor { value: ValueId::new(0), mask: 1 }, ValueId::new(1));
+        sink(&mut k, ValueId::new(1));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(
             msl.contains("simd_shuffle_xor("),
@@ -876,6 +1435,7 @@ mod tests {
             Op::SimdBroadcast { value: ValueId::new(0), lane: ValueId::new(1) },
             ValueId::new(2),
         );
+        sink(&mut k, ValueId::new(2));
         let msl = MslGenerator::default().generate(&k).unwrap();
         assert!(msl.contains("simd_broadcast("), "kernel must emit a simd_broadcast call: {msl}");
     }

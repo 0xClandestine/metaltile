@@ -260,23 +260,25 @@ impl MslGenerator {
                 },
 
                 // ---- compute -------------------------------------------
+                // FMA fusion is now an IR pass (`FmaFusionPass`) — when
+                // it fires, the IR has a real `Op::Fma { a, b, c }`
+                // here.  The emit lowers it to a single `fma(a, b, c)`
+                // line; the upstream `Op::Mul` becomes dead and is
+                // swept by DCE.  Pre-#209/3 this was a textual
+                // peephole on `BinOp::Add` / `BinOp::Sub` that left
+                // the standalone Mul behind in MSL as a dead variable.
+                Op::Fma { a, b, c } => {
+                    let v = self.vname(vid, block, extra_names);
+                    let av = self.vname(Some(*a), block, extra_names);
+                    let bv = self.vname(Some(*b), block, extra_names);
+                    let cv = self.vname(Some(*c), block, extra_names);
+                    wl!(out, "{pad}auto {v} = fma({av}, {bv}, {cv});");
+                },
+
                 Op::BinOp { op, lhs, rhs } => {
                     let v = self.vname(vid, block, extra_names);
                     let l = self.vname(Some(*lhs), block, extra_names);
                     let r = self.vname(Some(*rhs), block, extra_names);
-                    let is_float = |id: ValueId| -> bool {
-                        type_env
-                            .get(&id)
-                            .map(|tv| matches!(tv.dtype, DType::F32 | DType::F16 | DType::BF16))
-                            .unwrap_or(false)
-                    };
-                    let result_is_float = vid.map(is_float).unwrap_or(false);
-                    // FMA fusion needs ALL operands float (Metal has no
-                    // integer fma overload). Result-only check is unsafe
-                    // because type inference can propagate float from an
-                    // outer Load result back through the index BinOp tree.
-                    let operands_all_float = is_float(*lhs) && is_float(*rhs);
-                    let fma_ok = result_is_float && operands_all_float;
                     match op {
                         BinOpKind::Max
                         | BinOpKind::Min
@@ -294,36 +296,8 @@ impl MslGenerator {
                         BinOpKind::Shl => wl!(out, "{pad}auto {v} = ({l} << {r});"),
                         BinOpKind::Shr => wl!(out, "{pad}auto {v} = ({l} >> {r});"),
                         BinOpKind::Mod => wl!(out, "{pad}auto {v} = ({l} % {r});"),
-                        BinOpKind::Add => {
-                            // FMA recognition: Mul + Add → fma() (floats only)
-                            match (fma_ok, try_get_mul(*lhs, block), try_get_mul(*rhs, block)) {
-                                (true, Some((ml, mr)), None) => wl!(
-                                    out,
-                                    "{pad}auto {v} = fma({ml}, {mr}, {r});",
-                                    ml = self.vname(Some(ml), block, extra_names),
-                                    mr = self.vname(Some(mr), block, extra_names),
-                                ),
-                                (true, None, Some((ml, mr))) => wl!(
-                                    out,
-                                    "{pad}auto {v} = fma({ml}, {mr}, {l});",
-                                    ml = self.vname(Some(ml), block, extra_names),
-                                    mr = self.vname(Some(mr), block, extra_names),
-                                ),
-                                _ => wl!(out, "{pad}auto {v} = {l} + {r};"),
-                            }
-                        },
-                        BinOpKind::Sub => {
-                            // FMA recognition: Mul - X → fma() (floats only)
-                            match (fma_ok, try_get_mul(*lhs, block)) {
-                                (true, Some((ml, mr))) => wl!(
-                                    out,
-                                    "{pad}auto {v} = fma({ml}, {mr}, -{r});",
-                                    ml = self.vname(Some(ml), block, extra_names),
-                                    mr = self.vname(Some(mr), block, extra_names),
-                                ),
-                                _ => wl!(out, "{pad}auto {v} = {l} - {r};"),
-                            }
-                        },
+                        BinOpKind::Add => wl!(out, "{pad}auto {v} = {l} + {r};"),
+                        BinOpKind::Sub => wl!(out, "{pad}auto {v} = {l} - {r};"),
                         _ => wl!(out, "{pad}auto {v} = {l} {} {r};", op.msl_symbol()),
                     }
                 },
@@ -1211,18 +1185,6 @@ impl MslGenerator {
     }
 }
 
-// ---------------------------------------------------------------------------
-// FMA recognition helper
-// ---------------------------------------------------------------------------
-
-/// If `vid` is defined by a `BinOp(Mul, a, b)` in `block`, return `Some((a, b))`.
-fn try_get_mul(vid: ValueId, block: &Block) -> Option<(ValueId, ValueId)> {
-    for (i, op) in block.ops.iter().enumerate() {
-        if block.results.get(i) == Some(&Some(vid))
-            && let Op::BinOp { op: BinOpKind::Mul, lhs, rhs } = op
-        {
-            return Some((*lhs, *rhs));
-        }
-    }
-    None
-}
+// FMA recognition lives in `passes::fma_fusion::FmaFusionPass` (IR-level
+// rewrite of `Add(Mul(a, b), c)` → `Op::Fma { a, b, c }`).  The pre-#209/3
+// emit-time peephole + per-kernel skip-set lived here; both are deleted.

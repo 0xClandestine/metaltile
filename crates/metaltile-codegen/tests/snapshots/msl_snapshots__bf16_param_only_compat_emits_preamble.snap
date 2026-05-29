@@ -26,7 +26,7 @@ struct bfloat16_t {
 };
 
 kernel void bf16_param(
-    const device bfloat16_t *a [[buffer(0)]],
+    [[maybe_unused]] const device bfloat16_t *a [[buffer(0)]],
     uint tid [[thread_position_in_grid]]
 ) {
 }

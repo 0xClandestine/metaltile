@@ -12,6 +12,8 @@ pub mod const_fold;
 pub mod copy_prop;
 pub mod cse;
 pub mod dead_store_elim;
+pub mod dead_value_elim;
+pub mod fma_fusion;
 pub mod fusion;
 pub mod if_conversion;
 pub mod kernel_inline;
@@ -115,8 +117,19 @@ impl PassRegistry {
     /// The standard pass order (names, in pipeline sequence).
     ///
     /// TypeCheck → ConstFold → AlgebraicSimplify → CopyProp → CSE → LICM
-    ///   → IfConversion → ValueSink → Fusion → Unroll
+    ///   → IfConversion → ValueSink → Fusion → FmaFusion → Unroll
     ///   → Schedule → Vectorize → DeadStoreElim
+    ///
+    /// Each pass that can produce orphan SSA values (the producer is
+    /// left in the block after the pass removes/redirects its last
+    /// consumer) invokes
+    /// `dead_value_elim::eliminate_dead_values(kernel)` at the end of
+    /// its own `run()` — see #209/1.  Pre-#209/1 a separate
+    /// `dead_value_elim` slot ran last in the pipeline to sweep up
+    /// every pass's accumulated debris; with the per-pass
+    /// postcondition in place, that slot is redundant and removed.
+    /// `DeadValueElimPass` remains a registry-callable pass for tests
+    /// and tooling that want to invoke DCE explicitly.
     pub fn order() -> &'static [&'static str] {
         &[
             "kernel_inline",
@@ -129,6 +142,12 @@ impl PassRegistry {
             "if_conversion",
             "value_sink",
             "fusion",
+            // FmaFusion runs after the FusedElementwise chain builder
+            // and before Unroll — it rewrites `Add(Mul, c)` → `Fma`
+            // in-place and relies on type inference, so it needs to
+            // run after `type_check`.  The standalone Mul becomes a
+            // dead value that the pass's own DCE postcondition sweeps.
+            "fma_fusion",
             "unroll",
             "schedule",
             "vectorize",
@@ -150,12 +169,14 @@ impl PassRegistry {
             "value_sink" => Some(Box::new(value_sink::ValueSinkPass)),
             "tile_lowering" => Some(Box::new(tile_lowering::TileLoweringPass::default())),
             "fusion" => Some(Box::new(fusion::FusionPass)),
+            "fma_fusion" => Some(Box::new(fma_fusion::FmaFusionPass)),
             "unroll" => Some(Box::new(unroll::UnrollPass::default())),
             "schedule" => Some(Box::new(schedule::SchedulePass::default())),
             "vectorize" => Some(Box::new(vectorize::VectorizePass)),
             "cse_2" => Some(Box::new(cse::CsePass)),
             "const_fold_2" => Some(Box::new(const_fold::ConstFoldPass::new())),
             "dead_store_elim" => Some(Box::new(dead_store_elim::DeadStoreElimPass)),
+            "dead_value_elim" => Some(Box::new(dead_value_elim::DeadValueElimPass)),
             _ => None,
         }
     }
