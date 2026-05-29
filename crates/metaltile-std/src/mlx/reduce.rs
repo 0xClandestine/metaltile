@@ -272,3 +272,275 @@ seg_reduce_kernel!(mt_seg_reduce, sum, "sum");
 seg_reduce_kernel!(mt_seg_reduce_prod, product, "prod");
 seg_reduce_kernel!(mt_seg_reduce_max, max, "max");
 seg_reduce_kernel!(mt_seg_reduce_min, min, "min");
+
+/// New-syntax correctness for the reduce family.
+///
+/// all/row reduce are Reduction-mode (`.mode(Reduction)`, one threadgroup per
+/// row); col/seg reduce are Grid3D (one thread per output). Oracles fold the
+/// dtype-rounded inputs in f32. max/min are exact; sum/prod widen per dtype to
+/// cover f16/bf16 accumulation order vs the f32 oracle. Inputs are kept small
+/// (prod stays near 1) so the accumulation drift is bounded.
+pub mod kernel_tests {
+    use metaltile::{core::ir::Kernel, test::*, test_kernel};
+
+    use super::*;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    fn fold(init: f32, xs: impl Iterator<Item = f32>, op: fn(f32, f32) -> f32) -> f32 {
+        xs.fold(init, op)
+    }
+
+    // ── all-reduce: one threadgroup folds `n` elements → out[0] ───────────
+    fn all_setup_for(
+        kernel: Kernel,
+        n: usize,
+        vals: &[f32],
+        init: f32,
+        op: fn(f32, f32) -> f32,
+        dt: DType,
+    ) -> TestSetup {
+        let v = unpack_f32(&pack_f32(vals, dt), dt);
+        let expected = fold(init, v.into_iter(), op);
+        TestSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("inp", pack_f32(vals, dt), dt))
+            .input(TestBuffer::zeros("out", 1, dt))
+            .constexpr("n", n as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&[expected], dt), dt))
+            .grid_3d(1, 1, 1, [256, 1, 1])
+    }
+
+    fn sum_vals(n: usize) -> Vec<f32> { (0..n).map(|i| ((i % 17) as f32 - 8.0) * 0.01).collect() }
+    fn prod_vals(n: usize) -> Vec<f32> {
+        (0..n).map(|i| 1.0 + ((i % 7) as f32 - 3.0) * 0.001).collect()
+    }
+    fn ext_vals(n: usize) -> Vec<f32> {
+        (0..n).map(|i| ((i * 7919 % 1000) as f32) * 0.01 - 5.0).collect()
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 2.0, 16.0])]
+    fn test_all_reduce_sum(dt: DType) -> TestSetup {
+        all_setup_for(
+            mt_all_reduce::kernel_ir_for(dt),
+            2048,
+            &sum_vals(2048),
+            0.0,
+            |a, b| a + b,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 1e-1, 1.0])]
+    fn test_all_reduce_prod(dt: DType) -> TestSetup {
+        all_setup_for(
+            mt_all_reduce_prod::kernel_ir_for(dt),
+            512,
+            &prod_vals(512),
+            1.0,
+            |a, b| a * b,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-3)]
+    fn test_all_reduce_max(dt: DType) -> TestSetup {
+        all_setup_for(
+            mt_all_reduce_max::kernel_ir_for(dt),
+            2048,
+            &ext_vals(2048),
+            f32::NEG_INFINITY,
+            f32::max,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-3)]
+    fn test_all_reduce_min(dt: DType) -> TestSetup {
+        all_setup_for(
+            mt_all_reduce_min::kernel_ir_for(dt),
+            2048,
+            &ext_vals(2048),
+            f32::INFINITY,
+            f32::min,
+            dt,
+        )
+    }
+
+    // ── row-reduce: one threadgroup per row of [rows, n] → out[row] ────────
+    fn row_setup_for(
+        kernel: Kernel,
+        rows: usize,
+        n: usize,
+        per_row: &dyn Fn(usize) -> Vec<f32>,
+        init: f32,
+        op: fn(f32, f32) -> f32,
+        dt: DType,
+    ) -> TestSetup {
+        let mut inp = Vec::with_capacity(rows * n);
+        let mut expected = Vec::with_capacity(rows);
+        for r in 0..rows {
+            let row = per_row(r);
+            let rd = unpack_f32(&pack_f32(&row, dt), dt);
+            expected.push(fold(init, rd.into_iter(), op));
+            inp.extend_from_slice(&row);
+        }
+        TestSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("inp", pack_f32(&inp, dt), dt))
+            .input(TestBuffer::zeros("out", rows, dt))
+            .constexpr("n", n as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(rows as u32, 1, 1, [256, 1, 1])
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 1.0, 8.0])]
+    fn test_row_reduce_sum(dt: DType) -> TestSetup {
+        row_setup_for(
+            mt_row_reduce::kernel_ir_for(dt),
+            4,
+            1024,
+            &|r| (0..1024).map(|i| ((i % 17) as f32 - 8.0) * 0.01 + r as f32 * 0.001).collect(),
+            0.0,
+            |a, b| a + b,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-3)]
+    fn test_row_reduce_max(dt: DType) -> TestSetup {
+        row_setup_for(
+            mt_row_reduce_max::kernel_ir_for(dt),
+            4,
+            1024,
+            &|r| (0..1024).map(|i| ((i * 7919 % 1000) as f32) * 0.01 - 5.0 + r as f32).collect(),
+            f32::NEG_INFINITY,
+            f32::max,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-3)]
+    fn test_row_reduce_min(dt: DType) -> TestSetup {
+        row_setup_for(
+            mt_row_reduce_min::kernel_ir_for(dt),
+            4,
+            1024,
+            &|r| (0..1024).map(|i| ((i * 7919 % 1000) as f32) * 0.01 - 5.0 + r as f32).collect(),
+            f32::INFINITY,
+            f32::min,
+            dt,
+        )
+    }
+
+    // ── col-reduce: Grid3D, one thread per column of [rows, cols] ─────────
+    fn col_setup_for(
+        kernel: Kernel,
+        rows: usize,
+        cols: usize,
+        init: f32,
+        op: fn(f32, f32) -> f32,
+        dt: DType,
+    ) -> TestSetup {
+        let inp: Vec<f32> = (0..rows * cols).map(|i| ((i % 19) as f32 - 9.0) * 0.1).collect();
+        let id = unpack_f32(&pack_f32(&inp, dt), dt);
+        let expected: Vec<f32> =
+            (0..cols).map(|c| fold(init, (0..rows).map(|r| id[r * cols + c]), op)).collect();
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("inp", pack_f32(&inp, dt), dt))
+            .input(TestBuffer::zeros("out", cols, dt))
+            .constexpr("rows", rows as u32)
+            .constexpr("cols", cols as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_1d(cols, 256)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-2, 5e-1])]
+    fn test_col_reduce_sum(dt: DType) -> TestSetup {
+        col_setup_for(mt_col_reduce::kernel_ir_for(dt), 37, 100, 0.0, |a, b| a + b, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-3)]
+    fn test_col_reduce_max(dt: DType) -> TestSetup {
+        col_setup_for(mt_col_reduce_max::kernel_ir_for(dt), 50, 70, f32::NEG_INFINITY, f32::max, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-3)]
+    fn test_col_reduce_min(dt: DType) -> TestSetup {
+        col_setup_for(mt_col_reduce_min::kernel_ir_for(dt), 50, 70, f32::INFINITY, f32::min, dt)
+    }
+
+    // ── seg-reduce: Grid3D, one thread per contiguous segment ─────────────
+    fn seg_setup_for(
+        kernel: Kernel,
+        n_segments: usize,
+        seg_len: usize,
+        init: f32,
+        op: fn(f32, f32) -> f32,
+        dt: DType,
+    ) -> TestSetup {
+        let inp: Vec<f32> =
+            (0..n_segments * seg_len).map(|i| ((i % 13) as f32 - 6.0) * 0.05).collect();
+        let id = unpack_f32(&pack_f32(&inp, dt), dt);
+        let expected: Vec<f32> = (0..n_segments)
+            .map(|s| fold(init, (0..seg_len).map(|j| id[s * seg_len + j]), op))
+            .collect();
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("inp", pack_f32(&inp, dt), dt))
+            .input(TestBuffer::zeros("out", n_segments, dt))
+            .constexpr("n_segments", n_segments as u32)
+            .constexpr("seg_len", seg_len as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_1d(n_segments, 256)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-2, 5e-1])]
+    fn test_seg_reduce_sum(dt: DType) -> TestSetup {
+        seg_setup_for(mt_seg_reduce::kernel_ir_for(dt), 64, 48, 0.0, |a, b| a + b, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-3)]
+    fn test_seg_reduce_max(dt: DType) -> TestSetup {
+        seg_setup_for(mt_seg_reduce_max::kernel_ir_for(dt), 64, 48, f32::NEG_INFINITY, f32::max, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-3)]
+    fn test_seg_reduce_min(dt: DType) -> TestSetup {
+        seg_setup_for(mt_seg_reduce_min::kernel_ir_for(dt), 64, 48, f32::INFINITY, f32::min, dt)
+    }
+}
+
+/// New-syntax benchmarks for the reduce family (vs MLX `metal/reduce.metal`).
+pub mod kernel_benches {
+    use metaltile::{bench, core::ir::Kernel, test::*};
+
+    use super::*;
+
+    // all-reduce: one threadgroup folds N elements to a scalar.
+    fn all_b(kernel: Kernel, dt: DType) -> BenchSetup {
+        let n = 16 * 1024 * 1024usize;
+        BenchSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("inp", n, dt))
+            .buffer(BenchBuffer::zeros("out", 1, dt).output())
+            .constexpr("n", n as u32)
+            .grid_3d(1, 1, 1, [256, 1, 1])
+            .bytes_moved((n * dt.size_bytes()) as u64)
+    }
+
+    #[bench(name = "mlx/all_reduce/sum", dtypes = [f32, f16, bf16])]
+    fn bench_all_sum(dt: DType) -> BenchSetup { all_b(mt_all_reduce::kernel_ir_for(dt), dt) }
+    #[bench(name = "mlx/all_reduce/max", dtypes = [f32, f16, bf16])]
+    fn bench_all_max(dt: DType) -> BenchSetup { all_b(mt_all_reduce_max::kernel_ir_for(dt), dt) }
+    #[bench(name = "mlx/all_reduce/min", dtypes = [f32, f16, bf16])]
+    fn bench_all_min(dt: DType) -> BenchSetup { all_b(mt_all_reduce_min::kernel_ir_for(dt), dt) }
+
+    // row-reduce: one threadgroup per row.
+    fn row_b(kernel: Kernel, dt: DType) -> BenchSetup {
+        let (rows, n) = (4096usize, 4096usize);
+        BenchSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("inp", rows * n, dt))
+            .buffer(BenchBuffer::zeros("out", rows, dt).output())
+            .constexpr("n", n as u32)
+            .grid_3d(rows as u32, 1, 1, [256, 1, 1])
+            .bytes_moved((rows * n * dt.size_bytes()) as u64)
+    }
+
+    #[bench(name = "mlx/row_reduce/sum", dtypes = [f32, f16, bf16])]
+    fn bench_row_sum(dt: DType) -> BenchSetup { row_b(mt_row_reduce::kernel_ir_for(dt), dt) }
+    #[bench(name = "mlx/row_reduce/max", dtypes = [f32, f16, bf16])]
+    fn bench_row_max(dt: DType) -> BenchSetup { row_b(mt_row_reduce_max::kernel_ir_for(dt), dt) }
+    #[bench(name = "mlx/row_reduce/min", dtypes = [f32, f16, bf16])]
+    fn bench_row_min(dt: DType) -> BenchSetup { row_b(mt_row_reduce_min::kernel_ir_for(dt), dt) }
+}

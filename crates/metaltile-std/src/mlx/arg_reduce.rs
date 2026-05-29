@@ -157,3 +157,65 @@ pub fn mt_argmin<T>(inp: Tensor<T>, out: Tensor<u32>, #[constexpr] n: u32) {
         store(out[0], final_idx);
     }
 }
+
+/// New-syntax correctness for the mlx arg-reduce kernels (Reduction mode, one
+/// 256-lane threadgroup, u32 index output). A lone spike/dip in a flat field
+/// gives an unambiguous winner in every dtype.
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::{mt_argmax, mt_argmin};
+    use crate::utils::pack_f32;
+
+    fn setup(
+        kernel: metaltile::core::ir::Kernel,
+        n: usize,
+        idx: usize,
+        spike: f32,
+        dt: DType,
+    ) -> TestSetup {
+        let mut inp = vec![0.0f32; n];
+        inp[idx] = spike; // +2 for argmax, -2 for argmin
+        TestSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("inp", pack_f32(&inp, dt), dt))
+            .input(TestBuffer::zeros("out", 1, DType::U32))
+            .constexpr("n", n as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&[idx as f32], DType::U32), DType::U32))
+            .grid_3d(1, 1, 1, [256, 1, 1])
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 0.5)]
+    fn test_mt_argmax(dt: DType) -> TestSetup {
+        setup(mt_argmax::kernel_ir_for(dt), 1000, 813, 2.0, dt)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 0.5)]
+    fn test_mt_argmin(dt: DType) -> TestSetup {
+        setup(mt_argmin::kernel_ir_for(dt), 1000, 271, -2.0, dt)
+    }
+}
+
+/// New-syntax benchmarks for the mlx arg-reduce kernels (vs MLX
+/// `metal/arg_reduce.metal`). Vocab-sized, read-dominated.
+pub mod kernel_benches {
+    use metaltile::{bench, test::*};
+
+    use super::{mt_argmax, mt_argmin};
+
+    fn ab(kernel: metaltile::core::ir::Kernel, dt: DType) -> BenchSetup {
+        let n = 256 * 1024usize;
+        BenchSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("inp", n, dt))
+            .buffer(BenchBuffer::zeros("out", 1, DType::U32).output())
+            .constexpr("n", n as u32)
+            .grid_3d(1, 1, 1, [256, 1, 1])
+            .bytes_moved((n * dt.size_bytes()) as u64)
+    }
+
+    #[bench(name = "mlx/arg_reduce/argmax", dtypes = [f32, f16, bf16])]
+    fn bench_argmax(dt: DType) -> BenchSetup { ab(mt_argmax::kernel_ir_for(dt), dt) }
+    #[bench(name = "mlx/arg_reduce/argmin", dtypes = [f32, f16, bf16])]
+    fn bench_argmin(dt: DType) -> BenchSetup { ab(mt_argmin::kernel_ir_for(dt), dt) }
+}
