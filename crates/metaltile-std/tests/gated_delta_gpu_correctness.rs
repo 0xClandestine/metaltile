@@ -110,6 +110,30 @@ fn run_gated_delta_step(
     dv: usize,
     dk: usize,
 ) -> (Vec<f32>, Vec<f32>) {
+    // One-shot callers create a fresh Context; the iterative-stability test
+    // reuses a single Context across thousands of steps via the `_ctx`
+    // variant (a fresh `Context::new()` per iteration leaks Metal devices
+    // and eventually fails device creation — see the 2049-iteration test).
+    let ctx = Context::new().expect("Context::new on macOS");
+    run_gated_delta_step_ctx(&ctx, q, k, v, g, beta, state_in, dt, b, hv, hk, dv, dk)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_gated_delta_step_ctx(
+    ctx: &Context,
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    g: &[f32],
+    beta: &[f32],
+    state_in: &[f32],
+    dt: Dt,
+    b: usize,
+    hv: usize,
+    hk: usize,
+    dv: usize,
+    dk: usize,
+) -> (Vec<f32>, Vec<f32>) {
     let n_total = b * hv;
 
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -126,7 +150,6 @@ fn run_gated_delta_step(
     buffers.insert("hv".into(), (hv as u32).to_le_bytes().to_vec());
     buffers.insert("hk".into(), (hk as u32).to_le_bytes().to_vec());
 
-    let ctx = Context::new().expect("Context::new on macOS");
     let mut kernel = mt_gated_delta_step::kernel_ir_for(dt.to_dtype());
     kernel.mode = KernelMode::Reduction;
 
@@ -481,13 +504,29 @@ fn gated_delta_step_2049_iterations_stay_stable_f32() {
     let mut last_y_gpu = vec![0.0_f32; n_total * dv];
     let mut last_y_cpu = vec![0.0_f32; n_total * dv];
 
+    // One Context for all 2049 iterations — a fresh `Context::new()` per
+    // step leaks Metal devices and eventually fails device creation.
+    let ctx = Context::new().expect("Context::new on macOS");
     for step in 0..n_iters {
         // v varies per step so the recurrence has actual input.
         let v: Vec<f32> =
             (0..n_total * dv).map(|i| ((i as f32 + step as f32) * 0.029).sin() * 0.3).collect();
 
-        let (y_gpu, state_gpu_new) =
-            run_gated_delta_step(&q, &k, &v, &g, &beta, &state_gpu, Dt::F32, b, hv, hk, dv, dk);
+        let (y_gpu, state_gpu_new) = run_gated_delta_step_ctx(
+            &ctx,
+            &q,
+            &k,
+            &v,
+            &g,
+            &beta,
+            &state_gpu,
+            Dt::F32,
+            b,
+            hv,
+            hk,
+            dv,
+            dk,
+        );
         let (y_cpu, state_cpu_new) =
             naive_gated_delta_step(&q, &k, &v, &g, &beta, &state_cpu, b, hv, hk, dv, dk);
 
