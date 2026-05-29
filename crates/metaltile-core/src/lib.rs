@@ -15,17 +15,11 @@ pub mod toolchain;
 
 /// Backward-compat re-export: `metaltile_core::bench` still works.
 pub mod bench {
-    pub use crate::toolchain::bench::*;
-    pub use crate::toolchain::test::*;
+    pub use crate::toolchain::{bench::*, test::*};
 }
 
 // Backward-compat flat re-exports for the DSL types.
-pub use dsl::constexpr as constexpr;
-pub use dsl::dtype as dtype;
-pub use dsl::shape as shape;
-pub use dsl::ConstExpr;
-pub use dsl::DType;
-pub use dsl::{Dim, DimExpr, Shape, tile};
+pub use dsl::{ConstExpr, DType, Dim, DimExpr, Shape, constexpr, dtype, shape, tile};
 pub use error::{Error, Result};
 /// Re-export of `inventory` so generated `inventory::submit!` code in
 /// `#[kernel]`-expanded modules can use `metaltile_core::inventory::submit!`.

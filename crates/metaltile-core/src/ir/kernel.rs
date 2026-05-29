@@ -4,13 +4,12 @@ use std::{collections::BTreeMap, fmt};
 
 use rustc_hash::FxHashMap;
 
-use crate::dsl::shape::Shape;
-
 use super::{
     ids::{BlockId, ValueId},
     op::Op,
     param::{ConstExprDecl, Param},
 };
+use crate::dsl::shape::Shape;
 
 // ---------------------------------------------------------------------------
 // KernelMode
@@ -282,9 +281,13 @@ impl fmt::Display for Block {
 #[cfg(test)]
 mod tests {
     use super::{Block, BlockId, Kernel, Op, ValueId};
-    use crate::ir::op::{BinOpKind, IndexExpr};
-    use crate::ir::param::{Param, ParamKind};
-    use crate::dsl::{dtype::DType, shape::Shape};
+    use crate::{
+        dsl::{dtype::DType, shape::Shape},
+        ir::{
+            op::{BinOpKind, IndexExpr},
+            param::{Param, ParamKind},
+        },
+    };
 
     #[test]
     fn entry_block_lives_in_body_not_blocks() {

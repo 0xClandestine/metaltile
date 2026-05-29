@@ -5,12 +5,11 @@
 
 use metaltile_macros::{OpFlags, ValueRefs, VariantName};
 
-use crate::dsl::{constexpr::ConstExpr, dtype::DType, shape::Shape};
-
 use super::{
     ids::{BlockId, ValueId, VarId},
     param::TypedSlot,
 };
+use crate::dsl::{constexpr::ConstExpr, dtype::DType, shape::Shape};
 
 // ---------------------------------------------------------------------------
 // Op-kind enums
@@ -1071,10 +1070,7 @@ pub enum Op {
     },
 
     /// Execute A·B → C.
-    CoopTileRun {
-        name: String,
-        direct: bool,
-    },
+    CoopTileRun { name: String, direct: bool },
 
     /// Store the C register tile through a `tensor_inline` view.
     CoopTileStoreC {
@@ -1377,12 +1373,7 @@ impl Op {
                 write!(f, "Gather({src}, v{}, axis={axis})", indices.as_u32())
             },
             Op::Scatter { dst, indices, value, axis } => {
-                write!(
-                    f,
-                    "Scatter({dst}, v{}, v{}, axis={axis})",
-                    indices.as_u32(),
-                    value.as_u32()
-                )
+                write!(f, "Scatter({dst}, v{}, v{}, axis={axis})", indices.as_u32(), value.as_u32())
             },
             Op::Atomic { op, scope, dst, index, value } => {
                 write!(
@@ -1482,12 +1473,7 @@ impl Op {
                 write!(f, "SimdgroupElemLoad(v{}, [{index}])", value.as_u32())
             },
             Op::SimdgroupElemStore { value, index, data } => {
-                write!(
-                    f,
-                    "SimdgroupElemStore(v{}, [{index}], v{})",
-                    value.as_u32(),
-                    data.as_u32()
-                )
+                write!(f, "SimdgroupElemStore(v{}, [{index}], v{})", value.as_u32(), data.as_u32())
             },
             Op::SimdgroupLoad { dest, tg, offset, stride, transpose } => {
                 write!(

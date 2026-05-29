@@ -1,8 +1,7 @@
 //! Test setup types: [`TestBuffer`], [`TestSetup`], [`KernelTest`], [`KernelTestEntry`].
 
+use super::bench::{ConstValue, Grid, random_bytes};
 use crate::{dsl::dtype::DType, ir::Kernel};
-
-use super::bench::{random_bytes, ConstValue, Grid};
 
 // ---------------------------------------------------------------------------
 // TestBuffer
@@ -219,7 +218,6 @@ impl KernelTestEntry {
 impl AsRef<dyn KernelTest + 'static> for KernelTestEntry {
     fn as_ref(&self) -> &(dyn KernelTest + 'static) { self.inner }
 }
-
 
 // ---------------------------------------------------------------------------
 // Tests

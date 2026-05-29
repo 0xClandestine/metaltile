@@ -39,8 +39,8 @@ use std::{
 };
 
 use metaltile_codegen::{MslGenerator, msl::MslConfig};
-use metaltile_core::{KernelEntry, all_kernels};
-use metaltile_std::spec::{BenchSpec, all_specs, effective_mode};
+use metaltile_core::all_kernels;
+use metaltile_std::spec::{all_specs, effective_mode};
 
 // ── DSL builtin whitelist (mt_* and __mt_* symbols emitted by codegen) ──
 //
@@ -254,8 +254,7 @@ fn every_registered_benchspec_codegens() {
 #[test]
 fn no_undefined_mt_symbols_in_emitted_msl() {
     // Build set of known kernel names from the registry.
-    let kernel_names: HashSet<String> =
-        all_specs().map(|s| s.kernel_name.to_string()).collect();
+    let kernel_names: HashSet<String> = all_specs().map(|s| s.kernel_name.to_string()).collect();
     assert!(!kernel_names.is_empty(), "inventory empty — link issue?");
 
     let builtins: HashSet<&'static str> = DSL_BUILTINS.iter().copied().collect();

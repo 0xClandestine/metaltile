@@ -27,7 +27,16 @@ pub mod param;
 pub use ids::{BlockId, ValueId, VarId};
 pub use kernel::{Block, Kernel, KernelMode};
 pub use op::{
-    ActKind, AtomicKind, AtomicScope, BinOpKind, CoopTileAccMode, CoopTileScope, IndexExpr,
-    KernelCallArg, Op, ReduceKind, UnaryOpKind,
+    ActKind,
+    AtomicKind,
+    AtomicScope,
+    BinOpKind,
+    CoopTileAccMode,
+    CoopTileScope,
+    IndexExpr,
+    KernelCallArg,
+    Op,
+    ReduceKind,
+    UnaryOpKind,
 };
 pub use param::{ConstExprDecl, Param, ParamKind, TypedSlot};

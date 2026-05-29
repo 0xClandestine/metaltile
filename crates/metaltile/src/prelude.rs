@@ -34,14 +34,18 @@
 
 use std::{marker::PhantomData, ops::Index};
 
+/// Registry entry for a MetalTile kernel available for cross-kernel calling.
+///
+/// You only need this when registering a kernel for use as an inlined callee via the
+/// `inventory::collect!` mechanism. For ordinary `#[kernel]` definitions this is handled
+/// automatically by the macro.
+pub use metaltile_core::KernelEntry;
 /// Compile-time symbolic values used in shape annotations and generated IR.
 pub use metaltile_core::constexpr::ConstExpr;
 /// A collection of resolved constexpr values for a specific kernel launch.
 pub use metaltile_core::constexpr::ConstExprValues;
 /// Scalar and tensor element types supported by the IR and MSL codegen.
 pub use metaltile_core::dtype::DType;
-/// Apple GPU family inference from Metal device name strings.
-pub use metaltile_runtime::GpuFamily;
 // IR types — user-facing subset (op-kind enums and kernel-level containers).
 // Raw IR plumbing (Op, Block, ValueId, Param, etc.) lives in `metaltile::core::ir`.
 /// Neural activation function kind.
@@ -64,12 +68,6 @@ pub use metaltile_core::ir::KernelMode;
 pub use metaltile_core::ir::ReduceKind;
 /// Unary math operation kind.
 pub use metaltile_core::ir::UnaryOpKind;
-/// Registry entry for a MetalTile kernel available for cross-kernel calling.
-///
-/// You only need this when registering a kernel for use as an inlined callee via the
-/// `inventory::collect!` mechanism. For ordinary `#[kernel]` definitions this is handled
-/// automatically by the macro.
-pub use metaltile_core::KernelEntry;
 /// Shape-building helpers.
 pub use metaltile_core::shape::Dim;
 /// Build a 2D tile shape at runtime: `make_tile(rows, cols) -> Shape`.
@@ -97,6 +95,8 @@ pub use metaltile_runtime::Context;
 pub use metaltile_runtime::DispatchResult;
 /// Input buffer spec for the launched dispatch pipeline.
 pub use metaltile_runtime::DispatchSpec;
+/// Apple GPU family inference from Metal device name strings.
+pub use metaltile_runtime::GpuFamily;
 /// Top-level runtime error.
 pub use metaltile_runtime::MetalTileError;
 /// A resident Metal buffer managed by the context.
