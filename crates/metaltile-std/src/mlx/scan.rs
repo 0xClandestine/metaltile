@@ -652,3 +652,149 @@ pub fn mt_scan_min_exclusive<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: 
         threadgroup_barrier();
     }
 }
+
+/// New-syntax correctness for the prefix-scan family (Reduction mode,
+/// grid=[1, rows, 1], tpg=256). Per-row inclusive/exclusive scans, oracle on
+/// dtype-rounded inputs. Exclusive max/min are bench-only — they seed position
+/// 0 with ±inf (the identity), which breaks the abs-diff comparison.
+pub mod kernel_tests {
+    use metaltile::{core::ir::Kernel, test::*, test_kernel};
+
+    use super::*;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    #[allow(clippy::too_many_arguments)]
+    fn scan_setup(
+        kernel: Kernel,
+        rows: usize,
+        n: usize,
+        gen_row: &dyn Fn(usize, usize) -> f32,
+        init: f32,
+        op: fn(f32, f32) -> f32,
+        exclusive: bool,
+        dt: DType,
+    ) -> TestSetup {
+        let mut inp = Vec::with_capacity(rows * n);
+        let mut expected = Vec::with_capacity(rows * n);
+        for r in 0..rows {
+            let row: Vec<f32> = (0..n).map(|i| gen_row(r, i)).collect();
+            let rd = unpack_f32(&pack_f32(&row, dt), dt);
+            let mut acc = init;
+            for &x in &rd {
+                if exclusive {
+                    expected.push(acc);
+                    acc = op(acc, x);
+                } else {
+                    acc = op(acc, x);
+                    expected.push(acc);
+                }
+            }
+            inp.extend_from_slice(&row);
+        }
+        TestSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("inp", pack_f32(&inp, dt), dt))
+            .input(TestBuffer::zeros("out", rows * n, dt))
+            .constexpr("n", n as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(1, rows as u32, 1, [256, 1, 1])
+    }
+
+    fn small(r: usize, i: usize) -> f32 { ((i % 17) as f32 - 8.0) * 0.01 + r as f32 * 0.001 }
+    fn near1(r: usize, i: usize) -> f32 { 1.0 + ((i % 7) as f32 - 3.0) * 0.001 + r as f32 * 1e-4 }
+    fn spread(r: usize, i: usize) -> f32 { ((i * 7919 % 1000) as f32) * 0.01 - 5.0 + r as f32 }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 1.0, 8.0])]
+    fn test_scan_sum(dt: DType) -> TestSetup {
+        scan_setup(mt_scan::kernel_ir_for(dt), 4, 1024, &small, 0.0, |a, b| a + b, false, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 1.0, 8.0])]
+    fn test_scan_exclusive(dt: DType) -> TestSetup {
+        scan_setup(
+            mt_scan_exclusive::kernel_ir_for(dt),
+            4,
+            1024,
+            &small,
+            0.0,
+            |a, b| a + b,
+            true,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 1e-1, 1.0])]
+    fn test_scan_prod(dt: DType) -> TestSetup {
+        scan_setup(mt_scan_prod::kernel_ir_for(dt), 4, 1024, &near1, 1.0, |a, b| a * b, false, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 1e-1, 1.0])]
+    fn test_scan_prod_exclusive(dt: DType) -> TestSetup {
+        scan_setup(
+            mt_scan_prod_exclusive::kernel_ir_for(dt),
+            4,
+            1024,
+            &near1,
+            1.0,
+            |a, b| a * b,
+            true,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-3)]
+    fn test_scan_max(dt: DType) -> TestSetup {
+        scan_setup(
+            mt_scan_max::kernel_ir_for(dt),
+            4,
+            1024,
+            &spread,
+            f32::NEG_INFINITY,
+            f32::max,
+            false,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-3)]
+    fn test_scan_min(dt: DType) -> TestSetup {
+        scan_setup(
+            mt_scan_min::kernel_ir_for(dt),
+            4,
+            1024,
+            &spread,
+            f32::INFINITY,
+            f32::min,
+            false,
+            dt,
+        )
+    }
+}
+
+/// New-syntax benchmarks for the prefix-scan family.
+pub mod kernel_benches {
+    use metaltile::{bench, core::ir::Kernel, test::*};
+
+    use super::*;
+
+    fn sb(kernel: Kernel, dt: DType) -> BenchSetup {
+        let (rows, n) = (4096usize, 1024usize);
+        BenchSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("inp", rows * n, dt))
+            .buffer(BenchBuffer::zeros("out", rows * n, dt).output())
+            .constexpr("n", n as u32)
+            .grid_3d(1, rows as u32, 1, [256, 1, 1])
+            .bytes_moved((2 * rows * n * dt.size_bytes()) as u64)
+    }
+
+    macro_rules! sbench {
+        ($name:ident, $full:literal, $kernel:ident) => {
+            #[bench(name = $full, dtypes = [f32, f16, bf16])]
+            fn $name(dt: DType) -> BenchSetup { sb($kernel::kernel_ir_for(dt), dt) }
+        };
+    }
+    sbench!(bench_scan_sum, "mlx/scan/sum", mt_scan);
+    sbench!(bench_scan_excl, "mlx/scan/sum_exclusive", mt_scan_exclusive);
+    sbench!(bench_scan_prod, "mlx/scan/prod", mt_scan_prod);
+    sbench!(bench_scan_prod_excl, "mlx/scan/prod_exclusive", mt_scan_prod_exclusive);
+    sbench!(bench_scan_max, "mlx/scan/max", mt_scan_max);
+    sbench!(bench_scan_max_excl, "mlx/scan/max_exclusive", mt_scan_max_exclusive);
+    sbench!(bench_scan_min, "mlx/scan/min", mt_scan_min);
+    sbench!(bench_scan_min_excl, "mlx/scan/min_exclusive", mt_scan_min_exclusive);
+}
