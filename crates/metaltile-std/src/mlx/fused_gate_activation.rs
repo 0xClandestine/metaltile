@@ -106,3 +106,88 @@ pub fn mt_fused_gate_clipped_swiglu<T>(gate: Tensor<T>, up: Tensor<T>, out: Tens
     let act = g * sig * (u + 1.0f32);
     store(out[idx], act.cast::<T>());
 }
+
+/// New-syntax correctness for the fused gate-activation kernels (Grid3D, f32
+/// internal). Oracles mirror the kernels exactly on dtype-rounded inputs.
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::{mt_fused_gate_clipped_swiglu, mt_fused_gate_gelu};
+    use crate::utils::{pack_f32, unpack_f32};
+
+    fn inputs(n: usize, dt: DType) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+        // Range spans beyond +/-7 so clipped_swiglu's clamp is exercised.
+        let gate: Vec<f32> = (0..n).map(|i| (i % 17) as f32 - 8.0).collect();
+        let up: Vec<f32> = (0..n).map(|i| (i % 13) as f32 - 6.0).collect();
+        let g = unpack_f32(&pack_f32(&gate, dt), dt);
+        let u = unpack_f32(&pack_f32(&up, dt), dt);
+        (gate, up, g, u)
+    }
+
+    fn build(
+        kernel: metaltile::core::ir::Kernel,
+        gate: &[f32],
+        up: &[f32],
+        expected: &[f32],
+        dt: DType,
+    ) -> TestSetup {
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("gate", pack_f32(gate, dt), dt))
+            .input(TestBuffer::from_vec("up", pack_f32(up, dt), dt))
+            .input(TestBuffer::zeros("out", gate.len(), dt))
+            .expect(TestBuffer::from_vec("out", pack_f32(expected, dt), dt))
+            .grid_1d(gate.len(), 256)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 1e-2, 5e-2])]
+    fn test_fused_gate_gelu(dt: DType) -> TestSetup {
+        let (gate, up, g, u) = inputs(512, dt);
+        const C: f32 = 0.797_884_6; // sqrt(2/pi)
+        let expected: Vec<f32> = g
+            .iter()
+            .zip(&u)
+            .map(|(&g, &u)| 0.5 * g * (1.0 + (C * (g + 0.044715 * g * g * g)).tanh()) * u)
+            .collect();
+        build(mt_fused_gate_gelu::kernel_ir_for(dt), &gate, &up, &expected, dt)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 1e-2, 5e-2])]
+    fn test_fused_gate_clipped_swiglu(dt: DType) -> TestSetup {
+        let (gate, up, g, u) = inputs(512, dt);
+        let expected: Vec<f32> = g
+            .iter()
+            .zip(&u)
+            .map(|(&g, &u)| {
+                let g = g.clamp(-7.0, 7.0);
+                let u = u.clamp(-7.0, 7.0);
+                g * (1.0 / (1.0 + (-1.702 * g).exp())) * (u + 1.0)
+            })
+            .collect();
+        build(mt_fused_gate_clipped_swiglu::kernel_ir_for(dt), &gate, &up, &expected, dt)
+    }
+}
+
+/// New-syntax benchmarks for the fused gate-activation kernels.
+pub mod kernel_benches {
+    use metaltile::{bench, test::*};
+
+    use super::{mt_fused_gate_clipped_swiglu, mt_fused_gate_gelu};
+
+    fn fb(kernel: metaltile::core::ir::Kernel, dt: DType) -> BenchSetup {
+        let n = 64 * 1024 * 1024usize;
+        BenchSetup::new(kernel)
+            .buffer(BenchBuffer::random("gate", n, dt))
+            .buffer(BenchBuffer::random("up", n, dt))
+            .buffer(BenchBuffer::zeros("out", n, dt).output())
+            .grid_1d(n, 256)
+            .bytes_moved((3 * n * dt.size_bytes()) as u64)
+    }
+
+    #[bench(name = "mlx/fused_gate/gelu_approx", dtypes = [f32, f16, bf16])]
+    fn bench_gelu(dt: DType) -> BenchSetup { fb(mt_fused_gate_gelu::kernel_ir_for(dt), dt) }
+
+    #[bench(name = "mlx/fused_gate/clipped_swiglu", dtypes = [f32, f16, bf16])]
+    fn bench_clipped(dt: DType) -> BenchSetup {
+        fb(mt_fused_gate_clipped_swiglu::kernel_ir_for(dt), dt)
+    }
+}

@@ -150,3 +150,144 @@ pub fn mt_masked_scatter<T>(
         store(out[idx], chosen);
     }
 }
+
+/// New-syntax correctness for the row gather/scatter + masked-scatter index
+/// kernels (Grid3D, exact). Oracles replicate the index math on dtype-rounded
+/// data; scatter uses distinct indices (no collisions).
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::{mt_gather_front, mt_masked_scatter, mt_scatter};
+    use crate::utils::{pack_f32, unpack_f32};
+
+    fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-6)]
+    fn test_mt_gather_front(dt: DType) -> TestSetup {
+        let (n_src, n_out, w) = (5usize, 3usize, 4usize);
+        let src: Vec<f32> = (0..n_src * w).map(|i| i as f32 * 0.1 - 1.0).collect();
+        let src_dt = unpack_f32(&pack_f32(&src, dt), dt);
+        let rows: Vec<u32> = vec![2, 0, 4];
+        let n_elems = n_out * w;
+        let expected: Vec<f32> =
+            (0..n_elems).map(|idx| src_dt[rows[idx / w] as usize * w + idx % w]).collect();
+        TestSetup::new(mt_gather_front::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("src", pack_f32(&src, dt), dt))
+            .input(TestBuffer::from_vec("indices", u32_bytes(&rows), DType::U32))
+            .input(TestBuffer::zeros("out", n_elems, dt))
+            .constexpr("row_width", w as u32)
+            .constexpr("n_elems", n_elems as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_1d(n_elems, 256)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-6)]
+    fn test_mt_scatter(dt: DType) -> TestSetup {
+        let (n_upd, n_out, w) = (3usize, 5usize, 4usize);
+        let updates: Vec<f32> = (0..n_upd * w).map(|i| i as f32 * 0.1 - 0.5).collect();
+        let upd_dt = unpack_f32(&pack_f32(&updates, dt), dt);
+        let rows: Vec<u32> = vec![0, 2, 4]; // distinct → no collisions
+        let n_elems = n_upd * w;
+        let mut expected = vec![0.0f32; n_out * w];
+        for idx in 0..n_elems {
+            expected[rows[idx / w] as usize * w + idx % w] = upd_dt[idx];
+        }
+        TestSetup::new(mt_scatter::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("updates", pack_f32(&updates, dt), dt))
+            .input(TestBuffer::from_vec("indices", u32_bytes(&rows), DType::U32))
+            .input(TestBuffer::zeros("out", n_out * w, dt))
+            .constexpr("row_width", w as u32)
+            .constexpr("n_elems", n_elems as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_1d(n_elems, 256)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-6)]
+    fn test_mt_masked_scatter(dt: DType) -> TestSetup {
+        let n_elems = 64usize;
+        let src: Vec<f32> = (0..n_elems).map(|i| i as f32 * 0.05 - 1.5).collect();
+        let src_dt = unpack_f32(&pack_f32(&src, dt), dt);
+        let mask: Vec<u32> = (0..n_elems).map(|i| (i % 2) as u32).collect();
+        let offsets: Vec<u32> = (0..n_elems).map(|i| ((i * 13 + 1) % n_elems) as u32).collect();
+        // out is pre-zeroed → unmasked slots keep 0.
+        let expected: Vec<f32> = (0..n_elems)
+            .map(|i| if mask[i] != 0 { src_dt[offsets[i] as usize] } else { 0.0 })
+            .collect();
+        TestSetup::new(mt_masked_scatter::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("mask", u32_bytes(&mask), DType::U32))
+            .input(TestBuffer::from_vec("offsets", u32_bytes(&offsets), DType::U32))
+            .input(TestBuffer::from_vec("src", pack_f32(&src, dt), dt))
+            .input(TestBuffer::zeros("out", n_elems, dt))
+            .constexpr("n_elems", n_elems as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_1d(n_elems, 256)
+    }
+}
+
+/// New-syntax benchmarks for the index kernels.
+pub mod kernel_benches {
+    use metaltile::{bench, test::*};
+
+    use super::{mt_gather_front, mt_masked_scatter, mt_scatter};
+
+    fn u32_bytes(v: impl Iterator<Item = u32>) -> Vec<u8> {
+        v.flat_map(|x| x.to_le_bytes()).collect()
+    }
+
+    #[bench(name = "mlx/indexing/gather_front", dtypes = [f32, f16, bf16])]
+    fn bench_gather_front(dt: DType) -> BenchSetup {
+        let (n_src, n_out, w) = (8192usize, 8192usize, 256usize);
+        let n_elems = n_out * w;
+        BenchSetup::new(mt_gather_front::kernel_ir_for(dt))
+            .buffer(BenchBuffer::random("src", n_src * w, dt))
+            .buffer(BenchBuffer::from_vec(
+                "indices",
+                u32_bytes((0..n_out).map(|r| (r % n_src) as u32)),
+                DType::U32,
+            ))
+            .buffer(BenchBuffer::zeros("out", n_elems, dt).output())
+            .constexpr("row_width", w as u32)
+            .constexpr("n_elems", n_elems as u32)
+            .grid_1d(n_elems, 256)
+            .bytes_moved((2 * n_elems * dt.size_bytes()) as u64)
+    }
+
+    #[bench(name = "mlx/indexing/scatter", dtypes = [f32, f16, bf16])]
+    fn bench_scatter(dt: DType) -> BenchSetup {
+        let (n_upd, n_out, w) = (8192usize, 8192usize, 256usize);
+        let n_elems = n_upd * w;
+        BenchSetup::new(mt_scatter::kernel_ir_for(dt))
+            .buffer(BenchBuffer::random("updates", n_elems, dt))
+            .buffer(BenchBuffer::from_vec(
+                "indices",
+                u32_bytes((0..n_upd).map(|r| (r % n_out) as u32)),
+                DType::U32,
+            ))
+            .buffer(BenchBuffer::zeros("out", n_out * w, dt).output())
+            .constexpr("row_width", w as u32)
+            .constexpr("n_elems", n_elems as u32)
+            .grid_1d(n_elems, 256)
+            .bytes_moved((2 * n_elems * dt.size_bytes()) as u64)
+    }
+
+    #[bench(name = "mlx/indexing/masked_scatter", dtypes = [f32, f16, bf16])]
+    fn bench_masked_scatter(dt: DType) -> BenchSetup {
+        let n_elems = 8 * 1024 * 1024usize;
+        BenchSetup::new(mt_masked_scatter::kernel_ir_for(dt))
+            .buffer(BenchBuffer::from_vec(
+                "mask",
+                u32_bytes((0..n_elems).map(|i| (i % 2) as u32)),
+                DType::U32,
+            ))
+            .buffer(BenchBuffer::from_vec(
+                "offsets",
+                u32_bytes((0..n_elems).map(|i| (i % n_elems) as u32)),
+                DType::U32,
+            ))
+            .buffer(BenchBuffer::random("src", n_elems, dt))
+            .buffer(BenchBuffer::zeros("out", n_elems, dt).output())
+            .constexpr("n_elems", n_elems as u32)
+            .grid_1d(n_elems, 256)
+            .bytes_moved((3 * n_elems * dt.size_bytes()) as u64)
+    }
+}

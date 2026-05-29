@@ -335,3 +335,58 @@ pub fn mt_sort_segmented<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32)
         store(out[row_base + i3], threadgroup_load("shared", i3));
     }
 }
+
+/// New-syntax correctness for `mt_sort` (single-block bitonic sort, Reduction
+/// mode, one threadgroup per `n=1024` block, tpg=256). Oracle sorts each block
+/// ascending; exact (same multiset). `mt_merge` / `mt_sort_segmented` (the
+/// multi-block + segmented paths) go to the hard-tier PR.
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::mt_sort;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-6)]
+    fn test_mt_sort(dt: DType) -> TestSetup {
+        let (n_blocks, n) = (3usize, 1024usize); // n hardcoded to TPG*4 in the kernel
+        let mut inp = Vec::with_capacity(n_blocks * n);
+        let mut expected = Vec::with_capacity(n_blocks * n);
+        for b in 0..n_blocks {
+            // A scrambled-but-distinct block; sort is exact on the multiset.
+            let block: Vec<f32> = (0..n)
+                .map(|i| (((i * 2_654_435_761 + b * 40_503) % 9973) as f32) * 0.01 - 50.0)
+                .collect();
+            let bd = unpack_f32(&pack_f32(&block, dt), dt);
+            let mut sorted = bd.clone();
+            sorted.sort_by(|a, c| a.partial_cmp(c).unwrap());
+            expected.extend_from_slice(&sorted);
+            inp.extend_from_slice(&block);
+        }
+        TestSetup::new(mt_sort::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("inp", pack_f32(&inp, dt), dt))
+            .input(TestBuffer::zeros("out", n_blocks * n, dt))
+            .constexpr("n", n as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(n_blocks as u32, 1, 1, [256, 1, 1])
+    }
+}
+
+/// New-syntax benchmark for `mt_sort` (vs MLX `metal/sort.metal`).
+pub mod kernel_benches {
+    use metaltile::{bench, test::*};
+
+    use super::mt_sort;
+
+    #[bench(name = "mlx/sort", dtypes = [f32, f16, bf16])]
+    fn bench_sort(dt: DType) -> BenchSetup {
+        let (n_blocks, n) = (16384usize, 1024usize);
+        BenchSetup::new(mt_sort::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("inp", n_blocks * n, dt))
+            .buffer(BenchBuffer::zeros("out", n_blocks * n, dt).output())
+            .constexpr("n", n as u32)
+            .grid_3d(n_blocks as u32, 1, 1, [256, 1, 1])
+            .bytes_moved((2 * n_blocks * n * dt.size_bytes()) as u64)
+    }
+}
