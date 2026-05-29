@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 #[cfg(target_os = "macos")]
 use std::sync::Mutex;
 
+#[cfg(any(target_os = "macos", test))]
 use metaltile_core::ir::Kernel;
 #[cfg(target_os = "macos")]
 use objc2::{rc::Retained, runtime::ProtocolObject};
@@ -39,6 +40,7 @@ use objc2_metal::{
 #[cfg(target_os = "macos")]
 use rustc_hash::FxHashMap;
 
+#[cfg(target_os = "macos")]
 use crate::error::MetalTileError;
 
 // ---------------------------------------------------------------------------
@@ -96,25 +98,15 @@ type Pso = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
 ///
 /// All public methods require `&self` (the inner `Mutex` provides
 /// interior mutability), so the cache can be shared freely.
+#[cfg(target_os = "macos")]
 pub(crate) struct PsoCache {
-    #[cfg(target_os = "macos")]
     cache: Mutex<FxHashMap<u64, Pso>>,
-    #[cfg(not(target_os = "macos"))]
-    _private: (),
 }
 
+#[cfg(target_os = "macos")]
 impl PsoCache {
     /// Create an empty cache.
-    pub fn new() -> Self {
-        #[cfg(target_os = "macos")]
-        {
-            PsoCache { cache: Mutex::new(FxHashMap::default()) }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            PsoCache { _private: () }
-        }
-    }
+    pub fn new() -> Self { PsoCache { cache: Mutex::new(FxHashMap::default()) } }
 
     /// Return a cached pipeline state for `key`, or compile it from
     /// `msl_source` on miss.
