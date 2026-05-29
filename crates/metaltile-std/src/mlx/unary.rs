@@ -597,6 +597,160 @@ pub fn mt_erfinv<T>(a: Tensor<T>, out: Tensor<T>) {
     store(out[idx], erfinv(load(a[idx])));
 }
 
+/// New-syntax correctness for the simple unary elementwise ops.
+///
+/// Each test rounds its input to `dt` (so the oracle sees what the GPU loads),
+/// computes the f32 reference, and compares per-dtype. Exact ops (abs, relu,
+/// neg, sign, ceil, floor, round, trunc) hold at 1e-6; transcendentals use a
+/// generous-but-bounded per-dtype band that still catches an empty-body or
+/// wrong-formula kernel. `erf`/`gelu`/`erfinv` are bench-only — there's no
+/// std f32 oracle for them (the legacy test didn't cover them either).
+pub mod kernel_tests {
+    use metaltile::{core::ir::Kernel, test::*, test_kernel};
+
+    use super::*;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    const N: usize = 512;
+
+    fn signed() -> Vec<f32> { (0..N).map(|i| (i % 17) as f32 * 0.35 - 3.0).collect() }
+    // Small range that stays clear of the tan poles at ±π/2.
+    fn small() -> Vec<f32> { (0..N).map(|i| (i % 17) as f32 * 0.12 - 1.0).collect() }
+    fn positive() -> Vec<f32> { (0..N).map(|i| (i % 17) as f32 * 0.1 + 0.1).collect() }
+    fn unit() -> Vec<f32> { (0..N).map(|i| (i % 17) as f32 * 0.1 - 0.8).collect() }
+    fn ge_one() -> Vec<f32> { (0..N).map(|i| (i % 17) as f32 * 0.12 + 1.0).collect() }
+    // Offset to dodge .5 boundaries where round-half-even vs -away disagree.
+    fn round_safe() -> Vec<f32> { (0..N).map(|i| (i % 23) as f32 * 0.137 - 1.5).collect() }
+
+    fn un<F: Fn(f32) -> f32>(kernel: Kernel, a: &[f32], op: F, dt: DType) -> TestSetup {
+        let a_dt = unpack_f32(&pack_f32(a, dt), dt);
+        let expected: Vec<f32> = a_dt.iter().map(|&x| op(x)).collect();
+        TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("a", pack_f32(a, dt), dt))
+            .input(TestBuffer::zeros("out", a.len(), dt))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_1d(a.len(), 256)
+    }
+
+    // ── Exact ops (bit-exact in every dtype) ──────────────────────────────
+    macro_rules! exact_test {
+        ($name:ident, $kernel:ident, $input:ident, $op:expr) => {
+            #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-6)]
+            fn $name(dt: DType) -> TestSetup { un($kernel::kernel_ir_for(dt), &$input(), $op, dt) }
+        };
+    }
+    exact_test!(test_unary_abs, mt_abs, signed, f32::abs);
+    exact_test!(test_unary_relu, mt_relu, signed, |x| x.max(0.0));
+    exact_test!(test_unary_neg, mt_neg, signed, |x| -x);
+    exact_test!(test_unary_ceil, mt_ceil, round_safe, f32::ceil);
+    exact_test!(test_unary_floor, mt_floor, round_safe, f32::floor);
+    exact_test!(test_unary_round, mt_round, round_safe, f32::round);
+    exact_test!(test_unary_trunc, mt_trunc, round_safe, f32::trunc);
+    exact_test!(test_unary_sign, mt_sign, signed, |x| if x > 0.0 {
+        1.0
+    } else if x < 0.0 {
+        -1.0
+    } else {
+        0.0
+    });
+
+    // ── Transcendental ops (per-dtype band) ───────────────────────────────
+    macro_rules! trans_test {
+        ($name:ident, $kernel:ident, $input:ident, $op:expr) => {
+            #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+            fn $name(dt: DType) -> TestSetup { un($kernel::kernel_ir_for(dt), &$input(), $op, dt) }
+        };
+    }
+    trans_test!(test_unary_exp, mt_exp, signed, f32::exp);
+    trans_test!(test_unary_exp2, mt_exp2, signed, f32::exp2);
+    trans_test!(test_unary_expm1, mt_expm1, signed, f32::exp_m1);
+    trans_test!(test_unary_log, mt_log, positive, f32::ln);
+    trans_test!(test_unary_log2, mt_log2, positive, f32::log2);
+    trans_test!(test_unary_log10, mt_log10, positive, f32::log10);
+    trans_test!(test_unary_log1p, mt_log1p, positive, f32::ln_1p);
+    trans_test!(test_unary_sqrt, mt_sqrt, positive, f32::sqrt);
+    trans_test!(test_unary_rsqrt, mt_rsqrt, positive, |x| 1.0 / x.sqrt());
+    trans_test!(test_unary_recip, mt_recip, positive, |x| 1.0 / x);
+    trans_test!(test_unary_square, mt_square, signed, |x| x * x);
+    trans_test!(test_unary_sin, mt_sin, signed, f32::sin);
+    trans_test!(test_unary_cos, mt_cos, signed, f32::cos);
+    trans_test!(test_unary_tan, mt_tan, small, f32::tan);
+    trans_test!(test_unary_asin, mt_asin, unit, f32::asin);
+    trans_test!(test_unary_acos, mt_acos, unit, f32::acos);
+    trans_test!(test_unary_atan, mt_atan, signed, f32::atan);
+    trans_test!(test_unary_sinh, mt_sinh, signed, f32::sinh);
+    trans_test!(test_unary_cosh, mt_cosh, signed, f32::cosh);
+    trans_test!(test_unary_tanh, mt_tanh_op, signed, f32::tanh);
+    trans_test!(test_unary_asinh, mt_asinh, signed, f32::asinh);
+    trans_test!(test_unary_acosh, mt_acosh, ge_one, f32::acosh);
+    trans_test!(test_unary_atanh, mt_atanh, unit, f32::atanh);
+    trans_test!(test_unary_silu, mt_silu, signed, |x| x / (1.0 + (-x).exp()));
+    trans_test!(test_unary_sigmoid, mt_sigmoid, signed, |x| 1.0 / (1.0 + (-x).exp()));
+    trans_test!(test_unary_softplus, mt_softplus, signed, |x| x.max(0.0)
+        + (1.0 + (-x.abs()).exp()).ln());
+}
+
+/// New-syntax benchmarks for the simple unary elementwise ops (vs MLX
+/// `metal/unary.metal`). All read `a` once and write `out` once.
+pub mod kernel_benches {
+    use metaltile::{bench, core::ir::Kernel, test::*};
+
+    use super::*;
+
+    fn ub(kernel: Kernel, dt: DType) -> BenchSetup {
+        let n = 64 * 1024 * 1024usize;
+        BenchSetup::new(kernel)
+            .buffer(BenchBuffer::random("a", n, dt))
+            .buffer(BenchBuffer::zeros("out", n, dt).output())
+            .grid_1d(n, 256)
+            .bytes_moved((2 * n * dt.size_bytes()) as u64)
+    }
+
+    macro_rules! ubench {
+        ($name:ident, $full:literal, $kernel:ident) => {
+            #[bench(name = $full, dtypes = [f32, f16, bf16])]
+            fn $name(dt: DType) -> BenchSetup { ub($kernel::kernel_ir_for(dt), dt) }
+        };
+    }
+    ubench!(bench_exp, "mlx/unary/exp", mt_exp);
+    ubench!(bench_exp2, "mlx/unary/exp2", mt_exp2);
+    ubench!(bench_expm1, "mlx/unary/expm1", mt_expm1);
+    ubench!(bench_log, "mlx/unary/log", mt_log);
+    ubench!(bench_log2, "mlx/unary/log2", mt_log2);
+    ubench!(bench_log10, "mlx/unary/log10", mt_log10);
+    ubench!(bench_log1p, "mlx/unary/log1p", mt_log1p);
+    ubench!(bench_sqrt, "mlx/unary/sqrt", mt_sqrt);
+    ubench!(bench_rsqrt, "mlx/unary/rsqrt", mt_rsqrt);
+    ubench!(bench_recip, "mlx/unary/recip", mt_recip);
+    ubench!(bench_square, "mlx/unary/square", mt_square);
+    ubench!(bench_abs, "mlx/unary/abs", mt_abs);
+    ubench!(bench_neg, "mlx/unary/neg", mt_neg);
+    ubench!(bench_sign, "mlx/unary/sign", mt_sign);
+    ubench!(bench_relu, "mlx/unary/relu", mt_relu);
+    ubench!(bench_ceil, "mlx/unary/ceil", mt_ceil);
+    ubench!(bench_floor, "mlx/unary/floor", mt_floor);
+    ubench!(bench_round, "mlx/unary/round", mt_round);
+    ubench!(bench_trunc, "mlx/unary/trunc", mt_trunc);
+    ubench!(bench_sin, "mlx/unary/sin", mt_sin);
+    ubench!(bench_cos, "mlx/unary/cos", mt_cos);
+    ubench!(bench_tan, "mlx/unary/tan", mt_tan);
+    ubench!(bench_asin, "mlx/unary/asin", mt_asin);
+    ubench!(bench_acos, "mlx/unary/acos", mt_acos);
+    ubench!(bench_atan, "mlx/unary/atan", mt_atan);
+    ubench!(bench_sinh, "mlx/unary/sinh", mt_sinh);
+    ubench!(bench_cosh, "mlx/unary/cosh", mt_cosh);
+    ubench!(bench_tanh, "mlx/unary/tanh", mt_tanh_op);
+    ubench!(bench_asinh, "mlx/unary/asinh", mt_asinh);
+    ubench!(bench_acosh, "mlx/unary/acosh", mt_acosh);
+    ubench!(bench_atanh, "mlx/unary/atanh", mt_atanh);
+    ubench!(bench_silu, "mlx/unary/silu", mt_silu);
+    ubench!(bench_gelu, "mlx/unary/gelu", mt_gelu);
+    ubench!(bench_sigmoid, "mlx/unary/sigmoid", mt_sigmoid);
+    ubench!(bench_softplus, "mlx/unary/softplus", mt_softplus);
+    ubench!(bench_erf, "mlx/unary/erf", mt_erf);
+    ubench!(bench_erfinv, "mlx/unary/erfinv", mt_erfinv);
+}
+
 // Numerically-stable softplus: softplus(x) = max(x, 0) + log1p(exp(-|x|)).
 // Avoids overflow at large positive x and underflow at large negative x —
 // the naive `log(1 + exp(x))` blows up for x > ~80 (f32) / ~10 (f16).
