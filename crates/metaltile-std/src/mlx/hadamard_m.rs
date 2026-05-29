@@ -226,6 +226,34 @@ pub fn kernel_ir_for(m: u32, dt: DType) -> Kernel {
 // inventory submit needs it (the inventory is registered per-M below).
 const _: &[BenchDType] = &[BenchDType::F32, BenchDType::F16, BenchDType::BF16];
 
+/// New-syntax benchmarks for the Paley-construction Hadamard-M transforms
+/// (M ∈ {12, 20, 28}; Reduction, one TG per row, tpg=M). These plain
+/// `#[kernel]`s were never benched under the legacy schema — bench-only here;
+/// correctness stays pinned by `tests/hadamard_m_gpu_correctness.rs` (its
+/// oracle needs the bit-packed Paley sign tables, not worth transcribing).
+pub mod kernel_benches {
+    use metaltile::{bench, test::*};
+
+    macro_rules! hm_bench {
+        ($name:ident, $full:literal, $kernel:ident, $m:literal) => {
+            #[bench(name = $full, dtypes = [f32, f16, bf16])]
+            fn $name(dt: DType) -> BenchSetup {
+                let (rows, m) = (16384usize, $m);
+                BenchSetup::new(super::$kernel::kernel_ir_for(dt))
+                    .mode(KernelMode::Reduction)
+                    .buffer(BenchBuffer::random("inp", rows * m, dt))
+                    .buffer(BenchBuffer::zeros("out", rows * m, dt).output())
+                    .constexpr("scale", 1.0f32 / (m as f32).sqrt())
+                    .grid_3d(rows as u32, 1, 1, [m as u32, 1, 1])
+                    .bytes_moved((2 * rows * m * dt.size_bytes()) as u64)
+            }
+        };
+    }
+    hm_bench!(bench_hadamard_m12, "mlx/hadamard_m/m12", mt_hadamard_m12, 12);
+    hm_bench!(bench_hadamard_m20, "mlx/hadamard_m/m20", mt_hadamard_m20, 20);
+    hm_bench!(bench_hadamard_m28, "mlx/hadamard_m/m28", mt_hadamard_m28, 28);
+}
+
 #[cfg(test)]
 #[allow(clippy::needless_range_loop)] // index loops mirror the H_m matrix math
 mod tests {
