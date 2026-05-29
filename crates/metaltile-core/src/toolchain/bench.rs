@@ -266,6 +266,7 @@ pub struct BenchSetup {
     grid: Option<Grid>,
     bytes_moved: Option<u64>,
     ref_kernel: Option<RefKernel>,
+    shape_label: Option<String>,
 }
 
 impl BenchSetup {
@@ -278,6 +279,7 @@ impl BenchSetup {
             grid: None,
             bytes_moved: None,
             ref_kernel: None,
+            shape_label: None,
         }
     }
 
@@ -328,6 +330,19 @@ impl BenchSetup {
         self
     }
 
+    /// Set an explicit label for the bench row's "Shape" column.
+    ///
+    /// Multi-dimensional kernels (attention `B/H/L/D`, matmul `M/N/K`, …) can't
+    /// be summarised by one buffer's element count; set a readable label here
+    /// (e.g. `"B=32 H=128 L=512"`). When unset, the runner falls back to
+    /// `N=<largest buffer> <dtype>`. (Named `with_*` like
+    /// [`with_reference`](Self::with_reference); the getter is
+    /// [`shape_label`](Self::shape_label).)
+    pub fn with_shape_label(mut self, label: impl Into<String>) -> Self {
+        self.shape_label = Some(label.into());
+        self
+    }
+
     /// Attach a reference Metal kernel.
     pub fn with_reference(mut self, ref_kernel: RefKernel) -> Self {
         self.ref_kernel = Some(ref_kernel);
@@ -370,6 +385,9 @@ impl BenchSetup {
 
     /// Optional reference Metal kernel.
     pub fn ref_kernel(&self) -> Option<&RefKernel> { self.ref_kernel.as_ref() }
+
+    /// Author-supplied label for the "Shape" column, if set.
+    pub fn shape_label(&self) -> Option<&str> { self.shape_label.as_deref() }
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +476,19 @@ mod tests {
         assert_eq!(setup.constexprs().len(), 1);
         assert_eq!(setup.grid().grid[0], 4);
         assert_eq!(setup.grid().tpg[0], 16);
+        // No explicit shape label by default — the runner infers one.
+        assert_eq!(setup.shape_label(), None);
+    }
+
+    #[test]
+    fn bench_setup_shape_label_is_set_when_provided() {
+        let setup = BenchSetup::new(Kernel::new("k"))
+            .buffer(BenchBuffer::zeros("out", 64, DType::F32).output())
+            .with_shape_label("B=32 H=128 L=512")
+            .grid_1d(64, 16)
+            .build()
+            .unwrap();
+        assert_eq!(setup.shape_label(), Some("B=32 H=128 L=512"));
     }
 
     #[test]
