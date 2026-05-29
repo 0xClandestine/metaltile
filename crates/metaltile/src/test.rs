@@ -27,4 +27,5 @@ pub use metaltile_core::{
         TestBuffer,
         TestSetup,
     },
+    ir::KernelMode,
 };

@@ -83,3 +83,67 @@ pub fn ffai_argmax<T>(inp: Tensor<T>, out: Tensor<u32>, #[constexpr] n: u32) {
         store(out[0], final_idx);
     }
 }
+
+/// New-syntax correctness for `ffai_argmax`.
+///
+/// This is a **reduction-mode, MLX-less (ffai)** kernel — exactly the case the
+/// legacy harness left unbenched via `class=GenericEmpty`. The new builders
+/// express it with `.mode(KernelMode::Reduction)` (so codegen emits the
+/// threadgroup reduction) and a one-threadgroup grid; the u32 index output is
+/// compared exactly through the integer-aware `pack_f32`/`unpack_f32` path.
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::ffai_argmax;
+    use crate::utils::pack_f32;
+
+    /// One 256-lane threadgroup reduces all `n` elements (the kernel loops over
+    /// `n` in chunks of `lsize`). `max_idx` carries a lone `2.0` spike in a
+    /// field of `1.0` — an unambiguous argmax in every dtype (no rounding ties).
+    fn setup(n: usize, max_idx: usize, dt: DType) -> TestSetup {
+        let mut inp = vec![1.0f32; n];
+        inp[max_idx] = 2.0;
+        TestSetup::new(ffai_argmax::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("inp", pack_f32(&inp, dt), dt))
+            .input(TestBuffer::zeros("out", 1, DType::U32))
+            .constexpr("n", n as u32)
+            .expect(TestBuffer::from_vec(
+                "out",
+                pack_f32(&[max_idx as f32], DType::U32),
+                DType::U32,
+            ))
+            .grid_3d(1, 1, 1, [256, 1, 1])
+    }
+
+    // Integer index output — tol < 1 means the index must match exactly.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 0.5)]
+    fn test_ffai_argmax_interior(dt: DType) -> TestSetup { setup(256, 37, dt) }
+
+    // n > lsize exercises the chunked outer loop (4 chunks of 256).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 0.5)]
+    fn test_ffai_argmax_multi_chunk(dt: DType) -> TestSetup { setup(1000, 813, dt) }
+}
+
+/// New-syntax benchmark for `ffai_argmax` — an MLX-less reduction kernel that
+/// previously produced no bench rows (`class=GenericEmpty`). It now reports
+/// real GB/s in `tile bench` with `Ref(GB/s)` blank (no MLX counterpart).
+pub mod kernel_benches {
+    use metaltile::{bench, test::*};
+
+    use super::ffai_argmax;
+
+    // Vocab-sized argmax (greedy decode): one threadgroup reduces 256K elements.
+    // Read-dominated, so bytes_moved counts the input.
+    #[bench(name = "ffai/argmax", dtypes = [f32, f16, bf16])]
+    fn bench_argmax(dt: DType) -> BenchSetup {
+        let n = 256 * 1024usize;
+        BenchSetup::new(ffai_argmax::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("inp", n, dt))
+            .buffer(BenchBuffer::zeros("out", 1, DType::U32).output())
+            .constexpr("n", n as u32)
+            .grid_3d(1, 1, 1, [256, 1, 1])
+            .bytes_moved((n * dt.size_bytes()) as u64)
+    }
+}

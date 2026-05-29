@@ -231,15 +231,10 @@ pub fn run_kernel_bench(
     let t = grid.tpg.map(|x| x as usize);
     let (gbps, _stats) = bench_gbps(runner, &compiled, &refs, g, t, bytes_moved as f64)?;
 
-    // Shape label from the largest output buffer (fall back to any buffer).
-    let n = setup
-        .buffers()
-        .iter()
-        .filter(|b| b.is_output())
-        .map(|b| b.len())
-        .max()
-        .or_else(|| setup.buffers().iter().map(|b| b.len()).max())
-        .unwrap_or(0);
+    // Shape label from the largest buffer — the meaningful problem size,
+    // whether that's the output (elementwise, e.g. arange) or the input
+    // (a reduction whose output is a single element, e.g. argmax).
+    let n = setup.buffers().iter().map(|b| b.len()).max().unwrap_or(0);
     let shape = format!("N={} {}", human_count(n), dtype_label(dt));
 
     let equiv = EquivResult { n_checked: 0, max_abs_err: 0.0, cosine_sim: 1.0, passed: true };

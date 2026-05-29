@@ -5,7 +5,10 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{dsl::dtype::DType, ir::Kernel};
+use crate::{
+    dsl::dtype::DType,
+    ir::{Kernel, KernelMode},
+};
 
 pub(super) fn random_bytes(len: usize) -> Vec<u8> {
     let seed = std::time::SystemTime::now()
@@ -281,6 +284,17 @@ impl BenchSetup {
     /// Add a GPU buffer.
     pub fn buffer(mut self, b: BenchBuffer) -> Self {
         self.buffers.push(b);
+        self
+    }
+
+    /// Override the kernel's dispatch mode before codegen.
+    ///
+    /// `kernel_ir_for` defaults to [`KernelMode::Elementwise`]; reduction,
+    /// 3D-grid, or simdgroup-matrix kernels must declare their mode here so the
+    /// generated MSL matches how they are dispatched. Elementwise kernels (e.g.
+    /// arange) can omit this.
+    pub fn mode(mut self, mode: KernelMode) -> Self {
+        self.kernel.mode = mode;
         self
     }
 

@@ -1,7 +1,10 @@
 //! Test setup types: [`TestBuffer`], [`TestSetup`], [`KernelTest`], [`KernelTestEntry`].
 
 use super::bench::{ConstValue, Grid, random_bytes};
-use crate::{dsl::dtype::DType, ir::Kernel};
+use crate::{
+    dsl::dtype::DType,
+    ir::{Kernel, KernelMode},
+};
 
 // ---------------------------------------------------------------------------
 // TestBuffer
@@ -129,6 +132,17 @@ impl TestSetup {
     /// Add an expected output buffer (compared against GPU result).
     pub fn expect(mut self, b: TestBuffer) -> Self {
         self.expected.push(b);
+        self
+    }
+
+    /// Override the kernel's dispatch mode before codegen.
+    ///
+    /// `kernel_ir_for` defaults to [`KernelMode::Elementwise`]; reduction,
+    /// 3D-grid, or simdgroup-matrix kernels must declare their mode here so the
+    /// generated MSL matches how they are dispatched. Elementwise kernels (e.g.
+    /// arange) can omit this.
+    pub fn mode(mut self, mode: KernelMode) -> Self {
+        self.kernel.mode = mode;
         self
     }
 
