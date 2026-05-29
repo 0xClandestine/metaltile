@@ -254,3 +254,101 @@ pub mod kernel_benches {
         mb(mt_steel_gemm_masked_32x32x16_2x2::kernel_ir_for(dt), 32, 32, 128, dt)
     }
 }
+
+/// New-syntax correctness tests for the block-masked steel GEMM — ports
+/// the oracle from `tests/steel_gemm_masked_gpu_correctness.rs`. The
+/// kernel computes `C = A · B` with block-level predication: an
+/// output-block mask zeroes whole `BM×BN` blocks, an operand-block mask
+/// scales each `BK`-block's contribution.
+///
+/// Small shape: `M = 2·BM`, `N = 2·BN`, `K = 48` ⇒ 2×2 output blocks,
+/// 3 K-blocks ⇒ `out_mask` length 4, `op_mask` length 12. The setup
+/// drives a checkerboard out-mask (zero the (0,1)/(1,0) blocks) and a
+/// partial op-mask (drop the middle K-block) so both predication paths
+/// fire in one dispatch. `SimdGroup2D` grid `(N/BN, M/BM, 1)`.
+pub mod kernel_tests {
+    use metaltile::{core::ir::Kernel, test::*, test_kernel};
+
+    use super::*;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    fn ramp(n: usize, modulus: usize, offset: f32) -> Vec<f32> {
+        (0..n).map(|i| ((i % modulus) as f32 - offset) * 0.05).collect()
+    }
+
+    /// Naive masked fp32 reference. `out_mask` is `[m/bm * n/bn]`;
+    /// `op_mask` is `[m/bm * n/bn * k/16]`, row-major over (out-block, K-block).
+    #[allow(clippy::too_many_arguments)]
+    fn naive_masked_matmul(
+        a: &[f32],
+        b: &[f32],
+        out_mask: &[f32],
+        op_mask: &[f32],
+        m: usize,
+        k: usize,
+        n: usize,
+        bm: usize,
+        bn: usize,
+    ) -> Vec<f32> {
+        let n_n_blocks = n / bn;
+        let n_k_blocks = k / 16;
+        let mut out = vec![0.0f32; m * n];
+        for mi in 0..m {
+            for ni in 0..n {
+                let blk = (mi / bm) * n_n_blocks + (ni / bn);
+                if out_mask[blk] == 0.0 {
+                    out[mi * n + ni] = 0.0;
+                    continue;
+                }
+                let mut acc = 0.0f32;
+                for kb in 0..n_k_blocks {
+                    let opm = op_mask[blk * n_k_blocks + kb];
+                    for ki in (kb * 16)..(kb * 16 + 16) {
+                        acc += a[mi * k + ki] * opm * b[ki * n + ni];
+                    }
+                }
+                out[mi * n + ni] = acc;
+            }
+        }
+        out
+    }
+
+    /// Build a masked-GEMM correctness setup with a checkerboard out-mask
+    /// and a middle-K-block-dropped op-mask. The mask buffers are `T`-typed.
+    fn masked_setup(kernel: Kernel, bm: u32, bn: u32, tpg: u32, dt: DType) -> TestSetup {
+        let (m, n, k) = (bm as usize * 2, bn as usize * 2, 48usize);
+        let n_out_blocks = (m / bm as usize) * (n / bn as usize); // 4
+        let n_op = n_out_blocks * (k / 16); // 12
+        // Checkerboard output mask: keep (0,0) and (1,1), zero the rest.
+        let out_mask = vec![1.0f32, 0.0, 0.0, 1.0];
+        // Drop the middle K-block of every output block.
+        let op_mask: Vec<f32> = (0..n_op).map(|i| if i % 3 == 1 { 0.0 } else { 1.0 }).collect();
+        let a = unpack_f32(&pack_f32(&ramp(m * k, 19, 7.0), dt), dt);
+        let b = unpack_f32(&pack_f32(&ramp(k * n, 23, 9.0), dt), dt);
+        // Masks are dtype-rounded too (they round-trip exactly for 0/1).
+        let om = unpack_f32(&pack_f32(&out_mask, dt), dt);
+        let opm = unpack_f32(&pack_f32(&op_mask, dt), dt);
+        let expected = naive_masked_matmul(&a, &b, &om, &opm, m, k, n, bm as usize, bn as usize);
+        TestSetup::new(kernel)
+            .mode(KernelMode::SimdGroup2D)
+            .input(TestBuffer::from_vec("a", pack_f32(&a, dt), dt))
+            .input(TestBuffer::from_vec("b", pack_f32(&b, dt), dt))
+            .input(TestBuffer::from_vec("out_mask", pack_f32(&out_mask, dt), dt))
+            .input(TestBuffer::from_vec("op_mask", pack_f32(&op_mask, dt), dt))
+            .input(TestBuffer::zeros("out", m * n, dt))
+            .constexpr("m", m as u32)
+            .constexpr("n", n as u32)
+            .constexpr("k", k as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(n as u32 / bn, m as u32 / bm, 1, [tpg, 1, 1])
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_masked_64x64x16_2x2(dt: DType) -> TestSetup {
+        masked_setup(mt_steel_gemm_masked_64x64x16_2x2::kernel_ir_for(dt), 64, 64, 128, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_masked_32x32x16_2x2(dt: DType) -> TestSetup {
+        masked_setup(mt_steel_gemm_masked_32x32x16_2x2::kernel_ir_for(dt), 32, 32, 128, dt)
+    }
+}

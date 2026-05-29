@@ -190,6 +190,72 @@ pub mod kernel_benches {
     }
 }
 
+/// New-syntax correctness tests for the NAX (cooperative-tensor) fused
+/// steel GEMM — ports the oracle from
+/// `tests/steel_gemm_fused_nax_gpu_correctness.rs`. The kernel computes
+/// the plain row-major `C = A · B` via `mpp::tensor_ops::matmul2d`; the
+/// oracle is a straight triple-loop fp32 matmul over dtype-rounded
+/// inputs.
+///
+/// Multi-tile shape `M = N = 64`, `K = 128` (all multiples of 32 — the
+/// NAX tile contract; 2×2 output tiles, 4 K-blocks). `KernelMode::
+/// Reduction` — `tgid_*` are threadgroup indices — so the grid is
+/// threadgroup counts `(N/32, M/32, 1)` with `tpg = [128, 1, 1]`, copied
+/// from the `#[bench]`. Constexprs are `k`, `n` (M is implicit from the
+/// grid). NOTE: `matmul2d` only runs correctly on Metal 4 / Apple10+;
+/// the test still compiles and dispatches on older hardware (where it is
+/// expected to miss tolerance — the intended signal).
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::mt_steel_gemm_fused_nax;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    /// Naive triple-loop fp32 GEMM oracle (matches `AccumType=float`).
+    fn naive_matmul(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; m * n];
+        for mi in 0..m {
+            for ni in 0..n {
+                let mut acc = 0.0f32;
+                for kk in 0..k {
+                    acc += a[mi * k + kk] * b[kk * n + ni];
+                }
+                out[mi * n + ni] = acc;
+            }
+        }
+        out
+    }
+
+    /// Small-magnitude deterministic inputs — keep values small so the
+    /// f16 / bf16 staging stays well inside dynamic range.
+    fn build_inputs(n_elems_a: usize, n_elems_b: usize) -> (Vec<f32>, Vec<f32>) {
+        let a: Vec<f32> = (0..n_elems_a).map(|i| 0.01 + (i as f32 % 17.0) * 0.013).collect();
+        let b: Vec<f32> = (0..n_elems_b).map(|i| -0.02 + (i as f32 % 13.0) * 0.011).collect();
+        (a, b)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fused_nax(dt: DType) -> TestSetup {
+        const TILE: u32 = 32;
+        let (m, n, k) = (64usize, 64usize, 128usize);
+        let (a, b) = build_inputs(m * k, k * n);
+        // Dtype-round so the CPU oracle sees the same quantization.
+        let a = unpack_f32(&pack_f32(&a, dt), dt);
+        let b = unpack_f32(&pack_f32(&b, dt), dt);
+        let expected = naive_matmul(&a, &b, m, n, k);
+        TestSetup::new(mt_steel_gemm_fused_nax::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("a", pack_f32(&a, dt), dt))
+            .input(TestBuffer::from_vec("b", pack_f32(&b, dt), dt))
+            .input(TestBuffer::zeros("out", m * n, dt))
+            .constexpr("k", k as u32)
+            .constexpr("n", n as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            // Reduction grid is threadgroup counts: (n/32, m/32, 1).
+            .grid_3d(n as u32 / TILE, m as u32 / TILE, 1, [128, 1, 1])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use metaltile_codegen::msl::MslGenerator;

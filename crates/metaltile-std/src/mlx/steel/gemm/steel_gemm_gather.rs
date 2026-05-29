@@ -247,3 +247,90 @@ pub mod kernel_benches {
         gb(mt_steel_gemm_gather_32x32x16_2x2::kernel_ir_for(dt), 32, 32, 128, dt)
     }
 }
+
+/// New-syntax correctness tests for the gather steel GEMM — ports the
+/// oracle from `tests/steel_gemm_gather_gpu_correctness.rs`. The kernel
+/// computes `out[r,c] = Σ_k a[lhs_indices[r], k] · b_sel[k, c]` where
+/// `b_sel` is the `[K, N]` matrix `rhs_indices[c/BN]` stored flat in `b`
+/// at offset `idx*K*N`.
+///
+/// Small shape: `M = 2·BM`, `N = 2·BN`, `K = 48`. Uses a permuted /
+/// repeated `lhs_indices` (pulling from a larger A pool, `n_a_rows =
+/// M+16`) and a two-matrix rhs select to exercise both gathers in a
+/// single dispatch. `SimdGroup2D` grid `(N/BN, M/BM, 1)`, `tpg` copied
+/// from the matching `#[bench]`.
+pub mod kernel_tests {
+    use metaltile::{core::ir::Kernel, test::*, test_kernel};
+
+    use super::*;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
+
+    fn ramp(n: usize, modulus: usize, offset: f32) -> Vec<f32> {
+        (0..n).map(|i| ((i % modulus) as f32 - offset) * 0.05).collect()
+    }
+
+    /// Naive gathered fp32 reference (`b` is `n_b_mats` flat [K,N] matrices).
+    #[allow(clippy::too_many_arguments)]
+    fn naive_gather_matmul(
+        a: &[f32],
+        b: &[f32],
+        lhs: &[u32],
+        rhs: &[u32],
+        m: usize,
+        k: usize,
+        n: usize,
+        bn: usize,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; m * n];
+        for r in 0..m {
+            let a_row = lhs[r] as usize;
+            for c in 0..n {
+                let b_base = rhs[c / bn] as usize * k * n;
+                let mut acc = 0.0f32;
+                for ki in 0..k {
+                    acc += a[a_row * k + ki] * b[b_base + ki * n + c];
+                }
+                out[r * n + c] = acc;
+            }
+        }
+        out
+    }
+
+    /// Build a gather-GEMM correctness setup. Two B matrices (rhs select)
+    /// and a permuted lhs over an `M+16`-row A pool.
+    fn gather_setup(kernel: Kernel, bm: u32, bn: u32, tpg: u32, dt: DType) -> TestSetup {
+        let (m, n, k) = (bm as usize * 2, bn as usize * 2, 48usize);
+        let n_a_rows = m + 16;
+        let n_b_mats = 2usize;
+        // Permuted/repeated lhs over the larger A pool; rhs picks matrix
+        // 1 for N-block 0 and matrix 0 for N-block 1.
+        let lhs: Vec<u32> = (0..m).map(|r| ((r * 7 + 3) % n_a_rows) as u32).collect();
+        let rhs: Vec<u32> = (0..(n / bn as usize)).map(|i| (i % n_b_mats) as u32 ^ 1).collect();
+        let a = unpack_f32(&pack_f32(&ramp(n_a_rows * k, 19, 7.0), dt), dt);
+        let b = unpack_f32(&pack_f32(&ramp(n_b_mats * k * n, 23, 9.0), dt), dt);
+        let expected = naive_gather_matmul(&a, &b, &lhs, &rhs, m, k, n, bn as usize);
+        TestSetup::new(kernel)
+            .mode(KernelMode::SimdGroup2D)
+            .input(TestBuffer::from_vec("a", pack_f32(&a, dt), dt))
+            .input(TestBuffer::from_vec("b", pack_f32(&b, dt), dt))
+            .input(TestBuffer::from_vec("lhs_indices", u32_bytes(&lhs), DType::U32))
+            .input(TestBuffer::from_vec("rhs_indices", u32_bytes(&rhs), DType::U32))
+            .input(TestBuffer::zeros("out", m * n, dt))
+            .constexpr("m", m as u32)
+            .constexpr("n", n as u32)
+            .constexpr("k", k as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(n as u32 / bn, m as u32 / bm, 1, [tpg, 1, 1])
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_gather_64x64x16_2x2(dt: DType) -> TestSetup {
+        gather_setup(mt_steel_gemm_gather_64x64x16_2x2::kernel_ir_for(dt), 64, 64, 128, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_gather_32x32x16_2x2(dt: DType) -> TestSetup {
+        gather_setup(mt_steel_gemm_gather_32x32x16_2x2::kernel_ir_for(dt), 32, 32, 128, dt)
+    }
+}

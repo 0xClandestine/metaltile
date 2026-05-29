@@ -240,9 +240,34 @@ mod tests {
     }
 }
 
-/// New-syntax benchmark for the MPP MoE int8 BGEMM (BM=8). Bench-only:
-/// correctness covered by the int4 MPP bm8 test + legacy int8 A/B test.
-/// `bits=8` → `k_in/4` u32 weight words/row.
+/// New-syntax correctness test for the MPP MoE int8 BGEMM (BM=8). Oracle is the
+/// shared per-row-`indices` int8 dequant-then-grouped-matmul (4 unsigned bytes
+/// per u32). Inputs are dtype-rounded; tolerance is wide because the MPP
+/// cooperative-tensor accumulator reorders the K reduction.
+///
+/// Grid (Reduction, 1 simdgroup per TG): `grid_3d(n_out/32, ceil(m_total/8), 1, [32,1,1])`.
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::mt_moe_gather_qmm_mma_int8_bm8_mpp;
+    use crate::ffai::moe_mpp_shared::{MmaTestShape, int8_indexed_setup};
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_moe_gather_qmm_mma_int8_bm8_mpp(dt: DType) -> TestSetup {
+        // BM=8 → ceil(64/8)=8 m-tiles, BN=32 → 64/32=2 n-tiles.
+        int8_indexed_setup(
+            mt_moe_gather_qmm_mma_int8_bm8_mpp::kernel_ir_for(dt),
+            MmaTestShape { n_experts: 4, m_total: 64, n_out: 64, k_in: 64, group_size: 32 },
+            32, // bn
+            8,  // bm
+            32, // tpg
+            dt,
+        )
+    }
+}
+
+/// New-syntax benchmark for the MPP MoE int8 BGEMM (BM=8). `bits=8` →
+/// `k_in/4` u32 weight words/row.
 ///
 /// Grid (Reduction, 1 simdgroup per TG): `grid_3d(n_out/32, ceil(m_total/8), 1, [32,1,1])`.
 pub mod kernel_benches {

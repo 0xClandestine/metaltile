@@ -202,6 +202,200 @@ gated_delta_record!(
 );
 state_replay!(state_replay_d64_32_2_2, 64u32, 32u32, 2u32, 2u32, "replay_d64_32_2_2");
 
+/// New-syntax correctness for the GDN innovation-tape record + replay kernels
+/// on the small `d64_32_2_2` cell (Dk=64, Dv=32, Hk=2, Hv=2). Oracles are
+/// ported verbatim from `tests/gated_delta_replay_gpu_correctness.rs`:
+///
+///   - `record` runs the plain GatedDelta forward step and surfaces `delta_t`
+///     to the tape; we check its `y` and `state_out`.
+///   - `replay` re-folds the accepted prefix `[0, accepted)` of the tape onto
+///     a state snapshot via the branchless `select`-gate; we check `state_out`.
+///
+/// Both kernels are single-dispatch Grid3D, `grid = [1, Dv, batch·Hv]`,
+/// `tg = [32,1,1]`. We run with `has_mask=0` and a full (all-ones) mask buffer.
+/// The record forward folds an `accepted`-step recurrence, so tolerances follow
+/// the legacy 2e-3 f32 bar widened for f16/bf16: `[1e-3, 5e-3, 2e-2]`.
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::{gated_delta_step_record_d64_32_2_2, state_replay_d64_32_2_2};
+    use crate::utils::{pack_f32, unpack_f32};
+
+    // d64_32_2_2 cell dims.
+    const DK: usize = 64;
+    const DV: usize = 32;
+    const HK: usize = 2;
+    const HV: usize = 2;
+
+    fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
+
+    /// Forward recurrence + delta capture — ported `naive_record`.
+    #[allow(clippy::too_many_arguments)]
+    fn naive_record(
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        g: &[f32],
+        beta: &[f32],
+        state_in: &[f32],
+        batch: usize,
+        t_val: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let mut y = vec![0.0_f32; batch * t_val * HV * DV];
+        let mut state = state_in.to_vec();
+        for n in 0..batch * HV {
+            let b = n / HV;
+            let hvh = n % HV;
+            let hkh = hvh / (HV / HK);
+            for t in 0..t_val {
+                let qk = (b * t_val + t) * HK * DK + hkh * DK;
+                let vb = (b * t_val + t) * HV * DV + hvh * DV;
+                let gb = (b * t_val + t) * HV + hvh;
+                for dv in 0..DV {
+                    let s0 = (n * DV + dv) * DK;
+                    let mut kv = 0.0_f32;
+                    for dk in 0..DK {
+                        state[s0 + dk] *= g[gb];
+                        kv += state[s0 + dk] * k[qk + dk];
+                    }
+                    let delta = (v[vb + dv] - kv) * beta[gb];
+                    let mut out = 0.0_f32;
+                    for dk in 0..DK {
+                        state[s0 + dk] += k[qk + dk] * delta;
+                        out += state[s0 + dk] * q[qk + dk];
+                    }
+                    y[vb + dv] = out;
+                }
+            }
+        }
+        (y, state)
+    }
+
+    /// Branchless tape re-fold of the accepted prefix — ported `naive_replay`.
+    #[allow(clippy::too_many_arguments)]
+    fn naive_replay(
+        delta_log: &[f32],
+        k_log: &[f32],
+        g_log: &[f32],
+        state_in: &[f32],
+        batch: usize,
+        t_log: usize,
+        accepted: usize,
+    ) -> Vec<f32> {
+        let mut state = state_in.to_vec();
+        for n in 0..batch * HV {
+            let b = n / HV;
+            let hvh = n % HV;
+            for t in 0..t_log {
+                if t >= accepted {
+                    continue;
+                }
+                let dr = (b * t_log + t) * HV * DV + hvh * DV;
+                let kr = (b * t_log + t) * HV * DK + hvh * DK;
+                let g = g_log[(b * t_log + t) * HV + hvh];
+                for dv in 0..DV {
+                    let s0 = (n * DV + dv) * DK;
+                    for dk in 0..DK {
+                        state[s0 + dk] = state[s0 + dk] * g + k_log[kr + dk] * delta_log[dr + dv];
+                    }
+                }
+            }
+        }
+        state
+    }
+
+    /// Deterministic xorshift fixture (mirrors the legacy `src`).
+    fn src(n: usize, seed: u64, scale: f32) -> Vec<f32> {
+        let mut s = seed;
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                (s % 20_000) as f32 / 20_000.0 * scale - scale * 0.5
+            })
+            .collect()
+    }
+
+    /// Record cell: T=3 forward steps, verify `y` and `state_out`.
+    fn record_setup(dt: DType) -> TestSetup {
+        let (batch, t_val) = (1usize, 3usize);
+        let n_total = batch * HV;
+        let q = src(batch * t_val * HK * DK, 0x1, 0.4);
+        let k = src(batch * t_val * HK * DK, 0x2, 0.4);
+        let v = src(batch * t_val * HV * DV, 0x3, 1.0);
+        let g: Vec<f32> = src(batch * t_val * HV, 0x4, 0.1).iter().map(|x| 0.9 + x).collect();
+        let beta: Vec<f32> = src(batch * t_val * HV, 0x5, 0.1).iter().map(|x| 0.5 + x).collect();
+        let state_in = src(n_total * DV * DK, 0x6, 0.2);
+
+        // Dtype-round inputs so the oracle matches the GPU's load precision.
+        let r = |xs: &[f32]| unpack_f32(&pack_f32(xs, dt), dt);
+        let (y_exp, s_exp) =
+            naive_record(&r(&q), &r(&k), &r(&v), &r(&g), &r(&beta), &r(&state_in), batch, t_val);
+
+        TestSetup::new(gated_delta_step_record_d64_32_2_2::kernel_ir_for(dt))
+            .mode(KernelMode::Grid3D)
+            .input(TestBuffer::from_vec("q", pack_f32(&q, dt), dt))
+            .input(TestBuffer::from_vec("k", pack_f32(&k, dt), dt))
+            .input(TestBuffer::from_vec("v", pack_f32(&v, dt), dt))
+            .input(TestBuffer::from_vec("g", pack_f32(&g, dt), dt))
+            .input(TestBuffer::from_vec("beta", pack_f32(&beta, dt), dt))
+            .input(TestBuffer::from_vec("state_in", pack_f32(&state_in, dt), dt))
+            .input(TestBuffer::from_vec("mask", u32_bytes(&vec![1u32; batch * t_val]), DType::U32))
+            .input(TestBuffer::zeros("y", batch * t_val * HV * DV, dt))
+            .input(TestBuffer::zeros("state_out", n_total * DV * DK, dt))
+            .input(TestBuffer::zeros("delta_log", batch * t_val * HV * DV, dt))
+            .constexpr("t_val", t_val as u32)
+            .constexpr("has_mask", 0u32)
+            .expect(TestBuffer::from_vec("y", pack_f32(&y_exp, dt), dt))
+            .expect(TestBuffer::from_vec("state_out", pack_f32(&s_exp, dt), dt))
+            .grid_3d(1, DV as u32, (batch * HV) as u32, [32, 1, 1])
+    }
+
+    /// Replay cell: T=5 tape, accept the first 3 steps; verify `state_out`.
+    fn replay_setup(dt: DType) -> TestSetup {
+        let (batch, t_log, accepted) = (1usize, 5usize, 3usize);
+        let n_total = batch * HV;
+        let delta_log = src(batch * t_log * HV * DV, 0x21, 0.5);
+        let k_log = src(batch * t_log * HV * DK, 0x22, 0.4);
+        let g_log: Vec<f32> = src(batch * t_log * HV, 0x23, 0.1).iter().map(|x| 0.9 + x).collect();
+        let state_in = src(n_total * DV * DK, 0x24, 0.3);
+
+        let r = |xs: &[f32]| unpack_f32(&pack_f32(xs, dt), dt);
+        let s_exp = naive_replay(
+            &r(&delta_log),
+            &r(&k_log),
+            &r(&g_log),
+            &r(&state_in),
+            batch,
+            t_log,
+            accepted,
+        );
+
+        TestSetup::new(state_replay_d64_32_2_2::kernel_ir_for(dt))
+            .mode(KernelMode::Grid3D)
+            .input(TestBuffer::from_vec("delta_log", pack_f32(&delta_log, dt), dt))
+            .input(TestBuffer::from_vec("k_log", pack_f32(&k_log, dt), dt))
+            .input(TestBuffer::from_vec("g_log", pack_f32(&g_log, dt), dt))
+            .input(TestBuffer::from_vec("state_in", pack_f32(&state_in, dt), dt))
+            .input(TestBuffer::from_vec("mask", u32_bytes(&vec![1u32; batch * t_log]), DType::U32))
+            .input(TestBuffer::zeros("state_out", n_total * DV * DK, dt))
+            .constexpr("t_log", t_log as u32)
+            .constexpr("accepted", accepted as u32)
+            .constexpr("has_mask", 0u32)
+            .expect(TestBuffer::from_vec("state_out", pack_f32(&s_exp, dt), dt))
+            .grid_3d(1, DV as u32, (batch * HV) as u32, [32, 1, 1])
+    }
+
+    // Forward record: y + state_out match the plain GDN recurrence.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-3, 2e-2])]
+    fn test_gated_delta_record_d64_32_2_2(dt: DType) -> TestSetup { record_setup(dt) }
+
+    // Replay: state_out matches the accepted-prefix re-fold.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-3, 2e-2])]
+    fn test_state_replay_d64_32_2_2(dt: DType) -> TestSetup { replay_setup(dt) }
+}
+
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 

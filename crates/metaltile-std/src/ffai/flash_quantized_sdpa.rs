@@ -525,6 +525,153 @@ flash_quantized_sdpa_float_mask_kernel!(
     "float_mask_b8_d256"
 );
 
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::flash_quantized_sdpa_b4_d128;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
+
+    /// Affine per-group quantize of `[rows, dim]` → (packed u32, scales,
+    /// biases, dequantized floats). Pack-strided layout: `32/bits` values
+    /// per u32 word, matching what the kernel unpacks.
+    fn quantize(
+        vals: &[f32],
+        rows: usize,
+        dim: usize,
+        group_size: usize,
+        bits: u32,
+    ) -> (Vec<u32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+        let pack_factor = 32 / bits as usize;
+        let n_groups = dim / group_size;
+        let max_q = ((1u32 << bits) - 1) as f32;
+        let mut packed = vec![0u32; rows * dim / pack_factor];
+        let mut scales = vec![0.0_f32; rows * n_groups];
+        let mut biases = vec![0.0_f32; rows * n_groups];
+        let mut deq = vec![0.0_f32; rows * dim];
+        for r in 0..rows {
+            for g in 0..n_groups {
+                let slice = &vals[r * dim + g * group_size..r * dim + (g + 1) * group_size];
+                let mn = slice.iter().copied().fold(f32::INFINITY, f32::min);
+                let mx = slice.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let scale = if (mx - mn).abs() < 1e-10 { 1.0 } else { (mx - mn) / max_q };
+                scales[r * n_groups + g] = scale;
+                biases[r * n_groups + g] = mn;
+                for (i, &v) in slice.iter().enumerate() {
+                    let d = g * group_size + i;
+                    let q = ((v - mn) / scale).round().clamp(0.0, max_q) as u32;
+                    packed[(r * dim + d) / pack_factor] |= q << ((d % pack_factor) * bits as usize);
+                    deq[r * dim + d] = scale * q as f32 + mn;
+                }
+            }
+        }
+        (packed, scales, biases, deq)
+    }
+
+    /// Dense softmax-attention over the DEQUANTIZED K,V — the result the
+    /// single-pass flash quantized decode must reproduce. No sinks, no
+    /// window (full attention) to keep the oracle simple.
+    #[allow(clippy::too_many_arguments)]
+    fn naive(
+        q: &[f32],
+        k_deq: &[f32],
+        v_deq: &[f32],
+        q_heads: usize,
+        kv_heads: usize,
+        tokens: usize,
+        dim: usize,
+        scale: f32,
+    ) -> Vec<f32> {
+        let repeat = q_heads / kv_heads;
+        let mut out = vec![0.0_f32; q_heads * dim];
+        for qh in 0..q_heads {
+            let kvh = qh / repeat;
+            let mut scores = vec![0.0_f32; tokens];
+            for (t, s) in scores.iter_mut().enumerate() {
+                let mut dot = 0.0_f32;
+                for d in 0..dim {
+                    dot += scale * q[qh * dim + d] * k_deq[(kvh * tokens + t) * dim + d];
+                }
+                *s = dot;
+            }
+            let m = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut sum = 0.0_f32;
+            for s in scores.iter_mut() {
+                *s = (*s - m).exp();
+                sum += *s;
+            }
+            let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+            for d in 0..dim {
+                let mut acc = 0.0_f32;
+                for (t, s) in scores.iter().enumerate() {
+                    acc += *s * inv * v_deq[(kvh * tokens + t) * dim + d];
+                }
+                out[qh * dim + d] = acc;
+            }
+        }
+        out
+    }
+
+    fn source(n: usize, seed: u64, scale: f32) -> Vec<f32> {
+        let mut s = seed;
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                (s % 20_000) as f32 / 20_000.0 * scale - scale * 0.5
+            })
+            .collect()
+    }
+
+    // Representative variant: b4_d128 (4-bit affine quant, head_dim 128),
+    // full attention (window=0), no sinks (has_sinks=0). Quantization
+    // rounding loosens the half-precision tolerances vs. dense SDPA.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_ffai_flash_quantized_sdpa_b4_d128(dt: DType) -> TestSetup {
+        let (q_heads, kv_heads, tokens, dim) = (2usize, 1usize, 8usize, 128usize);
+        let bits = 4u32;
+        let group_size = 64usize; // dim % 64 == 0
+        let repeat = q_heads / kv_heads;
+        let scale = 1.0f32 / (dim as f32).sqrt();
+
+        // Round q through the dtype so the oracle sees the same inputs.
+        let q_raw = source(q_heads * dim, 0x51, 2.0);
+        let q = unpack_f32(&pack_f32(&q_raw, dt), dt);
+        let k_raw = source(kv_heads * tokens * dim, 0x62, 3.0);
+        let v_raw = source(kv_heads * tokens * dim, 0x73, 3.0);
+        let sinks = vec![0.0f32; q_heads];
+
+        let (kp, ks, kb, k_deq) = quantize(&k_raw, kv_heads * tokens, dim, group_size, bits);
+        let (vp, vs, vb, v_deq) = quantize(&v_raw, kv_heads * tokens, dim, group_size, bits);
+
+        let expected = naive(&q, &k_deq, &v_deq, q_heads, kv_heads, tokens, dim, scale);
+
+        TestSetup::new(flash_quantized_sdpa_b4_d128::kernel_ir_for(dt))
+            .mode(KernelMode::Grid3D)
+            .input(TestBuffer::from_vec("queries", pack_f32(&q, dt), dt))
+            .input(TestBuffer::from_vec("k_packed", u32_bytes(&kp), DType::U32))
+            .input(TestBuffer::from_vec("k_scales", pack_f32(&ks, dt), dt))
+            .input(TestBuffer::from_vec("k_biases", pack_f32(&kb, dt), dt))
+            .input(TestBuffer::from_vec("v_packed", u32_bytes(&vp), DType::U32))
+            .input(TestBuffer::from_vec("v_scales", pack_f32(&vs, dt), dt))
+            .input(TestBuffer::from_vec("v_biases", pack_f32(&vb, dt), dt))
+            .input(TestBuffer::from_vec("sinks", pack_f32(&sinks, DType::F32), DType::F32))
+            .input(TestBuffer::zeros("out", q_heads * dim, dt))
+            .constexpr("dim", dim as u32)
+            .constexpr("tokens", tokens as u32)
+            .constexpr("repeat_count", repeat as u32)
+            .constexpr("group_size", group_size as u32)
+            .constexpr("num_q_heads", q_heads as u32)
+            .constexpr("has_sinks", 0u32)
+            .constexpr("window_size", 0u32)
+            .constexpr("scale", scale)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(1, q_heads as u32, 1, [32, 1, 1])
+    }
+}
+
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 

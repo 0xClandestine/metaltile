@@ -214,6 +214,138 @@ aura_encode_kernel!(aura_encode_int4, 4u32, 16u32, "encode_int4");
 aura_encode_kernel!(aura_encode_int6, 6u32, 64u32, "encode_int6");
 aura_encode_kernel!(aura_encode_int8, 8u32, 256u32, "encode_int8");
 
+/// New-syntax correctness for the AURA fused encode kernel. Mirrors the
+/// affine-quantize tests' strategy: the **packed codes** go through a
+/// branchless boundary-count whose last bit and bit-packing are sensitive to
+/// Metal fast-math FMA fusion, so they stay covered by the legacy bit-exact
+/// `aura_encode_gpu_correctness.rs` A/B test. Here we pin the part that is
+/// robustly checkable — the per-vector **norm-correction factor**
+/// (`norms_out`), which the decoder multiplies back through.
+///
+/// Setup uses an **identity rotation** so the Stage-2 matmul is `rotated =
+/// unit_val` exactly (no reorder ambiguity in the quant index), and a smooth
+/// input chosen to land each rotated coordinate comfortably mid-bin — so the
+/// codebook index feeding `norms_out` is stable under input dtype rounding.
+/// Only `input` is dtype-rounded (rotation/codebook/boundaries are f32 always);
+/// `norms_out` is f32 output, compared at the per-dtype tol. `packed_out` is
+/// provided but NOT expected (fast-math packing — legacy A/B test owns it).
+///
+/// Grid (Reduction, TPG = dim): `grid_3d(rows, 1, 1, [dim,1,1])`.
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::aura_encode_int4;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
+
+    /// Identity rotation `[dim, dim]` — row d is the unit vector e_d.
+    fn identity_rotation(dim: usize) -> Vec<f32> {
+        let mut r = vec![0.0_f32; dim * dim];
+        for d in 0..dim {
+            r[d * dim + d] = 1.0;
+        }
+        r
+    }
+
+    /// Symmetric int4 codebook: 16 evenly-spaced centroids in [-1, 1], with the
+    /// 15 boundaries at the midpoints (mirrors `int4_uniform_codebook` in the
+    /// legacy test).
+    fn int4_uniform_codebook() -> (Vec<f32>, Vec<f32>) {
+        let levels = 16usize;
+        let codebook: Vec<f32> =
+            (0..levels).map(|i| -1.0 + 2.0 * (i as f32) / (levels as f32 - 1.0)).collect();
+        let boundaries: Vec<f32> =
+            (0..levels - 1).map(|i| 0.5 * (codebook[i] + codebook[i + 1])).collect();
+        (codebook, boundaries)
+    }
+
+    /// CPU oracle for `norms_out` only. Replicates Stages 1/3/5 of the kernel
+    /// under an identity rotation (so `rotated = unit_val`): L2-normalise the
+    /// row, boundary-count each coordinate into a codebook index, then
+    /// `corrected = norm / ‖centroids‖`.
+    fn norms_oracle(
+        input: &[f32],
+        boundaries: &[f32],
+        codebook: &[f32],
+        rows: usize,
+        dim: usize,
+    ) -> Vec<f32> {
+        let mut norms = vec![0.0_f32; rows];
+        for r in 0..rows {
+            let row = &input[r * dim..(r + 1) * dim];
+            let norm_sq: f32 = row.iter().map(|&v| v * v).sum();
+            let norm_val = norm_sq.sqrt();
+            let inv_norm = if norm_val > 1.0e-8 { 1.0 / norm_val } else { 0.0 };
+            let mut recon_sq = 0.0_f32;
+            for &v in row {
+                let rotated = v * inv_norm; // identity rotation
+                // Index = count of boundaries the value exceeds.
+                let mut idx = 0usize;
+                for &bnd in boundaries {
+                    if rotated > bnd {
+                        idx += 1;
+                    }
+                }
+                let centroid = codebook[idx];
+                recon_sq += centroid * centroid;
+            }
+            let recon_norm = recon_sq.sqrt();
+            norms[r] = if recon_norm > 1.0e-8 { norm_val / recon_norm } else { norm_val };
+        }
+        norms
+    }
+
+    /// Small AURA-encode shape: dim a multiple of 32, identity rotation. int4.
+    fn setup(dim: usize, rows: usize, dt: DType) -> TestSetup {
+        const BITS: usize = 4;
+        let packed_width = (dim * BITS).div_ceil(32);
+        let (codebook, boundaries) = int4_uniform_codebook();
+        let rotation = identity_rotation(dim);
+        // Smooth input bounded so unit-normed coordinates land mid-bin (away
+        // from the 15 midpoint boundaries) — keeps the quant index stable under
+        // input dtype rounding.
+        let input: Vec<f32> = (0..rows * dim).map(|i| ((i as f32) * 0.013).sin() * 0.6).collect();
+        // Only `input` is dtype-rounded; the oracle then matches the GPU load.
+        let input_r = unpack_f32(&pack_f32(&input, dt), dt);
+        let expected_norms = norms_oracle(&input_r, &boundaries, &codebook, rows, dim);
+
+        TestSetup::new(aura_encode_int4::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("input", pack_f32(&input, dt), dt))
+            .input(TestBuffer::from_vec("rotation", pack_f32(&rotation, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("boundaries", pack_f32(&boundaries, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("codebook", pack_f32(&codebook, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec(
+                "packed_out",
+                u32_bytes(&vec![0u32; rows * packed_width]),
+                DType::U32,
+            ))
+            .input(TestBuffer::zeros("norms_out", rows, DType::F32))
+            .constexpr("dim", dim as u32)
+            .constexpr("packed_width", packed_width as u32)
+            // Only verify the norm-correction factor (f32). `packed_out` is
+            // fast-math-sensitive — covered bit-exact by the legacy A/B test.
+            .expect(TestBuffer::from_vec(
+                "norms_out",
+                pack_f32(&expected_norms, DType::F32),
+                DType::F32,
+            ))
+            .grid_3d(rows as u32, 1, 1, [dim as u32, 1, 1])
+    }
+
+    // dim=128 (4 simdgroups — exercises the cross-simdgroup `shared_norm`
+    // combine), 2 rows. norms_out is f32; the simd_sum reorder vs the CPU
+    // left-fold drifts a few ulp, so even the f32 cell uses a small absolute
+    // band; f16/bf16 widen only from input rounding.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-3, 5e-3])]
+    fn test_aura_encode_int4_norms(dt: DType) -> TestSetup { setup(128, 2, dt) }
+
+    // dim=32 (exactly one simdgroup — the n_simd=1 path), single row.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-3, 5e-3])]
+    fn test_aura_encode_int4_norms_min_dim(dt: DType) -> TestSetup { setup(32, 1, dt) }
+}
+
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 

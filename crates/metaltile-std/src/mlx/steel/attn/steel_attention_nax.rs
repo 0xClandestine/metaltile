@@ -530,6 +530,179 @@ sdpa_prefill_nax_wide!(mt_sdpa_prefill_nax_d64, 64u32, 2u32, 1088);
 sdpa_prefill_nax_wide!(mt_sdpa_prefill_nax_d128, 128u32, 4u32, 2112);
 sdpa_prefill_nax_wide!(mt_sdpa_prefill_nax_d256, 256u32, 8u32, 4160);
 
+/// New-syntax benchmark for the NAX SDPA-prefill kernel (`mpp::matmul2d`
+/// flash attention, head_dim=32). The NAX path lowers to Apple
+/// tensor-core `matmul2d` (Metal 4 / Apple10+); the bench compiles and
+/// dispatches everywhere but only executes on supported HW.
+///
+/// Dispatch contract (mirrors the GPU correctness harness in
+/// `tests/steel_attention_nax_gpu_correctness.rs`):
+///
+/// - **Reduction mode** — the kernel reads `tgid_x`/`tgid_y`/`tgid_z`.
+/// - **Grid = (q_len / BQ=16, n_q_heads, batch)** threadGROUP counts,
+///   **TPG = 32** (1 simdgroup). `grid_3d` takes group counts, so the
+///   first three args are the group counts directly.
+/// - `head_dim` is hardcoded 32 in this kernel body; `scale = 1/sqrt(32)`.
+///
+/// Shape mirrors the scalar/MMA siblings' bench geometry (n_heads=32,
+/// gqa_factor=4 → 8 KV heads, batch=1, q_len=k_len=512) but at the NAX
+/// head_dim=32.
+pub mod kernel_benches {
+    use metaltile::{bench, test::*};
+
+    use super::{BQ, TPG, mt_sdpa_prefill_nax};
+
+    // SDPA prefill geometry — NAX head_dim is fixed at 32.
+    const HEAD_DIM: usize = 32;
+    const N_Q_HEADS: usize = 32;
+    const GQA_FACTOR: usize = 4;
+    const N_KV_HEADS: usize = N_Q_HEADS / GQA_FACTOR; // 8
+    const BATCH: usize = 1;
+    const Q_LEN: usize = 512;
+    const K_LEN: usize = 512;
+
+    #[bench(name = "mlx/sdpa/sdpa_prefill_nax", dtypes = [f32, f16, bf16])]
+    fn bench_sdpa_prefill_nax(dt: DType) -> BenchSetup {
+        let q_elems = BATCH * N_Q_HEADS * Q_LEN * HEAD_DIM;
+        let kv_elems = BATCH * N_KV_HEADS * K_LEN * HEAD_DIM;
+        let scale = 1.0f32 / (HEAD_DIM as f32).sqrt();
+        BenchSetup::new(mt_sdpa_prefill_nax::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("q", q_elems, dt))
+            .buffer(BenchBuffer::random("k", kv_elems, dt))
+            .buffer(BenchBuffer::random("v", kv_elems, dt))
+            .buffer(BenchBuffer::zeros("out", q_elems, dt).output())
+            .constexpr("q_len", Q_LEN as u32)
+            .constexpr("k_len", K_LEN as u32)
+            .constexpr("gqa_factor", GQA_FACTOR as u32)
+            .constexpr("n_q_heads", N_Q_HEADS as u32)
+            .constexpr("n_kv_heads", N_KV_HEADS as u32)
+            .constexpr("scale", scale)
+            // grid_3d takes threadGROUP counts: (q_len / BQ, n_q_heads, batch).
+            .grid_3d(Q_LEN as u32 / BQ, N_Q_HEADS as u32, BATCH as u32, [TPG, 1, 1])
+            // Q/O read+written once each; K/V read once per q_tile group.
+            .bytes_moved(((2 * q_elems + 2 * kv_elems) * dt.size_bytes()) as u64)
+    }
+}
+
+/// New-syntax correctness test for the NAX SDPA-prefill kernel — ports
+/// the causal-SDPA oracle used by the scalar/MMA siblings in
+/// `steel_attention.rs`. Reference:
+///   `O = softmax(Q·Kᵀ · scale)·V` per Q head, with causal masking
+///   (`k_abs ≤ q_abs`, `q_abs = (k_len - q_len) + qi`) and GQA via
+///   `kv_head = q_head / gqa_factor`.
+///
+/// The NAX kernel lowers to `mpp::tensor_ops::matmul2d` (Metal 4 /
+/// Apple10+ tensor cores). This test compiles and dispatches on every
+/// target, but only numerically validates on supported hardware; on
+/// older GPUs the dispatch is gated out.
+///
+/// Minimal valid shape: `n_q_heads = n_kv_heads = 4`, `q_len = k_len =
+/// 64` (= 4·BQ=16 q-tiles), `head_dim = 32` (hardcoded in the kernel),
+/// `gqa_factor = 1`, `scale = 1/sqrt(32)`. `Reduction` dispatch — grid
+/// is threadgroup counts `(q_len/BQ, n_q_heads, batch)` with `tpg =
+/// [32, 1, 1]` (1 simdgroup) — copied from the matching `#[bench]` and
+/// the GPU correctness harness.
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::mt_sdpa_prefill_nax;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    // Shared shape (single batch). head_dim is hardcoded 32 in the kernel.
+    const N_Q_HEADS: usize = 4;
+    const N_KV_HEADS: usize = 4;
+    const Q_LEN: usize = 64;
+    const K_LEN: usize = 64;
+    const HEAD_DIM: usize = 32;
+    const BQ: u32 = 16;
+
+    /// Deterministic ramp — mirrors the scalar/MMA siblings' `ramp`.
+    fn ramp(n: usize, modulus: usize, offset: f32) -> Vec<f32> {
+        (0..n).map(|i| ((i % modulus) as f32 - offset) * 0.05).collect()
+    }
+
+    /// Naive causal SDPA, single batch. Q/K/V laid out
+    /// `[n_heads, q_len, head_dim]` contiguous.
+    #[allow(clippy::too_many_arguments)]
+    fn naive_sdpa_prefill_causal(
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        n_q_heads: usize,
+        n_kv_heads: usize,
+        q_len: usize,
+        k_len: usize,
+        head_dim: usize,
+        scale: f32,
+    ) -> Vec<f32> {
+        let gqa = n_q_heads / n_kv_heads;
+        let q_len_off = k_len - q_len;
+        let mut out = vec![0.0f32; n_q_heads * q_len * head_dim];
+        for qh in 0..n_q_heads {
+            let kvh = qh / gqa;
+            let q_off = qh * q_len * head_dim;
+            let kv_off = kvh * k_len * head_dim;
+            for qi in 0..q_len {
+                let causal_lim = q_len_off + qi + 1;
+                let mut scores = vec![f32::NEG_INFINITY; k_len];
+                for (j, s) in scores.iter_mut().enumerate().take(causal_lim) {
+                    let mut dot = 0.0f32;
+                    for d in 0..head_dim {
+                        dot += q[q_off + qi * head_dim + d] * k[kv_off + j * head_dim + d];
+                    }
+                    *s = dot * scale;
+                }
+                let m = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let e: Vec<f32> = scores
+                    .iter()
+                    .map(|&s| if s.is_finite() { (s - m).exp() } else { 0.0 })
+                    .collect();
+                let total: f32 = e.iter().sum();
+                let inv = if total > 0.0 { 1.0 / total } else { 0.0 };
+                for d in 0..head_dim {
+                    let mut acc = 0.0f32;
+                    for (j, &ej) in e.iter().enumerate() {
+                        acc += ej * inv * v[kv_off + j * head_dim + d];
+                    }
+                    out[q_off + qi * head_dim + d] = acc;
+                }
+            }
+        }
+        out
+    }
+
+    // tol per dtype: f32 2e-2, f16 5e-2, bf16 2e-1 — matches the
+    // scalar/MMA siblings (online-softmax + matmul drift).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [2e-2, 5e-2, 2e-1])]
+    fn test_sdpa_prefill_nax(dt: DType) -> TestSetup {
+        let scale = 1.0f32 / (HEAD_DIM as f32).sqrt();
+        // Dtype-round inputs so the CPU oracle sees the same load-cast
+        // quantization the kernel does.
+        let q = unpack_f32(&pack_f32(&ramp(N_Q_HEADS * Q_LEN * HEAD_DIM, 17, 8.0), dt), dt);
+        let k = unpack_f32(&pack_f32(&ramp(N_KV_HEADS * K_LEN * HEAD_DIM, 13, 6.0), dt), dt);
+        let v = unpack_f32(&pack_f32(&ramp(N_KV_HEADS * K_LEN * HEAD_DIM, 11, 5.0), dt), dt);
+        let expected = naive_sdpa_prefill_causal(
+            &q, &k, &v, N_Q_HEADS, N_KV_HEADS, Q_LEN, K_LEN, HEAD_DIM, scale,
+        );
+        TestSetup::new(mt_sdpa_prefill_nax::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("q", pack_f32(&q, dt), dt))
+            .input(TestBuffer::from_vec("k", pack_f32(&k, dt), dt))
+            .input(TestBuffer::from_vec("v", pack_f32(&v, dt), dt))
+            .input(TestBuffer::zeros("out", N_Q_HEADS * Q_LEN * HEAD_DIM, dt))
+            .constexpr("q_len", Q_LEN as u32)
+            .constexpr("k_len", K_LEN as u32)
+            .constexpr("gqa_factor", (N_Q_HEADS / N_KV_HEADS) as u32)
+            .constexpr("n_q_heads", N_Q_HEADS as u32)
+            .constexpr("n_kv_heads", N_KV_HEADS as u32)
+            .constexpr("scale", scale)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            // grid_3d takes threadGROUP counts: (q_len / BQ, n_q_heads, batch).
+            .grid_3d(Q_LEN as u32 / BQ, N_Q_HEADS as u32, 1, [32, 1, 1])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use metaltile_core::{dtype::DType, ir::Op};

@@ -376,3 +376,155 @@ pub mod kernel_benches {
             .bytes_moved(bytes as u64)
     }
 }
+
+/// New-syntax correctness tests for the two-kernel split-K steel GEMM —
+/// ports the oracle from `tests/steel_gemm_splitk_gpu_correctness.rs`.
+///
+/// Split-K is a single-dispatch-per-pass kernel, so each pass is pinned
+/// independently:
+///   - **pass 1** (`mt_steel_gemm_splitk_*`) — each K-split computes its
+///     partial `[M, N]` product into `partials[split, :, :]` (fp32). The
+///     oracle is the per-split partial matmul over `[k_start, k_end)`.
+///   - **pass 2** (`accum` / `accum_axpby`) — reduces synthetic `[n_split,
+///     M, N]` partials into `[M, N]`; `accum` sums, `accum_axpby` does
+///     `α·Σ + β·c_in`. Oracle computed directly from the seeded partials.
+///
+/// Small shape: pass 1 uses `M = N = 128`, `K = 64`, `N_SPLITS = 2`,
+/// `k_per_split = 32` (2 K-blocks/split). `SimdGroup2D` 3-D grid
+/// `(N/BN, M/BM, n_splits)` — `program_id<2>` is the split. Pass 2 is
+/// `Elementwise`, grid `m*n`.
+pub mod kernel_tests {
+    use metaltile::{core::ir::Kernel, test::*, test_kernel};
+
+    use super::*;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    fn ramp(n: usize, modulus: usize, offset: f32) -> Vec<f32> {
+        (0..n).map(|i| ((i % modulus) as f32 - offset) * 0.05).collect()
+    }
+
+    /// Per-split partial fp32 reference: for split `s` over
+    /// `[s·kps, min((s+1)·kps, k))`, `partials[s,m,n] = Σ a[m,k]·b[k,n]`.
+    fn naive_splitk_partials(
+        a: &[f32],
+        b: &[f32],
+        m: usize,
+        k: usize,
+        n: usize,
+        n_splits: usize,
+        k_per_split: usize,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; n_splits * m * n];
+        for s in 0..n_splits {
+            let k_start = s * k_per_split;
+            let k_end = (k_start + k_per_split).min(k);
+            for mi in 0..m {
+                for ni in 0..n {
+                    let mut acc = 0.0f32;
+                    for ki in k_start..k_end {
+                        acc += a[mi * k + ki] * b[ki * n + ni];
+                    }
+                    out[s * m * n + mi * n + ni] = acc;
+                }
+            }
+        }
+        out
+    }
+
+    // ── Pass 1 — split-K partial GEMM ──────────────────────────────────────
+    /// Build a pass-1 correctness setup. The partials buffer is fp32 (the
+    /// accumulator dtype) regardless of `T`, so the oracle is f32-exact.
+    fn pass1_setup(kernel: Kernel, bm: u32, bn: u32, tpg: u32, dt: DType) -> TestSetup {
+        let (m, n, k) = (bm as usize * 2, bn as usize * 2, 64usize);
+        let (n_splits, k_per_split) = (2usize, 32usize);
+        let a = unpack_f32(&pack_f32(&ramp(m * k, 19, 7.0), dt), dt);
+        let b = unpack_f32(&pack_f32(&ramp(k * n, 23, 9.0), dt), dt);
+        let expected = naive_splitk_partials(&a, &b, m, k, n, n_splits, k_per_split);
+        TestSetup::new(kernel)
+            .mode(KernelMode::SimdGroup2D)
+            .input(TestBuffer::from_vec("a", pack_f32(&a, dt), dt))
+            .input(TestBuffer::from_vec("b", pack_f32(&b, dt), dt))
+            .input(TestBuffer::zeros("partials", n_splits * m * n, DType::F32))
+            .constexpr("m", m as u32)
+            .constexpr("n", n as u32)
+            .constexpr("k", k as u32)
+            .constexpr("k_per_split", k_per_split as u32)
+            .expect(TestBuffer::from_vec(
+                "partials",
+                pack_f32(&expected, DType::F32),
+                DType::F32,
+            ))
+            // 3-D grid: (n/BN, m/BM, n_splits). program_id<2> = K-split.
+            .grid_3d(n as u32 / bn, m as u32 / bm, n_splits as u32, [tpg, 1, 1])
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_splitk_pass1_64x64x16_2x2(dt: DType) -> TestSetup {
+        pass1_setup(mt_steel_gemm_splitk_64x64x16_2x2::kernel_ir_for(dt), 64, 64, 128, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_splitk_pass1_32x32x16_2x2(dt: DType) -> TestSetup {
+        pass1_setup(mt_steel_gemm_splitk_32x32x16_2x2::kernel_ir_for(dt), 32, 32, 128, dt)
+    }
+
+    // ── Pass 2 — partial-sum reduction (plain accum) ───────────────────────
+    /// Seed `[n_splits, M, N]` fp32 partials and check the straight sum.
+    /// `accum`'s only quantization is the final cast to `T`.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-3, 5e-2])]
+    fn test_splitk_accum(dt: DType) -> TestSetup {
+        let (m, n, n_splits) = (32usize, 32usize, 3usize);
+        let total = m * n;
+        let partials: Vec<f32> =
+            (0..n_splits * total).map(|i| ((i % 23) as f32 - 11.0) * 0.05).collect();
+        let mut expected = vec![0.0f32; total];
+        for (idx, e) in expected.iter_mut().enumerate() {
+            let mut acc = 0.0f32;
+            for s in 0..n_splits {
+                acc += partials[s * total + idx];
+            }
+            *e = acc;
+        }
+        let expected = unpack_f32(&pack_f32(&expected, dt), dt);
+        TestSetup::new(mt_steel_gemm_splitk_accum::kernel_ir_for(dt))
+            .mode(KernelMode::Elementwise)
+            .input(TestBuffer::from_vec("partials", pack_f32(&partials, DType::F32), DType::F32))
+            .input(TestBuffer::zeros("out", total, dt))
+            .constexpr("m", m as u32)
+            .constexpr("n", n as u32)
+            .constexpr("n_splits", n_splits as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_1d(total, 256)
+    }
+
+    // ── Pass 2 — axpby form `α·Σ + β·c_in` ─────────────────────────────────
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-3, 5e-2])]
+    fn test_splitk_accum_axpby(dt: DType) -> TestSetup {
+        let (m, n, n_splits) = (32usize, 32usize, 2usize);
+        let (alpha, beta) = (0.5f32, 2.0f32);
+        let total = m * n;
+        let partials: Vec<f32> =
+            (0..n_splits * total).map(|i| ((i % 23) as f32 - 11.0) * 0.05).collect();
+        let c_in = unpack_f32(&pack_f32(&ramp(total, 41, 5.0), dt), dt);
+        let mut expected = vec![0.0f32; total];
+        for (idx, e) in expected.iter_mut().enumerate() {
+            let mut acc = 0.0f32;
+            for s in 0..n_splits {
+                acc += partials[s * total + idx];
+            }
+            *e = alpha * acc + beta * c_in[idx];
+        }
+        let expected = unpack_f32(&pack_f32(&expected, dt), dt);
+        TestSetup::new(mt_steel_gemm_splitk_accum_axpby::kernel_ir_for(dt))
+            .mode(KernelMode::Elementwise)
+            .input(TestBuffer::from_vec("partials", pack_f32(&partials, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("c_in", pack_f32(&c_in, dt), dt))
+            .input(TestBuffer::zeros("out", total, dt))
+            .constexpr("m", m as u32)
+            .constexpr("n", n as u32)
+            .constexpr("n_splits", n_splits as u32)
+            .constexpr("alpha", alpha)
+            .constexpr("beta", beta)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_1d(total, 256)
+    }
+}

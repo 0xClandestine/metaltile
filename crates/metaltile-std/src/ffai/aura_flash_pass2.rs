@@ -122,6 +122,182 @@ aura_flash_pass2_kernel!(aura_flash_pass2_d128, 4u32, "flash_pass2_d128");
 aura_flash_pass2_kernel!(aura_flash_pass2_d256, 8u32, "flash_pass2_d256");
 aura_flash_pass2_kernel!(aura_flash_pass2_d512, 16u32, "flash_pass2_d512");
 
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::aura_flash_pass2_d128;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    // ── COMBINED AURA flash decode, exercised through pass 2 ─────────────
+    //
+    // The test runner dispatches a single kernel per `TestSetup`, so we
+    // cannot chain p1 → pass2 on the GPU. Instead we emulate the
+    // non-causal `aura_flash_p1` per-block online-softmax on the CPU
+    // (decoding K/V from `codebook[index] * norm`), producing the
+    // `(o_partials, m_partials, l_partials)` staging tuples, then
+    // dispatch the real GPU pass-2 reducer. Its output must equal a dense
+    // `softmax(QKᵀ)·V` over the whole codebook-decoded cache — proving
+    // the p1-emulation → pass2 pipeline reconstructs dense attention.
+    // This is the COMBINED result the two-pass AURA decode produces.
+
+    const DIM: usize = 128;
+    const KEY_BITS: usize = 4;
+    const VALUE_BITS: usize = 4;
+
+    /// Emulate `aura_flash_p1` (non-causal): per (q_head, block)
+    /// online-softmax over the block's token range, K/V decoded from
+    /// `codebook[index] * norm`. Emits per-block partials exactly as p1
+    /// stores them (o is the un-normalised accumulator, m the block max,
+    /// l the block sum_exp).
+    #[allow(clippy::too_many_arguments)]
+    fn emulate_p1(
+        q_rot: &[f32],
+        key_idx: &[u32],
+        val_idx: &[u32],
+        key_norms: &[f32],
+        val_norms: &[f32],
+        key_cb: &[f32],
+        val_cb: &[f32],
+        q_heads: usize,
+        kv_heads: usize,
+        tokens: usize,
+        dim: usize,
+        block_size: usize,
+        num_blocks: usize,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let repeat = q_heads / kv_heads;
+        let mut o_part = vec![0.0f32; q_heads * num_blocks * dim];
+        let mut m_part = vec![f32::NEG_INFINITY; q_heads * num_blocks];
+        let mut l_part = vec![0.0f32; q_heads * num_blocks];
+        for qh in 0..q_heads {
+            let kvh = qh / repeat;
+            for block in 0..num_blocks {
+                let t_start = block * block_size;
+                let t_end = ((block + 1) * block_size).min(tokens);
+                let mut m_acc = f32::NEG_INFINITY;
+                let mut l_acc = 0.0f32;
+                let mut acc = vec![0.0f32; dim];
+                for t in t_start..t_end {
+                    let mut dot = 0.0f32;
+                    for d in 0..dim {
+                        let q = key_idx[(kvh * tokens + t) * dim + d];
+                        dot += q_rot[qh * dim + d] * key_cb[q as usize];
+                    }
+                    let score = dot * key_norms[kvh * tokens + t];
+                    let new_m = score.max(m_acc);
+                    let exp_diff = (m_acc - new_m).exp();
+                    let exp_score = (score - new_m).exp();
+                    for (d, a) in acc.iter_mut().enumerate() {
+                        let v = val_idx[(kvh * tokens + t) * dim + d];
+                        *a = *a * exp_diff
+                            + exp_score * val_cb[v as usize] * val_norms[kvh * tokens + t];
+                    }
+                    l_acc = l_acc * exp_diff + exp_score;
+                    m_acc = new_m;
+                }
+                let base = (qh * num_blocks + block) * dim;
+                o_part[base..base + dim].copy_from_slice(&acc);
+                m_part[qh * num_blocks + block] = m_acc;
+                l_part[qh * num_blocks + block] = l_acc;
+            }
+        }
+        (o_part, m_part, l_part)
+    }
+
+    /// Dense softmax-attention over codebook-decoded K,V — the COMBINED
+    /// result the two-pass AURA decode must reproduce.
+    #[allow(clippy::too_many_arguments)]
+    fn naive(
+        q_rot: &[f32],
+        key_idx: &[u32],
+        val_idx: &[u32],
+        key_norms: &[f32],
+        val_norms: &[f32],
+        key_cb: &[f32],
+        val_cb: &[f32],
+        q_heads: usize,
+        kv_heads: usize,
+        tokens: usize,
+        dim: usize,
+    ) -> Vec<f32> {
+        let repeat = q_heads / kv_heads;
+        let mut out = vec![0.0f32; q_heads * dim];
+        for qh in 0..q_heads {
+            let kvh = qh / repeat;
+            let mut scores = vec![0.0f32; tokens];
+            for (t, s) in scores.iter_mut().enumerate() {
+                let mut dot = 0.0f32;
+                for d in 0..dim {
+                    let q = key_idx[(kvh * tokens + t) * dim + d];
+                    dot += q_rot[qh * dim + d] * key_cb[q as usize];
+                }
+                *s = dot * key_norms[kvh * tokens + t];
+            }
+            let m = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut sum_w = 0.0f32;
+            let mut acc = vec![0.0f32; dim];
+            for (t, s) in scores.iter().enumerate() {
+                let w = (s - m).exp();
+                sum_w += w;
+                for (d, a) in acc.iter_mut().enumerate() {
+                    let v = val_idx[(kvh * tokens + t) * dim + d];
+                    *a += w * val_cb[v as usize] * val_norms[kvh * tokens + t];
+                }
+            }
+            let inv = if sum_w > 0.0 { 1.0 / sum_w } else { 0.0 };
+            for d in 0..dim {
+                out[qh * dim + d] = acc[d] * inv;
+            }
+        }
+        out
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_ffai_aura_flash_pass2_combined(dt: DType) -> TestSetup {
+        let (q_heads, kv_heads, tokens, dim) = (2usize, 1usize, 8usize, DIM);
+        let block_size = 4usize;
+        let num_blocks = tokens.div_ceil(block_size); // 2
+
+        let key_cb: Vec<f32> = (0..16).map(|i| -1.0 + 2.0 * i as f32 / 15.0).collect();
+        let val_cb: Vec<f32> = (0..16).map(|i| -1.0 + 2.0 * i as f32 / 15.0).collect();
+        let key_idx: Vec<u32> =
+            (0..kv_heads * tokens * dim).map(|i| ((i * 7 + 3) % (1 << KEY_BITS)) as u32).collect();
+        let val_idx: Vec<u32> = (0..kv_heads * tokens * dim)
+            .map(|i| ((i * 11 + 5) % (1 << VALUE_BITS)) as u32)
+            .collect();
+        let key_norms: Vec<f32> = (0..kv_heads * tokens).map(|i| 0.5 + 0.05 * i as f32).collect();
+        let val_norms: Vec<f32> = (0..kv_heads * tokens).map(|i| 0.3 + 0.07 * i as f32).collect();
+        let q_rot: Vec<f32> =
+            (0..q_heads * dim).map(|i| (((i * 13) % 19) as f32 - 9.0) * 0.02).collect();
+
+        // Emulate p1 → partials, rounded through the storage dtype just
+        // like the GPU p1 stores them.
+        let (o_part, m_part, l_part) = emulate_p1(
+            &q_rot, &key_idx, &val_idx, &key_norms, &val_norms, &key_cb, &val_cb, q_heads,
+            kv_heads, tokens, dim, block_size, num_blocks,
+        );
+        let o_part = unpack_f32(&pack_f32(&o_part, dt), dt);
+        let m_part = unpack_f32(&pack_f32(&m_part, dt), dt);
+        let l_part = unpack_f32(&pack_f32(&l_part, dt), dt);
+
+        let expected = naive(
+            &q_rot, &key_idx, &val_idx, &key_norms, &val_norms, &key_cb, &val_cb, q_heads,
+            kv_heads, tokens, dim,
+        );
+
+        TestSetup::new(aura_flash_pass2_d128::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("o_partials", pack_f32(&o_part, dt), dt))
+            .input(TestBuffer::from_vec("m_partials", pack_f32(&m_part, dt), dt))
+            .input(TestBuffer::from_vec("l_partials", pack_f32(&l_part, dt), dt))
+            .input(TestBuffer::zeros("output", q_heads * dim, dt))
+            .constexpr("dim", dim as u32)
+            .constexpr("num_blocks", num_blocks as u32)
+            .expect(TestBuffer::from_vec("output", pack_f32(&expected, dt), dt))
+            .grid_3d(q_heads as u32, 1, 1, [32, 1, 1])
+    }
+}
+
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 

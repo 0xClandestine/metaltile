@@ -780,6 +780,168 @@ pub fn sdpa_decode_2pass_pass2_d256<T>(
 // at this point. Add per-dim registrations here as FFAI starts
 // dispatching them.
 
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::sdpa_decode_2pass_pass2;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    // ── COMBINED two-pass correctness, exercised through pass 2 ──────────
+    //
+    // The test runner dispatches a single kernel per `TestSetup`, so we
+    // cannot chain pass1 → pass2 on the GPU. Instead we emulate pass 1 on
+    // the CPU exactly (the same block-strided online-softmax that the GPU
+    // pass-1 kernel runs) to produce the staging buffers, then dispatch
+    // the real GPU pass-2 reducer. Its output must equal a dense
+    // `softmax(QKᵀ·scale)·V` over the whole K,V cache — proving the
+    // pass1-emulation→pass2 pipeline reconstructs dense attention. This
+    // is the COMBINED result the two-pass decode is supposed to produce.
+
+    const HEAD_DIM: usize = 128;
+
+    /// Emulate GPU pass 1: per (q_head, block) online-softmax over the
+    /// KV rows `block, block+blocks, block+2*blocks, …` (the GPU's
+    /// `range(block_idx, n_kv, blocks)` stride). Emits the per-block
+    /// `(partial_o, partial_m, partial_l)` exactly as pass 1 stores them.
+    #[allow(clippy::too_many_arguments)]
+    fn emulate_pass1(
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        n_q_heads: usize,
+        gqa_factor: usize,
+        head_dim: usize,
+        n_kv: usize,
+        kv_stride: usize,
+        blocks: usize,
+        scale: f32,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let mut partial_o = vec![0.0f32; n_q_heads * blocks * head_dim];
+        let mut partial_m = vec![f32::NEG_INFINITY; n_q_heads * blocks];
+        let mut partial_l = vec![0.0f32; n_q_heads * blocks];
+        for qh in 0..n_q_heads {
+            let kvh = qh / gqa_factor;
+            let q_off = qh * head_dim;
+            let kv_slab = kvh * kv_stride * head_dim;
+            for block in 0..blocks {
+                let mut run_max = f32::NEG_INFINITY;
+                let mut run_sum = 0.0f32;
+                let mut acc = vec![0.0f32; head_dim];
+                let mut t = block;
+                while t < n_kv {
+                    let k_off = kv_slab + t * head_dim;
+                    let mut dot = 0.0f32;
+                    for d in 0..head_dim {
+                        dot += q[q_off + d] * scale * k[k_off + d];
+                    }
+                    let new_max = dot.max(run_max);
+                    let factor = (run_max - new_max).exp();
+                    let weight = (dot - new_max).exp();
+                    run_sum = run_sum * factor + weight;
+                    run_max = new_max;
+                    for d in 0..head_dim {
+                        acc[d] = acc[d] * factor + weight * v[k_off + d];
+                    }
+                    t += blocks;
+                }
+                let o_base = (qh * blocks + block) * head_dim;
+                partial_o[o_base..o_base + head_dim].copy_from_slice(&acc);
+                partial_m[qh * blocks + block] = run_max;
+                partial_l[qh * blocks + block] = run_sum;
+            }
+        }
+        (partial_o, partial_m, partial_l)
+    }
+
+    /// Dense softmax-attention oracle — the result the combined two-pass
+    /// decode must reproduce.
+    #[allow(clippy::too_many_arguments)]
+    fn naive_sdpa(
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        n_q_heads: usize,
+        gqa_factor: usize,
+        head_dim: usize,
+        n_kv: usize,
+        kv_stride: usize,
+        scale: f32,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; n_q_heads * head_dim];
+        for qh in 0..n_q_heads {
+            let kvh = qh / gqa_factor;
+            let q_off = qh * head_dim;
+            let kv_slab = kvh * kv_stride * head_dim;
+            let mut scores = vec![0.0f32; n_kv];
+            for (t, score) in scores.iter_mut().enumerate() {
+                let k_off = kv_slab + t * head_dim;
+                let mut dot = 0.0f32;
+                for d in 0..head_dim {
+                    dot += q[q_off + d] * k[k_off + d];
+                }
+                *score = dot * scale;
+            }
+            let m = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut sum = 0.0f32;
+            for s in scores.iter_mut() {
+                *s = (*s - m).exp();
+                sum += *s;
+            }
+            let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+            for d in 0..head_dim {
+                let mut a = 0.0f32;
+                for (t, s) in scores.iter().enumerate() {
+                    a += *s * inv * v[kv_slab + t * head_dim + d];
+                }
+                out[q_off + d] = a;
+            }
+        }
+        out
+    }
+
+    fn ramp(n: usize, step: f32, start: f32) -> Vec<f32> {
+        (0..n).map(|i| ((start + i as f32 * step) % 2.0) - 1.0).collect()
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 3e-3, 1.5e-2])]
+    fn test_ffai_sdpa_decode_2pass_combined(dt: DType) -> TestSetup {
+        let (n_q_heads, n_kv_heads) = (8usize, 2usize);
+        let gqa_factor = n_q_heads / n_kv_heads;
+        let head_dim = HEAD_DIM;
+        // blocks MUST be a multiple of 32 (pass-2 reducer constraint).
+        let blocks = 32usize;
+        let (n_kv, kv_stride) = (64usize, 64usize);
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+        let q = unpack_f32(&pack_f32(&ramp(n_q_heads * head_dim, 0.013, -0.4), dt), dt);
+        let k =
+            unpack_f32(&pack_f32(&ramp(n_kv_heads * kv_stride * head_dim, 0.011, -0.5), dt), dt);
+        let v =
+            unpack_f32(&pack_f32(&ramp(n_kv_heads * kv_stride * head_dim, 0.007, -0.3), dt), dt);
+
+        // Emulate pass 1 → staging buffers, round partial_o through the
+        // dtype just like the GPU stores it (partial_m/l stay f32).
+        let (partial_o, partial_m, partial_l) = emulate_pass1(
+            &q, &k, &v, n_q_heads, gqa_factor, head_dim, n_kv, kv_stride, blocks, scale,
+        );
+        let partial_o = unpack_f32(&pack_f32(&partial_o, dt), dt);
+
+        let expected =
+            naive_sdpa(&q, &k, &v, n_q_heads, gqa_factor, head_dim, n_kv, kv_stride, scale);
+
+        TestSetup::new(sdpa_decode_2pass_pass2::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("partial_o", pack_f32(&partial_o, dt), dt))
+            .input(TestBuffer::from_vec("partial_m", pack_f32(&partial_m, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("partial_l", pack_f32(&partial_l, DType::F32), DType::F32))
+            .input(TestBuffer::zeros("out", n_q_heads * head_dim, dt))
+            .constexpr("head_dim", head_dim as u32)
+            .constexpr("blocks", blocks as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(n_q_heads as u32, 1, 1, [1024, 1, 1])
+    }
+}
+
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 

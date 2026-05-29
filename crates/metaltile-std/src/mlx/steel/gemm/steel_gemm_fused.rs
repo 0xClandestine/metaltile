@@ -319,3 +319,79 @@ pub mod kernel_benches {
         fb(mt_steel_gemm_32x32x16_1x2::kernel_ir_for(dt), 32, 32, 64, dt)
     }
 }
+
+/// New-syntax correctness tests for the fused steel GEMM — ports the
+/// `nn` (non-transposed) oracle from
+/// `tests/steel_gemm_gpu_correctness.rs`. The kernel computes a plain
+/// row-major `C = A · B` (`A:[M,K]`, `B:[K,N]`, `C:[M,N]`); the oracle
+/// is a straight triple-loop fp32 matmul over dtype-rounded inputs.
+///
+/// Small shape per block: `M = 2·BM`, `N = 2·BN` (a 2×2 grid of output
+/// blocks, exercising `program_id<0/1>`), `K = 48` (3 BK=16 K-steps).
+/// `SimdGroup2D` dispatch — grid is tile-group counts `(N/BN, M/BM, 1)`,
+/// `tpg = [WM*WN*32, 1, 1]` — copied from the matching `#[bench]`.
+pub mod kernel_tests {
+    use metaltile::{core::ir::Kernel, test::*, test_kernel};
+
+    use super::*;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    /// Naive fp32 reference: `out[m,n] = Σ_k a[m,k]·b[k,n]`.
+    fn naive_matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; m * n];
+        for mi in 0..m {
+            for ni in 0..n {
+                let mut acc = 0.0f32;
+                for ki in 0..k {
+                    acc += a[mi * k + ki] * b[ki * n + ni];
+                }
+                out[mi * n + ni] = acc;
+            }
+        }
+        out
+    }
+
+    /// Deterministic ramp — mirrors the legacy test's `ramp(n, modulus, offset)`.
+    fn ramp(n: usize, modulus: usize, offset: f32) -> Vec<f32> {
+        (0..n).map(|i| ((i % modulus) as f32 - offset) * 0.05).collect()
+    }
+
+    /// Build a fused-GEMM correctness setup for one block shape.
+    fn fused_setup(kernel: Kernel, bm: u32, bn: u32, tpg: u32, dt: DType) -> TestSetup {
+        let (m, n, k) = (bm as usize * 2, bn as usize * 2, 48usize);
+        // Dtype-round the inputs so the CPU oracle sees the same
+        // load-cast quantization the kernel does.
+        let a = unpack_f32(&pack_f32(&ramp(m * k, 19, 7.0), dt), dt);
+        let b = unpack_f32(&pack_f32(&ramp(k * n, 23, 9.0), dt), dt);
+        let expected = naive_matmul(&a, &b, m, k, n);
+        TestSetup::new(kernel)
+            .mode(KernelMode::SimdGroup2D)
+            .input(TestBuffer::from_vec("a", pack_f32(&a, dt), dt))
+            .input(TestBuffer::from_vec("b", pack_f32(&b, dt), dt))
+            .input(TestBuffer::zeros("out", m * n, dt))
+            .constexpr("m", m as u32)
+            .constexpr("n", n as u32)
+            .constexpr("k", k as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            // SimdGroup2D grid is tile-GROUP counts: (n/BN, m/BM, 1).
+            .grid_3d(n as u32 / bn, m as u32 / bm, 1, [tpg, 1, 1])
+    }
+
+    // tol per dtype: f32 5e-3, f16 5e-2, bf16 2e-1 (K=48 matmul magnitudes).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fused_64x64x16_2x2(dt: DType) -> TestSetup {
+        fused_setup(mt_steel_gemm_64x64x16_2x2::kernel_ir_for(dt), 64, 64, 128, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fused_32x32x16_2x2(dt: DType) -> TestSetup {
+        fused_setup(mt_steel_gemm_32x32x16_2x2::kernel_ir_for(dt), 32, 32, 128, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fused_64x64x16_1x2(dt: DType) -> TestSetup {
+        fused_setup(mt_steel_gemm_64x64x16_1x2::kernel_ir_for(dt), 64, 64, 64, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fused_32x64x16_1x2(dt: DType) -> TestSetup {
+        fused_setup(mt_steel_gemm_32x64x16_1x2::kernel_ir_for(dt), 32, 64, 64, dt)
+    }
+}

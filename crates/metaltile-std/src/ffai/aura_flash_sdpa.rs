@@ -240,6 +240,153 @@ aura_flash_sdpa_kernel!(
     "flash_sdpa_kb4_vb4_d64"
 );
 
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::aura_flash_sdpa_kb4_vb4_d128;
+    use crate::utils::pack_f32;
+
+    fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
+
+    /// Bit-pack per-token codebook indices into the spill-aware layout the
+    /// kernel unpacks (`bit = d*bits`, possibly crossing a u32 boundary).
+    fn pack_int_indices(
+        indices: &[u32],
+        kv_heads: usize,
+        tokens: usize,
+        dim: usize,
+        bits: usize,
+    ) -> Vec<u32> {
+        let mask = (1u32 << bits) - 1;
+        let pw = (dim * bits).div_ceil(32);
+        let mut packed = vec![0u32; kv_heads * tokens * pw];
+        for kvh in 0..kv_heads {
+            for t in 0..tokens {
+                for d in 0..dim {
+                    let idx = indices[(kvh * tokens + t) * dim + d] & mask;
+                    let bit = d * bits;
+                    let word = bit / 32;
+                    let shift = bit & 31;
+                    packed[(kvh * tokens + t) * pw + word] |= idx << shift;
+                    let spill = (shift + bits) as i32 - 32;
+                    if spill > 0 {
+                        packed[(kvh * tokens + t) * pw + word + 1] |=
+                            idx >> (bits as u32 - spill as u32);
+                    }
+                }
+            }
+        }
+        packed
+    }
+
+    /// Dense softmax-attention over the codebook-DECODED K,V. The fused
+    /// single-pass AURA flash decode (`kv_stride == tokens`, full
+    /// attention, no sinks) must reproduce this. K/V are reconstructed as
+    /// `codebook[index] * norm` per token.
+    #[allow(clippy::too_many_arguments)]
+    fn naive(
+        q_rot: &[f32],
+        key_idx: &[u32],
+        val_idx: &[u32],
+        key_norms: &[f32],
+        val_norms: &[f32],
+        key_cb: &[f32],
+        val_cb: &[f32],
+        q_heads: usize,
+        kv_heads: usize,
+        tokens: usize,
+        dim: usize,
+    ) -> Vec<f32> {
+        let repeat = q_heads / kv_heads;
+        let mut out = vec![0.0_f32; q_heads * dim];
+        for qh in 0..q_heads {
+            let kvh = qh / repeat;
+            let mut scores = vec![0.0_f32; tokens];
+            for (t, s) in scores.iter_mut().enumerate() {
+                let mut dot = 0.0_f32;
+                for d in 0..dim {
+                    let q = key_idx[(kvh * tokens + t) * dim + d];
+                    dot += q_rot[qh * dim + d] * key_cb[q as usize];
+                }
+                *s = dot * key_norms[kvh * tokens + t];
+            }
+            let m = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut sum_w = 0.0_f32;
+            let mut acc = vec![0.0_f32; dim];
+            for (t, s) in scores.iter().enumerate() {
+                let w = (s - m).exp();
+                sum_w += w;
+                for (d, a) in acc.iter_mut().enumerate() {
+                    let v = val_idx[(kvh * tokens + t) * dim + d];
+                    *a += w * val_cb[v as usize] * val_norms[kvh * tokens + t];
+                }
+            }
+            let inv = if sum_w > 0.0 { 1.0 / sum_w } else { 0.0 };
+            for d in 0..dim {
+                out[qh * dim + d] = acc[d] * inv;
+            }
+        }
+        out
+    }
+
+    // Representative variant: kb4_vb4_d128 (4-bit key + 4-bit value
+    // codebooks, head_dim 128), full attention, no sinks. Codebook
+    // decode loosens the half-precision tolerances vs. dense SDPA.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_ffai_aura_flash_sdpa_kb4_vb4_d128(dt: DType) -> TestSetup {
+        let (q_heads, kv_heads, tokens, dim) = (2usize, 1usize, 8usize, 128usize);
+        let (key_bits, value_bits) = (4usize, 4usize);
+        let repeat = q_heads / kv_heads;
+        let kpw = (dim * key_bits).div_ceil(32);
+        let vpw = (dim * value_bits).div_ceil(32);
+
+        // 16-level codebooks for both 4-bit key and 4-bit value.
+        let key_cb: Vec<f32> = (0..16).map(|i| -1.0 + 2.0 * i as f32 / 15.0).collect();
+        let val_cb: Vec<f32> = (0..16).map(|i| -1.0 + 2.0 * i as f32 / 15.0).collect();
+        let key_idx: Vec<u32> =
+            (0..kv_heads * tokens * dim).map(|i| ((i * 7 + 3) % 16) as u32).collect();
+        let val_idx: Vec<u32> =
+            (0..kv_heads * tokens * dim).map(|i| ((i * 11 + 5) % 16) as u32).collect();
+        let key_norms: Vec<f32> = (0..kv_heads * tokens).map(|i| 0.5 + 0.05 * i as f32).collect();
+        let val_norms: Vec<f32> = (0..kv_heads * tokens).map(|i| 0.3 + 0.07 * i as f32).collect();
+        let q_rot: Vec<f32> =
+            (0..q_heads * dim).map(|i| (((i * 13) % 19) as f32 - 9.0) * 0.02).collect();
+        let sinks = vec![0.0f32; q_heads];
+
+        let key_packed = pack_int_indices(&key_idx, kv_heads, tokens, dim, key_bits);
+        let val_packed = pack_int_indices(&val_idx, kv_heads, tokens, dim, value_bits);
+
+        let expected = naive(
+            &q_rot, &key_idx, &val_idx, &key_norms, &val_norms, &key_cb, &val_cb, q_heads,
+            kv_heads, tokens, dim,
+        );
+
+        TestSetup::new(aura_flash_sdpa_kb4_vb4_d128::kernel_ir_for(dt))
+            .mode(KernelMode::Grid3D)
+            .input(TestBuffer::from_vec("q_rot", pack_f32(&q_rot, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("key_packed", u32_bytes(&key_packed), DType::U32))
+            .input(TestBuffer::from_vec("key_norms", pack_f32(&key_norms, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("key_codebook", pack_f32(&key_cb, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("val_packed", u32_bytes(&val_packed), DType::U32))
+            .input(TestBuffer::from_vec("val_norms", pack_f32(&val_norms, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("val_codebook", pack_f32(&val_cb, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("sinks", pack_f32(&sinks, DType::F32), DType::F32))
+            .input(TestBuffer::zeros("out", q_heads * dim, dt))
+            .constexpr("dim", dim as u32)
+            .constexpr("key_packed_width", kpw as u32)
+            .constexpr("value_packed_width", vpw as u32)
+            .constexpr("tokens", tokens as u32)
+            // Fully-populated fixture: stride == live row count.
+            .constexpr("kv_stride", tokens as u32)
+            .constexpr("repeat_count", repeat as u32)
+            .constexpr("num_q_heads", q_heads as u32)
+            .constexpr("has_sinks", 0u32)
+            .constexpr("window_size", 0u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(1, q_heads as u32, 1, [32, 1, 1])
+    }
+}
+
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 

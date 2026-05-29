@@ -420,3 +420,135 @@ pub mod kernel_benches {
         sdpa_b(mt_sdpa_prefill_mma_bf16::kernel_ir_for(dt), dt)
     }
 }
+
+/// New-syntax correctness tests for the SDPA-prefill family — ports the
+/// causal-SDPA oracle from `tests/steel_attention_gpu_correctness.rs`.
+/// All three variants (`mt_sdpa_prefill` scalar flash, `_mma`, and
+/// `_mma_bf16`) share the same dispatch contract and the same reference:
+///   `O = softmax(Q·Kᵀ · scale)·V` per Q head, with causal masking
+///   (`k_abs ≤ q_abs`, `q_abs = (k_len - q_len) + qi`) and GQA via
+///   `kv_head = q_head / gqa_factor`.
+///
+/// Minimal valid shape: `n_q_heads = n_kv_heads = 4`, `q_len = k_len =
+/// 128` (= 4·BQ=32 q-tiles), `head_dim = 128` (hardcoded in the kernel),
+/// `gqa_factor = 1`, `scale = 1/sqrt(128)`. `SimdGroup2D` dispatch —
+/// grid is threadgroup counts `(q_len/BQ, n_q_heads, batch)` with `tpg =
+/// [128, 1, 1]` (4 simdgroups) — copied from the matching `#[bench]`.
+pub mod kernel_tests {
+    use metaltile::{core::ir::Kernel, test::*, test_kernel};
+
+    use super::mt_sdpa_prefill;
+    use crate::{
+        mlx::steel::attn::{
+            steel_attention_mma::mt_sdpa_prefill_mma,
+            steel_attention_mma_bf16::mt_sdpa_prefill_mma_bf16,
+        },
+        utils::{pack_f32, unpack_f32},
+    };
+
+    // Shared shape (single batch). head_dim is hardcoded 128 in the kernel.
+    const N_Q_HEADS: usize = 4;
+    const N_KV_HEADS: usize = 4;
+    const Q_LEN: usize = 128;
+    const K_LEN: usize = 128;
+    const HEAD_DIM: usize = 128;
+    const BQ: u32 = 32;
+
+    /// Deterministic ramp — mirrors the legacy test's `ramp(n, modulus, offset)`.
+    fn ramp(n: usize, modulus: usize, offset: f32) -> Vec<f32> {
+        (0..n).map(|i| ((i % modulus) as f32 - offset) * 0.05).collect()
+    }
+
+    /// Naive causal SDPA, single batch. Q/K/V laid out
+    /// `[n_heads, q_len, head_dim]` contiguous.
+    #[allow(clippy::too_many_arguments)]
+    fn naive_sdpa_prefill_causal(
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        n_q_heads: usize,
+        n_kv_heads: usize,
+        q_len: usize,
+        k_len: usize,
+        head_dim: usize,
+        scale: f32,
+    ) -> Vec<f32> {
+        let gqa = n_q_heads / n_kv_heads;
+        let q_len_off = k_len - q_len;
+        let mut out = vec![0.0f32; n_q_heads * q_len * head_dim];
+        for qh in 0..n_q_heads {
+            let kvh = qh / gqa;
+            let q_off = qh * q_len * head_dim;
+            let kv_off = kvh * k_len * head_dim;
+            for qi in 0..q_len {
+                let causal_lim = q_len_off + qi + 1;
+                let mut scores = vec![f32::NEG_INFINITY; k_len];
+                for (j, s) in scores.iter_mut().enumerate().take(causal_lim) {
+                    let mut dot = 0.0f32;
+                    for d in 0..head_dim {
+                        dot += q[q_off + qi * head_dim + d] * k[kv_off + j * head_dim + d];
+                    }
+                    *s = dot * scale;
+                }
+                let m = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let e: Vec<f32> = scores
+                    .iter()
+                    .map(|&s| if s.is_finite() { (s - m).exp() } else { 0.0 })
+                    .collect();
+                let total: f32 = e.iter().sum();
+                let inv = if total > 0.0 { 1.0 / total } else { 0.0 };
+                for d in 0..head_dim {
+                    let mut acc = 0.0f32;
+                    for (j, &ej) in e.iter().enumerate() {
+                        acc += ej * inv * v[kv_off + j * head_dim + d];
+                    }
+                    out[q_off + qi * head_dim + d] = acc;
+                }
+            }
+        }
+        out
+    }
+
+    /// Build a causal-SDPA prefill correctness setup for one variant.
+    fn sdpa_setup(kernel: Kernel, dt: DType) -> TestSetup {
+        let scale = 1.0f32 / (HEAD_DIM as f32).sqrt();
+        // Dtype-round inputs so the CPU oracle sees the same load-cast
+        // quantization the kernel does.
+        let q = unpack_f32(&pack_f32(&ramp(N_Q_HEADS * Q_LEN * HEAD_DIM, 17, 8.0), dt), dt);
+        let k = unpack_f32(&pack_f32(&ramp(N_KV_HEADS * K_LEN * HEAD_DIM, 13, 6.0), dt), dt);
+        let v = unpack_f32(&pack_f32(&ramp(N_KV_HEADS * K_LEN * HEAD_DIM, 11, 5.0), dt), dt);
+        let expected = naive_sdpa_prefill_causal(
+            &q, &k, &v, N_Q_HEADS, N_KV_HEADS, Q_LEN, K_LEN, HEAD_DIM, scale,
+        );
+        TestSetup::new(kernel)
+            .mode(KernelMode::SimdGroup2D)
+            .input(TestBuffer::from_vec("q", pack_f32(&q, dt), dt))
+            .input(TestBuffer::from_vec("k", pack_f32(&k, dt), dt))
+            .input(TestBuffer::from_vec("v", pack_f32(&v, dt), dt))
+            .input(TestBuffer::zeros("out", N_Q_HEADS * Q_LEN * HEAD_DIM, dt))
+            .constexpr("q_len", Q_LEN as u32)
+            .constexpr("k_len", K_LEN as u32)
+            .constexpr("gqa_factor", (N_Q_HEADS / N_KV_HEADS) as u32)
+            .constexpr("n_q_heads", N_Q_HEADS as u32)
+            .constexpr("n_kv_heads", N_KV_HEADS as u32)
+            .constexpr("scale", scale)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            // grid_3d takes threadGROUP counts: (q_len / BQ, n_q_heads, batch).
+            .grid_3d(Q_LEN as u32 / BQ, N_Q_HEADS as u32, 1, [128, 1, 1])
+    }
+
+    // tol per dtype: f32 2e-2 (matches the legacy test), f16 5e-2, bf16
+    // 2e-1 (online-softmax + matmul drift at head_dim=128).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [2e-2, 5e-2, 2e-1])]
+    fn test_sdpa_prefill(dt: DType) -> TestSetup {
+        sdpa_setup(mt_sdpa_prefill::kernel_ir_for(dt), dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [2e-2, 5e-2, 2e-1])]
+    fn test_sdpa_prefill_mma(dt: DType) -> TestSetup {
+        sdpa_setup(mt_sdpa_prefill_mma::kernel_ir_for(dt), dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [2e-2, 5e-2, 2e-1])]
+    fn test_sdpa_prefill_mma_bf16(dt: DType) -> TestSetup {
+        sdpa_setup(mt_sdpa_prefill_mma_bf16::kernel_ir_for(dt), dt)
+    }
+}

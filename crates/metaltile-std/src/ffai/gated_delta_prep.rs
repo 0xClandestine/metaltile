@@ -236,6 +236,219 @@ mod tests {
     }
 }
 
+/// New-syntax correctness for the fused GDN prep+step kernel
+/// (`mt_gated_delta_prep_step`). Oracle is the legacy
+/// `gated_delta_prep_step_correctness.rs` reference: CPU prep (conv split →
+/// per-head RMSNorm+scale of q/k → `g = exp(-exp(a_log)·softplus(a_raw+dt_bias))`
+/// → `beta = sigmoid(b_raw)`) composed with the sequential GDN recurrence. The
+/// kernel and oracle use the same un-clamped `softplus = log(exp(x)+1)`, so the
+/// only diff is fp32 ULP / dtype rounding. Inputs are dtype-rounded.
+///
+/// Grid (Reduction, 1 simdgroup per TG): `grid_3d(dv, b*hv, 1, [32,1,1])`.
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::mt_gated_delta_prep_step;
+    use crate::utils::pack_f32;
+
+    fn softplus_unclamped(x: f32) -> f32 { (x.exp() + 1.0).ln() }
+    fn sigmoid(x: f32) -> f32 { 1.0 / (1.0 + (-x).exp()) }
+
+    /// CPU prep: conv_out → (q_normed, k_normed, v_flat, g, beta). Mirrors
+    /// `cpu_prep` in the legacy test.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn cpu_prep(
+        conv_out: &[f32],
+        a_log: &[f32],
+        dt_bias: &[f32],
+        a_raw: &[f32],
+        b_raw: &[f32],
+        q_norm_weight: &[f32],
+        k_norm_weight: &[f32],
+        b: usize,
+        hv: usize,
+        hk: usize,
+        dv: usize,
+        dk: usize,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+        let eps = 1e-6_f32;
+        let stride_b = 2 * hk * dk + hv * dv;
+        let mut q_normed = vec![0.0_f32; b * hk * dk];
+        let mut k_normed = vec![0.0_f32; b * hk * dk];
+        let mut v_flat = vec![0.0_f32; b * hv * dv];
+        let mut g = vec![0.0_f32; b * hv];
+        let mut beta = vec![0.0_f32; b * hv];
+        for batch in 0..b {
+            let q_base = batch * stride_b;
+            let k_base = q_base + hk * dk;
+            let v_base = q_base + 2 * hk * dk;
+            for hk_idx in 0..hk {
+                let row_off = hk_idx * dk;
+                let mut q_ssq = 0.0_f32;
+                let mut k_ssq = 0.0_f32;
+                for d in 0..dk {
+                    let qv = conv_out[q_base + row_off + d];
+                    let kv = conv_out[k_base + row_off + d];
+                    q_ssq += qv * qv;
+                    k_ssq += kv * kv;
+                }
+                let q_inv = 1.0 / ((q_ssq / dk as f32) + eps).sqrt();
+                let k_inv = 1.0 / ((k_ssq / dk as f32) + eps).sqrt();
+                for d in 0..dk {
+                    let qv = conv_out[q_base + row_off + d];
+                    let kv = conv_out[k_base + row_off + d];
+                    let qw = q_norm_weight[hk_idx * dk + d];
+                    let kw = k_norm_weight[hk_idx * dk + d];
+                    q_normed[batch * hk * dk + row_off + d] = qv * q_inv * qw;
+                    k_normed[batch * hk * dk + row_off + d] = kv * k_inv * kw;
+                }
+            }
+            for hv_idx in 0..hv {
+                for dv_idx in 0..dv {
+                    v_flat[(batch * hv + hv_idx) * dv + dv_idx] =
+                        conv_out[v_base + hv_idx * dv + dv_idx];
+                }
+            }
+            for hv_idx in 0..hv {
+                let n = batch * hv + hv_idx;
+                let dt = softplus_unclamped(a_raw[n] + dt_bias[hv_idx]);
+                g[n] = (-a_log[hv_idx].exp() * dt).exp();
+                beta[n] = sigmoid(b_raw[n]);
+            }
+        }
+        (q_normed, k_normed, v_flat, g, beta)
+    }
+
+    /// CPU GDN recurrence (matches `cpu_step` in the legacy test).
+    #[allow(clippy::too_many_arguments)]
+    fn cpu_step(
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        g: &[f32],
+        beta: &[f32],
+        state_in: &[f32],
+        b: usize,
+        hv: usize,
+        hk: usize,
+        dv: usize,
+        dk: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let mut y = vec![0.0_f32; b * hv * dv];
+        let mut state_out = vec![0.0_f32; b * hv * dv * dk];
+        let hk_per_hv = hv / hk;
+        for batch in 0..b {
+            for hv_idx in 0..hv {
+                let n = batch * hv + hv_idx;
+                let hk_idx = hv_idx / hk_per_hv;
+                let g_val = g[n];
+                let beta_val = beta[n];
+                let qk_base = (batch * hk + hk_idx) * dk;
+                for dv_idx in 0..dv {
+                    let v_val = v[n * dv + dv_idx];
+                    let s_base = n * dv * dk + dv_idx * dk;
+                    let mut kv_mem = 0.0_f32;
+                    let mut decayed = vec![0.0_f32; dk];
+                    for s_idx in 0..dk {
+                        let s = state_in[s_base + s_idx] * g_val;
+                        decayed[s_idx] = s;
+                        kv_mem += s * k[qk_base + s_idx];
+                    }
+                    let delta = (v_val - kv_mem) * beta_val;
+                    let mut out = 0.0_f32;
+                    for s_idx in 0..dk {
+                        let s_new = decayed[s_idx] + k[qk_base + s_idx] * delta;
+                        state_out[s_base + s_idx] = s_new;
+                        out += s_new * q[qk_base + s_idx];
+                    }
+                    y[n * dv + dv_idx] = out;
+                }
+            }
+        }
+        (y, state_out)
+    }
+
+    /// Small fused GDN-prep shape: dk a multiple of 32, Hv divisible by Hk.
+    #[allow(clippy::too_many_arguments)]
+    fn setup(
+        b: usize,
+        hv: usize,
+        hk: usize,
+        dv: usize,
+        dk: usize,
+        weight_scale: f32,
+        dt: DType,
+    ) -> TestSetup {
+        let n_total = b * hv;
+        let stride_b = 2 * hk * dk + hv * dv;
+        // Bounded magnitudes keep softplus/exp in fp32 range (same fixture
+        // shape as the legacy test's `make_fixture`).
+        let conv_out: Vec<f32> =
+            (0..b * stride_b).map(|i| ((i as f32) * 0.0131).sin() * 0.4).collect();
+        let a_log: Vec<f32> = (0..hv).map(|i| -1.5 - (i as f32) * 0.1).collect();
+        let dt_bias: Vec<f32> = (0..hv).map(|i| -0.5 + (i as f32) * 0.05).collect();
+        let a_raw: Vec<f32> = (0..b * hv).map(|i| -0.3 + (i as f32) * 0.04).collect();
+        let b_raw: Vec<f32> = (0..b * hv).map(|i| -0.2 + (i as f32) * 0.03).collect();
+        // Non-identity per-head_dim weights (exercises the scaled path).
+        let q_norm_weight: Vec<f32> =
+            (0..hk * dk).map(|i| weight_scale * (1.0 + ((i % 11) as f32) * 0.05)).collect();
+        let k_norm_weight: Vec<f32> =
+            (0..hk * dk).map(|i| weight_scale * (1.0 + ((i % 13) as f32) * 0.04)).collect();
+        let state_in: Vec<f32> =
+            (0..n_total * dv * dk).map(|i| ((i as f32) * 0.0073).cos() * 0.1).collect();
+
+        // Dtype-round every input so the oracle sees the GPU's load precision.
+        let r = |xs: &[f32]| crate::utils::unpack_f32(&pack_f32(xs, dt), dt);
+        let (q, k, v, g, beta) = cpu_prep(
+            &r(&conv_out),
+            &r(&a_log),
+            &r(&dt_bias),
+            &r(&a_raw),
+            &r(&b_raw),
+            &r(&q_norm_weight),
+            &r(&k_norm_weight),
+            b,
+            hv,
+            hk,
+            dv,
+            dk,
+        );
+        let (y_exp, state_exp) = cpu_step(&q, &k, &v, &g, &beta, &r(&state_in), b, hv, hk, dv, dk);
+
+        TestSetup::new(mt_gated_delta_prep_step::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("conv_out", pack_f32(&conv_out, dt), dt))
+            .input(TestBuffer::from_vec("a_log", pack_f32(&a_log, dt), dt))
+            .input(TestBuffer::from_vec("dt_bias", pack_f32(&dt_bias, dt), dt))
+            .input(TestBuffer::from_vec("a_raw", pack_f32(&a_raw, dt), dt))
+            .input(TestBuffer::from_vec("b_raw", pack_f32(&b_raw, dt), dt))
+            .input(TestBuffer::from_vec("q_norm_weight", pack_f32(&q_norm_weight, dt), dt))
+            .input(TestBuffer::from_vec("k_norm_weight", pack_f32(&k_norm_weight, dt), dt))
+            .input(TestBuffer::from_vec("state_in", pack_f32(&state_in, dt), dt))
+            .input(TestBuffer::zeros("state_out", state_in.len(), dt))
+            .input(TestBuffer::zeros("y", n_total * dv, dt))
+            .constexpr("dk", dk as u32)
+            .constexpr("dv", dv as u32)
+            .constexpr("hv", hv as u32)
+            .constexpr("hk", hk as u32)
+            .expect(TestBuffer::from_vec("y", pack_f32(&y_exp, dt), dt))
+            .expect(TestBuffer::from_vec("state_out", pack_f32(&state_exp, dt), dt))
+            .grid_3d(dv as u32, n_total as u32, 1, [32, 1, 1])
+    }
+
+    // GQA (Hv = 2·Hk), weighted RMSNorm path. f16/bf16 widen the band: the
+    // RMSNorm rsqrt, softplus/exp prep, and the dependent recurrence reduction
+    // all compound the mantissa noise.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mt_gated_delta_prep_step_gqa(dt: DType) -> TestSetup { setup(2, 4, 2, 8, 64, 0.7, dt) }
+
+    // Hv == Hk (no key-sharing) at the minimum dk=32, single batch.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mt_gated_delta_prep_step_no_gqa(dt: DType) -> TestSetup {
+        setup(1, 4, 4, 4, 32, 1.0, dt)
+    }
+}
+
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 

@@ -344,6 +344,198 @@ aura_flash_p1_kernel!(
     "flash_p1_causal_kb4_vb2_d64"
 );
 
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::aura_flash_p1_kb4_vb2_d128;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    // ── GPU pass-1 partials, validated directly ─────────────────────────
+    //
+    // The companion `aura_flash_pass2` test CPU-emulates pass 1 to stage
+    // the partials it feeds the GPU reducer — so the GPU pass-1 path itself
+    // was never exercised. This test dispatches the real `aura_flash_p1`
+    // kernel and validates its three partial outputs against a CPU oracle:
+    // the same per-(q_head, block) online-softmax block reduction over the
+    // AURA-codebook-decoded K,V that `aura_flash_pass2`'s `emulate_p1`
+    // reference computes. All three partials are deterministic per
+    // (q_head, block), so all three are checked.
+
+    const DIM: usize = 128;
+    const KEY_BITS: usize = 4;
+    const VALUE_BITS: usize = 2;
+
+    /// Bit-pack per-dim codebook indices into `[kv_heads, tokens,
+    /// packed_width]` u32 words, mirroring the kernel's spill-aware decode
+    /// (`bit_offset = d * bits`, split across `word_idx` / `word_idx + 1`).
+    /// `kv_stride` is the row stride (cache `maxSeq`); here it equals
+    /// `tokens` so the live rows pack contiguously.
+    fn pack_indices(
+        indices: &[u32],
+        kv_heads: usize,
+        kv_stride: usize,
+        tokens: usize,
+        dim: usize,
+        bits: usize,
+    ) -> Vec<u32> {
+        let packed_width = (dim * bits).div_ceil(32);
+        let mask = (1u32 << bits) - 1;
+        let mut packed = vec![0u32; kv_heads * kv_stride * packed_width];
+        for h in 0..kv_heads {
+            for t in 0..tokens {
+                let row = (h * kv_stride + t) * packed_width;
+                for d in 0..dim {
+                    let idx = indices[(h * tokens + t) * dim + d] & mask;
+                    let bit_offset = d * bits;
+                    let word_idx = bit_offset / 32;
+                    let shift = bit_offset & 31;
+                    let bits_in_w0 = 32 - shift;
+                    // Low part lands in word_idx; any spill into word_idx+1.
+                    packed[row + word_idx] |= idx << shift;
+                    if bits_in_w0 < bits {
+                        packed[row + word_idx + 1] |= idx >> bits_in_w0;
+                    }
+                }
+            }
+        }
+        packed
+    }
+
+    /// CPU oracle for `aura_flash_p1` (non-causal): per (q_head, block)
+    /// online-softmax over the block's token range, K/V decoded from
+    /// `codebook[index] * norm`. Emits the partials exactly as the kernel
+    /// stores them — `o` un-normalised accumulator `[q_head, block, dim]`,
+    /// `m` block max `[q_head, block]`, `l` block sum_exp `[q_head, block]`.
+    /// Mirrors `aura_flash_pass2::kernel_tests::emulate_p1`.
+    #[allow(clippy::too_many_arguments)]
+    fn emulate_p1(
+        q_rot: &[f32],
+        key_idx: &[u32],
+        val_idx: &[u32],
+        key_norms: &[f32],
+        val_norms: &[f32],
+        key_cb: &[f32],
+        val_cb: &[f32],
+        q_heads: usize,
+        kv_heads: usize,
+        tokens: usize,
+        dim: usize,
+        block_size: usize,
+        num_blocks: usize,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let repeat = q_heads / kv_heads;
+        let mut o_part = vec![0.0f32; q_heads * num_blocks * dim];
+        let mut m_part = vec![f32::NEG_INFINITY; q_heads * num_blocks];
+        let mut l_part = vec![0.0f32; q_heads * num_blocks];
+        for qh in 0..q_heads {
+            let kvh = qh / repeat;
+            for block in 0..num_blocks {
+                let t_start = block * block_size;
+                let t_end = ((block + 1) * block_size).min(tokens);
+                let mut m_acc = f32::NEG_INFINITY;
+                let mut l_acc = 0.0f32;
+                let mut acc = vec![0.0f32; dim];
+                for t in t_start..t_end {
+                    let mut dot = 0.0f32;
+                    for d in 0..dim {
+                        let q = key_idx[(kvh * tokens + t) * dim + d];
+                        dot += q_rot[qh * dim + d] * key_cb[q as usize];
+                    }
+                    let score = dot * key_norms[kvh * tokens + t];
+                    let new_m = score.max(m_acc);
+                    let exp_diff = (m_acc - new_m).exp();
+                    let exp_score = (score - new_m).exp();
+                    for (d, a) in acc.iter_mut().enumerate() {
+                        let v = val_idx[(kvh * tokens + t) * dim + d];
+                        *a = *a * exp_diff
+                            + exp_score * val_cb[v as usize] * val_norms[kvh * tokens + t];
+                    }
+                    l_acc = l_acc * exp_diff + exp_score;
+                    m_acc = new_m;
+                }
+                let base = (qh * num_blocks + block) * dim;
+                o_part[base..base + dim].copy_from_slice(&acc);
+                m_part[qh * num_blocks + block] = m_acc;
+                l_part[qh * num_blocks + block] = l_acc;
+            }
+        }
+        (o_part, m_part, l_part)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_ffai_aura_flash_p1_kb4_vb2_d128(dt: DType) -> TestSetup {
+        // Small shape matching the bench's representative variant
+        // (kb=4, vb=2, dim=128) shrunk to: 2 q-heads / 1 kv-head, 8 tokens,
+        // block_size 4 → num_blocks 2. kv_stride == tokens (fully packed).
+        let (q_heads, kv_heads, tokens, dim) = (2usize, 1usize, 8usize, DIM);
+        let repeat = q_heads / kv_heads;
+        let block_size = 4usize;
+        let num_blocks = tokens.div_ceil(block_size); // 2
+        let kv_stride = tokens;
+        let key_pw = (dim * KEY_BITS).div_ceil(32); // 16
+        let val_pw = (dim * VALUE_BITS).div_ceil(32); // 8
+
+        let key_cb: Vec<f32> = (0..(1 << KEY_BITS)).map(|i| -1.0 + 2.0 * i as f32 / 15.0).collect();
+        let val_cb: Vec<f32> =
+            (0..(1 << VALUE_BITS)).map(|i| -1.0 + 2.0 * i as f32 / 3.0).collect();
+        let key_idx: Vec<u32> =
+            (0..kv_heads * tokens * dim).map(|i| ((i * 7 + 3) % (1 << KEY_BITS)) as u32).collect();
+        let val_idx: Vec<u32> = (0..kv_heads * tokens * dim)
+            .map(|i| ((i * 11 + 5) % (1 << VALUE_BITS)) as u32)
+            .collect();
+        let key_norms: Vec<f32> = (0..kv_heads * tokens).map(|i| 0.5 + 0.05 * i as f32).collect();
+        let val_norms: Vec<f32> = (0..kv_heads * tokens).map(|i| 0.3 + 0.07 * i as f32).collect();
+        let q_rot: Vec<f32> =
+            (0..q_heads * dim).map(|i| (((i * 13) % 19) as f32 - 9.0) * 0.02).collect();
+
+        // Bit-pack K/V indices into the kernel's packed layout.
+        let key_packed = pack_indices(&key_idx, kv_heads, kv_stride, tokens, dim, KEY_BITS);
+        let val_packed = pack_indices(&val_idx, kv_heads, kv_stride, tokens, dim, VALUE_BITS);
+
+        // CPU oracle partials, rounded through the storage dtype to match
+        // the kernel's cast-on-store.
+        let (o_part, m_part, l_part) = emulate_p1(
+            &q_rot, &key_idx, &val_idx, &key_norms, &val_norms, &key_cb, &val_cb, q_heads,
+            kv_heads, tokens, dim, block_size, num_blocks,
+        );
+        let o_part = unpack_f32(&pack_f32(&o_part, dt), dt);
+        let m_part = unpack_f32(&pack_f32(&m_part, dt), dt);
+        let l_part = unpack_f32(&pack_f32(&l_part, dt), dt);
+
+        TestSetup::new(aura_flash_p1_kb4_vb2_d128::kernel_ir_for(dt))
+            .mode(KernelMode::Grid3D)
+            .input(TestBuffer::from_vec("q_rot", pack_f32(&q_rot, dt), dt))
+            .input(TestBuffer::from_vec("key_packed", pack_u32(&key_packed), DType::U32))
+            .input(TestBuffer::from_vec("key_norms", pack_f32(&key_norms, dt), dt))
+            .input(TestBuffer::from_vec("key_codebook", pack_f32(&key_cb, dt), dt))
+            .input(TestBuffer::from_vec("val_packed", pack_u32(&val_packed), DType::U32))
+            .input(TestBuffer::from_vec("val_norms", pack_f32(&val_norms, dt), dt))
+            .input(TestBuffer::from_vec("val_codebook", pack_f32(&val_cb, dt), dt))
+            .input(TestBuffer::zeros("o_partials", q_heads * num_blocks * dim, dt))
+            .input(TestBuffer::zeros("m_partials", q_heads * num_blocks, dt))
+            .input(TestBuffer::zeros("l_partials", q_heads * num_blocks, dt))
+            .constexpr("dim", dim as u32)
+            .constexpr("key_packed_width", key_pw as u32)
+            .constexpr("value_packed_width", val_pw as u32)
+            .constexpr("tokens", tokens as u32)
+            .constexpr("kv_stride", kv_stride as u32)
+            .constexpr("repeat_count", repeat as u32)
+            .constexpr("num_blocks", num_blocks as u32)
+            .constexpr("block_size", block_size as u32)
+            // Non-causal: q_position is constexpr-folded out of the loop.
+            .constexpr("q_position", (tokens - 1) as u32)
+            // All three partials are deterministic per (q_head, block).
+            .expect(TestBuffer::from_vec("o_partials", pack_f32(&o_part, dt), dt))
+            .expect(TestBuffer::from_vec("m_partials", pack_f32(&m_part, dt), dt))
+            .expect(TestBuffer::from_vec("l_partials", pack_f32(&l_part, dt), dt))
+            // grid_3d args are threadGROUP counts: (lane=1, q_heads,
+            // num_blocks) with a 32-lane threadgroup, copied from the bench.
+            .grid_3d(1, q_heads as u32, num_blocks as u32, [32, 1, 1])
+    }
+
+    fn pack_u32(words: &[u32]) -> Vec<u8> { words.iter().flat_map(|w| w.to_le_bytes()).collect() }
+}
+
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 

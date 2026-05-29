@@ -266,3 +266,86 @@ pub mod kernel_benches {
         sb(mt_steel_gemm_segmented_32x32x16_2x2::kernel_ir_for(dt), 32, 32, 128, dt)
     }
 }
+
+/// New-syntax correctness tests for the segmented (ragged-K batched)
+/// steel GEMM — ports the oracle from
+/// `tests/steel_gemm_segmented_gpu_correctness.rs`. For segment `seg`
+/// with K-range `[segments[2·seg], segments[2·seg+1])`:
+///   `out[seg, r, c] = Σ_{k in range} a[r, k] · b[k, c]`,
+/// `a` is `[M, total_k]`, `b` is `[total_k, N]`, output `[n_seg, M, N]`.
+///
+/// Small shape: `M = 2·BM`, `N = 2·BN`, `total_k = 48` split into 3
+/// disjoint 16-wide segments `(0..16, 16..32, 32..48)` — each `k_start`
+/// and extent is a multiple of 16 (BK contract). `SimdGroup2D` 3-D grid
+/// `(N/BN, M/BM, n_seg)` — `program_id<2>` selects the segment.
+pub mod kernel_tests {
+    use metaltile::{core::ir::Kernel, test::*, test_kernel};
+
+    use super::*;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
+
+    fn ramp(n: usize, modulus: usize, offset: f32) -> Vec<f32> {
+        (0..n).map(|i| ((i % modulus) as f32 - offset) * 0.05).collect()
+    }
+
+    /// Naive segmented fp32 reference — one `[M, N]` matrix per segment.
+    fn naive_segmented_matmul(
+        a: &[f32],
+        b: &[f32],
+        segments: &[u32],
+        m: usize,
+        n: usize,
+        total_k: usize,
+    ) -> Vec<f32> {
+        let n_seg = segments.len() / 2;
+        let mut out = vec![0.0f32; n_seg * m * n];
+        for seg in 0..n_seg {
+            let k_start = segments[2 * seg] as usize;
+            let k_end = segments[2 * seg + 1] as usize;
+            for r in 0..m {
+                for c in 0..n {
+                    let mut acc = 0.0f32;
+                    for k in k_start..k_end {
+                        acc += a[r * total_k + k] * b[k * n + c];
+                    }
+                    out[seg * m * n + r * n + c] = acc;
+                }
+            }
+        }
+        out
+    }
+
+    /// Build a segmented-GEMM correctness setup with 3 disjoint 16-wide
+    /// K-segments over a 48-wide total K.
+    fn segmented_setup(kernel: Kernel, bm: u32, bn: u32, tpg: u32, dt: DType) -> TestSetup {
+        let (m, n, total_k) = (bm as usize * 2, bn as usize * 2, 48usize);
+        let segments: Vec<u32> = vec![0, 16, 16, 32, 32, 48];
+        let n_seg = segments.len() / 2;
+        let a = unpack_f32(&pack_f32(&ramp(m * total_k, 19, 7.0), dt), dt);
+        let b = unpack_f32(&pack_f32(&ramp(total_k * n, 23, 9.0), dt), dt);
+        let expected = naive_segmented_matmul(&a, &b, &segments, m, n, total_k);
+        TestSetup::new(kernel)
+            .mode(KernelMode::SimdGroup2D)
+            .input(TestBuffer::from_vec("a", pack_f32(&a, dt), dt))
+            .input(TestBuffer::from_vec("b", pack_f32(&b, dt), dt))
+            .input(TestBuffer::from_vec("segments", u32_bytes(&segments), DType::U32))
+            .input(TestBuffer::zeros("out", n_seg * m * n, dt))
+            .constexpr("m", m as u32)
+            .constexpr("n", n as u32)
+            .constexpr("total_k", total_k as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            // 3-D grid: (n/BN, m/BM, n_seg). program_id<2> = segment.
+            .grid_3d(n as u32 / bn, m as u32 / bm, n_seg as u32, [tpg, 1, 1])
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_segmented_64x64x16_2x2(dt: DType) -> TestSetup {
+        segmented_setup(mt_steel_gemm_segmented_64x64x16_2x2::kernel_ir_for(dt), 64, 64, 128, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_segmented_32x32x16_2x2(dt: DType) -> TestSetup {
+        segmented_setup(mt_steel_gemm_segmented_32x32x16_2x2::kernel_ir_for(dt), 32, 32, 128, dt)
+    }
+}

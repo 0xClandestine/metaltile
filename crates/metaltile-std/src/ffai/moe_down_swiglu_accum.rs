@@ -316,6 +316,185 @@ define_moe_down_swiglu_accum_chain8!(
     (gate_7, up_7, exp_7, sw_7, we_7, se_7, rpo_7, rgo_7, {}),
 );
 
+/// New-syntax correctness test for the fused MoE decode kernel
+/// (`ffai_moe_down_swiglu_accum_int4_chain8`). The 8-way fusion has a clean
+/// closed-form oracle: for each output row `i`,
+///
+///   out[i] = Σ_{k=0..8} slot_weights[k]
+///            · Σ_d (silu(gate_k[d]) · up_k[d]) · dequant(W[expert_k][i][d])
+///
+/// where `dequant(W)` unpacks the int4 code (8 nibbles/u32, per-group
+/// scale/bias) — exactly the per-slot SwiGLU → indexed-int4-down → scalar-FMA
+/// chain the kernel fuses. Inputs are dtype-rounded so the oracle sees what the
+/// GPU loads; tolerance follows the qmm family (the simd reduce_sum reorders the
+/// per-thread K fold).
+///
+/// Grid (Reduction): `grid_3d(out_dim, 1, 1, [lsize,1,1])`.
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::ffai_moe_down_swiglu_accum_int4_chain8;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    /// Top-k slot count this kernel fuses (8-way chain).
+    const N_SLOTS: usize = 8;
+
+    fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
+
+    /// Pack a row of int4 codes into u32s (8 nibbles per u32, LSB-first).
+    fn pack_int4_row(weights: &[u32]) -> Vec<u32> {
+        weights
+            .chunks_exact(8)
+            .map(|chunk| {
+                let mut packed = 0u32;
+                for (i, &q) in chunk.iter().enumerate() {
+                    packed |= (q & 0xf) << (i * 4);
+                }
+                packed
+            })
+            .collect()
+    }
+
+    /// CPU oracle for the fused SwiGLU + 8-way indexed int4 down-proj + FMA
+    /// chain. `gates`/`ups` are `N_SLOTS` slices of `[in_dim]`; `weight_packed`
+    /// stacks `[n_experts, out_dim, in_dim/8]` int4 codes; `scales`/`biases`
+    /// stack `[n_experts, out_dim, in_dim/group_size]`.
+    #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+    fn oracle(
+        gates: &[Vec<f32>],
+        ups: &[Vec<f32>],
+        expert_indices: &[u32],
+        slot_weights: &[f32],
+        weight_packed: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        in_dim: usize,
+        out_dim: usize,
+        group_size: usize,
+    ) -> Vec<f32> {
+        let packs_per_row = in_dim / 8;
+        let groups_per_row = in_dim / group_size;
+        let mut out = vec![0.0f32; out_dim];
+        for row in 0..out_dim {
+            let mut acc = 0.0f32;
+            for k in 0..N_SLOTS {
+                let expert = expert_indices[k] as usize;
+                let sw = slot_weights[k];
+                // SwiGLU inner activation for this slot: silu(gate)*up.
+                let inner: Vec<f32> = (0..in_dim)
+                    .map(|d| {
+                        let g = gates[k][d];
+                        let u = ups[k][d];
+                        let silu = g / (1.0 + (-g).exp());
+                        silu * u
+                    })
+                    .collect();
+                let w_row_base = expert * out_dim * packs_per_row + row * packs_per_row;
+                let sb_row_base = expert * out_dim * groups_per_row + row * groups_per_row;
+                for pack_idx in 0..packs_per_row {
+                    let packed = weight_packed[w_row_base + pack_idx];
+                    let d_first = pack_idx * 8;
+                    let g = d_first / group_size;
+                    let scale = scales[sb_row_base + g];
+                    let bias = biases[sb_row_base + g];
+                    for nib in 0..8 {
+                        let q = ((packed >> (nib * 4)) & 0xf) as f32;
+                        let dq = q * scale + bias;
+                        acc += sw * dq * inner[d_first + nib];
+                    }
+                }
+            }
+            out[row] = acc;
+        }
+        out
+    }
+
+    /// Small fused-MoE shape: in_dim a multiple of 8 (int4 pack) and of
+    /// group_size; out_dim small so outputs are O(1) under an absolute tol.
+    fn setup(
+        n_experts: usize,
+        in_dim: usize,
+        out_dim: usize,
+        group_size: usize,
+        lsize: u32,
+        dt: DType,
+    ) -> TestSetup {
+        let groups_per_row = in_dim / group_size;
+
+        // Per-slot gate/up activations (deterministic, dtype-rounded).
+        let gates_f: Vec<Vec<f32>> = (0..N_SLOTS)
+            .map(|k| (0..in_dim).map(|d| (((k * in_dim + d) as f32) * 0.017).sin() * 0.5).collect())
+            .collect();
+        let ups_f: Vec<Vec<f32>> = (0..N_SLOTS)
+            .map(|k| (0..in_dim).map(|d| (((k * in_dim + d) as f32) * 0.021).cos() * 0.5).collect())
+            .collect();
+
+        let expert_indices: Vec<u32> = (0..N_SLOTS).map(|k| (k % n_experts) as u32).collect();
+        let slot_weights_f: Vec<f32> = (0..N_SLOTS).map(|k| 0.1 + (k as f32) * 0.05).collect();
+
+        // Stacked int4 weights: [n_experts, out_dim, in_dim].
+        let mut weight_unpacked = vec![0u32; n_experts * out_dim * in_dim];
+        for (i, w) in weight_unpacked.iter_mut().enumerate() {
+            *w = ((i as u32) * 7 + 3) & 0xf;
+        }
+        let weight_packed: Vec<u32> =
+            weight_unpacked.chunks_exact(in_dim).flat_map(pack_int4_row).collect();
+
+        let scales_f: Vec<f32> = (0..n_experts * out_dim * groups_per_row)
+            .map(|i| 0.005 + 0.001 * (i as f32 * 0.03).sin())
+            .collect();
+        let biases_f: Vec<f32> = (0..n_experts * out_dim * groups_per_row)
+            .map(|i| -0.02 + 0.005 * (i as f32 * 0.07).cos())
+            .collect();
+
+        // Round inputs through the dtype so the oracle matches the GPU loads.
+        let gates_r: Vec<Vec<f32>> =
+            gates_f.iter().map(|g| unpack_f32(&pack_f32(g, dt), dt)).collect();
+        let ups_r: Vec<Vec<f32>> = ups_f.iter().map(|u| unpack_f32(&pack_f32(u, dt), dt)).collect();
+        let sw_r = unpack_f32(&pack_f32(&slot_weights_f, dt), dt);
+        let s_r = unpack_f32(&pack_f32(&scales_f, dt), dt);
+        let b_r = unpack_f32(&pack_f32(&biases_f, dt), dt);
+
+        let expected = oracle(
+            &gates_r,
+            &ups_r,
+            &expert_indices,
+            &sw_r,
+            &weight_packed,
+            &s_r,
+            &b_r,
+            in_dim,
+            out_dim,
+            group_size,
+        );
+
+        let mut su = TestSetup::new(ffai_moe_down_swiglu_accum_int4_chain8::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction);
+        for k in 0..N_SLOTS {
+            su = su
+                .input(TestBuffer::from_vec(&format!("gate_{k}"), pack_f32(&gates_f[k], dt), dt))
+                .input(TestBuffer::from_vec(&format!("up_{k}"), pack_f32(&ups_f[k], dt), dt));
+        }
+        su.input(TestBuffer::from_vec("expert_indices", u32_bytes(&expert_indices), DType::U32))
+            .input(TestBuffer::from_vec("slot_weights", pack_f32(&slot_weights_f, dt), dt))
+            .input(TestBuffer::from_vec("weights_stacked", u32_bytes(&weight_packed), DType::U32))
+            .input(TestBuffer::from_vec("scales_stacked", pack_f32(&scales_f, dt), dt))
+            .input(TestBuffer::from_vec("biases_stacked", pack_f32(&biases_f, dt), dt))
+            .input(TestBuffer::zeros("output", out_dim, dt))
+            .constexpr("in_dim", in_dim as u32)
+            .constexpr("out_dim", out_dim as u32)
+            .constexpr("group_size", group_size as u32)
+            .expect(TestBuffer::from_vec("output", pack_f32(&expected, dt), dt))
+            .grid_3d(out_dim as u32, 1, 1, [lsize, 1, 1])
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_moe_down_swiglu_accum_int4_chain8(dt: DType) -> TestSetup {
+        // in_dim=64 (8 packs/row, 2 groups @ gs=32), out_dim=8, n_experts=4.
+        setup(4, 64, 8, 32, 64, dt)
+    }
+}
+
 /// New-syntax benchmark for the fused MoE decode kernel
 /// (`ffai_moe_down_swiglu_accum_int4_chain8`). Bench-only: the 8-way
 /// SwiGLU + indexed int4 down-projection + scalar-FMA-chain fusion has no

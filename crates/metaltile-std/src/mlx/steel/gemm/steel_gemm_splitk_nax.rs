@@ -261,6 +261,116 @@ pub mod kernel_benches {
     }
 }
 
+/// New-syntax correctness tests for the two-kernel NAX split-K steel
+/// GEMM — ports the oracle from
+/// `tests/steel_gemm_splitk_nax_gpu_correctness.rs`. Each pass is pinned
+/// independently (single dispatch per `#[test_kernel]`):
+///   - **pass 1** (`mt_steel_gemm_splitk_nax`) — each `tgid_z` K-split
+///     writes its partial `[M, N]` product (fp32) to `partials[split]`.
+///     Oracle = per-split partial matmul over `[k_start, k_end)`.
+///   - **pass 2** (`mt_steel_gemm_splitk_accum_nax`) — sums `n_splits`
+///     partial slabs into `[M, N]`. Oracle = straight fp32 sum of seeded
+///     partials, cast to `T`.
+///
+/// Pass-1 shape `M = N = 64`, `K = 128`, `N_SPLITS = 2`, `k_per_split =
+/// 64` (multiples of 32 — NAX tile contract). `KernelMode::Reduction`,
+/// grid threadgroup counts `(N/32, M/32, n_splits)` — `tgid_z` selects
+/// the split — `tpg = [128, 1, 1]`; constexprs `m, k, n, k_per_split`
+/// (note `k` precedes `n`). Pass 2 reads `tgid_x` as the flat element
+/// index: grid `(M*N, 1, 1)`, `tpg = [1, 1, 1]`. NOTE: `matmul2d` only
+/// runs correctly on Metal 4 / Apple10+ (pass-1).
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::{mt_steel_gemm_splitk_accum_nax, mt_steel_gemm_splitk_nax};
+    use crate::utils::{pack_f32, unpack_f32};
+
+    /// Per-split partial fp32 reference.
+    fn naive_splitk_partials(
+        a: &[f32],
+        b: &[f32],
+        m: usize,
+        k: usize,
+        n: usize,
+        n_splits: usize,
+        k_per_split: usize,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; n_splits * m * n];
+        for s in 0..n_splits {
+            let k_start = s * k_per_split;
+            let k_end = (k_start + k_per_split).min(k);
+            for mi in 0..m {
+                for ni in 0..n {
+                    let mut acc = 0.0f32;
+                    for ki in k_start..k_end {
+                        acc += a[mi * k + ki] * b[ki * n + ni];
+                    }
+                    out[s * m * n + mi * n + ni] = acc;
+                }
+            }
+        }
+        out
+    }
+
+    // ── Pass 1 — NAX split-K partial GEMM ──────────────────────────────────
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_splitk_nax_pass1(dt: DType) -> TestSetup {
+        const TILE: u32 = 32;
+        let (m, n, k) = (64usize, 64usize, 128usize);
+        let (n_splits, k_per_split) = (2usize, 64usize);
+        let a: Vec<f32> = (0..m * k).map(|i| 0.01 + (i as f32 % 17.0) * 0.013).collect();
+        let b: Vec<f32> = (0..k * n).map(|i| -0.02 + (i as f32 % 13.0) * 0.011).collect();
+        let a = unpack_f32(&pack_f32(&a, dt), dt);
+        let b = unpack_f32(&pack_f32(&b, dt), dt);
+        let expected = naive_splitk_partials(&a, &b, m, k, n, n_splits, k_per_split);
+        TestSetup::new(mt_steel_gemm_splitk_nax::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("a", pack_f32(&a, dt), dt))
+            .input(TestBuffer::from_vec("b", pack_f32(&b, dt), dt))
+            .input(TestBuffer::zeros("partials", n_splits * m * n, DType::F32))
+            // Kernel param order: m, k, n, k_per_split.
+            .constexpr("m", m as u32)
+            .constexpr("k", k as u32)
+            .constexpr("n", n as u32)
+            .constexpr("k_per_split", k_per_split as u32)
+            .expect(TestBuffer::from_vec(
+                "partials",
+                pack_f32(&expected, DType::F32),
+                DType::F32,
+            ))
+            // 3-D grid: (n/32, m/32, n_splits). tgid_z = K-split.
+            .grid_3d(n as u32 / TILE, m as u32 / TILE, n_splits as u32, [128, 1, 1])
+    }
+
+    // ── Pass 2 — NAX partial-sum reduction (one TG per output element) ─────
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-3, 5e-2])]
+    fn test_splitk_accum_nax(dt: DType) -> TestSetup {
+        let (m, n, n_splits) = (32usize, 32usize, 3usize);
+        let total = m * n;
+        let partials: Vec<f32> =
+            (0..n_splits * total).map(|i| ((i % 23) as f32 - 11.0) * 0.05).collect();
+        let mut expected = vec![0.0f32; total];
+        for (idx, e) in expected.iter_mut().enumerate() {
+            let mut acc = 0.0f32;
+            for s in 0..n_splits {
+                acc += partials[s * total + idx];
+            }
+            *e = acc;
+        }
+        let expected = unpack_f32(&pack_f32(&expected, dt), dt);
+        TestSetup::new(mt_steel_gemm_splitk_accum_nax::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("partials", pack_f32(&partials, DType::F32), DType::F32))
+            .input(TestBuffer::zeros("out", total, dt))
+            .constexpr("m", m as u32)
+            .constexpr("n", n as u32)
+            .constexpr("n_splits", n_splits as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            // One threadgroup per [M, N] element — grid (m*n, 1, 1).
+            .grid_3d(total as u32, 1, 1, [1, 1, 1])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use metaltile_codegen::msl::MslGenerator;
