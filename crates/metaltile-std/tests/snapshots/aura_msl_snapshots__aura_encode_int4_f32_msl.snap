@@ -74,95 +74,96 @@ kernel void aura_encode_int4(
         auto v37 = __ml_rotated;
         auto v39 = v38 + i_1;
         auto v40 = rotation[v39];
-        auto v41 = shared_unit[i_1];
-        auto v42 = v40 * v41;
-        auto v43 = v37 + v42;
-        __ml_rotated = v43;
+        auto v42 = shared_unit[i_1];
+        auto v43 = (static_cast<float>(v40) * v42);
+        auto v44 = v37 + v43;
+        __ml_rotated = v44;
     }
-    uint v44 = 0u;
-    auto __ml_idx = v44;
-    uint v49 = 1u;
     uint v45 = 0u;
-    uint v48 = 15u;
-    for (uint i_2 = v45; i_2 < v48; i_2 += v49) {
-        auto v50 = __ml_idx;
-        auto v51 = __ml_rotated;
-        auto v52 = boundaries[i_2];
-        auto v54 = static_cast<uint>((v51 > v52));
-        auto v55 = v50 + v54;
-        __ml_idx = v55;
+    auto __ml_idx = v45;
+    uint v50 = 1u;
+    uint v46 = 0u;
+    uint v49 = 15u;
+    for (uint i_2 = v46; i_2 < v49; i_2 += v50) {
+        auto v51 = __ml_idx;
+        auto v52 = __ml_rotated;
+        auto v53 = boundaries[i_2];
+        float v54 = static_cast<float>(v53);
+        auto v56 = static_cast<uint>((v52 > v54));
+        auto v57 = v51 + v56;
+        __ml_idx = v57;
     }
-    uint v56 = 4u;
-    auto v_bit_offset = v_d * v56;
-    uint v58 = 32u;
-    auto v_word_idx = v_bit_offset / v58;
-    uint v60 = 31u;
-    auto v_shift = (v_bit_offset & v60);
-    auto v62 = __ml_idx;
-    uint v66 = 1u;
-    uint v65 = 16u;
-    auto v67 = v65 - v66;
-    auto v_masked = (v62 & v67);
-    auto v69 = packed_width;
-    auto v70 = v69 > v_d;
-    if (v70) {
-        uint v71 = 0u;
-        shared_packed[v_d] = v71;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    auto v72 = (v_masked << v_shift);
-    atomic_fetch_or_explicit((threadgroup atomic_uint*)&shared_packed[v_word_idx], v72, memory_order_relaxed);
-    uint v73 = 4u;
-    auto v_total_bits = v_shift + v73;
-    uint v75 = 32u;
-    auto v76 = v_total_bits > v75;
-    if (v76) {
-        uint v77 = 32u;
-        uint v79 = 1u;
-        uint v81 = 4u;
-        auto v_spill_u = v_total_bits - v77;
-        auto v82 = v81 - v_spill_u;
-        auto v83 = (v_masked >> v82);
-        auto v80 = v_word_idx + v79;
-        atomic_fetch_or_explicit((threadgroup atomic_uint*)&shared_packed[v80], v83, memory_order_relaxed);
+    uint v58 = 4u;
+    auto v_bit_offset = v_d * v58;
+    uint v60 = 32u;
+    auto v_word_idx = v_bit_offset / v60;
+    uint v62 = 31u;
+    auto v_shift = (v_bit_offset & v62);
+    auto v64 = __ml_idx;
+    uint v68 = 1u;
+    uint v67 = 16u;
+    auto v69 = v67 - v68;
+    auto v_masked = (v64 & v69);
+    auto v71 = packed_width;
+    auto v72 = v71 > v_d;
+    if (v72) {
+        uint v73 = 0u;
+        shared_packed[v_d] = v73;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (v70) {
-        auto v87 = shared_packed[v_d];
-        auto v86 = ((v_row * v69) + v_d);
-        packed_out[v86] = v87;
+    auto v74 = (v_masked << v_shift);
+    atomic_fetch_or_explicit((threadgroup atomic_uint*)&shared_packed[v_word_idx], v74, memory_order_relaxed);
+    uint v75 = 4u;
+    auto v_total_bits = v_shift + v75;
+    uint v77 = 32u;
+    auto v78 = v_total_bits > v77;
+    if (v78) {
+        uint v79 = 32u;
+        uint v81 = 1u;
+        uint v83 = 4u;
+        auto v_spill_u = v_total_bits - v79;
+        auto v84 = v83 - v_spill_u;
+        auto v85 = (v_masked >> v84);
+        auto v82 = v_word_idx + v81;
+        atomic_fetch_or_explicit((threadgroup atomic_uint*)&shared_packed[v82], v85, memory_order_relaxed);
     }
-    auto v88 = __ml_idx;
-    auto v89 = codebook[v88];
-    float v_centroid_val = static_cast<float>(v89);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (v72) {
+        auto v89 = shared_packed[v_d];
+        auto v88 = ((v_row * v71) + v_d);
+        packed_out[v88] = v89;
+    }
+    auto v90 = __ml_idx;
+    auto v91 = codebook[v90];
+    float v_centroid_val = static_cast<float>(v91);
     auto v_recon_sq = v_centroid_val * v_centroid_val;
     float v_simd_recon_sq = simd_sum(float(v_recon_sq));
-    uint v93 = 0u;
-    auto v94 = v_lane == v93;
-    if (v94) {
+    uint v95 = 0u;
+    auto v96 = v_lane == v95;
+    if (v96) {
         shared_norm[v_sg_id] = v_simd_recon_sq;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    auto v95 = 0.0f;
-    auto __ml_total_recon_sq = v95;
-    uint v97 = 1u;
-    uint v96 = 0u;
-    for (uint i_3 = v96; i_3 < v_num_groups; i_3 += v97) {
-        auto v98 = __ml_total_recon_sq;
-        auto v99 = shared_norm[i_3];
-        auto v100 = v98 + v99;
-        __ml_total_recon_sq = v100;
+    auto v97 = 0.0f;
+    auto __ml_total_recon_sq = v97;
+    uint v99 = 1u;
+    uint v98 = 0u;
+    for (uint i_3 = v98; i_3 < v_num_groups; i_3 += v99) {
+        auto v100 = __ml_total_recon_sq;
+        auto v101 = shared_norm[i_3];
+        auto v102 = v100 + v101;
+        __ml_total_recon_sq = v102;
     }
-    auto v101 = __ml_total_recon_sq;
-    auto v_recon_norm = sqrt(v101);
-    auto v103 = 0.00000001f;
-    auto v105 = v_norm_val / v_recon_norm;
-    auto v104 = v_recon_norm > v103;
-    auto v_corrected_norm = bool(v104) ? v105 : v_norm_val;
-    uint v107 = 0u;
-    auto v108 = v_d == v107;
-    if (v108) {
-        float v109 = static_cast<float>(v_corrected_norm);
-        norms_out[v_row] = v109;
+    auto v103 = __ml_total_recon_sq;
+    auto v_recon_norm = sqrt(v103);
+    auto v105 = 0.00000001f;
+    auto v107 = v_norm_val / v_recon_norm;
+    auto v106 = v_recon_norm > v105;
+    auto v_corrected_norm = bool(v106) ? v107 : v_norm_val;
+    uint v109 = 0u;
+    auto v110 = v_d == v109;
+    if (v110) {
+        float v111 = static_cast<float>(v_corrected_norm);
+        norms_out[v_row] = v111;
     }
 }
