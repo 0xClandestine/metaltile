@@ -7,14 +7,15 @@
 //!
 //! # Migration status
 //!
-//! The `legacy` module preserves the original `#[kernel(bench(...))]` implementation
-//! while `bench`, `test`, `kernel`, `derive`, and `shape` contain the new OO design.
-//! `#[kernel]` currently routes through `legacy` to maintain `bench(...)` compat.
-//! Once all kernels are migrated (PR 3/4), the `legacy` module will be removed.
+//! The `legacy` module is the live `#[kernel]` / `#[kernel(bench(...))]`
+//! implementation (parser + bench registration); `bench`, `test`, `derive`,
+//! and `shape` are the new OO pieces. `#[kernel]` routes through `legacy` to
+//! keep `bench(...)` compat. Once all kernels are migrated (PR 3/4), `legacy`
+//! is removed and `#[kernel]` becomes an arg-free attribute over a shared
+//! body/sig parser.
 
 mod bench;
 mod derive;
-mod kernel;
 mod legacy;
 mod shape;
 mod test;
