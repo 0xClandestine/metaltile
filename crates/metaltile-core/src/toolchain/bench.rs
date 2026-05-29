@@ -5,7 +5,10 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{dsl::dtype::DType, ir::Kernel};
+use crate::{
+    dsl::dtype::DType,
+    ir::{Kernel, KernelMode},
+};
 
 pub(super) fn random_bytes(len: usize) -> Vec<u8> {
     let seed = std::time::SystemTime::now()
@@ -263,6 +266,7 @@ pub struct BenchSetup {
     grid: Option<Grid>,
     bytes_moved: Option<u64>,
     ref_kernel: Option<RefKernel>,
+    shape_label: Option<String>,
 }
 
 impl BenchSetup {
@@ -275,12 +279,24 @@ impl BenchSetup {
             grid: None,
             bytes_moved: None,
             ref_kernel: None,
+            shape_label: None,
         }
     }
 
     /// Add a GPU buffer.
     pub fn buffer(mut self, b: BenchBuffer) -> Self {
         self.buffers.push(b);
+        self
+    }
+
+    /// Override the kernel's dispatch mode before codegen.
+    ///
+    /// `kernel_ir_for` defaults to [`KernelMode::Elementwise`]; reduction,
+    /// 3D-grid, or simdgroup-matrix kernels must declare their mode here so the
+    /// generated MSL matches how they are dispatched. Elementwise kernels (e.g.
+    /// arange) can omit this.
+    pub fn mode(mut self, mode: KernelMode) -> Self {
+        self.kernel.mode = mode;
         self
     }
 
@@ -311,6 +327,19 @@ impl BenchSetup {
     /// Override the bytes-moved figure for bandwidth computation.
     pub fn bytes_moved(mut self, bytes: u64) -> Self {
         self.bytes_moved = Some(bytes);
+        self
+    }
+
+    /// Set an explicit label for the bench row's "Shape" column.
+    ///
+    /// Multi-dimensional kernels (attention `B/H/L/D`, matmul `M/N/K`, …) can't
+    /// be summarised by one buffer's element count; set a readable label here
+    /// (e.g. `"B=32 H=128 L=512"`). When unset, the runner falls back to
+    /// `N=<largest buffer> <dtype>`. (Named `with_*` like
+    /// [`with_reference`](Self::with_reference); the getter is
+    /// [`shape_label`](Self::shape_label).)
+    pub fn with_shape_label(mut self, label: impl Into<String>) -> Self {
+        self.shape_label = Some(label.into());
         self
     }
 
@@ -356,6 +385,9 @@ impl BenchSetup {
 
     /// Optional reference Metal kernel.
     pub fn ref_kernel(&self) -> Option<&RefKernel> { self.ref_kernel.as_ref() }
+
+    /// Author-supplied label for the "Shape" column, if set.
+    pub fn shape_label(&self) -> Option<&str> { self.shape_label.as_deref() }
 }
 
 // ---------------------------------------------------------------------------
@@ -444,6 +476,19 @@ mod tests {
         assert_eq!(setup.constexprs().len(), 1);
         assert_eq!(setup.grid().grid[0], 4);
         assert_eq!(setup.grid().tpg[0], 16);
+        // No explicit shape label by default — the runner infers one.
+        assert_eq!(setup.shape_label(), None);
+    }
+
+    #[test]
+    fn bench_setup_shape_label_is_set_when_provided() {
+        let setup = BenchSetup::new(Kernel::new("k"))
+            .buffer(BenchBuffer::zeros("out", 64, DType::F32).output())
+            .with_shape_label("B=32 H=128 L=512")
+            .grid_1d(64, 16)
+            .build()
+            .unwrap();
+        assert_eq!(setup.shape_label(), Some("B=32 H=128 L=512"));
     }
 
     #[test]

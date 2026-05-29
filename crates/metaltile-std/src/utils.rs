@@ -20,12 +20,17 @@ use metaltile_core::dtype::DType;
 /// Pack a slice of `f32` values into little-endian bytes for `dt`.
 ///
 /// `F32` is a straight memcpy; `F16`/`BF16` round each value to the target
-/// precision (matching the load-cast the kernel performs on the GPU). Any
-/// other dtype falls back to the raw `f32` layout.
+/// precision (matching the load-cast the kernel performs on the GPU); integer
+/// dtypes **value-cast** (`v as u32` etc., not a bit reinterpret), so a kernel
+/// emitting integer output (e.g. argmax indices) round-trips through `f32`.
 pub fn pack_f32(vals: &[f32], dt: DType) -> Vec<u8> {
     match dt {
         DType::F16 => vals.iter().flat_map(|&v| f16::from_f32(v).to_le_bytes()).collect(),
         DType::BF16 => vals.iter().flat_map(|&v| bf16::from_f32(v).to_le_bytes()).collect(),
+        DType::U32 => vals.iter().flat_map(|&v| (v as u32).to_le_bytes()).collect(),
+        DType::I32 => vals.iter().flat_map(|&v| (v as i32).to_le_bytes()).collect(),
+        DType::U8 => vals.iter().map(|&v| v as u8).collect(),
+        DType::I8 => vals.iter().map(|&v| v as i8 as u8).collect(),
         _ => vals.iter().flat_map(|&v| v.to_le_bytes()).collect(),
     }
 }
@@ -45,6 +50,16 @@ pub fn unpack_f32(bytes: &[u8], dt: DType) -> Vec<f32> {
             bytes.chunks_exact(2).map(|c| f16::from_le_bytes([c[0], c[1]]).to_f32()).collect(),
         DType::BF16 =>
             bytes.chunks_exact(2).map(|c| bf16::from_le_bytes([c[0], c[1]]).to_f32()).collect(),
+        DType::U32 => bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f32)
+            .collect(),
+        DType::I32 => bytes
+            .chunks_exact(4)
+            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f32)
+            .collect(),
+        DType::U8 => bytes.iter().map(|&b| b as f32).collect(),
+        DType::I8 => bytes.iter().map(|&b| b as i8 as f32).collect(),
         _ => bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect(),
     }
 }
@@ -109,11 +124,16 @@ mod tests {
     }
 
     #[test]
-    fn non_float_dtype_falls_back_to_f32_layout() {
-        let vals = [1.0, 2.0];
-        assert_eq!(pack_f32(&vals, DType::I32), pack_f32(&vals, DType::F32));
-        let bytes = pack_f32(&vals, DType::I32);
-        assert_eq!(unpack_f32(&bytes, DType::U32), vals);
+    fn integer_dtypes_value_cast_round_trip() {
+        let vals = [0.0, 1.0, 42.0, 255.0];
+        for dt in [DType::U32, DType::I32] {
+            assert_eq!(unpack_f32(&pack_f32(&vals, dt), dt), vals);
+        }
+        // Value cast, not a bit reinterpret: 1.0 → the integer 1.
+        assert_eq!(pack_f32(&[1.0], DType::U32), 1u32.to_le_bytes().to_vec());
+        // 8-bit dtypes narrow to one byte per element.
+        assert_eq!(pack_f32(&[5.0, 250.0], DType::U8), vec![5, 250]);
+        assert_eq!(unpack_f32(&[5, 250], DType::U8), vec![5.0, 250.0]);
     }
 
     #[test]
