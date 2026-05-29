@@ -651,20 +651,29 @@ mod tests {
     }
 
     #[test]
-    fn pso_cache_key_only_first_param_dtype_matters() {
-        // `pso_cache_key` only looks at `params.first()`. A second param of
-        // any dtype must not change the key. Documents the chosen
-        // specialisation surface: a kernel is monomorphised by the dtype of
-        // its first tensor operand; downstream dtypes are propagated.
-        let mut k_one = Kernel::new("k");
-        k_one.params = vec![tensor_param("a", DType::F32, &[4], false, ParamKind::Tensor)];
-        let mut k_two = Kernel::new("k");
-        k_two.params = vec![
-            tensor_param("a", DType::F32, &[4], false, ParamKind::Tensor),
-            tensor_param("b", DType::F16, &[4], true, ParamKind::Tensor),
-        ];
+    fn pso_cache_key_folds_all_param_dtypes() {
+        // Regression: `pso_cache_key` used to fold only `params.first()`.
+        // Quantized kernels (mt_qmm, dequant_gemv_int*) take a packed
+        // `Tensor<u32>` weight as their first param, so the f32 / f16 /
+        // bf16 monomorphizations shared one key and collided onto a single
+        // PSO — whichever dtype compiled first served the others, reading
+        // their narrower buffers through the wrong pipeline (garbage). The
+        // full param-dtype signature now participates: kernels that differ
+        // only in a *later* value dtype must hash to distinct keys.
         let consts = BTreeMap::new();
-        assert_eq!(pso_cache_key(&k_one, &consts), pso_cache_key(&k_two, &consts));
+        let mut k_f32 = Kernel::new("mt_qmm");
+        k_f32.params = vec![
+            tensor_param("w", DType::U32, &[4], false, ParamKind::Tensor),
+            tensor_param("scales", DType::F32, &[4], false, ParamKind::Tensor),
+            tensor_param("out", DType::F32, &[4], true, ParamKind::Tensor),
+        ];
+        let mut k_f16 = Kernel::new("mt_qmm");
+        k_f16.params = vec![
+            tensor_param("w", DType::U32, &[4], false, ParamKind::Tensor),
+            tensor_param("scales", DType::F16, &[4], false, ParamKind::Tensor),
+            tensor_param("out", DType::F16, &[4], true, ParamKind::Tensor),
+        ];
+        assert_ne!(pso_cache_key(&k_f32, &consts), pso_cache_key(&k_f16, &consts));
     }
 
     #[test]

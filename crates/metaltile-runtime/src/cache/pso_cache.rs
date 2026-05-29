@@ -77,8 +77,17 @@ pub(crate) fn pso_cache_key(kernel: &Kernel, fn_consts: &BTreeMap<String, u32>) 
     let mut h = FNV_OFFSET;
     fnv1a_extend(&mut h, kernel.name.as_bytes());
     fnv1a_extend(&mut h, b":");
-    if let Some(p) = kernel.params.first() {
+    // Fold EVERY param's dtype label, not just the first. Quantized
+    // kernels (mt_qmm, dequant_gemv_int*, …) take a packed `Tensor<u32>`
+    // weight as their first parameter, so `params[0].dtype` is identical
+    // (u32) across the f32 / f16 / bf16 monomorphizations — keying on
+    // only the first param collided all three onto one PSO, and whichever
+    // dtype compiled first served the rest (garbage output for the
+    // others). The full param-dtype signature is the real differentiator,
+    // since a kernel's monomorphizations all share one `kernel.name`.
+    for p in &kernel.params {
         fnv1a_extend(&mut h, p.dtype.label().as_bytes());
+        fnv1a_extend(&mut h, b",");
     }
     for (n, v) in fn_consts {
         fnv1a_extend(&mut h, n.as_bytes());
@@ -328,17 +337,39 @@ mod tests {
         assert_ne!(pso_cache_key(&k_f32, &consts), pso_cache_key(&k_f16, &consts));
     }
 
+    // Regression test for the quantized-kernel PSO collision: keying on
+    // only the first param's dtype made monomorphizations that share a
+    // first param (e.g. quantized kernels with a packed `Tensor<u32>`
+    // weight) but differ in a *later* value dtype collide onto one PSO.
+    // Every param's dtype must now participate in the key.
     #[test]
-    fn pso_cache_key_only_first_param_dtype_matters() {
-        let mut k_one = Kernel::new("k");
-        k_one.params = vec![tensor_param("a", DType::F32, &[4], false, ParamKind::Tensor)];
-        let mut k_two = Kernel::new("k");
-        k_two.params = vec![
-            tensor_param("a", DType::F32, &[4], false, ParamKind::Tensor),
-            tensor_param("b", DType::F16, &[4], true, ParamKind::Tensor),
-        ];
+    fn pso_cache_key_folds_all_param_dtypes() {
         let consts = BTreeMap::new();
-        assert_eq!(pso_cache_key(&k_one, &consts), pso_cache_key(&k_two, &consts));
+        // Two "kernels" with the same name + identical first param (u32
+        // packed weight) but f32 vs f16 value dtypes — the exact shape of
+        // mt_qmm / dequant_gemv monomorphizations. They must NOT collide.
+        let mut k_f32 = Kernel::new("mt_qmm");
+        k_f32.params = vec![
+            tensor_param("w", DType::U32, &[4], false, ParamKind::Tensor),
+            tensor_param("scales", DType::F32, &[4], false, ParamKind::Tensor),
+            tensor_param("out", DType::F32, &[4], true, ParamKind::Tensor),
+        ];
+        let mut k_f16 = Kernel::new("mt_qmm");
+        k_f16.params = vec![
+            tensor_param("w", DType::U32, &[4], false, ParamKind::Tensor),
+            tensor_param("scales", DType::F16, &[4], false, ParamKind::Tensor),
+            tensor_param("out", DType::F16, &[4], true, ParamKind::Tensor),
+        ];
+        assert_ne!(pso_cache_key(&k_f32, &consts), pso_cache_key(&k_f16, &consts));
+
+        // And f16 vs bf16 (same byte width, different label) must differ too.
+        let mut k_bf16 = Kernel::new("mt_qmm");
+        k_bf16.params = vec![
+            tensor_param("w", DType::U32, &[4], false, ParamKind::Tensor),
+            tensor_param("scales", DType::BF16, &[4], false, ParamKind::Tensor),
+            tensor_param("out", DType::BF16, &[4], true, ParamKind::Tensor),
+        ];
+        assert_ne!(pso_cache_key(&k_f16, &consts), pso_cache_key(&k_bf16, &consts));
     }
 
     #[test]

@@ -7,7 +7,7 @@
 //! buffer: buffer allocation, Metal buffer binding, grid derivation,
 //! dispatch, commit, and output read‑back.
 
-use std::{collections::BTreeMap, ptr::NonNull};
+use std::{borrow::Cow, collections::BTreeMap, ptr::NonNull};
 
 use metaltile_core::ir::{Kernel, KernelMode};
 use objc2::{rc::Retained, runtime::ProtocolObject};
@@ -139,30 +139,57 @@ impl<'a> SingleDispatch<'a> {
                 }
             }
 
-            let len = binding.data_len.max(4);
+            // `required` is the param's true byte size; `alloc_len` adds
+            // Metal's minimum-allocation floor (4 bytes). Keeping them
+            // distinct lets a legitimately-small buffer — e.g. a 2-byte
+            // f16/bf16 single-element `Tensor<T>` — bind correctly: we
+            // still reject genuine under-provisioning (`< required`), but
+            // zero-pad an in-spec-but-sub-floor buffer up to the floor so
+            // the GPU read stays in bounds. Comparing against the floored
+            // `alloc_len` (the bug this restores) rejected every valid
+            // 2-byte buffer with "expected 4 bytes but received 2".
+            let required = binding.data_len;
+            let alloc_len = required.max(4);
             let buf = if let Some(bytes) = data.filter(|b| !b.is_empty()) {
-                if bytes.len() < len {
+                if bytes.len() < required {
                     return Err(MetalTileError::Buffer(format!(
-                        "buffer allocation expected {len} bytes but received {}",
+                        "buffer allocation expected {required} bytes but received {}",
                         bytes.len()
                     )));
                 }
-                // SAFETY: `bytes.as_ptr()` is valid for
-                // `bytes.len()` bytes.  `len ≤ bytes.len()` was
-                // checked above.
-                unsafe {
-                    self.dev.device().newBufferWithBytes_length_options(
-                        NonNull::new(bytes.as_ptr() as *mut _)
-                            .ok_or_else(|| MetalTileError::Buffer("null data pointer".into()))?,
-                        len,
-                        MTLResourceOptions::StorageModeShared,
-                    )
+                if bytes.len() >= alloc_len {
+                    // SAFETY: `bytes.as_ptr()` is valid for `bytes.len()`
+                    // bytes, and `alloc_len <= bytes.len()` here.
+                    unsafe {
+                        self.dev.device().newBufferWithBytes_length_options(
+                            NonNull::new(bytes.as_ptr() as *mut _).ok_or_else(|| {
+                                MetalTileError::Buffer("null data pointer".into())
+                            })?,
+                            alloc_len,
+                            MTLResourceOptions::StorageModeShared,
+                        )
+                    }
+                    .ok_or(MetalTileError::NoDevice)?
+                } else {
+                    // bytes.len() ∈ [required, alloc_len): pad up to the floor.
+                    let mut padded = bytes.to_vec();
+                    padded.resize(alloc_len, 0);
+                    // SAFETY: `padded.as_ptr()` is valid for `alloc_len` bytes.
+                    unsafe {
+                        self.dev.device().newBufferWithBytes_length_options(
+                            NonNull::new(padded.as_ptr() as *mut _).ok_or_else(|| {
+                                MetalTileError::Buffer("null data pointer".into())
+                            })?,
+                            alloc_len,
+                            MTLResourceOptions::StorageModeShared,
+                        )
+                    }
+                    .ok_or(MetalTileError::NoDevice)?
                 }
-                .ok_or(MetalTileError::NoDevice)?
             } else {
                 self.dev
                     .device()
-                    .newBufferWithLength_options(len, MTLResourceOptions::StorageModeShared)
+                    .newBufferWithLength_options(alloc_len, MTLResourceOptions::StorageModeShared)
                     .ok_or(MetalTileError::NoDevice)?
             };
             bufs.push(std::rc::Rc::new(buf));
@@ -180,10 +207,20 @@ impl<'a> SingleDispatch<'a> {
             let bytes = self.buffers.get(key).map(Vec::as_slice);
             let len = elem.max(4);
             let buf = if let Some(b) = bytes.filter(|b| !b.is_empty()) {
-                // SAFETY: `b.as_ptr()` is valid for `b.len()` bytes.
+                // Zero-pad a sub-floor scalar (e.g. a 2-byte f16/bf16
+                // constexpr) up to `len` so the bound read stays in
+                // bounds — same floor handling as the param path above.
+                let padded = if b.len() < len {
+                    let mut p = b.to_vec();
+                    p.resize(len, 0);
+                    Cow::Owned(p)
+                } else {
+                    Cow::Borrowed(b)
+                };
+                // SAFETY: `padded.as_ptr()` is valid for `len` bytes.
                 unsafe {
                     self.dev.device().newBufferWithBytes_length_options(
-                        NonNull::new(b.as_ptr() as *mut _)
+                        NonNull::new(padded.as_ptr() as *mut _)
                             .ok_or_else(|| MetalTileError::Buffer("null constexpr data".into()))?,
                         len,
                         MTLResourceOptions::StorageModeShared,
