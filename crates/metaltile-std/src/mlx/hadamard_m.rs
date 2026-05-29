@@ -31,7 +31,10 @@
 //!   thread-in-threadgroup index since one partial simdgroup covers the TG.
 //! - `n_rows * M` must equal the total element count of the input tensor.
 //!
-//! Correctness pinned by `tests/hadamard_m_gpu_correctness.rs`.
+//! Correctness pinned by the in-module `kernel_tests` (`#[test_kernel]`,
+//! consistent with the other migrated mlx kernels) plus the richer oracle
+//! cases (identity-vector, not-all-zeros) in
+//! `tests/hadamard_m_gpu_correctness.rs`.
 //!
 //! ## Sign-bit encoding
 //!
@@ -48,20 +51,18 @@ use crate::bench_types::DType as BenchDType;
 // ── H_M sign-bit encodings ─────────────────────────────────────────────────
 //
 // Derived from `mlx/backend/common/hadamard.h`. Each entry `signs[t]` is a
-// 32-bit integer where bit j = 1 means H_M[t][j] = +1.  These are only used
-// to verify H · H^T = M · I in tests; the kernel inlines the same constants
-// as `stack_store` arguments (the DSL has no compile-time loop over Rust
-// arrays, so each M gets its own monomorphized `#[kernel]` fn).
-#[cfg(test)]
+// 32-bit integer where bit j = 1 means H_M[t][j] = +1.  The kernel inlines
+// the same constants as `stack_store` arguments (the DSL has no compile-time
+// loop over Rust arrays, so each M gets its own monomorphized `#[kernel]`
+// fn); these arrays are the canonical reference the `kernel_tests` CPU
+// oracle and the `H · H^T = M · I` orthogonality tests check against.
 const H12_SIGNS: [u32; 12] = [4093, 1364, 3127, 1681, 223, 2629, 883, 2329, 3523, 1129, 1807, 421];
 
-#[cfg(test)]
 const H20_SIGNS: [u32; 20] = [
     445473, 859202, 702596, 389384, 747024, 641086, 234589, 469147, 938263, 828943, 984492, 953176,
     889521, 762211, 508614, 34194, 68357, 135722, 270452, 540873,
 ];
 
-#[cfg(test)]
 const H28_SIGNS: [u32; 28] = [
     53043585, 106070914, 210061060, 153783816, 41229328, 80377888, 160739520, 79265980, 156451192,
     44483185, 88966243, 177932359, 87445519, 172810270, 125848794, 251697461, 237056618, 207758549,
@@ -227,10 +228,10 @@ pub fn kernel_ir_for(m: u32, dt: DType) -> Kernel {
 const _: &[BenchDType] = &[BenchDType::F32, BenchDType::F16, BenchDType::BF16];
 
 /// New-syntax benchmarks for the Paley-construction Hadamard-M transforms
-/// (M ∈ {12, 20, 28}; Reduction, one TG per row, tpg=M). These plain
-/// `#[kernel]`s were never benched under the legacy schema — bench-only here;
-/// correctness stays pinned by `tests/hadamard_m_gpu_correctness.rs` (its
-/// oracle needs the bit-packed Paley sign tables, not worth transcribing).
+/// (M ∈ {12, 20, 28}; Reduction, one TG per row, tpg=M). In-process
+/// correctness for the same kernels lives in [`kernel_tests`] below; the
+/// richer oracle cases (identity-vector, not-all-zeros, perf bench) stay
+/// in `tests/hadamard_m_gpu_correctness.rs`.
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
@@ -252,6 +253,68 @@ pub mod kernel_benches {
     hm_bench!(bench_hadamard_m12, "mlx/hadamard_m/m12", mt_hadamard_m12, 12);
     hm_bench!(bench_hadamard_m20, "mlx/hadamard_m/m20", mt_hadamard_m20, 20);
     hm_bench!(bench_hadamard_m28, "mlx/hadamard_m/m28", mt_hadamard_m28, 28);
+}
+
+/// New-syntax in-process correctness tests for the Paley Hadamard-M
+/// transforms (M ∈ {12, 20, 28}). Mirrors the `kernel_benches` structure
+/// so the kernel family is consistent with the other migrated mlx kernels
+/// (gemv, sort, scan, …) that pin correctness via `#[test_kernel]`.
+///
+/// The CPU oracle reuses the same `super::H{M}_SIGNS` bit-packed sign
+/// tables the kernel is built from: `out[t] = scale · Σ_j sign(t,j)·inp[j]`,
+/// where `sign(t,j) = +1` iff bit j of `signs[t]` is set. Accumulation is
+/// in f32 (matching the kernel's `cast::<f32>()` load) and the input is
+/// round-tripped through the dispatch dtype so the oracle sees the same
+/// load precision as the GPU.
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use crate::utils::{pack_f32, unpack_f32};
+
+    /// `out[t] = scale · Σ_j sign(t,j) · inp[j]` per M-element row.
+    fn oracle(data: &[f32], m: usize, signs: &[u32], scale: f32) -> Vec<f32> {
+        let n_rows = data.len() / m;
+        let mut out = vec![0.0f32; data.len()];
+        for row in 0..n_rows {
+            let base = row * m;
+            for t in 0..m {
+                let mut acc = 0.0f32;
+                for j in 0..m {
+                    let sign = if (signs[t] >> j) & 1 == 1 { 1.0f32 } else { -1.0 };
+                    acc += sign * data[base + j];
+                }
+                out[base + t] = acc * scale;
+            }
+        }
+        out
+    }
+
+    macro_rules! hm_test {
+        ($name:ident, $kernel:ident, $signs:ident, $m:literal) => {
+            // f32 tight; f16/bf16 looser — M-term accumulation in reduced
+            // precision (same convention as the mlx/gemv reduction test).
+            #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-2, 2e-1])]
+            fn $name(dt: DType) -> TestSetup {
+                let (rows, m) = (16usize, $m);
+                let scale = 1.0f32 / (m as f32).sqrt();
+                // Deterministic input in [-3, 3], round-tripped through `dt`
+                // so the oracle accumulates the same values the GPU loads.
+                let raw: Vec<f32> = (0..rows * m).map(|i| ((i % 13) as f32 - 6.0) * 0.5).collect();
+                let data = unpack_f32(&pack_f32(&raw, dt), dt);
+                let expected = oracle(&data, m, &super::$signs, scale);
+                TestSetup::new(super::$kernel::kernel_ir_for(dt))
+                    .mode(KernelMode::Reduction)
+                    .input(TestBuffer::from_vec("inp", pack_f32(&data, dt), dt))
+                    .input(TestBuffer::zeros("out", rows * m, dt))
+                    .constexpr("scale", scale)
+                    .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+                    .grid_3d(rows as u32, 1, 1, [m as u32, 1, 1])
+            }
+        };
+    }
+    hm_test!(test_hadamard_m12, mt_hadamard_m12, H12_SIGNS, 12);
+    hm_test!(test_hadamard_m20, mt_hadamard_m20, H20_SIGNS, 20);
+    hm_test!(test_hadamard_m28, mt_hadamard_m28, H28_SIGNS, 28);
 }
 
 #[cfg(test)]
