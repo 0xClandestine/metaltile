@@ -89,7 +89,7 @@ pub use metaltile_codegen::error::Error as CodegenError;
 /// Core IR, dtype, shape, and constexpr definitions.
 pub use metaltile_core as core;
 /// Proc macros and helper macros used by kernel definitions.
-pub use metaltile_macros::{constexpr, kernel, scalar, shape, strided, tile};
+pub use metaltile_macros::{bench, constexpr, kernel, scalar, shape, strided, test_kernel, tile};
 /// Runtime context, dispatch result, and top-level runtime error.
 pub use metaltile_runtime::{Context, DispatchResult, MetalTileError};
 /// Placeholder tensor marker used in `#[kernel]` signatures.

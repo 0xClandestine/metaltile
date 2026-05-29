@@ -8,15 +8,35 @@
 //! - [`ConstExpr`]: constexpr values resolved at kernel compile time
 //! - Kernel IR nodes: the SSA-form intermediate representation
 
+pub mod bench;
 pub mod constexpr;
 pub mod dtype;
 pub mod error;
 pub mod gpu_family;
 pub mod ir;
 pub mod kernel_registry;
+pub mod protocol;
 pub mod shape;
+pub mod tile_config;
 pub mod utils;
 
+pub use bench::{
+    BenchBuffer,
+    BenchSetup,
+    ConstValue,
+    Gbps,
+    Grid,
+    KernelBench,
+    KernelBenchEntry,
+    KernelTest,
+    KernelTestEntry,
+    MetalRef,
+    Microseconds,
+    TestBuffer,
+    TestSetup,
+    all_benches,
+    all_tests,
+};
 pub use constexpr::ConstExpr;
 pub use dtype::DType;
 pub use error::{Error, Result};
