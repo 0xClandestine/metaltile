@@ -110,3 +110,78 @@ pub fn mt_sdpa<T>(
         store(out[out_off + 3u32], so3.cast::<T>());
     }
 }
+
+/// New-syntax correctness + benchmark for `mt_sdpa` — the baseline decode SDPA
+/// (head_dim hardcoded 128, one KV head per Q head, constexprs `n_kv` +
+/// `scale`). Reuses the triple-loop `softmax(Q·Kᵀ·scale)·V` oracle from
+/// `sdpa_vector` (gqa=1). Pre-this migration `mt_sdpa` had no CPU-oracle test
+/// — validation flowed only through the `tile bench` head-to-head against MLX.
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::mt_sdpa;
+    use crate::{
+        mlx::sdpa_vector::kernel_tests::cpu_sdpa,
+        utils::{pack_f32, unpack_f32},
+    };
+
+    const HEAD_DIM: usize = 128;
+
+    fn setup(n_heads: usize, n_kv: usize, dt: DType) -> TestSetup {
+        let scale = 1.0f32 / (HEAD_DIM as f32).sqrt();
+        let q_f: Vec<f32> =
+            (0..n_heads * HEAD_DIM).map(|i| ((i % 17) as f32 - 8.0) * 0.02).collect();
+        let kv_len = n_heads * n_kv * HEAD_DIM;
+        let k_f: Vec<f32> = (0..kv_len).map(|i| ((i % 23) as f32 - 11.0) * 0.02).collect();
+        let v_f: Vec<f32> = (0..kv_len).map(|i| ((i % 19) as f32 - 9.0) * 0.03).collect();
+        let q = unpack_f32(&pack_f32(&q_f, dt), dt);
+        let k = unpack_f32(&pack_f32(&k_f, dt), dt);
+        let v = unpack_f32(&pack_f32(&v_f, dt), dt);
+        // gqa=1: one KV head per Q head.
+        let expected = cpu_sdpa(&q, &k, &v, n_heads, n_heads, n_kv, HEAD_DIM);
+        TestSetup::new(mt_sdpa::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("q", pack_f32(&q_f, dt), dt))
+            .input(TestBuffer::from_vec("k", pack_f32(&k_f, dt), dt))
+            .input(TestBuffer::from_vec("v", pack_f32(&v_f, dt), dt))
+            .input(TestBuffer::zeros("out", n_heads * HEAD_DIM, dt))
+            .constexpr("n_kv", n_kv as u32)
+            .constexpr("scale", scale)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(n_heads as u32, 1, 1, [1024, 1, 1])
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-3, 1e-2])]
+    fn test_sdpa(dt: DType) -> TestSetup { setup(8, 64, dt) }
+}
+
+/// New-syntax benchmark for `mt_sdpa` (decode attention, head_dim 128).
+pub mod kernel_benches {
+    use metaltile::{bench, test::*};
+
+    use super::mt_sdpa;
+
+    const HEAD_DIM: usize = 128;
+
+    #[bench(name = "mlx/sdpa/sdpa", dtypes = [f32, f16, bf16])]
+    fn bench_sdpa(dt: DType) -> BenchSetup {
+        let (n_heads, n_kv) = (32usize, 4096usize);
+        let scale = 1.0f32 / (HEAD_DIM as f32).sqrt();
+        let kv_len = n_heads * n_kv * HEAD_DIM;
+        let bytes = 2 * kv_len * dt.size_bytes() + 2 * n_heads * HEAD_DIM * dt.size_bytes();
+        BenchSetup::new(mt_sdpa::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("q", n_heads * HEAD_DIM, dt))
+            .buffer(BenchBuffer::random("k", kv_len, dt))
+            .buffer(BenchBuffer::random("v", kv_len, dt))
+            .buffer(BenchBuffer::zeros("out", n_heads * HEAD_DIM, dt).output())
+            .constexpr("n_kv", n_kv as u32)
+            .constexpr("scale", scale)
+            .with_shape_label(format!(
+                "h{HEAD_DIM} kv{n_kv} nh{n_heads} {}",
+                crate::bench_types::dtype_label(dt)
+            ))
+            .grid_3d(n_heads as u32, 1, 1, [1024, 1, 1])
+            .bytes_moved(bytes as u64)
+    }
+}

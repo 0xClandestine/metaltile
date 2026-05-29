@@ -656,3 +656,179 @@ pub fn mt_sdpa_vector_d256<T>(
         store(out[out_off + 7u32], red7);
     }
 }
+
+/// New-syntax correctness + benchmarks for the decode-step attention vector
+/// kernels (`mt_sdpa_vector` at head_dim 128 plus the d64/d96/d192/d256
+/// variants). Oracle: a straight triple-loop `O = softmax(Q·Kᵀ·scale)·V` per
+/// Q head with GQA via `kv_head = q_head / gqa_factor` (the same reference the
+/// legacy `sdpa_vector_gpu_correctness.rs` pins). The CPU oracle is reused by
+/// `scaled_dot_product_attention`'s `mt_sdpa`. Inputs are dtype-rounded so the
+/// oracle sees what the kernel loads after the f32 cast.
+pub mod kernel_tests {
+    use metaltile::{core::ir::Kernel, test::*, test_kernel};
+
+    use super::{
+        mt_sdpa_vector,
+        mt_sdpa_vector_d64,
+        mt_sdpa_vector_d96,
+        mt_sdpa_vector_d192,
+        mt_sdpa_vector_d256,
+    };
+    use crate::utils::{pack_f32, unpack_f32};
+
+    /// `O = softmax(Q·Kᵀ·scale)·V`, GQA via `kv_head = q_head / gqa`.
+    /// `q` is `[n_q_heads, head_dim]`; `k`/`v` are `[n_kv_heads, n_kv, head_dim]`.
+    pub(crate) fn cpu_sdpa(
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        n_q_heads: usize,
+        n_kv_heads: usize,
+        n_kv: usize,
+        head_dim: usize,
+    ) -> Vec<f32> {
+        let gqa = n_q_heads / n_kv_heads;
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+        let mut out = vec![0.0f32; n_q_heads * head_dim];
+        for h in 0..n_q_heads {
+            let kv_h = h / gqa;
+            let mut scores = vec![0.0f32; n_kv];
+            for (j, sc) in scores.iter_mut().enumerate() {
+                let mut dot = 0.0f32;
+                for d in 0..head_dim {
+                    dot += q[h * head_dim + d] * k[kv_h * n_kv * head_dim + j * head_dim + d];
+                }
+                *sc = dot * scale;
+            }
+            let mx = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut e: Vec<f32> = scores.iter().map(|&s| (s - mx).exp()).collect();
+            let sum: f32 = e.iter().sum();
+            let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+            for ej in e.iter_mut() {
+                *ej *= inv;
+            }
+            for d in 0..head_dim {
+                let mut acc = 0.0f32;
+                for (j, &ej) in e.iter().enumerate() {
+                    acc += ej * v[kv_h * n_kv * head_dim + j * head_dim + d];
+                }
+                out[h * head_dim + d] = acc;
+            }
+        }
+        out
+    }
+
+    /// Shared setup for the `(q, k, v, out, head_dim, n_kv, gqa_factor, scale)`
+    /// vector kernels. Grid `[n_q_heads, 1, 1]`, tpg 1024, Reduction mode.
+    pub(crate) fn sdpa_setup(
+        kernel: Kernel,
+        head_dim: usize,
+        n_kv: usize,
+        n_q_heads: usize,
+        gqa_factor: usize,
+        dt: DType,
+    ) -> TestSetup {
+        let n_kv_heads = n_q_heads / gqa_factor;
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+        let q_f: Vec<f32> =
+            (0..n_q_heads * head_dim).map(|i| ((i % 17) as f32 - 8.0) * 0.02).collect();
+        let kv_len = n_kv_heads * n_kv * head_dim;
+        let k_f: Vec<f32> = (0..kv_len).map(|i| ((i % 23) as f32 - 11.0) * 0.02).collect();
+        let v_f: Vec<f32> = (0..kv_len).map(|i| ((i % 19) as f32 - 9.0) * 0.03).collect();
+        let q = unpack_f32(&pack_f32(&q_f, dt), dt);
+        let k = unpack_f32(&pack_f32(&k_f, dt), dt);
+        let v = unpack_f32(&pack_f32(&v_f, dt), dt);
+        let expected = cpu_sdpa(&q, &k, &v, n_q_heads, n_kv_heads, n_kv, head_dim);
+        TestSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("q", pack_f32(&q_f, dt), dt))
+            .input(TestBuffer::from_vec("k", pack_f32(&k_f, dt), dt))
+            .input(TestBuffer::from_vec("v", pack_f32(&v_f, dt), dt))
+            .input(TestBuffer::zeros("out", n_q_heads * head_dim, dt))
+            .constexpr("head_dim", head_dim as u32)
+            .constexpr("n_kv", n_kv as u32)
+            .constexpr("gqa_factor", gqa_factor as u32)
+            .constexpr("scale", scale)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(n_q_heads as u32, 1, 1, [1024, 1, 1])
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-3, 1e-2])]
+    fn test_sdpa_vector(dt: DType) -> TestSetup {
+        sdpa_setup(mt_sdpa_vector::kernel_ir_for(dt), 128, 64, 8, 2, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-3, 1e-2])]
+    fn test_sdpa_vector_d64(dt: DType) -> TestSetup {
+        sdpa_setup(mt_sdpa_vector_d64::kernel_ir_for(dt), 64, 64, 8, 2, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-3, 1e-2])]
+    fn test_sdpa_vector_d96(dt: DType) -> TestSetup {
+        sdpa_setup(mt_sdpa_vector_d96::kernel_ir_for(dt), 96, 64, 8, 2, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-3, 1e-2])]
+    fn test_sdpa_vector_d192(dt: DType) -> TestSetup {
+        sdpa_setup(mt_sdpa_vector_d192::kernel_ir_for(dt), 192, 64, 8, 2, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-3, 1e-2])]
+    fn test_sdpa_vector_d256(dt: DType) -> TestSetup {
+        sdpa_setup(mt_sdpa_vector_d256::kernel_ir_for(dt), 256, 64, 8, 2, dt)
+    }
+}
+
+/// New-syntax benchmarks for the decode-step attention vector kernels.
+/// Production decode shape: n_q_heads=32, gqa_factor=4, n_kv=4096.
+pub mod kernel_benches {
+    use metaltile::{bench, core::ir::Kernel, test::*};
+
+    use super::{
+        mt_sdpa_vector,
+        mt_sdpa_vector_d64,
+        mt_sdpa_vector_d96,
+        mt_sdpa_vector_d192,
+        mt_sdpa_vector_d256,
+    };
+
+    fn sb(kernel: Kernel, head_dim: usize, dt: DType) -> BenchSetup {
+        let (n_kv, n_q_heads, gqa_factor) = (4096usize, 32usize, 4usize);
+        let n_kv_heads = n_q_heads / gqa_factor;
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+        let kv_len = n_kv_heads * n_kv * head_dim;
+        // Dominant traffic: streaming K and V once each.
+        let bytes = 2 * kv_len * dt.size_bytes() + 2 * n_q_heads * head_dim * dt.size_bytes();
+        BenchSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("q", n_q_heads * head_dim, dt))
+            .buffer(BenchBuffer::random("k", kv_len, dt))
+            .buffer(BenchBuffer::random("v", kv_len, dt))
+            .buffer(BenchBuffer::zeros("out", n_q_heads * head_dim, dt).output())
+            .constexpr("head_dim", head_dim as u32)
+            .constexpr("n_kv", n_kv as u32)
+            .constexpr("gqa_factor", gqa_factor as u32)
+            .constexpr("scale", scale)
+            .with_shape_label(format!(
+                "h{head_dim} kv{n_kv} nq{n_q_heads} {}",
+                crate::bench_types::dtype_label(dt)
+            ))
+            .grid_3d(n_q_heads as u32, 1, 1, [1024, 1, 1])
+            .bytes_moved(bytes as u64)
+    }
+
+    #[bench(name = "mlx/sdpa/vector_d128", dtypes = [f32, f16, bf16])]
+    fn bench_sdpa_vector(dt: DType) -> BenchSetup { sb(mt_sdpa_vector::kernel_ir_for(dt), 128, dt) }
+    #[bench(name = "mlx/sdpa/vector_d64", dtypes = [f32, f16, bf16])]
+    fn bench_sdpa_vector_d64(dt: DType) -> BenchSetup {
+        sb(mt_sdpa_vector_d64::kernel_ir_for(dt), 64, dt)
+    }
+    #[bench(name = "mlx/sdpa/vector_d96", dtypes = [f32, f16, bf16])]
+    fn bench_sdpa_vector_d96(dt: DType) -> BenchSetup {
+        sb(mt_sdpa_vector_d96::kernel_ir_for(dt), 96, dt)
+    }
+    #[bench(name = "mlx/sdpa/vector_d192", dtypes = [f32, f16, bf16])]
+    fn bench_sdpa_vector_d192(dt: DType) -> BenchSetup {
+        sb(mt_sdpa_vector_d192::kernel_ir_for(dt), 192, dt)
+    }
+    #[bench(name = "mlx/sdpa/vector_d256", dtypes = [f32, f16, bf16])]
+    fn bench_sdpa_vector_d256(dt: DType) -> BenchSetup {
+        sb(mt_sdpa_vector_d256::kernel_ir_for(dt), 256, dt)
+    }
+}

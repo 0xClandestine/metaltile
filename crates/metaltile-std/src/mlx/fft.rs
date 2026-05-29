@@ -441,3 +441,333 @@ pub fn mt_fft_bluestein_postprocess<T>(
         store(out_im[idx], (pi_v * scale).cast::<T>());
     }
 }
+
+/// New-syntax correctness for the FFT family. The radix-2 kernels are pinned
+/// against a naive O(N²) DFT (forward); the Bluestein pipeline stages are
+/// each pure elementwise chirp arithmetic, pinned against direct CPU replays
+/// of their documented formulas (the legacy `fft_*_gpu_correctness.rs` tests
+/// validate the full assembled pipeline against a DFT — these pin the
+/// individual stages). Inputs are kept small + dtype-rounded so the f32
+/// threadgroup math the kernels use matches the oracle within an absolute tol.
+pub mod kernel_tests {
+    use std::f32::consts::PI;
+
+    use metaltile::{core::ir::Kernel, test::*, test_kernel};
+
+    use super::*;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    /// Naive O(N²) DFT (`inv=false`) / IDFT (`inv=true`, 1/N scaled) per row.
+    fn naive_dft(re: &[f32], im: &[f32], rows: usize, n: usize, inv: bool) -> (Vec<f32>, Vec<f32>) {
+        let sign = if inv { 1.0f32 } else { -1.0f32 };
+        let mut or = vec![0.0f32; rows * n];
+        let mut oi = vec![0.0f32; rows * n];
+        for r in 0..rows {
+            for k in 0..n {
+                let (mut ar, mut ai) = (0.0f32, 0.0f32);
+                for t in 0..n {
+                    let ang = sign * 2.0 * PI * (k as f32) * (t as f32) / n as f32;
+                    let (c, s) = (ang.cos(), ang.sin());
+                    ar += re[r * n + t] * c - im[r * n + t] * s;
+                    ai += re[r * n + t] * s + im[r * n + t] * c;
+                }
+                let scale = if inv { 1.0 / n as f32 } else { 1.0 };
+                or[r * n + k] = ar * scale;
+                oi[r * n + k] = ai * scale;
+            }
+        }
+        (or, oi)
+    }
+
+    /// Forward-FFT setup against the naive DFT. Pseudo-random white input
+    /// keeps every bin O(1) so an absolute tolerance is meaningful at all N.
+    fn fft_setup(kernel: Kernel, n: usize, dt: DType) -> TestSetup {
+        let rows = 2usize;
+        let in_re_f: Vec<f32> = (0..rows * n)
+            .map(|i| (((i as u64 * 1_103_515_245 + 12345) % 2048) as f32 / 2048.0 - 0.5) * 0.06)
+            .collect();
+        let in_im_f = vec![0.0f32; rows * n];
+        let re = unpack_f32(&pack_f32(&in_re_f, dt), dt);
+        let im = unpack_f32(&pack_f32(&in_im_f, dt), dt);
+        let (or, oi) = naive_dft(&re, &im, rows, n, false);
+        TestSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("in_re", pack_f32(&in_re_f, dt), dt))
+            .input(TestBuffer::from_vec("in_im", pack_f32(&in_im_f, dt), dt))
+            .input(TestBuffer::zeros("out_re", rows * n, dt))
+            .input(TestBuffer::zeros("out_im", rows * n, dt))
+            .constexpr("inv", 0u32)
+            .expect(TestBuffer::from_vec("out_re", pack_f32(&or, dt), dt))
+            .expect(TestBuffer::from_vec("out_im", pack_f32(&oi, dt), dt))
+            .grid_3d(rows as u32, 1, 1, [n as u32, 1, 1])
+    }
+
+    macro_rules! fft_test {
+        ($name:ident, $kernel:ident, $n:literal) => {
+            #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 8e-3, 4e-2])]
+            fn $name(dt: DType) -> TestSetup { fft_setup($kernel::kernel_ir_for(dt), $n, dt) }
+        };
+    }
+    fft_test!(test_fft_n32, mt_fft_n32, 32);
+    fft_test!(test_fft_n64, mt_fft_n64, 64);
+    fft_test!(test_fft_n128, mt_fft_n128, 128);
+    fft_test!(test_fft_n256, mt_fft_n256, 256);
+    fft_test!(test_fft_n512, mt_fft_n512, 512);
+    fft_test!(test_fft_n1024, mt_fft_n1024, 1024);
+
+    // ── Bluestein stages ───────────────────────────────────────────────────
+    fn u8re(v: &[f32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
+
+    /// chirp_filter (f32 only): build the time-domain convolution kernel a[m].
+    #[test_kernel(dtypes = [f32], tol = 1e-4)]
+    fn test_fft_bluestein_chirp_filter(_dt: DType) -> TestSetup {
+        let (n_len, m_len) = (5usize, 16usize);
+        let mut fr = vec![0.0f32; m_len];
+        let mut fi = vec![0.0f32; m_len];
+        for m in 0..m_len {
+            let m_minus = m_len - m;
+            let in_range = m < n_len || (m_minus < n_len && m > 0);
+            if in_range {
+                let n_tap = if m < n_len {
+                    m
+                } else if m_minus < n_len {
+                    m_minus
+                } else {
+                    n_len
+                };
+                let angle = PI * (n_tap as f32) * (n_tap as f32) / n_len as f32;
+                fr[m] = angle.cos();
+                fi[m] = angle.sin();
+            }
+        }
+        TestSetup::new(mt_fft_bluestein_chirp_filter::kernel_ir_for())
+            .mode(KernelMode::Grid3D)
+            .input(TestBuffer::zeros("filter_re", m_len, DType::F32))
+            .input(TestBuffer::zeros("filter_im", m_len, DType::F32))
+            .constexpr("n_len", n_len as u32)
+            .constexpr("m_len", m_len as u32)
+            .expect(TestBuffer::from_vec("filter_re", u8re(&fr), DType::F32))
+            .expect(TestBuffer::from_vec("filter_im", u8re(&fi), DType::F32))
+            // Grid3D, unguarded `filter[m]` store: total threads must equal
+            // m_len exactly (grid_1d → one group of m_len; grid_3d's first arg
+            // is a *group count*, so the prior `(m_len, …, [m_len,…])` launched
+            // m_len² threads and wrote out of bounds).
+            .grid_1d(m_len, m_len as u32)
+    }
+
+    /// preprocess: chirp pre-multiply + zero-pad input `[rows,n]` → `[rows,m]`.
+    fn bluestein_pre_setup(dt: DType) -> TestSetup {
+        let (rows, n_len, m_len) = (2usize, 5usize, 16usize);
+        let xr_f: Vec<f32> = (0..rows * n_len).map(|i| ((i % 7) as f32 - 3.0) * 0.05).collect();
+        let xi_f: Vec<f32> = (0..rows * n_len).map(|i| ((i % 5) as f32 - 2.0) * 0.04).collect();
+        let xr = unpack_f32(&pack_f32(&xr_f, dt), dt);
+        let xi = unpack_f32(&pack_f32(&xi_f, dt), dt);
+        let mut or = vec![0.0f32; rows * m_len];
+        let mut oi = vec![0.0f32; rows * m_len];
+        for row in 0..rows {
+            for col in 0..n_len {
+                let angle = -PI * (col as f32) * (col as f32) / n_len as f32;
+                let (wr, wi) = (angle.cos(), angle.sin());
+                let xrv = xr[row * n_len + col];
+                let xiv = xi[row * n_len + col];
+                or[row * m_len + col] = xrv * wr - xiv * wi;
+                oi[row * m_len + col] = xrv * wi + xiv * wr;
+            }
+        }
+        TestSetup::new(mt_fft_bluestein_preprocess::kernel_ir_for(dt))
+            .mode(KernelMode::Grid3D)
+            .input(TestBuffer::from_vec("in_re", pack_f32(&xr_f, dt), dt))
+            .input(TestBuffer::from_vec("in_im", pack_f32(&xi_f, dt), dt))
+            .input(TestBuffer::zeros("out_re", rows * m_len, dt))
+            .input(TestBuffer::zeros("out_im", rows * m_len, dt))
+            .constexpr("n_len", n_len as u32)
+            .constexpr("m_len", m_len as u32)
+            .constexpr("rows", rows as u32)
+            .constexpr("inv", 0u32)
+            .expect(TestBuffer::from_vec("out_re", pack_f32(&or, dt), dt))
+            .expect(TestBuffer::from_vec("out_im", pack_f32(&oi, dt), dt))
+            .grid_1d(rows * m_len, 64)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 2e-3, 1e-2])]
+    fn test_fft_bluestein_preprocess(dt: DType) -> TestSetup { bluestein_pre_setup(dt) }
+
+    /// cmul: elementwise complex multiply, f32 filter broadcast across rows.
+    fn bluestein_cmul_setup(dt: DType) -> TestSetup {
+        let (rows, m_len) = (2usize, 16usize);
+        let yr_f: Vec<f32> = (0..rows * m_len).map(|i| ((i % 11) as f32 - 5.0) * 0.03).collect();
+        let yi_f: Vec<f32> = (0..rows * m_len).map(|i| ((i % 9) as f32 - 4.0) * 0.03).collect();
+        let fr: Vec<f32> = (0..m_len).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect();
+        let fi: Vec<f32> = (0..m_len).map(|i| ((i % 5) as f32 - 2.0) * 0.1).collect();
+        let yr = unpack_f32(&pack_f32(&yr_f, dt), dt);
+        let yi = unpack_f32(&pack_f32(&yi_f, dt), dt);
+        let mut or = vec![0.0f32; rows * m_len];
+        let mut oi = vec![0.0f32; rows * m_len];
+        for idx in 0..rows * m_len {
+            let col = idx % m_len;
+            or[idx] = yr[idx] * fr[col] - yi[idx] * fi[col];
+            oi[idx] = yr[idx] * fi[col] + yi[idx] * fr[col];
+        }
+        TestSetup::new(mt_fft_bluestein_cmul::kernel_ir_for(dt))
+            .mode(KernelMode::Grid3D)
+            .input(TestBuffer::from_vec("y_re", pack_f32(&yr_f, dt), dt))
+            .input(TestBuffer::from_vec("y_im", pack_f32(&yi_f, dt), dt))
+            .input(TestBuffer::from_vec("filter_re", u8re(&fr), DType::F32))
+            .input(TestBuffer::from_vec("filter_im", u8re(&fi), DType::F32))
+            .input(TestBuffer::zeros("out_re", rows * m_len, dt))
+            .input(TestBuffer::zeros("out_im", rows * m_len, dt))
+            .constexpr("m_len", m_len as u32)
+            .constexpr("rows", rows as u32)
+            .expect(TestBuffer::from_vec("out_re", pack_f32(&or, dt), dt))
+            .expect(TestBuffer::from_vec("out_im", pack_f32(&oi, dt), dt))
+            .grid_1d(rows * m_len, 64)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 2e-3, 1e-2])]
+    fn test_fft_bluestein_cmul(dt: DType) -> TestSetup { bluestein_cmul_setup(dt) }
+
+    /// postprocess: chirp post-multiply + extract first N + (inverse) scale.
+    fn bluestein_post_setup(dt: DType) -> TestSetup {
+        let (rows, n_len, m_len) = (2usize, 5usize, 16usize);
+        let cr_f: Vec<f32> = (0..rows * m_len).map(|i| ((i % 13) as f32 - 6.0) * 0.03).collect();
+        let ci_f: Vec<f32> = (0..rows * m_len).map(|i| ((i % 11) as f32 - 5.0) * 0.03).collect();
+        let cr = unpack_f32(&pack_f32(&cr_f, dt), dt);
+        let ci = unpack_f32(&pack_f32(&ci_f, dt), dt);
+        let mut or = vec![0.0f32; rows * n_len];
+        let mut oi = vec![0.0f32; rows * n_len];
+        for row in 0..rows {
+            for k in 0..n_len {
+                let angle = -PI * (k as f32) * (k as f32) / n_len as f32;
+                let (wr, wi) = (angle.cos(), angle.sin());
+                let crv = cr[row * m_len + k];
+                let civ = ci[row * m_len + k];
+                or[row * n_len + k] = crv * wr - civ * wi;
+                oi[row * n_len + k] = crv * wi + civ * wr;
+            }
+        }
+        TestSetup::new(mt_fft_bluestein_postprocess::kernel_ir_for(dt))
+            .mode(KernelMode::Grid3D)
+            .input(TestBuffer::from_vec("conv_re", pack_f32(&cr_f, dt), dt))
+            .input(TestBuffer::from_vec("conv_im", pack_f32(&ci_f, dt), dt))
+            .input(TestBuffer::zeros("out_re", rows * n_len, dt))
+            .input(TestBuffer::zeros("out_im", rows * n_len, dt))
+            .constexpr("n_len", n_len as u32)
+            .constexpr("m_len", m_len as u32)
+            .constexpr("rows", rows as u32)
+            .constexpr("inv", 0u32)
+            .expect(TestBuffer::from_vec("out_re", pack_f32(&or, dt), dt))
+            .expect(TestBuffer::from_vec("out_im", pack_f32(&oi, dt), dt))
+            .grid_1d(rows * n_len, 64)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 2e-3, 1e-2])]
+    fn test_fft_bluestein_postprocess(dt: DType) -> TestSetup { bluestein_post_setup(dt) }
+}
+
+/// New-syntax benchmarks for the FFT family.
+pub mod kernel_benches {
+    use metaltile::{bench, core::ir::Kernel, test::*};
+
+    use super::*;
+
+    // Radix-2 FFT: rows independent length-N transforms, one TG per row.
+    fn fb(kernel: Kernel, n: usize, dt: DType) -> BenchSetup {
+        let rows = 8192usize;
+        BenchSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("in_re", rows * n, dt))
+            .buffer(BenchBuffer::random("in_im", rows * n, dt))
+            .buffer(BenchBuffer::zeros("out_re", rows * n, dt).output())
+            .buffer(BenchBuffer::zeros("out_im", rows * n, dt).output())
+            .constexpr("inv", 0u32)
+            .grid_3d(rows as u32, 1, 1, [n as u32, 1, 1])
+            .bytes_moved((4 * rows * n * dt.size_bytes()) as u64)
+    }
+    macro_rules! fft_bench {
+        ($name:ident, $full:literal, $kernel:ident, $n:literal) => {
+            #[bench(name = $full, dtypes = [f32, f16, bf16])]
+            fn $name(dt: DType) -> BenchSetup { fb($kernel::kernel_ir_for(dt), $n, dt) }
+        };
+    }
+    fft_bench!(bench_fft_n32, "mlx/fft/n32", mt_fft_n32, 32);
+    fft_bench!(bench_fft_n64, "mlx/fft/n64", mt_fft_n64, 64);
+    fft_bench!(bench_fft_n128, "mlx/fft/n128", mt_fft_n128, 128);
+    fft_bench!(bench_fft_n256, "mlx/fft/n256", mt_fft_n256, 256);
+    fft_bench!(bench_fft_n512, "mlx/fft/n512", mt_fft_n512, 512);
+    fft_bench!(bench_fft_n1024, "mlx/fft/n1024", mt_fft_n1024, 1024);
+
+    // Bluestein stages at a realistic non-power-of-two length (N=480 → M=1024).
+    const N_LEN: usize = 480;
+    const M_LEN: usize = 1024;
+    const ROWS: usize = 64;
+
+    #[bench(name = "mlx/fft/bluestein_chirp_filter", dtypes = [f32])]
+    fn bench_bluestein_chirp_filter(_dt: DType) -> BenchSetup {
+        BenchSetup::new(mt_fft_bluestein_chirp_filter::kernel_ir_for())
+            .mode(KernelMode::Grid3D)
+            .buffer(BenchBuffer::zeros("filter_re", M_LEN, DType::F32).output())
+            .buffer(BenchBuffer::zeros("filter_im", M_LEN, DType::F32).output())
+            .constexpr("n_len", N_LEN as u32)
+            .constexpr("m_len", M_LEN as u32)
+            .with_shape_label(format!("M={M_LEN} f32"))
+            // Grid3D, unguarded `filter[m]` store: total threads = M_LEN
+            // exactly (M_LEN is a multiple of 256). grid_3d's first arg is a
+            // group *count*, so the prior form launched M_LEN×256 threads.
+            .grid_1d(M_LEN, 256)
+            .bytes_moved((2 * M_LEN * 4) as u64)
+    }
+    #[bench(name = "mlx/fft/bluestein_preprocess", dtypes = [f32, f16, bf16])]
+    fn bench_bluestein_preprocess(dt: DType) -> BenchSetup {
+        BenchSetup::new(mt_fft_bluestein_preprocess::kernel_ir_for(dt))
+            .mode(KernelMode::Grid3D)
+            .buffer(BenchBuffer::random("in_re", ROWS * N_LEN, dt))
+            .buffer(BenchBuffer::random("in_im", ROWS * N_LEN, dt))
+            .buffer(BenchBuffer::zeros("out_re", ROWS * M_LEN, dt).output())
+            .buffer(BenchBuffer::zeros("out_im", ROWS * M_LEN, dt).output())
+            .constexpr("n_len", N_LEN as u32)
+            .constexpr("m_len", M_LEN as u32)
+            .constexpr("rows", ROWS as u32)
+            .constexpr("inv", 0u32)
+            .with_shape_label(format!(
+                "N={N_LEN} M={M_LEN} {}",
+                crate::bench_types::dtype_label(dt)
+            ))
+            .grid_1d(ROWS * M_LEN, 256)
+            .bytes_moved((2 * ROWS * (N_LEN + M_LEN) * dt.size_bytes()) as u64)
+    }
+    #[bench(name = "mlx/fft/bluestein_cmul", dtypes = [f32, f16, bf16])]
+    fn bench_bluestein_cmul(dt: DType) -> BenchSetup {
+        BenchSetup::new(mt_fft_bluestein_cmul::kernel_ir_for(dt))
+            .mode(KernelMode::Grid3D)
+            .buffer(BenchBuffer::random("y_re", ROWS * M_LEN, dt))
+            .buffer(BenchBuffer::random("y_im", ROWS * M_LEN, dt))
+            .buffer(BenchBuffer::random("filter_re", M_LEN, DType::F32))
+            .buffer(BenchBuffer::random("filter_im", M_LEN, DType::F32))
+            .buffer(BenchBuffer::zeros("out_re", ROWS * M_LEN, dt).output())
+            .buffer(BenchBuffer::zeros("out_im", ROWS * M_LEN, dt).output())
+            .constexpr("m_len", M_LEN as u32)
+            .constexpr("rows", ROWS as u32)
+            .with_shape_label(format!(
+                "M={M_LEN} rows={ROWS} {}",
+                crate::bench_types::dtype_label(dt)
+            ))
+            .grid_1d(ROWS * M_LEN, 256)
+            .bytes_moved((4 * ROWS * M_LEN * dt.size_bytes()) as u64)
+    }
+    #[bench(name = "mlx/fft/bluestein_postprocess", dtypes = [f32, f16, bf16])]
+    fn bench_bluestein_postprocess(dt: DType) -> BenchSetup {
+        BenchSetup::new(mt_fft_bluestein_postprocess::kernel_ir_for(dt))
+            .mode(KernelMode::Grid3D)
+            .buffer(BenchBuffer::random("conv_re", ROWS * M_LEN, dt))
+            .buffer(BenchBuffer::random("conv_im", ROWS * M_LEN, dt))
+            .buffer(BenchBuffer::zeros("out_re", ROWS * N_LEN, dt).output())
+            .buffer(BenchBuffer::zeros("out_im", ROWS * N_LEN, dt).output())
+            .constexpr("n_len", N_LEN as u32)
+            .constexpr("m_len", M_LEN as u32)
+            .constexpr("rows", ROWS as u32)
+            .constexpr("inv", 0u32)
+            .with_shape_label(format!(
+                "N={N_LEN} M={M_LEN} {}",
+                crate::bench_types::dtype_label(dt)
+            ))
+            .grid_1d(ROWS * N_LEN, 256)
+            .bytes_moved((2 * ROWS * (M_LEN + N_LEN) * dt.size_bytes()) as u64)
+    }
+}
