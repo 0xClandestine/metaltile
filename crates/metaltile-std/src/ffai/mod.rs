@@ -34,6 +34,7 @@ pub mod conv2d;
 pub mod conv2d_mma;
 pub mod conv3d;
 pub mod conv3d_mma;
+pub mod depthwise_conv2d;
 pub mod dequant_gather;
 pub mod dequant_gemv;
 pub mod dequant_gemv_expert_indexed;
