@@ -151,3 +151,107 @@ fp8_kernel!(mt_fp8_e4m3_quant_dequant, "fp8_e4m3", 3.0f32, -6.0f32, 8.0f32, 448.
 // e5m2 — 2 mantissa bits, exponent range [-14, 15] (bias 15), max
 // magnitude 57344.
 fp8_kernel!(mt_fp8_e5m2_quant_dequant, "fp8_e5m2", 2.0f32, -14.0f32, 15.0f32, 57344.0f32);
+
+/// New-syntax correctness for `mt_fp4_quant_dequant` (Grid3D, one 32-lane
+/// simdgroup per group; per-group amax → fp4-codebook snap → rescale). The
+/// oracle replays the exact codebook; inputs are kept clear of codebook
+/// decision boundaries so an f32 ULP can't flip a cell. The fp8 e4m3/e5m2
+/// variants are bench-only (their parameterised codebooks would need a
+/// separate oracle — covered by their legacy tests).
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::mt_fp4_quant_dequant;
+
+    fn fp4_snap(norm: f32) -> f32 {
+        if norm < 0.25 {
+            0.0
+        } else if norm < 0.75 {
+            0.5
+        } else if norm < 1.25 {
+            1.0
+        } else if norm < 1.75 {
+            1.5
+        } else if norm < 2.5 {
+            2.0
+        } else if norm < 3.5 {
+            3.0
+        } else if norm < 5.0 {
+            4.0
+        } else {
+            6.0
+        }
+    }
+
+    fn synthetic_group(seed: usize) -> Vec<f32> {
+        (0..32)
+            .map(|i| {
+                let v = ((i * 7 + seed * 11) % 33) as f32 * 0.03 - 0.46;
+                match i % 4 {
+                    0 => v * 10.0,
+                    1 => v * 0.05,
+                    2 => 0.0,
+                    _ => v,
+                }
+            })
+            .collect()
+    }
+
+    #[test_kernel(dtypes = [f32], tol = 1e-4)]
+    fn test_mt_fp4_quant_dequant(_dt: DType) -> TestSetup {
+        let inp: Vec<f32> = (0..4).flat_map(synthetic_group).collect();
+        let n = inp.len();
+        // Per-32-element-simdgroup amax-scale → codebook snap → rescale.
+        let mut expected = vec![0.0f32; n];
+        for (gi, group) in inp.chunks_exact(32).enumerate() {
+            let group_max = group.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+            let inv_scale = if group_max > 0.0 { 6.0 / group_max } else { 0.0 };
+            let rescale = group_max / 6.0;
+            for (i, &x) in group.iter().enumerate() {
+                let q = fp4_snap(x.abs() * inv_scale);
+                let sign = if x < 0.0 { -1.0 } else { 1.0 };
+                expected[gi * 32 + i] = sign * q * rescale;
+            }
+        }
+        TestSetup::new(mt_fp4_quant_dequant::kernel_ir_for())
+            .mode(KernelMode::Grid3D)
+            .input(TestBuffer::from_vec(
+                "inp",
+                inp.iter().flat_map(|v| v.to_le_bytes()).collect(),
+                DType::F32,
+            ))
+            .input(TestBuffer::zeros("out", n, DType::F32))
+            .constexpr("n", n as u32)
+            .expect(TestBuffer::from_vec(
+                "out",
+                expected.iter().flat_map(|v| v.to_le_bytes()).collect(),
+                DType::F32,
+            ))
+            .grid_3d((n / 32) as u32, 1, 1, [32, 1, 1])
+    }
+}
+
+/// New-syntax benchmarks for the fp-quantize round-trip kernels.
+pub mod kernel_benches {
+    use metaltile::{bench, core::ir::Kernel, test::*};
+
+    use super::{mt_fp4_quant_dequant, mt_fp8_e4m3_quant_dequant, mt_fp8_e5m2_quant_dequant};
+
+    fn qb(kernel: Kernel) -> BenchSetup {
+        let n = 64 * 1024 * 1024usize;
+        BenchSetup::new(kernel)
+            .mode(KernelMode::Grid3D)
+            .buffer(BenchBuffer::random("inp", n, DType::F32))
+            .buffer(BenchBuffer::zeros("out", n, DType::F32).output())
+            .constexpr("n", n as u32)
+            .grid_3d((n / 32) as u32, 1, 1, [32, 1, 1])
+            .bytes_moved((2 * n * 4) as u64)
+    }
+
+    #[bench(name = "mlx/fp_quantized/fp4", dtypes = [f32])]
+    fn bench_fp4(_dt: DType) -> BenchSetup { qb(mt_fp4_quant_dequant::kernel_ir_for()) }
+    #[bench(name = "mlx/fp_quantized/fp8_e4m3", dtypes = [f32])]
+    fn bench_fp8_e4m3(_dt: DType) -> BenchSetup { qb(mt_fp8_e4m3_quant_dequant::kernel_ir_for()) }
+    #[bench(name = "mlx/fp_quantized/fp8_e5m2", dtypes = [f32])]
+    fn bench_fp8_e5m2(_dt: DType) -> BenchSetup { qb(mt_fp8_e5m2_quant_dequant::kernel_ir_for()) }
+}
