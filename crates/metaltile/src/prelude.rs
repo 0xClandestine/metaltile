@@ -19,7 +19,7 @@
 //!   [`ActKind`], [`ReduceKind`], [`AtomicKind`], [`AtomicScope`], [`CoopTileScope`],
 //!   [`CoopTileAccMode`]
 //! - **Runtime:** [`Context`], [`DispatchResult`], [`DispatchSpec`], [`ResidentBuffer`],
-//!   [`MetalTileError`], [`start_gpu_trace`], [`stop_gpu_trace`]
+//!   [`MetalTileError`]
 //! - **Other:** [`GpuFamily`], [`KernelEntry`], [`make_tile`]
 //! - **DSL stubs:** [`Tensor`], [`program_id`], [`load`], [`store`], [`dot`],
 //!   `exp`, `log`, `sqrt`, `rsqrt`, `abs`, `silu`, `gelu`, `relu`, `tanh`,
@@ -101,10 +101,6 @@ pub use metaltile_runtime::GpuFamily;
 pub use metaltile_runtime::MetalTileError;
 /// A resident Metal buffer managed by the context.
 pub use metaltile_runtime::ResidentBuffer;
-/// Start GPU trace capture (Xcode GPU frame capture).
-pub use metaltile_runtime::start_gpu_trace;
-/// Stop GPU trace capture.
-pub use metaltile_runtime::stop_gpu_trace;
 
 /// Placeholder tensor type used in `#[kernel]` signatures.
 ///
