@@ -243,10 +243,22 @@ pub enum CorrectnessStatus {
 pub struct OpBench {
     op: &'static str,
     metric: &'static str,
+    /// When true, rows are tagged "(legacy)" — used during migration to mark a
+    /// `#[kernel(bench(...))]` whose kernel also has a new `#[bench]` registration.
+    legacy: bool,
 }
 
 impl OpBench {
-    pub const fn new(op: &'static str, metric: &'static str) -> Self { Self { op, metric } }
+    pub const fn new(op: &'static str, metric: &'static str) -> Self {
+        Self { op, metric, legacy: false }
+    }
+
+    /// Mark rows produced by this `OpBench` as legacy (tagged "(legacy)").
+    pub const fn legacy(mut self, legacy: bool) -> Self {
+        self.legacy = legacy;
+        self
+    }
+
     pub const fn op(&self) -> &'static str { self.op }
 
     pub fn result(
@@ -297,6 +309,7 @@ impl OpBench {
             equiv,
             mt_timing,
             ref_timing,
+            legacy: self.legacy,
         };
         report_result(&result);
         result
@@ -335,6 +348,10 @@ pub struct OpResult {
     pub mt_timing: Option<BenchStats>,
     /// GPU timing stats for reference (-vv mode only).
     pub ref_timing: Option<BenchStats>,
+    /// When true, the op label renders with a "(legacy)" suffix. Set for a
+    /// `#[kernel(bench(...))]` whose kernel also has a new `#[bench]`, so the
+    /// old and new rows are visually distinct during migration.
+    legacy: bool,
 }
 
 impl OpResult {
@@ -344,13 +361,18 @@ impl OpResult {
     /// "op (subop)" display string should call [`op_display`] instead.
     pub fn subop(&self) -> Option<&str> { self.subop.as_deref() }
 
-    /// Rendered op name: "op (subop)" if subop is set, else "op".
+    /// Rendered op name: "op (subop)" if subop is set, else "op", with a
+    /// trailing " (legacy)" when this row is a superseded legacy registration.
     pub fn op_display(&self) -> String {
-        match &self.subop {
+        let base = match &self.subop {
             Some(s) => format!("{} ({})", self.op, s),
             None => self.op.to_string(),
-        }
+        };
+        if self.legacy { format!("{base} (legacy)") } else { base }
     }
+
+    /// Whether this row is a superseded legacy registration.
+    pub fn is_legacy(&self) -> bool { self.legacy }
 
     pub fn shape(&self) -> &str { &self.shape }
 
@@ -572,6 +594,7 @@ mod tests {
             equiv: None,
             mt_timing: None,
             ref_timing: None,
+            legacy: false,
         };
         let unavailable = sample_result(None, None);
         assert_eq!(unchecked.correctness_status(), CorrectnessStatus::Unchecked);
@@ -631,6 +654,7 @@ mod tests {
             equiv: None,
             mt_timing: None,
             ref_timing: None,
+            legacy: false,
         };
         let err = validate_results(&[unchecked]).expect_err("unchecked rows should fail");
         assert!(err.contains("sample [shape]"));

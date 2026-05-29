@@ -50,6 +50,8 @@ make clean       # remove target/
 
 Prefer `make` over raw `cargo` — it centralises flags and always passes `--workspace`. See [the CLI reference](cli.md) for the `tile` binary.
 
+New kernels can declare their correctness test and benchmark inline with the `#[test_kernel]` / `#[bench]` attributes (run via `tile test` / `tile bench`) instead of, or alongside, the hand-written `tests/*_gpu_correctness.rs` + `#[kernel(bench(...))]` pair. Both styles are supported during the migration — see [testing.md](testing.md#new-declarative-test_kernel--bench-additive-opt-in) and `crates/metaltile-std/src/mlx/arange.rs` for the template.
+
 ## Pre-push hooks
 
 `make hooks` installs three git hooks (under `.github/scripts/hooks/`, opt-in per clone via `git config core.hooksPath`) that mirror the CI checks locally so the slow round-trip to GitHub doesn't surface trivially-catchable failures:

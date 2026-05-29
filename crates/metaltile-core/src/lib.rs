@@ -18,6 +18,10 @@ pub mod bench {
     pub use crate::toolchain::{bench::*, test::*};
 }
 
+/// Bench/test inventory wrappers, re-exported at the crate root so the
+/// `#[bench]` / `#[test_kernel]` macros can submit via
+/// `metaltile_core::KernelBenchEntry` / `KernelTestEntry`.
+pub use bench::{KernelBenchEntry, KernelTestEntry};
 // Backward-compat flat re-exports for the DSL types.
 pub use dsl::{ConstExpr, DType, Dim, DimExpr, Shape, constexpr, dtype, shape, tile};
 pub use error::{Error, Result};

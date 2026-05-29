@@ -41,6 +41,8 @@ struct Cli {
 enum Command {
     /// Benchmark suite: MetalTile vs MLX reference
     Bench(BenchArgs),
+    /// Run #[test_kernel] correctness tests against their CPU oracle
+    Test(TestArgs),
     /// Compile kernels to MSL; emit metallib/Swift/manifest with --emit
     Build(BuildArgs),
     /// Print IR and/or MSL for registered kernels
@@ -80,6 +82,15 @@ struct BenchArgs {
     /// first of `origin/dev`, `upstream/dev`, `dev` that resolves).
     #[arg(long = "baseline-ref")]
     baseline_ref: Option<String>,
+}
+
+// ── Test ─────────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+struct TestArgs {
+    /// Only run tests whose name contains this text
+    #[arg(long = "filter", short = 'f')]
+    filter: Option<String>,
 }
 
 // ── Build ────────────────────────────────────────────────────────────────
@@ -241,6 +252,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Command::Bench(args) => cmd::bench::run(&args)?,
+        Command::Test(args) => cmd::test::run(&args)?,
         Command::Build(args) => cmd::build::run(&args)?,
         Command::Inspect(args) => cmd::inspect::run(&args)?,
         Command::Device(args) => cmd::device::run(&args)?,

@@ -79,6 +79,65 @@ fn my_kernel_perf_bench_f32() {
 
 The naive CPU reference **is the contract**. If kernel and reference disagree, decide which is wrong before merging — don't loosen the tolerance to pass.
 
+### New: declarative `#[test_kernel]` / `#[bench]` (additive, opt-in)
+
+Alongside the hand-written `tests/*_gpu_correctness.rs` files, a kernel can now declare its correctness test and benchmark **next to the kernel** with the `#[test_kernel]` / `#[bench]` attributes. This is being introduced additively — the legacy `#[kernel(bench(...))]` registration and the `tests/*_gpu_correctness.rs` files keep working unchanged, and during migration a kernel can carry both so old and new are A/B-compared on the same IR. `crates/metaltile-std/src/mlx/arange.rs` is the first kernel ported; use it as the template.
+
+```rust
+use metaltile::kernel;
+
+#[kernel]
+pub fn mt_arange<T>(out: Tensor<T>, start: Tensor<T>, step: Tensor<T>, #[constexpr] n: u32) { /* … */ }
+
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+    use super::mt_arange;
+    use crate::utils::{pack_f32, scalar_bytes};
+
+    fn setup(start: f32, step: f32, n: usize, dt: DType) -> TestSetup {
+        let expected: Vec<f32> = (0..n).map(|i| start + i as f32 * step).collect(); // CPU oracle in f32
+        TestSetup::new(mt_arange::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("out", vec![0u8; n * dt.size_bytes()], dt))
+            .input(TestBuffer::from_vec("start", scalar_bytes(start, dt), dt))
+            .input(TestBuffer::from_vec("step", scalar_bytes(step, dt), dt))
+            .constexpr("n", n as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_1d(n, 256)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-6)]
+    fn test_mt_arange_ascending(dt: DType) -> TestSetup { setup(0.0, 0.5, 64, dt) }
+
+    // Per-dtype tolerances (order matches `dtypes`): f32, f16, bf16.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-6, 1e-2, 1e-1])]
+    fn test_mt_arange_fractional_step(dt: DType) -> TestSetup { setup(0.0, 0.1, 64, dt) }
+}
+
+pub mod kernel_benches {
+    use metaltile::{bench, test::*};
+    use super::mt_arange;
+    use crate::utils::scalar_bytes;
+
+    #[bench(name = "mlx/arange", dtypes = [f32, f16, bf16])]
+    fn bench_arange(dt: DType) -> BenchSetup {
+        let n = 64 * 1024 * 1024usize;
+        BenchSetup::new(mt_arange::kernel_ir_for(dt))
+            .buffer(BenchBuffer::zeros("out", n, dt).output())
+            .buffer(BenchBuffer::from_vec("start", scalar_bytes(0.0, dt), dt))
+            .buffer(BenchBuffer::from_vec("step", scalar_bytes(1.0, dt), dt))
+            .constexpr("n", n as u32)
+            .grid_1d(n, 256)
+            .bytes_moved((n * dt.size_bytes()) as u64)
+    }
+}
+```
+
+Notes:
+- Buffers bind **by name** (matching the kernel parameter names); ordering of `.buffer()`/`.input()` calls doesn't matter. `#[constexpr]` scalars are passed as little-endian uniform buffers, same as the hand-written tests.
+- The CPU oracle is the same contract as above — compute expected in `f32`, let the runner pack to the dtype and diff within tolerance. `tol` accepts a scalar, a per-dtype array, or a `{ f32: …, f16: … }` table.
+- Run them with `tile test [-f <filter>]` and `tile bench [-f <filter>]`; the new benches render in the same table as legacy rows. The `tests/kernel_tests_harness.rs` cargo bridge runs every `#[test_kernel]` under `cargo test` so the new path is part of the commit gate without `tile test`.
+- This in-process runner is deliberately simple (it re-dispatches per iteration rather than reusing the legacy `GpuRunner`'s resident-buffer + DVFS-pinning path), so new-syntax bench GB/s currently reads lower than the legacy rows — fidelity is a follow-up, correctness is not affected.
+
 ### MSL snapshots for new emit paths
 
 A new DSL primitive, fusion pattern, or dtype path also lands an `insta` fixture in `crates/metaltile-codegen/tests/msl_snapshots.rs` — a hand-built kernel run through `MslGenerator`, with the full MSL pinned via `assert_snapshot!`. Any future codegen change then surfaces as a reviewable text diff. Refresh intentional changes with `cargo insta review` (interactive) or `cargo insta test --accept`.

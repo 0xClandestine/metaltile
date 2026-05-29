@@ -27,6 +27,15 @@ impl TestBuffer {
         TestBuffer { name: name.to_string(), data, dtype }
     }
 
+    /// Create a zero-filled test buffer of `len` elements of `dtype`.
+    ///
+    /// Common for the output slot an in-place/elementwise kernel writes into:
+    /// `TestBuffer::zeros("out", n, dt)` rather than
+    /// `TestBuffer::from_vec("out", vec![0u8; n * dt.size_bytes()], dt)`.
+    pub fn zeros(name: &str, len: usize, dtype: DType) -> Self {
+        TestBuffer { name: name.to_string(), data: vec![0u8; len * dtype.size_bytes()], dtype }
+    }
+
     /// Map each element (interpreted as f32) through a CPU function.
     ///
     /// # Panics
@@ -213,6 +222,12 @@ pub struct KernelTestEntry {
 impl KernelTestEntry {
     /// Wrap a `KernelTest` impl for inventory submission.
     pub const fn new(inner: &'static dyn KernelTest) -> Self { KernelTestEntry { inner } }
+
+    /// The wrapped `KernelTest` with its `'static` lifetime preserved.
+    ///
+    /// Unlike `AsRef`, this returns the stored `&'static` reference by copy,
+    /// so callers (e.g. a runner) can hold it independently of the entry borrow.
+    pub fn test(&self) -> &'static dyn KernelTest { self.inner }
 }
 
 impl AsRef<dyn KernelTest + 'static> for KernelTestEntry {
@@ -244,5 +259,18 @@ mod tests {
         let expected = input.map_f32(|x| x * 2.0).rename("out");
         assert_eq!(expected.name(), "out");
         assert_eq!(expected.len(), 100);
+    }
+
+    #[test]
+    fn test_buffer_zeros_sizes_by_dtype() {
+        let f32_buf = TestBuffer::zeros("out", 8, DType::F32);
+        assert_eq!(f32_buf.len(), 8);
+        assert_eq!(f32_buf.data().len(), 32);
+        assert!(f32_buf.data().iter().all(|&b| b == 0));
+
+        // Half-precision packs two bytes per element.
+        let f16_buf = TestBuffer::zeros("out", 8, DType::F16);
+        assert_eq!(f16_buf.len(), 8);
+        assert_eq!(f16_buf.data().len(), 16);
     }
 }

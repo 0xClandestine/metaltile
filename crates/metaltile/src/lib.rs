@@ -74,6 +74,8 @@
 //!   generated IR and MSL before dispatching.
 
 pub mod prelude;
+/// Author-facing re-exports for `#[bench]` / `#[test_kernel]` setups.
+pub mod test;
 
 /// Crate version from `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
