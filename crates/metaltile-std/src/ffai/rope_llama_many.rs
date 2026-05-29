@@ -133,8 +133,8 @@ pub mod kernel_tests {
             (0..t_len * row_stride).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
         let qk = unpack_f32(&pack_f32(&qk_f, dt), dt);
         let mut exp = vec![0.0f32; t_len * row_stride];
-        for r in 0..t_len {
-            let pos = positions[r] as f32;
+        for (r, &posu) in positions.iter().enumerate() {
+            let pos = posu as f32;
             for h in 0..n_heads {
                 for i in 0..half {
                     let invf = band_inv_freq(i, half, theta_base, sf, lf, hf, omp);
