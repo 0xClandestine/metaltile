@@ -18,6 +18,7 @@ path = "src/main.rs"
 thiserror.workspace = true
 metaltile.workspace = true
 metaltile-core.workspace = true
+metaltile-runtime.workspace = true
 metaltile-codegen.workspace = true
 metaltile-std.workspace = true
 inventory.workspace = true

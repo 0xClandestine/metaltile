@@ -7,6 +7,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::{dsl::dtype::DType, ir::Kernel};
 
+pub(super) fn random_bytes(len: usize) -> Vec<u8> {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(42);
+    let mut state = seed as u64 ^ 0x9e3779b97f4a7c15;
+    let mut data = Vec::with_capacity(len);
+    for _ in 0..len {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        data.push(state as u8);
+    }
+    data
+}
+
 // ---------------------------------------------------------------------------
 // Primitive value types
 // ---------------------------------------------------------------------------
@@ -207,7 +223,7 @@ impl BenchBuffer {
     pub fn initial_bytes(&self) -> Vec<u8> {
         let n = self.size_bytes() as usize;
         match &self.init {
-            BufferInit::Random => crate::utils::random_bytes(n),
+            BufferInit::Random => random_bytes(n),
             BufferInit::Zeros => vec![0u8; n],
             BufferInit::FromVec(v) => v.clone(),
         }

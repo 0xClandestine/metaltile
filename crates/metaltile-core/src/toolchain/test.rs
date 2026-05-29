@@ -2,7 +2,7 @@
 
 use crate::{dsl::dtype::DType, ir::Kernel};
 
-use super::bench::{ConstValue, Grid};
+use super::bench::{random_bytes, ConstValue, Grid};
 
 // ---------------------------------------------------------------------------
 // TestBuffer
@@ -19,7 +19,7 @@ pub struct TestBuffer {
 impl TestBuffer {
     /// Create a test buffer filled with random data.
     pub fn random(name: &str, len: usize, dtype: DType) -> Self {
-        let data = crate::utils::random_bytes(len * dtype.size_bytes());
+        let data = random_bytes(len * dtype.size_bytes());
         TestBuffer { name: name.to_string(), data, dtype }
     }
 

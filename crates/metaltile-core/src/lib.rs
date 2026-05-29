@@ -8,22 +8,26 @@
 //! - [`ConstExpr`]: constexpr values resolved at kernel compile time
 //! - Kernel IR nodes: the SSA-form intermediate representation
 
-pub mod bench;
-pub mod constexpr;
-pub mod dtype;
+pub mod dsl;
 pub mod error;
-pub mod gpu_family;
 pub mod ir;
 pub mod kernel_registry;
-pub mod protocol;
-pub mod shape;
-pub mod tile_config;
-pub mod utils;
+pub mod toolchain;
 
-pub use constexpr::ConstExpr;
-pub use dtype::DType;
+/// Backward-compat re-export: `metaltile_core::bench` still works.
+pub mod bench {
+    pub use crate::toolchain::bench::*;
+    pub use crate::toolchain::test::*;
+}
+
+// Backward-compat flat re-exports for the DSL types.
+pub use dsl::constexpr as constexpr;
+pub use dsl::dtype as dtype;
+pub use dsl::shape as shape;
+pub use dsl::ConstExpr;
+pub use dsl::DType;
+pub use dsl::{Dim, DimExpr, Shape, tile};
 pub use error::{Error, Result};
-pub use gpu_family::GpuFamily;
 /// Re-export of `inventory` so generated `inventory::submit!` code in
 /// `#[kernel]`-expanded modules can use `metaltile_core::inventory::submit!`.
 #[doc(hidden)]
@@ -45,4 +49,3 @@ pub use ir::{
     VarId,
 };
 pub use kernel_registry::KernelEntry;
-pub use shape::{Dim, DimExpr, Shape, tile};

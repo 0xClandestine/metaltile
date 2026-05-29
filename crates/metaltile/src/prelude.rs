@@ -41,7 +41,7 @@ pub use metaltile_core::constexpr::ConstExprValues;
 /// Scalar and tensor element types supported by the IR and MSL codegen.
 pub use metaltile_core::dtype::DType;
 /// Apple GPU family inference from Metal device name strings.
-pub use metaltile_core::gpu_family::GpuFamily;
+pub use metaltile_runtime::GpuFamily;
 // IR types — user-facing subset (op-kind enums and kernel-level containers).
 // Raw IR plumbing (Op, Block, ValueId, Param, etc.) lives in `metaltile::core::ir`.
 /// Neural activation function kind.

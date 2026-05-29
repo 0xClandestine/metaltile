@@ -13,7 +13,9 @@ pub mod buffer;
 pub mod capture;
 pub mod context;
 pub mod error;
+pub mod gpu_family;
 
 pub use capture::{start_gpu_trace, stop_gpu_trace};
 pub use context::{Context, DispatchResult, DispatchSpec, ResidentBuffer};
 pub use error::MetalTileError;
+pub use gpu_family::GpuFamily;
