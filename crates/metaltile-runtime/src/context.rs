@@ -294,7 +294,7 @@ impl Context {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (kernel, buffers, fn_consts, grid_override);
-            return Ok(DispatchResult { elapsed_us: 0.0, gflops: 0.0, outputs: BTreeMap::new() });
+            Ok(DispatchResult { elapsed_us: 0.0, gflops: 0.0, outputs: BTreeMap::new() })
         }
 
         #[cfg(target_os = "macos")]
@@ -370,10 +370,10 @@ impl Context {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = specs;
-            return Ok(specs
+            Ok(specs
                 .iter()
                 .map(|_| DispatchResult { elapsed_us: 0.0, gflops: 0.0, outputs: BTreeMap::new() })
-                .collect());
+                .collect())
         }
 
         #[cfg(target_os = "macos")]
