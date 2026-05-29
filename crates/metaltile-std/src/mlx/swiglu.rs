@@ -63,3 +63,48 @@ pub fn mt_swiglu<T>(gate: Tensor<T>, up: Tensor<T>, out: Tensor<T>) {
     let s = mt_silu(g);
     store(out[idx], (s * u).cast::<T>());
 }
+
+/// New-syntax correctness for `mt_swiglu` (`silu(gate) * up`, computed in f32).
+pub mod kernel_tests {
+    use metaltile::{test::*, test_kernel};
+
+    use super::mt_swiglu;
+    use crate::utils::{pack_f32, unpack_f32};
+
+    fn setup(n: usize, dt: DType) -> TestSetup {
+        let gate: Vec<f32> = (0..n).map(|i| (i % 17) as f32 * 0.35 - 3.0).collect();
+        let up: Vec<f32> = (0..n).map(|i| (i % 13) as f32 * 0.2 - 1.0).collect();
+        let g_dt = unpack_f32(&pack_f32(&gate, dt), dt);
+        let u_dt = unpack_f32(&pack_f32(&up, dt), dt);
+        let expected: Vec<f32> =
+            g_dt.iter().zip(&u_dt).map(|(&g, &u)| (g / (1.0 + (-g).exp())) * u).collect();
+        TestSetup::new(mt_swiglu::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("gate", pack_f32(&gate, dt), dt))
+            .input(TestBuffer::from_vec("up", pack_f32(&up, dt), dt))
+            .input(TestBuffer::zeros("out", n, dt))
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_1d(n, 256)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 5e-3, 5e-2])]
+    fn test_mt_swiglu(dt: DType) -> TestSetup { setup(1024, dt) }
+}
+
+/// New-syntax benchmark for `mt_swiglu` (vs MLX `mx.fast.swiglu`).
+pub mod kernel_benches {
+    use metaltile::{bench, test::*};
+
+    use super::mt_swiglu;
+
+    #[bench(name = "mlx/swiglu", dtypes = [f32, f16, bf16])]
+    fn bench_swiglu(dt: DType) -> BenchSetup {
+        // `idx = tid` (global) — keep within a comfortable single-grid size.
+        let n = 1024 * 1024usize;
+        BenchSetup::new(mt_swiglu::kernel_ir_for(dt))
+            .buffer(BenchBuffer::random("gate", n, dt))
+            .buffer(BenchBuffer::random("up", n, dt))
+            .buffer(BenchBuffer::zeros("out", n, dt).output())
+            .grid_1d(n, 256)
+            .bytes_moved((3 * n * dt.size_bytes()) as u64)
+    }
+}
