@@ -39,8 +39,9 @@ use metaltile_core::{
     dtype::DType,
     ir::{BinOpKind, Block, BlockId, IndexExpr, Kernel, Op, Param, ValueId},
 };
+use rustc_hash::FxHashMap;
 
-use crate::{error::Result, passes::remap::remap_value_ids};
+use crate::{error::Result, passes::remap::remap_value_ids_fx};
 
 pub struct VectorizePass;
 
@@ -297,7 +298,12 @@ fn vectorize_block(
     let mut old_ops = std::mem::take(&mut block.ops);
     let old_results = std::mem::take(&mut block.results);
 
-    let mut result_remap: BTreeMap<ValueId, ValueId> = BTreeMap::new();
+    // FxHashMap — pure get-only on `ValueId` keys (consumed by
+    // `remap_value_ids_fx` at the end of this fn). Iteration order
+    // doesn't escape. `extract_inserts` above this is keyed on
+    // `usize` op-index and stays `BTreeMap` because it's
+    // consumed in op-index order during the scan.
+    let mut result_remap: FxHashMap<ValueId, ValueId> = FxHashMap::default();
     let mut new_ops: Vec<Op> = Vec::new();
     let mut new_results: Vec<Option<ValueId>> = Vec::new();
 
@@ -337,7 +343,7 @@ fn vectorize_block(
     // Remap value references in surviving ops (each skipped scalar
     // Load's VID now points at its dedicated VectorExtract output).
     for op in new_ops.iter_mut() {
-        remap_value_ids(op, &result_remap);
+        remap_value_ids_fx(op, &result_remap);
     }
 
     block.ops = new_ops;
@@ -429,7 +435,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::passes::Pass;
+    use crate::passes::{Pass, remap::remap_value_ids};
 
     fn f32_param(name: &str) -> Param {
         Param {

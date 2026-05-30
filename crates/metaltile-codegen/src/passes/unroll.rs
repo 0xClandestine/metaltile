@@ -211,7 +211,13 @@ fn unroll_block(
             inlined.push((Op::Const { value: iv_val }, Some(iv_const_vid)));
 
             // ---- build vid-map for this clone ----------------------------
-            let mut vid_map: BTreeMap<ValueId, ValueId> = BTreeMap::new();
+            // FxHashMap per playbook §"FxHashMap wins on the codegen
+            // pipeline" — vid_map is pure get-only on `ValueId` keys
+            // when consumed by `remap_value_ids_fx` below. Pre-sized
+            // with `body_n + 1` (one entry per body result plus the IV
+            // mapping) per §"Pre-size with `with_capacity`".
+            let mut vid_map: FxHashMap<ValueId, ValueId> =
+                FxHashMap::with_capacity_and_hasher(body_n + 1, Default::default());
             vid_map.insert(iv_vid, iv_const_vid);
 
             for j in 0..body_n {
@@ -273,7 +279,7 @@ fn unroll_block(
                 cloned.names = src_block.names.clone();
                 for (idx, src_op) in src_block.ops.iter().enumerate() {
                     let mut new_op = src_op.clone();
-                    remap::remap_value_ids(&mut new_op, &nested_vid_map);
+                    remap::remap_value_ids_fx(&mut new_op, &nested_vid_map);
                     let new_result = src_block.results[idx]
                         .map(|old_v| nested_vid_map.get(&old_v).copied().unwrap_or(old_v));
                     cloned.ops.push(new_op);
@@ -284,7 +290,7 @@ fn unroll_block(
 
             for j in 0..body_n {
                 let mut new_op = body.ops[j].clone();
-                remap::remap_value_ids(&mut new_op, &vid_map);
+                remap::remap_value_ids_fx(&mut new_op, &vid_map);
 
                 // Rewrite the cloned op's nested-block references to
                 // point at the fresh clones we just inserted.

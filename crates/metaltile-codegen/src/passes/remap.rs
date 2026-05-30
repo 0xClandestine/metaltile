@@ -24,6 +24,7 @@
 use std::collections::BTreeMap;
 
 use metaltile_core::ir::{Kernel, Op, ValueId};
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 // ---------------------------------------------------------------------------
@@ -33,6 +34,20 @@ use smallvec::SmallVec;
 /// Remap all `ValueId` references in `op` according to `map`.
 /// References not present in `map` are left unchanged.
 pub fn remap_value_ids(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
+    op.for_each_value_id_mut(&mut |v| {
+        if let Some(&nv) = map.get(v) {
+            *v = nv;
+        }
+    });
+}
+
+/// `FxHashMap`-keyed sibling of [`remap_value_ids`]. Same semantics;
+/// the only difference is the map type. Lets passes whose lookup is
+/// pure get-only (no iteration-order dependency) build their
+/// replacement map as `FxHashMap<ValueId, ValueId>` and skip BTree's
+/// log(n) per-probe cost — playbook §"FxHashMap wins on the codegen
+/// pipeline" (PR #38 fusion swap measured -29.8%).
+pub fn remap_value_ids_fx(op: &mut Op, map: &FxHashMap<ValueId, ValueId>) {
     op.for_each_value_id_mut(&mut |v| {
         if let Some(&nv) = map.get(v) {
             *v = nv;
