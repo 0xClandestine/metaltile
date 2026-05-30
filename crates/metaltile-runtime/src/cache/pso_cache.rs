@@ -20,8 +20,6 @@
 
 #[cfg(any(target_os = "macos", test))]
 use std::collections::BTreeMap;
-#[cfg(target_os = "macos")]
-use std::sync::Mutex;
 
 #[cfg(any(target_os = "macos", test))]
 use metaltile_core::ir::Kernel;
@@ -37,6 +35,8 @@ use objc2_metal::{
     MTLLibrary,
     MTLPipelineOption,
 };
+#[cfg(target_os = "macos")]
+use parking_lot::Mutex;
 #[cfg(target_os = "macos")]
 use rustc_hash::FxHashMap;
 
@@ -134,8 +134,7 @@ impl PsoCache {
     ) -> Result<Pso, MetalTileError> {
         use std::ptr::NonNull;
 
-        let mut lock =
-            self.cache.lock().map_err(|_| MetalTileError::LockPoisoned("PSO cache".into()))?;
+        let mut lock = self.cache.lock();
 
         if let Some(cached) = lock.get(&key) {
             return Ok(cached.clone());
