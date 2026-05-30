@@ -250,12 +250,16 @@ pub mod kernel_tests {
         (y, state)
     }
 
-    /// Re-fold the first `k` tape entries — ported `naive_replay`.
+    /// Re-fold the first `k` tape entries — ported `naive_replay`. When
+    /// `has_mask`, a step whose `mask[bt] == 0` is identity (the kernel's
+    /// `dA = 1, dBx = 0` masked-step path) and leaves the state untouched.
     #[allow(clippy::too_many_arguments)]
     fn naive_replay(
         snapshot: &[f32],
         da_log: &[f32],
         dbx_log: &[f32],
+        mask: &[u32],
+        has_mask: bool,
         batch: usize,
         t_total: usize,
         k: usize,
@@ -266,6 +270,9 @@ pub mod kernel_tests {
             let h = n % H;
             for t in 0..k {
                 let bt = b * t_total + t;
+                if has_mask && mask[bt] == 0 {
+                    continue; // masked step: identity, state unchanged
+                }
                 let bt_h = bt * H + h;
                 for dh in 0..DH {
                     for ds in 0..DS {
@@ -340,8 +347,8 @@ pub mod kernel_tests {
     }
 
     /// Replay cell: T=5 tape, re-fold the first 3 entries; verify
-    /// `state_after_k`.
-    fn replay_setup(dt: DType) -> TestSetup {
+    /// `state_after_k`. `mask`/`has_mask` drive the masked-step path.
+    fn replay_setup(dt: DType, mask: Vec<u32>, has_mask: bool) -> TestSetup {
         let (batch, t, k) = (1usize, 5usize, 3usize);
         let n_total = batch * H;
         let snapshot = src(n_total * DH * DS, 0x21, 0.3);
@@ -349,18 +356,19 @@ pub mod kernel_tests {
         let dbx_log = src(batch * t * H * DH * DS, 0x23, 0.4);
 
         let r = |xs: &[f32]| unpack_f32(&pack_f32(xs, dt), dt);
-        let s_exp = naive_replay(&r(&snapshot), &r(&da_log), &r(&dbx_log), batch, t, k);
+        let s_exp =
+            naive_replay(&r(&snapshot), &r(&da_log), &r(&dbx_log), &mask, has_mask, batch, t, k);
 
         TestSetup::new(ssm_replay_d16_64_4::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
             .input(TestBuffer::from_vec("state_snapshot", pack_f32(&snapshot, dt), dt))
             .input(TestBuffer::from_vec("da_log", pack_f32(&da_log, dt), dt))
             .input(TestBuffer::from_vec("dbx_log", pack_f32(&dbx_log, dt), dt))
-            .input(TestBuffer::from_vec("mask", u32_bytes(&vec![1u32; batch * t]), DType::U32))
+            .input(TestBuffer::from_vec("mask", u32_bytes(&mask), DType::U32))
             .input(TestBuffer::zeros("state_after_k", n_total * DH * DS, dt))
             .constexpr("k_steps", k as u32)
             .constexpr("t_total", t as u32)
-            .constexpr("has_mask", 0u32)
+            .constexpr("has_mask", u32::from(has_mask))
             .expect(TestBuffer::from_vec("state_after_k", pack_f32(&s_exp, dt), dt))
             .grid_3d(1, DH as u32, (batch * H) as u32, [32, 1, 1])
     }
@@ -369,9 +377,17 @@ pub mod kernel_tests {
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-3, 2e-2])]
     fn test_ssm_step_record_d16_64_4(dt: DType) -> TestSetup { record_setup(dt) }
 
-    // Replay: state_after_k matches the first-k tape re-fold.
+    // Replay (no mask): state_after_k matches the first-k tape re-fold.
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-3, 2e-2])]
-    fn test_ssm_replay_d16_64_4(dt: DType) -> TestSetup { replay_setup(dt) }
+    fn test_ssm_replay_d16_64_4(dt: DType) -> TestSetup { replay_setup(dt, vec![1u32; 5], false) }
+
+    // Replay with a step mask [1,0,1,1,0]: masked steps (1 and 4) are identity.
+    // Only the first k=3 are re-folded, so step 1 (masked) and steps 0,2 apply;
+    // exercises the `has_mask=1` constexpr branch the no-mask test folds away.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-3, 2e-2])]
+    fn test_ssm_replay_d16_64_4_masked(dt: DType) -> TestSetup {
+        replay_setup(dt, vec![1, 0, 1, 1, 0], true)
+    }
 }
 
 pub mod kernel_benches {

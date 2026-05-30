@@ -438,24 +438,33 @@ pub mod kernel_tests {
         (or, oi)
     }
 
-    /// Forward-FFT setup against the naive DFT. Pseudo-random white input
-    /// keeps every bin O(1) so an absolute tolerance is meaningful at all N.
-    fn fft_setup(kernel: Kernel, n: usize, dt: DType) -> TestSetup {
+    /// FFT setup against the naive DFT. `inv` selects the inverse transform
+    /// (conjugated twiddles + 1/N scale). Pseudo-random input (real + imag for
+    /// the inverse case) keeps every bin O(1) so an absolute tol is meaningful.
+    fn fft_setup(kernel: Kernel, n: usize, inv: bool, dt: DType) -> TestSetup {
         let rows = 2usize;
         let in_re_f: Vec<f32> = (0..rows * n)
             .map(|i| (((i as u64 * 1_103_515_245 + 12345) % 2048) as f32 / 2048.0 - 0.5) * 0.06)
             .collect();
-        let in_im_f = vec![0.0f32; rows * n];
+        // Forward fixture is real-valued; the inverse takes a complex spectrum,
+        // so give it a non-zero imaginary part too.
+        let in_im_f: Vec<f32> = if inv {
+            (0..rows * n)
+                .map(|i| (((i as u64 * 2_654_435_761 + 7) % 2048) as f32 / 2048.0 - 0.5) * 0.06)
+                .collect()
+        } else {
+            vec![0.0f32; rows * n]
+        };
         let re = unpack_f32(&pack_f32(&in_re_f, dt), dt);
         let im = unpack_f32(&pack_f32(&in_im_f, dt), dt);
-        let (or, oi) = naive_dft(&re, &im, rows, n, false);
+        let (or, oi) = naive_dft(&re, &im, rows, n, inv);
         TestSetup::new(kernel)
             .mode(KernelMode::Reduction)
             .input(TestBuffer::from_vec("in_re", pack_f32(&in_re_f, dt), dt))
             .input(TestBuffer::from_vec("in_im", pack_f32(&in_im_f, dt), dt))
             .input(TestBuffer::zeros("out_re", rows * n, dt))
             .input(TestBuffer::zeros("out_im", rows * n, dt))
-            .constexpr("inv", 0u32)
+            .constexpr("inv", u32::from(inv))
             .expect(TestBuffer::from_vec("out_re", pack_f32(&or, dt), dt))
             .expect(TestBuffer::from_vec("out_im", pack_f32(&oi, dt), dt))
             .grid_3d(rows as u32, 1, 1, [n as u32, 1, 1])
@@ -464,7 +473,9 @@ pub mod kernel_tests {
     macro_rules! fft_test {
         ($name:ident, $kernel:ident, $n:literal) => {
             #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 8e-3, 4e-2])]
-            fn $name(dt: DType) -> TestSetup { fft_setup($kernel::kernel_ir_for(dt), $n, dt) }
+            fn $name(dt: DType) -> TestSetup {
+                fft_setup($kernel::kernel_ir_for(dt), $n, false, dt)
+            }
         };
     }
     fft_test!(test_fft_n32, mt_fft_n32, 32);
@@ -473,6 +484,17 @@ pub mod kernel_tests {
     fft_test!(test_fft_n256, mt_fft_n256, 256);
     fft_test!(test_fft_n512, mt_fft_n512, 512);
     fft_test!(test_fft_n1024, mt_fft_n1024, 1024);
+
+    // Inverse transform (inv=1): conjugated twiddles + 1/N scale — the path
+    // the forward tests const-fold away. Complex spectrum input.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 8e-3, 4e-2])]
+    fn test_fft_inv_n64(dt: DType) -> TestSetup {
+        fft_setup(mt_fft_n64::kernel_ir_for(dt), 64, true, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 8e-3, 4e-2])]
+    fn test_fft_inv_n256(dt: DType) -> TestSetup {
+        fft_setup(mt_fft_n256::kernel_ir_for(dt), 256, true, dt)
+    }
 
     // ── Bluestein stages ───────────────────────────────────────────────────
     fn u8re(v: &[f32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
@@ -515,8 +537,10 @@ pub mod kernel_tests {
     }
 
     /// preprocess: chirp pre-multiply + zero-pad input `[rows,n]` → `[rows,m]`.
-    fn bluestein_pre_setup(dt: DType) -> TestSetup {
+    /// `inv` flips the chirp angle sign (the kernel's `angle_sign`).
+    fn bluestein_pre_setup(dt: DType, inv: bool) -> TestSetup {
         let (rows, n_len, m_len) = (2usize, 5usize, 16usize);
+        let sign = if inv { 1.0f32 } else { -1.0f32 };
         let xr_f: Vec<f32> = (0..rows * n_len).map(|i| ((i % 7) as f32 - 3.0) * 0.05).collect();
         let xi_f: Vec<f32> = (0..rows * n_len).map(|i| ((i % 5) as f32 - 2.0) * 0.04).collect();
         let xr = unpack_f32(&pack_f32(&xr_f, dt), dt);
@@ -525,7 +549,7 @@ pub mod kernel_tests {
         let mut oi = vec![0.0f32; rows * m_len];
         for row in 0..rows {
             for col in 0..n_len {
-                let angle = -PI * (col as f32) * (col as f32) / n_len as f32;
+                let angle = sign * PI * (col as f32) * (col as f32) / n_len as f32;
                 let (wr, wi) = (angle.cos(), angle.sin());
                 let xrv = xr[row * n_len + col];
                 let xiv = xi[row * n_len + col];
@@ -542,13 +566,15 @@ pub mod kernel_tests {
             .constexpr("n_len", n_len as u32)
             .constexpr("m_len", m_len as u32)
             .constexpr("rows", rows as u32)
-            .constexpr("inv", 0u32)
+            .constexpr("inv", u32::from(inv))
             .expect(TestBuffer::from_vec("out_re", pack_f32(&or, dt), dt))
             .expect(TestBuffer::from_vec("out_im", pack_f32(&oi, dt), dt))
             .grid_1d(rows * m_len, 64)
     }
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 2e-3, 1e-2])]
-    fn test_fft_bluestein_preprocess(dt: DType) -> TestSetup { bluestein_pre_setup(dt) }
+    fn test_fft_bluestein_preprocess(dt: DType) -> TestSetup { bluestein_pre_setup(dt, false) }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 2e-3, 1e-2])]
+    fn test_fft_bluestein_preprocess_inv(dt: DType) -> TestSetup { bluestein_pre_setup(dt, true) }
 
     /// cmul: elementwise complex multiply, f32 filter broadcast across rows.
     fn bluestein_cmul_setup(dt: DType) -> TestSetup {
@@ -584,8 +610,11 @@ pub mod kernel_tests {
     fn test_fft_bluestein_cmul(dt: DType) -> TestSetup { bluestein_cmul_setup(dt) }
 
     /// postprocess: chirp post-multiply + extract first N + (inverse) scale.
-    fn bluestein_post_setup(dt: DType) -> TestSetup {
+    /// `inv` flips the chirp angle sign AND applies the `1/N` inverse scale.
+    fn bluestein_post_setup(dt: DType, inv: bool) -> TestSetup {
         let (rows, n_len, m_len) = (2usize, 5usize, 16usize);
+        let sign = if inv { 1.0f32 } else { -1.0f32 };
+        let scale = if inv { 1.0f32 / n_len as f32 } else { 1.0f32 };
         let cr_f: Vec<f32> = (0..rows * m_len).map(|i| ((i % 13) as f32 - 6.0) * 0.03).collect();
         let ci_f: Vec<f32> = (0..rows * m_len).map(|i| ((i % 11) as f32 - 5.0) * 0.03).collect();
         let cr = unpack_f32(&pack_f32(&cr_f, dt), dt);
@@ -594,12 +623,12 @@ pub mod kernel_tests {
         let mut oi = vec![0.0f32; rows * n_len];
         for row in 0..rows {
             for k in 0..n_len {
-                let angle = -PI * (k as f32) * (k as f32) / n_len as f32;
+                let angle = sign * PI * (k as f32) * (k as f32) / n_len as f32;
                 let (wr, wi) = (angle.cos(), angle.sin());
                 let crv = cr[row * m_len + k];
                 let civ = ci[row * m_len + k];
-                or[row * n_len + k] = crv * wr - civ * wi;
-                oi[row * n_len + k] = crv * wi + civ * wr;
+                or[row * n_len + k] = (crv * wr - civ * wi) * scale;
+                oi[row * n_len + k] = (crv * wi + civ * wr) * scale;
             }
         }
         TestSetup::new(mt_fft_bluestein_postprocess::kernel_ir_for(dt))
@@ -611,13 +640,15 @@ pub mod kernel_tests {
             .constexpr("n_len", n_len as u32)
             .constexpr("m_len", m_len as u32)
             .constexpr("rows", rows as u32)
-            .constexpr("inv", 0u32)
+            .constexpr("inv", u32::from(inv))
             .expect(TestBuffer::from_vec("out_re", pack_f32(&or, dt), dt))
             .expect(TestBuffer::from_vec("out_im", pack_f32(&oi, dt), dt))
             .grid_1d(rows * n_len, 64)
     }
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 2e-3, 1e-2])]
-    fn test_fft_bluestein_postprocess(dt: DType) -> TestSetup { bluestein_post_setup(dt) }
+    fn test_fft_bluestein_postprocess(dt: DType) -> TestSetup { bluestein_post_setup(dt, false) }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 2e-3, 1e-2])]
+    fn test_fft_bluestein_postprocess_inv(dt: DType) -> TestSetup { bluestein_post_setup(dt, true) }
 }
 
 /// New-syntax benchmarks for the FFT family.

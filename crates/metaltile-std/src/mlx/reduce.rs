@@ -404,6 +404,45 @@ pub mod kernel_tests {
     fn test_seg_reduce_min(dt: DType) -> TestSetup {
         seg_setup_for(mt_seg_reduce_min::kernel_ir_for(dt), 64, 48, f32::INFINITY, f32::min, dt)
     }
+
+    // ── prod: separate setups with inputs near 1.0 so the running product
+    // stays O(1) (a `((i%19)-9)*0.1`-style input underflows to 0 over a long
+    // reduction). Modest reduction lengths keep f16/bf16 well-conditioned.
+    fn prod_inputs(n: usize) -> Vec<f32> {
+        (0..n).map(|i| 1.0 + ((i % 7) as f32 - 3.0) * 0.05).collect()
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_col_reduce_prod(dt: DType) -> TestSetup {
+        let (rows, cols) = (8usize, 40usize);
+        let inp = prod_inputs(rows * cols);
+        let id = unpack_f32(&pack_f32(&inp, dt), dt);
+        let expected: Vec<f32> =
+            (0..cols).map(|c| (0..rows).map(|r| id[r * cols + c]).product()).collect();
+        TestSetup::new(mt_col_reduce_prod::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("inp", pack_f32(&inp, dt), dt))
+            .input(TestBuffer::zeros("out", cols, dt))
+            .constexpr("rows", rows as u32)
+            .constexpr("cols", cols as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_1d(cols, 256)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_seg_reduce_prod(dt: DType) -> TestSetup {
+        let (n_segments, seg_len) = (64usize, 12usize);
+        let inp = prod_inputs(n_segments * seg_len);
+        let id = unpack_f32(&pack_f32(&inp, dt), dt);
+        let expected: Vec<f32> =
+            (0..n_segments).map(|s| (0..seg_len).map(|j| id[s * seg_len + j]).product()).collect();
+        TestSetup::new(mt_seg_reduce_prod::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("inp", pack_f32(&inp, dt), dt))
+            .input(TestBuffer::zeros("out", n_segments, dt))
+            .constexpr("n_segments", n_segments as u32)
+            .constexpr("seg_len", seg_len as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_1d(n_segments, 256)
+    }
 }
 
 /// New-syntax benchmarks for the reduce family (vs MLX `metal/reduce.metal`).

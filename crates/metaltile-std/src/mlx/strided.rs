@@ -139,6 +139,35 @@ pub mod kernel_tests {
             .grid_3d(n_out as u32, 1, 1, [1, 1, 1])
     }
 
+    /// Shared nd setup for a given (shape, strides) — `rank` is constexpr, so
+    /// each rank is a distinct unroll depth in the generated kernel.
+    fn nd_setup(shape: &[u32], strides: &[u32], src_len: usize, dt: DType) -> TestSetup {
+        let src_f: Vec<f32> = (0..src_len).map(|i| (i as f32 - 6.0) * 0.25).collect();
+        let src = unpack_f32(&pack_f32(&src_f, dt), dt);
+        let expected = nd_oracle(&src, shape, strides);
+        let n_out: usize = shape.iter().map(|&s| s as usize).product();
+        TestSetup::new(mt_strided_copy_nd::kernel_ir_for(dt))
+            .mode(KernelMode::Grid3D)
+            .input(TestBuffer::from_vec("src", pack_f32(&src_f, dt), dt))
+            .input(TestBuffer::from_vec("shape", u8u32(shape), DType::U32))
+            .input(TestBuffer::from_vec("strides", u8u32(strides), DType::U32))
+            .input(TestBuffer::zeros("out", n_out, dt))
+            .constexpr("rank", shape.len() as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(n_out as u32, 1, 1, [1, 1, 1])
+    }
+
+    // rank-3 unravel with non-contiguous strides (max off = 1·1 + 2·2 + 3·6 = 23).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 0.0)]
+    fn test_strided_copy_nd_3d(dt: DType) -> TestSetup { nd_setup(&[2, 3, 4], &[1, 2, 6], 24, dt) }
+
+    // Broadcast axis: dim 1 has stride 0, so its 3 indices all read the same
+    // source element (max off = 1·12 + 2·0 + 3·1 = 15).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 0.0)]
+    fn test_strided_copy_nd_broadcast(dt: DType) -> TestSetup {
+        nd_setup(&[2, 3, 4], &[12, 0, 1], 16, dt)
+    }
+
     /// 2-D padded submatrix copy via the `#[strided]` ABI: copy a
     /// `rows × dest_cols` tile out of a `rows × src_cols` padded source.
     #[test_kernel(dtypes = [f32, f16, bf16], tol = 0.0)]
