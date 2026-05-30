@@ -58,7 +58,8 @@ pub fn ffai_attn_head_gate<T>(
     let g_raw = load(gate[h]).cast::<f32>();
     let s = 1.0 / (1.0 + (-g_raw).exp());
     let a = load(attn[attn_idx]).cast::<f32>();
-    store(out[attn_idx], (a * s).cast::<T>());
+    // Implicit narrowing per playbook §"DSL implicit Store coercion".
+    store(out[attn_idx], a * s);
 }
 
 pub mod kernel_tests {

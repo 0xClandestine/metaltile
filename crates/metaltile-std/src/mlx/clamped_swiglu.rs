@@ -60,7 +60,8 @@ pub fn mt_clamped_swiglu<T>(gate: Tensor<T>, up: Tensor<T>, out: Tensor<T>, limi
     let s_clipped = select(active, min(s_raw, limit), s_raw);
     // Symmetric two-sided clip on `up`.
     let u_clipped = select(active, max(min(u, limit), -limit), u);
-    store(out[idx], (s_clipped * u_clipped).cast::<T>());
+    // Implicit narrowing per playbook §"DSL implicit Store coercion".
+    store(out[idx], s_clipped * u_clipped);
 }
 
 pub mod kernel_tests {
