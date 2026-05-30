@@ -8,6 +8,10 @@ homepage.workspace = true
 description = "Core IR types and data structures for the MetalTile GPU kernel DSL"
 keywords = ["metal", "gpu", "apple-silicon", "compiler", "ir"]
 categories = ["compilers", "hardware-support"]
+publish = false
+
+[lints]
+workspace = true
 
 [dependencies]
 metaltile-macros.workspace = true

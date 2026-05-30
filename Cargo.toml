@@ -34,6 +34,8 @@ quote = "1"
 proc-macro2 = "1"
 thiserror = "2"
 smallvec = { version = "1", features = ["serde"] }
+arrayvec = "0.7"
+parking_lot = "0.12"
 rustc-hash = "2"
 bytemuck = "1"
 half = "2"
@@ -45,13 +47,43 @@ inventory = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
 
+# Apple Metal FFI. Workspace-deduped because metaltile-runtime and
+# metaltile-std previously declared overlapping-but-drifting feature
+# sets — that bit us at link time when one crate's feature was the
+# other's hard requirement.
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-metal = { version = "0.3", features = [
+    "MTLBuffer",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLCommandQueue",
+    "MTLComputeCommandEncoder",
+    "MTLComputePipeline",
+    "MTLDataType",
+    "MTLDevice",
+    "MTLFunctionConstantValues",
+    "MTLLibrary",
+] }
+
 # Test-only
 trybuild = "1"
 insta = { version = "1.43", default-features = false }
 
+# Workspace-wide lints. `arc_with_non_send_sync` catches the
+# `Arc<Retained<T>>`-in-thread-local pattern the playbook flags as
+# a guaranteed `Rc` win — the lint is preventive here (no live sites
+# today) but cheap to keep on.
+[workspace.lints.clippy]
+arc_with_non_send_sync = "warn"
+
 [profile.release]
-lto = "fat"
-codegen-units = 1
+# metaltile-std is `publish = true`, so workspace-wide `lto = "fat"` +
+# `codegen-units = 1` would balloon downstream caller build times 5-10×
+# (rustls caveat in the playbook). Keep release downstream-friendly;
+# push the aggressive inlining settings into `[profile.bench]` where
+# the perf measurement actually wants them.
+codegen-units = 16
 panic = "abort"
 
 # CI profile: same correctness as release but skips fat-LTO and forces
@@ -63,6 +95,11 @@ inherits = "release"
 lto = "thin"
 codegen-units = 16
 
+# Bench profile: opt for absolute speed for steady-state measurements.
+# `debug = true` keeps frame pointers + DWARF available for Instruments
+# / Metal Frame Capture without hurting runtime.
 [profile.bench]
 inherits = "release"
+lto = "fat"
+codegen-units = 1
 debug = true
