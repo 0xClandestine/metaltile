@@ -151,5 +151,6 @@ pub mod sdpa_multi_d256;
 pub mod sdpa_prefill_d512_sink;
 pub mod ssm;
 pub mod ssm_replay;
+pub mod transpose_th;
 pub mod vocoder;
 pub mod winograd_conv;
