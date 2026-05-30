@@ -65,11 +65,20 @@ pub mod kernel_tests {
     use crate::utils::{pack_f32, unpack_f32};
 
     fn setup(rows: usize, n: usize, dt: DType) -> TestSetup {
+        setup_with(rows, n, dt, |r, i| ((i % 17) as f32 - 8.0) * 0.1 + r as f32 * 0.05)
+    }
+
+    // Shared builder so the standard and large-value tests reuse one oracle.
+    fn setup_with(
+        rows: usize,
+        n: usize,
+        dt: DType,
+        genf: impl Fn(usize, usize) -> f32,
+    ) -> TestSetup {
         let mut inp = Vec::with_capacity(rows * n);
         let mut expected = Vec::with_capacity(rows * n);
         for r in 0..rows {
-            let row: Vec<f32> =
-                (0..n).map(|i| ((i % 17) as f32 - 8.0) * 0.1 + r as f32 * 0.05).collect();
+            let row: Vec<f32> = (0..n).map(|i| genf(r, i)).collect();
             let rd = unpack_f32(&pack_f32(&row, dt), dt);
             let m = rd.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             let exps: Vec<f32> = rd.iter().map(|&x| (x - m).exp()).collect();
@@ -88,6 +97,18 @@ pub mod kernel_tests {
 
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 5e-2])]
     fn test_mt_softmax(dt: DType) -> TestSetup { setup(4, 1024, dt) }
+
+    // Large-magnitude logits (50..120): pins the max-subtraction overflow
+    // guard. Without it `exp(120)` is +inf; the online-softmax running-max
+    // path keeps every term finite and the distribution summing to 1. The
+    // CPU oracle subtracts the same max, so GPU and oracle agree exactly
+    // (a non-finite GPU result would blow past tol). f32-only — at large
+    // magnitudes f16/bf16 input rounding dominates and isn't the contract
+    // under test. (Ported from the legacy softmax_large_values_no_overflow.)
+    #[test_kernel(dtypes = [f32], tol = [1e-4])]
+    fn test_mt_softmax_large_values(dt: DType) -> TestSetup {
+        setup_with(2, 1024, dt, |_r, i| 50.0 + (i % 7) as f32 * 10.0)
+    }
 }
 
 /// New-syntax benchmark for `mt_softmax` (vs MLX `metal/softmax.metal`).
