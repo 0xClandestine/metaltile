@@ -39,6 +39,7 @@ pub mod dequant_gather;
 pub mod dequant_gemv;
 pub mod dequant_gemv_expert_indexed;
 pub mod dsv4_compressor_pool;
+pub mod dsv4_csa_sdpa_decode;
 pub mod dsv4_fp8_block_dequant;
 pub mod dsv4_indexer_score;
 pub mod dsv4_indexer_topk;
