@@ -10,6 +10,15 @@ pub mod error;
 pub mod ffai;
 pub mod mlx;
 pub mod probe;
+
+// Re-export the kernel inventories from `metaltile-core`. The `#[kernel]` /
+// `#[bench]` / `#[test_kernel]` registrations live in this crate's `ffai` /
+// `mlx` modules; importing these accessors via `metaltile_std` (rather than
+// `metaltile_core`) pulls the std rlib into a downstream link, which is what
+// retains those inventory statics. Integration tests + tools that enumerate
+// the registries should import them from here — importing from `metaltile_core`
+// directly yields empty registries because nothing force-links the std crate.
+pub use metaltile_core::{all_benches, all_kernels, all_tests};
 pub mod run_kernel;
 pub mod run_spec;
 pub mod runner;
