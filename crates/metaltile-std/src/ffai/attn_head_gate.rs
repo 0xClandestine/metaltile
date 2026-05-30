@@ -36,14 +36,10 @@
 
 use metaltile::kernel;
 
-#[kernel(
-    bench(
-        op="attn_head_gate",
-        subop="attn_head_gate",
-        class=GenericEmpty,
-        tol=1e-3,
-    )
-)]
+// Bare `#[kernel]` — the legacy `bench(...)` registration doesn't
+// fit this 3-input + 1-constexpr shape; the new declarative `#[bench]`
+// on `kernel_benches::bench_attn_head_gate` below handles registration.
+#[kernel]
 pub fn ffai_attn_head_gate<T>(
     attn: Tensor<T>,
     gate: Tensor<T>,

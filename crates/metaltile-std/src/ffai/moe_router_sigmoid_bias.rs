@@ -39,16 +39,11 @@
 
 use metaltile::kernel;
 
-#[kernel(
-    bench(
-        op="moe_router",
-        subop="sigmoid_bias",
-        class=Binary,
-        input_a=Signed,
-        input_b=Signed,
-        tol=1e-4,
-    )
-)]
+// Bare `#[kernel]` — non-generic, all-`Tensor<f32>` kernel; the legacy
+// `bench(...)` registration expects a generic-T shape it can't bind to
+// a no-`<T>` signature. The new declarative `#[bench]` on
+// `kernel_benches::bench_router` below handles registration directly.
+#[kernel]
 pub fn ffai_moe_router_sigmoid_bias(logits: Tensor<f32>, bias: Tensor<f32>, scores: Tensor<f32>) {
     let idx = tid;
     let l = load(logits[idx]);

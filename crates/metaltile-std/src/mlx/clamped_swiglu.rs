@@ -35,16 +35,11 @@
 
 use metaltile::kernel;
 
-#[kernel(
-    bench(
-        op="swiglu",
-        subop="clamped_swiglu",
-        class=Binary,
-        input_a=Signed,
-        input_b=Signed,
-        tol=1e-3,
-    )
-)]
+// Bare `#[kernel]` — the legacy `bench(...)` registration's `Binary`
+// class can't represent the extra `limit: f32` runtime scalar; the new
+// declarative `#[bench]` attribute on `kernel_benches::bench_clamped_swiglu`
+// below registers the kernel for `tile bench` directly.
+#[kernel]
 pub fn mt_clamped_swiglu<T>(gate: Tensor<T>, up: Tensor<T>, out: Tensor<T>, limit: f32) {
     let idx = tid;
     let g = load(gate[idx]).cast::<f32>();
