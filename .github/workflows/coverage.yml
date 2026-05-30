@@ -13,7 +13,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
-      - '.github/configs/codecov.yml'
+      - 'codecov.yml'
       - '.github/workflows/coverage.yml'
   workflow_dispatch: {}
 
@@ -65,7 +65,13 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           files: coverage.json
-          codecov_yml_path: .github/configs/codecov.yml
+          # codecov.yml lives at repo root where the Codecov CLI's
+          # default auto-discovery looks. The `codecov_yml_path` action
+          # input did NOT plumb through to the CLI in our environment
+          # (verified via the run 26340393892 debug log: CLI dumped
+          # `"codecov_yml_path": null` while loading from the default
+          # `<repo>/codecov.yml`), so the config was silently ignored
+          # when it lived under `.github/configs/`. Closes #172.
           fail_ci_if_error: false
           verbose: true
 
