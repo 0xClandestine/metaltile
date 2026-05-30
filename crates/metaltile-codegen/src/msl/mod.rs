@@ -1430,6 +1430,50 @@ mod tests {
         );
     }
 
+    /// `kernel_uses_n_simd` (the signal the runtime dispatch verifier consults)
+    /// must distinguish freeze-prone kernels from the per-thread Reduction-mode
+    /// matvecs like `mt_hadamard_m*` that dispatch safely at TPG < 32.
+    #[test]
+    fn kernel_uses_n_simd_flags_only_freeze_prone_kernels() {
+        use metaltile_core::ir::ReduceKind;
+
+        // (a) Reduction + axis-0 reduce → derives n_simd.
+        let mut reduce = Kernel::new("r");
+        reduce.mode = KernelMode::Reduction;
+        reduce.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
+        reduce.body.push_op(
+            Op::Reduce { value: ValueId::new(0), axis: 0, op: ReduceKind::Sum },
+            ValueId::new(1),
+        );
+        assert!(super::kernel_uses_n_simd(&reduce), "axis-0 reduce derives n_simd");
+
+        // (b) Reduction + direct `n_simd` identifier load → true.
+        let mut ident = Kernel::new("i");
+        ident.mode = KernelMode::Reduction;
+        ident.body.push_op(
+            Op::Load { src: "n_simd".into(), indices: Vec::new(), mask: None, other: None },
+            ValueId::new(0),
+        );
+        assert!(super::kernel_uses_n_simd(&ident), "direct n_simd load → true");
+
+        // (c) Reduction-mode but a plain per-thread loop (mt_hadamard_m* shape):
+        // no reduce, no n_simd reference → false, so a TPG < 32 dispatch is
+        // allowed and not falsely rejected.
+        let mut plain = Kernel::new("h");
+        plain.mode = KernelMode::Reduction;
+        plain.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        assert!(
+            !super::kernel_uses_n_simd(&plain),
+            "plain Reduction matvec must be free of n_simd"
+        );
+
+        // (d) Elementwise → never derives n_simd.
+        let mut el = Kernel::new("e");
+        el.mode = KernelMode::Elementwise;
+        el.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        assert!(!super::kernel_uses_n_simd(&el));
+    }
+
     /// Direct `n_simd` identifier read keeps the decl regardless of
     /// reduce presence.
     #[test]

@@ -712,7 +712,10 @@ pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
     use super::mt_sdpa_prefill_mma;
-    use crate::utils::{pack_f32, unpack_f32};
+    use crate::{
+        mlx::steel::attn::steel_attention_mma_bf16::mt_sdpa_prefill_mma_bf16,
+        utils::{pack_f32, unpack_f32},
+    };
 
     const HEAD_DIM: usize = 128;
     const Q_LEN: usize = 32;
@@ -778,7 +781,13 @@ pub mod kernel_tests {
     /// `q_len = 32` query rows attend a `k_len`-slot causal-prefix cache.
     /// `q_len_off = k_len - q_len`, so the first query row already sees the
     /// `n_kv = k_len - q_len` prefix plus itself.
-    fn prefill_setup(dt: DType, n_q_heads: usize, n_kv_heads: usize, k_len: usize) -> TestSetup {
+    fn prefill_setup(
+        ir: metaltile::core::ir::Kernel,
+        dt: DType,
+        n_q_heads: usize,
+        n_kv_heads: usize,
+        k_len: usize,
+    ) -> TestSetup {
         let gqa_factor = n_q_heads / n_kv_heads;
         let scale = 1.0f32 / (HEAD_DIM as f32).sqrt();
         let q_len_off = k_len - Q_LEN;
@@ -792,7 +801,7 @@ pub mod kernel_tests {
 
         // The prefill kernel narrows once per store (inference dispatches it
         // with the bfloat reinterpret-cast path enabled).
-        let mut ir = mt_sdpa_prefill_mma::kernel_ir_for(dt);
+        let mut ir = ir;
         ir.bfloat_reinterpret_cast = true;
 
         TestSetup::new(ir)
@@ -813,10 +822,26 @@ pub mod kernel_tests {
 
     // MHA, short prefix: k_len = 96 (6 KV-tiles of 16), 2 heads, 1 KV head.
     #[test_kernel(dtypes = [f32], tol = [5e-3])]
-    fn test_mt_sdpa_prefill_mma(dt: DType) -> TestSetup { prefill_setup(dt, 2, 1, 96) }
+    fn test_mt_sdpa_prefill_mma(dt: DType) -> TestSetup {
+        prefill_setup(mt_sdpa_prefill_mma::kernel_ir_for(dt), dt, 2, 1, 96)
+    }
 
     // GQA fan-out 4: 8 Q heads over 2 KV heads — exercises the kv-head
     // mapping in the prefill tile.
     #[test_kernel(dtypes = [f32], tol = [5e-3])]
-    fn test_mt_sdpa_prefill_mma_gqa(dt: DType) -> TestSetup { prefill_setup(dt, 8, 2, 96) }
+    fn test_mt_sdpa_prefill_mma_gqa(dt: DType) -> TestSetup {
+        prefill_setup(mt_sdpa_prefill_mma::kernel_ir_for(dt), dt, 8, 2, 96)
+    }
+
+    // bf16-optimized M2 variant — identical signature/geometry/causal-prefix
+    // semantics, so it reuses the same oracle. Tested at bf16 (its target) and
+    // f32; the half-precision simdgroup-matrix accumulation widens the band.
+    #[test_kernel(dtypes = [f32, bf16], tol = [5e-3, 1e-1])]
+    fn test_mt_sdpa_prefill_mma_bf16(dt: DType) -> TestSetup {
+        prefill_setup(mt_sdpa_prefill_mma_bf16::kernel_ir_for(dt), dt, 2, 1, 96)
+    }
+    #[test_kernel(dtypes = [f32, bf16], tol = [5e-3, 1e-1])]
+    fn test_mt_sdpa_prefill_mma_bf16_gqa(dt: DType) -> TestSetup {
+        prefill_setup(mt_sdpa_prefill_mma_bf16::kernel_ir_for(dt), dt, 8, 2, 96)
+    }
 }
