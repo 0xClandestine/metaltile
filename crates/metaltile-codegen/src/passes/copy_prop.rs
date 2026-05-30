@@ -31,12 +31,11 @@
 //!   ACM TOPLAS 13(2):181–210.  Sparse conditional constant propagation framework
 //!   that subsumes copy propagation.
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use metaltile_core::{
     dtype::DType,
     ir::{Block, BlockId, Kernel, Op, ValueId},
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::remap;
 use crate::error::{Error, Result};
@@ -64,11 +63,11 @@ impl super::Pass for CopyPropPass {
 }
 
 /// Resolve transitive replacement chains: {v2→v1, v1→v0} becomes {v2→v0, v1→v0}.
-fn resolve_transitive(map: &BTreeMap<ValueId, ValueId>) -> BTreeMap<ValueId, ValueId> {
-    let mut resolved = BTreeMap::new();
+fn resolve_transitive(map: &FxHashMap<ValueId, ValueId>) -> FxHashMap<ValueId, ValueId> {
+    let mut resolved = FxHashMap::with_capacity_and_hasher(map.len(), Default::default());
     for (&key, &val) in map.iter() {
         let mut terminal = val;
-        let mut visited = BTreeSet::new();
+        let mut visited = FxHashSet::default();
         visited.insert(key);
         while let Some(&next) = map.get(&terminal) {
             if !visited.insert(terminal) {
@@ -91,7 +90,10 @@ fn copy_prop_block_fixpoint(block: &mut Block) {
 
 fn copy_prop_block_once(block: &mut Block) -> bool {
     let n = block.ops.len();
-    let mut vid_replacements: BTreeMap<ValueId, ValueId> = BTreeMap::new();
+    // Pre-sized with `block.ops.len()` per playbook §"Pre-size with
+    // `with_capacity`" — half the dead_store_elim PR #38 win.
+    let mut vid_replacements: FxHashMap<ValueId, ValueId> =
+        FxHashMap::with_capacity_and_hasher(n, Default::default());
 
     for i in 0..n {
         let op = &block.ops[i];
@@ -109,15 +111,16 @@ fn copy_prop_block_once(block: &mut Block) -> bool {
     // Resolve transitive replacement chains: v2→v1→v0 becomes v2→v0.
     let vid_replacements = resolve_transitive(&vid_replacements);
 
-    // Remap ValueIds in all ops.
+    // Remap ValueIds in all ops via the FxHashMap-keyed sibling of
+    // `remap_value_ids` (playbook §"FxHashMap wins on codegen").
     for op in block.ops.iter_mut() {
-        remap::remap_value_ids(op, &vid_replacements);
+        remap::remap_value_ids_fx(op, &vid_replacements);
     }
 
     // Remove dead ops whose results were redirected via identity propagation.
     // Without this, the same identity pattern re-matches on the next iteration,
     // producing the same replacement and causing an infinite fixpoint loop.
-    let dead_vids: BTreeSet<ValueId> = vid_replacements.keys().copied().collect();
+    let dead_vids: FxHashSet<ValueId> = vid_replacements.keys().copied().collect();
     if !dead_vids.is_empty() {
         let mut new_ops = Vec::new();
         let mut new_results = Vec::new();
@@ -202,6 +205,129 @@ fn infer_value_dtype(vid: ValueId, block: &Block) -> Option<DType> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod perf {
+    //! `#[ignore]`'d microbench for the cascade — runs under
+    //!
+    //! ```text
+    //! cargo test -p metaltile-codegen --release perf_copy_prop_btreemap_vs_fxhash \
+    //!     -- --ignored --nocapture
+    //! ```
+    //!
+    //! Reconstructs the pre-cascade `resolve_transitive` + `dead_vids`
+    //! collection + `remap_value_ids` shape using `BTreeMap`/`BTreeSet`
+    //! against the new `FxHashMap`/`FxHashSet` versions and times the
+    //! per-block hot path. Covers the same shape change applied across
+    //! `copy_prop.rs` / `algebraic_simplify.rs` / `unroll.rs` /
+    //! `vectorize.rs::result_remap` — the four call sites of
+    //! `remap::remap_value_ids_fx` introduced in this PR.
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        hint::black_box,
+        time::Instant,
+    };
+
+    use metaltile_core::ir::{BinOpKind, Op, ValueId};
+    use rustc_hash::{FxHashMap, FxHashSet};
+
+    use super::remap;
+
+    fn synthetic_block(n: usize) -> (Vec<Op>, Vec<Option<ValueId>>) {
+        // Build n BinOp(Add, v_{i-1}, v_{i-2}) ops to exercise the
+        // 2-refs-per-op iteration that drives `remap_value_ids` cost.
+        let mut ops = Vec::with_capacity(n);
+        let mut results = Vec::with_capacity(n);
+        for i in 0..n {
+            let lhs = ValueId::new(if i >= 2 { (i - 2) as u32 } else { 0 });
+            let rhs = ValueId::new(if i >= 1 { (i - 1) as u32 } else { 0 });
+            ops.push(Op::BinOp { op: BinOpKind::Add, lhs, rhs });
+            results.push(Some(ValueId::new(i as u32 + 100)));
+        }
+        (ops, results)
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_copy_prop_btreemap_vs_fxhash() {
+        const N_OPS: usize = 2_000;
+        const N_REPLACEMENTS: u32 = 256;
+        const N_ITERS: usize = 500;
+
+        let (base_ops, _results) = synthetic_block(N_OPS);
+
+        // ── BTreeMap (pre-cascade) ──
+        let bt_seed: Vec<(ValueId, ValueId)> =
+            (0..N_REPLACEMENTS).map(|i| (ValueId::new(i), ValueId::new(i + 1000))).collect();
+
+        for _ in 0..3 {
+            let map: BTreeMap<ValueId, ValueId> = bt_seed.iter().copied().collect();
+            let mut ops = base_ops.clone();
+            for op in ops.iter_mut() {
+                remap::remap_value_ids(op, &map);
+            }
+            let _dead: BTreeSet<ValueId> = map.keys().copied().collect();
+            black_box(&ops);
+        }
+        let t0 = Instant::now();
+        for _ in 0..N_ITERS {
+            let map: BTreeMap<ValueId, ValueId> = bt_seed.iter().copied().collect();
+            let mut ops = base_ops.clone();
+            for op in ops.iter_mut() {
+                remap::remap_value_ids(op, &map);
+            }
+            let dead: BTreeSet<ValueId> = map.keys().copied().collect();
+            black_box(&ops);
+            black_box(dead.len());
+        }
+        let bt_elapsed = t0.elapsed();
+
+        // ── FxHashMap (this cascade) ──
+        for _ in 0..3 {
+            let map: FxHashMap<ValueId, ValueId> = bt_seed.iter().copied().collect();
+            let mut ops = base_ops.clone();
+            for op in ops.iter_mut() {
+                remap::remap_value_ids_fx(op, &map);
+            }
+            let _dead: FxHashSet<ValueId> = map.keys().copied().collect();
+            black_box(&ops);
+        }
+        let t0 = Instant::now();
+        for _ in 0..N_ITERS {
+            let map: FxHashMap<ValueId, ValueId> =
+                FxHashMap::with_capacity_and_hasher(N_REPLACEMENTS as usize, Default::default());
+            let mut map = map;
+            for (k, v) in &bt_seed {
+                map.insert(*k, *v);
+            }
+            let mut ops = base_ops.clone();
+            for op in ops.iter_mut() {
+                remap::remap_value_ids_fx(op, &map);
+            }
+            let dead: FxHashSet<ValueId> = map.keys().copied().collect();
+            black_box(&ops);
+            black_box(dead.len());
+        }
+        let fx_elapsed = t0.elapsed();
+
+        let bt_ns_per = bt_elapsed.as_nanos() as f64 / (N_ITERS * N_OPS) as f64;
+        let fx_ns_per = fx_elapsed.as_nanos() as f64 / (N_ITERS * N_OPS) as f64;
+        let speedup = bt_ns_per / fx_ns_per;
+        let delta_pct = (1.0 - fx_ns_per / bt_ns_per) * 100.0;
+        println!();
+        println!(
+            "=== copy_prop hot path: build map + remap {N_OPS} ops + collect dead set ({N_ITERS} iters) ==="
+        );
+        println!("  BTreeMap (old)  : {bt_elapsed:?}  ({bt_ns_per:.2} ns/op)");
+        println!("  FxHashMap (new) : {fx_elapsed:?}  ({fx_ns_per:.2} ns/op)");
+        println!("  speedup         : {speedup:.2}× ({delta_pct:+.1}%)");
+
+        assert!(
+            fx_ns_per <= bt_ns_per * 1.05,
+            "FxHashMap regressed vs BTreeMap (fx={fx_ns_per:.2} ns, bt={bt_ns_per:.2} ns)"
+        );
+    }
 }
 
 #[cfg(test)]
