@@ -35,12 +35,12 @@
 //!   Tools", 2nd ed., §9.4.  Standard treatment of loop optimizations including
 //!   code motion.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use metaltile_core::ir::{Block, BlockId, Kernel, Op, ParamKind, ValueId};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::remap;
+use super::{remap, remap::find_max_vid};
 use crate::error::{Error, Result};
 
 pub struct LicmPass;
@@ -50,7 +50,11 @@ impl super::Pass for LicmPass {
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
         // Determine which params are read-only (Load-safe for hoisting).
-        let read_only: BTreeSet<String> = kernel
+        // Param count is small (~10s) and string-keyed; FxHashSet pays its
+        // own SipHash-grade hash on String, so keep this as the standard
+        // hasher per playbook §"When NOT to over-engineer". The inner
+        // hot-path checks use ValueId keys which DO get FxHash below.
+        let read_only: FxHashSet<String> = kernel
             .params
             .iter()
             .filter(|p| !p.is_output && matches!(p.kind, ParamKind::Tensor | ParamKind::Strided))
@@ -58,7 +62,12 @@ impl super::Pass for LicmPass {
             .collect();
 
         // Build a definition map: ValueId -> BlockId where it's defined.
-        let mut def_block: BTreeMap<ValueId, BlockId> = BTreeMap::new();
+        // FxHashMap pre-sized with `find_max_vid` so the dense ValueId
+        // population doesn't pay 4→8→16→32… regrowth — playbook §"Pre-size
+        // with `with_capacity`" (half the dead_store_elim win in PR #38).
+        let max_vid = find_max_vid(kernel) as usize;
+        let mut def_block: FxHashMap<ValueId, BlockId> =
+            FxHashMap::with_capacity_and_hasher(max_vid + 1, Default::default());
         for vid in kernel.body.results.iter().flatten() {
             def_block.insert(*vid, kernel.body.id);
         }
@@ -101,8 +110,8 @@ impl super::Pass for LicmPass {
 fn licm_block(
     block: &mut Block,
     blocks: &mut FxHashMap<BlockId, Block>,
-    def_block: &BTreeMap<ValueId, BlockId>,
-    read_only: &BTreeSet<String>,
+    def_block: &FxHashMap<ValueId, BlockId>,
+    read_only: &FxHashSet<String>,
 ) {
     let n = block.ops.len();
 
@@ -126,7 +135,11 @@ fn licm_block(
 
             // Build the initial invariant set: ValueIds defined before position `i`
             // in the parent block, plus any from ancestor blocks.
-            let mut invariant: BTreeSet<ValueId> = BTreeSet::new();
+            // FxHashSet because the inner fixpoint check
+            // `op_refs.iter().all(|v| invariant.contains(v))` is the
+            // densest membership-test loop in the codegen — BTreeSet
+            // log(n) per probe vs FxHashSet single-cycle.
+            let mut invariant: FxHashSet<ValueId> = FxHashSet::default();
             for j in 0..i {
                 if let Some(Some(vid)) = block.results.get(j) {
                     invariant.insert(*vid);
@@ -264,7 +277,7 @@ fn licm_block(
 
 /// Remove ops at given indices from a block. Indices must be sorted ascending.
 fn remove_ops_from_block(block: &mut Block, indices: &[usize]) {
-    let skip: BTreeSet<usize> = indices.iter().copied().collect();
+    let skip: FxHashSet<usize> = indices.iter().copied().collect();
     let old_ops = std::mem::take(&mut block.ops);
     let old_results = std::mem::take(&mut block.results);
     let mut new_ops = Vec::new();
@@ -280,13 +293,125 @@ fn remove_ops_from_block(block: &mut Block, indices: &[usize]) {
 }
 
 /// Return true if the op is pure (no side effects) and safe to hoist.
-fn is_pure_op(op: &Op, read_only: &BTreeSet<String>) -> bool {
+fn is_pure_op(op: &Op, read_only: &FxHashSet<String>) -> bool {
     // Load is pure only when the source is a read-only (const) param.
     if let Some(src) = op.load_src() {
         return read_only.contains(src);
     }
     // Elementwise, cheap-ALU, and shape-manipulation ops are always pure.
     op.is_elementwise() || op.is_cheap_alu() || op.is_shape_op()
+}
+
+#[cfg(test)]
+mod perf {
+    //! `#[ignore]`'d microbench for the LICM hoist-fixpoint inner check
+    //! — the densest membership-test loop in the codegen.
+    //!
+    //! ```text
+    //! cargo test -p metaltile-codegen --release perf_licm_invariant_contains \
+    //!     -- --ignored --nocapture
+    //! ```
+    //!
+    //! Per playbook §"Measurement infrastructure" and §"FxHashMap wins
+    //! on the codegen pipeline". Compares BTreeSet (pre-swap state)
+    //! vs FxHashSet (current) on the exact
+    //! `op_refs.iter().all(|v| invariant.contains(v))` pattern that
+    //! runs in the LICM fixpoint loop.
+
+    use std::{collections::BTreeSet, hint::black_box, time::Instant};
+
+    use metaltile_core::ir::ValueId;
+    use rustc_hash::FxHashSet;
+
+    #[test]
+    #[ignore]
+    fn perf_licm_invariant_contains() {
+        // Representative shape: 256 invariants (typical for a kernel
+        // body with several loops), 4 refs per op (Add/Mul/Select
+        // average), 10K op-refs total per pass run.
+        const N_INV: u32 = 256;
+        const N_REFS_PER_OP: usize = 4;
+        const N_OPS: usize = 10_000;
+        const N_PASS_ITERS: usize = 200;
+
+        let invariants_seed: Vec<ValueId> = (0..N_INV).map(ValueId::new).collect();
+        // Mix of hits and misses: 80% in-set, 20% out-of-set — matches
+        // the empirical hoist hit rate in the LICM tests.
+        let op_refs: Vec<ValueId> = (0..N_OPS * N_REFS_PER_OP)
+            .map(|i| {
+                if i % 5 == 0 {
+                    ValueId::new(N_INV + (i as u32 % 32))
+                } else {
+                    ValueId::new(i as u32 % N_INV)
+                }
+            })
+            .collect();
+
+        // ── BTreeSet (the old state) ──
+        let inv_btree: BTreeSet<ValueId> = invariants_seed.iter().copied().collect();
+        for _ in 0..3 {
+            let mut acc = 0u32;
+            for chunk in op_refs.chunks(N_REFS_PER_OP) {
+                if chunk.iter().all(|v| inv_btree.contains(v)) {
+                    acc = acc.wrapping_add(1);
+                }
+            }
+            black_box(acc);
+        }
+        let t0 = Instant::now();
+        let mut bt_acc = 0u32;
+        for _ in 0..N_PASS_ITERS {
+            for chunk in op_refs.chunks(N_REFS_PER_OP) {
+                if chunk.iter().all(|v| inv_btree.contains(v)) {
+                    bt_acc = bt_acc.wrapping_add(1);
+                }
+            }
+        }
+        let bt_elapsed = t0.elapsed();
+        black_box(bt_acc);
+
+        // ── FxHashSet (the new state) ──
+        let inv_fx: FxHashSet<ValueId> = invariants_seed.iter().copied().collect();
+        for _ in 0..3 {
+            let mut acc = 0u32;
+            for chunk in op_refs.chunks(N_REFS_PER_OP) {
+                if chunk.iter().all(|v| inv_fx.contains(v)) {
+                    acc = acc.wrapping_add(1);
+                }
+            }
+            black_box(acc);
+        }
+        let t0 = Instant::now();
+        let mut fx_acc = 0u32;
+        for _ in 0..N_PASS_ITERS {
+            for chunk in op_refs.chunks(N_REFS_PER_OP) {
+                if chunk.iter().all(|v| inv_fx.contains(v)) {
+                    fx_acc = fx_acc.wrapping_add(1);
+                }
+            }
+        }
+        let fx_elapsed = t0.elapsed();
+        black_box(fx_acc);
+
+        assert_eq!(bt_acc, fx_acc, "BTreeSet and FxHashSet disagree on hit count");
+
+        let bt_ns_per = bt_elapsed.as_nanos() as f64 / (N_PASS_ITERS * N_OPS) as f64;
+        let fx_ns_per = fx_elapsed.as_nanos() as f64 / (N_PASS_ITERS * N_OPS) as f64;
+        let speedup = bt_ns_per / fx_ns_per;
+        let delta_pct = (1.0 - fx_ns_per / bt_ns_per) * 100.0;
+        println!();
+        println!(
+            "=== LICM hoist-fixpoint membership check ({N_OPS} ops × {N_PASS_ITERS} pass iters, {N_REFS_PER_OP} refs/op) ==="
+        );
+        println!("  BTreeSet (old)  : {bt_elapsed:?}  ({bt_ns_per:.2} ns/op-check)");
+        println!("  FxHashSet (new) : {fx_elapsed:?}  ({fx_ns_per:.2} ns/op-check)");
+        println!("  speedup         : {speedup:.2}× ({delta_pct:+.1}%)");
+
+        assert!(
+            fx_ns_per <= bt_ns_per * 1.05,
+            "FxHashSet regressed vs BTreeSet (fx={fx_ns_per:.2} ns, bt={bt_ns_per:.2} ns)"
+        );
+    }
 }
 
 #[cfg(test)]
