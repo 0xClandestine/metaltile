@@ -6,6 +6,9 @@ license.workspace = true
 description = "MetalTile kernel standard library — benchmark metadata and type definitions"
 publish = true
 
+[lints]
+workspace = true
+
 [dependencies]
 thiserror.workspace = true
 metaltile.workspace = true
@@ -18,14 +21,9 @@ bytemuck.workspace = true
 rustc-hash.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-metal = { version = "0.3", features = [
-    "MTLDevice", "MTLCommandQueue", "MTLLibrary",
-    "MTLComputePipeline", "MTLComputeCommandEncoder",
-    "MTLBuffer", "MTLCommandBuffer", "MTLCommandEncoder",
-    "MTLFunctionConstantValues", "MTLDataType",
-] }
-objc2-foundation = "0.3"
+objc2.workspace = true
+objc2-metal.workspace = true
+objc2-foundation.workspace = true
 
 [dev-dependencies]
 # AURA MSL snapshot tests (tests/aura_msl_snapshots.rs).
