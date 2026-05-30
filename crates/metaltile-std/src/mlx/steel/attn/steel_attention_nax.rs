@@ -606,15 +606,19 @@ pub mod kernel_benches {
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::mt_sdpa_prefill_nax;
+    use super::{
+        mt_sdpa_prefill_nax,
+        mt_sdpa_prefill_nax_d64,
+        mt_sdpa_prefill_nax_d128,
+        mt_sdpa_prefill_nax_d256,
+    };
     use crate::utils::{pack_f32, unpack_f32};
 
-    // Shared shape (single batch). head_dim is hardcoded 32 in the kernel.
+    // Shared shape (single batch). head_dim varies per kernel variant.
     const N_Q_HEADS: usize = 4;
     const N_KV_HEADS: usize = 4;
     const Q_LEN: usize = 64;
     const K_LEN: usize = 64;
-    const HEAD_DIM: usize = 32;
     const BQ: u32 = 16;
 
     /// Deterministic ramp — mirrors the scalar/MMA siblings' `ramp`.
@@ -672,25 +676,25 @@ pub mod kernel_tests {
         out
     }
 
-    // tol per dtype: f32 2e-2, f16 5e-2, bf16 2e-1 — matches the
-    // scalar/MMA siblings (online-softmax + matmul drift).
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [2e-2, 5e-2, 2e-1])]
-    fn test_sdpa_prefill_nax(dt: DType) -> TestSetup {
-        let scale = 1.0f32 / (HEAD_DIM as f32).sqrt();
+    /// Build a prefill-nax test for a given `head_dim` variant (the kernel
+    /// bakes head_dim in; the D-chunk loop count is `head_dim / 32`). All
+    /// variants share the signature, oracle, and dispatch geometry.
+    fn nax_setup(kernel: metaltile::core::ir::Kernel, head_dim: usize, dt: DType) -> TestSetup {
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
         // Dtype-round inputs so the CPU oracle sees the same load-cast
         // quantization the kernel does.
-        let q = unpack_f32(&pack_f32(&ramp(N_Q_HEADS * Q_LEN * HEAD_DIM, 17, 8.0), dt), dt);
-        let k = unpack_f32(&pack_f32(&ramp(N_KV_HEADS * K_LEN * HEAD_DIM, 13, 6.0), dt), dt);
-        let v = unpack_f32(&pack_f32(&ramp(N_KV_HEADS * K_LEN * HEAD_DIM, 11, 5.0), dt), dt);
+        let q = unpack_f32(&pack_f32(&ramp(N_Q_HEADS * Q_LEN * head_dim, 17, 8.0), dt), dt);
+        let k = unpack_f32(&pack_f32(&ramp(N_KV_HEADS * K_LEN * head_dim, 13, 6.0), dt), dt);
+        let v = unpack_f32(&pack_f32(&ramp(N_KV_HEADS * K_LEN * head_dim, 11, 5.0), dt), dt);
         let expected = naive_sdpa_prefill_causal(
-            &q, &k, &v, N_Q_HEADS, N_KV_HEADS, Q_LEN, K_LEN, HEAD_DIM, scale,
+            &q, &k, &v, N_Q_HEADS, N_KV_HEADS, Q_LEN, K_LEN, head_dim, scale,
         );
-        TestSetup::new(mt_sdpa_prefill_nax::kernel_ir_for(dt))
+        TestSetup::new(kernel)
             .mode(KernelMode::Reduction)
             .input(TestBuffer::from_vec("q", pack_f32(&q, dt), dt))
             .input(TestBuffer::from_vec("k", pack_f32(&k, dt), dt))
             .input(TestBuffer::from_vec("v", pack_f32(&v, dt), dt))
-            .input(TestBuffer::zeros("out", N_Q_HEADS * Q_LEN * HEAD_DIM, dt))
+            .input(TestBuffer::zeros("out", N_Q_HEADS * Q_LEN * head_dim, dt))
             .constexpr("q_len", Q_LEN as u32)
             .constexpr("k_len", K_LEN as u32)
             .constexpr("gqa_factor", (N_Q_HEADS / N_KV_HEADS) as u32)
@@ -700,6 +704,27 @@ pub mod kernel_tests {
             .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
             // grid_3d takes threadGROUP counts: (q_len / BQ, n_q_heads, batch).
             .grid_3d(Q_LEN as u32 / BQ, N_Q_HEADS as u32, 1, [32, 1, 1])
+    }
+
+    // tol per dtype: f32 2e-2, f16 5e-2, bf16 2e-1 — matches the
+    // scalar/MMA siblings (online-softmax + matmul drift).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [2e-2, 5e-2, 2e-1])]
+    fn test_sdpa_prefill_nax(dt: DType) -> TestSetup {
+        nax_setup(mt_sdpa_prefill_nax::kernel_ir_for(dt), 32, dt)
+    }
+
+    // Wide head-dim variants — D-chunk loop over head_dim/32 32-wide chunks.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [2e-2, 5e-2, 2e-1])]
+    fn test_sdpa_prefill_nax_d64(dt: DType) -> TestSetup {
+        nax_setup(mt_sdpa_prefill_nax_d64::kernel_ir_for(dt), 64, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [2e-2, 5e-2, 2e-1])]
+    fn test_sdpa_prefill_nax_d128(dt: DType) -> TestSetup {
+        nax_setup(mt_sdpa_prefill_nax_d128::kernel_ir_for(dt), 128, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [2e-2, 5e-2, 2e-1])]
+    fn test_sdpa_prefill_nax_d256(dt: DType) -> TestSetup {
+        nax_setup(mt_sdpa_prefill_nax_d256::kernel_ir_for(dt), 256, dt)
     }
 }
 
