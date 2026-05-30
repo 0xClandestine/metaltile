@@ -14,8 +14,15 @@ use metaltile_core::{
     ir::{Kernel, Param, ParamKind},
     shape::Dim,
 };
+use smallvec::SmallVec;
 
 use crate::error::MetalTileError;
+
+/// Inline capacity for shape/stride vectors. Covers tensor rank up to 6,
+/// which fits every kernel currently in `metaltile-std` (the tallest is
+/// rank‑5 conv3d weight tensors). Beyond 6 falls back to heap.
+const INLINE_RANK: usize = 6;
+type DimVec = SmallVec<[u32; INLINE_RANK]>;
 
 // ---------------------------------------------------------------------------
 // Buffer planning
@@ -100,13 +107,20 @@ pub(crate) type StridedMetadata<'a> = (Cow<'a, [u8]>, Cow<'a, [u8]>);
 
 /// Pack `u32` values as little‑endian bytes.
 pub(crate) fn encode_u32s(values: &[u32]) -> Vec<u8> {
-    values.iter().flat_map(|value| value.to_le_bytes()).collect()
+    // Pre-allocate the exact byte count; flat_map's size_hint can't always
+    // forward the inner `[u8; 4]` exact size, leaving `collect` to grow.
+    let mut bytes = Vec::with_capacity(values.len() * 4);
+    for &value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
 }
 
 /// Extract the known dimensions of a parameter's shape, or `None` if
-/// any dimension is dynamic.
-fn known_shape_dims(param: &Param) -> Result<Option<Vec<u32>>, MetalTileError> {
-    let mut dims = Vec::with_capacity(param.shape.rank());
+/// any dimension is dynamic. Storage is stack-resident up to rank
+/// [`INLINE_RANK`].
+fn known_shape_dims(param: &Param) -> Result<Option<DimVec>, MetalTileError> {
+    let mut dims: DimVec = SmallVec::with_capacity(param.shape.rank());
     for dim in param.shape.iter() {
         let Dim::Known(value) = dim else {
             return Ok(None);
@@ -121,9 +135,10 @@ fn known_shape_dims(param: &Param) -> Result<Option<Vec<u32>>, MetalTileError> {
     Ok(Some(dims))
 }
 
-/// Compute row‑major strides for the given dimensions.
-fn row_major_strides(name: &str, dims: &[u32]) -> Result<Vec<u32>, MetalTileError> {
-    let mut strides = vec![1u32; dims.len()];
+/// Compute row‑major strides for the given dimensions. Stack-resident
+/// up to rank [`INLINE_RANK`].
+fn row_major_strides(name: &str, dims: &[u32]) -> Result<DimVec, MetalTileError> {
+    let mut strides: DimVec = SmallVec::from_elem(1u32, dims.len());
     let mut stride = 1u32;
     for (idx, &dim) in dims.iter().enumerate().rev() {
         strides[idx] = stride;
@@ -276,6 +291,131 @@ mod tests {
 
         assert_eq!(shape_data.as_ref(), encode_u32s(&[2, 3, 4]).as_slice());
         assert_eq!(stride_data.as_ref(), encode_u32s(&[12, 4, 1]).as_slice());
+    }
+
+    /// Side-by-side: the pre-PR Vec<u32> implementation of
+    /// `known_shape_dims` + `row_major_strides`, kept ONLY in the test
+    /// module so we can quantify the SmallVec win without revert-and-
+    /// re-measure noise. Synced with the public impls — if they
+    /// change, mirror the change here.
+    fn known_shape_dims_vec(param: &Param) -> Option<Vec<u32>> {
+        let mut dims = Vec::with_capacity(param.shape.rank());
+        for dim in param.shape.iter() {
+            let Dim::Known(value) = dim else {
+                return None;
+            };
+            dims.push(*value as u32);
+        }
+        Some(dims)
+    }
+
+    fn row_major_strides_vec(dims: &[u32]) -> Vec<u32> {
+        let mut strides = vec![1u32; dims.len()];
+        let mut stride = 1u32;
+        for (idx, &dim) in dims.iter().enumerate().rev() {
+            strides[idx] = stride;
+            stride *= dim;
+        }
+        strides
+    }
+
+    fn resolve_strided_metadata_vec(param: &Param) -> (Vec<u8>, Vec<u8>) {
+        let dims = known_shape_dims_vec(param).expect("known dims");
+        let strides = row_major_strides_vec(&dims);
+        (encode_u32s(&dims), encode_u32s(&strides))
+    }
+
+    fn resolve_strided_metadata_smallvec(param: &Param) -> (Vec<u8>, Vec<u8>) {
+        let dims = known_shape_dims(param).unwrap().expect("known dims");
+        let strides = row_major_strides(&param.name, &dims).unwrap();
+        (encode_u32s(&dims), encode_u32s(&strides))
+    }
+
+    #[test]
+    #[ignore = "perf microbench"]
+    fn perf_strided_metadata_vec_vs_smallvec() {
+        // Modal rank=3 strided KV cache shape.
+        let param =
+            tensor_param("kv_cache", DType::F16, &[8, 4096, 128], false, ParamKind::Strided);
+
+        const ITERS: usize = 5_000_000;
+        for _ in 0..50_000 {
+            std::hint::black_box(resolve_strided_metadata_vec(std::hint::black_box(&param)));
+            std::hint::black_box(resolve_strided_metadata_smallvec(std::hint::black_box(&param)));
+        }
+
+        let t0 = std::time::Instant::now();
+        for _ in 0..ITERS {
+            std::hint::black_box(resolve_strided_metadata_vec(std::hint::black_box(&param)));
+        }
+        let vec_elapsed = t0.elapsed();
+        let vec_ns_per = vec_elapsed.as_nanos() as f64 / ITERS as f64;
+
+        let t1 = std::time::Instant::now();
+        for _ in 0..ITERS {
+            std::hint::black_box(resolve_strided_metadata_smallvec(std::hint::black_box(&param)));
+        }
+        let sv_elapsed = t1.elapsed();
+        let sv_ns_per = sv_elapsed.as_nanos() as f64 / ITERS as f64;
+
+        println!();
+        println!(
+            "=== rank-3 strided metadata: 2× Vec<u32> intermediates vs 2× SmallVec ({ITERS} iters) ==="
+        );
+        println!("  Vec<u32>   (old): {vec_elapsed:>10.2?}  ({vec_ns_per:>5.1} ns/call)");
+        println!("  SmallVec   (new): {sv_elapsed:>10.2?}  ({sv_ns_per:>5.1} ns/call)");
+        let speedup = vec_ns_per / sv_ns_per;
+        println!(
+            "  → speedup        : {speedup:.2}× ({:+.1}%)",
+            (1.0 - sv_ns_per / vec_ns_per) * 100.0
+        );
+
+        // Regression assertion: SmallVec must not regress within 5%.
+        assert!(
+            sv_ns_per * 1.05 <= vec_ns_per,
+            "SmallVec resolve_strided_metadata ({sv_ns_per:.1} ns/call) should beat the Vec \
+             baseline ({vec_ns_per:.1} ns/call)"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf microbench"]
+    fn perf_build_param_buffer_plans_modal_kernel() {
+        // Modal FFAI kernel: 8 params, 2 strided. Bench reflects what
+        // every single_dispatch.execute() does once per call.
+        let mut kernel = Kernel::new("perf_modal_8param");
+        kernel.params = vec![
+            tensor_param("q", DType::F16, &[1024, 128], false, ParamKind::Strided),
+            tensor_param("k", DType::F16, &[1024, 128], false, ParamKind::Strided),
+            tensor_param("v", DType::F16, &[1024, 128], false, ParamKind::Tensor),
+            tensor_param("mask", DType::F16, &[1024], false, ParamKind::Tensor),
+            tensor_param("out", DType::F16, &[1024, 128], true, ParamKind::Tensor),
+            tensor_param("scale_a", DType::F32, &[1], false, ParamKind::Tensor),
+            tensor_param("scale_b", DType::F32, &[1], false, ParamKind::Tensor),
+            tensor_param("bias", DType::F32, &[128], false, ParamKind::Tensor),
+        ];
+        let mut buffers = BTreeMap::new();
+        buffers.insert("q".into(), vec![0u8; 1024 * 128 * 2]);
+        buffers.insert("k".into(), vec![0u8; 1024 * 128 * 2]);
+
+        const ITERS: usize = 1_000_000;
+        for _ in 0..20_000 {
+            std::hint::black_box(
+                build_param_buffer_plans(&kernel, std::hint::black_box(&buffers)).unwrap(),
+            );
+        }
+        let start = std::time::Instant::now();
+        for _ in 0..ITERS {
+            std::hint::black_box(
+                build_param_buffer_plans(&kernel, std::hint::black_box(&buffers)).unwrap(),
+            );
+        }
+        let elapsed = start.elapsed();
+        let ns_per_call = elapsed.as_nanos() as f64 / ITERS as f64;
+        println!(
+            "build_param_buffer_plans(8-param, 2-strided) × {ITERS}: {elapsed:?} ({ns_per_call:.1} \
+             ns/call)"
+        );
     }
 
     #[test]
