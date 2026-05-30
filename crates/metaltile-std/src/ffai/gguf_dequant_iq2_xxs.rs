@@ -74,11 +74,26 @@ use metaltile::kernel;
 
 // Bare `#[kernel]` — see Q8_0 sibling for why; mixed concrete +
 // generic param dtype set doesn't fit the legacy `bench(...)` shape.
+//
+// The dequant uses **two** runtime lookup tables ported from
+// llama.cpp `ggml-quants.c` (MIT-licensed verbatim):
+//
+//   1. `grid: [256 × 8] u8`           — the `iq2xxs_grid` octet table.
+//      Each row encodes 8 small-integer magnitudes (observed values:
+//      `{0x08, 0x19, 0x2b}` = `{8, 25, 43}` — the absolute octet
+//      magnitudes that the sign byte modulates).
+//   2. `signs: [128] u8`               — the `ksigns_iq2xs` sign byte
+//      table. Each entry maps a 7-bit sign-field index to an 8-bit
+//      mask; bit `l` of the mask is 1 → that octet flips sign.
+//
+// Both are uploaded once at runtime init and shared across all
+// dequant calls.
 #[kernel]
 pub fn ffai_gguf_dequant_iq2_xxs<T>(
     qs_u32: Tensor<u32>,
     d_f32: Tensor<f32>,
     grid: Tensor<u8>,
+    signs: Tensor<u8>,
     out: Tensor<T>,
     #[constexpr] n_values: u32,
 ) {
@@ -106,26 +121,16 @@ pub fn ffai_gguf_dequant_iq2_xxs<T>(
         let grid_key = (aux_idx >> (octet_within_index * 8u32)) & 0xffu32;
         let grid_row_base = grid_key * 8u32;
         let octet_u = load(grid[grid_row_base + lane_in_octet]).cast::<u32>();
-        let octet_signed = select(octet_u >= 128u32, octet_u - 256u32, octet_u);
-        let octet = octet_signed.cast::<i32>().cast::<f32>();
+        let octet = octet_u.cast::<i32>().cast::<f32>();
 
-        // Sign reconstruction: 7-bit sign field at bit (7 * octet_within_index)
-        // in aux_sgn; the high bit is implicit-parity (XOR of low 7).
-        let sign_field = (aux_sgn >> (octet_within_index * 7u32)) & 0x7fu32;
-        let low_sign_bit = (sign_field >> lane_in_octet) & 1u32;
-        // Implicit-parity bit for the 8th octet of each group of 8 —
-        // XOR-parity of the low 7 sign bits. Inlined here because the
-        // DSL only cross-calls between `#[kernel]`-registered fns.
-        let parity = (((sign_field)
-            ^ (sign_field >> 1u32)
-            ^ (sign_field >> 2u32)
-            ^ (sign_field >> 3u32)
-            ^ (sign_field >> 4u32)
-            ^ (sign_field >> 5u32)
-            ^ (sign_field >> 6u32))
-            & 1u32);
-        let sign_bit = select(lane_in_octet == 7u32, parity, low_sign_bit);
-        let sign = select(sign_bit == 1u32, -1.0f32, 1.0f32);
+        // Sign reconstruction: 7-bit sign-index lives at bit
+        // `7 * octet_within_index` in aux_sgn; look it up in the
+        // `ksigns_iq2xs` table to get the 8-bit sign mask. Bit `l`
+        // of that mask says whether octet `l` flips sign.
+        let sign_idx = (aux_sgn >> (octet_within_index * 7u32)) & 0x7fu32;
+        let sign_mask = load(signs[sign_idx]).cast::<u32>();
+        let lane_bit = sign_mask & (1u32 << lane_in_octet);
+        let sign = select(lane_bit != 0u32, -1.0f32, 1.0f32);
 
         // Implicit narrowing — see playbook §"DSL implicit Store
         // coercion" (no `.cast::<T>()` at the Store site).
@@ -158,13 +163,11 @@ pub mod kernel_tests {
         }
     }
 
-    /// TODO end-to-end correctness vs llama.cpp reference. Blocked on
-    /// porting the 2048-byte `iq2xxs_grid` constant from
-    /// `ggml-quants.c` (256 × 8 signed-octet table, source under MIT
-    /// — needs verbatim copy + endian-pack into `Tensor<u8>` layout).
-    /// Once the table lands, this fixture quantizes a known vector
-    /// with the reference quantizer and asserts the kernel
-    /// reproduces the dequant within tolerance.
+    /// TODO end-to-end correctness vs llama.cpp reference. The grid +
+    /// ksigns tables ship on the FFAI loader side (verbatim ports
+    /// from `ggml-quants.c`, MIT). Once they're wired through Ops.swift
+    /// this fixture should round-trip a quantized + dequantized block
+    /// and assert within bf16 tolerance.
     #[allow(dead_code)]
     fn _placeholder_setup(n_blocks: usize, dt: DType) -> TestSetup {
         let n = n_blocks * 256;
@@ -176,6 +179,7 @@ pub mod kernel_tests {
                 DType::F32,
             ))
             .input(TestBuffer::zeros("grid", 2048, DType::U8))
+            .input(TestBuffer::zeros("signs", 128, DType::U8))
             .input(TestBuffer::zeros("out", n, dt))
             .constexpr("n_values", n as u32)
             .expect(TestBuffer::zeros("out", n, dt))
@@ -196,9 +200,10 @@ pub mod kernel_benches {
             .buffer(BenchBuffer::random("qs_u32", n_blocks * 16, DType::U32))
             .buffer(BenchBuffer::random("d_f32", n_blocks, DType::F32))
             .buffer(BenchBuffer::random("grid", 2048, DType::U8))
+            .buffer(BenchBuffer::random("signs", 128, DType::U8))
             .buffer(BenchBuffer::zeros("out", n, dt).output())
             .constexpr("n_values", n as u32)
             .grid_1d(n, 256)
-            .bytes_moved(((n_blocks * 64 + n_blocks * 4 + 2048) + n * dt.size_bytes()) as u64)
+            .bytes_moved(((n_blocks * 64 + n_blocks * 4 + 2048 + 128) + n * dt.size_bytes()) as u64)
     }
 }
