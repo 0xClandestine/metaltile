@@ -5264,6 +5264,99 @@ pub mod kernel_tests {
         dequant_setup(mt_affine_dequantize_int2::kernel_ir_for(dt), 2, 64, 16, dt)
     }
 
+    // ── affine dequantize, odd bit-widths (int3 / int5 / int6) ────────────
+    //
+    // Unlike the pow2 widths, these pack `pack_factor` codes (int3/int5 = 8,
+    // int6 = 4) into `bytes_per_pack` bytes (3 / 5 / 3) and read them as a
+    // byte-stream that can straddle a u32 boundary. Because `bytes_per_pack *
+    // 8 == pack_factor * bits` for each width, the per-pack byte layout is
+    // identical to one GLOBAL contiguous little-endian bit-stream — code `e`
+    // occupies bits `[e*bits, (e+1)*bits)`. The packer below builds exactly
+    // that stream, so the kernel's spill-aware byte extraction reconstructs
+    // the original codes. The CPU oracle is then `scale[g]·code + bias[g]`,
+    // mirroring `dequant_setup`. (The legacy file proved these via a
+    // quantize→dequantize round-trip; this pins the dequantize direction
+    // directly with a known-code oracle.)
+
+    /// Pack `indices` (each < `2^bits`) into the global contiguous
+    /// little-endian bit-stream the odd-width dequant kernels read, returned
+    /// as u32 words with one trailing guard word (the kernel always loads
+    /// `w[u_idx0 + 1]`, which the last pack may leave unused).
+    fn pack_odd_stream(indices: &[u32], bits: usize) -> Vec<u32> {
+        let total_bytes = (indices.len() * bits).div_ceil(8);
+        let mut bytes = vec![0u8; total_bytes];
+        for (e, &q) in indices.iter().enumerate() {
+            let base = e * bits;
+            for k in 0..bits {
+                if (q >> k) & 1 == 1 {
+                    let bit = base + k;
+                    bytes[bit / 8] |= 1 << (bit % 8);
+                }
+            }
+        }
+        let n_words = total_bytes.div_ceil(4);
+        let mut words = vec![0u32; n_words + 1];
+        for (i, chunk) in bytes.chunks(4).enumerate() {
+            let mut w = 0u32;
+            for (j, &b) in chunk.iter().enumerate() {
+                w |= (b as u32) << (8 * j);
+            }
+            words[i] = w;
+        }
+        words
+    }
+
+    /// One thread per pack (`program_id::<0>()`), Grid3D, tpg 16. `pack_factor`
+    /// is values-per-pack (int3/int5 = 8, int6 = 4); `n_packs` is kept a
+    /// multiple of 16 so there is no over-dispatch past the `out` buffer.
+    fn dequant_odd_setup(
+        kernel: Kernel,
+        bits: usize,
+        pack_factor: usize,
+        group_size: usize,
+        n_groups: usize,
+        dt: DType,
+    ) -> TestSetup {
+        let mask = (1u32 << bits) - 1;
+        let n_elem = n_groups * group_size;
+        let n_packs = n_elem / pack_factor;
+        // Deterministic codes spanning the full 0..2^bits range.
+        let indices: Vec<u32> =
+            (0..n_elem).map(|e| ((e as u32).wrapping_mul(2_654_435_761) >> 11) & mask).collect();
+        let w = pack_odd_stream(&indices, bits);
+        let scales: Vec<f32> = (0..n_groups).map(|g| 0.05 + g as f32 * 0.01).collect();
+        let biases: Vec<f32> = (0..n_groups).map(|g| -0.2 + g as f32 * 0.03).collect();
+        let sd = unpack_f32(&pack_f32(&scales, dt), dt);
+        let bd = unpack_f32(&pack_f32(&biases, dt), dt);
+        let mut expected = vec![0.0f32; n_elem];
+        for (e, &q) in indices.iter().enumerate() {
+            let g = e / group_size;
+            expected[e] = sd[g] * q as f32 + bd[g];
+        }
+        TestSetup::new(kernel)
+            .mode(KernelMode::Grid3D)
+            .input(TestBuffer::from_vec("w", u32_bytes(&w), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack_f32(&scales, dt), dt))
+            .input(TestBuffer::from_vec("biases", pack_f32(&biases, dt), dt))
+            .input(TestBuffer::zeros("out", n_elem, dt))
+            .constexpr("group_size", group_size as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_1d(n_packs, 16)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 1e-1])]
+    fn test_affine_dequantize_int3(dt: DType) -> TestSetup {
+        dequant_odd_setup(mt_affine_dequantize_int3::kernel_ir_for(dt), 3, 8, 32, 4, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-2, 5e-1])]
+    fn test_affine_dequantize_int5(dt: DType) -> TestSetup {
+        dequant_odd_setup(mt_affine_dequantize_int5::kernel_ir_for(dt), 5, 8, 32, 4, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-2, 5e-1])]
+    fn test_affine_dequantize_int6(dt: DType) -> TestSetup {
+        dequant_odd_setup(mt_affine_dequantize_int6::kernel_ir_for(dt), 6, 4, 32, 4, dt)
+    }
+
     // ── affine quantize (float → bit-stream) ──────────────────────────────
     //
     // The quantize kernels write three outputs: the packed codes (`out`),

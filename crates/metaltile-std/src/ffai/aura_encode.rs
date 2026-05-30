@@ -298,12 +298,47 @@ pub mod kernel_tests {
         (codebook, boundaries)
     }
 
-    /// CPU oracle for `norms_out` only. Replicates Stages 1/3/5 of the kernel
-    /// under an identity rotation (so `rotated = unit_val`): L2-normalise the
-    /// row, boundary-count each coordinate into a codebook index, then
-    /// `corrected = norm / ‖centroids‖`.
+    /// Sylvester–Hadamard SRHT rotation `[dim, dim]` (`H · diag(±1) / √dim`,
+    /// orthogonal). Every output coordinate mixes every input coordinate, so
+    /// the encode kernel's Stage-2 rotation matmul is genuinely exercised —
+    /// an identity Π leaves it dormant. Mirrors `srht_rotation` in the legacy
+    /// test's `common` module. `dim` must be a power of two.
+    fn srht_rotation(dim: usize, seed: u64) -> Vec<f32> {
+        assert!(dim.is_power_of_two(), "SRHT rotation requires a power-of-two dim");
+        // H[i][j] = (-1)^popcount(i & j).
+        let mut h = vec![0.0_f32; dim * dim];
+        for i in 0..dim {
+            for j in 0..dim {
+                h[i * dim + j] = if (i & j).count_ones() % 2 == 0 { 1.0 } else { -1.0 };
+            }
+        }
+        // Deterministic ±1 diagonal via a small LCG.
+        let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let signs: Vec<f32> = (0..dim)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                if (state >> 33) & 1 == 0 { 1.0 } else { -1.0 }
+            })
+            .collect();
+        // R = H · diag(signs) / √dim → column j scaled by signs[j].
+        let scale = 1.0 / (dim as f32).sqrt();
+        let mut r = vec![0.0_f32; dim * dim];
+        for i in 0..dim {
+            for j in 0..dim {
+                r[i * dim + j] = h[i * dim + j] * signs[j] * scale;
+            }
+        }
+        r
+    }
+
+    /// CPU oracle for `norms_out` only. Replicates Stages 1/2/3/5 of the
+    /// kernel: L2-normalise the row, apply the rotation Π (`rotated[d] =
+    /// Σ_j Π[d,j]·unit[j]`), boundary-count each rotated coordinate into a
+    /// codebook index, then `corrected = norm / ‖centroids‖`. With an identity
+    /// Π this reduces to `rotated = unit_val`.
     fn norms_oracle(
         input: &[f32],
+        rotation: &[f32],
         boundaries: &[f32],
         codebook: &[f32],
         rows: usize,
@@ -316,9 +351,13 @@ pub mod kernel_tests {
             let norm_val = norm_sq.sqrt();
             let inv_norm = if norm_val > 1.0e-8 { 1.0 / norm_val } else { 0.0 };
             let mut recon_sq = 0.0_f32;
-            for &v in row {
-                let rotated = v * inv_norm; // identity rotation
-                // Index = count of boundaries the value exceeds.
+            for d in 0..dim {
+                // Stage 2: rotated component d = Σ_j Π[d,j] · (input[j]·inv_norm).
+                let mut rotated = 0.0_f32;
+                for j in 0..dim {
+                    rotated += rotation[d * dim + j] * row[j] * inv_norm;
+                }
+                // Index = count of boundaries the rotated value exceeds.
                 let mut idx = 0usize;
                 for &bnd in boundaries {
                     if rotated > bnd {
@@ -334,31 +373,31 @@ pub mod kernel_tests {
         norms
     }
 
-    /// Small AURA-encode shape: dim a multiple of 32, identity rotation. int4.
-    fn setup(dim: usize, rows: usize, dt: DType) -> TestSetup {
+    /// Small AURA-encode shape: dim a multiple of 32. int4. Caller supplies the
+    /// rotation Π (identity leaves the Stage-2 matmul dormant; an SRHT Π
+    /// exercises it) and an input chosen so rotated coordinates land mid-bin.
+    fn setup(dim: usize, rows: usize, dt: DType, rotation: &[f32], input: &[f32]) -> TestSetup {
         const BITS: usize = 4;
         let packed_width = (dim * BITS).div_ceil(32);
         let (codebook, boundaries) = int4_uniform_codebook();
-        let rotation = identity_rotation(dim);
-        // Smooth input bounded so unit-normed coordinates land mid-bin (away
-        // from the 15 midpoint boundaries) — keeps the quant index stable under
-        // input dtype rounding.
-        let input: Vec<f32> = (0..rows * dim).map(|i| ((i as f32) * 0.013).sin() * 0.6).collect();
         // `input` and `codebook` are dtype-rounded (both `Tensor<T>` now); the
         // oracle then matches the GPU's cast-at-load. `norms_out` is stored
         // through `dt`, so round the expectation through `dt` too.
-        let input_r = unpack_f32(&pack_f32(&input, dt), dt);
+        let input_r = unpack_f32(&pack_f32(input, dt), dt);
         let codebook_r = unpack_f32(&pack_f32(&codebook, dt), dt);
         // rotation rounds through dt at cast-at-load (identity is exact in
-        // every dtype so it's a no-op here). `boundaries` is Tensor<f32>
-        // — no rounding, the GPU loads the same float the oracle reads.
-        let expected_norms_f32 = norms_oracle(&input_r, &boundaries, &codebook_r, rows, dim);
+        // every dtype so it's a no-op there; an SRHT Π in f32 is also exact).
+        // `boundaries` is Tensor<f32> — no rounding, the GPU loads the same
+        // float the oracle reads.
+        let rotation_r = unpack_f32(&pack_f32(rotation, dt), dt);
+        let expected_norms_f32 =
+            norms_oracle(&input_r, &rotation_r, &boundaries, &codebook_r, rows, dim);
         let expected_norms = unpack_f32(&pack_f32(&expected_norms_f32, dt), dt);
 
         TestSetup::new(aura_encode_int4::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
-            .input(TestBuffer::from_vec("input", pack_f32(&input, dt), dt))
-            .input(TestBuffer::from_vec("rotation", pack_f32(&rotation, dt), dt))
+            .input(TestBuffer::from_vec("input", pack_f32(input, dt), dt))
+            .input(TestBuffer::from_vec("rotation", pack_f32(rotation, dt), dt))
             .input(TestBuffer::from_vec(
                 "boundaries",
                 pack_f32(&boundaries, DType::F32),
@@ -379,16 +418,45 @@ pub mod kernel_tests {
             .grid_3d(rows as u32, 1, 1, [dim as u32, 1, 1])
     }
 
+    /// Smooth input bounded so unit-normed coordinates land mid-bin (away from
+    /// the 15 midpoint boundaries) — keeps the quant index stable under input
+    /// dtype rounding. Used by the identity-rotation tests.
+    fn smooth_input(n: usize) -> Vec<f32> {
+        (0..n).map(|i| ((i as f32) * 0.013).sin() * 0.6).collect()
+    }
+
     // dim=128 (4 simdgroups — exercises the cross-simdgroup `shared_norm`
     // combine), 2 rows. norms_out is f32; the simd_sum reorder vs the CPU
     // left-fold drifts a few ulp, so even the f32 cell uses a small absolute
     // band; f16/bf16 widen only from input rounding.
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-3, 5e-3])]
-    fn test_aura_encode_int4_norms(dt: DType) -> TestSetup { setup(128, 2, dt) }
+    fn test_aura_encode_int4_norms(dt: DType) -> TestSetup {
+        setup(128, 2, dt, &identity_rotation(128), &smooth_input(2 * 128))
+    }
 
     // dim=32 (exactly one simdgroup — the n_simd=1 path), single row.
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-3, 5e-3])]
-    fn test_aura_encode_int4_norms_min_dim(dt: DType) -> TestSetup { setup(32, 1, dt) }
+    fn test_aura_encode_int4_norms_min_dim(dt: DType) -> TestSetup {
+        setup(32, 1, dt, &identity_rotation(32), &smooth_input(32))
+    }
+
+    // Non-identity SRHT rotation (dim=128, 3 rows). The identity-rotation
+    // tests above leave the Stage-2 rotation matmul dormant — every rotated
+    // coordinate equals its input, so a bug in `Σ_j Π[d,j]·unit[j]` would be
+    // invisible. Here Π mixes every coordinate, so the matmul stage is
+    // exercised against the oracle (which applies the same Π). f32-only and a
+    // ramp input that keeps rotated values off the Lloyd-Max boundaries, so
+    // the matmul-reorder noise can't flip a quant index (mirrors the legacy
+    // `aura_encode_int4_srht_rotation_f32` A/B test).
+    #[test_kernel(dtypes = [f32], tol = 1e-4)]
+    fn test_aura_encode_int4_srht_rotation(dt: DType) -> TestSetup {
+        let dim = 128usize;
+        let rows = 3usize;
+        let rotation = srht_rotation(dim, 0xA09A_5EED);
+        // ramp(rows*dim, 29, 11.0): ((i % 29) - 11) * 0.05.
+        let input: Vec<f32> = (0..rows * dim).map(|i| ((i % 29) as f32 - 11.0) * 0.05).collect();
+        setup(dim, rows, dt, &rotation, &input)
+    }
 }
 
 pub mod kernel_benches {

@@ -119,20 +119,21 @@ pub mod kernel_tests {
         packed
     }
 
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-1)]
-    fn test_aura_value_int4(dt: DType) -> TestSetup {
-        // GQA: 4 q-heads over 2 kv-heads (repeat 2); dim 128, 8 tokens.
-        // sparse_threshold = 0 keeps every token (the skip branch is
-        // exercised separately by the legacy GPU test).
-        let (dim, q_heads, kv_heads, tokens) = (128usize, 4usize, 2usize, 8usize);
+    /// Build an int4 value-aggregation test for a given head layout and
+    /// sparsity threshold. `repeat_count = q_heads / kv_heads` selects the
+    /// GQA fan-out (1 = MHA), and `sparse_threshold > 0` exercises the
+    /// per-token skip branch (`if w >= sparse_threshold`).
+    fn value_setup(dt: DType, q_heads: usize, kv_heads: usize, sparse_threshold: f32) -> TestSetup {
+        let (dim, tokens) = (128usize, 8usize);
         let repeat = q_heads / kv_heads;
         let packed_width = (dim * 4).div_ceil(32);
-        let sparse_threshold = 0.0_f32;
         let codebook: Vec<f32> = (0..16).map(|i| -1.0 + 2.0 * i as f32 / 15.0).collect();
         let indices: Vec<u32> =
             (0..kv_heads * tokens * dim).map(|i| ((i * 13 + 5) % 16) as u32).collect();
         let packed = pack_int4_indices(&indices, kv_heads, tokens, dim);
         let norms: Vec<f32> = (0..kv_heads * tokens).map(|i| 0.4 + 0.07 * i as f32).collect();
+        // Weights span [0.05, 0.35]; a 0.1 threshold drops the smallest few
+        // (the values 0.05 / 0.08), so the skip branch actually fires.
         let weights: Vec<f32> =
             (0..q_heads * tokens).map(|i| 0.05 + ((i * 7 % 11) as f32) * 0.03).collect();
 
@@ -172,6 +173,23 @@ pub mod kernel_tests {
             // tpg=1 → total threads == (dim, q_heads, 1).
             .grid_3d(dim as u32, q_heads as u32, 1, [1, 1, 1])
     }
+
+    // GQA: 4 q-heads over 2 kv-heads (repeat 2), every token kept.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-1)]
+    fn test_aura_value_int4(dt: DType) -> TestSetup { value_setup(dt, 4, 2, 0.0) }
+
+    // MHA: q-heads == kv-heads (repeat 1) — the identity head mapping.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-1)]
+    fn test_aura_value_int4_mha(dt: DType) -> TestSetup { value_setup(dt, 4, 4, 0.0) }
+
+    // Wide GQA fan-out: 8 q-heads over 2 kv-heads (repeat 4).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-1)]
+    fn test_aura_value_int4_gqa4(dt: DType) -> TestSetup { value_setup(dt, 8, 2, 0.0) }
+
+    // Sparse threshold 0.1 skips the lowest-weight tokens — exercises the
+    // `w >= sparse_threshold` skip branch the other configs leave dormant.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-1)]
+    fn test_aura_value_int4_sparse(dt: DType) -> TestSetup { value_setup(dt, 4, 2, 0.1) }
 }
 
 /// New-syntax benchmarks for the AURA value family (int2/3/4/6/8) — MLX-less

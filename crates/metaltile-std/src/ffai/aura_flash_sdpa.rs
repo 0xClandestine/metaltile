@@ -293,10 +293,17 @@ pub mod kernel_tests {
         packed
     }
 
-    /// Dense softmax-attention over the codebook-DECODED K,V. The fused
-    /// single-pass AURA flash decode (`kv_stride == tokens`, full
-    /// attention, no sinks) must reproduce this. K/V are reconstructed as
-    /// `codebook[index] * norm` per token.
+    /// Dense softmax-attention over the codebook-DECODED K,V, with the same
+    /// optional attention-sink and sliding-window masking the kernel applies.
+    /// K/V are reconstructed as `codebook[index] * norm` per token.
+    ///
+    /// - Sliding window (`window_size > 0`): key `t` contributes only when
+    ///   `t + window_size > tokens - 1` (the kernel's `causal_upper` mask),
+    ///   i.e. only the most-recent `window_size` tokens.
+    /// - Attention sink (`has_sinks`): the running softmax starts at
+    ///   `(m = sinks[qh], l = 1)` — a virtual key with score `sinks[qh]` and
+    ///   value 0, which adds `exp(sink - m)` to the denominator but nothing
+    ///   to the numerator.
     #[allow(clippy::too_many_arguments)]
     fn naive(
         q_rot: &[f32],
@@ -310,11 +317,16 @@ pub mod kernel_tests {
         kv_heads: usize,
         tokens: usize,
         dim: usize,
+        sinks: &[f32],
+        has_sinks: bool,
+        window_size: usize,
     ) -> Vec<f32> {
         let repeat = q_heads / kv_heads;
         let mut out = vec![0.0_f32; q_heads * dim];
         for qh in 0..q_heads {
             let kvh = qh / repeat;
+            // Which tokens survive the sliding-window mask.
+            let used = |t: usize| window_size == 0 || t + window_size > tokens - 1;
             let mut scores = vec![0.0_f32; tokens];
             for (t, s) in scores.iter_mut().enumerate() {
                 let mut dot = 0.0_f32;
@@ -324,18 +336,29 @@ pub mod kernel_tests {
                 }
                 *s = dot * key_norms[kvh * tokens + t];
             }
-            let m = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let mut sum_w = 0.0_f32;
-            let mut acc = vec![0.0_f32; dim];
-            for (t, s) in scores.iter().enumerate() {
-                let w = (s - m).exp();
-                sum_w += w;
-                for (d, a) in acc.iter_mut().enumerate() {
-                    let v = val_idx[(kvh * tokens + t) * dim + d];
-                    *a += w * val_cb[v as usize] * val_norms[kvh * tokens + t];
+            // Running max seeds at the sink logit (if any), then the masked-in
+            // scores.
+            let mut m = if has_sinks { sinks[qh] } else { f32::NEG_INFINITY };
+            for (t, &s) in scores.iter().enumerate() {
+                if used(t) {
+                    m = m.max(s);
                 }
             }
-            let inv = if sum_w > 0.0 { 1.0 / sum_w } else { 0.0 };
+            // Denominator includes the sink's exp term (numerator does not).
+            let mut sum_w = if has_sinks { (sinks[qh] - m).exp() } else { 0.0_f32 };
+            let mut acc = vec![0.0_f32; dim];
+            for (t, &s) in scores.iter().enumerate() {
+                if used(t) {
+                    let w = (s - m).exp();
+                    sum_w += w;
+                    for (d, a) in acc.iter_mut().enumerate() {
+                        let v = val_idx[(kvh * tokens + t) * dim + d];
+                        *a += w * val_cb[v as usize] * val_norms[kvh * tokens + t];
+                    }
+                }
+            }
+            // Kernel normalizes only when l_acc > 0, else writes the raw acc.
+            let inv = if sum_w > 0.0 { 1.0 / sum_w } else { 1.0 };
             for d in 0..dim {
                 out[qh * dim + d] = acc[d] * inv;
             }
@@ -343,11 +366,12 @@ pub mod kernel_tests {
         out
     }
 
-    // Representative variant: kb4_vb4_d128 (4-bit key + 4-bit value
-    // codebooks, head_dim 128), full attention, no sinks. Codebook
-    // decode loosens the half-precision tolerances vs. dense SDPA.
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
-    fn test_ffai_aura_flash_sdpa_kb4_vb4_d128(dt: DType) -> TestSetup {
+    /// Build a kb4_vb4_d128 SDPA test for a given (has_sinks, window_size)
+    /// configuration. `has_sinks` flips the sink branch (running softmax seeds
+    /// at the per-head sink logit); `window_size > 0` flips the sliding-window
+    /// mask (only the most-recent `window_size` tokens contribute). The same
+    /// CPU oracle models both.
+    fn sdpa_setup(dt: DType, has_sinks: bool, window_size: usize) -> TestSetup {
         let (q_heads, kv_heads, tokens, dim) = (2usize, 1usize, 8usize, 128usize);
         let (key_bits, value_bits) = (4usize, 4usize);
         let repeat = q_heads / kv_heads;
@@ -365,7 +389,13 @@ pub mod kernel_tests {
         let val_norms: Vec<f32> = (0..kv_heads * tokens).map(|i| 0.3 + 0.07 * i as f32).collect();
         let q_rot: Vec<f32> =
             (0..q_heads * dim).map(|i| (((i * 13) % 19) as f32 - 9.0) * 0.02).collect();
-        let sinks = vec![0.0f32; q_heads];
+        // Distinct per-head sink logits (ignored when has_sinks is false, but
+        // packed either way so the buffer shape is constant).
+        let sinks: Vec<f32> = if has_sinks {
+            (0..q_heads).map(|h| 0.5 + 0.25 * h as f32).collect()
+        } else {
+            vec![0.0f32; q_heads]
+        };
 
         let key_packed = pack_int_indices(&key_idx, kv_heads, tokens, dim, key_bits);
         let val_packed = pack_int_indices(&val_idx, kv_heads, tokens, dim, value_bits);
@@ -378,6 +408,7 @@ pub mod kernel_tests {
         let val_norms_r = unpack_f32(&pack_f32(&val_norms, dt), dt);
         let key_cb_r = unpack_f32(&pack_f32(&key_cb, dt), dt);
         let val_cb_r = unpack_f32(&pack_f32(&val_cb, dt), dt);
+        let sinks_r = unpack_f32(&pack_f32(&sinks, dt), dt);
 
         let expected = naive(
             &q_rot_r,
@@ -391,6 +422,9 @@ pub mod kernel_tests {
             kv_heads,
             tokens,
             dim,
+            &sinks_r,
+            has_sinks,
+            window_size,
         );
 
         TestSetup::new(aura_flash_sdpa_kb4_vb4_d128::kernel_ir_for(dt))
@@ -412,11 +446,32 @@ pub mod kernel_tests {
             .constexpr("kv_stride", tokens as u32)
             .constexpr("repeat_count", repeat as u32)
             .constexpr("num_q_heads", q_heads as u32)
-            .constexpr("has_sinks", 0u32)
-            .constexpr("window_size", 0u32)
+            .constexpr("has_sinks", u32::from(has_sinks))
+            .constexpr("window_size", window_size as u32)
             .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
             .grid_3d(1, q_heads as u32, 1, [32, 1, 1])
     }
+
+    // Representative variant: kb4_vb4_d128 (4-bit key + 4-bit value
+    // codebooks, head_dim 128), full attention, no sinks. Codebook
+    // decode loosens the half-precision tolerances vs. dense SDPA.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_ffai_aura_flash_sdpa_kb4_vb4_d128(dt: DType) -> TestSetup { sdpa_setup(dt, false, 0) }
+
+    // Attention sinks on: the running softmax seeds at the per-head sink
+    // logit, so the sink behaves as a virtual zero-valued key in the
+    // denominator. Exercises the `has_sinks` branch.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_ffai_aura_flash_sdpa_sinks(dt: DType) -> TestSetup { sdpa_setup(dt, true, 0) }
+
+    // Sliding-window mask on (window 4 of 8 tokens): only the most-recent
+    // four keys contribute. Exercises the `window_size > 0` mask branch.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_ffai_aura_flash_sdpa_window(dt: DType) -> TestSetup { sdpa_setup(dt, false, 4) }
+
+    // Sinks AND sliding window together — the GPT-OSS sink-attention recipe.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_ffai_aura_flash_sdpa_sinks_window(dt: DType) -> TestSetup { sdpa_setup(dt, true, 4) }
 }
 
 pub mod kernel_benches {
