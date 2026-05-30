@@ -82,12 +82,18 @@ pub mod kernel_tests {
     use super::ffai_rope_yarn;
     use crate::utils::{pack_f32, unpack_f32};
 
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 5e-2])]
-    fn test_rope_yarn(dt: DType) -> TestSetup {
+    #[allow(clippy::too_many_arguments)]
+    fn rope_yarn_setup(
+        dt: DType,
+        position: u32,
+        factor: f32,
+        low: f32,
+        high: f32,
+        attn: f32,
+    ) -> TestSetup {
         let (n_heads, head_dim) = (4usize, 64usize);
         let half = head_dim / 2;
-        let (theta_base, position) = (10_000.0f32, 100u32);
-        let (factor, low, high, attn) = (4.0f32, 16.0f32, 24.0f32, 1.0f32);
+        let theta_base = 10_000.0f32;
         let qk_f: Vec<f32> =
             (0..n_heads * head_dim).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
         let qk = unpack_f32(&pack_f32(&qk_f, dt), dt);
@@ -121,6 +127,20 @@ pub mod kernel_tests {
             .constexpr("attn_factor", attn)
             .expect(TestBuffer::from_vec("out", pack_f32(&exp, dt), dt))
             .grid_3d(n_heads as u32, half as u32, 1, [1, 1, 1])
+    }
+
+    // Moderate YaRN: factor 4, attn_factor 1 (the scaling multiply is a no-op).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 5e-2])]
+    fn test_rope_yarn(dt: DType) -> TestSetup { rope_yarn_setup(dt, 100, 4.0, 16.0, 24.0, 1.0) }
+
+    // Nemotron-style aggressive YaRN: factor 16 (strong interp band) with a
+    // non-unit attn_factor (mscale) — exercises both the deeper extrap/interp
+    // ramp and the `cos/sin * attn_factor` scaling the attn=1 config leaves as
+    // a no-op. The ramp is selected by the frequency index, not the position,
+    // so a small position keeps the cos/sin precision tight.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 5e-2])]
+    fn test_rope_yarn_nemotron(dt: DType) -> TestSetup {
+        rope_yarn_setup(dt, 100, 16.0, 20.0, 37.0, 1.13)
     }
 }
 

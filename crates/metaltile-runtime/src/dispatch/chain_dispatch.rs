@@ -142,6 +142,17 @@ impl<'a> ChainDispatch<'a> {
                 &mut alias_pool,
             )?;
 
+            // Reject GPU-pinning geometry before encoding this pass (same guard
+            // as the single-dispatch path). Done before the encoder is created
+            // so a rejection can't leave it un-ended.
+            crate::dispatch::validate::validate_dispatch_geometry(
+                spec.kernel,
+                spec.grid_groups,
+                spec.threads_per_group,
+                pipes[i].maxTotalThreadsPerThreadgroup(),
+                metaltile_codegen::kernel_uses_n_simd(spec.kernel),
+            )?;
+
             let enc = (*cb).computeCommandEncoder().ok_or(MetalTileError::NoDevice)?;
 
             enc.setComputePipelineState(&pipes[i]);

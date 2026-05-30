@@ -142,4 +142,42 @@ mod tests {
         assert_eq!(scalar_bytes(1.0, DType::F16).len(), 2);
         assert_eq!(scalar_bytes(1.0, DType::BF16).len(), 2);
     }
+
+    #[test]
+    fn nan_and_inf_round_trip_through_float_dtypes() {
+        // NaN != NaN, so check the predicate; ±inf survive f16/bf16 (both have
+        // an inf encoding). Oracles that produce inf (e.g. a masked-out softmax
+        // max of -inf) must round-trip faithfully.
+        for dt in [DType::F32, DType::F16, DType::BF16] {
+            let out = unpack_f32(&pack_f32(&[f32::NAN, f32::INFINITY, f32::NEG_INFINITY], dt), dt);
+            assert!(out[0].is_nan(), "{dt:?}: NaN must round-trip");
+            assert_eq!(out[1], f32::INFINITY, "{dt:?}: +inf must round-trip");
+            assert_eq!(out[2], f32::NEG_INFINITY, "{dt:?}: -inf must round-trip");
+        }
+    }
+
+    #[test]
+    fn negative_zero_sign_is_preserved() {
+        // -0.0 == 0.0 numerically, so compare the sign bit explicitly. A lost
+        // sign would silently flip the result of e.g. copysign-based ops.
+        for dt in [DType::F32, DType::F16, DType::BF16] {
+            let out = unpack_f32(&pack_f32(&[-0.0f32], dt), dt)[0];
+            assert!(out.is_sign_negative() && out == 0.0, "{dt:?}: -0.0 sign must survive");
+        }
+    }
+
+    #[test]
+    fn f16_overflow_saturates_to_inf() {
+        // 70000 exceeds f16's max finite (65504) → rounds to +inf, not a wrap.
+        assert_eq!(unpack_f32(&pack_f32(&[70_000.0], DType::F16), DType::F16)[0], f32::INFINITY);
+    }
+
+    #[test]
+    fn i8_round_trips_signed_range() {
+        // I8 covers [-128, 127]; the sign must survive the u8 byte storage.
+        let vals = [-128.0, -1.0, 0.0, 1.0, 127.0];
+        assert_eq!(unpack_f32(&pack_f32(&vals, DType::I8), DType::I8), vals);
+        // -1.0 stores as 0xFF (two's complement), not 0x01.
+        assert_eq!(pack_f32(&[-1.0], DType::I8), vec![0xFF]);
+    }
 }

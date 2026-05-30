@@ -16,4 +16,4 @@ pub mod msl;
 pub mod passes;
 
 pub use error::{Error, Result};
-pub use msl::{MslGenerator, config::TileSchedule, generator_for_mode};
+pub use msl::{MslGenerator, config::TileSchedule, generator_for_mode, kernel_uses_n_simd};

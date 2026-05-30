@@ -106,13 +106,18 @@ pub mod kernel_tests {
         }
     }
 
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 5e-2])]
-    fn test_rope_llama(dt: DType) -> TestSetup {
+    #[allow(clippy::too_many_arguments)]
+    fn rope_llama_setup(
+        dt: DType,
+        position: u32,
+        sf: f32,
+        lf: f32,
+        hf: f32,
+        omp: f32,
+    ) -> TestSetup {
         let (n_heads, head_dim) = (4usize, 64usize);
         let half = head_dim / 2;
-        let (theta_base, position) = (500_000.0f32, 100u32);
-        // Scaling OFF (Llama-3 banding disabled): high-freq branch selected.
-        let (sf, lf, hf, omp) = (1.0f32, 1.0f32, 1.0f32, 1.0e9f32);
+        let theta_base = 500_000.0f32;
         let qk_f: Vec<f32> =
             (0..n_heads * head_dim).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
         let qk = unpack_f32(&pack_f32(&qk_f, dt), dt);
@@ -142,6 +147,20 @@ pub mod kernel_tests {
             .constexpr("original_max_position", omp)
             .expect(TestBuffer::from_vec("out", pack_f32(&exp, dt), dt))
             .grid_3d(n_heads as u32, half as u32, 1, [1, 1, 1])
+    }
+
+    // Scaling OFF (banding disabled) → high-freq branch for every pair.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 5e-2])]
+    fn test_rope_llama(dt: DType) -> TestSetup { rope_llama_setup(dt, 100, 1.0, 1.0, 1.0, 1.0e9) }
+
+    // Llama-3 frequency-band scaling ON (scale 8, low/high factors 1/4,
+    // original_max 8192). The band a pair lands in (low-freq scaled, high-freq
+    // unscaled, smoothed-medium) is selected by the frequency index, NOT the
+    // position — so a small position keeps `theta = pos·inv_freq` (hence the
+    // cos/sin precision) tight while still exercising all three branches.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 5e-2])]
+    fn test_rope_llama_llama3_banding(dt: DType) -> TestSetup {
+        rope_llama_setup(dt, 100, 8.0, 1.0, 4.0, 8192.0)
     }
 }
 

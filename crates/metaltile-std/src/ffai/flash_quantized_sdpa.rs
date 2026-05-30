@@ -522,7 +522,16 @@ flash_quantized_sdpa_float_mask_kernel!(
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::flash_quantized_sdpa_b4_d128;
+    use super::{
+        flash_quantized_sdpa_b4_d96,
+        flash_quantized_sdpa_b4_d128,
+        flash_quantized_sdpa_b4_d512,
+        flash_quantized_sdpa_b8_d128,
+        flash_quantized_sdpa_bool_mask_b4_d128,
+        flash_quantized_sdpa_bool_mask_b8_d128,
+        flash_quantized_sdpa_float_mask_b4_d128,
+        flash_quantized_sdpa_float_mask_b8_d128,
+    };
     use crate::utils::{pack_f32, unpack_f32};
 
     fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
@@ -564,8 +573,14 @@ pub mod kernel_tests {
     }
 
     /// Dense softmax-attention over the DEQUANTIZED K,V — the result the
-    /// single-pass flash quantized decode must reproduce. No sinks, no
-    /// window (full attention) to keep the oracle simple.
+    /// single-pass flash quantized decode must reproduce, with the kernel's
+    /// optional sliding-window, attention-sink, and mask paths:
+    /// - `window_size > 0`: key `t` contributes only when `t + window_size >
+    ///   tokens - 1` (the last `window_size` tokens).
+    /// - `has_sinks`: a virtual key with score `sinks[qh]` and value 0 widens
+    ///   the denominator.
+    /// - `bool_mask` (per `[qh, t]`): zero entries gate the key out entirely.
+    /// - `float_mask` (per `[qh, t]`): an additive logit bias `score += bias`.
     #[allow(clippy::too_many_arguments)]
     fn naive(
         q: &[f32],
@@ -576,30 +591,48 @@ pub mod kernel_tests {
         tokens: usize,
         dim: usize,
         scale: f32,
+        sinks: &[f32],
+        has_sinks: bool,
+        window_size: usize,
+        bool_mask: Option<&[u32]>,
+        float_mask: Option<&[f32]>,
     ) -> Vec<f32> {
         let repeat = q_heads / kv_heads;
         let mut out = vec![0.0_f32; q_heads * dim];
         for qh in 0..q_heads {
             let kvh = qh / repeat;
+            let used = |t: usize| {
+                let window_ok = window_size == 0 || t + window_size > tokens - 1;
+                let mask_ok = bool_mask.is_none_or(|m| m[qh * tokens + t] != 0);
+                window_ok && mask_ok
+            };
             let mut scores = vec![0.0_f32; tokens];
             for (t, s) in scores.iter_mut().enumerate() {
                 let mut dot = 0.0_f32;
                 for d in 0..dim {
                     dot += scale * q[qh * dim + d] * k_deq[(kvh * tokens + t) * dim + d];
                 }
-                *s = dot;
+                *s = dot + float_mask.map_or(0.0, |fm| fm[qh * tokens + t]);
             }
-            let m = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let mut sum = 0.0_f32;
-            for s in scores.iter_mut() {
-                *s = (*s - m).exp();
-                sum += *s;
+            let mut m = if has_sinks { sinks[qh] } else { f32::NEG_INFINITY };
+            for (t, &s) in scores.iter().enumerate() {
+                if used(t) {
+                    m = m.max(s);
+                }
             }
-            let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+            let mut sum = if has_sinks { (sinks[qh] - m).exp() } else { 0.0_f32 };
+            let mut w = vec![0.0_f32; tokens];
+            for (t, &s) in scores.iter().enumerate() {
+                if used(t) {
+                    w[t] = (s - m).exp();
+                    sum += w[t];
+                }
+            }
+            let inv = if sum > 0.0 { 1.0 / sum } else { 1.0 };
             for d in 0..dim {
                 let mut acc = 0.0_f32;
-                for (t, s) in scores.iter().enumerate() {
-                    acc += *s * inv * v_deq[(kvh * tokens + t) * dim + d];
+                for (t, &wt) in w.iter().enumerate() {
+                    acc += wt * inv * v_deq[(kvh * tokens + t) * dim + d];
                 }
                 out[qh * dim + d] = acc;
             }
@@ -619,40 +652,172 @@ pub mod kernel_tests {
             .collect()
     }
 
-    // Representative variant: b4_d128 (4-bit affine quant, head_dim 128),
-    // full attention (window=0), no sinks (has_sinks=0). Quantization
-    // rounding loosens the half-precision tolerances vs. dense SDPA.
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
-    fn test_ffai_flash_quantized_sdpa_b4_d128(dt: DType) -> TestSetup {
-        let (q_heads, kv_heads, tokens, dim) = (2usize, 1usize, 8usize, 128usize);
-        let bits = 4u32;
-        let group_size = 64usize; // dim % 64 == 0
-        let repeat = q_heads / kv_heads;
-        let scale = 1.0f32 / (dim as f32).sqrt();
-
-        // Round q through the dtype so the oracle sees the same inputs.
+    // Shared q/k/v fixture: 2 q-heads / 1 kv-head, 8 tokens, given dim.
+    // Returns (q, sinks, k_packed, k_scales, k_biases, k_deq, v_*).
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    fn fixture(
+        q_heads: usize,
+        kv_heads: usize,
+        tokens: usize,
+        dim: usize,
+        group_size: usize,
+        bits: u32,
+        has_sinks: bool,
+        dt: DType,
+    ) -> (Vec<f32>, Vec<f32>, FqQuant, FqQuant) {
         let q_raw = source(q_heads * dim, 0x51, 2.0);
         let q = unpack_f32(&pack_f32(&q_raw, dt), dt);
         let k_raw = source(kv_heads * tokens * dim, 0x62, 3.0);
         let v_raw = source(kv_heads * tokens * dim, 0x73, 3.0);
-        let sinks = vec![0.0f32; q_heads];
+        let sinks: Vec<f32> = if has_sinks {
+            (0..q_heads).map(|h| 0.5 + 0.25 * h as f32).collect()
+        } else {
+            vec![0.0f32; q_heads]
+        };
+        let k = quantize(&k_raw, kv_heads * tokens, dim, group_size, bits);
+        let v = quantize(&v_raw, kv_heads * tokens, dim, group_size, bits);
+        (q, sinks, FqQuant::from(k), FqQuant::from(v))
+    }
 
-        let (kp, ks, kb, k_deq) = quantize(&k_raw, kv_heads * tokens, dim, group_size, bits);
-        let (vp, vs, vb, v_deq) = quantize(&v_raw, kv_heads * tokens, dim, group_size, bits);
+    struct FqQuant {
+        packed: Vec<u32>,
+        scales: Vec<f32>,
+        biases: Vec<f32>,
+        deq: Vec<f32>,
+    }
+    impl From<(Vec<u32>, Vec<f32>, Vec<f32>, Vec<f32>)> for FqQuant {
+        fn from(t: (Vec<u32>, Vec<f32>, Vec<f32>, Vec<f32>)) -> Self {
+            FqQuant { packed: t.0, scales: t.1, biases: t.2, deq: t.3 }
+        }
+    }
 
-        let expected = naive(&q, &k_deq, &v_deq, q_heads, kv_heads, tokens, dim, scale);
-
-        TestSetup::new(flash_quantized_sdpa_b4_d128::kernel_ir_for(dt))
+    /// Base flash-quantized SDPA setup (no mask) for a (dim, bits) variant with
+    /// the given sink / sliding-window config.
+    fn base_setup(
+        kernel: metaltile::core::ir::Kernel,
+        dim: usize,
+        bits: u32,
+        group_size: usize,
+        has_sinks: bool,
+        window_size: usize,
+        dt: DType,
+    ) -> TestSetup {
+        let (q_heads, kv_heads, tokens) = (2usize, 1usize, 8usize);
+        let repeat = q_heads / kv_heads;
+        let scale = 1.0f32 / (dim as f32).sqrt();
+        let (q, sinks, k, v) =
+            fixture(q_heads, kv_heads, tokens, dim, group_size, bits, has_sinks, dt);
+        let expected = naive(
+            &q,
+            &k.deq,
+            &v.deq,
+            q_heads,
+            kv_heads,
+            tokens,
+            dim,
+            scale,
+            &sinks,
+            has_sinks,
+            window_size,
+            None,
+            None,
+        );
+        TestSetup::new(kernel)
             .mode(KernelMode::Grid3D)
             .input(TestBuffer::from_vec("queries", pack_f32(&q, dt), dt))
-            .input(TestBuffer::from_vec("k_packed", u32_bytes(&kp), DType::U32))
-            .input(TestBuffer::from_vec("k_scales", pack_f32(&ks, dt), dt))
-            .input(TestBuffer::from_vec("k_biases", pack_f32(&kb, dt), dt))
-            .input(TestBuffer::from_vec("v_packed", u32_bytes(&vp), DType::U32))
-            .input(TestBuffer::from_vec("v_scales", pack_f32(&vs, dt), dt))
-            .input(TestBuffer::from_vec("v_biases", pack_f32(&vb, dt), dt))
+            .input(TestBuffer::from_vec("k_packed", u32_bytes(&k.packed), DType::U32))
+            .input(TestBuffer::from_vec("k_scales", pack_f32(&k.scales, dt), dt))
+            .input(TestBuffer::from_vec("k_biases", pack_f32(&k.biases, dt), dt))
+            .input(TestBuffer::from_vec("v_packed", u32_bytes(&v.packed), DType::U32))
+            .input(TestBuffer::from_vec("v_scales", pack_f32(&v.scales, dt), dt))
+            .input(TestBuffer::from_vec("v_biases", pack_f32(&v.biases, dt), dt))
             .input(TestBuffer::from_vec("sinks", pack_f32(&sinks, DType::F32), DType::F32))
             .input(TestBuffer::zeros("out", q_heads * dim, dt))
+            .constexpr("dim", dim as u32)
+            .constexpr("tokens", tokens as u32)
+            .constexpr("repeat_count", repeat as u32)
+            .constexpr("group_size", group_size as u32)
+            .constexpr("num_q_heads", q_heads as u32)
+            .constexpr("has_sinks", u32::from(has_sinks))
+            .constexpr("window_size", window_size as u32)
+            .constexpr("scale", scale)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(1, q_heads as u32, 1, [32, 1, 1])
+    }
+
+    /// Mask-variant setup. `float_mask` selects the additive-bias kernel (mask
+    /// input is `T`); otherwise the bool-gate kernel (mask input is `u32`).
+    fn mask_setup(
+        kernel: metaltile::core::ir::Kernel,
+        dim: usize,
+        bits: u32,
+        group_size: usize,
+        float_mask: bool,
+        dt: DType,
+    ) -> TestSetup {
+        let (q_heads, kv_heads, tokens) = (2usize, 1usize, 8usize);
+        let repeat = q_heads / kv_heads;
+        let scale = 1.0f32 / (dim as f32).sqrt();
+        let (q, sinks, k, v) = fixture(q_heads, kv_heads, tokens, dim, group_size, bits, false, dt);
+
+        // Bool mask: checkerboard keep (qh+t even) — every head keeps ≥1 token.
+        // Float mask: a smooth per-(qh,t) logit bias.
+        let bool_mask: Vec<u32> =
+            (0..q_heads * tokens).map(|i| u32::from((i / tokens + i % tokens) % 2 == 0)).collect();
+        let float_mask_raw: Vec<f32> =
+            (0..q_heads * tokens).map(|i| ((i as f32) * 0.37).sin() * 0.5).collect();
+        let float_mask_vals = unpack_f32(&pack_f32(&float_mask_raw, dt), dt);
+
+        let expected = if float_mask {
+            naive(
+                &q,
+                &k.deq,
+                &v.deq,
+                q_heads,
+                kv_heads,
+                tokens,
+                dim,
+                scale,
+                &sinks,
+                false,
+                0,
+                None,
+                Some(&float_mask_vals),
+            )
+        } else {
+            naive(
+                &q,
+                &k.deq,
+                &v.deq,
+                q_heads,
+                kv_heads,
+                tokens,
+                dim,
+                scale,
+                &sinks,
+                false,
+                0,
+                Some(&bool_mask),
+                None,
+            )
+        };
+
+        let mut su = TestSetup::new(kernel)
+            .mode(KernelMode::Grid3D)
+            .input(TestBuffer::from_vec("queries", pack_f32(&q, dt), dt))
+            .input(TestBuffer::from_vec("k_packed", u32_bytes(&k.packed), DType::U32))
+            .input(TestBuffer::from_vec("k_scales", pack_f32(&k.scales, dt), dt))
+            .input(TestBuffer::from_vec("k_biases", pack_f32(&k.biases, dt), dt))
+            .input(TestBuffer::from_vec("v_packed", u32_bytes(&v.packed), DType::U32))
+            .input(TestBuffer::from_vec("v_scales", pack_f32(&v.scales, dt), dt))
+            .input(TestBuffer::from_vec("v_biases", pack_f32(&v.biases, dt), dt))
+            .input(TestBuffer::from_vec("sinks", pack_f32(&sinks, DType::F32), DType::F32));
+        su = if float_mask {
+            su.input(TestBuffer::from_vec("mask_float", pack_f32(&float_mask_vals, dt), dt))
+        } else {
+            su.input(TestBuffer::from_vec("mask_bool", u32_bytes(&bool_mask), DType::U32))
+        };
+        su.input(TestBuffer::zeros("out", q_heads * dim, dt))
             .constexpr("dim", dim as u32)
             .constexpr("tokens", tokens as u32)
             .constexpr("repeat_count", repeat as u32)
@@ -663,6 +828,55 @@ pub mod kernel_tests {
             .constexpr("scale", scale)
             .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
             .grid_3d(1, q_heads as u32, 1, [32, 1, 1])
+    }
+
+    // Base b4_d128, full attention, no sinks.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_ffai_flash_quantized_sdpa_b4_d128(dt: DType) -> TestSetup {
+        base_setup(flash_quantized_sdpa_b4_d128::kernel_ir_for(dt), 128, 4, 64, false, 0, dt)
+    }
+    // Attention sinks.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_ffai_flash_quantized_sdpa_b4_d128_sinks(dt: DType) -> TestSetup {
+        base_setup(flash_quantized_sdpa_b4_d128::kernel_ir_for(dt), 128, 4, 64, true, 0, dt)
+    }
+    // Sliding window (4 of 8 tokens).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_ffai_flash_quantized_sdpa_b4_d128_window(dt: DType) -> TestSetup {
+        base_setup(flash_quantized_sdpa_b4_d128::kernel_ir_for(dt), 128, 4, 64, false, 4, dt)
+    }
+    // 8-bit quant (pack_factor 4).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_ffai_flash_quantized_sdpa_b8_d128(dt: DType) -> TestSetup {
+        base_setup(flash_quantized_sdpa_b8_d128::kernel_ir_for(dt), 128, 8, 64, false, 0, dt)
+    }
+    // head_dim 96 (dims_per_lane 3) and 512 (dims_per_lane 16).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_ffai_flash_quantized_sdpa_b4_d96(dt: DType) -> TestSetup {
+        base_setup(flash_quantized_sdpa_b4_d96::kernel_ir_for(dt), 96, 4, 32, false, 0, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_ffai_flash_quantized_sdpa_b4_d512(dt: DType) -> TestSetup {
+        base_setup(flash_quantized_sdpa_b4_d512::kernel_ir_for(dt), 512, 4, 64, false, 0, dt)
+    }
+
+    // Bool-mask gate (b4 / b8).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_ffai_flash_quantized_sdpa_bool_mask_b4_d128(dt: DType) -> TestSetup {
+        mask_setup(flash_quantized_sdpa_bool_mask_b4_d128::kernel_ir_for(dt), 128, 4, 64, false, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_ffai_flash_quantized_sdpa_bool_mask_b8_d128(dt: DType) -> TestSetup {
+        mask_setup(flash_quantized_sdpa_bool_mask_b8_d128::kernel_ir_for(dt), 128, 8, 64, false, dt)
+    }
+    // Float-mask additive bias (b4 / b8).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_ffai_flash_quantized_sdpa_float_mask_b4_d128(dt: DType) -> TestSetup {
+        mask_setup(flash_quantized_sdpa_float_mask_b4_d128::kernel_ir_for(dt), 128, 4, 64, true, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_ffai_flash_quantized_sdpa_float_mask_b8_d128(dt: DType) -> TestSetup {
+        mask_setup(flash_quantized_sdpa_float_mask_b8_d128::kernel_ir_for(dt), 128, 8, 64, true, dt)
     }
 }
 

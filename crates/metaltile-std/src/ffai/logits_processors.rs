@@ -127,12 +127,14 @@ pub mod kernel_tests {
             .grid_1d(n, 256)
     }
 
-    // Bench-only: HF repetition-penalty sign convention (divide if >0 else
-    // multiply) oracle mismatch — covered by the legacy logits GPU test.
-    #[allow(dead_code)]
+    // Repetition penalty, HF convention (divide if logit > 0, else multiply).
+    // Mixed-sign logits, distinct (deduped) token ids; the kernel mutates
+    // `logits` in place. Dispatched at EXACTLY `token_ids.len()` threads — the
+    // kernel has no bounds guard (`grid.x·tg.x == token_ids.len()` is its
+    // contract), so the previous `grid_1d(_, 256)` over-dispatch read
+    // `token_ids` OOB and wrote garbage slots (the prior "oracle mismatch").
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [0.0, 5e-2, 5e-1])]
     fn test_logits_repetition_penalty(dt: DType) -> TestSetup {
-        // Mixed-sign logits, distinct token ids (deduped, per the caller
-        // contract). The kernel writes back into `logits` in place.
         let n = 256usize;
         let penalty = 1.5f32;
         let logits: Vec<f32> = (0..n).map(|i| (i as f32) * 0.1 - 12.0).collect();
@@ -149,7 +151,7 @@ pub mod kernel_tests {
             .input(TestBuffer::from_vec("token_ids", u32_bytes(&token_ids), DType::U32))
             .constexpr("penalty", penalty)
             .expect(TestBuffer::from_vec("logits", pack_f32(&expected, dt), dt))
-            .grid_1d(token_ids.len(), 256)
+            .grid_3d(token_ids.len() as u32, 1, 1, [1, 1, 1])
     }
 }
 

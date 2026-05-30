@@ -170,6 +170,45 @@ pub mod kernel_tests {
     fn test_mt_argmin(dt: DType) -> TestSetup {
         setup(mt_argmin::kernel_ir_for(dt), 1000, 271, -2.0, dt)
     }
+
+    /// Tie-break: a plateau of equal extrema must resolve to the SMALLEST
+    /// index (NumPy/MLX semantics). The plateau spans lanes `lo..=hi`,
+    /// crossing the 256-lane chunk boundary and several tree-reduction
+    /// strides, so the only correct answer is `lo`. Pins the strict `>`/`<`
+    /// per-lane scan + the `(ov == tv) & (oi < ti)` tie rule in the tree
+    /// merge; a `>=` regression would return a larger index.
+    fn tie_setup(
+        kernel: metaltile::core::ir::Kernel,
+        n: usize,
+        lo: usize,
+        hi: usize,
+        extreme: f32,
+    ) -> TestSetup {
+        assert!(lo < hi && hi < n);
+        let mut inp = vec![0.0f32; n];
+        for v in inp.iter_mut().take(hi + 1).skip(lo) {
+            *v = extreme; // +5 plateau for argmax, -5 for argmin
+        }
+        TestSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("inp", pack_f32(&inp, DType::F32), DType::F32))
+            .input(TestBuffer::zeros("out", 1, DType::U32))
+            .constexpr("n", n as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&[lo as f32], DType::U32), DType::U32))
+            .grid_3d(1, 1, 1, [256, 1, 1])
+    }
+
+    #[test_kernel(dtypes = [f32], tol = 0.5)]
+    fn test_mt_argmax_ties_take_smallest(dt: DType) -> TestSetup {
+        let _ = dt;
+        tie_setup(mt_argmax::kernel_ir_for(DType::F32), 1024, 200, 600, 5.0)
+    }
+
+    #[test_kernel(dtypes = [f32], tol = 0.5)]
+    fn test_mt_argmin_ties_take_smallest(dt: DType) -> TestSetup {
+        let _ = dt;
+        tie_setup(mt_argmin::kernel_ir_for(DType::F32), 1024, 200, 600, -5.0)
+    }
 }
 
 /// New-syntax benchmarks for the mlx arg-reduce kernels (vs MLX

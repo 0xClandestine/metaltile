@@ -240,6 +240,11 @@ pub mod kernel_tests {
     fn test_fp_qmm_nax(dt: DType) -> TestSetup {
         fp_setup(mt_fp_qmm_nax::kernel_ir_for(dt), 32, 32, 128, 4, dt)
     }
+    // Multi-tile (64×64) — cross-threadgroup tile indexing over the MPP path.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 1e-2, 5e-2])]
+    fn test_fp_qmm_nax_multi_tile(dt: DType) -> TestSetup {
+        fp_setup(mt_fp_qmm_nax::kernel_ir_for(dt), 64, 64, 128, 4, dt)
+    }
 }
 
 /// New-syntax benchmark for `mt_fp_qmm_nax`.

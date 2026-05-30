@@ -3693,6 +3693,370 @@ pub mod kernel_tests {
     fn test_moe_gather_qmm_int4_m8(dt: DType) -> TestSetup {
         int4_setup(mt_moe_gather_qmm_int4_m8::kernel_ir_for(dt), 1, dt)
     }
+
+    // ── Wider-precision scalar gather qmm (b3/b5/b6/b8) ───────────────────
+    //
+    // Same CSR-routed dequant-then-matmul as int4, but the weight is bit-stream
+    // packed: code `e` (flat over `[expert, m, k]`) at bit `e*bits`, straddling
+    // u32 words for odd widths. Since `k_in*bits % 32 == 0`, the per-row streams
+    // pack end-to-end into one contiguous stream — covering b3/b5/b6 (odd) and
+    // b8 (pow2) with a single packer + code-based oracle.
+
+    /// Contiguous LSB-first bit-stream packer (+1 guard word for the kernel's
+    /// two-word straddle read).
+    fn pack_bitstream_w(codes: &[u32], bits: u32) -> Vec<u32> {
+        let n_words = (codes.len() * bits as usize).div_ceil(32);
+        let mut words = vec![0u32; n_words + 1];
+        for (e, &c) in codes.iter().enumerate() {
+            let base = e * bits as usize;
+            for bk in 0..bits as usize {
+                if (c >> bk) & 1 == 1 {
+                    let b = base + bk;
+                    words[b / 32] |= 1u32 << (b % 32);
+                }
+            }
+        }
+        words
+    }
+
+    /// Code-based CSR gather-qmm oracle. `codes[(expert*m_out + m)*k_in + d]`.
+    #[allow(clippy::too_many_arguments)]
+    fn cpu_gather_qmm_codes(
+        codes: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        x: &[f32],
+        expert_offsets: &[u32],
+        t_rows: usize,
+        k_in: usize,
+        m_out: usize,
+        n_experts: usize,
+        group_size: usize,
+    ) -> Vec<f32> {
+        let gspr = k_in / group_size;
+        let mut out = vec![0.0f32; t_rows * m_out];
+        for row in 0..t_rows {
+            let mut expert = 0usize;
+            for e in 0..n_experts {
+                if (row as u32) < expert_offsets[e + 1] {
+                    expert = e;
+                    break;
+                }
+            }
+            for m in 0..m_out {
+                let wbase = (expert * m_out + m) * k_in;
+                let sbase = (expert * m_out + m) * gspr;
+                let mut acc = 0.0f32;
+                for d in 0..k_in {
+                    let g = d / group_size;
+                    acc += (codes[wbase + d] as f32 * scales[sbase + g] + biases[sbase + g])
+                        * x[row * k_in + d];
+                }
+                out[row * m_out + m] = acc;
+            }
+        }
+        out
+    }
+
+    fn gather_qmm_bits_setup(kernel: Kernel, bits: u32, dt: DType) -> TestSetup {
+        let (n_experts, k_in, m_out, group_size, t_rows) =
+            (3usize, 64usize, 8usize, 64usize, 6usize);
+        let expert_offsets: Vec<u32> = vec![0, 2, 5, 6];
+        let mask = (1u32 << bits) - 1;
+        let codes: Vec<u32> =
+            (0..n_experts * m_out * k_in).map(|i| ((i as u32) * 7 + 3) & mask).collect();
+        let w = pack_bitstream_w(&codes, bits);
+        let gspr = k_in / group_size;
+        let scales_f: Vec<f32> =
+            (0..n_experts * m_out * gspr).map(|i| 0.01 + 0.001 * (i as f32)).collect();
+        let biases_f: Vec<f32> =
+            (0..n_experts * m_out * gspr).map(|i| -0.05 + 0.002 * (i as f32)).collect();
+        let x_f: Vec<f32> = (0..t_rows * k_in).map(|i| 0.1 * ((i as f32 * 0.17).sin())).collect();
+        let s = unpack_f32(&pack_f32(&scales_f, dt), dt);
+        let b = unpack_f32(&pack_f32(&biases_f, dt), dt);
+        let x = unpack_f32(&pack_f32(&x_f, dt), dt);
+        let expected = cpu_gather_qmm_codes(
+            &codes,
+            &s,
+            &b,
+            &x,
+            &expert_offsets,
+            t_rows,
+            k_in,
+            m_out,
+            n_experts,
+            group_size,
+        );
+        TestSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("x", pack_f32(&x_f, dt), dt))
+            .input(TestBuffer::from_vec("weight_packed", u32_bytes(&w), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack_f32(&scales_f, dt), dt))
+            .input(TestBuffer::from_vec("biases", pack_f32(&biases_f, dt), dt))
+            .input(TestBuffer::from_vec("expert_offsets", u32_bytes(&expert_offsets), DType::U32))
+            .input(TestBuffer::zeros("out", t_rows * m_out, dt))
+            .constexpr("k_in", k_in as u32)
+            .constexpr("m_out", m_out as u32)
+            .constexpr("n_experts", n_experts as u32)
+            .constexpr("group_size", group_size as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(m_out as u32, t_rows as u32, 1, [32, 1, 1])
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_moe_gather_qmm_b3(dt: DType) -> TestSetup {
+        gather_qmm_bits_setup(mt_moe_gather_qmm_b3::kernel_ir_for(dt), 3, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_moe_gather_qmm_b5(dt: DType) -> TestSetup {
+        gather_qmm_bits_setup(mt_moe_gather_qmm_b5::kernel_ir_for(dt), 5, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_moe_gather_qmm_b6(dt: DType) -> TestSetup {
+        gather_qmm_bits_setup(mt_moe_gather_qmm_b6::kernel_ir_for(dt), 6, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_moe_gather_qmm_b8(dt: DType) -> TestSetup {
+        gather_qmm_bits_setup(mt_moe_gather_qmm_b8::kernel_ir_for(dt), 8, dt)
+    }
+
+    // ── MMA-tiled gather qmm (int4 / int8) ────────────────────────────────
+    //
+    // 32×32 output tiles via simdgroup-matrix MMA. Per-row `indices` select the
+    // expert (vs the scalar path's CSR `expert_offsets`); a 32-row tile may span
+    // two experts (16 rows each here), exercising the kernel's per-tile expert
+    // sub-run logic. Oracle is the same dequant-then-matmul.
+
+    fn pack_pow2_codes(codes: &[u32], bits: u32) -> Vec<u32> {
+        let per = 32 / bits as usize;
+        codes
+            .chunks_exact(per)
+            .map(|c| {
+                let mut p = 0u32;
+                for (i, &q) in c.iter().enumerate() {
+                    p |= (q & ((1 << bits) - 1)) << (i as u32 * bits);
+                }
+                p
+            })
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cpu_gather_qmm_mma(
+        codes: &[u32],
+        scales: &[f32],
+        biases: &[f32],
+        indices: &[u32],
+        x: &[f32],
+        m_total: usize,
+        n_out: usize,
+        k_in: usize,
+        group_size: usize,
+    ) -> Vec<f32> {
+        let gspr = k_in / group_size;
+        let mut out = vec![0.0f32; m_total * n_out];
+        for row in 0..m_total {
+            let expert = indices[row] as usize;
+            for n in 0..n_out {
+                let wbase = (expert * n_out + n) * k_in;
+                let sbase = (expert * n_out + n) * gspr;
+                let mut acc = 0.0f32;
+                for d in 0..k_in {
+                    let g = d / group_size;
+                    acc += (codes[wbase + d] as f32 * scales[sbase + g] + biases[sbase + g])
+                        * x[row * k_in + d];
+                }
+                out[row * n_out + n] = acc;
+            }
+        }
+        out
+    }
+
+    fn mma_setup(kernel: Kernel, bits: u32, bm: u32, tpg: u32, dt: DType) -> TestSetup {
+        let (n_experts, t_rows, n_out, k_in, group_size) =
+            (4usize, 64usize, 64usize, 64usize, 32usize);
+        let gspr = k_in / group_size;
+        let mask = (1u32 << bits) - 1;
+        let codes: Vec<u32> =
+            (0..n_experts * n_out * k_in).map(|i| ((i as u32) * 7 + 3) & mask).collect();
+        let w = pack_pow2_codes(&codes, bits);
+        // Expert-sorted rows: 16 contiguous rows per expert.
+        let per = t_rows / n_experts;
+        let indices: Vec<u32> = (0..t_rows).map(|r| (r / per) as u32).collect();
+        // Normalise the scale by the code range so `code·scale` (hence the
+        // output magnitude) is comparable across bit-widths — without this,
+        // int8 codes (0..255) make the dequant ~17× larger than int4, which
+        // would force a loose f16/bf16 tolerance to absorb the half-precision
+        // rounding of big values. Keeping outputs O(1) lets every width share
+        // the same tight tolerance.
+        let s_norm = 15.0 / mask as f32;
+        let scales_f: Vec<f32> =
+            (0..n_experts * n_out * gspr).map(|i| (0.01 + 0.001 * (i as f32)) * s_norm).collect();
+        let biases_f: Vec<f32> =
+            (0..n_experts * n_out * gspr).map(|i| -0.05 + 0.002 * (i as f32)).collect();
+        let x_f: Vec<f32> = (0..t_rows * k_in).map(|i| 0.1 * ((i as f32 * 0.17).sin())).collect();
+        let s = unpack_f32(&pack_f32(&scales_f, dt), dt);
+        let b = unpack_f32(&pack_f32(&biases_f, dt), dt);
+        let x = unpack_f32(&pack_f32(&x_f, dt), dt);
+        let expected =
+            cpu_gather_qmm_mma(&codes, &s, &b, &indices, &x, t_rows, n_out, k_in, group_size);
+        TestSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("x", pack_f32(&x_f, dt), dt))
+            .input(TestBuffer::from_vec("w", u32_bytes(&w), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack_f32(&scales_f, dt), dt))
+            .input(TestBuffer::from_vec("biases", pack_f32(&biases_f, dt), dt))
+            .input(TestBuffer::from_vec("indices", u32_bytes(&indices), DType::U32))
+            .input(TestBuffer::zeros("out", t_rows * n_out, dt))
+            .constexpr("m_total", t_rows as u32)
+            .constexpr("n_out", n_out as u32)
+            .constexpr("k_in", k_in as u32)
+            .constexpr("group_size", group_size as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(n_out as u32 / 32, (t_rows as u32).div_ceil(bm), 1, [tpg, 1, 1])
+    }
+
+    // int4: BM=32 → 4 SGs (tpg 128). bm16: BM=16 → 2 SGs (tpg 64).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_moe_gather_qmm_mma_int4(dt: DType) -> TestSetup {
+        mma_setup(mt_moe_gather_qmm_mma_int4::kernel_ir_for(dt), 4, 32, 128, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_moe_gather_qmm_mma_int4_bm16(dt: DType) -> TestSetup {
+        mma_setup(mt_moe_gather_qmm_mma_int4_bm16::kernel_ir_for(dt), 4, 16, 64, dt)
+    }
+    // int8 (codes 0..255): the scale is range-normalised in mma_setup so the
+    // output stays O(1) like int4, keeping the same tight tolerance.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_moe_gather_qmm_mma_int8(dt: DType) -> TestSetup {
+        mma_setup(mt_moe_gather_qmm_mma_int8::kernel_ir_for(dt), 8, 32, 128, dt)
+    }
+
+    // ── Router top-k + permute / unpermute orchestration ──────────────────
+
+    /// Router oracle: softmax over all experts for the denominator, pick the
+    /// top-k logits (well-separated test inputs → no ties), then weight either
+    /// by renormalised softmax over the chosen k (`norm_topk_prob`) or by the
+    /// global softmax (raw probs that sum to < 1).
+    fn router_oracle(
+        logits: &[f32],
+        n_rows: usize,
+        n_experts: usize,
+        k: usize,
+        norm_topk_prob: bool,
+    ) -> (Vec<u32>, Vec<f32>) {
+        let mut idx_out = vec![0u32; n_rows * k];
+        let mut w_out = vec![0.0f32; n_rows * k];
+        for row in 0..n_rows {
+            let row_l = &logits[row * n_experts..(row + 1) * n_experts];
+            let max_all = row_l.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let sum_all: f32 = row_l.iter().map(|&l| (l - max_all).exp()).sum();
+            // Top-k by descending logit (stable: smaller index wins ties).
+            let mut order: Vec<usize> = (0..n_experts).collect();
+            order.sort_by(|&a, &b| row_l[b].partial_cmp(&row_l[a]).unwrap().then(a.cmp(&b)));
+            let chosen = &order[..k];
+            let sum_chosen: f32 = chosen.iter().map(|&e| (row_l[e] - max_all).exp()).sum();
+            for (i, &e) in chosen.iter().enumerate() {
+                idx_out[row * k + i] = e as u32;
+                let num = (row_l[e] - max_all).exp();
+                w_out[row * k + i] = if norm_topk_prob { num / sum_chosen } else { num / sum_all };
+            }
+        }
+        (idx_out, w_out)
+    }
+
+    fn router_setup(dt: DType, norm_topk_prob: bool) -> TestSetup {
+        let (n_rows, n_experts, k) = (4usize, 8usize, 4usize);
+        // Well-separated logits (distinct multiples of 0.5 per row → no ties,
+        // gap ≫ dtype epsilon so the selection is dtype-stable).
+        let logits_f: Vec<f32> = (0..n_rows * n_experts)
+            .map(|i| {
+                let row = i / n_experts;
+                let e = i % n_experts;
+                ((e * 5 + row * 3) % n_experts) as f32 * 0.5
+            })
+            .collect();
+        let logits = unpack_f32(&pack_f32(&logits_f, dt), dt);
+        let (idx, w) = router_oracle(&logits, n_rows, n_experts, k, norm_topk_prob);
+        TestSetup::new(mt_moe_router_topk::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("router_logits", pack_f32(&logits_f, dt), dt))
+            .input(TestBuffer::zeros("indices_out", n_rows * k, DType::U32))
+            .input(TestBuffer::zeros("weights_out", n_rows * k, dt))
+            .constexpr("n_experts", n_experts as u32)
+            .constexpr("k", k as u32)
+            .constexpr("norm_topk_prob", u32::from(norm_topk_prob))
+            .expect(TestBuffer::from_vec("indices_out", u32_bytes(&idx), DType::U32))
+            .expect(TestBuffer::from_vec("weights_out", pack_f32(&w, dt), dt))
+            .grid_3d(n_rows as u32, 1, 1, [32, 1, 1])
+    }
+
+    // norm_topk_prob = 1: weights renormalised over the chosen k (Qwen3-MoE).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 5e-2])]
+    fn test_moe_router_topk_norm(dt: DType) -> TestSetup { router_setup(dt, true) }
+    // norm_topk_prob = 0: raw global-softmax probs (Qwen3-Next).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 5e-2])]
+    fn test_moe_router_topk_global(dt: DType) -> TestSetup { router_setup(dt, false) }
+
+    // mt_moe_permute: gather token rows into expert-sorted order.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-3, 1e-2])]
+    fn test_moe_permute(dt: DType) -> TestSetup {
+        let (n_tokens, k, hidden) = (4usize, 2usize, 128usize);
+        let n_permuted = k * n_tokens;
+        let tokens_f: Vec<f32> =
+            (0..n_tokens * hidden).map(|i| ((i as f32) * 0.013).sin()).collect();
+        let sort_token_idx: Vec<u32> = vec![0, 2, 1, 3, 1, 0, 3, 2];
+        let tokens = unpack_f32(&pack_f32(&tokens_f, dt), dt);
+        let mut expected = vec![0.0f32; n_permuted * hidden];
+        for p in 0..n_permuted {
+            let src = sort_token_idx[p] as usize;
+            for h in 0..hidden {
+                expected[p * hidden + h] = tokens[src * hidden + h];
+            }
+        }
+        TestSetup::new(mt_moe_permute::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("tokens", pack_f32(&tokens_f, dt), dt))
+            .input(TestBuffer::from_vec("sort_token_idx", u32_bytes(&sort_token_idx), DType::U32))
+            .input(TestBuffer::zeros("permuted", n_permuted * hidden, dt))
+            .constexpr("hidden", hidden as u32)
+            .expect(TestBuffer::from_vec("permuted", pack_f32(&expected, dt), dt))
+            .grid_3d(n_permuted as u32, 1, 1, [128, 1, 1])
+    }
+
+    // mt_moe_unpermute: weighted sum of k expert outputs back to token order.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-3, 1e-2])]
+    fn test_moe_unpermute(dt: DType) -> TestSetup {
+        let (n_tokens, k, hidden) = (4usize, 2usize, 128usize);
+        let n_permuted = k * n_tokens;
+        let expert_outputs_f: Vec<f32> =
+            (0..n_permuted * hidden).map(|i| ((i as f32) * 0.011).sin()).collect();
+        let inv_perm: Vec<u32> = vec![0, 5, 2, 7, 4, 1, 6, 3];
+        let weights_f: Vec<f32> = (0..n_tokens * k).map(|i| 0.3 + 0.1 * (i as f32)).collect();
+        let eo = unpack_f32(&pack_f32(&expert_outputs_f, dt), dt);
+        let w = unpack_f32(&pack_f32(&weights_f, dt), dt);
+        let mut expected = vec![0.0f32; n_tokens * hidden];
+        for token in 0..n_tokens {
+            for h in 0..hidden {
+                let mut acc = 0.0f32;
+                for j in 0..k {
+                    let pos = inv_perm[token * k + j] as usize;
+                    acc += w[token * k + j] * eo[pos * hidden + h];
+                }
+                expected[token * hidden + h] = acc;
+            }
+        }
+        TestSetup::new(mt_moe_unpermute::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("expert_outputs", pack_f32(&expert_outputs_f, dt), dt))
+            .input(TestBuffer::from_vec("inv_perm", u32_bytes(&inv_perm), DType::U32))
+            .input(TestBuffer::from_vec("top_k_weights", pack_f32(&weights_f, dt), dt))
+            .input(TestBuffer::zeros("out", n_tokens * hidden, dt))
+            .constexpr("hidden", hidden as u32)
+            .constexpr("k", k as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(n_tokens as u32, 1, 1, [128, 1, 1])
+    }
 }
 
 /// New-syntax benchmarks for the full MoE kernel family. Production-ish

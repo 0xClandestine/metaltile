@@ -369,6 +369,8 @@ pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
     use super::{
+        bulk_dequant_kv_fp8_e4m3,
+        bulk_dequant_kv_fp8_e5m2,
         bulk_dequant_kv_int4,
         bulk_dequant_kv_int8,
         kv_cache_update,
@@ -598,17 +600,119 @@ pub mod kernel_tests {
             .constexpr("group_size", group_size as u32)
             .constexpr("position", position as u32)
             .expect(TestBuffer::from_vec("out_s", pack_f32(&exp_s, dt), dt))
-            .grid_1d(total_groups, 256)
+            // One thread per group, EXACTLY `total_groups` threads — the
+            // kernel has no bounds guard, so the prior `grid_1d(_, 256)`
+            // over-dispatched and wrote `out_s`/`out_w` OOB (the "layout
+            // mismatch" that kept these bench-only).
+            .grid_3d(total_groups as u32, 1, 1, [1, 1, 1])
     }
 
-    #[allow(dead_code)] // bench-only (see test_quantize_kv_int4 note)
+    // fp8 quantize: validates the per-group scale (`amax / fp8_max`). The
+    // packed fp8 codes are fast-math-sensitive (covered by the dequant tests'
+    // exact decode), so only the scale is pinned here.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-3, 1e-2])]
     fn test_quantize_kv_fp8_e4m3(dt: DType) -> TestSetup {
         quant_fp8_scale_setup(quantize_kv_fp8_e4m3::kernel_ir_for(dt), 240.0, dt)
     }
 
-    #[allow(dead_code)] // bench-only (see test_quantize_kv_int4 note)
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-3, 1e-2])]
     fn test_quantize_kv_fp8_e5m2(dt: DType) -> TestSetup {
         quant_fp8_scale_setup(quantize_kv_fp8_e5m2::kernel_ir_for(dt), 57344.0, dt)
+    }
+
+    // ── bulk_dequant_kv_fp8_e4m3 / e5m2 — exact fp8 decode oracle ─────────
+    //
+    // Pack KNOWN fp8 bytes whose decoded magnitudes are exact in every dtype
+    // (the fp8 grid is a subset of f16/bf16), with scale=1, so the dequant
+    // output equals the decoded value bit-for-bit. fp8 codes pack 4-per-u32
+    // little-endian; `out` is `[n_kv_heads, max_seq, head_dim]` with only
+    // `[0, n_positions)` written.
+    fn dequant_fp8_setup(
+        kernel: metaltile::core::ir::Kernel,
+        palette: &[(u8, f32)],
+        dt: DType,
+    ) -> TestSetup {
+        let (n_kv_heads, head_dim, group_size, max_seq, n_positions) =
+            (2usize, 16usize, 8usize, 4usize, 2usize);
+        let groups_per_head = head_dim / group_size;
+        let byte_at =
+            |h: usize, pos: usize, d: usize| palette[(h * 7 + pos * 3 + d) % palette.len()];
+
+        let n_packed = n_kv_heads * max_seq * (head_dim / 4);
+        let mut in_w = vec![0u32; n_packed];
+        for h in 0..n_kv_heads {
+            for pos in 0..n_positions {
+                for d in 0..head_dim {
+                    let (byte, _) = byte_at(h, pos, d);
+                    let pack_idx = (h * max_seq + pos) * (head_dim / 4) + d / 4;
+                    let lane = (d % 4) as u32;
+                    in_w[pack_idx] |= (byte as u32) << (lane * 8);
+                }
+            }
+        }
+        let s_total = n_kv_heads * max_seq * groups_per_head;
+        let in_s = vec![1.0f32; s_total];
+        let recon_total = n_kv_heads * max_seq * head_dim;
+        let mut expected = vec![0.0f32; recon_total];
+        for h in 0..n_kv_heads {
+            for pos in 0..n_positions {
+                for d in 0..head_dim {
+                    let (_, val) = byte_at(h, pos, d);
+                    expected[h * max_seq * head_dim + pos * head_dim + d] = val; // val * scale(1)
+                }
+            }
+        }
+        let total_out = n_kv_heads * n_positions * head_dim;
+        TestSetup::new(kernel)
+            .mode(KernelMode::Grid3D)
+            .input(TestBuffer::from_vec("in_w", u32_bytes(&in_w), DType::U32))
+            .input(TestBuffer::from_vec("in_s", pack_f32(&in_s, dt), dt))
+            .input(TestBuffer::zeros("out", recon_total, dt))
+            .constexpr("head_dim", head_dim as u32)
+            .constexpr("max_seq", max_seq as u32)
+            .constexpr("group_size", group_size as u32)
+            .constexpr("n_positions", n_positions as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_1d(total_out, 256)
+    }
+
+    // e4m3 byte → exact value: 0x00→0, 0x30→0.5, 0x34→0.75, 0x38→1.0,
+    // 0x3C→1.5, 0x40→2.0, 0xB8→-1.0, 0xC0→-2.0. The decode is exact
+    // arithmetic on paper, but the kernel reconstructs the magnitude with
+    // `exp2()` (a Metal fast-math transcendental), which is ~1 ULP off even
+    // for integer arguments — so f32 carries a 1-ULP band (max |val| = 2 →
+    // 1 ULP ≈ 2.4e-7); f16/bf16 round that sub-ULP drift away and stay exact.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-6, 0.0, 0.0])]
+    fn test_bulk_dequant_kv_fp8_e4m3(dt: DType) -> TestSetup {
+        let palette: [(u8, f32); 8] = [
+            (0x00, 0.0),
+            (0x30, 0.5),
+            (0x34, 0.75),
+            (0x38, 1.0),
+            (0x3C, 1.5),
+            (0x40, 2.0),
+            (0xB8, -1.0),
+            (0xC0, -2.0),
+        ];
+        dequant_fp8_setup(bulk_dequant_kv_fp8_e4m3::kernel_ir_for(dt), &palette, dt)
+    }
+
+    // e5m2 byte → exact value: 0x00→0, 0x34→0.25, 0x38→0.5, 0x3C→1.0,
+    // 0x40→2.0, 0x44→4.0, 0xBC→-1.0, 0xB8→-0.5. f32 carries the same 1-ULP
+    // `exp2()` band as e4m3 (max |val| = 4 → 1 ULP ≈ 4.8e-7); f16/bf16 exact.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-6, 0.0, 0.0])]
+    fn test_bulk_dequant_kv_fp8_e5m2(dt: DType) -> TestSetup {
+        let palette: [(u8, f32); 8] = [
+            (0x00, 0.0),
+            (0x34, 0.25),
+            (0x38, 0.5),
+            (0x3C, 1.0),
+            (0x40, 2.0),
+            (0x44, 4.0),
+            (0xBC, -1.0),
+            (0xB8, -0.5),
+        ];
+        dequant_fp8_setup(bulk_dequant_kv_fp8_e5m2::kernel_ir_for(dt), &palette, dt)
     }
 }
 

@@ -17,6 +17,7 @@ kernel void reduction_smoke(
     uint tgid_x = _tgid3.x;
     uint lsize  = _lsize3.x;
     uint n_simd = lsize / 32u;
+    if (n_simd == 0u) { return; }
     threadgroup float v2_sg[32];
 
     uint v0 = tgid_x;

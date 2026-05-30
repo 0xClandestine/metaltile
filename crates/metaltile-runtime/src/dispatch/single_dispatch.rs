@@ -77,6 +77,22 @@ impl<'a> SingleDispatch<'a> {
 
         let (metal_bufs, n_threads) = self.allocate_buffers(&binding_plans)?;
 
+        let n_threads = n_threads.max(1);
+        let tpg_w = self.pso.maxTotalThreadsPerThreadgroup().min(256);
+        let (tgs, tpg) = self.resolve_grid(n_threads, tpg_w);
+
+        // Reject GPU-pinning geometry (e.g. a reduction kernel dispatched with
+        // < 32 threads/threadgroup → infinite loop) before it reaches the
+        // non-preemptive GPU — and before any command encoder is created, so a
+        // rejection can't leave an encoder un-ended. See `dispatch::validate`.
+        crate::dispatch::validate::validate_dispatch_geometry(
+            self.kernel,
+            [tgs.width, tgs.height, tgs.depth],
+            [tpg.width, tpg.height, tpg.depth],
+            self.pso.maxTotalThreadsPerThreadgroup(),
+            metaltile_codegen::kernel_uses_n_simd(self.kernel),
+        )?;
+
         let cb = self.dev.command_buffer()?;
         let enc = (*cb).computeCommandEncoder().ok_or(MetalTileError::NoDevice)?;
         enc.setComputePipelineState(self.pso);
@@ -87,10 +103,6 @@ impl<'a> SingleDispatch<'a> {
             // binding.
             unsafe { enc.setBuffer_offset_atIndex(Some(buf), 0, i) };
         }
-
-        let n_threads = n_threads.max(1);
-        let tpg_w = self.pso.maxTotalThreadsPerThreadgroup().min(256);
-        let (tgs, tpg) = self.resolve_grid(n_threads, tpg_w);
 
         enc.dispatchThreadgroups_threadsPerThreadgroup(tgs, tpg);
         (*enc).endEncoding();

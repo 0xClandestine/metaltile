@@ -171,6 +171,23 @@ pub(super) fn kernel_reduce_uses_n_simd(kernel: &Kernel, config: &MslConfig) -> 
     has_axis0_reduce(&kernel.body.ops) || kernel.blocks.values().any(|b| has_axis0_reduce(&b.ops))
 }
 
+/// Whether `kernel` derives `n_simd = lsize / 32u` — the freeze-prone
+/// reduction-stride pattern (a loop strided by `n_simd` becomes an infinite GPU
+/// loop when `n_simd == 0`; see docs/developing.md). True for slow-path
+/// axis-0 reductions and for any kernel that references the `n_simd` identifier
+/// directly (e.g. cross-simdgroup reductions like `ffai_sdpa_decode`).
+///
+/// The runtime dispatch verifier consults this to reject a sub-simdgroup
+/// (< 32-thread) threadgroup before it pins the GPU; it mirrors the in-kernel
+/// escape-hatch gate (uses the default, conservative config). A Reduction-mode
+/// kernel that neither reduces nor mentions `n_simd` — e.g. the per-thread
+/// `mt_hadamard_m*` matvecs dispatched at TPG = M < 32 — returns `false` and is
+/// therefore free to run with a small threadgroup.
+pub fn kernel_uses_n_simd(kernel: &Kernel) -> bool {
+    kernel_reduce_uses_n_simd(kernel, &MslConfig::default())
+        || kernel_uses_identifier(kernel, "n_simd")
+}
+
 /// Precomputed flags for Reduction-mode signature + preamble emission.
 /// Each field is `true` when the corresponding MSL identifier
 /// (`tid`/`tgid_x`/`lsize`/`n_simd`) has a real consumer in the emitted
@@ -548,6 +565,18 @@ impl MslGenerator {
             }
             if gates.needs_n_simd {
                 wl!(out, "    uint n_simd = lsize / 32u;");
+                // Escape hatch against the GPU-pinning freeze (see
+                // docs/developing.md "A wrong dispatch can freeze the
+                // machine"): a reduction loop strided by `n_simd` becomes an
+                // infinite GPU loop when `n_simd == 0`, i.e. when the kernel is
+                // dispatched with fewer than 32 threads per threadgroup. Metal
+                // dispatches are non-preemptive, so that hangs the device until
+                // a power-cycle. The runtime verifier
+                // (`validate_dispatch_geometry`) rejects such a dispatch before
+                // it reaches the GPU; this in-kernel guard is defense-in-depth
+                // for any path that bypasses it — a degenerate threadgroup
+                // returns immediately instead of pinning.
+                wl!(out, "    if (n_simd == 0u) {{ return; }}");
             }
         }
 
@@ -1359,6 +1388,90 @@ mod tests {
             msl.contains("uint n_simd = lsize / 32u;"),
             "slow-path Op::Reduce must keep n_simd in the preamble: {msl}"
         );
+        // The GPU-pinning escape hatch must immediately follow the n_simd
+        // derivation (see docs/developing.md freeze hazard).
+        assert!(
+            msl.contains("uint n_simd = lsize / 32u;\n    if (n_simd == 0u) { return; }"),
+            "n_simd derivation must be guarded by the pinning escape hatch: {msl}"
+        );
+    }
+
+    /// The pinning escape hatch is emitted iff the kernel derives `n_simd`
+    /// (the freeze-prone reduction-stride pattern) — not for kernels that
+    /// never compute it.
+    #[test]
+    fn pinning_escape_hatch_only_when_n_simd_derived() {
+        use metaltile_core::ir::ReduceKind;
+        // With n_simd: slow-path reduce → guard present.
+        let mut with = Kernel::new("guard_present");
+        with.mode = KernelMode::Reduction;
+        with.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        with.body.push_op(Op::Const { value: 1 }, ValueId::new(1));
+        with.body.push_op(
+            Op::Reduce { value: ValueId::new(1), axis: 0, op: ReduceKind::Sum },
+            ValueId::new(2),
+        );
+        sink(&mut with, ValueId::new(2));
+        let msl_with = MslGenerator::default().generate(&with).unwrap();
+        assert!(
+            msl_with.contains("if (n_simd == 0u) { return; }"),
+            "n_simd-deriving kernel must carry the escape hatch: {msl_with}"
+        );
+
+        // Elementwise kernel: never derives n_simd → no guard.
+        let mut without = Kernel::new("guard_absent");
+        without.mode = KernelMode::Elementwise;
+        without.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        sink(&mut without, ValueId::new(0));
+        let msl_without = MslGenerator::default().generate(&without).unwrap();
+        assert!(
+            !msl_without.contains("if (n_simd == 0u) { return; }"),
+            "elementwise kernel must not carry the n_simd guard: {msl_without}"
+        );
+    }
+
+    /// `kernel_uses_n_simd` (the signal the runtime dispatch verifier consults)
+    /// must distinguish freeze-prone kernels from the per-thread Reduction-mode
+    /// matvecs like `mt_hadamard_m*` that dispatch safely at TPG < 32.
+    #[test]
+    fn kernel_uses_n_simd_flags_only_freeze_prone_kernels() {
+        use metaltile_core::ir::ReduceKind;
+
+        // (a) Reduction + axis-0 reduce → derives n_simd.
+        let mut reduce = Kernel::new("r");
+        reduce.mode = KernelMode::Reduction;
+        reduce.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
+        reduce.body.push_op(
+            Op::Reduce { value: ValueId::new(0), axis: 0, op: ReduceKind::Sum },
+            ValueId::new(1),
+        );
+        assert!(super::kernel_uses_n_simd(&reduce), "axis-0 reduce derives n_simd");
+
+        // (b) Reduction + direct `n_simd` identifier load → true.
+        let mut ident = Kernel::new("i");
+        ident.mode = KernelMode::Reduction;
+        ident.body.push_op(
+            Op::Load { src: "n_simd".into(), indices: Vec::new(), mask: None, other: None },
+            ValueId::new(0),
+        );
+        assert!(super::kernel_uses_n_simd(&ident), "direct n_simd load → true");
+
+        // (c) Reduction-mode but a plain per-thread loop (mt_hadamard_m* shape):
+        // no reduce, no n_simd reference → false, so a TPG < 32 dispatch is
+        // allowed and not falsely rejected.
+        let mut plain = Kernel::new("h");
+        plain.mode = KernelMode::Reduction;
+        plain.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        assert!(
+            !super::kernel_uses_n_simd(&plain),
+            "plain Reduction matvec must be free of n_simd"
+        );
+
+        // (d) Elementwise → never derives n_simd.
+        let mut el = Kernel::new("e");
+        el.mode = KernelMode::Elementwise;
+        el.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
+        assert!(!super::kernel_uses_n_simd(&el));
     }
 
     /// Direct `n_simd` identifier read keeps the decl regardless of

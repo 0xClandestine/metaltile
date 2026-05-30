@@ -5264,6 +5264,99 @@ pub mod kernel_tests {
         dequant_setup(mt_affine_dequantize_int2::kernel_ir_for(dt), 2, 64, 16, dt)
     }
 
+    // ── affine dequantize, odd bit-widths (int3 / int5 / int6) ────────────
+    //
+    // Unlike the pow2 widths, these pack `pack_factor` codes (int3/int5 = 8,
+    // int6 = 4) into `bytes_per_pack` bytes (3 / 5 / 3) and read them as a
+    // byte-stream that can straddle a u32 boundary. Because `bytes_per_pack *
+    // 8 == pack_factor * bits` for each width, the per-pack byte layout is
+    // identical to one GLOBAL contiguous little-endian bit-stream — code `e`
+    // occupies bits `[e*bits, (e+1)*bits)`. The packer below builds exactly
+    // that stream, so the kernel's spill-aware byte extraction reconstructs
+    // the original codes. The CPU oracle is then `scale[g]·code + bias[g]`,
+    // mirroring `dequant_setup`. (The legacy file proved these via a
+    // quantize→dequantize round-trip; this pins the dequantize direction
+    // directly with a known-code oracle.)
+
+    /// Pack `indices` (each < `2^bits`) into the global contiguous
+    /// little-endian bit-stream the odd-width dequant kernels read, returned
+    /// as u32 words with one trailing guard word (the kernel always loads
+    /// `w[u_idx0 + 1]`, which the last pack may leave unused).
+    fn pack_odd_stream(indices: &[u32], bits: usize) -> Vec<u32> {
+        let total_bytes = (indices.len() * bits).div_ceil(8);
+        let mut bytes = vec![0u8; total_bytes];
+        for (e, &q) in indices.iter().enumerate() {
+            let base = e * bits;
+            for k in 0..bits {
+                if (q >> k) & 1 == 1 {
+                    let bit = base + k;
+                    bytes[bit / 8] |= 1 << (bit % 8);
+                }
+            }
+        }
+        let n_words = total_bytes.div_ceil(4);
+        let mut words = vec![0u32; n_words + 1];
+        for (i, chunk) in bytes.chunks(4).enumerate() {
+            let mut w = 0u32;
+            for (j, &b) in chunk.iter().enumerate() {
+                w |= (b as u32) << (8 * j);
+            }
+            words[i] = w;
+        }
+        words
+    }
+
+    /// One thread per pack (`program_id::<0>()`), Grid3D, tpg 16. `pack_factor`
+    /// is values-per-pack (int3/int5 = 8, int6 = 4); `n_packs` is kept a
+    /// multiple of 16 so there is no over-dispatch past the `out` buffer.
+    fn dequant_odd_setup(
+        kernel: Kernel,
+        bits: usize,
+        pack_factor: usize,
+        group_size: usize,
+        n_groups: usize,
+        dt: DType,
+    ) -> TestSetup {
+        let mask = (1u32 << bits) - 1;
+        let n_elem = n_groups * group_size;
+        let n_packs = n_elem / pack_factor;
+        // Deterministic codes spanning the full 0..2^bits range.
+        let indices: Vec<u32> =
+            (0..n_elem).map(|e| ((e as u32).wrapping_mul(2_654_435_761) >> 11) & mask).collect();
+        let w = pack_odd_stream(&indices, bits);
+        let scales: Vec<f32> = (0..n_groups).map(|g| 0.05 + g as f32 * 0.01).collect();
+        let biases: Vec<f32> = (0..n_groups).map(|g| -0.2 + g as f32 * 0.03).collect();
+        let sd = unpack_f32(&pack_f32(&scales, dt), dt);
+        let bd = unpack_f32(&pack_f32(&biases, dt), dt);
+        let mut expected = vec![0.0f32; n_elem];
+        for (e, &q) in indices.iter().enumerate() {
+            let g = e / group_size;
+            expected[e] = sd[g] * q as f32 + bd[g];
+        }
+        TestSetup::new(kernel)
+            .mode(KernelMode::Grid3D)
+            .input(TestBuffer::from_vec("w", u32_bytes(&w), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack_f32(&scales, dt), dt))
+            .input(TestBuffer::from_vec("biases", pack_f32(&biases, dt), dt))
+            .input(TestBuffer::zeros("out", n_elem, dt))
+            .constexpr("group_size", group_size as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_1d(n_packs, 16)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 1e-1])]
+    fn test_affine_dequantize_int3(dt: DType) -> TestSetup {
+        dequant_odd_setup(mt_affine_dequantize_int3::kernel_ir_for(dt), 3, 8, 32, 4, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-2, 5e-1])]
+    fn test_affine_dequantize_int5(dt: DType) -> TestSetup {
+        dequant_odd_setup(mt_affine_dequantize_int5::kernel_ir_for(dt), 5, 8, 32, 4, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-2, 5e-1])]
+    fn test_affine_dequantize_int6(dt: DType) -> TestSetup {
+        dequant_odd_setup(mt_affine_dequantize_int6::kernel_ir_for(dt), 6, 4, 32, 4, dt)
+    }
+
     // ── affine quantize (float → bit-stream) ──────────────────────────────
     //
     // The quantize kernels write three outputs: the packed codes (`out`),
@@ -5661,6 +5754,246 @@ pub mod kernel_tests {
             .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
             .grid_3d((n / 8) as u32, 1, 1, [64, 1, 1])
     }
+
+    // ── Generic affine qmv/qvm/qmm family + odd-width MMA ─────────────────
+    //
+    // These bit-width-parametric kernels (`mt_qmv_b*`, `mt_qvm_b*`,
+    // `mt_qmm_b*`, `mt_qmm_mma_b{3,5,6}`) read a per-row bit-stream weight:
+    // row `r` holds its codes contiguously starting at bit `r·cols·bits`.
+    // Because `cols·bits` is a multiple of 32 for every shape here, the
+    // per-row streams pack end-to-end into ONE global contiguous LSB-first
+    // bit-stream — code `e` at bit `e·bits`. That single packing covers both
+    // the pow2 (4/8) and odd (3/5/6) widths, so a code-based oracle (no
+    // re-extraction) validates them all. The generic family carries `k, n,
+    // group_size` constexprs; the MMA variants carry `k, n, gs_per_row`.
+
+    /// Deterministic int-`bits` codes, one per logical matrix element.
+    fn synth_codes(count: usize, bits: u32) -> Vec<u32> {
+        let mask = (1u32 << bits) - 1;
+        (0..count).map(|e| ((e as u32).wrapping_mul(2_654_435_761) >> 9) & mask).collect()
+    }
+
+    /// Pack a flat code array into the contiguous LSB-first bit-stream the
+    /// weight kernels read (code `e` at bit `e·bits`), plus one guard word for
+    /// the kernels' unconditional two-word straddle read.
+    fn pack_codes_bitstream(codes: &[u32], bits: u32) -> Vec<u32> {
+        let n_words = (codes.len() * bits as usize).div_ceil(32);
+        let mut words = vec![0u32; n_words + 1];
+        for (e, &code) in codes.iter().enumerate() {
+            let base = e * bits as usize;
+            for bk in 0..bits as usize {
+                if (code >> bk) & 1 == 1 {
+                    let bit = base + bk;
+                    words[bit / 32] |= 1u32 << (bit % 32);
+                }
+            }
+        }
+        words
+    }
+
+    fn gen_scales(count: usize) -> Vec<f32> {
+        (0..count).map(|i| 0.004 + (i % 7) as f32 * 0.0008).collect()
+    }
+    fn gen_biases(count: usize) -> Vec<f32> {
+        (0..count).map(|i| ((i % 5) as f32 - 2.0) * 0.0009).collect()
+    }
+    fn gen_x(count: usize) -> Vec<f32> {
+        (0..count).map(|i| ((i % 11) as f32 - 5.0) * 0.01).collect()
+    }
+
+    /// qmv/qmm/MMA setup: W is `[n, k]` (code `(row, d) = codes[row·k + d]`),
+    /// scales/biases `[n, k/group_size]`, output `[m, n]`. `gs_per_row_cx`
+    /// selects the `gs_per_row` constexpr (MMA) vs `group_size` (generic).
+    #[allow(clippy::too_many_arguments)]
+    fn nk_setup(
+        kernel: Kernel,
+        m: usize,
+        n: usize,
+        k: usize,
+        bits: u32,
+        group_size: usize,
+        gs_per_row_cx: bool,
+        grid: [u32; 3],
+        tpg: [u32; 3],
+        dt: DType,
+    ) -> TestSetup {
+        let gspr = k / group_size;
+        let codes = synth_codes(n * k, bits);
+        let w = pack_codes_bitstream(&codes, bits);
+        let scales_f = gen_scales(n * gspr);
+        let biases_f = gen_biases(n * gspr);
+        let x_f = gen_x(m * k);
+        let s = unpack_f32(&pack_f32(&scales_f, dt), dt);
+        let b = unpack_f32(&pack_f32(&biases_f, dt), dt);
+        let x = unpack_f32(&pack_f32(&x_f, dt), dt);
+        let mut expected = vec![0.0f32; m * n];
+        for mr in 0..m {
+            for nc in 0..n {
+                let mut acc = 0.0f32;
+                for j in 0..k {
+                    let g = j / group_size;
+                    acc += (codes[nc * k + j] as f32 * s[nc * gspr + g] + b[nc * gspr + g])
+                        * x[mr * k + j];
+                }
+                expected[mr * n + nc] = acc;
+            }
+        }
+        let su = TestSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("w", u32_bytes(&w), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack_f32(&scales_f, dt), dt))
+            .input(TestBuffer::from_vec("biases", pack_f32(&biases_f, dt), dt))
+            .input(TestBuffer::from_vec("x", pack_f32(&x_f, dt), dt))
+            .input(TestBuffer::zeros("out", m * n, dt))
+            .constexpr("k", k as u32)
+            .constexpr("n", n as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt));
+        let su = if gs_per_row_cx {
+            su.constexpr("gs_per_row", gspr as u32)
+        } else {
+            su.constexpr("group_size", group_size as u32)
+        };
+        su.grid_3d(grid[0], grid[1], grid[2], tpg)
+    }
+
+    /// qvm setup: W transposed to `[k, n]` (code `(d, col) = codes[d·n +
+    /// col]`), scales/biases `[k/group_size, n]` (groups along K), output
+    /// `[m, n]`. `group_size` constexpr; grid `[n, m, 1]`, TG 32.
+    fn qvm_gs_setup(
+        m: usize,
+        n: usize,
+        k: usize,
+        bits: u32,
+        group_size: usize,
+        kernel: Kernel,
+        dt: DType,
+    ) -> TestSetup {
+        let gspr = k / group_size;
+        let codes = synth_codes(k * n, bits);
+        let w = pack_codes_bitstream(&codes, bits);
+        let scales_f = gen_scales(gspr * n);
+        let biases_f = gen_biases(gspr * n);
+        let x_f = gen_x(m * k);
+        let s = unpack_f32(&pack_f32(&scales_f, dt), dt);
+        let b = unpack_f32(&pack_f32(&biases_f, dt), dt);
+        let x = unpack_f32(&pack_f32(&x_f, dt), dt);
+        let mut expected = vec![0.0f32; m * n];
+        for mr in 0..m {
+            for col in 0..n {
+                let mut acc = 0.0f32;
+                for d in 0..k {
+                    let g = d / group_size;
+                    acc += (codes[d * n + col] as f32 * s[g * n + col] + b[g * n + col])
+                        * x[mr * k + d];
+                }
+                expected[mr * n + col] = acc;
+            }
+        }
+        TestSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("w", u32_bytes(&w), DType::U32))
+            .input(TestBuffer::from_vec("scales", pack_f32(&scales_f, dt), dt))
+            .input(TestBuffer::from_vec("biases", pack_f32(&biases_f, dt), dt))
+            .input(TestBuffer::from_vec("x", pack_f32(&x_f, dt), dt))
+            .input(TestBuffer::zeros("out", m * n, dt))
+            .constexpr("k", k as u32)
+            .constexpr("n", n as u32)
+            .constexpr("group_size", group_size as u32)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(n as u32, m as u32, 1, [32, 1, 1])
+    }
+
+    // Generic qmv (M=1 matvec): one simdgroup per output row, grid [n, 1, 1].
+    macro_rules! qmv_test {
+        ($fn:ident, $kernel:ident, $bits:literal) => {
+            #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+            fn $fn(dt: DType) -> TestSetup {
+                nk_setup(
+                    $kernel::kernel_ir_for(dt),
+                    1,
+                    32,
+                    512,
+                    $bits,
+                    64,
+                    false,
+                    [32, 1, 1],
+                    [32, 1, 1],
+                    dt,
+                )
+            }
+        };
+    }
+    qmv_test!(test_qmv_b3, mt_qmv_b3, 3);
+    qmv_test!(test_qmv_b4, mt_qmv_b4, 4);
+    qmv_test!(test_qmv_b5, mt_qmv_b5, 5);
+    qmv_test!(test_qmv_b6, mt_qmv_b6, 6);
+    qmv_test!(test_qmv_b8, mt_qmv_b8, 8);
+
+    // Generic qmm (M-batched matvec): grid [n, m, 1].
+    macro_rules! qmm_test {
+        ($fn:ident, $kernel:ident, $bits:literal) => {
+            #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+            fn $fn(dt: DType) -> TestSetup {
+                nk_setup(
+                    $kernel::kernel_ir_for(dt),
+                    4,
+                    32,
+                    512,
+                    $bits,
+                    64,
+                    false,
+                    [32, 4, 1],
+                    [32, 1, 1],
+                    dt,
+                )
+            }
+        };
+    }
+    qmm_test!(test_qmm_b3, mt_qmm_b3, 3);
+    qmm_test!(test_qmm_b4, mt_qmm_b4, 4);
+    qmm_test!(test_qmm_b5, mt_qmm_b5, 5);
+    qmm_test!(test_qmm_b6, mt_qmm_b6, 6);
+    qmm_test!(test_qmm_b8, mt_qmm_b8, 8);
+
+    // Generic qvm (vecmat, M=1): grid [n, 1, 1].
+    macro_rules! qvm_test {
+        ($fn:ident, $kernel:ident, $bits:literal) => {
+            #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+            fn $fn(dt: DType) -> TestSetup {
+                qvm_gs_setup(1, 32, 512, $bits, 64, $kernel::kernel_ir_for(dt), dt)
+            }
+        };
+    }
+    qvm_test!(test_qvm_b3, mt_qvm_b3, 3);
+    qvm_test!(test_qvm_b4, mt_qvm_b4, 4);
+    qvm_test!(test_qvm_b5, mt_qvm_b5, 5);
+    qvm_test!(test_qvm_b6, mt_qvm_b6, 6);
+    qvm_test!(test_qvm_b8, mt_qvm_b8, 8);
+
+    // Odd-width simdgroup-matrix MMA (b3/b5/b6): grid [n/32, m/32, 1], tpg 128,
+    // gs_per_row constexpr. Same per-row bit-stream weight as the generic path.
+    macro_rules! qmm_mma_odd_test {
+        ($fn:ident, $kernel:ident, $bits:literal) => {
+            #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+            fn $fn(dt: DType) -> TestSetup {
+                nk_setup(
+                    $kernel::kernel_ir_for(dt),
+                    32,
+                    64,
+                    512,
+                    $bits,
+                    64,
+                    true,
+                    [2, 1, 1],
+                    [128, 1, 1],
+                    dt,
+                )
+            }
+        };
+    }
+    qmm_mma_odd_test!(test_qmm_mma_b3, mt_qmm_mma_b3, 3);
+    qmm_mma_odd_test!(test_qmm_mma_b5, mt_qmm_mma_b5, 5);
+    qmm_mma_odd_test!(test_qmm_mma_b6, mt_qmm_mma_b6, 6);
 }
 
 /// New-syntax benchmarks for the affine dequantize kernels.

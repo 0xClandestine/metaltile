@@ -292,4 +292,20 @@ mod tests {
         assert_eq!(max_abs_diff(&[-1.0], &[1.0]), 2.0); // sign-aware via abs
         assert_eq!(max_abs_diff(&[], &[]), 0.0); // empty → 0
     }
+
+    #[test]
+    fn max_abs_diff_ignores_nan_in_the_fold() {
+        // (inf - inf) = NaN; `f32::max` returns the non-NaN argument, so a
+        // matching ±inf position contributes nothing while the real diffs still
+        // dominate. The harness relies on this so masked-out -inf softmax maxes
+        // (which round-trip as -inf on both sides) don't poison the comparison.
+        assert_eq!(max_abs_diff(&[f32::INFINITY, 1.0], &[f32::INFINITY, 1.25]), 0.25);
+        assert_eq!(max_abs_diff(&[f32::NEG_INFINITY], &[f32::NEG_INFINITY]), 0.0);
+    }
+
+    #[test]
+    fn max_abs_diff_compares_over_the_shorter_slice() {
+        // `zip` stops at the shorter length — the trailing 99.0 is not compared.
+        assert_eq!(max_abs_diff(&[1.0, 2.0, 99.0], &[1.0, 2.0]), 0.0);
+    }
 }

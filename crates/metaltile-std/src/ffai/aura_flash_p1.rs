@@ -345,7 +345,7 @@ aura_flash_p1_kernel!(
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::aura_flash_p1_kb4_vb2_d128;
+    use super::{aura_flash_p1_causal_kb4_vb2_d128, aura_flash_p1_kb4_vb2_d128};
     use crate::utils::{pack_f32, unpack_f32};
 
     // ── GPU pass-1 partials, validated directly ─────────────────────────
@@ -420,6 +420,10 @@ pub mod kernel_tests {
         dim: usize,
         block_size: usize,
         num_blocks: usize,
+        // Causal cutoff: tokens with index `>= t_limit` are masked out of
+        // every block (mirrors the kernel's `causal_end = q_position + 1`).
+        // The non-causal caller passes `tokens`, making it a no-op.
+        t_limit: usize,
     ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let repeat = q_heads / kv_heads;
         let mut o_part = vec![0.0f32; q_heads * num_blocks * dim];
@@ -429,7 +433,7 @@ pub mod kernel_tests {
             let kvh = qh / repeat;
             for block in 0..num_blocks {
                 let t_start = block * block_size;
-                let t_end = ((block + 1) * block_size).min(tokens);
+                let t_end = ((block + 1) * block_size).min(tokens).min(t_limit);
                 let mut m_acc = f32::NEG_INFINITY;
                 let mut l_acc = 0.0f32;
                 let mut acc = vec![0.0f32; dim];
@@ -494,7 +498,7 @@ pub mod kernel_tests {
         // the kernel's cast-on-store.
         let (o_part, m_part, l_part) = emulate_p1(
             &q_rot, &key_idx, &val_idx, &key_norms, &val_norms, &key_cb, &val_cb, q_heads,
-            kv_heads, tokens, dim, block_size, num_blocks,
+            kv_heads, tokens, dim, block_size, num_blocks, tokens,
         );
         let o_part = unpack_f32(&pack_f32(&o_part, dt), dt);
         let m_part = unpack_f32(&pack_f32(&m_part, dt), dt);
@@ -528,6 +532,94 @@ pub mod kernel_tests {
             .expect(TestBuffer::from_vec("l_partials", pack_f32(&l_part, dt), dt))
             // grid_3d args are threadGROUP counts: (lane=1, q_heads,
             // num_blocks) with a 32-lane threadgroup, copied from the bench.
+            .grid_3d(1, q_heads as u32, num_blocks as u32, [32, 1, 1])
+    }
+
+    // ── Causal pass-1 partials ──────────────────────────────────────────
+    //
+    // The causal sibling `aura_flash_p1_causal_kb4_vb2_d128` shares the whole
+    // online-softmax body but clamps its per-token loop at `q_position + 1` —
+    // keys strictly after the query position contribute nothing. With a
+    // mid-stream `q_position`, the block containing the cutoff sums only its
+    // pre-cutoff tokens (exercises the `t_end = min(causal_end, clamped_end)`
+    // selection that the non-causal kernel folds away). The oracle reuses
+    // `emulate_p1` with `t_limit = q_position + 1`.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-2, 1e-1])]
+    fn test_ffai_aura_flash_p1_causal_kb4_vb2_d128(dt: DType) -> TestSetup {
+        let (q_heads, kv_heads, tokens, dim) = (2usize, 1usize, 8usize, DIM);
+        let repeat = q_heads / kv_heads;
+        let block_size = 4usize;
+        let num_blocks = tokens.div_ceil(block_size); // 2
+        let kv_stride = tokens;
+        let key_pw = (dim * KEY_BITS).div_ceil(32);
+        let val_pw = (dim * VALUE_BITS).div_ceil(32);
+        // Mid-stream query: block 0 (tokens 0..4) stays full, block 1
+        // (tokens 4..8) is clamped to tokens 4..6 — the causal cutoff lands
+        // inside it, so no block is fully masked (keeps every block max
+        // finite for the absolute-error comparison).
+        let q_position = 5usize;
+
+        let key_cb: Vec<f32> = (0..(1 << KEY_BITS)).map(|i| -1.0 + 2.0 * i as f32 / 15.0).collect();
+        let val_cb: Vec<f32> =
+            (0..(1 << VALUE_BITS)).map(|i| -1.0 + 2.0 * i as f32 / 3.0).collect();
+        let key_idx: Vec<u32> =
+            (0..kv_heads * tokens * dim).map(|i| ((i * 7 + 3) % (1 << KEY_BITS)) as u32).collect();
+        let val_idx: Vec<u32> = (0..kv_heads * tokens * dim)
+            .map(|i| ((i * 11 + 5) % (1 << VALUE_BITS)) as u32)
+            .collect();
+        let key_norms: Vec<f32> = (0..kv_heads * tokens).map(|i| 0.5 + 0.05 * i as f32).collect();
+        let val_norms: Vec<f32> = (0..kv_heads * tokens).map(|i| 0.3 + 0.07 * i as f32).collect();
+        let q_rot: Vec<f32> =
+            (0..q_heads * dim).map(|i| (((i * 13) % 19) as f32 - 9.0) * 0.02).collect();
+
+        let key_packed = pack_indices(&key_idx, kv_heads, kv_stride, tokens, dim, KEY_BITS);
+        let val_packed = pack_indices(&val_idx, kv_heads, kv_stride, tokens, dim, VALUE_BITS);
+
+        let (o_part, m_part, l_part) = emulate_p1(
+            &q_rot,
+            &key_idx,
+            &val_idx,
+            &key_norms,
+            &val_norms,
+            &key_cb,
+            &val_cb,
+            q_heads,
+            kv_heads,
+            tokens,
+            dim,
+            block_size,
+            num_blocks,
+            q_position + 1,
+        );
+        let o_part = unpack_f32(&pack_f32(&o_part, dt), dt);
+        let m_part = unpack_f32(&pack_f32(&m_part, dt), dt);
+        let l_part = unpack_f32(&pack_f32(&l_part, dt), dt);
+
+        TestSetup::new(aura_flash_p1_causal_kb4_vb2_d128::kernel_ir_for(dt))
+            .mode(KernelMode::Grid3D)
+            .input(TestBuffer::from_vec("q_rot", pack_f32(&q_rot, dt), dt))
+            .input(TestBuffer::from_vec("key_packed", pack_u32(&key_packed), DType::U32))
+            .input(TestBuffer::from_vec("key_norms", pack_f32(&key_norms, dt), dt))
+            .input(TestBuffer::from_vec("key_codebook", pack_f32(&key_cb, dt), dt))
+            .input(TestBuffer::from_vec("val_packed", pack_u32(&val_packed), DType::U32))
+            .input(TestBuffer::from_vec("val_norms", pack_f32(&val_norms, dt), dt))
+            .input(TestBuffer::from_vec("val_codebook", pack_f32(&val_cb, dt), dt))
+            .input(TestBuffer::zeros("o_partials", q_heads * num_blocks * dim, dt))
+            .input(TestBuffer::zeros("m_partials", q_heads * num_blocks, dt))
+            .input(TestBuffer::zeros("l_partials", q_heads * num_blocks, dt))
+            .constexpr("dim", dim as u32)
+            .constexpr("key_packed_width", key_pw as u32)
+            .constexpr("value_packed_width", val_pw as u32)
+            .constexpr("tokens", tokens as u32)
+            .constexpr("kv_stride", kv_stride as u32)
+            .constexpr("repeat_count", repeat as u32)
+            .constexpr("num_blocks", num_blocks as u32)
+            .constexpr("block_size", block_size as u32)
+            // Causal: the clamp at `q_position + 1` is live.
+            .constexpr("q_position", q_position as u32)
+            .expect(TestBuffer::from_vec("o_partials", pack_f32(&o_part, dt), dt))
+            .expect(TestBuffer::from_vec("m_partials", pack_f32(&m_part, dt), dt))
+            .expect(TestBuffer::from_vec("l_partials", pack_f32(&l_part, dt), dt))
             .grid_3d(1, q_heads as u32, num_blocks as u32, [32, 1, 1])
     }
 
