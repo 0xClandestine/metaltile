@@ -99,6 +99,55 @@ tile bench · Apple M4 Max
 
 Read the [docs](docs/) to learn more.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph User["Your crate"]
+        K["#[kernel]<br/>fn mt_exp&lt;T&gt;(..)"]
+        B["#[bench]<br/>fn exp_bench(dt)"]
+        T["#[test_kernel]<br/>fn exp_test(dt)"]
+    end
+
+    K --> IR["MetalTile IR<br/>(Op variants)"]
+    IR --> Passes["codegen passes<br/>vectorize · unroll · DCE · ..."]
+    Passes --> MSL[".metal source"]
+    MSL --> Metallib["kernels.metallib<br/>(xcrun metal -c)"]
+
+    subgraph CLI["tile CLI"]
+        Build["tile build"]
+        Bench["tile bench"]
+        Test["tile test"]
+        Inspect["tile inspect"]
+    end
+
+    B -.registers.-> Bench
+    T -.registers.-> Test
+    K -.discovered by.-> Build
+    K -.discovered by.-> Inspect
+    Build --> MSL
+    Bench --> Runner["__tile_runner<br/>(subprocess)"]
+    Test --> Runner
+    Runner --> Metallib
+```
+
+`#[kernel]` lowers your DSL function to IR; the codegen passes optimise it; MSL emit produces a `.metal` source that `xcrun metal` compiles to a `metallib`. `#[bench]` / `#[test_kernel]` are optional annotations on the same function that register a setup callback the runner uses to dispatch the kernel and measure it (or diff against a CPU oracle).
+
+## CLI reference
+
+| Command | What it does |
+|---|---|
+| `tile build` | Compile every `#[kernel]` in the workspace to MSL and (optionally) a `metallib`. |
+| `tile bench` | Run every `#[bench]`, report MetalTile GB/s vs the MLX reference + correctness. |
+| `tile test` | Run every `#[test_kernel]` against its CPU oracle within tolerance. |
+| `tile inspect` | Dump IR / per-pass IR / MSL for one kernel. |
+| `tile device` | Print GPU device info and supported feature flags. |
+| `tile snap` | Save bench results as a regression baseline. |
+| `tile diff` | Compare bench results to a saved baseline. |
+| `tile update` | Install the latest release (or build from a PR / commit). |
+
+See [`docs/cli.md`](docs/cli.md) for the full flag surface.
+
 ## Contributing
 
 Contributions are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) for the issue / PR process and [`docs/developing.md`](docs/developing.md) for the kernel-authoring hazards **before** writing a kernel.
