@@ -39,9 +39,8 @@
 //! - Aho, Lam, Sethi & Ullman (2006), "Compilers: Principles, Techniques, and
 //!   Tools", 2nd ed., §9.5.  Partial-redundancy elimination and code sinking.
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use metaltile_core::ir::{Block, BlockId, Kernel, Op, ValueId};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::remap;
 use crate::error::{Error, Result};
@@ -76,8 +75,11 @@ impl super::Pass for ValueSinkPass {
 /// Count every use of every `ValueId` across the kernel's entry body and all
 /// stored blocks. Sinking is intra-block (it only reorders ops within one
 /// block) so this count never goes stale as sinking proceeds.
-fn compute_global_use_count(kernel: &Kernel) -> BTreeMap<ValueId, usize> {
-    let mut use_count: BTreeMap<ValueId, usize> = BTreeMap::new();
+fn compute_global_use_count(kernel: &Kernel) -> FxHashMap<ValueId, usize> {
+    // Pre-size from a rough op-count: each op contributes ≤ 3 refs.
+    let cap = kernel.body.ops.len() + kernel.blocks.values().map(|b| b.ops.len()).sum::<usize>();
+    let mut use_count: FxHashMap<ValueId, usize> =
+        FxHashMap::with_capacity_and_hasher(cap, Default::default());
     let mut tally = |ops: &[Op]| {
         for op in ops {
             for vid in remap::op_value_refs(op) {
@@ -116,7 +118,7 @@ struct SinkPlan {
 // main logic
 // ---------------------------------------------------------------------------
 
-fn sink_in_block(block: &mut Block, global_use_count: &BTreeMap<ValueId, usize>) {
+fn sink_in_block(block: &mut Block, global_use_count: &FxHashMap<ValueId, usize>) {
     let n = block.ops.len();
     if n == 0 {
         return;
@@ -197,8 +199,12 @@ fn rebuild_with_sinking(block: &mut Block, plans: &[SinkPlan]) {
     let n = old_ops.len();
 
     // Build maps: from_pos → remove; to_pos → insert (Vec of ops).
-    let mut remove_at: BTreeSet<usize> = BTreeSet::new();
-    let mut insert_before: BTreeMap<usize, Vec<(Op, Option<ValueId>)>> = BTreeMap::new();
+    // Position-keyed sets/maps — pure get/contains, no ordered iteration
+    // (the rebuild loop walks positions 0..n itself).
+    let mut remove_at: FxHashSet<usize> =
+        FxHashSet::with_capacity_and_hasher(plans.len(), Default::default());
+    let mut insert_before: FxHashMap<usize, Vec<(Op, Option<ValueId>)>> =
+        FxHashMap::with_capacity_and_hasher(plans.len(), Default::default());
 
     for plan in plans {
         remove_at.insert(plan.from);

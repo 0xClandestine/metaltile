@@ -35,8 +35,6 @@
 //!   TensorFlow blog.  Production operator fusion for ML workloads.
 //!   https://developers.googleblog.com/xla-tensorflow-compiled/
 
-use std::collections::BTreeSet;
-
 use metaltile_core::ir::{Block, BlockId, Kernel, Op, ValueId};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -99,7 +97,7 @@ impl super::Pass for FusionPass {
         // defined in B but used in at least one other block (i.e. a child block).
         // Pinned values must not be fused away — they need a standalone declaration
         // so that child blocks can reference the variable by name.
-        let mut pinned_per_block: FxHashMap<BlockId, BTreeSet<ValueId>> = FxHashMap::default();
+        let mut pinned_per_block: FxHashMap<BlockId, FxHashSet<ValueId>> = FxHashMap::default();
         for (vid, def_bid) in &def_block {
             if let Some(use_bids) = used_in.get(vid) {
                 for &use_bid in use_bids {
@@ -142,7 +140,7 @@ impl super::Pass for FusionPass {
 // Fusion on a single block
 // ---------------------------------------------------------------------------
 
-fn fuse_block(block: &mut Block, pinned: &BTreeSet<ValueId>) -> Result<()> {
+fn fuse_block(block: &mut Block, pinned: &FxHashSet<ValueId>) -> Result<()> {
     // Phase 1: build def-use graph.
     // uses[vid] = set of op indices that reference vid.
     let mut uses: FxHashMap<ValueId, Vec<usize>> = FxHashMap::default();

@@ -64,7 +64,8 @@ pub fn estimate_registers(kernel: &Kernel) -> RegisterEstimate {
 
 /// Compute the maximum live ValueId count in a single block.
 fn block_max_live(block: &metaltile_core::ir::Block) -> usize {
-    let mut live: std::collections::BTreeSet<ValueId> = std::collections::BTreeSet::new();
+    let mut live: rustc_hash::FxHashSet<ValueId> =
+        rustc_hash::FxHashSet::with_capacity_and_hasher(block.ops.len(), Default::default());
     let mut max = 0usize;
 
     for (i, op) in block.ops.iter().enumerate() {
@@ -110,6 +111,71 @@ mod tests {
 
         let est = estimate_registers(&k);
         assert_eq!(est.max_live, 3); // v0, v1, v2 all live at the Add
+    }
+
+    /// Side-by-side: BTreeSet<ValueId> live set (pre-PR impl) vs
+    /// FxHashSet<ValueId> live set (new impl). Same workload run in
+    /// one binary so the comparison is noise-bounded.
+    fn block_max_live_btree(block: &metaltile_core::ir::Block) -> usize {
+        let mut live: std::collections::BTreeSet<ValueId> = std::collections::BTreeSet::new();
+        let mut max = 0usize;
+        for (i, op) in block.ops.iter().enumerate() {
+            for vid in crate::passes::remap::op_value_refs(op) {
+                live.insert(vid);
+            }
+            if let Some(Some(vid)) = block.results.get(i) {
+                live.insert(*vid);
+            }
+            max = max.max(live.len());
+        }
+        max
+    }
+
+    #[test]
+    #[ignore = "perf microbench"]
+    fn perf_block_max_live_btree_vs_fxhash() {
+        // Build a kernel with ~2000 ops and dense ValueIds — the live
+        // set grows continuously, exercising the hash/compare cost.
+        let mut k = Kernel::new("perf_live");
+        for i in 0..2000u32 {
+            k.body.push_op(Op::Const { value: i as i64 }, ValueId::new(i));
+        }
+
+        const ITERS: usize = 10_000;
+
+        for _ in 0..1_000 {
+            std::hint::black_box(block_max_live_btree(std::hint::black_box(&k.body)));
+            std::hint::black_box(block_max_live(std::hint::black_box(&k.body)));
+        }
+
+        let t0 = std::time::Instant::now();
+        for _ in 0..ITERS {
+            std::hint::black_box(block_max_live_btree(std::hint::black_box(&k.body)));
+        }
+        let bt_elapsed = t0.elapsed();
+        let bt_ns_per = bt_elapsed.as_nanos() as f64 / ITERS as f64;
+
+        let t1 = std::time::Instant::now();
+        for _ in 0..ITERS {
+            std::hint::black_box(block_max_live(std::hint::black_box(&k.body)));
+        }
+        let fx_elapsed = t1.elapsed();
+        let fx_ns_per = fx_elapsed.as_nanos() as f64 / ITERS as f64;
+
+        println!();
+        println!("=== block_max_live: 2000-op live-set walk × {ITERS} iters ===");
+        println!("  BTreeSet  (old): {bt_elapsed:>10.2?}  ({bt_ns_per:>8.1} ns/call)");
+        println!("  FxHashSet (new): {fx_elapsed:>10.2?}  ({fx_ns_per:>8.1} ns/call)");
+        let speedup = bt_ns_per / fx_ns_per;
+        println!(
+            "  → speedup       : {speedup:.2}× ({:+.1}%)",
+            (1.0 - fx_ns_per / bt_ns_per) * 100.0
+        );
+
+        assert!(
+            fx_ns_per * 1.05 <= bt_ns_per,
+            "FxHashSet block_max_live ({fx_ns_per:.1} ns) should beat BTreeSet ({bt_ns_per:.1} ns)"
+        );
     }
 
     #[test]

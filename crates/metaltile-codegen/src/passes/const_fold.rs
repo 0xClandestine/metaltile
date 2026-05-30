@@ -31,9 +31,8 @@
 //! - Aho, Lam, Sethi & Ullman (2006), "Compilers: Principles, Techniques, and
 //!   Tools", 2nd ed., §8.4 (constant folding), §9.1.2 (dead-code elimination).
 
-use std::collections::BTreeSet;
-
 use metaltile_core::ir::{BinOpKind, Block, BlockId, Kernel, Op, UnaryOpKind, ValueId};
+use rustc_hash::FxHashSet;
 
 use crate::error::Result;
 
@@ -76,7 +75,7 @@ impl super::Pass for ConstFoldPass {
         // Collect all ValueIds referenced by any block in the kernel (cross-block uses).
         // These must be treated as "live" in each individual block's DCE pass to prevent
         // eliminating values that are consumed by sibling or child blocks.
-        let mut cross_block_refs: BTreeSet<ValueId> = BTreeSet::new();
+        let mut cross_block_refs: FxHashSet<ValueId> = FxHashSet::default();
         for block in kernel.blocks.values() {
             for op in &block.ops {
                 collect_uses(op, &mut cross_block_refs);
@@ -267,8 +266,9 @@ fn replace_value_in_op(op: &mut Op, old: ValueId, new: ValueId) {
 // Dead Code Elimination
 // ---------------------------------------------------------------------------
 
-fn dce_block(block: &mut Block, cross_block_refs: &BTreeSet<ValueId>) {
-    let mut used: BTreeSet<ValueId> = BTreeSet::new();
+fn dce_block(block: &mut Block, cross_block_refs: &FxHashSet<ValueId>) {
+    let mut used: FxHashSet<ValueId> =
+        FxHashSet::with_capacity_and_hasher(block.ops.len(), Default::default());
     for op in &block.ops {
         collect_uses(op, &mut used);
     }
@@ -296,7 +296,7 @@ fn dce_block(block: &mut Block, cross_block_refs: &BTreeSet<ValueId>) {
     block.results = new_results;
 }
 
-fn collect_uses(op: &Op, used: &mut BTreeSet<ValueId>) {
+fn collect_uses(op: &Op, used: &mut FxHashSet<ValueId>) {
     for &v in op.value_refs().iter() {
         used.insert(*v);
     }
