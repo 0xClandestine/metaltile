@@ -39,11 +39,11 @@
 //! ## Dispatch
 //!
 //! 1D grid over output `head_dim` elements. Each thread computes one
-//! output position: walk the `pool_len`-element softmax window, sum
-//! the weighted (raw + ape) contributions. Softmax denominator is
-//! computed once per output (every thread re-does the small softmax)
-//! — cheaper than a TG-reduction at pool_len ≤ 128 because the gate
-//! vector is small and read from L1 multicast.
+//! output position. **Single-pass online-softmax** — Flash-style
+//! running (max, sum, weighted-acc) in one loop over the pool. Avoids
+//! the codegen-CSE hazard with sequential `for _w` loops sharing a
+//! reused `gate[_w]` load (DSL collapses them and references variables
+//! out of scope across loop boundaries).
 
 use metaltile::kernel;
 
@@ -58,29 +58,27 @@ pub fn ffai_dsv4_compressor_pool<T>(
 ) {
     let d = tid;
     if d < head_dim {
-        // Compute softmax(gate) max-stable. Each thread re-derives the
-        // denominator over the small pool window — cheap, avoids a
-        // cross-thread reduction.
+        // Online-softmax single pass: maintain running (max, sum) of
+        // gate exponentials and a running weighted accumulator of
+        // (raw + ape) at this thread's output dim. Rescale running
+        // state by `exp(old_max - new_max)` when a larger gate is
+        // seen — identical numerics to the two-pass form.
         let mut g_max = neg_infinity();
-        for _w in range(0u32, pool_len, 1u32) {
-            let g = load(gate[_w]);
-            g_max = select(g > g_max, g, g_max);
-        }
         let mut g_sum = 0.0f32;
-        for _w in range(0u32, pool_len, 1u32) {
-            g_sum = g_sum + (load(gate[_w]) - g_max).exp();
-        }
-
-        // Weighted sum of (raw + ape) at output position `d`.
         let mut acc = 0.0f32;
         for _w in range(0u32, pool_len, 1u32) {
-            let g_w = ((load(gate[_w]) - g_max).exp()) / g_sum;
+            let g = load(gate[_w]);
+            let new_max = select(g > g_max, g, g_max);
+            let factor = exp(g_max - new_max);
+            let weight = exp(g - new_max);
             let raw_val = load(raw_kv[_w * head_dim + d]).cast::<f32>();
             let ape_val = load(ape[_w * head_dim + d]).cast::<f32>();
-            acc = acc + g_w * (raw_val + ape_val);
+            g_sum = g_sum * factor + weight;
+            acc = acc * factor + weight * (raw_val + ape_val);
+            g_max = new_max;
         }
         // Implicit narrowing per playbook §"DSL implicit Store coercion".
-        store(compressed[d], acc);
+        store(compressed[d], acc / g_sum);
     }
 }
 

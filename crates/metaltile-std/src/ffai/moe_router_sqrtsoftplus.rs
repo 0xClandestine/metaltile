@@ -52,16 +52,31 @@ pub fn ffai_moe_router_sqrtsoftplus(
     mut score_biased: Tensor<f32>,
 ) {
     let idx = tid;
-    let x = load(logits[idx]);
+    let logit_val = load(logits[idx]);
     // Numerically stable softplus: `max(x, 0) + log(1 + exp(-|x|))`.
     // For x >> 0:  ≈ x + log(1 + tiny)   ≈ x
     // For x << 0:  ≈ 0 + log(1 + e^x)    ≈ e^x
-    let ax = select(x >= 0.0f32, x, -x); // |x|
-    let sp = select(x >= 0.0f32, x, 0.0f32) + (1.0f32 + (-ax).exp()).ln();
-    let s = sp.sqrt();
-    store(score_unbiased[idx], s);
-    let b = load(bias[idx]);
-    store(score_biased[idx], s + b);
+    //
+    // Variable names deliberately avoid the `score` prefix — the DSL's
+    // codegen identifier mangler matches argument prefixes, so a local
+    // `score` collides with the `score_unbiased` / `score_biased` Tensor
+    // params and the binding is silently elided.
+    // Use the DSL free-function forms `log` / `exp` — the method-call
+    // forms `.ln()` / `.exp()` don't always emit their bindings when
+    // chained inside larger expressions (see e.g.
+    // `gated_delta_prep.rs` which uses the function form for the
+    // same `log(exp(x) + 1)` softplus pattern).
+    let abs_logit = select(logit_val >= 0.0f32, logit_val, -logit_val);
+    let neg_abs = 0.0f32 - abs_logit;
+    let exp_neg = exp(neg_abs);
+    let one_plus = 1.0f32 + exp_neg;
+    let log_term = log(one_plus);
+    let pos_part = select(logit_val >= 0.0f32, logit_val, 0.0f32);
+    let softplus_val = pos_part + log_term;
+    let routing_signal = sqrt(softplus_val);
+    let bias_val = load(bias[idx]);
+    store(score_unbiased[idx], routing_signal);
+    store(score_biased[idx], routing_signal + bias_val);
 }
 
 pub mod kernel_tests {
