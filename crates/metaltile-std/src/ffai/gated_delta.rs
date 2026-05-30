@@ -254,8 +254,8 @@ pub fn mt_gated_delta_chunk<T>(
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::mt_gated_delta_step;
-    use crate::utils::pack_f32;
+    use super::{mt_gated_delta_chunk, mt_gated_delta_step};
+    use crate::utils::{pack_f32, unpack_f32};
 
     /// CPU oracle: mirrors `_gated_delta_step_ops` from
     /// `mlx_lm/models/gated_delta.py` (see the legacy
@@ -352,6 +352,133 @@ pub mod kernel_tests {
     // Hv == Hk (no key-sharing) at the minimum dk=32, single batch.
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-5, 5e-2, 2e-1])]
     fn test_mt_gated_delta_step_no_gqa(dt: DType) -> TestSetup { setup(1, 4, 4, 4, 32, dt) }
+
+    // ── mt_gated_delta_chunk: multi-token prefill recurrence ───────────────
+    //
+    // Same per-step recurrence as `mt_gated_delta_step`, but the kernel threads
+    // the (Dv, Dk) state across `t_len` tokens within one threadgroup. The
+    // oracle runs the step recurrence sequentially over T, keeping state in f32
+    // (matching the kernel's in-register state), and emits per-token `y` plus
+    // the final `state_out`. Layout: q/k `[B, T, Hk, Dk]`, v/y `[B, T, Hv, Dv]`,
+    // g/beta `[B, T, Hv]`, state `[B, Hv, Dv, Dk]`.
+    #[allow(clippy::too_many_arguments)]
+    fn chunk_oracle(
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        g: &[f32],
+        beta: &[f32],
+        state_in: &[f32],
+        b: usize,
+        t_len: usize,
+        hv: usize,
+        hk: usize,
+        dv: usize,
+        dk: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let mut y = vec![0.0_f32; b * t_len * hv * dv];
+        let mut state = state_in.to_vec();
+        let hk_per_hv = hv / hk;
+        for batch in 0..b {
+            for hv_idx in 0..hv {
+                let hk_idx = hv_idx / hk_per_hv;
+                for dv_idx in 0..dv {
+                    let s_base = (batch * hv + hv_idx) * dv * dk + dv_idx * dk;
+                    for t in 0..t_len {
+                        let n_t = batch * t_len + t;
+                        let g_val = g[n_t * hv + hv_idx];
+                        let beta_val = beta[n_t * hv + hv_idx];
+                        let qk_base = (n_t * hk + hk_idx) * dk;
+                        let v_val = v[(n_t * hv + hv_idx) * dv + dv_idx];
+                        let mut kv_mem = 0.0_f32;
+                        let mut decayed = vec![0.0_f32; dk];
+                        for s in 0..dk {
+                            let sv = state[s_base + s] * g_val;
+                            decayed[s] = sv;
+                            kv_mem += sv * k[qk_base + s];
+                        }
+                        let delta = (v_val - kv_mem) * beta_val;
+                        let mut out = 0.0_f32;
+                        for s in 0..dk {
+                            let sn = decayed[s] + k[qk_base + s] * delta;
+                            state[s_base + s] = sn;
+                            out += sn * q[qk_base + s];
+                        }
+                        y[(n_t * hv + hv_idx) * dv + dv_idx] = out;
+                    }
+                }
+            }
+        }
+        (y, state)
+    }
+
+    /// Chunked-prefill: T tokens threaded through state in one dispatch. Grid
+    /// `[dv, b*hv, 1]`, TG `[32,1,1]`, Reduction — same as the decode step.
+    fn chunk_setup(
+        b: usize,
+        t_len: usize,
+        hv: usize,
+        hk: usize,
+        dv: usize,
+        dk: usize,
+        dt: DType,
+    ) -> TestSetup {
+        let nt = b * t_len; // token rows
+        let round = |raw: &[f32]| unpack_f32(&pack_f32(raw, dt), dt);
+        let q = round(
+            &(0..nt * hk * dk).map(|i| ((i as f32) * 0.0173).sin() * 0.5).collect::<Vec<_>>(),
+        );
+        // L2-normalise each (token, hk) key row. The delta-rule recurrence
+        // `s' = g·s + k·β·(v − k·g·s)` has an eigenvalue `1 − β|k|²` along k;
+        // unnormalised keys (|k|² ≫ 1) make it expansive, so over a T-token
+        // chunk the GPU simd_sum vs CPU left-fold reorder explodes. Real GDN
+        // normalises k — doing so keeps the recurrence contractive and the
+        // f32 oracle tight.
+        let mut k_raw: Vec<f32> =
+            (0..nt * hk * dk).map(|i| ((i as f32) * 0.0211).cos() * 0.5).collect();
+        for row in k_raw.chunks_mut(dk) {
+            let norm = row.iter().map(|v| v * v).sum::<f32>().sqrt();
+            if norm > 1e-6 {
+                for v in row.iter_mut() {
+                    *v /= norm;
+                }
+            }
+        }
+        let k = round(&k_raw);
+        let v =
+            round(&(0..nt * hv * dv).map(|i| ((i as f32) * 0.029).sin() * 0.3).collect::<Vec<_>>());
+        let g = round(&(0..nt * hv).map(|i| 0.9 - ((i % 7) as f32) * 0.01).collect::<Vec<_>>());
+        let beta = round(&(0..nt * hv).map(|i| 0.5 + ((i % 5) as f32) * 0.01).collect::<Vec<_>>());
+        let state_in = round(
+            &(0..b * hv * dv * dk).map(|i| ((i as f32) * 0.011).sin() * 0.1).collect::<Vec<_>>(),
+        );
+        let (y_exp, state_exp) =
+            chunk_oracle(&q, &k, &v, &g, &beta, &state_in, b, t_len, hv, hk, dv, dk);
+        TestSetup::new(mt_gated_delta_chunk::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("q", pack_f32(&q, dt), dt))
+            .input(TestBuffer::from_vec("k", pack_f32(&k, dt), dt))
+            .input(TestBuffer::from_vec("v", pack_f32(&v, dt), dt))
+            .input(TestBuffer::from_vec("g", pack_f32(&g, dt), dt))
+            .input(TestBuffer::from_vec("beta", pack_f32(&beta, dt), dt))
+            .input(TestBuffer::from_vec("state_in", pack_f32(&state_in, dt), dt))
+            .input(TestBuffer::zeros("state_out", state_in.len(), dt))
+            .input(TestBuffer::zeros("y", nt * hv * dv, dt))
+            .input(TestBuffer::from_vec("t_len", (t_len as u32).to_le_bytes().to_vec(), DType::U32))
+            .constexpr("dk", dk as u32)
+            .constexpr("dv", dv as u32)
+            .constexpr("hv", hv as u32)
+            .constexpr("hk", hk as u32)
+            .expect(TestBuffer::from_vec("y", pack_f32(&y_exp, dt), dt))
+            .expect(TestBuffer::from_vec("state_out", pack_f32(&state_exp, dt), dt))
+            .grid_3d(dv as u32, (b * hv) as u32, 1, [32, 1, 1])
+    }
+
+    // 16-token chunk, GQA (Hv = 2·Hk) — exercises the per-token state threading
+    // the single-step decode test leaves dormant. f16/bf16 widen with the
+    // 16-step dependent recurrence.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-4, 5e-2, 2e-1])]
+    fn test_mt_gated_delta_chunk(dt: DType) -> TestSetup { chunk_setup(1, 16, 4, 2, 8, 64, dt) }
 }
 
 /// New-syntax benchmarks for the GDN decode + chunked-prefill kernels.
