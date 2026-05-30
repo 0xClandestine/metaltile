@@ -4,8 +4,6 @@
 
 use metaltile::kernel;
 
-static ATTENTION_SHAPES: &[(usize, usize, usize)] = &[(8, 2048, 128), (32, 4096, 128)];
-
 #[kernel]
 pub fn mt_sdpa<T>(
     q: Tensor<T>,

@@ -2,8 +2,8 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! MetalTile kernel standard library: benchmark metadata and type definitions.
 //!
-//! `metaltile-std` provides the data types shared between kernel definitions
-//! (`#[kernel(bench(...))]`) and the CLI runner. It contains no GPU runtime code.
+//! `metaltile-std` provides the kernel definitions (`#[kernel]` / `#[bench]` /
+//! `#[test_kernel]`) and the metadata/runner types shared with the CLI.
 
 pub mod bench_types;
 pub mod error;
@@ -20,8 +20,6 @@ pub mod probe;
 // directly yields empty registries because nothing force-links the std crate.
 pub use metaltile_core::{all_benches, all_kernels, all_tests};
 pub mod run_kernel;
-pub mod run_spec;
 pub mod runner;
-pub mod spec;
 pub mod stats;
 pub mod utils;

@@ -3,14 +3,6 @@
 //! Quantized MatVec benchmark — #[kernel] DSL vs MLX metal/quantized.metal
 
 use metaltile::kernel;
-// (out_dim, in_dim) pairs. 4096² = baseline reference. Other rows are
-// production hot-paths in Qwen3-class inference:
-//   - 5120²       Qwen3-8B/14B attention proj (Q/K/V/O), MLP.gate/up at hidden
-//   - 14336×5120  Qwen3-8B/14B MLP up_proj
-//   - 5120×14336  Qwen3-8B/14B MLP down_proj
-//   - 27648×5120  Qwen3-coder-30B MoE expert up_proj
-static QUANTIZED_SHAPES: &[(usize, usize)] =
-    &[(4096, 4096), (5120, 5120), (14336, 5120), (5120, 14336), (27648, 5120)];
 
 #[kernel]
 pub fn mt_qmv<T>(

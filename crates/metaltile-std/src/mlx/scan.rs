@@ -28,8 +28,6 @@
 
 use metaltile::kernel;
 
-static SCAN_SHAPES: &[(usize, usize)] = &[(1_024, 4_096)];
-
 #[kernel]
 pub fn mt_scan<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
     let row = program_id::<1>();
