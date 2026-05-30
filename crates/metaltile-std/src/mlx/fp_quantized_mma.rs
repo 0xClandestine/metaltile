@@ -633,6 +633,16 @@ pub mod kernel_tests {
     fn test_fp8_e4m3_qmm_mma(dt: DType) -> TestSetup {
         fp_setup(mt_fp8_e4m3_qmm_mma::kernel_ir_for(dt), 32, 32, 128, 8, dt)
     }
+    // Multi-tile (64×64 → grid [2, 2, 1]): exercises the cross-threadgroup
+    // N/M tile indexing the single-tile shapes leave dormant.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 1e-2, 5e-2])]
+    fn test_fp4_qmm_mma_multi_tile(dt: DType) -> TestSetup {
+        fp_setup(mt_fp4_qmm_mma::kernel_ir_for(dt), 64, 64, 128, 4, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 1e-2, 5e-2])]
+    fn test_fp8_e4m3_qmm_mma_multi_tile(dt: DType) -> TestSetup {
+        fp_setup(mt_fp8_e4m3_qmm_mma::kernel_ir_for(dt), 64, 64, 128, 8, dt)
+    }
 }
 
 /// New-syntax benchmarks for the fp MMA quantized-matmul kernels.

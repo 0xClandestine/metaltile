@@ -147,7 +147,7 @@ fp8_kernel!(mt_fp8_e5m2_quant_dequant, "fp8_e5m2", 2.0f32, -14.0f32, 15.0f32, 57
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::mt_fp4_quant_dequant;
+    use super::{mt_fp4_quant_dequant, mt_fp8_e4m3_quant_dequant, mt_fp8_e5m2_quant_dequant};
 
     fn fp4_snap(norm: f32) -> f32 {
         if norm < 0.25 {
@@ -214,6 +214,71 @@ pub mod kernel_tests {
                 DType::F32,
             ))
             .grid_3d((n / 32) as u32, 1, 1, [32, 1, 1])
+    }
+
+    /// CPU oracle for the fp8 round-trip: per-32-element amax-scale, then snap
+    /// each magnitude to the `mant`-bit-mantissa fp8 grid (binade via
+    /// `floor(log2)`, exponent clamped to `[emin, emax]`, `round` to the
+    /// per-binade quantum, saturate at `fp8max`), then rescale. Mirrors the
+    /// `fp8_kernel!` body exactly.
+    fn fp8_oracle(inp: &[f32], mant: f32, emin: f32, emax: f32, fp8max: f32) -> Vec<f32> {
+        let mut out = vec![0.0f32; inp.len()];
+        for (gi, group) in inp.chunks_exact(32).enumerate() {
+            let group_max = group.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+            let inv_scale = if group_max > 0.0 { fp8max / group_max } else { 0.0 };
+            let rescale = group_max / fp8max;
+            for (i, &x) in group.iter().enumerate() {
+                let norm = x.abs() * inv_scale;
+                let q = if norm > 0.0 {
+                    let e = norm.log2().floor().clamp(emin, emax);
+                    let quantum = (e - mant).exp2();
+                    ((norm / quantum).round() * quantum).min(fp8max)
+                } else {
+                    0.0
+                };
+                let sign = if x < 0.0 { -1.0 } else { 1.0 };
+                out[gi * 32 + i] = sign * q * rescale;
+            }
+        }
+        out
+    }
+
+    fn fp8_setup(
+        kernel: metaltile::core::ir::Kernel,
+        mant: f32,
+        emin: f32,
+        emax: f32,
+        fp8max: f32,
+    ) -> TestSetup {
+        let inp: Vec<f32> = (0..4).flat_map(synthetic_group).collect();
+        let n = inp.len();
+        let expected = fp8_oracle(&inp, mant, emin, emax, fp8max);
+        TestSetup::new(kernel)
+            .mode(KernelMode::Grid3D)
+            .input(TestBuffer::from_vec(
+                "inp",
+                inp.iter().flat_map(|v| v.to_le_bytes()).collect(),
+                DType::F32,
+            ))
+            .input(TestBuffer::zeros("out", n, DType::F32))
+            .constexpr("n", n as u32)
+            .expect(TestBuffer::from_vec(
+                "out",
+                expected.iter().flat_map(|v| v.to_le_bytes()).collect(),
+                DType::F32,
+            ))
+            .grid_3d((n / 32) as u32, 1, 1, [32, 1, 1])
+    }
+
+    // e4m3: 3 mantissa bits, exponent [-6, 8], max ±448.
+    #[test_kernel(dtypes = [f32], tol = 1e-3)]
+    fn test_mt_fp8_e4m3_quant_dequant(_dt: DType) -> TestSetup {
+        fp8_setup(mt_fp8_e4m3_quant_dequant::kernel_ir_for(), 3.0, -6.0, 8.0, 448.0)
+    }
+    // e5m2: 2 mantissa bits, exponent [-14, 15], max ±57344.
+    #[test_kernel(dtypes = [f32], tol = 1e-3)]
+    fn test_mt_fp8_e5m2_quant_dequant(_dt: DType) -> TestSetup {
+        fp8_setup(mt_fp8_e5m2_quant_dequant::kernel_ir_for(), 2.0, -14.0, 15.0, 57344.0)
     }
 }
 
