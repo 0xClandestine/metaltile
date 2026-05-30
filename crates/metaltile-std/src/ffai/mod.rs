@@ -17,6 +17,7 @@
 //! `mlx/`.
 
 pub mod arg_reduce;
+pub mod attn_head_gate;
 pub mod audio_conv1d;
 pub mod aura_dequant_rotated;
 pub mod aura_encode;
@@ -66,6 +67,7 @@ pub mod moe_mpp_bm8;
 pub mod moe_mpp_bm8_int8;
 pub mod moe_mpp_int8;
 pub mod moe_mpp_shared;
+pub mod moe_router_sigmoid_bias;
 pub mod patch_embed;
 pub mod patch_embed_mma;
 pub mod rms_norm_qgemv;

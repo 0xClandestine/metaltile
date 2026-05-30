@@ -18,6 +18,7 @@ pub mod arange;
 pub mod arg_reduce;
 pub mod binary;
 pub mod binary_two;
+pub mod clamped_swiglu;
 pub mod copy;
 pub mod fft;
 pub mod fp_quantized;
