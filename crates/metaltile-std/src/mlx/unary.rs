@@ -328,14 +328,43 @@ pub mod kernel_benches {
     use metaltile::{bench, core::ir::Kernel, test::*};
 
     use super::*;
+    use crate::bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname};
+
+    const UNARY_N: usize = 64 * 1024 * 1024;
 
     fn ub(kernel: Kernel, dt: DType) -> BenchSetup {
-        let n = 64 * 1024 * 1024usize;
+        let n = UNARY_N;
         BenchSetup::new(kernel)
             .buffer(BenchBuffer::random("a", n, dt))
             .buffer(BenchBuffer::zeros("out", n, dt).output())
             .grid_1d(n, 256)
             .bytes_moved((2 * n * dt.size_bytes()) as u64)
+    }
+
+    /// Like [`ub`], but seeds `a` with `domain`'s deterministic in-range pattern
+    /// and attaches the MLX `metal/unary.metal` reference `v_<Op><tn><tn>`
+    /// (`unary_v`, 1 element/thread) for an A/B perf + correctness comparison.
+    fn ub_ref(kernel: Kernel, dt: DType, mlx_op: &str, domain: InputDomain) -> BenchSetup {
+        let n = UNARY_N;
+        let tn = mlx_tname(dt);
+        BenchSetup::new(kernel)
+            .buffer(input_buffer("a", n, dt, domain))
+            .buffer(BenchBuffer::zeros("out", n, dt).output())
+            .grid_1d(n, 256)
+            .bytes_moved((2 * n * dt.size_bytes()) as u64)
+            .with_reference(
+                RefKernel::new(
+                    format!("v_{mlx_op}{tn}{tn}"),
+                    include_str!(concat!(env!("OUT_DIR"), "/metal/unary.metal")),
+                )
+                // "a" is shared by name with the MT input above (same data); the
+                // runner overrides this placeholder with the MT bytes.
+                .buffer(BenchBuffer::zeros("a", n, dt))
+                .buffer(BenchBuffer::zeros("out", n, dt).output())
+                .buffer(BenchBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
+                .grid_1d(n, 256)
+                .tol(dtype_tol(dt)),
+            )
     }
 
     macro_rules! ubench {
@@ -344,10 +373,20 @@ pub mod kernel_benches {
             fn $name(dt: DType) -> BenchSetup { ub($kernel::kernel_ir_for(dt), dt) }
         };
     }
-    ubench!(bench_exp, "mlx/unary/exp", mt_exp);
+
+    /// `#[bench]` registration with an MLX reference comparison.
+    macro_rules! ubench_ref {
+        ($name:ident, $full:literal, $kernel:ident, $mlxop:literal, $domain:expr) => {
+            #[bench(name = $full, dtypes = [f32, f16, bf16])]
+            fn $name(dt: DType) -> BenchSetup {
+                ub_ref($kernel::kernel_ir_for(dt), dt, $mlxop, $domain)
+            }
+        };
+    }
+    ubench_ref!(bench_exp, "mlx/unary/exp", mt_exp, "Exp", InputDomain::Signed);
     ubench!(bench_exp2, "mlx/unary/exp2", mt_exp2);
     ubench!(bench_expm1, "mlx/unary/expm1", mt_expm1);
-    ubench!(bench_log, "mlx/unary/log", mt_log);
+    ubench_ref!(bench_log, "mlx/unary/log", mt_log, "Log", InputDomain::Positive);
     ubench!(bench_log2, "mlx/unary/log2", mt_log2);
     ubench!(bench_log10, "mlx/unary/log10", mt_log10);
     ubench!(bench_log1p, "mlx/unary/log1p", mt_log1p);
@@ -366,7 +405,7 @@ pub mod kernel_benches {
     ubench!(bench_sin, "mlx/unary/sin", mt_sin);
     ubench!(bench_cos, "mlx/unary/cos", mt_cos);
     ubench!(bench_tan, "mlx/unary/tan", mt_tan);
-    ubench!(bench_asin, "mlx/unary/asin", mt_asin);
+    ubench_ref!(bench_asin, "mlx/unary/asin", mt_asin, "ArcSin", InputDomain::Unit);
     ubench!(bench_acos, "mlx/unary/acos", mt_acos);
     ubench!(bench_atan, "mlx/unary/atan", mt_atan);
     ubench!(bench_sinh, "mlx/unary/sinh", mt_sinh);

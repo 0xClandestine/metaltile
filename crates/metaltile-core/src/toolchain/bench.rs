@@ -237,17 +237,77 @@ impl BenchBuffer {
 // RefKernel
 // ---------------------------------------------------------------------------
 
-/// A reference Metal kernel to benchmark against a MetalTile kernel.
+/// A reference Metal kernel (e.g. an MLX kernel) to benchmark a MetalTile
+/// kernel against. The runner times both under the same machinery and compares
+/// their outputs for numerical equivalence, so a bench row can report MetalTile
+/// GB/s, reference GB/s, the speed ratio, and a correctness verdict.
 #[derive(Debug, Clone)]
 pub struct RefKernel {
-    /// The Metal kernel function name to dispatch, e.g. `"vvn_expfloat32"`.
+    /// The Metal kernel function to dispatch, e.g. `"vn_expfloat32"`.
     pub fn_name: String,
-    /// Path to the `.metal` source file, relative to `reference_metal_path`.
-    pub metal_file: String,
-    /// Buffers bound positionally (`[[buffer(0)]]`, `[[buffer(1)]]`, etc.).
+    /// Preprocessed Metal source, compilable as-is — every `#include "..."`
+    /// already inlined. In practice this is
+    /// `include_str!(concat!(env!("OUT_DIR"), "/metal/<file>.metal"))`, which
+    /// the `metaltile-std` build script emits from the pinned MLX checkout
+    /// (`ekryski/mlx@alpha`) with includes resolved. (The Metal runtime source
+    /// compiler can't resolve `#include "..."`, so a raw `.metal` path won't do.)
+    pub source: std::borrow::Cow<'static, str>,
+    /// Buffers bound positionally (`[[buffer(0)]]`, `[[buffer(1)]]`, …) in the
+    /// order the reference kernel's signature declares. Exactly one must be
+    /// marked `.output()` — that buffer is read back and compared.
     pub buffers: Vec<BenchBuffer>,
     /// Dispatch grid for the reference kernel.
     pub grid: Grid,
+    /// Maximum absolute error tolerance for the MT-vs-reference equivalence
+    /// check (combined with the shared cosine-similarity floor).
+    pub tol: f32,
+}
+
+impl RefKernel {
+    /// Start building a reference kernel from its function name and compilable
+    /// source. Append buffers with [`buffer`](Self::buffer), then set the grid
+    /// and tolerance. The grid defaults to a degenerate 1×1×1 until set.
+    pub fn new(
+        fn_name: impl Into<String>,
+        source: impl Into<std::borrow::Cow<'static, str>>,
+    ) -> Self {
+        RefKernel {
+            fn_name: fn_name.into(),
+            source: source.into(),
+            buffers: Vec::new(),
+            grid: Grid::new_1d(1, 1),
+            tol: 0.0,
+        }
+    }
+
+    /// Append a positionally-bound buffer.
+    pub fn buffer(mut self, b: BenchBuffer) -> Self {
+        self.buffers.push(b);
+        self
+    }
+
+    /// Set the dispatch grid explicitly.
+    pub fn grid(mut self, grid: Grid) -> Self {
+        self.grid = grid;
+        self
+    }
+
+    /// Set a 1D dispatch grid from total elements and threads-per-group.
+    pub fn grid_1d(mut self, n: usize, tpg: u32) -> Self {
+        self.grid = Grid::new_1d(n, tpg);
+        self
+    }
+
+    /// Set the equivalence tolerance (max absolute error).
+    pub fn tol(mut self, tol: f32) -> Self {
+        self.tol = tol;
+        self
+    }
+
+    /// The single `.output()`-marked buffer, if any — the one compared.
+    pub fn output_buffer(&self) -> Option<&BenchBuffer> {
+        self.buffers.iter().find(|b| b.is_output())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -514,5 +574,30 @@ mod tests {
         let g = Grid::new_2d(8, 4, [16, 8]);
         let s = format!("{g}");
         assert!(s.contains("8") && s.contains("4") && s.contains("16"));
+    }
+
+    #[test]
+    fn ref_kernel_builder_collects_fields_and_finds_output() {
+        let rk = RefKernel::new("vn_expfloat32", "// metal source")
+            .buffer(BenchBuffer::random("in", 64, DType::F32))
+            .buffer(BenchBuffer::zeros("out", 64, DType::F32).output())
+            .grid_1d(64, 256)
+            .tol(1e-3);
+        assert_eq!(rk.fn_name, "vn_expfloat32");
+        assert_eq!(rk.source, "// metal source");
+        assert_eq!(rk.buffers.len(), 2);
+        assert_eq!(rk.grid.tpg[0], 256);
+        assert_eq!(rk.tol, 1e-3);
+        // Exactly the `.output()`-marked buffer is reported as the comparison slot.
+        assert_eq!(rk.output_buffer().map(|b| b.name()), Some("out"));
+    }
+
+    #[test]
+    fn ref_kernel_source_accepts_borrowed_and_owned() {
+        // `include_str!` yields &'static str (borrowed); a runtime String also works.
+        let borrowed = RefKernel::new("k", "static src");
+        let owned = RefKernel::new("k", String::from("owned src"));
+        assert_eq!(borrowed.source, "static src");
+        assert_eq!(owned.source, "owned src");
     }
 }

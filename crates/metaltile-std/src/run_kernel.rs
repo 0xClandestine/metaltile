@@ -27,15 +27,15 @@ use std::collections::BTreeMap;
 
 use metaltile_codegen::msl::MslGenerator;
 use metaltile_core::{
-    bench::{BenchSetup, ConstValue, KernelBench, TestSetup},
+    bench::{BenchSetup, ConstValue, KernelBench, RefKernel, TestSetup},
     dtype::DType,
     ir::ParamKind,
 };
 use metaltile_runtime::Context;
 
 use crate::{
-    bench_types::{EquivResult, OpBench, OpResult, dtype_label},
-    runner::{GpuBuffer, GpuRunner, bench_gbps},
+    bench_types::{EquivResult, OpBench, OpResult, check_equiv, dtype_label},
+    runner::{GpuBuffer, GpuRunner, bench_gbps, read_typed},
     utils::unpack_f32,
 };
 
@@ -208,12 +208,25 @@ pub fn run_kernel_bench(
     let compiled = runner.compile(&msl, &kernel.name).ok()?;
 
     // Allocate resident GPU buffers in codegen binding order: tensor params
-    // first, then constexpr scalars.
+    // first, then constexpr scalars. We also remember (a) each tensor param's
+    // initial bytes by name, so a reference kernel can be fed *identical* input
+    // data for an apples-to-apples A/B, and (b) where the primary output buffer
+    // lands, so it can be read back and compared.
     let mut bufs: Vec<GpuBuffer> =
         Vec::with_capacity(kernel.params.len() + kernel.constexprs.len());
+    let mut input_bytes: std::collections::HashMap<String, Vec<u8>> =
+        std::collections::HashMap::new();
+    let mut mt_out: Option<MtOutput> = None;
     for param in &kernel.params {
         let buf = setup.buffers().iter().find(|b| b.name() == param.name)?;
-        bufs.push(runner.buffer_bytes(&buf.initial_bytes()));
+        let bytes = buf.initial_bytes();
+        if param.is_output && mt_out.is_none() {
+            mt_out = Some(MtOutput { buf_idx: bufs.len(), elems: buf.len(), dtype: buf.dtype() });
+        }
+        // Upload first, then hand the bytes to the share-map (no clone) so a
+        // reference kernel can reuse this exact input.
+        bufs.push(runner.buffer_bytes(&bytes));
+        input_bytes.insert(param.name.clone(), bytes);
         // A `#[strided]` param occupies three consecutive buffer slots —
         // data, then `<name>_shape` and `<name>_strides` — matching the
         // runtime's `push_strided` ABI. The bench setup must carry those two
@@ -252,8 +265,103 @@ pub fn run_kernel_bench(
         },
     };
 
+    // When the bench declares a reference kernel (e.g. an MLX kernel), time it
+    // the same way and compare outputs — the row then reports MT GB/s, ref
+    // GB/s, the speed ratio, and a real correctness verdict. If anything in the
+    // reference path fails (compile, missing output, off-GPU), fall through to
+    // the perf-only row rather than dropping the bench entirely.
+    if let (Some(rk), Some(out)) = (setup.ref_kernel(), mt_out)
+        && let Some(equiv) =
+            run_reference_compare(runner, rk, &bufs, out, &input_bytes, bytes_moved)
+    {
+        return Some(OpBench::new(bench.name(), "GB/s").implemented(
+            shape,
+            Some(equiv.ref_gbps),
+            gbps,
+            equiv.result,
+        ));
+    }
+
     let equiv = EquivResult { n_checked: 0, max_abs_err: 0.0, cosine_sim: 1.0, passed: true };
     Some(OpBench::new(bench.name(), "GB/s").implemented(shape, None, gbps, equiv))
+}
+
+/// Upper bound on output elements compared in a reference A/B. Keeps the
+/// per-kernel read-back + compare cheap; deterministic inputs repeat a short
+/// pattern, so a 1M-element prefix exercises every branch the full output would.
+const COMPARE_ELEM_CAP: usize = 1 << 20;
+
+/// Where a MetalTile kernel's primary output landed, for read-back.
+#[derive(Debug, Clone, Copy)]
+struct MtOutput {
+    /// Index of the output buffer within the positional `bufs` vector.
+    buf_idx: usize,
+    /// Element count of the output.
+    elems: usize,
+    /// Output element dtype.
+    dtype: DType,
+}
+
+/// Result of running a reference kernel alongside MetalTile: its throughput plus
+/// the numerical equivalence verdict between the two outputs.
+struct RefOutcome {
+    ref_gbps: f64,
+    result: EquivResult,
+}
+
+/// Compile, dispatch, and time the reference kernel, then compare its output
+/// against MetalTile's.
+///
+/// The reference is fed **identical input data**: every non-output reference
+/// buffer whose name matches a MetalTile tensor parameter reuses that
+/// parameter's exact initial bytes (`input_bytes`), so the A/B is apples-to-
+/// apples even though `BenchBuffer::random` is non-deterministic. Buffers with
+/// no MetalTile counterpart (the fresh output, MLX-specific scalars) use their
+/// own initial bytes.
+///
+/// Returns `None` (so the caller emits a perf-only row) if the reference can't
+/// compile, declares no `.output()` buffer, or times out.
+fn run_reference_compare(
+    runner: &GpuRunner,
+    rk: &RefKernel,
+    mt_bufs: &[GpuBuffer],
+    mt_out: MtOutput,
+    input_bytes: &std::collections::HashMap<String, Vec<u8>>,
+    bytes_moved: u64,
+) -> Option<RefOutcome> {
+    let compiled = runner.compile(&rk.source, &rk.fn_name).ok()?;
+
+    // Build the reference's positional buffers, sharing MT input data by name.
+    let mut ref_bufs: Vec<GpuBuffer> = Vec::with_capacity(rk.buffers.len());
+    let mut ref_out: Option<(usize, usize, DType)> = None;
+    for b in &rk.buffers {
+        if b.is_output() && ref_out.is_none() {
+            ref_out = Some((ref_bufs.len(), b.len(), b.dtype()));
+        }
+        let bytes = match (b.is_output(), input_bytes.get(b.name())) {
+            (false, Some(shared)) => shared.clone(),
+            _ => b.initial_bytes(),
+        };
+        ref_bufs.push(runner.buffer_bytes(&bytes));
+    }
+    let (ref_out_idx, ref_out_elems, ref_out_dt) = ref_out?;
+
+    let ref_refs: Vec<&GpuBuffer> = ref_bufs.iter().collect();
+    let g = rk.grid.grid.map(|x| x as usize);
+    let t = rk.grid.tpg.map(|x| x as usize);
+    let (ref_gbps, _stats) = bench_gbps(runner, &compiled, &ref_refs, g, t, bytes_moved as f64)?;
+
+    // Read both outputs back (the timed run leaves the last result resident) and
+    // compare over the overlapping prefix. The prefix is capped: a 64M-element
+    // readback + compare per kernel would dominate the bench wall-clock, and a
+    // 1M-element prefix is plenty to catch a miscomputing kernel (inputs repeat
+    // a short pattern, so every code path is exercised within the prefix).
+    let n = mt_out.elems.min(ref_out_elems).min(COMPARE_ELEM_CAP);
+    let mt_vals = read_typed(runner, &mt_bufs[mt_out.buf_idx], n, mt_out.dtype);
+    let ref_vals = read_typed(runner, &ref_bufs[ref_out_idx], n, ref_out_dt);
+    let result = check_equiv(&ref_vals, &mt_vals, rk.tol);
+
+    Some(RefOutcome { ref_gbps, result })
 }
 
 #[cfg(test)]

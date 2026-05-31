@@ -4,7 +4,10 @@ use std::{cell::RefCell, ptr::NonNull};
 
 use metaltile_codegen::msl::MslGenerator;
 pub use metaltile_core::dtype::DType;
-use metaltile_core::ir::{Kernel, KernelMode};
+use metaltile_core::{
+    bench::BenchBuffer,
+    ir::{Kernel, KernelMode},
+};
 
 use crate::stats::BenchStats;
 
@@ -44,6 +47,48 @@ pub fn mlx_tname(dt: DType) -> &'static str {
         DType::Bool => "bool_",
         _ => "float32",
     }
+}
+
+/// Deterministic, range-controlled input distributions for A/B reference
+/// comparisons.
+///
+/// Random bytes reinterpreted as floats overflow transcendentals (exp, sinh) to
+/// inf/nan and fall outside restricted domains (log needs > 0, asin needs
+/// `|x| ≤ 1`), which would make every MT-vs-reference comparison spuriously
+/// fail. So a reference-compared bench seeds its input from a small repeating
+/// pattern inside the op's valid domain (mirrors the legacy `BufInit`).
+/// Throughput is data-independent, so this does not perturb the GB/s figures.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum InputDomain {
+    /// Mixed signs around zero: `[-3, -1.5, -0.5, 0, 0.25, 0.75, 1.5, 3]`.
+    Signed,
+    /// Strictly positive `0.25..=4.0` — for `log`/`sqrt`/`rsqrt`/`acosh` domains.
+    Positive,
+    /// Inside the unit interval: `[-0.9, -0.5, -0.1, 0, 0.1, 0.5, 0.9]` — for
+    /// `asin`/`acos`/`atanh`/`erfinv`.
+    Unit,
+}
+
+impl InputDomain {
+    /// The deterministic value at flat index `i`.
+    pub fn value(self, i: usize) -> f32 {
+        match self {
+            InputDomain::Signed => [-3.0, -1.5, -0.5, 0.0, 0.25, 0.75, 1.5, 3.0][i % 8],
+            InputDomain::Positive => 0.25 + (i % 16) as f32 * 0.25,
+            InputDomain::Unit => [-0.9, -0.5, -0.1, 0.0, 0.1, 0.5, 0.9][i % 7],
+        }
+    }
+}
+
+/// Build a `BenchBuffer` of `n` elements filled with `domain`'s deterministic
+/// pattern, packed for `dt`.
+///
+/// Use for the **input** of a reference-compared bench so MetalTile and the
+/// reference kernel see identical, in-domain data (the runner shares this exact
+/// buffer with the reference by name).
+pub fn input_buffer(name: &str, n: usize, dt: DType, domain: InputDomain) -> BenchBuffer {
+    let vals: Vec<f32> = (0..n).map(|i| domain.value(i)).collect();
+    BenchBuffer::from_vec(name, crate::utils::pack_f32(&vals, dt), dt)
 }
 
 /// Bytes per element.
