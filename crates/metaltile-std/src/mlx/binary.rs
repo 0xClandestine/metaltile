@@ -223,69 +223,100 @@ pub mod kernel_tests {
 /// New-syntax benchmarks for the elementwise binary ops (vs MLX
 /// `metal/binary.metal`). Reads `a` + `b`, writes the output.
 pub mod kernel_benches {
-    use metaltile::{bench, test::*};
+    use metaltile::{bench, core::ir::Kernel, test::*};
 
     use super::*;
+    use crate::bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname};
 
-    // Buffers bind by name to the kernel's params, so pass the actual param
-    // names (vector_add uses a/b/c; atan2 uses y/x/out; the rest a/b/out).
-    fn setup(kernel: metaltile::core::ir::Kernel, names: [&str; 3], dt: DType) -> BenchSetup {
-        let n = 64 * 1024 * 1024usize;
+    const BINARY_N: usize = 64 * 1024 * 1024;
+
+    /// Build a binary bench against MLX `metal/binary.metal` `vvn_<Op><tn>`
+    /// (`binary_vv`, 1 element/thread). Both inputs are seeded with the
+    /// `Positive` pattern (safe for every op — no div-by-zero, no `pow` of a
+    /// negative, no overflow) and shared by name with the reference, so the A/B
+    /// checks MetalTile and MLX agree. `tol_floor` lifts the tolerance for ops
+    /// that legitimately diverge by > 1 ULP (`pow`/`atan2`/`logaddexp`).
+    ///
+    /// `names` are the MT kernel's param names (vector_add uses a/b/c; atan2 uses
+    /// y/x/out; the rest a/b/out) so MT buffers bind correctly; the reference
+    /// reuses `names[0]`/`names[1]` to share the same inputs.
+    fn setup_ref(
+        kernel: Kernel,
+        names: [&str; 3],
+        dt: DType,
+        mlx_op: &str,
+        tol_floor: f32,
+    ) -> BenchSetup {
+        let n = BINARY_N;
+        let tn = mlx_tname(dt);
         BenchSetup::new(kernel)
-            .buffer(BenchBuffer::random(names[0], n, dt))
-            .buffer(BenchBuffer::random(names[1], n, dt))
+            .buffer(input_buffer(names[0], n, dt, InputDomain::Positive))
+            .buffer(input_buffer(names[1], n, dt, InputDomain::Positive))
             .buffer(BenchBuffer::zeros(names[2], n, dt).output())
             .grid_1d(n, 256)
             .bytes_moved((3 * n * dt.size_bytes()) as u64)
+            .with_reference(
+                RefKernel::new(
+                    format!("vvn_{mlx_op}{tn}"),
+                    include_str!(concat!(env!("OUT_DIR"), "/metal/binary.metal")),
+                )
+                // a/b shared by name with the MT inputs above (placeholders).
+                .buffer(BenchBuffer::zeros(names[0], n, dt))
+                .buffer(BenchBuffer::zeros(names[1], n, dt))
+                .buffer(BenchBuffer::zeros("out", n, dt).output())
+                .buffer(BenchBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
+                .grid_1d(n, 256)
+                .tol(dtype_tol(dt).max(tol_floor)),
+            )
     }
 
     #[bench(name = "mlx/binary/add", dtypes = [f32, f16, bf16])]
     fn bench_add(dt: DType) -> BenchSetup {
-        setup(vector_add::kernel_ir_for(dt), ["a", "b", "c"], dt)
+        setup_ref(vector_add::kernel_ir_for(dt), ["a", "b", "c"], dt, "Add", 0.0)
     }
 
     #[bench(name = "mlx/binary/mul", dtypes = [f32, f16, bf16])]
     fn bench_mul(dt: DType) -> BenchSetup {
-        setup(mt_mul::kernel_ir_for(dt), ["a", "b", "out"], dt)
+        setup_ref(mt_mul::kernel_ir_for(dt), ["a", "b", "out"], dt, "Multiply", 0.0)
     }
 
     #[bench(name = "mlx/binary/sub", dtypes = [f32, f16, bf16])]
     fn bench_sub(dt: DType) -> BenchSetup {
-        setup(mt_sub::kernel_ir_for(dt), ["a", "b", "out"], dt)
+        setup_ref(mt_sub::kernel_ir_for(dt), ["a", "b", "out"], dt, "Subtract", 0.0)
     }
 
     #[bench(name = "mlx/binary/div", dtypes = [f32, f16, bf16])]
     fn bench_div(dt: DType) -> BenchSetup {
-        setup(mt_div::kernel_ir_for(dt), ["a", "b", "out"], dt)
+        setup_ref(mt_div::kernel_ir_for(dt), ["a", "b", "out"], dt, "Divide", 0.0)
     }
 
     #[bench(name = "mlx/binary/maximum", dtypes = [f32, f16, bf16])]
     fn bench_max(dt: DType) -> BenchSetup {
-        setup(mt_max_elem::kernel_ir_for(dt), ["a", "b", "out"], dt)
+        setup_ref(mt_max_elem::kernel_ir_for(dt), ["a", "b", "out"], dt, "Maximum", 0.0)
     }
 
     #[bench(name = "mlx/binary/minimum", dtypes = [f32, f16, bf16])]
     fn bench_min(dt: DType) -> BenchSetup {
-        setup(mt_min_elem::kernel_ir_for(dt), ["a", "b", "out"], dt)
+        setup_ref(mt_min_elem::kernel_ir_for(dt), ["a", "b", "out"], dt, "Minimum", 0.0)
     }
 
     #[bench(name = "mlx/binary/pow", dtypes = [f32, f16, bf16])]
     fn bench_pow(dt: DType) -> BenchSetup {
-        setup(mt_pow::kernel_ir_for(dt), ["a", "b", "out"], dt)
+        setup_ref(mt_pow::kernel_ir_for(dt), ["a", "b", "out"], dt, "Power", 1e-4)
     }
 
     #[bench(name = "mlx/binary/atan2", dtypes = [f32, f16, bf16])]
     fn bench_atan2(dt: DType) -> BenchSetup {
-        setup(mt_atan2::kernel_ir_for(dt), ["y", "x", "out"], dt)
+        setup_ref(mt_atan2::kernel_ir_for(dt), ["y", "x", "out"], dt, "ArcTan2", 1e-3)
     }
 
     #[bench(name = "mlx/binary/remainder", dtypes = [f32, f16, bf16])]
     fn bench_remainder(dt: DType) -> BenchSetup {
-        setup(mt_remainder::kernel_ir_for(dt), ["a", "b", "out"], dt)
+        setup_ref(mt_remainder::kernel_ir_for(dt), ["a", "b", "out"], dt, "Remainder", 1e-4)
     }
 
     #[bench(name = "mlx/binary/logaddexp", dtypes = [f32, f16, bf16])]
     fn bench_logaddexp(dt: DType) -> BenchSetup {
-        setup(mt_logaddexp::kernel_ir_for(dt), ["a", "b", "out"], dt)
+        setup_ref(mt_logaddexp::kernel_ir_for(dt), ["a", "b", "out"], dt, "LogAddExp", 1e-2)
     }
 }
