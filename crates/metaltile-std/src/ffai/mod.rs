@@ -36,6 +36,7 @@ pub mod batched_qkv_block_scaled_qgemv;
 pub mod batched_qkv_block_scaled_qmm;
 pub mod batched_qkv_qgemv;
 pub mod batched_qkv_qmm;
+pub mod clamp_scalar;
 pub mod conv1d_causal_step_silu_cast_many;
 pub mod conv2d;
 pub mod conv2d_block_scaled;
