@@ -43,7 +43,7 @@ use rustc_hash::FxHashMap;
 use super::remap;
 use crate::error::{Error, Result};
 
-const MAX_UNROLL_TRIP: i64 = 8;
+const MAX_UNROLL_TRIP: i64 = 16;
 
 pub struct UnrollPass {
     factor: u32,
@@ -54,7 +54,7 @@ impl UnrollPass {
 }
 
 impl Default for UnrollPass {
-    fn default() -> Self { UnrollPass::new(4) }
+    fn default() -> Self { UnrollPass::new(16) }
 }
 
 impl super::Pass for UnrollPass {

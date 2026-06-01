@@ -603,6 +603,9 @@ impl DslBodyParser {
             "stack_alloc" => self.parse_stack_alloc(call),
             "stack_load" => self.parse_stack_load(call),
             "stack_store" => self.parse_stack_store(call),
+            // Indexed register-local scalar arrays (hoisted named floats, one per slot).
+            "get_local_idx" => self.parse_get_local_idx(call),
+            "set_local_idx" => self.parse_set_local_idx(call),
             "simd_scan_inclusive" => self.parse_simd_scan(call, false),
             "simd_scan_exclusive" => self.parse_simd_scan(call, true),
             "simdgroup_alloc" => self.parse_simdgroup_alloc(call),
@@ -1567,6 +1570,40 @@ impl DslBodyParser {
             Op::StackStore {
                 name: #name.to_string(),
                 index: ValueId::new(#idx_vid),
+                value: ValueId::new(#val_vid),
+            }
+        });
+        0
+    }
+
+    /// `get_local_idx("name", idx)` → Op::GetLocalIdx.
+    fn parse_get_local_idx(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<_> = call.args.iter().collect();
+        let name = string_lit_from_expr(args.first().unwrap_or(&&*call.func));
+        let idx_vid = args.get(1).map(|a| self.parse_expr(a)).unwrap_or(0);
+        let result = self.alloc_vid();
+        self.push_op(
+            quote! {
+                Op::GetLocalIdx {
+                    name: #name.to_string(),
+                    idx: ValueId::new(#idx_vid),
+                }
+            },
+            result,
+        );
+        result
+    }
+
+    /// `set_local_idx("name", idx, val)` → Op::SetLocalIdx (no result).
+    fn parse_set_local_idx(&mut self, call: &ExprCall) -> u32 {
+        let args: Vec<_> = call.args.iter().collect();
+        let name = string_lit_from_expr(args.first().unwrap_or(&&*call.func));
+        let idx_vid = args.get(1).map(|a| self.parse_expr(a)).unwrap_or(0);
+        let val_vid = args.get(2).map(|a| self.parse_expr(a)).unwrap_or(0);
+        self.push_op_no_result(quote! {
+            Op::SetLocalIdx {
+                name: #name.to_string(),
+                idx: ValueId::new(#idx_vid),
                 value: ValueId::new(#val_vid),
             }
         });

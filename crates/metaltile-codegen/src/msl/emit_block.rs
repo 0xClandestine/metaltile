@@ -10,7 +10,7 @@ use metaltile_core::{
     dtype::DType,
     ir::{BinOpKind, Block, BlockId, CoopTileScope, Kernel, KernelMode, Op, ReduceKind, ValueId},
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
     MslGenerator,
@@ -30,6 +30,7 @@ impl MslGenerator {
         type_env: &TypeEnv,
         extra_names: &BTreeMap<ValueId, String>,
         hoists: &mut Vec<String>,
+        declared_local_idx: &mut FxHashSet<String>,
     ) -> Result<()> {
         let has_tile = matches!(kernel.mode, KernelMode::Tile2D);
         let pad = "    ".repeat(indent);
@@ -49,6 +50,15 @@ impl MslGenerator {
             }
         }
         let extra_names = &dedup_extra;
+
+        // Build ValueId → constant-integer map for this block so GetLocalIdx /
+        // SetLocalIdx can resolve their `idx` fields to concrete slot numbers.
+        let const_map: FxHashMap<ValueId, i64> = block
+            .ops
+            .iter()
+            .zip(block.results.iter())
+            .filter_map(|(op, r)| r.and_then(|vid| op.as_const().map(|c| (vid, c))))
+            .collect();
 
         for (i, op) in block.ops.iter().enumerate() {
             let vid = block.results.get(i).and_then(|x| *x);
@@ -481,6 +491,7 @@ impl MslGenerator {
                             type_env,
                             &inner_names,
                             hoists,
+                            declared_local_idx,
                         )?;
                     }
                     wl!(out, "{pad}}}");
@@ -822,6 +833,7 @@ impl MslGenerator {
                             type_env,
                             &child_names,
                             hoists,
+                            declared_local_idx,
                         )?;
                     }
                     if let Some(ebid) = else_block {
@@ -836,6 +848,7 @@ impl MslGenerator {
                                 type_env,
                                 &child_names,
                                 hoists,
+                                declared_local_idx,
                             )?;
                         }
                     }
@@ -1169,6 +1182,47 @@ impl MslGenerator {
                 Op::SetLocal { name, value } => {
                     let rv = self.vname(Some(*value), block, extra_names);
                     wl!(out, "{pad}__ml_{name} = {rv};");
+                },
+
+                // ---- indexed register-local scalar arrays ----------------
+                // GetLocalIdx/SetLocalIdx implement a per-thread named-register
+                // array.  Unlike StackAlloc (which emits `float name[N]`), these
+                // hoist individual `float __ml_{name}_{k};` declarations to the
+                // function scope so every block can read/write the same register
+                // without re-declaration. `idx` MUST resolve to a compile-time
+                // constant (i.e. after ConstFold + UnrollPass).
+                Op::GetLocalIdx { name, idx } => {
+                    let v = self.vname(vid, block, extra_names);
+                    let k = const_map.get(idx).copied().unwrap_or_else(|| {
+                        // idx was not a literal constant in this block —
+                        // fall back to the vname string and emit a dynamic access.
+                        // This will produce a Metal compile error if the resulting
+                        // expression is not actually constant, which is the
+                        // correct failure mode.
+                        i64::MAX
+                    });
+                    if k == i64::MAX {
+                        let iv = self.vname(Some(*idx), block, extra_names);
+                        wl!(out, "{pad}float {v} = __ml_{name}[{iv}]; /* dynamic idx — unrolling needed */");
+                    } else {
+                        wl!(out, "{pad}float {v} = __ml_{name}_{k};");
+                    }
+                },
+
+                Op::SetLocalIdx { name, idx, value } => {
+                    let rv = self.vname(Some(*value), block, extra_names);
+                    let k = const_map.get(idx).copied().unwrap_or(i64::MAX);
+                    if k == i64::MAX {
+                        let iv = self.vname(Some(*idx), block, extra_names);
+                        wl!(out, "{pad}__ml_{name}[{iv}] = {rv}; /* dynamic idx — unrolling needed */");
+                    } else {
+                        let var_key = format!("{name}_{k}");
+                        if declared_local_idx.insert(var_key.clone()) {
+                            // First declaration: hoist to function scope.
+                            hoists.push(format!("float __ml_{var_key};"));
+                        }
+                        wl!(out, "{pad}__ml_{var_key} = {rv};");
+                    }
                 },
 
                 // ---- arg reduce -----------------------------------------

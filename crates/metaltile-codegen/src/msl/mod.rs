@@ -584,6 +584,7 @@ impl MslGenerator {
         let mut body_buf = String::new();
         let mut hoists: Vec<String> = Vec::new();
         let extra_names: BTreeMap<ValueId, String> = BTreeMap::new();
+        let mut declared_local_idx = rustc_hash::FxHashSet::default();
 
         if feat.is_matmul {
             self.emit_tiled(&mut body_buf, "    ", kernel, None)?;
@@ -597,6 +598,7 @@ impl MslGenerator {
                 type_env,
                 &extra_names,
                 &mut hoists,
+                &mut declared_local_idx,
             )?;
         }
 
