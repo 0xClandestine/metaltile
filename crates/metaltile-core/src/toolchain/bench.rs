@@ -144,11 +144,30 @@ impl fmt::Display for Grid {
 // ---------------------------------------------------------------------------
 
 /// How a GPU buffer should be initialised before running a benchmark.
-#[derive(Debug, Clone)]
+///
+/// `Lazy` defers data generation until [`BenchBuffer::initial_bytes`] is called
+/// (i.e. only when a bench actually runs on-GPU). Building a `BenchSetup` purely
+/// to read its kernel IR — as the codegen-consistency tests and `tile build` do
+/// for all ~1200 benches — then costs nothing. (A deterministic `input_buffer`
+/// of 64M elements would otherwise materialise ~256 MB *per* `setup()` call,
+/// which dominated those tests after the MLX A/B benches landed.)
+#[derive(Clone)]
 enum BufferInit {
     Random,
     Zeros,
     FromVec(Vec<u8>),
+    Lazy(std::sync::Arc<dyn Fn() -> Vec<u8> + Send + Sync>),
+}
+
+impl std::fmt::Debug for BufferInit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BufferInit::Random => write!(f, "Random"),
+            BufferInit::Zeros => write!(f, "Zeros"),
+            BufferInit::FromVec(v) => write!(f, "FromVec({} bytes)", v.len()),
+            BufferInit::Lazy(_) => write!(f, "Lazy(..)"),
+        }
+    }
 }
 
 /// Describes a GPU buffer for a benchmark run.
@@ -198,6 +217,27 @@ impl BenchBuffer {
         }
     }
 
+    /// Create a `len`-element buffer whose bytes are produced on demand by
+    /// `generate` (invoked from [`initial_bytes`](Self::initial_bytes), i.e.
+    /// only when the bench actually runs). Use for deterministic inputs that are
+    /// expensive to materialise so that building a `BenchSetup` just to inspect
+    /// its kernel IR stays cheap. `generate` must return exactly
+    /// `len * dtype.size_bytes()` bytes.
+    pub fn lazy(
+        name: &str,
+        len: usize,
+        dtype: DType,
+        generate: std::sync::Arc<dyn Fn() -> Vec<u8> + Send + Sync>,
+    ) -> Self {
+        BenchBuffer {
+            name: name.to_string(),
+            len,
+            dtype,
+            is_output: false,
+            init: BufferInit::Lazy(generate),
+        }
+    }
+
     /// Mark this buffer as an output slot.
     pub fn output(mut self) -> Self {
         self.is_output = true;
@@ -229,6 +269,7 @@ impl BenchBuffer {
             BufferInit::Random => random_bytes(n),
             BufferInit::Zeros => vec![0u8; n],
             BufferInit::FromVec(v) => v.clone(),
+            BufferInit::Lazy(generate) => generate(),
         }
     }
 }

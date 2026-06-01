@@ -94,8 +94,19 @@ impl InputDomain {
 /// reference kernel see identical, in-domain data (the runner shares this exact
 /// buffer with the reference by name).
 pub fn input_buffer(name: &str, n: usize, dt: DType, domain: InputDomain) -> BenchBuffer {
-    let vals: Vec<f32> = (0..n).map(|i| domain.value(i)).collect();
-    BenchBuffer::from_vec(name, crate::utils::pack_f32(&vals, dt), dt)
+    // Generate lazily: a `BenchSetup` is often built only to read its kernel IR
+    // (codegen-consistency tests, `tile build`), and an eager 64M-element fill
+    // would materialise ~256 MB per call for nothing. The bytes are produced
+    // only when the bench actually runs (`initial_bytes`).
+    BenchBuffer::lazy(
+        name,
+        n,
+        dt,
+        std::sync::Arc::new(move || {
+            let vals: Vec<f32> = (0..n).map(|i| domain.value(i)).collect();
+            crate::utils::pack_f32(&vals, dt)
+        }),
+    )
 }
 
 /// Bytes per element.
