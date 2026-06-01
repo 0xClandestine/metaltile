@@ -332,7 +332,13 @@ fn run_reference_compare(
     input_bytes: &std::collections::HashMap<String, Vec<u8>>,
     bytes_moved: u64,
 ) -> Option<RefOutcome> {
-    let compiled = runner.compile(&rk.source, &rk.fn_name).ok()?;
+    // Compile the reference, binding any Metal function constants it requires
+    // (e.g. rope / steel attention gate their body on no-default bool constants).
+    let compiled = if rk.bool_constants.is_empty() {
+        runner.compile(&rk.source, &rk.fn_name).ok()?
+    } else {
+        runner.compile_with_bool_constants(&rk.source, &rk.fn_name, &rk.bool_constants).ok()?
+    };
 
     // Build the reference's positional buffers, sharing MT input data by name.
     let mut ref_bufs: Vec<GpuBuffer> = Vec::with_capacity(rk.buffers.len());

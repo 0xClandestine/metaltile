@@ -343,9 +343,12 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::mt_sdpa_prefill;
-    use crate::mlx::steel::attn::{
-        steel_attention_mma::mt_sdpa_prefill_mma,
-        steel_attention_mma_bf16::mt_sdpa_prefill_mma_bf16,
+    use crate::{
+        bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname},
+        mlx::steel::attn::{
+            steel_attention_mma::mt_sdpa_prefill_mma,
+            steel_attention_mma_bf16::mt_sdpa_prefill_mma_bf16,
+        },
     };
 
     // SDPA prefill geometry shared by all three variants.
@@ -358,16 +361,94 @@ pub mod kernel_benches {
     const K_LEN: usize = 512;
     const BQ: u32 = 32;
     const TPG: u32 = 128;
+    // MLX `steel_attention` tile params (fixed instantiation it ships):
+    // bq=32, bk=16 (bd=128 ⇒ bk=16), wm=4, wn=1. Our MT BQ is a separate
+    // tuning knob; the MLX dispatch always uses its bq=32/bk=16 tile.
+    const MLX_BQ: usize = 32;
+    const MLX_BK: usize = 16;
+    const MLX_WM: u32 = 4;
+    const MLX_WN: u32 = 1;
+    /// Tolerance floor — legacy steel_attention bench `tol=2e-2`. MT bakes
+    /// `scale·log2(e)` and softmaxes with `exp2`; MLX applies `scale` with a
+    /// natural-base softmax. The two are mathematically identical (softmax is
+    /// log-base invariant), so f32 is bit-tight; f16/bf16 carry storage
+    /// quantization (worst observed ~1.4e-3 on bf16 at T=512).
+    const ATTN_TOL_FLOOR: f32 = 2e-2;
+
+    /// Build the 152-byte MLX `AttnParams` buffer (mlx steel/attn/params.h) for
+    /// the fixed bench shape. Layout: 6 i32 (B,H,D,qL,kL,gqa) + 1 f32 (scale) +
+    /// 7 i32 (NQ,NK,NQ_aligned,NK_aligned,qL_rem,kL_rem,qL_off) = 56 bytes, then
+    /// Q/K/V/O strides (12 × i64 = 96 bytes), in element units. Total 152.
+    fn attn_params(scale: f32) -> Vec<u8> {
+        let mut p = Vec::<u8>::with_capacity(152);
+        let push_i32 = |v: i32, p: &mut Vec<u8>| p.extend_from_slice(&v.to_le_bytes());
+        let push_i64 = |v: i64, p: &mut Vec<u8>| p.extend_from_slice(&v.to_le_bytes());
+        let nq = Q_LEN.div_ceil(MLX_BQ);
+        let nk = K_LEN.div_ceil(MLX_BK);
+        let nq_aligned = Q_LEN / MLX_BQ;
+        let nk_aligned = K_LEN / MLX_BK;
+        push_i32(BATCH as i32, &mut p); // B
+        push_i32(N_Q_HEADS as i32, &mut p); // H
+        push_i32(HEAD_DIM as i32, &mut p); // D
+        push_i32(Q_LEN as i32, &mut p); // qL
+        push_i32(K_LEN as i32, &mut p); // kL
+        push_i32(GQA_FACTOR as i32, &mut p); // gqa_factor
+        p.extend_from_slice(&scale.to_le_bytes()); // scale (f32)
+        push_i32(nq as i32, &mut p); // NQ
+        push_i32(nk as i32, &mut p); // NK
+        push_i32(nq_aligned as i32, &mut p); // NQ_aligned
+        push_i32(nk_aligned as i32, &mut p); // NK_aligned
+        push_i32((Q_LEN - nq_aligned * MLX_BQ) as i32, &mut p); // qL_rem
+        push_i32((K_LEN - nk_aligned * MLX_BK) as i32, &mut p); // kL_rem
+        push_i32((K_LEN - Q_LEN) as i32, &mut p); // qL_off (causal start offset)
+        // Strides in element units. Q/O: [B, H, qL, D=1]; K/V: [B, H, kL, D=1].
+        let q_t = HEAD_DIM as i64;
+        let q_h = Q_LEN as i64 * q_t;
+        let q_b = N_Q_HEADS as i64 * q_h;
+        let kv_t = HEAD_DIM as i64;
+        let kv_h = K_LEN as i64 * kv_t;
+        let kv_b = N_KV_HEADS as i64 * kv_h;
+        // Q strides (B, H, T).
+        push_i64(q_b, &mut p);
+        push_i64(q_h, &mut p);
+        push_i64(q_t, &mut p);
+        // K strides (B, H, T).
+        push_i64(kv_b, &mut p);
+        push_i64(kv_h, &mut p);
+        push_i64(kv_t, &mut p);
+        // V strides (B, H, T).
+        push_i64(kv_b, &mut p);
+        push_i64(kv_h, &mut p);
+        push_i64(kv_t, &mut p);
+        // O strides (B, H, T) — same layout as Q.
+        push_i64(q_b, &mut p);
+        push_i64(q_h, &mut p);
+        push_i64(q_t, &mut p);
+        // Params are dtype-independent: strides are in element units, so the
+        // same AttnParams serves f32/f16/bf16 (only the q/k/v/o buffers differ).
+        p
+    }
 
     fn sdpa_b(kernel: metaltile::core::ir::Kernel, dt: DType) -> BenchSetup {
         let q_elems = BATCH * N_Q_HEADS * Q_LEN * HEAD_DIM;
         let kv_elems = BATCH * N_KV_HEADS * K_LEN * HEAD_DIM;
         let scale = 1.0f32 / (HEAD_DIM as f32).sqrt();
+        let tn = mlx_tname(dt);
+        // MLX `steel_attention` host_name uses the iname for the mask type when
+        // there is no mask (`type_to_name(has_mask ? *mask : q)`), so the mask
+        // suffix equals the q-type name.
+        let mlx_kname = format!(
+            "steel_attention_{tn}_bq{MLX_BQ}_bk{MLX_BK}_bd{HEAD_DIM}_wm{MLX_WM}_wn{MLX_WN}_mask{tn}"
+        );
+        let nq = (Q_LEN / MLX_BQ) as u32; // 512 / 32 = 16 full Q blocks
         BenchSetup::new(kernel)
             .mode(KernelMode::SimdGroup2D)
-            .buffer(BenchBuffer::random("q", q_elems, dt))
-            .buffer(BenchBuffer::random("k", kv_elems, dt))
-            .buffer(BenchBuffer::random("v", kv_elems, dt))
+            // q/k/v seeded `Signed` (in-domain, nan-free) and shared by name with
+            // the reference so both kernels attend over identical data; raw
+            // `random` f32 bytes alias to inf/nan and would poison the A/B.
+            .buffer(input_buffer("q", q_elems, dt, InputDomain::Signed))
+            .buffer(input_buffer("k", kv_elems, dt, InputDomain::Signed))
+            .buffer(input_buffer("v", kv_elems, dt, InputDomain::Signed))
             .buffer(BenchBuffer::zeros("out", q_elems, dt).output())
             .constexpr("q_len", Q_LEN as u32)
             .constexpr("k_len", K_LEN as u32)
@@ -379,6 +460,36 @@ pub mod kernel_benches {
             .grid_3d(Q_LEN as u32 / BQ, N_Q_HEADS as u32, BATCH as u32, [TPG, 1, 1])
             // Q/O read+written once each; K/V read once per q_tile group.
             .bytes_moved(((2 * q_elems + 2 * kv_elems) * dt.size_bytes()) as u64)
+            .with_reference(
+                RefKernel::new(
+                    mlx_kname,
+                    include_str!(concat!(
+                        env!("OUT_DIR"),
+                        "/metal/steel/attn/steel_attention.metal"
+                    )),
+                )
+                // Q[[0]] / K[[1]] / V[[2]] shared by name with the MT inputs.
+                .buffer(BenchBuffer::zeros("q", q_elems, dt))
+                .buffer(BenchBuffer::zeros("k", kv_elems, dt))
+                .buffer(BenchBuffer::zeros("v", kv_elems, dt))
+                // O[[3]] — fresh output, same [B, H, qL, D] layout as MT `out`.
+                .buffer(BenchBuffer::zeros("out", q_elems, dt).output())
+                // params[[4]] — 152-byte AttnParams struct.
+                .buffer(BenchBuffer::from_vec("attn_params", attn_params(scale), DType::U8))
+                // Function constants (no defaults in steel_attention.h):
+                //   align_Q(200)=qL % bq == 0, align_K(201)=kL % bk == 0,
+                //   has_mask(300)=false, do_causal(301)=true, has_sinks(302)=false.
+                // mask_params[[5]]/mask[[6]]/sinks[[7]] are gated off by
+                // has_mask/has_sinks=false, so they are left unbound.
+                .bool_constant(200, Q_LEN.is_multiple_of(MLX_BQ))
+                .bool_constant(201, K_LEN.is_multiple_of(MLX_BK))
+                .bool_constant(300, false)
+                .bool_constant(301, true)
+                .bool_constant(302, false)
+                // Grid = (NQ, n_q_heads, batch); tpg = (32, wm, wn) = 128 lanes.
+                .grid(Grid::new_3d(nq, N_Q_HEADS as u32, BATCH as u32, [32, MLX_WM, MLX_WN]))
+                .tol(dtype_tol(dt).max(ATTN_TOL_FLOOR)),
+            )
     }
 
     #[bench(name = "mlx/sdpa/sdpa_prefill", dtypes = [f32, f16, bf16])]

@@ -261,6 +261,11 @@ pub struct RefKernel {
     /// Maximum absolute error tolerance for the MT-vs-reference equivalence
     /// check (combined with the shared cosine-similarity floor).
     pub tol: f32,
+    /// Boolean Metal `[[function_constant(index)]]` specializations to set at
+    /// compile time, as `(index, value)` pairs. Many MLX kernels (rope, steel
+    /// attention) gate their body on function constants that have no default, so
+    /// they only compile once these are bound. Empty for kernels that take none.
+    pub bool_constants: Vec<(usize, bool)>,
 }
 
 impl RefKernel {
@@ -277,7 +282,16 @@ impl RefKernel {
             buffers: Vec::new(),
             grid: Grid::new_1d(1, 1),
             tol: 0.0,
+            bool_constants: Vec::new(),
         }
+    }
+
+    /// Bind a boolean Metal function constant by index for compile-time
+    /// specialization (chainable). Needed for MLX kernels whose function
+    /// constants have no default (rope, steel attention).
+    pub fn bool_constant(mut self, index: usize, value: bool) -> Self {
+        self.bool_constants.push((index, value));
+        self
     }
 
     /// Append a positionally-bound buffer.

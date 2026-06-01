@@ -917,6 +917,32 @@ pub mod kernel_tests {
     }
 }
 
+// ── NO MLX `.with_reference` — chained-2-pass vs single-pass mismatch ──────
+//
+// The legacy bench (dcbe860, `subop="sdpa_decode_2pass"`, `class=SdpaVector2Pass`,
+// `mlx="sdpa_vector_{tn}_128_128"`) compared the CHAINED pass1→pass2 FINAL output
+// against MLX's SINGLE-pass `sdpa_vector`. The new `.with_reference` mechanism
+// (`run_reference_compare` in run_kernel.rs) times exactly ONE MT kernel against
+// ONE reference kernel, sharing inputs by name and comparing a single `.output()`
+// buffer — it cannot chain pass1→pass2 before comparing. This file registers
+// pass1 and pass2 as SEPARATE perf-only rows, neither of which has a comparable
+// single MLX kernel:
+//
+//   • pass1 emits per-block intermediates (`partial_o/partial_m/partial_l`),
+//     not the final attention output. MLX's `sdpa_vector_2pass_1` produces
+//     analogous partials, but its block-partition + softmax-state layout was
+//     never proven element-equivalent to ours on-GPU (the legacy harness only
+//     ever checked the chained final output), so a reference here would risk a
+//     spurious FAIL.
+//   • pass2 reads `random` partials (NOT real attention partials from a live
+//     pass1) and merges them. Comparing that to MLX `sdpa_vector` — which reads
+//     q/k/v and computes the whole attention — is mathematically unrelated:
+//     no shared inputs, no comparable output.
+//
+// → FLAGGED: not portable to the single-kernel reference mechanism without a
+//   chained-dispatch harness extension. Left perf-only (8 rows: 4 head dims × 2
+//   passes). The chained-output correctness lives in `kernel_tests` above
+//   (`emulate_pass1` → pass2) which reconstructs dense attention on the CPU.
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
