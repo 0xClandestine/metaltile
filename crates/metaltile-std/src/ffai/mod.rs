@@ -48,6 +48,7 @@ pub mod conv3d_mma;
 pub mod conv3d_mma_block_scaled;
 pub mod depthwise_conv2d;
 pub mod depthwise_conv2d_block_scaled;
+pub mod depthwise_conv2d_nhwc;
 pub mod dequant_gather;
 pub mod dequant_gather_block_scaled;
 pub mod dequant_gemv;
