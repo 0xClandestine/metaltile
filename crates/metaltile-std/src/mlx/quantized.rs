@@ -6266,11 +6266,22 @@ pub mod kernel_benches {
     }
 
     /// `qmb` with an optional MLX reference `(kind, tol)`. When a reference is
-    /// attached, `scales`/`biases`/`x` are seeded from bounded `InputDomain`
-    /// patterns (not raw `BenchBuffer::random`, whose random f32 *bytes* alias
-    /// to inf/nan and would poison the A/B equivalence check); the runner shares
+    /// attached, `scales`/`biases`/`x` are seeded from the small-magnitude
+    /// `InputDomain::Tiny` pattern (not raw `BenchBuffer::random`, whose random
+    /// f32 *bytes* alias to inf/nan and would poison the A/B); the runner shares
     /// these exact bytes with the reference by name. Weights stay `random` u32 —
-    /// any bit pattern is a valid packed quant code.
+    /// any bit pattern is a valid packed quant code, and `Tiny` scales bound the
+    /// dequantized magnitude regardless.
+    ///
+    /// Why `Tiny`, not `Positive`/`Signed`: MT folds the dequant dot in f32
+    /// while MLX rounds its output to the I/O dtype, so the A/B gap **scales with
+    /// the output magnitude** (`≈ max_code × √K`). At K=4096 a `Positive`/`Signed`
+    /// fill drives the f16/bf16 output to the thousands, where one output ULP
+    /// already exceeds the absolute tol (this is the PR #240 CI "Bench" failure,
+    /// worse on the paravirtual CI GPU). `Tiny` keeps the output ≈ O(0.1), so the
+    /// absolute gap shrinks ~30000× — comfortably inside tol — while the
+    /// scale-invariant `cosine_sim` floor still guards against any *algorithmic*
+    /// MT-vs-MLX divergence (which tiny magnitudes can't mask).
     #[allow(clippy::too_many_arguments)]
     fn qmb_ref(
         kernel: Kernel,
@@ -6289,13 +6300,14 @@ pub mod kernel_benches {
         let pf = 32 / bits as usize;
         let sz = dt.size_bytes();
         let bytes = n * k * bits as usize / 8 + 2 * n * gspr * sz + m * k * sz + m * n * sz;
-        // Scales positive, biases/x signed-and-finite when a reference is
-        // attached so the A/B compare sees identical, nan-free data.
+        // Small-magnitude, finite, identical data on both sides when a reference
+        // is attached, so the K-deep matmul output stays O(0.1) and the
+        // f32-vs-output-rounding gap fits well inside tol (see fn docs).
         let (scales_buf, biases_buf, x_buf) = if reference.is_some() {
             (
-                input_buffer("scales", n * gspr, dt, InputDomain::Positive),
-                input_buffer("biases", n * gspr, dt, InputDomain::Signed),
-                input_buffer("x", m * k, dt, InputDomain::Signed),
+                input_buffer("scales", n * gspr, dt, InputDomain::Tiny),
+                input_buffer("biases", n * gspr, dt, InputDomain::Tiny),
+                input_buffer("x", m * k, dt, InputDomain::Tiny),
             )
         } else {
             (
