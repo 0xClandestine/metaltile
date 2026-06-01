@@ -1,8 +1,8 @@
 # tile CLI configuration
 # https://github.com/0xClandestine/metaltile
 #
-# Values here are overridden by TILE__* environment variables
-# (e.g. TILE__VERBOSE=true, TILE__RUNNER_BINARY=/usr/local/bin/__tile_runner).
+# Values here are overridden by TILE_* environment variables
+# (e.g. TILE_VERBOSE=1, TILE_RUNNER_BINARY=/usr/local/bin/__tile_runner).
 
 # Path to the __tile_runner subprocess binary (resolved via $PATH if bare name).
 runner_binary = "__tile_runner"

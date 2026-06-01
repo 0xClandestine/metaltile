@@ -45,6 +45,7 @@ pub fn run(args: &InitArgs) -> Result<(), CliError> {
     std::fs::create_dir_all(&src_dir).map_err(CliError::Io)?;
 
     // Cargo.toml
+    let mt_version = env!("CARGO_PKG_VERSION");
     let cargo_toml = format!(
         r#"[package]
 name = "{name}"
@@ -52,8 +53,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-metaltile = "0.1"
-metaltile-std = "0.1"
+metaltile = "{mt_version}"
+metaltile-std = "{mt_version}"
 "#
     );
     write_file(&root.join("Cargo.toml"), &cargo_toml)?;
@@ -84,7 +85,8 @@ fn bench_relu(dt: DType) -> BenchSetup {
 # Override the runner binary path if `__tile_runner` is not on $PATH.
 # runner_binary = "/path/to/__tile_runner"
 
-verbose = false
+# Verbosity: 0 = quiet, 1 = profile columns, 2 = timing columns.
+verbose = 0
 "#;
     write_file(&root.join("tile.toml"), tile_toml)?;
 

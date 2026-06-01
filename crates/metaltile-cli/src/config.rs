@@ -5,8 +5,10 @@
 //! Load order (later layers override earlier ones):
 //!   1. Built-in defaults (`Serialized::defaults`)
 //!   2. `tile.toml` in the current directory (optional, ignored if absent)
-//!   3. `TILE__*` environment variables with `__` as the nesting separator
-//!      (e.g. `TILE__VERBOSE=1`, `TILE__RUNNER_BINARY=/usr/local/bin/__tile_runner`)
+//!   3. `TILE_*` environment variables
+//!      (e.g. `TILE_VERBOSE=1`, `TILE_RUNNER_BINARY=/usr/local/bin/__tile_runner`)
+//!
+//! Note: only a single underscore prefix is used (`TILE_`), not double (`TILE__`).
 
 use figment::{
     Figment,
@@ -59,7 +61,7 @@ impl ConfigLoader {
     pub fn load() -> Result<TileConfig, Box<figment::Error>> {
         Figment::from(Serialized::defaults(TileConfig::default()))
             .merge(Toml::file("tile.toml"))
-            .merge(Env::prefixed("TILE__").split("__"))
+            .merge(Env::prefixed("TILE_"))
             .extract()
             .map_err(Box::new)
     }
