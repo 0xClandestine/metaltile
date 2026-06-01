@@ -44,6 +44,7 @@ pub mod dequant_gather_block_scaled;
 pub mod dequant_gemv;
 pub mod dequant_gemv_expert_indexed;
 pub mod fishspeech_conv1d;
+pub mod flash_block_scaled_sdpa;
 pub mod flash_quantized_sdpa;
 pub mod gated_delta;
 pub mod gated_delta_prep;
