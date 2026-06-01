@@ -301,3 +301,71 @@ pub mod kernel_tests {
         qgemv_setup(mt_nvfp8_qgemv::kernel_ir_for(dt), QFormat::Nvfp8, 4, 256, dt)
     }
 }
+
+/// Decode-shape (single-token GEMV) benches at the canonical N=K=4096 so the
+/// GFLOP/s + roofline columns rank the precisions side by side (the spec's
+/// "which precision is fastest" goal). Throughput is data-independent, so the
+/// packed weight/scale buffers are random bytes.
+pub mod kernel_benches {
+    use metaltile::{bench, core::ir::Kernel, test::*};
+
+    use super::*;
+    use crate::quant::format::QFormat;
+
+    fn qgemv_bench(
+        kernel: Kernel,
+        fmt: QFormat,
+        out_dim: usize,
+        in_dim: usize,
+        dt: DType,
+    ) -> BenchSetup {
+        let n_blocks = out_dim * (in_dim / fmt.block_size());
+        let (codes_len, codes_dt) = if fmt.element_bits() == 4 {
+            (out_dim * in_dim / 8, DType::U32)
+        } else {
+            (out_dim * in_dim, DType::U8)
+        };
+        let scales_dt = if matches!(fmt, QFormat::Nvfp8) { DType::F32 } else { DType::U8 };
+        let sz = dt.size_bytes();
+        let bytes = codes_len * codes_dt.size_bytes()
+            + n_blocks * scales_dt.size_bytes()
+            + in_dim * sz
+            + out_dim * sz;
+        let mut s = BenchSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("weight", codes_len, codes_dt))
+            .buffer(BenchBuffer::random("scales", n_blocks, scales_dt))
+            .buffer(BenchBuffer::random("input", in_dim, dt))
+            .buffer(BenchBuffer::zeros("output", out_dim, dt).output())
+            .constexpr("in_dim", in_dim as u32)
+            .constexpr("block_size", fmt.block_size() as u32);
+        if matches!(fmt, QFormat::Nvfp4) {
+            s = s.constexpr("global", 1.0f32);
+        }
+        s.grid_3d(out_dim as u32, 1, 1, [64, 1, 1])
+            .bytes_moved(bytes as u64)
+            .flops(2 * out_dim as u64 * in_dim as u64) // GEMV (B=1): 2·N·K
+            .with_shape_label(format!("{} m={out_dim} k={in_dim}", fmt.name()))
+    }
+
+    #[bench(name = "ffai/block_scaled_qgemv/mxfp4", dtypes = [f32, f16, bf16])]
+    fn bench_mxfp4_qgemv(dt: DType) -> BenchSetup {
+        qgemv_bench(mt_mxfp4_qgemv::kernel_ir_for(dt), QFormat::Mxfp4, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_qgemv/nvfp4", dtypes = [f32, f16, bf16])]
+    fn bench_nvfp4_qgemv(dt: DType) -> BenchSetup {
+        qgemv_bench(mt_nvfp4_qgemv::kernel_ir_for(dt), QFormat::Nvfp4, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_qgemv/mxfp8_e4m3", dtypes = [f32, f16, bf16])]
+    fn bench_mxfp8_e4m3_qgemv(dt: DType) -> BenchSetup {
+        qgemv_bench(mt_mxfp8_e4m3_qgemv::kernel_ir_for(dt), QFormat::Mxfp8E4, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_qgemv/mxfp8_e5m2", dtypes = [f32, f16, bf16])]
+    fn bench_mxfp8_e5m2_qgemv(dt: DType) -> BenchSetup {
+        qgemv_bench(mt_mxfp8_e5m2_qgemv::kernel_ir_for(dt), QFormat::Mxfp8E5, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_qgemv/nvfp8", dtypes = [f32, f16, bf16])]
+    fn bench_nvfp8_qgemv(dt: DType) -> BenchSetup {
+        qgemv_bench(mt_nvfp8_qgemv::kernel_ir_for(dt), QFormat::Nvfp8, 4096, 4096, dt)
+    }
+}
