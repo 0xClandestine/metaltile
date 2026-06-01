@@ -15,7 +15,7 @@ runner_binary = "__tile_runner"
 verbose = 0
 
 # Number of timed benchmark iterations per kernel (after warmup).
-runs = 10
+runs = 3
 
 # Number of warmup dispatches before timing begins.
-warmup_runs = 3
+warmup_runs = 1
