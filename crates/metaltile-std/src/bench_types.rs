@@ -7,7 +7,7 @@ pub use metaltile_core::dtype::DType;
 use metaltile::harness::bench::BenchBuffer;
 use metaltile_core::ir::{Kernel, KernelMode};
 
-use crate::stats::BenchStats;
+use metaltile::runner::BenchStats;
 
 // ── Dtype variant helpers ─────────────────────────────────────────────────────
 

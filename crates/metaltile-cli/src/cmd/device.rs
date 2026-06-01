@@ -3,7 +3,7 @@
 //! `tile device` — Show GPU device info and supported feature flags.
 
 use metaltile_runtime::GpuFamily;
-use metaltile_std::runner::GpuRunner;
+use metaltile::runner::GpuRunner;
 
 use crate::{
     DeviceArgs,

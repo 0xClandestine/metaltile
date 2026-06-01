@@ -546,6 +546,99 @@ fn run_one_test(
     })
 }
 
+// ── Public in-process test runner (legacy CLI compat) ─────────────────────────
+
+/// Outcome of running a single `#[test_kernel]` setup in-process.
+#[derive(Debug, Clone, Copy)]
+pub struct TestOutcome {
+    /// Whether every compared element was within tolerance.
+    pub passed:      bool,
+    /// Largest absolute error observed across all expected buffers.
+    pub max_abs_err: f32,
+    /// Total number of elements compared.
+    pub n_checked:   usize,
+}
+
+/// Run a `TestSetup` in-process via the given runtime context.
+///
+/// This is the legacy API used by `tile test` and integration test harnesses
+/// before the subprocess migration. It dispatches the kernel, then compares
+/// each expected output buffer against the GPU result within `tol` (absolute).
+pub fn run_kernel_test(
+    ctx: &metaltile_runtime::Context,
+    setup: &crate::harness::test::TestSetup,
+    tol: f64,
+) -> Result<TestOutcome, String> {
+    use std::collections::BTreeMap;
+    use crate::runner::gpu::elem_bytes;
+
+    let no_consts: BTreeMap<String, u32> = BTreeMap::new();
+    let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for inp in setup.inputs() {
+        buffers.insert(inp.name().to_string(), inp.data().to_vec());
+    }
+    for (k, v) in setup.constexprs() {
+        buffers.insert(k.clone(), constexpr_bytes(v));
+    }
+
+    let grid = setup.grid();
+    let g = grid.grid.map(|x| x as usize);
+    let t = grid.tpg.map(|x| x as usize);
+    let result = ctx
+        .dispatch_with_grid(setup.kernel(), &buffers, &no_consts, g, t)
+        .map_err(|e| format!("dispatch failed: {e}"))?;
+
+    let expected: Vec<(String, Vec<u8>, DType)> = if let Some(reference) = setup.ref_setup() {
+        let mut ref_bufs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        for inp in reference.inputs() {
+            ref_bufs.insert(inp.name().to_string(), inp.data().to_vec());
+        }
+        for (k, v) in reference.constexprs() {
+            ref_bufs.insert(k.clone(), constexpr_bytes(v));
+        }
+        let rg = reference.grid();
+        let rgg = rg.grid.map(|x| x as usize);
+        let rgt = rg.tpg.map(|x| x as usize);
+        let ref_result = ctx
+            .dispatch_with_grid(reference.kernel(), &ref_bufs, &no_consts, rgg, rgt)
+            .map_err(|e| format!("reference dispatch failed: {e}"))?;
+        ref_result
+            .outputs
+            .into_iter()
+            .map(|(n, bytes)| {
+                let d = setup
+                    .inputs()
+                    .iter()
+                    .find(|b| b.name() == n)
+                    .map_or(DType::F32, |b| b.dtype());
+                (n, bytes, d)
+            })
+            .collect()
+    } else {
+        setup
+            .expected()
+            .iter()
+            .map(|b| (b.name().to_string(), b.data().to_vec(), b.dtype()))
+            .collect()
+    };
+
+    let mut worst = 0.0f32;
+    let mut n_checked = 0usize;
+    for (bname, exp_bytes, bdt) in &expected {
+        let out_bytes = result
+            .output(bname)
+            .ok_or_else(|| format!("expected output '{bname}' missing"))?;
+        let n = out_bytes.len() / elem_bytes(*bdt).max(1);
+        let got = read_raw_f32(out_bytes, *bdt, n);
+        let exp = read_raw_f32(exp_bytes, *bdt, n);
+        let err = max_abs_diff(&got, &exp);
+        worst = worst.max(err);
+        n_checked += n;
+    }
+
+    Ok(TestOutcome { passed: (worst as f64) <= tol, max_abs_err: worst, n_checked })
+}
+
 fn read_raw_f32(bytes: &[u8], dt: DType, n: usize) -> Vec<f32> {
     match dt {
         DType::F32 => bytes.chunks_exact(4).take(n).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect(),

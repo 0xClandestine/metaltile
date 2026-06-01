@@ -6,10 +6,8 @@ pub use metaltile::core::dtype::DType;
 use metaltile::core::ir::{Kernel, KernelMode};
 use metaltile_codegen::msl::MslGenerator;
 
-use crate::{
-    runner::{CompiledKernel, GpuBuffer, GpuRunner},
-    term::{Color, Style, paint_stdout},
-};
+use metaltile::runner::{CompiledKernel, GpuBuffer, GpuRunner};
+use crate::term::{Color, Style, paint_stdout};
 
 // ── Dtype variant helpers ─────────────────────────────────────────────────────
 
@@ -753,11 +751,11 @@ pub fn run_f16_once_as_f32(
     runner.read_f16_slice(out, n)
 }
 
-pub fn to_gflops(st: &crate::stats::BenchStats, flops: f64) -> Option<f64> {
+pub fn to_gflops(st: &metaltile::runner::BenchStats, flops: f64) -> Option<f64> {
     st.is_valid().then(|| flops / (st.mean_us * 1e-6) / 1e9)
 }
 
-pub(crate) fn to_gbps(st: &crate::stats::BenchStats, bytes: f64) -> Option<f64> {
+pub(crate) fn to_gbps(st: &metaltile::runner::BenchStats, bytes: f64) -> Option<f64> {
     st.is_valid().then(|| bytes / (st.mean_us * 1e-6) / 1e9)
 }
 
@@ -878,7 +876,7 @@ macro_rules! bench_tests {
             #[cfg(target_os = "macos")]
             #[test]
             fn kernels_compile() {
-                let Ok(runner) = $crate::runner::GpuRunner::new() else {
+                let Ok(runner) = metaltile::runner::GpuRunner::new() else {
                     return;
                 };
                 for &dt in $crate::ops::FLOAT_DTYPES {

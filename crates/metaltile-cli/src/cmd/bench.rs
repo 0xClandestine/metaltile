@@ -8,10 +8,11 @@ use metaltile_codegen::passes::{
     self,
     occupancy::{self, Bottleneck},
 };
+use metaltile::runner::{GpuBuffer, GpuRunner, bench_gbps, read_typed};
+use metaltile::harness::bench::{BenchSetup, ConstValue, KernelBench, RefKernel};
+use metaltile_core::ir::ParamKind;
 use metaltile_std::{
-    bench_types::{CorrectnessStatus, OpResult, set_result_reporter, validate_results},
-    run_kernel::run_kernel_bench,
-    runner::GpuRunner,
+    bench_types::{CorrectnessStatus, EquivResult, OpBench, OpResult, check_equiv, dtype_label, set_result_reporter, validate_results},
 };
 use serde_json::Value;
 
@@ -521,6 +522,142 @@ fn compute_profiles(filter: Option<&str>) -> HashMap<(String, String), ProfileRo
         }
     }
     map
+}
+
+// ── In-process bench runner (bridges old OpResult API to new GpuRunner) ───────
+
+fn constexpr_bytes_bench(v: &ConstValue) -> Vec<u8> {
+    match *v {
+        ConstValue::U32(x) => x.to_le_bytes().to_vec(),
+        ConstValue::I32(x) => x.to_le_bytes().to_vec(),
+        ConstValue::F32(x) => x.to_le_bytes().to_vec(),
+        ConstValue::U64(x) => x.to_le_bytes().to_vec(),
+        ConstValue::I64(x) => x.to_le_bytes().to_vec(),
+        ConstValue::Usize(x) => (x as u32).to_le_bytes().to_vec(),
+    }
+}
+
+fn human_count_bench(n: usize) -> String {
+    const M: usize = 1 << 20;
+    const K: usize = 1 << 10;
+    if n >= M && n.is_multiple_of(M) {
+        format!("{}M", n / M)
+    } else if n >= K && n.is_multiple_of(K) {
+        format!("{}K", n / K)
+    } else {
+        n.to_string()
+    }
+}
+
+const COMPARE_ELEM_CAP: usize = 1 << 15;
+
+fn run_kernel_bench(
+    runner: &GpuRunner,
+    bench: &'static dyn KernelBench,
+    dt: metaltile_core::DType,
+) -> Option<OpResult> {
+    use metaltile_codegen::msl::MslGenerator;
+
+    let setup: BenchSetup = bench.setup(dt);
+    let bytes_moved = bench.bytes_moved(&setup);
+    let kernel = setup.kernel();
+
+    let msl = MslGenerator::default().generate(kernel).ok()?;
+    let compiled = runner.compile(&msl, &kernel.name).ok()?;
+
+    let mut bufs: Vec<GpuBuffer> = Vec::with_capacity(kernel.params.len() + kernel.constexprs.len());
+    let mut input_bytes: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+    let mut mt_out: Option<(usize, usize, metaltile_core::DType)> = None;
+
+    for param in &kernel.params {
+        let buf = setup.buffers().iter().find(|b| b.name() == param.name)?;
+        let bytes = buf.initial_bytes();
+        if param.is_output && mt_out.is_none() {
+            mt_out = Some((bufs.len(), buf.len(), buf.dtype()));
+        }
+        bufs.push(runner.buffer_bytes(&bytes));
+        input_bytes.insert(param.name.clone(), bytes);
+        if param.kind == ParamKind::Strided {
+            let shape_name = format!("{}_shape", param.name);
+            let strides_name = format!("{}_strides", param.name);
+            let shape = setup.buffers().iter().find(|b| b.name() == shape_name)?;
+            let strides = setup.buffers().iter().find(|b| b.name() == strides_name)?;
+            bufs.push(runner.buffer_bytes(&shape.initial_bytes()));
+            bufs.push(runner.buffer_bytes(&strides.initial_bytes()));
+        }
+    }
+    for decl in &kernel.constexprs {
+        let n = decl.name.name();
+        let (_, value) = setup.constexprs().iter().find(|(k, _)| k == n)?;
+        bufs.push(runner.buffer_bytes(&constexpr_bytes_bench(value)));
+    }
+    let refs: Vec<&GpuBuffer> = bufs.iter().collect();
+
+    let grid = setup.grid();
+    let g = grid.grid.map(|x| x as usize);
+    let t = grid.tpg.map(|x| x as usize);
+    let (gbps, _stats) = bench_gbps(runner, &compiled, &refs, g, t, bytes_moved as f64)?;
+
+    let shape = match setup.shape_label() {
+        Some(label) => label.to_string(),
+        None => {
+            let n = setup.buffers().iter().map(|b| b.len()).max().unwrap_or(0);
+            format!("N={} {}", human_count_bench(n), dtype_label(dt))
+        },
+    };
+
+    if let (Some(rk), Some((out_idx, out_n, out_dt))) = (setup.ref_kernel(), mt_out) {
+        if let Some((ref_gbps, equiv)) =
+            run_reference_bench(runner, rk, &bufs, out_idx, out_n, out_dt, &input_bytes, bytes_moved)
+        {
+            return Some(OpBench::new(bench.name(), "GB/s").implemented(shape, Some(ref_gbps), gbps, equiv));
+        }
+    }
+
+    let equiv = EquivResult { n_checked: 0, max_abs_err: 0.0, cosine_sim: 1.0, passed: true };
+    Some(OpBench::new(bench.name(), "GB/s").implemented(shape, None, gbps, equiv))
+}
+
+fn run_reference_bench(
+    runner: &GpuRunner,
+    rk: &RefKernel,
+    mt_bufs: &[GpuBuffer],
+    mt_out_idx: usize,
+    mt_out_n: usize,
+    mt_out_dt: metaltile_core::DType,
+    input_bytes: &std::collections::HashMap<String, Vec<u8>>,
+    bytes_moved: u64,
+) -> Option<(f64, EquivResult)> {
+    let compiled = if rk.bool_constants.is_empty() {
+        runner.compile(&rk.source, &rk.fn_name).ok()?
+    } else {
+        runner.compile_with_bool_constants(&rk.source, &rk.fn_name, &rk.bool_constants).ok()?
+    };
+
+    let mut ref_bufs: Vec<GpuBuffer> = Vec::with_capacity(rk.buffers.len());
+    let mut ref_out: Option<(usize, usize, metaltile_core::DType)> = None;
+    for b in &rk.buffers {
+        if b.is_output() && ref_out.is_none() {
+            ref_out = Some((ref_bufs.len(), b.len(), b.dtype()));
+        }
+        let bytes = match (b.is_output(), input_bytes.get(b.name())) {
+            (false, Some(shared)) => shared.clone(),
+            _ => b.initial_bytes(),
+        };
+        ref_bufs.push(runner.buffer_bytes(&bytes));
+    }
+    let (ref_out_idx, ref_out_n, ref_out_dt) = ref_out?;
+    let ref_refs: Vec<&GpuBuffer> = ref_bufs.iter().collect();
+    let g = rk.grid.grid.map(|x| x as usize);
+    let t = rk.grid.tpg.map(|x| x as usize);
+    let (ref_gbps, _) = bench_gbps(runner, &compiled, &ref_refs, g, t, bytes_moved as f64)?;
+
+    let n = mt_out_n.min(ref_out_n).min(COMPARE_ELEM_CAP);
+    let mt_vals = read_typed(runner, &mt_bufs[mt_out_idx], n, mt_out_dt);
+    let ref_vals = read_typed(runner, &ref_bufs[ref_out_idx], n, ref_out_dt);
+    let equiv = check_equiv(&ref_vals, &mt_vals, rk.tol);
+
+    Some((ref_gbps, equiv))
 }
 
 #[cfg(test)]

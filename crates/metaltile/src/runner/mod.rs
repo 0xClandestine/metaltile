@@ -38,4 +38,4 @@ pub use gpu::{
     to_gflops,
     zeros_typed,
 };
-pub use harness::RunnerHarness;
+pub use harness::{RunnerHarness, TestOutcome, run_kernel_test};

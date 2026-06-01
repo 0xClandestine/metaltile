@@ -10,20 +10,13 @@ publish = true
 workspace = true
 
 [dependencies]
-thiserror.workspace = true
 metaltile.workspace = true
 metaltile-core.workspace = true
 metaltile-codegen.workspace = true
-metaltile-runtime.workspace = true
 inventory.workspace = true
 half.workspace = true
 bytemuck.workspace = true
 rustc-hash.workspace = true
-
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2.workspace = true
-objc2-metal.workspace = true
-objc2-foundation.workspace = true
 
 [dev-dependencies]
 # AURA MSL snapshot tests (tests/aura_msl_snapshots.rs).

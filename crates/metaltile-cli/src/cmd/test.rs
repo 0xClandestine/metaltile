@@ -8,7 +8,7 @@
 //! `tests/*_gpu_correctness.rs` suite (removed in #240; now in-source
 //! `#[test_kernel]`s).
 
-use metaltile_std::run_kernel::run_kernel_test;
+use metaltile::runner::run_kernel_test;
 
 use crate::{
     TestArgs,
