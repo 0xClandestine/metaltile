@@ -1072,3 +1072,68 @@ pub mod kernel_tests {
         mma_setup(mt_nvfp8_qmm_mma::kernel_ir_for(dt), QFormat::Nvfp8, 32, 32, 64, dt)
     }
 }
+
+/// Prefill GEMM (m=n=k=4096) benches — the M≥32 simdgroup-matrix throughput
+/// path, where GFLOP/s + %FLOP rank the precisions (and the M5 NA story lives).
+/// Random packed buffers (throughput is data-independent).
+pub mod kernel_benches {
+    use metaltile::{bench, core::ir::Kernel, test::*};
+
+    use super::*;
+    use crate::quant::format::QFormat;
+
+    fn mma_bench(
+        kernel: Kernel,
+        fmt: QFormat,
+        m: usize,
+        n: usize,
+        k: usize,
+        dt: DType,
+    ) -> BenchSetup {
+        let n_blocks = n * (k / fmt.block_size());
+        let (codes_len, codes_dt) =
+            if fmt.element_bits() == 4 { (n * k / 8, DType::U32) } else { (n * k, DType::U8) };
+        let scales_dt = if matches!(fmt, QFormat::Nvfp8) { DType::F32 } else { DType::U8 };
+        let sz = dt.size_bytes();
+        let bytes = codes_len * codes_dt.size_bytes()
+            + n_blocks * scales_dt.size_bytes()
+            + (m * k + m * n) * sz;
+        let mut s = BenchSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("w", codes_len, codes_dt))
+            .buffer(BenchBuffer::random("scales", n_blocks, scales_dt))
+            .buffer(BenchBuffer::random("x", m * k, dt))
+            .buffer(BenchBuffer::zeros("out", m * n, dt).output())
+            .constexpr("k", k as u32)
+            .constexpr("n", n as u32)
+            .constexpr("block_size", fmt.block_size() as u32);
+        if matches!(fmt, QFormat::Nvfp4) {
+            s = s.constexpr("global", 1.0f32);
+        }
+        s.grid_3d((n / 32) as u32, (m / 32) as u32, 1, [128, 1, 1])
+            .bytes_moved(bytes as u64)
+            .flops(2 * m as u64 * n as u64 * k as u64) // GEMM: 2·M·N·K
+            .with_shape_label(format!("{} m={m} n={n} k={k}", fmt.name()))
+    }
+
+    #[bench(name = "ffai/block_scaled_qmm_mma/mxfp4", dtypes = [f32, f16, bf16])]
+    fn bench_mxfp4_mma(dt: DType) -> BenchSetup {
+        mma_bench(mt_mxfp4_qmm_mma::kernel_ir_for(dt), QFormat::Mxfp4, 4096, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_qmm_mma/nvfp4", dtypes = [f32, f16, bf16])]
+    fn bench_nvfp4_mma(dt: DType) -> BenchSetup {
+        mma_bench(mt_nvfp4_qmm_mma::kernel_ir_for(dt), QFormat::Nvfp4, 4096, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_qmm_mma/mxfp8_e4m3", dtypes = [f32, f16, bf16])]
+    fn bench_mxfp8_e4m3_mma(dt: DType) -> BenchSetup {
+        mma_bench(mt_mxfp8_e4m3_qmm_mma::kernel_ir_for(dt), QFormat::Mxfp8E4, 4096, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_qmm_mma/mxfp8_e5m2", dtypes = [f32, f16, bf16])]
+    fn bench_mxfp8_e5m2_mma(dt: DType) -> BenchSetup {
+        mma_bench(mt_mxfp8_e5m2_qmm_mma::kernel_ir_for(dt), QFormat::Mxfp8E5, 4096, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_qmm_mma/nvfp8", dtypes = [f32, f16, bf16])]
+    fn bench_nvfp8_mma(dt: DType) -> BenchSetup {
+        mma_bench(mt_nvfp8_qmm_mma::kernel_ir_for(dt), QFormat::Nvfp8, 4096, 4096, 4096, dt)
+    }
+}
