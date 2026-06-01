@@ -596,12 +596,16 @@ mod tests {
             .buffer(BenchBuffer::random("in", 64, DType::F32))
             .buffer(BenchBuffer::zeros("out", 64, DType::F32).output())
             .grid_1d(64, 256)
-            .tol(1e-3);
+            .tol(1e-3)
+            .bool_constant(1, true)
+            .bool_constant(2, false);
         assert_eq!(rk.fn_name, "vn_expfloat32");
         assert_eq!(rk.source, "// metal source");
         assert_eq!(rk.buffers.len(), 2);
         assert_eq!(rk.grid.tpg[0], 256);
         assert_eq!(rk.tol, 1e-3);
+        // Function constants accumulate in binding order.
+        assert_eq!(rk.bool_constants, vec![(1, true), (2, false)]);
         // Exactly the `.output()`-marked buffer is reported as the comparison slot.
         assert_eq!(rk.output_buffer().map(|b| b.name()), Some("out"));
     }
