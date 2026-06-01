@@ -112,13 +112,16 @@ Goal: **support all precisions in every weight-bearing kernel** (matmul/gemv/att
 
 | format | element | block | block scale | status |
 |---|---|---|---|---|
-| nvfp4 | E2M1 | 16 | E4M3 + global FP32 | ❌ (we use gs32 + float scale) |
-| mxfp4 | E2M1 | 32 | E8M0 (pow-2) | ❌ (we use float scale) |
-| mxfp8 | E4M3/E5M2 | 32 | E8M0 | ❌ |
+| nvfp4 | E2M1 | 16 | E4M3 + global FP32 | ✅ spec-conformant (`quant::format::Nvfp4`) |
+| mxfp4 | E2M1 | 32 | E8M0 (pow-2) | ✅ (`Mxfp4`) |
+| mxfp8 | E4M3/E5M2 | 32 | E8M0 | ✅ (`Mxfp8E4`/`Mxfp8E5`) |
+| nvfp8 | E4M3 | 16 | per-block FP32 | ✅ (`Nvfp8`) |
 | int2/4/8 affine | int | group 64 | per-group | ✅ (qmv/qmm variants) |
 | fp8 E4M3/E5M2 | fp8 | — | — | ✅ (kv-cache, dequant) |
 
-Work items: implement block-scaling (gs16+E4M3 for nvfp4, gs32+E8M0 for mxfp4/mxfp8); add int4/int8/fp4/fp8 weight variants across the weight-bearing kernel families; audit whether the `ekryski/mlx@alpha` reference kernels are themselves spec-correct before trusting them as oracles. The Phase-1/2 latency+GFLOP metrics are a **prerequisite** so "fastest precision" is observable.
+**Status (✅ implemented):** spec-conformant block-scaled codecs (`crates/metaltile-std/src/quant/{codec,format}.rs`) — the single source of truth shared by the host packer, the CPU correctness oracle, and the kernels via first-class DSL decode intrinsics (`e2m1_decode`/`e4m3_decode`/`e5m2_decode`). All 5 formats wired across the weight-bearing matmul families: **dequant + qgemv + qmm + MoE gather_qmm + simdgroup-matrix MMA = 25 GPU-verified kernels** (`mlx/block_scaled_*.rs`), each with a `#[test_kernel]` oracle (1:1) and decode/qmm/MMA precision benches. The PR-#1 latency+GFLOP+roofline metrics make "fastest precision" directly readable.
+
+**Remaining (follow-ups):** more bench shapes (dequant bandwidth, MoE gather); the fused perf-kernels (`rms_norm_qgemv`, `batched_qkv_qgemv`) which *compose* the above primitives (not coverage gaps); block-scaled-KV flash attention (a distinct, complex kernel class); and an audit of whether the `ekryski/mlx@alpha` reference kernels are themselves spec-correct.
 
 ## Appendix C — M5 Neural Accelerator hardware context
 
