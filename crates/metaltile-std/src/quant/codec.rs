@@ -148,21 +148,31 @@ pub fn e4m3_encode(f: f32) -> u8 {
 /// Decode an 8-bit E5M2 code to `f32`.
 pub fn e5m2_decode(bits: u8) -> f32 { f16_bits_to_f32((bits as u16) << 8) }
 
+/// Largest finite E5M2 magnitude code (exp 30, mantissa 3 → 57344).
+const E5M2_MAX_FINITE: u8 = 0x7b;
+
 /// Encode an `f32` to an 8-bit E5M2 code: round to half, then round the half's
 /// 10-bit mantissa to 2 bits (round-to-nearest-even) and take the high byte.
+/// A **finite** input never becomes ±inf — it saturates to ±57344 (so a block
+/// scale that rounds down can't turn a weight into inf and poison a matmul).
 pub fn e5m2_encode(f: f32) -> u8 {
     let h = f32_to_f16_bits(f);
-    if (h & 0x7c00) == 0x7c00 {
-        // inf/nan: keep the high byte as-is (mantissa already in the top bits).
-        return (h >> 8) as u8;
+    let byte = if (h & 0x7c00) == 0x7c00 {
+        // inf/nan in the half already: keep the high byte (mantissa in top bits).
+        (h >> 8) as u8
+    } else {
+        // Round the 10-bit half mantissa down to 2 bits, nearest-even on bit 7.
+        let round_bit = (h >> 7) & 1;
+        let sticky = h & 0x7f;
+        let lsb = (h >> 8) & 1;
+        let round_up = round_bit == 1 && (sticky != 0 || lsb == 1);
+        (h.wrapping_add(if round_up { 1 << 8 } else { 0 }) >> 8) as u8
+    };
+    // Saturate a finite input that landed in the inf/nan range (exp all ones).
+    if f.is_finite() && (byte & 0x7f) >= 0x7c {
+        return (byte & 0x80) | E5M2_MAX_FINITE;
     }
-    // Round the 10-bit half mantissa down to 2 bits, nearest-even on bit 7.
-    let round_bit = (h >> 7) & 1;
-    let sticky = h & 0x7f;
-    let lsb = (h >> 8) & 1;
-    let round_up = round_bit == 1 && (sticky != 0 || lsb == 1);
-    let rounded = h.wrapping_add(if round_up { 1 << 8 } else { 0 });
-    (rounded >> 8) as u8
+    byte
 }
 
 // ── E8M0 (block scale) ──────────────────────────────────────────────────────

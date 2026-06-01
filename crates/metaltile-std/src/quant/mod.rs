@@ -8,3 +8,4 @@
 //! `docs/BENCH_METRICS_SPEC.md` Appendix B for the format roadmap.
 
 pub mod codec;
+pub mod format;
