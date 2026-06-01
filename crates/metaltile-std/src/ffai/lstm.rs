@@ -1,14 +1,14 @@
 //! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
 //! SPDX-License-Identifier: Apache-2.0
-//! Single-direction LSTM layer — the recurrent building block the StyleTTS2
-//! / Kokoro prosody predictor, duration predictor, and text encoder need
-//! (no FFAI model used an LSTM before this).
+//! LSTM kernels — the recurrent building block style-vector TTS encoders /
+//! prosody / duration predictors need (no FFAI model used an LSTM before).
+//! This file holds two forms:
+//!   * [`ffai_lstm`] — runs the **whole sequence** recurrence on the GPU in
+//!     one dispatch (the "GPU from the start" form).
+//!   * [`lstm_cell`] — ONE timestep, leaving the recurrence on the host (a
+//!     per-step CPU↔GPU sync); use when per-step host control is wanted.
 //!
-//! Complements [`super::kokoro`]'s `lstm_cell`, which computes ONE timestep
-//! and leaves the recurrence on the host (a per-step CPU↔GPU sync). This
-//! kernel runs the **whole sequence** recurrence on the GPU in one dispatch
-//! — the "GPU from the start" form — eliminating the per-timestep round
-//! trip; the caller picks whichever fits its sequence lengths.
+//! ## `ffai_lstm`
 //!
 //! Runs the full sequence recurrence on the GPU in **one threadgroup**:
 //! thread `j` owns hidden unit `j`, with the hidden/cell state `h` / `c`
