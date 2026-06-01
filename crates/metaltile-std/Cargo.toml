@@ -21,3 +21,5 @@ rustc-hash.workspace = true
 [dev-dependencies]
 # AURA MSL snapshot tests (tests/aura_msl_snapshots.rs).
 insta.workspace = true
+# GPU dispatch in probe / GPU-correctness integration tests.
+metaltile-runtime.workspace = true
