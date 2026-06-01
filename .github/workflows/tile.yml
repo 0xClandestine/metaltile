@@ -21,6 +21,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - 'tile.toml'
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
@@ -29,6 +30,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - 'tile.toml'
   workflow_dispatch: {}
 
 permissions:
