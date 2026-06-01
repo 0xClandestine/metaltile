@@ -496,8 +496,9 @@ pub fn mt_fp8_e4m3_qmm_mma<T>(
 /// New-syntax correctness for the floating-point MMA quantized-matmul kernels
 /// (`mt_fp4_qmm_mma`, `mt_fp8_e4m3_qmm_mma`). These are scale-only (no bias):
 /// the oracle replays the exact E2M1 / E4M3 codebook decode the kernel uses
-/// (the legacy `fp_quantized_mma_gpu_correctness.rs` checks the same via
-/// cosine similarity). Inputs are small + dtype-rounded so an absolute
+/// (the legacy `tests/fp_quantized_mma_gpu_correctness.rs` (removed in #240)
+/// checked the same via cosine similarity). Inputs are small + dtype-rounded
+/// so an absolute
 /// tolerance is meaningful. The fp4 decode is reused by `fp_quantized_nax`.
 pub mod kernel_tests {
     use metaltile::{core::ir::Kernel, test::*, test_kernel};

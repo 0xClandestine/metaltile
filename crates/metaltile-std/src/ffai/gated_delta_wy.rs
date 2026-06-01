@@ -340,12 +340,12 @@ pub fn mt_gated_delta_wy_chunk<T>(
 
 /// New-syntax correctness for the chunked-WY GDN prefill kernel
 /// (`mt_gated_delta_wy_chunk`). Oracle is the plain `sequential_gdn` per-token
-/// recurrence (the legacy `gated_delta_wy_gpu_correctness.rs` reference): the WY
-/// Woodbury-Young chunk form must reproduce the sequential delta-rule output
-/// exactly (modulo fp reorder). State per `(b, hv)` slot is `[Dv, Dk]` flat
-/// (`s_base = (hv·dv + dv_idx)·dk` within `n·dv·dk`). `t_len` must be a multiple
-/// of `c`. Inputs are dtype-rounded; k is kscale-normalised so the recurrence
-/// stays well-conditioned.
+/// recurrence (the legacy `tests/gated_delta_wy_gpu_correctness.rs`, removed
+/// in #240): the WY Woodbury-Young chunk form must reproduce the sequential
+/// delta-rule output exactly (modulo fp reorder). State per `(b, hv)` slot is
+/// `[Dv, Dk]` flat (`s_base = (hv·dv + dv_idx)·dk` within `n·dv·dk`). `t_len`
+/// must be a multiple of `c`. Inputs are dtype-rounded; k is kscale-normalised
+/// so the recurrence stays well-conditioned.
 ///
 /// The WY chunk math reorders the K reduction across the triangular solves, so
 /// tolerances follow the legacy WY test (5e-3 / 5e-2 / 2e-1), wider than the

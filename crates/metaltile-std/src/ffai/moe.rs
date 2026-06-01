@@ -3225,7 +3225,7 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16<T>(
 // consecutive signed-byte codes as bytes 0..3 (little-endian bit order).
 //
 // Dispatch: grid `[N/32, ceil(M/32), 1]`, TG `[128, 1, 1]` (4 SGs).
-// Correctness: `tests/moe_gather_qmm_mma_int8_gpu_correctness.rs`.
+// Correctness: the in-source `#[test_kernel]`s.
 #[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_moe_gather_qmm_mma_int8<T>(
@@ -3537,10 +3537,11 @@ pub fn mt_moe_gather_qmm_mma_int8<T>(
 /// variants are validated against the scalar m1 path via cosine in the legacy
 /// GPU tests — both are bench-only here.
 ///
-/// Oracle (mirrors `tests/moe_gather_qmm_gpu_correctness.rs`): resolve each
-/// row's expert via the CSR `expert_offsets` array (first `e` where
-/// `row < expert_offsets[e+1]`), dequant that expert's int4 weight row
-/// (8 nibbles per u32, per-group scale/bias), and dot against the row's input.
+/// Oracle (mirrors the legacy `tests/moe_gather_qmm_gpu_correctness.rs`,
+/// removed in #240): resolve each row's expert via the CSR `expert_offsets`
+/// array (first `e` where `row < expert_offsets[e+1]`), dequant that expert's
+/// int4 weight row (8 nibbles per u32, per-group scale/bias), and dot against
+/// the row's input.
 /// Inputs are dtype-rounded so the GPU sees exactly what the oracle computes.
 ///
 /// Grid (Reduction mode, one simdgroup per TG):

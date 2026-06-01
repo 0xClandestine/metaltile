@@ -31,8 +31,7 @@
 //!   x         [N]            T
 //!   y         [out_q+out_k+out_v] T
 //!
-//! Codegen-only; correctness pinned by
-//! `tests/batched_qkv_qgemv_gpu_correctness.rs`.
+//! Codegen-only; correctness pinned by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

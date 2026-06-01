@@ -55,7 +55,7 @@
 //! - Input / output are split real / imaginary planes, each
 //!   `[rows, N]`. A real-input transform passes an all-zero `in_im`.
 //!
-//! Codegen-only; correctness pinned by `tests/fft_gpu_correctness.rs`.
+//! Codegen-only; correctness pinned by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 
@@ -404,8 +404,9 @@ pub fn mt_fft_bluestein_postprocess<T>(
 /// New-syntax correctness for the FFT family. The radix-2 kernels are pinned
 /// against a naive O(N²) DFT (forward); the Bluestein pipeline stages are
 /// each pure elementwise chirp arithmetic, pinned against direct CPU replays
-/// of their documented formulas (the legacy `fft_*_gpu_correctness.rs` tests
-/// validate the full assembled pipeline against a DFT — these pin the
+/// of their documented formulas (the legacy `tests/fft_*_gpu_correctness.rs`
+/// (removed in #240) validated the full assembled pipeline against a DFT —
+/// these pin the
 /// individual stages). Inputs are kept small + dtype-rounded so the f32
 /// threadgroup math the kernels use matches the oracle within an absolute tol.
 pub mod kernel_tests {

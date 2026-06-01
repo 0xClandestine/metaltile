@@ -39,7 +39,7 @@
 //! in vault memory for the relevant pattern.
 //!
 //! Codegen-only. Correctness validated against `ffai_rope_llama` looped
-//! per-row in `tests/rope_llama_many_gpu_correctness.rs`.
+//! per-row by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

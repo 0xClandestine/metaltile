@@ -22,8 +22,7 @@
 //!
 //! - **Grid3D**, one thread per update element over `outer*axis_upd*inner`.
 //!
-//! Codegen-only; correctness pinned by
-//! `tests/scatter_axis_gpu_correctness.rs`.
+//! Codegen-only; correctness pinned by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

@@ -97,8 +97,8 @@ pub fn mt_scan<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
 // 4-element group, so element k stores `base_prefix + (sum of v0..v_{k-1})`.
 //
 // `BenchDispatch::Generic` because the `run_scan` bench runner hard-codes
-// the inclusive-sum oracle; correctness is pinned by
-// `tests/scan_exclusive_gpu_correctness.rs` instead.
+// the inclusive-sum oracle; correctness is pinned by the in-source
+// `#[test_kernel]`s instead.
 
 #[kernel]
 pub fn mt_scan_exclusive<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {

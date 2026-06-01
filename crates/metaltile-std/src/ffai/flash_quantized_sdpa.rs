@@ -59,8 +59,7 @@
 //! - **Grid3D**, `grid = [1, B*nQ, 1]`, `tg = [32, 1, 1]`.
 //! - `dims_per_lane = ceil(dim / 32)`; `dim` a multiple of `32/bits`.
 //!
-//! Codegen-only; correctness pinned by
-//! `tests/flash_quantized_sdpa_gpu_correctness.rs`.
+//! Codegen-only; correctness pinned by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

@@ -5363,8 +5363,9 @@ pub mod kernel_tests {
     // per-group `scales`, and per-group `biases`. The packed codes go through
     // a `round((v-bias)*inv_scale)` snap whose last bit is sensitive to Metal
     // fast-math FMA fusion (the legacy round-trip test in
-    // `affine_int356_quantize_gpu_correctness.rs` sidesteps this by checking a
-    // quantize→dequantize round-trip within one step). Here we pin the part
+    // `tests/affine_int356_quantize_gpu_correctness.rs` (removed in #240)
+    // sidesteps this by checking a quantize→dequantize round-trip within one
+    // step). Here we pin the part
     // that is exact and the genuinely parallel hard part — the per-group
     // `simd_min`/`simd_max` reduction and the `scale=(max-min)/n_bins`,
     // `bias=min` derivation. Inputs are dtype-rounded so the GPU's f32 min/max
@@ -5439,7 +5440,8 @@ pub mod kernel_tests {
     // tiling (K-blocks, BM tiles, MMA frags) is a performance detail that the
     // CPU oracle is blind to: a faithful dequant-then-matmul reference pins MSL
     // emit + dispatch wiring + index math against the IR (the same contract the
-    // legacy `qmm_gpu_correctness.rs` oracle checks). Inputs are kept small so
+    // legacy `tests/qmm_gpu_correctness.rs` (removed in #240) oracle checks).
+    // Inputs are kept small so
     // outputs are O(1) and an absolute tolerance is meaningful, and are
     // dtype-rounded so the oracle sees exactly what the kernel loads.
 

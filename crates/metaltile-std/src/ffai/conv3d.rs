@@ -47,7 +47,7 @@
 //!   (`groups == in_ch` is depthwise) on top, mirroring `conv2d_grouped`.
 //!   The 3D counterpart of `steel_conv_general` for `NDIM == 3`.
 //!
-//! Codegen-only. Correctness validated by `conv3d_gpu_correctness`.
+//! Codegen-only. Correctness validated by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 
@@ -70,7 +70,7 @@ use metaltile::kernel;
 ///   convolution output-size formula and passes them as constexprs so
 ///   no division happens on the hot path.
 ///
-/// Codegen-only; correctness pinned by `conv3d_gpu_correctness`.
+/// Codegen-only; correctness pinned by the in-source `#[test_kernel]`s.
 #[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn conv3d_generic<T>(
@@ -192,7 +192,7 @@ pub fn conv3d_generic<T>(
 ///   counts `icpg`/`ocpg` so no division happens on the hot path and
 ///   `groups` itself is not needed inside the body.
 ///
-/// Codegen-only; correctness pinned by `conv3d_gpu_correctness`.
+/// Codegen-only; correctness pinned by the in-source `#[test_kernel]`s.
 #[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn conv3d_grouped<T>(

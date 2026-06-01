@@ -27,7 +27,8 @@ use metaltile_runtime::Context;
 use metaltile_std::ffai::{moe::mt_moe_gather_qmm_int4, moe_mpp};
 
 /// Pack a row of int4 weights into uint32s (8 per uint, LSB-first per nibble).
-/// Identical to the helper used by `moe_gather_qmm_gpu_correctness.rs` —
+/// Identical to the helper used by the legacy
+/// `tests/moe_gather_qmm_gpu_correctness.rs` (removed in #240) —
 /// duplicated to keep this test file self-contained.
 fn pack_int4_row(weights: &[u32]) -> Vec<u32> {
     assert!(weights.len() % 8 == 0);

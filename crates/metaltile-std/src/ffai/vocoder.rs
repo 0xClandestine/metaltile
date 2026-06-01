@@ -51,7 +51,7 @@
 //! tails run small `n_fft` (Kokoro: 20, hop 5) so this is cheap. A
 //! radix-FFT inverse is a perf follow-up (needs complex-type codegen).
 //!
-//! Codegen-only. Correctness validated by `vocoder_gpu_correctness`.
+//! Codegen-only. Correctness validated by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

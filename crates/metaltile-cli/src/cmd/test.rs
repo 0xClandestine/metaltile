@@ -4,8 +4,9 @@
 //!
 //! Iterates the `KernelTest` inventory and dispatches each setup in-process via
 //! the shared name-keyed runner, comparing GPU output to the expected buffers
-//! within each test's tolerance. Complements the legacy
-//! `tests/*_gpu_correctness.rs` suite during migration.
+//! within each test's tolerance. Replaces the former
+//! `tests/*_gpu_correctness.rs` suite (removed in #240; now in-source
+//! `#[test_kernel]`s).
 
 use metaltile_std::run_kernel::run_kernel_test;
 

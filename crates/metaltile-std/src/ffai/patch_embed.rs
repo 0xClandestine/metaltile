@@ -41,7 +41,7 @@
 //! the weight column for `(ic, py, px)` is at
 //! `ic*patch_h*patch_w + py*patch_w + px`.
 //!
-//! Codegen-only. Correctness validated by `patch_embed_gpu_correctness`.
+//! Codegen-only. Correctness validated by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

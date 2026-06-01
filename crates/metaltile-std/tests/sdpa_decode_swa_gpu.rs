@@ -2,10 +2,13 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Sliding-window + sink-token perf bench for `ffai::sdpa_decode`.
 //!
-//! Companion to `sdpa_decode_gpu_correctness.rs`. The correctness file
-//! pins that the dense path (`sink_end = 0, window_start = 0`) matches
-//! the pre-SWA kernel's CPU naive reference within fp32 tolerance, and
-//! that the SWA bound split matches a masked naive reference. This
+//! Companion to the in-source `#[test_kernel]` correctness coverage in
+//! `src/ffai/sdpa_decode.rs` (`test_ffai_sdpa_decode` /
+//! `test_ffai_sdpa_decode_swa` / `_swa_sink` / `_learned_sink`), which pins
+//! the dense path (`sink_end = 0, window_start = 0`) against the pre-SWA
+//! kernel's CPU naive reference within fp32 tolerance and the SWA bound split
+//! against a masked naive reference. (That coverage moved here from the
+//! former `sdpa_decode_gpu_correctness.rs`, deleted in #240.) This
 //! file measures the resulting decode speedup at Qwen3-class GQA
 //! shapes and the long-context regimes where sliding window is
 //! actually deployed (industry SWA config: `window = 4096` over

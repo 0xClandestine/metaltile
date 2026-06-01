@@ -259,7 +259,8 @@ pub mod kernel_tests {
 
     /// CPU oracle: mirrors `_gated_delta_step_ops` from
     /// `mlx_lm/models/gated_delta.py` (see the legacy
-    /// `tests/gated_delta_gpu_correctness.rs::naive_gated_delta_step`).
+    /// `tests/gated_delta_gpu_correctness.rs::naive_gated_delta_step`, removed
+    /// in #240).
     /// Returns `(y, state_out)` flattened.
     #[allow(clippy::too_many_arguments)]
     fn oracle(

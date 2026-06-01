@@ -64,7 +64,7 @@
 //! - **Kernel size is fixed at 3×3, stride at 1.** Padding is a runtime
 //!   constexpr; padded taps outside the real image contribute zero.
 //!
-//! Codegen-only. Correctness validated by `winograd_conv_gpu_correctness`.
+//! Codegen-only. Correctness validated by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

@@ -665,7 +665,8 @@ fn prep_step_bf16_multi_step_8_consecutive() {
 //
 //  When q_norm_weight / k_norm_weight are identity and a_log / a_raw /
 //  dt_bias / b_raw are chosen so g and beta land at the values used by
-//  the (unfused) `gated_delta_gpu_correctness.rs` tests, the fused
+//  the (unfused) legacy `tests/gated_delta_gpu_correctness.rs` tests
+//  (removed in #240), the fused
 //  kernel's output should match the CPU oracle to the same precision
 //  envelope the unfused kernel does. This is the regression net under
 //  the "drop-in replacement" claim.

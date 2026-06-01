@@ -250,10 +250,11 @@ aura_encode_kernel!(aura_encode_int8, 8u32, 256u32, "encode_int8");
 /// New-syntax correctness for the AURA fused encode kernel. Mirrors the
 /// affine-quantize tests' strategy: the **packed codes** go through a
 /// branchless boundary-count whose last bit and bit-packing are sensitive to
-/// Metal fast-math FMA fusion, so they stay covered by the legacy bit-exact
-/// `aura_encode_gpu_correctness.rs` A/B test. Here we pin the part that is
-/// robustly checkable — the per-vector **norm-correction factor**
-/// (`norms_out`), which the decoder multiplies back through.
+/// Metal fast-math FMA fusion, so they stayed covered by the legacy bit-exact
+/// `tests/aura_encode_gpu_correctness.rs` (removed in #240) A/B test. Here we
+/// pin the part that is robustly checkable — the per-vector
+/// **norm-correction factor** (`norms_out`), which the decoder multiplies
+/// back through.
 ///
 /// Setup uses an **identity rotation** so the Stage-2 matmul is `rotated =
 /// unit_val` exactly (no reorder ambiguity in the quant index), and a smooth

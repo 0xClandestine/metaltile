@@ -5,7 +5,8 @@
 //!
 //! Dispatches `mt_qmm_mma_mpp_{f32,f16}` over a small set of shapes
 //! (single 32×32 tile + multi-tile / multi-K-block) and validates against
-//! the same triple-loop CPU oracle used by `qmm_gpu_correctness.rs` for
+//! the same triple-loop CPU oracle once used by the legacy
+//! `tests/qmm_gpu_correctness.rs` (removed in #240) for
 //! `mt_qmm_mma`. Requires macOS 26+ / Metal 4 — the kernel includes
 //! `<MetalPerformancePrimitives/MetalPerformancePrimitives.h>` and calls
 //! `mpp::tensor_ops::matmul2d<desc, metal::execution_simdgroup>`. The
@@ -48,7 +49,8 @@ fn ctx_or_skip(test_name: &str) -> Option<Context> {
 }
 
 /// Triple-loop CPU oracle — bit-identical algorithm to `cpu_qmm_reference`
-/// in `qmm_gpu_correctness.rs`. Replicated here to keep the test file
+/// in the legacy `tests/qmm_gpu_correctness.rs` (removed in #240). Replicated
+/// here to keep the test file
 /// self-contained (integration tests can't share helpers across files
 /// without a `mod common`).
 #[allow(clippy::too_many_arguments)]

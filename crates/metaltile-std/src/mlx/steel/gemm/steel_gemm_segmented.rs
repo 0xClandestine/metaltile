@@ -257,8 +257,9 @@ pub mod kernel_benches {
 }
 
 /// New-syntax correctness tests for the segmented (ragged-K batched)
-/// steel GEMM — ports the oracle from
-/// `tests/steel_gemm_segmented_gpu_correctness.rs`. For segment `seg`
+/// steel GEMM — ports the oracle from the legacy
+/// `tests/steel_gemm_segmented_gpu_correctness.rs` (removed in #240). For
+/// segment `seg`
 /// with K-range `[segments[2·seg], segments[2·seg+1])`:
 ///   `out[seg, r, c] = Σ_{k in range} a[r, k] · b[k, c]`,
 /// `a` is `[M, total_k]`, `b` is `[total_k, N]`, output `[n_seg, M, N]`.

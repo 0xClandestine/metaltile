@@ -291,7 +291,8 @@ pub fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Naive RMSNorm reference: `out = x * w / sqrt(mean(x²) + eps)`.
-/// Used by `rms_norm_gpu_correctness.rs`. f32 throughout.
+/// Was used by the legacy `tests/rms_norm_gpu_correctness.rs` (removed in
+/// #240). f32 throughout.
 pub fn naive_rms_norm_f32(x: &[f32], w: &[f32], n: usize, eps: f32) -> Vec<f32> {
     assert_eq!(x.len() % n, 0, "x len must be multiple of row width n");
     assert_eq!(w.len(), n, "w length must equal row width n");

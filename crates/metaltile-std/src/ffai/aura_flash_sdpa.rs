@@ -53,8 +53,7 @@
 //!   simdgroup per query.
 //! - `dims_per_lane = ceil(dim / 32)`.
 //!
-//! Codegen-only; correctness pinned by
-//! `tests/aura_flash_sdpa_gpu_correctness.rs`.
+//! Codegen-only; correctness pinned by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

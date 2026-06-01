@@ -245,7 +245,8 @@ pub mod kernel_benches {
 }
 
 /// New-syntax correctness tests for the block-masked steel GEMM — ports
-/// the oracle from `tests/steel_gemm_masked_gpu_correctness.rs`. The
+/// the oracle from the legacy `tests/steel_gemm_masked_gpu_correctness.rs`
+/// (removed in #240). The
 /// kernel computes `C = A · B` with block-level predication: an
 /// output-block mask zeroes whole `BM×BN` blocks, an operand-block mask
 /// scales each `BK`-block's contribution.

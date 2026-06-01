@@ -491,8 +491,8 @@ pub mod kernel_tests {
 /// (`ffai_moe_down_swiglu_accum_int4_chain8`). Bench-only: the 8-way
 /// SwiGLU + indexed int4 down-projection + scalar-FMA-chain fusion has no
 /// clean single-stage oracle — its end-to-end correctness is validated in
-/// FFAI integration tests and `tests/moe_down_swiglu_accum_gpu_correctness.rs`
-/// against the unfused 3-stage chain.
+/// FFAI integration tests and by the in-source `#[test_kernel]`s against the
+/// unfused 3-stage chain.
 ///
 /// Geometry: one threadgroup per down-projection output row.
 /// Grid (Reduction): `grid_3d(out_dim, 1, 1, [lsize,1,1])` (lsize = 128).

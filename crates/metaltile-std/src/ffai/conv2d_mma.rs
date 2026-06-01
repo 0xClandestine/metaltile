@@ -72,7 +72,7 @@
 //! lanes loads 8 contiguous K-elements for one oc-row, then the MMA reads
 //! rows of B as K-vectors (no transpose needed vs `mt_qmm_mma`'s W^T).
 //!
-//! Codegen-only. Correctness validated by `conv2d_mma_gpu_correctness`.
+//! Codegen-only. Correctness validated by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 
@@ -81,7 +81,7 @@ use metaltile::kernel;
 /// Grid `[out_ch/32, (batch*out_h*out_w)/32, 1]`, tpg = 128.
 /// Each TG computes a 32×32 tile of `out[pixels, out_channels]`.
 ///
-/// Correctness pinned by `conv2d_mma_gpu_correctness`.
+/// Correctness pinned by the in-source `#[test_kernel]`s.
 #[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn conv2d_mma<T>(

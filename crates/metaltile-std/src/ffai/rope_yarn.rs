@@ -26,7 +26,7 @@
 //! (head, i in 0..head_dim/2), each thread rotating the pair
 //! (i, i + half_dim). No reduction, no threadgroup memory.
 //!
-//! Codegen-only. Validated by `rope_yarn_gpu_correctness` + FFAI
+//! Codegen-only. Validated by the in-source `#[test_kernel]`s + FFAI
 //! integration tests.
 
 use metaltile::kernel;

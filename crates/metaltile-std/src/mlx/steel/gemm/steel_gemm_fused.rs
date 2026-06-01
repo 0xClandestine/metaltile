@@ -310,8 +310,9 @@ pub mod kernel_benches {
 }
 
 /// New-syntax correctness tests for the fused steel GEMM — ports the
-/// `nn` (non-transposed) oracle from
-/// `tests/steel_gemm_gpu_correctness.rs`. The kernel computes a plain
+/// `nn` (non-transposed) oracle from the legacy
+/// `tests/steel_gemm_gpu_correctness.rs` (removed in #240). The kernel
+/// computes a plain
 /// row-major `C = A · B` (`A:[M,K]`, `B:[K,N]`, `C:[M,N]`); the oracle
 /// is a straight triple-loop fp32 matmul over dtype-rounded inputs.
 ///

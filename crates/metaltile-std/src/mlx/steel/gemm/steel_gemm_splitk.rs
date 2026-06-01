@@ -455,7 +455,8 @@ pub mod kernel_benches {
 }
 
 /// New-syntax correctness tests for the two-kernel split-K steel GEMM —
-/// ports the oracle from `tests/steel_gemm_splitk_gpu_correctness.rs`.
+/// ports the oracle from the legacy
+/// `tests/steel_gemm_splitk_gpu_correctness.rs` (removed in #240).
 ///
 /// Split-K is a single-dispatch-per-pass kernel, so each pass is pinned
 /// independently:

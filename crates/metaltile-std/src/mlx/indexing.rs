@@ -27,8 +27,7 @@
 //! a `bool` tensor — `u32` is the dtype the DSL exposes for index
 //! buffers, and the caller packs the mask as `0u32` / `1u32`).
 //!
-//! Codegen-only; correctness pinned by
-//! `tests/indexing_gpu_correctness.rs`.
+//! Codegen-only; correctness pinned by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

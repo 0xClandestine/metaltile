@@ -40,7 +40,7 @@
 //! `kv_cache_update`.
 //!
 //! Codegen-only. Correctness validated against `kv_cache_update` looped
-//! per-row in `tests/kv_cache_update_many_gpu_correctness.rs`.
+//! per-row by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

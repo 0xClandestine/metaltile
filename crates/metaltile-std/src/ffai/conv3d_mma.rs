@@ -51,7 +51,7 @@
 //!   iw   = ow + kx
 //!   A[pv, kt] = input[n*in_ch*in_d*in_h*in_w + ic*in_d*in_h*in_w + id*in_h*in_w + ih*in_w + iw]
 //!
-//! Codegen-only. Correctness validated by `conv3d_mma_gpu_correctness`.
+//! Codegen-only. Correctness validated by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 
@@ -59,7 +59,7 @@ use metaltile::kernel;
 ///
 /// Grid `[out_ch/32, (batch*out_d*out_h*out_w)/32, 1]`, tpg = 128.
 ///
-/// Correctness pinned by `conv3d_mma_gpu_correctness`.
+/// Correctness pinned by the in-source `#[test_kernel]`s.
 #[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn conv3d_mma<T>(

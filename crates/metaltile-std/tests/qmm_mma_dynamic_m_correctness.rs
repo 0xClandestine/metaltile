@@ -37,8 +37,9 @@ use metaltile_runtime::Context;
 use metaltile_std::mlx::quantized_mma_dynamic_m as dyn_m;
 
 // ── Triple-loop CPU oracle — bit-identical algorithm to ──────────────────
-//    `cpu_qmm_reference` in `qmm_gpu_correctness.rs`. Replicated for
-//    test-file isolation per integration-test convention in this crate.
+//    `cpu_qmm_reference` in the legacy `tests/qmm_gpu_correctness.rs`
+//    (removed in #240). Replicated for test-file isolation per
+//    integration-test convention in this crate.
 
 #[allow(clippy::too_many_arguments)]
 fn cpu_qmm_reference(
@@ -152,7 +153,8 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 // ── Deterministic q4 weights — same per-pack pattern as the other ────────
-//    qmm correctness tests (`qmm_mpp_correctness.rs`, `qmm_gpu_correctness.rs`).
+//    qmm correctness tests (`qmm_mpp_correctness.rs`, and the legacy
+//    `tests/qmm_gpu_correctness.rs` removed in #240).
 
 fn build_quant_inputs(
     m: usize,

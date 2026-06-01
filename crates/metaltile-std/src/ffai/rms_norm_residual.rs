@@ -23,8 +23,7 @@
 //!   **`TPG ≤ 1024`**. Combined: `n` multiple of 128, `n ≤ 4096`.
 //! - **Grid: 1 threadgroup per row** — `program_id::<0>()` = row index.
 //!
-//! Codegen-only; correctness pinned by
-//! `tests/rms_norm_residual_gpu_correctness.rs`.
+//! Codegen-only; correctness pinned by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

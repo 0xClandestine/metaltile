@@ -22,9 +22,10 @@ pub fn mt_arange<T>(out: Tensor<T>, start: Tensor<T>, step: Tensor<T>, #[constex
 
 /// Correctness tests for `mt_arange` in the new `#[test_kernel]` syntax.
 ///
-/// These run via `tile test` (and the `kernel_tests_harness` cargo bridge)
-/// alongside the legacy `tests/arange_gpu_correctness.rs`, so the old and new
-/// paths can be A/B-compared on the same kernel IR during migration.
+/// These run via `tile test` (and the `kernel_tests_harness` cargo bridge).
+/// They were A/B-compared against the legacy
+/// `tests/arange_gpu_correctness.rs` (removed in #240) on the same kernel IR
+/// during migration.
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 

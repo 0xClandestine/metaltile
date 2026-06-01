@@ -25,8 +25,7 @@
 //! - **Grid3D**, `grid = [1, Dh, batch*H]`, `tg = [32, 1, 1]`.
 //! - `Ds` a multiple of 32.
 //!
-//! Codegen-only; correctness pinned by
-//! `tests/ssm_replay_gpu_correctness.rs`.
+//! Codegen-only; correctness pinned by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 
@@ -181,7 +180,8 @@ ssm_replay!(ssm_replay_d128_128_32, 128u32, 128u32, 32u32, 4u32, "replay_d128_12
 
 /// New-syntax correctness for the Mamba 2 SSD tape record + replay kernels on
 /// the small `d16_64_4` cell (Dh=16, Ds=64, H=4, G=2). Oracles are ported
-/// verbatim from `tests/ssm_replay_gpu_correctness.rs`:
+/// verbatim from the legacy `tests/ssm_replay_gpu_correctness.rs`
+/// (removed in #240):
 ///
 ///   - `record` runs the sequential SSD forward (`y = C·state + D·x`,
 ///     `state ← dA·state + dBx`) and surfaces the `(dA, dBx)` tape; we check

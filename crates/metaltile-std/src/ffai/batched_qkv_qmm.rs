@@ -36,8 +36,7 @@
 //!   biases_*  [out_*, N/G]    T
 //!   *_buf     [M, out_*]      T
 //!
-//! Codegen-only; correctness pinned by
-//! `tests/batched_qkv_qmm_gpu_correctness.rs`.
+//! Codegen-only; correctness pinned by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

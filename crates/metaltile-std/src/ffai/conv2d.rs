@@ -46,7 +46,7 @@
 //! tokens — never an inner `macro_rules!` inside a kernel body (which
 //! silently empties the kernel; see `dequant_gather.rs`).
 //!
-//! Codegen-only. Correctness validated by `conv2d_gpu_correctness`.
+//! Codegen-only. Correctness validated by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 
@@ -192,7 +192,7 @@ conv2d_kernel!(conv2d_generic, "generic", kh, kw, stride_h, stride_w);
 ///   above. The kernel takes the per-group channel counts as
 ///   constexprs so no division happens on the hot path.
 ///
-/// Codegen-only; correctness pinned by `conv2d_gpu_correctness`.
+/// Codegen-only; correctness pinned by the in-source `#[test_kernel]`s.
 #[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn conv2d_grouped<T>(

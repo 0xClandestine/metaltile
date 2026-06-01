@@ -32,9 +32,9 @@
 //! - `n_rows * M` must equal the total element count of the input tensor.
 //!
 //! Correctness pinned by the in-module `kernel_tests` (`#[test_kernel]`,
-//! consistent with the other migrated mlx kernels) plus the richer oracle
-//! cases (identity-vector, not-all-zeros) in
-//! `tests/hadamard_m_gpu_correctness.rs`.
+//! consistent with the other migrated mlx kernels); these absorbed the
+//! richer oracle cases (identity-vector, not-all-zeros) from the legacy
+//! `tests/hadamard_m_gpu_correctness.rs` (removed in #240).
 //!
 //! ## Sign-bit encoding
 //!
@@ -229,9 +229,9 @@ const _: &[BenchDType] = &[BenchDType::F32, BenchDType::F16, BenchDType::BF16];
 
 /// New-syntax benchmarks for the Paley-construction Hadamard-M transforms
 /// (M ∈ {12, 20, 28}; Reduction, one TG per row, tpg=M). In-process
-/// correctness for the same kernels lives in [`kernel_tests`] below; the
-/// richer oracle cases (identity-vector, not-all-zeros, perf bench) stay
-/// in `tests/hadamard_m_gpu_correctness.rs`.
+/// correctness for the same kernels lives in [`kernel_tests`] below, which
+/// absorbed the richer oracle cases (identity-vector, not-all-zeros) from
+/// the legacy `tests/hadamard_m_gpu_correctness.rs` (removed in #240).
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 

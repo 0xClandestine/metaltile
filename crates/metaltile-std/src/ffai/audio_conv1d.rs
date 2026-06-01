@@ -27,7 +27,7 @@
 //! clamped to index 0 and masked. Indices stay in the *padded* frame so
 //! every value is a non-negative u32 (no i32 arithmetic). Generic over T.
 //!
-//! Codegen-only. Correctness validated by `audio_conv1d_gpu_correctness`.
+//! Codegen-only. Correctness validated by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

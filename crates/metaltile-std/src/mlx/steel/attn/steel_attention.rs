@@ -513,7 +513,8 @@ pub mod kernel_benches {
 }
 
 /// New-syntax correctness tests for the SDPA-prefill family — ports the
-/// causal-SDPA oracle from `tests/steel_attention_gpu_correctness.rs`.
+/// causal-SDPA oracle from the legacy
+/// `tests/steel_attention_gpu_correctness.rs` (removed in #240).
 /// All three variants (`mt_sdpa_prefill` scalar flash, `_mma`, and
 /// `_mma_bf16`) share the same dispatch contract and the same reference:
 ///   `O = softmax(Q·Kᵀ · scale)·V` per Q head, with causal masking

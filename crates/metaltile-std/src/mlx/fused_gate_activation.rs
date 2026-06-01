@@ -33,8 +33,7 @@
 //! `activation_type == 0` (silu) is `mt_swiglu`; this file ports `1`
 //! and `2`.
 //!
-//! Codegen-only; correctness pinned by
-//! `tests/fused_gate_activation_gpu_correctness.rs`.
+//! Codegen-only; correctness pinned by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

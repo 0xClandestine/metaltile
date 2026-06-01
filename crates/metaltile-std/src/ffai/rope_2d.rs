@@ -39,7 +39,7 @@
 //! the row half and one in the column half. `head_dim` must be a
 //! multiple of 4 (caller precondition — checked in the test / wrapper).
 //!
-//! Codegen-only. Correctness validated by `rope_2d_gpu_correctness`.
+//! Codegen-only. Correctness validated by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

@@ -51,7 +51,7 @@
 //! - `KernelMode::Reduction`.
 //!
 //! Correctness vs CPU oracle ≥ cos 0.999 (f32/f16), ≥ 0.997 (bf16) — see
-//! `crates/metaltile-std/tests/steel_attention_nax_gpu_correctness.rs`.
+//! the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 
@@ -535,8 +535,9 @@ sdpa_prefill_nax_wide!(mt_sdpa_prefill_nax_d256, 256u32, 8u32, 4160);
 /// tensor-core `matmul2d` (Metal 4 / Apple10+); the bench compiles and
 /// dispatches everywhere but only executes on supported HW.
 ///
-/// Dispatch contract (mirrors the GPU correctness harness in
-/// `tests/steel_attention_nax_gpu_correctness.rs`):
+/// Dispatch contract (mirrors the in-source `#[test_kernel]`s, ported from
+/// the legacy `tests/steel_attention_nax_gpu_correctness.rs`, removed in
+/// #240):
 ///
 /// - **Reduction mode** — the kernel reads `tgid_x`/`tgid_y`/`tgid_z`.
 /// - **Grid = (q_len / BQ=16, n_q_heads, batch)** threadGROUP counts,

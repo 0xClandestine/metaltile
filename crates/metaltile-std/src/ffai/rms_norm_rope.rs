@@ -29,8 +29,7 @@
 //! - **`TPG ≤ 1024`** → `axis_size ≤ 2048`.
 //! - **Grid: 1 threadgroup per row**, `program_id::<0>()` = row index.
 //!
-//! Codegen-only; correctness pinned by
-//! `tests/rms_norm_rope_gpu_correctness.rs`.
+//! Codegen-only; correctness pinned by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

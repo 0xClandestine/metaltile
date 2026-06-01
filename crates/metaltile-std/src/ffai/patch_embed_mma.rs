@@ -61,7 +61,7 @@
 //!   `mt_qmm_mma_m16` defers).
 //! - Single image (no batch — matches `patch_embed.rs` layout).
 //!
-//! Codegen-only. Correctness validated by `patch_embed_mma_gpu_correctness`.
+//! Codegen-only. Correctness validated by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 
@@ -69,7 +69,7 @@ use metaltile::kernel;
 ///
 /// Grid `[hidden/32, num_patches/32, 1]`, tpg = 128.
 ///
-/// Correctness pinned by `patch_embed_mma_gpu_correctness`.
+/// Correctness pinned by the in-source `#[test_kernel]`s.
 #[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn patch_embed_mma<T>(

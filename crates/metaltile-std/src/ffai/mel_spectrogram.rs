@@ -40,7 +40,7 @@
 //! on the frame walk — `n_samples >= (n_frames-1)*hop + n_fft` is a
 //! caller precondition. Generic over T; accumulation is fp32.
 //!
-//! Codegen-only. Correctness validated by `mel_spectrogram_gpu_correctness`.
+//! Codegen-only. Correctness validated by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

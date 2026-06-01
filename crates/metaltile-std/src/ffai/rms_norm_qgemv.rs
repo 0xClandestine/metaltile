@@ -41,8 +41,7 @@
 //! - `out_dim` must be a multiple of 8.
 //! - `group_size` must be 64 (one group per 512-K block / 4 lanes).
 //!
-//! Codegen-only; correctness pinned by
-//! `tests/rms_norm_qgemv_gpu_correctness.rs`.
+//! Codegen-only; correctness pinned by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

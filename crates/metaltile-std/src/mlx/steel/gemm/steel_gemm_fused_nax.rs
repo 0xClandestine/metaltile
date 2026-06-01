@@ -43,8 +43,8 @@
 //! - **`KernelMode::Reduction`** so `tgid_*` lowers to the threadgroup
 //!   index, not the global thread index.
 //!
-//! Correctness vs CPU oracle ≥ cos 0.999 — see
-//! `crates/metaltile-std/tests/steel_gemm_fused_nax_gpu_correctness.rs`.
+//! Correctness vs CPU oracle ≥ cos 0.999 — see the in-source
+//! `#[test_kernel]`s.
 
 use metaltile::kernel;
 
@@ -149,8 +149,9 @@ pub fn mt_steel_gemm_fused_nax<T>(
 /// indices — so the grid is **threadgroup counts** `(n/32, m/32, 1)`
 /// (`tgid_x` = N-block, `tgid_y` = M-block) with `tpg = [128, 1, 1]`.
 /// Constexprs are `k`, `n` (the kernel param order). `bytes_moved` counts
-/// the three dominant matmul streams. Bench-only — correctness stays on
-/// `steel_gemm_fused_nax_gpu_correctness.rs`.
+/// the three dominant matmul streams. Bench-only — correctness lives in the
+/// in-source `#[test_kernel]`s (ported from the legacy
+/// `tests/steel_gemm_fused_nax_gpu_correctness.rs`, removed in #240).
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
@@ -183,8 +184,9 @@ pub mod kernel_benches {
 }
 
 /// New-syntax correctness tests for the NAX (cooperative-tensor) fused
-/// steel GEMM — ports the oracle from
-/// `tests/steel_gemm_fused_nax_gpu_correctness.rs`. The kernel computes
+/// steel GEMM — ports the oracle from the legacy
+/// `tests/steel_gemm_fused_nax_gpu_correctness.rs` (removed in #240). The
+/// kernel computes
 /// the plain row-major `C = A · B` via `mpp::tensor_ops::matmul2d`; the
 /// oracle is a straight triple-loop fp32 matmul over dtype-rounded
 /// inputs.

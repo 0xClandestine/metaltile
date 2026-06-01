@@ -647,7 +647,8 @@ pub fn mt_sdpa_vector_d256<T>(
 /// kernels (`mt_sdpa_vector` at head_dim 128 plus the d64/d96/d192/d256
 /// variants). Oracle: a straight triple-loop `O = softmax(Q·Kᵀ·scale)·V` per
 /// Q head with GQA via `kv_head = q_head / gqa_factor` (the same reference the
-/// legacy `sdpa_vector_gpu_correctness.rs` pins). The CPU oracle is reused by
+/// legacy `tests/sdpa_vector_gpu_correctness.rs` (removed in #240) pins). The
+/// CPU oracle is reused by
 /// `scaled_dot_product_attention`'s `mt_sdpa`. Inputs are dtype-rounded so the
 /// oracle sees what the kernel loads after the f32 cast.
 pub mod kernel_tests {

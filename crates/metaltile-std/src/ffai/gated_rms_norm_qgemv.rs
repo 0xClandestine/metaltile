@@ -76,7 +76,7 @@
 //!   out   = ffai_dequant_gemv_int4(inner, Wq, S, B)  // [out_dim]
 //! ```
 //!
-//! Pinned by `tests/gated_rms_norm_qgemv_int4_gpu_correctness.rs`.
+//! Pinned by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 
@@ -321,7 +321,8 @@ mod oracle {
     pub fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
 
     /// CPU oracle: per-row gated RMSNorm (`silu(z)` gate) → int4 GEMV.
-    /// Mirrors `tests/gated_rms_norm_qgemv_int4_gpu_correctness.rs::naive`.
+    /// Mirrors the legacy `tests/gated_rms_norm_qgemv_int4_gpu_correctness.rs::naive`
+    /// (removed in #240).
     #[allow(clippy::too_many_arguments)]
     pub fn naive(
         y: &[f32],

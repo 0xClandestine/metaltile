@@ -121,9 +121,9 @@ pub fn mt_sort<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32) {
 // cases need no special-casing: an exhausted run always compares
 // "greater", so the other run is drained first.
 //
-// `BenchDispatch::Generic` — correctness is pinned by
-// `tests/sort_gpu_correctness.rs`; there is no single-dispatch MLX
-// merge-pass to bench against (MLX fuses partition + merge differently).
+// `BenchDispatch::Generic` — correctness is pinned by the in-source
+// `#[test_kernel]`s; there is no single-dispatch MLX merge-pass to bench
+// against (MLX fuses partition + merge differently).
 
 #[kernel]
 pub fn mt_merge<T>(

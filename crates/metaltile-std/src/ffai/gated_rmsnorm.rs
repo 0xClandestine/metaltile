@@ -43,8 +43,7 @@
 //!   Multi-row dispatch uses `grid = (nRows * TPG, 1, 1)`,
 //!   `tg = (TPG, 1, 1)`.
 //!
-//! Codegen-only; correctness pinned by
-//! `tests/gated_rmsnorm_gpu_correctness.rs`.
+//! Codegen-only; correctness pinned by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

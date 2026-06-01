@@ -70,8 +70,8 @@
 //! safe). The runtime decides the residency / barrier story.
 //!
 //! Codegen-only. Correctness validated against the
-//! `conv1d_causal_step` + `mt_silu_cast_to_f32` looped pair in
-//! `tests/conv1d_causal_step_silu_cast_many_gpu_correctness.rs`.
+//! `conv1d_causal_step` + `mt_silu_cast_to_f32` looped pair by the in-source
+//! `#[test_kernel]`s.
 
 use metaltile::kernel;
 

@@ -44,8 +44,8 @@
 //! - **`KernelMode::Reduction`** so `tgid_*` lowers to the threadgroup
 //!   index.
 //!
-//! Correctness vs CPU oracle ≥ cos 0.999 — see
-//! `crates/metaltile-std/tests/steel_gemm_gather_nax_gpu_correctness.rs`.
+//! Correctness vs CPU oracle ≥ cos 0.999 — see the in-source
+//! `#[test_kernel]`s.
 
 use metaltile::kernel;
 
@@ -149,7 +149,8 @@ pub fn mt_steel_gemm_gather_nax<T>(
 /// (gather row / matrix 0 — in-bounds and deterministic). `b` is a
 /// single `[K, N]` matrix here (one expert). `bytes_moved` counts the
 /// three matmul streams plus the index reads. Bench-only — correctness
-/// stays on `steel_gemm_gather_nax_gpu_correctness.rs`.
+/// lives in the in-source `#[test_kernel]`s (ported from the legacy
+/// `tests/steel_gemm_gather_nax_gpu_correctness.rs`, removed in #240).
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
@@ -183,8 +184,8 @@ pub mod kernel_benches {
 }
 
 /// New-syntax correctness tests for the NAX gather steel GEMM (MoE
-/// `gather_mm`) — ports the oracle from
-/// `tests/steel_gemm_gather_nax_gpu_correctness.rs`:
+/// `gather_mm`) — ports the oracle from the legacy
+/// `tests/steel_gemm_gather_nax_gpu_correctness.rs` (removed in #240):
 ///   `out[mr, nc] = Σ_k a[lhs_indices[mr], k] · b[rhs_indices[nc/32], k, nc]`,
 /// where `b` is the stacked `[n_b_mats, K, N]` operand.
 ///

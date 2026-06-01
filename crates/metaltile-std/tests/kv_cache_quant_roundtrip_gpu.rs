@@ -9,7 +9,8 @@
 //! a wrong index formula in either direction would silently corrupt
 //! the cache without crashing.
 //!
-//! Coverage rationale (mirrors `kv_cache_update_gpu_correctness.rs`):
+//! Coverage rationale (mirrors the legacy
+//! `tests/kv_cache_update_gpu_correctness.rs`, removed in #240):
 //! `quantize_kv_*` and `bulk_dequant_kv_*` are emitted from `macro_rules!`
 //! shells (the proc-macro doesn't expand the inner declarative macro,
 //! so embedding kernel bodies in nested macros would silently produce

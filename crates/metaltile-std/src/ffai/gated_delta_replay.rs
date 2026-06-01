@@ -22,8 +22,7 @@
 //! - **Grid3D**, `grid = [1, Dv, batch*Hv]`, `tg = [32, 1, 1]`.
 //! - `Dk` a multiple of 32.
 //!
-//! Codegen-only; correctness pinned by
-//! `tests/gated_delta_replay_gpu_correctness.rs`.
+//! Codegen-only; correctness pinned by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 
@@ -188,7 +187,8 @@ state_replay!(state_replay_d64_32_2_2, 64u32, 32u32, 2u32, 2u32, "replay_d64_32_
 
 /// New-syntax correctness for the GDN innovation-tape record + replay kernels
 /// on the small `d64_32_2_2` cell (Dk=64, Dv=32, Hk=2, Hv=2). Oracles are
-/// ported verbatim from `tests/gated_delta_replay_gpu_correctness.rs`:
+/// ported verbatim from the legacy `tests/gated_delta_replay_gpu_correctness.rs`
+/// (removed in #240):
 ///
 ///   - `record` runs the plain GatedDelta forward step and surfaces `delta_t`
 ///     to the tape; we check its `y` and `state_out`.

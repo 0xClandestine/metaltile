@@ -21,7 +21,7 @@
 //! - TPG is fixed at 256 (8 simdgroups × 32 lanes) — the 7-stage
 //!   halving tree below assumes exactly 256 threads.
 //!
-//! Correctness pinned by `tests/arg_reduce_gpu_correctness.rs`.
+//! Correctness pinned by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

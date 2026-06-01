@@ -49,8 +49,8 @@
 //! - **`partials` length `n_splits * m * n` (fp32)**, `out` length `m*n`.
 //! - Accumulates via a `stack_alloc` fp32 register; final cast to `T`.
 //!
-//! Correctness vs CPU oracle ≥ cos 0.999 — see
-//! `crates/metaltile-std/tests/steel_gemm_splitk_nax_gpu_correctness.rs`.
+//! Correctness vs CPU oracle ≥ cos 0.999 — see the in-source
+//! `#[test_kernel]`s.
 
 use metaltile::kernel;
 
@@ -180,7 +180,8 @@ pub fn mt_steel_gemm_splitk_accum_nax<T>(
 /// threadgroup per `[M, N]` element. Constexprs `m`, `n`, `n_splits`.
 ///
 /// `bytes_moved` counts the dominant streams. Bench-only — correctness
-/// stays on `steel_gemm_splitk_nax_gpu_correctness.rs`.
+/// lives in the in-source `#[test_kernel]`s (ported from the legacy
+/// `tests/steel_gemm_splitk_nax_gpu_correctness.rs`, removed in #240).
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
@@ -246,8 +247,9 @@ pub mod kernel_benches {
 }
 
 /// New-syntax correctness tests for the two-kernel NAX split-K steel
-/// GEMM — ports the oracle from
-/// `tests/steel_gemm_splitk_nax_gpu_correctness.rs`. Each pass is pinned
+/// GEMM — ports the oracle from the legacy
+/// `tests/steel_gemm_splitk_nax_gpu_correctness.rs` (removed in #240). Each
+/// pass is pinned
 /// independently (single dispatch per `#[test_kernel]`):
 ///   - **pass 1** (`mt_steel_gemm_splitk_nax`) — each `tgid_z` K-split
 ///     writes its partial `[M, N]` product (fp32) to `partials[split]`.

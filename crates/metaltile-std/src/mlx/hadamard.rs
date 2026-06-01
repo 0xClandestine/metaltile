@@ -19,8 +19,7 @@
 //! - **Reduction mode**, `grid = [rows, 1, 1]`, `tg = [N, 1, 1]`.
 //! - `N` a power of two, `32 ≤ N ≤ 1024`; one thread per element.
 //!
-//! Codegen-only; correctness pinned by
-//! `tests/hadamard_gpu_correctness.rs`.
+//! Codegen-only; correctness pinned by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 

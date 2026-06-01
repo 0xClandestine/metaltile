@@ -48,8 +48,8 @@
 //! - **Group size baked at 32** — one scale per BK-block per N-row.
 //! - **`KernelMode::Reduction`**.
 //!
-//! Correctness vs CPU oracle ≥ cos 0.999 — see
-//! `crates/metaltile-std/tests/fp_quantized_nax_gpu_correctness.rs`.
+//! Correctness vs CPU oracle ≥ cos 0.999 — see the in-source
+//! `#[test_kernel]`s.
 
 use metaltile::kernel;
 

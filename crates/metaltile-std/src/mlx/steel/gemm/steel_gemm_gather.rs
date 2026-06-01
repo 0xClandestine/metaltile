@@ -238,7 +238,8 @@ pub mod kernel_benches {
 }
 
 /// New-syntax correctness tests for the gather steel GEMM — ports the
-/// oracle from `tests/steel_gemm_gather_gpu_correctness.rs`. The kernel
+/// oracle from the legacy `tests/steel_gemm_gather_gpu_correctness.rs`
+/// (removed in #240). The kernel
 /// computes `out[r,c] = Σ_k a[lhs_indices[r], k] · b_sel[k, c]` where
 /// `b_sel` is the `[K, N]` matrix `rhs_indices[c/BN]` stored flat in `b`
 /// at offset `idx*K*N`.

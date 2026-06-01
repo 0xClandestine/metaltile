@@ -6,8 +6,8 @@
 //! Per @0xClandestine's review on #147: "Would add a test that ensures
 //! generated output is as you would expect using this." These kernels
 //! are expressed entirely via the `CoopTile*` / DSL IR ops — no
-//! `Op::InlineMsl` — and the GPU correctness tests under
-//! `tests/steel_*_nax_gpu_correctness.rs` already pin numerical
+//! `Op::InlineMsl` — and the legacy GPU correctness tests under
+//! `tests/steel_*_nax_gpu_correctness.rs` (removed in #240) pinned numerical
 //! behaviour. The snapshots here pin the EMIT PATH: any change to op
 //! lowering, preamble emission, scheduling, or vectorization shows up
 //! as a reviewable text diff instead of silent drift through to the
