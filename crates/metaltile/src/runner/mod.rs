@@ -23,12 +23,15 @@ pub mod harness;
 pub use args::{RunnerArgs, RunnerCommand};
 pub use emit::{emit, emit_stdout};
 pub use gpu::{
+    BENCH_ITERS,
+    BENCH_WARMUP,
     BenchStats,
     CompiledKernel,
     GpuBuffer,
     GpuRunner,
     bench_gbps,
     bench_gbps_only,
+    bench_gbps_with,
     buffer_typed,
     elem_bytes,
     read_typed,

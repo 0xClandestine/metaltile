@@ -644,8 +644,8 @@ pub fn to_gbps(st: &BenchStats, bytes: f64) -> Option<f64> {
     st.is_valid().then(|| bytes / (st.min_us * 1e-6) / 1e9)
 }
 
-const BENCH_WARMUP: usize = 15;
-const BENCH_ITERS: usize = 10;
+pub const BENCH_WARMUP: usize = 15;
+pub const BENCH_ITERS: usize = 10;
 
 pub fn bench_gbps(
     runner: &GpuRunner,
@@ -655,8 +655,23 @@ pub fn bench_gbps(
     tpg: [usize; 3],
     bytes: f64,
 ) -> Option<(f64, BenchStats)> {
+    bench_gbps_with(runner, kernel, buffers, grid, tpg, bytes, BENCH_WARMUP, BENCH_ITERS)
+}
+
+/// Like [`bench_gbps`] but with explicit warmup / iteration counts, allowing
+/// `tile.toml` `warmup_runs` / `runs` to override the compile-time defaults.
+pub fn bench_gbps_with(
+    runner: &GpuRunner,
+    kernel: &CompiledKernel,
+    buffers: &[&GpuBuffer],
+    grid: [usize; 3],
+    tpg: [usize; 3],
+    bytes: f64,
+    warmup: usize,
+    iters: usize,
+) -> Option<(f64, BenchStats)> {
     runner.flush_slc();
-    let stats = runner.bench(kernel, buffers, grid, tpg, BENCH_WARMUP, BENCH_ITERS);
+    let stats = runner.bench(kernel, buffers, grid, tpg, warmup, iters);
     to_gbps(&stats, bytes).map(|x| (x, stats))
 }
 

@@ -27,11 +27,23 @@ pub struct TileConfig {
 
     /// Increase log verbosity when true.
     pub verbose: bool,
+
+    /// Number of timed benchmark iterations per kernel (after warmup).
+    pub runs: usize,
+
+    /// Number of warmup dispatches before timing begins.
+    pub warmup_runs: usize,
 }
 
 impl Default for TileConfig {
     fn default() -> Self {
-        Self { runner_binary: "__tile_runner".to_string(), project_path: None, verbose: false }
+        Self {
+            runner_binary: "__tile_runner".to_string(),
+            project_path: None,
+            verbose: false,
+            runs: 10,
+            warmup_runs: 15,
+        }
     }
 }
 
