@@ -13,3 +13,9 @@ runner_binary = "__tile_runner"
 
 # Increase log verbosity.
 verbose = false
+
+# Number of timed benchmark iterations per kernel (after warmup).
+runs = 10
+
+# Number of warmup dispatches before timing begins.
+warmup_runs = 15

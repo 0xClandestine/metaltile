@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use metaltile::{
     harness::bench::{BenchSetup, ConstValue, KernelBench, RefKernel},
-    runner::{GpuBuffer, GpuRunner, bench_gbps, read_typed},
+    runner::{GpuBuffer, GpuRunner, bench_gbps_with, read_typed},
 };
 use metaltile_codegen::passes::{
     self,
@@ -34,7 +34,7 @@ use crate::{
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
-pub fn run(args: &BenchArgs) -> Result<(), crate::CliError> {
+pub fn run(args: &BenchArgs, warmup_runs: usize, runs: usize) -> Result<(), crate::CliError> {
     let _span =
         tracing::info_span!("bench", filter = ?args.filter, verbose = args.verbose).entered();
     let json_out = &args.json;
@@ -136,7 +136,7 @@ pub fn run(args: &BenchArgs) -> Result<(), crate::CliError> {
                 for &dt in b.dtypes() {
                     let _kspan =
                         tracing::debug_span!("bench", name = b.name(), dtype = %dt).entered();
-                    if let Some(r) = run_kernel_bench(&runner, b, dt) {
+                    if let Some(r) = run_kernel_bench(&runner, b, dt, warmup_runs, runs) {
                         all.push(r);
                     }
                 }
@@ -564,6 +564,8 @@ fn run_kernel_bench(
     runner: &GpuRunner,
     bench: &'static dyn KernelBench,
     dt: metaltile_core::DType,
+    warmup_runs: usize,
+    runs: usize,
 ) -> Option<OpResult> {
     use metaltile_codegen::msl::MslGenerator;
 
@@ -607,7 +609,8 @@ fn run_kernel_bench(
     let grid = setup.grid();
     let g = grid.grid.map(|x| x as usize);
     let t = grid.tpg.map(|x| x as usize);
-    let (gbps, _stats) = bench_gbps(runner, &compiled, &refs, g, t, bytes_moved as f64)?;
+    let (gbps, _stats) =
+        bench_gbps_with(runner, &compiled, &refs, g, t, bytes_moved as f64, warmup_runs, runs)?;
 
     let shape = match setup.shape_label() {
         Some(label) => label.to_string(),
@@ -627,6 +630,8 @@ fn run_kernel_bench(
             out_dt,
             &input_bytes,
             bytes_moved,
+            warmup_runs,
+            runs,
         )
     {
         return Some(OpBench::new(bench.name(), "GB/s").implemented(
@@ -651,6 +656,8 @@ fn run_reference_bench(
     mt_out_dt: metaltile_core::DType,
     input_bytes: &std::collections::HashMap<String, Vec<u8>>,
     bytes_moved: u64,
+    warmup_runs: usize,
+    runs: usize,
 ) -> Option<(f64, EquivResult)> {
     let compiled = if rk.bool_constants.is_empty() {
         runner.compile(&rk.source, &rk.fn_name).ok()?
@@ -674,7 +681,8 @@ fn run_reference_bench(
     let ref_refs: Vec<&GpuBuffer> = ref_bufs.iter().collect();
     let g = rk.grid.grid.map(|x| x as usize);
     let t = rk.grid.tpg.map(|x| x as usize);
-    let (ref_gbps, _) = bench_gbps(runner, &compiled, &ref_refs, g, t, bytes_moved as f64)?;
+    let (ref_gbps, _) =
+        bench_gbps_with(runner, &compiled, &ref_refs, g, t, bytes_moved as f64, warmup_runs, runs)?;
 
     let n = mt_out_n.min(ref_out_n).min(COMPARE_ELEM_CAP);
     let mt_vals = read_typed(runner, &mt_bufs[mt_out_idx], n, mt_out_dt);
@@ -692,7 +700,9 @@ fn run_reference_bench(
 pub struct BenchCommand<'a>(pub &'a BenchArgs);
 
 impl<'a> super::TileCommand for BenchCommand<'a> {
-    fn run(&self, _harness: &crate::harness::Harness) -> Result<(), crate::CliError> { run(self.0) }
+    fn run(&self, harness: &crate::harness::Harness) -> Result<(), crate::CliError> {
+        run(self.0, harness.config.warmup_runs, harness.config.runs)
+    }
 }
 
 #[cfg(test)]
