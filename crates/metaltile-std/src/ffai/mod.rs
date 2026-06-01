@@ -45,6 +45,7 @@ pub mod gated_delta_prep;
 pub mod gated_delta_prep_chunk;
 pub mod gated_delta_replay;
 pub mod gated_delta_wy;
+pub mod gated_rms_norm_block_scaled_qgemv;
 pub mod gated_rms_norm_qgemv;
 pub mod gated_rmsnorm;
 pub mod gather;
