@@ -12,10 +12,11 @@ mod sig;
 use std::collections::HashMap;
 
 pub(crate) use body::DslBodyParser;
+use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use sig::{extract_constexprs_typed, extract_param_names, parse_kernel_params_generic};
-use syn::ItemFn;
+use syn::{ItemFn, parse_macro_input};
 
 /// Parsed arguments for `#[kernel]`.
 ///
@@ -247,6 +248,14 @@ impl KernelMacroBuilder {
             }
         }
     }
+}
+
+/// Expand the `#[kernel]` attribute.
+pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let _attr = parse_macro_input!(attr as KernelAttr);
+    let input_fn = parse_macro_input!(item as ItemFn);
+    let builder = KernelMacroBuilder::new(input_fn);
+    TokenStream::from(builder.expand())
 }
 
 #[cfg(test)]

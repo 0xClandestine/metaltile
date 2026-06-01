@@ -4,18 +4,10 @@
 //!
 //! Each macro lives in its own submodule; this file is a thin routing layer.
 //! Kernel authors never need to look here — see `docs/TOOLCHAIN_DESIGN.md`.
-//!
-//! # Migration status
-//!
-//! The `legacy` module preserves the original `#[kernel(bench(...))]` implementation
-//! while `bench`, `test`, `kernel`, `derive`, and `shape` contain the new OO design.
-//! `#[kernel]` currently routes through `legacy` to maintain `bench(...)` compat.
-//! Once all kernels are migrated (PR 3/4), the `legacy` module will be removed.
 
 mod bench;
 mod derive;
 mod kernel;
-mod legacy;
 mod shape;
 mod test;
 
@@ -87,23 +79,21 @@ pub fn scalar(_attr: TokenStream, item: TokenStream) -> TokenStream { item }
 pub fn strided(_attr: TokenStream, item: TokenStream) -> TokenStream { item }
 
 // ---------------------------------------------------------------------------
-// #[kernel] — routes through legacy to preserve bench(...) compat
+// #[kernel]
 // ---------------------------------------------------------------------------
 
 /// Marks a function as a MetalTile kernel.
 ///
-/// Supports optional `bench(...)` args for legacy BenchSpec registration:
+/// Use the separate `#[bench]` and `#[test_kernel]` attributes for
+/// benchmark and correctness-test registration.
 ///
 /// ```ignore
-/// #[kernel(bench(op = "unary", subop = "exp", class = Unary, tol = 1e-4, ...))]
+/// #[kernel]
 /// pub fn mt_exp<T>(a: Tensor<T>, out: Tensor<T>) { … }
 /// ```
-///
-/// New kernels should use the separate `#[bench]` and `#[test_kernel]` attributes
-/// instead of embedding bench args in `#[kernel]`.
 #[proc_macro_attribute]
 pub fn kernel(attr: TokenStream, item: TokenStream) -> TokenStream {
-    legacy::expand_kernel(attr, item)
+    kernel::expand(attr, item)
 }
 
 // ---------------------------------------------------------------------------
