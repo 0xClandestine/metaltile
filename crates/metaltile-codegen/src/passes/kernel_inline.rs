@@ -41,12 +41,11 @@ use metaltile_core::{
     dtype::DType,
     ir::{Kernel, KernelCallArg, Op, ValueId},
 };
-
-use crate::kernel_registry::all_kernels;
 use rustc_hash::FxHashMap;
 
 use crate::{
     error::{Error, Result},
+    kernel_registry::all_kernels,
     passes::{
         Pass,
         remap::{find_max_vid, remap_value_ids},

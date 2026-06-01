@@ -25,13 +25,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use metaltile::harness::{bench::KernelBench, registry::all_benches};
 use metaltile_codegen::{
     emit::{self, compile_metallib, dtype_suffix, write_manifest, write_msl, write_swift_wrappers},
     generator_for_mode,
     passes::{PassStats, PipelineBuilder, run_passes_with_stats},
 };
 use metaltile_core::ir::Kernel;
-use metaltile::harness::{bench::KernelBench, registry::all_benches};
 use metaltile_std::bench_types::DType;
 
 use crate::{
@@ -57,9 +57,7 @@ type EmitKernel = (&'static dyn KernelBench, Vec<DType>);
 pub struct BuildCommand<'a>(pub &'a BuildArgs);
 
 impl<'a> super::TileCommand for BuildCommand<'a> {
-    fn run(&self, _harness: &crate::harness::Harness) -> Result<(), crate::CliError> {
-        run(self.0)
-    }
+    fn run(&self, _harness: &crate::harness::Harness) -> Result<(), crate::CliError> { run(self.0) }
 }
 
 pub fn run(args: &BuildArgs) -> Result<(), CliError> {

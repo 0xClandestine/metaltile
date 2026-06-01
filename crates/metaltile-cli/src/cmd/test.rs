@@ -20,9 +20,7 @@ use crate::{
 pub struct TestCommand<'a>(pub &'a TestArgs);
 
 impl<'a> super::TileCommand for TestCommand<'a> {
-    fn run(&self, _harness: &crate::harness::Harness) -> Result<(), crate::CliError> {
-        run(self.0)
-    }
+    fn run(&self, _harness: &crate::harness::Harness) -> Result<(), crate::CliError> { run(self.0) }
 }
 
 pub fn run(args: &TestArgs) -> Result<(), crate::CliError> {

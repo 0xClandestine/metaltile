@@ -18,7 +18,6 @@ pub mod protocol;
 // Flat re-exports for the DSL types used throughout the codebase.
 pub use dsl::{ConstExpr, DType, Dim, DimExpr, Shape, constexpr, dtype, shape, tile};
 pub use error::{Error, Result};
-
 /// Re-export of `inventory` so generated `inventory::submit!` code in
 /// `#[kernel]`-expanded modules can use `metaltile_core::inventory::submit!`.
 ///
@@ -27,7 +26,6 @@ pub use error::{Error, Result};
 /// the `#[kernel]` macro without forcing user code to depend on codegen.
 #[doc(hidden)]
 pub use inventory;
-
 pub use ir::{
     ActKind,
     Block,

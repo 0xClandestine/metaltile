@@ -14,8 +14,8 @@
 
 use std::{collections::BTreeMap, str::FromStr};
 
-use metaltile_codegen::generator_for_mode;
 use metaltile::harness::{bench::KernelBench, registry::all_benches};
+use metaltile_codegen::generator_for_mode;
 use metaltile_std::bench_types::DType;
 
 use crate::{
@@ -33,9 +33,7 @@ type InspectKernel = (&'static dyn KernelBench, Vec<DType>);
 pub struct InspectCommand<'a>(pub &'a InspectArgs);
 
 impl<'a> super::TileCommand for InspectCommand<'a> {
-    fn run(&self, _harness: &crate::harness::Harness) -> Result<(), crate::CliError> {
-        run(self.0)
-    }
+    fn run(&self, _harness: &crate::harness::Harness) -> Result<(), crate::CliError> { run(self.0) }
 }
 
 pub fn run(args: &InspectArgs) -> Result<(), CliError> {

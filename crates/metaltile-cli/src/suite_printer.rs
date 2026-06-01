@@ -109,19 +109,14 @@ impl SuitePrinter {
         } else {
             paint_stdout("✗", Style::new().fg(Color::Red).bold())
         };
-        let label = paint_stdout(
-            format!("{} [{}]", r.name, r.dtype),
-            Style::new().fg(Color::BrightWhite),
-        );
+        let label =
+            paint_stdout(format!("{} [{}]", r.name, r.dtype), Style::new().fg(Color::BrightWhite));
         let mt = paint_stdout(
             format!("{:.1} GB/s", r.mt_gbps),
             Style::new().fg(Color::BrightWhite).bold(),
         );
         let ref_part = match r.ref_gbps {
-            Some(rg) => paint_stdout(
-                format!("ref {rg:.1}"),
-                Style::new().fg(Color::BrightBlack),
-            ),
+            Some(rg) => paint_stdout(format!("ref {rg:.1}"), Style::new().fg(Color::BrightBlack)),
             None => paint_stdout("no ref", Style::new().fg(Color::BrightBlack).dim()),
         };
         let pct_part = match r.mt_pct {

@@ -15,7 +15,8 @@
 use std::path::Path;
 
 use crate::{
-    CliError, InitArgs,
+    CliError,
+    InitArgs,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
@@ -23,9 +24,7 @@ use crate::{
 pub struct InitCommand<'a>(pub &'a InitArgs);
 
 impl<'a> super::TileCommand for InitCommand<'a> {
-    fn run(&self, _harness: &crate::harness::Harness) -> Result<(), crate::CliError> {
-        run(self.0)
-    }
+    fn run(&self, _harness: &crate::harness::Harness) -> Result<(), crate::CliError> { run(self.0) }
 }
 
 pub fn run(args: &InitArgs) -> Result<(), CliError> {
@@ -94,26 +93,11 @@ verbose = false
     let ck = paint_stdout("✓", Style::new().fg(Color::Green).bold());
     println!(
         "  {ck}  {}",
-        paint_stdout(
-            format!("Created project '{name}'"),
-            Style::new().fg(Color::BrightWhite),
-        )
+        paint_stdout(format!("Created project '{name}'"), Style::new().fg(Color::BrightWhite),)
     );
-    println!(
-        "  {}  {}/Cargo.toml",
-        paint_stdout("   ", Style::new()),
-        name,
-    );
-    println!(
-        "  {}  {}/src/lib.rs",
-        paint_stdout("   ", Style::new()),
-        name,
-    );
-    println!(
-        "  {}  {}/tile.toml",
-        paint_stdout("   ", Style::new()),
-        name,
-    );
+    println!("  {}  {}/Cargo.toml", paint_stdout("   ", Style::new()), name,);
+    println!("  {}  {}/src/lib.rs", paint_stdout("   ", Style::new()), name,);
+    println!("  {}  {}/tile.toml", paint_stdout("   ", Style::new()), name,);
     println!();
     println!(
         "  {}",

@@ -34,12 +34,6 @@
 
 use std::{marker::PhantomData, ops::Index};
 
-/// Registry entry for a MetalTile kernel available for cross-kernel calling.
-///
-/// You only need this when registering a kernel for use as an inlined callee via the
-/// `inventory::collect!` mechanism. For ordinary `#[kernel]` definitions this is handled
-/// automatically by the macro.
-pub use crate::harness::registry::KernelEntry;
 /// Compile-time symbolic values used in shape annotations and generated IR.
 pub use metaltile_core::constexpr::ConstExpr;
 /// A collection of resolved constexpr values for a specific kernel launch.
@@ -101,6 +95,13 @@ pub use metaltile_runtime::GpuFamily;
 pub use metaltile_runtime::MetalTileError;
 /// A resident Metal buffer managed by the context.
 pub use metaltile_runtime::ResidentBuffer;
+
+/// Registry entry for a MetalTile kernel available for cross-kernel calling.
+///
+/// You only need this when registering a kernel for use as an inlined callee via the
+/// `inventory::collect!` mechanism. For ordinary `#[kernel]` definitions this is handled
+/// automatically by the macro.
+pub use crate::harness::registry::KernelEntry;
 
 /// Placeholder tensor type used in `#[kernel]` signatures.
 ///

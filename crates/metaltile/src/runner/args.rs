@@ -22,17 +22,17 @@ pub enum RunnerCommand {
 #[derive(Debug, Clone)]
 pub struct RunnerArgs {
     /// Which subcommand to run.
-    pub command:     RunnerCommand,
+    pub command: RunnerCommand,
     /// Optional name filter — only items whose name contains this substring
     /// are processed.
-    pub filter:      Option<String>,
+    pub filter: Option<String>,
     /// Dtype filter (e.g. `"f16"`). `None` means all supported dtypes.
-    pub dtype:       Option<String>,
+    pub dtype: Option<String>,
     /// For `inspect`: which representation to emit (`msl`, `ir`, `stats`,
     /// `listing`).
     pub inspect_kind: Option<String>,
     /// Emit profiling data with each bench result.
-    pub profile:     bool,
+    pub profile: bool,
 }
 
 impl RunnerArgs {
@@ -93,9 +93,13 @@ mod tests {
 
     #[test]
     fn parse_bench_with_filter_and_profile() {
-        let a =
-            RunnerArgs::parse(vec!["bench".into(), "--filter".into(), "exp".into(), "--profile".into()])
-                .unwrap();
+        let a = RunnerArgs::parse(vec![
+            "bench".into(),
+            "--filter".into(),
+            "exp".into(),
+            "--profile".into(),
+        ])
+        .unwrap();
         assert_eq!(a.filter.as_deref(), Some("exp"));
         assert!(a.profile);
     }

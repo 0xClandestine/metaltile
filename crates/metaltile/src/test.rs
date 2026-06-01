@@ -12,8 +12,9 @@
 //! fn test_my_kernel(dt: DType) -> TestSetup { /* ... */ }
 //! ```
 
+pub use metaltile_core::{DType, ir::KernelMode};
+
 pub use crate::harness::{
     bench::{BenchBuffer, BenchSetup, ConstValue, Grid, KernelBench, RefKernel},
     test::{KernelTest, TestBuffer, TestSetup},
 };
-pub use metaltile_core::{DType, ir::KernelMode};

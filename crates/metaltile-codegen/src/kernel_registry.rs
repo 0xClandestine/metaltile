@@ -23,7 +23,7 @@ use metaltile_core::{DType, ir::Kernel};
 /// [`KernelInlinePass`](crate::passes::KernelInlinePass) calls [`all_kernels`]
 /// to resolve `Op::KernelCall` nodes during MSL generation.
 pub struct KernelEntry {
-    name:    &'static str,
+    name: &'static str,
     builder: fn(&[DType]) -> Kernel,
 }
 

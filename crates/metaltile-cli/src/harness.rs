@@ -29,7 +29,5 @@ impl Harness {
     }
 
     /// Return the path to the `__tile_runner` binary as configured.
-    pub fn runner_binary(&self) -> &str {
-        &self.config.runner_binary
-    }
+    pub fn runner_binary(&self) -> &str { &self.config.runner_binary }
 }

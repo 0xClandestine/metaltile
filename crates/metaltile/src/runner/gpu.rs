@@ -13,19 +13,19 @@ use metaltile_core::DType;
 #[derive(Debug, Clone)]
 pub struct BenchStats {
     /// Minimum (best) GPU execution time in microseconds.
-    pub min_us:    f64,
+    pub min_us: f64,
     /// Mean GPU execution time in microseconds.
-    pub mean_us:   f64,
+    pub mean_us: f64,
     /// Median (p50) GPU execution time in microseconds.
     pub median_us: f64,
     /// 95th-percentile GPU execution time in microseconds.
-    pub p95_us:    f64,
+    pub p95_us: f64,
     /// 99th-percentile GPU execution time in microseconds.
-    pub p99_us:    f64,
+    pub p99_us: f64,
     /// Standard deviation in microseconds.
     pub stddev_us: f64,
     /// Coefficient of variation (stddev/mean × 100). >5% suggests instability.
-    pub cv_pct:    f64,
+    pub cv_pct: f64,
 }
 
 impl BenchStats {
@@ -41,7 +41,15 @@ impl BenchStats {
         let variance = samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64;
         let stddev = variance.sqrt();
         let cv_pct = if mean > 0.0 { stddev / mean * 100.0 } else { 0.0 };
-        BenchStats { min_us: min, mean_us: mean, median_us: median, p95_us: p95, p99_us: p99, stddev_us: stddev, cv_pct }
+        BenchStats {
+            min_us: min,
+            mean_us: mean,
+            median_us: median,
+            p95_us: p95,
+            p99_us: p99,
+            stddev_us: stddev,
+            cv_pct,
+        }
     }
 
     /// True if timing data came from a real GPU dispatch (non-macOS always returns false).
@@ -70,11 +78,11 @@ fn f16_bits_to_f32(bits: u16) -> f32 {
 pub struct GpuRunner {
     pub device_name: String,
     #[cfg(target_os = "macos")]
-    inner:      MacosRunner,
+    inner: MacosRunner,
     #[cfg(target_os = "macos")]
     slc_kernel: CompiledKernel,
     #[cfg(target_os = "macos")]
-    slc_buf:    GpuBuffer,
+    slc_buf: GpuBuffer,
 }
 
 #[allow(clippy::manual_non_exhaustive)]
@@ -116,9 +124,9 @@ mod metal_impl {
     };
 
     pub struct MacosRunner {
-        pub device:       Retained<ProtocolObject<dyn MTLDevice>>,
-        pub queue:        Retained<ProtocolObject<dyn MTLCommandQueue>>,
-        library_cache:    std::sync::Mutex<
+        pub device: Retained<ProtocolObject<dyn MTLDevice>>,
+        pub queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+        library_cache: std::sync::Mutex<
             std::collections::HashMap<u64, Retained<ProtocolObject<dyn MTLLibrary>>>,
         >,
     }
@@ -393,10 +401,7 @@ impl GpuRunner {
         #[cfg(target_os = "macos")]
         {
             let bytes = MacosRunner::read_bytes(&buf.inner, n * 4);
-            bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect()
+            bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()
         }
         #[cfg(not(target_os = "macos"))]
         vec![0.0f32; n]
@@ -547,9 +552,7 @@ pub fn buffer_typed(runner: &GpuRunner, vals: &[f32], dt: DType) -> GpuBuffer {
     match dt {
         DType::F32 => runner.buffer_f32(vals),
         DType::F16 => runner.buffer_f16(&vals.iter().map(|&v| f32_to_f16(v)).collect::<Vec<_>>()),
-        DType::BF16 => {
-            runner.buffer_f16(&vals.iter().map(|&v| f32_to_bf16(v)).collect::<Vec<_>>())
-        },
+        DType::BF16 => runner.buffer_f16(&vals.iter().map(|&v| f32_to_bf16(v)).collect::<Vec<_>>()),
         DType::I32 => runner
             .buffer_bytes(&vals.iter().flat_map(|&v| (v as i32).to_le_bytes()).collect::<Vec<_>>()),
         DType::U32 => runner
@@ -642,7 +645,7 @@ pub fn to_gbps(st: &BenchStats, bytes: f64) -> Option<f64> {
 }
 
 const BENCH_WARMUP: usize = 15;
-const BENCH_ITERS:  usize = 10;
+const BENCH_ITERS: usize = 10;
 
 pub fn bench_gbps(
     runner: &GpuRunner,

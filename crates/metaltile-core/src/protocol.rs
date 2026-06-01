@@ -60,7 +60,7 @@ pub enum InspectKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildError {
     /// The dtype that failed to compile (e.g. `"f16"`).
-    pub dtype:   String,
+    pub dtype: String,
     /// Human-readable error message from the Metal compiler.
     pub message: String,
 }
@@ -71,11 +71,11 @@ pub struct BuildError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileInfo {
     /// Achieved occupancy as a percentage of theoretical maximum.
-    pub occ_pct:          f32,
+    pub occ_pct: f32,
     /// Registers allocated per thread.
-    pub regs_per_thread:  u32,
+    pub regs_per_thread: u32,
     /// Human-readable description of the primary performance bottleneck.
-    pub bottleneck:       String,
+    pub bottleneck: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -91,35 +91,33 @@ pub struct ProfileInfo {
 #[serde(tag = "type")]
 pub enum ProtocolMessage {
     // ── Lifecycle ────────────────────────────────────────────────────────────
-
     /// Emitted once as the very first line of a run.
     #[serde(rename = "start")]
     Start {
         /// Runner crate version string (e.g. `"0.1.0"`).
         runner_version: String,
         /// The subcommand being run (`"bench"`, `"test"`, `"build"`, `"inspect"`).
-        command:        String,
+        command: String,
         /// Total number of items to be processed in this run.
-        total:          u32,
+        total: u32,
     },
 
     /// Emitted once as the very last line of a run.
     #[serde(rename = "done")]
     Done {
         /// Whether the run completed without any errors or failures.
-        ok:            bool,
+        ok: bool,
         /// Number of bench items that passed correctness checks.
-        bench_passed:  u32,
+        bench_passed: u32,
         /// Number of bench items that failed correctness checks.
-        bench_failed:  u32,
+        bench_failed: u32,
         /// Number of test cases that passed.
-        test_passed:   u32,
+        test_passed: u32,
         /// Number of test cases that failed.
-        test_failed:   u32,
+        test_failed: u32,
     },
 
     // ── Per-item results ─────────────────────────────────────────────────────
-
     /// Result of a single benchmark (one kernel × one dtype).
     #[serde(rename = "bench")]
     BenchResult(BenchResult),
@@ -145,24 +143,23 @@ pub enum ProtocolMessage {
     #[serde(rename = "inspect")]
     Inspect {
         /// Kernel name (e.g. `"unary/exp"`).
-        name:    String,
+        name: String,
         /// What kind of content this is.
-        kind:    InspectKind,
+        kind: InspectKind,
         /// The content itself (MSL source, IR dump, stats text, etc.).
         content: String,
     },
 
     // ── Errors ───────────────────────────────────────────────────────────────
-
     /// A non-fatal error for one kernel/dtype combination.
     ///
     /// The run continues after this message; fatal errors exit immediately.
     #[serde(rename = "error")]
     ProtocolError {
         /// Kernel or bench name.
-        name:    String,
+        name: String,
         /// Data type being processed when the error occurred (e.g. `"f16"`).
-        dtype:   String,
+        dtype: String,
         /// Human-readable error message.
         message: String,
     },
@@ -176,9 +173,9 @@ pub enum ProtocolMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchResult {
     /// Kernel/bench name (e.g. `"unary/exp"`).
-    pub name:    String,
+    pub name: String,
     /// Data type (e.g. `"f16"`, `"f32"`).
-    pub dtype:   String,
+    pub dtype: String,
     /// Throughput in GB/s for the MetalTile kernel.
     #[serde(default)]
     pub mt_gbps: f64,
@@ -187,13 +184,13 @@ pub struct BenchResult {
     pub ref_gbps: Option<f64>,
     /// MetalTile speed relative to reference (%), if reference exists.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub mt_pct:  Option<f64>,
+    pub mt_pct: Option<f64>,
     /// Whether the kernel produced correct results.
     #[serde(default)]
     pub correct: bool,
     /// Minimum recorded latency in microseconds.
     #[serde(default)]
-    pub min_us:  f64,
+    pub min_us: f64,
     /// Mean latency in microseconds.
     #[serde(default)]
     pub mean_us: f64,
@@ -206,12 +203,12 @@ pub struct BenchResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestResult {
     /// Kernel/test name (e.g. `"unary/exp"`).
-    pub name:    String,
+    pub name: String,
     /// Data type (e.g. `"f16"`, `"f32"`).
-    pub dtype:   String,
+    pub dtype: String,
     /// Whether the test passed within tolerance.
     #[serde(default)]
-    pub passed:  bool,
+    pub passed: bool,
     /// Maximum element-wise absolute error observed.
     #[serde(default)]
     pub max_err: f64,
@@ -221,9 +218,9 @@ pub struct TestResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildResult {
     /// Kernel name (e.g. `"unary/exp"`).
-    pub name:       String,
+    pub name: String,
     /// Dtypes that compiled successfully.
-    pub dtypes_ok:  Vec<String>,
+    pub dtypes_ok: Vec<String>,
     /// Dtypes that failed to compile, with error messages.
     pub dtypes_err: Vec<BuildError>,
 }
@@ -258,15 +255,15 @@ mod tests {
     #[test]
     fn bench_result_roundtrip() {
         let msg = ProtocolMessage::BenchResult(BenchResult {
-            name:     "unary/exp".into(),
-            dtype:    "f16".into(),
-            mt_gbps:  1234.5,
+            name: "unary/exp".into(),
+            dtype: "f16".into(),
+            mt_gbps: 1234.5,
             ref_gbps: Some(1189.2),
-            mt_pct:   Some(103.8),
-            correct:  true,
-            min_us:   12.3,
-            mean_us:  12.8,
-            profile:  None,
+            mt_pct: Some(103.8),
+            correct: true,
+            min_us: 12.3,
+            mean_us: 12.8,
+            profile: None,
         });
         let json = msg.to_json_line();
         let parsed = ProtocolMessage::from_json_line(&json).unwrap();
@@ -284,18 +281,18 @@ mod tests {
     #[test]
     fn bench_result_with_profile_roundtrip() {
         let msg = ProtocolMessage::BenchResult(BenchResult {
-            name:     "unary/exp".into(),
-            dtype:    "f32".into(),
-            mt_gbps:  900.0,
+            name: "unary/exp".into(),
+            dtype: "f32".into(),
+            mt_gbps: 900.0,
             ref_gbps: None,
-            mt_pct:   None,
-            correct:  true,
-            min_us:   5.0,
-            mean_us:  5.2,
-            profile:  Some(ProfileInfo {
-                occ_pct:         87.5,
+            mt_pct: None,
+            correct: true,
+            min_us: 5.0,
+            mean_us: 5.2,
+            profile: Some(ProfileInfo {
+                occ_pct: 87.5,
                 regs_per_thread: 32,
-                bottleneck:      "memory bandwidth".into(),
+                bottleneck: "memory bandwidth".into(),
             }),
         });
         let json = msg.to_json_line();
@@ -314,9 +311,9 @@ mod tests {
     #[test]
     fn test_result_roundtrip() {
         let msg = ProtocolMessage::TestResult(TestResult {
-            name:    "unary/exp".into(),
-            dtype:   "f16".into(),
-            passed:  true,
+            name: "unary/exp".into(),
+            dtype: "f16".into(),
+            passed: true,
             max_err: 3.2e-5,
         });
         let json = msg.to_json_line();
@@ -327,10 +324,10 @@ mod tests {
     #[test]
     fn build_result_roundtrip() {
         let msg = ProtocolMessage::BuildResult(BuildResult {
-            name:       "unary/exp".into(),
-            dtypes_ok:  vec!["f32".into(), "f16".into()],
+            name: "unary/exp".into(),
+            dtypes_ok: vec!["f32".into(), "f16".into()],
             dtypes_err: vec![BuildError {
-                dtype:   "bf16".into(),
+                dtype: "bf16".into(),
                 message: "unsupported operation".into(),
             }],
         });
@@ -367,8 +364,8 @@ mod tests {
     #[test]
     fn inspect_roundtrip() {
         let msg = ProtocolMessage::Inspect {
-            name:    "unary/exp".into(),
-            kind:    InspectKind::Msl,
+            name: "unary/exp".into(),
+            kind: InspectKind::Msl,
             content: "kernel void mt_exp(...) {}".into(),
         };
         let json = msg.to_json_line();
@@ -387,8 +384,8 @@ mod tests {
     fn start_roundtrip() {
         let msg = ProtocolMessage::Start {
             runner_version: "0.1.0".into(),
-            command:        "bench".into(),
-            total:          42,
+            command: "bench".into(),
+            total: 42,
         };
         let json = msg.to_json_line();
         let parsed = ProtocolMessage::from_json_line(&json).unwrap();
@@ -405,11 +402,11 @@ mod tests {
     #[test]
     fn done_roundtrip() {
         let msg = ProtocolMessage::Done {
-            ok:           true,
+            ok: true,
             bench_passed: 10,
             bench_failed: 1,
-            test_passed:  5,
-            test_failed:  0,
+            test_passed: 5,
+            test_failed: 0,
         };
         let json = msg.to_json_line();
         let parsed = ProtocolMessage::from_json_line(&json).unwrap();
@@ -426,7 +423,11 @@ mod tests {
     #[test]
     fn from_json_line_strips_trailing_newline() {
         let msg = ProtocolMessage::Done {
-            ok: true, bench_passed: 0, bench_failed: 0, test_passed: 0, test_failed: 0,
+            ok: true,
+            bench_passed: 0,
+            bench_failed: 0,
+            test_passed: 0,
+            test_failed: 0,
         };
         let mut json = msg.to_json_line(); // includes trailing \n
         // parse with the newline present (to_json_line adds it)

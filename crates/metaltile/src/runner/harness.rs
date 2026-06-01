@@ -6,19 +6,25 @@
 //! This is the only place that calls the `inventory` registries. The CLI
 //! process never imports this module — it only reads the JSON lines.
 
-use metaltile_core::protocol::{BenchResult, BuildError, BuildResult, ProtocolMessage, TestResult};
 use metaltile_codegen::msl::MslGenerator;
+use metaltile_core::{
+    DType,
+    ir::ParamKind,
+    protocol::{BenchResult, BuildError, BuildResult, ProtocolMessage, TestResult},
+};
 
 use crate::{
-    harness::registry::{all_benches, all_kernels, all_tests},
+    harness::{
+        bench::{BenchSetup, ConstValue, KernelBench, RefKernel},
+        registry::{all_benches, all_kernels, all_tests},
+        test::{KernelTest, TestSetup},
+    },
     runner::{
         args::{RunnerArgs, RunnerCommand},
         emit::emit_stdout,
         gpu::{GpuBuffer, GpuRunner, bench_gbps, read_typed},
     },
 };
-use metaltile_core::{DType, ir::ParamKind};
-use crate::harness::{bench::{BenchSetup, ConstValue, KernelBench, RefKernel}, test::{KernelTest, TestSetup}};
 
 /// Entry-point for the `__tile_runner` subprocess.
 ///
@@ -49,7 +55,7 @@ impl RunnerHarness {
 
         emit_stdout(&ProtocolMessage::Start {
             runner_version: env!("CARGO_PKG_VERSION").into(),
-            command:        "bench".into(),
+            command: "bench".into(),
             total,
         });
 
@@ -57,16 +63,16 @@ impl RunnerHarness {
             Ok(r) => r,
             Err(e) => {
                 emit_stdout(&ProtocolMessage::ProtocolError {
-                    name:    "GpuRunner".into(),
-                    dtype:   "".into(),
+                    name: "GpuRunner".into(),
+                    dtype: "".into(),
                     message: format!("GPU init failed: {e}"),
                 });
                 emit_stdout(&ProtocolMessage::Done {
-                    ok:           false,
+                    ok: false,
                     bench_passed: 0,
                     bench_failed: total,
-                    test_passed:  0,
-                    test_failed:  0,
+                    test_passed: 0,
+                    test_failed: 0,
                 });
                 return false;
             },
@@ -79,13 +85,17 @@ impl RunnerHarness {
             let bench = entry.bench();
             for &dt in &dtypes {
                 if let Some(result) = run_one_bench(&runner, bench, dt) {
-                    if result.correct { passed += 1; } else { failed += 1; }
+                    if result.correct {
+                        passed += 1;
+                    } else {
+                        failed += 1;
+                    }
                     emit_stdout(&ProtocolMessage::BenchResult(result));
                 } else {
                     failed += 1;
                     emit_stdout(&ProtocolMessage::ProtocolError {
-                        name:    entry.bench().name().into(),
-                        dtype:   format!("{dt:?}").to_lowercase(),
+                        name: entry.bench().name().into(),
+                        dtype: format!("{dt:?}").to_lowercase(),
                         message: "bench failed (compile error or GPU unavailable)".into(),
                     });
                 }
@@ -114,7 +124,7 @@ impl RunnerHarness {
 
         emit_stdout(&ProtocolMessage::Start {
             runner_version: env!("CARGO_PKG_VERSION").into(),
-            command:        "test".into(),
+            command: "test".into(),
             total,
         });
 
@@ -122,8 +132,8 @@ impl RunnerHarness {
             Ok(c) => c,
             Err(e) => {
                 emit_stdout(&ProtocolMessage::ProtocolError {
-                    name:    "Context".into(),
-                    dtype:   "".into(),
+                    name: "Context".into(),
+                    dtype: "".into(),
                     message: format!("runtime init: {e}"),
                 });
                 emit_stdout(&ProtocolMessage::Done {
@@ -145,14 +155,18 @@ impl RunnerHarness {
             for &dt in &dtypes {
                 match run_one_test(&ctx, test, dt) {
                     Ok(result) => {
-                        if result.passed { passed += 1; } else { failed += 1; }
+                        if result.passed {
+                            passed += 1;
+                        } else {
+                            failed += 1;
+                        }
                         emit_stdout(&ProtocolMessage::TestResult(result));
                     },
                     Err(msg) => {
                         failed += 1;
                         emit_stdout(&ProtocolMessage::ProtocolError {
-                            name:    entry.test().name().into(),
-                            dtype:   format!("{dt:?}").to_lowercase(),
+                            name: entry.test().name().into(),
+                            dtype: format!("{dt:?}").to_lowercase(),
                             message: msg,
                         });
                     },
@@ -164,8 +178,8 @@ impl RunnerHarness {
             ok: failed == 0,
             bench_passed: 0,
             bench_failed: 0,
-            test_passed:  passed,
-            test_failed:  failed,
+            test_passed: passed,
+            test_failed: failed,
         });
         failed == 0
     }
@@ -182,7 +196,7 @@ impl RunnerHarness {
 
         emit_stdout(&ProtocolMessage::Start {
             runner_version: env!("CARGO_PKG_VERSION").into(),
-            command:        "build".into(),
+            command: "build".into(),
             total,
         });
 
@@ -198,7 +212,7 @@ impl RunnerHarness {
                     Err(e) => {
                         any_err = true;
                         dtypes_err.push(BuildError {
-                            dtype:   format!("{dt:?}").to_lowercase(),
+                            dtype: format!("{dt:?}").to_lowercase(),
                             message: e.to_string(),
                         });
                     },
@@ -244,17 +258,13 @@ impl RunnerHarness {
 
         emit_stdout(&ProtocolMessage::Start {
             runner_version: env!("CARGO_PKG_VERSION").into(),
-            command:        "inspect".into(),
-            total:          entries.len() as u32,
+            command: "inspect".into(),
+            total: entries.len() as u32,
         });
 
         let mut ok = true;
         for entry in &entries {
-            let dt = args
-                .dtype
-                .as_deref()
-                .and_then(parse_dtype)
-                .unwrap_or(DType::F32);
+            let dt = args.dtype.as_deref().and_then(parse_dtype).unwrap_or(DType::F32);
             let kernel = entry.build(&[dt]);
 
             let content = match kind {
@@ -263,22 +273,20 @@ impl RunnerHarness {
                     Err(e) => {
                         ok = false;
                         emit_stdout(&ProtocolMessage::ProtocolError {
-                            name:    entry.name().to_string(),
-                            dtype:   format!("{dt:?}").to_lowercase(),
+                            name: entry.name().to_string(),
+                            dtype: format!("{dt:?}").to_lowercase(),
                             message: e.to_string(),
                         });
                         continue;
                     },
                 },
                 InspectKind::Ir => format!("{kernel:#?}"),
-                InspectKind::Stats | InspectKind::Listing => {
-                    "not yet implemented".into()
-                },
+                InspectKind::Stats | InspectKind::Listing => "not yet implemented".into(),
             };
 
             emit_stdout(&ProtocolMessage::Inspect {
-                name:    entry.name().to_string(),
-                kind:    kind.clone(),
+                name: entry.name().to_string(),
+                kind: kind.clone(),
                 content,
             });
         }
@@ -334,7 +342,11 @@ fn constexpr_bytes(v: &ConstValue) -> Vec<u8> {
 }
 
 /// Run one bench entry for one dtype; returns `None` on compile/GPU error.
-fn run_one_bench(runner: &GpuRunner, bench: &'static dyn KernelBench, dt: DType) -> Option<BenchResult> {
+fn run_one_bench(
+    runner: &GpuRunner,
+    bench: &'static dyn KernelBench,
+    dt: DType,
+) -> Option<BenchResult> {
     let setup: BenchSetup = bench.setup(dt);
     let bytes_moved = bench.bytes_moved(&setup);
     let kernel = setup.kernel();
@@ -345,8 +357,10 @@ fn run_one_bench(runner: &GpuRunner, bench: &'static dyn KernelBench, dt: DType)
     let compiled = runner.compile(&msl, &kernel.name).ok()?;
 
     // Build positional GPU buffers: tensor params → constexprs.
-    let mut bufs: Vec<GpuBuffer> = Vec::with_capacity(kernel.params.len() + kernel.constexprs.len());
-    let mut input_bytes: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+    let mut bufs: Vec<GpuBuffer> =
+        Vec::with_capacity(kernel.params.len() + kernel.constexprs.len());
+    let mut input_bytes: std::collections::HashMap<String, Vec<u8>> =
+        std::collections::HashMap::new();
     let mut mt_out_idx: Option<usize> = None;
     let mut mt_out_n = 0usize;
     let mut mt_out_dt = dt;
@@ -385,7 +399,16 @@ fn run_one_bench(runner: &GpuRunner, bench: &'static dyn KernelBench, dt: DType)
     // Reference comparison (optional).
     let (ref_gbps, mt_pct, correct) =
         if let (Some(rk), Some(out_idx)) = (setup.ref_kernel(), mt_out_idx) {
-            match run_reference(runner, rk, &bufs, out_idx, mt_out_n, mt_out_dt, &input_bytes, bytes_moved) {
+            match run_reference(
+                runner,
+                rk,
+                &bufs,
+                out_idx,
+                mt_out_n,
+                mt_out_dt,
+                &input_bytes,
+                bytes_moved,
+            ) {
                 Some((rgbps, pass)) => {
                     let pct = mt_gbps / rgbps * 100.0;
                     (Some(rgbps), Some(pct), pass)
@@ -398,12 +421,12 @@ fn run_one_bench(runner: &GpuRunner, bench: &'static dyn KernelBench, dt: DType)
 
     Some(BenchResult {
         name,
-        dtype:   dtype_str,
+        dtype: dtype_str,
         mt_gbps,
         ref_gbps,
         mt_pct,
         correct,
-        min_us:  stats.min_us,
+        min_us: stats.min_us,
         mean_us: stats.mean_us,
         profile: None,
     })
@@ -470,6 +493,7 @@ fn run_one_test(
     dt: DType,
 ) -> Result<TestResult, String> {
     use std::collections::BTreeMap;
+
     use crate::runner::gpu::elem_bytes;
 
     let setup: TestSetup = test.setup(dt);
@@ -510,11 +534,8 @@ fn run_one_test(
             .outputs
             .into_iter()
             .map(|(n, bytes)| {
-                let d = setup
-                    .inputs()
-                    .iter()
-                    .find(|b| b.name() == n)
-                    .map_or(DType::F32, |b| b.dtype());
+                let d =
+                    setup.inputs().iter().find(|b| b.name() == n).map_or(DType::F32, |b| b.dtype());
                 (n, bytes, d)
             })
             .collect()
@@ -529,9 +550,8 @@ fn run_one_test(
     let mut worst = 0.0f32;
     let tol = test.tolerance(dt);
     for (bname, exp_bytes, bdt) in &expected {
-        let out_bytes = result
-            .output(bname)
-            .ok_or_else(|| format!("expected output '{bname}' missing"))?;
+        let out_bytes =
+            result.output(bname).ok_or_else(|| format!("expected output '{bname}' missing"))?;
         let n = out_bytes.len() / elem_bytes(*bdt).max(1);
         let got = read_raw_f32(out_bytes, *bdt, n);
         let exp = read_raw_f32(exp_bytes, *bdt, n);
@@ -539,12 +559,7 @@ fn run_one_test(
         worst = worst.max(err);
     }
 
-    Ok(TestResult {
-        name,
-        dtype:   dtype_str,
-        passed:  (worst as f64) <= tol,
-        max_err: worst as f64,
-    })
+    Ok(TestResult { name, dtype: dtype_str, passed: (worst as f64) <= tol, max_err: worst as f64 })
 }
 
 // ── Public in-process test runner (legacy CLI compat) ─────────────────────────
@@ -553,11 +568,11 @@ fn run_one_test(
 #[derive(Debug, Clone, Copy)]
 pub struct TestOutcome {
     /// Whether every compared element was within tolerance.
-    pub passed:      bool,
+    pub passed: bool,
     /// Largest absolute error observed across all expected buffers.
     pub max_abs_err: f32,
     /// Total number of elements compared.
-    pub n_checked:   usize,
+    pub n_checked: usize,
 }
 
 /// Run a `TestSetup` in-process via the given runtime context.
@@ -571,6 +586,7 @@ pub fn run_kernel_test(
     tol: f64,
 ) -> Result<TestOutcome, String> {
     use std::collections::BTreeMap;
+
     use crate::runner::gpu::elem_bytes;
 
     let no_consts: BTreeMap<String, u32> = BTreeMap::new();
@@ -607,11 +623,8 @@ pub fn run_kernel_test(
             .outputs
             .into_iter()
             .map(|(n, bytes)| {
-                let d = setup
-                    .inputs()
-                    .iter()
-                    .find(|b| b.name() == n)
-                    .map_or(DType::F32, |b| b.dtype());
+                let d =
+                    setup.inputs().iter().find(|b| b.name() == n).map_or(DType::F32, |b| b.dtype());
                 (n, bytes, d)
             })
             .collect()
@@ -626,9 +639,8 @@ pub fn run_kernel_test(
     let mut worst = 0.0f32;
     let mut n_checked = 0usize;
     for (bname, exp_bytes, bdt) in &expected {
-        let out_bytes = result
-            .output(bname)
-            .ok_or_else(|| format!("expected output '{bname}' missing"))?;
+        let out_bytes =
+            result.output(bname).ok_or_else(|| format!("expected output '{bname}' missing"))?;
         let n = out_bytes.len() / elem_bytes(*bdt).max(1);
         let got = read_raw_f32(out_bytes, *bdt, n);
         let exp = read_raw_f32(exp_bytes, *bdt, n);
@@ -642,24 +654,48 @@ pub fn run_kernel_test(
 
 fn read_raw_f32(bytes: &[u8], dt: DType, n: usize) -> Vec<f32> {
     match dt {
-        DType::F32 => bytes.chunks_exact(4).take(n).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect(),
-        DType::F16 => bytes.chunks_exact(2).take(n).map(|b| {
-            let bits = u16::from_le_bytes(b.try_into().unwrap());
-            // simple f16→f32 via half-float bit pattern
-            let sign = ((bits as u32) >> 15) << 31;
-            let exp5 = ((bits as u32) >> 10) & 0x1f;
-            let mant = (bits as u32) & 0x3ff;
-            if exp5 == 0 { return f32::from_bits(sign); }
-            if exp5 == 31 { return f32::from_bits(sign | 0x7f80_0000 | (mant << 13)); }
-            let exp8 = (exp5 as i32 - 15 + 127) as u32;
-            f32::from_bits(sign | (exp8 << 23) | (mant << 13))
-        }).collect(),
-        DType::BF16 => bytes.chunks_exact(2).take(n).map(|b| {
-            let bits = u16::from_le_bytes(b.try_into().unwrap());
-            f32::from_bits((bits as u32) << 16)
-        }).collect(),
-        DType::I32 => bytes.chunks_exact(4).take(n).map(|b| i32::from_le_bytes(b.try_into().unwrap()) as f32).collect(),
-        DType::U32 => bytes.chunks_exact(4).take(n).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as f32).collect(),
+        DType::F32 => bytes
+            .chunks_exact(4)
+            .take(n)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect(),
+        DType::F16 => bytes
+            .chunks_exact(2)
+            .take(n)
+            .map(|b| {
+                let bits = u16::from_le_bytes(b.try_into().unwrap());
+                // simple f16→f32 via half-float bit pattern
+                let sign = ((bits as u32) >> 15) << 31;
+                let exp5 = ((bits as u32) >> 10) & 0x1f;
+                let mant = (bits as u32) & 0x3ff;
+                if exp5 == 0 {
+                    return f32::from_bits(sign);
+                }
+                if exp5 == 31 {
+                    return f32::from_bits(sign | 0x7f80_0000 | (mant << 13));
+                }
+                let exp8 = (exp5 as i32 - 15 + 127) as u32;
+                f32::from_bits(sign | (exp8 << 23) | (mant << 13))
+            })
+            .collect(),
+        DType::BF16 => bytes
+            .chunks_exact(2)
+            .take(n)
+            .map(|b| {
+                let bits = u16::from_le_bytes(b.try_into().unwrap());
+                f32::from_bits((bits as u32) << 16)
+            })
+            .collect(),
+        DType::I32 => bytes
+            .chunks_exact(4)
+            .take(n)
+            .map(|b| i32::from_le_bytes(b.try_into().unwrap()) as f32)
+            .collect(),
+        DType::U32 => bytes
+            .chunks_exact(4)
+            .take(n)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as f32)
+            .collect(),
         DType::I8 => bytes.iter().take(n).map(|&b| b as i8 as f32).collect(),
         DType::U8 => bytes.iter().take(n).map(|&b| b as f32).collect(),
         _ => vec![0.0; n],

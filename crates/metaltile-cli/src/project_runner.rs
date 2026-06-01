@@ -48,9 +48,7 @@ pub struct ProjectRunner<'a> {
 }
 
 impl<'a> ProjectRunner<'a> {
-    pub fn new(harness: &'a Harness) -> Self {
-        Self { harness }
-    }
+    pub fn new(harness: &'a Harness) -> Self { Self { harness } }
 
     /// Run the invocation in-process (Phase 1).
     ///

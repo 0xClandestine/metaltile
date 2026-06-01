@@ -31,11 +31,7 @@ pub struct TileConfig {
 
 impl Default for TileConfig {
     fn default() -> Self {
-        Self {
-            runner_binary: "__tile_runner".to_string(),
-            project_path: None,
-            verbose: false,
-        }
+        Self { runner_binary: "__tile_runner".to_string(), project_path: None, verbose: false }
     }
 }
 

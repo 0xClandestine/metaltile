@@ -5,9 +5,11 @@
 
 use std::fmt;
 
+use metaltile_core::{
+    DType,
+    ir::{Kernel, KernelMode},
+};
 use serde::{Deserialize, Serialize};
-
-use metaltile_core::{DType, ir::{Kernel, KernelMode}};
 
 pub(super) fn random_bytes(len: usize) -> Vec<u8> {
     let seed = std::time::SystemTime::now()
@@ -86,12 +88,24 @@ impl ConstValue {
     }
 }
 
-impl From<u32> for ConstValue { fn from(v: u32) -> Self { ConstValue::U32(v) } }
-impl From<i32> for ConstValue { fn from(v: i32) -> Self { ConstValue::I32(v) } }
-impl From<f32> for ConstValue { fn from(v: f32) -> Self { ConstValue::F32(v) } }
-impl From<u64> for ConstValue { fn from(v: u64) -> Self { ConstValue::U64(v) } }
-impl From<i64> for ConstValue { fn from(v: i64) -> Self { ConstValue::I64(v) } }
-impl From<usize> for ConstValue { fn from(v: usize) -> Self { ConstValue::Usize(v) } }
+impl From<u32> for ConstValue {
+    fn from(v: u32) -> Self { ConstValue::U32(v) }
+}
+impl From<i32> for ConstValue {
+    fn from(v: i32) -> Self { ConstValue::I32(v) }
+}
+impl From<f32> for ConstValue {
+    fn from(v: f32) -> Self { ConstValue::F32(v) }
+}
+impl From<u64> for ConstValue {
+    fn from(v: u64) -> Self { ConstValue::U64(v) }
+}
+impl From<i64> for ConstValue {
+    fn from(v: i64) -> Self { ConstValue::I64(v) }
+}
+impl From<usize> for ConstValue {
+    fn from(v: usize) -> Self { ConstValue::Usize(v) }
+}
 
 /// Dispatch dimensions for a kernel launch.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -162,22 +176,34 @@ impl std::fmt::Debug for BufferInit {
 /// Fields are private — construction goes through named constructors.
 #[derive(Debug, Clone)]
 pub struct BenchBuffer {
-    name:      String,
-    len:       usize,
-    dtype:     DType,
+    name: String,
+    len: usize,
+    dtype: DType,
     is_output: bool,
-    init:      BufferInit,
+    init: BufferInit,
 }
 
 impl BenchBuffer {
     /// Create a buffer initialised with random data.
     pub fn random(name: &str, len: usize, dtype: DType) -> Self {
-        BenchBuffer { name: name.to_string(), len, dtype, is_output: false, init: BufferInit::Random }
+        BenchBuffer {
+            name: name.to_string(),
+            len,
+            dtype,
+            is_output: false,
+            init: BufferInit::Random,
+        }
     }
 
     /// Create a buffer initialised with zeros.
     pub fn zeros(name: &str, len: usize, dtype: DType) -> Self {
-        BenchBuffer { name: name.to_string(), len, dtype, is_output: false, init: BufferInit::Zeros }
+        BenchBuffer {
+            name: name.to_string(),
+            len,
+            dtype,
+            is_output: false,
+            init: BufferInit::Zeros,
+        }
     }
 
     /// Create a buffer from concrete byte data.
@@ -337,12 +363,12 @@ impl RefKernel {
 /// it returns an error if no grid was set.
 #[derive(Debug, Clone)]
 pub struct BenchSetup {
-    kernel:      Kernel,
-    buffers:     Vec<BenchBuffer>,
-    constexprs:  Vec<(String, ConstValue)>,
-    grid:        Option<Grid>,
+    kernel: Kernel,
+    buffers: Vec<BenchBuffer>,
+    constexprs: Vec<(String, ConstValue)>,
+    grid: Option<Grid>,
     bytes_moved: Option<u64>,
-    ref_kernel:  Option<RefKernel>,
+    ref_kernel: Option<RefKernel>,
     shape_label: Option<String>,
 }
 
@@ -504,8 +530,9 @@ impl AsRef<dyn KernelBench + 'static> for KernelBenchEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use metaltile_core::ir::Kernel;
+
+    use super::*;
 
     #[test]
     fn bench_buffer_named_constructors() {

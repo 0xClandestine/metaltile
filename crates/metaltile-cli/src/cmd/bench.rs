@@ -4,15 +4,24 @@
 
 use std::collections::HashMap;
 
+use metaltile::{
+    harness::bench::{BenchSetup, ConstValue, KernelBench, RefKernel},
+    runner::{GpuBuffer, GpuRunner, bench_gbps, read_typed},
+};
 use metaltile_codegen::passes::{
     self,
     occupancy::{self, Bottleneck},
 };
-use metaltile::runner::{GpuBuffer, GpuRunner, bench_gbps, read_typed};
-use metaltile::harness::bench::{BenchSetup, ConstValue, KernelBench, RefKernel};
 use metaltile_core::ir::ParamKind;
-use metaltile_std::{
-    bench_types::{CorrectnessStatus, EquivResult, OpBench, OpResult, check_equiv, dtype_label, set_result_reporter, validate_results},
+use metaltile_std::bench_types::{
+    CorrectnessStatus,
+    EquivResult,
+    OpBench,
+    OpResult,
+    check_equiv,
+    dtype_label,
+    set_result_reporter,
+    validate_results,
 };
 use serde_json::Value;
 
@@ -565,8 +574,10 @@ fn run_kernel_bench(
     let msl = MslGenerator::default().generate(kernel).ok()?;
     let compiled = runner.compile(&msl, &kernel.name).ok()?;
 
-    let mut bufs: Vec<GpuBuffer> = Vec::with_capacity(kernel.params.len() + kernel.constexprs.len());
-    let mut input_bytes: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+    let mut bufs: Vec<GpuBuffer> =
+        Vec::with_capacity(kernel.params.len() + kernel.constexprs.len());
+    let mut input_bytes: std::collections::HashMap<String, Vec<u8>> =
+        std::collections::HashMap::new();
     let mut mt_out: Option<(usize, usize, metaltile_core::DType)> = None;
 
     for param in &kernel.params {
@@ -607,10 +618,23 @@ fn run_kernel_bench(
     };
 
     if let (Some(rk), Some((out_idx, out_n, out_dt))) = (setup.ref_kernel(), mt_out)
-        && let Some((ref_gbps, equiv)) =
-            run_reference_bench(runner, rk, &bufs, out_idx, out_n, out_dt, &input_bytes, bytes_moved)
+        && let Some((ref_gbps, equiv)) = run_reference_bench(
+            runner,
+            rk,
+            &bufs,
+            out_idx,
+            out_n,
+            out_dt,
+            &input_bytes,
+            bytes_moved,
+        )
     {
-        return Some(OpBench::new(bench.name(), "GB/s").implemented(shape, Some(ref_gbps), gbps, equiv));
+        return Some(OpBench::new(bench.name(), "GB/s").implemented(
+            shape,
+            Some(ref_gbps),
+            gbps,
+            equiv,
+        ));
     }
 
     let equiv = EquivResult { n_checked: 0, max_abs_err: 0.0, cosine_sim: 1.0, passed: true };
@@ -668,9 +692,7 @@ fn run_reference_bench(
 pub struct BenchCommand<'a>(pub &'a BenchArgs);
 
 impl<'a> super::TileCommand for BenchCommand<'a> {
-    fn run(&self, _harness: &crate::harness::Harness) -> Result<(), crate::CliError> {
-        run(self.0)
-    }
+    fn run(&self, _harness: &crate::harness::Harness) -> Result<(), crate::CliError> { run(self.0) }
 }
 
 #[cfg(test)]

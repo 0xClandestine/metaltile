@@ -2,8 +2,12 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Test setup types: [`TestBuffer`], [`TestSetup`], [`KernelTest`], [`KernelTestEntry`].
 
+use metaltile_core::{
+    DType,
+    ir::{Kernel, KernelMode},
+};
+
 use super::bench::{ConstValue, Grid, random_bytes};
-use metaltile_core::{DType, ir::{Kernel, KernelMode}};
 
 // ---------------------------------------------------------------------------
 // TestBuffer
@@ -12,8 +16,8 @@ use metaltile_core::{DType, ir::{Kernel, KernelMode}};
 /// Describes a CPU-side buffer used as input or expected output in correctness tests.
 #[derive(Debug, Clone)]
 pub struct TestBuffer {
-    name:  String,
-    data:  Vec<u8>,
+    name: String,
+    data: Vec<u8>,
     dtype: DType,
 }
 
@@ -97,12 +101,12 @@ impl TestBuffer {
 /// it returns an error if no grid was set.
 #[derive(Debug, Clone)]
 pub struct TestSetup {
-    kernel:     Kernel,
-    inputs:     Vec<TestBuffer>,
-    expected:   Vec<TestBuffer>,
+    kernel: Kernel,
+    inputs: Vec<TestBuffer>,
+    expected: Vec<TestBuffer>,
     constexprs: Vec<(String, ConstValue)>,
-    grid:       Option<Grid>,
-    ref_setup:  Option<Box<TestSetup>>,
+    grid: Option<Grid>,
+    ref_setup: Option<Box<TestSetup>>,
 }
 
 impl TestSetup {
@@ -243,8 +247,9 @@ impl AsRef<dyn KernelTest + 'static> for KernelTestEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use metaltile_core::ir::Kernel;
+
+    use super::*;
 
     #[test]
     fn test_setup_build_requires_grid() {
