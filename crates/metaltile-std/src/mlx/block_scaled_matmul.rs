@@ -87,6 +87,202 @@ pub fn mt_mxfp4_qgemv<T>(
     }
 }
 
+/// nvfp4 dequantizing GEMV — E2M1 weights (block 16), E4M3 micro-scale ×
+/// a global FP32. Pack-strided like mxfp4 (block 16 ⇒ 2 packs/block).
+#[kernel]
+pub fn mt_nvfp4_qgemv<T>(
+    weight: Tensor<u32>,
+    scales: Tensor<u8>,
+    input: Tensor<T>,
+    output: Tensor<T>,
+    #[constexpr] in_dim: u32,
+    #[constexpr] block_size: u32,
+    #[constexpr] global: f32,
+) {
+    let row = program_id::<0>();
+    let n_packs_per_row = in_dim / 8u32;
+    let n_blocks = in_dim / block_size;
+    let packs_per_block = block_size / 8u32;
+    let row_pack_off = row * n_packs_per_row;
+    let row_block_off = row * n_blocks;
+
+    let mut acc = 0.0f32;
+    let p_iters = (n_packs_per_row + lsize - 1u32) / lsize;
+    for p_iter in range(0u32, p_iters, 1u32) {
+        let pack_idx = p_iter * lsize + tid;
+        if pack_idx < n_packs_per_row {
+            let blk = pack_idx / packs_per_block;
+            // E4M3 micro-scale × global.
+            let sb = load(scales[row_block_off + blk]).cast::<u32>();
+            let se = (sb >> 3u32) & 0xFu32;
+            let sm = sb & 0x7u32;
+            let smag = select(
+                se < 1u32,
+                sm.cast::<f32>() * 0.001953125f32,
+                (1.0f32 + sm.cast::<f32>() * 0.125f32) * exp2(se.cast::<f32>() - 7.0f32),
+            );
+            let scale = select((sb >> 7u32) > 0u32, -smag, smag) * global;
+            let packed = load(weight[row_pack_off + pack_idx]);
+            let p_off = pack_idx * 8u32;
+            for i in range(0u32, 8u32, 1u32) {
+                let nib = (packed >> (i * 4u32)) & 0xFu32;
+                let m = nib & 0x7u32;
+                let mag = select(
+                    m < 1u32,
+                    0.0f32,
+                    select(
+                        m < 2u32,
+                        0.5f32,
+                        select(
+                            m < 3u32,
+                            1.0f32,
+                            select(
+                                m < 4u32,
+                                1.5f32,
+                                select(
+                                    m < 5u32,
+                                    2.0f32,
+                                    select(m < 6u32, 3.0f32, select(m < 7u32, 4.0f32, 6.0f32)),
+                                ),
+                            ),
+                        ),
+                    ),
+                );
+                let val = select((nib & 0x8u32) > 0u32, -mag, mag);
+                acc = acc + (val * scale) * load(input[p_off + i]).cast::<f32>();
+            }
+        }
+    }
+
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[row], total.cast::<T>());
+    }
+}
+
+/// mxfp8 (E4M3) dequantizing GEMV — 8-bit weights (block 32), E8M0 pow-2 scale.
+/// Element-strided: one byte per code, so threads stride over elements.
+#[kernel]
+pub fn mt_mxfp8_e4m3_qgemv<T>(
+    weight: Tensor<u8>,
+    scales: Tensor<u8>,
+    input: Tensor<T>,
+    output: Tensor<T>,
+    #[constexpr] in_dim: u32,
+    #[constexpr] block_size: u32,
+) {
+    let row = program_id::<0>();
+    let row_off = row * in_dim;
+    let n_blocks = in_dim / block_size;
+    let row_block_off = row * n_blocks;
+
+    let mut acc = 0.0f32;
+    let iters = (in_dim + lsize - 1u32) / lsize;
+    for it in range(0u32, iters, 1u32) {
+        let c = it * lsize + tid;
+        if c < in_dim {
+            let bits = load(weight[row_off + c]).cast::<u32>();
+            let exp = (bits >> 3u32) & 0xFu32;
+            let mant = bits & 0x7u32;
+            let mag = select(
+                exp < 1u32,
+                mant.cast::<f32>() * 0.001953125f32,
+                (1.0f32 + mant.cast::<f32>() * 0.125f32) * exp2(exp.cast::<f32>() - 7.0f32),
+            );
+            let elem = select((bits >> 7u32) > 0u32, -mag, mag);
+            let sbits = load(scales[row_block_off + c / block_size]).cast::<f32>();
+            let scale = exp2(sbits - 127.0f32);
+            acc = acc + (elem * scale) * load(input[c]).cast::<f32>();
+        }
+    }
+
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[row], total.cast::<T>());
+    }
+}
+
+/// mxfp8 (E5M2) dequantizing GEMV — 8-bit weights (block 32), E8M0 pow-2 scale.
+#[kernel]
+pub fn mt_mxfp8_e5m2_qgemv<T>(
+    weight: Tensor<u8>,
+    scales: Tensor<u8>,
+    input: Tensor<T>,
+    output: Tensor<T>,
+    #[constexpr] in_dim: u32,
+    #[constexpr] block_size: u32,
+) {
+    let row = program_id::<0>();
+    let row_off = row * in_dim;
+    let n_blocks = in_dim / block_size;
+    let row_block_off = row * n_blocks;
+
+    let mut acc = 0.0f32;
+    let iters = (in_dim + lsize - 1u32) / lsize;
+    for it in range(0u32, iters, 1u32) {
+        let c = it * lsize + tid;
+        if c < in_dim {
+            let bits = load(weight[row_off + c]).cast::<u32>();
+            let exp = (bits >> 2u32) & 0x1Fu32;
+            let mant = bits & 0x3u32;
+            let mag = select(
+                exp < 1u32,
+                mant.cast::<f32>() * 0.0000152587890625f32,
+                (1.0f32 + mant.cast::<f32>() * 0.25f32) * exp2(exp.cast::<f32>() - 15.0f32),
+            );
+            let elem = select((bits >> 7u32) > 0u32, -mag, mag);
+            let sbits = load(scales[row_block_off + c / block_size]).cast::<f32>();
+            let scale = exp2(sbits - 127.0f32);
+            acc = acc + (elem * scale) * load(input[c]).cast::<f32>();
+        }
+    }
+
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[row], total.cast::<T>());
+    }
+}
+
+/// nvfp8 dequantizing GEMV — E4M3 weights (block 16), per-block FP32 scale.
+#[kernel]
+pub fn mt_nvfp8_qgemv<T>(
+    weight: Tensor<u8>,
+    scales: Tensor<f32>,
+    input: Tensor<T>,
+    output: Tensor<T>,
+    #[constexpr] in_dim: u32,
+    #[constexpr] block_size: u32,
+) {
+    let row = program_id::<0>();
+    let row_off = row * in_dim;
+    let n_blocks = in_dim / block_size;
+    let row_block_off = row * n_blocks;
+
+    let mut acc = 0.0f32;
+    let iters = (in_dim + lsize - 1u32) / lsize;
+    for it in range(0u32, iters, 1u32) {
+        let c = it * lsize + tid;
+        if c < in_dim {
+            let bits = load(weight[row_off + c]).cast::<u32>();
+            let exp = (bits >> 3u32) & 0xFu32;
+            let mant = bits & 0x7u32;
+            let mag = select(
+                exp < 1u32,
+                mant.cast::<f32>() * 0.001953125f32,
+                (1.0f32 + mant.cast::<f32>() * 0.125f32) * exp2(exp.cast::<f32>() - 7.0f32),
+            );
+            let elem = select((bits >> 7u32) > 0u32, -mag, mag);
+            let scale = load(scales[row_block_off + c / block_size]);
+            acc = acc + (elem * scale) * load(input[c]).cast::<f32>();
+        }
+    }
+
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[row], total.cast::<T>());
+    }
+}
+
 pub mod kernel_tests {
     use metaltile::{core::ir::Kernel, test::*, test_kernel};
 
@@ -131,22 +327,53 @@ pub mod kernel_tests {
         // Round-trip the input through `dt` so the oracle sees what the GPU sees.
         let x = unpack_f32(&pack_f32(&input_f, dt), dt);
         let expected = qgemv_oracle(&wdq, &x, out_dim, in_dim);
-        TestSetup::new(kernel)
+        // 4-bit weights bind as packed u32; 8-bit as one uchar each. FP32 (nvfp8)
+        // scales bind as f32; all others are one byte (E8M0/E4M3).
+        let weight_dt = if fmt.element_bits() == 4 { DType::U32 } else { DType::U8 };
+        let scales_dt = if matches!(fmt, QFormat::Nvfp8) { DType::F32 } else { DType::U8 };
+        let mut s = TestSetup::new(kernel)
             .mode(KernelMode::Reduction)
-            .input(TestBuffer::from_vec("weight", p.codes, DType::U32))
-            .input(TestBuffer::from_vec("scales", p.scales, DType::U8))
+            .input(TestBuffer::from_vec("weight", p.codes, weight_dt))
+            .input(TestBuffer::from_vec("scales", p.scales, scales_dt))
             .input(TestBuffer::from_vec("input", pack_f32(&input_f, dt), dt))
             .input(TestBuffer::zeros("output", out_dim, dt))
             .constexpr("in_dim", in_dim as u32)
-            .constexpr("block_size", fmt.block_size() as u32)
-            .expect(TestBuffer::from_vec("output", pack_f32(&expected, dt), dt))
-            .grid_3d(out_dim as u32, 1, 1, [TPG, 1, 1])
+            .constexpr("block_size", fmt.block_size() as u32);
+        if matches!(fmt, QFormat::Nvfp4) {
+            s = s.constexpr("global", p.global);
+        }
+        s.expect(TestBuffer::from_vec("output", pack_f32(&expected, dt), dt)).grid_3d(
+            out_dim as u32,
+            1,
+            1,
+            [TPG, 1, 1],
+        )
     }
 
-    // out_dim 4, in_dim 256 (8 blocks of 32, 32 packs/row) — mirrors the int
+    // out_dim 4, in_dim 256 (divisible by both block sizes) — mirrors the int
     // dequant_gemv test shape.
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
     fn test_mxfp4_qgemv(dt: DType) -> TestSetup {
         qgemv_setup(mt_mxfp4_qgemv::kernel_ir_for(dt), QFormat::Mxfp4, 4, 256, dt)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_nvfp4_qgemv(dt: DType) -> TestSetup {
+        qgemv_setup(mt_nvfp4_qgemv::kernel_ir_for(dt), QFormat::Nvfp4, 4, 256, dt)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxfp8_e4m3_qgemv(dt: DType) -> TestSetup {
+        qgemv_setup(mt_mxfp8_e4m3_qgemv::kernel_ir_for(dt), QFormat::Mxfp8E4, 4, 256, dt)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxfp8_e5m2_qgemv(dt: DType) -> TestSetup {
+        qgemv_setup(mt_mxfp8_e5m2_qgemv::kernel_ir_for(dt), QFormat::Mxfp8E5, 4, 256, dt)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_nvfp8_qgemv(dt: DType) -> TestSetup {
+        qgemv_setup(mt_nvfp8_qgemv::kernel_ir_for(dt), QFormat::Nvfp8, 4, 256, dt)
     }
 }
