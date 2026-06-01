@@ -367,5 +367,8 @@ pub mod kernel_benches {
             .constexpr("scale", scale)
             .grid_3d((n_q_heads * n_query) as u32, 1, 1, [1024, 1, 1])
             .bytes_moved(bytes as u64)
+            // QK·V (4·H·Nq·Nkv·D) + the content-dependent rel-pos term
+            // (q+v)·rel_emb (+2·H·Nq·Nkv·D) ⇒ 6·H·Nq·Nkv·D dense-equivalent.
+            .flops(6 * (n_q_heads as u64) * (n_query as u64) * (n_kv as u64) * (head_dim as u64))
     }
 }

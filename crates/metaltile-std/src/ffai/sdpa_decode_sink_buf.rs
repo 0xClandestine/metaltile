@@ -349,5 +349,7 @@ pub mod kernel_benches {
             .constexpr("scale", scale)
             .grid_3d(n_q_heads as u32, 1, 1, [1024, 1, 1])
             .bytes_moved(bytes as u64)
+            // Single-query decode: 4·H·Nkv·D (QK + softmax·V over the cache).
+            .flops(4 * (n_q_heads as u64) * (n_kv as u64) * (head_dim as u64))
     }
 }

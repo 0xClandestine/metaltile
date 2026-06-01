@@ -459,6 +459,11 @@ pub mod kernel_benches {
                 ((seq_len * input_dim + 4 * hidden * (input_dim + hidden)) * dt.size_bytes())
                     as u64,
             )
+            // 4 gates × (W_ih·x + W_hh·h) MACs per step, over the sequence:
+            // 8·seq_len·hidden·(input_dim + hidden).
+            .flops(
+                8 * (seq_len as u64) * (hidden as u64) * (input_dim as u64 + hidden as u64),
+            )
     }
 
     #[bench(name = "ffai/lstm/lstm_cell", dtypes = [f32, f16, bf16])]
@@ -487,5 +492,10 @@ pub mod kernel_benches {
             .constexpr("hidden", hidden as u32)
             .grid_1d(n_out, 256)
             .bytes_moved(bytes as u64)
+            // 4 gates × (W_ih·x + W_hh·h) MACs per batch element:
+            // 8·batch·hidden·(input_size + hidden).
+            .flops(
+                8 * (batch as u64) * (hidden as u64) * (input_size as u64 + hidden as u64),
+            )
     }
 }

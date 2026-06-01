@@ -333,5 +333,8 @@ pub mod kernel_benches {
             .constexpr("scale", scale)
             .grid_3d((n_q_heads * n_query) as u32, 1, 1, [1024, 1, 1])
             .bytes_moved(bytes as u64)
+            // Windowed: each query attends only its `win` keys ⇒ useful work
+            // is 4·H·Nq·win·D (QK + softmax·V), not the dense Nq² form.
+            .flops(4 * (n_q_heads as u64) * (n_query as u64) * (win as u64) * (head_dim as u64))
     }
 }
