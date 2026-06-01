@@ -227,6 +227,9 @@ pub mod kernel_tests {
     ) -> Vec<f32> {
         let gqa = n_q_heads / n_kv_heads;
         let mut out = vec![0.0f32; n_q_heads * head_dim];
+        // `qh` indexes several arrays (out/q/sink) with different strides, so
+        // a single `enumerate()` would not replace the range loop cleanly.
+        #[allow(clippy::needless_range_loop)]
         for qh in 0..n_q_heads {
             let kvh = qh / gqa;
             let q_off = qh * head_dim;
