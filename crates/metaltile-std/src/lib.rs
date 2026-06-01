@@ -9,6 +9,7 @@ pub mod bench_types;
 pub mod ffai;
 pub mod mlx;
 pub mod probe;
+pub mod quant;
 
 // Re-export the kernel inventories from the harness registry. The `#[kernel]` /
 // `#[bench]` / `#[test_kernel]` registrations live in this crate's `ffai` /
