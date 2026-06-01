@@ -606,18 +606,18 @@ fn run_kernel_bench(
         },
     };
 
-    if let (Some(rk), Some((out_idx, out_n, out_dt))) = (setup.ref_kernel(), mt_out) {
-        if let Some((ref_gbps, equiv)) =
+    if let (Some(rk), Some((out_idx, out_n, out_dt))) = (setup.ref_kernel(), mt_out)
+        && let Some((ref_gbps, equiv)) =
             run_reference_bench(runner, rk, &bufs, out_idx, out_n, out_dt, &input_bytes, bytes_moved)
-        {
-            return Some(OpBench::new(bench.name(), "GB/s").implemented(shape, Some(ref_gbps), gbps, equiv));
-        }
+    {
+        return Some(OpBench::new(bench.name(), "GB/s").implemented(shape, Some(ref_gbps), gbps, equiv));
     }
 
     let equiv = EquivResult { n_checked: 0, max_abs_err: 0.0, cosine_sim: 1.0, passed: true };
     Some(OpBench::new(bench.name(), "GB/s").implemented(shape, None, gbps, equiv))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_reference_bench(
     runner: &GpuRunner,
     rk: &RefKernel,

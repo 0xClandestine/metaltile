@@ -48,11 +48,12 @@ impl ConfigLoader {
     /// Returns `Err` only when figment itself fails (malformed TOML, type
     /// mismatch in an env var, etc.).  A missing `tile.toml` is silently
     /// ignored.
-    pub fn load() -> Result<TileConfig, figment::Error> {
+    pub fn load() -> Result<TileConfig, Box<figment::Error>> {
         Figment::from(Serialized::defaults(TileConfig::default()))
             .merge(Toml::file("tile.toml"))
             .merge(Env::prefixed("TILE__").split("__"))
             .extract()
+            .map_err(Box::new)
     }
 }
 
@@ -71,7 +72,7 @@ mod tests {
     #[test]
     fn load_returns_defaults_without_tile_toml() {
         // Assumes no tile.toml in CWD during tests and no TILE__ vars set.
-        let cfg = ConfigLoader::load().expect("ConfigLoader::load should not fail");
+        let cfg = ConfigLoader::load().expect("ConfigLoader::load should not fail with defaults");
         assert_eq!(cfg.runner_binary, "__tile_runner");
         assert!(!cfg.verbose);
     }

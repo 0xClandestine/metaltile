@@ -381,7 +381,9 @@ impl GpuRunner {
     #[allow(unused_variables)]
     pub fn read_bytes(&self, buf: &GpuBuffer, n_bytes: usize) -> Vec<u8> {
         #[cfg(target_os = "macos")]
-        return MacosRunner::read_bytes(&buf.inner, n_bytes);
+        {
+            MacosRunner::read_bytes(&buf.inner, n_bytes)
+        }
         #[cfg(not(target_os = "macos"))]
         vec![0u8; n_bytes]
     }
@@ -391,10 +393,10 @@ impl GpuRunner {
         #[cfg(target_os = "macos")]
         {
             let bytes = MacosRunner::read_bytes(&buf.inner, n * 4);
-            return bytes
+            bytes
                 .chunks_exact(4)
                 .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect();
+                .collect()
         }
         #[cfg(not(target_os = "macos"))]
         vec![0.0f32; n]
@@ -405,13 +407,13 @@ impl GpuRunner {
         #[cfg(target_os = "macos")]
         {
             let bytes = MacosRunner::read_bytes(&buf.inner, n * 2);
-            return bytes
+            bytes
                 .chunks_exact(2)
                 .map(|b| {
                     let bits = u16::from_le_bytes([b[0], b[1]]);
                     f32::from_bits((bits as u32) << 16)
                 })
-                .collect();
+                .collect()
         }
         #[cfg(not(target_os = "macos"))]
         vec![0.0f32; n]
@@ -422,10 +424,10 @@ impl GpuRunner {
         #[cfg(target_os = "macos")]
         {
             let bytes = MacosRunner::read_bytes(&buf.inner, n * 2);
-            return bytes
+            bytes
                 .chunks_exact(2)
                 .map(|b| f16_bits_to_f32(u16::from_le_bytes([b[0], b[1]])))
-                .collect();
+                .collect()
         }
         #[cfg(not(target_os = "macos"))]
         vec![0.0f32; n]
@@ -446,7 +448,7 @@ impl GpuRunner {
         #[cfg(target_os = "macos")]
         {
             let raw: Vec<&MacosBuffer> = buffers.iter().map(|b| &b.inner).collect();
-            return self.inner.measure(&kernel.inner, &raw, tgs, tpg, warmup, iters);
+            self.inner.measure(&kernel.inner, &raw, tgs, tpg, warmup, iters)
         }
         #[cfg(not(target_os = "macos"))]
         vec![0.0; iters]
@@ -490,10 +492,10 @@ impl GpuRunner {
         {
             use objc2_metal::{MTLDevice, MTLGPUFamily};
             let dev = &self.inner.device;
-            return dev.supportsFamily(MTLGPUFamily::Apple10)
+            dev.supportsFamily(MTLGPUFamily::Apple10)
                 || dev.supportsFamily(MTLGPUFamily::Apple9)
                 || dev.supportsFamily(MTLGPUFamily::Apple8)
-                || dev.supportsFamily(MTLGPUFamily::Apple7);
+                || dev.supportsFamily(MTLGPUFamily::Apple7)
         }
         #[cfg(not(target_os = "macos"))]
         false

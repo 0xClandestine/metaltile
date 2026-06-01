@@ -41,7 +41,7 @@ impl RunnerHarness {
 
     fn run_bench(args: &RunnerArgs) -> bool {
         let entries: Vec<_> = all_benches()
-            .filter(|e| args.filter.as_deref().map_or(true, |f| e.bench().name().contains(f)))
+            .filter(|e| args.filter.as_deref().is_none_or(|f| e.bench().name().contains(f)))
             .collect();
 
         let dtypes = Self::dtype_list(args);
@@ -106,7 +106,7 @@ impl RunnerHarness {
 
     fn run_test(args: &RunnerArgs) -> bool {
         let entries: Vec<_> = all_tests()
-            .filter(|e| args.filter.as_deref().map_or(true, |f| e.test().name().contains(f)))
+            .filter(|e| args.filter.as_deref().is_none_or(|f| e.test().name().contains(f)))
             .collect();
 
         let dtypes = Self::dtype_list(args);
@@ -174,7 +174,7 @@ impl RunnerHarness {
 
     fn run_build(args: &RunnerArgs) -> bool {
         let entries: Vec<_> = all_kernels()
-            .filter(|e| args.filter.as_deref().map_or(true, |f| e.name().contains(f)))
+            .filter(|e| args.filter.as_deref().is_none_or(|f| e.name().contains(f)))
             .collect();
 
         let dtypes = Self::dtype_list(args);
@@ -239,7 +239,7 @@ impl RunnerHarness {
         };
 
         let entries: Vec<_> = all_kernels()
-            .filter(|e| args.filter.as_deref().map_or(true, |f| e.name().contains(f)))
+            .filter(|e| args.filter.as_deref().is_none_or(|f| e.name().contains(f)))
             .collect();
 
         emit_stdout(&ProtocolMessage::Start {
@@ -415,6 +415,7 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_reference(
     runner: &GpuRunner,
     rk: &RefKernel,
