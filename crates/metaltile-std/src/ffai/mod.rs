@@ -71,6 +71,7 @@ pub mod fishspeech_conv1d;
 pub mod fishspeech_conv1d_block_scaled;
 pub mod flash_block_scaled_sdpa;
 pub mod flash_quantized_sdpa;
+pub mod frame_diff_luma;
 pub mod gate_up_swiglu_fused;
 pub mod gated_delta;
 pub mod gated_delta_prep;
