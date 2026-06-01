@@ -65,6 +65,135 @@ pub fn mt_mxfp4_dequant<T>(
     }
 }
 
+/// nvfp4 — E2M1 elements (block 16), E4M3 micro-scale × a global FP32.
+/// `scales[b]` is an E4M3 code; effective block scale `e4m3(scales[b]) * global`.
+#[kernel]
+pub fn mt_nvfp4_dequant<T>(
+    codes: Tensor<u32>,
+    scales: Tensor<u8>,
+    out: Tensor<T>,
+    #[constexpr] n: u32,
+    #[constexpr] block_size: u32,
+    #[constexpr] global: f32,
+) {
+    let i = program_id::<0>();
+    if i < n {
+        let word = load(codes[i / 8u32]);
+        let nib = (word >> ((i & 7u32) * 4u32)) & 0xFu32;
+        let m = nib & 0x7u32;
+        let mag = select(
+            m < 1u32,
+            0.0f32,
+            select(
+                m < 2u32,
+                0.5f32,
+                select(
+                    m < 3u32,
+                    1.0f32,
+                    select(
+                        m < 4u32,
+                        1.5f32,
+                        select(
+                            m < 5u32,
+                            2.0f32,
+                            select(m < 6u32, 3.0f32, select(m < 7u32, 4.0f32, 6.0f32)),
+                        ),
+                    ),
+                ),
+            ),
+        );
+        let elem = select((nib & 0x8u32) > 0u32, -mag, mag);
+        // E4M3 micro-scale decode: (1 + mant/8)·2^(exp-7); subnormal mant·2^-9.
+        let sb = load(scales[i / block_size]).cast::<u32>();
+        let se = (sb >> 3u32) & 0xFu32;
+        let sm = sb & 0x7u32;
+        let smag = select(
+            se < 1u32,
+            sm.cast::<f32>() * 0.001953125f32,
+            (1.0f32 + sm.cast::<f32>() * 0.125f32) * exp2(se.cast::<f32>() - 7.0f32),
+        );
+        let block_scale = select((sb >> 7u32) > 0u32, -smag, smag) * global;
+        store(out[i], (elem * block_scale).cast::<T>());
+    }
+}
+
+/// mxfp8 (E4M3) — E4M3 elements (block 32), E8M0 pow-2 block scale.
+#[kernel]
+pub fn mt_mxfp8_e4m3_dequant<T>(
+    codes: Tensor<u8>,
+    scales: Tensor<u8>,
+    out: Tensor<T>,
+    #[constexpr] n: u32,
+    #[constexpr] block_size: u32,
+) {
+    let i = program_id::<0>();
+    if i < n {
+        let bits = load(codes[i]).cast::<u32>();
+        let exp = (bits >> 3u32) & 0xFu32;
+        let mant = bits & 0x7u32;
+        let mag = select(
+            exp < 1u32,
+            mant.cast::<f32>() * 0.001953125f32, // 2^-9 subnormal
+            (1.0f32 + mant.cast::<f32>() * 0.125f32) * exp2(exp.cast::<f32>() - 7.0f32),
+        );
+        let elem = select((bits >> 7u32) > 0u32, -mag, mag);
+        let sbits = load(scales[i / block_size]).cast::<f32>();
+        let scale = exp2(sbits - 127.0f32);
+        store(out[i], (elem * scale).cast::<T>());
+    }
+}
+
+/// mxfp8 (E5M2) — E5M2 elements (block 32), E8M0 pow-2 block scale.
+#[kernel]
+pub fn mt_mxfp8_e5m2_dequant<T>(
+    codes: Tensor<u8>,
+    scales: Tensor<u8>,
+    out: Tensor<T>,
+    #[constexpr] n: u32,
+    #[constexpr] block_size: u32,
+) {
+    let i = program_id::<0>();
+    if i < n {
+        let bits = load(codes[i]).cast::<u32>();
+        let exp = (bits >> 2u32) & 0x1Fu32;
+        let mant = bits & 0x3u32;
+        let mag = select(
+            exp < 1u32,
+            mant.cast::<f32>() * 0.0000152587890625f32, // 2^-16 subnormal
+            (1.0f32 + mant.cast::<f32>() * 0.25f32) * exp2(exp.cast::<f32>() - 15.0f32),
+        );
+        let elem = select((bits >> 7u32) > 0u32, -mag, mag);
+        let sbits = load(scales[i / block_size]).cast::<f32>();
+        let scale = exp2(sbits - 127.0f32);
+        store(out[i], (elem * scale).cast::<T>());
+    }
+}
+
+/// nvfp8 — E4M3 elements (block 16), per-block FP32 scale (loaded directly).
+#[kernel]
+pub fn mt_nvfp8_dequant<T>(
+    codes: Tensor<u8>,
+    scales: Tensor<f32>,
+    out: Tensor<T>,
+    #[constexpr] n: u32,
+    #[constexpr] block_size: u32,
+) {
+    let i = program_id::<0>();
+    if i < n {
+        let bits = load(codes[i]).cast::<u32>();
+        let exp = (bits >> 3u32) & 0xFu32;
+        let mant = bits & 0x7u32;
+        let mag = select(
+            exp < 1u32,
+            mant.cast::<f32>() * 0.001953125f32, // 2^-9 subnormal
+            (1.0f32 + mant.cast::<f32>() * 0.125f32) * exp2(exp.cast::<f32>() - 7.0f32),
+        );
+        let elem = select((bits >> 7u32) > 0u32, -mag, mag);
+        let scale = load(scales[i / block_size]);
+        store(out[i], (elem * scale).cast::<T>());
+    }
+}
+
 pub mod kernel_tests {
     use metaltile::{core::ir::Kernel, test::*, test_kernel};
 
@@ -99,18 +228,51 @@ pub mod kernel_tests {
         let oracle = crate::quant::format::dequant(fmt, &p, rows, cols);
         let n = rows * cols;
         const TPG: u32 = 256;
-        TestSetup::new(kernel)
-            .input(TestBuffer::from_vec("codes", p.codes, DType::U32))
-            .input(TestBuffer::from_vec("scales", p.scales, DType::U8))
+        // 4-bit codes bind as packed u32 words; 8-bit as one uchar each. The FP32
+        // (nvfp8) scale binds as f32; all other scales are one byte (E8M0/E4M3).
+        let codes_dt = if fmt.element_bits() == 4 { DType::U32 } else { DType::U8 };
+        let scales_dt = if matches!(fmt, QFormat::Nvfp8) { DType::F32 } else { DType::U8 };
+        let mut s = TestSetup::new(kernel)
+            .input(TestBuffer::from_vec("codes", p.codes, codes_dt))
+            .input(TestBuffer::from_vec("scales", p.scales, scales_dt))
             .input(TestBuffer::zeros("out", n, dt))
             .constexpr("n", n as u32)
-            .constexpr("block_size", fmt.block_size() as u32)
-            .expect(TestBuffer::from_vec("out", pack_f32(&oracle, dt), dt))
-            .grid_3d((n as u32).div_ceil(TPG), 1, 1, [TPG, 1, 1])
+            .constexpr("block_size", fmt.block_size() as u32);
+        // nvfp4 is two-level: the per-tensor global FP32 is a constexpr.
+        if matches!(fmt, QFormat::Nvfp4) {
+            s = s.constexpr("global", p.global);
+        }
+        s.expect(TestBuffer::from_vec("out", pack_f32(&oracle, dt), dt)).grid_3d(
+            (n as u32).div_ceil(TPG),
+            1,
+            1,
+            [TPG, 1, 1],
+        )
     }
 
+    // cols 64 is divisible by both block sizes (16 and 32).
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-2, 2e-1])]
     fn test_mxfp4_dequant(dt: DType) -> TestSetup {
         dequant_setup(mt_mxfp4_dequant::kernel_ir_for(dt), QFormat::Mxfp4, 4, 64, dt)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-2, 2e-1])]
+    fn test_nvfp4_dequant(dt: DType) -> TestSetup {
+        dequant_setup(mt_nvfp4_dequant::kernel_ir_for(dt), QFormat::Nvfp4, 4, 64, dt)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-2, 2e-1])]
+    fn test_mxfp8_e4m3_dequant(dt: DType) -> TestSetup {
+        dequant_setup(mt_mxfp8_e4m3_dequant::kernel_ir_for(dt), QFormat::Mxfp8E4, 4, 64, dt)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-2, 2e-1])]
+    fn test_mxfp8_e5m2_dequant(dt: DType) -> TestSetup {
+        dequant_setup(mt_mxfp8_e5m2_dequant::kernel_ir_for(dt), QFormat::Mxfp8E5, 4, 64, dt)
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-2, 2e-1])]
+    fn test_nvfp8_dequant(dt: DType) -> TestSetup {
+        dequant_setup(mt_nvfp8_dequant::kernel_ir_for(dt), QFormat::Nvfp8, 4, 64, dt)
     }
 }
