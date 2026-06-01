@@ -17,6 +17,10 @@ Table of contents for the MetalTile docs. The top-level [`README`](../README.md)
 - [CLI](cli.md) — the `tile` binary: `bench`, `build`, `emit`, `inspect`, `device`, `snap`, `diff`.
 - [Kernel audit](KERNEL_AUDIT.md) — per-op coverage table: which MLX / FFAI kernels are ported, partial, or still missing, with the gaps and open PRs called out.
 
+## Design & planning
+
+- [Bench metrics spec](BENCH_METRICS_SPEC.md) — planned `tile bench` measurement additions (latency, GFLOP/s, roofline/utilization, bottleneck) so kernels can actually be optimized and precisions compared; includes the precision-support roadmap (nvfp4/mxfp4/mxfp8) and M5 Neural Accelerator context.
+
 ## See also
 
 - Top-level [`README`](../README.md) — project landing page.
