@@ -41,6 +41,14 @@ pub enum QFormat {
     Mxfp8E5,
     /// E4M3, block 16, per-block FP32 scale (NVIDIA-style fp8).
     Nvfp8,
+    /// E2M1, group 32, per-group FP32 scale (legacy float-scale fp4).
+    Fp4,
+    /// E4M3, group 32, per-group FP32 scale (legacy float-scale fp8).
+    Fp8E4m3,
+    /// E5M2, group 32, per-group FP32 scale (legacy float-scale fp8).
+    Fp8E5m2,
+    /// Symmetric int8, group 64, per-group FP32 scale (affine, scale-only).
+    Int8,
 }
 
 /// How a format stores its per-block scale.
@@ -57,19 +65,20 @@ enum ScaleKind {
 use QFormat::*;
 
 impl QFormat {
-    /// Elements per block along the K dimension.
+    /// Elements per block (mx*) / group (nv*, legacy fp, int8) along K.
     pub fn block_size(self) -> usize {
         match self {
             Nvfp4 | Nvfp8 => 16,
-            Mxfp4 | Mxfp8E4 | Mxfp8E5 => 32,
+            Mxfp4 | Mxfp8E4 | Mxfp8E5 | Fp4 | Fp8E4m3 | Fp8E5m2 => 32,
+            Int8 => 64,
         }
     }
 
-    /// Bits per quantized element (4 for E2M1, 8 for E4M3/E5M2).
+    /// Bits per quantized element (4 for E2M1, 8 for E4M3/E5M2/int8).
     pub fn element_bits(self) -> usize {
         match self {
-            Nvfp4 | Mxfp4 => 4,
-            Mxfp8E4 | Mxfp8E5 | Nvfp8 => 8,
+            Nvfp4 | Mxfp4 | Fp4 => 4,
+            Mxfp8E4 | Mxfp8E5 | Nvfp8 | Fp8E4m3 | Fp8E5m2 | Int8 => 8,
         }
     }
 
@@ -81,16 +90,21 @@ impl QFormat {
             Mxfp8E4 => "mxfp8_e4m3",
             Mxfp8E5 => "mxfp8_e5m2",
             Nvfp8 => "nvfp8",
+            Fp4 => "fp4",
+            Fp8E4m3 => "fp8_e4m3",
+            Fp8E5m2 => "fp8_e5m2",
+            Int8 => "int8",
         }
     }
 
-    /// Largest finite element magnitude — the block scale maps a block's amax to
-    /// (roughly) this so the block uses the element's full dynamic range.
+    /// Largest finite element magnitude — the block/group scale maps a block's
+    /// amax to (roughly) this so the block uses the element's full range.
     fn element_max(self) -> f32 {
         match self {
-            Nvfp4 | Mxfp4 => 6.0,        // E2M1 max codebook value
-            Mxfp8E4 | Nvfp8 => E4M3_MAX, // E4M3 max
-            Mxfp8E5 => 57344.0,          // E5M2 max
+            Nvfp4 | Mxfp4 | Fp4 => 6.0,            // E2M1 max codebook value
+            Mxfp8E4 | Nvfp8 | Fp8E4m3 => E4M3_MAX, // E4M3 max
+            Mxfp8E5 | Fp8E5m2 => 57344.0,          // E5M2 max
+            Int8 => 127.0,                         // symmetric int8 max
         }
     }
 
@@ -98,7 +112,8 @@ impl QFormat {
         match self {
             Nvfp4 => ScaleKind::E4M3,
             Mxfp4 | Mxfp8E4 | Mxfp8E5 => ScaleKind::E8M0,
-            Nvfp8 => ScaleKind::F32,
+            // Legacy fp4/fp8 + int8 store a raw per-group FP32 scale, like nvfp8.
+            Nvfp8 | Fp4 | Fp8E4m3 | Fp8E5m2 | Int8 => ScaleKind::F32,
         }
     }
 
@@ -107,17 +122,19 @@ impl QFormat {
 
     fn element_encode(self, x: f32) -> u8 {
         match self {
-            Nvfp4 | Mxfp4 => codec::e2m1_encode(x),
-            Mxfp8E4 | Nvfp8 => codec::e4m3_encode(x),
-            Mxfp8E5 => codec::e5m2_encode(x),
+            Nvfp4 | Mxfp4 | Fp4 => codec::e2m1_encode(x),
+            Mxfp8E4 | Nvfp8 | Fp8E4m3 => codec::e4m3_encode(x),
+            Mxfp8E5 | Fp8E5m2 => codec::e5m2_encode(x),
+            Int8 => codec::int8_encode(x),
         }
     }
 
     fn element_decode(self, code: u8) -> f32 {
         match self {
-            Nvfp4 | Mxfp4 => codec::e2m1_decode(code),
-            Mxfp8E4 | Nvfp8 => codec::e4m3_decode(code),
-            Mxfp8E5 => codec::e5m2_decode(code),
+            Nvfp4 | Mxfp4 | Fp4 => codec::e2m1_decode(code),
+            Mxfp8E4 | Nvfp8 | Fp8E4m3 => codec::e4m3_decode(code),
+            Mxfp8E5 | Fp8E5m2 => codec::e5m2_decode(code),
+            Int8 => codec::int8_decode(code),
         }
     }
 }
@@ -249,7 +266,7 @@ pub fn dequant(fmt: QFormat, p: &PackedTensor, rows: usize, cols: usize) -> Vec<
 mod tests {
     use super::*;
 
-    const ALL: [QFormat; 5] = [Nvfp4, Mxfp4, Mxfp8E4, Mxfp8E5, Nvfp8];
+    const ALL: [QFormat; 9] = [Nvfp4, Mxfp4, Mxfp8E4, Mxfp8E5, Nvfp8, Fp4, Fp8E4m3, Fp8E5m2, Int8];
 
     /// Deterministic weight matrix with per-row varying magnitude — exercises
     /// the per-block scaling (different blocks see different amax).
@@ -296,9 +313,11 @@ mod tests {
             // mxfp8 E8M0 pow-2 scale leaves up to ~2× of the element range
             // unused (so it's looser than nvfp8's exact FP32 scale).
             let floor = match fmt {
-                Nvfp4 | Mxfp4 => 0.97,     // 4-bit element
-                Mxfp8E4 | Mxfp8E5 => 0.99, // 8-bit element + pow-2 scale
-                Nvfp8 => 0.999,            // 8-bit element + exact FP32 scale
+                Nvfp4 | Mxfp4 => 0.97,              // 4-bit element
+                Fp4 => 0.98,                        // 4-bit element + exact FP32 group scale
+                Mxfp8E4 | Mxfp8E5 => 0.99,          // 8-bit element + pow-2 scale
+                Nvfp8 | Fp8E4m3 | Fp8E5m2 => 0.999, // 8-bit element + exact FP32 scale
+                Int8 => 0.9999,                     // int8 + FP32 scale is very tight
             };
             assert!(cos >= floor, "{}: cosine {cos} < {floor}", fmt.name());
         }
@@ -306,7 +325,7 @@ mod tests {
 
     #[test]
     fn packed_byte_sizes_match_layout() {
-        let (rows, cols) = (2usize, 32usize);
+        let (rows, cols) = (2usize, 64usize); // 64 divisible by every block/group (16/32/64)
         let w = weights(rows, cols);
         for fmt in ALL {
             let p = pack(fmt, &w, rows, cols);
@@ -324,7 +343,7 @@ mod tests {
 
     #[test]
     fn all_zero_block_dequants_to_zero() {
-        let (rows, cols) = (1usize, 32usize);
+        let (rows, cols) = (1usize, 64usize); // divisible by every block/group
         let w = vec![0f32; rows * cols];
         for fmt in ALL {
             let p = pack(fmt, &w, rows, cols);

@@ -69,6 +69,9 @@ pub enum UnaryOpKind {
     /// Decode an 8-bit E5M2 (fp8) byte → f32 (IEEE-half high byte).
     /// See `quant::codec::e5m2_decode`.
     DecodeE5m2,
+    /// Decode a symmetric-int8 code (a `u8` reinterpreted as `i8`) → f32. The
+    /// per-group float scale is applied separately. See `quant::codec::int8_decode`.
+    DecodeInt8,
 }
 
 impl UnaryOpKind {
@@ -110,13 +113,20 @@ impl UnaryOpKind {
             UnaryOpKind::DecodeE2m1 => format!("mt_decode_e2m1({arg})"),
             UnaryOpKind::DecodeE4m3 => format!("mt_decode_e4m3({arg})"),
             UnaryOpKind::DecodeE5m2 => format!("mt_decode_e5m2({arg})"),
+            UnaryOpKind::DecodeInt8 => format!("mt_decode_int8({arg})"),
         }
     }
 
-    /// True for the block-scaled decode ops, whose result is always f32
-    /// regardless of the (integer) operand dtype.
+    /// True for the quant decode ops, whose result is always f32 regardless of
+    /// the (integer) operand dtype.
     pub fn yields_f32(self) -> bool {
-        matches!(self, UnaryOpKind::DecodeE2m1 | UnaryOpKind::DecodeE4m3 | UnaryOpKind::DecodeE5m2)
+        matches!(
+            self,
+            UnaryOpKind::DecodeE2m1
+                | UnaryOpKind::DecodeE4m3
+                | UnaryOpKind::DecodeE5m2
+                | UnaryOpKind::DecodeInt8
+        )
     }
 }
 

@@ -199,6 +199,13 @@ impl super::MslGenerator {
             wl!(out, "    return ((bits >> 7u) & 1u) ? -mag : mag;");
             wl!(out, "}}");
         }
+        if feat.needs_decode_int8 {
+            wl!(out);
+            wl!(out, "// Symmetric int8: reinterpret the byte as i8 (sign-extend low 8 bits).");
+            wl!(out, "inline float mt_decode_int8(uint bits) {{");
+            wl!(out, "    return float(int(bits << 24u) >> 24);");
+            wl!(out, "}}");
+        }
         if feat.needs_simd_product {
             wl!(out);
             // simd_size is only accessible as a kernel attribute, not in free functions.

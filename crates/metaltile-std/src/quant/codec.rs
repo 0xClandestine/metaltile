@@ -202,9 +202,34 @@ pub fn e8m0_encode(x: f32) -> u8 {
     (n + 127) as u8
 }
 
+// ── int8 (symmetric affine element) ────────────────────────────────────────
+// Unlike the fp formats, int8's "element" is the integer itself; the per-group
+// FP32 scale is applied by the caller. Symmetric: codes in [-127, 127] (−128 is
+// unused so |min| == |max|).
+
+/// Decode a symmetric-int8 code (a `u8` reinterpreted as `i8`) to `f32`.
+pub fn int8_decode(bits: u8) -> f32 { (bits as i8) as f32 }
+
+/// Encode a scaled value (already divided by the group scale) to symmetric int8:
+/// round-to-nearest, clamp to ±127, store as `u8`.
+pub fn int8_encode(scaled: f32) -> u8 {
+    let q = scaled.round().clamp(-127.0, 127.0) as i32;
+    (q as i8) as u8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn int8_round_trips_and_saturates() {
+        for v in [-127i32, -64, -1, 0, 1, 63, 127] {
+            assert_eq!(int8_decode(int8_encode(v as f32)), v as f32);
+        }
+        // Saturates to ±127 (−128 unused for symmetry).
+        assert_eq!(int8_decode(int8_encode(200.0)), 127.0);
+        assert_eq!(int8_decode(int8_encode(-200.0)), -127.0);
+    }
 
     #[test]
     fn e2m1_codebook_round_trips_exactly() {

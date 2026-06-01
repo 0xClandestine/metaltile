@@ -47,10 +47,11 @@ pub(super) struct KernelFeatures {
     pub needs_erf: bool,
     pub needs_erfinv: bool,
     pub needs_expm1: bool,
-    /// Block-scaled dequant decode helpers (`mt_decode_e2m1/e4m3/e5m2`).
+    /// Block-scaled dequant decode helpers (`mt_decode_e2m1/e4m3/e5m2/int8`).
     pub needs_decode_e2m1: bool,
     pub needs_decode_e4m3: bool,
     pub needs_decode_e5m2: bool,
+    pub needs_decode_int8: bool,
     pub needs_simd_product: bool,
     /// MetalPerformancePrimitives (`mpp::tensor_ops::matmul2d` / NAX) needed.
     /// Detected by scanning `Op::InlineMsl::source` for `"mpp::"` — kernels
@@ -78,6 +79,7 @@ impl MslGenerator {
             needs_decode_e2m1: false,
             needs_decode_e4m3: false,
             needs_decode_e5m2: false,
+            needs_decode_int8: false,
             needs_simd_product: false,
             needs_mpp: false,
         };
@@ -199,6 +201,7 @@ impl MslGenerator {
             Op::UnaryOp { op: UnaryOpKind::DecodeE2m1, .. } => feat.needs_decode_e2m1 = true,
             Op::UnaryOp { op: UnaryOpKind::DecodeE4m3, .. } => feat.needs_decode_e4m3 = true,
             Op::UnaryOp { op: UnaryOpKind::DecodeE5m2, .. } => feat.needs_decode_e5m2 = true,
+            Op::UnaryOp { op: UnaryOpKind::DecodeInt8, .. } => feat.needs_decode_int8 = true,
             Op::FusedElementwise { ops } =>
                 for inner in ops {
                     self.analyze_op(inner, feat);

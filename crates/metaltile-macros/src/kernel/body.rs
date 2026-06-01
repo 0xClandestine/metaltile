@@ -2185,6 +2185,7 @@ fn unary_op_kind(name: &str) -> Option<TokenStream> {
         "e2m1_decode" => quote! { UnaryOpKind::DecodeE2m1 },
         "e4m3_decode" => quote! { UnaryOpKind::DecodeE4m3 },
         "e5m2_decode" => quote! { UnaryOpKind::DecodeE5m2 },
+        "int8_decode" => quote! { UnaryOpKind::DecodeInt8 },
         _ => return None,
     })
 }
