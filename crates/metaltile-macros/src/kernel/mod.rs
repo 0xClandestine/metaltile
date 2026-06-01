@@ -242,7 +242,7 @@ impl KernelMacroBuilder {
                     }
 
                     metaltile::core::inventory::submit! {
-                        metaltile::core::KernelEntry::new(#fn_name_str, __build_for_inline)
+                        metaltile::harness::registry::KernelEntry::new(#fn_name_str, __build_for_inline)
                     }
                 };
             }

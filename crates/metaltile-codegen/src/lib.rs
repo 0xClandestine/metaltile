@@ -12,8 +12,10 @@
 
 pub mod emit;
 pub mod error;
+pub mod kernel_registry;
 pub mod msl;
 pub mod passes;
 
 pub use error::{Error, Result};
+pub use kernel_registry::{KernelEntry, all_kernels};
 pub use msl::{MslGenerator, config::TileSchedule, generator_for_mode, kernel_uses_n_simd};

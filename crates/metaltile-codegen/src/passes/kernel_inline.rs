@@ -38,10 +38,11 @@
 use std::collections::BTreeMap;
 
 use metaltile_core::{
-    all_kernels,
     dtype::DType,
     ir::{Kernel, KernelCallArg, Op, ValueId},
 };
+
+use crate::kernel_registry::all_kernels;
 use rustc_hash::FxHashMap;
 
 use crate::{

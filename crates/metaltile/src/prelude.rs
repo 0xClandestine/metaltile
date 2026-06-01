@@ -39,7 +39,7 @@ use std::{marker::PhantomData, ops::Index};
 /// You only need this when registering a kernel for use as an inlined callee via the
 /// `inventory::collect!` mechanism. For ordinary `#[kernel]` definitions this is handled
 /// automatically by the macro.
-pub use metaltile_core::KernelEntry;
+pub use crate::harness::registry::KernelEntry;
 /// Compile-time symbolic values used in shape annotations and generated IR.
 pub use metaltile_core::constexpr::ConstExpr;
 /// A collection of resolved constexpr values for a specific kernel launch.

@@ -2,14 +2,16 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! In-process kernel IR registry consumed by [`KernelInlinePass`].
 //!
-//! [`KernelEntry`] is the only type here — bench and test registries live in
-//! `metaltile::harness::registry` to avoid pulling bench infrastructure into
-//! the codegen crate.
+//! [`KernelEntry`] lives here — alongside the pass that uses it — rather than
+//! in `metaltile-core`, because kernel discovery is a runner/codegen concern.
+//! The `tile` CLI never calls `all_kernels()` or instantiates `KernelEntry`;
+//! those operations only happen inside the `__tile_runner` subprocess.
 //!
-//! `metaltile-codegen` depends on `metaltile-core` (not the facade), so the
-//! kernel entry type and its `all_kernels()` accessor must live here.
+//! The `metaltile` facade re-exports [`KernelEntry`] and [`all_kernels`] from
+//! `metaltile::harness::registry` so user code and the runner module can access
+//! them without importing codegen directly.
 
-use crate::{dsl::dtype::DType, ir::Kernel};
+use metaltile_core::{DType, ir::Kernel};
 
 // ---------------------------------------------------------------------------
 // KernelEntry
@@ -18,7 +20,8 @@ use crate::{dsl::dtype::DType, ir::Kernel};
 /// Registry entry for a MetalTile kernel available for cross-kernel inlining.
 ///
 /// Each `#[kernel]` macro auto-submits one of these via `inventory::submit!`.
-/// [`KernelInlinePass`] calls [`all_kernels`] to resolve `Op::KernelCall` nodes.
+/// [`KernelInlinePass`](crate::passes::KernelInlinePass) calls [`all_kernels`]
+/// to resolve `Op::KernelCall` nodes during MSL generation.
 pub struct KernelEntry {
     name:    &'static str,
     builder: fn(&[DType]) -> Kernel,
@@ -41,14 +44,13 @@ impl KernelEntry {
 inventory::collect!(KernelEntry);
 
 // ---------------------------------------------------------------------------
-// Accessor — re-exported at the crate root for metaltile-codegen
+// Accessor
 // ---------------------------------------------------------------------------
 
 /// Iterate all registered kernel IR builders.
 ///
-/// Called by [`KernelInlinePass`] to resolve `Op::KernelCall` nodes at
-/// codegen time. This function is the only caller of `inventory::iter` for
-/// `KernelEntry` — no other module should call it directly.
+/// Called by [`KernelInlinePass`](crate::passes::KernelInlinePass) at codegen
+/// time inside the runner subprocess. No CLI code should call this.
 pub fn all_kernels() -> impl Iterator<Item = &'static KernelEntry> {
     inventory::iter::<KernelEntry>.into_iter()
 }

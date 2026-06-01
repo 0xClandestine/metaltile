@@ -35,6 +35,6 @@ pub fn all_tests() -> impl Iterator<Item = &'static KernelTestEntry> {
 
 /// Iterate all registered kernel IR builders.
 ///
-/// Re-exported from `metaltile_core::registry` for callers that import the
-/// full harness surface. `metaltile-codegen` uses the core path directly.
-pub use metaltile_core::all_kernels;
+/// Re-exported from `metaltile_codegen::kernel_registry`. The `tile` CLI
+/// never calls this — it only runs in the `__tile_runner` subprocess.
+pub use metaltile_codegen::{KernelEntry, all_kernels};

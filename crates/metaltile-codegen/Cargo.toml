@@ -15,6 +15,7 @@ workspace = true
 
 [dependencies]
 metaltile-core.workspace = true
+inventory.workspace = true
 thiserror.workspace = true
 smallvec.workspace = true
 rustc-hash.workspace = true
