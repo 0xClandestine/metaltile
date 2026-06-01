@@ -52,6 +52,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+metaltile = "0.1"
 metaltile-std = "0.1"
 "#
     );

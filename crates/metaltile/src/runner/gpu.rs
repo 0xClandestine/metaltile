@@ -660,6 +660,7 @@ pub fn bench_gbps(
 
 /// Like [`bench_gbps`] but with explicit warmup / iteration counts, allowing
 /// `tile.toml` `warmup_runs` / `runs` to override the compile-time defaults.
+#[allow(clippy::too_many_arguments)]
 pub fn bench_gbps_with(
     runner: &GpuRunner,
     kernel: &CompiledKernel,

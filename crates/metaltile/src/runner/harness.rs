@@ -15,14 +15,14 @@ use metaltile_core::{
 
 use crate::{
     harness::{
-        bench::{BenchSetup, ConstValue, KernelBench, RefKernel},
+        bench::{BenchSetup, KernelBench, RefKernel},
         registry::{all_benches, all_kernels, all_tests},
         test::{KernelTest, TestSetup},
     },
     runner::{
         args::{RunnerArgs, RunnerCommand},
         emit::emit_stdout,
-        gpu::{GpuBuffer, GpuRunner, bench_gbps, read_typed},
+        gpu::{BENCH_ITERS, BENCH_WARMUP, GpuBuffer, GpuRunner, bench_gbps_with, read_typed},
     },
 };
 
@@ -46,6 +46,9 @@ impl RunnerHarness {
     // ── bench ─────────────────────────────────────────────────────────────────
 
     fn run_bench(args: &RunnerArgs) -> bool {
+        let warmup = args.warmup.unwrap_or(BENCH_WARMUP);
+        let iters = args.iters.unwrap_or(BENCH_ITERS);
+
         let entries: Vec<_> = all_benches()
             .filter(|e| args.filter.as_deref().is_none_or(|f| e.bench().name().contains(f)))
             .collect();
@@ -84,7 +87,7 @@ impl RunnerHarness {
         for entry in entries {
             let bench = entry.bench();
             for &dt in &dtypes {
-                if let Some(result) = run_one_bench(&runner, bench, dt) {
+                if let Some(result) = run_one_bench(&runner, bench, dt, warmup, iters) {
                     if result.correct {
                         passed += 1;
                     } else {
@@ -330,22 +333,13 @@ fn parse_dtype(s: &str) -> Option<DType> {
 
 // ── per-item execution ────────────────────────────────────────────────────────
 
-fn constexpr_bytes(v: &ConstValue) -> Vec<u8> {
-    match *v {
-        ConstValue::U32(x) => x.to_le_bytes().to_vec(),
-        ConstValue::I32(x) => x.to_le_bytes().to_vec(),
-        ConstValue::F32(x) => x.to_le_bytes().to_vec(),
-        ConstValue::U64(x) => x.to_le_bytes().to_vec(),
-        ConstValue::I64(x) => x.to_le_bytes().to_vec(),
-        ConstValue::Usize(x) => (x as u32).to_le_bytes().to_vec(),
-    }
-}
-
 /// Run one bench entry for one dtype; returns `None` on compile/GPU error.
 fn run_one_bench(
     runner: &GpuRunner,
     bench: &'static dyn KernelBench,
     dt: DType,
+    warmup: usize,
+    iters: usize,
 ) -> Option<BenchResult> {
     let setup: BenchSetup = bench.setup(dt);
     let bytes_moved = bench.bytes_moved(&setup);
@@ -366,7 +360,14 @@ fn run_one_bench(
     let mut mt_out_dt = dt;
 
     for param in &kernel.params {
-        let buf = setup.buffers().iter().find(|b| b.name() == param.name)?;
+        let buf = setup.buffers().iter().find(|b| b.name() == param.name).or_else(|| {
+            eprintln!(
+                "[runner] bench '{}' dt={dt:?}: no buffer named '{}' in setup",
+                bench.name(),
+                param.name,
+            );
+            None
+        })?;
         let bytes = buf.initial_bytes();
         if param.is_output && mt_out_idx.is_none() {
             mt_out_idx = Some(bufs.len());
@@ -387,14 +388,14 @@ fn run_one_bench(
     for decl in &kernel.constexprs {
         let n = decl.name.name();
         let (_, value) = setup.constexprs().iter().find(|(k, _)| k == n)?;
-        bufs.push(runner.buffer_bytes(&constexpr_bytes(value)));
+        bufs.push(runner.buffer_bytes(&value.to_le_bytes()));
     }
     let refs: Vec<&GpuBuffer> = bufs.iter().collect();
 
     let grid = setup.grid();
     let g = grid.grid.map(|x| x as usize);
     let t = grid.tpg.map(|x| x as usize);
-    let (mt_gbps, stats) = bench_gbps(runner, &compiled, &refs, g, t, bytes_moved as f64)?;
+    let (mt_gbps, stats) = bench_gbps_with(runner, &compiled, &refs, g, t, bytes_moved as f64, warmup, iters)?;
 
     // Reference comparison (optional).
     let (ref_gbps, mt_pct, correct) =
@@ -408,6 +409,8 @@ fn run_one_bench(
                 mt_out_dt,
                 &input_bytes,
                 bytes_moved,
+                warmup,
+                iters,
             ) {
                 Some((rgbps, pass)) => {
                     let pct = mt_gbps / rgbps * 100.0;
@@ -448,6 +451,8 @@ fn run_reference(
     mt_out_dt: DType,
     input_bytes: &std::collections::HashMap<String, Vec<u8>>,
     bytes_moved: u64,
+    warmup: usize,
+    iters: usize,
 ) -> Option<(f64, bool)> {
     let compiled = if rk.bool_constants.is_empty() {
         runner.compile(&rk.source, &rk.fn_name).ok()?
@@ -475,7 +480,7 @@ fn run_reference(
     let ref_refs: Vec<&GpuBuffer> = ref_bufs.iter().collect();
     let g = rk.grid.grid.map(|x| x as usize);
     let t = rk.grid.tpg.map(|x| x as usize);
-    let (ref_gbps, _) = bench_gbps(runner, &compiled, &ref_refs, g, t, bytes_moved as f64)?;
+    let (ref_gbps, _) = bench_gbps_with(runner, &compiled, &ref_refs, g, t, bytes_moved as f64, warmup, iters)?;
 
     let n = mt_out_n.min(ref_out_n).min(COMPARE_ELEM_CAP);
     let mt_vals = read_typed(runner, &mt_bufs[mt_out_idx], n, mt_out_dt);
@@ -506,7 +511,7 @@ fn run_one_test(
         buffers.insert(inp.name().to_string(), inp.data().to_vec());
     }
     for (k, v) in setup.constexprs() {
-        buffers.insert(k.clone(), constexpr_bytes(v));
+        buffers.insert(k.clone(), v.to_le_bytes());
     }
 
     let grid = setup.grid();
@@ -522,7 +527,7 @@ fn run_one_test(
             ref_bufs.insert(inp.name().to_string(), inp.data().to_vec());
         }
         for (k, v) in reference.constexprs() {
-            ref_bufs.insert(k.clone(), constexpr_bytes(v));
+            ref_bufs.insert(k.clone(), v.to_le_bytes());
         }
         let rg = reference.grid();
         let rgg = rg.grid.map(|x| x as usize);
@@ -595,7 +600,7 @@ pub fn run_kernel_test(
         buffers.insert(inp.name().to_string(), inp.data().to_vec());
     }
     for (k, v) in setup.constexprs() {
-        buffers.insert(k.clone(), constexpr_bytes(v));
+        buffers.insert(k.clone(), v.to_le_bytes());
     }
 
     let grid = setup.grid();
@@ -611,7 +616,7 @@ pub fn run_kernel_test(
             ref_bufs.insert(inp.name().to_string(), inp.data().to_vec());
         }
         for (k, v) in reference.constexprs() {
-            ref_bufs.insert(k.clone(), constexpr_bytes(v));
+            ref_bufs.insert(k.clone(), v.to_le_bytes());
         }
         let rg = reference.grid();
         let rgg = rg.grid.map(|x| x as usize);

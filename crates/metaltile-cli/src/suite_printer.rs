@@ -57,9 +57,7 @@ impl SuitePrinter {
     /// `Harness` config.  The caller may still override with `set_verbose`.
     pub fn from_harness(harness: &crate::harness::Harness) -> Self {
         let mut p = Self::new(true);
-        if harness.config.verbose {
-            p.verbose = 1;
-        }
+        p.verbose = harness.config.verbose;
         p
     }
 

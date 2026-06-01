@@ -35,10 +35,14 @@ pub struct RunnerInvocation {
     pub filter: Option<String>,
     /// Optional dtype filter (passed as `--dtype`).
     pub dtype: Option<String>,
-    /// Optional inspect kind (passed as `--inspect`).
+    /// Optional inspect kind (passed as `--kind`).
     pub inspect_kind: Option<String>,
     /// Enable profiling (passed as `--profile`).
     pub profile: bool,
+    /// Override warmup dispatch count (passed as `--warmup-runs`).
+    pub warmup_runs: Option<usize>,
+    /// Override timed iteration count (passed as `--runs`).
+    pub runs: Option<usize>,
 }
 
 /// Owns the `Harness` reference and exposes the subprocess-or-in-process
@@ -80,11 +84,19 @@ fn build_argv(inv: &RunnerInvocation) -> Vec<String> {
         argv.push(d.clone());
     }
     if let Some(k) = &inv.inspect_kind {
-        argv.push("--inspect".to_string());
+        argv.push("--kind".to_string());
         argv.push(k.clone());
     }
     if inv.profile {
         argv.push("--profile".to_string());
+    }
+    if let Some(w) = inv.warmup_runs {
+        argv.push("--warmup-runs".to_string());
+        argv.push(w.to_string());
+    }
+    if let Some(r) = inv.runs {
+        argv.push("--runs".to_string());
+        argv.push(r.to_string());
     }
     argv
 }

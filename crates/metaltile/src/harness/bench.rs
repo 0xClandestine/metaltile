@@ -71,6 +71,20 @@ pub enum ConstValue {
 }
 
 impl ConstValue {
+    /// Serialise the value to little-endian bytes for GPU buffer binding.
+    ///
+    /// `Usize` is narrowed to `u32` (constexprs are 32-bit on Metal).
+    pub fn to_le_bytes(&self) -> Vec<u8> {
+        match *self {
+            ConstValue::U32(x) => x.to_le_bytes().to_vec(),
+            ConstValue::I32(x) => x.to_le_bytes().to_vec(),
+            ConstValue::F32(x) => x.to_le_bytes().to_vec(),
+            ConstValue::U64(x) => x.to_le_bytes().to_vec(),
+            ConstValue::I64(x) => x.to_le_bytes().to_vec(),
+            ConstValue::Usize(x) => (x as u32).to_le_bytes().to_vec(),
+        }
+    }
+
     /// Return the value as a `u32` if it is representable, or an error.
     pub fn as_u32(&self) -> metaltile_core::Result<u32> {
         match *self {

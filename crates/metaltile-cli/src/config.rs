@@ -6,7 +6,7 @@
 //!   1. Built-in defaults (`Serialized::defaults`)
 //!   2. `tile.toml` in the current directory (optional, ignored if absent)
 //!   3. `TILE__*` environment variables with `__` as the nesting separator
-//!      (e.g. `TILE__VERBOSE=true`, `TILE__RUNNER_BINARY=/usr/local/bin/__tile_runner`)
+//!      (e.g. `TILE__VERBOSE=1`, `TILE__RUNNER_BINARY=/usr/local/bin/__tile_runner`)
 
 use figment::{
     Figment,
@@ -25,8 +25,8 @@ pub struct TileConfig {
     /// When set, `tile bench/test/build` look for source here.
     pub project_path: Option<String>,
 
-    /// Increase log verbosity when true.
-    pub verbose: bool,
+    /// Verbosity level: 0 = quiet, 1 = profile columns (`-v`), 2 = timing columns (`-vv`).
+    pub verbose: u8,
 
     /// Number of timed benchmark iterations per kernel (after warmup).
     pub runs: usize,
@@ -40,7 +40,7 @@ impl Default for TileConfig {
         Self {
             runner_binary: "__tile_runner".to_string(),
             project_path: None,
-            verbose: false,
+            verbose: 0,
             runs: 10,
             warmup_runs: 15,
         }
@@ -73,15 +73,24 @@ mod tests {
     fn defaults_are_sensible() {
         let cfg = TileConfig::default();
         assert_eq!(cfg.runner_binary, "__tile_runner");
-        assert!(!cfg.verbose);
+        assert_eq!(cfg.verbose, 0);
         assert!(cfg.project_path.is_none());
+        assert_eq!(cfg.runs, 10);
+        assert_eq!(cfg.warmup_runs, 15);
     }
 
     #[test]
     fn load_returns_defaults_without_tile_toml() {
-        // Assumes no tile.toml in CWD during tests and no TILE__ vars set.
-        let cfg = ConfigLoader::load().expect("ConfigLoader::load should not fail with defaults");
+        // Build the figment with an explicitly-absent path so this test is
+        // CWD-independent and safe to run from the workspace root (which has
+        // a real tile.toml that would otherwise override defaults).
+        let cfg: TileConfig = Figment::from(Serialized::defaults(TileConfig::default()))
+            .merge(Toml::file("/nonexistent/tile.toml"))
+            .extract()
+            .expect("should succeed with all-defaults");
         assert_eq!(cfg.runner_binary, "__tile_runner");
-        assert!(!cfg.verbose);
+        assert_eq!(cfg.verbose, 0);
+        assert_eq!(cfg.runs, 10);
+        assert_eq!(cfg.warmup_runs, 15);
     }
 }

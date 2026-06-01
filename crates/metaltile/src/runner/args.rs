@@ -33,6 +33,10 @@ pub struct RunnerArgs {
     pub inspect_kind: Option<String>,
     /// Emit profiling data with each bench result.
     pub profile: bool,
+    /// Number of warmup dispatches before timing (overrides `BENCH_WARMUP` default).
+    pub warmup: Option<usize>,
+    /// Number of timed iterations (overrides `BENCH_ITERS` default).
+    pub iters: Option<usize>,
 }
 
 impl RunnerArgs {
@@ -41,6 +45,7 @@ impl RunnerArgs {
     /// Expected invocation format (produced by `ProjectRunner` in the CLI):
     /// ```text
     /// __tile_runner bench [--filter <pat>] [--dtype <dt>] [--profile]
+    ///                     [--warmup-runs <n>] [--runs <n>]
     /// __tile_runner test  [--filter <pat>] [--dtype <dt>]
     /// __tile_runner build [--filter <pat>] [--dtype <dt>]
     /// __tile_runner inspect [--filter <pat>] [--kind <msl|ir|stats|listing>]
@@ -64,6 +69,8 @@ impl RunnerArgs {
         let mut dtype = None;
         let mut inspect_kind = None;
         let mut profile = false;
+        let mut warmup: Option<usize> = None;
+        let mut iters: Option<usize> = None;
 
         while let Some(flag) = it.next() {
             match flag.as_str() {
@@ -71,11 +78,19 @@ impl RunnerArgs {
                 "--dtype" => dtype = it.next(),
                 "--kind" => inspect_kind = it.next(),
                 "--profile" => profile = true,
+                "--warmup-runs" => {
+                    let v = it.next().ok_or("--warmup-runs requires a value")?;
+                    warmup = Some(v.parse::<usize>().map_err(|_| format!("invalid --warmup-runs '{v}'"))?);
+                },
+                "--runs" => {
+                    let v = it.next().ok_or("--runs requires a value")?;
+                    iters = Some(v.parse::<usize>().map_err(|_| format!("invalid --runs '{v}'"))?);
+                },
                 other => return Err(format!("unknown flag '{other}'")),
             }
         }
 
-        Ok(RunnerArgs { command, filter, dtype, inspect_kind, profile })
+        Ok(RunnerArgs { command, filter, dtype, inspect_kind, profile, warmup, iters })
     }
 }
 

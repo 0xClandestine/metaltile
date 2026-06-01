@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use metaltile::{
-    harness::bench::{BenchSetup, ConstValue, KernelBench, RefKernel},
+    harness::bench::{BenchSetup, KernelBench, RefKernel},
     runner::{GpuBuffer, GpuRunner, bench_gbps_with, read_typed},
 };
 use metaltile_codegen::passes::{
@@ -535,17 +535,6 @@ fn compute_profiles(filter: Option<&str>) -> HashMap<(String, String), ProfileRo
 
 // ── In-process bench runner (bridges old OpResult API to new GpuRunner) ───────
 
-fn constexpr_bytes_bench(v: &ConstValue) -> Vec<u8> {
-    match *v {
-        ConstValue::U32(x) => x.to_le_bytes().to_vec(),
-        ConstValue::I32(x) => x.to_le_bytes().to_vec(),
-        ConstValue::F32(x) => x.to_le_bytes().to_vec(),
-        ConstValue::U64(x) => x.to_le_bytes().to_vec(),
-        ConstValue::I64(x) => x.to_le_bytes().to_vec(),
-        ConstValue::Usize(x) => (x as u32).to_le_bytes().to_vec(),
-    }
-}
-
 fn human_count_bench(n: usize) -> String {
     const M: usize = 1 << 20;
     const K: usize = 1 << 10;
@@ -602,7 +591,7 @@ fn run_kernel_bench(
     for decl in &kernel.constexprs {
         let n = decl.name.name();
         let (_, value) = setup.constexprs().iter().find(|(k, _)| k == n)?;
-        bufs.push(runner.buffer_bytes(&constexpr_bytes_bench(value)));
+        bufs.push(runner.buffer_bytes(&value.to_le_bytes()));
     }
     let refs: Vec<&GpuBuffer> = bufs.iter().collect();
 

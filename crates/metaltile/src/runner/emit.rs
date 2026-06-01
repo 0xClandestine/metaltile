@@ -19,8 +19,13 @@ pub fn emit(sink: &mut impl Write, msg: &ProtocolMessage) -> io::Result<()> {
 }
 
 /// Convenience wrapper that emits to locked stdout.
+///
+/// IO errors (e.g. broken pipe when the CLI process exits) are logged to
+/// stderr so the runner can diagnose unexpected termination.
 pub fn emit_stdout(msg: &ProtocolMessage) {
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    let _ = emit(&mut out, msg);
+    if let Err(e) = emit(&mut out, msg) {
+        eprintln!("[runner] emit error: {e}");
+    }
 }

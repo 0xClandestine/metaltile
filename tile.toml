@@ -11,8 +11,8 @@ runner_binary = "__tile_runner"
 # When set, tile bench/test/build look for source here.
 # project_path = "."
 
-# Increase log verbosity.
-verbose = false
+# Verbosity level: 0 = quiet, 1 = profile columns (-v), 2 = timing columns (-vv).
+verbose = 0
 
 # Number of timed benchmark iterations per kernel (after warmup).
 runs = 10

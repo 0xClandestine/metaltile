@@ -22,7 +22,7 @@ impl Harness {
     /// config loading fails.
     pub fn from_config() -> Self {
         let config = crate::config::ConfigLoader::load().unwrap_or_else(|e| {
-            eprintln!("[tile] config warning: {e}; using defaults");
+            tracing::warn!("tile.toml config error: {e}; using defaults");
             TileConfig::default()
         });
         Self { config }
