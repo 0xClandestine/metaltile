@@ -16,6 +16,7 @@
 //! counterpart lands in mainline at a future pin, the file moves to
 //! `mlx/`.
 
+pub mod adain1d;
 pub mod arg_reduce;
 pub mod attn_head_gate;
 pub mod audio_conv1d;
@@ -93,7 +94,6 @@ pub mod gguf_dequant_q2_k;
 pub mod gguf_dequant_q8_0;
 pub mod gguf_iq2_xxs_extract_qs;
 pub mod im2col_patch;
-pub mod kokoro;
 pub mod kv_cache;
 pub mod kv_cache_update_many;
 pub mod logits_min_p;
