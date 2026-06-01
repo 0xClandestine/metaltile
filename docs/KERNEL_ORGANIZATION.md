@@ -4,6 +4,14 @@
 > kernel source layout, file granularity, and the canonical per-kernel file
 > shape. Intentionally NOT executed in one pass — migrate family-by-family to
 > avoid conflicts with in-flight work (fp4/fp8/int8 coverage, etc.).
+>
+> **Coordinates with the "MetalTile CLI Subprocess Rewrite (v4)"** — that spec
+> restructures the *crate/CLI architecture* (subprocess runner, `tile.toml`,
+> harness, dep-graph reduction); this one restructures the *kernel files inside
+> `metaltile-std`*. They are orthogonal in intent but **touch the same files**
+> (`metaltile-std/src/lib.rs`, every kernel file's test/bench imports). The v4
+> rewrite is the **governing** change and lands first; the kernel-family reorg
+> here applies on top of the v4 end-state. See §11.
 
 ## 1. Why
 
@@ -65,7 +73,13 @@ fragmented families have them).
 
 Replace `ffai/` + `mlx/` with **family directories** under
 `crates/metaltile-std/src/kernels/` (the `kernels/` umbrella keeps the crate
-root clean; `mod.rs` re-exports families). Proposed families:
+root clean; `mod.rs` re-exports families). This is compatible with v4's
+"`metaltile-std/src/` top-level **files** = only `lib.rs` + `utils.rs`" rule:
+`kernels/` is a *directory* module, and `lib.rs` becomes `pub mod kernels; pub
+mod utils;` (replacing v4's interim `pub mod ffai; pub mod mlx;`). v4 also
+deletes `probe/`, `bench_types.rs`, `error.rs`, `stats.rs`, `run_kernel.rs`,
+`runner.rs` — so those are gone before this reorg, not relocated by it.
+Proposed families:
 
 ```
 crates/metaltile-std/src/kernels/
@@ -107,7 +121,7 @@ Notes:
   prefer the *operation* family (`conv/`, `norm/`) over the *domain* folder.
 - **`turbo` / `aura`** are quant schemes → under `quant/` (siblings of
   `affine`/`fp_scaled`), not top-level, so all quantization lives in one place.
-- The `probe/` folder (debug utilities) stays as-is.
+- `probe/` is **deleted by v4**, not carried into `kernels/`.
 
 ## 4. File-granularity rules — when does a kernel get its own file?
 
@@ -159,6 +173,10 @@ pub fn <name><T>( … ) { … }
 pub mod kernel_tests   { /* naive oracle(s) + #[test_kernel(dtypes=…, tol=…)] */ }
 pub mod kernel_benches { /* #[bench(name="ffai/<family>/<op>")] per shape    */ }
 ```
+
+> Post-v4 (§10), the test/bench modules import from `metaltile::harness::test`
+> / `::harness::bench` (not `metaltile::test` / `::bench`), and any
+> `crate::bench_types::dtype_label` becomes `crate::utils::dtype_label`.
 
 **Macro requirements (the "all permutations" ask).** The target is that a
 single file expresses every permutation declaratively, rather than copy-pasted
@@ -230,8 +248,9 @@ is a **new file** under `quant/`.
 
 ## 9. Migration plan (incremental, conflict-safe)
 
-Because other sessions are actively touching kernels, migrate in **small
-family-scoped PRs**, never a big-bang move:
+Because other sessions are actively touching kernels — including the v4 CLI
+rewrite (§10), which must land first — migrate in **small family-scoped PRs**,
+never a big-bang move:
 
 1. **Done already** (precedent): de-model-name `kokoro`/`fishspeech`; group
    `resize_normalize_bicubic`→`resize_normalize.rs`,
@@ -250,7 +269,47 @@ family-scoped PRs**, never a big-bang move:
    lands, group the hand-written dim variants into one file but don't try to
    macro-collapse them.
 
-## 10. Open questions
+## 10. Coordination with the CLI Subprocess Rewrite (v4)
+
+The v4 rewrite restructures the **crate/CLI architecture**; this spec
+restructures the **kernel files**. They're orthogonal, but both edit
+`metaltile-std` and the test/bench surface, so they must be sequenced:
+
+- **v4 lands first; this reorg applies on top of its end-state.** Both rewrite
+  `metaltile-std/src/lib.rs`'s `pub mod` list and touch every kernel file's
+  test/bench imports — doing them concurrently guarantees conflicts.
+- **Import-path changes this reorg must adopt** (set by v4):
+  - Harness types move `metaltile::{bench,test}::*` → **`metaltile::harness::{bench,test}::*`**.
+    Every kernel file's `kernel_tests` / `kernel_benches` `use` updates to the
+    `harness::` paths. (The `#[bench]` / `#[test_kernel]` macros emit these
+    paths, so the per-file `use` is the only manual change.)
+  - **`crate::bench_types::dtype_label(dt)`** (used in some benches, e.g.
+    `resize_normalize`) goes away — v4 deletes `bench_types.rs`. Move
+    `dtype_label` (and any other still-needed bench helper) into `utils.rs`
+    and update callers to `crate::utils::dtype_label`.
+  - `probe/`, `error.rs`, `stats.rs`, `run_kernel.rs`, `runner.rs` are deleted
+    by v4 — they are not kernel families and don't appear in `kernels/`.
+- **`metaltile-std` is facade-only after v4** (`metaltile` + `inventory` +
+  `half` + `bytemuck`). Kernel files already import only via `metaltile::…`, so
+  no kernel-body change is needed; just don't reach for `-core`/`-codegen`/
+  `-runtime` directly.
+- **Bench protocol:** v4 routes results through `ProtocolMessage` (incl. the
+  optional `ref_gbps` / `mt_pct` fields for an MLX comparator). This *reinforces*
+  §7 — the MLX reference is a per-bench data field, not a folder; a kernel with
+  no `mlx=` simply reports `ref_gbps: None`. Nothing in `kernels/` needs to
+  encode MLX-presence.
+- **`lib.rs` convergence:** v4's interim `pub mod ffai; pub mod mlx; pub mod
+  utils;` becomes `pub mod kernels; pub mod utils;` once this reorg lands (the
+  `pub use metaltile::harness::registry::{all_benches, all_kernels, all_tests};`
+  re-export from v4's `lib.rs` is unaffected — registry population is by
+  `inventory`, independent of module layout).
+
+**Net sequencing:** (1) v4 crate/CLI rewrite → (2) the lane-packing macro (§5,
+prerequisite for the cleanest `sdpa/`) → (3) family-by-family kernel migration
+(§9), starting with the independent families and holding `quant/` for the
+fp4/fp8/int8 session.
+
+## 11. Open questions
 
 - `core` vs `primitives` vs `ops` as the elementwise-folder name? (Spec assumes
   `core`.)
