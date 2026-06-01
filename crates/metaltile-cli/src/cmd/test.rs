@@ -39,7 +39,7 @@ pub fn run(args: &TestArgs) -> Result<(), crate::CliError> {
     let mut failures: Vec<String> = Vec::new();
     let mut matched_filter = false;
 
-    for entry in metaltile_core::all_tests() {
+    for entry in metaltile::harness::registry::all_tests() {
         let t = entry.test();
         if !matches_filter(filter.as_deref(), t.name()) {
             continue;

@@ -26,11 +26,11 @@
 use std::collections::BTreeMap;
 
 use metaltile_codegen::msl::MslGenerator;
-use metaltile_core::{
-    bench::{BenchSetup, ConstValue, KernelBench, RefKernel, TestSetup},
-    dtype::DType,
-    ir::ParamKind,
+use metaltile::harness::{
+    bench::{BenchSetup, ConstValue, KernelBench, RefKernel},
+    test::TestSetup,
 };
+use metaltile_core::{dtype::DType, ir::ParamKind};
 use metaltile_runtime::Context;
 
 use crate::{

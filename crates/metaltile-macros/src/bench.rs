@@ -119,7 +119,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         Some(expr) => quote! {
             fn bytes_moved(
                 &self,
-                setup: &::metaltile::core::bench::BenchSetup,
+                setup: &::metaltile::harness::bench::BenchSetup,
             ) -> u64 {
                 (#expr)(setup)
             }
@@ -131,7 +131,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         Some(expr) => quote! {
             fn reference_kernel(
                 &self,
-            ) -> ::std::option::Option<::metaltile::core::bench::RefKernel> {
+            ) -> ::std::option::Option<::metaltile::harness::bench::RefKernel> {
                 ::std::option::Option::Some(#expr)
             }
         },
@@ -146,7 +146,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[allow(non_camel_case_types)]
         struct #impl_name;
 
-        impl ::metaltile::core::bench::KernelBench for #impl_name {
+        impl ::metaltile::harness::bench::KernelBench for #impl_name {
             fn name(&self) -> &str { #name_lit }
 
             fn dtypes(&self) -> &[::metaltile::core::DType] {
@@ -156,7 +156,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
             fn setup(
                 &self,
                 dt: ::metaltile::core::DType,
-            ) -> ::metaltile::core::bench::BenchSetup {
+            ) -> ::metaltile::harness::bench::BenchSetup {
                 #fn_name(dt)
             }
 
@@ -167,7 +167,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[allow(non_upper_case_globals)]
         static #static_name: #impl_name = #impl_name;
         ::metaltile::core::inventory::submit! {
-            ::metaltile::core::KernelBenchEntry::new(&#static_name)
+            ::metaltile::harness::bench::KernelBenchEntry::new(&#static_name)
         }
     })
 }

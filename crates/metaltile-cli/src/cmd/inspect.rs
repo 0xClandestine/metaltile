@@ -15,7 +15,7 @@
 use std::{collections::BTreeMap, str::FromStr};
 
 use metaltile_codegen::generator_for_mode;
-use metaltile_core::{all_benches, bench::KernelBench};
+use metaltile::harness::{bench::KernelBench, registry::all_benches};
 use metaltile_std::bench_types::DType;
 
 use crate::{

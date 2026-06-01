@@ -4,10 +4,8 @@ use std::{cell::RefCell, ptr::NonNull};
 
 use metaltile_codegen::msl::MslGenerator;
 pub use metaltile_core::dtype::DType;
-use metaltile_core::{
-    bench::BenchBuffer,
-    ir::{Kernel, KernelMode},
-};
+use metaltile::harness::bench::BenchBuffer;
+use metaltile_core::ir::{Kernel, KernelMode};
 
 use crate::stats::BenchStats;
 

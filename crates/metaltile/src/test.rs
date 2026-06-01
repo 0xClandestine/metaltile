@@ -1,3 +1,5 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Author-facing surface for `#[bench]` / `#[test_kernel]` setups.
 //!
 //! Glob-import this in a kernel file to bring the builder types and `DType`
@@ -9,23 +11,9 @@
 //! #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-6)]
 //! fn test_my_kernel(dt: DType) -> TestSetup { /* ... */ }
 //! ```
-//!
-//! These are re-exports of the canonical definitions in
-//! [`metaltile_core::bench`]; importing them from here keeps kernel files
-//! depending only on the `metaltile` umbrella crate.
 
-pub use metaltile_core::{
-    DType,
-    bench::{
-        BenchBuffer,
-        BenchSetup,
-        ConstValue,
-        Grid,
-        KernelBench,
-        KernelTest,
-        RefKernel,
-        TestBuffer,
-        TestSetup,
-    },
-    ir::KernelMode,
+pub use crate::harness::{
+    bench::{BenchBuffer, BenchSetup, ConstValue, Grid, KernelBench, RefKernel},
+    test::{KernelTest, TestBuffer, TestSetup},
 };
+pub use metaltile_core::{DType, ir::KernelMode};

@@ -30,7 +30,8 @@ use metaltile_codegen::{
     generator_for_mode,
     passes::{PassStats, PipelineBuilder, run_passes_with_stats},
 };
-use metaltile_core::{all_benches, bench::KernelBench, ir::Kernel};
+use metaltile_core::ir::Kernel;
+use metaltile::harness::{bench::KernelBench, registry::all_benches};
 use metaltile_std::bench_types::DType;
 
 use crate::{

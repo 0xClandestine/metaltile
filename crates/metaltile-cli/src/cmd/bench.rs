@@ -119,7 +119,7 @@ pub fn run(args: &BenchArgs) -> Result<(), crate::CliError> {
         // legacy `#[kernel(bench(...))]` / `all_specs()` path was retired once
         // every kernel had a #[bench]; correctness now lives in the
         // `#[test_kernel]` harness rather than the old MLX A/B comparison.
-        for entry in metaltile_core::all_benches() {
+        for entry in metaltile::harness::registry::all_benches() {
             let b = entry.bench();
             if matches_filter(filter.as_deref(), b.name()) {
                 matched_filter = true;
@@ -484,7 +484,7 @@ fn pct_style(pct: f64) -> Style {
 fn compute_profiles(filter: Option<&str>) -> HashMap<(String, String), ProfileRow> {
     // Key: (op_display, dtype_label), e.g. ("unary (acos)", "f32")
     let mut map = HashMap::new();
-    for entry in metaltile_core::all_benches() {
+    for entry in metaltile::harness::registry::all_benches() {
         let b = entry.bench();
         let name = b.name();
         if !matches_filter(filter, name) {

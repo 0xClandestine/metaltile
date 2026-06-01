@@ -245,7 +245,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[allow(non_camel_case_types)]
         struct #impl_name;
 
-        impl ::metaltile::core::bench::KernelTest for #impl_name {
+        impl ::metaltile::harness::test::KernelTest for #impl_name {
             fn name(&self) -> &str { #name_lit }
 
             fn dtypes(&self) -> &[::metaltile::core::DType] {
@@ -255,7 +255,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
             fn setup(
                 &self,
                 dt: ::metaltile::core::DType,
-            ) -> ::metaltile::core::bench::TestSetup {
+            ) -> ::metaltile::harness::test::TestSetup {
                 #fn_name(dt)
             }
 
@@ -265,7 +265,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[allow(non_upper_case_globals)]
         static #static_name: #impl_name = #impl_name;
         ::metaltile::core::inventory::submit! {
-            ::metaltile::core::KernelTestEntry::new(&#static_name)
+            ::metaltile::harness::test::KernelTestEntry::new(&#static_name)
         }
     })
 }

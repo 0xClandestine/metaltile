@@ -1,10 +1,9 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
 //! Test setup types: [`TestBuffer`], [`TestSetup`], [`KernelTest`], [`KernelTestEntry`].
 
 use super::bench::{ConstValue, Grid, random_bytes};
-use crate::{
-    dsl::dtype::DType,
-    ir::{Kernel, KernelMode},
-};
+use metaltile_core::{DType, ir::{Kernel, KernelMode}};
 
 // ---------------------------------------------------------------------------
 // TestBuffer
@@ -13,8 +12,8 @@ use crate::{
 /// Describes a CPU-side buffer used as input or expected output in correctness tests.
 #[derive(Debug, Clone)]
 pub struct TestBuffer {
-    name: String,
-    data: Vec<u8>,
+    name:  String,
+    data:  Vec<u8>,
     dtype: DType,
 }
 
@@ -31,10 +30,6 @@ impl TestBuffer {
     }
 
     /// Create a zero-filled test buffer of `len` elements of `dtype`.
-    ///
-    /// Common for the output slot an in-place/elementwise kernel writes into:
-    /// `TestBuffer::zeros("out", n, dt)` rather than
-    /// `TestBuffer::from_vec("out", vec![0u8; n * dt.size_bytes()], dt)`.
     pub fn zeros(name: &str, len: usize, dtype: DType) -> Self {
         TestBuffer { name: name.to_string(), data: vec![0u8; len * dtype.size_bytes()], dtype }
     }
@@ -102,12 +97,12 @@ impl TestBuffer {
 /// it returns an error if no grid was set.
 #[derive(Debug, Clone)]
 pub struct TestSetup {
-    kernel: Kernel,
-    inputs: Vec<TestBuffer>,
-    expected: Vec<TestBuffer>,
+    kernel:     Kernel,
+    inputs:     Vec<TestBuffer>,
+    expected:   Vec<TestBuffer>,
     constexprs: Vec<(String, ConstValue)>,
-    grid: Option<Grid>,
-    ref_setup: Option<Box<TestSetup>>,
+    grid:       Option<Grid>,
+    ref_setup:  Option<Box<TestSetup>>,
 }
 
 impl TestSetup {
@@ -136,11 +131,6 @@ impl TestSetup {
     }
 
     /// Override the kernel's dispatch mode before codegen.
-    ///
-    /// `kernel_ir_for` defaults to [`KernelMode::Elementwise`]; reduction,
-    /// 3D-grid, or simdgroup-matrix kernels must declare their mode here so the
-    /// generated MSL matches how they are dispatched. Elementwise kernels (e.g.
-    /// arange) can omit this.
     pub fn mode(mut self, mode: KernelMode) -> Self {
         self.kernel.mode = mode;
         self
@@ -177,9 +167,9 @@ impl TestSetup {
     }
 
     /// Finalise the builder. Returns an error if no grid was set.
-    pub fn build(self) -> crate::Result<TestSetup> {
+    pub fn build(self) -> metaltile_core::Result<TestSetup> {
         if self.grid.is_none() {
-            return Err(crate::Error::Internal(
+            return Err(metaltile_core::Error::Internal(
                 "TestSetup missing grid — call grid_1d(), grid_2d(), or grid_3d()".into(),
             ));
         }
@@ -208,7 +198,7 @@ impl TestSetup {
 }
 
 // ---------------------------------------------------------------------------
-// KernelTest trait + inventory
+// KernelTest trait + inventory entry
 // ---------------------------------------------------------------------------
 
 /// Trait for correctness test definitions.
@@ -229,6 +219,8 @@ pub trait KernelTest: Send + Sync {
 }
 
 /// Inventory wrapper for a [`KernelTest`] implementation.
+///
+/// Submitted by the `#[test_kernel]` macro; iterated by the test runner.
 pub struct KernelTestEntry {
     pub(crate) inner: &'static dyn KernelTest,
 }
@@ -238,9 +230,6 @@ impl KernelTestEntry {
     pub const fn new(inner: &'static dyn KernelTest) -> Self { KernelTestEntry { inner } }
 
     /// The wrapped `KernelTest` with its `'static` lifetime preserved.
-    ///
-    /// Unlike `AsRef`, this returns the stored `&'static` reference by copy,
-    /// so callers (e.g. a runner) can hold it independently of the entry borrow.
     pub fn test(&self) -> &'static dyn KernelTest { self.inner }
 }
 
@@ -255,7 +244,7 @@ impl AsRef<dyn KernelTest + 'static> for KernelTestEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::Kernel;
+    use metaltile_core::ir::Kernel;
 
     #[test]
     fn test_setup_build_requires_grid() {
@@ -282,7 +271,6 @@ mod tests {
         assert_eq!(f32_buf.data().len(), 32);
         assert!(f32_buf.data().iter().all(|&b| b == 0));
 
-        // Half-precision packs two bytes per element.
         let f16_buf = TestBuffer::zeros("out", 8, DType::F16);
         assert_eq!(f16_buf.len(), 8);
         assert_eq!(f16_buf.data().len(), 16);

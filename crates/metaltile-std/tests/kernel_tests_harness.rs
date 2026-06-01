@@ -28,7 +28,7 @@ fn all_registered_kernel_tests_pass() {
     let mut total = 0usize;
     let mut failures: Vec<String> = Vec::new();
 
-    for entry in metaltile_core::all_tests() {
+    for entry in metaltile::harness::registry::all_tests() {
         let t = entry.test();
         for &dt in t.dtypes() {
             total += 1;

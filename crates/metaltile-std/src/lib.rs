@@ -18,7 +18,7 @@ pub mod probe;
 // retains those inventory statics. Integration tests + tools that enumerate
 // the registries should import them from here — importing from `metaltile_core`
 // directly yields empty registries because nothing force-links the std crate.
-pub use metaltile_core::{all_benches, all_kernels, all_tests};
+pub use metaltile::harness::registry::{all_benches, all_kernels, all_tests};
 pub mod run_kernel;
 pub mod runner;
 pub mod stats;
