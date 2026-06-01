@@ -70,13 +70,30 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::mt_arange;
-    use crate::utils::scalar_bytes;
+    use crate::{
+        bench_types::{dtype_tol, mlx_tname},
+        utils::scalar_bytes,
+    };
 
     // 64M elements matches the MLX default elementwise bench size.
     // bytes_moved counts the output only; the two scalar reads are negligible.
+    //
+    // MLX `metal/arange.metal` `arange<tn>` (one thread per element) takes its
+    // params as scalar references in a different order than MetalTile:
+    //   start (constant T&) [[buffer(0)]], step (constant T&) [[buffer(1)]],
+    //   out (device T*) [[buffer(2)]].
+    // There's no shared input tensor (arange is a pure generator), so the
+    // reference supplies its own matching start=0.0/step=1.0 scalars and a fresh
+    // output. Both kernels compute `start + i*step` identically.
+    //
+    // Legacy spec used tol=1.0: at 64M elements with step=1 the output reaches
+    // ~6.7e7, which overflows the f16/bf16 mantissa, so consecutive integers
+    // collapse to the same representable value. MetalTile and MLX overflow the
+    // same way, but the 1.0 floor absorbs any last-ULP rounding-mode difference.
     #[bench(name = "mlx/arange", dtypes = [f32, f16, bf16])]
     fn bench_arange(dt: DType) -> BenchSetup {
         let n = 64 * 1024 * 1024usize;
+        let tn = mlx_tname(dt);
         BenchSetup::new(mt_arange::kernel_ir_for(dt))
             .buffer(BenchBuffer::zeros("out", n, dt).output())
             .buffer(BenchBuffer::from_vec("start", scalar_bytes(0.0, dt), dt))
@@ -84,5 +101,17 @@ pub mod kernel_benches {
             .constexpr("n", n as u32)
             .grid_1d(n, 256)
             .bytes_moved((n * dt.size_bytes()) as u64)
+            .with_reference(
+                RefKernel::new(
+                    format!("arange{tn}"),
+                    include_str!(concat!(env!("OUT_DIR"), "/metal/arange.metal")),
+                )
+                // MLX param order: start, step, out (no size buffer).
+                .buffer(BenchBuffer::from_vec("start", scalar_bytes(0.0, dt), dt))
+                .buffer(BenchBuffer::from_vec("step", scalar_bytes(1.0, dt), dt))
+                .buffer(BenchBuffer::zeros("out", n, dt).output())
+                .grid_1d(n, 256)
+                .tol(dtype_tol(dt).max(1.0)),
+            )
     }
 }

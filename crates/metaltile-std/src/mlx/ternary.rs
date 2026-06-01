@@ -56,17 +56,46 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::mt_select;
+    use crate::bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname};
 
+    // MLX `metal/ternary.metal` `v_Select<tn>` (`ternary_v`, 1 element/thread):
+    //   a=cond (device const bool*) [[buffer(0)]], b=on_true [[buffer(1)]],
+    //   c=on_false [[buffer(2)]], d=out [[buffer(3)]], size (uint) [[buffer(4)]].
+    // The reference binds cond/on_true/on_false by name (shared with the MT
+    // inputs, identical data), its fresh `out`, then the U32 element count.
+    //
+    // Select picks an input verbatim, so it's bit-exact in every dtype; legacy
+    // spec used tol=1e-4 (covered by the per-dtype `dtype_tol` floor). Inputs are
+    // seeded deterministically: `cond`'s `Positive` 0.25.. ramp value-casts to a
+    // repeating mix of 0 and nonzero u8 bytes (so both select branches are
+    // exercised), and on_true/on_false use the `Signed` pattern. Both kernels see
+    // identical cond/on_true/on_false bytes, so the A/B is exact.
     #[bench(name = "mlx/select", dtypes = [f32, f16, bf16])]
     fn bench_select(dt: DType) -> BenchSetup {
         let n = 64 * 1024 * 1024usize;
+        let tn = mlx_tname(dt);
         BenchSetup::new(mt_select::kernel_ir_for(dt))
-            .buffer(BenchBuffer::random("cond", n, DType::U8))
-            .buffer(BenchBuffer::random("on_true", n, dt))
-            .buffer(BenchBuffer::random("on_false", n, dt))
+            .buffer(input_buffer("cond", n, DType::U8, InputDomain::Positive))
+            .buffer(input_buffer("on_true", n, dt, InputDomain::Signed))
+            .buffer(input_buffer("on_false", n, dt, InputDomain::Signed))
             .buffer(BenchBuffer::zeros("out", n, dt).output())
             .grid_1d(n, 256)
             // cond (1 byte) + two reads + one write of the dtype.
             .bytes_moved((n + 3 * n * dt.size_bytes()) as u64)
+            .with_reference(
+                RefKernel::new(
+                    format!("v_Select{tn}"),
+                    include_str!(concat!(env!("OUT_DIR"), "/metal/ternary.metal")),
+                )
+                // cond/on_true/on_false shared by name with the MT inputs above
+                // (placeholders; the runner overrides them with the MT bytes).
+                .buffer(BenchBuffer::zeros("cond", n, DType::U8))
+                .buffer(BenchBuffer::zeros("on_true", n, dt))
+                .buffer(BenchBuffer::zeros("on_false", n, dt))
+                .buffer(BenchBuffer::zeros("out", n, dt).output())
+                .buffer(BenchBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
+                .grid_1d(n, 256)
+                .tol(dtype_tol(dt)),
+            )
     }
 }

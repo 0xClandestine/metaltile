@@ -478,35 +478,71 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::{mt_gated_mixer_norm, mt_rms_norm, mt_rms_norm_small, mt_rms_norm_wide};
+    use crate::bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname};
+
+    // Build the MLX `rms_single_row` (`rms{tn}`) reference for a `(rows, n)`
+    // RMSNorm bench. Buffer order: `x`[[buffer(0)]], `w`[[buffer(1)]],
+    // `out`[[buffer(2)]], `eps`(float)[[buffer(3)]], `axis_size`(uint)[[buffer(4)]],
+    // `w_stride`(uint)[[buffer(5)]]. x/w/eps_buf are shared by name with the MT
+    // inputs; w_stride=1 (contiguous per-channel weight, the legacy `U32V(1)`).
+    // `eps` reuses the MT `eps_buf` (1e-5, F32) so both sides match.
+    //
+    // `rms_single_row` reads N_READS=4 elements per thread (`lid*4`), so MLX
+    // dispatches it at one threadgroup per row, tpg=1024 (legacy RowNorm
+    // `mlx_tpg: 1024` — uniform for both shapes; for n=64 the per-lane
+    // `lid*4+4 <= axis_size` guard zeroes the idle lanes so the larger tpg is
+    // still correct). The forward write path does not gate on the `has_w`
+    // function constant, so no constant value is needed (matches the legacy
+    // `runner.compile` path).
+    fn rms_ref(rows: usize, n: usize, dt: DType) -> RefKernel {
+        let tn = mlx_tname(dt);
+        RefKernel::new(
+            format!("rms{tn}"),
+            include_str!(concat!(env!("OUT_DIR"), "/metal/rms_norm.metal")),
+        )
+        // x/w/eps_buf shared by name with the MT inputs (placeholders).
+        .buffer(BenchBuffer::zeros("x", rows * n, dt))
+        .buffer(BenchBuffer::zeros("w", n, dt))
+        .buffer(BenchBuffer::zeros("out", rows * n, dt).output())
+        .buffer(BenchBuffer::zeros("eps_buf", 1, DType::F32))
+        .buffer(BenchBuffer::from_vec("axis_size", (n as u32).to_le_bytes().to_vec(), DType::U32))
+        .buffer(BenchBuffer::from_vec("w_stride", 1u32.to_le_bytes().to_vec(), DType::U32))
+        .grid(Grid::new_3d(rows as u32, 1, 1, [1024, 1, 1]))
+        .tol(dtype_tol(dt).max(1e-4))
+    }
 
     #[bench(name = "mlx/rms_norm", dtypes = [f32, f16, bf16])]
     fn bench_rms_norm(dt: DType) -> BenchSetup {
         let (rows, n) = (4096usize, 4096usize);
         BenchSetup::new(mt_rms_norm::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
-            .buffer(BenchBuffer::random("x", rows * n, dt))
-            .buffer(BenchBuffer::random("w", n, dt))
+            .buffer(input_buffer("x", rows * n, dt, InputDomain::Signed))
+            .buffer(input_buffer("w", n, dt, InputDomain::Positive))
             .buffer(BenchBuffer::zeros("out", rows * n, dt).output())
             .buffer(BenchBuffer::from_vec("eps_buf", 1e-5f32.to_le_bytes().to_vec(), DType::F32))
             .constexpr("n", n as u32)
             .grid_3d(rows as u32, 1, 1, [(n / 4) as u32, 1, 1])
             .bytes_moved((2 * rows * n * dt.size_bytes()) as u64)
+            .with_reference(rms_ref(rows, n, dt))
     }
 
     // rms_norm_small: 2 elements per thread → tpg = n/2. Per-head shape
-    // (head_dim=64, 1024 rows) matching the legacy bench(b=1024, n=64).
+    // (head_dim=64, 1024 rows) matching the legacy bench(b=1024, n=64). The
+    // MLX reference (`rms_single_row`, 4 elements/thread) is the same kernel as
+    // the parent bench; only the MT-side per-thread layout differs.
     #[bench(name = "mlx/rms_norm/rms_norm_small", dtypes = [f32, f16, bf16])]
     fn bench_rms_norm_small(dt: DType) -> BenchSetup {
         let (rows, n) = (1024usize, 64usize);
         BenchSetup::new(mt_rms_norm_small::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
-            .buffer(BenchBuffer::random("x", rows * n, dt))
-            .buffer(BenchBuffer::random("w", n, dt))
+            .buffer(input_buffer("x", rows * n, dt, InputDomain::Signed))
+            .buffer(input_buffer("w", n, dt, InputDomain::Positive))
             .buffer(BenchBuffer::zeros("out", rows * n, dt).output())
             .buffer(BenchBuffer::from_vec("eps_buf", 1e-5f32.to_le_bytes().to_vec(), DType::F32))
             .constexpr("n", n as u32)
             .grid_3d(rows as u32, 1, 1, [(n / 2) as u32, 1, 1])
             .bytes_moved((2 * rows * n * dt.size_bytes()) as u64)
+            .with_reference(rms_ref(rows, n, dt))
     }
 
     // rms_norm_wide: strided over the row, one threadgroup (tpg=1024) per

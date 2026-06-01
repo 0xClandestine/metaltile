@@ -116,16 +116,45 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::mt_softmax;
+    use crate::bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname};
 
+    // MLX `looped_softmax_*` buffer order: `in`[[buffer(0)]], `out`[[buffer(1)]],
+    // `axis_size`(int)[[buffer(2)]]. `inp` is shared by name with the MT input.
+    //
+    // MLX dispatch geometry: one threadgroup per row (grid=[rows,1,1]) at
+    // tpg=1024 — NOT the MT tpg=256. `softmax_looped` uses
+    // `threadgroup AccT local_max[32]` / `local_normalizer[32]` without
+    // zero-initialising slots past `simd_group_id`; the later
+    // `simd_max(local_max[simd_lane_id])` reads all 32. MLX always dispatches
+    // these at 1024 threads (n_simd==32, every slot live). At MT's tpg=256
+    // (n_simd==8) the 24 stale slots produce NaN. Pin tpg=1024 (mirrors the
+    // legacy RowNorm `mlx_tpg: 1024`).
     #[bench(name = "mlx/softmax", dtypes = [f32, f16, bf16])]
     fn bench_softmax(dt: DType) -> BenchSetup {
         let (rows, n) = (4096usize, 1024usize);
+        let tn = mlx_tname(dt);
         BenchSetup::new(mt_softmax::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
-            .buffer(BenchBuffer::random("inp", rows * n, dt))
+            .buffer(input_buffer("inp", rows * n, dt, InputDomain::Signed))
             .buffer(BenchBuffer::zeros("out", rows * n, dt).output())
             .constexpr("n", n as u32)
             .grid_3d(rows as u32, 1, 1, [256, 1, 1])
             .bytes_moved((2 * rows * n * dt.size_bytes()) as u64)
+            .with_reference(
+                RefKernel::new(
+                    format!("looped_softmax_{tn}"),
+                    include_str!(concat!(env!("OUT_DIR"), "/metal/softmax.metal")),
+                )
+                // `inp` shared by name with the MT input above (placeholder).
+                .buffer(BenchBuffer::zeros("inp", rows * n, dt))
+                .buffer(BenchBuffer::zeros("out", rows * n, dt).output())
+                .buffer(BenchBuffer::from_vec(
+                    "axis_size",
+                    (n as u32).to_le_bytes().to_vec(),
+                    DType::U32,
+                ))
+                .grid(Grid::new_3d(rows as u32, 1, 1, [1024, 1, 1]))
+                .tol(dtype_tol(dt).max(1e-4)),
+            )
     }
 }

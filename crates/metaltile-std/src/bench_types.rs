@@ -67,6 +67,12 @@ pub enum InputDomain {
     /// Inside the unit interval: `[-0.9, -0.5, -0.1, 0, 0.1, 0.5, 0.9]` — for
     /// `asin`/`acos`/`atanh`/`erfinv`.
     Unit,
+    /// Small positive `1e-4..=1.6e-3` — for long reductions (`sum`/`prod` over
+    /// millions of elements) so the accumulated result stays finite in f16
+    /// (a `sum` of millions of `Positive` values overflows; a `prod` blows up to
+    /// inf). `sum` lands in the tens of thousands; `prod` underflows cleanly to
+    /// 0 on both kernels.
+    Tiny,
 }
 
 impl InputDomain {
@@ -76,6 +82,7 @@ impl InputDomain {
             InputDomain::Signed => [-3.0, -1.5, -0.5, 0.0, 0.25, 0.75, 1.5, 3.0][i % 8],
             InputDomain::Positive => 0.25 + (i % 16) as f32 * 0.25,
             InputDomain::Unit => [-0.9, -0.5, -0.1, 0.0, 0.1, 0.5, 0.9][i % 7],
+            InputDomain::Tiny => 1e-4 + (i % 16) as f32 * 1e-4,
         }
     }
 }

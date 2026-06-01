@@ -214,23 +214,67 @@ pub mod kernel_tests {
 /// New-syntax benchmarks for the mlx arg-reduce kernels (vs MLX
 /// `metal/arg_reduce.metal`). Vocab-sized, read-dominated.
 pub mod kernel_benches {
-    use metaltile::{bench, test::*};
+    use metaltile::{bench, core::ir::Kernel, test::*};
 
     use super::{mt_argmax, mt_argmin};
+    use crate::bench_types::{InputDomain, input_buffer, mlx_tname};
 
-    fn ab(kernel: metaltile::core::ir::Kernel, dt: DType) -> BenchSetup {
-        let n = 256 * 1024usize;
+    const ARG_REDUCE_N: usize = 256 * 1024;
+    // Strict `>`/`<` tie-break: indices must match exactly, so a sub-1 tolerance
+    // demands an exact integer-index match (legacy `tol=0.5`).
+    const ARG_REDUCE_TOL: f32 = 0.5;
+
+    // Attaches the MLX `metal/arg_reduce.metal` `argmax_<tn>` / `argmin_<tn>`
+    // (`arg_reduce_general`) reference. Both MT and MLX emit the winning index as
+    // a `u32`, so the output buffer is `DType::U32` and the comparison checks an
+    // exact index match.
+    //
+    // `arg_reduce_general` is a strided N-D arg-reduce; we drive it as a flat
+    // 1-D reduction over the whole input:
+    //   - one threadgroup (`row_idx = gid.y + gsize.y*gid.z = 0`), 256 threads;
+    //   - `shape = [1]`, `in_strides = [0]`, `out_strides = [0]`, `ndim = 1` —
+    //     `elem_to_loc(0, ...)` returns 0, so `in_idx = out_idx = 0`;
+    //   - `axis_stride = 1` (contiguous), `axis_size = N` (whole input).
+    // The scalar args are `size_t`/`int64_t` (8 bytes each); the shape/stride
+    // arrays are single-element (`int` = 4 bytes, `int64_t` = 8 bytes).
+    fn ab(kernel: Kernel, dt: DType, mlx_op: &str) -> BenchSetup {
+        let n = ARG_REDUCE_N;
+        let tn = mlx_tname(dt);
         BenchSetup::new(kernel)
             .mode(KernelMode::Reduction)
-            .buffer(BenchBuffer::random("inp", n, dt))
+            .buffer(input_buffer("inp", n, dt, InputDomain::Signed))
             .buffer(BenchBuffer::zeros("out", 1, DType::U32).output())
             .constexpr("n", n as u32)
             .grid_3d(1, 1, 1, [256, 1, 1])
             .bytes_moved((n * dt.size_bytes()) as u64)
+            .with_reference(
+                RefKernel::new(
+                    format!("{mlx_op}_{tn}"),
+                    include_str!(concat!(env!("OUT_DIR"), "/metal/arg_reduce.metal")),
+                )
+                // in[0] shared by name with the MT `inp` above (placeholder).
+                .buffer(BenchBuffer::zeros("inp", n, dt))
+                // u32 index output — compared for an exact match.
+                .buffer(BenchBuffer::zeros("out", 1, DType::U32).output())
+                // shape (int, 4 bytes) = [1] — non-reduced dims of the output.
+                .buffer(BenchBuffer::from_vec("shape", 1u32.to_le_bytes().to_vec(), DType::U32))
+                // in_strides / out_strides (int64_t, 8 bytes) = [0] — row_idx is 0.
+                .buffer(BenchBuffer::from_vec("in_strides", 0u64.to_le_bytes().to_vec(), DType::U32))
+                .buffer(BenchBuffer::from_vec("out_strides", 0u64.to_le_bytes().to_vec(), DType::U32))
+                // ndim (size_t, 8 bytes) = 1.
+                .buffer(BenchBuffer::from_vec("ndim", 1u64.to_le_bytes().to_vec(), DType::U32))
+                // axis_stride (int64_t, 8 bytes) = 1 — contiguous flat input.
+                .buffer(BenchBuffer::from_vec("axis_stride", 1u64.to_le_bytes().to_vec(), DType::U32))
+                // axis_size (size_t, 8 bytes) = N — reduce the whole input.
+                .buffer(BenchBuffer::from_vec("axis_size", (n as u64).to_le_bytes().to_vec(), DType::U32))
+                // One threadgroup of 256 threads, matching MT.
+                .grid(Grid::new_3d(1, 1, 1, [256, 1, 1]))
+                .tol(ARG_REDUCE_TOL),
+            )
     }
 
     #[bench(name = "mlx/arg_reduce/argmax", dtypes = [f32, f16, bf16])]
-    fn bench_argmax(dt: DType) -> BenchSetup { ab(mt_argmax::kernel_ir_for(dt), dt) }
+    fn bench_argmax(dt: DType) -> BenchSetup { ab(mt_argmax::kernel_ir_for(dt), dt, "argmax") }
     #[bench(name = "mlx/arg_reduce/argmin", dtypes = [f32, f16, bf16])]
-    fn bench_argmin(dt: DType) -> BenchSetup { ab(mt_argmin::kernel_ir_for(dt), dt) }
+    fn bench_argmin(dt: DType) -> BenchSetup { ab(mt_argmin::kernel_ir_for(dt), dt, "argmin") }
 }

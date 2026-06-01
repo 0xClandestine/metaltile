@@ -37,15 +37,35 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::mt_copy;
+    use crate::bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname};
 
     // 64M elements (MLX default elementwise size); reads `a`, writes `out`.
+    //
+    // Same shape as unary's `ub_ref`: MLX `metal/copy.metal` `v_copy<tn><tn>`
+    // (`copy_v`, 1 element/thread) takes `src [[buffer(0)]]`, `dst [[buffer(1)]]`,
+    // `size` — so the reference binds `a` (shared by name with the MT input),
+    // `out`, then the U32 element count. Legacy spec: input=Signed, tol=1e-6.
     #[bench(name = "mlx/copy", dtypes = [f32, f16, bf16])]
     fn bench_copy(dt: DType) -> BenchSetup {
         let n = 64 * 1024 * 1024usize;
+        let tn = mlx_tname(dt);
         BenchSetup::new(mt_copy::kernel_ir_for(dt))
-            .buffer(BenchBuffer::random("a", n, dt))
+            .buffer(input_buffer("a", n, dt, InputDomain::Signed))
             .buffer(BenchBuffer::zeros("out", n, dt).output())
             .grid_1d(n, 256)
             .bytes_moved((2 * n * dt.size_bytes()) as u64)
+            .with_reference(
+                RefKernel::new(
+                    format!("v_copy{tn}{tn}"),
+                    include_str!(concat!(env!("OUT_DIR"), "/metal/copy.metal")),
+                )
+                // "a" is shared by name with the MT input above (same data); the
+                // runner overrides this placeholder with the MT bytes.
+                .buffer(BenchBuffer::zeros("a", n, dt))
+                .buffer(BenchBuffer::zeros("out", n, dt).output())
+                .buffer(BenchBuffer::from_vec("n", (n as u32).to_le_bytes().to_vec(), DType::U32))
+                .grid_1d(n, 256)
+                .tol(dtype_tol(dt)),
+            )
     }
 }

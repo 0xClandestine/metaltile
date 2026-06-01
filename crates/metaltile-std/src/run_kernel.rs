@@ -288,8 +288,11 @@ pub fn run_kernel_bench(
 
 /// Upper bound on output elements compared in a reference A/B. Keeps the
 /// per-kernel read-back + compare cheap; deterministic inputs repeat a short
-/// pattern, so a 1M-element prefix exercises every branch the full output would.
-const COMPARE_ELEM_CAP: usize = 1 << 20;
+/// pattern, so a 32K-element prefix exercises every branch the full output
+/// would. Held below f16's largest finite value (65504) so generators like
+/// `arange` (whose output grows with the index) stay representable across the
+/// compared prefix in every dtype instead of saturating to inf.
+const COMPARE_ELEM_CAP: usize = 1 << 15;
 
 /// Where a MetalTile kernel's primary output landed, for read-back.
 #[derive(Debug, Clone, Copy)]

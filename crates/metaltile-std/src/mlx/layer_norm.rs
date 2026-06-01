@@ -116,19 +116,54 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::mt_layer_norm;
+    use crate::bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname};
 
+    // MLX `layer_norm_looped*` buffer order: `x`[[buffer(0)]], `w`[[buffer(1)]],
+    // `b`[[buffer(2)]], `out`[[buffer(3)]], `eps`(float)[[buffer(4)]],
+    // `axis_size`(uint)[[buffer(5)]], `w_stride`(uint)[[buffer(6)]],
+    // `b_stride`(uint)[[buffer(7)]]. x/w/b/eps_buf are shared by name with the
+    // MT inputs; w_stride=b_stride=1 (contiguous per-channel weight/bias, the
+    // legacy `U32V(1)` args). `eps` reuses the MT `eps_buf` (1e-5, F32) so both
+    // sides normalise identically.
+    //
+    // MLX dispatch geometry: one threadgroup per row (grid=[rows,1,1]) at
+    // tpg=1024 (= n/4 = MT tpg for n=4096; legacy RowNorm `mlx_tpg: 1024`).
+    // `layer_norm_looped` zero-inits its threadgroup array explicitly, so the
+    // larger tpg is safe here (unlike softmax/logsumexp).
     #[bench(name = "mlx/layer_norm", dtypes = [f32, f16, bf16])]
     fn bench_layer_norm(dt: DType) -> BenchSetup {
         let (rows, n) = (4096usize, 4096usize);
+        let tn = mlx_tname(dt);
         BenchSetup::new(mt_layer_norm::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
-            .buffer(BenchBuffer::random("x", rows * n, dt))
-            .buffer(BenchBuffer::random("w", n, dt))
-            .buffer(BenchBuffer::random("b", n, dt))
+            .buffer(input_buffer("x", rows * n, dt, InputDomain::Signed))
+            .buffer(input_buffer("w", n, dt, InputDomain::Positive))
+            .buffer(input_buffer("b", n, dt, InputDomain::Signed))
             .buffer(BenchBuffer::zeros("out", rows * n, dt).output())
             .buffer(BenchBuffer::from_vec("eps_buf", 1e-5f32.to_le_bytes().to_vec(), DType::F32))
             .constexpr("n", n as u32)
             .grid_3d(rows as u32, 1, 1, [(n / 4) as u32, 1, 1])
             .bytes_moved((2 * rows * n * dt.size_bytes()) as u64)
+            .with_reference(
+                RefKernel::new(
+                    format!("layer_norm_looped{tn}"),
+                    include_str!(concat!(env!("OUT_DIR"), "/metal/layer_norm.metal")),
+                )
+                // x/w/b/eps_buf shared by name with the MT inputs (placeholders).
+                .buffer(BenchBuffer::zeros("x", rows * n, dt))
+                .buffer(BenchBuffer::zeros("w", n, dt))
+                .buffer(BenchBuffer::zeros("b", n, dt))
+                .buffer(BenchBuffer::zeros("out", rows * n, dt).output())
+                .buffer(BenchBuffer::zeros("eps_buf", 1, DType::F32))
+                .buffer(BenchBuffer::from_vec(
+                    "axis_size",
+                    (n as u32).to_le_bytes().to_vec(),
+                    DType::U32,
+                ))
+                .buffer(BenchBuffer::from_vec("w_stride", 1u32.to_le_bytes().to_vec(), DType::U32))
+                .buffer(BenchBuffer::from_vec("b_stride", 1u32.to_le_bytes().to_vec(), DType::U32))
+                .grid(Grid::new_3d(rows as u32, 1, 1, [1024, 1, 1]))
+                .tol(dtype_tol(dt).max(1e-4)),
+            )
     }
 }
