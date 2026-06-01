@@ -106,29 +106,7 @@ pub fn mt_mxfp4_qmm_mma<T>(
         let ws_base = w_row * ws_ld + pack_in_row * 8u32;
         for i in range(0u32, 8u32, 1u32) {
             let nib = (pack >> (i * 4u32)) & 0xFu32;
-            let m = nib & 0x7u32;
-            let mag = select(
-                m < 1u32,
-                0.0f32,
-                select(
-                    m < 2u32,
-                    0.5f32,
-                    select(
-                        m < 3u32,
-                        1.0f32,
-                        select(
-                            m < 4u32,
-                            1.5f32,
-                            select(
-                                m < 5u32,
-                                2.0f32,
-                                select(m < 6u32, 3.0f32, select(m < 7u32, 4.0f32, 6.0f32)),
-                            ),
-                        ),
-                    ),
-                ),
-            );
-            let val = select((nib & 0x8u32) > 0u32, -mag, mag);
+            let val = e2m1_decode(nib);
             threadgroup_store("ws", ws_base + i, (val * scale).cast::<T>());
         }
         threadgroup_barrier();

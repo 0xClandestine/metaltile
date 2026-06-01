@@ -53,29 +53,7 @@ pub fn mt_mxfp4_qmm<T>(
             let p_off = pack_idx * 8u32;
             for i in range(0u32, 8u32, 1u32) {
                 let nib = (packed >> (i * 4u32)) & 0xFu32;
-                let m = nib & 0x7u32;
-                let mag = select(
-                    m < 1u32,
-                    0.0f32,
-                    select(
-                        m < 2u32,
-                        0.5f32,
-                        select(
-                            m < 3u32,
-                            1.0f32,
-                            select(
-                                m < 4u32,
-                                1.5f32,
-                                select(
-                                    m < 5u32,
-                                    2.0f32,
-                                    select(m < 6u32, 3.0f32, select(m < 7u32, 4.0f32, 6.0f32)),
-                                ),
-                            ),
-                        ),
-                    ),
-                );
-                let val = select((nib & 0x8u32) > 0u32, -mag, mag);
+                let val = e2m1_decode(nib);
                 acc = acc + (val * scale) * load(x[x_row_off + p_off + i]).cast::<f32>();
             }
         }
@@ -113,42 +91,12 @@ pub fn mt_nvfp4_qmm<T>(
         let pack_idx = p_iter * lsize + tid;
         if pack_idx < n_packs_per_row {
             let blk = pack_idx / packs_per_block;
-            let sb = load(scales[row_block_off + blk]).cast::<u32>();
-            let se = (sb >> 3u32) & 0xFu32;
-            let sm = sb & 0x7u32;
-            let smag = select(
-                se < 1u32,
-                sm.cast::<f32>() * 0.001953125f32,
-                (1.0f32 + sm.cast::<f32>() * 0.125f32) * exp2(se.cast::<f32>() - 7.0f32),
-            );
-            let scale = select((sb >> 7u32) > 0u32, -smag, smag) * global;
+            let scale = e4m3_decode(load(scales[row_block_off + blk]).cast::<u32>()) * global;
             let packed = load(weight[row_pack_off + pack_idx]);
             let p_off = pack_idx * 8u32;
             for i in range(0u32, 8u32, 1u32) {
                 let nib = (packed >> (i * 4u32)) & 0xFu32;
-                let m = nib & 0x7u32;
-                let mag = select(
-                    m < 1u32,
-                    0.0f32,
-                    select(
-                        m < 2u32,
-                        0.5f32,
-                        select(
-                            m < 3u32,
-                            1.0f32,
-                            select(
-                                m < 4u32,
-                                1.5f32,
-                                select(
-                                    m < 5u32,
-                                    2.0f32,
-                                    select(m < 6u32, 3.0f32, select(m < 7u32, 4.0f32, 6.0f32)),
-                                ),
-                            ),
-                        ),
-                    ),
-                );
-                let val = select((nib & 0x8u32) > 0u32, -mag, mag);
+                let val = e2m1_decode(nib);
                 acc = acc + (val * scale) * load(x[x_row_off + p_off + i]).cast::<f32>();
             }
         }
@@ -182,15 +130,7 @@ pub fn mt_mxfp8_e4m3_qmm<T>(
     for it in range(0u32, iters, 1u32) {
         let c = it * lsize + tid;
         if c < in_dim {
-            let bits = load(weight[row_off + c]).cast::<u32>();
-            let exp = (bits >> 3u32) & 0xFu32;
-            let mant = bits & 0x7u32;
-            let mag = select(
-                exp < 1u32,
-                mant.cast::<f32>() * 0.001953125f32,
-                (1.0f32 + mant.cast::<f32>() * 0.125f32) * exp2(exp.cast::<f32>() - 7.0f32),
-            );
-            let elem = select((bits >> 7u32) > 0u32, -mag, mag);
+            let elem = e4m3_decode(load(weight[row_off + c]).cast::<u32>());
             let sbits = load(scales[row_block_off + c / block_size]).cast::<f32>();
             let scale = exp2(sbits - 127.0f32);
             acc = acc + (elem * scale) * load(x[x_row_off + c]).cast::<f32>();
@@ -225,15 +165,7 @@ pub fn mt_mxfp8_e5m2_qmm<T>(
     for it in range(0u32, iters, 1u32) {
         let c = it * lsize + tid;
         if c < in_dim {
-            let bits = load(weight[row_off + c]).cast::<u32>();
-            let exp = (bits >> 2u32) & 0x1Fu32;
-            let mant = bits & 0x3u32;
-            let mag = select(
-                exp < 1u32,
-                mant.cast::<f32>() * 0.0000152587890625f32,
-                (1.0f32 + mant.cast::<f32>() * 0.25f32) * exp2(exp.cast::<f32>() - 15.0f32),
-            );
-            let elem = select((bits >> 7u32) > 0u32, -mag, mag);
+            let elem = e5m2_decode(load(weight[row_off + c]).cast::<u32>());
             let sbits = load(scales[row_block_off + c / block_size]).cast::<f32>();
             let scale = exp2(sbits - 127.0f32);
             acc = acc + (elem * scale) * load(x[x_row_off + c]).cast::<f32>();
@@ -268,15 +200,7 @@ pub fn mt_nvfp8_qmm<T>(
     for it in range(0u32, iters, 1u32) {
         let c = it * lsize + tid;
         if c < in_dim {
-            let bits = load(weight[row_off + c]).cast::<u32>();
-            let exp = (bits >> 3u32) & 0xFu32;
-            let mant = bits & 0x7u32;
-            let mag = select(
-                exp < 1u32,
-                mant.cast::<f32>() * 0.001953125f32,
-                (1.0f32 + mant.cast::<f32>() * 0.125f32) * exp2(exp.cast::<f32>() - 7.0f32),
-            );
-            let elem = select((bits >> 7u32) > 0u32, -mag, mag);
+            let elem = e4m3_decode(load(weight[row_off + c]).cast::<u32>());
             let scale = load(scales[row_block_off + c / block_size]);
             acc = acc + (elem * scale) * load(x[x_row_off + c]).cast::<f32>();
         }

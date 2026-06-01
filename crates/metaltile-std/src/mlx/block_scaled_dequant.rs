@@ -35,30 +35,7 @@ pub fn mt_mxfp4_dequant<T>(
     if i < n {
         let word = load(codes[i / 8u32]);
         let nib = (word >> ((i & 7u32) * 4u32)) & 0xFu32;
-        let m = nib & 0x7u32;
-        // E2M1 codebook {0, .5, 1, 1.5, 2, 3, 4, 6} indexed by the low 3 bits.
-        let mag = select(
-            m < 1u32,
-            0.0f32,
-            select(
-                m < 2u32,
-                0.5f32,
-                select(
-                    m < 3u32,
-                    1.0f32,
-                    select(
-                        m < 4u32,
-                        1.5f32,
-                        select(
-                            m < 5u32,
-                            2.0f32,
-                            select(m < 6u32, 3.0f32, select(m < 7u32, 4.0f32, 6.0f32)),
-                        ),
-                    ),
-                ),
-            ),
-        );
-        let val = select((nib & 0x8u32) > 0u32, -mag, mag);
+        let val = e2m1_decode(nib);
         let sbits = load(scales[i / block_size]).cast::<f32>();
         let scale = exp2(sbits - 127.0f32); // E8M0: 2^(bits-127), exact for integer bits
         store(out[i], (val * scale).cast::<T>());
@@ -80,39 +57,9 @@ pub fn mt_nvfp4_dequant<T>(
     if i < n {
         let word = load(codes[i / 8u32]);
         let nib = (word >> ((i & 7u32) * 4u32)) & 0xFu32;
-        let m = nib & 0x7u32;
-        let mag = select(
-            m < 1u32,
-            0.0f32,
-            select(
-                m < 2u32,
-                0.5f32,
-                select(
-                    m < 3u32,
-                    1.0f32,
-                    select(
-                        m < 4u32,
-                        1.5f32,
-                        select(
-                            m < 5u32,
-                            2.0f32,
-                            select(m < 6u32, 3.0f32, select(m < 7u32, 4.0f32, 6.0f32)),
-                        ),
-                    ),
-                ),
-            ),
-        );
-        let elem = select((nib & 0x8u32) > 0u32, -mag, mag);
-        // E4M3 micro-scale decode: (1 + mant/8)·2^(exp-7); subnormal mant·2^-9.
-        let sb = load(scales[i / block_size]).cast::<u32>();
-        let se = (sb >> 3u32) & 0xFu32;
-        let sm = sb & 0x7u32;
-        let smag = select(
-            se < 1u32,
-            sm.cast::<f32>() * 0.001953125f32,
-            (1.0f32 + sm.cast::<f32>() * 0.125f32) * exp2(se.cast::<f32>() - 7.0f32),
-        );
-        let block_scale = select((sb >> 7u32) > 0u32, -smag, smag) * global;
+        let elem = e2m1_decode(nib);
+        // E4M3 micro-scale × global.
+        let block_scale = e4m3_decode(load(scales[i / block_size]).cast::<u32>()) * global;
         store(out[i], (elem * block_scale).cast::<T>());
     }
 }
@@ -128,15 +75,7 @@ pub fn mt_mxfp8_e4m3_dequant<T>(
 ) {
     let i = program_id::<0>();
     if i < n {
-        let bits = load(codes[i]).cast::<u32>();
-        let exp = (bits >> 3u32) & 0xFu32;
-        let mant = bits & 0x7u32;
-        let mag = select(
-            exp < 1u32,
-            mant.cast::<f32>() * 0.001953125f32, // 2^-9 subnormal
-            (1.0f32 + mant.cast::<f32>() * 0.125f32) * exp2(exp.cast::<f32>() - 7.0f32),
-        );
-        let elem = select((bits >> 7u32) > 0u32, -mag, mag);
+        let elem = e4m3_decode(load(codes[i]).cast::<u32>());
         let sbits = load(scales[i / block_size]).cast::<f32>();
         let scale = exp2(sbits - 127.0f32);
         store(out[i], (elem * scale).cast::<T>());
@@ -154,15 +93,7 @@ pub fn mt_mxfp8_e5m2_dequant<T>(
 ) {
     let i = program_id::<0>();
     if i < n {
-        let bits = load(codes[i]).cast::<u32>();
-        let exp = (bits >> 2u32) & 0x1Fu32;
-        let mant = bits & 0x3u32;
-        let mag = select(
-            exp < 1u32,
-            mant.cast::<f32>() * 0.0000152587890625f32, // 2^-16 subnormal
-            (1.0f32 + mant.cast::<f32>() * 0.25f32) * exp2(exp.cast::<f32>() - 15.0f32),
-        );
-        let elem = select((bits >> 7u32) > 0u32, -mag, mag);
+        let elem = e5m2_decode(load(codes[i]).cast::<u32>());
         let sbits = load(scales[i / block_size]).cast::<f32>();
         let scale = exp2(sbits - 127.0f32);
         store(out[i], (elem * scale).cast::<T>());
@@ -180,15 +111,7 @@ pub fn mt_nvfp8_dequant<T>(
 ) {
     let i = program_id::<0>();
     if i < n {
-        let bits = load(codes[i]).cast::<u32>();
-        let exp = (bits >> 3u32) & 0xFu32;
-        let mant = bits & 0x7u32;
-        let mag = select(
-            exp < 1u32,
-            mant.cast::<f32>() * 0.001953125f32, // 2^-9 subnormal
-            (1.0f32 + mant.cast::<f32>() * 0.125f32) * exp2(exp.cast::<f32>() - 7.0f32),
-        );
-        let elem = select((bits >> 7u32) > 0u32, -mag, mag);
+        let elem = e4m3_decode(load(codes[i]).cast::<u32>());
         let scale = load(scales[i / block_size]);
         store(out[i], (elem * scale).cast::<T>());
     }

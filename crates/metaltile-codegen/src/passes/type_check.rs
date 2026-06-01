@@ -482,6 +482,16 @@ fn infer_block(
                     env.insert(vid, TypedValue { dtype: tv.dtype, shape: tv.shape.clone() });
                 },
 
+            // Block-scaled decodes consume an integer code and always produce
+            // f32, so their result dtype is f32 regardless of the operand dtype.
+            Op::UnaryOp { op, value } if op.yields_f32() =>
+                if let Some(tv) = env.get(value) {
+                    env.insert(vid, TypedValue {
+                        dtype: metaltile_core::dtype::DType::F32,
+                        shape: tv.shape.clone(),
+                    });
+                },
+
             Op::UnaryOp { value, .. } | Op::Activation { value, .. } => {
                 if let Some(tv) = env.get(value) {
                     env.insert(vid, TypedValue { dtype: tv.dtype, shape: tv.shape.clone() });
