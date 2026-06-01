@@ -20,6 +20,7 @@ pub mod binary;
 pub mod binary_two;
 pub mod block_scaled_dequant;
 pub mod block_scaled_matmul;
+pub mod block_scaled_qmm;
 pub mod copy;
 pub mod fft;
 pub mod fp_quantized;
