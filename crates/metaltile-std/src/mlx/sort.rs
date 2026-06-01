@@ -396,17 +396,56 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::{mt_merge, mt_sort, mt_sort_segmented};
+    use crate::bench_types::{InputDomain, input_buffer, mlx_tname};
 
     #[bench(name = "mlx/sort", dtypes = [f32, f16, bf16])]
     fn bench_sort(dt: DType) -> BenchSetup {
         let (n_blocks, n) = (16384usize, 1024usize);
+        let tn = mlx_tname(dt);
+        // `inp` seeded `Signed` (period-8 `[-3..3]`, nan-free) rather than raw
+        // `BenchBuffer::random` (random *bytes* alias to nan, and sorting nan is
+        // unordered/inconsistent across the two kernels — fatal at tol 0). The
+        // many ties are fine: both run a stable sort, so identical input → bit-
+        // identical sorted output. The runner shares these bytes by name.
         BenchSetup::new(mt_sort::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
-            .buffer(BenchBuffer::random("inp", n_blocks * n, dt))
+            .buffer(input_buffer("inp", n_blocks * n, dt, InputDomain::Signed))
             .buffer(BenchBuffer::zeros("out", n_blocks * n, dt).output())
             .constexpr("n", n as u32)
             .grid_3d(n_blocks as u32, 1, 1, [256, 1, 1])
             .bytes_moved((2 * n_blocks * n * dt.size_bytes()) as u64)
+            // MLX `metal/sort.metal` `c_block_sort_<tn>_<tn>_bn256_tn4`: a
+            // single-block bitonic sort, one threadgroup per block, matching the
+            // MT `mt_sort` layout (`bn256_tn4` → BLOCK_THREADS=256, N_PER_THREAD=4,
+            // N_PER_BLOCK = 1024 = n). Buffer order (all `int`, 4 bytes):
+            //   inp[[0]], out[[1]], size_sorted_axis[[2]]=n,
+            //   in_stride_sorted_axis[[3]]=1, out_stride_sorted_axis[[4]]=1,
+            //   in_stride_segment_axis[[5]]=n, out_stride_segment_axis[[6]]=n.
+            //
+            // The block is selected by `tid.y` (the kernel does
+            // `inp += tid.y * in_stride_segment_axis`; `tid.x` is unused for the
+            // data offset), so the per-block dispatch puts the `n_blocks` blocks
+            // on the Y axis (`[1, n_blocks, 1]`) — unlike the MT kernel which
+            // indexes the block via `program_id::<0>()` (X axis). `inp` is shared
+            // by name (placeholder); both sort identical random data so the A/B is
+            // a true per-block equivalence (tol 0 — a sort permutes, never
+            // arithmetic, so the match is exact in every dtype).
+            .with_reference(
+                RefKernel::new(
+                    format!("c_block_sort_{tn}_{tn}_bn256_tn4"),
+                    include_str!(concat!(env!("OUT_DIR"), "/metal/sort.metal")),
+                )
+                .buffer(BenchBuffer::zeros("inp", n_blocks * n, dt))
+                .buffer(BenchBuffer::zeros("out", n_blocks * n, dt).output())
+                .buffer(BenchBuffer::from_vec("size", (n as i32).to_le_bytes().to_vec(), DType::I32))
+                .buffer(BenchBuffer::from_vec("in_str_sort", 1i32.to_le_bytes().to_vec(), DType::I32))
+                .buffer(BenchBuffer::from_vec("out_str_sort", 1i32.to_le_bytes().to_vec(), DType::I32))
+                .buffer(BenchBuffer::from_vec("in_str_seg", (n as i32).to_le_bytes().to_vec(), DType::I32))
+                .buffer(BenchBuffer::from_vec("out_str_seg", (n as i32).to_le_bytes().to_vec(), DType::I32))
+                // blocks on Y (the kernel reads the segment from `tid.y`).
+                .grid(Grid::new_3d(1, n_blocks as u32, 1, [256, 1, 1]))
+                .tol(0.0),
+            )
     }
 
     #[bench(name = "mlx/sort/merge", dtypes = [f32, f16, bf16])]

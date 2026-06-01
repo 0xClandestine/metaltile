@@ -207,14 +207,41 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::{mt_strided_copy, mt_strided_copy_nd};
+    use crate::bench_types::{dtype_tol, mlx_tname};
 
     fn u8u32(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
 
+    fn u8i64(v: &[i64]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
+
     /// 2-D padded copy, matching the legacy `m=1024 n=4096 pad=128` shape.
+    ///
+    /// Attaches the MLX `metal/copy.metal` `copy_g_nd2` reference for an
+    /// A/B perf + correctness comparison. In the pinned `ekryski/mlx@alpha`
+    /// checkout the `copy_g_nd2` template is host-named `g2_copy<tn><tn>` (e.g.
+    /// `g2_copyfloat32float32`) — the `instantiate_kernel("g2_copy" #tname, …)`
+    /// form in `copy.metal`, not the legacy `copy_g_nd2{tn}{tn}` spelling.
+    /// `copy_g_nd2` reads `src[buffer(0)]`,
+    /// writes `dst[buffer(1)]`, and takes `src_strides` as an `int64_t*` array at
+    /// **`[[buffer(3)]]`** — buffer index 2 is unused. The new runner binds
+    /// reference buffers positionally and contiguously (it does not honour
+    /// `[[buffer(N)]]` gaps), so a 1-element placeholder occupies slot 2 to push
+    /// `src_strides` onto slot 3.
+    ///
+    /// `copy_g_nd2` indexes with `thread_position_in_grid` and reads
+    /// `grid_dim = threads_per_grid`: `dst_idx = index.x + grid_dim.x·index.y`,
+    /// and `src_idx = elem_to_loc_2(index, strides) = index.x·strides[1] +
+    /// index.y·strides[0]`. For a row-major `[rows, dest_cols]` output from a
+    /// row-major `[rows, src_cols]` (= dest_cols+pad) source we need
+    /// `grid_dim.x = dest_cols` (index.x = col, index.y = row) and
+    /// `strides = [src_cols, 1]` (row stride, col stride). With `dispatchThreadgroups`,
+    /// `threads_per_grid = groups × tpg`, so dispatching `[dest_cols, rows, 1]`
+    /// groups at a `[1,1,1]` tpg gives `grid_dim.x = dest_cols`. `src` is shared
+    /// by name with the MT `#[strided]` source.
     #[bench(name = "mlx/strided_copy/strided_copy", dtypes = [f32, f16, bf16])]
     fn bench_strided_copy(dt: DType) -> BenchSetup {
         let (rows, dest_cols, pad) = (1024usize, 4096usize, 128usize);
         let src_cols = dest_cols + pad;
+        let tn = mlx_tname(dt);
         BenchSetup::new(mt_strided_copy::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
             .buffer(BenchBuffer::random("src", rows * src_cols, dt))
@@ -236,6 +263,32 @@ pub mod kernel_benches {
             // (a [1,1,1] tpg would launch rows×dest_cols single-thread groups).
             .grid_3d(rows as u32, (dest_cols / 256) as u32, 1, [1, 256, 1])
             .bytes_moved((2 * rows * dest_cols * dt.size_bytes()) as u64)
+            .with_reference(
+                RefKernel::new(
+                    format!("g2_copy{tn}{tn}"),
+                    include_str!(concat!(env!("OUT_DIR"), "/metal/copy.metal")),
+                )
+                // src[0] shared by name with the MT `#[strided] src` above.
+                .buffer(BenchBuffer::zeros("src", rows * src_cols, dt))
+                // dst[1] — the compared output.
+                .buffer(BenchBuffer::zeros("out", rows * dest_cols, dt).output())
+                // buffer(2) is unused by `copy_g_nd2`; the runner binds
+                // positionally, so a placeholder here lands `src_strides` on
+                // slot 3 to match the `[[buffer(3)]]` declaration.
+                .buffer(BenchBuffer::zeros("_pad2", 1, DType::U32))
+                // src_strides (int64_t[2]) = [row stride, col stride] = [src_cols, 1].
+                .buffer(BenchBuffer::from_vec(
+                    "src_strides_i64",
+                    u8i64(&[src_cols as i64, 1]),
+                    DType::U32,
+                ))
+                // grid_dim.x must equal dest_cols → groups [dest_cols, rows, 1] × tpg [1,1,1].
+                .grid(Grid::new_3d(dest_cols as u32, rows as u32, 1, [1, 1, 1]))
+                // Exact copy: both kernels cast the same `src` bytes to the same
+                // dtype, so the outputs are bit-identical. `dtype_tol` (matching the
+                // proven `v_copy` exact-copy bench) is a harmless epsilon floor.
+                .tol(dtype_tol(dt)),
+            )
     }
 
     /// N-D copy: a 1024×4096 logical transpose out of a 4096×1024 buffer.

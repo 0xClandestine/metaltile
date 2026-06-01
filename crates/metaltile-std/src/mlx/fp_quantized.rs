@@ -287,9 +287,12 @@ pub mod kernel_benches {
     use metaltile::{bench, core::ir::Kernel, test::*};
 
     use super::{mt_fp4_quant_dequant, mt_fp8_e4m3_quant_dequant, mt_fp8_e5m2_quant_dequant};
+    use crate::bench_types::{InputDomain, input_buffer};
+
+    const QUANT_N: usize = 64 * 1024 * 1024;
 
     fn qb(kernel: Kernel) -> BenchSetup {
-        let n = 64 * 1024 * 1024usize;
+        let n = QUANT_N;
         BenchSetup::new(kernel)
             .mode(KernelMode::Grid3D)
             .buffer(BenchBuffer::random("inp", n, DType::F32))
@@ -299,8 +302,51 @@ pub mod kernel_benches {
             .bytes_moved((2 * n * 4) as u64)
     }
 
+    // fp4 carries the MLX `metal/fp_quantized.metal`
+    // `nvfp4_quantize_dequantize_float_gs_16_b_4` reference. The MLX kernel is
+    // 2-buffer (`w`[[0]] input, `out`[[1]] output, both f32) with no scalars and
+    // no function constants. It is dispatched 2D: `index = tidx.x + grid_dim.x *
+    // tidx.y`, so the legacy `[1, n/32, 1]` threadgroups × `[32,1,1]` tpg gives
+    // `grid_dim.x = 32` and each 32-lane threadgroup is one simdgroup covering 32
+    // consecutive elements — the same element-to-simdgroup grouping the MT Grid3D
+    // dispatch uses. `inp` is shared by name with the MT input below.
+    //
+    // The input is seeded `Signed` (period-8 pattern `[-3..3]`) rather than
+    // `qb`'s raw `BenchBuffer::random` (random f32 *bytes* alias to inf/nan, which
+    // would poison the quantize round-trip and the A/B). The pattern's period (8)
+    // divides every group boundary, so the per-group amax is a uniform 3.0 — which
+    // also neutralises the gs16-vs-gs32 scale split described next.
+    //
+    // NOTE (semantic divergence): MLX `nvfp4` quantises at **group_size 16**
+    // (`use_mx_scale = group_size == 32` is false → each 32-lane simdgroup is
+    // split into two 16-lane amax groups), whereas `mt_fp4_quant_dequant` takes a
+    // full **32-lane** `simd_max` (group_size 32). With a non-uniform input the
+    // two would pick different per-group scales near a 16-boundary and disagree by
+    // up to a codebook step; the `Signed` pattern's uniform amax avoids that, so
+    // the legacy tol=0.5 dequant-band floor holds for the A/B.
     #[bench(name = "mlx/fp_quantized/fp4", dtypes = [f32])]
-    fn bench_fp4(_dt: DType) -> BenchSetup { qb(mt_fp4_quant_dequant::kernel_ir_for()) }
+    fn bench_fp4(_dt: DType) -> BenchSetup {
+        let n = QUANT_N;
+        BenchSetup::new(mt_fp4_quant_dequant::kernel_ir_for())
+            .mode(KernelMode::Grid3D)
+            .buffer(input_buffer("inp", n, DType::F32, InputDomain::Signed))
+            .buffer(BenchBuffer::zeros("out", n, DType::F32).output())
+            .constexpr("n", n as u32)
+            .grid_3d((n / 32) as u32, 1, 1, [32, 1, 1])
+            .bytes_moved((2 * n * 4) as u64)
+            .with_reference(
+                RefKernel::new(
+                    "nvfp4_quantize_dequantize_float_gs_16_b_4".to_string(),
+                    include_str!(concat!(env!("OUT_DIR"), "/metal/fp_quantized.metal")),
+                )
+                // w[[0]] shared by name with the MT `inp`; out[[1]] fresh.
+                .buffer(BenchBuffer::zeros("inp", n, DType::F32))
+                .buffer(BenchBuffer::zeros("out", n, DType::F32).output())
+                // 2D: [1, n/32, 1] threadgroups × [32,1,1] → grid_dim.x = 32.
+                .grid(Grid::new_3d(1, (n / 32) as u32, 1, [32, 1, 1]))
+                .tol(0.5),
+            )
+    }
     #[bench(name = "mlx/fp_quantized/fp8_e4m3", dtypes = [f32])]
     fn bench_fp8_e4m3(_dt: DType) -> BenchSetup { qb(mt_fp8_e4m3_quant_dequant::kernel_ir_for()) }
     #[bench(name = "mlx/fp_quantized/fp8_e5m2", dtypes = [f32])]

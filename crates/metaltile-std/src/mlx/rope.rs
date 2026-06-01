@@ -106,6 +106,18 @@ pub mod kernel_benches {
 
     use super::mt_rope;
 
+    // NO MLX `.with_reference` here: the MLX `metal/rope.metal` `rope_<tn>` kernel
+    // gates its whole body on three *function constants* with no defaults —
+    // `forward [[function_constant(1)]]`, `traditional [[function_constant(2)]]`,
+    // `hs_transpose [[function_constant(3)]]`. The legacy runner specialized them
+    // via `compile_with_bool_constants(src, "rope_<tn>", &[(1,true),(2,false),(3,false)])`.
+    // The new `RefKernel` reference path (`run_kernel.rs::run_reference_compare`)
+    // compiles the MLX source with plain `runner.compile(src, fn_name)`, which has
+    // no `MTLFunctionConstantValues`, so `rope_<tn>` would fail to compile
+    // (Metal errors on an unset, no-default function constant) and the reference
+    // would silently fall back to a perf-only row. Attaching a `RefKernel` for
+    // rope therefore requires extending the `RefKernel` API with
+    // function-constant support first (an infra change, out of scope here).
     #[bench(name = "mlx/rope", dtypes = [f32, f16, bf16])]
     fn bench_rope(dt: DType) -> BenchSetup {
         let (n_heads, seq_len, head_dim, theta_base) = (32u32, 512u32, 128u32, 10000.0f32);

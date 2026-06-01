@@ -702,9 +702,21 @@ pub mod kernel_benches {
     use metaltile::{bench, core::ir::Kernel, test::*};
 
     use super::*;
+    use crate::bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname};
 
+    const SCAN_ROWS: usize = 4096;
+    const SCAN_N: usize = 1024;
+    // Legacy `tol=1e-3` floor for the scan family. MT accumulates the running
+    // prefix in f32; MLX's `contiguous_scan` accumulates in the output dtype
+    // `U` (lossy for f16/bf16), so the two legitimately drift by more than 1
+    // ULP over a 1024-element row.
+    const SCAN_TOL_FLOOR: f32 = 1e-3;
+
+    /// MetalTile-only scan bench (prod/max/min and the exclusive variants have
+    /// no single-host-named MLX `contig_scan_*` counterpart wired here — only
+    /// inclusive sum carries an A/B reference below).
     fn sb(kernel: Kernel, dt: DType) -> BenchSetup {
-        let (rows, n) = (4096usize, 1024usize);
+        let (rows, n) = (SCAN_ROWS, SCAN_N);
         BenchSetup::new(kernel)
             .mode(KernelMode::Reduction)
             .buffer(BenchBuffer::random("inp", rows * n, dt))
@@ -714,13 +726,54 @@ pub mod kernel_benches {
             .bytes_moved((2 * rows * n * dt.size_bytes()) as u64)
     }
 
+    /// Inclusive-sum scan bench WITH the MLX `metal/scan.metal`
+    /// `contig_scan_inclusive_sum_<tn>_<tn>` reference attached for an A/B perf +
+    /// correctness comparison.
+    ///
+    /// `contiguous_scan` indexes the row it scans via `gid.y` (so the dispatch
+    /// puts rows on the Y axis, matching MT's `grid_3d(1, rows, 1, …)`), reads
+    /// `in[buffer(0)]`, writes `out[buffer(1)]`, and takes `axis_size` as a
+    /// `size_t` (8-byte) scalar — unlike MT's `u32` `n` constexpr.
+    ///
+    /// `inp` is shared by name with the reference (the runner injects the MT
+    /// bytes), so both kernels scan identical data. The input uses
+    /// `InputDomain::Tiny` (~1e-4..1.6e-3) so the running sum over a 1024-element
+    /// row stays small (≈1.6 max) and finite in f16/bf16.
+    fn sb_sum_ref(kernel: Kernel, dt: DType) -> BenchSetup {
+        let (rows, n) = (SCAN_ROWS, SCAN_N);
+        let tn = mlx_tname(dt);
+        BenchSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .buffer(input_buffer("inp", rows * n, dt, InputDomain::Tiny))
+            .buffer(BenchBuffer::zeros("out", rows * n, dt).output())
+            .constexpr("n", n as u32)
+            .grid_3d(1, rows as u32, 1, [256, 1, 1])
+            .bytes_moved((2 * rows * n * dt.size_bytes()) as u64)
+            .with_reference(
+                RefKernel::new(
+                    format!("contig_scan_inclusive_sum_{tn}_{tn}"),
+                    include_str!(concat!(env!("OUT_DIR"), "/metal/scan.metal")),
+                )
+                // in[0] shared by name with the MT `inp` above (placeholder).
+                .buffer(BenchBuffer::zeros("inp", rows * n, dt))
+                .buffer(BenchBuffer::zeros("out", rows * n, dt).output())
+                // axis_size is `size_t` (8 bytes) = N.
+                .buffer(BenchBuffer::from_vec("axis_size", (n as u64).to_le_bytes().to_vec(), DType::U32))
+                // `contiguous_scan` reads the row from `gid.y` → rows on Y.
+                .grid(Grid::new_3d(1, rows as u32, 1, [256, 1, 1]))
+                .tol(dtype_tol(dt).max(SCAN_TOL_FLOOR)),
+            )
+    }
+
+    #[bench(name = "mlx/scan/sum", dtypes = [f32, f16, bf16])]
+    fn bench_scan_sum(dt: DType) -> BenchSetup { sb_sum_ref(mt_scan::kernel_ir_for(dt), dt) }
+
     macro_rules! sbench {
         ($name:ident, $full:literal, $kernel:ident) => {
             #[bench(name = $full, dtypes = [f32, f16, bf16])]
             fn $name(dt: DType) -> BenchSetup { sb($kernel::kernel_ir_for(dt), dt) }
         };
     }
-    sbench!(bench_scan_sum, "mlx/scan/sum", mt_scan);
     sbench!(bench_scan_excl, "mlx/scan/sum_exclusive", mt_scan_exclusive);
     sbench!(bench_scan_prod, "mlx/scan/prod", mt_scan_prod);
     sbench!(bench_scan_prod_excl, "mlx/scan/prod_exclusive", mt_scan_prod_exclusive);

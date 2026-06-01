@@ -46,7 +46,19 @@ pub mod kernel_tests {
     }
 }
 
-/// New-syntax benchmark for `mt_random_hash` (vs MLX `metal/random.metal`).
+/// New-syntax benchmark for `mt_random_hash`.
+///
+/// MetalTile-only: there is **no A/B reference attached**. MLX's nearest
+/// `metal/random.metal` kernel is `rbitsc`, a threefry2x32 counter-based PRNG
+/// that emits raw bytes (`device char* out`, `num_keys × bytes_per_key`), while
+/// `mt_random_hash` is a per-element xorshift of `gid + 1` producing a `[n]`
+/// `u32`. The two PRNGs are different algorithms with different output layouts
+/// by design, so their outputs are not numerically equivalent — the legacy
+/// runner likewise dispatched `rbitsc` perf-only and never compared its bytes.
+/// The bench runner always correctness-checks an attached reference, so wiring
+/// `rbitsc` here would force a guaranteed-fail verdict on every row; this bench
+/// is therefore left MetalTile-only (its xorshift is pinned by the
+/// `#[test_kernel]` oracle above).
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
