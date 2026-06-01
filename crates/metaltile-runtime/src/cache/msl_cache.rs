@@ -156,7 +156,7 @@ mod perf {
 }
 
 #[cfg(all(test, target_os = "macos"))]
-mod perf {
+mod perf_clone {
     //! Side-by-side: the per-dispatch cost of eagerly cloning the MSL
     //! string out of the cache (the pre-PR `Context::dispatch` path —
     //! every dispatch pays the clone even when the PSO cache hits)
@@ -218,7 +218,7 @@ mod perf {
         // Pre-seed the cache with an 8 KB synthetic MSL so every probe
         // is a hit (the realistic steady-state regime).
         let synthetic = synth_msl(8 * 1024);
-        cache.cache.lock().unwrap().insert(key, synthetic.clone());
+        cache.cache.lock().insert(key, synthetic.clone());
 
         const ITERS: usize = 500_000;
 
