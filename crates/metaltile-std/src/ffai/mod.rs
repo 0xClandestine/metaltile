@@ -68,6 +68,7 @@ pub mod moe_mpp_int8;
 pub mod moe_mpp_shared;
 pub mod patch_embed;
 pub mod patch_embed_mma;
+pub mod rms_norm_block_scaled_qgemv;
 pub mod rms_norm_qgemv;
 pub mod rms_norm_residual;
 pub mod rms_norm_rope;
