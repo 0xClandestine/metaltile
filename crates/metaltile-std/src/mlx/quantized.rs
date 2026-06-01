@@ -6215,7 +6215,7 @@ pub mod kernel_benches {
             // grid=(ceil(N/32), ceil(M/32), 1). Function constants:
             // align_M=(M%32==0), align_N=(N%32==0)=true, align_K=(K%32==0)=true.
             QuantRef::QmmT => {
-                let align_m = m % 32 == 0;
+                let align_m = m.is_multiple_of(32);
                 bs.with_reference(
                     RefKernel::new(
                         format!("affine_qmm_t_{tn}_gs_{group_size}_b_{bits}_alN_true_batch_0"),
