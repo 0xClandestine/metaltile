@@ -18,4 +18,4 @@ verbose = 0
 runs = 10
 
 # Number of warmup dispatches before timing begins.
-warmup_runs = 15
+warmup_runs = 3

@@ -44,7 +44,7 @@ impl Default for TileConfig {
             project_path: None,
             verbose: 0,
             runs: 10,
-            warmup_runs: 15,
+            warmup_runs: 3,
         }
     }
 }
@@ -78,7 +78,7 @@ mod tests {
         assert_eq!(cfg.verbose, 0);
         assert!(cfg.project_path.is_none());
         assert_eq!(cfg.runs, 10);
-        assert_eq!(cfg.warmup_runs, 15);
+        assert_eq!(cfg.warmup_runs, 3);
     }
 
     #[test]
@@ -93,6 +93,6 @@ mod tests {
         assert_eq!(cfg.runner_binary, "__tile_runner");
         assert_eq!(cfg.verbose, 0);
         assert_eq!(cfg.runs, 10);
-        assert_eq!(cfg.warmup_runs, 15);
+        assert_eq!(cfg.warmup_runs, 3);
     }
 }

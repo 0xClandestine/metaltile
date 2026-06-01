@@ -97,9 +97,13 @@ pub fn run(args: &BenchArgs, warmup_runs: usize, runs: usize) -> Result<(), crat
 
     // Banner — single compact line.
     println!(
-        "{} {}",
+        "{} {}  {}",
         paint_stdout("tile bench", Style::new().fg(Color::Cyan).bold()),
         paint_stdout(format!("· {}", runner.device_name), Style::new().fg(Color::BrightBlack)),
+        paint_stdout(
+            format!("warmup={warmup_runs} runs={runs}"),
+            Style::new().fg(Color::BrightBlack),
+        ),
     );
 
     // Run all ops, optionally narrowed to a single substring filter.
