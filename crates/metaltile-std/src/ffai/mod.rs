@@ -27,6 +27,7 @@ pub mod aura_flash_pass2;
 pub mod aura_flash_sdpa;
 pub mod aura_score;
 pub mod aura_value;
+pub mod avg_pool2d_nhwc;
 pub mod axpy_scalar_inplace;
 pub mod batched_4_block_scaled_qgemv;
 pub mod batched_4_block_scaled_qmm;
