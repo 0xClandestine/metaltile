@@ -103,7 +103,6 @@ pub mod logits_top_p;
 pub mod logits_topk;
 pub mod lstm;
 pub mod mel_spectrogram;
-pub mod mel_spectrogram_magnitude;
 pub mod moe;
 pub mod moe_bgemm_iq2xxs_bm64;
 pub mod moe_bgemm_iq2xxs_mpp;
