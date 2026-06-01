@@ -145,6 +145,7 @@ pub mod rope_yarn;
 pub mod sampling;
 pub mod sdpa_bidirectional;
 pub mod sdpa_bidirectional_d128_relpos;
+pub mod sdpa_bidirectional_windowed;
 pub mod sdpa_decode; // unified: d64, d96, d128, d256, d512
 pub mod sdpa_decode_2pass;
 pub mod sdpa_decode_batched;
