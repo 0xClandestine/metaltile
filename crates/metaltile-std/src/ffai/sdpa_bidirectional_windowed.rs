@@ -37,15 +37,7 @@
 
 use metaltile::kernel;
 
-#[kernel(
-    bench(
-        op = "sdpa",
-        subop = "sdpa_bidirectional_windowed_d80",
-        class = GenericEmpty,
-        tol = 1e-3,
-        kernel_mode = Reduction,
-    )
-)]
+#[kernel]
 pub fn ffai_sdpa_bidirectional_windowed_d80<T>(
     q: Tensor<T>,
     k: Tensor<T>,

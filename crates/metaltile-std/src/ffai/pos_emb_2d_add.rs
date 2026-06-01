@@ -30,15 +30,7 @@
 
 use metaltile::kernel;
 
-#[kernel(
-    bench(
-        op="pos_emb",
-        subop="pos_emb_2d_add",
-        class=GenericEmpty,
-        tol=1e-4,
-        kernel_mode=Grid3D,
-    )
-)]
+#[kernel]
 pub fn pos_emb_2d_add<T>(
     tokens: Tensor<T>,
     pos_x: Tensor<f32>,

@@ -168,15 +168,7 @@ pub fn mel_filterbank<T>(
 /// The amplitude-correct front-end the Gemma 4 audio encoder + several
 /// streaming-ASR models are trained on (feeding power degrades them).
 /// Direct-DFT, one thread per `(frame, mel_bin)`.
-#[kernel(
-    bench(
-        op="mel_spectrogram",
-        subop="mel_spectrogram_magnitude",
-        class=GenericEmpty,
-        tol=1e-3,
-        kernel_mode=Grid3D,
-    )
-)]
+#[kernel]
 pub fn mel_spectrogram_magnitude<T>(
     audio: Tensor<T>,
     window: Tensor<T>,

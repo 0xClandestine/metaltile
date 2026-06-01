@@ -26,15 +26,7 @@
 
 use metaltile::kernel;
 
-#[kernel(
-    bench(
-        op="pool",
-        subop="avg_pool2d_nhwc",
-        class=GenericEmpty,
-        tol=1e-3,
-        kernel_mode=Grid3D,
-    )
-)]
+#[kernel]
 pub fn avg_pool2d_nhwc<T>(
     input: Tensor<T>,
     out: Tensor<T>,

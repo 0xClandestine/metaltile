@@ -36,15 +36,7 @@
 
 use metaltile::kernel;
 
-#[kernel(
-    bench(
-        op="transpose",
-        subop="transpose_th",
-        class=GenericEmpty,
-        tol=0.0,
-        kernel_mode=Grid3D,
-    )
-)]
+#[kernel]
 pub fn ffai_transpose_th<T>(
     input: Tensor<T>,
     out: Tensor<T>,

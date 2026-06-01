@@ -26,15 +26,7 @@
 
 use metaltile::kernel;
 
-#[kernel(
-    bench(
-        op="elementwise",
-        subop="clamp_scalar",
-        class=GenericEmpty,
-        tol=0.0,
-        kernel_mode=Grid3D,
-    )
-)]
+#[kernel]
 pub fn ffai_clamp_scalar<T>(input: Tensor<T>, out: Tensor<T>, lo: Tensor<f32>, hi: Tensor<f32>) {
     let i = program_id::<0>();
     let lo_v = load(lo[0]);

@@ -22,15 +22,7 @@
 
 use metaltile::kernel;
 
-#[kernel(
-    bench(
-        op="norm",
-        subop="adain1d",
-        class=GenericEmpty,
-        tol=1e-3,
-        kernel_mode=Reduction,
-    )
-)]
+#[kernel]
 pub fn adain1d<T>(
     x: Tensor<T>,
     gamma: Tensor<T>,

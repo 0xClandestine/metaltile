@@ -30,15 +30,7 @@
 
 use metaltile::kernel;
 
-#[kernel(
-    bench(
-        op = "sdpa",
-        subop = "sdpa_decode_sink_buf",
-        class = GenericEmpty,
-        tol = 1e-3,
-        kernel_mode = Reduction,
-    )
-)]
+#[kernel]
 pub fn ffai_sdpa_decode_sink_buf<T>(
     q: Tensor<T>,
     k: Tensor<T>,

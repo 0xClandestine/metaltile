@@ -26,15 +26,7 @@
 
 use metaltile::kernel;
 
-#[kernel(
-    bench(
-        op="resize",
-        subop="resize_normalize",
-        class=GenericEmpty,
-        tol=1e-4,
-        kernel_mode=Grid3D,
-    )
-)]
+#[kernel]
 pub fn ffai_resize_normalize<T>(
     input: Tensor<T>,
     mean: Tensor<f32>,
@@ -107,15 +99,7 @@ pub fn ffai_resize_normalize<T>(
 /// centers, 4 taps `floor(src)−1…+2`, edge-clamp per tap, partition-of-unity
 /// weights (no renormalize). Per-tap branch specialization is exact at
 /// boundaries (cubic1(1)=cubic2(1)=0).
-#[kernel(
-    bench(
-        op="resize",
-        subop="resize_normalize_bicubic",
-        class=GenericEmpty,
-        tol=1e-4,
-        kernel_mode=Grid3D,
-    )
-)]
+#[kernel]
 pub fn ffai_resize_normalize_bicubic<T>(
     input: Tensor<T>,
     mean: Tensor<f32>,

@@ -27,15 +27,7 @@
 
 use metaltile::kernel;
 
-#[kernel(
-    bench(
-        op="im2col",
-        subop="im2col_patch",
-        class=GenericEmpty,
-        tol=1e-4,
-        kernel_mode=Grid3D,
-    )
-)]
+#[kernel]
 pub fn im2col_patch<T>(
     input: Tensor<T>,
     out: Tensor<T>,

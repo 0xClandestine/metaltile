@@ -27,15 +27,7 @@
 
 use metaltile::kernel;
 
-#[kernel(
-    bench(
-        op="video",
-        subop="frame_diff_luma",
-        class=GenericEmpty,
-        tol=1e-3,
-        kernel_mode=Grid3D,
-    )
-)]
+#[kernel]
 pub fn frame_diff_luma<T>(
     frame0: Tensor<T>,
     frame1: Tensor<T>,

@@ -48,15 +48,7 @@
 
 use metaltile::kernel;
 
-#[kernel(
-    bench(
-        op = "lstm",
-        subop = "lstm",
-        class = GenericEmpty,
-        tol = 1e-3,
-        kernel_mode = Reduction,
-    )
-)]
+#[kernel]
 pub fn ffai_lstm<T>(
     x: Tensor<T>,
     w_ih: Tensor<T>,
@@ -144,15 +136,7 @@ pub fn ffai_lstm<T>(
 /// per-step host control is wanted; use [`ffai_lstm`] above to run the whole
 /// sequence on the GPU in one dispatch. Takes the `bias_ih` / `bias_hh`
 /// split separately (vs. `ffai_lstm`'s precombined `bias`).
-#[kernel(
-    bench(
-        op="lstm",
-        subop="lstm_cell",
-        class=GenericEmpty,
-        tol=1e-3,
-        kernel_mode=Grid3D,
-    )
-)]
+#[kernel]
 pub fn lstm_cell<T>(
     x: Tensor<T>,
     h_prev: Tensor<T>,
