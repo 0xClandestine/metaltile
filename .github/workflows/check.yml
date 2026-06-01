@@ -60,7 +60,11 @@ jobs:
   clippy-test:
     name: Clippy + Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # `cargo test --workspace` runs the codegen-every-registered-kernel test
+    # (`every_registered_benchspec_codegens`), which alone takes ~14 min and
+    # grew with the MLX A/B bench additions; with clippy --all-features + the
+    # build on top, 15 min no longer fits.
+    timeout-minutes: 30
     steps:
       - uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
         with:

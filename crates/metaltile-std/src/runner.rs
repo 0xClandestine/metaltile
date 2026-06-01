@@ -85,6 +85,17 @@ mod metal_impl {
     pub struct MacosRunner {
         pub device: Retained<ProtocolObject<dyn MTLDevice>>,
         pub queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+        /// Compiled-library cache keyed by source-content hash.
+        ///
+        /// Runtime MSL compilation of the large include-inlined MLX reference
+        /// sources (`quantized.metal` ≈ 5.8k lines, `unary.metal` ≈ 2k, …)
+        /// dominates `tile bench` wall-clock, and the *same* source is reused
+        /// across dozens of (kernel, dtype) A/B benches. Caching the compiled
+        /// `MTLLibrary` makes each unique source compile exactly once; the
+        /// per-kernel function-extraction + pipeline-state build are cheap.
+        library_cache: std::sync::Mutex<
+            std::collections::HashMap<u64, Retained<ProtocolObject<dyn MTLLibrary>>>,
+        >,
     }
 
     pub struct MacosPipeline {
@@ -100,16 +111,38 @@ mod metal_impl {
             let device = objc2_metal::MTLCreateSystemDefaultDevice().ok_or("no Metal device")?;
             let name = device.name().to_string();
             let queue = device.newCommandQueue().ok_or("newCommandQueue failed")?;
-            Ok((name, MacosRunner { device, queue }))
+            Ok((name, MacosRunner {
+                device,
+                queue,
+                library_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            }))
         }
 
-        pub fn compile(&self, source: &str, fn_name: &str) -> Result<MacosPipeline, String> {
+        /// Compile `source` into an `MTLLibrary`, caching by content hash so each
+        /// unique source compiles only once across the whole bench run.
+        fn library(
+            &self,
+            source: &str,
+        ) -> Result<Retained<ProtocolObject<dyn MTLLibrary>>, String> {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            source.hash(&mut hasher);
+            let key = hasher.finish();
+            if let Some(lib) = self.library_cache.lock().unwrap().get(&key) {
+                return Ok(lib.clone());
+            }
             let opts = objc2_metal::MTLCompileOptions::new();
             let src = NSString::from_str(source);
             let lib: Retained<ProtocolObject<dyn MTLLibrary>> = self
                 .device
                 .newLibraryWithSource_options_error(&src, Some(&opts))
-                .map_err(|e| format!("compile '{fn_name}': {e}"))?;
+                .map_err(|e| format!("compile source: {e}"))?;
+            self.library_cache.lock().unwrap().insert(key, lib.clone());
+            Ok(lib)
+        }
+
+        pub fn compile(&self, source: &str, fn_name: &str) -> Result<MacosPipeline, String> {
+            let lib = self.library(source)?;
             let fname = NSString::from_str(fn_name);
             let func = lib
                 .newFunctionWithName(&fname)
@@ -134,12 +167,7 @@ mod metal_impl {
             fn_name: &str,
             bool_constants: &[(usize, bool)],
         ) -> Result<MacosPipeline, String> {
-            let opts = objc2_metal::MTLCompileOptions::new();
-            let src = NSString::from_str(source);
-            let lib: Retained<ProtocolObject<dyn MTLLibrary>> = self
-                .device
-                .newLibraryWithSource_options_error(&src, Some(&opts))
-                .map_err(|e| format!("compile '{fn_name}': {e}"))?;
+            let lib = self.library(source)?;
             let cv = MTLFunctionConstantValues::new();
             for &(idx, val) in bool_constants {
                 let val_ptr =
