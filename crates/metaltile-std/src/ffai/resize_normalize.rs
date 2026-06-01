@@ -180,3 +180,40 @@ pub mod kernel_tests {
             .grid_3d(tw as u32, th as u32, 3, [1, 1, 1])
     }
 }
+
+/// New-syntax benchmark for `ffai_resize_normalize` at a representative VL
+/// preprocess shape (≈640×480 source → 448×448).
+pub mod kernel_benches {
+    use metaltile::{bench, test::*};
+
+    use super::ffai_resize_normalize;
+
+    #[bench(name = "ffai/resize/resize_normalize", dtypes = [f32, f16, bf16])]
+    fn bench_resize_normalize(dt: DType) -> BenchSetup {
+        let (sw, sh, tw, th) = (640usize, 480usize, 448usize, 448usize);
+        BenchSetup::new(ffai_resize_normalize::kernel_ir_for(dt))
+            .mode(KernelMode::Grid3D)
+            .buffer(BenchBuffer::random("input", sh * sw * 3, dt))
+            .buffer(BenchBuffer::random("mean", 3, DType::F32))
+            .buffer(BenchBuffer::random("std", 3, DType::F32))
+            .buffer(BenchBuffer::zeros("out", 3 * th * tw, dt).output())
+            .buffer(BenchBuffer::from_vec("src_w", (sw as u32).to_le_bytes().to_vec(), DType::U32))
+            .buffer(BenchBuffer::from_vec("src_h", (sh as u32).to_le_bytes().to_vec(), DType::U32))
+            .buffer(BenchBuffer::from_vec(
+                "target_w",
+                (tw as u32).to_le_bytes().to_vec(),
+                DType::U32,
+            ))
+            .buffer(BenchBuffer::from_vec(
+                "target_h",
+                (th as u32).to_le_bytes().to_vec(),
+                DType::U32,
+            ))
+            .with_shape_label(format!(
+                "{sw}x{sh}->{tw}x{th} {}",
+                crate::bench_types::dtype_label(dt)
+            ))
+            .grid_3d(tw as u32, th as u32, 3, [1, 1, 1])
+            .bytes_moved(((sh * sw * 3 + 3 * th * tw) * dt.size_bytes()) as u64)
+    }
+}
