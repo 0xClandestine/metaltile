@@ -80,7 +80,9 @@ impl RunnerArgs {
                 "--profile" => profile = true,
                 "--warmup-runs" => {
                     let v = it.next().ok_or("--warmup-runs requires a value")?;
-                    warmup = Some(v.parse::<usize>().map_err(|_| format!("invalid --warmup-runs '{v}'"))?);
+                    warmup = Some(
+                        v.parse::<usize>().map_err(|_| format!("invalid --warmup-runs '{v}'"))?,
+                    );
                 },
                 "--runs" => {
                     let v = it.next().ok_or("--runs requires a value")?;

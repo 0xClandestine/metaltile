@@ -395,7 +395,8 @@ fn run_one_bench(
     let grid = setup.grid();
     let g = grid.grid.map(|x| x as usize);
     let t = grid.tpg.map(|x| x as usize);
-    let (mt_gbps, stats) = bench_gbps_with(runner, &compiled, &refs, g, t, bytes_moved as f64, warmup, iters)?;
+    let (mt_gbps, stats) =
+        bench_gbps_with(runner, &compiled, &refs, g, t, bytes_moved as f64, warmup, iters)?;
 
     // Reference comparison (optional).
     let (ref_gbps, mt_pct, correct) =
@@ -480,7 +481,8 @@ fn run_reference(
     let ref_refs: Vec<&GpuBuffer> = ref_bufs.iter().collect();
     let g = rk.grid.grid.map(|x| x as usize);
     let t = rk.grid.tpg.map(|x| x as usize);
-    let (ref_gbps, _) = bench_gbps_with(runner, &compiled, &ref_refs, g, t, bytes_moved as f64, warmup, iters)?;
+    let (ref_gbps, _) =
+        bench_gbps_with(runner, &compiled, &ref_refs, g, t, bytes_moved as f64, warmup, iters)?;
 
     let n = mt_out_n.min(ref_out_n).min(COMPARE_ELEM_CAP);
     let mt_vals = read_typed(runner, &mt_bufs[mt_out_idx], n, mt_out_dt);
