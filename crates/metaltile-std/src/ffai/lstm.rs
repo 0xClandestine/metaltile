@@ -120,14 +120,13 @@ pub fn ffai_lstm<T>(
         // Barrier: every unit has finished reading the previous `h` (and its
         // own `c`) before any unit overwrites the state below.
         threadgroup_barrier();
-        // σ(x) = 1/(1+e^-x);  tanh(x) = 2/(1+e^-2x) − 1 (exact identity).
-        let ig = 1.0f32 / (1.0f32 + exp(0.0f32 - gi));
-        let fg = 1.0f32 / (1.0f32 + exp(0.0f32 - gf));
-        let gt = 2.0f32 / (1.0f32 + exp(0.0f32 - 2.0f32 * gg)) - 1.0f32;
-        let og = 1.0f32 / (1.0f32 + exp(0.0f32 - go));
+        // Gate activations via the DSL `sigmoid`/`tanh` intrinsics.
+        let ig = sigmoid(gi);
+        let fg = sigmoid(gf);
+        let gt = tanh(gg);
+        let og = sigmoid(go);
         let c_new = fg * c_old + ig * gt;
-        let tanh_c = 2.0f32 / (1.0f32 + exp(0.0f32 - 2.0f32 * c_new)) - 1.0f32;
-        let h_new = og * tanh_c;
+        let h_new = og * tanh(c_new);
         if active {
             threadgroup_store("c", jj, c_new);
             threadgroup_store("h", jj, h_new);
