@@ -10,7 +10,7 @@
 
 use std::process::Command;
 
-use metaltile_runtime::GpuFamily;
+use metaltile::runner::GpuFamily;
 use serde::Serialize;
 use serde_json::Value;
 

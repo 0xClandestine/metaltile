@@ -29,6 +29,15 @@ use crate::{
 /// dtypes it is benched at.
 type InspectKernel = (&'static dyn KernelBench, Vec<DType>);
 
+/// `TileCommand` wrapper for `tile inspect`.
+pub struct InspectCommand<'a>(pub &'a InspectArgs);
+
+impl<'a> super::TileCommand for InspectCommand<'a> {
+    fn run(&self, _harness: &crate::harness::Harness) -> Result<(), crate::CliError> {
+        run(self.0)
+    }
+}
+
 pub fn run(args: &InspectArgs) -> Result<(), CliError> {
     let filter_val = args.filter.as_ref().or(args.kernel.as_ref());
     let _span = tracing::info_span!(

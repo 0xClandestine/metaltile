@@ -39,3 +39,6 @@ pub use gpu::{
     zeros_typed,
 };
 pub use harness::{RunnerHarness, TestOutcome, run_kernel_test};
+// Re-export GpuFamily so CLI crates can reach it without a direct
+// metaltile-runtime dep.  Device-capability queries go through here.
+pub use metaltile_runtime::GpuFamily;

@@ -49,7 +49,7 @@ impl RunnerArgs {
         Self::parse(std::env::args().skip(1).collect())
     }
 
-    fn parse(args: Vec<String>) -> Result<Self, String> {
+    pub fn parse(args: Vec<String>) -> Result<Self, String> {
         let mut it = args.into_iter();
         let cmd_str = it.next().ok_or("missing subcommand")?;
         let command = match cmd_str.as_str() {

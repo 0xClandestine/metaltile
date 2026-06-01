@@ -4,20 +4,26 @@
 //!
 //! Subcommands:
 //!   bench     Benchmark suite: MetalTile vs MLX reference
+//!   test      Run #[test_kernel] correctness tests
 //!   build     Compile kernels to MSL; emit metallib/Swift/manifest with --emit
 //!   inspect   Print IR and/or MSL for one kernel
-//!   device    Show GPU device info and supported features
+//!   device    Show GPU device info and supported feature flags
 //!   snap      Save bench results as a regression baseline
 //!   diff      Compare bench results to a saved baseline
 //!   update    Install the latest tile binary (or build from a PR / commit)
+//!   init      Scaffold a new MetalTile kernel project
 
 mod cmd;
+pub mod config;
 mod error;
 pub mod git;
+pub mod harness;
+pub mod project_runner;
 pub mod suite_printer;
 pub mod term;
 use anstyle::AnsiColor;
 use clap::{Parser, builder::Styles};
+use cmd::TileCommand as _;
 pub use error::CliError;
 
 const CLAP_STYLES: Styles = Styles::styled()
@@ -55,6 +61,8 @@ enum Command {
     Diff(DiffArgs),
     /// Install the latest tile binary, or build from a PR / commit
     Update(UpdateArgs),
+    /// Scaffold a new MetalTile kernel project in the current directory
+    Init(InitArgs),
 }
 
 // ── Bench ────────────────────────────────────────────────────────────────
@@ -203,6 +211,18 @@ struct DiffArgs {
     only_improvements: bool,
 }
 
+// ── Init ──────────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+struct InitArgs {
+    /// Project directory name to create (default: "my-tile-kernels")
+    #[arg(default_value = "my-tile-kernels")]
+    name: String,
+    /// Overwrite if the directory already exists
+    #[arg(long = "force")]
+    force: bool,
+}
+
 // ── Update ────────────────────────────────────────────────────────────────
 
 #[derive(clap::Args, Debug)]
@@ -250,15 +270,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let _span = tracing::info_span!("tile", command = ?cli.command).entered();
 
+    let h = harness::Harness::from_config();
+
     match cli.command {
-        Command::Bench(args) => cmd::bench::run(&args)?,
-        Command::Test(args) => cmd::test::run(&args)?,
-        Command::Build(args) => cmd::build::run(&args)?,
-        Command::Inspect(args) => cmd::inspect::run(&args)?,
+        Command::Bench(ref args) => cmd::BenchCommand(args).run(&h)?,
+        Command::Test(ref args) => cmd::TestCommand(args).run(&h)?,
+        Command::Build(ref args) => cmd::BuildCommand(args).run(&h)?,
+        Command::Inspect(ref args) => cmd::InspectCommand(args).run(&h)?,
         Command::Device(args) => cmd::device::run(&args)?,
         Command::Snap(args) => cmd::snap::run(&args)?,
         Command::Diff(args) => cmd::diff::run(&args)?,
         Command::Update(args) => cmd::update::run(&args)?,
+        Command::Init(ref args) => cmd::InitCommand(args).run(&h)?,
     }
     Ok(())
 }

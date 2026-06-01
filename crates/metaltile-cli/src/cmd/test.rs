@@ -16,6 +16,15 @@ use crate::{
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
+/// `TileCommand` wrapper for `tile test`.
+pub struct TestCommand<'a>(pub &'a TestArgs);
+
+impl<'a> super::TileCommand for TestCommand<'a> {
+    fn run(&self, _harness: &crate::harness::Harness) -> Result<(), crate::CliError> {
+        run(self.0)
+    }
+}
+
 pub fn run(args: &TestArgs) -> Result<(), crate::CliError> {
     let _span = tracing::info_span!("test", filter = ?args.filter).entered();
     let filter = &args.filter;

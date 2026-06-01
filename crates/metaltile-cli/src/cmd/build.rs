@@ -53,6 +53,15 @@ fn pad_right(text: &str, width: usize) -> String { format!("{text:>width$}") }
 /// dtypes it should be monomorphized over.
 type EmitKernel = (&'static dyn KernelBench, Vec<DType>);
 
+/// `TileCommand` wrapper for `tile build`.
+pub struct BuildCommand<'a>(pub &'a BuildArgs);
+
+impl<'a> super::TileCommand for BuildCommand<'a> {
+    fn run(&self, _harness: &crate::harness::Harness) -> Result<(), crate::CliError> {
+        run(self.0)
+    }
+}
+
 pub fn run(args: &BuildArgs) -> Result<(), CliError> {
     let _span = tracing::info_span!("build", filter = ?args.filter, emit = ?args.emit).entered();
     let filter = &args.filter;

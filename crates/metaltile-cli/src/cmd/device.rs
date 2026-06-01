@@ -2,8 +2,7 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! `tile device` — Show GPU device info and supported feature flags.
 
-use metaltile_runtime::GpuFamily;
-use metaltile::runner::GpuRunner;
+use metaltile::runner::{GpuFamily, GpuRunner};
 
 use crate::{
     DeviceArgs,

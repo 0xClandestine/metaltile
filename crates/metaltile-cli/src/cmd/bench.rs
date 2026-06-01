@@ -660,6 +660,19 @@ fn run_reference_bench(
     Some((ref_gbps, equiv))
 }
 
+// ── TileCommand impl ──────────────────────────────────────────────────────
+
+/// `TileCommand` wrapper so `Harness`/`ProjectRunner` can dispatch `bench`
+/// uniformly.  The `BenchArgs` carry all user-supplied flags; `harness` is
+/// available for future config overrides (e.g. verbose level from config).
+pub struct BenchCommand<'a>(pub &'a BenchArgs);
+
+impl<'a> super::TileCommand for BenchCommand<'a> {
+    fn run(&self, _harness: &crate::harness::Harness) -> Result<(), crate::CliError> {
+        run(self.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use metaltile_std::bench_types::{EquivResult, OpBench};

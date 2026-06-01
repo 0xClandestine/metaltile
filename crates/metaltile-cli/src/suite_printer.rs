@@ -1,12 +1,19 @@
 //! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
 //! SPDX-License-Identifier: Apache-2.0
-//! Suite printer: formats OpResult batches as terminal tables.
+//! Suite printer: formats OpResult batches and `ProtocolMessage::BenchResult`
+//! JSON-stream entries as terminal tables.
 //!
-//! All terminal output logic lives here (and in `term.rs`). The data types
-//! (`OpResult`, `OpBench`, `CorrectnessStatus`) stay in `metaltile-std`.
+//! Two input paths:
+//!
+//! * **Phase 1 (current)**: `print_batch(&[OpResult])` — in-process bench
+//!   results from `metaltile-std::bench_types`.
+//! * **Phase 2 (subprocess)**: `print_bench_result(&BenchResult)` — parsed
+//!   JSON lines from the `__tile_runner` subprocess.  The data type lives in
+//!   `metaltile-core::protocol` so the CLI does not need `metaltile-std`.
 
 use std::io::Write;
 
+use metaltile_core::protocol::BenchResult as ProtoBenchResult;
 use metaltile_std::bench_types::{CorrectnessStatus, OpResult};
 
 use crate::term::{Color, Style, paint_stdout};
@@ -46,6 +53,16 @@ impl SuitePrinter {
         }
     }
 
+    /// Construct a printer whose baseline verbosity comes from the shared
+    /// `Harness` config.  The caller may still override with `set_verbose`.
+    pub fn from_harness(harness: &crate::harness::Harness) -> Self {
+        let mut p = Self::new(true);
+        if harness.config.verbose {
+            p.verbose = 1;
+        }
+        p
+    }
+
     pub fn set_verbose(&mut self, v: u8) { self.verbose = v; }
 
     pub fn set_profile_map(&mut self, m: std::collections::HashMap<(String, String), ProfileRow>) {
@@ -76,6 +93,51 @@ impl SuitePrinter {
             self.last_op_display = Some(result.op_display());
             self.print_data_row(result);
         }
+        self.flush();
+    }
+
+    /// Print one `ProtocolMessage::BenchResult` line (Phase 2 subprocess path).
+    ///
+    /// Emits a single compact row: `  ✓/✗  <name> [<dtype>]  <mt> GB/s  (ref: <ref>)  <pct>%`.
+    /// This intentionally does not try to match the full `print_batch` table
+    /// layout — that refactor (grouping by kernel name, shared column widths)
+    /// is a follow-up once all commands are subprocess-based.
+    pub fn print_bench_result(&mut self, r: &ProtoBenchResult) {
+        self.started = true;
+        let ok_sym = if r.correct {
+            paint_stdout("✓", Style::new().fg(Color::Green).bold())
+        } else {
+            paint_stdout("✗", Style::new().fg(Color::Red).bold())
+        };
+        let label = paint_stdout(
+            format!("{} [{}]", r.name, r.dtype),
+            Style::new().fg(Color::BrightWhite),
+        );
+        let mt = paint_stdout(
+            format!("{:.1} GB/s", r.mt_gbps),
+            Style::new().fg(Color::BrightWhite).bold(),
+        );
+        let ref_part = match r.ref_gbps {
+            Some(rg) => paint_stdout(
+                format!("ref {rg:.1}"),
+                Style::new().fg(Color::BrightBlack),
+            ),
+            None => paint_stdout("no ref", Style::new().fg(Color::BrightBlack).dim()),
+        };
+        let pct_part = match r.mt_pct {
+            Some(p) => {
+                let style = if p >= 90.0 {
+                    Style::new().fg(Color::Green).bold()
+                } else if p >= 60.0 {
+                    Style::new().fg(Color::Yellow).bold()
+                } else {
+                    Style::new().fg(Color::Red).bold()
+                };
+                paint_stdout(format!("{p:.0}%"), style)
+            },
+            None => paint_stdout("—", Style::new().fg(Color::BrightBlack).dim()),
+        };
+        println!("  {ok_sym}  {label}  {mt}  {ref_part}  {pct_part}");
         self.flush();
     }
 
