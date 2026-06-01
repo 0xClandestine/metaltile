@@ -155,6 +155,7 @@ pub mod sdpa_decode; // unified: d64, d96, d128, d256, d512
 pub mod sdpa_decode_2pass;
 pub mod sdpa_decode_batched;
 pub mod sdpa_decode_d512_sink;
+pub mod sdpa_decode_sink_buf;
 pub mod sdpa_multi;
 pub mod sdpa_multi_d256;
 pub mod sdpa_prefill_d512_sink;
