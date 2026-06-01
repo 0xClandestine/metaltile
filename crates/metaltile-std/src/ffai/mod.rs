@@ -139,6 +139,7 @@ pub mod patch_embed_mma;
 pub mod patch_embed_mma_block_scaled;
 pub mod pos_emb_2d_add;
 pub mod resize_normalize;
+pub mod resize_normalize_bicubic;
 pub mod rms_norm_block_scaled_qgemv;
 pub mod rms_norm_qgemv;
 pub mod rms_norm_residual;
