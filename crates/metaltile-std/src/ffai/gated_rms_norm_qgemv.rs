@@ -478,5 +478,7 @@ pub mod kernel_benches {
             .grid_3d((out_dim / 8) as u32, 1, 1, [64, 1, 1])
             // Weight matrix dominates traffic: out_dim*in_dim int4 = bytes/2.
             .bytes_moved((out_dim * in_dim / 2) as u64)
+            // fused gated-rms_norm + qgemv (B=1): dominant compute is 2 * out_dim * in_dim
+            .flops(2 * out_dim as u64 * in_dim as u64)
     }
 }

@@ -298,6 +298,68 @@ pub enum CorrectnessStatus {
     Unavailable,
 }
 
+/// Derived performance metrics computed by the runner from the raw timing,
+/// bytes-moved, FLOP count, and device peak specs. Everything is `Option` so a
+/// kernel that supplies no FLOP count (memory-bound) or runs on an unknown device
+/// simply leaves the corresponding cells blank — the columns/JSON fields are
+/// **additive**, never replacing the existing GB/s figures.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DerivedMetrics {
+    /// Compute throughput in GFLOP/s (`flops ÷ min latency`). `None` unless the
+    /// bench annotated a FLOP count via [`BenchSetup::flops`](metaltile_core::bench::BenchSetup::flops).
+    pub gflops: Option<f64>,
+    /// Achieved bandwidth as a percentage of the device's peak DRAM bandwidth.
+    pub pct_peak_bw: Option<f64>,
+    /// Achieved compute as a percentage of the device's peak compute (for the
+    /// kernel's dtype/engine). `None` unless both `gflops` and device specs exist.
+    pub pct_peak_flops: Option<f64>,
+    /// Arithmetic intensity in FLOPs/byte (`flops ÷ bytes_moved`) — places the
+    /// kernel on the roofline (left of the ridge ⇒ memory-bound, right ⇒ compute).
+    pub arith_intensity: Option<f64>,
+    /// Estimated SIMD occupancy (%), from the CPU-side occupancy pass.
+    pub occ_pct: Option<f64>,
+    /// Estimated registers per thread, from the CPU-side register pass.
+    pub regs_per_thread: Option<usize>,
+    /// One-word bottleneck verdict (`memory-bound`, `compute-bound`,
+    /// `occupancy-limited`, `register-limited`, `latency-bound`), combining the
+    /// roofline position with the occupancy/register signals.
+    pub bottleneck: Option<&'static str>,
+}
+
+/// Build the wire-format [`ProfileInfo`](metaltile_core::protocol::ProfileInfo)
+/// from the in-process [`DerivedMetrics`]. This is the single source of truth
+/// for the metric schema: the future `__tile_runner` subprocess emits a
+/// `ProtocolMessage::BenchResult` whose `profile` is produced via this
+/// conversion, so the CLI renders the same numbers whether it computed them
+/// in-process (Phase 1) or parsed them off the wire (Phase 2).
+impl From<&DerivedMetrics> for metaltile_core::protocol::ProfileInfo {
+    fn from(m: &DerivedMetrics) -> Self {
+        Self {
+            gflops: m.gflops,
+            pct_peak_bw: m.pct_peak_bw,
+            pct_peak_flops: m.pct_peak_flops,
+            arith_intensity: m.arith_intensity,
+            occ_pct: m.occ_pct,
+            regs_per_thread: m.regs_per_thread.map(|r| r as u32),
+            bottleneck: m.bottleneck.map(str::to_string),
+        }
+    }
+}
+
+/// Optional per-run extras threaded into an [`OpResult`] alongside the headline
+/// perf figures: GPU timing distributions and the derived roofline metrics. Kept
+/// in one struct so [`OpBench::result_with_extras`] doesn't grow an unwieldy
+/// argument list as new metrics are added.
+#[derive(Debug, Clone, Default)]
+pub struct OpResultExtras {
+    /// GPU timing stats for the MetalTile kernel (latency, percentiles, cv%).
+    pub mt_timing: Option<BenchStats>,
+    /// GPU timing stats for the reference kernel, when an A/B ran.
+    pub ref_timing: Option<BenchStats>,
+    /// Derived roofline / throughput metrics.
+    pub metrics: Option<DerivedMetrics>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct OpBench {
     op: &'static str,
@@ -354,6 +416,26 @@ impl OpBench {
         mt_timing: Option<BenchStats>,
         ref_timing: Option<BenchStats>,
     ) -> OpResult {
+        self.result_with_extras(subop, shape, ref_perf, mt_perf, equiv, OpResultExtras {
+            mt_timing,
+            ref_timing,
+            metrics: None,
+        })
+    }
+
+    /// The fullest constructor: like `result_sub_timed` but also carries the
+    /// derived roofline/throughput metrics (and bundles the timing stats) in an
+    /// [`OpResultExtras`]. All other `result*` helpers funnel through here, so the
+    /// single `report_result` call always sees a fully-populated row.
+    pub fn result_with_extras(
+        &self,
+        subop: Option<impl Into<String>>,
+        shape: impl Into<String>,
+        ref_perf: Option<f64>,
+        mt_perf: Option<f64>,
+        equiv: Option<EquivResult>,
+        extras: OpResultExtras,
+    ) -> OpResult {
         let shape = shape.into();
         if mt_perf.is_some() && equiv.is_none() {
             panic!("implemented benchmark '{}' [{}] is missing correctness", self.op, shape);
@@ -366,8 +448,9 @@ impl OpBench {
             ref_perf,
             mt_perf,
             equiv,
-            mt_timing,
-            ref_timing,
+            mt_timing: extras.mt_timing,
+            ref_timing: extras.ref_timing,
+            metrics: extras.metrics,
             legacy: self.legacy,
         };
         report_result(&result);
@@ -407,6 +490,9 @@ pub struct OpResult {
     pub mt_timing: Option<BenchStats>,
     /// GPU timing stats for reference (-vv mode only).
     pub ref_timing: Option<BenchStats>,
+    /// Derived roofline / throughput metrics (GFLOP/s, %-of-peak, arithmetic
+    /// intensity, occupancy, bottleneck). `None` until the runner computes them.
+    metrics: Option<DerivedMetrics>,
     /// When true, the op label renders with a "(legacy)" suffix. Set for a
     /// `#[kernel(bench(...))]` whose kernel also has a new `#[bench]`, so the
     /// old and new rows are visually distinct during migration.
@@ -442,6 +528,21 @@ impl OpResult {
     pub fn mt_perf(&self) -> Option<f64> { self.mt_perf }
 
     pub fn equiv(&self) -> Option<&EquivResult> { self.equiv.as_ref() }
+
+    /// MetalTile wall-clock latency in microseconds (the `min` sample — the
+    /// steady-state runtime, matching the GB/s convention). Derived from the
+    /// threaded `mt_timing`, so there is no separately-stored latency to drift.
+    pub fn mt_us(&self) -> Option<f64> {
+        self.mt_timing.as_ref().filter(|t| t.is_valid()).map(|t| t.min_us)
+    }
+
+    /// Reference kernel wall-clock latency in microseconds, when an A/B ran.
+    pub fn ref_us(&self) -> Option<f64> {
+        self.ref_timing.as_ref().filter(|t| t.is_valid()).map(|t| t.min_us)
+    }
+
+    /// Derived roofline / throughput metrics, if the runner computed them.
+    pub fn metrics(&self) -> Option<&DerivedMetrics> { self.metrics.as_ref() }
 
     pub fn pct(&self) -> Option<f64> {
         match (self.ref_perf, self.mt_perf) {
@@ -709,6 +810,7 @@ mod tests {
             equiv: None,
             mt_timing: None,
             ref_timing: None,
+            metrics: None,
             legacy: false,
         };
         let unavailable = sample_result(None, None);
@@ -717,6 +819,43 @@ mod tests {
         assert!(unchecked.is_unchecked());
         assert_eq!(unavailable.correctness_status(), CorrectnessStatus::Unavailable);
         assert_eq!(unavailable.correctness_cell(), "—");
+    }
+
+    #[test]
+    fn mt_us_and_ref_us_surface_the_min_sample() {
+        use metaltile::runner::BenchStats;
+        let mt = BenchStats::from_samples(vec![120.0, 130.0, 250.0]);
+        let reference = BenchStats::from_samples(vec![80.0, 90.0, 100.0]);
+        let r = OpBench::new("sample", "GB/s").result_with_extras(
+            None::<&str>,
+            "shape",
+            Some(1.0),
+            Some(2.0),
+            Some(EquivResult { n_checked: 1, max_abs_err: 0.0, cosine_sim: 1.0, passed: true }),
+            super::OpResultExtras {
+                mt_timing: Some(mt),
+                ref_timing: Some(reference),
+                metrics: None,
+            },
+        );
+        // Latency is the min sample (steady state), matching the GB/s convention.
+        assert_eq!(r.mt_us(), Some(120.0));
+        assert_eq!(r.ref_us(), Some(80.0));
+    }
+
+    #[test]
+    fn mt_us_is_none_without_timing_or_when_invalid() {
+        use metaltile::runner::BenchStats;
+        // No timing at all → None.
+        let no_timing = sample_result(
+            Some(2.0),
+            Some(EquivResult { n_checked: 1, max_abs_err: 0.0, cosine_sim: 1.0, passed: true }),
+        );
+        assert_eq!(no_timing.mt_us(), None);
+        assert_eq!(no_timing.ref_us(), None);
+        // Off-GPU stub timing (all-zero samples ⇒ !is_valid) → None, not 0.0.
+        let stub = BenchStats::from_samples(vec![0.0, 0.0]);
+        assert!(!stub.is_valid());
     }
 
     #[test]
@@ -769,6 +908,7 @@ mod tests {
             equiv: None,
             mt_timing: None,
             ref_timing: None,
+            metrics: None,
             legacy: false,
         };
         let err = validate_results(&[unchecked]).expect_err("unchecked rows should fail");

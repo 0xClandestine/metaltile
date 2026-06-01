@@ -456,6 +456,8 @@ pub mod kernel_benches {
             .constexpr("in_dim", in_dim as u32)
             .constexpr("group_size", gs as u32)
             .bytes_moved((total * 4) as u64)
+            // 3 fused qmms: 2 * m * (out_q + out_k + out_v) * in_dim
+            .flops(2 * m as u64 * (out_q + out_k + out_v) as u64 * in_dim as u64)
             .grid_3d(n_tgs as u32, m as u32, 3, [64, 1, 1])
     }
 }

@@ -684,6 +684,8 @@ pub mod kernel_benches {
             .constexpr("q_position", q_position as u32)
             // K+V packed reads dominate.
             .bytes_moved((kv_heads * kv_stride * (key_pw + val_pw) * 4) as u64)
+            // 4 * H * Nkv * D (pass1: Nq=1 decode, QKᵀ + ·V over kv range; H = q_heads)
+            .flops(4 * (q_heads as u64) * (tokens as u64) * (dim as u64))
             .grid_3d(1, q_heads as u32, num_blocks as u32, [32, 1, 1])
     }
 

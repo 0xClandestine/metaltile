@@ -171,5 +171,7 @@ pub mod kernel_benches {
             ))
             .grid_3d(n_heads as u32, 1, 1, [1024, 1, 1])
             .bytes_moved(bytes as u64)
+            // 4 * H * Nkv * D (decode: Nq=1, QKᵀ + ·V both matmuls)
+            .flops(4 * (n_heads as u64) * (n_kv as u64) * (HEAD_DIM as u64))
     }
 }

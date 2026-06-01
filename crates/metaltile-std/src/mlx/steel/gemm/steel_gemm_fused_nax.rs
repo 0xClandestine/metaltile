@@ -180,6 +180,7 @@ pub mod kernel_benches {
             // Reduction grid is threadgroup counts: (n/32, m/32, 1).
             .grid_3d(N / TILE, M / TILE, 1, [TPG, 1, 1])
             .bytes_moved(bytes as u64)
+            .flops(2 * (M as u64) * (N as u64) * (K as u64)) // 2 * M * N * K
     }
 }
 

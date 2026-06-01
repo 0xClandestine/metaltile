@@ -12,7 +12,8 @@ cargo run -p metaltile-cli -- <command> …
 
 ## `tile bench` — benchmark vs MLX
 
-Runs every kernel against its MLX reference and reports throughput + a correctness check.
+Runs every kernel against its MLX reference and reports throughput, wall-clock
+latency, compute throughput, and a correctness check.
 
 ```
 tile bench [-f <substr>] [-v|-vv] [-o <file.json>] [--allow-dirty]
@@ -22,11 +23,34 @@ tile bench [-f <substr>] [-v|-vv] [-o <file.json>] [--allow-dirty]
 | Flag | Effect |
 |---|---|
 | `-f, --filter <substr>` | only run kernels whose name contains `<substr>` |
-| `-v` / `-vv` | `-v` adds occupancy + register profile; `-vv` adds GPU timing (min µs + bandwidth) |
+| `-v` / `-vv` | `-v` adds the reference latency, roofline (`%BW` / `%FLOP` / arithmetic intensity), occupancy/registers, and a bottleneck verdict; `-vv` adds the GPU timing distribution (`p95` / `p99` / `cv%`) |
 | `-o, --json <file>` | also write results as JSON |
 | `--allow-dirty` | run on a dirty working tree (default: refuses, so numbers tie to a clean SHA) |
 | `--diff` | opt into the post-bench diff against the target-branch baseline |
 | `--baseline-ref <ref>` | git ref whose `baselines/<chip>.json` to diff against (default: first of `origin/dev`, `upstream/dev`, `dev`) |
+
+### Metrics
+
+The default table shows, per kernel/dtype: `MT(µs)` (wall-clock latency, the
+`min` sample — the metric that makes "which precision is fastest" directly
+readable), `Ref`/`MT` (GB/s bandwidth), `MT%` (MT-vs-reference ratio), `GFLOP/s`
+(compute throughput, blank for memory-bound kernels), and `ok` (correctness).
+
+`-v` adds the roofline view: `%BW` (achieved ÷ the device's peak DRAM bandwidth),
+`%FLOP` (achieved ÷ peak compute — the M5 Neural-Accelerator FP16 ceiling where
+applicable, the SIMD pipe otherwise), `AI` (arithmetic intensity, FLOPs/byte),
+the estimated `occ%`/`regs`, and a combined `bottleneck` verdict
+(`memory-bound` / `compute-bound` / `occupancy-limited` / `register-limited` /
+`latency-bound`). Peak ceilings come from a per-device table
+(`crates/metaltile-std/src/device_specs.rs`); an unknown GPU leaves the roofline
+columns blank rather than failing.
+
+GFLOP/s, latency, and the roofline figures only appear for kernels that declared
+a FLOP count (`#[bench(flops = …)]` or `BenchSetup::flops`) — matmul, attention,
+and convolution; memory-bound elementwise/reduction kernels leave them blank. The
+JSON (`-o`) is **additive**: it keeps the `ref`/`mt` (GB/s) keys baseline diffing
+consumes and adds `latency_us`, `gflops`, `pct_peak_bw`, `pct_peak_flops`, and
+`arith_intensity`.
 
 ## `tile build` — compile kernels to MSL
 

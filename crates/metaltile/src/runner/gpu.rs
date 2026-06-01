@@ -687,3 +687,23 @@ pub fn bench_gbps_only(
     runner.flush_slc();
     to_gbps(&runner.bench(kernel, buffers, grid, tpg, BENCH_WARMUP, BENCH_ITERS), bytes)
 }
+
+#[cfg(test)]
+mod throughput_tests {
+    use super::{BenchStats, to_gbps, to_gflops};
+
+    /// Both throughput conversions use the `min` sample (steady state) and are
+    /// `None` for the off-GPU all-zero stub (`is_valid() == false`).
+    #[test]
+    fn throughput_conversions_use_min_and_guard_invalid() {
+        // 1e9 FLOPs in 100 µs = 1e13 FLOP/s = 10_000 GFLOP/s; min sample is 100.
+        let st = BenchStats::from_samples(vec![100.0, 150.0, 300.0]);
+        assert_eq!(to_gflops(&st, 1e9), Some(10_000.0));
+        // 1e9 bytes in 100 µs = 1e13 B/s = 10_000 GB/s.
+        assert_eq!(to_gbps(&st, 1e9), Some(10_000.0));
+        // Off-GPU stub: all-zero samples ⇒ invalid ⇒ no throughput.
+        let stub = BenchStats::from_samples(vec![0.0, 0.0]);
+        assert_eq!(to_gflops(&stub, 1e9), None);
+        assert_eq!(to_gbps(&stub, 1e9), None);
+    }
+}

@@ -1109,6 +1109,8 @@ pub mod kernel_benches {
             .constexpr("in_dim", in_dim as u32)
             .constexpr("group_size", gs as u32)
             .bytes_moved((total * 4) as u64)
+            // 3 fused qgemvs (B=1): 2 * (out_q + out_k + out_v) * in_dim
+            .flops(2 * (out_q + out_k + out_v) as u64 * in_dim as u64)
     }
 
     #[bench(name = "ffai/batched_qkv_qgemv", dtypes = [f32, f16, bf16])]

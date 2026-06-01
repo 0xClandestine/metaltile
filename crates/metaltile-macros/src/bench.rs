@@ -18,6 +18,8 @@ struct BenchAttr {
     dtypes: Vec<Ident>,
     /// Optional `|s: &BenchSetup| -> u64` closure overriding bytes-moved.
     bytes: Option<Expr>,
+    /// Optional `|s: &BenchSetup| -> u64` closure overriding the FLOP count.
+    flops: Option<Expr>,
     /// Optional `MetalRef { ... }` expression for reference comparison.
     metal_ref: Option<Expr>,
 }
@@ -27,6 +29,7 @@ impl syn::parse::Parse for BenchAttr {
         let mut name = None;
         let mut dtypes = None;
         let mut bytes = None;
+        let mut flops = None;
         let mut metal_ref = None;
 
         while !input.is_empty() {
@@ -42,12 +45,16 @@ impl syn::parse::Parse for BenchAttr {
                 dtypes = Some(list.into_iter().collect::<Vec<_>>());
             } else if key == "bytes" {
                 bytes = Some(input.parse::<Expr>()?);
+            } else if key == "flops" {
+                flops = Some(input.parse::<Expr>()?);
             } else if key == "ref" {
                 metal_ref = Some(input.parse::<Expr>()?);
             } else {
                 return Err(syn::Error::new(
                     key.span(),
-                    format!("unknown #[bench] key `{key}` — valid keys: name, dtypes, bytes, ref"),
+                    format!(
+                        "unknown #[bench] key `{key}` — valid keys: name, dtypes, bytes, flops, ref"
+                    ),
                 ));
             }
 
@@ -70,6 +77,7 @@ impl syn::parse::Parse for BenchAttr {
                 )
             })?,
             bytes,
+            flops,
             metal_ref,
         })
     }
@@ -127,6 +135,18 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         None => quote! {},
     };
 
+    let flops_impl: TokenStream2 = match &bench_attr.flops {
+        Some(expr) => quote! {
+            fn flops(
+                &self,
+                setup: &::metaltile::core::bench::BenchSetup,
+            ) -> ::std::option::Option<u64> {
+                ::std::option::Option::Some((#expr)(setup))
+            }
+        },
+        None => quote! {},
+    };
+
     let metal_ref_impl: TokenStream2 = match &bench_attr.metal_ref {
         Some(expr) => quote! {
             fn reference_kernel(
@@ -161,6 +181,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
 
             #bytes_impl
+            #flops_impl
             #metal_ref_impl
         }
 

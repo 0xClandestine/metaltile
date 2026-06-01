@@ -251,6 +251,8 @@ pub mod kernel_benches {
             .constexpr("conv_kernel", CONV_KERNEL)
             .grid_3d(conv_dim as u32, 1, 1, [1, 1, 1])
             .bytes_moved(((t_len * conv_dim) * (DType::F32.size_bytes() + dt.size_bytes())) as u64)
+            // 2 * T * conv_dim * conv_kernel; depthwise causal conv1d (icpg=1, Lo=T)
+            .flops(2 * (t_len as u64) * (conv_dim as u64) * (CONV_KERNEL as u64))
     }
 
     #[bench(name = "ffai/ssm/conv1d_causal_step_silu_cast_many", dtypes = [f32, f16, bf16])]

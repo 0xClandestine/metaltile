@@ -577,6 +577,8 @@ pub mod kernel_benches {
             .constexpr("group_size", group_size as u32)
             .grid_3d(grid_rows, 1, 1, [tpg, 1, 1])
             .bytes_moved(bytes as u64)
+            // qgemv (B=1): 2 * out_dim * in_dim
+            .flops(2 * out_dim as u64 * in_dim as u64)
     }
 
     #[bench(name = "ffai/dequant_gemv/int2", dtypes = [f32, f16, bf16])]

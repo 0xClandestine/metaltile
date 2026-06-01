@@ -906,6 +906,8 @@ pub mod kernel_benches {
             .constexpr("in_dim", in_dim as u32)
             .constexpr("group_size", gs as u32)
             .bytes_moved((weight_words * 4) as u64)
+            // fused rms_norm + qgemv (B=1): dominant compute is 2 * out_dim * in_dim
+            .flops(2 * out_dim as u64 * in_dim as u64)
     }
 
     #[bench(name = "ffai/rms_norm_qgemv", dtypes = [f32, f16, bf16])]

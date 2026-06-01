@@ -461,5 +461,7 @@ pub mod kernel_benches {
             .constexpr("kw", kw as u32)
             .grid_3d((out_ch / 32) as u32, (n_pixels / 32) as u32, 1, [128, 1, 1])
             .bytes_moved((n_out * dt.size_bytes()) as u64)
+            // 2 * N * Co * Ho * Wo * Ci * kh * kw (stride=1, pad=0, so Ho=in_h-kh+1)
+            .flops(2 * (batch as u64) * (out_ch as u64) * (out_h as u64) * (out_w as u64) * (in_ch as u64) * (kh as u64) * (kw as u64))
     }
 }

@@ -2,28 +2,23 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! `tile bench` — Benchmark suite: MetalTile vs MLX reference.
 
-use std::collections::HashMap;
-
 use metaltile::{
     harness::bench::{BenchSetup, KernelBench, RefKernel},
-    runner::{GpuBuffer, GpuRunner, bench_gbps_with, read_typed},
-};
-use metaltile_codegen::passes::{
-    self,
-    occupancy::{self, Bottleneck},
+    runner::{GpuBuffer, GpuRunner, bench_gbps_with, device_specs, profile, read_typed, to_gflops},
 };
 use metaltile_core::ir::ParamKind;
 use metaltile_std::bench_types::{
     CorrectnessStatus,
+    DerivedMetrics,
     EquivResult,
     OpBench,
     OpResult,
+    OpResultExtras,
     check_equiv,
     dtype_label,
     set_result_reporter,
     validate_results,
 };
-use rayon::prelude::*;
 use serde_json::Value;
 
 use crate::{
@@ -31,7 +26,7 @@ use crate::{
     FilterSpec,
     cmd::diff as diff_cmd,
     git,
-    suite_printer::{ProfileRow, SuitePrinter},
+    suite_printer::SuitePrinter,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
@@ -123,15 +118,11 @@ pub fn run(args: &BenchArgs, harness: &crate::harness::Harness) -> Result<(), cr
     let mut all: Vec<OpResult> = Vec::new();
     let mut matched_filter = false;
 
-    // When -v, compute occupancy/register profile for each op+dtype (CPU-only, fast).
-    let profile_map: Option<HashMap<(String, String), ProfileRow>> =
-        if verbose > 0 { Some(compute_profiles(&spec)) } else { None };
-
+    // Per-result roofline/occupancy metrics are computed inline in
+    // `run_kernel_bench` and attached to each `OpResult` (see `DerivedMetrics`),
+    // which the SuitePrinter renders directly under `-v`/`-vv`.
     let mut printer = SuitePrinter::new(true);
     printer.set_verbose(verbose);
-    if let Some(m) = &profile_map {
-        printer.set_profile_map(m.clone());
-    }
     {
         let mut report = |result: &OpResult| {
             if spec.matches_name(result.op()) {
@@ -513,58 +504,58 @@ fn pct_style(pct: f64) -> Style {
     }
 }
 
-// ── Profile helper for -v / -vv ───────────────────────────────────────
+// ── Derived metrics for -v / -vv ──────────────────────────────────────
 
-/// Compile-time profile for each op (first dtypes entry, usually f32).
-/// Runs the standard optimization pipeline + liveness + occupancy estimate.
-/// Parallelized via rayon — the pass pipeline and occupancy analysis are
-/// CPU-only and independent per kernel/dtype, so this scales with core count.
-fn compute_profiles(spec: &FilterSpec) -> HashMap<(String, String), ProfileRow> {
-    // Collect first so we can par_iter (inventory::iter is sequential).
-    let entries: Vec<_> = metaltile::harness::registry::all_benches().collect();
+/// Compute the derived roofline / occupancy metrics for one bench run.
+///
+/// Folds the measured throughput (`gbps`, `stats`) together with the bench's
+/// declared FLOP count and the device's peak specs into a [`DerivedMetrics`]:
+/// GFLOP/s, %-of-peak bandwidth/compute, arithmetic intensity, and the
+/// CPU-estimated occupancy/register/bottleneck verdict. Every field is
+/// `Option`, so an unseeded device (CI's virtualized GPU) or a memory-bound
+/// kernel with no FLOP count simply leaves the corresponding columns blank.
+fn derive_metrics(
+    bench: &dyn KernelBench,
+    setup: &BenchSetup,
+    dt: metaltile_core::DType,
+    device_name: &str,
+    gbps: f64,
+    stats: &metaltile::runner::BenchStats,
+    bytes_moved: u64,
+) -> DerivedMetrics {
+    let specs = device_specs::lookup(device_name);
+    let flops = bench.flops(setup);
+    let gflops = flops.and_then(|f| to_gflops(stats, f as f64));
 
-    entries
-        .par_iter()
-        .flat_map_iter(|entry| {
-            let b = entry.bench();
-            let name = b.name();
-            if !spec.matches(name, entry.file()) {
-                return vec![];
-            }
-            let op_display = name.to_string();
-            b.dtypes()
-                .iter()
-                .filter_map(|&dt| {
-                    let mut k = b.setup(dt).kernel().clone();
-                    if passes::run_passes(&mut k, &passes::standard_pipeline()).is_err() {
-                        return None;
-                    }
-                    let reg_est = passes::register_estimate::estimate_registers(&k);
-                    let candidates: Vec<(u32, Option<u32>)> =
-                        [64u32, 128, 256, 512, 1024].iter().map(|&s| (s, None)).collect();
-                    let (occ_pct, bottleneck) = if let Some((_tg, est)) =
-                        occupancy::best_threadgroup_size(&k, &candidates)
-                    {
-                        (est.occupancy_pct, est.bottleneck)
-                    } else {
-                        return None;
-                    };
-                    let bottleneck_label = match bottleneck {
-                        Bottleneck::ThreadLimited => "thread-limited",
-                        Bottleneck::RegisterLimited => "register-limited",
-                        Bottleneck::MemoryLimited => "tgmem-limited",
-                        _ => "unknown",
-                    };
-                    let dtype_label = metaltile_std::bench_types::dtype_label(dt).to_string();
-                    Some(((op_display.clone(), dtype_label), ProfileRow {
-                        occ_pct,
-                        regs_per_thread: reg_est.regs_per_thread,
-                        bottleneck: bottleneck_label,
-                    }))
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect()
+    let pct_peak_bw = specs.as_ref().map(|s| gbps / s.peak_bw_gbps * 100.0);
+    let pct_peak_flops = gflops.zip(specs.as_ref()).and_then(|(g, s)| {
+        // peak_tflops_for is TFLOP/s; gflops is GFLOP/s ⇒ ×1000 to compare.
+        let peak_gflops = s.peak_tflops_for(dt) * 1000.0;
+        (peak_gflops > 0.0).then_some(g / peak_gflops * 100.0)
+    });
+    let arith_intensity = flops.filter(|_| bytes_moved > 0).map(|f| f as f64 / bytes_moved as f64);
+
+    // Occupancy / register profile + the combined bottleneck verdict (folds the
+    // roofline position together with the occupancy/register signals).
+    let prof = profile::estimate_profile(setup.kernel());
+    let ridge_point = specs.as_ref().map(|s| s.peak_tflops_for(dt) * 1000.0 / s.peak_bw_gbps);
+    let bottleneck = profile::classify_bottleneck(
+        arith_intensity,
+        ridge_point,
+        pct_peak_bw,
+        pct_peak_flops,
+        prof.as_ref(),
+    );
+
+    DerivedMetrics {
+        gflops,
+        pct_peak_bw,
+        pct_peak_flops,
+        arith_intensity,
+        occ_pct: prof.as_ref().map(|p| p.occ_pct),
+        regs_per_thread: prof.as_ref().map(|p| p.regs_per_thread),
+        bottleneck,
+    }
 }
 
 // ── In-process bench runner (bridges old OpResult API to new GpuRunner) ───────
@@ -632,7 +623,7 @@ fn run_kernel_bench(
     let grid = setup.grid();
     let g = grid.grid.map(|x| x as usize);
     let t = grid.tpg.map(|x| x as usize);
-    let (gbps, _stats) =
+    let (gbps, stats) =
         bench_gbps_with(runner, &compiled, &refs, g, t, bytes_moved as f64, warmup_runs, runs)?;
 
     let shape = match setup.shape_label() {
@@ -643,8 +634,14 @@ fn run_kernel_bench(
         },
     };
 
+    // Derived roofline / occupancy metrics, attached to every row and rendered
+    // by the SuitePrinter under `-v`/`-vv`.
+    let metrics = derive_metrics(bench, &setup, dt, &runner.device_name, gbps, &stats, bytes_moved);
+    let extras =
+        OpResultExtras { mt_timing: Some(stats), metrics: Some(metrics), ..Default::default() };
+
     if let (Some(rk), Some((out_idx, out_n, out_dt))) = (setup.ref_kernel(), mt_out)
-        && let Some((ref_gbps, equiv)) = run_reference_bench(
+        && let Some((ref_gbps, ref_stats, equiv)) = run_reference_bench(
             runner,
             rk,
             &bufs,
@@ -657,16 +654,26 @@ fn run_kernel_bench(
             runs,
         )
     {
-        return Some(OpBench::new(bench.name(), "GB/s").implemented(
+        let extras = OpResultExtras { ref_timing: Some(ref_stats), ..extras };
+        return Some(OpBench::new(bench.name(), "GB/s").result_with_extras(
+            None::<&str>,
             shape,
             Some(ref_gbps),
-            gbps,
-            equiv,
+            Some(gbps),
+            Some(equiv),
+            extras,
         ));
     }
 
     let equiv = EquivResult { n_checked: 0, max_abs_err: 0.0, cosine_sim: 1.0, passed: true };
-    Some(OpBench::new(bench.name(), "GB/s").implemented(shape, None, gbps, equiv))
+    Some(OpBench::new(bench.name(), "GB/s").result_with_extras(
+        None::<&str>,
+        shape,
+        None,
+        Some(gbps),
+        Some(equiv),
+        extras,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -681,7 +688,7 @@ fn run_reference_bench(
     bytes_moved: u64,
     warmup_runs: usize,
     runs: usize,
-) -> Option<(f64, EquivResult)> {
+) -> Option<(f64, metaltile::runner::BenchStats, EquivResult)> {
     let compiled = if rk.bool_constants.is_empty() {
         runner.compile(&rk.source, &rk.fn_name).ok()?
     } else {
@@ -704,7 +711,7 @@ fn run_reference_bench(
     let ref_refs: Vec<&GpuBuffer> = ref_bufs.iter().collect();
     let g = rk.grid.grid.map(|x| x as usize);
     let t = rk.grid.tpg.map(|x| x as usize);
-    let (ref_gbps, _) =
+    let (ref_gbps, ref_stats) =
         bench_gbps_with(runner, &compiled, &ref_refs, g, t, bytes_moved as f64, warmup_runs, runs)?;
 
     let n = mt_out_n.min(ref_out_n).min(COMPARE_ELEM_CAP);
@@ -712,7 +719,7 @@ fn run_reference_bench(
     let ref_vals = read_typed(runner, &ref_bufs[ref_out_idx], n, ref_out_dt);
     let equiv = check_equiv(&ref_vals, &mt_vals, rk.tol);
 
-    Some((ref_gbps, equiv))
+    Some((ref_gbps, ref_stats, equiv))
 }
 
 // ── TileCommand impl ──────────────────────────────────────────────────────

@@ -382,6 +382,7 @@ pub struct BenchSetup {
     constexprs: Vec<(String, ConstValue)>,
     grid: Option<Grid>,
     bytes_moved: Option<u64>,
+    flops: Option<u64>,
     ref_kernel: Option<RefKernel>,
     shape_label: Option<String>,
 }
@@ -395,6 +396,7 @@ impl BenchSetup {
             constexprs: Vec::new(),
             grid: None,
             bytes_moved: None,
+            flops: None,
             ref_kernel: None,
             shape_label: None,
         }
@@ -442,6 +444,15 @@ impl BenchSetup {
         self
     }
 
+    /// Set the floating-point-operation count for compute-throughput (GFLOP/s)
+    /// reporting. Mirrors [`bytes_moved`](Self::bytes_moved). Only meaningful for
+    /// compute-bound kernels (matmul/gemv `2·M·N·K`, attention, conv); leave unset
+    /// for memory-bound elementwise/reduction kernels, where GFLOP/s is blank.
+    pub fn flops(mut self, flops: u64) -> Self {
+        self.flops = Some(flops);
+        self
+    }
+
     /// Set an explicit label for the bench row's "Shape" column.
     pub fn with_shape_label(mut self, label: impl Into<String>) -> Self {
         self.shape_label = Some(label.into());
@@ -483,6 +494,12 @@ impl BenchSetup {
         self.bytes_moved.unwrap_or_else(|| self.buffers.iter().map(|b| b.size_bytes()).sum())
     }
 
+    /// Floating-point-operation count for compute-throughput, if the bench set
+    /// one via [`flops`](Self::flops). `None` for memory-bound kernels. (Named
+    /// distinctly from the [`flops`](Self::flops) *builder* — the builder consumes
+    /// `self`, this getter borrows it.)
+    pub fn flop_count(&self) -> Option<u64> { self.flops }
+
     /// Byte size of a named buffer, or 0 if not found.
     pub fn buffer_bytes(&self, name: &str) -> u64 {
         self.buffers.iter().find(|b| b.name == name).map(|b| b.size_bytes()).unwrap_or(0)
@@ -517,6 +534,11 @@ pub trait KernelBench: Send + Sync {
 
     /// Bytes moved for bandwidth calculation (default: sum of all buffer sizes).
     fn bytes_moved(&self, setup: &BenchSetup) -> u64 { setup.compute_bytes_moved() }
+
+    /// Floating-point-operation count for compute throughput (default: whatever
+    /// the setup declared via [`BenchSetup::flops`], i.e. `None` unless the bench
+    /// annotated it). Compute-bound kernels return `Some`; memory-bound ones `None`.
+    fn flops(&self, setup: &BenchSetup) -> Option<u64> { setup.flop_count() }
 }
 
 /// Inventory wrapper for a [`KernelBench`] implementation.
@@ -588,6 +610,19 @@ mod tests {
         assert_eq!(setup.grid().grid[0], 4);
         assert_eq!(setup.grid().tpg[0], 16);
         assert_eq!(setup.shape_label(), None);
+        // FLOPs are opt-in: unset unless the bench annotates a compute count.
+        assert_eq!(setup.flop_count(), None);
+    }
+
+    #[test]
+    fn bench_setup_flops_is_set_when_provided() {
+        let setup = BenchSetup::new(Kernel::new("k"))
+            .buffer(BenchBuffer::zeros("out", 64, DType::F32).output())
+            .flops(2 * 32 * 4096 * 4096)
+            .grid_1d(64, 16)
+            .build()
+            .unwrap();
+        assert_eq!(setup.flop_count(), Some(2 * 32 * 4096 * 4096));
     }
 
     #[test]

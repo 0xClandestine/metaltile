@@ -227,6 +227,17 @@ fn exp_bench(dt: DType) -> BenchSetup {
 fn exp_bench(dt: DType) -> BenchSetup { … }
 ```
 
+Compute-bound kernels (matmul, attention, convolution) should also declare a FLOP
+count so `tile bench` reports `GFLOP/s` and the roofline `%FLOP` / arithmetic
+intensity. Use the `.flops(n)` builder (the dense-equivalent multiply-accumulate
+count × 2, e.g. `2·M·N·K` for a matmul) or the `flops` key for a closure;
+memory-bound kernels leave it unset and the compute columns stay blank.
+
+```rust
+BenchSetup::new(…).grid_…(…).bytes_moved(b).flops(2 * m * n * k)
+// or, as a #[bench] key: flops = |s| 2 * m * n * k
+```
+
 ### `BenchSetup` and `BenchBuffer`
 
 Both types are **opaque** — fields are private, construction goes through named constructors only. This is intentional: call-site code is insulated from internal layout changes.
@@ -242,6 +253,8 @@ impl BenchSetup {
     pub fn grid_1d(self, n: usize, tpg: u32) -> Self; // [ceil(n/tpg),1,1] / [tpg,1,1]
     pub fn grid_2d(self, x: u32, y: u32, tpg: [u32; 2]) -> Self;
     pub fn grid_3d(self, x: u32, y: u32, z: u32, tpg: [u32; 3]) -> Self;
+    pub fn bytes_moved(self, bytes: u64) -> Self;  // override the GB/s denominator
+    pub fn flops(self, flops: u64) -> Self;        // declare FLOPs for GFLOP/s / roofline
     pub fn buffer_bytes(&self, name: &str) -> u64;
 }
 

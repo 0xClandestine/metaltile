@@ -1114,6 +1114,7 @@ pub mod kernel_benches {
             .constexpr("scale", 1.0f32 / (hd as f32).sqrt())
             .grid_3d(nqh as u32, 1, 1, [1024, 1, 1])
             .bytes_moved(bytes as u64)
+            .flops(4 * (nqh as u64) * (n_kv as u64) * (hd as u64))
     }
 
     #[bench(name = "ffai/sdpa_decode_d96", dtypes = [f32, f16, bf16])]
@@ -1134,6 +1135,7 @@ pub mod kernel_benches {
             .constexpr("scale", 1.0f32 / (hd as f32).sqrt())
             .grid_3d(nqh as u32, 1, 1, [1024, 1, 1])
             .bytes_moved(bytes as u64)
+            .flops(4 * (nqh as u64) * (n_kv as u64) * (hd as u64))
     }
 
     #[bench(name = "ffai/sdpa_decode", dtypes = [f32, f16, bf16])]
@@ -1158,6 +1160,7 @@ pub mod kernel_benches {
             .constexpr("scale", 1.0f32 / (hd as f32).sqrt())
             .grid_3d(nqh as u32, 1, 1, [1024, 1, 1])
             .bytes_moved(bytes as u64)
+            .flops(4 * (nqh as u64) * (n_kv as u64) * (hd as u64))
     }
 
     #[bench(name = "ffai/sdpa_decode_d256", dtypes = [f32, f16, bf16])]
@@ -1180,6 +1183,7 @@ pub mod kernel_benches {
             .constexpr("scale", 1.0f32 / (hd as f32).sqrt())
             .grid_3d(nqh as u32, 1, 1, [1024, 1, 1])
             .bytes_moved(bytes as u64)
+            .flops(4 * (nqh as u64) * (n_kv as u64) * (hd as u64))
     }
 
     #[bench(name = "ffai/sdpa_decode_d512", dtypes = [f32, f16, bf16])]
@@ -1200,5 +1204,7 @@ pub mod kernel_benches {
             .constexpr("scale", 1.0f32 / (hd as f32).sqrt())
             .grid_3d(nqh as u32, 1, 1, [512, 1, 1])
             .bytes_moved(bytes as u64)
+            // 4 * H * Nkv * D (decode: Nq=1, QKᵀ + ·V matmuls; H = n_q_heads)
+            .flops(4 * (nqh as u64) * (n_kv as u64) * (hd as u64))
     }
 }

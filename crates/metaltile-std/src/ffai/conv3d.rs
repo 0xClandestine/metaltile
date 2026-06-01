@@ -577,6 +577,8 @@ pub mod kernel_benches {
             .constexpr("pad_w", 0u32)
             .grid_1d(n_out, 256)
             .bytes_moved((n_out * dt.size_bytes()) as u64)
+            // 2 * N * Co * Do * Ho * Wo * Ci * kd * kh * kw (groups=1)
+            .flops(2 * (batch as u64) * (out_ch as u64) * (out_d as u64) * (out_h as u64) * (out_w as u64) * (in_ch as u64) * (kd as u64) * (kh as u64) * (kw as u64))
     }
 
     #[bench(name = "ffai/conv3d/grouped", dtypes = [f32, f16, bf16])]
@@ -618,5 +620,7 @@ pub mod kernel_benches {
             .constexpr("ocpg", 1u32)
             .grid_1d(n_out, 256)
             .bytes_moved((n_out * dt.size_bytes()) as u64)
+            // 2 * N * Co * Do * Ho * Wo * icpg * kd * kh * kw; depthwise: icpg=1 (omitted).
+            .flops(2 * (batch as u64) * (ch as u64) * (out_d as u64) * (out_h as u64) * (out_w as u64) * (kd as u64) * (kh as u64) * (kw as u64))
     }
 }

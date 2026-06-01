@@ -6333,7 +6333,9 @@ pub mod kernel_benches {
         bs = bs
             .with_shape_label(format!("m{m} n{n} k{k} {}", crate::bench_types::dtype_label(dt)))
             .grid_3d(grid[0], grid[1], grid[2], tpg)
-            .bytes_moved(bytes as u64);
+            .bytes_moved(bytes as u64)
+            // qmm/qmv out[m,n] = x[m,k] · dequant(w)[k,n]: 2 MACs per (m, n, k).
+            .flops(2 * (m as u64) * (n as u64) * (k as u64));
         match reference {
             Some((kind, tol)) => with_quant_reference(bs, kind, m, n, k, bits, group_size, dt, tol),
             None => bs,
@@ -6575,6 +6577,8 @@ pub mod kernel_benches {
             .with_shape_label(format!("n{n} k{k} {}", crate::bench_types::dtype_label(dt)))
             .grid_3d((n / 8) as u32, 1, 1, [64, 1, 1])
             .bytes_moved(bytes as u64)
+            // qvm vector-mat out[n] = x[k] · dequant(w)[k,n]: 2 MACs per (n, k).
+            .flops(2 * (n as u64) * (k as u64))
     }
 
     // ── multi-bit-width qmv / qvm / qmm family (b3/b4/b5/b6/b8) ─────────────
@@ -6618,6 +6622,8 @@ pub mod kernel_benches {
             .with_shape_label(format!("m{m} n{n} k{k} {}", crate::bench_types::dtype_label(dt)))
             .grid_3d(grid[0], grid[1], grid[2], [32, 1, 1])
             .bytes_moved(bytes as u64)
+            // qmv/qvm/qmm out[m,n] = x[m,k] · dequant(w)[k,n]: 2 MACs per (m, n, k).
+            .flops(2 * (m as u64) * (n as u64) * (k as u64))
     }
 
     // qmv (matvec, M=1): grid [N, 1, 1].
@@ -6721,6 +6727,8 @@ pub mod kernel_benches {
             .with_shape_label(format!("m{m} n{n} k{k} {}", crate::bench_types::dtype_label(dt)))
             .grid_3d((n / 32) as u32, (m / 32) as u32, 1, [128, 1, 1])
             .bytes_moved(bytes as u64)
+            // qmm_mma out[m,n] = x[m,k] · dequant(w)[k,n]: 2 MACs per (m, n, k).
+            .flops(2 * (m as u64) * (n as u64) * (k as u64))
     }
 
     #[bench(name = "mlx/quantized/qmm_mma_b3", dtypes = [f32, f16, bf16])]

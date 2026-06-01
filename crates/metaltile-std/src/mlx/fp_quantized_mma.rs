@@ -677,6 +677,8 @@ pub mod kernel_benches {
             .with_shape_label(format!("m{m} n{n} k{k} {}", crate::bench_types::dtype_label(dt)))
             .grid_3d((n / 32) as u32, (m / 32) as u32, 1, [128, 1, 1])
             .bytes_moved(bytes as u64)
+            // fp-qmm out[m,n] = x[m,k] · dequant(w)[k,n]: 2 MACs per (m, n, k).
+            .flops(2 * (m as u64) * (n as u64) * (k as u64))
     }
 
     #[bench(name = "mlx/fp_quantized/fp4_qmm_mma", dtypes = [f32, f16, bf16])]

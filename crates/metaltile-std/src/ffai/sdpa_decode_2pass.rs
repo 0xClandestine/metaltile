@@ -987,6 +987,8 @@ pub mod kernel_benches {
             .constexpr("scale", scale)
             .grid_3d(N_KV_HEADS as u32, BLOCKS as u32, 1, [32, gqa_factor as u32, 1])
             .bytes_moved(bytes as u64)
+            // 4 * H * Nkv * D (decode pass1: Nq=1, QKᵀ + ·V over kv block; H = N_Q_HEADS)
+            .flops(4 * (N_Q_HEADS as u64) * (N_KV as u64) * (head_dim as u64))
     }
 
     fn pass2(ir: metaltile::core::ir::Kernel, head_dim: usize, dt: DType) -> BenchSetup {

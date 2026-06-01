@@ -256,5 +256,7 @@ pub mod kernel_benches {
             .constexpr("dilation", dilation as u32)
             .grid_1d(n_out, 256)
             .bytes_moved((n_out * dt.size_bytes()) as u64)
+            // 2 * N * ch * Ho * Wo * k * k; depthwise: one filter tap per channel (icpg=1)
+            .flops(2 * (batch as u64) * (ch as u64) * (out_h as u64) * (out_w as u64) * (k as u64) * (k as u64))
     }
 }

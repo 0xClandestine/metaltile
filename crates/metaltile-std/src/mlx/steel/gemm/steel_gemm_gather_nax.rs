@@ -180,6 +180,7 @@ pub mod kernel_benches {
             .with_shape_label(format!("m{M} n{N} k{K} {}", crate::bench_types::dtype_label(dt)))
             .grid_3d(N / TILE, M / TILE, 1, [TPG, 1, 1])
             .bytes_moved(bytes as u64)
+            .flops(2 * (M as u64) * (N as u64) * (K as u64)) // 2 * M * N * K
     }
 }
 

@@ -422,5 +422,7 @@ pub mod kernel_benches {
             .constexpr("hidden", hidden as u32)
             .grid_3d((hidden / 32) as u32, (num_patches / 32) as u32, 1, [128, 1, 1])
             .bytes_moved((n_out * dt.size_bytes()) as u64)
+            // 2 * num_patches * hidden * in_ch * patch_h * patch_w (conv2d formula: N=1, Co=hidden, Ho*Wo=num_patches)
+            .flops(2 * (num_patches as u64) * (hidden as u64) * (in_ch as u64) * (patch_h as u64) * (patch_w as u64))
     }
 }

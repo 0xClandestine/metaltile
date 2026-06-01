@@ -318,4 +318,6 @@ pub fn int4_mma_bench(kernel: Kernel, shape: MmaBenchShape, dt: DType) -> BenchS
         ))
         .grid_3d(n_out as u32 / bn, (m_total as u32).div_ceil(bm), 1, [tpg, 1, 1])
         .bytes_moved(bytes as u64)
+        // MoE gather_qmm indexed: 2 * m_total * n_out * k_in (dense-equivalent FLOPs)
+        .flops(2 * m_total as u64 * n_out as u64 * k_in as u64)
 }

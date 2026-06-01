@@ -1615,6 +1615,8 @@ pub mod kernel_benches {
             .constexpr("scale", scale)
             .grid_3d(n_q_heads as u32, 1, 1, [1024, 1, 1])
             .bytes_moved(bytes as u64)
+            // 4 * H * Nkv * D * Nq (batched decode: Nq=batch_q query positions per head)
+            .flops(4 * (n_q_heads as u64) * (n_kv as u64) * (head_dim as u64) * (batch_q as u64))
     }
 
     #[bench(name = "ffai/sdpa_decode_batched_q2", dtypes = [f32, f16, bf16])]

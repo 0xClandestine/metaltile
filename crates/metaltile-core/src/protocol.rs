@@ -70,12 +70,33 @@ pub struct BuildError {
 /// Populated when the runner is invoked with profiling enabled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileInfo {
-    /// Achieved occupancy as a percentage of theoretical maximum.
-    pub occ_pct: f32,
-    /// Registers allocated per thread.
-    pub regs_per_thread: u32,
-    /// Human-readable description of the primary performance bottleneck.
-    pub bottleneck: String,
+    /// Compute throughput in GFLOP/s (`flops ÷ min latency`). `None` unless the
+    /// bench declared a FLOP count via the `flops` `#[bench]` annotation.
+    #[serde(default)]
+    pub gflops: Option<f64>,
+    /// Achieved bandwidth as a percentage of the device's peak DRAM bandwidth.
+    /// `None` on chips with no seeded specs (e.g. CI's virtualized GPU).
+    #[serde(default)]
+    pub pct_peak_bw: Option<f64>,
+    /// Achieved compute as a percentage of the device's peak compute for the
+    /// kernel's dtype. `None` unless both `gflops` and device specs exist.
+    #[serde(default)]
+    pub pct_peak_flops: Option<f64>,
+    /// Arithmetic intensity in FLOPs/byte (`flops ÷ bytes_moved`) — places the
+    /// kernel on the roofline (left of the ridge ⇒ memory-bound, right ⇒ compute).
+    #[serde(default)]
+    pub arith_intensity: Option<f64>,
+    /// Achieved occupancy as a percentage of theoretical maximum. `None` when
+    /// the CPU-side occupancy estimate could not be produced.
+    #[serde(default)]
+    pub occ_pct: Option<f64>,
+    /// Registers allocated per thread. `None` when no estimate was produced.
+    #[serde(default)]
+    pub regs_per_thread: Option<u32>,
+    /// Combined roofline + occupancy bottleneck verdict (`memory-bound`,
+    /// `compute-bound`, `occupancy-limited`, …). `None` when unclassifiable.
+    #[serde(default)]
+    pub bottleneck: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -290,9 +311,13 @@ mod tests {
             min_us: 5.0,
             mean_us: 5.2,
             profile: Some(ProfileInfo {
-                occ_pct: 87.5,
-                regs_per_thread: 32,
-                bottleneck: "memory bandwidth".into(),
+                gflops: Some(1234.5),
+                pct_peak_bw: Some(92.0),
+                pct_peak_flops: Some(3.0),
+                arith_intensity: Some(0.5),
+                occ_pct: Some(87.5),
+                regs_per_thread: Some(32),
+                bottleneck: Some("memory-bound".into()),
             }),
         });
         let json = msg.to_json_line();
@@ -300,9 +325,13 @@ mod tests {
         match parsed {
             ProtocolMessage::BenchResult(b) => {
                 let p = b.profile.unwrap();
-                assert!((p.occ_pct - 87.5).abs() < 0.01);
-                assert_eq!(p.regs_per_thread, 32);
-                assert_eq!(p.bottleneck, "memory bandwidth");
+                assert_eq!(p.gflops, Some(1234.5));
+                assert_eq!(p.pct_peak_bw, Some(92.0));
+                assert_eq!(p.pct_peak_flops, Some(3.0));
+                assert_eq!(p.arith_intensity, Some(0.5));
+                assert!((p.occ_pct.unwrap() - 87.5).abs() < 0.01);
+                assert_eq!(p.regs_per_thread, Some(32));
+                assert_eq!(p.bottleneck.as_deref(), Some("memory-bound"));
             },
             _ => panic!("expected BenchResult"),
         }

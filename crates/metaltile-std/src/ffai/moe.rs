@@ -4113,6 +4113,8 @@ pub mod kernel_benches {
             ))
             .grid_3d(m_out as u32 / m_cells, t_rows as u32, 1, [32, 1, 1])
             .bytes_moved(bytes as u64)
+            // MoE gather_qmm: 2 * T_rows * m_out * k_in (dense-equivalent FLOPs)
+            .flops(2 * t_rows as u64 * m_out as u64 * k_in as u64)
     }
 
     #[bench(name = "ffai/moe/gather_qmm_int4", dtypes = [f32, f16, bf16])]
@@ -4191,6 +4193,8 @@ pub mod kernel_benches {
             ))
             .grid_3d(n_out as u32 / bn, (m_total as u32).div_ceil(bm), 1, [tpg, 1, 1])
             .bytes_moved(bytes as u64)
+            // MoE gather_qmm MMA: 2 * m_total * n_out * k_in (dense-equivalent FLOPs)
+            .flops(2 * m_total as u64 * n_out as u64 * k_in as u64)
     }
 
     // BM=32 4-SG variants (int4 / b{3,5,6,8} / int8): grid [N/32, ceil(M/32), 1], tpg 128.

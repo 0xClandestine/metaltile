@@ -460,6 +460,8 @@ pub mod kernel_benches {
             .grid_3d(Q_LEN as u32 / BQ, N_Q_HEADS as u32, BATCH as u32, [TPG, 1, 1])
             // Q/O read+written once each; K/V read once per q_tile group.
             .bytes_moved(((2 * q_elems + 2 * kv_elems) * dt.size_bytes()) as u64)
+            // 4 * H * Nq * Nkv * D (QK^T + weighted sum over V, per head)
+            .flops(4 * (N_Q_HEADS as u64) * (Q_LEN as u64) * (K_LEN as u64) * (HEAD_DIM as u64))
             .with_reference(
                 RefKernel::new(
                     mlx_kname,

@@ -84,18 +84,22 @@ kernel void mt_exp(
 
 ```sh
 cargo install --path crates/metaltile-cli
-tile bench --filter exp
+tile bench --filter mlx/gemv
 ```
 
 ```
-tile bench · Apple M4 Max
-  logsumexp (logsumexp)
-  Shape                                  │  Ref(GB/s) │  MT(GB/s) │   MT% │  ok
-  ────────────────────────────────────────────────────────────────────────────────
-  B=1024 N=4096 f32                      │      737.6 │     844.3 │  114% │   ✓
-  B=1024 N=4096 f16                      │      369.5 │     504.7 │  137% │   ✓
-  B=1024 N=4096 bf16                     │      366.8 │     508.5 │  139% │   ✓
+tile bench · Apple M1 Max
+  mlx/gemv
+  Shape                                │   MT(µs) │  Ref(GB/s) │  MT(GB/s) │   MT% │  GFLOP/s │  ok
+  ────────────────────────────────────────────────────────────────────────────────────────────────────
+  N=16M f32                           │    192.8 │      350.1 │     348.2 │   99% │    174.1 │   ✓
+  N=16M f16                           │     62.1 │      583.6 │     540.1 │   93% │    540.1 │   ✓
+  N=16M bf16                          │    136.8 │      615.2 │     245.2 │   40% │    245.2 │   ✓
 ```
+
+The default table adds wall-clock latency (`MT(µs)`) and compute throughput
+(`GFLOP/s`, blank for memory-bound kernels); `-v` adds the roofline (`%BW` /
+`%FLOP` / arithmetic intensity), occupancy/registers, and a bottleneck verdict.
 
 Read the [docs](docs/) to learn more.
 

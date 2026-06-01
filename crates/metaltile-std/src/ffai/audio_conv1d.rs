@@ -213,5 +213,7 @@ pub mod kernel_benches {
             .constexpr("pad", pad as u32)
             .grid_1d(n_out, 256)
             .bytes_moved((n_out * dt.size_bytes()) as u64)
+            // 2 * N * Co * Lo * Ci * k (groups=1)
+            .flops(2 * (batch as u64) * (ch as u64) * (out_len as u64) * (ch as u64) * (k as u64))
     }
 }

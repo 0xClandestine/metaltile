@@ -798,6 +798,8 @@ pub mod kernel_benches {
             ))
             .grid_3d(n_q_heads as u32, 1, 1, [1024, 1, 1])
             .bytes_moved(bytes as u64)
+            // 4 * H * Nkv * D (decode: Nq=1, QKᵀ + ·V matmuls; H = n_q_heads)
+            .flops(4 * (n_q_heads as u64) * (n_kv as u64) * (head_dim as u64))
     }
 
     #[bench(name = "mlx/sdpa/vector_d128", dtypes = [f32, f16, bf16])]

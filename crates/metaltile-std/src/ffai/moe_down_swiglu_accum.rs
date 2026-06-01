@@ -554,5 +554,7 @@ pub mod kernel_benches {
             ))
             .grid_3d(out_dim as u32, 1, 1, [LSIZE, 1, 1])
             .bytes_moved(bytes as u64)
+            // 8 fused qgemvs: 2 * N_SLOTS * out_dim * in_dim (dense-equivalent FLOPs)
+            .flops(2 * N_SLOTS as u64 * out_dim as u64 * in_dim as u64)
     }
 }

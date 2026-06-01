@@ -543,6 +543,8 @@ pub mod kernel_benches {
             .constexpr("pad_w", 0u32)
             .grid_1d(n_out, 256)
             .bytes_moved((n_out * dt.size_bytes()) as u64)
+            // 2 * N * Co * Ho * Wo * Ci_per_group * kh * kw; groups=1 so Ci_per_group=in_ch
+            .flops(2 * (batch as u64) * (out_ch as u64) * (out_h as u64) * (out_w as u64) * (in_ch as u64) * (kh as u64) * (kw as u64))
     }
 
     #[bench(name = "ffai/conv2d/patch14", dtypes = [f32, f16, bf16])]
@@ -591,5 +593,7 @@ pub mod kernel_benches {
             .constexpr("ocpg", 1u32)
             .grid_1d(n_out, 256)
             .bytes_moved((n_out * dt.size_bytes()) as u64)
+            // 2 * N * Co * Ho * Wo * icpg * kh * kw; depthwise: groups=ch ⇒ icpg=1 (omitted).
+            .flops(2 * (batch as u64) * (ch as u64) * (out_h as u64) * (out_w as u64) * (kh as u64) * (kw as u64))
     }
 }

@@ -277,6 +277,7 @@ pub mod kernel_benches {
             // SimdGroup2D grid is tile-GROUP counts: (n/BN, m/BM, 1).
             .grid_3d(N / bn, M / bm, 1, [tpg, 1, 1])
             .bytes_moved(bytes as u64)
+            .flops(2 * (M as u64) * (N as u64) * (K as u64)) // 2 * M * N * K
     }
 
     #[bench(name = "mlx/steel_gemm_fused/bm64_bn64_bk16_wm2_wn2", dtypes = [f32, f16, bf16])]

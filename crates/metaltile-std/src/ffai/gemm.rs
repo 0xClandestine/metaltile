@@ -178,5 +178,7 @@ pub mod kernel_benches {
             .constexpr("n_rows", n_rows as u32)
             .grid_3d(out_dim.div_ceil(32) as u32, n_rows.div_ceil(32) as u32, 1, [1024, 1, 1])
             .bytes_moved(bytes as u64)
+            // GEMM out[n_rows, out_dim] = input · weightᵀ: 2 MACs per (row, col, k).
+            .flops((2 * n_rows * out_dim * in_dim) as u64)
     }
 }

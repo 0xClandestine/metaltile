@@ -527,6 +527,8 @@ pub mod kernel_benches {
             .constexpr("window_size", 0u32)
             .grid_3d(1, Q_HEADS as u32, 1, [32, 1, 1])
             .bytes_moved(bytes as u64)
+            // 4 * H * Nkv * D (decode: Nq=1, QKᵀ + ·V over AURA-encoded KV; H = Q_HEADS)
+            .flops(4 * (Q_HEADS as u64) * (TOKENS as u64) * (dim as u64))
     }
 
     #[bench(name = "ffai/aura_flash_sdpa_kb4_vb2_d128", dtypes = [f32, f16, bf16])]

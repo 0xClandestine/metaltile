@@ -74,5 +74,7 @@ pub mod kernel_benches {
             .constexpr("k", k as u32)
             .grid_3d(m as u32, 1, 1, [256, 1, 1])
             .bytes_moved((m * k * dt.size_bytes()) as u64)
+            // Masked matrix-vector out[m] = mat[m,k] · vec[k] · mask[k]: 2 MACs per (row, k).
+            .flops(2 * (m as u64) * (k as u64))
     }
 }

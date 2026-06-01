@@ -232,6 +232,7 @@ pub mod kernel_benches {
             .with_shape_label(format!("m{M} n{N} k{K} {}", crate::bench_types::dtype_label(dt)))
             .grid_3d(N / bn, M / bm, 1, [tpg, 1, 1])
             .bytes_moved(bytes as u64)
+            .flops(2 * (M as u64) * (N as u64) * (K as u64)) // 2 * M * N * K
     }
 
     #[bench(name = "mlx/steel_gemm_masked/bm64_bn64_bk16_wm2_wn2", dtypes = [f32, f16, bf16])]

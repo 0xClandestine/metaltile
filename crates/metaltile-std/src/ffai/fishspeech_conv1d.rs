@@ -381,6 +381,8 @@ pub mod kernel_benches {
             .constexpr("dilation", dilation as u32)
             .grid_1d(n_out, 256)
             .bytes_moved((n_out * dt.size_bytes()) as u64)
+            // 2 * N * Co * Lo * Ci * k (groups=1, dilated conv same MAC count as dense)
+            .flops(2 * (batch as u64) * (ch as u64) * (out_len as u64) * (ch as u64) * (k as u64))
     }
 
     #[bench(name = "ffai/fishspeech_conv1d/conv1d_transpose", dtypes = [f32, f16, bf16])]
@@ -407,5 +409,7 @@ pub mod kernel_benches {
             .constexpr("dilation", dilation as u32)
             .grid_1d(n_out, 256)
             .bytes_moved((n_out * dt.size_bytes()) as u64)
+            // 2 * N * Co * Lo * Ci * k; transpose conv: same MAC count as direct conv with output length Lo
+            .flops(2 * (batch as u64) * (out_ch as u64) * (out_len as u64) * (in_ch as u64) * (k as u64))
     }
 }

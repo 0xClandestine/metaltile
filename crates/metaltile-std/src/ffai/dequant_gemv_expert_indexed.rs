@@ -247,5 +247,7 @@ pub mod kernel_benches {
             .constexpr("group_size", group_size as u32)
             .grid_3d(out_dim as u32, 1, 1, [64, 1, 1])
             .bytes_moved(bytes as u64)
+            // qgemv expert-indexed (B=1): 2 * out_dim * in_dim
+            .flops(2 * out_dim as u64 * in_dim as u64)
     }
 }

@@ -836,6 +836,8 @@ pub mod kernel_benches {
             .constexpr("tiles_w", tiles_w as u32)
             .grid_1d(n_tiles, 64)
             .bytes_moved((n_out * dt.size_bytes()) as u64)
+            // Direct-conv MAC count: 2 * N * Co * Ho * Wo * Ci * kh * kw (kh=kw=3, stride=1)
+            .flops(2 * (batch as u64) * (out_ch as u64) * (out_h as u64) * (out_w as u64) * (in_ch as u64) * 3u64 * 3u64)
     }
 
     #[bench(name = "ffai/conv2d/winograd_filter_transform_3x3", dtypes = [f32, f16, bf16])]
@@ -879,5 +881,7 @@ pub mod kernel_benches {
             .constexpr("tiles_w", tiles_w as u32)
             .grid_1d(n_tiles, 64)
             .bytes_moved((n_out * dt.size_bytes()) as u64)
+            // Direct-conv MAC count: 2 * N * Co * Ho * Wo * Ci * kh * kw (kh=kw=3, stride=1)
+            .flops(2 * (batch as u64) * (out_ch as u64) * (out_h as u64) * (out_w as u64) * (in_ch as u64) * 3u64 * 3u64)
     }
 }

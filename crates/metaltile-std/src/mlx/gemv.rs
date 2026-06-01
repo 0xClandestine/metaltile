@@ -93,6 +93,8 @@ pub mod kernel_benches {
             .constexpr("k", k as u32)
             .grid_3d(m as u32, 1, 1, [256, 1, 1])
             .bytes_moved((m * k * dt.size_bytes()) as u64)
+            // Matrix-vector out[m] = mat[m,k] · vec[k]: 2 MACs per (row, k).
+            .flops(2 * (m as u64) * (k as u64))
             .with_reference(
                 RefKernel::new(
                     format!("gemv_{tn}_bm4_bn1_sm1_sn32_tm4_tn4_nc0_axpby0"),

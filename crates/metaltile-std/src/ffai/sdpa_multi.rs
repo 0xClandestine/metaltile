@@ -474,6 +474,8 @@ pub mod kernel_benches {
             .constexpr("scale", scale)
             .grid_3d((n_q_heads * n_query) as u32, 1, 1, [1024, 1, 1])
             .bytes_moved(bytes as u64)
+            // 4 * H * Nkv * D * Nq (multi-query: Nq=n_query, Nkv=base_kv+n_query)
+            .flops(4 * (n_q_heads as u64) * (n_kv as u64) * (head_dim as u64) * (n_query as u64))
     }
 
     #[bench(name = "ffai/sdpa_multi_tree_mask", dtypes = [f32, f16, bf16])]
@@ -505,5 +507,7 @@ pub mod kernel_benches {
             .constexpr("scale", scale)
             .grid_3d((n_q_heads * n_query) as u32, 1, 1, [1024, 1, 1])
             .bytes_moved(bytes as u64)
+            // 4 * H * Nkv * D * Nq (multi-query tree-mask: Nq=n_query, Nkv=base_kv+n_query)
+            .flops(4 * (n_q_heads as u64) * (n_kv as u64) * (head_dim as u64) * (n_query as u64))
     }
 }

@@ -244,6 +244,8 @@ pub mod kernel_benches {
             ))
             .grid_3d(N / bn, M / bm, N_SEG, [tpg, 1, 1])
             .bytes_moved(bytes as u64)
+            // N_SEG segments × 2 * M * N * K_PER_SEG = 2 * M * N * TOTAL_K
+            .flops(2 * (N_SEG as u64) * (M as u64) * (N as u64) * (K_PER_SEG as u64))
     }
 
     #[bench(name = "mlx/steel_gemm_segmented/bm64_bn64_bk16_wm2_wn2", dtypes = [f32, f16, bf16])]

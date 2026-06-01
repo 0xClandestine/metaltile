@@ -306,6 +306,8 @@ pub mod kernel_benches {
             ))
             .grid_3d(N / bn, M / bm, N_SPLITS, [tpg, 1, 1])
             .bytes_moved(bytes as u64)
+            // all splits together cover the full K: 2 * M * N * K
+            .flops(2 * (M as u64) * (N as u64) * (K as u64))
     }
 
     // ── Pass-1 split-K GEMM: NO MLX REFERENCE (perf-only) ──────────────────

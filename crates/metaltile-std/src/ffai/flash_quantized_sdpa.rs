@@ -924,6 +924,8 @@ pub mod kernel_benches {
             .constexpr("scale", scale)
             .grid_3d(1, Q_HEADS as u32, 1, [32, 1, 1])
             .bytes_moved(bytes as u64)
+            // 4 * H * Nkv * D (decode: Nq=1, QKᵀ + ·V on dequantized KV; H = Q_HEADS)
+            .flops(4 * (Q_HEADS as u64) * (TOKENS as u64) * (dim as u64))
     }
 
     // Mask variant bench — inserts the extra mask buffer (`mask_bool` u32 or
@@ -971,6 +973,8 @@ pub mod kernel_benches {
             .constexpr("scale", scale)
             .grid_3d(1, Q_HEADS as u32, 1, [32, 1, 1])
             .bytes_moved(bytes as u64)
+            // 4 * H * Nkv * D (decode: Nq=1, QKᵀ + ·V on dequantized KV; H = Q_HEADS)
+            .flops(4 * (Q_HEADS as u64) * (TOKENS as u64) * (dim as u64))
     }
 
     macro_rules! base_bench {

@@ -1,6 +1,8 @@
 # Bench Metrics & Kernel-Optimization Spec
 
-**Status:** Draft — planning doc for a future PR (not yet implemented)
+**Status:** ✅ Implemented (Phases 1–4: latency µs, GFLOP/s, roofline %-of-peak +
+arithmetic intensity, and the bottleneck verdict). Precision roadmap (Appendix B)
+is tracked separately.
 **Captured:** 2026-05-31
 **Context:** follow-up to the MLX A/B comparison work on `ek/delete-legacy-gpu-tests` (PR #240)
 
