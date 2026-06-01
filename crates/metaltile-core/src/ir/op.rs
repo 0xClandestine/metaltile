@@ -1001,31 +1001,6 @@ pub enum Op {
         value: ValueId,
     },
 
-    /// Load from a named indexed local register array slot.
-    /// `idx` must be a constant after ConstFold + Unroll.
-    /// MSL: `__ml_{name}_{k}` where k = const value of `idx`.
-    /// Always f32 (all SDPA accumulators are f32).
-    #[result_f32_scalar]
-    GetLocalIdx {
-        name: String,
-        #[vid]
-        idx: ValueId,
-    },
-
-    /// Store to / declare a named indexed local register array slot.
-    /// First encounter of (name, k) emits `float __ml_{name}_{k} = val;`;
-    /// subsequent stores emit `__ml_{name}_{k} = val;`.
-    #[side_effect]
-    #[unpredictable]
-    #[no_result]
-    SetLocalIdx {
-        name: String,
-        #[vid]
-        idx: ValueId,
-        #[vid]
-        value: ValueId,
-    },
-
     /// Return the index of the min/max element along an axis.
     #[result_u32]
     ArgReduce {
@@ -1487,12 +1462,6 @@ impl Op {
             },
             Op::SetLocal { name, value } => {
                 write!(f, "SetLocal({name}, v{})", value.as_u32())
-            },
-            Op::GetLocalIdx { name, idx } => {
-                write!(f, "GetLocalIdx({name}, v{})", idx.as_u32())
-            },
-            Op::SetLocalIdx { name, idx, value } => {
-                write!(f, "SetLocalIdx({name}, v{}, v{})", idx.as_u32(), value.as_u32())
             },
             Op::ArgReduce { value, axis, op } => {
                 write!(f, "ArgReduce(v{}, axis={axis}, {op:?})", value.as_u32())

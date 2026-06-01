@@ -710,8 +710,6 @@ mod tests {
             ("SimdGroupId", Op::SimdGroupId),
             ("DeclareLocal", Op::DeclareLocal { name: "l".into(), value: vid }),
             ("SetLocal", Op::SetLocal { name: "l".into(), value: vid }),
-            ("GetLocalIdx", Op::GetLocalIdx { name: "li".into(), idx: vid }),
-            ("SetLocalIdx", Op::SetLocalIdx { name: "li".into(), idx: vid, value: vid }),
             ("ArgReduce", Op::ArgReduce { value: vid, axis: 0, op: ReduceKind::Max }),
         ];
 
