@@ -22,6 +22,12 @@ metaltile-runtime.workspace = true
 inventory.workspace = true
 half.workspace = true
 serde.workspace = true
+bytemuck.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-metal.workspace = true
+objc2-foundation.workspace = true
 
 [dev-dependencies]
 trybuild.workspace = true
