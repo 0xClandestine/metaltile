@@ -1,0 +1,152 @@
+//! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
+//! SPDX-License-Identifier: Apache-2.0
+//! Block-scaled **dequantizing GEMV** kernels (Phase B of the precision
+//! roadmap, `docs/BENCH_METRICS_SPEC.md` Appendix B): `output[row] =
+//! Σ_k dequant(weight[row, k]) · input[k]` for the spec-conformant formats.
+//!
+//! The dispatch geometry is the **proven pack-strided reduction** from
+//! `ffai/dequant_gemv.rs` — one threadgroup per output row, threads stride over
+//! the row's packed words, `reduce_sum` folds the partials. Only the per-element
+//! *decode* differs (block-scaled E2M1/E4M3/… instead of int-affine), so no new
+//! dispatch shape is introduced (and the reduction freeze hazard — TPG ≥ 32 &
+//! multiple of 32 — is handled exactly as the int kernels handle it).
+//!
+//! ## DISPATCH INVARIANTS
+//!
+//! - **Mode: Reduction**, `grid = [out_dim, 1, 1]`, `tpg = [TPG, 1, 1]` with
+//!   TPG ≥ 32 and a multiple of 32 (tests/benches use 64). One TG per row.
+//! - `in_dim` a multiple of `block_size`; `block_size` a multiple of 8 (so a
+//!   u32 pack of 8 nibbles lies wholly inside one block — one scale load/pack).
+//! - weight `[out_dim, in_dim/8]` u32 (8 E2M1 nibbles/word, little-endian);
+//!   scales `[out_dim, in_dim/block_size]` u8 (E8M0); input `[in_dim]`,
+//!   output `[out_dim]`.
+
+use metaltile::kernel;
+
+/// mxfp4 dequantizing GEMV — E2M1 weights (block 32) with an E8M0 pow-2 scale.
+#[kernel]
+pub fn mt_mxfp4_qgemv<T>(
+    weight: Tensor<u32>,
+    scales: Tensor<u8>,
+    input: Tensor<T>,
+    output: Tensor<T>,
+    #[constexpr] in_dim: u32,
+    #[constexpr] block_size: u32,
+) {
+    let row = program_id::<0>();
+    let n_packs_per_row = in_dim / 8u32; // 8 nibbles per u32
+    let n_blocks = in_dim / block_size;
+    let packs_per_block = block_size / 8u32;
+    let row_pack_off = row * n_packs_per_row;
+    let row_block_off = row * n_blocks;
+
+    let mut acc = 0.0f32;
+    let p_iters = (n_packs_per_row + lsize - 1u32) / lsize;
+    for p_iter in range(0u32, p_iters, 1u32) {
+        let pack_idx = p_iter * lsize + tid;
+        if pack_idx < n_packs_per_row {
+            // All 8 nibbles of a pack lie in one block → one scale load.
+            let blk = pack_idx / packs_per_block;
+            let sbits = load(scales[row_block_off + blk]).cast::<f32>();
+            let scale = exp2(sbits - 127.0f32); // E8M0: 2^(bits-127)
+            let packed = load(weight[row_pack_off + pack_idx]);
+            let p_off = pack_idx * 8u32;
+            for i in range(0u32, 8u32, 1u32) {
+                let nib = (packed >> (i * 4u32)) & 0xFu32;
+                let m = nib & 0x7u32;
+                let mag = select(
+                    m < 1u32,
+                    0.0f32,
+                    select(
+                        m < 2u32,
+                        0.5f32,
+                        select(
+                            m < 3u32,
+                            1.0f32,
+                            select(
+                                m < 4u32,
+                                1.5f32,
+                                select(
+                                    m < 5u32,
+                                    2.0f32,
+                                    select(m < 6u32, 3.0f32, select(m < 7u32, 4.0f32, 6.0f32)),
+                                ),
+                            ),
+                        ),
+                    ),
+                );
+                let val = select((nib & 0x8u32) > 0u32, -mag, mag);
+                acc = acc + (val * scale) * load(input[p_off + i]).cast::<f32>();
+            }
+        }
+    }
+
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[row], total.cast::<T>());
+    }
+}
+
+pub mod kernel_tests {
+    use metaltile::{core::ir::Kernel, test::*, test_kernel};
+
+    use super::*;
+    use crate::{
+        quant::format::QFormat,
+        utils::{pack_f32, unpack_f32},
+    };
+
+    /// One TG-row's lanes; ≥ 32 and a multiple of 32 (the Reduction contract).
+    const TPG: u32 = 64;
+
+    /// Deterministic `[out_dim, in_dim]` weights with mixed signs + per-block
+    /// magnitude variation.
+    fn weights(out_dim: usize, in_dim: usize) -> Vec<f32> {
+        (0..out_dim * in_dim)
+            .map(|i| {
+                let r = (i / in_dim) as f32;
+                let c = (i % in_dim) as f32;
+                let mag = (0.5 + r * 0.25) * (0.1 + (c % 13.0) * 0.2);
+                if (i % 3) == 0 { -mag } else { mag }
+            })
+            .collect()
+    }
+
+    /// Dequant-then-dot reference: `out[r] = Σ_c dequant(W)[r,c] · input[c]`.
+    fn qgemv_oracle(wdq: &[f32], input: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+        (0..out_dim).map(|r| (0..in_dim).map(|c| wdq[r * in_dim + c] * input[c]).sum()).collect()
+    }
+
+    fn qgemv_setup(
+        kernel: Kernel,
+        fmt: QFormat,
+        out_dim: usize,
+        in_dim: usize,
+        dt: DType,
+    ) -> TestSetup {
+        let w = weights(out_dim, in_dim);
+        let p = crate::quant::format::pack(fmt, &w, out_dim, in_dim);
+        let wdq = crate::quant::format::dequant(fmt, &p, out_dim, in_dim);
+        let input_f: Vec<f32> = (0..in_dim).map(|i| ((i % 11) as f32 - 5.0) * 0.01).collect();
+        // Round-trip the input through `dt` so the oracle sees what the GPU sees.
+        let x = unpack_f32(&pack_f32(&input_f, dt), dt);
+        let expected = qgemv_oracle(&wdq, &x, out_dim, in_dim);
+        TestSetup::new(kernel)
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("weight", p.codes, DType::U32))
+            .input(TestBuffer::from_vec("scales", p.scales, DType::U8))
+            .input(TestBuffer::from_vec("input", pack_f32(&input_f, dt), dt))
+            .input(TestBuffer::zeros("output", out_dim, dt))
+            .constexpr("in_dim", in_dim as u32)
+            .constexpr("block_size", fmt.block_size() as u32)
+            .expect(TestBuffer::from_vec("output", pack_f32(&expected, dt), dt))
+            .grid_3d(out_dim as u32, 1, 1, [TPG, 1, 1])
+    }
+
+    // out_dim 4, in_dim 256 (8 blocks of 32, 32 packs/row) — mirrors the int
+    // dequant_gemv test shape.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxfp4_qgemv(dt: DType) -> TestSetup {
+        qgemv_setup(mt_mxfp4_qgemv::kernel_ir_for(dt), QFormat::Mxfp4, 4, 256, dt)
+    }
+}
