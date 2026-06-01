@@ -92,6 +92,7 @@ pub mod gguf_dequant_iq2_xxs_raw;
 pub mod gguf_dequant_q2_k;
 pub mod gguf_dequant_q8_0;
 pub mod gguf_iq2_xxs_extract_qs;
+pub mod im2col_patch;
 pub mod kokoro;
 pub mod kv_cache;
 pub mod kv_cache_update_many;
