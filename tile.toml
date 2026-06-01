@@ -1,13 +1,11 @@
 # tile CLI configuration
 # https://github.com/0xClandestine/metaltile
 #
-# All keys are optional — omit any to use the built-in default.
 # Values here are overridden by TILE__* environment variables
-# (e.g. TILE__VERBOSE=true).
+# (e.g. TILE__VERBOSE=true, TILE__RUNNER_BINARY=/usr/local/bin/__tile_runner).
 
-# Path to the __tile_runner subprocess binary.
-# Defaults to "__tile_runner" (resolved via $PATH).
-# runner_binary = "/path/to/__tile_runner"
+# Path to the __tile_runner subprocess binary (resolved via $PATH if bare name).
+runner_binary = "__tile_runner"
 
 # Optional path to the MetalTile project root.
 # When set, tile bench/test/build look for source here.
