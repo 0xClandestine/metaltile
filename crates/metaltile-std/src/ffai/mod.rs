@@ -16,6 +16,7 @@
 //! counterpart lands in mainline at a future pin, the file moves to
 //! `mlx/`.
 
+pub mod adain1d;
 pub mod arg_reduce;
 pub mod attn_head_gate;
 pub mod audio_conv1d;
