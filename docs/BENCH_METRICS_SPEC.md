@@ -138,12 +138,28 @@ Goal: **support all precisions in every weight-bearing kernel** (matmul/gemv/att
 | embedding gather | `ffai/dequant_gather_block_scaled.rs` |
 | qmm via MPP (tensor engine) | `mlx/block_scaled_qmm_mpp.rs` |
 | qmm via NAX | `mlx/block_scaled_qmm_nax.rs` |
-| MoE gather-qmm via MPP (bm16) | `ffai/moe_mpp_block_scaled.rs` |
+| MoE gather-qmm via MPP (bm8/bm16/bm64) | `ffai/moe_mpp{,_bm8,_bm64}_block_scaled.rs` |
 | expert-indexed GEMV | `ffai/dequant_gemv_expert_indexed_block_scaled.rs` |
+| patch embedding (linear projection) | `ffai/patch_embed_block_scaled.rs` |
 
-Each (family × format) ships a `#[test_kernel]` CPU-oracle correctness check (1:1, GPU-verified vs `quant::format::dequant`) and a `#[bench]` with `.flops()` so the PR-#1 latency/GFLOP/roofline columns rank precisions side-by-side. `fp8_e4m3` reuses each family's `nvfp8` kernel (identical 8-bit-E4M3 + f32-scale shape). The MPP/NAX/MoE-MPP cooperative-matmul variants dequant W to `coop_stage(T)` during threadgroup staging and reuse the proven int4/int8 `mpp::tensor_ops::matmul2d` dispatch geometry byte-for-byte (no new freeze surface). ~146 block-scaled kernels across **every quantized weight-bearing op + backend**, all GPU-verified, each 1:1 tested + benched.
+Each (family × format) ships a `#[test_kernel]` CPU-oracle correctness check (1:1, GPU-verified vs `quant::format::dequant`) and a `#[bench]` with `.flops()` so the PR-#1 latency/GFLOP/roofline columns rank precisions side-by-side. `fp8_e4m3` reuses each family's `nvfp8` kernel (identical 8-bit-E4M3 + f32-scale shape). The MPP/NAX/MoE-MPP cooperative-matmul variants dequant W to `coop_stage(T)` during threadgroup staging and reuse the proven int4/int8 `mpp::tensor_ops::matmul2d` dispatch geometry byte-for-byte (no new freeze surface). ~178 block-scaled kernels across **every quantized weight-bearing op + backend + MoE tile**, all GPU-verified, each 1:1 tested + benched.
 
-**Remaining (follow-ups, all non-blocking):** the legacy int2–8 *affine* (scale+bias) path stays in its existing `dequant_gemv`/`quantized`/`quantized_{mpp,nax}` kernels (the new `Int8` is the symmetric scale-only variant); more flash head-dim variants (only d=128 has block-scaled KV today); the MoE-MPP perf-tile variants (`bm8`/`bm64` — same op + cooperative engine as the covered `bm16`, a perf-tuning axis); and an audit of whether the `ekryski/mlx@alpha` reference kernels are themselves spec-correct. Non-quantized-matmul ops are out of scope: `steel_gemm_*` are dense GEMM, `quantized_mma_dynamic_m` is a host dispatch helper, `fp_quantized.rs` is a superseded codec utility, and AURA is a separate codebook scheme.
+### Where block-scaled quantization does **not** apply
+
+Quantization compresses a large persistent *weight/parameter* tensor, so it is only added to ops that read one. The following are intentionally left as activation-precision-only (they already support fp16/bf16/fp32 via the generic `<T>`), because they carry no quantizable weight:
+
+| op class | why no quantization |
+|---|---|
+| RoPE (`rope_*`) | rotates Q/K *activations* by position; no weight matrix (cos/sin are tiny + precision-sensitive) |
+| Gated-DeltaNet / SSM (`gated_delta*`, `ssm_replay`) | state recurrence over activations; the Q/K/V/gate *projections* are separate matmuls (already covered) |
+| RMSNorm / gated-RMSNorm (standalone) | the norm-weight is a tiny per-channel vector, precision-sensitive |
+| dense SDPA / attention (`sdpa_*`, `scaled_dot_product_attention`, `steel_attention*`) | operate on Q/K/V activations; the quantized-KV path is `flash_block_scaled_sdpa` (covered) |
+| dense GEMM (`gemm`, `steel_gemm_*`) | the quantized path is the qmm family (covered); dense stays dense |
+| KV-cache *write* (`kv_cache*`) | the dynamic cache is quantized **per decode step** → affine int4/int8 (cheap min/max encode) is the right scheme; block-scaled is a static-weight format whose per-step *encode* is costly + needs GPU encode intrinsics. The block-scaled KV *read* is covered (`flash_block_scaled_sdpa`) for pre-quantized caches. |
+| Winograd conv (`winograd_conv`) | the filter is pre-transformed into the Winograd domain (`GgGᵀ`), which strongly amplifies quantization error — quantized Winograd is non-standard and counterproductive |
+| elementwise / reduction / softmax / sort / scan / fft / rope / gather-axis / scatter | no persistent parameter tensor |
+
+**Remaining (follow-ups, non-blocking):** the legacy int2–8 *affine* (scale+bias) path stays in its existing `dequant_gemv`/`quantized`/`quantized_{mpp,nax}` kernels (the new `Int8` is the symmetric scale-only variant); more flash head-dim variants (only d=128 has block-scaled KV); the remaining weight-bearing **conv** kernels (`conv2d`, `conv3d`, `depthwise_conv2d`, `conv1d` audio frontends, and the `conv*_mma` cooperative variants — quantizable like `patch_embed` but lower-value: small filters vs the transformer matmuls, and the dense kernels are perf-tuned); and an audit of whether the `ekryski/mlx@alpha` reference kernels are themselves spec-correct.
 
 ## Appendix C — M5 Neural Accelerator hardware context
 
