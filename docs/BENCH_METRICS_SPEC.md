@@ -159,10 +159,12 @@ Quantization compresses a large persistent *weight/parameter* tensor, so it is o
 | Winograd conv (`winograd_conv`) | the filter is pre-transformed into the Winograd domain (`GgGᵀ`), which strongly amplifies quantization error — quantized Winograd is non-standard and counterproductive |
 | elementwise / reduction / softmax / sort / scan / fft / rope / gather-axis / scatter | no persistent parameter tensor |
 
-Quantized **conv** is now covered for the direct families too — `patch_embed`,
-`conv2d`, `conv3d`, `depthwise_conv2d`, and `conv1d` (`audio_conv1d`,
-`fishspeech_conv1d`) — quantizing the filter `[out_ch, C]` block-wise along the
-`in_ch·k…` contraction (8 kernels each, all 9 formats, GPU-verified).
+Quantized **conv** is now covered across the family — direct (`patch_embed`,
+`conv2d`, `conv3d`, `depthwise_conv2d`, `audio_conv1d`, `fishspeech_conv1d`) and
+the implicit-im2col simdgroup-MMA (`conv2d_mma`, `conv3d_mma`) — quantizing the
+filter `[out_ch, C]` block-wise along the `in_ch·k…` contraction (8 kernels
+each, all 9 formats, GPU-verified; the conv-MMA fp4 path is f16/bf16-only per
+the simdgroup-f32 caveat below).
 
 > **Test-gate note:** the `#[test_kernel]` harness (`tests/kernel_tests_harness.rs`)
 > must enumerate the registry via `metaltile_std::all_tests()`, not
@@ -171,7 +173,7 @@ Quantized **conv** is now covered for the direct families too — `patch_embed`,
 > harness silently runs **zero** checks (a vacuous gate). With the correct
 > accessor it runs ~1857 GPU-correctness checks.
 
-**Remaining (follow-ups, non-blocking):** the legacy int2–8 *affine* (scale+bias) path stays in its existing `dequant_gemv`/`quantized`/`quantized_{mpp,nax}` kernels (the new `Int8` is the symmetric scale-only variant); more flash head-dim variants (only d=128 has block-scaled KV); the `winograd_conv` filter-transform and the `conv*_mma` cooperative-conv perf-variants (quantizing Winograd amplifies error; the conv op×all-formats is already covered by the direct kernels); **`fp4` on the qmm-MMA path with f32 activations** (a deterministic ~0.46 discrepancy unique to 4-bit + raw-f32-scale + f32-simdgroup — fp4 MMA is verified on f16/bf16, and fp4 is f32-correct on qgemv/qmm/dequant/conv); a pre-existing **`ffai_sdpa_multi_d256_causal`** correctness failure (dense SDPA causal masking, exposed by the gate fix, quarantined); and an audit of whether the `ekryski/mlx@alpha` reference kernels are themselves spec-correct.
+**Remaining (follow-ups, non-blocking):** the legacy int2–8 *affine* (scale+bias) path stays in its existing `dequant_gemv`/`quantized`/`quantized_{mpp,nax}` kernels (the new `Int8` is the symmetric scale-only variant); more flash head-dim variants (only d=128 has block-scaled KV); the `winograd_conv` filter-transform variant (quantizing Winograd amplifies error in the transform domain; every other weight-bearing conv — direct + im2col-MMA — is covered); **`fp4` on the qmm-MMA path with f32 activations** (a deterministic ~0.46 discrepancy unique to 4-bit + raw-f32-scale + f32-simdgroup — fp4 MMA is verified on f16/bf16, and fp4 is f32-correct on qgemv/qmm/dequant/conv); a pre-existing **`ffai_sdpa_multi_d256_causal`** correctness failure (dense SDPA causal masking, exposed by the gate fix, quarantined); and an audit of whether the `ekryski/mlx@alpha` reference kernels are themselves spec-correct.
 
 ## Appendix C — M5 Neural Accelerator hardware context
 
