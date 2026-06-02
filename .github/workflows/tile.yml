@@ -9,8 +9,9 @@ concurrency:
 #
 #   changes
 #   compile ──┬── build
-#             ├── bench (ffai)  ──┐
-#             └── bench (mlx)  ──┴── bench-merge
+#             ├── test
+#             ├── bench-ffai  ──┐
+#             └── bench-mlx   ──┴── bench-merge
 #
 # `changes` (ubuntu, fast) classifies which paths changed so each bench
 # shard only runs when its kernel family was the sole thing modified:
@@ -166,7 +167,33 @@ jobs:
       - name: Build
         run: tile build
 
-  # ── Job 3 + 4: GPU benchmark suite (sharded by kernel family) ────────────────
+  # ── Job 3: correctness tests ─────────────────────────────────────────────────
+  # Runs `tile test` against the CPU oracle for every registered #[test_kernel].
+  # Runs in parallel with build and the bench shards.
+  test:
+    name: Test
+    runs-on: macos-latest
+    timeout-minutes: 30
+    needs: compile
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5.0.0
+
+      - name: Download tile binary
+        uses: actions/download-artifact@v4
+        with:
+          name: tile-binary
+          path: target/ci
+
+      - name: Make tile executable
+        run: chmod +x target/ci/tile
+
+      - name: Add tile to PATH
+        run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
+
+      - name: Test
+        run: tile test
+
+  # ── Job 4 + 5: GPU benchmark suite (sharded by kernel family) ────────────────
   # Two bench jobs run in parallel — one for the `ffai` family (attention/MLP
   # inference kernels) and one for the `mlx` family (MLX reference comparisons).
   # `--match-group` narrows each shard to only its family so both finish faster
