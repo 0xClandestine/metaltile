@@ -438,6 +438,18 @@ struct TestArgs {
     #[arg(long, short = 'l', help_heading = "Display options")]
     list: bool,
 
+    /// Show a live per-test progress indicator while tests run.
+    #[arg(long, help_heading = "Display options")]
+    show_progress: bool,
+
+    /// Print a per-suite summary table after all tests finish.
+    #[arg(long, help_heading = "Display options")]
+    summary: bool,
+
+    /// With --summary: show individual test rows in the table.
+    #[arg(long, requires = "summary", help_heading = "Display options")]
+    detailed: bool,
+
     #[command(flatten)]
     filter_args: FilterArgs,
 }
@@ -467,6 +479,10 @@ struct BuildArgs {
     /// xcrun SDK to use for Metal compilation (default: from tile.toml or macosx).
     #[arg(long, value_name = "SDK", help_heading = "Build options")]
     sdk: Option<String>,
+
+    /// List kernel names that would be compiled, without compiling.
+    #[arg(long, short = 'n', help_heading = "Build options")]
+    names: bool,
 
     /// Run the standard pass pipeline and report per-pass median wall time.
     #[arg(long, short = 't', help_heading = "Build options")]

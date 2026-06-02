@@ -113,6 +113,34 @@ pub fn run(args: &BuildArgs, harness: &crate::harness::Harness) -> Result<(), Cl
         return Ok(());
     }
 
+    // --names: list kernel names that would be compiled, then exit.
+    if args.names {
+        let mut kernels: BTreeMap<String, EmitKernel> = BTreeMap::new();
+        for entry in all_benches() {
+            let bench = entry.bench();
+            let Some(&first_dt) = bench.dtypes().first() else { continue };
+            let base_name = bench.setup(first_dt).kernel().name.to_string();
+            if !spec.matches_name(&base_name) {
+                continue;
+            }
+            let e = kernels.entry(base_name).or_insert((bench, Vec::new()));
+            for &dt in bench.dtypes() {
+                if !e.1.contains(&dt) {
+                    e.1.push(dt);
+                }
+            }
+        }
+        let mut sorted: Vec<(String, EmitKernel)> = kernels.into_iter().collect();
+        sorted.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        for (name, (_, dtypes)) in &sorted {
+            println!(
+                "{name}  {}",
+                dtypes.iter().map(|dt| dt.label()).collect::<Vec<_>>().join("/")
+            );
+        }
+        return Ok(());
+    }
+
     let emit_kinds: BTreeSet<EmitKind> = match emit_arg.as_deref() {
         None => BTreeSet::new(),
         Some(raw) => match parse_emit_list(raw) {
@@ -179,7 +207,9 @@ pub fn run(args: &BuildArgs, harness: &crate::harness::Harness) -> Result<(), Cl
             Style::new().fg(Color::BrightWhite),
         ),
     );
-    println!();
+    if verbose {
+        println!();
+    }
 
     // Compute column widths for the per-kernel lines.
     let name_w = sorted.iter().map(|(n, _)| n.len()).max().unwrap_or(20).clamp(8, 48);
@@ -359,7 +389,7 @@ pub fn run(args: &BuildArgs, harness: &crate::harness::Harness) -> Result<(), Cl
                 );
             }
             errors += result.dtypes_err.len() as u32;
-        } else if !result.dtypes_ok.is_empty() {
+        } else if verbose && !result.dtypes_ok.is_empty() {
             let kernel_col =
                 paint_stdout(pad_left(&result.name, name_w), Style::new().fg(Color::Cyan));
             let dtype_str =
