@@ -18,446 +18,521 @@
 //!   - 8-bit (mxfp8/nvfp8): `k_packed [B·nKV, N, dim] u8`, scales u8 (E8M0) or
 //!     f32 (nvfp8). V mirrors K. `dim` a multiple of `block_size`.
 //!
-//! These kernels are fixed to head-dim 128 (`dims_per_lane = 4`), the canonical
-//! attention head width; other dims follow the same body with a different
-//! `dims_per_lane`. Codegen-only; correctness pinned by `#[test_kernel]`s.
+//! Each format is a whole-fn `macro_rules!` parameterized by `$dpl` (= head_dim/32,
+//! the per-lane dim count). Every production head dim is generated:
+//! d64 (`$dpl=2`), d96 (3), d128 (4), d256 (8), d512 (16). The dispatch geometry
+//! is identical across dims (only the stack size + loop bound change), so there
+//! is no new freeze surface. Codegen-only; correctness pinned by `#[test_kernel]`s.
 
 use metaltile::kernel;
 
-/// mxfp4 flash SDPA (d=128) — E2M1 K/V (block 32), E8M0 pow-2 scale.
-#[kernel]
-pub fn mt_mxfp4_flash_sdpa_d128<T>(
-    queries: Tensor<T>,
-    k_packed: Tensor<u32>,
-    k_scales: Tensor<u8>,
-    v_packed: Tensor<u32>,
-    v_scales: Tensor<u8>,
-    sinks: Tensor<f32>,
-    out: Tensor<T>,
-    #[constexpr] dim: u32,
-    #[constexpr] tokens: u32,
-    #[constexpr] repeat_count: u32,
-    #[constexpr] block_size: u32,
-    #[constexpr] num_q_heads: u32,
-    #[constexpr] has_sinks: u32,
-    #[constexpr] window_size: u32,
-    #[constexpr] scale: f32,
-) {
-    let lane = program_id::<0>();
-    let q_idx = program_id::<1>();
-    let kv_idx = q_idx / repeat_count;
-    let n_blocks = dim / block_size;
-    let words_per_token = dim / 8u32;
+/// mxfp4 flash SDPA — E2M1 K/V (block 32), E8M0 pow-2 scale.
+/// `$dpl` = head_dim/32 (the per-lane dim count, a compile-time stack/loop bound).
+macro_rules! mxfp4_flash {
+    ($name:ident, $dpl:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            queries: Tensor<T>,
+            k_packed: Tensor<u32>,
+            k_scales: Tensor<u8>,
+            v_packed: Tensor<u32>,
+            v_scales: Tensor<u8>,
+            sinks: Tensor<f32>,
+            out: Tensor<T>,
+            #[constexpr] dim: u32,
+            #[constexpr] tokens: u32,
+            #[constexpr] repeat_count: u32,
+            #[constexpr] block_size: u32,
+            #[constexpr] num_q_heads: u32,
+            #[constexpr] has_sinks: u32,
+            #[constexpr] window_size: u32,
+            #[constexpr] scale: f32,
+        ) {
+            let lane = program_id::<0>();
+            let q_idx = program_id::<1>();
+            let kv_idx = q_idx / repeat_count;
+            let n_blocks = dim / block_size;
+            let words_per_token = dim / 8u32;
 
-    stack_alloc("q_vals", 4, "f32");
-    for i in range(0u32, 4u32, 1u32) {
-        let d = lane + i * 32u32;
-        let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
-        stack_store("q_vals", i, v * scale);
-    }
-
-    let sink_val = load(sinks[q_idx % num_q_heads]);
-    let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
-    let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
-    stack_alloc("o", 4, "f32");
-    for i in range(0u32, 4u32, 1u32) {
-        stack_store("o", i, 0.0f32);
-    }
-
-    let causal_upper = tokens - 1u32;
-    for t in range(0u32, tokens, 1u32) {
-        let use_key = select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
-        if use_key {
-            let k_word_row = (kv_idx * tokens + t) * words_per_token;
-            let k_blk_row = (kv_idx * tokens + t) * n_blocks;
-            let mut dot_partial = 0.0f32;
-            for i in range(0u32, 4u32, 1u32) {
+            stack_alloc("q_vals", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
                 let d = lane + i * 32u32;
-                if d < dim {
-                    let nib =
-                        (load(k_packed[k_word_row + d / 8u32]) >> ((d % 8u32) * 4u32)) & 0xFu32;
-                    let ksc =
-                        exp2(load(k_scales[k_blk_row + d / block_size]).cast::<f32>() - 127.0f32);
-                    dot_partial = dot_partial + stack_load("q_vals", i) * (e2m1_decode(nib) * ksc);
+                let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+                stack_store("q_vals", i, v * scale);
+            }
+
+            let sink_val = load(sinks[q_idx % num_q_heads]);
+            let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
+            let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
+            stack_alloc("o", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
+                stack_store("o", i, 0.0f32);
+            }
+
+            let causal_upper = tokens - 1u32;
+            for t in range(0u32, tokens, 1u32) {
+                let use_key =
+                    select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+                if use_key {
+                    let k_word_row = (kv_idx * tokens + t) * words_per_token;
+                    let k_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    let mut dot_partial = 0.0f32;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let nib = (load(k_packed[k_word_row + d / 8u32])
+                                >> ((d % 8u32) * 4u32))
+                                & 0xFu32;
+                            let ksc = exp2(
+                                load(k_scales[k_blk_row + d / block_size]).cast::<f32>() - 127.0f32,
+                            );
+                            dot_partial =
+                                dot_partial + stack_load("q_vals", i) * (e2m1_decode(nib) * ksc);
+                        }
+                    }
+                    let score = simd_sum(dot_partial);
+                    let new_m = select(m_acc > score, m_acc, score);
+                    let exp_diff = exp(m_acc - new_m);
+                    let exp_score = exp(score - new_m);
+                    let v_word_row = (kv_idx * tokens + t) * words_per_token;
+                    let v_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let nib = (load(v_packed[v_word_row + d / 8u32])
+                                >> ((d % 8u32) * 4u32))
+                                & 0xFu32;
+                            let vsc = exp2(
+                                load(v_scales[v_blk_row + d / block_size]).cast::<f32>() - 127.0f32,
+                            );
+                            let prev = stack_load("o", i);
+                            stack_store(
+                                "o",
+                                i,
+                                prev * exp_diff + exp_score * (e2m1_decode(nib) * vsc),
+                            );
+                        }
+                    }
+                    l_acc = l_acc * exp_diff + exp_score;
+                    m_acc = new_m;
                 }
             }
-            let score = simd_sum(dot_partial);
-            let new_m = select(m_acc > score, m_acc, score);
-            let exp_diff = exp(m_acc - new_m);
-            let exp_score = exp(score - new_m);
-            let v_word_row = (kv_idx * tokens + t) * words_per_token;
-            let v_blk_row = (kv_idx * tokens + t) * n_blocks;
-            for i in range(0u32, 4u32, 1u32) {
+
+            for i in range(0u32, $dpl, 1u32) {
                 let d = lane + i * 32u32;
                 if d < dim {
-                    let nib =
-                        (load(v_packed[v_word_row + d / 8u32]) >> ((d % 8u32) * 4u32)) & 0xFu32;
-                    let vsc =
-                        exp2(load(v_scales[v_blk_row + d / block_size]).cast::<f32>() - 127.0f32);
-                    let prev = stack_load("o", i);
-                    stack_store("o", i, prev * exp_diff + exp_score * (e2m1_decode(nib) * vsc));
+                    let oi = stack_load("o", i);
+                    let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
+                    store(out[q_idx * dim + d], normed.cast::<T>());
                 }
             }
-            l_acc = l_acc * exp_diff + exp_score;
-            m_acc = new_m;
         }
-    }
-
-    for i in range(0u32, 4u32, 1u32) {
-        let d = lane + i * 32u32;
-        if d < dim {
-            let oi = stack_load("o", i);
-            let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
-            store(out[q_idx * dim + d], normed.cast::<T>());
-        }
-    }
+    };
 }
+mxfp4_flash!(mt_mxfp4_flash_sdpa_d64, 2u32);
+mxfp4_flash!(mt_mxfp4_flash_sdpa_d96, 3u32);
+mxfp4_flash!(mt_mxfp4_flash_sdpa_d128, 4u32);
+mxfp4_flash!(mt_mxfp4_flash_sdpa_d256, 8u32);
+mxfp4_flash!(mt_mxfp4_flash_sdpa_d512, 16u32);
 
-/// nvfp4 flash SDPA (d=128) — E2M1 K/V (block 16), E4M3 micro-scale × global.
-#[kernel]
-pub fn mt_nvfp4_flash_sdpa_d128<T>(
-    queries: Tensor<T>,
-    k_packed: Tensor<u32>,
-    k_scales: Tensor<u8>,
-    v_packed: Tensor<u32>,
-    v_scales: Tensor<u8>,
-    sinks: Tensor<f32>,
-    out: Tensor<T>,
-    #[constexpr] dim: u32,
-    #[constexpr] tokens: u32,
-    #[constexpr] repeat_count: u32,
-    #[constexpr] block_size: u32,
-    #[constexpr] num_q_heads: u32,
-    #[constexpr] has_sinks: u32,
-    #[constexpr] window_size: u32,
-    #[constexpr] scale: f32,
-    #[constexpr] global: f32,
-) {
-    let lane = program_id::<0>();
-    let q_idx = program_id::<1>();
-    let kv_idx = q_idx / repeat_count;
-    let n_blocks = dim / block_size;
-    let words_per_token = dim / 8u32;
+/// nvfp4 flash SDPA — E2M1 K/V (block 16), E4M3 micro-scale × global.
+macro_rules! nvfp4_flash {
+    ($name:ident, $dpl:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            queries: Tensor<T>,
+            k_packed: Tensor<u32>,
+            k_scales: Tensor<u8>,
+            v_packed: Tensor<u32>,
+            v_scales: Tensor<u8>,
+            sinks: Tensor<f32>,
+            out: Tensor<T>,
+            #[constexpr] dim: u32,
+            #[constexpr] tokens: u32,
+            #[constexpr] repeat_count: u32,
+            #[constexpr] block_size: u32,
+            #[constexpr] num_q_heads: u32,
+            #[constexpr] has_sinks: u32,
+            #[constexpr] window_size: u32,
+            #[constexpr] scale: f32,
+            #[constexpr] global: f32,
+        ) {
+            let lane = program_id::<0>();
+            let q_idx = program_id::<1>();
+            let kv_idx = q_idx / repeat_count;
+            let n_blocks = dim / block_size;
+            let words_per_token = dim / 8u32;
 
-    stack_alloc("q_vals", 4, "f32");
-    for i in range(0u32, 4u32, 1u32) {
-        let d = lane + i * 32u32;
-        let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
-        stack_store("q_vals", i, v * scale);
-    }
-
-    let sink_val = load(sinks[q_idx % num_q_heads]);
-    let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
-    let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
-    stack_alloc("o", 4, "f32");
-    for i in range(0u32, 4u32, 1u32) {
-        stack_store("o", i, 0.0f32);
-    }
-
-    let causal_upper = tokens - 1u32;
-    for t in range(0u32, tokens, 1u32) {
-        let use_key = select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
-        if use_key {
-            let k_word_row = (kv_idx * tokens + t) * words_per_token;
-            let k_blk_row = (kv_idx * tokens + t) * n_blocks;
-            let mut dot_partial = 0.0f32;
-            for i in range(0u32, 4u32, 1u32) {
+            stack_alloc("q_vals", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
                 let d = lane + i * 32u32;
-                if d < dim {
-                    let nib =
-                        (load(k_packed[k_word_row + d / 8u32]) >> ((d % 8u32) * 4u32)) & 0xFu32;
-                    let ksc = e4m3_decode(load(k_scales[k_blk_row + d / block_size]).cast::<u32>())
-                        * global;
-                    dot_partial = dot_partial + stack_load("q_vals", i) * (e2m1_decode(nib) * ksc);
+                let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+                stack_store("q_vals", i, v * scale);
+            }
+
+            let sink_val = load(sinks[q_idx % num_q_heads]);
+            let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
+            let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
+            stack_alloc("o", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
+                stack_store("o", i, 0.0f32);
+            }
+
+            let causal_upper = tokens - 1u32;
+            for t in range(0u32, tokens, 1u32) {
+                let use_key =
+                    select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+                if use_key {
+                    let k_word_row = (kv_idx * tokens + t) * words_per_token;
+                    let k_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    let mut dot_partial = 0.0f32;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let nib = (load(k_packed[k_word_row + d / 8u32])
+                                >> ((d % 8u32) * 4u32))
+                                & 0xFu32;
+                            let ksc = e4m3_decode(
+                                load(k_scales[k_blk_row + d / block_size]).cast::<u32>(),
+                            ) * global;
+                            dot_partial =
+                                dot_partial + stack_load("q_vals", i) * (e2m1_decode(nib) * ksc);
+                        }
+                    }
+                    let score = simd_sum(dot_partial);
+                    let new_m = select(m_acc > score, m_acc, score);
+                    let exp_diff = exp(m_acc - new_m);
+                    let exp_score = exp(score - new_m);
+                    let v_word_row = (kv_idx * tokens + t) * words_per_token;
+                    let v_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let nib = (load(v_packed[v_word_row + d / 8u32])
+                                >> ((d % 8u32) * 4u32))
+                                & 0xFu32;
+                            let vsc = e4m3_decode(
+                                load(v_scales[v_blk_row + d / block_size]).cast::<u32>(),
+                            ) * global;
+                            let prev = stack_load("o", i);
+                            stack_store(
+                                "o",
+                                i,
+                                prev * exp_diff + exp_score * (e2m1_decode(nib) * vsc),
+                            );
+                        }
+                    }
+                    l_acc = l_acc * exp_diff + exp_score;
+                    m_acc = new_m;
                 }
             }
-            let score = simd_sum(dot_partial);
-            let new_m = select(m_acc > score, m_acc, score);
-            let exp_diff = exp(m_acc - new_m);
-            let exp_score = exp(score - new_m);
-            let v_word_row = (kv_idx * tokens + t) * words_per_token;
-            let v_blk_row = (kv_idx * tokens + t) * n_blocks;
-            for i in range(0u32, 4u32, 1u32) {
+
+            for i in range(0u32, $dpl, 1u32) {
                 let d = lane + i * 32u32;
                 if d < dim {
-                    let nib =
-                        (load(v_packed[v_word_row + d / 8u32]) >> ((d % 8u32) * 4u32)) & 0xFu32;
-                    let vsc = e4m3_decode(load(v_scales[v_blk_row + d / block_size]).cast::<u32>())
-                        * global;
-                    let prev = stack_load("o", i);
-                    stack_store("o", i, prev * exp_diff + exp_score * (e2m1_decode(nib) * vsc));
+                    let oi = stack_load("o", i);
+                    let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
+                    store(out[q_idx * dim + d], normed.cast::<T>());
                 }
             }
-            l_acc = l_acc * exp_diff + exp_score;
-            m_acc = new_m;
         }
-    }
-
-    for i in range(0u32, 4u32, 1u32) {
-        let d = lane + i * 32u32;
-        if d < dim {
-            let oi = stack_load("o", i);
-            let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
-            store(out[q_idx * dim + d], normed.cast::<T>());
-        }
-    }
+    };
 }
+nvfp4_flash!(mt_nvfp4_flash_sdpa_d64, 2u32);
+nvfp4_flash!(mt_nvfp4_flash_sdpa_d96, 3u32);
+nvfp4_flash!(mt_nvfp4_flash_sdpa_d128, 4u32);
+nvfp4_flash!(mt_nvfp4_flash_sdpa_d256, 8u32);
+nvfp4_flash!(mt_nvfp4_flash_sdpa_d512, 16u32);
 
-/// mxfp8 (E4M3) flash SDPA (d=128) — 8-bit K/V (block 32), E8M0 pow-2 scale.
-#[kernel]
-pub fn mt_mxfp8_e4m3_flash_sdpa_d128<T>(
-    queries: Tensor<T>,
-    k_packed: Tensor<u8>,
-    k_scales: Tensor<u8>,
-    v_packed: Tensor<u8>,
-    v_scales: Tensor<u8>,
-    sinks: Tensor<f32>,
-    out: Tensor<T>,
-    #[constexpr] dim: u32,
-    #[constexpr] tokens: u32,
-    #[constexpr] repeat_count: u32,
-    #[constexpr] block_size: u32,
-    #[constexpr] num_q_heads: u32,
-    #[constexpr] has_sinks: u32,
-    #[constexpr] window_size: u32,
-    #[constexpr] scale: f32,
-) {
-    let lane = program_id::<0>();
-    let q_idx = program_id::<1>();
-    let kv_idx = q_idx / repeat_count;
-    let n_blocks = dim / block_size;
+/// mxfp8 (E4M3) flash SDPA — 8-bit K/V (block 32), E8M0 pow-2 scale.
+macro_rules! mxfp8_e4m3_flash {
+    ($name:ident, $dpl:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            queries: Tensor<T>,
+            k_packed: Tensor<u8>,
+            k_scales: Tensor<u8>,
+            v_packed: Tensor<u8>,
+            v_scales: Tensor<u8>,
+            sinks: Tensor<f32>,
+            out: Tensor<T>,
+            #[constexpr] dim: u32,
+            #[constexpr] tokens: u32,
+            #[constexpr] repeat_count: u32,
+            #[constexpr] block_size: u32,
+            #[constexpr] num_q_heads: u32,
+            #[constexpr] has_sinks: u32,
+            #[constexpr] window_size: u32,
+            #[constexpr] scale: f32,
+        ) {
+            let lane = program_id::<0>();
+            let q_idx = program_id::<1>();
+            let kv_idx = q_idx / repeat_count;
+            let n_blocks = dim / block_size;
 
-    stack_alloc("q_vals", 4, "f32");
-    for i in range(0u32, 4u32, 1u32) {
-        let d = lane + i * 32u32;
-        let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
-        stack_store("q_vals", i, v * scale);
-    }
-
-    let sink_val = load(sinks[q_idx % num_q_heads]);
-    let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
-    let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
-    stack_alloc("o", 4, "f32");
-    for i in range(0u32, 4u32, 1u32) {
-        stack_store("o", i, 0.0f32);
-    }
-
-    let causal_upper = tokens - 1u32;
-    for t in range(0u32, tokens, 1u32) {
-        let use_key = select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
-        if use_key {
-            let k_row = (kv_idx * tokens + t) * dim;
-            let k_blk_row = (kv_idx * tokens + t) * n_blocks;
-            let mut dot_partial = 0.0f32;
-            for i in range(0u32, 4u32, 1u32) {
+            stack_alloc("q_vals", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
                 let d = lane + i * 32u32;
-                if d < dim {
-                    let kelem = e4m3_decode(load(k_packed[k_row + d]).cast::<u32>());
-                    let ksc =
-                        exp2(load(k_scales[k_blk_row + d / block_size]).cast::<f32>() - 127.0f32);
-                    dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
+                let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+                stack_store("q_vals", i, v * scale);
+            }
+
+            let sink_val = load(sinks[q_idx % num_q_heads]);
+            let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
+            let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
+            stack_alloc("o", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
+                stack_store("o", i, 0.0f32);
+            }
+
+            let causal_upper = tokens - 1u32;
+            for t in range(0u32, tokens, 1u32) {
+                let use_key =
+                    select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+                if use_key {
+                    let k_row = (kv_idx * tokens + t) * dim;
+                    let k_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    let mut dot_partial = 0.0f32;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let kelem = e4m3_decode(load(k_packed[k_row + d]).cast::<u32>());
+                            let ksc = exp2(
+                                load(k_scales[k_blk_row + d / block_size]).cast::<f32>() - 127.0f32,
+                            );
+                            dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
+                        }
+                    }
+                    let score = simd_sum(dot_partial);
+                    let new_m = select(m_acc > score, m_acc, score);
+                    let exp_diff = exp(m_acc - new_m);
+                    let exp_score = exp(score - new_m);
+                    let v_row = (kv_idx * tokens + t) * dim;
+                    let v_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let velem = e4m3_decode(load(v_packed[v_row + d]).cast::<u32>());
+                            let vsc = exp2(
+                                load(v_scales[v_blk_row + d / block_size]).cast::<f32>() - 127.0f32,
+                            );
+                            let prev = stack_load("o", i);
+                            stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
+                        }
+                    }
+                    l_acc = l_acc * exp_diff + exp_score;
+                    m_acc = new_m;
                 }
             }
-            let score = simd_sum(dot_partial);
-            let new_m = select(m_acc > score, m_acc, score);
-            let exp_diff = exp(m_acc - new_m);
-            let exp_score = exp(score - new_m);
-            let v_row = (kv_idx * tokens + t) * dim;
-            let v_blk_row = (kv_idx * tokens + t) * n_blocks;
-            for i in range(0u32, 4u32, 1u32) {
+
+            for i in range(0u32, $dpl, 1u32) {
                 let d = lane + i * 32u32;
                 if d < dim {
-                    let velem = e4m3_decode(load(v_packed[v_row + d]).cast::<u32>());
-                    let vsc =
-                        exp2(load(v_scales[v_blk_row + d / block_size]).cast::<f32>() - 127.0f32);
-                    let prev = stack_load("o", i);
-                    stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
+                    let oi = stack_load("o", i);
+                    let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
+                    store(out[q_idx * dim + d], normed.cast::<T>());
                 }
             }
-            l_acc = l_acc * exp_diff + exp_score;
-            m_acc = new_m;
         }
-    }
-
-    for i in range(0u32, 4u32, 1u32) {
-        let d = lane + i * 32u32;
-        if d < dim {
-            let oi = stack_load("o", i);
-            let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
-            store(out[q_idx * dim + d], normed.cast::<T>());
-        }
-    }
+    };
 }
+mxfp8_e4m3_flash!(mt_mxfp8_e4m3_flash_sdpa_d64, 2u32);
+mxfp8_e4m3_flash!(mt_mxfp8_e4m3_flash_sdpa_d96, 3u32);
+mxfp8_e4m3_flash!(mt_mxfp8_e4m3_flash_sdpa_d128, 4u32);
+mxfp8_e4m3_flash!(mt_mxfp8_e4m3_flash_sdpa_d256, 8u32);
+mxfp8_e4m3_flash!(mt_mxfp8_e4m3_flash_sdpa_d512, 16u32);
 
-/// mxfp8 (E5M2) flash SDPA (d=128) — 8-bit K/V (block 32), E8M0 pow-2 scale.
-#[kernel]
-pub fn mt_mxfp8_e5m2_flash_sdpa_d128<T>(
-    queries: Tensor<T>,
-    k_packed: Tensor<u8>,
-    k_scales: Tensor<u8>,
-    v_packed: Tensor<u8>,
-    v_scales: Tensor<u8>,
-    sinks: Tensor<f32>,
-    out: Tensor<T>,
-    #[constexpr] dim: u32,
-    #[constexpr] tokens: u32,
-    #[constexpr] repeat_count: u32,
-    #[constexpr] block_size: u32,
-    #[constexpr] num_q_heads: u32,
-    #[constexpr] has_sinks: u32,
-    #[constexpr] window_size: u32,
-    #[constexpr] scale: f32,
-) {
-    let lane = program_id::<0>();
-    let q_idx = program_id::<1>();
-    let kv_idx = q_idx / repeat_count;
-    let n_blocks = dim / block_size;
+/// mxfp8 (E5M2) flash SDPA — 8-bit K/V (block 32), E8M0 pow-2 scale.
+macro_rules! mxfp8_e5m2_flash {
+    ($name:ident, $dpl:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            queries: Tensor<T>,
+            k_packed: Tensor<u8>,
+            k_scales: Tensor<u8>,
+            v_packed: Tensor<u8>,
+            v_scales: Tensor<u8>,
+            sinks: Tensor<f32>,
+            out: Tensor<T>,
+            #[constexpr] dim: u32,
+            #[constexpr] tokens: u32,
+            #[constexpr] repeat_count: u32,
+            #[constexpr] block_size: u32,
+            #[constexpr] num_q_heads: u32,
+            #[constexpr] has_sinks: u32,
+            #[constexpr] window_size: u32,
+            #[constexpr] scale: f32,
+        ) {
+            let lane = program_id::<0>();
+            let q_idx = program_id::<1>();
+            let kv_idx = q_idx / repeat_count;
+            let n_blocks = dim / block_size;
 
-    stack_alloc("q_vals", 4, "f32");
-    for i in range(0u32, 4u32, 1u32) {
-        let d = lane + i * 32u32;
-        let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
-        stack_store("q_vals", i, v * scale);
-    }
-
-    let sink_val = load(sinks[q_idx % num_q_heads]);
-    let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
-    let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
-    stack_alloc("o", 4, "f32");
-    for i in range(0u32, 4u32, 1u32) {
-        stack_store("o", i, 0.0f32);
-    }
-
-    let causal_upper = tokens - 1u32;
-    for t in range(0u32, tokens, 1u32) {
-        let use_key = select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
-        if use_key {
-            let k_row = (kv_idx * tokens + t) * dim;
-            let k_blk_row = (kv_idx * tokens + t) * n_blocks;
-            let mut dot_partial = 0.0f32;
-            for i in range(0u32, 4u32, 1u32) {
+            stack_alloc("q_vals", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
                 let d = lane + i * 32u32;
-                if d < dim {
-                    let kelem = e5m2_decode(load(k_packed[k_row + d]).cast::<u32>());
-                    let ksc =
-                        exp2(load(k_scales[k_blk_row + d / block_size]).cast::<f32>() - 127.0f32);
-                    dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
+                let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+                stack_store("q_vals", i, v * scale);
+            }
+
+            let sink_val = load(sinks[q_idx % num_q_heads]);
+            let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
+            let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
+            stack_alloc("o", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
+                stack_store("o", i, 0.0f32);
+            }
+
+            let causal_upper = tokens - 1u32;
+            for t in range(0u32, tokens, 1u32) {
+                let use_key =
+                    select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+                if use_key {
+                    let k_row = (kv_idx * tokens + t) * dim;
+                    let k_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    let mut dot_partial = 0.0f32;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let kelem = e5m2_decode(load(k_packed[k_row + d]).cast::<u32>());
+                            let ksc = exp2(
+                                load(k_scales[k_blk_row + d / block_size]).cast::<f32>() - 127.0f32,
+                            );
+                            dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
+                        }
+                    }
+                    let score = simd_sum(dot_partial);
+                    let new_m = select(m_acc > score, m_acc, score);
+                    let exp_diff = exp(m_acc - new_m);
+                    let exp_score = exp(score - new_m);
+                    let v_row = (kv_idx * tokens + t) * dim;
+                    let v_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let velem = e5m2_decode(load(v_packed[v_row + d]).cast::<u32>());
+                            let vsc = exp2(
+                                load(v_scales[v_blk_row + d / block_size]).cast::<f32>() - 127.0f32,
+                            );
+                            let prev = stack_load("o", i);
+                            stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
+                        }
+                    }
+                    l_acc = l_acc * exp_diff + exp_score;
+                    m_acc = new_m;
                 }
             }
-            let score = simd_sum(dot_partial);
-            let new_m = select(m_acc > score, m_acc, score);
-            let exp_diff = exp(m_acc - new_m);
-            let exp_score = exp(score - new_m);
-            let v_row = (kv_idx * tokens + t) * dim;
-            let v_blk_row = (kv_idx * tokens + t) * n_blocks;
-            for i in range(0u32, 4u32, 1u32) {
+
+            for i in range(0u32, $dpl, 1u32) {
                 let d = lane + i * 32u32;
                 if d < dim {
-                    let velem = e5m2_decode(load(v_packed[v_row + d]).cast::<u32>());
-                    let vsc =
-                        exp2(load(v_scales[v_blk_row + d / block_size]).cast::<f32>() - 127.0f32);
-                    let prev = stack_load("o", i);
-                    stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
+                    let oi = stack_load("o", i);
+                    let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
+                    store(out[q_idx * dim + d], normed.cast::<T>());
                 }
             }
-            l_acc = l_acc * exp_diff + exp_score;
-            m_acc = new_m;
         }
-    }
-
-    for i in range(0u32, 4u32, 1u32) {
-        let d = lane + i * 32u32;
-        if d < dim {
-            let oi = stack_load("o", i);
-            let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
-            store(out[q_idx * dim + d], normed.cast::<T>());
-        }
-    }
+    };
 }
+mxfp8_e5m2_flash!(mt_mxfp8_e5m2_flash_sdpa_d64, 2u32);
+mxfp8_e5m2_flash!(mt_mxfp8_e5m2_flash_sdpa_d96, 3u32);
+mxfp8_e5m2_flash!(mt_mxfp8_e5m2_flash_sdpa_d128, 4u32);
+mxfp8_e5m2_flash!(mt_mxfp8_e5m2_flash_sdpa_d256, 8u32);
+mxfp8_e5m2_flash!(mt_mxfp8_e5m2_flash_sdpa_d512, 16u32);
 
-/// nvfp8 flash SDPA (d=128) — E4M3 K/V (block 16), per-block FP32 scale.
-#[kernel]
-pub fn mt_nvfp8_flash_sdpa_d128<T>(
-    queries: Tensor<T>,
-    k_packed: Tensor<u8>,
-    k_scales: Tensor<f32>,
-    v_packed: Tensor<u8>,
-    v_scales: Tensor<f32>,
-    sinks: Tensor<f32>,
-    out: Tensor<T>,
-    #[constexpr] dim: u32,
-    #[constexpr] tokens: u32,
-    #[constexpr] repeat_count: u32,
-    #[constexpr] block_size: u32,
-    #[constexpr] num_q_heads: u32,
-    #[constexpr] has_sinks: u32,
-    #[constexpr] window_size: u32,
-    #[constexpr] scale: f32,
-) {
-    let lane = program_id::<0>();
-    let q_idx = program_id::<1>();
-    let kv_idx = q_idx / repeat_count;
-    let n_blocks = dim / block_size;
+/// nvfp8 flash SDPA — E4M3 K/V (block 16), per-block FP32 scale.
+macro_rules! nvfp8_flash {
+    ($name:ident, $dpl:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            queries: Tensor<T>,
+            k_packed: Tensor<u8>,
+            k_scales: Tensor<f32>,
+            v_packed: Tensor<u8>,
+            v_scales: Tensor<f32>,
+            sinks: Tensor<f32>,
+            out: Tensor<T>,
+            #[constexpr] dim: u32,
+            #[constexpr] tokens: u32,
+            #[constexpr] repeat_count: u32,
+            #[constexpr] block_size: u32,
+            #[constexpr] num_q_heads: u32,
+            #[constexpr] has_sinks: u32,
+            #[constexpr] window_size: u32,
+            #[constexpr] scale: f32,
+        ) {
+            let lane = program_id::<0>();
+            let q_idx = program_id::<1>();
+            let kv_idx = q_idx / repeat_count;
+            let n_blocks = dim / block_size;
 
-    stack_alloc("q_vals", 4, "f32");
-    for i in range(0u32, 4u32, 1u32) {
-        let d = lane + i * 32u32;
-        let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
-        stack_store("q_vals", i, v * scale);
-    }
-
-    let sink_val = load(sinks[q_idx % num_q_heads]);
-    let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
-    let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
-    stack_alloc("o", 4, "f32");
-    for i in range(0u32, 4u32, 1u32) {
-        stack_store("o", i, 0.0f32);
-    }
-
-    let causal_upper = tokens - 1u32;
-    for t in range(0u32, tokens, 1u32) {
-        let use_key = select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
-        if use_key {
-            let k_row = (kv_idx * tokens + t) * dim;
-            let k_blk_row = (kv_idx * tokens + t) * n_blocks;
-            let mut dot_partial = 0.0f32;
-            for i in range(0u32, 4u32, 1u32) {
+            stack_alloc("q_vals", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
                 let d = lane + i * 32u32;
-                if d < dim {
-                    let kelem = e4m3_decode(load(k_packed[k_row + d]).cast::<u32>());
-                    let ksc = load(k_scales[k_blk_row + d / block_size]);
-                    dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
+                let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+                stack_store("q_vals", i, v * scale);
+            }
+
+            let sink_val = load(sinks[q_idx % num_q_heads]);
+            let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
+            let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
+            stack_alloc("o", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
+                stack_store("o", i, 0.0f32);
+            }
+
+            let causal_upper = tokens - 1u32;
+            for t in range(0u32, tokens, 1u32) {
+                let use_key =
+                    select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+                if use_key {
+                    let k_row = (kv_idx * tokens + t) * dim;
+                    let k_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    let mut dot_partial = 0.0f32;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let kelem = e4m3_decode(load(k_packed[k_row + d]).cast::<u32>());
+                            let ksc = load(k_scales[k_blk_row + d / block_size]);
+                            dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
+                        }
+                    }
+                    let score = simd_sum(dot_partial);
+                    let new_m = select(m_acc > score, m_acc, score);
+                    let exp_diff = exp(m_acc - new_m);
+                    let exp_score = exp(score - new_m);
+                    let v_row = (kv_idx * tokens + t) * dim;
+                    let v_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let velem = e4m3_decode(load(v_packed[v_row + d]).cast::<u32>());
+                            let vsc = load(v_scales[v_blk_row + d / block_size]);
+                            let prev = stack_load("o", i);
+                            stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
+                        }
+                    }
+                    l_acc = l_acc * exp_diff + exp_score;
+                    m_acc = new_m;
                 }
             }
-            let score = simd_sum(dot_partial);
-            let new_m = select(m_acc > score, m_acc, score);
-            let exp_diff = exp(m_acc - new_m);
-            let exp_score = exp(score - new_m);
-            let v_row = (kv_idx * tokens + t) * dim;
-            let v_blk_row = (kv_idx * tokens + t) * n_blocks;
-            for i in range(0u32, 4u32, 1u32) {
+
+            for i in range(0u32, $dpl, 1u32) {
                 let d = lane + i * 32u32;
                 if d < dim {
-                    let velem = e4m3_decode(load(v_packed[v_row + d]).cast::<u32>());
-                    let vsc = load(v_scales[v_blk_row + d / block_size]);
-                    let prev = stack_load("o", i);
-                    stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
+                    let oi = stack_load("o", i);
+                    let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
+                    store(out[q_idx * dim + d], normed.cast::<T>());
                 }
             }
-            l_acc = l_acc * exp_diff + exp_score;
-            m_acc = new_m;
         }
-    }
-
-    for i in range(0u32, 4u32, 1u32) {
-        let d = lane + i * 32u32;
-        if d < dim {
-            let oi = stack_load("o", i);
-            let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
-            store(out[q_idx * dim + d], normed.cast::<T>());
-        }
-    }
+    };
 }
+nvfp8_flash!(mt_nvfp8_flash_sdpa_d64, 2u32);
+nvfp8_flash!(mt_nvfp8_flash_sdpa_d96, 3u32);
+nvfp8_flash!(mt_nvfp8_flash_sdpa_d128, 4u32);
+nvfp8_flash!(mt_nvfp8_flash_sdpa_d256, 8u32);
+nvfp8_flash!(mt_nvfp8_flash_sdpa_d512, 16u32);
 
 // ── Legacy float-scale (fp4 / fp8) + symmetric int8 flash SDPA ─────────────
 // These share the block-scaled attention body but store a raw per-group FP32
@@ -466,261 +541,300 @@ pub fn mt_nvfp8_flash_sdpa_d128<T>(
 // E2M1), fp8_e5m2 (8-bit E5M2), and int8 (8-bit symmetric) need their own
 // decode here.
 
-/// Legacy fp4 flash SDPA (d=128) — E2M1 K/V (group 32), per-group FP32 scale.
-#[kernel]
-pub fn mt_fp4_flash_sdpa_d128<T>(
-    queries: Tensor<T>,
-    k_packed: Tensor<u32>,
-    k_scales: Tensor<f32>,
-    v_packed: Tensor<u32>,
-    v_scales: Tensor<f32>,
-    sinks: Tensor<f32>,
-    out: Tensor<T>,
-    #[constexpr] dim: u32,
-    #[constexpr] tokens: u32,
-    #[constexpr] repeat_count: u32,
-    #[constexpr] block_size: u32,
-    #[constexpr] num_q_heads: u32,
-    #[constexpr] has_sinks: u32,
-    #[constexpr] window_size: u32,
-    #[constexpr] scale: f32,
-) {
-    let lane = program_id::<0>();
-    let q_idx = program_id::<1>();
-    let kv_idx = q_idx / repeat_count;
-    let n_blocks = dim / block_size;
-    let words_per_token = dim / 8u32;
+/// Legacy fp4 flash SDPA — E2M1 K/V (group 32), per-group FP32 scale.
+macro_rules! fp4_flash {
+    ($name:ident, $dpl:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            queries: Tensor<T>,
+            k_packed: Tensor<u32>,
+            k_scales: Tensor<f32>,
+            v_packed: Tensor<u32>,
+            v_scales: Tensor<f32>,
+            sinks: Tensor<f32>,
+            out: Tensor<T>,
+            #[constexpr] dim: u32,
+            #[constexpr] tokens: u32,
+            #[constexpr] repeat_count: u32,
+            #[constexpr] block_size: u32,
+            #[constexpr] num_q_heads: u32,
+            #[constexpr] has_sinks: u32,
+            #[constexpr] window_size: u32,
+            #[constexpr] scale: f32,
+        ) {
+            let lane = program_id::<0>();
+            let q_idx = program_id::<1>();
+            let kv_idx = q_idx / repeat_count;
+            let n_blocks = dim / block_size;
+            let words_per_token = dim / 8u32;
 
-    stack_alloc("q_vals", 4, "f32");
-    for i in range(0u32, 4u32, 1u32) {
-        let d = lane + i * 32u32;
-        let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
-        stack_store("q_vals", i, v * scale);
-    }
-
-    let sink_val = load(sinks[q_idx % num_q_heads]);
-    let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
-    let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
-    stack_alloc("o", 4, "f32");
-    for i in range(0u32, 4u32, 1u32) {
-        stack_store("o", i, 0.0f32);
-    }
-
-    let causal_upper = tokens - 1u32;
-    for t in range(0u32, tokens, 1u32) {
-        let use_key = select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
-        if use_key {
-            let k_word_row = (kv_idx * tokens + t) * words_per_token;
-            let k_blk_row = (kv_idx * tokens + t) * n_blocks;
-            let mut dot_partial = 0.0f32;
-            for i in range(0u32, 4u32, 1u32) {
+            stack_alloc("q_vals", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
                 let d = lane + i * 32u32;
-                if d < dim {
-                    let nib =
-                        (load(k_packed[k_word_row + d / 8u32]) >> ((d % 8u32) * 4u32)) & 0xFu32;
-                    let ksc = load(k_scales[k_blk_row + d / block_size]);
-                    dot_partial = dot_partial + stack_load("q_vals", i) * (e2m1_decode(nib) * ksc);
+                let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+                stack_store("q_vals", i, v * scale);
+            }
+
+            let sink_val = load(sinks[q_idx % num_q_heads]);
+            let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
+            let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
+            stack_alloc("o", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
+                stack_store("o", i, 0.0f32);
+            }
+
+            let causal_upper = tokens - 1u32;
+            for t in range(0u32, tokens, 1u32) {
+                let use_key =
+                    select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+                if use_key {
+                    let k_word_row = (kv_idx * tokens + t) * words_per_token;
+                    let k_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    let mut dot_partial = 0.0f32;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let nib = (load(k_packed[k_word_row + d / 8u32])
+                                >> ((d % 8u32) * 4u32))
+                                & 0xFu32;
+                            let ksc = load(k_scales[k_blk_row + d / block_size]);
+                            dot_partial =
+                                dot_partial + stack_load("q_vals", i) * (e2m1_decode(nib) * ksc);
+                        }
+                    }
+                    let score = simd_sum(dot_partial);
+                    let new_m = select(m_acc > score, m_acc, score);
+                    let exp_diff = exp(m_acc - new_m);
+                    let exp_score = exp(score - new_m);
+                    let v_word_row = (kv_idx * tokens + t) * words_per_token;
+                    let v_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let nib = (load(v_packed[v_word_row + d / 8u32])
+                                >> ((d % 8u32) * 4u32))
+                                & 0xFu32;
+                            let vsc = load(v_scales[v_blk_row + d / block_size]);
+                            let prev = stack_load("o", i);
+                            stack_store(
+                                "o",
+                                i,
+                                prev * exp_diff + exp_score * (e2m1_decode(nib) * vsc),
+                            );
+                        }
+                    }
+                    l_acc = l_acc * exp_diff + exp_score;
+                    m_acc = new_m;
                 }
             }
-            let score = simd_sum(dot_partial);
-            let new_m = select(m_acc > score, m_acc, score);
-            let exp_diff = exp(m_acc - new_m);
-            let exp_score = exp(score - new_m);
-            let v_word_row = (kv_idx * tokens + t) * words_per_token;
-            let v_blk_row = (kv_idx * tokens + t) * n_blocks;
-            for i in range(0u32, 4u32, 1u32) {
+
+            for i in range(0u32, $dpl, 1u32) {
                 let d = lane + i * 32u32;
                 if d < dim {
-                    let nib =
-                        (load(v_packed[v_word_row + d / 8u32]) >> ((d % 8u32) * 4u32)) & 0xFu32;
-                    let vsc = load(v_scales[v_blk_row + d / block_size]);
-                    let prev = stack_load("o", i);
-                    stack_store("o", i, prev * exp_diff + exp_score * (e2m1_decode(nib) * vsc));
+                    let oi = stack_load("o", i);
+                    let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
+                    store(out[q_idx * dim + d], normed.cast::<T>());
                 }
             }
-            l_acc = l_acc * exp_diff + exp_score;
-            m_acc = new_m;
         }
-    }
-
-    for i in range(0u32, 4u32, 1u32) {
-        let d = lane + i * 32u32;
-        if d < dim {
-            let oi = stack_load("o", i);
-            let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
-            store(out[q_idx * dim + d], normed.cast::<T>());
-        }
-    }
+    };
 }
+fp4_flash!(mt_fp4_flash_sdpa_d64, 2u32);
+fp4_flash!(mt_fp4_flash_sdpa_d96, 3u32);
+fp4_flash!(mt_fp4_flash_sdpa_d128, 4u32);
+fp4_flash!(mt_fp4_flash_sdpa_d256, 8u32);
+fp4_flash!(mt_fp4_flash_sdpa_d512, 16u32);
 
-/// Legacy fp8 (E5M2) flash SDPA (d=128) — 8-bit K/V (group 32), FP32 scale.
-#[kernel]
-pub fn mt_fp8_e5m2_flash_sdpa_d128<T>(
-    queries: Tensor<T>,
-    k_packed: Tensor<u8>,
-    k_scales: Tensor<f32>,
-    v_packed: Tensor<u8>,
-    v_scales: Tensor<f32>,
-    sinks: Tensor<f32>,
-    out: Tensor<T>,
-    #[constexpr] dim: u32,
-    #[constexpr] tokens: u32,
-    #[constexpr] repeat_count: u32,
-    #[constexpr] block_size: u32,
-    #[constexpr] num_q_heads: u32,
-    #[constexpr] has_sinks: u32,
-    #[constexpr] window_size: u32,
-    #[constexpr] scale: f32,
-) {
-    let lane = program_id::<0>();
-    let q_idx = program_id::<1>();
-    let kv_idx = q_idx / repeat_count;
-    let n_blocks = dim / block_size;
+/// Legacy fp8 (E5M2) flash SDPA — 8-bit K/V (group 32), FP32 scale.
+macro_rules! fp8_e5m2_flash {
+    ($name:ident, $dpl:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            queries: Tensor<T>,
+            k_packed: Tensor<u8>,
+            k_scales: Tensor<f32>,
+            v_packed: Tensor<u8>,
+            v_scales: Tensor<f32>,
+            sinks: Tensor<f32>,
+            out: Tensor<T>,
+            #[constexpr] dim: u32,
+            #[constexpr] tokens: u32,
+            #[constexpr] repeat_count: u32,
+            #[constexpr] block_size: u32,
+            #[constexpr] num_q_heads: u32,
+            #[constexpr] has_sinks: u32,
+            #[constexpr] window_size: u32,
+            #[constexpr] scale: f32,
+        ) {
+            let lane = program_id::<0>();
+            let q_idx = program_id::<1>();
+            let kv_idx = q_idx / repeat_count;
+            let n_blocks = dim / block_size;
 
-    stack_alloc("q_vals", 4, "f32");
-    for i in range(0u32, 4u32, 1u32) {
-        let d = lane + i * 32u32;
-        let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
-        stack_store("q_vals", i, v * scale);
-    }
-
-    let sink_val = load(sinks[q_idx % num_q_heads]);
-    let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
-    let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
-    stack_alloc("o", 4, "f32");
-    for i in range(0u32, 4u32, 1u32) {
-        stack_store("o", i, 0.0f32);
-    }
-
-    let causal_upper = tokens - 1u32;
-    for t in range(0u32, tokens, 1u32) {
-        let use_key = select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
-        if use_key {
-            let k_row = (kv_idx * tokens + t) * dim;
-            let k_blk_row = (kv_idx * tokens + t) * n_blocks;
-            let mut dot_partial = 0.0f32;
-            for i in range(0u32, 4u32, 1u32) {
+            stack_alloc("q_vals", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
                 let d = lane + i * 32u32;
-                if d < dim {
-                    let kelem = e5m2_decode(load(k_packed[k_row + d]).cast::<u32>());
-                    let ksc = load(k_scales[k_blk_row + d / block_size]);
-                    dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
+                let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+                stack_store("q_vals", i, v * scale);
+            }
+
+            let sink_val = load(sinks[q_idx % num_q_heads]);
+            let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
+            let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
+            stack_alloc("o", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
+                stack_store("o", i, 0.0f32);
+            }
+
+            let causal_upper = tokens - 1u32;
+            for t in range(0u32, tokens, 1u32) {
+                let use_key =
+                    select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+                if use_key {
+                    let k_row = (kv_idx * tokens + t) * dim;
+                    let k_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    let mut dot_partial = 0.0f32;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let kelem = e5m2_decode(load(k_packed[k_row + d]).cast::<u32>());
+                            let ksc = load(k_scales[k_blk_row + d / block_size]);
+                            dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
+                        }
+                    }
+                    let score = simd_sum(dot_partial);
+                    let new_m = select(m_acc > score, m_acc, score);
+                    let exp_diff = exp(m_acc - new_m);
+                    let exp_score = exp(score - new_m);
+                    let v_row = (kv_idx * tokens + t) * dim;
+                    let v_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let velem = e5m2_decode(load(v_packed[v_row + d]).cast::<u32>());
+                            let vsc = load(v_scales[v_blk_row + d / block_size]);
+                            let prev = stack_load("o", i);
+                            stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
+                        }
+                    }
+                    l_acc = l_acc * exp_diff + exp_score;
+                    m_acc = new_m;
                 }
             }
-            let score = simd_sum(dot_partial);
-            let new_m = select(m_acc > score, m_acc, score);
-            let exp_diff = exp(m_acc - new_m);
-            let exp_score = exp(score - new_m);
-            let v_row = (kv_idx * tokens + t) * dim;
-            let v_blk_row = (kv_idx * tokens + t) * n_blocks;
-            for i in range(0u32, 4u32, 1u32) {
+
+            for i in range(0u32, $dpl, 1u32) {
                 let d = lane + i * 32u32;
                 if d < dim {
-                    let velem = e5m2_decode(load(v_packed[v_row + d]).cast::<u32>());
-                    let vsc = load(v_scales[v_blk_row + d / block_size]);
-                    let prev = stack_load("o", i);
-                    stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
+                    let oi = stack_load("o", i);
+                    let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
+                    store(out[q_idx * dim + d], normed.cast::<T>());
                 }
             }
-            l_acc = l_acc * exp_diff + exp_score;
-            m_acc = new_m;
         }
-    }
-
-    for i in range(0u32, 4u32, 1u32) {
-        let d = lane + i * 32u32;
-        if d < dim {
-            let oi = stack_load("o", i);
-            let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
-            store(out[q_idx * dim + d], normed.cast::<T>());
-        }
-    }
+    };
 }
+fp8_e5m2_flash!(mt_fp8_e5m2_flash_sdpa_d64, 2u32);
+fp8_e5m2_flash!(mt_fp8_e5m2_flash_sdpa_d96, 3u32);
+fp8_e5m2_flash!(mt_fp8_e5m2_flash_sdpa_d128, 4u32);
+fp8_e5m2_flash!(mt_fp8_e5m2_flash_sdpa_d256, 8u32);
+fp8_e5m2_flash!(mt_fp8_e5m2_flash_sdpa_d512, 16u32);
 
-/// Symmetric int8 flash SDPA (d=128) — 8-bit codes (group 64), per-group FP32
+/// Symmetric int8 flash SDPA — 8-bit codes (group 64), per-group FP32
 /// scale (affine, scale-only). Decode is sign-extend → `code · scale`.
-#[kernel]
-pub fn mt_int8_flash_sdpa_d128<T>(
-    queries: Tensor<T>,
-    k_packed: Tensor<u8>,
-    k_scales: Tensor<f32>,
-    v_packed: Tensor<u8>,
-    v_scales: Tensor<f32>,
-    sinks: Tensor<f32>,
-    out: Tensor<T>,
-    #[constexpr] dim: u32,
-    #[constexpr] tokens: u32,
-    #[constexpr] repeat_count: u32,
-    #[constexpr] block_size: u32,
-    #[constexpr] num_q_heads: u32,
-    #[constexpr] has_sinks: u32,
-    #[constexpr] window_size: u32,
-    #[constexpr] scale: f32,
-) {
-    let lane = program_id::<0>();
-    let q_idx = program_id::<1>();
-    let kv_idx = q_idx / repeat_count;
-    let n_blocks = dim / block_size;
+macro_rules! int8_flash {
+    ($name:ident, $dpl:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            queries: Tensor<T>,
+            k_packed: Tensor<u8>,
+            k_scales: Tensor<f32>,
+            v_packed: Tensor<u8>,
+            v_scales: Tensor<f32>,
+            sinks: Tensor<f32>,
+            out: Tensor<T>,
+            #[constexpr] dim: u32,
+            #[constexpr] tokens: u32,
+            #[constexpr] repeat_count: u32,
+            #[constexpr] block_size: u32,
+            #[constexpr] num_q_heads: u32,
+            #[constexpr] has_sinks: u32,
+            #[constexpr] window_size: u32,
+            #[constexpr] scale: f32,
+        ) {
+            let lane = program_id::<0>();
+            let q_idx = program_id::<1>();
+            let kv_idx = q_idx / repeat_count;
+            let n_blocks = dim / block_size;
 
-    stack_alloc("q_vals", 4, "f32");
-    for i in range(0u32, 4u32, 1u32) {
-        let d = lane + i * 32u32;
-        let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
-        stack_store("q_vals", i, v * scale);
-    }
-
-    let sink_val = load(sinks[q_idx % num_q_heads]);
-    let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
-    let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
-    stack_alloc("o", 4, "f32");
-    for i in range(0u32, 4u32, 1u32) {
-        stack_store("o", i, 0.0f32);
-    }
-
-    let causal_upper = tokens - 1u32;
-    for t in range(0u32, tokens, 1u32) {
-        let use_key = select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
-        if use_key {
-            let k_row = (kv_idx * tokens + t) * dim;
-            let k_blk_row = (kv_idx * tokens + t) * n_blocks;
-            let mut dot_partial = 0.0f32;
-            for i in range(0u32, 4u32, 1u32) {
+            stack_alloc("q_vals", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
                 let d = lane + i * 32u32;
-                if d < dim {
-                    let kelem = int8_decode(load(k_packed[k_row + d]).cast::<u32>());
-                    let ksc = load(k_scales[k_blk_row + d / block_size]);
-                    dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
+                let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+                stack_store("q_vals", i, v * scale);
+            }
+
+            let sink_val = load(sinks[q_idx % num_q_heads]);
+            let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
+            let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
+            stack_alloc("o", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
+                stack_store("o", i, 0.0f32);
+            }
+
+            let causal_upper = tokens - 1u32;
+            for t in range(0u32, tokens, 1u32) {
+                let use_key =
+                    select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+                if use_key {
+                    let k_row = (kv_idx * tokens + t) * dim;
+                    let k_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    let mut dot_partial = 0.0f32;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let kelem = int8_decode(load(k_packed[k_row + d]).cast::<u32>());
+                            let ksc = load(k_scales[k_blk_row + d / block_size]);
+                            dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
+                        }
+                    }
+                    let score = simd_sum(dot_partial);
+                    let new_m = select(m_acc > score, m_acc, score);
+                    let exp_diff = exp(m_acc - new_m);
+                    let exp_score = exp(score - new_m);
+                    let v_row = (kv_idx * tokens + t) * dim;
+                    let v_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let velem = int8_decode(load(v_packed[v_row + d]).cast::<u32>());
+                            let vsc = load(v_scales[v_blk_row + d / block_size]);
+                            let prev = stack_load("o", i);
+                            stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
+                        }
+                    }
+                    l_acc = l_acc * exp_diff + exp_score;
+                    m_acc = new_m;
                 }
             }
-            let score = simd_sum(dot_partial);
-            let new_m = select(m_acc > score, m_acc, score);
-            let exp_diff = exp(m_acc - new_m);
-            let exp_score = exp(score - new_m);
-            let v_row = (kv_idx * tokens + t) * dim;
-            let v_blk_row = (kv_idx * tokens + t) * n_blocks;
-            for i in range(0u32, 4u32, 1u32) {
+
+            for i in range(0u32, $dpl, 1u32) {
                 let d = lane + i * 32u32;
                 if d < dim {
-                    let velem = int8_decode(load(v_packed[v_row + d]).cast::<u32>());
-                    let vsc = load(v_scales[v_blk_row + d / block_size]);
-                    let prev = stack_load("o", i);
-                    stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
+                    let oi = stack_load("o", i);
+                    let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
+                    store(out[q_idx * dim + d], normed.cast::<T>());
                 }
             }
-            l_acc = l_acc * exp_diff + exp_score;
-            m_acc = new_m;
         }
-    }
-
-    for i in range(0u32, 4u32, 1u32) {
-        let d = lane + i * 32u32;
-        if d < dim {
-            let oi = stack_load("o", i);
-            let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
-            store(out[q_idx * dim + d], normed.cast::<T>());
-        }
-    }
+    };
 }
+int8_flash!(mt_int8_flash_sdpa_d64, 2u32);
+// No d96: int8's block_size is 64 and 96 is not a multiple of 64, so the cache
+// can't be tiled. d96 (GPT-NeoX) with int8 KV uses the affine path (group 32);
+// the other formats (block 16/32) cover d96.
+int8_flash!(mt_int8_flash_sdpa_d128, 4u32);
+int8_flash!(mt_int8_flash_sdpa_d256, 8u32);
+int8_flash!(mt_int8_flash_sdpa_d512, 16u32);
 
 pub mod kernel_tests {
     use metaltile::{core::ir::Kernel, test::*, test_kernel};
@@ -952,6 +1066,107 @@ pub mod kernel_tests {
     fn test_mxfp4_flash_sdpa_d128_window(dt: DType) -> TestSetup {
         flash_setup(mt_mxfp4_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Mxfp4, 128, false, 4, dt)
     }
+
+    // ── Other production head dims (d64/d96/d256/d512), all 9 formats ──
+    // `fp8_e4m3` reuses the `nvfp8` kernel (same 8-bit-E4M3 + f32-scale shape).
+    macro_rules! flash_dim_test {
+        ($test:ident, $kernel:ident, $fmt:expr, $dim:literal) => {
+            #[test_kernel(dtypes = [f32, f16, bf16], tol = [2e-3, 3e-2, 1.5e-1])]
+            fn $test(dt: DType) -> TestSetup {
+                flash_setup($kernel::kernel_ir_for(dt), $fmt, $dim, false, 0, dt)
+            }
+        };
+    }
+    // d64
+    flash_dim_test!(test_mxfp4_flash_sdpa_d64, mt_mxfp4_flash_sdpa_d64, QFormat::Mxfp4, 64);
+    flash_dim_test!(test_nvfp4_flash_sdpa_d64, mt_nvfp4_flash_sdpa_d64, QFormat::Nvfp4, 64);
+    flash_dim_test!(
+        test_mxfp8_e4m3_flash_sdpa_d64,
+        mt_mxfp8_e4m3_flash_sdpa_d64,
+        QFormat::Mxfp8E4,
+        64
+    );
+    flash_dim_test!(
+        test_mxfp8_e5m2_flash_sdpa_d64,
+        mt_mxfp8_e5m2_flash_sdpa_d64,
+        QFormat::Mxfp8E5,
+        64
+    );
+    flash_dim_test!(test_nvfp8_flash_sdpa_d64, mt_nvfp8_flash_sdpa_d64, QFormat::Nvfp8, 64);
+    flash_dim_test!(test_fp4_flash_sdpa_d64, mt_fp4_flash_sdpa_d64, QFormat::Fp4, 64);
+    flash_dim_test!(test_fp8_e4m3_flash_sdpa_d64, mt_nvfp8_flash_sdpa_d64, QFormat::Fp8E4m3, 64);
+    flash_dim_test!(test_fp8_e5m2_flash_sdpa_d64, mt_fp8_e5m2_flash_sdpa_d64, QFormat::Fp8E5m2, 64);
+    flash_dim_test!(test_int8_flash_sdpa_d64, mt_int8_flash_sdpa_d64, QFormat::Int8, 64);
+    // d96
+    flash_dim_test!(test_mxfp4_flash_sdpa_d96, mt_mxfp4_flash_sdpa_d96, QFormat::Mxfp4, 96);
+    flash_dim_test!(test_nvfp4_flash_sdpa_d96, mt_nvfp4_flash_sdpa_d96, QFormat::Nvfp4, 96);
+    flash_dim_test!(
+        test_mxfp8_e4m3_flash_sdpa_d96,
+        mt_mxfp8_e4m3_flash_sdpa_d96,
+        QFormat::Mxfp8E4,
+        96
+    );
+    flash_dim_test!(
+        test_mxfp8_e5m2_flash_sdpa_d96,
+        mt_mxfp8_e5m2_flash_sdpa_d96,
+        QFormat::Mxfp8E5,
+        96
+    );
+    flash_dim_test!(test_nvfp8_flash_sdpa_d96, mt_nvfp8_flash_sdpa_d96, QFormat::Nvfp8, 96);
+    flash_dim_test!(test_fp4_flash_sdpa_d96, mt_fp4_flash_sdpa_d96, QFormat::Fp4, 96);
+    flash_dim_test!(test_fp8_e4m3_flash_sdpa_d96, mt_nvfp8_flash_sdpa_d96, QFormat::Fp8E4m3, 96);
+    flash_dim_test!(test_fp8_e5m2_flash_sdpa_d96, mt_fp8_e5m2_flash_sdpa_d96, QFormat::Fp8E5m2, 96);
+    // int8 d96 omitted — block_size 64 does not divide head-dim 96 (see kernel note).
+    // d256
+    flash_dim_test!(test_mxfp4_flash_sdpa_d256, mt_mxfp4_flash_sdpa_d256, QFormat::Mxfp4, 256);
+    flash_dim_test!(test_nvfp4_flash_sdpa_d256, mt_nvfp4_flash_sdpa_d256, QFormat::Nvfp4, 256);
+    flash_dim_test!(
+        test_mxfp8_e4m3_flash_sdpa_d256,
+        mt_mxfp8_e4m3_flash_sdpa_d256,
+        QFormat::Mxfp8E4,
+        256
+    );
+    flash_dim_test!(
+        test_mxfp8_e5m2_flash_sdpa_d256,
+        mt_mxfp8_e5m2_flash_sdpa_d256,
+        QFormat::Mxfp8E5,
+        256
+    );
+    flash_dim_test!(test_nvfp8_flash_sdpa_d256, mt_nvfp8_flash_sdpa_d256, QFormat::Nvfp8, 256);
+    flash_dim_test!(test_fp4_flash_sdpa_d256, mt_fp4_flash_sdpa_d256, QFormat::Fp4, 256);
+    flash_dim_test!(test_fp8_e4m3_flash_sdpa_d256, mt_nvfp8_flash_sdpa_d256, QFormat::Fp8E4m3, 256);
+    flash_dim_test!(
+        test_fp8_e5m2_flash_sdpa_d256,
+        mt_fp8_e5m2_flash_sdpa_d256,
+        QFormat::Fp8E5m2,
+        256
+    );
+    flash_dim_test!(test_int8_flash_sdpa_d256, mt_int8_flash_sdpa_d256, QFormat::Int8, 256);
+    // d512
+    flash_dim_test!(test_mxfp4_flash_sdpa_d512, mt_mxfp4_flash_sdpa_d512, QFormat::Mxfp4, 512);
+    flash_dim_test!(test_nvfp4_flash_sdpa_d512, mt_nvfp4_flash_sdpa_d512, QFormat::Nvfp4, 512);
+    flash_dim_test!(
+        test_mxfp8_e4m3_flash_sdpa_d512,
+        mt_mxfp8_e4m3_flash_sdpa_d512,
+        QFormat::Mxfp8E4,
+        512
+    );
+    flash_dim_test!(
+        test_mxfp8_e5m2_flash_sdpa_d512,
+        mt_mxfp8_e5m2_flash_sdpa_d512,
+        QFormat::Mxfp8E5,
+        512
+    );
+    flash_dim_test!(test_nvfp8_flash_sdpa_d512, mt_nvfp8_flash_sdpa_d512, QFormat::Nvfp8, 512);
+    flash_dim_test!(test_fp4_flash_sdpa_d512, mt_fp4_flash_sdpa_d512, QFormat::Fp4, 512);
+    flash_dim_test!(test_fp8_e4m3_flash_sdpa_d512, mt_nvfp8_flash_sdpa_d512, QFormat::Fp8E4m3, 512);
+    flash_dim_test!(
+        test_fp8_e5m2_flash_sdpa_d512,
+        mt_fp8_e5m2_flash_sdpa_d512,
+        QFormat::Fp8E5m2,
+        512
+    );
+    flash_dim_test!(test_int8_flash_sdpa_d512, mt_int8_flash_sdpa_d512, QFormat::Int8, 512);
 }
 
 /// Decode-shape benches: single-query attention over a block-scaled K/V cache
@@ -1047,4 +1262,143 @@ pub mod kernel_benches {
     fn bench_int8_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_int8_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int8, 128, dt)
     }
+
+    // Large-head-dim perf matrix (d256 = long-context; d512 = Gemma global),
+    // all 9 formats. d64/d96 are correctness-tested but follow the d128 trend.
+    macro_rules! flash_dim_bench {
+        ($bench:ident, $name:literal, $kernel:ident, $fmt:expr, $dim:literal) => {
+            #[bench(name = $name, dtypes = [f32, f16, bf16])]
+            fn $bench(dt: DType) -> BenchSetup {
+                flash_bench($kernel::kernel_ir_for(dt), $fmt, $dim, dt)
+            }
+        };
+    }
+    // d256
+    flash_dim_bench!(
+        bench_mxfp4_flash_d256,
+        "ffai/flash_block_sdpa/mxfp4_d256",
+        mt_mxfp4_flash_sdpa_d256,
+        QFormat::Mxfp4,
+        256
+    );
+    flash_dim_bench!(
+        bench_nvfp4_flash_d256,
+        "ffai/flash_block_sdpa/nvfp4_d256",
+        mt_nvfp4_flash_sdpa_d256,
+        QFormat::Nvfp4,
+        256
+    );
+    flash_dim_bench!(
+        bench_mxfp8_e4m3_flash_d256,
+        "ffai/flash_block_sdpa/mxfp8_e4m3_d256",
+        mt_mxfp8_e4m3_flash_sdpa_d256,
+        QFormat::Mxfp8E4,
+        256
+    );
+    flash_dim_bench!(
+        bench_mxfp8_e5m2_flash_d256,
+        "ffai/flash_block_sdpa/mxfp8_e5m2_d256",
+        mt_mxfp8_e5m2_flash_sdpa_d256,
+        QFormat::Mxfp8E5,
+        256
+    );
+    flash_dim_bench!(
+        bench_nvfp8_flash_d256,
+        "ffai/flash_block_sdpa/nvfp8_d256",
+        mt_nvfp8_flash_sdpa_d256,
+        QFormat::Nvfp8,
+        256
+    );
+    flash_dim_bench!(
+        bench_fp4_flash_d256,
+        "ffai/flash_block_sdpa/fp4_d256",
+        mt_fp4_flash_sdpa_d256,
+        QFormat::Fp4,
+        256
+    );
+    flash_dim_bench!(
+        bench_fp8_e4m3_flash_d256,
+        "ffai/flash_block_sdpa/fp8_e4m3_d256",
+        mt_nvfp8_flash_sdpa_d256,
+        QFormat::Fp8E4m3,
+        256
+    );
+    flash_dim_bench!(
+        bench_fp8_e5m2_flash_d256,
+        "ffai/flash_block_sdpa/fp8_e5m2_d256",
+        mt_fp8_e5m2_flash_sdpa_d256,
+        QFormat::Fp8E5m2,
+        256
+    );
+    flash_dim_bench!(
+        bench_int8_flash_d256,
+        "ffai/flash_block_sdpa/int8_d256",
+        mt_int8_flash_sdpa_d256,
+        QFormat::Int8,
+        256
+    );
+    // d512
+    flash_dim_bench!(
+        bench_mxfp4_flash_d512,
+        "ffai/flash_block_sdpa/mxfp4_d512",
+        mt_mxfp4_flash_sdpa_d512,
+        QFormat::Mxfp4,
+        512
+    );
+    flash_dim_bench!(
+        bench_nvfp4_flash_d512,
+        "ffai/flash_block_sdpa/nvfp4_d512",
+        mt_nvfp4_flash_sdpa_d512,
+        QFormat::Nvfp4,
+        512
+    );
+    flash_dim_bench!(
+        bench_mxfp8_e4m3_flash_d512,
+        "ffai/flash_block_sdpa/mxfp8_e4m3_d512",
+        mt_mxfp8_e4m3_flash_sdpa_d512,
+        QFormat::Mxfp8E4,
+        512
+    );
+    flash_dim_bench!(
+        bench_mxfp8_e5m2_flash_d512,
+        "ffai/flash_block_sdpa/mxfp8_e5m2_d512",
+        mt_mxfp8_e5m2_flash_sdpa_d512,
+        QFormat::Mxfp8E5,
+        512
+    );
+    flash_dim_bench!(
+        bench_nvfp8_flash_d512,
+        "ffai/flash_block_sdpa/nvfp8_d512",
+        mt_nvfp8_flash_sdpa_d512,
+        QFormat::Nvfp8,
+        512
+    );
+    flash_dim_bench!(
+        bench_fp4_flash_d512,
+        "ffai/flash_block_sdpa/fp4_d512",
+        mt_fp4_flash_sdpa_d512,
+        QFormat::Fp4,
+        512
+    );
+    flash_dim_bench!(
+        bench_fp8_e4m3_flash_d512,
+        "ffai/flash_block_sdpa/fp8_e4m3_d512",
+        mt_nvfp8_flash_sdpa_d512,
+        QFormat::Fp8E4m3,
+        512
+    );
+    flash_dim_bench!(
+        bench_fp8_e5m2_flash_d512,
+        "ffai/flash_block_sdpa/fp8_e5m2_d512",
+        mt_fp8_e5m2_flash_sdpa_d512,
+        QFormat::Fp8E5m2,
+        512
+    );
+    flash_dim_bench!(
+        bench_int8_flash_d512,
+        "ffai/flash_block_sdpa/int8_d512",
+        mt_int8_flash_sdpa_d512,
+        QFormat::Int8,
+        512
+    );
 }
