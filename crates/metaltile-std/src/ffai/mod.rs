@@ -18,6 +18,7 @@
 
 pub mod arg_reduce;
 pub mod audio_conv1d;
+pub mod audio_conv1d_block_scaled;
 pub mod aura_dequant_rotated;
 pub mod aura_encode;
 pub mod aura_flash_p1;
@@ -35,10 +36,12 @@ pub mod batched_qkv_qgemv;
 pub mod batched_qkv_qmm;
 pub mod conv1d_causal_step_silu_cast_many;
 pub mod conv2d;
+pub mod conv2d_block_scaled;
 pub mod conv2d_mma;
 pub mod conv3d;
 pub mod conv3d_mma;
 pub mod depthwise_conv2d;
+pub mod depthwise_conv2d_block_scaled;
 pub mod dequant_gather;
 pub mod dequant_gather_block_scaled;
 pub mod dequant_gemv;
