@@ -23,6 +23,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use metaltile::harness::{bench::KernelBench, registry::all_benches};
@@ -50,13 +51,32 @@ use crate::{
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
-// ── Table helpers ────────────────────────────────────────────────────
-
-fn col_sep() -> String { paint_stdout("│", Style::new().fg(Color::BrightBlack).dim()) }
+// ── Helpers ──────────────────────────────────────────────────────────────
 
 fn pad_left(text: &str, width: usize) -> String { format!("{text:<width$}") }
 
-fn pad_right(text: &str, width: usize) -> String { format!("{text:>width$}") }
+/// Returns a short version string like `"xcrun metal 32023.155"`, or
+/// `"xcrun metal"` if the version cannot be determined.
+///
+/// `xcrun metal --version` writes its output to stderr with a line like
+/// `"Apple metal version 32023.155 (metalfe-1690.6)"`.
+fn xcrun_metal_short_version(sdk: &str) -> String {
+    let out =
+        std::process::Command::new("xcrun").args(["-sdk", sdk, "metal", "--version"]).output().ok();
+    if let Some(o) = out {
+        // metal --version writes to stderr.
+        let text =
+            String::from_utf8_lossy(&o.stderr).into_owned() + &String::from_utf8_lossy(&o.stdout);
+        if let Some(line) = text.lines().next() {
+            // "Apple metal version 32023.155 (metalfe-1690.6)" → "xcrun metal 32023.155"
+            if let Some(after) = line.split("version ").nth(1) {
+                let ver = after.split_whitespace().next().unwrap_or(after);
+                return format!("xcrun metal {ver}");
+            }
+        }
+    }
+    "xcrun metal".to_string()
+}
 
 /// A kernel to emit: its bench (carrying IR + mode + grid) and the union of
 /// dtypes it should be monomorphized over.
@@ -150,14 +170,18 @@ pub fn run(args: &BuildArgs, harness: &crate::harness::Harness) -> Result<(), Cl
     let mut sorted: Vec<(String, EmitKernel)> = kernels.into_iter().collect();
     sorted.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
-    // Header.
+    // Forge-style header: "Compiling N kernels with xcrun metal X.Y"
+    let xcrun_ver = xcrun_metal_short_version(sdk);
     println!(
-        "{} {}",
-        paint_stdout("tile build", Style::new().fg(Color::Cyan).bold()),
-        paint_stdout(format!("· {} kernels", sorted.len()), Style::new().fg(Color::BrightBlack)),
+        "{}",
+        paint_stdout(
+            format!("Compiling {} kernels with {xcrun_ver}", sorted.len()),
+            Style::new().fg(Color::BrightWhite),
+        ),
     );
+    println!();
 
-    // Compute column widths.
+    // Compute column widths for the per-kernel lines.
     let name_w = sorted.iter().map(|(n, _)| n.len()).max().unwrap_or(20).clamp(8, 48);
     let dt_w = sorted
         .iter()
@@ -167,23 +191,8 @@ pub fn run(args: &BuildArgs, harness: &crate::harness::Harness) -> Result<(), Cl
         .max()
         .unwrap_or(12)
         .clamp(8, 24);
-    let ck_w = 2usize;
 
-    let sep = col_sep();
-    let bold = Style::new().fg(Color::BrightWhite).bold();
-    let hdr = format!(
-        "  {} {} {} {} {}",
-        paint_stdout(pad_left("Kernel", name_w), bold),
-        sep,
-        paint_stdout(pad_left("Dtypes", dt_w), bold),
-        sep,
-        paint_stdout(pad_right("ok", ck_w), bold),
-    );
-    println!("{hdr}");
-
-    let total_w = 4 + name_w + 3 + dt_w + 3 + ck_w;
-    let sep_line = paint_stdout("─".repeat(total_w), Style::new().fg(Color::BrightBlack).dim());
-    println!("  {sep_line}");
+    let compile_start = Instant::now();
 
     // Per-output collectors for the emit step.
     let kernels_dir = out_root.as_ref().map(|r| r.join("Resources").join("kernels"));
@@ -319,8 +328,7 @@ pub fn run(args: &BuildArgs, harness: &crate::harness::Harness) -> Result<(), Cl
         })
         .collect();
 
-    // Sequential pass: print table rows and accumulate emit artifacts.
-    let mut ok = 0u32;
+    // Sequential pass: print per-kernel lines and accumulate emit artifacts.
     let mut errors = 0u32;
     let mut emitted_kernels: Vec<Kernel> = Vec::new();
     let mut emitted_paths: Vec<PathBuf> = Vec::new();
@@ -330,36 +338,33 @@ pub fn run(args: &BuildArgs, harness: &crate::harness::Harness) -> Result<(), Cl
             println!("{line}");
         }
         if !result.dtypes_err.is_empty() {
-            let kernel_cell =
-                paint_stdout(pad_left(&result.name, name_w), Style::new().fg(Color::Cyan).bold());
+            let kernel_col =
+                paint_stdout(pad_left(&result.name, name_w), Style::new().fg(Color::Cyan));
             let dt_str: String =
                 result.dtypes_err.iter().map(|(dt, _)| dt.label()).collect::<Vec<_>>().join("/");
-            let dt_cell =
-                paint_stdout(pad_left(&dt_str, dt_w), Style::new().fg(Color::Blue).bold());
-            let ck_cell = paint_stderr("✗", Style::new().fg(Color::Red).bold());
-            println!("  {kernel_cell} {sep} {dt_cell} {sep}  {ck_cell}");
+            let dt_col = paint_stdout(pad_left(&dt_str, dt_w), Style::new().fg(Color::BrightBlack));
+            let status = paint_stderr("FAILED", Style::new().fg(Color::Red).bold());
+            println!("  {kernel_col}  {dt_col}  {status}");
             for (dt, err_msg) in &result.dtypes_err {
-                let label = format!("{}:", dt.label());
                 eprintln!(
-                    "    {} {}",
-                    paint_stdout(pad_right(&label, dt_w + 2), Style::new().fg(Color::BrightBlack)),
+                    "    {}  {}",
+                    paint_stdout(format!("{}:", dt.label()), Style::new().fg(Color::BrightBlack)),
                     paint_stderr(
                         err_msg.lines().next().unwrap_or(err_msg),
-                        Style::new().fg(Color::BrightWhite)
+                        Style::new().fg(Color::BrightWhite),
                     ),
                 );
             }
             errors += result.dtypes_err.len() as u32;
         } else if !result.dtypes_ok.is_empty() {
-            ok += 1;
-            let kernel_cell =
-                paint_stdout(pad_left(&result.name, name_w), Style::new().fg(Color::Cyan).bold());
+            let kernel_col =
+                paint_stdout(pad_left(&result.name, name_w), Style::new().fg(Color::Cyan));
             let dtype_str =
                 result.dtypes_ok.iter().map(|dt| dt.label()).collect::<Vec<_>>().join("/");
-            let dt_cell =
-                paint_stdout(pad_left(&dtype_str, dt_w), Style::new().fg(Color::Blue).bold());
-            let ck_cell = paint_stdout("✓", Style::new().fg(Color::Green).bold());
-            println!("  {kernel_cell} {sep} {dt_cell} {sep}  {ck_cell}");
+            let dt_col =
+                paint_stdout(pad_left(&dtype_str, dt_w), Style::new().fg(Color::BrightBlack));
+            let status = paint_stdout("ok", Style::new().fg(Color::Green));
+            println!("  {kernel_col}  {dt_col}  {status}");
         }
         emitted_kernels.extend(result.emitted_kernels);
         emitted_paths.extend(result.emitted_paths);
@@ -370,20 +375,28 @@ pub fn run(args: &BuildArgs, harness: &crate::harness::Harness) -> Result<(), Cl
         emit_artifacts(out, &emit_kinds, &emitted_kernels, &emitted_paths, sdk)?;
     }
 
-    // Summary
+    // Forge-style footer: timing line + result line.
+    let compile_elapsed = compile_start.elapsed();
     println!();
+    println!(
+        "{} finished in {compile_elapsed:.2?}",
+        paint_stdout(&xcrun_ver, Style::new().fg(Color::BrightBlack)),
+    );
+
     if errors > 0 {
         println!(
-            "  {}  {}",
-            paint_stdout(format!("{ok} ok"), Style::new().fg(Color::Green).bold()),
+            "{}",
             paint_stderr(
-                format!("{errors} error{}", if errors == 1 { "" } else { "s" }),
-                Style::new().fg(Color::Red).bold()
+                format!("Build FAILED. {} error{}.", errors, if errors == 1 { "" } else { "s" }),
+                Style::new().fg(Color::Red).bold(),
             ),
         );
         Err(CliError::BuildFailure)
     } else {
-        println!("  {}", paint_stdout(format!("{ok} ok"), Style::new().fg(Color::Green).bold()));
+        println!(
+            "{}",
+            paint_stdout("Compiler run successful!", Style::new().fg(Color::Green).bold()),
+        );
         Ok(())
     }
 }

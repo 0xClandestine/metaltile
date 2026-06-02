@@ -430,6 +430,14 @@ struct TestArgs {
     #[arg(value_name = "FILTER", value_hint = clap::builder::ValueHint::Other)]
     path: Option<String>,
 
+    /// Stop running tests after the first failure.
+    #[arg(long, help_heading = "Test options")]
+    fail_fast: bool,
+
+    /// List matching tests without running them.
+    #[arg(long, short = 'l', help_heading = "Display options")]
+    list: bool,
+
     #[command(flatten)]
     filter_args: FilterArgs,
 }
