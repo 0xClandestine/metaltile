@@ -1,21 +1,30 @@
 # tile CLI configuration
 # https://github.com/0xClandestine/metaltile
 #
-# Values here are overridden by TILE_* environment variables
-# (e.g. TILE_VERBOSE=1, TILE_RUNNER_BINARY=/usr/local/bin/__tile_runner).
+# Values here are overridden by TILE_* environment variables and CLI flags.
+# Select a named profile with --profile <name> or TILE_PROFILE=<name>.
 
-# Path to the __tile_runner subprocess binary (resolved via $PATH if bare name).
-runner_binary = "__tile_runner"
-
-# Optional path to the MetalTile project root.
-# When set, tile bench/test/build look for source here.
-# project_path = "."
-
-# Verbosity level: 0 = quiet, 1 = profile columns (-v), 2 = timing columns (-vv).
+# Verbosity: 0 = quiet, 1 = profile columns (-v), 2 = timing columns (-vv).
 verbose = 0
 
+[bench]
 # Number of timed benchmark iterations per kernel (after warmup).
 runs = 3
-
 # Number of warmup dispatches before timing begins.
 warmup_runs = 1
+
+[build]
+# xcrun SDK to use for Metal compilation.
+sdk = "macosx"
+# Dtypes to compile by default when --dtypes is not passed.
+default_dtypes = ["f32", "f16", "bf16"]
+
+[runner]
+# Path to the __tile_runner subprocess binary (resolved via $PATH if bare name).
+binary = "__tile_runner"
+
+# Example CI profile — select with: tile bench --profile ci
+# [profiles.ci]
+# [profiles.ci.bench]
+# runs = 5
+# warmup_runs = 2

@@ -9,7 +9,7 @@
 //!   Cargo.toml          (workspace-aware package, depends on metaltile-std)
 //!   src/
 //!     lib.rs            (sample #[kernel] and #[bench_kernel])
-//!   tile.toml           (tile CLI config with runner_binary path)
+//!   tile.toml           (layered tile CLI config: sub-tables, profiles, extends)
 //! ```
 
 use std::path::Path;
@@ -82,11 +82,33 @@ fn bench_relu(dt: DType) -> BenchSetup {
 
     // tile.toml — project config
     let tile_toml = r#"# tile CLI configuration for this project.
-# Override the runner binary path if `__tile_runner` is not on $PATH.
-# runner_binary = "/path/to/__tile_runner"
+# Values here are overridden by TILE_* env vars and CLI flags.
+# Select a named profile with --profile <name> or TILE_PROFILE=<name>.
 
-# Verbosity: 0 = quiet, 1 = profile columns, 2 = timing columns.
+# Verbosity: 0 = quiet, 1 = profile columns (-v), 2 = timing columns (-vv).
 verbose = 0
+
+[bench]
+# Number of timed iterations per kernel (after warmup).
+runs = 3
+# Number of warmup dispatches before timing begins.
+warmup_runs = 1
+
+[build]
+# xcrun SDK for Metal compilation.
+sdk = "macosx"
+# Dtypes compiled by default when --dtypes is not passed.
+default_dtypes = ["f32", "f16", "bf16"]
+
+[runner]
+# Path to the __tile_runner subprocess binary (resolved via $PATH if bare name).
+# binary = "/path/to/__tile_runner"
+
+# Example CI profile — select with: tile bench --profile ci
+# [profiles.ci]
+# [profiles.ci.bench]
+# runs = 5
+# warmup_runs = 2
 "#;
     write_file(&root.join("tile.toml"), tile_toml)?;
 
