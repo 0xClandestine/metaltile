@@ -17,20 +17,24 @@ use crate::harness::{bench::KernelBenchEntry, test::KernelTestEntry};
 inventory::collect!(KernelBenchEntry);
 inventory::collect!(KernelTestEntry);
 
-/// Iterate all registered bench definitions.
+/// Iterate all registered bench definitions, sorted alphabetically by name.
 ///
 /// Called by the runner after all `inventory::submit!` calls have fired at
 /// link time. No other module should call `inventory::iter` for this type.
 pub fn all_benches() -> impl Iterator<Item = &'static KernelBenchEntry> {
-    inventory::iter::<KernelBenchEntry>.into_iter()
+    let mut entries: Vec<_> = inventory::iter::<KernelBenchEntry>.into_iter().collect();
+    entries.sort_unstable_by_key(|e| e.bench().name());
+    entries.into_iter()
 }
 
-/// Iterate all registered test definitions.
+/// Iterate all registered test definitions, sorted alphabetically by name.
 ///
 /// Called by the runner after all `inventory::submit!` calls have fired at
 /// link time. No other module should call `inventory::iter` for this type.
 pub fn all_tests() -> impl Iterator<Item = &'static KernelTestEntry> {
-    inventory::iter::<KernelTestEntry>.into_iter()
+    let mut entries: Vec<_> = inventory::iter::<KernelTestEntry>.into_iter().collect();
+    entries.sort_unstable_by_key(|e| e.test().name());
+    entries.into_iter()
 }
 
 /// Iterate all registered kernel IR builders.
