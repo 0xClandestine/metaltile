@@ -279,6 +279,159 @@ pub fn mt_nvfp8_rms_norm_qgemv<T>(
     }
 }
 
+// ── Legacy float-scale (fp4 / fp8) + symmetric int8 fused RMSNorm GEMVs ─────
+// These share the fused framework but carry a raw per-group FP32 scale (no
+// E8M0/E4M3/global). fp8_e4m3 has the same shape as nvfp8 (8-bit E4M3 + f32
+// scale), so it reuses `mt_nvfp8_rms_norm_qgemv` — only fp4 (4-bit E2M1),
+// fp8_e5m2 (8-bit E5M2), and int8 (8-bit symmetric) need their own decode.
+
+/// Legacy fp4 fused RMSNorm + GEMV — E2M1 weights (group 32), per-group FP32 scale.
+#[kernel]
+pub fn mt_fp4_rms_norm_qgemv<T>(
+    x: Tensor<T>,
+    norm_weight: Tensor<T>,
+    weight: Tensor<u32>,
+    scales: Tensor<f32>,
+    output: Tensor<T>,
+    eps_buf: Tensor<f32>,
+    #[constexpr] in_dim: u32,
+    #[constexpr] block_size: u32,
+) {
+    let row = program_id::<0>();
+    let mut ssq = 0.0f32;
+    let n_iters = (in_dim + lsize - 1u32) / lsize;
+    for _iter in range(0u32, n_iters, 1u32) {
+        let d = _iter * lsize + tid;
+        if d < in_dim {
+            let v = load(x[d]).cast::<f32>();
+            ssq = ssq + v * v;
+        }
+    }
+    let inv_rms = mt_rms_inv_scalar(ssq, eps_buf, in_dim);
+    let n_packs_per_row = in_dim / 8u32;
+    let n_blocks = in_dim / block_size;
+    let packs_per_block = block_size / 8u32;
+    let row_pack_off = row * n_packs_per_row;
+    let row_block_off = row * n_blocks;
+
+    let mut acc = 0.0f32;
+    let p_iters = (n_packs_per_row + lsize - 1u32) / lsize;
+    for p_iter in range(0u32, p_iters, 1u32) {
+        let pack_idx = p_iter * lsize + tid;
+        if pack_idx < n_packs_per_row {
+            let blk = pack_idx / packs_per_block;
+            let scale = load(scales[row_block_off + blk]);
+            let packed = load(weight[row_pack_off + pack_idx]);
+            let p_off = pack_idx * 8u32;
+            for i in range(0u32, 8u32, 1u32) {
+                let nib = (packed >> (i * 4u32)) & 0xFu32;
+                let val = e2m1_decode(nib);
+                let xi = load(x[p_off + i]).cast::<f32>();
+                let nw = load(norm_weight[p_off + i]).cast::<f32>();
+                acc = acc + (val * scale) * (xi * nw * inv_rms);
+            }
+        }
+    }
+
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[row], total.cast::<T>());
+    }
+}
+
+/// Legacy fp8 (E5M2) fused RMSNorm + GEMV — 8-bit weights (group 32), FP32 scale.
+#[kernel]
+pub fn mt_fp8_e5m2_rms_norm_qgemv<T>(
+    x: Tensor<T>,
+    norm_weight: Tensor<T>,
+    weight: Tensor<u8>,
+    scales: Tensor<f32>,
+    output: Tensor<T>,
+    eps_buf: Tensor<f32>,
+    #[constexpr] in_dim: u32,
+    #[constexpr] block_size: u32,
+) {
+    let row = program_id::<0>();
+    let mut ssq = 0.0f32;
+    let n_iters = (in_dim + lsize - 1u32) / lsize;
+    for _iter in range(0u32, n_iters, 1u32) {
+        let d = _iter * lsize + tid;
+        if d < in_dim {
+            let v = load(x[d]).cast::<f32>();
+            ssq = ssq + v * v;
+        }
+    }
+    let inv_rms = mt_rms_inv_scalar(ssq, eps_buf, in_dim);
+    let row_off = row * in_dim;
+    let n_blocks = in_dim / block_size;
+    let row_block_off = row * n_blocks;
+
+    let mut acc = 0.0f32;
+    let iters = (in_dim + lsize - 1u32) / lsize;
+    for it in range(0u32, iters, 1u32) {
+        let c = it * lsize + tid;
+        if c < in_dim {
+            let elem = e5m2_decode(load(weight[row_off + c]).cast::<u32>());
+            let scale = load(scales[row_block_off + c / block_size]);
+            let xi = load(x[c]).cast::<f32>();
+            let nw = load(norm_weight[c]).cast::<f32>();
+            acc = acc + (elem * scale) * (xi * nw * inv_rms);
+        }
+    }
+
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[row], total.cast::<T>());
+    }
+}
+
+/// Symmetric int8 fused RMSNorm + GEMV — 8-bit codes (group 64), per-group FP32
+/// scale (affine, scale-only). Decode is sign-extend → `code · scale`.
+#[kernel]
+pub fn mt_int8_rms_norm_qgemv<T>(
+    x: Tensor<T>,
+    norm_weight: Tensor<T>,
+    weight: Tensor<u8>,
+    scales: Tensor<f32>,
+    output: Tensor<T>,
+    eps_buf: Tensor<f32>,
+    #[constexpr] in_dim: u32,
+    #[constexpr] block_size: u32,
+) {
+    let row = program_id::<0>();
+    let mut ssq = 0.0f32;
+    let n_iters = (in_dim + lsize - 1u32) / lsize;
+    for _iter in range(0u32, n_iters, 1u32) {
+        let d = _iter * lsize + tid;
+        if d < in_dim {
+            let v = load(x[d]).cast::<f32>();
+            ssq = ssq + v * v;
+        }
+    }
+    let inv_rms = mt_rms_inv_scalar(ssq, eps_buf, in_dim);
+    let row_off = row * in_dim;
+    let n_blocks = in_dim / block_size;
+    let row_block_off = row * n_blocks;
+
+    let mut acc = 0.0f32;
+    let iters = (in_dim + lsize - 1u32) / lsize;
+    for it in range(0u32, iters, 1u32) {
+        let c = it * lsize + tid;
+        if c < in_dim {
+            let elem = int8_decode(load(weight[row_off + c]).cast::<u32>());
+            let scale = load(scales[row_block_off + c / block_size]);
+            let xi = load(x[c]).cast::<f32>();
+            let nw = load(norm_weight[c]).cast::<f32>();
+            acc = acc + (elem * scale) * (xi * nw * inv_rms);
+        }
+    }
+
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[row], total.cast::<T>());
+    }
+}
+
 pub mod kernel_tests {
     use metaltile::{core::ir::Kernel, test::*, test_kernel};
 
@@ -338,7 +491,14 @@ pub mod kernel_tests {
         let nw = unpack_f32(&pack_f32(&nw_f, dt), dt);
         let expected = rms_qgemv_oracle(&wdq, &x, &nw, out_dim, in_dim);
         let weight_dt = if fmt.element_bits() == 4 { DType::U32 } else { DType::U8 };
-        let scales_dt = if matches!(fmt, QFormat::Nvfp8) { DType::F32 } else { DType::U8 };
+        let scales_dt = if matches!(
+            fmt,
+            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
+        ) {
+            DType::F32
+        } else {
+            DType::U8
+        };
         let mut s = TestSetup::new(kernel)
             .mode(KernelMode::Reduction)
             .input(TestBuffer::from_vec("x", pack_f32(&x_f, dt), dt))
@@ -397,6 +557,26 @@ pub mod kernel_tests {
     fn test_nvfp8_rms_norm_qgemv(dt: DType) -> TestSetup {
         rms_qgemv_setup(mt_nvfp8_rms_norm_qgemv::kernel_ir_for(dt), QFormat::Nvfp8, 4, 256, dt)
     }
+
+    // Legacy float-scale fp4 / fp8 + symmetric int8. fp8_e4m3 reuses the
+    // nvfp8 kernel (same 8-bit-E4M3 + f32-scale shape); the others decode here.
+    // in_dim 256 is a multiple of int8's block_size 64 (= 4 × 64).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp4_rms_norm_qgemv(dt: DType) -> TestSetup {
+        rms_qgemv_setup(mt_fp4_rms_norm_qgemv::kernel_ir_for(dt), QFormat::Fp4, 4, 256, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e4m3_rms_norm_qgemv(dt: DType) -> TestSetup {
+        rms_qgemv_setup(mt_nvfp8_rms_norm_qgemv::kernel_ir_for(dt), QFormat::Fp8E4m3, 4, 256, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e5m2_rms_norm_qgemv(dt: DType) -> TestSetup {
+        rms_qgemv_setup(mt_fp8_e5m2_rms_norm_qgemv::kernel_ir_for(dt), QFormat::Fp8E5m2, 4, 256, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int8_rms_norm_qgemv(dt: DType) -> TestSetup {
+        rms_qgemv_setup(mt_int8_rms_norm_qgemv::kernel_ir_for(dt), QFormat::Int8, 4, 256, dt)
+    }
 }
 
 /// Decode-shape (single-token) benches at the canonical hidden = out = 4096 so
@@ -421,7 +601,14 @@ pub mod kernel_benches {
         } else {
             (out_dim * in_dim, DType::U8)
         };
-        let scales_dt = if matches!(fmt, QFormat::Nvfp8) { DType::F32 } else { DType::U8 };
+        let scales_dt = if matches!(
+            fmt,
+            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
+        ) {
+            DType::F32
+        } else {
+            DType::U8
+        };
         let sz = dt.size_bytes();
         let bytes = codes_len * codes_dt.size_bytes()
             + n_blocks * scales_dt.size_bytes()
@@ -478,5 +665,33 @@ pub mod kernel_benches {
     #[bench(name = "ffai/rms_norm_block_qgemv/nvfp8", dtypes = [f32, f16, bf16])]
     fn bench_nvfp8_rms_norm_qgemv(dt: DType) -> BenchSetup {
         rms_qgemv_bench(mt_nvfp8_rms_norm_qgemv::kernel_ir_for(dt), QFormat::Nvfp8, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/rms_norm_block_qgemv/fp4", dtypes = [f32, f16, bf16])]
+    fn bench_fp4_rms_norm_qgemv(dt: DType) -> BenchSetup {
+        rms_qgemv_bench(mt_fp4_rms_norm_qgemv::kernel_ir_for(dt), QFormat::Fp4, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/rms_norm_block_qgemv/fp8_e4m3", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e4m3_rms_norm_qgemv(dt: DType) -> BenchSetup {
+        rms_qgemv_bench(
+            mt_nvfp8_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Fp8E4m3,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/rms_norm_block_qgemv/fp8_e5m2", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e5m2_rms_norm_qgemv(dt: DType) -> BenchSetup {
+        rms_qgemv_bench(
+            mt_fp8_e5m2_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Fp8E5m2,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/rms_norm_block_qgemv/int8", dtypes = [f32, f16, bf16])]
+    fn bench_int8_rms_norm_qgemv(dt: DType) -> BenchSetup {
+        rms_qgemv_bench(mt_int8_rms_norm_qgemv::kernel_ir_for(dt), QFormat::Int8, 4096, 4096, dt)
     }
 }

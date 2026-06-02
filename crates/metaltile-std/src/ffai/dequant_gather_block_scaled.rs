@@ -134,6 +134,76 @@ pub fn mt_nvfp8_dequant_gather<T>(
     store(out[idx], (elem * scale).cast::<T>());
 }
 
+// ── Legacy float-scale (fp4 / fp8) + symmetric int8 gathers ────────────────
+// These share the block-scaled gather framework but store a raw per-group FP32
+// scale (no E8M0/E4M3/global). fp8_e4m3 has the same shape as nvfp8 (8-bit E4M3
+// + f32 scale), so it reuses `mt_nvfp8_dequant_gather`; only fp4 (4-bit E2M1),
+// fp8_e5m2 (8-bit E5M2), and int8 (8-bit symmetric) need their own decode here.
+
+/// Legacy fp4 dequantizing gather — E2M1 (group 32), per-group FP32 scale.
+#[kernel]
+pub fn mt_fp4_dequant_gather<T>(
+    weight: Tensor<u32>,
+    scales: Tensor<f32>,
+    indices: Tensor<u32>,
+    out: Tensor<T>,
+    #[constexpr] hidden: u32,
+    #[constexpr] block_size: u32,
+) {
+    let idx = program_id::<0>();
+    let token = idx / hidden;
+    let d = idx - token * hidden;
+    let token_id = load(indices[token]);
+    let words_per_row = hidden / 8u32;
+    let blocks_per_row = hidden / block_size;
+    let packed = load(weight[token_id * words_per_row + d / 8u32]);
+    let nib = (packed >> ((d % 8u32) * 4u32)) & 0xFu32;
+    let val = e2m1_decode(nib);
+    let scale = load(scales[token_id * blocks_per_row + d / block_size]);
+    store(out[idx], (val * scale).cast::<T>());
+}
+
+/// Legacy fp8 (E5M2) dequantizing gather — 8-bit (group 32), per-group FP32 scale.
+#[kernel]
+pub fn mt_fp8_e5m2_dequant_gather<T>(
+    weight: Tensor<u8>,
+    scales: Tensor<f32>,
+    indices: Tensor<u32>,
+    out: Tensor<T>,
+    #[constexpr] hidden: u32,
+    #[constexpr] block_size: u32,
+) {
+    let idx = program_id::<0>();
+    let token = idx / hidden;
+    let d = idx - token * hidden;
+    let token_id = load(indices[token]);
+    let blocks_per_row = hidden / block_size;
+    let elem = e5m2_decode(load(weight[token_id * hidden + d]).cast::<u32>());
+    let scale = load(scales[token_id * blocks_per_row + d / block_size]);
+    store(out[idx], (elem * scale).cast::<T>());
+}
+
+/// Symmetric int8 dequantizing gather — 8-bit codes (group 64), per-group FP32
+/// scale (affine, scale-only). Decode is sign-extend → `code · scale`.
+#[kernel]
+pub fn mt_int8_dequant_gather<T>(
+    weight: Tensor<u8>,
+    scales: Tensor<f32>,
+    indices: Tensor<u32>,
+    out: Tensor<T>,
+    #[constexpr] hidden: u32,
+    #[constexpr] block_size: u32,
+) {
+    let idx = program_id::<0>();
+    let token = idx / hidden;
+    let d = idx - token * hidden;
+    let token_id = load(indices[token]);
+    let blocks_per_row = hidden / block_size;
+    let elem = int8_decode(load(weight[token_id * hidden + d]).cast::<u32>());
+    let scale = load(scales[token_id * blocks_per_row + d / block_size]);
+    store(out[idx], (elem * scale).cast::<T>());
+}
+
 pub mod kernel_tests {
     use metaltile::{core::ir::Kernel, test::*, test_kernel};
 
@@ -169,7 +239,14 @@ pub mod kernel_tests {
             }
         }
         let weight_dt = if fmt.element_bits() == 4 { DType::U32 } else { DType::U8 };
-        let scales_dt = if matches!(fmt, QFormat::Nvfp8) { DType::F32 } else { DType::U8 };
+        let scales_dt = if matches!(
+            fmt,
+            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
+        ) {
+            DType::F32
+        } else {
+            DType::U8
+        };
         let mut s = TestSetup::new(kernel)
             .mode(KernelMode::Grid3D)
             .input(TestBuffer::from_vec("weight", p.codes, weight_dt))
@@ -205,6 +282,26 @@ pub mod kernel_tests {
     fn test_nvfp8_dequant_gather(dt: DType) -> TestSetup {
         gather_setup(mt_nvfp8_dequant_gather::kernel_ir_for(dt), QFormat::Nvfp8, 256, dt)
     }
+
+    // Legacy float-scale fp4 / fp8 + symmetric int8. fp8_e4m3 reuses the
+    // nvfp8 kernel (same 8-bit-E4M3 + f32-scale shape); the others decode here.
+    // hidden=256 is 4×64, so the int8 group of 64 divides evenly.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp4_dequant_gather(dt: DType) -> TestSetup {
+        gather_setup(mt_fp4_dequant_gather::kernel_ir_for(dt), QFormat::Fp4, 256, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e4m3_dequant_gather(dt: DType) -> TestSetup {
+        gather_setup(mt_nvfp8_dequant_gather::kernel_ir_for(dt), QFormat::Fp8E4m3, 256, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e5m2_dequant_gather(dt: DType) -> TestSetup {
+        gather_setup(mt_fp8_e5m2_dequant_gather::kernel_ir_for(dt), QFormat::Fp8E5m2, 256, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int8_dequant_gather(dt: DType) -> TestSetup {
+        gather_setup(mt_int8_dequant_gather::kernel_ir_for(dt), QFormat::Int8, 256, dt)
+    }
 }
 
 /// Decode-shape benches: gather `n_tokens` rows of a `vocab × hidden`
@@ -224,7 +321,14 @@ pub mod kernel_benches {
         } else {
             (vocab * hidden, DType::U8)
         };
-        let scales_dt = if matches!(fmt, QFormat::Nvfp8) { DType::F32 } else { DType::U8 };
+        let scales_dt = if matches!(
+            fmt,
+            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
+        ) {
+            DType::F32
+        } else {
+            DType::U8
+        };
         let mut s = BenchSetup::new(kernel)
             .mode(KernelMode::Grid3D)
             .buffer(BenchBuffer::random("weight", codes_len, codes_dt))
@@ -260,5 +364,21 @@ pub mod kernel_benches {
     #[bench(name = "ffai/dequant_gather_block/nvfp8", dtypes = [f32, f16, bf16])]
     fn bench_nvfp8_gather(dt: DType) -> BenchSetup {
         gb(mt_nvfp8_dequant_gather::kernel_ir_for(dt), QFormat::Nvfp8, 4096, dt)
+    }
+    #[bench(name = "ffai/dequant_gather_block/fp4", dtypes = [f32, f16, bf16])]
+    fn bench_fp4_gather(dt: DType) -> BenchSetup {
+        gb(mt_fp4_dequant_gather::kernel_ir_for(dt), QFormat::Fp4, 4096, dt)
+    }
+    #[bench(name = "ffai/dequant_gather_block/fp8_e4m3", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e4m3_gather(dt: DType) -> BenchSetup {
+        gb(mt_nvfp8_dequant_gather::kernel_ir_for(dt), QFormat::Fp8E4m3, 4096, dt)
+    }
+    #[bench(name = "ffai/dequant_gather_block/fp8_e5m2", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e5m2_gather(dt: DType) -> BenchSetup {
+        gb(mt_fp8_e5m2_dequant_gather::kernel_ir_for(dt), QFormat::Fp8E5m2, 4096, dt)
+    }
+    #[bench(name = "ffai/dequant_gather_block/int8", dtypes = [f32, f16, bf16])]
+    fn bench_int8_gather(dt: DType) -> BenchSetup {
+        gb(mt_int8_dequant_gather::kernel_ir_for(dt), QFormat::Int8, 4096, dt)
     }
 }

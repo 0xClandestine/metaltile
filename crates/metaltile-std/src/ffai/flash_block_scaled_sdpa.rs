@@ -459,6 +459,269 @@ pub fn mt_nvfp8_flash_sdpa_d128<T>(
     }
 }
 
+// ── Legacy float-scale (fp4 / fp8) + symmetric int8 flash SDPA ─────────────
+// These share the block-scaled attention body but store a raw per-group FP32
+// scale (no E8M0/E4M3/global). fp8_e4m3 has the same shape as nvfp8 (8-bit
+// E4M3 + f32 scale), so it reuses `mt_nvfp8_flash_sdpa_d128`; only fp4 (4-bit
+// E2M1), fp8_e5m2 (8-bit E5M2), and int8 (8-bit symmetric) need their own
+// decode here.
+
+/// Legacy fp4 flash SDPA (d=128) — E2M1 K/V (group 32), per-group FP32 scale.
+#[kernel]
+pub fn mt_fp4_flash_sdpa_d128<T>(
+    queries: Tensor<T>,
+    k_packed: Tensor<u32>,
+    k_scales: Tensor<f32>,
+    v_packed: Tensor<u32>,
+    v_scales: Tensor<f32>,
+    sinks: Tensor<f32>,
+    out: Tensor<T>,
+    #[constexpr] dim: u32,
+    #[constexpr] tokens: u32,
+    #[constexpr] repeat_count: u32,
+    #[constexpr] block_size: u32,
+    #[constexpr] num_q_heads: u32,
+    #[constexpr] has_sinks: u32,
+    #[constexpr] window_size: u32,
+    #[constexpr] scale: f32,
+) {
+    let lane = program_id::<0>();
+    let q_idx = program_id::<1>();
+    let kv_idx = q_idx / repeat_count;
+    let n_blocks = dim / block_size;
+    let words_per_token = dim / 8u32;
+
+    stack_alloc("q_vals", 4, "f32");
+    for i in range(0u32, 4u32, 1u32) {
+        let d = lane + i * 32u32;
+        let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+        stack_store("q_vals", i, v * scale);
+    }
+
+    let sink_val = load(sinks[q_idx % num_q_heads]);
+    let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
+    let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
+    stack_alloc("o", 4, "f32");
+    for i in range(0u32, 4u32, 1u32) {
+        stack_store("o", i, 0.0f32);
+    }
+
+    let causal_upper = tokens - 1u32;
+    for t in range(0u32, tokens, 1u32) {
+        let use_key = select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+        if use_key {
+            let k_word_row = (kv_idx * tokens + t) * words_per_token;
+            let k_blk_row = (kv_idx * tokens + t) * n_blocks;
+            let mut dot_partial = 0.0f32;
+            for i in range(0u32, 4u32, 1u32) {
+                let d = lane + i * 32u32;
+                if d < dim {
+                    let nib =
+                        (load(k_packed[k_word_row + d / 8u32]) >> ((d % 8u32) * 4u32)) & 0xFu32;
+                    let ksc = load(k_scales[k_blk_row + d / block_size]);
+                    dot_partial = dot_partial + stack_load("q_vals", i) * (e2m1_decode(nib) * ksc);
+                }
+            }
+            let score = simd_sum(dot_partial);
+            let new_m = select(m_acc > score, m_acc, score);
+            let exp_diff = exp(m_acc - new_m);
+            let exp_score = exp(score - new_m);
+            let v_word_row = (kv_idx * tokens + t) * words_per_token;
+            let v_blk_row = (kv_idx * tokens + t) * n_blocks;
+            for i in range(0u32, 4u32, 1u32) {
+                let d = lane + i * 32u32;
+                if d < dim {
+                    let nib =
+                        (load(v_packed[v_word_row + d / 8u32]) >> ((d % 8u32) * 4u32)) & 0xFu32;
+                    let vsc = load(v_scales[v_blk_row + d / block_size]);
+                    let prev = stack_load("o", i);
+                    stack_store("o", i, prev * exp_diff + exp_score * (e2m1_decode(nib) * vsc));
+                }
+            }
+            l_acc = l_acc * exp_diff + exp_score;
+            m_acc = new_m;
+        }
+    }
+
+    for i in range(0u32, 4u32, 1u32) {
+        let d = lane + i * 32u32;
+        if d < dim {
+            let oi = stack_load("o", i);
+            let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
+            store(out[q_idx * dim + d], normed.cast::<T>());
+        }
+    }
+}
+
+/// Legacy fp8 (E5M2) flash SDPA (d=128) — 8-bit K/V (group 32), FP32 scale.
+#[kernel]
+pub fn mt_fp8_e5m2_flash_sdpa_d128<T>(
+    queries: Tensor<T>,
+    k_packed: Tensor<u8>,
+    k_scales: Tensor<f32>,
+    v_packed: Tensor<u8>,
+    v_scales: Tensor<f32>,
+    sinks: Tensor<f32>,
+    out: Tensor<T>,
+    #[constexpr] dim: u32,
+    #[constexpr] tokens: u32,
+    #[constexpr] repeat_count: u32,
+    #[constexpr] block_size: u32,
+    #[constexpr] num_q_heads: u32,
+    #[constexpr] has_sinks: u32,
+    #[constexpr] window_size: u32,
+    #[constexpr] scale: f32,
+) {
+    let lane = program_id::<0>();
+    let q_idx = program_id::<1>();
+    let kv_idx = q_idx / repeat_count;
+    let n_blocks = dim / block_size;
+
+    stack_alloc("q_vals", 4, "f32");
+    for i in range(0u32, 4u32, 1u32) {
+        let d = lane + i * 32u32;
+        let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+        stack_store("q_vals", i, v * scale);
+    }
+
+    let sink_val = load(sinks[q_idx % num_q_heads]);
+    let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
+    let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
+    stack_alloc("o", 4, "f32");
+    for i in range(0u32, 4u32, 1u32) {
+        stack_store("o", i, 0.0f32);
+    }
+
+    let causal_upper = tokens - 1u32;
+    for t in range(0u32, tokens, 1u32) {
+        let use_key = select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+        if use_key {
+            let k_row = (kv_idx * tokens + t) * dim;
+            let k_blk_row = (kv_idx * tokens + t) * n_blocks;
+            let mut dot_partial = 0.0f32;
+            for i in range(0u32, 4u32, 1u32) {
+                let d = lane + i * 32u32;
+                if d < dim {
+                    let kelem = e5m2_decode(load(k_packed[k_row + d]).cast::<u32>());
+                    let ksc = load(k_scales[k_blk_row + d / block_size]);
+                    dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
+                }
+            }
+            let score = simd_sum(dot_partial);
+            let new_m = select(m_acc > score, m_acc, score);
+            let exp_diff = exp(m_acc - new_m);
+            let exp_score = exp(score - new_m);
+            let v_row = (kv_idx * tokens + t) * dim;
+            let v_blk_row = (kv_idx * tokens + t) * n_blocks;
+            for i in range(0u32, 4u32, 1u32) {
+                let d = lane + i * 32u32;
+                if d < dim {
+                    let velem = e5m2_decode(load(v_packed[v_row + d]).cast::<u32>());
+                    let vsc = load(v_scales[v_blk_row + d / block_size]);
+                    let prev = stack_load("o", i);
+                    stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
+                }
+            }
+            l_acc = l_acc * exp_diff + exp_score;
+            m_acc = new_m;
+        }
+    }
+
+    for i in range(0u32, 4u32, 1u32) {
+        let d = lane + i * 32u32;
+        if d < dim {
+            let oi = stack_load("o", i);
+            let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
+            store(out[q_idx * dim + d], normed.cast::<T>());
+        }
+    }
+}
+
+/// Symmetric int8 flash SDPA (d=128) — 8-bit codes (group 64), per-group FP32
+/// scale (affine, scale-only). Decode is sign-extend → `code · scale`.
+#[kernel]
+pub fn mt_int8_flash_sdpa_d128<T>(
+    queries: Tensor<T>,
+    k_packed: Tensor<u8>,
+    k_scales: Tensor<f32>,
+    v_packed: Tensor<u8>,
+    v_scales: Tensor<f32>,
+    sinks: Tensor<f32>,
+    out: Tensor<T>,
+    #[constexpr] dim: u32,
+    #[constexpr] tokens: u32,
+    #[constexpr] repeat_count: u32,
+    #[constexpr] block_size: u32,
+    #[constexpr] num_q_heads: u32,
+    #[constexpr] has_sinks: u32,
+    #[constexpr] window_size: u32,
+    #[constexpr] scale: f32,
+) {
+    let lane = program_id::<0>();
+    let q_idx = program_id::<1>();
+    let kv_idx = q_idx / repeat_count;
+    let n_blocks = dim / block_size;
+
+    stack_alloc("q_vals", 4, "f32");
+    for i in range(0u32, 4u32, 1u32) {
+        let d = lane + i * 32u32;
+        let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+        stack_store("q_vals", i, v * scale);
+    }
+
+    let sink_val = load(sinks[q_idx % num_q_heads]);
+    let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
+    let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
+    stack_alloc("o", 4, "f32");
+    for i in range(0u32, 4u32, 1u32) {
+        stack_store("o", i, 0.0f32);
+    }
+
+    let causal_upper = tokens - 1u32;
+    for t in range(0u32, tokens, 1u32) {
+        let use_key = select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+        if use_key {
+            let k_row = (kv_idx * tokens + t) * dim;
+            let k_blk_row = (kv_idx * tokens + t) * n_blocks;
+            let mut dot_partial = 0.0f32;
+            for i in range(0u32, 4u32, 1u32) {
+                let d = lane + i * 32u32;
+                if d < dim {
+                    let kelem = int8_decode(load(k_packed[k_row + d]).cast::<u32>());
+                    let ksc = load(k_scales[k_blk_row + d / block_size]);
+                    dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
+                }
+            }
+            let score = simd_sum(dot_partial);
+            let new_m = select(m_acc > score, m_acc, score);
+            let exp_diff = exp(m_acc - new_m);
+            let exp_score = exp(score - new_m);
+            let v_row = (kv_idx * tokens + t) * dim;
+            let v_blk_row = (kv_idx * tokens + t) * n_blocks;
+            for i in range(0u32, 4u32, 1u32) {
+                let d = lane + i * 32u32;
+                if d < dim {
+                    let velem = int8_decode(load(v_packed[v_row + d]).cast::<u32>());
+                    let vsc = load(v_scales[v_blk_row + d / block_size]);
+                    let prev = stack_load("o", i);
+                    stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
+                }
+            }
+            l_acc = l_acc * exp_diff + exp_score;
+            m_acc = new_m;
+        }
+    }
+
+    for i in range(0u32, 4u32, 1u32) {
+        let d = lane + i * 32u32;
+        if d < dim {
+            let oi = stack_load("o", i);
+            let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
+            store(out[q_idx * dim + d], normed.cast::<T>());
+        }
+    }
+}
+
 pub mod kernel_tests {
     use metaltile::{core::ir::Kernel, test::*, test_kernel};
 
@@ -575,7 +838,14 @@ pub mod kernel_tests {
             window_size,
         );
         let weight_dt = if fmt.element_bits() == 4 { DType::U32 } else { DType::U8 };
-        let scales_dt = if matches!(fmt, QFormat::Nvfp8) { DType::F32 } else { DType::U8 };
+        let scales_dt = if matches!(
+            fmt,
+            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
+        ) {
+            DType::F32
+        } else {
+            DType::U8
+        };
         let mut s = TestSetup::new(kernel)
             .mode(KernelMode::Grid3D)
             .input(TestBuffer::from_vec("queries", pack_f32(&q, dt), dt))
@@ -640,6 +910,39 @@ pub mod kernel_tests {
         flash_setup(mt_nvfp8_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Nvfp8, 128, false, 0, dt)
     }
 
+    // Legacy float-scale fp4 / fp8 + symmetric int8. fp8_e4m3 reuses the
+    // nvfp8 kernel (same 8-bit-E4M3 + f32-scale shape); the others decode here.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [2e-3, 3e-2, 1.5e-1])]
+    fn test_fp4_flash_sdpa_d128(dt: DType) -> TestSetup {
+        flash_setup(mt_fp4_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Fp4, 128, false, 0, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [2e-3, 3e-2, 1.5e-1])]
+    fn test_fp8_e4m3_flash_sdpa_d128(dt: DType) -> TestSetup {
+        flash_setup(
+            mt_nvfp8_flash_sdpa_d128::kernel_ir_for(dt),
+            QFormat::Fp8E4m3,
+            128,
+            false,
+            0,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [2e-3, 3e-2, 1.5e-1])]
+    fn test_fp8_e5m2_flash_sdpa_d128(dt: DType) -> TestSetup {
+        flash_setup(
+            mt_fp8_e5m2_flash_sdpa_d128::kernel_ir_for(dt),
+            QFormat::Fp8E5m2,
+            128,
+            false,
+            0,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [2e-3, 3e-2, 1.5e-1])]
+    fn test_int8_flash_sdpa_d128(dt: DType) -> TestSetup {
+        flash_setup(mt_int8_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int8, 128, false, 0, dt)
+    }
+
     // Sink + sliding-window paths exercised on the mxfp4 representative.
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [2e-3, 3e-2, 1.5e-1])]
     fn test_mxfp4_flash_sdpa_d128_sinks(dt: DType) -> TestSetup {
@@ -668,7 +971,14 @@ pub mod kernel_benches {
         } else {
             (rows * dim, DType::U8)
         };
-        let scales_dt = if matches!(fmt, QFormat::Nvfp8) { DType::F32 } else { DType::U8 };
+        let scales_dt = if matches!(
+            fmt,
+            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
+        ) {
+            DType::F32
+        } else {
+            DType::U8
+        };
         let sz = dt.size_bytes();
         let bytes = q_heads * dim * sz                      // queries
             + 2 * codes_len * codes_dt.size_bytes()         // K + V codes
@@ -720,5 +1030,21 @@ pub mod kernel_benches {
     #[bench(name = "ffai/flash_block_sdpa/nvfp8", dtypes = [f32, f16, bf16])]
     fn bench_nvfp8_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_nvfp8_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Nvfp8, 128, dt)
+    }
+    #[bench(name = "ffai/flash_block_sdpa/fp4", dtypes = [f32, f16, bf16])]
+    fn bench_fp4_flash(dt: DType) -> BenchSetup {
+        flash_bench(mt_fp4_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Fp4, 128, dt)
+    }
+    #[bench(name = "ffai/flash_block_sdpa/fp8_e4m3", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e4m3_flash(dt: DType) -> BenchSetup {
+        flash_bench(mt_nvfp8_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Fp8E4m3, 128, dt)
+    }
+    #[bench(name = "ffai/flash_block_sdpa/fp8_e5m2", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e5m2_flash(dt: DType) -> BenchSetup {
+        flash_bench(mt_fp8_e5m2_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Fp8E5m2, 128, dt)
+    }
+    #[bench(name = "ffai/flash_block_sdpa/int8", dtypes = [f32, f16, bf16])]
+    fn bench_int8_flash(dt: DType) -> BenchSetup {
+        flash_bench(mt_int8_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int8, 128, dt)
     }
 }
