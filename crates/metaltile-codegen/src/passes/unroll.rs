@@ -117,10 +117,10 @@ fn has_nested_loop_or_barrier(block: &Block, blocks: &FxHashMap<BlockId, Block>)
             if blocks.get(&then_id).is_some_and(|b| has_nested_loop_or_barrier(b, blocks)) {
                 return true;
             }
-            if let Some(eid) = else_id {
-                if blocks.get(&eid).is_some_and(|b| has_nested_loop_or_barrier(b, blocks)) {
-                    return true;
-                }
+            if let Some(eid) = else_id
+                && blocks.get(&eid).is_some_and(|b| has_nested_loop_or_barrier(b, blocks))
+            {
+                return true;
             }
         }
         false
