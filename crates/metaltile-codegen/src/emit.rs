@@ -411,6 +411,49 @@ fn emit_swift_wrapper_icb_record(out: &mut String, k: &Kernel) {
 
 // ─── metallib compilation (xcrun metal + metallib) ───────────────────
 
+/// Compile a single `.metal` file to a `.air` intermediate in `air_dir`.
+///
+/// Exposed so callers (e.g. the CLI) can drive multiple files in parallel
+/// using their own executor before calling [`link_air_to_metallib`].
+pub fn compile_metal_to_air(metal: &Path, sdk: &str, air_dir: &Path) -> Result<PathBuf> {
+    let stem = metal
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| EmitError::MetalToolchain(format!("bad filename: {}", metal.display())))?;
+    let air = air_dir.join(format!("{stem}.air"));
+    let status = Command::new("xcrun")
+        .args(["-sdk", sdk, "metal", "-c"])
+        .arg(metal)
+        .arg("-o")
+        .arg(&air)
+        .status()
+        .map_err(|e| {
+            EmitError::MetalToolchain(format!("invoke xcrun metal for {}: {e}", metal.display()))
+        })?;
+    if !status.success() {
+        return Err(EmitError::MetalToolchain(format!(
+            "xcrun metal failed for {}",
+            metal.display()
+        )));
+    }
+    Ok(air)
+}
+
+/// Link a set of `.air` files into a single `metallib` at `output`.
+pub fn link_air_to_metallib(air_files: &[PathBuf], output: &Path, sdk: &str) -> Result<()> {
+    let status = Command::new("xcrun")
+        .args(["-sdk", sdk, "metallib"])
+        .args(air_files)
+        .arg("-o")
+        .arg(output)
+        .status()
+        .map_err(|e| EmitError::MetalToolchain(format!("invoke xcrun metallib: {e}")))?;
+    if !status.success() {
+        return Err(EmitError::MetalToolchain("xcrun metallib failed".into()));
+    }
+    Ok(())
+}
+
 /// Compile every `.metal` in `metal_files` and link them into a single
 /// `metallib` written to `output`. Uses `xcrun -sdk <sdk> metal` for
 /// per-file `.air` and `xcrun -sdk <sdk> metallib` for the final link.
@@ -418,6 +461,9 @@ fn emit_swift_wrapper_icb_record(out: &mut String, k: &Kernel) {
 /// `sdk` is the SDK name (e.g. `"macosx"`, `"iphoneos"`); `air_dir` is
 /// a scratch directory the caller controls (so it can land under
 /// cargo's `target/` and not litter `/tmp/`).
+///
+/// For parallel compilation, use [`compile_metal_to_air`] per-file (with
+/// rayon or similar) and then call [`link_air_to_metallib`].
 pub fn compile_metallib(
     metal_files: &[PathBuf],
     output: &Path,
@@ -428,45 +474,9 @@ pub fn compile_metallib(
         return Err(EmitError::MetalToolchain("no .metal files to compile".into()));
     }
     std::fs::create_dir_all(air_dir)?;
-
-    let mut air_files: Vec<PathBuf> = Vec::with_capacity(metal_files.len());
-    for metal in metal_files {
-        let stem = metal.file_stem().and_then(|s| s.to_str()).ok_or_else(|| {
-            EmitError::MetalToolchain(format!("bad filename: {}", metal.display()))
-        })?;
-        let air = air_dir.join(format!("{stem}.air"));
-        let status = Command::new("xcrun")
-            .args(["-sdk", sdk, "metal", "-c"])
-            .arg(metal)
-            .arg("-o")
-            .arg(&air)
-            .status()
-            .map_err(|e| {
-                EmitError::MetalToolchain(format!(
-                    "invoke xcrun metal for {}: {e}",
-                    metal.display()
-                ))
-            })?;
-        if !status.success() {
-            return Err(EmitError::MetalToolchain(format!(
-                "xcrun metal failed for {}",
-                metal.display()
-            )));
-        }
-        air_files.push(air);
-    }
-
-    let status = Command::new("xcrun")
-        .args(["-sdk", sdk, "metallib"])
-        .args(&air_files)
-        .arg("-o")
-        .arg(output)
-        .status()
-        .map_err(|e| EmitError::MetalToolchain(format!("invoke xcrun metallib: {e}")))?;
-    if !status.success() {
-        return Err(EmitError::MetalToolchain("xcrun metallib failed".into()));
-    }
-    Ok(())
+    let air_files: Vec<PathBuf> =
+        metal_files.iter().map(|m| compile_metal_to_air(m, sdk, air_dir)).collect::<Result<_>>()?;
+    link_air_to_metallib(&air_files, output, sdk)
 }
 
 // ─── String helpers ──────────────────────────────────────────────────

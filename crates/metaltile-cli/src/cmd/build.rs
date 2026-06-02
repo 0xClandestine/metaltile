@@ -27,7 +27,15 @@ use std::{
 
 use metaltile::harness::{bench::KernelBench, registry::all_benches};
 use metaltile_codegen::{
-    emit::{self, compile_metallib, dtype_suffix, write_manifest, write_msl, write_swift_wrappers},
+    emit::{
+        self,
+        compile_metal_to_air,
+        dtype_suffix,
+        link_air_to_metallib,
+        write_manifest,
+        write_msl,
+        write_swift_wrappers,
+    },
     generator_for_mode,
     passes::{PassStats, PipelineBuilder, run_passes_with_stats},
 };
@@ -474,9 +482,34 @@ fn emit_artifacts(
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("target"))
             .join("tile-build-air");
-        if let Err(e) = compile_metallib(metal_files, &metallib_path, sdk, &air_dir) {
+        if let Err(e) = std::fs::create_dir_all(&air_dir) {
             eprintln!(
-                "  {} compile metallib: {}",
+                "  {} create air dir: {}",
+                paint_stderr("error:", Style::new().fg(Color::Red).bold()),
+                e
+            );
+            return Err(CliError::Io(e));
+        }
+        // Compile each .metal → .air in parallel; each xcrun call is ~50-200 ms
+        // and fully independent. The metallib link remains a single serial step.
+        let air_files: Vec<PathBuf> = match metal_files
+            .par_iter()
+            .map(|m| compile_metal_to_air(m, sdk, &air_dir))
+            .collect::<std::result::Result<Vec<_>, _>>()
+        {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "  {} compile .metal: {}",
+                    paint_stderr("error:", Style::new().fg(Color::Red).bold()),
+                    e
+                );
+                return Err(CliError::MetalCompile(e.to_string()));
+            },
+        };
+        if let Err(e) = link_air_to_metallib(&air_files, &metallib_path, sdk) {
+            eprintln!(
+                "  {} link metallib: {}",
                 paint_stderr("error:", Style::new().fg(Color::Red).bold()),
                 e
             );
