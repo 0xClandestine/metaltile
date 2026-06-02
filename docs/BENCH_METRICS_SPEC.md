@@ -116,12 +116,30 @@ Goal: **support all precisions in every weight-bearing kernel** (matmul/gemv/att
 | mxfp4 | E2M1 | 32 | E8M0 (pow-2) | ✅ (`Mxfp4`) |
 | mxfp8 | E4M3/E5M2 | 32 | E8M0 | ✅ (`Mxfp8E4`/`Mxfp8E5`) |
 | nvfp8 | E4M3 | 16 | per-block FP32 | ✅ (`Nvfp8`) |
-| int2/4/8 affine | int | group 64 | per-group | ✅ (qmv/qmm variants) |
-| fp8 E4M3/E5M2 | fp8 | — | — | ✅ (kv-cache, dequant) |
+| fp4 (legacy) | E2M1 | 32 | per-group FP32 | ✅ (`Fp4`) |
+| fp8 (legacy) | E4M3/E5M2 | 32 | per-group FP32 | ✅ (`Fp8E4m3`/`Fp8E5m2`) |
+| int8 (symmetric) | int8 | group 64 | per-group FP32 | ✅ (`Int8`) |
+| int2–8 affine | int | group 64 | per-group scale+bias | ✅ (legacy qmv/qmm/gather) |
 
-**Status (✅ implemented):** spec-conformant block-scaled codecs (`crates/metaltile-std/src/quant/{codec,format}.rs`) — the single source of truth shared by the host packer, the CPU correctness oracle, and the kernels via first-class DSL decode intrinsics (`e2m1_decode`/`e4m3_decode`/`e5m2_decode`). All 5 formats wired across the weight-bearing matmul families: **dequant + qgemv + qmm + MoE gather_qmm + simdgroup-matrix MMA = 25 GPU-verified kernels** (`mlx/block_scaled_*.rs`), each with a `#[test_kernel]` oracle (1:1) and decode/qmm/MMA precision benches. The PR-#1 latency+GFLOP+roofline metrics make "fastest precision" directly readable.
+**Status (✅ FULL MATRIX implemented):** spec-conformant block-scaled codecs (`crates/metaltile-std/src/quant/{codec,format}.rs`) — the single source of truth shared by the host packer, the CPU correctness oracle, and the kernels via first-class DSL decode intrinsics (`e2m1_decode`/`e4m3_decode`/`e5m2_decode`/`int8_decode`). **All 9 quant formats** (int8, legacy fp4, legacy fp8 e4m3/e5m2, mxfp4, nvfp4, mxfp8 e4m3/e5m2, nvfp8) are wired across **every weight-bearing family** in fp16/bf16/fp32 activation:
 
-**Remaining (follow-ups):** more bench shapes (dequant bandwidth, MoE gather); the fused perf-kernels (`rms_norm_qgemv`, `batched_qkv_qgemv`) which *compose* the above primitives (not coverage gaps); block-scaled-KV flash attention (a distinct, complex kernel class); and an audit of whether the `ekryski/mlx@alpha` reference kernels are themselves spec-correct.
+| family | file |
+|---|---|
+| dequant (standalone) | `mlx/block_scaled_dequant.rs` |
+| qgemv | `mlx/block_scaled_matmul.rs` |
+| qmm | `mlx/block_scaled_qmm.rs` |
+| qmm-MMA (simdgroup) | `mlx/block_scaled_mma.rs` |
+| MoE gather-qmm | `mlx/block_scaled_moe.rs` |
+| fused RMSNorm+GEMV | `ffai/rms_norm_block_scaled_qgemv.rs` |
+| fused gated-RMSNorm+GEMV | `ffai/gated_rms_norm_block_scaled_qgemv.rs` |
+| batched-4 qgemv / qmm | `ffai/batched_4_block_scaled_{qgemv,qmm}.rs` |
+| batched-Q/K/V qgemv / qmm | `ffai/batched_qkv_block_scaled_{qgemv,qmm}.rs` |
+| flash SDPA (block-scaled KV) | `ffai/flash_block_scaled_sdpa.rs` |
+| embedding gather | `ffai/dequant_gather_block_scaled.rs` |
+
+Each (family × format) ships a `#[test_kernel]` CPU-oracle correctness check (1:1, GPU-verified vs `quant::format::dequant`) and a `#[bench]` with `.flops()` so the PR-#1 latency/GFLOP/roofline columns rank precisions side-by-side. `fp8_e4m3` reuses each family's `nvfp8` kernel (identical 8-bit-E4M3 + f32-scale shape). ~104 block-scaled kernels, 127 `#[test_kernel]`s, 117 benches.
+
+**Remaining (follow-ups):** the legacy int2–8 *affine* (scale+bias) path stays in its existing `dequant_gemv`/`quantized` kernels (the new `Int8` is the symmetric scale-only variant); more flash head-dim variants (only d=128 has block-scaled KV today); and an audit of whether the `ekryski/mlx@alpha` reference kernels are themselves spec-correct.
 
 ## Appendix C — M5 Neural Accelerator hardware context
 
