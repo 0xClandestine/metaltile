@@ -23,6 +23,7 @@ pub mod block_scaled_matmul;
 pub mod block_scaled_mma;
 pub mod block_scaled_moe;
 pub mod block_scaled_qmm;
+pub mod block_scaled_qmm_mpp;
 pub mod copy;
 pub mod fft;
 pub mod fp_quantized;
