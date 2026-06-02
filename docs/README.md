@@ -14,6 +14,7 @@ Table of contents for the MetalTile docs. The top-level [`README`](../README.md)
 
 ## Reference
 
+- [Architecture](ARCHITECTURE.md) — how a `#[kernel]` becomes a compiled shader, and how the bench runner, test runner, and kernel profiling work end-to-end (current in-process vs planned-subprocess execution model).
 - [CLI](cli.md) — the `tile` binary: `bench`, `build`, `emit`, `inspect`, `device`, `snap`, `diff`.
 - [Kernel audit](KERNEL_AUDIT.md) — per-op coverage table: which MLX / FFAI kernels are ported, partial, or still missing, with the gaps and open PRs called out.
 
