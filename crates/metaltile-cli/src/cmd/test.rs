@@ -163,7 +163,7 @@ pub fn run(args: &TestArgs, harness: &crate::harness::Harness) -> Result<(), cra
                 Ok(o) if o.passed => {
                     suite_passed += 1;
                     total_passed += 1;
-                    let pct = if *tol > 0.0 { o.max_abs_err / tol * 100.0 } else { 0.0 };
+                    let pct = if *tol > 0.0 { o.max_abs_err as f64 / tol * 100.0 } else { 0.0 };
                     println!(
                         "{}  {}  {}",
                         paint_stdout("[PASS]", Style::new().fg(Color::Green).bold()),
@@ -174,7 +174,8 @@ pub fn run(args: &TestArgs, harness: &crate::harness::Harness) -> Result<(), cra
                 Ok(o) => {
                     suite_failed += 1;
                     total_failed += 1;
-                    let pct = if *tol > 0.0 { o.max_abs_err / tol * 100.0 } else { f64::INFINITY };
+                    let pct =
+                        if *tol > 0.0 { o.max_abs_err as f64 / tol * 100.0 } else { f64::INFINITY };
                     let reason = format!("δ={pct:.1}%");
                     let line = format!(
                         "{}  {}",
