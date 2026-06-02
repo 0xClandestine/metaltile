@@ -48,7 +48,7 @@ use crate::{
     BuildArgs,
     CliError,
     FilterSpec,
-    term::{Color, Style, paint_stderr, paint_stdout},
+    term::{Color, Spinner, Style, paint_stderr, paint_stdout},
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -193,6 +193,7 @@ pub fn run(args: &BuildArgs, harness: &crate::harness::Harness) -> Result<(), Cl
         .clamp(8, 24);
 
     let compile_start = Instant::now();
+    let mut spinner = Spinner::new(format!("Compiling {} kernels...", sorted.len()));
 
     // Per-output collectors for the emit step.
     let kernels_dir = out_root.as_ref().map(|r| r.join("Resources").join("kernels"));
@@ -327,6 +328,8 @@ pub fn run(args: &BuildArgs, harness: &crate::harness::Harness) -> Result<(), Cl
             }
         })
         .collect();
+
+    spinner.stop();
 
     // Sequential pass: print per-kernel lines and accumulate emit artifacts.
     let mut errors = 0u32;

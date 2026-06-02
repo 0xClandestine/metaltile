@@ -22,7 +22,7 @@ use rayon::prelude::*;
 use crate::{
     FilterSpec,
     TestArgs,
-    term::{Color, Style, paint_stderr, paint_stdout},
+    term::{Color, Spinner, Style, paint_stderr, paint_stdout},
 };
 
 /// `TileCommand` wrapper for `tile test`.
@@ -113,6 +113,7 @@ pub fn run(args: &TestArgs, harness: &crate::harness::Harness) -> Result<(), cra
     // Phase 1 (parallel): run CPU oracle for every (entry, dtype) pair.
     // `t.setup(dt)` computes expected output buffers on the CPU — no GPU
     // involvement — so all pairs can run concurrently.
+    let mut spinner = Spinner::new("Compiling...");
     let work: Vec<Vec<_>> = entries
         .par_iter()
         .map(|entry| {
@@ -129,6 +130,7 @@ pub fn run(args: &TestArgs, harness: &crate::harness::Harness) -> Result<(), cra
         })
         .collect();
 
+    spinner.stop();
     let wall_start = Instant::now();
     let mut total = 0usize;
     let mut total_passed = 0usize;

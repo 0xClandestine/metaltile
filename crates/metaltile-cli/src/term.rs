@@ -6,7 +6,11 @@
 //! while delegating color management and TTY detection to the clap ecosystem crates
 //! already in the dependency tree.
 
-use std::sync::OnceLock;
+use std::sync::{
+    Arc,
+    OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
 
 // ── Public types ─────────────────────────────────────────────────────────
 /// Re-export of `anstyle::AnsiColor` — drop-in replacement for our old
@@ -78,4 +82,68 @@ fn paint(stream: Stream, text: &str, style: Style) -> String {
         return text.to_owned();
     }
     format!("{}{text}{}", style.0, anstyle::Reset)
+}
+
+// ── Spinner ──────────────────────────────────────────────────────────────
+
+const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Animated terminal spinner — no-op when stderr is not a TTY.
+///
+/// ```text
+/// [⠋] Compiling...
+/// ```
+///
+/// Drop or call [`Spinner::stop`] to clear the line.
+#[must_use]
+pub struct Spinner {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+    is_tty: bool,
+}
+
+impl Spinner {
+    /// Spawn a spinner with the given message.
+    pub fn new(msg: impl Into<String>) -> Self {
+        let is_tty = is_term(Stream::Stderr);
+        let stop = Arc::new(AtomicBool::new(false));
+
+        if !is_tty {
+            return Self { stop, handle: None, is_tty: false };
+        }
+
+        let stop2 = stop.clone();
+        let msg = msg.into();
+        let handle = std::thread::spawn(move || {
+            for (i, frame) in FRAMES.iter().cycle().enumerate() {
+                if stop2.load(Ordering::Relaxed) {
+                    break;
+                }
+                eprint!("\r\x1b[K[{frame}] {msg}");
+                if i % 10 == 0 {
+                    // flush stderr periodically so the animation is visible
+                    use std::io::Write;
+                    let _ = std::io::stderr().flush();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(80));
+            }
+        });
+
+        Self { stop, handle: Some(handle), is_tty: true }
+    }
+
+    /// Stop the spinner and erase the line.
+    pub fn stop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+        if self.is_tty {
+            eprint!("\r\x1b[K");
+        }
+    }
+}
+
+impl Drop for Spinner {
+    fn drop(&mut self) { self.stop(); }
 }
