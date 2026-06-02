@@ -141,8 +141,14 @@ Goal: **support all precisions in every weight-bearing kernel** (matmul/gemv/att
 | MoE gather-qmm via MPP (bm8/bm16/bm64) | `ffai/moe_mpp{,_bm8,_bm64}_block_scaled.rs` |
 | expert-indexed GEMV | `ffai/dequant_gemv_expert_indexed_block_scaled.rs` |
 | patch embedding (linear projection) | `ffai/patch_embed_block_scaled.rs` |
+| conv2d / conv3d (direct) | `ffai/{conv2d,conv3d}_block_scaled.rs` |
+| conv2d / conv3d (im2col simdgroup-MMA) | `ffai/{conv2d,conv3d}_mma_block_scaled.rs` |
+| depthwise conv2d | `ffai/depthwise_conv2d_block_scaled.rs` |
+| audio conv1d (STT) / fishspeech conv1d (TTS) | `ffai/{audio_conv1d,fishspeech_conv1d}_block_scaled.rs` |
 
-Each (family × format) ships a `#[test_kernel]` CPU-oracle correctness check (1:1, GPU-verified vs `quant::format::dequant`) and a `#[bench]` with `.flops()` so the PR-#1 latency/GFLOP/roofline columns rank precisions side-by-side. `fp8_e4m3` reuses each family's `nvfp8` kernel (identical 8-bit-E4M3 + f32-scale shape). The MPP/NAX/MoE-MPP cooperative-matmul variants dequant W to `coop_stage(T)` during threadgroup staging and reuse the proven int4/int8 `mpp::tensor_ops::matmul2d` dispatch geometry byte-for-byte (no new freeze surface). ~178 block-scaled kernels across **every quantized weight-bearing op + backend + MoE tile**, all GPU-verified, each 1:1 tested + benched.
+Each (family × format) ships a `#[test_kernel]` CPU-oracle correctness check (1:1, GPU-verified vs `quant::format::dequant`) and a `#[bench]` with `.flops()` so the PR-#1 latency/GFLOP/roofline columns rank precisions side-by-side. `fp8_e4m3` reuses each family's `nvfp8` kernel (identical 8-bit-E4M3 + f32-scale shape). The MPP/NAX/MoE-MPP cooperative-matmul variants dequant W to `coop_stage(T)` during threadgroup staging and reuse the proven int4/int8 `mpp::tensor_ops::matmul2d` dispatch geometry byte-for-byte (no new freeze surface). ~216 block-scaled kernels across **every quantized weight-bearing op + backend + MoE tile**, all GPU-verified on f32/f16/bf16, each 1:1 tested + benched.
+
+**int8 is in every family above** — including the fast tensor-engine paths (simdgroup-MMA, MPP, NAX, MoE-MPP) — because symmetric int8 is one of the nine `QFormat`s. It is the highest-throughput quantized format on Apple GPUs / the ANE, so it is deliberately a first-class citizen of the matrix rather than a special case; the core matmul / MoE / fused-norm / batched-QKV / KV-cache / attention families *also* carry the pre-existing affine (scale+bias) int8. No weight-bearing family lacks an int8 path.
 
 ### Where block-scaled quantization does **not** apply
 
@@ -159,12 +165,16 @@ Quantization compresses a large persistent *weight/parameter* tensor, so it is o
 | Winograd conv (`winograd_conv`) | the filter is pre-transformed into the Winograd domain (`GgGᵀ`), which strongly amplifies quantization error — quantized Winograd is non-standard and counterproductive |
 | elementwise / reduction / softmax / sort / scan / fft / rope / gather-axis / scatter | no persistent parameter tensor |
 
-Quantized **conv** is now covered across the family — direct (`patch_embed`,
+Quantized **conv** is covered across the family — direct (`patch_embed`,
 `conv2d`, `conv3d`, `depthwise_conv2d`, `audio_conv1d`, `fishspeech_conv1d`) and
 the implicit-im2col simdgroup-MMA (`conv2d_mma`, `conv3d_mma`) — quantizing the
-filter `[out_ch, C]` block-wise along the `in_ch·k…` contraction (8 kernels
-each, all 9 formats, GPU-verified; the conv-MMA fp4 path is f16/bf16-only per
-the simdgroup-f32 caveat below).
+filter `[out_ch, C]` block-wise along the `in_ch·k…` contraction (all 9 formats,
+GPU-verified on f32/f16/bf16).
+
+**Open precision item:** block-scaled flash-SDPA KV is currently **d=128 only**
+(`flash_block_scaled_sdpa`), whereas the affine int4/int8 KV path covers
+d ∈ {64, 96, 128, 256, 512}. Extending the block-scaled KV read to the other head
+dims (one flash kernel × 9 formats per dim) is the main remaining gap.
 
 > **Test-gate note:** the `#[test_kernel]` harness (`tests/kernel_tests_harness.rs`)
 > must enumerate the registry via `metaltile_std::all_tests()`, not
