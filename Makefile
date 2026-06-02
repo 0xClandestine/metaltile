@@ -101,6 +101,10 @@ fmt-check: ## check formatting without modifying files (uses the pinned nightly)
 typos: ## run typos checker (same config CI uses)
 	typos --config .github/configs/typos-cli.toml
 
+.PHONY: check-bench-names
+check-bench-names: ## verify all #[bench] names use a CI-sharded group prefix (ffai/ or mlx/)
+	./.github/scripts/check_bench_names.sh
+
 # ─── tile CLI ─────────────────────────────────────────────────────────
 #
 # All targets call into the `tile` CLI via `cargo run --release`,
