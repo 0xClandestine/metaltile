@@ -58,14 +58,30 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt,clippy
+
+      # Cache the compiled tile binary keyed on all Rust source inputs.
+      # A cache hit skips `cargo build` entirely (~3-5 min saved per job).
+      # Falls back to rust-cache for incremental compilation on a miss.
+      - name: Cache tile binary
+        id: binary-cache
+        uses: actions/cache@v4
+        with:
+          path: target/ci/tile
+          key: tile-binary-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'crates/**/*.rs', 'rust-toolchain.toml') }}
+
       - uses: Swatinem/rust-cache@v2
+        if: steps.binary-cache.outputs.cache-hit != 'true'
         with:
           shared-key: tile-macos
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install tile CLI
-        run: |
-          cargo build --profile ci -p metaltile-cli
-          echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
+
+      - name: Build tile CLI
+        if: steps.binary-cache.outputs.cache-hit != 'true'
+        run: cargo build --profile ci -p metaltile-cli
+
+      - name: Add tile to PATH
+        run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
+
       - name: Build
         run: tile build
 
@@ -83,17 +99,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt,clippy
+
+      # Same binary cache as the build job — same key, so a warm build job
+      # primes it for bench too. Skips cargo build when only non-Rust files
+      # changed (workflow edits, docs, baselines, tile.toml tweaks).
+      - name: Cache tile binary
+        id: binary-cache
+        uses: actions/cache@v4
+        with:
+          path: target/ci/tile
+          key: tile-binary-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'crates/**/*.rs', 'rust-toolchain.toml') }}
+
       - uses: Swatinem/rust-cache@v2
+        if: steps.binary-cache.outputs.cache-hit != 'true'
         with:
           shared-key: tile-macos
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # Build the CLI once and add the release binary to PATH so all
-      # subsequent steps call `tile` directly without cargo overhead.
-      - name: Install tile CLI
-        run: |
-          cargo build --profile ci -p metaltile-cli
-          echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
+      - name: Build tile CLI
+        if: steps.binary-cache.outputs.cache-hit != 'true'
+        run: cargo build --profile ci -p metaltile-cli
+
+      - name: Add tile to PATH
+        run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
 
       # Diff is opt-in (`--diff`); the next step runs `tile diff` separately.
       # `--allow-dirty` is defensive — CI checks out
