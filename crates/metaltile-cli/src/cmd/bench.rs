@@ -35,13 +35,24 @@ use crate::{
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
-pub fn run(args: &BenchArgs, warmup_runs: usize, runs: usize) -> Result<(), crate::CliError> {
-    let _span =
-        tracing::info_span!("bench", filter = ?args.filter_args.filter, verbose = args.verbose)
-            .entered();
-    let json_out = &args.json;
-    let spec = FilterSpec::from_args(&args.filter_args);
-    let verbose = args.verbose;
+pub fn run(args: &BenchArgs, harness: &crate::harness::Harness) -> Result<(), crate::CliError> {
+    let verbose = harness.verbosity();
+    let runs = args.runs.unwrap_or_else(|| harness.config.effective_runs());
+    let warmup_runs = args.warmup.unwrap_or_else(|| harness.config.effective_warmup_runs());
+    let _span = tracing::info_span!("bench", filter = ?args.filter_args.filter, verbose).entered();
+    let json_out = &args.out;
+    // Merge positional path into filter: '/' → match-path glob, else → --filter.
+    let mut filter_args = args.filter_args.clone();
+    if let Some(p) = &args.path {
+        if p.contains('/') || p.contains('*') {
+            if filter_args.match_path.is_none() {
+                filter_args.match_path = Some(p.clone());
+            }
+        } else if filter_args.filter.is_none() {
+            filter_args.filter = Some(p.clone());
+        }
+    }
+    let spec = FilterSpec::from_args(&filter_args);
 
     // Refuse to bench on a dirty tree: a stale `target/` binary against
     // a dirty source tree silently decouples the numbers from any
@@ -151,7 +162,7 @@ pub fn run(args: &BenchArgs, warmup_runs: usize, runs: usize) -> Result<(), crat
     }
 
     if all.is_empty() {
-        if let Some(pattern) = &args.filter_args.filter {
+        if let Some(pattern) = &filter_args.filter {
             if matched_filter {
                 eprintln!(
                     "{} {}",
@@ -274,7 +285,7 @@ pub fn run(args: &BenchArgs, warmup_runs: usize, runs: usize) -> Result<(), crat
         try_auto_diff(
             &runner.device_name,
             &all,
-            args.filter_args.filter.as_deref(),
+            filter_args.filter.as_deref(),
             args.baseline_ref.as_deref(),
         );
     }
@@ -284,7 +295,7 @@ pub fn run(args: &BenchArgs, warmup_runs: usize, runs: usize) -> Result<(), crat
     }
 
     if equiv_fail > 0 {
-        return Err(crate::CliError::Other(format!("{equiv_fail} correctness check(s) failed")));
+        return Err(crate::CliError::TestFailure);
     }
     Ok(())
 }
@@ -706,14 +717,11 @@ fn run_reference_bench(
 
 // ── TileCommand impl ──────────────────────────────────────────────────────
 
-/// `TileCommand` wrapper so `Harness`/`ProjectRunner` can dispatch `bench`
-/// uniformly.  The `BenchArgs` carry all user-supplied flags; `harness` is
-/// available for future config overrides (e.g. verbose level from config).
 pub struct BenchCommand<'a>(pub &'a BenchArgs);
 
 impl<'a> super::TileCommand for BenchCommand<'a> {
     fn run(&self, harness: &crate::harness::Harness) -> Result<(), crate::CliError> {
-        run(self.0, harness.config.warmup_runs, harness.config.runs)
+        run(self.0, harness)
     }
 }
 

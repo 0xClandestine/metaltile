@@ -66,18 +66,27 @@ type EmitKernel = (&'static dyn KernelBench, Vec<DType>);
 pub struct BuildCommand<'a>(pub &'a BuildArgs);
 
 impl<'a> super::TileCommand for BuildCommand<'a> {
-    fn run(&self, _harness: &crate::harness::Harness) -> Result<(), crate::CliError> { run(self.0) }
+    fn run(&self, harness: &crate::harness::Harness) -> Result<(), crate::CliError> {
+        run(self.0, harness)
+    }
 }
 
-pub fn run(args: &BuildArgs) -> Result<(), CliError> {
+pub fn run(args: &BuildArgs, harness: &crate::harness::Harness) -> Result<(), CliError> {
     let _span = tracing::info_span!("build", filter = ?args.filter_args.filter, emit = ?args.emit)
         .entered();
     let spec = FilterSpec::from_args(&args.filter_args);
     let dtypes_arg = &args.dtypes;
-    let verbose = args.verbose > 0;
+    let verbose = harness.verbosity() > 0;
     let emit_arg = &args.emit;
     let out_arg = &args.out;
-    let sdk = &args.sdk;
+    // CLI --sdk overrides tile.toml sdk.
+    let sdk_owned;
+    let sdk: &str = if let Some(s) = &args.sdk {
+        sdk_owned = s.clone();
+        &sdk_owned
+    } else {
+        harness.config.effective_sdk()
+    };
 
     if args.time_passes {
         run_time_passes(&spec, dtypes_arg.as_deref())?;
@@ -372,7 +381,7 @@ pub fn run(args: &BuildArgs) -> Result<(), CliError> {
                 Style::new().fg(Color::Red).bold()
             ),
         );
-        Err(CliError::Other(format!("{errors} kernel(s) failed to compile")))
+        Err(CliError::BuildFailure)
     } else {
         println!("  {}", paint_stdout(format!("{ok} ok"), Style::new().fg(Color::Green).bold()));
         Ok(())

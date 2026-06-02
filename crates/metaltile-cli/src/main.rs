@@ -3,15 +3,18 @@
 //! MetalTile CLI — `tile` binary.
 //!
 //! Subcommands:
-//!   bench     Benchmark suite: MetalTile vs MLX reference
-//!   test      Run #[test_kernel] correctness tests
-//!   build     Compile kernels to MSL; emit metallib/Swift/manifest with --emit
-//!   inspect   Print IR and/or MSL for one kernel
-//!   device    Show GPU device info and supported feature flags
-//!   snap      Save bench results as a regression baseline
-//!   diff      Compare bench results to a saved baseline
-//!   update    Install the latest tile binary (or build from a PR / commit)
-//!   init      Scaffold a new MetalTile kernel project
+//!   bench         Benchmark suite: MetalTile vs MLX reference
+//!   test          Run #[test_kernel] correctness tests
+//!   build         Compile kernels to MSL; emit metallib/Swift/manifest
+//!   inspect       Print IR and/or MSL for registered kernels
+//!   device        Show GPU device info and feature flags
+//!   snap          Save bench results as a regression baseline
+//!   diff          Compare bench results against a saved baseline
+//!   update        Install the latest tile binary
+//!   init          Scaffold a new MetalTile kernel project
+//!   clean         Remove build artifacts and cached snapshots
+//!   config        Display effective merged configuration
+//!   completions   Generate shell completion scripts
 
 mod cmd;
 pub mod config;
@@ -22,9 +25,9 @@ pub mod project_runner;
 pub mod suite_printer;
 pub mod term;
 use anstyle::AnsiColor;
-use clap::{Parser, builder::Styles};
+use clap::{CommandFactory, Parser, builder::Styles};
 use cmd::TileCommand as _;
-pub use error::CliError;
+pub use error::{CliError, TileExitCode};
 use regex::Regex;
 
 const CLAP_STYLES: Styles = Styles::styled()
@@ -36,70 +39,223 @@ const CLAP_STYLES: Styles = Styles::styled()
     .valid(AnsiColor::Green.on_default())
     .invalid(AnsiColor::Red.on_default());
 
+// ── Color choice ──────────────────────────────────────────────────────────
+
+/// When to emit coloured output.
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+pub enum ColorChoice {
+    /// Always emit ANSI colour codes.
+    Always,
+    /// Emit colour only when stdout/stderr is a TTY (default).
+    #[default]
+    Auto,
+    /// Never emit colour codes.
+    Never,
+}
+
+fn apply_color_choice(choice: ColorChoice) {
+    // SAFETY: called once at startup before any threads are spawned,
+    // so there are no concurrent reads of these env vars.
+    unsafe {
+        match choice {
+            ColorChoice::Always => {
+                std::env::set_var("CLICOLOR_FORCE", "1");
+                std::env::remove_var("NO_COLOR");
+            },
+            ColorChoice::Never => {
+                std::env::set_var("NO_COLOR", "1");
+                std::env::remove_var("CLICOLOR_FORCE");
+            },
+            ColorChoice::Auto => {},
+        }
+    }
+}
+
+// ── Global flags ──────────────────────────────────────────────────────────
+
+/// Global flags available to every `tile` subcommand.
+///
+/// All fields carry `global = true` so clap propagates them through
+/// subcommand boundaries automatically.
+#[derive(clap::Args, Debug, Clone, Default)]
+#[command(next_help_heading = "Global options")]
+pub struct GlobalArgs {
+    /// Suppress all non-essential terminal output.
+    #[arg(short = 'q', long, global = true, help_heading = "Global options")]
+    pub quiet: bool,
+
+    /// Output machine-readable JSON (where supported by the subcommand).
+    #[arg(long, global = true, help_heading = "Global options")]
+    pub json: bool,
+
+    /// Control coloured output.
+    #[arg(
+        long,
+        global = true,
+        value_name = "WHEN",
+        default_value = "auto",
+        help_heading = "Global options"
+    )]
+    pub color: ColorChoice,
+
+    /// Number of parallel threads (defaults to logical CPU count).
+    #[arg(short = 'j', long, global = true, value_name = "N", help_heading = "Global options")]
+    pub threads: Option<usize>,
+
+    /// Increase verbosity: -v profile columns, -vv timing stats, -vvv dumps IR.
+    #[arg(
+        short = 'v',
+        long = "verbose",
+        global = true,
+        action = clap::ArgAction::Count,
+        help_heading = "Global options"
+    )]
+    pub verbose: u8,
+
+    /// Select a named config profile from `[profiles.<name>]` in tile.toml.
+    ///
+    /// Can also be set via the `TILE_PROFILE` environment variable.
+    #[arg(
+        long,
+        global = true,
+        value_name = "NAME",
+        env = "TILE_PROFILE",
+        help_heading = "Global options"
+    )]
+    pub profile: Option<String>,
+}
+
+// ── CLI root ──────────────────────────────────────────────────────────────
+
 /// MetalTile CLI — benchmark and inspect GPU kernels on Apple Silicon.
+///
+/// Run `tile <COMMAND> --help` for per-command documentation.
 #[derive(Parser)]
-#[command(name = "tile", version, about, styles = CLAP_STYLES)]
+#[command(name = "tile", version, about, long_about = None, styles = CLAP_STYLES)]
 struct Cli {
+    #[command(flatten)]
+    global: GlobalArgs,
+
     #[command(subcommand)]
     command: Command,
 }
 
+// ── Subcommand enum ───────────────────────────────────────────────────────
+
 #[derive(clap::Subcommand, Debug)]
 enum Command {
-    /// Benchmark suite: MetalTile vs MLX reference
+    /// Benchmark MetalTile kernels against MLX reference implementations.
+    ///
+    /// Measures throughput (GB/s) for every registered `#[bench_kernel]` entry,
+    /// optionally comparing against MLX reference kernels for correctness and
+    /// performance parity.
+    #[command(visible_alias = "b")]
     Bench(BenchArgs),
-    /// Run #[test_kernel] correctness tests against their CPU oracle
+
+    /// Run `#[test_kernel]` correctness tests against their CPU oracle.
+    ///
+    /// Each test computes expected output on the CPU and compares GPU output
+    /// element-wise within the kernel's declared tolerance.
+    #[command(visible_alias = "t")]
     Test(TestArgs),
-    /// Compile kernels to MSL; emit metallib/Swift/manifest with --emit
+
+    /// Compile all registered kernels to MSL; optionally emit build artifacts.
+    ///
+    /// Default: compile-check only (no output written).
+    /// With `--emit <kinds> --out <dir>`: write MSL, metallib, Swift wrappers,
+    /// and/or an IR manifest to disk.
+    #[command(visible_alias = "c", visible_alias = "compile")]
     Build(BuildArgs),
-    /// Print IR and/or MSL for registered kernels
+
+    /// Print IR and/or MSL for registered kernels.
+    ///
+    /// Lists all kernels when called without arguments.  Pass a kernel name
+    /// to inspect a specific kernel, or use `--all` to dump every kernel.
+    #[command(visible_alias = "in")]
     Inspect(InspectArgs),
-    /// Show GPU device info and supported feature flags
+
+    /// Show GPU device info and supported Metal feature flags.
+    #[command(visible_alias = "d")]
     Device(DeviceArgs),
-    /// Save bench results as a regression baseline
+
+    /// Save current bench results as a regression baseline JSON file.
+    #[command(visible_alias = "s")]
     Snap(SnapArgs),
-    /// Compare bench results against a saved baseline
+
+    /// Compare bench results against a saved baseline.
+    ///
+    /// Pass two JSON files to diff offline, or omit the second argument to
+    /// run bench live and compare against the baseline.
     Diff(DiffArgs),
-    /// Install the latest tile binary, or build from a PR / commit
+
+    /// Install the latest `tile` binary, or build from a PR / commit.
+    #[command(visible_alias = "u")]
     Update(UpdateArgs),
-    /// Scaffold a new MetalTile kernel project in the current directory
+
+    /// Scaffold a new MetalTile kernel project in a new directory.
+    ///
+    /// Creates a minimal Cargo workspace with an example `#[bench_kernel]`.
     Init(InitArgs),
+
+    /// Remove build artifacts (`*.air`, `*.metallib`) and optionally snapshots.
+    ///
+    /// By default only removes generated build outputs. Pass `--snapshots` to
+    /// also wipe `.tile-snapshots/`, or `--all` to remove everything.
+    #[command(visible_alias = "cl")]
+    Clean(CleanArgs),
+
+    /// Display the effective merged configuration.
+    ///
+    /// Prints the config as TOML (or JSON with `--json`), showing the result
+    /// of merging defaults → extends base → tile.toml → profile → env vars.
+    /// Useful for debugging why a setting is not taking effect.
+    #[command(visible_alias = "co")]
+    Config(ConfigArgs),
+
+    /// Generate shell completion script and print it to stdout.
+    ///
+    /// Pipe into your shell's completion directory, e.g.:
+    ///   tile completions zsh > ~/.zfunc/_tile
+    ///   tile completions bash > /etc/bash_completion.d/tile
+    #[command(visible_alias = "com")]
+    Completions(CompletionsArgs),
 }
 
 // ── Shared filter flags ───────────────────────────────────────────────────
 
 /// Filter flags shared across all `tile` subcommands.
 ///
-/// Flatten into any `*Args` struct with `#[command(flatten)]`.
-#[derive(clap::Args, Debug, Default)]
+/// All predicates must pass (AND semantics).  Flatten into any `*Args`
+/// struct with `#[command(flatten)]`.
+#[derive(clap::Args, Debug, Default, Clone)]
+#[command(next_help_heading = "Filter options")]
 pub(crate) struct FilterArgs {
-    /// Only run entries whose name contains this text (substring, case-insensitive)
-    #[arg(long = "filter", short = 'f')]
+    /// Only run entries whose name contains this text (substring, case-insensitive).
+    #[arg(long = "filter", short = 'f', help_heading = "Filter options")]
     pub filter: Option<String>,
-    /// Only run entries whose name matches this regex (case-insensitive)
-    #[arg(long = "match-name", alias = "mn")]
+    /// Only run entries whose name matches this regex (case-insensitive).
+    #[arg(long = "match-name", visible_alias = "mn", help_heading = "Filter options")]
     pub match_name: Option<String>,
-    /// Exclude entries whose name matches this regex (case-insensitive)
-    #[arg(long = "no-match-name", alias = "nmn")]
+    /// Exclude entries whose name matches this regex (case-insensitive).
+    #[arg(long = "no-match-name", visible_alias = "nmn", help_heading = "Filter options")]
     pub no_match_name: Option<String>,
-    /// Only run entries in the given op group (regex, case-insensitive).
-    /// Group is the path component before `/`, e.g. `ffai` from `ffai/gemv`.
-    #[arg(long = "match-group", alias = "mg")]
+    /// Only run entries in this op group (regex). Group = path component before `/`.
+    #[arg(long = "match-group", visible_alias = "mg", help_heading = "Filter options")]
     pub match_group: Option<String>,
-    /// Exclude entries in the given op group (regex, case-insensitive)
-    #[arg(long = "no-match-group", alias = "nmg")]
+    /// Exclude entries in this op group (regex).
+    #[arg(long = "no-match-group", visible_alias = "nmg", help_heading = "Filter options")]
     pub no_match_group: Option<String>,
-    /// Only run entries whose source file matches this glob pattern
-    #[arg(long = "match-path", alias = "mp")]
+    /// Only run entries whose source file matches this glob pattern.
+    #[arg(long = "match-path", visible_alias = "mp", help_heading = "Filter options")]
     pub match_path: Option<String>,
-    /// Exclude entries whose source file matches this glob pattern
-    #[arg(long = "no-match-path", alias = "nmp")]
+    /// Exclude entries whose source file matches this glob pattern.
+    #[arg(long = "no-match-path", visible_alias = "nmp", help_heading = "Filter options")]
     pub no_match_path: Option<String>,
 }
 
 // ── FilterSpec (runtime evaluator) ───────────────────────────────────────
 
-/// Compiled filter spec built from [`FilterArgs`]. All predicates must pass (AND logic).
+/// Compiled filter spec built from [`FilterArgs`].  All predicates must pass (AND).
 pub(crate) struct FilterSpec {
     filter: Option<String>,
     match_name: Option<Regex>,
@@ -222,33 +378,58 @@ fn extract_op_group(name: &str) -> &str {
 // ── Bench ────────────────────────────────────────────────────────────────
 
 #[derive(clap::Args, Debug)]
+#[command(
+    after_help = "EXAMPLES:\n  tile bench                      # run all benchmarks\n  tile bench softmax              # run benchmarks matching 'softmax'\n  tile bench -f gemv --vv         # gemv with timing stats\n  tile bench --diff               # bench + auto-diff vs target branch baseline"
+)]
 struct BenchArgs {
+    /// Kernel name filter (shorthand for --filter; if it contains '/' it is
+    /// treated as a --match-path glob instead).
+    #[arg(value_name = "FILTER", value_hint = clap::builder::ValueHint::Other)]
+    path: Option<String>,
+
     #[command(flatten)]
     filter_args: FilterArgs,
-    /// Show occupancy and register profile (-v) and GPU timing stats (-vv).
-    #[arg(short = 'v', action = clap::ArgAction::Count)]
-    verbose: u8,
-    /// Write results as JSON to this file
-    #[arg(long = "json", short = 'o')]
-    json: Option<String>,
-    /// Run even if the working tree has tracked-file modifications.
-    /// Without this flag, bench refuses to run on a dirty tree so the
-    /// numbers always tie back to a clean commit SHA.
-    #[arg(long = "allow-dirty")]
+
+    /// Override the number of timed iterations (default: from tile.toml or 3).
+    #[arg(long, value_name = "N", help_heading = "Bench options")]
+    runs: Option<usize>,
+
+    /// Override the number of warmup iterations (default: from tile.toml or 1).
+    #[arg(long, value_name = "N", help_heading = "Bench options")]
+    warmup: Option<usize>,
+
+    /// Save results as JSON to this file path.
+    #[arg(long, short = 'o', value_name = "FILE", help_heading = "Output options")]
+    out: Option<String>,
+
+    /// Run even if the working tree has uncommitted changes.
+    ///
+    /// By default bench refuses to run on a dirty tree so numbers always
+    /// tie back to a clean commit SHA.
+    #[arg(long, help_heading = "Bench options")]
     allow_dirty: bool,
-    /// Opt into the post-bench diff against the target-branch baseline.
-    #[arg(long = "diff")]
+
+    /// After bench, auto-diff against the target-branch baseline.
+    #[arg(long, help_heading = "Bench options")]
     diff: bool,
-    /// Git ref whose `baselines/<chip>.json` to diff against (default:
-    /// first of `origin/dev`, `upstream/dev`, `dev` that resolves).
-    #[arg(long = "baseline-ref")]
+
+    /// Git ref to use for baseline auto-diff (default: origin/dev or dev).
+    #[arg(long, value_name = "REF", help_heading = "Bench options")]
     baseline_ref: Option<String>,
 }
 
 // ── Test ─────────────────────────────────────────────────────────────────
 
 #[derive(clap::Args, Debug)]
+#[command(
+    after_help = "EXAMPLES:\n  tile test                   # run all tests\n  tile test softmax           # tests matching 'softmax'\n  tile test -f rms_norm       # tests matching 'rms_norm'"
+)]
 struct TestArgs {
+    /// Kernel name filter (shorthand for --filter; if it contains '/' treated
+    /// as a --match-path glob).
+    #[arg(value_name = "FILTER", value_hint = clap::builder::ValueHint::Other)]
+    path: Option<String>,
+
     #[command(flatten)]
     filter_args: FilterArgs,
 }
@@ -256,56 +437,69 @@ struct TestArgs {
 // ── Build ────────────────────────────────────────────────────────────────
 
 #[derive(clap::Args, Debug)]
+#[command(
+    after_help = "EXAMPLES:\n  tile build                       # compile-check all kernels\n  tile build -f softmax            # compile-check softmax kernels\n  tile build --emit msl --out out/ # emit MSL source files\n  tile build --emit all --out out/ # emit MSL + metallib + Swift + IR"
+)]
 struct BuildArgs {
     #[command(flatten)]
     filter_args: FilterArgs,
-    /// Comma-separated list of dtypes to build (f32,f16,bf16)
-    #[arg(long = "dtypes")]
+
+    /// Comma-separated list of dtypes to compile (e.g. f32,f16,bf16).
+    #[arg(long, value_name = "LIST", help_heading = "Build options")]
     dtypes: Option<String>,
-    /// Print generated MSL for each kernel (-v for verbose)
-    #[arg(short = 'v', action = clap::ArgAction::Count)]
-    verbose: u8,
-    /// Comma-separated: msl,metallib,swift,ir,all
-    #[arg(long = "emit")]
+
+    /// Comma-separated emit kinds: msl, metallib, swift, ir, all.
+    #[arg(long, value_name = "KINDS", help_heading = "Output options")]
     emit: Option<String>,
-    /// Output directory (required when --emit is set)
-    #[arg(long = "out", short = 'o')]
+
+    /// Output directory (required when --emit is set).
+    #[arg(long, short = 'o', value_name = "DIR", help_heading = "Output options")]
     out: Option<String>,
-    /// xcrun SDK (default: macosx)
-    #[arg(long = "sdk", default_value = "macosx")]
-    sdk: String,
-    /// Run the standard pass pipeline 25× per kernel and print per-pass
-    /// median wall_us instead of emitting MSL (after 5 warmup iters).
-    /// Inherits `--filter` and `--dtypes`.
-    #[arg(long = "time-passes", short = 't')]
+
+    /// xcrun SDK to use for Metal compilation (default: from tile.toml or macosx).
+    #[arg(long, value_name = "SDK", help_heading = "Build options")]
+    sdk: Option<String>,
+
+    /// Run the standard pass pipeline and report per-pass median wall time.
+    #[arg(long, short = 't', help_heading = "Build options")]
     time_passes: bool,
 }
 
 // ── Inspect ──────────────────────────────────────────────────────────────
 
 #[derive(clap::Args, Debug)]
+#[command(
+    after_help = "EXAMPLES:\n  tile inspect                     # list all kernels\n  tile inspect mt_softmax_f32      # print final MSL\n  tile inspect mt_softmax_f32 --ir # print raw IR\n  tile inspect --all -o /tmp/out   # dump all kernels to disk"
+)]
 struct InspectArgs {
-    /// Kernel name to inspect (list all if omitted)
+    /// Kernel name to inspect (lists all registered kernels when omitted).
     kernel: Option<String>,
+
     #[command(flatten)]
     filter_args: FilterArgs,
-    /// Process all kernels
-    #[arg(long = "all")]
+
+    /// Process all kernels (required when no kernel name is given and --dir is set).
+    #[arg(long, help_heading = "Inspect options")]
     all: bool,
-    /// Print raw IR before any passes
-    #[arg(long = "ir")]
+
+    /// Print raw IR before any passes.
+    #[arg(long, help_heading = "Inspect options")]
     ir: bool,
-    /// Print per-pass op-count reduction table
-    #[arg(long = "stats")]
+
+    /// Print per-pass op-count reduction table.
+    #[arg(long, help_heading = "Inspect options")]
     stats: bool,
-    /// Print IR after a specific pass name (or 'all' for every stage)
-    #[arg(long = "pass")]
+
+    /// Print IR after a specific pass name, or 'all' for every stage.
+    #[arg(long, value_name = "NAME", help_heading = "Inspect options")]
     pass: Option<String>,
-    /// Dtype override (f32, f16, bf16, i32, u32)
-    #[arg(long = "dtype")]
+
+    /// Dtype override (f32, f16, bf16, i32, u32).
+    #[arg(long, value_name = "DTYPE", help_heading = "Inspect options")]
     dtype: Option<String>,
-    /// Write output files to <path> instead of stdout
-    #[arg(long = "dir", short = 'o')]
+
+    /// Write output files to <path> instead of stdout.
+    #[arg(long, short = 'o', value_name = "DIR", help_heading = "Output options")]
     dir: Option<String>,
 }
 
@@ -313,8 +507,8 @@ struct InspectArgs {
 
 #[derive(clap::Args, Debug)]
 struct DeviceArgs {
-    /// Output as JSON
-    #[arg(long = "json")]
+    /// Output as JSON (also enabled by global --json flag).
+    #[arg(long)]
     json: bool,
 }
 
@@ -322,15 +516,18 @@ struct DeviceArgs {
 
 #[derive(clap::Args, Debug)]
 struct SnapArgs {
-    /// Write snapshot to <file> (default: .tile-snapshots/<sha>.json)
-    #[arg(long = "out", short = 'o')]
+    /// Write snapshot to this file (default: `.tile-snapshots/<sha>.json`).
+    #[arg(long, short = 'o', value_name = "FILE")]
     out: Option<String>,
-    /// Promote an existing JSON file instead of re-running bench
-    #[arg(long = "from")]
+
+    /// Promote an existing JSON bench result file instead of re-running bench.
+    #[arg(long, value_name = "FILE")]
     from: Option<String>,
-    /// Attach a note to the snapshot
-    #[arg(long = "note")]
+
+    /// Attach a freeform note to the snapshot.
+    #[arg(long, value_name = "TEXT")]
     note: Option<String>,
+
     #[command(flatten)]
     filter_args: FilterArgs,
 }
@@ -339,23 +536,29 @@ struct SnapArgs {
 
 #[derive(clap::Args, Debug)]
 struct DiffArgs {
-    /// Baseline JSON file
+    /// Baseline JSON file.
     baseline: String,
-    /// Current JSON file (runs bench if omitted)
+
+    /// Current JSON file (runs bench if omitted).
     current: Option<String>,
+
     #[command(flatten)]
     filter_args: FilterArgs,
-    /// Highlight regressions larger than this percentage (default: 5)
-    #[arg(long = "threshold", default_value = "5.0")]
+
+    /// Highlight regressions larger than this percentage (default: 5).
+    #[arg(long, default_value = "5.0", value_name = "PCT")]
     threshold: f64,
-    /// Sort by: name, delta, pct (default: name)
-    #[arg(long = "sort", default_value = "name")]
+
+    /// Sort by: name, delta, pct (default: name).
+    #[arg(long, default_value = "name", value_name = "KEY")]
     sort: String,
-    /// Only show regressions
-    #[arg(long = "only-regressions")]
+
+    /// Only show regressions (hide improvements and unchanged rows).
+    #[arg(long)]
     only_regressions: bool,
-    /// Only show improvements
-    #[arg(long = "only-improvements")]
+
+    /// Only show improvements (hide regressions and unchanged rows).
+    #[arg(long)]
     only_improvements: bool,
 }
 
@@ -363,36 +566,67 @@ struct DiffArgs {
 
 #[derive(clap::Args, Debug)]
 struct InitArgs {
-    /// Project directory name to create (default: "my-tile-kernels")
+    /// Name for the new project directory (default: my-tile-kernels).
     #[arg(default_value = "my-tile-kernels")]
     name: String,
-    /// Overwrite if the directory already exists
-    #[arg(long = "force")]
+
+    /// Overwrite an existing directory if it already exists.
+    #[arg(long)]
     force: bool,
+}
+
+// ── Clean ────────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+struct CleanArgs {
+    /// Also remove regression baselines in `.tile-snapshots/`.
+    #[arg(long)]
+    snapshots: bool,
+
+    /// Remove all build artifacts and regression baselines.
+    #[arg(long)]
+    all: bool,
+}
+
+// ── Config ───────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+struct ConfigArgs {
+    /// Output as JSON instead of TOML (also enabled by global --json).
+    #[arg(long)]
+    json: bool,
+}
+
+// ── Completions ───────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+struct CompletionsArgs {
+    /// Shell to generate completions for.
+    #[arg(value_enum)]
+    shell: clap_complete::Shell,
 }
 
 // ── Update ────────────────────────────────────────────────────────────────
 
 #[derive(clap::Args, Debug)]
 struct UpdateArgs {
-    /// Print what would be installed without modifying anything
-    #[arg(long = "check")]
+    /// Print what would be installed without making any changes.
+    #[arg(long)]
     check: bool,
-    /// Build and install from the head of this PR number (requires git + cargo)
-    #[arg(long = "pr", value_name = "N", conflicts_with = "commit")]
+
+    /// Build and install from the head of this PR number (requires git + cargo).
+    #[arg(long, value_name = "N", conflicts_with = "commit")]
     pr: Option<u32>,
-    /// Build and install from this commit SHA (requires git + cargo)
-    #[arg(long = "commit", value_name = "SHA", conflicts_with = "pr")]
+
+    /// Build and install from this commit SHA (requires git + cargo).
+    #[arg(long, value_name = "SHA", conflicts_with = "pr")]
     commit: Option<String>,
 }
 
 // ── Dispatch ─────────────────────────────────────────────────────────────
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialise tracing. METALTILE_DEBUG=1 enables debug-level output for all
-    // metaltile crates; METALTILE_DEBUG=trace enables trace level.
-    // When the env-var is absent the subscriber is still installed but the filter
-    // rejects everything, so library crates pay only the ~1 ns no-subscriber cost.
+fn main() {
+    // Initialise tracing. METALTILE_DEBUG=1 → debug level; =trace → trace.
     let debug_level = std::env::var("METALTILE_DEBUG").ok();
     let filter = match debug_level.as_deref() {
         Some("1") | Some("debug") => "metaltile=debug",
@@ -404,39 +638,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter)),
         )
-        // Diagnostics go to stderr so they don't interleave with bench/build
-        // output on stdout. `with_target` shows which crate/module emitted
-        // each event — useful when tracing spans multiple crates.
         .with_writer(std::io::stderr)
         .with_target(true)
         .with_thread_ids(false)
-        // Print a line when each span closes so you see elapsed wall time.
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .compact()
         .init();
 
     let cli = Cli::parse();
+
+    // Apply --color choice before any paint calls (sets NO_COLOR / CLICOLOR_FORCE).
+    apply_color_choice(cli.global.color);
+
+    // Apply -j / --threads before any rayon work.
+    if let Some(n) = cli.global.threads {
+        let _ = rayon::ThreadPoolBuilder::new().num_threads(n).build_global();
+    }
+
     let _span = tracing::info_span!("tile", command = ?cli.command).entered();
 
-    let h = harness::Harness::from_config();
+    let h = harness::Harness::new(cli.global);
 
-    match cli.command {
-        Command::Bench(ref args) => cmd::BenchCommand(args).run(&h)?,
-        Command::Test(ref args) => cmd::TestCommand(args).run(&h)?,
-        Command::Build(ref args) => cmd::BuildCommand(args).run(&h)?,
-        Command::Inspect(ref args) => cmd::InspectCommand(args).run(&h)?,
-        Command::Device(args) => cmd::device::run(&args)?,
-        Command::Snap(args) => cmd::snap::run(&args)?,
-        Command::Diff(args) => cmd::diff::run(&args)?,
-        Command::Update(args) => cmd::update::run(&args)?,
-        Command::Init(ref args) => cmd::InitCommand(args).run(&h)?,
+    let result: Result<(), CliError> = match cli.command {
+        Command::Bench(ref args) => cmd::BenchCommand(args).run(&h),
+        Command::Test(ref args) => cmd::TestCommand(args).run(&h),
+        Command::Build(ref args) => cmd::BuildCommand(args).run(&h),
+        Command::Inspect(ref args) => cmd::InspectCommand(args).run(&h),
+        Command::Device(ref args) => cmd::device::run(args, &h),
+        Command::Snap(ref args) => cmd::snap::run(args),
+        Command::Diff(ref args) => cmd::diff::run(args),
+        Command::Update(ref args) => cmd::update::run(args),
+        Command::Init(ref args) => cmd::InitCommand(args).run(&h),
+        Command::Clean(ref args) => cmd::clean::run(args),
+        Command::Config(ref args) => cmd::config::run(args, &h),
+        Command::Completions(ref args) => {
+            clap_complete::generate(
+                args.shell,
+                &mut Cli::command(),
+                "tile",
+                &mut std::io::stdout(),
+            );
+            Ok(())
+        },
+    };
+
+    // Print config-load warnings (unknown keys, deprecated fields).
+    if !matches!(cli.command, Command::Config(_) | Command::Completions(_)) {
+        h.print_warnings();
     }
-    Ok(())
+
+    if let Err(e) = result {
+        eprintln!("error: {e}");
+        std::process::exit(e.exit_code());
+    }
 }
 
 /// Legacy filter helper: case-insensitive substring match on a single string.
-/// Prefer [`FilterSpec`] for new code; this remains for `diff` render internals
-/// that only have a name, not a full entry.
+/// Prefer [`FilterSpec`] for new code.
 pub(crate) fn matches_filter(filter: Option<&str>, label: &str) -> bool {
     let Some(filter) = filter else {
         return true;

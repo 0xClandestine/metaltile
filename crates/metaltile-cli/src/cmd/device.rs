@@ -9,9 +9,9 @@ use crate::{
     term::{Color, Style, paint_stdout},
 };
 
-pub fn run(args: &DeviceArgs) -> Result<(), crate::CliError> {
-    let _span = tracing::info_span!("device", json = args.json).entered();
-    let json_out = args.json;
+pub fn run(args: &DeviceArgs, harness: &crate::harness::Harness) -> Result<(), crate::CliError> {
+    let json_out = args.json || harness.json_output();
+    let _span = tracing::info_span!("device", json = json_out).entered();
 
     let runner = match GpuRunner::new() {
         Ok(r) => r,

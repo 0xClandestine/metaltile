@@ -28,12 +28,25 @@ use crate::{
 pub struct TestCommand<'a>(pub &'a TestArgs);
 
 impl<'a> super::TileCommand for TestCommand<'a> {
-    fn run(&self, _harness: &crate::harness::Harness) -> Result<(), crate::CliError> { run(self.0) }
+    fn run(&self, harness: &crate::harness::Harness) -> Result<(), crate::CliError> {
+        run(self.0, harness)
+    }
 }
 
-pub fn run(args: &TestArgs) -> Result<(), crate::CliError> {
+pub fn run(args: &TestArgs, harness: &crate::harness::Harness) -> Result<(), crate::CliError> {
     let _span = tracing::info_span!("test", filter = ?args.filter_args.filter).entered();
-    let spec = FilterSpec::from_args(&args.filter_args);
+    // Merge positional path into filter args.
+    let mut filter_args = args.filter_args.clone();
+    if let Some(p) = &args.path {
+        if p.contains('/') || p.contains('*') {
+            if filter_args.match_path.is_none() {
+                filter_args.match_path = Some(p.clone());
+            }
+        } else if filter_args.filter.is_none() {
+            filter_args.filter = Some(p.clone());
+        }
+    }
+    let spec = FilterSpec::from_args(&filter_args);
 
     let ctx = match metaltile::Context::new() {
         Ok(c) => c,
@@ -56,7 +69,7 @@ pub fn run(args: &TestArgs) -> Result<(), crate::CliError> {
         .collect();
 
     if entries.is_empty() {
-        if let Some(pattern) = &args.filter_args.filter {
+        if let Some(pattern) = &filter_args.filter {
             eprintln!(
                 "{} {}",
                 paint_stderr("[warn]", Style::new().fg(Color::Yellow).bold()),
@@ -162,8 +175,20 @@ pub fn run(args: &TestArgs) -> Result<(), crate::CliError> {
     };
     println!("\n  {}", paint_stdout(format!("{passed}/{total} passed"), style));
 
+    // JSON summary (global --json flag).
+    if harness.json_output() {
+        let json = serde_json::json!({
+            "command": "test",
+            "passed": passed,
+            "failed": failures.len(),
+            "total": total,
+            "failures": failures,
+        });
+        println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
+    }
+
     if !failures.is_empty() {
-        return Err(crate::CliError::Other(format!("{} test(s) failed", failures.len())));
+        return Err(crate::CliError::TestFailure);
     }
     Ok(())
 }

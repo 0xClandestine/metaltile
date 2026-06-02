@@ -8,6 +8,8 @@
 
 pub mod bench;
 pub mod build;
+pub mod clean;
+pub mod config;
 pub mod device;
 pub mod diff;
 pub mod init;
