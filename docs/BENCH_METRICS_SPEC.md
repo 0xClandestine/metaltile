@@ -119,7 +119,7 @@ Goal: **support all precisions in every weight-bearing kernel** (matmul/gemv/att
 | fp4 (legacy) | E2M1 | 32 | per-group FP32 | ✅ (`Fp4`) |
 | fp8 (legacy) | E4M3/E5M2 | 32 | per-group FP32 | ✅ (`Fp8E4m3`/`Fp8E5m2`) |
 | int8 (symmetric) | int8 | group 64 | per-group FP32 | ✅ (`Int8`) |
-| int2–8 affine | int | group 64 | per-group scale+bias | ✅ (legacy qmv/qmm/gather) |
+| int2–8 affine | int | group 64 | per-group scale+bias | ✅ (qmv/qmm/gather — current, **not** legacy: MLX-checkpoint + KV-cache interop) |
 
 **Status (✅ FULL MATRIX implemented):** spec-conformant block-scaled codecs (`crates/metaltile-std/src/quant/{codec,format}.rs`) — the single source of truth shared by the host packer, the CPU correctness oracle, and the kernels via first-class DSL decode intrinsics (`e2m1_decode`/`e4m3_decode`/`e5m2_decode`/`int8_decode`). **All 9 quant formats** (int8, legacy fp4, legacy fp8 e4m3/e5m2, mxfp4, nvfp4, mxfp8 e4m3/e5m2, nvfp8) are wired across **every weight-bearing family** in fp16/bf16/fp32 activation:
 
@@ -134,19 +134,20 @@ Goal: **support all precisions in every weight-bearing kernel** (matmul/gemv/att
 | fused gated-RMSNorm+GEMV | `ffai/gated_rms_norm_block_scaled_qgemv.rs` |
 | batched-4 qgemv / qmm | `ffai/batched_4_block_scaled_{qgemv,qmm}.rs` |
 | batched-Q/K/V qgemv / qmm | `ffai/batched_qkv_block_scaled_{qgemv,qmm}.rs` |
-| flash SDPA (block-scaled KV) | `ffai/flash_block_scaled_sdpa.rs` |
+| flash SDPA (block-scaled KV, d64/96/128/256/512) | `ffai/flash_block_scaled_sdpa.rs` |
 | embedding gather | `ffai/dequant_gather_block_scaled.rs` |
 | qmm via MPP (tensor engine) | `mlx/block_scaled_qmm_mpp.rs` |
 | qmm via NAX | `mlx/block_scaled_qmm_nax.rs` |
 | MoE gather-qmm via MPP (bm8/bm16/bm64) | `ffai/moe_mpp{,_bm8,_bm64}_block_scaled.rs` |
 | expert-indexed GEMV | `ffai/dequant_gemv_expert_indexed_block_scaled.rs` |
 | patch embedding (linear projection) | `ffai/patch_embed_block_scaled.rs` |
+| patch embedding (simdgroup-MMA) | `ffai/patch_embed_mma_block_scaled.rs` |
 | conv2d / conv3d (direct) | `ffai/{conv2d,conv3d}_block_scaled.rs` |
 | conv2d / conv3d (im2col simdgroup-MMA) | `ffai/{conv2d,conv3d}_mma_block_scaled.rs` |
 | depthwise conv2d | `ffai/depthwise_conv2d_block_scaled.rs` |
 | audio conv1d (STT) / fishspeech conv1d (TTS) | `ffai/{audio_conv1d,fishspeech_conv1d}_block_scaled.rs` |
 
-Each (family × format) ships a `#[test_kernel]` CPU-oracle correctness check (1:1, GPU-verified vs `quant::format::dequant`) and a `#[bench]` with `.flops()` so the PR-#1 latency/GFLOP/roofline columns rank precisions side-by-side. `fp8_e4m3` reuses each family's `nvfp8` kernel (identical 8-bit-E4M3 + f32-scale shape). The MPP/NAX/MoE-MPP cooperative-matmul variants dequant W to `coop_stage(T)` during threadgroup staging and reuse the proven int4/int8 `mpp::tensor_ops::matmul2d` dispatch geometry byte-for-byte (no new freeze surface). ~216 block-scaled kernels across **every quantized weight-bearing op + backend + MoE tile**, all GPU-verified on f32/f16/bf16, each 1:1 tested + benched.
+Each (family × format) ships a `#[test_kernel]` CPU-oracle correctness check (1:1, GPU-verified vs `quant::format::dequant`) and a `#[bench]` with `.flops()` so the PR-#1 latency/GFLOP/roofline columns rank precisions side-by-side. `fp8_e4m3` reuses each family's `nvfp8` kernel (identical 8-bit-E4M3 + f32-scale shape). The MPP/NAX/MoE-MPP cooperative-matmul variants dequant W to `coop_stage(T)` during threadgroup staging and reuse the proven int4/int8 `mpp::tensor_ops::matmul2d` dispatch geometry byte-for-byte (no new freeze surface). ~255 block-scaled kernels across **every quantized weight-bearing op + backend + MoE tile**, all GPU-verified on f32/f16/bf16, each 1:1 tested + benched. Flash KV covers every production head dim (d64/96/128/256/512 × all 9 formats), the lone exception being **int8 @ d96** (int8's block size 64 doesn't divide 96 — the affine int8 KV path, group 32, covers d96). The MMA patch-embed (`patch_embed_mma_block_scaled.rs`) reuses the dense `patch_embed_mma` geometry + the `conv2d_mma` block-scaled W-dequant.
 
 **int8 is in every family above** — including the fast tensor-engine paths (simdgroup-MMA, MPP, NAX, MoE-MPP) — because symmetric int8 is one of the nine `QFormat`s. It is the highest-throughput quantized format on Apple GPUs / the ANE, so it is deliberately a first-class citizen of the matrix rather than a special case; the core matmul / MoE / fused-norm / batched-QKV / KV-cache / attention families *also* carry the pre-existing affine (scale+bias) int8. No weight-bearing family lacks an int8 path.
 
@@ -165,16 +166,17 @@ Quantization compresses a large persistent *weight/parameter* tensor, so it is o
 | Winograd conv (`winograd_conv`) | the filter is pre-transformed into the Winograd domain (`GgGᵀ`), which strongly amplifies quantization error — quantized Winograd is non-standard and counterproductive |
 | elementwise / reduction / softmax / sort / scan / fft / rope / gather-axis / scatter | no persistent parameter tensor |
 
-Quantized **conv** is covered across the family — direct (`patch_embed`,
-`conv2d`, `conv3d`, `depthwise_conv2d`, `audio_conv1d`, `fishspeech_conv1d`) and
-the implicit-im2col simdgroup-MMA (`conv2d_mma`, `conv3d_mma`) — quantizing the
-filter `[out_ch, C]` block-wise along the `in_ch·k…` contraction (all 9 formats,
-GPU-verified on f32/f16/bf16).
+Quantized **conv + patch-embed** are covered across the family — direct
+(`patch_embed`, `conv2d`, `conv3d`, `depthwise_conv2d`, `audio_conv1d`,
+`fishspeech_conv1d`) and the implicit-im2col simdgroup-MMA (`patch_embed_mma`,
+`conv2d_mma`, `conv3d_mma`) — quantizing the filter / projection weight block-wise
+along the contraction (all 9 formats, GPU-verified on f32/f16/bf16).
 
-**Open precision item:** block-scaled flash-SDPA KV is currently **d=128 only**
-(`flash_block_scaled_sdpa`), whereas the affine int4/int8 KV path covers
-d ∈ {64, 96, 128, 256, 512}. Extending the block-scaled KV read to the other head
-dims (one flash kernel × 9 formats per dim) is the main remaining gap.
+**Flash KV (closed):** block-scaled flash-SDPA KV now covers every production head
+dim — d ∈ {64, 96, 128, 256, 512} × all 9 formats — matching the affine path. The
+single (format × dim) hole is **int8 @ d96** (int8 block size 64 ∤ 96; the affine
+int8 KV path, group 32, serves d96). The geometry is one simdgroup per query, identical
+across dims (only the per-lane dim count changes), so the extension added no freeze surface.
 
 > **Test-gate note:** the `#[test_kernel]` harness (`tests/kernel_tests_harness.rs`)
 > must enumerate the registry via `metaltile_std::all_tests()`, not
@@ -194,7 +196,10 @@ dims (one flash kernel × 9 formats per dim) is the main remaining gap.
 > apparent `ffai_sdpa_multi_d256_causal` failure, which was a *victim* of the shared-
 > state contamination, not itself buggy); renamed to `mt_fp4_float_qmm_mma`.
 
-**Remaining (follow-ups, non-blocking):** the legacy int2–8 *affine* (scale+bias) path stays in its existing `dequant_gemv`/`quantized`/`quantized_{mpp,nax}` kernels (the new `Int8` is the symmetric scale-only variant); more flash head-dim variants (only d=128 has block-scaled KV); the `winograd_conv` filter-transform variant (quantizing Winograd amplifies error in the transform domain; every other weight-bearing conv — direct + im2col-MMA — is covered); and an audit of whether the `ekryski/mlx@alpha` reference kernels are themselves spec-correct.
+**Two parallel, both-current quant tracks (by design — neither supersedes the other):**
+the **affine** int2–8 (scale+bias) track lives in `dequant_gemv`/`quantized`/`quantized_{mpp,nax}`/`kv_cache` and is *not* legacy — it is the on-disk format for MLX-quantized checkpoints (asymmetric, carries a per-group **bias**) and the right scheme for per-decode-step KV-cache quant (cheap min/max encode; block-scaled would need GPU encode intrinsics). The new symmetric `Int8` is a parallel spec-family member (scale-only), not a replacement; there is no block-scaled int4 at all, so affine int4 remains required to load MLX 4-bit models.
+
+**Remaining (follow-ups, non-blocking):** the `winograd_conv` filter-transform variant (quantizing Winograd amplifies error in the transform domain; every other weight-bearing conv — direct + im2col-MMA — is covered); and an audit of whether the `ekryski/mlx@alpha` reference kernels are themselves spec-correct.
 
 ## Appendix C — M5 Neural Accelerator hardware context
 
