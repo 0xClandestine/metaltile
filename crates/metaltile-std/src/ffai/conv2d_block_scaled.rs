@@ -745,7 +745,7 @@ pub mod kernel_tests {
         let bias = unpack_f32(&pack_f32(&bias_f, dt), dt);
         // Oracle: dense conv2d over the dequantized filter row [out_ch, C].
         let expected = naive_conv2d(
-            &input, &bias, &wdq, batch, in_ch, in_h, in_w, out_ch, kh, kw, stride_h, stride_w,
+            &input, &wdq, &bias, batch, in_ch, in_h, in_w, out_ch, kh, kw, stride_h, stride_w,
             pad_h, pad_w,
         );
         let weight_dt = if fmt.element_bits() == 4 { DType::U32 } else { DType::U8 };

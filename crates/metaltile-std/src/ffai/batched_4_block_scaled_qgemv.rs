@@ -62,9 +62,9 @@ pub fn mt_mxfp4_batched_4_qgemv<T>(
     let p_iters = (n_packs + lsize - 1u32) / lsize;
     let row_pack_off = row * n_packs;
     let row_block_off = row * n_blocks;
+    let mut acc = 0.0f32;
     if matrix == 0u32 {
         if row < out_a {
-            let mut acc = 0.0f32;
             for _p in range(0u32, p_iters, 1u32) {
                 let pack_idx = _p * lsize + tid;
                 if pack_idx < n_packs {
@@ -78,15 +78,10 @@ pub fn mt_mxfp4_batched_4_qgemv<T>(
                     }
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(a_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 1u32 {
         if row < out_b {
-            let mut acc = 0.0f32;
             for _p in range(0u32, p_iters, 1u32) {
                 let pack_idx = _p * lsize + tid;
                 if pack_idx < n_packs {
@@ -100,15 +95,10 @@ pub fn mt_mxfp4_batched_4_qgemv<T>(
                     }
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(b_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 2u32 {
         if row < out_c {
-            let mut acc = 0.0f32;
             for _p in range(0u32, p_iters, 1u32) {
                 let pack_idx = _p * lsize + tid;
                 if pack_idx < n_packs {
@@ -122,15 +112,10 @@ pub fn mt_mxfp4_batched_4_qgemv<T>(
                     }
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(c_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 3u32 {
         if row < out_d {
-            let mut acc = 0.0f32;
             for _p in range(0u32, p_iters, 1u32) {
                 let pack_idx = _p * lsize + tid;
                 if pack_idx < n_packs {
@@ -144,8 +129,27 @@ pub fn mt_mxfp4_batched_4_qgemv<T>(
                     }
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
+        }
+    }
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        if matrix == 0u32 {
+            if row < out_a {
+                store(a_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 1u32 {
+            if row < out_b {
+                store(b_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 2u32 {
+            if row < out_c {
+                store(c_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 3u32 {
+            if row < out_d {
                 store(d_out[row], total.cast::<T>());
             }
         }
@@ -184,9 +188,9 @@ pub fn mt_nvfp4_batched_4_qgemv<T>(
     let p_iters = (n_packs + lsize - 1u32) / lsize;
     let row_pack_off = row * n_packs;
     let row_block_off = row * n_blocks;
+    let mut acc = 0.0f32;
     if matrix == 0u32 {
         if row < out_a {
-            let mut acc = 0.0f32;
             for _p in range(0u32, p_iters, 1u32) {
                 let pack_idx = _p * lsize + tid;
                 if pack_idx < n_packs {
@@ -201,15 +205,10 @@ pub fn mt_nvfp4_batched_4_qgemv<T>(
                     }
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(a_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 1u32 {
         if row < out_b {
-            let mut acc = 0.0f32;
             for _p in range(0u32, p_iters, 1u32) {
                 let pack_idx = _p * lsize + tid;
                 if pack_idx < n_packs {
@@ -224,15 +223,10 @@ pub fn mt_nvfp4_batched_4_qgemv<T>(
                     }
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(b_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 2u32 {
         if row < out_c {
-            let mut acc = 0.0f32;
             for _p in range(0u32, p_iters, 1u32) {
                 let pack_idx = _p * lsize + tid;
                 if pack_idx < n_packs {
@@ -247,15 +241,10 @@ pub fn mt_nvfp4_batched_4_qgemv<T>(
                     }
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(c_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 3u32 {
         if row < out_d {
-            let mut acc = 0.0f32;
             for _p in range(0u32, p_iters, 1u32) {
                 let pack_idx = _p * lsize + tid;
                 if pack_idx < n_packs {
@@ -270,8 +259,27 @@ pub fn mt_nvfp4_batched_4_qgemv<T>(
                     }
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
+        }
+    }
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        if matrix == 0u32 {
+            if row < out_a {
+                store(a_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 1u32 {
+            if row < out_b {
+                store(b_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 2u32 {
+            if row < out_c {
+                store(c_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 3u32 {
+            if row < out_d {
                 store(d_out[row], total.cast::<T>());
             }
         }
@@ -307,9 +315,9 @@ pub fn mt_mxfp8_e4m3_batched_4_qgemv<T>(
     let iters = (in_dim + lsize - 1u32) / lsize;
     let row_off = row * in_dim;
     let row_block_off = row * n_blocks;
+    let mut acc = 0.0f32;
     if matrix == 0u32 {
         if row < out_a {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -320,15 +328,10 @@ pub fn mt_mxfp8_e4m3_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(a_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 1u32 {
         if row < out_b {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -339,15 +342,10 @@ pub fn mt_mxfp8_e4m3_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(b_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 2u32 {
         if row < out_c {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -358,15 +356,10 @@ pub fn mt_mxfp8_e4m3_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(c_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 3u32 {
         if row < out_d {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -377,8 +370,27 @@ pub fn mt_mxfp8_e4m3_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
+        }
+    }
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        if matrix == 0u32 {
+            if row < out_a {
+                store(a_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 1u32 {
+            if row < out_b {
+                store(b_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 2u32 {
+            if row < out_c {
+                store(c_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 3u32 {
+            if row < out_d {
                 store(d_out[row], total.cast::<T>());
             }
         }
@@ -414,9 +426,9 @@ pub fn mt_mxfp8_e5m2_batched_4_qgemv<T>(
     let iters = (in_dim + lsize - 1u32) / lsize;
     let row_off = row * in_dim;
     let row_block_off = row * n_blocks;
+    let mut acc = 0.0f32;
     if matrix == 0u32 {
         if row < out_a {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -427,15 +439,10 @@ pub fn mt_mxfp8_e5m2_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(a_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 1u32 {
         if row < out_b {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -446,15 +453,10 @@ pub fn mt_mxfp8_e5m2_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(b_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 2u32 {
         if row < out_c {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -465,15 +467,10 @@ pub fn mt_mxfp8_e5m2_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(c_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 3u32 {
         if row < out_d {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -484,8 +481,27 @@ pub fn mt_mxfp8_e5m2_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
+        }
+    }
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        if matrix == 0u32 {
+            if row < out_a {
+                store(a_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 1u32 {
+            if row < out_b {
+                store(b_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 2u32 {
+            if row < out_c {
+                store(c_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 3u32 {
+            if row < out_d {
                 store(d_out[row], total.cast::<T>());
             }
         }
@@ -521,9 +537,9 @@ pub fn mt_nvfp8_batched_4_qgemv<T>(
     let iters = (in_dim + lsize - 1u32) / lsize;
     let row_off = row * in_dim;
     let row_block_off = row * n_blocks;
+    let mut acc = 0.0f32;
     if matrix == 0u32 {
         if row < out_a {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -532,15 +548,10 @@ pub fn mt_nvfp8_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(a_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 1u32 {
         if row < out_b {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -549,15 +560,10 @@ pub fn mt_nvfp8_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(b_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 2u32 {
         if row < out_c {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -566,15 +572,10 @@ pub fn mt_nvfp8_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(c_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 3u32 {
         if row < out_d {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -583,8 +584,27 @@ pub fn mt_nvfp8_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
+        }
+    }
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        if matrix == 0u32 {
+            if row < out_a {
+                store(a_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 1u32 {
+            if row < out_b {
+                store(b_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 2u32 {
+            if row < out_c {
+                store(c_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 3u32 {
+            if row < out_d {
                 store(d_out[row], total.cast::<T>());
             }
         }
@@ -630,9 +650,9 @@ pub fn mt_fp4_batched_4_qgemv<T>(
     let p_iters = (n_packs + lsize - 1u32) / lsize;
     let row_pack_off = row * n_packs;
     let row_block_off = row * n_blocks;
+    let mut acc = 0.0f32;
     if matrix == 0u32 {
         if row < out_a {
-            let mut acc = 0.0f32;
             for _p in range(0u32, p_iters, 1u32) {
                 let pack_idx = _p * lsize + tid;
                 if pack_idx < n_packs {
@@ -646,15 +666,10 @@ pub fn mt_fp4_batched_4_qgemv<T>(
                     }
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(a_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 1u32 {
         if row < out_b {
-            let mut acc = 0.0f32;
             for _p in range(0u32, p_iters, 1u32) {
                 let pack_idx = _p * lsize + tid;
                 if pack_idx < n_packs {
@@ -668,15 +683,10 @@ pub fn mt_fp4_batched_4_qgemv<T>(
                     }
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(b_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 2u32 {
         if row < out_c {
-            let mut acc = 0.0f32;
             for _p in range(0u32, p_iters, 1u32) {
                 let pack_idx = _p * lsize + tid;
                 if pack_idx < n_packs {
@@ -690,15 +700,10 @@ pub fn mt_fp4_batched_4_qgemv<T>(
                     }
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(c_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 3u32 {
         if row < out_d {
-            let mut acc = 0.0f32;
             for _p in range(0u32, p_iters, 1u32) {
                 let pack_idx = _p * lsize + tid;
                 if pack_idx < n_packs {
@@ -712,8 +717,27 @@ pub fn mt_fp4_batched_4_qgemv<T>(
                     }
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
+        }
+    }
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        if matrix == 0u32 {
+            if row < out_a {
+                store(a_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 1u32 {
+            if row < out_b {
+                store(b_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 2u32 {
+            if row < out_c {
+                store(c_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 3u32 {
+            if row < out_d {
                 store(d_out[row], total.cast::<T>());
             }
         }
@@ -751,9 +775,9 @@ pub fn mt_fp8_e5m2_batched_4_qgemv<T>(
     let iters = (in_dim + lsize - 1u32) / lsize;
     let row_off = row * in_dim;
     let row_block_off = row * n_blocks;
+    let mut acc = 0.0f32;
     if matrix == 0u32 {
         if row < out_a {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -762,15 +786,10 @@ pub fn mt_fp8_e5m2_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(a_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 1u32 {
         if row < out_b {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -779,15 +798,10 @@ pub fn mt_fp8_e5m2_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(b_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 2u32 {
         if row < out_c {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -796,15 +810,10 @@ pub fn mt_fp8_e5m2_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(c_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 3u32 {
         if row < out_d {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -813,8 +822,27 @@ pub fn mt_fp8_e5m2_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
+        }
+    }
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        if matrix == 0u32 {
+            if row < out_a {
+                store(a_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 1u32 {
+            if row < out_b {
+                store(b_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 2u32 {
+            if row < out_c {
+                store(c_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 3u32 {
+            if row < out_d {
                 store(d_out[row], total.cast::<T>());
             }
         }
@@ -852,9 +880,9 @@ pub fn mt_int8_batched_4_qgemv<T>(
     let iters = (in_dim + lsize - 1u32) / lsize;
     let row_off = row * in_dim;
     let row_block_off = row * n_blocks;
+    let mut acc = 0.0f32;
     if matrix == 0u32 {
         if row < out_a {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -863,15 +891,10 @@ pub fn mt_int8_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(a_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 1u32 {
         if row < out_b {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -880,15 +903,10 @@ pub fn mt_int8_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(b_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 2u32 {
         if row < out_c {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -897,15 +915,10 @@ pub fn mt_int8_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(c_out[row], total.cast::<T>());
-            }
         }
     }
     if matrix == 3u32 {
         if row < out_d {
-            let mut acc = 0.0f32;
             for it in range(0u32, iters, 1u32) {
                 let c = it * lsize + tid;
                 if c < in_dim {
@@ -914,8 +927,27 @@ pub fn mt_int8_batched_4_qgemv<T>(
                     acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
                 }
             }
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
+        }
+    }
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        if matrix == 0u32 {
+            if row < out_a {
+                store(a_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 1u32 {
+            if row < out_b {
+                store(b_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 2u32 {
+            if row < out_c {
+                store(c_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 3u32 {
+            if row < out_d {
                 store(d_out[row], total.cast::<T>());
             }
         }

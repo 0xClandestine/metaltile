@@ -44,7 +44,7 @@ pub fn mt_mxfp4_gated_rms_norm_qgemv<T>(
     #[constexpr] dv: u32,
     #[constexpr] block_size: u32,
 ) {
-    threadgroup_alloc("tg_inner", 8192, "f32");
+    threadgroup_alloc("tg_inner", 4096, "f32");
     let sg = simd_id;
     let lane = simd_lane;
     // Phase 1: gated RMSNorm staged into tg_inner (2-simdgroup per-row scheme).
@@ -121,7 +121,7 @@ pub fn mt_nvfp4_gated_rms_norm_qgemv<T>(
     #[constexpr] block_size: u32,
     #[constexpr] global: f32,
 ) {
-    threadgroup_alloc("tg_inner", 8192, "f32");
+    threadgroup_alloc("tg_inner", 4096, "f32");
     let sg = simd_id;
     let lane = simd_lane;
     let dv_per_lane = dv / 32u32;
@@ -194,7 +194,7 @@ pub fn mt_mxfp8_e4m3_gated_rms_norm_qgemv<T>(
     #[constexpr] dv: u32,
     #[constexpr] block_size: u32,
 ) {
-    threadgroup_alloc("tg_inner", 8192, "f32");
+    threadgroup_alloc("tg_inner", 4096, "f32");
     let sg = simd_id;
     let lane = simd_lane;
     let dv_per_lane = dv / 32u32;
@@ -260,7 +260,7 @@ pub fn mt_mxfp8_e5m2_gated_rms_norm_qgemv<T>(
     #[constexpr] dv: u32,
     #[constexpr] block_size: u32,
 ) {
-    threadgroup_alloc("tg_inner", 8192, "f32");
+    threadgroup_alloc("tg_inner", 4096, "f32");
     let sg = simd_id;
     let lane = simd_lane;
     let dv_per_lane = dv / 32u32;
@@ -326,7 +326,7 @@ pub fn mt_nvfp8_gated_rms_norm_qgemv<T>(
     #[constexpr] dv: u32,
     #[constexpr] block_size: u32,
 ) {
-    threadgroup_alloc("tg_inner", 8192, "f32");
+    threadgroup_alloc("tg_inner", 4096, "f32");
     let sg = simd_id;
     let lane = simd_lane;
     let dv_per_lane = dv / 32u32;
@@ -398,7 +398,7 @@ pub fn mt_fp4_gated_rms_norm_qgemv<T>(
     #[constexpr] dv: u32,
     #[constexpr] block_size: u32,
 ) {
-    threadgroup_alloc("tg_inner", 8192, "f32");
+    threadgroup_alloc("tg_inner", 4096, "f32");
     let sg = simd_id;
     let lane = simd_lane;
     let dv_per_lane = dv / 32u32;
@@ -472,7 +472,7 @@ pub fn mt_fp8_e5m2_gated_rms_norm_qgemv<T>(
     #[constexpr] dv: u32,
     #[constexpr] block_size: u32,
 ) {
-    threadgroup_alloc("tg_inner", 8192, "f32");
+    threadgroup_alloc("tg_inner", 4096, "f32");
     let sg = simd_id;
     let lane = simd_lane;
     let dv_per_lane = dv / 32u32;
@@ -538,7 +538,7 @@ pub fn mt_int8_gated_rms_norm_qgemv<T>(
     #[constexpr] dv: u32,
     #[constexpr] block_size: u32,
 ) {
-    threadgroup_alloc("tg_inner", 8192, "f32");
+    threadgroup_alloc("tg_inner", 4096, "f32");
     let sg = simd_id;
     let lane = simd_lane;
     let dv_per_lane = dv / 32u32;
