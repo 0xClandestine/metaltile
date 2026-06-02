@@ -7,9 +7,20 @@ concurrency:
 
 # Job graph (all macOS runners):
 #
+#   changes
 #   compile ──┬── build
 #             ├── bench (ffai)  ──┐
 #             └── bench (mlx)  ──┴── bench-merge
+#
+# `changes` (ubuntu, fast) classifies which paths changed so each bench
+# shard only runs when its kernel family was the sole thing modified:
+#   - ffai bench: only runs when crates/metaltile-std/src/ffai/** changed
+#     AND no other crates or Rust-related files changed.
+#   - mlx bench: same rule for crates/metaltile-std/src/mlx/**.
+#   If other crates changed (core IR, codegen, …) neither shard runs — the
+#   `build` job covers correctness for those changes.  Both shards run when
+#   both families were touched (and nothing else).
+#   On workflow_dispatch all shards always run regardless of file changes.
 #
 # `compile` builds the tile binary once (or restores it from the binary
 # cache).  All downstream jobs download the pre-built artifact — no Rust
@@ -52,7 +63,40 @@ env:
   CLICOLOR_FORCE: 1
 
 jobs:
-  # ── Job 0: compile tile binary ───────────────────────────────────────────────
+  # ── Job 0: detect which paths changed ────────────────────────────────────────
+  # Fast ubuntu job: classifies changed files into three buckets so the bench
+  # shards can be gated independently.  Uses dorny/paths-filter which compares
+  # against the PR base (pull_request) or the previous push commit (push).
+  # On workflow_dispatch there is no diff, so all outputs default to 'false';
+  # the bench jobs override this with a workflow_dispatch bypass condition.
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      ffai: ${{ steps.filter.outputs.ffai }}
+      mlx: ${{ steps.filter.outputs.mlx }}
+      other: ${{ steps.filter.outputs.other }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5.0.0
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        id: filter
+        with:
+          filters: |
+            ffai:
+              - 'crates/metaltile-std/src/ffai/**'
+            mlx:
+              - 'crates/metaltile-std/src/mlx/**'
+            other:
+              - 'crates/**/*.rs'
+              - '!crates/metaltile-std/src/ffai/**'
+              - '!crates/metaltile-std/src/mlx/**'
+              - 'crates/**/Cargo.toml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'tile.toml'
+
+  # ── Job 1: compile tile binary ───────────────────────────────────────────────
   # Builds `tile` once (or restores from binary cache) and uploads it as a
   # workflow artifact.  All other jobs download the artifact instead of
   # running cargo themselves — one build per workflow run, not one per job.
@@ -95,7 +139,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # ── Job 1: compile-check all registered kernels ──────────────────────────────
+  # ── Job 2: compile-check all registered kernels ──────────────────────────────
   # Runs `tile build` (MSL codegen + xcrun compile-check for every kernel ×
   # dtype).  Overlaps with the bench shards so all three free macOS runners
   # are busy in parallel.
@@ -122,16 +166,29 @@ jobs:
       - name: Build
         run: tile build
 
-  # ── Job 2 + 3: GPU benchmark suite (sharded by kernel family) ────────────────
+  # ── Job 3 + 4: GPU benchmark suite (sharded by kernel family) ────────────────
   # Two bench jobs run in parallel — one for the `ffai` family (attention/MLP
   # inference kernels) and one for the `mlx` family (MLX reference comparisons).
   # `--match-group` narrows each shard to only its family so both finish faster
   # than a single sequential run.
+  #
+  # Each shard only runs when its kernel family was the sole thing modified
+  # (no other crates or Rust files touched). On workflow_dispatch both shards
+  # always run so a manual trigger can force a full bench.
   bench:
     name: Bench (${{ matrix.family }})
     runs-on: macos-latest
     timeout-minutes: 60
-    needs: compile
+    needs: [compile, changes]
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        needs.changes.outputs.other == 'false' &&
+        (
+          (matrix.family == 'ffai' && needs.changes.outputs.ffai == 'true') ||
+          (matrix.family == 'mlx'  && needs.changes.outputs.mlx  == 'true')
+        )
+      )
     strategy:
       fail-fast: false
       matrix:
@@ -173,14 +230,26 @@ jobs:
             /tmp/bench-snapshot-${{ matrix.family }}.json
           if-no-files-found: error
 
-  # ── Job 4: merge shards + diff comment ───────────────────────────────────────
+  # ── Job 5: merge shards + diff comment ───────────────────────────────────────
   # Downloads both shard JSON files, merges them into a combined bench.json,
   # snaps a unified baseline, and posts the bench-diff PR comment.
+  # Only runs when both shards ran (i.e. both families were changed and bench
+  # succeeded), or on a manual workflow_dispatch.
   bench-merge:
     name: Bench (merge + diff)
     runs-on: macos-latest
     timeout-minutes: 15
-    needs: bench
+    needs: [bench, changes]
+    if: >-
+      needs.bench.result == 'success' &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        (
+          needs.changes.outputs.other == 'false' &&
+          needs.changes.outputs.ffai  == 'true'  &&
+          needs.changes.outputs.mlx   == 'true'
+        )
+      )
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5.0.0
 

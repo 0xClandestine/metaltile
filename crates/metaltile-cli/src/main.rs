@@ -99,7 +99,7 @@ pub(crate) struct FilterArgs {
 
 // ── FilterSpec (runtime evaluator) ───────────────────────────────────────
 
-/// Compiled filter spec built from [`FilterArgs`]. All predicates are ANDed.
+/// Compiled filter spec built from [`FilterArgs`]. All predicates must pass (AND logic).
 pub(crate) struct FilterSpec {
     filter: Option<String>,
     match_name: Option<Regex>,
