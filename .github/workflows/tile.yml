@@ -42,14 +42,6 @@ on:
       - 'tile.toml'
   pull_request:
     types: [opened, synchronize, reopened]
-    paths:
-      - 'crates/**/*.rs'
-      - 'crates/**/Cargo.toml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'tile.toml'
-      - '.github/workflows/tile.yml'
   workflow_dispatch: {}
 
 permissions:
