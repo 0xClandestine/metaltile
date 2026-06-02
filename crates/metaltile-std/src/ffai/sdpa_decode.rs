@@ -72,8 +72,7 @@ macro_rules! sdpa_decode_kernel {
                 let kv0 = base + d0;
                 let mut partial = 0.0f32;
                 for _i in range(0u32, $elems, 1u32) {
-                    partial =
-                        partial + stack_load("qs", _i) * load(k[kv0 + _i]).cast::<f32>();
+                    partial = partial + stack_load("qs", _i) * load(k[kv0 + _i]).cast::<f32>();
                 }
                 let score = simd_sum(partial);
                 let new_max = select(score > run_max, score, run_max);
@@ -85,8 +84,7 @@ macro_rules! sdpa_decode_kernel {
                     stack_store(
                         "os",
                         _i,
-                        stack_load("os", _i) * factor
-                            + weight * load(v[kv0 + _i]).cast::<f32>(),
+                        stack_load("os", _i) * factor + weight * load(v[kv0 + _i]).cast::<f32>(),
                     );
                 }
             }
@@ -96,8 +94,7 @@ macro_rules! sdpa_decode_kernel {
             }
             threadgroup_barrier();
             if sg == 0 {
-                let g_max_raw =
-                    select(lane < ns, threadgroup_load("tg_max", lane), neg_infinity());
+                let g_max_raw = select(lane < ns, threadgroup_load("tg_max", lane), neg_infinity());
                 let sink_max = select(has_sink > 0u32, sink_logit, neg_infinity());
                 let g_max_in = select(
                     lane == 0u32,
@@ -111,8 +108,7 @@ macro_rules! sdpa_decode_kernel {
                     0.0f32,
                 );
                 let sink_sum = select(has_sink > 0u32, exp(sink_logit - g_max), 0.0f32);
-                let g_sum =
-                    simd_sum(g_sum_in + select(lane == 0u32, sink_sum, 0.0f32));
+                let g_sum = simd_sum(g_sum_in + select(lane == 0u32, sink_sum, 0.0f32));
                 if lane == 0 {
                     threadgroup_store("tg_max", 0, g_max);
                     threadgroup_store("tg_sum", 0, g_sum);
@@ -185,8 +181,7 @@ macro_rules! sdpa_decode_kernel {
                 let kv0 = base + d0;
                 let mut partial = 0.0f32;
                 for _i in range(0u32, $elems, 1u32) {
-                    partial =
-                        partial + stack_load("qs", _i) * load(k[kv0 + _i]).cast::<f32>();
+                    partial = partial + stack_load("qs", _i) * load(k[kv0 + _i]).cast::<f32>();
                 }
                 let score = simd_sum(partial);
                 let new_max = select(score > run_max, score, run_max);
@@ -198,8 +193,7 @@ macro_rules! sdpa_decode_kernel {
                     stack_store(
                         "os",
                         _i,
-                        stack_load("os", _i) * factor
-                            + weight * load(v[kv0 + _i]).cast::<f32>(),
+                        stack_load("os", _i) * factor + weight * load(v[kv0 + _i]).cast::<f32>(),
                     );
                 }
             }
@@ -209,8 +203,7 @@ macro_rules! sdpa_decode_kernel {
             }
             threadgroup_barrier();
             if sg == 0 {
-                let g_max_in =
-                    select(lane < ns, threadgroup_load("tg_max", lane), neg_infinity());
+                let g_max_in = select(lane < ns, threadgroup_load("tg_max", lane), neg_infinity());
                 let g_max = simd_max(g_max_in);
                 let g_sum_in = select(
                     lane < ns,
@@ -302,8 +295,7 @@ macro_rules! sdpa_decode_kernel {
                 let kv0 = base + d0;
                 let mut partial = 0.0f32;
                 for _i in range(0u32, $elems, 1u32) {
-                    partial =
-                        partial + stack_load("qs", _i) * load(k[kv0 + _i]).cast::<f32>();
+                    partial = partial + stack_load("qs", _i) * load(k[kv0 + _i]).cast::<f32>();
                 }
                 let score = simd_sum(partial);
                 let new_max = select(score > run_max, score, run_max);
@@ -315,8 +307,7 @@ macro_rules! sdpa_decode_kernel {
                     stack_store(
                         "os",
                         _i,
-                        stack_load("os", _i) * factor
-                            + weight * load(v[kv0 + _i]).cast::<f32>(),
+                        stack_load("os", _i) * factor + weight * load(v[kv0 + _i]).cast::<f32>(),
                     );
                 }
             }
@@ -326,8 +317,7 @@ macro_rules! sdpa_decode_kernel {
                 let kv0 = base + d0;
                 let mut partial = 0.0f32;
                 for _i in range(0u32, $elems, 1u32) {
-                    partial =
-                        partial + stack_load("qs", _i) * load(k[kv0 + _i]).cast::<f32>();
+                    partial = partial + stack_load("qs", _i) * load(k[kv0 + _i]).cast::<f32>();
                 }
                 let score = simd_sum(partial);
                 let new_max = select(score > run_max, score, run_max);
@@ -339,8 +329,7 @@ macro_rules! sdpa_decode_kernel {
                     stack_store(
                         "os",
                         _i,
-                        stack_load("os", _i) * factor
-                            + weight * load(v[kv0 + _i]).cast::<f32>(),
+                        stack_load("os", _i) * factor + weight * load(v[kv0 + _i]).cast::<f32>(),
                     );
                 }
             }
@@ -350,8 +339,7 @@ macro_rules! sdpa_decode_kernel {
             }
             threadgroup_barrier();
             if sg == 0 {
-                let g_max_raw =
-                    select(lane < ns, threadgroup_load("tg_max", lane), neg_infinity());
+                let g_max_raw = select(lane < ns, threadgroup_load("tg_max", lane), neg_infinity());
                 let sink_max = select(has_sink > 0u32, sink_logit, neg_infinity());
                 let g_max_in = select(
                     lane == 0u32,
@@ -365,8 +353,7 @@ macro_rules! sdpa_decode_kernel {
                     0.0f32,
                 );
                 let sink_sum = select(has_sink > 0u32, exp(sink_logit - g_max), 0.0f32);
-                let g_sum =
-                    simd_sum(g_sum_in + select(lane == 0u32, sink_sum, 0.0f32));
+                let g_sum = simd_sum(g_sum_in + select(lane == 0u32, sink_sum, 0.0f32));
                 if lane == 0 {
                     threadgroup_store("tg_max", 0, g_max);
                     threadgroup_store("tg_sum", 0, g_sum);
@@ -450,8 +437,7 @@ macro_rules! sdpa_decode_kernel {
                 let kv0 = base + d0;
                 let mut partial = 0.0f32;
                 for _i in range(0u32, $elems, 1u32) {
-                    partial =
-                        partial + stack_load("qs", _i) * load(k[kv0 + _i]).cast::<f32>();
+                    partial = partial + stack_load("qs", _i) * load(k[kv0 + _i]).cast::<f32>();
                 }
                 let score = simd_sum(partial);
                 let new_max = select(score > run_max, score, run_max);
@@ -463,8 +449,7 @@ macro_rules! sdpa_decode_kernel {
                     stack_store(
                         "os",
                         _i,
-                        stack_load("os", _i) * factor
-                            + weight * load(v[kv0 + _i]).cast::<f32>(),
+                        stack_load("os", _i) * factor + weight * load(v[kv0 + _i]).cast::<f32>(),
                     );
                 }
             }
@@ -474,8 +459,7 @@ macro_rules! sdpa_decode_kernel {
             }
             threadgroup_barrier();
             if sg == 0 {
-                let g_max_raw =
-                    select(lane < ns, threadgroup_load("tg_max", lane), neg_infinity());
+                let g_max_raw = select(lane < ns, threadgroup_load("tg_max", lane), neg_infinity());
                 let sink_max = select(has_sink > 0u32, sink_logit, neg_infinity());
                 let g_max_in = select(
                     lane == 0u32,
@@ -489,8 +473,7 @@ macro_rules! sdpa_decode_kernel {
                     0.0f32,
                 );
                 let sink_sum = select(has_sink > 0u32, exp(sink_logit - g_max), 0.0f32);
-                let g_sum =
-                    simd_sum(g_sum_in + select(lane == 0u32, sink_sum, 0.0f32));
+                let g_sum = simd_sum(g_sum_in + select(lane == 0u32, sink_sum, 0.0f32));
                 if lane == 0 {
                     threadgroup_store("tg_max", 0, g_max);
                     threadgroup_store("tg_sum", 0, g_sum);
@@ -600,8 +583,7 @@ macro_rules! sdpa_decode_kernel {
                 let kv0 = base + d0;
                 let mut partial = 0.0f32;
                 for _i in range(0u32, $elems, 1u32) {
-                    partial =
-                        partial + stack_load("qs", _i) * load(k[kv0 + _i]).cast::<f32>();
+                    partial = partial + stack_load("qs", _i) * load(k[kv0 + _i]).cast::<f32>();
                 }
                 let score = simd_sum(partial);
                 let new_max = select(score > run_max, score, run_max);
@@ -613,8 +595,7 @@ macro_rules! sdpa_decode_kernel {
                     stack_store(
                         "os",
                         _i,
-                        stack_load("os", _i) * factor
-                            + weight * load(v[kv0 + _i]).cast::<f32>(),
+                        stack_load("os", _i) * factor + weight * load(v[kv0 + _i]).cast::<f32>(),
                     );
                 }
             }
@@ -624,8 +605,7 @@ macro_rules! sdpa_decode_kernel {
             }
             threadgroup_barrier();
             if sg == 0 {
-                let g_max_in =
-                    select(lane < ns, threadgroup_load("tg_max", lane), neg_infinity());
+                let g_max_in = select(lane < ns, threadgroup_load("tg_max", lane), neg_infinity());
                 let g_max = simd_max(g_max_in);
                 let g_sum_in = select(
                     lane < ns,
@@ -749,11 +729,11 @@ macro_rules! sdpa_decode_kernel {
 
 // ── Kernel instantiations ────────────────────────────────────────────────
 
-sdpa_decode_kernel!(sink_2,        ffai_sdpa_decode_d64,  2u32);
-sdpa_decode_kernel!(simple_3,      ffai_sdpa_decode_d96,  3u32);
-sdpa_decode_kernel!(sink_window_4, ffai_sdpa_decode,      4u32);
-sdpa_decode_kernel!(sink_4x2,      ffai_sdpa_decode_d256, 8u32);
-sdpa_decode_kernel!(simple_4x4,    ffai_sdpa_decode_d512, 16u32);
+sdpa_decode_kernel!(sink_2, ffai_sdpa_decode_d64, 2u32);
+sdpa_decode_kernel!(simple_3, ffai_sdpa_decode_d96, 3u32);
+sdpa_decode_kernel!(sink_window_4, ffai_sdpa_decode, 4u32);
+sdpa_decode_kernel!(sink_4x2, ffai_sdpa_decode_d256, 8u32);
+sdpa_decode_kernel!(simple_4x4, ffai_sdpa_decode_d512, 16u32);
 
 // ── Codegen smoke tests ──────────────────────────────────────────────────
 
@@ -763,17 +743,17 @@ mod tests {
     use metaltile_core::ir::KernelMode;
 
     use super::{
-        ffai_sdpa_decode, ffai_sdpa_decode_d256, ffai_sdpa_decode_d512, ffai_sdpa_decode_d64,
+        ffai_sdpa_decode,
+        ffai_sdpa_decode_d64,
         ffai_sdpa_decode_d96,
+        ffai_sdpa_decode_d256,
+        ffai_sdpa_decode_d512,
     };
     use crate::bench_types::DType;
 
     fn check(name: &str, src: &str) {
         assert!(!src.trim().is_empty(), "MSL for {name} should not be empty");
-        assert!(
-            src.contains(&format!("kernel void {name}")),
-            "MSL should declare {name}:\n{src}",
-        );
+        assert!(src.contains(&format!("kernel void {name}")), "MSL should declare {name}:\n{src}",);
     }
 
     #[test]
@@ -836,8 +816,11 @@ pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
     use super::{
-        ffai_sdpa_decode, ffai_sdpa_decode_d256, ffai_sdpa_decode_d512, ffai_sdpa_decode_d64,
+        ffai_sdpa_decode,
+        ffai_sdpa_decode_d64,
         ffai_sdpa_decode_d96,
+        ffai_sdpa_decode_d256,
+        ffai_sdpa_decode_d512,
     };
     use crate::utils::{pack_f32, unpack_f32};
 
@@ -874,16 +857,20 @@ pub mod kernel_tests {
             let mut scores: Vec<(usize, f32)> = attended
                 .iter()
                 .map(|&t| {
-                    let dot: f32 = (0..head_dim)
-                        .map(|d| q[q_off + d] * k[kv_slab + t * head_dim + d])
-                        .sum();
+                    let dot: f32 =
+                        (0..head_dim).map(|d| q[q_off + d] * k[kv_slab + t * head_dim + d]).sum();
                     (t, dot * scale)
                 })
                 .collect();
             let mut m = scores.iter().map(|&(_, s)| s).fold(f32::NEG_INFINITY, f32::max);
-            if has_sink { m = m.max(sink_logit); }
+            if has_sink {
+                m = m.max(sink_logit);
+            }
             let mut sum = if has_sink { (sink_logit - m).exp() } else { 0.0f32 };
-            for (_, s) in scores.iter_mut() { *s = (*s - m).exp(); sum += *s; }
+            for (_, s) in scores.iter_mut() {
+                *s = (*s - m).exp();
+                sum += *s;
+            }
             let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
             for d in 0..head_dim {
                 out[q_off + d] =
@@ -904,8 +891,9 @@ pub mod kernel_tests {
         let q = unpack_f32(&pack_f32(&ramp(nqh * hd, 0.013, -0.4), dt), dt);
         let k = unpack_f32(&pack_f32(&ramp(nkh * kv_stride * hd, 0.011, -0.5), dt), dt);
         let v = unpack_f32(&pack_f32(&ramp(nkh * kv_stride * hd, 0.007, -0.3), dt), dt);
-        let expected = naive_sdpa(&q, &k, &v, nqh, nkh, hd, n_kv, kv_stride,
-            0, 0, has_sink, sink_logit, scale);
+        let expected = naive_sdpa(
+            &q, &k, &v, nqh, nkh, hd, n_kv, kv_stride, 0, 0, has_sink, sink_logit, scale,
+        );
         TestSetup::new(ffai_sdpa_decode_d64::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
             .input(TestBuffer::from_vec("q", pack_f32(&q, dt), dt))
@@ -940,8 +928,8 @@ pub mod kernel_tests {
         let q = unpack_f32(&pack_f32(&ramp(nqh * hd, 0.013, -0.4), dt), dt);
         let k = unpack_f32(&pack_f32(&ramp(nkh * kv_stride * hd, 0.011, -0.5), dt), dt);
         let v = unpack_f32(&pack_f32(&ramp(nkh * kv_stride * hd, 0.007, -0.3), dt), dt);
-        let expected = naive_sdpa(&q, &k, &v, nqh, nkh, hd, n_kv, kv_stride,
-            0, 0, false, 0.0, scale);
+        let expected =
+            naive_sdpa(&q, &k, &v, nqh, nkh, hd, n_kv, kv_stride, 0, 0, false, 0.0, scale);
         TestSetup::new(ffai_sdpa_decode_d96::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
             .input(TestBuffer::from_vec("q", pack_f32(&q, dt), dt))
@@ -961,8 +949,13 @@ pub mod kernel_tests {
 
     #[allow(clippy::too_many_arguments)]
     fn setup_d128(
-        dt: DType, n_kv: usize, kv_stride: usize,
-        sink_end: usize, window_start: usize, has_sink: bool, sink_logit: f32,
+        dt: DType,
+        n_kv: usize,
+        kv_stride: usize,
+        sink_end: usize,
+        window_start: usize,
+        has_sink: bool,
+        sink_logit: f32,
     ) -> TestSetup {
         let (nqh, nkh, hd) = (8usize, 4usize, 128usize);
         let hpg = nqh / nkh;
@@ -970,8 +963,21 @@ pub mod kernel_tests {
         let q = unpack_f32(&pack_f32(&ramp(nqh * hd, 0.013, -0.4), dt), dt);
         let k = unpack_f32(&pack_f32(&ramp(nkh * kv_stride * hd, 0.011, -0.5), dt), dt);
         let v = unpack_f32(&pack_f32(&ramp(nkh * kv_stride * hd, 0.007, -0.3), dt), dt);
-        let expected = naive_sdpa(&q, &k, &v, nqh, nkh, hd, n_kv, kv_stride,
-            sink_end, window_start, has_sink, sink_logit, scale);
+        let expected = naive_sdpa(
+            &q,
+            &k,
+            &v,
+            nqh,
+            nkh,
+            hd,
+            n_kv,
+            kv_stride,
+            sink_end,
+            window_start,
+            has_sink,
+            sink_logit,
+            scale,
+        );
         TestSetup::new(ffai_sdpa_decode::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
             .input(TestBuffer::from_vec("q", pack_f32(&q, dt), dt))
@@ -992,9 +998,7 @@ pub mod kernel_tests {
     }
 
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-3, 1e-2])]
-    fn test_ffai_sdpa_decode(dt: DType) -> TestSetup {
-        setup_d128(dt, 64, 64, 0, 0, false, 0.0)
-    }
+    fn test_ffai_sdpa_decode(dt: DType) -> TestSetup { setup_d128(dt, 64, 64, 0, 0, false, 0.0) }
 
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-3, 1e-2])]
     fn test_ffai_sdpa_decode_swa_sink(dt: DType) -> TestSetup {
@@ -1022,8 +1026,9 @@ pub mod kernel_tests {
         let q = unpack_f32(&pack_f32(&ramp(nqh * hd, 0.013, -0.4), dt), dt);
         let k = unpack_f32(&pack_f32(&ramp(nkh * kv_stride * hd, 0.011, -0.5), dt), dt);
         let v = unpack_f32(&pack_f32(&ramp(nkh * kv_stride * hd, 0.007, -0.3), dt), dt);
-        let expected = naive_sdpa(&q, &k, &v, nqh, nkh, hd, n_kv, kv_stride,
-            0, 0, has_sink, sink_logit, scale);
+        let expected = naive_sdpa(
+            &q, &k, &v, nqh, nkh, hd, n_kv, kv_stride, 0, 0, has_sink, sink_logit, scale,
+        );
         TestSetup::new(ffai_sdpa_decode_d256::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
             .input(TestBuffer::from_vec("q", pack_f32(&q, dt), dt))
@@ -1058,8 +1063,8 @@ pub mod kernel_tests {
         let q = unpack_f32(&pack_f32(&ramp(nqh * hd, 0.013, -0.4), dt), dt);
         let k = unpack_f32(&pack_f32(&ramp(nkh * kv_stride * hd, 0.011, -0.5), dt), dt);
         let v = unpack_f32(&pack_f32(&ramp(nkh * kv_stride * hd, 0.007, -0.3), dt), dt);
-        let expected = naive_sdpa(&q, &k, &v, nqh, nkh, hd, n_kv, kv_stride,
-            0, 0, false, 0.0, scale);
+        let expected =
+            naive_sdpa(&q, &k, &v, nqh, nkh, hd, n_kv, kv_stride, 0, 0, false, 0.0, scale);
         TestSetup::new(ffai_sdpa_decode_d512::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
             .input(TestBuffer::from_vec("q", pack_f32(&q, dt), dt))
@@ -1082,8 +1087,11 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::{
-        ffai_sdpa_decode, ffai_sdpa_decode_d256, ffai_sdpa_decode_d512, ffai_sdpa_decode_d64,
+        ffai_sdpa_decode,
+        ffai_sdpa_decode_d64,
         ffai_sdpa_decode_d96,
+        ffai_sdpa_decode_d256,
+        ffai_sdpa_decode_d512,
     };
 
     #[bench(name = "ffai/sdpa_decode_d64", dtypes = [f32, f16, bf16])]
