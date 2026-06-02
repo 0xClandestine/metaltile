@@ -7,8 +7,16 @@
 //! within each test's tolerance. Replaces the former
 //! `tests/*_gpu_correctness.rs` suite (removed in #240; now in-source
 //! `#[test_kernel]`s).
+//!
+//! ## Two-phase execution
+//!
+//! CPU oracle work (`t.setup(dt)` — generating expected buffers) is run in
+//! parallel across all (test, dtype) pairs via rayon.  GPU dispatch
+//! (`run_kernel_test`) is then performed serially on the main thread, since
+//! `Context` wraps a non-`Send` Metal device.
 
 use metaltile::runner::run_kernel_test;
+use rayon::prelude::*;
 
 use crate::{
     TestArgs,
@@ -41,22 +49,65 @@ pub fn run(args: &TestArgs) -> Result<(), crate::CliError> {
 
     println!("{}", paint_stdout("tile test", Style::new().fg(Color::Cyan).bold()));
 
+    // Collect all matching entries up front so we can detect empty results
+    // before starting any work and so rayon can index into the slice.
+    let entries: Vec<_> = metaltile::harness::registry::all_tests()
+        .filter(|entry| matches_filter(filter.as_deref(), entry.test().name()))
+        .collect();
+
+    if entries.is_empty() {
+        if let Some(pattern) = filter {
+            eprintln!(
+                "{} {}",
+                paint_stderr("[warn]", Style::new().fg(Color::Yellow).bold()),
+                paint_stderr(
+                    format!("No tests matched --filter {pattern:?}"),
+                    Style::new().fg(Color::BrightWhite),
+                ),
+            );
+        } else {
+            eprintln!(
+                "{} {}",
+                paint_stderr("[warn]", Style::new().fg(Color::Yellow).bold()),
+                paint_stderr(
+                    "No #[test_kernel] tests registered",
+                    Style::new().fg(Color::BrightWhite),
+                ),
+            );
+        }
+        return Ok(());
+    }
+
+    // Phase 1 (parallel): run CPU oracle for every (entry, dtype) pair.
+    // `t.setup(dt)` computes expected output buffers on the CPU — no GPU
+    // involvement — so all pairs can run concurrently.  Results are collected
+    // in input order (rayon preserves order with par_iter + collect).
+    let work: Vec<Vec<_>> = entries
+        .par_iter()
+        .map(|entry| {
+            let t = entry.test();
+            t.dtypes()
+                .iter()
+                .map(|&dt| {
+                    let label = format!("{} [{dt}]", t.name());
+                    let setup = t.setup(dt);
+                    let tol = t.tolerance(dt);
+                    (label, setup, tol)
+                })
+                .collect()
+        })
+        .collect();
+
+    // Phase 2 (serial): GPU dispatch + comparison.
+    // `run_kernel_test` uses the Metal `Context` which is not `Send`, so all
+    // dispatches happen on the main thread in deterministic order.
     let mut total = 0usize;
     let mut passed = 0usize;
     let mut failures: Vec<String> = Vec::new();
-    let mut matched_filter = false;
 
-    for entry in metaltile::harness::registry::all_tests() {
-        let t = entry.test();
-        if !matches_filter(filter.as_deref(), t.name()) {
-            continue;
-        }
-        matched_filter = true;
-        for &dt in t.dtypes() {
-            let setup = t.setup(dt);
-            let tol = t.tolerance(dt);
+    for group in work {
+        for (label, setup, tol) in group {
             total += 1;
-            let label = format!("{} [{dt}]", t.name());
             match run_kernel_test(&ctx, &setup, tol) {
                 Ok(o) if o.passed => {
                     passed += 1;
@@ -93,30 +144,6 @@ pub fn run(args: &TestArgs) -> Result<(), crate::CliError> {
                 },
             }
         }
-    }
-
-    if total == 0 {
-        if let Some(pattern) = filter {
-            let _ = matched_filter;
-            eprintln!(
-                "{} {}",
-                paint_stderr("[warn]", Style::new().fg(Color::Yellow).bold()),
-                paint_stderr(
-                    format!("No tests matched --filter {pattern:?}"),
-                    Style::new().fg(Color::BrightWhite),
-                ),
-            );
-        } else {
-            eprintln!(
-                "{} {}",
-                paint_stderr("[warn]", Style::new().fg(Color::Yellow).bold()),
-                paint_stderr(
-                    "No #[test_kernel] tests registered",
-                    Style::new().fg(Color::BrightWhite)
-                ),
-            );
-        }
-        return Ok(());
     }
 
     let style = if failures.is_empty() {
