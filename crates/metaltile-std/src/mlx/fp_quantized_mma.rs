@@ -131,22 +131,15 @@ pub fn mt_fp4_qmm_mma<T>(
         let g = k_off / group_size;
         let s = load(scales[sb_base + g]).cast::<f32>();
         let ws_base = w_row * ws_ld + word_in_row * 8u32;
-        // Dequant 8 fp4 codes using the E2M1 two_m_int trick.
-        // code3 = 3-bit magnitude (bits 0-2 of each nibble), sign = bit 3.
+        // Dequant 8 fp4 codes via the E2M1 decode intrinsic. This matches the
+        // proven block-scaled MMA path (`mlx::block_scaled_mma`) and avoids the
+        // earlier hand-rolled `(mantissa + 2) << (exp - 1)` magnitude trick,
+        // whose shift was undefined when `exp == 0` (subnormal codes). That UB
+        // shift miscompiled on the f32 simdgroup path — leaving the output tile
+        // unwritten (zeros / stale garbage) — while f16/bf16 happened to mask it.
         for _ci in range(0u32, 8u32, 1u32) {
             let nibble = (pack >> (_ci * 4u32)) & 15u32;
-            let sign = 1.0f32 - 2.0f32 * ((nibble >> 3u32) & 1u32).cast::<f32>();
-            let code3 = nibble & 7u32;
-            let exp = code3 >> 1u32;
-            let mantissa = code3 & 1u32;
-            // two_m_int: integer value of 2×magnitude.
-            // subnormal (exp=0): two_m_int = mantissa ∈ {0, 1}
-            // normal (exp≥1): two_m_int = (mantissa + 2) * 2^(exp-1)
-            let is_normal = select(exp > 0u32, 1u32, 0u32);
-            let two_m_int_sub = mantissa;
-            let two_m_int_norm = (mantissa + 2u32) << (exp - 1u32);
-            let two_m_int = select(is_normal == 1u32, two_m_int_norm, two_m_int_sub);
-            let val = s * sign * two_m_int.cast::<f32>() * 0.5f32;
+            let val = s * e2m1_decode(nibble);
             threadgroup_store("ws", ws_base + _ci, val.cast::<T>());
         }
         threadgroup_barrier();

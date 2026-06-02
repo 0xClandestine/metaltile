@@ -484,11 +484,9 @@ pub fn mt_nvfp4_conv2d_mma<T>(
     );
 }
 
-/// Legacy fp4 (E2M1 weights, group 32, raw per-group FP32 scale) conv2d.
+/// fp4 (E2M1 weights, group 32, raw per-group FP32 scale) conv2d.
 ///
-/// NOTE: verified on f16/bf16 activations only — the f32-activation path shows
-/// the same deterministic discrepancy as `block_scaled_mma::test_fp4_mma`
-/// (4-bit-E2M1 + raw-f32-scale + f32-simdgroup); prefer f16/bf16 for fp4 here.
+/// Verified on f32/f16/bf16 against the `quant::format` oracle.
 #[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_fp4_conv2d_mma<T>(
@@ -1835,10 +1833,7 @@ pub mod kernel_tests {
         mma_setup(mt_nvfp4_conv2d_mma::kernel_ir_for(dt), QFormat::Nvfp4, 2, 4, 7, 7, 32, 4, 4, dt)
     }
 
-    // fp4 MMA is validated on f16/bf16 only — the f32-activation path shows the
-    // deterministic 4-bit-E2M1 + raw-f32-scale + f32-simdgroup discrepancy
-    // documented in `block_scaled_mma::test_fp4_mma`; use f16/bf16 for fp4 here.
-    #[test_kernel(dtypes = [f16, bf16], tol = [5e-2, 2e-1])]
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
     fn test_fp4_conv2d_mma(dt: DType) -> TestSetup {
         mma_setup(mt_fp4_conv2d_mma::kernel_ir_for(dt), QFormat::Fp4, 2, 4, 7, 7, 32, 4, 4, dt)
     }

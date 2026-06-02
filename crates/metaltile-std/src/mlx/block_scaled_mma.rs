@@ -977,14 +977,14 @@ pub fn mt_nvfp8_qmm_mma<T>(
 // E4M3 + f32 scale), so it reuses `mt_nvfp8_qmm_mma`; only fp4 (4-bit E2M1),
 // fp8_e5m2 (8-bit E5M2), and int8 (8-bit symmetric) need their own decode here.
 
-/// Legacy fp4 simdgroup-matrix dequantizing GEMM (E2M1 weights, per-group FP32 scale).
+/// fp4 simdgroup-matrix dequantizing GEMM (E2M1 weights, per-group FP32 scale).
 ///
-/// NOTE: verified on f16/bf16 activations only. The f32-activation path has a
-/// deterministic numeric discrepancy specific to the 4-bit + raw-f32-scale +
-/// f32-simdgroup combination (see `test_fp4_mma`); prefer f16/bf16 for fp4 here,
-/// or the fp4 qgemv/qmm kernels (which are f32-correct) for f32 activations.
+/// Distinct name from the original `fp_quantized_mma::mt_fp4_qmm_mma`: emitting
+/// two kernels under the same MSL function name collided in the pipeline cache,
+/// producing order-dependent (and f32-specific) wrong results. Verified correct
+/// on f32/f16/bf16 against the `quant::format` oracle.
 #[kernel]
-pub fn mt_fp4_qmm_mma<T>(
+pub fn mt_fp4_float_qmm_mma<T>(
     w: Tensor<u32>,
     scales: Tensor<f32>,
     x: Tensor<T>,
@@ -1663,15 +1663,9 @@ pub mod kernel_tests {
     // kernel (same 8-bit-E4M3 + f32-scale shape); the others decode in their own
     // kernels. int8 has block_size=64, so K=64 is exactly one K-block (and a
     // multiple of the 32 MMA tile) — valid for every variant.
-    // fp4 MMA is validated on f16/bf16 (the realistic quantized-inference
-    // activation dtypes). The f32 path shows a deterministic ~0.46 discrepancy
-    // unique to the 4-bit-E2M1 + raw-f32-group-scale + f32-simdgroup combination
-    // (mxfp4/nvfp4 4-bit+u8-scale and nvfp8/fp8_e5m2 8-bit+f32-scale MMA all pass
-    // f32; fp4 qgemv/qmm/dequant pass f32) — tracked as a follow-up; use f16/bf16
-    // for fp4 on the MMA path.
-    #[test_kernel(dtypes = [f16, bf16], tol = [1e-1, 4e-1])]
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 1e-1, 4e-1])]
     fn test_fp4_mma(dt: DType) -> TestSetup {
-        mma_setup(mt_fp4_qmm_mma::kernel_ir_for(dt), QFormat::Fp4, 32, 32, 64, dt)
+        mma_setup(mt_fp4_float_qmm_mma::kernel_ir_for(dt), QFormat::Fp4, 32, 32, 64, dt)
     }
 
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 1e-1, 4e-1])]
@@ -1762,7 +1756,7 @@ pub mod kernel_benches {
     }
     #[bench(name = "ffai/block_scaled_qmm_mma/fp4", dtypes = [f32, f16, bf16])]
     fn bench_fp4_mma(dt: DType) -> BenchSetup {
-        mma_bench(mt_fp4_qmm_mma::kernel_ir_for(dt), QFormat::Fp4, 4096, 4096, 4096, dt)
+        mma_bench(mt_fp4_float_qmm_mma::kernel_ir_for(dt), QFormat::Fp4, 4096, 4096, 4096, dt)
     }
     #[bench(name = "ffai/block_scaled_qmm_mma/fp8_e4m3", dtypes = [f32, f16, bf16])]
     fn bench_fp8_e4m3_mma(dt: DType) -> BenchSetup {

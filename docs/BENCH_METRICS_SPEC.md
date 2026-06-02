@@ -171,9 +171,20 @@ the simdgroup-f32 caveat below).
 > `metaltile::harness::registry::all_tests()` — the latter leaves metaltile-std's
 > inventory statics dead-code-eliminated from the integration-test link, so the
 > harness silently runs **zero** checks (a vacuous gate). With the correct
-> accessor it runs ~1857 GPU-correctness checks.
+> accessor it runs ~1910 GPU-correctness checks, all green on f32/f16/bf16.
 
-**Remaining (follow-ups, non-blocking):** the legacy int2–8 *affine* (scale+bias) path stays in its existing `dequant_gemv`/`quantized`/`quantized_{mpp,nax}` kernels (the new `Int8` is the symmetric scale-only variant); more flash head-dim variants (only d=128 has block-scaled KV); the `winograd_conv` filter-transform variant (quantizing Winograd amplifies error in the transform domain; every other weight-bearing conv — direct + im2col-MMA — is covered); **`fp4` on the qmm-MMA path with f32 activations** (a deterministic ~0.46 discrepancy unique to 4-bit + raw-f32-scale + f32-simdgroup — fp4 MMA is verified on f16/bf16, and fp4 is f32-correct on qgemv/qmm/dequant/conv); a pre-existing **`ffai_sdpa_multi_d256_causal`** correctness failure (dense SDPA causal masking, exposed by the gate fix, quarantined); and an audit of whether the `ekryski/mlx@alpha` reference kernels are themselves spec-correct.
+> **fp4 simdgroup-MMA f32 fix (this PR):** exposing the real harness surfaced two
+> intertwined fp4-MMA defects, both now fixed (every fp4 MMA test runs f32/f16/bf16):
+> (1) the original `fp_quantized_mma::mt_fp4_qmm_mma` hand-rolled the E2M1 magnitude
+> as `(mantissa + 2) << (exp − 1)`, an **undefined shift when `exp == 0`** (subnormal
+> codes) that miscompiled on the f32 path → unwritten output (zeros / stale garbage);
+> replaced with the `e2m1_decode` intrinsic. (2) the block-scaled fp4 MMA kernel was
+> **also named `mt_fp4_qmm_mma`**, colliding with the original in the MSL/pipeline
+> cache → order-dependent wrong pipelines (the source of the ~0.46 f32 anomaly and the
+> apparent `ffai_sdpa_multi_d256_causal` failure, which was a *victim* of the shared-
+> state contamination, not itself buggy); renamed to `mt_fp4_float_qmm_mma`.
+
+**Remaining (follow-ups, non-blocking):** the legacy int2–8 *affine* (scale+bias) path stays in its existing `dequant_gemv`/`quantized`/`quantized_{mpp,nax}` kernels (the new `Int8` is the symmetric scale-only variant); more flash head-dim variants (only d=128 has block-scaled KV); the `winograd_conv` filter-transform variant (quantizing Winograd amplifies error in the transform domain; every other weight-bearing conv — direct + im2col-MMA — is covered); and an audit of whether the `ekryski/mlx@alpha` reference kernels are themselves spec-correct.
 
 ## Appendix C — M5 Neural Accelerator hardware context
 

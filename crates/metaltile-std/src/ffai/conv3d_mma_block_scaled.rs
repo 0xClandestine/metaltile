@@ -1381,13 +1381,10 @@ pub fn mt_nvfp8_conv3d_mma<T>(
     );
 }
 
-/// Legacy fp4 quantized-weight cooperative conv3d — E2M1 filter (group 32),
+/// fp4 quantized-weight cooperative conv3d — E2M1 filter (group 32),
 /// per-group FP32 scale. Stride=1, dilation=1, pad=0.
 ///
-/// NOTE: verified on f16/bf16 activations only. The f32-activation path has a
-/// deterministic numeric discrepancy specific to the 4-bit-E2M1 + raw-f32-scale
-/// + f32-simdgroup combination (see `block_scaled_mma::test_fp4_mma`); prefer
-/// f16/bf16 here, or the fp4 conv3d_block_scaled path for f32 activations.
+/// Verified on f32/f16/bf16 against the `quant::format` oracle.
 #[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_fp4_conv3d_mma<T>(
@@ -2014,11 +2011,7 @@ pub mod kernel_tests {
             dt,
         )
     }
-    // fp4 simdgroup-MMA has a known f32 anomaly (block_scaled_mma `test_fp4_mma`
-    // is [f16, bf16]-only): the 4-bit-E2M1 + raw-f32-scale + f32-simdgroup combo
-    // shows a deterministic discrepancy. Validate on f16/bf16 (the realistic
-    // quantized-inference activation dtypes).
-    #[test_kernel(dtypes = [f16, bf16], tol = [5e-2, 2e-1])]
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
     fn test_fp4_conv3d_mma(dt: DType) -> TestSetup {
         mma_setup(
             mt_fp4_conv3d_mma::kernel_ir_for(dt),
