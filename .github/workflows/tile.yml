@@ -5,13 +5,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
-# Slow macOS job: `tile build` + `tile bench` together. The bench
-# matrix has grown well past the original ~5-6 min and now approaches
-# the runner timeout; the limit below was bumped accordingly. Runtime
-# will drop again once the duplicate legacy `#[kernel(bench(...))]`
-# specs are deleted, but a higher ceiling is kept for headroom. Skip
-# on PRs that can't affect kernel emission, dispatch, or measurement —
-# docs-only PRs, baseline-JSON additions, README/CONTRIBUTING patches.
+# Two parallel macOS jobs: `build` (compile-check) and `bench` (GPU
+# measurement). They are independent — no shared artifacts — so both
+# free macOS runners are kept busy simultaneously. Wall-clock time is
+# dominated by the bench job (~40-45 min); the build job finishes in
+# ~15 min and would otherwise sit idle at the end of a serial run.
+# Skip on PRs that can't affect kernel emission, dispatch, or
+# measurement — docs-only PRs, baseline-JSON additions, etc.
 on:
   push:
     branches: [main, dev]
@@ -44,8 +44,35 @@ env:
   CLICOLOR_FORCE: 1
 
 jobs:
-  tile:
-    name: Suite
+  # ── Job 1: compile-check all registered kernels ─────────────────────────────
+  # Runs `tile build` (MSL codegen + xcrun compile-check for every kernel ×
+  # dtype). Completely independent from the bench job — no shared artifacts.
+  # Runs in parallel with `bench` so the two free macOS runners are both busy.
+  build:
+    name: Build
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5.0.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: tile-macos
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install tile CLI
+        run: |
+          cargo build --profile ci -p metaltile-cli
+          echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
+      - name: Build
+        run: tile build
+
+  # ── Job 2: GPU benchmark suite ───────────────────────────────────────────────
+  # Runs `tile bench` on a separate macOS runner in parallel with `build`.
+  # Produces a bench-snapshot artifact and posts a diff comment on PRs.
+  bench:
+    name: Bench
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
@@ -57,6 +84,7 @@ jobs:
           components: rustfmt,clippy
       - uses: Swatinem/rust-cache@v2
         with:
+          shared-key: tile-macos
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Build the CLI once and add the release binary to PATH so all
@@ -65,9 +93,6 @@ jobs:
         run: |
           cargo build --profile ci -p metaltile-cli
           echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
-
-      - name: Build
-        run: tile build
 
       # Diff is opt-in (`--diff`); the next step runs `tile diff` separately.
       # `--allow-dirty` is defensive — CI checks out
