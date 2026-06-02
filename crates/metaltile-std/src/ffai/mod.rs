@@ -87,6 +87,7 @@ pub mod moe_mpp_shared;
 pub mod patch_embed;
 pub mod patch_embed_block_scaled;
 pub mod patch_embed_mma;
+pub mod patch_embed_mma_block_scaled;
 pub mod rms_norm_block_scaled_qgemv;
 pub mod rms_norm_qgemv;
 pub mod rms_norm_residual;
