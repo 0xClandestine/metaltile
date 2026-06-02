@@ -136,10 +136,14 @@ Goal: **support all precisions in every weight-bearing kernel** (matmul/gemv/att
 | batched-Q/K/V qgemv / qmm | `ffai/batched_qkv_block_scaled_{qgemv,qmm}.rs` |
 | flash SDPA (block-scaled KV) | `ffai/flash_block_scaled_sdpa.rs` |
 | embedding gather | `ffai/dequant_gather_block_scaled.rs` |
+| qmm via MPP (tensor engine) | `mlx/block_scaled_qmm_mpp.rs` |
+| qmm via NAX | `mlx/block_scaled_qmm_nax.rs` |
+| MoE gather-qmm via MPP (bm16) | `ffai/moe_mpp_block_scaled.rs` |
+| expert-indexed GEMV | `ffai/dequant_gemv_expert_indexed_block_scaled.rs` |
 
-Each (family × format) ships a `#[test_kernel]` CPU-oracle correctness check (1:1, GPU-verified vs `quant::format::dequant`) and a `#[bench]` with `.flops()` so the PR-#1 latency/GFLOP/roofline columns rank precisions side-by-side. `fp8_e4m3` reuses each family's `nvfp8` kernel (identical 8-bit-E4M3 + f32-scale shape). ~104 block-scaled kernels, 127 `#[test_kernel]`s, 117 benches.
+Each (family × format) ships a `#[test_kernel]` CPU-oracle correctness check (1:1, GPU-verified vs `quant::format::dequant`) and a `#[bench]` with `.flops()` so the PR-#1 latency/GFLOP/roofline columns rank precisions side-by-side. `fp8_e4m3` reuses each family's `nvfp8` kernel (identical 8-bit-E4M3 + f32-scale shape). The MPP/NAX/MoE-MPP cooperative-matmul variants dequant W to `coop_stage(T)` during threadgroup staging and reuse the proven int4/int8 `mpp::tensor_ops::matmul2d` dispatch geometry byte-for-byte (no new freeze surface). ~146 block-scaled kernels across **every quantized weight-bearing op + backend**, all GPU-verified, each 1:1 tested + benched.
 
-**Remaining (follow-ups):** the legacy int2–8 *affine* (scale+bias) path stays in its existing `dequant_gemv`/`quantized` kernels (the new `Int8` is the symmetric scale-only variant); more flash head-dim variants (only d=128 has block-scaled KV today); and an audit of whether the `ekryski/mlx@alpha` reference kernels are themselves spec-correct.
+**Remaining (follow-ups, all non-blocking):** the legacy int2–8 *affine* (scale+bias) path stays in its existing `dequant_gemv`/`quantized`/`quantized_{mpp,nax}` kernels (the new `Int8` is the symmetric scale-only variant); more flash head-dim variants (only d=128 has block-scaled KV today); the MoE-MPP perf-tile variants (`bm8`/`bm64` — same op + cooperative engine as the covered `bm16`, a perf-tuning axis); and an audit of whether the `ekryski/mlx@alpha` reference kernels are themselves spec-correct. Non-quantized-matmul ops are out of scope: `steel_gemm_*` are dense GEMM, `quantized_mma_dynamic_m` is a host dispatch helper, `fp_quantized.rs` is a superseded codec utility, and AURA is a separate codebook scheme.
 
 ## Appendix C — M5 Neural Accelerator hardware context
 
