@@ -494,6 +494,11 @@ pub mod kernel_benches {
             .constexpr("log_eps", 1e-5f32)
             .grid_1d(n_out, 256)
             .bytes_moved((n_out * dt.size_bytes()) as u64)
+            // Each (frame, mel) thread recomputes the full direct DFT power
+            // spectrum: n_freq bins × n_fft taps × 4 flops (re+im MAC). This is
+            // the compute that the tiny byte count hides — the kernel is
+            // compute-bound, not memory-bound.
+            .flops((n_out as u64) * (n_freq() as u64) * (N_FFT as u64) * 4)
     }
 
     #[bench(name = "ffai/mel_spectrogram/stft_window", dtypes = [f32, f16, bf16])]
@@ -547,5 +552,9 @@ pub mod kernel_benches {
             .constexpr("log_eps", 1e-5f32)
             .grid_1d(n_out, 256)
             .bytes_moved((n_out * dt.size_bytes()) as u64)
+            // Per (frame, mel) thread recomputes the full DFT power spectrum:
+            // n_freq bins × n_fft taps × 4 flops. Compute-bound despite the
+            // tiny output byte count.
+            .flops((n_out as u64) * (n_freq as u64) * (n_fft as u64) * 4)
     }
 }

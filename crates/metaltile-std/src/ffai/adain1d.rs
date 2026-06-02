@@ -139,5 +139,7 @@ pub mod kernel_benches {
             .constexpr("length", length as u32)
             .grid_3d(rows as u32, 1, 1, [1024, 1, 1])
             .bytes_moved((2 * rows * length * dt.size_bytes()) as u64)
+            // Per row: mean (1·len) + variance (2·len) + normalize·γ+β (4·len).
+            .flops((rows as u64) * (length as u64) * 7)
     }
 }

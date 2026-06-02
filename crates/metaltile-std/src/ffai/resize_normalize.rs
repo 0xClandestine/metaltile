@@ -433,6 +433,8 @@ pub mod kernel_benches {
             ))
             .grid_3d(tw as u32, th as u32, 3, [1, 1, 1])
             .bytes_moved(((sh * sw * 3 + 3 * th * tw) * dt.size_bytes()) as u64)
+            // 4-tap bilinear (4 MAC = 8) + normalize (2) per output element.
+            .flops((3 * th * tw) as u64 * 10)
     }
 
     #[bench(name = "ffai/resize/resize_normalize_bicubic", dtypes = [f32, f16, bf16])]
@@ -462,5 +464,7 @@ pub mod kernel_benches {
             ))
             .grid_3d(tw as u32, th as u32, 3, [1, 1, 1])
             .bytes_moved(((sh * sw * 3 + 3 * th * tw) * dt.size_bytes()) as u64)
+            // 4×4-tap bicubic (16 MAC = 32) + normalize (2) per output element.
+            .flops((3 * th * tw) as u64 * 34)
     }
 }

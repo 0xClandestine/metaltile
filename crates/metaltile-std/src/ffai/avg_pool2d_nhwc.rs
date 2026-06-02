@@ -212,5 +212,7 @@ pub mod kernel_benches {
             .constexpr("pad", pad as u32)
             .grid_1d(n_out, 256)
             .bytes_moved((n_out * dt.size_bytes()) as u64)
+            // k² window adds + 1 reciprocal-scale per output element.
+            .flops((n_out as u64) * (k as u64 * k as u64 + 1))
     }
 }
