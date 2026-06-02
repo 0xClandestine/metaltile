@@ -6,9 +6,9 @@
 //!
 //! ```text
 //! Ran 3 tests for mt_add
-//! [PASS] mt_add [f32]   (max|Δ|=0.00e0)
-//! [PASS] mt_add [f16]   (max|Δ|=2.38e-7)
-//! [PASS] mt_add [bf16]  (max|Δ|=1.56e-3)
+//! [PASS] mt_add [f32]   (err=0.00e0)
+//! [PASS] mt_add [f16]   (err=2.38e-7)
+//! [PASS] mt_add [bf16]  (err=1.56e-3)
 //! Suite result: ok. 3 passed; 0 failed; finished in 45.12ms
 //!
 //! Ran 2 test suites in 57.46ms: 3 tests passed, 1 failed (4 total tests)
@@ -168,7 +168,7 @@ pub fn run(args: &TestArgs, harness: &crate::harness::Harness) -> Result<(), cra
                         paint_stdout("[PASS]", Style::new().fg(Color::Green).bold()),
                         paint_stdout(label, Style::new().fg(Color::BrightWhite)),
                         paint_stdout(
-                            format!("(max|Δ|={:.2e})", o.max_abs_err),
+                            format!("(err={:.2e})", o.max_abs_err),
                             Style::new().fg(Color::BrightBlack),
                         ),
                     );
@@ -176,7 +176,7 @@ pub fn run(args: &TestArgs, harness: &crate::harness::Harness) -> Result<(), cra
                 Ok(o) => {
                     suite_failed += 1;
                     total_failed += 1;
-                    let reason = format!("max|Δ|={:.2e} > tol {tol:.2e}", o.max_abs_err);
+                    let reason = format!("err={:.2e} > tol {tol:.2e}", o.max_abs_err);
                     let line = format!(
                         "{}  {}",
                         paint_stdout(
