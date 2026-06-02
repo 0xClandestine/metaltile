@@ -29,3 +29,5 @@ anstream = "1"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 rayon.workspace = true
+regex.workspace = true
+glob.workspace = true

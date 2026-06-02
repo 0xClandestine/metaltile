@@ -524,14 +524,20 @@ pub trait KernelBench: Send + Sync {
 /// Submitted by the `#[bench]` macro; iterated by the bench runner.
 pub struct KernelBenchEntry {
     pub(crate) inner: &'static dyn KernelBench,
+    pub(crate) file: &'static str,
 }
 
 impl KernelBenchEntry {
     /// Wrap a `KernelBench` impl for inventory submission.
-    pub const fn new(inner: &'static dyn KernelBench) -> Self { KernelBenchEntry { inner } }
+    pub const fn new(inner: &'static dyn KernelBench, file: &'static str) -> Self {
+        KernelBenchEntry { inner, file }
+    }
 
     /// The wrapped `KernelBench` with its `'static` lifetime preserved.
     pub fn bench(&self) -> &'static dyn KernelBench { self.inner }
+
+    /// Source file path where the `#[bench]` was defined (via `file!()`).
+    pub fn file(&self) -> &'static str { self.file }
 }
 
 impl AsRef<dyn KernelBench + 'static> for KernelBenchEntry {

@@ -46,7 +46,7 @@ use rayon::prelude::*;
 use crate::{
     BuildArgs,
     CliError,
-    matches_filter,
+    FilterSpec,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
@@ -70,8 +70,9 @@ impl<'a> super::TileCommand for BuildCommand<'a> {
 }
 
 pub fn run(args: &BuildArgs) -> Result<(), CliError> {
-    let _span = tracing::info_span!("build", filter = ?args.filter, emit = ?args.emit).entered();
-    let filter = &args.filter;
+    let _span = tracing::info_span!("build", filter = ?args.filter_args.filter, emit = ?args.emit)
+        .entered();
+    let spec = FilterSpec::from_args(&args.filter_args);
     let dtypes_arg = &args.dtypes;
     let verbose = args.verbose > 0;
     let emit_arg = &args.emit;
@@ -79,7 +80,7 @@ pub fn run(args: &BuildArgs) -> Result<(), CliError> {
     let sdk = &args.sdk;
 
     if args.time_passes {
-        run_time_passes(filter.as_deref(), dtypes_arg.as_deref())?;
+        run_time_passes(&spec, dtypes_arg.as_deref())?;
         return Ok(());
     }
 
@@ -198,7 +199,7 @@ pub fn run(args: &BuildArgs) -> Result<(), CliError> {
     }
     let work_items: Vec<WorkItem<'_>> = sorted
         .iter()
-        .filter(|(name, _)| matches_filter(filter.as_deref(), name.as_str()))
+        .filter(|(name, _)| spec.matches_name(name.as_str()))
         .map(|(name, (bench, dtypes))| {
             let dtypes_to_check: Vec<DType> = match &dtypes_filter {
                 Some(df) => dtypes.iter().filter(|dt| df.contains(dt)).copied().collect(),
@@ -574,16 +575,17 @@ const TIME_PASSES_ITERS: usize = 25;
 ///
 /// Output schema matches `rustc -Z time-passes`-style tables:
 /// `pass_name  median_total_us  median_per_kernel_us`.
-fn run_time_passes(filter: Option<&str>, dtypes_arg: Option<&str>) -> Result<(), CliError> {
+fn run_time_passes(spec: &crate::FilterSpec, dtypes_arg: Option<&str>) -> Result<(), CliError> {
     let dtypes_filter: Option<Vec<DType>> =
         dtypes_arg.map(|s| s.split(',').filter_map(|t| t.trim().parse::<DType>().ok()).collect());
 
     let kernels: Vec<_> = all_benches()
-        .map(|e| e.bench())
-        .filter(|b| {
+        .filter(|e| {
+            let b = e.bench();
             let first = b.dtypes().first().copied().unwrap_or(DType::F32);
-            matches_filter(filter, &b.setup(first).kernel().name)
+            spec.matches(&b.setup(first).kernel().name, e.file())
         })
+        .map(|e| e.bench())
         .flat_map(|b| {
             b.dtypes()
                 .iter()

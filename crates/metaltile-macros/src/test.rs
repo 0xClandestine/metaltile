@@ -265,7 +265,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[allow(non_upper_case_globals)]
         static #static_name: #impl_name = #impl_name;
         ::metaltile::core::inventory::submit! {
-            ::metaltile::harness::test::KernelTestEntry::new(&#static_name)
+            ::metaltile::harness::test::KernelTestEntry::new(&#static_name, file!())
         }
     })
 }

@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use crate::{
     CliError,
+    FilterSpec,
     SnapArgs,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
@@ -38,7 +39,7 @@ pub fn run(args: &SnapArgs) -> Result<(), CliError> {
     let out_path = args.out.as_deref();
     let from_path = args.from.as_deref();
     let note = &args.note;
-    let filter = &args.filter;
+    let spec = FilterSpec::from_args(&args.filter_args);
 
     let out_path: String = match out_path {
         Some(p) => p.to_string(),
@@ -118,14 +119,10 @@ pub fn run(args: &SnapArgs) -> Result<(), CliError> {
     let mut results: Vec<Value> =
         results_json.get("results").and_then(|v| v.as_array()).cloned().unwrap_or_default();
 
-    // Apply filter
-    if let Some(f) = filter {
-        let f_lower = f.to_ascii_lowercase();
+    // Apply filter (name-based only — snap JSON has no source file paths)
+    if !spec.is_empty() {
         results.retain(|r| {
-            r.get("op")
-                .and_then(|v| v.as_str())
-                .map(|op| op.to_ascii_lowercase().contains(&f_lower))
-                .unwrap_or(false)
+            r.get("op").and_then(|v| v.as_str()).map(|op| spec.matches_name(op)).unwrap_or(false)
         });
     }
 

@@ -20,8 +20,8 @@ use metaltile_std::bench_types::DType;
 
 use crate::{
     CliError,
+    FilterSpec,
     InspectArgs,
-    matches_filter,
     term::{Color, Style, paint_stdout},
 };
 
@@ -37,7 +37,7 @@ impl<'a> super::TileCommand for InspectCommand<'a> {
 }
 
 pub fn run(args: &InspectArgs) -> Result<(), CliError> {
-    let filter_val = args.filter.as_ref().or(args.kernel.as_ref());
+    let filter_val = args.filter_args.filter.as_ref().or(args.kernel.as_ref());
     let _span = tracing::info_span!(
         "inspect",
         filter = ?filter_val,
@@ -46,8 +46,28 @@ pub fn run(args: &InspectArgs) -> Result<(), CliError> {
     )
     .entered();
     let dir = &args.dir;
-    // filter is either --filter flag or the positional kernel name
-    let filter = filter_val;
+    // Build a FilterSpec. If only a positional kernel name was given (no other
+    // filter flags), synthesise a legacy substring spec from it so the existing
+    // list-vs-filter logic stays intact.
+    let spec = if args.filter_args.filter.is_none()
+        && args.filter_args.match_name.is_none()
+        && args.filter_args.no_match_name.is_none()
+        && args.filter_args.match_group.is_none()
+        && args.filter_args.no_match_group.is_none()
+        && args.filter_args.match_path.is_none()
+        && args.filter_args.no_match_path.is_none()
+    {
+        if let Some(kname) = &args.kernel {
+            FilterSpec::from_args(&crate::FilterArgs {
+                filter: Some(kname.clone()),
+                ..Default::default()
+            })
+        } else {
+            FilterSpec::from_args(&args.filter_args)
+        }
+    } else {
+        FilterSpec::from_args(&args.filter_args)
+    };
     let all_flag = args.all;
     let ir_flag = args.ir;
     let stats_flag = args.stats;
@@ -113,7 +133,7 @@ pub fn run(args: &InspectArgs) -> Result<(), CliError> {
     }
 
     // No filter: list all kernels
-    let Some(filter) = filter else {
+    if spec.is_empty() {
         eprintln!("{}", paint_stdout("tile inspect", Style::new().fg(Color::Cyan).bold()),);
         eprintln!();
         for (name, (b, dtypes)) in &sorted {
@@ -134,18 +154,18 @@ pub fn run(args: &InspectArgs) -> Result<(), CliError> {
             paint_stdout("<kernel> for MSL", Style::new().fg(Color::BrightBlack)),
         );
         return Ok(());
-    };
+    }
 
-    // Filter by kernel name
-    let matched: Vec<_> =
-        sorted.iter().filter(|(name, _)| matches_filter(Some(filter), name)).collect();
+    // Filter by kernel name / group / path
+    let matched: Vec<_> = sorted.iter().filter(|(name, _)| spec.matches_name(name)).collect();
 
     if matched.is_empty() {
+        let filter_desc = filter_val.map(|s| s.as_str()).unwrap_or("<filter>");
         eprintln!(
             "{} {}",
             paint_stdout("error:", Style::new().fg(Color::Red).bold()),
             paint_stdout(
-                format!("no kernel matched '{filter}'"),
+                format!("no kernel matched '{filter_desc}'"),
                 Style::new().fg(Color::BrightWhite),
             ),
         );
@@ -157,7 +177,7 @@ pub fn run(args: &InspectArgs) -> Result<(), CliError> {
                 Style::new().fg(Color::BrightWhite),
             ),
         );
-        return Err(CliError::Other(format!("no kernel matched '{filter}'")));
+        return Err(CliError::Other(format!("no kernel matched '{filter_desc}'")));
     }
 
     for (name, (b, dtypes)) in &matched {

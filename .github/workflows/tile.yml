@@ -5,13 +5,20 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
-# Two parallel macOS jobs: `build` (compile-check) and `bench` (GPU
-# measurement). They are independent — no shared artifacts — so both
-# free macOS runners are kept busy simultaneously. Wall-clock time is
-# dominated by the bench job (~40-45 min); the build job finishes in
-# ~15 min and would otherwise sit idle at the end of a serial run.
-# Skip on PRs that can't affect kernel emission, dispatch, or
-# measurement — docs-only PRs, baseline-JSON additions, etc.
+# Job graph (all macOS runners):
+#
+#   compile ──┬── build
+#             ├── bench (ffai)  ──┐
+#             └── bench (mlx)  ──┴── bench-merge
+#
+# `compile` builds the tile binary once (or restores it from the binary
+# cache).  All downstream jobs download the pre-built artifact — no Rust
+# toolchain or cargo invocation needed there.  Wall-clock time is dominated
+# by the two bench shards (~20-25 min each); build and compile overlap with
+# them so no runner sits idle.
+#
+# Skip on PRs that can't affect kernel emission, dispatch, or measurement —
+# docs-only PRs, baseline-JSON additions, etc.
 on:
   push:
     branches: [main, dev]
@@ -45,14 +52,14 @@ env:
   CLICOLOR_FORCE: 1
 
 jobs:
-  # ── Job 1: compile-check all registered kernels ─────────────────────────────
-  # Runs `tile build` (MSL codegen + xcrun compile-check for every kernel ×
-  # dtype). Completely independent from the bench job — no shared artifacts.
-  # Runs in parallel with `bench` so the two free macOS runners are both busy.
-  build:
-    name: Build
+  # ── Job 0: compile tile binary ───────────────────────────────────────────────
+  # Builds `tile` once (or restores from binary cache) and uploads it as a
+  # workflow artifact.  All other jobs download the artifact instead of
+  # running cargo themselves — one build per workflow run, not one per job.
+  compile:
+    name: Compile
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5.0.0
       - uses: dtolnay/rust-toolchain@stable
@@ -60,8 +67,7 @@ jobs:
           components: rustfmt,clippy
 
       # Cache the compiled tile binary keyed on all Rust source inputs.
-      # A cache hit skips `cargo build` entirely (~3-5 min saved per job).
-      # Falls back to rust-cache for incremental compilation on a miss.
+      # A cache hit skips `cargo build` entirely (~3-5 min saved).
       - name: Cache tile binary
         id: binary-cache
         uses: actions/cache@v4
@@ -78,6 +84,37 @@ jobs:
       - name: Build tile CLI
         if: steps.binary-cache.outputs.cache-hit != 'true'
         run: cargo build --profile ci -p metaltile-cli
+
+      # Upload so every downstream job gets the binary without any cargo
+      # invocation.  retention-days=1 keeps storage costs near zero.
+      - name: Upload tile binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: tile-binary
+          path: target/ci/tile
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── Job 1: compile-check all registered kernels ──────────────────────────────
+  # Runs `tile build` (MSL codegen + xcrun compile-check for every kernel ×
+  # dtype).  Overlaps with the bench shards so all three free macOS runners
+  # are busy in parallel.
+  build:
+    name: Build
+    runs-on: macos-latest
+    timeout-minutes: 30
+    needs: compile
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5.0.0
+
+      - name: Download tile binary
+        uses: actions/download-artifact@v4
+        with:
+          name: tile-binary
+          path: target/ci
+
+      - name: Make tile executable
+        run: chmod +x target/ci/tile
 
       - name: Add tile to PATH
         run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
@@ -85,55 +122,117 @@ jobs:
       - name: Build
         run: tile build
 
-  # ── Job 2: GPU benchmark suite ───────────────────────────────────────────────
-  # Runs `tile bench` on a separate macOS runner in parallel with `build`.
-  # Produces a bench-snapshot artifact and posts a diff comment on PRs.
+  # ── Job 2 + 3: GPU benchmark suite (sharded by kernel family) ────────────────
+  # Two bench jobs run in parallel — one for the `ffai` family (attention/MLP
+  # inference kernels) and one for the `mlx` family (MLX reference comparisons).
+  # `--match-group` narrows each shard to only its family so both finish faster
+  # than a single sequential run.
   bench:
-    name: Bench
+    name: Bench (${{ matrix.family }})
     runs-on: macos-latest
     timeout-minutes: 60
+    needs: compile
+    strategy:
+      fail-fast: false
+      matrix:
+        family: [ffai, mlx]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5.0.0
-      # rust-toolchain.toml pins nightly (edition=2024); the action installs
-      # default but cargo will pick up the toml override automatically.
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt,clippy
 
-      # Same binary cache as the build job — same key, so a warm build job
-      # primes it for bench too. Skips cargo build when only non-Rust files
-      # changed (workflow edits, docs, baselines, tile.toml tweaks).
-      - name: Cache tile binary
-        id: binary-cache
-        uses: actions/cache@v4
+      - name: Download tile binary
+        uses: actions/download-artifact@v4
         with:
-          path: target/ci/tile
-          key: tile-binary-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'crates/**/*.rs', 'rust-toolchain.toml') }}
+          name: tile-binary
+          path: target/ci
 
-      - uses: Swatinem/rust-cache@v2
-        if: steps.binary-cache.outputs.cache-hit != 'true'
-        with:
-          shared-key: tile-macos
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Build tile CLI
-        if: steps.binary-cache.outputs.cache-hit != 'true'
-        run: cargo build --profile ci -p metaltile-cli
+      - name: Make tile executable
+        run: chmod +x target/ci/tile
 
       - name: Add tile to PATH
         run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
 
-      # Diff is opt-in (`--diff`); the next step runs `tile diff` separately.
-      # `--allow-dirty` is defensive — CI checks out
-      # clean, but a future codegen step could mutate a tracked file.
-      - name: Bench
-        run: tile bench -vv --allow-dirty --json /tmp/bench.json
+      # `--allow-dirty` is defensive — CI checks out clean, but a future
+      # codegen step could mutate a tracked file.
+      - name: Bench (${{ matrix.family }})
+        run: tile bench -vv --allow-dirty --match-group '${{ matrix.family }}' --json /tmp/bench-${{ matrix.family }}.json
 
-      # Snapshot the raw bench JSON into the committed-baseline format.
-      # snap runs *on the runner* so the `device` field reflects the real
-      # chip — letting a maintainer download it and commit it as
-      # `baselines/<chip-slug>.json`.
-      - name: Snapshot bench result
+      # Snapshot this shard's bench JSON.
+      - name: Snapshot bench result (${{ matrix.family }})
+        run: |
+          tile snap \
+            --from /tmp/bench-${{ matrix.family }}.json \
+            -o /tmp/bench-snapshot-${{ matrix.family }}.json \
+            --note "CI shard=${{ matrix.family }} @ ${{ github.sha }} (${{ github.ref_name }})"
+
+      - name: Upload bench shard
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-shard-${{ matrix.family }}
+          path: |
+            /tmp/bench-${{ matrix.family }}.json
+            /tmp/bench-snapshot-${{ matrix.family }}.json
+          if-no-files-found: error
+
+  # ── Job 4: merge shards + diff comment ───────────────────────────────────────
+  # Downloads both shard JSON files, merges them into a combined bench.json,
+  # snaps a unified baseline, and posts the bench-diff PR comment.
+  bench-merge:
+    name: Bench (merge + diff)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    needs: bench
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5.0.0
+
+      - name: Download tile binary
+        uses: actions/download-artifact@v4
+        with:
+          name: tile-binary
+          path: target/ci
+
+      - name: Make tile executable
+        run: chmod +x target/ci/tile
+
+      - name: Add tile to PATH
+        run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
+
+      - name: Download bench shard (ffai)
+        uses: actions/download-artifact@v4
+        with:
+          name: bench-shard-ffai
+          path: /tmp/shards/ffai
+
+      - name: Download bench shard (mlx)
+        uses: actions/download-artifact@v4
+        with:
+          name: bench-shard-mlx
+          path: /tmp/shards/mlx
+
+      # Merge the two shard JSON files by concatenating their `results` arrays.
+      # Both files share the same `device` field (same runner pool).
+      - name: Merge bench shards
+        run: |
+          set -euo pipefail
+          FFAI=/tmp/shards/ffai/bench-ffai.json
+          MLX=/tmp/shards/mlx/bench-mlx.json
+
+          DEVICE=$(jq -r '.device' "$FFAI")
+          jq -s '
+            {
+              device: .[0].device,
+              summary: {
+                total:       ([.[].summary.total]       | add),
+                implemented: ([.[].summary.implemented] | add),
+                correct:     ([.[].summary.correct]     | add),
+                unchecked:   ([.[].summary.unchecked]   | add)
+              },
+              results: ([.[].results] | add)
+            }
+          ' "$FFAI" "$MLX" > /tmp/bench.json
+          echo "Merged: $(jq '.results | length' /tmp/bench.json) results for device $DEVICE"
+
+      # Snapshot the merged result for artifact upload.
+      - name: Snapshot merged bench result
         run: |
           tile snap \
             --from /tmp/bench.json -o /tmp/bench-snapshot.json \

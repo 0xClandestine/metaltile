@@ -227,14 +227,20 @@ pub trait KernelTest: Send + Sync {
 /// Submitted by the `#[test_kernel]` macro; iterated by the test runner.
 pub struct KernelTestEntry {
     pub(crate) inner: &'static dyn KernelTest,
+    pub(crate) file: &'static str,
 }
 
 impl KernelTestEntry {
     /// Wrap a `KernelTest` impl for inventory submission.
-    pub const fn new(inner: &'static dyn KernelTest) -> Self { KernelTestEntry { inner } }
+    pub const fn new(inner: &'static dyn KernelTest, file: &'static str) -> Self {
+        KernelTestEntry { inner, file }
+    }
 
     /// The wrapped `KernelTest` with its `'static` lifetime preserved.
     pub fn test(&self) -> &'static dyn KernelTest { self.inner }
+
+    /// Source file path where the `#[test_kernel]` was defined (via `file!()`).
+    pub fn file(&self) -> &'static str { self.file }
 }
 
 impl AsRef<dyn KernelTest + 'static> for KernelTestEntry {

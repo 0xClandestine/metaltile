@@ -19,8 +19,8 @@ use metaltile::runner::run_kernel_test;
 use rayon::prelude::*;
 
 use crate::{
+    FilterSpec,
     TestArgs,
-    matches_filter,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
@@ -32,8 +32,8 @@ impl<'a> super::TileCommand for TestCommand<'a> {
 }
 
 pub fn run(args: &TestArgs) -> Result<(), crate::CliError> {
-    let _span = tracing::info_span!("test", filter = ?args.filter).entered();
-    let filter = &args.filter;
+    let _span = tracing::info_span!("test", filter = ?args.filter_args.filter).entered();
+    let spec = FilterSpec::from_args(&args.filter_args);
 
     let ctx = match metaltile::Context::new() {
         Ok(c) => c,
@@ -52,16 +52,25 @@ pub fn run(args: &TestArgs) -> Result<(), crate::CliError> {
     // Collect all matching entries up front so we can detect empty results
     // before starting any work and so rayon can index into the slice.
     let entries: Vec<_> = metaltile::harness::registry::all_tests()
-        .filter(|entry| matches_filter(filter.as_deref(), entry.test().name()))
+        .filter(|entry| spec.matches(entry.test().name(), entry.file()))
         .collect();
 
     if entries.is_empty() {
-        if let Some(pattern) = filter {
+        if let Some(pattern) = &args.filter_args.filter {
             eprintln!(
                 "{} {}",
                 paint_stderr("[warn]", Style::new().fg(Color::Yellow).bold()),
                 paint_stderr(
-                    format!("No tests matched --filter {pattern:?}"),
+                    format!("No tests matched filter {pattern:?}"),
+                    Style::new().fg(Color::BrightWhite),
+                ),
+            );
+        } else if !spec.is_empty() {
+            eprintln!(
+                "{} {}",
+                paint_stderr("[warn]", Style::new().fg(Color::Yellow).bold()),
+                paint_stderr(
+                    "No tests matched the given filter flags",
                     Style::new().fg(Color::BrightWhite),
                 ),
             );

@@ -15,6 +15,7 @@ use serde_json::Value;
 use crate::{
     CliError,
     DiffArgs,
+    FilterSpec,
     matches_filter,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
@@ -73,8 +74,9 @@ pub fn run(args: &DiffArgs) -> Result<(), CliError> {
         json.get("results").and_then(|v| v.as_array()).cloned().unwrap_or_default()
     };
 
+    let spec = FilterSpec::from_args(&args.filter_args);
     let opts = RenderOpts {
-        filter: args.filter.as_deref(),
+        filter: spec.legacy_filter(),
         threshold: args.threshold,
         sort: &args.sort,
         only_regressions: args.only_regressions,

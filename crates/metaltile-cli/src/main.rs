@@ -25,6 +25,7 @@ use anstyle::AnsiColor;
 use clap::{Parser, builder::Styles};
 use cmd::TileCommand as _;
 pub use error::CliError;
+use regex::Regex;
 
 const CLAP_STYLES: Styles = Styles::styled()
     .header(AnsiColor::Cyan.on_default().bold())
@@ -65,13 +66,165 @@ enum Command {
     Init(InitArgs),
 }
 
+// ── Shared filter flags ───────────────────────────────────────────────────
+
+/// Filter flags shared across all `tile` subcommands.
+///
+/// Flatten into any `*Args` struct with `#[command(flatten)]`.
+#[derive(clap::Args, Debug, Default)]
+pub(crate) struct FilterArgs {
+    /// Only run entries whose name contains this text (substring, case-insensitive)
+    #[arg(long = "filter", short = 'f')]
+    pub filter: Option<String>,
+    /// Only run entries whose name matches this regex (case-insensitive)
+    #[arg(long = "match-name", alias = "mn")]
+    pub match_name: Option<String>,
+    /// Exclude entries whose name matches this regex (case-insensitive)
+    #[arg(long = "no-match-name", alias = "nmn")]
+    pub no_match_name: Option<String>,
+    /// Only run entries in the given op group (regex, case-insensitive).
+    /// Group is the path component before `/`, e.g. `ffai` from `ffai/gemv`.
+    #[arg(long = "match-group", alias = "mg")]
+    pub match_group: Option<String>,
+    /// Exclude entries in the given op group (regex, case-insensitive)
+    #[arg(long = "no-match-group", alias = "nmg")]
+    pub no_match_group: Option<String>,
+    /// Only run entries whose source file matches this glob pattern
+    #[arg(long = "match-path", alias = "mp")]
+    pub match_path: Option<String>,
+    /// Exclude entries whose source file matches this glob pattern
+    #[arg(long = "no-match-path", alias = "nmp")]
+    pub no_match_path: Option<String>,
+}
+
+// ── FilterSpec (runtime evaluator) ───────────────────────────────────────
+
+/// Compiled filter spec built from [`FilterArgs`]. All predicates are ANDed.
+pub(crate) struct FilterSpec {
+    filter: Option<String>,
+    match_name: Option<Regex>,
+    no_match_name: Option<Regex>,
+    match_group: Option<Regex>,
+    no_match_group: Option<Regex>,
+    match_path: Option<glob::Pattern>,
+    no_match_path: Option<glob::Pattern>,
+}
+
+impl FilterSpec {
+    pub fn from_args(args: &FilterArgs) -> Self {
+        fn re(s: Option<&str>, flag: &str) -> Option<Regex> {
+            s.map(|p| {
+                Regex::new(&format!("(?i){p}")).unwrap_or_else(|e| {
+                    eprintln!("tile: invalid regex for {flag}: {e}");
+                    std::process::exit(2);
+                })
+            })
+        }
+        fn gl(s: Option<&str>, flag: &str) -> Option<glob::Pattern> {
+            s.map(|p| {
+                glob::Pattern::new(p).unwrap_or_else(|e| {
+                    eprintln!("tile: invalid glob for {flag}: {e}");
+                    std::process::exit(2);
+                })
+            })
+        }
+        FilterSpec {
+            filter: args.filter.clone(),
+            match_name: re(args.match_name.as_deref(), "--match-name"),
+            no_match_name: re(args.no_match_name.as_deref(), "--no-match-name"),
+            match_group: re(args.match_group.as_deref(), "--match-group"),
+            no_match_group: re(args.no_match_group.as_deref(), "--no-match-group"),
+            match_path: gl(args.match_path.as_deref(), "--match-path"),
+            no_match_path: gl(args.no_match_path.as_deref(), "--no-match-path"),
+        }
+    }
+
+    /// All filters pass for this name + source file (used for bench/test/build).
+    pub fn matches(&self, name: &str, file: &str) -> bool {
+        self.matches_name(name) && self.matches_file(file)
+    }
+
+    /// Name-only match (used for snap/diff which have no file info).
+    pub fn matches_name(&self, name: &str) -> bool {
+        if let Some(f) = &self.filter
+            && !name.to_ascii_lowercase().contains(&f.to_ascii_lowercase())
+        {
+            return false;
+        }
+        if let Some(re) = &self.match_name
+            && !re.is_match(name)
+        {
+            return false;
+        }
+        if let Some(re) = &self.no_match_name
+            && re.is_match(name)
+        {
+            return false;
+        }
+        let group = extract_op_group(name);
+        if let Some(re) = &self.match_group
+            && !re.is_match(group)
+        {
+            return false;
+        }
+        if let Some(re) = &self.no_match_group
+            && re.is_match(group)
+        {
+            return false;
+        }
+        true
+    }
+
+    fn matches_file(&self, file: &str) -> bool {
+        if let Some(pat) = &self.match_path
+            && !pat.matches(file)
+        {
+            return false;
+        }
+        if let Some(pat) = &self.no_match_path
+            && pat.matches(file)
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Returns the legacy `--filter` string for passing to APIs that take `Option<&str>`.
+    pub fn legacy_filter(&self) -> Option<&str> { self.filter.as_deref() }
+
+    /// True if no filter flags were set (everything passes).
+    pub fn is_empty(&self) -> bool {
+        self.filter.is_none()
+            && self.match_name.is_none()
+            && self.no_match_name.is_none()
+            && self.match_group.is_none()
+            && self.no_match_group.is_none()
+            && self.match_path.is_none()
+            && self.no_match_path.is_none()
+    }
+}
+
+/// Extract the op group from a kernel name:
+/// - `"ffai/gemv"` → `"ffai"`
+/// - `"mt_softmax_f32"` → `"softmax"` (strips `mt_` prefix and dtype suffix)
+/// - `"softmax"` → `"softmax"`
+fn extract_op_group(name: &str) -> &str {
+    if let Some(pos) = name.find('/') {
+        return &name[..pos];
+    }
+    let name = name.strip_prefix("mt_").unwrap_or(name);
+    name.strip_suffix("_f32")
+        .or_else(|| name.strip_suffix("_f16"))
+        .or_else(|| name.strip_suffix("_bf16"))
+        .unwrap_or(name)
+}
+
 // ── Bench ────────────────────────────────────────────────────────────────
 
 #[derive(clap::Args, Debug)]
 struct BenchArgs {
-    /// Only run kernels whose name contains this text
-    #[arg(long = "filter", short = 'f')]
-    filter: Option<String>,
+    #[command(flatten)]
+    filter_args: FilterArgs,
     /// Show occupancy and register profile (-v) and GPU timing stats (-vv).
     #[arg(short = 'v', action = clap::ArgAction::Count)]
     verbose: u8,
@@ -96,18 +249,16 @@ struct BenchArgs {
 
 #[derive(clap::Args, Debug)]
 struct TestArgs {
-    /// Only run tests whose name contains this text
-    #[arg(long = "filter", short = 'f')]
-    filter: Option<String>,
+    #[command(flatten)]
+    filter_args: FilterArgs,
 }
 
 // ── Build ────────────────────────────────────────────────────────────────
 
 #[derive(clap::Args, Debug)]
 struct BuildArgs {
-    /// Only build kernels whose name contains this text
-    #[arg(long = "filter", short = 'f')]
-    filter: Option<String>,
+    #[command(flatten)]
+    filter_args: FilterArgs,
     /// Comma-separated list of dtypes to build (f32,f16,bf16)
     #[arg(long = "dtypes")]
     dtypes: Option<String>,
@@ -136,9 +287,8 @@ struct BuildArgs {
 struct InspectArgs {
     /// Kernel name to inspect (list all if omitted)
     kernel: Option<String>,
-    /// Filter kernels by name substring
-    #[arg(long = "filter")]
-    filter: Option<String>,
+    #[command(flatten)]
+    filter_args: FilterArgs,
     /// Process all kernels
     #[arg(long = "all")]
     all: bool,
@@ -181,9 +331,8 @@ struct SnapArgs {
     /// Attach a note to the snapshot
     #[arg(long = "note")]
     note: Option<String>,
-    /// Only include kernels whose name contains this text
-    #[arg(long = "filter", short = 'f')]
-    filter: Option<String>,
+    #[command(flatten)]
+    filter_args: FilterArgs,
 }
 
 // ── Diff ─────────────────────────────────────────────────────────────────
@@ -194,9 +343,8 @@ struct DiffArgs {
     baseline: String,
     /// Current JSON file (runs bench if omitted)
     current: Option<String>,
-    /// Only show kernels whose name contains this text
-    #[arg(long = "filter", short = 'f')]
-    filter: Option<String>,
+    #[command(flatten)]
+    filter_args: FilterArgs,
     /// Highlight regressions larger than this percentage (default: 5)
     #[arg(long = "threshold", default_value = "5.0")]
     threshold: f64,
@@ -286,7 +434,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Filter helper: case-insensitive substring match.
+/// Legacy filter helper: case-insensitive substring match on a single string.
+/// Prefer [`FilterSpec`] for new code; this remains for `diff` render internals
+/// that only have a name, not a full entry.
 pub(crate) fn matches_filter(filter: Option<&str>, label: &str) -> bool {
     let Some(filter) = filter else {
         return true;

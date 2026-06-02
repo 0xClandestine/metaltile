@@ -28,18 +28,19 @@ use serde_json::Value;
 
 use crate::{
     BenchArgs,
+    FilterSpec,
     cmd::diff as diff_cmd,
     git,
-    matches_filter,
     suite_printer::{ProfileRow, SuitePrinter},
     term::{Color, Style, paint_stderr, paint_stdout},
 };
 
 pub fn run(args: &BenchArgs, warmup_runs: usize, runs: usize) -> Result<(), crate::CliError> {
     let _span =
-        tracing::info_span!("bench", filter = ?args.filter, verbose = args.verbose).entered();
+        tracing::info_span!("bench", filter = ?args.filter_args.filter, verbose = args.verbose)
+            .entered();
     let json_out = &args.json;
-    let filter = &args.filter;
+    let spec = FilterSpec::from_args(&args.filter_args);
     let verbose = args.verbose;
 
     // Refuse to bench on a dirty tree: a stale `target/` binary against
@@ -113,7 +114,7 @@ pub fn run(args: &BenchArgs, warmup_runs: usize, runs: usize) -> Result<(), crat
 
     // When -v, compute occupancy/register profile for each op+dtype (CPU-only, fast).
     let profile_map: Option<HashMap<(String, String), ProfileRow>> =
-        if verbose > 0 { Some(compute_profiles(filter.as_deref())) } else { None };
+        if verbose > 0 { Some(compute_profiles(&spec)) } else { None };
 
     let mut printer = SuitePrinter::new(true);
     printer.set_verbose(verbose);
@@ -122,7 +123,7 @@ pub fn run(args: &BenchArgs, warmup_runs: usize, runs: usize) -> Result<(), crat
     }
     {
         let mut report = |result: &OpResult| {
-            if matches_filter(filter.as_deref(), result.op()) {
+            if spec.matches_name(result.op()) {
                 printer.print_batch(std::slice::from_ref(result));
             }
         };
@@ -136,7 +137,7 @@ pub fn run(args: &BenchArgs, warmup_runs: usize, runs: usize) -> Result<(), crat
         // `#[test_kernel]` harness rather than the old MLX A/B comparison.
         for entry in metaltile::harness::registry::all_benches() {
             let b = entry.bench();
-            if matches_filter(filter.as_deref(), b.name()) {
+            if spec.matches(b.name(), entry.file()) {
                 matched_filter = true;
                 for &dt in b.dtypes() {
                     let _kspan =
@@ -150,14 +151,14 @@ pub fn run(args: &BenchArgs, warmup_runs: usize, runs: usize) -> Result<(), crat
     }
 
     if all.is_empty() {
-        if let Some(pattern) = &filter {
+        if let Some(pattern) = &args.filter_args.filter {
             if matched_filter {
                 eprintln!(
                     "{} {}",
                     paint_stderr("[error]", Style::new().fg(Color::Red).bold()),
                     paint_stderr(
                         format!(
-                            "Kernel matched --filter {pattern:?} but all shapes failed to compile or run"
+                            "Kernel matched filter {pattern:?} but all shapes failed to compile or run"
                         ),
                         Style::new().fg(Color::BrightWhite),
                     ),
@@ -167,11 +168,20 @@ pub fn run(args: &BenchArgs, warmup_runs: usize, runs: usize) -> Result<(), crat
                     "{} {}",
                     paint_stderr("[warn]", Style::new().fg(Color::Yellow).bold()),
                     paint_stderr(
-                        format!("No benchmarks matched --filter {pattern:?}"),
+                        format!("No benchmarks matched filter {pattern:?}"),
                         Style::new().fg(Color::BrightWhite),
                     ),
                 );
             }
+        } else if !spec.is_empty() {
+            eprintln!(
+                "{} {}",
+                paint_stderr("[warn]", Style::new().fg(Color::Yellow).bold()),
+                paint_stderr(
+                    "No benchmarks matched the given filter flags",
+                    Style::new().fg(Color::BrightWhite),
+                ),
+            );
         } else {
             eprintln!(
                 "{} {}",
@@ -264,7 +274,7 @@ pub fn run(args: &BenchArgs, warmup_runs: usize, runs: usize) -> Result<(), crat
         try_auto_diff(
             &runner.device_name,
             &all,
-            args.filter.as_deref(),
+            args.filter_args.filter.as_deref(),
             args.baseline_ref.as_deref(),
         );
     }
@@ -498,7 +508,7 @@ fn pct_style(pct: f64) -> Style {
 /// Runs the standard optimization pipeline + liveness + occupancy estimate.
 /// Parallelized via rayon — the pass pipeline and occupancy analysis are
 /// CPU-only and independent per kernel/dtype, so this scales with core count.
-fn compute_profiles(filter: Option<&str>) -> HashMap<(String, String), ProfileRow> {
+fn compute_profiles(spec: &FilterSpec) -> HashMap<(String, String), ProfileRow> {
     // Collect first so we can par_iter (inventory::iter is sequential).
     let entries: Vec<_> = metaltile::harness::registry::all_benches().collect();
 
@@ -507,7 +517,7 @@ fn compute_profiles(filter: Option<&str>) -> HashMap<(String, String), ProfileRo
         .flat_map_iter(|entry| {
             let b = entry.bench();
             let name = b.name();
-            if !matches_filter(filter, name) {
+            if !spec.matches(name, entry.file()) {
                 return vec![];
             }
             let op_display = name.to_string();
