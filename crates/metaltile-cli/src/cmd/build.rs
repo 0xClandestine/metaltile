@@ -33,6 +33,7 @@ use metaltile_codegen::{
 };
 use metaltile_core::ir::Kernel;
 use metaltile_std::bench_types::DType;
+use rayon::prelude::*;
 
 use crate::{
     BuildArgs,
@@ -179,123 +180,147 @@ pub fn run(args: &BuildArgs) -> Result<(), CliError> {
         );
         return Err(CliError::Io(e));
     }
+
+    // Collect work items for kernels that pass the name filter.
+    struct WorkItem<'a> {
+        name: &'a str,
+        bench: &'static dyn metaltile::harness::bench::KernelBench,
+        dtypes_to_check: Vec<DType>,
+        n_dtypes: usize,
+    }
+    let work_items: Vec<WorkItem<'_>> = sorted
+        .iter()
+        .filter(|(name, _)| matches_filter(filter.as_deref(), name.as_str()))
+        .map(|(name, (bench, dtypes))| {
+            let dtypes_to_check: Vec<DType> = match &dtypes_filter {
+                Some(df) => dtypes.iter().filter(|dt| df.contains(dt)).copied().collect(),
+                None => dtypes.clone(),
+            };
+            WorkItem { name: name.as_str(), bench: *bench, dtypes_to_check, n_dtypes: dtypes.len() }
+        })
+        .collect();
+
+    // Compile all kernels in parallel. Each xcrun metal -c call is ~50-200 ms
+    // and fully independent, so parallelism across N CPU cores gives a near-N×
+    // speedup on the typical 200+ kernel corpus.
+    struct KernelResult {
+        name: String,
+        dtypes_ok: Vec<DType>,
+        dtypes_err: Vec<(DType, String)>,
+        emitted_kernels: Vec<Kernel>,
+        emitted_paths: Vec<PathBuf>,
+        verbose_lines: Vec<String>,
+    }
+
+    let par_results: Vec<KernelResult> = work_items
+        .par_iter()
+        .map(|item| {
+            let _kspan = tracing::debug_span!("kernel", name = item.name).entered();
+            tracing::debug!(kernel = item.name, "building kernel");
+
+            let mut dtypes_ok = Vec::new();
+            let mut dtypes_err = Vec::new();
+            let mut item_kernels = Vec::new();
+            let mut item_paths = Vec::new();
+            let mut verbose_lines = Vec::new();
+
+            for &dt in &item.dtypes_to_check {
+                let setup = item.bench.setup(dt);
+                let mut k = setup.kernel().clone();
+                let mode = k.mode;
+                k.name = monomorphized_name(item.name, dt, item.n_dtypes);
+
+                // Codegen hint so the emitted MSL matches exactly what `tile
+                // bench` measures (and what production callers will dispatch
+                // at, per the kernel's DISPATCH INVARIANTS):
+                //   1. `Generic` dispatch carries TPG on `ShapeSpec`; prefer that.
+                //   2. Other variants (`Sort`, `SdpaVector`, `Attention`, …) carry
+                //      TPG on the `BenchDispatch` variant itself.
+                //   3. `None` (a few Grid3D/Elementwise variants with no fixed
+                //      TPG) → safe slow path. Reduction-mode kernels with no TPG
+                //      signal anywhere fall through to the conservative emit.
+                let expected_tpg = Some(setup.grid().tpg[0]);
+                let generator = generator_for_mode(mode, expected_tpg);
+
+                let msl = match generator.generate(&k) {
+                    Ok(msl) => {
+                        tracing::debug!(kernel = %k.name, dtype = %dt, bytes = msl.len(), "codegen ok");
+                        msl
+                    },
+                    Err(e) => {
+                        tracing::warn!(kernel = %k.name, dtype = %dt, error = %e, "codegen failed");
+                        dtypes_err.push((dt, format!("{e:?}")));
+                        continue;
+                    },
+                };
+
+                // Metal compile-check on macOS (catches invalid simdgroup signatures, etc.)
+                if cfg!(target_os = "macos")
+                    && let Err(e) = check_metal_compile(&msl, &k.name)
+                {
+                    dtypes_err.push((dt, e));
+                    continue;
+                }
+
+                if verbose {
+                    verbose_lines.push(format!("// ══ {} {} ══\n{}", k.name, dt.label(), msl));
+                }
+
+                dtypes_ok.push(dt);
+
+                // Emit on success.
+                if let Some(dir) = &kernels_dir
+                    && emit_kinds.contains(&EmitKind::Msl)
+                {
+                    match write_msl(&k, dir, &generator) {
+                        Ok(path) => item_paths.push(path),
+                        Err(e) => {
+                            dtypes_err.push((dt, e.to_string()));
+                            dtypes_ok.pop();
+                            continue;
+                        },
+                    }
+                }
+                if !emit_kinds.is_empty() {
+                    // Per-kernel opt-in for the `_indirect` Swift wrapper.
+                    if metaltile_std::ffai::dequant_gemv::dequant_gemv_wants_indirect(&k.name) {
+                        k.wants_indirect_variant = true;
+                    }
+                    item_kernels.push(k);
+                }
+            }
+
+            KernelResult {
+                name: item.name.to_string(),
+                dtypes_ok,
+                dtypes_err,
+                emitted_kernels: item_kernels,
+                emitted_paths: item_paths,
+                verbose_lines,
+            }
+        })
+        .collect();
+
+    // Sequential pass: print table rows and accumulate emit artifacts.
+    let mut ok = 0u32;
+    let mut errors = 0u32;
     let mut emitted_kernels: Vec<Kernel> = Vec::new();
     let mut emitted_paths: Vec<PathBuf> = Vec::new();
 
-    let mut ok = 0u32;
-    let mut errors = 0u32;
-
-    for (name, (bench, dtypes)) in &sorted {
-        if !matches_filter(filter.as_deref(), name.as_str()) {
-            continue;
+    for result in par_results {
+        for line in &result.verbose_lines {
+            println!("{line}");
         }
-        let _kspan = tracing::debug_span!("kernel", name).entered();
-        tracing::debug!(kernel = name, "building kernel");
-
-        // Filter dtypes if --dtypes was specified.
-        let dtypes_to_check: Vec<DType> = match &dtypes_filter {
-            Some(df) => dtypes.iter().filter(|dt| df.contains(dt)).copied().collect(),
-            None => dtypes.clone(),
-        };
-
-        let mut dtypes_ok = Vec::new();
-        let mut dtypes_err = Vec::new();
-        for &dt in &dtypes_to_check {
-            // The bench's setup carries the kernel IR with its dispatch mode
-            // already applied (via `.mode()`) and the threadgroup geometry.
-            let setup = bench.setup(dt);
-            let mut k = setup.kernel().clone();
-            let mode = k.mode;
-            // Monomorphize per-dtype name (e.g. `mt_add` → `mt_add_f32`),
-            // unless the kernel is already dtype-specialized (e.g. `mt_argmax_f32`).
-            k.name = monomorphized_name(name, dt, dtypes.len());
-
-            // Codegen hint so the emitted MSL matches exactly what `tile
-            // bench` measures (and what production callers will dispatch
-            // at, per the kernel's DISPATCH INVARIANTS):
-            //   1. `Generic` dispatch carries TPG on `ShapeSpec`; prefer that.
-            //   2. Other variants (`Sort`, `SdpaVector`, `Attention`, …) carry
-            //      TPG on the `BenchDispatch` variant itself.
-            //   3. `None` (a few Grid3D/Elementwise variants with no fixed
-            //      TPG) → safe slow path. Reduction-mode kernels with no TPG
-            //      signal anywhere fall through to the conservative emit.
-            // Threadgroup-size hint for codegen comes straight from the bench's
-            // dispatch geometry, matching exactly what `tile bench` measures.
-            let expected_tpg = Some(setup.grid().tpg[0]);
-            let generator = generator_for_mode(mode, expected_tpg);
-
-            // Compile-check via generate.
-            let msl_result = generator.generate(&k);
-            let msl = match msl_result {
-                Ok(msl) => {
-                    tracing::debug!(kernel = %k.name, dtype = %dt, bytes = msl.len(), "codegen ok");
-                    msl
-                },
-                Err(e) => {
-                    tracing::warn!(kernel = %k.name, dtype = %dt, error = %e, "codegen failed");
-                    dtypes_err.push((dt, format!("{e:?}")));
-                    errors += 1;
-                    continue;
-                },
-            };
-
-            // Metal compile-check on macOS (catches invalid simdgroup signatures, etc.)
-            if cfg!(target_os = "macos") {
-                let air_check = check_metal_compile(&msl, &k.name);
-                if let Err(e) = air_check {
-                    dtypes_err.push((dt, e));
-                    errors += 1;
-                    continue;
-                }
-            }
-
-            dtypes_ok.push(dt);
-
-            // Emit on success.
-            if let Some(dir) = &kernels_dir
-                && emit_kinds.contains(&EmitKind::Msl)
-            {
-                match write_msl(&k, dir, &generator) {
-                    Ok(path) => emitted_paths.push(path),
-                    Err(e) => {
-                        eprintln!(
-                            "  {} emit msl for {}: {}",
-                            paint_stderr("error:", Style::new().fg(Color::Red).bold()),
-                            k.name,
-                            e
-                        );
-                        return Err(CliError::Other(e.to_string()));
-                    },
-                }
-            }
-            if !emit_kinds.is_empty() {
-                // Per-kernel opt-in for the `_indirect` Swift wrapper.
-                // Mirrors the `tile emit` path — kernels declare their
-                // own indirect-dispatch eligibility via the std helper.
-                // Without this, `tile build --emit swift` produces only
-                // direct wrappers and FFAI's GPU-router indirect paths
-                // fail to compile.
-                if metaltile_std::ffai::dequant_gemv::dequant_gemv_wants_indirect(&k.name) {
-                    k.wants_indirect_variant = true;
-                }
-                emitted_kernels.push(k.clone());
-            }
-
-            if verbose && let Ok(msl) = generator.generate(&k) {
-                println!("// ══ {} {} ══\n{}", k.name, dt.label(), msl);
-            }
-        }
-
-        if !dtypes_err.is_empty() {
+        if !result.dtypes_err.is_empty() {
             let kernel_cell =
-                paint_stdout(pad_left(name, name_w), Style::new().fg(Color::Cyan).bold());
+                paint_stdout(pad_left(&result.name, name_w), Style::new().fg(Color::Cyan).bold());
             let dt_str: String =
-                dtypes_err.iter().map(|(dt, _)| dt.label()).collect::<Vec<_>>().join("/");
+                result.dtypes_err.iter().map(|(dt, _)| dt.label()).collect::<Vec<_>>().join("/");
             let dt_cell =
                 paint_stdout(pad_left(&dt_str, dt_w), Style::new().fg(Color::Blue).bold());
             let ck_cell = paint_stderr("✗", Style::new().fg(Color::Red).bold());
             println!("  {kernel_cell} {sep} {dt_cell} {sep}  {ck_cell}");
-            for (dt, err_msg) in &dtypes_err {
+            for (dt, err_msg) in &result.dtypes_err {
                 let label = format!("{}:", dt.label());
                 eprintln!(
                     "    {} {}",
@@ -306,16 +331,20 @@ pub fn run(args: &BuildArgs) -> Result<(), CliError> {
                     ),
                 );
             }
-        } else if !dtypes_ok.is_empty() {
+            errors += result.dtypes_err.len() as u32;
+        } else if !result.dtypes_ok.is_empty() {
             ok += 1;
             let kernel_cell =
-                paint_stdout(pad_left(name, name_w), Style::new().fg(Color::Cyan).bold());
-            let dtype_str = dtypes_ok.iter().map(|dt| dt.label()).collect::<Vec<_>>().join("/");
+                paint_stdout(pad_left(&result.name, name_w), Style::new().fg(Color::Cyan).bold());
+            let dtype_str =
+                result.dtypes_ok.iter().map(|dt| dt.label()).collect::<Vec<_>>().join("/");
             let dt_cell =
                 paint_stdout(pad_left(&dtype_str, dt_w), Style::new().fg(Color::Blue).bold());
             let ck_cell = paint_stdout("✓", Style::new().fg(Color::Green).bold());
             println!("  {kernel_cell} {sep} {dt_cell} {sep}  {ck_cell}");
         }
+        emitted_kernels.extend(result.emitted_kernels);
+        emitted_paths.extend(result.emitted_paths);
     }
 
     // ─── Emit pass (manifest, Swift wrappers, metallib) ─────────────────

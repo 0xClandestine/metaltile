@@ -23,6 +23,7 @@ use metaltile_std::bench_types::{
     set_result_reporter,
     validate_results,
 };
+use rayon::prelude::*;
 use serde_json::Value;
 
 use crate::{
@@ -495,46 +496,54 @@ fn pct_style(pct: f64) -> Style {
 
 /// Compile-time profile for each op (first dtypes entry, usually f32).
 /// Runs the standard optimization pipeline + liveness + occupancy estimate.
+/// Parallelized via rayon — the pass pipeline and occupancy analysis are
+/// CPU-only and independent per kernel/dtype, so this scales with core count.
 fn compute_profiles(filter: Option<&str>) -> HashMap<(String, String), ProfileRow> {
-    // Key: (op_display, dtype_label), e.g. ("unary (acos)", "f32")
-    let mut map = HashMap::new();
-    for entry in metaltile::harness::registry::all_benches() {
-        let b = entry.bench();
-        let name = b.name();
-        if !matches_filter(filter, name) {
-            continue;
-        }
-        let op_display = name.to_string();
-        for &dt in b.dtypes() {
-            // Mode is already baked into the bench's setup IR.
-            let mut k = b.setup(dt).kernel().clone();
-            if passes::run_passes(&mut k, &passes::standard_pipeline()).is_err() {
-                continue;
+    // Collect first so we can par_iter (inventory::iter is sequential).
+    let entries: Vec<_> = metaltile::harness::registry::all_benches().collect();
+
+    entries
+        .par_iter()
+        .flat_map_iter(|entry| {
+            let b = entry.bench();
+            let name = b.name();
+            if !matches_filter(filter, name) {
+                return vec![];
             }
-            let reg_est = passes::register_estimate::estimate_registers(&k);
-            let candidates: Vec<(u32, Option<u32>)> =
-                [64u32, 128, 256, 512, 1024].iter().map(|&s| (s, None)).collect();
-            let (occ_pct, bottleneck) =
-                if let Some((_tg, est)) = occupancy::best_threadgroup_size(&k, &candidates) {
-                    (est.occupancy_pct, est.bottleneck)
-                } else {
-                    continue;
-                };
-            let bottleneck_label = match bottleneck {
-                Bottleneck::ThreadLimited => "thread-limited",
-                Bottleneck::RegisterLimited => "register-limited",
-                Bottleneck::MemoryLimited => "tgmem-limited",
-                _ => "unknown",
-            };
-            let dtype_label = metaltile_std::bench_types::dtype_label(dt).to_string();
-            map.insert((op_display.clone(), dtype_label), ProfileRow {
-                occ_pct,
-                regs_per_thread: reg_est.regs_per_thread,
-                bottleneck: bottleneck_label,
-            });
-        }
-    }
-    map
+            let op_display = name.to_string();
+            b.dtypes()
+                .iter()
+                .filter_map(|&dt| {
+                    let mut k = b.setup(dt).kernel().clone();
+                    if passes::run_passes(&mut k, &passes::standard_pipeline()).is_err() {
+                        return None;
+                    }
+                    let reg_est = passes::register_estimate::estimate_registers(&k);
+                    let candidates: Vec<(u32, Option<u32>)> =
+                        [64u32, 128, 256, 512, 1024].iter().map(|&s| (s, None)).collect();
+                    let (occ_pct, bottleneck) = if let Some((_tg, est)) =
+                        occupancy::best_threadgroup_size(&k, &candidates)
+                    {
+                        (est.occupancy_pct, est.bottleneck)
+                    } else {
+                        return None;
+                    };
+                    let bottleneck_label = match bottleneck {
+                        Bottleneck::ThreadLimited => "thread-limited",
+                        Bottleneck::RegisterLimited => "register-limited",
+                        Bottleneck::MemoryLimited => "tgmem-limited",
+                        _ => "unknown",
+                    };
+                    let dtype_label = metaltile_std::bench_types::dtype_label(dt).to_string();
+                    Some(((op_display.clone(), dtype_label), ProfileRow {
+                        occ_pct,
+                        regs_per_thread: reg_est.regs_per_thread,
+                        bottleneck: bottleneck_label,
+                    }))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 // ── In-process bench runner (bridges old OpResult API to new GpuRunner) ───────

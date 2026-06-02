@@ -45,6 +45,7 @@ toml = "0.8"
 figment = { version = "0.10", features = ["toml", "env"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 inventory = "0.3"
+rayon = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
 
