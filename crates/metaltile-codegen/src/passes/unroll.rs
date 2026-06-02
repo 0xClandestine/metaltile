@@ -108,14 +108,66 @@ impl super::Pass for UnrollPass {
 // helpers
 // ---------------------------------------------------------------------------
 
-fn has_nested_loop_or_barrier(block: &Block) -> bool {
-    block.ops.iter().any(|op| op.is_loop() || op.is_barrier())
+fn has_nested_loop_or_barrier(block: &Block, blocks: &FxHashMap<BlockId, Block>) -> bool {
+    block.ops.iter().any(|op| {
+        if op.is_loop() || op.is_barrier() {
+            return true;
+        }
+        if let Some((_, then_id, else_id)) = op.as_if() {
+            if blocks.get(&then_id).is_some_and(|b| has_nested_loop_or_barrier(b, blocks)) {
+                return true;
+            }
+            if let Some(eid) = else_id {
+                if blocks.get(&eid).is_some_and(|b| has_nested_loop_or_barrier(b, blocks)) {
+                    return true;
+                }
+            }
+        }
+        false
+    })
 }
 
 fn find_const_in_block(block: &Block, vid: ValueId) -> Option<i64> {
     block.ops.iter().enumerate().find_map(|(i, op)| {
         if block.results.get(i) == Some(&Some(vid)) { op.as_const() } else { None }
     })
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+/// Recursively collect every nested block reachable from `block`'s ops
+/// (Op::If then/else, Op::Loop body) and assign each a fresh BlockId.
+/// Populates `block_map` with old_id → new_id for every reachable block.
+fn collect_nested_block_ids_deep(
+    block: &Block,
+    blocks: &FxHashMap<BlockId, Block>,
+    block_map: &mut BTreeMap<BlockId, BlockId>,
+    next_block_id: &mut u32,
+) {
+    for op in &block.ops {
+        let mut children: Vec<BlockId> = Vec::new();
+        if let Some((_, then_id, else_id)) = op.as_if() {
+            children.push(then_id);
+            if let Some(eid) = else_id {
+                children.push(eid);
+            }
+        } else if let Some((_, _, _, _, body_id)) = op.as_loop() {
+            children.push(body_id);
+        }
+        for old_id in children {
+            if block_map.contains_key(&old_id) {
+                continue;
+            }
+            let new_id = BlockId::new(*next_block_id);
+            *next_block_id += 1;
+            block_map.insert(old_id, new_id);
+            if let Some(child) = blocks.get(&old_id) {
+                collect_nested_block_ids_deep(child, blocks, block_map, next_block_id);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +213,7 @@ fn unroll_block(
             if tc <= 0 || tc > factor as i64 {
                 continue;
             };
-            if has_nested_loop_or_barrier(body_block) {
+            if has_nested_loop_or_barrier(body_block, blocks) {
                 continue;
             };
             plans.push(Plan {
@@ -222,46 +274,20 @@ fn unroll_block(
                 }
             }
 
-            // ---- clone and remap each body op -----------------------------
-            // For each `Op::If` / nested `Op::Loop` op we hit, the
-            // referenced `then_block` / `else_block` / loop `body` lives
-            // in `blocks` and its contents reference SSA values from the
-            // loop body (e.g. the loop iv).  Each unrolled iteration
-            // needs a FRESH copy of that nested block with the iteration's
-            // `vid_map` applied — otherwise every cloned `Op::If` points
-            // at the same shared block whose ops still reference the
-            // pre-remap value IDs, producing dangling `o[v1007]` /
-            // `partial_base + v191` references in the emitted MSL.
-            let pending_clones: Vec<(BlockId, BlockId)> = body
-                .ops
-                .iter()
-                .flat_map(|op| {
-                    let mut ids = Vec::new();
-                    if let Some((_, then_block, else_block)) = op.as_if() {
-                        ids.push(then_block);
-                        if let Some(eb) = else_block {
-                            ids.push(eb);
-                        }
-                    } else if let Some((_, _, _, _, body_id)) = op.as_loop() {
-                        ids.push(body_id);
-                    }
-                    ids
-                })
-                .map(|old_id| {
-                    let new_id = BlockId::new(*next_block_id);
-                    *next_block_id += 1;
-                    (old_id, new_id)
-                })
-                .collect();
-
+            // ---- deep-clone all nested blocks for this iteration ----------
+            // Build a complete block_map covering ALL depths of nesting
+            // (If→then/else→inner-If→... and Loop→body) so every cloned
+            // Op::If / Op::Loop gets a fresh block that has the iteration's
+            // vid_map applied throughout.  A shallow one-level clone leaves
+            // level-2+ blocks pointing at the originals whose VID references
+            // have already been remapped away, producing "undeclared
+            // identifier" errors in the emitted MSL.
             let mut block_map: BTreeMap<BlockId, BlockId> = BTreeMap::new();
-            for (old_id, new_id) in &pending_clones {
-                let Some(src_block) = blocks.get(old_id).cloned() else { continue };
-                block_map.insert(*old_id, *new_id);
+            collect_nested_block_ids_deep(&body, blocks, &mut block_map, next_block_id);
 
-                // For each op in the source block, also allocate fresh
-                // ValueIds for its results so cross-iteration writes to
-                // shared state stay distinct.
+            for (&old_id, &new_id) in &block_map {
+                let Some(src_block) = blocks.get(&old_id).cloned() else { continue };
+
                 let mut nested_vid_map = vid_map.clone();
                 for old_v in src_block.results.iter().flatten() {
                     let new_v = ValueId::new(*next_vid);
@@ -269,17 +295,35 @@ fn unroll_block(
                     nested_vid_map.insert(*old_v, new_v);
                 }
 
-                let mut cloned = Block::new(*new_id);
+                let mut cloned = Block::new(new_id);
                 cloned.names = src_block.names.clone();
                 for (idx, src_op) in src_block.ops.iter().enumerate() {
                     let mut new_op = src_op.clone();
                     remap::remap_value_ids(&mut new_op, &nested_vid_map);
+                    // Rewrite nested BlockIds in cloned ops.
+                    match &mut new_op {
+                        Op::If { then_block, else_block, .. } => {
+                            if let Some(nb) = block_map.get(then_block) {
+                                *then_block = *nb;
+                            }
+                            if let Some(eb) = else_block.as_mut()
+                                && let Some(nb) = block_map.get(eb)
+                            {
+                                *eb = *nb;
+                            }
+                        },
+                        Op::Loop { body, .. } =>
+                            if let Some(nb) = block_map.get(body) {
+                                *body = *nb;
+                            },
+                        _ => {},
+                    }
                     let new_result = src_block.results[idx]
                         .map(|old_v| nested_vid_map.get(&old_v).copied().unwrap_or(old_v));
                     cloned.ops.push(new_op);
                     cloned.results.push(new_result);
                 }
-                blocks.insert(*new_id, cloned);
+                blocks.insert(new_id, cloned);
             }
 
             for j in 0..body_n {
