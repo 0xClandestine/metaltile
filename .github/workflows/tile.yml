@@ -103,7 +103,7 @@ jobs:
   # running cargo themselves — one build per workflow run, not one per job.
   compile:
     name: Compile
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5.0.0
@@ -146,7 +146,7 @@ jobs:
   # are busy in parallel.
   build:
     name: Build
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 30
     needs: compile
     steps:
@@ -172,7 +172,7 @@ jobs:
   # Runs in parallel with build and the bench shards.
   test:
     name: Test
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 30
     needs: compile
     steps:
@@ -207,7 +207,7 @@ jobs:
   # shards are spelled out as separate jobs.
   bench-ffai:
     name: Bench (ffai)
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 60
     needs: [compile, changes]
     if: >-
@@ -252,7 +252,7 @@ jobs:
 
   bench-mlx:
     name: Bench (mlx)
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 60
     needs: [compile, changes]
     if: >-
@@ -302,7 +302,7 @@ jobs:
   # succeeded), or on a manual workflow_dispatch.
   bench-merge:
     name: Bench (merge + diff)
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 15
     needs: [bench-ffai, bench-mlx, changes]
     if: >-
