@@ -388,7 +388,7 @@ impl RunnerHarness {
                     let expected_tpg = Some(setup.grid().tpg[0]);
                     let generator = generator_for_mode(mode, expected_tpg);
 
-                    let msl = match generator.generate(&k) {
+                    let _msl = match generator.generate(&k) {
                         Ok(msl) => msl,
                         Err(e) => {
                             dtypes_err.push(BuildError {
@@ -401,7 +401,7 @@ impl RunnerHarness {
 
                     // Metal compile-check via xcrun (macOS only).
                     #[cfg(target_os = "macos")]
-                    if let Err(e) = build_metal_compile_check(&msl, &k.name, sdk) {
+                    if let Err(e) = build_metal_compile_check(&_msl, &k.name, sdk) {
                         dtypes_err.push(BuildError {
                             dtype: format!("{dt:?}").to_lowercase(),
                             message: e,
