@@ -4680,8 +4680,8 @@ pub mod kernel_benches {
     }
 
     macro_rules! conv3d_mma_bench_fmt {
-        ($fn:ident, $kernel:path, $fmt:expr, $name:literal) => {
-            #[bench(name = $name, dtypes = [f32, f16, bf16])]
+        ($fn:ident, $kernel:path, $fmt:expr) => {
+            #[bench(dtypes = [f32, f16, bf16])]
             fn $fn(dt: DType) -> BenchSetup {
                 // in_ch=64, out_ch=256, 2×2×2 kernel on a 9×9×9 volume →
                 // out 8×8×8, n_voxels=512; C=512 (÷ 16/32/64).
@@ -4689,179 +4689,54 @@ pub mod kernel_benches {
             }
         };
     }
-    conv3d_mma_bench_fmt!(
-        bench_mxfp4,
-        mt_mxfp4_conv3d_mma::kernel_ir_for,
-        QFormat::Mxfp4,
-        "ffai/conv3d_mma_block/mxfp4"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_nvfp4,
-        mt_nvfp4_conv3d_mma::kernel_ir_for,
-        QFormat::Nvfp4,
-        "ffai/conv3d_mma_block/nvfp4"
-    );
+    conv3d_mma_bench_fmt!(bench_mxfp4, mt_mxfp4_conv3d_mma::kernel_ir_for, QFormat::Mxfp4);
+    conv3d_mma_bench_fmt!(bench_nvfp4, mt_nvfp4_conv3d_mma::kernel_ir_for, QFormat::Nvfp4);
     conv3d_mma_bench_fmt!(
         bench_mxfp8_e4m3,
         mt_mxfp8_e4m3_conv3d_mma::kernel_ir_for,
-        QFormat::Mxfp8E4,
-        "ffai/conv3d_mma_block/mxfp8_e4m3"
+        QFormat::Mxfp8E4
     );
     conv3d_mma_bench_fmt!(
         bench_mxfp8_e5m2,
         mt_mxfp8_e5m2_conv3d_mma::kernel_ir_for,
-        QFormat::Mxfp8E5,
-        "ffai/conv3d_mma_block/mxfp8_e5m2"
+        QFormat::Mxfp8E5
     );
-    conv3d_mma_bench_fmt!(
-        bench_nvfp8,
-        mt_nvfp8_conv3d_mma::kernel_ir_for,
-        QFormat::Nvfp8,
-        "ffai/conv3d_mma_block/nvfp8"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_fp4,
-        mt_fp4_conv3d_mma::kernel_ir_for,
-        QFormat::Fp4,
-        "ffai/conv3d_mma_block/fp4"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_fp8_e5m2,
-        mt_fp8_e5m2_conv3d_mma::kernel_ir_for,
-        QFormat::Fp8E5m2,
-        "ffai/conv3d_mma_block/fp8_e5m2"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_int8,
-        mt_int8_conv3d_mma::kernel_ir_for,
-        QFormat::Int8,
-        "ffai/conv3d_mma_block/int8"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_int2,
-        mt_int2_conv3d_mma::kernel_ir_for,
-        QFormat::Int2,
-        "ffai/conv3d_mma_block/int2"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_int3,
-        mt_int3_conv3d_mma::kernel_ir_for,
-        QFormat::Int3,
-        "ffai/conv3d_mma_block/int3"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_int4,
-        mt_int4_conv3d_mma::kernel_ir_for,
-        QFormat::Int4,
-        "ffai/conv3d_mma_block/int4"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_int5,
-        mt_int5_conv3d_mma::kernel_ir_for,
-        QFormat::Int5,
-        "ffai/conv3d_mma_block/int5"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_int6,
-        mt_int6_conv3d_mma::kernel_ir_for,
-        QFormat::Int6,
-        "ffai/conv3d_mma_block/int6"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_mxint2,
-        mt_mxint2_conv3d_mma::kernel_ir_for,
-        QFormat::Mxint2,
-        "ffai/conv3d_mma_block/mxint2"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_mxint3,
-        mt_mxint3_conv3d_mma::kernel_ir_for,
-        QFormat::Mxint3,
-        "ffai/conv3d_mma_block/mxint3"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_mxint4,
-        mt_mxint4_conv3d_mma::kernel_ir_for,
-        QFormat::Mxint4,
-        "ffai/conv3d_mma_block/mxint4"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_mxint5,
-        mt_mxint5_conv3d_mma::kernel_ir_for,
-        QFormat::Mxint5,
-        "ffai/conv3d_mma_block/mxint5"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_mxint6,
-        mt_mxint6_conv3d_mma::kernel_ir_for,
-        QFormat::Mxint6,
-        "ffai/conv3d_mma_block/mxint6"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_mxint8,
-        mt_mxint8_conv3d_mma::kernel_ir_for,
-        QFormat::Mxint8,
-        "ffai/conv3d_mma_block/mxint8"
-    );
+    conv3d_mma_bench_fmt!(bench_nvfp8, mt_nvfp8_conv3d_mma::kernel_ir_for, QFormat::Nvfp8);
+    conv3d_mma_bench_fmt!(bench_fp4, mt_fp4_conv3d_mma::kernel_ir_for, QFormat::Fp4);
+    conv3d_mma_bench_fmt!(bench_fp8_e5m2, mt_fp8_e5m2_conv3d_mma::kernel_ir_for, QFormat::Fp8E5m2);
+    conv3d_mma_bench_fmt!(bench_int8, mt_int8_conv3d_mma::kernel_ir_for, QFormat::Int8);
+    conv3d_mma_bench_fmt!(bench_int2, mt_int2_conv3d_mma::kernel_ir_for, QFormat::Int2);
+    conv3d_mma_bench_fmt!(bench_int3, mt_int3_conv3d_mma::kernel_ir_for, QFormat::Int3);
+    conv3d_mma_bench_fmt!(bench_int4, mt_int4_conv3d_mma::kernel_ir_for, QFormat::Int4);
+    conv3d_mma_bench_fmt!(bench_int5, mt_int5_conv3d_mma::kernel_ir_for, QFormat::Int5);
+    conv3d_mma_bench_fmt!(bench_int6, mt_int6_conv3d_mma::kernel_ir_for, QFormat::Int6);
+    conv3d_mma_bench_fmt!(bench_mxint2, mt_mxint2_conv3d_mma::kernel_ir_for, QFormat::Mxint2);
+    conv3d_mma_bench_fmt!(bench_mxint3, mt_mxint3_conv3d_mma::kernel_ir_for, QFormat::Mxint3);
+    conv3d_mma_bench_fmt!(bench_mxint4, mt_mxint4_conv3d_mma::kernel_ir_for, QFormat::Mxint4);
+    conv3d_mma_bench_fmt!(bench_mxint5, mt_mxint5_conv3d_mma::kernel_ir_for, QFormat::Mxint5);
+    conv3d_mma_bench_fmt!(bench_mxint6, mt_mxint6_conv3d_mma::kernel_ir_for, QFormat::Mxint6);
+    conv3d_mma_bench_fmt!(bench_mxint8, mt_mxint8_conv3d_mma::kernel_ir_for, QFormat::Mxint8);
     // ── FP16-scale twins (fp8_e4m3_f16 reuses the nvfp8_f16 kernel) ──
     conv3d_mma_bench_fmt!(
         bench_nvfp8_f16,
         mt_nvfp8_f16_conv3d_mma::kernel_ir_for,
-        QFormat::Nvfp8F16,
-        "ffai/conv3d_mma_block/nvfp8_f16"
+        QFormat::Nvfp8F16
     );
     conv3d_mma_bench_fmt!(
         bench_fp8_e4m3_f16,
         mt_nvfp8_f16_conv3d_mma::kernel_ir_for,
-        QFormat::Fp8E4m3F16,
-        "ffai/conv3d_mma_block/fp8_e4m3_f16"
+        QFormat::Fp8E4m3F16
     );
-    conv3d_mma_bench_fmt!(
-        bench_fp4_f16,
-        mt_fp4_f16_conv3d_mma::kernel_ir_for,
-        QFormat::Fp4F16,
-        "ffai/conv3d_mma_block/fp4_f16"
-    );
+    conv3d_mma_bench_fmt!(bench_fp4_f16, mt_fp4_f16_conv3d_mma::kernel_ir_for, QFormat::Fp4F16);
     conv3d_mma_bench_fmt!(
         bench_fp8_e5m2_f16,
         mt_fp8_e5m2_f16_conv3d_mma::kernel_ir_for,
-        QFormat::Fp8E5m2F16,
-        "ffai/conv3d_mma_block/fp8_e5m2_f16"
+        QFormat::Fp8E5m2F16
     );
-    conv3d_mma_bench_fmt!(
-        bench_int2_f16,
-        mt_int2_f16_conv3d_mma::kernel_ir_for,
-        QFormat::Int2F16,
-        "ffai/conv3d_mma_block/int2_f16"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_int3_f16,
-        mt_int3_f16_conv3d_mma::kernel_ir_for,
-        QFormat::Int3F16,
-        "ffai/conv3d_mma_block/int3_f16"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_int4_f16,
-        mt_int4_f16_conv3d_mma::kernel_ir_for,
-        QFormat::Int4F16,
-        "ffai/conv3d_mma_block/int4_f16"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_int5_f16,
-        mt_int5_f16_conv3d_mma::kernel_ir_for,
-        QFormat::Int5F16,
-        "ffai/conv3d_mma_block/int5_f16"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_int6_f16,
-        mt_int6_f16_conv3d_mma::kernel_ir_for,
-        QFormat::Int6F16,
-        "ffai/conv3d_mma_block/int6_f16"
-    );
-    conv3d_mma_bench_fmt!(
-        bench_int8_f16,
-        mt_int8_f16_conv3d_mma::kernel_ir_for,
-        QFormat::Int8F16,
-        "ffai/conv3d_mma_block/int8_f16"
-    );
+    conv3d_mma_bench_fmt!(bench_int2_f16, mt_int2_f16_conv3d_mma::kernel_ir_for, QFormat::Int2F16);
+    conv3d_mma_bench_fmt!(bench_int3_f16, mt_int3_f16_conv3d_mma::kernel_ir_for, QFormat::Int3F16);
+    conv3d_mma_bench_fmt!(bench_int4_f16, mt_int4_f16_conv3d_mma::kernel_ir_for, QFormat::Int4F16);
+    conv3d_mma_bench_fmt!(bench_int5_f16, mt_int5_f16_conv3d_mma::kernel_ir_for, QFormat::Int5F16);
+    conv3d_mma_bench_fmt!(bench_int6_f16, mt_int6_f16_conv3d_mma::kernel_ir_for, QFormat::Int6F16);
+    conv3d_mma_bench_fmt!(bench_int8_f16, mt_int8_f16_conv3d_mma::kernel_ir_for, QFormat::Int8F16);
 }

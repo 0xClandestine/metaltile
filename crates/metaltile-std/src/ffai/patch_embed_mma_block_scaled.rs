@@ -4278,7 +4278,7 @@ pub mod kernel_benches {
             )
     }
 
-    #[bench(name = "ffai/patch_embed_mma_block/mxfp4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxfp4_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_mxfp4_patch_embed_mma::kernel_ir_for(dt),
@@ -4292,7 +4292,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/nvfp4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_nvfp4_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_nvfp4_patch_embed_mma::kernel_ir_for(dt),
@@ -4306,7 +4306,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/fp4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp4_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_fp4_patch_embed_mma::kernel_ir_for(dt),
@@ -4320,7 +4320,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/mxfp8_e4m3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxfp8_e4m3_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_mxfp8_e4m3_patch_embed_mma::kernel_ir_for(dt),
@@ -4334,7 +4334,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/mxfp8_e5m2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxfp8_e5m2_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_mxfp8_e5m2_patch_embed_mma::kernel_ir_for(dt),
@@ -4348,7 +4348,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/nvfp8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_nvfp8_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_nvfp8_patch_embed_mma::kernel_ir_for(dt),
@@ -4362,7 +4362,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/fp8_e5m2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e5m2_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_fp8_e5m2_patch_embed_mma::kernel_ir_for(dt),
@@ -4376,7 +4376,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/int8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int8_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int8_patch_embed_mma::kernel_ir_for(dt),
@@ -4393,7 +4393,7 @@ pub mod kernel_benches {
     // Symmetric sub-byte ints (FP32 group scale) + MXINT (E8M0 block scale) +
     // MXINT8 (8-bit, E8M0). patch_dim=256 is a multiple of 32 and every block
     // size, and word-aligned for every bit width.
-    #[bench(name = "ffai/patch_embed_mma_block/int2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int2_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int2_patch_embed_mma::kernel_ir_for(dt),
@@ -4407,7 +4407,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/int3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int3_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int3_patch_embed_mma::kernel_ir_for(dt),
@@ -4421,7 +4421,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/int4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int4_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int4_patch_embed_mma::kernel_ir_for(dt),
@@ -4435,7 +4435,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/int5", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int5_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int5_patch_embed_mma::kernel_ir_for(dt),
@@ -4449,7 +4449,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/int6", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int6_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int6_patch_embed_mma::kernel_ir_for(dt),
@@ -4463,7 +4463,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/mxint2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint2_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_mxint2_patch_embed_mma::kernel_ir_for(dt),
@@ -4477,7 +4477,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/mxint3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint3_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_mxint3_patch_embed_mma::kernel_ir_for(dt),
@@ -4491,7 +4491,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/mxint4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint4_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_mxint4_patch_embed_mma::kernel_ir_for(dt),
@@ -4505,7 +4505,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/mxint5", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint5_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_mxint5_patch_embed_mma::kernel_ir_for(dt),
@@ -4519,7 +4519,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/mxint6", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint6_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_mxint6_patch_embed_mma::kernel_ir_for(dt),
@@ -4533,7 +4533,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/mxint8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint8_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_mxint8_patch_embed_mma::kernel_ir_for(dt),
@@ -4550,7 +4550,7 @@ pub mod kernel_benches {
 
     // FP16-scale twins — same shapes / FLOPs as their FP32 siblings; only the
     // scale buffer binds as f16 (`mma_bench` picks DType::F16 off `scale_kind`).
-    #[bench(name = "ffai/patch_embed_mma_block/nvfp8_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_nvfp8_f16_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_nvfp8_f16_patch_embed_mma::kernel_ir_for(dt),
@@ -4564,7 +4564,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/fp8_e4m3_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e4m3_f16_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_nvfp8_f16_patch_embed_mma::kernel_ir_for(dt),
@@ -4578,7 +4578,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/fp4_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp4_f16_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_fp4_f16_patch_embed_mma::kernel_ir_for(dt),
@@ -4592,7 +4592,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/fp8_e5m2_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e5m2_f16_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_fp8_e5m2_f16_patch_embed_mma::kernel_ir_for(dt),
@@ -4606,7 +4606,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/int2_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int2_f16_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int2_f16_patch_embed_mma::kernel_ir_for(dt),
@@ -4620,7 +4620,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/int3_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int3_f16_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int3_f16_patch_embed_mma::kernel_ir_for(dt),
@@ -4634,7 +4634,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/int4_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int4_f16_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int4_f16_patch_embed_mma::kernel_ir_for(dt),
@@ -4648,7 +4648,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/int5_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int5_f16_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int5_f16_patch_embed_mma::kernel_ir_for(dt),
@@ -4662,7 +4662,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/int6_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int6_f16_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int6_f16_patch_embed_mma::kernel_ir_for(dt),
@@ -4676,7 +4676,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/patch_embed_mma_block/int8_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int8_f16_patch_embed_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int8_f16_patch_embed_mma::kernel_ir_for(dt),

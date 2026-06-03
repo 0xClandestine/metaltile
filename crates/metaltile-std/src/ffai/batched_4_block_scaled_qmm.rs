@@ -2748,7 +2748,7 @@ pub mod kernel_benches {
             ))
     }
 
-    #[bench(name = "ffai/batched_4_block_qmm/mxfp4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxfp4_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_mxfp4_batched_4_qmm::kernel_ir_for(dt),
@@ -2762,7 +2762,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/nvfp4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_nvfp4_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_nvfp4_batched_4_qmm::kernel_ir_for(dt),
@@ -2776,7 +2776,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/mxfp8_e4m3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxfp8_e4m3_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_mxfp8_e4m3_batched_4_qmm::kernel_ir_for(dt),
@@ -2790,7 +2790,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/mxfp8_e5m2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxfp8_e5m2_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_mxfp8_e5m2_batched_4_qmm::kernel_ir_for(dt),
@@ -2804,7 +2804,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/nvfp8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_nvfp8_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_nvfp8_batched_4_qmm::kernel_ir_for(dt),
@@ -2818,7 +2818,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/fp4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp4_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_fp4_batched_4_qmm::kernel_ir_for(dt),
@@ -2832,7 +2832,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/fp8_e4m3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e4m3_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_nvfp8_batched_4_qmm::kernel_ir_for(dt),
@@ -2846,7 +2846,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/fp8_e5m2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e5m2_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_fp8_e5m2_batched_4_qmm::kernel_ir_for(dt),
@@ -2860,7 +2860,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/int8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int8_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_int8_batched_4_qmm::kernel_ir_for(dt),
@@ -2875,7 +2875,7 @@ pub mod kernel_benches {
         )
     }
     // Symmetric sub-byte ints (FP32 group scale) + MXINT (E8M0 block scale).
-    #[bench(name = "ffai/batched_4_block_qmm/int2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int2_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_int2_batched_4_qmm::kernel_ir_for(dt),
@@ -2889,7 +2889,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/int3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int3_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_int3_batched_4_qmm::kernel_ir_for(dt),
@@ -2903,7 +2903,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/int4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int4_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_int4_batched_4_qmm::kernel_ir_for(dt),
@@ -2917,7 +2917,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/int5", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int5_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_int5_batched_4_qmm::kernel_ir_for(dt),
@@ -2931,7 +2931,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/int6", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int6_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_int6_batched_4_qmm::kernel_ir_for(dt),
@@ -2945,7 +2945,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/mxint2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint2_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_mxint2_batched_4_qmm::kernel_ir_for(dt),
@@ -2959,7 +2959,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/mxint3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint3_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_mxint3_batched_4_qmm::kernel_ir_for(dt),
@@ -2973,7 +2973,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/mxint4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint4_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_mxint4_batched_4_qmm::kernel_ir_for(dt),
@@ -2987,7 +2987,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/mxint5", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint5_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_mxint5_batched_4_qmm::kernel_ir_for(dt),
@@ -3001,7 +3001,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/mxint6", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint6_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_mxint6_batched_4_qmm::kernel_ir_for(dt),
@@ -3015,7 +3015,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/mxint8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint8_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_mxint8_batched_4_qmm::kernel_ir_for(dt),
@@ -3031,7 +3031,7 @@ pub mod kernel_benches {
     }
     // FP16-scale twins of the FP32-scaled formats. `fp8_e4m3_f16` reuses the
     // `nvfp8_f16` kernel (same 8-bit-E4M3 + scale shape).
-    #[bench(name = "ffai/batched_4_block_qmm/nvfp8_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_nvfp8_f16_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_nvfp8_f16_batched_4_qmm::kernel_ir_for(dt),
@@ -3045,7 +3045,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/fp8_e4m3_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e4m3_f16_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_nvfp8_f16_batched_4_qmm::kernel_ir_for(dt),
@@ -3059,7 +3059,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/fp4_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp4_f16_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_fp4_f16_batched_4_qmm::kernel_ir_for(dt),
@@ -3073,7 +3073,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/fp8_e5m2_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e5m2_f16_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_fp8_e5m2_f16_batched_4_qmm::kernel_ir_for(dt),
@@ -3087,7 +3087,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/int2_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int2_f16_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_int2_f16_batched_4_qmm::kernel_ir_for(dt),
@@ -3101,7 +3101,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/int3_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int3_f16_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_int3_f16_batched_4_qmm::kernel_ir_for(dt),
@@ -3115,7 +3115,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/int4_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int4_f16_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_int4_f16_batched_4_qmm::kernel_ir_for(dt),
@@ -3129,7 +3129,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/int5_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int5_f16_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_int5_f16_batched_4_qmm::kernel_ir_for(dt),
@@ -3143,7 +3143,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/int6_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int6_f16_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_int6_f16_batched_4_qmm::kernel_ir_for(dt),
@@ -3157,7 +3157,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/batched_4_block_qmm/int8_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int8_f16_batched_4(dt: DType) -> BenchSetup {
         batched_4_qmm_bench(
             mt_int8_f16_batched_4_qmm::kernel_ir_for(dt),

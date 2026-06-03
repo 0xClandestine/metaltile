@@ -647,103 +647,103 @@ pub mod kernel_benches {
             .with_shape_label(format!("{} m={rows} k={cols}", fmt.name()))
     }
 
-    #[bench(name = "ffai/block_scaled_dequant/mxfp4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxfp4_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_mxfp4_dequant::kernel_ir_for(dt), QFormat::Mxfp4, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/nvfp4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_nvfp4_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_nvfp4_dequant::kernel_ir_for(dt), QFormat::Nvfp4, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/mxfp8_e4m3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxfp8_e4m3_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_mxfp8_e4m3_dequant::kernel_ir_for(dt), QFormat::Mxfp8E4, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/mxfp8_e5m2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxfp8_e5m2_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_mxfp8_e5m2_dequant::kernel_ir_for(dt), QFormat::Mxfp8E5, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/nvfp8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_nvfp8_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_nvfp8_dequant::kernel_ir_for(dt), QFormat::Nvfp8, 4096, 4096, dt)
     }
     // Legacy float-scale fp4 / fp8 + symmetric int8. fp8_e4m3 reuses the nvfp8
     // kernel (same 8-bit-E4M3 + f32-scale shape); the others decode in their own.
-    #[bench(name = "ffai/block_scaled_dequant/fp4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp4_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_fp4_dequant::kernel_ir_for(dt), QFormat::Fp4, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/fp8_e4m3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e4m3_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_nvfp8_dequant::kernel_ir_for(dt), QFormat::Fp8E4m3, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/fp8_e5m2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e5m2_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_fp8_e5m2_dequant::kernel_ir_for(dt), QFormat::Fp8E5m2, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/int8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int8_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_int8_dequant::kernel_ir_for(dt), QFormat::Int8, 4096, 4096, dt)
     }
     // Symmetric sub-byte ints (FP32 group scale) + MXINT (E8M0 block scale).
-    #[bench(name = "ffai/block_scaled_dequant/int2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int2_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_int2_dequant::kernel_ir_for(dt), QFormat::Int2, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/int3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int3_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_int3_dequant::kernel_ir_for(dt), QFormat::Int3, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/int4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int4_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_int4_dequant::kernel_ir_for(dt), QFormat::Int4, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/int5", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int5_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_int5_dequant::kernel_ir_for(dt), QFormat::Int5, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/int6", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int6_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_int6_dequant::kernel_ir_for(dt), QFormat::Int6, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/mxint2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint2_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_mxint2_dequant::kernel_ir_for(dt), QFormat::Mxint2, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/mxint3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint3_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_mxint3_dequant::kernel_ir_for(dt), QFormat::Mxint3, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/mxint4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint4_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_mxint4_dequant::kernel_ir_for(dt), QFormat::Mxint4, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/mxint5", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint5_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_mxint5_dequant::kernel_ir_for(dt), QFormat::Mxint5, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/mxint6", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint6_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_mxint6_dequant::kernel_ir_for(dt), QFormat::Mxint6, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/mxint8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint8_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_mxint8_dequant::kernel_ir_for(dt), QFormat::Mxint8, 4096, 4096, dt)
     }
     // FP16-scale twins (fp8_e4m3_f16 reuses the nvfp8_f16 kernel).
-    #[bench(name = "ffai/block_scaled_dequant/nvfp8_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_nvfp8_f16_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_nvfp8_f16_dequant::kernel_ir_for(dt), QFormat::Nvfp8F16, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/fp8_e4m3_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e4m3_f16_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_nvfp8_f16_dequant::kernel_ir_for(dt), QFormat::Fp8E4m3F16, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/fp4_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp4_f16_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_fp4_f16_dequant::kernel_ir_for(dt), QFormat::Fp4F16, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/fp8_e5m2_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e5m2_f16_dequant(dt: DType) -> BenchSetup {
         dequant_bench(
             mt_fp8_e5m2_f16_dequant::kernel_ir_for(dt),
@@ -753,27 +753,27 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/block_scaled_dequant/int2_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int2_f16_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_int2_f16_dequant::kernel_ir_for(dt), QFormat::Int2F16, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/int3_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int3_f16_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_int3_f16_dequant::kernel_ir_for(dt), QFormat::Int3F16, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/int4_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int4_f16_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_int4_f16_dequant::kernel_ir_for(dt), QFormat::Int4F16, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/int5_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int5_f16_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_int5_f16_dequant::kernel_ir_for(dt), QFormat::Int5F16, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/int6_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int6_f16_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_int6_f16_dequant::kernel_ir_for(dt), QFormat::Int6F16, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_dequant/int8_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int8_f16_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_int8_f16_dequant::kernel_ir_for(dt), QFormat::Int8F16, 4096, 4096, dt)
     }

@@ -1669,188 +1669,91 @@ pub mod kernel_benches {
     }
 
     macro_rules! conv1d_bench_fmt {
-        ($fn:ident, $kernel:path, $fmt:expr, $name:literal) => {
-            #[bench(name = $name, dtypes = [f32, f16, bf16])]
+        ($fn:ident, $kernel:path, $fmt:expr) => {
+            #[bench(dtypes = [f32, f16, bf16])]
             fn $fn(dt: DType) -> BenchSetup {
                 conv1d_bench($kernel(dt), $fmt, 1, 128, 1024, 128, 8, 1, 3, 3, dt)
             }
         };
     }
-    conv1d_bench_fmt!(
-        bench_mxfp4,
-        mt_mxfp4_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Mxfp4,
-        "ffai/fishspeech_conv1d_block/mxfp4"
-    );
-    conv1d_bench_fmt!(
-        bench_nvfp4,
-        mt_nvfp4_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Nvfp4,
-        "ffai/fishspeech_conv1d_block/nvfp4"
-    );
-    conv1d_bench_fmt!(
-        bench_fp4,
-        mt_fp4_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Fp4,
-        "ffai/fishspeech_conv1d_block/fp4"
-    );
+    conv1d_bench_fmt!(bench_mxfp4, mt_mxfp4_fishspeech_conv1d::kernel_ir_for, QFormat::Mxfp4);
+    conv1d_bench_fmt!(bench_nvfp4, mt_nvfp4_fishspeech_conv1d::kernel_ir_for, QFormat::Nvfp4);
+    conv1d_bench_fmt!(bench_fp4, mt_fp4_fishspeech_conv1d::kernel_ir_for, QFormat::Fp4);
     conv1d_bench_fmt!(
         bench_mxfp8_e4m3,
         mt_mxfp8_e4m3_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Mxfp8E4,
-        "ffai/fishspeech_conv1d_block/mxfp8_e4m3"
+        QFormat::Mxfp8E4
     );
     conv1d_bench_fmt!(
         bench_mxfp8_e5m2,
         mt_mxfp8_e5m2_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Mxfp8E5,
-        "ffai/fishspeech_conv1d_block/mxfp8_e5m2"
+        QFormat::Mxfp8E5
     );
     conv1d_bench_fmt!(
         bench_fp8_e5m2,
         mt_fp8_e5m2_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Fp8E5m2,
-        "ffai/fishspeech_conv1d_block/fp8_e5m2"
+        QFormat::Fp8E5m2
     );
-    conv1d_bench_fmt!(
-        bench_nvfp8,
-        mt_nvfp8_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Nvfp8,
-        "ffai/fishspeech_conv1d_block/nvfp8"
-    );
-    conv1d_bench_fmt!(
-        bench_int8,
-        mt_int8_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Int8,
-        "ffai/fishspeech_conv1d_block/int8"
-    );
+    conv1d_bench_fmt!(bench_nvfp8, mt_nvfp8_fishspeech_conv1d::kernel_ir_for, QFormat::Nvfp8);
+    conv1d_bench_fmt!(bench_int8, mt_int8_fishspeech_conv1d::kernel_ir_for, QFormat::Int8);
     // Symmetric sub-byte ints (FP32 group scale) + MXINT (E8M0 block scale) +
     // MXINT8 (8-bit, E8M0).
-    conv1d_bench_fmt!(
-        bench_int2,
-        mt_int2_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Int2,
-        "ffai/fishspeech_conv1d_block/int2"
-    );
-    conv1d_bench_fmt!(
-        bench_int3,
-        mt_int3_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Int3,
-        "ffai/fishspeech_conv1d_block/int3"
-    );
-    conv1d_bench_fmt!(
-        bench_int4,
-        mt_int4_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Int4,
-        "ffai/fishspeech_conv1d_block/int4"
-    );
-    conv1d_bench_fmt!(
-        bench_int5,
-        mt_int5_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Int5,
-        "ffai/fishspeech_conv1d_block/int5"
-    );
-    conv1d_bench_fmt!(
-        bench_int6,
-        mt_int6_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Int6,
-        "ffai/fishspeech_conv1d_block/int6"
-    );
-    conv1d_bench_fmt!(
-        bench_mxint2,
-        mt_mxint2_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Mxint2,
-        "ffai/fishspeech_conv1d_block/mxint2"
-    );
-    conv1d_bench_fmt!(
-        bench_mxint3,
-        mt_mxint3_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Mxint3,
-        "ffai/fishspeech_conv1d_block/mxint3"
-    );
-    conv1d_bench_fmt!(
-        bench_mxint4,
-        mt_mxint4_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Mxint4,
-        "ffai/fishspeech_conv1d_block/mxint4"
-    );
-    conv1d_bench_fmt!(
-        bench_mxint5,
-        mt_mxint5_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Mxint5,
-        "ffai/fishspeech_conv1d_block/mxint5"
-    );
-    conv1d_bench_fmt!(
-        bench_mxint6,
-        mt_mxint6_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Mxint6,
-        "ffai/fishspeech_conv1d_block/mxint6"
-    );
-    conv1d_bench_fmt!(
-        bench_mxint8,
-        mt_mxint8_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Mxint8,
-        "ffai/fishspeech_conv1d_block/mxint8"
-    );
+    conv1d_bench_fmt!(bench_int2, mt_int2_fishspeech_conv1d::kernel_ir_for, QFormat::Int2);
+    conv1d_bench_fmt!(bench_int3, mt_int3_fishspeech_conv1d::kernel_ir_for, QFormat::Int3);
+    conv1d_bench_fmt!(bench_int4, mt_int4_fishspeech_conv1d::kernel_ir_for, QFormat::Int4);
+    conv1d_bench_fmt!(bench_int5, mt_int5_fishspeech_conv1d::kernel_ir_for, QFormat::Int5);
+    conv1d_bench_fmt!(bench_int6, mt_int6_fishspeech_conv1d::kernel_ir_for, QFormat::Int6);
+    conv1d_bench_fmt!(bench_mxint2, mt_mxint2_fishspeech_conv1d::kernel_ir_for, QFormat::Mxint2);
+    conv1d_bench_fmt!(bench_mxint3, mt_mxint3_fishspeech_conv1d::kernel_ir_for, QFormat::Mxint3);
+    conv1d_bench_fmt!(bench_mxint4, mt_mxint4_fishspeech_conv1d::kernel_ir_for, QFormat::Mxint4);
+    conv1d_bench_fmt!(bench_mxint5, mt_mxint5_fishspeech_conv1d::kernel_ir_for, QFormat::Mxint5);
+    conv1d_bench_fmt!(bench_mxint6, mt_mxint6_fishspeech_conv1d::kernel_ir_for, QFormat::Mxint6);
+    conv1d_bench_fmt!(bench_mxint8, mt_mxint8_fishspeech_conv1d::kernel_ir_for, QFormat::Mxint8);
     // FP16-scale twins. `fp8_e4m3_f16` reuses the `nvfp8_f16` kernel.
     conv1d_bench_fmt!(
         bench_nvfp8_f16,
         mt_nvfp8_f16_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Nvfp8F16,
-        "ffai/fishspeech_conv1d_block/nvfp8_f16"
+        QFormat::Nvfp8F16
     );
     conv1d_bench_fmt!(
         bench_fp8_e4m3_f16,
         mt_nvfp8_f16_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Fp8E4m3F16,
-        "ffai/fishspeech_conv1d_block/fp8_e4m3_f16"
+        QFormat::Fp8E4m3F16
     );
-    conv1d_bench_fmt!(
-        bench_fp4_f16,
-        mt_fp4_f16_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Fp4F16,
-        "ffai/fishspeech_conv1d_block/fp4_f16"
-    );
+    conv1d_bench_fmt!(bench_fp4_f16, mt_fp4_f16_fishspeech_conv1d::kernel_ir_for, QFormat::Fp4F16);
     conv1d_bench_fmt!(
         bench_fp8_e5m2_f16,
         mt_fp8_e5m2_f16_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Fp8E5m2F16,
-        "ffai/fishspeech_conv1d_block/fp8_e5m2_f16"
+        QFormat::Fp8E5m2F16
     );
     conv1d_bench_fmt!(
         bench_int2_f16,
         mt_int2_f16_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Int2F16,
-        "ffai/fishspeech_conv1d_block/int2_f16"
+        QFormat::Int2F16
     );
     conv1d_bench_fmt!(
         bench_int3_f16,
         mt_int3_f16_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Int3F16,
-        "ffai/fishspeech_conv1d_block/int3_f16"
+        QFormat::Int3F16
     );
     conv1d_bench_fmt!(
         bench_int4_f16,
         mt_int4_f16_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Int4F16,
-        "ffai/fishspeech_conv1d_block/int4_f16"
+        QFormat::Int4F16
     );
     conv1d_bench_fmt!(
         bench_int5_f16,
         mt_int5_f16_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Int5F16,
-        "ffai/fishspeech_conv1d_block/int5_f16"
+        QFormat::Int5F16
     );
     conv1d_bench_fmt!(
         bench_int6_f16,
         mt_int6_f16_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Int6F16,
-        "ffai/fishspeech_conv1d_block/int6_f16"
+        QFormat::Int6F16
     );
     conv1d_bench_fmt!(
         bench_int8_f16,
         mt_int8_f16_fishspeech_conv1d::kernel_ir_for,
-        QFormat::Int8F16,
-        "ffai/fishspeech_conv1d_block/int8_f16"
+        QFormat::Int8F16
     );
 }

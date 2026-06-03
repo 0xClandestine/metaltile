@@ -2722,102 +2722,102 @@ pub mod kernel_benches {
             .with_shape_label(format!("{} q={q_heads} t={tokens} d={dim}", fmt.name()))
     }
 
-    #[bench(name = "ffai/flash_block_sdpa/mxfp4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxfp4_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_mxfp4_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Mxfp4, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/nvfp4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_nvfp4_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_nvfp4_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Nvfp4, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/mxfp8_e4m3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxfp8_e4m3_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_mxfp8_e4m3_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Mxfp8E4, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/mxfp8_e5m2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxfp8_e5m2_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_mxfp8_e5m2_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Mxfp8E5, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/nvfp8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_nvfp8_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_nvfp8_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Nvfp8, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/fp4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp4_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_fp4_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Fp4, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/fp8_e4m3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e4m3_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_nvfp8_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Fp8E4m3, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/fp8_e5m2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e5m2_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_fp8_e5m2_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Fp8E5m2, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/int8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int8_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_int8_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int8, 128, dt)
     }
     // Symmetric sub-byte ints (FP32 group scale) + MXINT (E8M0 block scale) + MXINT8.
-    #[bench(name = "ffai/flash_block_sdpa/int2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int2_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_int2_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int2, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/int3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int3_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_int3_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int3, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/int4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int4_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_int4_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int4, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/int5", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int5_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_int5_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int5, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/int6", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int6_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_int6_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int6, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/mxint2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint2_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_mxint2_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Mxint2, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/mxint3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint3_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_mxint3_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Mxint3, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/mxint4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint4_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_mxint4_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Mxint4, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/mxint5", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint5_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_mxint5_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Mxint5, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/mxint6", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint6_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_mxint6_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Mxint6, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/mxint8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint8_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_mxint8_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Mxint8, 128, dt)
     }
     // FP16-scale twins (nvfp8_f16 / fp4_f16 / fp8_e5m2_f16 / int2..6_f16 /
     // int8_f16). `fp8_e4m3_f16` reuses the `nvfp8_f16` kernel.
-    #[bench(name = "ffai/flash_block_sdpa/nvfp8_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_nvfp8_f16_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_nvfp8_f16_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Nvfp8F16, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/fp4_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp4_f16_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_fp4_f16_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Fp4F16, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/fp8_e4m3_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e4m3_f16_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_nvfp8_f16_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Fp8E4m3F16, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/fp8_e5m2_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e5m2_f16_flash(dt: DType) -> BenchSetup {
         flash_bench(
             mt_fp8_e5m2_f16_flash_sdpa_d128::kernel_ir_for(dt),
@@ -2826,27 +2826,27 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/flash_block_sdpa/int2_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int2_f16_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_int2_f16_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int2F16, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/int3_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int3_f16_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_int3_f16_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int3F16, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/int4_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int4_f16_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_int4_f16_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int4F16, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/int5_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int5_f16_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_int5_f16_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int5F16, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/int6_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int6_f16_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_int6_f16_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int6F16, 128, dt)
     }
-    #[bench(name = "ffai/flash_block_sdpa/int8_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int8_f16_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_int8_f16_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int8F16, 128, dt)
     }
@@ -2854,438 +2854,128 @@ pub mod kernel_benches {
     // Large-head-dim perf matrix (d256 = long-context; d512 = Gemma global),
     // all 9 formats. d64/d96 are correctness-tested but follow the d128 trend.
     macro_rules! flash_dim_bench {
-        ($bench:ident, $name:literal, $kernel:ident, $fmt:expr, $dim:literal) => {
-            #[bench(name = $name, dtypes = [f32, f16, bf16])]
+        ($bench:ident, $kernel:ident, $fmt:expr, $dim:literal) => {
+            #[bench(dtypes = [f32, f16, bf16])]
             fn $bench(dt: DType) -> BenchSetup {
                 flash_bench($kernel::kernel_ir_for(dt), $fmt, $dim, dt)
             }
         };
     }
     // d256
-    flash_dim_bench!(
-        bench_mxfp4_flash_d256,
-        "ffai/flash_block_sdpa/mxfp4_d256",
-        mt_mxfp4_flash_sdpa_d256,
-        QFormat::Mxfp4,
-        256
-    );
-    flash_dim_bench!(
-        bench_nvfp4_flash_d256,
-        "ffai/flash_block_sdpa/nvfp4_d256",
-        mt_nvfp4_flash_sdpa_d256,
-        QFormat::Nvfp4,
-        256
-    );
+    flash_dim_bench!(bench_mxfp4_flash_d256, mt_mxfp4_flash_sdpa_d256, QFormat::Mxfp4, 256);
+    flash_dim_bench!(bench_nvfp4_flash_d256, mt_nvfp4_flash_sdpa_d256, QFormat::Nvfp4, 256);
     flash_dim_bench!(
         bench_mxfp8_e4m3_flash_d256,
-        "ffai/flash_block_sdpa/mxfp8_e4m3_d256",
         mt_mxfp8_e4m3_flash_sdpa_d256,
         QFormat::Mxfp8E4,
         256
     );
     flash_dim_bench!(
         bench_mxfp8_e5m2_flash_d256,
-        "ffai/flash_block_sdpa/mxfp8_e5m2_d256",
         mt_mxfp8_e5m2_flash_sdpa_d256,
         QFormat::Mxfp8E5,
         256
     );
-    flash_dim_bench!(
-        bench_nvfp8_flash_d256,
-        "ffai/flash_block_sdpa/nvfp8_d256",
-        mt_nvfp8_flash_sdpa_d256,
-        QFormat::Nvfp8,
-        256
-    );
-    flash_dim_bench!(
-        bench_fp4_flash_d256,
-        "ffai/flash_block_sdpa/fp4_d256",
-        mt_fp4_flash_sdpa_d256,
-        QFormat::Fp4,
-        256
-    );
-    flash_dim_bench!(
-        bench_fp8_e4m3_flash_d256,
-        "ffai/flash_block_sdpa/fp8_e4m3_d256",
-        mt_nvfp8_flash_sdpa_d256,
-        QFormat::Fp8E4m3,
-        256
-    );
-    flash_dim_bench!(
-        bench_fp8_e5m2_flash_d256,
-        "ffai/flash_block_sdpa/fp8_e5m2_d256",
-        mt_fp8_e5m2_flash_sdpa_d256,
-        QFormat::Fp8E5m2,
-        256
-    );
-    flash_dim_bench!(
-        bench_int8_flash_d256,
-        "ffai/flash_block_sdpa/int8_d256",
-        mt_int8_flash_sdpa_d256,
-        QFormat::Int8,
-        256
-    );
-    flash_dim_bench!(
-        bench_int2_flash_d256,
-        "ffai/flash_block_sdpa/int2_d256",
-        mt_int2_flash_sdpa_d256,
-        QFormat::Int2,
-        256
-    );
-    flash_dim_bench!(
-        bench_int3_flash_d256,
-        "ffai/flash_block_sdpa/int3_d256",
-        mt_int3_flash_sdpa_d256,
-        QFormat::Int3,
-        256
-    );
-    flash_dim_bench!(
-        bench_int4_flash_d256,
-        "ffai/flash_block_sdpa/int4_d256",
-        mt_int4_flash_sdpa_d256,
-        QFormat::Int4,
-        256
-    );
-    flash_dim_bench!(
-        bench_int5_flash_d256,
-        "ffai/flash_block_sdpa/int5_d256",
-        mt_int5_flash_sdpa_d256,
-        QFormat::Int5,
-        256
-    );
-    flash_dim_bench!(
-        bench_int6_flash_d256,
-        "ffai/flash_block_sdpa/int6_d256",
-        mt_int6_flash_sdpa_d256,
-        QFormat::Int6,
-        256
-    );
-    flash_dim_bench!(
-        bench_mxint2_flash_d256,
-        "ffai/flash_block_sdpa/mxint2_d256",
-        mt_mxint2_flash_sdpa_d256,
-        QFormat::Mxint2,
-        256
-    );
-    flash_dim_bench!(
-        bench_mxint3_flash_d256,
-        "ffai/flash_block_sdpa/mxint3_d256",
-        mt_mxint3_flash_sdpa_d256,
-        QFormat::Mxint3,
-        256
-    );
-    flash_dim_bench!(
-        bench_mxint4_flash_d256,
-        "ffai/flash_block_sdpa/mxint4_d256",
-        mt_mxint4_flash_sdpa_d256,
-        QFormat::Mxint4,
-        256
-    );
-    flash_dim_bench!(
-        bench_mxint5_flash_d256,
-        "ffai/flash_block_sdpa/mxint5_d256",
-        mt_mxint5_flash_sdpa_d256,
-        QFormat::Mxint5,
-        256
-    );
-    flash_dim_bench!(
-        bench_mxint6_flash_d256,
-        "ffai/flash_block_sdpa/mxint6_d256",
-        mt_mxint6_flash_sdpa_d256,
-        QFormat::Mxint6,
-        256
-    );
-    flash_dim_bench!(
-        bench_mxint8_flash_d256,
-        "ffai/flash_block_sdpa/mxint8_d256",
-        mt_mxint8_flash_sdpa_d256,
-        QFormat::Mxint8,
-        256
-    );
+    flash_dim_bench!(bench_nvfp8_flash_d256, mt_nvfp8_flash_sdpa_d256, QFormat::Nvfp8, 256);
+    flash_dim_bench!(bench_fp4_flash_d256, mt_fp4_flash_sdpa_d256, QFormat::Fp4, 256);
+    flash_dim_bench!(bench_fp8_e4m3_flash_d256, mt_nvfp8_flash_sdpa_d256, QFormat::Fp8E4m3, 256);
+    flash_dim_bench!(bench_fp8_e5m2_flash_d256, mt_fp8_e5m2_flash_sdpa_d256, QFormat::Fp8E5m2, 256);
+    flash_dim_bench!(bench_int8_flash_d256, mt_int8_flash_sdpa_d256, QFormat::Int8, 256);
+    flash_dim_bench!(bench_int2_flash_d256, mt_int2_flash_sdpa_d256, QFormat::Int2, 256);
+    flash_dim_bench!(bench_int3_flash_d256, mt_int3_flash_sdpa_d256, QFormat::Int3, 256);
+    flash_dim_bench!(bench_int4_flash_d256, mt_int4_flash_sdpa_d256, QFormat::Int4, 256);
+    flash_dim_bench!(bench_int5_flash_d256, mt_int5_flash_sdpa_d256, QFormat::Int5, 256);
+    flash_dim_bench!(bench_int6_flash_d256, mt_int6_flash_sdpa_d256, QFormat::Int6, 256);
+    flash_dim_bench!(bench_mxint2_flash_d256, mt_mxint2_flash_sdpa_d256, QFormat::Mxint2, 256);
+    flash_dim_bench!(bench_mxint3_flash_d256, mt_mxint3_flash_sdpa_d256, QFormat::Mxint3, 256);
+    flash_dim_bench!(bench_mxint4_flash_d256, mt_mxint4_flash_sdpa_d256, QFormat::Mxint4, 256);
+    flash_dim_bench!(bench_mxint5_flash_d256, mt_mxint5_flash_sdpa_d256, QFormat::Mxint5, 256);
+    flash_dim_bench!(bench_mxint6_flash_d256, mt_mxint6_flash_sdpa_d256, QFormat::Mxint6, 256);
+    flash_dim_bench!(bench_mxint8_flash_d256, mt_mxint8_flash_sdpa_d256, QFormat::Mxint8, 256);
     // d512
-    flash_dim_bench!(
-        bench_mxfp4_flash_d512,
-        "ffai/flash_block_sdpa/mxfp4_d512",
-        mt_mxfp4_flash_sdpa_d512,
-        QFormat::Mxfp4,
-        512
-    );
-    flash_dim_bench!(
-        bench_nvfp4_flash_d512,
-        "ffai/flash_block_sdpa/nvfp4_d512",
-        mt_nvfp4_flash_sdpa_d512,
-        QFormat::Nvfp4,
-        512
-    );
+    flash_dim_bench!(bench_mxfp4_flash_d512, mt_mxfp4_flash_sdpa_d512, QFormat::Mxfp4, 512);
+    flash_dim_bench!(bench_nvfp4_flash_d512, mt_nvfp4_flash_sdpa_d512, QFormat::Nvfp4, 512);
     flash_dim_bench!(
         bench_mxfp8_e4m3_flash_d512,
-        "ffai/flash_block_sdpa/mxfp8_e4m3_d512",
         mt_mxfp8_e4m3_flash_sdpa_d512,
         QFormat::Mxfp8E4,
         512
     );
     flash_dim_bench!(
         bench_mxfp8_e5m2_flash_d512,
-        "ffai/flash_block_sdpa/mxfp8_e5m2_d512",
         mt_mxfp8_e5m2_flash_sdpa_d512,
         QFormat::Mxfp8E5,
         512
     );
-    flash_dim_bench!(
-        bench_nvfp8_flash_d512,
-        "ffai/flash_block_sdpa/nvfp8_d512",
-        mt_nvfp8_flash_sdpa_d512,
-        QFormat::Nvfp8,
-        512
-    );
-    flash_dim_bench!(
-        bench_fp4_flash_d512,
-        "ffai/flash_block_sdpa/fp4_d512",
-        mt_fp4_flash_sdpa_d512,
-        QFormat::Fp4,
-        512
-    );
-    flash_dim_bench!(
-        bench_fp8_e4m3_flash_d512,
-        "ffai/flash_block_sdpa/fp8_e4m3_d512",
-        mt_nvfp8_flash_sdpa_d512,
-        QFormat::Fp8E4m3,
-        512
-    );
-    flash_dim_bench!(
-        bench_fp8_e5m2_flash_d512,
-        "ffai/flash_block_sdpa/fp8_e5m2_d512",
-        mt_fp8_e5m2_flash_sdpa_d512,
-        QFormat::Fp8E5m2,
-        512
-    );
-    flash_dim_bench!(
-        bench_int8_flash_d512,
-        "ffai/flash_block_sdpa/int8_d512",
-        mt_int8_flash_sdpa_d512,
-        QFormat::Int8,
-        512
-    );
-    flash_dim_bench!(
-        bench_int2_flash_d512,
-        "ffai/flash_block_sdpa/int2_d512",
-        mt_int2_flash_sdpa_d512,
-        QFormat::Int2,
-        512
-    );
-    flash_dim_bench!(
-        bench_int3_flash_d512,
-        "ffai/flash_block_sdpa/int3_d512",
-        mt_int3_flash_sdpa_d512,
-        QFormat::Int3,
-        512
-    );
-    flash_dim_bench!(
-        bench_int4_flash_d512,
-        "ffai/flash_block_sdpa/int4_d512",
-        mt_int4_flash_sdpa_d512,
-        QFormat::Int4,
-        512
-    );
-    flash_dim_bench!(
-        bench_int5_flash_d512,
-        "ffai/flash_block_sdpa/int5_d512",
-        mt_int5_flash_sdpa_d512,
-        QFormat::Int5,
-        512
-    );
-    flash_dim_bench!(
-        bench_int6_flash_d512,
-        "ffai/flash_block_sdpa/int6_d512",
-        mt_int6_flash_sdpa_d512,
-        QFormat::Int6,
-        512
-    );
-    flash_dim_bench!(
-        bench_mxint2_flash_d512,
-        "ffai/flash_block_sdpa/mxint2_d512",
-        mt_mxint2_flash_sdpa_d512,
-        QFormat::Mxint2,
-        512
-    );
-    flash_dim_bench!(
-        bench_mxint3_flash_d512,
-        "ffai/flash_block_sdpa/mxint3_d512",
-        mt_mxint3_flash_sdpa_d512,
-        QFormat::Mxint3,
-        512
-    );
-    flash_dim_bench!(
-        bench_mxint4_flash_d512,
-        "ffai/flash_block_sdpa/mxint4_d512",
-        mt_mxint4_flash_sdpa_d512,
-        QFormat::Mxint4,
-        512
-    );
-    flash_dim_bench!(
-        bench_mxint5_flash_d512,
-        "ffai/flash_block_sdpa/mxint5_d512",
-        mt_mxint5_flash_sdpa_d512,
-        QFormat::Mxint5,
-        512
-    );
-    flash_dim_bench!(
-        bench_mxint6_flash_d512,
-        "ffai/flash_block_sdpa/mxint6_d512",
-        mt_mxint6_flash_sdpa_d512,
-        QFormat::Mxint6,
-        512
-    );
-    flash_dim_bench!(
-        bench_mxint8_flash_d512,
-        "ffai/flash_block_sdpa/mxint8_d512",
-        mt_mxint8_flash_sdpa_d512,
-        QFormat::Mxint8,
-        512
-    );
+    flash_dim_bench!(bench_nvfp8_flash_d512, mt_nvfp8_flash_sdpa_d512, QFormat::Nvfp8, 512);
+    flash_dim_bench!(bench_fp4_flash_d512, mt_fp4_flash_sdpa_d512, QFormat::Fp4, 512);
+    flash_dim_bench!(bench_fp8_e4m3_flash_d512, mt_nvfp8_flash_sdpa_d512, QFormat::Fp8E4m3, 512);
+    flash_dim_bench!(bench_fp8_e5m2_flash_d512, mt_fp8_e5m2_flash_sdpa_d512, QFormat::Fp8E5m2, 512);
+    flash_dim_bench!(bench_int8_flash_d512, mt_int8_flash_sdpa_d512, QFormat::Int8, 512);
+    flash_dim_bench!(bench_int2_flash_d512, mt_int2_flash_sdpa_d512, QFormat::Int2, 512);
+    flash_dim_bench!(bench_int3_flash_d512, mt_int3_flash_sdpa_d512, QFormat::Int3, 512);
+    flash_dim_bench!(bench_int4_flash_d512, mt_int4_flash_sdpa_d512, QFormat::Int4, 512);
+    flash_dim_bench!(bench_int5_flash_d512, mt_int5_flash_sdpa_d512, QFormat::Int5, 512);
+    flash_dim_bench!(bench_int6_flash_d512, mt_int6_flash_sdpa_d512, QFormat::Int6, 512);
+    flash_dim_bench!(bench_mxint2_flash_d512, mt_mxint2_flash_sdpa_d512, QFormat::Mxint2, 512);
+    flash_dim_bench!(bench_mxint3_flash_d512, mt_mxint3_flash_sdpa_d512, QFormat::Mxint3, 512);
+    flash_dim_bench!(bench_mxint4_flash_d512, mt_mxint4_flash_sdpa_d512, QFormat::Mxint4, 512);
+    flash_dim_bench!(bench_mxint5_flash_d512, mt_mxint5_flash_sdpa_d512, QFormat::Mxint5, 512);
+    flash_dim_bench!(bench_mxint6_flash_d512, mt_mxint6_flash_sdpa_d512, QFormat::Mxint6, 512);
+    flash_dim_bench!(bench_mxint8_flash_d512, mt_mxint8_flash_sdpa_d512, QFormat::Mxint8, 512);
 
     // ── FP16-scale twins, large-head-dim perf matrix (d256 / d512) ──
     // `fp8_e4m3_f16` reuses the `nvfp8_f16` kernel.
     // d256
     flash_dim_bench!(
         bench_nvfp8_f16_flash_d256,
-        "ffai/flash_block_sdpa/nvfp8_f16_d256",
         mt_nvfp8_f16_flash_sdpa_d256,
         QFormat::Nvfp8F16,
         256
     );
-    flash_dim_bench!(
-        bench_fp4_f16_flash_d256,
-        "ffai/flash_block_sdpa/fp4_f16_d256",
-        mt_fp4_f16_flash_sdpa_d256,
-        QFormat::Fp4F16,
-        256
-    );
+    flash_dim_bench!(bench_fp4_f16_flash_d256, mt_fp4_f16_flash_sdpa_d256, QFormat::Fp4F16, 256);
     flash_dim_bench!(
         bench_fp8_e4m3_f16_flash_d256,
-        "ffai/flash_block_sdpa/fp8_e4m3_f16_d256",
         mt_nvfp8_f16_flash_sdpa_d256,
         QFormat::Fp8E4m3F16,
         256
     );
     flash_dim_bench!(
         bench_fp8_e5m2_f16_flash_d256,
-        "ffai/flash_block_sdpa/fp8_e5m2_f16_d256",
         mt_fp8_e5m2_f16_flash_sdpa_d256,
         QFormat::Fp8E5m2F16,
         256
     );
-    flash_dim_bench!(
-        bench_int2_f16_flash_d256,
-        "ffai/flash_block_sdpa/int2_f16_d256",
-        mt_int2_f16_flash_sdpa_d256,
-        QFormat::Int2F16,
-        256
-    );
-    flash_dim_bench!(
-        bench_int3_f16_flash_d256,
-        "ffai/flash_block_sdpa/int3_f16_d256",
-        mt_int3_f16_flash_sdpa_d256,
-        QFormat::Int3F16,
-        256
-    );
-    flash_dim_bench!(
-        bench_int4_f16_flash_d256,
-        "ffai/flash_block_sdpa/int4_f16_d256",
-        mt_int4_f16_flash_sdpa_d256,
-        QFormat::Int4F16,
-        256
-    );
-    flash_dim_bench!(
-        bench_int5_f16_flash_d256,
-        "ffai/flash_block_sdpa/int5_f16_d256",
-        mt_int5_f16_flash_sdpa_d256,
-        QFormat::Int5F16,
-        256
-    );
-    flash_dim_bench!(
-        bench_int6_f16_flash_d256,
-        "ffai/flash_block_sdpa/int6_f16_d256",
-        mt_int6_f16_flash_sdpa_d256,
-        QFormat::Int6F16,
-        256
-    );
-    flash_dim_bench!(
-        bench_int8_f16_flash_d256,
-        "ffai/flash_block_sdpa/int8_f16_d256",
-        mt_int8_f16_flash_sdpa_d256,
-        QFormat::Int8F16,
-        256
-    );
+    flash_dim_bench!(bench_int2_f16_flash_d256, mt_int2_f16_flash_sdpa_d256, QFormat::Int2F16, 256);
+    flash_dim_bench!(bench_int3_f16_flash_d256, mt_int3_f16_flash_sdpa_d256, QFormat::Int3F16, 256);
+    flash_dim_bench!(bench_int4_f16_flash_d256, mt_int4_f16_flash_sdpa_d256, QFormat::Int4F16, 256);
+    flash_dim_bench!(bench_int5_f16_flash_d256, mt_int5_f16_flash_sdpa_d256, QFormat::Int5F16, 256);
+    flash_dim_bench!(bench_int6_f16_flash_d256, mt_int6_f16_flash_sdpa_d256, QFormat::Int6F16, 256);
+    flash_dim_bench!(bench_int8_f16_flash_d256, mt_int8_f16_flash_sdpa_d256, QFormat::Int8F16, 256);
     // d512
     flash_dim_bench!(
         bench_nvfp8_f16_flash_d512,
-        "ffai/flash_block_sdpa/nvfp8_f16_d512",
         mt_nvfp8_f16_flash_sdpa_d512,
         QFormat::Nvfp8F16,
         512
     );
-    flash_dim_bench!(
-        bench_fp4_f16_flash_d512,
-        "ffai/flash_block_sdpa/fp4_f16_d512",
-        mt_fp4_f16_flash_sdpa_d512,
-        QFormat::Fp4F16,
-        512
-    );
+    flash_dim_bench!(bench_fp4_f16_flash_d512, mt_fp4_f16_flash_sdpa_d512, QFormat::Fp4F16, 512);
     flash_dim_bench!(
         bench_fp8_e4m3_f16_flash_d512,
-        "ffai/flash_block_sdpa/fp8_e4m3_f16_d512",
         mt_nvfp8_f16_flash_sdpa_d512,
         QFormat::Fp8E4m3F16,
         512
     );
     flash_dim_bench!(
         bench_fp8_e5m2_f16_flash_d512,
-        "ffai/flash_block_sdpa/fp8_e5m2_f16_d512",
         mt_fp8_e5m2_f16_flash_sdpa_d512,
         QFormat::Fp8E5m2F16,
         512
     );
-    flash_dim_bench!(
-        bench_int2_f16_flash_d512,
-        "ffai/flash_block_sdpa/int2_f16_d512",
-        mt_int2_f16_flash_sdpa_d512,
-        QFormat::Int2F16,
-        512
-    );
-    flash_dim_bench!(
-        bench_int3_f16_flash_d512,
-        "ffai/flash_block_sdpa/int3_f16_d512",
-        mt_int3_f16_flash_sdpa_d512,
-        QFormat::Int3F16,
-        512
-    );
-    flash_dim_bench!(
-        bench_int4_f16_flash_d512,
-        "ffai/flash_block_sdpa/int4_f16_d512",
-        mt_int4_f16_flash_sdpa_d512,
-        QFormat::Int4F16,
-        512
-    );
-    flash_dim_bench!(
-        bench_int5_f16_flash_d512,
-        "ffai/flash_block_sdpa/int5_f16_d512",
-        mt_int5_f16_flash_sdpa_d512,
-        QFormat::Int5F16,
-        512
-    );
-    flash_dim_bench!(
-        bench_int6_f16_flash_d512,
-        "ffai/flash_block_sdpa/int6_f16_d512",
-        mt_int6_f16_flash_sdpa_d512,
-        QFormat::Int6F16,
-        512
-    );
-    flash_dim_bench!(
-        bench_int8_f16_flash_d512,
-        "ffai/flash_block_sdpa/int8_f16_d512",
-        mt_int8_f16_flash_sdpa_d512,
-        QFormat::Int8F16,
-        512
-    );
+    flash_dim_bench!(bench_int2_f16_flash_d512, mt_int2_f16_flash_sdpa_d512, QFormat::Int2F16, 512);
+    flash_dim_bench!(bench_int3_f16_flash_d512, mt_int3_f16_flash_sdpa_d512, QFormat::Int3F16, 512);
+    flash_dim_bench!(bench_int4_f16_flash_d512, mt_int4_f16_flash_sdpa_d512, QFormat::Int4F16, 512);
+    flash_dim_bench!(bench_int5_f16_flash_d512, mt_int5_f16_flash_sdpa_d512, QFormat::Int5F16, 512);
+    flash_dim_bench!(bench_int6_f16_flash_d512, mt_int6_f16_flash_sdpa_d512, QFormat::Int6F16, 512);
+    flash_dim_bench!(bench_int8_f16_flash_d512, mt_int8_f16_flash_sdpa_d512, QFormat::Int8F16, 512);
 }

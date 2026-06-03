@@ -4271,7 +4271,7 @@ pub mod kernel_benches {
             )
     }
 
-    #[bench(name = "ffai/conv2d_mma_block/mxfp4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxfp4_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_mxfp4_conv2d_mma::kernel_ir_for(dt),
@@ -4286,7 +4286,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/nvfp4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_nvfp4_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_nvfp4_conv2d_mma::kernel_ir_for(dt),
@@ -4301,11 +4301,11 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/fp4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp4_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(mt_fp4_conv2d_mma::kernel_ir_for(dt), QFormat::Fp4, 1, 64, 32, 32, 1024, 1, 1, dt)
     }
-    #[bench(name = "ffai/conv2d_mma_block/mxfp8_e4m3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxfp8_e4m3_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_mxfp8_e4m3_conv2d_mma::kernel_ir_for(dt),
@@ -4320,7 +4320,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/mxfp8_e5m2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxfp8_e5m2_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_mxfp8_e5m2_conv2d_mma::kernel_ir_for(dt),
@@ -4335,7 +4335,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/nvfp8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_nvfp8_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_nvfp8_conv2d_mma::kernel_ir_for(dt),
@@ -4350,7 +4350,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/fp8_e5m2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e5m2_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_fp8_e5m2_conv2d_mma::kernel_ir_for(dt),
@@ -4365,7 +4365,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/int8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int8_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int8_conv2d_mma::kernel_ir_for(dt),
@@ -4380,7 +4380,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/int2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int2_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int2_conv2d_mma::kernel_ir_for(dt),
@@ -4395,7 +4395,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/int3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int3_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int3_conv2d_mma::kernel_ir_for(dt),
@@ -4410,7 +4410,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/int4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int4_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int4_conv2d_mma::kernel_ir_for(dt),
@@ -4425,7 +4425,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/int5", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int5_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int5_conv2d_mma::kernel_ir_for(dt),
@@ -4440,7 +4440,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/int6", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int6_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int6_conv2d_mma::kernel_ir_for(dt),
@@ -4455,7 +4455,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/mxint2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint2_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_mxint2_conv2d_mma::kernel_ir_for(dt),
@@ -4470,7 +4470,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/mxint3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint3_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_mxint3_conv2d_mma::kernel_ir_for(dt),
@@ -4485,7 +4485,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/mxint4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint4_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_mxint4_conv2d_mma::kernel_ir_for(dt),
@@ -4500,7 +4500,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/mxint5", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint5_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_mxint5_conv2d_mma::kernel_ir_for(dt),
@@ -4515,7 +4515,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/mxint6", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint6_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_mxint6_conv2d_mma::kernel_ir_for(dt),
@@ -4530,7 +4530,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/mxint8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint8_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_mxint8_conv2d_mma::kernel_ir_for(dt),
@@ -4546,7 +4546,7 @@ pub mod kernel_benches {
         )
     }
     // ── FP16-scale twins of the FP32-scaled formats ──
-    #[bench(name = "ffai/conv2d_mma_block/nvfp8_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_nvfp8_f16_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_nvfp8_f16_conv2d_mma::kernel_ir_for(dt),
@@ -4562,7 +4562,7 @@ pub mod kernel_benches {
         )
     }
     // fp8_e4m3_f16 reuses the nvfp8_f16 kernel (same 8-bit-E4M3 + f16-scale shape).
-    #[bench(name = "ffai/conv2d_mma_block/fp8_e4m3_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e4m3_f16_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_nvfp8_f16_conv2d_mma::kernel_ir_for(dt),
@@ -4577,7 +4577,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/fp4_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp4_f16_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_fp4_f16_conv2d_mma::kernel_ir_for(dt),
@@ -4592,7 +4592,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/fp8_e5m2_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e5m2_f16_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_fp8_e5m2_f16_conv2d_mma::kernel_ir_for(dt),
@@ -4607,7 +4607,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/int2_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int2_f16_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int2_f16_conv2d_mma::kernel_ir_for(dt),
@@ -4622,7 +4622,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/int3_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int3_f16_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int3_f16_conv2d_mma::kernel_ir_for(dt),
@@ -4637,7 +4637,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/int4_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int4_f16_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int4_f16_conv2d_mma::kernel_ir_for(dt),
@@ -4652,7 +4652,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/int5_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int5_f16_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int5_f16_conv2d_mma::kernel_ir_for(dt),
@@ -4667,7 +4667,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/int6_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int6_f16_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int6_f16_conv2d_mma::kernel_ir_for(dt),
@@ -4682,7 +4682,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/conv2d_mma_block/int8_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int8_f16_conv2d_mma(dt: DType) -> BenchSetup {
         mma_bench(
             mt_int8_f16_conv2d_mma::kernel_ir_for(dt),

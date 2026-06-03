@@ -1753,188 +1753,59 @@ pub mod kernel_benches {
     }
 
     macro_rules! dw_bench_fmt {
-        ($fn:ident, $kernel:path, $fmt:expr, $name:literal) => {
-            #[bench(name = $name, dtypes = [f32, f16, bf16])]
+        ($fn:ident, $kernel:path, $fmt:expr) => {
+            #[bench(dtypes = [f32, f16, bf16])]
             fn $fn(dt: DType) -> BenchSetup {
                 dw_bench($kernel(dt), $fmt, 1, 256, 64, 64, 8, 1, 0, 1, dt)
             }
         };
     }
-    dw_bench_fmt!(
-        bench_mxfp4,
-        mt_mxfp4_depthwise_conv2d::kernel_ir_for,
-        QFormat::Mxfp4,
-        "ffai/depthwise_conv2d_block/mxfp4"
-    );
-    dw_bench_fmt!(
-        bench_nvfp4,
-        mt_nvfp4_depthwise_conv2d::kernel_ir_for,
-        QFormat::Nvfp4,
-        "ffai/depthwise_conv2d_block/nvfp4"
-    );
-    dw_bench_fmt!(
-        bench_fp4,
-        mt_fp4_depthwise_conv2d::kernel_ir_for,
-        QFormat::Fp4,
-        "ffai/depthwise_conv2d_block/fp4"
-    );
+    dw_bench_fmt!(bench_mxfp4, mt_mxfp4_depthwise_conv2d::kernel_ir_for, QFormat::Mxfp4);
+    dw_bench_fmt!(bench_nvfp4, mt_nvfp4_depthwise_conv2d::kernel_ir_for, QFormat::Nvfp4);
+    dw_bench_fmt!(bench_fp4, mt_fp4_depthwise_conv2d::kernel_ir_for, QFormat::Fp4);
     dw_bench_fmt!(
         bench_mxfp8_e4m3,
         mt_mxfp8_e4m3_depthwise_conv2d::kernel_ir_for,
-        QFormat::Mxfp8E4,
-        "ffai/depthwise_conv2d_block/mxfp8_e4m3"
+        QFormat::Mxfp8E4
     );
     dw_bench_fmt!(
         bench_mxfp8_e5m2,
         mt_mxfp8_e5m2_depthwise_conv2d::kernel_ir_for,
-        QFormat::Mxfp8E5,
-        "ffai/depthwise_conv2d_block/mxfp8_e5m2"
+        QFormat::Mxfp8E5
     );
-    dw_bench_fmt!(
-        bench_fp8_e5m2,
-        mt_fp8_e5m2_depthwise_conv2d::kernel_ir_for,
-        QFormat::Fp8E5m2,
-        "ffai/depthwise_conv2d_block/fp8_e5m2"
-    );
-    dw_bench_fmt!(
-        bench_nvfp8,
-        mt_nvfp8_depthwise_conv2d::kernel_ir_for,
-        QFormat::Nvfp8,
-        "ffai/depthwise_conv2d_block/nvfp8"
-    );
-    dw_bench_fmt!(
-        bench_int8,
-        mt_int8_depthwise_conv2d::kernel_ir_for,
-        QFormat::Int8,
-        "ffai/depthwise_conv2d_block/int8"
-    );
+    dw_bench_fmt!(bench_fp8_e5m2, mt_fp8_e5m2_depthwise_conv2d::kernel_ir_for, QFormat::Fp8E5m2);
+    dw_bench_fmt!(bench_nvfp8, mt_nvfp8_depthwise_conv2d::kernel_ir_for, QFormat::Nvfp8);
+    dw_bench_fmt!(bench_int8, mt_int8_depthwise_conv2d::kernel_ir_for, QFormat::Int8);
     // Symmetric sub-byte ints (int2-6, FP32 group scale) + MXINT (mxint2-6, E8M0
     // block scale) + MXINT8 (8-bit, E8M0).
-    dw_bench_fmt!(
-        bench_int2,
-        mt_int2_depthwise_conv2d::kernel_ir_for,
-        QFormat::Int2,
-        "ffai/depthwise_conv2d_block/int2"
-    );
-    dw_bench_fmt!(
-        bench_int3,
-        mt_int3_depthwise_conv2d::kernel_ir_for,
-        QFormat::Int3,
-        "ffai/depthwise_conv2d_block/int3"
-    );
-    dw_bench_fmt!(
-        bench_int4,
-        mt_int4_depthwise_conv2d::kernel_ir_for,
-        QFormat::Int4,
-        "ffai/depthwise_conv2d_block/int4"
-    );
-    dw_bench_fmt!(
-        bench_int5,
-        mt_int5_depthwise_conv2d::kernel_ir_for,
-        QFormat::Int5,
-        "ffai/depthwise_conv2d_block/int5"
-    );
-    dw_bench_fmt!(
-        bench_int6,
-        mt_int6_depthwise_conv2d::kernel_ir_for,
-        QFormat::Int6,
-        "ffai/depthwise_conv2d_block/int6"
-    );
-    dw_bench_fmt!(
-        bench_mxint2,
-        mt_mxint2_depthwise_conv2d::kernel_ir_for,
-        QFormat::Mxint2,
-        "ffai/depthwise_conv2d_block/mxint2"
-    );
-    dw_bench_fmt!(
-        bench_mxint3,
-        mt_mxint3_depthwise_conv2d::kernel_ir_for,
-        QFormat::Mxint3,
-        "ffai/depthwise_conv2d_block/mxint3"
-    );
-    dw_bench_fmt!(
-        bench_mxint4,
-        mt_mxint4_depthwise_conv2d::kernel_ir_for,
-        QFormat::Mxint4,
-        "ffai/depthwise_conv2d_block/mxint4"
-    );
-    dw_bench_fmt!(
-        bench_mxint5,
-        mt_mxint5_depthwise_conv2d::kernel_ir_for,
-        QFormat::Mxint5,
-        "ffai/depthwise_conv2d_block/mxint5"
-    );
-    dw_bench_fmt!(
-        bench_mxint6,
-        mt_mxint6_depthwise_conv2d::kernel_ir_for,
-        QFormat::Mxint6,
-        "ffai/depthwise_conv2d_block/mxint6"
-    );
-    dw_bench_fmt!(
-        bench_mxint8,
-        mt_mxint8_depthwise_conv2d::kernel_ir_for,
-        QFormat::Mxint8,
-        "ffai/depthwise_conv2d_block/mxint8"
-    );
+    dw_bench_fmt!(bench_int2, mt_int2_depthwise_conv2d::kernel_ir_for, QFormat::Int2);
+    dw_bench_fmt!(bench_int3, mt_int3_depthwise_conv2d::kernel_ir_for, QFormat::Int3);
+    dw_bench_fmt!(bench_int4, mt_int4_depthwise_conv2d::kernel_ir_for, QFormat::Int4);
+    dw_bench_fmt!(bench_int5, mt_int5_depthwise_conv2d::kernel_ir_for, QFormat::Int5);
+    dw_bench_fmt!(bench_int6, mt_int6_depthwise_conv2d::kernel_ir_for, QFormat::Int6);
+    dw_bench_fmt!(bench_mxint2, mt_mxint2_depthwise_conv2d::kernel_ir_for, QFormat::Mxint2);
+    dw_bench_fmt!(bench_mxint3, mt_mxint3_depthwise_conv2d::kernel_ir_for, QFormat::Mxint3);
+    dw_bench_fmt!(bench_mxint4, mt_mxint4_depthwise_conv2d::kernel_ir_for, QFormat::Mxint4);
+    dw_bench_fmt!(bench_mxint5, mt_mxint5_depthwise_conv2d::kernel_ir_for, QFormat::Mxint5);
+    dw_bench_fmt!(bench_mxint6, mt_mxint6_depthwise_conv2d::kernel_ir_for, QFormat::Mxint6);
+    dw_bench_fmt!(bench_mxint8, mt_mxint8_depthwise_conv2d::kernel_ir_for, QFormat::Mxint8);
     // FP16-scale twins (fp8_e4m3_f16 reuses the nvfp8_f16 kernel).
-    dw_bench_fmt!(
-        bench_nvfp8_f16,
-        mt_nvfp8_f16_depthwise_conv2d::kernel_ir_for,
-        QFormat::Nvfp8F16,
-        "ffai/depthwise_conv2d_block/nvfp8_f16"
-    );
+    dw_bench_fmt!(bench_nvfp8_f16, mt_nvfp8_f16_depthwise_conv2d::kernel_ir_for, QFormat::Nvfp8F16);
     dw_bench_fmt!(
         bench_fp8_e4m3_f16,
         mt_nvfp8_f16_depthwise_conv2d::kernel_ir_for,
-        QFormat::Fp8E4m3F16,
-        "ffai/depthwise_conv2d_block/fp8_e4m3_f16"
+        QFormat::Fp8E4m3F16
     );
-    dw_bench_fmt!(
-        bench_fp4_f16,
-        mt_fp4_f16_depthwise_conv2d::kernel_ir_for,
-        QFormat::Fp4F16,
-        "ffai/depthwise_conv2d_block/fp4_f16"
-    );
+    dw_bench_fmt!(bench_fp4_f16, mt_fp4_f16_depthwise_conv2d::kernel_ir_for, QFormat::Fp4F16);
     dw_bench_fmt!(
         bench_fp8_e5m2_f16,
         mt_fp8_e5m2_f16_depthwise_conv2d::kernel_ir_for,
-        QFormat::Fp8E5m2F16,
-        "ffai/depthwise_conv2d_block/fp8_e5m2_f16"
+        QFormat::Fp8E5m2F16
     );
-    dw_bench_fmt!(
-        bench_int2_f16,
-        mt_int2_f16_depthwise_conv2d::kernel_ir_for,
-        QFormat::Int2F16,
-        "ffai/depthwise_conv2d_block/int2_f16"
-    );
-    dw_bench_fmt!(
-        bench_int3_f16,
-        mt_int3_f16_depthwise_conv2d::kernel_ir_for,
-        QFormat::Int3F16,
-        "ffai/depthwise_conv2d_block/int3_f16"
-    );
-    dw_bench_fmt!(
-        bench_int4_f16,
-        mt_int4_f16_depthwise_conv2d::kernel_ir_for,
-        QFormat::Int4F16,
-        "ffai/depthwise_conv2d_block/int4_f16"
-    );
-    dw_bench_fmt!(
-        bench_int5_f16,
-        mt_int5_f16_depthwise_conv2d::kernel_ir_for,
-        QFormat::Int5F16,
-        "ffai/depthwise_conv2d_block/int5_f16"
-    );
-    dw_bench_fmt!(
-        bench_int6_f16,
-        mt_int6_f16_depthwise_conv2d::kernel_ir_for,
-        QFormat::Int6F16,
-        "ffai/depthwise_conv2d_block/int6_f16"
-    );
-    dw_bench_fmt!(
-        bench_int8_f16,
-        mt_int8_f16_depthwise_conv2d::kernel_ir_for,
-        QFormat::Int8F16,
-        "ffai/depthwise_conv2d_block/int8_f16"
-    );
+    dw_bench_fmt!(bench_int2_f16, mt_int2_f16_depthwise_conv2d::kernel_ir_for, QFormat::Int2F16);
+    dw_bench_fmt!(bench_int3_f16, mt_int3_f16_depthwise_conv2d::kernel_ir_for, QFormat::Int3F16);
+    dw_bench_fmt!(bench_int4_f16, mt_int4_f16_depthwise_conv2d::kernel_ir_for, QFormat::Int4F16);
+    dw_bench_fmt!(bench_int5_f16, mt_int5_f16_depthwise_conv2d::kernel_ir_for, QFormat::Int5F16);
+    dw_bench_fmt!(bench_int6_f16, mt_int6_f16_depthwise_conv2d::kernel_ir_for, QFormat::Int6F16);
+    dw_bench_fmt!(bench_int8_f16, mt_int8_f16_depthwise_conv2d::kernel_ir_for, QFormat::Int8F16);
 }

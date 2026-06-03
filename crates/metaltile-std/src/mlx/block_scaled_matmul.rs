@@ -955,125 +955,125 @@ pub mod kernel_benches {
             .with_shape_label(format!("{} m={out_dim} k={in_dim}", fmt.name()))
     }
 
-    #[bench(name = "ffai/block_scaled_qgemv/mxfp4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxfp4_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_mxfp4_qgemv::kernel_ir_for(dt), QFormat::Mxfp4, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/nvfp4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_nvfp4_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_nvfp4_qgemv::kernel_ir_for(dt), QFormat::Nvfp4, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/mxfp8_e4m3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxfp8_e4m3_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_mxfp8_e4m3_qgemv::kernel_ir_for(dt), QFormat::Mxfp8E4, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/mxfp8_e5m2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxfp8_e5m2_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_mxfp8_e5m2_qgemv::kernel_ir_for(dt), QFormat::Mxfp8E5, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/nvfp8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_nvfp8_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_nvfp8_qgemv::kernel_ir_for(dt), QFormat::Nvfp8, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/fp4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp4_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_fp4_qgemv::kernel_ir_for(dt), QFormat::Fp4, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/fp8_e4m3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e4m3_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_nvfp8_qgemv::kernel_ir_for(dt), QFormat::Fp8E4m3, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/fp8_e5m2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e5m2_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_fp8_e5m2_qgemv::kernel_ir_for(dt), QFormat::Fp8E5m2, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/int8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int8_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_int8_qgemv::kernel_ir_for(dt), QFormat::Int8, 4096, 4096, dt)
     }
     // Symmetric sub-byte ints (FP32 group scale) + MXINT (E8M0 block scale).
-    #[bench(name = "ffai/block_scaled_qgemv/int2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int2_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_int2_qgemv::kernel_ir_for(dt), QFormat::Int2, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/int3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int3_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_int3_qgemv::kernel_ir_for(dt), QFormat::Int3, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/int4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int4_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_int4_qgemv::kernel_ir_for(dt), QFormat::Int4, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/int5", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int5_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_int5_qgemv::kernel_ir_for(dt), QFormat::Int5, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/int6", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int6_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_int6_qgemv::kernel_ir_for(dt), QFormat::Int6, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/mxint2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint2_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_mxint2_qgemv::kernel_ir_for(dt), QFormat::Mxint2, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/mxint3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint3_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_mxint3_qgemv::kernel_ir_for(dt), QFormat::Mxint3, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/mxint4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint4_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_mxint4_qgemv::kernel_ir_for(dt), QFormat::Mxint4, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/mxint5", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint5_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_mxint5_qgemv::kernel_ir_for(dt), QFormat::Mxint5, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/mxint6", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint6_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_mxint6_qgemv::kernel_ir_for(dt), QFormat::Mxint6, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/mxint8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxint8_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_mxint8_qgemv::kernel_ir_for(dt), QFormat::Mxint8, 4096, 4096, dt)
     }
     // FP16-scale twins. fp8_e4m3_f16 reuses the nvfp8_f16 kernel.
-    #[bench(name = "ffai/block_scaled_qgemv/nvfp8_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_nvfp8_f16_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_nvfp8_f16_qgemv::kernel_ir_for(dt), QFormat::Nvfp8F16, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/fp8_e4m3_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e4m3_f16_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_nvfp8_f16_qgemv::kernel_ir_for(dt), QFormat::Fp8E4m3F16, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/fp4_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp4_f16_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_fp4_f16_qgemv::kernel_ir_for(dt), QFormat::Fp4F16, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/fp8_e5m2_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e5m2_f16_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_fp8_e5m2_f16_qgemv::kernel_ir_for(dt), QFormat::Fp8E5m2F16, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/int2_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int2_f16_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_int2_f16_qgemv::kernel_ir_for(dt), QFormat::Int2F16, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/int3_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int3_f16_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_int3_f16_qgemv::kernel_ir_for(dt), QFormat::Int3F16, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/int4_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int4_f16_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_int4_f16_qgemv::kernel_ir_for(dt), QFormat::Int4F16, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/int5_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int5_f16_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_int5_f16_qgemv::kernel_ir_for(dt), QFormat::Int5F16, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/int6_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int6_f16_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_int6_f16_qgemv::kernel_ir_for(dt), QFormat::Int6F16, 4096, 4096, dt)
     }
-    #[bench(name = "ffai/block_scaled_qgemv/int8_f16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_int8_f16_qgemv(dt: DType) -> BenchSetup {
         qgemv_bench(mt_int8_f16_qgemv::kernel_ir_for(dt), QFormat::Int8F16, 4096, 4096, dt)
     }
