@@ -954,6 +954,488 @@ pub fn mt_int8_batched_4_qgemv<T>(
     }
 }
 
+// ── Symmetric sub-byte integer batched-4 GEMVs (int2/3/4/5/6 + MXINT2..6) ────
+// Same four-output Reduction framework as the int8 batched-4 GEMV above, but the
+// element is a signed N-bit two's-complement code tight-bit-packed LSB-first into
+// u32 words (one independent bit-stream per weight matrix, per-row word-aligned;
+// element `c` of a row sits at bit `c·bits` within that row's stream). Each of
+// the four matrices keeps its OWN weight + scale buffer (`w_a/scales_a`, …), just
+// like every other format in this family — there is no shared/concatenated
+// weight buffer. The per-element decode mirrors `block_scaled_dequant`'s proven
+// `int_dequant_*` macros exactly (straddle-aware two-word read, sign-extend in
+// float by subtracting 2^N when the top bit is set; `$half`/`$full` are 2^(N-1) /
+// 2^N passed as literals to keep the constexpr math out of the DSL shift
+// operands), then multiplies by the block scale and the matching activation.
+// `row_word_off = row · (in_dim·bits / 32)` is the per-matrix analogue of the
+// 8-bit family's `row_off = row · in_dim`. Dispatch geometry is UNCHANGED from
+// the rest of the family (Reduction, `grid = [max_rows, 1, 4]`, `tpg = [TPG,1,1]`,
+// z selects the matrix, x the output row).
+
+/// FP32-scaled symmetric int batched-4 GEMV (int2/3/4/5/6): four projections of
+/// per-element bit-stream codes × per-group FP32 scales sharing one activation
+/// `x`, each written to its own `*_out`. Clone of `mt_int8_batched_4_qgemv` with
+/// the byte decode replaced by the straddle-aware sub-byte read.
+macro_rules! int_batched_4_qgemv_f32 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            x: Tensor<T>,
+            w_a: Tensor<u32>,
+            scales_a: Tensor<f32>,
+            w_b: Tensor<u32>,
+            scales_b: Tensor<f32>,
+            w_c: Tensor<u32>,
+            scales_c: Tensor<f32>,
+            w_d: Tensor<u32>,
+            scales_d: Tensor<f32>,
+            mut a_out: Tensor<T>,
+            mut b_out: Tensor<T>,
+            mut c_out: Tensor<T>,
+            mut d_out: Tensor<T>,
+            #[constexpr] out_a: u32,
+            #[constexpr] out_b: u32,
+            #[constexpr] out_c: u32,
+            #[constexpr] out_d: u32,
+            #[constexpr] in_dim: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let matrix = program_id::<2>();
+            let row = program_id::<0>();
+            let words_per_row = in_dim * $bits / 32u32;
+            let n_blocks = in_dim / block_size;
+            let row_word_off = row * words_per_row;
+            let row_block_off = row * n_blocks;
+            let iters = (in_dim + lsize - 1u32) / lsize;
+            let mut acc = 0.0f32;
+            if matrix == 0u32 {
+                if row < out_a {
+                    for it in range(0u32, iters, 1u32) {
+                        let c = it * lsize + tid;
+                        if c < in_dim {
+                            let bit_off = c * $bits;
+                            let word_idx = bit_off / 32u32;
+                            let bit_in_w = bit_off & 31u32;
+                            let bits_in_w0 = 32u32 - bit_in_w;
+                            let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                            let spill = $bits - lo_bits;
+                            let w0 = load(w_a[row_word_off + word_idx]);
+                            let w1 = load(
+                                w_a[row_word_off + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                            );
+                            let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                            let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                            let q = lo | hi;
+                            let qf = q.cast::<f32>();
+                            let val = select(q >= $half, qf - $full, qf); // sign-extend
+                            let scale = load(scales_a[row_block_off + c / block_size]);
+                            acc = acc + (val * scale) * load(x[c]).cast::<f32>();
+                        }
+                    }
+                }
+            }
+            if matrix == 1u32 {
+                if row < out_b {
+                    for it in range(0u32, iters, 1u32) {
+                        let c = it * lsize + tid;
+                        if c < in_dim {
+                            let bit_off = c * $bits;
+                            let word_idx = bit_off / 32u32;
+                            let bit_in_w = bit_off & 31u32;
+                            let bits_in_w0 = 32u32 - bit_in_w;
+                            let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                            let spill = $bits - lo_bits;
+                            let w0 = load(w_b[row_word_off + word_idx]);
+                            let w1 = load(
+                                w_b[row_word_off + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                            );
+                            let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                            let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                            let q = lo | hi;
+                            let qf = q.cast::<f32>();
+                            let val = select(q >= $half, qf - $full, qf); // sign-extend
+                            let scale = load(scales_b[row_block_off + c / block_size]);
+                            acc = acc + (val * scale) * load(x[c]).cast::<f32>();
+                        }
+                    }
+                }
+            }
+            if matrix == 2u32 {
+                if row < out_c {
+                    for it in range(0u32, iters, 1u32) {
+                        let c = it * lsize + tid;
+                        if c < in_dim {
+                            let bit_off = c * $bits;
+                            let word_idx = bit_off / 32u32;
+                            let bit_in_w = bit_off & 31u32;
+                            let bits_in_w0 = 32u32 - bit_in_w;
+                            let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                            let spill = $bits - lo_bits;
+                            let w0 = load(w_c[row_word_off + word_idx]);
+                            let w1 = load(
+                                w_c[row_word_off + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                            );
+                            let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                            let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                            let q = lo | hi;
+                            let qf = q.cast::<f32>();
+                            let val = select(q >= $half, qf - $full, qf); // sign-extend
+                            let scale = load(scales_c[row_block_off + c / block_size]);
+                            acc = acc + (val * scale) * load(x[c]).cast::<f32>();
+                        }
+                    }
+                }
+            }
+            if matrix == 3u32 {
+                if row < out_d {
+                    for it in range(0u32, iters, 1u32) {
+                        let c = it * lsize + tid;
+                        if c < in_dim {
+                            let bit_off = c * $bits;
+                            let word_idx = bit_off / 32u32;
+                            let bit_in_w = bit_off & 31u32;
+                            let bits_in_w0 = 32u32 - bit_in_w;
+                            let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                            let spill = $bits - lo_bits;
+                            let w0 = load(w_d[row_word_off + word_idx]);
+                            let w1 = load(
+                                w_d[row_word_off + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                            );
+                            let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                            let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                            let q = lo | hi;
+                            let qf = q.cast::<f32>();
+                            let val = select(q >= $half, qf - $full, qf); // sign-extend
+                            let scale = load(scales_d[row_block_off + c / block_size]);
+                            acc = acc + (val * scale) * load(x[c]).cast::<f32>();
+                        }
+                    }
+                }
+            }
+            let total = reduce_sum(acc);
+            if tid == 0u32 {
+                if matrix == 0u32 {
+                    if row < out_a {
+                        store(a_out[row], total.cast::<T>());
+                    }
+                }
+                if matrix == 1u32 {
+                    if row < out_b {
+                        store(b_out[row], total.cast::<T>());
+                    }
+                }
+                if matrix == 2u32 {
+                    if row < out_c {
+                        store(c_out[row], total.cast::<T>());
+                    }
+                }
+                if matrix == 3u32 {
+                    if row < out_d {
+                        store(d_out[row], total.cast::<T>());
+                    }
+                }
+            }
+        }
+    };
+}
+int_batched_4_qgemv_f32!(mt_int2_batched_4_qgemv, 2u32, 2u32, 4.0f32);
+int_batched_4_qgemv_f32!(mt_int3_batched_4_qgemv, 3u32, 4u32, 8.0f32);
+int_batched_4_qgemv_f32!(mt_int4_batched_4_qgemv, 4u32, 8u32, 16.0f32);
+int_batched_4_qgemv_f32!(mt_int5_batched_4_qgemv, 5u32, 16u32, 32.0f32);
+int_batched_4_qgemv_f32!(mt_int6_batched_4_qgemv, 6u32, 32u32, 64.0f32);
+
+/// E8M0-scaled symmetric int batched-4 GEMV (MXINT2/3/4/5/6): same four-output
+/// straddle-aware decode as `int_batched_4_qgemv_f32`, but each block carries a
+/// pow-2 (E8M0) exponent `2^(bits-127)` (one u8/block) instead of a raw f32.
+macro_rules! int_batched_4_qgemv_e8m0 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            x: Tensor<T>,
+            w_a: Tensor<u32>,
+            scales_a: Tensor<u8>,
+            w_b: Tensor<u32>,
+            scales_b: Tensor<u8>,
+            w_c: Tensor<u32>,
+            scales_c: Tensor<u8>,
+            w_d: Tensor<u32>,
+            scales_d: Tensor<u8>,
+            mut a_out: Tensor<T>,
+            mut b_out: Tensor<T>,
+            mut c_out: Tensor<T>,
+            mut d_out: Tensor<T>,
+            #[constexpr] out_a: u32,
+            #[constexpr] out_b: u32,
+            #[constexpr] out_c: u32,
+            #[constexpr] out_d: u32,
+            #[constexpr] in_dim: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let matrix = program_id::<2>();
+            let row = program_id::<0>();
+            let words_per_row = in_dim * $bits / 32u32;
+            let n_blocks = in_dim / block_size;
+            let row_word_off = row * words_per_row;
+            let row_block_off = row * n_blocks;
+            let iters = (in_dim + lsize - 1u32) / lsize;
+            let mut acc = 0.0f32;
+            if matrix == 0u32 {
+                if row < out_a {
+                    for it in range(0u32, iters, 1u32) {
+                        let c = it * lsize + tid;
+                        if c < in_dim {
+                            let bit_off = c * $bits;
+                            let word_idx = bit_off / 32u32;
+                            let bit_in_w = bit_off & 31u32;
+                            let bits_in_w0 = 32u32 - bit_in_w;
+                            let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                            let spill = $bits - lo_bits;
+                            let w0 = load(w_a[row_word_off + word_idx]);
+                            let w1 = load(
+                                w_a[row_word_off + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                            );
+                            let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                            let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                            let q = lo | hi;
+                            let qf = q.cast::<f32>();
+                            let val = select(q >= $half, qf - $full, qf); // sign-extend
+                            let sbits =
+                                load(scales_a[row_block_off + c / block_size]).cast::<f32>();
+                            let scale = exp2(sbits - 127.0f32); // E8M0: 2^(bits-127)
+                            acc = acc + (val * scale) * load(x[c]).cast::<f32>();
+                        }
+                    }
+                }
+            }
+            if matrix == 1u32 {
+                if row < out_b {
+                    for it in range(0u32, iters, 1u32) {
+                        let c = it * lsize + tid;
+                        if c < in_dim {
+                            let bit_off = c * $bits;
+                            let word_idx = bit_off / 32u32;
+                            let bit_in_w = bit_off & 31u32;
+                            let bits_in_w0 = 32u32 - bit_in_w;
+                            let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                            let spill = $bits - lo_bits;
+                            let w0 = load(w_b[row_word_off + word_idx]);
+                            let w1 = load(
+                                w_b[row_word_off + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                            );
+                            let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                            let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                            let q = lo | hi;
+                            let qf = q.cast::<f32>();
+                            let val = select(q >= $half, qf - $full, qf); // sign-extend
+                            let sbits =
+                                load(scales_b[row_block_off + c / block_size]).cast::<f32>();
+                            let scale = exp2(sbits - 127.0f32); // E8M0: 2^(bits-127)
+                            acc = acc + (val * scale) * load(x[c]).cast::<f32>();
+                        }
+                    }
+                }
+            }
+            if matrix == 2u32 {
+                if row < out_c {
+                    for it in range(0u32, iters, 1u32) {
+                        let c = it * lsize + tid;
+                        if c < in_dim {
+                            let bit_off = c * $bits;
+                            let word_idx = bit_off / 32u32;
+                            let bit_in_w = bit_off & 31u32;
+                            let bits_in_w0 = 32u32 - bit_in_w;
+                            let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                            let spill = $bits - lo_bits;
+                            let w0 = load(w_c[row_word_off + word_idx]);
+                            let w1 = load(
+                                w_c[row_word_off + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                            );
+                            let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                            let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                            let q = lo | hi;
+                            let qf = q.cast::<f32>();
+                            let val = select(q >= $half, qf - $full, qf); // sign-extend
+                            let sbits =
+                                load(scales_c[row_block_off + c / block_size]).cast::<f32>();
+                            let scale = exp2(sbits - 127.0f32); // E8M0: 2^(bits-127)
+                            acc = acc + (val * scale) * load(x[c]).cast::<f32>();
+                        }
+                    }
+                }
+            }
+            if matrix == 3u32 {
+                if row < out_d {
+                    for it in range(0u32, iters, 1u32) {
+                        let c = it * lsize + tid;
+                        if c < in_dim {
+                            let bit_off = c * $bits;
+                            let word_idx = bit_off / 32u32;
+                            let bit_in_w = bit_off & 31u32;
+                            let bits_in_w0 = 32u32 - bit_in_w;
+                            let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                            let spill = $bits - lo_bits;
+                            let w0 = load(w_d[row_word_off + word_idx]);
+                            let w1 = load(
+                                w_d[row_word_off + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                            );
+                            let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                            let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                            let q = lo | hi;
+                            let qf = q.cast::<f32>();
+                            let val = select(q >= $half, qf - $full, qf); // sign-extend
+                            let sbits =
+                                load(scales_d[row_block_off + c / block_size]).cast::<f32>();
+                            let scale = exp2(sbits - 127.0f32); // E8M0: 2^(bits-127)
+                            acc = acc + (val * scale) * load(x[c]).cast::<f32>();
+                        }
+                    }
+                }
+            }
+            let total = reduce_sum(acc);
+            if tid == 0u32 {
+                if matrix == 0u32 {
+                    if row < out_a {
+                        store(a_out[row], total.cast::<T>());
+                    }
+                }
+                if matrix == 1u32 {
+                    if row < out_b {
+                        store(b_out[row], total.cast::<T>());
+                    }
+                }
+                if matrix == 2u32 {
+                    if row < out_c {
+                        store(c_out[row], total.cast::<T>());
+                    }
+                }
+                if matrix == 3u32 {
+                    if row < out_d {
+                        store(d_out[row], total.cast::<T>());
+                    }
+                }
+            }
+        }
+    };
+}
+int_batched_4_qgemv_e8m0!(mt_mxint2_batched_4_qgemv, 2u32, 2u32, 4.0f32);
+int_batched_4_qgemv_e8m0!(mt_mxint3_batched_4_qgemv, 3u32, 4u32, 8.0f32);
+int_batched_4_qgemv_e8m0!(mt_mxint4_batched_4_qgemv, 4u32, 8u32, 16.0f32);
+int_batched_4_qgemv_e8m0!(mt_mxint5_batched_4_qgemv, 5u32, 16u32, 32.0f32);
+int_batched_4_qgemv_e8m0!(mt_mxint6_batched_4_qgemv, 6u32, 32u32, 64.0f32);
+
+/// MXINT8 batched 4-output GEMV — 8-bit symmetric codes (byte layout, block 32),
+/// E8M0 pow-2 block scale `2^(bits-127)`. Clone of `mt_mxfp8_e4m3_batched_4_qgemv`
+/// (same 8-bit byte layout + E8M0 scale) with the E4M3 decode swapped for
+/// `int8_decode`.
+#[kernel]
+pub fn mt_mxint8_batched_4_qgemv<T>(
+    x: Tensor<T>,
+    w_a: Tensor<u8>,
+    scales_a: Tensor<u8>,
+    w_b: Tensor<u8>,
+    scales_b: Tensor<u8>,
+    w_c: Tensor<u8>,
+    scales_c: Tensor<u8>,
+    w_d: Tensor<u8>,
+    scales_d: Tensor<u8>,
+    mut a_out: Tensor<T>,
+    mut b_out: Tensor<T>,
+    mut c_out: Tensor<T>,
+    mut d_out: Tensor<T>,
+    #[constexpr] out_a: u32,
+    #[constexpr] out_b: u32,
+    #[constexpr] out_c: u32,
+    #[constexpr] out_d: u32,
+    #[constexpr] in_dim: u32,
+    #[constexpr] block_size: u32,
+) {
+    let matrix = program_id::<2>();
+    let row = program_id::<0>();
+    let n_blocks = in_dim / block_size;
+    let iters = (in_dim + lsize - 1u32) / lsize;
+    let row_off = row * in_dim;
+    let row_block_off = row * n_blocks;
+    let mut acc = 0.0f32;
+    if matrix == 0u32 {
+        if row < out_a {
+            for it in range(0u32, iters, 1u32) {
+                let c = it * lsize + tid;
+                if c < in_dim {
+                    let elem = int8_decode(load(w_a[row_off + c]).cast::<u32>());
+                    let scale = exp2(
+                        load(scales_a[row_block_off + c / block_size]).cast::<f32>() - 127.0f32,
+                    );
+                    acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
+                }
+            }
+        }
+    }
+    if matrix == 1u32 {
+        if row < out_b {
+            for it in range(0u32, iters, 1u32) {
+                let c = it * lsize + tid;
+                if c < in_dim {
+                    let elem = int8_decode(load(w_b[row_off + c]).cast::<u32>());
+                    let scale = exp2(
+                        load(scales_b[row_block_off + c / block_size]).cast::<f32>() - 127.0f32,
+                    );
+                    acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
+                }
+            }
+        }
+    }
+    if matrix == 2u32 {
+        if row < out_c {
+            for it in range(0u32, iters, 1u32) {
+                let c = it * lsize + tid;
+                if c < in_dim {
+                    let elem = int8_decode(load(w_c[row_off + c]).cast::<u32>());
+                    let scale = exp2(
+                        load(scales_c[row_block_off + c / block_size]).cast::<f32>() - 127.0f32,
+                    );
+                    acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
+                }
+            }
+        }
+    }
+    if matrix == 3u32 {
+        if row < out_d {
+            for it in range(0u32, iters, 1u32) {
+                let c = it * lsize + tid;
+                if c < in_dim {
+                    let elem = int8_decode(load(w_d[row_off + c]).cast::<u32>());
+                    let scale = exp2(
+                        load(scales_d[row_block_off + c / block_size]).cast::<f32>() - 127.0f32,
+                    );
+                    acc = acc + (elem * scale) * load(x[c]).cast::<f32>();
+                }
+            }
+        }
+    }
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        if matrix == 0u32 {
+            if row < out_a {
+                store(a_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 1u32 {
+            if row < out_b {
+                store(b_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 2u32 {
+            if row < out_c {
+                store(c_out[row], total.cast::<T>());
+            }
+        }
+        if matrix == 3u32 {
+            if row < out_d {
+                store(d_out[row], total.cast::<T>());
+            }
+        }
+    }
+}
+
 pub mod kernel_tests {
     use metaltile::{core::ir::Kernel, test::*, test_kernel};
 
@@ -1008,11 +1490,12 @@ pub mod kernel_tests {
         let eb = gemv(&wdq_b, &x, out_b, in_dim);
         let ec = gemv(&wdq_c, &x, out_c, in_dim);
         let ed = gemv(&wdq_d, &x, out_d, in_dim);
-        let weight_dt = if fmt.element_bits() == 4 { DType::U32 } else { DType::U8 };
-        let scales_dt = if matches!(
-            fmt,
-            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
-        ) {
+        // 8-bit codes bind as one uchar each; every sub-byte width (4-bit nibble
+        // packs + int2/3/5/6 tight bit-streams) binds as packed u32 words. FP32
+        // scales bind as f32; E8M0/E4M3 scales as one byte. Both axes are driven
+        // off the format so new integer formats pick up the right buffer types.
+        let weight_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
+        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
             DType::F32
         } else {
             DType::U8
@@ -1178,6 +1661,155 @@ pub mod kernel_tests {
             dt,
         )
     }
+
+    // Symmetric sub-byte ints (FP32 group scale, group 64) + MXINT (E8M0 block
+    // scale, block 32) + MXINT8 (8-bit, E8M0). in_dim 256 satisfies
+    // `in_dim*bits % 32 == 0` for every width, so each row's bit-stream is
+    // word-aligned. Kernel + oracle share the codec, so the four GPU outputs
+    // track the dequant-then-dot reference to float precision.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int2_batched_4_qgemv(dt: DType) -> TestSetup {
+        batched_4_setup(
+            mt_int2_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Int2,
+            16,
+            4,
+            4,
+            4,
+            256,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int3_batched_4_qgemv(dt: DType) -> TestSetup {
+        batched_4_setup(
+            mt_int3_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Int3,
+            16,
+            4,
+            4,
+            4,
+            256,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int4_batched_4_qgemv(dt: DType) -> TestSetup {
+        batched_4_setup(
+            mt_int4_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Int4,
+            16,
+            4,
+            4,
+            4,
+            256,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int5_batched_4_qgemv(dt: DType) -> TestSetup {
+        batched_4_setup(
+            mt_int5_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Int5,
+            16,
+            4,
+            4,
+            4,
+            256,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int6_batched_4_qgemv(dt: DType) -> TestSetup {
+        batched_4_setup(
+            mt_int6_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Int6,
+            16,
+            4,
+            4,
+            4,
+            256,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint2_batched_4_qgemv(dt: DType) -> TestSetup {
+        batched_4_setup(
+            mt_mxint2_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Mxint2,
+            16,
+            4,
+            4,
+            4,
+            256,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint3_batched_4_qgemv(dt: DType) -> TestSetup {
+        batched_4_setup(
+            mt_mxint3_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Mxint3,
+            16,
+            4,
+            4,
+            4,
+            256,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint4_batched_4_qgemv(dt: DType) -> TestSetup {
+        batched_4_setup(
+            mt_mxint4_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Mxint4,
+            16,
+            4,
+            4,
+            4,
+            256,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint5_batched_4_qgemv(dt: DType) -> TestSetup {
+        batched_4_setup(
+            mt_mxint5_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Mxint5,
+            16,
+            4,
+            4,
+            4,
+            256,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint6_batched_4_qgemv(dt: DType) -> TestSetup {
+        batched_4_setup(
+            mt_mxint6_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Mxint6,
+            16,
+            4,
+            4,
+            4,
+            256,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint8_batched_4_qgemv(dt: DType) -> TestSetup {
+        batched_4_setup(
+            mt_mxint8_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Mxint8,
+            16,
+            4,
+            4,
+            4,
+            256,
+            dt,
+        )
+    }
 }
 
 /// Decode-shape benches at a fused 4-projection shape (out_a=out_b=out_c=out_d
@@ -1200,19 +1832,26 @@ pub mod kernel_benches {
         dt: DType,
     ) -> BenchSetup {
         let bs = fmt.block_size();
-        let (codes_dt, code_div) =
-            if fmt.element_bits() == 4 { (DType::U32, 8) } else { (DType::U8, 1) };
-        let scales_dt = if matches!(
-            fmt,
-            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
-        ) {
+        // 8-bit codes are one uchar each; every sub-byte width (4-bit nibble
+        // packs + int2/3/5/6 tight bit-streams) tight-bit-packs into u32 words.
+        let codes_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
+        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
             DType::F32
         } else {
             DType::U8
         };
         let max_rows = out_a.max(out_b).max(out_c).max(out_d);
         let sz = dt.size_bytes();
-        let codes = |o: usize| o * in_dim / code_div;
+        // Per-matrix code-buffer length: 8-bit stays `o·in_dim` bytes, every
+        // sub-byte width is the tight bit-stream's u32-word count.
+        let elem_bits = fmt.element_bits();
+        let codes = |o: usize| {
+            if elem_bits == 8 {
+                o * in_dim
+            } else {
+                crate::quant::format::bitstream_words(o * in_dim, elem_bits)
+            }
+        };
         let scl = |o: usize| o * (in_dim / bs);
         let bytes = (codes(out_a) + codes(out_b) + codes(out_c) + codes(out_d))
             * codes_dt.size_bytes()
@@ -1361,6 +2000,151 @@ pub mod kernel_benches {
         batched_4_bench(
             mt_int8_batched_4_qgemv::kernel_ir_for(dt),
             QFormat::Int8,
+            4096,
+            4096,
+            4096,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    // Symmetric sub-byte ints (FP32 group scale) + MXINT (E8M0 block scale) +
+    // MXINT8 (8-bit, E8M0).
+    #[bench(name = "ffai/batched_4_block_qgemv/int2", dtypes = [f32, f16, bf16])]
+    fn bench_int2_batched_4(dt: DType) -> BenchSetup {
+        batched_4_bench(
+            mt_int2_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Int2,
+            4096,
+            4096,
+            4096,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/batched_4_block_qgemv/int3", dtypes = [f32, f16, bf16])]
+    fn bench_int3_batched_4(dt: DType) -> BenchSetup {
+        batched_4_bench(
+            mt_int3_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Int3,
+            4096,
+            4096,
+            4096,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/batched_4_block_qgemv/int4", dtypes = [f32, f16, bf16])]
+    fn bench_int4_batched_4(dt: DType) -> BenchSetup {
+        batched_4_bench(
+            mt_int4_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Int4,
+            4096,
+            4096,
+            4096,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/batched_4_block_qgemv/int5", dtypes = [f32, f16, bf16])]
+    fn bench_int5_batched_4(dt: DType) -> BenchSetup {
+        batched_4_bench(
+            mt_int5_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Int5,
+            4096,
+            4096,
+            4096,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/batched_4_block_qgemv/int6", dtypes = [f32, f16, bf16])]
+    fn bench_int6_batched_4(dt: DType) -> BenchSetup {
+        batched_4_bench(
+            mt_int6_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Int6,
+            4096,
+            4096,
+            4096,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/batched_4_block_qgemv/mxint2", dtypes = [f32, f16, bf16])]
+    fn bench_mxint2_batched_4(dt: DType) -> BenchSetup {
+        batched_4_bench(
+            mt_mxint2_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Mxint2,
+            4096,
+            4096,
+            4096,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/batched_4_block_qgemv/mxint3", dtypes = [f32, f16, bf16])]
+    fn bench_mxint3_batched_4(dt: DType) -> BenchSetup {
+        batched_4_bench(
+            mt_mxint3_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Mxint3,
+            4096,
+            4096,
+            4096,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/batched_4_block_qgemv/mxint4", dtypes = [f32, f16, bf16])]
+    fn bench_mxint4_batched_4(dt: DType) -> BenchSetup {
+        batched_4_bench(
+            mt_mxint4_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Mxint4,
+            4096,
+            4096,
+            4096,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/batched_4_block_qgemv/mxint5", dtypes = [f32, f16, bf16])]
+    fn bench_mxint5_batched_4(dt: DType) -> BenchSetup {
+        batched_4_bench(
+            mt_mxint5_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Mxint5,
+            4096,
+            4096,
+            4096,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/batched_4_block_qgemv/mxint6", dtypes = [f32, f16, bf16])]
+    fn bench_mxint6_batched_4(dt: DType) -> BenchSetup {
+        batched_4_bench(
+            mt_mxint6_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Mxint6,
+            4096,
+            4096,
+            4096,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/batched_4_block_qgemv/mxint8", dtypes = [f32, f16, bf16])]
+    fn bench_mxint8_batched_4(dt: DType) -> BenchSetup {
+        batched_4_bench(
+            mt_mxint8_batched_4_qgemv::kernel_ir_for(dt),
+            QFormat::Mxint8,
             4096,
             4096,
             4096,
