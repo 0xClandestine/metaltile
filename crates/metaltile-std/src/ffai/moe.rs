@@ -521,7 +521,6 @@ pub fn mt_moe_gather_qmm_b8<T>(
     }
 }
 
-
 /// Grouped-gather quantized matmul — odd bit-widths (3, 5, 6).
 ///
 /// Produces kernels: `mt_moe_gather_qmm_b3`, `_b5`, `_b6`.

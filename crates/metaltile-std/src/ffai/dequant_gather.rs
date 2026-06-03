@@ -41,7 +41,6 @@
 
 use metaltile::kernel;
 
-
 /// Dequantizing token-gather kernel — variable bit-widths (2, 3, 4, 5, 6, 8).
 ///
 /// Produces kernels: `dequant_gather_int2`, `_int3`, `_int4`, `_int5`,

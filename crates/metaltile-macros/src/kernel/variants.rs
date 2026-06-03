@@ -19,7 +19,7 @@
 //!    - Evaluates **compile-time `if` blocks** whose condition references only
 //!      variant parameters and integer literals, stripping the unselected
 //!      branch entirely before the `#[kernel]` body parser runs.
-//!    String literal contents are never modified.
+//!      String literal contents are never modified.
 //! 3. **Rename**: the assembled function name `base_name + "_" + suffix_value`
 //!    is validated as a legal Rust identifier and set on the cloned function.
 //! 4. **Expand**: `mod.rs` feeds each renamed, substituted function into the
@@ -310,10 +310,7 @@ fn substitute_tokens(stream: TokenStream, params: &HashMap<String, i64>) -> Toke
                 new_s = new_s.replace(name.as_str(), &val.to_string());
             }
             if new_s != s {
-                out.extend(std::iter::once(TokenTree::Ident(Ident::new(
-                    &new_s,
-                    ident.span(),
-                ))));
+                out.extend(std::iter::once(TokenTree::Ident(Ident::new(&new_s, ident.span()))));
             } else {
                 out.extend(std::iter::once(tts[i].clone()));
             }
@@ -363,10 +360,10 @@ fn substitute_if(
     // ── Collect condition tokens (everything before the first brace group) ──
     let cond_start = i;
     while i < tts.len() {
-        if let TokenTree::Group(g) = &tts[i] {
-            if g.delimiter() == Delimiter::Brace {
-                break;
-            }
+        if let TokenTree::Group(g) = &tts[i]
+            && g.delimiter() == Delimiter::Brace
+        {
+            break;
         }
         i += 1;
     }
@@ -387,30 +384,25 @@ fn substitute_if(
     i += 1;
 
     // ── Optionally consume `else { }` or `else if …` ──────────────────────
-    let else_branch: Option<ElseBranch> = if i < tts.len() {
-        if let TokenTree::Ident(else_kw) = &tts[i] {
-            if else_kw.to_string() == "else" {
-                i += 1; // consume `else`
-                if i < tts.len() {
-                    match &tts[i] {
-                        TokenTree::Group(g) if g.delimiter() == Delimiter::Brace => {
-                            let g = g.clone();
-                            i += 1;
-                            Some(ElseBranch::Block(g))
-                        },
-                        TokenTree::Ident(kw) if kw.to_string() == "if" => {
-                            // `else if …` — recurse.
-                            let (inner_consumed, inner_ts) = substitute_if(tts, i, params);
-                            i += inner_consumed;
-                            Some(ElseBranch::Processed(inner_ts))
-                        },
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
+    let else_branch: Option<ElseBranch> = if i < tts.len()
+        && let TokenTree::Ident(else_kw) = &tts[i]
+        && else_kw == "else"
+    {
+        i += 1; // consume `else`
+        if i < tts.len() {
+            match &tts[i] {
+                TokenTree::Group(g) if g.delimiter() == Delimiter::Brace => {
+                    let g = g.clone();
+                    i += 1;
+                    Some(ElseBranch::Block(g))
+                },
+                TokenTree::Ident(kw) if kw == "if" => {
+                    // `else if …` — recurse.
+                    let (inner_consumed, inner_ts) = substitute_if(tts, i, params);
+                    i += inner_consumed;
+                    Some(ElseBranch::Processed(inner_ts))
+                },
+                _ => None,
             }
         } else {
             None
@@ -422,22 +414,21 @@ fn substitute_if(
     let consumed = i - start;
 
     // ── Try compile-time evaluation ────────────────────────────────────────
-    if condition_is_param_only(&cond_stream, params) {
-        if let Ok(expr) = syn::parse2::<syn::Expr>(cond_stream.clone()) {
-            if let Some(taken) = eval_bool_expr(&expr, params) {
-                let selected = if taken {
-                    substitute_tokens(then_group.stream(), params)
-                } else {
-                    match else_branch {
-                        Some(ElseBranch::Block(g)) => substitute_tokens(g.stream(), params),
-                        // Processed inner was already substituted by the recursive call.
-                        Some(ElseBranch::Processed(ts)) => ts,
-                        None => TokenStream::new(),
-                    }
-                };
-                return (consumed, selected);
+    if condition_is_param_only(&cond_stream, params)
+        && let Ok(expr) = syn::parse2::<syn::Expr>(cond_stream.clone())
+        && let Some(taken) = eval_bool_expr(&expr, params)
+    {
+        let selected = if taken {
+            substitute_tokens(then_group.stream(), params)
+        } else {
+            match else_branch {
+                Some(ElseBranch::Block(g)) => substitute_tokens(g.stream(), params),
+                // Processed inner was already substituted by the recursive call.
+                Some(ElseBranch::Processed(ts)) => ts,
+                None => TokenStream::new(),
             }
-        }
+        };
+        return (consumed, selected);
     }
 
     // ── Fallthrough: reassemble as a runtime `if` with substitution ────────
@@ -451,10 +442,7 @@ fn substitute_if(
     ts.extend(std::iter::once(TokenTree::Group(new_then)));
 
     if let Some(eb) = else_branch {
-        ts.extend(std::iter::once(TokenTree::Ident(Ident::new(
-            "else",
-            Span::call_site(),
-        ))));
+        ts.extend(std::iter::once(TokenTree::Ident(Ident::new("else", Span::call_site()))));
         match eb {
             ElseBranch::Block(g) => {
                 let sub_else = substitute_tokens(g.stream(), params);
@@ -472,7 +460,7 @@ fn substitute_if(
                     .clone()
                     .into_iter()
                     .next()
-                    .map(|tt| matches!(tt, TokenTree::Ident(ref id) if id.to_string() == "if"))
+                    .map(|tt| matches!(tt, TokenTree::Ident(ref id) if id == "if"))
                     .unwrap_or(false);
                 if first_is_if {
                     ts.extend(inner_ts);
@@ -504,11 +492,10 @@ fn condition_is_param_only(stream: &TokenStream, params: &HashMap<String, i64>) 
                     return false;
                 }
             },
-            TokenTree::Group(g) => {
-                if !condition_is_param_only(&g.stream(), params) {
-                    return false;
-                }
+            TokenTree::Group(g) if !condition_is_param_only(&g.stream(), params) => {
+                return false;
             },
+            TokenTree::Group(_) => {},
             _ => {},
         }
     }

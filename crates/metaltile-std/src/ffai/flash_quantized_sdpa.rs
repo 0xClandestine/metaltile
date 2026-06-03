@@ -59,137 +59,132 @@
 //! - **Grid3D**, `grid = [1, B*nQ, 1]`, `tg = [32, 1, 1]`.
 //! - `dims_per_lane = ceil(dim / 32)`; `dim` a multiple of `32/bits`.
 //!
+//! ## Variant axes
+//!
+//! Base: `variants(BITS=[4,4,4,4,4,8,8,8,8,8], DIM=[64,96,128,256,512,64,96,128,256,512],
+//!                 DPL=[2,3,4,8,16,2,3,4,8,16], suffix="b{BITS}_d{DIM}")` — 10 kernels.
+//! Bool/float mask: `variants(BITS=[4,4,4,8,8,8], DIM=[64,128,256,64,128,256],
+//!                            DPL=[2,4,8,2,4,8], suffix="b{BITS}_d{DIM}")` — 6 kernels each.
+//! `DPL`=dims_per_lane=ceil(DIM/32) is a pre-computed literal for `stack_alloc`.
+//!
 //! Codegen-only; correctness pinned by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 
-macro_rules! flash_quantized_sdpa_kernel {
-    ($name:ident, $bits:literal, $dim:literal, $dims_per_lane:literal, $subop:literal) => {
-        #[kernel]
-        pub fn $name<T>(
-            queries: Tensor<T>,
-            k_packed: Tensor<u32>,
-            k_scales: Tensor<T>,
-            k_biases: Tensor<T>,
-            v_packed: Tensor<u32>,
-            v_scales: Tensor<T>,
-            v_biases: Tensor<T>,
-            sinks: Tensor<f32>,
-            out: Tensor<T>,
-            #[constexpr] dim: u32,
-            #[constexpr] tokens: u32,
-            #[constexpr] repeat_count: u32,
-            #[constexpr] group_size: u32,
-            #[constexpr] num_q_heads: u32,
-            #[constexpr] has_sinks: u32,
-            #[constexpr] window_size: u32,
-            #[constexpr] scale: f32,
-        ) {
-            let lane = program_id::<0>();
-            let q_idx = program_id::<1>();
-            let kv_idx = q_idx / repeat_count;
+/// Flash quantized SDPA (no mask), BITS ∈ {4, 8}, DIM ∈ {64,96,128,256,512}.
+///
+/// Produces 10 kernels: `flash_quantized_sdpa_b4_d64`, `_b4_d96`, `_b4_d128`,
+/// `_b4_d256`, `_b4_d512`, `_b8_d64`, `_b8_d96`, `_b8_d128`, `_b8_d256`,
+/// `_b8_d512`.
+#[kernel(variants(
+    BITS = [4, 4, 4, 4, 4, 8, 8, 8, 8, 8],
+    DIM  = [64, 96, 128, 256, 512, 64, 96, 128, 256, 512],
+    DPL  = [2, 3, 4, 8, 16, 2, 3, 4, 8, 16],
+    suffix = "b{BITS}_d{DIM}"
+))]
+pub fn flash_quantized_sdpa<T>(
+    queries: Tensor<T>,
+    k_packed: Tensor<u32>,
+    k_scales: Tensor<T>,
+    k_biases: Tensor<T>,
+    v_packed: Tensor<u32>,
+    v_scales: Tensor<T>,
+    v_biases: Tensor<T>,
+    sinks: Tensor<f32>,
+    out: Tensor<T>,
+    #[constexpr] dim: u32,
+    #[constexpr] tokens: u32,
+    #[constexpr] repeat_count: u32,
+    #[constexpr] group_size: u32,
+    #[constexpr] num_q_heads: u32,
+    #[constexpr] has_sinks: u32,
+    #[constexpr] window_size: u32,
+    #[constexpr] scale: f32,
+) {
+    let lane = program_id::<0>();
+    let q_idx = program_id::<1>();
+    let kv_idx = q_idx / repeat_count;
 
-            let pack_factor = 32u32 / $bits;
-            let mask = (1u32 << $bits) - 1u32;
-            let n_groups = dim / group_size;
-            let words_per_token = dim / pack_factor;
+    let pack_factor = 32u32 / BITS;
+    let mask = (1u32 << BITS) - 1u32;
+    let n_groups = dim / group_size;
+    let words_per_token = dim / pack_factor;
 
-            // Per-lane query slice, pre-scaled by the attention scale.
-            stack_alloc("q_vals", $dims_per_lane, "f32");
-            for i in range(0u32, $dims_per_lane, 1u32) {
-                let d = lane + i * 32u32;
-                let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
-                stack_store("q_vals", i, v * scale);
-            }
+    // Per-lane query slice, pre-scaled by the attention scale.
+    stack_alloc("q_vals", DPL, "f32");
+    for i in range(0u32, DPL, 1u32) {
+        let d = lane + i * 32u32;
+        let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+        stack_store("q_vals", i, v * scale);
+    }
 
-            // Online-softmax accumulators (sink = virtual key, value 0).
-            let sink_val = load(sinks[q_idx % num_q_heads]);
-            let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
-            let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
-            stack_alloc("o", $dims_per_lane, "f32");
-            for i in range(0u32, $dims_per_lane, 1u32) {
-                stack_store("o", i, 0.0f32);
-            }
+    // Online-softmax accumulators (sink = virtual key, value 0).
+    let sink_val = load(sinks[q_idx % num_q_heads]);
+    let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
+    let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
+    stack_alloc("o", DPL, "f32");
+    for i in range(0u32, DPL, 1u32) {
+        stack_store("o", i, 0.0f32);
+    }
 
-            let causal_upper = tokens - 1u32;
+    let causal_upper = tokens - 1u32;
 
-            for t in range(0u32, tokens, 1u32) {
-                let use_key =
-                    select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
-                if use_key {
-                    let k_word_row = (kv_idx * tokens + t) * words_per_token;
-                    let k_grp_row = (kv_idx * tokens + t) * n_groups;
-                    let mut dot_partial = 0.0f32;
-                    for i in range(0u32, $dims_per_lane, 1u32) {
-                        let d = lane + i * 32u32;
-                        if d < dim {
-                            let word_idx = d / pack_factor;
-                            let shift = (d % pack_factor) * $bits;
-                            let val = (load(k_packed[k_word_row + word_idx]) >> shift) & mask;
-                            let g = d / group_size;
-                            let ksc = load(k_scales[k_grp_row + g]).cast::<f32>();
-                            let kb = load(k_biases[k_grp_row + g]).cast::<f32>();
-                            let kj = ksc * val.cast::<f32>() + kb;
-                            dot_partial = dot_partial + stack_load("q_vals", i) * kj;
-                        }
-                    }
-                    let score = simd_sum(dot_partial);
-
-                    let new_m = select(m_acc > score, m_acc, score);
-                    let exp_diff = exp(m_acc - new_m);
-                    let exp_score = exp(score - new_m);
-
-                    let v_word_row = (kv_idx * tokens + t) * words_per_token;
-                    let v_grp_row = (kv_idx * tokens + t) * n_groups;
-                    for i in range(0u32, $dims_per_lane, 1u32) {
-                        let d = lane + i * 32u32;
-                        if d < dim {
-                            let word_idx = d / pack_factor;
-                            let shift = (d % pack_factor) * $bits;
-                            let val = (load(v_packed[v_word_row + word_idx]) >> shift) & mask;
-                            let g = d / group_size;
-                            let vsc = load(v_scales[v_grp_row + g]).cast::<f32>();
-                            let vb = load(v_biases[v_grp_row + g]).cast::<f32>();
-                            let vj = vsc * val.cast::<f32>() + vb;
-                            let prev = stack_load("o", i);
-                            stack_store("o", i, prev * exp_diff + exp_score * vj);
-                        }
-                    }
-
-                    l_acc = l_acc * exp_diff + exp_score;
-                    m_acc = new_m;
-                }
-            }
-
-            for i in range(0u32, $dims_per_lane, 1u32) {
+    for t in range(0u32, tokens, 1u32) {
+        let use_key = select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+        if use_key {
+            let k_word_row = (kv_idx * tokens + t) * words_per_token;
+            let k_grp_row = (kv_idx * tokens + t) * n_groups;
+            let mut dot_partial = 0.0f32;
+            for i in range(0u32, DPL, 1u32) {
                 let d = lane + i * 32u32;
                 if d < dim {
-                    let oi = stack_load("o", i);
-                    let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
-                    store(out[q_idx * dim + d], normed.cast::<T>());
+                    let word_idx = d / pack_factor;
+                    let shift = (d % pack_factor) * BITS;
+                    let val = (load(k_packed[k_word_row + word_idx]) >> shift) & mask;
+                    let g = d / group_size;
+                    let ksc = load(k_scales[k_grp_row + g]).cast::<f32>();
+                    let kb = load(k_biases[k_grp_row + g]).cast::<f32>();
+                    let kj = ksc * val.cast::<f32>() + kb;
+                    dot_partial = dot_partial + stack_load("q_vals", i) * kj;
                 }
             }
-        }
-    };
-}
+            let score = simd_sum(dot_partial);
 
-flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b4_d64, 4u32, 64u32, 2u32, "b4_d64");
-// d=96: GPT-NeoX head dim. dims_per_lane = ceil(96/32) = 3.
-flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b4_d96, 4u32, 96u32, 3u32, "b4_d96");
-flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b4_d128, 4u32, 128u32, 4u32, "b4_d128");
-flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b4_d256, 4u32, 256u32, 8u32, "b4_d256");
-// d=512: Gemma 4 global-attention head dim. dims_per_lane = 512/32 = 16.
-// Register pressure with 16 fp32 accumulators pushes maxTotalThreadsPerThreadgroup
-// below 1024; dispatch at 256 threads/TG (8 SG) — same approach as
-// ffai_sdpa_decode_d512 which also uses 16 elements/lane.
-flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b4_d512, 4u32, 512u32, 16u32, "b4_d512");
-flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b8_d64, 8u32, 64u32, 2u32, "b8_d64");
-// d=96: GPT-NeoX, int8.
-flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b8_d96, 8u32, 96u32, 3u32, "b8_d96");
-flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b8_d128, 8u32, 128u32, 4u32, "b8_d128");
-flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b8_d256, 8u32, 256u32, 8u32, "b8_d256");
-// d=512: Gemma 4 global, int8. Same 256-thread/TG constraint as b4_d512.
-flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b8_d512, 8u32, 512u32, 16u32, "b8_d512");
+            let new_m = select(m_acc > score, m_acc, score);
+            let exp_diff = exp(m_acc - new_m);
+            let exp_score = exp(score - new_m);
+
+            let v_word_row = (kv_idx * tokens + t) * words_per_token;
+            let v_grp_row = (kv_idx * tokens + t) * n_groups;
+            for i in range(0u32, DPL, 1u32) {
+                let d = lane + i * 32u32;
+                if d < dim {
+                    let word_idx = d / pack_factor;
+                    let shift = (d % pack_factor) * BITS;
+                    let val = (load(v_packed[v_word_row + word_idx]) >> shift) & mask;
+                    let g = d / group_size;
+                    let vsc = load(v_scales[v_grp_row + g]).cast::<f32>();
+                    let vb = load(v_biases[v_grp_row + g]).cast::<f32>();
+                    let vj = vsc * val.cast::<f32>() + vb;
+                    let prev = stack_load("o", i);
+                    stack_store("o", i, prev * exp_diff + exp_score * vj);
+                }
+            }
+
+            l_acc = l_acc * exp_diff + exp_score;
+            m_acc = new_m;
+        }
+    }
+
+    for i in range(0u32, DPL, 1u32) {
+        let d = lane + i * 32u32;
+        if d < dim {
+            let oi = stack_load("o", i);
+            let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
+            store(out[q_idx * dim + d], normed.cast::<T>());
+        }
+    }
+}
 
 // ── Bool-mask variants ───────────────────────────────────────────────────
 //
@@ -200,160 +195,121 @@ flash_quantized_sdpa_kernel!(flash_quantized_sdpa_b8_d512, 8u32, 512u32, 16u32, 
 // The mask tensor is flat u32 (not bit-packed) for simplicity; one u32
 // per token keeps the load a single scalar read with no shift/mask.
 
-macro_rules! flash_quantized_sdpa_bool_mask_kernel {
-    ($name:ident, $bits:literal, $dim:literal, $dims_per_lane:literal, $subop:literal) => {
-        #[kernel]
-        pub fn $name<T>(
-            queries: Tensor<T>,
-            k_packed: Tensor<u32>,
-            k_scales: Tensor<T>,
-            k_biases: Tensor<T>,
-            v_packed: Tensor<u32>,
-            v_scales: Tensor<T>,
-            v_biases: Tensor<T>,
-            sinks: Tensor<f32>,
-            mask_bool: Tensor<u32>,
-            out: Tensor<T>,
-            #[constexpr] dim: u32,
-            #[constexpr] tokens: u32,
-            #[constexpr] repeat_count: u32,
-            #[constexpr] group_size: u32,
-            #[constexpr] num_q_heads: u32,
-            #[constexpr] has_sinks: u32,
-            #[constexpr] window_size: u32,
-            #[constexpr] scale: f32,
-        ) {
-            let lane = program_id::<0>();
-            let q_idx = program_id::<1>();
-            let kv_idx = q_idx / repeat_count;
+/// Flash quantized SDPA with bool gate mask, BITS ∈ {4, 8}, DIM ∈ {64,128,256}.
+///
+/// Produces 6 kernels: `flash_quantized_sdpa_bool_mask_b4_d64`,
+/// `_b4_d128`, `_b4_d256`, `_b8_d64`, `_b8_d128`, `_b8_d256`.
+#[kernel(variants(
+    BITS = [4, 4, 4, 8, 8, 8],
+    DIM  = [64, 128, 256, 64, 128, 256],
+    DPL  = [2, 4, 8, 2, 4, 8],
+    suffix = "b{BITS}_d{DIM}"
+))]
+pub fn flash_quantized_sdpa_bool_mask<T>(
+    queries: Tensor<T>,
+    k_packed: Tensor<u32>,
+    k_scales: Tensor<T>,
+    k_biases: Tensor<T>,
+    v_packed: Tensor<u32>,
+    v_scales: Tensor<T>,
+    v_biases: Tensor<T>,
+    sinks: Tensor<f32>,
+    mask_bool: Tensor<u32>,
+    out: Tensor<T>,
+    #[constexpr] dim: u32,
+    #[constexpr] tokens: u32,
+    #[constexpr] repeat_count: u32,
+    #[constexpr] group_size: u32,
+    #[constexpr] num_q_heads: u32,
+    #[constexpr] has_sinks: u32,
+    #[constexpr] window_size: u32,
+    #[constexpr] scale: f32,
+) {
+    let lane = program_id::<0>();
+    let q_idx = program_id::<1>();
+    let kv_idx = q_idx / repeat_count;
 
-            let pack_factor = 32u32 / $bits;
-            let mask = (1u32 << $bits) - 1u32;
-            let n_groups = dim / group_size;
-            let words_per_token = dim / pack_factor;
+    let pack_factor = 32u32 / BITS;
+    let mask = (1u32 << BITS) - 1u32;
+    let n_groups = dim / group_size;
+    let words_per_token = dim / pack_factor;
 
-            stack_alloc("q_vals", $dims_per_lane, "f32");
-            for i in range(0u32, $dims_per_lane, 1u32) {
-                let d = lane + i * 32u32;
-                let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
-                stack_store("q_vals", i, v * scale);
-            }
+    stack_alloc("q_vals", DPL, "f32");
+    for i in range(0u32, DPL, 1u32) {
+        let d = lane + i * 32u32;
+        let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+        stack_store("q_vals", i, v * scale);
+    }
 
-            let sink_val = load(sinks[q_idx % num_q_heads]);
-            let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
-            let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
-            stack_alloc("o", $dims_per_lane, "f32");
-            for i in range(0u32, $dims_per_lane, 1u32) {
-                stack_store("o", i, 0.0f32);
-            }
+    let sink_val = load(sinks[q_idx % num_q_heads]);
+    let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
+    let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
+    stack_alloc("o", DPL, "f32");
+    for i in range(0u32, DPL, 1u32) {
+        stack_store("o", i, 0.0f32);
+    }
 
-            let causal_upper = tokens - 1u32;
+    let causal_upper = tokens - 1u32;
 
-            for t in range(0u32, tokens, 1u32) {
-                // Causal / sliding-window gate (same as base kernel).
-                let use_key =
-                    select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
-                // Bool mask gate: skip tokens where the mask slot is 0.
-                let mask_pass = load(mask_bool[q_idx * tokens + t]) != 0u32;
-                if use_key & mask_pass {
-                    let k_word_row = (kv_idx * tokens + t) * words_per_token;
-                    let k_grp_row = (kv_idx * tokens + t) * n_groups;
-                    let mut dot_partial = 0.0f32;
-                    for i in range(0u32, $dims_per_lane, 1u32) {
-                        let d = lane + i * 32u32;
-                        if d < dim {
-                            let word_idx = d / pack_factor;
-                            let shift = (d % pack_factor) * $bits;
-                            let val = (load(k_packed[k_word_row + word_idx]) >> shift) & mask;
-                            let g = d / group_size;
-                            let ksc = load(k_scales[k_grp_row + g]).cast::<f32>();
-                            let kb = load(k_biases[k_grp_row + g]).cast::<f32>();
-                            let kj = ksc * val.cast::<f32>() + kb;
-                            dot_partial = dot_partial + stack_load("q_vals", i) * kj;
-                        }
-                    }
-                    let score = simd_sum(dot_partial);
-
-                    let new_m = select(m_acc > score, m_acc, score);
-                    let exp_diff = exp(m_acc - new_m);
-                    let exp_score = exp(score - new_m);
-
-                    let v_word_row = (kv_idx * tokens + t) * words_per_token;
-                    let v_grp_row = (kv_idx * tokens + t) * n_groups;
-                    for i in range(0u32, $dims_per_lane, 1u32) {
-                        let d = lane + i * 32u32;
-                        if d < dim {
-                            let word_idx = d / pack_factor;
-                            let shift = (d % pack_factor) * $bits;
-                            let val = (load(v_packed[v_word_row + word_idx]) >> shift) & mask;
-                            let g = d / group_size;
-                            let vsc = load(v_scales[v_grp_row + g]).cast::<f32>();
-                            let vb = load(v_biases[v_grp_row + g]).cast::<f32>();
-                            let vj = vsc * val.cast::<f32>() + vb;
-                            let prev = stack_load("o", i);
-                            stack_store("o", i, prev * exp_diff + exp_score * vj);
-                        }
-                    }
-
-                    l_acc = l_acc * exp_diff + exp_score;
-                    m_acc = new_m;
-                }
-            }
-
-            for i in range(0u32, $dims_per_lane, 1u32) {
+    for t in range(0u32, tokens, 1u32) {
+        // Causal / sliding-window gate (same as base kernel).
+        let use_key = select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+        // Bool mask gate: skip tokens where the mask slot is 0.
+        let mask_pass = load(mask_bool[q_idx * tokens + t]) != 0u32;
+        if use_key & mask_pass {
+            let k_word_row = (kv_idx * tokens + t) * words_per_token;
+            let k_grp_row = (kv_idx * tokens + t) * n_groups;
+            let mut dot_partial = 0.0f32;
+            for i in range(0u32, DPL, 1u32) {
                 let d = lane + i * 32u32;
                 if d < dim {
-                    let oi = stack_load("o", i);
-                    let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
-                    store(out[q_idx * dim + d], normed.cast::<T>());
+                    let word_idx = d / pack_factor;
+                    let shift = (d % pack_factor) * BITS;
+                    let val = (load(k_packed[k_word_row + word_idx]) >> shift) & mask;
+                    let g = d / group_size;
+                    let ksc = load(k_scales[k_grp_row + g]).cast::<f32>();
+                    let kb = load(k_biases[k_grp_row + g]).cast::<f32>();
+                    let kj = ksc * val.cast::<f32>() + kb;
+                    dot_partial = dot_partial + stack_load("q_vals", i) * kj;
                 }
             }
-        }
-    };
-}
+            let score = simd_sum(dot_partial);
 
-flash_quantized_sdpa_bool_mask_kernel!(
-    flash_quantized_sdpa_bool_mask_b4_d64,
-    4u32,
-    64u32,
-    2u32,
-    "bool_mask_b4_d64"
-);
-flash_quantized_sdpa_bool_mask_kernel!(
-    flash_quantized_sdpa_bool_mask_b4_d128,
-    4u32,
-    128u32,
-    4u32,
-    "bool_mask_b4_d128"
-);
-flash_quantized_sdpa_bool_mask_kernel!(
-    flash_quantized_sdpa_bool_mask_b4_d256,
-    4u32,
-    256u32,
-    8u32,
-    "bool_mask_b4_d256"
-);
-flash_quantized_sdpa_bool_mask_kernel!(
-    flash_quantized_sdpa_bool_mask_b8_d64,
-    8u32,
-    64u32,
-    2u32,
-    "bool_mask_b8_d64"
-);
-flash_quantized_sdpa_bool_mask_kernel!(
-    flash_quantized_sdpa_bool_mask_b8_d128,
-    8u32,
-    128u32,
-    4u32,
-    "bool_mask_b8_d128"
-);
-flash_quantized_sdpa_bool_mask_kernel!(
-    flash_quantized_sdpa_bool_mask_b8_d256,
-    8u32,
-    256u32,
-    8u32,
-    "bool_mask_b8_d256"
-);
+            let new_m = select(m_acc > score, m_acc, score);
+            let exp_diff = exp(m_acc - new_m);
+            let exp_score = exp(score - new_m);
+
+            let v_word_row = (kv_idx * tokens + t) * words_per_token;
+            let v_grp_row = (kv_idx * tokens + t) * n_groups;
+            for i in range(0u32, DPL, 1u32) {
+                let d = lane + i * 32u32;
+                if d < dim {
+                    let word_idx = d / pack_factor;
+                    let shift = (d % pack_factor) * BITS;
+                    let val = (load(v_packed[v_word_row + word_idx]) >> shift) & mask;
+                    let g = d / group_size;
+                    let vsc = load(v_scales[v_grp_row + g]).cast::<f32>();
+                    let vb = load(v_biases[v_grp_row + g]).cast::<f32>();
+                    let vj = vsc * val.cast::<f32>() + vb;
+                    let prev = stack_load("o", i);
+                    stack_store("o", i, prev * exp_diff + exp_score * vj);
+                }
+            }
+
+            l_acc = l_acc * exp_diff + exp_score;
+            m_acc = new_m;
+        }
+    }
+
+    for i in range(0u32, DPL, 1u32) {
+        let d = lane + i * 32u32;
+        if d < dim {
+            let oi = stack_load("o", i);
+            let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
+            store(out[q_idx * dim + d], normed.cast::<T>());
+        }
+    }
+}
 
 // ── Float-mask variants ──────────────────────────────────────────────────
 //
@@ -361,162 +317,123 @@ flash_quantized_sdpa_bool_mask_kernel!(
 // The value is added to the raw attention logit before the softmax step,
 // enabling relative-position biases (ALiBi, T5 bias, etc.).
 
-macro_rules! flash_quantized_sdpa_float_mask_kernel {
-    ($name:ident, $bits:literal, $dim:literal, $dims_per_lane:literal, $subop:literal) => {
-        #[kernel]
-        pub fn $name<T>(
-            queries: Tensor<T>,
-            k_packed: Tensor<u32>,
-            k_scales: Tensor<T>,
-            k_biases: Tensor<T>,
-            v_packed: Tensor<u32>,
-            v_scales: Tensor<T>,
-            v_biases: Tensor<T>,
-            sinks: Tensor<f32>,
-            mask_float: Tensor<T>,
-            out: Tensor<T>,
-            #[constexpr] dim: u32,
-            #[constexpr] tokens: u32,
-            #[constexpr] repeat_count: u32,
-            #[constexpr] group_size: u32,
-            #[constexpr] num_q_heads: u32,
-            #[constexpr] has_sinks: u32,
-            #[constexpr] window_size: u32,
-            #[constexpr] scale: f32,
-        ) {
-            let lane = program_id::<0>();
-            let q_idx = program_id::<1>();
-            let kv_idx = q_idx / repeat_count;
+/// Flash quantized SDPA with additive float bias mask, BITS ∈ {4, 8}, DIM ∈ {64,128,256}.
+///
+/// Produces 6 kernels: `flash_quantized_sdpa_float_mask_b4_d64`,
+/// `_b4_d128`, `_b4_d256`, `_b8_d64`, `_b8_d128`, `_b8_d256`.
+#[kernel(variants(
+    BITS = [4, 4, 4, 8, 8, 8],
+    DIM  = [64, 128, 256, 64, 128, 256],
+    DPL  = [2, 4, 8, 2, 4, 8],
+    suffix = "b{BITS}_d{DIM}"
+))]
+pub fn flash_quantized_sdpa_float_mask<T>(
+    queries: Tensor<T>,
+    k_packed: Tensor<u32>,
+    k_scales: Tensor<T>,
+    k_biases: Tensor<T>,
+    v_packed: Tensor<u32>,
+    v_scales: Tensor<T>,
+    v_biases: Tensor<T>,
+    sinks: Tensor<f32>,
+    mask_float: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] dim: u32,
+    #[constexpr] tokens: u32,
+    #[constexpr] repeat_count: u32,
+    #[constexpr] group_size: u32,
+    #[constexpr] num_q_heads: u32,
+    #[constexpr] has_sinks: u32,
+    #[constexpr] window_size: u32,
+    #[constexpr] scale: f32,
+) {
+    let lane = program_id::<0>();
+    let q_idx = program_id::<1>();
+    let kv_idx = q_idx / repeat_count;
 
-            let pack_factor = 32u32 / $bits;
-            let mask = (1u32 << $bits) - 1u32;
-            let n_groups = dim / group_size;
-            let words_per_token = dim / pack_factor;
+    let pack_factor = 32u32 / BITS;
+    let mask = (1u32 << BITS) - 1u32;
+    let n_groups = dim / group_size;
+    let words_per_token = dim / pack_factor;
 
-            stack_alloc("q_vals", $dims_per_lane, "f32");
-            for i in range(0u32, $dims_per_lane, 1u32) {
-                let d = lane + i * 32u32;
-                let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
-                stack_store("q_vals", i, v * scale);
-            }
+    stack_alloc("q_vals", DPL, "f32");
+    for i in range(0u32, DPL, 1u32) {
+        let d = lane + i * 32u32;
+        let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+        stack_store("q_vals", i, v * scale);
+    }
 
-            let sink_val = load(sinks[q_idx % num_q_heads]);
-            let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
-            let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
-            stack_alloc("o", $dims_per_lane, "f32");
-            for i in range(0u32, $dims_per_lane, 1u32) {
-                stack_store("o", i, 0.0f32);
-            }
+    let sink_val = load(sinks[q_idx % num_q_heads]);
+    let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
+    let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
+    stack_alloc("o", DPL, "f32");
+    for i in range(0u32, DPL, 1u32) {
+        stack_store("o", i, 0.0f32);
+    }
 
-            let causal_upper = tokens - 1u32;
+    let causal_upper = tokens - 1u32;
 
-            for t in range(0u32, tokens, 1u32) {
-                let use_key =
-                    select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
-                if use_key {
-                    let k_word_row = (kv_idx * tokens + t) * words_per_token;
-                    let k_grp_row = (kv_idx * tokens + t) * n_groups;
-                    let mut dot_partial = 0.0f32;
-                    for i in range(0u32, $dims_per_lane, 1u32) {
-                        let d = lane + i * 32u32;
-                        if d < dim {
-                            let word_idx = d / pack_factor;
-                            let shift = (d % pack_factor) * $bits;
-                            let val = (load(k_packed[k_word_row + word_idx]) >> shift) & mask;
-                            let g = d / group_size;
-                            let ksc = load(k_scales[k_grp_row + g]).cast::<f32>();
-                            let kb = load(k_biases[k_grp_row + g]).cast::<f32>();
-                            let kj = ksc * val.cast::<f32>() + kb;
-                            dot_partial = dot_partial + stack_load("q_vals", i) * kj;
-                        }
-                    }
-                    // Load the float mask bias and add it to the logit.
-                    // The bias is a scalar per (q, t) token — all 32 lanes
-                    // in the simdgroup load from the same address and obtain
-                    // the same value, so the addition is uniform across lanes.
-                    let bias = load(mask_float[q_idx * tokens + t]).cast::<f32>();
-                    let score = simd_sum(dot_partial) + bias;
-
-                    let new_m = select(m_acc > score, m_acc, score);
-                    let exp_diff = exp(m_acc - new_m);
-                    let exp_score = exp(score - new_m);
-
-                    let v_word_row = (kv_idx * tokens + t) * words_per_token;
-                    let v_grp_row = (kv_idx * tokens + t) * n_groups;
-                    for i in range(0u32, $dims_per_lane, 1u32) {
-                        let d = lane + i * 32u32;
-                        if d < dim {
-                            let word_idx = d / pack_factor;
-                            let shift = (d % pack_factor) * $bits;
-                            let val = (load(v_packed[v_word_row + word_idx]) >> shift) & mask;
-                            let g = d / group_size;
-                            let vsc = load(v_scales[v_grp_row + g]).cast::<f32>();
-                            let vb = load(v_biases[v_grp_row + g]).cast::<f32>();
-                            let vj = vsc * val.cast::<f32>() + vb;
-                            let prev = stack_load("o", i);
-                            stack_store("o", i, prev * exp_diff + exp_score * vj);
-                        }
-                    }
-
-                    l_acc = l_acc * exp_diff + exp_score;
-                    m_acc = new_m;
-                }
-            }
-
-            for i in range(0u32, $dims_per_lane, 1u32) {
+    for t in range(0u32, tokens, 1u32) {
+        let use_key = select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+        if use_key {
+            let k_word_row = (kv_idx * tokens + t) * words_per_token;
+            let k_grp_row = (kv_idx * tokens + t) * n_groups;
+            let mut dot_partial = 0.0f32;
+            for i in range(0u32, DPL, 1u32) {
                 let d = lane + i * 32u32;
                 if d < dim {
-                    let oi = stack_load("o", i);
-                    let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
-                    store(out[q_idx * dim + d], normed.cast::<T>());
+                    let word_idx = d / pack_factor;
+                    let shift = (d % pack_factor) * BITS;
+                    let val = (load(k_packed[k_word_row + word_idx]) >> shift) & mask;
+                    let g = d / group_size;
+                    let ksc = load(k_scales[k_grp_row + g]).cast::<f32>();
+                    let kb = load(k_biases[k_grp_row + g]).cast::<f32>();
+                    let kj = ksc * val.cast::<f32>() + kb;
+                    dot_partial = dot_partial + stack_load("q_vals", i) * kj;
                 }
             }
-        }
-    };
-}
+            // Load the float mask bias and add it to the logit.
+            // The bias is a scalar per (q, t) token — all 32 lanes
+            // in the simdgroup load from the same address and obtain
+            // the same value, so the addition is uniform across lanes.
+            let bias = load(mask_float[q_idx * tokens + t]).cast::<f32>();
+            let score = simd_sum(dot_partial) + bias;
 
-flash_quantized_sdpa_float_mask_kernel!(
-    flash_quantized_sdpa_float_mask_b4_d64,
-    4u32,
-    64u32,
-    2u32,
-    "float_mask_b4_d64"
-);
-flash_quantized_sdpa_float_mask_kernel!(
-    flash_quantized_sdpa_float_mask_b4_d128,
-    4u32,
-    128u32,
-    4u32,
-    "float_mask_b4_d128"
-);
-flash_quantized_sdpa_float_mask_kernel!(
-    flash_quantized_sdpa_float_mask_b4_d256,
-    4u32,
-    256u32,
-    8u32,
-    "float_mask_b4_d256"
-);
-flash_quantized_sdpa_float_mask_kernel!(
-    flash_quantized_sdpa_float_mask_b8_d64,
-    8u32,
-    64u32,
-    2u32,
-    "float_mask_b8_d64"
-);
-flash_quantized_sdpa_float_mask_kernel!(
-    flash_quantized_sdpa_float_mask_b8_d128,
-    8u32,
-    128u32,
-    4u32,
-    "float_mask_b8_d128"
-);
-flash_quantized_sdpa_float_mask_kernel!(
-    flash_quantized_sdpa_float_mask_b8_d256,
-    8u32,
-    256u32,
-    8u32,
-    "float_mask_b8_d256"
-);
+            let new_m = select(m_acc > score, m_acc, score);
+            let exp_diff = exp(m_acc - new_m);
+            let exp_score = exp(score - new_m);
+
+            let v_word_row = (kv_idx * tokens + t) * words_per_token;
+            let v_grp_row = (kv_idx * tokens + t) * n_groups;
+            for i in range(0u32, DPL, 1u32) {
+                let d = lane + i * 32u32;
+                if d < dim {
+                    let word_idx = d / pack_factor;
+                    let shift = (d % pack_factor) * BITS;
+                    let val = (load(v_packed[v_word_row + word_idx]) >> shift) & mask;
+                    let g = d / group_size;
+                    let vsc = load(v_scales[v_grp_row + g]).cast::<f32>();
+                    let vb = load(v_biases[v_grp_row + g]).cast::<f32>();
+                    let vj = vsc * val.cast::<f32>() + vb;
+                    let prev = stack_load("o", i);
+                    stack_store("o", i, prev * exp_diff + exp_score * vj);
+                }
+            }
+
+            l_acc = l_acc * exp_diff + exp_score;
+            m_acc = new_m;
+        }
+    }
+
+    for i in range(0u32, DPL, 1u32) {
+        let d = lane + i * 32u32;
+        if d < dim {
+            let oi = stack_load("o", i);
+            let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
+            store(out[q_idx * dim + d], normed.cast::<T>());
+        }
+    }
+}
 
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
@@ -882,6 +799,8 @@ pub mod kernel_tests {
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
+    use super::*;
+
     // Decode-class shape: 32 Q heads, GQA fan-out 4, 512-token cache.
     const Q_HEADS: usize = 32;
     const KV_HEADS: usize = 8;
@@ -977,163 +896,42 @@ pub mod kernel_benches {
             .flops(4 * (Q_HEADS as u64) * (TOKENS as u64) * (dim as u64))
     }
 
-    macro_rules! base_bench {
-        ($fn:ident, $kernel:ident, $name:literal, $dim:literal, $bits:literal) => {
-            #[bench(name = $name, dtypes = [f32, f16, bf16])]
-            fn $fn(dt: DType) -> BenchSetup {
-                base(super::$kernel::kernel_ir_for(dt), $dim, $bits, dt)
-            }
-        };
+    // Base: BITS ∈ {4, 8}, DIM ∈ {64, 96, 128, 256, 512} — all 10 combos.
+    #[bench(name = "ffai/flash_quantized_sdpa_b{BITS}_d{DIM}", dtypes = [f32, f16, bf16],
+            variants(BITS = [4, 4, 4, 4, 4, 8, 8, 8, 8, 8],
+                     DIM  = [64, 96, 128, 256, 512, 64, 96, 128, 256, 512],
+                     suffix = "b{BITS}_d{DIM}"))]
+    fn bench_base(dt: DType) -> BenchSetup {
+        base(flash_quantized_sdpa_bBITS_dDIM::kernel_ir_for(dt), DIM, BITS, dt)
     }
 
-    base_bench!(b_b4_d64, flash_quantized_sdpa_b4_d64, "ffai/flash_quantized_sdpa_b4_d64", 64, 4);
-    base_bench!(b_b4_d96, flash_quantized_sdpa_b4_d96, "ffai/flash_quantized_sdpa_b4_d96", 96, 4);
-    base_bench!(
-        b_b4_d128,
-        flash_quantized_sdpa_b4_d128,
-        "ffai/flash_quantized_sdpa_b4_d128",
-        128,
-        4
-    );
-    base_bench!(
-        b_b4_d256,
-        flash_quantized_sdpa_b4_d256,
-        "ffai/flash_quantized_sdpa_b4_d256",
-        256,
-        4
-    );
-    base_bench!(
-        b_b4_d512,
-        flash_quantized_sdpa_b4_d512,
-        "ffai/flash_quantized_sdpa_b4_d512",
-        512,
-        4
-    );
-    base_bench!(b_b8_d64, flash_quantized_sdpa_b8_d64, "ffai/flash_quantized_sdpa_b8_d64", 64, 8);
-    base_bench!(b_b8_d96, flash_quantized_sdpa_b8_d96, "ffai/flash_quantized_sdpa_b8_d96", 96, 8);
-    base_bench!(
-        b_b8_d128,
-        flash_quantized_sdpa_b8_d128,
-        "ffai/flash_quantized_sdpa_b8_d128",
-        128,
-        8
-    );
-    base_bench!(
-        b_b8_d256,
-        flash_quantized_sdpa_b8_d256,
-        "ffai/flash_quantized_sdpa_b8_d256",
-        256,
-        8
-    );
-    base_bench!(
-        b_b8_d512,
-        flash_quantized_sdpa_b8_d512,
-        "ffai/flash_quantized_sdpa_b8_d512",
-        512,
-        8
-    );
-
-    macro_rules! bool_bench {
-        ($fn:ident, $kernel:ident, $name:literal, $dim:literal, $bits:literal) => {
-            #[bench(name = $name, dtypes = [f32, f16, bf16])]
-            fn $fn(dt: DType) -> BenchSetup {
-                masked(super::$kernel::kernel_ir_for(dt), $dim, $bits, "mask_bool", DType::U32, dt)
-            }
-        };
+    // Bool mask: BITS ∈ {4, 8}, DIM ∈ {64, 128, 256} — 6 combos.
+    #[bench(name = "ffai/flash_quantized_sdpa_bool_mask_b{BITS}_d{DIM}", dtypes = [f32, f16, bf16],
+            variants(BITS = [4, 4, 4, 8, 8, 8], DIM = [64, 128, 256, 64, 128, 256],
+                     suffix = "b{BITS}_d{DIM}"))]
+    fn bench_bool_mask(dt: DType) -> BenchSetup {
+        masked(
+            flash_quantized_sdpa_bool_mask_bBITS_dDIM::kernel_ir_for(dt),
+            DIM,
+            BITS,
+            "mask_bool",
+            DType::U32,
+            dt,
+        )
     }
 
-    bool_bench!(
-        bm_b4_d64,
-        flash_quantized_sdpa_bool_mask_b4_d64,
-        "ffai/flash_quantized_sdpa_bool_mask_b4_d64",
-        64,
-        4
-    );
-    bool_bench!(
-        bm_b4_d128,
-        flash_quantized_sdpa_bool_mask_b4_d128,
-        "ffai/flash_quantized_sdpa_bool_mask_b4_d128",
-        128,
-        4
-    );
-    bool_bench!(
-        bm_b4_d256,
-        flash_quantized_sdpa_bool_mask_b4_d256,
-        "ffai/flash_quantized_sdpa_bool_mask_b4_d256",
-        256,
-        4
-    );
-    bool_bench!(
-        bm_b8_d64,
-        flash_quantized_sdpa_bool_mask_b8_d64,
-        "ffai/flash_quantized_sdpa_bool_mask_b8_d64",
-        64,
-        8
-    );
-    bool_bench!(
-        bm_b8_d128,
-        flash_quantized_sdpa_bool_mask_b8_d128,
-        "ffai/flash_quantized_sdpa_bool_mask_b8_d128",
-        128,
-        8
-    );
-    bool_bench!(
-        bm_b8_d256,
-        flash_quantized_sdpa_bool_mask_b8_d256,
-        "ffai/flash_quantized_sdpa_bool_mask_b8_d256",
-        256,
-        8
-    );
-
-    macro_rules! float_bench {
-        ($fn:ident, $kernel:ident, $name:literal, $dim:literal, $bits:literal) => {
-            #[bench(name = $name, dtypes = [f32, f16, bf16])]
-            fn $fn(dt: DType) -> BenchSetup {
-                masked(super::$kernel::kernel_ir_for(dt), $dim, $bits, "mask_float", dt, dt)
-            }
-        };
+    // Float mask: BITS ∈ {4, 8}, DIM ∈ {64, 128, 256} — 6 combos.
+    #[bench(name = "ffai/flash_quantized_sdpa_float_mask_b{BITS}_d{DIM}", dtypes = [f32, f16, bf16],
+            variants(BITS = [4, 4, 4, 8, 8, 8], DIM = [64, 128, 256, 64, 128, 256],
+                     suffix = "b{BITS}_d{DIM}"))]
+    fn bench_float_mask(dt: DType) -> BenchSetup {
+        masked(
+            flash_quantized_sdpa_float_mask_bBITS_dDIM::kernel_ir_for(dt),
+            DIM,
+            BITS,
+            "mask_float",
+            dt,
+            dt,
+        )
     }
-
-    float_bench!(
-        fm_b4_d64,
-        flash_quantized_sdpa_float_mask_b4_d64,
-        "ffai/flash_quantized_sdpa_float_mask_b4_d64",
-        64,
-        4
-    );
-    float_bench!(
-        fm_b4_d128,
-        flash_quantized_sdpa_float_mask_b4_d128,
-        "ffai/flash_quantized_sdpa_float_mask_b4_d128",
-        128,
-        4
-    );
-    float_bench!(
-        fm_b4_d256,
-        flash_quantized_sdpa_float_mask_b4_d256,
-        "ffai/flash_quantized_sdpa_float_mask_b4_d256",
-        256,
-        4
-    );
-    float_bench!(
-        fm_b8_d64,
-        flash_quantized_sdpa_float_mask_b8_d64,
-        "ffai/flash_quantized_sdpa_float_mask_b8_d64",
-        64,
-        8
-    );
-    float_bench!(
-        fm_b8_d128,
-        flash_quantized_sdpa_float_mask_b8_d128,
-        "ffai/flash_quantized_sdpa_float_mask_b8_d128",
-        128,
-        8
-    );
-    float_bench!(
-        fm_b8_d256,
-        flash_quantized_sdpa_float_mask_b8_d256,
-        "ffai/flash_quantized_sdpa_float_mask_b8_d256",
-        256,
-        8
-    );
 }

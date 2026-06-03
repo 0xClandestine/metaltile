@@ -26,201 +26,160 @@
 //!
 //! - `bits ∈ {2, 4, 8}`: 32 / bits divides cleanly → each packed word
 //!   holds exactly `32 / bits` quantized dims with no cross-word spill.
-//!   Inner loop emits `DIMS_PER_WORD` outputs per thread with a single
-//!   load.
-//! - `bits ∈ {3, 5, 6}`: odd-width packs straddle word boundaries.  Each
+//!   Inner loop emits `DIMS_PER_WORD` outputs per thread with a single load.
+//! - `bits ∈ {3, 6}`: odd-width packs straddle word boundaries.  Each
 //!   per-dim emit re-fetches `packed[word_idx]` (and `packed[word_idx+1]`
 //!   if spilling) to grab the bits whose absolute offset is `d * bits`.
-//!   Same logic as `dequant_gemv_int{3,5,6}` in the affine-quant path.
 //!
-//! ## Macro structure
+//! ## Variant axis
 //!
-//! Outer `aura_dequant_rotated_clean!` (for bits ∈ {2,4,8}) and
-//! `aura_dequant_rotated_odd!` (for bits=3) emit the entire
-//! `#[kernel] pub fn …` at module scope.  Required because
-//! the `#[kernel]` proc-macro doesn't expand inner `macro_rules!`
-//! invocations (see CLAUDE.md note about PR #19's macro regression).
+//! `#[kernel(variants(BITS = [2, 3, 4, 6, 8], suffix = "int{BITS}"))]`
+//! emits one kernel module per bit-width. A compile-time
+//! `if BITS % 2 == 0` selects the pack-strided path (even widths) or the
+//! element-strided bit-stream path (odd widths). BITS=5 is absent — AURA
+//! does not ship int5.
 
 use metaltile::kernel;
 
-// ── Clean nibble/byte path: bits ∈ {2, 4, 8} ─────────────────────────────
-//
-// Each thread owns one packed word w covering DIMS_PER_WORD = 32/bits
-// dim slots starting at `d_base = w * DIMS_PER_WORD`.  One u32 load
-// amortises across all dims in the pack.
-#[rustfmt::skip]
-macro_rules! aura_dequant_rotated_clean {
-    ($name:ident, $bits:literal, $subop:literal) => {
-        #[kernel]
-        pub fn $name<T>(
-            packed: Tensor<u32>,
-            norms: Tensor<T>,
-            codebook: Tensor<T>,
-            mut out: Tensor<T>,
-            #[constexpr] dim: u32,
-            #[constexpr] packed_width: u32,
-            #[constexpr] tokens: u32,
-        ) {
-            // Dispatch grid is exactly (packed_width, tokens, B*H); Metal's
-            // `dispatchThreads` doesn't pad, so the MLX-source's
-            // `if (w >= packed_width) return;` guards are unnecessary
-            // belt-and-suspenders.  Omitted here — the DSL has no early
-            // `return`, and bounded `for k < dims_per_word` plus
-            // `if d < dim` keeps any spurious thread from writing out of
-            // bounds.
-            let w = program_id::<0>();
-            let t = program_id::<1>();
-            let bh = program_id::<2>();
+/// AURA codebook dequant + norm-scale, Grid3D dispatch.
+///
+/// Produces kernels: `aura_dequant_rotated_int2`, `_int3`, `_int4`,
+/// `_int6`, `_int8`.
+///
+/// Even BITS (2, 4, 8): pack-strided — one u32 load amortises across all
+/// `32/BITS` values in the pack.
+/// Odd BITS (3, 6): element-strided bit-stream — reads `packed[word_idx]`
+/// and optionally `packed[word_idx+1]` per dim.
+///
+/// Grid: (packed_width, tokens, B*H), tpg=[1,1,1].
+#[kernel(variants(BITS = [2, 3, 4, 6, 8], suffix = "int{BITS}"))]
+pub fn aura_dequant_rotated<T>(
+    packed: Tensor<u32>,
+    norms: Tensor<T>,
+    codebook: Tensor<T>,
+    mut out: Tensor<T>,
+    #[constexpr] dim: u32,
+    #[constexpr] packed_width: u32,
+    #[constexpr] tokens: u32,
+) {
+    let w = program_id::<0>();
+    let t = program_id::<1>();
+    let bh = program_id::<2>();
 
-            let mask = (1u32 << $bits) - 1u32;
-            let dims_per_word = 32u32 / $bits;
+    let mask = (1u32 << BITS) - 1u32;
+    let base = (bh * tokens + t) * packed_width;
+    let norm_val = load(norms[bh * tokens + t]).cast::<f32>();
 
-            let base = (bh * tokens + t) * packed_width;
-            let word = load(packed[base + w]);
-            let norm_val = load(norms[bh * tokens + t]).cast::<f32>();
-
-            let d_base = w * dims_per_word;
-            let out_row_base = (bh * tokens + t) * dim + d_base;
-            for k in range(0u32, dims_per_word, 1u32) {
-                let d = d_base + k;
-                if d < dim {
-                    let val = (word >> (k * $bits)) & mask;
-                    let centroid = load(codebook[val]).cast::<f32>();
-                    let result = centroid * norm_val;
-                    store(out[out_row_base + k], result.cast::<T>());
-                }
+    if BITS % 2 == 0 {
+        // Pack-strided path: one u32 load per thread covers `32/BITS` dims.
+        let dims_per_word = 32u32 / BITS;
+        let word = load(packed[base + w]);
+        let d_base = w * dims_per_word;
+        let out_row_base = (bh * tokens + t) * dim + d_base;
+        for k in range(0u32, dims_per_word, 1u32) {
+            let d = d_base + k;
+            if d < dim {
+                let val = (word >> (k * BITS)) & mask;
+                let centroid = load(codebook[val]).cast::<f32>();
+                let result = centroid * norm_val;
+                store(out[out_row_base + k], result.cast::<T>());
             }
         }
-    };
-}
-
-// ── Odd-width spill path: bits ∈ {3, 5, 6} ───────────────────────────────
-//
-// Words straddle dim boundaries: thread `w` may need to read packed[w]
-// AND packed[w+1] for any dim whose bit-range crosses word index 32.
-// Same bit-stream formula as `dequant_gather_int{3,5,6}`.
-//
-// `ceil(32 / bits)` outputs per thread; `d_base = w * DIMS_PER_WORD`
-// for the iteration but the bit-offset arithmetic is keyed on the
-// absolute dim index `d`, so cross-word spills resolve correctly.
-#[rustfmt::skip]
-macro_rules! aura_dequant_rotated_odd {
-    ($name:ident, $bits:literal, $subop:literal) => {
-        #[kernel]
-        pub fn $name<T>(
-            packed: Tensor<u32>,
-            norms: Tensor<T>,
-            codebook: Tensor<T>,
-            mut out: Tensor<T>,
-            #[constexpr] dim: u32,
-            #[constexpr] packed_width: u32,
-            #[constexpr] tokens: u32,
-        ) {
-            // Dispatch grid is exactly (packed_width, tokens, B*H); Metal's
-            // `dispatchThreads` doesn't pad, so the MLX-source's
-            // `if (w >= packed_width) return;` guards are unnecessary
-            // belt-and-suspenders.  Omitted here — the DSL has no early
-            // `return`, and bounded `for k < dims_per_word` plus
-            // `if d < dim` keeps any spurious thread from writing out of
-            // bounds.
-            let w = program_id::<0>();
-            let t = program_id::<1>();
-            let bh = program_id::<2>();
-
-            let mask = (1u32 << $bits) - 1u32;
-            let dims_per_word = (32u32 + $bits - 1u32) / $bits;
-
-            let base = (bh * tokens + t) * packed_width;
-            let norm_val = load(norms[bh * tokens + t]).cast::<f32>();
-
-            let d_base = w * dims_per_word;
-            for k in range(0u32, dims_per_word, 1u32) {
-                let d = d_base + k;
-                if d < dim {
-                    let bit_offset = d * $bits;
-                    let word_idx = bit_offset / 32u32;
-                    let bit_in_w = bit_offset & 31u32;
-                    let bits_in_w0 = 32u32 - bit_in_w;
-                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
-                    let spill = $bits - lo_bits;
-
-                    let w0 = load(packed[base + word_idx]);
-                    let w1_idx = select(spill > 0u32, word_idx + 1u32, word_idx);
-                    let w1 = load(packed[base + w1_idx]);
-
-                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
-                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
-                    let val = (lo | hi) & mask;
-
-                    let centroid = load(codebook[val]).cast::<f32>();
-                    let result = centroid * norm_val;
-                    store(out[(bh * tokens + t) * dim + d], result.cast::<T>());
-                }
+    } else {
+        // Element-strided bit-stream path: handles cross-word spills.
+        let dims_per_word = (32u32 + BITS - 1u32) / BITS;
+        let d_base = w * dims_per_word;
+        for k in range(0u32, dims_per_word, 1u32) {
+            let d = d_base + k;
+            if d < dim {
+                let bit_offset = d * BITS;
+                let word_idx = bit_offset / 32u32;
+                let bit_in_w = bit_offset & 31u32;
+                let bits_in_w0 = 32u32 - bit_in_w;
+                let lo_bits = select(bits_in_w0 >= BITS, BITS, bits_in_w0);
+                let spill = BITS - lo_bits;
+                let w0 = load(packed[base + word_idx]);
+                let w1_idx = select(spill > 0u32, word_idx + 1u32, word_idx);
+                let w1 = load(packed[base + w1_idx]);
+                let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                let val = (lo | hi) & mask;
+                let centroid = load(codebook[val]).cast::<f32>();
+                let result = centroid * norm_val;
+                store(out[(bh * tokens + t) * dim + d], result.cast::<T>());
             }
         }
-    };
+    }
 }
 
-// Bit-width × dim instantiations.  AURA today supports kb ∈ {2,3,4,6,8}
-// per the session plan (kb=5 isn't shipped); add new variants here when
-// the planning doc adds another kb level.
-aura_dequant_rotated_clean!(aura_dequant_rotated_int2, 2u32, "dequant_rotated_int2");
-aura_dequant_rotated_clean!(aura_dequant_rotated_int4, 4u32, "dequant_rotated_int4");
-aura_dequant_rotated_clean!(aura_dequant_rotated_int8, 8u32, "dequant_rotated_int8");
-aura_dequant_rotated_odd!(aura_dequant_rotated_int3, 3u32, "dequant_rotated_int3");
-aura_dequant_rotated_odd!(aura_dequant_rotated_int6, 6u32, "dequant_rotated_int6");
-
+/// Correctness tests for the `aura_dequant_rotated_int{2,3,4,6,8}` family.
+/// Grid3D, one thread per (packed_word, token, bh) tile. Oracle: decode each
+/// codebook index from the packed bit-stream and multiply by the token norm.
+/// dim=128 is u32-aligned for every supported bit-width (128×2/32=8,
+/// 128×3/32=12, 128×4/32=16, 128×6/32=24, 128×8/32=32 exact).
 pub mod kernel_tests {
-    use metaltile::{test::*, test_kernel};
+    use metaltile::{core::ir::Kernel, test::*, test_kernel};
 
-    use super::aura_dequant_rotated_int4;
+    use super::*;
     use crate::utils::{pack_f32, unpack_f32};
 
-    /// Bit-pack a flat `[bh, t, dim]` int4 index array into
-    /// `[bh, t, packed_width]` u32 words — what `aura_encode` produces.
-    fn pack_int4_indices(indices: &[u32], bh: usize, tokens: usize, dim: usize) -> Vec<u32> {
-        let bits = 4;
+    fn pack_u32(words: &[u32]) -> Vec<u8> { words.iter().flat_map(|w| w.to_le_bytes()).collect() }
+
+    /// Bit-pack a flat `[bh, t, dim]` index array into `[bh, t, packed_width]`
+    /// u32 words using `bits`-wide fields — handles cross-word spills.
+    fn pack_bitstream_indices(
+        indices: &[u32],
+        bh: usize,
+        tokens: usize,
+        dim: usize,
+        bits: usize,
+    ) -> Vec<u32> {
         let packed_width = (dim * bits).div_ceil(32);
         let mut packed = vec![0u32; bh * tokens * packed_width];
+        let mask = (1u32 << bits) - 1;
         for b in 0..bh {
             for t in 0..tokens {
                 for d in 0..dim {
-                    let idx = indices[(b * tokens + t) * dim + d];
+                    let idx = indices[(b * tokens + t) * dim + d] & mask;
                     let bit_offset = d * bits;
                     let word_idx = bit_offset / 32;
-                    let shift = bit_offset & 31;
-                    packed[(b * tokens + t) * packed_width + word_idx] |= (idx & 0xf) << shift;
+                    let shift = (bit_offset & 31) as u32;
+                    let bits_in_w0 = 32 - shift as usize;
+                    let row_base = (b * tokens + t) * packed_width;
+                    if bits_in_w0 >= bits {
+                        packed[row_base + word_idx] |= idx << shift;
+                    } else {
+                        packed[row_base + word_idx] |= idx << shift;
+                        packed[row_base + word_idx + 1] |= idx >> bits_in_w0;
+                    }
                 }
             }
         }
         packed
     }
 
-    fn pack_u32(words: &[u32]) -> Vec<u8> { words.iter().flat_map(|w| w.to_le_bytes()).collect() }
-
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-1)]
-    fn test_aura_dequant_rotated_int4(dt: DType) -> TestSetup {
-        // bits=4, dim=128, packed_width=16, 2 heads × 3 tokens.
-        let (dim, bh, tokens) = (128usize, 2usize, 3usize);
-        let packed_width = (dim * 4).div_ceil(32);
-        // 16-level symmetric codebook in [-1, 1]. Now T-typed (#212): the
-        // buffer follows the activation dtype so the same codebook feeds the
-        // encoder and decoder with no per-call cast.
-        let codebook: Vec<f32> = (0..16).map(|i| -1.0 + 2.0 * i as f32 / 15.0).collect();
-        let indices: Vec<u32> = (0..bh * tokens * dim).map(|i| ((i * 7 + 3) % 16) as u32).collect();
-        let packed = pack_int4_indices(&indices, bh, tokens, dim);
+    fn dequant_setup(
+        kernel: Kernel,
+        bits: u32,
+        dim: usize,
+        bh: usize,
+        tokens: usize,
+        dt: DType,
+    ) -> TestSetup {
+        let packed_width = (dim * bits as usize).div_ceil(32);
+        let levels = 1usize << bits;
+        let codebook: Vec<f32> =
+            (0..levels).map(|i| -1.0 + 2.0 * i as f32 / (levels - 1) as f32).collect();
+        let indices: Vec<u32> =
+            (0..bh * tokens * dim).map(|i| ((i * 7 + 3) as u32) % levels as u32).collect();
+        let packed = pack_bitstream_indices(&indices, bh, tokens, dim, bits as usize);
         let norms: Vec<f32> = (0..bh * tokens).map(|i| 0.5 + 0.1 * i as f32).collect();
-
-        // `norms` and `codebook` are now `Tensor<T>` — round them through the
-        // GPU dtype so the oracle sees the same cast-at-load values the kernel
-        // does. Output is also rounded through `dt` to match the store-cast.
         let codebook_r = unpack_f32(&pack_f32(&codebook, dt), dt);
         let norms_r = unpack_f32(&pack_f32(&norms, dt), dt);
         let expected: Vec<f32> = (0..bh * tokens * dim)
             .map(|i| codebook_r[indices[i] as usize] * norms_r[i / dim])
             .collect();
-
-        TestSetup::new(aura_dequant_rotated_int4::kernel_ir_for(dt))
+        TestSetup::new(kernel)
             .mode(KernelMode::Grid3D)
             .input(TestBuffer::from_vec("packed", pack_u32(&packed), DType::U32))
             .input(TestBuffer::from_vec("norms", pack_f32(&norms, dt), dt))
@@ -230,33 +189,32 @@ pub mod kernel_tests {
             .constexpr("packed_width", packed_width as u32)
             .constexpr("tokens", tokens as u32)
             .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
-            // tpg=1 → total threads == group counts == (packed_width, tokens, B*H).
             .grid_3d(packed_width as u32, tokens as u32, bh as u32, [1, 1, 1])
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = 1e-1,
+                  variants(BITS = [2, 3, 4, 6, 8], suffix = "int{BITS}"))]
+    fn test_aura_dequant_rotated(dt: DType) -> TestSetup {
+        dequant_setup(aura_dequant_rotated_intBITS::kernel_ir_for(dt), BITS, 128, 2, 3, dt)
     }
 }
 
 /// New-syntax benchmarks for the AURA bulk-dequant family (int2/3/4/6/8) —
-/// MLX-less Grid3D kernels. Shape: head_dim 128, 64 tokens, 8 KV heads.
+/// Grid3D dispatch. Shape: dim=128, 64 tokens, 8 BH.
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    use super::{
-        aura_dequant_rotated_int2,
-        aura_dequant_rotated_int3,
-        aura_dequant_rotated_int4,
-        aura_dequant_rotated_int6,
-        aura_dequant_rotated_int8,
-    };
+    use super::*;
 
     fn setup(
         s: BenchSetup,
         dim: usize,
-        bits: usize,
+        bits: u32,
         bh: usize,
         tokens: usize,
         dt: DType,
     ) -> BenchSetup {
-        let packed_width = (dim * bits).div_ceil(32);
+        let packed_width = (dim * bits as usize).div_ceil(32);
         let levels = 1usize << bits;
         s.mode(KernelMode::Grid3D)
             .buffer(BenchBuffer::random("packed", bh * tokens * packed_width, DType::U32))
@@ -270,28 +228,16 @@ pub mod kernel_benches {
             .grid_3d(packed_width as u32, tokens as u32, bh as u32, [1, 1, 1])
     }
 
-    #[bench(name = "ffai/aura_dequant_rotated_int2", dtypes = [f32, f16, bf16])]
-    fn bench_int2(dt: DType) -> BenchSetup {
-        setup(BenchSetup::new(aura_dequant_rotated_int2::kernel_ir_for(dt)), 128, 2, 8, 64, dt)
-    }
-
-    #[bench(name = "ffai/aura_dequant_rotated_int3", dtypes = [f32, f16, bf16])]
-    fn bench_int3(dt: DType) -> BenchSetup {
-        setup(BenchSetup::new(aura_dequant_rotated_int3::kernel_ir_for(dt)), 128, 3, 8, 64, dt)
-    }
-
-    #[bench(name = "ffai/aura_dequant_rotated_int4", dtypes = [f32, f16, bf16])]
-    fn bench_int4(dt: DType) -> BenchSetup {
-        setup(BenchSetup::new(aura_dequant_rotated_int4::kernel_ir_for(dt)), 128, 4, 8, 64, dt)
-    }
-
-    #[bench(name = "ffai/aura_dequant_rotated_int6", dtypes = [f32, f16, bf16])]
-    fn bench_int6(dt: DType) -> BenchSetup {
-        setup(BenchSetup::new(aura_dequant_rotated_int6::kernel_ir_for(dt)), 128, 6, 8, 64, dt)
-    }
-
-    #[bench(name = "ffai/aura_dequant_rotated_int8", dtypes = [f32, f16, bf16])]
-    fn bench_int8(dt: DType) -> BenchSetup {
-        setup(BenchSetup::new(aura_dequant_rotated_int8::kernel_ir_for(dt)), 128, 8, 8, 64, dt)
+    #[bench(name = "ffai/aura_dequant_rotated_int{BITS}", dtypes = [f32, f16, bf16],
+            variants(BITS = [2, 3, 4, 6, 8], suffix = "int{BITS}"))]
+    fn bench_aura_dequant_rotated(dt: DType) -> BenchSetup {
+        setup(
+            BenchSetup::new(aura_dequant_rotated_intBITS::kernel_ir_for(dt)),
+            128,
+            BITS,
+            8,
+            64,
+            dt,
+        )
     }
 }

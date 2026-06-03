@@ -26,127 +26,174 @@
 //! out-of-range (padding) reads to contribute zero. Generic over T —
 //! fp16 / bf16 / f32 all flow through the same `#[kernel] fn`.
 //!
-//! Two macro variants bake in the common patch configs so the inner
-//! `kh / kw / stride` loop bounds are compile-time constants the codegen
-//! can unroll: `conv2d_patch14` (14×14 stride 14 — Qwen-VL / SigLIP) and
-//! `conv2d_patch16` (16×16 stride 16 — CLIP / Gemma-VL). `conv2d_generic`
-//! keeps the kernel size and stride as runtime constexprs for any other
-//! configuration.
+//! `conv2d_patch14` (14×14 stride 14 — Qwen-VL / SigLIP) and
+//! `conv2d_patch16` (16×16 stride 16 — CLIP / Gemma-VL) bake in the
+//! kernel size and stride as compile-time constants so the receptive-field
+//! loops unroll. `conv2d_generic` keeps them as runtime constexprs for any
+//! other configuration.
 //!
 //! `conv2d_grouped` is the fully general 2D convolution — it adds
 //! dilation (atrous convs) and grouped channels (depthwise / grouped
 //! convs) on top of the strided/padded direct-conv structure. It is the
 //! direct-conv counterpart of MLX's implicit-GEMM `steel_conv_general`.
 //!
-//! ## Macro structure
-//!
-//! `conv2d_kernel!` emits the whole `#[kernel] pub fn …` at
-//! module scope. The compiler expands the outer macro before the `#[kernel]`
-//! proc-macro runs, so the body parser sees concrete `$kh / $kw / $stride`
-//! tokens — never an inner `macro_rules!` inside a kernel body (which
-//! silently empties the kernel; see `dequant_gather.rs`).
-//!
 //! Codegen-only. Correctness validated by the in-source `#[test_kernel]`s.
 
 use metaltile::kernel;
 
-/// Emit a conv2d kernel. `$kh / $kw / $stride` are either literals (the
-/// fixed-patch variants) or the `kh / kw / stride_h / stride_w`
-/// constexpr idents (the generic variant). Padding is always a runtime
-/// constexpr — vision patch convs are typically unpadded but Gemma-VL's
-/// pan-and-scan tiles can carry a small pad.
-macro_rules! conv2d_kernel {
-    ($name:ident, $subop:literal, $kh:expr, $kw:expr, $sh:expr, $sw:expr) => {
-        #[kernel]
-        pub fn $name<T>(
-            input: Tensor<T>,
-            weight: Tensor<T>,
-            bias: Tensor<T>,
-            out: Tensor<T>,
-            #[constexpr] batch: u32,
-            #[constexpr] in_ch: u32,
-            #[constexpr] in_h: u32,
-            #[constexpr] in_w: u32,
-            #[constexpr] out_ch: u32,
-            #[constexpr] out_h: u32,
-            #[constexpr] out_w: u32,
-            #[constexpr] kh: u32,
-            #[constexpr] kw: u32,
-            #[constexpr] stride_h: u32,
-            #[constexpr] stride_w: u32,
-            #[constexpr] pad_h: u32,
-            #[constexpr] pad_w: u32,
-        ) {
-            // Flat output index → (n, oc, oh, ow). One thread per output.
-            let idx = program_id::<0>();
-            let ow = idx % out_w;
-            let t1 = idx / out_w;
-            let oh = t1 % out_h;
-            let t2 = t1 / out_h;
-            let oc = t2 % out_ch;
-            let n = t2 / out_ch;
+// ── Fixed-patch variants ─────────────────────────────────────────────────
+//
+// Kernel size and stride are compile-time constants so the receptive-field
+// loops unroll. 14×14/14 is the Qwen-VL / SigLIP patch; 16×16/16 is
+// CLIP / Gemma-VL.
 
-            // Receptive-field anchors expressed as indices into the
-            // *padded* input — `oh*stride` lands at column `pad_h` of the
-            // padded grid. A real input pixel at row `ph` therefore sits
-            // at unpadded row `ph - pad_h`, valid iff
-            // `pad_h <= ph < pad_h + in_h`. Working in this padded frame
-            // keeps every index a non-negative u32 — no i32 arithmetic.
-            let kh_v = $kh;
-            let kw_v = $kw;
-            let sh_v = $sh;
-            let sw_v = $sw;
-            let ph0 = oh * sh_v;
-            let pw0 = ow * sw_v;
+#[kernel(variants(
+    KH = [14u32, 16u32],
+    KW = [14u32, 16u32],
+    SH = [14u32, 16u32],
+    SW = [14u32, 16u32],
+    suffix = "patch{KH}"
+))]
+pub fn conv2d<T>(
+    input: Tensor<T>,
+    weight: Tensor<T>,
+    bias: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] batch: u32,
+    #[constexpr] in_ch: u32,
+    #[constexpr] in_h: u32,
+    #[constexpr] in_w: u32,
+    #[constexpr] out_ch: u32,
+    #[constexpr] out_h: u32,
+    #[constexpr] out_w: u32,
+    #[constexpr] kh: u32,
+    #[constexpr] kw: u32,
+    #[constexpr] stride_h: u32,
+    #[constexpr] stride_w: u32,
+    #[constexpr] pad_h: u32,
+    #[constexpr] pad_w: u32,
+) {
+    // Flat output index → (n, oc, oh, ow). One thread per output.
+    let idx = program_id::<0>();
+    let ow = idx % out_w;
+    let t1 = idx / out_w;
+    let oh = t1 % out_h;
+    let t2 = t1 / out_h;
+    let oc = t2 % out_ch;
+    let n = t2 / out_ch;
 
-            let input_plane = in_h * in_w;
-            let in_n_stride = in_ch * input_plane;
-            let w_in_stride = kh_v * kw_v;
-            let w_oc_stride = in_ch * w_in_stride;
+    // Receptive-field anchors in the *padded* input frame — `oh*stride`
+    // lands at column `pad_h` of the padded grid. A real pixel at row
+    // `ph` sits at unpadded row `ph - pad_h`, valid iff
+    // `pad_h <= ph < pad_h + in_h`. u32 arithmetic throughout.
+    let ph0 = oh * SH;
+    let pw0 = ow * SW;
 
-            let mut acc = load(bias[oc]).cast::<f32>();
+    let input_plane = in_h * in_w;
+    let in_n_stride = in_ch * input_plane;
+    let w_in_stride = KH * KW;
+    let w_oc_stride = in_ch * w_in_stride;
 
-            // Walk the in_ch × kh × kw receptive field. Padding pixels
-            // (row/col outside the real input) contribute zero — the load
-            // is clamped to index 0 and masked out, so it never reads OOB.
-            for ic in range(0u32, in_ch, 1u32) {
-                let in_ic_base = n * in_n_stride + ic * input_plane;
-                let w_ic_base = oc * w_oc_stride + ic * w_in_stride;
-                for ky in range(0u32, kh_v, 1u32) {
-                    let ph = ph0 + ky;
-                    let row_ok = (ph >= pad_h) & (ph < pad_h + in_h);
-                    let ih = select(row_ok, ph - pad_h, 0u32);
-                    for kx in range(0u32, kw_v, 1u32) {
-                        let pw = pw0 + kx;
-                        let col_ok = (pw >= pad_w) & (pw < pad_w + in_w);
-                        let valid = row_ok & col_ok;
-                        let iw = select(col_ok, pw - pad_w, 0u32);
+    let mut acc = load(bias[oc]).cast::<f32>();
 
-                        let in_idx = in_ic_base + ih * in_w + iw;
-                        let pix = load(input[in_idx]).cast::<f32>();
-                        let pix_m = select(valid, pix, 0.0f32);
+    // Walk the in_ch × KH × KW receptive field. Padding pixels contribute
+    // zero — clamped load, masked out, never reads OOB.
+    for ic in range(0u32, in_ch, 1u32) {
+        let in_ic_base = n * in_n_stride + ic * input_plane;
+        let w_ic_base = oc * w_oc_stride + ic * w_in_stride;
+        for ky in range(0u32, KH, 1u32) {
+            let ph = ph0 + ky;
+            let row_ok = (ph >= pad_h) & (ph < pad_h + in_h);
+            let ih = select(row_ok, ph - pad_h, 0u32);
+            for kx in range(0u32, KW, 1u32) {
+                let pw = pw0 + kx;
+                let col_ok = (pw >= pad_w) & (pw < pad_w + in_w);
+                let valid = row_ok & col_ok;
+                let iw = select(col_ok, pw - pad_w, 0u32);
 
-                        let w_idx = w_ic_base + ky * kw_v + kx;
-                        let wt = load(weight[w_idx]).cast::<f32>();
-                        acc = acc + pix_m * wt;
-                    }
-                }
+                let in_idx = in_ic_base + ih * in_w + iw;
+                let pix = load(input[in_idx]).cast::<f32>();
+                let pix_m = select(valid, pix, 0.0f32);
+
+                let w_idx = w_ic_base + ky * KW + kx;
+                let wt = load(weight[w_idx]).cast::<f32>();
+                acc = acc + pix_m * wt;
             }
-
-            store(out[idx], acc.cast::<T>());
         }
-    };
+    }
+
+    store(out[idx], acc.cast::<T>());
 }
 
-// Fixed-patch variants: kernel size and stride are compile-time
-// constants so the receptive-field loops unroll. 14×14/14 is the
-// Qwen-VL / SigLIP patch; 16×16/16 is CLIP / Gemma-VL.
-conv2d_kernel!(conv2d_patch14, "patch14", 14u32, 14u32, 14u32, 14u32);
-conv2d_kernel!(conv2d_patch16, "patch16", 16u32, 16u32, 16u32, 16u32);
+// ── Generic variant ──────────────────────────────────────────────────────
+//
+// Kernel size and stride are runtime constexprs for any (kh, kw, stride)
+// configuration.
 
-// Generic variant: kernel size and stride stay runtime constexprs for
-// any other (kh, kw, stride) configuration.
-conv2d_kernel!(conv2d_generic, "generic", kh, kw, stride_h, stride_w);
+#[kernel]
+pub fn conv2d_generic<T>(
+    input: Tensor<T>,
+    weight: Tensor<T>,
+    bias: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] batch: u32,
+    #[constexpr] in_ch: u32,
+    #[constexpr] in_h: u32,
+    #[constexpr] in_w: u32,
+    #[constexpr] out_ch: u32,
+    #[constexpr] out_h: u32,
+    #[constexpr] out_w: u32,
+    #[constexpr] kh: u32,
+    #[constexpr] kw: u32,
+    #[constexpr] stride_h: u32,
+    #[constexpr] stride_w: u32,
+    #[constexpr] pad_h: u32,
+    #[constexpr] pad_w: u32,
+) {
+    let idx = program_id::<0>();
+    let ow = idx % out_w;
+    let t1 = idx / out_w;
+    let oh = t1 % out_h;
+    let t2 = t1 / out_h;
+    let oc = t2 % out_ch;
+    let n = t2 / out_ch;
+
+    let ph0 = oh * stride_h;
+    let pw0 = ow * stride_w;
+
+    let input_plane = in_h * in_w;
+    let in_n_stride = in_ch * input_plane;
+    let w_in_stride = kh * kw;
+    let w_oc_stride = in_ch * w_in_stride;
+
+    let mut acc = load(bias[oc]).cast::<f32>();
+
+    for ic in range(0u32, in_ch, 1u32) {
+        let in_ic_base = n * in_n_stride + ic * input_plane;
+        let w_ic_base = oc * w_oc_stride + ic * w_in_stride;
+        for ky in range(0u32, kh, 1u32) {
+            let ph = ph0 + ky;
+            let row_ok = (ph >= pad_h) & (ph < pad_h + in_h);
+            let ih = select(row_ok, ph - pad_h, 0u32);
+            for kx in range(0u32, kw, 1u32) {
+                let pw = pw0 + kx;
+                let col_ok = (pw >= pad_w) & (pw < pad_w + in_w);
+                let valid = row_ok & col_ok;
+                let iw = select(col_ok, pw - pad_w, 0u32);
+
+                let in_idx = in_ic_base + ih * in_w + iw;
+                let pix = load(input[in_idx]).cast::<f32>();
+                let pix_m = select(valid, pix, 0.0f32);
+
+                let w_idx = w_ic_base + ky * kw + kx;
+                let wt = load(weight[w_idx]).cast::<f32>();
+                acc = acc + pix_m * wt;
+            }
+        }
+    }
+
+    store(out[idx], acc.cast::<T>());
+}
 
 /// Fully general 2D convolution — strides, dilation, padding, and
 /// grouped channels.
@@ -235,7 +282,7 @@ pub fn conv2d_grouped<T>(
     let group = oc / ocpg;
     let ic_base = group * icpg;
     // Receptive-field anchors in the *padded* input frame (see the
-    // `conv2d_kernel!` comment) — a real pixel at padded row `ph` sits
+    // `conv2d_grouped` comment) — a real pixel at padded row `ph` sits
     // at unpadded row `ph - pad_h`, valid iff `pad_h <= ph < pad_h+in_h`.
     let ph0 = oh * stride_h;
     let pw0 = ow * stride_w;

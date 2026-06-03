@@ -1,7 +1,7 @@
 //! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
 //! SPDX-License-Identifier: Apache-2.0
-//! MLX-format dequantizing GEMV kernels for int3 / int4 / int5 / int6 /
-//! int8 weights. Reduction-mode kernels; one threadgroup per output row.
+//! MLX-format dequantizing GEMV kernels for int2 / int3 / int4 / int5 /
+//! int6 / int8 weights. Reduction-mode kernels; one threadgroup per output row.
 //!
 //! Layouts (per dtype, with N = `in_dim`, G = `group_size`):
 //!
@@ -11,16 +11,14 @@
 //!   input   [N]                        T
 //!   output  [out_dim]                  T
 //!
-//! Two dispatch strategies, chosen per bit-width:
+//! Two dispatch strategies, chosen per bit-width via compile-time
+//! `if BITS % 2 == 0`:
 //!
-//! **Pack-strided** (int4, int8) — threads stride over u32 packs; each pack
-//! yields `32/bits` values.  One u32 load amortises across all values in
+//! **Pack-strided** (BITS ∈ {2, 4, 8}) — threads stride over u32 packs; each
+//! pack yields `32/BITS` values. One u32 load amortises across all values in
 //! the pack; no extra bit-extraction arithmetic beyond a simple shift+mask.
 //!
-//!   n_packs = in_dim / (32/bits)
-//!   per pack: 1 u32 load → (32/bits) shift+mask extractions → (32/bits) FMAs
-//!
-//! **Element-strided** (int3, int5, int6) — threads stride over individual
+//! **Element-strided** (BITS ∈ {3, 5, 6}) — threads stride over individual
 //! elements using the two-word bit-stream formula from `dequant_gather.rs`.
 //! Odd-width packs don't align to u32 boundaries so pack-striding would
 //! require complex cycle handling; element-striding is cleaner and achieves
@@ -28,144 +26,94 @@
 //! L1 multicast) while avoiding the idle-thread problem of the old
 //! group-strided approach.
 //!
-//!   n_iters = ceil(in_dim / lsize)
-//!   per iter: 1-2 u32 loads + bit-extract (5 ops) + 1 FMA
+//! ## Variant axis
 //!
-//! ## Macro structure
-//!
-//! Each bit-width gets a `#[kernel] pub fn dequant_gemv_int<bits><T>(…)` plus
-//! its `BenchSpec` registration.  The body shape is identical across bit-
-//! widths within a strategy, so an outer `macro_rules!` (`dequant_gemv_pow2!`
-//! / `dequant_gemv_odd!`) emits the whole `#[kernel] fn …` + `inventory::
-//! submit!` at module scope; the compiler expands those before the
-//! `#[kernel]` proc-macro runs, so the body parser sees concrete tokens.
-//! Embedding the body inside an *inner* `macro_rules!` invocation (the
-//! previous shape of this file) silently produced empty kernels — the
-//! proc-macro doesn't expand inner declarative macros.
+//! `#[kernel(variants(BITS = [2, 3, 4, 5, 6, 8], suffix = "int{BITS}"))]`
+//! produces kernels: `dequant_gemv_int2`, `_int3`, `_int4`, `_int5`,
+//! `_int6`, `_int8`. The `dequant_gemv_int4_fast` kernel is a separate
+//! perf-tuned variant with a different algorithm.
 
 use metaltile::kernel;
 
-// ── Pack-strided kernel (int4, int8) ──────────────────────────────────────
-//
-// Each thread strides over u32 packs. One pack load → (32/$bits) extractions.
-// `$bits` must divide 32 evenly (i.e. 2, 4, or 8).
-macro_rules! dequant_gemv_pow2 {
-    ($name:ident, $bits:literal, $subop:literal) => {
-        #[kernel]
-        pub fn $name<T>(
-            weight: Tensor<u32>,
-            scales: Tensor<T>,
-            biases: Tensor<T>,
-            input: Tensor<T>,
-            output: Tensor<T>,
-            #[constexpr] in_dim: u32,
-            #[constexpr] group_size: u32,
-        ) {
-            let vals_per_pack = 32u32 / $bits;
-            let mask = (1u32 << $bits) - 1u32;
-            let row = program_id::<0>();
-            let n_packs_per_row = in_dim / vals_per_pack;
-            let n_groups = in_dim / group_size;
-            let packs_per_group = group_size / vals_per_pack;
-            let row_pack_off = row * n_packs_per_row;
-            let row_group_off = row * n_groups;
+/// Dequantizing GEMV — variable bit-widths (2, 3, 4, 5, 6, 8).
+///
+/// Produces: `dequant_gemv_int2`, `_int3`, `_int4`, `_int5`, `_int6`,
+/// `_int8`. One threadgroup per output row; `reduce_sum` across lanes.
+///
+/// Even BITS: pack-strided (one u32 covers `32/BITS` elements).
+/// Odd BITS: element-strided two-word bit-stream (`lo | hi` formula).
+#[kernel(variants(BITS = [2, 3, 4, 5, 6, 8], suffix = "int{BITS}"))]
+pub fn dequant_gemv<T>(
+    weight: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    input: Tensor<T>,
+    output: Tensor<T>,
+    #[constexpr] in_dim: u32,
+    #[constexpr] group_size: u32,
+) {
+    let row = program_id::<0>();
+    let n_groups = in_dim / group_size;
+    let row_group_off = row * n_groups;
+    let mut acc = 0.0f32;
 
-            let mut acc = 0.0f32;
-            let p_iters = (n_packs_per_row + lsize - 1u32) / lsize;
-            for p_iter in range(0u32, p_iters, 1u32) {
-                let pack_idx = p_iter * lsize + tid;
-                if pack_idx < n_packs_per_row {
-                    let g = pack_idx / packs_per_group;
-                    let scale = load(scales[row_group_off + g]).cast::<f32>();
-                    let bias = load(biases[row_group_off + g]).cast::<f32>();
-
-                    let packed = load(weight[row_pack_off + pack_idx]);
-                    let p_off = pack_idx * vals_per_pack;
-
-                    for i in range(0u32, vals_per_pack, 1u32) {
-                        let q = (packed >> (i * $bits)) & mask;
-                        acc = acc
-                            + (q.cast::<f32>() * scale + bias)
-                                * load(input[p_off + i]).cast::<f32>();
-                    }
+    if BITS % 2 == 0 {
+        // Pack-strided: one u32 load covers `32/BITS` values.
+        let vals_per_pack = 32u32 / BITS;
+        let mask = (1u32 << BITS) - 1u32;
+        let n_packs_per_row = in_dim / vals_per_pack;
+        let packs_per_group = group_size / vals_per_pack;
+        let row_pack_off = row * n_packs_per_row;
+        let p_iters = (n_packs_per_row + lsize - 1u32) / lsize;
+        for p_iter in range(0u32, p_iters, 1u32) {
+            let pack_idx = p_iter * lsize + tid;
+            if pack_idx < n_packs_per_row {
+                let g = pack_idx / packs_per_group;
+                let scale = load(scales[row_group_off + g]).cast::<f32>();
+                let bias = load(biases[row_group_off + g]).cast::<f32>();
+                let packed = load(weight[row_pack_off + pack_idx]);
+                let p_off = pack_idx * vals_per_pack;
+                for i in range(0u32, vals_per_pack, 1u32) {
+                    let q = (packed >> (i * BITS)) & mask;
+                    acc = acc
+                        + (q.cast::<f32>() * scale + bias) * load(input[p_off + i]).cast::<f32>();
                 }
             }
-
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(output[row], total.cast::<T>());
+        }
+    } else {
+        // Element-strided: two-word bit-stream for odd widths.
+        let mask = (1u32 << BITS) - 1u32;
+        let u32_per_row = in_dim * BITS / 32u32;
+        let row_u32_off = row * u32_per_row;
+        let n_iters = (in_dim + lsize - 1u32) / lsize;
+        for _iter in range(0u32, n_iters, 1u32) {
+            let d = _iter * lsize + tid;
+            if d < in_dim {
+                let g = d / group_size;
+                let scale = load(scales[row_group_off + g]).cast::<f32>();
+                let bias = load(biases[row_group_off + g]).cast::<f32>();
+                let bit_off = d * BITS;
+                let word_idx = bit_off / 32u32;
+                let bit_in_w = bit_off & 31u32;
+                let bits_in_w0 = 32u32 - bit_in_w;
+                let lo_bits = select(bits_in_w0 >= BITS, BITS, bits_in_w0);
+                let spill = BITS - lo_bits;
+                let w0 = load(weight[row_u32_off + word_idx]);
+                let w1idx = select(spill > 0u32, word_idx + 1u32, word_idx);
+                let w1 = load(weight[row_u32_off + w1idx]);
+                let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                let q = lo | hi;
+                acc = acc + (q.cast::<f32>() * scale + bias) * load(input[d]).cast::<f32>();
             }
         }
-    };
+    }
+
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[row], total.cast::<T>());
+    }
 }
-
-// ── Element-strided kernel (int3, int5, int6) ────────────────────────────
-//
-// Odd-width packs don't divide u32s evenly, so pack-striding requires
-// complex multi-u32 cycle handling. Element-striding with the two-word
-// bit-stream formula is cleaner and avoids the idle-thread problem of the
-// old group-strided approach (where threads past n_groups sat idle).
-// Adjacent threads access adjacent elements → same u32 words → L1 multicast.
-macro_rules! dequant_gemv_odd {
-    ($name:ident, $bits:literal, $subop:literal) => {
-        #[kernel]
-        pub fn $name<T>(
-            weight: Tensor<u32>,
-            scales: Tensor<T>,
-            biases: Tensor<T>,
-            input: Tensor<T>,
-            output: Tensor<T>,
-            #[constexpr] in_dim: u32,
-            #[constexpr] group_size: u32,
-        ) {
-            let row = program_id::<0>();
-            let u32_per_row = in_dim * $bits / 32u32;
-            let n_groups = in_dim / group_size;
-            let row_u32_off = row * u32_per_row;
-            let row_group_off = row * n_groups;
-
-            let mut acc = 0.0f32;
-            let n_iters = (in_dim + lsize - 1u32) / lsize;
-            for _iter in range(0u32, n_iters, 1u32) {
-                let d = _iter * lsize + tid;
-                if d < in_dim {
-                    let g = d / group_size;
-                    let scale = load(scales[row_group_off + g]).cast::<f32>();
-                    let bias = load(biases[row_group_off + g]).cast::<f32>();
-
-                    let bit_off = d * $bits;
-                    let word_idx = bit_off / 32u32;
-                    let bit_in_w = bit_off & 31u32;
-                    let bits_in_w0 = 32u32 - bit_in_w;
-                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
-                    let spill = $bits - lo_bits;
-
-                    let w0 = load(weight[row_u32_off + word_idx]);
-                    let w1idx = select(spill > 0u32, word_idx + 1u32, word_idx);
-                    let w1 = load(weight[row_u32_off + w1idx]);
-
-                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
-                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
-                    let q = lo | hi;
-
-                    acc = acc + (q.cast::<f32>() * scale + bias) * load(input[d]).cast::<f32>();
-                }
-            }
-
-            let total = reduce_sum(acc);
-            if tid == 0u32 {
-                store(output[row], total.cast::<T>());
-            }
-        }
-    };
-}
-
-dequant_gemv_pow2!(dequant_gemv_int2, 2u32, "int2");
-dequant_gemv_pow2!(dequant_gemv_int4, 4u32, "int4");
-dequant_gemv_pow2!(dequant_gemv_int8, 8u32, "int8");
-dequant_gemv_odd!(dequant_gemv_int3, 3u32, "int3");
-dequant_gemv_odd!(dequant_gemv_int5, 5u32, "int5");
-dequant_gemv_odd!(dequant_gemv_int6, 6u32, "int6");
 
 // ── Perf-tuned int4 GEMV — 8 output rows per TG ─────────────────────────
 //
@@ -492,35 +440,17 @@ pub mod kernel_tests {
             .grid_3d(grid_rows, 1, 1, [tpg, 1, 1])
     }
 
-    // ── Pack-strided (int2 / int4 / int8) ──────────────────────────────────
-    // in_dim a multiple of 32/bits; group_size 64; one TG per output row.
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_dequant_gemv_int2(dt: DType) -> TestSetup {
-        gemv_setup(dequant_gemv_int2::kernel_ir_for(dt), 2, 4, 256, 64, 4, TPG, dt)
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_dequant_gemv_int4(dt: DType) -> TestSetup {
-        gemv_setup(dequant_gemv_int4::kernel_ir_for(dt), 4, 4, 256, 64, 4, TPG, dt)
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_dequant_gemv_int8(dt: DType) -> TestSetup {
-        gemv_setup(dequant_gemv_int8::kernel_ir_for(dt), 8, 4, 256, 64, 4, TPG, dt)
-    }
-
-    // ── Element-strided odd widths (int3 / int5 / int6) ─────────────────────
-    // in_dim*bits must be a multiple of 32 (u32-aligned packed row):
-    //   int3: 64*3 = 192 = 6 u32; int5: 64*5 = 320 = 10 u32; int6: 64*6 = 384.
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_dequant_gemv_int3(dt: DType) -> TestSetup {
-        gemv_setup(dequant_gemv_int3::kernel_ir_for(dt), 3, 4, 64, 32, 4, TPG, dt)
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_dequant_gemv_int5(dt: DType) -> TestSetup {
-        gemv_setup(dequant_gemv_int5::kernel_ir_for(dt), 5, 4, 64, 32, 4, TPG, dt)
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_dequant_gemv_int6(dt: DType) -> TestSetup {
-        gemv_setup(dequant_gemv_int6::kernel_ir_for(dt), 6, 4, 64, 32, 4, TPG, dt)
+    // Even bits (2, 4, 8): pack-strided; in_dim a multiple of 32/bits.
+    // Odd bits (3, 5, 6): element-strided; in_dim*bits must be 32-aligned.
+    //   int3: 64*3=192; int5: 64*5=320; int6: 64*6=384.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1],
+                  variants(BITS = [2, 3, 4, 5, 6, 8], suffix = "int{BITS}"))]
+    fn test_dequant_gemv(dt: DType) -> TestSetup {
+        if BITS % 2 == 0 {
+            gemv_setup(dequant_gemv_intBITS::kernel_ir_for(dt), BITS, 4, 256, 64, 4, TPG, dt)
+        } else {
+            gemv_setup(dequant_gemv_intBITS::kernel_ir_for(dt), BITS, 4, 64, 32, 4, TPG, dt)
+        }
     }
 
     // ── Perf-tuned int4_fast: 8 rows per TG ─────────────────────────────────
@@ -581,29 +511,10 @@ pub mod kernel_benches {
             .flops(2 * out_dim as u64 * in_dim as u64)
     }
 
-    #[bench(name = "ffai/dequant_gemv/int2", dtypes = [f32, f16, bf16])]
-    fn bench_dequant_gemv_int2(dt: DType) -> BenchSetup {
-        gb(dequant_gemv_int2::kernel_ir_for(dt), 2, 4096, 4096, 64, 4096, 64, dt)
-    }
-    #[bench(name = "ffai/dequant_gemv/int3", dtypes = [f32, f16, bf16])]
-    fn bench_dequant_gemv_int3(dt: DType) -> BenchSetup {
-        gb(dequant_gemv_int3::kernel_ir_for(dt), 3, 4096, 4096, 64, 4096, 64, dt)
-    }
-    #[bench(name = "ffai/dequant_gemv/int4", dtypes = [f32, f16, bf16])]
-    fn bench_dequant_gemv_int4(dt: DType) -> BenchSetup {
-        gb(dequant_gemv_int4::kernel_ir_for(dt), 4, 4096, 4096, 64, 4096, 64, dt)
-    }
-    #[bench(name = "ffai/dequant_gemv/int5", dtypes = [f32, f16, bf16])]
-    fn bench_dequant_gemv_int5(dt: DType) -> BenchSetup {
-        gb(dequant_gemv_int5::kernel_ir_for(dt), 5, 4096, 4096, 64, 4096, 64, dt)
-    }
-    #[bench(name = "ffai/dequant_gemv/int6", dtypes = [f32, f16, bf16])]
-    fn bench_dequant_gemv_int6(dt: DType) -> BenchSetup {
-        gb(dequant_gemv_int6::kernel_ir_for(dt), 6, 4096, 4096, 64, 4096, 64, dt)
-    }
-    #[bench(name = "ffai/dequant_gemv/int8", dtypes = [f32, f16, bf16])]
-    fn bench_dequant_gemv_int8(dt: DType) -> BenchSetup {
-        gb(dequant_gemv_int8::kernel_ir_for(dt), 8, 4096, 4096, 64, 4096, 64, dt)
+    #[bench(name = "ffai/dequant_gemv/int{BITS}", dtypes = [f32, f16, bf16],
+            variants(BITS = [2, 3, 4, 5, 6, 8], suffix = "int{BITS}"))]
+    fn bench_dequant_gemv(dt: DType) -> BenchSetup {
+        gb(dequant_gemv_intBITS::kernel_ir_for(dt), BITS, 4096, 4096, 64, 4096, 64, dt)
     }
 
     // 8-rows-per-TG fast int4: grid [out_dim/8, 1, 1], TPG 64.

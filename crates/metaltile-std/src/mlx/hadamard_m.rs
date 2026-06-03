@@ -9,8 +9,11 @@
 //!
 //! Expressed in the `#[kernel]` DSL — no `Op::InlineMsl`. The three M values
 //! get their own monomorphized DSL function (`mt_hadamard_m12`, `_m20`, `_m28`)
-//! because each has its own compile-time sign table. The Rust-level wrapper
-//! `kernel_ir_for(m, dt)` dispatches to the right inner function.
+//! because each has its own compile-time sign table; `#[kernel(variants(...))]`
+//! cannot be used here since the DSL has no compile-time loop over Rust arrays.
+//! The Rust-level wrapper `kernel_ir_for(m, dt)` dispatches to the right fn.
+//! Bench and test boilerplate uses explicit `#[bench]` / `#[test_kernel]`
+//! annotations — one per M value — without `macro_rules!` indirection.
 //!
 //! ## Algorithm
 //!
@@ -45,8 +48,6 @@
 
 use metaltile::kernel;
 use metaltile_core::{dtype::DType, ir::Kernel};
-
-use crate::bench_types::DType as BenchDType;
 
 // ── H_M sign-bit encodings ─────────────────────────────────────────────────
 //
@@ -223,10 +224,6 @@ pub fn kernel_ir_for(m: u32, dt: DType) -> Kernel {
     }
 }
 
-// Keep `BenchDType` referenced so the `use` survives even when no
-// inventory submit needs it (the inventory is registered per-M below).
-const _: &[BenchDType] = &[BenchDType::F32, BenchDType::F16, BenchDType::BF16];
-
 /// New-syntax benchmarks for the Paley-construction Hadamard-M transforms
 /// (M ∈ {12, 20, 28}; Reduction, one TG per row, tpg=M). In-process
 /// correctness for the same kernels lives in [`kernel_tests`] below, which
@@ -235,24 +232,41 @@ const _: &[BenchDType] = &[BenchDType::F32, BenchDType::F16, BenchDType::BF16];
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    macro_rules! hm_bench {
-        ($name:ident, $full:literal, $kernel:ident, $m:literal) => {
-            #[bench(name = $full, dtypes = [f32, f16, bf16])]
-            fn $name(dt: DType) -> BenchSetup {
-                let (rows, m) = (16384usize, $m);
-                BenchSetup::new(super::$kernel::kernel_ir_for(dt))
-                    .mode(KernelMode::Reduction)
-                    .buffer(BenchBuffer::random("inp", rows * m, dt))
-                    .buffer(BenchBuffer::zeros("out", rows * m, dt).output())
-                    .constexpr("scale", 1.0f32 / (m as f32).sqrt())
-                    .grid_3d(rows as u32, 1, 1, [m as u32, 1, 1])
-                    .bytes_moved((2 * rows * m * dt.size_bytes()) as u64)
-            }
-        };
+    #[bench(name = "mlx/hadamard_m/m12", dtypes = [f32, f16, bf16])]
+    fn bench_hadamard_m12(dt: DType) -> BenchSetup {
+        let (rows, m) = (16384usize, 12usize);
+        BenchSetup::new(super::mt_hadamard_m12::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("inp", rows * m, dt))
+            .buffer(BenchBuffer::zeros("out", rows * m, dt).output())
+            .constexpr("scale", 1.0f32 / (m as f32).sqrt())
+            .grid_3d(rows as u32, 1, 1, [m as u32, 1, 1])
+            .bytes_moved((2 * rows * m * dt.size_bytes()) as u64)
     }
-    hm_bench!(bench_hadamard_m12, "mlx/hadamard_m/m12", mt_hadamard_m12, 12);
-    hm_bench!(bench_hadamard_m20, "mlx/hadamard_m/m20", mt_hadamard_m20, 20);
-    hm_bench!(bench_hadamard_m28, "mlx/hadamard_m/m28", mt_hadamard_m28, 28);
+
+    #[bench(name = "mlx/hadamard_m/m20", dtypes = [f32, f16, bf16])]
+    fn bench_hadamard_m20(dt: DType) -> BenchSetup {
+        let (rows, m) = (16384usize, 20usize);
+        BenchSetup::new(super::mt_hadamard_m20::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("inp", rows * m, dt))
+            .buffer(BenchBuffer::zeros("out", rows * m, dt).output())
+            .constexpr("scale", 1.0f32 / (m as f32).sqrt())
+            .grid_3d(rows as u32, 1, 1, [m as u32, 1, 1])
+            .bytes_moved((2 * rows * m * dt.size_bytes()) as u64)
+    }
+
+    #[bench(name = "mlx/hadamard_m/m28", dtypes = [f32, f16, bf16])]
+    fn bench_hadamard_m28(dt: DType) -> BenchSetup {
+        let (rows, m) = (16384usize, 28usize);
+        BenchSetup::new(super::mt_hadamard_m28::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .buffer(BenchBuffer::random("inp", rows * m, dt))
+            .buffer(BenchBuffer::zeros("out", rows * m, dt).output())
+            .constexpr("scale", 1.0f32 / (m as f32).sqrt())
+            .grid_3d(rows as u32, 1, 1, [m as u32, 1, 1])
+            .bytes_moved((2 * rows * m * dt.size_bytes()) as u64)
+    }
 }
 
 /// New-syntax in-process correctness tests for the Paley Hadamard-M
@@ -289,32 +303,55 @@ pub mod kernel_tests {
         out
     }
 
-    macro_rules! hm_test {
-        ($name:ident, $kernel:ident, $signs:ident, $m:literal) => {
-            // f32 tight; f16/bf16 looser — M-term accumulation in reduced
-            // precision (same convention as the mlx/gemv reduction test).
-            #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-2, 2e-1])]
-            fn $name(dt: DType) -> TestSetup {
-                let (rows, m) = (16usize, $m);
-                let scale = 1.0f32 / (m as f32).sqrt();
-                // Deterministic input in [-3, 3], round-tripped through `dt`
-                // so the oracle accumulates the same values the GPU loads.
-                let raw: Vec<f32> = (0..rows * m).map(|i| ((i % 13) as f32 - 6.0) * 0.5).collect();
-                let data = unpack_f32(&pack_f32(&raw, dt), dt);
-                let expected = oracle(&data, m, &super::$signs, scale);
-                TestSetup::new(super::$kernel::kernel_ir_for(dt))
-                    .mode(KernelMode::Reduction)
-                    .input(TestBuffer::from_vec("inp", pack_f32(&data, dt), dt))
-                    .input(TestBuffer::zeros("out", rows * m, dt))
-                    .constexpr("scale", scale)
-                    .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
-                    .grid_3d(rows as u32, 1, 1, [m as u32, 1, 1])
-            }
-        };
+    // f32 tight; f16/bf16 looser — M-term accumulation in reduced
+    // precision (same convention as the mlx/gemv reduction test).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-2, 2e-1])]
+    fn test_hadamard_m12(dt: DType) -> TestSetup {
+        let (rows, m) = (16usize, 12usize);
+        let scale = 1.0f32 / (m as f32).sqrt();
+        let raw: Vec<f32> = (0..rows * m).map(|i| ((i % 13) as f32 - 6.0) * 0.5).collect();
+        let data = unpack_f32(&pack_f32(&raw, dt), dt);
+        let expected = oracle(&data, m, &super::H12_SIGNS, scale);
+        TestSetup::new(super::mt_hadamard_m12::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("inp", pack_f32(&data, dt), dt))
+            .input(TestBuffer::zeros("out", rows * m, dt))
+            .constexpr("scale", scale)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(rows as u32, 1, 1, [m as u32, 1, 1])
     }
-    hm_test!(test_hadamard_m12, mt_hadamard_m12, H12_SIGNS, 12);
-    hm_test!(test_hadamard_m20, mt_hadamard_m20, H20_SIGNS, 20);
-    hm_test!(test_hadamard_m28, mt_hadamard_m28, H28_SIGNS, 28);
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-2, 2e-1])]
+    fn test_hadamard_m20(dt: DType) -> TestSetup {
+        let (rows, m) = (16usize, 20usize);
+        let scale = 1.0f32 / (m as f32).sqrt();
+        let raw: Vec<f32> = (0..rows * m).map(|i| ((i % 13) as f32 - 6.0) * 0.5).collect();
+        let data = unpack_f32(&pack_f32(&raw, dt), dt);
+        let expected = oracle(&data, m, &super::H20_SIGNS, scale);
+        TestSetup::new(super::mt_hadamard_m20::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("inp", pack_f32(&data, dt), dt))
+            .input(TestBuffer::zeros("out", rows * m, dt))
+            .constexpr("scale", scale)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(rows as u32, 1, 1, [m as u32, 1, 1])
+    }
+
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 5e-2, 2e-1])]
+    fn test_hadamard_m28(dt: DType) -> TestSetup {
+        let (rows, m) = (16usize, 28usize);
+        let scale = 1.0f32 / (m as f32).sqrt();
+        let raw: Vec<f32> = (0..rows * m).map(|i| ((i % 13) as f32 - 6.0) * 0.5).collect();
+        let data = unpack_f32(&pack_f32(&raw, dt), dt);
+        let expected = oracle(&data, m, &super::H28_SIGNS, scale);
+        TestSetup::new(super::mt_hadamard_m28::kernel_ir_for(dt))
+            .mode(KernelMode::Reduction)
+            .input(TestBuffer::from_vec("inp", pack_f32(&data, dt), dt))
+            .input(TestBuffer::zeros("out", rows * m, dt))
+            .constexpr("scale", scale)
+            .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
+            .grid_3d(rows as u32, 1, 1, [m as u32, 1, 1])
+    }
 }
 
 #[cfg(test)]

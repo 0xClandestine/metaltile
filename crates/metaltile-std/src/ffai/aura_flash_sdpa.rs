@@ -132,8 +132,7 @@ pub fn aura_flash_sdpa<T>(
     for t in range(0u32, tokens, 1u32) {
         // Sliding-window mask: keep key `t` when window is off,
         // or when `t` is within `window_size` of the last pos.
-        let use_key =
-            select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+        let use_key = select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
         if use_key {
             // Q · K in the compressed domain.
             // NOTE: row stride is `kv_stride` (cache's `maxSeq`), not
