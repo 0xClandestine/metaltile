@@ -5037,8 +5037,8 @@ qmm_mma_bitwidth!(mt_qmm_mma_b6, 6u32, "qmm_mma_b6");
 /// At M=32, mma f32 essentially at MLX parity; f16 remains 9-16pt
 /// below MLX (open follow-up — 4 layered tweaks identified by the
 /// MLX archaeology study at `/tmp/mlx_archaeology.md`).
-pub fn mt_qmm_for(dtype: metaltile_core::dtype::DType, m: u32) -> metaltile_core::ir::Kernel {
-    use metaltile_core::ir::KernelMode;
+pub fn mt_qmm_for(dtype: metaltile::core::dtype::DType, m: u32) -> metaltile::core::ir::Kernel {
+    use metaltile::core::ir::KernelMode;
     let mut k = if m >= 32 && m.is_multiple_of(32) {
         // Full simdgroup-matrix MMA path (M=32, 64, 96, ...).
         let mut kk = mt_qmm_mma::kernel_ir_for(dtype);
@@ -5082,10 +5082,10 @@ pub fn mt_qmm_for(dtype: metaltile_core::dtype::DType, m: u32) -> metaltile_core
 /// (3-barrier MMA, vectorized X load, serpentine MMA order) it is
 /// expected to land the missing 9-16pt.
 pub fn patch_qmm_mma_dtype_aware_skew(
-    kernel: &mut metaltile_core::ir::Kernel,
-    dtype: metaltile_core::dtype::DType,
+    kernel: &mut metaltile::core::ir::Kernel,
+    dtype: metaltile::core::dtype::DType,
 ) {
-    use metaltile_core::dtype::DType;
+    use metaltile::core::dtype::DType;
     // f32 keeps its default 36 stride — nothing to do.
     let bytes = match dtype {
         DType::F32 => 4,
@@ -5126,7 +5126,7 @@ pub fn patch_qmm_mma_dtype_aware_skew(
 
 #[cfg(test)]
 mod qmm_selector_tests {
-    use metaltile_core::dtype::DType;
+    use metaltile::core::dtype::DType;
 
     use super::*;
 
@@ -5191,7 +5191,7 @@ mod qmm_selector_tests {
             let k = mt_qmm_for(DType::F32, m);
             assert_eq!(
                 k.mode,
-                metaltile_core::ir::KernelMode::Reduction,
+                metaltile::core::ir::KernelMode::Reduction,
                 "m={m}: missing Reduction mode",
             );
         }
@@ -6003,7 +6003,7 @@ pub mod kernel_benches {
     use metaltile::{bench, core::ir::Kernel, test::*};
 
     use super::*;
-    use crate::bench_types::{InputDomain, dtype_tol, input_buffer};
+    use crate::utils::{InputDomain, dtype_tol, input_buffer};
 
     fn db(kernel: Kernel, bits: u32, group_size: usize, n_groups: usize, dt: DType) -> BenchSetup {
         let pack_factor = (32 / bits) as usize;
@@ -6139,7 +6139,7 @@ pub mod kernel_benches {
     }
 
     /// MLX kernel type-string for the `<tn>` slot (`float` / `float16_t` /
-    /// `bfloat16_t`). Distinct from `bench_types::mlx_tname` (which yields the
+    /// `bfloat16_t`). Distinct from `utils::mlx_tname` (which yields the
     /// dispatch-side `float16`, not the kernel-template `float16_t`).
     fn mlx_quant_tname(dt: DType) -> &'static str {
         match dt {
@@ -6331,7 +6331,7 @@ pub mod kernel_benches {
             bs = bs.constexpr("n", n as u32);
         }
         bs = bs
-            .with_shape_label(format!("m{m} n{n} k{k} {}", crate::bench_types::dtype_label(dt)))
+            .with_shape_label(format!("m{m} n{n} k{k} {}", crate::utils::dtype_label(dt)))
             .grid_3d(grid[0], grid[1], grid[2], tpg)
             .bytes_moved(bytes as u64)
             // qmm/qmv out[m,n] = x[m,k] · dequant(w)[k,n]: 2 MACs per (m, n, k).
@@ -6574,7 +6574,7 @@ pub mod kernel_benches {
             .constexpr("k", k as u32)
             .constexpr("n", n as u32)
             .constexpr("gs_per_col", gs_per_col as u32)
-            .with_shape_label(format!("n{n} k{k} {}", crate::bench_types::dtype_label(dt)))
+            .with_shape_label(format!("n{n} k{k} {}", crate::utils::dtype_label(dt)))
             .grid_3d((n / 8) as u32, 1, 1, [64, 1, 1])
             .bytes_moved(bytes as u64)
             // qvm vector-mat out[n] = x[k] · dequant(w)[k,n]: 2 MACs per (n, k).
@@ -6619,7 +6619,7 @@ pub mod kernel_benches {
             .constexpr("k", k as u32)
             .constexpr("n", n as u32)
             .constexpr("group_size", group_size as u32)
-            .with_shape_label(format!("m{m} n{n} k{k} {}", crate::bench_types::dtype_label(dt)))
+            .with_shape_label(format!("m{m} n{n} k{k} {}", crate::utils::dtype_label(dt)))
             .grid_3d(grid[0], grid[1], grid[2], [32, 1, 1])
             .bytes_moved(bytes as u64)
             // qmv/qvm/qmm out[m,n] = x[m,k] · dequant(w)[k,n]: 2 MACs per (m, n, k).
@@ -6724,7 +6724,7 @@ pub mod kernel_benches {
             .constexpr("k", k as u32)
             .constexpr("n", n as u32)
             .constexpr("gs_per_row", gspr as u32)
-            .with_shape_label(format!("m{m} n{n} k{k} {}", crate::bench_types::dtype_label(dt)))
+            .with_shape_label(format!("m{m} n{n} k{k} {}", crate::utils::dtype_label(dt)))
             .grid_3d((n / 32) as u32, (m / 32) as u32, 1, [128, 1, 1])
             .bytes_moved(bytes as u64)
             // qmm_mma out[m,n] = x[m,k] · dequant(w)[k,n]: 2 MACs per (m, n, k).

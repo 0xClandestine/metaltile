@@ -56,7 +56,7 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::mt_select;
-    use crate::bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname};
+    use crate::utils::{InputDomain, dtype_tol, input_buffer, mlx_tname};
 
     // MLX `metal/ternary.metal` `v_Select<tn>` (`ternary_v`, 1 element/thread):
     //   a=cond (device const bool*) [[buffer(0)]], b=on_true [[buffer(1)]],

@@ -396,7 +396,7 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::{mt_merge, mt_sort, mt_sort_segmented};
-    use crate::bench_types::{InputDomain, input_buffer, mlx_tname};
+    use crate::utils::{InputDomain, input_buffer, mlx_tname};
 
     #[bench(name = "mlx/sort", dtypes = [f32, f16, bf16])]
     fn bench_sort(dt: DType) -> BenchSetup {

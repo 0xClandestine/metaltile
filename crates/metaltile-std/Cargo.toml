@@ -11,15 +11,12 @@ workspace = true
 
 [dependencies]
 metaltile.workspace = true
-metaltile-core.workspace = true
-metaltile-codegen.workspace = true
-inventory.workspace = true
 half.workspace = true
-bytemuck.workspace = true
 rustc-hash.workspace = true
 
 [dev-dependencies]
 # AURA MSL snapshot tests (tests/aura_msl_snapshots.rs).
 insta.workspace = true
+bytemuck.workspace = true
 # GPU dispatch in probe / GPU-correctness integration tests.
 metaltile-runtime.workspace = true

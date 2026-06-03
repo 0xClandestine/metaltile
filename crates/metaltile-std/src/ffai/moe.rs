@@ -4109,7 +4109,7 @@ pub mod kernel_benches {
             .constexpr("group_size", group_size as u32)
             .with_shape_label(format!(
                 "T{t_rows} m{m_out} k{k_in} E{n_experts} {}",
-                crate::bench_types::dtype_label(dt)
+                crate::utils::dtype_label(dt)
             ))
             .grid_3d(m_out as u32 / m_cells, t_rows as u32, 1, [32, 1, 1])
             .bytes_moved(bytes as u64)
@@ -4189,7 +4189,7 @@ pub mod kernel_benches {
             .constexpr("group_size", group_size as u32)
             .with_shape_label(format!(
                 "M{m_total} N{n_out} K{k_in} E{n_experts} {}",
-                crate::bench_types::dtype_label(dt)
+                crate::utils::dtype_label(dt)
             ))
             .grid_3d(n_out as u32 / bn, (m_total as u32).div_ceil(bm), 1, [tpg, 1, 1])
             .bytes_moved(bytes as u64)
@@ -4332,7 +4332,7 @@ pub mod kernel_benches {
             .constexpr("norm_topk_prob", 1u32)
             .with_shape_label(format!(
                 "BT{n_rows} E{n_experts} k{k} {}",
-                crate::bench_types::dtype_label(dt)
+                crate::utils::dtype_label(dt)
             ))
             .grid_3d(n_rows as u32, 1, 1, [32, 1, 1])
             .bytes_moved(bytes as u64)
@@ -4356,10 +4356,7 @@ pub mod kernel_benches {
             .buffer(BenchBuffer::zeros("sort_token_idx", rows, DType::U32))
             .buffer(BenchBuffer::zeros("permuted", rows * hidden, dt).output())
             .constexpr("hidden", hidden as u32)
-            .with_shape_label(format!(
-                "rows{rows} h{hidden} {}",
-                crate::bench_types::dtype_label(dt)
-            ))
+            .with_shape_label(format!("rows{rows} h{hidden} {}", crate::utils::dtype_label(dt)))
             .grid_3d(rows as u32, 1, 1, [128, 1, 1])
             .bytes_moved(bytes as u64)
     }
@@ -4382,10 +4379,7 @@ pub mod kernel_benches {
             .buffer(BenchBuffer::zeros("out", bt * hidden, dt).output())
             .constexpr("hidden", hidden as u32)
             .constexpr("k", k as u32)
-            .with_shape_label(format!(
-                "BT{bt} h{hidden} k{k} {}",
-                crate::bench_types::dtype_label(dt)
-            ))
+            .with_shape_label(format!("BT{bt} h{hidden} k{k} {}", crate::utils::dtype_label(dt)))
             .grid_3d(bt as u32, 1, 1, [128, 1, 1])
             .bytes_moved(bytes as u64)
     }

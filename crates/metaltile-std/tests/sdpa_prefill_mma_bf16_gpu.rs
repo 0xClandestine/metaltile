@@ -163,7 +163,7 @@ fn run_sdpa_prefill_bf16(
     // Same SimdGroup2D dispatch as the sibling: the kernel body reads
     // tgid_x/tgid_y/tgid_z directly, so only the 3D-axis mode resolves
     // all three grid coords.
-    kernel.mode = metaltile_core::ir::KernelMode::SimdGroup2D;
+    kernel.mode = metaltile::core::ir::KernelMode::SimdGroup2D;
     // Grid: (q_len / BQ=32, n_q_heads, batch). 128 threads = 4 SGs.
     let result = ctx
         .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [q_len / 32, n_q_heads, batch], [

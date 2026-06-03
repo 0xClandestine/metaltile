@@ -5,7 +5,7 @@ pub mod steel_attention_mma;
 pub mod steel_attention_mma_bf16;
 pub mod steel_attention_nax;
 
-use metaltile_core::{dtype::DType, ir::Kernel};
+use metaltile::core::{dtype::DType, ir::Kernel};
 
 /// Auto-select the best SDPA-prefill MMA kernel for the given dtype + GPU
 /// family. Returns the kernel IR ready to dispatch.

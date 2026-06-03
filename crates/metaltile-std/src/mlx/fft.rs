@@ -716,10 +716,7 @@ pub mod kernel_benches {
             .constexpr("m_len", M_LEN as u32)
             .constexpr("rows", ROWS as u32)
             .constexpr("inv", 0u32)
-            .with_shape_label(format!(
-                "N={N_LEN} M={M_LEN} {}",
-                crate::bench_types::dtype_label(dt)
-            ))
+            .with_shape_label(format!("N={N_LEN} M={M_LEN} {}", crate::utils::dtype_label(dt)))
             .grid_1d(ROWS * M_LEN, 256)
             .bytes_moved((2 * ROWS * (N_LEN + M_LEN) * dt.size_bytes()) as u64)
     }
@@ -735,10 +732,7 @@ pub mod kernel_benches {
             .buffer(BenchBuffer::zeros("out_im", ROWS * M_LEN, dt).output())
             .constexpr("m_len", M_LEN as u32)
             .constexpr("rows", ROWS as u32)
-            .with_shape_label(format!(
-                "M={M_LEN} rows={ROWS} {}",
-                crate::bench_types::dtype_label(dt)
-            ))
+            .with_shape_label(format!("M={M_LEN} rows={ROWS} {}", crate::utils::dtype_label(dt)))
             .grid_1d(ROWS * M_LEN, 256)
             .bytes_moved((4 * ROWS * M_LEN * dt.size_bytes()) as u64)
     }
@@ -754,10 +748,7 @@ pub mod kernel_benches {
             .constexpr("m_len", M_LEN as u32)
             .constexpr("rows", ROWS as u32)
             .constexpr("inv", 0u32)
-            .with_shape_label(format!(
-                "N={N_LEN} M={M_LEN} {}",
-                crate::bench_types::dtype_label(dt)
-            ))
+            .with_shape_label(format!("N={N_LEN} M={M_LEN} {}", crate::utils::dtype_label(dt)))
             .grid_1d(ROWS * N_LEN, 256)
             .bytes_moved((2 * ROWS * (M_LEN + N_LEN) * dt.size_bytes()) as u64)
     }

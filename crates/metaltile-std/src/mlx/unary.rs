@@ -328,7 +328,7 @@ pub mod kernel_benches {
     use metaltile::{bench, core::ir::Kernel, test::*};
 
     use super::*;
-    use crate::bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname};
+    use crate::utils::{InputDomain, dtype_tol, input_buffer, mlx_tname};
 
     const UNARY_N: usize = 64 * 1024 * 1024;
 

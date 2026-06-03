@@ -20,7 +20,6 @@ metaltile-macros.workspace = true
 metaltile-codegen.workspace = true
 metaltile-runtime.workspace = true
 inventory.workspace = true
-half.workspace = true
 serde.workspace = true
 bytemuck.workspace = true
 

@@ -16,7 +16,7 @@ use std::{collections::BTreeMap, str::FromStr};
 
 use metaltile::harness::{bench::KernelBench, registry::all_benches};
 use metaltile_codegen::generator_for_mode;
-use metaltile_std::bench_types::DType;
+use metaltile_core::DType;
 
 use crate::{
     CliError,
@@ -284,12 +284,9 @@ fn run_all_passes_and_print(k: &mut metaltile_core::ir::Kernel) {
 /// Generate the final MSL a kernel emits, at dtype `dt`. Mirrors the bench /
 /// emit path: the IR comes from the `#[bench]` setup (mode already applied),
 /// and `mt_qmm_mma` gets the same dtype-aware-skew patch the bench compiles.
-fn generate_msl_dt(b: &dyn KernelBench, name: &str, dt: DType) -> String {
+fn generate_msl_dt(b: &dyn KernelBench, _name: &str, dt: DType) -> String {
     let setup = b.setup(dt);
-    let mut k = setup.kernel().clone();
-    if name == "mt_qmm_mma" {
-        metaltile_std::mlx::quantized::patch_qmm_mma_dtype_aware_skew(&mut k, dt);
-    }
+    let k = setup.kernel().clone();
     let expected_tpg = Some(setup.grid().tpg[0]);
     generator_for_mode(k.mode, expected_tpg)
         .generate(&k)

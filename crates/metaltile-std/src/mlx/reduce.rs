@@ -450,7 +450,7 @@ pub mod kernel_benches {
     use metaltile::{bench, core::ir::Kernel, test::*};
 
     use super::*;
-    use crate::bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname};
+    use crate::utils::{InputDomain, dtype_tol, input_buffer, mlx_tname};
 
     const ALL_REDUCE_N: usize = 16 * 1024 * 1024;
     const ROW_REDUCE_ROWS: usize = 4096;

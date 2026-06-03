@@ -273,7 +273,7 @@ pub mod kernel_benches {
             .constexpr("m", M)
             .constexpr("n", N)
             .constexpr("k", K)
-            .with_shape_label(format!("m{M} n{N} k{K} {}", crate::bench_types::dtype_label(dt)))
+            .with_shape_label(format!("m{M} n{N} k{K} {}", crate::utils::dtype_label(dt)))
             // SimdGroup2D grid is tile-GROUP counts: (n/BN, m/BM, 1).
             .grid_3d(N / bn, M / bm, 1, [tpg, 1, 1])
             .bytes_moved(bytes as u64)

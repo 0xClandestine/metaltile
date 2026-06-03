@@ -116,7 +116,7 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::mt_layer_norm;
-    use crate::bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname};
+    use crate::utils::{InputDomain, dtype_tol, input_buffer, mlx_tname};
 
     // MLX `layer_norm_looped*` buffer order: `x`[[buffer(0)]], `w`[[buffer(1)]],
     // `b`[[buffer(2)]], `out`[[buffer(3)]], `eps`(float)[[buffer(4)]],

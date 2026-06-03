@@ -21,7 +21,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, pack_bytes, unpack_bytes};
-use metaltile_core::ir::KernelMode;
+use metaltile::core::ir::KernelMode;
 use metaltile_runtime::Context;
 use metaltile_std::ffai::moe::{
     mt_moe_gather_qmm_mma_b3,
@@ -92,7 +92,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 
 fn run_bitwidth(
     bits: u32,
-    kernel_ir: fn(metaltile_core::dtype::DType) -> metaltile_core::ir::Kernel,
+    kernel_ir: fn(metaltile::core::dtype::DType) -> metaltile::core::ir::Kernel,
 ) {
     let _g = gpu_lock();
     let n_experts = 4usize;

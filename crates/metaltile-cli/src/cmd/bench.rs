@@ -9,23 +9,23 @@ use metaltile::{
     runner::{GpuBuffer, GpuRunner, bench_gbps_with, device_specs, profile, read_typed, to_gflops},
 };
 use metaltile_core::ir::ParamKind;
-use metaltile_std::bench_types::{
-    CorrectnessStatus,
-    DerivedMetrics,
-    EquivResult,
-    OpBench,
-    OpResult,
-    OpResultExtras,
-    check_equiv,
-    dtype_label,
-    set_result_reporter,
-    validate_results,
-};
 use serde_json::Value;
 
 use crate::{
     BenchArgs,
     FilterSpec,
+    bench_types::{
+        CorrectnessStatus,
+        DerivedMetrics,
+        EquivResult,
+        OpBench,
+        OpResult,
+        OpResultExtras,
+        check_equiv,
+        dtype_label,
+        set_result_reporter,
+        validate_results,
+    },
     cmd::diff as diff_cmd,
     git,
     suite_printer::SuitePrinter,
@@ -740,9 +740,8 @@ impl<'a> super::TileCommand for BenchCommand<'a> {
 
 #[cfg(test)]
 mod tests {
-    use metaltile_std::bench_types::{EquivResult, OpBench};
-
     use super::*;
+    use crate::bench_types::{EquivResult, OpBench};
 
     fn pass_equiv() -> EquivResult {
         EquivResult { n_checked: 1, max_abs_err: 0.0, cosine_sim: 1.0, passed: true }

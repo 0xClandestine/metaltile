@@ -167,7 +167,7 @@ pub mod kernel_benches {
             .constexpr("scale", scale)
             .with_shape_label(format!(
                 "h{HEAD_DIM} kv{n_kv} nh{n_heads} {}",
-                crate::bench_types::dtype_label(dt)
+                crate::utils::dtype_label(dt)
             ))
             .grid_3d(n_heads as u32, 1, 1, [1024, 1, 1])
             .bytes_moved(bytes as u64)

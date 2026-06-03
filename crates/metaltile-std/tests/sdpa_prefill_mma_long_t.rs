@@ -116,7 +116,7 @@ fn run_sdpa_prefill(
     // It's required because the body reads `tgid_x`/`tgid_y`/`tgid_z`
     // directly — only SimdGroup2D maps `uint3 tid
     // [[threadgroup_position_in_grid]]` so the three axes resolve.
-    kernel.mode = metaltile_core::ir::KernelMode::SimdGroup2D;
+    kernel.mode = metaltile::core::ir::KernelMode::SimdGroup2D;
     // Grid: (q_len / BQ=32, n_heads, batch). 128 threads = 4 SGs.
     let result = ctx
         .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [t / 32, n_heads, batch], [

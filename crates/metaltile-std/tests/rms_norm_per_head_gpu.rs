@@ -101,7 +101,7 @@ fn run_and_check(head_dim: usize, rows: usize, dtype: Dt, tol_abs: f32) {
     } else {
         (mt_rms_norm_small::kernel_ir_for(dtype.to_dtype()), head_dim / 2)
     };
-    kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+    kernel.mode = metaltile::core::ir::KernelMode::Reduction;
 
     let result = ctx
         .dispatch_with_grid(&kernel, &buffers, &BTreeMap::new(), [rows, 1, 1], [tpg, 1, 1])

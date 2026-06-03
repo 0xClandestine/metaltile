@@ -185,11 +185,12 @@ pub fn mt_moe_gather_qmm_mma_int4_bm16_mpp<T>(
 
 #[cfg(test)]
 mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::ir::Op;
+    use metaltile::{
+        codegen::msl::MslGenerator,
+        core::{DType, ir::Op},
+    };
 
     use super::*;
-    use crate::bench_types::DType;
 
     #[test]
     fn kernel_ir_constructs_and_uses_coop_tile_ops() {

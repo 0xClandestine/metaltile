@@ -15,7 +15,7 @@ mod common;
 use std::{collections::BTreeMap, time::Instant};
 
 use common::{Dt, gpu_lock, pack_bytes};
-use metaltile_core::{dtype::DType, ir::KernelMode};
+use metaltile::core::{dtype::DType, ir::KernelMode};
 use metaltile_runtime::Context;
 use metaltile_std::ffai::sampling::softmax_categorical_sample;
 

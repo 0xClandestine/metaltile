@@ -97,7 +97,7 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::mt_logsumexp;
-    use crate::bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname};
+    use crate::utils::{InputDomain, dtype_tol, input_buffer, mlx_tname};
 
     // MLX `looped_logsumexp_*` buffer order: `in`[[buffer(0)]],
     // `out`[[buffer(1)]] (one element per row), `axis_size`(int)[[buffer(2)]].

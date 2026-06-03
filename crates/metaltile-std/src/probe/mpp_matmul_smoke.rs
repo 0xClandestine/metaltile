@@ -13,7 +13,7 @@
 //!
 //! Geometry: single threadgroup, single simdgroup (32 threads).
 
-use metaltile_core::{
+use metaltile::core::{
     dtype::DType,
     ir::{
         Block,
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn codegen_emits_mpp_include() {
-        use metaltile_codegen::msl::MslGenerator;
+        use metaltile::codegen::msl::MslGenerator;
         let k = kernel_ir();
         let msl = MslGenerator::default().generate(&k).expect("codegen");
         assert!(
@@ -177,7 +177,7 @@ mod tests {
     /// Developer aid — `cargo test -p metaltile-std --lib -- dump_generated_msl --nocapture`
     #[test]
     fn dump_generated_msl() {
-        use metaltile_codegen::msl::MslGenerator;
+        use metaltile::codegen::msl::MslGenerator;
         let k = kernel_ir();
         let msl = MslGenerator::default().generate(&k).expect("codegen");
         println!("===== BEGIN MSL =====\n{}\n===== END MSL =====", msl);

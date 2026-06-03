@@ -105,7 +105,7 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::mt_rope;
-    use crate::bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname};
+    use crate::utils::{InputDomain, dtype_tol, input_buffer, mlx_tname};
 
     // Attaches the MLX `metal/rope.metal` `rope_<tn>` reference (the non-freqs,
     // 32-bit-index `rope<T, int32_t>` instantiation, `instantiate_rope_g`).

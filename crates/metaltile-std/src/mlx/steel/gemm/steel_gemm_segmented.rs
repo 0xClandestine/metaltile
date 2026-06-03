@@ -240,7 +240,7 @@ pub mod kernel_benches {
             .constexpr("total_k", TOTAL_K)
             .with_shape_label(format!(
                 "m{M} n{N} k{TOTAL_K} seg{N_SEG} {}",
-                crate::bench_types::dtype_label(dt)
+                crate::utils::dtype_label(dt)
             ))
             .grid_3d(N / bn, M / bm, N_SEG, [tpg, 1, 1])
             .bytes_moved(bytes as u64)

@@ -217,7 +217,7 @@ pub mod kernel_benches {
     use metaltile::{bench, core::ir::Kernel, test::*};
 
     use super::{mt_argmax, mt_argmin};
-    use crate::bench_types::{InputDomain, input_buffer, mlx_tname};
+    use crate::utils::{InputDomain, input_buffer, mlx_tname};
 
     const ARG_REDUCE_N: usize = 256 * 1024;
     // Strict `>`/`<` tie-break: indices must match exactly, so a sub-1 tolerance

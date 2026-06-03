@@ -40,8 +40,7 @@ use metaltile_codegen::{
     generator_for_mode,
     passes::{PassStats, PipelineBuilder, run_passes_with_stats},
 };
-use metaltile_core::ir::Kernel;
-use metaltile_std::bench_types::DType;
+use metaltile_core::{DType, ir::Kernel};
 use rayon::prelude::*;
 
 use crate::{
@@ -341,7 +340,7 @@ pub fn run(args: &BuildArgs, harness: &crate::harness::Harness) -> Result<(), Cl
                 }
                 if !emit_kinds.is_empty() {
                     // Per-kernel opt-in for the `_indirect` Swift wrapper.
-                    if metaltile_std::ffai::dequant_gemv::dequant_gemv_wants_indirect(&k.name) {
+                    if matches!(k.name.as_str(), "dequant_gemv_int4_f16" | "dequant_gemv_int4_bf16") {
                         k.wants_indirect_variant = true;
                     }
                     item_kernels.push(k);
@@ -742,7 +741,7 @@ mod tests {
             for &dt in dtypes {
                 let mut k = b.setup(dt).kernel().clone();
                 k.name = monomorphized_name(name, dt, dtypes.len());
-                if metaltile_std::ffai::dequant_gemv::dequant_gemv_wants_indirect(&k.name) {
+                if matches!(k.name.as_str(), "dequant_gemv_int4_f16" | "dequant_gemv_int4_bf16") {
                     k.wants_indirect_variant = true;
                 }
                 kernels.push(k);

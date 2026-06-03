@@ -43,10 +43,10 @@
 //! integer where bit j = 1 means H_M[t][j] = +1 (otherwise −1).
 //! Verified for orthogonality: H · H^T = M · I.
 
-use metaltile::kernel;
-use metaltile_core::{dtype::DType, ir::Kernel};
-
-use crate::bench_types::DType as BenchDType;
+use metaltile::{
+    core::{DType as BenchDType, dtype::DType, ir::Kernel},
+    kernel,
+};
 
 // ── H_M sign-bit encodings ─────────────────────────────────────────────────
 //
@@ -320,8 +320,7 @@ pub mod kernel_tests {
 #[cfg(test)]
 #[allow(clippy::needless_range_loop)] // index loops mirror the H_m matrix math
 mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::ir::Op;
+    use metaltile::{codegen::msl::MslGenerator, core::ir::Op};
 
     use super::*;
 

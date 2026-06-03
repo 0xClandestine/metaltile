@@ -216,7 +216,7 @@ pub mod kernel_benches {
             .constexpr("k_per_split", K_PER_SPLIT)
             .with_shape_label(format!(
                 "m{M} n{N} k{K} split{N_SPLITS} {}",
-                crate::bench_types::dtype_label(dt)
+                crate::utils::dtype_label(dt)
             ))
             .grid_3d(N / TILE, M / TILE, N_SPLITS, [TPG, 1, 1])
             .bytes_moved(bytes as u64)
@@ -240,7 +240,7 @@ pub mod kernel_benches {
             .constexpr("n_splits", N_SPLITS)
             .with_shape_label(format!(
                 "m{M} n{N} split{N_SPLITS} {}",
-                crate::bench_types::dtype_label(dt)
+                crate::utils::dtype_label(dt)
             ))
             // One threadgroup per [M, N] element — grid (m*n, 1, 1).
             .grid_3d((m * n) as u32, 1, 1, [1, 1, 1])
@@ -361,8 +361,10 @@ pub mod kernel_tests {
 
 #[cfg(test)]
 mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::{dtype::DType, ir::Op};
+    use metaltile::{
+        codegen::msl::MslGenerator,
+        core::{dtype::DType, ir::Op},
+    };
 
     use super::*;
 

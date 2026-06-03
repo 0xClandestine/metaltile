@@ -316,11 +316,12 @@ pub fn mt_gated_mixer_norm<T>(
 
 #[cfg(test)]
 mod wide_tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::ir::KernelMode;
+    use metaltile::{
+        codegen::msl::MslGenerator,
+        core::{DType, ir::KernelMode},
+    };
 
     use super::mt_rms_norm_wide;
-    use crate::bench_types::DType;
 
     fn msl_for(dt: DType) -> String {
         let mut k = mt_rms_norm_wide::kernel_ir_for(dt);
@@ -478,7 +479,7 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::{mt_gated_mixer_norm, mt_rms_norm, mt_rms_norm_small, mt_rms_norm_wide};
-    use crate::bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname};
+    use crate::utils::{InputDomain, dtype_tol, input_buffer, mlx_tname};
 
     // Build the MLX `rms_single_row` (`rms{tn}`) reference for a `(rows, n)`
     // RMSNorm bench. Buffer order: `x`[[buffer(0)]], `w`[[buffer(1)]],

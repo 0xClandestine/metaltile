@@ -38,7 +38,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use metaltile_codegen::{MslGenerator, msl::MslConfig};
+use metaltile::codegen::{MslGenerator, msl::MslConfig};
 // Import the registries via `metaltile_std` (not `metaltile_core`) so the std
 // rlib — which carries the `#[kernel]` / `#[bench]` / `#[test_kernel]` inventory
 // statics in its `ffai` / `mlx` modules — is force-linked into this test binary.

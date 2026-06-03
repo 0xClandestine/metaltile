@@ -148,8 +148,10 @@ pub fn mt_qmm_mma_mpp_int8<T>(
 
 #[cfg(test)]
 mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::{dtype::DType, ir::Op};
+    use metaltile::{
+        codegen::msl::MslGenerator,
+        core::{dtype::DType, ir::Op},
+    };
 
     use super::*;
 

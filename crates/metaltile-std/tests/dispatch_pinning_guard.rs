@@ -20,7 +20,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::gpu_lock;
-use metaltile_core::{dtype::DType, ir::KernelMode};
+use metaltile::core::{dtype::DType, ir::KernelMode};
 use metaltile_runtime::Context;
 use metaltile_std::mlx::rms_norm::mt_rms_norm;
 
@@ -36,7 +36,7 @@ fn rms_norm_buffers(n: usize) -> BTreeMap<String, Vec<u8>> {
     b
 }
 
-fn rms_norm_kernel() -> metaltile_core::ir::Kernel {
+fn rms_norm_kernel() -> metaltile::core::ir::Kernel {
     let mut k = mt_rms_norm::kernel_ir_for(DType::F32);
     k.mode = KernelMode::Reduction;
     k

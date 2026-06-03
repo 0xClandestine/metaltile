@@ -53,7 +53,7 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::mt_gemv;
-    use crate::bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname};
+    use crate::utils::{InputDomain, dtype_tol, input_buffer, mlx_tname};
 
     #[bench(name = "mlx/gemv", dtypes = [f32, f16, bf16])]
     fn bench_gemv(dt: DType) -> BenchSetup {

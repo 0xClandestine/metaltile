@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 mod common;
 
 use common::gpu_lock;
-use metaltile_core::{dtype::DType, ir::KernelMode};
+use metaltile::core::{dtype::DType, ir::KernelMode};
 use metaltile_runtime::Context;
 use metaltile_std::mlx::quantized_mpp_int8::mt_qmm_mma_mpp_int8;
 

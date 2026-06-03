@@ -739,8 +739,10 @@ sdpa_decode_kernel!(simple_4x4, ffai_sdpa_decode_d512, 16u32);
 
 #[cfg(test)]
 mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::ir::KernelMode;
+    use metaltile::{
+        codegen::msl::MslGenerator,
+        core::{DType, ir::KernelMode},
+    };
 
     use super::{
         ffai_sdpa_decode,
@@ -749,7 +751,6 @@ mod tests {
         ffai_sdpa_decode_d256,
         ffai_sdpa_decode_d512,
     };
-    use crate::bench_types::DType;
 
     fn check(name: &str, src: &str) {
         assert!(!src.trim().is_empty(), "MSL for {name} should not be empty");

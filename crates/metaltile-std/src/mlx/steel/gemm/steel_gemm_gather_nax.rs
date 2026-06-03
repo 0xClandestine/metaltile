@@ -177,7 +177,7 @@ pub mod kernel_benches {
             .buffer(BenchBuffer::zeros("out", m * n, dt).output())
             .constexpr("k", K)
             .constexpr("n", N)
-            .with_shape_label(format!("m{M} n{N} k{K} {}", crate::bench_types::dtype_label(dt)))
+            .with_shape_label(format!("m{M} n{N} k{K} {}", crate::utils::dtype_label(dt)))
             .grid_3d(N / TILE, M / TILE, 1, [TPG, 1, 1])
             .bytes_moved(bytes as u64)
             .flops(2 * (M as u64) * (N as u64) * (K as u64)) // 2 * M * N * K
@@ -260,8 +260,10 @@ pub mod kernel_tests {
 
 #[cfg(test)]
 mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::{dtype::DType, ir::Op};
+    use metaltile::{
+        codegen::msl::MslGenerator,
+        core::{dtype::DType, ir::Op},
+    };
 
     use super::*;
 

@@ -11,12 +11,12 @@
 //! per-variant `TestSetup`, and the per-variant `BenchSetup` so each
 //! kernel file stays a thin shape-binding wrapper.
 
-use metaltile::{core::ir::Kernel, test::*};
-
-use crate::{
-    bench_types::DType,
-    utils::{pack_f32, unpack_f32},
+use metaltile::{
+    core::{DType, ir::Kernel},
+    test::*,
 };
+
+use crate::utils::{pack_f32, unpack_f32};
 
 fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
 
@@ -314,7 +314,7 @@ pub fn int4_mma_bench(kernel: Kernel, shape: MmaBenchShape, dt: DType) -> BenchS
         .constexpr("group_size", group_size as u32)
         .with_shape_label(format!(
             "M{m_total} N{n_out} K{k_in} E{n_experts} {}",
-            crate::bench_types::dtype_label(dt)
+            crate::utils::dtype_label(dt)
         ))
         .grid_3d(n_out as u32 / bn, (m_total as u32).div_ceil(bm), 1, [tpg, 1, 1])
         .bytes_moved(bytes as u64)

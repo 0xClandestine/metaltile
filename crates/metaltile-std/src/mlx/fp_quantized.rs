@@ -287,7 +287,7 @@ pub mod kernel_benches {
     use metaltile::{bench, core::ir::Kernel, test::*};
 
     use super::{mt_fp4_quant_dequant, mt_fp8_e4m3_quant_dequant, mt_fp8_e5m2_quant_dequant};
-    use crate::bench_types::{InputDomain, input_buffer};
+    use crate::utils::{InputDomain, input_buffer};
 
     const QUANT_N: usize = 64 * 1024 * 1024;
 

@@ -16,6 +16,7 @@
 //!   config        Display effective merged configuration
 //!   completions   Generate shell completion scripts
 
+pub mod bench_types;
 mod cmd;
 pub mod config;
 mod error;

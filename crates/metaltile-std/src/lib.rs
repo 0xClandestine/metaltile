@@ -1,11 +1,10 @@
 //! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
 //! SPDX-License-Identifier: Apache-2.0
-//! MetalTile kernel standard library: benchmark metadata and type definitions.
+//! MetalTile kernel standard library: kernel definitions and bench helpers.
 //!
 //! `metaltile-std` provides the kernel definitions (`#[kernel]` / `#[bench]` /
-//! `#[test_kernel]`) and the metadata/runner types shared with the CLI.
+//! `#[test_kernel]`) and the shared bench-setup utilities used by the kernels.
 
-pub mod bench_types;
 pub mod ffai;
 pub mod mlx;
 pub mod probe;

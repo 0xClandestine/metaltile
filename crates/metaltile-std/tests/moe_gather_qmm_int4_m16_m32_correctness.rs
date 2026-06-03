@@ -23,7 +23,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, pack_bytes, unpack_bytes};
-use metaltile_core::ir::KernelMode;
+use metaltile::core::ir::KernelMode;
 use metaltile_runtime::Context;
 use metaltile_std::ffai::moe::{
     mt_moe_gather_qmm_int4_m8,
@@ -154,7 +154,7 @@ fn build_inputs(
 
 #[allow(clippy::too_many_arguments)]
 fn run_kernel(
-    kernel_ir: fn(metaltile_core::dtype::DType) -> metaltile_core::ir::Kernel,
+    kernel_ir: fn(metaltile::core::dtype::DType) -> metaltile::core::ir::Kernel,
     grid_x: usize,
     x: &[f32],
     weight_packed: &[u32],
