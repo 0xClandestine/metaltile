@@ -62,7 +62,7 @@ All additive. New fields default to `None`/absent so untouched kernels and the b
 - Display: `GFLOP/s` column, shown when `flops` is set.
 
 ### 4.3 Roofline / utilization — *Phase 3*
-- **Device spec table**: `DeviceSpecs { peak_bw_gbps, peak_f32_tflops, peak_f16_tflops, na_f16_tflops?, na_int8_tops? }` looked up by `runner.device_name`. Seed with M1/M2/M3/M4 Max and **M5/M5 Max** (the M5 adds per-GPU-core Neural Accelerators — see Appendix C). Unknown device → utilization columns blank (don't fail).
+- **Device spec table**: `DeviceSpecs { peak_bw_gbps, peak_f32_tflops, peak_f16_tflops, na_f16_tflops?, na_int8_tops?, ane_tops? }` looked up by `runner.device_name`. Seed with M1/M2/M3/M4 Max and **M5/M5 Max** (the M5 adds per-GPU-core Neural Accelerators — see Appendix C). Unknown device → utilization columns blank (don't fail).
 - **% peak bandwidth** = `GB/s ÷ peak_bw_gbps` — tells you if a memory-bound kernel is saturating DRAM.
 - **% peak compute** = `GFLOP/s ÷ peak_*_tflops` (pick the dtype/engine: SIMD f16/f32, or the M5 NA path) — tells you if a compute-bound kernel is saturating the ALUs/accelerators.
 - **Arithmetic intensity** = `flops ÷ bytes_moved` (FLOPs/byte) — places the kernel on the roofline (left of the ridge ⇒ memory-bound; right ⇒ compute-bound).
@@ -122,7 +122,7 @@ Work items: implement block-scaling (gs16+E4M3 for nvfp4, gs32+E8M0 for mxfp4/mx
 
 ## Appendix C — M5 Neural Accelerator hardware context
 
-The M5/A19 added a per-GPU-core **Neural Accelerator** — Apple's first dedicated *GPU* matmul hardware (~1024 FP16 FMACs/cycle/accelerator; ~70 TFLOPS FP16 on M5 Max 40-core). Accelerated formats:
+The M5/A19 added a per-GPU-core **Neural Accelerator** — Apple's first dedicated *GPU* matmul hardware (~1024 FP16 FMACs/cycle/accelerator), **embedded in the GPU cores** (unlike the standalone Apple Neural Engine that held the matrix block on M1–M4). Published FP16 matmul ceilings: **base 16.8 / Pro 33.2 / Max 66.4 / Ultra 132.8 TFLOPS** (Ultra a projected 2× Max) — `device_specs::na_f16_tflops`. Accelerated formats:
 
 - ✅ **FP16** (FP16 or FP32 accumulate) — fast path
 - ✅ **INT8** (INT32 accumulate) — accelerated but **lags FP16** (opposite of NVIDIA)
@@ -130,6 +130,6 @@ The M5/A19 added a per-GPU-core **Neural Accelerator** — Apple's first dedicat
 - ❌ **bfloat16 — not accelerated** on first-gen NA
 - ❌ **fp8 / fp4 — not supported**
 
-Implications for the roadmap: on M5, **fp16 is the fastest compute precision**; int8 helps memory-bound decode (bandwidth) but not compute; **bf16 may be slower than fp16** for matmul; fp4/fp8 elements get no native acceleration (dequantize-to-fp16 for the NA). The roofline device-spec table (§4.3) should carry both the SIMD and NA ceilings for M5.
+Implications for the roadmap: on M5, **fp16 is the fastest compute precision**; int8 helps memory-bound decode (bandwidth) but not compute; **bf16 may be slower than fp16** for matmul; fp4/fp8 elements get no native acceleration (dequantize-to-fp16 for the NA). The roofline device-spec table (§4.3) carries the SIMD (`peak_f32`/`peak_f16`), the M5+ GPU-Neural-Accelerator (`na_f16_tflops`), and the standalone-ANE (`ane_tops`, M1–M4 — for the upcoming ANE kernels/benches) ceilings.
 
 Sources: [Apple Developer — Accelerate ML with M5 & A19 GPUs](https://developer.apple.com/videos/play/tech-talks/111432/) · [Investigating the GPU Neural Accelerators on A19/M5 (tzakharko)](https://tzakharko.github.io/apple-neural-accelerators-benchmark/) · [TechBoards — A19/M5 GPU Neural Accelerators](https://techboards.net/threads/apple-a19-m5-gpu-neural-accelerators.5297/)

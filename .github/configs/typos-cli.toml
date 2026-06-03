@@ -43,6 +43,10 @@ ARANGE = "ARANGE"
 # MLX kernel suffix for non-Apple-Silicon variants
 nax = "nax"
 NAX = "NAX"
+# Apple Neural Engine (lowercase in the `ane_tops` field/param; ANE is caught
+# by the all-caps acronym regex above)
+ane = "ane"
+Ane = "Ane"
 # Strided kernel suffix (e.g. copy_g_nd2)
 nd = "nd"
 Nd = "Nd"
