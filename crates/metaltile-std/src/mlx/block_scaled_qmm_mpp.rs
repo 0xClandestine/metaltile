@@ -975,6 +975,444 @@ pub fn mt_mxint8_qmm_mma_mpp<T>(
     }
 }
 
+// ── FP16-scale twins (scale tensor is `Tensor<f16>`) ───────────────────────
+// Near-clones of the FP32-scaled kernels above: the ONLY change is the scale
+// axis — `scales: Tensor<f16>` instead of `Tensor<f32>`, and the staging read
+// becomes `load(scales[...]).cast::<f32>()` (the native half load, widened to
+// f32 before the multiply). Element decode (E2M1 / E4M3 / E5M2 / int bit-stream
+// + sign-extend), weight indexing, dispatch geometry, staging, the coop-tensor
+// extents, TPG, and grid are **byte-identical** to the FP32 twin. The half
+// scale-read matches `block_scaled_dequant`'s proven `mt_*_f16_dequant`
+// references. fp8_e4m3_f16 reuses the nvfp8_f16 kernel (same 8-bit-E4M3 + f16
+// scale shape, only block_size differs), mirroring how fp8_e4m3 reuses nvfp8.
+
+/// nvfp8 (f16-scale) MPP matmul — E4M3 weights, per-block FP16 scale.
+/// Also serves **fp8_e4m3_f16** (same 8-bit-E4M3 + f16-scale shape, only
+/// `block_size` differs). Twin of `mt_nvfp8_qmm_mma_mpp`, scale → f16.
+#[kernel]
+pub fn mt_nvfp8_f16_qmm_mma_mpp<T>(
+    w: Tensor<u8>,
+    scales: Tensor<f16>,
+    x: Tensor<T>,
+    mut out: Tensor<T>,
+    #[constexpr] k: u32,
+    #[constexpr] n: u32,
+    #[constexpr] block_size: u32,
+) {
+    let lane = simd_lane;
+    let sg = simd_group_id();
+    let lane_in_tg = sg * 32u32 + lane;
+    let sm = sg / 2u32;
+    let sn = sg & 1u32;
+    let sg_m_base = sm * 16u32;
+    let sg_n_base = sn * 16u32;
+    let x_m_base = tgid_y * 32u32;
+    let w_n_base = tgid_x * 32u32;
+    threadgroup_alloc("Xs", 1152u32, coop_stage(T));
+    threadgroup_alloc("Ws", 1152u32, coop_stage(T));
+    threadgroup_alloc("OutScratch", 1024u32, f32);
+    coop_tile_setup(
+        "gemm",
+        16u32,
+        16u32,
+        32u32,
+        coop_stage(T),
+        "accumulate",
+        "simdgroup",
+        f32,
+        false,
+        true,
+        false,
+    );
+    coop_tile_zero("gemm");
+    let x_m_row = lane_in_tg / 4u32;
+    let x_k_quad = lane_in_tg & 3u32;
+    let x_k_base = x_k_quad * 8u32;
+    let x_ws_base = x_m_row * 36u32 + x_k_base;
+    let gs_per_row = k / block_size;
+    let wn_plus_wr = w_n_base + x_m_row;
+    let sb_base = wn_plus_wr * gs_per_row;
+    let w_row_base = wn_plus_wr * k;
+    let xs_sg_off = sg_m_base * 36u32;
+    let ws_sg_off = sg_n_base * 36u32;
+    let sg_scratch_off = sg * 256u32;
+    for kb in range(0u32, k, 32u32) {
+        let x_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base;
+        for _i in range(0u32, 8u32, 1u32) {
+            let xv = load(x[x_row_dev_base + _i]).cast::<f32>();
+            threadgroup_store("Xs", x_ws_base + _i, xv);
+        }
+        let k_off = kb + x_k_base;
+        let scale = load(scales[sb_base + k_off / block_size]).cast::<f32>();
+        for _i in range(0u32, 8u32, 1u32) {
+            let elem = e4m3_decode(load(w[w_row_base + k_off + _i]).cast::<u32>());
+            threadgroup_store("Ws", x_ws_base + _i, elem * scale);
+        }
+        threadgroup_barrier();
+        coop_tile_load_a("gemm", "Xs", true, coop_stage(T), 36u32, 16u32, xs_sg_off);
+        coop_tile_load_b("gemm", "Ws", true, coop_stage(T), 36u32, 16u32, ws_sg_off);
+        coop_tile_run("gemm");
+        threadgroup_barrier();
+    }
+    coop_tile_store_c("gemm", "OutScratch", true, f32, 16u32, 16u32, sg_scratch_off);
+    threadgroup_barrier();
+    let out_m_base = x_m_base + sg_m_base;
+    let out_n_base = w_n_base + sg_n_base;
+    let o_row = lane / 2u32;
+    let o_col_base = (lane & 1u32) * 8u32;
+    for _i in range(0u32, 8u32, 1u32) {
+        let col = o_col_base + _i;
+        let v = threadgroup_load("OutScratch", sg_scratch_off + o_row * 16u32 + col);
+        store(out[(out_m_base + o_row) * n + (out_n_base + col)], v.cast::<T>());
+    }
+}
+
+/// fp4 (f16-scale) MPP matmul — E2M1 weights, per-group FP16 scale.
+/// Twin of `mt_fp4_qmm_mma_mpp`, scale → f16.
+#[kernel]
+pub fn mt_fp4_f16_qmm_mma_mpp<T>(
+    w: Tensor<u32>,
+    scales: Tensor<f16>,
+    x: Tensor<T>,
+    mut out: Tensor<T>,
+    #[constexpr] k: u32,
+    #[constexpr] n: u32,
+    #[constexpr] block_size: u32,
+) {
+    let lane = simd_lane;
+    let sg = simd_group_id();
+    let lane_in_tg = sg * 32u32 + lane;
+    let sm = sg / 2u32;
+    let sn = sg & 1u32;
+    let sg_m_base = sm * 16u32;
+    let sg_n_base = sn * 16u32;
+    let x_m_base = tgid_y * 32u32;
+    let w_n_base = tgid_x * 32u32;
+    threadgroup_alloc("Xs", 1152u32, coop_stage(T));
+    threadgroup_alloc("Ws", 1152u32, coop_stage(T));
+    threadgroup_alloc("OutScratch", 1024u32, f32);
+    coop_tile_setup(
+        "gemm",
+        16u32,
+        16u32,
+        32u32,
+        coop_stage(T),
+        "accumulate",
+        "simdgroup",
+        f32,
+        false,
+        true,
+        false,
+    );
+    coop_tile_zero("gemm");
+    let x_m_row = lane_in_tg / 4u32;
+    let x_k_quad = lane_in_tg & 3u32;
+    let x_k_base = x_k_quad * 8u32;
+    let x_ws_base = x_m_row * 36u32 + x_k_base;
+    let packs_per_row = k / 8u32;
+    let gs_per_row = k / block_size;
+    let wn_plus_wr = w_n_base + x_m_row;
+    let sb_base = wn_plus_wr * gs_per_row;
+    let w_pack_row_base = wn_plus_wr * packs_per_row;
+    let xs_sg_off = sg_m_base * 36u32;
+    let ws_sg_off = sg_n_base * 36u32;
+    let sg_scratch_off = sg * 256u32;
+    for kb in range(0u32, k, 32u32) {
+        let x_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base;
+        for _i in range(0u32, 8u32, 1u32) {
+            let xv = load(x[x_row_dev_base + _i]).cast::<f32>();
+            threadgroup_store("Xs", x_ws_base + _i, xv);
+        }
+        let packed = load(w[w_pack_row_base + kb / 8u32 + x_k_quad]);
+        let k_off = kb + x_k_quad * 8u32;
+        let scale = load(scales[sb_base + k_off / block_size]).cast::<f32>();
+        for _ni in range(0u32, 8u32, 1u32) {
+            let nib = (packed >> (_ni * 4u32)) & 15u32;
+            threadgroup_store("Ws", x_ws_base + _ni, e2m1_decode(nib) * scale);
+        }
+        threadgroup_barrier();
+        coop_tile_load_a("gemm", "Xs", true, coop_stage(T), 36u32, 16u32, xs_sg_off);
+        coop_tile_load_b("gemm", "Ws", true, coop_stage(T), 36u32, 16u32, ws_sg_off);
+        coop_tile_run("gemm");
+        threadgroup_barrier();
+    }
+    coop_tile_store_c("gemm", "OutScratch", true, f32, 16u32, 16u32, sg_scratch_off);
+    threadgroup_barrier();
+    let out_m_base = x_m_base + sg_m_base;
+    let out_n_base = w_n_base + sg_n_base;
+    let o_row = lane / 2u32;
+    let o_col_base = (lane & 1u32) * 8u32;
+    for _i in range(0u32, 8u32, 1u32) {
+        let col = o_col_base + _i;
+        let v = threadgroup_load("OutScratch", sg_scratch_off + o_row * 16u32 + col);
+        store(out[(out_m_base + o_row) * n + (out_n_base + col)], v.cast::<T>());
+    }
+}
+
+/// fp8 (E5M2, f16-scale) MPP matmul — 8-bit weights, per-group FP16 scale.
+/// Twin of `mt_fp8_e5m2_qmm_mma_mpp`, scale → f16.
+#[kernel]
+pub fn mt_fp8_e5m2_f16_qmm_mma_mpp<T>(
+    w: Tensor<u8>,
+    scales: Tensor<f16>,
+    x: Tensor<T>,
+    mut out: Tensor<T>,
+    #[constexpr] k: u32,
+    #[constexpr] n: u32,
+    #[constexpr] block_size: u32,
+) {
+    let lane = simd_lane;
+    let sg = simd_group_id();
+    let lane_in_tg = sg * 32u32 + lane;
+    let sm = sg / 2u32;
+    let sn = sg & 1u32;
+    let sg_m_base = sm * 16u32;
+    let sg_n_base = sn * 16u32;
+    let x_m_base = tgid_y * 32u32;
+    let w_n_base = tgid_x * 32u32;
+    threadgroup_alloc("Xs", 1152u32, coop_stage(T));
+    threadgroup_alloc("Ws", 1152u32, coop_stage(T));
+    threadgroup_alloc("OutScratch", 1024u32, f32);
+    coop_tile_setup(
+        "gemm",
+        16u32,
+        16u32,
+        32u32,
+        coop_stage(T),
+        "accumulate",
+        "simdgroup",
+        f32,
+        false,
+        true,
+        false,
+    );
+    coop_tile_zero("gemm");
+    let x_m_row = lane_in_tg / 4u32;
+    let x_k_quad = lane_in_tg & 3u32;
+    let x_k_base = x_k_quad * 8u32;
+    let x_ws_base = x_m_row * 36u32 + x_k_base;
+    let gs_per_row = k / block_size;
+    let wn_plus_wr = w_n_base + x_m_row;
+    let sb_base = wn_plus_wr * gs_per_row;
+    let w_row_base = wn_plus_wr * k;
+    let xs_sg_off = sg_m_base * 36u32;
+    let ws_sg_off = sg_n_base * 36u32;
+    let sg_scratch_off = sg * 256u32;
+    for kb in range(0u32, k, 32u32) {
+        let x_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base;
+        for _i in range(0u32, 8u32, 1u32) {
+            let xv = load(x[x_row_dev_base + _i]).cast::<f32>();
+            threadgroup_store("Xs", x_ws_base + _i, xv);
+        }
+        let k_off = kb + x_k_base;
+        let scale = load(scales[sb_base + k_off / block_size]).cast::<f32>();
+        for _i in range(0u32, 8u32, 1u32) {
+            let elem = e5m2_decode(load(w[w_row_base + k_off + _i]).cast::<u32>());
+            threadgroup_store("Ws", x_ws_base + _i, elem * scale);
+        }
+        threadgroup_barrier();
+        coop_tile_load_a("gemm", "Xs", true, coop_stage(T), 36u32, 16u32, xs_sg_off);
+        coop_tile_load_b("gemm", "Ws", true, coop_stage(T), 36u32, 16u32, ws_sg_off);
+        coop_tile_run("gemm");
+        threadgroup_barrier();
+    }
+    coop_tile_store_c("gemm", "OutScratch", true, f32, 16u32, 16u32, sg_scratch_off);
+    threadgroup_barrier();
+    let out_m_base = x_m_base + sg_m_base;
+    let out_n_base = w_n_base + sg_n_base;
+    let o_row = lane / 2u32;
+    let o_col_base = (lane & 1u32) * 8u32;
+    for _i in range(0u32, 8u32, 1u32) {
+        let col = o_col_base + _i;
+        let v = threadgroup_load("OutScratch", sg_scratch_off + o_row * 16u32 + col);
+        store(out[(out_m_base + o_row) * n + (out_n_base + col)], v.cast::<T>());
+    }
+}
+
+/// FP16-scaled symmetric int MPP matmul (int2/3/4/5/6, f16-scale twins): same
+/// straddle-aware bit-stream decode + staging path as `int_qmm_mma_mpp_f32`;
+/// only the scale axis differs (`Tensor<f16>` widened to f32 on the read).
+macro_rules! int_qmm_mma_mpp_f16 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            w: Tensor<u32>,
+            scales: Tensor<f16>,
+            x: Tensor<T>,
+            mut out: Tensor<T>,
+            #[constexpr] k: u32,
+            #[constexpr] n: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let lane = simd_lane;
+            let sg = simd_group_id();
+            let lane_in_tg = sg * 32u32 + lane;
+            let sm = sg / 2u32;
+            let sn = sg & 1u32;
+            let sg_m_base = sm * 16u32;
+            let sg_n_base = sn * 16u32;
+            let x_m_base = tgid_y * 32u32;
+            let w_n_base = tgid_x * 32u32;
+            threadgroup_alloc("Xs", 1152u32, coop_stage(T));
+            threadgroup_alloc("Ws", 1152u32, coop_stage(T));
+            threadgroup_alloc("OutScratch", 1024u32, f32);
+            coop_tile_setup(
+                "gemm",
+                16u32,
+                16u32,
+                32u32,
+                coop_stage(T),
+                "accumulate",
+                "simdgroup",
+                f32,
+                false,
+                true,
+                false,
+            );
+            coop_tile_zero("gemm");
+            let x_m_row = lane_in_tg / 4u32;
+            let x_k_quad = lane_in_tg & 3u32;
+            let x_k_base = x_k_quad * 8u32;
+            let x_ws_base = x_m_row * 36u32 + x_k_base;
+            let gs_per_row = k / block_size;
+            let words_per_row = k * $bits / 32u32;
+            let wn_plus_wr = w_n_base + x_m_row;
+            let sb_base = wn_plus_wr * gs_per_row;
+            let w_word_row_base = wn_plus_wr * words_per_row;
+            let xs_sg_off = sg_m_base * 36u32;
+            let ws_sg_off = sg_n_base * 36u32;
+            let sg_scratch_off = sg * 256u32;
+            for kb in range(0u32, k, 32u32) {
+                let x_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base;
+                for _i in range(0u32, 8u32, 1u32) {
+                    let xv = load(x[x_row_dev_base + _i]).cast::<f32>();
+                    threadgroup_store("Xs", x_ws_base + _i, xv);
+                }
+                let k_off = kb + x_k_base;
+                let scale = load(scales[sb_base + k_off / block_size]).cast::<f32>();
+                for _i in range(0u32, 8u32, 1u32) {
+                    let bit_off = (k_off + _i) * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(w[w_word_row_base + word_idx]);
+                    let w1 =
+                        load(w[w_word_row_base + select(spill > 0u32, word_idx + 1u32, word_idx)]);
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+                    let qf = q.cast::<f32>();
+                    let val = select(q >= $half, qf - $full, qf); // sign-extend
+                    threadgroup_store("Ws", x_ws_base + _i, val * scale);
+                }
+                threadgroup_barrier();
+                coop_tile_load_a("gemm", "Xs", true, coop_stage(T), 36u32, 16u32, xs_sg_off);
+                coop_tile_load_b("gemm", "Ws", true, coop_stage(T), 36u32, 16u32, ws_sg_off);
+                coop_tile_run("gemm");
+                threadgroup_barrier();
+            }
+            coop_tile_store_c("gemm", "OutScratch", true, f32, 16u32, 16u32, sg_scratch_off);
+            threadgroup_barrier();
+            let out_m_base = x_m_base + sg_m_base;
+            let out_n_base = w_n_base + sg_n_base;
+            let o_row = lane / 2u32;
+            let o_col_base = (lane & 1u32) * 8u32;
+            for _i in range(0u32, 8u32, 1u32) {
+                let col = o_col_base + _i;
+                let v = threadgroup_load("OutScratch", sg_scratch_off + o_row * 16u32 + col);
+                store(out[(out_m_base + o_row) * n + (out_n_base + col)], v.cast::<T>());
+            }
+        }
+    };
+}
+int_qmm_mma_mpp_f16!(mt_int2_f16_qmm_mma_mpp, 2u32, 2u32, 4.0f32);
+int_qmm_mma_mpp_f16!(mt_int3_f16_qmm_mma_mpp, 3u32, 4u32, 8.0f32);
+int_qmm_mma_mpp_f16!(mt_int4_f16_qmm_mma_mpp, 4u32, 8u32, 16.0f32);
+int_qmm_mma_mpp_f16!(mt_int5_f16_qmm_mma_mpp, 5u32, 16u32, 32.0f32);
+int_qmm_mma_mpp_f16!(mt_int6_f16_qmm_mma_mpp, 6u32, 32u32, 64.0f32);
+
+/// int8 (f16-scale) MPP matmul — 8-bit symmetric codes (byte layout), per-group
+/// FP16 scale (no bias). Twin of `mt_int8_qmm_mma_mpp`, scale → f16.
+#[kernel]
+pub fn mt_int8_f16_qmm_mma_mpp<T>(
+    w: Tensor<u8>,
+    scales: Tensor<f16>,
+    x: Tensor<T>,
+    mut out: Tensor<T>,
+    #[constexpr] k: u32,
+    #[constexpr] n: u32,
+    #[constexpr] block_size: u32,
+) {
+    let lane = simd_lane;
+    let sg = simd_group_id();
+    let lane_in_tg = sg * 32u32 + lane;
+    let sm = sg / 2u32;
+    let sn = sg & 1u32;
+    let sg_m_base = sm * 16u32;
+    let sg_n_base = sn * 16u32;
+    let x_m_base = tgid_y * 32u32;
+    let w_n_base = tgid_x * 32u32;
+    threadgroup_alloc("Xs", 1152u32, coop_stage(T));
+    threadgroup_alloc("Ws", 1152u32, coop_stage(T));
+    threadgroup_alloc("OutScratch", 1024u32, f32);
+    coop_tile_setup(
+        "gemm",
+        16u32,
+        16u32,
+        32u32,
+        coop_stage(T),
+        "accumulate",
+        "simdgroup",
+        f32,
+        false,
+        true,
+        false,
+    );
+    coop_tile_zero("gemm");
+    let x_m_row = lane_in_tg / 4u32;
+    let x_k_quad = lane_in_tg & 3u32;
+    let x_k_base = x_k_quad * 8u32;
+    let x_ws_base = x_m_row * 36u32 + x_k_base;
+    let gs_per_row = k / block_size;
+    let wn_plus_wr = w_n_base + x_m_row;
+    let sb_base = wn_plus_wr * gs_per_row;
+    let w_row_base = wn_plus_wr * k;
+    let xs_sg_off = sg_m_base * 36u32;
+    let ws_sg_off = sg_n_base * 36u32;
+    let sg_scratch_off = sg * 256u32;
+    for kb in range(0u32, k, 32u32) {
+        let x_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base;
+        for _i in range(0u32, 8u32, 1u32) {
+            let xv = load(x[x_row_dev_base + _i]).cast::<f32>();
+            threadgroup_store("Xs", x_ws_base + _i, xv);
+        }
+        let k_off = kb + x_k_base;
+        let scale = load(scales[sb_base + k_off / block_size]).cast::<f32>();
+        for _i in range(0u32, 8u32, 1u32) {
+            let elem = int8_decode(load(w[w_row_base + k_off + _i]).cast::<u32>());
+            threadgroup_store("Ws", x_ws_base + _i, elem * scale);
+        }
+        threadgroup_barrier();
+        coop_tile_load_a("gemm", "Xs", true, coop_stage(T), 36u32, 16u32, xs_sg_off);
+        coop_tile_load_b("gemm", "Ws", true, coop_stage(T), 36u32, 16u32, ws_sg_off);
+        coop_tile_run("gemm");
+        threadgroup_barrier();
+    }
+    coop_tile_store_c("gemm", "OutScratch", true, f32, 16u32, 16u32, sg_scratch_off);
+    threadgroup_barrier();
+    let out_m_base = x_m_base + sg_m_base;
+    let out_n_base = w_n_base + sg_n_base;
+    let o_row = lane / 2u32;
+    let o_col_base = (lane & 1u32) * 8u32;
+    for _i in range(0u32, 8u32, 1u32) {
+        let col = o_col_base + _i;
+        let v = threadgroup_load("OutScratch", sg_scratch_off + o_row * 16u32 + col);
+        store(out[(out_m_base + o_row) * n + (out_n_base + col)], v.cast::<T>());
+    }
+}
+
 pub mod kernel_tests {
     use metaltile::{core::ir::Kernel, test::*, test_kernel};
 
@@ -1017,13 +1455,14 @@ pub mod kernel_tests {
         }
         // 8-bit codes bind as one uchar each; every sub-byte width (4-bit nibble
         // packs + int2/3/5/6 tight bit-streams) binds as packed u32 words. FP32
-        // scales bind as f32; E8M0/E4M3 scales as one byte. Both axes are driven
-        // off the format so new integer formats pick up the right buffer types.
+        // scales bind as f32; FP16 scales as f16; E8M0/E4M3 scales as one byte.
+        // Both axes are driven off the format so new integer/fp16 formats pick up
+        // the right buffer types.
         let weight_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
         let mut s = TestSetup::new(kernel)
             .mode(KernelMode::Reduction)
@@ -1132,6 +1571,56 @@ pub mod kernel_tests {
     fn test_mxint8_qmm_mma_mpp(dt: DType) -> TestSetup {
         mpp_setup(mt_mxint8_qmm_mma_mpp::kernel_ir_for(dt), QFormat::Mxint8, 32, 64, 512, dt)
     }
+
+    // FP16-scale twins — same element packing as their FP32 twins, scale → f16.
+    // fp8_e4m3_f16 reuses the nvfp8_f16 kernel (8-bit E4M3 + f16 scale).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_nvfp8_f16_qmm_mma_mpp(dt: DType) -> TestSetup {
+        mpp_setup(mt_nvfp8_f16_qmm_mma_mpp::kernel_ir_for(dt), QFormat::Nvfp8F16, 32, 64, 512, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e4m3_f16_qmm_mma_mpp(dt: DType) -> TestSetup {
+        mpp_setup(mt_nvfp8_f16_qmm_mma_mpp::kernel_ir_for(dt), QFormat::Fp8E4m3F16, 32, 64, 512, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp4_f16_qmm_mma_mpp(dt: DType) -> TestSetup {
+        mpp_setup(mt_fp4_f16_qmm_mma_mpp::kernel_ir_for(dt), QFormat::Fp4F16, 32, 64, 512, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e5m2_f16_qmm_mma_mpp(dt: DType) -> TestSetup {
+        mpp_setup(
+            mt_fp8_e5m2_f16_qmm_mma_mpp::kernel_ir_for(dt),
+            QFormat::Fp8E5m2F16,
+            32,
+            64,
+            512,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int2_f16_qmm_mma_mpp(dt: DType) -> TestSetup {
+        mpp_setup(mt_int2_f16_qmm_mma_mpp::kernel_ir_for(dt), QFormat::Int2F16, 32, 64, 512, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int3_f16_qmm_mma_mpp(dt: DType) -> TestSetup {
+        mpp_setup(mt_int3_f16_qmm_mma_mpp::kernel_ir_for(dt), QFormat::Int3F16, 32, 64, 512, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int4_f16_qmm_mma_mpp(dt: DType) -> TestSetup {
+        mpp_setup(mt_int4_f16_qmm_mma_mpp::kernel_ir_for(dt), QFormat::Int4F16, 32, 64, 512, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int5_f16_qmm_mma_mpp(dt: DType) -> TestSetup {
+        mpp_setup(mt_int5_f16_qmm_mma_mpp::kernel_ir_for(dt), QFormat::Int5F16, 32, 64, 512, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int6_f16_qmm_mma_mpp(dt: DType) -> TestSetup {
+        mpp_setup(mt_int6_f16_qmm_mma_mpp::kernel_ir_for(dt), QFormat::Int6F16, 32, 64, 512, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int8_f16_qmm_mma_mpp(dt: DType) -> TestSetup {
+        mpp_setup(mt_int8_f16_qmm_mma_mpp::kernel_ir_for(dt), QFormat::Int8F16, 32, 64, 512, dt)
+    }
 }
 
 /// MPP tensor-engine matmul benches at a 128×4096×4096 tile shape.
@@ -1157,10 +1646,10 @@ pub mod kernel_benches {
         } else {
             (crate::quant::format::bitstream_words(n * k, fmt.element_bits()), DType::U32)
         };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
         let n_blocks = n * (k / fmt.block_size());
         let sz = dt.size_bytes();
@@ -1277,5 +1766,68 @@ pub mod kernel_benches {
     #[bench(name = "mlx/block_scaled_qmm_mpp/mxint8", dtypes = [f32, f16, bf16])]
     fn bench_mxint8(dt: DType) -> BenchSetup {
         mpp_bench(mt_mxint8_qmm_mma_mpp::kernel_ir_for(dt), QFormat::Mxint8, 128, 4096, 4096, dt)
+    }
+    // FP16-scale twins — same element packing as their FP32 twins, scale → f16.
+    // fp8_e4m3_f16 reuses the nvfp8_f16 kernel (8-bit E4M3 + f16 scale).
+    #[bench(name = "mlx/block_scaled_qmm_mpp/nvfp8_f16", dtypes = [f32, f16, bf16])]
+    fn bench_nvfp8_f16(dt: DType) -> BenchSetup {
+        mpp_bench(
+            mt_nvfp8_f16_qmm_mma_mpp::kernel_ir_for(dt),
+            QFormat::Nvfp8F16,
+            128,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "mlx/block_scaled_qmm_mpp/fp8_e4m3_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e4m3_f16(dt: DType) -> BenchSetup {
+        mpp_bench(
+            mt_nvfp8_f16_qmm_mma_mpp::kernel_ir_for(dt),
+            QFormat::Fp8E4m3F16,
+            128,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "mlx/block_scaled_qmm_mpp/fp4_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp4_f16(dt: DType) -> BenchSetup {
+        mpp_bench(mt_fp4_f16_qmm_mma_mpp::kernel_ir_for(dt), QFormat::Fp4F16, 128, 4096, 4096, dt)
+    }
+    #[bench(name = "mlx/block_scaled_qmm_mpp/fp8_e5m2_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e5m2_f16(dt: DType) -> BenchSetup {
+        mpp_bench(
+            mt_fp8_e5m2_f16_qmm_mma_mpp::kernel_ir_for(dt),
+            QFormat::Fp8E5m2F16,
+            128,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "mlx/block_scaled_qmm_mpp/int2_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int2_f16(dt: DType) -> BenchSetup {
+        mpp_bench(mt_int2_f16_qmm_mma_mpp::kernel_ir_for(dt), QFormat::Int2F16, 128, 4096, 4096, dt)
+    }
+    #[bench(name = "mlx/block_scaled_qmm_mpp/int3_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int3_f16(dt: DType) -> BenchSetup {
+        mpp_bench(mt_int3_f16_qmm_mma_mpp::kernel_ir_for(dt), QFormat::Int3F16, 128, 4096, 4096, dt)
+    }
+    #[bench(name = "mlx/block_scaled_qmm_mpp/int4_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int4_f16(dt: DType) -> BenchSetup {
+        mpp_bench(mt_int4_f16_qmm_mma_mpp::kernel_ir_for(dt), QFormat::Int4F16, 128, 4096, 4096, dt)
+    }
+    #[bench(name = "mlx/block_scaled_qmm_mpp/int5_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int5_f16(dt: DType) -> BenchSetup {
+        mpp_bench(mt_int5_f16_qmm_mma_mpp::kernel_ir_for(dt), QFormat::Int5F16, 128, 4096, 4096, dt)
+    }
+    #[bench(name = "mlx/block_scaled_qmm_mpp/int6_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int6_f16(dt: DType) -> BenchSetup {
+        mpp_bench(mt_int6_f16_qmm_mma_mpp::kernel_ir_for(dt), QFormat::Int6F16, 128, 4096, 4096, dt)
+    }
+    #[bench(name = "mlx/block_scaled_qmm_mpp/int8_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int8_f16(dt: DType) -> BenchSetup {
+        mpp_bench(mt_int8_f16_qmm_mma_mpp::kernel_ir_for(dt), QFormat::Int8F16, 128, 4096, 4096, dt)
     }
 }
