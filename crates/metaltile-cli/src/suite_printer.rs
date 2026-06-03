@@ -156,7 +156,10 @@ impl SuitePrinter {
         let w = sub_table_widths(self.term_width, metric, self.show_correctness);
 
         let sep = col_sep();
-        let bold = Style::new().fg(Color::BrightWhite).bold();
+        // Column headers use the same muted bold as the rest of the CLI's labels
+        // (cf. `tile device`): BrightBlack-bold headers recede so the BrightWhite
+        // data values stand out. (Was BrightWhite-bold, which clashed with #255.)
+        let bold = Style::new().fg(Color::BrightBlack).bold();
 
         // Default columns: Shape │ MT(µs) │ Ref(perf) │ MT(perf) │ MT% │ GFLOP/s [│ ok].
         let mut hdr = format!(
@@ -397,10 +400,13 @@ fn fmt_latency(us: Option<f64>, width: usize, primary: bool) -> String {
 }
 
 /// Render a compute-throughput cell (GFLOP/s) right-padded to `width`. Blank
-/// (dim "—") for memory-bound kernels that declared no FLOP count.
+/// (dim "—") for memory-bound kernels that declared no FLOP count. Rendered in
+/// the standard BrightWhite value colour (Cyan is reserved for the op/title row,
+/// per the #255 CLI palette).
 fn fmt_gflops(gflops: Option<f64>, width: usize) -> String {
     match gflops {
-        Some(x) => paint_stdout(pad_right(&format!("{x:.1}"), width), Style::new().fg(Color::Cyan)),
+        Some(x) =>
+            paint_stdout(pad_right(&format!("{x:.1}"), width), Style::new().fg(Color::BrightWhite)),
         None => paint_stdout(pad_right("—", width), Style::new().fg(Color::BrightBlack).dim()),
     }
 }
