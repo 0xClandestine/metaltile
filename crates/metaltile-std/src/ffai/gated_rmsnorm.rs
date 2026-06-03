@@ -164,7 +164,7 @@ pub mod kernel_benches {
 
     use super::ffai_gated_rmsnorm;
 
-    #[bench(name = "ffai/gated_rmsnorm/gated_rmsnorm", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gated_rmsnorm(dt: DType) -> BenchSetup {
         let (rows, n) = (4096usize, 4096usize);
         BenchSetup::new(ffai_gated_rmsnorm::kernel_ir_for(dt))

@@ -330,7 +330,7 @@ pub mod kernel_benches {
 
     use super::{adain1d, lstm_cell};
 
-    #[bench(name = "ffai/kokoro/lstm_cell", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_lstm_cell(dt: DType) -> BenchSetup {
         // Kokoro-class BiLSTM: input 512, hidden 256, batch 8.
         let (batch, input_size, hidden) = (8usize, 512usize, 256usize);
@@ -358,7 +358,7 @@ pub mod kernel_benches {
             .bytes_moved(bytes as u64)
     }
 
-    #[bench(name = "ffai/kokoro/adain1d", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_adain1d(dt: DType) -> BenchSetup {
         // Decoder AdaIN: 512 channels, time length 1024, batch 4.
         let (batch, channels, length) = (4usize, 512usize, 1024usize);

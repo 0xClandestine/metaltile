@@ -1113,7 +1113,7 @@ pub mod kernel_benches {
             .flops(2 * (out_q + out_k + out_v) as u64 * in_dim as u64)
     }
 
-    #[bench(name = "ffai/batched_qkv_qgemv", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_batched_qkv_qgemv(dt: DType) -> BenchSetup {
         let (in_dim, gs, out_q, out_k, out_v) =
             (4096usize, 64usize, 4096usize, 1024usize, 1024usize);
@@ -1123,7 +1123,7 @@ pub mod kernel_benches {
         buffers(s, in_dim, gs, out_q, out_k, out_v, dt).grid_3d(max_rows as u32, 1, 3, [128, 1, 1])
     }
 
-    #[bench(name = "ffai/batched_qkv_qgemv_fast", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_batched_qkv_qgemv_fast(dt: DType) -> BenchSetup {
         let (in_dim, gs, out_q, out_k, out_v) =
             (4096usize, 64usize, 4096usize, 1024usize, 1024usize);

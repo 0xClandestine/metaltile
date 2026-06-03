@@ -45,7 +45,7 @@ pub mod kernel_benches {
     // (`copy_v`, 1 element/thread) takes `src [[buffer(0)]]`, `dst [[buffer(1)]]`,
     // `size` — so the reference binds `a` (shared by name with the MT input),
     // `out`, then the U32 element count. Legacy spec: input=Signed, tol=1e-6.
-    #[bench(name = "mlx/copy", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_copy(dt: DType) -> BenchSetup {
         let n = 64 * 1024 * 1024usize;
         let tn = mlx_tname(dt);

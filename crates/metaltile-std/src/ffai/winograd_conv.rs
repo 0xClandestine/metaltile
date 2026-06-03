@@ -808,7 +808,7 @@ pub mod kernel_benches {
 
     use super::{winograd_conv2d_3x3, winograd_conv2d_3x3_split, winograd_filter_transform_3x3};
 
-    #[bench(name = "ffai/conv2d/winograd_3x3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_winograd_3x3(dt: DType) -> BenchSetup {
         // ResNet-ish 3×3 stride-1 pad-1: 64ch 56×56.
         let (batch, in_ch, in_h, in_w, out_ch, pad) =
@@ -840,7 +840,7 @@ pub mod kernel_benches {
             .flops(2 * (batch as u64) * (out_ch as u64) * (out_h as u64) * (out_w as u64) * (in_ch as u64) * 3u64 * 3u64)
     }
 
-    #[bench(name = "ffai/conv2d/winograd_filter_transform_3x3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_winograd_filter_transform(dt: DType) -> BenchSetup {
         let (out_ch, in_ch) = (256usize, 256usize);
         let n_filt = out_ch * in_ch;
@@ -854,7 +854,7 @@ pub mod kernel_benches {
             .bytes_moved((n_filt * 16 * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "ffai/conv2d/winograd_3x3_split", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_winograd_3x3_split(dt: DType) -> BenchSetup {
         let (batch, in_ch, in_h, in_w, out_ch, pad) =
             (1usize, 64usize, 56usize, 56usize, 64usize, 1usize);

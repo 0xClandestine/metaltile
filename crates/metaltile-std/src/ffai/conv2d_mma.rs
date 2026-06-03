@@ -436,7 +436,7 @@ pub mod kernel_benches {
 
     use super::conv2d_mma;
 
-    #[bench(name = "ffai/conv2d/mma", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_conv2d_mma(dt: DType) -> BenchSetup {
         // 14×14 stride-1 conv on a 32×32 feature map → out 19×19=361 px
         // → not %32. Pick a 1×1 conv on a 32×32 map: n_pixels=1024, out_ch=1024.

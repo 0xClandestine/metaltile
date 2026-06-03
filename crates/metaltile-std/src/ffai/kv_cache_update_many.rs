@@ -125,7 +125,7 @@ pub mod kernel_benches {
         v.flat_map(|x| x.to_le_bytes()).collect()
     }
 
-    #[bench(name = "ffai/kv_cache/update_many", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_kv_cache_update_many(dt: DType) -> BenchSetup {
         let (n_tokens, n_kv_heads, head_dim, max_seq) = (512usize, 8usize, 128usize, 4096usize);
         let total = n_tokens * n_kv_heads * head_dim;

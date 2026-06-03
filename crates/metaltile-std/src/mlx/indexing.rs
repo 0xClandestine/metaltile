@@ -209,7 +209,7 @@ pub mod kernel_benches {
         v.flat_map(|x| x.to_le_bytes()).collect()
     }
 
-    #[bench(name = "mlx/indexing/gather_front", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gather_front(dt: DType) -> BenchSetup {
         let (n_src, n_out, w) = (8192usize, 8192usize, 256usize);
         let n_elems = n_out * w;
@@ -227,7 +227,7 @@ pub mod kernel_benches {
             .bytes_moved((2 * n_elems * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "mlx/indexing/scatter", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_scatter(dt: DType) -> BenchSetup {
         let (n_upd, n_out, w) = (8192usize, 8192usize, 256usize);
         let n_elems = n_upd * w;
@@ -245,7 +245,7 @@ pub mod kernel_benches {
             .bytes_moved((2 * n_elems * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "mlx/indexing/masked_scatter", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_masked_scatter(dt: DType) -> BenchSetup {
         let n_elems = 8 * 1024 * 1024usize;
         BenchSetup::new(mt_masked_scatter::kernel_ir_for(dt))

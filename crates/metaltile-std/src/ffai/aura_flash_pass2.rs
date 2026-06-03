@@ -313,7 +313,7 @@ pub mod kernel_benches {
             .grid_3d(q_heads as u32, 1, 1, [32, 1, 1])
     }
 
-    #[bench(name = "ffai/aura_flash_pass2_d{DIM}", dtypes = [f32, f16, bf16],
+    #[bench(dtypes = [f32, f16, bf16],
             variants(DIM = [64, 80, 96, 128, 256, 512], suffix = "d{DIM}"))]
     fn bench_flash_pass2(dt: DType) -> BenchSetup {
         flash_pass2(BenchSetup::new(aura_flash_pass2_dDIM::kernel_ir_for(dt)), DIM, dt)

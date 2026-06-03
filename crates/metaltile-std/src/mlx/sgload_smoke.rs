@@ -131,7 +131,7 @@ pub mod kernel_benches {
 
     use super::mt_sgload_smoke;
 
-    #[bench(name = "mlx/sgload/smoke", dtypes = [f32, f16])]
+    #[bench(dtypes = [f32, f16])]
     fn bench_sgload_smoke(dt: DType) -> BenchSetup {
         BenchSetup::new(mt_sgload_smoke::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)

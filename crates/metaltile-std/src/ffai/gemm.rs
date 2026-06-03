@@ -163,7 +163,7 @@ pub mod kernel_benches {
 
     use super::ffai_gemm;
 
-    #[bench(name = "ffai/gemm/gemm", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gemm(dt: DType) -> BenchSetup {
         let (n_rows, in_dim, out_dim) = (32usize, 4096usize, 4096usize);
         let sz = dt.size_bytes();

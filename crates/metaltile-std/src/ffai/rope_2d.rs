@@ -152,7 +152,7 @@ pub mod kernel_benches {
 
     use super::ffai_rope_2d;
 
-    #[bench(name = "ffai/rope/rope_2d", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_rope_2d(dt: DType) -> BenchSetup {
         let (n_tokens, n_heads, head_dim) = (1024usize, 16usize, 64usize);
         let half = head_dim / 2;

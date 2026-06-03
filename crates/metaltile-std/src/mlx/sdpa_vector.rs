@@ -802,21 +802,21 @@ pub mod kernel_benches {
             .flops(4 * (n_q_heads as u64) * (n_kv as u64) * (head_dim as u64))
     }
 
-    #[bench(name = "mlx/sdpa/vector_d128", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa_vector(dt: DType) -> BenchSetup { sb(mt_sdpa_vector::kernel_ir_for(dt), 128, dt) }
-    #[bench(name = "mlx/sdpa/vector_d64", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa_vector_d64(dt: DType) -> BenchSetup {
         sb(mt_sdpa_vector_d64::kernel_ir_for(dt), 64, dt)
     }
-    #[bench(name = "mlx/sdpa/vector_d96", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa_vector_d96(dt: DType) -> BenchSetup {
         sb(mt_sdpa_vector_d96::kernel_ir_for(dt), 96, dt)
     }
-    #[bench(name = "mlx/sdpa/vector_d192", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa_vector_d192(dt: DType) -> BenchSetup {
         sb(mt_sdpa_vector_d192::kernel_ir_for(dt), 192, dt)
     }
-    #[bench(name = "mlx/sdpa/vector_d256", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa_vector_d256(dt: DType) -> BenchSetup {
         sb(mt_sdpa_vector_d256::kernel_ir_for(dt), 256, dt)
     }

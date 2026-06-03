@@ -64,7 +64,7 @@ pub mod kernel_benches {
 
     use super::mt_random_hash;
 
-    #[bench(name = "mlx/random/random_hash", dtypes = [f32])]
+    #[bench(dtypes = [f32])]
     fn bench_random_hash(_dt: DType) -> BenchSetup {
         let n = 64 * 1024 * 1024usize;
         BenchSetup::new(mt_random_hash::kernel_ir_for())

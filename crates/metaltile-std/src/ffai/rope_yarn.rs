@@ -150,7 +150,7 @@ pub mod kernel_benches {
 
     use super::ffai_rope_yarn;
 
-    #[bench(name = "ffai/rope/rope_yarn", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_rope_yarn(dt: DType) -> BenchSetup {
         let (n_heads, head_dim) = (32usize, 128usize);
         let half = head_dim / 2;

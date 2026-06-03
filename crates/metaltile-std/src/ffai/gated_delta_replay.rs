@@ -391,7 +391,7 @@ pub mod kernel_benches {
     fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
 
     // Forward recurrence with per-step delta-tape capture.
-    #[bench(name = "ffai/gated_delta_record", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gated_delta_record(dt: DType) -> BenchSetup {
         let (batch, t_val) = (1usize, 8usize);
         let n_total = batch * HV;
@@ -418,7 +418,7 @@ pub mod kernel_benches {
     }
 
     // Branchless tape re-fold of the accepted prefix onto a snapshot.
-    #[bench(name = "ffai/gated_delta_replay", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gated_delta_replay(dt: DType) -> BenchSetup {
         let (batch, t_log, accepted) = (1usize, 8usize, 8usize);
         let n_total = batch * HV;
@@ -443,7 +443,7 @@ pub mod kernel_benches {
 
     // Production cell (Dk=192, Dv=128, Hk=4, Hv=4): forward recurrence with
     // per-step delta-tape capture.
-    #[bench(name = "ffai/gated_delta_record_d192_128_4_4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gated_delta_record_d192_128_4_4(dt: DType) -> BenchSetup {
         let (batch, t_val) = (1usize, 8usize);
         let n_total = batch * P_HV;
@@ -471,7 +471,7 @@ pub mod kernel_benches {
 
     // Production cell (Dk=192, Dv=128, Hv=4): branchless tape re-fold of the
     // accepted prefix onto a snapshot.
-    #[bench(name = "ffai/gated_delta_replay_d192_128_4_4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gated_delta_replay_d192_128_4_4(dt: DType) -> BenchSetup {
         let (batch, t_log, accepted) = (1usize, 8usize, 8usize);
         let n_total = batch * P_HV;

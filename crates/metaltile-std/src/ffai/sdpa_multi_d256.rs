@@ -349,7 +349,7 @@ pub mod kernel_benches {
 
     use super::ffai_sdpa_multi_d256;
 
-    #[bench(name = "ffai/sdpa_multi_d256", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa_multi_d256(dt: DType) -> BenchSetup {
         let (n_q_heads, n_kv_heads, head_dim) = (32usize, 8usize, 256usize);
         let (base_kv, n_query) = (4096usize, 8usize);

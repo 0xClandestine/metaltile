@@ -1047,7 +1047,7 @@ pub mod kernel_benches {
         ffai_sdpa_decode_d512,
     };
 
-    #[bench(name = "ffai/sdpa_decode_d64", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa_decode_d64(dt: DType) -> BenchSetup {
         let (nqh, nkh, hd) = (32usize, 8usize, 64usize);
         let (n_kv, kv_stride) = (4096usize, 4096usize);
@@ -1070,7 +1070,7 @@ pub mod kernel_benches {
             .flops(4 * (nqh as u64) * (n_kv as u64) * (hd as u64))
     }
 
-    #[bench(name = "ffai/sdpa_decode_d96", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa_decode_d96(dt: DType) -> BenchSetup {
         let (nqh, nkh, hd) = (32usize, 8usize, 96usize);
         let (n_kv, kv_stride) = (4096usize, 4096usize);
@@ -1091,7 +1091,7 @@ pub mod kernel_benches {
             .flops(4 * (nqh as u64) * (n_kv as u64) * (hd as u64))
     }
 
-    #[bench(name = "ffai/sdpa_decode", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa_decode(dt: DType) -> BenchSetup {
         let (nqh, nkh, hd) = (32usize, 8usize, 128usize);
         let (n_kv, kv_stride) = (4096usize, 4096usize);
@@ -1116,7 +1116,7 @@ pub mod kernel_benches {
             .flops(4 * (nqh as u64) * (n_kv as u64) * (hd as u64))
     }
 
-    #[bench(name = "ffai/sdpa_decode_d256", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa_decode_d256(dt: DType) -> BenchSetup {
         let (nqh, nkh, hd) = (32usize, 8usize, 256usize);
         let (n_kv, kv_stride) = (4096usize, 4096usize);
@@ -1139,7 +1139,7 @@ pub mod kernel_benches {
             .flops(4 * (nqh as u64) * (n_kv as u64) * (hd as u64))
     }
 
-    #[bench(name = "ffai/sdpa_decode_d512", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa_decode_d512(dt: DType) -> BenchSetup {
         let (nqh, nkh, hd) = (32usize, 8usize, 512usize);
         let (n_kv, kv_stride) = (4096usize, 4096usize);

@@ -543,7 +543,7 @@ pub mod kernel_benches {
 
     use super::{conv3d_generic, conv3d_grouped};
 
-    #[bench(name = "ffai/conv3d/generic", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_conv3d_generic(dt: DType) -> BenchSetup {
         let (batch, in_ch, in_d, in_h, in_w, out_ch) =
             (1usize, 16usize, 16usize, 32usize, 32usize, 32usize);
@@ -581,7 +581,7 @@ pub mod kernel_benches {
             .flops(2 * (batch as u64) * (out_ch as u64) * (out_d as u64) * (out_h as u64) * (out_w as u64) * (in_ch as u64) * (kd as u64) * (kh as u64) * (kw as u64))
     }
 
-    #[bench(name = "ffai/conv3d/grouped", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_conv3d_grouped(dt: DType) -> BenchSetup {
         // Depthwise 3×3×3 stride-1, groups == in_ch == out_ch.
         let (batch, ch, in_d, in_h, in_w) = (1usize, 32usize, 16usize, 32usize, 32usize);

@@ -270,52 +270,52 @@ pub mod kernel_benches {
             )
     }
 
-    #[bench(name = "mlx/binary/add", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_add(dt: DType) -> BenchSetup {
         setup_ref(vector_add::kernel_ir_for(dt), ["a", "b", "c"], dt, "Add", 0.0)
     }
 
-    #[bench(name = "mlx/binary/mul", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mul(dt: DType) -> BenchSetup {
         setup_ref(mt_mul::kernel_ir_for(dt), ["a", "b", "out"], dt, "Multiply", 0.0)
     }
 
-    #[bench(name = "mlx/binary/sub", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sub(dt: DType) -> BenchSetup {
         setup_ref(mt_sub::kernel_ir_for(dt), ["a", "b", "out"], dt, "Subtract", 0.0)
     }
 
-    #[bench(name = "mlx/binary/div", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_div(dt: DType) -> BenchSetup {
         setup_ref(mt_div::kernel_ir_for(dt), ["a", "b", "out"], dt, "Divide", 0.0)
     }
 
-    #[bench(name = "mlx/binary/maximum", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_max(dt: DType) -> BenchSetup {
         setup_ref(mt_max_elem::kernel_ir_for(dt), ["a", "b", "out"], dt, "Maximum", 0.0)
     }
 
-    #[bench(name = "mlx/binary/minimum", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_min(dt: DType) -> BenchSetup {
         setup_ref(mt_min_elem::kernel_ir_for(dt), ["a", "b", "out"], dt, "Minimum", 0.0)
     }
 
-    #[bench(name = "mlx/binary/pow", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_pow(dt: DType) -> BenchSetup {
         setup_ref(mt_pow::kernel_ir_for(dt), ["a", "b", "out"], dt, "Power", 1e-4)
     }
 
-    #[bench(name = "mlx/binary/atan2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_atan2(dt: DType) -> BenchSetup {
         setup_ref(mt_atan2::kernel_ir_for(dt), ["y", "x", "out"], dt, "ArcTan2", 1e-3)
     }
 
-    #[bench(name = "mlx/binary/remainder", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_remainder(dt: DType) -> BenchSetup {
         setup_ref(mt_remainder::kernel_ir_for(dt), ["a", "b", "out"], dt, "Remainder", 1e-4)
     }
 
-    #[bench(name = "mlx/binary/logaddexp", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_logaddexp(dt: DType) -> BenchSetup {
         setup_ref(mt_logaddexp::kernel_ir_for(dt), ["a", "b", "out"], dt, "LogAddExp", 1e-2)
     }

@@ -151,7 +151,7 @@ pub mod kernel_benches {
 
     const HEAD_DIM: usize = 128;
 
-    #[bench(name = "mlx/sdpa/sdpa", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa(dt: DType) -> BenchSetup {
         let (n_heads, n_kv) = (32usize, 4096usize);
         let scale = 1.0f32 / (HEAD_DIM as f32).sqrt();

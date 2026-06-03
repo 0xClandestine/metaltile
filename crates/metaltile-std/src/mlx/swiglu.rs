@@ -87,7 +87,7 @@ pub mod kernel_benches {
 
     use super::mt_swiglu;
 
-    #[bench(name = "mlx/swiglu", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_swiglu(dt: DType) -> BenchSetup {
         // `idx = tid` (global) — keep within a comfortable single-grid size.
         let n = 1024 * 1024usize;

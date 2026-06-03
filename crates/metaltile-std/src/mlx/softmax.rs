@@ -129,7 +129,7 @@ pub mod kernel_benches {
     // these at 1024 threads (n_simd==32, every slot live). At MT's tpg=256
     // (n_simd==8) the 24 stale slots produce NaN. Pin tpg=1024 (mirrors the
     // legacy RowNorm `mlx_tpg: 1024`).
-    #[bench(name = "mlx/softmax", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_softmax(dt: DType) -> BenchSetup {
         let (rows, n) = (4096usize, 1024usize);
         let tn = mlx_tname(dt);

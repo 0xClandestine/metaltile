@@ -910,14 +910,14 @@ pub mod kernel_benches {
             .flops(2 * out_dim as u64 * in_dim as u64)
     }
 
-    #[bench(name = "ffai/rms_norm_qgemv", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_rms_norm_qgemv(dt: DType) -> BenchSetup {
         let (in_dim, gs, out_dim) = (4096usize, 64usize, 4096usize);
         let s = BenchSetup::new(ffai_rms_norm_qgemv::kernel_ir_for(dt)).mode(KernelMode::Reduction);
         buffers(s, in_dim, gs, out_dim, dt, 4).grid_3d(out_dim as u32, 1, 1, [128, 1, 1])
     }
 
-    #[bench(name = "ffai/rms_norm_qgemv_fast", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_rms_norm_qgemv_fast(dt: DType) -> BenchSetup {
         let (in_dim, gs, out_dim) = (4096usize, 64usize, 4096usize);
         let s = BenchSetup::new(ffai_rms_norm_qgemv_fast::kernel_ir_for(dt))
@@ -925,7 +925,7 @@ pub mod kernel_benches {
         buffers(s, in_dim, gs, out_dim, dt, 4).grid_3d((out_dim / 8) as u32, 1, 1, [64, 1, 1])
     }
 
-    #[bench(name = "ffai/rms_norm_qgemv_int8_fast", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_rms_norm_qgemv_int8_fast(dt: DType) -> BenchSetup {
         let (in_dim, gs, out_dim) = (4096usize, 64usize, 4096usize);
         let s = BenchSetup::new(ffai_rms_norm_qgemv_int8_fast::kernel_ir_for(dt))

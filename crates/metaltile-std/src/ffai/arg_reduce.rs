@@ -160,7 +160,7 @@ pub mod kernel_benches {
 
     // Vocab-sized argmax (greedy decode): one threadgroup reduces 256K elements.
     // Read-dominated, so bytes_moved counts the input.
-    #[bench(name = "ffai/argmax", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_argmax(dt: DType) -> BenchSetup {
         let n = 256 * 1024usize;
         BenchSetup::new(ffai_argmax::kernel_ir_for(dt))

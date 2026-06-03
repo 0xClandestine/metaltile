@@ -169,7 +169,7 @@ pub mod kernel_benches {
     use super::softmax_categorical_sample;
     use crate::utils::pack_f32;
 
-    #[bench(name = "ffai/sampling/softmax_categorical_sample", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_softmax_categorical_sample(dt: DType) -> BenchSetup {
         let n = 152_064usize;
         BenchSetup::new(softmax_categorical_sample::kernel_ir_for(dt))

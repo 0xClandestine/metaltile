@@ -493,7 +493,7 @@ pub mod kernel_benches {
     }
 
     // All four (VB, DIM) combos via zipped variant lists.
-    #[bench(name = "ffai/aura_flash_sdpa_kb4_vb{VB}_d{DIM}", dtypes = [f32, f16, bf16],
+    #[bench(dtypes = [f32, f16, bf16],
             variants(VB = [2, 2, 4, 4], DIM = [64, 128, 64, 128], suffix = "kb4_vb{VB}_d{DIM}"))]
     fn bench_sdpa(dt: DType) -> BenchSetup {
         setup(aura_flash_sdpa_kb4_vbVB_dDIM::kernel_ir_for(dt), DIM, 4, VB, dt)

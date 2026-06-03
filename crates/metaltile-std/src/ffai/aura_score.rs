@@ -229,7 +229,7 @@ pub mod kernel_benches {
             .grid_3d(q_heads as u32, tokens as u32, 1, [32, 1, 1])
     }
 
-    #[bench(name = "ffai/aura_score_int{BITS}", dtypes = [f32, f16, bf16],
+    #[bench(dtypes = [f32, f16, bf16],
             variants(BITS = [2, 3, 4, 6, 8], suffix = "int{BITS}"))]
     fn bench_aura_score(dt: DType) -> BenchSetup {
         setup(BenchSetup::new(aura_score_intBITS::kernel_ir_for(dt)), 128, BITS, 32, 8, 4096, dt)

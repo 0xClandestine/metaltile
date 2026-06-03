@@ -246,7 +246,7 @@ pub mod kernel_benches {
 
     use super::vocoder_istft;
 
-    #[bench(name = "ffai/vocoder/istft", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_vocoder_istft(dt: DType) -> BenchSetup {
         let (n_frames, n_fft, hop) = (2048usize, 20usize, 5usize);
         let n_freq = n_fft / 2 + 1;

@@ -307,11 +307,11 @@ pub mod kernel_benches {
     // skipped split-K entirely). Attaching a reference here risks a spurious
     // correctness FAIL on a kernel that is actually correct, so it is left
     // perf-only pending a dedicated on-GPU equivalence check. → FLAGGED, perf-only.
-    #[bench(name = "mlx/steel_gemm_splitk/bm64_bn64_bk16_wm2_wn2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_splitk_64x64x16_2x2(dt: DType) -> BenchSetup {
         pb(mt_steel_gemm_splitk_64x64x16_2x2::kernel_ir_for(dt), 64, 64, 128, dt)
     }
-    #[bench(name = "mlx/steel_gemm_splitk/bm32_bn32_bk16_wm2_wn2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_splitk_32x32x16_2x2(dt: DType) -> BenchSetup {
         pb(mt_steel_gemm_splitk_32x32x16_2x2::kernel_ir_for(dt), 32, 32, 128, dt)
     }
@@ -328,7 +328,7 @@ pub mod kernel_benches {
     //   ldd[[4]]=N (int,4). No function constants. Grid = `[N, M]` total threads
     //   (`thread_position_in_grid`, no bounds check) → threadgroup grid
     //   `[N/32, M/32]` × group `[32, 32, 1]` covers it exactly.
-    #[bench(name = "mlx/steel_gemm_splitk/accum", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_splitk_accum(dt: DType) -> BenchSetup {
         let (m, n) = (M as usize, N as usize);
         let sz = dt.size_bytes();
@@ -383,7 +383,7 @@ pub mod kernel_benches {
     //   fdc[[7]]=1 (int,4), alpha[[8]] (f32,4), beta[[9]] (f32,4). `C` is indexed
     //   `gid.x*fdc + gid.y*ldc` → with ldc=N, fdc=1 it is the same flat row-major
     //   `[M, N]` layout as MT's `c_in[idx]`. Same grid as plain accum.
-    #[bench(name = "mlx/steel_gemm_splitk/accum_axpby", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_splitk_accum_axpby(dt: DType) -> BenchSetup {
         let (m, n) = (M as usize, N as usize);
         let sz = dt.size_bytes();

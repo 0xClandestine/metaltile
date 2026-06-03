@@ -765,20 +765,20 @@ pub mod kernel_benches {
             )
     }
 
-    #[bench(name = "mlx/scan/sum", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_scan_sum(dt: DType) -> BenchSetup { sb_sum_ref(mt_scan::kernel_ir_for(dt), dt) }
 
     macro_rules! sbench {
-        ($name:ident, $full:literal, $kernel:ident) => {
-            #[bench(name = $full, dtypes = [f32, f16, bf16])]
+        ($name:ident, $kernel:ident) => {
+            #[bench(dtypes = [f32, f16, bf16])]
             fn $name(dt: DType) -> BenchSetup { sb($kernel::kernel_ir_for(dt), dt) }
         };
     }
-    sbench!(bench_scan_excl, "mlx/scan/sum_exclusive", mt_scan_exclusive);
-    sbench!(bench_scan_prod, "mlx/scan/prod", mt_scan_prod);
-    sbench!(bench_scan_prod_excl, "mlx/scan/prod_exclusive", mt_scan_prod_exclusive);
-    sbench!(bench_scan_max, "mlx/scan/max", mt_scan_max);
-    sbench!(bench_scan_max_excl, "mlx/scan/max_exclusive", mt_scan_max_exclusive);
-    sbench!(bench_scan_min, "mlx/scan/min", mt_scan_min);
-    sbench!(bench_scan_min_excl, "mlx/scan/min_exclusive", mt_scan_min_exclusive);
+    sbench!(bench_scan_excl, mt_scan_exclusive);
+    sbench!(bench_scan_prod, mt_scan_prod);
+    sbench!(bench_scan_prod_excl, mt_scan_prod_exclusive);
+    sbench!(bench_scan_max, mt_scan_max);
+    sbench!(bench_scan_max_excl, mt_scan_max_exclusive);
+    sbench!(bench_scan_min, mt_scan_min);
+    sbench!(bench_scan_min_excl, mt_scan_min_exclusive);
 }

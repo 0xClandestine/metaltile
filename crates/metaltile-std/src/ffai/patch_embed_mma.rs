@@ -399,7 +399,7 @@ pub mod kernel_benches {
 
     use super::patch_embed_mma;
 
-    #[bench(name = "ffai/patch_embed/mma", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_patch_embed_mma(dt: DType) -> BenchSetup {
         // 8×8 patch, 4 channels (patch_dim=256), 256×256 image →
         // 32×32 = 1024 patches, hidden 1024.

@@ -75,7 +75,7 @@ pub mod kernel_benches {
         v.flat_map(|x| x.to_le_bytes()).collect()
     }
 
-    #[bench(name = "ffai/gather/gather", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gather(dt: DType) -> BenchSetup {
         let (vocab, dim, n_tokens) = (8192usize, 4096usize, 1024usize);
         let n_elems = n_tokens * dim;

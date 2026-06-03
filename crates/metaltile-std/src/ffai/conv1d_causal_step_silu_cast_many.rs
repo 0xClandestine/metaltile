@@ -255,7 +255,7 @@ pub mod kernel_benches {
             .flops(2 * (t_len as u64) * (conv_dim as u64) * (CONV_KERNEL as u64))
     }
 
-    #[bench(name = "ffai/ssm/conv1d_causal_step_silu_cast_many", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_conv1d_causal_many(dt: DType) -> BenchSetup {
         // Qwen3.6-A3B GDN prefill: T=512, conv_dim=2048.
         bench_shape(512, 2048, dt)

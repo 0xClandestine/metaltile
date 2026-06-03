@@ -165,7 +165,7 @@ pub mod kernel_benches {
         v.flat_map(|x| x.to_le_bytes()).collect()
     }
 
-    #[bench(name = "ffai/logits_processors/temperature", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_logits_temperature(dt: DType) -> BenchSetup {
         let n = 152_064usize;
         BenchSetup::new(logits_temperature::kernel_ir_for(dt))
@@ -177,7 +177,7 @@ pub mod kernel_benches {
             .bytes_moved((2 * n * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "ffai/logits_processors/repetition_penalty", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_logits_repetition_penalty(dt: DType) -> BenchSetup {
         // A modest context window of distinct token ids over a Qwen-scale
         // vocab — one thread per token id.

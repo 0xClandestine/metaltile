@@ -48,7 +48,7 @@ pub mod kernel_benches {
 
     use super::mt_binary_two;
 
-    #[bench(name = "mlx/binary_two/add_mul", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_binary_two(dt: DType) -> BenchSetup {
         let n = 64 * 1024 * 1024usize;
         BenchSetup::new(mt_binary_two::kernel_ir_for(dt))

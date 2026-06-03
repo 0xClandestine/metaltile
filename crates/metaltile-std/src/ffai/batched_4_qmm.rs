@@ -494,7 +494,7 @@ pub mod kernel_benches {
 
     use super::ffai_batched_4_qmm_fast;
 
-    #[bench(name = "ffai/batched_4_qmm_fast", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_batched_4_qmm_fast(dt: DType) -> BenchSetup {
         let (m, in_dim, gs) = (4usize, 2048usize, 64usize);
         let (out_a, out_b, out_c, out_d) = (2048usize, 2048usize, 16usize, 16usize);

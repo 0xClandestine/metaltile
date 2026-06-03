@@ -768,7 +768,7 @@ pub mod kernel_benches {
     const POSITION: usize = 7;
     const N_POSITIONS: usize = 256;
 
-    #[bench(name = "ffai/kv_cache/update", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_kv_cache_update(dt: DType) -> BenchSetup {
         let elems = N_KV_HEADS * HEAD_DIM;
         BenchSetup::new(kv_cache_update::kernel_ir_for(dt))
@@ -802,7 +802,7 @@ pub mod kernel_benches {
             .bytes_moved((N_KV_HEADS * HEAD_DIM * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "ffai/kv_cache/quantize", dtypes = [f32, f16, bf16],
+    #[bench(dtypes = [f32, f16, bf16],
             variants(BITS = [4, 8], suffix = "int{BITS}"))]
     fn bench_quantize_kv(dt: DType) -> BenchSetup {
         quant_bench(quantize_kv_intBITS::kernel_ir_for(dt), BITS, dt)
@@ -828,7 +828,7 @@ pub mod kernel_benches {
             .bytes_moved((total_out * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "ffai/kv_cache/bulk_dequant", dtypes = [f32, f16, bf16],
+    #[bench(dtypes = [f32, f16, bf16],
             variants(BITS = [4, 8], suffix = "int{BITS}"))]
     fn bench_bulk_dequant_kv(dt: DType) -> BenchSetup {
         dequant_bench(bulk_dequant_kv_intBITS::kernel_ir_for(dt), BITS, dt)
@@ -853,11 +853,11 @@ pub mod kernel_benches {
             .bytes_moved((N_KV_HEADS * HEAD_DIM * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "ffai/kv_cache/quantize_fp8_e4m3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_quantize_kv_fp8_e4m3(dt: DType) -> BenchSetup {
         quant_fp8_bench(quantize_kv_fp8_e4m3::kernel_ir_for(dt), dt)
     }
-    #[bench(name = "ffai/kv_cache/quantize_fp8_e5m2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_quantize_kv_fp8_e5m2(dt: DType) -> BenchSetup {
         quant_fp8_bench(quantize_kv_fp8_e5m2::kernel_ir_for(dt), dt)
     }
@@ -881,11 +881,11 @@ pub mod kernel_benches {
             .bytes_moved((total_out * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "ffai/kv_cache/bulk_dequant_fp8_e4m3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_bulk_dequant_kv_fp8_e4m3(dt: DType) -> BenchSetup {
         dequant_fp8_bench(bulk_dequant_kv_fp8_e4m3::kernel_ir_for(dt), dt)
     }
-    #[bench(name = "ffai/kv_cache/bulk_dequant_fp8_e5m2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_bulk_dequant_kv_fp8_e5m2(dt: DType) -> BenchSetup {
         dequant_fp8_bench(bulk_dequant_kv_fp8_e5m2::kernel_ir_for(dt), dt)
     }

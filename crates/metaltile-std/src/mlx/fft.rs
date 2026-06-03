@@ -668,24 +668,24 @@ pub mod kernel_benches {
             .bytes_moved((4 * rows * n * dt.size_bytes()) as u64)
     }
     macro_rules! fft_bench {
-        ($name:ident, $full:literal, $kernel:ident, $n:literal) => {
-            #[bench(name = $full, dtypes = [f32, f16, bf16])]
+        ($name:ident, $kernel:ident, $n:literal) => {
+            #[bench(dtypes = [f32, f16, bf16])]
             fn $name(dt: DType) -> BenchSetup { fb($kernel::kernel_ir_for(dt), $n, dt) }
         };
     }
-    fft_bench!(bench_fft_n32, "mlx/fft/n32", mt_fft_n32, 32);
-    fft_bench!(bench_fft_n64, "mlx/fft/n64", mt_fft_n64, 64);
-    fft_bench!(bench_fft_n128, "mlx/fft/n128", mt_fft_n128, 128);
-    fft_bench!(bench_fft_n256, "mlx/fft/n256", mt_fft_n256, 256);
-    fft_bench!(bench_fft_n512, "mlx/fft/n512", mt_fft_n512, 512);
-    fft_bench!(bench_fft_n1024, "mlx/fft/n1024", mt_fft_n1024, 1024);
+    fft_bench!(bench_fft_n32, mt_fft_n32, 32);
+    fft_bench!(bench_fft_n64, mt_fft_n64, 64);
+    fft_bench!(bench_fft_n128, mt_fft_n128, 128);
+    fft_bench!(bench_fft_n256, mt_fft_n256, 256);
+    fft_bench!(bench_fft_n512, mt_fft_n512, 512);
+    fft_bench!(bench_fft_n1024, mt_fft_n1024, 1024);
 
     // Bluestein stages at a realistic non-power-of-two length (N=480 → M=1024).
     const N_LEN: usize = 480;
     const M_LEN: usize = 1024;
     const ROWS: usize = 64;
 
-    #[bench(name = "mlx/fft/bluestein_chirp_filter", dtypes = [f32])]
+    #[bench(dtypes = [f32])]
     fn bench_bluestein_chirp_filter(_dt: DType) -> BenchSetup {
         BenchSetup::new(mt_fft_bluestein_chirp_filter::kernel_ir_for())
             .mode(KernelMode::Grid3D)
@@ -700,7 +700,7 @@ pub mod kernel_benches {
             .grid_1d(M_LEN, 256)
             .bytes_moved((2 * M_LEN * 4) as u64)
     }
-    #[bench(name = "mlx/fft/bluestein_preprocess", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_bluestein_preprocess(dt: DType) -> BenchSetup {
         BenchSetup::new(mt_fft_bluestein_preprocess::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
@@ -719,7 +719,7 @@ pub mod kernel_benches {
             .grid_1d(ROWS * M_LEN, 256)
             .bytes_moved((2 * ROWS * (N_LEN + M_LEN) * dt.size_bytes()) as u64)
     }
-    #[bench(name = "mlx/fft/bluestein_cmul", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_bluestein_cmul(dt: DType) -> BenchSetup {
         BenchSetup::new(mt_fft_bluestein_cmul::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
@@ -738,7 +738,7 @@ pub mod kernel_benches {
             .grid_1d(ROWS * M_LEN, 256)
             .bytes_moved((4 * ROWS * M_LEN * dt.size_bytes()) as u64)
     }
-    #[bench(name = "mlx/fft/bluestein_postprocess", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_bluestein_postprocess(dt: DType) -> BenchSetup {
         BenchSetup::new(mt_fft_bluestein_postprocess::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)

@@ -481,7 +481,7 @@ pub mod kernel_benches {
 
     // Single-chunk shape (T = C) that fits the scalar TG-memory budget:
     // Dk=32, Dv=16, C=16, Hk=Hv=1. `t_len` must be a multiple of `c`.
-    #[bench(name = "ffai/gated_delta_wy_chunk", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gated_delta_wy_chunk(dt: DType) -> BenchSetup {
         let (b, t, hk, hv, dk, dv, c) =
             (1usize, 16usize, 1usize, 1usize, 32usize, 16usize, 16usize);

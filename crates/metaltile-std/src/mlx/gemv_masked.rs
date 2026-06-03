@@ -62,7 +62,7 @@ pub mod kernel_benches {
 
     use super::mt_gemv_masked;
 
-    #[bench(name = "mlx/gemv_masked", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gemv_masked(dt: DType) -> BenchSetup {
         let (m, k) = (4096usize, 4096usize);
         BenchSetup::new(mt_gemv_masked::kernel_ir_for(dt))

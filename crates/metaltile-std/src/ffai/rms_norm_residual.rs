@@ -127,7 +127,7 @@ pub mod kernel_benches {
 
     use super::ffai_rms_norm_residual;
 
-    #[bench(name = "ffai/rms_norm_residual/rms_norm_residual", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_rms_norm_residual(dt: DType) -> BenchSetup {
         let (rows, n) = (4096usize, 4096usize);
         BenchSetup::new(ffai_rms_norm_residual::kernel_ir_for(dt))

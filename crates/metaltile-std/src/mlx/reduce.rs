@@ -571,19 +571,19 @@ pub mod kernel_benches {
             )
     }
 
-    #[bench(name = "mlx/all_reduce/sum", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_all_sum(dt: DType) -> BenchSetup {
         all_ref(mt_all_reduce::kernel_ir_for(dt), dt, "sum", 256.0, true)
     }
-    #[bench(name = "mlx/all_reduce/prod", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_all_prod(dt: DType) -> BenchSetup {
         all_ref(mt_all_reduce_prod::kernel_ir_for(dt), dt, "prod", 1024.0, false)
     }
-    #[bench(name = "mlx/all_reduce/max", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_all_max(dt: DType) -> BenchSetup {
         all_ref(mt_all_reduce_max::kernel_ir_for(dt), dt, "max", 0.0, false)
     }
-    #[bench(name = "mlx/all_reduce/min", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_all_min(dt: DType) -> BenchSetup {
         all_ref(mt_all_reduce_min::kernel_ir_for(dt), dt, "min", 0.0, false)
     }
@@ -621,19 +621,19 @@ pub mod kernel_benches {
             )
     }
 
-    #[bench(name = "mlx/row_reduce/sum", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_row_sum(dt: DType) -> BenchSetup {
         row_ref(mt_row_reduce::kernel_ir_for(dt), dt, "sum", 128.0)
     }
-    #[bench(name = "mlx/row_reduce/prod", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_row_prod(dt: DType) -> BenchSetup {
         row_ref(mt_row_reduce_prod::kernel_ir_for(dt), dt, "prod", 32.0)
     }
-    #[bench(name = "mlx/row_reduce/max", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_row_max(dt: DType) -> BenchSetup {
         row_ref(mt_row_reduce_max::kernel_ir_for(dt), dt, "max", 0.0)
     }
-    #[bench(name = "mlx/row_reduce/min", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_row_min(dt: DType) -> BenchSetup {
         row_ref(mt_row_reduce_min::kernel_ir_for(dt), dt, "min", 0.0)
     }
@@ -651,13 +651,13 @@ pub mod kernel_benches {
             .bytes_moved((rows * cols * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "mlx/col_reduce/sum", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_col_sum(dt: DType) -> BenchSetup { col_b(mt_col_reduce::kernel_ir_for(dt), dt) }
-    #[bench(name = "mlx/col_reduce/prod", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_col_prod(dt: DType) -> BenchSetup { col_b(mt_col_reduce_prod::kernel_ir_for(dt), dt) }
-    #[bench(name = "mlx/col_reduce/max", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_col_max(dt: DType) -> BenchSetup { col_b(mt_col_reduce_max::kernel_ir_for(dt), dt) }
-    #[bench(name = "mlx/col_reduce/min", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_col_min(dt: DType) -> BenchSetup { col_b(mt_col_reduce_min::kernel_ir_for(dt), dt) }
 
     // seg-reduce: Grid3D, one thread per contiguous segment.
@@ -673,12 +673,12 @@ pub mod kernel_benches {
             .bytes_moved((n_segments * seg_len * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "mlx/seg_reduce/sum", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_seg_sum(dt: DType) -> BenchSetup { seg_b(mt_seg_reduce::kernel_ir_for(dt), dt) }
-    #[bench(name = "mlx/seg_reduce/prod", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_seg_prod(dt: DType) -> BenchSetup { seg_b(mt_seg_reduce_prod::kernel_ir_for(dt), dt) }
-    #[bench(name = "mlx/seg_reduce/max", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_seg_max(dt: DType) -> BenchSetup { seg_b(mt_seg_reduce_max::kernel_ir_for(dt), dt) }
-    #[bench(name = "mlx/seg_reduce/min", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_seg_min(dt: DType) -> BenchSetup { seg_b(mt_seg_reduce_min::kernel_ir_for(dt), dt) }
 }

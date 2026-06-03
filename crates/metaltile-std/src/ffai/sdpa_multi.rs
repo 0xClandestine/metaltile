@@ -448,7 +448,7 @@ pub mod kernel_benches {
 
     use super::ffai_sdpa_multi;
 
-    #[bench(name = "ffai/sdpa_multi", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa_multi(dt: DType) -> BenchSetup {
         let (n_q_heads, n_kv_heads, head_dim) = (32usize, 8usize, 128usize);
         let (base_kv, n_query) = (4096usize, 8usize);
@@ -478,7 +478,7 @@ pub mod kernel_benches {
             .flops(4 * (n_q_heads as u64) * (n_kv as u64) * (head_dim as u64) * (n_query as u64))
     }
 
-    #[bench(name = "ffai/sdpa_multi_tree_mask", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa_multi_tree_mask(dt: DType) -> BenchSetup {
         use super::ffai_sdpa_multi_tree_mask;
         let (n_q_heads, n_kv_heads, head_dim) = (32usize, 8usize, 128usize);

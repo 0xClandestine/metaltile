@@ -485,7 +485,7 @@ pub mod kernel_benches {
             .grid_3d(rows as u32, 1, 1, [dim as u32, 1, 1])
     }
 
-    #[bench(name = "ffai/aura_encode_int{BITS}", dtypes = [f32, f16, bf16],
+    #[bench(dtypes = [f32, f16, bf16],
             variants(BITS = [2, 3, 4, 6, 8], suffix = "int{BITS}"))]
     fn bench_aura_encode(dt: DType) -> BenchSetup {
         setup(BenchSetup::new(aura_encode_intBITS::kernel_ir_for(dt)), 128, BITS, 256, dt)

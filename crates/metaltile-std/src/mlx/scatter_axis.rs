@@ -88,7 +88,7 @@ pub mod kernel_benches {
 
     use super::mt_scatter_axis;
 
-    #[bench(name = "mlx/indexing/scatter_axis", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_scatter_axis(dt: DType) -> BenchSetup {
         let (outer, axis_upd, axis_size, inner) = (4096usize, 64, 64, 64);
         let upd_len = outer * axis_upd * inner;

@@ -162,7 +162,7 @@ pub mod kernel_benches {
     const TILE: u32 = 32;
     const TPG: u32 = 128;
 
-    #[bench(name = "mlx/steel_gemm/gather_nax", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gather_nax(dt: DType) -> BenchSetup {
         let (m, n, k) = (M as usize, N as usize, K as usize);
         let sz = dt.size_bytes();

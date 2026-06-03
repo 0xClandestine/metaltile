@@ -410,7 +410,7 @@ pub mod kernel_benches {
     fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
 
     // Sequential SSD forward with (dA, dBx) tape capture over `t_total` steps.
-    #[bench(name = "ffai/ssm_record", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_ssm_record(dt: DType) -> BenchSetup {
         let (batch, t) = (1usize, 8usize);
         let n_total = batch * H;
@@ -435,7 +435,7 @@ pub mod kernel_benches {
     }
 
     // Re-fold the first `k_steps` tape entries onto a recurrent-state snapshot.
-    #[bench(name = "ffai/ssm_replay", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_ssm_replay(dt: DType) -> BenchSetup {
         let (batch, t, k_steps) = (1usize, 8usize, 8usize);
         let n_total = batch * H;
@@ -455,7 +455,7 @@ pub mod kernel_benches {
 
     // Production cell (Dh=128, Ds=128, H=32, G=2): sequential SSD forward
     // with (dA, dBx) tape capture over `t_total` steps.
-    #[bench(name = "ffai/ssm_record_d128_128_32", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_ssm_record_d128_128_32(dt: DType) -> BenchSetup {
         let (batch, t) = (1usize, 8usize);
         let n_total = batch * P_H;
@@ -481,7 +481,7 @@ pub mod kernel_benches {
 
     // Production cell (Dh=128, Ds=128, H=32): re-fold the first `k_steps`
     // tape entries onto a recurrent-state snapshot.
-    #[bench(name = "ffai/ssm_replay_d128_128_32", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_ssm_replay_d128_128_32(dt: DType) -> BenchSetup {
         let (batch, t, k_steps) = (1usize, 8usize, 8usize);
         let n_total = batch * P_H;

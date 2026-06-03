@@ -449,7 +449,7 @@ pub mod kernel_benches {
     // Grid `[dv, b*hv, 1]`, TG `[32,1,1]`, Reduction — identical geometry to
     // `mt_gated_delta_step`. conv_out is the fused q|k|v slab of width
     // `2·Hk·Dk + Hv·Dv`.
-    #[bench(name = "ffai/gated_delta_prep_step", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gated_delta_prep_step(dt: DType) -> BenchSetup {
         let (b, hv, hk, dv, dk) = (2usize, 4usize, 2usize, 64usize, 64usize);
         let n_total = b * hv;

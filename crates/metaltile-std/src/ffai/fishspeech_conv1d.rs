@@ -357,7 +357,7 @@ pub mod kernel_benches {
 
     use super::{conv1d_dilated, conv1d_transpose};
 
-    #[bench(name = "ffai/fishspeech_conv1d/conv1d_dilated", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_conv1d_dilated(dt: DType) -> BenchSetup {
         // ResBlock dilated conv: 512 ch, len 1024, k=3, dilation 3, same pad.
         let (batch, ch, in_len, k, stride, pad, dilation) =
@@ -385,7 +385,7 @@ pub mod kernel_benches {
             .flops(2 * (batch as u64) * (ch as u64) * (out_len as u64) * (ch as u64) * (k as u64))
     }
 
-    #[bench(name = "ffai/fishspeech_conv1d/conv1d_transpose", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_conv1d_transpose(dt: DType) -> BenchSetup {
         // HiFi-GAN upsample stage: 256→128 ch, len 256, stride 8, k=16, pad 4.
         let (batch, in_ch, in_len, out_ch, k, stride, pad, dilation) =

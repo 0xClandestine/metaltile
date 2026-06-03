@@ -257,7 +257,7 @@ pub mod kernel_benches {
             .bytes_moved((n_tokens * hidden * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "ffai/dequant_gather/int{BITS}", dtypes = [f32, f16, bf16],
+    #[bench(dtypes = [f32, f16, bf16],
             variants(BITS = [2, 3, 4, 5, 6, 8], suffix = "int{BITS}"))]
     fn bench_dequant_gather(dt: DType) -> BenchSetup {
         gb(dequant_gather_intBITS::kernel_ir_for(dt), BITS, 4096, 64, dt)

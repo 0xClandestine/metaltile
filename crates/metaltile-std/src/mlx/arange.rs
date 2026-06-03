@@ -91,7 +91,7 @@ pub mod kernel_benches {
     // ~6.7e7, which overflows the f16/bf16 mantissa, so consecutive integers
     // collapse to the same representable value. MetalTile and MLX overflow the
     // same way, but the 1.0 floor absorbs any last-ULP rounding-mode difference.
-    #[bench(name = "mlx/arange", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_arange(dt: DType) -> BenchSetup {
         let n = 64 * 1024 * 1024usize;
         let tn = mlx_tname(dt);

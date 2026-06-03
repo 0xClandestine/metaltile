@@ -112,8 +112,8 @@ pub mod kernel_benches {
     use super::*;
 
     macro_rules! had_bench {
-        ($name:ident, $full:literal, $kernel:ident, $n:literal) => {
-            #[bench(name = $full, dtypes = [f32, f16, bf16])]
+        ($name:ident, $kernel:ident, $n:literal) => {
+            #[bench(dtypes = [f32, f16, bf16])]
             fn $name(dt: DType) -> BenchSetup {
                 let rows = 8192usize;
                 let n = $n;
@@ -127,9 +127,9 @@ pub mod kernel_benches {
             }
         };
     }
-    had_bench!(bench_hadamard_n64, "mlx/hadamard/n64", mt_hadamard_n64, 64);
-    had_bench!(bench_hadamard_n128, "mlx/hadamard/n128", mt_hadamard_n128, 128);
-    had_bench!(bench_hadamard_n256, "mlx/hadamard/n256", mt_hadamard_n256, 256);
-    had_bench!(bench_hadamard_n512, "mlx/hadamard/n512", mt_hadamard_n512, 512);
-    had_bench!(bench_hadamard_n1024, "mlx/hadamard/n1024", mt_hadamard_n1024, 1024);
+    had_bench!(bench_hadamard_n64, mt_hadamard_n64, 64);
+    had_bench!(bench_hadamard_n128, mt_hadamard_n128, 128);
+    had_bench!(bench_hadamard_n256, mt_hadamard_n256, 256);
+    had_bench!(bench_hadamard_n512, mt_hadamard_n512, 512);
+    had_bench!(bench_hadamard_n1024, mt_hadamard_n1024, 1024);
 }

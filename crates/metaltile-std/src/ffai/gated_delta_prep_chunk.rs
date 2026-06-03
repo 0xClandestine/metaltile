@@ -416,7 +416,7 @@ pub mod kernel_benches {
 
     // Grid `[dv, b*hv, 1]`, TG `[32,1,1]`, Reduction. conv_out gains a T
     // dimension: `[B, T, 2·Hk·Dk + Hv·Dv]`. `t_len` is a runtime u32 scalar.
-    #[bench(name = "ffai/gated_delta_prep_chunk", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gated_delta_prep_chunk(dt: DType) -> BenchSetup {
         let (b, t, hv, hk, dv, dk) = (1usize, 64usize, 4usize, 2usize, 8usize, 64usize);
         let n_total = b * hv;

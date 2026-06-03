@@ -494,12 +494,12 @@ pub mod kernel_benches {
             )
     }
 
-    #[bench(name = "mlx/sdpa/sdpa_prefill", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa_prefill(dt: DType) -> BenchSetup {
         sdpa_b(mt_sdpa_prefill::kernel_ir_for(dt), dt)
     }
 
-    #[bench(name = "mlx/sdpa/sdpa_prefill_mma", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa_prefill_mma(dt: DType) -> BenchSetup {
         sdpa_b(mt_sdpa_prefill_mma::kernel_ir_for(dt), dt)
     }
@@ -508,7 +508,7 @@ pub mod kernel_benches {
     // meaningful at bf16 (single-Q dd-loop, bf16 MMA frags).
     // dtypes f32/f16/bf16 to match the legacy emission (the bf16-tile kernel
     // is monomorphized over all three input dtypes, same as the legacy spec).
-    #[bench(name = "mlx/sdpa/sdpa_prefill_mma_bf16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa_prefill_mma_bf16(dt: DType) -> BenchSetup {
         sdpa_b(mt_sdpa_prefill_mma_bf16::kernel_ir_for(dt), dt)
     }

@@ -594,22 +594,22 @@ pub mod kernel_benches {
             .flops(2 * (batch as u64) * (out_ch as u64) * (out_h as u64) * (out_w as u64) * (in_ch as u64) * (kh as u64) * (kw as u64))
     }
 
-    #[bench(name = "ffai/conv2d/patch14", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_conv2d_patch14(dt: DType) -> BenchSetup {
         conv2d_bench(conv2d_patch14::kernel_ir_for(dt), 1, 3, 224, 224, 1024, 14, 14, 14, 14, dt)
     }
 
-    #[bench(name = "ffai/conv2d/patch16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_conv2d_patch16(dt: DType) -> BenchSetup {
         conv2d_bench(conv2d_patch16::kernel_ir_for(dt), 1, 3, 224, 224, 768, 16, 16, 16, 16, dt)
     }
 
-    #[bench(name = "ffai/conv2d/generic", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_conv2d_generic(dt: DType) -> BenchSetup {
         conv2d_bench(conv2d_generic::kernel_ir_for(dt), 1, 32, 56, 56, 64, 3, 3, 1, 1, dt)
     }
 
-    #[bench(name = "ffai/conv2d/grouped", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_conv2d_grouped(dt: DType) -> BenchSetup {
         // Depthwise 3×3 stride-1, groups == in_ch == out_ch.
         let (batch, ch, in_h, in_w, kh, kw) = (1usize, 64usize, 56usize, 56usize, 3usize, 3usize);

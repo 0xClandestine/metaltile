@@ -70,7 +70,7 @@ pub mod kernel_benches {
     // repeating mix of 0 and nonzero u8 bytes (so both select branches are
     // exercised), and on_true/on_false use the `Signed` pattern. Both kernels see
     // identical cond/on_true/on_false bytes, so the A/B is exact.
-    #[bench(name = "mlx/select", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_select(dt: DType) -> BenchSetup {
         let n = 64 * 1024 * 1024usize;
         let tn = mlx_tname(dt);

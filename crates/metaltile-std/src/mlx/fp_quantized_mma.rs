@@ -674,11 +674,11 @@ pub mod kernel_benches {
             .flops(2 * (m as u64) * (n as u64) * (k as u64))
     }
 
-    #[bench(name = "mlx/fp_quantized/fp4_qmm_mma", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp4_qmm_mma(dt: DType) -> BenchSetup {
         fpb(mt_fp4_qmm_mma::kernel_ir_for(dt), 32, 4096, 4096, 4, dt)
     }
-    #[bench(name = "mlx/fp_quantized/fp8_e4m3_qmm_mma", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8_e4m3_qmm_mma(dt: DType) -> BenchSetup {
         fpb(mt_fp8_e4m3_qmm_mma::kernel_ir_for(dt), 32, 4096, 4096, 8, dt)
     }

@@ -455,7 +455,7 @@ pub mod kernel_benches {
 
     use super::ffai_gated_rms_norm_qgemv_int4_fast;
 
-    #[bench(name = "ffai/gated_rms_norm_qgemv_int4_fast", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gated_rms_norm_qgemv_int4_fast(dt: DType) -> BenchSetup {
         let (hv, dv, out_dim, group_size) = (16usize, 128usize, 2048usize, 64usize);
         let in_dim = hv * dv;

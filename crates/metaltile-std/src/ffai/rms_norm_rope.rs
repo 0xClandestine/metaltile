@@ -136,7 +136,7 @@ pub mod kernel_benches {
 
     fn f32_bytes(v: &[f32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
 
-    #[bench(name = "ffai/rms_norm_rope/rms_norm_rope", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_rms_norm_rope(dt: DType) -> BenchSetup {
         let (axis, n_heads, seq_len) = (128usize, 32usize, 128usize);
         let rows = n_heads * seq_len;

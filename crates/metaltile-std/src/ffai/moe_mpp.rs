@@ -272,7 +272,7 @@ pub mod kernel_benches {
     use super::mt_moe_gather_qmm_mma_int4_bm16_mpp;
     use crate::ffai::moe_mpp_shared::{MmaBenchShape, int4_mma_bench};
 
-    #[bench(name = "ffai/moe_mpp/gather_qmm_mma_int4_bm16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_moe_gather_qmm_mma_int4_bm16_mpp(dt: DType) -> BenchSetup {
         int4_mma_bench(
             mt_moe_gather_qmm_mma_int4_bm16_mpp::kernel_ir_for(dt),

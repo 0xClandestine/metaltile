@@ -88,7 +88,7 @@ pub mod kernel_benches {
 
     use super::mt_gather_axis;
 
-    #[bench(name = "mlx/indexing/gather_axis", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gather_axis(dt: DType) -> BenchSetup {
         let (outer, axis_out, axis_size, inner) = (4096usize, 64, 64, 64);
         let out_len = outer * axis_out * inner;

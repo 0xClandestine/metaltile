@@ -232,7 +232,7 @@ pub fn kernel_ir_for(m: u32, dt: DType) -> Kernel {
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    #[bench(name = "mlx/hadamard_m/m12", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_hadamard_m12(dt: DType) -> BenchSetup {
         let (rows, m) = (16384usize, 12usize);
         BenchSetup::new(super::mt_hadamard_m12::kernel_ir_for(dt))
@@ -244,7 +244,7 @@ pub mod kernel_benches {
             .bytes_moved((2 * rows * m * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "mlx/hadamard_m/m20", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_hadamard_m20(dt: DType) -> BenchSetup {
         let (rows, m) = (16384usize, 20usize);
         BenchSetup::new(super::mt_hadamard_m20::kernel_ir_for(dt))
@@ -256,7 +256,7 @@ pub mod kernel_benches {
             .bytes_moved((2 * rows * m * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "mlx/hadamard_m/m28", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_hadamard_m28(dt: DType) -> BenchSetup {
         let (rows, m) = (16384usize, 28usize);
         BenchSetup::new(super::mt_hadamard_m28::kernel_ir_for(dt))

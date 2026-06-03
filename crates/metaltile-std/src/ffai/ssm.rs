@@ -576,7 +576,7 @@ pub mod kernel_benches {
     use super::{conv1d_causal_step, mt_ssm_step, ssm_step, ssm_step_a2d};
 
     // Mamba 2 short-conv at a realistic channel count, K=4. One thread/channel.
-    #[bench(name = "ffai/conv1d_causal_step", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_conv1d_causal_step(dt: DType) -> BenchSetup {
         let (n_channels, kernel_size) = (1536usize, 4usize);
         BenchSetup::new(conv1d_causal_step::kernel_ir_for(dt))
@@ -593,7 +593,7 @@ pub mod kernel_benches {
     }
 
     // Scalar-A selective-scan decode. One thread per (head, d).
-    #[bench(name = "ffai/ssm_step", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_ssm_step(dt: DType) -> BenchSetup {
         let (n_heads, head_dim, state_dim) = (32usize, 64usize, 16usize);
         BenchSetup::new(ssm_step::kernel_ir_for(dt))
@@ -612,7 +612,7 @@ pub mod kernel_benches {
     }
 
     // Mamba 1 (Jamba) 2-D A_log variant. `a_log` is [n_heads*head_dim, state_dim].
-    #[bench(name = "ffai/ssm_step_a2d", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_ssm_step_a2d(dt: DType) -> BenchSetup {
         let (n_heads, head_dim, state_dim) = (32usize, 64usize, 16usize);
         let channels = n_heads * head_dim;
@@ -633,7 +633,7 @@ pub mod kernel_benches {
 
     // MLX-aligned reduction form: one simdgroup per (d_idx, n) reduces the
     // state axis via simd_sum. Grid `[dh, n_heads*batch, 1]`, TG `[32,1,1]`.
-    #[bench(name = "ffai/mt_ssm_step", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mt_ssm_step(dt: DType) -> BenchSetup {
         let (n_heads, heads_per_group, batch, dh, ds) = (8usize, 2usize, 2usize, 64usize, 32usize);
         let n_total = n_heads * batch;

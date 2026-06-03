@@ -6054,7 +6054,7 @@ pub mod kernel_benches {
             .bytes_moved((n_elem * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "mlx/affine/dequantize_int{BITS}", dtypes = [f32, f16, bf16],
+    #[bench(dtypes = [f32, f16, bf16],
             variants(BITS = [2, 4, 8], suffix = "int{BITS}"))]
     fn bench_dequant_pow2(dt: DType) -> BenchSetup {
         db(mt_affine_dequantize_intBITS::kernel_ir_for(dt), BITS, 64, 65536, dt)
@@ -6090,15 +6090,15 @@ pub mod kernel_benches {
             .bytes_moved((n_elem * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "mlx/affine/dequantize_int3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_dequant_int3(dt: DType) -> BenchSetup {
         db_odd(mt_affine_dequantize_int3::kernel_ir_for(dt), 8, 3, 32, 65536, dt)
     }
-    #[bench(name = "mlx/affine/dequantize_int5", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_dequant_int5(dt: DType) -> BenchSetup {
         db_odd(mt_affine_dequantize_int5::kernel_ir_for(dt), 8, 5, 32, 65536, dt)
     }
-    #[bench(name = "mlx/affine/dequantize_int6", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_dequant_int6(dt: DType) -> BenchSetup {
         db_odd(mt_affine_dequantize_int6::kernel_ir_for(dt), 4, 3, 32, 65536, dt)
     }
@@ -6120,13 +6120,13 @@ pub mod kernel_benches {
             .bytes_moved((n_elem * dt.size_bytes() + out_words * 4) as u64)
     }
 
-    #[bench(name = "mlx/affine/quantize_int{BITS}", dtypes = [f32, f16, bf16],
+    #[bench(dtypes = [f32, f16, bf16],
             variants(BITS = [2, 4, 8], suffix = "int{BITS}"))]
     fn bench_quant_pow2(dt: DType) -> BenchSetup {
         qb(mt_affine_quantize_intBITS::kernel_ir_for(dt), BITS, 64, 65536, dt)
     }
 
-    #[bench(name = "mlx/affine/quantize_int{BITS}", dtypes = [f32, f16, bf16],
+    #[bench(dtypes = [f32, f16, bf16],
             variants(BITS = [3, 5, 6], suffix = "int{BITS}"))]
     fn bench_quant_odd(dt: DType) -> BenchSetup {
         qb(mt_affine_quantize_intBITS::kernel_ir_for(dt), BITS, 32, 65536, dt)
@@ -6362,7 +6362,7 @@ pub mod kernel_benches {
     const QMV_TOL: f32 = 1e-3;
     const QMM_TOL: f32 = 1e-2;
 
-    #[bench(name = "mlx/quantized/qmv", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmv(dt: DType) -> BenchSetup {
         qmb_ref(
             mt_qmv::kernel_ir_for(dt),
@@ -6378,7 +6378,7 @@ pub mod kernel_benches {
             Some((QuantRef::QmvFast, QMV_TOL)),
         )
     }
-    #[bench(name = "mlx/quantized/qmv_int8_fast", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmv_int8_fast(dt: DType) -> BenchSetup {
         qmb_ref(
             mt_qmv_int8_fast::kernel_ir_for(dt),
@@ -6394,7 +6394,7 @@ pub mod kernel_benches {
             Some((QuantRef::QmvFast, QMV_TOL)),
         )
     }
-    #[bench(name = "mlx/quantized/qmm", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm(dt: DType) -> BenchSetup {
         qmb_ref(
             mt_qmm::kernel_ir_for(dt),
@@ -6410,7 +6410,7 @@ pub mod kernel_benches {
             Some((QuantRef::QmmT, QMM_TOL)),
         )
     }
-    #[bench(name = "mlx/quantized/qmm_bm2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm_bm2(dt: DType) -> BenchSetup {
         qmb_ref(
             mt_qmm_bm2::kernel_ir_for(dt),
@@ -6426,7 +6426,7 @@ pub mod kernel_benches {
             Some((QuantRef::QmmT, QMM_TOL)),
         )
     }
-    #[bench(name = "mlx/quantized/qmm_bm4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm_bm4(dt: DType) -> BenchSetup {
         qmb_ref(
             mt_qmm_bm4::kernel_ir_for(dt),
@@ -6442,7 +6442,7 @@ pub mod kernel_benches {
             Some((QuantRef::QmmT, QMM_TOL)),
         )
     }
-    #[bench(name = "mlx/quantized/qmm_int8_fast", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm_int8_fast(dt: DType) -> BenchSetup {
         qmb_ref(
             mt_qmm_int8_fast::kernel_ir_for(dt),
@@ -6458,7 +6458,7 @@ pub mod kernel_benches {
             Some((QuantRef::QmmT, QMM_TOL)),
         )
     }
-    #[bench(name = "mlx/quantized/qmm_bm2_int8_fast", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm_bm2_int8_fast(dt: DType) -> BenchSetup {
         qmb_ref(
             mt_qmm_bm2_int8_fast::kernel_ir_for(dt),
@@ -6474,7 +6474,7 @@ pub mod kernel_benches {
             Some((QuantRef::QmmT, QMM_TOL)),
         )
     }
-    #[bench(name = "mlx/quantized/qmm_bm4_int8_fast", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm_bm4_int8_fast(dt: DType) -> BenchSetup {
         qmb_ref(
             mt_qmm_bm4_int8_fast::kernel_ir_for(dt),
@@ -6490,7 +6490,7 @@ pub mod kernel_benches {
             Some((QuantRef::QmmT, QMM_TOL)),
         )
     }
-    #[bench(name = "mlx/quantized/qmm_mma", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm_mma(dt: DType) -> BenchSetup {
         qmb_ref(
             mt_qmm_mma::kernel_ir_for(dt),
@@ -6506,7 +6506,7 @@ pub mod kernel_benches {
             Some((QuantRef::QmmT, QMM_TOL)),
         )
     }
-    #[bench(name = "mlx/quantized/qmm_mma_m16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm_mma_m16(dt: DType) -> BenchSetup {
         qmb_ref(
             mt_qmm_mma_m16::kernel_ir_for(dt),
@@ -6522,7 +6522,7 @@ pub mod kernel_benches {
             Some((QuantRef::QmmT, QMM_TOL)),
         )
     }
-    #[bench(name = "mlx/quantized/qmm_mma_int8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm_mma_int8(dt: DType) -> BenchSetup {
         qmb_ref(
             mt_qmm_mma_int8::kernel_ir_for(dt),
@@ -6538,7 +6538,7 @@ pub mod kernel_benches {
             Some((QuantRef::QmmT, QMM_TOL)),
         )
     }
-    #[bench(name = "mlx/quantized/qmm_mma_m16_int8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm_mma_m16_int8(dt: DType) -> BenchSetup {
         qmb_ref(
             mt_qmm_mma_m16_int8::kernel_ir_for(dt),
@@ -6554,7 +6554,7 @@ pub mod kernel_benches {
             Some((QuantRef::QmmT, QMM_TOL)),
         )
     }
-    #[bench(name = "mlx/quantized/qmm_mma_int2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm_mma_int2(dt: DType) -> BenchSetup {
         qmb_ref(
             mt_qmm_mma_int2::kernel_ir_for(dt),
@@ -6572,7 +6572,7 @@ pub mod kernel_benches {
     }
 
     // qvm: transposed weight [K, N], 8 output columns per TG.
-    #[bench(name = "mlx/quantized/qvm_int4_fast", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qvm_int4_fast(dt: DType) -> BenchSetup {
         let (n, k, group_size) = (4096usize, 4096usize, 64usize);
         let gs_per_col = k / group_size;
@@ -6641,68 +6641,68 @@ pub mod kernel_benches {
     }
 
     // qmv (matvec, M=1): grid [N, 1, 1].
-    #[bench(name = "mlx/quantized/qmv_b3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmv_b3(dt: DType) -> BenchSetup {
         qmb_gs(mt_qmv_odd_b3::kernel_ir_for(dt), 1, 4096, 4096, 3, 64, [4096, 1, 1], dt)
     }
-    #[bench(name = "mlx/quantized/qmv_b4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmv_b4(dt: DType) -> BenchSetup {
         qmb_gs(mt_qmv_b4::kernel_ir_for(dt), 1, 4096, 4096, 4, 64, [4096, 1, 1], dt)
     }
-    #[bench(name = "mlx/quantized/qmv_b5", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmv_b5(dt: DType) -> BenchSetup {
         qmb_gs(mt_qmv_odd_b5::kernel_ir_for(dt), 1, 4096, 4096, 5, 64, [4096, 1, 1], dt)
     }
-    #[bench(name = "mlx/quantized/qmv_b6", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmv_b6(dt: DType) -> BenchSetup {
         qmb_gs(mt_qmv_odd_b6::kernel_ir_for(dt), 1, 4096, 4096, 6, 64, [4096, 1, 1], dt)
     }
-    #[bench(name = "mlx/quantized/qmv_b8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmv_b8(dt: DType) -> BenchSetup {
         qmb_gs(mt_qmv_b8::kernel_ir_for(dt), 1, 4096, 4096, 8, 64, [4096, 1, 1], dt)
     }
 
     // qvm (vecmat, M=1): W is [K, N]; grid [N, 1, 1]. Same buffer totals as
     // qmv (n·k codes, n·gspr scales) — only the kernel's index math differs.
-    #[bench(name = "mlx/quantized/qvm_b3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qvm_b3(dt: DType) -> BenchSetup {
         qmb_gs(mt_qvm_odd_b3::kernel_ir_for(dt), 1, 4096, 4096, 3, 64, [4096, 1, 1], dt)
     }
-    #[bench(name = "mlx/quantized/qvm_b4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qvm_b4(dt: DType) -> BenchSetup {
         qmb_gs(mt_qvm_b4::kernel_ir_for(dt), 1, 4096, 4096, 4, 64, [4096, 1, 1], dt)
     }
-    #[bench(name = "mlx/quantized/qvm_b5", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qvm_b5(dt: DType) -> BenchSetup {
         qmb_gs(mt_qvm_odd_b5::kernel_ir_for(dt), 1, 4096, 4096, 5, 64, [4096, 1, 1], dt)
     }
-    #[bench(name = "mlx/quantized/qvm_b6", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qvm_b6(dt: DType) -> BenchSetup {
         qmb_gs(mt_qvm_odd_b6::kernel_ir_for(dt), 1, 4096, 4096, 6, 64, [4096, 1, 1], dt)
     }
-    #[bench(name = "mlx/quantized/qvm_b8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qvm_b8(dt: DType) -> BenchSetup {
         qmb_gs(mt_qvm_b8::kernel_ir_for(dt), 1, 4096, 4096, 8, 64, [4096, 1, 1], dt)
     }
 
     // qmm (batched matvec, M=4): grid [N, M, 1].
-    #[bench(name = "mlx/quantized/qmm_b3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm_b3(dt: DType) -> BenchSetup {
         qmb_gs(mt_qmm_odd_b3::kernel_ir_for(dt), 4, 4096, 4096, 3, 64, [4096, 4, 1], dt)
     }
-    #[bench(name = "mlx/quantized/qmm_b4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm_b4(dt: DType) -> BenchSetup {
         qmb_gs(mt_qmm_b4::kernel_ir_for(dt), 4, 4096, 4096, 4, 64, [4096, 4, 1], dt)
     }
-    #[bench(name = "mlx/quantized/qmm_b5", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm_b5(dt: DType) -> BenchSetup {
         qmb_gs(mt_qmm_odd_b5::kernel_ir_for(dt), 4, 4096, 4096, 5, 64, [4096, 4, 1], dt)
     }
-    #[bench(name = "mlx/quantized/qmm_b6", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm_b6(dt: DType) -> BenchSetup {
         qmb_gs(mt_qmm_odd_b6::kernel_ir_for(dt), 4, 4096, 4096, 6, 64, [4096, 4, 1], dt)
     }
-    #[bench(name = "mlx/quantized/qmm_b8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm_b8(dt: DType) -> BenchSetup {
         qmb_gs(mt_qmm_b8::kernel_ir_for(dt), 4, 4096, 4096, 8, 64, [4096, 4, 1], dt)
     }
@@ -6745,15 +6745,15 @@ pub mod kernel_benches {
             .flops(2 * (m as u64) * (n as u64) * (k as u64))
     }
 
-    #[bench(name = "mlx/quantized/qmm_mma_b3", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm_mma_b3(dt: DType) -> BenchSetup {
         qmm_mma_b(mt_qmm_mma_b3::kernel_ir_for(dt), 4096, 4096, 3, 64, dt)
     }
-    #[bench(name = "mlx/quantized/qmm_mma_b5", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm_mma_b5(dt: DType) -> BenchSetup {
         qmm_mma_b(mt_qmm_mma_b5::kernel_ir_for(dt), 4096, 4096, 5, 64, dt)
     }
-    #[bench(name = "mlx/quantized/qmm_mma_b6", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm_mma_b6(dt: DType) -> BenchSetup {
         qmm_mma_b(mt_qmm_mma_b6::kernel_ir_for(dt), 4096, 4096, 6, 64, dt)
     }

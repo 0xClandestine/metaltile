@@ -206,7 +206,7 @@ pub mod kernel_benches {
 
     use super::patch_embed;
 
-    #[bench(name = "ffai/patch_embed/patch_embed", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_patch_embed(dt: DType) -> BenchSetup {
         // SigLIP-L: 14×14 patch, 3 channels, 224×224 → 16×16=256 patches,
         // hidden 1024.

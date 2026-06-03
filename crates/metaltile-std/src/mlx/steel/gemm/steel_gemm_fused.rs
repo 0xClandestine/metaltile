@@ -199,31 +199,31 @@ pub mod kernel_benches {
             .flops(2 * (M as u64) * (N as u64) * (K as u64)) // 2 * M * N * K
     }
 
-    #[bench(name = "mlx/steel_gemm_fused/bm64_bn64_bk16_wm2_wn2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fused_64x64x16_2x2(dt: DType) -> BenchSetup {
         fb(mt_steel_gemm_64x64x16_2x2::kernel_ir_for(dt), 64, 64, 128, dt)
     }
-    #[bench(name = "mlx/steel_gemm_fused/bm32_bn32_bk16_wm2_wn2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fused_32x32x16_2x2(dt: DType) -> BenchSetup {
         fb(mt_steel_gemm_32x32x16_2x2::kernel_ir_for(dt), 32, 32, 128, dt)
     }
-    #[bench(name = "mlx/steel_gemm_fused/bm64_bn64_bk16_wm1_wn2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fused_64x64x16_1x2(dt: DType) -> BenchSetup {
         fb(mt_steel_gemm_64x64x16_1x2::kernel_ir_for(dt), 64, 64, 64, dt)
     }
-    #[bench(name = "mlx/steel_gemm_fused/bm32_bn64_bk16_wm1_wn2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fused_32x64x16_1x2(dt: DType) -> BenchSetup {
         fb(mt_steel_gemm_32x64x16_1x2::kernel_ir_for(dt), 32, 64, 64, dt)
     }
-    #[bench(name = "mlx/steel_gemm_fused/bm64_bn64_bk16_wm4_wn2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fused_64x64x16_4x2(dt: DType) -> BenchSetup {
         fb(mt_steel_gemm_64x64x16_4x2::kernel_ir_for(dt), 64, 64, 256, dt)
     }
-    #[bench(name = "mlx/steel_gemm_fused/bm64_bn32_bk16_wm1_wn2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fused_64x32x16_1x2(dt: DType) -> BenchSetup {
         fb(mt_steel_gemm_64x32x16_1x2::kernel_ir_for(dt), 64, 32, 64, dt)
     }
-    #[bench(name = "mlx/steel_gemm_fused/bm32_bn32_bk16_wm1_wn2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fused_32x32x16_1x2(dt: DType) -> BenchSetup {
         fb(mt_steel_gemm_32x32x16_1x2::kernel_ir_for(dt), 32, 32, 64, dt)
     }

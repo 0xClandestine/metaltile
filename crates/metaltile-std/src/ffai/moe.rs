@@ -4095,23 +4095,23 @@ pub mod kernel_benches {
             .flops(2 * t_rows as u64 * m_out as u64 * k_in as u64)
     }
 
-    #[bench(name = "ffai/moe/gather_qmm_int4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_moe_gather_qmm_int4(dt: DType) -> BenchSetup {
         csr_bench(mt_moe_gather_qmm_int4::kernel_ir_for(dt), 4, 1, 64, 2048, 256, 128, 64, dt)
     }
-    #[bench(name = "ffai/moe/gather_qmm_int4_m8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_moe_gather_qmm_int4_m8(dt: DType) -> BenchSetup {
         csr_bench(mt_moe_gather_qmm_int4_m8::kernel_ir_for(dt), 4, 8, 64, 2048, 256, 128, 64, dt)
     }
-    #[bench(name = "ffai/moe/gather_qmm_int4_m16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_moe_gather_qmm_int4_m16(dt: DType) -> BenchSetup {
         csr_bench(mt_moe_gather_qmm_int4_m16::kernel_ir_for(dt), 4, 16, 64, 2048, 256, 128, 64, dt)
     }
-    #[bench(name = "ffai/moe/gather_qmm_int4_m32", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_moe_gather_qmm_int4_m32(dt: DType) -> BenchSetup {
         csr_bench(mt_moe_gather_qmm_int4_m32::kernel_ir_for(dt), 4, 32, 64, 2048, 256, 128, 64, dt)
     }
-    #[bench(name = "ffai/moe/gather_qmm_b{BITS}", dtypes = [f32, f16, bf16],
+    #[bench(dtypes = [f32, f16, bf16],
             variants(BITS = [3, 5, 6, 8], suffix = "b{BITS}"))]
     fn bench_moe_gather_qmm(dt: DType) -> BenchSetup {
         csr_bench(mt_moe_gather_qmm_bBITS::kernel_ir_for(dt), BITS, 1, 64, 2048, 256, 128, 64, dt)
@@ -4165,7 +4165,7 @@ pub mod kernel_benches {
     }
 
     // BM=32 4-SG variants (int4 / b{3,5,6,8} / int8): grid [N/32, ceil(M/32), 1], tpg 128.
-    #[bench(name = "ffai/moe/gather_qmm_mma_int4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_moe_gather_qmm_mma_int4(dt: DType) -> BenchSetup {
         mma_bench(
             mt_moe_gather_qmm_mma_int4::kernel_ir_for(dt),
@@ -4181,7 +4181,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/moe/gather_qmm_mma_b{BITS}", dtypes = [f32, f16, bf16],
+    #[bench(dtypes = [f32, f16, bf16],
             variants(BITS = [3, 5, 6, 8], suffix = "b{BITS}"))]
     fn bench_moe_gather_qmm_mma(dt: DType) -> BenchSetup {
         mma_bench(
@@ -4198,7 +4198,7 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/moe/gather_qmm_mma_int8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_moe_gather_qmm_mma_int8(dt: DType) -> BenchSetup {
         mma_bench(
             mt_moe_gather_qmm_mma_int8::kernel_ir_for(dt),
@@ -4215,7 +4215,7 @@ pub mod kernel_benches {
         )
     }
     // BM=16 2-SG variant: grid [N/32, ceil(M/16), 1], tpg 64.
-    #[bench(name = "ffai/moe/gather_qmm_mma_int4_bm16", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_moe_gather_qmm_mma_int4_bm16(dt: DType) -> BenchSetup {
         mma_bench(
             mt_moe_gather_qmm_mma_int4_bm16::kernel_ir_for(dt),
@@ -4235,7 +4235,7 @@ pub mod kernel_benches {
     // ── router_topk — data-dependent argmax, bench-only ───────────────────
     // ABI: router_logits, indices_out, weights_out + {n_experts, k,
     // norm_topk_prob}. Grid [B*T, 1, 1], tpg [32,1,1] (pinned in the doc).
-    #[bench(name = "ffai/moe/router_topk", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_moe_router_topk(dt: DType) -> BenchSetup {
         let n_rows = 4096usize; // B*T
         let n_experts = 128usize;
@@ -4261,7 +4261,7 @@ pub mod kernel_benches {
     // ── permute — pure gather, bench-only ─────────────────────────────────
     // ABI: tokens, sort_token_idx, permuted + {hidden}. Grid [k*B*T, 1, 1],
     // tpg [128,1,1].
-    #[bench(name = "ffai/moe/permute", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_moe_permute(dt: DType) -> BenchSetup {
         let bt = 512usize;
         let k = 8usize;
@@ -4287,7 +4287,7 @@ pub mod kernel_benches {
     // ── unpermute — weighted scatter-combine, bench-only ──────────────────
     // ABI: expert_outputs, inv_perm, top_k_weights, out + {hidden, k}.
     // Grid [B*T, 1, 1], tpg [128,1,1].
-    #[bench(name = "ffai/moe/unpermute", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_moe_unpermute(dt: DType) -> BenchSetup {
         let bt = 512usize;
         let k = 8usize;

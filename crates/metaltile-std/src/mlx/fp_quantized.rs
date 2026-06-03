@@ -302,7 +302,7 @@ pub mod kernel_benches {
     // two would pick different per-group scales near a 16-boundary and disagree by
     // up to a codebook step; the `Signed` pattern's uniform amax avoids that, so
     // the legacy tol=0.5 dequant-band floor holds for the A/B.
-    #[bench(name = "mlx/fp_quantized/fp4", dtypes = [f32])]
+    #[bench(dtypes = [f32])]
     fn bench_fp4(_dt: DType) -> BenchSetup {
         let n = QUANT_N;
         BenchSetup::new(mt_fp4_quant_dequant::kernel_ir_for())
@@ -325,8 +325,8 @@ pub mod kernel_benches {
                 .tol(0.5),
             )
     }
-    #[bench(name = "mlx/fp_quantized/fp8_e4m3", dtypes = [f32])]
+    #[bench(dtypes = [f32])]
     fn bench_fp8_e4m3(_dt: DType) -> BenchSetup { qb(mt_fp8_e4m3_quant_dequant::kernel_ir_for()) }
-    #[bench(name = "mlx/fp_quantized/fp8_e5m2", dtypes = [f32])]
+    #[bench(dtypes = [f32])]
     fn bench_fp8_e5m2(_dt: DType) -> BenchSetup { qb(mt_fp8_e5m2_quant_dequant::kernel_ir_for()) }
 }

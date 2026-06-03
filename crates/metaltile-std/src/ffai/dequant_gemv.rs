@@ -511,14 +511,14 @@ pub mod kernel_benches {
             .flops(2 * out_dim as u64 * in_dim as u64)
     }
 
-    #[bench(name = "ffai/dequant_gemv/int{BITS}", dtypes = [f32, f16, bf16],
+    #[bench(dtypes = [f32, f16, bf16],
             variants(BITS = [2, 3, 4, 5, 6, 8], suffix = "int{BITS}"))]
     fn bench_dequant_gemv(dt: DType) -> BenchSetup {
         gb(dequant_gemv_intBITS::kernel_ir_for(dt), BITS, 4096, 4096, 64, 4096, 64, dt)
     }
 
     // 8-rows-per-TG fast int4: grid [out_dim/8, 1, 1], TPG 64.
-    #[bench(name = "ffai/dequant_gemv/int4_fast", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_dequant_gemv_int4_fast(dt: DType) -> BenchSetup {
         gb(dequant_gemv_int4_fast::kernel_ir_for(dt), 4, 4096, 4096, 64, 4096 / 8, 64, dt)
     }

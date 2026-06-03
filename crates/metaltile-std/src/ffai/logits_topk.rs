@@ -89,7 +89,7 @@ pub mod kernel_benches {
 
     use super::logits_topk_mask;
 
-    #[bench(name = "ffai/logits_processors/topk_mask", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_logits_topk_mask(dt: DType) -> BenchSetup {
         let n = 152_064usize;
         BenchSetup::new(logits_topk_mask::kernel_ir_for(dt))

@@ -379,8 +379,8 @@ pub mod kernel_benches {
     }
 
     macro_rules! ubench {
-        ($name:ident, $full:literal, $kernel:ident) => {
-            #[bench(name = $full, dtypes = [f32, f16, bf16])]
+        ($name:ident, $kernel:ident) => {
+            #[bench(dtypes = [f32, f16, bf16])]
             fn $name(dt: DType) -> BenchSetup { ub($kernel::kernel_ir_for(dt), dt) }
         };
     }
@@ -388,11 +388,11 @@ pub mod kernel_benches {
     /// `#[bench]` registration with an MLX reference comparison. The optional 6th
     /// argument is a tolerance floor for ops that diverge by more than 1 ULP.
     macro_rules! ubench_ref {
-        ($name:ident, $full:literal, $kernel:ident, $mlxop:literal, $domain:expr) => {
-            ubench_ref!($name, $full, $kernel, $mlxop, $domain, 0.0);
+        ($name:ident, $kernel:ident, $mlxop:literal, $domain:expr) => {
+            ubench_ref!($name, $kernel, $mlxop, $domain, 0.0);
         };
-        ($name:ident, $full:literal, $kernel:ident, $mlxop:literal, $domain:expr, $floor:expr) => {
-            #[bench(name = $full, dtypes = [f32, f16, bf16])]
+        ($name:ident, $kernel:ident, $mlxop:literal, $domain:expr, $floor:expr) => {
+            #[bench(dtypes = [f32, f16, bf16])]
             fn $name(dt: DType) -> BenchSetup {
                 ub_ref($kernel::kernel_ir_for(dt), dt, $mlxop, $domain, $floor)
             }
@@ -400,45 +400,45 @@ pub mod kernel_benches {
     }
     // MT-specific / no MLX unary counterpart (exp2, recip, relu, trunc, silu,
     // gelu, softplus) bench MetalTile-only; the rest carry an MLX A/B reference.
-    ubench_ref!(bench_exp, "mlx/unary/exp", mt_exp, "Exp", InputDomain::Signed);
-    ubench!(bench_exp2, "mlx/unary/exp2", mt_exp2);
+    ubench_ref!(bench_exp, mt_exp, "Exp", InputDomain::Signed);
+    ubench!(bench_exp2, mt_exp2);
     // expm1: MT `exp(x)-1` cancels catastrophically near 0 vs MLX's accurate
     // expm1; legacy used tol=5e-3.
-    ubench_ref!(bench_expm1, "mlx/unary/expm1", mt_expm1, "Expm1", InputDomain::Signed, 5e-3);
-    ubench_ref!(bench_log, "mlx/unary/log", mt_log, "Log", InputDomain::Positive);
-    ubench_ref!(bench_log2, "mlx/unary/log2", mt_log2, "Log2", InputDomain::Positive);
-    ubench_ref!(bench_log10, "mlx/unary/log10", mt_log10, "Log10", InputDomain::Positive);
-    ubench_ref!(bench_log1p, "mlx/unary/log1p", mt_log1p, "Log1p", InputDomain::Positive);
-    ubench_ref!(bench_sqrt, "mlx/unary/sqrt", mt_sqrt, "Sqrt", InputDomain::Positive);
-    ubench_ref!(bench_rsqrt, "mlx/unary/rsqrt", mt_rsqrt, "Rsqrt", InputDomain::Positive);
-    ubench!(bench_recip, "mlx/unary/recip", mt_recip);
-    ubench_ref!(bench_square, "mlx/unary/square", mt_square, "Square", InputDomain::Signed);
-    ubench_ref!(bench_abs, "mlx/unary/abs", mt_abs, "Abs", InputDomain::Signed);
-    ubench_ref!(bench_neg, "mlx/unary/neg", mt_neg, "Negative", InputDomain::Signed);
-    ubench_ref!(bench_sign, "mlx/unary/sign", mt_sign, "Sign", InputDomain::Signed);
-    ubench!(bench_relu, "mlx/unary/relu", mt_relu);
-    ubench_ref!(bench_ceil, "mlx/unary/ceil", mt_ceil, "Ceil", InputDomain::Signed);
-    ubench_ref!(bench_floor, "mlx/unary/floor", mt_floor, "Floor", InputDomain::Signed);
-    ubench_ref!(bench_round, "mlx/unary/round", mt_round, "Round", InputDomain::Signed);
-    ubench!(bench_trunc, "mlx/unary/trunc", mt_trunc);
-    ubench_ref!(bench_sin, "mlx/unary/sin", mt_sin, "Sin", InputDomain::Signed);
-    ubench_ref!(bench_cos, "mlx/unary/cos", mt_cos, "Cos", InputDomain::Signed);
-    ubench_ref!(bench_tan, "mlx/unary/tan", mt_tan, "Tan", InputDomain::Signed);
-    ubench_ref!(bench_asin, "mlx/unary/asin", mt_asin, "ArcSin", InputDomain::Unit);
-    ubench_ref!(bench_acos, "mlx/unary/acos", mt_acos, "ArcCos", InputDomain::Unit);
-    ubench_ref!(bench_atan, "mlx/unary/atan", mt_atan, "ArcTan", InputDomain::Signed);
-    ubench_ref!(bench_sinh, "mlx/unary/sinh", mt_sinh, "Sinh", InputDomain::Signed);
-    ubench_ref!(bench_cosh, "mlx/unary/cosh", mt_cosh, "Cosh", InputDomain::Signed);
-    ubench_ref!(bench_tanh, "mlx/unary/tanh", mt_tanh_op, "Tanh", InputDomain::Signed);
-    ubench_ref!(bench_asinh, "mlx/unary/asinh", mt_asinh, "ArcSinh", InputDomain::Signed);
-    ubench_ref!(bench_acosh, "mlx/unary/acosh", mt_acosh, "ArcCosh", InputDomain::Positive);
-    ubench_ref!(bench_atanh, "mlx/unary/atanh", mt_atanh, "ArcTanh", InputDomain::Unit);
-    ubench!(bench_silu, "mlx/unary/silu", mt_silu);
-    ubench!(bench_gelu, "mlx/unary/gelu", mt_gelu);
-    ubench_ref!(bench_sigmoid, "mlx/unary/sigmoid", mt_sigmoid, "Sigmoid", InputDomain::Signed);
-    ubench!(bench_softplus, "mlx/unary/softplus", mt_softplus);
-    ubench_ref!(bench_erf, "mlx/unary/erf", mt_erf, "Erf", InputDomain::Signed);
-    ubench_ref!(bench_erfinv, "mlx/unary/erfinv", mt_erfinv, "ErfInv", InputDomain::Unit);
+    ubench_ref!(bench_expm1, mt_expm1, "Expm1", InputDomain::Signed, 5e-3);
+    ubench_ref!(bench_log, mt_log, "Log", InputDomain::Positive);
+    ubench_ref!(bench_log2, mt_log2, "Log2", InputDomain::Positive);
+    ubench_ref!(bench_log10, mt_log10, "Log10", InputDomain::Positive);
+    ubench_ref!(bench_log1p, mt_log1p, "Log1p", InputDomain::Positive);
+    ubench_ref!(bench_sqrt, mt_sqrt, "Sqrt", InputDomain::Positive);
+    ubench_ref!(bench_rsqrt, mt_rsqrt, "Rsqrt", InputDomain::Positive);
+    ubench!(bench_recip, mt_recip);
+    ubench_ref!(bench_square, mt_square, "Square", InputDomain::Signed);
+    ubench_ref!(bench_abs, mt_abs, "Abs", InputDomain::Signed);
+    ubench_ref!(bench_neg, mt_neg, "Negative", InputDomain::Signed);
+    ubench_ref!(bench_sign, mt_sign, "Sign", InputDomain::Signed);
+    ubench!(bench_relu, mt_relu);
+    ubench_ref!(bench_ceil, mt_ceil, "Ceil", InputDomain::Signed);
+    ubench_ref!(bench_floor, mt_floor, "Floor", InputDomain::Signed);
+    ubench_ref!(bench_round, mt_round, "Round", InputDomain::Signed);
+    ubench!(bench_trunc, mt_trunc);
+    ubench_ref!(bench_sin, mt_sin, "Sin", InputDomain::Signed);
+    ubench_ref!(bench_cos, mt_cos, "Cos", InputDomain::Signed);
+    ubench_ref!(bench_tan, mt_tan, "Tan", InputDomain::Signed);
+    ubench_ref!(bench_asin, mt_asin, "ArcSin", InputDomain::Unit);
+    ubench_ref!(bench_acos, mt_acos, "ArcCos", InputDomain::Unit);
+    ubench_ref!(bench_atan, mt_atan, "ArcTan", InputDomain::Signed);
+    ubench_ref!(bench_sinh, mt_sinh, "Sinh", InputDomain::Signed);
+    ubench_ref!(bench_cosh, mt_cosh, "Cosh", InputDomain::Signed);
+    ubench_ref!(bench_tanh, mt_tanh_op, "Tanh", InputDomain::Signed);
+    ubench_ref!(bench_asinh, mt_asinh, "ArcSinh", InputDomain::Signed);
+    ubench_ref!(bench_acosh, mt_acosh, "ArcCosh", InputDomain::Positive);
+    ubench_ref!(bench_atanh, mt_atanh, "ArcTanh", InputDomain::Unit);
+    ubench!(bench_silu, mt_silu);
+    ubench!(bench_gelu, mt_gelu);
+    ubench_ref!(bench_sigmoid, mt_sigmoid, "Sigmoid", InputDomain::Signed);
+    ubench!(bench_softplus, mt_softplus);
+    ubench_ref!(bench_erf, mt_erf, "Erf", InputDomain::Signed);
+    ubench_ref!(bench_erfinv, mt_erfinv, "ErfInv", InputDomain::Unit);
 
     // ── Fused / cast variants ─────────────────────────────────────────────
     // These have signatures the `ub` helper can't cover (f32 output, scalar
@@ -455,15 +455,15 @@ pub mod kernel_benches {
             .bytes_moved((n * (dt.size_bytes() + DType::F32.size_bytes())) as u64)
     }
 
-    #[bench(name = "mlx/unary/cast_to_f32", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_cast_to_f32(dt: DType) -> BenchSetup { cast_b(mt_cast_to_f32::kernel_ir_for(dt), dt) }
-    #[bench(name = "mlx/unary/silu_cast_to_f32", dtypes = [f16, bf16])]
+    #[bench(dtypes = [f16, bf16])]
     fn bench_silu_cast_to_f32(dt: DType) -> BenchSetup {
         cast_b(mt_silu_cast_to_f32::kernel_ir_for(dt), dt)
     }
 
     // sigmoid_mul: out[i] = a[i] * sigmoid(b[i]). Two full-length inputs.
-    #[bench(name = "mlx/unary/sigmoid_mul", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sigmoid_mul(dt: DType) -> BenchSetup {
         let n = 64 * 1024 * 1024usize;
         BenchSetup::new(mt_sigmoid_mul::kernel_ir_for(dt))
@@ -476,7 +476,7 @@ pub mod kernel_benches {
 
     // scalar_fma: out[i] = base[i] + scalar[0] * value[i]. `scalar` is a
     // 1-element broadcast buffer; `value` + `base` are full-length.
-    #[bench(name = "mlx/unary/scalar_fma", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_scalar_fma(dt: DType) -> BenchSetup {
         let n = 64 * 1024 * 1024usize;
         BenchSetup::new(mt_scalar_fma::kernel_ir_for(dt))
@@ -489,7 +489,7 @@ pub mod kernel_benches {
     }
 
     // sigmoid_scalar_fma: out[i] = base[i] + sigmoid(gate[0]) * value[i].
-    #[bench(name = "mlx/unary/sigmoid_scalar_fma", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sigmoid_scalar_fma(dt: DType) -> BenchSetup {
         let n = 64 * 1024 * 1024usize;
         BenchSetup::new(mt_sigmoid_scalar_fma::kernel_ir_for(dt))
@@ -502,7 +502,7 @@ pub mod kernel_benches {
     }
 
     // sigmoid_scalar_fma_residual: out = residual + base + sigmoid(gate[0])·value.
-    #[bench(name = "mlx/unary/sigmoid_scalar_fma_residual", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sigmoid_scalar_fma_residual(dt: DType) -> BenchSetup {
         let n = 64 * 1024 * 1024usize;
         BenchSetup::new(mt_sigmoid_scalar_fma_residual::kernel_ir_for(dt))
@@ -517,7 +517,7 @@ pub mod kernel_benches {
 
     // scalar_fma_chain8: out[i] = sum_{k=0..8} scalar_k[0] * value_k[i].
     // Eight 1-element scalar buffers + eight full-length value buffers.
-    #[bench(name = "mlx/unary/scalar_fma_chain8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_scalar_fma_chain8(dt: DType) -> BenchSetup {
         let n = 16 * 1024 * 1024usize;
         let mut s = BenchSetup::new(mt_scalar_fma_chain8::kernel_ir_for(dt));
@@ -533,7 +533,7 @@ pub mod kernel_benches {
 
     // add_rms_norm: Reduction, one threadgroup per row, N = tpg*4. Fused
     // residual-add (a+b) + RMSNorm with two outputs (residual + normed).
-    #[bench(name = "mlx/unary/add_rms_norm", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_add_rms_norm(dt: DType) -> BenchSetup {
         let (rows, n) = (4096usize, 4096usize);
         BenchSetup::new(mt_add_rms_norm::kernel_ir_for(dt))

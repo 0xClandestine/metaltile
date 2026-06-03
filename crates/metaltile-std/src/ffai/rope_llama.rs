@@ -170,7 +170,7 @@ pub mod kernel_benches {
 
     use super::ffai_rope_llama;
 
-    #[bench(name = "ffai/rope/rope_llama", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_rope_llama(dt: DType) -> BenchSetup {
         let (n_heads, head_dim) = (32usize, 128usize);
         let half = head_dim / 2;

@@ -711,7 +711,7 @@ pub mod kernel_benches {
     }
 
     // Non-causal variants: VB ∈ {2, 4}, DIM ∈ {64, 128} — all four combos.
-    #[bench(name = "ffai/aura_flash_p1_kb4_vb{VB}_d{DIM}", dtypes = [f32, f16, bf16],
+    #[bench(dtypes = [f32, f16, bf16],
             variants(VB = [2, 2, 4, 4], DIM = [64, 128, 64, 128], suffix = "kb4_vb{VB}_d{DIM}"))]
     fn bench_flash_p1(dt: DType) -> BenchSetup {
         flash_p1(
@@ -725,7 +725,7 @@ pub mod kernel_benches {
     }
 
     // Causal variants: VB=2, DIM ∈ {64, 128}.
-    #[bench(name = "ffai/aura_flash_p1_causal_kb4_vb2_d{DIM}", dtypes = [f32, f16, bf16],
+    #[bench(dtypes = [f32, f16, bf16],
             variants(DIM = [64, 128], suffix = "kb4_vb2_d{DIM}"))]
     fn bench_flash_p1_causal(dt: DType) -> BenchSetup {
         flash_p1(

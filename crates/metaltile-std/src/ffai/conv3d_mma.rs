@@ -427,7 +427,7 @@ pub mod kernel_benches {
 
     use super::conv3d_mma;
 
-    #[bench(name = "ffai/conv3d/mma", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_conv3d_mma(dt: DType) -> BenchSetup {
         // 1×1×1 conv on a 16×16×16 volume → n_voxels=4096, out_ch=256.
         let (batch, in_ch, in_d, in_h, in_w, out_ch) =

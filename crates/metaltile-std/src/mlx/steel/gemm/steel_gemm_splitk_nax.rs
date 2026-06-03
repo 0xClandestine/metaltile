@@ -198,7 +198,7 @@ pub mod kernel_benches {
     const TPG: u32 = 128;
 
     // ── Pass 1 — NAX split-K partial GEMM (Reduction, 3-D grid) ────────────
-    #[bench(name = "mlx/steel_gemm/splitk_nax", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_splitk_nax(dt: DType) -> BenchSetup {
         let (m, n, k) = (M as usize, N as usize, K as usize);
         let sz = dt.size_bytes();
@@ -225,7 +225,7 @@ pub mod kernel_benches {
     }
 
     // ── Pass 2 — NAX partial-sum reduction (one TG per output element) ─────
-    #[bench(name = "mlx/steel_gemm/splitk_accum_nax", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_splitk_accum_nax(dt: DType) -> BenchSetup {
         let (m, n) = (M as usize, N as usize);
         let sz = dt.size_bytes();

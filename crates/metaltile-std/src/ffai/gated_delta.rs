@@ -494,7 +494,7 @@ pub mod kernel_benches {
 
     // Decode step at Qwen3.6-class head_dim (dk=dv=256-ish kept small for the
     // in-process runner): one simdgroup per (dv, b*hv) element.
-    #[bench(name = "ffai/gated_delta_step", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gated_delta_step(dt: DType) -> BenchSetup {
         let (b, hv, hk, dv, dk) = (2usize, 4usize, 2usize, 64usize, 256usize);
         let n_total = b * hv;
@@ -517,7 +517,7 @@ pub mod kernel_benches {
     }
 
     // Chunked prefill over T tokens; `t_len` is a runtime u32 scalar buffer.
-    #[bench(name = "ffai/gated_delta_chunk", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gated_delta_chunk(dt: DType) -> BenchSetup {
         let (b, t, hv, hk, dv, dk) = (1usize, 64usize, 4usize, 2usize, 8usize, 64usize);
         let n_total = b * hv;

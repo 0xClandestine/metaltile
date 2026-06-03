@@ -221,7 +221,7 @@ pub mod kernel_benches {
 
     use super::dequant_gemv_int4_expert_indexed;
 
-    #[bench(name = "ffai/dequant_gemv_expert_indexed/int4", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_dequant_gemv_int4_expert_indexed(dt: DType) -> BenchSetup {
         let (n_experts, out_dim, in_dim, group_size) = (8usize, 4096usize, 4096usize, 64usize);
         let n_groups = in_dim / group_size;

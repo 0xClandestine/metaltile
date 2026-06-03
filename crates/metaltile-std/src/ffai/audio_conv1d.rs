@@ -190,7 +190,7 @@ pub mod kernel_benches {
 
     use super::audio_conv1d;
 
-    #[bench(name = "ffai/audio_conv1d/audio_conv1d", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_audio_conv1d(dt: DType) -> BenchSetup {
         // Whisper-large stem conv #2: d_model=1280, k=3, stride 2, pad 1.
         let (batch, ch, in_len, k, stride, pad) =

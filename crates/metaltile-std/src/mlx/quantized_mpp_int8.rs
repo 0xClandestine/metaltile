@@ -253,7 +253,7 @@ pub mod kernel_benches {
     use super::mt_qmm_mma_mpp_int8;
     use crate::mlx::quantized::kernel_benches::qmb;
 
-    #[bench(name = "mlx/quantized/qmm_mma_mpp_int8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_qmm_mma_mpp_int8(dt: DType) -> BenchSetup {
         qmb(
             mt_qmm_mma_mpp_int8::kernel_ir_for(dt),

@@ -562,7 +562,7 @@ pub mod kernel_benches {
     const Q_LEN: usize = 512;
     const K_LEN: usize = 512;
 
-    #[bench(name = "mlx/sdpa/sdpa_prefill_nax", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa_prefill_nax(dt: DType) -> BenchSetup {
         let q_elems = BATCH * N_Q_HEADS * Q_LEN * HEAD_DIM;
         let kv_elems = BATCH * N_KV_HEADS * K_LEN * HEAD_DIM;

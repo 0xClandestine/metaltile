@@ -398,7 +398,7 @@ pub mod kernel_benches {
     use super::{mt_merge, mt_sort, mt_sort_segmented};
     use crate::bench_types::{InputDomain, input_buffer, mlx_tname};
 
-    #[bench(name = "mlx/sort", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sort(dt: DType) -> BenchSetup {
         let (n_blocks, n) = (16384usize, 1024usize);
         let tn = mlx_tname(dt);
@@ -448,7 +448,7 @@ pub mod kernel_benches {
             )
     }
 
-    #[bench(name = "mlx/sort/merge", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_merge(dt: DType) -> BenchSetup {
         let (run, n) = (1024usize, 16 * 1024 * 1024usize);
         BenchSetup::new(mt_merge::kernel_ir_for(dt))
@@ -462,7 +462,7 @@ pub mod kernel_benches {
             .bytes_moved((2 * n * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "mlx/sort/segmented", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_segmented(dt: DType) -> BenchSetup {
         let (batch, n) = (16384usize, 1024usize);
         BenchSetup::new(mt_sort_segmented::kernel_ir_for(dt))

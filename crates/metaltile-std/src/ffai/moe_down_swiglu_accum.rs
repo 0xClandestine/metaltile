@@ -509,7 +509,7 @@ pub mod kernel_benches {
     /// Top-k slot count this kernel fuses (8-way chain).
     const N_SLOTS: usize = 8;
 
-    #[bench(name = "ffai/moe_down_swiglu_accum/int4_chain8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_moe_down_swiglu_accum_int4_chain8(dt: DType) -> BenchSetup {
         // Qwen3.6-A3B-ish: hidden=2048 (out_dim), moeIntermediate=768 (in_dim).
         let n_experts = 128usize;

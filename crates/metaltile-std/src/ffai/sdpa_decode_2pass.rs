@@ -1007,42 +1007,42 @@ pub mod kernel_benches {
             .bytes_moved(bytes as u64)
     }
 
-    #[bench(name = "ffai/sdpa_decode_2pass_pass1", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_pass1(dt: DType) -> BenchSetup {
         pass1(sdpa_decode_2pass_pass1::kernel_ir_for(dt), 128, dt)
     }
 
-    #[bench(name = "ffai/sdpa_decode_2pass_pass2", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_pass2(dt: DType) -> BenchSetup {
         pass2(sdpa_decode_2pass_pass2::kernel_ir_for(dt), 128, dt)
     }
 
-    #[bench(name = "ffai/sdpa_decode_2pass_pass1_d64", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_pass1_d64(dt: DType) -> BenchSetup {
         pass1(sdpa_decode_2pass_pass1_d64::kernel_ir_for(dt), 64, dt)
     }
 
-    #[bench(name = "ffai/sdpa_decode_2pass_pass2_d64", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_pass2_d64(dt: DType) -> BenchSetup {
         pass2(sdpa_decode_2pass_pass2_d64::kernel_ir_for(dt), 64, dt)
     }
 
-    #[bench(name = "ffai/sdpa_decode_2pass_pass1_d96", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_pass1_d96(dt: DType) -> BenchSetup {
         pass1(sdpa_decode_2pass_pass1_d96::kernel_ir_for(dt), 96, dt)
     }
 
-    #[bench(name = "ffai/sdpa_decode_2pass_pass2_d96", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_pass2_d96(dt: DType) -> BenchSetup {
         pass2(sdpa_decode_2pass_pass2_d96::kernel_ir_for(dt), 96, dt)
     }
 
-    #[bench(name = "ffai/sdpa_decode_2pass_pass1_d256", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_pass1_d256(dt: DType) -> BenchSetup {
         pass1(sdpa_decode_2pass_pass1_d256::kernel_ir_for(dt), 256, dt)
     }
 
-    #[bench(name = "ffai/sdpa_decode_2pass_pass2_d256", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_pass2_d256(dt: DType) -> BenchSetup {
         pass2(sdpa_decode_2pass_pass2_d256::kernel_ir_for(dt), 256, dt)
     }

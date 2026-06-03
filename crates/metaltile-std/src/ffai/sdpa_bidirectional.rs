@@ -837,27 +837,27 @@ pub mod kernel_benches {
             .flops(4 * (n_q_heads as u64) * (n_kv as u64) * (head_dim as u64) * (n_query as u64))
     }
 
-    #[bench(name = "ffai/sdpa_bidirectional_d32", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_d32(dt: DType) -> BenchSetup {
         setup(ffai_sdpa_bidirectional_d32::kernel_ir_for(dt), 32, dt)
     }
 
-    #[bench(name = "ffai/sdpa_bidirectional_d64", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_d64(dt: DType) -> BenchSetup {
         setup(ffai_sdpa_bidirectional_d64::kernel_ir_for(dt), 64, dt)
     }
 
-    #[bench(name = "ffai/sdpa_bidirectional_d72", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_d72(dt: DType) -> BenchSetup {
         setup(ffai_sdpa_bidirectional_d72::kernel_ir_for(dt), 72, dt)
     }
 
-    #[bench(name = "ffai/sdpa_bidirectional_d80", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_d80(dt: DType) -> BenchSetup {
         setup(ffai_sdpa_bidirectional_d80::kernel_ir_for(dt), 80, dt)
     }
 
-    #[bench(name = "ffai/sdpa_bidirectional_d96", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_d96(dt: DType) -> BenchSetup {
         setup(ffai_sdpa_bidirectional_d96::kernel_ir_for(dt), 96, dt)
     }

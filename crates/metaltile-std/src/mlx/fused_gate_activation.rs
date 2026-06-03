@@ -166,10 +166,10 @@ pub mod kernel_benches {
             .bytes_moved((3 * n * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "mlx/fused_gate/gelu_approx", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gelu(dt: DType) -> BenchSetup { fb(mt_fused_gate_gelu::kernel_ir_for(dt), dt) }
 
-    #[bench(name = "mlx/fused_gate/clipped_swiglu", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_clipped(dt: DType) -> BenchSetup {
         fb(mt_fused_gate_clipped_swiglu::kernel_ir_for(dt), dt)
     }

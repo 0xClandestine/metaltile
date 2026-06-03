@@ -160,7 +160,7 @@ pub mod kernel_benches {
 
     use super::logits_top_p_mask;
 
-    #[bench(name = "ffai/logits_processors/top_p_mask", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_logits_top_p_mask(dt: DType) -> BenchSetup {
         let (n, rows) = (152_064usize, 2usize);
         BenchSetup::new(logits_top_p_mask::kernel_ir_for(dt))
