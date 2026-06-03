@@ -4711,6 +4711,11 @@ pub fn mt_qvm_int4_fast<T>(
 // Mirrors the `gather_qmm_mma!` macro in `ffai/moe.rs` — exactly the same
 // coop-dequant strategy, just applied to the dense (non-expert) GEMM.
 //
+// Odd bit-widths for the dense MMA QMM family.
+// Keep in sync with `variants(BITS = [...])` on the kernel and bench below.
+#[allow(dead_code)]
+const QMM_MMA_ODD_BITS: &[u32] = &[3, 5, 6];
+
 // `w` layout: `[N, k*bits/32]` uint32 LSB-first bit-stream packed.
 // `group_size` must divide `k`; the 8-K span per lane within a BK=32
 // block is group-aligned (`pack_in_row*8 % group_size == 0`).
@@ -5972,17 +5977,10 @@ pub mod kernel_benches {
             .bytes_moved((n_elem * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "mlx/affine/dequantize_int4", dtypes = [f32, f16, bf16])]
-    fn bench_dequant_int4(dt: DType) -> BenchSetup {
-        db(mt_affine_dequantize_int4::kernel_ir_for(dt), 4, 64, 65536, dt)
-    }
-    #[bench(name = "mlx/affine/dequantize_int8", dtypes = [f32, f16, bf16])]
-    fn bench_dequant_int8(dt: DType) -> BenchSetup {
-        db(mt_affine_dequantize_int8::kernel_ir_for(dt), 8, 64, 65536, dt)
-    }
-    #[bench(name = "mlx/affine/dequantize_int2", dtypes = [f32, f16, bf16])]
-    fn bench_dequant_int2(dt: DType) -> BenchSetup {
-        db(mt_affine_dequantize_int2::kernel_ir_for(dt), 2, 64, 65536, dt)
+    #[bench(name = "mlx/affine/dequantize_int{BITS}", dtypes = [f32, f16, bf16],
+            variants(BITS = [2, 4, 8], suffix = "int{BITS}"))]
+    fn bench_dequant_pow2(dt: DType) -> BenchSetup {
+        db(mt_affine_dequantize_intBITS::kernel_ir_for(dt), BITS, 64, 65536, dt)
     }
 
     // ── odd-bit dequant (int3/5/6) ─────────────────────────────────────────
@@ -6045,29 +6043,16 @@ pub mod kernel_benches {
             .bytes_moved((n_elem * dt.size_bytes() + out_words * 4) as u64)
     }
 
-    #[bench(name = "mlx/affine/quantize_int2", dtypes = [f32, f16, bf16])]
-    fn bench_quant_int2(dt: DType) -> BenchSetup {
-        qb(mt_affine_quantize_int2::kernel_ir_for(dt), 2, 64, 65536, dt)
+    #[bench(name = "mlx/affine/quantize_int{BITS}", dtypes = [f32, f16, bf16],
+            variants(BITS = [2, 4, 8], suffix = "int{BITS}"))]
+    fn bench_quant_pow2(dt: DType) -> BenchSetup {
+        qb(mt_affine_quantize_intBITS::kernel_ir_for(dt), BITS, 64, 65536, dt)
     }
-    #[bench(name = "mlx/affine/quantize_int3", dtypes = [f32, f16, bf16])]
-    fn bench_quant_int3(dt: DType) -> BenchSetup {
-        qb(mt_affine_quantize_int3::kernel_ir_for(dt), 3, 32, 65536, dt)
-    }
-    #[bench(name = "mlx/affine/quantize_int4", dtypes = [f32, f16, bf16])]
-    fn bench_quant_int4(dt: DType) -> BenchSetup {
-        qb(mt_affine_quantize_int4::kernel_ir_for(dt), 4, 64, 65536, dt)
-    }
-    #[bench(name = "mlx/affine/quantize_int5", dtypes = [f32, f16, bf16])]
-    fn bench_quant_int5(dt: DType) -> BenchSetup {
-        qb(mt_affine_quantize_int5::kernel_ir_for(dt), 5, 32, 65536, dt)
-    }
-    #[bench(name = "mlx/affine/quantize_int6", dtypes = [f32, f16, bf16])]
-    fn bench_quant_int6(dt: DType) -> BenchSetup {
-        qb(mt_affine_quantize_int6::kernel_ir_for(dt), 6, 32, 65536, dt)
-    }
-    #[bench(name = "mlx/affine/quantize_int8", dtypes = [f32, f16, bf16])]
-    fn bench_quant_int8(dt: DType) -> BenchSetup {
-        qb(mt_affine_quantize_int8::kernel_ir_for(dt), 8, 64, 65536, dt)
+
+    #[bench(name = "mlx/affine/quantize_int{BITS}", dtypes = [f32, f16, bf16],
+            variants(BITS = [3, 5, 6], suffix = "int{BITS}"))]
+    fn bench_quant_odd(dt: DType) -> BenchSetup {
+        qb(mt_affine_quantize_intBITS::kernel_ir_for(dt), BITS, 32, 65536, dt)
     }
 
     // ── qmv / qmm matmul-family benches ────────────────────────────────────

@@ -521,6 +521,11 @@ pub fn mt_moe_gather_qmm_b8<T>(
     }
 }
 
+// Odd bit-widths for the grouped-gather scalar/CSR QMM family.
+// Keep in sync with `variants(BITS = [...])` on the kernel, tests, and bench below.
+#[allow(dead_code)]
+const GATHER_QMM_ODD_BITS: &[u32] = &[3, 5, 6];
+
 /// Grouped-gather quantized matmul — odd bit-widths (3, 5, 6).
 ///
 /// Produces kernels: `mt_moe_gather_qmm_b3`, `_b5`, `_b6`.
@@ -2543,6 +2548,11 @@ pub fn mt_moe_gather_qmm_mma_int4<T>(
 // `w` layout: `[E, N, k_in*bits/32]` uint32 bit-stream packed.
 // `group_size` must divide `k_in`; `pack_in_row*8` group-aligned so the
 // per-lane group index is hoistable.
+// Bit-widths for the tiled-MMA grouped-gather QMM family (odd + int8).
+// Keep in sync with `variants(BITS = [...])` on the kernel and bench below.
+#[allow(dead_code)]
+const GATHER_QMM_MMA_BITS: &[u32] = &[3, 5, 6, 8];
+
 /// Tiled-MMA grouped-gather quantized matmul — variable bit-widths (3, 5, 6, 8).
 ///
 /// Produces kernels: `mt_moe_gather_qmm_mma_b3`, `_b5`, `_b6`, `_b8`.
@@ -3792,21 +3802,10 @@ pub mod kernel_tests {
             .grid_3d(m_out as u32, t_rows as u32, 1, [32, 1, 1])
     }
 
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_moe_gather_qmm_b3(dt: DType) -> TestSetup {
-        gather_qmm_bits_setup(mt_moe_gather_qmm_b3::kernel_ir_for(dt), 3, dt)
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_moe_gather_qmm_b5(dt: DType) -> TestSetup {
-        gather_qmm_bits_setup(mt_moe_gather_qmm_b5::kernel_ir_for(dt), 5, dt)
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_moe_gather_qmm_b6(dt: DType) -> TestSetup {
-        gather_qmm_bits_setup(mt_moe_gather_qmm_b6::kernel_ir_for(dt), 6, dt)
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_moe_gather_qmm_b8(dt: DType) -> TestSetup {
-        gather_qmm_bits_setup(mt_moe_gather_qmm_b8::kernel_ir_for(dt), 8, dt)
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1],
+                  variants(BITS = [3, 5, 6, 8], suffix = "b{BITS}"))]
+    fn test_moe_gather_qmm(dt: DType) -> TestSetup {
+        gather_qmm_bits_setup(mt_moe_gather_qmm_bBITS::kernel_ir_for(dt), BITS, dt)
     }
 
     // ── MMA-tiled gather qmm (int4 / int8) ────────────────────────────────
@@ -4121,21 +4120,10 @@ pub mod kernel_benches {
     fn bench_moe_gather_qmm_int4_m32(dt: DType) -> BenchSetup {
         csr_bench(mt_moe_gather_qmm_int4_m32::kernel_ir_for(dt), 4, 32, 64, 2048, 256, 128, 64, dt)
     }
-    #[bench(name = "ffai/moe/gather_qmm_b8", dtypes = [f32, f16, bf16])]
-    fn bench_moe_gather_qmm_b8(dt: DType) -> BenchSetup {
-        csr_bench(mt_moe_gather_qmm_b8::kernel_ir_for(dt), 8, 1, 64, 2048, 256, 128, 64, dt)
-    }
-    #[bench(name = "ffai/moe/gather_qmm_b3", dtypes = [f32, f16, bf16])]
-    fn bench_moe_gather_qmm_b3(dt: DType) -> BenchSetup {
-        csr_bench(mt_moe_gather_qmm_b3::kernel_ir_for(dt), 3, 1, 64, 2048, 256, 128, 64, dt)
-    }
-    #[bench(name = "ffai/moe/gather_qmm_b5", dtypes = [f32, f16, bf16])]
-    fn bench_moe_gather_qmm_b5(dt: DType) -> BenchSetup {
-        csr_bench(mt_moe_gather_qmm_b5::kernel_ir_for(dt), 5, 1, 64, 2048, 256, 128, 64, dt)
-    }
-    #[bench(name = "ffai/moe/gather_qmm_b6", dtypes = [f32, f16, bf16])]
-    fn bench_moe_gather_qmm_b6(dt: DType) -> BenchSetup {
-        csr_bench(mt_moe_gather_qmm_b6::kernel_ir_for(dt), 6, 1, 64, 2048, 256, 128, 64, dt)
+    #[bench(name = "ffai/moe/gather_qmm_b{BITS}", dtypes = [f32, f16, bf16],
+            variants(BITS = [3, 5, 6, 8], suffix = "b{BITS}"))]
+    fn bench_moe_gather_qmm(dt: DType) -> BenchSetup {
+        csr_bench(mt_moe_gather_qmm_bBITS::kernel_ir_for(dt), BITS, 1, 64, 2048, 256, 128, 64, dt)
     }
 
     // ── Tiled-MMA family (per-row `indices`, no CSR offsets) ──────────────
@@ -4202,59 +4190,12 @@ pub mod kernel_benches {
             dt,
         )
     }
-    #[bench(name = "ffai/moe/gather_qmm_mma_b3", dtypes = [f32, f16, bf16])]
-    fn bench_moe_gather_qmm_mma_b3(dt: DType) -> BenchSetup {
+    #[bench(name = "ffai/moe/gather_qmm_mma_b{BITS}", dtypes = [f32, f16, bf16],
+            variants(BITS = [3, 5, 6, 8], suffix = "b{BITS}"))]
+    fn bench_moe_gather_qmm_mma(dt: DType) -> BenchSetup {
         mma_bench(
-            mt_moe_gather_qmm_mma_b3::kernel_ir_for(dt),
-            3,
-            32,
-            32,
-            128,
-            1024,
-            256,
-            2048,
-            128,
-            64,
-            dt,
-        )
-    }
-    #[bench(name = "ffai/moe/gather_qmm_mma_b5", dtypes = [f32, f16, bf16])]
-    fn bench_moe_gather_qmm_mma_b5(dt: DType) -> BenchSetup {
-        mma_bench(
-            mt_moe_gather_qmm_mma_b5::kernel_ir_for(dt),
-            5,
-            32,
-            32,
-            128,
-            1024,
-            256,
-            2048,
-            128,
-            64,
-            dt,
-        )
-    }
-    #[bench(name = "ffai/moe/gather_qmm_mma_b6", dtypes = [f32, f16, bf16])]
-    fn bench_moe_gather_qmm_mma_b6(dt: DType) -> BenchSetup {
-        mma_bench(
-            mt_moe_gather_qmm_mma_b6::kernel_ir_for(dt),
-            6,
-            32,
-            32,
-            128,
-            1024,
-            256,
-            2048,
-            128,
-            64,
-            dt,
-        )
-    }
-    #[bench(name = "ffai/moe/gather_qmm_mma_b8", dtypes = [f32, f16, bf16])]
-    fn bench_moe_gather_qmm_mma_b8(dt: DType) -> BenchSetup {
-        mma_bench(
-            mt_moe_gather_qmm_mma_b8::kernel_ir_for(dt),
-            8,
+            mt_moe_gather_qmm_mma_bBITS::kernel_ir_for(dt),
+            BITS,
             32,
             32,
             128,

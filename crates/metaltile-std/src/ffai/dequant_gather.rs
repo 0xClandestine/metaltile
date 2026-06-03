@@ -41,6 +41,11 @@
 
 use metaltile::kernel;
 
+// Supported bit-widths for the dequant_gather family.
+// Keep in sync with `variants(BITS = [...])` on the kernel, test, and bench below.
+#[allow(dead_code)]
+const SUPPORTED_BITS: &[u32] = &[2, 3, 4, 5, 6, 8];
+
 /// Dequantizing token-gather kernel — variable bit-widths (2, 3, 4, 5, 6, 8).
 ///
 /// Produces kernels: `dequant_gather_int2`, `_int3`, `_int4`, `_int5`,
@@ -214,33 +219,19 @@ pub mod kernel_tests {
             .grid_1d(n_tokens * hidden, 256)
     }
 
-    // Pack-strided pow2 widths (codes never span a u32 boundary).
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 1e-1])]
-    fn test_dequant_gather_int2(dt: DType) -> TestSetup {
-        gather_setup(dequant_gather_int2::kernel_ir_for(dt), 2, 256, 64, dt)
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 1e-1])]
-    fn test_dequant_gather_int4(dt: DType) -> TestSetup {
-        gather_setup(dequant_gather_int4::kernel_ir_for(dt), 4, 256, 64, dt)
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 1e-1])]
-    fn test_dequant_gather_int8(dt: DType) -> TestSetup {
-        gather_setup(dequant_gather_int8::kernel_ir_for(dt), 8, 256, 64, dt)
+    // Pack-strided pow2 widths (hidden=256, group_size=64).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 1e-1],
+                  variants(BITS = [2, 4, 8], suffix = "int{BITS}"))]
+    fn test_dequant_gather_pow2(dt: DType) -> TestSetup {
+        gather_setup(dequant_gather_intBITS::kernel_ir_for(dt), BITS, 256, 64, dt)
     }
 
-    // Odd widths (word-spilling `lo | hi` decode). hidden*bits a multiple of 32:
-    //   int3: 64*3 = 192; int5: 64*5 = 320; int6: 64*6 = 384. group_size 32.
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 1e-1])]
-    fn test_dequant_gather_int3(dt: DType) -> TestSetup {
-        gather_setup(dequant_gather_int3::kernel_ir_for(dt), 3, 64, 32, dt)
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 1e-1])]
-    fn test_dequant_gather_int5(dt: DType) -> TestSetup {
-        gather_setup(dequant_gather_int5::kernel_ir_for(dt), 5, 64, 32, dt)
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 1e-1])]
-    fn test_dequant_gather_int6(dt: DType) -> TestSetup {
-        gather_setup(dequant_gather_int6::kernel_ir_for(dt), 6, 64, 32, dt)
+    // Odd widths — hidden*BITS must be a multiple of 32 (hidden=64, group_size=32).
+    //   int3: 64×3=192; int5: 64×5=320; int6: 64×6=384.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 1e-1],
+                  variants(BITS = [3, 5, 6], suffix = "int{BITS}"))]
+    fn test_dequant_gather_odd(dt: DType) -> TestSetup {
+        gather_setup(dequant_gather_intBITS::kernel_ir_for(dt), BITS, 64, 32, dt)
     }
 }
 
@@ -271,28 +262,9 @@ pub mod kernel_benches {
             .bytes_moved((n_tokens * hidden * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "ffai/dequant_gather/int2", dtypes = [f32, f16, bf16])]
-    fn bench_dequant_gather_int2(dt: DType) -> BenchSetup {
-        gb(dequant_gather_int2::kernel_ir_for(dt), 2, 4096, 64, dt)
-    }
-    #[bench(name = "ffai/dequant_gather/int3", dtypes = [f32, f16, bf16])]
-    fn bench_dequant_gather_int3(dt: DType) -> BenchSetup {
-        gb(dequant_gather_int3::kernel_ir_for(dt), 3, 4096, 64, dt)
-    }
-    #[bench(name = "ffai/dequant_gather/int4", dtypes = [f32, f16, bf16])]
-    fn bench_dequant_gather_int4(dt: DType) -> BenchSetup {
-        gb(dequant_gather_int4::kernel_ir_for(dt), 4, 4096, 64, dt)
-    }
-    #[bench(name = "ffai/dequant_gather/int5", dtypes = [f32, f16, bf16])]
-    fn bench_dequant_gather_int5(dt: DType) -> BenchSetup {
-        gb(dequant_gather_int5::kernel_ir_for(dt), 5, 4096, 64, dt)
-    }
-    #[bench(name = "ffai/dequant_gather/int6", dtypes = [f32, f16, bf16])]
-    fn bench_dequant_gather_int6(dt: DType) -> BenchSetup {
-        gb(dequant_gather_int6::kernel_ir_for(dt), 6, 4096, 64, dt)
-    }
-    #[bench(name = "ffai/dequant_gather/int8", dtypes = [f32, f16, bf16])]
-    fn bench_dequant_gather_int8(dt: DType) -> BenchSetup {
-        gb(dequant_gather_int8::kernel_ir_for(dt), 8, 4096, 64, dt)
+    #[bench(name = "ffai/dequant_gather/int{BITS}", dtypes = [f32, f16, bf16],
+            variants(BITS = [2, 3, 4, 5, 6, 8], suffix = "int{BITS}"))]
+    fn bench_dequant_gather(dt: DType) -> BenchSetup {
+        gb(dequant_gather_intBITS::kernel_ir_for(dt), BITS, 4096, 64, dt)
     }
 }

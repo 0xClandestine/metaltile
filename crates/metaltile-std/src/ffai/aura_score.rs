@@ -47,6 +47,11 @@
 
 use metaltile::kernel;
 
+// Supported AURA bit-widths for the score kernel family.
+// Keep in sync with `variants(BITS = [...])` on the kernel and bench below.
+#[allow(dead_code)]
+const SUPPORTED_BITS: &[u32] = &[2, 3, 4, 6, 8];
+
 /// AURA quantized attention-score kernel — variable bit-widths (2, 3, 4, 6, 8).
 ///
 /// Produces kernels: `aura_score_int2`, `aura_score_int3`, `aura_score_int4`,
@@ -201,13 +206,7 @@ pub mod kernel_tests {
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    use super::{
-        aura_score_int2,
-        aura_score_int3,
-        aura_score_int4,
-        aura_score_int6,
-        aura_score_int8,
-    };
+    use super::*;
 
     fn setup(
         s: BenchSetup,
@@ -235,28 +234,9 @@ pub mod kernel_benches {
             .grid_3d(q_heads as u32, tokens as u32, 1, [32, 1, 1])
     }
 
-    #[bench(name = "ffai/aura_score_int2", dtypes = [f32, f16, bf16])]
-    fn bench_int2(dt: DType) -> BenchSetup {
-        setup(BenchSetup::new(aura_score_int2::kernel_ir_for(dt)), 128, 2, 32, 8, 4096, dt)
-    }
-
-    #[bench(name = "ffai/aura_score_int3", dtypes = [f32, f16, bf16])]
-    fn bench_int3(dt: DType) -> BenchSetup {
-        setup(BenchSetup::new(aura_score_int3::kernel_ir_for(dt)), 128, 3, 32, 8, 4096, dt)
-    }
-
-    #[bench(name = "ffai/aura_score_int4", dtypes = [f32, f16, bf16])]
-    fn bench_int4(dt: DType) -> BenchSetup {
-        setup(BenchSetup::new(aura_score_int4::kernel_ir_for(dt)), 128, 4, 32, 8, 4096, dt)
-    }
-
-    #[bench(name = "ffai/aura_score_int6", dtypes = [f32, f16, bf16])]
-    fn bench_int6(dt: DType) -> BenchSetup {
-        setup(BenchSetup::new(aura_score_int6::kernel_ir_for(dt)), 128, 6, 32, 8, 4096, dt)
-    }
-
-    #[bench(name = "ffai/aura_score_int8", dtypes = [f32, f16, bf16])]
-    fn bench_int8(dt: DType) -> BenchSetup {
-        setup(BenchSetup::new(aura_score_int8::kernel_ir_for(dt)), 128, 8, 32, 8, 4096, dt)
+    #[bench(name = "ffai/aura_score_int{BITS}", dtypes = [f32, f16, bf16],
+            variants(BITS = [2, 3, 4, 6, 8], suffix = "int{BITS}"))]
+    fn bench_aura_score(dt: DType) -> BenchSetup {
+        setup(BenchSetup::new(aura_score_intBITS::kernel_ir_for(dt)), 128, BITS, 32, 8, 4096, dt)
     }
 }

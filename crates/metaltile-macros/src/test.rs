@@ -11,8 +11,12 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{Ident, ItemFn, LitFloat, Token, parse::ParseStream};
 
-use crate::bench::dtype_token;
+use crate::{
+    bench::dtype_token,
+    kernel::variants::{self, VariantsSpec},
+};
 
+#[derive(Clone)]
 enum Tolerance {
     Scalar(f64),
     Table(Vec<(Ident, f64)>),
@@ -20,6 +24,7 @@ enum Tolerance {
 }
 
 /// Parsed arguments for the `#[test_kernel]` attribute.
+#[derive(Clone)]
 struct TestAttr {
     /// Optional explicit test name; if absent the function name is used.
     name: Option<syn::LitStr>,
@@ -27,6 +32,10 @@ struct TestAttr {
     dtypes: Vec<Ident>,
     /// Element-wise tolerance override (default: `1e-4`).
     tol: Option<Tolerance>,
+    /// Optional compile-time variant specialisation.  When present, the macro
+    /// expands into N test registrations — one per variant — substituting
+    /// integer constants into the function body and renaming each clone.
+    variants: Option<VariantsSpec>,
 }
 
 fn parse_tol_value(input: ParseStream) -> syn::Result<f64> {
@@ -130,9 +139,22 @@ impl syn::parse::Parse for TestAttr {
         let mut name = None;
         let mut dtypes = None;
         let mut tol = None;
+        let mut variants_spec = None;
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
+
+            if key == "variants" {
+                // `variants(...)` — no `=`, parenthesised spec follows.
+                let inner;
+                syn::parenthesized!(inner in input);
+                variants_spec = Some(inner.parse::<VariantsSpec>()?);
+                if input.peek(Token![,]) {
+                    input.parse::<Token![,]>()?;
+                }
+                continue;
+            }
+
             input.parse::<Token![=]>()?;
 
             if key == "name" {
@@ -147,7 +169,9 @@ impl syn::parse::Parse for TestAttr {
             } else {
                 return Err(syn::Error::new(
                     key.span(),
-                    format!("unknown #[test_kernel] key `{key}` — valid keys: name, dtypes, tol"),
+                    format!(
+                        "unknown #[test_kernel] key `{key}` —                          valid keys: name, dtypes, tol, variants"
+                    ),
                 ));
             }
 
@@ -165,6 +189,7 @@ impl syn::parse::Parse for TestAttr {
                 )
             })?,
             tol,
+            variants: variants_spec,
         };
         if let Some(tol) = &attr.tol {
             validate_tolerance(&attr.dtypes, tol)?;
@@ -174,35 +199,33 @@ impl syn::parse::Parse for TestAttr {
 }
 
 /// Expand `#[test_kernel(...)]` on a setup function into a `KernelTest` impl.
-pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let test_attr = syn::parse_macro_input!(attr as TestAttr);
-    let input_fn = syn::parse_macro_input!(item as ItemFn);
-
-    if input_fn.sig.inputs.len() != 1 {
-        return syn::Error::new_spanned(
-            &input_fn.sig,
-            "#[test_kernel] setup function must take exactly one argument: `dt: DType`",
-        )
-        .into_compile_error()
-        .into();
-    }
-
+/// Expand a single concrete `#[test_kernel]` function into its `KernelTest` impl.
+///
+/// Called once per variant when `variants(...)` is present, or once directly
+/// for a plain `#[test_kernel]`.
+fn expand_one(
+    test_attr: &TestAttr,
+    explicit_name: Option<&syn::LitStr>,
+    input_fn: ItemFn,
+) -> TokenStream2 {
     let fn_name = &input_fn.sig.ident;
     let fn_name_str = fn_name.to_string();
-    // Private impl struct — unique per function name within the module.
     let impl_name = syn::Ident::new(&format!("__TestImpl_{fn_name_str}"), fn_name.span());
 
-    // Use explicit name if given, otherwise fall back to the function name.
-    let name_lit = test_attr.name.unwrap_or_else(|| syn::LitStr::new(&fn_name_str, fn_name.span()));
+    let name_lit = explicit_name
+        .cloned()
+        .or_else(|| test_attr.name.clone())
+        .unwrap_or_else(|| syn::LitStr::new(&fn_name_str, fn_name.span()));
     let dtype_tokens: Vec<TokenStream2> =
         test_attr.dtypes.iter().map(|id| dtype_token(&id.to_string())).collect();
 
-    let tol_impl: TokenStream2 = match test_attr.tol {
+    let tol_impl: TokenStream2 = match test_attr.tol.clone() {
         Some(Tolerance::Scalar(tol)) => quote! {
             fn tolerance(&self, _dt: ::metaltile::core::DType) -> f64 { #tol }
         },
         Some(Tolerance::Array(vals)) => {
-            let arms = test_attr.dtypes.iter().zip(vals.iter()).map(|(dtype, tol)| {
+            let dtypes = test_attr.dtypes.clone();
+            let arms = dtypes.iter().zip(vals.iter()).map(|(dtype, tol)| {
                 let dt = dtype_token(&dtype.to_string());
                 quote! { #dt => #tol }
             });
@@ -222,7 +245,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
                 .collect::<syn::Result<Vec<_>>>()
             {
                 Ok(arms) => arms,
-                Err(err) => return err.into_compile_error().into(),
+                Err(err) => return err.into_compile_error(),
             };
             let arms = arms.iter().map(|(dtype, tol)| quote! { #dtype => #tol });
             quote! {
@@ -239,7 +262,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let static_name = syn::Ident::new(&format!("__STATIC_{fn_name_str}"), fn_name.span());
 
-    TokenStream::from(quote! {
+    quote! {
         #input_fn
 
         #[allow(non_camel_case_types)]
@@ -267,7 +290,63 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         ::metaltile::core::inventory::submit! {
             ::metaltile::harness::test::KernelTestEntry::new(&#static_name, file!())
         }
-    })
+    }
+}
+
+/// Expand `#[test_kernel(...)]` on a setup function.
+///
+/// Without `variants(...)` this emits a single `KernelTest` registration.
+/// With `variants(...)` it emits one registration per variant, substituting
+/// integer constants into the function body and renaming each clone.
+pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let attr2: proc_macro2::TokenStream = attr.into();
+    let item2: proc_macro2::TokenStream = item.into();
+
+    let test_attr = match syn::parse2::<TestAttr>(attr2) {
+        Ok(a) => a,
+        Err(e) => return e.into_compile_error().into(),
+    };
+    let input_fn = match syn::parse2::<ItemFn>(item2) {
+        Ok(f) => f,
+        Err(e) => return e.into_compile_error().into(),
+    };
+
+    if input_fn.sig.inputs.len() != 1 {
+        return syn::Error::new_spanned(
+            &input_fn.sig,
+            "#[test_kernel] setup function must take exactly one argument: `dt: DType`",
+        )
+        .into_compile_error()
+        .into();
+    }
+
+    let Some(spec) = test_attr.variants.as_ref() else {
+        // Plain #[test_kernel] — single expansion.
+        return expand_one(&test_attr, None, input_fn).into();
+    };
+
+    // Variants path: expand once per variant.
+    let base_name = input_fn.sig.ident.to_string();
+    let mut out = proc_macro2::TokenStream::new();
+
+    for i in 0..spec.variant_count {
+        let params_ordered: Vec<(String, i64)> =
+            spec.params.iter().map(|(n, vals)| (n.clone(), vals[i])).collect();
+
+        let variant_fn = match variants::substitute_fn(
+            input_fn.clone(),
+            &params_ordered,
+            &base_name,
+            &spec.suffix,
+        ) {
+            Ok(f) => f,
+            Err(e) => return e.into_compile_error().into(),
+        };
+
+        out.extend(expand_one(&test_attr, None, variant_fn));
+    }
+
+    out.into()
 }
 
 #[cfg(test)]
