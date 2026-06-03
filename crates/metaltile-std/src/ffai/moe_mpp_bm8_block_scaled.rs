@@ -14,8 +14,8 @@
 //! the W-dequant staging block — it emits `element_decode(code) · block_scale`
 //! (no bias) per `mlx/block_scaled_qmm_mpp` instead of the affine `scale·q + bias`.
 //!
-//! Eight kernels cover all nine formats (`fp8_e4m3` reuses the `nvfp8` kernel —
-//! both are 8-bit E4M3 + f32 per-block scale):
+//! Nineteen kernels cover all twenty formats (`fp8_e4m3` reuses the `nvfp8`
+//! kernel — both are 8-bit E4M3 + f32 per-block scale):
 //!
 //! | kernel                                 | element | weight | scale       |
 //! |----------------------------------------|---------|--------|-------------|
@@ -27,12 +27,19 @@
 //! | `mt_fp8_e5m2_moe_gather_qmm_bm8_mpp`   | E5M2    | u8     | f32         |
 //! | `mt_nvfp8_moe_gather_qmm_bm8_mpp`      | E4M3    | u8     | f32         |
 //! | `mt_int8_moe_gather_qmm_bm8_mpp`       | int8    | u8     | f32         |
+//! | `mt_int{2,3,4,5,6}_moe_gather_qmm_bm8_mpp`   | intN  | u32 | f32      |
+//! | `mt_mxint{2,3,4,5,6}_moe_gather_qmm_bm8_mpp` | intN  | u32 | E8M0 (u8) |
+//! | `mt_mxint8_moe_gather_qmm_bm8_mpp`     | int8    | u8     | E8M0 (u8)   |
 //!
-//! Weight layout per expert (stacked `[n_experts, …]`): 4-bit `w [n_out, k_in/8]
-//! u32` (8 E2M1 nibbles/word, LSB-first), 8-bit `w [n_out, k_in] u8` (one code
-//! per byte). Scales `[n_experts, n_out, k_in/block_size]` are u8 (E8M0/E4M3) or
-//! f32 (nvfp8 / legacy fp / int8). No `biases` param — block-scaled is
-//! scale-only.
+//! Weight layout (stacked `[n_experts·n_out, k_in]`, packed in ONE call —
+//! never per-expert pack + concatenation): 4-bit `w [·, k_in/8] u32` (8 E2M1
+//! nibbles/word, LSB-first), 8-bit `w [·, k_in] u8` (one code per byte),
+//! sub-byte int2/3/5/6 `w [·, k_in·BITS/32] u32` (tight LSB-first bit-stream,
+//! per-row word-aligned — `k_in·BITS % 32 == 0` since k_in is a multiple of 32,
+//! one guard word at the very end of the whole stack). The global stacked row
+//! is `g_row = expert·n_out + n`. Scales `[n_experts, n_out, k_in/block_size]`
+//! are u8 (E8M0/E4M3) or f32 (nvfp8 / legacy fp / int / mxint). No `biases`
+//! param — block-scaled is scale-only.
 //!
 //! ## bf16 staging
 //!
@@ -1087,6 +1094,455 @@ pub fn mt_int8_moe_gather_qmm_bm8_mpp<T>(
     }
 }
 
+// ── Symmetric sub-byte integer MoE MPP kernels (int2/3/4/5/6 + MXINT2..6) ───
+// The element is a signed N-bit two's-complement code, tight-bit-packed
+// LSB-first into u32 words. The WHOLE `[n_experts·n_out, k_in]` expert stack is
+// packed in ONE call (the test builds the full stacked matrix and packs once —
+// never per-expert pack + byte concatenation), so it is a single contiguous
+// bit-stream with one guard word at the very end. Every weight row therefore
+// stays word-aligned (k_in a multiple of 32 ⇒ `k_in·BITS % 32 == 0`), and the
+// per-row word base is just `g_row · (k_in·BITS/32)` with the gather's global
+// stacked row `g_row = cur_expert·n_out + (n_tile_base + w_row)` — exactly the
+// `[g_row, k_col]` flat index the 8-bit kernels read, expressed as a bit
+// offset. Each lane stages a 16-K-element stripe of one BN row into `ws` exactly
+// as the 8-bit kernels do; only the per-element decode changes. Decode is the
+// straddle-aware two-word read + float sign-extend from `block_scaled_dequant`'s
+// proven `int_dequant_*` macros, multiplied by the block scale. `$half`/`$full`
+// are 2^(N-1)/2^N passed as literals to keep the constexpr shift math out of the
+// DSL operands. **Dispatch geometry, BM/BN/BK tile sizes, coop-tensor extents,
+// TPG, grid, and the contiguous-expert sub-run walk are byte-identical to the
+// 8-bit kernels above** — only the W-stage decode + scale read differ.
+
+/// FP32-scaled symmetric int MoE gather BGEMM (int2/3/4/5/6): per-element
+/// bit-stream code × per-group FP32 scale, staged into `ws` and fed to the
+/// tensor engine. The lane's BN row maps to global stacked row
+/// `g_row = cur_expert·n_out + (n_tile_base + w_row)`, whose tight bit-stream
+/// base word is `g_row · (k_in·BITS/32)`.
+///
+/// Params: `x [m_total, k_in]`, `w [n_experts·n_out, k_in·BITS/32]` (tight
+/// LSB-first bit-stream, per-row word-aligned), `scales [n_experts, n_out,
+/// k_in/block_size]` (f32), `indices [m_total]`, `out [m_total, n_out]`.
+macro_rules! int_moe_gather_qmm_bm8_mpp_f32 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        #[allow(clippy::too_many_arguments)]
+        pub fn $name<T>(
+            x: Tensor<T>,
+            w: Tensor<u32>,
+            scales: Tensor<f32>,
+            indices: Tensor<u32>,
+            mut out: Tensor<T>,
+            #[constexpr] m_total: u32,
+            #[constexpr] n_out: u32,
+            #[constexpr] k_in: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let n_tile_base = tgid_x * 32u32;
+            let m_tile_base = tgid_y * 8u32;
+            let lane = simd_lane;
+            let groups_per_row = k_in / block_size;
+            let words_per_row = k_in * $bits / 32u32;
+            threadgroup_alloc("xs", 128, coop_stage(T)); // 8 × 16
+            threadgroup_alloc("ws", 512, coop_stage(T)); // 32 × 16
+            threadgroup_alloc("out_scratch", 256, f32); // 8 × 32
+            coop_tile_setup(
+                "gemm",
+                8,
+                32,
+                16, // m, n, k
+                coop_stage(T),
+                "accumulate",
+                "simdgroup",
+                f32,
+                false,
+                true,
+                false,
+                true, // direct_inputs
+                true,
+                16,
+                8, // a: is_tg, ei, eo
+                true,
+                16,
+                32, // b: is_tg, ei, eo
+            );
+            let mut sub_offset = 0u32;
+            for _sub_iter in range(0u32, 8u32, 1u32) {
+                let cur_row = m_tile_base + sub_offset;
+                let cur_in_range = (sub_offset < 8u32) & (cur_row < m_total);
+                let cur_expert = select(cur_in_range, load(indices[cur_row]), 4294967295u32);
+                // Find the run end — first row whose expert differs (or OOB).
+                let mut sub_end = 8u32;
+                let mut found = 0u32;
+                for _ii in range(0u32, 8u32, 1u32) {
+                    let probe = sub_offset + 1u32 + _ii;
+                    let probe_row = m_tile_base + probe;
+                    let probe_in_range = (probe < 8u32) & (probe_row < m_total);
+                    if probe_in_range & (found == 0u32) {
+                        let e = load(indices[probe_row]);
+                        if e != cur_expert {
+                            sub_end = probe;
+                            found = 1u32;
+                        }
+                    }
+                    if (probe < 8u32) & (probe_row >= m_total) & (found == 0u32) {
+                        sub_end = probe;
+                        found = 1u32;
+                    }
+                }
+                let cur_valid = (cur_expert != 4294967295u32) & (sub_offset < 8u32);
+                if cur_valid {
+                    let sb_expert_base = cur_expert * n_out * groups_per_row;
+                    coop_tile_zero("gemm");
+                    for kb in range(0u32, k_in, 16u32) {
+                        for _e in range(0u32, 4u32, 1u32) {
+                            let flat = lane * 4u32 + _e;
+                            let mr = flat / 16u32;
+                            let kc = flat % 16u32;
+                            let gr = m_tile_base + mr;
+                            let in_run = (mr >= sub_offset) & (mr < sub_end) & (gr < m_total);
+                            let safe_g = select(in_run, gr, 0u32);
+                            let xv = load(x[safe_g * k_in + kb + kc]).cast::<f32>();
+                            threadgroup_store("xs", mr * 16u32 + kc, select(in_run, xv, 0.0f32));
+                        }
+                        // Dequant W → ws. 32 lanes (lane = BN row), 16 K-elems/lane.
+                        let w_row = lane; // 0..31 (BN row)
+                        // Global stacked row (single contiguous bit-stream).
+                        let g_row = cur_expert * n_out + n_tile_base + w_row;
+                        let row_word = g_row * words_per_row;
+                        let g = kb / block_size;
+                        let sb_off = sb_expert_base + (n_tile_base + w_row) * groups_per_row + g;
+                        // int2/3/5/6: raw per-group FP32 scale.
+                        let scale = load(scales[sb_off]);
+                        for kc in range(0u32, 16u32, 1u32) {
+                            let bit_off = (kb + kc) * $bits;
+                            let word_idx = bit_off / 32u32;
+                            let bit_in_w = bit_off & 31u32;
+                            let bits_in_w0 = 32u32 - bit_in_w;
+                            let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                            let spill = $bits - lo_bits;
+                            let w0 = load(w[row_word + word_idx]);
+                            let w1 =
+                                load(w[row_word + select(spill > 0u32, word_idx + 1u32, word_idx)]);
+                            let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                            let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                            let q = lo | hi;
+                            let qf = q.cast::<f32>();
+                            let val = select(q >= $half, qf - $full, qf); // sign-extend
+                            threadgroup_store("ws", w_row * 16u32 + kc, val * scale);
+                        }
+                        threadgroup_barrier();
+                        coop_tile_load_a("gemm", "xs", true, coop_stage(T), 16, 8, true);
+                        coop_tile_load_b("gemm", "ws", true, coop_stage(T), 16, 32, true);
+                        coop_tile_run("gemm", true);
+                        threadgroup_barrier();
+                    }
+                    coop_tile_store_c("gemm", "out_scratch", true, f32, 32, 8);
+                    threadgroup_barrier();
+                    // Coop-write out_scratch → out. 32 lanes × 8 elems = 256 = BM*BN.
+                    for _e in range(0u32, 8u32, 1u32) {
+                        let flat = lane * 8u32 + _e;
+                        let mr = flat / 32u32;
+                        let nc = flat % 32u32;
+                        let gr = m_tile_base + mr;
+                        let gc = n_tile_base + nc;
+                        let in_run =
+                            (mr >= sub_offset) & (mr < sub_end) & (gr < m_total) & (gc < n_out);
+                        if in_run {
+                            let v = threadgroup_load("out_scratch", mr * 32u32 + nc);
+                            store(out[gr * n_out + gc], v.cast::<T>());
+                        }
+                    }
+                    threadgroup_barrier();
+                }
+                sub_offset = sub_end;
+            }
+        }
+    };
+}
+int_moe_gather_qmm_bm8_mpp_f32!(mt_int2_moe_gather_qmm_bm8_mpp, 2u32, 2u32, 4.0f32);
+int_moe_gather_qmm_bm8_mpp_f32!(mt_int3_moe_gather_qmm_bm8_mpp, 3u32, 4u32, 8.0f32);
+int_moe_gather_qmm_bm8_mpp_f32!(mt_int4_moe_gather_qmm_bm8_mpp, 4u32, 8u32, 16.0f32);
+int_moe_gather_qmm_bm8_mpp_f32!(mt_int5_moe_gather_qmm_bm8_mpp, 5u32, 16u32, 32.0f32);
+int_moe_gather_qmm_bm8_mpp_f32!(mt_int6_moe_gather_qmm_bm8_mpp, 6u32, 32u32, 64.0f32);
+
+/// E8M0-scaled symmetric int MoE gather BGEMM (MXINT2/3/4/5/6): per-element
+/// bit-stream code × pow-2 (E8M0) block scale `2^(bits-127)`, staged into `ws`.
+/// Same straddle-aware bit-stream decode and staging path as
+/// `int_moe_gather_qmm_bm8_mpp_f32`; only the scale axis differs (one u8
+/// exponent per block instead of a raw f32).
+///
+/// Params: `x [m_total, k_in]`, `w [n_experts·n_out, k_in·BITS/32]` (tight
+/// LSB-first bit-stream, per-row word-aligned), `scales [n_experts, n_out,
+/// k_in/block_size]` (E8M0 byte), `indices [m_total]`, `out [m_total, n_out]`.
+macro_rules! int_moe_gather_qmm_bm8_mpp_e8m0 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        #[allow(clippy::too_many_arguments)]
+        pub fn $name<T>(
+            x: Tensor<T>,
+            w: Tensor<u32>,
+            scales: Tensor<u8>,
+            indices: Tensor<u32>,
+            mut out: Tensor<T>,
+            #[constexpr] m_total: u32,
+            #[constexpr] n_out: u32,
+            #[constexpr] k_in: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let n_tile_base = tgid_x * 32u32;
+            let m_tile_base = tgid_y * 8u32;
+            let lane = simd_lane;
+            let groups_per_row = k_in / block_size;
+            let words_per_row = k_in * $bits / 32u32;
+            threadgroup_alloc("xs", 128, coop_stage(T)); // 8 × 16
+            threadgroup_alloc("ws", 512, coop_stage(T)); // 32 × 16
+            threadgroup_alloc("out_scratch", 256, f32); // 8 × 32
+            coop_tile_setup(
+                "gemm",
+                8,
+                32,
+                16, // m, n, k
+                coop_stage(T),
+                "accumulate",
+                "simdgroup",
+                f32,
+                false,
+                true,
+                false,
+                true, // direct_inputs
+                true,
+                16,
+                8, // a: is_tg, ei, eo
+                true,
+                16,
+                32, // b: is_tg, ei, eo
+            );
+            let mut sub_offset = 0u32;
+            for _sub_iter in range(0u32, 8u32, 1u32) {
+                let cur_row = m_tile_base + sub_offset;
+                let cur_in_range = (sub_offset < 8u32) & (cur_row < m_total);
+                let cur_expert = select(cur_in_range, load(indices[cur_row]), 4294967295u32);
+                // Find the run end — first row whose expert differs (or OOB).
+                let mut sub_end = 8u32;
+                let mut found = 0u32;
+                for _ii in range(0u32, 8u32, 1u32) {
+                    let probe = sub_offset + 1u32 + _ii;
+                    let probe_row = m_tile_base + probe;
+                    let probe_in_range = (probe < 8u32) & (probe_row < m_total);
+                    if probe_in_range & (found == 0u32) {
+                        let e = load(indices[probe_row]);
+                        if e != cur_expert {
+                            sub_end = probe;
+                            found = 1u32;
+                        }
+                    }
+                    if (probe < 8u32) & (probe_row >= m_total) & (found == 0u32) {
+                        sub_end = probe;
+                        found = 1u32;
+                    }
+                }
+                let cur_valid = (cur_expert != 4294967295u32) & (sub_offset < 8u32);
+                if cur_valid {
+                    let sb_expert_base = cur_expert * n_out * groups_per_row;
+                    coop_tile_zero("gemm");
+                    for kb in range(0u32, k_in, 16u32) {
+                        for _e in range(0u32, 4u32, 1u32) {
+                            let flat = lane * 4u32 + _e;
+                            let mr = flat / 16u32;
+                            let kc = flat % 16u32;
+                            let gr = m_tile_base + mr;
+                            let in_run = (mr >= sub_offset) & (mr < sub_end) & (gr < m_total);
+                            let safe_g = select(in_run, gr, 0u32);
+                            let xv = load(x[safe_g * k_in + kb + kc]).cast::<f32>();
+                            threadgroup_store("xs", mr * 16u32 + kc, select(in_run, xv, 0.0f32));
+                        }
+                        // Dequant W → ws. 32 lanes (lane = BN row), 16 K-elems/lane.
+                        let w_row = lane; // 0..31 (BN row)
+                        // Global stacked row (single contiguous bit-stream).
+                        let g_row = cur_expert * n_out + n_tile_base + w_row;
+                        let row_word = g_row * words_per_row;
+                        let g = kb / block_size;
+                        let sb_off = sb_expert_base + (n_tile_base + w_row) * groups_per_row + g;
+                        // MXINT2/3/5/6: E8M0 pow-2 block scale → 2^(bits-127).
+                        let scale = exp2(load(scales[sb_off]).cast::<f32>() - 127.0f32);
+                        for kc in range(0u32, 16u32, 1u32) {
+                            let bit_off = (kb + kc) * $bits;
+                            let word_idx = bit_off / 32u32;
+                            let bit_in_w = bit_off & 31u32;
+                            let bits_in_w0 = 32u32 - bit_in_w;
+                            let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                            let spill = $bits - lo_bits;
+                            let w0 = load(w[row_word + word_idx]);
+                            let w1 =
+                                load(w[row_word + select(spill > 0u32, word_idx + 1u32, word_idx)]);
+                            let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                            let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                            let q = lo | hi;
+                            let qf = q.cast::<f32>();
+                            let val = select(q >= $half, qf - $full, qf); // sign-extend
+                            threadgroup_store("ws", w_row * 16u32 + kc, val * scale);
+                        }
+                        threadgroup_barrier();
+                        coop_tile_load_a("gemm", "xs", true, coop_stage(T), 16, 8, true);
+                        coop_tile_load_b("gemm", "ws", true, coop_stage(T), 16, 32, true);
+                        coop_tile_run("gemm", true);
+                        threadgroup_barrier();
+                    }
+                    coop_tile_store_c("gemm", "out_scratch", true, f32, 32, 8);
+                    threadgroup_barrier();
+                    // Coop-write out_scratch → out. 32 lanes × 8 elems = 256 = BM*BN.
+                    for _e in range(0u32, 8u32, 1u32) {
+                        let flat = lane * 8u32 + _e;
+                        let mr = flat / 32u32;
+                        let nc = flat % 32u32;
+                        let gr = m_tile_base + mr;
+                        let gc = n_tile_base + nc;
+                        let in_run =
+                            (mr >= sub_offset) & (mr < sub_end) & (gr < m_total) & (gc < n_out);
+                        if in_run {
+                            let v = threadgroup_load("out_scratch", mr * 32u32 + nc);
+                            store(out[gr * n_out + gc], v.cast::<T>());
+                        }
+                    }
+                    threadgroup_barrier();
+                }
+                sub_offset = sub_end;
+            }
+        }
+    };
+}
+int_moe_gather_qmm_bm8_mpp_e8m0!(mt_mxint2_moe_gather_qmm_bm8_mpp, 2u32, 2u32, 4.0f32);
+int_moe_gather_qmm_bm8_mpp_e8m0!(mt_mxint3_moe_gather_qmm_bm8_mpp, 3u32, 4u32, 8.0f32);
+int_moe_gather_qmm_bm8_mpp_e8m0!(mt_mxint4_moe_gather_qmm_bm8_mpp, 4u32, 8u32, 16.0f32);
+int_moe_gather_qmm_bm8_mpp_e8m0!(mt_mxint5_moe_gather_qmm_bm8_mpp, 5u32, 16u32, 32.0f32);
+int_moe_gather_qmm_bm8_mpp_e8m0!(mt_mxint6_moe_gather_qmm_bm8_mpp, 6u32, 32u32, 64.0f32);
+
+/// MXINT8 MoE gather BGEMM, BM=8 / BN=32 / BK=16 — 8-bit symmetric codes (byte
+/// layout, block 32), E8M0 pow-2 block scale `2^(bits-127)`. Byte-strided
+/// staging like the int8 / mxfp8 kernels (one byte per code); decode is
+/// `int8_decode → val · scale`. Geometry and coop-tensor extents are
+/// byte-identical to the int8 kernel above.
+///
+/// Params: `x [m_total, k_in]`, `w [n_experts, n_out, k_in]` (int8 codes, 1
+/// byte/elem), `scales [n_experts, n_out, k_in/block_size]` (E8M0 byte),
+/// `indices [m_total]`, `out [m_total, n_out]`.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_mxint8_moe_gather_qmm_bm8_mpp<T>(
+    x: Tensor<T>,
+    w: Tensor<u8>,
+    scales: Tensor<u8>,
+    indices: Tensor<u32>,
+    mut out: Tensor<T>,
+    #[constexpr] m_total: u32,
+    #[constexpr] n_out: u32,
+    #[constexpr] k_in: u32,
+    #[constexpr] block_size: u32,
+) {
+    let n_tile_base = tgid_x * 32u32;
+    let m_tile_base = tgid_y * 8u32;
+    let lane = simd_lane;
+    let groups_per_row = k_in / block_size;
+    threadgroup_alloc("xs", 128, coop_stage(T)); // 8 × 16
+    threadgroup_alloc("ws", 512, coop_stage(T)); // 32 × 16
+    threadgroup_alloc("out_scratch", 256, f32); // 8 × 32
+    coop_tile_setup(
+        "gemm",
+        8,
+        32,
+        16, // m, n, k
+        coop_stage(T),
+        "accumulate",
+        "simdgroup",
+        f32,
+        false,
+        true,
+        false,
+        true, // direct_inputs
+        true,
+        16,
+        8, // a: is_tg, ei, eo
+        true,
+        16,
+        32, // b: is_tg, ei, eo
+    );
+    let mut sub_offset = 0u32;
+    for _sub_iter in range(0u32, 8u32, 1u32) {
+        let cur_row = m_tile_base + sub_offset;
+        let cur_in_range = (sub_offset < 8u32) & (cur_row < m_total);
+        let cur_expert = select(cur_in_range, load(indices[cur_row]), 4294967295u32);
+        // Find the run end — first row whose expert differs (or OOB).
+        let mut sub_end = 8u32;
+        let mut found = 0u32;
+        for _ii in range(0u32, 8u32, 1u32) {
+            let probe = sub_offset + 1u32 + _ii;
+            let probe_row = m_tile_base + probe;
+            let probe_in_range = (probe < 8u32) & (probe_row < m_total);
+            if probe_in_range & (found == 0u32) {
+                let e = load(indices[probe_row]);
+                if e != cur_expert {
+                    sub_end = probe;
+                    found = 1u32;
+                }
+            }
+            if (probe < 8u32) & (probe_row >= m_total) & (found == 0u32) {
+                sub_end = probe;
+                found = 1u32;
+            }
+        }
+        let cur_valid = (cur_expert != 4294967295u32) & (sub_offset < 8u32);
+        if cur_valid {
+            let w_expert_base_8 = cur_expert * n_out * k_in;
+            let sb_expert_base = cur_expert * n_out * groups_per_row;
+            coop_tile_zero("gemm");
+            for kb in range(0u32, k_in, 16u32) {
+                for _e in range(0u32, 4u32, 1u32) {
+                    let flat = lane * 4u32 + _e;
+                    let mr = flat / 16u32;
+                    let kc = flat % 16u32;
+                    let gr = m_tile_base + mr;
+                    let in_run = (mr >= sub_offset) & (mr < sub_end) & (gr < m_total);
+                    let safe_g = select(in_run, gr, 0u32);
+                    let xv = load(x[safe_g * k_in + kb + kc]).cast::<f32>();
+                    threadgroup_store("xs", mr * 16u32 + kc, select(in_run, xv, 0.0f32));
+                }
+                let w_row = lane; // 0..31 (BN row)
+                let g = kb / block_size;
+                let sb_off = sb_expert_base + (n_tile_base + w_row) * groups_per_row + g;
+                // mxint8: E8M0 pow-2 block scale → 2^(bits-127).
+                let scale = exp2(load(scales[sb_off]).cast::<f32>() - 127.0f32);
+                let w_dev = w_expert_base_8 + (n_tile_base + w_row) * k_in + kb;
+                for kc in range(0u32, 16u32, 1u32) {
+                    let elem = int8_decode(load(w[w_dev + kc]).cast::<u32>());
+                    threadgroup_store("ws", w_row * 16u32 + kc, elem * scale);
+                }
+                threadgroup_barrier();
+                coop_tile_load_a("gemm", "xs", true, coop_stage(T), 16, 8, true);
+                coop_tile_load_b("gemm", "ws", true, coop_stage(T), 16, 32, true);
+                coop_tile_run("gemm", true);
+                threadgroup_barrier();
+            }
+            coop_tile_store_c("gemm", "out_scratch", true, f32, 32, 8);
+            threadgroup_barrier();
+            // Coop-write out_scratch → out. 32 lanes × 8 elems = 256 = BM*BN.
+            for _e in range(0u32, 8u32, 1u32) {
+                let flat = lane * 8u32 + _e;
+                let mr = flat / 32u32;
+                let nc = flat % 32u32;
+                let gr = m_tile_base + mr;
+                let gc = n_tile_base + nc;
+                let in_run = (mr >= sub_offset) & (mr < sub_end) & (gr < m_total) & (gc < n_out);
+                if in_run {
+                    let v = threadgroup_load("out_scratch", mr * 32u32 + nc);
+                    store(out[gr * n_out + gc], v.cast::<T>());
+                }
+            }
+            threadgroup_barrier();
+        }
+        sub_offset = sub_end;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use metaltile_codegen::msl::MslGenerator;
@@ -1109,6 +1565,17 @@ mod tests {
                 ("mt_fp8_e5m2_moe_gather_qmm_bm8_mpp", 4),
                 ("mt_nvfp8_moe_gather_qmm_bm8_mpp", 4),
                 ("mt_int8_moe_gather_qmm_bm8_mpp", 4),
+                ("mt_int2_moe_gather_qmm_bm8_mpp", 4),
+                ("mt_int3_moe_gather_qmm_bm8_mpp", 4),
+                ("mt_int4_moe_gather_qmm_bm8_mpp", 4),
+                ("mt_int5_moe_gather_qmm_bm8_mpp", 4),
+                ("mt_int6_moe_gather_qmm_bm8_mpp", 4),
+                ("mt_mxint2_moe_gather_qmm_bm8_mpp", 4),
+                ("mt_mxint3_moe_gather_qmm_bm8_mpp", 4),
+                ("mt_mxint4_moe_gather_qmm_bm8_mpp", 4),
+                ("mt_mxint5_moe_gather_qmm_bm8_mpp", 4),
+                ("mt_mxint6_moe_gather_qmm_bm8_mpp", 4),
+                ("mt_mxint8_moe_gather_qmm_bm8_mpp", 4),
             ];
             let irs = [
                 mt_mxfp4_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
@@ -1118,6 +1585,17 @@ mod tests {
                 mt_fp8_e5m2_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
                 mt_nvfp8_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
                 mt_int8_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+                mt_int2_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+                mt_int3_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+                mt_int4_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+                mt_int5_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+                mt_int6_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+                mt_mxint2_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+                mt_mxint3_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+                mt_mxint4_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+                mt_mxint5_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+                mt_mxint6_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+                mt_mxint8_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
             ];
             for ((name, n_const), k) in kernels.iter().zip(irs.iter()) {
                 assert_eq!(&k.name, name);
@@ -1206,10 +1684,11 @@ pub mod kernel_tests {
     /// Build a `TestSetup` for a block-scaled indexed-MoE-MPP kernel (BM=8).
     /// Mirrors `int8_indexed_setup`: per-row expert routing, dtype-rounded x,
     /// oracle = `Σ_k x[t,k] · dequant(W_expert)[nc,k]`. Differs in that the
-    /// weight slab is packed per expert via `quant::format::pack` (no biases
-    /// buffer; scale dtype per format; weight dtype U32 for 4-bit / U8 for
-    /// 8-bit). `block_size` and the nvfp4 `global` constexpr come from the
-    /// packed tensors. The BM=8 m-tile height drives `ceil(m_total/8)` m-tiles.
+    /// whole `[n_experts·n_out, k_in]` expert stack is packed in ONE
+    /// `quant::format::pack` call (no biases buffer; scale dtype per format;
+    /// weight dtype U32 for sub-byte bit-streams / U8 for 8-bit). `block_size`
+    /// and the nvfp4 `global` constexpr come from the packed tensor. The BM=8
+    /// m-tile height drives `ceil(m_total/8)` m-tiles.
     #[allow(clippy::too_many_arguments)]
     fn block_indexed_setup(
         kernel: Kernel,
@@ -1219,69 +1698,72 @@ pub mod kernel_tests {
     ) -> TestSetup {
         let BlockTestShape { n_experts, m_total, n_out, k_in } = shape;
         let block_size = fmt.block_size();
+        let stack_rows = n_experts * n_out;
 
         // Per-row expert indices, sorted (post-permute layout).
         let indices: Vec<u32> = (0..m_total).map(|r| (r / (m_total / n_experts)) as u32).collect();
 
-        // Deterministic per-expert weight slab → pack each `[n_out, k_in]`.
-        // Mirrors the magnitude pattern used by the non-MoE block-scaled test.
-        let slab_for = |e: usize| -> Vec<f32> {
-            (0..n_out * k_in)
-                .map(|i| {
-                    let r = (i / k_in) as f32;
-                    let c = (i % k_in) as f32;
-                    let mag = (0.4 + ((r + e as f32) % 7.0) * 0.1) * (0.1 + (c % 13.0) * 0.15);
-                    if i % 3 == 0 { -mag } else { mag }
-                })
-                .collect()
-        };
-
-        // Pack every expert; concat codes + scales; track per-format dtypes and
-        // the max `global` across experts (nvfp4 two-level scaling).
-        let four_bit = fmt.element_bits() == 4;
-        let f32_scale = matches!(
-            fmt,
-            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
-        );
-        let mut codes_bytes: Vec<u8> = Vec::new();
-        let mut scales_bytes: Vec<u8> = Vec::new();
-        let mut packed_per_expert = Vec::with_capacity(n_experts);
-        let mut global = 0.0f32;
-        for e in 0..n_experts {
-            let slab = slab_for(e);
-            let p = crate::quant::format::pack(fmt, &slab, n_out, k_in);
-            global = global.max(p.global);
-            codes_bytes.extend_from_slice(&p.codes);
-            scales_bytes.extend_from_slice(&p.scales);
-            packed_per_expert.push(p);
-        }
+        // Build the FULL `[n_experts·n_out, k_in]` stacked weight matrix (all
+        // experts stacked along rows) and pack it in ONE call — never per-expert
+        // packing + byte concatenation. For sub-byte widths (3/5/6-bit) `pack`
+        // appends a single guard word at the very end of the contiguous
+        // bit-stream; concatenating per-expert buffers would instead inject a
+        // guard word mid-stream and misalign every expert after the first. One
+        // stacked pack is byte-identical to the old per-expert concat for the
+        // 4-bit/8-bit formats (those widths divide 32 ⇒ exact word count, no
+        // guard word) and correct for every sub-byte width. `k_in` is a multiple
+        // of 32, so each row's bit-stream is word-aligned for every width. The
+        // magnitude pattern mirrors the non-MoE block-scaled test, keyed off the
+        // global stacked row (expert folded into the row index).
+        let stacked: Vec<f32> = (0..stack_rows * k_in)
+            .map(|i| {
+                let g_row = i / k_in;
+                let e = (g_row / n_out) as f32;
+                let r = (g_row % n_out) as f32;
+                let c = (i % k_in) as f32;
+                let mag = (0.4 + ((r + e) % 7.0) * 0.1) * (0.1 + (c % 13.0) * 0.15);
+                if i % 3 == 0 { -mag } else { mag }
+            })
+            .collect();
+        let p = crate::quant::format::pack(fmt, &stacked, stack_rows, k_in);
+        let global = p.global;
+        // Dequant the full stack once; row `expert·n_out + nc` is expert `e`'s
+        // output row `nc`.
+        let wdq = crate::quant::format::dequant(fmt, &p, stack_rows, k_in);
 
         // Activations: dtype-rounded so the GPU sees exactly the oracle's x.
         let x_f: Vec<f32> = (0..m_total * k_in).map(|i| ((i % 11) as f32 - 5.0) * 0.02).collect();
         let x = unpack_f32(&pack_f32(&x_f, dt), dt);
 
-        // Oracle: out[t, nc] = Σ_k x[t, k] · dequant(W_{expert(t)})[nc, k].
+        // Oracle: out[t, nc] = Σ_k x[t, k] · dequant(W)[expert(t)·n_out + nc, k].
         let mut expected = vec![0.0f32; m_total * n_out];
         for t in 0..m_total {
-            let expert = indices[t] as usize;
-            let wdq = crate::quant::format::dequant(fmt, &packed_per_expert[expert], n_out, k_in);
+            let base = indices[t] as usize * n_out;
             for nc in 0..n_out {
                 let mut acc = 0.0f32;
                 for kk in 0..k_in {
-                    acc += x[t * k_in + kk] * wdq[nc * k_in + kk];
+                    acc += x[t * k_in + kk] * wdq[(base + nc) * k_in + kk];
                 }
                 expected[t * n_out + nc] = acc;
             }
         }
 
-        let weight_dt = if four_bit { DType::U32 } else { DType::U8 };
-        let scales_dt = if f32_scale { DType::F32 } else { DType::U8 };
+        // 8-bit codes bind as one uchar each; every sub-byte width (4-bit nibble
+        // packs + int2/3/5/6 tight bit-streams) binds as packed u32 words. FP32
+        // scales bind as f32; E8M0/E4M3 scales as one byte. Both axes are driven
+        // off the format so new integer formats pick up the right buffer types.
+        let weight_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
+        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
+            DType::F32
+        } else {
+            DType::U8
+        };
 
         let mut s = TestSetup::new(kernel)
             .mode(KernelMode::Reduction)
             .input(TestBuffer::from_vec("x", pack_f32(&x_f, dt), dt))
-            .input(TestBuffer::from_vec("w", codes_bytes, weight_dt))
-            .input(TestBuffer::from_vec("scales", scales_bytes, scales_dt))
+            .input(TestBuffer::from_vec("w", p.codes, weight_dt))
+            .input(TestBuffer::from_vec("scales", p.scales, scales_dt))
             .input(TestBuffer::from_vec("indices", u32_bytes(&indices), DType::U32))
             .input(TestBuffer::zeros("out", m_total * n_out, dt))
             .constexpr("m_total", m_total as u32)
@@ -1385,6 +1867,110 @@ pub mod kernel_tests {
             dt,
         )
     }
+    // Symmetric sub-byte ints (FP32 group scale, group 64) + MXINT (E8M0 block
+    // scale, block 32) + MXINT8 (8-bit, E8M0). k_in=64 is a multiple of 32, so
+    // each weight row's bit-stream is word-aligned for every width, and the
+    // whole `[n_experts·n_out, k_in]` stack is packed once → one contiguous
+    // bit-stream (guard word at the very end). Kernel + oracle share the codec.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_int2_moe_gather_qmm_bm8_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_int2_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+            QFormat::Int2,
+            SHAPE,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_int3_moe_gather_qmm_bm8_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_int3_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+            QFormat::Int3,
+            SHAPE,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_int4_moe_gather_qmm_bm8_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_int4_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+            QFormat::Int4,
+            SHAPE,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_int5_moe_gather_qmm_bm8_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_int5_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+            QFormat::Int5,
+            SHAPE,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_int6_moe_gather_qmm_bm8_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_int6_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+            QFormat::Int6,
+            SHAPE,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_mxint2_moe_gather_qmm_bm8_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_mxint2_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+            QFormat::Mxint2,
+            SHAPE,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_mxint3_moe_gather_qmm_bm8_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_mxint3_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+            QFormat::Mxint3,
+            SHAPE,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_mxint4_moe_gather_qmm_bm8_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_mxint4_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+            QFormat::Mxint4,
+            SHAPE,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_mxint5_moe_gather_qmm_bm8_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_mxint5_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+            QFormat::Mxint5,
+            SHAPE,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_mxint6_moe_gather_qmm_bm8_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_mxint6_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+            QFormat::Mxint6,
+            SHAPE,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_mxint8_moe_gather_qmm_bm8_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_mxint8_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt),
+            QFormat::Mxint8,
+            SHAPE,
+            dt,
+        )
+    }
 }
 
 /// New-syntax benchmarks for the MPP block-scaled MoE BGEMM (BM=8). Random
@@ -1409,16 +1995,21 @@ pub mod kernel_benches {
         let BlockBenchShape { n_experts, m_total, n_out, k_in } = shape;
         let block_size = fmt.block_size();
         let groups_per_row = k_in / block_size;
-        // Codes: 4-bit → k_in/8 u32 words/row; 8-bit → k_in u8 bytes/row.
-        let (codes_len, codes_dt) = if fmt.element_bits() == 4 {
-            (n_experts * n_out * k_in / 8, DType::U32)
+        // The whole `[n_experts·n_out, k_in]` expert stack is one contiguous
+        // bit-stream (single pack), so its code length is `bitstream_words` over
+        // the *total* element count (one guard word for the whole stack). 8-bit
+        // codes are one uchar each; every sub-byte width (4-bit nibble packs +
+        // int2/3/5/6 tight bit-streams) tight-bit-packs into u32 words
+        // (`bitstream_words` collapses to the old `n·k/8` for the 4-bit case).
+        // Both axes are driven off the format so new integer formats pick up the
+        // right buffer types with no regression for the pre-existing formats.
+        let stack_n = n_experts * n_out * k_in;
+        let (codes_len, codes_dt) = if fmt.element_bits() == 8 {
+            (stack_n, DType::U8)
         } else {
-            (n_experts * n_out * k_in, DType::U8)
+            (crate::quant::format::bitstream_words(stack_n, fmt.element_bits()), DType::U32)
         };
-        let scales_dt = if matches!(
-            fmt,
-            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
-        ) {
+        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
             DType::F32
         } else {
             DType::U8
@@ -1509,5 +2100,52 @@ pub mod kernel_benches {
     #[bench(name = "ffai/moe_mpp_bm8_block/int8", dtypes = [f32, f16, bf16])]
     fn bench_int8(dt: DType) -> BenchSetup {
         block_bench(mt_int8_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt), QFormat::Int8, SHAPE, dt)
+    }
+    // Symmetric sub-byte ints (FP32 group scale) + MXINT (E8M0 block scale) +
+    // MXINT8 (8-bit, E8M0). k_in=4096 is a multiple of 32 → word-aligned per
+    // width; the whole expert stack is one contiguous bit-stream (single pack).
+    #[bench(name = "ffai/moe_mpp_bm8_block/int2", dtypes = [f32, f16, bf16])]
+    fn bench_int2(dt: DType) -> BenchSetup {
+        block_bench(mt_int2_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt), QFormat::Int2, SHAPE, dt)
+    }
+    #[bench(name = "ffai/moe_mpp_bm8_block/int3", dtypes = [f32, f16, bf16])]
+    fn bench_int3(dt: DType) -> BenchSetup {
+        block_bench(mt_int3_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt), QFormat::Int3, SHAPE, dt)
+    }
+    #[bench(name = "ffai/moe_mpp_bm8_block/int4", dtypes = [f32, f16, bf16])]
+    fn bench_int4(dt: DType) -> BenchSetup {
+        block_bench(mt_int4_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt), QFormat::Int4, SHAPE, dt)
+    }
+    #[bench(name = "ffai/moe_mpp_bm8_block/int5", dtypes = [f32, f16, bf16])]
+    fn bench_int5(dt: DType) -> BenchSetup {
+        block_bench(mt_int5_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt), QFormat::Int5, SHAPE, dt)
+    }
+    #[bench(name = "ffai/moe_mpp_bm8_block/int6", dtypes = [f32, f16, bf16])]
+    fn bench_int6(dt: DType) -> BenchSetup {
+        block_bench(mt_int6_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt), QFormat::Int6, SHAPE, dt)
+    }
+    #[bench(name = "ffai/moe_mpp_bm8_block/mxint2", dtypes = [f32, f16, bf16])]
+    fn bench_mxint2(dt: DType) -> BenchSetup {
+        block_bench(mt_mxint2_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt), QFormat::Mxint2, SHAPE, dt)
+    }
+    #[bench(name = "ffai/moe_mpp_bm8_block/mxint3", dtypes = [f32, f16, bf16])]
+    fn bench_mxint3(dt: DType) -> BenchSetup {
+        block_bench(mt_mxint3_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt), QFormat::Mxint3, SHAPE, dt)
+    }
+    #[bench(name = "ffai/moe_mpp_bm8_block/mxint4", dtypes = [f32, f16, bf16])]
+    fn bench_mxint4(dt: DType) -> BenchSetup {
+        block_bench(mt_mxint4_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt), QFormat::Mxint4, SHAPE, dt)
+    }
+    #[bench(name = "ffai/moe_mpp_bm8_block/mxint5", dtypes = [f32, f16, bf16])]
+    fn bench_mxint5(dt: DType) -> BenchSetup {
+        block_bench(mt_mxint5_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt), QFormat::Mxint5, SHAPE, dt)
+    }
+    #[bench(name = "ffai/moe_mpp_bm8_block/mxint6", dtypes = [f32, f16, bf16])]
+    fn bench_mxint6(dt: DType) -> BenchSetup {
+        block_bench(mt_mxint6_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt), QFormat::Mxint6, SHAPE, dt)
+    }
+    #[bench(name = "ffai/moe_mpp_bm8_block/mxint8", dtypes = [f32, f16, bf16])]
+    fn bench_mxint8(dt: DType) -> BenchSetup {
+        block_bench(mt_mxint8_moe_gather_qmm_bm8_mpp::kernel_ir_for(dt), QFormat::Mxint8, SHAPE, dt)
     }
 }
