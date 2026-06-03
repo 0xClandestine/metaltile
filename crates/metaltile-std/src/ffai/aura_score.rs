@@ -47,11 +47,6 @@
 
 use metaltile::kernel;
 
-// Supported AURA bit-widths for the score kernel family.
-// Keep in sync with `variants(BITS = [...])` on the kernel and bench below.
-#[allow(dead_code)]
-const SUPPORTED_BITS: &[u32] = &[2, 3, 4, 6, 8];
-
 /// AURA quantized attention-score kernel — variable bit-widths (2, 3, 4, 6, 8).
 ///
 /// Produces kernels: `aura_score_int2`, `aura_score_int3`, `aura_score_int4`,

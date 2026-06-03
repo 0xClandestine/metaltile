@@ -41,10 +41,6 @@
 
 use metaltile::kernel;
 
-// Supported bit-widths for the dequant_gather family.
-// Keep in sync with `variants(BITS = [...])` on the kernel, test, and bench below.
-#[allow(dead_code)]
-const SUPPORTED_BITS: &[u32] = &[2, 3, 4, 5, 6, 8];
 
 /// Dequantizing token-gather kernel — variable bit-widths (2, 3, 4, 5, 6, 8).
 ///

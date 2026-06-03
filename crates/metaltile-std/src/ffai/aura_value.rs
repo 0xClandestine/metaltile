@@ -31,11 +31,6 @@
 
 use metaltile::kernel;
 
-// Supported AURA bit-widths for the value-aggregation family.
-// Keep in sync with `variants(BITS = [...])` on the kernel and bench below.
-#[allow(dead_code)]
-const SUPPORTED_BITS: &[u32] = &[2, 3, 4, 6, 8];
-
 #[rustfmt::skip]
 /// AURA quantized value-aggregation kernel — variable bit-widths (2, 3, 4, 6, 8).
 ///

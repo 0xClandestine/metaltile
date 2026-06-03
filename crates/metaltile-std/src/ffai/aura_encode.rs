@@ -83,11 +83,6 @@
 
 use metaltile::kernel;
 
-// Supported AURA bit-widths for the fused encode kernel family.
-// Keep in sync with `variants(BITS = [...], LEVELS = [...])` on the kernel and bench below.
-#[allow(dead_code)]
-const SUPPORTED_BITS: &[u32] = &[2, 3, 4, 6, 8];
-
 /// AURA fused rotation-encode kernel — variable bit-widths (2, 3, 4, 6, 8).
 ///
 /// Produces kernels: `aura_encode_int2`, `aura_encode_int3`, `aura_encode_int4`,

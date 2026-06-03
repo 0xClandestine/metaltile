@@ -521,10 +521,6 @@ pub fn mt_moe_gather_qmm_b8<T>(
     }
 }
 
-// Odd bit-widths for the grouped-gather scalar/CSR QMM family.
-// Keep in sync with `variants(BITS = [...])` on the kernel, tests, and bench below.
-#[allow(dead_code)]
-const GATHER_QMM_ODD_BITS: &[u32] = &[3, 5, 6];
 
 /// Grouped-gather quantized matmul — odd bit-widths (3, 5, 6).
 ///
@@ -2548,10 +2544,6 @@ pub fn mt_moe_gather_qmm_mma_int4<T>(
 // `w` layout: `[E, N, k_in*bits/32]` uint32 bit-stream packed.
 // `group_size` must divide `k_in`; `pack_in_row*8` group-aligned so the
 // per-lane group index is hoistable.
-// Bit-widths for the tiled-MMA grouped-gather QMM family (odd + int8).
-// Keep in sync with `variants(BITS = [...])` on the kernel and bench below.
-#[allow(dead_code)]
-const GATHER_QMM_MMA_BITS: &[u32] = &[3, 5, 6, 8];
 
 /// Tiled-MMA grouped-gather quantized matmul — variable bit-widths (3, 5, 6, 8).
 ///

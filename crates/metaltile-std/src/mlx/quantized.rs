@@ -4711,10 +4711,6 @@ pub fn mt_qvm_int4_fast<T>(
 // Mirrors the `gather_qmm_mma!` macro in `ffai/moe.rs` — exactly the same
 // coop-dequant strategy, just applied to the dense (non-expert) GEMM.
 //
-// Odd bit-widths for the dense MMA QMM family.
-// Keep in sync with `variants(BITS = [...])` on the kernel and bench below.
-#[allow(dead_code)]
-const QMM_MMA_ODD_BITS: &[u32] = &[3, 5, 6];
 
 // `w` layout: `[N, k*bits/32]` uint32 LSB-first bit-stream packed.
 // `group_size` must divide `k`; the 8-K span per lane within a BK=32
