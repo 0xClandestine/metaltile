@@ -1043,6 +1043,380 @@ pub fn mt_int8_moe_gather_qmm_bm16_mpp<T>(
     }
 }
 
+// ── FP16-scale float twins (nvfp8_f16 / fp4_f16 / fp8_e5m2_f16) ─────────────
+// Near-clones of the FP32-scaled float kernels above: the element decode
+// (E4M3 / E2M1 / E5M2), weight indexing, dispatch geometry, staging, and
+// reduction are IDENTICAL. The ONLY change is the per-block scale tensor —
+// `scales: Tensor<f16>` read as `load(scales[..]).cast::<f32>()` (the native
+// `half` load matches `quant::format::dequant`'s FP16 decode). See
+// `mlx/block_scaled_dequant.rs`'s `mt_nvfp8_f16_dequant` etc. for the proven
+// scale-read pattern.
+
+/// nvfp8 (FP16-scale) MoE gather BGEMM, BM=16 / BN=32 / BK=16 — 8-bit E4M3
+/// weights, per-block FP16 scale. Twin of `mt_nvfp8_moe_gather_qmm_bm16_mpp`;
+/// also serves **fp8_e4m3_f16** (same 8-bit-E4M3 + f16-scale shape; only the
+/// `block_size` constexpr differs).
+///
+/// Params: `x [m_total, k_in]`, `w [n_experts, n_out, k_in]` (E4M3, 1
+/// byte/elem), `scales [n_experts, n_out, k_in/block_size]` (f16),
+/// `indices [m_total]`, `out [m_total, n_out]`.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_nvfp8_f16_moe_gather_qmm_bm16_mpp<T>(
+    x: Tensor<T>,
+    w: Tensor<u8>,
+    scales: Tensor<f16>,
+    indices: Tensor<u32>,
+    mut out: Tensor<T>,
+    #[constexpr] m_total: u32,
+    #[constexpr] n_out: u32,
+    #[constexpr] k_in: u32,
+    #[constexpr] block_size: u32,
+) {
+    let n_tile_base = tgid_x * 32u32;
+    let m_tile_base = tgid_y * 16u32;
+    let lane = simd_lane;
+    let groups_per_row = k_in / block_size;
+    threadgroup_alloc("xs", 256, coop_stage(T)); // 16 × 16
+    threadgroup_alloc("ws", 512, coop_stage(T)); // 32 × 16
+    threadgroup_alloc("out_scratch", 512, f32); // 16 × 32
+    coop_tile_setup(
+        "gemm",
+        16,
+        32,
+        16, // m, n, k
+        coop_stage(T),
+        "accumulate",
+        "simdgroup",
+        f32,
+        false,
+        true,
+        false,
+    );
+    let mut sub_offset = 0u32;
+    for _sub_iter in range(0u32, 16u32, 1u32) {
+        let cur_row = m_tile_base + sub_offset;
+        let cur_in_range = (sub_offset < 16u32) & (cur_row < m_total);
+        let cur_expert = select(cur_in_range, load(indices[cur_row]), 4294967295u32);
+        // Find the run end — first row whose expert differs (or OOB).
+        let mut sub_end = 16u32;
+        let mut found = 0u32;
+        for _ii in range(0u32, 16u32, 1u32) {
+            let probe = sub_offset + 1u32 + _ii;
+            let probe_row = m_tile_base + probe;
+            let probe_in_range = (probe < 16u32) & (probe_row < m_total);
+            if probe_in_range & (found == 0u32) {
+                let e = load(indices[probe_row]);
+                if e != cur_expert {
+                    sub_end = probe;
+                    found = 1u32;
+                }
+            }
+            if (probe < 16u32) & (probe_row >= m_total) & (found == 0u32) {
+                sub_end = probe;
+                found = 1u32;
+            }
+        }
+        let cur_valid = (cur_expert != 4294967295u32) & (sub_offset < 16u32);
+        if cur_valid {
+            let w_expert_base_8 = cur_expert * n_out * k_in;
+            let sb_expert_base = cur_expert * n_out * groups_per_row;
+            coop_tile_zero("gemm");
+            for kb in range(0u32, k_in, 16u32) {
+                for _e in range(0u32, 8u32, 1u32) {
+                    let flat = lane * 8u32 + _e;
+                    let mr = flat / 16u32;
+                    let kc = flat % 16u32;
+                    let gr = m_tile_base + mr;
+                    let in_run = (mr >= sub_offset) & (mr < sub_end) & (gr < m_total);
+                    let safe_g = select(in_run, gr, 0u32);
+                    let xv = load(x[safe_g * k_in + kb + kc]).cast::<f32>();
+                    threadgroup_store("xs", mr * 16u32 + kc, select(in_run, xv, 0.0f32));
+                }
+                let w_row = lane; // 0..31 (BN row)
+                let g = kb / block_size;
+                let sb_off = sb_expert_base + (n_tile_base + w_row) * groups_per_row + g;
+                // nvfp8 f16: per-block FP16 scale (native half load → f32).
+                let scale = load(scales[sb_off]).cast::<f32>();
+                let w_dev = w_expert_base_8 + (n_tile_base + w_row) * k_in + kb;
+                for kc in range(0u32, 16u32, 1u32) {
+                    let elem = e4m3_decode(load(w[w_dev + kc]).cast::<u32>());
+                    threadgroup_store("ws", w_row * 16u32 + kc, elem * scale);
+                }
+                threadgroup_barrier();
+                coop_tile_load_a("gemm", "xs", true, coop_stage(T), 16, 16);
+                coop_tile_load_b("gemm", "ws", true, coop_stage(T), 16, 32);
+                coop_tile_run("gemm");
+                threadgroup_barrier();
+            }
+            coop_tile_store_c("gemm", "out_scratch", true, f32, 32, 16);
+            threadgroup_barrier();
+            // Coop-write out_scratch → out with the per-row expert mask.
+            // 32 lanes × 16 elems = 512 = BM*BN.
+            for _e in range(0u32, 16u32, 1u32) {
+                let flat = lane * 16u32 + _e;
+                let mr = flat / 32u32;
+                let nc = flat % 32u32;
+                let gr = m_tile_base + mr;
+                let gc = n_tile_base + nc;
+                let in_run = (mr >= sub_offset) & (mr < sub_end) & (gr < m_total) & (gc < n_out);
+                if in_run {
+                    let v = threadgroup_load("out_scratch", mr * 32u32 + nc);
+                    store(out[gr * n_out + gc], v.cast::<T>());
+                }
+            }
+            threadgroup_barrier();
+        }
+        sub_offset = sub_end;
+    }
+}
+
+/// Legacy fp4 (FP16-scale) MoE gather BGEMM, BM=16 / BN=32 / BK=16 — E2M1
+/// weights, per-group FP16 scale. Twin of `mt_fp4_moe_gather_qmm_bm16_mpp`.
+///
+/// Params: `x [m_total, k_in]`, `w [n_experts, n_out, k_in/8]` (E2M1, 8
+/// nibbles/u32), `scales [n_experts, n_out, k_in/block_size]` (f16),
+/// `indices [m_total]`, `out [m_total, n_out]`.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_fp4_f16_moe_gather_qmm_bm16_mpp<T>(
+    x: Tensor<T>,
+    w: Tensor<u32>,
+    scales: Tensor<f16>,
+    indices: Tensor<u32>,
+    mut out: Tensor<T>,
+    #[constexpr] m_total: u32,
+    #[constexpr] n_out: u32,
+    #[constexpr] k_in: u32,
+    #[constexpr] block_size: u32,
+) {
+    let n_tile_base = tgid_x * 32u32;
+    let m_tile_base = tgid_y * 16u32;
+    let lane = simd_lane;
+    let packs_per_row = k_in / 8u32;
+    let groups_per_row = k_in / block_size;
+    threadgroup_alloc("xs", 256, coop_stage(T)); // 16 × 16
+    threadgroup_alloc("ws", 512, coop_stage(T)); // 32 × 16
+    threadgroup_alloc("out_scratch", 512, f32); // 16 × 32
+    coop_tile_setup(
+        "gemm",
+        16,
+        32,
+        16, // m, n, k
+        coop_stage(T),
+        "accumulate",
+        "simdgroup",
+        f32,
+        false,
+        true,
+        false,
+    );
+    let mut sub_offset = 0u32;
+    for _sub_iter in range(0u32, 16u32, 1u32) {
+        let cur_row = m_tile_base + sub_offset;
+        let cur_in_range = (sub_offset < 16u32) & (cur_row < m_total);
+        let cur_expert = select(cur_in_range, load(indices[cur_row]), 4294967295u32);
+        // Find the run end — first row whose expert differs (or OOB).
+        let mut sub_end = 16u32;
+        let mut found = 0u32;
+        for _ii in range(0u32, 16u32, 1u32) {
+            let probe = sub_offset + 1u32 + _ii;
+            let probe_row = m_tile_base + probe;
+            let probe_in_range = (probe < 16u32) & (probe_row < m_total);
+            if probe_in_range & (found == 0u32) {
+                let e = load(indices[probe_row]);
+                if e != cur_expert {
+                    sub_end = probe;
+                    found = 1u32;
+                }
+            }
+            if (probe < 16u32) & (probe_row >= m_total) & (found == 0u32) {
+                sub_end = probe;
+                found = 1u32;
+            }
+        }
+        let cur_valid = (cur_expert != 4294967295u32) & (sub_offset < 16u32);
+        if cur_valid {
+            let w_expert_base = cur_expert * n_out * packs_per_row;
+            let sb_expert_base = cur_expert * n_out * groups_per_row;
+            coop_tile_zero("gemm");
+            for kb in range(0u32, k_in, 16u32) {
+                for _e in range(0u32, 8u32, 1u32) {
+                    let flat = lane * 8u32 + _e;
+                    let mr = flat / 16u32;
+                    let kc = flat % 16u32;
+                    let gr = m_tile_base + mr;
+                    let in_run = (mr >= sub_offset) & (mr < sub_end) & (gr < m_total);
+                    let safe_g = select(in_run, gr, 0u32);
+                    let xv = load(x[safe_g * k_in + kb + kc]).cast::<f32>();
+                    threadgroup_store("xs", mr * 16u32 + kc, select(in_run, xv, 0.0f32));
+                }
+                for _pi in range(0u32, 2u32, 1u32) {
+                    let pack_id = lane * 2u32 + _pi;
+                    let w_row = pack_id / 2u32;
+                    let pack_col = pack_id % 2u32;
+                    let pack_dev = w_expert_base
+                        + (n_tile_base + w_row) * packs_per_row
+                        + kb / 8u32
+                        + pack_col;
+                    let packed = load(w[pack_dev]);
+                    let k_off = kb + pack_col * 8u32;
+                    let g = k_off / block_size;
+                    let sb_off = sb_expert_base + (n_tile_base + w_row) * groups_per_row + g;
+                    // fp4 f16: per-group FP16 scale (native half load → f32).
+                    let scale = load(scales[sb_off]).cast::<f32>();
+                    let dst = w_row * 16u32 + pack_col * 8u32;
+                    for _j in range(0u32, 8u32, 1u32) {
+                        let nib = (packed >> (_j * 4u32)) & 15u32;
+                        threadgroup_store("ws", dst + _j, e2m1_decode(nib) * scale);
+                    }
+                }
+                threadgroup_barrier();
+                coop_tile_load_a("gemm", "xs", true, coop_stage(T), 16, 16);
+                coop_tile_load_b("gemm", "ws", true, coop_stage(T), 16, 32);
+                coop_tile_run("gemm");
+                threadgroup_barrier();
+            }
+            coop_tile_store_c("gemm", "out_scratch", true, f32, 32, 16);
+            threadgroup_barrier();
+            // Coop-write out_scratch → out with the per-row expert mask.
+            // 32 lanes × 16 elems = 512 = BM*BN.
+            for _e in range(0u32, 16u32, 1u32) {
+                let flat = lane * 16u32 + _e;
+                let mr = flat / 32u32;
+                let nc = flat % 32u32;
+                let gr = m_tile_base + mr;
+                let gc = n_tile_base + nc;
+                let in_run = (mr >= sub_offset) & (mr < sub_end) & (gr < m_total) & (gc < n_out);
+                if in_run {
+                    let v = threadgroup_load("out_scratch", mr * 32u32 + nc);
+                    store(out[gr * n_out + gc], v.cast::<T>());
+                }
+            }
+            threadgroup_barrier();
+        }
+        sub_offset = sub_end;
+    }
+}
+
+/// Legacy fp8 (E5M2, FP16-scale) MoE gather BGEMM, BM=16 / BN=32 / BK=16 —
+/// 8-bit E5M2 weights, per-group FP16 scale. Twin of
+/// `mt_fp8_e5m2_moe_gather_qmm_bm16_mpp`.
+///
+/// Params: `x [m_total, k_in]`, `w [n_experts, n_out, k_in]` (E5M2, 1
+/// byte/elem), `scales [n_experts, n_out, k_in/block_size]` (f16),
+/// `indices [m_total]`, `out [m_total, n_out]`.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_fp8_e5m2_f16_moe_gather_qmm_bm16_mpp<T>(
+    x: Tensor<T>,
+    w: Tensor<u8>,
+    scales: Tensor<f16>,
+    indices: Tensor<u32>,
+    mut out: Tensor<T>,
+    #[constexpr] m_total: u32,
+    #[constexpr] n_out: u32,
+    #[constexpr] k_in: u32,
+    #[constexpr] block_size: u32,
+) {
+    let n_tile_base = tgid_x * 32u32;
+    let m_tile_base = tgid_y * 16u32;
+    let lane = simd_lane;
+    let groups_per_row = k_in / block_size;
+    threadgroup_alloc("xs", 256, coop_stage(T)); // 16 × 16
+    threadgroup_alloc("ws", 512, coop_stage(T)); // 32 × 16
+    threadgroup_alloc("out_scratch", 512, f32); // 16 × 32
+    coop_tile_setup(
+        "gemm",
+        16,
+        32,
+        16, // m, n, k
+        coop_stage(T),
+        "accumulate",
+        "simdgroup",
+        f32,
+        false,
+        true,
+        false,
+    );
+    let mut sub_offset = 0u32;
+    for _sub_iter in range(0u32, 16u32, 1u32) {
+        let cur_row = m_tile_base + sub_offset;
+        let cur_in_range = (sub_offset < 16u32) & (cur_row < m_total);
+        let cur_expert = select(cur_in_range, load(indices[cur_row]), 4294967295u32);
+        // Find the run end — first row whose expert differs (or OOB).
+        let mut sub_end = 16u32;
+        let mut found = 0u32;
+        for _ii in range(0u32, 16u32, 1u32) {
+            let probe = sub_offset + 1u32 + _ii;
+            let probe_row = m_tile_base + probe;
+            let probe_in_range = (probe < 16u32) & (probe_row < m_total);
+            if probe_in_range & (found == 0u32) {
+                let e = load(indices[probe_row]);
+                if e != cur_expert {
+                    sub_end = probe;
+                    found = 1u32;
+                }
+            }
+            if (probe < 16u32) & (probe_row >= m_total) & (found == 0u32) {
+                sub_end = probe;
+                found = 1u32;
+            }
+        }
+        let cur_valid = (cur_expert != 4294967295u32) & (sub_offset < 16u32);
+        if cur_valid {
+            let w_expert_base_8 = cur_expert * n_out * k_in;
+            let sb_expert_base = cur_expert * n_out * groups_per_row;
+            coop_tile_zero("gemm");
+            for kb in range(0u32, k_in, 16u32) {
+                for _e in range(0u32, 8u32, 1u32) {
+                    let flat = lane * 8u32 + _e;
+                    let mr = flat / 16u32;
+                    let kc = flat % 16u32;
+                    let gr = m_tile_base + mr;
+                    let in_run = (mr >= sub_offset) & (mr < sub_end) & (gr < m_total);
+                    let safe_g = select(in_run, gr, 0u32);
+                    let xv = load(x[safe_g * k_in + kb + kc]).cast::<f32>();
+                    threadgroup_store("xs", mr * 16u32 + kc, select(in_run, xv, 0.0f32));
+                }
+                let w_row = lane; // 0..31 (BN row)
+                let g = kb / block_size;
+                let sb_off = sb_expert_base + (n_tile_base + w_row) * groups_per_row + g;
+                // fp8 e5m2 f16: per-group FP16 scale (native half load → f32).
+                let scale = load(scales[sb_off]).cast::<f32>();
+                let w_dev = w_expert_base_8 + (n_tile_base + w_row) * k_in + kb;
+                for kc in range(0u32, 16u32, 1u32) {
+                    let elem = e5m2_decode(load(w[w_dev + kc]).cast::<u32>());
+                    threadgroup_store("ws", w_row * 16u32 + kc, elem * scale);
+                }
+                threadgroup_barrier();
+                coop_tile_load_a("gemm", "xs", true, coop_stage(T), 16, 16);
+                coop_tile_load_b("gemm", "ws", true, coop_stage(T), 16, 32);
+                coop_tile_run("gemm");
+                threadgroup_barrier();
+            }
+            coop_tile_store_c("gemm", "out_scratch", true, f32, 32, 16);
+            threadgroup_barrier();
+            // Coop-write out_scratch → out with the per-row expert mask.
+            // 32 lanes × 16 elems = 512 = BM*BN.
+            for _e in range(0u32, 16u32, 1u32) {
+                let flat = lane * 16u32 + _e;
+                let mr = flat / 32u32;
+                let nc = flat % 32u32;
+                let gr = m_tile_base + mr;
+                let gc = n_tile_base + nc;
+                let in_run = (mr >= sub_offset) & (mr < sub_end) & (gr < m_total) & (gc < n_out);
+                if in_run {
+                    let v = threadgroup_load("out_scratch", mr * 32u32 + nc);
+                    store(out[gr * n_out + gc], v.cast::<T>());
+                }
+            }
+            threadgroup_barrier();
+        }
+        sub_offset = sub_end;
+    }
+}
+
 // ── Symmetric sub-byte integer MoE MPP kernels (int2/3/4/5/6 + MXINT2..6) ────
 // The element is a signed N-bit two's-complement code, tight-bit-packed LSB-first
 // into u32 words. The WHOLE `[n_experts·n_out, k_in]` expert stack is packed in
@@ -1220,6 +1594,167 @@ int_moe_gather_qmm_bm16_mpp_f32!(mt_int3_moe_gather_qmm_bm16_mpp, 3u32, 4u32, 8.
 int_moe_gather_qmm_bm16_mpp_f32!(mt_int4_moe_gather_qmm_bm16_mpp, 4u32, 8u32, 16.0f32);
 int_moe_gather_qmm_bm16_mpp_f32!(mt_int5_moe_gather_qmm_bm16_mpp, 5u32, 16u32, 32.0f32);
 int_moe_gather_qmm_bm16_mpp_f32!(mt_int6_moe_gather_qmm_bm16_mpp, 6u32, 32u32, 64.0f32);
+
+/// FP16-scaled symmetric int MoE gather BGEMM (int2/3/4/5/6), BM=16 / BN=32 /
+/// BK=16 — FP16-scale twin of `int_moe_gather_qmm_bm16_mpp_f32`. The
+/// straddle-aware bit-stream decode, weight indexing, staging, geometry, and
+/// reduction are IDENTICAL; only the scale tensor changes to `Tensor<f16>`,
+/// read as `load(scales[..]).cast::<f32>()` (native half load → f32, matching
+/// `quant::format::dequant`). Mirrors `mlx/block_scaled_dequant.rs`'s
+/// `int_dequant_f16!`.
+///
+/// Params: `x [m_total, k_in]`, `w [n_experts·n_out · k_in·bits/32]` (tight
+/// bit-stream, LSB-first), `scales [n_experts, n_out, k_in/block_size]` (f16),
+/// `indices [m_total]`, `out [m_total, n_out]`.
+macro_rules! int_moe_gather_qmm_bm16_mpp_f16 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        #[allow(clippy::too_many_arguments)]
+        pub fn $name<T>(
+            x: Tensor<T>,
+            w: Tensor<u32>,
+            scales: Tensor<f16>,
+            indices: Tensor<u32>,
+            mut out: Tensor<T>,
+            #[constexpr] m_total: u32,
+            #[constexpr] n_out: u32,
+            #[constexpr] k_in: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let n_tile_base = tgid_x * 32u32;
+            let m_tile_base = tgid_y * 16u32;
+            let lane = simd_lane;
+            let words_per_row = k_in * $bits / 32u32;
+            let groups_per_row = k_in / block_size;
+            threadgroup_alloc("xs", 256, coop_stage(T)); // 16 × 16
+            threadgroup_alloc("ws", 512, coop_stage(T)); // 32 × 16
+            threadgroup_alloc("out_scratch", 512, f32); // 16 × 32
+            coop_tile_setup(
+                "gemm",
+                16,
+                32,
+                16, // m, n, k
+                coop_stage(T),
+                "accumulate",
+                "simdgroup",
+                f32,
+                false,
+                true,
+                false,
+            );
+            let mut sub_offset = 0u32;
+            for _sub_iter in range(0u32, 16u32, 1u32) {
+                let cur_row = m_tile_base + sub_offset;
+                let cur_in_range = (sub_offset < 16u32) & (cur_row < m_total);
+                let cur_expert = select(cur_in_range, load(indices[cur_row]), 4294967295u32);
+                // Find the run end — first row whose expert differs (or OOB).
+                let mut sub_end = 16u32;
+                let mut found = 0u32;
+                for _ii in range(0u32, 16u32, 1u32) {
+                    let probe = sub_offset + 1u32 + _ii;
+                    let probe_row = m_tile_base + probe;
+                    let probe_in_range = (probe < 16u32) & (probe_row < m_total);
+                    if probe_in_range & (found == 0u32) {
+                        let e = load(indices[probe_row]);
+                        if e != cur_expert {
+                            sub_end = probe;
+                            found = 1u32;
+                        }
+                    }
+                    if (probe < 16u32) & (probe_row >= m_total) & (found == 0u32) {
+                        sub_end = probe;
+                        found = 1u32;
+                    }
+                }
+                let cur_valid = (cur_expert != 4294967295u32) & (sub_offset < 16u32);
+                if cur_valid {
+                    // Per-expert row base in the single stacked bit-stream pack.
+                    let w_expert_row_base = cur_expert * n_out;
+                    let sb_expert_base = cur_expert * n_out * groups_per_row;
+                    coop_tile_zero("gemm");
+                    for kb in range(0u32, k_in, 16u32) {
+                        // Stage X[m_tile_base..+16, kb..kb+16] → xs. 32 lanes × 8.
+                        for _e in range(0u32, 8u32, 1u32) {
+                            let flat = lane * 8u32 + _e;
+                            let mr = flat / 16u32;
+                            let kc = flat % 16u32;
+                            let gr = m_tile_base + mr;
+                            let in_run = (mr >= sub_offset) & (mr < sub_end) & (gr < m_total);
+                            let safe_g = select(in_run, gr, 0u32);
+                            let xv = load(x[safe_g * k_in + kb + kc]).cast::<f32>();
+                            threadgroup_store("xs", mr * 16u32 + kc, select(in_run, xv, 0.0f32));
+                        }
+                        // Dequant W[expert, n_tile_base..+32, kb..kb+16] → ws.
+                        // 32 lanes × 2 stripes/lane; 8 K-elems/stripe (same lane
+                        // layout as the 4-bit kernel's 2 packs/lane).
+                        for _pi in range(0u32, 2u32, 1u32) {
+                            let pack_id = lane * 2u32 + _pi;
+                            let w_row = pack_id / 2u32; // 0..31 (BN rows)
+                            let stripe = pack_id % 2u32; // 0..1 (BK=16 → 2 stripes)
+                            let g_row = w_expert_row_base + n_tile_base + w_row;
+                            let w_word_row_base = g_row * words_per_row;
+                            let k_off = kb + stripe * 8u32;
+                            let g = k_off / block_size;
+                            let sb_off =
+                                sb_expert_base + (n_tile_base + w_row) * groups_per_row + g;
+                            // int f16: per-group FP16 scale (native half load → f32).
+                            let scale = load(scales[sb_off]).cast::<f32>();
+                            let dst = w_row * 16u32 + stripe * 8u32;
+                            for _j in range(0u32, 8u32, 1u32) {
+                                let bit_off = (k_off + _j) * $bits;
+                                let word_idx = bit_off / 32u32;
+                                let bit_in_w = bit_off & 31u32;
+                                let bits_in_w0 = 32u32 - bit_in_w;
+                                let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                                let spill = $bits - lo_bits;
+                                let w0 = load(w[w_word_row_base + word_idx]);
+                                let w1 = load(
+                                    w[w_word_row_base
+                                        + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                                );
+                                let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                                let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                                let q = lo | hi;
+                                let qf = q.cast::<f32>();
+                                let val = select(q >= $half, qf - $full, qf); // sign-extend
+                                threadgroup_store("ws", dst + _j, val * scale);
+                            }
+                        }
+                        threadgroup_barrier();
+                        coop_tile_load_a("gemm", "xs", true, coop_stage(T), 16, 16);
+                        coop_tile_load_b("gemm", "ws", true, coop_stage(T), 16, 32);
+                        coop_tile_run("gemm");
+                        threadgroup_barrier();
+                    }
+                    coop_tile_store_c("gemm", "out_scratch", true, f32, 32, 16);
+                    threadgroup_barrier();
+                    // Coop-write out_scratch → out with the per-row expert mask.
+                    // 32 lanes × 16 elems = 512 = BM*BN.
+                    for _e in range(0u32, 16u32, 1u32) {
+                        let flat = lane * 16u32 + _e;
+                        let mr = flat / 32u32;
+                        let nc = flat % 32u32;
+                        let gr = m_tile_base + mr;
+                        let gc = n_tile_base + nc;
+                        let in_run =
+                            (mr >= sub_offset) & (mr < sub_end) & (gr < m_total) & (gc < n_out);
+                        if in_run {
+                            let v = threadgroup_load("out_scratch", mr * 32u32 + nc);
+                            store(out[gr * n_out + gc], v.cast::<T>());
+                        }
+                    }
+                    threadgroup_barrier();
+                }
+                sub_offset = sub_end;
+            }
+        }
+    };
+}
+int_moe_gather_qmm_bm16_mpp_f16!(mt_int2_f16_moe_gather_qmm_bm16_mpp, 2u32, 2u32, 4.0f32);
+int_moe_gather_qmm_bm16_mpp_f16!(mt_int3_f16_moe_gather_qmm_bm16_mpp, 3u32, 4u32, 8.0f32);
+int_moe_gather_qmm_bm16_mpp_f16!(mt_int4_f16_moe_gather_qmm_bm16_mpp, 4u32, 8u32, 16.0f32);
+int_moe_gather_qmm_bm16_mpp_f16!(mt_int5_f16_moe_gather_qmm_bm16_mpp, 5u32, 16u32, 32.0f32);
+int_moe_gather_qmm_bm16_mpp_f16!(mt_int6_f16_moe_gather_qmm_bm16_mpp, 6u32, 32u32, 64.0f32);
 
 /// E8M0-scaled symmetric int MoE gather BGEMM (MXINT2/3/4/5/6), BM=16 / BN=32 /
 /// BK=16 — per-element bit-stream code × pow-2 (E8M0) block scale `2^(bits-127)`,
@@ -1495,6 +2030,126 @@ pub fn mt_mxint8_moe_gather_qmm_bm16_mpp<T>(
     }
 }
 
+/// Symmetric int8 (FP16-scale) MoE gather BGEMM, BM=16 / BN=32 / BK=16 — 8-bit
+/// codes (byte layout, group 64), per-group FP16 scale (no bias). FP16-scale
+/// twin of `mt_int8_moe_gather_qmm_bm16_mpp`; identical byte-strided staging and
+/// `int8_decode`, only the scale tensor is `Tensor<f16>` (native half load →
+/// f32). Mirrors `mlx/block_scaled_dequant.rs`'s `mt_int8_f16_dequant`.
+///
+/// Params: `x [m_total, k_in]`, `w [n_experts, n_out, k_in]` (int8 codes, 1
+/// byte/elem), `scales [n_experts, n_out, k_in/block_size]` (f16),
+/// `indices [m_total]`, `out [m_total, n_out]`.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_int8_f16_moe_gather_qmm_bm16_mpp<T>(
+    x: Tensor<T>,
+    w: Tensor<u8>,
+    scales: Tensor<f16>,
+    indices: Tensor<u32>,
+    mut out: Tensor<T>,
+    #[constexpr] m_total: u32,
+    #[constexpr] n_out: u32,
+    #[constexpr] k_in: u32,
+    #[constexpr] block_size: u32,
+) {
+    let n_tile_base = tgid_x * 32u32;
+    let m_tile_base = tgid_y * 16u32;
+    let lane = simd_lane;
+    let groups_per_row = k_in / block_size;
+    threadgroup_alloc("xs", 256, coop_stage(T)); // 16 × 16
+    threadgroup_alloc("ws", 512, coop_stage(T)); // 32 × 16
+    threadgroup_alloc("out_scratch", 512, f32); // 16 × 32
+    coop_tile_setup(
+        "gemm",
+        16,
+        32,
+        16, // m, n, k
+        coop_stage(T),
+        "accumulate",
+        "simdgroup",
+        f32,
+        false,
+        true,
+        false,
+    );
+    let mut sub_offset = 0u32;
+    for _sub_iter in range(0u32, 16u32, 1u32) {
+        let cur_row = m_tile_base + sub_offset;
+        let cur_in_range = (sub_offset < 16u32) & (cur_row < m_total);
+        let cur_expert = select(cur_in_range, load(indices[cur_row]), 4294967295u32);
+        // Find the run end — first row whose expert differs (or OOB).
+        let mut sub_end = 16u32;
+        let mut found = 0u32;
+        for _ii in range(0u32, 16u32, 1u32) {
+            let probe = sub_offset + 1u32 + _ii;
+            let probe_row = m_tile_base + probe;
+            let probe_in_range = (probe < 16u32) & (probe_row < m_total);
+            if probe_in_range & (found == 0u32) {
+                let e = load(indices[probe_row]);
+                if e != cur_expert {
+                    sub_end = probe;
+                    found = 1u32;
+                }
+            }
+            if (probe < 16u32) & (probe_row >= m_total) & (found == 0u32) {
+                sub_end = probe;
+                found = 1u32;
+            }
+        }
+        let cur_valid = (cur_expert != 4294967295u32) & (sub_offset < 16u32);
+        if cur_valid {
+            let w_expert_base_8 = cur_expert * n_out * k_in;
+            let sb_expert_base = cur_expert * n_out * groups_per_row;
+            coop_tile_zero("gemm");
+            for kb in range(0u32, k_in, 16u32) {
+                for _e in range(0u32, 8u32, 1u32) {
+                    let flat = lane * 8u32 + _e;
+                    let mr = flat / 16u32;
+                    let kc = flat % 16u32;
+                    let gr = m_tile_base + mr;
+                    let in_run = (mr >= sub_offset) & (mr < sub_end) & (gr < m_total);
+                    let safe_g = select(in_run, gr, 0u32);
+                    let xv = load(x[safe_g * k_in + kb + kc]).cast::<f32>();
+                    threadgroup_store("xs", mr * 16u32 + kc, select(in_run, xv, 0.0f32));
+                }
+                let w_row = lane; // 0..31 (BN row)
+                let g = kb / block_size;
+                let sb_off = sb_expert_base + (n_tile_base + w_row) * groups_per_row + g;
+                // int8 f16: per-group FP16 scale (native half load → f32).
+                let scale = load(scales[sb_off]).cast::<f32>();
+                let w_dev = w_expert_base_8 + (n_tile_base + w_row) * k_in + kb;
+                for kc in range(0u32, 16u32, 1u32) {
+                    let elem = int8_decode(load(w[w_dev + kc]).cast::<u32>());
+                    threadgroup_store("ws", w_row * 16u32 + kc, elem * scale);
+                }
+                threadgroup_barrier();
+                coop_tile_load_a("gemm", "xs", true, coop_stage(T), 16, 16);
+                coop_tile_load_b("gemm", "ws", true, coop_stage(T), 16, 32);
+                coop_tile_run("gemm");
+                threadgroup_barrier();
+            }
+            coop_tile_store_c("gemm", "out_scratch", true, f32, 32, 16);
+            threadgroup_barrier();
+            // Coop-write out_scratch → out with the per-row expert mask.
+            // 32 lanes × 16 elems = 512 = BM*BN.
+            for _e in range(0u32, 16u32, 1u32) {
+                let flat = lane * 16u32 + _e;
+                let mr = flat / 32u32;
+                let nc = flat % 32u32;
+                let gr = m_tile_base + mr;
+                let gc = n_tile_base + nc;
+                let in_run = (mr >= sub_offset) & (mr < sub_end) & (gr < m_total) & (gc < n_out);
+                if in_run {
+                    let v = threadgroup_load("out_scratch", mr * 32u32 + nc);
+                    store(out[gr * n_out + gc], v.cast::<T>());
+                }
+            }
+            threadgroup_barrier();
+        }
+        sub_offset = sub_end;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use metaltile_codegen::msl::MslGenerator;
@@ -1679,10 +2334,10 @@ pub mod kernel_tests {
         // scales bind as f32; E8M0/E4M3 scales as one byte. Both axes are driven
         // off the format so new integer formats pick up the right buffer types.
         let weight_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
 
         let mut s = TestSetup::new(kernel)
@@ -1899,6 +2554,102 @@ pub mod kernel_tests {
             dt,
         )
     }
+
+    // FP16-scale twins of the FP32-scaled float + int formats. Same element
+    // packing (codes dtype unchanged); the scale buffer is f16. `fp8_e4m3_f16`
+    // reuses the `nvfp8_f16` kernel (8-bit E4M3 + f16 scale; only block_size
+    // differs).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_nvfp8_f16_moe_gather_qmm_bm16_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_nvfp8_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Nvfp8F16,
+            SHAPE,
+            dt,
+        )
+    }
+    // fp8_e4m3_f16 reuses the nvfp8_f16 kernel (8-bit E4M3 + f16 scale, block 32).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_fp8_e4m3_f16_moe_gather_qmm_bm16_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_nvfp8_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Fp8E4m3F16,
+            SHAPE,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_fp4_f16_moe_gather_qmm_bm16_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_fp4_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Fp4F16,
+            SHAPE,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_fp8_e5m2_f16_moe_gather_qmm_bm16_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_fp8_e5m2_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Fp8E5m2F16,
+            SHAPE,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_int2_f16_moe_gather_qmm_bm16_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_int2_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Int2F16,
+            SHAPE,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_int3_f16_moe_gather_qmm_bm16_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_int3_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Int3F16,
+            SHAPE,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_int4_f16_moe_gather_qmm_bm16_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_int4_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Int4F16,
+            SHAPE,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_int5_f16_moe_gather_qmm_bm16_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_int5_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Int5F16,
+            SHAPE,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_int6_f16_moe_gather_qmm_bm16_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_int6_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Int6F16,
+            SHAPE,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_int8_f16_moe_gather_qmm_bm16_mpp(dt: DType) -> TestSetup {
+        block_indexed_setup(
+            mt_int8_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Int8F16,
+            SHAPE,
+            dt,
+        )
+    }
 }
 
 /// New-syntax benchmarks for the MPP block-scaled MoE BGEMM (BM=16). Random
@@ -1936,10 +2687,10 @@ pub mod kernel_benches {
         } else {
             (crate::quant::format::bitstream_words(stack_n, fmt.element_bits()), DType::U32)
         };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
         let n_blocks = n_experts * n_out * groups_per_row;
         let sz = dt.size_bytes();
@@ -2105,6 +2856,98 @@ pub mod kernel_benches {
         block_bench(
             mt_mxint8_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
             QFormat::Mxint8,
+            SHAPE,
+            dt,
+        )
+    }
+    // FP16-scale twins (f16 scale buffer; codes packing unchanged). fp8_e4m3_f16
+    // reuses the nvfp8_f16 kernel (8-bit E4M3 + f16 scale, block 32).
+    #[bench(name = "ffai/moe_mpp_block/nvfp8_f16", dtypes = [f32, f16, bf16])]
+    fn bench_nvfp8_f16(dt: DType) -> BenchSetup {
+        block_bench(
+            mt_nvfp8_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Nvfp8F16,
+            SHAPE,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/moe_mpp_block/fp8_e4m3_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e4m3_f16(dt: DType) -> BenchSetup {
+        block_bench(
+            mt_nvfp8_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Fp8E4m3F16,
+            SHAPE,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/moe_mpp_block/fp4_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp4_f16(dt: DType) -> BenchSetup {
+        block_bench(
+            mt_fp4_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Fp4F16,
+            SHAPE,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/moe_mpp_block/fp8_e5m2_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e5m2_f16(dt: DType) -> BenchSetup {
+        block_bench(
+            mt_fp8_e5m2_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Fp8E5m2F16,
+            SHAPE,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/moe_mpp_block/int2_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int2_f16(dt: DType) -> BenchSetup {
+        block_bench(
+            mt_int2_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Int2F16,
+            SHAPE,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/moe_mpp_block/int3_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int3_f16(dt: DType) -> BenchSetup {
+        block_bench(
+            mt_int3_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Int3F16,
+            SHAPE,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/moe_mpp_block/int4_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int4_f16(dt: DType) -> BenchSetup {
+        block_bench(
+            mt_int4_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Int4F16,
+            SHAPE,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/moe_mpp_block/int5_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int5_f16(dt: DType) -> BenchSetup {
+        block_bench(
+            mt_int5_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Int5F16,
+            SHAPE,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/moe_mpp_block/int6_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int6_f16(dt: DType) -> BenchSetup {
+        block_bench(
+            mt_int6_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Int6F16,
+            SHAPE,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/moe_mpp_block/int8_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int8_f16(dt: DType) -> BenchSetup {
+        block_bench(
+            mt_int8_f16_moe_gather_qmm_bm16_mpp::kernel_ir_for(dt),
+            QFormat::Int8F16,
             SHAPE,
             dt,
         )

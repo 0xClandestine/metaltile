@@ -569,6 +569,243 @@ pub fn mt_mxint8_dequant_gemv_expert_indexed<T>(
     }
 }
 
+// ── FP16-scale twins (nvfp8_f16 / fp4_f16 / fp8_e5m2_f16 + int2..int6/int8 f16) ─
+// Near-clones of the FP32-scaled kernels above for the same element layout; only
+// the scale tensor changes from `Tensor<f32>` to `Tensor<f16>` and the scale read
+// gains a `.cast::<f32>()`. Element decode (E2M1 / E4M3 / E5M2 / int bit-stream +
+// sign-extend), weight indexing, the per-expert row bases, and the dispatch
+// geometry are IDENTICAL to the FP32 twin. The GPU-verified scale-read pattern is
+// `mlx/block_scaled_dequant.rs` (`mt_nvfp8_f16_dequant` et al.): native half load
+// then cast to f32. `fp8_e4m3_f16` reuses `mt_nvfp8_f16_dequant_gemv_expert_indexed`
+// (same 8-bit E4M3 + f16-scale shape), exactly as `fp8_e4m3` reuses the nvfp8 kernel.
+
+/// nvfp8 (FP16-scale) expert-indexed dequantizing GEMV — E4M3 weights (block 16),
+/// per-block FP16 scale. Also serves the `fp8_e4m3_f16` format (identical layout).
+/// Clone of `mt_nvfp8_dequant_gemv_expert_indexed` with the scale as half.
+#[kernel]
+pub fn mt_nvfp8_f16_dequant_gemv_expert_indexed<T>(
+    weights_stacked: Tensor<u8>,
+    scales_stacked: Tensor<f16>,
+    input: Tensor<T>,
+    expert_index: Tensor<u32>,
+    output: Tensor<T>,
+    #[constexpr] in_dim: u32,
+    #[constexpr] out_dim: u32,
+    #[constexpr] block_size: u32,
+) {
+    let row = program_id::<0>();
+    let n_blocks = in_dim / block_size;
+    let expert = load(expert_index[0u32]);
+    let weight_expert_off = expert * out_dim * in_dim;
+    let scale_expert_off = expert * out_dim * n_blocks;
+    let row_off = weight_expert_off + row * in_dim;
+    let row_block_off = scale_expert_off + row * n_blocks;
+
+    let mut acc = 0.0f32;
+    let iters = (in_dim + lsize - 1u32) / lsize;
+    for it in range(0u32, iters, 1u32) {
+        let c = it * lsize + tid;
+        if c < in_dim {
+            let elem = e4m3_decode(load(weights_stacked[row_off + c]).cast::<u32>());
+            let scale = load(scales_stacked[row_block_off + c / block_size]).cast::<f32>();
+            acc = acc + (elem * scale) * load(input[c]).cast::<f32>();
+        }
+    }
+
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[row], total.cast::<T>());
+    }
+}
+
+/// fp4 (FP16-scale) expert-indexed dequantizing GEMV — E2M1 weights (group 32),
+/// per-group FP16 scale. Clone of `mt_fp4_dequant_gemv_expert_indexed`, scale → half.
+#[kernel]
+pub fn mt_fp4_f16_dequant_gemv_expert_indexed<T>(
+    weights_stacked: Tensor<u32>,
+    scales_stacked: Tensor<f16>,
+    input: Tensor<T>,
+    expert_index: Tensor<u32>,
+    output: Tensor<T>,
+    #[constexpr] in_dim: u32,
+    #[constexpr] out_dim: u32,
+    #[constexpr] block_size: u32,
+) {
+    let row = program_id::<0>();
+    let n_packs_per_row = in_dim / 8u32;
+    let n_blocks = in_dim / block_size;
+    let packs_per_block = block_size / 8u32;
+    let expert = load(expert_index[0u32]);
+    let weight_expert_off = expert * out_dim * n_packs_per_row;
+    let scale_expert_off = expert * out_dim * n_blocks;
+    let row_pack_off = weight_expert_off + row * n_packs_per_row;
+    let row_block_off = scale_expert_off + row * n_blocks;
+
+    let mut acc = 0.0f32;
+    let p_iters = (n_packs_per_row + lsize - 1u32) / lsize;
+    for p_iter in range(0u32, p_iters, 1u32) {
+        let pack_idx = p_iter * lsize + tid;
+        if pack_idx < n_packs_per_row {
+            let scale =
+                load(scales_stacked[row_block_off + pack_idx / packs_per_block]).cast::<f32>();
+            let packed = load(weights_stacked[row_pack_off + pack_idx]);
+            let p_off = pack_idx * 8u32;
+            for i in range(0u32, 8u32, 1u32) {
+                let val = e2m1_decode((packed >> (i * 4u32)) & 0xFu32);
+                acc = acc + (val * scale) * load(input[p_off + i]).cast::<f32>();
+            }
+        }
+    }
+
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[row], total.cast::<T>());
+    }
+}
+
+/// fp8 (E5M2, FP16-scale) expert-indexed dequantizing GEMV — 8-bit weights
+/// (group 32), per-group FP16 scale. Clone of
+/// `mt_fp8_e5m2_dequant_gemv_expert_indexed`, scale → half.
+#[kernel]
+pub fn mt_fp8_e5m2_f16_dequant_gemv_expert_indexed<T>(
+    weights_stacked: Tensor<u8>,
+    scales_stacked: Tensor<f16>,
+    input: Tensor<T>,
+    expert_index: Tensor<u32>,
+    output: Tensor<T>,
+    #[constexpr] in_dim: u32,
+    #[constexpr] out_dim: u32,
+    #[constexpr] block_size: u32,
+) {
+    let row = program_id::<0>();
+    let n_blocks = in_dim / block_size;
+    let expert = load(expert_index[0u32]);
+    let weight_expert_off = expert * out_dim * in_dim;
+    let scale_expert_off = expert * out_dim * n_blocks;
+    let row_off = weight_expert_off + row * in_dim;
+    let row_block_off = scale_expert_off + row * n_blocks;
+
+    let mut acc = 0.0f32;
+    let iters = (in_dim + lsize - 1u32) / lsize;
+    for it in range(0u32, iters, 1u32) {
+        let c = it * lsize + tid;
+        if c < in_dim {
+            let elem = e5m2_decode(load(weights_stacked[row_off + c]).cast::<u32>());
+            let scale = load(scales_stacked[row_block_off + c / block_size]).cast::<f32>();
+            acc = acc + (elem * scale) * load(input[c]).cast::<f32>();
+        }
+    }
+
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[row], total.cast::<T>());
+    }
+}
+
+/// FP16-scaled symmetric int expert-indexed GEMV (int2/3/4/5/6 F16): identical
+/// straddle-aware bit-stream decode + expert-folded row bases as
+/// `int_qgemv_f32_expert_indexed!`; only the scale tensor is half (read with a
+/// trailing `.cast::<f32>()`).
+macro_rules! int_qgemv_f16_expert_indexed {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            weights_stacked: Tensor<u32>,
+            scales_stacked: Tensor<f16>,
+            input: Tensor<T>,
+            expert_index: Tensor<u32>,
+            output: Tensor<T>,
+            #[constexpr] in_dim: u32,
+            #[constexpr] out_dim: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let row = program_id::<0>();
+            let words_per_row = in_dim * $bits / 32u32;
+            let n_blocks = in_dim / block_size;
+            // g_row = expert·out_dim + row → fold the expert stride into both bases.
+            let expert = load(expert_index[0u32]);
+            let g_row = expert * out_dim + row;
+            let row_word_off = g_row * words_per_row;
+            let row_block_off = g_row * n_blocks;
+
+            let mut acc = 0.0f32;
+            let iters = (in_dim + lsize - 1u32) / lsize;
+            for it in range(0u32, iters, 1u32) {
+                let c = it * lsize + tid;
+                if c < in_dim {
+                    let bit_off = c * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(weights_stacked[row_word_off + word_idx]);
+                    let w1 = load(
+                        weights_stacked
+                            [row_word_off + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                    );
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+                    let qf = q.cast::<f32>();
+                    let val = select(q >= $half, qf - $full, qf); // sign-extend
+                    let scale = load(scales_stacked[row_block_off + c / block_size]).cast::<f32>();
+                    acc = acc + (val * scale) * load(input[c]).cast::<f32>();
+                }
+            }
+
+            let total = reduce_sum(acc);
+            if tid == 0u32 {
+                store(output[row], total.cast::<T>());
+            }
+        }
+    };
+}
+int_qgemv_f16_expert_indexed!(mt_int2_f16_dequant_gemv_expert_indexed, 2u32, 2u32, 4.0f32);
+int_qgemv_f16_expert_indexed!(mt_int3_f16_dequant_gemv_expert_indexed, 3u32, 4u32, 8.0f32);
+int_qgemv_f16_expert_indexed!(mt_int4_f16_dequant_gemv_expert_indexed, 4u32, 8u32, 16.0f32);
+int_qgemv_f16_expert_indexed!(mt_int5_f16_dequant_gemv_expert_indexed, 5u32, 16u32, 32.0f32);
+int_qgemv_f16_expert_indexed!(mt_int6_f16_dequant_gemv_expert_indexed, 6u32, 32u32, 64.0f32);
+
+/// int8 (FP16-scale) expert-indexed dequantizing GEMV — 8-bit symmetric codes
+/// (byte layout, group 64), per-group FP16 scale. Clone of
+/// `mt_int8_dequant_gemv_expert_indexed`, scale → half.
+#[kernel]
+pub fn mt_int8_f16_dequant_gemv_expert_indexed<T>(
+    weights_stacked: Tensor<u8>,
+    scales_stacked: Tensor<f16>,
+    input: Tensor<T>,
+    expert_index: Tensor<u32>,
+    output: Tensor<T>,
+    #[constexpr] in_dim: u32,
+    #[constexpr] out_dim: u32,
+    #[constexpr] block_size: u32,
+) {
+    let row = program_id::<0>();
+    let n_blocks = in_dim / block_size;
+    let expert = load(expert_index[0u32]);
+    let weight_expert_off = expert * out_dim * in_dim;
+    let scale_expert_off = expert * out_dim * n_blocks;
+    let row_off = weight_expert_off + row * in_dim;
+    let row_block_off = scale_expert_off + row * n_blocks;
+
+    let mut acc = 0.0f32;
+    let iters = (in_dim + lsize - 1u32) / lsize;
+    for it in range(0u32, iters, 1u32) {
+        let c = it * lsize + tid;
+        if c < in_dim {
+            let elem = int8_decode(load(weights_stacked[row_off + c]).cast::<u32>());
+            let scale = load(scales_stacked[row_block_off + c / block_size]).cast::<f32>();
+            acc = acc + (elem * scale) * load(input[c]).cast::<f32>();
+        }
+    }
+
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[row], total.cast::<T>());
+    }
+}
+
 /// Correctness tests for the per-expert-indexed block-scaled dequant GEMVs.
 ///
 /// Oracle: build the FULL `[n_experts·out_dim, in_dim]` stacked weight and pack
@@ -655,10 +892,10 @@ pub mod kernel_tests {
         // scales bind as f32; E8M0/E4M3 scales as one byte. Both axes are driven
         // off the format so new integer formats pick up the right buffer types.
         let weight_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
         let mut s = TestSetup::new(kernel)
             .mode(KernelMode::Reduction)
@@ -940,6 +1177,131 @@ pub mod kernel_tests {
             dt,
         )
     }
+
+    // ── FP16-scale twins ────────────────────────────────────────────────────
+    // Same geometry as the FP32-scaled formats; only the scale axis is half.
+    // `fp8_e4m3_f16` dispatches the nvfp8_f16 kernel (identical 8-bit-E4M3 +
+    // f16-scale shape), exactly as `fp8_e4m3` reuses the nvfp8 kernel.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_nvfp8_f16_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_nvfp8_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Nvfp8F16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e4m3_f16_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_nvfp8_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Fp8E4m3F16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp4_f16_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_fp4_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Fp4F16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e5m2_f16_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_fp8_e5m2_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Fp8E5m2F16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int2_f16_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_int2_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int2F16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int3_f16_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_int3_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int3F16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int4_f16_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_int4_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int4F16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int5_f16_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_int5_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int5F16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int6_f16_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_int6_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int6F16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int8_f16_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_int8_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int8F16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
 }
 
 /// Decode-shape benches: per-expert-indexed dequant GEMV over an 8-expert stack
@@ -980,10 +1342,10 @@ pub mod kernel_benches {
         } else {
             crate::quant::format::bitstream_words(out_dim * in_dim, fmt.element_bits())
         };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
         let sz = dt.size_bytes();
         // Active stream: one expert's weight slab + its scales + input + output.
@@ -1226,6 +1588,118 @@ pub mod kernel_benches {
         expert_bench(
             mt_mxint8_dequant_gemv_expert_indexed::kernel_ir_for(dt),
             QFormat::Mxint8,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    // FP16-scale twins. fp8_e4m3_f16 reuses the nvfp8_f16 kernel (same 8-bit-E4M3
+    // + f16-scale shape); the rest decode in their own per-element kernel.
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/nvfp8_f16", dtypes = [f32, f16, bf16])]
+    fn bench_nvfp8_f16_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_nvfp8_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Nvfp8F16,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/fp8_e4m3_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e4m3_f16_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_nvfp8_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Fp8E4m3F16,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/fp4_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp4_f16_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_fp4_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Fp4F16,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/fp8_e5m2_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e5m2_f16_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_fp8_e5m2_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Fp8E5m2F16,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/int2_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int2_f16_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_int2_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int2F16,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/int3_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int3_f16_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_int3_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int3F16,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/int4_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int4_f16_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_int4_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int4F16,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/int5_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int5_f16_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_int5_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int5F16,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/int6_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int6_f16_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_int6_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int6F16,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/int8_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int8_f16_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_int8_f16_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int8F16,
             8,
             4096,
             4096,
