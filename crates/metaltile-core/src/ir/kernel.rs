@@ -179,6 +179,34 @@ impl Kernel {
         std::iter::once(&mut self.body).chain(self.blocks.values_mut())
     }
 
+    /// True if this kernel uses cooperative-tensor MMA — any `Op::CoopTile*` or
+    /// an `mpp::`-tagged `Op::InlineMsl` (the NAX / MPP `matmul2d` family).
+    ///
+    /// These compile via the **runtime Metal toolchain** that ships with the OS,
+    /// and the dynamic-extent `cooperative_tensor` they emit needs macOS 26.5+;
+    /// on an older OS toolchain the pipeline fails to build ("unsupported
+    /// deferred-static-alloca-size") regardless of the selected Xcode. `tile test`
+    /// uses this to *skip* (not fail) such a kernel when its pipeline won't build
+    /// on the current runner — they still compile + get tested wherever the
+    /// toolchain supports them. Plain simdgroup-matrix MMA is **not** included
+    /// (it builds on Apple7+).
+    pub fn requires_cooperative_tensors(&self) -> bool {
+        fn op_uses_coop(op: &Op) -> bool {
+            match op {
+                Op::CoopTileSetup { .. }
+                | Op::CoopTileZero { .. }
+                | Op::CoopTileLoadA { .. }
+                | Op::CoopTileLoadB { .. }
+                | Op::CoopTileRun { .. }
+                | Op::CoopTileStoreC { .. } => true,
+                Op::InlineMsl { source, .. } => source.contains("mpp::"),
+                Op::FusedElementwise { ops } => ops.iter().any(op_uses_coop),
+                _ => false,
+            }
+        }
+        self.iter_blocks().any(|b| b.ops.iter().any(op_uses_coop))
+    }
+
     /// Get a block by ID.
     pub fn get_block(&self, id: BlockId) -> Option<&Block> {
         if id == self.body.id {
@@ -326,6 +354,50 @@ mod tests {
 
         let ids: Vec<u32> = kernel.iter_blocks().map(|b| b.id.as_u32()).collect();
         assert_eq!(ids, vec![0, 1], "iter_blocks yields body first then nested");
+    }
+
+    #[test]
+    fn requires_cooperative_tensors_detects_coop_and_mpp() {
+        // Plain kernel — no cooperative-tensor ops.
+        let mut plain = Kernel::new("plain");
+        plain.body.push_op(Op::Const { value: 1 }, ValueId::new(0));
+        assert!(!plain.requires_cooperative_tensors());
+
+        // A `CoopTile*` op in the entry body.
+        let mut coop = Kernel::new("coop");
+        coop.body.push_op(Op::CoopTileRun { name: "ct".into(), direct: false }, ValueId::new(0));
+        assert!(coop.requires_cooperative_tensors());
+
+        // A `CoopTile*` op in a NESTED block (e.g. a K-loop body) is still found.
+        let mut nested = Kernel::new("nested");
+        nested.body.push_op(Op::Const { value: 0 }, ValueId::new(0));
+        let mut loop_body = Block::new(BlockId::new(1));
+        loop_body.push_op(Op::CoopTileRun { name: "ct".into(), direct: true }, ValueId::new(1));
+        nested.add_block(loop_body);
+        assert!(nested.requires_cooperative_tensors());
+
+        // `mpp::`-tagged InlineMsl counts; other inline MSL does not.
+        let mut mpp = Kernel::new("mpp");
+        mpp.body.push_op(
+            Op::InlineMsl {
+                source: "auto r = mpp::tensor_ops::matmul2d(a, b);".into(),
+                inputs: vec![],
+                outputs: vec![],
+            },
+            ValueId::new(0),
+        );
+        assert!(mpp.requires_cooperative_tensors());
+
+        let mut plain_inline = Kernel::new("plain_inline");
+        plain_inline.body.push_op(
+            Op::InlineMsl {
+                source: "out[i] = simd_sum(x);".into(),
+                inputs: vec![],
+                outputs: vec![],
+            },
+            ValueId::new(0),
+        );
+        assert!(!plain_inline.requires_cooperative_tensors());
     }
 
     #[test]

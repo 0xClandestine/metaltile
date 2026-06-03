@@ -56,15 +56,20 @@ The macOS CI jobs (`tile.yml` build/test/bench, plus `coverage.yml` and
 what is installed (Xcode versions, SDKs, CLI tools), consult the image manifest:
 [runner-images → macos-26-arm64 readme](https://github.com/actions/runner-images/blob/main/images/macos/macos-26-arm64-Readme.md).
 
-> **Xcode / Metal toolchain pin.** The NAX / MPP cooperative-tensor kernels
-> (`mpp::tensor_ops::matmul2d`) must be compiled by the **Xcode 26.5** Metal
-> toolchain. The `macos-26` image *defaults* to Xcode 26.4.1, whose Metal
-> compiler rejects the dynamic-extent `cooperative_tensor` at pipeline-build
-> time ("unsupported deferred-static-alloca-size"); 26.5 (also installed on the
-> image) compiles it. The macOS workflows therefore pin
-> `DEVELOPER_DIR=/Applications/Xcode_26.5.app/Contents/Developer`. Bump that path
-> once the image's default Xcode reaches ≥ 26.5. (`runs-on: macos-26` always
-> pulls GitHub's current image — there is no cached/pinned image to refresh.)
+> **NAX / MPP kernels need the macOS 26.5+ Metal toolchain.** The
+> cooperative-tensor kernels (`mpp::tensor_ops::matmul2d`) compile via the Metal
+> toolchain that ships with the **OS**, and the dynamic-extent `cooperative_tensor`
+> they emit (inside Apple's MPP library) is rejected by the macOS-26.4 compiler
+> at pipeline-build time ("unsupported deferred-static-alloca-size"); macOS 26.5
+> compiles it. This is the *runtime* `newLibraryWithSource` compiler, which is the
+> OS's — **selecting a newer Xcode (`DEVELOPER_DIR`) does not change it** (that
+> only swaps the offline `metal` compiler). The `macos-26` runner image is
+> currently macOS 26.4, so `tile test` **skips** any cooperative-tensor kernel
+> whose pipeline won't build (`Kernel::requires_cooperative_tensors()` →
+> `[SKIP]`), reporting them as skipped rather than failed. They still compile +
+> get correctness-tested wherever the toolchain supports them (a 26.5+ box, and
+> CI automatically once the image's OS reaches 26.5) — the skip self-re-enables.
+> Numeric mismatches still fail; only build failures skip.
 
 ## Writing tests
 

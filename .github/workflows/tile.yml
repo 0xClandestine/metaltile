@@ -62,13 +62,6 @@ permissions:
 
 env:
   CLICOLOR_FORCE: 1
-  # The macos-26 runner image defaults to Xcode 26.4.1, whose Metal compiler
-  # rejects the dynamic-extent `cooperative_tensor` used by the NAX / MPP
-  # `matmul2d` kernels (runtime "unsupported deferred-static-alloca-size" when
-  # the pipeline is built). Xcode 26.5 (Build 17F42, also installed on the image)
-  # compiles them. Select it for every macOS job here. Revisit once the image's
-  # default Xcode is ≥ 26.5.
-  DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
 
 jobs:
   # ── Job 0: detect which paths changed ────────────────────────────────────────

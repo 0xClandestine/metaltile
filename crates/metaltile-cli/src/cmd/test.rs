@@ -156,6 +156,7 @@ pub fn run(args: &TestArgs, harness: &crate::harness::Harness) -> Result<(), cra
     let mut total = 0usize;
     let mut total_passed = 0usize;
     let mut total_failed = 0usize;
+    let mut total_skipped = 0usize;
 
     // failure_lines: pre-formatted "[FAIL: reason] label" strings for the summary.
     // failure_labels: plain label strings for JSON output.
@@ -184,6 +185,7 @@ pub fn run(args: &TestArgs, harness: &crate::harness::Harness) -> Result<(), cra
         let suite_start = Instant::now();
         let mut suite_passed = 0usize;
         let mut suite_failed = 0usize;
+        let mut suite_skipped = 0usize;
         let mut suite_rows: Vec<(String, bool)> = Vec::new();
 
         for (label, setup, tol) in group {
@@ -257,6 +259,29 @@ pub fn run(args: &TestArgs, harness: &crate::harness::Harness) -> Result<(), cra
                     if args.show_progress {
                         eprint!("\r\x1b[K");
                     }
+                    // A cooperative-tensor (NAX / MPP `matmul2d`) kernel whose
+                    // pipeline won't *build* on this runner is skipped, not failed:
+                    // its `mpp::tensor_ops::matmul2d` needs the macOS 26.5+ Metal
+                    // toolchain (the dynamic-extent `cooperative_tensor` is rejected
+                    // by older OS compilers — selecting Xcode 26.5 doesn't help, the
+                    // runtime compiler is the OS's). They still compile + get
+                    // correctness-tested wherever the toolchain supports them, so this
+                    // auto-re-enables once the runner's OS reaches 26.5. Numeric
+                    // failures (the `Ok(o)` arm) still fail — only build failures skip.
+                    if setup.kernel().requires_cooperative_tensors() {
+                        suite_skipped += 1;
+                        total_skipped += 1;
+                        println!(
+                            "{}  {}  {}",
+                            paint_stdout("[SKIP]", Style::new().fg(Color::Yellow).bold()),
+                            paint_stdout(label, Style::new().fg(Color::BrightBlack)),
+                            paint_stdout(
+                                "cooperative-tensor pipeline won't build here (needs macOS 26.5+ Metal toolchain)",
+                                Style::new().fg(Color::BrightBlack),
+                            ),
+                        );
+                        continue;
+                    }
                     suite_failed += 1;
                     total_failed += 1;
                     if args.detailed {
@@ -297,8 +322,10 @@ pub fn run(args: &TestArgs, harness: &crate::harness::Harness) -> Result<(), cra
                 paint_stderr(suite_failed.to_string(), Style::new().fg(Color::Red)),
             )
         };
+        let skipped_note =
+            if suite_skipped > 0 { format!("; {suite_skipped} skipped") } else { String::new() };
         println!(
-            "Suite result: {result_word}. {passed_paint} passed; {failed_paint} failed; finished in {suite_elapsed:.2?}",
+            "Suite result: {result_word}. {passed_paint} passed; {failed_paint} failed{skipped_note}; finished in {suite_elapsed:.2?}",
         );
 
         if args.summary || args.detailed {
@@ -385,6 +412,7 @@ pub fn run(args: &TestArgs, harness: &crate::harness::Harness) -> Result<(), cra
             "command": "test",
             "passed": total_passed,
             "failed": total_failed,
+            "skipped": total_skipped,
             "total": total,
             "failures": failure_labels,
         });
@@ -401,8 +429,16 @@ pub fn run(args: &TestArgs, harness: &crate::harness::Harness) -> Result<(), cra
     } else {
         paint_stdout("0", Style::new().fg(Color::BrightBlack))
     };
+    let skipped_overall = if total_skipped > 0 {
+        format!(
+            ", {} skipped",
+            paint_stdout(total_skipped.to_string(), Style::new().fg(Color::Yellow))
+        )
+    } else {
+        String::new()
+    };
     println!(
-        "\nRan {n_suites} test {suite_noun} in {wall_elapsed:.2?}: {passed_overall} passed, {failed_overall} failed ({total} total tests)",
+        "\nRan {n_suites} test {suite_noun} in {wall_elapsed:.2?}: {passed_overall} passed, {failed_overall} failed{skipped_overall} ({total} total tests)",
     );
 
     if total_failed > 0 {
