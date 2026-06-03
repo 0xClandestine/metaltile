@@ -31,6 +31,23 @@ fn xorshift(state: &mut u32) -> u32 {
 
 fn frand(state: &mut u32) -> f32 { (xorshift(state) as f32 / u32::MAX as f32) * 2.0 - 1.0 }
 
+/// Canonical Q2_K output-index → (qs byte 0..63, 2-bit shift). Mirrors
+/// `gguf_dequant_q2_k` (llama.cpp `dequantize_row_q2_K` order) and the
+/// `ffai_moe_gather_down_q2k` kernel under test exactly. The 256 values
+/// are NOT 4-consecutive-per-byte: they split into 2 halves of 128, each
+/// half into 4 j-groups of 32, each j-group into two runs of 16 values
+/// indexing 16 consecutive qs bytes at a shared shift (`jg * 2`). The
+/// canonical scale index for output `i` is simply `i / 16`.
+fn q2_k_qpos(i: usize) -> (usize, u32) {
+    let half = i / 128; // 0..1  → qs byte base half*32
+    let yh = i % 128; // 0..127
+    let jg = yh / 32; // 0..3  → shift = jg*2
+    let yg = yh % 32; // 0..31
+    let sub_half = yg / 16; // 0..1
+    let l = yg % 16; // 0..15 → byte within the 16-run
+    (half * 32 + sub_half * 16 + l, (jg * 2) as u32)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn reference(
     inners_all: &[f32],
@@ -56,13 +73,16 @@ fn reference(
             for k in 0..k_in {
                 let b = k / 256;
                 let in_block = k % 256;
+                // Canonical Q2_K layout — identical mapping to
+                // `gguf_dequant_q2_k` and the kernel under test. Scale index
+                // is `in_block / 16`; the qs byte + 2-bit shift come from
+                // `q2_k_qpos`, NOT the naive 4-consecutive-per-byte order.
                 let sub = in_block / 16;
-                let q_byte_idx = in_block / 4;
-                let word_idx = q_byte_idx / 4;
-                let byte_in_word = q_byte_idx % 4;
+                let (q_byte, shift) = q2_k_qpos(in_block);
+                let word_idx = q_byte / 4;
+                let byte_in_word = q_byte % 4;
                 let word = qs_all[qs_row_base + b * 16 + word_idx];
                 let qs_byte = (word >> (byte_in_word * 8)) & 0xff;
-                let shift = (in_block % 4) * 2;
                 let q_2bit = (qs_byte >> shift) & 0x3;
                 let scale_byte = scales_all[qs_row_base + b * 16 + sub] as u32;
                 let scale_4bit = scale_byte & 0xf;
