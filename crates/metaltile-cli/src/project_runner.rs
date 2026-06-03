@@ -1,28 +1,16 @@
 //! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
 //! SPDX-License-Identifier: Apache-2.0
-//! `ProjectRunner` — will spawn `__tile_runner` as a subprocess and stream
-//! `ProtocolMessage` JSON lines back to the caller.
-//!
-//! # Architecture (Phase 2 target)
+//! `ProjectRunner` — spawns `__tile_runner` as a subprocess and streams its
+//! `ProtocolMessage` JSON-lines output to stdout.
 //!
 //! ```text
-//!  tile CLI  ──spawn──►  __tile_runner
+//!  tile CLI  ──spawn──►  __tile_runner  (metaltile-std linked → inventory populated)
 //!             JSON Lines ◄── stdout
 //! ```
 //!
-//! Each subcommand builds a `RunnerInvocation` describing the command,
-//! filter, dtype, etc., then calls `ProjectRunner::run(invocation, callback)`.
-//! The runner process writes one JSON-encoded `ProtocolMessage` per line; this
-//! module parses each line and calls the callback in order.
-//!
-//! # Phase 1 (current)
-//!
-//! `run` delegates in-process to `metaltile::runner::RunnerHarness`, which
-//! writes JSON lines directly to stdout.  The `on_message` callback is **not**
-//! invoked in the Phase-1 path — callers that depend on it should wait for
-//! Phase 2 subprocess wiring (Step 7 → Step 9 migration).
-
-use metaltile::runner::{RunnerArgs, RunnerHarness};
+//! `__tile_runner` is a hidden sibling binary built from `metaltile-std`.
+//! It lives alongside `tile` in the same `target/` directory and is never
+//! installed or exposed to the user directly.
 
 use crate::harness::Harness;
 
@@ -45,8 +33,7 @@ pub struct RunnerInvocation {
     pub runs: Option<usize>,
 }
 
-/// Owns the `Harness` reference and exposes the subprocess-or-in-process
-/// dispatch method.
+/// Owns the `Harness` reference and exposes the subprocess dispatch method.
 pub struct ProjectRunner<'a> {
     pub harness: &'a Harness,
 }
@@ -54,22 +41,44 @@ pub struct ProjectRunner<'a> {
 impl<'a> ProjectRunner<'a> {
     pub fn new(harness: &'a Harness) -> Self { Self { harness } }
 
-    /// Run the invocation in-process (Phase 1).
-    ///
-    /// Emits `ProtocolMessage` JSON lines directly to stdout via
-    /// `RunnerHarness::run`.  Returns `true` when the runner signals success.
-    ///
-    /// Phase 2 will replace this with a subprocess spawn that captures stdout
-    /// and forwards parsed `ProtocolMessage`s to a caller-supplied callback.
+    /// Spawn `__tile_runner` as a subprocess with stdout/stderr inherited,
+    /// so its `ProtocolMessage` JSON lines flow directly to the terminal.
+    /// Returns `true` when the runner exits with status 0.
     pub fn run(&self, inv: &RunnerInvocation) -> bool {
-        let args = match RunnerArgs::parse(build_argv(inv)) {
-            Ok(a) => a,
+        let binary = self.runner_binary();
+        let argv = build_argv(inv);
+        match std::process::Command::new(&binary).args(&argv).status() {
+            Ok(s) => s.success(),
             Err(e) => {
-                eprintln!("[tile] runner args error: {e}");
-                return false;
+                eprintln!("[tile] failed to spawn '{binary}': {e}");
+                false
             },
-        };
-        RunnerHarness::run(&args)
+        }
+    }
+
+    /// Resolve the `__tile_runner` binary path.
+    ///
+    /// Precedence:
+    /// 1. `tile.toml [runner] binary` config override (allows pointing at a
+    ///    custom build or a project-local runner).
+    /// 2. Sibling of the current executable in the same `target/` directory —
+    ///    the standard case when running `cargo run` or an installed `tile`.
+    /// 3. Bare `"__tile_runner"` name resolved via `$PATH` as a last resort.
+    fn runner_binary(&self) -> String {
+        let configured = self.harness.runner_binary();
+        if configured != "__tile_runner" {
+            return configured.to_string();
+        }
+        // Look for the sibling binary next to the current executable.
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let sibling = dir.join("__tile_runner");
+                if sibling.exists() {
+                    return sibling.to_string_lossy().into_owned();
+                }
+            }
+        }
+        "__tile_runner".to_string()
     }
 }
 

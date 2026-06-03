@@ -9,6 +9,10 @@ publish = true
 [lints]
 workspace = true
 
+[[bin]]
+name = "__tile_runner"
+path = "src/bin/tile_runner.rs"
+
 [dependencies]
 metaltile.workspace = true
 half.workspace = true
