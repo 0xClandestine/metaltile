@@ -778,6 +778,374 @@ pub fn mt_int8_batched_qkv_qmm<T>(
     }
 }
 
+// ── FP16-scale twins (nvfp8 / fp4 / fp8_e5m2 + int8) ───────────────────────
+// Near-clones of the FP32-scaled kernels above: identical element decode,
+// weight indexing, and (matrix, token, row) reduction geometry — only the
+// scale tensor changes from `Tensor<f32>` to `Tensor<f16>`, read as
+// `load(scales[...]).cast::<f32>()` (native half load → f32, matching
+// `mlx/block_scaled_dequant.rs`'s `mt_*_f16_dequant`). `fp8_e4m3_f16` reuses
+// `mt_nvfp8_f16_batched_qkv_qmm` (same 8-bit-E4M3 + f16-scale shape), exactly
+// as `fp8_e4m3` reuses `mt_nvfp8_batched_qkv_qmm`.
+
+/// nvfp8 (FP16-scale) batched Q/K/V GEMM (M>1) — E4M3 weights (block 16),
+/// per-block FP16 scale. Twin of `mt_nvfp8_batched_qkv_qmm`; also serves
+/// `Fp8E4m3F16` (E4M3 element, group 32, FP16 scale).
+#[kernel]
+pub fn mt_nvfp8_f16_batched_qkv_qmm<T>(
+    x: Tensor<T>,
+    w_q: Tensor<u8>,
+    scales_q: Tensor<f16>,
+    w_k: Tensor<u8>,
+    scales_k: Tensor<f16>,
+    w_v: Tensor<u8>,
+    scales_v: Tensor<f16>,
+    mut q_buf: Tensor<T>,
+    mut k_buf: Tensor<T>,
+    mut v_buf: Tensor<T>,
+    #[constexpr] out_q: u32,
+    #[constexpr] out_k: u32,
+    #[constexpr] out_v: u32,
+    #[constexpr] in_dim: u32,
+    #[constexpr] block_size: u32,
+) {
+    let matrix = program_id::<2>();
+    let mr = program_id::<1>();
+    let row = program_id::<0>();
+    let n_blocks = in_dim / block_size;
+    let iters = (in_dim + lsize - 1u32) / lsize;
+    let row_off = row * in_dim;
+    let row_block_off = row * n_blocks;
+    let x_row_off = mr * in_dim;
+    let mut acc = 0.0f32;
+    if matrix == 0u32 {
+        if row < out_q {
+            for it in range(0u32, iters, 1u32) {
+                let c = it * lsize + tid;
+                if c < in_dim {
+                    let elem = e4m3_decode(load(w_q[row_off + c]).cast::<u32>());
+                    let scale = load(scales_q[row_block_off + c / block_size]).cast::<f32>();
+                    acc = acc + (elem * scale) * load(x[x_row_off + c]).cast::<f32>();
+                }
+            }
+        }
+    }
+    if matrix == 1u32 {
+        if row < out_k {
+            for it in range(0u32, iters, 1u32) {
+                let c = it * lsize + tid;
+                if c < in_dim {
+                    let elem = e4m3_decode(load(w_k[row_off + c]).cast::<u32>());
+                    let scale = load(scales_k[row_block_off + c / block_size]).cast::<f32>();
+                    acc = acc + (elem * scale) * load(x[x_row_off + c]).cast::<f32>();
+                }
+            }
+        }
+    }
+    if matrix == 2u32 {
+        if row < out_v {
+            for it in range(0u32, iters, 1u32) {
+                let c = it * lsize + tid;
+                if c < in_dim {
+                    let elem = e4m3_decode(load(w_v[row_off + c]).cast::<u32>());
+                    let scale = load(scales_v[row_block_off + c / block_size]).cast::<f32>();
+                    acc = acc + (elem * scale) * load(x[x_row_off + c]).cast::<f32>();
+                }
+            }
+        }
+    }
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        if matrix == 0u32 {
+            if row < out_q {
+                store(q_buf[mr * out_q + row], total.cast::<T>());
+            }
+        }
+        if matrix == 1u32 {
+            if row < out_k {
+                store(k_buf[mr * out_k + row], total.cast::<T>());
+            }
+        }
+        if matrix == 2u32 {
+            if row < out_v {
+                store(v_buf[mr * out_v + row], total.cast::<T>());
+            }
+        }
+    }
+}
+
+/// fp4 (FP16-scale) batched Q/K/V GEMM (M>1) — E2M1 weights (group 32), FP16
+/// scale. Twin of `mt_fp4_batched_qkv_qmm`; scale tensor is half.
+#[kernel]
+pub fn mt_fp4_f16_batched_qkv_qmm<T>(
+    x: Tensor<T>,
+    w_q: Tensor<u32>,
+    scales_q: Tensor<f16>,
+    w_k: Tensor<u32>,
+    scales_k: Tensor<f16>,
+    w_v: Tensor<u32>,
+    scales_v: Tensor<f16>,
+    mut q_buf: Tensor<T>,
+    mut k_buf: Tensor<T>,
+    mut v_buf: Tensor<T>,
+    #[constexpr] out_q: u32,
+    #[constexpr] out_k: u32,
+    #[constexpr] out_v: u32,
+    #[constexpr] in_dim: u32,
+    #[constexpr] block_size: u32,
+) {
+    let matrix = program_id::<2>();
+    let mr = program_id::<1>();
+    let row = program_id::<0>();
+    let n_packs = in_dim / 8u32;
+    let n_blocks = in_dim / block_size;
+    let packs_per_block = block_size / 8u32;
+    let p_iters = (n_packs + lsize - 1u32) / lsize;
+    let row_pack_off = row * n_packs;
+    let row_block_off = row * n_blocks;
+    let x_row_off = mr * in_dim;
+    let mut acc = 0.0f32;
+    if matrix == 0u32 {
+        if row < out_q {
+            for _p in range(0u32, p_iters, 1u32) {
+                let pack_idx = _p * lsize + tid;
+                if pack_idx < n_packs {
+                    let blk = pack_idx / packs_per_block;
+                    let scale = load(scales_q[row_block_off + blk]).cast::<f32>();
+                    let packed = load(w_q[row_pack_off + pack_idx]);
+                    let p_off = pack_idx * 8u32;
+                    for i in range(0u32, 8u32, 1u32) {
+                        let val = e2m1_decode((packed >> (i * 4u32)) & 0xFu32);
+                        acc = acc + (val * scale) * load(x[x_row_off + p_off + i]).cast::<f32>();
+                    }
+                }
+            }
+        }
+    }
+    if matrix == 1u32 {
+        if row < out_k {
+            for _p in range(0u32, p_iters, 1u32) {
+                let pack_idx = _p * lsize + tid;
+                if pack_idx < n_packs {
+                    let blk = pack_idx / packs_per_block;
+                    let scale = load(scales_k[row_block_off + blk]).cast::<f32>();
+                    let packed = load(w_k[row_pack_off + pack_idx]);
+                    let p_off = pack_idx * 8u32;
+                    for i in range(0u32, 8u32, 1u32) {
+                        let val = e2m1_decode((packed >> (i * 4u32)) & 0xFu32);
+                        acc = acc + (val * scale) * load(x[x_row_off + p_off + i]).cast::<f32>();
+                    }
+                }
+            }
+        }
+    }
+    if matrix == 2u32 {
+        if row < out_v {
+            for _p in range(0u32, p_iters, 1u32) {
+                let pack_idx = _p * lsize + tid;
+                if pack_idx < n_packs {
+                    let blk = pack_idx / packs_per_block;
+                    let scale = load(scales_v[row_block_off + blk]).cast::<f32>();
+                    let packed = load(w_v[row_pack_off + pack_idx]);
+                    let p_off = pack_idx * 8u32;
+                    for i in range(0u32, 8u32, 1u32) {
+                        let val = e2m1_decode((packed >> (i * 4u32)) & 0xFu32);
+                        acc = acc + (val * scale) * load(x[x_row_off + p_off + i]).cast::<f32>();
+                    }
+                }
+            }
+        }
+    }
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        if matrix == 0u32 {
+            if row < out_q {
+                store(q_buf[mr * out_q + row], total.cast::<T>());
+            }
+        }
+        if matrix == 1u32 {
+            if row < out_k {
+                store(k_buf[mr * out_k + row], total.cast::<T>());
+            }
+        }
+        if matrix == 2u32 {
+            if row < out_v {
+                store(v_buf[mr * out_v + row], total.cast::<T>());
+            }
+        }
+    }
+}
+
+/// fp8 (E5M2, FP16-scale) batched Q/K/V GEMM (M>1) — 8-bit weights (group 32),
+/// FP16 scale. Twin of `mt_fp8_e5m2_batched_qkv_qmm`; scale tensor is half.
+#[kernel]
+pub fn mt_fp8_e5m2_f16_batched_qkv_qmm<T>(
+    x: Tensor<T>,
+    w_q: Tensor<u8>,
+    scales_q: Tensor<f16>,
+    w_k: Tensor<u8>,
+    scales_k: Tensor<f16>,
+    w_v: Tensor<u8>,
+    scales_v: Tensor<f16>,
+    mut q_buf: Tensor<T>,
+    mut k_buf: Tensor<T>,
+    mut v_buf: Tensor<T>,
+    #[constexpr] out_q: u32,
+    #[constexpr] out_k: u32,
+    #[constexpr] out_v: u32,
+    #[constexpr] in_dim: u32,
+    #[constexpr] block_size: u32,
+) {
+    let matrix = program_id::<2>();
+    let mr = program_id::<1>();
+    let row = program_id::<0>();
+    let n_blocks = in_dim / block_size;
+    let iters = (in_dim + lsize - 1u32) / lsize;
+    let row_off = row * in_dim;
+    let row_block_off = row * n_blocks;
+    let x_row_off = mr * in_dim;
+    let mut acc = 0.0f32;
+    if matrix == 0u32 {
+        if row < out_q {
+            for it in range(0u32, iters, 1u32) {
+                let c = it * lsize + tid;
+                if c < in_dim {
+                    let elem = e5m2_decode(load(w_q[row_off + c]).cast::<u32>());
+                    let scale = load(scales_q[row_block_off + c / block_size]).cast::<f32>();
+                    acc = acc + (elem * scale) * load(x[x_row_off + c]).cast::<f32>();
+                }
+            }
+        }
+    }
+    if matrix == 1u32 {
+        if row < out_k {
+            for it in range(0u32, iters, 1u32) {
+                let c = it * lsize + tid;
+                if c < in_dim {
+                    let elem = e5m2_decode(load(w_k[row_off + c]).cast::<u32>());
+                    let scale = load(scales_k[row_block_off + c / block_size]).cast::<f32>();
+                    acc = acc + (elem * scale) * load(x[x_row_off + c]).cast::<f32>();
+                }
+            }
+        }
+    }
+    if matrix == 2u32 {
+        if row < out_v {
+            for it in range(0u32, iters, 1u32) {
+                let c = it * lsize + tid;
+                if c < in_dim {
+                    let elem = e5m2_decode(load(w_v[row_off + c]).cast::<u32>());
+                    let scale = load(scales_v[row_block_off + c / block_size]).cast::<f32>();
+                    acc = acc + (elem * scale) * load(x[x_row_off + c]).cast::<f32>();
+                }
+            }
+        }
+    }
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        if matrix == 0u32 {
+            if row < out_q {
+                store(q_buf[mr * out_q + row], total.cast::<T>());
+            }
+        }
+        if matrix == 1u32 {
+            if row < out_k {
+                store(k_buf[mr * out_k + row], total.cast::<T>());
+            }
+        }
+        if matrix == 2u32 {
+            if row < out_v {
+                store(v_buf[mr * out_v + row], total.cast::<T>());
+            }
+        }
+    }
+}
+
+/// Symmetric int8 (FP16-scale) batched Q/K/V GEMM (M>1) — 8-bit codes (group
+/// 64), per-group FP16 scale. Twin of `mt_int8_batched_qkv_qmm`; decode is
+/// sign-extend → `code · scale` with the scale read as half → f32.
+#[kernel]
+pub fn mt_int8_f16_batched_qkv_qmm<T>(
+    x: Tensor<T>,
+    w_q: Tensor<u8>,
+    scales_q: Tensor<f16>,
+    w_k: Tensor<u8>,
+    scales_k: Tensor<f16>,
+    w_v: Tensor<u8>,
+    scales_v: Tensor<f16>,
+    mut q_buf: Tensor<T>,
+    mut k_buf: Tensor<T>,
+    mut v_buf: Tensor<T>,
+    #[constexpr] out_q: u32,
+    #[constexpr] out_k: u32,
+    #[constexpr] out_v: u32,
+    #[constexpr] in_dim: u32,
+    #[constexpr] block_size: u32,
+) {
+    let matrix = program_id::<2>();
+    let mr = program_id::<1>();
+    let row = program_id::<0>();
+    let n_blocks = in_dim / block_size;
+    let iters = (in_dim + lsize - 1u32) / lsize;
+    let row_off = row * in_dim;
+    let row_block_off = row * n_blocks;
+    let x_row_off = mr * in_dim;
+    let mut acc = 0.0f32;
+    if matrix == 0u32 {
+        if row < out_q {
+            for it in range(0u32, iters, 1u32) {
+                let c = it * lsize + tid;
+                if c < in_dim {
+                    let elem = int8_decode(load(w_q[row_off + c]).cast::<u32>());
+                    let scale = load(scales_q[row_block_off + c / block_size]).cast::<f32>();
+                    acc = acc + (elem * scale) * load(x[x_row_off + c]).cast::<f32>();
+                }
+            }
+        }
+    }
+    if matrix == 1u32 {
+        if row < out_k {
+            for it in range(0u32, iters, 1u32) {
+                let c = it * lsize + tid;
+                if c < in_dim {
+                    let elem = int8_decode(load(w_k[row_off + c]).cast::<u32>());
+                    let scale = load(scales_k[row_block_off + c / block_size]).cast::<f32>();
+                    acc = acc + (elem * scale) * load(x[x_row_off + c]).cast::<f32>();
+                }
+            }
+        }
+    }
+    if matrix == 2u32 {
+        if row < out_v {
+            for it in range(0u32, iters, 1u32) {
+                let c = it * lsize + tid;
+                if c < in_dim {
+                    let elem = int8_decode(load(w_v[row_off + c]).cast::<u32>());
+                    let scale = load(scales_v[row_block_off + c / block_size]).cast::<f32>();
+                    acc = acc + (elem * scale) * load(x[x_row_off + c]).cast::<f32>();
+                }
+            }
+        }
+    }
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        if matrix == 0u32 {
+            if row < out_q {
+                store(q_buf[mr * out_q + row], total.cast::<T>());
+            }
+        }
+        if matrix == 1u32 {
+            if row < out_k {
+                store(k_buf[mr * out_k + row], total.cast::<T>());
+            }
+        }
+        if matrix == 2u32 {
+            if row < out_v {
+                store(v_buf[mr * out_v + row], total.cast::<T>());
+            }
+        }
+    }
+}
+
 // ── Symmetric sub-byte integer batched Q/K/V GEMMs (int2/3/4/5/6 + MXINT2..6) ─
 // Each element is a signed N-bit two's-complement code, tight-bit-packed
 // LSB-first into u32 words. The three weight matrices are laid out exactly like
@@ -933,6 +1301,148 @@ int_batched_qkv_qmm_f32!(mt_int3_batched_qkv_qmm, 3u32, 4u32, 8.0f32);
 int_batched_qkv_qmm_f32!(mt_int4_batched_qkv_qmm, 4u32, 8u32, 16.0f32);
 int_batched_qkv_qmm_f32!(mt_int5_batched_qkv_qmm, 5u32, 16u32, 32.0f32);
 int_batched_qkv_qmm_f32!(mt_int6_batched_qkv_qmm, 6u32, 32u32, 64.0f32);
+
+/// FP16-scaled symmetric int batched Q/K/V GEMM (int2/3/4/5/6): the FP16-scale
+/// twin of `int_batched_qkv_qmm_f32`. Identical straddle-aware bit-stream decode
+/// and (matrix, token, row) reduction; only the per-group scale axis switches
+/// from a raw f32 to a half read as `load(scales[...]).cast::<f32>()`.
+macro_rules! int_batched_qkv_qmm_f16 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            x: Tensor<T>,
+            w_q: Tensor<u32>,
+            scales_q: Tensor<f16>,
+            w_k: Tensor<u32>,
+            scales_k: Tensor<f16>,
+            w_v: Tensor<u32>,
+            scales_v: Tensor<f16>,
+            mut q_buf: Tensor<T>,
+            mut k_buf: Tensor<T>,
+            mut v_buf: Tensor<T>,
+            #[constexpr] out_q: u32,
+            #[constexpr] out_k: u32,
+            #[constexpr] out_v: u32,
+            #[constexpr] in_dim: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let matrix = program_id::<2>();
+            let mr = program_id::<1>();
+            let row = program_id::<0>();
+            let words_per_row = in_dim * $bits / 32u32;
+            let n_blocks = in_dim / block_size;
+            let row_word_off = row * words_per_row;
+            let row_block_off = row * n_blocks;
+            let x_row_off = mr * in_dim;
+            let iters = (in_dim + lsize - 1u32) / lsize;
+            let mut acc = 0.0f32;
+            if matrix == 0u32 {
+                if row < out_q {
+                    for it in range(0u32, iters, 1u32) {
+                        let c = it * lsize + tid;
+                        if c < in_dim {
+                            let bit_off = c * $bits;
+                            let word_idx = bit_off / 32u32;
+                            let bit_in_w = bit_off & 31u32;
+                            let bits_in_w0 = 32u32 - bit_in_w;
+                            let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                            let spill = $bits - lo_bits;
+                            let w0 = load(w_q[row_word_off + word_idx]);
+                            let w1 = load(
+                                w_q[row_word_off + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                            );
+                            let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                            let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                            let q = lo | hi;
+                            let qf = q.cast::<f32>();
+                            let val = select(q >= $half, qf - $full, qf); // sign-extend
+                            let scale =
+                                load(scales_q[row_block_off + c / block_size]).cast::<f32>();
+                            acc = acc + (val * scale) * load(x[x_row_off + c]).cast::<f32>();
+                        }
+                    }
+                }
+            }
+            if matrix == 1u32 {
+                if row < out_k {
+                    for it in range(0u32, iters, 1u32) {
+                        let c = it * lsize + tid;
+                        if c < in_dim {
+                            let bit_off = c * $bits;
+                            let word_idx = bit_off / 32u32;
+                            let bit_in_w = bit_off & 31u32;
+                            let bits_in_w0 = 32u32 - bit_in_w;
+                            let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                            let spill = $bits - lo_bits;
+                            let w0 = load(w_k[row_word_off + word_idx]);
+                            let w1 = load(
+                                w_k[row_word_off + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                            );
+                            let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                            let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                            let q = lo | hi;
+                            let qf = q.cast::<f32>();
+                            let val = select(q >= $half, qf - $full, qf); // sign-extend
+                            let scale =
+                                load(scales_k[row_block_off + c / block_size]).cast::<f32>();
+                            acc = acc + (val * scale) * load(x[x_row_off + c]).cast::<f32>();
+                        }
+                    }
+                }
+            }
+            if matrix == 2u32 {
+                if row < out_v {
+                    for it in range(0u32, iters, 1u32) {
+                        let c = it * lsize + tid;
+                        if c < in_dim {
+                            let bit_off = c * $bits;
+                            let word_idx = bit_off / 32u32;
+                            let bit_in_w = bit_off & 31u32;
+                            let bits_in_w0 = 32u32 - bit_in_w;
+                            let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                            let spill = $bits - lo_bits;
+                            let w0 = load(w_v[row_word_off + word_idx]);
+                            let w1 = load(
+                                w_v[row_word_off + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                            );
+                            let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                            let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                            let q = lo | hi;
+                            let qf = q.cast::<f32>();
+                            let val = select(q >= $half, qf - $full, qf); // sign-extend
+                            let scale =
+                                load(scales_v[row_block_off + c / block_size]).cast::<f32>();
+                            acc = acc + (val * scale) * load(x[x_row_off + c]).cast::<f32>();
+                        }
+                    }
+                }
+            }
+            let total = reduce_sum(acc);
+            if tid == 0u32 {
+                if matrix == 0u32 {
+                    if row < out_q {
+                        store(q_buf[mr * out_q + row], total.cast::<T>());
+                    }
+                }
+                if matrix == 1u32 {
+                    if row < out_k {
+                        store(k_buf[mr * out_k + row], total.cast::<T>());
+                    }
+                }
+                if matrix == 2u32 {
+                    if row < out_v {
+                        store(v_buf[mr * out_v + row], total.cast::<T>());
+                    }
+                }
+            }
+        }
+    };
+}
+int_batched_qkv_qmm_f16!(mt_int2_f16_batched_qkv_qmm, 2u32, 2u32, 4.0f32);
+int_batched_qkv_qmm_f16!(mt_int3_f16_batched_qkv_qmm, 3u32, 4u32, 8.0f32);
+int_batched_qkv_qmm_f16!(mt_int4_f16_batched_qkv_qmm, 4u32, 8u32, 16.0f32);
+int_batched_qkv_qmm_f16!(mt_int5_f16_batched_qkv_qmm, 5u32, 16u32, 32.0f32);
+int_batched_qkv_qmm_f16!(mt_int6_f16_batched_qkv_qmm, 6u32, 32u32, 64.0f32);
 
 /// E8M0-scaled symmetric int batched Q/K/V GEMM (MXINT2/3/4/5/6): per-element
 /// bit-stream code × pow-2 (E8M0) block scale `2^(bits-127)`, dotted with `x`.
@@ -1247,13 +1757,14 @@ pub mod kernel_tests {
         let ev = qmm_oracle(&wdq_v, &x, m_rows, in_dim, out_v);
         // 8-bit codes bind as one uchar each; every sub-byte width (4-bit nibble
         // packs + int2/3/5/6 tight bit-streams) binds as packed u32 words. FP32
-        // scales bind as f32; E8M0/E4M3 scales as one byte. Both axes are driven
-        // off the format so new integer formats pick up the right buffer types.
+        // scales bind as f32; FP16 scales as half; E8M0/E4M3 scales as one byte.
+        // Both axes are driven off the format so new formats pick up the right
+        // buffer types.
         let weight_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
         let max_rows = out_q.max(out_k).max(out_v);
         let mut s = TestSetup::new(kernel)
@@ -1469,6 +1980,140 @@ pub mod kernel_tests {
             dt,
         )
     }
+
+    // FP16-scale twins (nvfp8 / fp4 / fp8_e5m2 + int2..6 + int8). fp8_e4m3_f16
+    // reuses the nvfp8_f16 kernel (same 8-bit-E4M3 + f16-scale shape); the
+    // scales bind as half via the `ScaleKind::F16` arm of `qkv_setup`.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_nvfp8_f16_batched_qkv_qmm(dt: DType) -> TestSetup {
+        qkv_setup(
+            mt_nvfp8_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Nvfp8F16,
+            16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e4m3_f16_batched_qkv_qmm(dt: DType) -> TestSetup {
+        qkv_setup(
+            mt_nvfp8_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Fp8E4m3F16,
+            16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp4_f16_batched_qkv_qmm(dt: DType) -> TestSetup {
+        qkv_setup(
+            mt_fp4_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Fp4F16,
+            16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e5m2_f16_batched_qkv_qmm(dt: DType) -> TestSetup {
+        qkv_setup(
+            mt_fp8_e5m2_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Fp8E5m2F16,
+            16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int2_f16_batched_qkv_qmm(dt: DType) -> TestSetup {
+        qkv_setup(
+            mt_int2_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Int2F16,
+            16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int3_f16_batched_qkv_qmm(dt: DType) -> TestSetup {
+        qkv_setup(
+            mt_int3_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Int3F16,
+            16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int4_f16_batched_qkv_qmm(dt: DType) -> TestSetup {
+        qkv_setup(
+            mt_int4_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Int4F16,
+            16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int5_f16_batched_qkv_qmm(dt: DType) -> TestSetup {
+        qkv_setup(
+            mt_int5_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Int5F16,
+            16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int6_f16_batched_qkv_qmm(dt: DType) -> TestSetup {
+        qkv_setup(
+            mt_int6_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Int6F16,
+            16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int8_f16_batched_qkv_qmm(dt: DType) -> TestSetup {
+        qkv_setup(
+            mt_int8_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Int8F16,
+            16,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
 }
 
 /// Small-batch prefill (M=8) benches at a Qwen3-class fused-QKV shape
@@ -1495,10 +2140,10 @@ pub mod kernel_benches {
         // 8-bit codes are one uchar each; every sub-byte width (4-bit nibble
         // packs + int2/3/5/6 tight bit-streams) tight-bit-packs into u32 words.
         let codes_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
         let max_rows = out_q.max(out_k).max(out_v);
         let sz = dt.size_bytes();
@@ -1800,6 +2445,138 @@ pub mod kernel_benches {
         qkv_bench(
             mt_mxint8_batched_qkv_qmm::kernel_ir_for(dt),
             QFormat::Mxint8,
+            4096,
+            1024,
+            1024,
+            4096,
+            8,
+            dt,
+        )
+    }
+    // FP16-scale twins (nvfp8 / fp4 / fp8_e5m2 + int2..6 + int8). fp8_e4m3_f16
+    // reuses the nvfp8_f16 kernel (same 8-bit-E4M3 + f16-scale shape).
+    #[bench(name = "ffai/batched_qkv_block_qmm/nvfp8_f16", dtypes = [f32, f16, bf16])]
+    fn bench_nvfp8_f16_qkv(dt: DType) -> BenchSetup {
+        qkv_bench(
+            mt_nvfp8_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Nvfp8F16,
+            4096,
+            1024,
+            1024,
+            4096,
+            8,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/batched_qkv_block_qmm/fp8_e4m3_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e4m3_f16_qkv(dt: DType) -> BenchSetup {
+        qkv_bench(
+            mt_nvfp8_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Fp8E4m3F16,
+            4096,
+            1024,
+            1024,
+            4096,
+            8,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/batched_qkv_block_qmm/fp4_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp4_f16_qkv(dt: DType) -> BenchSetup {
+        qkv_bench(
+            mt_fp4_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Fp4F16,
+            4096,
+            1024,
+            1024,
+            4096,
+            8,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/batched_qkv_block_qmm/fp8_e5m2_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e5m2_f16_qkv(dt: DType) -> BenchSetup {
+        qkv_bench(
+            mt_fp8_e5m2_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Fp8E5m2F16,
+            4096,
+            1024,
+            1024,
+            4096,
+            8,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/batched_qkv_block_qmm/int2_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int2_f16_qkv(dt: DType) -> BenchSetup {
+        qkv_bench(
+            mt_int2_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Int2F16,
+            4096,
+            1024,
+            1024,
+            4096,
+            8,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/batched_qkv_block_qmm/int3_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int3_f16_qkv(dt: DType) -> BenchSetup {
+        qkv_bench(
+            mt_int3_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Int3F16,
+            4096,
+            1024,
+            1024,
+            4096,
+            8,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/batched_qkv_block_qmm/int4_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int4_f16_qkv(dt: DType) -> BenchSetup {
+        qkv_bench(
+            mt_int4_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Int4F16,
+            4096,
+            1024,
+            1024,
+            4096,
+            8,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/batched_qkv_block_qmm/int5_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int5_f16_qkv(dt: DType) -> BenchSetup {
+        qkv_bench(
+            mt_int5_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Int5F16,
+            4096,
+            1024,
+            1024,
+            4096,
+            8,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/batched_qkv_block_qmm/int6_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int6_f16_qkv(dt: DType) -> BenchSetup {
+        qkv_bench(
+            mt_int6_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Int6F16,
+            4096,
+            1024,
+            1024,
+            4096,
+            8,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/batched_qkv_block_qmm/int8_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int8_f16_qkv(dt: DType) -> BenchSetup {
+        qkv_bench(
+            mt_int8_f16_batched_qkv_qmm::kernel_ir_for(dt),
+            QFormat::Int8F16,
             4096,
             1024,
             1024,

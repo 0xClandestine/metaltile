@@ -672,6 +672,280 @@ pub fn mt_nvfp8_conv3d<T>(
     store(out[idx], acc.cast::<T>());
 }
 
+/// nvfp8 (FP16-scale) quantized-weight conv3d — E4M3 filter (block 16), per-block
+/// FP16 scale. Clone of `mt_nvfp8_conv3d` with the scale axis as `Tensor<f16>`
+/// read `.cast::<f32>()`; element decode, weight layout and Grid3D geometry are
+/// IDENTICAL. Also serves **fp8_e4m3_f16** (same 8-bit-E4M3 + f16-scale shape).
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_nvfp8_f16_conv3d<T>(
+    input: Tensor<T>,
+    weight: Tensor<u8>,
+    scales: Tensor<f16>,
+    bias: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] batch: u32,
+    #[constexpr] in_ch: u32,
+    #[constexpr] in_d: u32,
+    #[constexpr] in_h: u32,
+    #[constexpr] in_w: u32,
+    #[constexpr] out_ch: u32,
+    #[constexpr] out_d: u32,
+    #[constexpr] out_h: u32,
+    #[constexpr] out_w: u32,
+    #[constexpr] kd: u32,
+    #[constexpr] kh: u32,
+    #[constexpr] kw: u32,
+    #[constexpr] stride_d: u32,
+    #[constexpr] stride_h: u32,
+    #[constexpr] stride_w: u32,
+    #[constexpr] pad_d: u32,
+    #[constexpr] pad_h: u32,
+    #[constexpr] pad_w: u32,
+    #[constexpr] block_size: u32,
+) {
+    let idx = program_id::<0>();
+    let ow = idx % out_w;
+    let t1 = idx / out_w;
+    let oh = t1 % out_h;
+    let t2 = t1 / out_h;
+    let od = t2 % out_d;
+    let t3 = t2 / out_d;
+    let oc = t3 % out_ch;
+    let n = t3 / out_ch;
+
+    let pd0 = od * stride_d;
+    let ph0 = oh * stride_h;
+    let pw0 = ow * stride_w;
+
+    let input_plane = in_h * in_w;
+    let input_vol = in_d * input_plane;
+    let in_n_stride = in_ch * input_vol;
+
+    let contraction = in_ch * kd * kh * kw;
+    let n_blocks = contraction / block_size;
+    let w_row = oc * contraction;
+    let w_row_blk = oc * n_blocks;
+
+    let mut acc = load(bias[oc]).cast::<f32>();
+
+    for ic in range(0u32, in_ch, 1u32) {
+        let in_ic_base = n * in_n_stride + ic * input_vol;
+        let col_ic = ic * kd * kh * kw;
+        for kz in range(0u32, kd, 1u32) {
+            let pd = pd0 + kz;
+            let dep_ok = (pd >= pad_d) & (pd < pad_d + in_d);
+            let id = select(dep_ok, pd - pad_d, 0u32);
+            let col_kz = col_ic + kz * kh * kw;
+            for ky in range(0u32, kh, 1u32) {
+                let ph = ph0 + ky;
+                let row_ok = (ph >= pad_h) & (ph < pad_h + in_h);
+                let ih = select(row_ok, ph - pad_h, 0u32);
+                for kx in range(0u32, kw, 1u32) {
+                    let pw = pw0 + kx;
+                    let col_ok = (pw >= pad_w) & (pw < pad_w + in_w);
+                    let valid = dep_ok & row_ok & col_ok;
+                    let iw = select(col_ok, pw - pad_w, 0u32);
+
+                    let in_idx = in_ic_base + id * input_plane + ih * in_w + iw;
+                    let pix = load(input[in_idx]).cast::<f32>();
+                    let pix_m = select(valid, pix, 0.0f32);
+
+                    let col = col_kz + ky * kw + kx;
+                    let elem = e4m3_decode(load(weight[w_row + col]).cast::<u32>());
+                    let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
+                    acc = acc + pix_m * (elem * scale);
+                }
+            }
+        }
+    }
+
+    store(out[idx], acc.cast::<T>());
+}
+
+/// Legacy fp8 (E5M2, FP16-scale) quantized-weight conv3d — 8-bit filter (group
+/// 32), FP16 scale. Clone of `mt_fp8_e5m2_conv3d` with the scale axis as
+/// `Tensor<f16>` read `.cast::<f32>()`; everything else is IDENTICAL.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_fp8_e5m2_f16_conv3d<T>(
+    input: Tensor<T>,
+    weight: Tensor<u8>,
+    scales: Tensor<f16>,
+    bias: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] batch: u32,
+    #[constexpr] in_ch: u32,
+    #[constexpr] in_d: u32,
+    #[constexpr] in_h: u32,
+    #[constexpr] in_w: u32,
+    #[constexpr] out_ch: u32,
+    #[constexpr] out_d: u32,
+    #[constexpr] out_h: u32,
+    #[constexpr] out_w: u32,
+    #[constexpr] kd: u32,
+    #[constexpr] kh: u32,
+    #[constexpr] kw: u32,
+    #[constexpr] stride_d: u32,
+    #[constexpr] stride_h: u32,
+    #[constexpr] stride_w: u32,
+    #[constexpr] pad_d: u32,
+    #[constexpr] pad_h: u32,
+    #[constexpr] pad_w: u32,
+    #[constexpr] block_size: u32,
+) {
+    let idx = program_id::<0>();
+    let ow = idx % out_w;
+    let t1 = idx / out_w;
+    let oh = t1 % out_h;
+    let t2 = t1 / out_h;
+    let od = t2 % out_d;
+    let t3 = t2 / out_d;
+    let oc = t3 % out_ch;
+    let n = t3 / out_ch;
+
+    let pd0 = od * stride_d;
+    let ph0 = oh * stride_h;
+    let pw0 = ow * stride_w;
+
+    let input_plane = in_h * in_w;
+    let input_vol = in_d * input_plane;
+    let in_n_stride = in_ch * input_vol;
+
+    let contraction = in_ch * kd * kh * kw;
+    let n_blocks = contraction / block_size;
+    let w_row = oc * contraction;
+    let w_row_blk = oc * n_blocks;
+
+    let mut acc = load(bias[oc]).cast::<f32>();
+
+    for ic in range(0u32, in_ch, 1u32) {
+        let in_ic_base = n * in_n_stride + ic * input_vol;
+        let col_ic = ic * kd * kh * kw;
+        for kz in range(0u32, kd, 1u32) {
+            let pd = pd0 + kz;
+            let dep_ok = (pd >= pad_d) & (pd < pad_d + in_d);
+            let id = select(dep_ok, pd - pad_d, 0u32);
+            let col_kz = col_ic + kz * kh * kw;
+            for ky in range(0u32, kh, 1u32) {
+                let ph = ph0 + ky;
+                let row_ok = (ph >= pad_h) & (ph < pad_h + in_h);
+                let ih = select(row_ok, ph - pad_h, 0u32);
+                for kx in range(0u32, kw, 1u32) {
+                    let pw = pw0 + kx;
+                    let col_ok = (pw >= pad_w) & (pw < pad_w + in_w);
+                    let valid = dep_ok & row_ok & col_ok;
+                    let iw = select(col_ok, pw - pad_w, 0u32);
+
+                    let in_idx = in_ic_base + id * input_plane + ih * in_w + iw;
+                    let pix = load(input[in_idx]).cast::<f32>();
+                    let pix_m = select(valid, pix, 0.0f32);
+
+                    let col = col_kz + ky * kw + kx;
+                    let elem = e5m2_decode(load(weight[w_row + col]).cast::<u32>());
+                    let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
+                    acc = acc + pix_m * (elem * scale);
+                }
+            }
+        }
+    }
+
+    store(out[idx], acc.cast::<T>());
+}
+
+/// Legacy fp4 (FP16-scale) quantized-weight conv3d — E2M1 filter (group 32),
+/// per-group FP16 scale. Clone of `mt_fp4_conv3d` with the scale axis as
+/// `Tensor<f16>` read `.cast::<f32>()`; 4-bit nibble layout and Grid3D geometry
+/// are IDENTICAL.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_fp4_f16_conv3d<T>(
+    input: Tensor<T>,
+    weight: Tensor<u32>,
+    scales: Tensor<f16>,
+    bias: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] batch: u32,
+    #[constexpr] in_ch: u32,
+    #[constexpr] in_d: u32,
+    #[constexpr] in_h: u32,
+    #[constexpr] in_w: u32,
+    #[constexpr] out_ch: u32,
+    #[constexpr] out_d: u32,
+    #[constexpr] out_h: u32,
+    #[constexpr] out_w: u32,
+    #[constexpr] kd: u32,
+    #[constexpr] kh: u32,
+    #[constexpr] kw: u32,
+    #[constexpr] stride_d: u32,
+    #[constexpr] stride_h: u32,
+    #[constexpr] stride_w: u32,
+    #[constexpr] pad_d: u32,
+    #[constexpr] pad_h: u32,
+    #[constexpr] pad_w: u32,
+    #[constexpr] block_size: u32,
+) {
+    let idx = program_id::<0>();
+    let ow = idx % out_w;
+    let t1 = idx / out_w;
+    let oh = t1 % out_h;
+    let t2 = t1 / out_h;
+    let od = t2 % out_d;
+    let t3 = t2 / out_d;
+    let oc = t3 % out_ch;
+    let n = t3 / out_ch;
+
+    let pd0 = od * stride_d;
+    let ph0 = oh * stride_h;
+    let pw0 = ow * stride_w;
+
+    let input_plane = in_h * in_w;
+    let input_vol = in_d * input_plane;
+    let in_n_stride = in_ch * input_vol;
+
+    let contraction = in_ch * kd * kh * kw;
+    let w_packs_per_row = contraction / 8u32;
+    let n_blocks = contraction / block_size;
+    let w_row_pack = oc * w_packs_per_row;
+    let w_row_blk = oc * n_blocks;
+
+    let mut acc = load(bias[oc]).cast::<f32>();
+
+    for ic in range(0u32, in_ch, 1u32) {
+        let in_ic_base = n * in_n_stride + ic * input_vol;
+        let col_ic = ic * kd * kh * kw;
+        for kz in range(0u32, kd, 1u32) {
+            let pd = pd0 + kz;
+            let dep_ok = (pd >= pad_d) & (pd < pad_d + in_d);
+            let id = select(dep_ok, pd - pad_d, 0u32);
+            let col_kz = col_ic + kz * kh * kw;
+            for ky in range(0u32, kh, 1u32) {
+                let ph = ph0 + ky;
+                let row_ok = (ph >= pad_h) & (ph < pad_h + in_h);
+                let ih = select(row_ok, ph - pad_h, 0u32);
+                for kx in range(0u32, kw, 1u32) {
+                    let pw = pw0 + kx;
+                    let col_ok = (pw >= pad_w) & (pw < pad_w + in_w);
+                    let valid = dep_ok & row_ok & col_ok;
+                    let iw = select(col_ok, pw - pad_w, 0u32);
+
+                    let in_idx = in_ic_base + id * input_plane + ih * in_w + iw;
+                    let pix = load(input[in_idx]).cast::<f32>();
+                    let pix_m = select(valid, pix, 0.0f32);
+
+                    let col = col_kz + ky * kw + kx;
+                    let nib =
+                        (load(weight[w_row_pack + col / 8u32]) >> ((col % 8u32) * 4u32)) & 0xFu32;
+                    let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
+                    acc = acc + pix_m * (e2m1_decode(nib) * scale);
+                }
+            }
+        }
+    }
+
+    store(out[idx], acc.cast::<T>());
+}
+
 /// Symmetric int8 quantized-weight conv3d — 8-bit codes (group 64), FP32 scale.
 #[kernel]
 #[allow(clippy::too_many_arguments)]
@@ -891,6 +1165,124 @@ int_conv3d_f32!(mt_int4_conv3d, 4u32, 8u32, 16.0f32);
 int_conv3d_f32!(mt_int5_conv3d, 5u32, 16u32, 32.0f32);
 int_conv3d_f32!(mt_int6_conv3d, 6u32, 32u32, 64.0f32);
 
+/// FP16-scaled symmetric int conv3d (int2/3/4/5/6 F16-scale twins): identical to
+/// `int_conv3d_f32` — same straddle-aware sub-byte bit-stream decode, weight
+/// layout (group 64) and Grid3D geometry — with the per-group scale axis read as
+/// `Tensor<f16>` and cast to f32.
+macro_rules! int_conv3d_f16 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        #[allow(clippy::too_many_arguments)]
+        pub fn $name<T>(
+            input: Tensor<T>,
+            weight: Tensor<u32>,
+            scales: Tensor<f16>,
+            bias: Tensor<T>,
+            out: Tensor<T>,
+            #[constexpr] batch: u32,
+            #[constexpr] in_ch: u32,
+            #[constexpr] in_d: u32,
+            #[constexpr] in_h: u32,
+            #[constexpr] in_w: u32,
+            #[constexpr] out_ch: u32,
+            #[constexpr] out_d: u32,
+            #[constexpr] out_h: u32,
+            #[constexpr] out_w: u32,
+            #[constexpr] kd: u32,
+            #[constexpr] kh: u32,
+            #[constexpr] kw: u32,
+            #[constexpr] stride_d: u32,
+            #[constexpr] stride_h: u32,
+            #[constexpr] stride_w: u32,
+            #[constexpr] pad_d: u32,
+            #[constexpr] pad_h: u32,
+            #[constexpr] pad_w: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let idx = program_id::<0>();
+            let ow = idx % out_w;
+            let t1 = idx / out_w;
+            let oh = t1 % out_h;
+            let t2 = t1 / out_h;
+            let od = t2 % out_d;
+            let t3 = t2 / out_d;
+            let oc = t3 % out_ch;
+            let n = t3 / out_ch;
+
+            let pd0 = od * stride_d;
+            let ph0 = oh * stride_h;
+            let pw0 = ow * stride_w;
+
+            let input_plane = in_h * in_w;
+            let input_vol = in_d * input_plane;
+            let in_n_stride = in_ch * input_vol;
+
+            let contraction = in_ch * kd * kh * kw;
+            let words_per_row = contraction * $bits / 32u32;
+            let n_blocks = contraction / block_size;
+            let w_row_word = oc * words_per_row;
+            let w_row_blk = oc * n_blocks;
+
+            let mut acc = load(bias[oc]).cast::<f32>();
+
+            for ic in range(0u32, in_ch, 1u32) {
+                let in_ic_base = n * in_n_stride + ic * input_vol;
+                let col_ic = ic * kd * kh * kw;
+                for kz in range(0u32, kd, 1u32) {
+                    let pd = pd0 + kz;
+                    let dep_ok = (pd >= pad_d) & (pd < pad_d + in_d);
+                    let id = select(dep_ok, pd - pad_d, 0u32);
+                    let col_kz = col_ic + kz * kh * kw;
+                    for ky in range(0u32, kh, 1u32) {
+                        let ph = ph0 + ky;
+                        let row_ok = (ph >= pad_h) & (ph < pad_h + in_h);
+                        let ih = select(row_ok, ph - pad_h, 0u32);
+                        for kx in range(0u32, kw, 1u32) {
+                            let pw = pw0 + kx;
+                            let col_ok = (pw >= pad_w) & (pw < pad_w + in_w);
+                            let valid = dep_ok & row_ok & col_ok;
+                            let iw = select(col_ok, pw - pad_w, 0u32);
+
+                            let in_idx = in_ic_base + id * input_plane + ih * in_w + iw;
+                            let pix = load(input[in_idx]).cast::<f32>();
+                            let pix_m = select(valid, pix, 0.0f32);
+
+                            // Sub-byte code: straddle-aware two-word read of the
+                            // low N bits at bit `col·BITS` within the row stream.
+                            let col = col_kz + ky * kw + kx;
+                            let bit_off = col * $bits;
+                            let word_idx = bit_off / 32u32;
+                            let bit_in_w = bit_off & 31u32;
+                            let bits_in_w0 = 32u32 - bit_in_w;
+                            let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                            let spill = $bits - lo_bits;
+                            let w0 = load(weight[w_row_word + word_idx]);
+                            let w1 = load(
+                                weight
+                                    [w_row_word + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                            );
+                            let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                            let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                            let q = lo | hi;
+                            let qf = q.cast::<f32>();
+                            let elem = select(q >= $half, qf - $full, qf); // sign-extend
+                            let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
+                            acc = acc + pix_m * (elem * scale);
+                        }
+                    }
+                }
+            }
+
+            store(out[idx], acc.cast::<T>());
+        }
+    };
+}
+int_conv3d_f16!(mt_int2_f16_conv3d, 2u32, 2u32, 4.0f32);
+int_conv3d_f16!(mt_int3_f16_conv3d, 3u32, 4u32, 8.0f32);
+int_conv3d_f16!(mt_int4_f16_conv3d, 4u32, 8u32, 16.0f32);
+int_conv3d_f16!(mt_int5_f16_conv3d, 5u32, 16u32, 32.0f32);
+int_conv3d_f16!(mt_int6_f16_conv3d, 6u32, 32u32, 64.0f32);
+
 /// E8M0-scaled symmetric int conv3d (MXINT2/3/4/5/6): per-element bit-stream
 /// filter code (block 32) × pow-2 (E8M0) block scale `2^(bits-127)`. Same
 /// straddle-aware sub-byte decode and IDENTICAL Grid3D geometry as
@@ -1101,6 +1493,96 @@ pub fn mt_mxint8_conv3d<T>(
     store(out[idx], acc.cast::<T>());
 }
 
+/// Symmetric int8 (FP16-scale) quantized-weight conv3d — 8-bit codes (group 64),
+/// FP16 scale. Clone of `mt_int8_conv3d` with the scale axis as `Tensor<f16>`
+/// read `.cast::<f32>()`; byte-per-code layout and Grid3D geometry are IDENTICAL.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_int8_f16_conv3d<T>(
+    input: Tensor<T>,
+    weight: Tensor<u8>,
+    scales: Tensor<f16>,
+    bias: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] batch: u32,
+    #[constexpr] in_ch: u32,
+    #[constexpr] in_d: u32,
+    #[constexpr] in_h: u32,
+    #[constexpr] in_w: u32,
+    #[constexpr] out_ch: u32,
+    #[constexpr] out_d: u32,
+    #[constexpr] out_h: u32,
+    #[constexpr] out_w: u32,
+    #[constexpr] kd: u32,
+    #[constexpr] kh: u32,
+    #[constexpr] kw: u32,
+    #[constexpr] stride_d: u32,
+    #[constexpr] stride_h: u32,
+    #[constexpr] stride_w: u32,
+    #[constexpr] pad_d: u32,
+    #[constexpr] pad_h: u32,
+    #[constexpr] pad_w: u32,
+    #[constexpr] block_size: u32,
+) {
+    let idx = program_id::<0>();
+    let ow = idx % out_w;
+    let t1 = idx / out_w;
+    let oh = t1 % out_h;
+    let t2 = t1 / out_h;
+    let od = t2 % out_d;
+    let t3 = t2 / out_d;
+    let oc = t3 % out_ch;
+    let n = t3 / out_ch;
+
+    let pd0 = od * stride_d;
+    let ph0 = oh * stride_h;
+    let pw0 = ow * stride_w;
+
+    let input_plane = in_h * in_w;
+    let input_vol = in_d * input_plane;
+    let in_n_stride = in_ch * input_vol;
+
+    let contraction = in_ch * kd * kh * kw;
+    let n_blocks = contraction / block_size;
+    let w_row = oc * contraction;
+    let w_row_blk = oc * n_blocks;
+
+    let mut acc = load(bias[oc]).cast::<f32>();
+
+    for ic in range(0u32, in_ch, 1u32) {
+        let in_ic_base = n * in_n_stride + ic * input_vol;
+        let col_ic = ic * kd * kh * kw;
+        for kz in range(0u32, kd, 1u32) {
+            let pd = pd0 + kz;
+            let dep_ok = (pd >= pad_d) & (pd < pad_d + in_d);
+            let id = select(dep_ok, pd - pad_d, 0u32);
+            let col_kz = col_ic + kz * kh * kw;
+            for ky in range(0u32, kh, 1u32) {
+                let ph = ph0 + ky;
+                let row_ok = (ph >= pad_h) & (ph < pad_h + in_h);
+                let ih = select(row_ok, ph - pad_h, 0u32);
+                for kx in range(0u32, kw, 1u32) {
+                    let pw = pw0 + kx;
+                    let col_ok = (pw >= pad_w) & (pw < pad_w + in_w);
+                    let valid = dep_ok & row_ok & col_ok;
+                    let iw = select(col_ok, pw - pad_w, 0u32);
+
+                    let in_idx = in_ic_base + id * input_plane + ih * in_w + iw;
+                    let pix = load(input[in_idx]).cast::<f32>();
+                    let pix_m = select(valid, pix, 0.0f32);
+
+                    let col = col_kz + ky * kw + kx;
+                    let elem = int8_decode(load(weight[w_row + col]).cast::<u32>());
+                    let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
+                    acc = acc + pix_m * (elem * scale);
+                }
+            }
+        }
+    }
+
+    store(out[idx], acc.cast::<T>());
+}
+
 pub mod kernel_tests {
     use metaltile::{core::ir::Kernel, test::*, test_kernel};
 
@@ -1242,10 +1724,10 @@ pub mod kernel_tests {
         // scales bind as f32; E8M0/E4M3 scales as one byte. Both axes are driven
         // off the format so new integer formats pick up the right buffer types.
         let weight_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
         let mut s = TestSetup::new(kernel)
             .mode(KernelMode::Grid3D)
@@ -1749,6 +2231,240 @@ pub mod kernel_tests {
             dt,
         )
     }
+
+    // FP16-scale twins of the FP32-scaled formats — same element packing and
+    // IDENTICAL geometry (C = 64), only the per-block scale tensor is f16.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_nvfp8_f16_conv3d(dt: DType) -> TestSetup {
+        conv3d_setup(
+            mt_nvfp8_f16_conv3d::kernel_ir_for(dt),
+            QFormat::Nvfp8F16,
+            1,
+            8,
+            4,
+            4,
+            4,
+            8,
+            2,
+            2,
+            2,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            dt,
+        )
+    }
+    // fp8_e4m3_f16 reuses the nvfp8_f16 kernel (8-bit E4M3 + f16 scale).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e4m3_f16_conv3d(dt: DType) -> TestSetup {
+        conv3d_setup(
+            mt_nvfp8_f16_conv3d::kernel_ir_for(dt),
+            QFormat::Fp8E4m3F16,
+            1,
+            8,
+            4,
+            4,
+            4,
+            8,
+            2,
+            2,
+            2,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp4_f16_conv3d(dt: DType) -> TestSetup {
+        conv3d_setup(
+            mt_fp4_f16_conv3d::kernel_ir_for(dt),
+            QFormat::Fp4F16,
+            1,
+            8,
+            4,
+            4,
+            4,
+            8,
+            2,
+            2,
+            2,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e5m2_f16_conv3d(dt: DType) -> TestSetup {
+        conv3d_setup(
+            mt_fp8_e5m2_f16_conv3d::kernel_ir_for(dt),
+            QFormat::Fp8E5m2F16,
+            1,
+            8,
+            4,
+            4,
+            4,
+            8,
+            2,
+            2,
+            2,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int2_f16_conv3d(dt: DType) -> TestSetup {
+        conv3d_setup(
+            mt_int2_f16_conv3d::kernel_ir_for(dt),
+            QFormat::Int2F16,
+            1,
+            8,
+            4,
+            4,
+            4,
+            8,
+            2,
+            2,
+            2,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int3_f16_conv3d(dt: DType) -> TestSetup {
+        conv3d_setup(
+            mt_int3_f16_conv3d::kernel_ir_for(dt),
+            QFormat::Int3F16,
+            1,
+            8,
+            4,
+            4,
+            4,
+            8,
+            2,
+            2,
+            2,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int4_f16_conv3d(dt: DType) -> TestSetup {
+        conv3d_setup(
+            mt_int4_f16_conv3d::kernel_ir_for(dt),
+            QFormat::Int4F16,
+            1,
+            8,
+            4,
+            4,
+            4,
+            8,
+            2,
+            2,
+            2,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int5_f16_conv3d(dt: DType) -> TestSetup {
+        conv3d_setup(
+            mt_int5_f16_conv3d::kernel_ir_for(dt),
+            QFormat::Int5F16,
+            1,
+            8,
+            4,
+            4,
+            4,
+            8,
+            2,
+            2,
+            2,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int6_f16_conv3d(dt: DType) -> TestSetup {
+        conv3d_setup(
+            mt_int6_f16_conv3d::kernel_ir_for(dt),
+            QFormat::Int6F16,
+            1,
+            8,
+            4,
+            4,
+            4,
+            8,
+            2,
+            2,
+            2,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int8_f16_conv3d(dt: DType) -> TestSetup {
+        conv3d_setup(
+            mt_int8_f16_conv3d::kernel_ir_for(dt),
+            QFormat::Int8F16,
+            1,
+            8,
+            4,
+            4,
+            4,
+            8,
+            2,
+            2,
+            2,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            dt,
+        )
+    }
 }
 
 /// Decode-shape benches: a realistic conv (in_ch=32, out_ch=64, 2×2×2 kernel →
@@ -1791,10 +2507,10 @@ pub mod kernel_benches {
         } else {
             (crate::quant::format::bitstream_words(total, fmt.element_bits()), DType::U32)
         };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
         let n_blocks = out_ch * (contraction / fmt.block_size());
         let sz = dt.size_bytes();
@@ -1966,5 +2682,68 @@ pub mod kernel_benches {
         mt_mxint8_conv3d::kernel_ir_for,
         QFormat::Mxint8,
         "ffai/conv3d_block/mxint8"
+    );
+    // FP16-scale twins of the FP32-scaled formats — same element packing, only
+    // the per-block scale is f16. C=256 ⇒ word-aligned for every width.
+    conv3d_bench_fmt!(
+        bench_nvfp8_f16,
+        mt_nvfp8_f16_conv3d::kernel_ir_for,
+        QFormat::Nvfp8F16,
+        "ffai/conv3d_block/nvfp8_f16"
+    );
+    // fp8_e4m3_f16 reuses the nvfp8_f16 kernel (8-bit E4M3 + f16 scale).
+    conv3d_bench_fmt!(
+        bench_fp8_e4m3_f16,
+        mt_nvfp8_f16_conv3d::kernel_ir_for,
+        QFormat::Fp8E4m3F16,
+        "ffai/conv3d_block/fp8_e4m3_f16"
+    );
+    conv3d_bench_fmt!(
+        bench_fp4_f16,
+        mt_fp4_f16_conv3d::kernel_ir_for,
+        QFormat::Fp4F16,
+        "ffai/conv3d_block/fp4_f16"
+    );
+    conv3d_bench_fmt!(
+        bench_fp8_e5m2_f16,
+        mt_fp8_e5m2_f16_conv3d::kernel_ir_for,
+        QFormat::Fp8E5m2F16,
+        "ffai/conv3d_block/fp8_e5m2_f16"
+    );
+    conv3d_bench_fmt!(
+        bench_int2_f16,
+        mt_int2_f16_conv3d::kernel_ir_for,
+        QFormat::Int2F16,
+        "ffai/conv3d_block/int2_f16"
+    );
+    conv3d_bench_fmt!(
+        bench_int3_f16,
+        mt_int3_f16_conv3d::kernel_ir_for,
+        QFormat::Int3F16,
+        "ffai/conv3d_block/int3_f16"
+    );
+    conv3d_bench_fmt!(
+        bench_int4_f16,
+        mt_int4_f16_conv3d::kernel_ir_for,
+        QFormat::Int4F16,
+        "ffai/conv3d_block/int4_f16"
+    );
+    conv3d_bench_fmt!(
+        bench_int5_f16,
+        mt_int5_f16_conv3d::kernel_ir_for,
+        QFormat::Int5F16,
+        "ffai/conv3d_block/int5_f16"
+    );
+    conv3d_bench_fmt!(
+        bench_int6_f16,
+        mt_int6_f16_conv3d::kernel_ir_for,
+        QFormat::Int6F16,
+        "ffai/conv3d_block/int6_f16"
+    );
+    conv3d_bench_fmt!(
+        bench_int8_f16,
+        mt_int8_f16_conv3d::kernel_ir_for,
+        QFormat::Int8F16,
+        "ffai/conv3d_block/int8_f16"
     );
 }

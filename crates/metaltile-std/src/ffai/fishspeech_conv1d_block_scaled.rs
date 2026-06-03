@@ -457,6 +457,223 @@ pub fn mt_int8_fishspeech_conv1d<T>(
     store(out[idx], acc.cast::<T>());
 }
 
+// ── FP16-scale twins of the FP32-scaled formats ─────────────────────────────
+// Identical decode + geometry to their FP32 twins; only the scale axis is a
+// native `half` (`Tensor<f16>`) read and cast to f32. The GPU half load matches
+// the host `f16_scale_decode`, so each oracle still holds exactly. fp8_e4m3_f16
+// reuses the nvfp8_f16 kernel (same 8-bit-E4M3 + f16-scale shape).
+
+/// nvfp8 (FP16 scale) quantized-weight dilated conv1d — E4M3 filter (block 16),
+/// per-block FP16 scale. Clone of `mt_nvfp8_fishspeech_conv1d`, scale → f16. Also
+/// serves **fp8_e4m3_f16** (same 8-bit-E4M3 + f16-scale shape).
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_nvfp8_f16_fishspeech_conv1d<T>(
+    input: Tensor<T>,
+    weight: Tensor<u8>,
+    scales: Tensor<f16>,
+    bias: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] batch: u32,
+    #[constexpr] in_ch: u32,
+    #[constexpr] in_len: u32,
+    #[constexpr] out_ch: u32,
+    #[constexpr] out_len: u32,
+    #[constexpr] k: u32,
+    #[constexpr] stride: u32,
+    #[constexpr] pad: u32,
+    #[constexpr] dilation: u32,
+    #[constexpr] block_size: u32,
+) {
+    let idx = program_id::<0>();
+    let op = idx % out_len;
+    let t1 = idx / out_len;
+    let oc = t1 % out_ch;
+    let n = t1 / out_ch;
+    let p0 = op * stride;
+    let in_n_stride = in_ch * in_len;
+    let c_dim = in_ch * k;
+    let n_blocks = c_dim / block_size;
+    let w_row = oc * c_dim;
+    let w_row_blk = oc * n_blocks;
+    let mut acc = load(bias[oc]).cast::<f32>();
+    for ic in range(0u32, in_ch, 1u32) {
+        let in_ic_base = n * in_n_stride + ic * in_len;
+        let col_ic = ic * k;
+        for kx in range(0u32, k, 1u32) {
+            let p = p0 + kx * dilation;
+            let valid = (p >= pad) & (p < pad + in_len);
+            let ix = select(valid, p - pad, 0u32);
+            let x = load(input[in_ic_base + ix]).cast::<f32>();
+            let x_m = select(valid, x, 0.0f32);
+            let col = col_ic + kx;
+            let elem = e4m3_decode(load(weight[w_row + col]).cast::<u32>());
+            let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
+            let wt = elem * scale;
+            acc = acc + x_m * wt;
+        }
+    }
+    store(out[idx], acc.cast::<T>());
+}
+
+/// fp4 (FP16 scale) quantized-weight dilated conv1d — E2M1 filter (group 32),
+/// per-group FP16 scale. Clone of `mt_fp4_fishspeech_conv1d`, scale → f16.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_fp4_f16_fishspeech_conv1d<T>(
+    input: Tensor<T>,
+    weight: Tensor<u32>,
+    scales: Tensor<f16>,
+    bias: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] batch: u32,
+    #[constexpr] in_ch: u32,
+    #[constexpr] in_len: u32,
+    #[constexpr] out_ch: u32,
+    #[constexpr] out_len: u32,
+    #[constexpr] k: u32,
+    #[constexpr] stride: u32,
+    #[constexpr] pad: u32,
+    #[constexpr] dilation: u32,
+    #[constexpr] block_size: u32,
+) {
+    let idx = program_id::<0>();
+    let op = idx % out_len;
+    let t1 = idx / out_len;
+    let oc = t1 % out_ch;
+    let n = t1 / out_ch;
+    let p0 = op * stride;
+    let in_n_stride = in_ch * in_len;
+    let c_dim = in_ch * k;
+    let w_packs_per_row = c_dim / 8u32;
+    let n_blocks = c_dim / block_size;
+    let w_row_pack = oc * w_packs_per_row;
+    let w_row_blk = oc * n_blocks;
+    let mut acc = load(bias[oc]).cast::<f32>();
+    for ic in range(0u32, in_ch, 1u32) {
+        let in_ic_base = n * in_n_stride + ic * in_len;
+        let col_ic = ic * k;
+        for kx in range(0u32, k, 1u32) {
+            let p = p0 + kx * dilation;
+            let valid = (p >= pad) & (p < pad + in_len);
+            let ix = select(valid, p - pad, 0u32);
+            let x = load(input[in_ic_base + ix]).cast::<f32>();
+            let x_m = select(valid, x, 0.0f32);
+            let col = col_ic + kx;
+            let nib = (load(weight[w_row_pack + col / 8u32]) >> ((col % 8u32) * 4u32)) & 0xFu32;
+            let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
+            let wt = e2m1_decode(nib) * scale;
+            acc = acc + x_m * wt;
+        }
+    }
+    store(out[idx], acc.cast::<T>());
+}
+
+/// fp8 (E5M2, FP16 scale) quantized-weight dilated conv1d — 8-bit filter (group
+/// 32), per-group FP16 scale. Clone of `mt_fp8_e5m2_fishspeech_conv1d`, scale → f16.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_fp8_e5m2_f16_fishspeech_conv1d<T>(
+    input: Tensor<T>,
+    weight: Tensor<u8>,
+    scales: Tensor<f16>,
+    bias: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] batch: u32,
+    #[constexpr] in_ch: u32,
+    #[constexpr] in_len: u32,
+    #[constexpr] out_ch: u32,
+    #[constexpr] out_len: u32,
+    #[constexpr] k: u32,
+    #[constexpr] stride: u32,
+    #[constexpr] pad: u32,
+    #[constexpr] dilation: u32,
+    #[constexpr] block_size: u32,
+) {
+    let idx = program_id::<0>();
+    let op = idx % out_len;
+    let t1 = idx / out_len;
+    let oc = t1 % out_ch;
+    let n = t1 / out_ch;
+    let p0 = op * stride;
+    let in_n_stride = in_ch * in_len;
+    let c_dim = in_ch * k;
+    let n_blocks = c_dim / block_size;
+    let w_row = oc * c_dim;
+    let w_row_blk = oc * n_blocks;
+    let mut acc = load(bias[oc]).cast::<f32>();
+    for ic in range(0u32, in_ch, 1u32) {
+        let in_ic_base = n * in_n_stride + ic * in_len;
+        let col_ic = ic * k;
+        for kx in range(0u32, k, 1u32) {
+            let p = p0 + kx * dilation;
+            let valid = (p >= pad) & (p < pad + in_len);
+            let ix = select(valid, p - pad, 0u32);
+            let x = load(input[in_ic_base + ix]).cast::<f32>();
+            let x_m = select(valid, x, 0.0f32);
+            let col = col_ic + kx;
+            let elem = e5m2_decode(load(weight[w_row + col]).cast::<u32>());
+            let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
+            let wt = elem * scale;
+            acc = acc + x_m * wt;
+        }
+    }
+    store(out[idx], acc.cast::<T>());
+}
+
+/// Symmetric int8 (FP16 scale) quantized-weight dilated conv1d — 8-bit codes
+/// (group 64), per-group FP16 scale. Clone of `mt_int8_fishspeech_conv1d`,
+/// scale → f16.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_int8_f16_fishspeech_conv1d<T>(
+    input: Tensor<T>,
+    weight: Tensor<u8>,
+    scales: Tensor<f16>,
+    bias: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] batch: u32,
+    #[constexpr] in_ch: u32,
+    #[constexpr] in_len: u32,
+    #[constexpr] out_ch: u32,
+    #[constexpr] out_len: u32,
+    #[constexpr] k: u32,
+    #[constexpr] stride: u32,
+    #[constexpr] pad: u32,
+    #[constexpr] dilation: u32,
+    #[constexpr] block_size: u32,
+) {
+    let idx = program_id::<0>();
+    let op = idx % out_len;
+    let t1 = idx / out_len;
+    let oc = t1 % out_ch;
+    let n = t1 / out_ch;
+    let p0 = op * stride;
+    let in_n_stride = in_ch * in_len;
+    let c_dim = in_ch * k;
+    let n_blocks = c_dim / block_size;
+    let w_row = oc * c_dim;
+    let w_row_blk = oc * n_blocks;
+    let mut acc = load(bias[oc]).cast::<f32>();
+    for ic in range(0u32, in_ch, 1u32) {
+        let in_ic_base = n * in_n_stride + ic * in_len;
+        let col_ic = ic * k;
+        for kx in range(0u32, k, 1u32) {
+            let p = p0 + kx * dilation;
+            let valid = (p >= pad) & (p < pad + in_len);
+            let ix = select(valid, p - pad, 0u32);
+            let x = load(input[in_ic_base + ix]).cast::<f32>();
+            let x_m = select(valid, x, 0.0f32);
+            let col = col_ic + kx;
+            let elem = int8_decode(load(weight[w_row + col]).cast::<u32>());
+            let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
+            let wt = elem * scale;
+            acc = acc + x_m * wt;
+        }
+    }
+    store(out[idx], acc.cast::<T>());
+}
+
 // ── Symmetric sub-byte integer dilated conv1d (int2/3/4/5/6 + MXINT2..6) ─────
 // The filter element is a signed N-bit two's-complement code, tight-bit-packed
 // LSB-first into a **single flat u32 bit-stream** over the whole `[out_ch, C]`
@@ -551,6 +768,82 @@ int_conv1d_f32!(mt_int3_fishspeech_conv1d, 3u32, 4u32, 8.0f32);
 int_conv1d_f32!(mt_int4_fishspeech_conv1d, 4u32, 8u32, 16.0f32);
 int_conv1d_f32!(mt_int5_fishspeech_conv1d, 5u32, 16u32, 32.0f32);
 int_conv1d_f32!(mt_int6_fishspeech_conv1d, 6u32, 32u32, 64.0f32);
+
+/// FP16-scaled symmetric int dilated conv1d (int2/3/4/5/6) — clone of
+/// `int_conv1d_f32` with the per-group scale read from a native `half`
+/// (`Tensor<f16>`) and cast to f32. Same straddle-aware global-stream decode;
+/// only the scale axis differs.
+macro_rules! int_conv1d_f16 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        #[allow(clippy::too_many_arguments)]
+        pub fn $name<T>(
+            input: Tensor<T>,
+            weight: Tensor<u32>,
+            scales: Tensor<f16>,
+            bias: Tensor<T>,
+            out: Tensor<T>,
+            #[constexpr] batch: u32,
+            #[constexpr] in_ch: u32,
+            #[constexpr] in_len: u32,
+            #[constexpr] out_ch: u32,
+            #[constexpr] out_len: u32,
+            #[constexpr] k: u32,
+            #[constexpr] stride: u32,
+            #[constexpr] pad: u32,
+            #[constexpr] dilation: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let idx = program_id::<0>();
+            let op = idx % out_len;
+            let t1 = idx / out_len;
+            let oc = t1 % out_ch;
+            let n = t1 / out_ch;
+            let p0 = op * stride;
+            let in_n_stride = in_ch * in_len;
+            let c_dim = in_ch * k;
+            let n_blocks = c_dim / block_size;
+            let w_row_elem = oc * c_dim; // global filter element base for this row
+            let w_row_blk = oc * n_blocks;
+            let mut acc = load(bias[oc]).cast::<f32>();
+            for ic in range(0u32, in_ch, 1u32) {
+                let in_ic_base = n * in_n_stride + ic * in_len;
+                let col_ic = ic * k;
+                for kx in range(0u32, k, 1u32) {
+                    let p = p0 + kx * dilation;
+                    let valid = (p >= pad) & (p < pad + in_len);
+                    let ix = select(valid, p - pad, 0u32);
+                    let x = load(input[in_ic_base + ix]).cast::<f32>();
+                    let x_m = select(valid, x, 0.0f32);
+                    let col = col_ic + kx;
+                    // Global flat bit offset into the whole-filter stream.
+                    let bit_off = (w_row_elem + col) * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(weight[word_idx]);
+                    let w1 = load(weight[select(spill > 0u32, word_idx + 1u32, word_idx)]);
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+                    let qf = q.cast::<f32>();
+                    let val = select(q >= $half, qf - $full, qf); // sign-extend
+                    let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
+                    let wt = val * scale;
+                    acc = acc + x_m * wt;
+                }
+            }
+            store(out[idx], acc.cast::<T>());
+        }
+    };
+}
+int_conv1d_f16!(mt_int2_f16_fishspeech_conv1d, 2u32, 2u32, 4.0f32);
+int_conv1d_f16!(mt_int3_f16_fishspeech_conv1d, 3u32, 4u32, 8.0f32);
+int_conv1d_f16!(mt_int4_f16_fishspeech_conv1d, 4u32, 8u32, 16.0f32);
+int_conv1d_f16!(mt_int5_f16_fishspeech_conv1d, 5u32, 16u32, 32.0f32);
+int_conv1d_f16!(mt_int6_f16_fishspeech_conv1d, 6u32, 32u32, 64.0f32);
 
 /// E8M0-scaled symmetric int dilated conv1d (MXINT2/3/4/5/6) — per-element
 /// bit-stream filter code × pow-2 (E8M0) block scale `2^(bits-127)`. Same
@@ -772,13 +1065,14 @@ pub mod kernel_tests {
         );
         // 8-bit codes bind as one uchar each; every sub-byte width (4-bit nibble
         // packs + int2/3/5/6 tight bit-streams) binds as a flat u32 bit-stream.
-        // FP32 scales bind as f32; E8M0/E4M3 scales as one byte. Both axes are
-        // driven off the format so new integer formats pick up the right buffers.
+        // FP32 scales bind as f32; FP16 scales as native half; E8M0/E4M3 scales as
+        // one byte. Both axes are driven off the format so new quant formats pick
+        // up the right buffers.
         let weight_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
         let mut s = TestSetup::new(kernel)
             .mode(KernelMode::Grid3D)
@@ -1133,6 +1427,171 @@ pub mod kernel_tests {
             dt,
         )
     }
+
+    // FP16-scale twins of the FP32-scaled formats. `fp8_e4m3_f16` reuses the
+    // `nvfp8_f16` kernel (same 8-bit-E4M3 + f16-scale shape); the rest are
+    // per-element clones of their FP32 twin with the scale read as a native half.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_nvfp8_f16_fishspeech_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_nvfp8_f16_fishspeech_conv1d::kernel_ir_for(dt),
+            QFormat::Nvfp8F16,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            3,
+            3,
+            dt,
+        )
+    }
+    // fp8_e4m3_f16 reuses the nvfp8_f16 kernel (8-bit E4M3 + f16 scale).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e4m3_f16_fishspeech_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_nvfp8_f16_fishspeech_conv1d::kernel_ir_for(dt),
+            QFormat::Fp8E4m3F16,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            3,
+            3,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp4_f16_fishspeech_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_fp4_f16_fishspeech_conv1d::kernel_ir_for(dt),
+            QFormat::Fp4F16,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            3,
+            3,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e5m2_f16_fishspeech_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_fp8_e5m2_f16_fishspeech_conv1d::kernel_ir_for(dt),
+            QFormat::Fp8E5m2F16,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            3,
+            3,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int2_f16_fishspeech_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_int2_f16_fishspeech_conv1d::kernel_ir_for(dt),
+            QFormat::Int2F16,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            3,
+            3,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int3_f16_fishspeech_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_int3_f16_fishspeech_conv1d::kernel_ir_for(dt),
+            QFormat::Int3F16,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            3,
+            3,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int4_f16_fishspeech_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_int4_f16_fishspeech_conv1d::kernel_ir_for(dt),
+            QFormat::Int4F16,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            3,
+            3,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int5_f16_fishspeech_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_int5_f16_fishspeech_conv1d::kernel_ir_for(dt),
+            QFormat::Int5F16,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            3,
+            3,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int6_f16_fishspeech_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_int6_f16_fishspeech_conv1d::kernel_ir_for(dt),
+            QFormat::Int6F16,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            3,
+            3,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int8_f16_fishspeech_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_int8_f16_fishspeech_conv1d::kernel_ir_for(dt),
+            QFormat::Int8F16,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            3,
+            3,
+            dt,
+        )
+    }
 }
 
 /// Decode-shape benches: realistic FishSpeech ResBlock dilated conv (in_ch=128,
@@ -1171,10 +1630,10 @@ pub mod kernel_benches {
         } else {
             (crate::quant::format::bitstream_words(out_ch * c_dim, fmt.element_bits()), DType::U32)
         };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
         let n_blocks = out_ch * (c_dim / fmt.block_size());
         let sz = dt.size_bytes();
@@ -1332,5 +1791,66 @@ pub mod kernel_benches {
         mt_mxint8_fishspeech_conv1d::kernel_ir_for,
         QFormat::Mxint8,
         "ffai/fishspeech_conv1d_block/mxint8"
+    );
+    // FP16-scale twins. `fp8_e4m3_f16` reuses the `nvfp8_f16` kernel.
+    conv1d_bench_fmt!(
+        bench_nvfp8_f16,
+        mt_nvfp8_f16_fishspeech_conv1d::kernel_ir_for,
+        QFormat::Nvfp8F16,
+        "ffai/fishspeech_conv1d_block/nvfp8_f16"
+    );
+    conv1d_bench_fmt!(
+        bench_fp8_e4m3_f16,
+        mt_nvfp8_f16_fishspeech_conv1d::kernel_ir_for,
+        QFormat::Fp8E4m3F16,
+        "ffai/fishspeech_conv1d_block/fp8_e4m3_f16"
+    );
+    conv1d_bench_fmt!(
+        bench_fp4_f16,
+        mt_fp4_f16_fishspeech_conv1d::kernel_ir_for,
+        QFormat::Fp4F16,
+        "ffai/fishspeech_conv1d_block/fp4_f16"
+    );
+    conv1d_bench_fmt!(
+        bench_fp8_e5m2_f16,
+        mt_fp8_e5m2_f16_fishspeech_conv1d::kernel_ir_for,
+        QFormat::Fp8E5m2F16,
+        "ffai/fishspeech_conv1d_block/fp8_e5m2_f16"
+    );
+    conv1d_bench_fmt!(
+        bench_int2_f16,
+        mt_int2_f16_fishspeech_conv1d::kernel_ir_for,
+        QFormat::Int2F16,
+        "ffai/fishspeech_conv1d_block/int2_f16"
+    );
+    conv1d_bench_fmt!(
+        bench_int3_f16,
+        mt_int3_f16_fishspeech_conv1d::kernel_ir_for,
+        QFormat::Int3F16,
+        "ffai/fishspeech_conv1d_block/int3_f16"
+    );
+    conv1d_bench_fmt!(
+        bench_int4_f16,
+        mt_int4_f16_fishspeech_conv1d::kernel_ir_for,
+        QFormat::Int4F16,
+        "ffai/fishspeech_conv1d_block/int4_f16"
+    );
+    conv1d_bench_fmt!(
+        bench_int5_f16,
+        mt_int5_f16_fishspeech_conv1d::kernel_ir_for,
+        QFormat::Int5F16,
+        "ffai/fishspeech_conv1d_block/int5_f16"
+    );
+    conv1d_bench_fmt!(
+        bench_int6_f16,
+        mt_int6_f16_fishspeech_conv1d::kernel_ir_for,
+        QFormat::Int6F16,
+        "ffai/fishspeech_conv1d_block/int6_f16"
+    );
+    conv1d_bench_fmt!(
+        bench_int8_f16,
+        mt_int8_f16_fishspeech_conv1d::kernel_ir_for,
+        QFormat::Int8F16,
+        "ffai/fishspeech_conv1d_block/int8_f16"
     );
 }
