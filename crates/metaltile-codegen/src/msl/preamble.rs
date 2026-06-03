@@ -156,6 +156,56 @@ impl super::MslGenerator {
             wl!(out, "template<typename T>");
             wl!(out, "inline T mt_expm1_impl(T x) {{ return T(mt_expm1_impl(float(x))); }}");
         }
+        // Block-scaled dequant decodes (mirror crates/metaltile-std quant::codec).
+        // Operand is the raw integer code; result is always f32.
+        if feat.needs_decode_e2m1 {
+            wl!(out);
+            wl!(out, "// E2M1 (fp4): codebook {{0,.5,1,1.5,2,3,4,6}}, sign in bit 3.");
+            wl!(out, "inline float mt_decode_e2m1(uint code) {{");
+            wl!(out, "    uint m = code & 7u;");
+            wl!(
+                out,
+                "    float mag = (m < 1u) ? 0.0f : (m < 2u) ? 0.5f : (m < 3u) ? 1.0f : \
+                 (m < 4u) ? 1.5f : (m < 5u) ? 2.0f : (m < 6u) ? 3.0f : (m < 7u) ? 4.0f : 6.0f;"
+            );
+            wl!(out, "    return (code & 8u) ? -mag : mag;");
+            wl!(out, "}}");
+        }
+        if feat.needs_decode_e4m3 {
+            wl!(out);
+            wl!(out, "// E4M3 (fp8): (1+m/8)*2^(e-7); subnormal m*2^-9; sign in bit 7.");
+            wl!(out, "inline float mt_decode_e4m3(uint bits) {{");
+            wl!(out, "    uint e = (bits >> 3u) & 15u;");
+            wl!(out, "    uint m = bits & 7u;");
+            wl!(
+                out,
+                "    float mag = (e < 1u) ? (float(m) * 0.001953125f) \
+                 : ((1.0f + float(m) * 0.125f) * exp2(float(e) - 7.0f));"
+            );
+            wl!(out, "    return ((bits >> 7u) & 1u) ? -mag : mag;");
+            wl!(out, "}}");
+        }
+        if feat.needs_decode_e5m2 {
+            wl!(out);
+            wl!(out, "// E5M2 (fp8): (1+m/4)*2^(e-15); subnormal m*2^-16; sign in bit 7.");
+            wl!(out, "inline float mt_decode_e5m2(uint bits) {{");
+            wl!(out, "    uint e = (bits >> 2u) & 31u;");
+            wl!(out, "    uint m = bits & 3u;");
+            wl!(
+                out,
+                "    float mag = (e < 1u) ? (float(m) * 0.0000152587890625f) \
+                 : ((1.0f + float(m) * 0.25f) * exp2(float(e) - 15.0f));"
+            );
+            wl!(out, "    return ((bits >> 7u) & 1u) ? -mag : mag;");
+            wl!(out, "}}");
+        }
+        if feat.needs_decode_int8 {
+            wl!(out);
+            wl!(out, "// Symmetric int8: reinterpret the byte as i8 (sign-extend low 8 bits).");
+            wl!(out, "inline float mt_decode_int8(uint bits) {{");
+            wl!(out, "    return float(int(bits << 24u) >> 24);");
+            wl!(out, "}}");
+        }
         if feat.needs_simd_product {
             wl!(out);
             // simd_size is only accessible as a kernel attribute, not in free functions.

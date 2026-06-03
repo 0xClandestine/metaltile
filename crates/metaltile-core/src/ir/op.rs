@@ -59,6 +59,19 @@ pub enum UnaryOpKind {
     Log10,
     /// Inverse error function: `erfinv(x)`.
     ErfInv,
+    /// Decode a 4-bit E2M1 (fp4) code → signed f32 (codebook
+    /// `{0,.5,1,1.5,2,3,4,6}`, sign in bit 3). Operand is the `u32` code;
+    /// result is always f32. See `quant::codec::e2m1_decode`.
+    DecodeE2m1,
+    /// Decode an 8-bit E4M3 (fp8) byte → f32 (`(1+m/8)·2^(e-7)`, ±448, no inf).
+    /// Used for fp8 elements and nvfp4 micro-scales. See `quant::codec::e4m3_decode`.
+    DecodeE4m3,
+    /// Decode an 8-bit E5M2 (fp8) byte → f32 (IEEE-half high byte).
+    /// See `quant::codec::e5m2_decode`.
+    DecodeE5m2,
+    /// Decode a symmetric-int8 code (a `u8` reinterpreted as `i8`) → f32. The
+    /// per-group float scale is applied separately. See `quant::codec::int8_decode`.
+    DecodeInt8,
 }
 
 impl UnaryOpKind {
@@ -97,7 +110,23 @@ impl UnaryOpKind {
             UnaryOpKind::Expm1 => format!("mt_expm1_impl({arg})"),
             UnaryOpKind::Log10 => format!("log10({arg})"),
             UnaryOpKind::ErfInv => format!("mt_erfinv_impl({arg})"),
+            UnaryOpKind::DecodeE2m1 => format!("mt_decode_e2m1({arg})"),
+            UnaryOpKind::DecodeE4m3 => format!("mt_decode_e4m3({arg})"),
+            UnaryOpKind::DecodeE5m2 => format!("mt_decode_e5m2({arg})"),
+            UnaryOpKind::DecodeInt8 => format!("mt_decode_int8({arg})"),
         }
+    }
+
+    /// True for the quant decode ops, whose result is always f32 regardless of
+    /// the (integer) operand dtype.
+    pub fn yields_f32(self) -> bool {
+        matches!(
+            self,
+            UnaryOpKind::DecodeE2m1
+                | UnaryOpKind::DecodeE4m3
+                | UnaryOpKind::DecodeE5m2
+                | UnaryOpKind::DecodeInt8
+        )
     }
 }
 

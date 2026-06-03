@@ -3,11 +3,14 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! `#[kernel]` proc-macro implementation.
 //!
-//! `KernelAttr` parses the (currently argument-free) `#[kernel]` attribute.
-//! `KernelMacroBuilder` orchestrates DSL-function → IR-module expansion.
+//! [`KernelAttr`] parses the `#[kernel]` attribute, which accepts an optional
+//! `variants(...)` block for compile-time kernel specialisation.
+//! [`KernelMacroBuilder`] orchestrates DSL-function → IR-module expansion for
+//! a single concrete kernel (i.e. after any variant substitution has occurred).
 
 mod body;
 mod sig;
+pub(crate) mod variants;
 
 use std::collections::HashMap;
 
@@ -16,23 +19,46 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use sig::{extract_constexprs_typed, extract_param_names, parse_kernel_params_generic};
-use syn::{ItemFn, parse_macro_input};
+use syn::ItemFn;
+use variants::VariantsSpec;
 
 /// Parsed arguments for `#[kernel]`.
 ///
-/// Currently accepts no arguments — bench and test registrations live in the
-/// separate `#[bench]` and `#[test_kernel]` attributes.
-pub(crate) struct KernelAttr;
+/// An argument-free `#[kernel]` expands the annotated function as a single
+/// kernel, identical to the previous behaviour.  With `#[kernel(variants(...))]`
+/// the function body is cloned once per variant, substituting the listed
+/// compile-time integer constants and renaming each clone.
+pub(crate) struct KernelAttr {
+    /// Optional variant-specialisation spec.  `None` for plain `#[kernel]`.
+    pub variants: Option<VariantsSpec>,
+}
 
 impl syn::parse::Parse for KernelAttr {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        if !input.is_empty() {
+        if input.is_empty() {
+            return Ok(KernelAttr { variants: None });
+        }
+
+        // The only supported argument is `variants(...)`.
+        let kw: syn::Ident = input.parse()?;
+        if kw != "variants" {
             return Err(syn::Error::new(
-                input.span(),
-                "#[kernel] takes no arguments — use #[bench] and #[test_kernel] for registration",
+                kw.span(),
+                format!(
+                    "expected `variants(...)` or no arguments, found `{kw}`; \
+                     use #[bench] and #[test_kernel] for registration"
+                ),
             ));
         }
-        Ok(KernelAttr)
+
+        let inner;
+        syn::parenthesized!(inner in input);
+        let spec = inner.parse::<VariantsSpec>()?;
+
+        if !input.is_empty() {
+            return Err(input.error("unexpected tokens after `variants(...)`"));
+        }
+        Ok(KernelAttr { variants: Some(spec) })
     }
 }
 
@@ -48,8 +74,12 @@ impl KernelMacroBuilder {
     /// Create a new builder from the parsed kernel function.
     pub(crate) fn new(input_fn: ItemFn) -> Self { KernelMacroBuilder { input_fn } }
 
-    /// Run the full expansion pipeline and return the generated token stream.
-    pub(crate) fn expand(self) -> TokenStream2 {
+    /// Run the full expansion pipeline for a single kernel and return its token stream.
+    ///
+    /// For `#[kernel(variants(...))]` callers, this is invoked once per variant
+    /// after [`variants::substitute_fn`] has already rewritten the function.
+    /// For plain `#[kernel]`, it is called exactly once with the original function.
+    pub(crate) fn expand_one(self) -> TokenStream2 {
         let fn_name = &self.input_fn.sig.ident;
         let fn_name_str = fn_name.to_string();
         let vis = &self.input_fn.vis;
@@ -251,11 +281,47 @@ impl KernelMacroBuilder {
 }
 
 /// Expand the `#[kernel]` attribute.
+///
+/// For a plain `#[kernel]` this calls `KernelMacroBuilder::expand_one` once.
+/// For `#[kernel(variants(...))]` this calls `expand_one` once per variant,
+/// after substituting the variant's compile-time constants into the function
+/// body and renaming it.  The source function itself is **not** emitted; only
+/// the N variant modules are registered in the kernel inventory.
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let _attr = parse_macro_input!(attr as KernelAttr);
-    let input_fn = parse_macro_input!(item as ItemFn);
-    let builder = KernelMacroBuilder::new(input_fn);
-    TokenStream::from(builder.expand())
+    let attr2: TokenStream2 = attr.into();
+    let item2: TokenStream2 = item.into();
+
+    let attr_parsed = match syn::parse2::<KernelAttr>(attr2) {
+        Ok(a) => a,
+        Err(e) => return TokenStream::from(e.into_compile_error()),
+    };
+    let input_fn = match syn::parse2::<ItemFn>(item2) {
+        Ok(f) => f,
+        Err(e) => return TokenStream::from(e.into_compile_error()),
+    };
+
+    match attr_parsed.variants {
+        None => KernelMacroBuilder::new(input_fn).expand_one().into(),
+        Some(spec) => {
+            let base_name = input_fn.sig.ident.to_string();
+            let mut out = TokenStream2::new();
+            for i in 0..spec.variant_count {
+                let params_ordered: Vec<(String, i64)> =
+                    spec.params.iter().map(|(name, vals)| (name.clone(), vals[i])).collect();
+                let variant_fn = match variants::substitute_fn(
+                    input_fn.clone(),
+                    &params_ordered,
+                    &base_name,
+                    &spec.suffix,
+                ) {
+                    Ok(f) => f,
+                    Err(e) => return TokenStream::from(e.into_compile_error()),
+                };
+                out.extend(KernelMacroBuilder::new(variant_fn).expand_one());
+            }
+            out.into()
+        },
+    }
 }
 
 #[cfg(test)]

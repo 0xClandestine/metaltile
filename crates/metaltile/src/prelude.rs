@@ -158,3 +158,4 @@ unary!(cos);
 unary!(ceil);
 unary!(floor);
 unary!(recip);
+unary!(erf);

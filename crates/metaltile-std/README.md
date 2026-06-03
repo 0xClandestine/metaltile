@@ -45,7 +45,7 @@ correctness verification.
 | Vision / STT / TTS front-end — patch conv, patch embed, mel-spectrogram, vocoder/iSTFT | ✅ |
 | Sampling — categorical inverse-CDF, top-k / top-p / min-p, temperature, repetition penalty | ✅ |
 
-See [`docs/KERNEL_AUDIT.md`](../../docs/KERNEL_AUDIT.md) for the full per-op coverage table and [`docs/developing.md`](../../docs/developing.md) for how kernels are organised.
+See [`specs/KERNEL_AUDIT.md`](../../specs/KERNEL_AUDIT.md) for the full per-op coverage table and [`docs/developing.md`](../../docs/developing.md) for how kernels are organised.
 
 </details>
 

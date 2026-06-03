@@ -30,11 +30,27 @@ use smallvec::SmallVec;
 // remap_value_ids — mutate ValueId references in an Op
 // ---------------------------------------------------------------------------
 
+/// `ValueId → ValueId` lookup abstraction so [`remap_value_ids`] accepts either
+/// a `BTreeMap` or an `FxHashMap`. Callers pick the map type for performance;
+/// the remap itself is a pure per-reference substitution, so iteration order is
+/// irrelevant and either map yields identical output.
+pub trait VidRemap {
+    fn remap(&self, v: ValueId) -> Option<ValueId>;
+}
+
+impl VidRemap for BTreeMap<ValueId, ValueId> {
+    fn remap(&self, v: ValueId) -> Option<ValueId> { self.get(&v).copied() }
+}
+
+impl<S: std::hash::BuildHasher> VidRemap for std::collections::HashMap<ValueId, ValueId, S> {
+    fn remap(&self, v: ValueId) -> Option<ValueId> { self.get(&v).copied() }
+}
+
 /// Remap all `ValueId` references in `op` according to `map`.
 /// References not present in `map` are left unchanged.
-pub fn remap_value_ids(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
+pub fn remap_value_ids<M: VidRemap>(op: &mut Op, map: &M) {
     op.for_each_value_id_mut(&mut |v| {
-        if let Some(&nv) = map.get(v) {
+        if let Some(nv) = map.remap(*v) {
             *v = nv;
         }
     });

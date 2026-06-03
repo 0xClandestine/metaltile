@@ -192,6 +192,7 @@ fn parse_dtype_generic(
             "bf16" => quote! { DType::BF16 },
             "i32" => quote! { DType::I32 },
             "u32" => quote! { DType::U32 },
+            "u16" | "ushort" => quote! { DType::U16 },
             "i8" => quote! { DType::I8 },
             "u8" => quote! { DType::U8 },
             "bool" => quote! { DType::Bool },

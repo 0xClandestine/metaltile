@@ -59,9 +59,8 @@
 //!   Tools", 2nd ed., §8.4–8.5.  Classic treatment of algebraic identities and
 //!   reduction in strength.
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use metaltile_core::ir::{BinOpKind, Block, BlockId, Kernel, Op, UnaryOpKind, ValueId};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::remap;
 use crate::error::{Error, Result};
@@ -93,11 +92,11 @@ impl super::Pass for AlgebraicSimplifyPass {
 // ---------------------------------------------------------------------------
 
 /// Resolve transitive replacement chains: {v2→v1, v1→v0} becomes {v2→v0, v1→v0}.
-fn resolve_transitive(map: &BTreeMap<ValueId, ValueId>) -> BTreeMap<ValueId, ValueId> {
-    let mut resolved = BTreeMap::new();
+fn resolve_transitive(map: &FxHashMap<ValueId, ValueId>) -> FxHashMap<ValueId, ValueId> {
+    let mut resolved = FxHashMap::default();
     for (&key, &val) in map.iter() {
         let mut terminal = val;
-        let mut visited = BTreeSet::new();
+        let mut visited = FxHashSet::default();
         visited.insert(key);
         while let Some(&next) = map.get(&terminal) {
             if !visited.insert(terminal) {
@@ -122,10 +121,11 @@ fn simplify_block_once(block: &mut Block) -> bool {
     let n = block.ops.len();
     let mut const_overwrites: Vec<(usize, i64)> = Vec::new();
     let mut op_replacements: Vec<(usize, Op)> = Vec::new();
-    let mut vid_replacements: BTreeMap<ValueId, ValueId> = BTreeMap::new();
+    let mut vid_replacements: FxHashMap<ValueId, ValueId> =
+        FxHashMap::with_capacity_and_hasher(block.ops.len(), Default::default());
 
     // Build a map for peephole lookups.
-    let vid_to_op_pos: BTreeMap<ValueId, usize> = block
+    let vid_to_op_pos: FxHashMap<ValueId, usize> = block
         .results
         .iter()
         .enumerate()
@@ -180,7 +180,7 @@ fn simplify_block_once(block: &mut Block) -> bool {
     // Remove dead ops whose results were redirected via ReplaceWithVid.
     // Without this, the same pattern re-matches on the next iteration,
     // producing the same replacement and causing an infinite fixpoint loop.
-    let dead_vids: BTreeSet<ValueId> = vid_replacements.keys().copied().collect();
+    let dead_vids: FxHashSet<ValueId> = vid_replacements.keys().copied().collect();
     if !dead_vids.is_empty() {
         let mut new_ops = Vec::new();
         let mut new_results = Vec::new();
@@ -217,7 +217,7 @@ fn try_simplify(
     op: &Op,
     pos: usize,
     block: &Block,
-    vid_to_pos: &BTreeMap<ValueId, usize>,
+    vid_to_pos: &FxHashMap<ValueId, usize>,
 ) -> Option<SimpResult> {
     match op {
         // ---- BinOp patterns ----
@@ -292,7 +292,7 @@ fn simplify_binop(
     rhs: ValueId,
     _pos: usize,
     block: &Block,
-    vid_to_pos: &BTreeMap<ValueId, usize>,
+    vid_to_pos: &FxHashMap<ValueId, usize>,
 ) -> Option<SimpResult> {
     let lv = find_const_in_block(block, lhs);
     let rv = find_const_in_block(block, rhs);
@@ -383,7 +383,7 @@ fn simplify_select(
     on_true: ValueId,
     on_false: ValueId,
     block: &Block,
-    vid_to_pos: &BTreeMap<ValueId, usize>,
+    vid_to_pos: &FxHashMap<ValueId, usize>,
 ) -> Option<SimpResult> {
     // Select(true, a, b) → a
     if let Some(1) = find_const_in_block(block, cond) {
@@ -427,7 +427,7 @@ fn find_const_in_block(block: &Block, vid: ValueId) -> Option<i64> {
 fn get_defining_op<'a>(
     vid: ValueId,
     block: &'a Block,
-    vid_to_pos: &BTreeMap<ValueId, usize>,
+    vid_to_pos: &FxHashMap<ValueId, usize>,
 ) -> Option<(usize, &'a Op)> {
     let &pos = vid_to_pos.get(&vid)?;
     Some((pos, &block.ops[pos]))
@@ -437,7 +437,7 @@ fn get_defining_op<'a>(
 fn get_neg_arg(
     vid: ValueId,
     block: &Block,
-    vid_to_pos: &BTreeMap<ValueId, usize>,
+    vid_to_pos: &FxHashMap<ValueId, usize>,
 ) -> Option<ValueId> {
     let (_pos, op) = get_defining_op(vid, block, vid_to_pos)?;
     if let Op::UnaryOp { op: UnaryOpKind::Neg, value } = op { Some(*value) } else { None }
@@ -447,7 +447,7 @@ fn get_neg_arg(
 fn get_not_arg(
     vid: ValueId,
     block: &Block,
-    vid_to_pos: &BTreeMap<ValueId, usize>,
+    vid_to_pos: &FxHashMap<ValueId, usize>,
 ) -> Option<ValueId> {
     let (_pos, op) = get_defining_op(vid, block, vid_to_pos)?;
     match op {
@@ -476,7 +476,7 @@ fn get_not_arg(
 }
 
 /// Remap all ValueId references in an op.
-fn remap_values_in_op(op: &mut Op, map: &BTreeMap<ValueId, ValueId>) {
+fn remap_values_in_op(op: &mut Op, map: &FxHashMap<ValueId, ValueId>) {
     op.for_each_value_id_mut(&mut |v| {
         if let Some(&nv) = map.get(v) {
             *v = nv;

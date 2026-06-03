@@ -31,12 +31,11 @@
 //!   ACM TOPLAS 13(2):181–210.  Sparse conditional constant propagation framework
 //!   that subsumes copy propagation.
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use metaltile_core::{
     dtype::DType,
     ir::{Block, BlockId, Kernel, Op, ValueId},
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::remap;
 use crate::error::{Error, Result};
@@ -64,11 +63,11 @@ impl super::Pass for CopyPropPass {
 }
 
 /// Resolve transitive replacement chains: {v2→v1, v1→v0} becomes {v2→v0, v1→v0}.
-fn resolve_transitive(map: &BTreeMap<ValueId, ValueId>) -> BTreeMap<ValueId, ValueId> {
-    let mut resolved = BTreeMap::new();
+fn resolve_transitive(map: &FxHashMap<ValueId, ValueId>) -> FxHashMap<ValueId, ValueId> {
+    let mut resolved = FxHashMap::default();
     for (&key, &val) in map.iter() {
         let mut terminal = val;
-        let mut visited = BTreeSet::new();
+        let mut visited = FxHashSet::default();
         visited.insert(key);
         while let Some(&next) = map.get(&terminal) {
             if !visited.insert(terminal) {
@@ -91,7 +90,8 @@ fn copy_prop_block_fixpoint(block: &mut Block) {
 
 fn copy_prop_block_once(block: &mut Block) -> bool {
     let n = block.ops.len();
-    let mut vid_replacements: BTreeMap<ValueId, ValueId> = BTreeMap::new();
+    let mut vid_replacements: FxHashMap<ValueId, ValueId> =
+        FxHashMap::with_capacity_and_hasher(block.ops.len(), Default::default());
 
     for i in 0..n {
         let op = &block.ops[i];
@@ -117,7 +117,7 @@ fn copy_prop_block_once(block: &mut Block) -> bool {
     // Remove dead ops whose results were redirected via identity propagation.
     // Without this, the same identity pattern re-matches on the next iteration,
     // producing the same replacement and causing an infinite fixpoint loop.
-    let dead_vids: BTreeSet<ValueId> = vid_replacements.keys().copied().collect();
+    let dead_vids: FxHashSet<ValueId> = vid_replacements.keys().copied().collect();
     if !dead_vids.is_empty() {
         let mut new_ops = Vec::new();
         let mut new_results = Vec::new();

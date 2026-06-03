@@ -176,6 +176,7 @@ pub fn render_swift_wrappers(kernels: &[Kernel]) -> String {
     );
     for k in kernels {
         emit_swift_wrapper(&mut out, k);
+        emit_swift_wrapper_threadgroups(&mut out, k);
         if k.wants_indirect_variant {
             emit_swift_wrapper_indirect(&mut out, k);
         }
@@ -238,6 +239,66 @@ fn emit_swift_wrapper(out: &mut String, k: &Kernel) {
     // Requires Metal 2.0 non-uniform threadgroup support (M-series ✓).
     writeln!(out, "        enc.dispatchThreads(gridSize, threadsPerThreadgroup: threadgroupSize)")
         .ok();
+    writeln!(out, "        enc.endEncoding()").ok();
+    writeln!(out, "    }}\n").ok();
+}
+
+/// `dispatchThreadgroups` variant of `emit_swift_wrapper`. IDENTICAL bindings,
+/// but `gridSize` is in THREADGROUPS and dispatch uses
+/// `dispatchThreadgroups(_:threadsPerThreadgroup:)`. REQUIRED for coop_tile /
+/// simdgroup_matrix kernels: `dispatchThreads` puts Metal in non-uniform-
+/// threadgroup mode, which silently produces WRONG results for cooperative-
+/// matrix ops even when the grid is a multiple of the threadgroup size. Plain
+/// simd_sum/elementwise kernels are fine on either path.
+fn emit_swift_wrapper_threadgroups(out: &mut String, k: &Kernel) {
+    use std::fmt::Write as _;
+    let fn_name = format!("{}_threadgroups", swift_safe_name(&k.name));
+    writeln!(
+        out,
+        "    /// dispatchThreadgroups variant of `{}` (gridSize in THREADGROUPS).",
+        k.name
+    )
+    .ok();
+    writeln!(out, "    /// Use for coop_tile / simdgroup-matrix kernels.").ok();
+    writeln!(out, "    public static func {fn_name}(").ok();
+    for p in &k.params {
+        let label = swift_safe_name(&p.name);
+        writeln!(out, "        {label}: MTLBuffer, {label}Offset: Int = 0,").ok();
+    }
+    for c in &k.constexprs {
+        let label = swift_safe_name(c.name.name());
+        let swift_ty = swift_scalar_type(dtype_suffix(c.dtype));
+        writeln!(out, "        {label}: {swift_ty},").ok();
+    }
+    writeln!(out, "        gridSize: MTLSize,").ok();
+    writeln!(out, "        threadgroupSize: MTLSize,").ok();
+    writeln!(out, "        on commandBuffer: MTLCommandBuffer").ok();
+    writeln!(out, "    ) {{").ok();
+    writeln!(out, "        let pso = PSOCache.shared.pipelineState(for: \"{}\")", k.name).ok();
+    writeln!(
+        out,
+        "        guard let enc = commandBuffer.makeComputeCommandEncoder() else {{ return }}"
+    )
+    .ok();
+    writeln!(out, "        enc.setComputePipelineState(pso)").ok();
+    let mut slot = 0usize;
+    for p in &k.params {
+        let label = swift_safe_name(&p.name);
+        writeln!(out, "        enc.setBuffer({label}, offset: {label}Offset, index: {slot})").ok();
+        slot += 1;
+    }
+    for c in &k.constexprs {
+        let label = swift_safe_name(c.name.name());
+        let len = swift_scalar_size(dtype_suffix(c.dtype));
+        writeln!(out, "        var {label}_v = {label}").ok();
+        writeln!(out, "        enc.setBytes(&{label}_v, length: {len}, index: {slot})").ok();
+        slot += 1;
+    }
+    writeln!(
+        out,
+        "        enc.dispatchThreadgroups(gridSize, threadsPerThreadgroup: threadgroupSize)"
+    )
+    .ok();
     writeln!(out, "        enc.endEncoding()").ok();
     writeln!(out, "    }}\n").ok();
 }
@@ -490,6 +551,7 @@ pub fn dtype_suffix(dt: DType) -> &'static str {
         DType::U32 => "u32",
         DType::I8 => "i8",
         DType::U8 => "u8",
+        DType::U16 => "u16",
         DType::I64 => "i64",
         DType::U64 => "u64",
         DType::I4 => "i4",
@@ -589,5 +651,49 @@ mod tests {
         let swift = render_swift_wrappers(&[dummy_kernel("mt_add_f32")]);
         assert!(swift.contains("func mt_add_f32("));
         assert!(!swift.contains("_indirect("));
+    }
+
+    /// The `dispatchThreadgroups` wrapper (REQUIRED for coop_tile /
+    /// simdgroup-matrix kernels) is a distinct emit path: a `_threadgroups`
+    /// function taking `gridSize` + `threadgroupSize` in THREADGROUPS and
+    /// calling `dispatchThreadgroups(_:threadsPerThreadgroup:)`. Pins its
+    /// signature + buffer/constexpr binding + the dispatch call so a codegen
+    /// change to it surfaces as a reviewable diff (per docs/testing.md, a new
+    /// emit path lands with a fixture exercising it).
+    #[test]
+    fn emits_threadgroups_wrapper_with_bindings_and_dispatch() {
+        let mut k = dummy_kernel("mt_moe_bgemm_mma");
+        // A second buffer + a constexpr so both binding loops are exercised.
+        k.params.push(Param {
+            name: "x".into(),
+            dtype: DType::F32,
+            shape: Shape::scalar(),
+            is_output: false,
+            kind: ParamKind::Tensor,
+        });
+        k.constexprs.push(metaltile_core::ir::ConstExprDecl {
+            name: metaltile_core::constexpr::ConstExpr::new("k_in"),
+            dtype: DType::U32,
+            value: None,
+        });
+        let swift = render_swift_wrappers(&[k]);
+
+        // The threadgroups variant exists alongside the direct wrapper.
+        assert!(swift.contains("func mt_moe_bgemm_mma("));
+        assert!(swift.contains("public static func mt_moe_bgemm_mma_threadgroups("));
+        // gridSize is in THREADGROUPS and dispatch uses dispatchThreadgroups.
+        assert!(swift.contains("gridSize: MTLSize,"));
+        assert!(swift.contains("threadgroupSize: MTLSize,"));
+        assert!(
+            swift
+                .contains("dispatchThreadgroups(gridSize, threadsPerThreadgroup: threadgroupSize)")
+        );
+        // Buffers bind by slot; the constexpr is set as inline bytes.
+        assert!(swift.contains("enc.setBuffer(out, offset: outOffset, index: 0)"));
+        assert!(swift.contains("enc.setBuffer(x, offset: xOffset, index: 1)"));
+        assert!(swift.contains("var k_in_v = k_in"));
+        assert!(swift.contains("enc.setBytes(&k_in_v, length: 4, index: 2)"));
+        // PSO lookup uses the base kernel name (no `_threadgroups` PSO exists).
+        assert!(swift.contains("pipelineState(for: \"mt_moe_bgemm_mma\")"));
     }
 }

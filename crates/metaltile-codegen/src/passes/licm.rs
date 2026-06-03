@@ -38,7 +38,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use metaltile_core::ir::{Block, BlockId, Kernel, Op, ParamKind, ValueId};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::remap;
 use crate::error::{Error, Result};
@@ -58,7 +58,7 @@ impl super::Pass for LicmPass {
             .collect();
 
         // Build a definition map: ValueId -> BlockId where it's defined.
-        let mut def_block: BTreeMap<ValueId, BlockId> = BTreeMap::new();
+        let mut def_block: FxHashMap<ValueId, BlockId> = FxHashMap::default();
         for vid in kernel.body.results.iter().flatten() {
             def_block.insert(*vid, kernel.body.id);
         }
@@ -101,7 +101,7 @@ impl super::Pass for LicmPass {
 fn licm_block(
     block: &mut Block,
     blocks: &mut FxHashMap<BlockId, Block>,
-    def_block: &BTreeMap<ValueId, BlockId>,
+    def_block: &FxHashMap<ValueId, BlockId>,
     read_only: &BTreeSet<String>,
 ) {
     let n = block.ops.len();
@@ -126,7 +126,7 @@ fn licm_block(
 
             // Build the initial invariant set: ValueIds defined before position `i`
             // in the parent block, plus any from ancestor blocks.
-            let mut invariant: BTreeSet<ValueId> = BTreeSet::new();
+            let mut invariant: FxHashSet<ValueId> = FxHashSet::default();
             for j in 0..i {
                 if let Some(Some(vid)) = block.results.get(j) {
                     invariant.insert(*vid);
@@ -264,7 +264,7 @@ fn licm_block(
 
 /// Remove ops at given indices from a block. Indices must be sorted ascending.
 fn remove_ops_from_block(block: &mut Block, indices: &[usize]) {
-    let skip: BTreeSet<usize> = indices.iter().copied().collect();
+    let skip: FxHashSet<usize> = indices.iter().copied().collect();
     let old_ops = std::mem::take(&mut block.ops);
     let old_results = std::mem::take(&mut block.results);
     let mut new_ops = Vec::new();

@@ -6,9 +6,8 @@
 //! within a [`Block`].  Used by Unroll, LICM, DSE, IfConversion, ValueSink, and
 //! any pass that rewrites the op/results arrays of a block.
 
-use std::collections::BTreeSet;
-
 use metaltile_core::ir::{Block, Op, ValueId};
+use rustc_hash::FxHashSet;
 
 /// Remove ops at the given indices from a block.
 ///
@@ -18,7 +17,7 @@ pub fn remove_ops(block: &mut Block, indices: &[usize]) {
     if indices.is_empty() {
         return;
     }
-    let skip: BTreeSet<usize> = indices.iter().copied().collect();
+    let skip: FxHashSet<usize> = indices.iter().copied().collect();
     let old_ops = std::mem::take(&mut block.ops);
     let old_results = std::mem::take(&mut block.results);
     let mut new_ops = Vec::with_capacity(old_ops.len().saturating_sub(indices.len()));

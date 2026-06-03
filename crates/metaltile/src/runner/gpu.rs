@@ -560,7 +560,7 @@ pub fn buffer_typed(runner: &GpuRunner, vals: &[f32], dt: DType) -> GpuBuffer {
         DType::I8 => runner.buffer_bytes(&vals.iter().map(|&v| v as i8 as u8).collect::<Vec<_>>()),
         DType::U8 => runner.buffer_bytes(&vals.iter().map(|&v| v as u8).collect::<Vec<_>>()),
         DType::Bool => runner.buffer_f32(vals),
-        DType::I4 | DType::U64 | DType::I64 => {
+        DType::I4 | DType::U16 | DType::U64 | DType::I64 => {
             unimplemented!("buffer_typed: unsupported dtype {dt:?}")
         },
     }
@@ -598,7 +598,7 @@ pub fn read_typed(runner: &GpuRunner, buf: &GpuBuffer, n: usize, dt: DType) -> V
             bytes.iter().map(|&b| b as f32).collect()
         },
         DType::Bool => runner.read_f32_slice(buf, n),
-        DType::I4 | DType::U64 | DType::I64 => {
+        DType::I4 | DType::U16 | DType::U64 | DType::I64 => {
             unimplemented!("read_typed: unsupported dtype {dt:?}")
         },
     }

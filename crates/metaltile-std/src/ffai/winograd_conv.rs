@@ -11,7 +11,7 @@
 //! domain — a 2.25× cut in multiplies. The remaining work is three small
 //! fixed transforms (input, filter, output) built from adds and shifts.
 //!
-//! This closes the Winograd row of `docs/KERNEL_AUDIT.md`: the direct
+//! This closes the Winograd row of `specs/KERNEL_AUDIT.md`: the direct
 //! `naive_unfold` / depthwise paths are already covered by `conv2d.rs`
 //! and `conv3d.rs`; Winograd is the 3×3-stride-1 perf specialization.
 //!
@@ -50,7 +50,7 @@
 //! plane. The filter transform is recomputed per tile per channel — a
 //! correct-first implementation; hoisting it into a separate
 //! filter-transform kernel (the cuDNN split: transform → batched GEMM →
-//! untransform) is the perf follow-up noted in `KERNEL_AUDIT.md`.
+//! untransform) is the perf follow-up noted in `specs/KERNEL_AUDIT.md`.
 //!
 //! ## DISPATCH INVARIANTS
 //!

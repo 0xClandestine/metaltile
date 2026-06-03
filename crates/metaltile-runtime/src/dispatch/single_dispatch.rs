@@ -7,7 +7,7 @@
 //! buffer: buffer allocation, Metal buffer binding, grid derivation,
 //! dispatch, commit, and output read‑back.
 
-use std::{borrow::Cow, collections::BTreeMap, ptr::NonNull};
+use std::{borrow::Cow, collections::BTreeMap};
 
 use metaltile_core::ir::{Kernel, KernelMode};
 use objc2::{rc::Retained, runtime::ProtocolObject};
@@ -16,8 +16,6 @@ use objc2_metal::{
     MTLCommandEncoder,
     MTLComputeCommandEncoder,
     MTLComputePipelineState,
-    MTLDevice,
-    MTLResourceOptions,
     MTLSize,
 };
 
@@ -162,6 +160,12 @@ impl<'a> SingleDispatch<'a> {
             // 2-byte buffer with "expected 4 bytes but received 2".
             let required = binding.data_len;
             let alloc_len = required.max(4);
+            // Route every allocation through the thread-local pool
+            // (`acquire_shared` buckets by `next_power_of_two(len)` and
+            // hands back a `BufRc` whose strong-count gates recycling).
+            // The bench loop dispatches the same kernel hundreds of
+            // times against fresh buffers, so recycling avoids the
+            // ~µs/buffer `newBufferWithBytes` allocator round-trip.
             let buf = if let Some(bytes) = data.filter(|b| !b.is_empty()) {
                 if bytes.len() < required {
                     return Err(MetalTileError::Buffer(format!(
@@ -170,41 +174,17 @@ impl<'a> SingleDispatch<'a> {
                     )));
                 }
                 if bytes.len() >= alloc_len {
-                    // SAFETY: `bytes.as_ptr()` is valid for `bytes.len()`
-                    // bytes, and `alloc_len <= bytes.len()` here.
-                    unsafe {
-                        self.dev.device().newBufferWithBytes_length_options(
-                            NonNull::new(bytes.as_ptr() as *mut _).ok_or_else(|| {
-                                MetalTileError::Buffer("null data pointer".into())
-                            })?,
-                            alloc_len,
-                            MTLResourceOptions::StorageModeShared,
-                        )
-                    }
-                    .ok_or(MetalTileError::NoDevice)?
+                    self.dev.acquire_shared(Some(&bytes[..alloc_len]), alloc_len)?
                 } else {
                     // bytes.len() ∈ [required, alloc_len): pad up to the floor.
                     let mut padded = bytes.to_vec();
                     padded.resize(alloc_len, 0);
-                    // SAFETY: `padded.as_ptr()` is valid for `alloc_len` bytes.
-                    unsafe {
-                        self.dev.device().newBufferWithBytes_length_options(
-                            NonNull::new(padded.as_ptr() as *mut _).ok_or_else(|| {
-                                MetalTileError::Buffer("null data pointer".into())
-                            })?,
-                            alloc_len,
-                            MTLResourceOptions::StorageModeShared,
-                        )
-                    }
-                    .ok_or(MetalTileError::NoDevice)?
+                    self.dev.acquire_shared(Some(&padded), alloc_len)?
                 }
             } else {
-                self.dev
-                    .device()
-                    .newBufferWithLength_options(alloc_len, MTLResourceOptions::StorageModeShared)
-                    .ok_or(MetalTileError::NoDevice)?
+                self.dev.acquire_shared(None, alloc_len)?
             };
-            bufs.push(std::rc::Rc::new(buf));
+            bufs.push(buf);
 
             if param.kind == metaltile_core::ir::ParamKind::Strided {
                 let (shape_data, stride_data) = resolve_strided_metadata(param, self.buffers)?;
@@ -227,25 +207,13 @@ impl<'a> SingleDispatch<'a> {
                     p.resize(len, 0);
                     Cow::Owned(p)
                 } else {
-                    Cow::Borrowed(b)
+                    Cow::Borrowed(&b[..len.min(b.len())])
                 };
-                // SAFETY: `padded.as_ptr()` is valid for `len` bytes.
-                unsafe {
-                    self.dev.device().newBufferWithBytes_length_options(
-                        NonNull::new(padded.as_ptr() as *mut _)
-                            .ok_or_else(|| MetalTileError::Buffer("null constexpr data".into()))?,
-                        len,
-                        MTLResourceOptions::StorageModeShared,
-                    )
-                }
-                .ok_or(MetalTileError::NoDevice)?
+                self.dev.acquire_shared(Some(padded.as_ref()), len)?
             } else {
-                self.dev
-                    .device()
-                    .newBufferWithLength_options(len, MTLResourceOptions::StorageModeShared)
-                    .ok_or(MetalTileError::NoDevice)?
+                self.dev.acquire_shared(None, len)?
             };
-            bufs.push(std::rc::Rc::new(buf));
+            bufs.push(buf);
         }
 
         Ok((bufs, n_threads))
@@ -306,5 +274,157 @@ impl<'a> SingleDispatch<'a> {
                 depth: 1,
             }),
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod perf {
+    //! Microbench: per-call `newBufferWithLength_options` (the path this
+    //! file used to take) vs pooled `acquire_shared` (the path it takes
+    //! now). Run with:
+    //!
+    //!   cargo test -p metaltile-runtime --release \
+    //!     perf_alloc_per_call_vs_pool -- --ignored --nocapture
+    //!
+    //! 8 buffers per "dispatch" (5 params × 1 output + 2 strided meta +
+    //! 1 constexpr is a realistic minimum), 4096-byte allocation,
+    //! 5000 iters × bench == 40 000 buffer acquisitions.
+
+    use std::{ptr::NonNull, time::Instant};
+
+    use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
+
+    use crate::device::metal_device::MetalDevice;
+
+    const PER_DISPATCH: usize = 8;
+    const ITERS: usize = 5_000;
+    const LEN: usize = 4096;
+
+    #[test]
+    #[ignore = "perf microbench — requires Metal device"]
+    fn perf_alloc_per_call_vs_pool() {
+        let Some(raw_dev) = MTLCreateSystemDefaultDevice() else {
+            eprintln!("no Metal device — skipping");
+            return;
+        };
+
+        // Warm.
+        for _ in 0..1_000 {
+            let buf = raw_dev
+                .newBufferWithLength_options(LEN, MTLResourceOptions::StorageModeShared)
+                .unwrap();
+            std::hint::black_box(buf);
+        }
+
+        // (1) Per-call `newBufferWithLength_options` — old single_dispatch path.
+        let t0 = Instant::now();
+        for _ in 0..ITERS {
+            let mut bufs = Vec::with_capacity(PER_DISPATCH);
+            for _ in 0..PER_DISPATCH {
+                let buf = raw_dev
+                    .newBufferWithLength_options(LEN, MTLResourceOptions::StorageModeShared)
+                    .unwrap();
+                bufs.push(buf);
+            }
+            std::hint::black_box(bufs);
+        }
+        let baseline = t0.elapsed();
+        let baseline_ns_per = baseline.as_nanos() as f64 / (ITERS * PER_DISPATCH) as f64;
+
+        // (2) Pooled `acquire_shared` — new single_dispatch path. Each
+        // dispatch's BufRcs drop together so refcount falls to 1 and
+        // the pool recycles on the next iter.
+        let dev = MetalDevice::create().expect("MetalDevice::create").expect("no device");
+        for _ in 0..50 {
+            let mut bufs = Vec::with_capacity(PER_DISPATCH);
+            for _ in 0..PER_DISPATCH {
+                bufs.push(dev.acquire_shared(None, LEN).unwrap());
+            }
+            std::hint::black_box(bufs);
+        }
+        let t1 = Instant::now();
+        for _ in 0..ITERS {
+            let mut bufs = Vec::with_capacity(PER_DISPATCH);
+            for _ in 0..PER_DISPATCH {
+                bufs.push(dev.acquire_shared(None, LEN).unwrap());
+            }
+            std::hint::black_box(bufs);
+        }
+        let pooled = t1.elapsed();
+        let pooled_ns_per = pooled.as_nanos() as f64 / (ITERS * PER_DISPATCH) as f64;
+
+        // (3) Per-call `newBufferWithBytes` — old path with data upload.
+        let payload = vec![0xABu8; LEN];
+        let t2 = Instant::now();
+        for _ in 0..ITERS {
+            let mut bufs = Vec::with_capacity(PER_DISPATCH);
+            for _ in 0..PER_DISPATCH {
+                // SAFETY: `payload.as_ptr()` is valid for `LEN` bytes.
+                let buf = unsafe {
+                    raw_dev.newBufferWithBytes_length_options(
+                        NonNull::new(payload.as_ptr() as *mut _).unwrap(),
+                        LEN,
+                        MTLResourceOptions::StorageModeShared,
+                    )
+                }
+                .unwrap();
+                bufs.push(buf);
+            }
+            std::hint::black_box(bufs);
+        }
+        let bytes_baseline = t2.elapsed();
+        let bytes_ns_per = bytes_baseline.as_nanos() as f64 / (ITERS * PER_DISPATCH) as f64;
+
+        // (4) Pooled with bytes upload.
+        let t3 = Instant::now();
+        for _ in 0..ITERS {
+            let mut bufs = Vec::with_capacity(PER_DISPATCH);
+            for _ in 0..PER_DISPATCH {
+                bufs.push(dev.acquire_shared(Some(&payload), LEN).unwrap());
+            }
+            std::hint::black_box(bufs);
+        }
+        let bytes_pooled = t3.elapsed();
+        let bytes_pooled_ns_per = bytes_pooled.as_nanos() as f64 / (ITERS * PER_DISPATCH) as f64;
+
+        println!();
+        println!(
+            "=== buffer alloc: per-call vs pooled (LEN={LEN}B, {PER_DISPATCH}/dispatch × {ITERS} \
+             iters) ==="
+        );
+        println!(
+            "  zero-init  newBufferWithLength  : {baseline:>10.2?}  ({baseline_ns_per:>7.1} \
+             ns/buf)"
+        );
+        println!(
+            "  zero-init  pool acquire_shared  : {pooled:>10.2?}  ({pooled_ns_per:>7.1} ns/buf)"
+        );
+        let zero_speedup = baseline_ns_per / pooled_ns_per;
+        println!(
+            "  → speedup (zero-init)           : {zero_speedup:.2}× (+{:.1}%)",
+            (1.0 - pooled_ns_per / baseline_ns_per) * 100.0
+        );
+        println!();
+        println!(
+            "  upload     newBufferWithBytes   : {bytes_baseline:>10.2?}  ({bytes_ns_per:>7.1} \
+             ns/buf)"
+        );
+        println!(
+            "  upload     pool acquire_shared  : {bytes_pooled:>10.2?}  \
+             ({bytes_pooled_ns_per:>7.1} ns/buf)"
+        );
+        let upload_speedup = bytes_ns_per / bytes_pooled_ns_per;
+        println!(
+            "  → speedup (upload)              : {upload_speedup:.2}× (+{:.1}%)",
+            (1.0 - bytes_pooled_ns_per / bytes_ns_per) * 100.0
+        );
+
+        // Regression assertion: zero-init pool path must be at least
+        // 2× the per-call path. 5% tolerance.
+        assert!(
+            pooled_ns_per * 1.05 <= baseline_ns_per,
+            "pool acquire_shared ({pooled_ns_per:.1} ns) should beat per-call \
+             newBufferWithLength ({baseline_ns_per:.1} ns)"
+        );
     }
 }

@@ -8,8 +8,8 @@ How a `#[kernel]` becomes a compiled Metal shader, and how `tile bench` /
 `tile test` run and measure it today. Companion docs:
 [`TOOLCHAIN_DESIGN.md`](TOOLCHAIN_DESIGN.md) (the `#[kernel]`/`#[bench]`/
 `#[test_kernel]` macro surface), [`BENCH_METRICS_SPEC.md`](BENCH_METRICS_SPEC.md)
-(metric definitions), [`cli.md`](cli.md) (command flags),
-[`developing.md`](developing.md) (kernel-authoring hazards).
+(metric definitions), [`cli.md`](../docs/cli.md) (command flags),
+[`developing.md`](../docs/developing.md) (kernel-authoring hazards).
 
 > **Status:** the runner executes **in-process** today (Phase 1). The wire
 > protocol, arg parsing, and JSON-line emission for a future `__tile_runner`
