@@ -85,6 +85,7 @@ pub mod gated_rms_norm_block_scaled_qgemv;
 pub mod gated_rms_norm_qgemv;
 pub mod gated_rmsnorm;
 pub mod gather;
+pub mod gelu_erf;
 pub mod gemm;
 pub mod gemm_q8;
 pub mod gemm_q8_mpp;
