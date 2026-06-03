@@ -243,10 +243,15 @@ pub struct PackedTensor {
     pub global: f32,
 }
 
-/// `u32` words a tight bit-stream of `n` codes of `bits` each occupies, plus one
-/// guard word so a straddling (3/5/6-bit) code's second-word read can't run off
-/// the end.
-fn bitstream_words(n: usize, bits: usize) -> usize { (n * bits).div_ceil(32) + 1 }
+/// `u32` words a tight bit-stream of `n` codes of `bits` each occupies. Widths
+/// that divide 32 (2/4) never straddle a word boundary, so they pack to an exact
+/// word count — this keeps per-row / per-expert concatenation (which the 4-bit
+/// MoE kernels rely on) byte-aligned. Straddling widths (3/5/6) reserve one guard
+/// word so a last-element second-word read can't run off the end.
+pub fn bitstream_words(n: usize, bits: usize) -> usize {
+    let words = (n * bits).div_ceil(32);
+    if 32 % bits == 0 { words } else { words + 1 }
+}
 
 /// Write a code's low `bits` bits into the packed-code buffer for element `idx`.
 /// 8-bit codes occupy one byte; sub-byte codes are OR'd bit-by-bit into the tight
