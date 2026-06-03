@@ -10,7 +10,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, pack_bytes, unpack_bytes};
-use metaltile_core::ir::KernelMode;
+use metaltile::core::ir::KernelMode;
 use metaltile_runtime::Context;
 use metaltile_std::ffai::sdpa_prefill_d512_sink::ffai_sdpa_prefill_d512_sink;
 

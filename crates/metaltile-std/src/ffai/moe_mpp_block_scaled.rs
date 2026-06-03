@@ -2152,11 +2152,12 @@ pub fn mt_int8_f16_moe_gather_qmm_bm16_mpp<T>(
 
 #[cfg(test)]
 mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::ir::Op;
+    use metaltile::{
+        codegen::msl::MslGenerator,
+        core::{DType, ir::Op},
+    };
 
     use super::*;
-    use metaltile_core::DType;
 
     /// Every block-scaled MoE kernel builds, drops to `CoopTile*` ops (no raw
     /// inline MSL), and has the 5-tensor / 4-constexpr ABI (nvfp4 adds the

@@ -8,7 +8,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
-use metaltile_core::{dtype::DType, ir::KernelMode};
+use metaltile::core::{dtype::DType, ir::KernelMode};
 use metaltile_runtime::Context;
 use metaltile_std::ffai::{
     moe_bgemm_q2k_bm64::ffai_moe_bgemm_q2k_bm64,
@@ -79,7 +79,7 @@ fn q2k_view_u16_bm64_matches_pool() {
     let indices: Vec<u32> = (0..m_total).map(|r| (r * n_experts / m_total) as u32).collect();
     let dt = Dt::F32;
 
-    let run = |buffers: BTreeMap<String, Vec<u8>>, k: metaltile_core::ir::Kernel| -> Vec<f32> {
+    let run = |buffers: BTreeMap<String, Vec<u8>>, k: metaltile::core::ir::Kernel| -> Vec<f32> {
         let mut kk = k;
         kk.mode = KernelMode::Reduction;
         let r = ctx

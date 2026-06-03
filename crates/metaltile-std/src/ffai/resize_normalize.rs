@@ -429,7 +429,7 @@ pub mod kernel_benches {
             ))
             .with_shape_label(format!(
                 "{sw}x{sh}->{tw}x{th} {}",
-                crate::bench_types::dtype_label(dt)
+                crate::utils::dtype_label(dt)
             ))
             .grid_3d(tw as u32, th as u32, 3, [1, 1, 1])
             .bytes_moved(((sh * sw * 3 + 3 * th * tw) * dt.size_bytes()) as u64)
@@ -460,7 +460,7 @@ pub mod kernel_benches {
             ))
             .with_shape_label(format!(
                 "{sw}x{sh}->{tw}x{th} {}",
-                crate::bench_types::dtype_label(dt)
+                crate::utils::dtype_label(dt)
             ))
             .grid_3d(tw as u32, th as u32, 3, [1, 1, 1])
             .bytes_moved(((sh * sw * 3 + 3 * th * tw) * dt.size_bytes()) as u64)

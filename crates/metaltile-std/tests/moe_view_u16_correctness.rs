@@ -12,7 +12,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
-use metaltile_core::{dtype::DType, ir::KernelMode};
+use metaltile::core::{dtype::DType, ir::KernelMode};
 use metaltile_runtime::Context;
 use metaltile_std::ffai::{
     moe_bgemm_iq2xxs_bm64::ffai_moe_bgemm_iq2xxs_bm64,
@@ -125,7 +125,7 @@ fn view_u16_bm64_matches_pool_bm64() {
     // POOL bm64
     let ctx = Context::new().unwrap();
     let run =
-        |buffers: BTreeMap<String, Vec<u8>>, kernel_ir: metaltile_core::ir::Kernel| -> Vec<f32> {
+        |buffers: BTreeMap<String, Vec<u8>>, kernel_ir: metaltile::core::ir::Kernel| -> Vec<f32> {
             let mut k = kernel_ir;
             k.mode = KernelMode::Reduction;
             let r = ctx

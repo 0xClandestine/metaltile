@@ -84,7 +84,7 @@ pub mod kernel_benches {
             .buffer(BenchBuffer::random("lo", 1, DType::F32))
             .buffer(BenchBuffer::random("hi", 1, DType::F32))
             .buffer(BenchBuffer::zeros("out", n, dt).output())
-            .with_shape_label(format!("n{n} {}", crate::bench_types::dtype_label(dt)))
+            .with_shape_label(format!("n{n} {}", crate::utils::dtype_label(dt)))
             .grid_3d(n as u32, 1, 1, [1, 1, 1])
             .bytes_moved((2 * n * dt.size_bytes()) as u64)
     }

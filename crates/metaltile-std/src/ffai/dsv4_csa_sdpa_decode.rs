@@ -296,11 +296,12 @@ pub fn ffai_dsv4_csa_sdpa_decode<T>(
 
 #[cfg(test)]
 mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::ir::KernelMode;
+    use metaltile::{
+        codegen::msl::MslGenerator,
+        core::{DType, ir::KernelMode},
+    };
 
     use super::ffai_dsv4_csa_sdpa_decode;
-    use crate::bench_types::DType;
 
     fn msl_for(dt: DType) -> String {
         let mut k = ffai_dsv4_csa_sdpa_decode::kernel_ir_for(dt);

@@ -11,7 +11,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
-use metaltile_core::ir::KernelMode;
+use metaltile::core::ir::KernelMode;
 use metaltile_runtime::Context;
 use metaltile_std::ffai::moe_gemv_rows_iq2xxs::ffai_moe_gemv_rows_iq2xxs;
 

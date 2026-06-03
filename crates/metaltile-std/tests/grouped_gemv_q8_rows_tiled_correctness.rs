@@ -13,7 +13,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
-use metaltile_core::ir::KernelMode;
+use metaltile::core::ir::KernelMode;
 use metaltile_runtime::Context;
 use metaltile_std::ffai::gemv_q8::{ffai_grouped_gemv_q8_rows, ffai_grouped_gemv_q8_rows_tiled};
 
