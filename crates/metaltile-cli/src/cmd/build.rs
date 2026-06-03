@@ -105,24 +105,18 @@ pub fn run(args: &BuildArgs, harness: &crate::harness::Harness) -> Result<(), Cl
                 return;
             }
             if !dtypes_err.is_empty() {
-                let dt_err_str = dtypes_err.iter().map(|e| e.dtype.as_str()).collect::<Vec<_>>().join("/");
-                let kernel_col = paint_stdout(
-                    pad_left(&name, name_w),
-                    Style::new().fg(Color::Cyan),
-                );
-                let dt_col = paint_stdout(
-                    pad_left(&dt_err_str, dt_w),
-                    Style::new().fg(Color::BrightBlack),
-                );
+                let dt_err_str =
+                    dtypes_err.iter().map(|e| e.dtype.as_str()).collect::<Vec<_>>().join("/");
+                let kernel_col =
+                    paint_stdout(pad_left(&name, name_w), Style::new().fg(Color::Cyan));
+                let dt_col =
+                    paint_stdout(pad_left(&dt_err_str, dt_w), Style::new().fg(Color::BrightBlack));
                 let status = paint_stderr("FAILED", Style::new().fg(Color::Red).bold());
                 println!("  {kernel_col}  {dt_col}  {status}");
                 for e in &dtypes_err {
                     eprintln!(
                         "    {}  {}",
-                        paint_stdout(
-                            format!("{}:", e.dtype),
-                            Style::new().fg(Color::BrightBlack),
-                        ),
+                        paint_stdout(format!("{}:", e.dtype), Style::new().fg(Color::BrightBlack),),
                         paint_stderr(
                             e.message.lines().next().unwrap_or(&e.message),
                             Style::new().fg(Color::BrightWhite),
@@ -131,15 +125,16 @@ pub fn run(args: &BuildArgs, harness: &crate::harness::Harness) -> Result<(), Cl
                 }
                 errors += dtypes_err.len() as u32;
             } else if verbose && !dtypes_ok.is_empty() {
-                let kernel_col = paint_stdout(
-                    pad_left(&name, name_w),
-                    Style::new().fg(Color::Cyan),
-                );
+                let kernel_col =
+                    paint_stdout(pad_left(&name, name_w), Style::new().fg(Color::Cyan));
                 let dt_col = paint_stdout(
                     pad_left(&dtypes_ok.join("/"), dt_w),
                     Style::new().fg(Color::BrightBlack),
                 );
-                println!("  {kernel_col}  {dt_col}  {}", paint_stdout("ok", Style::new().fg(Color::Green)));
+                println!(
+                    "  {kernel_col}  {dt_col}  {}",
+                    paint_stdout("ok", Style::new().fg(Color::Green))
+                );
             }
             // Update column widths for subsequent lines.
             name_w = name_w.max(name.len());

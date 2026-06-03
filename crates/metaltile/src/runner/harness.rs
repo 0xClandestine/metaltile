@@ -10,7 +10,7 @@ use metaltile_codegen::{
     emit as codegen_emit,
     generator_for_mode,
     msl::MslGenerator,
-    passes::{PipelineBuilder, PassStats, run_passes_with_stats},
+    passes::{PassStats, PipelineBuilder, run_passes_with_stats},
 };
 use metaltile_core::{
     DType,
@@ -242,13 +242,19 @@ impl RunnerHarness {
             if let Some(raw) = args.emit.as_deref() {
                 for tok in raw.split(',').map(str::trim).filter(|t| !t.is_empty()) {
                     match tok {
-                        "msl" => { s.insert("msl"); },
+                        "msl" => {
+                            s.insert("msl");
+                        },
                         "metallib" => {
                             s.insert("msl");
                             s.insert("metallib");
                         },
-                        "swift" => { s.insert("swift"); },
-                        "ir" => { s.insert("ir"); },
+                        "swift" => {
+                            s.insert("swift");
+                        },
+                        "ir" => {
+                            s.insert("ir");
+                        },
                         "all" => {
                             s.insert("msl");
                             s.insert("metallib");
@@ -374,9 +380,7 @@ impl RunnerHarness {
                     let mut k = setup.kernel().clone();
                     let mode = k.mode;
                     let suffix = codegen_emit::dtype_suffix(dt);
-                    k.name = if item.n_dtypes == 1
-                        && item.name.ends_with(&format!("_{suffix}"))
-                    {
+                    k.name = if item.n_dtypes == 1 && item.name.ends_with(&format!("_{suffix}")) {
                         item.name.clone()
                     } else {
                         format!("{}_{suffix}", item.name)
@@ -725,12 +729,8 @@ fn build_metal_compile_check(msl: &str, kernel_name: &str, sdk: &str) -> Result<
         .map_err(|e| format!("invoke xcrun metal: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let short = stderr
-            .lines()
-            .filter(|l| l.contains("error:"))
-            .take(3)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let short =
+            stderr.lines().filter(|l| l.contains("error:")).take(3).collect::<Vec<_>>().join("\n");
         return Err(if short.is_empty() { stderr.into_owned() } else { short });
     }
     let _ = std::fs::remove_file(&metal_path);
