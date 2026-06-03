@@ -55,133 +55,113 @@ use metaltile::kernel;
 
 // ── Pass 1 — split-K partial GEMM ───────────────────────────────────────
 
-/// Expand one `(BM, BN, WM, WN)` block-shape instantiation of the
-/// split-K partial GEMM. The outer `macro_rules!` substitutes the
-/// literals before the `#[kernel]` body parser runs.
-#[rustfmt::skip]
-macro_rules! steel_gemm_splitk_kernel {
-    ($name:ident, $bm:literal, $bn:literal, $wm:literal, $wn:literal, $tpg:literal, $subop:literal) => {
-        #[kernel]
-        pub fn $name<T>(
-            a: Tensor<T>,
-            b: Tensor<T>,
-            mut partials: Tensor<f32>,
-            #[constexpr] m: u32,
-            #[constexpr] n: u32,
-            #[constexpr] k: u32,
-            #[constexpr] k_per_split: u32,
-        ) {
-            // ── Block / simdgroup geometry (identical to steel_gemm_fused) ──
-            let bm = $bm;
-            let bn = $bn;
-            let wm = $wm;
-            let wn = $wn;
-            let sub_m = bm / wm;
-            let sub_n = bn / wn;
-            let n_fm = sub_m / 8u32;
-            let n_fn = sub_n / 8u32;
-            let n_kf = 2u32; // BK = 16 ⇒ two 8×8 K-fragments per K-step.
+/// Split-K partial GEMM, both `(BM, BN, WM, WN)` block-shape instantiations.
+///
+/// Produces: `mt_steel_gemm_splitk_64x64x16_2x2`, `_32x32x16_2x2`.
+/// Split-K is most useful for the 32×32 shape: skinny M/N with a large K.
+#[kernel(variants(
+    BM = [64u32, 32u32],
+    BN = [64u32, 32u32],
+    WM = [2u32,  2u32],
+    WN = [2u32,  2u32],
+    suffix = "{BM}x{BN}x16_{WM}x{WN}"
+))]
+pub fn mt_steel_gemm_splitk<T>(
+    a: Tensor<T>,
+    b: Tensor<T>,
+    mut partials: Tensor<f32>,
+    #[constexpr] m: u32,
+    #[constexpr] n: u32,
+    #[constexpr] k: u32,
+    #[constexpr] k_per_split: u32,
+) {
+    // ── Block / simdgroup geometry (identical to steel_gemm_fused) ──
+    let bm = BM;
+    let bn = BN;
+    let wm = WM;
+    let wn = WN;
+    let sub_m = bm / wm;
+    let sub_n = bn / wn;
+    let n_fm = sub_m / 8u32;
+    let n_fn = sub_n / 8u32;
+    let n_kf = 2u32; // BK = 16 ⇒ two 8×8 K-fragments per K-step.
 
-            let tg_col = program_id::<0>(); // N-block index
-            let tg_row = program_id::<1>(); // M-block index
-            let split = program_id::<2>(); // K-split index
-            let sg_id = simd_group_id();
-            let sg_m = sg_id / wn;
-            let sg_n = sg_id % wn;
-            let lane = simd_lane_id();
+    let tg_col = program_id::<0>(); // N-block index
+    let tg_row = program_id::<1>(); // M-block index
+    let split = program_id::<2>(); // K-split index
+    let sg_id = simd_group_id();
+    let sg_m = sg_id / wn;
+    let sg_n = sg_id % wn;
+    let lane = simd_lane_id();
 
-            // Apple 8×8 fragment lane mapping.
-            let qid = lane / 4u32;
-            let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
-            let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
-            let fn1 = fn0 + 1u32;
+    // Apple 8×8 fragment lane mapping.
+    let qid = lane / 4u32;
+    let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
+    let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
+    let fn1 = fn0 + 1u32;
 
-            let sub_m0 = sg_m * sub_m;
-            let sub_n0 = sg_n * sub_n;
-            let block_m0 = tg_row * bm;
-            let block_n0 = tg_col * bn;
+    let sub_m0 = sg_m * sub_m;
+    let sub_n0 = sg_n * sub_n;
+    let block_m0 = tg_row * bm;
+    let block_n0 = tg_col * bn;
 
-            // ── This split's K-range ──
-            // [k_start, k_end) — the last split is clamped to `k`.
-            let k_start = split * k_per_split;
-            let k_end_raw = k_start + k_per_split;
-            let k_end = select(k_end_raw < k, k_end_raw, k);
-            // Partial-output base offset for this split: [split, M, N].
-            let part_base = split * m * n;
+    // ── This split's K-range ──
+    // [k_start, k_end) — the last split is clamped to `k`.
+    let k_start = split * k_per_split;
+    let k_end_raw = k_start + k_per_split;
+    let k_end = select(k_end_raw < k, k_end_raw, k);
+    // Partial-output base offset for this split: [split, M, N].
+    let part_base = split * m * n;
 
-            for _fm_i in range(0, n_fm, 1) {
-                for _fn_i in range(0, n_fn, 1) {
-                    let acc = simdgroup_alloc::<f32, 8, 8>();
-                    simdgroup_elem_store(acc, 0, 0.0f32);
-                    simdgroup_elem_store(acc, 1, 0.0f32);
+    for _fm_i in range(0, n_fm, 1) {
+        for _fn_i in range(0, n_fn, 1) {
+            let acc = simdgroup_alloc::<f32, 8, 8>();
+            simdgroup_elem_store(acc, 0, 0.0f32);
+            simdgroup_elem_store(acc, 1, 0.0f32);
 
-                    let m_row = block_m0 + sub_m0 + _fm_i * 8u32;
-                    let n_col = block_n0 + sub_n0 + _fn_i * 8u32;
+            let m_row = block_m0 + sub_m0 + _fm_i * 8u32;
+            let n_col = block_n0 + sub_n0 + _fn_i * 8u32;
 
-                    for kb in range(k_start, k_end, 16) {
-                        for _kf in range(0, n_kf, 1) {
-                            let kf = kb + _kf * 8u32;
-                            let sub_a = simdgroup_alloc::<T, 8, 8>();
-                            let sub_b = simdgroup_alloc::<T, 8, 8>();
+            for kb in range(k_start, k_end, 16) {
+                for _kf in range(0, n_kf, 1) {
+                    let kf = kb + _kf * 8u32;
+                    let sub_a = simdgroup_alloc::<T, 8, 8>();
+                    let sub_b = simdgroup_alloc::<T, 8, 8>();
 
-                            simdgroup_elem_store(
-                                sub_a,
-                                0,
-                                load(a[(m_row + fm) * k + kf + fn0]).cast::<T>(),
-                            );
-                            simdgroup_elem_store(
-                                sub_a,
-                                1,
-                                load(a[(m_row + fm) * k + kf + fn1]).cast::<T>(),
-                            );
-                            simdgroup_elem_store(
-                                sub_b,
-                                0,
-                                load(b[(kf + fm) * n + n_col + fn0]).cast::<T>(),
-                            );
-                            simdgroup_elem_store(
-                                sub_b,
-                                1,
-                                load(b[(kf + fm) * n + n_col + fn1]).cast::<T>(),
-                            );
+                    simdgroup_elem_store(
+                        sub_a,
+                        0,
+                        load(a[(m_row + fm) * k + kf + fn0]).cast::<T>(),
+                    );
+                    simdgroup_elem_store(
+                        sub_a,
+                        1,
+                        load(a[(m_row + fm) * k + kf + fn1]).cast::<T>(),
+                    );
+                    simdgroup_elem_store(
+                        sub_b,
+                        0,
+                        load(b[(kf + fm) * n + n_col + fn0]).cast::<T>(),
+                    );
+                    simdgroup_elem_store(
+                        sub_b,
+                        1,
+                        load(b[(kf + fm) * n + n_col + fn1]).cast::<T>(),
+                    );
 
-                            simdgroup_matmul(sub_a, sub_b, acc);
-                        }
-                    }
-
-                    // Write this split's fp32 partial — no cast, the
-                    // partials buffer is the f32 accumulator dtype.
-                    let r0 = simdgroup_elem_load(acc, 0);
-                    let r1 = simdgroup_elem_load(acc, 1);
-                    store(partials[part_base + (m_row + fm) * n + n_col + fn0], r0);
-                    store(partials[part_base + (m_row + fm) * n + n_col + fn1], r1);
+                    simdgroup_matmul(sub_a, sub_b, acc);
                 }
             }
-        }
-    };
-}
 
-// 64×64×16 / 2×2 — the canonical large-tile shape (4 simdgroups).
-steel_gemm_splitk_kernel!(
-    mt_steel_gemm_splitk_64x64x16_2x2,
-    64u32,
-    64u32,
-    2u32,
-    2u32,
-    128u32,
-    "bm64_bn64_bk16_wm2_wn2"
-);
-// 32×32×16 / 2×2 — small-tile shape (4 simdgroups) — split-K is most
-// useful exactly here: skinny M/N with a large K.
-steel_gemm_splitk_kernel!(
-    mt_steel_gemm_splitk_32x32x16_2x2,
-    32u32,
-    32u32,
-    2u32,
-    2u32,
-    128u32,
-    "bm32_bn32_bk16_wm2_wn2"
-);
+            // Write this split's fp32 partial — no cast, the
+            // partials buffer is the f32 accumulator dtype.
+            let r0 = simdgroup_elem_load(acc, 0);
+            let r1 = simdgroup_elem_load(acc, 1);
+            store(partials[part_base + (m_row + fm) * n + n_col + fn0], r0);
+            store(partials[part_base + (m_row + fm) * n + n_col + fn1], r1);
+        }
+    }
+}
 
 // ── Pass 2 — partial-sum reduction ──────────────────────────────────────
 

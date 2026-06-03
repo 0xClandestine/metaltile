@@ -107,36 +107,66 @@ pub fn mt_row_reduce_min<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] n: u32)
 // run by a single thread and already folds the whole column. A
 // `reduce_sum` here would lower to `simd_sum` and wrongly sum 32
 // independent columns together.
-//
-// The four ops share one body; the outer `macro_rules!` wraps the
-// whole `#[kernel]` declaration so the proc-macro sees concrete tokens
-// (an inner macro inside the body would silently emit no IR — see
-// docs/developing.md kernel-authoring hazards).
 
-#[rustfmt::skip]
-macro_rules! col_reduce_kernel {
-    ($name:ident, $reduce_op:ident, $subop:literal) => {
-        #[kernel]
-        pub fn $name<T>(
-            inp: Tensor<T>,
-            out: Tensor<T>,
-            #[constexpr] rows: u32,
-            #[constexpr] cols: u32,
-        ) {
-            let col = program_id::<0>();
-            if col < cols {
-                let end = rows * cols;
-                let acc = strided_reduce(inp, col, cols, end, $reduce_op);
-                store(out[col], acc.cast::<T>());
-            }
-        }
-    };
+#[kernel]
+pub fn mt_col_reduce<T>(
+    inp: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] rows: u32,
+    #[constexpr] cols: u32,
+) {
+    let col = program_id::<0>();
+    if col < cols {
+        let end = rows * cols;
+        let acc = strided_reduce(inp, col, cols, end, sum);
+        store(out[col], acc.cast::<T>());
+    }
 }
 
-col_reduce_kernel!(mt_col_reduce, sum, "sum");
-col_reduce_kernel!(mt_col_reduce_prod, product, "prod");
-col_reduce_kernel!(mt_col_reduce_max, max, "max");
-col_reduce_kernel!(mt_col_reduce_min, min, "min");
+#[kernel]
+pub fn mt_col_reduce_prod<T>(
+    inp: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] rows: u32,
+    #[constexpr] cols: u32,
+) {
+    let col = program_id::<0>();
+    if col < cols {
+        let end = rows * cols;
+        let acc = strided_reduce(inp, col, cols, end, product);
+        store(out[col], acc.cast::<T>());
+    }
+}
+
+#[kernel]
+pub fn mt_col_reduce_max<T>(
+    inp: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] rows: u32,
+    #[constexpr] cols: u32,
+) {
+    let col = program_id::<0>();
+    if col < cols {
+        let end = rows * cols;
+        let acc = strided_reduce(inp, col, cols, end, max);
+        store(out[col], acc.cast::<T>());
+    }
+}
+
+#[kernel]
+pub fn mt_col_reduce_min<T>(
+    inp: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] rows: u32,
+    #[constexpr] cols: u32,
+) {
+    let col = program_id::<0>();
+    if col < cols {
+        let end = rows * cols;
+        let acc = strided_reduce(inp, col, cols, end, min);
+        store(out[col], acc.cast::<T>());
+    }
+}
 
 // ── Segmented reduce ─────────────────────────────────────────────────────
 //
@@ -151,33 +181,69 @@ col_reduce_kernel!(mt_col_reduce_min, min, "min");
 // threadgroup-per-row form under-occupies the GPU (most lanes idle),
 // whereas one thread per segment keeps every lane busy.
 
-#[rustfmt::skip]
-macro_rules! seg_reduce_kernel {
-    ($name:ident, $reduce_op:ident, $subop:literal) => {
-        #[kernel]
-        pub fn $name<T>(
-            inp: Tensor<T>,
-            out: Tensor<T>,
-            #[constexpr] n_segments: u32,
-            #[constexpr] seg_len: u32,
-        ) {
-            let seg = program_id::<0>();
-            if seg < n_segments {
-                let start = seg * seg_len;
-                let end = start + seg_len;
-                // Grid3D: one thread folds the whole segment — no
-                // `reduce_*` finishing step (see col-reduce note above).
-                let acc = strided_reduce(inp, start, 1u32, end, $reduce_op);
-                store(out[seg], acc.cast::<T>());
-            }
-        }
-    };
+#[kernel]
+pub fn mt_seg_reduce<T>(
+    inp: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] n_segments: u32,
+    #[constexpr] seg_len: u32,
+) {
+    let seg = program_id::<0>();
+    if seg < n_segments {
+        let start = seg * seg_len;
+        let end = start + seg_len;
+        let acc = strided_reduce(inp, start, 1u32, end, sum);
+        store(out[seg], acc.cast::<T>());
+    }
 }
 
-seg_reduce_kernel!(mt_seg_reduce, sum, "sum");
-seg_reduce_kernel!(mt_seg_reduce_prod, product, "prod");
-seg_reduce_kernel!(mt_seg_reduce_max, max, "max");
-seg_reduce_kernel!(mt_seg_reduce_min, min, "min");
+#[kernel]
+pub fn mt_seg_reduce_prod<T>(
+    inp: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] n_segments: u32,
+    #[constexpr] seg_len: u32,
+) {
+    let seg = program_id::<0>();
+    if seg < n_segments {
+        let start = seg * seg_len;
+        let end = start + seg_len;
+        let acc = strided_reduce(inp, start, 1u32, end, product);
+        store(out[seg], acc.cast::<T>());
+    }
+}
+
+#[kernel]
+pub fn mt_seg_reduce_max<T>(
+    inp: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] n_segments: u32,
+    #[constexpr] seg_len: u32,
+) {
+    let seg = program_id::<0>();
+    if seg < n_segments {
+        let start = seg * seg_len;
+        let end = start + seg_len;
+        let acc = strided_reduce(inp, start, 1u32, end, max);
+        store(out[seg], acc.cast::<T>());
+    }
+}
+
+#[kernel]
+pub fn mt_seg_reduce_min<T>(
+    inp: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] n_segments: u32,
+    #[constexpr] seg_len: u32,
+) {
+    let seg = program_id::<0>();
+    if seg < n_segments {
+        let start = seg * seg_len;
+        let end = start + seg_len;
+        let acc = strided_reduce(inp, start, 1u32, end, min);
+        store(out[seg], acc.cast::<T>());
+    }
+}
 
 /// New-syntax correctness for the reduce family.
 ///

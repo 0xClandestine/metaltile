@@ -4266,268 +4266,349 @@ pub fn mt_affine_dequantize_int6<T>(
 // - **`K` must be a multiple of 32** and **`G` must divide `K`**.
 //   Every Qwen3 / Qwen3.6 quantized shape satisfies both.
 
+// ── qmv / qmm (matvec / batched matvec, y = W·x) ────────────────────────
+//
+// Two body shapes: pow2 bit-widths (pack-aligned extraction) and odd
+// bit-widths (two-word bit-stream extraction). Each body is parameterised
+// on BITS via `#[kernel(variants(...))]`.
+//
+// `mt_qmm_b*` is the M-batched form of `mt_qmv_b*`; the bodies are
+// identical — dispatch `grid = [N, M, 1]` for batched, `[N, 1, 1]` for
+// the plain matvec.
+
 /// Quantized matvec / matmul (`y = W · x`) — pow2 bit-widths (4, 8).
-/// `mt_qmm_b*` is the M-batched form; `mt_qmv_b*` its M=1 row. W is
-/// `[N, K]` row-major; element `(row, d)` lives in a pack-aligned u32.
-#[rustfmt::skip]
-macro_rules! qmv_pow2 {
-    ($name:ident, $bits:literal, $subop:literal) => {
-        #[kernel]
-        pub fn $name<T>(
-            w: Tensor<u32>,
-            scales: Tensor<T>,
-            biases: Tensor<T>,
-            x: Tensor<T>,
-            out: Tensor<T>,
-            #[constexpr] k: u32,
-            #[constexpr] n: u32,
-            #[constexpr] group_size: u32,
-        ) {
-            // tgid_x = output row, tgid_y = batch row (M). At M=1 the
-            // grid's y extent is 1, so this is the plain matvec.
-            let row = tgid_x;
-            let m_row = tgid_y;
-            let lane = simd_lane;
+/// W is `[N, K]` row-major; element `(row, d)` lives in a pack-aligned u32.
+/// Produces: `mt_qmv_b4`, `mt_qmv_b8`.
+#[kernel(variants(BITS = [4u32, 8u32], suffix = "b{BITS}"))]
+pub fn mt_qmv<T>(
+    w: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    x: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] k: u32,
+    #[constexpr] n: u32,
+    #[constexpr] group_size: u32,
+) {
+    // tgid_x = output row, tgid_y = batch row (M). At M=1 the
+    // grid's y extent is 1, so this is the plain matvec.
+    let row = tgid_x;
+    let m_row = tgid_y;
+    let lane = simd_lane;
 
-            let groups_per_row = k / group_size;
-            let scale_row_base = row * groups_per_row;
-            let x_row_base = m_row * k;
+    let groups_per_row = k / group_size;
+    let scale_row_base = row * groups_per_row;
+    let x_row_base = m_row * k;
 
-            let vals_per_pack = 32u32 / $bits;
-            let packs_per_row = k / vals_per_pack;
-            let mask = (1u32 << $bits) - 1u32;
+    let vals_per_pack = 32u32 / BITS;
+    let packs_per_row = k / vals_per_pack;
+    let mask = (1u32 << BITS) - 1u32;
 
-            // Each lane owns K-positions lane, lane+32, lane+64, ...
-            let mut acc = 0.0f32;
-            let n_iters = (k + 31u32) / 32u32;
-            for _it in range(0u32, n_iters, 1u32) {
-                let d = _it * 32u32 + lane;
-                if d < k {
-                    let g = d / group_size;
-                    let scale = load(scales[scale_row_base + g]).cast::<f32>();
-                    let bias = load(biases[scale_row_base + g]).cast::<f32>();
+    // Each lane owns K-positions lane, lane+32, lane+64, ...
+    let mut acc = 0.0f32;
+    let n_iters = (k + 31u32) / 32u32;
+    for _it in range(0u32, n_iters, 1u32) {
+        let d = _it * 32u32 + lane;
+        if d < k {
+            let g = d / group_size;
+            let scale = load(scales[scale_row_base + g]).cast::<f32>();
+            let bias = load(biases[scale_row_base + g]).cast::<f32>();
 
-                    // Pack-aligned int-$bits weight code at (row, d).
-                    let pack = d / vals_per_pack;
-                    let slot = d - pack * vals_per_pack;
-                    let word = load(w[row * packs_per_row + pack]);
-                    let q = (word >> (slot * $bits)) & mask;
+            // Pack-aligned weight code at (row, d).
+            let pack = d / vals_per_pack;
+            let slot = d - pack * vals_per_pack;
+            let word = load(w[row * packs_per_row + pack]);
+            let q = (word >> (slot * BITS)) & mask;
 
-                    let wv = q.cast::<f32>() * scale + bias;
-                    acc = acc + wv * load(x[x_row_base + d]).cast::<f32>();
-                }
-            }
-
-            let total = simd_sum(acc);
-            if lane == 0u32 {
-                store(out[m_row * n + row], total.cast::<T>());
-            }
+            let wv = q.cast::<f32>() * scale + bias;
+            acc = acc + wv * load(x[x_row_base + d]).cast::<f32>();
         }
-    };
+    }
+
+    let total = simd_sum(acc);
+    if lane == 0u32 {
+        store(out[m_row * n + row], total.cast::<T>());
+    }
 }
 
 /// Quantized matvec / matmul (`y = W · x`) — odd bit-widths (3, 5, 6).
 /// W is `[N, K]` bit-stream-packed; element `(row, d)` may straddle two
 /// consecutive u32 words.
-#[rustfmt::skip]
-macro_rules! qmv_odd {
-    ($name:ident, $bits:literal, $subop:literal) => {
-        #[kernel]
-        pub fn $name<T>(
-            w: Tensor<u32>,
-            scales: Tensor<T>,
-            biases: Tensor<T>,
-            x: Tensor<T>,
-            out: Tensor<T>,
-            #[constexpr] k: u32,
-            #[constexpr] n: u32,
-            #[constexpr] group_size: u32,
-        ) {
-            let row = tgid_x;
-            let m_row = tgid_y;
-            let lane = simd_lane;
+/// Produces: `mt_qmv_odd_b3`, `mt_qmv_odd_b5`, `mt_qmv_odd_b6`.
+#[kernel(variants(BITS = [3u32, 5u32, 6u32], suffix = "b{BITS}"))]
+pub fn mt_qmv_odd<T>(
+    w: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    x: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] k: u32,
+    #[constexpr] n: u32,
+    #[constexpr] group_size: u32,
+) {
+    let row = tgid_x;
+    let m_row = tgid_y;
+    let lane = simd_lane;
 
-            let groups_per_row = k / group_size;
-            let scale_row_base = row * groups_per_row;
-            let x_row_base = m_row * k;
+    let groups_per_row = k / group_size;
+    let scale_row_base = row * groups_per_row;
+    let x_row_base = m_row * k;
 
-            let u32_per_row = k * $bits / 32u32;
-            let row_u32_off = row * u32_per_row;
+    let u32_per_row = k * BITS / 32u32;
+    let row_u32_off = row * u32_per_row;
 
-            let mut acc = 0.0f32;
-            let n_iters = (k + 31u32) / 32u32;
-            for _it in range(0u32, n_iters, 1u32) {
-                let d = _it * 32u32 + lane;
-                if d < k {
-                    let g = d / group_size;
-                    let scale = load(scales[scale_row_base + g]).cast::<f32>();
-                    let bias = load(biases[scale_row_base + g]).cast::<f32>();
+    let mut acc = 0.0f32;
+    let n_iters = (k + 31u32) / 32u32;
+    for _it in range(0u32, n_iters, 1u32) {
+        let d = _it * 32u32 + lane;
+        if d < k {
+            let g = d / group_size;
+            let scale = load(scales[scale_row_base + g]).cast::<f32>();
+            let bias = load(biases[scale_row_base + g]).cast::<f32>();
 
-                    // Two-word bit-stream extract — code may straddle a
-                    // u32 boundary (`spill` bits land in the next word).
-                    let bit_off = d * $bits;
-                    let word_idx = bit_off / 32u32;
-                    let bit_in_w = bit_off & 31u32;
-                    let bits_in_w0 = 32u32 - bit_in_w;
-                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
-                    let spill = $bits - lo_bits;
-                    let w0 = load(w[row_u32_off + word_idx]);
-                    let w1idx = select(spill > 0u32, word_idx + 1u32, word_idx);
-                    let w1 = load(w[row_u32_off + w1idx]);
-                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
-                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
-                    let q = lo | hi;
+            // Two-word bit-stream extract — code may straddle a
+            // u32 boundary (`spill` bits land in the next word).
+            let bit_off = d * BITS;
+            let word_idx = bit_off / 32u32;
+            let bit_in_w = bit_off & 31u32;
+            let bits_in_w0 = 32u32 - bit_in_w;
+            let lo_bits = select(bits_in_w0 >= BITS, BITS, bits_in_w0);
+            let spill = BITS - lo_bits;
+            let w0 = load(w[row_u32_off + word_idx]);
+            let w1idx = select(spill > 0u32, word_idx + 1u32, word_idx);
+            let w1 = load(w[row_u32_off + w1idx]);
+            let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+            let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+            let q = lo | hi;
 
-                    let wv = q.cast::<f32>() * scale + bias;
-                    acc = acc + wv * load(x[x_row_base + d]).cast::<f32>();
-                }
-            }
-
-            let total = simd_sum(acc);
-            if lane == 0u32 {
-                store(out[m_row * n + row], total.cast::<T>());
-            }
+            let wv = q.cast::<f32>() * scale + bias;
+            acc = acc + wv * load(x[x_row_base + d]).cast::<f32>();
         }
-    };
+    }
+
+    let total = simd_sum(acc);
+    if lane == 0u32 {
+        store(out[m_row * n + row], total.cast::<T>());
+    }
 }
+
+/// Quantized matmul / batched matvec (`y = W · x`) — pow2 bit-widths.
+/// Identical body to `mt_qmv`; registered under `qmm_b*` so the bench
+/// scoreboard tracks it separately. Dispatch `grid = [N, M, 1]`.
+/// Produces: `mt_qmm_b4`, `mt_qmm_b8`.
+#[kernel(variants(BITS = [4u32, 8u32], suffix = "b{BITS}"))]
+pub fn mt_qmm<T>(
+    w: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    x: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] k: u32,
+    #[constexpr] n: u32,
+    #[constexpr] group_size: u32,
+) {
+    let row = tgid_x;
+    let m_row = tgid_y;
+    let lane = simd_lane;
+
+    let groups_per_row = k / group_size;
+    let scale_row_base = row * groups_per_row;
+    let x_row_base = m_row * k;
+
+    let vals_per_pack = 32u32 / BITS;
+    let packs_per_row = k / vals_per_pack;
+    let mask = (1u32 << BITS) - 1u32;
+
+    let mut acc = 0.0f32;
+    let n_iters = (k + 31u32) / 32u32;
+    for _it in range(0u32, n_iters, 1u32) {
+        let d = _it * 32u32 + lane;
+        if d < k {
+            let g = d / group_size;
+            let scale = load(scales[scale_row_base + g]).cast::<f32>();
+            let bias = load(biases[scale_row_base + g]).cast::<f32>();
+
+            let pack = d / vals_per_pack;
+            let slot = d - pack * vals_per_pack;
+            let word = load(w[row * packs_per_row + pack]);
+            let q = (word >> (slot * BITS)) & mask;
+
+            let wv = q.cast::<f32>() * scale + bias;
+            acc = acc + wv * load(x[x_row_base + d]).cast::<f32>();
+        }
+    }
+
+    let total = simd_sum(acc);
+    if lane == 0u32 {
+        store(out[m_row * n + row], total.cast::<T>());
+    }
+}
+
+/// Quantized matmul (`y = W · x`) — odd bit-widths.
+/// Produces: `mt_qmm_odd_b3`, `mt_qmm_odd_b5`, `mt_qmm_odd_b6`.
+#[kernel(variants(BITS = [3u32, 5u32, 6u32], suffix = "b{BITS}"))]
+pub fn mt_qmm_odd<T>(
+    w: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    x: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] k: u32,
+    #[constexpr] n: u32,
+    #[constexpr] group_size: u32,
+) {
+    let row = tgid_x;
+    let m_row = tgid_y;
+    let lane = simd_lane;
+
+    let groups_per_row = k / group_size;
+    let scale_row_base = row * groups_per_row;
+    let x_row_base = m_row * k;
+
+    let u32_per_row = k * BITS / 32u32;
+    let row_u32_off = row * u32_per_row;
+
+    let mut acc = 0.0f32;
+    let n_iters = (k + 31u32) / 32u32;
+    for _it in range(0u32, n_iters, 1u32) {
+        let d = _it * 32u32 + lane;
+        if d < k {
+            let g = d / group_size;
+            let scale = load(scales[scale_row_base + g]).cast::<f32>();
+            let bias = load(biases[scale_row_base + g]).cast::<f32>();
+
+            let bit_off = d * BITS;
+            let word_idx = bit_off / 32u32;
+            let bit_in_w = bit_off & 31u32;
+            let bits_in_w0 = 32u32 - bit_in_w;
+            let lo_bits = select(bits_in_w0 >= BITS, BITS, bits_in_w0);
+            let spill = BITS - lo_bits;
+            let w0 = load(w[row_u32_off + word_idx]);
+            let w1idx = select(spill > 0u32, word_idx + 1u32, word_idx);
+            let w1 = load(w[row_u32_off + w1idx]);
+            let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+            let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+            let q = lo | hi;
+
+            let wv = q.cast::<f32>() * scale + bias;
+            acc = acc + wv * load(x[x_row_base + d]).cast::<f32>();
+        }
+    }
+
+    let total = simd_sum(acc);
+    if lane == 0u32 {
+        store(out[m_row * n + row], total.cast::<T>());
+    }
+}
+
+// ── qvm (vecmat, y = xᵀ·W) ───────────────────────────────────────────────
 
 /// Quantized vecmat (`y = xᵀ · W`) — pow2 bit-widths. W is `[K, N]`
 /// row-major; output column `c` sums over K, reading element `(d, c)`.
-#[rustfmt::skip]
-macro_rules! qvm_pow2 {
-    ($name:ident, $bits:literal, $subop:literal) => {
-        #[kernel]
-        pub fn $name<T>(
-            w: Tensor<u32>,
-            scales: Tensor<T>,
-            biases: Tensor<T>,
-            x: Tensor<T>,
-            out: Tensor<T>,
-            #[constexpr] k: u32,
-            #[constexpr] n: u32,
-            #[constexpr] group_size: u32,
-        ) {
-            // tgid_x = output column, tgid_y = batch row (M).
-            let col = tgid_x;
-            let m_row = tgid_y;
-            let lane = simd_lane;
+/// Produces: `mt_qvm_b4`, `mt_qvm_b8`.
+#[kernel(variants(BITS = [4u32, 8u32], suffix = "b{BITS}"))]
+pub fn mt_qvm<T>(
+    w: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    x: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] k: u32,
+    #[constexpr] n: u32,
+    #[constexpr] group_size: u32,
+) {
+    // tgid_x = output column, tgid_y = batch row (M).
+    let col = tgid_x;
+    let m_row = tgid_y;
+    let lane = simd_lane;
 
-            let x_row_base = m_row * k;
-            let vals_per_pack = 32u32 / $bits;
-            let packs_per_row = n / vals_per_pack;
-            let mask = (1u32 << $bits) - 1u32;
+    let x_row_base = m_row * k;
+    let vals_per_pack = 32u32 / BITS;
+    let packs_per_row = n / vals_per_pack;
+    let mask = (1u32 << BITS) - 1u32;
 
-            let mut acc = 0.0f32;
-            let n_iters = (k + 31u32) / 32u32;
-            for _it in range(0u32, n_iters, 1u32) {
-                let d = _it * 32u32 + lane;
-                if d < k {
-                    // Groups run along K; scales/biases are [K/G, N].
-                    let g = d / group_size;
-                    let scale = load(scales[g * n + col]).cast::<f32>();
-                    let bias = load(biases[g * n + col]).cast::<f32>();
+    let mut acc = 0.0f32;
+    let n_iters = (k + 31u32) / 32u32;
+    for _it in range(0u32, n_iters, 1u32) {
+        let d = _it * 32u32 + lane;
+        if d < k {
+            // Groups run along K; scales/biases are [K/G, N].
+            let g = d / group_size;
+            let scale = load(scales[g * n + col]).cast::<f32>();
+            let bias = load(biases[g * n + col]).cast::<f32>();
 
-                    // Element (d, col) of a [K, N]-packed weight matrix.
-                    let pack = col / vals_per_pack;
-                    let slot = col - pack * vals_per_pack;
-                    let word = load(w[d * packs_per_row + pack]);
-                    let q = (word >> (slot * $bits)) & mask;
+            // Element (d, col) of a [K, N]-packed weight matrix.
+            let pack = col / vals_per_pack;
+            let slot = col - pack * vals_per_pack;
+            let word = load(w[d * packs_per_row + pack]);
+            let q = (word >> (slot * BITS)) & mask;
 
-                    let wv = q.cast::<f32>() * scale + bias;
-                    acc = acc + wv * load(x[x_row_base + d]).cast::<f32>();
-                }
-            }
-
-            let total = simd_sum(acc);
-            if lane == 0u32 {
-                store(out[m_row * n + col], total.cast::<T>());
-            }
+            let wv = q.cast::<f32>() * scale + bias;
+            acc = acc + wv * load(x[x_row_base + d]).cast::<f32>();
         }
-    };
+    }
+
+    let total = simd_sum(acc);
+    if lane == 0u32 {
+        store(out[m_row * n + col], total.cast::<T>());
+    }
 }
 
 /// Quantized vecmat (`y = xᵀ · W`) — odd bit-widths. W is `[K, N]`
 /// bit-stream-packed.
-#[rustfmt::skip]
-macro_rules! qvm_odd {
-    ($name:ident, $bits:literal, $subop:literal) => {
-        #[kernel]
-        pub fn $name<T>(
-            w: Tensor<u32>,
-            scales: Tensor<T>,
-            biases: Tensor<T>,
-            x: Tensor<T>,
-            out: Tensor<T>,
-            #[constexpr] k: u32,
-            #[constexpr] n: u32,
-            #[constexpr] group_size: u32,
-        ) {
-            let col = tgid_x;
-            let m_row = tgid_y;
-            let lane = simd_lane;
+/// Produces: `mt_qvm_odd_b3`, `mt_qvm_odd_b5`, `mt_qvm_odd_b6`.
+#[kernel(variants(BITS = [3u32, 5u32, 6u32], suffix = "b{BITS}"))]
+pub fn mt_qvm_odd<T>(
+    w: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    x: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] k: u32,
+    #[constexpr] n: u32,
+    #[constexpr] group_size: u32,
+) {
+    let col = tgid_x;
+    let m_row = tgid_y;
+    let lane = simd_lane;
 
-            let x_row_base = m_row * k;
-            let u32_per_row = n * $bits / 32u32;
+    let x_row_base = m_row * k;
+    let u32_per_row = n * BITS / 32u32;
 
-            let mut acc = 0.0f32;
-            let n_iters = (k + 31u32) / 32u32;
-            for _it in range(0u32, n_iters, 1u32) {
-                let d = _it * 32u32 + lane;
-                if d < k {
-                    let g = d / group_size;
-                    let scale = load(scales[g * n + col]).cast::<f32>();
-                    let bias = load(biases[g * n + col]).cast::<f32>();
+    let mut acc = 0.0f32;
+    let n_iters = (k + 31u32) / 32u32;
+    for _it in range(0u32, n_iters, 1u32) {
+        let d = _it * 32u32 + lane;
+        if d < k {
+            let g = d / group_size;
+            let scale = load(scales[g * n + col]).cast::<f32>();
+            let bias = load(biases[g * n + col]).cast::<f32>();
 
-                    // Two-word bit-stream extract of element (d, col).
-                    let row_u32_off = d * u32_per_row;
-                    let bit_off = col * $bits;
-                    let word_idx = bit_off / 32u32;
-                    let bit_in_w = bit_off & 31u32;
-                    let bits_in_w0 = 32u32 - bit_in_w;
-                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
-                    let spill = $bits - lo_bits;
-                    let w0 = load(w[row_u32_off + word_idx]);
-                    let w1idx = select(spill > 0u32, word_idx + 1u32, word_idx);
-                    let w1 = load(w[row_u32_off + w1idx]);
-                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
-                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
-                    let q = lo | hi;
+            // Two-word bit-stream extract of element (d, col).
+            let row_u32_off = d * u32_per_row;
+            let bit_off = col * BITS;
+            let word_idx = bit_off / 32u32;
+            let bit_in_w = bit_off & 31u32;
+            let bits_in_w0 = 32u32 - bit_in_w;
+            let lo_bits = select(bits_in_w0 >= BITS, BITS, bits_in_w0);
+            let spill = BITS - lo_bits;
+            let w0 = load(w[row_u32_off + word_idx]);
+            let w1idx = select(spill > 0u32, word_idx + 1u32, word_idx);
+            let w1 = load(w[row_u32_off + w1idx]);
+            let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+            let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+            let q = lo | hi;
 
-                    let wv = q.cast::<f32>() * scale + bias;
-                    acc = acc + wv * load(x[x_row_base + d]).cast::<f32>();
-                }
-            }
-
-            let total = simd_sum(acc);
-            if lane == 0u32 {
-                store(out[m_row * n + col], total.cast::<T>());
-            }
+            let wv = q.cast::<f32>() * scale + bias;
+            acc = acc + wv * load(x[x_row_base + d]).cast::<f32>();
         }
-    };
+    }
+
+    let total = simd_sum(acc);
+    if lane == 0u32 {
+        store(out[m_row * n + col], total.cast::<T>());
+    }
 }
-
-// qmv (matvec) — pow2 widths 4/8, odd widths 3/5/6.
-qmv_pow2!(mt_qmv_b4, 4u32, "qmv_b4");
-qmv_pow2!(mt_qmv_b8, 8u32, "qmv_b8");
-qmv_odd!(mt_qmv_b3, 3u32, "qmv_b3");
-qmv_odd!(mt_qmv_b5, 5u32, "qmv_b5");
-qmv_odd!(mt_qmv_b6, 6u32, "qmv_b6");
-
-// qmm (matmul / batched matvec) — identical body to qmv, registered
-// under the `qmm_b*` subop so the bench scoreboard tracks it
-// separately. Dispatch with `grid = [N, M, 1]`.
-qmv_pow2!(mt_qmm_b4, 4u32, "qmm_b4");
-qmv_pow2!(mt_qmm_b8, 8u32, "qmm_b8");
-qmv_odd!(mt_qmm_b3, 3u32, "qmm_b3");
-qmv_odd!(mt_qmm_b5, 5u32, "qmm_b5");
-qmv_odd!(mt_qmm_b6, 6u32, "qmm_b6");
-
-// qvm (vecmat) — the genuinely missing op; W transposed to [K, N].
-qvm_pow2!(mt_qvm_b4, 4u32, "qvm_b4");
-qvm_pow2!(mt_qvm_b8, 8u32, "qvm_b8");
-qvm_odd!(mt_qvm_b3, 3u32, "qvm_b3");
-qvm_odd!(mt_qvm_b5, 5u32, "qvm_b5");
-qvm_odd!(mt_qvm_b6, 6u32, "qvm_b6");
 
 // ─── mt_qvm_int4_fast ─────────────────────────────────────────────────
 //
@@ -5878,10 +5959,10 @@ pub mod kernel_tests {
             }
         };
     }
-    qmv_test!(test_qmv_b3, mt_qmv_b3, 3);
+    qmv_test!(test_qmv_b3, mt_qmv_odd_b3, 3);
     qmv_test!(test_qmv_b4, mt_qmv_b4, 4);
-    qmv_test!(test_qmv_b5, mt_qmv_b5, 5);
-    qmv_test!(test_qmv_b6, mt_qmv_b6, 6);
+    qmv_test!(test_qmv_b5, mt_qmv_odd_b5, 5);
+    qmv_test!(test_qmv_b6, mt_qmv_odd_b6, 6);
     qmv_test!(test_qmv_b8, mt_qmv_b8, 8);
 
     // Generic qmm (M-batched matvec): grid [n, m, 1].
@@ -5904,10 +5985,10 @@ pub mod kernel_tests {
             }
         };
     }
-    qmm_test!(test_qmm_b3, mt_qmm_b3, 3);
+    qmm_test!(test_qmm_b3, mt_qmm_odd_b3, 3);
     qmm_test!(test_qmm_b4, mt_qmm_b4, 4);
-    qmm_test!(test_qmm_b5, mt_qmm_b5, 5);
-    qmm_test!(test_qmm_b6, mt_qmm_b6, 6);
+    qmm_test!(test_qmm_b5, mt_qmm_odd_b5, 5);
+    qmm_test!(test_qmm_b6, mt_qmm_odd_b6, 6);
     qmm_test!(test_qmm_b8, mt_qmm_b8, 8);
 
     // Generic qvm (vecmat, M=1): grid [n, 1, 1].
@@ -5919,10 +6000,10 @@ pub mod kernel_tests {
             }
         };
     }
-    qvm_test!(test_qvm_b3, mt_qvm_b3, 3);
+    qvm_test!(test_qvm_b3, mt_qvm_odd_b3, 3);
     qvm_test!(test_qvm_b4, mt_qvm_b4, 4);
-    qvm_test!(test_qvm_b5, mt_qvm_b5, 5);
-    qvm_test!(test_qvm_b6, mt_qvm_b6, 6);
+    qvm_test!(test_qvm_b5, mt_qvm_odd_b5, 5);
+    qvm_test!(test_qvm_b6, mt_qvm_odd_b6, 6);
     qvm_test!(test_qvm_b8, mt_qvm_b8, 8);
 
     // Odd-width simdgroup-matrix MMA (b3/b5/b6): grid [n/32, m/32, 1], tpg 128,
@@ -6562,7 +6643,7 @@ pub mod kernel_benches {
     // qmv (matvec, M=1): grid [N, 1, 1].
     #[bench(name = "mlx/quantized/qmv_b3", dtypes = [f32, f16, bf16])]
     fn bench_qmv_b3(dt: DType) -> BenchSetup {
-        qmb_gs(mt_qmv_b3::kernel_ir_for(dt), 1, 4096, 4096, 3, 64, [4096, 1, 1], dt)
+        qmb_gs(mt_qmv_odd_b3::kernel_ir_for(dt), 1, 4096, 4096, 3, 64, [4096, 1, 1], dt)
     }
     #[bench(name = "mlx/quantized/qmv_b4", dtypes = [f32, f16, bf16])]
     fn bench_qmv_b4(dt: DType) -> BenchSetup {
@@ -6570,11 +6651,11 @@ pub mod kernel_benches {
     }
     #[bench(name = "mlx/quantized/qmv_b5", dtypes = [f32, f16, bf16])]
     fn bench_qmv_b5(dt: DType) -> BenchSetup {
-        qmb_gs(mt_qmv_b5::kernel_ir_for(dt), 1, 4096, 4096, 5, 64, [4096, 1, 1], dt)
+        qmb_gs(mt_qmv_odd_b5::kernel_ir_for(dt), 1, 4096, 4096, 5, 64, [4096, 1, 1], dt)
     }
     #[bench(name = "mlx/quantized/qmv_b6", dtypes = [f32, f16, bf16])]
     fn bench_qmv_b6(dt: DType) -> BenchSetup {
-        qmb_gs(mt_qmv_b6::kernel_ir_for(dt), 1, 4096, 4096, 6, 64, [4096, 1, 1], dt)
+        qmb_gs(mt_qmv_odd_b6::kernel_ir_for(dt), 1, 4096, 4096, 6, 64, [4096, 1, 1], dt)
     }
     #[bench(name = "mlx/quantized/qmv_b8", dtypes = [f32, f16, bf16])]
     fn bench_qmv_b8(dt: DType) -> BenchSetup {
@@ -6585,7 +6666,7 @@ pub mod kernel_benches {
     // qmv (n·k codes, n·gspr scales) — only the kernel's index math differs.
     #[bench(name = "mlx/quantized/qvm_b3", dtypes = [f32, f16, bf16])]
     fn bench_qvm_b3(dt: DType) -> BenchSetup {
-        qmb_gs(mt_qvm_b3::kernel_ir_for(dt), 1, 4096, 4096, 3, 64, [4096, 1, 1], dt)
+        qmb_gs(mt_qvm_odd_b3::kernel_ir_for(dt), 1, 4096, 4096, 3, 64, [4096, 1, 1], dt)
     }
     #[bench(name = "mlx/quantized/qvm_b4", dtypes = [f32, f16, bf16])]
     fn bench_qvm_b4(dt: DType) -> BenchSetup {
@@ -6593,11 +6674,11 @@ pub mod kernel_benches {
     }
     #[bench(name = "mlx/quantized/qvm_b5", dtypes = [f32, f16, bf16])]
     fn bench_qvm_b5(dt: DType) -> BenchSetup {
-        qmb_gs(mt_qvm_b5::kernel_ir_for(dt), 1, 4096, 4096, 5, 64, [4096, 1, 1], dt)
+        qmb_gs(mt_qvm_odd_b5::kernel_ir_for(dt), 1, 4096, 4096, 5, 64, [4096, 1, 1], dt)
     }
     #[bench(name = "mlx/quantized/qvm_b6", dtypes = [f32, f16, bf16])]
     fn bench_qvm_b6(dt: DType) -> BenchSetup {
-        qmb_gs(mt_qvm_b6::kernel_ir_for(dt), 1, 4096, 4096, 6, 64, [4096, 1, 1], dt)
+        qmb_gs(mt_qvm_odd_b6::kernel_ir_for(dt), 1, 4096, 4096, 6, 64, [4096, 1, 1], dt)
     }
     #[bench(name = "mlx/quantized/qvm_b8", dtypes = [f32, f16, bf16])]
     fn bench_qvm_b8(dt: DType) -> BenchSetup {
@@ -6607,7 +6688,7 @@ pub mod kernel_benches {
     // qmm (batched matvec, M=4): grid [N, M, 1].
     #[bench(name = "mlx/quantized/qmm_b3", dtypes = [f32, f16, bf16])]
     fn bench_qmm_b3(dt: DType) -> BenchSetup {
-        qmb_gs(mt_qmm_b3::kernel_ir_for(dt), 4, 4096, 4096, 3, 64, [4096, 4, 1], dt)
+        qmb_gs(mt_qmm_odd_b3::kernel_ir_for(dt), 4, 4096, 4096, 3, 64, [4096, 4, 1], dt)
     }
     #[bench(name = "mlx/quantized/qmm_b4", dtypes = [f32, f16, bf16])]
     fn bench_qmm_b4(dt: DType) -> BenchSetup {
@@ -6615,11 +6696,11 @@ pub mod kernel_benches {
     }
     #[bench(name = "mlx/quantized/qmm_b5", dtypes = [f32, f16, bf16])]
     fn bench_qmm_b5(dt: DType) -> BenchSetup {
-        qmb_gs(mt_qmm_b5::kernel_ir_for(dt), 4, 4096, 4096, 5, 64, [4096, 4, 1], dt)
+        qmb_gs(mt_qmm_odd_b5::kernel_ir_for(dt), 4, 4096, 4096, 5, 64, [4096, 4, 1], dt)
     }
     #[bench(name = "mlx/quantized/qmm_b6", dtypes = [f32, f16, bf16])]
     fn bench_qmm_b6(dt: DType) -> BenchSetup {
-        qmb_gs(mt_qmm_b6::kernel_ir_for(dt), 4, 4096, 4096, 6, 64, [4096, 4, 1], dt)
+        qmb_gs(mt_qmm_odd_b6::kernel_ir_for(dt), 4, 4096, 4096, 6, 64, [4096, 4, 1], dt)
     }
     #[bench(name = "mlx/quantized/qmm_b8", dtypes = [f32, f16, bf16])]
     fn bench_qmm_b8(dt: DType) -> BenchSetup {

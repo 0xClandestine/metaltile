@@ -59,93 +59,89 @@
 
 use metaltile::kernel;
 
-#[rustfmt::skip]
-macro_rules! fft_kernel {
-    ($name:ident, $n:literal, $log_n:literal, $inv_n:literal, $subop:literal) => {
-        /// Radix-2 FFT of one length-`N` row. `in_re` / `in_im` are the
-        /// real / imaginary input planes, `out_re` / `out_im` the
-        /// outputs; `inv` is `0` for the forward transform, `1` for the
-        /// inverse (conjugated twiddles + `1/N` scale).
-        #[kernel]
-        pub fn $name<T>(
-            in_re: Tensor<T>,
-            in_im: Tensor<T>,
-            mut out_re: Tensor<T>,
-            mut out_im: Tensor<T>,
-            #[constexpr] inv: u32,
-        ) {
-            let row = program_id::<0>();
-            let base = row * $n;
+/// Radix-2 FFT of one length-`N` row. `in_re` / `in_im` are the
+/// real / imaginary input planes, `out_re` / `out_im` the
+/// outputs; `inv` is `0` for the forward transform, `1` for the
+/// inverse (conjugated twiddles + `1/N` scale).
+///
+/// Produces kernels: `mt_fft_n32`, `_n64`, `_n128`, `_n256`, `_n512`, `_n1024`.
+/// `LOG_N = log2(N)` (integer constant, pre-computed per variant).
+#[kernel(variants(
+    N     = [32u32, 64u32, 128u32, 256u32, 512u32, 1024u32],
+    LOG_N = [5u32,  6u32,  7u32,   8u32,   9u32,   10u32],
+    suffix = "n{N}"
+))]
+pub fn mt_fft<T>(
+    in_re: Tensor<T>,
+    in_im: Tensor<T>,
+    mut out_re: Tensor<T>,
+    mut out_im: Tensor<T>,
+    #[constexpr] inv: u32,
+) {
+    let row = program_id::<0>();
+    let base = row * N;
 
-            threadgroup_alloc("re", $n, "f32");
-            threadgroup_alloc("im", $n, "f32");
+    threadgroup_alloc("re", N, "f32");
+    threadgroup_alloc("im", N, "f32");
 
-            // ---- bit-reversal permutation -------------------------------
-            // Reverse the low log2(N) bits of `tid`. One shift/mask/or
-            // per bit; `src` accumulates the reversed index.
-            let mut src = 0u32;
-            let mut rem = tid;
-            for _b in range(0u32, $log_n, 1u32) {
-                src = (src << 1u32) | (rem & 1u32);
-                rem = rem >> 1u32;
-            }
-            // Load input element `src` into this thread's slot.
-            threadgroup_store("re", tid, load(in_re[base + src]).cast::<f32>());
-            threadgroup_store("im", tid, load(in_im[base + src]).cast::<f32>());
-            threadgroup_barrier();
+    // ---- bit-reversal permutation -------------------------------
+    // Reverse the low log2(N) bits of `tid`. One shift/mask/or
+    // per bit; `src` accumulates the reversed index.
+    let mut src = 0u32;
+    let mut rem = tid;
+    for _b in range(0u32, LOG_N, 1u32) {
+        src = (src << 1u32) | (rem & 1u32);
+        rem = rem >> 1u32;
+    }
+    // Load input element `src` into this thread's slot.
+    threadgroup_store("re", tid, load(in_re[base + src]).cast::<f32>());
+    threadgroup_store("im", tid, load(in_im[base + src]).cast::<f32>());
+    threadgroup_barrier();
 
-            // ---- log2(N) butterfly stages -------------------------------
-            // Stage s: half-block h = 2^s. The twiddle-angle sign is
-            // negative for the forward transform, positive for inverse.
-            let pi = 3.141592653589793f32;
-            let angle_sign = select(inv == 0u32, -1.0f32, 1.0f32);
+    // ---- log2(N) butterfly stages -------------------------------
+    // Stage s: half-block h = 2^s. The twiddle-angle sign is
+    // negative for the forward transform, positive for inverse.
+    let pi = 3.141592653589793f32;
+    let angle_sign = select(inv == 0u32, -1.0f32, 1.0f32);
 
-            for s in range(0u32, $log_n, 1u32) {
-                let h = 1u32 << s;
-                // Top-of-butterfly threads: bit `s` of `tid` is clear.
-                if (tid & h) == 0u32 {
-                    // Twiddle exponent k = tid mod h, span = 2h.
-                    let k = tid & (h - 1u32);
-                    let h_f = h.cast::<f32>();
-                    let angle = angle_sign * pi * k.cast::<f32>() / h_f;
-                    let wr = cos(angle);
-                    let wi = sin(angle);
+    for s in range(0u32, LOG_N, 1u32) {
+        let h = 1u32 << s;
+        // Top-of-butterfly threads: bit `s` of `tid` is clear.
+        if (tid & h) == 0u32 {
+            // Twiddle exponent k = tid mod h, span = 2h.
+            let k = tid & (h - 1u32);
+            let h_f = h.cast::<f32>();
+            let angle = angle_sign * pi * k.cast::<f32>() / h_f;
+            let wr = cos(angle);
+            let wi = sin(angle);
 
-                    let ar = threadgroup_load("re", tid);
-                    let ai = threadgroup_load("im", tid);
-                    let br = threadgroup_load("re", tid + h);
-                    let bi = threadgroup_load("im", tid + h);
+            let ar = threadgroup_load("re", tid);
+            let ai = threadgroup_load("im", tid);
+            let br = threadgroup_load("re", tid + h);
+            let bi = threadgroup_load("im", tid + h);
 
-                    // t = w · b  (complex multiply, four-real-mul form).
-                    let tr = wr * br - wi * bi;
-                    let ti = wr * bi + wi * br;
+            // t = w · b  (complex multiply, four-real-mul form).
+            let tr = wr * br - wi * bi;
+            let ti = wr * bi + wi * br;
 
-                    // Butterfly: out[tid] = a + t, out[tid+h] = a − t.
-                    threadgroup_store("re", tid, ar + tr);
-                    threadgroup_store("im", tid, ai + ti);
-                    threadgroup_store("re", tid + h, ar - tr);
-                    threadgroup_store("im", tid + h, ai - ti);
-                }
-                threadgroup_barrier();
-            }
-
-            // ---- write back, inverse scale ------------------------------
-            // Forward: scale 1. Inverse: 1/N (the `$inv_n` literal).
-            let scale = select(inv == 0u32, 1.0f32, $inv_n);
-            let res_re = threadgroup_load("re", tid) * scale;
-            let res_im = threadgroup_load("im", tid) * scale;
-            store(out_re[base + tid], res_re.cast::<T>());
-            store(out_im[base + tid], res_im.cast::<T>());
+            // Butterfly: out[tid] = a + t, out[tid+h] = a − t.
+            threadgroup_store("re", tid, ar + tr);
+            threadgroup_store("im", tid, ai + ti);
+            threadgroup_store("re", tid + h, ar - tr);
+            threadgroup_store("im", tid + h, ai - ti);
         }
-    };
-}
+        threadgroup_barrier();
+    }
 
-fft_kernel!(mt_fft_n32, 32u32, 5u32, 0.031_25f32, "n32");
-fft_kernel!(mt_fft_n64, 64u32, 6u32, 0.015_625f32, "n64");
-fft_kernel!(mt_fft_n128, 128u32, 7u32, 0.007_812_5f32, "n128");
-fft_kernel!(mt_fft_n256, 256u32, 8u32, 0.003_906_25f32, "n256");
-fft_kernel!(mt_fft_n512, 512u32, 9u32, 0.001_953_125f32, "n512");
-fft_kernel!(mt_fft_n1024, 1024u32, 10u32, 0.000_976_562_5f32, "n1024");
+    // ---- write back, inverse scale ------------------------------
+    // Forward: scale 1. Inverse: 1/N (computed from the N literal).
+    let n_f = N.cast::<f32>();
+    let scale = select(inv == 0u32, 1.0f32, 1.0f32 / n_f);
+    let res_re = threadgroup_load("re", tid) * scale;
+    let res_im = threadgroup_load("im", tid) * scale;
+    store(out_re[base + tid], res_re.cast::<T>());
+    store(out_im[base + tid], res_im.cast::<T>());
+}
 
 // ── Bluestein chirp-Z transform — arbitrary-length DFT ───────────────────
 //
