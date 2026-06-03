@@ -502,6 +502,248 @@ pub fn mt_int8_depthwise_conv2d<T>(
     store(out[idx], acc.cast::<T>());
 }
 
+// ── Symmetric sub-byte integer depthwise conv (int2/3/4/5/6 + MXINT2..6) ─────
+// The filter element is a signed N-bit two's-complement code. Unlike the
+// per-row word-aligned GEMV (`mlx/block_scaled_matmul.rs`, where `in_dim` is a
+// multiple of 32), the depthwise filter squeezes to `[ch, C]` with `C = k*k` —
+// which is generally NOT a multiple of 32, so **per-row bit-streams are not
+// word-aligned**. `quant::format::pack` packs the whole `[ch, C]` matrix as ONE
+// flat LSB-first bit-stream keyed on the *global* flat element index
+// `flat = c * C + col` (it never re-bases per row), so the decode here must use
+// that same global index: `bit_off = (c·C + col)·bits`, then a straddle-aware
+// two-word read into the flat `weight` buffer (no per-row word base). This is
+// exact whether or not `C` is a multiple of 32. Everything else — the
+// (n, c, oh, ow) flattening, the padding/dilation/stride loop, the per-block
+// scale index `c·n_blocks + col/block_size`, the Grid3D geometry — is identical
+// to the existing 8-bit int kernel. `$half`/`$full` are passed as literals
+// (2^(N-1) / 2^N) to keep the constexpr math out of the DSL shift operands.
+
+/// FP32-scaled symmetric int depthwise conv (int2/3/4/5/6): per-tap bit-stream
+/// code × per-group FP32 scale. The filter is one flat `[ch, C]` bit-stream, so
+/// tap `(c, col)` decodes at the GLOBAL bit offset `(c·C + col)·bits`.
+macro_rules! int_dw_conv_f32 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        #[allow(clippy::too_many_arguments)]
+        pub fn $name<T>(
+            input: Tensor<T>,
+            weight: Tensor<u32>,
+            scales: Tensor<f32>,
+            bias: Tensor<T>,
+            out: Tensor<T>,
+            #[constexpr] batch: u32,
+            #[constexpr] ch: u32,
+            #[constexpr] in_h: u32,
+            #[constexpr] in_w: u32,
+            #[constexpr] out_h: u32,
+            #[constexpr] out_w: u32,
+            #[constexpr] k: u32,
+            #[constexpr] stride: u32,
+            #[constexpr] pad: u32,
+            #[constexpr] dilation: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let idx = program_id::<0>();
+            let ow = idx % out_w;
+            let t1 = idx / out_w;
+            let oh = t1 % out_h;
+            let t2 = t1 / out_h;
+            let c = t2 % ch;
+            let n = t2 / ch;
+            let ph0 = oh * stride;
+            let pw0 = ow * stride;
+            let in_c_base = (n * ch + c) * in_h * in_w;
+            let cols = k * k;
+            let n_blocks = cols / block_size;
+            // Flat global element base for this channel's filter row (codes are a
+            // single `[ch, C]` bit-stream keyed on `c·C + col`, never per-row
+            // word-aligned), and the per-channel block base for the scales.
+            let w_row_elem = c * cols;
+            let w_row_blk = c * n_blocks;
+            let mut acc = load(bias[c]).cast::<f32>();
+            for ky in range(0u32, k, 1u32) {
+                let ph = ph0 + ky * dilation;
+                let valid_h = (ph >= pad) & (ph < pad + in_h);
+                let ih = select(valid_h, ph - pad, 0u32);
+                for kx in range(0u32, k, 1u32) {
+                    let pw = pw0 + kx * dilation;
+                    let valid_w = (pw >= pad) & (pw < pad + in_w);
+                    let iw = select(valid_w, pw - pad, 0u32);
+                    let valid = valid_h & valid_w;
+                    let x = load(input[in_c_base + ih * in_w + iw]).cast::<f32>();
+                    let x_m = select(valid, x, 0.0f32);
+                    let col = ky * k + kx;
+                    // Straddle-aware two-word read at the GLOBAL bit offset.
+                    let bit_off = (w_row_elem + col) * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(weight[word_idx]);
+                    let w1 = load(weight[select(spill > 0u32, word_idx + 1u32, word_idx)]);
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+                    let qf = q.cast::<f32>();
+                    let elem = select(q >= $half, qf - $full, qf); // sign-extend
+                    let scale = load(scales[w_row_blk + col / block_size]);
+                    let wt = elem * scale;
+                    acc = acc + x_m * wt;
+                }
+            }
+            store(out[idx], acc.cast::<T>());
+        }
+    };
+}
+int_dw_conv_f32!(mt_int2_depthwise_conv2d, 2u32, 2u32, 4.0f32);
+int_dw_conv_f32!(mt_int3_depthwise_conv2d, 3u32, 4u32, 8.0f32);
+int_dw_conv_f32!(mt_int4_depthwise_conv2d, 4u32, 8u32, 16.0f32);
+int_dw_conv_f32!(mt_int5_depthwise_conv2d, 5u32, 16u32, 32.0f32);
+int_dw_conv_f32!(mt_int6_depthwise_conv2d, 6u32, 32u32, 64.0f32);
+
+/// E8M0-scaled symmetric int depthwise conv (MXINT2/3/4/5/6): per-tap bit-stream
+/// code × pow-2 (E8M0) block scale `2^(bits-127)`. Same flat-bit-stream decode as
+/// `int_dw_conv_f32`; only the scale axis differs (one u8 exponent per block).
+macro_rules! int_dw_conv_e8m0 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        #[allow(clippy::too_many_arguments)]
+        pub fn $name<T>(
+            input: Tensor<T>,
+            weight: Tensor<u32>,
+            scales: Tensor<u8>,
+            bias: Tensor<T>,
+            out: Tensor<T>,
+            #[constexpr] batch: u32,
+            #[constexpr] ch: u32,
+            #[constexpr] in_h: u32,
+            #[constexpr] in_w: u32,
+            #[constexpr] out_h: u32,
+            #[constexpr] out_w: u32,
+            #[constexpr] k: u32,
+            #[constexpr] stride: u32,
+            #[constexpr] pad: u32,
+            #[constexpr] dilation: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let idx = program_id::<0>();
+            let ow = idx % out_w;
+            let t1 = idx / out_w;
+            let oh = t1 % out_h;
+            let t2 = t1 / out_h;
+            let c = t2 % ch;
+            let n = t2 / ch;
+            let ph0 = oh * stride;
+            let pw0 = ow * stride;
+            let in_c_base = (n * ch + c) * in_h * in_w;
+            let cols = k * k;
+            let n_blocks = cols / block_size;
+            let w_row_elem = c * cols;
+            let w_row_blk = c * n_blocks;
+            let mut acc = load(bias[c]).cast::<f32>();
+            for ky in range(0u32, k, 1u32) {
+                let ph = ph0 + ky * dilation;
+                let valid_h = (ph >= pad) & (ph < pad + in_h);
+                let ih = select(valid_h, ph - pad, 0u32);
+                for kx in range(0u32, k, 1u32) {
+                    let pw = pw0 + kx * dilation;
+                    let valid_w = (pw >= pad) & (pw < pad + in_w);
+                    let iw = select(valid_w, pw - pad, 0u32);
+                    let valid = valid_h & valid_w;
+                    let x = load(input[in_c_base + ih * in_w + iw]).cast::<f32>();
+                    let x_m = select(valid, x, 0.0f32);
+                    let col = ky * k + kx;
+                    let bit_off = (w_row_elem + col) * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(weight[word_idx]);
+                    let w1 = load(weight[select(spill > 0u32, word_idx + 1u32, word_idx)]);
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+                    let qf = q.cast::<f32>();
+                    let elem = select(q >= $half, qf - $full, qf); // sign-extend
+                    let sbits = load(scales[w_row_blk + col / block_size]).cast::<f32>();
+                    let scale = exp2(sbits - 127.0f32); // E8M0: 2^(bits-127)
+                    let wt = elem * scale;
+                    acc = acc + x_m * wt;
+                }
+            }
+            store(out[idx], acc.cast::<T>());
+        }
+    };
+}
+int_dw_conv_e8m0!(mt_mxint2_depthwise_conv2d, 2u32, 2u32, 4.0f32);
+int_dw_conv_e8m0!(mt_mxint3_depthwise_conv2d, 3u32, 4u32, 8.0f32);
+int_dw_conv_e8m0!(mt_mxint4_depthwise_conv2d, 4u32, 8u32, 16.0f32);
+int_dw_conv_e8m0!(mt_mxint5_depthwise_conv2d, 5u32, 16u32, 32.0f32);
+int_dw_conv_e8m0!(mt_mxint6_depthwise_conv2d, 6u32, 32u32, 64.0f32);
+
+/// MXINT8 quantized depthwise conv2d — 8-bit symmetric codes (byte layout,
+/// block 32), E8M0 pow-2 block scale `2^(bits-127)`. Byte-per-code layout
+/// (one `uchar` each) identical to the 8-bit float formats, so it indexes
+/// `weight[c·C + col]` like `mt_int8`; only the decode + E8M0 scale differ.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_mxint8_depthwise_conv2d<T>(
+    input: Tensor<T>,
+    weight: Tensor<u8>,
+    scales: Tensor<u8>,
+    bias: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] batch: u32,
+    #[constexpr] ch: u32,
+    #[constexpr] in_h: u32,
+    #[constexpr] in_w: u32,
+    #[constexpr] out_h: u32,
+    #[constexpr] out_w: u32,
+    #[constexpr] k: u32,
+    #[constexpr] stride: u32,
+    #[constexpr] pad: u32,
+    #[constexpr] dilation: u32,
+    #[constexpr] block_size: u32,
+) {
+    let idx = program_id::<0>();
+    let ow = idx % out_w;
+    let t1 = idx / out_w;
+    let oh = t1 % out_h;
+    let t2 = t1 / out_h;
+    let c = t2 % ch;
+    let n = t2 / ch;
+    let ph0 = oh * stride;
+    let pw0 = ow * stride;
+    let in_c_base = (n * ch + c) * in_h * in_w;
+    let cols = k * k;
+    let n_blocks = cols / block_size;
+    let w_row = c * cols;
+    let w_row_blk = c * n_blocks;
+    let mut acc = load(bias[c]).cast::<f32>();
+    for ky in range(0u32, k, 1u32) {
+        let ph = ph0 + ky * dilation;
+        let valid_h = (ph >= pad) & (ph < pad + in_h);
+        let ih = select(valid_h, ph - pad, 0u32);
+        for kx in range(0u32, k, 1u32) {
+            let pw = pw0 + kx * dilation;
+            let valid_w = (pw >= pad) & (pw < pad + in_w);
+            let iw = select(valid_w, pw - pad, 0u32);
+            let valid = valid_h & valid_w;
+            let x = load(input[in_c_base + ih * in_w + iw]).cast::<f32>();
+            let x_m = select(valid, x, 0.0f32);
+            let col = ky * k + kx;
+            let elem = int8_decode(load(weight[w_row + col]).cast::<u32>());
+            let sbits = load(scales[w_row_blk + col / block_size]).cast::<f32>();
+            let scale = exp2(sbits - 127.0f32); // E8M0: 2^(bits-127)
+            let wt = elem * scale;
+            acc = acc + x_m * wt;
+        }
+    }
+    store(out[idx], acc.cast::<T>());
+}
+
 pub mod kernel_tests {
     use metaltile::{core::ir::Kernel, test::*, test_kernel};
 
@@ -575,11 +817,12 @@ pub mod kernel_tests {
                 }
             }
         }
-        let weight_dt = if fmt.element_bits() == 4 { DType::U32 } else { DType::U8 };
-        let scales_dt = if matches!(
-            fmt,
-            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
-        ) {
+        // 8-bit codes bind as one uchar each; every sub-byte width (4-bit nibble
+        // packs + int2/3/5/6 tight bit-streams) binds as packed u32 words. FP32
+        // scales bind as f32; E8M0/E4M3 scales as one byte. Both axes are driven
+        // off the format so new integer formats pick up the right buffer types.
+        let weight_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
+        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
             DType::F32
         } else {
             DType::U8
@@ -754,6 +997,189 @@ pub mod kernel_tests {
             dt,
         )
     }
+
+    // Symmetric sub-byte ints (int2-6, FP32 group scale 64) + MXINT (mxint2-6,
+    // E8M0 block scale 32) + MXINT8 (8-bit, E8M0). k=8 → C=64 is divisible by
+    // every group/block (64 and 32), so each channel's flat-bit-stream filter row
+    // lands on a u32 boundary and the per-block scale index is exact. The kernel
+    // and oracle share the codec, so the GPU output tracks the dequant-then-conv
+    // reference to float precision regardless of how coarse the quantization is.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int2_depthwise_conv2d(dt: DType) -> TestSetup {
+        dw_setup(
+            mt_int2_depthwise_conv2d::kernel_ir_for(dt),
+            QFormat::Int2,
+            1,
+            8,
+            16,
+            16,
+            8,
+            1,
+            0,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int3_depthwise_conv2d(dt: DType) -> TestSetup {
+        dw_setup(
+            mt_int3_depthwise_conv2d::kernel_ir_for(dt),
+            QFormat::Int3,
+            1,
+            8,
+            16,
+            16,
+            8,
+            1,
+            0,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int4_depthwise_conv2d(dt: DType) -> TestSetup {
+        dw_setup(
+            mt_int4_depthwise_conv2d::kernel_ir_for(dt),
+            QFormat::Int4,
+            1,
+            8,
+            16,
+            16,
+            8,
+            1,
+            0,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int5_depthwise_conv2d(dt: DType) -> TestSetup {
+        dw_setup(
+            mt_int5_depthwise_conv2d::kernel_ir_for(dt),
+            QFormat::Int5,
+            1,
+            8,
+            16,
+            16,
+            8,
+            1,
+            0,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int6_depthwise_conv2d(dt: DType) -> TestSetup {
+        dw_setup(
+            mt_int6_depthwise_conv2d::kernel_ir_for(dt),
+            QFormat::Int6,
+            1,
+            8,
+            16,
+            16,
+            8,
+            1,
+            0,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint2_depthwise_conv2d(dt: DType) -> TestSetup {
+        dw_setup(
+            mt_mxint2_depthwise_conv2d::kernel_ir_for(dt),
+            QFormat::Mxint2,
+            1,
+            8,
+            16,
+            16,
+            8,
+            1,
+            0,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint3_depthwise_conv2d(dt: DType) -> TestSetup {
+        dw_setup(
+            mt_mxint3_depthwise_conv2d::kernel_ir_for(dt),
+            QFormat::Mxint3,
+            1,
+            8,
+            16,
+            16,
+            8,
+            1,
+            0,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint4_depthwise_conv2d(dt: DType) -> TestSetup {
+        dw_setup(
+            mt_mxint4_depthwise_conv2d::kernel_ir_for(dt),
+            QFormat::Mxint4,
+            1,
+            8,
+            16,
+            16,
+            8,
+            1,
+            0,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint5_depthwise_conv2d(dt: DType) -> TestSetup {
+        dw_setup(
+            mt_mxint5_depthwise_conv2d::kernel_ir_for(dt),
+            QFormat::Mxint5,
+            1,
+            8,
+            16,
+            16,
+            8,
+            1,
+            0,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint6_depthwise_conv2d(dt: DType) -> TestSetup {
+        dw_setup(
+            mt_mxint6_depthwise_conv2d::kernel_ir_for(dt),
+            QFormat::Mxint6,
+            1,
+            8,
+            16,
+            16,
+            8,
+            1,
+            0,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint8_depthwise_conv2d(dt: DType) -> TestSetup {
+        dw_setup(
+            mt_mxint8_depthwise_conv2d::kernel_ir_for(dt),
+            QFormat::Mxint8,
+            1,
+            8,
+            16,
+            16,
+            8,
+            1,
+            0,
+            1,
+            dt,
+        )
+    }
 }
 
 /// Decode-shape benches: realistic depthwise stage (256 channels, 64×64 feature
@@ -783,15 +1209,16 @@ pub mod kernel_benches {
         let out_w = (in_w + 2 * pad - dilation * (k - 1) - 1) / stride + 1;
         let n_out = batch * ch * out_h * out_w;
         let cols = k * k;
-        let (codes_len, codes_dt) = if fmt.element_bits() == 4 {
-            (ch * cols / 8, DType::U32)
-        } else {
+        // 8-bit codes are one uchar each; every sub-byte width (4-bit nibble
+        // packs + int2/3/5/6 tight bit-streams) tight-bit-packs into u32 words
+        // (+ guard word for straddling reads). Both axes are driven off the
+        // format so new integer formats pick up the right buffer geometry.
+        let (codes_len, codes_dt) = if fmt.element_bits() == 8 {
             (ch * cols, DType::U8)
+        } else {
+            (crate::quant::format::bitstream_words(ch * cols, fmt.element_bits()), DType::U32)
         };
-        let scales_dt = if matches!(
-            fmt,
-            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
-        ) {
+        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
             DType::F32
         } else {
             DType::U8
@@ -885,5 +1312,73 @@ pub mod kernel_benches {
         mt_int8_depthwise_conv2d::kernel_ir_for,
         QFormat::Int8,
         "ffai/depthwise_conv2d_block/int8"
+    );
+    // Symmetric sub-byte ints (int2-6, FP32 group scale) + MXINT (mxint2-6, E8M0
+    // block scale) + MXINT8 (8-bit, E8M0).
+    dw_bench_fmt!(
+        bench_int2,
+        mt_int2_depthwise_conv2d::kernel_ir_for,
+        QFormat::Int2,
+        "ffai/depthwise_conv2d_block/int2"
+    );
+    dw_bench_fmt!(
+        bench_int3,
+        mt_int3_depthwise_conv2d::kernel_ir_for,
+        QFormat::Int3,
+        "ffai/depthwise_conv2d_block/int3"
+    );
+    dw_bench_fmt!(
+        bench_int4,
+        mt_int4_depthwise_conv2d::kernel_ir_for,
+        QFormat::Int4,
+        "ffai/depthwise_conv2d_block/int4"
+    );
+    dw_bench_fmt!(
+        bench_int5,
+        mt_int5_depthwise_conv2d::kernel_ir_for,
+        QFormat::Int5,
+        "ffai/depthwise_conv2d_block/int5"
+    );
+    dw_bench_fmt!(
+        bench_int6,
+        mt_int6_depthwise_conv2d::kernel_ir_for,
+        QFormat::Int6,
+        "ffai/depthwise_conv2d_block/int6"
+    );
+    dw_bench_fmt!(
+        bench_mxint2,
+        mt_mxint2_depthwise_conv2d::kernel_ir_for,
+        QFormat::Mxint2,
+        "ffai/depthwise_conv2d_block/mxint2"
+    );
+    dw_bench_fmt!(
+        bench_mxint3,
+        mt_mxint3_depthwise_conv2d::kernel_ir_for,
+        QFormat::Mxint3,
+        "ffai/depthwise_conv2d_block/mxint3"
+    );
+    dw_bench_fmt!(
+        bench_mxint4,
+        mt_mxint4_depthwise_conv2d::kernel_ir_for,
+        QFormat::Mxint4,
+        "ffai/depthwise_conv2d_block/mxint4"
+    );
+    dw_bench_fmt!(
+        bench_mxint5,
+        mt_mxint5_depthwise_conv2d::kernel_ir_for,
+        QFormat::Mxint5,
+        "ffai/depthwise_conv2d_block/mxint5"
+    );
+    dw_bench_fmt!(
+        bench_mxint6,
+        mt_mxint6_depthwise_conv2d::kernel_ir_for,
+        QFormat::Mxint6,
+        "ffai/depthwise_conv2d_block/mxint6"
+    );
+    dw_bench_fmt!(
+        bench_mxint8,
+        mt_mxint8_depthwise_conv2d::kernel_ir_for,
+        QFormat::Mxint8,
+        "ffai/depthwise_conv2d_block/mxint8"
     );
 }

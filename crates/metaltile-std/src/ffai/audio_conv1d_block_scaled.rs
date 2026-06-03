@@ -436,6 +436,220 @@ pub fn mt_int8_audio_conv1d<T>(
     store(out[idx], acc.cast::<T>());
 }
 
+// ── Symmetric sub-byte integer conv1d (int2/3/4/5/6 + MXINT2..6) ─────────────
+// The filter element is a signed N-bit two's-complement code, tight-bit-packed
+// LSB-first into u32 words. **Layout note:** `quant::format::pack` writes every
+// element at bit `global_elem · bits` of ONE flat bit-stream over the whole
+// `[out_ch, C]` filter (`global_elem = oc·C + col`, `col = ic·k + kx`) — it is
+// *not* a per-row word-aligned stream. So the bit offset is computed from the
+// **global** element index, mirroring `pack` exactly (this is also why the 4-bit
+// nibble path's `oc·(C/8) + col/8` works only because C is a multiple of 8). The
+// decode then matches `block_scaled_dequant`'s proven `int_dequant_*` macros:
+// extract the low N bits with a straddle-aware two-word read, sign-extend in
+// float (`$half`/`$full` = 2^(N-1)/2^N), and multiply by the per-block scale. The
+// block scale still indexes `[out_ch, C]` as `w_row_blk + col/block_size` (same
+// as int8). Geometry (Grid3D, one thread per output element) is unchanged.
+
+/// FP32-scaled symmetric int conv1d (int2/3/4/5/6): per-element bit-stream filter
+/// code × per-group FP32 scale, accumulated over the `in_ch·k` receptive field.
+/// `g_off = oc*c_dim + col` is the global element index into the flat bit-stream.
+macro_rules! int_audio_conv1d_f32 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        #[allow(clippy::too_many_arguments)]
+        pub fn $name<T>(
+            input: Tensor<T>,
+            weight: Tensor<u32>,
+            scales: Tensor<f32>,
+            bias: Tensor<T>,
+            out: Tensor<T>,
+            #[constexpr] batch: u32,
+            #[constexpr] in_ch: u32,
+            #[constexpr] in_len: u32,
+            #[constexpr] out_ch: u32,
+            #[constexpr] out_len: u32,
+            #[constexpr] k: u32,
+            #[constexpr] stride: u32,
+            #[constexpr] pad: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let idx = program_id::<0>();
+            let op = idx % out_len;
+            let t1 = idx / out_len;
+            let oc = t1 % out_ch;
+            let n = t1 / out_ch;
+            let p0 = op * stride;
+            let in_n_stride = in_ch * in_len;
+            let c_dim = in_ch * k;
+            let n_blocks = c_dim / block_size;
+            let w_row_elem = oc * c_dim; // global element base of this output row
+            let w_row_blk = oc * n_blocks;
+            let mut acc = load(bias[oc]).cast::<f32>();
+            for ic in range(0u32, in_ch, 1u32) {
+                let in_ic_base = n * in_n_stride + ic * in_len;
+                let col_ic = ic * k;
+                for kx in range(0u32, k, 1u32) {
+                    let p = p0 + kx;
+                    let valid = (p >= pad) & (p < pad + in_len);
+                    let ix = select(valid, p - pad, 0u32);
+                    let x = load(input[in_ic_base + ix]).cast::<f32>();
+                    let x_m = select(valid, x, 0.0f32);
+                    let col = col_ic + kx;
+                    // Flat global bit-stream: element `oc*C + col` at bit `·$bits`.
+                    let bit_off = (w_row_elem + col) * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(weight[word_idx]);
+                    let w1 = load(weight[select(spill > 0u32, word_idx + 1u32, word_idx)]);
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+                    let qf = q.cast::<f32>();
+                    let elem = select(q >= $half, qf - $full, qf); // sign-extend
+                    let scale = load(scales[w_row_blk + col / block_size]);
+                    acc = acc + x_m * (elem * scale);
+                }
+            }
+            store(out[idx], acc.cast::<T>());
+        }
+    };
+}
+int_audio_conv1d_f32!(mt_int2_audio_conv1d, 2u32, 2u32, 4.0f32);
+int_audio_conv1d_f32!(mt_int3_audio_conv1d, 3u32, 4u32, 8.0f32);
+int_audio_conv1d_f32!(mt_int4_audio_conv1d, 4u32, 8u32, 16.0f32);
+int_audio_conv1d_f32!(mt_int5_audio_conv1d, 5u32, 16u32, 32.0f32);
+int_audio_conv1d_f32!(mt_int6_audio_conv1d, 6u32, 32u32, 64.0f32);
+
+/// E8M0-scaled symmetric int conv1d (MXINT2/3/4/5/6): per-element bit-stream
+/// filter code × pow-2 (E8M0) block scale `2^(bits-127)`, over the `in_ch·k`
+/// receptive field. Same flat-global-bit-stream decode as `int_audio_conv1d_f32`;
+/// only the scale axis differs (one u8 exponent per block instead of a raw f32).
+macro_rules! int_audio_conv1d_e8m0 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        #[allow(clippy::too_many_arguments)]
+        pub fn $name<T>(
+            input: Tensor<T>,
+            weight: Tensor<u32>,
+            scales: Tensor<u8>,
+            bias: Tensor<T>,
+            out: Tensor<T>,
+            #[constexpr] batch: u32,
+            #[constexpr] in_ch: u32,
+            #[constexpr] in_len: u32,
+            #[constexpr] out_ch: u32,
+            #[constexpr] out_len: u32,
+            #[constexpr] k: u32,
+            #[constexpr] stride: u32,
+            #[constexpr] pad: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let idx = program_id::<0>();
+            let op = idx % out_len;
+            let t1 = idx / out_len;
+            let oc = t1 % out_ch;
+            let n = t1 / out_ch;
+            let p0 = op * stride;
+            let in_n_stride = in_ch * in_len;
+            let c_dim = in_ch * k;
+            let n_blocks = c_dim / block_size;
+            let w_row_elem = oc * c_dim; // global element base of this output row
+            let w_row_blk = oc * n_blocks;
+            let mut acc = load(bias[oc]).cast::<f32>();
+            for ic in range(0u32, in_ch, 1u32) {
+                let in_ic_base = n * in_n_stride + ic * in_len;
+                let col_ic = ic * k;
+                for kx in range(0u32, k, 1u32) {
+                    let p = p0 + kx;
+                    let valid = (p >= pad) & (p < pad + in_len);
+                    let ix = select(valid, p - pad, 0u32);
+                    let x = load(input[in_ic_base + ix]).cast::<f32>();
+                    let x_m = select(valid, x, 0.0f32);
+                    let col = col_ic + kx;
+                    // Flat global bit-stream: element `oc*C + col` at bit `·$bits`.
+                    let bit_off = (w_row_elem + col) * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(weight[word_idx]);
+                    let w1 = load(weight[select(spill > 0u32, word_idx + 1u32, word_idx)]);
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+                    let qf = q.cast::<f32>();
+                    let elem = select(q >= $half, qf - $full, qf); // sign-extend
+                    let sbits = load(scales[w_row_blk + col / block_size]).cast::<f32>();
+                    let scale = exp2(sbits - 127.0f32); // E8M0: 2^(bits-127)
+                    acc = acc + x_m * (elem * scale);
+                }
+            }
+            store(out[idx], acc.cast::<T>());
+        }
+    };
+}
+int_audio_conv1d_e8m0!(mt_mxint2_audio_conv1d, 2u32, 2u32, 4.0f32);
+int_audio_conv1d_e8m0!(mt_mxint3_audio_conv1d, 3u32, 4u32, 8.0f32);
+int_audio_conv1d_e8m0!(mt_mxint4_audio_conv1d, 4u32, 8u32, 16.0f32);
+int_audio_conv1d_e8m0!(mt_mxint5_audio_conv1d, 5u32, 16u32, 32.0f32);
+int_audio_conv1d_e8m0!(mt_mxint6_audio_conv1d, 6u32, 32u32, 64.0f32);
+
+/// MXINT8 quantized-weight conv1d — 8-bit symmetric codes (byte layout, block
+/// 32), E8M0 pow-2 block scale `2^(bits-127)`. Byte-addressed like the int8 /
+/// mxfp8 kernels (one code per byte), decode is `int8_decode → elem · scale`.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_mxint8_audio_conv1d<T>(
+    input: Tensor<T>,
+    weight: Tensor<u8>,
+    scales: Tensor<u8>,
+    bias: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] batch: u32,
+    #[constexpr] in_ch: u32,
+    #[constexpr] in_len: u32,
+    #[constexpr] out_ch: u32,
+    #[constexpr] out_len: u32,
+    #[constexpr] k: u32,
+    #[constexpr] stride: u32,
+    #[constexpr] pad: u32,
+    #[constexpr] block_size: u32,
+) {
+    let idx = program_id::<0>();
+    let op = idx % out_len;
+    let t1 = idx / out_len;
+    let oc = t1 % out_ch;
+    let n = t1 / out_ch;
+    let p0 = op * stride;
+    let in_n_stride = in_ch * in_len;
+    let c_dim = in_ch * k;
+    let n_blocks = c_dim / block_size;
+    let w_row = oc * c_dim;
+    let w_row_blk = oc * n_blocks;
+    let mut acc = load(bias[oc]).cast::<f32>();
+    for ic in range(0u32, in_ch, 1u32) {
+        let in_ic_base = n * in_n_stride + ic * in_len;
+        let col_ic = ic * k;
+        for kx in range(0u32, k, 1u32) {
+            let p = p0 + kx;
+            let valid = (p >= pad) & (p < pad + in_len);
+            let ix = select(valid, p - pad, 0u32);
+            let x = load(input[in_ic_base + ix]).cast::<f32>();
+            let x_m = select(valid, x, 0.0f32);
+            let col = col_ic + kx;
+            let elem = int8_decode(load(weight[w_row + col]).cast::<u32>());
+            let scale = exp2(load(scales[w_row_blk + col / block_size]).cast::<f32>() - 127.0f32);
+            let wt = elem * scale;
+            acc = acc + x_m * wt;
+        }
+    }
+    store(out[idx], acc.cast::<T>());
+}
+
 pub mod kernel_tests {
     use metaltile::{core::ir::Kernel, test::*, test_kernel};
 
@@ -518,11 +732,12 @@ pub mod kernel_tests {
         let bias = unpack_f32(&pack_f32(&bias_f, dt), dt);
         let expected =
             naive_conv1d(&input, &wdq, &bias, batch, in_ch, in_len, out_ch, k, stride, pad);
-        let weight_dt = if fmt.element_bits() == 4 { DType::U32 } else { DType::U8 };
-        let scales_dt = if matches!(
-            fmt,
-            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
-        ) {
+        // 8-bit codes bind as one uchar each; every sub-byte width (4-bit nibble
+        // packs + int2/3/5/6 tight bit-streams) binds as packed u32 words. FP32
+        // scales bind as f32; E8M0/E4M3 scales as one byte. Both axes are driven
+        // off the format so new integer formats pick up the right buffer types.
+        let weight_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
+        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
             DType::F32
         } else {
             DType::U8
@@ -675,6 +890,179 @@ pub mod kernel_tests {
             dt,
         )
     }
+
+    // Symmetric sub-byte ints (FP32 group scale, group 64) + MXINT (E8M0 block
+    // scale, block 32) + MXINT8 (8-bit, E8M0). The flattened contraction
+    // C = in_ch*k = 64 satisfies `C*bits % 32 == 0` for every width AND is a
+    // multiple of every block/group size, so the per-output-channel bit-stream
+    // is word-aligned within the flat global stream. Kernel + oracle share the
+    // codec, so the GPU output tracks the dequant-then-conv reference to float
+    // precision regardless of how coarse the quantization is.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int2_audio_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_int2_audio_conv1d::kernel_ir_for(dt),
+            QFormat::Int2,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int3_audio_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_int3_audio_conv1d::kernel_ir_for(dt),
+            QFormat::Int3,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int4_audio_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_int4_audio_conv1d::kernel_ir_for(dt),
+            QFormat::Int4,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int5_audio_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_int5_audio_conv1d::kernel_ir_for(dt),
+            QFormat::Int5,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int6_audio_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_int6_audio_conv1d::kernel_ir_for(dt),
+            QFormat::Int6,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint2_audio_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_mxint2_audio_conv1d::kernel_ir_for(dt),
+            QFormat::Mxint2,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint3_audio_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_mxint3_audio_conv1d::kernel_ir_for(dt),
+            QFormat::Mxint3,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint4_audio_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_mxint4_audio_conv1d::kernel_ir_for(dt),
+            QFormat::Mxint4,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint5_audio_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_mxint5_audio_conv1d::kernel_ir_for(dt),
+            QFormat::Mxint5,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint6_audio_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_mxint6_audio_conv1d::kernel_ir_for(dt),
+            QFormat::Mxint6,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            1,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint8_audio_conv1d(dt: DType) -> TestSetup {
+        conv1d_setup(
+            mt_mxint8_audio_conv1d::kernel_ir_for(dt),
+            QFormat::Mxint8,
+            1,
+            8,
+            32,
+            8,
+            8,
+            1,
+            1,
+            dt,
+        )
+    }
 }
 
 /// Decode-shape benches: realistic STT stem conv (in_ch=128, out_ch=128, k=8 →
@@ -702,15 +1090,15 @@ pub mod kernel_benches {
         let out_len = (in_len + 2 * pad - k) / stride + 1;
         let n_out = batch * out_ch * out_len;
         let c_dim = in_ch * k;
-        let (codes_len, codes_dt) = if fmt.element_bits() == 4 {
-            (out_ch * c_dim / 8, DType::U32)
-        } else {
+        // 8-bit codes are one uchar each; every sub-byte width (4-bit nibble
+        // packs + int2/3/5/6 tight bit-streams) tight-bit-packs into u32 words
+        // (with a guard word for straddling 3/5/6-bit reads).
+        let (codes_len, codes_dt) = if fmt.element_bits() == 8 {
             (out_ch * c_dim, DType::U8)
+        } else {
+            (crate::quant::format::bitstream_words(out_ch * c_dim, fmt.element_bits()), DType::U32)
         };
-        let scales_dt = if matches!(
-            fmt,
-            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
-        ) {
+        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
             DType::F32
         } else {
             DType::U8
@@ -802,5 +1190,72 @@ pub mod kernel_benches {
         mt_int8_audio_conv1d::kernel_ir_for,
         QFormat::Int8,
         "ffai/audio_conv1d_block/int8"
+    );
+    // Symmetric sub-byte ints (FP32 group scale) + MXINT (E8M0 block scale).
+    conv1d_bench_fmt!(
+        bench_int2,
+        mt_int2_audio_conv1d::kernel_ir_for,
+        QFormat::Int2,
+        "ffai/audio_conv1d_block/int2"
+    );
+    conv1d_bench_fmt!(
+        bench_int3,
+        mt_int3_audio_conv1d::kernel_ir_for,
+        QFormat::Int3,
+        "ffai/audio_conv1d_block/int3"
+    );
+    conv1d_bench_fmt!(
+        bench_int4,
+        mt_int4_audio_conv1d::kernel_ir_for,
+        QFormat::Int4,
+        "ffai/audio_conv1d_block/int4"
+    );
+    conv1d_bench_fmt!(
+        bench_int5,
+        mt_int5_audio_conv1d::kernel_ir_for,
+        QFormat::Int5,
+        "ffai/audio_conv1d_block/int5"
+    );
+    conv1d_bench_fmt!(
+        bench_int6,
+        mt_int6_audio_conv1d::kernel_ir_for,
+        QFormat::Int6,
+        "ffai/audio_conv1d_block/int6"
+    );
+    conv1d_bench_fmt!(
+        bench_mxint2,
+        mt_mxint2_audio_conv1d::kernel_ir_for,
+        QFormat::Mxint2,
+        "ffai/audio_conv1d_block/mxint2"
+    );
+    conv1d_bench_fmt!(
+        bench_mxint3,
+        mt_mxint3_audio_conv1d::kernel_ir_for,
+        QFormat::Mxint3,
+        "ffai/audio_conv1d_block/mxint3"
+    );
+    conv1d_bench_fmt!(
+        bench_mxint4,
+        mt_mxint4_audio_conv1d::kernel_ir_for,
+        QFormat::Mxint4,
+        "ffai/audio_conv1d_block/mxint4"
+    );
+    conv1d_bench_fmt!(
+        bench_mxint5,
+        mt_mxint5_audio_conv1d::kernel_ir_for,
+        QFormat::Mxint5,
+        "ffai/audio_conv1d_block/mxint5"
+    );
+    conv1d_bench_fmt!(
+        bench_mxint6,
+        mt_mxint6_audio_conv1d::kernel_ir_for,
+        QFormat::Mxint6,
+        "ffai/audio_conv1d_block/mxint6"
+    );
+    conv1d_bench_fmt!(
+        bench_mxint8,
+        mt_mxint8_audio_conv1d::kernel_ir_for,
+        QFormat::Mxint8,
+        "ffai/audio_conv1d_block/mxint8"
     );
 }
