@@ -1264,6 +1264,564 @@ mxint8_flash!(mt_mxint8_flash_sdpa_d128, 4u32);
 mxint8_flash!(mt_mxint8_flash_sdpa_d256, 8u32);
 mxint8_flash!(mt_mxint8_flash_sdpa_d512, 16u32);
 
+// ── FP16-scale twins (nvfp8 / fp4 / fp8_e5m2 / int2..6 / int8) ──────────────
+// These are byte-for-byte clones of the FP32-scaled kernels above, with ONE
+// change: the per-block scale tensor is `Tensor<f16>` (half the scale bytes)
+// and each scale read becomes `load(scales[...]).cast::<f32>()`. The element
+// decode (E4M3 / E2M1 / E5M2 / int bit-stream + sign-extend), weight indexing,
+// online-softmax, sinks/window, and dispatch geometry are IDENTICAL to the
+// FP32 twin — only the scale precision differs. `fp8_e4m3_f16` reuses the
+// `nvfp8_f16` kernel (same 8-bit-E4M3 + FP16-scale shape), exactly as
+// `fp8_e4m3` reuses `nvfp8` today.
+
+/// nvfp8 flash SDPA, FP16 scale — E4M3 K/V (block 16), per-block FP16 scale.
+/// Clone of `nvfp8_flash` with the scale tensor narrowed to f16 (also serves
+/// `Fp8E4m3F16`: same 8-bit-E4M3 + FP16-scale shape).
+macro_rules! nvfp8_f16_flash {
+    ($name:ident, $dpl:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            queries: Tensor<T>,
+            k_packed: Tensor<u8>,
+            k_scales: Tensor<f16>,
+            v_packed: Tensor<u8>,
+            v_scales: Tensor<f16>,
+            sinks: Tensor<f32>,
+            out: Tensor<T>,
+            #[constexpr] dim: u32,
+            #[constexpr] tokens: u32,
+            #[constexpr] repeat_count: u32,
+            #[constexpr] block_size: u32,
+            #[constexpr] num_q_heads: u32,
+            #[constexpr] has_sinks: u32,
+            #[constexpr] window_size: u32,
+            #[constexpr] scale: f32,
+        ) {
+            let lane = program_id::<0>();
+            let q_idx = program_id::<1>();
+            let kv_idx = q_idx / repeat_count;
+            let n_blocks = dim / block_size;
+
+            stack_alloc("q_vals", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
+                let d = lane + i * 32u32;
+                let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+                stack_store("q_vals", i, v * scale);
+            }
+
+            let sink_val = load(sinks[q_idx % num_q_heads]);
+            let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
+            let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
+            stack_alloc("o", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
+                stack_store("o", i, 0.0f32);
+            }
+
+            let causal_upper = tokens - 1u32;
+            for t in range(0u32, tokens, 1u32) {
+                let use_key =
+                    select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+                if use_key {
+                    let k_row = (kv_idx * tokens + t) * dim;
+                    let k_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    let mut dot_partial = 0.0f32;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let kelem = e4m3_decode(load(k_packed[k_row + d]).cast::<u32>());
+                            let ksc = load(k_scales[k_blk_row + d / block_size]).cast::<f32>();
+                            dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
+                        }
+                    }
+                    let score = simd_sum(dot_partial);
+                    let new_m = select(m_acc > score, m_acc, score);
+                    let exp_diff = exp(m_acc - new_m);
+                    let exp_score = exp(score - new_m);
+                    let v_row = (kv_idx * tokens + t) * dim;
+                    let v_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let velem = e4m3_decode(load(v_packed[v_row + d]).cast::<u32>());
+                            let vsc = load(v_scales[v_blk_row + d / block_size]).cast::<f32>();
+                            let prev = stack_load("o", i);
+                            stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
+                        }
+                    }
+                    l_acc = l_acc * exp_diff + exp_score;
+                    m_acc = new_m;
+                }
+            }
+
+            for i in range(0u32, $dpl, 1u32) {
+                let d = lane + i * 32u32;
+                if d < dim {
+                    let oi = stack_load("o", i);
+                    let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
+                    store(out[q_idx * dim + d], normed.cast::<T>());
+                }
+            }
+        }
+    };
+}
+nvfp8_f16_flash!(mt_nvfp8_f16_flash_sdpa_d64, 2u32);
+nvfp8_f16_flash!(mt_nvfp8_f16_flash_sdpa_d96, 3u32);
+nvfp8_f16_flash!(mt_nvfp8_f16_flash_sdpa_d128, 4u32);
+nvfp8_f16_flash!(mt_nvfp8_f16_flash_sdpa_d256, 8u32);
+nvfp8_f16_flash!(mt_nvfp8_f16_flash_sdpa_d512, 16u32);
+
+/// fp4 flash SDPA, FP16 scale — E2M1 K/V (group 32), per-group FP16 scale.
+/// Clone of `fp4_flash` with the scale tensor narrowed to f16.
+macro_rules! fp4_f16_flash {
+    ($name:ident, $dpl:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            queries: Tensor<T>,
+            k_packed: Tensor<u32>,
+            k_scales: Tensor<f16>,
+            v_packed: Tensor<u32>,
+            v_scales: Tensor<f16>,
+            sinks: Tensor<f32>,
+            out: Tensor<T>,
+            #[constexpr] dim: u32,
+            #[constexpr] tokens: u32,
+            #[constexpr] repeat_count: u32,
+            #[constexpr] block_size: u32,
+            #[constexpr] num_q_heads: u32,
+            #[constexpr] has_sinks: u32,
+            #[constexpr] window_size: u32,
+            #[constexpr] scale: f32,
+        ) {
+            let lane = program_id::<0>();
+            let q_idx = program_id::<1>();
+            let kv_idx = q_idx / repeat_count;
+            let n_blocks = dim / block_size;
+            let words_per_token = dim / 8u32;
+
+            stack_alloc("q_vals", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
+                let d = lane + i * 32u32;
+                let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+                stack_store("q_vals", i, v * scale);
+            }
+
+            let sink_val = load(sinks[q_idx % num_q_heads]);
+            let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
+            let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
+            stack_alloc("o", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
+                stack_store("o", i, 0.0f32);
+            }
+
+            let causal_upper = tokens - 1u32;
+            for t in range(0u32, tokens, 1u32) {
+                let use_key =
+                    select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+                if use_key {
+                    let k_word_row = (kv_idx * tokens + t) * words_per_token;
+                    let k_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    let mut dot_partial = 0.0f32;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let nib = (load(k_packed[k_word_row + d / 8u32])
+                                >> ((d % 8u32) * 4u32))
+                                & 0xFu32;
+                            let ksc = load(k_scales[k_blk_row + d / block_size]).cast::<f32>();
+                            dot_partial =
+                                dot_partial + stack_load("q_vals", i) * (e2m1_decode(nib) * ksc);
+                        }
+                    }
+                    let score = simd_sum(dot_partial);
+                    let new_m = select(m_acc > score, m_acc, score);
+                    let exp_diff = exp(m_acc - new_m);
+                    let exp_score = exp(score - new_m);
+                    let v_word_row = (kv_idx * tokens + t) * words_per_token;
+                    let v_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let nib = (load(v_packed[v_word_row + d / 8u32])
+                                >> ((d % 8u32) * 4u32))
+                                & 0xFu32;
+                            let vsc = load(v_scales[v_blk_row + d / block_size]).cast::<f32>();
+                            let prev = stack_load("o", i);
+                            stack_store(
+                                "o",
+                                i,
+                                prev * exp_diff + exp_score * (e2m1_decode(nib) * vsc),
+                            );
+                        }
+                    }
+                    l_acc = l_acc * exp_diff + exp_score;
+                    m_acc = new_m;
+                }
+            }
+
+            for i in range(0u32, $dpl, 1u32) {
+                let d = lane + i * 32u32;
+                if d < dim {
+                    let oi = stack_load("o", i);
+                    let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
+                    store(out[q_idx * dim + d], normed.cast::<T>());
+                }
+            }
+        }
+    };
+}
+fp4_f16_flash!(mt_fp4_f16_flash_sdpa_d64, 2u32);
+fp4_f16_flash!(mt_fp4_f16_flash_sdpa_d96, 3u32);
+fp4_f16_flash!(mt_fp4_f16_flash_sdpa_d128, 4u32);
+fp4_f16_flash!(mt_fp4_f16_flash_sdpa_d256, 8u32);
+fp4_f16_flash!(mt_fp4_f16_flash_sdpa_d512, 16u32);
+
+/// fp8 (E5M2) flash SDPA, FP16 scale — 8-bit K/V (group 32), per-group FP16
+/// scale. Clone of `fp8_e5m2_flash` with the scale tensor narrowed to f16.
+macro_rules! fp8_e5m2_f16_flash {
+    ($name:ident, $dpl:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            queries: Tensor<T>,
+            k_packed: Tensor<u8>,
+            k_scales: Tensor<f16>,
+            v_packed: Tensor<u8>,
+            v_scales: Tensor<f16>,
+            sinks: Tensor<f32>,
+            out: Tensor<T>,
+            #[constexpr] dim: u32,
+            #[constexpr] tokens: u32,
+            #[constexpr] repeat_count: u32,
+            #[constexpr] block_size: u32,
+            #[constexpr] num_q_heads: u32,
+            #[constexpr] has_sinks: u32,
+            #[constexpr] window_size: u32,
+            #[constexpr] scale: f32,
+        ) {
+            let lane = program_id::<0>();
+            let q_idx = program_id::<1>();
+            let kv_idx = q_idx / repeat_count;
+            let n_blocks = dim / block_size;
+
+            stack_alloc("q_vals", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
+                let d = lane + i * 32u32;
+                let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+                stack_store("q_vals", i, v * scale);
+            }
+
+            let sink_val = load(sinks[q_idx % num_q_heads]);
+            let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
+            let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
+            stack_alloc("o", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
+                stack_store("o", i, 0.0f32);
+            }
+
+            let causal_upper = tokens - 1u32;
+            for t in range(0u32, tokens, 1u32) {
+                let use_key =
+                    select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+                if use_key {
+                    let k_row = (kv_idx * tokens + t) * dim;
+                    let k_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    let mut dot_partial = 0.0f32;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let kelem = e5m2_decode(load(k_packed[k_row + d]).cast::<u32>());
+                            let ksc = load(k_scales[k_blk_row + d / block_size]).cast::<f32>();
+                            dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
+                        }
+                    }
+                    let score = simd_sum(dot_partial);
+                    let new_m = select(m_acc > score, m_acc, score);
+                    let exp_diff = exp(m_acc - new_m);
+                    let exp_score = exp(score - new_m);
+                    let v_row = (kv_idx * tokens + t) * dim;
+                    let v_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let velem = e5m2_decode(load(v_packed[v_row + d]).cast::<u32>());
+                            let vsc = load(v_scales[v_blk_row + d / block_size]).cast::<f32>();
+                            let prev = stack_load("o", i);
+                            stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
+                        }
+                    }
+                    l_acc = l_acc * exp_diff + exp_score;
+                    m_acc = new_m;
+                }
+            }
+
+            for i in range(0u32, $dpl, 1u32) {
+                let d = lane + i * 32u32;
+                if d < dim {
+                    let oi = stack_load("o", i);
+                    let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
+                    store(out[q_idx * dim + d], normed.cast::<T>());
+                }
+            }
+        }
+    };
+}
+fp8_e5m2_f16_flash!(mt_fp8_e5m2_f16_flash_sdpa_d64, 2u32);
+fp8_e5m2_f16_flash!(mt_fp8_e5m2_f16_flash_sdpa_d96, 3u32);
+fp8_e5m2_f16_flash!(mt_fp8_e5m2_f16_flash_sdpa_d128, 4u32);
+fp8_e5m2_f16_flash!(mt_fp8_e5m2_f16_flash_sdpa_d256, 8u32);
+fp8_e5m2_f16_flash!(mt_fp8_e5m2_f16_flash_sdpa_d512, 16u32);
+
+/// FP16-scaled symmetric int flash SDPA (int2/3/4/5/6): bit-stream K/V codes
+/// (group 64) × per-group FP16 scale. Clone of `int_flash_f32` with the scale
+/// tensor narrowed to f16 (`load(...).cast::<f32>()`); the straddle-aware
+/// two-word decode + sign-extend is identical to the FP32 twin.
+macro_rules! int_flash_f16 {
+    ($name:ident, $dpl:literal, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            queries: Tensor<T>,
+            k_packed: Tensor<u32>,
+            k_scales: Tensor<f16>,
+            v_packed: Tensor<u32>,
+            v_scales: Tensor<f16>,
+            sinks: Tensor<f32>,
+            out: Tensor<T>,
+            #[constexpr] dim: u32,
+            #[constexpr] tokens: u32,
+            #[constexpr] repeat_count: u32,
+            #[constexpr] block_size: u32,
+            #[constexpr] num_q_heads: u32,
+            #[constexpr] has_sinks: u32,
+            #[constexpr] window_size: u32,
+            #[constexpr] scale: f32,
+        ) {
+            let lane = program_id::<0>();
+            let q_idx = program_id::<1>();
+            let kv_idx = q_idx / repeat_count;
+            // Round up so a head dim that isn't a multiple of the group (int
+            // group 64 over d96 → a 64-block + a 32-block) counts the ragged
+            // tail block; matches the host packer's `div_ceil`.
+            let n_blocks = (dim + block_size - 1u32) / block_size;
+            // Tight bit-stream words per token row (dim is a multiple of 32, so
+            // `dim·BITS` is an exact word count — each token row word-aligned).
+            let words_per_token = dim * $bits / 32u32;
+
+            stack_alloc("q_vals", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
+                let d = lane + i * 32u32;
+                let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+                stack_store("q_vals", i, v * scale);
+            }
+
+            let sink_val = load(sinks[q_idx % num_q_heads]);
+            let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
+            let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
+            stack_alloc("o", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
+                stack_store("o", i, 0.0f32);
+            }
+
+            let causal_upper = tokens - 1u32;
+            for t in range(0u32, tokens, 1u32) {
+                let use_key =
+                    select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+                if use_key {
+                    let k_word_row = (kv_idx * tokens + t) * words_per_token;
+                    let k_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    let mut dot_partial = 0.0f32;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            // Straddle-aware two-word read of element `d`'s code.
+                            let bit_off = d * $bits;
+                            let word_idx = bit_off / 32u32;
+                            let bit_in_w = bit_off & 31u32;
+                            let bits_in_w0 = 32u32 - bit_in_w;
+                            let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                            let spill = $bits - lo_bits;
+                            let w0 = load(k_packed[k_word_row + word_idx]);
+                            let w1 = load(
+                                k_packed
+                                    [k_word_row + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                            );
+                            let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                            let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                            let q = lo | hi;
+                            let qf = q.cast::<f32>();
+                            let kelem = select(q >= $half, qf - $full, qf); // sign-extend
+                            let ksc = load(k_scales[k_blk_row + d / block_size]).cast::<f32>();
+                            dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
+                        }
+                    }
+                    let score = simd_sum(dot_partial);
+                    let new_m = select(m_acc > score, m_acc, score);
+                    let exp_diff = exp(m_acc - new_m);
+                    let exp_score = exp(score - new_m);
+                    let v_word_row = (kv_idx * tokens + t) * words_per_token;
+                    let v_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let bit_off = d * $bits;
+                            let word_idx = bit_off / 32u32;
+                            let bit_in_w = bit_off & 31u32;
+                            let bits_in_w0 = 32u32 - bit_in_w;
+                            let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                            let spill = $bits - lo_bits;
+                            let w0 = load(v_packed[v_word_row + word_idx]);
+                            let w1 = load(
+                                v_packed
+                                    [v_word_row + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                            );
+                            let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                            let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                            let q = lo | hi;
+                            let qf = q.cast::<f32>();
+                            let velem = select(q >= $half, qf - $full, qf); // sign-extend
+                            let vsc = load(v_scales[v_blk_row + d / block_size]).cast::<f32>();
+                            let prev = stack_load("o", i);
+                            stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
+                        }
+                    }
+                    l_acc = l_acc * exp_diff + exp_score;
+                    m_acc = new_m;
+                }
+            }
+
+            for i in range(0u32, $dpl, 1u32) {
+                let d = lane + i * 32u32;
+                if d < dim {
+                    let oi = stack_load("o", i);
+                    let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
+                    store(out[q_idx * dim + d], normed.cast::<T>());
+                }
+            }
+        }
+    };
+}
+int_flash_f16!(mt_int2_f16_flash_sdpa_d64, 2u32, 2u32, 2u32, 4.0f32);
+int_flash_f16!(mt_int2_f16_flash_sdpa_d96, 3u32, 2u32, 2u32, 4.0f32);
+int_flash_f16!(mt_int2_f16_flash_sdpa_d128, 4u32, 2u32, 2u32, 4.0f32);
+int_flash_f16!(mt_int2_f16_flash_sdpa_d256, 8u32, 2u32, 2u32, 4.0f32);
+int_flash_f16!(mt_int2_f16_flash_sdpa_d512, 16u32, 2u32, 2u32, 4.0f32);
+int_flash_f16!(mt_int3_f16_flash_sdpa_d64, 2u32, 3u32, 4u32, 8.0f32);
+int_flash_f16!(mt_int3_f16_flash_sdpa_d96, 3u32, 3u32, 4u32, 8.0f32);
+int_flash_f16!(mt_int3_f16_flash_sdpa_d128, 4u32, 3u32, 4u32, 8.0f32);
+int_flash_f16!(mt_int3_f16_flash_sdpa_d256, 8u32, 3u32, 4u32, 8.0f32);
+int_flash_f16!(mt_int3_f16_flash_sdpa_d512, 16u32, 3u32, 4u32, 8.0f32);
+int_flash_f16!(mt_int4_f16_flash_sdpa_d64, 2u32, 4u32, 8u32, 16.0f32);
+int_flash_f16!(mt_int4_f16_flash_sdpa_d96, 3u32, 4u32, 8u32, 16.0f32);
+int_flash_f16!(mt_int4_f16_flash_sdpa_d128, 4u32, 4u32, 8u32, 16.0f32);
+int_flash_f16!(mt_int4_f16_flash_sdpa_d256, 8u32, 4u32, 8u32, 16.0f32);
+int_flash_f16!(mt_int4_f16_flash_sdpa_d512, 16u32, 4u32, 8u32, 16.0f32);
+int_flash_f16!(mt_int5_f16_flash_sdpa_d64, 2u32, 5u32, 16u32, 32.0f32);
+int_flash_f16!(mt_int5_f16_flash_sdpa_d96, 3u32, 5u32, 16u32, 32.0f32);
+int_flash_f16!(mt_int5_f16_flash_sdpa_d128, 4u32, 5u32, 16u32, 32.0f32);
+int_flash_f16!(mt_int5_f16_flash_sdpa_d256, 8u32, 5u32, 16u32, 32.0f32);
+int_flash_f16!(mt_int5_f16_flash_sdpa_d512, 16u32, 5u32, 16u32, 32.0f32);
+int_flash_f16!(mt_int6_f16_flash_sdpa_d64, 2u32, 6u32, 32u32, 64.0f32);
+int_flash_f16!(mt_int6_f16_flash_sdpa_d96, 3u32, 6u32, 32u32, 64.0f32);
+int_flash_f16!(mt_int6_f16_flash_sdpa_d128, 4u32, 6u32, 32u32, 64.0f32);
+int_flash_f16!(mt_int6_f16_flash_sdpa_d256, 8u32, 6u32, 32u32, 64.0f32);
+int_flash_f16!(mt_int6_f16_flash_sdpa_d512, 16u32, 6u32, 32u32, 64.0f32);
+
+/// int8 flash SDPA, FP16 scale — 8-bit codes (group 64), per-group FP16 scale.
+/// Clone of `int8_flash` with the scale tensor narrowed to f16; decode is the
+/// same byte-layout sign-extend → `code · scale`.
+macro_rules! int8_f16_flash {
+    ($name:ident, $dpl:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            queries: Tensor<T>,
+            k_packed: Tensor<u8>,
+            k_scales: Tensor<f16>,
+            v_packed: Tensor<u8>,
+            v_scales: Tensor<f16>,
+            sinks: Tensor<f32>,
+            out: Tensor<T>,
+            #[constexpr] dim: u32,
+            #[constexpr] tokens: u32,
+            #[constexpr] repeat_count: u32,
+            #[constexpr] block_size: u32,
+            #[constexpr] num_q_heads: u32,
+            #[constexpr] has_sinks: u32,
+            #[constexpr] window_size: u32,
+            #[constexpr] scale: f32,
+        ) {
+            let lane = program_id::<0>();
+            let q_idx = program_id::<1>();
+            let kv_idx = q_idx / repeat_count;
+            // Round up so a head dim that isn't a multiple of the group (int8 group
+            // 64 over d96 → a 64-block + a 32-block) counts the ragged tail block.
+            let n_blocks = (dim + block_size - 1u32) / block_size;
+
+            stack_alloc("q_vals", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
+                let d = lane + i * 32u32;
+                let v = select(d < dim, load(queries[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+                stack_store("q_vals", i, v * scale);
+            }
+
+            let sink_val = load(sinks[q_idx % num_q_heads]);
+            let mut m_acc = select(has_sinks > 0u32, sink_val, neg_infinity());
+            let mut l_acc = select(has_sinks > 0u32, 1.0f32, 0.0f32);
+            stack_alloc("o", $dpl, "f32");
+            for i in range(0u32, $dpl, 1u32) {
+                stack_store("o", i, 0.0f32);
+            }
+
+            let causal_upper = tokens - 1u32;
+            for t in range(0u32, tokens, 1u32) {
+                let use_key =
+                    select(window_size == 0u32, t < tokens, t + window_size > causal_upper);
+                if use_key {
+                    let k_row = (kv_idx * tokens + t) * dim;
+                    let k_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    let mut dot_partial = 0.0f32;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let kelem = int8_decode(load(k_packed[k_row + d]).cast::<u32>());
+                            let ksc = load(k_scales[k_blk_row + d / block_size]).cast::<f32>();
+                            dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
+                        }
+                    }
+                    let score = simd_sum(dot_partial);
+                    let new_m = select(m_acc > score, m_acc, score);
+                    let exp_diff = exp(m_acc - new_m);
+                    let exp_score = exp(score - new_m);
+                    let v_row = (kv_idx * tokens + t) * dim;
+                    let v_blk_row = (kv_idx * tokens + t) * n_blocks;
+                    for i in range(0u32, $dpl, 1u32) {
+                        let d = lane + i * 32u32;
+                        if d < dim {
+                            let velem = int8_decode(load(v_packed[v_row + d]).cast::<u32>());
+                            let vsc = load(v_scales[v_blk_row + d / block_size]).cast::<f32>();
+                            let prev = stack_load("o", i);
+                            stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
+                        }
+                    }
+                    l_acc = l_acc * exp_diff + exp_score;
+                    m_acc = new_m;
+                }
+            }
+
+            for i in range(0u32, $dpl, 1u32) {
+                let d = lane + i * 32u32;
+                if d < dim {
+                    let oi = stack_load("o", i);
+                    let normed = select(l_acc > 0.0f32, oi / l_acc, oi);
+                    store(out[q_idx * dim + d], normed.cast::<T>());
+                }
+            }
+        }
+    };
+}
+int8_f16_flash!(mt_int8_f16_flash_sdpa_d64, 2u32);
+int8_f16_flash!(mt_int8_f16_flash_sdpa_d96, 3u32);
+int8_f16_flash!(mt_int8_f16_flash_sdpa_d128, 4u32);
+int8_f16_flash!(mt_int8_f16_flash_sdpa_d256, 8u32);
+int8_f16_flash!(mt_int8_f16_flash_sdpa_d512, 16u32);
+
 pub mod kernel_tests {
     use metaltile::{core::ir::Kernel, test::*, test_kernel};
 
@@ -1384,10 +1942,10 @@ pub mod kernel_tests {
         // scales bind as f32; E8M0/E4M3 scales as one byte. Both axes are driven
         // off the format so new integer formats pick up the right buffer types.
         let weight_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
         let mut s = TestSetup::new(kernel)
             .mode(KernelMode::Grid3D)
@@ -1576,6 +2134,121 @@ pub mod kernel_tests {
         )
     }
 
+    // FP16-scale twins (nvfp8_f16 / fp4_f16 / fp8_e5m2_f16 / int2..6_f16 /
+    // int8_f16). `fp8_e4m3_f16` reuses the `nvfp8_f16` kernel (same 8-bit-E4M3 +
+    // FP16-scale shape). Same codec is shared by kernel + oracle, so the GPU
+    // output matches the host `dequant` regardless of scale precision.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_nvfp8_f16_flash_sdpa_d128(dt: DType) -> TestSetup {
+        flash_setup(
+            mt_nvfp8_f16_flash_sdpa_d128::kernel_ir_for(dt),
+            QFormat::Nvfp8F16,
+            128,
+            false,
+            0,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp4_f16_flash_sdpa_d128(dt: DType) -> TestSetup {
+        flash_setup(
+            mt_fp4_f16_flash_sdpa_d128::kernel_ir_for(dt),
+            QFormat::Fp4F16,
+            128,
+            false,
+            0,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e4m3_f16_flash_sdpa_d128(dt: DType) -> TestSetup {
+        flash_setup(
+            mt_nvfp8_f16_flash_sdpa_d128::kernel_ir_for(dt),
+            QFormat::Fp8E4m3F16,
+            128,
+            false,
+            0,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e5m2_f16_flash_sdpa_d128(dt: DType) -> TestSetup {
+        flash_setup(
+            mt_fp8_e5m2_f16_flash_sdpa_d128::kernel_ir_for(dt),
+            QFormat::Fp8E5m2F16,
+            128,
+            false,
+            0,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int2_f16_flash_sdpa_d128(dt: DType) -> TestSetup {
+        flash_setup(
+            mt_int2_f16_flash_sdpa_d128::kernel_ir_for(dt),
+            QFormat::Int2F16,
+            128,
+            false,
+            0,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int3_f16_flash_sdpa_d128(dt: DType) -> TestSetup {
+        flash_setup(
+            mt_int3_f16_flash_sdpa_d128::kernel_ir_for(dt),
+            QFormat::Int3F16,
+            128,
+            false,
+            0,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int4_f16_flash_sdpa_d128(dt: DType) -> TestSetup {
+        flash_setup(
+            mt_int4_f16_flash_sdpa_d128::kernel_ir_for(dt),
+            QFormat::Int4F16,
+            128,
+            false,
+            0,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int5_f16_flash_sdpa_d128(dt: DType) -> TestSetup {
+        flash_setup(
+            mt_int5_f16_flash_sdpa_d128::kernel_ir_for(dt),
+            QFormat::Int5F16,
+            128,
+            false,
+            0,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int6_f16_flash_sdpa_d128(dt: DType) -> TestSetup {
+        flash_setup(
+            mt_int6_f16_flash_sdpa_d128::kernel_ir_for(dt),
+            QFormat::Int6F16,
+            128,
+            false,
+            0,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int8_f16_flash_sdpa_d128(dt: DType) -> TestSetup {
+        flash_setup(
+            mt_int8_f16_flash_sdpa_d128::kernel_ir_for(dt),
+            QFormat::Int8F16,
+            128,
+            false,
+            0,
+            dt,
+        )
+    }
+
     // Sink + sliding-window paths exercised on the mxfp4 representative.
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [2e-3, 3e-2, 1.5e-1])]
     fn test_mxfp4_flash_sdpa_d128_sinks(dt: DType) -> TestSetup {
@@ -1734,6 +2407,262 @@ pub mod kernel_tests {
     flash_dim_test!(test_mxint5_flash_sdpa_d512, mt_mxint5_flash_sdpa_d512, QFormat::Mxint5, 512);
     flash_dim_test!(test_mxint6_flash_sdpa_d512, mt_mxint6_flash_sdpa_d512, QFormat::Mxint6, 512);
     flash_dim_test!(test_mxint8_flash_sdpa_d512, mt_mxint8_flash_sdpa_d512, QFormat::Mxint8, 512);
+
+    // ── FP16-scale twins across the other production head dims (d64/d96/d256/
+    // d512) ── Same dims as the FP32-scaled formats, looser tol to match the
+    // integer formats. `fp8_e4m3_f16` reuses the `nvfp8_f16` kernel.
+    macro_rules! flash_dim_test_f16 {
+        ($test:ident, $kernel:ident, $fmt:expr, $dim:literal) => {
+            #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+            fn $test(dt: DType) -> TestSetup {
+                flash_setup($kernel::kernel_ir_for(dt), $fmt, $dim, false, 0, dt)
+            }
+        };
+    }
+    // d64
+    flash_dim_test_f16!(
+        test_nvfp8_f16_flash_sdpa_d64,
+        mt_nvfp8_f16_flash_sdpa_d64,
+        QFormat::Nvfp8F16,
+        64
+    );
+    flash_dim_test_f16!(
+        test_fp4_f16_flash_sdpa_d64,
+        mt_fp4_f16_flash_sdpa_d64,
+        QFormat::Fp4F16,
+        64
+    );
+    flash_dim_test_f16!(
+        test_fp8_e4m3_f16_flash_sdpa_d64,
+        mt_nvfp8_f16_flash_sdpa_d64,
+        QFormat::Fp8E4m3F16,
+        64
+    );
+    flash_dim_test_f16!(
+        test_fp8_e5m2_f16_flash_sdpa_d64,
+        mt_fp8_e5m2_f16_flash_sdpa_d64,
+        QFormat::Fp8E5m2F16,
+        64
+    );
+    flash_dim_test_f16!(
+        test_int2_f16_flash_sdpa_d64,
+        mt_int2_f16_flash_sdpa_d64,
+        QFormat::Int2F16,
+        64
+    );
+    flash_dim_test_f16!(
+        test_int3_f16_flash_sdpa_d64,
+        mt_int3_f16_flash_sdpa_d64,
+        QFormat::Int3F16,
+        64
+    );
+    flash_dim_test_f16!(
+        test_int4_f16_flash_sdpa_d64,
+        mt_int4_f16_flash_sdpa_d64,
+        QFormat::Int4F16,
+        64
+    );
+    flash_dim_test_f16!(
+        test_int5_f16_flash_sdpa_d64,
+        mt_int5_f16_flash_sdpa_d64,
+        QFormat::Int5F16,
+        64
+    );
+    flash_dim_test_f16!(
+        test_int6_f16_flash_sdpa_d64,
+        mt_int6_f16_flash_sdpa_d64,
+        QFormat::Int6F16,
+        64
+    );
+    flash_dim_test_f16!(
+        test_int8_f16_flash_sdpa_d64,
+        mt_int8_f16_flash_sdpa_d64,
+        QFormat::Int8F16,
+        64
+    );
+    // d96 (int group 64 → ragged 64+32 tail; fp4 group 32 divides 96 evenly)
+    flash_dim_test_f16!(
+        test_nvfp8_f16_flash_sdpa_d96,
+        mt_nvfp8_f16_flash_sdpa_d96,
+        QFormat::Nvfp8F16,
+        96
+    );
+    flash_dim_test_f16!(
+        test_fp4_f16_flash_sdpa_d96,
+        mt_fp4_f16_flash_sdpa_d96,
+        QFormat::Fp4F16,
+        96
+    );
+    flash_dim_test_f16!(
+        test_fp8_e4m3_f16_flash_sdpa_d96,
+        mt_nvfp8_f16_flash_sdpa_d96,
+        QFormat::Fp8E4m3F16,
+        96
+    );
+    flash_dim_test_f16!(
+        test_fp8_e5m2_f16_flash_sdpa_d96,
+        mt_fp8_e5m2_f16_flash_sdpa_d96,
+        QFormat::Fp8E5m2F16,
+        96
+    );
+    flash_dim_test_f16!(
+        test_int2_f16_flash_sdpa_d96,
+        mt_int2_f16_flash_sdpa_d96,
+        QFormat::Int2F16,
+        96
+    );
+    flash_dim_test_f16!(
+        test_int3_f16_flash_sdpa_d96,
+        mt_int3_f16_flash_sdpa_d96,
+        QFormat::Int3F16,
+        96
+    );
+    flash_dim_test_f16!(
+        test_int4_f16_flash_sdpa_d96,
+        mt_int4_f16_flash_sdpa_d96,
+        QFormat::Int4F16,
+        96
+    );
+    flash_dim_test_f16!(
+        test_int5_f16_flash_sdpa_d96,
+        mt_int5_f16_flash_sdpa_d96,
+        QFormat::Int5F16,
+        96
+    );
+    flash_dim_test_f16!(
+        test_int6_f16_flash_sdpa_d96,
+        mt_int6_f16_flash_sdpa_d96,
+        QFormat::Int6F16,
+        96
+    );
+    flash_dim_test_f16!(
+        test_int8_f16_flash_sdpa_d96,
+        mt_int8_f16_flash_sdpa_d96,
+        QFormat::Int8F16,
+        96
+    );
+    // d256
+    flash_dim_test_f16!(
+        test_nvfp8_f16_flash_sdpa_d256,
+        mt_nvfp8_f16_flash_sdpa_d256,
+        QFormat::Nvfp8F16,
+        256
+    );
+    flash_dim_test_f16!(
+        test_fp4_f16_flash_sdpa_d256,
+        mt_fp4_f16_flash_sdpa_d256,
+        QFormat::Fp4F16,
+        256
+    );
+    flash_dim_test_f16!(
+        test_fp8_e4m3_f16_flash_sdpa_d256,
+        mt_nvfp8_f16_flash_sdpa_d256,
+        QFormat::Fp8E4m3F16,
+        256
+    );
+    flash_dim_test_f16!(
+        test_fp8_e5m2_f16_flash_sdpa_d256,
+        mt_fp8_e5m2_f16_flash_sdpa_d256,
+        QFormat::Fp8E5m2F16,
+        256
+    );
+    flash_dim_test_f16!(
+        test_int2_f16_flash_sdpa_d256,
+        mt_int2_f16_flash_sdpa_d256,
+        QFormat::Int2F16,
+        256
+    );
+    flash_dim_test_f16!(
+        test_int3_f16_flash_sdpa_d256,
+        mt_int3_f16_flash_sdpa_d256,
+        QFormat::Int3F16,
+        256
+    );
+    flash_dim_test_f16!(
+        test_int4_f16_flash_sdpa_d256,
+        mt_int4_f16_flash_sdpa_d256,
+        QFormat::Int4F16,
+        256
+    );
+    flash_dim_test_f16!(
+        test_int5_f16_flash_sdpa_d256,
+        mt_int5_f16_flash_sdpa_d256,
+        QFormat::Int5F16,
+        256
+    );
+    flash_dim_test_f16!(
+        test_int6_f16_flash_sdpa_d256,
+        mt_int6_f16_flash_sdpa_d256,
+        QFormat::Int6F16,
+        256
+    );
+    flash_dim_test_f16!(
+        test_int8_f16_flash_sdpa_d256,
+        mt_int8_f16_flash_sdpa_d256,
+        QFormat::Int8F16,
+        256
+    );
+    // d512
+    flash_dim_test_f16!(
+        test_nvfp8_f16_flash_sdpa_d512,
+        mt_nvfp8_f16_flash_sdpa_d512,
+        QFormat::Nvfp8F16,
+        512
+    );
+    flash_dim_test_f16!(
+        test_fp4_f16_flash_sdpa_d512,
+        mt_fp4_f16_flash_sdpa_d512,
+        QFormat::Fp4F16,
+        512
+    );
+    flash_dim_test_f16!(
+        test_fp8_e4m3_f16_flash_sdpa_d512,
+        mt_nvfp8_f16_flash_sdpa_d512,
+        QFormat::Fp8E4m3F16,
+        512
+    );
+    flash_dim_test_f16!(
+        test_fp8_e5m2_f16_flash_sdpa_d512,
+        mt_fp8_e5m2_f16_flash_sdpa_d512,
+        QFormat::Fp8E5m2F16,
+        512
+    );
+    flash_dim_test_f16!(
+        test_int2_f16_flash_sdpa_d512,
+        mt_int2_f16_flash_sdpa_d512,
+        QFormat::Int2F16,
+        512
+    );
+    flash_dim_test_f16!(
+        test_int3_f16_flash_sdpa_d512,
+        mt_int3_f16_flash_sdpa_d512,
+        QFormat::Int3F16,
+        512
+    );
+    flash_dim_test_f16!(
+        test_int4_f16_flash_sdpa_d512,
+        mt_int4_f16_flash_sdpa_d512,
+        QFormat::Int4F16,
+        512
+    );
+    flash_dim_test_f16!(
+        test_int5_f16_flash_sdpa_d512,
+        mt_int5_f16_flash_sdpa_d512,
+        QFormat::Int5F16,
+        512
+    );
+    flash_dim_test_f16!(
+        test_int6_f16_flash_sdpa_d512,
+        mt_int6_f16_flash_sdpa_d512,
+        QFormat::Int6F16,
+        512
+    );
+    flash_dim_test_f16!(
+        test_int8_f16_flash_sdpa_d512,
+        mt_int8_f16_flash_sdpa_d512,
+        QFormat::Int8F16,
+        512
+    );
 }
 
 /// Decode-shape benches: single-query attention over a block-scaled K/V cache
@@ -1756,10 +2685,10 @@ pub mod kernel_benches {
         } else {
             (crate::quant::format::bitstream_words(rows * dim, fmt.element_bits()), DType::U32)
         };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
         let sz = dt.size_bytes();
         let bytes = q_heads * dim * sz                      // queries
@@ -1873,6 +2802,53 @@ pub mod kernel_benches {
     #[bench(name = "ffai/flash_block_sdpa/mxint8", dtypes = [f32, f16, bf16])]
     fn bench_mxint8_flash(dt: DType) -> BenchSetup {
         flash_bench(mt_mxint8_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Mxint8, 128, dt)
+    }
+    // FP16-scale twins (nvfp8_f16 / fp4_f16 / fp8_e5m2_f16 / int2..6_f16 /
+    // int8_f16). `fp8_e4m3_f16` reuses the `nvfp8_f16` kernel.
+    #[bench(name = "ffai/flash_block_sdpa/nvfp8_f16", dtypes = [f32, f16, bf16])]
+    fn bench_nvfp8_f16_flash(dt: DType) -> BenchSetup {
+        flash_bench(mt_nvfp8_f16_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Nvfp8F16, 128, dt)
+    }
+    #[bench(name = "ffai/flash_block_sdpa/fp4_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp4_f16_flash(dt: DType) -> BenchSetup {
+        flash_bench(mt_fp4_f16_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Fp4F16, 128, dt)
+    }
+    #[bench(name = "ffai/flash_block_sdpa/fp8_e4m3_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e4m3_f16_flash(dt: DType) -> BenchSetup {
+        flash_bench(mt_nvfp8_f16_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Fp8E4m3F16, 128, dt)
+    }
+    #[bench(name = "ffai/flash_block_sdpa/fp8_e5m2_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e5m2_f16_flash(dt: DType) -> BenchSetup {
+        flash_bench(
+            mt_fp8_e5m2_f16_flash_sdpa_d128::kernel_ir_for(dt),
+            QFormat::Fp8E5m2F16,
+            128,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/flash_block_sdpa/int2_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int2_f16_flash(dt: DType) -> BenchSetup {
+        flash_bench(mt_int2_f16_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int2F16, 128, dt)
+    }
+    #[bench(name = "ffai/flash_block_sdpa/int3_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int3_f16_flash(dt: DType) -> BenchSetup {
+        flash_bench(mt_int3_f16_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int3F16, 128, dt)
+    }
+    #[bench(name = "ffai/flash_block_sdpa/int4_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int4_f16_flash(dt: DType) -> BenchSetup {
+        flash_bench(mt_int4_f16_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int4F16, 128, dt)
+    }
+    #[bench(name = "ffai/flash_block_sdpa/int5_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int5_f16_flash(dt: DType) -> BenchSetup {
+        flash_bench(mt_int5_f16_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int5F16, 128, dt)
+    }
+    #[bench(name = "ffai/flash_block_sdpa/int6_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int6_f16_flash(dt: DType) -> BenchSetup {
+        flash_bench(mt_int6_f16_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int6F16, 128, dt)
+    }
+    #[bench(name = "ffai/flash_block_sdpa/int8_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int8_f16_flash(dt: DType) -> BenchSetup {
+        flash_bench(mt_int8_f16_flash_sdpa_d128::kernel_ir_for(dt), QFormat::Int8F16, 128, dt)
     }
 
     // Large-head-dim perf matrix (d256 = long-context; d512 = Gemma global),
@@ -2165,6 +3141,151 @@ pub mod kernel_benches {
         "ffai/flash_block_sdpa/mxint8_d512",
         mt_mxint8_flash_sdpa_d512,
         QFormat::Mxint8,
+        512
+    );
+
+    // ── FP16-scale twins, large-head-dim perf matrix (d256 / d512) ──
+    // `fp8_e4m3_f16` reuses the `nvfp8_f16` kernel.
+    // d256
+    flash_dim_bench!(
+        bench_nvfp8_f16_flash_d256,
+        "ffai/flash_block_sdpa/nvfp8_f16_d256",
+        mt_nvfp8_f16_flash_sdpa_d256,
+        QFormat::Nvfp8F16,
+        256
+    );
+    flash_dim_bench!(
+        bench_fp4_f16_flash_d256,
+        "ffai/flash_block_sdpa/fp4_f16_d256",
+        mt_fp4_f16_flash_sdpa_d256,
+        QFormat::Fp4F16,
+        256
+    );
+    flash_dim_bench!(
+        bench_fp8_e4m3_f16_flash_d256,
+        "ffai/flash_block_sdpa/fp8_e4m3_f16_d256",
+        mt_nvfp8_f16_flash_sdpa_d256,
+        QFormat::Fp8E4m3F16,
+        256
+    );
+    flash_dim_bench!(
+        bench_fp8_e5m2_f16_flash_d256,
+        "ffai/flash_block_sdpa/fp8_e5m2_f16_d256",
+        mt_fp8_e5m2_f16_flash_sdpa_d256,
+        QFormat::Fp8E5m2F16,
+        256
+    );
+    flash_dim_bench!(
+        bench_int2_f16_flash_d256,
+        "ffai/flash_block_sdpa/int2_f16_d256",
+        mt_int2_f16_flash_sdpa_d256,
+        QFormat::Int2F16,
+        256
+    );
+    flash_dim_bench!(
+        bench_int3_f16_flash_d256,
+        "ffai/flash_block_sdpa/int3_f16_d256",
+        mt_int3_f16_flash_sdpa_d256,
+        QFormat::Int3F16,
+        256
+    );
+    flash_dim_bench!(
+        bench_int4_f16_flash_d256,
+        "ffai/flash_block_sdpa/int4_f16_d256",
+        mt_int4_f16_flash_sdpa_d256,
+        QFormat::Int4F16,
+        256
+    );
+    flash_dim_bench!(
+        bench_int5_f16_flash_d256,
+        "ffai/flash_block_sdpa/int5_f16_d256",
+        mt_int5_f16_flash_sdpa_d256,
+        QFormat::Int5F16,
+        256
+    );
+    flash_dim_bench!(
+        bench_int6_f16_flash_d256,
+        "ffai/flash_block_sdpa/int6_f16_d256",
+        mt_int6_f16_flash_sdpa_d256,
+        QFormat::Int6F16,
+        256
+    );
+    flash_dim_bench!(
+        bench_int8_f16_flash_d256,
+        "ffai/flash_block_sdpa/int8_f16_d256",
+        mt_int8_f16_flash_sdpa_d256,
+        QFormat::Int8F16,
+        256
+    );
+    // d512
+    flash_dim_bench!(
+        bench_nvfp8_f16_flash_d512,
+        "ffai/flash_block_sdpa/nvfp8_f16_d512",
+        mt_nvfp8_f16_flash_sdpa_d512,
+        QFormat::Nvfp8F16,
+        512
+    );
+    flash_dim_bench!(
+        bench_fp4_f16_flash_d512,
+        "ffai/flash_block_sdpa/fp4_f16_d512",
+        mt_fp4_f16_flash_sdpa_d512,
+        QFormat::Fp4F16,
+        512
+    );
+    flash_dim_bench!(
+        bench_fp8_e4m3_f16_flash_d512,
+        "ffai/flash_block_sdpa/fp8_e4m3_f16_d512",
+        mt_nvfp8_f16_flash_sdpa_d512,
+        QFormat::Fp8E4m3F16,
+        512
+    );
+    flash_dim_bench!(
+        bench_fp8_e5m2_f16_flash_d512,
+        "ffai/flash_block_sdpa/fp8_e5m2_f16_d512",
+        mt_fp8_e5m2_f16_flash_sdpa_d512,
+        QFormat::Fp8E5m2F16,
+        512
+    );
+    flash_dim_bench!(
+        bench_int2_f16_flash_d512,
+        "ffai/flash_block_sdpa/int2_f16_d512",
+        mt_int2_f16_flash_sdpa_d512,
+        QFormat::Int2F16,
+        512
+    );
+    flash_dim_bench!(
+        bench_int3_f16_flash_d512,
+        "ffai/flash_block_sdpa/int3_f16_d512",
+        mt_int3_f16_flash_sdpa_d512,
+        QFormat::Int3F16,
+        512
+    );
+    flash_dim_bench!(
+        bench_int4_f16_flash_d512,
+        "ffai/flash_block_sdpa/int4_f16_d512",
+        mt_int4_f16_flash_sdpa_d512,
+        QFormat::Int4F16,
+        512
+    );
+    flash_dim_bench!(
+        bench_int5_f16_flash_d512,
+        "ffai/flash_block_sdpa/int5_f16_d512",
+        mt_int5_f16_flash_sdpa_d512,
+        QFormat::Int5F16,
+        512
+    );
+    flash_dim_bench!(
+        bench_int6_f16_flash_d512,
+        "ffai/flash_block_sdpa/int6_f16_d512",
+        mt_int6_f16_flash_sdpa_d512,
+        QFormat::Int6F16,
+        512
+    );
+    flash_dim_bench!(
+        bench_int8_f16_flash_d512,
+        "ffai/flash_block_sdpa/int8_f16_d512",
+        mt_int8_f16_flash_sdpa_d512,
+        QFormat::Int8F16,
         512
     );
 }
