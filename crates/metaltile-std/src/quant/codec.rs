@@ -217,6 +217,32 @@ pub fn int8_encode(scaled: f32) -> u8 {
     (q as i8) as u8
 }
 
+// ── intN (symmetric integer element, N ∈ {2,3,4,5,6,8}) ──────────────────────
+// Generalizes int8 to any bit width. The element is the signed integer itself;
+// the per-block scale (FP32 / E8M0 / FP16) is applied by the caller. Symmetric:
+// codes span [-(2^(N-1) − 1), 2^(N-1) − 1] — the most-negative two's-complement
+// value is unused so |min| == |max| (matches int8 dropping −128). Sub-byte codes
+// are tight-bit-packed by [`super::format`]; this codec only converts a single
+// N-bit code ↔ f32. `int8_{en,de}code` above is the N=8 hot-path special case.
+
+/// Largest symmetric magnitude an N-bit code represents: `2^(N-1) − 1`.
+pub fn intn_max(n: u32) -> i32 { (1i32 << (n - 1)) - 1 }
+
+/// Decode an N-bit symmetric integer code (its low N bits, two's complement) to
+/// `f32` by sign-extending from bit `N-1`.
+pub fn intn_decode(code: u32, n: u32) -> f32 {
+    let shift = 32 - n;
+    (((code << shift) as i32) >> shift) as f32 // arithmetic shift sign-extends
+}
+
+/// Encode a scaled value to an N-bit symmetric integer code: round-to-nearest,
+/// clamp to ±(2^(N-1) − 1), keep the low N bits (two's complement).
+pub fn intn_encode(scaled: f32, n: u32) -> u32 {
+    let lim = intn_max(n);
+    let q = scaled.round().clamp(-(lim as f32), lim as f32) as i32;
+    (q as u32) & ((1u32 << n) - 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +255,30 @@ mod tests {
         // Saturates to ±127 (−128 unused for symmetry).
         assert_eq!(int8_decode(int8_encode(200.0)), 127.0);
         assert_eq!(int8_decode(int8_encode(-200.0)), -127.0);
+    }
+
+    #[test]
+    fn intn_round_trips_and_saturates_every_width() {
+        for n in [2u32, 3, 4, 5, 6, 8] {
+            let lim = intn_max(n);
+            // Every representable integer in [-lim, lim] round-trips exactly.
+            for v in -lim..=lim {
+                let code = intn_encode(v as f32, n);
+                assert_eq!(intn_decode(code, n), v as f32, "int{n} value {v}");
+                // Only the low N bits are ever set.
+                assert_eq!(code >> n, 0, "int{n} code {code:#x} has high bits");
+            }
+            // Saturates symmetrically past the limit (no −2^(N-1) wrap).
+            assert_eq!(intn_decode(intn_encode(1e3, n), n), lim as f32, "int{n} +sat");
+            assert_eq!(intn_decode(intn_encode(-1e3, n), n), -(lim as f32), "int{n} -sat");
+        }
+        // intn at N=8 agrees with the dedicated int8 hot-path codec.
+        for v in [-127i32, -1, 0, 1, 127] {
+            assert_eq!(
+                intn_decode(intn_encode(v as f32, 8), 8),
+                int8_decode(int8_encode(v as f32))
+            );
+        }
     }
 
     #[test]
