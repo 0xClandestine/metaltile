@@ -16,10 +16,6 @@
 //!   config        Display effective merged configuration
 //!   completions   Generate shell completion scripts
 
-// Force metaltile-std into the link graph so its #[bench]/#[test_kernel]
-// inventory statics are retained by the linker.
-extern crate metaltile_std;
-
 pub mod bench_types;
 mod cmd;
 pub mod config;
