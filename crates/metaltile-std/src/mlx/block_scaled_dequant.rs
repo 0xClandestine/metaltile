@@ -1,7 +1,7 @@
 //! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
 //! SPDX-License-Identifier: Apache-2.0
 //! Standalone dequant kernels for the spec-conformant block-scaled formats
-//! (nvfp4 / mxfp4 / mxfp8 / nvfp8 — see `docs/BENCH_METRICS_SPEC.md` Appendix B).
+//! (nvfp4 / mxfp4 / mxfp8 / nvfp8 — see `specs/BENCH_METRICS_SPEC.md` Appendix B).
 //!
 //! Each kernel reads packed element codes + per-block scales and writes the
 //! reconstructed `[rows, cols]` matrix. The decode math mirrors

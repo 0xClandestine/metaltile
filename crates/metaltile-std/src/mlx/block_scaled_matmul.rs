@@ -1,7 +1,7 @@
 //! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
 //! SPDX-License-Identifier: Apache-2.0
 //! Block-scaled **dequantizing GEMV** kernels (Phase B of the precision
-//! roadmap, `docs/BENCH_METRICS_SPEC.md` Appendix B): `output[row] =
+//! roadmap, `specs/BENCH_METRICS_SPEC.md` Appendix B): `output[row] =
 //! Σ_k dequant(weight[row, k]) · input[k]` for the spec-conformant formats.
 //!
 //! The dispatch geometry is the **proven pack-strided reduction** from

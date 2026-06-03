@@ -313,7 +313,7 @@ A few rows mix multiple `.metal` files into one op or split one file into multip
 
 ## Out-of-tree micro-optimization proposals
 
-Some hot-path patterns require codegen-layer support to land cleanly and are documented as proposals rather than landed kernels. See [`docs/PROPOSED_OPTIMIZATIONS.md`](PROPOSED_OPTIMIZATIONS.md) for full rationale and implementation sketches:
+Some hot-path patterns require codegen-layer support to land cleanly and are documented as proposals rather than landed kernels. See [`specs/PROPOSED_OPTIMIZATIONS.md`](PROPOSED_OPTIMIZATIONS.md) for full rationale and implementation sketches:
 
 - **`simd_broadcast` for scale/bias** — int4/int8 GEMV kernels where 4 (int4) / 16 (int8) consecutive lanes share a group scale/bias. Hardware already coalesces same-address loads from one simdgroup, so the optimization is opportunistic (no measured profile signal yet).
 - **`fast::` math intrinsics** — `mel_spectrogram`, `mt_softmax`, `mt_logsumexp`, `vocoder_istft` use IEEE-precise built-ins. Switching to `fast::exp`/`fast::log`/`fast::sin`/`fast::cos` would give ~1.5–2× speedup at 1–3 ULP. Needs new `UnaryOpKind` IR variants + precision validation against existing test tolerances.

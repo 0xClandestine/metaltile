@@ -22,7 +22,7 @@
 //! work is a few×10⁴ multiply-adds — comfortably GPU-bound, one dispatch
 //! covering every `(frame, mel_bin)` in parallel. A radix-FFT path is a
 //! perf follow-up (it needs complex-type codegen — see the `fft` row in
-//! `KERNEL_AUDIT.md`); the direct DFT is exact and unblocks the model
+//! `specs/KERNEL_AUDIT.md`); the direct DFT is exact and unblocks the model
 //! family now.
 //!
 //! Layouts:

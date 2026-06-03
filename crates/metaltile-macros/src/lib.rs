@@ -3,7 +3,7 @@
 //! MetalTile proc macros: `#[kernel]`, `#[bench]`, `#[test_kernel]`, `shape!`, `tile!`.
 //!
 //! Each macro lives in its own submodule; this file is a thin routing layer.
-//! Kernel authors never need to look here — see `docs/TOOLCHAIN_DESIGN.md`.
+//! Kernel authors never need to look here — see `specs/TOOLCHAIN_DESIGN.md`.
 
 mod bench;
 mod derive;
