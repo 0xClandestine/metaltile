@@ -202,6 +202,54 @@ pub fn e8m0_encode(x: f32) -> u8 {
     (n + 127) as u8
 }
 
+// ── FP16 (block scale) ──────────────────────────────────────────────────────
+// An alternative to the FP32 group scale: half the bytes (2 vs 4) and the format
+// real checkpoints actually store. Round-to-nearest-even via the shared half
+// codec; the GPU reads the stored bits as a native `half`, so its decode matches
+// `f16_scale_decode` exactly (same IEEE pattern → same value).
+
+/// Encode an f32 block scale to IEEE half-precision bits (stored as 2 bytes),
+/// round-to-nearest-even, **with full subnormal support**. Block scales for
+/// wide-range elements (E5M2's `element_max` is 57344) land in f16's subnormal
+/// range (down to 2^-24); flushing them to zero would wipe out whole blocks, so
+/// — unlike the element-path [`f32_to_f16_bits`] — this rounds into subnormals.
+/// Matches the value an Apple-GPU `half` load produces from the same bits.
+pub fn f16_scale_encode(x: f32) -> u16 {
+    let bits = x.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let abs = bits & 0x7fff_ffff;
+    if abs >= 0x7f80_0000 {
+        // inf / nan → inf (scales are finite in practice).
+        return sign | 0x7c00;
+    }
+    let e = (abs >> 23) as i32 - 127 + 15; // half-biased exponent
+    if e >= 0x1f {
+        return sign | 0x7c00; // overflow → inf
+    }
+    if e <= 0 {
+        // Subnormal half (or underflow to ±0 below 2^-24).
+        if e < -10 {
+            return sign;
+        }
+        let mant = (abs & 0x7f_ffff) | 0x80_0000; // restore the implicit 1
+        let shift = (14 - e) as u32; // ∈ [14, 24]
+        let h = mant >> shift;
+        let rem = mant & ((1u32 << shift) - 1);
+        let halfway = 1u32 << (shift - 1);
+        let round_up = rem > halfway || (rem == halfway && (h & 1) == 1);
+        return sign | (h + u32::from(round_up)) as u16;
+    }
+    // Normal half: round the 23-bit mantissa to 10 bits (carry into exp is fine).
+    let mant = abs & 0x7f_ffff;
+    let h = ((e as u32) << 10) | (mant >> 13);
+    let rem = mant & 0x1fff;
+    let round_up = rem > 0x1000 || (rem == 0x1000 && (h & 1) == 1);
+    sign | (h + u32::from(round_up)) as u16
+}
+
+/// Decode an FP16 block-scale bit pattern back to f32 (handles subnormals).
+pub fn f16_scale_decode(bits: u16) -> f32 { f16_bits_to_f32(bits) }
+
 // ── int8 (symmetric affine element) ────────────────────────────────────────
 // Unlike the fp formats, int8's "element" is the integer itself; the per-group
 // FP32 scale is applied by the caller. Symmetric: codes in [-127, 127] (−128 is
@@ -316,6 +364,31 @@ mod tests {
         assert_eq!(e8m0_decode(e8m0_encode(1.6)), 2.0);
         assert_eq!(e8m0_encode(0.0), 0x00);
         assert!(e8m0_decode(0xff).is_nan());
+    }
+
+    #[test]
+    fn f16_scale_round_trips_within_half_precision() {
+        // Exact-in-half values round-trip exactly; arbitrary scales stay within
+        // half's ~2^-11 relative step. Includes the **subnormal** range
+        // (2^-24 … 2^-14), which E5M2's tiny block scales (amax/57344) land in —
+        // these must NOT flush to zero.
+        for &v in &[0.0f32, 1.0, 0.5, 0.25, 2.0, 0.001953125, 0.0040, 12.5] {
+            let r = f16_scale_decode(f16_scale_encode(v));
+            assert!((r - v).abs() <= v.abs() * 5e-4 + 1e-7, "f16 scale {v} → {r}");
+        }
+        // Mid-subnormal scales: relative error grows (fewer mantissa bits) but
+        // they stay non-zero and within ~7% — far better than flushing to 0.
+        for &v in &[3.3e-5f32, 5.0e-5, 1.0e-5, 3.0e-6] {
+            let r = f16_scale_decode(f16_scale_encode(v));
+            assert!(r > 0.0, "f16 subnormal scale {v} flushed to 0");
+            assert!((r - v).abs() <= v.abs() * 0.07, "f16 subnormal scale {v} → {r}");
+        }
+        // Near the 2^-24 floor only a handful of values exist, so precision is
+        // coarse — but they must still round to a non-zero subnormal, not flush.
+        // Below ~2^-25 underflows to 0.
+        for &v in &[2.0e-7f32, 6.0e-8] {
+            assert!(f16_scale_decode(f16_scale_encode(v)) > 0.0, "f16 floor scale {v} flushed");
+        }
     }
 
     #[test]

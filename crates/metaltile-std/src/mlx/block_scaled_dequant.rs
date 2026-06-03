@@ -281,6 +281,120 @@ pub fn mt_mxint8_dequant<T>(
     }
 }
 
+// ── FP16-scale twins ─────────────────────────────────────────────────────────
+// Identical element decode to their FP32-scaled twin; only the scale is read as a
+// native `half` (`Tensor<f16>`) and cast to f32. The GPU half load matches the
+// host `f16_scale_decode`, so the oracle still holds exactly.
+
+/// nvfp8 (FP16 scale) — E4M3 elements (block 16), per-block FP16 scale. Also
+/// serves `fp8_e4m3_f16` (same 8-bit-E4M3 + scale shape).
+#[kernel]
+pub fn mt_nvfp8_f16_dequant<T>(
+    codes: Tensor<u8>,
+    scales: Tensor<f16>,
+    out: Tensor<T>,
+    #[constexpr] n: u32,
+    #[constexpr] block_size: u32,
+) {
+    let i = program_id::<0>();
+    if i < n {
+        let elem = e4m3_decode(load(codes[i]).cast::<u32>());
+        let scale = load(scales[i / block_size]).cast::<f32>();
+        store(out[i], (elem * scale).cast::<T>());
+    }
+}
+
+/// fp4 (FP16 scale) — E2M1 elements (group 32), per-group FP16 scale.
+#[kernel]
+pub fn mt_fp4_f16_dequant<T>(
+    codes: Tensor<u32>,
+    scales: Tensor<f16>,
+    out: Tensor<T>,
+    #[constexpr] n: u32,
+    #[constexpr] block_size: u32,
+) {
+    let i = program_id::<0>();
+    if i < n {
+        let word = load(codes[i / 8u32]);
+        let nib = (word >> ((i & 7u32) * 4u32)) & 0xFu32;
+        let elem = e2m1_decode(nib);
+        let scale = load(scales[i / block_size]).cast::<f32>();
+        store(out[i], (elem * scale).cast::<T>());
+    }
+}
+
+/// fp8 (E5M2, FP16 scale) — E5M2 elements (group 32), per-group FP16 scale.
+#[kernel]
+pub fn mt_fp8_e5m2_f16_dequant<T>(
+    codes: Tensor<u8>,
+    scales: Tensor<f16>,
+    out: Tensor<T>,
+    #[constexpr] n: u32,
+    #[constexpr] block_size: u32,
+) {
+    let i = program_id::<0>();
+    if i < n {
+        let elem = e5m2_decode(load(codes[i]).cast::<u32>());
+        let scale = load(scales[i / block_size]).cast::<f32>();
+        store(out[i], (elem * scale).cast::<T>());
+    }
+}
+
+/// Symmetric int (FP16 scale, sub-byte int2/3/4/5/6) — bit-stream code × FP16 scale.
+macro_rules! int_dequant_f16 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            codes: Tensor<u32>,
+            scales: Tensor<f16>,
+            out: Tensor<T>,
+            #[constexpr] n: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let i = program_id::<0>();
+            if i < n {
+                let bit_off = i * $bits;
+                let word_idx = bit_off / 32u32;
+                let bit_in_w = bit_off & 31u32;
+                let bits_in_w0 = 32u32 - bit_in_w;
+                let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                let spill = $bits - lo_bits;
+                let w0 = load(codes[word_idx]);
+                let w1 = load(codes[select(spill > 0u32, word_idx + 1u32, word_idx)]);
+                let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                let q = lo | hi;
+                let qf = q.cast::<f32>();
+                let val = select(q >= $half, qf - $full, qf); // sign-extend
+                let scale = load(scales[i / block_size]).cast::<f32>();
+                store(out[i], (val * scale).cast::<T>());
+            }
+        }
+    };
+}
+int_dequant_f16!(mt_int2_f16_dequant, 2u32, 2u32, 4.0f32);
+int_dequant_f16!(mt_int3_f16_dequant, 3u32, 4u32, 8.0f32);
+int_dequant_f16!(mt_int4_f16_dequant, 4u32, 8u32, 16.0f32);
+int_dequant_f16!(mt_int5_f16_dequant, 5u32, 16u32, 32.0f32);
+int_dequant_f16!(mt_int6_f16_dequant, 6u32, 32u32, 64.0f32);
+
+/// int8 (FP16 scale) — 8-bit codes (byte layout, group 64), per-group FP16 scale.
+#[kernel]
+pub fn mt_int8_f16_dequant<T>(
+    codes: Tensor<u8>,
+    scales: Tensor<f16>,
+    out: Tensor<T>,
+    #[constexpr] n: u32,
+    #[constexpr] block_size: u32,
+) {
+    let i = program_id::<0>();
+    if i < n {
+        let elem = int8_decode(load(codes[i]).cast::<u32>());
+        let scale = load(scales[i / block_size]).cast::<f32>();
+        store(out[i], (elem * scale).cast::<T>());
+    }
+}
+
 pub mod kernel_tests {
     use metaltile::{core::ir::Kernel, test::*, test_kernel};
 
@@ -316,12 +430,13 @@ pub mod kernel_tests {
         let n = rows * cols;
         const TPG: u32 = 256;
         // Sub-byte codes (int2-6, E2M1) bind as bit-stream u32 words; 8-bit codes
-        // as one uchar each. FP32 scales bind as f32; E8M0/E4M3 scales as one byte.
+        // as one uchar each. FP32→f32, FP16→f16 scales bind by value; E8M0/E4M3
+        // scales as one byte.
         let codes_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
         let mut s = TestSetup::new(kernel)
             .input(TestBuffer::from_vec("codes", p.codes, codes_dt))
@@ -438,6 +553,49 @@ pub mod kernel_tests {
     fn test_mxint8_dequant(dt: DType) -> TestSetup {
         dequant_setup(mt_mxint8_dequant::kernel_ir_for(dt), QFormat::Mxint8, 4, 64, dt)
     }
+
+    // FP16-scale twins of the FP32-scaled formats. `fp8_e4m3_f16` reuses the
+    // `nvfp8_f16` kernel (same 8-bit-E4M3 + scale shape); the rest decode here.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_nvfp8_f16_dequant(dt: DType) -> TestSetup {
+        dequant_setup(mt_nvfp8_f16_dequant::kernel_ir_for(dt), QFormat::Nvfp8F16, 4, 64, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e4m3_f16_dequant(dt: DType) -> TestSetup {
+        dequant_setup(mt_nvfp8_f16_dequant::kernel_ir_for(dt), QFormat::Fp8E4m3F16, 4, 64, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp4_f16_dequant(dt: DType) -> TestSetup {
+        dequant_setup(mt_fp4_f16_dequant::kernel_ir_for(dt), QFormat::Fp4F16, 4, 64, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e5m2_f16_dequant(dt: DType) -> TestSetup {
+        dequant_setup(mt_fp8_e5m2_f16_dequant::kernel_ir_for(dt), QFormat::Fp8E5m2F16, 4, 64, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int2_f16_dequant(dt: DType) -> TestSetup {
+        dequant_setup(mt_int2_f16_dequant::kernel_ir_for(dt), QFormat::Int2F16, 4, 64, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int3_f16_dequant(dt: DType) -> TestSetup {
+        dequant_setup(mt_int3_f16_dequant::kernel_ir_for(dt), QFormat::Int3F16, 4, 64, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int4_f16_dequant(dt: DType) -> TestSetup {
+        dequant_setup(mt_int4_f16_dequant::kernel_ir_for(dt), QFormat::Int4F16, 4, 64, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int5_f16_dequant(dt: DType) -> TestSetup {
+        dequant_setup(mt_int5_f16_dequant::kernel_ir_for(dt), QFormat::Int5F16, 4, 64, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int6_f16_dequant(dt: DType) -> TestSetup {
+        dequant_setup(mt_int6_f16_dequant::kernel_ir_for(dt), QFormat::Int6F16, 4, 64, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int8_f16_dequant(dt: DType) -> TestSetup {
+        dequant_setup(mt_int8_f16_dequant::kernel_ir_for(dt), QFormat::Int8F16, 4, 64, dt)
+    }
 }
 
 /// Bulk-dequant (memory-bound, one thread per output element) benches at a
@@ -466,10 +624,10 @@ pub mod kernel_benches {
         } else {
             (crate::quant::format::bitstream_words(n, fmt.element_bits()), DType::U32)
         };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
         let bytes = codes_len * codes_dt.size_bytes()
             + n_blocks * scales_dt.size_bytes()
@@ -571,5 +729,52 @@ pub mod kernel_benches {
     #[bench(name = "ffai/block_scaled_dequant/mxint8", dtypes = [f32, f16, bf16])]
     fn bench_mxint8_dequant(dt: DType) -> BenchSetup {
         dequant_bench(mt_mxint8_dequant::kernel_ir_for(dt), QFormat::Mxint8, 4096, 4096, dt)
+    }
+    // FP16-scale twins (fp8_e4m3_f16 reuses the nvfp8_f16 kernel).
+    #[bench(name = "ffai/block_scaled_dequant/nvfp8_f16", dtypes = [f32, f16, bf16])]
+    fn bench_nvfp8_f16_dequant(dt: DType) -> BenchSetup {
+        dequant_bench(mt_nvfp8_f16_dequant::kernel_ir_for(dt), QFormat::Nvfp8F16, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_dequant/fp8_e4m3_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e4m3_f16_dequant(dt: DType) -> BenchSetup {
+        dequant_bench(mt_nvfp8_f16_dequant::kernel_ir_for(dt), QFormat::Fp8E4m3F16, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_dequant/fp4_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp4_f16_dequant(dt: DType) -> BenchSetup {
+        dequant_bench(mt_fp4_f16_dequant::kernel_ir_for(dt), QFormat::Fp4F16, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_dequant/fp8_e5m2_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e5m2_f16_dequant(dt: DType) -> BenchSetup {
+        dequant_bench(
+            mt_fp8_e5m2_f16_dequant::kernel_ir_for(dt),
+            QFormat::Fp8E5m2F16,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/block_scaled_dequant/int2_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int2_f16_dequant(dt: DType) -> BenchSetup {
+        dequant_bench(mt_int2_f16_dequant::kernel_ir_for(dt), QFormat::Int2F16, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_dequant/int3_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int3_f16_dequant(dt: DType) -> BenchSetup {
+        dequant_bench(mt_int3_f16_dequant::kernel_ir_for(dt), QFormat::Int3F16, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_dequant/int4_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int4_f16_dequant(dt: DType) -> BenchSetup {
+        dequant_bench(mt_int4_f16_dequant::kernel_ir_for(dt), QFormat::Int4F16, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_dequant/int5_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int5_f16_dequant(dt: DType) -> BenchSetup {
+        dequant_bench(mt_int5_f16_dequant::kernel_ir_for(dt), QFormat::Int5F16, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_dequant/int6_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int6_f16_dequant(dt: DType) -> BenchSetup {
+        dequant_bench(mt_int6_f16_dequant::kernel_ir_for(dt), QFormat::Int6F16, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_dequant/int8_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int8_f16_dequant(dt: DType) -> BenchSetup {
+        dequant_bench(mt_int8_f16_dequant::kernel_ir_for(dt), QFormat::Int8F16, 4096, 4096, dt)
     }
 }

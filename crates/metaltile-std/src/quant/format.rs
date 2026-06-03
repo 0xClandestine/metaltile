@@ -81,6 +81,30 @@ pub enum QFormat {
     Mxint6,
     /// Symmetric int8, block 32, E8M0 pow-2 scale (MXINT8, OCP-ratified).
     Mxint8,
+    // ── FP16-scale twins of the FP32-scaled formats ─────────────────────────
+    // Same element + block size as their FP32-scaled twin, but the per-block
+    // scale is stored as an IEEE half (2 B vs 4 B) — the layout real checkpoints
+    // use, halving scale-buffer traffic at negligible scale precision cost.
+    /// E4M3, block 16, per-block FP16 scale (nvfp8 twin).
+    Nvfp8F16,
+    /// E2M1, group 32, per-group FP16 scale (legacy fp4 twin).
+    Fp4F16,
+    /// E4M3, group 32, per-group FP16 scale (legacy fp8 e4m3 twin).
+    Fp8E4m3F16,
+    /// E5M2, group 32, per-group FP16 scale (legacy fp8 e5m2 twin).
+    Fp8E5m2F16,
+    /// Symmetric int2, group 64, per-group FP16 scale.
+    Int2F16,
+    /// Symmetric int3, group 64, per-group FP16 scale.
+    Int3F16,
+    /// Symmetric int4, group 64, per-group FP16 scale.
+    Int4F16,
+    /// Symmetric int5, group 64, per-group FP16 scale.
+    Int5F16,
+    /// Symmetric int6, group 64, per-group FP16 scale.
+    Int6F16,
+    /// Symmetric int8, group 64, per-group FP16 scale.
+    Int8F16,
 }
 
 /// A format's quantized **element** type — one of the three orthogonal axes
@@ -107,6 +131,19 @@ pub enum ScaleKind {
     E4M3,
     /// 4 bytes/block, raw little-endian f32.
     F32,
+    /// 2 bytes/block, IEEE half (little-endian) — the memory-halving FP32 twin.
+    F16,
+}
+
+impl ScaleKind {
+    /// Bytes one block's scale occupies in the packed buffer.
+    pub fn bytes(self) -> usize {
+        match self {
+            ScaleKind::E8M0 | ScaleKind::E4M3 => 1,
+            ScaleKind::F16 => 2,
+            ScaleKind::F32 => 4,
+        }
+    }
 }
 
 use QFormat::*;
@@ -115,15 +152,15 @@ impl QFormat {
     /// The element axis: integer width or micro-float codebook.
     pub fn element(self) -> Element {
         match self {
-            Nvfp4 | Mxfp4 | Fp4 => Element::E2m1,
-            Mxfp8E4 | Nvfp8 | Fp8E4m3 => Element::E4m3,
-            Mxfp8E5 | Fp8E5m2 => Element::E5m2,
-            Int2 | Mxint2 => Element::Int(2),
-            Int3 | Mxint3 => Element::Int(3),
-            Int4 | Mxint4 => Element::Int(4),
-            Int5 | Mxint5 => Element::Int(5),
-            Int6 | Mxint6 => Element::Int(6),
-            Int8 | Mxint8 => Element::Int(8),
+            Nvfp4 | Mxfp4 | Fp4 | Fp4F16 => Element::E2m1,
+            Mxfp8E4 | Nvfp8 | Fp8E4m3 | Nvfp8F16 | Fp8E4m3F16 => Element::E4m3,
+            Mxfp8E5 | Fp8E5m2 | Fp8E5m2F16 => Element::E5m2,
+            Int2 | Mxint2 | Int2F16 => Element::Int(2),
+            Int3 | Mxint3 | Int3F16 => Element::Int(3),
+            Int4 | Mxint4 | Int4F16 => Element::Int(4),
+            Int5 | Mxint5 | Int5F16 => Element::Int(5),
+            Int6 | Mxint6 | Int6F16 => Element::Int(6),
+            Int8 | Mxint8 | Int8F16 => Element::Int(8),
         }
     }
 
@@ -138,12 +175,14 @@ impl QFormat {
     /// Elements per block (mx*) / group (nv*, legacy fp, FP32-scaled int) along K.
     pub fn block_size(self) -> usize {
         match self {
-            Nvfp4 | Nvfp8 => 16,
+            Nvfp4 | Nvfp8 | Nvfp8F16 => 16,
             Mxfp4 | Mxfp8E4 | Mxfp8E5 | Fp4 | Fp8E4m3 | Fp8E5m2 => 32,
+            Fp4F16 | Fp8E4m3F16 | Fp8E5m2F16 => 32,
             // MXINT shares the MX block size (32); FP32-scaled symmetric ints
             // use the int group size (64, matching int8 + the affine track).
             Mxint2 | Mxint3 | Mxint4 | Mxint5 | Mxint6 | Mxint8 => 32,
             Int2 | Int3 | Int4 | Int5 | Int6 | Int8 => 64,
+            Int2F16 | Int3F16 | Int4F16 | Int5F16 | Int6F16 | Int8F16 => 64,
         }
     }
 
@@ -179,6 +218,16 @@ impl QFormat {
             Mxint5 => "mxint5",
             Mxint6 => "mxint6",
             Mxint8 => "mxint8",
+            Nvfp8F16 => "nvfp8_f16",
+            Fp4F16 => "fp4_f16",
+            Fp8E4m3F16 => "fp8_e4m3_f16",
+            Fp8E5m2F16 => "fp8_e5m2_f16",
+            Int2F16 => "int2_f16",
+            Int3F16 => "int3_f16",
+            Int4F16 => "int4_f16",
+            Int5F16 => "int5_f16",
+            Int6F16 => "int6_f16",
+            Int8F16 => "int8_f16",
         }
     }
 
@@ -203,6 +252,9 @@ impl QFormat {
             // FP32 scale, like nvfp8.
             Nvfp8 | Fp4 | Fp8E4m3 | Fp8E5m2 => ScaleKind::F32,
             Int2 | Int3 | Int4 | Int5 | Int6 | Int8 => ScaleKind::F32,
+            // FP16-scale twins.
+            Nvfp8F16 | Fp4F16 | Fp8E4m3F16 | Fp8E5m2F16 => ScaleKind::F16,
+            Int2F16 | Int3F16 | Int4F16 | Int5F16 | Int6F16 | Int8F16 => ScaleKind::F16,
         }
     }
 
@@ -327,8 +379,7 @@ pub fn pack(fmt: QFormat, w: &[f32], rows: usize, cols: usize) -> PackedTensor {
     } else {
         vec![0u8; bitstream_words(rows * cols, bits) * 4]
     };
-    let mut scales =
-        Vec::with_capacity(nblocks * if fmt.scale_kind() == ScaleKind::F32 { 4 } else { 1 });
+    let mut scales = Vec::with_capacity(nblocks * fmt.scale_kind().bytes());
 
     for r in 0..rows {
         for b in 0..blocks_per_row {
@@ -350,6 +401,11 @@ pub fn pack(fmt: QFormat, w: &[f32], rows: usize, cols: usize) -> PackedTensor {
                 ScaleKind::F32 => {
                     scales.extend_from_slice(&block_scale[blk].to_le_bytes());
                     block_scale[blk]
+                },
+                ScaleKind::F16 => {
+                    let bits = codec::f16_scale_encode(block_scale[blk]);
+                    scales.extend_from_slice(&bits.to_le_bytes());
+                    codec::f16_scale_decode(bits)
                 },
             };
             let inv = if eff > 0.0 { 1.0 / eff } else { 0.0 };
@@ -387,6 +443,10 @@ pub fn dequant(fmt: QFormat, p: &PackedTensor, rows: usize, cols: usize) -> Vec<
                         p.scales[o + 3],
                     ])
                 },
+                ScaleKind::F16 => {
+                    let o = blk * 2;
+                    codec::f16_scale_decode(u16::from_le_bytes([p.scales[o], p.scales[o + 1]]))
+                },
             };
             let len = bs.min(cols - b * bs); // clamp the ragged trailing block
             for e in 0..len {
@@ -402,9 +462,10 @@ pub fn dequant(fmt: QFormat, p: &PackedTensor, rows: usize, cols: usize) -> Vec<
 mod tests {
     use super::*;
 
-    const ALL: [QFormat; 20] = [
+    const ALL: [QFormat; 30] = [
         Nvfp4, Mxfp4, Mxfp8E4, Mxfp8E5, Nvfp8, Fp4, Fp8E4m3, Fp8E5m2, Int8, Int2, Int3, Int4, Int5,
-        Int6, Mxint2, Mxint3, Mxint4, Mxint5, Mxint6, Mxint8,
+        Int6, Mxint2, Mxint3, Mxint4, Mxint5, Mxint6, Mxint8, Nvfp8F16, Fp4F16, Fp8E4m3F16,
+        Fp8E5m2F16, Int2F16, Int3F16, Int4F16, Int5F16, Int6F16, Int8F16,
     ];
 
     /// Deterministic weight matrix with per-row varying magnitude — exercises
@@ -473,6 +534,17 @@ mod tests {
                 Mxint5 => 0.98,
                 Mxint6 => 0.99,
                 Mxint8 => 0.997,
+                // FP16-scale twins: same element fidelity as the FP32 twin; the
+                // half scale's ~3-digit precision costs almost nothing, so floors
+                // sit a notch below each twin to stay non-flaky.
+                Fp4F16 => 0.97,
+                Nvfp8F16 | Fp8E4m3F16 | Fp8E5m2F16 => 0.998,
+                Int2F16 => 0.79,
+                Int3F16 => 0.93,
+                Int4F16 => 0.96,
+                Int5F16 => 0.99,
+                Int6F16 => 0.996,
+                Int8F16 => 0.999,
             };
             assert!(cos >= floor, "{}: cosine {cos} < {floor}", fmt.name());
         }
@@ -493,8 +565,7 @@ mod tests {
             };
             assert_eq!(p.codes.len(), expected_codes, "{} codes", fmt.name());
             let nblocks = rows * (cols / fmt.block_size());
-            let per_block = if fmt.scale_kind() == ScaleKind::F32 { 4 } else { 1 };
-            assert_eq!(p.scales.len(), nblocks * per_block, "{} scales", fmt.name());
+            assert_eq!(p.scales.len(), nblocks * fmt.scale_kind().bytes(), "{} scales", fmt.name());
             if !fmt.has_global() {
                 assert_eq!(p.global, 1.0, "{} global", fmt.name());
             }
