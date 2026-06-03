@@ -41,6 +41,7 @@ pub mod batched_qkv_qmm;
 pub mod clamp_scalar;
 pub mod conv1d_causal_step_silu_cast_many;
 pub mod conv1d_dilated_transpose;
+pub mod conv1d_transpose_depthwise;
 pub mod conv2d;
 pub mod conv2d_block_scaled;
 pub mod conv2d_mma;
