@@ -10,7 +10,8 @@ use crate::kernel::variants::{self, VariantsSpec, eval_suffix};
 /// Parsed arguments for the `#[bench]` attribute.
 struct BenchAttr {
     /// Benchmark name (or name template when `variants` is set, e.g. `"ffai/foo/int{BITS}"`).
-    name: LitStr,
+    /// Optional — when absent, defaults to the (variant-renamed) function name.
+    name: Option<LitStr>,
     /// Data types to exercise, e.g. `[f32, f16, bf16]`.
     dtypes: Vec<Ident>,
     /// Optional `|s: &BenchSetup| -> u64` closure overriding bytes-moved.
@@ -75,12 +76,7 @@ impl syn::parse::Parse for BenchAttr {
         }
 
         Ok(BenchAttr {
-            name: name.ok_or_else(|| {
-                syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    "#[bench] requires `name = \"...\"`",
-                )
-            })?,
+            name,
             dtypes: dtypes.ok_or_else(|| {
                 syn::Error::new(
                     proc_macro2::Span::call_site(),
@@ -115,10 +111,14 @@ pub(crate) fn dtype_token(ident: &str) -> TokenStream2 {
 /// Expand a single concrete `#[bench]` function into its `KernelBench` impl.
 ///
 /// Called once per variant when `variants(...)` is present, or once directly
-/// for a plain `#[bench]`.
-fn expand_one(name_lit: &LitStr, bench_attr: &BenchAttr, input_fn: ItemFn) -> TokenStream2 {
+/// for a plain `#[bench]`.  `name_lit` is `None` when the caller wants the
+/// function name used as the bench name.
+fn expand_one(name_lit: Option<&LitStr>, bench_attr: &BenchAttr, input_fn: ItemFn) -> TokenStream2 {
     let fn_name = &input_fn.sig.ident;
     let fn_name_str = fn_name.to_string();
+    let name_lit = name_lit
+        .cloned()
+        .unwrap_or_else(|| LitStr::new(&fn_name_str, fn_name.span()));
     let impl_name = syn::Ident::new(&format!("__BenchImpl_{fn_name_str}"), fn_name.span());
 
     let dtype_tokens: Vec<TokenStream2> =
@@ -200,6 +200,11 @@ fn expand_one(name_lit: &LitStr, bench_attr: &BenchAttr, input_fn: ItemFn) -> To
 /// With `variants(...)` it emits one registration per variant, substituting
 /// integer constants into the function body (via [`variants::substitute_fn`])
 /// and evaluating `{PARAM}` expressions in the `name` template string.
+///
+/// `name` is optional.  When absent, the bench name defaults to the
+/// (variant-renamed) function name, e.g. `bench_dequant_gemv_int4`.
+/// Specify `name` explicitly when you need a path-prefixed display name such
+/// as `"ffai/dequant_gemv/int{BITS}"`.
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr2: proc_macro2::TokenStream = attr.into();
     let item2: proc_macro2::TokenStream = item.into();
@@ -224,26 +229,17 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let Some(spec) = bench_attr.variants.as_ref() else {
         // Plain #[bench] — single expansion.
-        return expand_one(&bench_attr.name, &bench_attr, input_fn).into();
+        return expand_one(bench_attr.name.as_ref(), &bench_attr, input_fn).into();
     };
 
     // Variants path: expand once per variant.
     let base_name = input_fn.sig.ident.to_string();
-    let name_template = bench_attr.name.value();
-    let name_span = bench_attr.name.span();
     let mut out = TokenStream2::new();
 
     for i in 0..spec.variant_count {
         let params_ordered: Vec<(String, i64)> =
             spec.params.iter().map(|(n, vals)| (n.clone(), vals[i])).collect();
         let params_map: HashMap<String, i64> = params_ordered.iter().cloned().collect();
-
-        // Evaluate the bench name template, e.g. "ffai/foo/int{BITS}" → "ffai/foo/int4".
-        let variant_name_str = match eval_suffix(&name_template, &params_map) {
-            Ok(s) => s,
-            Err(e) => return e.into_compile_error().into(),
-        };
-        let variant_name_lit = syn::LitStr::new(&variant_name_str, name_span);
 
         // Substitute body tokens and rename the function.
         let variant_fn = match variants::substitute_fn(
@@ -256,7 +252,40 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
             Err(e) => return e.into_compile_error().into(),
         };
 
-        out.extend(expand_one(&variant_name_lit, &bench_attr, variant_fn));
+        // Evaluate the explicit name template if provided, e.g. "ffai/foo/int{BITS}" →
+        // "ffai/foo/int4".  When absent, fall through to None so expand_one uses the
+        // renamed function name (which already has the suffix applied).
+        //
+        // If name contains no `{PARAM}` placeholders but variants has a suffix, append
+        // `_<suffix_value>` automatically.  This lets callers write
+        //   `name = "ffai/dequant_gemv", variants(BITS=[4,8], suffix="int{BITS}")`
+        // and get bench names `ffai/dequant_gemv_int4`, `ffai/dequant_gemv_int8`.
+        let variant_name_lit: Option<LitStr> = match &bench_attr.name {
+            Some(tmpl) => {
+                let raw = tmpl.value();
+                let evaluated = match eval_suffix(&raw, &params_map) {
+                    Ok(s) => s,
+                    Err(e) => return e.into_compile_error().into(),
+                };
+                // If eval changed nothing (no placeholders) and variants has a suffix,
+                // append the evaluated suffix value.
+                let final_name = if evaluated == raw
+                    && let Some(sfx_tmpl) = &spec.suffix
+                {
+                    let suffix_val = match eval_suffix(sfx_tmpl, &params_map) {
+                        Ok(s) => s,
+                        Err(e) => return e.into_compile_error().into(),
+                    };
+                    format!("{evaluated}_{suffix_val}")
+                } else {
+                    evaluated
+                };
+                Some(LitStr::new(&final_name, tmpl.span()))
+            },
+            None => None,
+        };
+
+        out.extend(expand_one(variant_name_lit.as_ref(), &bench_attr, variant_fn));
     }
 
     out.into()

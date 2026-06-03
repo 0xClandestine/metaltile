@@ -228,7 +228,7 @@ pub mod kernel_benches {
             .grid_3d(packed_width as u32, tokens as u32, bh as u32, [1, 1, 1])
     }
 
-    #[bench(name = "ffai/aura_dequant_rotated_int{BITS}", dtypes = [f32, f16, bf16],
+    #[bench(name = "ffai/aura_dequant_rotated", dtypes = [f32, f16, bf16],
             variants(BITS = [2, 3, 4, 6, 8], suffix = "int{BITS}"))]
     fn bench_aura_dequant_rotated(dt: DType) -> BenchSetup {
         setup(

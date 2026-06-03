@@ -802,7 +802,7 @@ pub mod kernel_benches {
             .bytes_moved((N_KV_HEADS * HEAD_DIM * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "ffai/kv_cache/quantize_int{BITS}", dtypes = [f32, f16, bf16],
+    #[bench(name = "ffai/kv_cache/quantize", dtypes = [f32, f16, bf16],
             variants(BITS = [4, 8], suffix = "int{BITS}"))]
     fn bench_quantize_kv(dt: DType) -> BenchSetup {
         quant_bench(quantize_kv_intBITS::kernel_ir_for(dt), BITS, dt)
@@ -828,7 +828,7 @@ pub mod kernel_benches {
             .bytes_moved((total_out * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "ffai/kv_cache/bulk_dequant_int{BITS}", dtypes = [f32, f16, bf16],
+    #[bench(name = "ffai/kv_cache/bulk_dequant", dtypes = [f32, f16, bf16],
             variants(BITS = [4, 8], suffix = "int{BITS}"))]
     fn bench_bulk_dequant_kv(dt: DType) -> BenchSetup {
         dequant_bench(bulk_dequant_kv_intBITS::kernel_ir_for(dt), BITS, dt)

@@ -897,7 +897,7 @@ pub mod kernel_benches {
     }
 
     // Base: BITS ∈ {4, 8}, DIM ∈ {64, 96, 128, 256, 512} — all 10 combos.
-    #[bench(name = "ffai/flash_quantized_sdpa_b{BITS}_d{DIM}", dtypes = [f32, f16, bf16],
+    #[bench(name = "ffai/flash_quantized_sdpa", dtypes = [f32, f16, bf16],
             variants(BITS = [4, 4, 4, 4, 4, 8, 8, 8, 8, 8],
                      DIM  = [64, 96, 128, 256, 512, 64, 96, 128, 256, 512],
                      suffix = "b{BITS}_d{DIM}"))]
@@ -906,7 +906,7 @@ pub mod kernel_benches {
     }
 
     // Bool mask: BITS ∈ {4, 8}, DIM ∈ {64, 128, 256} — 6 combos.
-    #[bench(name = "ffai/flash_quantized_sdpa_bool_mask_b{BITS}_d{DIM}", dtypes = [f32, f16, bf16],
+    #[bench(name = "ffai/flash_quantized_sdpa_bool_mask", dtypes = [f32, f16, bf16],
             variants(BITS = [4, 4, 4, 8, 8, 8], DIM = [64, 128, 256, 64, 128, 256],
                      suffix = "b{BITS}_d{DIM}"))]
     fn bench_bool_mask(dt: DType) -> BenchSetup {
@@ -921,7 +921,7 @@ pub mod kernel_benches {
     }
 
     // Float mask: BITS ∈ {4, 8}, DIM ∈ {64, 128, 256} — 6 combos.
-    #[bench(name = "ffai/flash_quantized_sdpa_float_mask_b{BITS}_d{DIM}", dtypes = [f32, f16, bf16],
+    #[bench(name = "ffai/flash_quantized_sdpa_float_mask", dtypes = [f32, f16, bf16],
             variants(BITS = [4, 4, 4, 8, 8, 8], DIM = [64, 128, 256, 64, 128, 256],
                      suffix = "b{BITS}_d{DIM}"))]
     fn bench_float_mask(dt: DType) -> BenchSetup {
