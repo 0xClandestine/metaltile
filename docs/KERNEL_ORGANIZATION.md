@@ -17,22 +17,21 @@
 
 The current layout splits kernels into two top-level folders:
 
-- `crates/metaltile-std/src/ffai/` — 88 files, kernels with **no** MLX
-  counterpart.
-- `crates/metaltile-std/src/mlx/` — 43 files, kernels that **mirror an MLX
-  metal kernel** (and carry an `mlx="…"` bench comparator).
+- `crates/metaltile-std/src/ffai/` — 88 files, kernels with **no** upstream
+  metal counterpart.
+- `crates/metaltile-std/src/mlx/` — 43 files, kernels that historically
+  **mirrored an upstream metal kernel** it could be benched against.
 
 Two structural problems:
 
-1. **The organizing axis is wrong.** "Does MLX have this kernel?" is not a
-   property of the *kernel* — it's a property of one *bench*. And it's already
-   expressed per-kernel: the `#[kernel(bench(… mlx="rms{tn}", class=RowNorm))]`
-   attribute + the `MetalRef` bench mechanism. The folder split duplicates that
-   attribute as directory structure, and it ages badly: as we **diverge from
-   and supersede MLX** (custom SDPA, GDN/SSM, AURA, turbo, fp4/fp8), the MLX
-   reference is losing value, so a folder defined by it is increasingly
-   meaningless. New kernels are landing under `ffai/` regardless of whether an
-   MLX analog exists.
+1. **The organizing axis is wrong.** "Does an upstream metal reference exist?"
+   is not a property of the *kernel* — it's a property of one *bench*, and an
+   optional one. It's already expressed per-bench: the optional `ref = MetalRef
+   { … }` attribute. The folder split duplicates that optional attribute as
+   directory structure, and it ages badly: as we **diverge from and supersede
+   the references** (custom SDPA, GDN/SSM, AURA, turbo, fp4/fp8), they lose
+   value, so a folder defined by them is increasingly meaningless. New kernels
+   land under `ffai/` regardless of whether a reference exists.
 
 2. **Fragmentation + model-name leakage.** Within `ffai/` the same family is
    scattered across many 1-kernel files (`sdpa_bidirectional.rs`,
@@ -54,12 +53,15 @@ fragmented families have them).
 ## 2. Goals / non-goals
 
 **Goals**
-- Organize by **kernel family**, not by MLX-presence.
+- Organize by **kernel family**, not by whether a kernel happens to have a
+  reference implementation.
 - One **cohesive file per kernel** = the op + all its shape / precision / dtype
   / bit-width variants, with its kernel spec, bench spec, and test spec
   together.
-- Make the MLX reference a purely **optional per-bench attribute** that any
-  kernel may carry, and dissolve the `mlx/` folder.
+- Lean into the **metal reference** already being an optional per-bench
+  attribute. There is no hardcoded `mlx` / `mlx_ref` naming any more — a ref is
+  just an optional metal kernel a bench compares against ("metal ref"), so files
+  group by family, not by ref-presence. Dissolve the `mlx/` folder.
 - Make the **quant explosion** (affine int2–8, fp4/fp8 mx/nv, int8, aura,
   turbo) drop in cleanly so the in-flight fp4/fp8/int8 work has an obvious home.
 - No model names anywhere in file names, `op=`, `subop=`, or bench `name=`.
@@ -152,6 +154,22 @@ test/bench scaffolding, they belong in one file. The cap is readability — a
 file past ~800 lines of *kernel* code (excluding tests) should split along the
 algorithm boundary, not the dtype/shape boundary.
 
+When a family does split along genuine algorithm boundaries, it becomes a
+**sub-folder, one file per distinct op** — keeping each file focused rather than
+one oversized family file. SDPA is the canonical example:
+
+```
+sdpa/
+    bidirectional.rs   # dense + windowed + relpos + conformer (one softmax body)
+    decode.rs          # decode-time SDPA (+ d64/d96/d256/d512, 2-pass, sink)
+    prefill.rs         # prefill MMA path
+    mod.rs             # pub mod bidirectional; pub mod decode; pub mod prefill;
+```
+
+The dtype / head-dim / shape variants of *one* op still collapse into that op's
+single file (per the "one file" rules above); the sub-folder split is reserved
+for genuinely distinct algorithms within the family.
+
 ## 5. The canonical kernel file
 
 Every kernel file is self-contained: **kernel spec + bench spec + test spec**,
@@ -162,16 +180,29 @@ in this order:
 //! No model names; name the *operation* and list representative consumers
 //! generically ("the bidirectional vision-tower SDPA", not "Qwen2.5-VL").
 
-use metaltile::kernel;
+use metaltile::{bench, kernel, test_kernel};
 
-#[kernel(bench(op="sdpa", subop="bidirectional", class=…, tol=…, mode=…,
-               mlx="…"   /* OPTIONAL — omit when no live MLX comparison */))]
+#[kernel]
 pub fn <name><T>( … ) { … }
 
 // (further variants of the SAME op live here too)
 
-pub mod kernel_tests   { /* naive oracle(s) + #[test_kernel(dtypes=…, tol=…)] */ }
-pub mod kernel_benches { /* #[bench(name="ffai/<family>/<op>")] per shape    */ }
+pub mod kernel_tests {
+    // naive CPU oracle(s) + correctness setups:
+    //   #[test_kernel(dtypes = [f32, f16, bf16], tol = […])]
+    //   fn test_<op>(dt: DType) -> TestSetup { … }
+}
+
+pub mod kernel_benches {
+    // one #[bench] per shape; builder-style BenchSetup:
+    //   #[bench(name = "ffai/<family>/<op>", dtypes = [f32, f16, bf16])]
+    //   fn bench_<op>(dt: DType) -> BenchSetup {
+    //       BenchSetup::new(<name>::kernel_ir_for(dt))
+    //           .mode(…).buffer(…).constexpr(…).bytes_moved(…)
+    //           .flops(…)                        // OPTIONAL — enables GFLOP/s
+    //           .with_reference(MetalRef { … })  // OPTIONAL metal ref — omit when none
+    //   }
+}
 ```
 
 > Post-v4 (§10), the test/bench modules import from `metaltile::harness::test`
@@ -195,17 +226,18 @@ single file expresses every permutation declaratively, rather than copy-pasted
   `bidirectional.rs` + one `decode.rs`. **This macro is the prerequisite that
   unlocks the cleanest end-state for `sdpa/`** — until it lands, keep the
   hand-written dim variants in ONE file rather than one-per-dim.
-- **optional MLX comparator** — keep `mlx="…"` as a per-`#[bench]` attribute
-  (already supported via `MetalRef`). It is the *only* thing that should encode
-  "an MLX version exists," and it is optional. Default (`class=GenericEmpty`,
-  no `mlx=`) = a metaltile-native kernel benched against itself / a CPU oracle.
+- **optional metal reference** — a bench may carry an optional `ref = MetalRef
+  { … }` attribute (or `BenchSetup::with_reference(…)`) naming a metal kernel to
+  benchmark against side-by-side. It is just an optional comparator — no
+  hardcoded `mlx` / `mlx_ref` naming. Omit it (the default) and the kernel is
+  benched on its own / against a CPU oracle.
 
 ## 6. Quantization umbrella (`quant/`) — fp4 / fp8 / int8 plan
 
 The in-flight mxfp4 / nvfp4 / mxfp8 / nvfp8 + int8 work lands here. Organize by
 **quant *scheme*, one file each**, every bit-width/dtype as a macro cell:
 
-- `quant/affine.rs` — MLX-style affine `(weight, scales, biases)` int2–8:
+- `quant/affine.rs` — standard affine `(weight, scales, biases)` int2–8:
   `dequant_gemv`, `dequant_gather`, `qmm_mma`, `dequantize_affine`. One file,
   `bits=[2,3,4,5,6,8]` macro axis.
 - `quant/fp_scaled.rs` — block-scaled float: **mxfp4, nvfp4, mxfp8, nvfp8**.
@@ -222,18 +254,18 @@ Rule of thumb: a **new quant *format*** (nvfp8, etc.) is a **macro cell** in the
 matching scheme file; a **new quant *algorithm*** (a different packing/codebook)
 is a **new file** under `quant/`.
 
-## 7. MLX-reference policy (deprioritize)
+## 7. Reference-kernel policy (deprioritize)
 
 - The `mlx/` folder **dissolves** — its kernels move into the family folders by
   operation (`mlx/gemv.rs` → `gemm/`, `mlx/rms_norm.rs` → `norm/`,
   `mlx/quantized*.rs` → `quant/`, `mlx/binary.rs` → `core/`, …).
-- The MLX comparison survives as the optional `mlx="…"` bench attribute on the
-  individual kernels where a side-by-side number still teaches us something
+- A side-by-side metal comparison survives as the optional `ref = MetalRef { … }`
+  bench attribute on the individual kernels where it still teaches us something
   (the few perf-sensitive primitives). Everywhere else, drop it; bench against a
-  CPU oracle / our own baseline.
-- **New kernels never require an MLX analog.** `class=GenericEmpty` is the
-  default. We are past parity; coverage + speed of *our* kernels is the metric,
-  not MLX-delta.
+  CPU oracle / our own baseline. The attribute is a generic *metal reference* —
+  there is no `mlx` / `mlx_ref` naming.
+- **New kernels never require a reference analog.** A bench with no `ref` is the
+  default. We are past parity; coverage + speed of *our* kernels is the metric.
 
 ## 8. Naming rules
 
@@ -294,10 +326,10 @@ restructures the **kernel files**. They're orthogonal, but both edit
   no kernel-body change is needed; just don't reach for `-core`/`-codegen`/
   `-runtime` directly.
 - **Bench protocol:** v4 routes results through `ProtocolMessage` (incl. the
-  optional `ref_gbps` / `mt_pct` fields for an MLX comparator). This *reinforces*
-  §7 — the MLX reference is a per-bench data field, not a folder; a kernel with
-  no `mlx=` simply reports `ref_gbps: None`. Nothing in `kernels/` needs to
-  encode MLX-presence.
+  optional `ref_gbps` / `mt_pct` fields for a metal comparator). This *reinforces*
+  §7 — the metal reference is a per-bench data field, not a folder; a kernel with
+  no `ref` simply reports `ref_gbps: None`. Nothing in `kernels/` needs to encode
+  reference-presence.
 - **`lib.rs` convergence:** v4's interim `pub mod ffai; pub mod mlx; pub mod
   utils;` becomes `pub mod kernels; pub mod utils;` once this reorg lands (the
   `pub use metaltile::harness::registry::{all_benches, all_kernels, all_tests};`
@@ -319,4 +351,4 @@ fp4/fp8/int8 session.
   into `conv/`, `norm/`, `core/` (with only the irreducibly-domain ops —
   mel DFT, bicubic resize, frame-diff — left)? (Spec keeps thin `vision/`/
   `audio/` folders; revisit once populated.)
-- Timeline to retire the last `mlx=` comparators entirely?
+- Which kernels keep an optional metal `ref` comparator, and for how long?
