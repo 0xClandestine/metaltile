@@ -8,7 +8,7 @@ Snapshot of the kernels shipped by `metaltile-std` as of `dev` `c017c94`. Compar
 - **89 / 90 kernel-op rows ported** — 89 ✓, 0 partial, 1 intentionally out of scope (`fence`; see [§ Fence ops](#fence-ops--intentionally-out-of-scope)).
 - **Every floating-point kernel exposes f32 / f16 / bf16.** bf16 coverage was completed in PR #152, which also migrated every cooperative-tensor (NAX) kernel from hand-built `Op::InlineMsl` IR to the `#[kernel]` DSL via the `coop_tile_*` intrinsics + `coop_stage(T)` (bf16 → `half` staging because Apple's `matmul2d` mishandles `bfloat` cooperative tensors).
 - **int4 and int8 quantized perf paths are at parity.** PR #154 built out int8 dense GEMM (`qmv`/`qmm`/`qmm_mma`/`qmm_mpp`/`qmm_nax`) and int8 MoE BGEMM (`mma`/`bm{8,16,64}_mpp`) plus int4 polish (`rms_norm_qgemv_fast`, `batched_qkv_qgemv_fast`, `dequant_gemv_int4_fast`, `qvm_int4_fast`).
-- **Full block-scaled precision matrix across every weight-bearing kernel.** PR #2 (`ek/precision-support`) added spec-conformant **nvfp4 / mxfp4 / mxfp8 (e4m3+e5m2) / nvfp8**, legacy float-scale **fp4 / fp8 (e4m3+e5m2)**, and the complete **symmetric integer matrix** — `int2/3/4/5/6/8` (FP32 group) + `mxint2/3/4/5/6/8` (E8M0 block) — **20 formats** to *every* quantized family (matmul/MoE/attention/embedding/conv, on the reduction, simdgroup-MMA, MPP, and NAX paths). Each `(family × format × dtype)` is 1:1 `#[test_kernel]`-verified against the `quant::format` CPU oracle and benched. **The full integer family is present in all of them** (incl. the fast tensor-engine paths). See [§ Quantization precision coverage](#quantization-precision-coverage).
+- **Full block-scaled precision matrix across every weight-bearing kernel.** PR #2 (`ek/precision-support`) added spec-conformant **nvfp4 / mxfp4 / mxfp8 (e4m3+e5m2) / nvfp8**, legacy float-scale **fp4 / fp8 (e4m3+e5m2)**, the complete **symmetric integer matrix** — `int2/3/4/5/6/8` (FP32 group) + `mxint2/3/4/5/6/8` (E8M0 block) — and **FP16-scale twins** of every FP32-scaled format (`*_f16`): **30 formats** to *every* quantized family (matmul/MoE/attention/embedding/conv, on the reduction, simdgroup-MMA, MPP, and NAX paths). Each `(family × format × dtype)` is 1:1 `#[test_kernel]`-verified against the `quant::format` CPU oracle and benched. **The full integer family is present in all of them** (incl. the fast tensor-engine paths). See [§ Quantization precision coverage](#quantization-precision-coverage).
 - **Attention coverage spans every production head_dim.** PR #157 added `steel_attention_nax_d{64,128,256}`, `mt_sdpa_vector_d{64,96,192,256}`, `sdpa_vector_2pass_d{64,96,256}`, and `flash_quantized_sdpa_d{96,512}` (GPT-NeoX d=96, Gemma 4 global d=512).
 - **Vision / STT / TTS front-end has MMA-tiled perf paths.** PR #157 shipped `conv2d_mma` / `conv3d_mma` / `patch_embed_mma` (implicit-im2col + 4-SG 2×2 simdgroup-matrix MMA) and Bluestein non-pow2 FFT (`mt_fft_bluestein_*`, covers Whisper n_fft=400/480).
 - **Tail items**: PR #157 added `mt_sort_segmented`, `mt_scan_{prod,max,min}` (+ exclusive), `sdpa_decode_batched_q8`, and 12 `flash_quantized_sdpa_{bool,float}_mask_*` variants.
@@ -110,7 +110,7 @@ Local verification of NAX kernels is the developer's responsibility on M4+ hardw
 | dequant_gather (quantized embedding-table gather) | ✗ | ✗ | ✓ | `ffai/dequant_gather.rs`. int{3,4,5,6,8} all bit-widths. FFAI-only. |
 | dequant_gemv (quantized GEMV, FFAI flavour) | ~ | ~ | ✓ | `ffai/dequant_gemv.rs` → `dequant_gemv_int{3,4,5,6,8}<T>` (one-row-per-TG) + `dequant_gemv_int4_fast<T>` (PR #154, 8-row-per-TG, mirrors MLX `qmv_fast`). The non-fast int4 kernel stays because FFAI's GPU-router opts into its indirect Swift wrapper. |
 | fp_quantized (fp4/fp8 quant + dequant) | ✓ | ✓ | ✓ | `mlx/fp_quantized.rs` → `mt_fp4_quant_dequant` (fp4 E2M1) + `mt_fp8_e4m3_quant_dequant` / `mt_fp8_e5m2_quant_dequant` (fp8). Pure arithmetic transform (per-group max-scale + mantissa rounding via `floor(log2)`/`exp2`/`round`); exact for fp8 normals/subnormals, saturating (no NaN/Inf). |
-| fp_quantized_mma | ✗ | ✗ | ✓ | `mlx/fp_quantized_mma.rs` (PR #157) → `mt_fp4_qmm_mma<T>` + `mt_fp8_e4m3_qmm_mma<T>`. Simdgroup-matrix BM=BN=BK=32 MMA — same 4-SG 2×2 scaffold as `mt_qmm_mma_b{3,5,6}` but with fp4 codebook lookup / fp8 E4M3 biased-exp decode. **Not** NAX-gated — runs on any M1+. Fills the M>1 perf slot between the scalar round-trip kernels and the NAX-gated `fp_quantized_nax`. fp4 decode goes through the `e2m1_decode` intrinsic; fp8 through `e4m3_decode`. The spec-conformant block-scaled MMA family (all 20 formats) lives in `mlx/block_scaled_mma.rs` (its float-scale fp4 kernel is `mt_fp4_float_qmm_mma`). |
+| fp_quantized_mma | ✗ | ✗ | ✓ | `mlx/fp_quantized_mma.rs` (PR #157) → `mt_fp4_qmm_mma<T>` + `mt_fp8_e4m3_qmm_mma<T>`. Simdgroup-matrix BM=BN=BK=32 MMA — same 4-SG 2×2 scaffold as `mt_qmm_mma_b{3,5,6}` but with fp4 codebook lookup / fp8 E4M3 biased-exp decode. **Not** NAX-gated — runs on any M1+. Fills the M>1 perf slot between the scalar round-trip kernels and the NAX-gated `fp_quantized_nax`. fp4 decode goes through the `e2m1_decode` intrinsic; fp8 through `e4m3_decode`. The spec-conformant block-scaled MMA family (all 30 formats) lives in `mlx/block_scaled_mma.rs` (its float-scale fp4 kernel is `mt_fp4_float_qmm_mma`). |
 | fp_quantized_nax | ✓ | ✓ | ✓ | `mlx/fp_quantized_nax.rs` → `mt_fp_qmm_nax<T>`. fp4 (E2M1) quantized matmul via NAX `matmul2d`. Same dequant-into-TG-memory + one cooperative `matmul2d` per simdgroup per K-block, with fp4 codebook lookup (`{0,0.5,1,1.5,2,3,4,6}` + sign bit, scale-only). 8 fp4 codes per `u32` pack; `GROUP_SIZE = 32`. Runtime-gated to Apple10+. |
 | quantized_nax | ✓ | ✓ | ✓ | `mlx/quantized_nax.rs` → `mt_qmm_nax<T>` (int4) + `mt_qmm_nax_int8` (int8, PR #154 in `mlx/quantized_nax_int8.rs`). MPP counterpart of `mt_qmm_mma`: same int4-dequant-into-TG-memory algorithm, one cooperative `matmul2d` per simdgroup per K-block; int8 variant uses byte-shift extract (2 packs/lane). Runtime-gated to Apple10+. |
 | fft (radix + readwrite + non-pow2) | ✓ | ✓ | ✓ | `mlx/fft.rs` → `mt_fft_n{32,64,128,256,512,1024}<T>` (iterative radix-2 Cooley–Tukey, forward + inverse via `inv` constexpr; complex via parallel real/imag planes). **Non-pow2 Bluestein** (PR #157): `mt_fft_bluestein_preprocess<T>` + `mt_fft_bluestein_chirp_filter` + `mt_fft_bluestein_cmul<T>` + `mt_fft_bluestein_postprocess<T>` — chirp-Z transform wrapping the existing pow2 FFT for arbitrary N in O(N log N); covers Whisper n_fft=400 / 480 with M=1024 padding. Prime-length (Rader) remains a follow-up. |
@@ -162,7 +162,7 @@ restores magnitude. Formats vary along **three orthogonal axes** — bit-width i
    (E2M1 / E4M3 / E5M2). The element is what the code decodes to.
 2. **Scale** — how the per-block scale is stored: a raw FP32 per large group, a
    compact `E8M0` power-of-two per small block (OCP MX), an `E4M3` micro-scale ×
-   a tensor-wide FP32 global (NVFP4), or FP16 (a memory-halving option).
+   a tensor-wide FP32 global (NVFP4), or FP16 (the memory-halving `*_f16` twins).
 3. **Zero-point** — **symmetric** (no zero-point) or **asymmetric** (scale +
    bias). Every Track-1 format below is symmetric; the asymmetric integer track
    (Track 2) carries a zero-point for MLX-checkpoint interop.
@@ -192,14 +192,20 @@ bit-stream extraction for `int2/3/5/6`):
 | `fp8_e5m2` (legacy) | E5M2 | 32 | FP32 per-group | — |
 | `int2 / int3 / int4 / int5 / int6 / int8` (symmetric) | int N | 64 | FP32 per-group | — |
 | `mxint2 / mxint3 / mxint4 / mxint5 / mxint6 / mxint8` | int N | 32 | E8M0 pow-2 (1 B) | — |
+| `*_f16` (twins of the FP32-scaled formats above) | as twin | as twin | FP16 (2 B) | — |
 
-**20 formats.** The integer members are symmetric int-N: a plain FP32 group scale
+**30 formats.** The integer members are symmetric int-N: a plain FP32 group scale
 (`int*`, group 64) or an OCP-MX-style `E8M0` power-of-two block scale (`mxint*`,
 block 32 — `mxint8` is OCP-ratified MXINT8, the rest follow the same
 construction; these map to tensor-core block-scaling units for future NVIDIA /
 AMD targets). Sub-byte codes (2/3/4/5/6-bit) tight-bit-pack LSB-first into u32
 words (a 4-bit stream is byte-identical to the classic nibble layout); 8-bit is
-one byte/code.
+one byte/code. Every FP32-scaled format additionally has an **FP16-scale twin**
+(`nvfp8_f16`, `fp4_f16`, `fp8_e4m3_f16`, `fp8_e5m2_f16`, `int2-6_f16`, `int8_f16`)
+— same element + block, scale stored as a 2-byte IEEE half (the layout real
+checkpoints use; the host encoder does correct round-to-nearest-even **with
+subnormal support**, since wide-range elements like E5M2 push scales into f16's
+subnormal range).
 
 ### Track 2 — asymmetric affine int (scale + bias)
 
@@ -227,7 +233,7 @@ matrix); it does not replace Track 2. (The float-scale `fp4`/`fp8` *within* Trac
 group scale — **are** legacy, superseded by spec mxfp4/nvfp4/mxfp8/nvfp8, kept as labeled
 comparison variants.)
 
-### Block-scaled coverage — every family supports all 20 Track-1 formats
+### Block-scaled coverage — every family supports all 30 Track-1 formats
 
 Each `(family × format)` ships a 1:1 `#[test_kernel]` (GPU-verified vs
 `quant::format::dequant`) + a `#[bench]` with `.flops()` so the latency / GFLOP/s /
@@ -254,7 +260,7 @@ each family's proven dispatch geometry verbatim (no new freeze surface).
 | batched-Q/K/V qgemv + qmm | reduction | `ffai/batched_qkv_block_scaled_{qgemv,qmm}.rs` | int4, int8-fast |
 | batched-4 qgemv + qmm | reduction | `ffai/batched_4_block_scaled_{qgemv,qmm}.rs` | int4 |
 | embedding gather | elementwise | `ffai/dequant_gather_block_scaled.rs` | int3–8 |
-| flash SDPA (block-scaled KV) | flash | `ffai/flash_block_scaled_sdpa.rs` (d64/96/128/256/512, all 20 formats¹) | affine int4/int8 KV, same dims |
+| flash SDPA (block-scaled KV) | flash | `ffai/flash_block_scaled_sdpa.rs` (d64/96/128/256/512, all 30 formats¹) | affine int4/int8 KV, same dims |
 | patch embed (linear projection) | reduction | `ffai/patch_embed_block_scaled.rs` | — |
 | patch embed (simdgroup-MMA) | simdgroup-matrix | `ffai/patch_embed_mma_block_scaled.rs` | — |
 | conv2d / conv3d (direct) | reduction | `ffai/{conv2d,conv3d}_block_scaled.rs` | — |
@@ -263,7 +269,7 @@ each family's proven dispatch geometry verbatim (no new freeze surface).
 | audio conv1d (STT front-end) | reduction | `ffai/audio_conv1d_block_scaled.rs` | — |
 | fishspeech conv1d (TTS front-end) | reduction | `ffai/fishspeech_conv1d_block_scaled.rs` | — |
 
-¹ Flash KV covers every production head dim (d64/96/128/256/512), each × all 20 formats —
+¹ Flash KV covers every production head dim (d64/96/128/256/512), each × all 30 formats —
 **no holes**. int8's group size (64) doesn't divide d96, so that case tiles with a ragged
 trailing block: `n_blocks = ceil(dim/block_size)` (a 64-block + a 32-block), with the host
 packer and kernel rounding up identically so codes + scales stay self-consistent. The
