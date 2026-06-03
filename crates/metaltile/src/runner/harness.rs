@@ -137,7 +137,10 @@ impl RunnerHarness {
             .collect();
 
         let dtypes = Self::dtype_list(args);
-        let total = (entries.len() * dtypes.len()) as u32;
+        let total: u32 = entries
+            .iter()
+            .map(|e| e.test().dtypes().iter().filter(|dt| dtypes.contains(dt)).count() as u32)
+            .sum();
 
         emit_stdout(&ProtocolMessage::Start {
             runner_version: env!("CARGO_PKG_VERSION").into(),
@@ -168,12 +171,15 @@ impl RunnerHarness {
         // Phase 1 (parallel): build all TestSetups on the CPU.
         // `test.setup(dt)` computes expected output buffers without touching the
         // GPU, so all (entry × dtype) pairs can run concurrently via rayon.
+        // Only run each test for its registered dtypes, intersected with the
+        // CLI dtype filter — a test with dtypes=[f32] must not run with f16.
         let work: Vec<Vec<(String, DType, TestSetup, f64)>> = entries
             .par_iter()
             .map(|entry| {
                 let test = entry.test();
-                dtypes
+                test.dtypes()
                     .iter()
+                    .filter(|dt| dtypes.contains(dt))
                     .map(|&dt| {
                         let setup = test.setup(dt);
                         let tol = test.tolerance(dt);
