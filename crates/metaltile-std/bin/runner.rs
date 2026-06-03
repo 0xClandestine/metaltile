@@ -4,6 +4,11 @@
 //!
 //! User projects get their own copy scaffolded by `tile init`. This copy
 //! serves the metaltile workspace itself (e.g. `make bench` / `make test`).
+
+// Force the linker to include all `inventory::submit!` statics from the
+// metaltile-std library so that kernel/bench/test registrations are populated.
+extern crate metaltile_std;
+
 fn main() {
     let args = match metaltile::runner::RunnerArgs::from_env_args() {
         Ok(a) => a,
