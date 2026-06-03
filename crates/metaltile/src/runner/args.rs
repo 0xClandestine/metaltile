@@ -37,6 +37,17 @@ pub struct RunnerArgs {
     pub warmup: Option<usize>,
     /// Number of timed iterations (overrides `BENCH_ITERS` default).
     pub iters: Option<usize>,
+    // ── build-specific ───────────────────────────────────────────────────────
+    /// Comma-separated emit kinds: `msl`, `metallib`, `swift`, `ir`, `all`.
+    pub emit: Option<String>,
+    /// Output root directory for emitted artifacts.
+    pub out_dir: Option<String>,
+    /// xcrun SDK for Metal compilation (default: `macosx`).
+    pub sdk: Option<String>,
+    /// List kernel names and dtypes without compiling.
+    pub names: bool,
+    /// Run pass-pipeline timing benchmark and print table; no JSON protocol.
+    pub time_passes: bool,
 }
 
 impl RunnerArgs {
@@ -71,6 +82,11 @@ impl RunnerArgs {
         let mut profile = false;
         let mut warmup: Option<usize> = None;
         let mut iters: Option<usize> = None;
+        let mut emit: Option<String> = None;
+        let mut out_dir: Option<String> = None;
+        let mut sdk: Option<String> = None;
+        let mut names = false;
+        let mut time_passes = false;
 
         while let Some(flag) = it.next() {
             match flag.as_str() {
@@ -88,11 +104,29 @@ impl RunnerArgs {
                     let v = it.next().ok_or("--runs requires a value")?;
                     iters = Some(v.parse::<usize>().map_err(|_| format!("invalid --runs '{v}'"))?);
                 },
+                "--emit" => emit = it.next(),
+                "--out-dir" => out_dir = it.next(),
+                "--sdk" => sdk = it.next(),
+                "--names" => names = true,
+                "--time-passes" => time_passes = true,
                 other => return Err(format!("unknown flag '{other}'")),
             }
         }
 
-        Ok(RunnerArgs { command, filter, dtype, inspect_kind, profile, warmup, iters })
+        Ok(RunnerArgs {
+            command,
+            filter,
+            dtype,
+            inspect_kind,
+            profile,
+            warmup,
+            iters,
+            emit,
+            out_dir,
+            sdk,
+            names,
+            time_passes,
+        })
     }
 }
 

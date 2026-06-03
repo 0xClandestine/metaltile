@@ -33,6 +33,17 @@ pub struct RunnerInvocation {
     pub warmup_runs: Option<usize>,
     /// Override timed iteration count (passed as `--runs`).
     pub runs: Option<usize>,
+    // ── build-specific ──────────────────────────────────────────────────────
+    /// Comma-separated emit kinds: `msl`, `metallib`, `swift`, `ir`, `all`.
+    pub emit: Option<String>,
+    /// Output root directory for emitted artifacts.
+    pub out_dir: Option<String>,
+    /// xcrun SDK for Metal compilation (default: `macosx`).
+    pub sdk: Option<String>,
+    /// List kernel names and dtypes without compiling.
+    pub names: bool,
+    /// Run pass-pipeline timing benchmark; no JSON protocol (stdout inherited).
+    pub time_passes: bool,
 }
 
 /// Owns the `Harness` reference and exposes the subprocess dispatch method.
@@ -147,6 +158,24 @@ fn build_argv(inv: &RunnerInvocation) -> Vec<String> {
     if let Some(r) = inv.runs {
         argv.push("--runs".to_string());
         argv.push(r.to_string());
+    }
+    if let Some(e) = &inv.emit {
+        argv.push("--emit".to_string());
+        argv.push(e.clone());
+    }
+    if let Some(d) = &inv.out_dir {
+        argv.push("--out-dir".to_string());
+        argv.push(d.clone());
+    }
+    if let Some(s) = &inv.sdk {
+        argv.push("--sdk".to_string());
+        argv.push(s.clone());
+    }
+    if inv.names {
+        argv.push("--names".to_string());
+    }
+    if inv.time_passes {
+        argv.push("--time-passes".to_string());
     }
     argv
 }

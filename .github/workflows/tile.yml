@@ -117,7 +117,9 @@ jobs:
         id: binary-cache
         uses: actions/cache@v4
         with:
-          path: target/ci/tile
+          path: |
+            target/ci/tile
+            target/ci/__tile_runner
           key: tile-binary-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'crates/**/*.rs', 'rust-toolchain.toml') }}
 
       - uses: Swatinem/rust-cache@v2
@@ -126,17 +128,19 @@ jobs:
           shared-key: tile-macos
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Build tile CLI
+      - name: Build tile CLI and runner
         if: steps.binary-cache.outputs.cache-hit != 'true'
-        run: cargo build --profile ci -p metaltile-cli
+        run: cargo build --profile ci -p metaltile-cli -p metaltile-std
 
-      # Upload so every downstream job gets the binary without any cargo
+      # Upload so every downstream job gets both binaries without any cargo
       # invocation.  retention-days=1 keeps storage costs near zero.
       - name: Upload tile binary
         uses: actions/upload-artifact@v4
         with:
           name: tile-binary
-          path: target/ci/tile
+          path: |
+            target/ci/tile
+            target/ci/__tile_runner
           if-no-files-found: error
           retention-days: 1
 
@@ -159,7 +163,7 @@ jobs:
           path: target/ci
 
       - name: Make tile executable
-        run: chmod +x target/ci/tile
+        run: chmod +x target/ci/tile target/ci/__tile_runner
 
       - name: Add tile to PATH
         run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
@@ -185,7 +189,7 @@ jobs:
           path: target/ci
 
       - name: Make tile executable
-        run: chmod +x target/ci/tile
+        run: chmod +x target/ci/tile target/ci/__tile_runner
 
       - name: Add tile to PATH
         run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
@@ -226,7 +230,7 @@ jobs:
           path: target/ci
 
       - name: Make tile executable
-        run: chmod +x target/ci/tile
+        run: chmod +x target/ci/tile target/ci/__tile_runner
 
       - name: Add tile to PATH
         run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
@@ -271,7 +275,7 @@ jobs:
           path: target/ci
 
       - name: Make tile executable
-        run: chmod +x target/ci/tile
+        run: chmod +x target/ci/tile target/ci/__tile_runner
 
       - name: Add tile to PATH
         run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
@@ -325,7 +329,7 @@ jobs:
           path: target/ci
 
       - name: Make tile executable
-        run: chmod +x target/ci/tile
+        run: chmod +x target/ci/tile target/ci/__tile_runner
 
       - name: Add tile to PATH
         run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
