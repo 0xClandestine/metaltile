@@ -394,6 +394,154 @@ pub fn mt_int8_patch_embed<T>(
     store(out[idx], acc.cast::<T>());
 }
 
+// ── FP16-scale twins (nvfp8 / fp4 / fp8_e5m2) ────────────────────────────────
+// Identical element decode + weight indexing + Grid3D geometry to their
+// FP32-scaled twin above; only the scale axis changes — read as a native `half`
+// (`Tensor<f16>`) and cast to f32. The GPU half load matches the host
+// `f16_scale_decode`, so the dequant-vs-oracle equality is preserved.
+
+/// nvfp8 (FP16 scale) quantized patch embed — E4M3 weight (block 16), per-block
+/// FP16 scale. Also serves **fp8_e4m3_f16** (same 8-bit-E4M3 + f16-scale shape).
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_nvfp8_f16_patch_embed<T>(
+    image: Tensor<T>,
+    weight: Tensor<u8>,
+    scales: Tensor<f16>,
+    bias: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] in_ch: u32,
+    #[constexpr] in_h: u32,
+    #[constexpr] in_w: u32,
+    #[constexpr] patch_h: u32,
+    #[constexpr] patch_w: u32,
+    #[constexpr] hidden: u32,
+    #[constexpr] block_size: u32,
+) {
+    let idx = program_id::<0>();
+    let h = idx % hidden;
+    let patch = idx / hidden;
+    let patches_w = in_w / patch_w;
+    let py0 = (patch / patches_w) * patch_h;
+    let px0 = (patch - (patch / patches_w) * patches_w) * patch_w;
+    let input_plane = in_h * in_w;
+    let patch_dim = in_ch * patch_h * patch_w;
+    let n_blocks = patch_dim / block_size;
+    let w_row = h * patch_dim;
+    let w_row_blk = h * n_blocks;
+    let mut acc = load(bias[h]).cast::<f32>();
+    for ic in range(0u32, in_ch, 1u32) {
+        let img_ic = ic * input_plane;
+        let col_ic = ic * patch_h * patch_w;
+        for py in range(0u32, patch_h, 1u32) {
+            let img_row = img_ic + (py0 + py) * in_w;
+            for px in range(0u32, patch_w, 1u32) {
+                let col = col_ic + py * patch_w + px;
+                let pix = load(image[img_row + px0 + px]).cast::<f32>();
+                let elem = e4m3_decode(load(weight[w_row + col]).cast::<u32>());
+                let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
+                acc = acc + (elem * scale) * pix;
+            }
+        }
+    }
+    store(out[idx], acc.cast::<T>());
+}
+
+/// Legacy fp4 (FP16 scale) quantized patch embed — E2M1 weight (group 32),
+/// per-group FP16 scale.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_fp4_f16_patch_embed<T>(
+    image: Tensor<T>,
+    weight: Tensor<u32>,
+    scales: Tensor<f16>,
+    bias: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] in_ch: u32,
+    #[constexpr] in_h: u32,
+    #[constexpr] in_w: u32,
+    #[constexpr] patch_h: u32,
+    #[constexpr] patch_w: u32,
+    #[constexpr] hidden: u32,
+    #[constexpr] block_size: u32,
+) {
+    let idx = program_id::<0>();
+    let h = idx % hidden;
+    let patch = idx / hidden;
+    let patches_w = in_w / patch_w;
+    let py0 = (patch / patches_w) * patch_h;
+    let px0 = (patch - (patch / patches_w) * patches_w) * patch_w;
+    let input_plane = in_h * in_w;
+    let patch_dim = in_ch * patch_h * patch_w;
+    let w_packs_per_row = patch_dim / 8u32;
+    let n_blocks = patch_dim / block_size;
+    let w_row_pack = h * w_packs_per_row;
+    let w_row_blk = h * n_blocks;
+    let mut acc = load(bias[h]).cast::<f32>();
+    for ic in range(0u32, in_ch, 1u32) {
+        let img_ic = ic * input_plane;
+        let col_ic = ic * patch_h * patch_w;
+        for py in range(0u32, patch_h, 1u32) {
+            let img_row = img_ic + (py0 + py) * in_w;
+            for px in range(0u32, patch_w, 1u32) {
+                let col = col_ic + py * patch_w + px;
+                let pix = load(image[img_row + px0 + px]).cast::<f32>();
+                let nib = (load(weight[w_row_pack + col / 8u32]) >> ((col % 8u32) * 4u32)) & 0xFu32;
+                let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
+                acc = acc + (e2m1_decode(nib) * scale) * pix;
+            }
+        }
+    }
+    store(out[idx], acc.cast::<T>());
+}
+
+/// Legacy fp8 (E5M2, FP16 scale) quantized patch embed — 8-bit weight (group 32),
+/// per-group FP16 scale.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_fp8_e5m2_f16_patch_embed<T>(
+    image: Tensor<T>,
+    weight: Tensor<u8>,
+    scales: Tensor<f16>,
+    bias: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] in_ch: u32,
+    #[constexpr] in_h: u32,
+    #[constexpr] in_w: u32,
+    #[constexpr] patch_h: u32,
+    #[constexpr] patch_w: u32,
+    #[constexpr] hidden: u32,
+    #[constexpr] block_size: u32,
+) {
+    let idx = program_id::<0>();
+    let h = idx % hidden;
+    let patch = idx / hidden;
+    let patches_w = in_w / patch_w;
+    let py0 = (patch / patches_w) * patch_h;
+    let px0 = (patch - (patch / patches_w) * patches_w) * patch_w;
+    let input_plane = in_h * in_w;
+    let patch_dim = in_ch * patch_h * patch_w;
+    let n_blocks = patch_dim / block_size;
+    let w_row = h * patch_dim;
+    let w_row_blk = h * n_blocks;
+    let mut acc = load(bias[h]).cast::<f32>();
+    for ic in range(0u32, in_ch, 1u32) {
+        let img_ic = ic * input_plane;
+        let col_ic = ic * patch_h * patch_w;
+        for py in range(0u32, patch_h, 1u32) {
+            let img_row = img_ic + (py0 + py) * in_w;
+            for px in range(0u32, patch_w, 1u32) {
+                let col = col_ic + py * patch_w + px;
+                let pix = load(image[img_row + px0 + px]).cast::<f32>();
+                let elem = e5m2_decode(load(weight[w_row + col]).cast::<u32>());
+                let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
+                acc = acc + (elem * scale) * pix;
+            }
+        }
+    }
+    store(out[idx], acc.cast::<T>());
+}
+
 // ── Symmetric sub-byte integer patch embeds (int2/3/4/5/6 + MXINT2..6) ───────
 // The projection weight `W[hidden, patch_dim]` is stored as signed N-bit
 // two's-complement codes, tight-bit-packed LSB-first into u32 words. Each weight
@@ -556,6 +704,127 @@ int_patch_embed_e8m0!(mt_mxint4_patch_embed, 4u32, 8u32, 16.0f32);
 int_patch_embed_e8m0!(mt_mxint5_patch_embed, 5u32, 16u32, 32.0f32);
 int_patch_embed_e8m0!(mt_mxint6_patch_embed, 6u32, 32u32, 64.0f32);
 
+/// FP16-scaled symmetric int patch embed (int2/3/4/5/6): identical per-element
+/// bit-stream decode and per-row word alignment as `int_patch_embed_f32`; only
+/// the scale axis differs — read as a native `half` (`Tensor<f16>`) and cast to
+/// f32 (one FP16 scale per group).
+macro_rules! int_patch_embed_f16 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        #[allow(clippy::too_many_arguments)]
+        pub fn $name<T>(
+            image: Tensor<T>,
+            weight: Tensor<u32>,
+            scales: Tensor<f16>,
+            bias: Tensor<T>,
+            out: Tensor<T>,
+            #[constexpr] in_ch: u32,
+            #[constexpr] in_h: u32,
+            #[constexpr] in_w: u32,
+            #[constexpr] patch_h: u32,
+            #[constexpr] patch_w: u32,
+            #[constexpr] hidden: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let idx = program_id::<0>();
+            let h = idx % hidden;
+            let patch = idx / hidden;
+            let patches_w = in_w / patch_w;
+            let py0 = (patch / patches_w) * patch_h;
+            let px0 = (patch - (patch / patches_w) * patches_w) * patch_w;
+            let input_plane = in_h * in_w;
+            let patch_dim = in_ch * patch_h * patch_w;
+            let words_per_row = patch_dim * $bits / 32u32;
+            let n_blocks = patch_dim / block_size;
+            let w_row_word = h * words_per_row;
+            let w_row_blk = h * n_blocks;
+            let mut acc = load(bias[h]).cast::<f32>();
+            for ic in range(0u32, in_ch, 1u32) {
+                let img_ic = ic * input_plane;
+                let col_ic = ic * patch_h * patch_w;
+                for py in range(0u32, patch_h, 1u32) {
+                    let img_row = img_ic + (py0 + py) * in_w;
+                    for px in range(0u32, patch_w, 1u32) {
+                        let col = col_ic + py * patch_w + px;
+                        let pix = load(image[img_row + px0 + px]).cast::<f32>();
+                        let bit_off = col * $bits;
+                        let word_idx = bit_off / 32u32;
+                        let bit_in_w = bit_off & 31u32;
+                        let bits_in_w0 = 32u32 - bit_in_w;
+                        let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                        let spill = $bits - lo_bits;
+                        let w0 = load(weight[w_row_word + word_idx]);
+                        let w1 = load(
+                            weight[w_row_word + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                        );
+                        let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                        let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                        let q = lo | hi;
+                        let qf = q.cast::<f32>();
+                        let val = select(q >= $half, qf - $full, qf); // sign-extend
+                        let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
+                        acc = acc + (val * scale) * pix;
+                    }
+                }
+            }
+            store(out[idx], acc.cast::<T>());
+        }
+    };
+}
+int_patch_embed_f16!(mt_int2_f16_patch_embed, 2u32, 2u32, 4.0f32);
+int_patch_embed_f16!(mt_int3_f16_patch_embed, 3u32, 4u32, 8.0f32);
+int_patch_embed_f16!(mt_int4_f16_patch_embed, 4u32, 8u32, 16.0f32);
+int_patch_embed_f16!(mt_int5_f16_patch_embed, 5u32, 16u32, 32.0f32);
+int_patch_embed_f16!(mt_int6_f16_patch_embed, 6u32, 32u32, 64.0f32);
+
+/// int8 (FP16 scale) quantized patch embed — 8-bit symmetric codes (byte layout,
+/// group 64), per-group FP16 scale. Same byte-strided decode as `mt_int8_patch_embed`;
+/// only the scale is read as a `half` and cast to f32.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_int8_f16_patch_embed<T>(
+    image: Tensor<T>,
+    weight: Tensor<u8>,
+    scales: Tensor<f16>,
+    bias: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] in_ch: u32,
+    #[constexpr] in_h: u32,
+    #[constexpr] in_w: u32,
+    #[constexpr] patch_h: u32,
+    #[constexpr] patch_w: u32,
+    #[constexpr] hidden: u32,
+    #[constexpr] block_size: u32,
+) {
+    let idx = program_id::<0>();
+    let h = idx % hidden;
+    let patch = idx / hidden;
+    let patches_w = in_w / patch_w;
+    let py0 = (patch / patches_w) * patch_h;
+    let px0 = (patch - (patch / patches_w) * patches_w) * patch_w;
+    let input_plane = in_h * in_w;
+    let patch_dim = in_ch * patch_h * patch_w;
+    let n_blocks = patch_dim / block_size;
+    let w_row = h * patch_dim;
+    let w_row_blk = h * n_blocks;
+    let mut acc = load(bias[h]).cast::<f32>();
+    for ic in range(0u32, in_ch, 1u32) {
+        let img_ic = ic * input_plane;
+        let col_ic = ic * patch_h * patch_w;
+        for py in range(0u32, patch_h, 1u32) {
+            let img_row = img_ic + (py0 + py) * in_w;
+            for px in range(0u32, patch_w, 1u32) {
+                let col = col_ic + py * patch_w + px;
+                let pix = load(image[img_row + px0 + px]).cast::<f32>();
+                let elem = int8_decode(load(weight[w_row + col]).cast::<u32>());
+                let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
+                acc = acc + (elem * scale) * pix;
+            }
+        }
+    }
+    store(out[idx], acc.cast::<T>());
+}
+
 /// MXINT8 quantized patch embed — 8-bit symmetric codes (byte layout, block 32),
 /// E8M0 pow-2 block scale `2^(bits-127)`. Element-strided like the 8-bit float
 /// formats (one byte per code), decode is `int8_decode → val · scale`.
@@ -664,13 +933,14 @@ pub mod kernel_tests {
         }
         // 8-bit codes bind as one uchar each; every sub-byte width (4-bit nibble
         // packs + int2/3/5/6 tight bit-streams) binds as packed u32 words. FP32
-        // scales bind as f32; E8M0/E4M3 scales as one byte. Both axes are driven
-        // off the format so new integer formats pick up the right buffer types.
+        // scales bind as f32; FP16 scales as f16; E8M0/E4M3 scales as one byte.
+        // Both axes are driven off the format so new formats pick up the right
+        // buffer types.
         let weight_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
         let mut s = TestSetup::new(kernel)
             .mode(KernelMode::Grid3D)
@@ -910,6 +1180,152 @@ pub mod kernel_tests {
             dt,
         )
     }
+
+    // FP16-scale twins of the FP32-scaled formats. Same element packing + Grid3D
+    // geometry as their twin; only the scale buffer is f16. `fp8_e4m3_f16` reuses
+    // the `nvfp8_f16` kernel (same 8-bit-E4M3 + scale shape). patch_dim 256 stays
+    // a multiple of 32, so each weight row's bit-stream is word-aligned.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_nvfp8_f16_patch_embed(dt: DType) -> TestSetup {
+        patch_setup(
+            mt_nvfp8_f16_patch_embed::kernel_ir_for(dt),
+            QFormat::Nvfp8F16,
+            4,
+            16,
+            16,
+            8,
+            8,
+            64,
+            dt,
+        )
+    }
+    // fp8_e4m3_f16 reuses the nvfp8_f16 kernel (8-bit E4M3 + f16 scale, block 32).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e4m3_f16_patch_embed(dt: DType) -> TestSetup {
+        patch_setup(
+            mt_nvfp8_f16_patch_embed::kernel_ir_for(dt),
+            QFormat::Fp8E4m3F16,
+            4,
+            16,
+            16,
+            8,
+            8,
+            64,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp4_f16_patch_embed(dt: DType) -> TestSetup {
+        patch_setup(
+            mt_fp4_f16_patch_embed::kernel_ir_for(dt),
+            QFormat::Fp4F16,
+            4,
+            16,
+            16,
+            8,
+            8,
+            64,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e5m2_f16_patch_embed(dt: DType) -> TestSetup {
+        patch_setup(
+            mt_fp8_e5m2_f16_patch_embed::kernel_ir_for(dt),
+            QFormat::Fp8E5m2F16,
+            4,
+            16,
+            16,
+            8,
+            8,
+            64,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int2_f16_patch_embed(dt: DType) -> TestSetup {
+        patch_setup(
+            mt_int2_f16_patch_embed::kernel_ir_for(dt),
+            QFormat::Int2F16,
+            4,
+            16,
+            16,
+            8,
+            8,
+            64,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int3_f16_patch_embed(dt: DType) -> TestSetup {
+        patch_setup(
+            mt_int3_f16_patch_embed::kernel_ir_for(dt),
+            QFormat::Int3F16,
+            4,
+            16,
+            16,
+            8,
+            8,
+            64,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int4_f16_patch_embed(dt: DType) -> TestSetup {
+        patch_setup(
+            mt_int4_f16_patch_embed::kernel_ir_for(dt),
+            QFormat::Int4F16,
+            4,
+            16,
+            16,
+            8,
+            8,
+            64,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int5_f16_patch_embed(dt: DType) -> TestSetup {
+        patch_setup(
+            mt_int5_f16_patch_embed::kernel_ir_for(dt),
+            QFormat::Int5F16,
+            4,
+            16,
+            16,
+            8,
+            8,
+            64,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int6_f16_patch_embed(dt: DType) -> TestSetup {
+        patch_setup(
+            mt_int6_f16_patch_embed::kernel_ir_for(dt),
+            QFormat::Int6F16,
+            4,
+            16,
+            16,
+            8,
+            8,
+            64,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int8_f16_patch_embed(dt: DType) -> TestSetup {
+        patch_setup(
+            mt_int8_f16_patch_embed::kernel_ir_for(dt),
+            QFormat::Int8F16,
+            4,
+            16,
+            16,
+            8,
+            8,
+            64,
+            dt,
+        )
+    }
 }
 
 /// Decode-shape benches: ViT-class patch embed (3×224×224 image, 16×16 patches,
@@ -943,10 +1359,10 @@ pub mod kernel_benches {
         } else {
             (crate::quant::format::bitstream_words(n_codes, fmt.element_bits()), DType::U32)
         };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
         let n_blocks = hidden * (patch_dim / fmt.block_size());
         let sz = dt.size_bytes();
@@ -1100,5 +1516,68 @@ pub mod kernel_benches {
         mt_mxint8_patch_embed::kernel_ir_for,
         QFormat::Mxint8,
         "ffai/patch_embed_block/mxint8"
+    );
+    // FP16-scale twins (nvfp8 / fp4 / fp8_e5m2 / int2..6 / int8 scales as f16).
+    // Same Grid3D geometry as the rest of the family. `fp8_e4m3_f16` reuses the
+    // `nvfp8_f16` kernel (8-bit E4M3 + f16 scale, block 32).
+    patch_bench_fmt!(
+        bench_nvfp8_f16,
+        mt_nvfp8_f16_patch_embed::kernel_ir_for,
+        QFormat::Nvfp8F16,
+        "ffai/patch_embed_block/nvfp8_f16"
+    );
+    patch_bench_fmt!(
+        bench_fp8_e4m3_f16,
+        mt_nvfp8_f16_patch_embed::kernel_ir_for,
+        QFormat::Fp8E4m3F16,
+        "ffai/patch_embed_block/fp8_e4m3_f16"
+    );
+    patch_bench_fmt!(
+        bench_fp4_f16,
+        mt_fp4_f16_patch_embed::kernel_ir_for,
+        QFormat::Fp4F16,
+        "ffai/patch_embed_block/fp4_f16"
+    );
+    patch_bench_fmt!(
+        bench_fp8_e5m2_f16,
+        mt_fp8_e5m2_f16_patch_embed::kernel_ir_for,
+        QFormat::Fp8E5m2F16,
+        "ffai/patch_embed_block/fp8_e5m2_f16"
+    );
+    patch_bench_fmt!(
+        bench_int2_f16,
+        mt_int2_f16_patch_embed::kernel_ir_for,
+        QFormat::Int2F16,
+        "ffai/patch_embed_block/int2_f16"
+    );
+    patch_bench_fmt!(
+        bench_int3_f16,
+        mt_int3_f16_patch_embed::kernel_ir_for,
+        QFormat::Int3F16,
+        "ffai/patch_embed_block/int3_f16"
+    );
+    patch_bench_fmt!(
+        bench_int4_f16,
+        mt_int4_f16_patch_embed::kernel_ir_for,
+        QFormat::Int4F16,
+        "ffai/patch_embed_block/int4_f16"
+    );
+    patch_bench_fmt!(
+        bench_int5_f16,
+        mt_int5_f16_patch_embed::kernel_ir_for,
+        QFormat::Int5F16,
+        "ffai/patch_embed_block/int5_f16"
+    );
+    patch_bench_fmt!(
+        bench_int6_f16,
+        mt_int6_f16_patch_embed::kernel_ir_for,
+        QFormat::Int6F16,
+        "ffai/patch_embed_block/int6_f16"
+    );
+    patch_bench_fmt!(
+        bench_int8_f16,
+        mt_int8_f16_patch_embed::kernel_ir_for,
+        QFormat::Int8F16,
+        "ffai/patch_embed_block/int8_f16"
     );
 }

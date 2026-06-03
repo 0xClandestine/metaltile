@@ -863,6 +863,385 @@ pub fn mt_mxint8_gated_rms_norm_qgemv<T>(
     }
 }
 
+// ── FP16-scale twins (nvfp8_f16 / fp4_f16 / fp8_e5m2_f16 + int*_f16) ─────────
+// Near-clones of the FP32-scaled kernels above for the same element. Phase 1
+// (gated RMSNorm → tg_inner) and phase 2's element decode (E2M1 / E4M3 / E5M2 /
+// int bit-stream + sign-extend), weight indexing, dispatch geometry, staging and
+// reduction are all IDENTICAL to the FP32 twin — only the scale tensor changes:
+// it binds as a native `half` (`Tensor<f16>`) and is `.cast::<f32>()` on read.
+// The half load matches the host `f16_scale_decode`, so the oracle holds exactly
+// (see the GPU-verified `mlx/block_scaled_dequant.rs` f16 references). Geometry
+// is unchanged from the rest of the family (Reduction, `grid = [out_dim, 1, 1]`,
+// `tpg = [64, 1, 1]`).
+
+/// nvfp8 (FP16 scale) fused gated-RMSNorm + GEMV — E4M3 weights (block 16),
+/// per-block FP16 scale. Clone of `mt_nvfp8_gated_rms_norm_qgemv` with the scale
+/// read as a `half`. Also serves `fp8_e4m3_f16` (same 8-bit-E4M3 + scale shape).
+#[kernel]
+pub fn mt_nvfp8_f16_gated_rms_norm_qgemv<T>(
+    y: Tensor<f32>,
+    z: Tensor<T>,
+    norm_weight: Tensor<T>,
+    eps_buf: Tensor<f32>,
+    weight: Tensor<u8>,
+    scales: Tensor<f16>,
+    out: Tensor<T>,
+    #[constexpr] hv: u32,
+    #[constexpr] dv: u32,
+    #[constexpr] block_size: u32,
+) {
+    threadgroup_alloc("tg_inner", 4096, "f32");
+    let sg = simd_id;
+    let lane = simd_lane;
+    let dv_per_lane = dv / 32u32;
+    let eps = load(eps_buf[0u32]);
+    let row_iters = hv / 2u32;
+    for r_it in range(0u32, row_iters, 1u32) {
+        let r = r_it * 2u32 + sg;
+        let row_base = r * dv;
+        let lane_base = lane * dv_per_lane;
+        let mut partial_ssq = 0.0f32;
+        for k in range(0u32, dv_per_lane, 1u32) {
+            let yv = load(y[row_base + lane_base + k]);
+            partial_ssq = partial_ssq + yv * yv;
+        }
+        let row_ssq = simd_sum(partial_ssq);
+        let inv_rms = rsqrt(row_ssq / dv + eps);
+        for k in range(0u32, dv_per_lane, 1u32) {
+            let d = lane_base + k;
+            let idx = row_base + d;
+            let yv = load(y[idx]);
+            let zv = load(z[idx]).cast::<f32>();
+            let wv = load(norm_weight[d]).cast::<f32>();
+            let gate = zv / (1.0f32 + exp(0.0f32 - zv));
+            let inner = yv * inv_rms * wv * gate;
+            threadgroup_store("tg_inner", idx, inner);
+        }
+    }
+    threadgroup_barrier();
+    let row = program_id::<0>();
+    let in_dim = hv * dv;
+    let row_off = row * in_dim;
+    let n_blocks = in_dim / block_size;
+    let row_block_off = row * n_blocks;
+    let mut acc = 0.0f32;
+    let iters = (in_dim + lsize - 1u32) / lsize;
+    for it in range(0u32, iters, 1u32) {
+        let c = it * lsize + tid;
+        if c < in_dim {
+            let elem = e4m3_decode(load(weight[row_off + c]).cast::<u32>());
+            let scale = load(scales[row_block_off + c / block_size]).cast::<f32>();
+            let inner = threadgroup_load("tg_inner", c);
+            acc = acc + (elem * scale) * inner;
+        }
+    }
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(out[row], total.cast::<T>());
+    }
+}
+
+/// fp4 (FP16 scale) fused gated-RMSNorm + GEMV — E2M1 weights (group 32), FP16
+/// scale. Clone of `mt_fp4_gated_rms_norm_qgemv` with the scale read as a `half`.
+#[kernel]
+pub fn mt_fp4_f16_gated_rms_norm_qgemv<T>(
+    y: Tensor<f32>,
+    z: Tensor<T>,
+    norm_weight: Tensor<T>,
+    eps_buf: Tensor<f32>,
+    weight: Tensor<u32>,
+    scales: Tensor<f16>,
+    out: Tensor<T>,
+    #[constexpr] hv: u32,
+    #[constexpr] dv: u32,
+    #[constexpr] block_size: u32,
+) {
+    threadgroup_alloc("tg_inner", 4096, "f32");
+    let sg = simd_id;
+    let lane = simd_lane;
+    let dv_per_lane = dv / 32u32;
+    let eps = load(eps_buf[0u32]);
+    let row_iters = hv / 2u32;
+    for r_it in range(0u32, row_iters, 1u32) {
+        let r = r_it * 2u32 + sg;
+        let row_base = r * dv;
+        let lane_base = lane * dv_per_lane;
+        let mut partial_ssq = 0.0f32;
+        for k in range(0u32, dv_per_lane, 1u32) {
+            let yv = load(y[row_base + lane_base + k]);
+            partial_ssq = partial_ssq + yv * yv;
+        }
+        let row_ssq = simd_sum(partial_ssq);
+        let inv_rms = rsqrt(row_ssq / dv + eps);
+        for k in range(0u32, dv_per_lane, 1u32) {
+            let d = lane_base + k;
+            let idx = row_base + d;
+            let yv = load(y[idx]);
+            let zv = load(z[idx]).cast::<f32>();
+            let wv = load(norm_weight[d]).cast::<f32>();
+            let gate = zv / (1.0f32 + exp(0.0f32 - zv));
+            let inner = yv * inv_rms * wv * gate;
+            threadgroup_store("tg_inner", idx, inner);
+        }
+    }
+    threadgroup_barrier();
+    let row = program_id::<0>();
+    let in_dim = hv * dv;
+    let n_packs_per_row = in_dim / 8u32;
+    let n_blocks = in_dim / block_size;
+    let packs_per_block = block_size / 8u32;
+    let row_pack_off = row * n_packs_per_row;
+    let row_block_off = row * n_blocks;
+    let mut acc = 0.0f32;
+    let p_iters = (n_packs_per_row + lsize - 1u32) / lsize;
+    for p_iter in range(0u32, p_iters, 1u32) {
+        let pack_idx = p_iter * lsize + tid;
+        if pack_idx < n_packs_per_row {
+            let blk = pack_idx / packs_per_block;
+            let scale = load(scales[row_block_off + blk]).cast::<f32>();
+            let packed = load(weight[row_pack_off + pack_idx]);
+            let p_off = pack_idx * 8u32;
+            for i in range(0u32, 8u32, 1u32) {
+                let nib = (packed >> (i * 4u32)) & 0xFu32;
+                let val = e2m1_decode(nib);
+                let inner = threadgroup_load("tg_inner", p_off + i);
+                acc = acc + (val * scale) * inner;
+            }
+        }
+    }
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(out[row], total.cast::<T>());
+    }
+}
+
+/// fp8 (E5M2, FP16 scale) fused gated-RMSNorm + GEMV — 8-bit weights (group 32),
+/// FP16 scale. Clone of `mt_fp8_e5m2_gated_rms_norm_qgemv` with a `half` scale.
+#[kernel]
+pub fn mt_fp8_e5m2_f16_gated_rms_norm_qgemv<T>(
+    y: Tensor<f32>,
+    z: Tensor<T>,
+    norm_weight: Tensor<T>,
+    eps_buf: Tensor<f32>,
+    weight: Tensor<u8>,
+    scales: Tensor<f16>,
+    out: Tensor<T>,
+    #[constexpr] hv: u32,
+    #[constexpr] dv: u32,
+    #[constexpr] block_size: u32,
+) {
+    threadgroup_alloc("tg_inner", 4096, "f32");
+    let sg = simd_id;
+    let lane = simd_lane;
+    let dv_per_lane = dv / 32u32;
+    let eps = load(eps_buf[0u32]);
+    let row_iters = hv / 2u32;
+    for r_it in range(0u32, row_iters, 1u32) {
+        let r = r_it * 2u32 + sg;
+        let row_base = r * dv;
+        let lane_base = lane * dv_per_lane;
+        let mut partial_ssq = 0.0f32;
+        for k in range(0u32, dv_per_lane, 1u32) {
+            let yv = load(y[row_base + lane_base + k]);
+            partial_ssq = partial_ssq + yv * yv;
+        }
+        let row_ssq = simd_sum(partial_ssq);
+        let inv_rms = rsqrt(row_ssq / dv + eps);
+        for k in range(0u32, dv_per_lane, 1u32) {
+            let d = lane_base + k;
+            let idx = row_base + d;
+            let yv = load(y[idx]);
+            let zv = load(z[idx]).cast::<f32>();
+            let wv = load(norm_weight[d]).cast::<f32>();
+            let gate = zv / (1.0f32 + exp(0.0f32 - zv));
+            let inner = yv * inv_rms * wv * gate;
+            threadgroup_store("tg_inner", idx, inner);
+        }
+    }
+    threadgroup_barrier();
+    let row = program_id::<0>();
+    let in_dim = hv * dv;
+    let row_off = row * in_dim;
+    let n_blocks = in_dim / block_size;
+    let row_block_off = row * n_blocks;
+    let mut acc = 0.0f32;
+    let iters = (in_dim + lsize - 1u32) / lsize;
+    for it in range(0u32, iters, 1u32) {
+        let c = it * lsize + tid;
+        if c < in_dim {
+            let elem = e5m2_decode(load(weight[row_off + c]).cast::<u32>());
+            let scale = load(scales[row_block_off + c / block_size]).cast::<f32>();
+            let inner = threadgroup_load("tg_inner", c);
+            acc = acc + (elem * scale) * inner;
+        }
+    }
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(out[row], total.cast::<T>());
+    }
+}
+
+/// FP16-scaled symmetric int fused gated-RMSNorm + GEMV (int2/3/4/5/6): clone of
+/// `int_gated_qgemv_f32` with the per-group scale read as a `half`. Same
+/// straddle-aware bit-stream decode, sign-extend, and element-strided reduction;
+/// only the scale axis differs (one f16 per group instead of a raw f32).
+macro_rules! int_gated_qgemv_f16 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            y: Tensor<f32>,
+            z: Tensor<T>,
+            norm_weight: Tensor<T>,
+            eps_buf: Tensor<f32>,
+            weight: Tensor<u32>,
+            scales: Tensor<f16>,
+            out: Tensor<T>,
+            #[constexpr] hv: u32,
+            #[constexpr] dv: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            threadgroup_alloc("tg_inner", 4096, "f32");
+            let sg = simd_id;
+            let lane = simd_lane;
+            // Phase 1: gated RMSNorm staged into tg_inner (2-simdgroup per-row).
+            let dv_per_lane = dv / 32u32;
+            let eps = load(eps_buf[0u32]);
+            let row_iters = hv / 2u32;
+            for r_it in range(0u32, row_iters, 1u32) {
+                let r = r_it * 2u32 + sg;
+                let row_base = r * dv;
+                let lane_base = lane * dv_per_lane;
+                let mut partial_ssq = 0.0f32;
+                for k in range(0u32, dv_per_lane, 1u32) {
+                    let yv = load(y[row_base + lane_base + k]);
+                    partial_ssq = partial_ssq + yv * yv;
+                }
+                let row_ssq = simd_sum(partial_ssq);
+                let inv_rms = rsqrt(row_ssq / dv + eps);
+                for k in range(0u32, dv_per_lane, 1u32) {
+                    let d = lane_base + k;
+                    let idx = row_base + d;
+                    let yv = load(y[idx]);
+                    let zv = load(z[idx]).cast::<f32>();
+                    let wv = load(norm_weight[d]).cast::<f32>();
+                    let gate = zv / (1.0f32 + exp(0.0f32 - zv));
+                    let inner = yv * inv_rms * wv * gate;
+                    threadgroup_store("tg_inner", idx, inner);
+                }
+            }
+            threadgroup_barrier();
+            // Phase 2: bit-stream int decode × FP16 scale over tg_inner.
+            let row = program_id::<0>();
+            let in_dim = hv * dv;
+            let words_per_row = in_dim * $bits / 32u32;
+            let n_blocks = in_dim / block_size;
+            let row_word_off = row * words_per_row;
+            let row_block_off = row * n_blocks;
+            let mut acc = 0.0f32;
+            let iters = (in_dim + lsize - 1u32) / lsize;
+            for it in range(0u32, iters, 1u32) {
+                let c = it * lsize + tid;
+                if c < in_dim {
+                    let bit_off = c * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(weight[row_word_off + word_idx]);
+                    let w1 = load(
+                        weight[row_word_off + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                    );
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+                    let qf = q.cast::<f32>();
+                    let val = select(q >= $half, qf - $full, qf); // sign-extend
+                    let scale = load(scales[row_block_off + c / block_size]).cast::<f32>();
+                    let inner = threadgroup_load("tg_inner", c);
+                    acc = acc + (val * scale) * inner;
+                }
+            }
+            let total = reduce_sum(acc);
+            if tid == 0u32 {
+                store(out[row], total.cast::<T>());
+            }
+        }
+    };
+}
+int_gated_qgemv_f16!(mt_int2_f16_gated_rms_norm_qgemv, 2u32, 2u32, 4.0f32);
+int_gated_qgemv_f16!(mt_int3_f16_gated_rms_norm_qgemv, 3u32, 4u32, 8.0f32);
+int_gated_qgemv_f16!(mt_int4_f16_gated_rms_norm_qgemv, 4u32, 8u32, 16.0f32);
+int_gated_qgemv_f16!(mt_int5_f16_gated_rms_norm_qgemv, 5u32, 16u32, 32.0f32);
+int_gated_qgemv_f16!(mt_int6_f16_gated_rms_norm_qgemv, 6u32, 32u32, 64.0f32);
+
+/// int8 (FP16 scale) fused gated-RMSNorm + GEMV — 8-bit symmetric codes (byte
+/// layout, group 64), per-group FP16 scale. Clone of
+/// `mt_int8_gated_rms_norm_qgemv` with the scale read as a `half`.
+#[kernel]
+pub fn mt_int8_f16_gated_rms_norm_qgemv<T>(
+    y: Tensor<f32>,
+    z: Tensor<T>,
+    norm_weight: Tensor<T>,
+    eps_buf: Tensor<f32>,
+    weight: Tensor<u8>,
+    scales: Tensor<f16>,
+    out: Tensor<T>,
+    #[constexpr] hv: u32,
+    #[constexpr] dv: u32,
+    #[constexpr] block_size: u32,
+) {
+    threadgroup_alloc("tg_inner", 4096, "f32");
+    let sg = simd_id;
+    let lane = simd_lane;
+    let dv_per_lane = dv / 32u32;
+    let eps = load(eps_buf[0u32]);
+    let row_iters = hv / 2u32;
+    for r_it in range(0u32, row_iters, 1u32) {
+        let r = r_it * 2u32 + sg;
+        let row_base = r * dv;
+        let lane_base = lane * dv_per_lane;
+        let mut partial_ssq = 0.0f32;
+        for k in range(0u32, dv_per_lane, 1u32) {
+            let yv = load(y[row_base + lane_base + k]);
+            partial_ssq = partial_ssq + yv * yv;
+        }
+        let row_ssq = simd_sum(partial_ssq);
+        let inv_rms = rsqrt(row_ssq / dv + eps);
+        for k in range(0u32, dv_per_lane, 1u32) {
+            let d = lane_base + k;
+            let idx = row_base + d;
+            let yv = load(y[idx]);
+            let zv = load(z[idx]).cast::<f32>();
+            let wv = load(norm_weight[d]).cast::<f32>();
+            let gate = zv / (1.0f32 + exp(0.0f32 - zv));
+            let inner = yv * inv_rms * wv * gate;
+            threadgroup_store("tg_inner", idx, inner);
+        }
+    }
+    threadgroup_barrier();
+    let row = program_id::<0>();
+    let in_dim = hv * dv;
+    let row_off = row * in_dim;
+    let n_blocks = in_dim / block_size;
+    let row_block_off = row * n_blocks;
+    let mut acc = 0.0f32;
+    let iters = (in_dim + lsize - 1u32) / lsize;
+    for it in range(0u32, iters, 1u32) {
+        let c = it * lsize + tid;
+        if c < in_dim {
+            let elem = int8_decode(load(weight[row_off + c]).cast::<u32>());
+            let scale = load(scales[row_block_off + c / block_size]).cast::<f32>();
+            let inner = threadgroup_load("tg_inner", c);
+            acc = acc + (elem * scale) * inner;
+        }
+    }
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(out[row], total.cast::<T>());
+    }
+}
+
 pub mod kernel_tests {
     use metaltile::{core::ir::Kernel, test::*, test_kernel};
 
@@ -936,10 +1315,10 @@ pub mod kernel_tests {
         // scales bind as f32; E8M0/E4M3 scales as one byte. Both axes are driven
         // off the format so new integer formats pick up the right buffer types.
         let weight_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
         let mut s = TestSetup::new(kernel)
             .mode(KernelMode::Reduction)
@@ -1131,6 +1510,120 @@ pub mod kernel_tests {
             dt,
         )
     }
+
+    // FP16-scale twins of the FP32-scaled formats. Same element packing as their
+    // twin (so codes dtype is unchanged); only the scale tensor binds as f16.
+    // fp8_e4m3_f16 reuses the nvfp8_f16 kernel (same 8-bit-E4M3 + f16-scale shape).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_nvfp8_f16_gated_rms_norm_qgemv(dt: DType) -> TestSetup {
+        gated_setup(
+            mt_nvfp8_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Nvfp8F16,
+            4,
+            128,
+            4,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e4m3_f16_gated_rms_norm_qgemv(dt: DType) -> TestSetup {
+        gated_setup(
+            mt_nvfp8_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Fp8E4m3F16,
+            4,
+            128,
+            4,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp4_f16_gated_rms_norm_qgemv(dt: DType) -> TestSetup {
+        gated_setup(
+            mt_fp4_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Fp4F16,
+            4,
+            128,
+            4,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_fp8_e5m2_f16_gated_rms_norm_qgemv(dt: DType) -> TestSetup {
+        gated_setup(
+            mt_fp8_e5m2_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Fp8E5m2F16,
+            4,
+            128,
+            4,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int2_f16_gated_rms_norm_qgemv(dt: DType) -> TestSetup {
+        gated_setup(
+            mt_int2_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Int2F16,
+            4,
+            128,
+            4,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int3_f16_gated_rms_norm_qgemv(dt: DType) -> TestSetup {
+        gated_setup(
+            mt_int3_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Int3F16,
+            4,
+            128,
+            4,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int4_f16_gated_rms_norm_qgemv(dt: DType) -> TestSetup {
+        gated_setup(
+            mt_int4_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Int4F16,
+            4,
+            128,
+            4,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int5_f16_gated_rms_norm_qgemv(dt: DType) -> TestSetup {
+        gated_setup(
+            mt_int5_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Int5F16,
+            4,
+            128,
+            4,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int6_f16_gated_rms_norm_qgemv(dt: DType) -> TestSetup {
+        gated_setup(
+            mt_int6_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Int6F16,
+            4,
+            128,
+            4,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int8_f16_gated_rms_norm_qgemv(dt: DType) -> TestSetup {
+        gated_setup(
+            mt_int8_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Int8F16,
+            4,
+            128,
+            4,
+            dt,
+        )
+    }
 }
 
 /// Decode-shape benches at the Qwen3.6-A3B activation shape (hv=16, dv=128,
@@ -1159,10 +1652,10 @@ pub mod kernel_benches {
         } else {
             (crate::quant::format::bitstream_words(n, fmt.element_bits()), DType::U32)
         };
-        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
-            DType::F32
-        } else {
-            DType::U8
+        let scales_dt = match fmt.scale_kind() {
+            crate::quant::format::ScaleKind::F32 => DType::F32,
+            crate::quant::format::ScaleKind::F16 => DType::F16,
+            _ => DType::U8,
         };
         let sz = dt.size_bytes();
         let bytes = codes_len * codes_dt.size_bytes()
@@ -1400,6 +1893,117 @@ pub mod kernel_benches {
         gated_bench(
             mt_mxint8_gated_rms_norm_qgemv::kernel_ir_for(dt),
             QFormat::Mxint8,
+            16,
+            128,
+            2048,
+            dt,
+        )
+    }
+    // FP16-scale twins. fp8_e4m3_f16 reuses the nvfp8_f16 kernel.
+    #[bench(name = "ffai/gated_rms_norm_block_qgemv/nvfp8_f16", dtypes = [f32, f16, bf16])]
+    fn bench_nvfp8_f16_gated(dt: DType) -> BenchSetup {
+        gated_bench(
+            mt_nvfp8_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Nvfp8F16,
+            16,
+            128,
+            2048,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/gated_rms_norm_block_qgemv/fp8_e4m3_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e4m3_f16_gated(dt: DType) -> BenchSetup {
+        gated_bench(
+            mt_nvfp8_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Fp8E4m3F16,
+            16,
+            128,
+            2048,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/gated_rms_norm_block_qgemv/fp4_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp4_f16_gated(dt: DType) -> BenchSetup {
+        gated_bench(
+            mt_fp4_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Fp4F16,
+            16,
+            128,
+            2048,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/gated_rms_norm_block_qgemv/fp8_e5m2_f16", dtypes = [f32, f16, bf16])]
+    fn bench_fp8_e5m2_f16_gated(dt: DType) -> BenchSetup {
+        gated_bench(
+            mt_fp8_e5m2_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Fp8E5m2F16,
+            16,
+            128,
+            2048,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/gated_rms_norm_block_qgemv/int2_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int2_f16_gated(dt: DType) -> BenchSetup {
+        gated_bench(
+            mt_int2_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Int2F16,
+            16,
+            128,
+            2048,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/gated_rms_norm_block_qgemv/int3_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int3_f16_gated(dt: DType) -> BenchSetup {
+        gated_bench(
+            mt_int3_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Int3F16,
+            16,
+            128,
+            2048,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/gated_rms_norm_block_qgemv/int4_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int4_f16_gated(dt: DType) -> BenchSetup {
+        gated_bench(
+            mt_int4_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Int4F16,
+            16,
+            128,
+            2048,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/gated_rms_norm_block_qgemv/int5_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int5_f16_gated(dt: DType) -> BenchSetup {
+        gated_bench(
+            mt_int5_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Int5F16,
+            16,
+            128,
+            2048,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/gated_rms_norm_block_qgemv/int6_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int6_f16_gated(dt: DType) -> BenchSetup {
+        gated_bench(
+            mt_int6_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Int6F16,
+            16,
+            128,
+            2048,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/gated_rms_norm_block_qgemv/int8_f16", dtypes = [f32, f16, bf16])]
+    fn bench_int8_f16_gated(dt: DType) -> BenchSetup {
+        gated_bench(
+            mt_int8_f16_gated_rms_norm_qgemv::kernel_ir_for(dt),
+            QFormat::Int8F16,
             16,
             128,
             2048,
