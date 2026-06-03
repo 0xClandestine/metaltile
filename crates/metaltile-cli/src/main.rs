@@ -3,7 +3,7 @@
 //! MetalTile CLI — `tile` binary.
 //!
 //! Subcommands:
-//!   bench         Benchmark suite: MetalTile vs MLX reference
+//!   bench         Benchmark MetalTile kernels (--mlx adds the MLX A/B)
 //!   test          Run #[test_kernel] correctness tests
 //!   build         Compile kernels to MSL; emit metallib/Swift/manifest
 //!   inspect       Print IR and/or MSL for registered kernels
@@ -144,11 +144,11 @@ struct Cli {
 
 #[derive(clap::Subcommand, Debug)]
 enum Command {
-    /// Benchmark MetalTile kernels against MLX reference implementations.
+    /// Benchmark MetalTile kernels (throughput, GFLOP/s, roofline).
     ///
-    /// Measures throughput (GB/s) for every registered `#[bench_kernel]` entry,
-    /// optionally comparing against MLX reference kernels for correctness and
-    /// performance parity.
+    /// Measures throughput (GB/s) for every registered `#[bench_kernel]` entry.
+    /// By default it benches only the metaltile kernels; pass `--mlx` to also run
+    /// the MLX reference kernels for an A/B speed + output-equivalence comparison.
     #[command(visible_alias = "b")]
     Bench(BenchArgs),
 
@@ -416,6 +416,16 @@ struct BenchArgs {
     /// Git ref to use for baseline auto-diff (default: origin/dev or dev).
     #[arg(long, value_name = "REF", help_heading = "Bench options")]
     baseline_ref: Option<String>,
+
+    /// Also bench the MLX reference kernels — an A/B speed comparison plus an
+    /// output-equivalence check — for kernels that have one.
+    ///
+    /// Off by default: the metaltile kernels have superseded the MLX references,
+    /// per-kernel correctness is covered by `tile test`, and running the MLX side
+    /// roughly doubles bench time. Pass `--mlx` when you specifically want the
+    /// side-by-side comparison.
+    #[arg(long, visible_alias = "reference", help_heading = "Bench options")]
+    mlx: bool,
 }
 
 // ── Test ─────────────────────────────────────────────────────────────────

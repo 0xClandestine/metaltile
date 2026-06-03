@@ -1,6 +1,8 @@
 //! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
 //! SPDX-License-Identifier: Apache-2.0
-//! `tile bench` — Benchmark suite: MetalTile vs MLX reference.
+//! `tile bench` — Benchmark MetalTile kernels (latency / GB/s / GFLOP·s /
+//! roofline). The MLX reference A/B (speed + output-equivalence) is opt-in via
+//! `--mlx`; by default only the metaltile kernels are benched.
 
 use metaltile::{
     harness::bench::{BenchSetup, KernelBench, RefKernel},
@@ -144,7 +146,7 @@ pub fn run(args: &BenchArgs, harness: &crate::harness::Harness) -> Result<(), cr
                 for &dt in b.dtypes() {
                     let _kspan =
                         tracing::debug_span!("bench", name = b.name(), dtype = %dt).entered();
-                    if let Some(r) = run_kernel_bench(&runner, b, dt, warmup_runs, runs) {
+                    if let Some(r) = run_kernel_bench(&runner, b, dt, warmup_runs, runs, args.mlx) {
                         all.push(r);
                     }
                 }
@@ -580,6 +582,9 @@ fn run_kernel_bench(
     dt: metaltile_core::DType,
     warmup_runs: usize,
     runs: usize,
+    // When false (the default), skip the MLX reference A/B entirely — bench only
+    // the metaltile kernel. `--mlx` flips it on for the side-by-side comparison.
+    compare_mlx: bool,
 ) -> Option<OpResult> {
     use metaltile_codegen::msl::MslGenerator;
 
@@ -640,7 +645,8 @@ fn run_kernel_bench(
     let extras =
         OpResultExtras { mt_timing: Some(stats), metrics: Some(metrics), ..Default::default() };
 
-    if let (Some(rk), Some((out_idx, out_n, out_dt))) = (setup.ref_kernel(), mt_out)
+    if compare_mlx
+        && let (Some(rk), Some((out_idx, out_n, out_dt))) = (setup.ref_kernel(), mt_out)
         && let Some((ref_gbps, ref_stats, equiv)) = run_reference_bench(
             runner,
             rk,
