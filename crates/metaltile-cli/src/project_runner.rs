@@ -12,6 +12,8 @@
 //! project's `bin/` directory and installed there via
 //! `cargo install --path . --root .`.
 
+use metaltile_core::protocol::ProtocolMessage;
+
 use crate::harness::Harness;
 
 /// Describes one invocation of `__tile_runner`.
@@ -54,6 +56,40 @@ impl<'a> ProjectRunner<'a> {
                 false
             },
         }
+    }
+
+    /// Spawn `__tile_runner`, capture its stdout, parse each
+    /// `ProtocolMessage` JSON line, and call `on_msg` for each.
+    /// Returns `true` if the subprocess exits successfully.
+    pub fn run_streaming(
+        &self,
+        inv: &RunnerInvocation,
+        mut on_msg: impl FnMut(ProtocolMessage),
+    ) -> bool {
+        use std::io::BufRead;
+        let binary = self.runner_binary();
+        let argv = build_argv(inv);
+        let mut child = match std::process::Command::new(&binary)
+            .args(&argv)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[tile] failed to spawn '{binary}': {e}");
+                return false;
+            },
+        };
+        if let Some(stdout) = child.stdout.take() {
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if let Ok(msg) = ProtocolMessage::from_json_line(line.as_bytes()) {
+                    on_msg(msg);
+                }
+            }
+        }
+        matches!(child.wait(), Ok(s) if s.success())
     }
 
     /// Resolve the `__tile_runner` binary path.

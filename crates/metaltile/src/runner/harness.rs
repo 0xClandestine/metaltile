@@ -56,15 +56,15 @@ impl RunnerHarness {
         let dtypes = Self::dtype_list(args);
         let total = (entries.len() * dtypes.len()) as u32;
 
-        emit_stdout(&ProtocolMessage::Start {
-            runner_version: env!("CARGO_PKG_VERSION").into(),
-            command: "bench".into(),
-            total,
-        });
-
         let runner = match GpuRunner::new() {
             Ok(r) => r,
             Err(e) => {
+                emit_stdout(&ProtocolMessage::Start {
+                    runner_version: env!("CARGO_PKG_VERSION").into(),
+                    command: "bench".into(),
+                    total,
+                    device: None,
+                });
                 emit_stdout(&ProtocolMessage::ProtocolError {
                     name: "GpuRunner".into(),
                     dtype: "".into(),
@@ -80,6 +80,13 @@ impl RunnerHarness {
                 return false;
             },
         };
+
+        emit_stdout(&ProtocolMessage::Start {
+            runner_version: env!("CARGO_PKG_VERSION").into(),
+            command: "bench".into(),
+            total,
+            device: Some(runner.device_name.clone()),
+        });
 
         let mut passed = 0u32;
         let mut failed = 0u32;
@@ -129,6 +136,7 @@ impl RunnerHarness {
             runner_version: env!("CARGO_PKG_VERSION").into(),
             command: "test".into(),
             total,
+            device: None,
         });
 
         let ctx = match metaltile_runtime::Context::new() {
@@ -201,6 +209,7 @@ impl RunnerHarness {
             runner_version: env!("CARGO_PKG_VERSION").into(),
             command: "build".into(),
             total,
+            device: None,
         });
 
         let mut any_err = false;
@@ -263,6 +272,7 @@ impl RunnerHarness {
             runner_version: env!("CARGO_PKG_VERSION").into(),
             command: "inspect".into(),
             total: entries.len() as u32,
+            device: None,
         });
 
         let mut ok = true;
@@ -423,9 +433,22 @@ fn run_one_bench(
             (None, None, true)
         };
 
+    let shape = setup.shape_label().map(|s| s.to_string()).unwrap_or_else(|| {
+        let n = setup.buffers().iter().map(|b| b.len()).max().unwrap_or(0);
+        let suffix = if n >= 1 << 20 && n % (1 << 20) == 0 {
+            format!("{}M", n >> 20)
+        } else if n >= 1 << 10 && n % (1 << 10) == 0 {
+            format!("{}K", n >> 10)
+        } else {
+            n.to_string()
+        };
+        format!("N={suffix} {dtype_str}")
+    });
+
     Some(BenchResult {
         name,
         dtype: dtype_str,
+        shape,
         mt_gbps,
         ref_gbps,
         mt_pct,
