@@ -5,6 +5,14 @@
 > shape. Intentionally NOT executed in one pass — migrate family-by-family to
 > avoid conflicts with in-flight work.
 >
+> **Companion to [`STYLE_GUIDE.md`](../crates/metaltile-std/STYLE_GUIDE.md)**
+> (PR #261) — the style guide is the authority on *how to write one kernel*
+> (file skeleton, naming, the CPU oracle, the bench, the DSL surface, and the
+> `#[kernel(variants(...))]` mechanism). This spec is about *how the kernel
+> files are organized* across the crate. Where they overlap (naming, per-file
+> shape, the macro axis), defer to the style guide; this doc adds only the
+> family/folder layout on top.
+>
 > **Coordinates with the "MetalTile CLI Subprocess Rewrite (v4)"** — that spec
 > restructures the *crate/CLI architecture* (subprocess runner, `tile.toml`,
 > harness, dep-graph reduction); this one restructures the *kernel files inside
@@ -15,23 +23,27 @@
 
 ## 1. Why
 
-The current layout splits kernels into two top-level folders:
+The current layout — documented as the convention in
+[`STYLE_GUIDE.md` §1](../crates/metaltile-std/STYLE_GUIDE.md) ("put it in `mlx/`
+if a matching MLX `.metal` source exists, `ffai/` otherwise") — splits kernels
+into two top-level folders:
 
 - `crates/metaltile-std/src/ffai/` — 88 files, kernels with **no** upstream
   metal counterpart.
 - `crates/metaltile-std/src/mlx/` — 43 files, kernels that historically
   **mirrored an upstream metal kernel** it could be benched against.
 
-Two structural problems:
+This spec proposes evolving *past* that convention. Two structural problems:
 
 1. **The organizing axis is wrong.** "Does an upstream metal reference exist?"
    is not a property of the *kernel* — it's a property of one *bench*, and an
-   optional one. It's already expressed per-bench: the optional `ref = MetalRef
-   { … }` attribute. The folder split duplicates that optional attribute as
-   directory structure, and it ages badly: as we **diverge from and supersede
-   the references** (custom SDPA, GDN/SSM, AURA, turbo, fp4/fp8), they lose
-   value, so a folder defined by them is increasingly meaningless. New kernels
-   land under `ffai/` regardless of whether a reference exists.
+   optional one. It's already expressed per-bench by an optional
+   `.with_reference(RefKernel::new(…))` attachment. The folder split duplicates
+   that optional attribute as directory structure, and it ages badly: as we
+   **diverge from and supersede the references** (custom SDPA, GDN/SSM, AURA,
+   turbo, fp4/fp8), they lose value, so a folder defined by them is increasingly
+   meaningless. New kernels land under `ffai/` regardless of whether a reference
+   exists.
 
 2. **Fragmentation + model-name leakage.** Within `ffai/` the same family is
    scattered across many 1-kernel files (`sdpa_bidirectional.rs`,
@@ -66,7 +78,7 @@ fragmented families have them).
   — the fp4/fp8/int8 matrix has now landed (#250) as ~240 per-op `#[kernel]`
   fns / ~39 kLOC, so the job here is **consolidating** it (§6), not finding it a
   home.
-- No model names anywhere in file names, `op=`, `subop=`, or bench `name=`.
+- No model names anywhere in file names, `pub fn` names, or bench `name`s.
 
 **Non-goals**
 - A big-bang move. Migrate incrementally; keep diffs family-scoped.
@@ -205,7 +217,7 @@ pub mod kernel_benches {
     //       BenchSetup::new(<name>::kernel_ir_for(dt))
     //           .mode(…).buffer(…).constexpr(…).bytes_moved(…)
     //           .flops(…)                        // OPTIONAL — enables GFLOP/s
-    //           .with_reference(MetalRef { … })  // OPTIONAL metal ref — omit when none
+    //           .with_reference(RefKernel::new(…))  // OPTIONAL metal ref — omit when none
     //   }
 }
 ```
@@ -214,26 +226,35 @@ pub mod kernel_benches {
 > / `::harness::bench` (not `metaltile::test` / `::bench`), and any
 > `crate::bench_types::dtype_label` becomes `crate::utils::dtype_label`.
 
-**Macro requirements (the "all permutations" ask).** The target is that a
-single file expresses every permutation declaratively, rather than copy-pasted
-`pub fn …_d64` / `…_d80` / `…_int4` / `…_int8`:
+**The "all permutations" ask — use `#[kernel(variants(...))]` (PR #261).** A
+single file should express every compile-time permutation declaratively, rather
+than copy-pasted `pub fn …_d64` / `…_d80` / `…_int4`. The `variants(...)` macro
+(see [`STYLE_GUIDE.md` §5](../crates/metaltile-std/STYLE_GUIDE.md)) is exactly
+that axis: it stamps out one specialised kernel per compile-time integer tuple
+and constant-folds the variant values into the body. `#[test_kernel]` / `#[bench]`
+take the same `variants(...)` syntax + ident-embedding, so the tests/benches
+collapse with the kernel.
 
 - **dtype axis** — already done: `#[test_kernel(dtypes=[f32,f16,bf16], tol=[…])]`.
 - **bit-width / group-size axis** — for quant kernels, generate the
-  `{2,3,4,5,6,8}` × `{group sizes}` cells from one body (today some are wrapped
-  with an outer `macro_rules!` around the whole `#[kernel] fn` — per
-  `developing.md`, never inside the body). Make this a first-class macro
-  parameter (`bits=[…]`, `group_size=[…]`) so a new scheme adds one line.
-- **head-dim / lane-packing axis** — the biggest gap. `sdpa_bidirectional_d80`
-  vs `_d64` differ only in elements-per-lane and the ragged tail mask. A
-  `head_dim=[32,64,72,80,96,128]` macro that emits the per-lane packing would
-  collapse ~5 files + the windowed/relpos/conformer/sink variants into one
-  `bidirectional.rs` + one `decode.rs`. **This macro is the prerequisite that
-  unlocks the cleanest end-state for `sdpa/`** — until it lands, keep the
-  hand-written dim variants in ONE file rather than one-per-dim.
-- **optional metal reference** — a bench may carry an optional `ref = MetalRef
-  { … }` attribute (or `BenchSetup::with_reference(…)`) naming a metal kernel to
-  benchmark against side-by-side. It is just an optional comparator — no
+  `{2,3,4,5,6,8}` cells from one body. This is what `variants(...)` is for:
+  `#[kernel(variants(BITS = [2,3,4,5,6,8], suffix = "int{BITS}"))]` replaces the
+  outer `macro_rules!` wrappers (and `developing.md`'s "never `macro_rules!`
+  inside a body" rule stays satisfied — `variants` is an *attribute* axis, not
+  an in-body macro). A new bit-width is one array entry.
+- **head-dim / lane-packing axis** — was the biggest gap; `variants(...)` now
+  supplies the mechanism. `sdpa_bidirectional_d80` vs `_d64` differ only in
+  elements-per-lane (`ceil(N/32)`) and the ragged tail mask, both derivable from
+  the head-dim literal — so a body written generically over a `D` variant param
+  (`#[kernel(variants(D = [32,64,72,80,96,128], suffix = "d{D}"))]`) collapses
+  the ~5 hand-packed files (+ windowed/relpos/conformer/sink) into one
+  `bidirectional.rs` + one `decode.rs`. The remaining work is *generalising the
+  hand-written bodies over `D`*, not building a macro. Until a family is
+  converted, keep its hand-written dim variants in ONE file rather than
+  one-per-dim.
+- **optional metal reference** — a bench may attach an optional
+  `.with_reference(RefKernel::new(name, source))` naming a metal kernel to
+  benchmark against side-by-side (see [`STYLE_GUIDE.md` §7](../crates/metaltile-std/STYLE_GUIDE.md)). It is just an optional comparator — no
   hardcoded `mlx` / `mlx_ref` naming. Omit it (the default) and the kernel is
   benched on its own / against a CPU oracle.
 
@@ -296,16 +317,16 @@ matrix to ~one body per op:
    decoders), not copy-pasted into ~240 kernel bodies. `scales`/`global` are
    simply absent for formats that don't use them.
 
-2. **Format as a first-class macro axis** (already half-proven). The integer
+2. **Format as a `#[kernel(variants(...))]` axis** (PR #261). The integer
    formats in `conv2d_block_scaled.rs` are *already* generated from one template
    via `int_conv2d_f32!` / `int_conv2d_e8m0!` / `int_conv2d_f16!` parameterized
-   on `$bits` — the float formats just never got the same treatment. Promote
-   this to a declared axis on the kernel, `formats = [mxfp4, nvfp4, mxfp8_e4,
-   …]`, so one `#[kernel]` body emits every format cell. Combined with (1) the
-   body is written **once per op**, format-agnostic, and the macro stamps the
-   variants — `conv2d_block_scaled.rs` goes from 16 hand-written fns to one body
-   + a format list. A new format becomes one `QFormat` arm in the `dequant`
-   lowering, automatically available to *every* op — not a new fn × every file.
+   on `$bits` — `variants(...)` replaces those hand-rolled `macro_rules!` with a
+   first-class axis (`#[kernel(variants(FMT = […], suffix = "{FMT}"))]`) that
+   also covers the float formats. Combined with (1) the body is written **once
+   per op**, format-agnostic; `variants` stamps each format cell —
+   `conv2d_block_scaled.rs` goes from 16 hand-written fns to one body + a format
+   list. A new format becomes one `QFormat` arm in the `dequant` lowering,
+   automatically available to *every* op — not a new fn × every file.
 
 3. **Fold the three scale-decode macros into the `dequant` op.** The
    `int_conv2d_{f32,e8m0,f16}!` triplication exists only because the *scale read*
@@ -315,16 +336,16 @@ matrix to ~one body per op:
 arm + a `dequant`-lowering cell, never a new kernel fn; a new quant **algorithm**
 (a different packing/codebook, e.g. AURA) is a new file under `quant/`. Combined
 effect: roughly **~240 fns / 39 kLOC → ~15 op bodies** + the shared `quant/`
-infra. See §11 for sequencing (this rides on top of the v4 + lane-pack macro
-work).
+infra. See §11 for sequencing (this rides on top of the v4 work and the
+`#[kernel(variants(...))]` axis from PR #261).
 
 ## 7. Reference-kernel policy (deprioritize)
 
 - The `mlx/` folder **dissolves** — its kernels move into the family folders by
   operation (`mlx/gemv.rs` → `gemm/`, `mlx/rms_norm.rs` → `norm/`,
   `mlx/quantized*.rs` → `quant/`, `mlx/binary.rs` → `core/`, …).
-- A side-by-side metal comparison survives as the optional `ref = MetalRef { … }`
-  bench attribute on the individual kernels where it still teaches us something
+- A side-by-side metal comparison survives as the optional
+  `.with_reference(RefKernel::new(…))` bench attachment on the individual kernels where it still teaches us something
   (the few perf-sensitive primitives). Everywhere else, drop it; bench against a
   CPU oracle / our own baseline. The attribute is a generic *metal reference* —
   there is no `mlx` / `mlx_ref` naming.
@@ -333,12 +354,18 @@ work).
 
 ## 8. Naming rules
 
-- **No model names** in file names, `op=`, `subop=`, or bench `name=`. Name the
-  operation. (Precedent: `kokoro.rs`→`adain1d.rs`/`lstm.rs`,
-  `fishspeech_conv1d.rs`→`conv1d_dilated_transpose.rs`,
-  `op="fishspeech_conv1d"`→`op="conv1d"`.)
-- `op` = family (`sdpa`, `conv`, `norm`); `subop` = the specific kernel
-  (`bidirectional`, `conv1d_transpose`); bench `name` = `ffai/<family>/<subop>`.
+Function and bench naming follow
+[`STYLE_GUIDE.md` §3 & §7](../crates/metaltile-std/STYLE_GUIDE.md) — `mt_<op>` /
+`mt_<op>_<variant>` / `ffai_<op>` / `mt_<family>_<variant>` for `pub fn`s, and a
+path-style bench `name` (`"mlx/<op>"` for MLX-mirrored, `"ffai/<family>/<op>"`
+for FFAI). This spec adds only the file/folder dimension:
+
+- **No model names** in file names, `pub fn` names, or bench `name` strings. Name
+  the *operation*. (Precedent: `kokoro.rs`→`adain1d.rs`/`lstm.rs`,
+  `fishspeech_conv1d.rs`→`conv1d_dilated_transpose.rs`; bench
+  `name = "ffai/fishspeech_conv1d"`→`"ffai/conv/conv1d_transpose"`.)
+- File/folder = family/op: `kernels/<family>/<op>.rs`, mirrored by the bench
+  `name` path (`"ffai/<family>/<op>"`).
 - Consumers named generically in docs ("the Conformer acoustic encoders"), as
   *examples*, never as the kernel's identity.
 
@@ -362,9 +389,10 @@ never a big-bang move:
    the largest payoff but rides on the `dequant` DSL op + format-axis macro
    (§6)** — land those first and let the matrix collapse, rather than
    reorganizing the 39 kLOC of per-op block-scaled files by hand.
-4. **The lane-packing macro (§5)** is a separate, prerequisite PR; until it
-   lands, group the hand-written dim variants into one file but don't try to
-   macro-collapse them.
+4. **`#[kernel(variants(...))]` (PR #261)** supplies the variant axis (§5); the
+   per-family work is *generalising* the hand-written dim/format bodies over the
+   variant param. Until a family is converted, group its hand-written variants
+   into one file rather than one-per-variant.
 
 ## 10. Coordination with the CLI Subprocess Rewrite (v4)
 
@@ -401,11 +429,11 @@ restructures the **kernel files**. They're orthogonal, but both edit
   re-export from v4's `lib.rs` is unaffected — registry population is by
   `inventory`, independent of module layout).
 
-**Net sequencing:** (1) v4 crate/CLI rewrite → (2) the lane-packing macro (§5,
-prerequisite for the cleanest `sdpa/`) + the `dequant` DSL op / format-axis
-macro (§6, prerequisite for collapsing the block-scaled matrix) → (3)
-family-by-family kernel migration (§9), with `quant/` consolidation as the
-largest single LOC reduction.
+**Net sequencing:** (1) v4 crate/CLI rewrite → (2) `#[kernel(variants(...))]`
+(§5, PR #261 — the variant axis for the cleanest `sdpa/`) + the `dequant` DSL op
+(§6, for collapsing the block-scaled matrix) → (3) family-by-family kernel
+migration (§9), generalising bodies over the variant param, with `quant/`
+consolidation as the largest single LOC reduction.
 
 ## 11. Open questions
 
