@@ -83,169 +83,172 @@
 
 use metaltile::kernel;
 
-macro_rules! aura_encode_kernel {
-    ($name:ident, $bits:literal, $levels:literal, $subop:literal) => {
-        // `input` / `rotation` / `codebook` / `norms_out` are model dtype
-        // T (bf16/f16 in production, f32 in tests) — we cast each load
-        // to f32 and accumulate in f32.
-        //
-        // The f32 *accumulation* is load-bearing and stays: the L2-norm
-        // reductions (Stages 1 & 5) and the dim-length rotation matmul
-        // (Stage 2) each sum up to `dim` (≤512) terms, and the resulting
-        // norm-correction factor scales the *entire* dequantized vector
-        // in the decoder — f16 accumulation there drifts enough to hurt.
-        // The *storage* precision is what was overkill: the dim×dim
-        // rotation matrix dominates this kernel's bandwidth, so storing
-        // it (and the codebook + norms_out) in T halves the dominant
-        // read. Its f16/bf16 rounding (~1e-3) is far below the 2–4-bit
-        // quant bin the rotated value lands in, and the decoder's
-        // inverse rotation is already a model-dtype gemm — so f32 Π
-        // here was strictly more precise than the round-trip it feeds.
-        //
-        // `boundaries` stays f32. The buffer is `2^bits - 1` floats per
-        // scheme — 60 bytes at 4-bit, ~1 KB at 8-bit — so the bandwidth
-        // argument for narrowing Π does not apply, and at 4-bit aura
-        // the bf16 rounding flips a small fraction of borderline bin
-        // assignments at the Stage-3 branchless compare. Measured on
-        // FFAI's KLD harness (Qwen3-0.6B-4bit, 61-position): T-typed
-        // boundaries → aura4v4 compressed-flash KLD 1.76; f32 boundaries
-        // → 1.40 (mirror baseline 1.41). The 0.3-nat gap maps cleanly
-        // to the bf16 boundary rounding flipping borderline bins.
-        #[kernel]
-        pub fn $name<T>(
-            input: Tensor<T>,
-            rotation: Tensor<T>,
-            boundaries: Tensor<f32>,
-            codebook: Tensor<T>,
-            mut packed_out: Tensor<u32>,
-            mut norms_out: Tensor<T>,
-            #[constexpr] dim: u32,
-            #[constexpr] packed_width: u32,
-        ) {
-            let d = tid;
-            let row = tgid_x;
+/// AURA fused rotation-encode kernel — variable bit-widths (2, 3, 4, 6, 8).
+///
+/// Produces kernels: `aura_encode_int2`, `aura_encode_int3`, `aura_encode_int4`,
+/// `aura_encode_int6`, `aura_encode_int8`.
+///
+/// Each variant bakes in `BITS` (the code width) and `LEVELS = 2^BITS` (the
+/// number of codebook entries). Five fused stages per row:
+///   1. L2-normalise the input vector.
+///   2. Apply the rotation matrix Π via shared-memory matmul.
+///   3. Branchless boundary-count → codebook index (LEVELS − 1 comparisons).
+///   4. Pack indices into the LSB-first bit-stream via `atomic_or_tg`.
+///   5. Compute and store the per-row norm-correction factor.
+///
+/// Grid: Reduction, `[rows, 1, 1]`, tpg = `dim`.
+// `input` / `rotation` / `codebook` / `norms_out` are model dtype
+// T (bf16/f16 in production, f32 in tests) — we cast each load
+// to f32 and accumulate in f32.
+//
+// The f32 *accumulation* is load-bearing and stays: the L2-norm
+// reductions (Stages 1 & 5) and the dim-length rotation matmul
+// (Stage 2) each sum up to `dim` (≤512) terms, and the resulting
+// norm-correction factor scales the *entire* dequantized vector
+// in the decoder — f16 accumulation there drifts enough to hurt.
+// The *storage* precision is what was overkill: the dim×dim
+// rotation matrix dominates this kernel's bandwidth, so storing
+// it (and the codebook + norms_out) in T halves the dominant
+// read. Its f16/bf16 rounding (~1e-3) is far below the 2–4-bit
+// quant bin the rotated value lands in, and the decoder's
+// inverse rotation is already a model-dtype gemm — so f32 Π
+// here was strictly more precise than the round-trip it feeds.
+//
+// `boundaries` stays f32. The buffer is `2^bits - 1` floats per
+// scheme — 60 bytes at 4-bit, ~1 KB at 8-bit — so the bandwidth
+// argument for narrowing Π does not apply, and at 4-bit aura
+// the bf16 rounding flips a small fraction of borderline bin
+// assignments at the Stage-3 branchless compare. Measured on
+// FFAI's KLD harness (Qwen3-0.6B-4bit, 61-position): T-typed
+// boundaries → aura4v4 compressed-flash KLD 1.76; f32 boundaries
+// → 1.40 (mirror baseline 1.41). The 0.3-nat gap maps cleanly
+// to the bf16 boundary rounding flipping borderline bins.
+#[kernel(variants(BITS = [2, 3, 4, 6, 8], LEVELS = [4, 8, 16, 64, 256], suffix = "int{BITS}"))]
+pub fn aura_encode<T>(
+    input: Tensor<T>,
+    rotation: Tensor<T>,
+    boundaries: Tensor<f32>,
+    codebook: Tensor<T>,
+    mut packed_out: Tensor<u32>,
+    mut norms_out: Tensor<T>,
+    #[constexpr] dim: u32,
+    #[constexpr] packed_width: u32,
+) {
+    let d = tid;
+    let row = tgid_x;
 
-            // ── Stage 1: per-thread L2 norm via simd_sum + cross-simdgroup
-            // reduction through threadgroup memory.  `shared_norm[16]`
-            // holds one partial per simdgroup (16 is enough for dim ≤ 512).
-            let val = load(input[row * dim + d]).cast::<f32>();
-            let sq = val * val;
-            let simd_norm_sq = simd_sum(sq);
-            threadgroup_alloc("shared_norm", 16);
-            let sg_id = d / 32u32;
-            let lane = d & 31u32;
-            if lane == 0u32 {
-                threadgroup_store("shared_norm", sg_id, simd_norm_sq);
-            }
-            threadgroup_barrier();
+    // ── Stage 1: per-thread L2 norm via simd_sum + cross-simdgroup
+    // reduction through threadgroup memory.  `shared_norm[16]`
+    // holds one partial per simdgroup (16 is enough for dim ≤ 512).
+    let val = load(input[row * dim + d]).cast::<f32>();
+    let sq = val * val;
+    let simd_norm_sq = simd_sum(sq);
+    threadgroup_alloc("shared_norm", 16);
+    let sg_id = d / 32u32;
+    let lane = d & 31u32;
+    if lane == 0u32 {
+        threadgroup_store("shared_norm", sg_id, simd_norm_sq);
+    }
+    threadgroup_barrier();
 
-            let mut total_norm_sq = 0.0f32;
-            let num_groups = (dim + 31u32) / 32u32;
-            for i in range(0u32, num_groups, 1u32) {
-                total_norm_sq = total_norm_sq + threadgroup_load("shared_norm", i);
-            }
-            let norm_val = sqrt(total_norm_sq);
-            let inv_norm = select(norm_val > 1.0e-8f32, 1.0f32 / norm_val, 0.0f32);
-            let unit_val = val * inv_norm;
+    let mut total_norm_sq = 0.0f32;
+    let num_groups = (dim + 31u32) / 32u32;
+    for i in range(0u32, num_groups, 1u32) {
+        total_norm_sq = total_norm_sq + threadgroup_load("shared_norm", i);
+    }
+    let norm_val = sqrt(total_norm_sq);
+    let inv_norm = select(norm_val > 1.0e-8f32, 1.0f32 / norm_val, 0.0f32);
+    let unit_val = val * inv_norm;
 
-            // ── Stage 2: rotation Π via shared-memory matmul.  Each
-            // thread stores its unit value, barriers, then reads the
-            // full row to compute its rotated component.  `shared_unit`
-            // sized at 1024 to match the MLX upstream's max dim.
-            threadgroup_alloc("shared_unit", 1024);
-            threadgroup_store("shared_unit", d, unit_val);
-            threadgroup_barrier();
-            let mut rotated = 0.0f32;
-            for j in range(0u32, dim, 1u32) {
-                rotated = rotated
-                    + load(rotation[d * dim + j]).cast::<f32>()
-                        * threadgroup_load("shared_unit", j);
-            }
+    // ── Stage 2: rotation Π via shared-memory matmul.  Each
+    // thread stores its unit value, barriers, then reads the
+    // full row to compute its rotated component.  `shared_unit`
+    // sized at 1024 to match the MLX upstream's max dim.
+    threadgroup_alloc("shared_unit", 1024);
+    threadgroup_store("shared_unit", d, unit_val);
+    threadgroup_barrier();
+    let mut rotated = 0.0f32;
+    for j in range(0u32, dim, 1u32) {
+        rotated = rotated
+            + load(rotation[d * dim + j]).cast::<f32>() * threadgroup_load("shared_unit", j);
+    }
 
-            // ── Stage 3: branchless boundary comparison → codebook
-            // index.  For LEVELS levels we have LEVELS-1 boundaries;
-            // the index is the count of boundaries the rotated value
-            // exceeds.
-            let mut idx = 0u32;
-            for b in range(0u32, $levels - 1u32, 1u32) {
-                idx = idx + (rotated > load(boundaries[b])).cast::<u32>();
-            }
+    // ── Stage 3: branchless boundary comparison → codebook
+    // index.  For LEVELS levels we have LEVELS-1 boundaries;
+    // the index is the count of boundaries the rotated value
+    // exceeds.
+    let mut idx = 0u32;
+    for b in range(0u32, LEVELS - 1u32, 1u32) {
+        idx = idx + (rotated > load(boundaries[b])).cast::<u32>();
+    }
 
-            // ── Stage 4: pack the index into the u32 stream via
-            // `atomic_or_tg` on threadgroup memory.  `shared_packed`
-            // sized for the worst-case PackedWidth (D=512, bits=8 →
-            // 128).  Other (dim, bits) combos use the prefix only.
-            let bit_offset = d * $bits;
-            let word_idx = bit_offset / 32u32;
-            let shift = bit_offset & 31u32;
-            let masked = idx & ((1u32 << $bits) - 1u32);
+    // ── Stage 4: pack the index into the u32 stream via
+    // `atomic_or_tg` on threadgroup memory.  `shared_packed`
+    // sized for the worst-case PackedWidth (D=512, bits=8 →
+    // 128).  Other (dim, bits) combos use the prefix only.
+    let bit_offset = d * BITS;
+    let word_idx = bit_offset / 32u32;
+    let shift = bit_offset & 31u32;
+    let masked = idx & ((1u32 << BITS) - 1u32);
 
-            threadgroup_alloc("shared_packed", 128, "u32");
-            if d < packed_width {
-                threadgroup_store("shared_packed", d, 0u32);
-            }
-            threadgroup_barrier();
+    threadgroup_alloc("shared_packed", 128, "u32");
+    if d < packed_width {
+        threadgroup_store("shared_packed", d, 0u32);
+    }
+    threadgroup_barrier();
 
-            atomic_or_tg("shared_packed", word_idx, masked << shift);
-            // Cross-word spill — write the high bits into the next u32
-            // if the index straddles a word boundary.
-            //
-            // Use unsigned-only arithmetic.  The original formulation
-            // `(shift + bits).cast::<i32>() - 32i32 > 0i32` lost its
-            // signedness in codegen (lowered to `int v_spill_bits =
-            // (int)(shift + bits) - 32; bool = v_spill_bits > 0u`),
-            // making the comparison int-vs-uint.  C/MSL promotes the
-            // int to uint, so -28 becomes ~4e9 and the spill branch
-            // ran for EVERY thread, polluting `shared_packed[word+1]`
-            // with garbage shifted by `masked >> 32` (which Apple
-            // Silicon evaluates as `masked >> 0 = masked`).  Symptom:
-            // low nibbles of subsequent words OR'd with unrelated dim
-            // indices.  Caught by the aura_encode GPU correctness
-            // test.  See FFAI post-mortem 2026-05-19 — a metaltile
-            // codegen follow-up should emit i32 comparisons
-            // faithfully when the DSL requests them.
-            let total_bits = shift + $bits;
-            if total_bits > 32u32 {
-                let spill_u = total_bits - 32u32;
-                atomic_or_tg("shared_packed", word_idx + 1u32, masked >> ($bits - spill_u));
-            }
-            threadgroup_barrier();
+    atomic_or_tg("shared_packed", word_idx, masked << shift);
+    // Cross-word spill — write the high bits into the next u32
+    // if the index straddles a word boundary.
+    //
+    // Use unsigned-only arithmetic.  The original formulation
+    // `(shift + bits).cast::<i32>() - 32i32 > 0i32` lost its
+    // signedness in codegen (lowered to `int v_spill_bits =
+    // (int)(shift + bits) - 32; bool = v_spill_bits > 0u`),
+    // making the comparison int-vs-uint.  C/MSL promotes the
+    // int to uint, so -28 becomes ~4e9 and the spill branch
+    // ran for EVERY thread, polluting `shared_packed[word+1]`
+    // with garbage shifted by `masked >> 32` (which Apple
+    // Silicon evaluates as `masked >> 0 = masked`).  Symptom:
+    // low nibbles of subsequent words OR'd with unrelated dim
+    // indices.  Caught by the aura_encode GPU correctness
+    // test.  See FFAI post-mortem 2026-05-19 — a metaltile
+    // codegen follow-up should emit i32 comparisons
+    // faithfully when the DSL requests them.
+    let total_bits = shift + BITS;
+    if total_bits > 32u32 {
+        let spill_u = total_bits - 32u32;
+        atomic_or_tg("shared_packed", word_idx + 1u32, masked >> (BITS - spill_u));
+    }
+    threadgroup_barrier();
 
-            if d < packed_width {
-                store(packed_out[row * packed_width + d], threadgroup_load("shared_packed", d));
-            }
+    if d < packed_width {
+        store(packed_out[row * packed_width + d], threadgroup_load("shared_packed", d));
+    }
 
-            // ── Stage 5: norm correction.  Re-run the reduction over
-            // the dequantised centroid values; `recon_norm` gives the
-            // L2 norm of the reconstructed vector, and
-            // `corrected = norm_val / recon_norm` is what the decoder
-            // multiplies back through.
-            let centroid_val = load(codebook[idx]).cast::<f32>();
-            let recon_sq = centroid_val * centroid_val;
-            let simd_recon_sq = simd_sum(recon_sq);
-            if lane == 0u32 {
-                threadgroup_store("shared_norm", sg_id, simd_recon_sq);
-            }
-            threadgroup_barrier();
-            let mut total_recon_sq = 0.0f32;
-            for i in range(0u32, num_groups, 1u32) {
-                total_recon_sq = total_recon_sq + threadgroup_load("shared_norm", i);
-            }
-            let recon_norm = sqrt(total_recon_sq);
-            let corrected_norm = select(recon_norm > 1.0e-8f32, norm_val / recon_norm, norm_val);
+    // ── Stage 5: norm correction.  Re-run the reduction over
+    // the dequantised centroid values; `recon_norm` gives the
+    // L2 norm of the reconstructed vector, and
+    // `corrected = norm_val / recon_norm` is what the decoder
+    // multiplies back through.
+    let centroid_val = load(codebook[idx]).cast::<f32>();
+    let recon_sq = centroid_val * centroid_val;
+    let simd_recon_sq = simd_sum(recon_sq);
+    if lane == 0u32 {
+        threadgroup_store("shared_norm", sg_id, simd_recon_sq);
+    }
+    threadgroup_barrier();
+    let mut total_recon_sq = 0.0f32;
+    for i in range(0u32, num_groups, 1u32) {
+        total_recon_sq = total_recon_sq + threadgroup_load("shared_norm", i);
+    }
+    let recon_norm = sqrt(total_recon_sq);
+    let corrected_norm = select(recon_norm > 1.0e-8f32, norm_val / recon_norm, norm_val);
 
-            if d == 0u32 {
-                store(norms_out[row], corrected_norm.cast::<T>());
-            }
-        }
-    };
+    if d == 0u32 {
+        store(norms_out[row], corrected_norm.cast::<T>());
+    }
 }
-
-aura_encode_kernel!(aura_encode_int2, 2u32, 4u32, "encode_int2");
-aura_encode_kernel!(aura_encode_int3, 3u32, 8u32, "encode_int3");
-aura_encode_kernel!(aura_encode_int4, 4u32, 16u32, "encode_int4");
-aura_encode_kernel!(aura_encode_int6, 6u32, 64u32, "encode_int6");
-aura_encode_kernel!(aura_encode_int8, 8u32, 256u32, "encode_int8");
 
 /// New-syntax correctness for the AURA fused encode kernel. Mirrors the
 /// affine-quantize tests' strategy: the **packed codes** go through a
