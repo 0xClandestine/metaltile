@@ -21,6 +21,7 @@ Table of contents for the MetalTile docs. The top-level [`README`](../README.md)
 ## Design & planning
 
 - [Bench metrics spec](BENCH_METRICS_SPEC.md) — planned `tile bench` measurement additions (latency, GFLOP/s, roofline/utilization, bottleneck) so kernels can actually be optimized and precisions compared; includes the precision-support roadmap (nvfp4/mxfp4/mxfp8) and M5 Neural Accelerator context.
+- [Kernel organization spec](KERNEL_ORGANIZATION.md) — **proposal** for `metaltile-std`'s kernel source layout: file granularity, the canonical per-kernel file shape, and the family-by-family migration plan (coordinates with the CLI subprocess-rewrite spec, which governs the crate/CLI side).
 
 ## See also
 
