@@ -49,7 +49,13 @@ pub fn adain1d<T>(
     let tot = reduce_sum(s);
     let tot_sq = reduce_sum(sq);
     let mean = tot / length;
-    let var = tot_sq / length - mean * mean;
+    // E[x²] − E[x]² is exact in real arithmetic but suffers catastrophic
+    // cancellation in f32 when the variance is tiny relative to the mean²
+    // (e.g. a near-constant channel over a long time axis): the result can go
+    // slightly negative, and `rsqrt(negative)` is NaN. The true variance is
+    // ≥ 0, so clamp before the reciprocal-sqrt.
+    let var_raw = tot_sq / length - mean * mean;
+    let var = select(var_raw > 0.0f32, var_raw, 0.0f32);
     let eps = load(eps_buf[0]);
     let inv = rsqrt(var + eps);
     let g = load(gamma[row]).cast::<f32>();
