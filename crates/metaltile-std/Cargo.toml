@@ -6,6 +6,8 @@ license.workspace = true
 description = "MetalTile kernel standard library — benchmark metadata and type definitions"
 publish = true
 
+build = "bin/build.rs"
+
 [lints]
 workspace = true
 
