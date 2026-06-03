@@ -52,6 +52,18 @@ comparison*, not evidence of a target path.)
 - It future-proofs MetalTile as a multi-target toolchain (GPU now; ANE for the
   supported subgraph).
 
+**Field evidence (the §8 references).** This is corroborated by working projects:
+`ane-infer` reports a **fused FFN at ~3.6 TFLOPS @ ~3 W** on the ANE (≈3× the
+single-op throughput, vs a Metal-GPU Q8 decode at ~32 tok/s @ ~15 W) — the
+perf/Watt gap is real, **but only for fused subgraphs**. The same project measures
+ANE dispatch overhead at roughly **`119 µs + bytes / 78 GB/s`** per submission, so
+tiny per-op dispatches are dominated by fixed cost. **Implication:** the ANE wins
+when you hand it a *large fused graph* (whole FFN / attention block), not a stream
+of small ops — which reinforces the "graph, not kernel" framing in §1, and means
+the lowering pass should **fuse aggressively** before emitting. `CoreML-LLM` shows
+the supported-layer ceiling in production: decode at **34–52 tok/s** for 0.3–2 B
+models with **92–99.9 % ANE residency**, entirely through Core ML (Route A).
+
 ## 3. Route A — Core ML / MIL (supported, recommended)
 
 Lower the supported subgraph to **MIL** (Model Intermediate Language, Core ML's IR)
@@ -86,7 +98,37 @@ placement. This is the route *The ANE Book* documents for production LLM inferen
   the ANE rejects; the lowering pass must detect these and keep them on GPU.
 - **Residency verification.** There is no API that *guarantees* ANE placement;
   confirm via `os_log`/Instruments / the book's **ANE-only residency checks**, and
-  treat ANE placement as best-effort.
+  treat ANE placement as best-effort. Production projects report **92–99.9 % ANE
+  residency** per chunk when conforming (CoreML-LLM).
+
+**Field-tested constraints (skyfallsin field-guide, M3 Max).** Concrete rules the
+lowering pass must encode, found empirically:
+- **IOSurface min width `W ≥ 32`** for runtime buffers (the ANE's `SP=32`); pad
+  narrow tensors. **Width-1 outputs may *compile* but fail at *eval*** — validate
+  output shapes, don't trust compile success.
+- **Proven-safe MIL ops:** `add`, `mul`, `reduce_sum`, `reshape`, `slice_by_size`,
+  `softmax`, `exp`, `concat`, unary. Treat anything outside a vetted allow-list as
+  GPU-fallback until proven on-device.
+- **MIL `tile` is poison** — it *"poisons ANE state for the rest of the process"*
+  in their tests. The emitter must **never** emit `tile`; express broadcasts
+  another way.
+
+**Production lowering patterns (CoreML-LLM, ane-infer).**
+- **Fuse before emitting.** ANE perf comes from large fused graphs (whole FFN /
+  attention block), not op-streams — `ane-infer`'s `mil-gen` emits **fused** FFN /
+  QKV / projection MIL (`mega.rs` / `attention.rs` / `ffn.rs`). This is a working
+  precedent for *exactly the Route-A emitter this spec proposes* (Rust → MIL text).
+- **Multifunction prefill + decode** (separate enumerated shapes, e.g. prefill
+  `T=32` / decode `T=1`) sharing weights; **`MLState` `slice_update` KV cache**;
+  weight blobs spill SRAM→DRAM above ~32 MB.
+- **INT8-per-chunk dominates in practice.** CoreML-LLM ships 4×INT8 chunks +
+  fp16-embed sidecars; notably their **blockwise *palettization* probe was a
+  negative result**. So our block-scaled formats inform the *scheme/granularity*
+  request, but don't assume our exact layout maps to a Core ML win — validate, and
+  expect plain Core ML linear-INT8 to be the strong baseline.
+- **fp16 reduction bias.** A18/A19 ANE fp16 reductions carry a bias that bit a
+  full-vocab repetition-penalty path (CoreML-LLM) — relevant if reductions are
+  lowered to ANE; keep accuracy-sensitive reductions verifiable.
 
 ### 3.3 What MetalTile contributes vs delegates
 - **Contributes:** the IR→MIL lowering pass, the op-eligibility analysis
@@ -110,12 +152,25 @@ compiler** to get a hardware executable; you only take over *submission*.
   "ANE program").
 - **`ANEServices.framework`** + the **`aned`** user-space daemon — the runtime
   that loads a `.hwx` and submits inference requests.
-- **IOKit user client `H11ANE` / `AppleH11ANEInterface`** (`H11ANEServicesClient`)
-  — the kernel interface to the ANE hardware; submission goes through IOKit
-  `IOConnectCall*` with ANE-specific request structs.
+- **`AppleNeuralEngine.framework` runtime client** (the symbols `ane-infer`
+  drives): `_ANEClient`, `_ANEInMemoryModel` / `_ANEInMemoryModelDescriptor`,
+  `_ANEIOSurfaceOutputSets` (output-buffer sets), and the eval entry points
+  `doEvaluateDirectWithModel:` (which **bypasses the `aned` daemon for ~10 % faster
+  eval**) plus `prepareChainingWithModel:` / `doPrepareChainingWithModel:` for
+  multi-procedure chaining. The daemon XPC surface is `_ANEDaemonConnection`
+  (~19 methods).
+- **IOKit user client `H11ANE` / `AppleH11ANEInterface`** (`H11ANEServicesClient`,
+  user-client types 1 & 4) — the kernel interface to the ANE hardware; submission
+  goes through IOKit `IOConnectCall*` with ANE-specific request structs.
 - **Entitlements.** Direct access is gated by private entitlements
   (`com.apple.ane.*`); third-party apps generally **cannot** obtain them, which is
   why hollance's answer to "program it directly" is effectively *no*.
+
+**Working precedent:** `ane-infer` (a Rust project, like MetalTile) drives exactly
+this stack — `mil-gen` emits fused MIL, the ANE private compiler produces the
+program, and `doEvaluateDirectWithModel:` submits with inputs/outputs as
+**`IOSurface`s** — reporting the ~3 W fused-FFN throughput in §2. It also documents
+the headline risk verbatim: *"Private APIs will break on macOS updates."*
 
 ### 4.2 What a Route-B backend would do
 1. Produce the supported subgraph (as in Route A, or as an espresso net).
@@ -193,3 +248,18 @@ replacement for — MetalTile's GPU kernel generation.
   community reverse-engineering: device/generation support, `computeUnits`,
   ANE precision, unsupported layers + fallback, *"Can I program the ANE
   directly?"*, "How does the ANE work internally", "Reverse engineering the ANE".
+- skyfallsin, *apple-neural-engine-field-guide* —
+  https://github.com/skyfallsin/apple-neural-engine-field-guide — empirical
+  constraints (M3 Max): `MIL → espresso net → .hwx`; IOSurface `W ≥ 32`; width-1
+  outputs fail at eval; the proven-safe MIL op set; `MIL tile` poisons ANE state;
+  the `~119 µs + bytes/78 GB/s` dispatch model.
+- thebasedcapital, *ane-infer* — https://github.com/thebasedcapital/ane-infer —
+  a Rust ANE/GPU LLM runtime via the **direct private path**: `mil-gen` fused-MIL
+  emitter, `_ANEClient` / `doEvaluateDirectWithModel:` / chaining,
+  `_ANEDaemonConnection`, `H11ANE` IOKit; fused-FFN ~3.6 TFLOPS @ ~3 W; the
+  closest existing analog to a MetalTile ANE backend.
+- john-rocky, *CoreML-LLM* — https://github.com/john-rocky/CoreML-LLM —
+  production **Route A** (Core ML) LLM inference: coremltools 8+, INT8 chunking
+  (~250 MB) + fp16-embed sidecars, multifunction prefill/decode, `MLState`
+  `slice_update` KV cache, 92–99.9 % ANE residency, 34–52 tok/s on A19 Pro;
+  blockwise-palettization noted as a negative result.
