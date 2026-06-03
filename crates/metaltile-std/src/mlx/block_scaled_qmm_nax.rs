@@ -674,6 +674,320 @@ pub fn mt_int8_qmm_nax<T>(
     }
 }
 
+// ── Symmetric sub-byte integer NAX kernels (int2/3/4/5/6 + MXINT2..6) ────────
+// The element is a signed N-bit two's-complement code, tight-bit-packed
+// LSB-first into the flat u32 W code-stream (per-row word-aligned: row `r` of
+// the `[n, k]` weight starts at word `r · k · bits / 32`, and element `e` within
+// that row sits at bit `e · bits`). The staging decode mirrors the proven
+// `int_dequant_*` macros in `mlx/block_scaled_dequant.rs` / the GEMV macros in
+// `mlx/block_scaled_matmul.rs` exactly: a straddle-aware two-word read extracts
+// the low N bits, then a float sign-extend (subtract 2^N when the top bit is
+// set; `$half`/`$full` are 2^(N-1) / 2^N) yields the signed value, multiplied by
+// the block scale into `Ws` before the cooperative `matmul2d` runs. Only this
+// per-element W decode + scale read change — the **dispatch geometry,
+// coop-tile extents, threadgroup staging dims, and the X/Out tail are
+// byte-identical** to `mt_int8_qmm_nax` (the `row_word_off` swaps in for the
+// 8-bit `w_row_base`, and the lane's 8-element K stripe `k_off + _i` plays the
+// role of the per-row element index). `$half`/`$full` are passed as literals to
+// keep the constexpr math out of the DSL shift operands.
+
+/// FP32-scaled symmetric int NAX matmul (int2/3/4/5/6): per-element bit-stream
+/// code × per-group FP32 scale (no bias). `w_word_row_base` indexes the W row's
+/// tight bit-stream (`k · bits / 32` u32 words per row).
+macro_rules! int_qmm_nax_f32 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            w: Tensor<u32>,
+            scales: Tensor<f32>,
+            x: Tensor<T>,
+            mut out: Tensor<T>,
+            #[constexpr] k: u32,
+            #[constexpr] n: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let lane = simd_lane;
+            let sg = simd_group_id();
+            let lane_in_tg = sg * 32u32 + lane;
+            let sm = sg / 2u32;
+            let sn = sg & 1u32;
+            let sg_m_base = sm * 16u32;
+            let sg_n_base = sn * 16u32;
+            let x_m_base = tgid_y * 32u32;
+            let w_n_base = tgid_x * 32u32;
+            threadgroup_alloc("Xs", 1152u32, coop_stage(T));
+            threadgroup_alloc("Ws", 1152u32, coop_stage(T));
+            threadgroup_alloc("OutScratch", 1024u32, f32);
+            coop_tile_setup(
+                "gemm",
+                16u32,
+                16u32,
+                32u32,
+                coop_stage(T),
+                "accumulate",
+                "simdgroup",
+                f32,
+                false,
+                true,
+                false,
+            );
+            coop_tile_zero("gemm");
+            let x_m_row = lane_in_tg / 4u32;
+            let x_k_quad = lane_in_tg & 3u32;
+            let x_k_base = x_k_quad * 8u32;
+            let x_ws_base = x_m_row * 36u32 + x_k_base;
+            let words_per_row = k * $bits / 32u32;
+            let gs_per_row = k / block_size;
+            let wn_plus_wr = w_n_base + x_m_row;
+            let sb_base = wn_plus_wr * gs_per_row;
+            let w_word_row_base = wn_plus_wr * words_per_row;
+            let xs_sg_off = sg_m_base * 36u32;
+            let ws_sg_off = sg_n_base * 36u32;
+            let sg_scratch_off = sg * 256u32;
+            for kb in range(0u32, k, 32u32) {
+                let x_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base;
+                for _i in range(0u32, 8u32, 1u32) {
+                    let xv = load(x[x_row_dev_base + _i]).cast::<f32>();
+                    threadgroup_store("Xs", x_ws_base + _i, xv);
+                }
+                let k_off = kb + x_k_base;
+                let scale = load(scales[sb_base + k_off / block_size]);
+                for _i in range(0u32, 8u32, 1u32) {
+                    // Element index within this W row's bit-stream.
+                    let e = k_off + _i;
+                    let bit_off = e * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(w[w_word_row_base + word_idx]);
+                    let w1 =
+                        load(w[w_word_row_base + select(spill > 0u32, word_idx + 1u32, word_idx)]);
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+                    let qf = q.cast::<f32>();
+                    let elem = select(q >= $half, qf - $full, qf); // sign-extend
+                    threadgroup_store("Ws", x_ws_base + _i, elem * scale);
+                }
+                threadgroup_barrier();
+                coop_tile_load_a("gemm", "Xs", true, coop_stage(T), 36u32, 16u32, xs_sg_off);
+                coop_tile_load_b("gemm", "Ws", true, coop_stage(T), 36u32, 16u32, ws_sg_off);
+                coop_tile_run("gemm");
+                threadgroup_barrier();
+            }
+            coop_tile_store_c("gemm", "OutScratch", true, f32, 16u32, 16u32, sg_scratch_off);
+            threadgroup_barrier();
+            let out_m_base = x_m_base + sg_m_base;
+            let out_n_base = w_n_base + sg_n_base;
+            let o_row = lane / 2u32;
+            let o_col_base = (lane & 1u32) * 8u32;
+            for _i in range(0u32, 8u32, 1u32) {
+                let col = o_col_base + _i;
+                let v = threadgroup_load("OutScratch", sg_scratch_off + o_row * 16u32 + col);
+                store(out[(out_m_base + o_row) * n + (out_n_base + col)], v.cast::<T>());
+            }
+        }
+    };
+}
+int_qmm_nax_f32!(mt_int2_qmm_nax, 2u32, 2u32, 4.0f32);
+int_qmm_nax_f32!(mt_int3_qmm_nax, 3u32, 4u32, 8.0f32);
+int_qmm_nax_f32!(mt_int4_qmm_nax, 4u32, 8u32, 16.0f32);
+int_qmm_nax_f32!(mt_int5_qmm_nax, 5u32, 16u32, 32.0f32);
+int_qmm_nax_f32!(mt_int6_qmm_nax, 6u32, 32u32, 64.0f32);
+
+/// E8M0-scaled symmetric int NAX matmul (MXINT2/3/4/5/6): per-element bit-stream
+/// code × pow-2 (E8M0) block scale `2^(bits-127)` (no bias). Same straddle-aware
+/// bit-stream decode and byte-identical geometry as `int_qmm_nax_f32`; only the
+/// scale axis differs (one u8 exponent per block instead of a raw f32).
+macro_rules! int_qmm_nax_e8m0 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            w: Tensor<u32>,
+            scales: Tensor<u8>,
+            x: Tensor<T>,
+            mut out: Tensor<T>,
+            #[constexpr] k: u32,
+            #[constexpr] n: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let lane = simd_lane;
+            let sg = simd_group_id();
+            let lane_in_tg = sg * 32u32 + lane;
+            let sm = sg / 2u32;
+            let sn = sg & 1u32;
+            let sg_m_base = sm * 16u32;
+            let sg_n_base = sn * 16u32;
+            let x_m_base = tgid_y * 32u32;
+            let w_n_base = tgid_x * 32u32;
+            threadgroup_alloc("Xs", 1152u32, coop_stage(T));
+            threadgroup_alloc("Ws", 1152u32, coop_stage(T));
+            threadgroup_alloc("OutScratch", 1024u32, f32);
+            coop_tile_setup(
+                "gemm",
+                16u32,
+                16u32,
+                32u32,
+                coop_stage(T),
+                "accumulate",
+                "simdgroup",
+                f32,
+                false,
+                true,
+                false,
+            );
+            coop_tile_zero("gemm");
+            let x_m_row = lane_in_tg / 4u32;
+            let x_k_quad = lane_in_tg & 3u32;
+            let x_k_base = x_k_quad * 8u32;
+            let x_ws_base = x_m_row * 36u32 + x_k_base;
+            let words_per_row = k * $bits / 32u32;
+            let gs_per_row = k / block_size;
+            let wn_plus_wr = w_n_base + x_m_row;
+            let sb_base = wn_plus_wr * gs_per_row;
+            let w_word_row_base = wn_plus_wr * words_per_row;
+            let xs_sg_off = sg_m_base * 36u32;
+            let ws_sg_off = sg_n_base * 36u32;
+            let sg_scratch_off = sg * 256u32;
+            for kb in range(0u32, k, 32u32) {
+                let x_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base;
+                for _i in range(0u32, 8u32, 1u32) {
+                    let xv = load(x[x_row_dev_base + _i]).cast::<f32>();
+                    threadgroup_store("Xs", x_ws_base + _i, xv);
+                }
+                let k_off = kb + x_k_base;
+                let scale =
+                    exp2(load(scales[sb_base + k_off / block_size]).cast::<f32>() - 127.0f32);
+                for _i in range(0u32, 8u32, 1u32) {
+                    // Element index within this W row's bit-stream.
+                    let e = k_off + _i;
+                    let bit_off = e * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(w[w_word_row_base + word_idx]);
+                    let w1 =
+                        load(w[w_word_row_base + select(spill > 0u32, word_idx + 1u32, word_idx)]);
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+                    let qf = q.cast::<f32>();
+                    let elem = select(q >= $half, qf - $full, qf); // sign-extend
+                    threadgroup_store("Ws", x_ws_base + _i, elem * scale);
+                }
+                threadgroup_barrier();
+                coop_tile_load_a("gemm", "Xs", true, coop_stage(T), 36u32, 16u32, xs_sg_off);
+                coop_tile_load_b("gemm", "Ws", true, coop_stage(T), 36u32, 16u32, ws_sg_off);
+                coop_tile_run("gemm");
+                threadgroup_barrier();
+            }
+            coop_tile_store_c("gemm", "OutScratch", true, f32, 16u32, 16u32, sg_scratch_off);
+            threadgroup_barrier();
+            let out_m_base = x_m_base + sg_m_base;
+            let out_n_base = w_n_base + sg_n_base;
+            let o_row = lane / 2u32;
+            let o_col_base = (lane & 1u32) * 8u32;
+            for _i in range(0u32, 8u32, 1u32) {
+                let col = o_col_base + _i;
+                let v = threadgroup_load("OutScratch", sg_scratch_off + o_row * 16u32 + col);
+                store(out[(out_m_base + o_row) * n + (out_n_base + col)], v.cast::<T>());
+            }
+        }
+    };
+}
+int_qmm_nax_e8m0!(mt_mxint2_qmm_nax, 2u32, 2u32, 4.0f32);
+int_qmm_nax_e8m0!(mt_mxint3_qmm_nax, 3u32, 4u32, 8.0f32);
+int_qmm_nax_e8m0!(mt_mxint4_qmm_nax, 4u32, 8u32, 16.0f32);
+int_qmm_nax_e8m0!(mt_mxint5_qmm_nax, 5u32, 16u32, 32.0f32);
+int_qmm_nax_e8m0!(mt_mxint6_qmm_nax, 6u32, 32u32, 64.0f32);
+
+/// MXINT8 NAX matmul — 8-bit symmetric codes (byte layout, block 32), E8M0
+/// pow-2 block scale `2^(bits-127)` (no bias). Element-strided W like the 8-bit
+/// float formats (one byte per code); decode is `int8_decode → elem · scale`.
+/// Byte-identical geometry to `mt_int8_qmm_nax` — only the scale axis (E8M0 u8)
+/// differs.
+#[kernel]
+pub fn mt_mxint8_qmm_nax<T>(
+    w: Tensor<u8>,
+    scales: Tensor<u8>,
+    x: Tensor<T>,
+    mut out: Tensor<T>,
+    #[constexpr] k: u32,
+    #[constexpr] n: u32,
+    #[constexpr] block_size: u32,
+) {
+    let lane = simd_lane;
+    let sg = simd_group_id();
+    let lane_in_tg = sg * 32u32 + lane;
+    let sm = sg / 2u32;
+    let sn = sg & 1u32;
+    let sg_m_base = sm * 16u32;
+    let sg_n_base = sn * 16u32;
+    let x_m_base = tgid_y * 32u32;
+    let w_n_base = tgid_x * 32u32;
+    threadgroup_alloc("Xs", 1152u32, coop_stage(T));
+    threadgroup_alloc("Ws", 1152u32, coop_stage(T));
+    threadgroup_alloc("OutScratch", 1024u32, f32);
+    coop_tile_setup(
+        "gemm",
+        16u32,
+        16u32,
+        32u32,
+        coop_stage(T),
+        "accumulate",
+        "simdgroup",
+        f32,
+        false,
+        true,
+        false,
+    );
+    coop_tile_zero("gemm");
+    let x_m_row = lane_in_tg / 4u32;
+    let x_k_quad = lane_in_tg & 3u32;
+    let x_k_base = x_k_quad * 8u32;
+    let x_ws_base = x_m_row * 36u32 + x_k_base;
+    let gs_per_row = k / block_size;
+    let wn_plus_wr = w_n_base + x_m_row;
+    let sb_base = wn_plus_wr * gs_per_row;
+    let w_row_base = wn_plus_wr * k;
+    let xs_sg_off = sg_m_base * 36u32;
+    let ws_sg_off = sg_n_base * 36u32;
+    let sg_scratch_off = sg * 256u32;
+    for kb in range(0u32, k, 32u32) {
+        let x_row_dev_base = (x_m_base + x_m_row) * k + kb + x_k_base;
+        for _i in range(0u32, 8u32, 1u32) {
+            let xv = load(x[x_row_dev_base + _i]).cast::<f32>();
+            threadgroup_store("Xs", x_ws_base + _i, xv);
+        }
+        let k_off = kb + x_k_base;
+        let scale = exp2(load(scales[sb_base + k_off / block_size]).cast::<f32>() - 127.0f32);
+        for _i in range(0u32, 8u32, 1u32) {
+            let elem = int8_decode(load(w[w_row_base + k_off + _i]).cast::<u32>());
+            threadgroup_store("Ws", x_ws_base + _i, elem * scale);
+        }
+        threadgroup_barrier();
+        coop_tile_load_a("gemm", "Xs", true, coop_stage(T), 36u32, 16u32, xs_sg_off);
+        coop_tile_load_b("gemm", "Ws", true, coop_stage(T), 36u32, 16u32, ws_sg_off);
+        coop_tile_run("gemm");
+        threadgroup_barrier();
+    }
+    coop_tile_store_c("gemm", "OutScratch", true, f32, 16u32, 16u32, sg_scratch_off);
+    threadgroup_barrier();
+    let out_m_base = x_m_base + sg_m_base;
+    let out_n_base = w_n_base + sg_n_base;
+    let o_row = lane / 2u32;
+    let o_col_base = (lane & 1u32) * 8u32;
+    for _i in range(0u32, 8u32, 1u32) {
+        let col = o_col_base + _i;
+        let v = threadgroup_load("OutScratch", sg_scratch_off + o_row * 16u32 + col);
+        store(out[(out_m_base + o_row) * n + (out_n_base + col)], v.cast::<T>());
+    }
+}
+
 pub mod kernel_tests {
     use metaltile::{core::ir::Kernel, test::*, test_kernel};
 
@@ -714,11 +1028,13 @@ pub mod kernel_tests {
                 expected[mr * n + nc] = acc;
             }
         }
-        let weight_dt = if fmt.element_bits() == 4 { DType::U32 } else { DType::U8 };
-        let scales_dt = if matches!(
-            fmt,
-            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
-        ) {
+        // 8-bit codes bind as one uchar each; every sub-byte width (4-bit nibble
+        // packs + int2/3/5/6 tight bit-streams) binds as packed u32 words. FP32
+        // scales bind as f32; E8M0/E4M3 scales as one byte. Both axes are driven
+        // off the format so new integer formats pick up the right buffer types
+        // (4-bit collapses to the old `== 4` branch, no regression).
+        let weight_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
+        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
             DType::F32
         } else {
             DType::U8
@@ -781,6 +1097,56 @@ pub mod kernel_tests {
     fn test_int8_qmm_nax(dt: DType) -> TestSetup {
         nax_setup(mt_int8_qmm_nax::kernel_ir_for(dt), QFormat::Int8, 32, 64, 512, dt)
     }
+
+    // Symmetric sub-byte ints (FP32 group scale, group 64) + MXINT (E8M0 block
+    // scale, block 32) + MXINT8 (8-bit, E8M0). k=512 is a multiple of 32, so
+    // each W row's bit-stream is word-aligned for every width; the kernel and
+    // oracle share the codec, so the GPU output tracks the dequant-then-matmul
+    // reference to float precision.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_int2_qmm_nax(dt: DType) -> TestSetup {
+        nax_setup(mt_int2_qmm_nax::kernel_ir_for(dt), QFormat::Int2, 32, 64, 512, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_int3_qmm_nax(dt: DType) -> TestSetup {
+        nax_setup(mt_int3_qmm_nax::kernel_ir_for(dt), QFormat::Int3, 32, 64, 512, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_int4_qmm_nax(dt: DType) -> TestSetup {
+        nax_setup(mt_int4_qmm_nax::kernel_ir_for(dt), QFormat::Int4, 32, 64, 512, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_int5_qmm_nax(dt: DType) -> TestSetup {
+        nax_setup(mt_int5_qmm_nax::kernel_ir_for(dt), QFormat::Int5, 32, 64, 512, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_int6_qmm_nax(dt: DType) -> TestSetup {
+        nax_setup(mt_int6_qmm_nax::kernel_ir_for(dt), QFormat::Int6, 32, 64, 512, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_mxint2_qmm_nax(dt: DType) -> TestSetup {
+        nax_setup(mt_mxint2_qmm_nax::kernel_ir_for(dt), QFormat::Mxint2, 32, 64, 512, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_mxint3_qmm_nax(dt: DType) -> TestSetup {
+        nax_setup(mt_mxint3_qmm_nax::kernel_ir_for(dt), QFormat::Mxint3, 32, 64, 512, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_mxint4_qmm_nax(dt: DType) -> TestSetup {
+        nax_setup(mt_mxint4_qmm_nax::kernel_ir_for(dt), QFormat::Mxint4, 32, 64, 512, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_mxint5_qmm_nax(dt: DType) -> TestSetup {
+        nax_setup(mt_mxint5_qmm_nax::kernel_ir_for(dt), QFormat::Mxint5, 32, 64, 512, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_mxint6_qmm_nax(dt: DType) -> TestSetup {
+        nax_setup(mt_mxint6_qmm_nax::kernel_ir_for(dt), QFormat::Mxint6, 32, 64, 512, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
+    fn test_mxint8_qmm_nax(dt: DType) -> TestSetup {
+        nax_setup(mt_mxint8_qmm_nax::kernel_ir_for(dt), QFormat::Mxint8, 32, 64, 512, dt)
+    }
 }
 
 /// NAX tensor-engine matmul benches at a 128×4096×4096 tile shape.
@@ -798,12 +1164,16 @@ pub mod kernel_benches {
         k: usize,
         dt: DType,
     ) -> BenchSetup {
-        let (codes_len, codes_dt) =
-            if fmt.element_bits() == 4 { (n * k / 8, DType::U32) } else { (n * k, DType::U8) };
-        let scales_dt = if matches!(
-            fmt,
-            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
-        ) {
+        // 8-bit codes are one uchar each; every sub-byte width (4-bit nibble
+        // packs + int2/3/5/6 tight bit-streams) tight-bit-packs into u32 words.
+        // `bitstream_words` collapses to the old `n*k/8` for 4-bit, so the
+        // pre-existing formats are unchanged.
+        let (codes_len, codes_dt) = if fmt.element_bits() == 8 {
+            (n * k, DType::U8)
+        } else {
+            (crate::quant::format::bitstream_words(n * k, fmt.element_bits()), DType::U32)
+        };
+        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
             DType::F32
         } else {
             DType::U8
@@ -863,5 +1233,51 @@ pub mod kernel_benches {
     #[bench(name = "mlx/block_scaled_qmm_nax/int8", dtypes = [f32, f16, bf16])]
     fn bench_int8(dt: DType) -> BenchSetup {
         nax_bench(mt_int8_qmm_nax::kernel_ir_for(dt), QFormat::Int8, 128, 4096, 4096, dt)
+    }
+    // Symmetric sub-byte ints (FP32 group scale) + MXINT (E8M0 block scale) +
+    // MXINT8 (8-bit, E8M0).
+    #[bench(name = "mlx/block_scaled_qmm_nax/int2", dtypes = [f32, f16, bf16])]
+    fn bench_int2(dt: DType) -> BenchSetup {
+        nax_bench(mt_int2_qmm_nax::kernel_ir_for(dt), QFormat::Int2, 128, 4096, 4096, dt)
+    }
+    #[bench(name = "mlx/block_scaled_qmm_nax/int3", dtypes = [f32, f16, bf16])]
+    fn bench_int3(dt: DType) -> BenchSetup {
+        nax_bench(mt_int3_qmm_nax::kernel_ir_for(dt), QFormat::Int3, 128, 4096, 4096, dt)
+    }
+    #[bench(name = "mlx/block_scaled_qmm_nax/int4", dtypes = [f32, f16, bf16])]
+    fn bench_int4(dt: DType) -> BenchSetup {
+        nax_bench(mt_int4_qmm_nax::kernel_ir_for(dt), QFormat::Int4, 128, 4096, 4096, dt)
+    }
+    #[bench(name = "mlx/block_scaled_qmm_nax/int5", dtypes = [f32, f16, bf16])]
+    fn bench_int5(dt: DType) -> BenchSetup {
+        nax_bench(mt_int5_qmm_nax::kernel_ir_for(dt), QFormat::Int5, 128, 4096, 4096, dt)
+    }
+    #[bench(name = "mlx/block_scaled_qmm_nax/int6", dtypes = [f32, f16, bf16])]
+    fn bench_int6(dt: DType) -> BenchSetup {
+        nax_bench(mt_int6_qmm_nax::kernel_ir_for(dt), QFormat::Int6, 128, 4096, 4096, dt)
+    }
+    #[bench(name = "mlx/block_scaled_qmm_nax/mxint2", dtypes = [f32, f16, bf16])]
+    fn bench_mxint2(dt: DType) -> BenchSetup {
+        nax_bench(mt_mxint2_qmm_nax::kernel_ir_for(dt), QFormat::Mxint2, 128, 4096, 4096, dt)
+    }
+    #[bench(name = "mlx/block_scaled_qmm_nax/mxint3", dtypes = [f32, f16, bf16])]
+    fn bench_mxint3(dt: DType) -> BenchSetup {
+        nax_bench(mt_mxint3_qmm_nax::kernel_ir_for(dt), QFormat::Mxint3, 128, 4096, 4096, dt)
+    }
+    #[bench(name = "mlx/block_scaled_qmm_nax/mxint4", dtypes = [f32, f16, bf16])]
+    fn bench_mxint4(dt: DType) -> BenchSetup {
+        nax_bench(mt_mxint4_qmm_nax::kernel_ir_for(dt), QFormat::Mxint4, 128, 4096, 4096, dt)
+    }
+    #[bench(name = "mlx/block_scaled_qmm_nax/mxint5", dtypes = [f32, f16, bf16])]
+    fn bench_mxint5(dt: DType) -> BenchSetup {
+        nax_bench(mt_mxint5_qmm_nax::kernel_ir_for(dt), QFormat::Mxint5, 128, 4096, 4096, dt)
+    }
+    #[bench(name = "mlx/block_scaled_qmm_nax/mxint6", dtypes = [f32, f16, bf16])]
+    fn bench_mxint6(dt: DType) -> BenchSetup {
+        nax_bench(mt_mxint6_qmm_nax::kernel_ir_for(dt), QFormat::Mxint6, 128, 4096, 4096, dt)
+    }
+    #[bench(name = "mlx/block_scaled_qmm_nax/mxint8", dtypes = [f32, f16, bf16])]
+    fn bench_mxint8(dt: DType) -> BenchSetup {
+        nax_bench(mt_mxint8_qmm_nax::kernel_ir_for(dt), QFormat::Mxint8, 128, 4096, 4096, dt)
     }
 }
