@@ -129,6 +129,37 @@ that makes the reduction and lane-shuffle kernels port cleanly.
   backend-agnostic — run the same setups against `CudaDevice` and assert the same
   tolerances. The `quant::format::dequant` oracle is identical.
 
+### 4.5 Tooling option — NVlabs `cuda-oxide`
+
+`cuda-oxide` (https://github.com/NVlabs/cuda-oxide, Apache-2.0 except the
+`cuda-bindings` crate which is under the NVIDIA Software License) is a Rust CUDA
+stack worth evaluating for two distinct parts of this backend:
+
+- **As the host runtime (low-risk, recommended):** its `cuda-core` / `cuda-async`
+  crates already provide safe `CudaContext`, `CudaStream`, `DeviceBuffer<T>` over
+  the Driver API, plus raw `cuda-bindings` FFI to `cuda.h`. The `CudaDevice` impl
+  (§4.1) could sit on these instead of hand-rolling `cuModule*`/`cuLaunch*` FFI.
+- **As an alternative codegen strategy (higher-leverage, higher-risk):**
+  `cuda-oxide` is fundamentally a **rustc codegen backend** —
+  `Rust → MIR → Pliron IR → LLVM IR → PTX`, single-source via `cargo oxide build`.
+  That offers a *second* path to a CUDA backend distinct from §4.2:
+
+  | | **§4.2 path: IR → CUDA C++ → NVRTC → PTX** | **cuda-oxide path: IR → Rust device code → PTX** |
+  |---|---|---|
+  | Fits MetalTile's model | Yes — same "emit target-language text" shape as the MSL emitter | Partly — emit *Rust* instead of CUDA C++ |
+  | Blackwell tensor cores | We must emit PTX / inline-asm or use CUTLASS for `tcgen05`/WGMMA | **Built-in intrinsics** (`tcgen05`, WGMMA, MMA, TMEM, TMA, `cta_group::2`, sm_100a) |
+  | Toolchain weight | CUDA Toolkit + NVRTC | CUDA 12.x **+ Clang/libclang + nightly `rust-src`/`rustc-dev`/`llvm-tools` + LLVM 21+** for the advanced intrinsics |
+  | Maturity | NVRTC is stable, shipping | **Alpha / experimental, active dev, Linux-only** (Ubuntu 24.04 tested) |
+  | License cleanliness | toolkit-only | `cuda-bindings` under NVIDIA Software License (not Apache) — vet before depending |
+
+  **Recommendation:** default to the §4.2 **C++/NVRTC** path (lighter, stable, and
+  the closest fit to the existing MSL text-emitter); adopt `cuda-core` for the
+  host runtime if it saves FFI work. Keep the `cuda-oxide` *Rust→PTX* path on the
+  radar specifically for **Phase 4 (Blackwell scaled-MMA)** — even if we don't
+  depend on it, its `tcgen05`/WGMMA intrinsics are a concrete reference for the PTX
+  our emitter (or a CUTLASS shim) must produce for the `mx*`/`mxint*` hardware
+  block-scaling path. Re-evaluate as a primary dependency once it leaves alpha.
+
 ## 5. Implementation phases
 
 1. **Seam + smoke kernel.** `CodegenBackend`/`Device` traits; `Cuda` emitter for a
@@ -174,3 +205,21 @@ The IR + DSL + the entire 30-format quant codec are reused as-is; only a codegen
 emitter and a runtime device are new, and the lane-width + format choices already
 line up with NVIDIA hardware. Contrast with the ANE (`ANE_BACKEND_SPEC.md`), which
 is **not** custom-kernel-programmable and forces a graph/compiler model.
+
+## 8. References
+
+- NVlabs **`cuda-oxide`** — https://github.com/NVlabs/cuda-oxide — Rust CUDA
+  stack: a rustc `Rust → MIR → Pliron → LLVM → PTX` codegen backend, `cuda-core`/
+  `cuda-async` host runtime (`CudaContext`/`CudaStream`/`DeviceBuffer<T>`), and
+  Blackwell tensor-core intrinsics (`tcgen05`, WGMMA, MMA, TMEM, sm_100a). See §4.5
+  for how it could serve the host runtime and/or the Blackwell path. Alpha,
+  Linux-only, heavy toolchain (LLVM 21+); `cuda-bindings` crate under the NVIDIA
+  Software License.
+- **NVRTC** (runtime CUDA→PTX compilation) + the **CUDA Driver API**
+  (`cuModuleLoadData` / `cuLaunchKernel`) — the default §4.2/§4.4 compile+dispatch
+  path.
+- **CUTLASS** — a candidate for the MMA / cooperative-matmul reimplementation
+  (§6) and the Blackwell scaled-MMA path for the `mx*`/`mxint*` formats.
+- **NVIDIA Blackwell microscaling** (MXFP4/6/8, NVFP4, MXINT8 via `tcgen05`
+  scaled-MMA, E8M0/E4M3 scale operands) — the hardware target the PR-#2 block-scaled
+  formats map onto (§4.3).
