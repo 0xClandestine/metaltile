@@ -10,20 +10,23 @@ cargo run -p metaltile-cli -- <command> …
 
 `make bench` wraps `tile bench`; for the other subcommands run `tile` (or the `cargo run` form) directly.
 
-## `tile bench` — benchmark vs MLX
+## `tile bench` — benchmark MetalTile kernels
 
-Runs every kernel against its MLX reference and reports throughput, wall-clock
-latency, compute throughput, and a correctness check.
+Benchmarks the MetalTile kernels and reports wall-clock latency, throughput
+(GB/s), compute throughput (GFLOP/s), and roofline figures. By default it
+benches **only the MetalTile kernels**; pass `--mlx` to also run each kernel's
+MLX reference for a side-by-side speed A/B plus an output-equivalence check.
 
 ```
-tile bench [-f <substr>] [-v|-vv] [-o <file.json>] [--allow-dirty]
+tile bench [-f <substr>] [--mlx] [-v|-vv] [-o <file.json>] [--allow-dirty]
            [--diff] [--baseline-ref <git-ref>]
 ```
 
 | Flag | Effect |
 |---|---|
 | `-f, --filter <substr>` | only run kernels whose name contains `<substr>` |
-| `-v` / `-vv` | `-v` adds the reference latency, roofline (`%BW` / `%FLOP` / arithmetic intensity), occupancy/registers, and a bottleneck verdict; `-vv` adds the GPU timing distribution (`p95` / `p99` / `cv%`) |
+| `--mlx` (alias `--reference`) | also run each kernel's MLX reference: the `Ref` / `MT%` columns and the output-equivalence check. Off by default (the metaltile kernels have superseded the references; correctness lives in `tile test`); roughly doubles bench time |
+| `-v` / `-vv` | `-v` adds the roofline (`%BW` / `%FLOP` / arithmetic intensity), occupancy/registers, and a bottleneck verdict (plus the reference latency when `--mlx` is set); `-vv` adds the GPU timing distribution (`p95` / `p99` / `cv%`) |
 | `-o, --json <file>` | also write results as JSON |
 | `--allow-dirty` | run on a dirty working tree (default: refuses, so numbers tie to a clean SHA) |
 | `--diff` | opt into the post-bench diff against the target-branch baseline |
@@ -33,8 +36,10 @@ tile bench [-f <substr>] [-v|-vv] [-o <file.json>] [--allow-dirty]
 
 The default table shows, per kernel/dtype: `MT(µs)` (wall-clock latency, the
 `min` sample — the metric that makes "which precision is fastest" directly
-readable), `Ref`/`MT` (GB/s bandwidth), `MT%` (MT-vs-reference ratio), `GFLOP/s`
-(compute throughput, blank for memory-bound kernels), and `ok` (correctness).
+readable), `MT` (GB/s bandwidth), `GFLOP/s` (compute throughput, blank for
+memory-bound kernels), and `ok` (correctness). With `--mlx` it also fills the
+`Ref` (MLX GB/s) and `MT%` (MetalTile-vs-MLX ratio) columns; without it those
+stay blank.
 
 `-v` adds the roofline view: `%BW` (achieved ÷ the device's peak DRAM bandwidth),
 `%FLOP` (achieved ÷ peak compute — the M5 Neural-Accelerator FP16 ceiling where
@@ -42,7 +47,7 @@ applicable, the SIMD pipe otherwise), `AI` (arithmetic intensity, FLOPs/byte),
 the estimated `occ%`/`regs`, and a combined `bottleneck` verdict
 (`memory-bound` / `compute-bound` / `occupancy-limited` / `register-limited` /
 `latency-bound`). Peak ceilings come from a per-device table
-(`crates/metaltile-std/src/device_specs.rs`); an unknown GPU leaves the roofline
+(`crates/metaltile/src/runner/device_specs.rs`); an unknown GPU leaves the roofline
 columns blank rather than failing.
 
 GFLOP/s, latency, and the roofline figures only appear for kernels that declared
