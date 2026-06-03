@@ -310,10 +310,7 @@ fn substitute_tokens(stream: TokenStream, params: &HashMap<String, i64>) -> Toke
                 new_s = new_s.replace(name.as_str(), &val.to_string());
             }
             if new_s != s {
-                out.extend(std::iter::once(TokenTree::Ident(Ident::new(
-                    &new_s,
-                    ident.span(),
-                ))));
+                out.extend(std::iter::once(TokenTree::Ident(Ident::new(&new_s, ident.span()))));
             } else {
                 out.extend(std::iter::once(tts[i].clone()));
             }
@@ -451,10 +448,7 @@ fn substitute_if(
     ts.extend(std::iter::once(TokenTree::Group(new_then)));
 
     if let Some(eb) = else_branch {
-        ts.extend(std::iter::once(TokenTree::Ident(Ident::new(
-            "else",
-            Span::call_site(),
-        ))));
+        ts.extend(std::iter::once(TokenTree::Ident(Ident::new("else", Span::call_site()))));
         match eb {
             ElseBranch::Block(g) => {
                 let sub_else = substitute_tokens(g.stream(), params);
@@ -504,11 +498,10 @@ fn condition_is_param_only(stream: &TokenStream, params: &HashMap<String, i64>) 
                     return false;
                 }
             },
-            TokenTree::Group(g) => {
+            TokenTree::Group(g) =>
                 if !condition_is_param_only(&g.stream(), params) {
                     return false;
-                }
-            },
+                },
             _ => {},
         }
     }
