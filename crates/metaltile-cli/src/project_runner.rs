@@ -8,9 +8,9 @@
 //!             JSON Lines ◄── stdout
 //! ```
 //!
-//! `__tile_runner` is a hidden sibling binary built from `metaltile-std`.
-//! It lives alongside `tile` in the same `target/` directory and is never
-//! installed or exposed to the user directly.
+//! `__tile_runner` is a hidden binary scaffolded by `tile init` into the
+//! project's `bin/` directory and installed there via
+//! `cargo install --path . --root .`.
 
 use crate::harness::Harness;
 
@@ -59,23 +59,28 @@ impl<'a> ProjectRunner<'a> {
     /// Resolve the `__tile_runner` binary path.
     ///
     /// Precedence:
-    /// 1. `tile.toml [runner] binary` config override (allows pointing at a
-    ///    custom build or a project-local runner).
-    /// 2. Sibling of the current executable in the same `target/` directory —
-    ///    the standard case when running `cargo run` or an installed `tile`.
-    /// 3. Bare `"__tile_runner"` name resolved via `$PATH` as a last resort.
+    /// 1. `tile.toml [runner] binary` config override (default: `bin/__tile_runner`).
+    /// 2. `./bin/__tile_runner` relative to CWD — the standard install location
+    ///    populated by `cargo install --path . --root .` in a tile project.
+    /// 3. Sibling of the current `tile` executable — works when both binaries
+    ///    are installed to the same prefix (e.g. `~/.cargo/bin/`).
+    /// 4. Bare `"__tile_runner"` resolved via `$PATH` as a last resort.
     fn runner_binary(&self) -> String {
         let configured = self.harness.runner_binary();
         if configured != "__tile_runner" {
             return configured.to_string();
         }
-        // Look for the sibling binary next to the current executable.
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                let sibling = dir.join("__tile_runner");
-                if sibling.exists() {
-                    return sibling.to_string_lossy().into_owned();
-                }
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let local = cwd.join("bin").join("__tile_runner");
+        if local.exists() {
+            return local.to_string_lossy().into_owned();
+        }
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(dir) = exe.parent()
+        {
+            let sibling = dir.join("__tile_runner");
+            if sibling.exists() {
+                return sibling.to_string_lossy().into_owned();
             }
         }
         "__tile_runner".to_string()

@@ -42,7 +42,9 @@ pub fn run(args: &InitArgs) -> Result<(), CliError> {
 
     // Create directory tree.
     let src_dir = root.join("src");
+    let bin_dir = root.join("bin");
     std::fs::create_dir_all(&src_dir).map_err(CliError::Io)?;
+    std::fs::create_dir_all(&bin_dir).map_err(CliError::Io)?;
 
     // Cargo.toml
     let mt_version = env!("CARGO_PKG_VERSION");
@@ -55,6 +57,12 @@ edition = "2024"
 [dependencies]
 metaltile = "{mt_version}"
 metaltile-std = "{mt_version}"
+
+# Hidden subprocess binary used by the `tile` CLI for kernel discovery.
+# Install to project bin/ with: cargo install --path . --root .
+[[bin]]
+name = "__tile_runner"
+path = "bin/__tile_runner.rs"
 "#
     );
     write_file(&root.join("Cargo.toml"), &cargo_toml)?;
@@ -80,6 +88,22 @@ fn bench_relu(dt: DType) -> BenchSetup {
 "#;
     write_file(&src_dir.join("lib.rs"), lib_rs)?;
 
+    // bin/__tile_runner.rs — subprocess entry point for the tile CLI.
+    // After `cargo install --path . --root .`, the binary lands in bin/ where
+    // `tile bench/test/inspect` will find and spawn it.
+    let runner_rs = r#"fn main() {
+    let args = match metaltile::runner::RunnerArgs::from_env_args() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("__tile_runner: {e}");
+            std::process::exit(2);
+        },
+    };
+    std::process::exit(if metaltile::runner::RunnerHarness::run(&args) { 0 } else { 1 });
+}
+"#;
+    write_file(&bin_dir.join("__tile_runner.rs"), runner_rs)?;
+
     // tile.toml — project config
     let tile_toml = r#"# tile CLI configuration for this project.
 # Values here are overridden by TILE_* env vars and CLI flags.
@@ -101,8 +125,9 @@ sdk = "macosx"
 default_dtypes = ["f32", "f16", "bf16"]
 
 [runner]
-# Path to the __tile_runner subprocess binary (resolved via $PATH if bare name).
-# binary = "/path/to/__tile_runner"
+# Path to the __tile_runner subprocess binary.
+# Run `cargo install --path . --root .` to install it here.
+binary = "bin/__tile_runner"
 
 # Example CI profile — select with: tile bench --profile ci
 # [profiles.ci]
@@ -122,12 +147,13 @@ default_dtypes = ["f32", "f16", "bf16"]
     );
     println!("  {}  {}/Cargo.toml", paint_stdout("   ", Style::new()), name,);
     println!("  {}  {}/src/lib.rs", paint_stdout("   ", Style::new()), name,);
+    println!("  {}  {}/bin/__tile_runner.rs", paint_stdout("   ", Style::new()), name,);
     println!("  {}  {}/tile.toml", paint_stdout("   ", Style::new()), name,);
     println!();
     println!(
         "  {}",
         paint_stdout(
-            format!("cd {name} && cargo build && tile bench"),
+            format!("cd {name} && cargo install --path . --root . && tile bench"),
             Style::new().fg(Color::BrightBlack),
         )
     );
