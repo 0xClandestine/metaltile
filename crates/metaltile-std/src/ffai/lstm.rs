@@ -326,6 +326,14 @@ pub mod kernel_tests {
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [3e-3, 1e-2, 6e-2])]
     fn test_lstm_h40(dt: DType) -> TestSetup { setup(dt, 6, 8, 40, false, 64) }
 
+    // The real Kokoro `predictor.shared` shape: hidden 256 = 8 full
+    // simdgroups, a long (65-step) sequence, wide input (640). Exercises the
+    // cross-simdgroup threadgroup hand-off over many timesteps that the small
+    // tests never reach. f32 only — f16/bf16 drift over 65 recurrent steps
+    // exceeds a useful tolerance.
+    #[test_kernel(dtypes = [f32], tol = [2e-3])]
+    fn test_lstm_long_h256(dt: DType) -> TestSetup { setup(dt, 65, 640, 256, false, 256) }
+
     // ── Per-step lstm_cell tests (gate order i, f, g, o) ──
     fn ramp_p(n: usize, period: usize, amp: f32, start: f32) -> Vec<f32> {
         (0..n).map(|i| ((i % period) as f32 / period as f32 - 0.5) * amp + start).collect()
