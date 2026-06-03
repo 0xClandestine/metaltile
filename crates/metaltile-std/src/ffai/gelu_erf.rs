@@ -36,13 +36,16 @@ pub mod kernel_tests {
     // oracle; the kernel uses Metal's hardware `erf`. Tolerances are loose
     // enough to absorb the oracle's own ~1e-7 approximation error.
     fn erf_approx(x: f32) -> f32 {
+        // Compute in f64 (the A&S coefficients carry more than f32 precision),
+        // cast the result back to f32.
+        let x = x as f64;
         let t = 1.0 / (1.0 + 0.3275911 * x.abs());
         let y = 1.0
             - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t
                 + 0.254829592)
                 * t
                 * (-x * x).exp();
-        if x >= 0.0 { y } else { -y }
+        (if x >= 0.0 { y } else { -y }) as f32
     }
 
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 5e-2])]
