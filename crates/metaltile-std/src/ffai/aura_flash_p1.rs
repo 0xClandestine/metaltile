@@ -37,310 +37,338 @@
 //! grouping (32 lanes) provides the simdgroup that `simd_sum` reduces
 //! across for the Q · K dot product.
 //!
-//! ## Constexpr params
+//! ## Variant axes
 //!
-//! - `key_bits`        — AURA K-side bit-width (2 / 3 / 4 / 8).
-//! - `value_bits`      — AURA V-side bit-width.
-//! - `dim`             — head_dim (64 / 80 / 96 / 128 / 256 / 512).
-//! - `key_packed_width / value_packed_width` —
-//!   `ceil(dim * bits / 32)`.
-//! - `key_levels / value_levels` — `1 << bits`.
-//! - `dims_per_lane`   — `ceil(dim / 32)`.
+//! Non-causal: `#[kernel(variants(VB=[2,2,4,4], DIM=[64,128,64,128],
+//!              VL=[4,4,16,16], DPL=[2,4,2,4], suffix="kb4_vb{VB}_d{DIM}"))]`
+//! — all four (vb, dim) combos via zipped lists; `VL`=val_levels=1<<VB
+//! and `DPL`=dims_per_lane=DIM/32 as literal constants for stack_alloc.
 //!
-//! Today's instantiation: `(key_bits=4, value_bits=2, dim=128)` — the
-//! `aura4v2` scheme on a Qwen3-style head_dim=128.  Extend the
-//! invocations at the bottom of the file for new (kb, vb, dim) combos.
+//! Causal: `#[kernel(variants(DIM = [64, 128], suffix =
+//! "kb4_vb2_d{DIM}"))]` — only the production aura4v2 recipe.
 //!
-//! ## Bounds checking the per-lane dim slots
-//!
-//! Each inner loop walks dim slots via
-//! `for i in 0..dims_per_lane { let d = lane + i*32; … }`.  When dim
-//! isn't a multiple of 32 (e.g. dim=80 with `dims_per_lane=3` and
-//! `max_d = 31 + 2*32 = 95 > 80`), the trailing lanes must skip the
-//! out-of-range dim slots.  An earlier version of this kernel dropped
-//! the `if d < dim { … }` guard to work around a metaltile unroll-pass
-//! bug (nested `Op::If` bodies weren't being cloned + SSA-remapped
-//! per iteration), but that limited us to multiple-of-32 dims.  The
-//! unroll-pass fix landed alongside this kernel, so the guards are
-//! back in.
+//! Key-bits `4`, key-levels `16`, `dims_per_lane = DIM / 32`.
+//! Value-levels = `1 << VB`.
 
 use metaltile::kernel;
 
-#[rustfmt::skip]
-macro_rules! aura_flash_p1_kernel {
-    (
-        $name:ident,
-        $key_bits:literal,
-        $value_bits:literal,
-        $key_levels:literal,
-        $value_levels:literal,
-        $dims_per_lane:literal,
-        $causal:literal,
-        $subop:literal
-    ) => {
-        #[kernel]
-        pub fn $name<T>(
-            q_rot: Tensor<T>,
-            key_packed: Tensor<u32>,
-            key_norms: Tensor<T>,
-            key_codebook: Tensor<T>,
-            val_packed: Tensor<u32>,
-            val_norms: Tensor<T>,
-            val_codebook: Tensor<T>,
-            mut o_partials: Tensor<T>,
-            mut m_partials: Tensor<T>,
-            mut l_partials: Tensor<T>,
-            #[constexpr] dim: u32,
-            #[constexpr] key_packed_width: u32,
-            #[constexpr] value_packed_width: u32,
-            #[constexpr] tokens: u32,
-            #[constexpr] kv_stride: u32,
-            #[constexpr] repeat_count: u32,
-            #[constexpr] num_blocks: u32,
-            #[constexpr] block_size: u32,
-            // Global position of this query token in the KV stream. Only
-            // consulted by the causal variant (`$causal == 1`): keys at
-            // token index `t > q_position` are masked out. The non-causal
-            // variant ignores it (constexpr, so the dead branch is folded
-            // away — no runtime cost).
-            #[constexpr] q_position: u32,
-        ) {
-            let lane = program_id::<0>();
-            let q_idx = program_id::<1>();
-            let block_idx = program_id::<2>();
-            let kv_idx = q_idx / repeat_count;
+/// AURA flash pass-1 (non-causal): per-block online-softmax, KB=4.
+///
+/// Produces kernels: `aura_flash_p1_kb4_vb2_d64`, `_kb4_vb2_d128`,
+/// `_kb4_vb4_d64`, `_kb4_vb4_d128`.
+#[kernel(variants(VB = [2, 2, 4, 4], DIM = [64, 128, 64, 128], VL = [4, 4, 16, 16], DPL = [2, 4, 2, 4], suffix = "kb4_vb{VB}_d{DIM}"))]
+pub fn aura_flash_p1<T>(
+    q_rot: Tensor<T>,
+    key_packed: Tensor<u32>,
+    key_norms: Tensor<T>,
+    key_codebook: Tensor<T>,
+    val_packed: Tensor<u32>,
+    val_norms: Tensor<T>,
+    val_codebook: Tensor<T>,
+    mut o_partials: Tensor<T>,
+    mut m_partials: Tensor<T>,
+    mut l_partials: Tensor<T>,
+    #[constexpr] dim: u32,
+    #[constexpr] key_packed_width: u32,
+    #[constexpr] value_packed_width: u32,
+    #[constexpr] tokens: u32,
+    #[constexpr] kv_stride: u32,
+    #[constexpr] repeat_count: u32,
+    #[constexpr] num_blocks: u32,
+    #[constexpr] block_size: u32,
+    // Global position of this query token in the KV stream. Only
+    // consulted by the causal variant (`causal == 1`): keys at
+    // token index `t > q_position` are masked out. The non-causal
+    // variant ignores it (constexpr, so the dead branch is folded
+    // away — no runtime cost).
+    #[constexpr] q_position: u32,
+) {
+    let lane = program_id::<0>();
+    let q_idx = program_id::<1>();
+    let block_idx = program_id::<2>();
+    let kv_idx = q_idx / repeat_count;
 
-            let key_mask = (1u32 << $key_bits) - 1u32;
-            let val_mask = (1u32 << $value_bits) - 1u32;
+    let key_mask = (1u32 << 4u32) - 1u32;
+    let val_mask = (VL) - 1u32;
 
-            let raw_end = block_idx * block_size + block_size;
-            let clamped_end = select(raw_end > tokens, tokens, raw_end);
-            // Causal cutoff: tokens strictly after `q_position` contribute
-            // nothing, so the inner loop can stop at `q_position + 1`. For
-            // the non-causal variant `$causal == 0` makes this a no-op
-            // (the macro substitutes the literal at compile time).
-            let causal_end = select($causal == 1u32, q_position + 1u32, clamped_end);
-            let t_end = select(causal_end < clamped_end, causal_end, clamped_end);
-            let t_start = block_idx * block_size;
+    let raw_end = block_idx * block_size + block_size;
+    let clamped_end = select(raw_end > tokens, tokens, raw_end);
+    // Non-causal: causal == 0, so select always picks clamped_end.
+    let causal_end = select(0u32 == 1u32, q_position + 1u32, clamped_end);
+    let t_end = select(causal_end < clamped_end, causal_end, clamped_end);
+    let t_start = block_idx * block_size;
 
-            // ── Cache codebooks in per-thread stack arrays.  Each lane
-            // touches the same codebook; the cache amortises lookups
-            // across the inner per-token loop.
-            stack_alloc("key_cb", $key_levels, "f32");
-            for i in range(0u32, $key_levels, 1u32) {
-                stack_store("key_cb", i, load(key_codebook[i]).cast::<f32>());
-            }
-            stack_alloc("val_cb", $value_levels, "f32");
-            for i in range(0u32, $value_levels, 1u32) {
-                stack_store("val_cb", i, load(val_codebook[i]).cast::<f32>());
-            }
+    // ── Cache codebooks in per-thread stack arrays.  Each lane
+    // touches the same codebook; the cache amortises lookups
+    // across the inner per-token loop.
+    stack_alloc("key_cb", 16u32, "f32");
+    for i in range(0u32, 16u32, 1u32) {
+        stack_store("key_cb", i, load(key_codebook[i]).cast::<f32>());
+    }
+    stack_alloc("val_cb", VL, "f32");
+    for i in range(0u32, VL, 1u32) {
+        stack_store("val_cb", i, load(val_codebook[i]).cast::<f32>());
+    }
 
-            // ── Per-lane slice of the rotated query vector — held in
-            // stack registers, loaded once.  Trailing lanes whose
-            // `d >= dim` get zero so the dot product treats them as a
-            // no-op. Loaded as T and promoted to f32 for compute.
-            stack_alloc("q_vals", $dims_per_lane, "f32");
-            for i in range(0u32, $dims_per_lane, 1u32) {
-                let d = lane + i * 32u32;
-                let v = select(d < dim, load(q_rot[q_idx * dim + d]).cast::<f32>(), 0.0f32);
-                stack_store("q_vals", i, v);
-            }
+    // ── Per-lane slice of the rotated query vector — held in
+    // stack registers, loaded once.  Trailing lanes whose
+    // `d >= dim` get zero so the dot product treats them as a
+    // no-op. Loaded as T and promoted to f32 for compute.
+    stack_alloc("q_vals", DPL, "f32");
+    for i in range(0u32, DPL, 1u32) {
+        let d = lane + i * 32u32;
+        let v = select(d < dim, load(q_rot[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+        stack_store("q_vals", i, v);
+    }
 
-            // ── Online-softmax accumulators.  `m` is the running max,
-            // `l` the running sum_exp, `o[]` the un-normalised output
-            // slice for this lane.
-            let mut m_acc = neg_infinity();
-            let mut l_acc = 0.0f32;
-            stack_alloc("o", $dims_per_lane, "f32");
-            for i in range(0u32, $dims_per_lane, 1u32) {
-                stack_store("o", i, 0.0f32);
-            }
+    // ── Online-softmax accumulators.  `m` is the running max,
+    // `l` the running sum_exp, `o[]` the un-normalised output
+    // slice for this lane.
+    let mut m_acc = neg_infinity();
+    let mut l_acc = 0.0f32;
+    stack_alloc("o", DPL, "f32");
+    for i in range(0u32, DPL, 1u32) {
+        stack_store("o", i, 0.0f32);
+    }
 
-            // ── Per-token inner loop ───────────────────────────────────
-            for t in range(t_start, t_end, 1u32) {
-                // Row stride is `kv_stride` (cache's `maxSeq`), not `tokens`
-                // (live KV-row count). When the cache isn't fully populated,
-                // head 1 starts at byte offset `kv_stride`, NOT `tokens` —
-                // otherwise we'd read head 0's tail bytes as head 1's rows.
-                let k_packed_row = (kv_idx * kv_stride + t) * key_packed_width;
-                let k_norm = load(key_norms[kv_idx * kv_stride + t]).cast::<f32>();
+    // ── Per-token inner loop ───────────────────────────────────
+    for t in range(t_start, t_end, 1u32) {
+        // Row stride is `kv_stride` (cache's `maxSeq`), not `tokens`
+        // (live KV-row count). When the cache isn't fully populated,
+        // head 1 starts at byte offset `kv_stride`, NOT `tokens` —
+        // otherwise we'd read head 0's tail bytes as head 1's rows.
+        let k_packed_row = (kv_idx * kv_stride + t) * key_packed_width;
+        let k_norm = load(key_norms[kv_idx * kv_stride + t]).cast::<f32>();
 
-                // Q · K via compressed-domain dot — bit-extract per dim,
-                // lookup centroid in cached key_cb, accumulate against the
-                // pre-loaded q_vals slice, simd_sum across the lane group.
-                let mut dot_partial = 0.0f32;
-                for i in range(0u32, $dims_per_lane, 1u32) {
-                    let d = lane + i * 32u32;
-                    if d < dim {
-                        let bit_offset = d * $key_bits;
-                        let word_idx = bit_offset / 32u32;
-                        let shift = bit_offset & 31u32;
-                        let bits_in_w0 = 32u32 - shift;
-                        let lo_bits = select(bits_in_w0 >= $key_bits, $key_bits, bits_in_w0);
-                        let spill = $key_bits - lo_bits;
+        // Q · K via compressed-domain dot — bit-extract per dim,
+        // lookup centroid in cached key_cb, accumulate against the
+        // pre-loaded q_vals slice, simd_sum across the lane group.
+        let mut dot_partial = 0.0f32;
+        for i in range(0u32, DPL, 1u32) {
+            let d = lane + i * 32u32;
+            if d < dim {
+                let bit_offset = d * 4u32;
+                let word_idx = bit_offset / 32u32;
+                let shift = bit_offset & 31u32;
+                let bits_in_w0 = 32u32 - shift;
+                let lo_bits = select(bits_in_w0 >= 4u32, 4u32, bits_in_w0);
+                let spill = 4u32 - lo_bits;
 
-                        let w0 = load(key_packed[k_packed_row + word_idx]);
-                        let w1_idx = select(spill > 0u32, word_idx + 1u32, word_idx);
-                        let w1 = load(key_packed[k_packed_row + w1_idx]);
-                        let lo = (w0 >> shift) & ((1u32 << lo_bits) - 1u32);
-                        let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
-                        let value = (lo | hi) & key_mask;
+                let w0 = load(key_packed[k_packed_row + word_idx]);
+                let w1_idx = select(spill > 0u32, word_idx + 1u32, word_idx);
+                let w1 = load(key_packed[k_packed_row + w1_idx]);
+                let lo = (w0 >> shift) & ((1u32 << lo_bits) - 1u32);
+                let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                let value = (lo | hi) & key_mask;
 
-                        let centroid = stack_load("key_cb", value);
-                        let qv = stack_load("q_vals", i);
-                        dot_partial = dot_partial + qv * centroid;
-                    }
-                }
-                let score = simd_sum(dot_partial) * k_norm;
-
-                // Online-softmax max-shift identity.
-                let new_m = select(m_acc > score, m_acc, score);
-                let exp_diff = exp(m_acc - new_m);
-                let exp_score = exp(score - new_m);
-
-                // V-side update: bit-extract each value, look up in the
-                // cached val_cb, scale by exp_score · v_norm, fold into
-                // the running output via the standard online-softmax
-                // rescale-then-add.
-                let v_packed_row = (kv_idx * kv_stride + t) * value_packed_width;
-                let v_norm = load(val_norms[kv_idx * kv_stride + t]).cast::<f32>();
-
-                for i in range(0u32, $dims_per_lane, 1u32) {
-                    let d = lane + i * 32u32;
-                    if d < dim {
-                        let bit_offset = d * $value_bits;
-                        let word_idx = bit_offset / 32u32;
-                        let shift = bit_offset & 31u32;
-                        let bits_in_w0 = 32u32 - shift;
-                        let lo_bits = select(bits_in_w0 >= $value_bits, $value_bits, bits_in_w0);
-                        let spill = $value_bits - lo_bits;
-
-                        let w0 = load(val_packed[v_packed_row + word_idx]);
-                        let w1_idx = select(spill > 0u32, word_idx + 1u32, word_idx);
-                        let w1 = load(val_packed[v_packed_row + w1_idx]);
-                        let lo = (w0 >> shift) & ((1u32 << lo_bits) - 1u32);
-                        let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
-                        let value = (lo | hi) & val_mask;
-
-                        let prev = stack_load("o", i);
-                        let centroid = stack_load("val_cb", value);
-                        let upd = prev * exp_diff + exp_score * centroid * v_norm;
-                        stack_store("o", i, upd);
-                    }
-                }
-
-                l_acc = l_acc * exp_diff + exp_score;
-                m_acc = new_m;
-            }
-
-            // ── Write per-block partials (cast f32 → T on store) ───────
-            let partial_base = (q_idx * num_blocks + block_idx) * dim;
-            for i in range(0u32, $dims_per_lane, 1u32) {
-                let d = lane + i * 32u32;
-                if d < dim {
-                    store(o_partials[partial_base + d], stack_load("o", i).cast::<T>());
-                }
-            }
-            if lane == 0u32 {
-                let ml_idx = q_idx * num_blocks + block_idx;
-                store(m_partials[ml_idx], m_acc.cast::<T>());
-                store(l_partials[ml_idx], l_acc.cast::<T>());
+                let centroid = stack_load("key_cb", value);
+                let qv = stack_load("q_vals", i);
+                dot_partial = dot_partial + qv * centroid;
             }
         }
-    };
+        let score = simd_sum(dot_partial) * k_norm;
+
+        // Online-softmax max-shift identity.
+        let new_m = select(m_acc > score, m_acc, score);
+        let exp_diff = exp(m_acc - new_m);
+        let exp_score = exp(score - new_m);
+
+        // V-side update: bit-extract each value, look up in the
+        // cached val_cb, scale by exp_score · v_norm, fold into
+        // the running output via the standard online-softmax
+        // rescale-then-add.
+        let v_packed_row = (kv_idx * kv_stride + t) * value_packed_width;
+        let v_norm = load(val_norms[kv_idx * kv_stride + t]).cast::<f32>();
+
+        for i in range(0u32, DPL, 1u32) {
+            let d = lane + i * 32u32;
+            if d < dim {
+                let bit_offset = d * VB;
+                let word_idx = bit_offset / 32u32;
+                let shift = bit_offset & 31u32;
+                let bits_in_w0 = 32u32 - shift;
+                let lo_bits = select(bits_in_w0 >= VB, VB, bits_in_w0);
+                let spill = VB - lo_bits;
+
+                let w0 = load(val_packed[v_packed_row + word_idx]);
+                let w1_idx = select(spill > 0u32, word_idx + 1u32, word_idx);
+                let w1 = load(val_packed[v_packed_row + w1_idx]);
+                let lo = (w0 >> shift) & ((1u32 << lo_bits) - 1u32);
+                let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                let value = (lo | hi) & val_mask;
+
+                let prev = stack_load("o", i);
+                let centroid = stack_load("val_cb", value);
+                let upd = prev * exp_diff + exp_score * centroid * v_norm;
+                stack_store("o", i, upd);
+            }
+        }
+
+        l_acc = l_acc * exp_diff + exp_score;
+        m_acc = new_m;
+    }
+
+    // ── Write per-block partials (cast f32 → T on store) ───────
+    let partial_base = (q_idx * num_blocks + block_idx) * dim;
+    for i in range(0u32, DPL, 1u32) {
+        let d = lane + i * 32u32;
+        if d < dim {
+            store(o_partials[partial_base + d], stack_load("o", i).cast::<T>());
+        }
+    }
+    if lane == 0u32 {
+        let ml_idx = q_idx * num_blocks + block_idx;
+        store(m_partials[ml_idx], m_acc.cast::<T>());
+        store(l_partials[ml_idx], l_acc.cast::<T>());
+    }
 }
 
-// Production (kb, vb, dim) instantiations. The macro is parametric;
-// adding a row generates one more dispatchable kernel.
-//
-//   dims_per_lane = ceil(dim / 32)
-//   {kb,vb}_levels = 2^{kb,vb}
-//
-// Coverage today:
-//   - head_dim=128: covers Qwen3, Llama 3.2 3B+, GPT-OSS full-attn layers
-//   - head_dim=64:  covers Llama 3.2 1B and GPT-OSS sliding-window layers
-//
-// Symmetric (kb=vb=4) is the AURAScheme.default (aura4v4) — stability-
-// first. Asymmetric kb=4 vb=2 is the production recipe aura4v2 — ~5×
-// compression vs fp16 per `papers/aura-compression-algorithm.md` §2.5.
-//
-// Other dims (80, 96, 192, 256) + other recipes (aura8, aura3) queued
-// behind a real consumer — adding more variants now is `make
-// emit-all` weight bloat without a use site.
-aura_flash_p1_kernel!(
-    aura_flash_p1_kb4_vb2_d128,
-    4u32,
-    2u32,
-    16u32,
-    4u32,
-    4u32,
-    0u32,
-    "flash_p1_kb4_vb2_d128"
-);
-aura_flash_p1_kernel!(
-    aura_flash_p1_kb4_vb4_d128,
-    4u32,
-    4u32,
-    16u32,
-    16u32,
-    4u32,
-    0u32,
-    "flash_p1_kb4_vb4_d128"
-);
-aura_flash_p1_kernel!(
-    aura_flash_p1_kb4_vb2_d64,
-    4u32,
-    2u32,
-    16u32,
-    4u32,
-    2u32,
-    0u32,
-    "flash_p1_kb4_vb2_d64"
-);
-aura_flash_p1_kernel!(
-    aura_flash_p1_kb4_vb4_d64,
-    4u32,
-    4u32,
-    16u32,
-    16u32,
-    2u32,
-    0u32,
-    "flash_p1_kb4_vb4_d64"
-);
+/// AURA flash pass-1 (causal): per-block online-softmax, KB=4, VB=2.
+///
+/// Same compressed-domain online-softmax as `aura_flash_p1`, with
+/// the per-token loop clamped at `q_position + 1` — every key strictly
+/// after the query token is masked out. Production recipe aura4v2.
+///
+/// Produces kernels: `aura_flash_p1_causal_kb4_vb2_d64`,
+/// `_causal_kb4_vb2_d128`.
+#[kernel(variants(DIM = [64, 128], DPL = [2, 4], suffix = "kb4_vb2_d{DIM}"))]
+pub fn aura_flash_p1_causal<T>(
+    q_rot: Tensor<T>,
+    key_packed: Tensor<u32>,
+    key_norms: Tensor<T>,
+    key_codebook: Tensor<T>,
+    val_packed: Tensor<u32>,
+    val_norms: Tensor<T>,
+    val_codebook: Tensor<T>,
+    mut o_partials: Tensor<T>,
+    mut m_partials: Tensor<T>,
+    mut l_partials: Tensor<T>,
+    #[constexpr] dim: u32,
+    #[constexpr] key_packed_width: u32,
+    #[constexpr] value_packed_width: u32,
+    #[constexpr] tokens: u32,
+    #[constexpr] kv_stride: u32,
+    #[constexpr] repeat_count: u32,
+    #[constexpr] num_blocks: u32,
+    #[constexpr] block_size: u32,
+    #[constexpr] q_position: u32,
+) {
+    let lane = program_id::<0>();
+    let q_idx = program_id::<1>();
+    let block_idx = program_id::<2>();
+    let kv_idx = q_idx / repeat_count;
 
-// ── Causal variants ──────────────────────────────────────────────────────
-//
-// Same compressed-domain online-softmax as the non-causal kernels, with
-// the per-token loop clamped at `q_position + 1` — every key strictly
-// after the query token is masked out. This is the prefill / chunked
-// form upstream's `turbo_flash_p1` carries as the `causal` template
-// flag. The `$causal == 1` literal lets the codegen const-fold the
-// `causal_end` selection, so the only runtime difference vs the
-// non-causal sibling is the inner-loop trip count.
-//
-// Production recipe `aura4v2` (kb=4, vb=2) for the two head dims FFAI
-// ships today; the symmetric `aura4v4` causal variant follows the same
-// macro arm if a consumer needs it.
-aura_flash_p1_kernel!(
-    aura_flash_p1_causal_kb4_vb2_d128,
-    4u32,
-    2u32,
-    16u32,
-    4u32,
-    4u32,
-    1u32,
-    "flash_p1_causal_kb4_vb2_d128"
-);
-aura_flash_p1_kernel!(
-    aura_flash_p1_causal_kb4_vb2_d64,
-    4u32,
-    2u32,
-    16u32,
-    4u32,
-    2u32,
-    1u32,
-    "flash_p1_causal_kb4_vb2_d64"
-);
+    let key_mask = (1u32 << 4u32) - 1u32;
+    let val_mask = (1u32 << 2u32) - 1u32;
+
+    let raw_end = block_idx * block_size + block_size;
+    let clamped_end = select(raw_end > tokens, tokens, raw_end);
+    // Causal cutoff: tokens strictly after `q_position` contribute
+    // nothing, so the inner loop can stop at `q_position + 1`.
+    let causal_end = select(1u32 == 1u32, q_position + 1u32, clamped_end);
+    let t_end = select(causal_end < clamped_end, causal_end, clamped_end);
+    let t_start = block_idx * block_size;
+
+    stack_alloc("key_cb", 16u32, "f32");
+    for i in range(0u32, 16u32, 1u32) {
+        stack_store("key_cb", i, load(key_codebook[i]).cast::<f32>());
+    }
+    stack_alloc("val_cb", 4u32, "f32");
+    for i in range(0u32, 4u32, 1u32) {
+        stack_store("val_cb", i, load(val_codebook[i]).cast::<f32>());
+    }
+
+    stack_alloc("q_vals", DPL, "f32");
+    for i in range(0u32, DPL, 1u32) {
+        let d = lane + i * 32u32;
+        let v = select(d < dim, load(q_rot[q_idx * dim + d]).cast::<f32>(), 0.0f32);
+        stack_store("q_vals", i, v);
+    }
+
+    let mut m_acc = neg_infinity();
+    let mut l_acc = 0.0f32;
+    stack_alloc("o", DPL, "f32");
+    for i in range(0u32, DPL, 1u32) {
+        stack_store("o", i, 0.0f32);
+    }
+
+    for t in range(t_start, t_end, 1u32) {
+        let k_packed_row = (kv_idx * kv_stride + t) * key_packed_width;
+        let k_norm = load(key_norms[kv_idx * kv_stride + t]).cast::<f32>();
+
+        let mut dot_partial = 0.0f32;
+        for i in range(0u32, DPL, 1u32) {
+            let d = lane + i * 32u32;
+            if d < dim {
+                let bit_offset = d * 4u32;
+                let word_idx = bit_offset / 32u32;
+                let shift = bit_offset & 31u32;
+                let bits_in_w0 = 32u32 - shift;
+                let lo_bits = select(bits_in_w0 >= 4u32, 4u32, bits_in_w0);
+                let spill = 4u32 - lo_bits;
+
+                let w0 = load(key_packed[k_packed_row + word_idx]);
+                let w1_idx = select(spill > 0u32, word_idx + 1u32, word_idx);
+                let w1 = load(key_packed[k_packed_row + w1_idx]);
+                let lo = (w0 >> shift) & ((1u32 << lo_bits) - 1u32);
+                let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                let value = (lo | hi) & key_mask;
+
+                let centroid = stack_load("key_cb", value);
+                let qv = stack_load("q_vals", i);
+                dot_partial = dot_partial + qv * centroid;
+            }
+        }
+        let score = simd_sum(dot_partial) * k_norm;
+
+        let new_m = select(m_acc > score, m_acc, score);
+        let exp_diff = exp(m_acc - new_m);
+        let exp_score = exp(score - new_m);
+
+        let v_packed_row = (kv_idx * kv_stride + t) * value_packed_width;
+        let v_norm = load(val_norms[kv_idx * kv_stride + t]).cast::<f32>();
+
+        for i in range(0u32, DPL, 1u32) {
+            let d = lane + i * 32u32;
+            if d < dim {
+                let bit_offset = d * 2u32;
+                let word_idx = bit_offset / 32u32;
+                let shift = bit_offset & 31u32;
+                let bits_in_w0 = 32u32 - shift;
+                let lo_bits = select(bits_in_w0 >= 2u32, 2u32, bits_in_w0);
+                let spill = 2u32 - lo_bits;
+
+                let w0 = load(val_packed[v_packed_row + word_idx]);
+                let w1_idx = select(spill > 0u32, word_idx + 1u32, word_idx);
+                let w1 = load(val_packed[v_packed_row + w1_idx]);
+                let lo = (w0 >> shift) & ((1u32 << lo_bits) - 1u32);
+                let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                let value = (lo | hi) & val_mask;
+
+                let prev = stack_load("o", i);
+                let centroid = stack_load("val_cb", value);
+                let upd = prev * exp_diff + exp_score * centroid * v_norm;
+                stack_store("o", i, upd);
+            }
+        }
+
+        l_acc = l_acc * exp_diff + exp_score;
+        m_acc = new_m;
+    }
+
+    let partial_base = (q_idx * num_blocks + block_idx) * dim;
+    for i in range(0u32, DPL, 1u32) {
+        let d = lane + i * 32u32;
+        if d < dim {
+            store(o_partials[partial_base + d], stack_load("o", i).cast::<T>());
+        }
+    }
+    if lane == 0u32 {
+        let ml_idx = q_idx * num_blocks + block_idx;
+        store(m_partials[ml_idx], m_acc.cast::<T>());
+        store(l_partials[ml_idx], l_acc.cast::<T>());
+    }
+}
 
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
@@ -629,14 +657,7 @@ pub mod kernel_tests {
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    use super::{
-        aura_flash_p1_causal_kb4_vb2_d64,
-        aura_flash_p1_causal_kb4_vb2_d128,
-        aura_flash_p1_kb4_vb2_d64,
-        aura_flash_p1_kb4_vb2_d128,
-        aura_flash_p1_kb4_vb4_d64,
-        aura_flash_p1_kb4_vb4_d128,
-    };
+    use super::*;
 
     // Shared builder for every (kb, vb, dim) flash-p1 variant. The grid is
     // (1, q_heads, num_blocks) with a 32-lane threadgroup; only the
@@ -689,64 +710,28 @@ pub mod kernel_benches {
             .grid_3d(1, q_heads as u32, num_blocks as u32, [32, 1, 1])
     }
 
-    #[bench(name = "ffai/aura_flash_p1_kb4_vb2_d128", dtypes = [f32, f16, bf16])]
+    // Non-causal variants: VB ∈ {2, 4}, DIM ∈ {64, 128} — all four combos.
+    #[bench(name = "ffai/aura_flash_p1_kb4_vb{VB}_d{DIM}", dtypes = [f32, f16, bf16],
+            variants(VB = [2, 2, 4, 4], DIM = [64, 128, 64, 128], suffix = "kb4_vb{VB}_d{DIM}"))]
     fn bench_flash_p1(dt: DType) -> BenchSetup {
-        // Production: head_dim 128, kb=4 vb=2, decode-time KV of 4096 tokens.
         flash_p1(
-            BenchSetup::new(aura_flash_p1_kb4_vb2_d128::kernel_ir_for(dt)),
+            BenchSetup::new(aura_flash_p1_kb4_vbVB_dDIM::kernel_ir_for(dt)),
             dt,
-            128,
+            DIM,
             4,
-            2,
+            VB,
             false,
         )
     }
 
-    #[bench(name = "ffai/aura_flash_p1_kb4_vb4_d128", dtypes = [f32, f16, bf16])]
-    fn bench_flash_p1_kb4_vb4_d128(dt: DType) -> BenchSetup {
-        // Symmetric aura4v4 on head_dim 128.
+    // Causal variants: VB=2, DIM ∈ {64, 128}.
+    #[bench(name = "ffai/aura_flash_p1_causal_kb4_vb2_d{DIM}", dtypes = [f32, f16, bf16],
+            variants(DIM = [64, 128], suffix = "kb4_vb2_d{DIM}"))]
+    fn bench_flash_p1_causal(dt: DType) -> BenchSetup {
         flash_p1(
-            BenchSetup::new(aura_flash_p1_kb4_vb4_d128::kernel_ir_for(dt)),
+            BenchSetup::new(aura_flash_p1_causal_kb4_vb2_dDIM::kernel_ir_for(dt)),
             dt,
-            128,
-            4,
-            4,
-            false,
-        )
-    }
-
-    #[bench(name = "ffai/aura_flash_p1_kb4_vb2_d64", dtypes = [f32, f16, bf16])]
-    fn bench_flash_p1_kb4_vb2_d64(dt: DType) -> BenchSetup {
-        // aura4v2 on head_dim 64 (Llama 3.2 1B, GPT-OSS sliding window).
-        flash_p1(BenchSetup::new(aura_flash_p1_kb4_vb2_d64::kernel_ir_for(dt)), dt, 64, 4, 2, false)
-    }
-
-    #[bench(name = "ffai/aura_flash_p1_kb4_vb4_d64", dtypes = [f32, f16, bf16])]
-    fn bench_flash_p1_kb4_vb4_d64(dt: DType) -> BenchSetup {
-        // Symmetric aura4v4 on head_dim 64.
-        flash_p1(BenchSetup::new(aura_flash_p1_kb4_vb4_d64::kernel_ir_for(dt)), dt, 64, 4, 4, false)
-    }
-
-    #[bench(name = "ffai/aura_flash_p1_causal_kb4_vb2_d128", dtypes = [f32, f16, bf16])]
-    fn bench_flash_p1_causal_kb4_vb2_d128(dt: DType) -> BenchSetup {
-        // Causal prefill/chunked form, aura4v2 on head_dim 128.
-        flash_p1(
-            BenchSetup::new(aura_flash_p1_causal_kb4_vb2_d128::kernel_ir_for(dt)),
-            dt,
-            128,
-            4,
-            2,
-            true,
-        )
-    }
-
-    #[bench(name = "ffai/aura_flash_p1_causal_kb4_vb2_d64", dtypes = [f32, f16, bf16])]
-    fn bench_flash_p1_causal_kb4_vb2_d64(dt: DType) -> BenchSetup {
-        // Causal prefill/chunked form, aura4v2 on head_dim 64.
-        flash_p1(
-            BenchSetup::new(aura_flash_p1_causal_kb4_vb2_d64::kernel_ir_for(dt)),
-            dt,
-            64,
+            DIM,
             4,
             2,
             true,

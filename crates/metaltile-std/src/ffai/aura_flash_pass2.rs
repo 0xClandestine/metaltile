@@ -23,10 +23,10 @@
 //! ## Dispatch
 //!
 //! Reduction mode; threadgroup = (32, 1, 1) per q_idx.  Each lane owns
-//! `DIMS_PER_LANE = ceil(dim / 32)` output slots (the lane's stride-32
-//! slice of `dim`), kept in a per-thread stack array.  Cross-block
-//! merge: replay `b_idx ∈ [0, num_blocks)`, rescaling `o[]` and `l`
-//! by the standard online-softmax max-shift on each step.
+//! `ceil(DIM / 32)` output slots (the lane's stride-32 slice of `dim`),
+//! kept in a per-thread stack array.  Cross-block merge: replay
+//! `b_idx ∈ [0, num_blocks)`, rescaling `o[]` and `l` by the standard
+//! online-softmax max-shift on each step.
 //!
 //! ## Output dtype
 //!
@@ -34,91 +34,86 @@
 //! stay fp32; only the final write narrows.  See the note in the
 //! upstream file about Qwen3.5-9B `!!!!!` decoding regressions when
 //! this was fp32 + caller-side cast.
+//!
+//! ## Variant axis
+//!
+//! `#[kernel(variants(DIM = [64, 80, 96, 128, 256, 512],
+//!                    DPL = [2, 3, 3, 4, 8, 16], suffix = "d{DIM}"))]`
+//! emits one kernel per head-dim.  `DPL` (dims-per-lane) = `ceil(DIM/32)`:
+//! pre-computed as a literal so `stack_alloc` receives an integer constant.
 
 use metaltile::kernel;
 
-macro_rules! aura_flash_pass2_kernel {
-    ($name:ident, $dims_per_lane:literal, $subop:literal) => {
-        #[kernel]
-        pub fn $name<T>(
-            o_partials: Tensor<T>,
-            m_partials: Tensor<T>,
-            l_partials: Tensor<T>,
-            mut output: Tensor<T>,
-            #[constexpr] dim: u32,
-            #[constexpr] num_blocks: u32,
-        ) {
-            let lane = tid;
-            let q_idx = tgid_x;
+/// AURA flash pass-2 cross-block softmax merge.
+///
+/// Produces kernels: `aura_flash_pass2_d64`, `_d80`, `_d96`, `_d128`,
+/// `_d256`, `_d512`.
+///
+/// Grid: `(q_heads, 1, 1)` with a 32-lane reduction threadgroup; only
+/// `dim` (and the buffer sizes it drives) varies.
+#[kernel(variants(DIM = [64, 80, 96, 128, 256, 512], DPL = [2, 3, 3, 4, 8, 16], suffix = "d{DIM}"))]
+pub fn aura_flash_pass2<T>(
+    o_partials: Tensor<T>,
+    m_partials: Tensor<T>,
+    l_partials: Tensor<T>,
+    mut output: Tensor<T>,
+    #[constexpr] dim: u32,
+    #[constexpr] num_blocks: u32,
+) {
+    let lane = tid;
+    let q_idx = tgid_x;
 
-            // Per-lane accumulators.  `o` is the running output slice;
-            // `m` and `l` are scalars updated each block.  Initialised
-            // to (-INF, 0, 0).
-            stack_alloc("o", $dims_per_lane, "f32");
-            for i in range(0u32, $dims_per_lane, 1u32) {
-                stack_store("o", i, 0.0f32);
-            }
+    // Per-lane accumulators.  `o` is the running output slice;
+    // `m` and `l` are scalars updated each block.  Initialised
+    // to (-INF, 0, 0).
+    stack_alloc("o", DPL, "f32");
+    for i in range(0u32, DPL, 1u32) {
+        stack_store("o", i, 0.0f32);
+    }
 
-            let mut m_acc = neg_infinity();
-            let mut l_acc = 0.0f32;
+    let mut m_acc = neg_infinity();
+    let mut l_acc = 0.0f32;
 
-            // Replay every block; rescale on each step using the
-            // standard online-softmax max-shift identity. Partials are
-            // promoted to f32 for the merge — keeps numerical stability
-            // independent of the storage dtype.
-            for b in range(0u32, num_blocks, 1u32) {
-                let ml_idx = q_idx * num_blocks + b;
-                let block_m = load(m_partials[ml_idx]).cast::<f32>();
-                let block_l = load(l_partials[ml_idx]).cast::<f32>();
-                // Skip empty blocks (causal masking can leave some
-                // blocks with l=0).
-                if block_l != 0.0f32 {
-                    let new_m = select(m_acc > block_m, m_acc, block_m);
-                    let exp_old = exp(m_acc - new_m);
-                    let exp_block = exp(block_m - new_m);
+    // Replay every block; rescale on each step using the
+    // standard online-softmax max-shift identity. Partials are
+    // promoted to f32 for the merge — keeps numerical stability
+    // independent of the storage dtype.
+    for b in range(0u32, num_blocks, 1u32) {
+        let ml_idx = q_idx * num_blocks + b;
+        let block_m = load(m_partials[ml_idx]).cast::<f32>();
+        let block_l = load(l_partials[ml_idx]).cast::<f32>();
+        // Skip empty blocks (causal masking can leave some
+        // blocks with l=0).
+        if block_l != 0.0f32 {
+            let new_m = select(m_acc > block_m, m_acc, block_m);
+            let exp_old = exp(m_acc - new_m);
+            let exp_block = exp(block_m - new_m);
 
-                    let partial_base = (q_idx * num_blocks + b) * dim;
-                    for i in range(0u32, $dims_per_lane, 1u32) {
-                        let d = lane + i * 32u32;
-                        if d < dim {
-                            let prev = stack_load("o", i);
-                            let part = load(o_partials[partial_base + d]).cast::<f32>();
-                            let scaled = prev * exp_old + part * exp_block;
-                            stack_store("o", i, scaled);
-                        }
-                    }
-                    l_acc = l_acc * exp_old + block_l * exp_block;
-                    m_acc = new_m;
-                }
-            }
-
-            // Final normalise + narrow-cast write.
-            let inv_l = select(l_acc > 0.0f32, 1.0f32 / l_acc, 0.0f32);
-            for i in range(0u32, $dims_per_lane, 1u32) {
+            let partial_base = (q_idx * num_blocks + b) * dim;
+            for i in range(0u32, DPL, 1u32) {
                 let d = lane + i * 32u32;
                 if d < dim {
-                    let v = stack_load("o", i) * inv_l;
-                    store(output[q_idx * dim + d], v.cast::<T>());
+                    let prev = stack_load("o", i);
+                    let part = load(o_partials[partial_base + d]).cast::<f32>();
+                    let scaled = prev * exp_old + part * exp_block;
+                    stack_store("o", i, scaled);
                 }
             }
+            l_acc = l_acc * exp_old + block_l * exp_block;
+            m_acc = new_m;
         }
-    };
-}
+    }
 
-// One instantiation per (dim).  `dims_per_lane = ceil(dim / 32)`.
-//
-//   dim  64  →  2 dims/lane
-//   dim  80  →  3 (3·32 = 96 ≥ 80)
-//   dim  96  →  3
-//   dim 128  →  4
-//   dim 256  →  8
-//   dim 512  → 16
-aura_flash_pass2_kernel!(aura_flash_pass2_d64, 2u32, "flash_pass2_d64");
-aura_flash_pass2_kernel!(aura_flash_pass2_d80, 3u32, "flash_pass2_d80");
-aura_flash_pass2_kernel!(aura_flash_pass2_d96, 3u32, "flash_pass2_d96");
-aura_flash_pass2_kernel!(aura_flash_pass2_d128, 4u32, "flash_pass2_d128");
-aura_flash_pass2_kernel!(aura_flash_pass2_d256, 8u32, "flash_pass2_d256");
-aura_flash_pass2_kernel!(aura_flash_pass2_d512, 16u32, "flash_pass2_d512");
+    // Final normalise + narrow-cast write.
+    let inv_l = select(l_acc > 0.0f32, 1.0f32 / l_acc, 0.0f32);
+    for i in range(0u32, DPL, 1u32) {
+        let d = lane + i * 32u32;
+        if d < dim {
+            let v = stack_load("o", i) * inv_l;
+            store(output[q_idx * dim + d], v.cast::<T>());
+        }
+    }
+}
 
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
@@ -299,14 +294,7 @@ pub mod kernel_tests {
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    use super::{
-        aura_flash_pass2_d64,
-        aura_flash_pass2_d80,
-        aura_flash_pass2_d96,
-        aura_flash_pass2_d128,
-        aura_flash_pass2_d256,
-        aura_flash_pass2_d512,
-    };
+    use super::*;
 
     // Shared builder for every pass2 dim. Grid is (q_heads, 1, 1) with a
     // 32-lane reduction threadgroup; only `dim` (and the buffer sizes it
@@ -325,34 +313,9 @@ pub mod kernel_benches {
             .grid_3d(q_heads as u32, 1, 1, [32, 1, 1])
     }
 
-    #[bench(name = "ffai/aura_flash_pass2_d64", dtypes = [f32, f16, bf16])]
-    fn bench_flash_pass2_d64(dt: DType) -> BenchSetup {
-        flash_pass2(BenchSetup::new(aura_flash_pass2_d64::kernel_ir_for(dt)), 64, dt)
-    }
-
-    #[bench(name = "ffai/aura_flash_pass2_d80", dtypes = [f32, f16, bf16])]
-    fn bench_flash_pass2_d80(dt: DType) -> BenchSetup {
-        flash_pass2(BenchSetup::new(aura_flash_pass2_d80::kernel_ir_for(dt)), 80, dt)
-    }
-
-    #[bench(name = "ffai/aura_flash_pass2_d96", dtypes = [f32, f16, bf16])]
-    fn bench_flash_pass2_d96(dt: DType) -> BenchSetup {
-        flash_pass2(BenchSetup::new(aura_flash_pass2_d96::kernel_ir_for(dt)), 96, dt)
-    }
-
-    #[bench(name = "ffai/aura_flash_pass2_d128", dtypes = [f32, f16, bf16])]
+    #[bench(name = "ffai/aura_flash_pass2_d{DIM}", dtypes = [f32, f16, bf16],
+            variants(DIM = [64, 80, 96, 128, 256, 512], suffix = "d{DIM}"))]
     fn bench_flash_pass2(dt: DType) -> BenchSetup {
-        // head_dim 128, decode-time KV of 4096 tokens / block 256 = 16 blocks.
-        flash_pass2(BenchSetup::new(aura_flash_pass2_d128::kernel_ir_for(dt)), 128, dt)
-    }
-
-    #[bench(name = "ffai/aura_flash_pass2_d256", dtypes = [f32, f16, bf16])]
-    fn bench_flash_pass2_d256(dt: DType) -> BenchSetup {
-        flash_pass2(BenchSetup::new(aura_flash_pass2_d256::kernel_ir_for(dt)), 256, dt)
-    }
-
-    #[bench(name = "ffai/aura_flash_pass2_d512", dtypes = [f32, f16, bf16])]
-    fn bench_flash_pass2_d512(dt: DType) -> BenchSetup {
-        flash_pass2(BenchSetup::new(aura_flash_pass2_d512::kernel_ir_for(dt)), 512, dt)
+        flash_pass2(BenchSetup::new(aura_flash_pass2_dDIM::kernel_ir_for(dt)), DIM, dt)
     }
 }
