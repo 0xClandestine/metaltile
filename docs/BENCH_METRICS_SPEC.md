@@ -147,7 +147,7 @@ Goal: **support all precisions in every weight-bearing kernel** (matmul/gemv/att
 | depthwise conv2d | `ffai/depthwise_conv2d_block_scaled.rs` |
 | audio conv1d (STT) / fishspeech conv1d (TTS) | `ffai/{audio_conv1d,fishspeech_conv1d}_block_scaled.rs` |
 
-Each (family × format) ships a `#[test_kernel]` CPU-oracle correctness check (1:1, GPU-verified vs `quant::format::dequant`) and a `#[bench]` with `.flops()` so the PR-#1 latency/GFLOP/roofline columns rank precisions side-by-side. `fp8_e4m3` reuses each family's `nvfp8` kernel (identical 8-bit-E4M3 + f32-scale shape). The MPP/NAX/MoE-MPP cooperative-matmul variants dequant W to `coop_stage(T)` during threadgroup staging and reuse the proven int4/int8 `mpp::tensor_ops::matmul2d` dispatch geometry byte-for-byte (no new freeze surface). ~255 block-scaled kernels across **every quantized weight-bearing op + backend + MoE tile**, all GPU-verified on f32/f16/bf16, each 1:1 tested + benched. Flash KV covers every production head dim (d64/96/128/256/512 × all 9 formats), the lone exception being **int8 @ d96** (int8's block size 64 doesn't divide 96 — the affine int8 KV path, group 32, covers d96). The MMA patch-embed (`patch_embed_mma_block_scaled.rs`) reuses the dense `patch_embed_mma` geometry + the `conv2d_mma` block-scaled W-dequant.
+Each (family × format) ships a `#[test_kernel]` CPU-oracle correctness check (1:1, GPU-verified vs `quant::format::dequant`) and a `#[bench]` with `.flops()` so the PR-#1 latency/GFLOP/roofline columns rank precisions side-by-side. `fp8_e4m3` reuses each family's `nvfp8` kernel (identical 8-bit-E4M3 + f32-scale shape). The MPP/NAX/MoE-MPP cooperative-matmul variants dequant W to `coop_stage(T)` during threadgroup staging and reuse the proven int4/int8 `mpp::tensor_ops::matmul2d` dispatch geometry byte-for-byte (no new freeze surface). ~255 block-scaled kernels across **every quantized weight-bearing op + backend + MoE tile**, all GPU-verified on f32/f16/bf16, each 1:1 tested + benched. Flash KV covers every production head dim (d64/96/128/256/512 × all 9 formats) with **no holes** — int8 @ d96 (where the group size 64 doesn't divide 96) tiles with a ragged trailing block (64 + 32), the host packer and kernel rounding up `n_blocks` identically. The MMA patch-embed (`patch_embed_mma_block_scaled.rs`) reuses the dense `patch_embed_mma` geometry + the `conv2d_mma` block-scaled W-dequant.
 
 **int8 is in every family above** — including the fast tensor-engine paths (simdgroup-MMA, MPP, NAX, MoE-MPP) — because symmetric int8 is one of the nine `QFormat`s. It is the highest-throughput quantized format on Apple GPUs / the ANE, so it is deliberately a first-class citizen of the matrix rather than a special case; the core matmul / MoE / fused-norm / batched-QKV / KV-cache / attention families *also* carry the pre-existing affine (scale+bias) int8. No weight-bearing family lacks an int8 path.
 
@@ -173,10 +173,12 @@ Quantized **conv + patch-embed** are covered across the family — direct
 along the contraction (all 9 formats, GPU-verified on f32/f16/bf16).
 
 **Flash KV (closed):** block-scaled flash-SDPA KV now covers every production head
-dim — d ∈ {64, 96, 128, 256, 512} × all 9 formats — matching the affine path. The
-single (format × dim) hole is **int8 @ d96** (int8 block size 64 ∤ 96; the affine
-int8 KV path, group 32, serves d96). The geometry is one simdgroup per query, identical
-across dims (only the per-lane dim count changes), so the extension added no freeze surface.
+dim — d ∈ {64, 96, 128, 256, 512} × all 9 formats — matching the affine path, with
+**no (format × dim) holes**. int8's group size (64) doesn't divide d96, so that case
+tiles with a ragged trailing block (`n_blocks = ceil(dim/block_size)`: a 64-block + a
+32-block); the host packer and kernel round up identically, so codes + scales stay
+self-consistent. The geometry is one simdgroup per query, identical across dims (only
+the per-lane dim count changes), so the extension added no freeze surface.
 
 > **Test-gate note:** the `#[test_kernel]` harness (`tests/kernel_tests_harness.rs`)
 > must enumerate the registry via `metaltile_std::all_tests()`, not

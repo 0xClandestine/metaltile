@@ -220,7 +220,7 @@ own kernel. ~216 block-scaled kernels total.
 | batched-Q/K/V qgemv + qmm | reduction | `ffai/batched_qkv_block_scaled_{qgemv,qmm}.rs` | int4, int8-fast |
 | batched-4 qgemv + qmm | reduction | `ffai/batched_4_block_scaled_{qgemv,qmm}.rs` | int4 |
 | embedding gather | elementwise | `ffai/dequant_gather_block_scaled.rs` | int3–8 |
-| flash SDPA (block-scaled KV) | flash | `ffai/flash_block_scaled_sdpa.rs` (d64/96/128/256/512¹) | affine int4/int8 KV, same dims |
+| flash SDPA (block-scaled KV) | flash | `ffai/flash_block_scaled_sdpa.rs` (d64/96/128/256/512, all 9 formats¹) | affine int4/int8 KV, same dims |
 | patch embed (linear projection) | reduction | `ffai/patch_embed_block_scaled.rs` | — |
 | patch embed (simdgroup-MMA) | simdgroup-matrix | `ffai/patch_embed_mma_block_scaled.rs` | — |
 | conv2d / conv3d (direct) | reduction | `ffai/{conv2d,conv3d}_block_scaled.rs` | — |
@@ -229,11 +229,12 @@ own kernel. ~216 block-scaled kernels total.
 | audio conv1d (STT front-end) | reduction | `ffai/audio_conv1d_block_scaled.rs` | — |
 | fishspeech conv1d (TTS front-end) | reduction | `ffai/fishspeech_conv1d_block_scaled.rs` | — |
 
-¹ Flash KV covers every production head dim (d64/96/128/256/512), each × all 9 formats,
-with one exception: **int8 @ d96** — int8's block size is 64 and 96 is not a multiple of
-64, so the cache can't be tiled (use the affine int8 KV path, group 32, for d96). All
-other (format × dim) combinations are present; the geometry is one simdgroup per query
-(grid `[32, n_query, 1]`), identical across dims (only the per-lane dim count changes).
+¹ Flash KV covers every production head dim (d64/96/128/256/512), each × all 9 formats —
+**no holes**. int8's group size (64) doesn't divide d96, so that case tiles with a ragged
+trailing block: `n_blocks = ceil(dim/block_size)` (a 64-block + a 32-block), with the host
+packer and kernel rounding up identically so codes + scales stay self-consistent. The
+geometry is one simdgroup per query (grid `[32, n_query, 1]`), identical across dims (only
+the per-lane dim count changes).
 
 ### int8 everywhere
 

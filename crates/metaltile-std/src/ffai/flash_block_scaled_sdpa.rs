@@ -15,8 +15,10 @@
 //! K/V cache layout (`N = tokens`, per `(kv_head, token)` row of `dim`):
 //!   - 4-bit (mxfp4/nvfp4): `k_packed [B·nKV, N, dim/8] u32` (8 E2M1 nibbles
 //!     per word), `k_scales [B·nKV, N, dim/block_size]` u8 (+ global f32 nvfp4).
-//!   - 8-bit (mxfp8/nvfp8): `k_packed [B·nKV, N, dim] u8`, scales u8 (E8M0) or
-//!     f32 (nvfp8). V mirrors K. `dim` a multiple of `block_size`.
+//!   - 8-bit (mxfp8/nvfp8/int8): `k_packed [B·nKV, N, dim] u8`, scales u8 (E8M0)
+//!     or f32 (nvfp8/int8). V mirrors K. A `dim` that isn't a multiple of
+//!     `block_size` (int8 group 64 over d96) tiles with a ragged trailing block:
+//!     `n_blocks = ceil(dim/block_size)`, matching the host packer.
 //!
 //! Each format is a whole-fn `macro_rules!` parameterized by `$dpl` (= head_dim/32,
 //! the per-lane dim count). Every production head dim is generated:
@@ -764,7 +766,10 @@ macro_rules! int8_flash {
             let lane = program_id::<0>();
             let q_idx = program_id::<1>();
             let kv_idx = q_idx / repeat_count;
-            let n_blocks = dim / block_size;
+            // Round up so a head dim that isn't a multiple of the group (int8 group
+            // 64 over d96 → a 64-block + a 32-block) counts the ragged tail block.
+            // `dim / block_size` floors; matches the host packer's `div_ceil`.
+            let n_blocks = (dim + block_size - 1u32) / block_size;
 
             stack_alloc("q_vals", $dpl, "f32");
             for i in range(0u32, $dpl, 1u32) {
@@ -829,9 +834,9 @@ macro_rules! int8_flash {
     };
 }
 int8_flash!(mt_int8_flash_sdpa_d64, 2u32);
-// No d96: int8's block_size is 64 and 96 is not a multiple of 64, so the cache
-// can't be tiled. d96 (GPT-NeoX) with int8 KV uses the affine path (group 32);
-// the other formats (block 16/32) cover d96.
+// d96 (GPT-NeoX): int8 group 64 doesn't divide 96, so the cache tiles as a
+// 64-block + a ragged 32-block (host `pack`/kernel `n_blocks` both round up).
+int8_flash!(mt_int8_flash_sdpa_d96, 3u32);
 int8_flash!(mt_int8_flash_sdpa_d128, 4u32);
 int8_flash!(mt_int8_flash_sdpa_d256, 8u32);
 int8_flash!(mt_int8_flash_sdpa_d512, 16u32);
@@ -1116,7 +1121,8 @@ pub mod kernel_tests {
     flash_dim_test!(test_fp4_flash_sdpa_d96, mt_fp4_flash_sdpa_d96, QFormat::Fp4, 96);
     flash_dim_test!(test_fp8_e4m3_flash_sdpa_d96, mt_nvfp8_flash_sdpa_d96, QFormat::Fp8E4m3, 96);
     flash_dim_test!(test_fp8_e5m2_flash_sdpa_d96, mt_fp8_e5m2_flash_sdpa_d96, QFormat::Fp8E5m2, 96);
-    // int8 d96 omitted — block_size 64 does not divide head-dim 96 (see kernel note).
+    // int8 d96: ragged trailing block (64 + 32) — see the kernel/packer notes.
+    flash_dim_test!(test_int8_flash_sdpa_d96, mt_int8_flash_sdpa_d96, QFormat::Int8, 96);
     // d256
     flash_dim_test!(test_mxfp4_flash_sdpa_d256, mt_mxfp4_flash_sdpa_d256, QFormat::Mxfp4, 256);
     flash_dim_test!(test_nvfp4_flash_sdpa_d256, mt_nvfp4_flash_sdpa_d256, QFormat::Nvfp4, 256);
@@ -1180,7 +1186,7 @@ pub mod kernel_benches {
     fn flash_bench(kernel: Kernel, fmt: QFormat, dim: usize, dt: DType) -> BenchSetup {
         let (q_heads, kv_heads, tokens) = (8usize, 1usize, 2048usize);
         let rows = kv_heads * tokens;
-        let n_blocks = rows * (dim / fmt.block_size());
+        let n_blocks = rows * dim.div_ceil(fmt.block_size()); // round up: ragged tail block
         let (codes_len, codes_dt) = if fmt.element_bits() == 4 {
             (rows * dim / 8, DType::U32)
         } else {

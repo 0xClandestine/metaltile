@@ -152,12 +152,17 @@ pub struct PackedTensor {
 }
 
 /// Quantize a row-major `[rows, cols]` f32 weight matrix to `fmt`'s layout.
-/// `cols` must be a multiple of `fmt.block_size()`.
+///
+/// Blocks tile K in `fmt.block_size()`-element groups. A `cols` that isn't a
+/// multiple of the block size (e.g. int8 group 64 over a d96 head) gets a
+/// shorter **trailing block** rather than being rejected — `blocks_per_row`
+/// rounds up and each block is clamped to the row's remaining columns. The
+/// kernel's `d / block_size` indexing maps every element to the right block,
+/// the partial tail included, so codes + scales stay self-consistent.
 pub fn pack(fmt: QFormat, w: &[f32], rows: usize, cols: usize) -> PackedTensor {
     assert_eq!(w.len(), rows * cols, "weight length must be rows*cols");
     let bs = fmt.block_size();
-    assert_eq!(cols % bs, 0, "{}: cols {cols} not a multiple of block {bs}", fmt.name());
-    let blocks_per_row = cols / bs;
+    let blocks_per_row = cols.div_ceil(bs);
     let nblocks = rows * blocks_per_row;
 
     // Per-block amax → the f32 block scale that maps amax to the element max.
@@ -165,7 +170,8 @@ pub fn pack(fmt: QFormat, w: &[f32], rows: usize, cols: usize) -> PackedTensor {
     for r in 0..rows {
         for b in 0..blocks_per_row {
             let start = r * cols + b * bs;
-            let amax = w[start..start + bs].iter().fold(0f32, |m, &v| m.max(v.abs()));
+            let len = bs.min(cols - b * bs); // clamp the ragged trailing block
+            let amax = w[start..start + len].iter().fold(0f32, |m, &v| m.max(v.abs()));
             block_scale[r * blocks_per_row + b] = amax / fmt.element_max();
         }
     }
@@ -205,7 +211,8 @@ pub fn pack(fmt: QFormat, w: &[f32], rows: usize, cols: usize) -> PackedTensor {
                 },
             };
             let inv = if eff > 0.0 { 1.0 / eff } else { 0.0 };
-            for e in 0..bs {
+            let len = bs.min(cols - b * bs); // clamp the ragged trailing block
+            for e in 0..len {
                 let idx = r * cols + b * bs + e;
                 let code = fmt.element_encode(w[idx] * inv);
                 if fmt.element_bits() == 4 {
@@ -229,7 +236,7 @@ pub fn pack(fmt: QFormat, w: &[f32], rows: usize, cols: usize) -> PackedTensor {
 /// `element_decode(code) * block_scale * global`.
 pub fn dequant(fmt: QFormat, p: &PackedTensor, rows: usize, cols: usize) -> Vec<f32> {
     let bs = fmt.block_size();
-    let blocks_per_row = cols / bs;
+    let blocks_per_row = cols.div_ceil(bs); // ragged trailing block, mirrors `pack`
     let mut out = vec![0f32; rows * cols];
     for r in 0..rows {
         for b in 0..blocks_per_row {
@@ -247,7 +254,8 @@ pub fn dequant(fmt: QFormat, p: &PackedTensor, rows: usize, cols: usize) -> Vec<
                     ])
                 },
             };
-            for e in 0..bs {
+            let len = bs.min(cols - b * bs); // clamp the ragged trailing block
+            for e in 0..len {
                 let idx = r * cols + b * bs + e;
                 let code = if fmt.element_bits() == 4 {
                     let byte = p.codes[idx / 2];
@@ -339,6 +347,25 @@ mod tests {
                 assert_eq!(p.global, 1.0, "{} global", fmt.name());
             }
         }
+    }
+
+    #[test]
+    fn ragged_trailing_block_round_trips() {
+        // A dim that isn't a multiple of the block size (int8 group 64 over a
+        // d96 head: a 64-block + a 32-block) must pack to a rounded-up block
+        // count and still round-trip with full fidelity — this is what unblocks
+        // int8 flash-SDPA KV at d96 (GPT-NeoX).
+        let (rows, cols) = (4usize, 96usize);
+        let w = weights(rows, cols);
+        let p = pack(Int8, &w, rows, cols);
+        // 96 / 64 rounds up to 2 blocks/row; F32 scales are 4 bytes each.
+        let blocks_per_row = cols.div_ceil(Int8.block_size());
+        assert_eq!(blocks_per_row, 2, "d96/64 should be 2 blocks");
+        assert_eq!(p.scales.len(), rows * blocks_per_row * 4, "scale bytes");
+        assert_eq!(p.codes.len(), rows * cols, "one code byte per int8 element");
+        let d = dequant(Int8, &p, rows, cols);
+        assert_eq!(d.len(), w.len());
+        assert!(cosine(&w, &d) >= 0.9999, "ragged int8 cosine {}", cosine(&w, &d));
     }
 
     #[test]
