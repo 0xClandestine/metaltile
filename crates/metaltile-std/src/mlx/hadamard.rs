@@ -23,39 +23,39 @@
 
 use metaltile::kernel;
 
-#[rustfmt::skip]
-macro_rules! hadamard_kernel {
-    ($name:ident, $n:literal, $log_n:literal, $subop:literal) => {
-        #[kernel]
-        pub fn $name<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] scale: f32) {
-            let row = program_id::<0>();
-            let base = row * $n;
-            threadgroup_alloc("buf", $n, "f32");
-            threadgroup_store("buf", tid, load(inp[base + tid]).cast::<f32>());
-            threadgroup_barrier();
+/// Fast Walsh–Hadamard transform — variable sizes (N = 64, 128, 256, 512, 1024).
+///
+/// Produces kernels: `mt_hadamard_n64`, `mt_hadamard_n128`, `mt_hadamard_n256`,
+/// `mt_hadamard_n512`, `mt_hadamard_n1024`.
+///
+/// Each variant fixes `N` (the transform size) and `LOG_N = log2(N)` at
+/// compile time. Both are substituted via the `variants` mechanism so the
+/// compiler sees integer literals — enabling constant-folding of the threadgroup
+/// allocation size and the butterfly loop bound.
+///
+/// Grid: Reduction, `[rows, 1, 1]` × `[N, 1, 1]` (one thread per element).
+#[kernel(variants(N = [64, 128, 256, 512, 1024], LOG_N = [6, 7, 8, 9, 10], suffix = "n{N}"))]
+pub fn mt_hadamard<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] scale: f32) {
+    let row = program_id::<0>();
+    let base = row * N;
+    threadgroup_alloc("buf", N, "f32");
+    threadgroup_store("buf", tid, load(inp[base + tid]).cast::<f32>());
+    threadgroup_barrier();
 
-            // log2(N) butterfly passes; stride h doubles each pass.
-            for s in range(0u32, $log_n, 1u32) {
-                let h = 1u32 << s;
-                if (tid & h) == 0u32 {
-                    let a = threadgroup_load("buf", tid);
-                    let b = threadgroup_load("buf", tid + h);
-                    threadgroup_store("buf", tid, a + b);
-                    threadgroup_store("buf", tid + h, a - b);
-                }
-                threadgroup_barrier();
-            }
-
-            store(out[base + tid], (threadgroup_load("buf", tid) * scale).cast::<T>());
+    // LOG_N butterfly passes; stride h doubles each pass.
+    for s in range(0u32, LOG_N, 1u32) {
+        let h = 1u32 << s;
+        if (tid & h) == 0u32 {
+            let a = threadgroup_load("buf", tid);
+            let b = threadgroup_load("buf", tid + h);
+            threadgroup_store("buf", tid, a + b);
+            threadgroup_store("buf", tid + h, a - b);
         }
-    };
-}
+        threadgroup_barrier();
+    }
 
-hadamard_kernel!(mt_hadamard_n64, 64u32, 6u32, "n64");
-hadamard_kernel!(mt_hadamard_n128, 128u32, 7u32, "n128");
-hadamard_kernel!(mt_hadamard_n256, 256u32, 8u32, "n256");
-hadamard_kernel!(mt_hadamard_n512, 512u32, 9u32, "n512");
-hadamard_kernel!(mt_hadamard_n1024, 1024u32, 10u32, "n1024");
+    store(out[base + tid], (threadgroup_load("buf", tid) * scale).cast::<T>());
+}
 
 /// New-syntax correctness for the Walsh–Hadamard transforms (Reduction mode,
 /// one threadgroup per row, tpg=N). Oracle is the algorithm-independent
