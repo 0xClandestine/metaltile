@@ -17,7 +17,7 @@ use crate::{
     harness::{
         bench::{BenchSetup, KernelBench, RefKernel},
         registry::{all_benches, all_kernels, all_tests},
-        test::{KernelTest, TestSetup},
+        test::TestSetup,
     },
     runner::{
         args::{RunnerArgs, RunnerCommand},
@@ -125,6 +125,8 @@ impl RunnerHarness {
     // ── test ──────────────────────────────────────────────────────────────────
 
     fn run_test(args: &RunnerArgs) -> bool {
+        use rayon::prelude::*;
+
         let entries: Vec<_> = all_tests()
             .filter(|e| args.filter.as_deref().is_none_or(|f| e.test().name().contains(f)))
             .collect();
@@ -158,13 +160,32 @@ impl RunnerHarness {
             },
         };
 
+        // Phase 1 (parallel): build all TestSetups on the CPU.
+        // `test.setup(dt)` computes expected output buffers without touching the
+        // GPU, so all (entry × dtype) pairs can run concurrently via rayon.
+        let work: Vec<Vec<(String, DType, TestSetup, f64)>> = entries
+            .par_iter()
+            .map(|entry| {
+                let test = entry.test();
+                dtypes
+                    .iter()
+                    .map(|&dt| {
+                        let setup = test.setup(dt);
+                        let tol = test.tolerance(dt);
+                        (test.name().to_string(), dt, setup, tol)
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // Phase 2 (serial): GPU dispatch + comparison.
+        // Metal Context is not Send, so all dispatches run on the main thread.
         let mut passed = 0u32;
         let mut failed = 0u32;
 
-        for entry in entries {
-            let test = entry.test();
-            for &dt in &dtypes {
-                match run_one_test(&ctx, test, dt) {
+        for group in &work {
+            for (name, dt, setup, tol) in group {
+                match run_one_test_with_setup(&ctx, setup, *tol, name, *dt) {
                     Ok(result) => {
                         if result.passed {
                             passed += 1;
@@ -176,7 +197,7 @@ impl RunnerHarness {
                     Err(msg) => {
                         failed += 1;
                         emit_stdout(&ProtocolMessage::ProtocolError {
-                            name: entry.test().name().into(),
+                            name: name.clone(),
                             dtype: format!("{dt:?}").to_lowercase(),
                             message: msg,
                         });
@@ -516,18 +537,21 @@ fn run_reference(
     Some((ref_gbps, passed))
 }
 
-/// Run one test entry for one dtype.
-fn run_one_test(
+/// GPU dispatch + comparison for a pre-built `TestSetup` (parallel-friendly).
+///
+/// The `setup` is built in Phase 1 (possibly on a rayon thread); this
+/// function runs in Phase 2 on the main thread where the Metal `Context` lives.
+fn run_one_test_with_setup(
     ctx: &metaltile_runtime::Context,
-    test: &'static dyn KernelTest,
+    setup: &TestSetup,
+    tol: f64,
+    name: &str,
     dt: DType,
 ) -> Result<TestResult, String> {
     use std::collections::BTreeMap;
 
     use crate::runner::gpu::elem_bytes;
 
-    let setup: TestSetup = test.setup(dt);
-    let name = test.name().to_string();
     let dtype_str = format!("{dt:?}").to_lowercase();
     let no_consts: BTreeMap<String, u32> = BTreeMap::new();
 
@@ -578,7 +602,6 @@ fn run_one_test(
     };
 
     let mut worst = 0.0f32;
-    let tol = test.tolerance(dt);
     for (bname, exp_bytes, bdt) in &expected {
         let out_bytes =
             result.output(bname).ok_or_else(|| format!("expected output '{bname}' missing"))?;
@@ -589,7 +612,12 @@ fn run_one_test(
         worst = worst.max(err);
     }
 
-    Ok(TestResult { name, dtype: dtype_str, passed: (worst as f64) <= tol, max_err: worst as f64 })
+    Ok(TestResult {
+        name: name.to_string(),
+        dtype: dtype_str,
+        passed: (worst as f64) <= tol,
+        max_err: worst as f64,
+    })
 }
 
 // ── Public in-process test runner (legacy CLI compat) ─────────────────────────
