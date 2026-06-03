@@ -60,7 +60,10 @@ impl<'a> ProjectRunner<'a> {
     pub fn run(&self, inv: &RunnerInvocation) -> bool {
         let binary = self.runner_binary();
         let argv = build_argv(inv);
-        match std::process::Command::new(&binary).args(&argv).status() {
+        let mut cmd = std::process::Command::new(&binary);
+        cmd.args(&argv);
+        self.apply_env(&mut cmd);
+        match cmd.status() {
             Ok(s) => s.success(),
             Err(e) => {
                 eprintln!("[tile] failed to spawn '{binary}': {e}");
@@ -80,12 +83,10 @@ impl<'a> ProjectRunner<'a> {
         use std::io::BufRead;
         let binary = self.runner_binary();
         let argv = build_argv(inv);
-        let mut child = match std::process::Command::new(&binary)
-            .args(&argv)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
-            .spawn()
-        {
+        let mut cmd = std::process::Command::new(&binary);
+        cmd.args(&argv).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit());
+        self.apply_env(&mut cmd);
+        let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("[tile] failed to spawn '{binary}': {e}");
@@ -101,6 +102,16 @@ impl<'a> ProjectRunner<'a> {
             }
         }
         matches!(child.wait(), Ok(s) if s.success())
+    }
+
+    /// Apply environment variables inherited from global CLI flags to a runner command.
+    ///
+    /// `RAYON_NUM_THREADS` forwards `-j N` so the runner's thread pool respects
+    /// the user's parallelism setting.
+    fn apply_env(&self, cmd: &mut std::process::Command) {
+        if let Some(n) = self.harness.global.threads {
+            cmd.env("RAYON_NUM_THREADS", n.to_string());
+        }
     }
 
     /// Resolve the `__tile_runner` binary path.
