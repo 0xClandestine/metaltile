@@ -3,7 +3,7 @@
 > Status: **proposal** (2026-06-01). Target end-state for `metaltile-std`'s
 > kernel source layout, file granularity, and the canonical per-kernel file
 > shape. Intentionally NOT executed in one pass — migrate family-by-family to
-> avoid conflicts with in-flight work (fp4/fp8/int8 coverage, etc.).
+> avoid conflicts with in-flight work.
 >
 > **Coordinates with the "MetalTile CLI Subprocess Rewrite (v4)"** — that spec
 > restructures the *crate/CLI architecture* (subprocess runner, `tile.toml`,
@@ -62,8 +62,10 @@ fragmented families have them).
   attribute. There is no hardcoded `mlx` / `mlx_ref` naming any more — a ref is
   just an optional metal kernel a bench compares against ("metal ref"), so files
   group by family, not by ref-presence. Dissolve the `mlx/` folder.
-- Make the **quant explosion** (affine int2–8, fp4/fp8 mx/nv, int8, aura,
-  turbo) drop in cleanly so the in-flight fp4/fp8/int8 work has an obvious home.
+- Tame the **quant explosion** (affine int2–8, fp4/fp8 mx/nv, int8, aura, turbo)
+  — the fp4/fp8/int8 matrix has now landed (#250) as ~240 per-op `#[kernel]`
+  fns / ~39 kLOC, so the job here is **consolidating** it (§6), not finding it a
+  home.
 - No model names anywhere in file names, `op=`, `subop=`, or bench `name=`.
 
 **Non-goals**
@@ -98,12 +100,14 @@ crates/metaltile-std/src/kernels/
 ├── conv/            # conv2d (+mma/grouped/patch), conv3d (+mma), depthwise (+nhwc),
 │                    #   conv1d (dense/dilated/transpose/causal-step), winograd
 ├── ssm/             # ssm, ssm_replay, gated_delta (+wy/prep/prep_chunk)
-├── quant/           # see §6 — the quantization umbrella
-│   ├── affine.rs            # int2/3/4/5/6/8 dequant_gemv / dequant_gather / mma
-│   ├── fp_scaled.rs         # mxfp4 / nvfp4 / mxfp8 / nvfp8 (block-scaled float)
-│   ├── int8.rs              # int8-specific gemm/mpp paths
+├── quant/           # see §6 — format/codec/lowering infra, NOT per-op kernels.
+│   ├── format.rs            # QFormat enum (~30 block-scaled formats) + params
+│   ├── codec.rs             # host encode/decode + dequant oracle
+│   ├── affine.rs            # standard affine (weight, scales, biases) int2–8
 │   ├── aura.rs              # AURA: encode, flash_p1/pass2, score, value, dequant_rotated
 │   └── turbo.rs             # (future) turbo quant kernels
+│   # block-scaled op variants do NOT live here — they fold into the op's own
+│   # family file as a format axis (conv2d_block_scaled → conv/conv2d.rs). §6.
 ├── audio/           # mel_spectrogram (+magnitude/stft/filterbank), lstm, vocoder,
 │                    #   fishspeech codec convs → folded into conv/ if generic
 ├── vision/          # resize_normalize (+bicubic), im2col_patch, pos_emb_2d_add,
@@ -122,7 +126,8 @@ Notes:
   lives in `conv/`; only truly domain-shaped kernels live here. When in doubt,
   prefer the *operation* family (`conv/`, `norm/`) over the *domain* folder.
 - **`turbo` / `aura`** are quant schemes → under `quant/` (siblings of
-  `affine`/`fp_scaled`), not top-level, so all quantization lives in one place.
+  `affine` / `format` / `codec`), not top-level, so all quantization infra lives
+  in one place.
 - `probe/` is **deleted by v4**, not carried into `kernels/`.
 
 ## 4. File-granularity rules — when does a kernel get its own file?
@@ -232,27 +237,86 @@ single file expresses every permutation declaratively, rather than copy-pasted
   hardcoded `mlx` / `mlx_ref` naming. Omit it (the default) and the kernel is
   benched on its own / against a CPU oracle.
 
-## 6. Quantization umbrella (`quant/`) — fp4 / fp8 / int8 plan
+## 6. Quantization umbrella (`quant/`) — and collapsing the op × format matrix
 
-The in-flight mxfp4 / nvfp4 / mxfp8 / nvfp8 + int8 work lands here. Organize by
-**quant *scheme*, one file each**, every bit-width/dtype as a macro cell:
+**Current reality (post-#250).** Comprehensive precision support has landed:
+`quant/format.rs` defines a `QFormat` enum of ~30 block-scaled formats (nvfp4,
+mxfp4, mxfp8_e4/e5, nvfp8(+f16), the legacy float-scale fp4/fp8, mxint2–8, …)
+and `quant/codec.rs` holds the host-side encode/decode + dequant oracle. That
+shared infra is the **right** single source of truth and stays.
 
-- `quant/affine.rs` — standard affine `(weight, scales, biases)` int2–8:
-  `dequant_gemv`, `dequant_gather`, `qmm_mma`, `dequantize_affine`. One file,
-  `bits=[2,3,4,5,6,8]` macro axis.
-- `quant/fp_scaled.rs` — block-scaled float: **mxfp4, nvfp4, mxfp8, nvfp8**.
-  These share a "dequant a block by its (shared exponent | fp8 scale) then
-  gemv/gemm" shape; parameterize on `(mantissa_bits, exp_bits, block, scale
-  kind)`. New formats = new macro cells, not new files.
-- `quant/int8.rs` — int8 gemm / mpp / per-row-scale paths that don't fit the
-  affine triplet.
-- `quant/aura.rs` — AURA (rotation + Lloyd-Max codebook): encode, flash_p1,
-  flash_pass2, score, value, dequant_rotated.
+The problem is everything *downstream* of it. The format matrix is materialized
+as **per-op `*_block_scaled.rs` files** — `conv2d_block_scaled.rs`,
+`conv3d_mma_block_scaled.rs`, `depthwise_conv2d_block_scaled.rs`,
+`dequant_gather_block_scaled.rs`, … — **15 files, ~240 `#[kernel]` fns, ~39 000
+LOC**. Within one file the op body is copy-pasted once per format: e.g.
+`mt_mxfp4_conv2d` and `mt_nvfp4_conv2d` are the *same* ~120-line im2col
+receptive-field walk; the only difference is ~4 lines (element unpack + element
+decode + block-scale read) and one extra `global` constexpr. That body then
+repeats across every weight-bearing op. **Op (`conv2d`) and format (`mxfp4`) are
+being multiplied into files instead of treated as orthogonal axes.**
+
+### Target organization
+
+Block-scaled variants are not their own family — they are the **quantized form
+of an existing op**. Fold each `<op>_block_scaled.rs` back into that op's family
+file (`conv2d_block_scaled.rs` → a format axis inside `conv/conv2d.rs`), and let
+`quant/` hold only the **format/codec/lowering** infrastructure, not per-op
+kernels:
+
+- `quant/format.rs` — the `QFormat` enum + per-format params (element type,
+  block size, scale kind, packing). (Exists.)
+- `quant/codec.rs` — host encode/decode + the dequant oracle. (Exists.)
+- `quant/affine.rs` — the standard affine `(weight, scales, biases)` int2–8
+  triplet where it doesn't share the block-scaled path.
+- `quant/aura.rs` — AURA (rotation + Lloyd-Max codebook).
 - `quant/turbo.rs` — (future) turbo quant kernels.
 
-Rule of thumb: a **new quant *format*** (nvfp8, etc.) is a **macro cell** in the
-matching scheme file; a **new quant *algorithm*** (a different packing/codebook)
-is a **new file** under `quant/`.
+### DSL changes to kill the duplication
+
+The 39 kLOC is a symptom: the DSL has **no way to express "dequantize a
+block-scaled element,"** so every kernel inlines the unpack-decode-scale by
+hand, per format. Two changes make op and format orthogonal and collapse the
+matrix to ~one body per op:
+
+1. **A `dequant` DSL op (the big win).** Add an intrinsic
+   ```
+   dequant_block_scaled(weight, scales, global, col, FORMAT) -> f32
+   ```
+   that codegen lowers per `QFormat` — element unpack (straddle-aware), element
+   decode (E2M1/E4M3/E5M2/int), and block-scale (E8M0 `exp2(s-127)` / E4M3
+   micro-scale × global / FP32 / FP16). Every block-scaled op body then becomes
+   **format-agnostic** — one line:
+   ```rust
+   acc += pix_m * dequant_block_scaled(weight, scales, global, col, FMT);
+   ```
+   instead of the inlined nibble-shift + `e2m1_decode` + `exp2(scale-127)`
+   block. This is the single largest reduction: the per-format decode lives once
+   in codegen (mirroring how `quant/codec.rs` already centralizes the *host*
+   decoders), not copy-pasted into ~240 kernel bodies. `scales`/`global` are
+   simply absent for formats that don't use them.
+
+2. **Format as a first-class macro axis** (already half-proven). The integer
+   formats in `conv2d_block_scaled.rs` are *already* generated from one template
+   via `int_conv2d_f32!` / `int_conv2d_e8m0!` / `int_conv2d_f16!` parameterized
+   on `$bits` — the float formats just never got the same treatment. Promote
+   this to a declared axis on the kernel, `formats = [mxfp4, nvfp4, mxfp8_e4,
+   …]`, so one `#[kernel]` body emits every format cell. Combined with (1) the
+   body is written **once per op**, format-agnostic, and the macro stamps the
+   variants — `conv2d_block_scaled.rs` goes from 16 hand-written fns to one body
+   + a format list. A new format becomes one `QFormat` arm in the `dequant`
+   lowering, automatically available to *every* op — not a new fn × every file.
+
+3. **Fold the three scale-decode macros into the `dequant` op.** The
+   `int_conv2d_{f32,e8m0,f16}!` triplication exists only because the *scale read*
+   differs by format; once (1) owns scale decode, the three collapse to one.
+
+**Rule of thumb (unchanged in spirit):** a new quant **format** is a `QFormat`
+arm + a `dequant`-lowering cell, never a new kernel fn; a new quant **algorithm**
+(a different packing/codebook, e.g. AURA) is a new file under `quant/`. Combined
+effect: roughly **~240 fns / 39 kLOC → ~15 op bodies** + the shared `quant/`
+infra. See §11 for sequencing (this rides on top of the v4 + lane-pack macro
+work).
 
 ## 7. Reference-kernel policy (deprioritize)
 
@@ -294,9 +358,10 @@ never a big-bang move:
    unchanged → FFAI emit unaffected; coordinate with the FFAI side to run
    `make regenerate-kernels` once after each landed family.
 3. **Order by independence:** start with self-contained families with no active
-   work (`rope/`, `logits/`→`sampling/`, `norm/`), then `sdpa/`. **Hold `quant/`
-   until the fp4/fp8/int8 session lands** — co-design the `quant/` layout with
-   that work rather than reorganizing under it.
+   work (`rope/`, `logits/`→`sampling/`, `norm/`), then `sdpa/`. **`quant/` is
+   the largest payoff but rides on the `dequant` DSL op + format-axis macro
+   (§6)** — land those first and let the matrix collapse, rather than
+   reorganizing the 39 kLOC of per-op block-scaled files by hand.
 4. **The lane-packing macro (§5)** is a separate, prerequisite PR; until it
    lands, group the hand-written dim variants into one file but don't try to
    macro-collapse them.
@@ -337,9 +402,10 @@ restructures the **kernel files**. They're orthogonal, but both edit
   `inventory`, independent of module layout).
 
 **Net sequencing:** (1) v4 crate/CLI rewrite → (2) the lane-packing macro (§5,
-prerequisite for the cleanest `sdpa/`) → (3) family-by-family kernel migration
-(§9), starting with the independent families and holding `quant/` for the
-fp4/fp8/int8 session.
+prerequisite for the cleanest `sdpa/`) + the `dequant` DSL op / format-axis
+macro (§6, prerequisite for collapsing the block-scaled matrix) → (3)
+family-by-family kernel migration (§9), with `quant/` consolidation as the
+largest single LOC reduction.
 
 ## 11. Open questions
 
