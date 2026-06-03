@@ -1819,6 +1819,895 @@ pub fn mt_int8_conv3d_mma<T>(
     );
 }
 
+// ── Symmetric sub-byte integer MMA conv3d (int2/3/4/5/6 + MXINT2..6) ─────────
+// The filter element is a signed N-bit two's-complement code, tight-bit-packed
+// LSB-first into a FLAT global u32 bit-stream by `quant::format::pack`: for the
+// 2-D filter `[out_ch, C]` (`C = in_ch·kd·kh·kw`), the element at output channel
+// `oc` and contraction tap `kt` has global index `oc·C + kt` and lives at bit
+// `(oc·C + kt)·BITS`. These kernels reuse `mt_int8_conv3d_mma`'s dispatch
+// geometry, threadgroup-memory layout, 8×8 frag mapping, MMA inner loop, and the
+// implicit-im2col A-load **verbatim** — only the per-tap B (filter) *decode*
+// changes. Instead of reading one byte, each lane decodes its tap from the global
+// bit-stream with a straddle-aware two-word read + float sign-extend (subtract
+// 2^N when the top bit is set; `$half`/`$full` are 2^(N-1) / 2^N), mirroring the
+// committed `mlx/block_scaled_mma.rs` `int_qmm_mma_*` macros and the GPU-verified
+// `block_scaled_dequant` decode. The global-offset form is robust for any `C`
+// (no per-row word alignment is assumed). `$half`/`$full` are passed as literals
+// to keep the constexpr math out of the DSL shift operands. The dense kernel's
+// in-bounds masking (clamp `kt_safe` to 0 on OOB, zero the staged value) and the
+// `bs` store position are preserved exactly.
+
+/// FP32-scaled symmetric int MMA conv3d (int2/3/4/5/6): per-tap bit-stream code
+/// × per-group FP32 scale, fed to the simdgroup-matrix matmul over the implicit
+/// im2col. The filter bit offset is `(global_oc·total_k + kt)·BITS`, matching
+/// `quant::format::pack`'s flat LSB-first stream for any contraction length.
+/// Stride=1, dilation=1, pad=0. Grid `[out_ch/32,
+/// (batch·out_d·out_h·out_w)/32, 1]`, tpg = 128.
+macro_rules! int_conv3d_mma_f32 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        #[allow(clippy::too_many_arguments)]
+        pub fn $name<T>(
+            input: Tensor<T>,
+            weight: Tensor<u32>,
+            scales: Tensor<f32>,
+            out: Tensor<T>,
+            #[constexpr] in_ch: u32,
+            #[constexpr] in_d: u32,
+            #[constexpr] in_h: u32,
+            #[constexpr] in_w: u32,
+            #[constexpr] out_ch: u32,
+            #[constexpr] out_d: u32,
+            #[constexpr] out_h: u32,
+            #[constexpr] out_w: u32,
+            #[constexpr] kd: u32,
+            #[constexpr] kh: u32,
+            #[constexpr] kw: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let oc_tile = tgid_x;
+            let pv_tile = tgid_y;
+            let lane = simd_lane;
+            let sg = simd_group_id();
+            let sm = sg / 2u32;
+            let sn = sg & 1u32;
+            let lane_in_tg = sg * 32u32 + lane;
+            let qid = lane / 4u32;
+            let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
+            let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
+            let fn1 = fn0 + 1u32;
+            let stride = 36u32;
+            threadgroup_alloc("as", 1152, T);
+            threadgroup_alloc("bs", 1152, T);
+            let c_f00 = simdgroup_alloc::<f32, 8, 8>();
+            simdgroup_elem_store(c_f00, 0, 0.0f32);
+            simdgroup_elem_store(c_f00, 1, 0.0f32);
+            let c_f01 = simdgroup_alloc::<f32, 8, 8>();
+            simdgroup_elem_store(c_f01, 0, 0.0f32);
+            simdgroup_elem_store(c_f01, 1, 0.0f32);
+            let c_f10 = simdgroup_alloc::<f32, 8, 8>();
+            simdgroup_elem_store(c_f10, 0, 0.0f32);
+            simdgroup_elem_store(c_f10, 1, 0.0f32);
+            let c_f11 = simdgroup_alloc::<f32, 8, 8>();
+            simdgroup_elem_store(c_f11, 0, 0.0f32);
+            simdgroup_elem_store(c_f11, 1, 0.0f32);
+            let a_f0 = simdgroup_alloc::<T, 8, 8>();
+            let a_f1 = simdgroup_alloc::<T, 8, 8>();
+            let b_f0 = simdgroup_alloc::<T, 8, 8>();
+            let b_f1 = simdgroup_alloc::<T, 8, 8>();
+            let khw = kh * kw;
+            let kdhw = kd * khw;
+            let total_k = in_ch * kdhw;
+            let out_hw = out_h * out_w;
+            let out_dhw = out_d * out_hw;
+            let a_pv_row = lane_in_tg / 4u32;
+            let a_k_quad = lane_in_tg & 3u32;
+            let a_k_base = a_k_quad * 8u32;
+            let global_pv = pv_tile * 32u32 + a_pv_row;
+            let n_pv = global_pv / out_dhw;
+            let rem_pv = global_pv - n_pv * out_dhw;
+            let od_pv = rem_pv / out_hw;
+            let rem_hw = rem_pv - od_pv * out_hw;
+            let oh_pv = rem_hw / out_w;
+            let ow_pv = rem_hw - oh_pv * out_w;
+            let in_plane = in_h * in_w;
+            let in_vol = in_d * in_plane;
+            let in_n_stride = in_ch * in_vol;
+            let pv_in_base = n_pv * in_n_stride;
+            let b_oc_row = lane_in_tg / 4u32;
+            let b_k_quad = lane_in_tg & 3u32;
+            let b_k_base = b_k_quad * 8u32;
+            let global_oc = oc_tile * 32u32 + b_oc_row;
+            let n_blocks_per_row = total_k / block_size;
+            // Global element index of this lane's filter row start: element
+            // (oc, kt) lives at bit (oc·total_k + kt)·BITS in the flat stream.
+            let w_oc_elem_base = global_oc * total_k;
+            let w_oc_blk_base = global_oc * n_blocks_per_row;
+            for kb in range(0u32, total_k, 32u32) {
+                for i in range(0u32, 8u32, 1u32) {
+                    let kt = kb + a_k_base + i;
+                    let in_bounds = kt < total_k;
+                    let kt_safe = select(in_bounds, kt, 0u32);
+                    let ic = kt_safe / kdhw;
+                    let rem_kt = kt_safe - ic * kdhw;
+                    let kz = rem_kt / khw;
+                    let rem_kh = rem_kt - kz * khw;
+                    let ky = rem_kh / kw;
+                    let kx = rem_kh - ky * kw;
+                    let id = od_pv + kz;
+                    let ih = oh_pv + ky;
+                    let iw = ow_pv + kx;
+                    let in_idx = pv_in_base + ic * in_vol + id * in_plane + ih * in_w + iw;
+                    let raw = load(input[in_idx]).cast::<f32>();
+                    let val = select(in_bounds, raw, 0.0f32).cast::<T>();
+                    threadgroup_store("as", a_pv_row * stride + a_k_base + i, val);
+                }
+                // ─ 2. Coop B load (symmetric intN: bit-stream code × f32 scale) ──
+                for i in range(0u32, 8u32, 1u32) {
+                    let kt = kb + b_k_base + i;
+                    let in_bounds = kt < total_k;
+                    let kt_safe = select(in_bounds, kt, 0u32);
+                    // Global element index → bit offset in the flat LSB-first stream.
+                    let bit_off = (w_oc_elem_base + kt_safe) * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(weight[word_idx]);
+                    let w1 = load(weight[select(spill > 0u32, word_idx + 1u32, word_idx)]);
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+                    let qf = q.cast::<f32>();
+                    let elem = select(q >= $half, qf - $full, qf); // sign-extend
+                    let g = kt_safe / block_size;
+                    let scale = load(scales[w_oc_blk_base + g]);
+                    let dq = elem * scale;
+                    let val = select(in_bounds, dq, 0.0f32).cast::<T>();
+                    threadgroup_store("bs", b_oc_row * stride + b_k_base + i, val);
+                }
+                threadgroup_barrier();
+                let row_a0 = sm * 16u32 + fm;
+                let row_a1 = sm * 16u32 + 8u32 + fm;
+                let col_b0 = sn * 16u32;
+                let col_b1 = sn * 16u32 + 8u32;
+                // k_inner = 0
+                simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + fn0));
+                simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + fn1));
+                simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + fn0));
+                simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + fn1));
+                simdgroup_barrier_mem_none();
+                simdgroup_elem_store(b_f0, 0, threadgroup_load("bs", (col_b0 + fn0) * stride + fm));
+                simdgroup_elem_store(b_f0, 1, threadgroup_load("bs", (col_b0 + fn1) * stride + fm));
+                simdgroup_elem_store(b_f1, 0, threadgroup_load("bs", (col_b1 + fn0) * stride + fm));
+                simdgroup_elem_store(b_f1, 1, threadgroup_load("bs", (col_b1 + fn1) * stride + fm));
+                simdgroup_barrier_mem_none();
+                simdgroup_matmul(a_f0, b_f0, c_f00);
+                simdgroup_matmul(a_f0, b_f1, c_f01);
+                simdgroup_matmul(a_f1, b_f1, c_f11);
+                simdgroup_matmul(a_f1, b_f0, c_f10);
+                simdgroup_barrier_mem_none();
+                // k_inner = 1
+                simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 8u32 + fn0));
+                simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 8u32 + fn1));
+                simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + 8u32 + fn0));
+                simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + 8u32 + fn1));
+                simdgroup_barrier_mem_none();
+                simdgroup_elem_store(
+                    b_f0,
+                    0,
+                    threadgroup_load("bs", (col_b0 + fn0) * stride + 8u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f0,
+                    1,
+                    threadgroup_load("bs", (col_b0 + fn1) * stride + 8u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    0,
+                    threadgroup_load("bs", (col_b1 + fn0) * stride + 8u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    1,
+                    threadgroup_load("bs", (col_b1 + fn1) * stride + 8u32 + fm),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_matmul(a_f0, b_f0, c_f00);
+                simdgroup_matmul(a_f0, b_f1, c_f01);
+                simdgroup_matmul(a_f1, b_f1, c_f11);
+                simdgroup_matmul(a_f1, b_f0, c_f10);
+                simdgroup_barrier_mem_none();
+                // k_inner = 2
+                simdgroup_elem_store(
+                    a_f0,
+                    0,
+                    threadgroup_load("as", row_a0 * stride + 16u32 + fn0),
+                );
+                simdgroup_elem_store(
+                    a_f0,
+                    1,
+                    threadgroup_load("as", row_a0 * stride + 16u32 + fn1),
+                );
+                simdgroup_elem_store(
+                    a_f1,
+                    0,
+                    threadgroup_load("as", row_a1 * stride + 16u32 + fn0),
+                );
+                simdgroup_elem_store(
+                    a_f1,
+                    1,
+                    threadgroup_load("as", row_a1 * stride + 16u32 + fn1),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_elem_store(
+                    b_f0,
+                    0,
+                    threadgroup_load("bs", (col_b0 + fn0) * stride + 16u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f0,
+                    1,
+                    threadgroup_load("bs", (col_b0 + fn1) * stride + 16u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    0,
+                    threadgroup_load("bs", (col_b1 + fn0) * stride + 16u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    1,
+                    threadgroup_load("bs", (col_b1 + fn1) * stride + 16u32 + fm),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_matmul(a_f0, b_f0, c_f00);
+                simdgroup_matmul(a_f0, b_f1, c_f01);
+                simdgroup_matmul(a_f1, b_f1, c_f11);
+                simdgroup_matmul(a_f1, b_f0, c_f10);
+                simdgroup_barrier_mem_none();
+                // k_inner = 3
+                simdgroup_elem_store(
+                    a_f0,
+                    0,
+                    threadgroup_load("as", row_a0 * stride + 24u32 + fn0),
+                );
+                simdgroup_elem_store(
+                    a_f0,
+                    1,
+                    threadgroup_load("as", row_a0 * stride + 24u32 + fn1),
+                );
+                simdgroup_elem_store(
+                    a_f1,
+                    0,
+                    threadgroup_load("as", row_a1 * stride + 24u32 + fn0),
+                );
+                simdgroup_elem_store(
+                    a_f1,
+                    1,
+                    threadgroup_load("as", row_a1 * stride + 24u32 + fn1),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_elem_store(
+                    b_f0,
+                    0,
+                    threadgroup_load("bs", (col_b0 + fn0) * stride + 24u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f0,
+                    1,
+                    threadgroup_load("bs", (col_b0 + fn1) * stride + 24u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    0,
+                    threadgroup_load("bs", (col_b1 + fn0) * stride + 24u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    1,
+                    threadgroup_load("bs", (col_b1 + fn1) * stride + 24u32 + fm),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_matmul(a_f0, b_f0, c_f00);
+                simdgroup_matmul(a_f0, b_f1, c_f01);
+                simdgroup_matmul(a_f1, b_f1, c_f11);
+                simdgroup_matmul(a_f1, b_f0, c_f10);
+                simdgroup_barrier_mem_none();
+                threadgroup_barrier();
+            }
+            let out_pv_base = pv_tile * 32u32 + sm * 16u32;
+            let out_oc_base = oc_tile * 32u32 + sn * 16u32;
+            store(
+                out[(out_pv_base + fm) * out_ch + out_oc_base + fn0],
+                simdgroup_elem_load(c_f00, 0).cast::<T>(),
+            );
+            store(
+                out[(out_pv_base + fm) * out_ch + out_oc_base + fn1],
+                simdgroup_elem_load(c_f00, 1).cast::<T>(),
+            );
+            store(
+                out[(out_pv_base + fm) * out_ch + out_oc_base + 8u32 + fn0],
+                simdgroup_elem_load(c_f01, 0).cast::<T>(),
+            );
+            store(
+                out[(out_pv_base + fm) * out_ch + out_oc_base + 8u32 + fn1],
+                simdgroup_elem_load(c_f01, 1).cast::<T>(),
+            );
+            store(
+                out[(out_pv_base + 8u32 + fm) * out_ch + out_oc_base + fn0],
+                simdgroup_elem_load(c_f10, 0).cast::<T>(),
+            );
+            store(
+                out[(out_pv_base + 8u32 + fm) * out_ch + out_oc_base + fn1],
+                simdgroup_elem_load(c_f10, 1).cast::<T>(),
+            );
+            store(
+                out[(out_pv_base + 8u32 + fm) * out_ch + out_oc_base + 8u32 + fn0],
+                simdgroup_elem_load(c_f11, 0).cast::<T>(),
+            );
+            store(
+                out[(out_pv_base + 8u32 + fm) * out_ch + out_oc_base + 8u32 + fn1],
+                simdgroup_elem_load(c_f11, 1).cast::<T>(),
+            );
+        }
+    };
+}
+int_conv3d_mma_f32!(mt_int2_conv3d_mma, 2u32, 2u32, 4.0f32);
+int_conv3d_mma_f32!(mt_int3_conv3d_mma, 3u32, 4u32, 8.0f32);
+int_conv3d_mma_f32!(mt_int4_conv3d_mma, 4u32, 8u32, 16.0f32);
+int_conv3d_mma_f32!(mt_int5_conv3d_mma, 5u32, 16u32, 32.0f32);
+int_conv3d_mma_f32!(mt_int6_conv3d_mma, 6u32, 32u32, 64.0f32);
+
+/// E8M0-scaled symmetric int MMA conv3d (MXINT2/3/4/5/6): per-tap bit-stream
+/// code × pow-2 (E8M0) block scale `2^(bits-127)`, fed to the simdgroup-matrix
+/// matmul over the implicit im2col. Same straddle-aware global-bit-offset decode
+/// and dispatch geometry as `int_conv3d_mma_f32`; only the scale axis differs
+/// (one u8 exponent per block). Stride=1, dilation=1, pad=0. Grid
+/// `[out_ch/32, (batch·out_d·out_h·out_w)/32, 1]`, tpg = 128.
+macro_rules! int_conv3d_mma_e8m0 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        #[allow(clippy::too_many_arguments)]
+        pub fn $name<T>(
+            input: Tensor<T>,
+            weight: Tensor<u32>,
+            scales: Tensor<u8>,
+            out: Tensor<T>,
+            #[constexpr] in_ch: u32,
+            #[constexpr] in_d: u32,
+            #[constexpr] in_h: u32,
+            #[constexpr] in_w: u32,
+            #[constexpr] out_ch: u32,
+            #[constexpr] out_d: u32,
+            #[constexpr] out_h: u32,
+            #[constexpr] out_w: u32,
+            #[constexpr] kd: u32,
+            #[constexpr] kh: u32,
+            #[constexpr] kw: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let oc_tile = tgid_x;
+            let pv_tile = tgid_y;
+            let lane = simd_lane;
+            let sg = simd_group_id();
+            let sm = sg / 2u32;
+            let sn = sg & 1u32;
+            let lane_in_tg = sg * 32u32 + lane;
+            let qid = lane / 4u32;
+            let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
+            let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
+            let fn1 = fn0 + 1u32;
+            let stride = 36u32;
+            threadgroup_alloc("as", 1152, T);
+            threadgroup_alloc("bs", 1152, T);
+            let c_f00 = simdgroup_alloc::<f32, 8, 8>();
+            simdgroup_elem_store(c_f00, 0, 0.0f32);
+            simdgroup_elem_store(c_f00, 1, 0.0f32);
+            let c_f01 = simdgroup_alloc::<f32, 8, 8>();
+            simdgroup_elem_store(c_f01, 0, 0.0f32);
+            simdgroup_elem_store(c_f01, 1, 0.0f32);
+            let c_f10 = simdgroup_alloc::<f32, 8, 8>();
+            simdgroup_elem_store(c_f10, 0, 0.0f32);
+            simdgroup_elem_store(c_f10, 1, 0.0f32);
+            let c_f11 = simdgroup_alloc::<f32, 8, 8>();
+            simdgroup_elem_store(c_f11, 0, 0.0f32);
+            simdgroup_elem_store(c_f11, 1, 0.0f32);
+            let a_f0 = simdgroup_alloc::<T, 8, 8>();
+            let a_f1 = simdgroup_alloc::<T, 8, 8>();
+            let b_f0 = simdgroup_alloc::<T, 8, 8>();
+            let b_f1 = simdgroup_alloc::<T, 8, 8>();
+            let khw = kh * kw;
+            let kdhw = kd * khw;
+            let total_k = in_ch * kdhw;
+            let out_hw = out_h * out_w;
+            let out_dhw = out_d * out_hw;
+            let a_pv_row = lane_in_tg / 4u32;
+            let a_k_quad = lane_in_tg & 3u32;
+            let a_k_base = a_k_quad * 8u32;
+            let global_pv = pv_tile * 32u32 + a_pv_row;
+            let n_pv = global_pv / out_dhw;
+            let rem_pv = global_pv - n_pv * out_dhw;
+            let od_pv = rem_pv / out_hw;
+            let rem_hw = rem_pv - od_pv * out_hw;
+            let oh_pv = rem_hw / out_w;
+            let ow_pv = rem_hw - oh_pv * out_w;
+            let in_plane = in_h * in_w;
+            let in_vol = in_d * in_plane;
+            let in_n_stride = in_ch * in_vol;
+            let pv_in_base = n_pv * in_n_stride;
+            let b_oc_row = lane_in_tg / 4u32;
+            let b_k_quad = lane_in_tg & 3u32;
+            let b_k_base = b_k_quad * 8u32;
+            let global_oc = oc_tile * 32u32 + b_oc_row;
+            let n_blocks_per_row = total_k / block_size;
+            // Global element index of this lane's filter row start: element
+            // (oc, kt) lives at bit (oc·total_k + kt)·BITS in the flat stream.
+            let w_oc_elem_base = global_oc * total_k;
+            let w_oc_blk_base = global_oc * n_blocks_per_row;
+            for kb in range(0u32, total_k, 32u32) {
+                for i in range(0u32, 8u32, 1u32) {
+                    let kt = kb + a_k_base + i;
+                    let in_bounds = kt < total_k;
+                    let kt_safe = select(in_bounds, kt, 0u32);
+                    let ic = kt_safe / kdhw;
+                    let rem_kt = kt_safe - ic * kdhw;
+                    let kz = rem_kt / khw;
+                    let rem_kh = rem_kt - kz * khw;
+                    let ky = rem_kh / kw;
+                    let kx = rem_kh - ky * kw;
+                    let id = od_pv + kz;
+                    let ih = oh_pv + ky;
+                    let iw = ow_pv + kx;
+                    let in_idx = pv_in_base + ic * in_vol + id * in_plane + ih * in_w + iw;
+                    let raw = load(input[in_idx]).cast::<f32>();
+                    let val = select(in_bounds, raw, 0.0f32).cast::<T>();
+                    threadgroup_store("as", a_pv_row * stride + a_k_base + i, val);
+                }
+                // ─ 2. Coop B load (symmetric MXINT: bit-stream code × E8M0 scale) ─
+                for i in range(0u32, 8u32, 1u32) {
+                    let kt = kb + b_k_base + i;
+                    let in_bounds = kt < total_k;
+                    let kt_safe = select(in_bounds, kt, 0u32);
+                    // Global element index → bit offset in the flat LSB-first stream.
+                    let bit_off = (w_oc_elem_base + kt_safe) * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(weight[word_idx]);
+                    let w1 = load(weight[select(spill > 0u32, word_idx + 1u32, word_idx)]);
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+                    let qf = q.cast::<f32>();
+                    let elem = select(q >= $half, qf - $full, qf); // sign-extend
+                    let g = kt_safe / block_size;
+                    let sbits = load(scales[w_oc_blk_base + g]).cast::<f32>();
+                    let scale = exp2(sbits - 127.0f32); // E8M0: 2^(bits-127)
+                    let dq = elem * scale;
+                    let val = select(in_bounds, dq, 0.0f32).cast::<T>();
+                    threadgroup_store("bs", b_oc_row * stride + b_k_base + i, val);
+                }
+                threadgroup_barrier();
+                let row_a0 = sm * 16u32 + fm;
+                let row_a1 = sm * 16u32 + 8u32 + fm;
+                let col_b0 = sn * 16u32;
+                let col_b1 = sn * 16u32 + 8u32;
+                // k_inner = 0
+                simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + fn0));
+                simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + fn1));
+                simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + fn0));
+                simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + fn1));
+                simdgroup_barrier_mem_none();
+                simdgroup_elem_store(b_f0, 0, threadgroup_load("bs", (col_b0 + fn0) * stride + fm));
+                simdgroup_elem_store(b_f0, 1, threadgroup_load("bs", (col_b0 + fn1) * stride + fm));
+                simdgroup_elem_store(b_f1, 0, threadgroup_load("bs", (col_b1 + fn0) * stride + fm));
+                simdgroup_elem_store(b_f1, 1, threadgroup_load("bs", (col_b1 + fn1) * stride + fm));
+                simdgroup_barrier_mem_none();
+                simdgroup_matmul(a_f0, b_f0, c_f00);
+                simdgroup_matmul(a_f0, b_f1, c_f01);
+                simdgroup_matmul(a_f1, b_f1, c_f11);
+                simdgroup_matmul(a_f1, b_f0, c_f10);
+                simdgroup_barrier_mem_none();
+                // k_inner = 1
+                simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 8u32 + fn0));
+                simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 8u32 + fn1));
+                simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + 8u32 + fn0));
+                simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + 8u32 + fn1));
+                simdgroup_barrier_mem_none();
+                simdgroup_elem_store(
+                    b_f0,
+                    0,
+                    threadgroup_load("bs", (col_b0 + fn0) * stride + 8u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f0,
+                    1,
+                    threadgroup_load("bs", (col_b0 + fn1) * stride + 8u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    0,
+                    threadgroup_load("bs", (col_b1 + fn0) * stride + 8u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    1,
+                    threadgroup_load("bs", (col_b1 + fn1) * stride + 8u32 + fm),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_matmul(a_f0, b_f0, c_f00);
+                simdgroup_matmul(a_f0, b_f1, c_f01);
+                simdgroup_matmul(a_f1, b_f1, c_f11);
+                simdgroup_matmul(a_f1, b_f0, c_f10);
+                simdgroup_barrier_mem_none();
+                // k_inner = 2
+                simdgroup_elem_store(
+                    a_f0,
+                    0,
+                    threadgroup_load("as", row_a0 * stride + 16u32 + fn0),
+                );
+                simdgroup_elem_store(
+                    a_f0,
+                    1,
+                    threadgroup_load("as", row_a0 * stride + 16u32 + fn1),
+                );
+                simdgroup_elem_store(
+                    a_f1,
+                    0,
+                    threadgroup_load("as", row_a1 * stride + 16u32 + fn0),
+                );
+                simdgroup_elem_store(
+                    a_f1,
+                    1,
+                    threadgroup_load("as", row_a1 * stride + 16u32 + fn1),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_elem_store(
+                    b_f0,
+                    0,
+                    threadgroup_load("bs", (col_b0 + fn0) * stride + 16u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f0,
+                    1,
+                    threadgroup_load("bs", (col_b0 + fn1) * stride + 16u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    0,
+                    threadgroup_load("bs", (col_b1 + fn0) * stride + 16u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    1,
+                    threadgroup_load("bs", (col_b1 + fn1) * stride + 16u32 + fm),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_matmul(a_f0, b_f0, c_f00);
+                simdgroup_matmul(a_f0, b_f1, c_f01);
+                simdgroup_matmul(a_f1, b_f1, c_f11);
+                simdgroup_matmul(a_f1, b_f0, c_f10);
+                simdgroup_barrier_mem_none();
+                // k_inner = 3
+                simdgroup_elem_store(
+                    a_f0,
+                    0,
+                    threadgroup_load("as", row_a0 * stride + 24u32 + fn0),
+                );
+                simdgroup_elem_store(
+                    a_f0,
+                    1,
+                    threadgroup_load("as", row_a0 * stride + 24u32 + fn1),
+                );
+                simdgroup_elem_store(
+                    a_f1,
+                    0,
+                    threadgroup_load("as", row_a1 * stride + 24u32 + fn0),
+                );
+                simdgroup_elem_store(
+                    a_f1,
+                    1,
+                    threadgroup_load("as", row_a1 * stride + 24u32 + fn1),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_elem_store(
+                    b_f0,
+                    0,
+                    threadgroup_load("bs", (col_b0 + fn0) * stride + 24u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f0,
+                    1,
+                    threadgroup_load("bs", (col_b0 + fn1) * stride + 24u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    0,
+                    threadgroup_load("bs", (col_b1 + fn0) * stride + 24u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    1,
+                    threadgroup_load("bs", (col_b1 + fn1) * stride + 24u32 + fm),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_matmul(a_f0, b_f0, c_f00);
+                simdgroup_matmul(a_f0, b_f1, c_f01);
+                simdgroup_matmul(a_f1, b_f1, c_f11);
+                simdgroup_matmul(a_f1, b_f0, c_f10);
+                simdgroup_barrier_mem_none();
+                threadgroup_barrier();
+            }
+            let out_pv_base = pv_tile * 32u32 + sm * 16u32;
+            let out_oc_base = oc_tile * 32u32 + sn * 16u32;
+            store(
+                out[(out_pv_base + fm) * out_ch + out_oc_base + fn0],
+                simdgroup_elem_load(c_f00, 0).cast::<T>(),
+            );
+            store(
+                out[(out_pv_base + fm) * out_ch + out_oc_base + fn1],
+                simdgroup_elem_load(c_f00, 1).cast::<T>(),
+            );
+            store(
+                out[(out_pv_base + fm) * out_ch + out_oc_base + 8u32 + fn0],
+                simdgroup_elem_load(c_f01, 0).cast::<T>(),
+            );
+            store(
+                out[(out_pv_base + fm) * out_ch + out_oc_base + 8u32 + fn1],
+                simdgroup_elem_load(c_f01, 1).cast::<T>(),
+            );
+            store(
+                out[(out_pv_base + 8u32 + fm) * out_ch + out_oc_base + fn0],
+                simdgroup_elem_load(c_f10, 0).cast::<T>(),
+            );
+            store(
+                out[(out_pv_base + 8u32 + fm) * out_ch + out_oc_base + fn1],
+                simdgroup_elem_load(c_f10, 1).cast::<T>(),
+            );
+            store(
+                out[(out_pv_base + 8u32 + fm) * out_ch + out_oc_base + 8u32 + fn0],
+                simdgroup_elem_load(c_f11, 0).cast::<T>(),
+            );
+            store(
+                out[(out_pv_base + 8u32 + fm) * out_ch + out_oc_base + 8u32 + fn1],
+                simdgroup_elem_load(c_f11, 1).cast::<T>(),
+            );
+        }
+    };
+}
+int_conv3d_mma_e8m0!(mt_mxint2_conv3d_mma, 2u32, 2u32, 4.0f32);
+int_conv3d_mma_e8m0!(mt_mxint3_conv3d_mma, 3u32, 4u32, 8.0f32);
+int_conv3d_mma_e8m0!(mt_mxint4_conv3d_mma, 4u32, 8u32, 16.0f32);
+int_conv3d_mma_e8m0!(mt_mxint5_conv3d_mma, 5u32, 16u32, 32.0f32);
+int_conv3d_mma_e8m0!(mt_mxint6_conv3d_mma, 6u32, 32u32, 64.0f32);
+
+/// MXINT8 quantized-weight cooperative conv3d — 8-bit symmetric codes (byte
+/// layout, block 32), E8M0 pow-2 block scale `2^(bits-127)`. Identical geometry
+/// and B-load mapping to `mt_int8_conv3d_mma` (one byte per filter tap); only the
+/// scale axis is E8M0 instead of a raw FP32. Stride=1, dilation=1, pad=0.
+///
+/// Grid `[out_ch/32, (batch·out_d·out_h·out_w)/32, 1]`, tpg = 128.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_mxint8_conv3d_mma<T>(
+    input: Tensor<T>,
+    weight: Tensor<u8>,
+    scales: Tensor<u8>,
+    out: Tensor<T>,
+    #[constexpr] in_ch: u32,
+    #[constexpr] in_d: u32,
+    #[constexpr] in_h: u32,
+    #[constexpr] in_w: u32,
+    #[constexpr] out_ch: u32,
+    #[constexpr] out_d: u32,
+    #[constexpr] out_h: u32,
+    #[constexpr] out_w: u32,
+    #[constexpr] kd: u32,
+    #[constexpr] kh: u32,
+    #[constexpr] kw: u32,
+    #[constexpr] block_size: u32,
+) {
+    let oc_tile = tgid_x;
+    let pv_tile = tgid_y;
+    let lane = simd_lane;
+    let sg = simd_group_id();
+    let sm = sg / 2u32;
+    let sn = sg & 1u32;
+    let lane_in_tg = sg * 32u32 + lane;
+    let qid = lane / 4u32;
+    let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
+    let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
+    let fn1 = fn0 + 1u32;
+    let stride = 36u32;
+    threadgroup_alloc("as", 1152, T);
+    threadgroup_alloc("bs", 1152, T);
+    let c_f00 = simdgroup_alloc::<f32, 8, 8>();
+    simdgroup_elem_store(c_f00, 0, 0.0f32);
+    simdgroup_elem_store(c_f00, 1, 0.0f32);
+    let c_f01 = simdgroup_alloc::<f32, 8, 8>();
+    simdgroup_elem_store(c_f01, 0, 0.0f32);
+    simdgroup_elem_store(c_f01, 1, 0.0f32);
+    let c_f10 = simdgroup_alloc::<f32, 8, 8>();
+    simdgroup_elem_store(c_f10, 0, 0.0f32);
+    simdgroup_elem_store(c_f10, 1, 0.0f32);
+    let c_f11 = simdgroup_alloc::<f32, 8, 8>();
+    simdgroup_elem_store(c_f11, 0, 0.0f32);
+    simdgroup_elem_store(c_f11, 1, 0.0f32);
+    let a_f0 = simdgroup_alloc::<T, 8, 8>();
+    let a_f1 = simdgroup_alloc::<T, 8, 8>();
+    let b_f0 = simdgroup_alloc::<T, 8, 8>();
+    let b_f1 = simdgroup_alloc::<T, 8, 8>();
+    let khw = kh * kw;
+    let kdhw = kd * khw;
+    let total_k = in_ch * kdhw;
+    let out_hw = out_h * out_w;
+    let out_dhw = out_d * out_hw;
+    let a_pv_row = lane_in_tg / 4u32;
+    let a_k_quad = lane_in_tg & 3u32;
+    let a_k_base = a_k_quad * 8u32;
+    let global_pv = pv_tile * 32u32 + a_pv_row;
+    let n_pv = global_pv / out_dhw;
+    let rem_pv = global_pv - n_pv * out_dhw;
+    let od_pv = rem_pv / out_hw;
+    let rem_hw = rem_pv - od_pv * out_hw;
+    let oh_pv = rem_hw / out_w;
+    let ow_pv = rem_hw - oh_pv * out_w;
+    let in_plane = in_h * in_w;
+    let in_vol = in_d * in_plane;
+    let in_n_stride = in_ch * in_vol;
+    let pv_in_base = n_pv * in_n_stride;
+    let b_oc_row = lane_in_tg / 4u32;
+    let b_k_quad = lane_in_tg & 3u32;
+    let b_k_base = b_k_quad * 8u32;
+    let global_oc = oc_tile * 32u32 + b_oc_row;
+    let n_blocks_per_row = total_k / block_size;
+    // 8-bit codes are one byte each: filter byte = oc*total_k + kt.
+    let w_oc_byte_base = global_oc * total_k;
+    let w_oc_blk_base = global_oc * n_blocks_per_row;
+    for kb in range(0u32, total_k, 32u32) {
+        for i in range(0u32, 8u32, 1u32) {
+            let kt = kb + a_k_base + i;
+            let in_bounds = kt < total_k;
+            let kt_safe = select(in_bounds, kt, 0u32);
+            let ic = kt_safe / kdhw;
+            let rem_kt = kt_safe - ic * kdhw;
+            let kz = rem_kt / khw;
+            let rem_kh = rem_kt - kz * khw;
+            let ky = rem_kh / kw;
+            let kx = rem_kh - ky * kw;
+            let id = od_pv + kz;
+            let ih = oh_pv + ky;
+            let iw = ow_pv + kx;
+            let in_idx = pv_in_base + ic * in_vol + id * in_plane + ih * in_w + iw;
+            let raw = load(input[in_idx]).cast::<f32>();
+            let val = select(in_bounds, raw, 0.0f32).cast::<T>();
+            threadgroup_store("as", a_pv_row * stride + a_k_base + i, val);
+        }
+        // ─ 2. Coop B load (symmetric mxint8: 8-bit byte × E8M0 pow-2 scale) ──
+        for i in range(0u32, 8u32, 1u32) {
+            let kt = kb + b_k_base + i;
+            let in_bounds = kt < total_k;
+            let kt_safe = select(in_bounds, kt, 0u32);
+            let elem = int8_decode(load(weight[w_oc_byte_base + kt_safe]).cast::<u32>());
+            let g = kt_safe / block_size;
+            let sbits = load(scales[w_oc_blk_base + g]).cast::<f32>();
+            let scale = exp2(sbits - 127.0f32);
+            let dq = elem * scale;
+            let val = select(in_bounds, dq, 0.0f32).cast::<T>();
+            threadgroup_store("bs", b_oc_row * stride + b_k_base + i, val);
+        }
+        threadgroup_barrier();
+        let row_a0 = sm * 16u32 + fm;
+        let row_a1 = sm * 16u32 + 8u32 + fm;
+        let col_b0 = sn * 16u32;
+        let col_b1 = sn * 16u32 + 8u32;
+        // k_inner = 0
+        simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + fn0));
+        simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + fn1));
+        simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + fn0));
+        simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + fn1));
+        simdgroup_barrier_mem_none();
+        simdgroup_elem_store(b_f0, 0, threadgroup_load("bs", (col_b0 + fn0) * stride + fm));
+        simdgroup_elem_store(b_f0, 1, threadgroup_load("bs", (col_b0 + fn1) * stride + fm));
+        simdgroup_elem_store(b_f1, 0, threadgroup_load("bs", (col_b1 + fn0) * stride + fm));
+        simdgroup_elem_store(b_f1, 1, threadgroup_load("bs", (col_b1 + fn1) * stride + fm));
+        simdgroup_barrier_mem_none();
+        simdgroup_matmul(a_f0, b_f0, c_f00);
+        simdgroup_matmul(a_f0, b_f1, c_f01);
+        simdgroup_matmul(a_f1, b_f1, c_f11);
+        simdgroup_matmul(a_f1, b_f0, c_f10);
+        simdgroup_barrier_mem_none();
+        // k_inner = 1
+        simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 8u32 + fn0));
+        simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 8u32 + fn1));
+        simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + 8u32 + fn0));
+        simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + 8u32 + fn1));
+        simdgroup_barrier_mem_none();
+        simdgroup_elem_store(b_f0, 0, threadgroup_load("bs", (col_b0 + fn0) * stride + 8u32 + fm));
+        simdgroup_elem_store(b_f0, 1, threadgroup_load("bs", (col_b0 + fn1) * stride + 8u32 + fm));
+        simdgroup_elem_store(b_f1, 0, threadgroup_load("bs", (col_b1 + fn0) * stride + 8u32 + fm));
+        simdgroup_elem_store(b_f1, 1, threadgroup_load("bs", (col_b1 + fn1) * stride + 8u32 + fm));
+        simdgroup_barrier_mem_none();
+        simdgroup_matmul(a_f0, b_f0, c_f00);
+        simdgroup_matmul(a_f0, b_f1, c_f01);
+        simdgroup_matmul(a_f1, b_f1, c_f11);
+        simdgroup_matmul(a_f1, b_f0, c_f10);
+        simdgroup_barrier_mem_none();
+        // k_inner = 2
+        simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 16u32 + fn0));
+        simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 16u32 + fn1));
+        simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + 16u32 + fn0));
+        simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + 16u32 + fn1));
+        simdgroup_barrier_mem_none();
+        simdgroup_elem_store(b_f0, 0, threadgroup_load("bs", (col_b0 + fn0) * stride + 16u32 + fm));
+        simdgroup_elem_store(b_f0, 1, threadgroup_load("bs", (col_b0 + fn1) * stride + 16u32 + fm));
+        simdgroup_elem_store(b_f1, 0, threadgroup_load("bs", (col_b1 + fn0) * stride + 16u32 + fm));
+        simdgroup_elem_store(b_f1, 1, threadgroup_load("bs", (col_b1 + fn1) * stride + 16u32 + fm));
+        simdgroup_barrier_mem_none();
+        simdgroup_matmul(a_f0, b_f0, c_f00);
+        simdgroup_matmul(a_f0, b_f1, c_f01);
+        simdgroup_matmul(a_f1, b_f1, c_f11);
+        simdgroup_matmul(a_f1, b_f0, c_f10);
+        simdgroup_barrier_mem_none();
+        // k_inner = 3
+        simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 24u32 + fn0));
+        simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 24u32 + fn1));
+        simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + 24u32 + fn0));
+        simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + 24u32 + fn1));
+        simdgroup_barrier_mem_none();
+        simdgroup_elem_store(b_f0, 0, threadgroup_load("bs", (col_b0 + fn0) * stride + 24u32 + fm));
+        simdgroup_elem_store(b_f0, 1, threadgroup_load("bs", (col_b0 + fn1) * stride + 24u32 + fm));
+        simdgroup_elem_store(b_f1, 0, threadgroup_load("bs", (col_b1 + fn0) * stride + 24u32 + fm));
+        simdgroup_elem_store(b_f1, 1, threadgroup_load("bs", (col_b1 + fn1) * stride + 24u32 + fm));
+        simdgroup_barrier_mem_none();
+        simdgroup_matmul(a_f0, b_f0, c_f00);
+        simdgroup_matmul(a_f0, b_f1, c_f01);
+        simdgroup_matmul(a_f1, b_f1, c_f11);
+        simdgroup_matmul(a_f1, b_f0, c_f10);
+        simdgroup_barrier_mem_none();
+        threadgroup_barrier();
+    }
+    let out_pv_base = pv_tile * 32u32 + sm * 16u32;
+    let out_oc_base = oc_tile * 32u32 + sn * 16u32;
+    store(
+        out[(out_pv_base + fm) * out_ch + out_oc_base + fn0],
+        simdgroup_elem_load(c_f00, 0).cast::<T>(),
+    );
+    store(
+        out[(out_pv_base + fm) * out_ch + out_oc_base + fn1],
+        simdgroup_elem_load(c_f00, 1).cast::<T>(),
+    );
+    store(
+        out[(out_pv_base + fm) * out_ch + out_oc_base + 8u32 + fn0],
+        simdgroup_elem_load(c_f01, 0).cast::<T>(),
+    );
+    store(
+        out[(out_pv_base + fm) * out_ch + out_oc_base + 8u32 + fn1],
+        simdgroup_elem_load(c_f01, 1).cast::<T>(),
+    );
+    store(
+        out[(out_pv_base + 8u32 + fm) * out_ch + out_oc_base + fn0],
+        simdgroup_elem_load(c_f10, 0).cast::<T>(),
+    );
+    store(
+        out[(out_pv_base + 8u32 + fm) * out_ch + out_oc_base + fn1],
+        simdgroup_elem_load(c_f10, 1).cast::<T>(),
+    );
+    store(
+        out[(out_pv_base + 8u32 + fm) * out_ch + out_oc_base + 8u32 + fn0],
+        simdgroup_elem_load(c_f11, 0).cast::<T>(),
+    );
+    store(
+        out[(out_pv_base + 8u32 + fm) * out_ch + out_oc_base + 8u32 + fn1],
+        simdgroup_elem_load(c_f11, 1).cast::<T>(),
+    );
+}
+
 pub mod kernel_tests {
     use metaltile::{core::ir::Kernel, test::*, test_kernel};
 
@@ -1935,13 +2824,11 @@ pub mod kernel_tests {
         // Oracle: dense conv3d_mma over the dequantized filter row [out_ch, C].
         let expected =
             naive_conv3d_mma(&input, &wdq, batch, in_ch, in_d, in_h, in_w, out_ch, kd, kh, kw);
-        // 4-bit weights bind as packed u32; 8-bit as one uchar each. nvfp8/fp4/
-        // fp8/int8 scales are raw f32; mx*/nvfp4 scales are one byte.
-        let weight_dt = if fmt.element_bits() == 4 { DType::U32 } else { DType::U8 };
-        let scales_dt = if matches!(
-            fmt,
-            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
-        ) {
+        // 8-bit codes bind as one uchar each; sub-byte codes pack into a u32
+        // bit-stream. F32-scaled formats bind raw f32 scales; E8M0/E4M3 are
+        // one byte. Axis-driven so every int/mxint width routes correctly.
+        let weight_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
+        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
             DType::F32
         } else {
             DType::U8
@@ -2131,6 +3018,196 @@ pub mod kernel_tests {
             dt,
         )
     }
+    // ── Symmetric sub-byte int (FP32 scale, group 64) + MXINT (E8M0, block 32) ──
+    // Same conv shape as int8: in_ch=8, 2×2×2 kernel → C = 64 (a multiple of 32,
+    // so each filter row's bit-stream is word-aligned for every width).
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int2_conv3d_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_int2_conv3d_mma::kernel_ir_for(dt),
+            QFormat::Int2,
+            1,
+            8,
+            5,
+            5,
+            5,
+            32,
+            2,
+            2,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int3_conv3d_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_int3_conv3d_mma::kernel_ir_for(dt),
+            QFormat::Int3,
+            1,
+            8,
+            5,
+            5,
+            5,
+            32,
+            2,
+            2,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int4_conv3d_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_int4_conv3d_mma::kernel_ir_for(dt),
+            QFormat::Int4,
+            1,
+            8,
+            5,
+            5,
+            5,
+            32,
+            2,
+            2,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int5_conv3d_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_int5_conv3d_mma::kernel_ir_for(dt),
+            QFormat::Int5,
+            1,
+            8,
+            5,
+            5,
+            5,
+            32,
+            2,
+            2,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int6_conv3d_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_int6_conv3d_mma::kernel_ir_for(dt),
+            QFormat::Int6,
+            1,
+            8,
+            5,
+            5,
+            5,
+            32,
+            2,
+            2,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint2_conv3d_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_mxint2_conv3d_mma::kernel_ir_for(dt),
+            QFormat::Mxint2,
+            1,
+            8,
+            5,
+            5,
+            5,
+            32,
+            2,
+            2,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint3_conv3d_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_mxint3_conv3d_mma::kernel_ir_for(dt),
+            QFormat::Mxint3,
+            1,
+            8,
+            5,
+            5,
+            5,
+            32,
+            2,
+            2,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint4_conv3d_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_mxint4_conv3d_mma::kernel_ir_for(dt),
+            QFormat::Mxint4,
+            1,
+            8,
+            5,
+            5,
+            5,
+            32,
+            2,
+            2,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint5_conv3d_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_mxint5_conv3d_mma::kernel_ir_for(dt),
+            QFormat::Mxint5,
+            1,
+            8,
+            5,
+            5,
+            5,
+            32,
+            2,
+            2,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint6_conv3d_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_mxint6_conv3d_mma::kernel_ir_for(dt),
+            QFormat::Mxint6,
+            1,
+            8,
+            5,
+            5,
+            5,
+            32,
+            2,
+            2,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint8_conv3d_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_mxint8_conv3d_mma::kernel_ir_for(dt),
+            QFormat::Mxint8,
+            1,
+            8,
+            5,
+            5,
+            5,
+            32,
+            2,
+            2,
+            2,
+            dt,
+        )
+    }
 }
 
 /// Decode-shape benches: a realistic conv (in_ch=64, out_ch=256, 2×2×2 kernel →
@@ -2163,15 +3240,16 @@ pub mod kernel_benches {
         let n_voxels = batch * out_d * out_h * out_w;
         let n_out = n_voxels * out_ch;
         let contraction = in_ch * kd * kh * kw;
-        let (codes_len, codes_dt) = if fmt.element_bits() == 4 {
-            (out_ch * contraction / 8, DType::U32)
+        // 8-bit codes are one byte each; sub-byte codes pack into a tight u32
+        // bit-stream of `bitstream_words(total_elems, bits)` words. Axis-driven
+        // so every int/mxint width sizes its code buffer correctly.
+        let total_elems = out_ch * contraction;
+        let (codes_len, codes_dt) = if fmt.element_bits() == 8 {
+            (total_elems, DType::U8)
         } else {
-            (out_ch * contraction, DType::U8)
+            (crate::quant::format::bitstream_words(total_elems, fmt.element_bits()), DType::U32)
         };
-        let scales_dt = if matches!(
-            fmt,
-            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
-        ) {
+        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
             DType::F32
         } else {
             DType::U8
@@ -2270,5 +3348,71 @@ pub mod kernel_benches {
         mt_int8_conv3d_mma::kernel_ir_for,
         QFormat::Int8,
         "ffai/conv3d_mma_block/int8"
+    );
+    conv3d_mma_bench_fmt!(
+        bench_int2,
+        mt_int2_conv3d_mma::kernel_ir_for,
+        QFormat::Int2,
+        "ffai/conv3d_mma_block/int2"
+    );
+    conv3d_mma_bench_fmt!(
+        bench_int3,
+        mt_int3_conv3d_mma::kernel_ir_for,
+        QFormat::Int3,
+        "ffai/conv3d_mma_block/int3"
+    );
+    conv3d_mma_bench_fmt!(
+        bench_int4,
+        mt_int4_conv3d_mma::kernel_ir_for,
+        QFormat::Int4,
+        "ffai/conv3d_mma_block/int4"
+    );
+    conv3d_mma_bench_fmt!(
+        bench_int5,
+        mt_int5_conv3d_mma::kernel_ir_for,
+        QFormat::Int5,
+        "ffai/conv3d_mma_block/int5"
+    );
+    conv3d_mma_bench_fmt!(
+        bench_int6,
+        mt_int6_conv3d_mma::kernel_ir_for,
+        QFormat::Int6,
+        "ffai/conv3d_mma_block/int6"
+    );
+    conv3d_mma_bench_fmt!(
+        bench_mxint2,
+        mt_mxint2_conv3d_mma::kernel_ir_for,
+        QFormat::Mxint2,
+        "ffai/conv3d_mma_block/mxint2"
+    );
+    conv3d_mma_bench_fmt!(
+        bench_mxint3,
+        mt_mxint3_conv3d_mma::kernel_ir_for,
+        QFormat::Mxint3,
+        "ffai/conv3d_mma_block/mxint3"
+    );
+    conv3d_mma_bench_fmt!(
+        bench_mxint4,
+        mt_mxint4_conv3d_mma::kernel_ir_for,
+        QFormat::Mxint4,
+        "ffai/conv3d_mma_block/mxint4"
+    );
+    conv3d_mma_bench_fmt!(
+        bench_mxint5,
+        mt_mxint5_conv3d_mma::kernel_ir_for,
+        QFormat::Mxint5,
+        "ffai/conv3d_mma_block/mxint5"
+    );
+    conv3d_mma_bench_fmt!(
+        bench_mxint6,
+        mt_mxint6_conv3d_mma::kernel_ir_for,
+        QFormat::Mxint6,
+        "ffai/conv3d_mma_block/mxint6"
+    );
+    conv3d_mma_bench_fmt!(
+        bench_mxint8,
+        mt_mxint8_conv3d_mma::kernel_ir_for,
+        QFormat::Mxint8,
+        "ffai/conv3d_mma_block/mxint8"
     );
 }

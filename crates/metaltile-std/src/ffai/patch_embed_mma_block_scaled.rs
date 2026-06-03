@@ -45,8 +45,15 @@
 //!   - 4-bit (E2M1): weight is `[hidden, patch_dim/8]` u32 (8 nibbles/word). The
 //!     nibble for tap `kt` is word `h*(patch_dim/8) + kt/8`, shift `(kt%8)*4`.
 //!
-//!   - 8-bit (E4M3 / E5M2 / int8): weight is `[hidden, patch_dim]` u8 (1
-//!     byte/tap). The byte for tap `kt` is `h*patch_dim + kt`.
+//!   - 8-bit (E4M3 / E5M2 / int8 / MXINT8): weight is `[hidden, patch_dim]` u8
+//!     (1 byte/tap). The byte for tap `kt` is `h*patch_dim + kt`.
+//!
+//!   - sub-byte symmetric int (int2/3/4/5/6 + MXINT2..6): weight is a FLAT
+//!     row-major u32 bit-stream, tight-packed LSB-first by `quant::format::pack`.
+//!     The N-bit two's-complement code for tap `kt` of row `h` lives at GLOBAL
+//!     bit offset `(h*patch_dim + kt)*N`, read straddle-aware across two words
+//!     and float-sign-extended (`code - 2^N` when the top bit is set). `patch_dim`
+//!     is a multiple of 32, so every row's bit-stream is word-aligned.
 //!
 //!   - The block scale for tap `kt` is
 //!     `scales[h*(patch_dim/block_size) + kt/block_size]` (E8M0 `exp2(b-127)`,
@@ -1670,6 +1677,848 @@ pub fn mt_int8_patch_embed_mma<T>(
     );
 }
 
+// ── Symmetric sub-byte integer patch-embed MMA (int2/3/4/5/6 + MXINT2..6) ───
+// The projection-weight element is a signed N-bit two's-complement code,
+// tight-bit-packed LSB-first into a FLAT global u32 bit-stream by
+// `quant::format::pack` (element with global index `idx = h*patch_dim + kt`
+// lives at bit `idx · BITS`). These kernels reuse `mt_int8_patch_embed_mma`'s
+// dispatch geometry, threadgroup-memory layout, 8×8 frag mapping, the implicit
+// patch-unfold A-load, and the MMA inner loop **verbatim** — only the per-tap B
+// *dequant* staging changes. The B-load mirrors the 8-bit lane mapping
+// (`b_k_base = (lane%4)·8`, each lane stages 8 contiguous taps `kb + b_k_base +
+// i`), but instead of reading one byte it decodes each element from the global
+// bit-stream with a straddle-aware two-word read + float sign-extend (subtract
+// 2^N when the top bit is set; `$half`/`$full` are 2^(N-1) / 2^N), mirroring
+// `mlx::block_scaled_mma`'s GPU-verified `int_qmm_mma_*` macros. The in-bounds
+// mask (`select(kt < patch_dim, decoded, 0)`) is preserved; on the masked path
+// `kt_safe = 0` keeps the bit-stream read in range. `$half`/`$full` are passed
+// as literals to keep the constexpr math out of the DSL shift operands.
+
+/// FP32-scaled symmetric int patch-embed MMA (int2/3/4/5/6): per-element
+/// bit-stream code × per-group FP32 scale, fed to the simdgroup-matrix matmul.
+/// The B bit offset is computed from the tap's GLOBAL index
+/// (`(h·patch_dim + kt)·BITS`), matching `quant::format::pack`'s flat LSB-first
+/// stream for any `patch_dim`.
+macro_rules! int_patch_embed_mma_f32 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        #[allow(clippy::too_many_arguments)]
+        pub fn $name<T>(
+            image: Tensor<T>,
+            weight: Tensor<u32>,
+            scales: Tensor<f32>,
+            bias: Tensor<T>,
+            out: Tensor<T>,
+            #[constexpr] in_ch: u32,
+            #[constexpr] in_h: u32,
+            #[constexpr] in_w: u32,
+            #[constexpr] patch_h: u32,
+            #[constexpr] patch_w: u32,
+            #[constexpr] hidden: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let h_tile = tgid_x;
+            let pat_tile = tgid_y;
+            let lane = simd_lane;
+            let sg = simd_group_id();
+            let sm = sg / 2u32;
+            let sn = sg & 1u32;
+            let lane_in_tg = sg * 32u32 + lane;
+            let qid = lane / 4u32;
+            let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
+            let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
+            let fn1 = fn0 + 1u32;
+            let stride = 36u32;
+            threadgroup_alloc("as", 1152, T);
+            threadgroup_alloc("bs", 1152, T);
+            let c_f00 = simdgroup_alloc::<f32, 8, 8>();
+            simdgroup_elem_store(c_f00, 0, 0.0f32);
+            simdgroup_elem_store(c_f00, 1, 0.0f32);
+            let c_f01 = simdgroup_alloc::<f32, 8, 8>();
+            simdgroup_elem_store(c_f01, 0, 0.0f32);
+            simdgroup_elem_store(c_f01, 1, 0.0f32);
+            let c_f10 = simdgroup_alloc::<f32, 8, 8>();
+            simdgroup_elem_store(c_f10, 0, 0.0f32);
+            simdgroup_elem_store(c_f10, 1, 0.0f32);
+            let c_f11 = simdgroup_alloc::<f32, 8, 8>();
+            simdgroup_elem_store(c_f11, 0, 0.0f32);
+            simdgroup_elem_store(c_f11, 1, 0.0f32);
+            let a_f0 = simdgroup_alloc::<T, 8, 8>();
+            let a_f1 = simdgroup_alloc::<T, 8, 8>();
+            let b_f0 = simdgroup_alloc::<T, 8, 8>();
+            let b_f1 = simdgroup_alloc::<T, 8, 8>();
+            let phw = patch_h * patch_w;
+            let patch_dim = in_ch * phw;
+            let patches_w = in_w / patch_w;
+            let input_plane = in_h * in_w;
+            let a_pat_row = lane_in_tg / 4u32;
+            let a_k_quad = lane_in_tg & 3u32;
+            let a_k_base = a_k_quad * 8u32;
+            let global_pat = pat_tile * 32u32 + a_pat_row;
+            let py0 = (global_pat / patches_w) * patch_h;
+            let px0 = (global_pat - (global_pat / patches_w) * patches_w) * patch_w;
+            let b_h_row = lane_in_tg / 4u32;
+            let b_k_quad = lane_in_tg & 3u32;
+            let b_k_base = b_k_quad * 8u32;
+            let global_h = h_tile * 32u32 + b_h_row;
+            let n_blocks = patch_dim / block_size;
+            let sb_base = global_h * n_blocks;
+            // Global element index of this row's first tap (flat bit-stream is
+            // row-major: element (h, kt) at bit (h·patch_dim + kt)·bits).
+            let w_global_row_base = global_h * patch_dim;
+            for kb in range(0u32, patch_dim, 32u32) {
+                // ─ 1. Coop A load (implicit patch unfold gather) — verbatim ─
+                for i in range(0u32, 8u32, 1u32) {
+                    let kt = kb + a_k_base + i;
+                    let in_bounds = kt < patch_dim;
+                    let kt_safe = select(in_bounds, kt, 0u32);
+                    let ic = kt_safe / phw;
+                    let rem_kt = kt_safe - ic * phw;
+                    let py = rem_kt / patch_w;
+                    let px = rem_kt - py * patch_w;
+                    let img_idx = ic * input_plane + (py0 + py) * in_w + (px0 + px);
+                    let raw = load(image[img_idx]).cast::<f32>();
+                    let val = select(in_bounds, raw, 0.0f32).cast::<T>();
+                    threadgroup_store("as", a_pat_row * stride + a_k_base + i, val);
+                }
+                // ─ 2. Coop B load (int bit-stream dequant) — sign-extended code
+                //   × per-group FP32 scale. Same lane→tap mapping as int8. ─
+                for i in range(0u32, 8u32, 1u32) {
+                    let kt = kb + b_k_base + i;
+                    let in_bounds = kt < patch_dim;
+                    let kt_safe = select(in_bounds, kt, 0u32);
+                    // Global element index → bit offset in the flat LSB-first stream.
+                    let bit_off = (w_global_row_base + kt_safe) * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(weight[word_idx]);
+                    let w1 = load(weight[select(spill > 0u32, word_idx + 1u32, word_idx)]);
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+                    let qf = q.cast::<f32>();
+                    let code = select(q >= $half, qf - $full, qf); // sign-extend
+                    let scale = load(scales[sb_base + kt_safe / block_size]);
+                    let decoded = code * scale;
+                    let val = select(in_bounds, decoded, 0.0f32).cast::<T>();
+                    threadgroup_store("bs", b_h_row * stride + b_k_base + i, val);
+                }
+                threadgroup_barrier();
+                // ─ 3. MMA inner loop — copied verbatim from int8 ─
+                let row_a0 = sm * 16u32 + fm;
+                let row_a1 = sm * 16u32 + 8u32 + fm;
+                let col_b0 = sn * 16u32;
+                let col_b1 = sn * 16u32 + 8u32;
+                // k_inner = 0
+                simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + fn0));
+                simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + fn1));
+                simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + fn0));
+                simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + fn1));
+                simdgroup_barrier_mem_none();
+                simdgroup_elem_store(b_f0, 0, threadgroup_load("bs", (col_b0 + fn0) * stride + fm));
+                simdgroup_elem_store(b_f0, 1, threadgroup_load("bs", (col_b0 + fn1) * stride + fm));
+                simdgroup_elem_store(b_f1, 0, threadgroup_load("bs", (col_b1 + fn0) * stride + fm));
+                simdgroup_elem_store(b_f1, 1, threadgroup_load("bs", (col_b1 + fn1) * stride + fm));
+                simdgroup_barrier_mem_none();
+                simdgroup_matmul(a_f0, b_f0, c_f00);
+                simdgroup_matmul(a_f0, b_f1, c_f01);
+                simdgroup_matmul(a_f1, b_f1, c_f11);
+                simdgroup_matmul(a_f1, b_f0, c_f10);
+                simdgroup_barrier_mem_none();
+                // k_inner = 1
+                simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 8u32 + fn0));
+                simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 8u32 + fn1));
+                simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + 8u32 + fn0));
+                simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + 8u32 + fn1));
+                simdgroup_barrier_mem_none();
+                simdgroup_elem_store(
+                    b_f0,
+                    0,
+                    threadgroup_load("bs", (col_b0 + fn0) * stride + 8u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f0,
+                    1,
+                    threadgroup_load("bs", (col_b0 + fn1) * stride + 8u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    0,
+                    threadgroup_load("bs", (col_b1 + fn0) * stride + 8u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    1,
+                    threadgroup_load("bs", (col_b1 + fn1) * stride + 8u32 + fm),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_matmul(a_f0, b_f0, c_f00);
+                simdgroup_matmul(a_f0, b_f1, c_f01);
+                simdgroup_matmul(a_f1, b_f1, c_f11);
+                simdgroup_matmul(a_f1, b_f0, c_f10);
+                simdgroup_barrier_mem_none();
+                // k_inner = 2
+                simdgroup_elem_store(
+                    a_f0,
+                    0,
+                    threadgroup_load("as", row_a0 * stride + 16u32 + fn0),
+                );
+                simdgroup_elem_store(
+                    a_f0,
+                    1,
+                    threadgroup_load("as", row_a0 * stride + 16u32 + fn1),
+                );
+                simdgroup_elem_store(
+                    a_f1,
+                    0,
+                    threadgroup_load("as", row_a1 * stride + 16u32 + fn0),
+                );
+                simdgroup_elem_store(
+                    a_f1,
+                    1,
+                    threadgroup_load("as", row_a1 * stride + 16u32 + fn1),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_elem_store(
+                    b_f0,
+                    0,
+                    threadgroup_load("bs", (col_b0 + fn0) * stride + 16u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f0,
+                    1,
+                    threadgroup_load("bs", (col_b0 + fn1) * stride + 16u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    0,
+                    threadgroup_load("bs", (col_b1 + fn0) * stride + 16u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    1,
+                    threadgroup_load("bs", (col_b1 + fn1) * stride + 16u32 + fm),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_matmul(a_f0, b_f0, c_f00);
+                simdgroup_matmul(a_f0, b_f1, c_f01);
+                simdgroup_matmul(a_f1, b_f1, c_f11);
+                simdgroup_matmul(a_f1, b_f0, c_f10);
+                simdgroup_barrier_mem_none();
+                // k_inner = 3
+                simdgroup_elem_store(
+                    a_f0,
+                    0,
+                    threadgroup_load("as", row_a0 * stride + 24u32 + fn0),
+                );
+                simdgroup_elem_store(
+                    a_f0,
+                    1,
+                    threadgroup_load("as", row_a0 * stride + 24u32 + fn1),
+                );
+                simdgroup_elem_store(
+                    a_f1,
+                    0,
+                    threadgroup_load("as", row_a1 * stride + 24u32 + fn0),
+                );
+                simdgroup_elem_store(
+                    a_f1,
+                    1,
+                    threadgroup_load("as", row_a1 * stride + 24u32 + fn1),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_elem_store(
+                    b_f0,
+                    0,
+                    threadgroup_load("bs", (col_b0 + fn0) * stride + 24u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f0,
+                    1,
+                    threadgroup_load("bs", (col_b0 + fn1) * stride + 24u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    0,
+                    threadgroup_load("bs", (col_b1 + fn0) * stride + 24u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    1,
+                    threadgroup_load("bs", (col_b1 + fn1) * stride + 24u32 + fm),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_matmul(a_f0, b_f0, c_f00);
+                simdgroup_matmul(a_f0, b_f1, c_f01);
+                simdgroup_matmul(a_f1, b_f1, c_f11);
+                simdgroup_matmul(a_f1, b_f0, c_f10);
+                simdgroup_barrier_mem_none();
+                threadgroup_barrier();
+            }
+            // ── 4. Add bias and write 4 C frags to global out — verbatim ──
+            let out_pat_base = pat_tile * 32u32 + sm * 16u32;
+            let out_h_base = h_tile * 32u32 + sn * 16u32;
+            let b00 = load(bias[out_h_base + fn0]).cast::<f32>();
+            let b01 = load(bias[out_h_base + fn1]).cast::<f32>();
+            let b10 = load(bias[out_h_base + 8u32 + fn0]).cast::<f32>();
+            let b11 = load(bias[out_h_base + 8u32 + fn1]).cast::<f32>();
+            store(
+                out[(out_pat_base + fm) * hidden + out_h_base + fn0],
+                (simdgroup_elem_load(c_f00, 0) + b00).cast::<T>(),
+            );
+            store(
+                out[(out_pat_base + fm) * hidden + out_h_base + fn1],
+                (simdgroup_elem_load(c_f00, 1) + b01).cast::<T>(),
+            );
+            store(
+                out[(out_pat_base + fm) * hidden + out_h_base + 8u32 + fn0],
+                (simdgroup_elem_load(c_f01, 0) + b10).cast::<T>(),
+            );
+            store(
+                out[(out_pat_base + fm) * hidden + out_h_base + 8u32 + fn1],
+                (simdgroup_elem_load(c_f01, 1) + b11).cast::<T>(),
+            );
+            store(
+                out[(out_pat_base + 8u32 + fm) * hidden + out_h_base + fn0],
+                (simdgroup_elem_load(c_f10, 0) + b00).cast::<T>(),
+            );
+            store(
+                out[(out_pat_base + 8u32 + fm) * hidden + out_h_base + fn1],
+                (simdgroup_elem_load(c_f10, 1) + b01).cast::<T>(),
+            );
+            store(
+                out[(out_pat_base + 8u32 + fm) * hidden + out_h_base + 8u32 + fn0],
+                (simdgroup_elem_load(c_f11, 0) + b10).cast::<T>(),
+            );
+            store(
+                out[(out_pat_base + 8u32 + fm) * hidden + out_h_base + 8u32 + fn1],
+                (simdgroup_elem_load(c_f11, 1) + b11).cast::<T>(),
+            );
+        }
+    };
+}
+int_patch_embed_mma_f32!(mt_int2_patch_embed_mma, 2u32, 2u32, 4.0f32);
+int_patch_embed_mma_f32!(mt_int3_patch_embed_mma, 3u32, 4u32, 8.0f32);
+int_patch_embed_mma_f32!(mt_int4_patch_embed_mma, 4u32, 8u32, 16.0f32);
+int_patch_embed_mma_f32!(mt_int5_patch_embed_mma, 5u32, 16u32, 32.0f32);
+int_patch_embed_mma_f32!(mt_int6_patch_embed_mma, 6u32, 32u32, 64.0f32);
+
+/// E8M0-scaled symmetric int patch-embed MMA (MXINT2/3/4/5/6): per-element
+/// bit-stream code × pow-2 (E8M0) block scale `2^(bits-127)`, fed to the
+/// simdgroup-matrix matmul. Same straddle-aware global-bit-offset decode and
+/// dispatch geometry as `int_patch_embed_mma_f32`; only the scale axis differs
+/// (one u8 exponent per block).
+macro_rules! int_patch_embed_mma_e8m0 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        #[allow(clippy::too_many_arguments)]
+        pub fn $name<T>(
+            image: Tensor<T>,
+            weight: Tensor<u32>,
+            scales: Tensor<u8>,
+            bias: Tensor<T>,
+            out: Tensor<T>,
+            #[constexpr] in_ch: u32,
+            #[constexpr] in_h: u32,
+            #[constexpr] in_w: u32,
+            #[constexpr] patch_h: u32,
+            #[constexpr] patch_w: u32,
+            #[constexpr] hidden: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let h_tile = tgid_x;
+            let pat_tile = tgid_y;
+            let lane = simd_lane;
+            let sg = simd_group_id();
+            let sm = sg / 2u32;
+            let sn = sg & 1u32;
+            let lane_in_tg = sg * 32u32 + lane;
+            let qid = lane / 4u32;
+            let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
+            let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
+            let fn1 = fn0 + 1u32;
+            let stride = 36u32;
+            threadgroup_alloc("as", 1152, T);
+            threadgroup_alloc("bs", 1152, T);
+            let c_f00 = simdgroup_alloc::<f32, 8, 8>();
+            simdgroup_elem_store(c_f00, 0, 0.0f32);
+            simdgroup_elem_store(c_f00, 1, 0.0f32);
+            let c_f01 = simdgroup_alloc::<f32, 8, 8>();
+            simdgroup_elem_store(c_f01, 0, 0.0f32);
+            simdgroup_elem_store(c_f01, 1, 0.0f32);
+            let c_f10 = simdgroup_alloc::<f32, 8, 8>();
+            simdgroup_elem_store(c_f10, 0, 0.0f32);
+            simdgroup_elem_store(c_f10, 1, 0.0f32);
+            let c_f11 = simdgroup_alloc::<f32, 8, 8>();
+            simdgroup_elem_store(c_f11, 0, 0.0f32);
+            simdgroup_elem_store(c_f11, 1, 0.0f32);
+            let a_f0 = simdgroup_alloc::<T, 8, 8>();
+            let a_f1 = simdgroup_alloc::<T, 8, 8>();
+            let b_f0 = simdgroup_alloc::<T, 8, 8>();
+            let b_f1 = simdgroup_alloc::<T, 8, 8>();
+            let phw = patch_h * patch_w;
+            let patch_dim = in_ch * phw;
+            let patches_w = in_w / patch_w;
+            let input_plane = in_h * in_w;
+            let a_pat_row = lane_in_tg / 4u32;
+            let a_k_quad = lane_in_tg & 3u32;
+            let a_k_base = a_k_quad * 8u32;
+            let global_pat = pat_tile * 32u32 + a_pat_row;
+            let py0 = (global_pat / patches_w) * patch_h;
+            let px0 = (global_pat - (global_pat / patches_w) * patches_w) * patch_w;
+            let b_h_row = lane_in_tg / 4u32;
+            let b_k_quad = lane_in_tg & 3u32;
+            let b_k_base = b_k_quad * 8u32;
+            let global_h = h_tile * 32u32 + b_h_row;
+            let n_blocks = patch_dim / block_size;
+            let sb_base = global_h * n_blocks;
+            // Global element index of this row's first tap (flat bit-stream is
+            // row-major: element (h, kt) at bit (h·patch_dim + kt)·bits).
+            let w_global_row_base = global_h * patch_dim;
+            for kb in range(0u32, patch_dim, 32u32) {
+                // ─ 1. Coop A load (implicit patch unfold gather) — verbatim ─
+                for i in range(0u32, 8u32, 1u32) {
+                    let kt = kb + a_k_base + i;
+                    let in_bounds = kt < patch_dim;
+                    let kt_safe = select(in_bounds, kt, 0u32);
+                    let ic = kt_safe / phw;
+                    let rem_kt = kt_safe - ic * phw;
+                    let py = rem_kt / patch_w;
+                    let px = rem_kt - py * patch_w;
+                    let img_idx = ic * input_plane + (py0 + py) * in_w + (px0 + px);
+                    let raw = load(image[img_idx]).cast::<f32>();
+                    let val = select(in_bounds, raw, 0.0f32).cast::<T>();
+                    threadgroup_store("as", a_pat_row * stride + a_k_base + i, val);
+                }
+                // ─ 2. Coop B load (int bit-stream dequant) — sign-extended code
+                //   × E8M0 pow-2 block scale. Same lane→tap mapping as int8. ─
+                for i in range(0u32, 8u32, 1u32) {
+                    let kt = kb + b_k_base + i;
+                    let in_bounds = kt < patch_dim;
+                    let kt_safe = select(in_bounds, kt, 0u32);
+                    // Global element index → bit offset in the flat LSB-first stream.
+                    let bit_off = (w_global_row_base + kt_safe) * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(weight[word_idx]);
+                    let w1 = load(weight[select(spill > 0u32, word_idx + 1u32, word_idx)]);
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+                    let qf = q.cast::<f32>();
+                    let code = select(q >= $half, qf - $full, qf); // sign-extend
+                    let sbits = load(scales[sb_base + kt_safe / block_size]).cast::<f32>();
+                    let scale = exp2(sbits - 127.0f32); // E8M0: 2^(bits-127)
+                    let decoded = code * scale;
+                    let val = select(in_bounds, decoded, 0.0f32).cast::<T>();
+                    threadgroup_store("bs", b_h_row * stride + b_k_base + i, val);
+                }
+                threadgroup_barrier();
+                // ─ 3. MMA inner loop — copied verbatim from int8 ─
+                let row_a0 = sm * 16u32 + fm;
+                let row_a1 = sm * 16u32 + 8u32 + fm;
+                let col_b0 = sn * 16u32;
+                let col_b1 = sn * 16u32 + 8u32;
+                // k_inner = 0
+                simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + fn0));
+                simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + fn1));
+                simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + fn0));
+                simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + fn1));
+                simdgroup_barrier_mem_none();
+                simdgroup_elem_store(b_f0, 0, threadgroup_load("bs", (col_b0 + fn0) * stride + fm));
+                simdgroup_elem_store(b_f0, 1, threadgroup_load("bs", (col_b0 + fn1) * stride + fm));
+                simdgroup_elem_store(b_f1, 0, threadgroup_load("bs", (col_b1 + fn0) * stride + fm));
+                simdgroup_elem_store(b_f1, 1, threadgroup_load("bs", (col_b1 + fn1) * stride + fm));
+                simdgroup_barrier_mem_none();
+                simdgroup_matmul(a_f0, b_f0, c_f00);
+                simdgroup_matmul(a_f0, b_f1, c_f01);
+                simdgroup_matmul(a_f1, b_f1, c_f11);
+                simdgroup_matmul(a_f1, b_f0, c_f10);
+                simdgroup_barrier_mem_none();
+                // k_inner = 1
+                simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 8u32 + fn0));
+                simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 8u32 + fn1));
+                simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + 8u32 + fn0));
+                simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + 8u32 + fn1));
+                simdgroup_barrier_mem_none();
+                simdgroup_elem_store(
+                    b_f0,
+                    0,
+                    threadgroup_load("bs", (col_b0 + fn0) * stride + 8u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f0,
+                    1,
+                    threadgroup_load("bs", (col_b0 + fn1) * stride + 8u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    0,
+                    threadgroup_load("bs", (col_b1 + fn0) * stride + 8u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    1,
+                    threadgroup_load("bs", (col_b1 + fn1) * stride + 8u32 + fm),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_matmul(a_f0, b_f0, c_f00);
+                simdgroup_matmul(a_f0, b_f1, c_f01);
+                simdgroup_matmul(a_f1, b_f1, c_f11);
+                simdgroup_matmul(a_f1, b_f0, c_f10);
+                simdgroup_barrier_mem_none();
+                // k_inner = 2
+                simdgroup_elem_store(
+                    a_f0,
+                    0,
+                    threadgroup_load("as", row_a0 * stride + 16u32 + fn0),
+                );
+                simdgroup_elem_store(
+                    a_f0,
+                    1,
+                    threadgroup_load("as", row_a0 * stride + 16u32 + fn1),
+                );
+                simdgroup_elem_store(
+                    a_f1,
+                    0,
+                    threadgroup_load("as", row_a1 * stride + 16u32 + fn0),
+                );
+                simdgroup_elem_store(
+                    a_f1,
+                    1,
+                    threadgroup_load("as", row_a1 * stride + 16u32 + fn1),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_elem_store(
+                    b_f0,
+                    0,
+                    threadgroup_load("bs", (col_b0 + fn0) * stride + 16u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f0,
+                    1,
+                    threadgroup_load("bs", (col_b0 + fn1) * stride + 16u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    0,
+                    threadgroup_load("bs", (col_b1 + fn0) * stride + 16u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    1,
+                    threadgroup_load("bs", (col_b1 + fn1) * stride + 16u32 + fm),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_matmul(a_f0, b_f0, c_f00);
+                simdgroup_matmul(a_f0, b_f1, c_f01);
+                simdgroup_matmul(a_f1, b_f1, c_f11);
+                simdgroup_matmul(a_f1, b_f0, c_f10);
+                simdgroup_barrier_mem_none();
+                // k_inner = 3
+                simdgroup_elem_store(
+                    a_f0,
+                    0,
+                    threadgroup_load("as", row_a0 * stride + 24u32 + fn0),
+                );
+                simdgroup_elem_store(
+                    a_f0,
+                    1,
+                    threadgroup_load("as", row_a0 * stride + 24u32 + fn1),
+                );
+                simdgroup_elem_store(
+                    a_f1,
+                    0,
+                    threadgroup_load("as", row_a1 * stride + 24u32 + fn0),
+                );
+                simdgroup_elem_store(
+                    a_f1,
+                    1,
+                    threadgroup_load("as", row_a1 * stride + 24u32 + fn1),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_elem_store(
+                    b_f0,
+                    0,
+                    threadgroup_load("bs", (col_b0 + fn0) * stride + 24u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f0,
+                    1,
+                    threadgroup_load("bs", (col_b0 + fn1) * stride + 24u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    0,
+                    threadgroup_load("bs", (col_b1 + fn0) * stride + 24u32 + fm),
+                );
+                simdgroup_elem_store(
+                    b_f1,
+                    1,
+                    threadgroup_load("bs", (col_b1 + fn1) * stride + 24u32 + fm),
+                );
+                simdgroup_barrier_mem_none();
+                simdgroup_matmul(a_f0, b_f0, c_f00);
+                simdgroup_matmul(a_f0, b_f1, c_f01);
+                simdgroup_matmul(a_f1, b_f1, c_f11);
+                simdgroup_matmul(a_f1, b_f0, c_f10);
+                simdgroup_barrier_mem_none();
+                threadgroup_barrier();
+            }
+            // ── 4. Add bias and write 4 C frags to global out — verbatim ──
+            let out_pat_base = pat_tile * 32u32 + sm * 16u32;
+            let out_h_base = h_tile * 32u32 + sn * 16u32;
+            let b00 = load(bias[out_h_base + fn0]).cast::<f32>();
+            let b01 = load(bias[out_h_base + fn1]).cast::<f32>();
+            let b10 = load(bias[out_h_base + 8u32 + fn0]).cast::<f32>();
+            let b11 = load(bias[out_h_base + 8u32 + fn1]).cast::<f32>();
+            store(
+                out[(out_pat_base + fm) * hidden + out_h_base + fn0],
+                (simdgroup_elem_load(c_f00, 0) + b00).cast::<T>(),
+            );
+            store(
+                out[(out_pat_base + fm) * hidden + out_h_base + fn1],
+                (simdgroup_elem_load(c_f00, 1) + b01).cast::<T>(),
+            );
+            store(
+                out[(out_pat_base + fm) * hidden + out_h_base + 8u32 + fn0],
+                (simdgroup_elem_load(c_f01, 0) + b10).cast::<T>(),
+            );
+            store(
+                out[(out_pat_base + fm) * hidden + out_h_base + 8u32 + fn1],
+                (simdgroup_elem_load(c_f01, 1) + b11).cast::<T>(),
+            );
+            store(
+                out[(out_pat_base + 8u32 + fm) * hidden + out_h_base + fn0],
+                (simdgroup_elem_load(c_f10, 0) + b00).cast::<T>(),
+            );
+            store(
+                out[(out_pat_base + 8u32 + fm) * hidden + out_h_base + fn1],
+                (simdgroup_elem_load(c_f10, 1) + b01).cast::<T>(),
+            );
+            store(
+                out[(out_pat_base + 8u32 + fm) * hidden + out_h_base + 8u32 + fn0],
+                (simdgroup_elem_load(c_f11, 0) + b10).cast::<T>(),
+            );
+            store(
+                out[(out_pat_base + 8u32 + fm) * hidden + out_h_base + 8u32 + fn1],
+                (simdgroup_elem_load(c_f11, 1) + b11).cast::<T>(),
+            );
+        }
+    };
+}
+int_patch_embed_mma_e8m0!(mt_mxint2_patch_embed_mma, 2u32, 2u32, 4.0f32);
+int_patch_embed_mma_e8m0!(mt_mxint3_patch_embed_mma, 3u32, 4u32, 8.0f32);
+int_patch_embed_mma_e8m0!(mt_mxint4_patch_embed_mma, 4u32, 8u32, 16.0f32);
+int_patch_embed_mma_e8m0!(mt_mxint5_patch_embed_mma, 5u32, 16u32, 32.0f32);
+int_patch_embed_mma_e8m0!(mt_mxint6_patch_embed_mma, 6u32, 32u32, 64.0f32);
+
+/// MXINT8 patch embed (8-bit symmetric codes, byte layout, block 32, E8M0 pow-2
+/// block scale `2^(bits-127)`). Identical geometry and B-load mapping to
+/// `mt_int8_patch_embed_mma` (one byte per code, 8 contiguous bytes per lane);
+/// only the scale axis is E8M0 instead of a raw FP32.
+#[kernel]
+#[allow(clippy::too_many_arguments)]
+pub fn mt_mxint8_patch_embed_mma<T>(
+    image: Tensor<T>,
+    weight: Tensor<u8>,
+    scales: Tensor<u8>,
+    bias: Tensor<T>,
+    out: Tensor<T>,
+    #[constexpr] in_ch: u32,
+    #[constexpr] in_h: u32,
+    #[constexpr] in_w: u32,
+    #[constexpr] patch_h: u32,
+    #[constexpr] patch_w: u32,
+    #[constexpr] hidden: u32,
+    #[constexpr] block_size: u32,
+) {
+    let h_tile = tgid_x;
+    let pat_tile = tgid_y;
+    let lane = simd_lane;
+    let sg = simd_group_id();
+    let sm = sg / 2u32;
+    let sn = sg & 1u32;
+    let lane_in_tg = sg * 32u32 + lane;
+    let qid = lane / 4u32;
+    let fm = (qid & 4u32) + ((lane / 2u32) % 4u32);
+    let fn0 = (qid & 2u32) * 2u32 + (lane % 2u32) * 2u32;
+    let fn1 = fn0 + 1u32;
+    let stride = 36u32;
+    threadgroup_alloc("as", 1152, T);
+    threadgroup_alloc("bs", 1152, T);
+    let c_f00 = simdgroup_alloc::<f32, 8, 8>();
+    simdgroup_elem_store(c_f00, 0, 0.0f32);
+    simdgroup_elem_store(c_f00, 1, 0.0f32);
+    let c_f01 = simdgroup_alloc::<f32, 8, 8>();
+    simdgroup_elem_store(c_f01, 0, 0.0f32);
+    simdgroup_elem_store(c_f01, 1, 0.0f32);
+    let c_f10 = simdgroup_alloc::<f32, 8, 8>();
+    simdgroup_elem_store(c_f10, 0, 0.0f32);
+    simdgroup_elem_store(c_f10, 1, 0.0f32);
+    let c_f11 = simdgroup_alloc::<f32, 8, 8>();
+    simdgroup_elem_store(c_f11, 0, 0.0f32);
+    simdgroup_elem_store(c_f11, 1, 0.0f32);
+    let a_f0 = simdgroup_alloc::<T, 8, 8>();
+    let a_f1 = simdgroup_alloc::<T, 8, 8>();
+    let b_f0 = simdgroup_alloc::<T, 8, 8>();
+    let b_f1 = simdgroup_alloc::<T, 8, 8>();
+    let phw = patch_h * patch_w;
+    let patch_dim = in_ch * phw;
+    let patches_w = in_w / patch_w;
+    let input_plane = in_h * in_w;
+    let a_pat_row = lane_in_tg / 4u32;
+    let a_k_quad = lane_in_tg & 3u32;
+    let a_k_base = a_k_quad * 8u32;
+    let global_pat = pat_tile * 32u32 + a_pat_row;
+    let py0 = (global_pat / patches_w) * patch_h;
+    let px0 = (global_pat - (global_pat / patches_w) * patches_w) * patch_w;
+    let b_h_row = lane_in_tg / 4u32;
+    let b_k_quad = lane_in_tg & 3u32;
+    let b_k_base = b_k_quad * 8u32;
+    let global_h = h_tile * 32u32 + b_h_row;
+    let n_blocks = patch_dim / block_size;
+    let w_row_base = global_h * patch_dim;
+    let sb_base = global_h * n_blocks;
+    for kb in range(0u32, patch_dim, 32u32) {
+        for i in range(0u32, 8u32, 1u32) {
+            let kt = kb + a_k_base + i;
+            let in_bounds = kt < patch_dim;
+            let kt_safe = select(in_bounds, kt, 0u32);
+            let ic = kt_safe / phw;
+            let rem_kt = kt_safe - ic * phw;
+            let py = rem_kt / patch_w;
+            let px = rem_kt - py * patch_w;
+            let img_idx = ic * input_plane + (py0 + py) * in_w + (px0 + px);
+            let raw = load(image[img_idx]).cast::<f32>();
+            let val = select(in_bounds, raw, 0.0f32).cast::<T>();
+            threadgroup_store("as", a_pat_row * stride + a_k_base + i, val);
+        }
+        // ─ 2. Coop B load (mxint8 dequant) — sign-extended code × E8M0 pow-2 scale ─
+        for i in range(0u32, 8u32, 1u32) {
+            let kt = kb + b_k_base + i;
+            let in_bounds = kt < patch_dim;
+            let kt_safe = select(in_bounds, kt, 0u32);
+            let code = load(weight[w_row_base + kt_safe]).cast::<u32>();
+            let sbits = load(scales[sb_base + kt_safe / block_size]).cast::<f32>();
+            let scale = exp2(sbits - 127.0f32);
+            let decoded = int8_decode(code) * scale;
+            let val = select(in_bounds, decoded, 0.0f32).cast::<T>();
+            threadgroup_store("bs", b_h_row * stride + b_k_base + i, val);
+        }
+        threadgroup_barrier();
+        let row_a0 = sm * 16u32 + fm;
+        let row_a1 = sm * 16u32 + 8u32 + fm;
+        let col_b0 = sn * 16u32;
+        let col_b1 = sn * 16u32 + 8u32;
+        simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + fn0));
+        simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + fn1));
+        simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + fn0));
+        simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + fn1));
+        simdgroup_barrier_mem_none();
+        simdgroup_elem_store(b_f0, 0, threadgroup_load("bs", (col_b0 + fn0) * stride + fm));
+        simdgroup_elem_store(b_f0, 1, threadgroup_load("bs", (col_b0 + fn1) * stride + fm));
+        simdgroup_elem_store(b_f1, 0, threadgroup_load("bs", (col_b1 + fn0) * stride + fm));
+        simdgroup_elem_store(b_f1, 1, threadgroup_load("bs", (col_b1 + fn1) * stride + fm));
+        simdgroup_barrier_mem_none();
+        simdgroup_matmul(a_f0, b_f0, c_f00);
+        simdgroup_matmul(a_f0, b_f1, c_f01);
+        simdgroup_matmul(a_f1, b_f1, c_f11);
+        simdgroup_matmul(a_f1, b_f0, c_f10);
+        simdgroup_barrier_mem_none();
+        simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 8u32 + fn0));
+        simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 8u32 + fn1));
+        simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + 8u32 + fn0));
+        simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + 8u32 + fn1));
+        simdgroup_barrier_mem_none();
+        simdgroup_elem_store(b_f0, 0, threadgroup_load("bs", (col_b0 + fn0) * stride + 8u32 + fm));
+        simdgroup_elem_store(b_f0, 1, threadgroup_load("bs", (col_b0 + fn1) * stride + 8u32 + fm));
+        simdgroup_elem_store(b_f1, 0, threadgroup_load("bs", (col_b1 + fn0) * stride + 8u32 + fm));
+        simdgroup_elem_store(b_f1, 1, threadgroup_load("bs", (col_b1 + fn1) * stride + 8u32 + fm));
+        simdgroup_barrier_mem_none();
+        simdgroup_matmul(a_f0, b_f0, c_f00);
+        simdgroup_matmul(a_f0, b_f1, c_f01);
+        simdgroup_matmul(a_f1, b_f1, c_f11);
+        simdgroup_matmul(a_f1, b_f0, c_f10);
+        simdgroup_barrier_mem_none();
+        simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 16u32 + fn0));
+        simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 16u32 + fn1));
+        simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + 16u32 + fn0));
+        simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + 16u32 + fn1));
+        simdgroup_barrier_mem_none();
+        simdgroup_elem_store(b_f0, 0, threadgroup_load("bs", (col_b0 + fn0) * stride + 16u32 + fm));
+        simdgroup_elem_store(b_f0, 1, threadgroup_load("bs", (col_b0 + fn1) * stride + 16u32 + fm));
+        simdgroup_elem_store(b_f1, 0, threadgroup_load("bs", (col_b1 + fn0) * stride + 16u32 + fm));
+        simdgroup_elem_store(b_f1, 1, threadgroup_load("bs", (col_b1 + fn1) * stride + 16u32 + fm));
+        simdgroup_barrier_mem_none();
+        simdgroup_matmul(a_f0, b_f0, c_f00);
+        simdgroup_matmul(a_f0, b_f1, c_f01);
+        simdgroup_matmul(a_f1, b_f1, c_f11);
+        simdgroup_matmul(a_f1, b_f0, c_f10);
+        simdgroup_barrier_mem_none();
+        simdgroup_elem_store(a_f0, 0, threadgroup_load("as", row_a0 * stride + 24u32 + fn0));
+        simdgroup_elem_store(a_f0, 1, threadgroup_load("as", row_a0 * stride + 24u32 + fn1));
+        simdgroup_elem_store(a_f1, 0, threadgroup_load("as", row_a1 * stride + 24u32 + fn0));
+        simdgroup_elem_store(a_f1, 1, threadgroup_load("as", row_a1 * stride + 24u32 + fn1));
+        simdgroup_barrier_mem_none();
+        simdgroup_elem_store(b_f0, 0, threadgroup_load("bs", (col_b0 + fn0) * stride + 24u32 + fm));
+        simdgroup_elem_store(b_f0, 1, threadgroup_load("bs", (col_b0 + fn1) * stride + 24u32 + fm));
+        simdgroup_elem_store(b_f1, 0, threadgroup_load("bs", (col_b1 + fn0) * stride + 24u32 + fm));
+        simdgroup_elem_store(b_f1, 1, threadgroup_load("bs", (col_b1 + fn1) * stride + 24u32 + fm));
+        simdgroup_barrier_mem_none();
+        simdgroup_matmul(a_f0, b_f0, c_f00);
+        simdgroup_matmul(a_f0, b_f1, c_f01);
+        simdgroup_matmul(a_f1, b_f1, c_f11);
+        simdgroup_matmul(a_f1, b_f0, c_f10);
+        simdgroup_barrier_mem_none();
+        threadgroup_barrier();
+    }
+    let out_pat_base = pat_tile * 32u32 + sm * 16u32;
+    let out_h_base = h_tile * 32u32 + sn * 16u32;
+    let b00 = load(bias[out_h_base + fn0]).cast::<f32>();
+    let b01 = load(bias[out_h_base + fn1]).cast::<f32>();
+    let b10 = load(bias[out_h_base + 8u32 + fn0]).cast::<f32>();
+    let b11 = load(bias[out_h_base + 8u32 + fn1]).cast::<f32>();
+    store(
+        out[(out_pat_base + fm) * hidden + out_h_base + fn0],
+        (simdgroup_elem_load(c_f00, 0) + b00).cast::<T>(),
+    );
+    store(
+        out[(out_pat_base + fm) * hidden + out_h_base + fn1],
+        (simdgroup_elem_load(c_f00, 1) + b01).cast::<T>(),
+    );
+    store(
+        out[(out_pat_base + fm) * hidden + out_h_base + 8u32 + fn0],
+        (simdgroup_elem_load(c_f01, 0) + b10).cast::<T>(),
+    );
+    store(
+        out[(out_pat_base + fm) * hidden + out_h_base + 8u32 + fn1],
+        (simdgroup_elem_load(c_f01, 1) + b11).cast::<T>(),
+    );
+    store(
+        out[(out_pat_base + 8u32 + fm) * hidden + out_h_base + fn0],
+        (simdgroup_elem_load(c_f10, 0) + b00).cast::<T>(),
+    );
+    store(
+        out[(out_pat_base + 8u32 + fm) * hidden + out_h_base + fn1],
+        (simdgroup_elem_load(c_f10, 1) + b01).cast::<T>(),
+    );
+    store(
+        out[(out_pat_base + 8u32 + fm) * hidden + out_h_base + 8u32 + fn0],
+        (simdgroup_elem_load(c_f11, 0) + b10).cast::<T>(),
+    );
+    store(
+        out[(out_pat_base + 8u32 + fm) * hidden + out_h_base + 8u32 + fn1],
+        (simdgroup_elem_load(c_f11, 1) + b11).cast::<T>(),
+    );
+}
+
 pub mod kernel_tests {
     use metaltile::{core::ir::Kernel, test::*, test_kernel};
 
@@ -1767,14 +2616,14 @@ pub mod kernel_tests {
         let bias = unpack_f32(&pack_f32(&bias_f, dt), dt);
         let expected =
             naive_patch_embed(&image, &wdq, &bias, in_ch, in_h, in_w, patch_h, patch_w, hidden);
-        // 4-bit weights bind as packed u32; 8-bit as one uchar each. Legacy
-        // float-scale formats (nvfp8/fp4/fp8*/int8) bind raw f32 scales; the
-        // mx*/nvfp4 formats use one byte (E8M0/E4M3) each.
-        let weight_dt = if fmt.element_bits() == 4 { DType::U32 } else { DType::U8 };
-        let scales_dt = if matches!(
-            fmt,
-            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
-        ) {
+        // 8-bit codes bind as one uchar each; every sub-byte width (4-bit nibble
+        // packs + int2/3/5/6 tight bit-streams) binds as packed u32 words. FP32
+        // scales bind as f32; E8M0/E4M3 scales as one byte. Both axes are driven
+        // off the format so new integer formats pick up the right buffer types
+        // (these are exactly equivalent to the old per-format lists for the
+        // pre-existing formats — 4-bit collapses to the u32 branch).
+        let weight_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
+        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
             DType::F32
         } else {
             DType::U8
@@ -1931,6 +2780,167 @@ pub mod kernel_tests {
             dt,
         )
     }
+
+    // Symmetric sub-byte ints (FP32 group scale, group 64) + MXINT (E8M0 block
+    // scale, block 32) + MXINT8 (8-bit, E8M0). patch_dim=64 is a multiple of 32
+    // (the MMA K-tile) and of both block sizes, and `patch_dim*bits % 32 == 0`
+    // for every width (64 is a multiple of 32), so each weight row's tight
+    // bit-stream is word-aligned. The kernel and oracle share the codec, so the
+    // GPU output tracks the dequant-then-projection reference.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int2_patch_embed_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_int2_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Int2,
+            4,
+            32,
+            32,
+            4,
+            4,
+            32,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int3_patch_embed_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_int3_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Int3,
+            4,
+            32,
+            32,
+            4,
+            4,
+            32,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int4_patch_embed_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_int4_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Int4,
+            4,
+            32,
+            32,
+            4,
+            4,
+            32,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int5_patch_embed_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_int5_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Int5,
+            4,
+            32,
+            32,
+            4,
+            4,
+            32,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int6_patch_embed_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_int6_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Int6,
+            4,
+            32,
+            32,
+            4,
+            4,
+            32,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint2_patch_embed_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_mxint2_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Mxint2,
+            4,
+            32,
+            32,
+            4,
+            4,
+            32,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint3_patch_embed_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_mxint3_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Mxint3,
+            4,
+            32,
+            32,
+            4,
+            4,
+            32,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint4_patch_embed_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_mxint4_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Mxint4,
+            4,
+            32,
+            32,
+            4,
+            4,
+            32,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint5_patch_embed_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_mxint5_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Mxint5,
+            4,
+            32,
+            32,
+            4,
+            4,
+            32,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint6_patch_embed_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_mxint6_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Mxint6,
+            4,
+            32,
+            32,
+            4,
+            4,
+            32,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint8_patch_embed_mma(dt: DType) -> TestSetup {
+        mma_setup(
+            mt_mxint8_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Mxint8,
+            4,
+            32,
+            32,
+            4,
+            4,
+            32,
+            dt,
+        )
+    }
 }
 
 /// Realistic vision-encoder benches — the M≥32 simdgroup-matrix throughput
@@ -1960,15 +2970,16 @@ pub mod kernel_benches {
         let patch_dim = in_ch * patch_h * patch_w;
         let n_out = num_patches * hidden;
         let n_blocks = hidden * (patch_dim / fmt.block_size());
-        let (codes_len, codes_dt) = if fmt.element_bits() == 4 {
-            (hidden * patch_dim / 8, DType::U32)
+        // 8-bit codes are one uchar each; every sub-byte width (4-bit nibble
+        // packs + int2/3/5/6 tight bit-streams) tight-bit-packs into u32 words
+        // (4-bit `bitstream_words` collapses to the old `n/8`, so no regression).
+        let n_weight = hidden * patch_dim;
+        let (codes_len, codes_dt) = if fmt.element_bits() == 8 {
+            (n_weight, DType::U8)
         } else {
-            (hidden * patch_dim, DType::U8)
+            (crate::quant::format::bitstream_words(n_weight, fmt.element_bits()), DType::U32)
         };
-        let scales_dt = if matches!(
-            fmt,
-            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
-        ) {
+        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
             DType::F32
         } else {
             DType::U8
@@ -2106,6 +3117,163 @@ pub mod kernel_benches {
         mma_bench(
             mt_int8_patch_embed_mma::kernel_ir_for(dt),
             QFormat::Int8,
+            4,
+            256,
+            256,
+            8,
+            8,
+            1024,
+            dt,
+        )
+    }
+    // Symmetric sub-byte ints (FP32 group scale) + MXINT (E8M0 block scale) +
+    // MXINT8 (8-bit, E8M0). patch_dim=256 is a multiple of 32 and every block
+    // size, and word-aligned for every bit width.
+    #[bench(name = "ffai/patch_embed_mma_block/int2", dtypes = [f32, f16, bf16])]
+    fn bench_int2_patch_embed_mma(dt: DType) -> BenchSetup {
+        mma_bench(
+            mt_int2_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Int2,
+            4,
+            256,
+            256,
+            8,
+            8,
+            1024,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/patch_embed_mma_block/int3", dtypes = [f32, f16, bf16])]
+    fn bench_int3_patch_embed_mma(dt: DType) -> BenchSetup {
+        mma_bench(
+            mt_int3_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Int3,
+            4,
+            256,
+            256,
+            8,
+            8,
+            1024,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/patch_embed_mma_block/int4", dtypes = [f32, f16, bf16])]
+    fn bench_int4_patch_embed_mma(dt: DType) -> BenchSetup {
+        mma_bench(
+            mt_int4_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Int4,
+            4,
+            256,
+            256,
+            8,
+            8,
+            1024,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/patch_embed_mma_block/int5", dtypes = [f32, f16, bf16])]
+    fn bench_int5_patch_embed_mma(dt: DType) -> BenchSetup {
+        mma_bench(
+            mt_int5_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Int5,
+            4,
+            256,
+            256,
+            8,
+            8,
+            1024,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/patch_embed_mma_block/int6", dtypes = [f32, f16, bf16])]
+    fn bench_int6_patch_embed_mma(dt: DType) -> BenchSetup {
+        mma_bench(
+            mt_int6_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Int6,
+            4,
+            256,
+            256,
+            8,
+            8,
+            1024,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/patch_embed_mma_block/mxint2", dtypes = [f32, f16, bf16])]
+    fn bench_mxint2_patch_embed_mma(dt: DType) -> BenchSetup {
+        mma_bench(
+            mt_mxint2_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Mxint2,
+            4,
+            256,
+            256,
+            8,
+            8,
+            1024,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/patch_embed_mma_block/mxint3", dtypes = [f32, f16, bf16])]
+    fn bench_mxint3_patch_embed_mma(dt: DType) -> BenchSetup {
+        mma_bench(
+            mt_mxint3_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Mxint3,
+            4,
+            256,
+            256,
+            8,
+            8,
+            1024,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/patch_embed_mma_block/mxint4", dtypes = [f32, f16, bf16])]
+    fn bench_mxint4_patch_embed_mma(dt: DType) -> BenchSetup {
+        mma_bench(
+            mt_mxint4_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Mxint4,
+            4,
+            256,
+            256,
+            8,
+            8,
+            1024,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/patch_embed_mma_block/mxint5", dtypes = [f32, f16, bf16])]
+    fn bench_mxint5_patch_embed_mma(dt: DType) -> BenchSetup {
+        mma_bench(
+            mt_mxint5_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Mxint5,
+            4,
+            256,
+            256,
+            8,
+            8,
+            1024,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/patch_embed_mma_block/mxint6", dtypes = [f32, f16, bf16])]
+    fn bench_mxint6_patch_embed_mma(dt: DType) -> BenchSetup {
+        mma_bench(
+            mt_mxint6_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Mxint6,
+            4,
+            256,
+            256,
+            8,
+            8,
+            1024,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/patch_embed_mma_block/mxint8", dtypes = [f32, f16, bf16])]
+    fn bench_mxint8_patch_embed_mma(dt: DType) -> BenchSetup {
+        mma_bench(
+            mt_mxint8_patch_embed_mma::kernel_ir_for(dt),
+            QFormat::Mxint8,
             4,
             256,
             256,
