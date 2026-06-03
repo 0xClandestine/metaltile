@@ -383,15 +383,203 @@ pub fn mt_int8_dequant_gemv_expert_indexed<T>(
     }
 }
 
+// ── Symmetric sub-byte integer expert-indexed GEMVs (int2/3/4/5/6 + MXINT2..6 +
+//    MXINT8) ───────────────────────────────────────────────────────────────────
+// Mirror `mlx/block_scaled_matmul.rs`'s `int_qgemv_f32!` / `int_qgemv_e8m0!` /
+// `mt_mxint8_qgemv` element decode, but fold in the per-expert row bases exactly
+// like the int8 kernel above. The element is a signed N-bit two's-complement code
+// tight-bit-packed LSB-first into u32 words. The whole `[n_experts·out_dim, in_dim]`
+// stack is one bit-stream, so for global row `g_row = expert·out_dim + row` the
+// row's word base is `g_row · (in_dim · bits / 32)` (per-row word-aligned because
+// `in_dim` is a multiple of 32 for every width). The scale base folds the expert
+// stride the same way the float kernels do: `(expert·out_dim + row)·n_blocks`.
+// Decode = straddle-aware two-word read + float sign-extend (subtract 2^N when the
+// top bit is set; `$half`/`$full` are 2^(N-1) / 2^N), then × block scale × input.
+// Element-strided like `mt_int8_dequant_gemv_expert_indexed`. The dispatch geometry
+// is unchanged from the rest of the family (Reduction, `grid = [out_dim, 1, 1]`,
+// `tpg = [64, 1, 1]`).
+
+/// FP32-scaled symmetric int expert-indexed GEMV (int2/3/4/5/6): per-element
+/// bit-stream code × per-group FP32 scale, dotted with the input. The row's tight
+/// bit-stream word base folds the expert stride via `g_row = expert·out_dim + row`.
+macro_rules! int_qgemv_f32_expert_indexed {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            weights_stacked: Tensor<u32>,
+            scales_stacked: Tensor<f32>,
+            input: Tensor<T>,
+            expert_index: Tensor<u32>,
+            output: Tensor<T>,
+            #[constexpr] in_dim: u32,
+            #[constexpr] out_dim: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let row = program_id::<0>();
+            let words_per_row = in_dim * $bits / 32u32;
+            let n_blocks = in_dim / block_size;
+            // g_row = expert·out_dim + row → fold the expert stride into both bases.
+            let expert = load(expert_index[0u32]);
+            let g_row = expert * out_dim + row;
+            let row_word_off = g_row * words_per_row;
+            let row_block_off = g_row * n_blocks;
+
+            let mut acc = 0.0f32;
+            let iters = (in_dim + lsize - 1u32) / lsize;
+            for it in range(0u32, iters, 1u32) {
+                let c = it * lsize + tid;
+                if c < in_dim {
+                    let bit_off = c * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(weights_stacked[row_word_off + word_idx]);
+                    let w1 = load(
+                        weights_stacked
+                            [row_word_off + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                    );
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+                    let qf = q.cast::<f32>();
+                    let val = select(q >= $half, qf - $full, qf); // sign-extend
+                    let scale = load(scales_stacked[row_block_off + c / block_size]);
+                    acc = acc + (val * scale) * load(input[c]).cast::<f32>();
+                }
+            }
+
+            let total = reduce_sum(acc);
+            if tid == 0u32 {
+                store(output[row], total.cast::<T>());
+            }
+        }
+    };
+}
+int_qgemv_f32_expert_indexed!(mt_int2_dequant_gemv_expert_indexed, 2u32, 2u32, 4.0f32);
+int_qgemv_f32_expert_indexed!(mt_int3_dequant_gemv_expert_indexed, 3u32, 4u32, 8.0f32);
+int_qgemv_f32_expert_indexed!(mt_int4_dequant_gemv_expert_indexed, 4u32, 8u32, 16.0f32);
+int_qgemv_f32_expert_indexed!(mt_int5_dequant_gemv_expert_indexed, 5u32, 16u32, 32.0f32);
+int_qgemv_f32_expert_indexed!(mt_int6_dequant_gemv_expert_indexed, 6u32, 32u32, 64.0f32);
+
+/// E8M0-scaled symmetric int expert-indexed GEMV (MXINT2/3/4/5/6): per-element
+/// bit-stream code × pow-2 (E8M0) block scale `2^(bits-127)`, dotted with the
+/// input. Same straddle-aware decode + expert-folded bases as the FP32 variant;
+/// only the scale axis differs (one u8 exponent per block instead of a raw f32).
+macro_rules! int_qgemv_e8m0_expert_indexed {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            weights_stacked: Tensor<u32>,
+            scales_stacked: Tensor<u8>,
+            input: Tensor<T>,
+            expert_index: Tensor<u32>,
+            output: Tensor<T>,
+            #[constexpr] in_dim: u32,
+            #[constexpr] out_dim: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let row = program_id::<0>();
+            let words_per_row = in_dim * $bits / 32u32;
+            let n_blocks = in_dim / block_size;
+            let expert = load(expert_index[0u32]);
+            let g_row = expert * out_dim + row;
+            let row_word_off = g_row * words_per_row;
+            let row_block_off = g_row * n_blocks;
+
+            let mut acc = 0.0f32;
+            let iters = (in_dim + lsize - 1u32) / lsize;
+            for it in range(0u32, iters, 1u32) {
+                let c = it * lsize + tid;
+                if c < in_dim {
+                    let bit_off = c * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(weights_stacked[row_word_off + word_idx]);
+                    let w1 = load(
+                        weights_stacked
+                            [row_word_off + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                    );
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+                    let qf = q.cast::<f32>();
+                    let val = select(q >= $half, qf - $full, qf); // sign-extend
+                    let sbits = load(scales_stacked[row_block_off + c / block_size]).cast::<f32>();
+                    let scale = exp2(sbits - 127.0f32); // E8M0: 2^(bits-127)
+                    acc = acc + (val * scale) * load(input[c]).cast::<f32>();
+                }
+            }
+
+            let total = reduce_sum(acc);
+            if tid == 0u32 {
+                store(output[row], total.cast::<T>());
+            }
+        }
+    };
+}
+int_qgemv_e8m0_expert_indexed!(mt_mxint2_dequant_gemv_expert_indexed, 2u32, 2u32, 4.0f32);
+int_qgemv_e8m0_expert_indexed!(mt_mxint3_dequant_gemv_expert_indexed, 3u32, 4u32, 8.0f32);
+int_qgemv_e8m0_expert_indexed!(mt_mxint4_dequant_gemv_expert_indexed, 4u32, 8u32, 16.0f32);
+int_qgemv_e8m0_expert_indexed!(mt_mxint5_dequant_gemv_expert_indexed, 5u32, 16u32, 32.0f32);
+int_qgemv_e8m0_expert_indexed!(mt_mxint6_dequant_gemv_expert_indexed, 6u32, 32u32, 64.0f32);
+
+/// MXINT8 expert-indexed dequantizing GEMV — 8-bit symmetric codes (byte layout,
+/// block 32), E8M0 pow-2 block scale `2^(bits-127)`. Element-strided like the
+/// 8-bit float formats (one byte per code), decode is `int8_decode → val · scale`,
+/// with the per-expert row bases folded in exactly like the int8 kernel.
+#[kernel]
+pub fn mt_mxint8_dequant_gemv_expert_indexed<T>(
+    weights_stacked: Tensor<u8>,
+    scales_stacked: Tensor<u8>,
+    input: Tensor<T>,
+    expert_index: Tensor<u32>,
+    output: Tensor<T>,
+    #[constexpr] in_dim: u32,
+    #[constexpr] out_dim: u32,
+    #[constexpr] block_size: u32,
+) {
+    let row = program_id::<0>();
+    let n_blocks = in_dim / block_size;
+    let expert = load(expert_index[0u32]);
+    let weight_expert_off = expert * out_dim * in_dim;
+    let scale_expert_off = expert * out_dim * n_blocks;
+    let row_off = weight_expert_off + row * in_dim;
+    let row_block_off = scale_expert_off + row * n_blocks;
+
+    let mut acc = 0.0f32;
+    let iters = (in_dim + lsize - 1u32) / lsize;
+    for it in range(0u32, iters, 1u32) {
+        let c = it * lsize + tid;
+        if c < in_dim {
+            let elem = int8_decode(load(weights_stacked[row_off + c]).cast::<u32>());
+            let sbits = load(scales_stacked[row_block_off + c / block_size]).cast::<f32>();
+            let scale = exp2(sbits - 127.0f32);
+            acc = acc + (elem * scale) * load(input[c]).cast::<f32>();
+        }
+    }
+
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[row], total.cast::<T>());
+    }
+}
+
 /// Correctness tests for the per-expert-indexed block-scaled dequant GEMVs.
 ///
-/// Oracle: stack `n_experts` block-scaled `[out_dim, in_dim]` weight slabs
-/// (each packed independently via `crate::quant::format::pack`, then their
-/// `codes`/`scales` byte buffers concatenated in expert order), pick a non-zero
-/// expert, dequant **only** the selected expert's slab via
-/// `crate::quant::format::dequant`, and replay `out[row] = Σ_i wdq[row,i]·x[i]`
-/// in f32. Verifies the expert-stride offset math on both the weight + scale
-/// row bases. Inputs are dtype-rounded so the GPU sees exactly what the oracle does.
+/// Oracle: build the FULL `[n_experts·out_dim, in_dim]` stacked weight and pack
+/// it **once** via `crate::quant::format::pack` (so the resulting `codes`/`scales`
+/// buffers are a single contiguous, correctly-aligned bit-stream — concatenating
+/// per-expert packs would misalign experts after the first for the straddling
+/// sub-byte widths 3/5/6, which append a guard word). Pick a non-zero expert,
+/// dequant the full stack, slice the selected expert's `[out_dim, in_dim]` rows,
+/// and replay `out[row] = Σ_i wdq[row,i]·x[i]` in f32. Verifies the expert-stride
+/// offset math on both the weight + scale row bases. Inputs are dtype-rounded so
+/// the GPU sees exactly what the oracle does.
 ///
 /// Grid: `grid_3d(out_dim, 1, 1, [TPG, 1, 1])` — one TG per output row, TPG = 64.
 pub mod kernel_tests {
@@ -437,48 +625,45 @@ pub mod kernel_tests {
         expert: usize,
         dt: DType,
     ) -> TestSetup {
-        // Pack each expert's slab independently, then concatenate the per-expert
-        // code + scale byte buffers in expert order (each slab's bytes already
-        // carry the right per-slab layout — 4-bit codes are 8 nibbles/u32-word,
-        // 8-bit codes 1/byte; scales are E8M0/E4M3 bytes or LE f32). The selected
-        // expert's `PackedTensor` is dequantized for the oracle.
-        let mut codes_stacked: Vec<u8> = Vec::new();
-        let mut scales_stacked: Vec<u8> = Vec::new();
-        let mut sel_packed = None;
-        let mut sel_global = 1.0f32;
+        // Build the FULL `[n_experts·out_dim, in_dim]` stacked weight and pack it
+        // ONCE — `pack` then produces a single contiguous, per-row word-aligned
+        // bit-stream for `codes` (and a contiguous `scales` axis). Packing each
+        // expert independently and concatenating would misalign experts after the
+        // first for the straddling sub-byte widths (3/5/6), which append a guard
+        // word; a single stacked pack is byte-identical for the 4/8-bit formats
+        // (no regression) and correct for every width. `p.codes`/`p.scales` bind
+        // directly with no per-expert concat.
+        let stacked_rows = n_experts * out_dim;
+        let mut stacked_w: Vec<f32> = Vec::with_capacity(stacked_rows * in_dim);
         for e in 0..n_experts {
-            let w = weights(e, out_dim, in_dim);
-            let p = crate::quant::format::pack(fmt, &w, out_dim, in_dim);
-            codes_stacked.extend_from_slice(&p.codes);
-            scales_stacked.extend_from_slice(&p.scales);
-            if e == expert {
-                sel_global = p.global;
-                sel_packed = Some(p);
-            }
+            stacked_w.extend_from_slice(&weights(e, out_dim, in_dim));
         }
-        let p_sel = sel_packed.expect("expert index in range");
-        let wdq = crate::quant::format::dequant(fmt, &p_sel, out_dim, in_dim);
+        let p = crate::quant::format::pack(fmt, &stacked_w, stacked_rows, in_dim);
+        let sel_global = p.global;
+        // Dequant the full stack, then slice the selected expert's row band for
+        // the oracle (rows `[expert·out_dim, (expert+1)·out_dim)`).
+        let wdq_all = crate::quant::format::dequant(fmt, &p, stacked_rows, in_dim);
+        let wdq = &wdq_all[expert * out_dim * in_dim..(expert + 1) * out_dim * in_dim];
 
         let input_f: Vec<f32> = (0..in_dim).map(|i| ((i % 11) as f32 - 5.0) * 0.01).collect();
         // Round-trip the input through `dt` so the oracle sees what the GPU sees.
         let x = unpack_f32(&pack_f32(&input_f, dt), dt);
-        let expected = oracle(&wdq, &x, out_dim, in_dim);
+        let expected = oracle(wdq, &x, out_dim, in_dim);
 
-        // 4-bit codes bind as packed u32; 8-bit as one uchar each. FP32 (nvfp8 /
-        // legacy fp / int8) scales bind as f32; all others are one byte (E8M0/E4M3).
-        let weight_dt = if fmt.element_bits() == 4 { DType::U32 } else { DType::U8 };
-        let scales_dt = if matches!(
-            fmt,
-            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
-        ) {
+        // 8-bit codes bind as one uchar each; every sub-byte width (4-bit nibble
+        // packs + int2/3/5/6 tight bit-streams) binds as packed u32 words. FP32
+        // scales bind as f32; E8M0/E4M3 scales as one byte. Both axes are driven
+        // off the format so new integer formats pick up the right buffer types.
+        let weight_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
+        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
             DType::F32
         } else {
             DType::U8
         };
         let mut s = TestSetup::new(kernel)
             .mode(KernelMode::Reduction)
-            .input(TestBuffer::from_vec("weights_stacked", codes_stacked, weight_dt))
-            .input(TestBuffer::from_vec("scales_stacked", scales_stacked, scales_dt))
+            .input(TestBuffer::from_vec("weights_stacked", p.codes, weight_dt))
+            .input(TestBuffer::from_vec("scales_stacked", p.scales, scales_dt))
             .input(TestBuffer::from_vec("input", pack_f32(&input_f, dt), dt))
             .input(TestBuffer::from_vec("expert_index", u32_bytes(&[expert as u32]), DType::U32))
             .input(TestBuffer::zeros("output", out_dim, dt))
@@ -617,6 +802,144 @@ pub mod kernel_tests {
             dt,
         )
     }
+
+    // Symmetric sub-byte ints (FP32 group scale, group 64) + MXINT (E8M0 block
+    // scale, block 32) + MXINT8 (8-bit, E8M0). in_dim 256 satisfies
+    // `in_dim*bits % 32 == 0` for every width (and divides every group/block
+    // size), so the single stacked pack's per-row bit-stream is word-aligned and
+    // the kernel + oracle share the codec to float precision.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int2_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_int2_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int2,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int3_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_int3_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int3,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int4_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_int4_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int4,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int5_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_int5_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int5,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int6_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_int6_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int6,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint2_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_mxint2_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Mxint2,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint3_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_mxint3_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Mxint3,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint4_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_mxint4_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Mxint4,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint5_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_mxint5_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Mxint5,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint6_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_mxint6_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Mxint6,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint8_dequant_gemv_expert_indexed(dt: DType) -> TestSetup {
+        expert_setup(
+            mt_mxint8_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Mxint8,
+            4,
+            4,
+            256,
+            2,
+            dt,
+        )
+    }
 }
 
 /// Decode-shape benches: per-expert-indexed dequant GEMV over an 8-expert stack
@@ -640,15 +963,24 @@ pub mod kernel_benches {
         dt: DType,
     ) -> BenchSetup {
         let blocks_per_expert = out_dim * (in_dim / fmt.block_size());
-        let (codes_per_expert, codes_dt) = if fmt.element_bits() == 4 {
-            (out_dim * in_dim / 8, DType::U32)
+        // The whole stack is one bit-stream packed once, so the `weights_stacked`
+        // buffer is `bitstream_words(n_experts·out_dim·in_dim, bits)` u32 words for
+        // every sub-byte width (4-bit collapses to the old `total/8`), or one byte
+        // per code at 8-bit. Per-expert lengths drive only the active-stream byte
+        // accounting (one expert's slab is read per dispatch). Both axes are driven
+        // off the format so new integer formats pick up the right buffer types.
+        let codes_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
+        let total_codes = if fmt.element_bits() == 8 {
+            n_experts * out_dim * in_dim
         } else {
-            (out_dim * in_dim, DType::U8)
+            crate::quant::format::bitstream_words(n_experts * out_dim * in_dim, fmt.element_bits())
         };
-        let scales_dt = if matches!(
-            fmt,
-            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
-        ) {
+        let codes_per_expert = if fmt.element_bits() == 8 {
+            out_dim * in_dim
+        } else {
+            crate::quant::format::bitstream_words(out_dim * in_dim, fmt.element_bits())
+        };
+        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
             DType::F32
         } else {
             DType::U8
@@ -661,7 +993,7 @@ pub mod kernel_benches {
             + out_dim * sz;
         let mut s = BenchSetup::new(kernel)
             .mode(KernelMode::Reduction)
-            .buffer(BenchBuffer::random("weights_stacked", n_experts * codes_per_expert, codes_dt))
+            .buffer(BenchBuffer::random("weights_stacked", total_codes, codes_dt))
             .buffer(BenchBuffer::random("scales_stacked", n_experts * blocks_per_expert, scales_dt))
             .buffer(BenchBuffer::random("input", in_dim, dt))
             .buffer(BenchBuffer::zeros("expert_index", 1, DType::U32))
@@ -771,6 +1103,129 @@ pub mod kernel_benches {
         expert_bench(
             mt_int8_dequant_gemv_expert_indexed::kernel_ir_for(dt),
             QFormat::Int8,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    // Symmetric sub-byte ints (FP32 group scale) + MXINT (E8M0 block scale) +
+    // MXINT8 (8-bit, E8M0).
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/int2", dtypes = [f32, f16, bf16])]
+    fn bench_int2_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_int2_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int2,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/int3", dtypes = [f32, f16, bf16])]
+    fn bench_int3_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_int3_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int3,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/int4", dtypes = [f32, f16, bf16])]
+    fn bench_int4_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_int4_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int4,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/int5", dtypes = [f32, f16, bf16])]
+    fn bench_int5_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_int5_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int5,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/int6", dtypes = [f32, f16, bf16])]
+    fn bench_int6_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_int6_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Int6,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/mxint2", dtypes = [f32, f16, bf16])]
+    fn bench_mxint2_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_mxint2_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Mxint2,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/mxint3", dtypes = [f32, f16, bf16])]
+    fn bench_mxint3_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_mxint3_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Mxint3,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/mxint4", dtypes = [f32, f16, bf16])]
+    fn bench_mxint4_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_mxint4_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Mxint4,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/mxint5", dtypes = [f32, f16, bf16])]
+    fn bench_mxint5_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_mxint5_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Mxint5,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/mxint6", dtypes = [f32, f16, bf16])]
+    fn bench_mxint6_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_mxint6_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Mxint6,
+            8,
+            4096,
+            4096,
+            dt,
+        )
+    }
+    #[bench(name = "ffai/dequant_gemv_expert_indexed_block/mxint8", dtypes = [f32, f16, bf16])]
+    fn bench_mxint8_dequant_gemv_expert_indexed(dt: DType) -> BenchSetup {
+        expert_bench(
+            mt_mxint8_dequant_gemv_expert_indexed::kernel_ir_for(dt),
+            QFormat::Mxint8,
             8,
             4096,
             4096,

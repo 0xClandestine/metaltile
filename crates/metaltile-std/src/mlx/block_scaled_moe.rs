@@ -344,6 +344,192 @@ pub fn mt_int8_gather_qmm<T>(
     }
 }
 
+// ── Symmetric sub-byte integer gather-GEMMs (int2/3/4/5/6 + MXINT2..6) ───────
+// The element is a signed N-bit two's-complement code, tight-bit-packed
+// LSB-first into u32 words. The WHOLE `[E·out_dim, in_dim]` expert stack is
+// packed in ONE call (the test builds the full stacked matrix and packs once —
+// never per-expert concatenation), so it is a single contiguous bit-stream with
+// one guard word at the very end. Every weight row therefore stays word-aligned
+// (in_dim a multiple of 32 ⇒ `in_dim · bits % 32 == 0`), and the per-row word
+// base is just `wrow · (in_dim · bits / 32)` — exactly the reduction GEMV
+// `block_scaled_matmul` layout with the gather's `wrow = expert·out_dim + n`.
+// Decode mirrors `block_scaled_dequant`'s proven `int_dequant_*` macros: extract
+// the low N bits with a straddle-aware two-word read, sign-extend in float
+// (subtract 2^N when the top bit is set; `$half`/`$full` are 2^(N-1) / 2^N),
+// then multiply by the block scale and the matching input. Element-strided like
+// `mt_int8_gather_qmm` — one TG per (token, output-row), threads stride over the
+// row's elements, `reduce_sum` folds the partials. `$half`/`$full` are passed as
+// literals to keep the constexpr math out of the DSL shift operands. The
+// dispatch geometry is unchanged from the rest of the family (Reduction,
+// `grid = [out_dim·m_rows, 1, 1]`, `tpg = [TPG, 1, 1]`).
+
+/// FP32-scaled symmetric int gather-GEMM (int2/3/4/5/6): per-element bit-stream
+/// code × per-group FP32 scale, dotted with the routed token. `row_word_off`
+/// indexes the gathered weight row's tight bit-stream
+/// (`in_dim · bits / 32` u32 words per row, `wrow = expert·out_dim + n`).
+macro_rules! int_gather_qmm_f32 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            weight: Tensor<u32>,
+            scales: Tensor<f32>,
+            expert_ids: Tensor<u32>,
+            x: Tensor<T>,
+            output: Tensor<T>,
+            #[constexpr] in_dim: u32,
+            #[constexpr] out_dim: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let tg = program_id::<0>();
+            let mr = tg / out_dim;
+            let n = tg - mr * out_dim;
+            let wrow = load(expert_ids[mr]) * out_dim + n;
+            let words_per_row = in_dim * $bits / 32u32;
+            let row_word_off = wrow * words_per_row;
+            let row_block_off = wrow * (in_dim / block_size);
+            let x_row_off = mr * in_dim;
+
+            let mut acc = 0.0f32;
+            let iters = (in_dim + lsize - 1u32) / lsize;
+            for it in range(0u32, iters, 1u32) {
+                let c = it * lsize + tid;
+                if c < in_dim {
+                    let bit_off = c * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(weight[row_word_off + word_idx]);
+                    let w1 = load(
+                        weight[row_word_off + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                    );
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+                    let qf = q.cast::<f32>();
+                    let val = select(q >= $half, qf - $full, qf); // sign-extend
+                    let scale = load(scales[row_block_off + c / block_size]);
+                    acc = acc + (val * scale) * load(x[x_row_off + c]).cast::<f32>();
+                }
+            }
+            let total = reduce_sum(acc);
+            if tid == 0u32 {
+                store(output[tg], total.cast::<T>());
+            }
+        }
+    };
+}
+int_gather_qmm_f32!(mt_int2_gather_qmm, 2u32, 2u32, 4.0f32);
+int_gather_qmm_f32!(mt_int3_gather_qmm, 3u32, 4u32, 8.0f32);
+int_gather_qmm_f32!(mt_int4_gather_qmm, 4u32, 8u32, 16.0f32);
+int_gather_qmm_f32!(mt_int5_gather_qmm, 5u32, 16u32, 32.0f32);
+int_gather_qmm_f32!(mt_int6_gather_qmm, 6u32, 32u32, 64.0f32);
+
+/// E8M0-scaled symmetric int gather-GEMM (MXINT2/3/4/5/6): per-element
+/// bit-stream code × pow-2 (E8M0) block scale `2^(bits-127)`, dotted with the
+/// routed token. Same straddle-aware decode and element-strided reduction as
+/// `int_gather_qmm_f32`; only the scale axis differs (one u8 exponent per block
+/// instead of a raw f32).
+macro_rules! int_gather_qmm_e8m0 {
+    ($name:ident, $bits:literal, $half:literal, $full:literal) => {
+        #[kernel]
+        pub fn $name<T>(
+            weight: Tensor<u32>,
+            scales: Tensor<u8>,
+            expert_ids: Tensor<u32>,
+            x: Tensor<T>,
+            output: Tensor<T>,
+            #[constexpr] in_dim: u32,
+            #[constexpr] out_dim: u32,
+            #[constexpr] block_size: u32,
+        ) {
+            let tg = program_id::<0>();
+            let mr = tg / out_dim;
+            let n = tg - mr * out_dim;
+            let wrow = load(expert_ids[mr]) * out_dim + n;
+            let words_per_row = in_dim * $bits / 32u32;
+            let row_word_off = wrow * words_per_row;
+            let row_block_off = wrow * (in_dim / block_size);
+            let x_row_off = mr * in_dim;
+
+            let mut acc = 0.0f32;
+            let iters = (in_dim + lsize - 1u32) / lsize;
+            for it in range(0u32, iters, 1u32) {
+                let c = it * lsize + tid;
+                if c < in_dim {
+                    let bit_off = c * $bits;
+                    let word_idx = bit_off / 32u32;
+                    let bit_in_w = bit_off & 31u32;
+                    let bits_in_w0 = 32u32 - bit_in_w;
+                    let lo_bits = select(bits_in_w0 >= $bits, $bits, bits_in_w0);
+                    let spill = $bits - lo_bits;
+                    let w0 = load(weight[row_word_off + word_idx]);
+                    let w1 = load(
+                        weight[row_word_off + select(spill > 0u32, word_idx + 1u32, word_idx)],
+                    );
+                    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+                    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+                    let q = lo | hi;
+                    let qf = q.cast::<f32>();
+                    let val = select(q >= $half, qf - $full, qf); // sign-extend
+                    let sbits = load(scales[row_block_off + c / block_size]).cast::<f32>();
+                    let scale = exp2(sbits - 127.0f32); // E8M0: 2^(bits-127)
+                    acc = acc + (val * scale) * load(x[x_row_off + c]).cast::<f32>();
+                }
+            }
+            let total = reduce_sum(acc);
+            if tid == 0u32 {
+                store(output[tg], total.cast::<T>());
+            }
+        }
+    };
+}
+int_gather_qmm_e8m0!(mt_mxint2_gather_qmm, 2u32, 2u32, 4.0f32);
+int_gather_qmm_e8m0!(mt_mxint3_gather_qmm, 3u32, 4u32, 8.0f32);
+int_gather_qmm_e8m0!(mt_mxint4_gather_qmm, 4u32, 8u32, 16.0f32);
+int_gather_qmm_e8m0!(mt_mxint5_gather_qmm, 5u32, 16u32, 32.0f32);
+int_gather_qmm_e8m0!(mt_mxint6_gather_qmm, 6u32, 32u32, 64.0f32);
+
+/// MXINT8 MoE gather-GEMM — 8-bit symmetric codes (byte layout, block 32),
+/// E8M0 pow-2 block scale `2^(bits-127)`. Element-strided like the 8-bit float
+/// formats (one byte per code), decode is `int8_decode → val · scale`.
+#[kernel]
+pub fn mt_mxint8_gather_qmm<T>(
+    weight: Tensor<u8>,
+    scales: Tensor<u8>,
+    expert_ids: Tensor<u32>,
+    x: Tensor<T>,
+    output: Tensor<T>,
+    #[constexpr] in_dim: u32,
+    #[constexpr] out_dim: u32,
+    #[constexpr] block_size: u32,
+) {
+    let tg = program_id::<0>();
+    let mr = tg / out_dim;
+    let n = tg - mr * out_dim;
+    let wrow = load(expert_ids[mr]) * out_dim + n;
+    let row_off = wrow * in_dim;
+    let row_block_off = wrow * (in_dim / block_size);
+    let x_row_off = mr * in_dim;
+
+    let mut acc = 0.0f32;
+    let iters = (in_dim + lsize - 1u32) / lsize;
+    for it in range(0u32, iters, 1u32) {
+        let c = it * lsize + tid;
+        if c < in_dim {
+            let elem = int8_decode(load(weight[row_off + c]).cast::<u32>());
+            let sbits = load(scales[row_block_off + c / block_size]).cast::<f32>();
+            let scale = exp2(sbits - 127.0f32);
+            acc = acc + (elem * scale) * load(x[x_row_off + c]).cast::<f32>();
+        }
+    }
+    let total = reduce_sum(acc);
+    if tid == 0u32 {
+        store(output[tg], total.cast::<T>());
+    }
+}
+
 pub mod kernel_tests {
     use metaltile::{core::ir::Kernel, test::*, test_kernel};
 
@@ -402,6 +588,16 @@ pub mod kernel_tests {
         dt: DType,
     ) -> TestSetup {
         let stack_rows = n_experts * out_dim;
+        // Build the FULL `[E·out_dim, in_dim]` stacked weight matrix (all experts
+        // stacked along rows) and pack it in ONE call — never per-expert packing
+        // + byte concatenation. For sub-byte widths (3/5/6-bit) `pack` appends a
+        // single guard word at the very end of the contiguous bit-stream;
+        // concatenating per-expert buffers would instead inject a guard word
+        // mid-stream and misalign every expert after the first. One stacked pack
+        // is byte-identical to the old per-expert concat for the 4-bit/8-bit
+        // formats (those widths divide 32 ⇒ exact word count, no guard word) and
+        // correct for every sub-byte width. `in_dim` is a multiple of 32, so each
+        // row's bit-stream is word-aligned for every width.
         let w = weights(stack_rows, in_dim);
         let p = crate::quant::format::pack(fmt, &w, stack_rows, in_dim);
         let wdq = crate::quant::format::dequant(fmt, &p, stack_rows, in_dim);
@@ -411,11 +607,12 @@ pub mod kernel_tests {
         let x = unpack_f32(&pack_f32(&x_f, dt), dt);
         let expected = gather_oracle(&wdq, &x, &eids, m_rows, in_dim, out_dim);
         let eid_bytes: Vec<u8> = eids.iter().flat_map(|e| e.to_le_bytes()).collect();
-        let weight_dt = if fmt.element_bits() == 4 { DType::U32 } else { DType::U8 };
-        let scales_dt = if matches!(
-            fmt,
-            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
-        ) {
+        // 8-bit codes bind as one uchar each; every sub-byte width (4-bit nibble
+        // packs + int2/3/5/6 tight bit-streams) binds as packed u32 words. FP32
+        // scales bind as f32; E8M0/E4M3 scales as one byte. Both axes are driven
+        // off the format so new integer formats pick up the right buffer types.
+        let weight_dt = if fmt.element_bits() == 8 { DType::U8 } else { DType::U32 };
+        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
             DType::F32
         } else {
             DType::U8
@@ -502,6 +699,58 @@ pub mod kernel_tests {
     fn test_int8_gather_qmm(dt: DType) -> TestSetup {
         gather_setup(mt_int8_gather_qmm::kernel_ir_for(dt), QFormat::Int8, 4, 3, 4, 256, dt)
     }
+
+    // Symmetric sub-byte ints (FP32 group scale, group 64) + MXINT (E8M0 block
+    // scale, block 32) + MXINT8 (8-bit, E8M0). in_dim 256 is a multiple of 32, so
+    // `in_dim*bits % 32 == 0` for every width and each gathered weight row's
+    // bit-stream is word-aligned. The whole `[E·out_dim, in_dim]` stack is packed
+    // once, so the bit-stream stays contiguous (one guard word at the very end)
+    // and the kernel/oracle share the codec — the GPU output tracks the
+    // dequant-then-dot reference to float precision.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int2_gather_qmm(dt: DType) -> TestSetup {
+        gather_setup(mt_int2_gather_qmm::kernel_ir_for(dt), QFormat::Int2, 4, 3, 4, 256, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int3_gather_qmm(dt: DType) -> TestSetup {
+        gather_setup(mt_int3_gather_qmm::kernel_ir_for(dt), QFormat::Int3, 4, 3, 4, 256, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int4_gather_qmm(dt: DType) -> TestSetup {
+        gather_setup(mt_int4_gather_qmm::kernel_ir_for(dt), QFormat::Int4, 4, 3, 4, 256, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int5_gather_qmm(dt: DType) -> TestSetup {
+        gather_setup(mt_int5_gather_qmm::kernel_ir_for(dt), QFormat::Int5, 4, 3, 4, 256, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_int6_gather_qmm(dt: DType) -> TestSetup {
+        gather_setup(mt_int6_gather_qmm::kernel_ir_for(dt), QFormat::Int6, 4, 3, 4, 256, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint2_gather_qmm(dt: DType) -> TestSetup {
+        gather_setup(mt_mxint2_gather_qmm::kernel_ir_for(dt), QFormat::Mxint2, 4, 3, 4, 256, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint3_gather_qmm(dt: DType) -> TestSetup {
+        gather_setup(mt_mxint3_gather_qmm::kernel_ir_for(dt), QFormat::Mxint3, 4, 3, 4, 256, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint4_gather_qmm(dt: DType) -> TestSetup {
+        gather_setup(mt_mxint4_gather_qmm::kernel_ir_for(dt), QFormat::Mxint4, 4, 3, 4, 256, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint5_gather_qmm(dt: DType) -> TestSetup {
+        gather_setup(mt_mxint5_gather_qmm::kernel_ir_for(dt), QFormat::Mxint5, 4, 3, 4, 256, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint6_gather_qmm(dt: DType) -> TestSetup {
+        gather_setup(mt_mxint6_gather_qmm::kernel_ir_for(dt), QFormat::Mxint6, 4, 3, 4, 256, dt)
+    }
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+    fn test_mxint8_gather_qmm(dt: DType) -> TestSetup {
+        gather_setup(mt_mxint8_gather_qmm::kernel_ir_for(dt), QFormat::Mxint8, 4, 3, 4, 256, dt)
+    }
 }
 
 /// Decode-shape (single routed token) gather-GEMM benches at the canonical
@@ -529,17 +778,20 @@ pub mod kernel_benches {
         dt: DType,
     ) -> BenchSetup {
         let stack_rows = N_EXPERTS * out_dim;
-        // Full packed stack lengths (what the buffers must hold).
+        // Full packed stack lengths (what the buffers must hold). The whole
+        // `[E·out_dim, in_dim]` stack is one contiguous bit-stream (single pack),
+        // so its code length is `bitstream_words` over the *total* element count
+        // (one guard word for the whole stack). 8-bit codes are one uchar each;
+        // every sub-byte width (4-bit nibble packs + int2/3/5/6 tight bit-streams)
+        // tight-bit-packs into u32 words. Both axes are driven off the format.
         let stack_blocks = stack_rows * (in_dim / fmt.block_size());
-        let (codes_len, codes_dt) = if fmt.element_bits() == 4 {
-            (stack_rows * in_dim / 8, DType::U32)
+        let stack_n = stack_rows * in_dim;
+        let (codes_len, codes_dt) = if fmt.element_bits() == 8 {
+            (stack_n, DType::U8)
         } else {
-            (stack_rows * in_dim, DType::U8)
+            (crate::quant::format::bitstream_words(stack_n, fmt.element_bits()), DType::U32)
         };
-        let scales_dt = if matches!(
-            fmt,
-            QFormat::Nvfp8 | QFormat::Fp4 | QFormat::Fp8E4m3 | QFormat::Fp8E5m2 | QFormat::Int8
-        ) {
+        let scales_dt = if fmt.scale_kind() == crate::quant::format::ScaleKind::F32 {
             DType::F32
         } else {
             DType::U8
@@ -547,9 +799,14 @@ pub mod kernel_benches {
         let sz = dt.size_bytes();
         // Bytes touched by the single routed token: only its expert's `out_dim`
         // weight rows + their scales + the expert id + the input row + output
-        // row (the rest of the stack is never read for one token).
-        let tok_codes =
-            if fmt.element_bits() == 4 { out_dim * in_dim / 8 } else { out_dim * in_dim };
+        // row (the rest of the stack is never read for one token). The token's
+        // weight rows are `out_dim` contiguous bit-stream rows, so their code
+        // length is `bitstream_words` over `out_dim · in_dim` elements.
+        let tok_codes = if fmt.element_bits() == 8 {
+            out_dim * in_dim
+        } else {
+            crate::quant::format::bitstream_words(out_dim * in_dim, fmt.element_bits())
+        };
         let tok_blocks = out_dim * (in_dim / fmt.block_size());
         let bytes = tok_codes * codes_dt.size_bytes()
             + tok_blocks * scales_dt.size_bytes()
@@ -611,5 +868,51 @@ pub mod kernel_benches {
     #[bench(name = "ffai/block_scaled_gather_qmm/int8", dtypes = [f32, f16, bf16])]
     fn bench_int8_gather_qmm(dt: DType) -> BenchSetup {
         gather_bench(mt_int8_gather_qmm::kernel_ir_for(dt), QFormat::Int8, 4096, 4096, dt)
+    }
+    // Symmetric sub-byte ints (FP32 group scale) + MXINT (E8M0 block scale) +
+    // MXINT8 (8-bit, E8M0).
+    #[bench(name = "ffai/block_scaled_gather_qmm/int2", dtypes = [f32, f16, bf16])]
+    fn bench_int2_gather_qmm(dt: DType) -> BenchSetup {
+        gather_bench(mt_int2_gather_qmm::kernel_ir_for(dt), QFormat::Int2, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_gather_qmm/int3", dtypes = [f32, f16, bf16])]
+    fn bench_int3_gather_qmm(dt: DType) -> BenchSetup {
+        gather_bench(mt_int3_gather_qmm::kernel_ir_for(dt), QFormat::Int3, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_gather_qmm/int4", dtypes = [f32, f16, bf16])]
+    fn bench_int4_gather_qmm(dt: DType) -> BenchSetup {
+        gather_bench(mt_int4_gather_qmm::kernel_ir_for(dt), QFormat::Int4, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_gather_qmm/int5", dtypes = [f32, f16, bf16])]
+    fn bench_int5_gather_qmm(dt: DType) -> BenchSetup {
+        gather_bench(mt_int5_gather_qmm::kernel_ir_for(dt), QFormat::Int5, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_gather_qmm/int6", dtypes = [f32, f16, bf16])]
+    fn bench_int6_gather_qmm(dt: DType) -> BenchSetup {
+        gather_bench(mt_int6_gather_qmm::kernel_ir_for(dt), QFormat::Int6, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_gather_qmm/mxint2", dtypes = [f32, f16, bf16])]
+    fn bench_mxint2_gather_qmm(dt: DType) -> BenchSetup {
+        gather_bench(mt_mxint2_gather_qmm::kernel_ir_for(dt), QFormat::Mxint2, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_gather_qmm/mxint3", dtypes = [f32, f16, bf16])]
+    fn bench_mxint3_gather_qmm(dt: DType) -> BenchSetup {
+        gather_bench(mt_mxint3_gather_qmm::kernel_ir_for(dt), QFormat::Mxint3, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_gather_qmm/mxint4", dtypes = [f32, f16, bf16])]
+    fn bench_mxint4_gather_qmm(dt: DType) -> BenchSetup {
+        gather_bench(mt_mxint4_gather_qmm::kernel_ir_for(dt), QFormat::Mxint4, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_gather_qmm/mxint5", dtypes = [f32, f16, bf16])]
+    fn bench_mxint5_gather_qmm(dt: DType) -> BenchSetup {
+        gather_bench(mt_mxint5_gather_qmm::kernel_ir_for(dt), QFormat::Mxint5, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_gather_qmm/mxint6", dtypes = [f32, f16, bf16])]
+    fn bench_mxint6_gather_qmm(dt: DType) -> BenchSetup {
+        gather_bench(mt_mxint6_gather_qmm::kernel_ir_for(dt), QFormat::Mxint6, 4096, 4096, dt)
+    }
+    #[bench(name = "ffai/block_scaled_gather_qmm/mxint8", dtypes = [f32, f16, bf16])]
+    fn bench_mxint8_gather_qmm(dt: DType) -> BenchSetup {
+        gather_bench(mt_mxint8_gather_qmm::kernel_ir_for(dt), QFormat::Mxint8, 4096, 4096, dt)
     }
 }
