@@ -40,13 +40,31 @@ cargo test --release -p metaltile-std --test <kernel>_gpu_correctness -- --ignor
 
 | Job | Workflow | What it runs |
 |---|---|---|
-| `typos` / `clippy` / tests | `.github/workflows/check.yml` | spell-check, lint `-D warnings`, `cargo test --workspace` |
+| `typos` / `clippy` / tests | `.github/workflows/check.yml` | spell-check, lint `-D warnings`, `cargo test --workspace` (Ubuntu — no GPU) |
+| build / test / bench | `.github/workflows/tile.yml` | `tile build`, `tile test` (GPU correctness vs CPU oracle), `tile bench` — on a **macOS GPU runner** |
 | coverage | `.github/workflows/coverage.yml` | `cargo llvm-cov --workspace --codecov` on macOS, uploads to Codecov; runs on pushes touching `crates/`, `Cargo.*`, `rust-toolchain.toml`, `.github/configs/codecov.yml` |
 | PR title | `.github/workflows/pr.yml` | validates the conventional-commit format |
 | labels | `.github/workflows/auto-label.yml` | release-notes labels from the PR-title prefix |
 
 - The DSL / codegen / GPU-correctness layers all run in CI — including on a macOS runner with a real GPU.
-- **`tile bench` (MLX side-by-side) is local-only** — it needs an MLX checkout the CI runners don't have. If a kernel has no MLX counterpart, MLX side-by-side does not apply; rely on the other three layers.
+- **`tile bench` benches the metaltile kernels by default**; the MLX side-by-side A/B is opt-in via `tile bench --mlx` (it needs an MLX checkout, so the default CI bench runs metaltile-only).
+
+### macOS runner environment
+
+The macOS CI jobs (`tile.yml` build/test/bench, plus `coverage.yml` and
+`release.yml`) run on the **`macos-26`** GitHub-hosted runner. To see exactly
+what is installed (Xcode versions, SDKs, CLI tools), consult the image manifest:
+[runner-images → macos-26-arm64 readme](https://github.com/actions/runner-images/blob/main/images/macos/macos-26-arm64-Readme.md).
+
+> **Xcode / Metal toolchain pin.** The NAX / MPP cooperative-tensor kernels
+> (`mpp::tensor_ops::matmul2d`) must be compiled by the **Xcode 26.5** Metal
+> toolchain. The `macos-26` image *defaults* to Xcode 26.4.1, whose Metal
+> compiler rejects the dynamic-extent `cooperative_tensor` at pipeline-build
+> time ("unsupported deferred-static-alloca-size"); 26.5 (also installed on the
+> image) compiles it. The macOS workflows therefore pin
+> `DEVELOPER_DIR=/Applications/Xcode_26.5.app/Contents/Developer`. Bump that path
+> once the image's default Xcode reaches ≥ 26.5. (`runs-on: macos-26` always
+> pulls GitHub's current image — there is no cached/pinned image to refresh.)
 
 ## Writing tests
 

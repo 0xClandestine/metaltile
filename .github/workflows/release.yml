@@ -14,6 +14,12 @@ on:
 permissions:
   contents: write   # create/update GitHub Releases and upload assets
 
+env:
+  # Build the released binary with Xcode 26.5's Metal toolchain — the macos-26
+  # image defaults to Xcode 26.4.1, which can't compile the NAX/MPP
+  # cooperative-tensor kernels (see tile.yml).
+  DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+
 jobs:
   build:
     name: Build tile binary
