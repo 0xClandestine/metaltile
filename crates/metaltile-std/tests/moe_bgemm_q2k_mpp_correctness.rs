@@ -22,6 +22,22 @@ fn xorshift(s: &mut u32) -> u32 {
     x
 }
 
+/// Canonical Q2_K output-index → (qs byte 0..63, 2-bit shift). Mirrors
+/// `gguf_dequant_q2_k` (llama.cpp `dequantize_row_q2_K` order) and the kernel
+/// under test exactly. The 256 values are NOT 4-consecutive-per-byte: 2 halves
+/// of 128, each split into 4 j-groups of 32, each j-group into two runs of 16
+/// values indexing 16 consecutive qs bytes at a shared `jg * 2` shift. The
+/// canonical scale index for output `i` is `i / 16`.
+fn q2_k_qpos(i: usize) -> (usize, u32) {
+    let half = i / 128;
+    let yh = i % 128;
+    let jg = yh / 32;
+    let yg = yh % 32;
+    let sub_half = yg / 16;
+    let l = yg % 16;
+    (half * 32 + sub_half * 16 + l, (jg * 2) as u32)
+}
+
 #[test]
 fn bgemm_q2k_mpp_matches_gemv_oracle() {
     let _g = gpu_lock();
@@ -54,13 +70,15 @@ fn bgemm_q2k_mpp_matches_gemv_oracle() {
         let vidx = o * k_in + k;
         let block = vidx / 256;
         let in_block = vidx % 256;
+        // Canonical Q2_K layout — identical to `gguf_dequant_q2_k` and the
+        // kernel under test. Scale index is `in_block / 16`; the qs byte +
+        // 2-bit shift come from `q2_k_qpos`, NOT the naive 4-per-byte order.
         let sub = in_block / 16;
-        let q_byte_idx = in_block / 4;
-        let word_idx = q_byte_idx / 4;
-        let byte_in_word = q_byte_idx % 4;
+        let (q_byte, shift) = q2_k_qpos(in_block);
+        let word_idx = q_byte / 4;
+        let byte_in_word = q_byte % 4;
         let word = qs[e * nblk * 16 + block * 16 + word_idx];
         let qs_byte = (word >> (byte_in_word * 8)) & 0xff;
-        let shift = (in_block % 4) * 2;
         let q2 = (qs_byte >> shift) & 0x3;
         let scale_byte = scales[e * nblk * 16 + block * 16 + sub] as u32;
         let s4 = scale_byte & 0xf;
