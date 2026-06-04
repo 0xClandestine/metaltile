@@ -99,12 +99,15 @@ pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
     use super::ffai_dsv4_mxfp4_dequant;
-    use crate::utils::pack_f32;
+    use crate::{quant::codec, utils::pack_f32};
 
-    /// The canonical OCP-spec MXFP4 value table. Order matches the
-    /// 4-bit code's binary interpretation (low 4 bits of nibble).
-    const MXFP4_LUT: [f32; 16] =
-        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0];
+    /// The canonical OCP-spec MXFP4 value table — `code → magnitude` for the 16
+    /// E2M1 codes. DSv4 ships these MoE expert weights as native MXFP4 in the
+    /// safetensors checkpoint, but the element decode is the *same* OCP E2M1
+    /// codebook as `quant::format`'s `Mxfp4` and the GGUF MXFP4 path: all route
+    /// through `codec::e2m1_decode` — the single source of truth — so the
+    /// uploaded LUT, the host quantizer, and this oracle can't drift apart.
+    fn mxfp4_lut() -> [f32; 16] { std::array::from_fn(|c| codec::e2m1_decode(c as u8)) }
 
     /// Reference quantizer: assign each input value to the nearest
     /// MXFP4 magnitude, picking a per-block E8M0 scale that maximises
@@ -125,17 +128,18 @@ pub mod kernel_tests {
             // fp32 terms: `scale = 2^(e - 127)`, so `e = floor(log2(amax / 6)) + 127`.
             let target = if amax > 0.0 { amax / 6.0 } else { 1.0 };
             let raw_exp = (target.log2().floor() as i32 + 127).clamp(0, 254);
-            let scale = (raw_exp - 127) as f32;
-            let scale_f32 = (2.0_f32).powf(scale);
+            // E8M0 block scale through the shared codec: 2^(raw_exp - 127).
+            let scale_f32 = codec::e8m0_decode(raw_exp as u8);
             scales.push(scale_f32);
             let inv = if scale_f32 > 0.0 { 1.0 / scale_f32 } else { 0.0 };
+            let lut = mxfp4_lut();
             let mut nibbles = [0u8; 32];
             for (i, &v) in block.iter().enumerate() {
                 let normalised = v * inv;
                 // Nearest-magnitude search over the 16-entry table.
                 let mut best = 0u8;
                 let mut best_err = f32::INFINITY;
-                for (code, &mag) in MXFP4_LUT.iter().enumerate() {
+                for (code, &mag) in lut.iter().enumerate() {
                     let err = (normalised - mag).abs();
                     if err < best_err {
                         best_err = err;
@@ -158,13 +162,14 @@ pub mod kernel_tests {
 
     fn cpu_dequant(qs_packed: &[u32], scales: &[f32]) -> Vec<f32> {
         let n_blocks = scales.len();
+        let lut = mxfp4_lut();
         let mut out = Vec::with_capacity(n_blocks * 32);
         for b in 0..n_blocks {
             let s = scales[b];
             for i in 0..32_usize {
                 let word = qs_packed[b * 4 + i / 8];
                 let nibble = (word >> ((i & 7) * 4)) & 0xf;
-                out.push(s * MXFP4_LUT[nibble as usize]);
+                out.push(s * lut[nibble as usize]);
             }
         }
         out
@@ -180,7 +185,7 @@ pub mod kernel_tests {
         TestSetup::new(ffai_dsv4_mxfp4_dequant::kernel_ir_for(dt))
             .input(TestBuffer::from_vec("qs_packed", qs_bytes, DType::U32))
             .input(TestBuffer::from_vec("scales", pack_f32(&scales, DType::F32), DType::F32))
-            .input(TestBuffer::from_vec("lut", pack_f32(&MXFP4_LUT, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("lut", pack_f32(&mxfp4_lut(), DType::F32), DType::F32))
             .input(TestBuffer::zeros("out", n, dt))
             .constexpr("n_values", n as u32)
             .expect(TestBuffer::from_vec("out", pack_f32(&dequantized, dt), dt))

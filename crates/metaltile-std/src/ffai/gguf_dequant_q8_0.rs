@@ -84,54 +84,18 @@ pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
     use super::ffai_gguf_dequant_q8_0;
-    use crate::utils::pack_f32;
-
-    /// Reference quantizer: mirrors `quantize_row_q8_0` in
-    /// ggml-quants.c. Returns the two GPU-resident tensors the kernel
-    /// expects: `(qs_signed, scales)`.
-    fn quantize_q8_0(values: &[f32]) -> (Vec<u8>, Vec<f32>) {
-        assert_eq!(values.len() % 32, 0, "Q8_0 needs multiple-of-32 values");
-        let n_blocks = values.len() / 32;
-        let mut qs = Vec::with_capacity(n_blocks * 32);
-        let mut scales = Vec::with_capacity(n_blocks);
-        for block in values.chunks_exact(32) {
-            let amax = block.iter().map(|v| v.abs()).fold(0.0_f32, f32::max);
-            let d = if amax > 0.0 { amax / 127.0 } else { 1.0 };
-            // Match the precision the on-disk fp16 super-scale gives
-            // us: round-trip through fp16 so the test's expected
-            // values match what the loader hands the kernel.
-            let d_f16 = half::f16::from_f32(d).to_f32();
-            scales.push(d_f16);
-            let inv_d = if d_f16 > 0.0 { 1.0 / d_f16 } else { 0.0 };
-            for &v in block {
-                let q = (v * inv_d).round().clamp(-128.0, 127.0) as i8;
-                qs.push(q as u8);
-            }
-        }
-        (qs, scales)
-    }
-
-    fn cpu_dequant(qs: &[u8], scales: &[f32]) -> Vec<f32> {
-        let n_blocks = scales.len();
-        let mut out = Vec::with_capacity(n_blocks * 32);
-        for b in 0..n_blocks {
-            let d = scales[b];
-            for i in 0..32 {
-                let q = qs[b * 32 + i] as i8;
-                out.push(q as f32 * d);
-            }
-        }
-        out
-    }
+    use crate::{quant::gguf, utils::pack_f32};
 
     fn setup(n_blocks: usize, dt: DType) -> TestSetup {
         let n = n_blocks * 32;
         let values: Vec<f32> = (0..n).map(|i| (i as f32 * 0.013 - 0.4).sin() * 3.5).collect();
-        let (qs, scales) = quantize_q8_0(&values);
-        let dequantized = cpu_dequant(&qs, &scales);
+        // Pack + dequant via the shared GgufFormat oracle — the single source of
+        // truth every q8_0 path decodes through (see quant::gguf).
+        let p = gguf::pack_q8_0(&values);
+        let dequantized = gguf::dequant_q8_0(&p);
         TestSetup::new(ffai_gguf_dequant_q8_0::kernel_ir_for(dt))
-            .input(TestBuffer::from_vec("qs_signed", qs, DType::U8))
-            .input(TestBuffer::from_vec("scales", pack_f32(&scales, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("qs_signed", p.qs, DType::U8))
+            .input(TestBuffer::from_vec("scales", pack_f32(&p.scales, DType::F32), DType::F32))
             .input(TestBuffer::zeros("out", n, dt))
             .constexpr("n_values", n as u32)
             .expect(TestBuffer::from_vec("out", pack_f32(&dequantized, dt), dt))

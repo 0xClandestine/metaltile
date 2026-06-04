@@ -145,7 +145,7 @@ Local verification of NAX kernels is the developer's responsibility on M4+ hardw
 | conv2d (vision patch conv — im2col + tiled GEMM) | ✓ | ✓ | ✓ | `ffai/conv2d.rs` → `conv2d_patch14` / `conv2d_patch16` + `conv2d_generic`. NCHW input, OIHW weight; direct conv (implicit im2col, one thread per output). VLM front-end. |
 | patch_embed (fused image unfold + linear projection) | ✗ | ✗ | ✓ | `ffai/patch_embed.rs` → `patch_embed<T>`. Fused image-unfold + linear projection — gathers each patch's pixels and dots them with one weight row, no intermediate unfolded buffer. **MMA-tiled perf path** (PR #157): `ffai/patch_embed_mma.rs` → `patch_embed_mma<T>` — implicit-patch-unfold + 4-SG 2×2 simdgroup-matrix MMA (`hidden` and `num_patches` divisible by 32); targets ViT-L/H shapes. |
 | rope_2d (2D positional RoPE for vision tokens) | ✓ | ✓ | ✓ | `ffai/rope_2d.rs` → `ffai_rope_2d<T>`. 2D RoPE over a (row, col) token grid; head_dim split into row half + column half, each running rotate-half RoPE. VLM front-end. |
-| mel_spectrogram (STFT + log-Mel filterbank) | ✓ | ✓ | ✓ | `ffai/mel_spectrogram.rs` → `mel_spectrogram<T>` (single-dispatch direct-DFT) + radix-FFT path `mel_stft_window<T>` → `mt_fft_n{n_fft}<T>` → `mel_filterbank<T>` (three kernels, O(N log N)). Generic over `T` per PR #152. STT front-end. |
+| mel_spectrogram (STFT + log-Mel filterbank) | ✓ | ✓ | ✓ | `ffai/mel_spectrogram.rs` → `mel_spectrogram<T>` (single-dispatch direct-DFT) + radix-FFT path `mel_stft_window<T>` → `mt_fft_n{n_fft}<T>` → `mel_filterbank<T>` (three kernels, O(N log N)). Generic over `T` per PR #152. STT front-end. All four kernels are bounds-guarded (`idx < n_out`) for threadgroup-rounded dispatch. **Correctness of the two direct-DFT kernels (`mel_spectrogram`, `mel_spectrogram_magnitude`) is gated at f32**: their in-thread DFT hits spectrum cancellation nulls where the GPU's approximate `sin`/`cos` diverge from libm by orders of magnitude relative to the (near-zero) true power, which low-precision *input* rounding moves onto the null — flaky O(6–16) log error on a correct kernel. The kernels stay generic over `T`; f16/bf16 are covered by `mel_filterbank` (post-FFT, no in-thread cancellation). |
 | audio_conv1d (wide-stride 1D conv — STT patch embed) | ✓ | ✓ | ✓ | `ffai/audio_conv1d.rs` → `audio_conv1d<T>`. Dense wide-stride multi-channel 1D conv (NCL); distinct from depthwise `conv1d_causal_step`. STT front-end. |
 | vocoder / iSTFT (TTS waveform synthesis) | ✓ | ✓ | ✓ | `ffai/vocoder.rs` → `vocoder_istft<T>`. Inverse-STFT overlap-add — one thread per output sample gathers every covering frame, inverse-DFTs with Hermitian symmetry, COLA-normalises. TTS waveform synthesis. |
 
@@ -286,6 +286,35 @@ block-scaling on future NVIDIA / AMD targets. The core matmul / MoE / RMSNorm-GE
 batched-QKV / KV-cache / attention families *additionally* carry the pre-existing
 asymmetric affine integers (scale + bias) for MLX-checkpoint interop. No weight-bearing
 family lacks an integer path.
+
+### Model-format decode — one codec, no per-oracle drift
+
+The Track-1 `QFormat` matrix above is metaltile's own block-scaled layout. Alongside it,
+several kernels consume **external model formats** with their own on-disk byte layouts but
+the *same* element/scale arithmetic. These all now decode through the shared
+[`quant::codec`](../crates/metaltile-std/src/quant/codec.rs) primitives (`e2m1_decode`,
+`e4m3_decode`, `e8m0_decode`, `int8_decode`, `f16_scale_decode`) and the
+[`quant::gguf`](../crates/metaltile-std/src/quant/gguf.rs) host packer/oracle — the single
+source of truth the kernel, the host quantizer, and the CPU correctness oracle all read,
+so an oracle can no longer drift from its kernel (the bug class fixed twice, independently,
+in PRs #264 and #265, once per duplicated copy of the layout map):
+
+| Format | Provenance | Element × scale | Decode source |
+|---|---|---|---|
+| `q8_0` | GGUF / llama.cpp | int8 × f16 block scale | `gguf::{pack,dequant}_q8_0` → `codec` |
+| `q2_k` | GGUF k-quant | 2-bit × two-level super-block (d·scale − dmin·min) | `gguf::{pack,dequant}_q2_k`, `gguf::q2_k_qpos` → `codec` |
+| DSv4 fp8-block | DeepSeek-V3 safetensors | e4m3 × per-(128×128) f32 | `codec::e4m3_decode` (NaN sentinel kept explicit) |
+| DSv4 mxfp4 | DeepSeek-V3 safetensors | = OCP `mxfp4` (e2m1 × e8m0) | `codec::{e2m1,e8m0}_decode` |
+
+The MoE Q2_K correctness oracles (`moe_gather_down_q2k`, `moe_bgemm_q2k_mpp`) import the one
+`gguf::q2_k_qpos` index map rather than each carrying a private copy.
+
+- **`iq2_xxs`** (GGUF i-quant) is a **codebook** format — the "element" is a 256×8 signed-octet
+  grid lookup plus a 7-bit sign-parity expansion, not an `element × scale` decode — so it sits
+  *outside* the codec matrix. The kernel is a **WIP scaffold** (grid table unlanded; ABI/shape
+  smoke-test only) and its MoE siblings (`moe_*_iq2xxs`) share that status.
+- **`gemm_q8` / `gemv_q8`** consume the `q8_0` format but are **bench-only** (no correctness
+  oracle yet) — a test-coverage gap, not a decode-drift risk.
 
 ### Gaps / deliberate exclusions
 

@@ -107,128 +107,24 @@ pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
     use super::ffai_gguf_dequant_q2_k;
-    use crate::utils::pack_f32;
-
-    /// Canonical Q2_K output-index → (qs byte 0..63, 2-bit shift).
-    /// Mirrors the GPU kernel's mapping exactly (llama.cpp
-    /// `dequantize_row_q2_K` order) so the quantizer, the CPU reference,
-    /// and the kernel all read/write the same byte for a given output —
-    /// the canonical scale index is simply `i / 16`.
-    fn q2_k_qpos(i: usize) -> (usize, u32) {
-        let half = i / 128; // 0..1  → qs byte base half*32
-        let yh = i % 128; // 0..127
-        let jg = yh / 32; // 0..3  → shift = jg*2
-        let yg = yh % 32; // 0..31
-        let sub_half = yg / 16; // 0..1
-        let l = yg % 16; // 0..15 → byte within the 16-run
-        (half * 32 + sub_half * 16 + l, (jg * 2) as u32)
-    }
-
-    /// Quantize a slice into the Q2_K GPU-resident split.
-    ///
-    /// This is a *non-trained* quantizer (per-sub-block min/max with
-    /// uniform 2-bit bucketing) sufficient to drive the kernel's
-    /// correctness test — `quantize_row_q2_K` in ggml-quants.c uses a
-    /// search-and-fit procedure tuned for perplexity that we don't
-    /// need to replicate for a dequant test.
-    fn quantize_q2_k(values: &[f32]) -> (Vec<u32>, Vec<u8>, Vec<f32>, Vec<f32>) {
-        assert_eq!(values.len() % 256, 0, "Q2_K needs multiple-of-256 values");
-        let n_blocks = values.len() / 256;
-        let mut qs_packed = Vec::with_capacity(n_blocks * 16);
-        let mut scales = Vec::with_capacity(n_blocks * 16);
-        let mut d_f32 = Vec::with_capacity(n_blocks);
-        let mut dmin_f32 = Vec::with_capacity(n_blocks);
-
-        for block in values.chunks_exact(256) {
-            // Per-sub-block (16 sub-blocks of 16 values each) compute
-            // mn, scale; quantize to 2 bits.
-            let mut sub_scales = [0u8; 16];
-            let mut sub_mins = [0u8; 16];
-            let mut qs_bytes = [0u8; 64];
-            for s in 0..16 {
-                let sub = &block[s * 16..(s + 1) * 16];
-                let mn = sub.iter().cloned().fold(f32::INFINITY, f32::min);
-                let mx = sub.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                let scale = ((mx - mn) / 3.0).max(1e-30);
-                let mn_q = (-mn / scale).round().clamp(0.0, 15.0) as u8;
-                let scale_q = (scale * 15.0).round().clamp(0.0, 15.0) as u8;
-                // Reconstruct the encoded `d` / `dmin` super-scales so
-                // dequant exactly recovers the per-sub-block scale.
-                sub_scales[s] = scale_q;
-                sub_mins[s] = mn_q;
-                // Pack two 2-bit quants per nibble: out = round((x + min) / scale).
-                let recon_scale = (scale_q as f32) / 15.0;
-                let recon_min = -(mn_q as f32) * recon_scale;
-                for (i, &v) in sub.iter().enumerate() {
-                    let q =
-                        ((v - recon_min) / recon_scale.max(1e-30)).round().clamp(0.0, 3.0) as u8;
-                    // Output index s*16+i (scale s governs the 16 outputs
-                    // [s*16, s*16+16)); write the quant at its canonical
-                    // byte/shift so the kernel recovers it.
-                    let (q_byte, shift) = q2_k_qpos(s * 16 + i);
-                    qs_bytes[q_byte] |= q << shift;
-                }
-            }
-            // Combine the per-sub-block 4-bit scale + 4-bit min into
-            // the on-disk scales[16] layout.
-            for s in 0..16 {
-                scales.push((sub_mins[s] << 4) | sub_scales[s]);
-            }
-            // Repack `qs_bytes` (64 bytes) into 16 u32 LE words.
-            for w in 0..16 {
-                let bs = w * 4;
-                qs_packed.push(
-                    (qs_bytes[bs] as u32)
-                        | ((qs_bytes[bs + 1] as u32) << 8)
-                        | ((qs_bytes[bs + 2] as u32) << 16)
-                        | ((qs_bytes[bs + 3] as u32) << 24),
-                );
-            }
-            // The two super-scales encode `d = 1/15` and `dmin = 1`
-            // after the reconstruction above. Materialize as fp32 the
-            // same way the GGUF loader would after fp16-converting.
-            d_f32.push(half::f16::from_f32(1.0 / 15.0).to_f32());
-            dmin_f32.push(half::f16::from_f32(1.0).to_f32());
-        }
-        (qs_packed, scales, d_f32, dmin_f32)
-    }
-
-    /// CPU reference. Mirrors the GPU kernel exactly so any kernel-side
-    /// divergence shows up as a tolerance miss.
-    fn cpu_dequant(qs_packed: &[u32], scales: &[u8], d_f32: &[f32], dmin_f32: &[f32]) -> Vec<f32> {
-        let n_blocks = d_f32.len();
-        let mut out = Vec::with_capacity(n_blocks * 256);
-        for b in 0..n_blocks {
-            let d = d_f32[b];
-            let dmin = dmin_f32[b];
-            for i in 0..256_usize {
-                let sub = i / 16; // canonical scale index == i / 16
-                let (q_byte, shift) = q2_k_qpos(i);
-                let word = qs_packed[b * 16 + q_byte / 4];
-                let byte_in_word = q_byte & 3;
-                let qs_byte = (word >> (byte_in_word * 8)) & 0xff;
-                let q_2bit = (qs_byte >> shift) & 0x3;
-                let scale_byte = scales[b * 16 + sub] as u32;
-                let scale_4bit = scale_byte & 0xf;
-                let min_4bit = (scale_byte >> 4) & 0xf;
-                out.push(d * (scale_4bit as f32) * (q_2bit as f32) - dmin * (min_4bit as f32));
-            }
-        }
-        out
-    }
+    use crate::{quant::gguf, utils::pack_f32};
 
     fn setup(n_blocks: usize, dt: DType) -> TestSetup {
         let n = n_blocks * 256;
         let values: Vec<f32> = (0..n).map(|i| (i as f32 * 0.007 - 0.5).sin() * 1.5).collect();
-        let (qs_packed, scales, d_f32, dmin_f32) = quantize_q2_k(&values);
-        let dequantized = cpu_dequant(&qs_packed, &scales, &d_f32, &dmin_f32);
+        // Pack + dequant via the shared GgufFormat oracle (quant::gguf) — the
+        // canonical q2_k_qpos map + two-level decode now live in one place the
+        // kernel, the quantizer, and this oracle all share, so the oracle can't
+        // drift from the kernel (the bug class fixed in #264).
+        let p = gguf::pack_q2_k(&values);
+        let dequantized = gguf::dequant_q2_k(&p);
         // Pack u32 vec as little-endian bytes for the test framework.
-        let qs_bytes: Vec<u8> = qs_packed.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let qs_bytes: Vec<u8> = p.qs_packed.iter().flat_map(|w| w.to_le_bytes()).collect();
         TestSetup::new(ffai_gguf_dequant_q2_k::kernel_ir_for(dt))
             .input(TestBuffer::from_vec("qs_packed", qs_bytes, DType::U32))
-            .input(TestBuffer::from_vec("scales", scales, DType::U8))
-            .input(TestBuffer::from_vec("d_f32", pack_f32(&d_f32, DType::F32), DType::F32))
-            .input(TestBuffer::from_vec("dmin_f32", pack_f32(&dmin_f32, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("scales", p.scales, DType::U8))
+            .input(TestBuffer::from_vec("d_f32", pack_f32(&p.d, DType::F32), DType::F32))
+            .input(TestBuffer::from_vec("dmin_f32", pack_f32(&p.dmin, DType::F32), DType::F32))
             .input(TestBuffer::zeros("out", n, dt))
             .constexpr("n_values", n as u32)
             .expect(TestBuffer::from_vec("out", pack_f32(&dequantized, dt), dt))
