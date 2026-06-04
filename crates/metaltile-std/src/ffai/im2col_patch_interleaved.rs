@@ -173,7 +173,7 @@ pub mod kernel_benches {
 
     use super::ffai_im2col_patch_interleaved;
 
-    #[bench(name = "ffai/im2col/im2col_patch_interleaved", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_interleaved(dt: DType) -> BenchSetup {
         let (channels, patch, grid_h, grid_w, patch_dim_padded) =
             (3usize, 14usize, 28usize, 28usize, 592usize);

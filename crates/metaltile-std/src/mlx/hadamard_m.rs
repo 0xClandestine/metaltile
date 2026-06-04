@@ -46,7 +46,10 @@
 //! integer where bit j = 1 means H_M[t][j] = +1 (otherwise −1).
 //! Verified for orthogonality: H · H^T = M · I.
 
-use metaltile::{core::{dtype::DType, ir::Kernel}, kernel};
+use metaltile::{
+    core::{dtype::DType, ir::Kernel},
+    kernel,
+};
 
 // ── H_M sign-bit encodings ─────────────────────────────────────────────────
 //

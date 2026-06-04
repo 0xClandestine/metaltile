@@ -212,7 +212,7 @@ pub mod kernel_benches {
 
     use super::ffai_patch_unfold_qwen;
 
-    #[bench(name = "ffai/im2col/patch_unfold_qwen", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_patch_unfold_qwen(dt: DType) -> BenchSetup {
         let (channels, patch, temporal_patch, merge, merge_blocks) =
             (3usize, 14usize, 2usize, 2usize, 8usize);
