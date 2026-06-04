@@ -35,8 +35,8 @@
 //!
 //! `#[kernel(variants(BITS = [2, 3, 4, 6, 8], suffix = "int{BITS}"))]`
 //! emits one kernel module per bit-width. A compile-time
-//! `if BITS % 2 == 0` selects the pack-strided path (even widths) or the
-//! element-strided bit-stream path (odd widths). BITS=5 is absent — AURA
+//! `if 32u32 % BITS == 0` selects the pack-strided path (BITS ∈ {2,4,8}) or the
+//! element-strided bit-stream path (BITS ∈ {3,6}). BITS=5 is absent — AURA
 //! does not ship int5.
 
 use metaltile::kernel;
@@ -70,7 +70,7 @@ pub fn aura_dequant_rotated<T>(
     let base = (bh * tokens + t) * packed_width;
     let norm_val = load(norms[bh * tokens + t]).cast::<f32>();
 
-    if BITS % 2 == 0 {
+    if 32u32 % BITS == 0 {
         // Pack-strided path: one u32 load per thread covers `32/BITS` dims.
         let dims_per_word = 32u32 / BITS;
         let word = load(packed[base + w]);

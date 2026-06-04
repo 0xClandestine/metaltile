@@ -12,18 +12,18 @@
 //!   output  [out_dim]                  T
 //!
 //! Two dispatch strategies, chosen per bit-width via compile-time
-//! `if BITS % 2 == 0`:
+//! `if 32u32 % BITS == 0`:
 //!
 //! **Pack-strided** (BITS ∈ {2, 4, 8}) — threads stride over u32 packs; each
 //! pack yields `32/BITS` values. One u32 load amortises across all values in
 //! the pack; no extra bit-extraction arithmetic beyond a simple shift+mask.
+//! Requires `32 % BITS == 0` (i.e. BITS divides a u32 evenly).
 //!
 //! **Element-strided** (BITS ∈ {3, 5, 6}) — threads stride over individual
 //! elements using the two-word bit-stream formula from `dequant_gather.rs`.
-//! Odd-width packs don't align to u32 boundaries so pack-striding would
-//! require complex cycle handling; element-striding is cleaner and achieves
-//! the same cache behaviour (adjacent threads share the same u32 words →
-//! L1 multicast) while avoiding the idle-thread problem of the old
+//! Used when BITS does not divide 32 evenly; element-striding is cleaner and
+//! achieves the same cache behaviour (adjacent threads share the same u32
+//! words → L1 multicast) while avoiding the idle-thread problem of the old
 //! group-strided approach.
 //!
 //! ## Variant axis
@@ -40,8 +40,8 @@ use metaltile::kernel;
 /// Produces: `dequant_gemv_int2`, `_int3`, `_int4`, `_int5`, `_int6`,
 /// `_int8`. One threadgroup per output row; `reduce_sum` across lanes.
 ///
-/// Even BITS: pack-strided (one u32 covers `32/BITS` elements).
-/// Odd BITS: element-strided two-word bit-stream (`lo | hi` formula).
+/// `32 % BITS == 0` (BITS ∈ {2,4,8}): pack-strided (one u32 covers `32/BITS` elements).
+/// `32 % BITS != 0` (BITS ∈ {3,5,6}): element-strided two-word bit-stream (`lo | hi` formula).
 #[kernel(variants(BITS = [2, 3, 4, 5, 6, 8], suffix = "int{BITS}"))]
 pub fn dequant_gemv<T>(
     weight: Tensor<u32>,
@@ -57,7 +57,7 @@ pub fn dequant_gemv<T>(
     let row_group_off = row * n_groups;
     let mut acc = 0.0f32;
 
-    if BITS % 2 == 0 {
+    if 32u32 % BITS == 0 {
         // Pack-strided: one u32 load covers `32/BITS` values.
         let vals_per_pack = 32u32 / BITS;
         let mask = (1u32 << BITS) - 1u32;
@@ -440,13 +440,13 @@ pub mod kernel_tests {
             .grid_3d(grid_rows, 1, 1, [tpg, 1, 1])
     }
 
-    // Even bits (2, 4, 8): pack-strided; in_dim a multiple of 32/bits.
-    // Odd bits (3, 5, 6): element-strided; in_dim*bits must be 32-aligned.
+    // Pack-strided (32 % BITS == 0): BITS ∈ {2, 4, 8}; in_dim a multiple of 32/BITS.
+    // Element-strided (32 % BITS != 0): BITS ∈ {3, 5, 6}; in_dim*BITS must be 32-aligned.
     //   int3: 64*3=192; int5: 64*5=320; int6: 64*6=384.
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1],
                   variants(BITS = [2, 3, 4, 5, 6, 8], suffix = "int{BITS}"))]
     fn test_dequant_gemv(dt: DType) -> TestSetup {
-        if BITS % 2 == 0 {
+        if 32u32 % BITS == 0 {
             gemv_setup(dequant_gemv_intBITS::kernel_ir_for(dt), BITS, 4, 256, 64, 4, TPG, dt)
         } else {
             gemv_setup(dequant_gemv_intBITS::kernel_ir_for(dt), BITS, 4, 64, 32, 4, TPG, dt)
