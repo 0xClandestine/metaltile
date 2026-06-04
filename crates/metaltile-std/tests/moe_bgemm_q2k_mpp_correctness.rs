@@ -12,6 +12,9 @@ use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
 use metaltile::core::ir::KernelMode;
 use metaltile_runtime::Context;
 use metaltile_std::ffai::moe_bgemm_q2k_mpp::ffai_moe_gather_bgemm_q2k_mpp;
+// Shared Q2_K output-index → (qs byte, 2-bit shift) map (see PR #264/#265): the
+// kernel, quantizer, and this oracle all read the one definition in quant::gguf.
+use metaltile_std::quant::gguf::q2_k_qpos;
 
 fn xorshift(s: &mut u32) -> u32 {
     let mut x = *s;
@@ -20,22 +23,6 @@ fn xorshift(s: &mut u32) -> u32 {
     x ^= x << 5;
     *s = x;
     x
-}
-
-/// Canonical Q2_K output-index → (qs byte 0..63, 2-bit shift). Mirrors
-/// `gguf_dequant_q2_k` (llama.cpp `dequantize_row_q2_K` order) and the kernel
-/// under test exactly. The 256 values are NOT 4-consecutive-per-byte: 2 halves
-/// of 128, each split into 4 j-groups of 32, each j-group into two runs of 16
-/// values indexing 16 consecutive qs bytes at a shared `jg * 2` shift. The
-/// canonical scale index for output `i` is `i / 16`.
-fn q2_k_qpos(i: usize) -> (usize, u32) {
-    let half = i / 128;
-    let yh = i % 128;
-    let jg = yh / 32;
-    let yg = yh % 32;
-    let sub_half = yg / 16;
-    let l = yg % 16;
-    (half * 32 + sub_half * 16 + l, (jg * 2) as u32)
 }
 
 #[test]

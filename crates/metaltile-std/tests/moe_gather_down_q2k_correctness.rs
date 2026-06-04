@@ -17,6 +17,10 @@ use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
 use metaltile::core::ir::KernelMode;
 use metaltile_runtime::Context;
 use metaltile_std::ffai::moe_gather_down_q2k::ffai_moe_gather_down_q2k;
+// The Q2_K output-index → (qs byte, 2-bit shift) map is the single shared
+// definition in `quant::gguf`: the kernel, the quantizer, and this oracle all
+// read it, so the layout can't drift apart (getting it wrong was PR #264).
+use metaltile_std::quant::gguf::q2_k_qpos;
 
 const N_SLOTS: usize = 6;
 
@@ -30,23 +34,6 @@ fn xorshift(state: &mut u32) -> u32 {
 }
 
 fn frand(state: &mut u32) -> f32 { (xorshift(state) as f32 / u32::MAX as f32) * 2.0 - 1.0 }
-
-/// Canonical Q2_K output-index → (qs byte 0..63, 2-bit shift). Mirrors
-/// `gguf_dequant_q2_k` (llama.cpp `dequantize_row_q2_K` order) and the
-/// `ffai_moe_gather_down_q2k` kernel under test exactly. The 256 values
-/// are NOT 4-consecutive-per-byte: they split into 2 halves of 128, each
-/// half into 4 j-groups of 32, each j-group into two runs of 16 values
-/// indexing 16 consecutive qs bytes at a shared shift (`jg * 2`). The
-/// canonical scale index for output `i` is simply `i / 16`.
-fn q2_k_qpos(i: usize) -> (usize, u32) {
-    let half = i / 128; // 0..1  → qs byte base half*32
-    let yh = i % 128; // 0..127
-    let jg = yh / 32; // 0..3  → shift = jg*2
-    let yg = yh % 32; // 0..31
-    let sub_half = yg / 16; // 0..1
-    let l = yg % 16; // 0..15 → byte within the 16-run
-    (half * 32 + sub_half * 16 + l, (jg * 2) as u32)
-}
 
 #[allow(clippy::too_many_arguments)]
 fn reference(
