@@ -162,7 +162,7 @@ pub mod kernel_benches {
 
     use super::ffai_moe_bgemm_q2k_bm64;
 
-    #[bench(name = "ffai/moe/bgemm_q2k_bm64", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_bgemm_q2k_bm64(dt: DType) -> BenchSetup {
         let n_experts = 4usize;
         let k_in = 2048usize;

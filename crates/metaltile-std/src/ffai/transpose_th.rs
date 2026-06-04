@@ -106,7 +106,7 @@ pub mod kernel_benches {
 
     use super::ffai_transpose_th;
 
-    #[bench(name = "ffai/transpose/transpose_th", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_transpose_th(dt: DType) -> BenchSetup {
         let (n_tokens, n_heads, head_dim) = (576usize, 16usize, 64usize);
         BenchSetup::new(ffai_transpose_th::kernel_ir_for(dt))

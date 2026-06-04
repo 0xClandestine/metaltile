@@ -291,7 +291,7 @@ pub mod kernel_benches {
 
     use super::ffai_sdpa_bidirectional_windowed_d80;
 
-    #[bench(name = "ffai/sdpa_bidirectional_windowed_d80", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_windowed_d80(dt: DType) -> BenchSetup {
         let head_dim = 80usize;
         let (n_q_heads, n_kv_heads) = (16usize, 16usize);

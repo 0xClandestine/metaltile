@@ -228,7 +228,7 @@ pub mod kernel_benches {
 
     use super::depthwise_conv2d_nhwc;
 
-    #[bench(name = "ffai/depthwise_conv2d/depthwise_conv2d_nhwc", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_depthwise_conv2d_nhwc(dt: DType) -> BenchSetup {
         let (batch, ch, in_h, in_w, k, stride, pad, dilation) =
             (1usize, 64usize, 112usize, 112usize, 3usize, 2usize, 1usize, 1usize);

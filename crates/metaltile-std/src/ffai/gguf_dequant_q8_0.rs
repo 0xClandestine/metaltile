@@ -150,7 +150,7 @@ pub mod kernel_benches {
 
     use super::ffai_gguf_dequant_q8_0;
 
-    #[bench(name = "ffai/gguf_dequant_q8_0", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_q8_0(dt: DType) -> BenchSetup {
         // 4096 × 4096 attn projection slab.
         let n = 4096 * 4096usize;

@@ -85,7 +85,7 @@ pub mod kernel_benches {
 
     use super::ffai_snake1d;
 
-    #[bench(name = "ffai/act/snake1d", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_snake1d(dt: DType) -> BenchSetup {
         let (c, length) = (128usize, 7801usize);
         let n = c * length;

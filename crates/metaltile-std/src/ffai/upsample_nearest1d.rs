@@ -84,7 +84,7 @@ pub mod kernel_benches {
 
     use super::ffai_upsample_nearest1d;
 
-    #[bench(name = "ffai/resample/upsample_nearest1d", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_upsample_nearest1d(dt: DType) -> BenchSetup {
         let (c, in_len, factor) = (512usize, 130usize, 2usize);
         let n_out = c * in_len * factor;

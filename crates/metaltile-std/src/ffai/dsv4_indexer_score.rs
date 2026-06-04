@@ -138,7 +138,7 @@ pub mod kernel_benches {
 
     use super::ffai_dsv4_indexer_score;
 
-    #[bench(name = "ffai/dsv4_indexer_score", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_indexer(dt: DType) -> BenchSetup {
         let (n_heads, d_idx, n_kv) = (64usize, 128usize, 4096usize);
         let bytes =

@@ -72,7 +72,7 @@ pub mod kernel_benches {
 
     use super::ffai_gelu_erf;
 
-    #[bench(name = "ffai/act/gelu_erf", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gelu_erf(dt: DType) -> BenchSetup {
         let n = 2048usize * 64usize;
         BenchSetup::new(ffai_gelu_erf::kernel_ir_for(dt))

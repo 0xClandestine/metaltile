@@ -114,7 +114,7 @@ pub mod kernel_benches {
 
     use super::mt_clamped_swiglu;
 
-    #[bench(name = "mlx/clamped_swiglu", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_clamped_swiglu(dt: DType) -> BenchSetup {
         let n = 1024 * 1024usize;
         BenchSetup::new(mt_clamped_swiglu::kernel_ir_for(dt))

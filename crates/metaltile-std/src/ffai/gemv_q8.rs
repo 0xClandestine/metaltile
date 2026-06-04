@@ -218,7 +218,7 @@ pub mod kernel_benches {
         ffai_grouped_gemv_q8_rows_tiled,
     };
 
-    #[bench(name = "ffai/gemv/q8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gemv_q8(dt: DType) -> BenchSetup {
         let m_out = 4096usize;
         let k_in = 8192usize;
@@ -235,7 +235,7 @@ pub mod kernel_benches {
             .bytes_moved((m_out * bpr * 36 + k_in * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "ffai/gemv/grouped_q8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_grouped_gemv_q8(dt: DType) -> BenchSetup {
         let m_out = 8192usize;
         let k_in = 4096usize;
@@ -253,7 +253,7 @@ pub mod kernel_benches {
             .bytes_moved((m_out * bpr * 36 + 8 * k_in * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "ffai/gemv/grouped_q8_rows", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_grouped_gemv_q8_rows(dt: DType) -> BenchSetup {
         let m_out = 8192usize;
         let k_in = 4096usize;
@@ -273,7 +273,7 @@ pub mod kernel_benches {
             .bytes_moved((m_out * bpr * 36 + n_tokens * n_groups * k_in * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "ffai/gemv/grouped_q8_rows_tiled", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_grouped_gemv_q8_rows_tiled(dt: DType) -> BenchSetup {
         let m_out = 8192usize;
         let k_in = 4096usize;

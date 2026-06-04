@@ -73,7 +73,7 @@ pub mod kernel_benches {
 
     use super::ffai_gguf_iq2_xxs_extract_qs;
 
-    #[bench(name = "ffai/gguf_iq2_xxs_extract_qs", dtypes = [u32])]
+    #[bench(dtypes = [u32])]
     fn bench_extract_qs(_dt: DType) -> BenchSetup {
         let n = 4096 * 4096usize;
         let n_blocks = n / 256;

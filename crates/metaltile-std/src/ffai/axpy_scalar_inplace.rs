@@ -49,7 +49,7 @@ pub mod kernel_benches {
 
     use super::ffai_axpy_scalar_inplace;
 
-    #[bench(name = "ffai/axpy_scalar_inplace", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_axpy_scalar(dt: DType) -> BenchSetup {
         let n = 4096usize;
         BenchSetup::new(ffai_axpy_scalar_inplace::kernel_ir_for(dt))

@@ -75,7 +75,7 @@ pub mod kernel_benches {
 
     use super::ffai_clamp_scalar;
 
-    #[bench(name = "ffai/elementwise/clamp_scalar", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_clamp_scalar(dt: DType) -> BenchSetup {
         let n = 576 * 768usize; // SigLIP patch-grid activation size
         BenchSetup::new(ffai_clamp_scalar::kernel_ir_for(dt))

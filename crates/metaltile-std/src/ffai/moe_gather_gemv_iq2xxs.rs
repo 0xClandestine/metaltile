@@ -132,7 +132,7 @@ pub mod kernel_benches {
     use super::ffai_moe_gather_gemv_iq2xxs;
 
     // n_slots=6 routed experts; production gate/up dims (m_out=2048, k_in=4096).
-    #[bench(name = "ffai/moe/gather_gemv_iq2xxs", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gather_gemv_iq2xxs(dt: DType) -> BenchSetup {
         let n_slots = 6usize;
         let m_out = 2048usize;

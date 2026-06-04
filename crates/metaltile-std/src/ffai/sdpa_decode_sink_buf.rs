@@ -324,7 +324,7 @@ pub mod kernel_benches {
 
     use super::ffai_sdpa_decode_sink_buf;
 
-    #[bench(name = "ffai/sdpa_decode_sink_buf", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa_decode_sink_buf(dt: DType) -> BenchSetup {
         let head_dim = 64usize;
         let (n_q_heads, n_kv_heads) = (8usize, 2usize);

@@ -154,7 +154,7 @@ pub mod kernel_benches {
 
     use super::ffai_moe_gather_bgemm_q2k_mpp;
 
-    #[bench(name = "ffai/moe/gather_bgemm_q2k_mpp", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_bgemm_q2k_mpp(dt: DType) -> BenchSetup {
         let n_experts = 4usize;
         let k_in = 2048usize;

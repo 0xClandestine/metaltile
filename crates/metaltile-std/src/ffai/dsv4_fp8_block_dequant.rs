@@ -216,7 +216,7 @@ pub mod kernel_benches {
 
     use super::ffai_dsv4_fp8_block_dequant;
 
-    #[bench(name = "ffai/dsv4_fp8_block_dequant", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_fp8(dt: DType) -> BenchSetup {
         // DSv4-Flash attention shape: wq_b is 1024 → 64*512 = 32768
         // (fused QK_nope + QK_rope across heads). Use 4096 × 4096 as

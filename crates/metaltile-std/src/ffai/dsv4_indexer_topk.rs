@@ -156,7 +156,7 @@ pub mod kernel_benches {
 
     use super::ffai_dsv4_indexer_topk_block;
 
-    #[bench(name = "ffai/dsv4_indexer_topk_block", dtypes = [f32])]
+    #[bench(dtypes = [f32])]
     fn bench_topk(_dt: DType) -> BenchSetup {
         let (n_kv, k) = (1024usize, 512usize);
         BenchSetup::new(ffai_dsv4_indexer_topk_block::kernel_ir())

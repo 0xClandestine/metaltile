@@ -49,7 +49,7 @@ pub mod kernel_benches {
 
     use super::ffai_vector_add;
 
-    #[bench(name = "ffai/vector_add", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_add(dt: DType) -> BenchSetup {
         let n = 4096usize;
         BenchSetup::new(ffai_vector_add::kernel_ir_for(dt))

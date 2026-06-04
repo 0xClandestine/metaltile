@@ -152,7 +152,7 @@ pub mod kernel_benches {
 
     use super::ffai_dsv4_compressor_pool;
 
-    #[bench(name = "ffai/dsv4_compressor_pool_csa", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_csa(dt: DType) -> BenchSetup {
         let (pool, head_dim) = (8usize, 512usize);
         BenchSetup::new(ffai_dsv4_compressor_pool::kernel_ir_for(dt))
@@ -169,7 +169,7 @@ pub mod kernel_benches {
             )
     }
 
-    #[bench(name = "ffai/dsv4_compressor_pool_hca", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_hca(dt: DType) -> BenchSetup {
         let (pool, head_dim) = (128usize, 512usize);
         BenchSetup::new(ffai_dsv4_compressor_pool::kernel_ir_for(dt))

@@ -330,7 +330,7 @@ pub mod kernel_benches {
 
     use super::ffai_moe_down_weighted_sum_6;
 
-    #[bench(name = "ffai/moe_down_weighted_sum_6", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mds(dt: DType) -> BenchSetup {
         let (m, k) = (4096usize, 2048usize);
         BenchSetup::new(ffai_moe_down_weighted_sum_6::kernel_ir_for(dt))

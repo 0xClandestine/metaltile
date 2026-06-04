@@ -106,7 +106,7 @@ pub mod kernel_benches {
 
     use super::{mt_dsv4_router_topk, mt_remap_u32};
 
-    #[bench(name = "ffai/moe/dsv4_router_topk", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_dsv4_router_topk(dt: DType) -> BenchSetup {
         let n_experts = 256usize;
         let k = 6usize;
@@ -122,7 +122,7 @@ pub mod kernel_benches {
             .bytes_moved((2 * n_experts * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "ffai/moe/remap_u32", dtypes = [f32])]
+    #[bench(dtypes = [f32])]
     fn bench_remap_u32(_dt: DType) -> BenchSetup {
         let n = 6usize;
         BenchSetup::new(mt_remap_u32::kernel_ir())

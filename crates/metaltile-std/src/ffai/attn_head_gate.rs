@@ -103,7 +103,7 @@ pub mod kernel_benches {
 
     use super::ffai_attn_head_gate;
 
-    #[bench(name = "ffai/attn_head_gate", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_attn_head_gate(dt: DType) -> BenchSetup {
         // Step-3 full-attn shape.
         let (n_heads, head_dim) = (64usize, 128usize);

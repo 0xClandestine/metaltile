@@ -87,7 +87,7 @@ pub mod kernel_benches {
 
     use super::ffai_gguf_dequant_iq2_xxs_raw;
 
-    #[bench(name = "ffai/gguf_dequant_iq2_xxs_raw", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_iq2_xxs_raw(dt: DType) -> BenchSetup {
         let n = 4096 * 4096usize;
         let n_blocks = n / 256;

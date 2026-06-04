@@ -63,7 +63,7 @@ pub mod kernel_benches {
 
     use super::ffai_dsv4_partial_rope_rows;
 
-    #[bench(name = "ffai/dsv4_partial_rope_rows", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_rope_rows(dt: DType) -> BenchSetup {
         let (n_heads, head_dim, n_nope, half_rot, n_tokens) =
             (64usize, 512usize, 448usize, 32usize, 256usize);

@@ -282,7 +282,7 @@ pub mod kernel_benches {
 
     use super::ffai_sdpa_prefill_d512_sink;
 
-    #[bench(name = "ffai/sdpa/sdpa_prefill_d512_sink", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_sdpa_prefill_d512_sink(dt: DType) -> BenchSetup {
         let hd = 512usize;
         let n_q = 64usize;

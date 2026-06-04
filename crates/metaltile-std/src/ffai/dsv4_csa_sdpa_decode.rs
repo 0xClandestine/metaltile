@@ -424,7 +424,7 @@ pub mod kernel_benches {
 
     use super::ffai_dsv4_csa_sdpa_decode;
 
-    #[bench(name = "ffai/dsv4_csa_sdpa_decode", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_csa(dt: DType) -> BenchSetup {
         let (n_q_heads, n_kv_heads, head_dim) = (32usize, 8usize, 512usize);
         let (n_selected, kv_stride) = (640usize, 4096usize); // 512 top-k + 128 sliding window

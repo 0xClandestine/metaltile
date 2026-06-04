@@ -131,7 +131,7 @@ pub mod kernel_benches {
 
     use super::adain1d;
 
-    #[bench(name = "ffai/norm/adain1d", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_adain1d(dt: DType) -> BenchSetup {
         let (batch, channels, length) = (4usize, 512usize, 1024usize);
         let rows = batch * channels;

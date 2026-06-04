@@ -130,7 +130,7 @@ pub mod kernel_benches {
 
     use super::im2col_patch;
 
-    #[bench(name = "ffai/im2col/im2col_patch", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_im2col_patch(dt: DType) -> BenchSetup {
         let (channels, patch, grid_h, grid_w) = (3usize, 14usize, 28usize, 28usize);
         let in_h = grid_h * patch;

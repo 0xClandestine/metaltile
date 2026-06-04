@@ -176,7 +176,7 @@ pub mod kernel_benches {
 
     use super::ffai_moe_bgemm_iq2xxs_view;
 
-    #[bench(name = "ffai/moe/bgemm_iq2xxs_view", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_bgemm_iq2xxs_view(dt: DType) -> BenchSetup {
         let n_experts = 4usize;
         let k_in = 4096usize;

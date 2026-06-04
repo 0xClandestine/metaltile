@@ -66,7 +66,7 @@ pub mod kernel_benches {
 
     use super::ffai_leaky_relu;
 
-    #[bench(name = "ffai/act/leaky_relu", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_leaky_relu(dt: DType) -> BenchSetup {
         let n = 128usize * 7801usize;
         BenchSetup::new(ffai_leaky_relu::kernel_ir_for(dt))

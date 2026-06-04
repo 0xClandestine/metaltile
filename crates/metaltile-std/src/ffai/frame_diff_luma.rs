@@ -144,7 +144,7 @@ pub mod kernel_benches {
 
     use super::frame_diff_luma;
 
-    #[bench(name = "ffai/video/frame_diff_luma", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_frame_diff_luma(dt: DType) -> BenchSetup {
         let (in_h, in_w, ds) = (720usize, 1280usize, 16usize);
         let out_h = in_h / ds;

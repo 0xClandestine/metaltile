@@ -78,7 +78,7 @@ pub mod kernel_benches {
 
     use super::ffai_dsv4_swiglu_limit;
 
-    #[bench(name = "ffai/swiglu/dsv4_swiglu_limit", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_dsv4_swiglu_limit(dt: DType) -> BenchSetup {
         let n = 1024 * 1024usize;
         BenchSetup::new(ffai_dsv4_swiglu_limit::kernel_ir_for(dt))

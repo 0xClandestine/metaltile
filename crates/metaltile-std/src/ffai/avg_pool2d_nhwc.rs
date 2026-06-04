@@ -189,7 +189,7 @@ pub mod kernel_benches {
 
     use super::avg_pool2d_nhwc;
 
-    #[bench(name = "ffai/pool/avg_pool2d_nhwc", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_avg_pool2d_nhwc(dt: DType) -> BenchSetup {
         let (batch, ch, in_h, in_w, k, stride, pad) =
             (1usize, 1152usize, 24usize, 24usize, 3usize, 3usize, 0usize);

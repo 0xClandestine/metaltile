@@ -107,7 +107,7 @@ pub mod kernel_benches {
     use super::ffai_moe_gemv_ws_q2k;
 
     // M=256 rows, production down dims (m_out=4096 hidden, k_in=2048).
-    #[bench(name = "ffai/moe/gemv_ws_q2k", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gemv_ws_q2k(dt: DType) -> BenchSetup {
         let m_total = 256usize;
         let n_experts = 8usize;

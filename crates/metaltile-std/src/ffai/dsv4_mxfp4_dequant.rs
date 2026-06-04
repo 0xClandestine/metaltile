@@ -199,7 +199,7 @@ pub mod kernel_benches {
 
     use super::ffai_dsv4_mxfp4_dequant;
 
-    #[bench(name = "ffai/dsv4_mxfp4_dequant", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mxfp4(dt: DType) -> BenchSetup {
         // Representative MoE expert slab — 4096 × 2048 (DSv4 Flash
         // expert intermediate=2048, hidden=4096).

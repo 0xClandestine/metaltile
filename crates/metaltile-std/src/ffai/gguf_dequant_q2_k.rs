@@ -247,7 +247,7 @@ pub mod kernel_benches {
 
     use super::ffai_gguf_dequant_q2_k;
 
-    #[bench(name = "ffai/gguf_dequant_q2_k", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_q2_k(dt: DType) -> BenchSetup {
         // Representative MoE-expert down-proj slab — 4096 × 4096.
         let n = 4096 * 4096usize;

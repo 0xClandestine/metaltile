@@ -114,7 +114,7 @@ pub mod kernel_benches {
 
     use super::pos_emb_2d_add;
 
-    #[bench(name = "ffai/pos_emb/pos_emb_2d_add", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_pos_emb_2d_add(dt: DType) -> BenchSetup {
         let (hidden, grid_h, grid_w) = (1152usize, 28usize, 28usize);
         let n_patches = grid_h * grid_w;

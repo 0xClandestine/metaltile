@@ -161,7 +161,7 @@ pub mod kernel_benches {
 
     use super::{ffai_gemm_q8, ffai_grouped_gemm_q8};
 
-    #[bench(name = "ffai/gemm/gemm_q8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gemm_q8(dt: DType) -> BenchSetup {
         let in_dim = 4096usize;
         let out_dim = 2048usize;
@@ -180,7 +180,7 @@ pub mod kernel_benches {
             .bytes_moved((n_blocks * 36 + n_rows * in_dim * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "ffai/gemm/grouped_gemm_q8", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_grouped_gemm_q8(dt: DType) -> BenchSetup {
         // O-LoRA-A shape: 8 groups, per-group in_dim=4096 (nHeads*headDim/8),
         // out_dim=8192 (8*1024), n_rows=256 tokens.

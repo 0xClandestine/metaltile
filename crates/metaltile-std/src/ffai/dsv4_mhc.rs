@@ -209,7 +209,7 @@ pub mod kernel_benches {
 
     use super::{ffai_dsv4_mhc_collapse, ffai_dsv4_mhc_expand};
 
-    #[bench(name = "ffai/dsv4_mhc_collapse", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_collapse(dt: DType) -> BenchSetup {
         let (hidden_dim, n_hc, n_tokens) = (4096usize, 4usize, 1usize);
         BenchSetup::new(ffai_dsv4_mhc_collapse::kernel_ir_for(dt))
@@ -226,7 +226,7 @@ pub mod kernel_benches {
             )
     }
 
-    #[bench(name = "ffai/dsv4_mhc_expand", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_expand(dt: DType) -> BenchSetup {
         let (hidden_dim, n_hc, n_tokens) = (4096usize, 4usize, 1usize);
         BenchSetup::new(ffai_dsv4_mhc_expand::kernel_ir_for(dt))

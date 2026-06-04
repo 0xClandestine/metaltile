@@ -406,7 +406,7 @@ pub mod kernel_benches {
 
     use super::{ffai_resize_normalize, ffai_resize_normalize_bicubic};
 
-    #[bench(name = "ffai/resize/resize_normalize", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_resize_normalize(dt: DType) -> BenchSetup {
         let (sw, sh, tw, th) = (640usize, 480usize, 448usize, 448usize);
         BenchSetup::new(ffai_resize_normalize::kernel_ir_for(dt))
@@ -437,7 +437,7 @@ pub mod kernel_benches {
             .flops((3 * th * tw) as u64 * 10)
     }
 
-    #[bench(name = "ffai/resize/resize_normalize_bicubic", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_resize_normalize_bicubic(dt: DType) -> BenchSetup {
         let (sw, sh, tw, th) = (640usize, 480usize, 448usize, 448usize);
         BenchSetup::new(ffai_resize_normalize_bicubic::kernel_ir_for(dt))

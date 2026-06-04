@@ -169,7 +169,7 @@ pub mod kernel_benches {
 
     use super::ffai_moe_gemv_rows_view_u16_iq2xxs;
 
-    #[bench(name = "ffai/moe/gemv_rows_view_u16_iq2xxs", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gemv_rows_view_u16_iq2xxs(dt: DType) -> BenchSetup {
         let m_total = 256usize;
         let n_experts = 8usize;
@@ -200,7 +200,7 @@ pub mod kernel_benches_old {
 
     use super::ffai_moe_gemv_rows_view_iq2xxs;
 
-    #[bench(name = "ffai/moe/gemv_rows_view_iq2xxs", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gemv_rows_view_iq2xxs(dt: DType) -> BenchSetup {
         let m_total = 256usize;
         let n_experts = 8usize;

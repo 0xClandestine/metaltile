@@ -445,7 +445,7 @@ pub mod kernel_benches {
 
     use super::{ffai_lstm, lstm_cell};
 
-    #[bench(name = "ffai/lstm/lstm", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_lstm(dt: DType) -> BenchSetup {
         let (seq_len, input_dim, hidden) = (200usize, 256usize, 256usize);
         let out_stride = hidden;
@@ -474,7 +474,7 @@ pub mod kernel_benches {
             )
     }
 
-    #[bench(name = "ffai/lstm/lstm_cell", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_lstm_cell(dt: DType) -> BenchSetup {
         // BiLSTM cell: input 512, hidden 256, batch 8.
         let (batch, input_size, hidden) = (8usize, 512usize, 256usize);

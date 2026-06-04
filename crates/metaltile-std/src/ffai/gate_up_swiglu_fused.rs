@@ -83,7 +83,7 @@ pub mod kernel_benches {
 
     use super::ffai_gate_up_swiglu_fused;
 
-    #[bench(name = "ffai/gate_up_swiglu_fused", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gus(dt: DType) -> BenchSetup {
         let (m, k) = (2048usize, 4096usize);
         BenchSetup::new(ffai_gate_up_swiglu_fused::kernel_ir_for(dt))

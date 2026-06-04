@@ -98,7 +98,7 @@ pub mod kernel_benches {
 
     use super::ffai_moe_router_sigmoid_bias;
 
-    #[bench(name = "ffai/moe_router_sigmoid_bias", dtypes = [f32])]
+    #[bench(dtypes = [f32])]
     fn bench_router(_dt: DType) -> BenchSetup {
         let dt = DType::F32;
         let n_experts = 288usize;

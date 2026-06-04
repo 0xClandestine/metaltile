@@ -533,7 +533,7 @@ pub mod kernel_benches {
             .bytes_moved((n_out * dt.size_bytes()) as u64)
     }
 
-    #[bench(name = "ffai/mel_spectrogram/mel_spectrogram_magnitude", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mel_spectrogram_magnitude(dt: DType) -> BenchSetup {
         let (n_fft, n_mels, hop_length, n_frames) = (400usize, 80usize, 160usize, 100usize);
         let n_freq = n_fft / 2 + 1;

@@ -151,7 +151,7 @@ pub mod kernel_benches {
 
     use super::ffai_conv1d_transpose_depthwise;
 
-    #[bench(name = "ffai/conv/conv1d_transpose_depthwise", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_conv1d_transpose_depthwise(dt: DType) -> BenchSetup {
         let (channels, in_len, k, stride, pad) = (1090usize, 65usize, 3usize, 2usize, 1usize);
         let out_len = (in_len - 1) * stride + (k - 1) + 1 - 2 * pad;

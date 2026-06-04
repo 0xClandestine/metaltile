@@ -330,7 +330,7 @@ pub mod kernel_benches {
 
     use super::ffai_dsv4_mhc_sinkhorn_split;
 
-    #[bench(name = "ffai/dsv4_mhc_sinkhorn_split", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_split(dt: DType) -> BenchSetup {
         // 2 mHC blocks per layer × 43 layers = 86 dispatches/token. At
         // decode (n_tokens=1) the per-dispatch work is trivial; bench

@@ -109,7 +109,7 @@ pub mod kernel_benches {
     use super::ffai_moe_gather_down_q2k;
 
     // n_slots=6; production down dims (m_out=4096, k_in=2048).
-    #[bench(name = "ffai/moe/gather_down_q2k", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gather_down_q2k(dt: DType) -> BenchSetup {
         let n_slots = 6usize;
         let m_out = 4096usize;

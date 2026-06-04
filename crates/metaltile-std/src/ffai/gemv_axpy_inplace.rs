@@ -86,7 +86,7 @@ pub mod kernel_benches {
 
     use super::ffai_gemv_axpy_inplace;
 
-    #[bench(name = "ffai/gemv_axpy_inplace", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_gemv_axpy(dt: DType) -> BenchSetup {
         let (m, k) = (4096usize, 2048usize);
         BenchSetup::new(ffai_gemv_axpy_inplace::kernel_ir_for(dt))
