@@ -139,6 +139,10 @@ pub enum ProtocolMessage {
         test_passed: u32,
         /// Number of test cases that failed.
         test_failed: u32,
+        /// Number of test cases skipped (e.g. cooperative-tensor kernels that
+        /// can't build on the current OS Metal toolchain).
+        #[serde(default)]
+        test_skipped: u32,
     },
 
     // ── Per-item results ─────────────────────────────────────────────────────
@@ -239,6 +243,10 @@ pub struct TestResult {
     /// Maximum element-wise absolute error observed.
     #[serde(default)]
     pub max_err: f64,
+    /// True when the test was skipped rather than run (e.g. cooperative-tensor
+    /// pipeline won't build on this OS Metal toolchain).
+    #[serde(default)]
+    pub skipped: bool,
 }
 
 /// Result of compiling a single kernel across all requested dtypes.
@@ -352,6 +360,7 @@ mod tests {
             dtype: "f16".into(),
             passed: true,
             max_err: 3.2e-5,
+            skipped: false,
         });
         let json = msg.to_json_line();
         let parsed = ProtocolMessage::from_json_line(&json).unwrap();
@@ -445,6 +454,7 @@ mod tests {
             bench_failed: 1,
             test_passed: 5,
             test_failed: 0,
+            test_skipped: 0,
         };
         let json = msg.to_json_line();
         let parsed = ProtocolMessage::from_json_line(&json).unwrap();
@@ -466,6 +476,7 @@ mod tests {
             bench_failed: 0,
             test_passed: 0,
             test_failed: 0,
+            test_skipped: 0,
         };
         let mut json = msg.to_json_line(); // includes trailing \n
         // parse with the newline present (to_json_line adds it)

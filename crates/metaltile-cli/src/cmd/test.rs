@@ -109,6 +109,7 @@ pub fn run(args: &TestArgs, harness: &crate::harness::Harness) -> Result<(), cra
 
     let mut total_passed = 0usize;
     let mut total_failed = 0usize;
+    let mut total_skipped = 0usize;
     let mut failure_lines: Vec<String> = Vec::new();
 
     for (name, idxs) in &groups {
@@ -121,11 +122,20 @@ pub fn run(args: &TestArgs, harness: &crate::harness::Harness) -> Result<(), cra
 
         let mut suite_passed = 0usize;
         let mut suite_failed = 0usize;
+        let mut suite_skipped = 0usize;
 
         for &i in idxs {
             let r = &results[i];
             let label = format!("{} [{}]", r.name, r.dtype);
-            if r.passed {
+            if r.skipped {
+                suite_skipped += 1;
+                total_skipped += 1;
+                println!(
+                    "{}  {}",
+                    paint_stdout("[SKIP]", Style::new().fg(Color::Yellow).bold()),
+                    paint_stdout(&label, Style::new().fg(Color::BrightBlack)),
+                );
+            } else if r.passed {
                 suite_passed += 1;
                 total_passed += 1;
                 println!(
@@ -169,7 +179,18 @@ pub fn run(args: &TestArgs, harness: &crate::harness::Harness) -> Result<(), cra
                 paint_stderr(suite_failed.to_string(), Style::new().fg(Color::Red)),
             )
         };
-        println!("Suite result: {result_word}. {passed_paint} passed; {failed_paint} failed");
+        let skipped_note = if suite_skipped > 0 {
+            format!(
+                "; {}",
+                paint_stdout(
+                    format!("{suite_skipped} skipped"),
+                    Style::new().fg(Color::Yellow),
+                )
+            )
+        } else {
+            String::new()
+        };
+        println!("Suite result: {result_word}. {passed_paint} passed; {failed_paint} failed{skipped_note}");
 
         if args.fail_fast && suite_failed > 0 {
             break;
@@ -198,9 +219,20 @@ pub fn run(args: &TestArgs, harness: &crate::harness::Harness) -> Result<(), cra
     let wall_elapsed = wall_start.elapsed();
     let n_suites = groups.len();
     let suite_noun = if n_suites == 1 { "suite" } else { "suites" };
-    let total = total_passed + total_failed;
+    let total = total_passed + total_failed + total_skipped;
+    let skipped_overall = if total_skipped > 0 {
+        format!(
+            ", {}",
+            paint_stdout(
+                format!("{total_skipped} skipped"),
+                Style::new().fg(Color::Yellow),
+            )
+        )
+    } else {
+        String::new()
+    };
     println!(
-        "\nRan {n_suites} test {suite_noun} in {wall_elapsed:.2?}: {} passed, {} failed ({total} total tests)",
+        "\nRan {n_suites} test {suite_noun} in {wall_elapsed:.2?}: {} passed, {} failed{skipped_overall} ({total} total tests)",
         paint_stdout(total_passed.to_string(), Style::new().fg(Color::Green)),
         if total_failed > 0 {
             paint_stderr(total_failed.to_string(), Style::new().fg(Color::Red))

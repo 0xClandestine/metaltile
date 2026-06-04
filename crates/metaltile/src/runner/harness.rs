@@ -80,7 +80,7 @@ impl RunnerHarness {
                     bench_passed: 0,
                     bench_failed: total,
                     test_passed: 0,
-                    test_failed: 0,
+                    test_failed: 0, test_skipped: 0,
                 });
                 return false;
             },
@@ -122,7 +122,7 @@ impl RunnerHarness {
             bench_passed: passed,
             bench_failed: failed,
             test_passed: 0,
-            test_failed: 0,
+            test_failed: 0, test_skipped: 0,
         });
         failed == 0
     }
@@ -162,7 +162,7 @@ impl RunnerHarness {
                     bench_passed: 0,
                     bench_failed: 0,
                     test_passed: 0,
-                    test_failed: total,
+                    test_failed: total, test_skipped: 0,
                 });
                 return false;
             },
@@ -193,6 +193,7 @@ impl RunnerHarness {
         // Metal Context is not Send, so all dispatches run on the main thread.
         let mut passed = 0u32;
         let mut failed = 0u32;
+        let mut skipped = 0u32;
 
         for group in &work {
             for (name, dt, setup, tol) in group {
@@ -206,12 +207,29 @@ impl RunnerHarness {
                         emit_stdout(&ProtocolMessage::TestResult(result));
                     },
                     Err(msg) => {
-                        failed += 1;
-                        emit_stdout(&ProtocolMessage::ProtocolError {
-                            name: name.clone(),
-                            dtype: format!("{dt:?}").to_lowercase(),
-                            message: msg,
-                        });
+                        // Cooperative-tensor (NAX/MPP matmul2d) kernels fail to
+                        // build on macOS <26.5 Metal toolchains with
+                        // "unsupported deferred-static-alloca-size". Skip rather
+                        // than fail — they'll auto-enable on qualifying runners.
+                        if setup.kernel().requires_cooperative_tensors()
+                            && msg.contains("deferred-static-alloca")
+                        {
+                            skipped += 1;
+                            emit_stdout(&ProtocolMessage::TestResult(TestResult {
+                                name: name.clone(),
+                                dtype: format!("{dt:?}").to_lowercase(),
+                                passed: false,
+                                max_err: 0.0,
+                                skipped: true,
+                            }));
+                        } else {
+                            failed += 1;
+                            emit_stdout(&ProtocolMessage::ProtocolError {
+                                name: name.clone(),
+                                dtype: format!("{dt:?}").to_lowercase(),
+                                message: msg,
+                            });
+                        }
                     },
                 }
             }
@@ -223,6 +241,7 @@ impl RunnerHarness {
             bench_failed: 0,
             test_passed: passed,
             test_failed: failed,
+            test_skipped: skipped,
         });
         failed == 0
     }
@@ -335,7 +354,7 @@ impl RunnerHarness {
                 bench_passed: 0,
                 bench_failed: 0,
                 test_passed: 0,
-                test_failed: 0,
+                test_failed: 0, test_skipped: 0,
             });
             return true;
         }
@@ -536,7 +555,7 @@ impl RunnerHarness {
             bench_passed: 0,
             bench_failed: 0,
             test_passed: 0,
-            test_failed: 0,
+            test_failed: 0, test_skipped: 0,
         });
         !any_err
     }
@@ -680,7 +699,7 @@ impl RunnerHarness {
             bench_passed: 0,
             bench_failed: 0,
             test_passed: 0,
-            test_failed: 0,
+            test_failed: 0, test_skipped: 0,
         });
         ok
     }
@@ -999,6 +1018,7 @@ fn run_one_test_with_setup(
         dtype: dtype_str,
         passed: (worst as f64) <= tol,
         max_err: worst as f64,
+        skipped: false,
     })
 }
 
