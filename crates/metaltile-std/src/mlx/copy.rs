@@ -37,7 +37,7 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::mt_copy;
-    use crate::bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname};
+    use crate::utils::{InputDomain, dtype_tol, input_buffer, mlx_tname};
 
     // 64M elements (MLX default elementwise size); reads `a`, writes `out`.
     //

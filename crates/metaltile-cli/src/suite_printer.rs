@@ -14,9 +14,11 @@
 use std::io::Write;
 
 use metaltile_core::protocol::BenchResult as ProtoBenchResult;
-use metaltile_std::bench_types::{CorrectnessStatus, OpResult};
 
-use crate::term::{Color, Style, paint_stdout};
+use crate::{
+    bench_types::{CorrectnessStatus, OpResult},
+    term::{Color, Style, paint_stdout},
+};
 
 // ── SuitePrinter ──────────────────────────────────────────────────────────
 

@@ -28,8 +28,10 @@
 //! by `skip_unless_apple10` (the M4+ tensor-core test guard).
 
 use insta::assert_snapshot;
-use metaltile_codegen::{MslGenerator, msl::MslConfig};
-use metaltile_core::{dtype::DType, ir::KernelMode};
+use metaltile::{
+    codegen::{MslGenerator, msl::MslConfig},
+    core::{dtype::DType, ir::KernelMode},
+};
 use metaltile_std::mlx::{
     fp_quantized_nax,
     hadamard_m,
@@ -42,7 +44,7 @@ use metaltile_std::mlx::{
 /// (Reduction / Grid3D) lives on the BenchSpec and must be set on the
 /// IR before codegen so the reduce-emit vs Grid3D-emit branches lower
 /// correctly.
-fn steel_msl(kernel_ir: metaltile_core::ir::Kernel, mode: KernelMode) -> String {
+fn steel_msl(kernel_ir: metaltile::core::ir::Kernel, mode: KernelMode) -> String {
     let mut kernel = kernel_ir;
     kernel.mode = mode;
     MslGenerator::new(MslConfig::default()).generate(&kernel).expect("kernel must codegen cleanly")

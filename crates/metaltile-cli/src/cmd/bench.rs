@@ -4,23 +4,7 @@
 //! roofline). The MLX reference A/B (speed + output-equivalence) is opt-in via
 //! `--mlx`; by default only the metaltile kernels are benched.
 
-use metaltile::{
-    harness::bench::{BenchSetup, KernelBench, RefKernel},
-    runner::{GpuBuffer, GpuRunner, bench_gbps_with, device_specs, profile, read_typed, to_gflops},
-};
-use metaltile_core::ir::ParamKind;
-use metaltile_std::bench_types::{
-    CorrectnessStatus,
-    DerivedMetrics,
-    EquivResult,
-    OpBench,
-    OpResult,
-    OpResultExtras,
-    check_equiv,
-    dtype_label,
-    set_result_reporter,
-    validate_results,
-};
+use metaltile_core::protocol::{BenchResult as ProtoBenchResult, ProtocolMessage};
 use serde_json::Value;
 
 use crate::{
@@ -28,6 +12,7 @@ use crate::{
     FilterSpec,
     cmd::diff as diff_cmd,
     git,
+    project_runner::{ProjectRunner, RunnerInvocation},
     suite_printer::SuitePrinter,
     term::{Color, Style, paint_stderr, paint_stdout},
 };
@@ -93,65 +78,59 @@ pub fn run(args: &BenchArgs, harness: &crate::harness::Harness) -> Result<(), cr
         return Err(crate::CliError::Other("uncommitted changes".into()));
     }
 
-    let runner = match GpuRunner::new() {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!(
-                "{} {}",
-                paint_stderr("Error:", Style::new().fg(Color::Red).bold()),
-                paint_stderr(&e, Style::new().fg(Color::BrightWhite)),
-            );
-            return Err(crate::CliError::GpuInit(e));
-        },
+    // Spawn __tile_runner bench and stream protocol results.
+    let inv = RunnerInvocation {
+        command: "bench".into(),
+        filter: filter_args.filter.clone(),
+        warmup_runs: Some(warmup_runs),
+        runs: Some(runs),
+        profile: verbose >= 1,
+        ..Default::default()
     };
 
-    // Banner — single compact line.
-    println!(
-        "{} {}  {}",
-        paint_stdout("tile bench", Style::new().fg(Color::Cyan).bold()),
-        paint_stdout(format!("· {}", runner.device_name), Style::new().fg(Color::BrightBlack)),
-        paint_stdout(
-            format!("warmup={warmup_runs} runs={runs}"),
-            Style::new().fg(Color::BrightBlack),
-        ),
-    );
-
-    // Run all ops, optionally narrowed to a single substring filter.
-    let mut all: Vec<OpResult> = Vec::new();
+    let mut all: Vec<ProtoBenchResult> = Vec::new();
     let mut matched_filter = false;
+    let mut device_name = String::new();
 
-    // Per-result roofline/occupancy metrics are computed inline in
-    // `run_kernel_bench` and attached to each `OpResult` (see `DerivedMetrics`),
-    // which the SuitePrinter renders directly under `-v`/`-vv`.
     let mut printer = SuitePrinter::new(true);
     printer.set_verbose(verbose);
-    {
-        let mut report = |result: &OpResult| {
-            if spec.matches_name(result.op()) {
-                printer.print_batch(std::slice::from_ref(result));
-            }
-        };
-        let _reporter = set_result_reporter(&mut report);
 
-        // Benches are registered via #[bench] (the `kernel_benches` modules).
-        // Timed in-process with the GpuRunner machinery (resident buffers,
-        // SLC flush, DVFS pin) and reported through the shared reporter. The
-        // legacy `#[kernel(bench(...))]` / `all_specs()` path was retired once
-        // every kernel had a #[bench]; correctness now lives in the
-        // `#[test_kernel]` harness rather than the old MLX A/B comparison.
-        for entry in metaltile::harness::registry::all_benches() {
-            let b = entry.bench();
-            if spec.matches(b.name(), entry.file()) {
+    let runner_ok = ProjectRunner::new(harness).run_streaming(&inv, |msg| match msg {
+        ProtocolMessage::Start { device, total, .. } => {
+            device_name = device.unwrap_or_default();
+            let dev_part =
+                if device_name.is_empty() { String::new() } else { format!("· {} ", device_name) };
+            println!(
+                "{} {}{}",
+                paint_stdout("tile bench", Style::new().fg(Color::Cyan).bold()),
+                paint_stdout(&dev_part, Style::new().fg(Color::BrightBlack)),
+                paint_stdout(
+                    format!("warmup={warmup_runs} runs={runs}  ({total} items)"),
+                    Style::new().fg(Color::BrightBlack),
+                ),
+            );
+        },
+        ProtocolMessage::BenchResult(br) => {
+            if spec.matches_name(&br.name) {
                 matched_filter = true;
-                for &dt in b.dtypes() {
-                    let _kspan =
-                        tracing::debug_span!("bench", name = b.name(), dtype = %dt).entered();
-                    if let Some(r) = run_kernel_bench(&runner, b, dt, warmup_runs, runs, args.mlx) {
-                        all.push(r);
-                    }
-                }
+                printer.print_bench_result(&br);
             }
-        }
+            all.push(br);
+        },
+        ProtocolMessage::ProtocolError { name, dtype, message } => {
+            eprintln!(
+                "{} {} [{}]: {}",
+                paint_stderr("[error]", Style::new().fg(Color::Red).bold()),
+                name,
+                dtype,
+                message,
+            );
+        },
+        _ => {},
+    });
+
+    if !runner_ok && all.is_empty() {
+        return Err(crate::CliError::Other("__tile_runner failed".into()));
     }
 
     if all.is_empty() {
@@ -196,32 +175,19 @@ pub fn run(args: &BenchArgs, harness: &crate::harness::Harness) -> Result<(), cr
         return Ok(());
     }
 
-    validate_results(&all).unwrap_or_else(|err| panic!("{err}"));
     printer.finish();
 
-    // Counters.
-    let impl_count = all.iter().filter(|r| r.mt_perf().is_some()).count();
-    let nyi_count = all.iter().filter(|r| r.mt_perf().is_none()).count();
-    let checked_count = all.iter().filter(|r| r.equiv().is_some()).count();
-    let equiv_pass = all
-        .iter()
-        .filter(|r| matches!(r.correctness_status(), CorrectnessStatus::Passed { .. }))
-        .count();
-    let equiv_fail = all
-        .iter()
-        .filter(|r| matches!(r.correctness_status(), CorrectnessStatus::Failed { .. }))
-        .count();
-    let unchecked: Vec<String> = all
-        .iter()
-        .filter(|r| r.is_unchecked())
-        .map(|r| format!("{} [{}]", r.op(), r.shape()))
-        .collect();
+    // Counters derived from protocol BenchResult.
+    let impl_count = all.iter().filter(|r| r.mt_gbps > 0.0).count();
+    let equiv_fail = all.iter().filter(|r| !r.correct).count();
+    let checked_count = all.len();
+    let equiv_pass = all.iter().filter(|r| r.correct).count();
     let avg_pct: Option<f64> = {
-        let valid: Vec<f64> = all.iter().filter_map(|r| r.pct()).collect();
+        let valid: Vec<f64> = all.iter().filter_map(|r| r.mt_pct).collect();
         if valid.is_empty() { None } else { Some(valid.iter().sum::<f64>() / valid.len() as f64) }
     };
 
-    // Summary — compact single line (or two if unchecked).
+    // Summary — compact single line.
     let mut parts: Vec<String> = Vec::new();
     let sep = format!("  {}  ", paint_stdout("·", Style::new().fg(Color::BrightBlack).dim()));
 
@@ -229,12 +195,6 @@ pub fn run(args: &BenchArgs, harness: &crate::harness::Harness) -> Result<(), cr
         "{} impl",
         paint_stdout(impl_count.to_string(), Style::new().fg(Color::Green).bold()),
     ));
-    if nyi_count > 0 {
-        parts.push(format!(
-            "{} NYI",
-            paint_stdout(nyi_count.to_string(), Style::new().fg(Color::Yellow).bold()),
-        ));
-    }
     if let Some(p) = avg_pct {
         parts.push(format!("avg {}", paint_stdout(format!("{p:.0}% MT"), pct_style(p)),));
     }
@@ -249,12 +209,6 @@ pub fn run(args: &BenchArgs, harness: &crate::harness::Harness) -> Result<(), cr
             paint_stdout(format!("{equiv_pass}/{checked_count}"), corr_style),
         ));
     }
-    if !unchecked.is_empty() {
-        parts.push(format!(
-            "{} unchecked",
-            paint_stdout(unchecked.len().to_string(), Style::new().fg(Color::Yellow).bold()),
-        ));
-    }
 
     println!("\n  {}", parts.join(&sep));
 
@@ -265,18 +219,11 @@ pub fn run(args: &BenchArgs, harness: &crate::harness::Harness) -> Result<(), cr
             paint_stdout(equiv_fail.to_string(), Style::new().fg(Color::Red).bold()),
         );
     }
-    if !unchecked.is_empty() {
-        println!(
-            "  {} {}",
-            paint_stdout("Unchecked:", Style::new().fg(Color::BrightBlack).bold()),
-            paint_stdout(unchecked.join(", "), Style::new().fg(Color::Yellow).bold()),
-        );
-    }
     println!();
 
     if args.diff {
         try_auto_diff(
-            &runner.device_name,
+            &device_name,
             &all,
             filter_args.filter.as_deref(),
             args.baseline_ref.as_deref(),
@@ -284,7 +231,7 @@ pub fn run(args: &BenchArgs, harness: &crate::harness::Harness) -> Result<(), cr
     }
 
     if let Some(path) = json_out {
-        save_json(&runner.device_name, &all, path);
+        save_json(&device_name, &all, path);
     }
 
     if equiv_fail > 0 {
@@ -299,7 +246,7 @@ pub fn run(args: &BenchArgs, harness: &crate::harness::Harness) -> Result<(), cr
 /// one-line skip note and returns. Never aborts the bench.
 fn try_auto_diff(
     device: &str,
-    results: &[OpResult],
+    results: &[ProtoBenchResult],
     filter: Option<&str>,
     baseline_ref_override: Option<&str>,
 ) {
@@ -387,16 +334,25 @@ fn chip_slug(device: &str) -> String {
     out
 }
 
-fn result_to_value(r: &OpResult) -> Value {
+/// Convert a `ProtoBenchResult` to the legacy JSON schema used by the
+/// diff/baseline system: `op`/`subop`/`shape`/`metric`/`ref`/`mt`.
+///
+/// The kernel `name` (e.g. `"unary/exp"`) is split on the first `'/'`:
+/// the leading component becomes `op`, any remainder becomes `subop`.
+fn result_to_value(r: &ProtoBenchResult) -> Value {
     let mut obj = serde_json::Map::new();
-    obj.insert("op".into(), Value::from(r.op()));
-    if let Some(sub) = r.subop() {
+    let (op, subop) = match r.name.split_once('/') {
+        Some((a, b)) => (a, Some(b)),
+        None => (r.name.as_str(), None),
+    };
+    obj.insert("op".into(), Value::from(op));
+    if let Some(sub) = subop {
         obj.insert("subop".into(), Value::from(sub));
     }
-    obj.insert("shape".into(), Value::from(r.shape()));
-    obj.insert("metric".into(), Value::from(r.metric()));
-    obj.insert("ref".into(), r.ref_perf().map(Value::from).unwrap_or(Value::Null));
-    obj.insert("mt".into(), r.mt_perf().map(Value::from).unwrap_or(Value::Null));
+    obj.insert("shape".into(), Value::from(r.shape.as_str()));
+    obj.insert("metric".into(), Value::from("GB/s"));
+    obj.insert("ref".into(), r.ref_gbps.map(Value::from).unwrap_or(Value::Null));
+    obj.insert("mt".into(), Value::from(r.mt_gbps));
     Value::Object(obj)
 }
 
@@ -404,19 +360,23 @@ fn log_skip(msg: &str) {
     eprintln!("  {}", paint_stderr(msg, Style::new().fg(Color::BrightBlack)));
 }
 
-fn save_json(device: &str, results: &[OpResult], path: &str) {
+fn save_json(device: &str, results: &[ProtoBenchResult], path: &str) {
     use std::io::Write;
     let s = summarize(results);
     let mut out = String::new();
     out.push_str(&format!(
-        "{{\"device\":{:?},\"summary\":{{\"total\":{},\"implemented\":{},\"correct\":{},\"unchecked\":{}}},\"results\":[\n",
-        device, s.total, s.implemented, s.correct, s.unchecked,
+        "{{\"device\":{:?},\"summary\":{{\"total\":{},\"implemented\":{},\"correct\":{}}},\"results\":[\n",
+        device, s.total, s.implemented, s.correct,
     ));
     for (i, r) in results.iter().enumerate() {
         let comma = if i + 1 < results.len() { "," } else { "" };
+        let (op, subop) = match r.name.split_once('/') {
+            Some((a, b)) => (a, Some(b)),
+            None => (r.name.as_str(), None),
+        };
         out.push_str(&format!(
             "  {}{}\n",
-            format_result_row(r.op(), r.subop(), r.shape(), r.metric(), r.ref_perf(), r.mt_perf()),
+            format_result_row(op, subop, &r.shape, "GB/s", r.ref_gbps, Some(r.mt_gbps)),
             comma
         ));
     }
@@ -445,18 +405,13 @@ struct Summary {
     total: usize,
     implemented: usize,
     correct: usize,
-    unchecked: usize,
 }
 
-fn summarize(results: &[OpResult]) -> Summary {
+fn summarize(results: &[ProtoBenchResult]) -> Summary {
     Summary {
         total: results.len(),
-        implemented: results.iter().filter(|r| r.mt_perf().is_some()).count(),
-        correct: results
-            .iter()
-            .filter(|r| matches!(r.correctness_status(), CorrectnessStatus::Passed { .. }))
-            .count(),
-        unchecked: results.iter().filter(|r| r.is_unchecked()).count(),
+        implemented: results.iter().filter(|r| r.mt_gbps > 0.0).count(),
+        correct: results.iter().filter(|r| r.correct).count(),
     }
 }
 
@@ -506,228 +461,6 @@ fn pct_style(pct: f64) -> Style {
     }
 }
 
-// ── Derived metrics for -v / -vv ──────────────────────────────────────
-
-/// Compute the derived roofline / occupancy metrics for one bench run.
-///
-/// Folds the measured throughput (`gbps`, `stats`) together with the bench's
-/// declared FLOP count and the device's peak specs into a [`DerivedMetrics`]:
-/// GFLOP/s, %-of-peak bandwidth/compute, arithmetic intensity, and the
-/// CPU-estimated occupancy/register/bottleneck verdict. Every field is
-/// `Option`, so an unseeded device (CI's virtualized GPU) or a memory-bound
-/// kernel with no FLOP count simply leaves the corresponding columns blank.
-fn derive_metrics(
-    bench: &dyn KernelBench,
-    setup: &BenchSetup,
-    dt: metaltile_core::DType,
-    device_name: &str,
-    gbps: f64,
-    stats: &metaltile::runner::BenchStats,
-    bytes_moved: u64,
-) -> DerivedMetrics {
-    let specs = device_specs::lookup(device_name);
-    let flops = bench.flops(setup);
-    let gflops = flops.and_then(|f| to_gflops(stats, f as f64));
-
-    let pct_peak_bw = specs.as_ref().map(|s| gbps / s.peak_bw_gbps * 100.0);
-    let pct_peak_flops = gflops.zip(specs.as_ref()).and_then(|(g, s)| {
-        // peak_tflops_for is TFLOP/s; gflops is GFLOP/s ⇒ ×1000 to compare.
-        let peak_gflops = s.peak_tflops_for(dt) * 1000.0;
-        (peak_gflops > 0.0).then_some(g / peak_gflops * 100.0)
-    });
-    let arith_intensity = flops.filter(|_| bytes_moved > 0).map(|f| f as f64 / bytes_moved as f64);
-
-    // Occupancy / register profile + the combined bottleneck verdict (folds the
-    // roofline position together with the occupancy/register signals).
-    let prof = profile::estimate_profile(setup.kernel());
-    let ridge_point = specs.as_ref().map(|s| s.peak_tflops_for(dt) * 1000.0 / s.peak_bw_gbps);
-    let bottleneck = profile::classify_bottleneck(
-        arith_intensity,
-        ridge_point,
-        pct_peak_bw,
-        pct_peak_flops,
-        prof.as_ref(),
-    );
-
-    DerivedMetrics {
-        gflops,
-        pct_peak_bw,
-        pct_peak_flops,
-        arith_intensity,
-        occ_pct: prof.as_ref().map(|p| p.occ_pct),
-        regs_per_thread: prof.as_ref().map(|p| p.regs_per_thread),
-        bottleneck,
-    }
-}
-
-// ── In-process bench runner (bridges old OpResult API to new GpuRunner) ───────
-
-fn human_count_bench(n: usize) -> String {
-    const M: usize = 1 << 20;
-    const K: usize = 1 << 10;
-    if n >= M && n.is_multiple_of(M) {
-        format!("{}M", n / M)
-    } else if n >= K && n.is_multiple_of(K) {
-        format!("{}K", n / K)
-    } else {
-        n.to_string()
-    }
-}
-
-const COMPARE_ELEM_CAP: usize = 1 << 15;
-
-fn run_kernel_bench(
-    runner: &GpuRunner,
-    bench: &'static dyn KernelBench,
-    dt: metaltile_core::DType,
-    warmup_runs: usize,
-    runs: usize,
-    // When false (the default), skip the MLX reference A/B entirely — bench only
-    // the metaltile kernel. `--mlx` flips it on for the side-by-side comparison.
-    compare_mlx: bool,
-) -> Option<OpResult> {
-    use metaltile_codegen::msl::MslGenerator;
-
-    let setup: BenchSetup = bench.setup(dt);
-    let bytes_moved = bench.bytes_moved(&setup);
-    let kernel = setup.kernel();
-
-    let msl = MslGenerator::default().generate(kernel).ok()?;
-    let compiled = runner.compile(&msl, &kernel.name).ok()?;
-
-    let mut bufs: Vec<GpuBuffer> =
-        Vec::with_capacity(kernel.params.len() + kernel.constexprs.len());
-    let mut input_bytes: std::collections::HashMap<String, Vec<u8>> =
-        std::collections::HashMap::new();
-    let mut mt_out: Option<(usize, usize, metaltile_core::DType)> = None;
-
-    for param in &kernel.params {
-        let buf = setup.buffers().iter().find(|b| b.name() == param.name)?;
-        let bytes = buf.initial_bytes();
-        if param.is_output && mt_out.is_none() {
-            mt_out = Some((bufs.len(), buf.len(), buf.dtype()));
-        }
-        bufs.push(runner.buffer_bytes(&bytes));
-        input_bytes.insert(param.name.clone(), bytes);
-        if param.kind == ParamKind::Strided {
-            let shape_name = format!("{}_shape", param.name);
-            let strides_name = format!("{}_strides", param.name);
-            let shape = setup.buffers().iter().find(|b| b.name() == shape_name)?;
-            let strides = setup.buffers().iter().find(|b| b.name() == strides_name)?;
-            bufs.push(runner.buffer_bytes(&shape.initial_bytes()));
-            bufs.push(runner.buffer_bytes(&strides.initial_bytes()));
-        }
-    }
-    for decl in &kernel.constexprs {
-        let n = decl.name.name();
-        let (_, value) = setup.constexprs().iter().find(|(k, _)| k == n)?;
-        bufs.push(runner.buffer_bytes(&value.to_le_bytes()));
-    }
-    let refs: Vec<&GpuBuffer> = bufs.iter().collect();
-
-    let grid = setup.grid();
-    let g = grid.grid.map(|x| x as usize);
-    let t = grid.tpg.map(|x| x as usize);
-    let (gbps, stats) =
-        bench_gbps_with(runner, &compiled, &refs, g, t, bytes_moved as f64, warmup_runs, runs)?;
-
-    let shape = match setup.shape_label() {
-        Some(label) => label.to_string(),
-        None => {
-            let n = setup.buffers().iter().map(|b| b.len()).max().unwrap_or(0);
-            format!("N={} {}", human_count_bench(n), dtype_label(dt))
-        },
-    };
-
-    // Derived roofline / occupancy metrics, attached to every row and rendered
-    // by the SuitePrinter under `-v`/`-vv`.
-    let metrics = derive_metrics(bench, &setup, dt, &runner.device_name, gbps, &stats, bytes_moved);
-    let extras =
-        OpResultExtras { mt_timing: Some(stats), metrics: Some(metrics), ..Default::default() };
-
-    if compare_mlx
-        && let (Some(rk), Some((out_idx, out_n, out_dt))) = (setup.ref_kernel(), mt_out)
-        && let Some((ref_gbps, ref_stats, equiv)) = run_reference_bench(
-            runner,
-            rk,
-            &bufs,
-            out_idx,
-            out_n,
-            out_dt,
-            &input_bytes,
-            bytes_moved,
-            warmup_runs,
-            runs,
-        )
-    {
-        let extras = OpResultExtras { ref_timing: Some(ref_stats), ..extras };
-        return Some(OpBench::new(bench.name(), "GB/s").result_with_extras(
-            None::<&str>,
-            shape,
-            Some(ref_gbps),
-            Some(gbps),
-            Some(equiv),
-            extras,
-        ));
-    }
-
-    let equiv = EquivResult { n_checked: 0, max_abs_err: 0.0, cosine_sim: 1.0, passed: true };
-    Some(OpBench::new(bench.name(), "GB/s").result_with_extras(
-        None::<&str>,
-        shape,
-        None,
-        Some(gbps),
-        Some(equiv),
-        extras,
-    ))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_reference_bench(
-    runner: &GpuRunner,
-    rk: &RefKernel,
-    mt_bufs: &[GpuBuffer],
-    mt_out_idx: usize,
-    mt_out_n: usize,
-    mt_out_dt: metaltile_core::DType,
-    input_bytes: &std::collections::HashMap<String, Vec<u8>>,
-    bytes_moved: u64,
-    warmup_runs: usize,
-    runs: usize,
-) -> Option<(f64, metaltile::runner::BenchStats, EquivResult)> {
-    let compiled = if rk.bool_constants.is_empty() {
-        runner.compile(&rk.source, &rk.fn_name).ok()?
-    } else {
-        runner.compile_with_bool_constants(&rk.source, &rk.fn_name, &rk.bool_constants).ok()?
-    };
-
-    let mut ref_bufs: Vec<GpuBuffer> = Vec::with_capacity(rk.buffers.len());
-    let mut ref_out: Option<(usize, usize, metaltile_core::DType)> = None;
-    for b in &rk.buffers {
-        if b.is_output() && ref_out.is_none() {
-            ref_out = Some((ref_bufs.len(), b.len(), b.dtype()));
-        }
-        let bytes = match (b.is_output(), input_bytes.get(b.name())) {
-            (false, Some(shared)) => shared.clone(),
-            _ => b.initial_bytes(),
-        };
-        ref_bufs.push(runner.buffer_bytes(&bytes));
-    }
-    let (ref_out_idx, ref_out_n, ref_out_dt) = ref_out?;
-    let ref_refs: Vec<&GpuBuffer> = ref_bufs.iter().collect();
-    let g = rk.grid.grid.map(|x| x as usize);
-    let t = rk.grid.tpg.map(|x| x as usize);
-    let (ref_gbps, ref_stats) =
-        bench_gbps_with(runner, &compiled, &ref_refs, g, t, bytes_moved as f64, warmup_runs, runs)?;
-
-    let n = mt_out_n.min(ref_out_n).min(COMPARE_ELEM_CAP);
-    let mt_vals = read_typed(runner, &mt_bufs[mt_out_idx], n, mt_out_dt);
-    let ref_vals = read_typed(runner, &ref_bufs[ref_out_idx], n, ref_out_dt);
-    let equiv = check_equiv(&ref_vals, &mt_vals, rk.tol);
-
-    Some((ref_gbps, ref_stats, equiv))
-}
-
 // ── TileCommand impl ──────────────────────────────────────────────────────
 
 pub struct BenchCommand<'a>(pub &'a BenchArgs);
@@ -740,46 +473,33 @@ impl<'a> super::TileCommand for BenchCommand<'a> {
 
 #[cfg(test)]
 mod tests {
-    use metaltile_std::bench_types::{EquivResult, OpBench};
-
     use super::*;
 
-    fn pass_equiv() -> EquivResult {
-        EquivResult { n_checked: 1, max_abs_err: 0.0, cosine_sim: 1.0, passed: true }
-    }
-
-    fn fail_equiv() -> EquivResult {
-        EquivResult { n_checked: 1, max_abs_err: 1e3, cosine_sim: 0.5, passed: false }
+    fn make_result(name: &str, dtype: &str, mt_gbps: f64, correct: bool) -> ProtoBenchResult {
+        ProtoBenchResult {
+            name: name.into(),
+            dtype: dtype.into(),
+            shape: format!("N=1M {dtype}"),
+            mt_gbps,
+            ref_gbps: None,
+            mt_pct: None,
+            correct,
+            min_us: 1.0,
+            mean_us: 1.0,
+            profile: None,
+        }
     }
 
     #[test]
     fn summary_counts_per_category() {
-        let b = OpBench::new("op_a", "GB/s");
-        let implemented_correct = b.result("shape_a", Some(100.0), Some(95.0), Some(pass_equiv()));
-        let implemented_wrong = b.result("shape_b", Some(100.0), Some(40.0), Some(fail_equiv()));
-        let nyi = b.result("shape_c", Some(100.0), None, None);
+        let implemented_correct = make_result("unary/exp", "f32", 100.0, true);
+        let implemented_wrong = make_result("unary/log", "f32", 40.0, false);
+        let nyi = make_result("unary/sin", "f32", 0.0, false);
 
         let s = summarize(&[implemented_correct, implemented_wrong, nyi]);
         assert_eq!(s.total, 3);
-        assert_eq!(s.implemented, 2); // _correct + _wrong
-        assert_eq!(s.correct, 1); // only _correct
-        assert_eq!(s.unchecked, 0); // both implemented rows had equiv
-    }
-
-    #[test]
-    fn summary_counts_unchecked_rows() {
-        // An implemented result without an equiv check is an "unchecked"
-        // row — pinned via panic in OpBench::result_sub, but the
-        // counting path matters for older snapshots loaded via `tile
-        // snap --from`.
-        let b = OpBench::new("op", "GB/s");
-        let r = b.result("shape", Some(100.0), Some(95.0), Some(pass_equiv()));
-        // is_unchecked() is false here — sanity check the summary
-        // doesn't double-count.
-        let s = summarize(&[r]);
-        assert_eq!(s.implemented, 1);
-        assert_eq!(s.correct, 1);
-        assert_eq!(s.unchecked, 0);
+        assert_eq!(s.implemented, 2); // exp + log (mt_gbps > 0)
+        assert_eq!(s.correct, 1); // only exp
     }
 
     #[test]
@@ -788,7 +508,25 @@ mod tests {
         assert_eq!(s.total, 0);
         assert_eq!(s.implemented, 0);
         assert_eq!(s.correct, 0);
-        assert_eq!(s.unchecked, 0);
+    }
+
+    #[test]
+    fn result_to_value_splits_name_into_op_subop() {
+        let r = make_result("unary/exp", "f32", 325.6, true);
+        let v = result_to_value(&r);
+        assert_eq!(v["op"], "unary");
+        assert_eq!(v["subop"], "exp");
+        assert_eq!(v["metric"], "GB/s");
+        assert_eq!(v["mt"], 325.6);
+        assert!(v["ref"].is_null());
+    }
+
+    #[test]
+    fn result_to_value_no_subop_for_simple_name() {
+        let r = make_result("rms_norm", "f32", 323.9, true);
+        let v = result_to_value(&r);
+        assert_eq!(v["op"], "rms_norm");
+        assert!(v.get("subop").is_none());
     }
 
     #[test]
@@ -859,31 +597,5 @@ mod tests {
         // double dashes or trailing dashes.
         assert_eq!(chip_slug("  Apple  --M1 (Pro)  "), "apple-m1-pro");
         assert_eq!(chip_slug("Apple_M2_Max!"), "apple-m2-max");
-    }
-
-    #[test]
-    fn result_to_value_emits_legacy_schema() {
-        let b = OpBench::new("rms_norm", "GB/s");
-        let r = b.result("B=1024 N=4096 f32", Some(323.9), Some(325.6), Some(pass_equiv()));
-        let v = result_to_value(&r);
-        assert_eq!(v["op"], "rms_norm");
-        assert_eq!(v["shape"], "B=1024 N=4096 f32");
-        assert_eq!(v["metric"], "GB/s");
-        assert_eq!(v["ref"], 323.9);
-        assert_eq!(v["mt"], 325.6);
-        // No subop here, so the field should be absent (matches save_json).
-        assert!(v.get("subop").is_none());
-    }
-
-    #[test]
-    fn result_to_value_null_perfs_round_trip_through_diff() {
-        // NYI result — both perfs are None. The diff `build_result_map`
-        // pulls f64::unwrap_or(0.0), so the row goes in as zeros which
-        // is the established contract.
-        let b = OpBench::new("sdpa", "GB/s");
-        let r = b.nyi("H=8 N=2048", None);
-        let v = result_to_value(&r);
-        assert!(v["ref"].is_null());
-        assert!(v["mt"].is_null());
     }
 }

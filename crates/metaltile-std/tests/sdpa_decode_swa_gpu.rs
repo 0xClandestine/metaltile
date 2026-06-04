@@ -38,7 +38,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, pack_bytes, ramp};
-use metaltile_core::ir::KernelMode;
+use metaltile::core::ir::KernelMode;
 use metaltile_runtime::{Context, DispatchSpec, ResidentBuffer};
 use metaltile_std::ffai::sdpa_decode::ffai_sdpa_decode as sdpa_decode;
 
@@ -82,7 +82,7 @@ fn build_scalar_buffers(cfg: &DispatchCfg, dt: Dt) -> BTreeMap<String, Vec<u8>> 
 
 fn bench_one(
     ctx: &Context,
-    kernel: &metaltile_core::ir::Kernel,
+    kernel: &metaltile::core::ir::Kernel,
     cfg: &DispatchCfg,
     qkv: &BTreeMap<String, ResidentBuffer>,
     empty_fn_consts: &BTreeMap<String, u32>,

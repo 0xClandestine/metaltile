@@ -357,8 +357,7 @@ pub mod kernel_tests {
 #[cfg(test)]
 #[allow(clippy::needless_range_loop)] // index loops mirror the H_m matrix math
 mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::ir::Op;
+    use metaltile::{codegen::msl::MslGenerator, core::ir::Op};
 
     use super::*;
 

@@ -667,7 +667,7 @@ pub mod kernel_benches {
             .constexpr("k", k as u32)
             .constexpr("n", n as u32)
             .constexpr("gs_per_row", gspr as u32)
-            .with_shape_label(format!("m{m} n{n} k{k} {}", crate::bench_types::dtype_label(dt)))
+            .with_shape_label(format!("m{m} n{n} k{k} {}", crate::utils::dtype_label(dt)))
             .grid_3d((n / 32) as u32, (m / 32) as u32, 1, [128, 1, 1])
             .bytes_moved(bytes as u64)
             // fp-qmm out[m,n] = x[m,k] · dequant(w)[k,n]: 2 MACs per (m, n, k).

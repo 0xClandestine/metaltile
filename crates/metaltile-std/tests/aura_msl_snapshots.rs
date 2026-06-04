@@ -28,8 +28,10 @@
 //!   cargo insta review
 
 use insta::assert_snapshot;
-use metaltile_codegen::{MslGenerator, msl::MslConfig};
-use metaltile_core::{dtype::DType, ir::KernelMode};
+use metaltile::{
+    codegen::{MslGenerator, msl::MslConfig},
+    core::{dtype::DType, ir::KernelMode},
+};
 use metaltile_std::ffai::{
     aura_dequant_rotated::aura_dequant_rotated_int4,
     aura_encode::aura_encode_int4,
@@ -43,7 +45,7 @@ use metaltile_std::ffai::{
 /// `kernel_ir_for` returns the bare IR; the mode (Reduction / Grid3D)
 /// is carried in the kernel's `BenchSpec` and must be set on the IR
 /// before codegen so `emit_reduce` / Grid3D dispatch lowers correctly.
-fn aura_msl(kernel_ir: metaltile_core::ir::Kernel, mode: KernelMode) -> String {
+fn aura_msl(kernel_ir: metaltile::core::ir::Kernel, mode: KernelMode) -> String {
     let mut kernel = kernel_ir;
     kernel.mode = mode;
     MslGenerator::new(MslConfig::default())

@@ -121,6 +121,9 @@ pub enum ProtocolMessage {
         command: String,
         /// Total number of items to be processed in this run.
         total: u32,
+        /// GPU device name, populated by bench/test commands after GPU init.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device: Option<String>,
     },
 
     /// Emitted once as the very last line of a run.
@@ -136,6 +139,10 @@ pub enum ProtocolMessage {
         test_passed: u32,
         /// Number of test cases that failed.
         test_failed: u32,
+        /// Number of test cases skipped (e.g. cooperative-tensor kernels that
+        /// can't build on the current OS Metal toolchain).
+        #[serde(default)]
+        test_skipped: u32,
     },
 
     // ── Per-item results ─────────────────────────────────────────────────────
@@ -197,6 +204,9 @@ pub struct BenchResult {
     pub name: String,
     /// Data type (e.g. `"f16"`, `"f32"`).
     pub dtype: String,
+    /// Human-readable shape label (e.g. `"N=1M f32"`). Empty string if not set.
+    #[serde(default)]
+    pub shape: String,
     /// Throughput in GB/s for the MetalTile kernel.
     #[serde(default)]
     pub mt_gbps: f64,
@@ -233,6 +243,10 @@ pub struct TestResult {
     /// Maximum element-wise absolute error observed.
     #[serde(default)]
     pub max_err: f64,
+    /// True when the test was skipped rather than run (e.g. cooperative-tensor
+    /// pipeline won't build on this OS Metal toolchain).
+    #[serde(default)]
+    pub skipped: bool,
 }
 
 /// Result of compiling a single kernel across all requested dtypes.
@@ -278,6 +292,7 @@ mod tests {
         let msg = ProtocolMessage::BenchResult(BenchResult {
             name: "unary/exp".into(),
             dtype: "f16".into(),
+            shape: "N=1M f16".into(),
             mt_gbps: 1234.5,
             ref_gbps: Some(1189.2),
             mt_pct: Some(103.8),
@@ -304,6 +319,7 @@ mod tests {
         let msg = ProtocolMessage::BenchResult(BenchResult {
             name: "unary/exp".into(),
             dtype: "f32".into(),
+            shape: "N=1M f32".into(),
             mt_gbps: 900.0,
             ref_gbps: None,
             mt_pct: None,
@@ -344,6 +360,7 @@ mod tests {
             dtype: "f16".into(),
             passed: true,
             max_err: 3.2e-5,
+            skipped: false,
         });
         let json = msg.to_json_line();
         let parsed = ProtocolMessage::from_json_line(&json).unwrap();
@@ -415,11 +432,12 @@ mod tests {
             runner_version: "0.1.0".into(),
             command: "bench".into(),
             total: 42,
+            device: Some("Apple M4 Max".into()),
         };
         let json = msg.to_json_line();
         let parsed = ProtocolMessage::from_json_line(&json).unwrap();
         match parsed {
-            ProtocolMessage::Start { runner_version, command, total } => {
+            ProtocolMessage::Start { runner_version, command, total, .. } => {
                 assert_eq!(runner_version, "0.1.0");
                 assert_eq!(command, "bench");
                 assert_eq!(total, 42);
@@ -436,6 +454,7 @@ mod tests {
             bench_failed: 1,
             test_passed: 5,
             test_failed: 0,
+            test_skipped: 0,
         };
         let json = msg.to_json_line();
         let parsed = ProtocolMessage::from_json_line(&json).unwrap();
@@ -457,6 +476,7 @@ mod tests {
             bench_failed: 0,
             test_passed: 0,
             test_failed: 0,
+            test_skipped: 0,
         };
         let mut json = msg.to_json_line(); // includes trailing \n
         // parse with the newline present (to_json_line adds it)

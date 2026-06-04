@@ -207,7 +207,7 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::{mt_strided_copy, mt_strided_copy_nd};
-    use crate::bench_types::{dtype_tol, mlx_tname};
+    use crate::utils::{dtype_tol, mlx_tname};
 
     fn u8u32(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
 
@@ -255,7 +255,7 @@ pub mod kernel_benches {
             .constexpr("cols", dest_cols as u32)
             .with_shape_label(format!(
                 "{rows}×{dest_cols} pad{pad} {}",
-                crate::bench_types::dtype_label(dt)
+                crate::utils::dtype_label(dt)
             ))
             // Grid3D, unguarded: total threads = [rows, dest_cols] exactly.
             // 256-wide threadgroups along the contiguous (col) axis — dest_cols
@@ -305,7 +305,7 @@ pub mod kernel_benches {
             .constexpr("rank", 2u32)
             .with_shape_label(format!(
                 "{d0}×{d1} transpose {}",
-                crate::bench_types::dtype_label(dt)
+                crate::utils::dtype_label(dt)
             ))
             // Grid3D, unguarded `out[p]` store: total threads must equal
             // n_out exactly. grid_1d sets groups = n_out/tpg; n_out is a

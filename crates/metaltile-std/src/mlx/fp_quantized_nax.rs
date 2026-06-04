@@ -163,8 +163,10 @@ pub fn mt_fp_qmm_nax<T>(
 
 #[cfg(test)]
 mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::{dtype::DType, ir::Op};
+    use metaltile::{
+        codegen::msl::MslGenerator,
+        core::{dtype::DType, ir::Op},
+    };
 
     use super::*;
 

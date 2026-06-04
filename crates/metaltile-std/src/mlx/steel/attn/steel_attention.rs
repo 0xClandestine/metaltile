@@ -344,11 +344,11 @@ pub mod kernel_benches {
 
     use super::mt_sdpa_prefill;
     use crate::{
-        bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname},
         mlx::steel::attn::{
             steel_attention_mma::mt_sdpa_prefill_mma,
             steel_attention_mma_bf16::mt_sdpa_prefill_mma_bf16,
         },
+        utils::{InputDomain, dtype_tol, input_buffer, mlx_tname},
     };
 
     // SDPA prefill geometry shared by all three variants.

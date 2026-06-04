@@ -4,7 +4,7 @@ use std::{cell::RefCell, io::Write, ptr::NonNull};
 
 pub use metaltile::core::dtype::DType;
 use metaltile::core::ir::{Kernel, KernelMode};
-use metaltile_codegen::msl::MslGenerator;
+use metaltile::codegen::msl::MslGenerator;
 
 use metaltile::runner::{CompiledKernel, GpuBuffer, GpuRunner};
 use crate::term::{Color, Style, paint_stdout};

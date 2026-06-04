@@ -2,7 +2,7 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! Block-scaled **quantized-weight** dilated 1D convolution — the
 //! weight-quantized counterpart of the FishSpeech ResBlock dilated conv
-//! `conv1d_dilated` in `ffai/fishspeech_conv1d.rs`.
+//! `conv1d_dilated` in `ffai/conv1d_dilated_transpose.rs`.
 //!
 //! The dense dilated conv projects every output element over the `in_ch × k`
 //! receptive field of an NCL input with an OIK filter `[out_ch, in_ch, k]`,

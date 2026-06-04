@@ -278,7 +278,9 @@ pub fn ffai_gated_rms_norm_qgemv_int4_fast<T>(
 }
 
 mod oracle {
-    use crate::{bench_types::DType, utils::pack_f32};
+    use metaltile::core::DType;
+
+    use crate::utils::pack_f32;
 
     /// Per-row affine int4 quantize, 8 nibbles per u32 — same packing the
     /// kernel decodes. Returns (packed_weight, scales, biases) for one row.

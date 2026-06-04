@@ -25,6 +25,24 @@ fn all_registered_kernel_tests_pass() {
     let _g = gpu_lock();
     let ctx = Context::new().expect("Context::new on macOS");
 
+    // Anchor the metaltile-std kernel translation units so the linker keeps
+    // them in this test binary. `#[test_kernel]` registers each test via an
+    // `inventory::submit!` static that lives in the *same* TU as the kernel
+    // it covers. Under `--gc-sections` (macOS `-dead_strip`) the linker drops
+    // every kernel TU that nothing in this binary references — taking the
+    // submissions with it — so `all_tests()` would iterate zero entries and
+    // this test would pass *vacuously*. Touching the kernel-IR registry (the
+    // same anchor `kernel_registry_consistency` relies on) keeps the TUs
+    // alive. The `tile` runner avoids this because it dispatches kernels
+    // directly; this cargo bridge has no such reference of its own.
+    let n_kernels = metaltile_std::all_kernels().count();
+    assert!(
+        n_kernels > 0,
+        "all_kernels() is empty — the metaltile-std kernel object files were \
+         stripped from this test binary, so the #[test_kernel] inventory \
+         cannot be read",
+    );
+
     let mut total = 0usize;
     let mut failures: Vec<String> = Vec::new();
 
@@ -53,6 +71,16 @@ fn all_registered_kernel_tests_pass() {
             }
         }
     }
+
+    // Guard against silent regression: a populated kernel registry but an
+    // empty test registry means the `#[test_kernel]` submissions stopped
+    // linking (or registering) — the exact failure mode that let this
+    // harness pass while exercising nothing.
+    assert!(
+        total > 0,
+        "all_tests() iterated zero #[test_kernel] entries despite {n_kernels} \
+         registered kernels — link / registration regression",
+    );
 
     assert!(
         failures.is_empty(),

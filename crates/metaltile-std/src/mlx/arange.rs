@@ -71,10 +71,7 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
     use super::mt_arange;
-    use crate::{
-        bench_types::{dtype_tol, mlx_tname},
-        utils::scalar_bytes,
-    };
+    use crate::utils::{dtype_tol, mlx_tname, scalar_bytes};
 
     // 64M elements matches the MLX default elementwise bench size.
     // bytes_moved counts the output only; the two scalar reads are negligible.

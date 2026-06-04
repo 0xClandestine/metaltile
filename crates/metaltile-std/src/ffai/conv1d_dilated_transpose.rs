@@ -1,10 +1,8 @@
 //! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
 //! SPDX-License-Identifier: Apache-2.0
-//! FishSpeech vocoder 1D convolutions: **dilated** (ResBlock) and
-//! **transposed / upsampling** (HiFi-GAN-style generator).
-//!
-//! The FishSpeech (and most HiFi-GAN-derived) vocoder generator is two
-//! interleaved conv families:
+//! 1D convolution variants: **dilated** and **transposed / upsampling** —
+//! the two conv families a HiFi-GAN-style vocoder generator interleaves
+//! (MRF ResBlocks + upsampling stages):
 //!
 //!   * **Dilated `Conv1d`** inside each MRF ResBlock — same shape as the
 //!     dense [`audio_conv1d`](super::audio_conv1d) but with a `dilation`

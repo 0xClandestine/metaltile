@@ -30,8 +30,10 @@ use std::collections::BTreeMap;
 mod common;
 
 use common::{Dt, gpu_lock, pack_bytes, unpack_bytes};
-use metaltile_codegen::msl::{MslConfig, MslGenerator};
-use metaltile_core::dtype::DType;
+use metaltile::{
+    codegen::msl::{MslConfig, MslGenerator},
+    core::dtype::DType,
+};
 use metaltile_runtime::Context;
 use metaltile_std::mlx::sgload_smoke::mt_sgload_smoke;
 

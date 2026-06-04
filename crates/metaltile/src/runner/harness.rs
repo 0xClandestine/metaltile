@@ -6,18 +6,23 @@
 //! This is the only place that calls the `inventory` registries. The CLI
 //! process never imports this module — it only reads the JSON lines.
 
-use metaltile_codegen::msl::MslGenerator;
+use metaltile_codegen::{
+    emit as codegen_emit,
+    generator_for_mode,
+    msl::MslGenerator,
+    passes::{PassStats, PipelineBuilder, run_passes_with_stats},
+};
 use metaltile_core::{
     DType,
-    ir::ParamKind,
-    protocol::{BenchResult, BuildError, BuildResult, ProtocolMessage, TestResult},
+    ir::{Kernel, ParamKind},
+    protocol::{ArtifactKind, BenchResult, BuildError, BuildResult, ProtocolMessage, TestResult},
 };
 
 use crate::{
     harness::{
         bench::{BenchSetup, KernelBench, RefKernel},
         registry::{all_benches, all_kernels, all_tests},
-        test::{KernelTest, TestSetup},
+        test::TestSetup,
     },
     runner::{
         args::{RunnerArgs, RunnerCommand},
@@ -56,15 +61,15 @@ impl RunnerHarness {
         let dtypes = Self::dtype_list(args);
         let total = (entries.len() * dtypes.len()) as u32;
 
-        emit_stdout(&ProtocolMessage::Start {
-            runner_version: env!("CARGO_PKG_VERSION").into(),
-            command: "bench".into(),
-            total,
-        });
-
         let runner = match GpuRunner::new() {
             Ok(r) => r,
             Err(e) => {
+                emit_stdout(&ProtocolMessage::Start {
+                    runner_version: env!("CARGO_PKG_VERSION").into(),
+                    command: "bench".into(),
+                    total,
+                    device: None,
+                });
                 emit_stdout(&ProtocolMessage::ProtocolError {
                     name: "GpuRunner".into(),
                     dtype: "".into(),
@@ -76,10 +81,18 @@ impl RunnerHarness {
                     bench_failed: total,
                     test_passed: 0,
                     test_failed: 0,
+                    test_skipped: 0,
                 });
                 return false;
             },
         };
+
+        emit_stdout(&ProtocolMessage::Start {
+            runner_version: env!("CARGO_PKG_VERSION").into(),
+            command: "bench".into(),
+            total,
+            device: Some(runner.device_name.clone()),
+        });
 
         let mut passed = 0u32;
         let mut failed = 0u32;
@@ -111,6 +124,7 @@ impl RunnerHarness {
             bench_failed: failed,
             test_passed: 0,
             test_failed: 0,
+            test_skipped: 0,
         });
         failed == 0
     }
@@ -118,17 +132,23 @@ impl RunnerHarness {
     // ── test ──────────────────────────────────────────────────────────────────
 
     fn run_test(args: &RunnerArgs) -> bool {
+        use rayon::prelude::*;
+
         let entries: Vec<_> = all_tests()
             .filter(|e| args.filter.as_deref().is_none_or(|f| e.test().name().contains(f)))
             .collect();
 
         let dtypes = Self::dtype_list(args);
-        let total = (entries.len() * dtypes.len()) as u32;
+        let total: u32 = entries
+            .iter()
+            .map(|e| e.test().dtypes().iter().filter(|dt| dtypes.contains(dt)).count() as u32)
+            .sum();
 
         emit_stdout(&ProtocolMessage::Start {
             runner_version: env!("CARGO_PKG_VERSION").into(),
             command: "test".into(),
             total,
+            device: None,
         });
 
         let ctx = match metaltile_runtime::Context::new() {
@@ -145,18 +165,42 @@ impl RunnerHarness {
                     bench_failed: 0,
                     test_passed: 0,
                     test_failed: total,
+                    test_skipped: 0,
                 });
                 return false;
             },
         };
 
+        // Phase 1 (parallel): build all TestSetups on the CPU.
+        // `test.setup(dt)` computes expected output buffers without touching the
+        // GPU, so all (entry × dtype) pairs can run concurrently via rayon.
+        // Only run each test for its registered dtypes, intersected with the
+        // CLI dtype filter — a test with dtypes=[f32] must not run with f16.
+        let work: Vec<Vec<(String, DType, TestSetup, f64)>> = entries
+            .par_iter()
+            .map(|entry| {
+                let test = entry.test();
+                test.dtypes()
+                    .iter()
+                    .filter(|dt| dtypes.contains(dt))
+                    .map(|&dt| {
+                        let setup = test.setup(dt);
+                        let tol = test.tolerance(dt);
+                        (test.name().to_string(), dt, setup, tol)
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // Phase 2 (serial): GPU dispatch + comparison.
+        // Metal Context is not Send, so all dispatches run on the main thread.
         let mut passed = 0u32;
         let mut failed = 0u32;
+        let mut skipped = 0u32;
 
-        for entry in entries {
-            let test = entry.test();
-            for &dt in &dtypes {
-                match run_one_test(&ctx, test, dt) {
+        for group in &work {
+            for (name, dt, setup, tol) in group {
+                match run_one_test_with_setup(&ctx, setup, *tol, name, *dt) {
                     Ok(result) => {
                         if result.passed {
                             passed += 1;
@@ -166,12 +210,29 @@ impl RunnerHarness {
                         emit_stdout(&ProtocolMessage::TestResult(result));
                     },
                     Err(msg) => {
-                        failed += 1;
-                        emit_stdout(&ProtocolMessage::ProtocolError {
-                            name: entry.test().name().into(),
-                            dtype: format!("{dt:?}").to_lowercase(),
-                            message: msg,
-                        });
+                        // Cooperative-tensor (NAX/MPP matmul2d) kernels fail to
+                        // build on macOS <26.5 Metal toolchains with
+                        // "unsupported deferred-static-alloca-size". Skip rather
+                        // than fail — they'll auto-enable on qualifying runners.
+                        if setup.kernel().requires_cooperative_tensors()
+                            && msg.contains("deferred-static-alloca")
+                        {
+                            skipped += 1;
+                            emit_stdout(&ProtocolMessage::TestResult(TestResult {
+                                name: name.clone(),
+                                dtype: format!("{dt:?}").to_lowercase(),
+                                passed: false,
+                                max_err: 0.0,
+                                skipped: true,
+                            }));
+                        } else {
+                            failed += 1;
+                            emit_stdout(&ProtocolMessage::ProtocolError {
+                                name: name.clone(),
+                                dtype: format!("{dt:?}").to_lowercase(),
+                                message: msg,
+                            });
+                        }
                     },
                 }
             }
@@ -183,6 +244,7 @@ impl RunnerHarness {
             bench_failed: 0,
             test_passed: passed,
             test_failed: failed,
+            test_skipped: skipped,
         });
         failed == 0
     }
@@ -190,43 +252,306 @@ impl RunnerHarness {
     // ── build ─────────────────────────────────────────────────────────────────
 
     fn run_build(args: &RunnerArgs) -> bool {
-        let entries: Vec<_> = all_kernels()
-            .filter(|e| args.filter.as_deref().is_none_or(|f| e.name().contains(f)))
-            .collect();
+        use std::{collections::BTreeSet, path::PathBuf};
 
-        let dtypes = Self::dtype_list(args);
-        let total = entries.len() as u32;
+        use rayon::prelude::*;
 
+        // --time-passes: pure-CPU pass timing, prints table directly to stdout
+        // (no JSON protocol — CLI uses run() with inherited stdout for this path).
+        if args.time_passes {
+            return Self::run_time_passes(args);
+        }
+
+        let sdk = args.sdk.as_deref().unwrap_or("macosx");
+
+        // Parse --emit kinds; "metallib" implies "msl" (needs .metal files on disk).
+        let emit_kinds: BTreeSet<&str> = {
+            let mut s = BTreeSet::new();
+            if let Some(raw) = args.emit.as_deref() {
+                for tok in raw.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+                    match tok {
+                        "msl" => {
+                            s.insert("msl");
+                        },
+                        "metallib" => {
+                            s.insert("msl");
+                            s.insert("metallib");
+                        },
+                        "swift" => {
+                            s.insert("swift");
+                        },
+                        "ir" => {
+                            s.insert("ir");
+                        },
+                        "all" => {
+                            s.insert("msl");
+                            s.insert("metallib");
+                            s.insert("swift");
+                            s.insert("ir");
+                        },
+                        other => eprintln!("[runner] unknown --emit kind '{other}', skipping"),
+                    }
+                }
+            }
+            s
+        };
+        let out_root = args.out_dir.as_ref().map(PathBuf::from);
+        let kernels_dir = out_root.as_ref().map(|r| r.join("Resources").join("kernels"));
+
+        // Collect unique kernels from the bench registry.  Each bench's setup
+        // carries the kernel IR (with mode applied), the dtype set, and the
+        // threadgroup geometry — everything emission needs.  Keyed by the
+        // kernel's generic name; multiple benches for the same kernel union
+        // their dtype sets.
+        let mut kernel_map: std::collections::BTreeMap<
+            String,
+            (&'static dyn KernelBench, Vec<DType>),
+        > = std::collections::BTreeMap::new();
+        for entry in all_benches()
+            .filter(|e| args.filter.as_deref().is_none_or(|f| e.bench().name().contains(f)))
+        {
+            let bench = entry.bench();
+            let Some(&first_dt) = bench.dtypes().first() else { continue };
+            let base_name = bench.setup(first_dt).kernel().name.to_string();
+            let e = kernel_map.entry(base_name).or_insert((bench, Vec::new()));
+            for &dt in bench.dtypes() {
+                if !e.1.contains(&dt) {
+                    e.1.push(dt);
+                }
+            }
+        }
+
+        // Dtype filter from --dtype (comma-separated).
+        let dtype_filter: Option<Vec<DType>> = args
+            .dtype
+            .as_ref()
+            .map(|s| s.split(',').filter_map(|t| parse_dtype(t.trim())).collect());
+
+        let total = kernel_map.len() as u32;
         emit_stdout(&ProtocolMessage::Start {
             runner_version: env!("CARGO_PKG_VERSION").into(),
             command: "build".into(),
             total,
+            device: None,
         });
 
-        let mut any_err = false;
-        for entry in &entries {
-            let mut dtypes_ok = Vec::new();
-            let mut dtypes_err = Vec::new();
+        // --names: emit BuildResult messages with kernel names/dtypes, no compilation.
+        if args.names {
+            for (name, (_, dtypes)) in &kernel_map {
+                let ok: Vec<String> = match &dtype_filter {
+                    Some(df) => dtypes
+                        .iter()
+                        .filter(|dt| df.contains(dt))
+                        .map(|dt| format!("{dt:?}").to_lowercase())
+                        .collect(),
+                    None => dtypes.iter().map(|dt| format!("{dt:?}").to_lowercase()).collect(),
+                };
+                emit_stdout(&ProtocolMessage::BuildResult(BuildResult {
+                    name: name.clone(),
+                    dtypes_ok: ok,
+                    dtypes_err: Vec::new(),
+                }));
+            }
+            emit_stdout(&ProtocolMessage::Done {
+                ok: true,
+                bench_passed: 0,
+                bench_failed: 0,
+                test_passed: 0,
+                test_failed: 0,
+                test_skipped: 0,
+            });
+            return true;
+        }
 
-            for &dt in &dtypes {
-                let kernel = entry.build(&[dt]);
-                match MslGenerator::default().generate(&kernel) {
-                    Ok(_msl) => dtypes_ok.push(format!("{dt:?}").to_lowercase()),
-                    Err(e) => {
-                        any_err = true;
+        // Create output directory if needed.
+        if let Some(dir) = &kernels_dir {
+            let _ = std::fs::create_dir_all(dir);
+        }
+
+        struct WorkItem {
+            name: String,
+            bench: &'static dyn KernelBench,
+            dtypes: Vec<DType>,
+            n_dtypes: usize,
+        }
+        let work_items: Vec<WorkItem> = kernel_map
+            .into_iter()
+            .map(|(name, (bench, dtypes))| {
+                let dtypes_to_check = match &dtype_filter {
+                    Some(df) => dtypes.iter().filter(|dt| df.contains(dt)).copied().collect(),
+                    None => dtypes.clone(),
+                };
+                let n_dtypes = dtypes.len();
+                WorkItem { name, bench, dtypes: dtypes_to_check, n_dtypes }
+            })
+            .collect();
+
+        struct KernelResult {
+            name: String,
+            dtypes_ok: Vec<String>,
+            dtypes_err: Vec<BuildError>,
+            emitted_kernels: Vec<Kernel>,
+            emitted_paths: Vec<PathBuf>,
+        }
+
+        // Compile all kernels in parallel (each xcrun call is ~50-200 ms and
+        // fully independent, so parallelism across N cores gives a near-N× speedup).
+        let par_results: Vec<KernelResult> = work_items
+            .par_iter()
+            .map(|item| {
+                let mut dtypes_ok = Vec::new();
+                let mut dtypes_err = Vec::new();
+                let mut item_kernels = Vec::new();
+                let mut item_paths = Vec::new();
+
+                for &dt in &item.dtypes {
+                    let setup = item.bench.setup(dt);
+                    let mut k = setup.kernel().clone();
+                    let mode = k.mode;
+                    let suffix = codegen_emit::dtype_suffix(dt);
+                    k.name = if item.n_dtypes == 1 && item.name.ends_with(&format!("_{suffix}")) {
+                        item.name.clone()
+                    } else {
+                        format!("{}_{suffix}", item.name)
+                    };
+                    let expected_tpg = Some(setup.grid().tpg[0]);
+                    let generator = generator_for_mode(mode, expected_tpg);
+
+                    let _msl = match generator.generate(&k) {
+                        Ok(msl) => msl,
+                        Err(e) => {
+                            dtypes_err.push(BuildError {
+                                dtype: format!("{dt:?}").to_lowercase(),
+                                message: e.to_string(),
+                            });
+                            continue;
+                        },
+                    };
+
+                    // Metal compile-check via xcrun (macOS only).
+                    #[cfg(target_os = "macos")]
+                    if let Err(e) = build_metal_compile_check(&_msl, &k.name, sdk) {
                         dtypes_err.push(BuildError {
                             dtype: format!("{dt:?}").to_lowercase(),
-                            message: e.to_string(),
+                            message: e,
                         });
-                    },
+                        continue;
+                    }
+
+                    dtypes_ok.push(format!("{dt:?}").to_lowercase());
+
+                    if let Some(dir) = &kernels_dir
+                        && emit_kinds.contains("msl")
+                    {
+                        match codegen_emit::write_msl(&k, dir, &generator) {
+                            Ok(path) => item_paths.push(path),
+                            Err(e) => {
+                                dtypes_err.push(BuildError {
+                                    dtype: format!("{dt:?}").to_lowercase(),
+                                    message: e.to_string(),
+                                });
+                                dtypes_ok.pop();
+                                continue;
+                            },
+                        }
+                    }
+                    if !emit_kinds.is_empty() {
+                        item_kernels.push(k);
+                    }
+                }
+
+                KernelResult {
+                    name: item.name.clone(),
+                    dtypes_ok,
+                    dtypes_err,
+                    emitted_kernels: item_kernels,
+                    emitted_paths: item_paths,
+                }
+            })
+            .collect();
+
+        let mut any_err = false;
+        let mut all_emitted_kernels: Vec<Kernel> = Vec::new();
+        let mut all_emitted_paths: Vec<PathBuf> = Vec::new();
+
+        for result in par_results {
+            any_err |= !result.dtypes_err.is_empty();
+            emit_stdout(&ProtocolMessage::BuildResult(BuildResult {
+                name: result.name,
+                dtypes_ok: result.dtypes_ok,
+                dtypes_err: result.dtypes_err,
+            }));
+            all_emitted_kernels.extend(result.emitted_kernels);
+            all_emitted_paths.extend(result.emitted_paths);
+        }
+
+        // ── Emit pass ─────────────────────────────────────────────────────────
+        if let Some(out) = &out_root {
+            let resources_dir = out.join("Resources");
+            let generated_dir = out.join("Generated");
+
+            if emit_kinds.contains("ir") {
+                let manifest_path = resources_dir.join("manifest.json");
+                let _ = std::fs::create_dir_all(&resources_dir);
+                match codegen_emit::write_manifest(&all_emitted_kernels, &manifest_path) {
+                    Ok(()) => emit_stdout(&ProtocolMessage::Artifact {
+                        kind: ArtifactKind::Ir,
+                        path: manifest_path.to_string_lossy().into_owned(),
+                    }),
+                    Err(e) => eprintln!("[runner] write manifest: {e}"),
                 }
             }
 
-            emit_stdout(&ProtocolMessage::BuildResult(BuildResult {
-                name: entry.name().to_string(),
-                dtypes_ok,
-                dtypes_err,
-            }));
+            if emit_kinds.contains("swift") {
+                let path = generated_dir.join("MetalTileKernels.swift");
+                let _ = std::fs::create_dir_all(&generated_dir);
+                match codegen_emit::write_swift_wrappers(&all_emitted_kernels, &path) {
+                    Ok(()) => emit_stdout(&ProtocolMessage::Artifact {
+                        kind: ArtifactKind::Swift,
+                        path: path.to_string_lossy().into_owned(),
+                    }),
+                    Err(e) => eprintln!("[runner] write swift: {e}"),
+                }
+            }
+
+            // Emit Artifact messages for each written .metal file.
+            for path in &all_emitted_paths {
+                emit_stdout(&ProtocolMessage::Artifact {
+                    kind: ArtifactKind::Msl,
+                    path: path.to_string_lossy().into_owned(),
+                });
+            }
+
+            if emit_kinds.contains("metallib") {
+                let metallib_path = resources_dir.join("kernels.metallib");
+                let air_dir = std::env::var("CARGO_TARGET_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| PathBuf::from("target"))
+                    .join("tile-build-air");
+                let _ = std::fs::create_dir_all(&air_dir);
+                let air_result: Result<Vec<PathBuf>, _> = all_emitted_paths
+                    .par_iter()
+                    .map(|m| codegen_emit::compile_metal_to_air(m, sdk, &air_dir))
+                    .collect();
+                match air_result {
+                    Ok(airs) => {
+                        match codegen_emit::link_air_to_metallib(&airs, &metallib_path, sdk) {
+                            Ok(()) => emit_stdout(&ProtocolMessage::Artifact {
+                                kind: ArtifactKind::Metallib,
+                                path: metallib_path.to_string_lossy().into_owned(),
+                            }),
+                            Err(e) => {
+                                eprintln!("[runner] link metallib: {e}");
+                                any_err = true;
+                            },
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("[runner] compile .metal: {e}");
+                        any_err = true;
+                    },
+                }
+            }
         }
 
         emit_stdout(&ProtocolMessage::Done {
@@ -235,8 +560,87 @@ impl RunnerHarness {
             bench_failed: 0,
             test_passed: 0,
             test_failed: 0,
+            test_skipped: 0,
         });
         !any_err
+    }
+
+    // ── time-passes ───────────────────────────────────────────────────────────
+
+    /// Run the standard pass pipeline over the filtered kernel corpus and print
+    /// a per-pass median wall-time table directly to stdout (no JSON protocol).
+    fn run_time_passes(args: &RunnerArgs) -> bool {
+        const WARMUP: usize = 5;
+        const ITERS: usize = 25;
+
+        let dtype_filter: Option<Vec<DType>> = args
+            .dtype
+            .as_ref()
+            .map(|s| s.split(',').filter_map(|t| parse_dtype(t.trim())).collect());
+
+        let kernels: Vec<_> = all_benches()
+            .filter(|e| args.filter.as_deref().is_none_or(|f| e.bench().name().contains(f)))
+            .map(|e| e.bench())
+            .flat_map(|b| {
+                b.dtypes()
+                    .iter()
+                    .filter(|dt| dtype_filter.as_ref().is_none_or(|df| df.contains(dt)))
+                    .map(|&dt| b.setup(dt).kernel().clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        if kernels.is_empty() {
+            eprintln!("[runner] no kernels matched filter");
+            return false;
+        }
+
+        let pipeline = PipelineBuilder::standard().build();
+        let total_iters = WARMUP + ITERS;
+        let mut pass_names: Vec<String> = Vec::new();
+        let mut samples: Vec<Vec<u64>> = Vec::new();
+
+        for iter in 0..total_iters {
+            let mut pass_totals: Vec<u64> = Vec::new();
+            for k in &kernels {
+                let mut kc = k.clone();
+                let stats: Vec<PassStats> = match run_passes_with_stats(&mut kc, &pipeline) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                if pass_totals.is_empty() {
+                    pass_totals = vec![0u64; stats.len()];
+                    if pass_names.is_empty() {
+                        pass_names = stats.iter().map(|s| s.name.clone()).collect();
+                        samples = vec![Vec::with_capacity(ITERS); pass_names.len()];
+                    }
+                }
+                for (i, s) in stats.iter().enumerate() {
+                    pass_totals[i] += s.wall_us;
+                }
+            }
+            if iter >= WARMUP {
+                for (i, t) in pass_totals.iter().enumerate() {
+                    samples[i].push(*t);
+                }
+            }
+        }
+
+        let n_kernels = kernels.len() as f64;
+        println!(
+            "tile build --time-passes · {} kernels × {} iters ({} warmup)",
+            kernels.len(),
+            ITERS,
+            WARMUP,
+        );
+        println!("  {:<24}  {:>14}  {:>18}", "pass", "median_us", "median_us/kernel");
+        for (i, name) in pass_names.iter().enumerate() {
+            samples[i].sort_unstable();
+            let median = samples[i][samples[i].len() / 2];
+            let per_kernel = median as f64 / n_kernels;
+            println!("  {name:<24}  {median:>14}  {per_kernel:>18.1}");
+        }
+        true
     }
 
     // ── inspect ───────────────────────────────────────────────────────────────
@@ -263,6 +667,7 @@ impl RunnerHarness {
             runner_version: env!("CARGO_PKG_VERSION").into(),
             command: "inspect".into(),
             total: entries.len() as u32,
+            device: None,
         });
 
         let mut ok = true;
@@ -300,6 +705,7 @@ impl RunnerHarness {
             bench_failed: 0,
             test_passed: 0,
             test_failed: 0,
+            test_skipped: 0,
         });
         ok
     }
@@ -329,6 +735,38 @@ fn parse_dtype(s: &str) -> Option<DType> {
         "u8" => Some(DType::U8),
         _ => None,
     }
+}
+
+// ── Metal compile-check ───────────────────────────────────────────────────────
+
+/// Quickly compile an MSL source string via xcrun to catch type errors.
+/// Returns `Ok(())` on success, `Err(msg)` on failure.
+#[cfg(target_os = "macos")]
+fn build_metal_compile_check(msl: &str, kernel_name: &str, sdk: &str) -> Result<(), String> {
+    use std::process::Command;
+    let dir = std::env::temp_dir().join("tile-build-check");
+    let _ = std::fs::create_dir_all(&dir);
+    let metal_path = dir.join(format!("{kernel_name}.metal"));
+    let air_path = dir.join(format!("{kernel_name}.air"));
+    if let Err(e) = std::fs::write(&metal_path, msl) {
+        return Err(format!("write temp .metal: {e}"));
+    }
+    let output = Command::new("xcrun")
+        .args(["-sdk", sdk, "metal", "-c"])
+        .arg(&metal_path)
+        .arg("-o")
+        .arg(&air_path)
+        .output()
+        .map_err(|e| format!("invoke xcrun metal: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let short =
+            stderr.lines().filter(|l| l.contains("error:")).take(3).collect::<Vec<_>>().join("\n");
+        return Err(if short.is_empty() { stderr.into_owned() } else { short });
+    }
+    let _ = std::fs::remove_file(&metal_path);
+    let _ = std::fs::remove_file(&air_path);
+    Ok(())
 }
 
 // ── per-item execution ────────────────────────────────────────────────────────
@@ -423,9 +861,22 @@ fn run_one_bench(
             (None, None, true)
         };
 
+    let shape = setup.shape_label().map(|s| s.to_string()).unwrap_or_else(|| {
+        let n = setup.buffers().iter().map(|b| b.len()).max().unwrap_or(0);
+        let suffix = if n >= 1 << 20 && n % (1 << 20) == 0 {
+            format!("{}M", n >> 20)
+        } else if n >= 1 << 10 && n % (1 << 10) == 0 {
+            format!("{}K", n >> 10)
+        } else {
+            n.to_string()
+        };
+        format!("N={suffix} {dtype_str}")
+    });
+
     Some(BenchResult {
         name,
         dtype: dtype_str,
+        shape,
         mt_gbps,
         ref_gbps,
         mt_pct,
@@ -493,18 +944,21 @@ fn run_reference(
     Some((ref_gbps, passed))
 }
 
-/// Run one test entry for one dtype.
-fn run_one_test(
+/// GPU dispatch + comparison for a pre-built `TestSetup` (parallel-friendly).
+///
+/// The `setup` is built in Phase 1 (possibly on a rayon thread); this
+/// function runs in Phase 2 on the main thread where the Metal `Context` lives.
+fn run_one_test_with_setup(
     ctx: &metaltile_runtime::Context,
-    test: &'static dyn KernelTest,
+    setup: &TestSetup,
+    tol: f64,
+    name: &str,
     dt: DType,
 ) -> Result<TestResult, String> {
     use std::collections::BTreeMap;
 
     use crate::runner::gpu::elem_bytes;
 
-    let setup: TestSetup = test.setup(dt);
-    let name = test.name().to_string();
     let dtype_str = format!("{dt:?}").to_lowercase();
     let no_consts: BTreeMap<String, u32> = BTreeMap::new();
 
@@ -555,7 +1009,6 @@ fn run_one_test(
     };
 
     let mut worst = 0.0f32;
-    let tol = test.tolerance(dt);
     for (bname, exp_bytes, bdt) in &expected {
         let out_bytes =
             result.output(bname).ok_or_else(|| format!("expected output '{bname}' missing"))?;
@@ -566,7 +1019,13 @@ fn run_one_test(
         worst = worst.max(err);
     }
 
-    Ok(TestResult { name, dtype: dtype_str, passed: (worst as f64) <= tol, max_err: worst as f64 })
+    Ok(TestResult {
+        name: name.to_string(),
+        dtype: dtype_str,
+        passed: (worst as f64) <= tol,
+        max_err: worst as f64,
+        skipped: false,
+    })
 }
 
 // ── Public in-process test runner (legacy CLI compat) ─────────────────────────

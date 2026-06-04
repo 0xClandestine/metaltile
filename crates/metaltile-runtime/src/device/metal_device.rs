@@ -96,6 +96,7 @@ impl MetalDevice {
     // ── accessors ──────────────────────────────────────────────────
 
     /// Borrow the Metal device.
+    #[allow(dead_code)]
     pub fn device(&self) -> &ProtocolObject<dyn MTLDevice> { &self.device }
 
     /// Borrow the command queue.

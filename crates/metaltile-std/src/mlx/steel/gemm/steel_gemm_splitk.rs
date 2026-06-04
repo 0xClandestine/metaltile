@@ -234,7 +234,7 @@ pub mod kernel_benches {
     use metaltile::{bench, core::ir::Kernel, test::*};
 
     use super::*;
-    use crate::bench_types::{InputDomain, dtype_tol, input_buffer, mlx_tname};
+    use crate::utils::{InputDomain, dtype_tol, input_buffer, mlx_tname};
 
     const M: u32 = 4096;
     const N: u32 = 4096;
@@ -282,7 +282,7 @@ pub mod kernel_benches {
             .constexpr("k_per_split", K_PER_SPLIT)
             .with_shape_label(format!(
                 "m{M} n{N} k{K} split{N_SPLITS} {}",
-                crate::bench_types::dtype_label(dt)
+                crate::utils::dtype_label(dt)
             ))
             .grid_3d(N / bn, M / bm, N_SPLITS, [tpg, 1, 1])
             .bytes_moved(bytes as u64)
@@ -347,7 +347,7 @@ pub mod kernel_benches {
             .constexpr("n_splits", N_SPLITS)
             .with_shape_label(format!(
                 "m{M} n{N} split{N_SPLITS} {}",
-                crate::bench_types::dtype_label(dt)
+                crate::utils::dtype_label(dt)
             ))
             .grid_1d(m * n, ACCUM_TPG)
             .bytes_moved(bytes as u64)
@@ -404,7 +404,7 @@ pub mod kernel_benches {
             .constexpr("beta", 1.0f32)
             .with_shape_label(format!(
                 "m{M} n{N} split{N_SPLITS} {}",
-                crate::bench_types::dtype_label(dt)
+                crate::utils::dtype_label(dt)
             ))
             .grid_1d(m * n, ACCUM_TPG)
             .bytes_moved(bytes as u64)

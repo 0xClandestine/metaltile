@@ -183,7 +183,7 @@ pub mod kernel_benches {
             .constexpr("original_max_position", 8192.0f32)
             .with_shape_label(format!(
                 "T{t_len} h{n_heads} d{head_dim} {}",
-                crate::bench_types::dtype_label(dt)
+                crate::utils::dtype_label(dt)
             ))
             .grid_3d(t_len as u32, n_heads as u32, half as u32, [1, 1, 1])
             .bytes_moved((2 * t_len * row_stride * dt.size_bytes()) as u64)

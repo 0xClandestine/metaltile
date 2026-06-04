@@ -25,6 +25,7 @@ pub mod block_scaled_moe;
 pub mod block_scaled_qmm;
 pub mod block_scaled_qmm_mpp;
 pub mod block_scaled_qmm_nax;
+pub mod clamped_swiglu;
 pub mod copy;
 pub mod fft;
 pub mod fp_quantized;

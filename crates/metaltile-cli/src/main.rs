@@ -16,6 +16,7 @@
 //!   config        Display effective merged configuration
 //!   completions   Generate shell completion scripts
 
+pub mod bench_types;
 mod cmd;
 pub mod config;
 mod error;
@@ -295,7 +296,8 @@ impl FilterSpec {
         }
     }
 
-    /// All filters pass for this name + source file (used for bench/test/build).
+    /// All filters pass for this name + source file.
+    #[allow(dead_code)]
     pub fn matches(&self, name: &str, file: &str) -> bool {
         self.matches_name(name) && self.matches_file(file)
     }
@@ -683,11 +685,6 @@ fn main() {
 
     // Apply --color choice before any paint calls (sets NO_COLOR / CLICOLOR_FORCE).
     apply_color_choice(cli.global.color);
-
-    // Apply -j / --threads before any rayon work.
-    if let Some(n) = cli.global.threads {
-        let _ = rayon::ThreadPoolBuilder::new().num_threads(n).build_global();
-    }
 
     let _span = tracing::info_span!("tile", command = ?cli.command).entered();
 

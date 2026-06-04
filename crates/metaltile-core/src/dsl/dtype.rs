@@ -23,6 +23,9 @@ pub enum DType {
     I4,
     /// 8-bit unsigned integer
     U8,
+    /// 16-bit unsigned integer (for reading misaligned GGUF quant blocks, e.g.
+    /// IQ2_XXS qs at byte offset 2 — u16-aligned, vs slow u8-recombine).
+    U16,
     /// 32-bit unsigned integer
     U32,
     /// 64-bit unsigned integer
@@ -38,7 +41,7 @@ impl DType {
     pub const fn size_bytes(self) -> usize {
         match self {
             DType::F32 | DType::I32 | DType::U32 => 4,
-            DType::F16 | DType::BF16 => 2,
+            DType::F16 | DType::BF16 | DType::U16 => 2,
             DType::I8 | DType::U8 => 1,
             DType::I4 => 1, // packed, but addressable as 1 byte
             DType::U64 | DType::I64 => 8,
@@ -46,15 +49,38 @@ impl DType {
         }
     }
 
+    // is_float / is_integer use an exhaustive `match` (not `matches!`) on
+    // purpose: adding a DType variant then fails to compile here until it's
+    // classified, so the two can never silently disagree or miss a new type.
     /// Whether this is a floating-point type.
-    pub const fn is_float(self) -> bool { matches!(self, DType::F32 | DType::F16 | DType::BF16) }
+    pub const fn is_float(self) -> bool {
+        match self {
+            DType::F32 | DType::F16 | DType::BF16 => true,
+            DType::I32
+            | DType::I8
+            | DType::I4
+            | DType::U8
+            | DType::U16
+            | DType::U32
+            | DType::U64
+            | DType::I64
+            | DType::Bool => false,
+        }
+    }
 
     /// Whether this is an integer type.
     pub const fn is_integer(self) -> bool {
-        matches!(
-            self,
-            DType::I32 | DType::I8 | DType::I4 | DType::U8 | DType::U32 | DType::U64 | DType::I64
-        )
+        match self {
+            DType::I32
+            | DType::I8
+            | DType::I4
+            | DType::U8
+            | DType::U16
+            | DType::U32
+            | DType::U64
+            | DType::I64 => true,
+            DType::F32 | DType::F16 | DType::BF16 | DType::Bool => false,
+        }
     }
 
     /// Metal Shading Language name for this type.
@@ -67,6 +93,7 @@ impl DType {
             DType::I8 => "char",
             DType::I4 => "char", // packed char
             DType::U8 => "uchar",
+            DType::U16 => "ushort",
             DType::U32 => "uint",
             DType::U64 => "ulong",
             DType::I64 => "long",
@@ -84,6 +111,7 @@ impl DType {
             DType::I8 => "i8",
             DType::I4 => "i8", // stored as i8
             DType::U8 => "u8",
+            DType::U16 => "u16",
             DType::U32 => "u32",
             DType::U64 => "u64",
             DType::I64 => "i64",
@@ -107,6 +135,7 @@ impl DType {
             DType::I8 => "i8",
             DType::I4 => "i4",
             DType::U8 => "u8",
+            DType::U16 => "u16",
             DType::U32 => "u32",
             DType::U64 => "u64",
             DType::I64 => "i64",
@@ -127,6 +156,7 @@ impl FromStr for DType {
             "i8" => Ok(DType::I8),
             "i4" => Ok(DType::I4),
             "u8" => Ok(DType::U8),
+            "u16" => Ok(DType::U16),
             "u32" => Ok(DType::U32),
             "u64" => Ok(DType::U64),
             "i64" => Ok(DType::I64),
@@ -148,6 +178,7 @@ mod tests {
         DType::I8,
         DType::I4,
         DType::U8,
+        DType::U16,
         DType::U32,
         DType::U64,
         DType::I64,

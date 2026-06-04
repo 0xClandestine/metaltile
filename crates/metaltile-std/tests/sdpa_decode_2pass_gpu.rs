@@ -23,7 +23,7 @@ use std::{
 };
 
 use common::{Dt, SdpaShape, max_abs_diff, naive_sdpa_f32, pack_bytes, ramp, unpack_bytes};
-use metaltile_core::ir::KernelMode;
+use metaltile::core::ir::KernelMode;
 use metaltile_runtime::{Context, DispatchSpec, ResidentBuffer};
 use metaltile_std::ffai::sdpa_decode_2pass::{sdpa_decode_2pass_pass1, sdpa_decode_2pass_pass2};
 

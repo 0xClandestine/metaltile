@@ -733,7 +733,7 @@ pub mod kernel_tests {
 
 #[cfg(test)]
 mod tests {
-    use metaltile_core::{dtype::DType, ir::Op};
+    use metaltile::core::{dtype::DType, ir::Op};
 
     use super::*;
 
@@ -784,7 +784,7 @@ mod tests {
 
     #[test]
     fn codegen_emits_mpp_include_and_kernel_decl() {
-        use metaltile_codegen::msl::MslGenerator;
+        use metaltile::codegen::msl::MslGenerator;
         for (dt, t_name) in [(DType::F32, "float"), (DType::F16, "half"), (DType::BF16, "half")] {
             let mut k = mt_sdpa_prefill_nax::kernel_ir_for(dt);
             let suffix = match dt {
@@ -803,7 +803,7 @@ mod tests {
 
     #[test]
     fn wide_codegen_emits_mpp_include_and_kernel_decl() {
-        use metaltile_codegen::msl::MslGenerator;
+        use metaltile::codegen::msl::MslGenerator;
         for (dt, t_name) in [(DType::F32, "float"), (DType::F16, "half"), (DType::BF16, "half")] {
             for (dim, kernel_ir) in [
                 (64usize, mt_sdpa_prefill_nax_d64::kernel_ir_for as fn(_) -> _),

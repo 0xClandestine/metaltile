@@ -6,7 +6,7 @@
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use metaltile_core::dtype::DType;
+use metaltile::core::dtype::DType;
 
 /// Serialise GPU dispatches across all integration tests that pull in
 /// this module. cargo runs integration tests in parallel by default;

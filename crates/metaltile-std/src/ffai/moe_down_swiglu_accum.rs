@@ -550,7 +550,7 @@ pub mod kernel_benches {
             .constexpr("group_size", group_size as u32)
             .with_shape_label(format!(
                 "in{in_dim} out{out_dim} E{n_experts} k{N_SLOTS} {}",
-                crate::bench_types::dtype_label(dt)
+                crate::utils::dtype_label(dt)
             ))
             .grid_3d(out_dim as u32, 1, 1, [LSIZE, 1, 1])
             .bytes_moved(bytes as u64)

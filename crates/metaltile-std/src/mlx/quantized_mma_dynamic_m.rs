@@ -43,7 +43,7 @@
 //! needed — `mt_qmm_mma` is already in the kernel pack at every
 //! shipped dtype.
 
-use metaltile_core::{dtype::DType, ir::Kernel};
+use metaltile::core::{dtype::DType, ir::Kernel};
 
 use crate::mlx::quantized::{mt_qmm_mma, patch_qmm_mma_dtype_aware_skew};
 
@@ -95,7 +95,7 @@ pub fn pad_x_rows_bytes(x_bytes: &[u8], t: usize, k: usize, bytes_per_elem: usiz
 pub fn kernel_ir_for(dtype: DType) -> Kernel {
     let mut k = mt_qmm_mma::kernel_ir_for(dtype);
     patch_qmm_mma_dtype_aware_skew(&mut k, dtype);
-    k.mode = metaltile_core::ir::KernelMode::Reduction;
+    k.mode = metaltile::core::ir::KernelMode::Reduction;
     k
 }
 
@@ -153,7 +153,7 @@ mod tests {
         for dt in [DType::F32, DType::F16, DType::BF16] {
             let k = kernel_ir_for(dt);
             assert_eq!(k.name, "mt_qmm_mma", "dynamic-M routes to mt_qmm_mma for dtype {:?}", dt);
-            assert_eq!(k.mode, metaltile_core::ir::KernelMode::Reduction);
+            assert_eq!(k.mode, metaltile::core::ir::KernelMode::Reduction);
         }
     }
 }

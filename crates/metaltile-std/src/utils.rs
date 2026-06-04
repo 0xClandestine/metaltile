@@ -15,7 +15,7 @@
 //! ```
 
 use half::{bf16, f16};
-use metaltile_core::dtype::DType;
+use metaltile::{core::dtype::DType, harness::bench::BenchBuffer};
 
 /// Pack a slice of `f32` values into little-endian bytes for `dt`.
 ///
@@ -62,6 +62,116 @@ pub fn unpack_f32(bytes: &[u8], dt: DType) -> Vec<f32> {
         DType::I8 => bytes.iter().map(|&b| b as i8 as f32).collect(),
         _ => bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Dtype helpers (bench setup — used by kernel files in this crate only)
+// ---------------------------------------------------------------------------
+
+/// All floating-point dtypes to iterate over in multi-variant benches.
+pub const FLOAT_DTYPES: &[DType] = &[DType::F32, DType::F16, DType::BF16];
+/// Short names for the three floating-point dtypes, matching MLX convention.
+pub const FLOAT_DTYPE_STRS: &[&str] = &["f32", "f16", "bf16"];
+/// Integer dtypes supported by MLX elementwise and copy kernels.
+pub const INTEGER_DTYPES: &[DType] = &[DType::I32, DType::U32, DType::I8, DType::U8];
+
+/// Short label for a dtype, e.g. `"f32"`, `"bf16"`.
+pub fn dtype_label(dt: DType) -> &'static str {
+    match dt {
+        DType::F32 => "f32",
+        DType::F16 => "f16",
+        DType::BF16 => "bf16",
+        DType::I32 => "i32",
+        DType::U32 => "u32",
+        DType::I8 => "i8",
+        DType::U8 => "u8",
+        DType::Bool => "bool",
+        _ => "?",
+    }
+}
+
+/// MLX template-name suffix used in kernel instantiation strings.
+pub fn mlx_tname(dt: DType) -> &'static str {
+    match dt {
+        DType::F32 => "float32",
+        DType::F16 => "float16",
+        DType::BF16 => "bfloat16",
+        DType::I32 => "int32",
+        DType::U32 => "uint32",
+        DType::I8 => "int8",
+        DType::U8 => "uint8",
+        DType::Bool => "bool_",
+        _ => "float32",
+    }
+}
+
+/// Bytes per element for a dtype.
+pub fn elem_bytes(dt: DType) -> usize {
+    match dt {
+        DType::F32 | DType::I32 | DType::U32 => 4,
+        DType::F16 | DType::BF16 => 2,
+        DType::U8 | DType::Bool | DType::I8 => 1,
+        _ => 4,
+    }
+}
+
+/// Absolute-error tolerance for elementwise op correctness checks.
+pub fn dtype_tol(dt: DType) -> f32 {
+    match dt {
+        DType::F32 => 1e-4,
+        DType::F16 => 1.5e-2,
+        DType::BF16 => 1.3e-1,
+        _ => 0.0,
+    }
+}
+
+/// Absolute-error tolerance for reduction ops.
+pub fn dtype_tol_reduce(dt: DType) -> f32 {
+    match dt {
+        DType::F32 => 1e-3,
+        DType::F16 => 0.5,
+        DType::BF16 => 128.0,
+        _ => 1e-3,
+    }
+}
+
+/// Deterministic, range-controlled input distributions for bench correctness checks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum InputDomain {
+    /// Mixed signs around zero: `[-3, -1.5, -0.5, 0, 0.25, 0.75, 1.5, 3]`.
+    Signed,
+    /// Strictly positive `0.25..=4.0` — for `log`/`sqrt`/`rsqrt`/`acosh` domains.
+    Positive,
+    /// Inside the unit interval: `[-0.9, -0.5, -0.1, 0, 0.1, 0.5, 0.9]`.
+    Unit,
+    /// Small positive `1e-4..=1.6e-3` — for long reductions that stay finite in f16.
+    Tiny,
+}
+
+impl InputDomain {
+    /// The deterministic value at flat index `i`.
+    pub fn value(self, i: usize) -> f32 {
+        match self {
+            InputDomain::Signed => [-3.0, -1.5, -0.5, 0.0, 0.25, 0.75, 1.5, 3.0][i % 8],
+            InputDomain::Positive => 0.25 + (i % 16) as f32 * 0.25,
+            InputDomain::Unit => [-0.9, -0.5, -0.1, 0.0, 0.1, 0.5, 0.9][i % 7],
+            InputDomain::Tiny => 1e-4 + (i % 16) as f32 * 1e-4,
+        }
+    }
+}
+
+/// Build a `BenchBuffer` of `n` elements filled with `domain`'s deterministic
+/// pattern, packed for `dt`. Lazy — bytes are only generated when the bench runs.
+pub fn input_buffer(name: &str, n: usize, dt: DType, domain: InputDomain) -> BenchBuffer {
+    BenchBuffer::lazy(
+        name,
+        n,
+        dt,
+        std::sync::Arc::new(move || {
+            let vals: Vec<f32> = (0..n).map(|i| domain.value(i)).collect();
+            pack_f32(&vals, dt)
+        }),
+    )
 }
 
 #[cfg(test)]

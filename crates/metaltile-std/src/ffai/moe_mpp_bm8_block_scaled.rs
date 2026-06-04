@@ -2217,11 +2217,12 @@ pub fn mt_int8_f16_moe_gather_qmm_bm8_mpp<T>(
 
 #[cfg(test)]
 mod tests {
-    use metaltile_codegen::msl::MslGenerator;
-    use metaltile_core::ir::Op;
+    use metaltile::{
+        codegen::msl::MslGenerator,
+        core::{DType, ir::Op},
+    };
 
     use super::*;
-    use crate::bench_types::DType;
 
     /// Every block-scaled MoE kernel (BM=8) builds, drops to `CoopTile*` ops (no
     /// raw inline MSL), and has the 5-tensor / 4-constexpr ABI (nvfp4 adds the
@@ -2826,7 +2827,7 @@ pub mod kernel_benches {
             .with_shape_label(format!(
                 "{} M{m_total} N{n_out} K{k_in} E{n_experts} {}",
                 fmt.name(),
-                crate::bench_types::dtype_label(dt)
+                crate::utils::dtype_label(dt)
             ))
     }
 
