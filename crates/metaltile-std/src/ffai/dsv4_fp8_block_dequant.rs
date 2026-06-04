@@ -85,34 +85,20 @@ pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
     use super::ffai_dsv4_fp8_block_dequant;
-    use crate::utils::pack_f32;
+    use crate::{quant::codec, utils::pack_f32};
 
-    /// Build the FP8 e4m3 byte → fp32 LUT. e4m3 layout:
-    /// `[s (1)] [e (4)] [m (3)]` with `bias = 7`; subnormals + NaN
-    /// per the IEEE-754-ish FP8 spec used by DeepSeek-V3.
+    /// FP8 e4m3 byte → fp32 LUT. The finite-value decode is the shared
+    /// `codec::e4m3_decode` — the single source of truth every E4M3 path
+    /// (`quant::format`'s E4M3 element, the GGUF/MLX micro-float scales) routes
+    /// through — so this DSv4 model LUT can't drift from the kernel's decode.
+    /// DSv4's FP8 storage additionally reserves the all-ones magnitude code
+    /// (`0x7F` / `0xFF`) as a NaN sentinel; production weights never emit it
+    /// (the quantizer saturates to ±448 = `0x7E`), so the policy is kept
+    /// explicit here rather than folded into the generic finite codec.
     fn build_fp8_lut() -> [f32; 256] {
-        let mut lut = [0.0f32; 256];
-        for byte in 0..256_u32 {
-            let sign = (byte >> 7) & 1;
-            let exp = (byte >> 3) & 0xf;
-            let mantissa = byte & 0x7;
-            let sign_mult = if sign == 0 { 1.0 } else { -1.0 };
-            let value: f32 = if exp == 0xf && mantissa == 0x7 {
-                // 0x7F / 0xFF = NaN. Encode as f32 NaN so the
-                // downstream NaN filter (if any) sees it.
-                f32::NAN
-            } else if exp == 0 {
-                // Subnormal: mantissa / 2^9 (no implicit leading 1).
-                sign_mult * (mantissa as f32) * (1.0 / 64.0) * (1.0 / 8.0)
-            } else {
-                // Normal: (1 + m/8) * 2^(e - 7).
-                let m_frac = 1.0 + (mantissa as f32) / 8.0;
-                let exp_scale = (2.0_f32).powf((exp as f32) - 7.0);
-                sign_mult * m_frac * exp_scale
-            };
-            lut[byte as usize] = value;
-        }
-        lut
+        std::array::from_fn(|byte| {
+            if byte as u32 & 0x7f == 0x7f { f32::NAN } else { codec::e4m3_decode(byte as u8) }
+        })
     }
 
     /// Reference quantizer: per (128×128) block compute the matching
