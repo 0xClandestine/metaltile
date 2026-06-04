@@ -80,7 +80,8 @@ impl RunnerHarness {
                     bench_passed: 0,
                     bench_failed: total,
                     test_passed: 0,
-                    test_failed: 0, test_skipped: 0,
+                    test_failed: 0,
+                    test_skipped: 0,
                 });
                 return false;
             },
@@ -122,7 +123,8 @@ impl RunnerHarness {
             bench_passed: passed,
             bench_failed: failed,
             test_passed: 0,
-            test_failed: 0, test_skipped: 0,
+            test_failed: 0,
+            test_skipped: 0,
         });
         failed == 0
     }
@@ -162,7 +164,8 @@ impl RunnerHarness {
                     bench_passed: 0,
                     bench_failed: 0,
                     test_passed: 0,
-                    test_failed: total, test_skipped: 0,
+                    test_failed: total,
+                    test_skipped: 0,
                 });
                 return false;
             },
@@ -354,7 +357,8 @@ impl RunnerHarness {
                 bench_passed: 0,
                 bench_failed: 0,
                 test_passed: 0,
-                test_failed: 0, test_skipped: 0,
+                test_failed: 0,
+                test_skipped: 0,
             });
             return true;
         }
@@ -555,7 +559,8 @@ impl RunnerHarness {
             bench_passed: 0,
             bench_failed: 0,
             test_passed: 0,
-            test_failed: 0, test_skipped: 0,
+            test_failed: 0,
+            test_skipped: 0,
         });
         !any_err
     }
@@ -699,7 +704,8 @@ impl RunnerHarness {
             bench_passed: 0,
             bench_failed: 0,
             test_passed: 0,
-            test_failed: 0, test_skipped: 0,
+            test_failed: 0,
+            test_skipped: 0,
         });
         ok
     }

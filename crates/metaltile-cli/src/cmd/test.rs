@@ -182,15 +182,14 @@ pub fn run(args: &TestArgs, harness: &crate::harness::Harness) -> Result<(), cra
         let skipped_note = if suite_skipped > 0 {
             format!(
                 "; {}",
-                paint_stdout(
-                    format!("{suite_skipped} skipped"),
-                    Style::new().fg(Color::Yellow),
-                )
+                paint_stdout(format!("{suite_skipped} skipped"), Style::new().fg(Color::Yellow),)
             )
         } else {
             String::new()
         };
-        println!("Suite result: {result_word}. {passed_paint} passed; {failed_paint} failed{skipped_note}");
+        println!(
+            "Suite result: {result_word}. {passed_paint} passed; {failed_paint} failed{skipped_note}"
+        );
 
         if args.fail_fast && suite_failed > 0 {
             break;
@@ -223,10 +222,7 @@ pub fn run(args: &TestArgs, harness: &crate::harness::Harness) -> Result<(), cra
     let skipped_overall = if total_skipped > 0 {
         format!(
             ", {}",
-            paint_stdout(
-                format!("{total_skipped} skipped"),
-                Style::new().fg(Color::Yellow),
-            )
+            paint_stdout(format!("{total_skipped} skipped"), Style::new().fg(Color::Yellow),)
         )
     } else {
         String::new()
