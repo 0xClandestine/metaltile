@@ -208,6 +208,7 @@ And the same `mx*`/`mxint*` formats that target Blackwell also target CDNA4 micr
 - **`LLVM_IR_UNIFICATION_ANALYSIS.md`** — evidence that NVIDIA and AMD both consume LLVM IR, enabling a shared emitter.
 - **`CUDA_BACKEND_SPEC.md`** — the NVIDIA `CodegenBackend` impl and shared Rust API design.
 - **`VULKAN_BACKEND_SPEC.md`** — the Vulkan/SPIR-V `CodegenBackend` impl, the third peer backend.
+- **`AIR_BACKEND_SPEC.md`** — the Apple AIR `CodegenBackend` impl (experimental).
 - **LLVM AMDGPU Backend Usage Guide** — https://llvm.org/docs/AMDGPUUsage.html
 - **ROCm / HIP** — HIP runtime + hipRTC (runtime compile), `hipcc`/LLVM AMDGPU.
 - **rocWMMA / Composable Kernel (CK)** — CUTLASS-class libraries for matrix-core and cooperative-kernel paths.

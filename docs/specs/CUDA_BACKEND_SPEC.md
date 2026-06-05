@@ -365,6 +365,7 @@ The IR + DSL + the entire 30-format quant codec are reused as-is. The LLVM IR em
 - **`LLVM_IR_UNIFICATION_ANALYSIS.md`** — evidence that NVIDIA and AMD both consume LLVM IR, enabling a shared emitter.
 - **`AMD_BACKEND_SPEC.md`** — the AMD `CodegenBackend` impl, sharing the same LLVM IR emitter.
 - **`VULKAN_BACKEND_SPEC.md`** — the Vulkan/SPIR-V `CodegenBackend` impl, the third peer backend.
+- **`AIR_BACKEND_SPEC.md`** — the Apple AIR `CodegenBackend` impl (experimental, LLVM IR codegen).
 - **NVVM IR Specification 12.9** — https://docs.nvidia.com/cuda/archive/12.9.1/nvvm-ir-spec/index.html
 - **LLVM NVPTX Backend Usage Guide** — https://releases.llvm.org/21.1.0/docs/NVPTXUsage.html
 - **NVlabs `cuda-oxide`** — https://github.com/NVlabs/cuda-oxide — Rust CUDA stack.

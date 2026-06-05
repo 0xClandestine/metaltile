@@ -393,3 +393,4 @@ Write three hand-crafted `.ll` files for a simple elementwise kernel:
 - **`CUDA_BACKEND_SPEC.md`** — NVIDIA backend spec (revised, LLVM IR codegen)
 - **`AMD_BACKEND_SPEC.md`** — AMD backend spec (revised, LLVM IR codegen)
 - **`VULKAN_BACKEND_SPEC.md`** — Vulkan backend spec (revised, LLVM IR codegen)
+- **`AIR_BACKEND_SPEC.md`** — Apple AIR backend spec (experimental, LLVM IR codegen)

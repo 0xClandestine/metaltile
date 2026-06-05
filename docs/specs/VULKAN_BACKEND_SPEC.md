@@ -280,6 +280,7 @@ Because the LLVM IR emitter is already shared with NVIDIA and AMD, adding Vulkan
 - **`LLVM_IR_UNIFICATION_ANALYSIS.md`** — evidence that NVIDIA, AMD, and Vulkan all consume LLVM IR via their respective LLVM backends.
 - **`CUDA_BACKEND_SPEC.md`** — the shared `CodegenBackend` trait and Rust API design.
 - **`AMD_BACKEND_SPEC.md`** — the AMD `CodegenBackend` impl, sharing the same LLVM IR emitter.
+- **`AIR_BACKEND_SPEC.md`** — the Apple AIR `CodegenBackend` impl (experimental).
 - **LLVM SPIR-V Backend Usage Guide** — https://releases.llvm.org/23.0.0/docs/SPIRVUsage.html
 - **LLVM PR #196101 — `vulkan` as SPIR-V OS target** — https://github.com/llvm/llvm-project/pull/196101
 - **LLVM PR #174910 — SPIR-V `gpuintrin.h` support** — https://github.com/llvm/llvm-project/pull/174910
