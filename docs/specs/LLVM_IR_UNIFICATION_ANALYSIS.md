@@ -69,35 +69,101 @@ viable and simpler — and finds that **LLVM IR unifies all three non-Apple back
 
 **Verdict:** You can feed LLVM IR to the SPIR-V backend and **skip GLSL/rspirv entirely**.
 
-### Apple / Metal
+### Apple / Metal — AIR IS LLVM bitcode (but the backend is locked)
 
-- Metal Shading Language (MSL) is the **only** input format. Apple's internal stack
-  (MSL → Air → GPU ISA) is proprietary and does not accept LLVM IR.
-- No documented way to feed LLVM IR to an Apple GPU.
+**tl;dr:** Apple's GPU compiler stack uses LLVM IR *internally*, and there are now
+open-source tools that generate it, but Apple does not expose a public API to feed
+LLVM IR directly. The MSL emitter is still the safe path today.
 
-**Verdict:** Metal requires its own MSL emitter — unavoidable.
+---
+
+**Key finding: Apple's AIR (Apple Intermediate Representation) IS LLVM bitcode.**
+
+The `.air` files produced by `xcrun metal -c` have the LLVM bitcode magic number
+(`DE C0 17 0B`). You can run `llvm-dis` on them to get human-readable LLVM IR, and
+`llc` to compile them to x86-64 or ARM64 assembly. This was proven in 2018 by
+reverse-engineering the `.metallib` container format
+([worthdoingbadly.com/metalbitcode](https://worthdoingbadly.com/metalbitcode/)).
+
+**The `.metallib` container** wraps AIR bitcode with a metadata header (`MTLB`
+format: NAME/TYPE/HASH/MDSZ/OFFT/VERS/ENDT tags). The format has been
+reverse-engineered and multiple independent tools can produce it.
+
+**Two open-source projects now generate AIR/metallib from LLVM IR:**
+
+1. **llvm-to-air** ([sueszli/llvm-to-air](https://github.com/sueszli/llvm-to-air))
+   — Python-based. Takes LLVM IR, lowers it to AIR (LLVM bitcode with
+   `llvm.air.*` intrinsics), packages it into a `.metallib` via `xcrun metallib`.
+   30+ kernel tests (matmul, softmax, conv2d, reductions, activations).
+   1150× speedup on mandelbrot vs Python. Experimental but functional.
+
+2. **CuMetal** ([Lulzx/cuda-metal](https://github.com/Lulzx/cuda-metal))
+   — C++-based. Has `cumetal-air-emitter` for low-level AIR/metallib writing,
+   `air_inspect` for inspecting metallibs, `air_validate` for validation.
+   Takes `.ll` → `.metallib` directly. Also translates CUDA/PTX → LLVM IR → AIR.
+
+3. **xDSL MPS backend** ([docs.xdsl.dev](https://docs.xdsl.dev/reference/backend/mps/))
+   — Complete system-level backend for Apple GPUs. Uses an MPS Dialect → AIR →
+   metallib pipeline. Documents that skipping MSL gives: (1) direct instruction
+   selection for simd ops, (2) predictable codegen, (3) reduced JIT latency.
+
+**The pipeline would be:**
+
+```
+LLVM IR → llvm-to-air (or CuMetal) → AIR (.air) → xcrun metallib → .metallib
+                                                                        ↓
+                                                          Metal runtime loads
+                                                          (proprietary AIR→ISA)
+```
+
+**The catch:** The final step (AIR → GPU ISA) is Apple's proprietary backend,
+invoked by the Metal runtime when loading a `.metallib` or by `xcrun metal`.
+There is no public API to feed LLVM IR or AIR directly to the driver — you must
+produce a `.metallib` that the Metal runtime accepts.
+
+**Practical status:**
+
+| Approach | Status | Risk |
+|---|---|---|
+| **MSL emitter** (current) | Production, Apple-supported | None |
+| **AIR via llvm-to-air** | Experimental, Python, 30+ kernels working | Fragile, undocumented |
+| **AIR via CuMetal** | Experimental, C++, has emitter/validator | Less mature, fewer kernels |
+| **AIR via xDSL MPS** | Python/xDSL, in development | Python dep, not for Rust project |
+
+**Verdict:** The MSL emitter stays as the production Apple path. The AIR path is a
+promising research direction that could *eventually* let the shared LLVM IR emitter
+cover all four backends, but it is not production-ready today. Document and monitor.
 
 ---
 
 ## 2. The Unified Pipeline
 
+### Production paths (today)
+
 ```
 MetalTile IR
     │
     ▼
-Shared LLVM IR emitter  ─── produces .ll text ─── one emitter, all backends
+Shared LLVM IR emitter  ─── produces .ll text
     │
-    ├─→ llc -mtriple=nvptx64-nvidia-cuda  -mcpu=sm_XX  → .ptx  → ptxas → .cubin  (NVIDIA)
-    ├─→ llc -mtriple=amdgcn-amd-amdhsa    -mcpu=gfxXXXX → .o                              (AMD)
-    └─→ llc -mtriple=spirv64-unknown-vulkan              → .spvt                          (Vulkan)
-                                                                                          (any GPU)
+    ├─→ llc NVPTX    → .ptx  → ptxas → .cubin   (NVIDIA)
+    ├─→ llc AMDGPU   → .o                         (AMD)
+    └─→ llc SPIR-V   → .spvt                      (Vulkan, any GPU)
 
-[Separate path for Apple:]
-MetalTile IR → MSL emitter → .metal → xcrun metal → .metallib   (Apple, unavoidable)
+[Separate:] IR → MSL emitter → .metal → xcrun metal → .metallib   (Apple)
 ```
 
-**One emitter, three backends.** Only `TargetProfile` differs: intrinsic names,
-address-space numbers, calling convention, and LLVM target triple.
+### Future possibility — Apple via AIR (experimental)
+
+```
+MetalTile IR → Shared LLVM IR emitter
+    │
+    ├─→ llvm-to-air / CuMetal → AIR (.air) → xcrun metallib → .metallib   (Apple)
+    └─→ (same NVPTX / AMDGPU / SPIR-V paths as above)
+```
+
+The AIR path is not production-ready (see §1 Apple / Metal), but it proves the
+shared LLVM IR emitter *could* cover all four backends if the tooling matures.
 
 ---
 
@@ -161,7 +227,7 @@ define <kernel-calling-convention> void @my_kernel(
 
 ## 4. Comparison: C++/GLSL Emitters vs LLVM IR Emitter
 
-### Current spec plan (three separate emitters)
+### Current spec plan (three separate emitters + MSL)
 
 ```
 IR → CUDA C++ emitter  → NVRTC    → PTX     → Cubin      (NVIDIA)
@@ -172,17 +238,17 @@ IR → MSL emitter       → xcrun metal → .metallib         (Apple)
 
 **Dependencies:** CUDA Toolkit (NVRTC), ROCm (hipRTC), shaderc/glslang, Xcode.
 
-### Proposed LLVM IR plan (one shared LLVM emitter → three backends)
+### Proposed LLVM IR plan (one shared emitter → three production backends + Apple research path)
 
 ```
-                   ┌→ llc  NVPTX   → PTX  → ptxas → .cubin   (NVIDIA)
-IR → LLVM IR ──→   ├→ llc  AMDGPU  → ISA                     (AMD)
-  emitter          └→ llc  SPIR-V  → .spvt                    (Vulkan, any GPU)
-
-[Separate:] IR → MSL emitter → xcrun metal → .metallib        (Apple)
+                   ┌→ llc  NVPTX   → PTX  → ptxas → .cubin   (NVIDIA, production)
+                   ├→ llc  AMDGPU  → ISA                     (AMD, production)
+IR → LLVM IR ──→   ├→ llc  SPIR-V  → .spvt                    (Vulkan, production)
+  emitter           └→ llvm-to-air / CuMetal → AIR → metallib (Apple, experimental)
 ```
 
-**Dependencies:** `llc` (one LLVM build with all three targets), Xcode.
+**Dependencies:** `llc` (one LLVM build with NVPTX + AMDGPU + SPIR-V targets), Xcode.
+Apple AIR path additionally needs `llvm-to-air` or `CuMetal` (experimental).
 
 ### Tradeoffs
 
@@ -197,6 +263,7 @@ IR → LLVM IR ──→   ├→ llc  AMDGPU  → ISA                     (AMD)
 | **Vulkan portability** | Separate GLSL/rspirv emitter | Free — SPIR-V backend uses same LLVM IR |
 | **Debuggability** | Easy (readable C++/GLSL) | Harder (LLVM IR is verbose) |
 | **Test effort** | One codegen test suite per emitter | One shared IR test suite; backend-specific tests for intrinsics only |
+| **Apple path** | MSL emitter (separate, unavoidable) | MSL (production) + AIR path (research, would unify) |
 
 **The simplification is real and compounding.** Going from 3 separate text emitters
 to 1 shared LLVM IR emitter eliminates the C++/HIP/GLSL toolchain dependencies,
@@ -251,9 +318,12 @@ Block-scaled formats (`mx*`/`mxint*`) run via software dequant on Vulkan.
 | NVIDIA | CUDA C++ → NVRTC → PTX | LLVM IR → `llc` NVPTX → PTX | **Eliminates NVRTC dep, shares emitter** |
 | AMD | HIP C++ → hipRTC → ISA | LLVM IR → `llc` AMDGPU → ISA | **Eliminates hipRTC dep, shares emitter** |
 | Vulkan | GLSL/rspirv → .spvt | LLVM IR → `llc` SPIR-V → .spvt | **LLVM IR path is simpler than rspirv builder** |
-| Apple | MSL emitter → xcrun metal | MSL emitter → xcrun metal | **Unchanged** |
+| Apple (MSL) | MSL emitter → xcrun metal | MSL emitter → xcrun metal | **Production path — unchanged** |
+| Apple (AIR) | N/A (no public API) | LLVM IR → llvm-to-air/CuMetal → AIR → metallib | **Research path — would unify all four** |
 
-**Total emitters:** 3 → 1. **Total external toolchains:** 4 (NVRTC + hipRTC + shaderc + Xcode) → 2 (`llc` + Xcode).
+**Total emitters:** 3 → 1 (plus AIR research path).
+**Total external toolchains:** 4 (NVRTC + hipRTC + shaderc + Xcode) → 2 (`llc` + Xcode).
+**Apple AIR path:** experimental, adds `llvm-to-air` or `CuMetal` dependency if adopted.
 
 ---
 
@@ -290,6 +360,13 @@ Write three hand-crafted `.ll` files for a simple elementwise kernel:
 
 - Replace `llc` subprocess with in-process LLVM compilation for lower latency
 
+### Phase 5 (research) — Apple AIR direct codegen
+
+- Evaluate **llvm-to-air** and **CuMetal** for producing `.metallib` from LLVM IR
+- If viable: add an `AppleAirBackend` `CodegenBackend` impl that wraps the external tool
+- If the tooling matures to production quality: retire the MSL emitter path
+- **Gating question:** Is the experimental AIR tooling reliable enough for CI?
+
 ---
 
 ## 8. Sources
@@ -306,7 +383,13 @@ Write three hand-crafted `.ll` files for a simple elementwise kernel:
 - **LLVM PR #174910 — SPIR-V `gpuintrin.h` support** — https://github.com/llvm/llvm-project/pull/174910
 - **LLVM Compile CUDA with clang** — https://prereleases.llvm.org/15.0.0/rc2/docs/CompileCudaWithLLVM.html
 - **cuda-oxide Architecture** — https://nvlabs.github.io/cuda-oxide/compiler/architecture-overview.html
-- **inkwell crate** — https://crates.io/crates/inkwell
+- **llvm-to-air (sueszli, reverse-engineered LLVM IR → AIR → metallib)** — https://github.com/sueszli/llvm-to-air
+- **xDSL MPS backend (Apple GPU AIR backend)** — https://docs.xdsl.dev/reference/backend/mps/
+- **CuMetal (Lulzx, CUDA/LLVM IR → AIR → metallib)** — https://github.com/Lulzx/cuda-metal
+- **Metal .air/.metallib reverse engineering** — https://worthdoingbadly.com/metalbitcode/
+- **MetalLibraryArchive (metallib parser)** — https://github.com/YuAo/MetalLibraryArchive
+- **Apple LLVM GPU Compiler talk (2017)** — https://llvm.org/devmtg/2017-10/slides/Chandrasekaran-Maggioni-Apple%20LLVM%20GPU%20Compiler.pdf
+- **Apple Metal shader converter (DXIL → Metal IR)** — https://developer.apple.com/metal/shader-converter/
 - **`CUDA_BACKEND_SPEC.md`** — NVIDIA backend spec (revised, LLVM IR codegen)
 - **`AMD_BACKEND_SPEC.md`** — AMD backend spec (revised, LLVM IR codegen)
 - **`VULKAN_BACKEND_SPEC.md`** — Vulkan backend spec (revised, LLVM IR codegen)
