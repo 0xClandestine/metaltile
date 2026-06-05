@@ -6,62 +6,116 @@
 
 ## The Core Claim
 
-> AMD and CUDA both use LLVM under the hood. We can skip the C++/HIP codegen step entirely and emit LLVM IR directly, sharing one emitter across both backends. Apple doesn't provide this API, so Metal keeps its MSL path.
+> AMD, NVIDIA, and Vulkan/SPIR-V all consume LLVM IR under the hood. We can skip
+> the C++/HIP/GLSL intermediate and emit LLVM IR directly, sharing one emitter
+> across all three backends. Apple doesn't provide this API, so Metal keeps its
+> MSL path.
 
-The existing specs (`CUDA_BACKEND_SPEC.md`, `AMD_BACKEND_SPEC.md`) propose emitting CUDA C++ → NVRTC → PTX and HIP C++ → hipRTC → ISA respectively. This note evaluates whether emitting LLVM IR directly is viable and simpler.
+The existing specs (`CUDA_BACKEND_SPEC.md`, `AMD_BACKEND_SPEC.md`, `VULKAN_BACKEND_SPEC.md`)
+proposed emitting CUDA C++ → NVRTC → PTX, HIP C++ → hipRTC → ISA, and GLSL/rspirv →
+SPIR-V respectively. This note evaluates whether emitting LLVM IR directly is
+viable and simpler — and finds that **LLVM IR unifies all three non-Apple backends**.
 
 ---
 
-## 1. Evidence: Both Backends ARE LLVM Backends
+## 1. Evidence: All Three Backends ARE LLVM Backends
 
 ### NVIDIA / NVPTX
 
-- The NVPTX LLVM backend consumes LLVM IR and emits PTX. This is documented in the [LLVM NVPTX Usage Guide](https://releases.llvm.org/21.1.0/docs/NVPTXUsage.html): *"To support GPU programming, the NVPTX back-end supports a subset of LLVM IR along with a defined set of conventions used to represent GPU programming concepts."*
-- NVIDIA ships `nvvm` (their LLVM-based compiler) which takes LLVM IR bitcode and produces PTX. Their **NVVM IR** specification ([NVVM IR Spec 12.9](https://docs.nvidia.com/cuda/archive/12.9.1/nvvm-ir-spec/index.html)) is literally: *"NVVM IR is a compiler IR based on the LLVM IR. The NVVM IR is designed to represent GPU compute kernels. The NVVM compiler generates PTX code from NVVM IR."* And: *"Technically speaking, NVVM IR is LLVM IR with a set of rules, restrictions, and conventions."*
-- A simple kernel in LLVM IR: use `ptx_kernel` calling convention, read thread IDs via `@llvm.nvvm.read.ptx.sreg.tid.x()`, use address spaces (1=global, 3=shared, 4=constant, 5=local), annotate with `!nvvm.annotations = !{!0}` metadata.
-- The compile pipeline is: `llc -mcpu=sm_XX kernel.ll -o kernel.ptx` → `cuModuleLoadData`.
-- **CICC (the CUDA C++ compiler) is just a frontend that produces NVVM IR.** The `tileiras` tool (CUDA Toolkit 13.x) goes MLIR → NVPTX, skipping C++ entirely. The common trunk is the NVPTX backend.
+- The NVPTX LLVM backend consumes LLVM IR and emits PTX. Documented in the
+  [LLVM NVPTX Usage Guide](https://releases.llvm.org/21.1.0/docs/NVPTXUsage.html):
+  *"To support GPU programming, the NVPTX back-end supports a subset of LLVM IR
+  along with a defined set of conventions."*
+- NVIDIA ships `nvvm` (their LLVM-based compiler) which takes LLVM IR bitcode and
+  produces PTX. Their **NVVM IR** specification states: *"NVVM IR is a compiler IR
+  based on the LLVM IR. The NVVM IR is designed to represent GPU compute kernels."*
+  And: *"Technically speaking, NVVM IR is LLVM IR with a set of rules, restrictions,
+  and conventions."*
+- A simple kernel in LLVM IR: use `ptx_kernel` calling convention, read thread IDs
+  via `@llvm.nvvm.read.ptx.sreg.tid.x()`, use address spaces (1=global, 3=shared,
+  4=constant, 5=local), annotate with `!nvvm.annotations` metadata.
+- The compile pipeline: `llc -mcpu=sm_XX kernel.ll -o kernel.ptx` → `cuModuleLoadData`.
 
 **Verdict:** You can feed LLVM IR to the NVPTX backend and **skip CUDA C++ / NVRTC entirely**.
 
 ### AMD / AMDGPU
 
-- The AMDGPU LLVM backend consumes LLVM IR and emits GCN/RDNA/CDNA ISA. Documented in [LLVM AMDGPU Usage Guide](https://llvm.org/docs/AMDGPUUsage.html): *"The AMDGPU backend provides ISA code generation for AMD GPUs."*
-- HIP C++ is compiled by `clang` (LLVM frontend) → LLVM IR → AMDGPU backend → ISA. The LLVM IR path is the same as the C++ path, just with the frontend step removed.
-- The ROCm runtime (`rocm-amdhsa`) loads code objects produced by the AMDGPU backend. The LLVM mailing list discussion confirms feeding LLVM IR directly to the AMDGPU backend for ROCm works: *"Compile an LLVM IR module with AMDGPU backend to a .o file using amdgcn triple."*
-- AMD GPU address spaces and intrinsics are accessed via LLVM IR constructs: `amdgcn` target triple, intrinsic math functions, barrier intrinsics.
+- The AMDGPU LLVM backend consumes LLVM IR and emits GCN/RDNA/CDNA ISA. Documented
+  in the [LLVM AMDGPU Usage Guide](https://llvm.org/docs/AMDGPUUsage.html).
+- HIP C++ is compiled by `clang` (LLVM frontend) → LLVM IR → AMDGPU backend → ISA.
+  The LLVM IR path is the same, just with the frontend step removed.
+- The ROCm runtime (`rocm-amdhsa`) loads code objects produced by the AMDGPU backend.
+- AMD GPU intrinsics: `@llvm.amdgcn.workitem.id.x`, `@llvm.amdgcn.s.barrier`, etc.
 
 **Verdict:** You can feed LLVM IR to the AMDGPU backend and **skip HIP C++ / hipRTC entirely**.
 
+### Vulkan / SPIR-V
+
+- LLVM ships a **SPIR-V backend** (promoted to official target status as of LLVM 19.x
+  — see [RFC](https://discourse.llvm.org/t/rfc-promoting-spir-v-to-an-official-target/83614)).
+- `llc -mtriple=spirv64-unknown-vulkan input.ll -o output.spvt` produces SPIR-V
+  binary consumable by Vulkan `vkCreateShaderModule`.
+- The [LLVM SPIR-V Usage Guide](https://releases.llvm.org/23.0.0/docs/SPIRVUsage.html)
+  documents the full pipeline, including SPIR-V extensions (cooperative matrix,
+  subgroup ops, atomics, fp16/int8/bfloat16) and multiple OS targets (`vulkan`,
+  `vulkan1.2`, `vulkan1.3`).
+- Active development (2026): PR #196101 adds `vulkan` as an OS for the `spirv` target
+  triple; PR #174910 adds SPIR-V support in `gpuintrin.h`.
+- Prior art: **khal** ([dimforge/khal](https://github.com/dimforge/khal)) already
+  does this — same Rust shader compiles to SPIR-V (WebGPU/Vulkan), PTX (CUDA), and
+  CPU. **Google clspv** compiles OpenCL C → LLVM IR → SPIR-V for Vulkan compute
+  in production. **Khronos SPIRV-LLVM-Translator** provides bi-directional LLVM IR ↔
+  SPIR-V translation.
+
+**Verdict:** You can feed LLVM IR to the SPIR-V backend and **skip GLSL/rspirv entirely**.
+
 ### Apple / Metal
 
-- Metal Shading Language (MSL) is the **only** input format. Apple's internal compiler stack (MSL → Air → GPU ISA) is proprietary and does not accept LLVM IR.
-- There is no documented way to feed LLVM IR to an Apple GPU. The `metaltile-codegen` MSL emitter is structurally unavoidable for Apple GPUs.
+- Metal Shading Language (MSL) is the **only** input format. Apple's internal stack
+  (MSL → Air → GPU ISA) is proprietary and does not accept LLVM IR.
+- No documented way to feed LLVM IR to an Apple GPU.
 
-**Verdict:** Your statement that "Apple simply doesn't provide the needed API" is correct. Metal requires its own emitter.
+**Verdict:** Metal requires its own MSL emitter — unavoidable.
 
 ---
 
-## 2. What an LLVM IR Emitter Would Look Like
-
-Instead of emitting C++ text, the codegen would emit LLVM IR (either as text `.ll` or via `inkwell`/`llvm-sys` programmatic IR construction).
-
-### Shared across both backends
+## 2. The Unified Pipeline
 
 ```
-target datalayout = "e-p:64:64:64-..."
-target triple = "<backend-specific>"
+MetalTile IR
+    │
+    ▼
+Shared LLVM IR emitter  ─── produces .ll text ─── one emitter, all backends
+    │
+    ├─→ llc -mtriple=nvptx64-nvidia-cuda  -mcpu=sm_XX  → .ptx  → ptxas → .cubin  (NVIDIA)
+    ├─→ llc -mtriple=amdgcn-amd-amdhsa    -mcpu=gfxXXXX → .o                              (AMD)
+    └─→ llc -mtriple=spirv64-unknown-vulkan              → .spvt                          (Vulkan)
+                                                                                          (any GPU)
 
-; Kernel function
-define ptx_kernel      ; NVIDIA uses ptx_kernel calling convention
-       define amdgcn_kernel  ; AMD uses amdgcn_kernel calling convention
-void @my_kernel(
-    ptr addrspace(1) %input,   ; global memory
+[Separate path for Apple:]
+MetalTile IR → MSL emitter → .metal → xcrun metal → .metallib   (Apple, unavoidable)
+```
+
+**One emitter, three backends.** Only `TargetProfile` differs: intrinsic names,
+address-space numbers, calling convention, and LLVM target triple.
+
+---
+
+## 3. What the Shared LLVM IR Looks Like
+
+```llvm
+; Shared data layout (same string for NVPTX, AMDGPU, SPIR-V)
+target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-..."
+
+; Backend-specific: filled in by TargetProfile
+target triple = "<backend-specific>"   ; e.g. nvptx64-nvidia-cuda / amdgcn-amd-amdhsa / spirv64-unknown-vulkan
+
+define <kernel-calling-convention> void @my_kernel(
+    ptr addrspace(1) %input,     ; global memory (addrspace 1 on all three)
     ptr addrspace(1) %output
 ) {
-  %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()   ; NVIDIA
-  ; --or--
-  %tid = call i32 @llvm.amdgcn.workitem.id.x()        ; AMD
+  ; Backend-specific: intrinsic name from TargetProfile
+  %tid = call i32 @<thread-id-intrinsic>(...)
 
   %ptr = getelementptr float, ptr addrspace(1) %input, i32 %tid
   %val = load float, ptr addrspace(1) %ptr
@@ -70,11 +124,11 @@ void @my_kernel(
   ret void
 }
 
-!nvvm.annotations = !{!0}    ; NVIDIA kernel annotation
-!0 = !{ptr @my_kernel, !"kernel", i32 1}
+; Backend-specific: kernel annotation
+!<kernel-annotation-metadata> = ...
 ```
 
-### What's shared (same LLVM IR for both)
+### Shared constructs (same LLVM IR for all three)
 
 | Concept | LLVM IR construct |
 |---------|------------------|
@@ -83,156 +137,176 @@ void @my_kernel(
 | Bit ops | `llvm.ctpop.*`, `llvm.ctlz.*`, `llvm.cttz.*`, `llvm.bswap.*` |
 | Memory | `load`, `store`, `getelementptr` |
 | Control flow | `br`, `switch`, `phi`, `select`, `ret` |
-| Barriers | `@llvm.nvvm.barrier0()` / `@llvm.amdgcn.s.barrier()` (different names, same concept) |
-| Shared memory | `addrspace(3)` (same number on both!) |
+| Shared memory | `addrspace(3)` — **same number on all three!** |
+| Global memory | `addrspace(1)` — **same number on all three!** |
+| Constants | `addrspace(2)` — maps to constant/uniform on all three |
 
-**Critical match:** Both NVPTX and AMDGPU use address space **3** for shared/LDS memory. Many other address spaces also align (1=global, 5=local).
+### Backend-specific (parameterized by TargetProfile)
 
-### What's backend-specific (parameterized by TargetProfile)
-
-| Feature | NVIDIA (NVVM) | AMD (AMDGPU) |
-|---------|--------------|--------------|
-| Target triple | `nvptx64-nvidia-cuda` | `amdgcn-amd-amdhsa` |
-| Kernel calling conv | `ptx_kernel` | `amdgcn_kernel` |
-| Thread ID | `@llvm.nvvm.read.ptx.sreg.tid.{x,y,z}` | `@llvm.amdgcn.workitem.id.{x,y,z}` |
-| Block ID | `@llvm.nvvm.read.ptx.sreg.ctaid.{x,y,z}` | `@llvm.amdgcn.workgroup.id.{x,y,z}` |
-| Block dim | `@llvm.nvvm.read.ptx.sreg.ntid.{x,y,z}` | `@llvm.amdgcn.dispatch.ids` (different mechanism) |
-| Warp size | `@llvm.nvvm.read.ptx.sreg.warpsize()` → 32 | `@llvm.amdgcn.wavefrontsize()` → 32 or 64 |
-| Barrier | `@llvm.nvvm.barrier0()` | `@llvm.amdgcn.s.barrier()` |
-| Shuffle | `@llvm.nvvm.shfl.sync.i32(...)` | `__builtin_amdgcn_permlane16_32(...)` |
-| Tensor cores (pre-Blackwell) | `@llvm.nvvm.hmma.*` (wmma-style) | `__builtin_amdgcn_mfma_*` / `__builtin_amdgcn_wmma_*` |
-| Tensor cores (Blackwell) | `@llvm.nvvm.tcgen05.*` | AMD CDNA4 MX MFMA intrinsics |
-| Kernel annotation | `!nvvm.annotations` metadata | `!amdgpu.annotations` or `"kernel"` attribute |
-| Data layout | Same string works for both | Same string works for both |
+| Feature | NVIDIA (NVVM) | AMD (AMDGPU) | Vulkan (SPIR-V) |
+|---|---|---|---|
+| Target triple | `nvptx64-nvidia-cuda` | `amdgcn-amd-amdhsa` | `spirv64-unknown-vulkan` |
+| Kernel calling conv | `ptx_kernel` | `amdgcn_kernel` | `spir_kernel` |
+| Thread ID | `@llvm.nvvm.read.ptx.sreg.tid.{x,y,z}` | `@llvm.amdgcn.workitem.id.{x,y,z}` | `__spirv_BuiltInLocalInvocationId` |
+| Block ID | `@llvm.nvvm.read.ptx.sreg.ctaid.{x,y,z}` | `@llvm.amdgcn.workgroup.id.{x,y,z}` | `__spirv_BuiltInWorkgroupId` |
+| Block dim | `@llvm.nvvm.read.ptx.sreg.ntid.{x,y,z}` | `@llvm.amdgcn.dispatch.ids` | `__spirv_BuiltInWorkgroupSize` |
+| Subgroup/warp size | `@llvm.nvvm.read.ptx.sreg.warpsize()` → 32 | `@llvm.amdgcn.wavefrontsize()` → 32/64 | SPIR-V `SubgroupSize` |
+| Barrier | `@llvm.nvvm.barrier0()` | `@llvm.amdgcn.s.barrier()` | `__spirv_ControlBarrier` |
+| Shuffle | `@llvm.nvvm.shfl.sync.i32(...)` | `@llvm.amdgcn.permlane16_32(...)` | `__spirv_GroupNonUniformShuffle` |
+| Tensor/coop matrix | `@llvm.nvvm.hmma.*` / `tcgen05.*` | `@llvm.amdgcn.mfma.*` / `wmma.*` | `SPV_KHR_cooperative_matrix` (optional) |
+| Hardware microscaling | `tcgen05` (Blackwell) | CDNA4 MX MFMA | **None** (software dequant only) |
+| Kernel annotation | `!nvvm.annotations` | `"kernel"` fn attr | `!spirv.ExecutionMode` |
 
 ---
 
-## 3. Comparison: C++ Emitter vs LLVM IR Emitter
+## 4. Comparison: C++/GLSL Emitters vs LLVM IR Emitter
 
-### Current spec plan (two C++ emitters)
-
-```
-IR → CUDA C++ emitter → NVRTC (CUDA Toolkit) → PTX → Cubin
-IR → HIP C++ emitter  → hipRTC (ROCm)         → ISA
-IR → MSL emitter      → xcrun metal            → metallib   (Apple, unavoidable)
-```
-
-**Dependencies:** CUDA Toolkit (NVRTC), ROCm (hipRTC), xcrun (Xcode).
-
-### Proposed LLVM IR plan (one shared LLVM emitter)
+### Current spec plan (three separate emitters)
 
 ```
-IR → LLVM IR emitter → NVPTX backend (llvm-sys/inkwell) → PTX → Cubin
-                     → AMDGPU backend (llvm-sys/inkwell) → ISA
-IR → MSL emitter     → xcrun metal                      → metallib   (Apple, unchanged)
+IR → CUDA C++ emitter  → NVRTC    → PTX     → Cubin      (NVIDIA)
+IR → HIP C++ emitter   → hipRTC   → ISA                 (AMD)
+IR → GLSL/rspirv emitter → shaderc → .spvt              (Vulkan)
+IR → MSL emitter       → xcrun metal → .metallib         (Apple)
 ```
 
-**Dependencies:** `llvm-sys` or `inkwell` crate (one LLVM build), Xcode.
+**Dependencies:** CUDA Toolkit (NVRTC), ROCm (hipRTC), shaderc/glslang, Xcode.
+
+### Proposed LLVM IR plan (one shared LLVM emitter → three backends)
+
+```
+                   ┌→ llc  NVPTX   → PTX  → ptxas → .cubin   (NVIDIA)
+IR → LLVM IR ──→   ├→ llc  AMDGPU  → ISA                     (AMD)
+  emitter          └→ llc  SPIR-V  → .spvt                    (Vulkan, any GPU)
+
+[Separate:] IR → MSL emitter → xcrun metal → .metallib        (Apple)
+```
+
+**Dependencies:** `llc` (one LLVM build with all three targets), Xcode.
 
 ### Tradeoffs
 
-| Dimension | C++ emitter (current spec) | LLVM IR emitter (proposed) |
-|-----------|---------------------------|---------------------------|
-| **Emitter count** | 2 (CUDA + HIP) | 1 (shared LLVM) |
-| **Skipped toolchain deps** | NVRTC, hipRTC | None — but need LLVM libs |
-| **LLVM dependency** | Implicit (via NVRTC/hipRTC) | Explicit (llvm-sys/inkwell + LLVM .dylib) |
-| **LLVM version** | Whatever NVRTC/hipRTC ships | Pinned by Cargo.toml |
-| **Optimization passes** | NVRTC/hipRTC own them | We control the pass pipeline |
-| **Tensor core intrinsics** | Via PTX inline asm or CUTLASS | Via LLVM intrinsics (`llvm.nvvm.tcgen05.*` etc.) |
-| **Complexity of emitter** | High (C++ syntax, type system) | Medium (LLVM IR is simpler, more regular) |
-| **Debuggability** | Easy (readable C++) | Harder (LLVM IR is verbose) |
-| **Portability to new backends** | New emitter per backend | Single emitter, just new intrinsic set |
-| **Rust ecosystem** | Mature (string templating) | Medium (inkwell, llvm-sys) |
-| **Build time impact** | None (external tools) | Significant (LLVM compilation via llvm-sys) |
+| Dimension | Separate emitters (current spec) | Shared LLVM IR emitter (proposed) |
+|---|---|---|
+| **Number of emitters** | 3 (CUDA C++ + HIP C++ + GLSL/rspirv) | **1** (shared LLVM) |
+| **Total emitter code** | ~6000 lines (3 × ~2000) | ~2500 shared + ~600 per-backend intrinsic tables |
+| **Target backends** | 2 native (NVIDIA, AMD) | **3** (NVIDIA + AMD + Vulkan) |
+| **External toolchain deps** | NVRTC + hipRTC + shaderc/glslang | `llc` (one binary) + `ptxas` (NVIDIA only) |
+| **Optimization passes** | Each toolchain owns its own | Shared LLVM pass pipeline — we control it |
+| **Tensor cores** | Vendor intrinsics per language | LLVM intrinsics (same mechanism, different names) |
+| **Vulkan portability** | Separate GLSL/rspirv emitter | Free — SPIR-V backend uses same LLVM IR |
+| **Debuggability** | Easy (readable C++/GLSL) | Harder (LLVM IR is verbose) |
+| **Test effort** | One codegen test suite per emitter | One shared IR test suite; backend-specific tests for intrinsics only |
+
+**The simplification is real and compounding.** Going from 3 separate text emitters
+to 1 shared LLVM IR emitter eliminates the C++/HIP/GLSL toolchain dependencies,
+gives direct control over the optimization pipeline, and adds Vulkan portability as
+a near-zero-cost add-on.
 
 ---
 
-## 4. Key Risks and Mitigations
+## 5. Key Risks and Mitigations
 
 ### Risk 1: LLVM is a heavy dependency
 
-Building LLVM via `llvm-sys` is slow and painful. Alternatives:
-- Use pre-built LLVM binaries (the `llvm-sys` `no-llvm-linking` feature + system LLVM).
-- Use the system LLVM that ships with Xcode (macOS) or the CUDA Toolkit (Linux).
-- Emit LLVM IR **text** (`.ll`), invoke `llc` as a subprocess (no Rust binding needed). This is the simplest integration: same shape as the current NVRTC/hipRTC calls, just replacing them with `llc` invocation.
+Building LLVM via `llvm-sys` is slow. Mitigations:
+- Use pre-built LLVM binaries via `llvm-sys` `no-llvm-linking` feature.
+- Use system LLVM that ships with Xcode (macOS) or the CUDA Toolkit (Linux).
+- **Emit LLVM IR text (`.ll`), invoke `llc` as a subprocess** — no Rust LLVM binding needed at all. Same pipeline shape as the current NVRTC/hipRTC calls.
 
-**Recommendation:** Start with LLVM IR text emission + `llc` subprocess. This is the lowest-risk path: no new Rust dependencies, the same pipeline shape, and you can see the IR you're emitting.
+**Recommendation:** Start with LLVM IR text emission + `llc` subprocess.
 
-### Risk 2: Tensor core intrinsics differ
+### Risk 2: Tensor-core / cooperative-matrix intrinsics differ per backend
 
-NVIDIA's `llvm.nvvm.tcgen05.*` and AMD's MFMA/WMMA intrinsics have no common subset. You'll still need backend-specific IR snippets for MMA kernels.
+Each backend has different intrinsic names and fragment shapes for matrix multiply.
 
-**Mitigation:** Same situation as the C++ emitter approach — you'd emit different PTX inline asm vs HIP intrinsics. In LLVM IR, you emit different intrinsic calls, parameterized by `TargetProfile`. No regression.
+**Mitigation:** Same situation as separate emitters — you'd write different code anyway. In the shared LLVM IR approach, the differences are parameterized in `TargetProfile` intrinsic tables. No regression.
 
-### Risk 3: Wavefront 32 vs 64 (AMD)
+### Risk 3: Wavefront/subgroup size variability
 
-This is identical to the risk in `AMD_BACKEND_SPEC.md §4.1`. Parameterize `WARP_SIZE` in the emitter.
+- NVIDIA: fixed 32.
+- AMD: 32 (RDNA) or 64 (CDNA).
+- Vulkan: variable (8/16/32/64), **runtime-queried**.
 
-### Risk 4: NVVM is a *subset* of LLVM IR
+**Mitigation:** The shared emitter takes `lane_width` from `TargetProfile`. For Vulkan, use subgroup-agnostic workgroup reductions as the portable baseline, with subgroup ops as a queried fast path (same strategy as existing Vulkan spec).
 
-You must avoid unsupported constructs (fp128, `fence` instruction, `invoke`, `landingpad`, `cmpxchg` on types other than i32/i64/i128, etc.). A validation pass is needed.
+### Risk 4: Each LLVM backend accepts a subset of LLVM IR
 
-**Mitigation:** Mostly straightforward — MetalTile's IR doesn't generate most of these. The subset restriction is not onerous for compute kernels.
+NVVM IR bans `fence`, `invoke`, `landingpad`, fp128. The SPIR-V backend has its own restrictions.
 
-### Risk 5: `inkwell`/`llvm-sys` version coupling
+**Mitigation:** MetalTile's IR doesn't generate most of these. A `validate()` pass in the shared emitter checks against the target's allowed subset.
 
-You must match LLVM versions. Using text IR + `llc` subprocess avoids this entirely.
+### Risk 5: SPIR-V has no hardware microscaling
 
----
+Block-scaled formats (`mx*`/`mxint*`) run via software dequant on Vulkan.
 
-## 5. Concrete Simplify Assessment
-
-| Concern | C++ emitter path | LLVM IR path | Net |
-|---------|----------------|--------------|-----|
-| Lines of emitter code | ~2000 each (CUDA + HIP) | ~2500 shared + ~500 backend-specific | **Roughly same** |
-| External toolchain deps | NVRTC + hipRTC | `llc` (x86\_64) + `ptxas` | **Fewer** (no hipRTC dep) |
-| Codegen passes | Built into NVRTC/hipRTC | Shared LLVM pass pipeline | **More control** |
-| Apple path | Unavoidable MSL | Unavoidable MSL | Same |
-| Test/debug | Readable C++ | Verbose LLVM IR | **Worse for debugging** |
-| Future backend (Intel?) | New emitter | New intrinsic set | **Easier** |
-
-**The simplification is real but incremental, not transformative.** You go from 2 C++ text emitters to 1 LLVM IR text emitter + per-backend intrinsic selection. The bigger win is eliminating the NVRTC/hipRTC toolchain dependencies and getting direct control over the LLVM optimization pipeline.
+**Mitigation:** Same as the existing Vulkan spec — software dequant is the universal fallback. The E8M0 hardware payoff stays with NVPTX and AMDGPU native backends.
 
 ---
 
-## 6. Recommended Path
+## 6. Concrete Simplify Assessment
+
+| Backend | Separate emitter path | LLVM IR path | Net change |
+|---------|----------------------|--------------|------------|
+| NVIDIA | CUDA C++ → NVRTC → PTX | LLVM IR → `llc` NVPTX → PTX | **Eliminates NVRTC dep, shares emitter** |
+| AMD | HIP C++ → hipRTC → ISA | LLVM IR → `llc` AMDGPU → ISA | **Eliminates hipRTC dep, shares emitter** |
+| Vulkan | GLSL/rspirv → .spvt | LLVM IR → `llc` SPIR-V → .spvt | **LLVM IR path is simpler than rspirv builder** |
+| Apple | MSL emitter → xcrun metal | MSL emitter → xcrun metal | **Unchanged** |
+
+**Total emitters:** 3 → 1. **Total external toolchains:** 4 (NVRTC + hipRTC + shaderc + Xcode) → 2 (`llc` + Xcode).
+
+---
+
+## 7. Recommended Path
 
 ### Phase 0 — Prove LLVM IR viability (this sprint)
 
-Write two hand-crafted `.ll` files (one for NVPTX, one for AMDGPU) for a simple elementwise kernel:
+Write three hand-crafted `.ll` files for a simple elementwise kernel:
 
-1. **NVIDIA:** `kernel.ll` → `llc -mcpu=sm_90` → `kernel.ptx` → `ptxas` → `kernel.cubin` → `cuModuleLoadData` → launch
-2. **AMD:** `kernel.ll` → `llc -mtriple=amdgcn-amd-amdhsa -mcpu=gfx942` → `kernel.o` → load via ROCm runtime
-3. Both: `tile test` passes correctness against CPU oracle
-
-If this works, the LLVM IR approach is validated end-to-end.
+1. **NVIDIA:** `kernel.ll` → `llc -mtriple=nvptx64-nvidia-cuda -mcpu=sm_90` → `.ptx` → `ptxas` → `.cubin` → launch via CUDA Driver API
+2. **AMD:** `kernel.ll` → `llc -mtriple=amdgcn-amd-amdhsa -mcpu=gfx942` → `.o` → load via ROCm runtime
+3. **Vulkan:** `kernel.ll` → `llc -mtriple=spirv64-unknown-vulkan` → `.spvt` → `vkCreateShaderModule` → dispatch
+4. All three: `tile test` passes correctness against CPU oracle
 
 ### Phase 1 — LLVM IR text emitter + codegen refactor
 
-- Add an `LlmIr` codegen backend that emits `.ll` text instead of `.cu`/`.hip` text
-- Add a `TargetProfile` with backend-specific intrinsic tables and calling conventions
-- Keep the MSL emitter unchanged
-- Replace NVRTC/hipRTC calls with `llc` subprocess invocations
+- Add shared LLVM IR emitter producing `.ll` text
+- Define `TargetProfile` with backend-specific intrinsic tables, triples, calling conventions
+- Implement `NvidiaBackend`, `AmdBackend`, `SpirvBackend` as `CodegenBackend` impls
+- Replace NVRTC/hipRTC/shaderc calls with `llc` subprocess invocations
+- Keep MSL emitter unchanged
 
-### Phase 2 — Optimization pipeline
+### Phase 2 — Subgroup/wavefront parameterization
+
+- Add `lane_width` handling (32 NVIDIA, 32/64 AMD, runtime-queried Vulkan)
+- Portable workgroup reductions for Vulkan with subgroup fast path
+
+### Phase 3 — Optimization pipeline
 
 - Run LLVM optimization passes (`-O3`, `-nvvm-reflect` for NVIDIA) via `opt`
-- Add custom passes for MetalTile-specific patterns (e.g., block-scaled dequant fusion)
+- Add custom passes for MetalTile-specific patterns
 
-### Phase 3 (optional) — In-process LLVM via inkwell
+### Phase 4 (optional) — In-process LLVM via inkwell
 
 - Replace `llc` subprocess with in-process LLVM compilation for lower latency
-- This is an optimization, not a correctness requirement
 
 ---
 
-## 7. Sources
+## 8. Sources
 
 - **NVVM IR Specification 12.9** — https://docs.nvidia.com/cuda/archive/12.9.1/nvvm-ir-spec/index.html
 - **LLVM NVPTX Backend Usage Guide** — https://releases.llvm.org/21.1.0/docs/NVPTXUsage.html
 - **LLVM AMDGPU Backend Usage Guide** — https://llvm.org/docs/AMDGPUUsage.html
+- **LLVM SPIR-V Backend Usage Guide** — https://releases.llvm.org/23.0.0/docs/SPIRVUsage.html
+- **SPIR-V Promotion to Official LLVM Target (RFC)** — https://discourse.llvm.org/t/rfc-promoting-spir-v-to-an-official-target/83614
+- **SPIRV-LLVM-Translator (Khronos)** — https://github.com/KhronosGroup/SPIRV-LLVM-Translator
+- **clspv (Google, OpenCL C → LLVM → SPIR-V → Vulkan)** — https://github.com/google/clspv
+- **khal (dimforge, write once → SPIR-V + PTX + CPU)** — https://github.com/dimforge/khal
+- **LLVM PR #196101 — `vulkan` as SPIR-V OS target** — https://github.com/llvm/llvm-project/pull/196101
+- **LLVM PR #174910 — SPIR-V `gpuintrin.h` support** — https://github.com/llvm/llvm-project/pull/174910
 - **LLVM Compile CUDA with clang** — https://prereleases.llvm.org/15.0.0/rc2/docs/CompileCudaWithLLVM.html
 - **cuda-oxide Architecture** — https://nvlabs.github.io/cuda-oxide/compiler/architecture-overview.html
-- **inkwell crate** — https://crates.io/crates/inkwell — Rust LLVM bindings
-- `CUDA_BACKEND_SPEC.md` — current spec proposing CUDA C++ + NVRTC path
-- `AMD_BACKEND_SPEC.md` — current spec proposing HIP C++ + hipRTC path
+- **inkwell crate** — https://crates.io/crates/inkwell
+- **`CUDA_BACKEND_SPEC.md`** — NVIDIA backend spec (revised, LLVM IR codegen)
+- **`AMD_BACKEND_SPEC.md`** — AMD backend spec (revised, LLVM IR codegen)
+- **`VULKAN_BACKEND_SPEC.md`** — Vulkan backend spec (revised, LLVM IR codegen)
