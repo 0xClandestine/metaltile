@@ -2181,11 +2181,6 @@ fn unary_op_kind(name: &str) -> Option<TokenStream> {
         "expm1" => quote! { UnaryOpKind::Expm1 },
         "log10" => quote! { UnaryOpKind::Log10 },
         "erfinv" => quote! { UnaryOpKind::ErfInv },
-        // Block-scaled dequant decodes: u32 code → f32 (see quant::codec).
-        "e2m1_decode" => quote! { UnaryOpKind::DecodeE2m1 },
-        "e4m3_decode" => quote! { UnaryOpKind::DecodeE4m3 },
-        "e5m2_decode" => quote! { UnaryOpKind::DecodeE5m2 },
-        "int8_decode" => quote! { UnaryOpKind::DecodeInt8 },
         _ => return None,
     })
 }

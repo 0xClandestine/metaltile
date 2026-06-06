@@ -177,7 +177,7 @@ pub fn mt_mxfp4_conv3d_mma<T>(
             let g = kt_safe / block_size;
             let sbits = load(scales[w_oc_blk_base + g]).cast::<f32>();
             let scale = exp2(sbits - 127.0f32);
-            let dq = e2m1_decode(nib) * scale;
+            let dq = mt_decode_e2m1(nib) * scale;
             let val = select(in_bounds, dq, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_oc_row * stride + b_k_base + i, val);
         }
@@ -400,8 +400,8 @@ pub fn mt_nvfp4_conv3d_mma<T>(
             let nib = (load(weight[word_idx]) >> shift) & 0xFu32;
             let g = kt_safe / block_size;
             // global multiplied LAST (two-level scaling).
-            let scale = e4m3_decode(load(scales[w_oc_blk_base + g]).cast::<u32>()) * global;
-            let dq = e2m1_decode(nib) * scale;
+            let scale = mt_decode_e4m3(load(scales[w_oc_blk_base + g]).cast::<u32>()) * global;
+            let dq = mt_decode_e2m1(nib) * scale;
             let val = select(in_bounds, dq, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_oc_row * stride + b_k_base + i, val);
         }
@@ -615,7 +615,7 @@ pub fn mt_mxfp8_e4m3_conv3d_mma<T>(
             let kt = kb + b_k_base + i;
             let in_bounds = kt < total_k;
             let kt_safe = select(in_bounds, kt, 0u32);
-            let elem = e4m3_decode(load(weight[w_oc_byte_base + kt_safe]).cast::<u32>());
+            let elem = mt_decode_e4m3(load(weight[w_oc_byte_base + kt_safe]).cast::<u32>());
             let g = kt_safe / block_size;
             let sbits = load(scales[w_oc_blk_base + g]).cast::<f32>();
             let scale = exp2(sbits - 127.0f32);
@@ -832,7 +832,7 @@ pub fn mt_mxfp8_e5m2_conv3d_mma<T>(
             let kt = kb + b_k_base + i;
             let in_bounds = kt < total_k;
             let kt_safe = select(in_bounds, kt, 0u32);
-            let elem = e5m2_decode(load(weight[w_oc_byte_base + kt_safe]).cast::<u32>());
+            let elem = mt_decode_e5m2(load(weight[w_oc_byte_base + kt_safe]).cast::<u32>());
             let g = kt_safe / block_size;
             let sbits = load(scales[w_oc_blk_base + g]).cast::<f32>();
             let scale = exp2(sbits - 127.0f32);
@@ -1049,7 +1049,7 @@ pub fn mt_fp8_e5m2_conv3d_mma<T>(
             let kt = kb + b_k_base + i;
             let in_bounds = kt < total_k;
             let kt_safe = select(in_bounds, kt, 0u32);
-            let elem = e5m2_decode(load(weight[w_oc_byte_base + kt_safe]).cast::<u32>());
+            let elem = mt_decode_e5m2(load(weight[w_oc_byte_base + kt_safe]).cast::<u32>());
             let g = kt_safe / block_size;
             let scale = load(scales[w_oc_blk_base + g]);
             let dq = elem * scale;
@@ -1267,7 +1267,7 @@ pub fn mt_nvfp8_conv3d_mma<T>(
             let kt = kb + b_k_base + i;
             let in_bounds = kt < total_k;
             let kt_safe = select(in_bounds, kt, 0u32);
-            let elem = e4m3_decode(load(weight[w_oc_byte_base + kt_safe]).cast::<u32>());
+            let elem = mt_decode_e4m3(load(weight[w_oc_byte_base + kt_safe]).cast::<u32>());
             let g = kt_safe / block_size;
             let scale = load(scales[w_oc_blk_base + g]);
             let dq = elem * scale;
@@ -1491,7 +1491,7 @@ pub fn mt_fp4_conv3d_mma<T>(
             let nib = (load(weight[word_idx]) >> shift) & 0xFu32;
             let g = kt_safe / block_size;
             let scale = load(scales[w_oc_blk_base + g]);
-            let dq = e2m1_decode(nib) * scale;
+            let dq = mt_decode_e2m1(nib) * scale;
             let val = select(in_bounds, dq, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_oc_row * stride + b_k_base + i, val);
         }
@@ -1705,7 +1705,7 @@ pub fn mt_int8_conv3d_mma<T>(
             let kt = kb + b_k_base + i;
             let in_bounds = kt < total_k;
             let kt_safe = select(in_bounds, kt, 0u32);
-            let elem = int8_decode(load(weight[w_oc_byte_base + kt_safe]).cast::<u32>());
+            let elem = mt_decode_int8(load(weight[w_oc_byte_base + kt_safe]).cast::<u32>());
             let g = kt_safe / block_size;
             let scale = load(scales[w_oc_blk_base + g]);
             let dq = elem * scale;
@@ -2593,7 +2593,7 @@ pub fn mt_mxint8_conv3d_mma<T>(
             let kt = kb + b_k_base + i;
             let in_bounds = kt < total_k;
             let kt_safe = select(in_bounds, kt, 0u32);
-            let elem = int8_decode(load(weight[w_oc_byte_base + kt_safe]).cast::<u32>());
+            let elem = mt_decode_int8(load(weight[w_oc_byte_base + kt_safe]).cast::<u32>());
             let g = kt_safe / block_size;
             let sbits = load(scales[w_oc_blk_base + g]).cast::<f32>();
             let scale = exp2(sbits - 127.0f32);
@@ -2825,7 +2825,7 @@ pub fn mt_nvfp8_f16_conv3d_mma<T>(
             let kt = kb + b_k_base + i;
             let in_bounds = kt < total_k;
             let kt_safe = select(in_bounds, kt, 0u32);
-            let elem = e4m3_decode(load(weight[w_oc_byte_base + kt_safe]).cast::<u32>());
+            let elem = mt_decode_e4m3(load(weight[w_oc_byte_base + kt_safe]).cast::<u32>());
             let g = kt_safe / block_size;
             let scale = load(scales[w_oc_blk_base + g]).cast::<f32>();
             let dq = elem * scale;
@@ -3049,7 +3049,7 @@ pub fn mt_fp4_f16_conv3d_mma<T>(
             let nib = (load(weight[word_idx]) >> shift) & 0xFu32;
             let g = kt_safe / block_size;
             let scale = load(scales[w_oc_blk_base + g]).cast::<f32>();
-            let dq = e2m1_decode(nib) * scale;
+            let dq = mt_decode_e2m1(nib) * scale;
             let val = select(in_bounds, dq, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_oc_row * stride + b_k_base + i, val);
         }
@@ -3264,7 +3264,7 @@ pub fn mt_fp8_e5m2_f16_conv3d_mma<T>(
             let kt = kb + b_k_base + i;
             let in_bounds = kt < total_k;
             let kt_safe = select(in_bounds, kt, 0u32);
-            let elem = e5m2_decode(load(weight[w_oc_byte_base + kt_safe]).cast::<u32>());
+            let elem = mt_decode_e5m2(load(weight[w_oc_byte_base + kt_safe]).cast::<u32>());
             let g = kt_safe / block_size;
             let scale = load(scales[w_oc_blk_base + g]).cast::<f32>();
             let dq = elem * scale;
@@ -3807,7 +3807,7 @@ pub fn mt_int8_f16_conv3d_mma<T>(
             let kt = kb + b_k_base + i;
             let in_bounds = kt < total_k;
             let kt_safe = select(in_bounds, kt, 0u32);
-            let elem = int8_decode(load(weight[w_oc_byte_base + kt_safe]).cast::<u32>());
+            let elem = mt_decode_int8(load(weight[w_oc_byte_base + kt_safe]).cast::<u32>());
             let g = kt_safe / block_size;
             let scale = load(scales[w_oc_blk_base + g]).cast::<f32>();
             let dq = elem * scale;

@@ -80,7 +80,7 @@ pub fn mt_mxfp4_dequant_gemv_expert_indexed<T>(
             let p_off = pack_idx * 8u32;
             for i in range(0u32, 8u32, 1u32) {
                 let nib = (packed >> (i * 4u32)) & 0xFu32;
-                let val = e2m1_decode(nib);
+                let val = mt_decode_e2m1(nib);
                 acc = acc + (val * scale) * load(input[p_off + i]).cast::<f32>();
             }
         }
@@ -124,12 +124,12 @@ pub fn mt_nvfp4_dequant_gemv_expert_indexed<T>(
             let blk = pack_idx / packs_per_block;
             // E4M3 micro-scale × global.
             let scale =
-                e4m3_decode(load(scales_stacked[row_block_off + blk]).cast::<u32>()) * global;
+                mt_decode_e4m3(load(scales_stacked[row_block_off + blk]).cast::<u32>()) * global;
             let packed = load(weights_stacked[row_pack_off + pack_idx]);
             let p_off = pack_idx * 8u32;
             for i in range(0u32, 8u32, 1u32) {
                 let nib = (packed >> (i * 4u32)) & 0xFu32;
-                let val = e2m1_decode(nib);
+                let val = mt_decode_e2m1(nib);
                 acc = acc + (val * scale) * load(input[p_off + i]).cast::<f32>();
             }
         }
@@ -167,7 +167,7 @@ pub fn mt_mxfp8_e4m3_dequant_gemv_expert_indexed<T>(
     for it in range(0u32, iters, 1u32) {
         let c = it * lsize + tid;
         if c < in_dim {
-            let elem = e4m3_decode(load(weights_stacked[row_off + c]).cast::<u32>());
+            let elem = mt_decode_e4m3(load(weights_stacked[row_off + c]).cast::<u32>());
             let sbits = load(scales_stacked[row_block_off + c / block_size]).cast::<f32>();
             let scale = exp2(sbits - 127.0f32);
             acc = acc + (elem * scale) * load(input[c]).cast::<f32>();
@@ -206,7 +206,7 @@ pub fn mt_mxfp8_e5m2_dequant_gemv_expert_indexed<T>(
     for it in range(0u32, iters, 1u32) {
         let c = it * lsize + tid;
         if c < in_dim {
-            let elem = e5m2_decode(load(weights_stacked[row_off + c]).cast::<u32>());
+            let elem = mt_decode_e5m2(load(weights_stacked[row_off + c]).cast::<u32>());
             let sbits = load(scales_stacked[row_block_off + c / block_size]).cast::<f32>();
             let scale = exp2(sbits - 127.0f32);
             acc = acc + (elem * scale) * load(input[c]).cast::<f32>();
@@ -245,7 +245,7 @@ pub fn mt_nvfp8_dequant_gemv_expert_indexed<T>(
     for it in range(0u32, iters, 1u32) {
         let c = it * lsize + tid;
         if c < in_dim {
-            let elem = e4m3_decode(load(weights_stacked[row_off + c]).cast::<u32>());
+            let elem = mt_decode_e4m3(load(weights_stacked[row_off + c]).cast::<u32>());
             let scale = load(scales_stacked[row_block_off + c / block_size]);
             acc = acc + (elem * scale) * load(input[c]).cast::<f32>();
         }
@@ -295,7 +295,7 @@ pub fn mt_fp4_dequant_gemv_expert_indexed<T>(
             let packed = load(weights_stacked[row_pack_off + pack_idx]);
             let p_off = pack_idx * 8u32;
             for i in range(0u32, 8u32, 1u32) {
-                let val = e2m1_decode((packed >> (i * 4u32)) & 0xFu32);
+                let val = mt_decode_e2m1((packed >> (i * 4u32)) & 0xFu32);
                 acc = acc + (val * scale) * load(input[p_off + i]).cast::<f32>();
             }
         }
@@ -333,7 +333,7 @@ pub fn mt_fp8_e5m2_dequant_gemv_expert_indexed<T>(
     for it in range(0u32, iters, 1u32) {
         let c = it * lsize + tid;
         if c < in_dim {
-            let elem = e5m2_decode(load(weights_stacked[row_off + c]).cast::<u32>());
+            let elem = mt_decode_e5m2(load(weights_stacked[row_off + c]).cast::<u32>());
             let scale = load(scales_stacked[row_block_off + c / block_size]);
             acc = acc + (elem * scale) * load(input[c]).cast::<f32>();
         }
@@ -371,7 +371,7 @@ pub fn mt_int8_dequant_gemv_expert_indexed<T>(
     for it in range(0u32, iters, 1u32) {
         let c = it * lsize + tid;
         if c < in_dim {
-            let elem = int8_decode(load(weights_stacked[row_off + c]).cast::<u32>());
+            let elem = mt_decode_int8(load(weights_stacked[row_off + c]).cast::<u32>());
             let scale = load(scales_stacked[row_block_off + c / block_size]);
             acc = acc + (elem * scale) * load(input[c]).cast::<f32>();
         }
@@ -530,7 +530,7 @@ int_qgemv_e8m0_expert_indexed!(mt_mxint6_dequant_gemv_expert_indexed, 6u32, 32u3
 
 /// MXINT8 expert-indexed dequantizing GEMV — 8-bit symmetric codes (byte layout,
 /// block 32), E8M0 pow-2 block scale `2^(bits-127)`. Element-strided like the
-/// 8-bit float formats (one byte per code), decode is `int8_decode → val · scale`,
+/// 8-bit float formats (one byte per code), decode is `mt_decode_int8 → val · scale`,
 /// with the per-expert row bases folded in exactly like the int8 kernel.
 #[kernel]
 pub fn mt_mxint8_dequant_gemv_expert_indexed<T>(
@@ -556,7 +556,7 @@ pub fn mt_mxint8_dequant_gemv_expert_indexed<T>(
     for it in range(0u32, iters, 1u32) {
         let c = it * lsize + tid;
         if c < in_dim {
-            let elem = int8_decode(load(weights_stacked[row_off + c]).cast::<u32>());
+            let elem = mt_decode_int8(load(weights_stacked[row_off + c]).cast::<u32>());
             let sbits = load(scales_stacked[row_block_off + c / block_size]).cast::<f32>();
             let scale = exp2(sbits - 127.0f32);
             acc = acc + (elem * scale) * load(input[c]).cast::<f32>();
@@ -606,7 +606,7 @@ pub fn mt_nvfp8_f16_dequant_gemv_expert_indexed<T>(
     for it in range(0u32, iters, 1u32) {
         let c = it * lsize + tid;
         if c < in_dim {
-            let elem = e4m3_decode(load(weights_stacked[row_off + c]).cast::<u32>());
+            let elem = mt_decode_e4m3(load(weights_stacked[row_off + c]).cast::<u32>());
             let scale = load(scales_stacked[row_block_off + c / block_size]).cast::<f32>();
             acc = acc + (elem * scale) * load(input[c]).cast::<f32>();
         }
@@ -651,7 +651,7 @@ pub fn mt_fp4_f16_dequant_gemv_expert_indexed<T>(
             let packed = load(weights_stacked[row_pack_off + pack_idx]);
             let p_off = pack_idx * 8u32;
             for i in range(0u32, 8u32, 1u32) {
-                let val = e2m1_decode((packed >> (i * 4u32)) & 0xFu32);
+                let val = mt_decode_e2m1((packed >> (i * 4u32)) & 0xFu32);
                 acc = acc + (val * scale) * load(input[p_off + i]).cast::<f32>();
             }
         }
@@ -690,7 +690,7 @@ pub fn mt_fp8_e5m2_f16_dequant_gemv_expert_indexed<T>(
     for it in range(0u32, iters, 1u32) {
         let c = it * lsize + tid;
         if c < in_dim {
-            let elem = e5m2_decode(load(weights_stacked[row_off + c]).cast::<u32>());
+            let elem = mt_decode_e5m2(load(weights_stacked[row_off + c]).cast::<u32>());
             let scale = load(scales_stacked[row_block_off + c / block_size]).cast::<f32>();
             acc = acc + (elem * scale) * load(input[c]).cast::<f32>();
         }
@@ -794,7 +794,7 @@ pub fn mt_int8_f16_dequant_gemv_expert_indexed<T>(
     for it in range(0u32, iters, 1u32) {
         let c = it * lsize + tid;
         if c < in_dim {
-            let elem = int8_decode(load(weights_stacked[row_off + c]).cast::<u32>());
+            let elem = mt_decode_int8(load(weights_stacked[row_off + c]).cast::<u32>());
             let scale = load(scales_stacked[row_block_off + c / block_size]).cast::<f32>();
             acc = acc + (elem * scale) * load(input[c]).cast::<f32>();
         }

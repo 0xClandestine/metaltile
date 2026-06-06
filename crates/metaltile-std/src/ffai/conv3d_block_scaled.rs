@@ -124,7 +124,7 @@ pub fn mt_mxfp4_conv3d<T>(
                         (load(weight[w_row_pack + col / 8u32]) >> ((col % 8u32) * 4u32)) & 0xFu32;
                     let scale =
                         exp2(load(scales[w_row_blk + col / block_size]).cast::<f32>() - 127.0f32);
-                    acc = acc + pix_m * (e2m1_decode(nib) * scale);
+                    acc = acc + pix_m * (mt_decode_e2m1(nib) * scale);
                 }
             }
         }
@@ -216,9 +216,9 @@ pub fn mt_nvfp4_conv3d<T>(
                         (load(weight[w_row_pack + col / 8u32]) >> ((col % 8u32) * 4u32)) & 0xFu32;
                     // nvfp4 two-level scale: E4M3 micro-scale × global FP32, global LAST.
                     let scale =
-                        e4m3_decode(load(scales[w_row_blk + col / block_size]).cast::<u32>())
+                        mt_decode_e4m3(load(scales[w_row_blk + col / block_size]).cast::<u32>())
                             * global;
-                    acc = acc + pix_m * (e2m1_decode(nib) * scale);
+                    acc = acc + pix_m * (mt_decode_e2m1(nib) * scale);
                 }
             }
         }
@@ -308,7 +308,7 @@ pub fn mt_fp4_conv3d<T>(
                     let nib =
                         (load(weight[w_row_pack + col / 8u32]) >> ((col % 8u32) * 4u32)) & 0xFu32;
                     let scale = load(scales[w_row_blk + col / block_size]);
-                    acc = acc + pix_m * (e2m1_decode(nib) * scale);
+                    acc = acc + pix_m * (mt_decode_e2m1(nib) * scale);
                 }
             }
         }
@@ -394,7 +394,7 @@ pub fn mt_mxfp8_e4m3_conv3d<T>(
                     let pix_m = select(valid, pix, 0.0f32);
 
                     let col = col_kz + ky * kw + kx;
-                    let elem = e4m3_decode(load(weight[w_row + col]).cast::<u32>());
+                    let elem = mt_decode_e4m3(load(weight[w_row + col]).cast::<u32>());
                     let scale =
                         exp2(load(scales[w_row_blk + col / block_size]).cast::<f32>() - 127.0f32);
                     acc = acc + pix_m * (elem * scale);
@@ -483,7 +483,7 @@ pub fn mt_mxfp8_e5m2_conv3d<T>(
                     let pix_m = select(valid, pix, 0.0f32);
 
                     let col = col_kz + ky * kw + kx;
-                    let elem = e5m2_decode(load(weight[w_row + col]).cast::<u32>());
+                    let elem = mt_decode_e5m2(load(weight[w_row + col]).cast::<u32>());
                     let scale =
                         exp2(load(scales[w_row_blk + col / block_size]).cast::<f32>() - 127.0f32);
                     acc = acc + pix_m * (elem * scale);
@@ -572,7 +572,7 @@ pub fn mt_fp8_e5m2_conv3d<T>(
                     let pix_m = select(valid, pix, 0.0f32);
 
                     let col = col_kz + ky * kw + kx;
-                    let elem = e5m2_decode(load(weight[w_row + col]).cast::<u32>());
+                    let elem = mt_decode_e5m2(load(weight[w_row + col]).cast::<u32>());
                     let scale = load(scales[w_row_blk + col / block_size]);
                     acc = acc + pix_m * (elem * scale);
                 }
@@ -661,7 +661,7 @@ pub fn mt_nvfp8_conv3d<T>(
                     let pix_m = select(valid, pix, 0.0f32);
 
                     let col = col_kz + ky * kw + kx;
-                    let elem = e4m3_decode(load(weight[w_row + col]).cast::<u32>());
+                    let elem = mt_decode_e4m3(load(weight[w_row + col]).cast::<u32>());
                     let scale = load(scales[w_row_blk + col / block_size]);
                     acc = acc + pix_m * (elem * scale);
                 }
@@ -752,7 +752,7 @@ pub fn mt_nvfp8_f16_conv3d<T>(
                     let pix_m = select(valid, pix, 0.0f32);
 
                     let col = col_kz + ky * kw + kx;
-                    let elem = e4m3_decode(load(weight[w_row + col]).cast::<u32>());
+                    let elem = mt_decode_e4m3(load(weight[w_row + col]).cast::<u32>());
                     let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
                     acc = acc + pix_m * (elem * scale);
                 }
@@ -842,7 +842,7 @@ pub fn mt_fp8_e5m2_f16_conv3d<T>(
                     let pix_m = select(valid, pix, 0.0f32);
 
                     let col = col_kz + ky * kw + kx;
-                    let elem = e5m2_decode(load(weight[w_row + col]).cast::<u32>());
+                    let elem = mt_decode_e5m2(load(weight[w_row + col]).cast::<u32>());
                     let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
                     acc = acc + pix_m * (elem * scale);
                 }
@@ -937,7 +937,7 @@ pub fn mt_fp4_f16_conv3d<T>(
                     let nib =
                         (load(weight[w_row_pack + col / 8u32]) >> ((col % 8u32) * 4u32)) & 0xFu32;
                     let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
-                    acc = acc + pix_m * (e2m1_decode(nib) * scale);
+                    acc = acc + pix_m * (mt_decode_e2m1(nib) * scale);
                 }
             }
         }
@@ -1023,7 +1023,7 @@ pub fn mt_int8_conv3d<T>(
                     let pix_m = select(valid, pix, 0.0f32);
 
                     let col = col_kz + ky * kw + kx;
-                    let elem = int8_decode(load(weight[w_row + col]).cast::<u32>());
+                    let elem = mt_decode_int8(load(weight[w_row + col]).cast::<u32>());
                     let scale = load(scales[w_row_blk + col / block_size]);
                     acc = acc + pix_m * (elem * scale);
                 }
@@ -1403,7 +1403,7 @@ int_conv3d_e8m0!(mt_mxint6_conv3d, 6u32, 32u32, 64.0f32);
 
 /// MXINT8 quantized-weight conv3d — 8-bit symmetric codes (byte layout, block
 /// 32), E8M0 pow-2 block scale `2^(bits-127)`. Byte-per-code filter layout
-/// `[out_ch, C]`, IDENTICAL to `mt_int8_conv3d`; decode is `int8_decode → val ·
+/// `[out_ch, C]`, IDENTICAL to `mt_int8_conv3d`; decode is `mt_decode_int8 → val ·
 /// scale` with the E8M0 scale axis instead of the int8 FP32 scale.
 #[kernel]
 #[allow(clippy::too_many_arguments)]
@@ -1481,7 +1481,7 @@ pub fn mt_mxint8_conv3d<T>(
                     let pix_m = select(valid, pix, 0.0f32);
 
                     let col = col_kz + ky * kw + kx;
-                    let elem = int8_decode(load(weight[w_row + col]).cast::<u32>());
+                    let elem = mt_decode_int8(load(weight[w_row + col]).cast::<u32>());
                     let sbits = load(scales[w_row_blk + col / block_size]).cast::<f32>();
                     let scale = exp2(sbits - 127.0f32); // E8M0: 2^(bits-127)
                     acc = acc + pix_m * (elem * scale);
@@ -1572,7 +1572,7 @@ pub fn mt_int8_f16_conv3d<T>(
                     let pix_m = select(valid, pix, 0.0f32);
 
                     let col = col_kz + ky * kw + kx;
-                    let elem = int8_decode(load(weight[w_row + col]).cast::<u32>());
+                    let elem = mt_decode_int8(load(weight[w_row + col]).cast::<u32>());
                     let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
                     acc = acc + pix_m * (elem * scale);
                 }

@@ -35,7 +35,7 @@ pub fn mt_mxfp4_dequant<T>(
     if i < n {
         let word = load(codes[i / 8u32]);
         let nib = (word >> ((i & 7u32) * 4u32)) & 0xFu32;
-        let val = e2m1_decode(nib);
+        let val = mt_decode_e2m1(nib);
         let sbits = load(scales[i / block_size]).cast::<f32>();
         let scale = exp2(sbits - 127.0f32); // E8M0: 2^(bits-127), exact for integer bits
         store(out[i], (val * scale).cast::<T>());
@@ -57,9 +57,9 @@ pub fn mt_nvfp4_dequant<T>(
     if i < n {
         let word = load(codes[i / 8u32]);
         let nib = (word >> ((i & 7u32) * 4u32)) & 0xFu32;
-        let elem = e2m1_decode(nib);
+        let elem = mt_decode_e2m1(nib);
         // E4M3 micro-scale × global.
-        let block_scale = e4m3_decode(load(scales[i / block_size]).cast::<u32>()) * global;
+        let block_scale = mt_decode_e4m3(load(scales[i / block_size]).cast::<u32>()) * global;
         store(out[i], (elem * block_scale).cast::<T>());
     }
 }
@@ -75,7 +75,7 @@ pub fn mt_mxfp8_e4m3_dequant<T>(
 ) {
     let i = program_id::<0>();
     if i < n {
-        let elem = e4m3_decode(load(codes[i]).cast::<u32>());
+        let elem = mt_decode_e4m3(load(codes[i]).cast::<u32>());
         let sbits = load(scales[i / block_size]).cast::<f32>();
         let scale = exp2(sbits - 127.0f32);
         store(out[i], (elem * scale).cast::<T>());
@@ -93,7 +93,7 @@ pub fn mt_mxfp8_e5m2_dequant<T>(
 ) {
     let i = program_id::<0>();
     if i < n {
-        let elem = e5m2_decode(load(codes[i]).cast::<u32>());
+        let elem = mt_decode_e5m2(load(codes[i]).cast::<u32>());
         let sbits = load(scales[i / block_size]).cast::<f32>();
         let scale = exp2(sbits - 127.0f32);
         store(out[i], (elem * scale).cast::<T>());
@@ -111,7 +111,7 @@ pub fn mt_nvfp8_dequant<T>(
 ) {
     let i = program_id::<0>();
     if i < n {
-        let elem = e4m3_decode(load(codes[i]).cast::<u32>());
+        let elem = mt_decode_e4m3(load(codes[i]).cast::<u32>());
         let scale = load(scales[i / block_size]);
         store(out[i], (elem * scale).cast::<T>());
     }
@@ -136,7 +136,7 @@ pub fn mt_fp4_dequant<T>(
     if i < n {
         let word = load(codes[i / 8u32]);
         let nib = (word >> ((i & 7u32) * 4u32)) & 0xFu32;
-        let elem = e2m1_decode(nib);
+        let elem = mt_decode_e2m1(nib);
         let scale = load(scales[i / block_size]);
         store(out[i], (elem * scale).cast::<T>());
     }
@@ -153,7 +153,7 @@ pub fn mt_fp8_e5m2_dequant<T>(
 ) {
     let i = program_id::<0>();
     if i < n {
-        let elem = e5m2_decode(load(codes[i]).cast::<u32>());
+        let elem = mt_decode_e5m2(load(codes[i]).cast::<u32>());
         let scale = load(scales[i / block_size]);
         store(out[i], (elem * scale).cast::<T>());
     }
@@ -171,7 +171,7 @@ pub fn mt_int8_dequant<T>(
 ) {
     let i = program_id::<0>();
     if i < n {
-        let elem = int8_decode(load(codes[i]).cast::<u32>());
+        let elem = mt_decode_int8(load(codes[i]).cast::<u32>());
         let scale = load(scales[i / block_size]);
         store(out[i], (elem * scale).cast::<T>());
     }
@@ -274,7 +274,7 @@ pub fn mt_mxint8_dequant<T>(
 ) {
     let i = program_id::<0>();
     if i < n {
-        let elem = int8_decode(load(codes[i]).cast::<u32>());
+        let elem = mt_decode_int8(load(codes[i]).cast::<u32>());
         let sbits = load(scales[i / block_size]).cast::<f32>();
         let scale = exp2(sbits - 127.0f32);
         store(out[i], (elem * scale).cast::<T>());
@@ -298,7 +298,7 @@ pub fn mt_nvfp8_f16_dequant<T>(
 ) {
     let i = program_id::<0>();
     if i < n {
-        let elem = e4m3_decode(load(codes[i]).cast::<u32>());
+        let elem = mt_decode_e4m3(load(codes[i]).cast::<u32>());
         let scale = load(scales[i / block_size]).cast::<f32>();
         store(out[i], (elem * scale).cast::<T>());
     }
@@ -317,7 +317,7 @@ pub fn mt_fp4_f16_dequant<T>(
     if i < n {
         let word = load(codes[i / 8u32]);
         let nib = (word >> ((i & 7u32) * 4u32)) & 0xFu32;
-        let elem = e2m1_decode(nib);
+        let elem = mt_decode_e2m1(nib);
         let scale = load(scales[i / block_size]).cast::<f32>();
         store(out[i], (elem * scale).cast::<T>());
     }
@@ -334,7 +334,7 @@ pub fn mt_fp8_e5m2_f16_dequant<T>(
 ) {
     let i = program_id::<0>();
     if i < n {
-        let elem = e5m2_decode(load(codes[i]).cast::<u32>());
+        let elem = mt_decode_e5m2(load(codes[i]).cast::<u32>());
         let scale = load(scales[i / block_size]).cast::<f32>();
         store(out[i], (elem * scale).cast::<T>());
     }
@@ -389,7 +389,7 @@ pub fn mt_int8_f16_dequant<T>(
 ) {
     let i = program_id::<0>();
     if i < n {
-        let elem = int8_decode(load(codes[i]).cast::<u32>());
+        let elem = mt_decode_int8(load(codes[i]).cast::<u32>());
         let scale = load(scales[i / block_size]).cast::<f32>();
         store(out[i], (elem * scale).cast::<T>());
     }

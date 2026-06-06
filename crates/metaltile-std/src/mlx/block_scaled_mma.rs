@@ -106,7 +106,7 @@ pub fn mt_mxfp4_qmm_mma<T>(
         let ws_base = w_row * ws_ld + pack_in_row * 8u32;
         for i in range(0u32, 8u32, 1u32) {
             let nib = (pack >> (i * 4u32)) & 0xFu32;
-            let val = e2m1_decode(nib);
+            let val = mt_decode_e2m1(nib);
             threadgroup_store("ws", ws_base + i, (val * scale).cast::<T>());
         }
         threadgroup_barrier();
@@ -295,11 +295,11 @@ pub fn mt_nvfp4_qmm_mma<T>(
         let pack = load(w[w_pack_row_base + pack_k_off]);
         let k_off = kb + pack_in_row * 8u32;
         let g = k_off / block_size; // E8M0 block index (one per BK for bs=32)
-        let scale = e4m3_decode(load(scales[sb_base + g]).cast::<u32>()) * global;
+        let scale = mt_decode_e4m3(load(scales[sb_base + g]).cast::<u32>()) * global;
         let ws_base = w_row * ws_ld + pack_in_row * 8u32;
         for i in range(0u32, 8u32, 1u32) {
             let nib = (pack >> (i * 4u32)) & 0xFu32;
-            let val = e2m1_decode(nib);
+            let val = mt_decode_e2m1(nib);
             threadgroup_store("ws", ws_base + i, (val * scale).cast::<T>());
         }
         threadgroup_barrier();
@@ -488,7 +488,7 @@ pub fn mt_mxfp8_e4m3_qmm_mma<T>(
         let scale = exp2(sbits - 127.0f32);
         let ws_base = w_row * ws_ld + x_k_base;
         for i in range(0u32, 8u32, 1u32) {
-            let elem = e4m3_decode(load(w[w_dev_base + i]).cast::<u32>());
+            let elem = mt_decode_e4m3(load(w[w_dev_base + i]).cast::<u32>());
             threadgroup_store("ws", ws_base + i, (elem * scale).cast::<T>());
         }
         threadgroup_barrier();
@@ -677,7 +677,7 @@ pub fn mt_mxfp8_e5m2_qmm_mma<T>(
         let scale = exp2(sbits - 127.0f32);
         let ws_base = w_row * ws_ld + x_k_base;
         for i in range(0u32, 8u32, 1u32) {
-            let elem = e5m2_decode(load(w[w_dev_base + i]).cast::<u32>());
+            let elem = mt_decode_e5m2(load(w[w_dev_base + i]).cast::<u32>());
             threadgroup_store("ws", ws_base + i, (elem * scale).cast::<T>());
         }
         threadgroup_barrier();
@@ -865,7 +865,7 @@ pub fn mt_nvfp8_qmm_mma<T>(
         let scale = load(scales[sb_base + g]); // per-block FP32 scale
         let ws_base = w_row * ws_ld + x_k_base;
         for i in range(0u32, 8u32, 1u32) {
-            let elem = e4m3_decode(load(w[w_dev_base + i]).cast::<u32>());
+            let elem = mt_decode_e4m3(load(w[w_dev_base + i]).cast::<u32>());
             threadgroup_store("ws", ws_base + i, (elem * scale).cast::<T>());
         }
         threadgroup_barrier();
@@ -1068,7 +1068,7 @@ pub fn mt_fp4_float_qmm_mma<T>(
         let ws_base = w_row * ws_ld + pack_in_row * 8u32;
         for i in range(0u32, 8u32, 1u32) {
             let nib = (pack >> (i * 4u32)) & 0xFu32;
-            let val = e2m1_decode(nib);
+            let val = mt_decode_e2m1(nib);
             threadgroup_store("ws", ws_base + i, (val * scale).cast::<T>());
         }
         threadgroup_barrier();
@@ -1256,7 +1256,7 @@ pub fn mt_fp8_e5m2_qmm_mma<T>(
         let scale = load(scales[sb_base + g]);
         let ws_base = w_row * ws_ld + x_k_base;
         for i in range(0u32, 8u32, 1u32) {
-            let elem = e5m2_decode(load(w[w_dev_base + i]).cast::<u32>());
+            let elem = mt_decode_e5m2(load(w[w_dev_base + i]).cast::<u32>());
             threadgroup_store("ws", ws_base + i, (elem * scale).cast::<T>());
         }
         threadgroup_barrier();
@@ -1445,7 +1445,7 @@ pub fn mt_int8_qmm_mma<T>(
         let scale = load(scales[sb_base + g]);
         let ws_base = w_row * ws_ld + x_k_base;
         for i in range(0u32, 8u32, 1u32) {
-            let elem = int8_decode(load(w[w_dev_base + i]).cast::<u32>());
+            let elem = mt_decode_int8(load(w[w_dev_base + i]).cast::<u32>());
             threadgroup_store("ws", ws_base + i, (elem * scale).cast::<T>());
         }
         threadgroup_barrier();
@@ -2197,7 +2197,7 @@ pub fn mt_mxint8_qmm_mma<T>(
         let scale = exp2(sbits - 127.0f32); // E8M0: 2^(bits-127)
         let ws_base = w_row * ws_ld + x_k_base;
         for i in range(0u32, 8u32, 1u32) {
-            let elem = int8_decode(load(w[w_dev_base + i]).cast::<u32>());
+            let elem = mt_decode_int8(load(w[w_dev_base + i]).cast::<u32>());
             threadgroup_store("ws", ws_base + i, (elem * scale).cast::<T>());
         }
         threadgroup_barrier();
@@ -2397,7 +2397,7 @@ pub fn mt_nvfp8_f16_qmm_mma<T>(
         let scale = load(scales[sb_base + g]).cast::<f32>(); // per-block FP16 scale
         let ws_base = w_row * ws_ld + x_k_base;
         for i in range(0u32, 8u32, 1u32) {
-            let elem = e4m3_decode(load(w[w_dev_base + i]).cast::<u32>());
+            let elem = mt_decode_e4m3(load(w[w_dev_base + i]).cast::<u32>());
             threadgroup_store("ws", ws_base + i, (elem * scale).cast::<T>());
         }
         threadgroup_barrier();
@@ -2590,7 +2590,7 @@ pub fn mt_fp4_f16_qmm_mma<T>(
         let ws_base = w_row * ws_ld + pack_in_row * 8u32;
         for i in range(0u32, 8u32, 1u32) {
             let nib = (pack >> (i * 4u32)) & 0xFu32;
-            let val = e2m1_decode(nib);
+            let val = mt_decode_e2m1(nib);
             threadgroup_store("ws", ws_base + i, (val * scale).cast::<T>());
         }
         threadgroup_barrier();
@@ -2779,7 +2779,7 @@ pub fn mt_fp8_e5m2_f16_qmm_mma<T>(
         let scale = load(scales[sb_base + g]).cast::<f32>();
         let ws_base = w_row * ws_ld + x_k_base;
         for i in range(0u32, 8u32, 1u32) {
-            let elem = e5m2_decode(load(w[w_dev_base + i]).cast::<u32>());
+            let elem = mt_decode_e5m2(load(w[w_dev_base + i]).cast::<u32>());
             threadgroup_store("ws", ws_base + i, (elem * scale).cast::<T>());
         }
         threadgroup_barrier();
@@ -3238,7 +3238,7 @@ pub fn mt_int8_f16_qmm_mma<T>(
         let scale = load(scales[sb_base + g]).cast::<f32>();
         let ws_base = w_row * ws_ld + x_k_base;
         for i in range(0u32, 8u32, 1u32) {
-            let elem = int8_decode(load(w[w_dev_base + i]).cast::<u32>());
+            let elem = mt_decode_int8(load(w[w_dev_base + i]).cast::<u32>());
             threadgroup_store("ws", ws_base + i, (elem * scale).cast::<T>());
         }
         threadgroup_barrier();

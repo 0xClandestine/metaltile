@@ -21,5 +21,6 @@
 //! `specs/KERNEL_AUDIT.md` for per-op precision coverage.
 
 pub mod codec;
+pub mod decode_kernels;
 pub mod format;
 pub mod gguf;

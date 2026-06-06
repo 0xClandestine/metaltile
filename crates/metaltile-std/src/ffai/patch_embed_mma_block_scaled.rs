@@ -171,7 +171,7 @@ pub fn mt_mxfp4_patch_embed_mma<T>(
             let nib = (pack >> ((kt_safe & 7u32) * 4u32)) & 0xFu32;
             let sbits = load(scales[sb_base + kt_safe / block_size]).cast::<f32>();
             let scale = exp2(sbits - 127.0f32);
-            let decoded = e2m1_decode(nib) * scale;
+            let decoded = mt_decode_e2m1(nib) * scale;
             let val = select(in_bounds, decoded, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_h_row * stride + b_k_base + i, val);
         }
@@ -378,9 +378,9 @@ pub fn mt_nvfp4_patch_embed_mma<T>(
             let kt_safe = select(in_bounds, kt, 0u32);
             let pack = load(weight[w_pack_row_base + kt_safe / 8u32]);
             let nib = (pack >> ((kt_safe & 7u32) * 4u32)) & 0xFu32;
-            let micro = e4m3_decode(load(scales[sb_base + kt_safe / block_size]).cast::<u32>());
+            let micro = mt_decode_e4m3(load(scales[sb_base + kt_safe / block_size]).cast::<u32>());
             let scale = micro * global;
-            let decoded = e2m1_decode(nib) * scale;
+            let decoded = mt_decode_e2m1(nib) * scale;
             let val = select(in_bounds, decoded, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_h_row * stride + b_k_base + i, val);
         }
@@ -578,7 +578,7 @@ pub fn mt_fp4_patch_embed_mma<T>(
             let pack = load(weight[w_pack_row_base + kt_safe / 8u32]);
             let nib = (pack >> ((kt_safe & 7u32) * 4u32)) & 0xFu32;
             let scale = load(scales[sb_base + kt_safe / block_size]);
-            let decoded = e2m1_decode(nib) * scale;
+            let decoded = mt_decode_e2m1(nib) * scale;
             let val = select(in_bounds, decoded, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_h_row * stride + b_k_base + i, val);
         }
@@ -777,7 +777,7 @@ pub fn mt_mxfp8_e4m3_patch_embed_mma<T>(
             let code = load(weight[w_row_base + kt_safe]).cast::<u32>();
             let sbits = load(scales[sb_base + kt_safe / block_size]).cast::<f32>();
             let scale = exp2(sbits - 127.0f32);
-            let decoded = e4m3_decode(code) * scale;
+            let decoded = mt_decode_e4m3(code) * scale;
             let val = select(in_bounds, decoded, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_h_row * stride + b_k_base + i, val);
         }
@@ -974,7 +974,7 @@ pub fn mt_mxfp8_e5m2_patch_embed_mma<T>(
             let code = load(weight[w_row_base + kt_safe]).cast::<u32>();
             let sbits = load(scales[sb_base + kt_safe / block_size]).cast::<f32>();
             let scale = exp2(sbits - 127.0f32);
-            let decoded = e5m2_decode(code) * scale;
+            let decoded = mt_decode_e5m2(code) * scale;
             let val = select(in_bounds, decoded, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_h_row * stride + b_k_base + i, val);
         }
@@ -1172,7 +1172,7 @@ pub fn mt_nvfp8_patch_embed_mma<T>(
             let kt_safe = select(in_bounds, kt, 0u32);
             let code = load(weight[w_row_base + kt_safe]).cast::<u32>();
             let scale = load(scales[sb_base + kt_safe / block_size]);
-            let decoded = e4m3_decode(code) * scale;
+            let decoded = mt_decode_e4m3(code) * scale;
             let val = select(in_bounds, decoded, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_h_row * stride + b_k_base + i, val);
         }
@@ -1368,7 +1368,7 @@ pub fn mt_fp8_e5m2_patch_embed_mma<T>(
             let kt_safe = select(in_bounds, kt, 0u32);
             let code = load(weight[w_row_base + kt_safe]).cast::<u32>();
             let scale = load(scales[sb_base + kt_safe / block_size]);
-            let decoded = e5m2_decode(code) * scale;
+            let decoded = mt_decode_e5m2(code) * scale;
             let val = select(in_bounds, decoded, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_h_row * stride + b_k_base + i, val);
         }
@@ -1566,7 +1566,7 @@ pub fn mt_int8_patch_embed_mma<T>(
             let kt_safe = select(in_bounds, kt, 0u32);
             let code = load(weight[w_row_base + kt_safe]).cast::<u32>();
             let scale = load(scales[sb_base + kt_safe / block_size]);
-            let decoded = int8_decode(code) * scale;
+            let decoded = mt_decode_int8(code) * scale;
             let val = select(in_bounds, decoded, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_h_row * stride + b_k_base + i, val);
         }
@@ -2408,7 +2408,7 @@ pub fn mt_mxint8_patch_embed_mma<T>(
             let code = load(weight[w_row_base + kt_safe]).cast::<u32>();
             let sbits = load(scales[sb_base + kt_safe / block_size]).cast::<f32>();
             let scale = exp2(sbits - 127.0f32);
-            let decoded = int8_decode(code) * scale;
+            let decoded = mt_decode_int8(code) * scale;
             let val = select(in_bounds, decoded, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_h_row * stride + b_k_base + i, val);
         }
@@ -2617,7 +2617,7 @@ pub fn mt_nvfp8_f16_patch_embed_mma<T>(
             let kt_safe = select(in_bounds, kt, 0u32);
             let code = load(weight[w_row_base + kt_safe]).cast::<u32>();
             let scale = load(scales[sb_base + kt_safe / block_size]).cast::<f32>();
-            let decoded = e4m3_decode(code) * scale;
+            let decoded = mt_decode_e4m3(code) * scale;
             let val = select(in_bounds, decoded, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_h_row * stride + b_k_base + i, val);
         }
@@ -2816,7 +2816,7 @@ pub fn mt_fp4_f16_patch_embed_mma<T>(
             let pack = load(weight[w_pack_row_base + kt_safe / 8u32]);
             let nib = (pack >> ((kt_safe & 7u32) * 4u32)) & 0xFu32;
             let scale = load(scales[sb_base + kt_safe / block_size]).cast::<f32>();
-            let decoded = e2m1_decode(nib) * scale;
+            let decoded = mt_decode_e2m1(nib) * scale;
             let val = select(in_bounds, decoded, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_h_row * stride + b_k_base + i, val);
         }
@@ -3013,7 +3013,7 @@ pub fn mt_fp8_e5m2_f16_patch_embed_mma<T>(
             let kt_safe = select(in_bounds, kt, 0u32);
             let code = load(weight[w_row_base + kt_safe]).cast::<u32>();
             let scale = load(scales[sb_base + kt_safe / block_size]).cast::<f32>();
-            let decoded = e5m2_decode(code) * scale;
+            let decoded = mt_decode_e5m2(code) * scale;
             let val = select(in_bounds, decoded, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_h_row * stride + b_k_base + i, val);
         }
@@ -3210,7 +3210,7 @@ pub fn mt_int8_f16_patch_embed_mma<T>(
             let kt_safe = select(in_bounds, kt, 0u32);
             let code = load(weight[w_row_base + kt_safe]).cast::<u32>();
             let scale = load(scales[sb_base + kt_safe / block_size]).cast::<f32>();
-            let decoded = int8_decode(code) * scale;
+            let decoded = mt_decode_int8(code) * scale;
             let val = select(in_bounds, decoded, 0.0f32).cast::<T>();
             threadgroup_store("bs", b_h_row * stride + b_k_base + i, val);
         }

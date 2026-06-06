@@ -92,7 +92,7 @@ pub fn mt_mxfp4_qmm_nax<T>(
         let scale = exp2(load(scales[sb_base + k_off / block_size]).cast::<f32>() - 127.0f32);
         for _ni in range(0u32, 8u32, 1u32) {
             let nib = (packed >> (_ni * 4u32)) & 15u32;
-            threadgroup_store("Ws", x_ws_base + _ni, e2m1_decode(nib) * scale);
+            threadgroup_store("Ws", x_ws_base + _ni, mt_decode_e2m1(nib) * scale);
         }
         threadgroup_barrier();
         coop_tile_load_a("gemm", "Xs", true, coop_stage(T), 36u32, 16u32, xs_sg_off);
@@ -171,10 +171,10 @@ pub fn mt_nvfp4_qmm_nax<T>(
         }
         let packed = load(w[w_pack_row_base + kb / 8u32 + x_k_quad]);
         let k_off = kb + x_k_quad * 8u32;
-        let scale = e4m3_decode(load(scales[sb_base + k_off / block_size]).cast::<u32>()) * global;
+        let scale = mt_decode_e4m3(load(scales[sb_base + k_off / block_size]).cast::<u32>()) * global;
         for _ni in range(0u32, 8u32, 1u32) {
             let nib = (packed >> (_ni * 4u32)) & 15u32;
-            threadgroup_store("Ws", x_ws_base + _ni, e2m1_decode(nib) * scale);
+            threadgroup_store("Ws", x_ws_base + _ni, mt_decode_e2m1(nib) * scale);
         }
         threadgroup_barrier();
         coop_tile_load_a("gemm", "Xs", true, coop_stage(T), 36u32, 16u32, xs_sg_off);
@@ -255,7 +255,7 @@ pub fn mt_fp4_qmm_nax<T>(
         let scale = load(scales[sb_base + k_off / block_size]);
         for _ni in range(0u32, 8u32, 1u32) {
             let nib = (packed >> (_ni * 4u32)) & 15u32;
-            threadgroup_store("Ws", x_ws_base + _ni, e2m1_decode(nib) * scale);
+            threadgroup_store("Ws", x_ws_base + _ni, mt_decode_e2m1(nib) * scale);
         }
         threadgroup_barrier();
         coop_tile_load_a("gemm", "Xs", true, coop_stage(T), 36u32, 16u32, xs_sg_off);
@@ -335,7 +335,7 @@ pub fn mt_mxfp8_e4m3_qmm_nax<T>(
         let k_off = kb + x_k_base;
         let scale = exp2(load(scales[sb_base + k_off / block_size]).cast::<f32>() - 127.0f32);
         for _i in range(0u32, 8u32, 1u32) {
-            let elem = e4m3_decode(load(w[w_row_base + k_off + _i]).cast::<u32>());
+            let elem = mt_decode_e4m3(load(w[w_row_base + k_off + _i]).cast::<u32>());
             threadgroup_store("Ws", x_ws_base + _i, elem * scale);
         }
         threadgroup_barrier();
@@ -414,7 +414,7 @@ pub fn mt_mxfp8_e5m2_qmm_nax<T>(
         let k_off = kb + x_k_base;
         let scale = exp2(load(scales[sb_base + k_off / block_size]).cast::<f32>() - 127.0f32);
         for _i in range(0u32, 8u32, 1u32) {
-            let elem = e5m2_decode(load(w[w_row_base + k_off + _i]).cast::<u32>());
+            let elem = mt_decode_e5m2(load(w[w_row_base + k_off + _i]).cast::<u32>());
             threadgroup_store("Ws", x_ws_base + _i, elem * scale);
         }
         threadgroup_barrier();
@@ -493,7 +493,7 @@ pub fn mt_fp8_e5m2_qmm_nax<T>(
         let k_off = kb + x_k_base;
         let scale = load(scales[sb_base + k_off / block_size]);
         for _i in range(0u32, 8u32, 1u32) {
-            let elem = e5m2_decode(load(w[w_row_base + k_off + _i]).cast::<u32>());
+            let elem = mt_decode_e5m2(load(w[w_row_base + k_off + _i]).cast::<u32>());
             threadgroup_store("Ws", x_ws_base + _i, elem * scale);
         }
         threadgroup_barrier();
@@ -573,7 +573,7 @@ pub fn mt_nvfp8_qmm_nax<T>(
         let k_off = kb + x_k_base;
         let scale = load(scales[sb_base + k_off / block_size]);
         for _i in range(0u32, 8u32, 1u32) {
-            let elem = e4m3_decode(load(w[w_row_base + k_off + _i]).cast::<u32>());
+            let elem = mt_decode_e4m3(load(w[w_row_base + k_off + _i]).cast::<u32>());
             threadgroup_store("Ws", x_ws_base + _i, elem * scale);
         }
         threadgroup_barrier();
@@ -652,7 +652,7 @@ pub fn mt_int8_qmm_nax<T>(
         let k_off = kb + x_k_base;
         let scale = load(scales[sb_base + k_off / block_size]);
         for _i in range(0u32, 8u32, 1u32) {
-            let elem = int8_decode(load(w[w_row_base + k_off + _i]).cast::<u32>());
+            let elem = mt_decode_int8(load(w[w_row_base + k_off + _i]).cast::<u32>());
             threadgroup_store("Ws", x_ws_base + _i, elem * scale);
         }
         threadgroup_barrier();
@@ -907,7 +907,7 @@ int_qmm_nax_e8m0!(mt_mxint6_qmm_nax, 6u32, 32u32, 64.0f32);
 
 /// MXINT8 NAX matmul — 8-bit symmetric codes (byte layout, block 32), E8M0
 /// pow-2 block scale `2^(bits-127)` (no bias). Element-strided W like the 8-bit
-/// float formats (one byte per code); decode is `int8_decode → elem · scale`.
+/// float formats (one byte per code); decode is `mt_decode_int8 → elem · scale`.
 /// Byte-identical geometry to `mt_int8_qmm_nax` — only the scale axis (E8M0 u8)
 /// differs.
 #[kernel]
@@ -966,7 +966,7 @@ pub fn mt_mxint8_qmm_nax<T>(
         let k_off = kb + x_k_base;
         let scale = exp2(load(scales[sb_base + k_off / block_size]).cast::<f32>() - 127.0f32);
         for _i in range(0u32, 8u32, 1u32) {
-            let elem = int8_decode(load(w[w_row_base + k_off + _i]).cast::<u32>());
+            let elem = mt_decode_int8(load(w[w_row_base + k_off + _i]).cast::<u32>());
             threadgroup_store("Ws", x_ws_base + _i, elem * scale);
         }
         threadgroup_barrier();
@@ -1058,7 +1058,7 @@ pub fn mt_nvfp8_f16_qmm_nax<T>(
         let k_off = kb + x_k_base;
         let scale = load(scales[sb_base + k_off / block_size]).cast::<f32>();
         for _i in range(0u32, 8u32, 1u32) {
-            let elem = e4m3_decode(load(w[w_row_base + k_off + _i]).cast::<u32>());
+            let elem = mt_decode_e4m3(load(w[w_row_base + k_off + _i]).cast::<u32>());
             threadgroup_store("Ws", x_ws_base + _i, elem * scale);
         }
         threadgroup_barrier();
@@ -1141,7 +1141,7 @@ pub fn mt_fp4_f16_qmm_nax<T>(
         let scale = load(scales[sb_base + k_off / block_size]).cast::<f32>();
         for _ni in range(0u32, 8u32, 1u32) {
             let nib = (packed >> (_ni * 4u32)) & 15u32;
-            threadgroup_store("Ws", x_ws_base + _ni, e2m1_decode(nib) * scale);
+            threadgroup_store("Ws", x_ws_base + _ni, mt_decode_e2m1(nib) * scale);
         }
         threadgroup_barrier();
         coop_tile_load_a("gemm", "Xs", true, coop_stage(T), 36u32, 16u32, xs_sg_off);
@@ -1220,7 +1220,7 @@ pub fn mt_fp8_e5m2_f16_qmm_nax<T>(
         let k_off = kb + x_k_base;
         let scale = load(scales[sb_base + k_off / block_size]).cast::<f32>();
         for _i in range(0u32, 8u32, 1u32) {
-            let elem = e5m2_decode(load(w[w_row_base + k_off + _i]).cast::<u32>());
+            let elem = mt_decode_e5m2(load(w[w_row_base + k_off + _i]).cast::<u32>());
             threadgroup_store("Ws", x_ws_base + _i, elem * scale);
         }
         threadgroup_barrier();
@@ -1407,7 +1407,7 @@ pub fn mt_int8_f16_qmm_nax<T>(
         let k_off = kb + x_k_base;
         let scale = load(scales[sb_base + k_off / block_size]).cast::<f32>();
         for _i in range(0u32, 8u32, 1u32) {
-            let elem = int8_decode(load(w[w_row_base + k_off + _i]).cast::<u32>());
+            let elem = mt_decode_int8(load(w[w_row_base + k_off + _i]).cast::<u32>());
             threadgroup_store("Ws", x_ws_base + _i, elem * scale);
         }
         threadgroup_barrier();

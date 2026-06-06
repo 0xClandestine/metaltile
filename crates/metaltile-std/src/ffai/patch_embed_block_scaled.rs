@@ -58,7 +58,7 @@ pub fn mt_mxfp4_patch_embed<T>(
                 let nib = (load(weight[w_row_pack + col / 8u32]) >> ((col % 8u32) * 4u32)) & 0xFu32;
                 let scale =
                     exp2(load(scales[w_row_blk + col / block_size]).cast::<f32>() - 127.0f32);
-                acc = acc + (e2m1_decode(nib) * scale) * pix;
+                acc = acc + (mt_decode_e2m1(nib) * scale) * pix;
             }
         }
     }
@@ -106,8 +106,8 @@ pub fn mt_nvfp4_patch_embed<T>(
                 let pix = load(image[img_row + px0 + px]).cast::<f32>();
                 let nib = (load(weight[w_row_pack + col / 8u32]) >> ((col % 8u32) * 4u32)) & 0xFu32;
                 let scale =
-                    e4m3_decode(load(scales[w_row_blk + col / block_size]).cast::<u32>()) * global;
-                acc = acc + (e2m1_decode(nib) * scale) * pix;
+                    mt_decode_e4m3(load(scales[w_row_blk + col / block_size]).cast::<u32>()) * global;
+                acc = acc + (mt_decode_e2m1(nib) * scale) * pix;
             }
         }
     }
@@ -154,7 +154,7 @@ pub fn mt_fp4_patch_embed<T>(
                 let pix = load(image[img_row + px0 + px]).cast::<f32>();
                 let nib = (load(weight[w_row_pack + col / 8u32]) >> ((col % 8u32) * 4u32)) & 0xFu32;
                 let scale = load(scales[w_row_blk + col / block_size]);
-                acc = acc + (e2m1_decode(nib) * scale) * pix;
+                acc = acc + (mt_decode_e2m1(nib) * scale) * pix;
             }
         }
     }
@@ -198,7 +198,7 @@ pub fn mt_mxfp8_e4m3_patch_embed<T>(
             for px in range(0u32, patch_w, 1u32) {
                 let col = col_ic + py * patch_w + px;
                 let pix = load(image[img_row + px0 + px]).cast::<f32>();
-                let elem = e4m3_decode(load(weight[w_row + col]).cast::<u32>());
+                let elem = mt_decode_e4m3(load(weight[w_row + col]).cast::<u32>());
                 let scale =
                     exp2(load(scales[w_row_blk + col / block_size]).cast::<f32>() - 127.0f32);
                 acc = acc + (elem * scale) * pix;
@@ -245,7 +245,7 @@ pub fn mt_mxfp8_e5m2_patch_embed<T>(
             for px in range(0u32, patch_w, 1u32) {
                 let col = col_ic + py * patch_w + px;
                 let pix = load(image[img_row + px0 + px]).cast::<f32>();
-                let elem = e5m2_decode(load(weight[w_row + col]).cast::<u32>());
+                let elem = mt_decode_e5m2(load(weight[w_row + col]).cast::<u32>());
                 let scale =
                     exp2(load(scales[w_row_blk + col / block_size]).cast::<f32>() - 127.0f32);
                 acc = acc + (elem * scale) * pix;
@@ -292,7 +292,7 @@ pub fn mt_fp8_e5m2_patch_embed<T>(
             for px in range(0u32, patch_w, 1u32) {
                 let col = col_ic + py * patch_w + px;
                 let pix = load(image[img_row + px0 + px]).cast::<f32>();
-                let elem = e5m2_decode(load(weight[w_row + col]).cast::<u32>());
+                let elem = mt_decode_e5m2(load(weight[w_row + col]).cast::<u32>());
                 let scale = load(scales[w_row_blk + col / block_size]);
                 acc = acc + (elem * scale) * pix;
             }
@@ -339,7 +339,7 @@ pub fn mt_nvfp8_patch_embed<T>(
             for px in range(0u32, patch_w, 1u32) {
                 let col = col_ic + py * patch_w + px;
                 let pix = load(image[img_row + px0 + px]).cast::<f32>();
-                let elem = e4m3_decode(load(weight[w_row + col]).cast::<u32>());
+                let elem = mt_decode_e4m3(load(weight[w_row + col]).cast::<u32>());
                 let scale = load(scales[w_row_blk + col / block_size]);
                 acc = acc + (elem * scale) * pix;
             }
@@ -385,7 +385,7 @@ pub fn mt_int8_patch_embed<T>(
             for px in range(0u32, patch_w, 1u32) {
                 let col = col_ic + py * patch_w + px;
                 let pix = load(image[img_row + px0 + px]).cast::<f32>();
-                let elem = int8_decode(load(weight[w_row + col]).cast::<u32>());
+                let elem = mt_decode_int8(load(weight[w_row + col]).cast::<u32>());
                 let scale = load(scales[w_row_blk + col / block_size]);
                 acc = acc + (elem * scale) * pix;
             }
@@ -438,7 +438,7 @@ pub fn mt_nvfp8_f16_patch_embed<T>(
             for px in range(0u32, patch_w, 1u32) {
                 let col = col_ic + py * patch_w + px;
                 let pix = load(image[img_row + px0 + px]).cast::<f32>();
-                let elem = e4m3_decode(load(weight[w_row + col]).cast::<u32>());
+                let elem = mt_decode_e4m3(load(weight[w_row + col]).cast::<u32>());
                 let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
                 acc = acc + (elem * scale) * pix;
             }
@@ -488,7 +488,7 @@ pub fn mt_fp4_f16_patch_embed<T>(
                 let pix = load(image[img_row + px0 + px]).cast::<f32>();
                 let nib = (load(weight[w_row_pack + col / 8u32]) >> ((col % 8u32) * 4u32)) & 0xFu32;
                 let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
-                acc = acc + (e2m1_decode(nib) * scale) * pix;
+                acc = acc + (mt_decode_e2m1(nib) * scale) * pix;
             }
         }
     }
@@ -533,7 +533,7 @@ pub fn mt_fp8_e5m2_f16_patch_embed<T>(
             for px in range(0u32, patch_w, 1u32) {
                 let col = col_ic + py * patch_w + px;
                 let pix = load(image[img_row + px0 + px]).cast::<f32>();
-                let elem = e5m2_decode(load(weight[w_row + col]).cast::<u32>());
+                let elem = mt_decode_e5m2(load(weight[w_row + col]).cast::<u32>());
                 let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
                 acc = acc + (elem * scale) * pix;
             }
@@ -816,7 +816,7 @@ pub fn mt_int8_f16_patch_embed<T>(
             for px in range(0u32, patch_w, 1u32) {
                 let col = col_ic + py * patch_w + px;
                 let pix = load(image[img_row + px0 + px]).cast::<f32>();
-                let elem = int8_decode(load(weight[w_row + col]).cast::<u32>());
+                let elem = mt_decode_int8(load(weight[w_row + col]).cast::<u32>());
                 let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
                 acc = acc + (elem * scale) * pix;
             }
@@ -827,7 +827,7 @@ pub fn mt_int8_f16_patch_embed<T>(
 
 /// MXINT8 quantized patch embed — 8-bit symmetric codes (byte layout, block 32),
 /// E8M0 pow-2 block scale `2^(bits-127)`. Element-strided like the 8-bit float
-/// formats (one byte per code), decode is `int8_decode → val · scale`.
+/// formats (one byte per code), decode is `mt_decode_int8 → val · scale`.
 #[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_mxint8_patch_embed<T>(
@@ -864,7 +864,7 @@ pub fn mt_mxint8_patch_embed<T>(
             for px in range(0u32, patch_w, 1u32) {
                 let col = col_ic + py * patch_w + px;
                 let pix = load(image[img_row + px0 + px]).cast::<f32>();
-                let elem = int8_decode(load(weight[w_row + col]).cast::<u32>());
+                let elem = mt_decode_int8(load(weight[w_row + col]).cast::<u32>());
                 let sbits = load(scales[w_row_blk + col / block_size]).cast::<f32>();
                 let scale = exp2(sbits - 127.0f32); // E8M0: 2^(bits-127)
                 acc = acc + (elem * scale) * pix;

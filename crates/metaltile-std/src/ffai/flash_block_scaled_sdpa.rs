@@ -89,7 +89,7 @@ macro_rules! mxfp4_flash {
                                 load(k_scales[k_blk_row + d / block_size]).cast::<f32>() - 127.0f32,
                             );
                             dot_partial =
-                                dot_partial + stack_load("q_vals", i) * (e2m1_decode(nib) * ksc);
+                                dot_partial + stack_load("q_vals", i) * (mt_decode_e2m1(nib) * ksc);
                         }
                     }
                     let score = simd_sum(dot_partial);
@@ -111,7 +111,7 @@ macro_rules! mxfp4_flash {
                             stack_store(
                                 "o",
                                 i,
-                                prev * exp_diff + exp_score * (e2m1_decode(nib) * vsc),
+                                prev * exp_diff + exp_score * (mt_decode_e2m1(nib) * vsc),
                             );
                         }
                     }
@@ -194,11 +194,11 @@ macro_rules! nvfp4_flash {
                             let nib = (load(k_packed[k_word_row + d / 8u32])
                                 >> ((d % 8u32) * 4u32))
                                 & 0xFu32;
-                            let ksc = e4m3_decode(
+                            let ksc = mt_decode_e4m3(
                                 load(k_scales[k_blk_row + d / block_size]).cast::<u32>(),
                             ) * global;
                             dot_partial =
-                                dot_partial + stack_load("q_vals", i) * (e2m1_decode(nib) * ksc);
+                                dot_partial + stack_load("q_vals", i) * (mt_decode_e2m1(nib) * ksc);
                         }
                     }
                     let score = simd_sum(dot_partial);
@@ -213,14 +213,14 @@ macro_rules! nvfp4_flash {
                             let nib = (load(v_packed[v_word_row + d / 8u32])
                                 >> ((d % 8u32) * 4u32))
                                 & 0xFu32;
-                            let vsc = e4m3_decode(
+                            let vsc = mt_decode_e4m3(
                                 load(v_scales[v_blk_row + d / block_size]).cast::<u32>(),
                             ) * global;
                             let prev = stack_load("o", i);
                             stack_store(
                                 "o",
                                 i,
-                                prev * exp_diff + exp_score * (e2m1_decode(nib) * vsc),
+                                prev * exp_diff + exp_score * (mt_decode_e2m1(nib) * vsc),
                             );
                         }
                     }
@@ -298,7 +298,7 @@ macro_rules! mxfp8_e4m3_flash {
                     for i in range(0u32, $dpl, 1u32) {
                         let d = lane + i * 32u32;
                         if d < dim {
-                            let kelem = e4m3_decode(load(k_packed[k_row + d]).cast::<u32>());
+                            let kelem = mt_decode_e4m3(load(k_packed[k_row + d]).cast::<u32>());
                             let ksc = exp2(
                                 load(k_scales[k_blk_row + d / block_size]).cast::<f32>() - 127.0f32,
                             );
@@ -314,7 +314,7 @@ macro_rules! mxfp8_e4m3_flash {
                     for i in range(0u32, $dpl, 1u32) {
                         let d = lane + i * 32u32;
                         if d < dim {
-                            let velem = e4m3_decode(load(v_packed[v_row + d]).cast::<u32>());
+                            let velem = mt_decode_e4m3(load(v_packed[v_row + d]).cast::<u32>());
                             let vsc = exp2(
                                 load(v_scales[v_blk_row + d / block_size]).cast::<f32>() - 127.0f32,
                             );
@@ -396,7 +396,7 @@ macro_rules! mxfp8_e5m2_flash {
                     for i in range(0u32, $dpl, 1u32) {
                         let d = lane + i * 32u32;
                         if d < dim {
-                            let kelem = e5m2_decode(load(k_packed[k_row + d]).cast::<u32>());
+                            let kelem = mt_decode_e5m2(load(k_packed[k_row + d]).cast::<u32>());
                             let ksc = exp2(
                                 load(k_scales[k_blk_row + d / block_size]).cast::<f32>() - 127.0f32,
                             );
@@ -412,7 +412,7 @@ macro_rules! mxfp8_e5m2_flash {
                     for i in range(0u32, $dpl, 1u32) {
                         let d = lane + i * 32u32;
                         if d < dim {
-                            let velem = e5m2_decode(load(v_packed[v_row + d]).cast::<u32>());
+                            let velem = mt_decode_e5m2(load(v_packed[v_row + d]).cast::<u32>());
                             let vsc = exp2(
                                 load(v_scales[v_blk_row + d / block_size]).cast::<f32>() - 127.0f32,
                             );
@@ -494,7 +494,7 @@ macro_rules! nvfp8_flash {
                     for i in range(0u32, $dpl, 1u32) {
                         let d = lane + i * 32u32;
                         if d < dim {
-                            let kelem = e4m3_decode(load(k_packed[k_row + d]).cast::<u32>());
+                            let kelem = mt_decode_e4m3(load(k_packed[k_row + d]).cast::<u32>());
                             let ksc = load(k_scales[k_blk_row + d / block_size]);
                             dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
                         }
@@ -508,7 +508,7 @@ macro_rules! nvfp8_flash {
                     for i in range(0u32, $dpl, 1u32) {
                         let d = lane + i * 32u32;
                         if d < dim {
-                            let velem = e4m3_decode(load(v_packed[v_row + d]).cast::<u32>());
+                            let velem = mt_decode_e4m3(load(v_packed[v_row + d]).cast::<u32>());
                             let vsc = load(v_scales[v_blk_row + d / block_size]);
                             let prev = stack_load("o", i);
                             stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
@@ -601,7 +601,7 @@ macro_rules! fp4_flash {
                                 & 0xFu32;
                             let ksc = load(k_scales[k_blk_row + d / block_size]);
                             dot_partial =
-                                dot_partial + stack_load("q_vals", i) * (e2m1_decode(nib) * ksc);
+                                dot_partial + stack_load("q_vals", i) * (mt_decode_e2m1(nib) * ksc);
                         }
                     }
                     let score = simd_sum(dot_partial);
@@ -621,7 +621,7 @@ macro_rules! fp4_flash {
                             stack_store(
                                 "o",
                                 i,
-                                prev * exp_diff + exp_score * (e2m1_decode(nib) * vsc),
+                                prev * exp_diff + exp_score * (mt_decode_e2m1(nib) * vsc),
                             );
                         }
                     }
@@ -699,7 +699,7 @@ macro_rules! fp8_e5m2_flash {
                     for i in range(0u32, $dpl, 1u32) {
                         let d = lane + i * 32u32;
                         if d < dim {
-                            let kelem = e5m2_decode(load(k_packed[k_row + d]).cast::<u32>());
+                            let kelem = mt_decode_e5m2(load(k_packed[k_row + d]).cast::<u32>());
                             let ksc = load(k_scales[k_blk_row + d / block_size]);
                             dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
                         }
@@ -713,7 +713,7 @@ macro_rules! fp8_e5m2_flash {
                     for i in range(0u32, $dpl, 1u32) {
                         let d = lane + i * 32u32;
                         if d < dim {
-                            let velem = e5m2_decode(load(v_packed[v_row + d]).cast::<u32>());
+                            let velem = mt_decode_e5m2(load(v_packed[v_row + d]).cast::<u32>());
                             let vsc = load(v_scales[v_blk_row + d / block_size]);
                             let prev = stack_load("o", i);
                             stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
@@ -797,7 +797,7 @@ macro_rules! int8_flash {
                     for i in range(0u32, $dpl, 1u32) {
                         let d = lane + i * 32u32;
                         if d < dim {
-                            let kelem = int8_decode(load(k_packed[k_row + d]).cast::<u32>());
+                            let kelem = mt_decode_int8(load(k_packed[k_row + d]).cast::<u32>());
                             let ksc = load(k_scales[k_blk_row + d / block_size]);
                             dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
                         }
@@ -811,7 +811,7 @@ macro_rules! int8_flash {
                     for i in range(0u32, $dpl, 1u32) {
                         let d = lane + i * 32u32;
                         if d < dim {
-                            let velem = int8_decode(load(v_packed[v_row + d]).cast::<u32>());
+                            let velem = mt_decode_int8(load(v_packed[v_row + d]).cast::<u32>());
                             let vsc = load(v_scales[v_blk_row + d / block_size]);
                             let prev = stack_load("o", i);
                             stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
@@ -1218,7 +1218,7 @@ macro_rules! mxint8_flash {
                     for i in range(0u32, $dpl, 1u32) {
                         let d = lane + i * 32u32;
                         if d < dim {
-                            let kelem = int8_decode(load(k_packed[k_row + d]).cast::<u32>());
+                            let kelem = mt_decode_int8(load(k_packed[k_row + d]).cast::<u32>());
                             let ksc = exp2(
                                 load(k_scales[k_blk_row + d / block_size]).cast::<f32>() - 127.0f32,
                             );
@@ -1234,7 +1234,7 @@ macro_rules! mxint8_flash {
                     for i in range(0u32, $dpl, 1u32) {
                         let d = lane + i * 32u32;
                         if d < dim {
-                            let velem = int8_decode(load(v_packed[v_row + d]).cast::<u32>());
+                            let velem = mt_decode_int8(load(v_packed[v_row + d]).cast::<u32>());
                             let vsc = exp2(
                                 load(v_scales[v_blk_row + d / block_size]).cast::<f32>() - 127.0f32,
                             );
@@ -1328,7 +1328,7 @@ macro_rules! nvfp8_f16_flash {
                     for i in range(0u32, $dpl, 1u32) {
                         let d = lane + i * 32u32;
                         if d < dim {
-                            let kelem = e4m3_decode(load(k_packed[k_row + d]).cast::<u32>());
+                            let kelem = mt_decode_e4m3(load(k_packed[k_row + d]).cast::<u32>());
                             let ksc = load(k_scales[k_blk_row + d / block_size]).cast::<f32>();
                             dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
                         }
@@ -1342,7 +1342,7 @@ macro_rules! nvfp8_f16_flash {
                     for i in range(0u32, $dpl, 1u32) {
                         let d = lane + i * 32u32;
                         if d < dim {
-                            let velem = e4m3_decode(load(v_packed[v_row + d]).cast::<u32>());
+                            let velem = mt_decode_e4m3(load(v_packed[v_row + d]).cast::<u32>());
                             let vsc = load(v_scales[v_blk_row + d / block_size]).cast::<f32>();
                             let prev = stack_load("o", i);
                             stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
@@ -1429,7 +1429,7 @@ macro_rules! fp4_f16_flash {
                                 & 0xFu32;
                             let ksc = load(k_scales[k_blk_row + d / block_size]).cast::<f32>();
                             dot_partial =
-                                dot_partial + stack_load("q_vals", i) * (e2m1_decode(nib) * ksc);
+                                dot_partial + stack_load("q_vals", i) * (mt_decode_e2m1(nib) * ksc);
                         }
                     }
                     let score = simd_sum(dot_partial);
@@ -1449,7 +1449,7 @@ macro_rules! fp4_f16_flash {
                             stack_store(
                                 "o",
                                 i,
-                                prev * exp_diff + exp_score * (e2m1_decode(nib) * vsc),
+                                prev * exp_diff + exp_score * (mt_decode_e2m1(nib) * vsc),
                             );
                         }
                     }
@@ -1528,7 +1528,7 @@ macro_rules! fp8_e5m2_f16_flash {
                     for i in range(0u32, $dpl, 1u32) {
                         let d = lane + i * 32u32;
                         if d < dim {
-                            let kelem = e5m2_decode(load(k_packed[k_row + d]).cast::<u32>());
+                            let kelem = mt_decode_e5m2(load(k_packed[k_row + d]).cast::<u32>());
                             let ksc = load(k_scales[k_blk_row + d / block_size]).cast::<f32>();
                             dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
                         }
@@ -1542,7 +1542,7 @@ macro_rules! fp8_e5m2_f16_flash {
                     for i in range(0u32, $dpl, 1u32) {
                         let d = lane + i * 32u32;
                         if d < dim {
-                            let velem = e5m2_decode(load(v_packed[v_row + d]).cast::<u32>());
+                            let velem = mt_decode_e5m2(load(v_packed[v_row + d]).cast::<u32>());
                             let vsc = load(v_scales[v_blk_row + d / block_size]).cast::<f32>();
                             let prev = stack_load("o", i);
                             stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));
@@ -1780,7 +1780,7 @@ macro_rules! int8_f16_flash {
                     for i in range(0u32, $dpl, 1u32) {
                         let d = lane + i * 32u32;
                         if d < dim {
-                            let kelem = int8_decode(load(k_packed[k_row + d]).cast::<u32>());
+                            let kelem = mt_decode_int8(load(k_packed[k_row + d]).cast::<u32>());
                             let ksc = load(k_scales[k_blk_row + d / block_size]).cast::<f32>();
                             dot_partial = dot_partial + stack_load("q_vals", i) * (kelem * ksc);
                         }
@@ -1794,7 +1794,7 @@ macro_rules! int8_f16_flash {
                     for i in range(0u32, $dpl, 1u32) {
                         let d = lane + i * 32u32;
                         if d < dim {
-                            let velem = int8_decode(load(v_packed[v_row + d]).cast::<u32>());
+                            let velem = mt_decode_int8(load(v_packed[v_row + d]).cast::<u32>());
                             let vsc = load(v_scales[v_blk_row + d / block_size]).cast::<f32>();
                             let prev = stack_load("o", i);
                             stack_store("o", i, prev * exp_diff + exp_score * (velem * vsc));

@@ -91,7 +91,7 @@ pub fn mt_mxfp4_depthwise_conv2d<T>(
             let col = ky * k + kx;
             let nib = (load(weight[w_row_pack + col / 8u32]) >> ((col % 8u32) * 4u32)) & 0xFu32;
             let scale = exp2(load(scales[w_row_blk + col / block_size]).cast::<f32>() - 127.0f32);
-            let wt = e2m1_decode(nib) * scale;
+            let wt = mt_decode_e2m1(nib) * scale;
             acc = acc + x_m * wt;
         }
     }
@@ -150,8 +150,8 @@ pub fn mt_nvfp4_depthwise_conv2d<T>(
             let col = ky * k + kx;
             let nib = (load(weight[w_row_pack + col / 8u32]) >> ((col % 8u32) * 4u32)) & 0xFu32;
             let scale =
-                e4m3_decode(load(scales[w_row_blk + col / block_size]).cast::<u32>()) * global;
-            let wt = e2m1_decode(nib) * scale;
+                mt_decode_e4m3(load(scales[w_row_blk + col / block_size]).cast::<u32>()) * global;
+            let wt = mt_decode_e2m1(nib) * scale;
             acc = acc + x_m * wt;
         }
     }
@@ -209,7 +209,7 @@ pub fn mt_fp4_depthwise_conv2d<T>(
             let col = ky * k + kx;
             let nib = (load(weight[w_row_pack + col / 8u32]) >> ((col % 8u32) * 4u32)) & 0xFu32;
             let scale = load(scales[w_row_blk + col / block_size]);
-            let wt = e2m1_decode(nib) * scale;
+            let wt = mt_decode_e2m1(nib) * scale;
             acc = acc + x_m * wt;
         }
     }
@@ -264,7 +264,7 @@ pub fn mt_mxfp8_e4m3_depthwise_conv2d<T>(
             let x = load(input[in_c_base + ih * in_w + iw]).cast::<f32>();
             let x_m = select(valid, x, 0.0f32);
             let col = ky * k + kx;
-            let elem = e4m3_decode(load(weight[w_row + col]).cast::<u32>());
+            let elem = mt_decode_e4m3(load(weight[w_row + col]).cast::<u32>());
             let scale = exp2(load(scales[w_row_blk + col / block_size]).cast::<f32>() - 127.0f32);
             let wt = elem * scale;
             acc = acc + x_m * wt;
@@ -321,7 +321,7 @@ pub fn mt_mxfp8_e5m2_depthwise_conv2d<T>(
             let x = load(input[in_c_base + ih * in_w + iw]).cast::<f32>();
             let x_m = select(valid, x, 0.0f32);
             let col = ky * k + kx;
-            let elem = e5m2_decode(load(weight[w_row + col]).cast::<u32>());
+            let elem = mt_decode_e5m2(load(weight[w_row + col]).cast::<u32>());
             let scale = exp2(load(scales[w_row_blk + col / block_size]).cast::<f32>() - 127.0f32);
             let wt = elem * scale;
             acc = acc + x_m * wt;
@@ -378,7 +378,7 @@ pub fn mt_fp8_e5m2_depthwise_conv2d<T>(
             let x = load(input[in_c_base + ih * in_w + iw]).cast::<f32>();
             let x_m = select(valid, x, 0.0f32);
             let col = ky * k + kx;
-            let elem = e5m2_decode(load(weight[w_row + col]).cast::<u32>());
+            let elem = mt_decode_e5m2(load(weight[w_row + col]).cast::<u32>());
             let scale = load(scales[w_row_blk + col / block_size]);
             let wt = elem * scale;
             acc = acc + x_m * wt;
@@ -436,7 +436,7 @@ pub fn mt_nvfp8_depthwise_conv2d<T>(
             let x = load(input[in_c_base + ih * in_w + iw]).cast::<f32>();
             let x_m = select(valid, x, 0.0f32);
             let col = ky * k + kx;
-            let elem = e4m3_decode(load(weight[w_row + col]).cast::<u32>());
+            let elem = mt_decode_e4m3(load(weight[w_row + col]).cast::<u32>());
             let scale = load(scales[w_row_blk + col / block_size]);
             let wt = elem * scale;
             acc = acc + x_m * wt;
@@ -493,7 +493,7 @@ pub fn mt_int8_depthwise_conv2d<T>(
             let x = load(input[in_c_base + ih * in_w + iw]).cast::<f32>();
             let x_m = select(valid, x, 0.0f32);
             let col = ky * k + kx;
-            let elem = int8_decode(load(weight[w_row + col]).cast::<u32>());
+            let elem = mt_decode_int8(load(weight[w_row + col]).cast::<u32>());
             let scale = load(scales[w_row_blk + col / block_size]);
             let wt = elem * scale;
             acc = acc + x_m * wt;
@@ -734,7 +734,7 @@ pub fn mt_mxint8_depthwise_conv2d<T>(
             let x = load(input[in_c_base + ih * in_w + iw]).cast::<f32>();
             let x_m = select(valid, x, 0.0f32);
             let col = ky * k + kx;
-            let elem = int8_decode(load(weight[w_row + col]).cast::<u32>());
+            let elem = mt_decode_int8(load(weight[w_row + col]).cast::<u32>());
             let sbits = load(scales[w_row_blk + col / block_size]).cast::<f32>();
             let scale = exp2(sbits - 127.0f32); // E8M0: 2^(bits-127)
             let wt = elem * scale;
@@ -805,7 +805,7 @@ pub fn mt_fp4_f16_depthwise_conv2d<T>(
             let col = ky * k + kx;
             let nib = (load(weight[w_row_pack + col / 8u32]) >> ((col % 8u32) * 4u32)) & 0xFu32;
             let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
-            let wt = e2m1_decode(nib) * scale;
+            let wt = mt_decode_e2m1(nib) * scale;
             acc = acc + x_m * wt;
         }
     }
@@ -861,7 +861,7 @@ pub fn mt_fp8_e5m2_f16_depthwise_conv2d<T>(
             let x = load(input[in_c_base + ih * in_w + iw]).cast::<f32>();
             let x_m = select(valid, x, 0.0f32);
             let col = ky * k + kx;
-            let elem = e5m2_decode(load(weight[w_row + col]).cast::<u32>());
+            let elem = mt_decode_e5m2(load(weight[w_row + col]).cast::<u32>());
             let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
             let wt = elem * scale;
             acc = acc + x_m * wt;
@@ -920,7 +920,7 @@ pub fn mt_nvfp8_f16_depthwise_conv2d<T>(
             let x = load(input[in_c_base + ih * in_w + iw]).cast::<f32>();
             let x_m = select(valid, x, 0.0f32);
             let col = ky * k + kx;
-            let elem = e4m3_decode(load(weight[w_row + col]).cast::<u32>());
+            let elem = mt_decode_e4m3(load(weight[w_row + col]).cast::<u32>());
             let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
             let wt = elem * scale;
             acc = acc + x_m * wt;
@@ -1064,7 +1064,7 @@ pub fn mt_int8_f16_depthwise_conv2d<T>(
             let x = load(input[in_c_base + ih * in_w + iw]).cast::<f32>();
             let x_m = select(valid, x, 0.0f32);
             let col = ky * k + kx;
-            let elem = int8_decode(load(weight[w_row + col]).cast::<u32>());
+            let elem = mt_decode_int8(load(weight[w_row + col]).cast::<u32>());
             let scale = load(scales[w_row_blk + col / block_size]).cast::<f32>();
             let wt = elem * scale;
             acc = acc + x_m * wt;
