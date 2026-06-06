@@ -106,7 +106,8 @@ pub fn mt_nvfp4_patch_embed<T>(
                 let pix = load(image[img_row + px0 + px]).cast::<f32>();
                 let nib = (load(weight[w_row_pack + col / 8u32]) >> ((col % 8u32) * 4u32)) & 0xFu32;
                 let scale =
-                    mt_decode_e4m3(load(scales[w_row_blk + col / block_size]).cast::<u32>()) * global;
+                    mt_decode_e4m3(load(scales[w_row_blk + col / block_size]).cast::<u32>())
+                        * global;
                 acc = acc + (mt_decode_e2m1(nib) * scale) * pix;
             }
         }

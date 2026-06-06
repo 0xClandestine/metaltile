@@ -185,7 +185,8 @@ pub fn mt_nvfp4_conv2d<T>(
                 let col = col_ic + ky * kw + kx;
                 let nib = (load(weight[w_row_pack + col / 8u32]) >> ((col % 8u32) * 4u32)) & 0xFu32;
                 let scale =
-                    mt_decode_e4m3(load(scales[w_row_blk + col / block_size]).cast::<u32>()) * global;
+                    mt_decode_e4m3(load(scales[w_row_blk + col / block_size]).cast::<u32>())
+                        * global;
                 acc = acc + pix_m * (mt_decode_e2m1(nib) * scale);
             }
         }

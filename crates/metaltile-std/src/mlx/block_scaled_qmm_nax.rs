@@ -171,7 +171,8 @@ pub fn mt_nvfp4_qmm_nax<T>(
         }
         let packed = load(w[w_pack_row_base + kb / 8u32 + x_k_quad]);
         let k_off = kb + x_k_quad * 8u32;
-        let scale = mt_decode_e4m3(load(scales[sb_base + k_off / block_size]).cast::<u32>()) * global;
+        let scale =
+            mt_decode_e4m3(load(scales[sb_base + k_off / block_size]).cast::<u32>()) * global;
         for _ni in range(0u32, 8u32, 1u32) {
             let nib = (packed >> (_ni * 4u32)) & 15u32;
             threadgroup_store("Ws", x_ws_base + _ni, mt_decode_e2m1(nib) * scale);

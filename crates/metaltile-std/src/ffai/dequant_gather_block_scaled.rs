@@ -67,8 +67,9 @@ pub fn mt_nvfp4_dequant_gather<T>(
     let packed = load(weight[token_id * words_per_row + d / 8u32]);
     let nib = (packed >> ((d % 8u32) * 4u32)) & 0xFu32;
     let val = mt_decode_e2m1(nib);
-    let scale = mt_decode_e4m3(load(scales[token_id * blocks_per_row + d / block_size]).cast::<u32>())
-        * global;
+    let scale =
+        mt_decode_e4m3(load(scales[token_id * blocks_per_row + d / block_size]).cast::<u32>())
+            * global;
     store(out[idx], (val * scale).cast::<T>());
 }
 
