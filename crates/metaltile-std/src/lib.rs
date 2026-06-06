@@ -5,6 +5,7 @@
 //! `metaltile-std` provides the kernel definitions (`#[kernel]` / `#[bench]` /
 //! `#[test_kernel]`) and the shared bench-setup utilities used by the kernels.
 
+pub mod convolution;
 pub mod ffai;
 pub mod mlx;
 pub mod probe;
