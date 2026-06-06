@@ -81,10 +81,11 @@ impl Pass for KernelInlinePass {
         inline_block(&mut kernel.body, &caller_pids, &mut vid_offset)?;
 
         // Process every nested block (then/else bodies of Op::If, loop bodies,
-        // etc.).  KernelCalls inside nested blocks arise when cross-kernel calls
-        // are placed inside loops or conditional branches.  IfConversionPass
-        // later hoists those ops to the parent scope, but inlining must already
-        // have resolved them by then.
+        // etc.).  KernelCalls inside nested blocks arise when `let x = if CONST
+        // { some_kernel_call(...) } else { ... }` is used — the body parser
+        // places the KernelCall inside the if-block's Block, not at the top
+        // level of kernel.body.  IfConversionPass later hoists those ops to the
+        // parent scope, but by then inlining must already have resolved them.
         let block_ids: Vec<_> = kernel.blocks.keys().copied().collect();
         for bid in block_ids {
             if let Some(block) = kernel.blocks.get_mut(&bid) {

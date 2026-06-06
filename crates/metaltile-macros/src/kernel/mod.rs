@@ -306,8 +306,11 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
             let base_name = input_fn.sig.ident.to_string();
             let mut out = TokenStream2::new();
             for i in 0..spec.variant_count {
-                let params_ordered: Vec<(String, i64)> =
-                    spec.params.iter().map(|(name, vals)| (name.clone(), vals[i])).collect();
+                let params_ordered: Vec<(String, variants::VariantValue)> = spec
+                    .params
+                    .iter()
+                    .map(|(name, vals)| (name.clone(), vals[i].clone()))
+                    .collect();
                 let variant_fn = match variants::substitute_fn(
                     input_fn.clone(),
                     &params_ordered,

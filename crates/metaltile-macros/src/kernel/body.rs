@@ -221,7 +221,17 @@ impl DslBodyParser {
     }
 
     fn parse_let(&mut self, local: &Local) {
-        if let Pat::Ident(pat_ident) = &local.pat {
+        // Strip an outer `Pat::Type` wrapper (e.g. `let x: T = ...`) so we
+        // can detect simple ident patterns beneath it. Without this, a
+        // `let mut acc: f32 = ...` would be silently dropped (the let is
+        // never registered, the subsequent `acc` reads fall through to a
+        // fresh SSA vid with no producer, and the output stays at the
+        // thread-id default).
+        let inner_pat: &Pat = match &local.pat {
+            Pat::Type(pt) => &pt.pat,
+            other => other,
+        };
+        if let Pat::Ident(pat_ident) = inner_pat {
             let var_name = pat_ident.ident.to_string();
             let is_mut = pat_ident.mutability.is_some();
             if let Some(init) = &local.init {
@@ -447,6 +457,35 @@ impl DslBodyParser {
             // an undeclared SSA value.
             Expr::Group(group) => self.parse_expr(&group.expr),
             Expr::If(if_expr) => self.parse_if(if_expr),
+            // A block expression `{ stmts...; tail_expr }` — parse all
+            // statements, then return the VID of the tail expression (if any).
+            // This case arises when the variants macro strips a compile-time
+            // `if` wrapper and the selected branch is a braced block, e.g.:
+            //   `let elem = if FMT <= 12u32 { ... } else { ... }`
+            // After variants substitution (compile-time if stripped):
+            //   `let elem = { let raw = ...; mt_decode_e4m3(raw) }`
+            // Without this arm, `parse_expr` falls through to `_ => alloc_vid()`
+            // and silently drops all ops inside the block.
+            Expr::Block(block_expr) => {
+                let stmts = &block_expr.block.stmts;
+                if stmts.is_empty() {
+                    return self.alloc_vid();
+                }
+                // Parse all but the last statement.
+                for stmt in &stmts[..stmts.len() - 1] {
+                    self.parse_stmt(stmt);
+                }
+                // If the last stmt is a tail expression (no semicolon), parse
+                // and return its VID.  Otherwise parse it as a statement and
+                // return a fresh (unproduced) VID.
+                match stmts.last().unwrap() {
+                    Stmt::Expr(expr, None) => self.parse_expr(expr),
+                    stmt => {
+                        self.parse_stmt(stmt);
+                        self.alloc_vid()
+                    },
+                }
+            },
             Expr::ForLoop(_) => self.alloc_vid(),
             Expr::Macro(mac) => {
                 // Same hazard as Stmt::Macro — fail loudly so silent-drop
