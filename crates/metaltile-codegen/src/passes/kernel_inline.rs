@@ -39,7 +39,7 @@ use std::collections::BTreeMap;
 
 use metaltile_core::{
     dtype::DType,
-    ir::{Kernel, KernelCallArg, Op, ValueId},
+    ir::{Block, Kernel, KernelCallArg, Op, ValueId},
 };
 use rustc_hash::FxHashMap;
 
@@ -58,8 +58,9 @@ impl Pass for KernelInlinePass {
     fn name(&self) -> &str { "kernel_inline" }
 
     fn run(&self, kernel: &mut Kernel) -> Result<()> {
-        // Collect caller's ProgramId result vids by axis (before we start
-        // rewriting the body).  Callee ProgramId ops are remapped to these.
+        // Collect caller's ProgramId result vids by axis (from the entry block
+        // only — that's where program_id ops always live).  Callee ProgramId
+        // ops in any block are remapped to these.
         let caller_pids: FxHashMap<u32, ValueId> = kernel
             .body
             .ops
@@ -76,44 +77,69 @@ impl Pass for KernelInlinePass {
 
         let mut vid_offset = find_max_vid(kernel) + 1;
 
-        let mut new_ops: Vec<Op> = Vec::with_capacity(kernel.body.ops.len());
-        let mut new_results: Vec<Option<ValueId>> = Vec::with_capacity(kernel.body.results.len());
+        // Process the entry block first.
+        inline_block(&mut kernel.body, &caller_pids, &mut vid_offset)?;
 
-        let old_ops = std::mem::take(&mut kernel.body.ops);
-        let old_results = std::mem::take(&mut kernel.body.results);
-
-        for (op, result) in old_ops.into_iter().zip(old_results) {
-            if let Op::KernelCall { ref callee, ref args, dtype } = op {
-                let call_result = result;
-
-                let callee_kernel = lookup_kernel(callee, dtype)?;
-
-                let inlined =
-                    inline_callee(&callee_kernel, args, &caller_pids, call_result, vid_offset);
-
-                let max_new_vid = inlined
-                    .iter()
-                    .filter_map(|(_, r)| *r)
-                    .map(|v| v.as_u32())
-                    .max()
-                    .unwrap_or(vid_offset.saturating_sub(1));
-                vid_offset = max_new_vid + 1;
-
-                for (inlined_op, inlined_result) in inlined {
-                    new_ops.push(inlined_op);
-                    new_results.push(inlined_result);
-                }
-            } else {
-                new_ops.push(op);
-                new_results.push(result);
+        // Process every nested block (then/else bodies of Op::If, loop bodies,
+        // etc.).  KernelCalls inside nested blocks arise when cross-kernel calls
+        // are placed inside loops or conditional branches.  IfConversionPass
+        // later hoists those ops to the parent scope, but inlining must already
+        // have resolved them by then.
+        let block_ids: Vec<_> = kernel.blocks.keys().copied().collect();
+        for bid in block_ids {
+            if let Some(block) = kernel.blocks.get_mut(&bid) {
+                inline_block(block, &caller_pids, &mut vid_offset)?;
             }
         }
 
-        kernel.body.ops = new_ops;
-        kernel.body.results = new_results;
-
         Ok(())
     }
+}
+
+/// Resolve all top-level `Op::KernelCall`s in `block` by splicing callee ops
+/// inline.  Updates `vid_offset` so callee VIDs never collide across blocks.
+fn inline_block(
+    block: &mut Block,
+    caller_pids: &FxHashMap<u32, ValueId>,
+    vid_offset: &mut u32,
+) -> Result<()> {
+    let mut new_ops: Vec<Op> = Vec::with_capacity(block.ops.len());
+    let mut new_results: Vec<Option<ValueId>> = Vec::with_capacity(block.results.len());
+
+    let old_ops = std::mem::take(&mut block.ops);
+    let old_results = std::mem::take(&mut block.results);
+
+    for (op, result) in old_ops.into_iter().zip(old_results) {
+        if let Op::KernelCall { ref callee, ref args, dtype } = op {
+            let call_result = result;
+
+            let callee_kernel = lookup_kernel(callee, dtype)?;
+
+            let inlined =
+                inline_callee(&callee_kernel, args, caller_pids, call_result, *vid_offset);
+
+            let max_new_vid = inlined
+                .iter()
+                .filter_map(|(_, r)| *r)
+                .map(|v| v.as_u32())
+                .max()
+                .unwrap_or(vid_offset.saturating_sub(1));
+            *vid_offset = max_new_vid + 1;
+
+            for (inlined_op, inlined_result) in inlined {
+                new_ops.push(inlined_op);
+                new_results.push(inlined_result);
+            }
+        } else {
+            new_ops.push(op);
+            new_results.push(result);
+        }
+    }
+
+    block.ops = new_ops;
+    block.results = new_results;
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
