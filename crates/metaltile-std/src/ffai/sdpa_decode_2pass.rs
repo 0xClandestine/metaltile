@@ -179,6 +179,285 @@ pub fn sdpa_decode_2pass_pass1<T>(
     }
 }
 
+// ── Pass 1 BC=4: process 4 KV positions per loop iteration ───────────────
+//
+// Motivation: the original pass1 is LATENCY-BOUND (halving KV bytes with f16
+// gave ~0% gain). The serial dependency chain `simd_sum → exp → update` keeps
+// the memory pipe idle between K loads. BC=4 breaks this by:
+//   1. Issuing K loads for 4 positions BEFORE any reduction (loads in flight).
+//   2. Computing 4 scores (4 simd_sums in sequence — still serial, but the
+//      loads for the next group are already in-flight while the first score
+//      resolves).
+//   3. One grouped online-softmax rescale (single exp(old_max - new_max) shared
+//      across all 4 positions → saves 3 redundant exp calls per iteration).
+//   4. Issuing V loads for all 4 positions (same pattern as K, 4 groups of 4
+//      lanes each) before the V accumulations.
+//
+// DSL vectorize constraints preserved:
+//   • Each group of 4 lane-elements uses pre-computed index VIDs BEFORE the
+//     Load run (BinOp/Const between loads breaks the 4-load window).
+//   • Each K group: kv_NM0..3 then k_Nraw0..3 (raw loads) then casts.
+//   • Each V group: same pattern, same base indices as K (K/V share position).
+//   • Store block at the end: pre-compute 4 indices, pre-snapshot accumulators,
+//     4 consecutive stores.
+//
+// Tail: positions that don't fill a 4-wide group are handled by a scalar
+// tail loop (identical to the original BC=1 body) to stay correct when
+// n_kv/blocks is not divisible by 4.
+
+#[kernel]
+pub fn sdpa_decode_2pass_pass1_bc4<T>(
+    q: Tensor<T>,
+    k: Tensor<T>,
+    v: Tensor<T>,
+    mut partial_o: Tensor<T>,
+    mut partial_m: Tensor<f32>,
+    mut partial_l: Tensor<f32>,
+    #[constexpr] head_dim: u32,
+    #[constexpr] n_kv: u32,
+    #[constexpr] kv_stride: u32,
+    #[constexpr] gqa_factor: u32,
+    #[constexpr] blocks: u32,
+    #[constexpr] scale: f32,
+) {
+    let kv_head = tgid_x;
+    let block_idx = tgid_y;
+    let gqa_idx = simd_id;
+    let lane = simd_lane;
+    let q_head = kv_head * gqa_factor + gqa_idx;
+    let d0 = lane * 4u32;
+    let q_off = q_head * head_dim;
+    let kv_head_base = kv_head * kv_stride * head_dim;
+    // Load Q once — shared across all KV positions.
+    let q0 = load(q[q_off + d0]).cast::<f32>() * scale;
+    let q1 = load(q[q_off + d0 + 1u32]).cast::<f32>() * scale;
+    let q2 = load(q[q_off + d0 + 2u32]).cast::<f32>() * scale;
+    let q3 = load(q[q_off + d0 + 3u32]).cast::<f32>() * scale;
+    let mut run_max = neg_infinity();
+    let mut run_sum = 0.0f32;
+    let mut o0 = 0.0f32;
+    let mut o1 = 0.0f32;
+    let mut o2 = 0.0f32;
+    let mut o3 = 0.0f32;
+
+    // ── BC=4 main loop: 4 KV positions per iteration ──────────────────────
+    // Step size = blocks * 4: each iteration processes positions
+    //   t0 = _t, t1 = _t+blocks, t2 = _t+2*blocks, t3 = _t+3*blocks.
+    // Guard: all 4 must be < n_kv. Equivalent to t0 + 3*blocks < n_kv,
+    // i.e. t0 < n_kv - 3*blocks. Use this as the exclusive upper bound.
+    // Kernel only dispatched when n_kv > 1024 and blocks ≥ 32, so
+    // n_kv - 3*blocks is always positive and well above block_idx.
+    let bc4_limit = n_kv - blocks * 3u32; // exclusive upper bound: t0 + 3*blocks < n_kv
+    for _t in range(block_idx, bc4_limit, blocks * 4u32) {
+        // KV position indices for the 4 slots.
+        let t0 = _t;
+        let t1 = _t + blocks;
+        let t2 = _t + blocks * 2u32;
+        let t3 = _t + blocks * 3u32;
+
+        // ── K loads: 4 groups of 4 consecutive loads (vectorize-friendly) ──
+        // Group 0 (position t0): pre-compute indices, then 4 raw loads, then casts.
+        let kbase0 = kv_head_base + t0 * head_dim + d0;
+        let ki00 = kbase0;
+        let ki01 = kbase0 + 1u32;
+        let ki02 = kbase0 + 2u32;
+        let ki03 = kbase0 + 3u32;
+        let k00r = load(k[ki00]);
+        let k01r = load(k[ki01]);
+        let k02r = load(k[ki02]);
+        let k03r = load(k[ki03]);
+        let k00 = k00r.cast::<f32>();
+        let k01 = k01r.cast::<f32>();
+        let k02 = k02r.cast::<f32>();
+        let k03 = k03r.cast::<f32>();
+
+        // Group 1 (position t1).
+        let kbase1 = kv_head_base + t1 * head_dim + d0;
+        let ki10 = kbase1;
+        let ki11 = kbase1 + 1u32;
+        let ki12 = kbase1 + 2u32;
+        let ki13 = kbase1 + 3u32;
+        let k10r = load(k[ki10]);
+        let k11r = load(k[ki11]);
+        let k12r = load(k[ki12]);
+        let k13r = load(k[ki13]);
+        let k10 = k10r.cast::<f32>();
+        let k11 = k11r.cast::<f32>();
+        let k12 = k12r.cast::<f32>();
+        let k13 = k13r.cast::<f32>();
+
+        // Group 2 (position t2).
+        let kbase2 = kv_head_base + t2 * head_dim + d0;
+        let ki20 = kbase2;
+        let ki21 = kbase2 + 1u32;
+        let ki22 = kbase2 + 2u32;
+        let ki23 = kbase2 + 3u32;
+        let k20r = load(k[ki20]);
+        let k21r = load(k[ki21]);
+        let k22r = load(k[ki22]);
+        let k23r = load(k[ki23]);
+        let k20 = k20r.cast::<f32>();
+        let k21 = k21r.cast::<f32>();
+        let k22 = k22r.cast::<f32>();
+        let k23 = k23r.cast::<f32>();
+
+        // Group 3 (position t3).
+        let kbase3 = kv_head_base + t3 * head_dim + d0;
+        let ki30 = kbase3;
+        let ki31 = kbase3 + 1u32;
+        let ki32 = kbase3 + 2u32;
+        let ki33 = kbase3 + 3u32;
+        let k30r = load(k[ki30]);
+        let k31r = load(k[ki31]);
+        let k32r = load(k[ki32]);
+        let k33r = load(k[ki33]);
+        let k30 = k30r.cast::<f32>();
+        let k31 = k31r.cast::<f32>();
+        let k32 = k32r.cast::<f32>();
+        let k33 = k33r.cast::<f32>();
+
+        // ── Compute 4 dot products + warp-reduce to 4 scores ──────────────
+        let score0 = simd_sum(q0 * k00 + q1 * k01 + q2 * k02 + q3 * k03);
+        let score1 = simd_sum(q0 * k10 + q1 * k11 + q2 * k12 + q3 * k13);
+        let score2 = simd_sum(q0 * k20 + q1 * k21 + q2 * k22 + q3 * k23);
+        let score3 = simd_sum(q0 * k30 + q1 * k31 + q2 * k32 + q3 * k33);
+
+        // ── Grouped online softmax: one rescale for the 4-position group ───
+        // Find the maximum across the 4 new scores and the running max.
+        let g01  = select(score0 > score1, score0, score1);
+        let g23  = select(score2 > score3, score2, score3);
+        let gmax = select(g01 > g23, g01, g23);
+        let new_max = select(gmax > run_max, gmax, run_max);
+        // Rescale old accumulators once by exp(run_max - new_max).
+        let rescale = exp(run_max - new_max);
+        run_sum = run_sum * rescale;
+        o0 = o0 * rescale;
+        o1 = o1 * rescale;
+        o2 = o2 * rescale;
+        o3 = o3 * rescale;
+        run_max = new_max;
+        // Per-position softmax weights (relative to new_max).
+        let w0 = exp(score0 - new_max);
+        let w1 = exp(score1 - new_max);
+        let w2 = exp(score2 - new_max);
+        let w3 = exp(score3 - new_max);
+        run_sum = run_sum + w0 + w1 + w2 + w3;
+
+        // ── V loads: 4 groups of 4 consecutive loads (same base indices as K) ──
+        // Group 0 (position t0) — reuse ki0* indices.
+        let v00r = load(v[ki00]);
+        let v01r = load(v[ki01]);
+        let v02r = load(v[ki02]);
+        let v03r = load(v[ki03]);
+        let v00 = v00r.cast::<f32>();
+        let v01 = v01r.cast::<f32>();
+        let v02 = v02r.cast::<f32>();
+        let v03 = v03r.cast::<f32>();
+
+        // Group 1 (position t1) — reuse ki1* indices.
+        let v10r = load(v[ki10]);
+        let v11r = load(v[ki11]);
+        let v12r = load(v[ki12]);
+        let v13r = load(v[ki13]);
+        let v10 = v10r.cast::<f32>();
+        let v11 = v11r.cast::<f32>();
+        let v12 = v12r.cast::<f32>();
+        let v13 = v13r.cast::<f32>();
+
+        // Group 2 (position t2) — reuse ki2* indices.
+        let v20r = load(v[ki20]);
+        let v21r = load(v[ki21]);
+        let v22r = load(v[ki22]);
+        let v23r = load(v[ki23]);
+        let v20 = v20r.cast::<f32>();
+        let v21 = v21r.cast::<f32>();
+        let v22 = v22r.cast::<f32>();
+        let v23 = v23r.cast::<f32>();
+
+        // Group 3 (position t3) — reuse ki3* indices.
+        let v30r = load(v[ki30]);
+        let v31r = load(v[ki31]);
+        let v32r = load(v[ki32]);
+        let v33r = load(v[ki33]);
+        let v30 = v30r.cast::<f32>();
+        let v31 = v31r.cast::<f32>();
+        let v32 = v32r.cast::<f32>();
+        let v33 = v33r.cast::<f32>();
+
+        // ── Accumulate: o += w_i * v_i for each of the 4 positions ─────────
+        o0 = o0 + w0 * v00 + w1 * v10 + w2 * v20 + w3 * v30;
+        o1 = o1 + w0 * v01 + w1 * v11 + w2 * v21 + w3 * v31;
+        o2 = o2 + w0 * v02 + w1 * v12 + w2 * v22 + w3 * v32;
+        o3 = o3 + w0 * v03 + w1 * v13 + w2 * v23 + w3 * v33;
+    }
+
+    // ── Tail: process positions in this block's slice that fall in [bc4_limit, n_kv) ──
+    // bc4_limit = n_kv - 3*blocks. The main BC=4 loop consumed all positions
+    // assigned to block_idx that are < bc4_limit. Remaining (tail) positions are:
+    //   block_idx + K*blocks  for the first K such that block_idx + K*blocks >= bc4_limit.
+    // We compute tail_start = block_idx + ceil((bc4_limit-block_idx)/blocks)*blocks.
+    // Since bc4_limit >> block_idx (n_kv > 1024, blocks >= 32, block_idx < blocks),
+    // this is well-defined and avoids underflow.
+    // ceil((bc4_limit - block_idx) / blocks) = (bc4_limit - block_idx + blocks - 1) / blocks
+    let tail_off = (bc4_limit - block_idx + blocks - 1u32) / blocks;
+    let tail_start = block_idx + tail_off * blocks;
+    for _t in range(tail_start, n_kv, blocks) {
+        let base = kv_head_base + _t * head_dim;
+        let kv_idx = base + d0;
+        let kv0 = kv_idx;
+        let kv1 = kv_idx + 1u32;
+        let kv2 = kv_idx + 2u32;
+        let kv3 = kv_idx + 3u32;
+        let k0_raw = load(k[kv0]);
+        let k1_raw = load(k[kv1]);
+        let k2_raw = load(k[kv2]);
+        let k3_raw = load(k[kv3]);
+        let k0 = k0_raw.cast::<f32>();
+        let k1 = k1_raw.cast::<f32>();
+        let k2 = k2_raw.cast::<f32>();
+        let k3 = k3_raw.cast::<f32>();
+        let partial = q0 * k0 + q1 * k1 + q2 * k2 + q3 * k3;
+        let score = simd_sum(partial);
+        let new_max = select(score > run_max, score, run_max);
+        let factor = exp(run_max - new_max);
+        let weight = exp(score - new_max);
+        run_sum = run_sum * factor + weight;
+        run_max = new_max;
+        let v0_raw = load(v[kv0]);
+        let v1_raw = load(v[kv1]);
+        let v2_raw = load(v[kv2]);
+        let v3_raw = load(v[kv3]);
+        let v0 = v0_raw.cast::<f32>();
+        let v1 = v1_raw.cast::<f32>();
+        let v2 = v2_raw.cast::<f32>();
+        let v3 = v3_raw.cast::<f32>();
+        o0 = o0 * factor + weight * v0;
+        o1 = o1 * factor + weight * v1;
+        o2 = o2 * factor + weight * v2;
+        o3 = o3 * factor + weight * v3;
+    }
+
+    // Store outputs — same pattern as original pass1 (consecutive stores).
+    let out_block_off = (q_head * blocks + block_idx) * head_dim + d0;
+    let po0 = out_block_off;
+    let po1 = out_block_off + 1u32;
+    let po2 = out_block_off + 2u32;
+    let po3 = out_block_off + 3u32;
+    let so0 = o0;
+    let so1 = o1;
+    let so2 = o2;
+    let so3 = o3;
+    store(partial_o[po0], so0);
+    store(partial_o[po1], so1);
+    store(partial_o[po2], so2);
+    store(partial_o[po3], so3);
+    if lane == 0u32 {
+        let ml_off = q_head * blocks + block_idx;
+        store(partial_m[ml_off], run_max);
+        store(partial_l[ml_off], run_sum);
+    }
+}
+
 // ── Pass 2: 32-sg × 32-lane merge, MLX-style ─────────────────────────────
 
 #[kernel]
@@ -267,6 +546,127 @@ pub fn sdpa_decode_2pass_pass2<T>(
         store(out[out_off + 1u32], (red1 * inv_sum).cast::<T>());
         store(out[out_off + 2u32], (red2 * inv_sum).cast::<T>());
         store(out[out_off + 3u32], (red3 * inv_sum).cast::<T>());
+    }
+}
+
+// ── Pass 1 TILED: contiguous-chunk access pattern ────────────────────────
+//
+// The strided access pattern in `sdpa_decode_2pass_pass1` (each block reads
+// every N-th position: 0, N, 2N, ...) causes L2 cache thrashing on CUDA:
+// all 512 concurrent TGs are reading from non-overlapping strided positions
+// in the same KV head, so every load misses L2. Effective bandwidth ~40%.
+//
+// The tiled variant assigns each block a CONTIGUOUS chunk of KV positions:
+//   block i owns positions [i*chunk, (i+1)*chunk) where chunk = ceil(n_kv/blocks).
+// This gives sequential access within each block (perfect spatial locality)
+// and non-overlapping access across blocks (no cache eviction competition).
+// Expected L2 hit rate improvement and better bandwidth utilization.
+//
+// Partial-output layout: same as the strided variant — indexed by
+//   (q_head * blocks + block_idx) * head_dim + d0
+// so the pass2 reducer is identical and reusable.
+//
+// CAVEATS:
+// - chunk_size = ceil(n_kv / blocks) is a runtime integer division.
+//   With #[constexpr] n_kv and blocks, this is a constant fold in codegen
+//   (both are constexpr params, so the division emits a constant in PTX).
+// - The last block may have fewer than chunk_size positions. The loop
+//   uses min(start + chunk, n_kv) as the exclusive upper bound.
+// - For n_kv not divisible by blocks, the last block processes the remainder.
+
+#[kernel]
+pub fn sdpa_decode_2pass_pass1_tiled<T>(
+    q: Tensor<T>,
+    k: Tensor<T>,
+    v: Tensor<T>,
+    mut partial_o: Tensor<T>,
+    mut partial_m: Tensor<f32>,
+    mut partial_l: Tensor<f32>,
+    #[constexpr] head_dim: u32,
+    #[constexpr] n_kv: u32,
+    #[constexpr] kv_stride: u32,
+    #[constexpr] gqa_factor: u32,
+    #[constexpr] blocks: u32,
+    #[constexpr] scale: f32,
+) {
+    let kv_head = tgid_x;
+    let block_idx = tgid_y;
+    let gqa_idx = simd_id;
+    let lane = simd_lane;
+    let q_head = kv_head * gqa_factor + gqa_idx;
+    let d0 = lane * 4u32;
+    let q_off = q_head * head_dim;
+    let kv_head_base = kv_head * kv_stride * head_dim;
+    let q0 = load(q[q_off + d0]).cast::<f32>() * scale;
+    let q1 = load(q[q_off + d0 + 1u32]).cast::<f32>() * scale;
+    let q2 = load(q[q_off + d0 + 2u32]).cast::<f32>() * scale;
+    let q3 = load(q[q_off + d0 + 3u32]).cast::<f32>() * scale;
+    let mut run_max = neg_infinity();
+    let mut run_sum = 0.0f32;
+    let mut o0 = 0.0f32;
+    let mut o1 = 0.0f32;
+    let mut o2 = 0.0f32;
+    let mut o3 = 0.0f32;
+
+    // Contiguous chunk: block_idx owns [chunk_start, chunk_end).
+    // chunk_size = ceil(n_kv / blocks) = (n_kv + blocks - 1) / blocks.
+    let chunk_size = (n_kv + blocks - 1u32) / blocks;
+    let chunk_start = block_idx * chunk_size;
+    // Guard: chunk_start must be < n_kv (last block may be empty if blocks > n_kv).
+    let chunk_end = select(chunk_start + chunk_size < n_kv, chunk_start + chunk_size, n_kv);
+
+    for _t in range(chunk_start, chunk_end, 1u32) {
+        let base = kv_head_base + _t * head_dim;
+        let kv_idx = base + d0;
+        let kv0 = kv_idx;
+        let kv1 = kv_idx + 1u32;
+        let kv2 = kv_idx + 2u32;
+        let kv3 = kv_idx + 3u32;
+        let k0_raw = load(k[kv0]);
+        let k1_raw = load(k[kv1]);
+        let k2_raw = load(k[kv2]);
+        let k3_raw = load(k[kv3]);
+        let k0 = k0_raw.cast::<f32>();
+        let k1 = k1_raw.cast::<f32>();
+        let k2 = k2_raw.cast::<f32>();
+        let k3 = k3_raw.cast::<f32>();
+        let partial = q0 * k0 + q1 * k1 + q2 * k2 + q3 * k3;
+        let score = simd_sum(partial);
+        let new_max = select(score > run_max, score, run_max);
+        let factor = exp(run_max - new_max);
+        let weight = exp(score - new_max);
+        run_sum = run_sum * factor + weight;
+        run_max = new_max;
+        let v0_raw = load(v[kv0]);
+        let v1_raw = load(v[kv1]);
+        let v2_raw = load(v[kv2]);
+        let v3_raw = load(v[kv3]);
+        let v0 = v0_raw.cast::<f32>();
+        let v1 = v1_raw.cast::<f32>();
+        let v2 = v2_raw.cast::<f32>();
+        let v3 = v3_raw.cast::<f32>();
+        o0 = o0 * factor + weight * v0;
+        o1 = o1 * factor + weight * v1;
+        o2 = o2 * factor + weight * v2;
+        o3 = o3 * factor + weight * v3;
+    }
+    let out_block_off = (q_head * blocks + block_idx) * head_dim + d0;
+    let po0 = out_block_off;
+    let po1 = out_block_off + 1u32;
+    let po2 = out_block_off + 2u32;
+    let po3 = out_block_off + 3u32;
+    let so0 = o0;
+    let so1 = o1;
+    let so2 = o2;
+    let so3 = o3;
+    store(partial_o[po0], so0);
+    store(partial_o[po1], so1);
+    store(partial_o[po2], so2);
+    store(partial_o[po3], so3);
+    if lane == 0u32 {
+        let ml_off = q_head * blocks + block_idx;
+        store(partial_m[ml_off], run_max);
+        store(partial_l[ml_off], run_sum);
     }
 }
 

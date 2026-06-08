@@ -11,6 +11,17 @@ build = "bin/build.rs"
 [lints]
 workspace = true
 
+[features]
+# Run the registered #[test_kernel] corpus on the CUDA backend
+# (tests/cuda_kernel_corpus.rs). Forwards to metaltile-runtime/cuda.
+cuda = ["metaltile-runtime/cuda"]
+# Run the registered #[test_kernel] corpus on the HIP / ROCm backend
+# (tests/hip_kernel_corpus.rs). Forwards to metaltile-runtime/hip.
+hip = ["metaltile-runtime/hip"]
+# Run the registered #[test_kernel] corpus on the Vulkan / SPIR-V backend
+# (tests/vulkan_kernel_corpus.rs). Forwards to metaltile-runtime/vulkan.
+vulkan = ["metaltile-runtime/vulkan"]
+
 [[bin]]
 name = "__tile_runner"
 path = "bin/runner.rs"
