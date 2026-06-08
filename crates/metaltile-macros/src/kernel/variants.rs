@@ -301,11 +301,17 @@ fn try_parse_named_label(content: &syn::parse::ParseBuffer<'_>) -> Option<String
 /// - `[0.5f32, 1.0f32]` — float params (substituted verbatim; excluded from
 ///   compile-time `if` and ident-embedding)
 /// - `[u32, u8]` — type params (substituted in `Tensor<WT>` positions)
+/// - `[mxfp4, nvfp4, fp4]` — named labels (bare non-primitive idents); the
+///   integer value is assigned by first occurrence so the same label always
+///   carries the same integer, even if it appears multiple times in the list.
 fn parse_value_list(
     content: &syn::parse::ParseBuffer<'_>,
     name_ident: &syn::Ident,
 ) -> syn::Result<Vec<VariantValue>> {
     let mut values: Vec<VariantValue> = Vec::new();
+    // Tracks the integer value assigned to each distinct named label.
+    // First occurrence wins: same label always maps to the same integer.
+    let mut named_seen: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let mut first = true;
 
     while !content.is_empty() {
@@ -329,8 +335,12 @@ fn parse_value_list(
         } else if let Some(name) = try_parse_named_label(content) {
             // Named enum-style label: a bare identifier that is not a
             // primitive type and not the start of a path/generic expression.
-            // Integer value is auto-assigned from its 0-based position.
-            let value = values.len() as i64;
+            // Integer value is stable per-name (first occurrence wins), so
+            // the same label always maps to the same integer even when it
+            // appears multiple times in the list (e.g. FMT repeated for each
+            // DILATED row).
+            let next_id = named_seen.len() as i64;
+            let value = *named_seen.entry(name.clone()).or_insert(next_id);
             values.push(VariantValue::Named { name, value });
         } else {
             let ty: syn::Type = content.parse().map_err(|_| {
@@ -1815,6 +1825,23 @@ mod tests {
         let s = eval_suffix("{DILATED}_{FMT}", &v0.iter().cloned().collect::<HashMap<_, _>>())
             .unwrap();
         assert_eq!(s, "0_mxfp4");
+    }
+
+    #[test]
+    fn named_label_repeated_keeps_same_integer_value() {
+        // Same label appearing multiple times in a list must carry the same
+        // integer value (first-occurrence wins), so compile-time `if FMT == 0u32`
+        // matches in all rows where FMT=mxfp4, not just the first.
+        let spec: VariantsSpec = syn::parse_str(
+            "FMT = [mxfp4, nvfp4, mxfp4, nvfp4]",
+        )
+        .unwrap();
+        let vals = &spec.params[0].1;
+        // First occurrence: mxfp4=0, nvfp4=1.  Repeated occurrences reuse same value.
+        assert!(matches!(&vals[0], VariantValue::Named { name, value: 0 } if name == "mxfp4"));
+        assert!(matches!(&vals[1], VariantValue::Named { name, value: 1 } if name == "nvfp4"));
+        assert!(matches!(&vals[2], VariantValue::Named { name, value: 0 } if name == "mxfp4"));
+        assert!(matches!(&vals[3], VariantValue::Named { name, value: 1 } if name == "nvfp4"));
     }
 
     #[test]

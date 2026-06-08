@@ -7,22 +7,21 @@
 //!
 //! * [`mt_conv1d_dense`](self::mt_conv1d_dense) — the four dense 1D convs
 //!   (direct with/without dilation, transpose full/depthwise) in one
-//!   function. Axes `TRANSPOSE × DILATED × DEPTHWISE` (4-row cartesian
-//!   product) generate the four original kernels:
-//!   `mt_conv1d_dense_fmt0_0_0` (audio_conv1d),
-//!   `mt_conv1d_dense_fmt0_1_0` (conv1d_dilated),
-//!   `mt_conv1d_dense_fmt1_0_0` (conv1d_transpose),
-//!   `mt_conv1d_dense_fmt1_0_1` (ffai_conv1d_transpose_depthwise).
+//!   function. Four named variants via `VARIANT` axis:
+//!   `mt_conv1d_dense_direct` (audio_conv1d),
+//!   `mt_conv1d_dense_dilated` (conv1d_dilated),
+//!   `mt_conv1d_dense_transpose` (conv1d_transpose),
+//!   `mt_conv1d_dense_depthwise` (ffai_conv1d_transpose_depthwise).
 //!   The `dilation` constexpr is OPTIONAL — stripped from the MSL signature
-//!   for the (T=0, D=0) row where the body does not reference it, so the
+//!   for the direct variant where the body does not reference it, so the
 //!   host doesn't need to bind a buffer slot for that one kernel.
 //!
-//! * [`mt_conv1d_block_scaled`](self::mt_conv1d_block_scaled) — the 19
+//! * [`mt_conv1d_quant`](self::mt_conv1d_quant) — the 19
 //!   block-scaled quantised-weight formats applied to both the direct
 //!   (audio) and dilated (fishspeech) paths. Axes `DILATED × FMT`
-//!   (38-row cartesian product) generate the 38 original kernels
-//!   `mt_conv1d_block_scaled_{0,1}_{mxfp4,nvfp4,…,int8}`. The `dilation` constexpr is
-//!   OPTIONAL — stripped for DILATED=0 (audio) and kept for DILATED=1
+//!   (38-row) generate the 38 kernels
+//!   `mt_conv1d_quant_{audio,fishspeech}_{mxfp4,nvfp4,…,int8}`. The `dilation` constexpr is
+//!   OPTIONAL — stripped for DILATED=audio and kept for DILATED=fishspeech
 //!   (fishspeech). FMT/BITS/WT/ST co-vary across the 19 formats; type
 //!   variants cannot gate compile-time `if` (per the variants macro's
 //!   design), so the FMT int is the gating discriminant and the body has a
@@ -96,10 +95,11 @@ use metaltile::kernel;
     // The skipped (T, D, W) cells are equivalent to a kept row (e.g.
     // (0,0,1) ≡ (0,0,0) since DEPTHWISE doesn't apply to direct), so we
     // skip them to keep the variant count minimal.
-    TRANSPOSE = [0u32, 0u32, 1u32, 1u32],
-    DILATED   = [0u32, 1u32, 0u32, 0u32],
-    DEPTHWISE = [0u32, 0u32, 0u32, 1u32],
-    suffix = "fmt{TRANSPOSE}_{DILATED}_{DEPTHWISE}",
+    TRANSPOSE = [0u32,   0u32,    1u32,       1u32     ],
+    DILATED   = [0u32,   1u32,    0u32,       0u32     ],
+    DEPTHWISE = [0u32,   0u32,    0u32,       1u32     ],
+    VARIANT   = [direct, dilated, transpose,  depthwise],
+    suffix = "{VARIANT}",
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn mt_conv1d_dense<T>(
@@ -222,13 +222,13 @@ pub fn mt_conv1d_dense<T>(
     // The 38 rows enumerate the cartesian product manually.
     //
     // FMT uses named enum-style labels so generated kernel names are readable:
-    //   mt_conv1d_block_scaled_0_mxfp4, mt_conv1d_block_scaled_1_nvfp8, …
+    //   mt_conv1d_quant_audio_mxfp4, mt_conv1d_quant_fishspeech_nvfp8, …
     // The label's auto-assigned integer value (its 0-based position in the
     // list, 0–18) is used in the compile-time `if FMT == N` dispatch tree.
-    DILATED = [0u32,   0u32,   0u32,   0u32,   0u32,   0u32,   0u32,   0u32,   0u32,   0u32,   0u32,   0u32,   0u32,   0u32,      0u32,      0u32,     0u32,   0u32,  0u32,
-               1u32,   1u32,   1u32,   1u32,   1u32,   1u32,   1u32,   1u32,   1u32,   1u32,   1u32,   1u32,   1u32,   1u32,      1u32,      1u32,     1u32,   1u32,  1u32 ],
-    FMT  = [   mxfp4,  nvfp4,  mxint2, mxint3, mxint4, mxint5, mxint6, fp4,    int2,   int3,   int4,   int5,   int6,   mxfp8_e4m3, mxfp8_e5m2, mxint8, fp8_e5m2, nvfp8, int8,
-               mxfp4,  nvfp4,  mxint2, mxint3, mxint4, mxint5, mxint6, fp4,    int2,   int3,   int4,   int5,   int6,   mxfp8_e4m3, mxfp8_e5m2, mxint8, fp8_e5m2, nvfp8, int8 ],
+    DILATED = [audio,  audio,  audio,  audio,  audio,  audio,  audio,  audio,  audio,  audio,  audio,  audio,  audio,  audio,     audio,     audio,    audio,   audio, audio,
+               fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech ],
+    FMT  = [   mxfp4,  nvfp4,  mxint2, mxint3, mxint4, mxint5, mxint6, fp4,    int2,   int3,   int4,   int5,   int6,   mxfp8,  mxfp8_e5m2, mxint8, fp8_e5m2, nvfp8, int8,
+               mxfp4,  nvfp4,  mxint2, mxint3, mxint4, mxint5, mxint6, fp4,    int2,   int3,   int4,   int5,   int6,   mxfp8,  mxfp8_e5m2, mxint8, fp8_e5m2, nvfp8, int8 ],
     BITS = [   4u32,   4u32,   2u32,   3u32,   4u32,   5u32,   6u32,   4u32,   2u32,   3u32,   4u32,   5u32,   6u32,   8u32,      8u32,       8u32,    8u32,    8u32,  8u32,
                4u32,   4u32,   2u32,   3u32,   4u32,   5u32,   6u32,   4u32,   2u32,   3u32,   4u32,   5u32,   6u32,   8u32,      8u32,       8u32,    8u32,    8u32,  8u32 ],
     WT   = [   u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u8,        u8,         u8,      u8,      u8,    u8,
@@ -237,15 +237,14 @@ pub fn mt_conv1d_dense<T>(
                u8,     u8,     u8,     u8,     u8,     u8,     u8,     f32,    f32,    f32,    f32,    f32,    f32,    u8,        u8,         u8,      f32,     f32,   f32 ],
     suffix = "{DILATED}_{FMT}",
 ))]
-/// Combined block-scaled 1D conv: the 19 quantised-weight formats applied
+/// Combined quantised-weight 1D conv: the 19 block-scaled formats applied
 /// to both the direct (audio) and dilated (fishspeech) paths. The
-/// `dilation` constexpr is OPTIONAL — stripped for DILATED=0 (audio
-/// path) and kept for DILATED=1 (fishspeech path). The body has a
-/// nested `if FMT == N { }` tree pruned at variants-substitution time
-/// since type-params (WT, ST) cannot appear in compile-time `if`
-/// conditions.
+/// `dilation` constexpr is OPTIONAL — stripped for DILATED=audio and
+/// kept for DILATED=fishspeech. The body has a nested `if FMT == N { }`
+/// tree pruned at variants-substitution time since type-params (WT, ST)
+/// cannot appear in compile-time `if` conditions.
 #[allow(clippy::too_many_arguments)]
-pub fn mt_conv1d_block_scaled<T>(
+pub fn mt_conv1d_quant<T>(
     input: Tensor<T>,
     weight: Tensor<WT>,
     scales: Tensor<ST>,
@@ -816,20 +815,21 @@ pub mod kernel_tests {
     // inside unrelated idents like `TestSetup` or `DType`.
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 8e-3, 4e-2],
                   variants(
-                      TRANSPOSE = [0u32, 0u32, 1u32, 1u32],
-                      DILATED   = [0u32, 1u32, 0u32, 0u32],
-                      DEPTHWISE = [0u32, 0u32, 0u32, 1u32],
-                      suffix = "fmt{TRANSPOSE}_{DILATED}_{DEPTHWISE}",
+                      TRANSPOSE = [0u32,   0u32,    1u32,       1u32     ],
+                      DILATED   = [0u32,   1u32,    0u32,       0u32     ],
+                      DEPTHWISE = [0u32,   0u32,    0u32,       1u32     ],
+                      VARIANT   = [direct, dilated, transpose,  depthwise],
+                      suffix = "{VARIANT}",
                   ))]
     fn test_dense_conv1d(dt: DType) -> TestSetup {
         if TRANSPOSE == 0u32 {
             if DILATED == 0u32 {
-                // (T=0, D=0, W=0) — direct, no dilation. Whisper stem conv #1.
-                direct_setup(mt_conv1d_dense_fmt0_0_0::kernel_ir_for(dt), 1, 8, 50, 16, 3, 1, 1, dt)
+                // direct — no dilation. Whisper stem conv #1.
+                direct_setup(mt_conv1d_dense_direct::kernel_ir_for(dt), 1, 8, 50, 16, 3, 1, 1, dt)
             } else {
-                // (T=0, D=1, W=0) — direct dilated. MRF ResBlock, dilation 3.
+                // dilated — MRF ResBlock, dilation 3.
                 dilated_setup(
-                    mt_conv1d_dense_fmt0_1_0::kernel_ir_for(dt),
+                    mt_conv1d_dense_dilated::kernel_ir_for(dt),
                     1,
                     12,
                     60,
@@ -842,9 +842,9 @@ pub mod kernel_tests {
                 )
             }
         } else if DEPTHWISE == 0u32 {
-            // (T=1, D=0, W=0) — transpose full. HiFi-GAN 8× upsample.
+            // transpose — HiFi-GAN 8× upsample.
             transpose_setup(
-                mt_conv1d_dense_fmt1_0_0::kernel_ir_for(dt),
+                mt_conv1d_dense_transpose::kernel_ir_for(dt),
                 1,
                 8,
                 16,
@@ -857,8 +857,8 @@ pub mod kernel_tests {
                 dt,
             )
         } else {
-            // (T=1, D=0, W=1) — depthwise transpose. StyleTTS2 pool.
-            depthwise_setup(mt_conv1d_dense_fmt1_0_1::kernel_ir_for(dt), 6, 13, 3, 2, 1, dt)
+            // depthwise transpose — StyleTTS2 pool.
+            depthwise_setup(mt_conv1d_dense_depthwise::kernel_ir_for(dt), 6, 13, 3, 2, 1, dt)
         }
     }
 
@@ -869,39 +869,41 @@ pub mod kernel_tests {
     // / `TestSetup` / `fmt` etc.
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1],
                   variants(
-                      DIL = [0u32, 1u32, 0u32, 1u32],
-                      FMT = [0u32, 1u32, 16u32, 18u32],
-                      suffix = "d{DIL}_fmt{FMT}",
+                      DIL = [audio,      fishspeech, audio,     fishspeech],
+                      FMT = [mxfp4,      nvfp4,      fp8_e5m2,  int8      ],
+                      suffix = "{DIL}_{FMT}",
                   ))]
     fn test_blockscaled_conv1d(dt: DType) -> TestSetup {
+        // Named FMT values in this mini-list: mxfp4=0, nvfp4=1, fp8_e5m2=2, int8=3.
+        // Named DIL values: audio=0, fishspeech=1.
         let fmt = if FMT == 0u32 {
             crate::quant::format::QFormat::Mxfp4
         } else if FMT == 1u32 {
             crate::quant::format::QFormat::Nvfp4
-        } else if FMT == 16u32 {
+        } else if FMT == 2u32 {
             crate::quant::format::QFormat::Fp8E5m2
         } else {
             crate::quant::format::QFormat::Int8
         };
         let kernel = if DIL == 0u32 {
             if FMT == 0u32 {
-                mt_conv1d_block_scaled_0_mxfp4::kernel_ir_for(dt)
+                mt_conv1d_quant_audio_mxfp4::kernel_ir_for(dt)
             } else if FMT == 1u32 {
-                mt_conv1d_block_scaled_0_nvfp4::kernel_ir_for(dt)
-            } else if FMT == 16u32 {
-                mt_conv1d_block_scaled_0_fp8_e5m2::kernel_ir_for(dt)
+                mt_conv1d_quant_audio_nvfp4::kernel_ir_for(dt)
+            } else if FMT == 2u32 {
+                mt_conv1d_quant_audio_fp8_e5m2::kernel_ir_for(dt)
             } else {
-                mt_conv1d_block_scaled_0_int8::kernel_ir_for(dt)
+                mt_conv1d_quant_audio_int8::kernel_ir_for(dt)
             }
         } else {
             if FMT == 0u32 {
-                mt_conv1d_block_scaled_1_mxfp4::kernel_ir_for(dt)
+                mt_conv1d_quant_fishspeech_mxfp4::kernel_ir_for(dt)
             } else if FMT == 1u32 {
-                mt_conv1d_block_scaled_1_nvfp4::kernel_ir_for(dt)
-            } else if FMT == 16u32 {
-                mt_conv1d_block_scaled_1_fp8_e5m2::kernel_ir_for(dt)
+                mt_conv1d_quant_fishspeech_nvfp4::kernel_ir_for(dt)
+            } else if FMT == 2u32 {
+                mt_conv1d_quant_fishspeech_fp8_e5m2::kernel_ir_for(dt)
             } else {
-                mt_conv1d_block_scaled_1_int8::kernel_ir_for(dt)
+                mt_conv1d_quant_fishspeech_int8::kernel_ir_for(dt)
             }
         };
         let dilation = if DIL == 1u32 { 2usize } else { 1usize };
@@ -921,13 +923,14 @@ pub mod kernel_benches {
     use super::*;
 
     // Whisper-large stem conv #2 — 1280 ch, len 1500, k=3, stride 2, pad 1.
-    // No dilation → uses fmt0_0_0 (dilation stripped from MSL signature).
+    // No dilation → direct variant (dilation stripped from MSL signature).
     #[bench(dtypes = [f32, f16, bf16],
            variants(
-               TRANSPOSE = [0u32, 0u32, 1u32, 1u32],
-               DILATED   = [0u32, 1u32, 0u32, 0u32],
-               DEPTHWISE = [0u32, 0u32, 0u32, 1u32],
-               suffix = "mT{TRANSPOSE}_d{DILATED}_w{DEPTHWISE}",
+               TRANSPOSE = [0u32,   0u32,    1u32,       1u32     ],
+               DILATED   = [0u32,   1u32,    0u32,       0u32     ],
+               DEPTHWISE = [0u32,   0u32,    0u32,       1u32     ],
+               VARIANT   = [direct, dilated, transpose,  depthwise],
+               suffix = "{VARIANT}",
            ))]
     fn bench_dense_conv1d(dt: DType) -> BenchSetup {
         let (batch, ch, in_len, k, stride, pad) =
@@ -936,14 +939,14 @@ pub mod kernel_benches {
         let n_out = batch * ch * out_len;
         let kernel = if TRANSPOSE == 0u32 {
             if DILATED == 0u32 {
-                mt_conv1d_dense_fmt0_0_0::kernel_ir_for(dt)
+                mt_conv1d_dense_direct::kernel_ir_for(dt)
             } else {
-                mt_conv1d_dense_fmt0_1_0::kernel_ir_for(dt)
+                mt_conv1d_dense_dilated::kernel_ir_for(dt)
             }
         } else if DEPTHWISE == 0u32 {
-            mt_conv1d_dense_fmt1_0_0::kernel_ir_for(dt)
+            mt_conv1d_dense_transpose::kernel_ir_for(dt)
         } else {
-            mt_conv1d_dense_fmt1_0_1::kernel_ir_for(dt)
+            mt_conv1d_dense_depthwise::kernel_ir_for(dt)
         };
         let s = BenchSetup::new(kernel)
             .mode(KernelMode::Grid3D)
@@ -971,9 +974,9 @@ pub mod kernel_benches {
     // larger Whisper-large-like shape.
     #[bench(dtypes = [f32, f16, bf16],
            variants(
-               DIL = [0u32, 1u32, 0u32, 1u32],
-               FMT = [0u32, 1u32, 16u32, 18u32],
-               suffix = "d{DIL}_fmt{FMT}",
+               DIL = [audio,      fishspeech, audio,     fishspeech],
+               FMT = [mxfp4,      nvfp4,      fp8_e5m2,  int8      ],
+               suffix = "{DIL}_{FMT}",
            ))]
     fn bench_blockscaled_conv1d(dt: DType) -> BenchSetup {
         let (batch, in_ch, in_len, out_ch, k, stride, pad) =
@@ -981,11 +984,13 @@ pub mod kernel_benches {
         let out_len = (in_len + 2 * pad - k) / stride + 1;
         let c_dim = in_ch * k;
         let n_out = batch * out_ch * out_len;
+        // Named FMT values in this mini-list: mxfp4=0, nvfp4=1, fp8_e5m2=2, int8=3.
+        // Named DIL values: audio=0, fishspeech=1.
         let fmt = if FMT == 0u32 {
             crate::quant::format::QFormat::Mxfp4
         } else if FMT == 1u32 {
             crate::quant::format::QFormat::Nvfp4
-        } else if FMT == 16u32 {
+        } else if FMT == 2u32 {
             crate::quant::format::QFormat::Fp8E5m2
         } else {
             crate::quant::format::QFormat::Int8
@@ -1009,23 +1014,23 @@ pub mod kernel_benches {
             + n_out * sz;
         let kernel = if DIL == 0u32 {
             if FMT == 0u32 {
-                mt_conv1d_block_scaled_0_mxfp4::kernel_ir_for(dt)
+                mt_conv1d_quant_audio_mxfp4::kernel_ir_for(dt)
             } else if FMT == 1u32 {
-                mt_conv1d_block_scaled_0_nvfp4::kernel_ir_for(dt)
-            } else if FMT == 16u32 {
-                mt_conv1d_block_scaled_0_fp8_e5m2::kernel_ir_for(dt)
+                mt_conv1d_quant_audio_nvfp4::kernel_ir_for(dt)
+            } else if FMT == 2u32 {
+                mt_conv1d_quant_audio_fp8_e5m2::kernel_ir_for(dt)
             } else {
-                mt_conv1d_block_scaled_0_int8::kernel_ir_for(dt)
+                mt_conv1d_quant_audio_int8::kernel_ir_for(dt)
             }
         } else {
             if FMT == 0u32 {
-                mt_conv1d_block_scaled_1_mxfp4::kernel_ir_for(dt)
+                mt_conv1d_quant_fishspeech_mxfp4::kernel_ir_for(dt)
             } else if FMT == 1u32 {
-                mt_conv1d_block_scaled_1_nvfp4::kernel_ir_for(dt)
-            } else if FMT == 16u32 {
-                mt_conv1d_block_scaled_1_fp8_e5m2::kernel_ir_for(dt)
+                mt_conv1d_quant_fishspeech_nvfp4::kernel_ir_for(dt)
+            } else if FMT == 2u32 {
+                mt_conv1d_quant_fishspeech_fp8_e5m2::kernel_ir_for(dt)
             } else {
-                mt_conv1d_block_scaled_1_int8::kernel_ir_for(dt)
+                mt_conv1d_quant_fishspeech_int8::kernel_ir_for(dt)
             }
         };
         let mut s = BenchSetup::new(kernel)
