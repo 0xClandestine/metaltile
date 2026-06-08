@@ -126,7 +126,8 @@ impl DeviceBuffer<'_> {
 impl Drop for DeviceBuffer<'_> {
     fn drop(&mut self) {
         if self.ptr != 0 {
-            unsafe { cuMemFree_v2(self.ptr) };
+            // Park back in the caching pool (raw cuMemFree when pool disabled).
+            self._dev.free_raw_pooled(self.ptr, self.len);
         }
     }
 }
@@ -320,7 +321,10 @@ impl CudaDevice {
             cu_check(cuCtxCreate_v2(&mut ctx, 0, dev), "cuCtxCreate")?;
             let mut stream: CUstream = ptr::null_mut();
             cu_check(cuStreamCreate(&mut stream, CU_STREAM_NON_BLOCKING), "cuStreamCreate")?;
-            let pool_enabled = std::env::var("METALTILE_POOL_ALLOC").is_ok();
+            // Caching allocator DEFAULT-ON (alloc()/Drop route through it): nsys
+            // showed raw cuMemAlloc/cuMemFree at 62% of CUDA API time. METALTILE_POOL_ALLOC_OFF=1
+            // restores direct driver alloc/free (clean A/B). 4GB pool cap (POOL_CAP_BYTES).
+            let pool_enabled = std::env::var("METALTILE_POOL_ALLOC_OFF").is_err();
             Ok(Some(CudaDevice { ctx, cc_major: major, cc_minor: minor, pool: Mutex::new(HashMap::new()), pooled_bytes: Mutex::new(0), pool_enabled, pinned_free: Mutex::new(HashMap::new()), pinned_inflight: Mutex::new(Vec::new()), stream, capturing: std::sync::atomic::AtomicBool::new(false), cublas: Mutex::new(0), cublaslt: Mutex::new((0, 0)) }))
         }
     }
@@ -1097,7 +1101,12 @@ impl CudaDevice {
         if len == 0 {
             return Ok(DeviceBuffer { ptr: 0, len: 0, _dev: self });
         }
-        cu_check(unsafe { cuMemAlloc_v2(&mut ptr, len) }, "cuMemAlloc")?;
+        // Route through the caching allocator (alloc_raw) so the main Tensor path
+        // is pooled too — not just alloc_raw callers. Falls back to a raw cuMemAlloc
+        // when the pool is disabled, so behavior is unchanged in that mode. nsys
+        // showed cuMemAlloc/cuMemFree = 62% of CUDA API time (6110 driver allocs,
+        // each ~0.5ms + device-synchronizing → the prefill GPU idle).
+        ptr = self.alloc_raw(len)?;
         Ok(DeviceBuffer { ptr, len, _dev: self })
     }
 
