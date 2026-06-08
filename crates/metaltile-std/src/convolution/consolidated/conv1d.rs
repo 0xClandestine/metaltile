@@ -217,24 +217,32 @@ pub fn mt_conv1d_dense<T>(
 // int is the gate).
 
 #[kernel(variants(
-    // The variants macro zips axes (no cartesian product), so DILATED and
-    // FMT must each have variant_count = 38 entries (2 DILATED × 19 FMT).
-    // The 38 rows enumerate the cartesian product manually.
-    //
-    // FMT uses named enum-style labels so generated kernel names are readable:
-    //   mt_conv1d_quant_audio_mxfp4, mt_conv1d_quant_fishspeech_nvfp8, …
-    // The label's auto-assigned integer value (its 0-based position in the
-    // list, 0–18) is used in the compile-time `if FMT == N` dispatch tree.
-    DILATED = [audio,  audio,  audio,  audio,  audio,  audio,  audio,  audio,  audio,  audio,  audio,  audio,  audio,  audio,     audio,     audio,    audio,   audio, audio,
-               fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech, fishspeech ],
-    FMT  = [   mxfp4,  nvfp4,  mxint2, mxint3, mxint4, mxint5, mxint6, fp4,    int2,   int3,   int4,   int5,   int6,   mxfp8,  mxfp8_e5m2, mxint8, fp8_e5m2, nvfp8, int8,
-               mxfp4,  nvfp4,  mxint2, mxint3, mxint4, mxint5, mxint6, fp4,    int2,   int3,   int4,   int5,   int6,   mxfp8,  mxfp8_e5m2, mxint8, fp8_e5m2, nvfp8, int8 ],
-    BITS = [   4u32,   4u32,   2u32,   3u32,   4u32,   5u32,   6u32,   4u32,   2u32,   3u32,   4u32,   5u32,   6u32,   8u32,      8u32,       8u32,    8u32,    8u32,  8u32,
-               4u32,   4u32,   2u32,   3u32,   4u32,   5u32,   6u32,   4u32,   2u32,   3u32,   4u32,   5u32,   6u32,   8u32,      8u32,       8u32,    8u32,    8u32,  8u32 ],
-    WT   = [   u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u8,        u8,         u8,      u8,      u8,    u8,
-               u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u8,        u8,         u8,      u8,      u8,    u8  ],
-    ST   = [   u8,     u8,     u8,     u8,     u8,     u8,     u8,     f32,    f32,    f32,    f32,    f32,    f32,    u8,        u8,         u8,      f32,     f32,   f32,
-               u8,     u8,     u8,     u8,     u8,     u8,     u8,     f32,    f32,    f32,    f32,    f32,    f32,    u8,        u8,         u8,      f32,     f32,   f32 ],
+    // (FMT, BITS, WT, ST) co-vary; DILATED is a cross axis producing 19×2=38 kernels.
+    // Named labels give readable names: mt_conv1d_quant_audio_mxfp4, …fishspeech_int8.
+    // FMT integer (0–18, position-based) gates the compile-time if dispatch tree.
+    // DILATED: audio=0, fishspeech=1 — matches `if DILATED == 0u32 / 1u32` in body.
+    (FMT,         BITS,  WT,  ST ) = [
+        (mxfp4,      4u32, u32, u8 ),
+        (nvfp4,      4u32, u32, u8 ),
+        (mxint2,     2u32, u32, u8 ),
+        (mxint3,     3u32, u32, u8 ),
+        (mxint4,     4u32, u32, u8 ),
+        (mxint5,     5u32, u32, u8 ),
+        (mxint6,     6u32, u32, u8 ),
+        (fp4,        4u32, u32, f32),
+        (int2,       2u32, u32, f32),
+        (int3,       3u32, u32, f32),
+        (int4,       4u32, u32, f32),
+        (int5,       5u32, u32, f32),
+        (int6,       6u32, u32, f32),
+        (mxfp8,      8u32, u8,  u8 ),
+        (mxfp8_e5m2, 8u32, u8,  u8 ),
+        (mxint8,     8u32, u8,  u8 ),
+        (fp8_e5m2,   8u32, u8,  f32),
+        (nvfp8,      8u32, u8,  f32),
+        (int8,       8u32, u8,  f32),
+    ],
+    DILATED = cross[audio, fishspeech],
     suffix = "{DILATED}_{FMT}",
 ))]
 /// Combined quantised-weight 1D conv: the 19 block-scaled formats applied

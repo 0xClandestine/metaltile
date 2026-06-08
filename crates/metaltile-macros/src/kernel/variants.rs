@@ -149,14 +149,24 @@ impl VariantValue {
 
 /// Parsed `variants(...)` argument block from `#[kernel(variants(...))]`.
 ///
-/// All parameter value lists have equal length ([`variant_count`]).
+/// Supports three axis kinds:
+/// - **Tuple-row axes** (`(A, B, C) = [(v1, v2, v3), …]`): co-varying columns
+///   grouped per row for readability; equivalent to separate zip axes.
+/// - **Zip axes** (`PARAM = [v1, v2, …]`): all zip axes have equal length;
+///   rows are built by zipping them together.
+/// - **Cross axes** (`PARAM = cross[v1, v2, …]`): multiplied against all
+///   existing zip rows, producing `zip_count × cross_count` total rows.
 #[derive(Clone, Debug)]
 pub(crate) struct VariantsSpec {
-    /// Named compile-time parameters in declaration order.
+    /// Zipped compile-time parameters in declaration order.
     ///
     /// Each tuple is `(param_name, values_per_variant)`.  All inner [`Vec`]s
-    /// have length [`variant_count`].  Values may be integers or types.
+    /// have length `zip_count`.
     pub params: Vec<(String, Vec<VariantValue>)>,
+
+    /// Cross-product axes.  Each is multiplied against all zip rows, so the
+    /// final row count is `zip_count × product(cross axis lengths)`.
+    pub cross_params: Vec<(String, Vec<VariantValue>)>,
 
     /// Optional suffix template string, e.g. `"m{M}"` or `"b{BITS}"`.
     ///
@@ -164,8 +174,45 @@ pub(crate) struct VariantsSpec {
     /// `_{lowercase_param}{value}` for each parameter in declaration order.
     pub suffix: Option<String>,
 
-    /// Total number of variants (= length of each parameter's value list).
+    /// Total number of variants (`zip_count × cross_product`).
     pub variant_count: usize,
+}
+
+impl VariantsSpec {
+    /// Expand to the full list of per-variant parameter rows.
+    ///
+    /// Each row is `Vec<(param_name, value)>` for one variant, containing
+    /// all zip params plus the cross-axis value for that variant.  Rows are
+    /// ordered cross-major: all zip rows for cross_value[0], then for
+    /// cross_value[1], etc.
+    pub fn rows(&self) -> Vec<Vec<(String, VariantValue)>> {
+        let zip_count = if self.params.is_empty() { 1 } else { self.params[0].1.len() };
+
+        // Build base zip rows.
+        let mut rows: Vec<Vec<(String, VariantValue)>> = (0..zip_count)
+            .map(|i| {
+                self.params
+                    .iter()
+                    .map(|(name, vals)| (name.clone(), vals[i].clone()))
+                    .collect()
+            })
+            .collect();
+
+        // Multiply by each cross axis.
+        for (cross_name, cross_vals) in &self.cross_params {
+            let mut new_rows = Vec::with_capacity(rows.len() * cross_vals.len());
+            for cross_val in cross_vals {
+                for row in &rows {
+                    let mut new_row = row.clone();
+                    new_row.push((cross_name.clone(), cross_val.clone()));
+                    new_rows.push(new_row);
+                }
+            }
+            rows = new_rows;
+        }
+
+        rows
+    }
 }
 
 /// A `#[optional(only_when = "EXPR")]` constexpr declaration on a kernel
@@ -194,64 +241,214 @@ impl Parse for VariantsSpec {
     ///
     /// Grammar (comma-separated, trailing comma allowed):
     /// ```text
-    /// IDENT = [ INT_LIT , ... ]
+    /// (A, B, C) = [(v1, v2, v3), ...]  — tuple-row (co-varying zip columns)
+    /// IDENT = [ VALUE , ... ]           — single zip axis
+    /// IDENT = cross[ VALUE , ... ]      — cross-product axis
     /// suffix = "TEMPLATE_STRING"
     /// ```
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut params: Vec<(String, Vec<VariantValue>)> = Vec::new();
+        let mut cross_params: Vec<(String, Vec<VariantValue>)> = Vec::new();
         let mut suffix: Option<String> = None;
         let mut first = true;
 
         while !input.is_empty() {
             if !first {
                 let _comma: Token![,] = input.parse()?;
-                // Allow trailing comma.
                 if input.is_empty() {
                     break;
                 }
             }
             first = false;
 
+            if input.peek(syn::token::Paren) {
+                // (A, B, C) = [(v1, v2, v3), ...]  — tuple-row
+                let names = parse_ident_list(input)?;
+                let _eq: Token![=] = input.parse()?;
+                let columns = parse_tuple_rows(input, names.len())?;
+                if columns.len() != names.len() {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        "variants: tuple-row column count mismatch",
+                    ));
+                }
+                for (name, col) in names.into_iter().zip(columns) {
+                    params.push((name, col));
+                }
+                continue;
+            }
+
             let ident: syn::Ident = input.parse()?;
             let _eq: Token![=] = input.parse()?;
             let name = ident.to_string();
 
             if name == "suffix" {
+                // suffix = "TEMPLATE"
                 let lit: syn::LitStr = input.parse()?;
                 suffix = Some(lit.value());
-            } else {
+            } else if input.peek(syn::token::Bracket) {
+                // IDENT = [values...]  — standard zip axis
                 let bracket_content;
                 syn::bracketed!(bracket_content in input);
                 let values = parse_value_list(&bracket_content, &ident)?;
                 params.push((name, values));
+            } else if input.peek(syn::Ident) {
+                // IDENT = cross[values...]  — cross-product axis
+                let fork = input.fork();
+                let next: syn::Ident = fork.parse()?;
+                if next == "cross" && fork.peek(syn::token::Bracket) {
+                    input.parse::<syn::Ident>()?; // consume "cross"
+                    let bracket_content;
+                    syn::bracketed!(bracket_content in input);
+                    let values = parse_value_list(&bracket_content, &ident)?;
+                    cross_params.push((name, values));
+                } else {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "variants: expected `cross[...]` after identifier; \
+                         use `IDENT = [values...]` for a zip axis",
+                    ));
+                }
+            } else {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    "variants: expected `[values...]` or `cross[values...]` after `=`",
+                ));
             }
         }
 
-        if params.is_empty() {
+        if params.is_empty() && cross_params.is_empty() {
             return Err(syn::Error::new(
                 Span::call_site(),
                 "variants: at least one parameter list is required",
             ));
         }
 
-        // All parameter lists must have the same length.
-        let variant_count = params[0].1.len();
+        // All zip parameter lists must have the same length.
+        let zip_count = params.first().map(|(_, v)| v.len()).unwrap_or(1);
         for (pname, vals) in &params {
-            if vals.len() != variant_count {
-                let first_name = &params[0].0;
+            if vals.len() != zip_count {
+                let first_name = params[0].0.as_str();
                 return Err(syn::Error::new(
                     Span::call_site(),
                     format!(
-                        "variants: param lists must have equal length: \
-                         {first_name}={variant_count}, {pname}={}",
+                        "variants: zip param lists must have equal length: \
+                         {first_name}={zip_count}, {pname}={}",
                         vals.len()
                     ),
                 ));
             }
         }
 
-        Ok(VariantsSpec { params, suffix, variant_count })
+        let cross_count: usize =
+            cross_params.iter().map(|(_, v)| v.len()).product::<usize>().max(1);
+        let variant_count = zip_count * cross_count;
+
+        Ok(VariantsSpec { params, cross_params, suffix, variant_count })
     }
+}
+
+/// Parse a parenthesized, comma-separated list of identifiers: `(A, B, C)`.
+///
+/// Used by the tuple-row syntax `(A, B, C) = [(v1, v2, v3), ...]`.
+fn parse_ident_list(input: ParseStream) -> syn::Result<Vec<String>> {
+    let paren_content;
+    syn::parenthesized!(paren_content in input);
+    let mut names = Vec::new();
+    loop {
+        let ident: syn::Ident = paren_content.parse()?;
+        names.push(ident.to_string());
+        if paren_content.is_empty() {
+            break;
+        }
+        let _comma: Token![,] = paren_content.parse()?;
+        if paren_content.is_empty() {
+            break;
+        }
+    }
+    if names.is_empty() {
+        return Err(syn::Error::new(Span::call_site(), "variants: empty tuple-row name list"));
+    }
+    Ok(names)
+}
+
+/// Parse a bracketed list of value tuples: `[(v1, v2, v3), (v4, v5, v6), ...]`.
+///
+/// Returns one `Vec<VariantValue>` per column (transposed from row form).
+/// Named labels in each column get stable integers via per-column `named_seen` maps
+/// (first-occurrence-wins, same as `parse_value_list`).
+fn parse_tuple_rows(
+    input: ParseStream,
+    col_count: usize,
+) -> syn::Result<Vec<Vec<VariantValue>>> {
+    let bracket_content;
+    syn::bracketed!(bracket_content in input);
+
+    let mut columns: Vec<Vec<VariantValue>> = vec![Vec::new(); col_count];
+    // Per-column named-label → integer maps (first occurrence wins).
+    let mut named_seen: Vec<std::collections::HashMap<String, i64>> =
+        (0..col_count).map(|_| std::collections::HashMap::new()).collect();
+
+    let mut first = true;
+    while !bracket_content.is_empty() {
+        if !first {
+            let _comma: Token![,] = bracket_content.parse()?;
+            if bracket_content.is_empty() {
+                break;
+            }
+        }
+        first = false;
+
+        let paren_content;
+        syn::parenthesized!(paren_content in bracket_content);
+        for col in 0..col_count {
+            if col > 0 {
+                let _comma: Token![,] = paren_content.parse()?;
+            }
+            let val = parse_single_value(&paren_content, &mut named_seen[col])?;
+            columns[col].push(val);
+        }
+        if !paren_content.is_empty() {
+            return Err(paren_content.error("variants: too many values in tuple row"));
+        }
+    }
+
+    if columns.first().map(|c| c.is_empty()).unwrap_or(true) {
+        return Err(syn::Error::new(Span::call_site(), "variants: tuple-row list is empty"));
+    }
+    Ok(columns)
+}
+
+/// Parse a single `VariantValue` from `content`, updating `named_seen` for
+/// stable label→integer assignment (first-occurrence-wins).
+///
+/// Shared by both `parse_value_list` and `parse_tuple_rows`.
+fn parse_single_value(
+    content: &syn::parse::ParseBuffer<'_>,
+    named_seen: &mut std::collections::HashMap<String, i64>,
+) -> syn::Result<VariantValue> {
+    if content.peek(syn::LitInt) {
+        let lit: syn::LitInt = content.parse()?;
+        return Ok(VariantValue::Int(lit.base10_parse::<i64>()?));
+    }
+    if content.peek(syn::LitFloat) {
+        let lit: syn::LitFloat = content.parse()?;
+        let literal: Literal = lit.token();
+        return Ok(VariantValue::Float(literal));
+    }
+    if let Some(name) = try_parse_named_label(content) {
+        let next_id = named_seen.len() as i64;
+        let value = *named_seen.entry(name.clone()).or_insert(next_id);
+        return Ok(VariantValue::Named { name, value });
+    }
+    let ty: syn::Type = content.parse().map_err(|_| {
+        syn::Error::new(
+            content.span(),
+            "variants: list values must be integer literals, float literals, \
+             named labels (e.g. mxfp4), or type paths (e.g. u32, u8)",
+        )
+    })?;
+    Ok(VariantValue::Type(quote::quote! { #ty }))
 }
 
 /// Primitive Rust types and MetalTile dtype aliases that should be parsed as
@@ -309,8 +506,6 @@ fn parse_value_list(
     name_ident: &syn::Ident,
 ) -> syn::Result<Vec<VariantValue>> {
     let mut values: Vec<VariantValue> = Vec::new();
-    // Tracks the integer value assigned to each distinct named label.
-    // First occurrence wins: same label always maps to the same integer.
     let mut named_seen: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let mut first = true;
 
@@ -322,36 +517,7 @@ fn parse_value_list(
             }
         }
         first = false;
-
-        if content.peek(syn::LitInt) {
-            let lit: syn::LitInt = content.parse()?;
-            values.push(VariantValue::Int(lit.base10_parse::<i64>()?));
-        } else if content.peek(syn::LitFloat) {
-            let lit: syn::LitFloat = content.parse()?;
-            // Re-emit as a proc_macro2::Literal so we can clone and emit it
-            // unchanged in substitute_tokens.
-            let literal: Literal = lit.token();
-            values.push(VariantValue::Float(literal));
-        } else if let Some(name) = try_parse_named_label(content) {
-            // Named enum-style label: a bare identifier that is not a
-            // primitive type and not the start of a path/generic expression.
-            // Integer value is stable per-name (first occurrence wins), so
-            // the same label always maps to the same integer even when it
-            // appears multiple times in the list (e.g. FMT repeated for each
-            // DILATED row).
-            let next_id = named_seen.len() as i64;
-            let value = *named_seen.entry(name.clone()).or_insert(next_id);
-            values.push(VariantValue::Named { name, value });
-        } else {
-            let ty: syn::Type = content.parse().map_err(|_| {
-                syn::Error::new(
-                    content.span(),
-                    "variants: list values must be integer literals, float literals, \
-                     named labels (e.g. mxfp4), or type paths (e.g. u32, u8)",
-                )
-            })?;
-            values.push(VariantValue::Type(quote::quote! { #ty }));
-        }
+        values.push(parse_single_value(content, &mut named_seen)?);
     }
 
     if values.is_empty() {
@@ -1210,6 +1376,60 @@ mod tests {
     fn trailing_comma_is_accepted() {
         let spec: VariantsSpec = syn::parse_str("M = [8, 16,], suffix = \"m{M}\",").unwrap();
         assert_eq!(spec.variant_count, 2);
+    }
+
+    #[test]
+    fn cross_axis_multiplies_zip_rows() {
+        // 2 zip rows × 3 cross values = 6 total variants.
+        let spec: VariantsSpec =
+            syn::parse_str("M = [8, 16], PATH = cross[a, b, c], suffix = \"{PATH}_{M}\"")
+                .unwrap();
+        assert_eq!(spec.variant_count, 6);
+        assert_eq!(spec.params.len(), 1);       // M is a zip axis
+        assert_eq!(spec.cross_params.len(), 1); // PATH is a cross axis
+        let rows = spec.rows();
+        assert_eq!(rows.len(), 6);
+        // Cross-major: a×8, a×16, b×8, b×16, c×8, c×16
+        assert!(matches!(&rows[0][0], (n, VariantValue::Int(8)) if n == "M"));
+        assert!(matches!(&rows[1][0], (n, VariantValue::Int(16)) if n == "M"));
+        assert!(matches!(&rows[0][1], (n, VariantValue::Named { name, .. }) if n == "PATH" && name == "a"));
+        assert!(matches!(&rows[2][1], (n, VariantValue::Named { name, .. }) if n == "PATH" && name == "b"));
+    }
+
+    #[test]
+    fn tuple_row_syntax_expands_to_zip_columns() {
+        let spec: VariantsSpec = syn::parse_str(
+            "(FMT, BITS) = [(mxfp4, 4u32), (nvfp4, 4u32), (int8, 8u32)], suffix = \"{FMT}\"",
+        )
+        .unwrap();
+        assert_eq!(spec.variant_count, 3);
+        assert_eq!(spec.params.len(), 2); // FMT + BITS
+        assert_eq!(spec.params[0].0, "FMT");
+        assert_eq!(spec.params[1].0, "BITS");
+        // FMT labels get sequential integers: mxfp4=0, nvfp4=1, int8=2
+        assert!(matches!(&spec.params[0].1[0], VariantValue::Named { name, value } if name == "mxfp4" && *value == 0));
+        assert!(matches!(&spec.params[0].1[1], VariantValue::Named { name, value } if name == "nvfp4" && *value == 1));
+        assert!(matches!(&spec.params[0].1[2], VariantValue::Named { name, value } if name == "int8" && *value == 2));
+        assert_eq!(int_vals(&spec.params[1].1), vec![4, 4, 8]);
+    }
+
+    #[test]
+    fn tuple_row_cross_combination() {
+        // 3 format rows × 2 path values = 6 variants.
+        let spec: VariantsSpec = syn::parse_str(
+            "(FMT, BITS) = [(mxfp4, 4u32), (nvfp4, 4u32), (int8, 8u32)], \
+             PATH = cross[audio, fishspeech], \
+             suffix = \"{PATH}_{FMT}\"",
+        )
+        .unwrap();
+        assert_eq!(spec.variant_count, 6);
+        let rows = spec.rows();
+        assert_eq!(rows.len(), 6);
+        // Row 0: (FMT=mxfp4, BITS=4, PATH=audio)
+        assert!(matches!(&rows[0][0], (n, VariantValue::Named { name, .. }) if n == "FMT" && name == "mxfp4"));
+        assert!(matches!(&rows[0][2], (n, VariantValue::Named { name, value }) if n == "PATH" && name == "audio" && *value == 0));
+        // Row 3: (FMT=mxfp4, BITS=4, PATH=fishspeech)
+        assert!(matches!(&rows[3][2], (n, VariantValue::Named { name, value }) if n == "PATH" && name == "fishspeech" && *value == 1));
     }
 
     // ── eval_suffix / eval_expr ───────────────────────────────────────────────
