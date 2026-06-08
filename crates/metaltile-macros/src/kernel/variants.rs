@@ -94,6 +94,25 @@ pub(crate) enum VariantValue {
     Float(Literal),
     /// A primitive type (e.g. `u32`, `u8`, `f16`).
     Type(TokenStream),
+    /// A named enum-style label (e.g. `mxfp4`, `nvfp4`).
+    ///
+    /// Written as a bare identifier in the value list:
+    /// ```text
+    /// FMT = [mxfp4, nvfp4, fp4, mxfp8_e4m3, ...]
+    /// ```
+    /// The integer `value` is auto-assigned from the label's 0-based position
+    /// in the list and is used wherever integer values are needed — compile-time
+    /// `if` conditions (`if FMT == 0u32`), ident-embedding, and arithmetic in
+    /// suffix expressions (`{FMT + 1}`).  The human-readable `name` is used
+    /// when `{FMT}` appears as a bare parameter reference in a suffix template,
+    /// making kernel names like `mt_conv1d_block_scaled_0_mxfp4` instead of
+    /// `mt_conv1d_block_scaled_0_0`.
+    Named {
+        /// Human-readable label used in suffix templates.
+        name: String,
+        /// Auto-assigned integer value (position in the list).
+        value: i64,
+    },
 }
 
 impl VariantValue {
@@ -101,6 +120,7 @@ impl VariantValue {
     fn as_int(&self) -> Option<i64> {
         match self {
             Self::Int(v) => Some(*v),
+            Self::Named { value, .. } => Some(*value),
             Self::Float(_) | Self::Type(_) => None,
         }
     }
@@ -111,6 +131,7 @@ impl VariantValue {
     /// - Floats: type suffix stripped, `.` replaced with `_` for ident safety
     ///   (`0.5f32` → `"0_5"`, `1.0` → `"1_0"`)
     /// - Types: whitespace stripped (`Vec < u8 >` → `"Vec<u8>"`)
+    /// - Named: human-readable label (`mxfp4` → `"mxfp4"`)
     fn to_suffix_string(&self) -> String {
         match self {
             Self::Int(v) => v.to_string(),
@@ -121,6 +142,7 @@ impl VariantValue {
                 s.replace('.', "_")
             },
             Self::Type(ts) => ts.to_string().replace(' ', ""),
+            Self::Named { name, .. } => name.clone(),
         }
     }
 }
@@ -232,6 +254,45 @@ impl Parse for VariantsSpec {
     }
 }
 
+/// Primitive Rust types and MetalTile dtype aliases that should be parsed as
+/// `VariantValue::Type` rather than `VariantValue::Named`.
+fn is_primitive_type(s: &str) -> bool {
+    matches!(
+        s,
+        "u8" | "u16" | "u32" | "u64" | "u128"
+            | "i8" | "i16" | "i32" | "i64" | "i128"
+            | "f32" | "f64" | "f16" | "bf16"
+            | "bool" | "char" | "usize" | "isize"
+    )
+}
+
+/// Try to consume a bare identifier from `content` as a named variant label.
+///
+/// Returns `Some(name)` and advances the stream when the next token is a bare
+/// identifier that:
+/// - is not a known primitive type (those should become `VariantValue::Type`),
+/// - is not followed by `<` (generic start) or `::` (path separator).
+///
+/// Returns `None` without consuming any input otherwise.
+fn try_parse_named_label(content: &syn::parse::ParseBuffer<'_>) -> Option<String> {
+    if !content.peek(syn::Ident) {
+        return None;
+    }
+    // Fork to check lookahead without consuming the original stream.
+    let fork = content.fork();
+    let Ok(ident) = fork.parse::<syn::Ident>() else { return None };
+    let s = ident.to_string();
+    if is_primitive_type(&s) {
+        return None;
+    }
+    // Reject if followed by generic `<` or path `::` — those are type paths.
+    if fork.peek(Token![<]) || fork.peek(Token![::]) {
+        return None;
+    }
+    // Fork check passed — consume the identifier from the original stream.
+    content.parse::<syn::Ident>().ok().map(|id| id.to_string())
+}
+
 /// Parse a `[ VALUE , ... ]` body that has already been delimited.
 ///
 /// Each element is tried in order: integer literal, float literal, type path.
@@ -265,12 +326,18 @@ fn parse_value_list(
             // unchanged in substitute_tokens.
             let literal: Literal = lit.token();
             values.push(VariantValue::Float(literal));
+        } else if let Some(name) = try_parse_named_label(content) {
+            // Named enum-style label: a bare identifier that is not a
+            // primitive type and not the start of a path/generic expression.
+            // Integer value is auto-assigned from its 0-based position.
+            let value = values.len() as i64;
+            values.push(VariantValue::Named { name, value });
         } else {
             let ty: syn::Type = content.parse().map_err(|_| {
                 syn::Error::new(
                     content.span(),
                     "variants: list values must be integer literals, float literals, \
-                     or type paths (e.g. u32, u8)",
+                     named labels (e.g. mxfp4), or type paths (e.g. u32, u8)",
                 )
             })?;
             values.push(VariantValue::Type(quote::quote! { #ty }));
@@ -415,7 +482,7 @@ fn substitute_tokens(stream: TokenStream, params: &HashMap<String, VariantValue>
             // Mode 2 — exact param match → integer literal, float literal, or type tokens.
             if let Some(val) = params.get(&s) {
                 match val {
-                    VariantValue::Int(v) => {
+                    VariantValue::Int(v) | VariantValue::Named { value: v, .. } => {
                         let mut lit = Literal::i64_unsuffixed(*v);
                         lit.set_span(ident.span());
                         out.extend(std::iter::once(TokenTree::Literal(lit)));
@@ -434,11 +501,15 @@ fn substitute_tokens(stream: TokenStream, params: &HashMap<String, VariantValue>
             }
 
             // Mode 3 — ident-embedding: substitute integer param substrings into idents.
+            // Named params embed their integer value (not their name string).
             // Type params are never embedded into identifier names.
             let mut new_s = s.clone();
             for (name, val) in params {
-                if let VariantValue::Int(v) = val {
-                    new_s = new_s.replace(name.as_str(), &v.to_string());
+                match val {
+                    VariantValue::Int(v) | VariantValue::Named { value: v, .. } => {
+                        new_s = new_s.replace(name.as_str(), &v.to_string());
+                    },
+                    _ => {},
                 }
             }
             if new_s != s {
@@ -749,11 +820,16 @@ pub(crate) fn eval_suffix(
         let expr_str = &remaining[..close];
         remaining = &remaining[close + 1..];
 
-        // A bare identifier naming a non-integer param (type or float, e.g.
-        // `{WT}` or `{SCALE}`) is stringified directly rather than parsed as
-        // an arithmetic expression.
+        // A bare identifier naming a non-arithmetic param (named label, type,
+        // or float, e.g. `{FMT}`, `{WT}`, `{SCALE}`) is stringified directly
+        // rather than parsed as an arithmetic expression.  For `Named` params
+        // this produces the human-readable label (e.g. `"mxfp4"`) rather than
+        // the integer value; arithmetic expressions (`{FMT + 1}`) still fall
+        // through to eval_expr where the integer value is used.
         let trimmed = expr_str.trim();
-        if let Some(val @ (VariantValue::Float(_) | VariantValue::Type(_))) = params.get(trimmed) {
+        if let Some(val @ (VariantValue::Float(_) | VariantValue::Type(_) | VariantValue::Named { .. })) =
+            params.get(trimmed)
+        {
             result.push_str(&val.to_suffix_string());
         } else {
             let expr: syn::Expr = syn::parse_str(expr_str).map_err(|_| {
@@ -1662,6 +1738,91 @@ mod tests {
         strip_optional_constexprs(&mut sig, &opts, &int_p).unwrap();
         let s = quote::quote! { #sig }.to_string();
         assert!(s.contains("dilation"), "dilation should be kept at DILATED=1: {s}");
+    }
+
+    // ── Named variant (label) tests ───────────────────────────────────────────
+
+    #[test]
+    fn named_labels_parsed_and_auto_indexed() {
+        let spec: VariantsSpec =
+            syn::parse_str("FMT = [mxfp4, nvfp4, fp4], suffix = \"{FMT}\"").unwrap();
+        assert_eq!(spec.variant_count, 3);
+        let vals = &spec.params[0].1;
+        assert!(matches!(&vals[0], VariantValue::Named { name, value: 0 } if name == "mxfp4"));
+        assert!(matches!(&vals[1], VariantValue::Named { name, value: 1 } if name == "nvfp4"));
+        assert!(matches!(&vals[2], VariantValue::Named { name, value: 2 } if name == "fp4"));
+    }
+
+    #[test]
+    fn named_label_suffix_uses_name_not_integer() {
+        let params = HashMap::from([(
+            "FMT".to_string(),
+            VariantValue::Named { name: "mxfp4".to_string(), value: 0 },
+        )]);
+        assert_eq!(eval_suffix("{FMT}", &params).unwrap(), "mxfp4");
+    }
+
+    #[test]
+    fn named_label_suffix_arithmetic_uses_integer() {
+        let params = HashMap::from([(
+            "FMT".to_string(),
+            VariantValue::Named { name: "mxfp4".to_string(), value: 3 },
+        )]);
+        // Arithmetic expressions use the integer value, not the label.
+        assert_eq!(eval_suffix("{FMT + 1}", &params).unwrap(), "4");
+    }
+
+    #[test]
+    fn named_label_as_int_for_compile_time_if() {
+        let val = VariantValue::Named { name: "mxfp4".to_string(), value: 0 };
+        assert_eq!(val.as_int(), Some(0));
+    }
+
+    #[test]
+    fn named_label_body_substitution_emits_integer() {
+        let params: HashMap<String, VariantValue> = HashMap::from([(
+            "FMT".to_string(),
+            VariantValue::Named { name: "mxfp4".to_string(), value: 0 },
+        )]);
+        let ts: TokenStream = quote::quote! { if FMT == 0u32 { 1u32 } else { 2u32 } };
+        let out = substitute_tokens(ts, &params).to_string();
+        // Compile-time if: FMT==0 is true → branch is { 1u32 }
+        assert!(out.contains("1u32"), "expected selected branch: {out}");
+        assert!(!out.contains("2u32"), "unexpected else branch: {out}");
+    }
+
+    #[test]
+    fn named_label_auto_suffix_uses_name() {
+        let pairs = vec![("FMT".to_string(), VariantValue::Named {
+            name: "nvfp4".to_string(),
+            value: 1,
+        })];
+        assert_eq!(auto_suffix(&pairs), "fmtnvfp4");
+    }
+
+    #[test]
+    fn named_labels_mixed_with_integers() {
+        // FMT is named, DILATED is integer — suffix uses name for FMT, number for DILATED.
+        let spec: VariantsSpec = syn::parse_str(
+            "DILATED = [0u32, 1u32], FMT = [mxfp4, mxfp4], suffix = \"{DILATED}_{FMT}\"",
+        )
+        .unwrap();
+        let v0 = spec
+            .params
+            .iter()
+            .map(|(name, vals)| (name.clone(), vals[0].clone()))
+            .collect::<Vec<_>>();
+        let s = eval_suffix("{DILATED}_{FMT}", &v0.iter().cloned().collect::<HashMap<_, _>>())
+            .unwrap();
+        assert_eq!(s, "0_mxfp4");
+    }
+
+    #[test]
+    fn named_labels_not_confused_with_primitive_types() {
+        // u32 / u8 should still become Type variants, not Named.
+        let spec: VariantsSpec = syn::parse_str("WT = [u32, u8]").unwrap();
+        assert!(matches!(spec.params[0].1[0], VariantValue::Type(_)));
+        assert!(matches!(spec.params[0].1[1], VariantValue::Type(_)));
     }
 
     #[test]
