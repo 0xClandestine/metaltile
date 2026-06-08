@@ -457,6 +457,48 @@ impl CudaDevice {
         Ok((guard.0 as cublasLtHandle_t, guard.1 as CUdeviceptr))
     }
 
+    /// CUTLASS grouped MoE GEMM (AOT-linked, `cfg(have_cutlass)` via build.rs +
+    /// CUTLASS_DIR). `a` = sorted-token f16 `[mt,K]`, `w` = contiguous f16 expert
+    /// slab `[n_exp,N,K]`, `c` = out f16 `[mt,N]`. `group_rows[g]`/`expert_ids[g]`
+    /// (HOST slices) describe each contiguous token group + its weight slab.
+    /// `out[t,n] = Σ_k a[t,k]·w[eid][n,k]`. Beats cuBLAS per-expert on the skinny
+    /// MoE shape. Errors if the runtime was built without CUTLASS.
+    pub fn moe_grouped_cutlass(
+        &self, a: CUdeviceptr, w: CUdeviceptr, c: CUdeviceptr,
+        group_rows: &[i32], expert_ids: &[i32], n: usize, k: usize,
+    ) -> Result<(), MetalTileError> {
+        #[cfg(have_cutlass)]
+        {
+            unsafe extern "C" {
+                fn moe_grouped_gemm_cutlass(
+                    a: *const c_void, w: *const c_void, c: *mut c_void,
+                    group_rows: *const c_int, expert_ids: *const c_int,
+                    n_groups: c_int, n: c_int, k: c_int, stream: *mut c_void,
+                ) -> c_int;
+            }
+            if group_rows.len() != expert_ids.len() {
+                return Err(MetalTileError::Dispatch("moe_grouped_cutlass: group_rows/expert_ids len mismatch".into()));
+            }
+            let r = unsafe {
+                moe_grouped_gemm_cutlass(
+                    a as *const c_void, w as *const c_void, c as *mut c_void,
+                    group_rows.as_ptr(), expert_ids.as_ptr(),
+                    group_rows.len() as c_int, n as c_int, k as c_int,
+                    self.stream as *mut c_void,
+                )
+            };
+            if r != 0 {
+                return Err(MetalTileError::Dispatch(format!("moe_grouped_gemm_cutlass failed: code {r}")));
+            }
+            Ok(())
+        }
+        #[cfg(not(have_cutlass))]
+        {
+            let _ = (a, w, c, group_rows, expert_ids, n, k);
+            Err(MetalTileError::Dispatch("moe_grouped_cutlass: runtime built without CUTLASS (set CUTLASS_DIR)".into()))
+        }
+    }
+
     /// f16/bf16 inputs, **f32 output** — convenience wrapper over [`gemm_cublaslt`]
     /// that keeps the A/B (weight/activation) dtype but writes the result as f32.
     /// cuBLAS already accumulates in f32 (`CUBLAS_COMPUTE_32F`); only the D-layout
