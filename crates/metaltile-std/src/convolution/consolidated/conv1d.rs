@@ -21,7 +21,7 @@
 //!   block-scaled quantised-weight formats applied to both the direct
 //!   (audio) and dilated (fishspeech) paths. Axes `DILATED × FMT`
 //!   (38-row cartesian product) generate the 38 original kernels
-//!   `mt_conv1d_block_scaled_{0,1}_{0..18}`. The `dilation` constexpr is
+//!   `mt_conv1d_block_scaled_{0,1}_{mxfp4,nvfp4,…,int8}`. The `dilation` constexpr is
 //!   OPTIONAL — stripped for DILATED=0 (audio) and kept for DILATED=1
 //!   (fishspeech). FMT/BITS/WT/ST co-vary across the 19 formats; type
 //!   variants cannot gate compile-time `if` (per the variants macro's
@@ -220,16 +220,21 @@ pub fn mt_conv1d_dense<T>(
     // The variants macro zips axes (no cartesian product), so DILATED and
     // FMT must each have variant_count = 38 entries (2 DILATED × 19 FMT).
     // The 38 rows enumerate the cartesian product manually.
-    DILATED = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32,
-               1u32, 1u32, 1u32, 1u32, 1u32, 1u32, 1u32, 1u32, 1u32, 1u32, 1u32, 1u32, 1u32, 1u32, 1u32, 1u32, 1u32, 1u32, 1u32 ],
-    FMT  = [ 0u32,  1u32,  2u32,  3u32,  4u32,  5u32,  6u32,  7u32,  8u32,  9u32, 10u32, 11u32, 12u32, 13u32, 14u32, 15u32, 16u32, 17u32, 18u32,
-             0u32,  1u32,  2u32,  3u32,  4u32,  5u32,  6u32,  7u32,  8u32,  9u32, 10u32, 11u32, 12u32, 13u32, 14u32, 15u32, 16u32, 17u32, 18u32 ],
-    BITS = [ 4u32,  4u32,  2u32,  3u32,  4u32,  5u32,  6u32,  4u32,  2u32,  3u32,  4u32,  5u32,  6u32,  8u32,  8u32,  8u32,  8u32,  8u32,  8u32,
-             4u32,  4u32,  2u32,  3u32,  4u32,  5u32,  6u32,  4u32,  2u32,  3u32,  4u32,  5u32,  6u32,  8u32,  8u32,  8u32,  8u32,  8u32,  8u32 ],
-    WT   = [  u32,   u32,   u32,   u32,   u32,   u32,   u32,   u32,   u32,   u32,   u32,   u32,   u32,   u8,   u8,   u8,   u8,   u8,   u8,
-              u32,   u32,   u32,   u32,   u32,   u32,   u32,   u32,   u32,   u32,   u32,   u32,   u32,   u8,   u8,   u8,   u8,   u8,   u8 ],
-    ST   = [   u8,    u8,    u8,    u8,    u8,    u8,    u8,   f32,   f32,   f32,   f32,   f32,   f32,   u8,   u8,   u8,  f32,  f32,  f32,
-               u8,    u8,    u8,    u8,    u8,    u8,    u8,   f32,   f32,   f32,   f32,   f32,   f32,   u8,   u8,   u8,  f32,  f32,  f32 ],
+    //
+    // FMT uses named enum-style labels so generated kernel names are readable:
+    //   mt_conv1d_block_scaled_0_mxfp4, mt_conv1d_block_scaled_1_nvfp8, …
+    // The label's auto-assigned integer value (its 0-based position in the
+    // list, 0–18) is used in the compile-time `if FMT == N` dispatch tree.
+    DILATED = [0u32,   0u32,   0u32,   0u32,   0u32,   0u32,   0u32,   0u32,   0u32,   0u32,   0u32,   0u32,   0u32,   0u32,      0u32,      0u32,     0u32,   0u32,  0u32,
+               1u32,   1u32,   1u32,   1u32,   1u32,   1u32,   1u32,   1u32,   1u32,   1u32,   1u32,   1u32,   1u32,   1u32,      1u32,      1u32,     1u32,   1u32,  1u32 ],
+    FMT  = [   mxfp4,  nvfp4,  mxint2, mxint3, mxint4, mxint5, mxint6, fp4,    int2,   int3,   int4,   int5,   int6,   mxfp8_e4m3, mxfp8_e5m2, mxint8, fp8_e5m2, nvfp8, int8,
+               mxfp4,  nvfp4,  mxint2, mxint3, mxint4, mxint5, mxint6, fp4,    int2,   int3,   int4,   int5,   int6,   mxfp8_e4m3, mxfp8_e5m2, mxint8, fp8_e5m2, nvfp8, int8 ],
+    BITS = [   4u32,   4u32,   2u32,   3u32,   4u32,   5u32,   6u32,   4u32,   2u32,   3u32,   4u32,   5u32,   6u32,   8u32,      8u32,       8u32,    8u32,    8u32,  8u32,
+               4u32,   4u32,   2u32,   3u32,   4u32,   5u32,   6u32,   4u32,   2u32,   3u32,   4u32,   5u32,   6u32,   8u32,      8u32,       8u32,    8u32,    8u32,  8u32 ],
+    WT   = [   u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u8,        u8,         u8,      u8,      u8,    u8,
+               u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u32,    u8,        u8,         u8,      u8,      u8,    u8  ],
+    ST   = [   u8,     u8,     u8,     u8,     u8,     u8,     u8,     f32,    f32,    f32,    f32,    f32,    f32,    u8,        u8,         u8,      f32,     f32,   f32,
+               u8,     u8,     u8,     u8,     u8,     u8,     u8,     f32,    f32,    f32,    f32,    f32,    f32,    u8,        u8,         u8,      f32,     f32,   f32 ],
     suffix = "{DILATED}_{FMT}",
 ))]
 /// Combined block-scaled 1D conv: the 19 quantised-weight formats applied
@@ -880,23 +885,23 @@ pub mod kernel_tests {
         };
         let kernel = if DIL == 0u32 {
             if FMT == 0u32 {
-                mt_conv1d_block_scaled_0_0::kernel_ir_for(dt)
+                mt_conv1d_block_scaled_0_mxfp4::kernel_ir_for(dt)
             } else if FMT == 1u32 {
-                mt_conv1d_block_scaled_0_1::kernel_ir_for(dt)
+                mt_conv1d_block_scaled_0_nvfp4::kernel_ir_for(dt)
             } else if FMT == 16u32 {
-                mt_conv1d_block_scaled_0_16::kernel_ir_for(dt)
+                mt_conv1d_block_scaled_0_fp8_e5m2::kernel_ir_for(dt)
             } else {
-                mt_conv1d_block_scaled_0_18::kernel_ir_for(dt)
+                mt_conv1d_block_scaled_0_int8::kernel_ir_for(dt)
             }
         } else {
             if FMT == 0u32 {
-                mt_conv1d_block_scaled_1_0::kernel_ir_for(dt)
+                mt_conv1d_block_scaled_1_mxfp4::kernel_ir_for(dt)
             } else if FMT == 1u32 {
-                mt_conv1d_block_scaled_1_1::kernel_ir_for(dt)
+                mt_conv1d_block_scaled_1_nvfp4::kernel_ir_for(dt)
             } else if FMT == 16u32 {
-                mt_conv1d_block_scaled_1_16::kernel_ir_for(dt)
+                mt_conv1d_block_scaled_1_fp8_e5m2::kernel_ir_for(dt)
             } else {
-                mt_conv1d_block_scaled_1_18::kernel_ir_for(dt)
+                mt_conv1d_block_scaled_1_int8::kernel_ir_for(dt)
             }
         };
         let dilation = if DIL == 1u32 { 2usize } else { 1usize };
@@ -1004,23 +1009,23 @@ pub mod kernel_benches {
             + n_out * sz;
         let kernel = if DIL == 0u32 {
             if FMT == 0u32 {
-                mt_conv1d_block_scaled_0_0::kernel_ir_for(dt)
+                mt_conv1d_block_scaled_0_mxfp4::kernel_ir_for(dt)
             } else if FMT == 1u32 {
-                mt_conv1d_block_scaled_0_1::kernel_ir_for(dt)
+                mt_conv1d_block_scaled_0_nvfp4::kernel_ir_for(dt)
             } else if FMT == 16u32 {
-                mt_conv1d_block_scaled_0_16::kernel_ir_for(dt)
+                mt_conv1d_block_scaled_0_fp8_e5m2::kernel_ir_for(dt)
             } else {
-                mt_conv1d_block_scaled_0_18::kernel_ir_for(dt)
+                mt_conv1d_block_scaled_0_int8::kernel_ir_for(dt)
             }
         } else {
             if FMT == 0u32 {
-                mt_conv1d_block_scaled_1_0::kernel_ir_for(dt)
+                mt_conv1d_block_scaled_1_mxfp4::kernel_ir_for(dt)
             } else if FMT == 1u32 {
-                mt_conv1d_block_scaled_1_1::kernel_ir_for(dt)
+                mt_conv1d_block_scaled_1_nvfp4::kernel_ir_for(dt)
             } else if FMT == 16u32 {
-                mt_conv1d_block_scaled_1_16::kernel_ir_for(dt)
+                mt_conv1d_block_scaled_1_fp8_e5m2::kernel_ir_for(dt)
             } else {
-                mt_conv1d_block_scaled_1_18::kernel_ir_for(dt)
+                mt_conv1d_block_scaled_1_int8::kernel_ir_for(dt)
             }
         };
         let mut s = BenchSetup::new(kernel)
