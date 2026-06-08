@@ -34,6 +34,7 @@ DENSE_OLD = [
 ]
 
 # Format-name → (FMT index, BITS, WT type, ST type)
+# FMT index matches the 0-based position in the variants list (auto-assigned by Named labels).
 FMT_TABLE = {
     "mxfp4":      ( 0, 4,  "u32", "u8"),
     "nvfp4":      ( 1, 4,  "u32", "u8"),
@@ -55,6 +56,11 @@ FMT_TABLE = {
     "nvfp8":      (17, 8,  "u8",  "f32"),
     "int8":       (18, 8,  "u8",  "f32"),
 }
+
+# Consolidated kernel suffix for a given (dilated, fmt_label):
+#   mt_conv1d_block_scaled_{dilated}_{fmt_label}
+def consolidated_block_scaled_name(dilated: int, fmt_label: str) -> str:
+    return f"mt_conv1d_block_scaled_{dilated}_{fmt_label}"
 
 # Old block-scaled kernel names follow the pattern:
 #   mt_{fmt}_{audio|fishspeech}_conv1d[_f16]
@@ -142,15 +148,34 @@ def parse_consolidated():
             def parse_u32_list(s):
                 return [int(x.replace("u32","").strip()) for x in s.split(",") if x.strip()]
             dil_list = parse_u32_list(dilated_m.group(1))
-            fmt_list = parse_u32_list(fmt_m.group(1))
-            bs_suffix_tpl = suffix_m.group(1) if suffix_m else "{DILATED}_{FMT}"
+            # FMT list may now be named labels (bare idents) rather than integers.
+            # Extract as strings, stripping u32 suffix if present.
+            def parse_fmt_list(s):
+                items = []
+                for x in s.split(","):
+                    x = x.strip()
+                    if not x:
+                        continue
+                    x = x.replace("u32","").strip()
+                    items.append(x)
+                return items
+            fmt_list = parse_fmt_list(fmt_m.group(1))
             fn_block = "mt_conv1d_block_scaled"
-            for dil, fmt in zip(dil_list, fmt_list):
-                suffix = bs_suffix_tpl.replace("{DILATED}", str(dil)).replace("{FMT}", str(fmt))
+            # Build consolidated variant names. For named labels the suffix is
+            # {dilated}_{label} (e.g. "0_mxfp4"). For numeric FMTs (legacy)
+            # it's {dilated}_{number}.
+            for dil, fmt_label in zip(dil_list, fmt_list):
+                # Determine integer index: if numeric, use directly; if label, look up.
+                try:
+                    fmt_idx = int(fmt_label)
+                except ValueError:
+                    entry = FMT_TABLE.get(fmt_label)
+                    fmt_idx = entry[0] if entry else None
                 block.append({
-                    "fn":      f"{fn_block}_{suffix}",
+                    "fn":      f"{fn_block}_{dil}_{fmt_label}",
                     "DILATED": dil,
-                    "FMT":     fmt,
+                    "FMT":     fmt_idx,
+                    "FMT_LABEL": fmt_label,
                 })
     return dense, block
 
@@ -180,48 +205,43 @@ def print_dense_table(dense_old, consolidated_dense):
 
 
 def print_block_scaled_table(block_old, consolidated_block):
-    # Build lookup: (dilated, fmt) → consolidated fn name
-    cons_by_key = {(r["DILATED"], r["FMT"]): r["fn"] for r in consolidated_block}
+    # Build lookup: (dilated, fmt_label) → consolidated fn name
+    cons_by_key = {(r["DILATED"], r.get("FMT_LABEL", str(r["FMT"]))): r["fn"]
+                   for r in consolidated_block}
 
     print("## Block-scaled 1D conv variants\n")
-    print(f"| {'Old kernel':<45} | {'Source file':<40} | {'D'} | {'FMT':<3} | {'Format':<12} | {'Consolidated variant':<38} | Status |")
-    print(f"|{'-'*46}|{'-'*41}|---|-----|{'-'*14}|{'-'*39}|--------|")
+    print(f"| {'Old kernel':<45} | {'Source file':<40} | {'D'} | {'Format':<12} | {'Consolidated variant':<44} | Status |")
+    print(f"|{'-'*46}|{'-'*41}|---|{'-'*14}|{'-'*45}|--------|")
 
     covered_keys = set()
     for r in block_old:
         dil  = r["dilated"]
-        fmt  = r["fmt_idx"]
         flbl = r["fmt_label"]
         fn   = r["fn"]
         file = r["file"]
         f16_note = " (T=f16, covered by generic T)" if r["explicit_f16"] else ""
-        if fmt is None:
-            cons = "???"
-            status = "UNKNOWN"
-        else:
-            cons = cons_by_key.get((dil, fmt), "NOT FOUND")
-            status = "✓" if cons != "NOT FOUND" else "MISSING"
-            if cons != "NOT FOUND":
-                covered_keys.add((dil, fmt))
-        print(f"| {fn:<45} | {file:<40} | {dil} | {fmt if fmt is not None else '?':>3} | {flbl:<12} | {cons:<38} | {status}{f16_note} |")
+        cons = cons_by_key.get((dil, flbl), "NOT FOUND")
+        status = "✓" if cons != "NOT FOUND" else "MISSING"
+        if cons != "NOT FOUND":
+            covered_keys.add((dil, flbl))
+        print(f"| {fn:<45} | {file:<40} | {dil} | {flbl:<12} | {cons:<44} | {status}{f16_note} |")
     print()
 
     # Show NEW variants (in consolidated but no old kernel)
-    new_variants = [(r["DILATED"], r["FMT"], r["fn"])
+    new_variants = [(r["DILATED"], r.get("FMT_LABEL", str(r["FMT"])), r["fn"])
                     for r in consolidated_block
-                    if (r["DILATED"], r["FMT"]) not in covered_keys]
+                    if (r["DILATED"], r.get("FMT_LABEL", str(r["FMT"]))) not in covered_keys]
     if new_variants:
         print("### New formats (consolidated only — no legacy equivalent)\n")
-        print(f"| {'Consolidated variant':<42} | {'D'} | {'FMT':<3} | {'Format':<12} | WT   | ST  | BITS |")
-        print(f"|{'-'*43}|---|-----|{'-'*14}|------|-----|------|")
-        for dil, fmt, cons_fn in new_variants:
-            flbl = fmt_label_for(fmt)
+        print(f"| {'Consolidated variant':<48} | {'D'} | {'Format':<12} | WT   | ST  | BITS |")
+        print(f"|{'-'*49}|---|{'-'*14}|------|-----|------|")
+        for dil, flbl, cons_fn in new_variants:
             entry = FMT_TABLE.get(flbl)
             if entry:
                 _, bits, wt, st = entry
             else:
                 bits, wt, st = "?", "?", "?"
-            print(f"| {cons_fn:<42} | {dil} | {fmt:>3} | {flbl:<12} | {wt:<4} | {st:<3} | {bits:>4} |")
+            print(f"| {cons_fn:<48} | {dil} | {flbl:<12} | {wt:<4} | {st:<3} | {bits:>4} |")
         print()
 
 
@@ -270,12 +290,12 @@ def main():
     )
     missing_block = sum(
         1 for r in block_old
-        if r["fmt_idx"] is not None and
-           not any(c["DILATED"]==r["dilated"] and c["FMT"]==r["fmt_idx"]
+        if not any(c["DILATED"]==r["dilated"] and
+                   c.get("FMT_LABEL", str(c["FMT"]))==r["fmt_label"]
                    for c in consolidated_block)
     )
     new_fmts = len(consolidated_block) - len({
-        (r["dilated"], r["fmt_idx"]) for r in block_old if r["fmt_idx"] is not None
+        (r["dilated"], r["fmt_label"]) for r in block_old
     })
 
     print("---\n")
