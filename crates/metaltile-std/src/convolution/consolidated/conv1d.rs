@@ -84,10 +84,9 @@ use metaltile::kernel;
 // not reference it, so the host doesn't need to provide a buffer slot
 // for that one kernel. All other rows keep `dilation`.
 //
-// The original kernel names (`audio_conv1d`, `conv1d_dilated`,
-// `conv1d_transpose`, `ffai_conv1d_transpose_depthwise`) are still
-// reachable from the parent `convolution` module — those source files
-// have not been removed yet (planned in a later phase).
+// The original source files (`audio_conv1d.rs`, `conv1d_dilated_transpose.rs`,
+// `conv1d_transpose_depthwise.rs`) have been removed; this consolidated module
+// is the sole implementation of all four dense 1D conv variants.
 
 /// Combined dense 1D conv: direct (with/without dilation) and transpose
 /// (full / depthwise) in one function. The body dispatches on TRANSPOSE,
