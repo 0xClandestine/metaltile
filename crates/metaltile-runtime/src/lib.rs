@@ -18,3 +18,14 @@ pub mod error;
 pub use context::{Context, DispatchResult, DispatchSpec, ResidentBuffer};
 pub use device::gpu_family::GpuFamily;
 pub use error::MetalTileError;
+
+#[cfg(feature = "cuda")]
+pub use device::cuda::{CudaDevice, CudaFunction, CudaModule, DeviceBuffer};
+
+#[cfg(feature = "hip")]
+pub use device::hip::{HipBuffer, HipDevice, HipKernel, HipModuleHandle};
+
+#[cfg(feature = "vulkan")]
+pub use device::vulkan::{
+    BatchDispatch, VulkanBuffer, VulkanDevice, VulkanPipeline, VulkanRawBuffer, compile_glsl_to_spv,
+};

@@ -13,7 +13,7 @@
 //!
 //! `--check`: print what would be installed without touching the binary.
 
-use std::{fs, os::unix::fs::PermissionsExt as _, path::PathBuf, process::Command};
+use std::{fs, path::PathBuf, process::Command};
 
 use crate::{
     UpdateArgs,
@@ -333,7 +333,12 @@ fn install_binary(src: &PathBuf, dest: &PathBuf) -> Result<(), crate::CliError> 
     fs::copy(src, &tmp)
         .map_err(|e| crate::CliError::Other(format!("failed to copy binary: {e}")))?;
 
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).map_err(crate::CliError::Io)?;
+    // chmod +x is Unix-only; on Windows executability is determined by file extension.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).map_err(crate::CliError::Io)?;
+    }
 
     fs::rename(&tmp, dest).map_err(|e| {
         let _ = fs::remove_file(&tmp);
