@@ -355,6 +355,14 @@ impl CudaDevice {
                 let atomics = std::env::var("METALTILE_GEMM_ATOMICS").ok().as_deref() == Some("1");
                 cublasSetAtomicsMode(h, if atomics { CUBLAS_ATOMICS_ALLOWED } else { CUBLAS_ATOMICS_NOT_ALLOWED });
             }
+            // Persistent 32MB cuBLAS workspace → GEMMs are CUDA-graph capture/replay
+            // safe (default workspace is a transient per-call alloc that the graph
+            // captures by pointer then reads after free → "unspecified launch failure"
+            // / null read on replay). Allocated once, never freed (device-lifetime).
+            let ws_bytes = 32usize * 1024 * 1024;
+            if let Ok(ws) = self.alloc_raw(ws_bytes) {
+                unsafe { cublasSetWorkspace_v2(h, ws as *mut std::ffi::c_void, ws_bytes); }
+            }
             *guard = h as usize;
         }
         Ok(*guard as cublasHandle_t)
@@ -1193,7 +1201,10 @@ impl CudaDevice {
     /// Free a pointer returned by [`alloc_raw`]. No-op on a null pointer.
     /// Eagerly releases to the driver (use [`free_raw_pooled`] on the hot path).
     pub fn free_raw(&self, ptr: CUdeviceptr) {
-        if ptr != 0 {
+        // Never cuMemFree while a CUDA graph is capturing (the graph captured this
+        // pointer → replay would read freed memory). Retain it (leaks for the
+        // transient capture; acceptable vs a corrupt graph).
+        if ptr != 0 && !self.is_capturing() {
             unsafe { cuMemFree_v2(ptr) };
         }
     }
@@ -1213,7 +1224,11 @@ impl CudaDevice {
             // release it to the driver instead of hoarding VRAM. (One cuMemFree
             // under memory pressure is acceptable vs. unbounded growth.)
             let mut parked = self.pooled_bytes.lock().unwrap();
-            if *parked + bucket > POOL_CAP_BYTES {
+            // NEVER cuMemFree while a CUDA graph is capturing: the graph records
+            // buffer pointers, so releasing one to the driver makes replay read
+            // freed memory ("unspecified launch failure"). Retain past the cap for
+            // the (transient) capture; the pool drains normally afterward.
+            if *parked + bucket > POOL_CAP_BYTES && !self.is_capturing() {
                 drop(parked);
                 unsafe { cuMemFree_v2(ptr) };
                 return;

@@ -180,6 +180,9 @@ unsafe extern "C" {
     pub fn cublasCreate_v2(handle: *mut cublasHandle_t) -> cublasStatus_t;
     pub fn cublasDestroy_v2(handle: cublasHandle_t) -> cublasStatus_t;
     pub fn cublasSetStream_v2(handle: cublasHandle_t, stream: CUstream) -> cublasStatus_t;
+    /// Persistent workspace so cuBLAS GEMMs are CUDA-graph capture/replay-safe (the
+    /// default workspace is a transient per-call alloc → replay reads freed memory).
+    pub fn cublasSetWorkspace_v2(handle: cublasHandle_t, workspace: *mut c_void, workspace_bytes: usize) -> cublasStatus_t;
     /// Allow/forbid atomic-accumulation kernels (split-K). Forbidding → deterministic.
     pub fn cublasSetAtomicsMode(handle: cublasHandle_t, mode: c_int) -> cublasStatus_t;
     pub fn cublasSetMathMode(handle: cublasHandle_t, mode: c_int) -> cublasStatus_t;
