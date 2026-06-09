@@ -11,6 +11,11 @@ build = "bin/build.rs"
 [lints]
 workspace = true
 
+[features]
+# Run the registered #[test_kernel] corpus on the CUDA backend
+# (tests/cuda_kernel_corpus.rs). Forwards to metaltile-runtime/cuda.
+cuda = ["metaltile-runtime/cuda"]
+
 [[bin]]
 name = "__tile_runner"
 path = "bin/runner.rs"
@@ -26,3 +31,7 @@ insta.workspace = true
 bytemuck.workspace = true
 # GPU dispatch in probe / GPU-correctness integration tests.
 metaltile-runtime.workspace = true
+# CUDA corpus tests (tests/cuda_kernel_corpus.rs, tests/cuda_bench_corpus.rs)
+# name these crates directly for DType + CudaGenerator.
+metaltile-core.workspace = true
+metaltile-codegen.workspace = true
