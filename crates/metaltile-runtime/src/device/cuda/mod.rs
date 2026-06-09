@@ -164,6 +164,15 @@ pub struct CudaFunction {
     func: CUfunction,
 }
 
+/// One `cuLaunchKernel` kernel-param slot, in emitted-signature order:
+/// either a pointer param (index into `Prepared::dev_ptrs`) or a by-value
+/// scalar (index into `Prepared::scalars` — the driver copies the value
+/// from the host pointer at launch).
+enum ArgSlot {
+    Buf(usize),
+    Scalar(usize),
+}
+
 /// A compiled + resident kernel ready to launch repeatedly. See
 /// [`CudaDevice::prepare`]. Holds its device resources alive; `args()`
 /// hands out raw kernel-param pointers into `dev_ptrs`/`scalars`, so those
@@ -174,22 +183,22 @@ struct Prepared<'d> {
     dev_bufs: Vec<DeviceBuffer<'d>>,
     dev_ptrs: Vec<CUdeviceptr>,
     scalars: Vec<Vec<u8>>,
+    arg_slots: Vec<ArgSlot>,
     out_meta: Vec<Option<(String, usize)>>,
     shared_bytes: u32,
 }
 
 impl Prepared<'_> {
-    /// Build the `cuLaunchKernel` param array: param device-ptrs first, then
-    /// scalar values, each a raw pointer into our stable `dev_ptrs`/`scalars`.
+    /// Build the `cuLaunchKernel` param array in emitted-signature order,
+    /// each entry a raw pointer into our stable `dev_ptrs`/`scalars`.
     fn args(&self) -> Vec<*mut c_void> {
-        let mut args: Vec<*mut c_void> = Vec::with_capacity(self.dev_ptrs.len() + self.scalars.len());
-        for p in &self.dev_ptrs {
-            args.push(p as *const CUdeviceptr as *mut c_void);
-        }
-        for s in &self.scalars {
-            args.push(s.as_ptr() as *mut c_void);
-        }
-        args
+        self.arg_slots
+            .iter()
+            .map(|slot| match slot {
+                ArgSlot::Buf(i) => &self.dev_ptrs[*i] as *const CUdeviceptr as *mut c_void,
+                ArgSlot::Scalar(i) => self.scalars[*i].as_ptr() as *mut c_void,
+            })
+            .collect()
     }
 }
 
@@ -247,12 +256,14 @@ pub struct CudaDevice {
     ///
     /// Key = bucket size in bytes (NOT the requested len). `pooled_bytes`
     /// tracks the total parked so we can cap the pool ([`POOL_CAP_BYTES`]) and
-    /// evict beyond it rather than hoard VRAM. Gated by `METALTILE_POOL_ALLOC`
-    /// ([`pool_enabled`]): off ⇒ direct `cuMemAlloc`/`cuMemFree` (clean A/B).
+    /// evict beyond it rather than hoard VRAM. Default-on; set
+    /// `METALTILE_POOL_ALLOC_OFF=1` ([`pool_enabled`]) for direct
+    /// `cuMemAlloc`/`cuMemFree` (clean A/B).
     pool: Mutex<HashMap<usize, Vec<CUdeviceptr>>>,
     /// Total bytes currently parked in `pool` (sum of bucket_size × count).
     pooled_bytes: Mutex<usize>,
-    /// `METALTILE_POOL_ALLOC` is set ⇒ caching allocator active. Cached once.
+    /// Caching allocator active unless `METALTILE_POOL_ALLOC_OFF` is set.
+    /// Cached once at create().
     pool_enabled: bool,
     /// Pinned host-staging buffers for async H2D: free-list by size, plus the
     /// in-flight list whose copies haven't been synced yet (reclaimed on the next
@@ -286,12 +297,17 @@ pub struct CudaDevice {
 /// pick efficient non-split-K tensor-op kernels for the Nemotron prefill GEMMs.
 const CUBLASLT_WORKSPACE_BYTES: usize = 32 * 1024 * 1024;
 
-// The context is current on this struct's lifetime; we keep it single-
-// device, single-context (Phase 1). Send is sound because we never share
-// the raw pointers across threads concurrently in the smoke path. Sync is
-// sound for serialized submission (a higher layer holds the device in an
-// `Arc` to keep its context alive for persistent buffers; GPU work is
-// submitted from one logical owner at a time).
+// SAFETY / THREADING CONTRACT: `cuCtxCreate` makes the context current on
+// the CREATING thread only, so every driver call in this module assumes it
+// runs on the thread that called [`CudaDevice::create`]. Calls from any
+// other thread see no current context and fail with a clean
+// CUDA_ERROR_INVALID_CONTEXT (interior state is Mutex-guarded, so there is
+// no data race — just an error). Send/Sync are asserted so a higher layer
+// can hold the device in an `Arc`/static to keep the context (and thus
+// persistent device buffers) alive; all GPU submission must stay on the
+// creating thread. The runtime and test harness are single-threaded today;
+// true multi-thread submission would need cuDevicePrimaryCtxRetain +
+// cuCtxSetCurrent guards at every entry point.
 unsafe impl Send for CudaDevice {}
 unsafe impl Sync for CudaDevice {}
 
@@ -320,7 +336,11 @@ impl CudaDevice {
             let mut ctx: CUcontext = ptr::null_mut();
             cu_check(cuCtxCreate_v2(&mut ctx, 0, dev), "cuCtxCreate")?;
             let mut stream: CUstream = ptr::null_mut();
-            cu_check(cuStreamCreate(&mut stream, CU_STREAM_NON_BLOCKING), "cuStreamCreate")?;
+            let sres = cuStreamCreate(&mut stream, CU_STREAM_NON_BLOCKING);
+            if sres != CUDA_SUCCESS {
+                cuCtxDestroy_v2(ctx);
+                cu_check(sres, "cuStreamCreate")?;
+            }
             // Caching allocator DEFAULT-ON (alloc()/Drop route through it): nsys
             // showed raw cuMemAlloc/cuMemFree at 62% of CUDA API time. METALTILE_POOL_ALLOC_OFF=1
             // restores direct driver alloc/free (clean A/B). 4GB pool cap (POOL_CAP_BYTES).
@@ -809,9 +829,11 @@ impl CudaDevice {
         // Each "group" has group_size[i]=1 (one GEMM with its own m).
         let n_i = n as i32;
         let k_i = k as i32;
-        // alpha/beta: single scalar shared across all groups (same as GemmEx)
-        let alpha_scalar: f32 = 1.0;
-        let beta_scalar:  f32 = 0.0;
+        // alpha/beta: the grouped API takes HOST ARRAYS with one entry per
+        // group (unlike GemmEx's single scalar) — a lone scalar ref would be
+        // read group_count entries deep (OOB host read for group_count > 1).
+        let alphas: Vec<f32> = vec![1.0f32; group_count];
+        let betas: Vec<f32> = vec![0.0f32; group_count];
         let transas: Vec<c_int> = vec![CUBLAS_OP_T; group_count];
         let transbs: Vec<c_int> = vec![CUBLAS_OP_N; group_count];
         // m_array[i] = n (cm rows = output cols), n_array[i] = m_per_group[i] (cm cols = token rows)
@@ -831,8 +853,8 @@ impl CudaDevice {
         // cuMemAlloc + 3× cuMemcpyHtoD + 3× cuMemFree per call — each driver
         // alloc/free is a device-wide sync that serialized the stream per grouped
         // GEMM). `alloc_raw`/`free_raw_pooled` recycle the buffer across calls when
-        // METALTILE_POOL_ALLOC is set (the raw driver alloc here otherwise bypassed
-        // the caching allocator entirely).
+        // the pool is enabled (default; the raw driver alloc here otherwise
+        // bypassed the caching allocator entirely).
         let ptr_bytes = group_count * 8; // each pointer is 8 bytes (u64)
         let triple_bytes = ptr_bytes * 3;
         // Layout: [A(W) | B(X) | C(Out)] contiguous.
@@ -864,14 +886,14 @@ impl CudaDevice {
                 m_arr.as_ptr(),
                 n_arr.as_ptr(),
                 k_arr.as_ptr(),
-                &alpha_scalar as *const f32 as *const c_void,
+                alphas.as_ptr() as *const c_void,
                 a_dev as *const *const c_void,
                 cdt,
                 lda.as_ptr(),
                 b_dev as *const *const c_void,
                 cdt,
                 ldb.as_ptr(),
-                &beta_scalar as *const f32 as *const c_void,
+                betas.as_ptr() as *const c_void,
                 c_dev as *mut *mut c_void,
                 cdt,
                 ldc.as_ptr(),
@@ -1014,16 +1036,39 @@ impl CudaDevice {
         let cccl_path = {
             let fixed1 = format!("{cuda_root}/targets/sbsa-linux/include/cccl");
             let fixed2 = format!("{cuda_root}/targets/x86_64-linux/include/cccl");
-            // Also try the versioned cuda-13.x path (some distros install both).
-            let by_ver = std::fs::read_dir(format!("{cuda_root}-{}.{}/targets",
-                    self.cc_major, self.cc_minor))
-                .ok()
-                .and_then(|mut rd| rd.next())
-                .and_then(|e| e.ok())
-                .map(|e| format!("{}/include/cccl", e.path().display()));
+            // Versioned TOOLKIT installs sit as `<root>-<toolkit-version>`
+            // siblings of the unversioned root (e.g. /usr/local/cuda-13.0);
+            // probe those, newest first. (The toolkit version is unrelated to
+            // the device's compute capability — don't derive paths from it.)
+            let by_toolkit = || -> Option<String> {
+                let root = std::path::Path::new(&cuda_root);
+                let stem = root.file_name()?.to_str()?.to_string();
+                let mut versioned: Vec<std::path::PathBuf> = std::fs::read_dir(root.parent()?)
+                    .ok()?
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.starts_with(&format!("{stem}-")))
+                    })
+                    .collect();
+                versioned.sort();
+                for dir in versioned.into_iter().rev() {
+                    if let Ok(rd) = std::fs::read_dir(dir.join("targets")) {
+                        for t in rd.flatten() {
+                            let cccl = t.path().join("include/cccl");
+                            if cccl.is_dir() {
+                                return Some(cccl.display().to_string());
+                            }
+                        }
+                    }
+                }
+                None
+            };
             if std::path::Path::new(&fixed1).exists() { Some(fixed1) }
             else if std::path::Path::new(&fixed2).exists() { Some(fixed2) }
-            else { by_ver.filter(|p| std::path::Path::new(p).exists()) }
+            else { by_toolkit() }
         };
         let cccl_inc = cccl_path.as_ref().map(|p| CString::new(format!("--include-path={p}")).unwrap());
         // Disable contraction of `a*b+c` into FMA by default: the CPU oracle
@@ -1189,7 +1234,8 @@ impl CudaDevice {
             cu_check(unsafe { cuMemAlloc_v2(&mut ptr, bucket) }, "cuMemAlloc")?;
             return Ok(ptr);
         }
-        // Default (pool off): legacy exact-size pool reuse, else fresh alloc.
+        // Pool off: direct driver alloc. The exact-size pop only ever serves
+        // buffers parked mid-capture by `free_raw_pooled` (see there).
         if let Some(ptr) = self.pool.lock().unwrap().get_mut(&len).and_then(|v| v.pop()) {
             return Ok(ptr);
         }
@@ -1213,7 +1259,9 @@ impl CudaDevice {
     /// instead of releasing it to the driver — avoids a synchronous
     /// `cuMemFree`/`cuMemAlloc` round-trip (each a device-wide sync) on the next
     /// same-bucket request. `len` MUST be the value passed to [`alloc_raw`] so
-    /// the bucket re-derives to the one the buffer was allocated as.
+    /// the bucket re-derives to the one the buffer was allocated as. With the
+    /// pool disabled (`METALTILE_POOL_ALLOC_OFF`) this releases to the driver
+    /// directly (except mid-graph-capture, where the pointer must stay live).
     pub fn free_raw_pooled(&self, ptr: CUdeviceptr, len: usize) {
         if ptr == 0 {
             return;
@@ -1238,9 +1286,15 @@ impl CudaDevice {
             self.pool.lock().unwrap().entry(bucket).or_default().push(ptr);
             return;
         }
-        // Default (pool off): legacy exact-size retain (unbounded; matches the
-        // prior committed behaviour for A/B parity when the flag is unset).
-        self.pool.lock().unwrap().entry(len).or_default().push(ptr);
+        // Pool off: release to the driver — EXCEPT mid-capture (the graph
+        // recorded this pointer; freeing it would make replay read freed
+        // memory). Capture-parked buffers are reused by alloc_raw or freed
+        // on Drop.
+        if self.is_capturing() {
+            self.pool.lock().unwrap().entry(len).or_default().push(ptr);
+            return;
+        }
+        unsafe { cuMemFree_v2(ptr) };
     }
 
     /// Copy host bytes into an existing device allocation (host→device), ASYNC
@@ -1269,17 +1323,14 @@ impl CudaDevice {
                 "cuMemcpyHtoDAsync(large)",
             );
         }
-        let pinned = self
-            .pinned_free
-            .lock()
-            .unwrap()
-            .get_mut(&len)
-            .and_then(|v| v.pop())
-            .unwrap_or_else(|| {
+        let pinned = match self.pinned_free.lock().unwrap().get_mut(&len).and_then(|v| v.pop()) {
+            Some(p) => p,
+            None => {
                 let mut p: *mut c_void = ptr::null_mut();
-                unsafe { cuMemAllocHost_v2(&mut p, len) };
+                cu_check(unsafe { cuMemAllocHost_v2(&mut p, len) }, "cuMemAllocHost")?;
                 p as usize
-            });
+            }
+        };
         unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), pinned as *mut u8, len) };
         cu_check(
             unsafe { cuMemcpyHtoDAsync_v2(ptr, pinned as *const c_void, len, self.stream) },
@@ -1439,11 +1490,18 @@ impl CudaDevice {
     /// Finish capture → instantiate an executable graph. Replay with `graph_launch`.
     pub fn end_capture(&self) -> Result<CUgraphExec, MetalTileError> {
         let mut graph: CUgraph = ptr::null_mut();
-        cu_check(unsafe { cuStreamEndCapture(self.stream, &mut graph) }, "cuStreamEndCapture")?;
+        let res = cu_check(unsafe { cuStreamEndCapture(self.stream, &mut graph) }, "cuStreamEndCapture");
+        // Clear the flag even on failure — a stuck `capturing` would make
+        // every later free_raw/free_raw_pooled leak "for the capture" forever.
         self.capturing.store(false, std::sync::atomic::Ordering::SeqCst);
+        res?;
         let mut exec: CUgraphExec = ptr::null_mut();
-        cu_check(unsafe { cuGraphInstantiateWithFlags(&mut exec, graph, 0) }, "cuGraphInstantiate")?;
+        let inst = cu_check(
+            unsafe { cuGraphInstantiateWithFlags(&mut exec, graph, 0) },
+            "cuGraphInstantiate",
+        );
         unsafe { cuGraphDestroy(graph) };
+        inst?;
         Ok(exec)
     }
 
@@ -1466,6 +1524,37 @@ impl CudaDevice {
             cu_check(unsafe { cuGraphLaunch(exec, self.stream) }, "cuGraphLaunch(batch)")?;
         }
         self.synchronize()
+    }
+
+    /// Dispatch-path upload with ZEROED SLACK after the payload. Grid3D
+    /// kernels carry no bounds guard (Metal parity), so a ceil-div launch
+    /// runs tail threads whose loads/stores walk past a buffer's logical
+    /// end. The Metal harness survives that because MTLBuffers are
+    /// page-granular and zero-filled; a recycled CUDA pool bucket instead
+    /// hands those threads garbage (e.g. a gather kernel loading a garbage
+    /// row index → wild address → sticky illegal-memory-access poisoning
+    /// the whole context). Mirror the Metal environment: over-allocate and
+    /// zero-fill so tail threads read benign zeros and their stores land in
+    /// owned slack. Dispatch/test path only — the engine's `alloc_raw`/
+    /// `htod` hot path is unaffected.
+    fn upload_padded(&self, data: &[u8]) -> Result<DeviceBuffer<'_>, MetalTileError> {
+        const DISPATCH_PAD_BYTES: usize = 4096;
+        let buf = self.alloc(data.len() + DISPATCH_PAD_BYTES)?;
+        cu_check(
+            unsafe { cuMemsetD8Async(buf.ptr, 0, buf.len, self.stream) },
+            "cuMemsetD8Async(dispatch pad)",
+        )?;
+        if !data.is_empty() {
+            cu_check(
+                unsafe {
+                    cuMemcpyHtoDAsync_v2(buf.ptr, data.as_ptr() as *const c_void, data.len(), self.stream)
+                },
+                "cuMemcpyHtoDAsync(upload_padded)",
+            )?;
+        }
+        // Sync so the pageable `data` borrow can end (same contract as upload).
+        cu_check(unsafe { cuStreamSynchronize(self.stream) }, "cuStreamSynchronize(upload_padded)")?;
+        Ok(buf)
     }
 
     /// A compiled+resident kernel: module, function, device buffers, and the
@@ -1493,25 +1582,36 @@ impl CudaDevice {
         }
         let module = self.compile(&src, &format!("{}.cu", kernel.name))?;
         let func = module.function(&kernel.name)?;
-        // Dynamic shared-memory size for this launch geometry.
-        let shared_bytes = cg.shared_bytes(kernel, block[0]) as u32;
+        // Dynamic shared-memory size for this launch geometry (per-warp
+        // arrays scale with the TOTAL thread count, x·y·z).
+        let shared_bytes = cg.shared_bytes(kernel, block[0] * block[1] * block[2]) as u32;
 
-        // 2. Allocate + upload each param buffer (in kernel.params order).
-        //    Strided params are not yet supported by the emitter (it errors
-        //    in generate() above), so every param here is Tensor/Scalar.
+        // 2. Marshal each param (in kernel.params order) into arg_slots.
+        //    Tensor/Strided params upload to a device buffer; Scalar params
+        //    stay HOST bytes passed by value through kernelParams — the
+        //    emitted signature takes them by value (`float x`), so a device
+        //    pointer here would be reinterpreted as the scalar's bytes.
         // dev_bufs / dev_ptrs / out_meta are kept index-aligned. Strided
         // params add 2 extra companion buffers, so an output's buffer is NOT
         // at its kernel.params index — out_meta carries the (name,len) for
         // read-back so the alignment is by buffer, not by param.
         let mut dev_bufs: Vec<DeviceBuffer> = Vec::new();
         let mut dev_ptrs: Vec<CUdeviceptr> = Vec::new();
+        let mut scalars: Vec<Vec<u8>> = Vec::new();
+        let mut arg_slots: Vec<ArgSlot> = Vec::new();
         let mut out_meta: Vec<Option<(String, usize)>> = Vec::new();
         for p in &kernel.params {
             let bytes = buffers.get(&p.name).ok_or_else(|| {
                 MetalTileError::Dispatch(format!("missing buffer for param '{}'", p.name))
             })?;
-            let buf = self.upload(bytes)?;
+            if p.kind == metaltile_core::ir::ParamKind::Scalar {
+                scalars.push(bytes.clone());
+                arg_slots.push(ArgSlot::Scalar(scalars.len() - 1));
+                continue;
+            }
+            let buf = self.upload_padded(bytes)?;
             dev_ptrs.push(buf.device_ptr());
+            arg_slots.push(ArgSlot::Buf(dev_ptrs.len() - 1));
             out_meta.push(if p.is_output { Some((p.name.clone(), bytes.len())) } else { None });
             dev_bufs.push(buf);
 
@@ -1525,23 +1625,29 @@ impl CudaDevice {
                         Some(b) => b.clone(),
                         None => synth_strided_meta(&p.shape, suffix == "_strides"),
                     };
-                    let mb = self.upload(&meta)?;
+                    let mb = self.upload_padded(&meta)?;
                     dev_ptrs.push(mb.device_ptr());
+                    arg_slots.push(ArgSlot::Buf(dev_ptrs.len() - 1));
                     out_meta.push(None);
                     dev_bufs.push(mb);
                 }
             }
         }
 
-        // 3. Scalar arg storage: constexprs (signature order) then the
+        // 3. Trailing by-value args: constexprs (signature order) then the
         //    synthetic _n_elems for Elementwise.
-        let mut scalars: Vec<Vec<u8>> = Vec::new();
         for ce in &kernel.constexprs {
             let name = ce.name.name();
-            let bytes = buffers.get(name).ok_or_else(|| {
-                MetalTileError::Dispatch(format!("missing constexpr '{name}'"))
-            })?;
-            scalars.push(bytes.clone());
+            // No binding = the constexpr is dead in this variant (e.g. a
+            // shared signature whose pruned body never reads it) — bind a
+            // zero of the declared width, mirroring the Metal dispatch path
+            // which binds a dummy buffer instead of erroring.
+            let bytes = match buffers.get(name) {
+                Some(b) => b.clone(),
+                None => vec![0u8; ce.dtype.size_bytes().max(4)],
+            };
+            scalars.push(bytes);
+            arg_slots.push(ArgSlot::Scalar(scalars.len() - 1));
         }
         if kernel.mode == metaltile_core::ir::KernelMode::Elementwise {
             // Bounds = element count of the first output param.
@@ -1555,6 +1661,7 @@ impl CudaDevice {
                 })
                 .unwrap_or(0);
             scalars.push(n_elems.to_le_bytes().to_vec());
+            arg_slots.push(ArgSlot::Scalar(scalars.len() - 1));
         }
 
         Ok(Prepared {
@@ -1563,6 +1670,7 @@ impl CudaDevice {
             dev_bufs,
             dev_ptrs,
             scalars,
+            arg_slots,
             out_meta,
             shared_bytes,
         })
@@ -1639,7 +1747,9 @@ impl CudaDevice {
             let mut samples = Vec::with_capacity(iters as usize);
             for _ in 0..iters {
                 ensure_dynamic_smem(prep.func.func, prep.shared_bytes)?;
-                cu_check(unsafe { cuEventRecord(start, ptr::null_mut()) }, "cuEventRecord(start)")?;
+                // Events + launch all ride self.stream — recording on the null
+                // stream would not order against the non-blocking work stream.
+                cu_check(unsafe { cuEventRecord(start, self.stream) }, "cuEventRecord(start)")?;
                 cu_check(
                     unsafe {
                         cuLaunchKernel(
@@ -1647,14 +1757,14 @@ impl CudaDevice {
                             grid[0], grid[1], grid[2],
                             block[0], block[1], block[2],
                             prep.shared_bytes,
-                            ptr::null_mut(),
+                            self.stream,
                             args.as_mut_ptr(),
                             ptr::null_mut(),
                         )
                     },
                     "cuLaunchKernel",
                 )?;
-                cu_check(unsafe { cuEventRecord(stop, ptr::null_mut()) }, "cuEventRecord(stop)")?;
+                cu_check(unsafe { cuEventRecord(stop, self.stream) }, "cuEventRecord(stop)")?;
                 cu_check(unsafe { cuEventSynchronize(stop) }, "cuEventSynchronize")?;
                 let mut ms: f32 = 0.0;
                 cu_check(
@@ -1684,6 +1794,42 @@ impl CudaDevice {
 
 impl Drop for CudaDevice {
     fn drop(&mut self) {
+        // Drain the stream before anything is freed — an async H2D copy
+        // still in flight would otherwise DMA from pinned host memory we
+        // are about to cuMemFreeHost.
+        unsafe { cuStreamSynchronize(self.stream) };
+        // Library handles + pinned host memory first: cuCtxDestroy does not
+        // release host pinned allocations, and destroying handles after their
+        // context is gone is undefined.
+        if let Ok(mut h) = self.cublas.lock()
+            && *h != 0
+        {
+            unsafe { cublasDestroy_v2(*h as cublasHandle_t) };
+            *h = 0;
+        }
+        if let Ok(mut lt) = self.cublaslt.lock()
+            && lt.0 != 0
+        {
+            unsafe {
+                cublasLtDestroy(lt.0 as cublasLtHandle_t);
+                if lt.1 != 0 {
+                    cuMemFree_v2(lt.1 as CUdeviceptr);
+                }
+            }
+            *lt = (0, 0);
+        }
+        if let Ok(mut free) = self.pinned_free.lock() {
+            for (_, ptrs) in free.drain() {
+                for p in ptrs {
+                    unsafe { cuMemFreeHost(p as *mut c_void) };
+                }
+            }
+        }
+        if let Ok(mut inflight) = self.pinned_inflight.lock() {
+            for (p, _) in inflight.drain(..) {
+                unsafe { cuMemFreeHost(p as *mut c_void) };
+            }
+        }
         if let Ok(mut pool) = self.pool.lock() {
             for (_, ptrs) in pool.drain() {
                 for p in ptrs {
@@ -1693,6 +1839,9 @@ impl Drop for CudaDevice {
         }
         if let Ok(mut parked) = self.pooled_bytes.lock() {
             *parked = 0;
+        }
+        if !self.stream.is_null() {
+            unsafe { cuStreamDestroy_v2(self.stream) };
         }
         if !self.ctx.is_null() {
             unsafe { cuCtxDestroy_v2(self.ctx) };

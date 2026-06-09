@@ -60,42 +60,58 @@ extern "C" int moe_grouped_gemm_cutlass(
         rowoff += m;
     }
 
-    // device arrays
-    cutlass::gemm::GemmCoord* ps_d; ElementA** pA_d; ElementB** pB_d; ElementOutput** pC_d;
-    StrideI *lda_d,*ldb_d,*ldc_d;
-    size_t gp = n_groups;
-    cudaMallocAsync((void**)&ps_d, gp*sizeof(cutlass::gemm::GemmCoord), stream);
-    cudaMallocAsync((void**)&pA_d, gp*sizeof(ElementA*), stream);
-    cudaMallocAsync((void**)&pB_d, gp*sizeof(ElementB*), stream);
-    cudaMallocAsync((void**)&pC_d, gp*sizeof(ElementOutput*), stream);
-    cudaMallocAsync((void**)&lda_d, gp*sizeof(StrideI), stream);
-    cudaMallocAsync((void**)&ldb_d, gp*sizeof(StrideI), stream);
-    cudaMallocAsync((void**)&ldc_d, gp*sizeof(StrideI), stream);
-    cudaMemcpyAsync(ps_d, ps.data(), gp*sizeof(cutlass::gemm::GemmCoord), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(pA_d, pA.data(), gp*sizeof(ElementA*), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(pB_d, pB.data(), gp*sizeof(ElementB*), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(pC_d, pC.data(), gp*sizeof(ElementOutput*), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(lda_d, lda.data(), gp*sizeof(StrideI), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(ldb_d, ldb.data(), gp*sizeof(StrideI), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(ldc_d, ldc.data(), gp*sizeof(StrideI), cudaMemcpyHostToDevice, stream);
-
-    int tbc = Gemm::sufficient(ps.data(), n_groups);
-    if (!tbc) return 10;
-    typename Gemm::EpilogueOutputOp::Params epi(ElementAccumulator(1), ElementAccumulator(0));
-    typename Gemm::Arguments args(ps_d, n_groups, tbc, epi,
-        pA_d, pB_d, pC_d, pC_d, lda_d, ldb_d, ldc_d, ldc_d, ps.data());
-
-    Gemm gemm;
-    size_t ws = gemm.get_workspace_size(args);
+    // device arrays — zero-init so the cleanup path can free unconditionally,
+    // and every alloc/copy is checked (error code 3) with a goto-cleanup that
+    // releases whatever was allocated before the failure.
+    cutlass::gemm::GemmCoord* ps_d = nullptr;
+    ElementA** pA_d = nullptr; ElementB** pB_d = nullptr; ElementOutput** pC_d = nullptr;
+    StrideI *lda_d = nullptr, *ldb_d = nullptr, *ldc_d = nullptr;
     uint8_t* work = nullptr;
-    if (ws) cudaMallocAsync((void**)&work, ws, stream);
-    cutlass::Status st = gemm.initialize(args, work, stream);
-    if (st != cutlass::Status::kSuccess) return 1;
-    st = gemm.run(stream);
-    if (st != cutlass::Status::kSuccess) return 2;
+    size_t gp = n_groups;
+    int rc = 0;
+#define MT_CUDA_CK(call) do { if ((call) != cudaSuccess) { rc = 3; goto cleanup; } } while (0)
+    MT_CUDA_CK(cudaMallocAsync((void**)&ps_d, gp*sizeof(cutlass::gemm::GemmCoord), stream));
+    MT_CUDA_CK(cudaMallocAsync((void**)&pA_d, gp*sizeof(ElementA*), stream));
+    MT_CUDA_CK(cudaMallocAsync((void**)&pB_d, gp*sizeof(ElementB*), stream));
+    MT_CUDA_CK(cudaMallocAsync((void**)&pC_d, gp*sizeof(ElementOutput*), stream));
+    MT_CUDA_CK(cudaMallocAsync((void**)&lda_d, gp*sizeof(StrideI), stream));
+    MT_CUDA_CK(cudaMallocAsync((void**)&ldb_d, gp*sizeof(StrideI), stream));
+    MT_CUDA_CK(cudaMallocAsync((void**)&ldc_d, gp*sizeof(StrideI), stream));
+    MT_CUDA_CK(cudaMemcpyAsync(ps_d, ps.data(), gp*sizeof(cutlass::gemm::GemmCoord), cudaMemcpyHostToDevice, stream));
+    MT_CUDA_CK(cudaMemcpyAsync(pA_d, pA.data(), gp*sizeof(ElementA*), cudaMemcpyHostToDevice, stream));
+    MT_CUDA_CK(cudaMemcpyAsync(pB_d, pB.data(), gp*sizeof(ElementB*), cudaMemcpyHostToDevice, stream));
+    MT_CUDA_CK(cudaMemcpyAsync(pC_d, pC.data(), gp*sizeof(ElementOutput*), cudaMemcpyHostToDevice, stream));
+    MT_CUDA_CK(cudaMemcpyAsync(lda_d, lda.data(), gp*sizeof(StrideI), cudaMemcpyHostToDevice, stream));
+    MT_CUDA_CK(cudaMemcpyAsync(ldb_d, ldb.data(), gp*sizeof(StrideI), cudaMemcpyHostToDevice, stream));
+    MT_CUDA_CK(cudaMemcpyAsync(ldc_d, ldc.data(), gp*sizeof(StrideI), cudaMemcpyHostToDevice, stream));
 
-    cudaFreeAsync(ps_d, stream); cudaFreeAsync(pA_d, stream); cudaFreeAsync(pB_d, stream);
-    cudaFreeAsync(pC_d, stream); cudaFreeAsync(lda_d, stream); cudaFreeAsync(ldb_d, stream);
-    cudaFreeAsync(ldc_d, stream); if (work) cudaFreeAsync(work, stream);
-    return 0;
+    // Inner scope: every variable below has an initializer, and C++ forbids a
+    // goto that jumps over one while it is still in scope at the label.
+    {
+        int tbc = Gemm::sufficient(ps.data(), n_groups);
+        if (!tbc) { rc = 10; goto cleanup; }
+        typename Gemm::EpilogueOutputOp::Params epi(ElementAccumulator(1), ElementAccumulator(0));
+        typename Gemm::Arguments args(ps_d, n_groups, tbc, epi,
+            pA_d, pB_d, pC_d, pC_d, lda_d, ldb_d, ldc_d, ldc_d, ps.data());
+
+        Gemm gemm;
+        size_t ws = gemm.get_workspace_size(args);
+        if (ws) MT_CUDA_CK(cudaMallocAsync((void**)&work, ws, stream));
+        cutlass::Status st = gemm.initialize(args, work, stream);
+        if (st != cutlass::Status::kSuccess) { rc = 1; goto cleanup; }
+        st = gemm.run(stream);
+        if (st != cutlass::Status::kSuccess) { rc = 2; goto cleanup; }
+    }
+#undef MT_CUDA_CK
+
+cleanup:
+    if (ps_d) cudaFreeAsync(ps_d, stream);
+    if (pA_d) cudaFreeAsync(pA_d, stream);
+    if (pB_d) cudaFreeAsync(pB_d, stream);
+    if (pC_d) cudaFreeAsync(pC_d, stream);
+    if (lda_d) cudaFreeAsync(lda_d, stream);
+    if (ldb_d) cudaFreeAsync(ldb_d, stream);
+    if (ldc_d) cudaFreeAsync(ldc_d, stream);
+    if (work) cudaFreeAsync(work, stream);
+    return rc;
 }

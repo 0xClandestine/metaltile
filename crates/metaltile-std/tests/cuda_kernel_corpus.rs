@@ -41,7 +41,23 @@ fn read_raw_f32(bytes: &[u8], dt: DType, n: usize) -> Vec<f32> {
 }
 
 fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
+    // Non-finite-aware: a plain `(x - y).abs()` fold has two holes. (1)
+    // f32::max DISCARDS NaN operands, so an all-NaN output scores 0.0 and
+    // passes. (2) Agreeing non-finites must PASS: logits-mask kernels write
+    // -inf on both sides, and (-inf) - (-inf) is NaN. Bitwise-equal values
+    // (covers equal infinities) and NaN-on-both-sides count as agreement;
+    // any one-sided NaN/inf maps to +inf so garbage fails loudly.
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| {
+            if x == y || (x.is_nan() && y.is_nan()) {
+                0.0
+            } else {
+                let d = (x - y).abs();
+                if d.is_nan() { f32::INFINITY } else { d }
+            }
+        })
+        .fold(0.0f32, f32::max)
 }
 
 /// Kernels that GENERATE but don't yet match the oracle on CUDA, with
@@ -51,6 +67,15 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
 const KNOWN_HARD: &[(&str, &str)] = &[
     // f32-only, ~3× over a tight 2e-2 tol; error grows with head_dim
     // (flash-attention accumulation over K=head_dim). d64 + all f16/bf16 pass.
+    //
+    // f16-only, DETERMINISTIC max|Δ|=5.0e-1 vs 5e-2 tol: the no_gqa fixture
+    // is the file's documented gain-sensitive 3-step recurrence (its f32 tol
+    // was already loosened 5e-3 → 1e-2 for the same drift). The f16-rounded
+    // input set hits a `(v - kv_mem)` cancellation that amplifies CUDA-vs-
+    // oracle transcendental rounding (exp/log/rsqrt ulp differences — NOT FMA
+    // contraction: identical with MT_FMAD=0). f32, bf16, and the gqa fixture
+    // all pass on the same kernel.
+    ("test_mt_gated_delta_prep_chunk_no_gqa [f16]", "cancellation-amplified rounding"),
 ];
 
 fn known_hard(name: &str) -> bool {
@@ -145,7 +170,9 @@ fn run_corpus_on_cuda() {
                     if (worst as f64) <= tol {
                         pass += 1;
                         pass_names.push(label);
-                    } else if known_hard(t.name()) {
+                    // Match on the dtype-qualified label so a KNOWN_HARD entry
+                    // can be scoped to one dtype without masking the others.
+                    } else if known_hard(&label) {
                         known += 1;
                     } else {
                         mismatch += 1;
@@ -154,7 +181,7 @@ fn run_corpus_on_cuda() {
                 }
                 Err(e) => {
                     let msg = e.to_string();
-                    if known_hard(t.name()) {
+                    if known_hard(&label) {
                         known += 1;
                     } else if is_unsupported(&msg) {
                         unsupported += 1;

@@ -234,6 +234,52 @@ fn rms_norm_ir() -> Kernel {
     k
 }
 
+/// out[i] = x[i] * s — `s` is a `ParamKind::Scalar` param sandwiched
+/// BETWEEN the two tensor params. Pins the scalar-param ABI end-to-end
+/// through `run_kernel`: the emitted signature takes `float s` by value,
+/// and the runtime must pass the raw scalar bytes (not a device pointer)
+/// in that exact kernelParams slot.
+fn scale_by_param_ir() -> Kernel {
+    let mut k = Kernel::new("scale_by_param");
+    k.params.push(Param {
+        name: "x".into(),
+        dtype: DType::F32,
+        shape: Shape::scalar(),
+        is_output: false,
+        kind: ParamKind::Tensor,
+    });
+    k.params.push(Param {
+        name: "s".into(),
+        dtype: DType::F32,
+        shape: Shape::scalar(),
+        is_output: false,
+        kind: ParamKind::Scalar,
+    });
+    k.params.push(Param {
+        name: "out".into(),
+        dtype: DType::F32,
+        shape: Shape::scalar(),
+        is_output: true,
+        kind: ParamKind::Tensor,
+    });
+    let (idx, xv, sv, m) = (ValueId::new(0), ValueId::new(1), ValueId::new(2), ValueId::new(3));
+    k.body.push_op(Op::ProgramId { axis: 0 }, idx);
+    k.body.name_value(idx, "idx");
+    k.body.push_op(
+        Op::Load { src: "x".into(), indices: vec![IndexExpr::Value(idx)], mask: None, other: None },
+        xv,
+    );
+    k.body.push_op(Op::Load { src: "s".into(), indices: vec![], mask: None, other: None }, sv);
+    k.body.push_op(Op::BinOp { op: BinOpKind::Mul, lhs: xv, rhs: sv }, m);
+    k.body.push_op_no_result(Op::Store {
+        dst: "out".into(),
+        indices: vec![IndexExpr::Value(idx)],
+        value: m,
+        mask: None,
+    });
+    k
+}
+
 fn f32s_to_bytes(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|x| x.to_ne_bytes()).collect()
 }
@@ -294,6 +340,39 @@ fn vector_add_cuda_end_to_end() {
     }
     eprintln!("max|Δ| = {max_err:.3e} over {N} elements");
     assert!(max_err <= 1e-6, "CUDA vector_add mismatch: max|Δ|={max_err:.3e}");
+}
+
+#[test]
+fn scalar_param_abi_via_run_kernel() {
+    let Some(dev) = CudaDevice::create().expect("CUDA init") else {
+        eprintln!("no CUDA device — skipping CUDA smoke test");
+        return;
+    };
+
+    let kernel = scale_by_param_ir();
+    const N: usize = 1024;
+    let s: f32 = 2.5;
+    let x: Vec<f32> = (0..N).map(|i| (i as f32 * 0.007 - 0.3).sin()).collect();
+    let expected: Vec<f32> = x.iter().map(|v| v * s).collect();
+
+    let mut buffers = std::collections::BTreeMap::new();
+    buffers.insert("x".to_string(), f32s_to_bytes(&x));
+    buffers.insert("s".to_string(), s.to_ne_bytes().to_vec());
+    buffers.insert("out".to_string(), vec![0u8; N * 4]);
+
+    let block = 256u32;
+    let grid = (N as u32).div_ceil(block);
+    let outputs = dev
+        .run_kernel(&kernel, &buffers, [grid, 1, 1], [block, 1, 1])
+        .expect("run_kernel with scalar param");
+    let got = bytes_to_f32s(outputs.get("out").expect("out buffer"));
+
+    let mut max_err = 0.0f32;
+    for (g, e) in got.iter().zip(&expected) {
+        max_err = max_err.max((g - e).abs());
+    }
+    eprintln!("max|Δ| = {max_err:.3e} over {N} elements (scale_by_param)");
+    assert!(max_err <= 1e-6, "CUDA scalar-param ABI mismatch: max|Δ|={max_err:.3e}");
 }
 
 #[test]
