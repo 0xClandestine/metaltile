@@ -420,10 +420,17 @@ impl CudaGenerator {
             return;
         }
         writeln!(out, "    extern __shared__ unsigned char _smem[];").ok();
-        writeln!(out, "    const unsigned int _nw = (blockDim.x + 31u) / 32u;").ok();
+        writeln!(out, "    const unsigned int _nw = (blockDim.x * blockDim.y * blockDim.z + 31u) / 32u;").ok();
         writeln!(out, "    unsigned int _so = 0u;").ok();
-        for (name, ctype, count, per_warp, _bytes) in &arrays {
+        for (name, ctype, count, per_warp, bytes) in &arrays {
             let wf = if *per_warp { "_nw" } else { "1u" };
+            // Align each array's base to its element size — a preceding
+            // odd-length half/byte tile must not misalign this one. MUST stay
+            // in lockstep with the identical rounding in `shared_bytes`.
+            if *bytes > 1 {
+                let m = bytes - 1;
+                writeln!(out, "    _so = (_so + {m}u) & ~{m}u;").ok();
+            }
             writeln!(out, "    {ctype}* {name} = ({ctype}*)(_smem + _so);").ok();
             writeln!(out, "    _so += {wf} * {count}u * sizeof({ctype});").ok();
         }
@@ -481,15 +488,20 @@ impl CudaGenerator {
         v
     }
 
-    /// Total dynamic shared-memory bytes for a launch at `block_x` threads.
-    pub fn shared_bytes(&self, kernel: &Kernel, block_x: u32) -> usize {
-        let nw = block_x.div_ceil(32).max(1) as usize;
-        self.shared_arrays(kernel)
-            .iter()
-            .map(|(_, _, count, per_warp, bytes)| {
-                (if *per_warp { nw } else { 1 }) * (*count as usize) * *bytes
-            })
-            .sum()
+    /// Total dynamic shared-memory bytes for a launch of `block_threads`
+    /// total threads (x·y·z). Walks the same array order as `emit_allocs`
+    /// and applies the same per-array element-size alignment — the two MUST
+    /// stay in lockstep or the runtime under/over-sizes the launch.
+    pub fn shared_bytes(&self, kernel: &Kernel, block_threads: u32) -> usize {
+        let nw = block_threads.div_ceil(32).max(1) as usize;
+        let mut total = 0usize;
+        for (_, _, count, per_warp, bytes) in self.shared_arrays(kernel) {
+            if bytes > 1 {
+                total = total.next_multiple_of(bytes);
+            }
+            total += (if per_warp { nw } else { 1 }) * count as usize * bytes;
+        }
+        total
     }
 
     /// Walk a block's ops, emitting each. `ov` carries name overrides from
@@ -521,10 +533,14 @@ impl CudaGenerator {
     /// this is only called for Elementwise/Grid3D.
     fn emit_simd_aliases(&self, out: &mut String) {
         let lw = self.profile.lane_width;
-        writeln!(out, "    const unsigned int lsize      = blockDim.x;").ok();
-        writeln!(out, "    const unsigned int n_simd     = blockDim.x / {lw}u;").ok();
-        writeln!(out, "    const unsigned int simd_lane  = threadIdx.x % {lw}u;").ok();
-        writeln!(out, "    const unsigned int simd_group = threadIdx.x / {lw}u;").ok();
+        // Lane/warp ids derive from the FLATTENED in-block thread index —
+        // hardware warps are carved from the linearised (z,y,x) order, so
+        // threadIdx.x alone is wrong whenever blockDim.y/z > 1.
+        writeln!(out, "    const unsigned int _ltid      = (threadIdx.z * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x;").ok();
+        writeln!(out, "    const unsigned int lsize      = blockDim.x * blockDim.y * blockDim.z;").ok();
+        writeln!(out, "    const unsigned int n_simd     = lsize / {lw}u;").ok();
+        writeln!(out, "    const unsigned int simd_lane  = _ltid % {lw}u;").ok();
+        writeln!(out, "    const unsigned int simd_group = _ltid / {lw}u;").ok();
     }
 
     /// Reduction-mode preamble: maps Metal's threadgroup/simd built-ins to
@@ -533,19 +549,23 @@ impl CudaGenerator {
     /// on CUDA, kept for parity).
     fn emit_reduction_preamble(&self, out: &mut String, needs_guard: bool) {
         let lw = self.profile.lane_width;
-        writeln!(out, "    const unsigned int tid       = threadIdx.x;").ok();
+        // `tid`/lane/warp ids derive from the FLATTENED in-block thread index
+        // (hardware warps follow the linearised (z,y,x) order); threadIdx.x
+        // alone is wrong whenever blockDim.y/z > 1.
+        writeln!(out, "    const unsigned int _ltid     = (threadIdx.z * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x;").ok();
+        writeln!(out, "    const unsigned int tid       = _ltid;").ok();
         writeln!(out, "    const unsigned int tgid_x    = blockIdx.x;").ok();
         writeln!(out, "    const unsigned int tgid_y    = blockIdx.y;").ok();
         writeln!(out, "    const unsigned int tgid_z    = blockIdx.z;").ok();
-        writeln!(out, "    const unsigned int lsize     = blockDim.x;").ok();
+        writeln!(out, "    const unsigned int lsize     = blockDim.x * blockDim.y * blockDim.z;").ok();
         writeln!(out, "    const unsigned int n_simd    = lsize / {lw}u;").ok();
         if needs_guard {
             // Only the threadgroup-reduce tree needs ≥32 threads; sub-warp
             // kernels without a Reduce (hadamard_m) must keep running.
             writeln!(out, "    if (n_simd == 0u) return;").ok();
         }
-        writeln!(out, "    const unsigned int simd_lane  = threadIdx.x % {lw}u;").ok();
-        writeln!(out, "    const unsigned int simd_group = threadIdx.x / {lw}u;").ok();
+        writeln!(out, "    const unsigned int simd_lane  = _ltid % {lw}u;").ok();
+        writeln!(out, "    const unsigned int simd_group = _ltid / {lw}u;").ok();
     }
 
     fn emit_op(
@@ -772,7 +792,7 @@ impl CudaGenerator {
             }
             Op::Splat { value, shape, .. } if shape.rank() == 0 => {
                 let v = self.vname(vid, block, ov);
-                writeln!(out, "{pad}float {v} = {value}f;").ok();
+                writeln!(out, "{pad}float {v} = {};", fmt_f32_lit(*value)).ok();
             }
             // Per-thread grid-stride accumulation over a row (Phase 2).
             // Each thread sums src[offset+tid], src[offset+tid+lsize], …
@@ -1191,6 +1211,10 @@ impl CudaGenerator {
         } else {
             writeln!(out, "{pad}    {result} = {buf}[0];").ok();
         }
+        // Loop-reentry guard: when this Reduce sits inside a Loop, warp 0
+        // can start the NEXT iteration and overwrite {buf} before a lagging
+        // warp has read this iteration's {buf}[0].
+        writeln!(out, "{pad}    __syncthreads();").ok();
         writeln!(out, "{pad}}}").ok();
     }
 
@@ -1324,6 +1348,23 @@ fn cuda_binop(op: BinOpKind, l: &str, r: &str) -> String {
         CmpGe => format!("({l} >= {r})"),
         CmpEq => format!("({l} == {r})"),
         CmpNe => format!("({l} != {r})"),
+    }
+}
+
+/// Format an f64 IR literal as a valid CUDA C++ `float` literal. Integral
+/// values need an explicit decimal point (`1` → `1.0f`; bare `1f` is not a
+/// C++ literal), and non-finite values have no literal form at all.
+fn fmt_f32_lit(v: f64) -> String {
+    if !v.is_finite() {
+        if v.is_nan() {
+            return "(MT_INF - MT_INF)".to_string();
+        }
+        return if v > 0.0 { "MT_INF".to_string() } else { "(-MT_INF)".to_string() };
+    }
+    if v.fract() == 0.0 {
+        format!("{v:.1}f")
+    } else {
+        format!("{v}f")
     }
 }
 
@@ -1520,10 +1561,13 @@ mod tests {
         assert!(src.contains("extern \"C\" __global__ void row_reduce_sum("));
         assert!(src.contains("unsigned int n"));
         assert!(!src.contains(N_ELEMS_PARAM));
-        // Reduction preamble (block-per-row, warp = 32 lanes).
+        // Reduction preamble (block-per-row, warp = 32 lanes, ids from the
+        // flattened in-block thread index).
         assert!(src.contains("const unsigned int tgid_x    = blockIdx.x;"));
+        assert!(src.contains("const unsigned int _ltid     = (threadIdx.z * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x;"));
+        assert!(src.contains("const unsigned int lsize     = blockDim.x * blockDim.y * blockDim.z;"));
         assert!(src.contains("const unsigned int n_simd    = lsize / 32u;"));
-        assert!(src.contains("const unsigned int simd_lane  = threadIdx.x % 32u;"));
+        assert!(src.contains("const unsigned int simd_lane  = _ltid % 32u;"));
         // Per-thread grid-stride accumulation.
         assert!(src.contains("for (unsigned int _i = v_rs_2 + tid; _i < v_re_3; _i += lsize)"));
         // Two-level tree: warp shuffle + shared mem + barriers.
@@ -1538,6 +1582,15 @@ mod tests {
         let mut k = vector_add_ir();
         k.mode = KernelMode::Tile2D;
         assert!(CudaGenerator::new().generate(&k).is_err());
+    }
+
+    #[test]
+    fn float_literals_are_valid_cpp() {
+        assert_eq!(fmt_f32_lit(1.0), "1.0f");
+        assert_eq!(fmt_f32_lit(-2.0), "-2.0f");
+        assert_eq!(fmt_f32_lit(0.5), "0.5f");
+        assert_eq!(fmt_f32_lit(f64::INFINITY), "MT_INF");
+        assert_eq!(fmt_f32_lit(f64::NEG_INFINITY), "(-MT_INF)");
     }
 
     #[test]

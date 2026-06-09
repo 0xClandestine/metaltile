@@ -64,6 +64,7 @@ unsafe extern "C" {
     pub fn cuMemAllocHost_v2(pp: *mut *mut c_void, bytesize: usize) -> CUresult;
     pub fn cuMemFreeHost(p: *mut c_void) -> CUresult;
     pub fn cuMemcpyHtoDAsync_v2(dst: CUdeviceptr, src: *const c_void, byte_count: usize, stream: CUstream) -> CUresult;
+    pub fn cuMemsetD8Async(dst: CUdeviceptr, uc: u8, n: usize, stream: CUstream) -> CUresult;
     #[allow(clippy::too_many_arguments)]
     pub fn cuLaunchKernel(
         f: CUfunction,
