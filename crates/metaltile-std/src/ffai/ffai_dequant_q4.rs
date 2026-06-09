@@ -19,7 +19,7 @@
 //!
 //! ```text
 //!   qs      [m * (k/32) * 4]   u32   — 4 words/block, 8 nibbles/word
-//!   scales  [m * (k/32)]       f32   — per-block scale
+//!   scales  [m * (k/32)]       f16   — per-block scale
 //!   out     [m * k]            T     — dense dequantized weight
 //! ```
 //!

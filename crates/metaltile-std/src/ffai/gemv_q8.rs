@@ -598,6 +598,12 @@ pub fn ffai_gemv_q4_vec<T>(
 /// TWO independent weight streams (rows 2r, 2r+1) → 2× memory-level-parallelism on
 /// the latency-bound Q4 weight read (ncu: scoreboard-stalled, <50% BW), plus the x
 /// read is shared (halved). Stacks with multi-warp (`rows_per_tg` warps/TG).
+///
+/// CONTRACT: `rows_per_group % 2 == 0` (or `rows_per_group >= m_out`, the plain
+/// matvec case). `x_base` is derived from `row_a`'s group and shared by both
+/// rows — that's the whole point of the kernel — so a group boundary must never
+/// fall between the even/odd row pair. Odd `m_out` is safe: the dangling
+/// `row_b` clamps its weight reads to `row_a` and skips its store.
 #[kernel]
 pub fn ffai_gemv_q4_coalesced_2row<T>(
     qs: Tensor<u32>, d_f32: Tensor<f32>, x: Tensor<T>, mut out: Tensor<T>,
@@ -611,10 +617,15 @@ pub fn ffai_gemv_q4_coalesced_2row<T>(
     if row_a < m_out {
         let bpr = k_in / 32u32;
         let nwords = bpr * 4u32;
+        // Clamp row_b's bases before any load (`select` pre-evaluates both
+        // arms): for odd m_out the last pair's row_b would read past qs/d_f32.
+        // Clamped-to-row_a results are discarded (store guarded below).
+        let row_b_ok = row_b < m_out;
+        let row_b_safe = select(row_b_ok, row_b, row_a);
         let qa = row_a * bpr * 4u32;
-        let qb = row_b * bpr * 4u32;
+        let qb = row_b_safe * bpr * 4u32;
         let da = row_a * bpr;
-        let db = row_b * bpr;
+        let db = row_b_safe * bpr;
         let x_base = (row_a / rows_per_group) * k_in;
         let mut dot_a = 0.0f32;
         let mut dot_b = 0.0f32;

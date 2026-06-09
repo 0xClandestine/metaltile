@@ -75,10 +75,15 @@ pub fn ffai_gemm_q4_mpp<T>(
             let w_row = flat / 32u32; // 0..63 (output feature within tile)
             let k_local = flat & 31u32; // 0..31 (BK)
             let global_col = n_tile_base + w_row;
+            // Clamp before the qs/scales loads (`select` pre-evaluates both
+            // arms): the edge tile reads past out_dim otherwise. Zeroed rows
+            // never reach `out` (the store loop guards gc < out_dim).
+            let in_run_w = global_col < out_dim;
+            let safe_col = select(in_run_w, global_col, 0u32);
             let k = kb + k_local;
-            // Q4: block = (global_col*bpr) + k/32; within-block lane = k%32;
+            // Q4: block = (safe_col*bpr) + k/32; within-block lane = k%32;
             // word = lane/8 (0..3); nibble = lane%8.
-            let blk = global_col * bpr + k / 32u32;
+            let blk = safe_col * bpr + k / 32u32;
             let lane = k & 31u32;
             let word = load(qs[blk * 4u32 + lane / 8u32]);
             let nib = (word >> ((lane & 7u32) * 4u32)) & 0xfu32;
@@ -87,7 +92,7 @@ pub fn ffai_gemm_q4_mpp<T>(
             let qf = q_signed.cast::<i32>().cast::<f32>();
             let sc = load(scales[blk]).cast::<f32>();
             let w = (sc * qf).cast::<T>().cast::<f32>();
-            threadgroup_store("Ws", w_row * 32u32 + k_local, w);
+            threadgroup_store("Ws", w_row * 32u32 + k_local, select(in_run_w, w, 0.0f32));
         }
         threadgroup_barrier();
         coop_tile_load_a("gemm", "Xs", true, coop_stage(T), 32, 32, sg_m_base * 32u32);

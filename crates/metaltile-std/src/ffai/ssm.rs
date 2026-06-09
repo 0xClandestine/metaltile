@@ -77,7 +77,12 @@ pub fn conv1d_causal_step<T>(
         let next = load(state[(k + 1u32) * n_channels + d]);
         store(state[k * n_channels + d], next);
     }
-    store(state[(kernel_size - 2u32) * n_channels + d], load(x[d]));
+    // Same `kernel_size < 2` hazard as above, but for the tail STORE: the
+    // slot index would wrap to ~4e9 AND `state` has K-1 = 0 slots, so there
+    // is nothing valid to clamp to — skip the store entirely.
+    if kernel_size > 1u32 {
+        store(state[(kernel_size - 2u32) * n_channels + d], load(x[d]));
+    }
 }
 
 // ── Mamba 2 batched-prefill causal depthwise conv1d ─────────────────────
@@ -1018,7 +1023,11 @@ pub fn ssd_lcs(
         let mut acc = 0.0f32;
         for i in range(0u32, l, 1u32) {
             let t = c * l + i;
-            let dtv = select(t < t_total, load(dt[t * n_heads + h]), 0.0f32);
+            // `select` pre-evaluates both arms — clamp the index BEFORE the
+            // load so the tail chunk (t ≥ T) never reads past `dt`.
+            let valid = t < t_total;
+            let t_safe = select(valid, t, 0u32);
+            let dtv = select(valid, load(dt[t_safe * n_heads + h]), 0.0f32);
             acc = acc + a * dtv;
             store(lcs[idx * l + i], acc);
         }
@@ -1116,7 +1125,11 @@ pub fn ssd_mmask(
             let c = bh / n_heads;
             let h = bh - c * n_heads;
             let tj = c * l + j;
-            let dtj = select(tj < t_total, load(dt[tj * n_heads + h]), 0.0f32);
+            // Clamp before the load — `select` pre-evaluates both arms, so an
+            // unclamped tj on the zero-padded tail chunk would read OOB.
+            let valid = tj < t_total;
+            let tj_safe = select(valid, tj, 0u32);
+            let dtj = select(valid, load(dt[tj_safe * n_heads + h]), 0.0f32);
             let decay = exp(load(lcs[bh * l + i]) - load(lcs[bh * l + j]));
             store(m_out[e], load(cb[e]) * decay * dtj);
         }
@@ -1181,19 +1194,22 @@ pub fn ssd_recur(
     let idx = program_id::<0>();
     let tot = n_heads * ds * dh;
     if idx < tot {
+        // `sidx`/`stv` (not `s`/`st`): a local whose name prefixes a tensor
+        // param (`s_chunk`, `sin_t`, `state_*`) trips the DSL codegen
+        // local-elision bug → undeclared identifier at dispatch.
         let p = idx - (idx / dh) * dh;       // head_dim
-        let s = (idx / dh) - (idx / (dh * ds)) * ds; // state
+        let sidx = (idx / dh) - (idx / (dh * ds)) * ds; // state
         let h = idx / (dh * ds);
-        let mut st = load(state_in[(h * dh + p) * ds + s]);
+        let mut stv = load(state_in[(h * dh + p) * ds + sidx]);
         for c in range(0u32, nc, 1u32) {
             let bh = c * n_heads + h;
             // emit S_inᵀ for this chunk BEFORE applying it
-            store(sin_t[(bh * dh + p) * ds + s], st);
+            store(sin_t[(bh * dh + p) * ds + sidx], stv);
             let alpha = exp(load(lcs[bh * l + (l - 1u32)]));
-            let sc = load(s_chunk[(bh * ds + s) * dh + p]);
-            st = alpha * st + sc;
+            let sc = load(s_chunk[(bh * ds + sidx) * dh + p]);
+            stv = alpha * stv + sc;
         }
-        store(state_out[(h * dh + p) * ds + s], st);
+        store(state_out[(h * dh + p) * ds + sidx], stv);
     }
 }
 
@@ -1319,9 +1335,12 @@ pub fn ssd_g1_cb(
     if i < l {
         if j < l {
             // mmask epilogue: causal (i<j → 0) · decay · dt[t_j, h].
-            // `select` (not if/else) keeps it in the codegen-portable subset.
+            // `select` (not if/else) keeps it in the codegen-portable subset;
+            // clamp tj before the load (select pre-evaluates both arms).
             let tj = c * l + j;
-            let dtj = select(tj < t_total, load(dt[tj * n_heads + h]), 0.0f32);
+            let dt_ok = tj < t_total;
+            let tj_safe = select(dt_ok, tj, 0u32);
+            let dtj = select(dt_ok, load(dt[tj_safe * n_heads + h]), 0.0f32);
             let decay = exp(load(lcs[bz * l + i]) - load(lcs[bz * l + j]));
             let m = select(i < j, 0.0f32, acc * decay * dtj);
             store(out[(bz * l + i) * l + j], m);
@@ -1358,25 +1377,27 @@ pub fn ssd_g4_cs(
     let mut acc = 0.0f32;
     for k0 in range(0u32, ds, 16u32) {
         if tid < 512u32 {
-            // sin_t tile: col p = tgid_x*32 + s/16, state k = k0 + s%16.
-            let s = tid;
-            let p = tgid_x * 32u32 + s / 16u32;
+            // sin_t tile: col p = tgid_x*32 + sl/16, state k = k0 + sl%16.
+            // `sl` (not `s`): `s` prefixes the `sin_t` param name — DSL
+            // codegen local-elision pitfall.
+            let sl = tid;
+            let p = tgid_x * 32u32 + sl / 16u32;
             let valid = p < dh;
             let p_safe = select(valid, p, 0u32);
-            let kk = k0 + s - (s / 16u32) * 16u32;
+            let kk = k0 + sl - (sl / 16u32) * 16u32;
             let wv = select(valid, load(sin_t[w_base + p_safe * ds + kk]), 0.0f32);
-            threadgroup_store("g4cs_w", s, wv);
+            threadgroup_store("g4cs_w", sl, wv);
         }
         if tid >= 512u32 {
-            // C tile: row i = tgid_y*32 + s/16, state k = k0 + s%16.
-            let s = tid - 512u32;
-            let i = tgid_y * 32u32 + s / 16u32;
+            // C tile: row i = tgid_y*32 + sl/16, state k = k0 + sl%16.
+            let sl = tid - 512u32;
+            let i = tgid_y * 32u32 + sl / 16u32;
             let ti = c * l + i;
             let valid = (i < l) & (ti < t_total);
             let ti_safe = select(valid, ti, 0u32);
-            let kk = k0 + s - (s / 16u32) * 16u32;
+            let kk = k0 + sl - (sl / 16u32) * 16u32;
             let cv = select(valid, load(c_mat[(ti_safe * n_groups + g) * ds + kk]), 0.0f32);
-            threadgroup_store("g4cs_c", s, cv);
+            threadgroup_store("g4cs_c", sl, cv);
         }
         threadgroup_barrier();
         for k in range(0u32, 16u32, 1u32) {

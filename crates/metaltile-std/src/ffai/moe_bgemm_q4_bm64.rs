@@ -64,7 +64,10 @@ pub fn ffai_moe_bgemm_q4_bm64<T>(
     for _sub_iter in range(0u32, 64u32, 1u32) {
         let cur_row = m_tile_base + sub_offset;
         let cur_in_range = (sub_offset < 64u32) & (cur_row < m_total);
-        let cur_expert = select(cur_in_range, load(indices[cur_row]), 4294967295u32);
+        // Clamp before the load (`select` pre-evaluates both arms): an
+        // out-of-range cur_row would read past `indices`.
+        let cur_row_safe = select(cur_in_range, cur_row, 0u32);
+        let cur_expert = select(cur_in_range, load(indices[cur_row_safe]), 4294967295u32);
         let mut sub_end = 64u32;
         let mut found = 0u32;
         for _ii in range(0u32, 64u32, 1u32) {
@@ -106,15 +109,21 @@ pub fn ffai_moe_bgemm_q4_bm64<T>(
                     let w_row = flat / 32u32; // 0..63 (output feature within tile)
                     let k_local = flat & 31u32; // 0..31 (BK)
                     let global_row = n_tile_base + w_row; // output feature within expert
+                    // Clamp before the qs/scales loads (`select` pre-evaluates
+                    // both arms): an edge tile would read past this expert's
+                    // weights. Zeroed rows never reach `out` (gc < n_out guard).
+                    let in_run_w = global_row < n_out;
+                    let safe_row = select(in_run_w, global_row, 0u32);
                     let k = kb + k_local;
-                    let blk = global_row * bpr + k / 32u32; // block within expert
+                    let blk = safe_row * bpr + k / 32u32; // block within expert
                     let lane = k & 31u32;
                     let word = load(qs[qs_expert_base + blk * 4u32 + lane / 8u32]);
                     let nib = (word >> ((lane & 7u32) * 4u32)) & 0xfu32;
                     let q_signed = select(nib >= 8u32, nib - 16u32, nib);
                     let qf = q_signed.cast::<i32>().cast::<f32>();
                     let sc = load(scales[sc_expert_base + blk]).cast::<f32>();
-                    threadgroup_store("Ws", w_row * 32u32 + k_local, (sc * qf).cast::<T>().cast::<f32>());
+                    let w = (sc * qf).cast::<T>().cast::<f32>();
+                    threadgroup_store("Ws", w_row * 32u32 + k_local, select(in_run_w, w, 0.0f32));
                 }
                 threadgroup_barrier();
                 coop_tile_load_a("gemm", "Xs", true, coop_stage(T), 32, 32, sg_m_base * 32u32);

@@ -245,9 +245,11 @@ pub fn sdpa_decode_2pass_pass1_bc4<T>(
     //   t0 = _t, t1 = _t+blocks, t2 = _t+2*blocks, t3 = _t+3*blocks.
     // Guard: all 4 must be < n_kv. Equivalent to t0 + 3*blocks < n_kv,
     // i.e. t0 < n_kv - 3*blocks. Use this as the exclusive upper bound.
-    // Kernel only dispatched when n_kv > 1024 and blocks ≥ 32, so
-    // n_kv - 3*blocks is always positive and well above block_idx.
-    let bc4_limit = n_kv - blocks * 3u32; // exclusive upper bound: t0 + 3*blocks < n_kv
+    // Kernel is meant to be dispatched only when n_kv > 1024 and blocks ≥ 32,
+    // but clamp the unsigned subtraction anyway: n_kv < 3*blocks would wrap
+    // to ~4e9 — a runaway (GPU-pinning) loop. Clamped to 0 the main loop
+    // runs zero iterations and the scalar tail covers everything.
+    let bc4_limit = select(n_kv > blocks * 3u32, n_kv - blocks * 3u32, 0u32);
     for _t in range(block_idx, bc4_limit, blocks * 4u32) {
         // KV position indices for the 4 slots.
         let t0 = _t;
@@ -396,10 +398,12 @@ pub fn sdpa_decode_2pass_pass1_bc4<T>(
     // assigned to block_idx that are < bc4_limit. Remaining (tail) positions are:
     //   block_idx + K*blocks  for the first K such that block_idx + K*blocks >= bc4_limit.
     // We compute tail_start = block_idx + ceil((bc4_limit-block_idx)/blocks)*blocks.
-    // Since bc4_limit >> block_idx (n_kv > 1024, blocks >= 32, block_idx < blocks),
-    // this is well-defined and avoids underflow.
-    // ceil((bc4_limit - block_idx) / blocks) = (bc4_limit - block_idx + blocks - 1) / blocks
-    let tail_off = (bc4_limit - block_idx + blocks - 1u32) / blocks;
+    // ceil((bc4_limit - block_idx) / blocks) = (bc4_limit - block_idx + blocks - 1) / blocks.
+    // The select guards the unsigned subtraction: with bc4_limit clamped to 0
+    // (or ≤ block_idx) the main loop ran zero iterations, so the tail starts
+    // right at block_idx and owns the whole [0, n_kv) slice.
+    let tail_off =
+        select(bc4_limit > block_idx, (bc4_limit - block_idx + blocks - 1u32) / blocks, 0u32);
     let tail_start = block_idx + tail_off * blocks;
     for _t in range(tail_start, n_kv, blocks) {
         let base = kv_head_base + _t * head_dim;
@@ -675,8 +679,8 @@ pub fn sdpa_decode_2pass_pass1_tiled<T>(
 // ── Additional head_dim variants: d={64,96,256} ──────────────────────────────
 //
 // Same pass-1 / pass-2 pairing, just with a different `elems_per_lane`
-// (= head_dim / 32). Pass 2 is unchanged for all variants since it reads
-// already-stored partials and doesn't depend on head_dim per-lane layout.
+// (= head_dim / 32). Each head_dim gets its own pass-2 twin too: pass 2
+// walks the per-lane `partial_o` layout, which scales with head_dim.
 
 /// Pass 1 for head_dim=64. Each lane owns 2 elements (`64/32`).
 /// Grid: `[n_kv_heads, blocks, 1]`, TG: `[32, gqa_factor, 1]`.
