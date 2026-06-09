@@ -13,6 +13,12 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# CUDA/NVIDIA backend (NVRTC + Driver API). Opt-in; requires the CUDA
+# toolkit + an NVIDIA driver at link/run time. Off by default so the
+# macOS Metal path stays zero-config. See specs/CUDA_BACKEND_SPEC.md.
+cuda = []
+
 [dependencies]
 metaltile-core.workspace = true
 metaltile-codegen.workspace = true
