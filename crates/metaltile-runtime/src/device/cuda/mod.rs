@@ -234,7 +234,7 @@ fn size_bucket(len: usize) -> usize {
         // worst-case slack to ~12.5% while keeping the bucket count small.
         let pow2 = len.next_power_of_two();
         let step = (pow2 / 8).max(MIN_BLOCK);
-        (len + step - 1) / step * step
+        len.div_ceil(step) * step
     }
 }
 
@@ -528,6 +528,7 @@ impl CudaDevice {
     /// (HOST slices) describe each contiguous token group + its weight slab.
     /// `out[t,n] = Σ_k a[t,k]·w[eid][n,k]`. Beats cuBLAS per-expert on the skinny
     /// MoE shape. Errors if the runtime was built without CUTLASS.
+    #[allow(clippy::too_many_arguments)] // mirrors the C entry point's signature
     pub fn moe_grouped_cutlass(
         &self,
         a: CUdeviceptr,
@@ -1411,7 +1412,6 @@ impl CudaDevice {
 
     /// Allocate `len` bytes of device memory.
     pub fn alloc(&self, len: usize) -> Result<DeviceBuffer<'_>, MetalTileError> {
-        let mut ptr: CUdeviceptr = 0;
         if len == 0 {
             return Ok(DeviceBuffer { ptr: 0, len: 0, _dev: self });
         }
@@ -1420,7 +1420,7 @@ impl CudaDevice {
         // when the pool is disabled, so behavior is unchanged in that mode. nsys
         // showed cuMemAlloc/cuMemFree = 62% of CUDA API time (6110 driver allocs,
         // each ~0.5ms + device-synchronizing → the prefill GPU idle).
-        ptr = self.alloc_raw(len)?;
+        let ptr = self.alloc_raw(len)?;
         Ok(DeviceBuffer { ptr, len, _dev: self })
     }
 
@@ -1781,6 +1781,9 @@ impl CudaDevice {
 
     /// Replay a captured decode token: ONE host launch replaces ~390 — no
     /// per-kernel enqueue, no inter-kernel host bubbles. Syncs the stream after.
+    ///
+    /// `exec` must be a live handle returned by [`Self::end_capture`].
+    #[allow(clippy::not_unsafe_ptr_arg_deref)] // opaque driver handle, not dereferenced host-side
     pub fn graph_launch(&self, exec: CUgraphExec) -> Result<(), MetalTileError> {
         cu_check(unsafe { cuGraphLaunch(exec, self.stream) }, "cuGraphLaunch")?;
         self.synchronize()
@@ -1793,6 +1796,8 @@ impl CudaDevice {
     /// `graph_launch` (sync-per-token) incurs, giving the maximum throughput
     /// for the captured graph. Use only for throughput benchmarking — state
     /// (KV cache, SSM state) is overwritten sequentially and not meaningful.
+    /// `exec` must be a live handle returned by [`Self::end_capture`].
+    #[allow(clippy::not_unsafe_ptr_arg_deref)] // opaque driver handle, not dereferenced host-side
     pub fn graph_launch_batch(&self, exec: CUgraphExec, n: usize) -> Result<(), MetalTileError> {
         for _ in 0..n {
             cu_check(unsafe { cuGraphLaunch(exec, self.stream) }, "cuGraphLaunch(batch)")?;
@@ -1856,7 +1861,7 @@ impl CudaDevice {
     ) -> Result<Prepared<'d>, MetalTileError> {
         // 1. IR → CUDA C++ → module.
         let cg = CudaGenerator::new();
-        let src = cg.generate(kernel).map_err(|e| MetalTileError::Codegen(e))?;
+        let src = cg.generate(kernel).map_err(MetalTileError::Codegen)?;
         // MT_DUMP_CUDA_SRC=<path>: write generated CUDA C++ for every kernel.
         if let Ok(dir) = std::env::var("MT_DUMP_CUDA_SRC") {
             let path = format!("{}/{}.cu", dir, kernel.name);
@@ -1962,8 +1967,8 @@ impl CudaDevice {
     /// allocate + upload every param (by name from `buffers`), pack kernel
     /// args in signature order, launch over (`grid`×`block`), and read back
     /// the output params. The CUDA analog of `Context::dispatch_with_grid`
-    /// + `SingleDispatch`, used to run the registered kernel-test corpus on
-    /// CUDA. `buffers` must contain every param's bytes (inputs AND
+    /// plus `SingleDispatch`, used to run the registered kernel-test corpus
+    /// on CUDA. `buffers` must contain every param's bytes (inputs AND
     /// pre-sized outputs) plus each constexpr's name→LE-bytes.
     pub fn run_kernel(
         &self,

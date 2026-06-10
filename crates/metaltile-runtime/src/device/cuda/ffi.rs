@@ -45,6 +45,7 @@ unsafe extern "C" {
     pub fn cuDeviceGetAttribute(pi: *mut c_int, attrib: c_int, dev: CUdevice) -> CUresult;
     pub fn cuCtxCreate_v2(pctx: *mut CUcontext, flags: c_uint, dev: CUdevice) -> CUresult;
     pub fn cuCtxDestroy_v2(ctx: CUcontext) -> CUresult;
+    #[allow(dead_code)]
     pub fn cuCtxSynchronize() -> CUresult;
     pub fn cuModuleLoadData(module: *mut CUmodule, image: *const c_void) -> CUresult;
     pub fn cuModuleUnload(module: CUmodule) -> CUresult;
@@ -56,6 +57,7 @@ unsafe extern "C" {
     pub fn cuFuncSetAttribute(func: CUfunction, attrib: c_int, value: c_int) -> CUresult;
     pub fn cuMemAlloc_v2(dptr: *mut CUdeviceptr, bytesize: usize) -> CUresult;
     pub fn cuMemFree_v2(dptr: CUdeviceptr) -> CUresult;
+    #[allow(dead_code)]
     pub fn cuMemcpyHtoD_v2(dst: CUdeviceptr, src: *const c_void, byte_count: usize) -> CUresult;
     pub fn cuMemcpyDtoH_v2(dst: *mut c_void, src: CUdeviceptr, byte_count: usize) -> CUresult;
     // Pinned host memory + async H2D copy — lets per-token activation uploads
@@ -121,6 +123,7 @@ unsafe extern "C" {
         flags: u64,
     ) -> CUresult;
     pub fn cuGraphLaunch(hGraphExec: CUgraphExec, hStream: CUstream) -> CUresult;
+    #[allow(dead_code)]
     pub fn cuGraphExecDestroy(hGraphExec: CUgraphExec) -> CUresult;
     pub fn cuGraphDestroy(hGraph: CUgraph) -> CUresult;
 }
@@ -156,7 +159,9 @@ pub const CUDA_R_16BF: c_int = 14;
 pub const CUBLAS_COMPUTE_32F: c_int = 68;
 
 // cublasGemmAlgo_t
+#[allow(dead_code)]
 pub const CUBLAS_GEMM_DEFAULT: c_int = -1;
+#[allow(dead_code)]
 pub const CUBLAS_GEMM_DEFAULT_TENSOR_OP: c_int = 99;
 // Explicit tensor-op algos: CUBLAS_GEMM_ALGO{N}_TENSOR_OP = 100 + N, N in 0..=15.
 // The DEFAULT (99) heuristic may pick split-K kernels that accumulate via atomics
@@ -166,6 +171,7 @@ pub const CUBLAS_GEMM_DEFAULT_TENSOR_OP: c_int = 99;
 pub const CUBLAS_GEMM_ALGO0_TENSOR_OP: c_int = 100;
 
 // cublasMath_t
+#[allow(dead_code)]
 pub const CUBLAS_DEFAULT_MATH: c_int = 0;
 pub const CUBLAS_TENSOR_OP_MATH: c_int = 1;
 
