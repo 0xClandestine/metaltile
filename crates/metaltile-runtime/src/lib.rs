@@ -16,5 +16,7 @@ mod dispatch;
 pub mod error;
 
 pub use context::{Context, DispatchResult, DispatchSpec, ResidentBuffer};
+#[cfg(feature = "cuda")]
+pub use device::cuda::{CudaDevice, CudaFunction, CudaModule, DeviceBuffer};
 pub use device::gpu_family::GpuFamily;
 pub use error::MetalTileError;

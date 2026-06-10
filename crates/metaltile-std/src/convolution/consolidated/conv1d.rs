@@ -439,6 +439,11 @@ fn blockscaled_setup(
         .input(TestBuffer::zeros("out", n_out, dt))
         .constexpr("batch", batch as u32)
         .constexpr("in_ch", in_ch as u32)
+            // `channels` is read only by the DEPTHWISE variant, but it stays
+            // in every variant's signature — the CUDA/HIP/Vulkan dispatchers
+            // bind constexprs strictly by the kernel's declared list and
+            // error on a missing one (Metal tolerates the gap).
+            .constexpr("channels", in_ch as u32)
         .constexpr("in_len", in_len as u32)
         .constexpr("out_ch", out_ch as u32)
         .constexpr("out_len", out_len as u32)
@@ -668,6 +673,11 @@ pub mod kernel_tests {
             .input(TestBuffer::zeros("out", n_out, dt))
             .constexpr("batch", batch as u32)
             .constexpr("in_ch", in_ch as u32)
+            // `channels` is read only by the DEPTHWISE variant, but it stays
+            // in every variant's signature — the CUDA/HIP/Vulkan dispatchers
+            // bind constexprs strictly by the kernel's declared list and
+            // error on a missing one (Metal tolerates the gap).
+            .constexpr("channels", in_ch as u32)
             .constexpr("in_len", in_len as u32)
             .constexpr("out_ch", out_ch as u32)
             .constexpr("out_len", out_len as u32)
@@ -711,6 +721,11 @@ pub mod kernel_tests {
             .input(TestBuffer::zeros("out", n_out, dt))
             .constexpr("batch", batch as u32)
             .constexpr("in_ch", in_ch as u32)
+            // `channels` is read only by the DEPTHWISE variant, but it stays
+            // in every variant's signature — the CUDA/HIP/Vulkan dispatchers
+            // bind constexprs strictly by the kernel's declared list and
+            // error on a missing one (Metal tolerates the gap).
+            .constexpr("channels", in_ch as u32)
             .constexpr("in_len", in_len as u32)
             .constexpr("out_ch", out_ch as u32)
             .constexpr("out_len", out_len as u32)
@@ -755,6 +770,11 @@ pub mod kernel_tests {
             .input(TestBuffer::zeros("out", n_out, dt))
             .constexpr("batch", batch as u32)
             .constexpr("in_ch", in_ch as u32)
+            // `channels` is read only by the DEPTHWISE variant, but it stays
+            // in every variant's signature — the CUDA/HIP/Vulkan dispatchers
+            // bind constexprs strictly by the kernel's declared list and
+            // error on a missing one (Metal tolerates the gap).
+            .constexpr("channels", in_ch as u32)
             .constexpr("in_len", in_len as u32)
             .constexpr("out_ch", out_ch as u32)
             .constexpr("out_len", out_len as u32)
@@ -794,6 +814,12 @@ pub mod kernel_tests {
             .input(TestBuffer::from_vec("bias", crate::utils::pack_f32(&bias_f, dt), dt))
             .input(TestBuffer::zeros("out", n_out, dt))
             .constexpr("channels", channels as u32)
+            // batch/in_ch/out_ch are read only by the non-depthwise variants
+            // but stay in the shared signature — strict-binding dispatchers
+            // (CUDA/HIP/Vulkan) need values for them too.
+            .constexpr("batch", 1u32)
+            .constexpr("in_ch", channels as u32)
+            .constexpr("out_ch", channels as u32)
             .constexpr("in_len", in_len as u32)
             .constexpr("out_len", out_len as u32)
             .constexpr("k", k as u32)
@@ -1032,6 +1058,11 @@ pub mod kernel_benches {
             .buffer(BenchBuffer::zeros("out", n_out, dt).output())
             .constexpr("batch", batch as u32)
             .constexpr("in_ch", in_ch as u32)
+            // `channels` is read only by the DEPTHWISE variant, but it stays
+            // in every variant's signature — the CUDA/HIP/Vulkan dispatchers
+            // bind constexprs strictly by the kernel's declared list and
+            // error on a missing one (Metal tolerates the gap).
+            .constexpr("channels", in_ch as u32)
             .constexpr("in_len", in_len as u32)
             .constexpr("out_ch", out_ch as u32)
             .constexpr("out_len", out_len as u32)

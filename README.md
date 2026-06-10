@@ -118,7 +118,7 @@ One `#[kernel]` DSL, four GPU backends. Your kernel lowers to a shared IR; the c
 | Backend | Target GPU | Compile path | Status |
 |---|---|---|---|
 | **MSL** | Apple (Metal) | `.metal` → `metallib` (`xcrun metal`) | Stable — default, zero-config on macOS |
-| **CUDA** | NVIDIA (sm_90 / 120 / 121, e.g. GB10) | CUDA C++ → NVRTC → PTX, runtime compile | Lands in a follow-up PR (`--features cuda`) |
+| **CUDA** | NVIDIA (sm_90 / 120 / 121, e.g. GB10) | CUDA C++ → NVRTC → PTX, runtime compile | Stable — `--features cuda` |
 | **HIP** | AMD (ROCm, `gfx*`) | HIP C++ → hipRTC → AMDGPU code object | Lands in a follow-up PR (`--features hip`) |
 | **Vulkan** | Any Vulkan-class GPU | SPIR-V via shaderc → Vulkan compute | Lands in a follow-up PR (`--features vulkan`) |
 
