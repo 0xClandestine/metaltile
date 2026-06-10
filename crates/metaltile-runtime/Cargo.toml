@@ -18,6 +18,14 @@ workspace = true
 # toolkit + an NVIDIA driver at link/run time. Off by default so the
 # macOS Metal path stays zero-config. See specs/CUDA_BACKEND_SPEC.md.
 cuda = []
+# AMD ROCm / HIP backend (hipRTC + HIP runtime). Opt-in; requires the
+# ROCm toolkit (HIP_PATH or `C:/Program Files/AMD/ROCm/<ver>`) + an AMD
+# driver. Off by default. See specs/AMD_BACKEND_SPEC.md.
+hip = []
+# Vulkan / SPIR-V backend (shaderc + Vulkan compute). Opt-in; requires
+# the Vulkan SDK (VULKAN_SDK env var) + a Vulkan driver. Off by default.
+# See specs/VULKAN_BACKEND_SPEC.md.
+vulkan = []
 
 [dependencies]
 metaltile-core.workspace = true
