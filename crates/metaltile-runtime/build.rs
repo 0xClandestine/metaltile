@@ -9,9 +9,65 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(have_cutlass)");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
+    println!("cargo:rerun-if-env-changed=HIP_PATH");
+    println!("cargo:rerun-if-env-changed=ROCM_PATH");
+    println!("cargo:rerun-if-env-changed=VULKAN_SDK");
 
     if std::env::var("CARGO_FEATURE_CUDA").is_ok() {
         cuda();
+    }
+    if std::env::var("CARGO_FEATURE_HIP").is_ok() {
+        hip();
+    }
+    if std::env::var("CARGO_FEATURE_VULKAN").is_ok() {
+        vulkan();
+    }
+}
+
+/// HIP / ROCm linker setup. Windows ships `amdhip64.lib` and `hiprtc.lib`
+/// under `<ROCm>/lib`; Linux distros ship them under `<rocm>/lib` or
+/// `/opt/rocm/lib`. `HIP_PATH` is the canonical env var; `ROCM_PATH`
+/// covers Linux installs that prefer that name.
+fn hip() {
+    let hip_root =
+        std::env::var("HIP_PATH").or_else(|_| std::env::var("ROCM_PATH")).unwrap_or_else(|_| {
+            if cfg!(windows) {
+                r"C:\Program Files\AMD\ROCm\7.1".to_string()
+            } else {
+                "/opt/rocm".to_string()
+            }
+        });
+
+    for sub in ["lib", "lib64"] {
+        println!("cargo:rustc-link-search=native={hip_root}/{sub}");
+    }
+
+    // `amdhip64` is the import lib on Windows and the shared object on
+    // Linux; rustc emits the right form for the target platform.
+    println!("cargo:rustc-link-lib=dylib=amdhip64");
+    println!("cargo:rustc-link-lib=dylib=hiprtc");
+}
+
+/// Vulkan linker setup. The SDK installs `vulkan-1.lib` and `shaderc*.lib`
+/// under `<VULKAN_SDK>/Lib` on Windows, `<sdk>/lib` on Linux.
+fn vulkan() {
+    let vk_sdk = std::env::var("VULKAN_SDK").unwrap_or_else(|_| {
+        if cfg!(windows) { r"C:\VulkanSDK\1.4.350.0".to_string() } else { "/usr".to_string() }
+    });
+
+    for sub in ["Lib", "lib", "lib64"] {
+        println!("cargo:rustc-link-search=native={vk_sdk}/{sub}");
+    }
+
+    if cfg!(windows) {
+        println!("cargo:rustc-link-lib=dylib=vulkan-1");
+        // shaderc_combined is the all-in-one static lib that bundles
+        // libshaderc + glslang + SPIRV-Tools — simpler than wiring up the
+        // shared `shaderc_shared.dll` plus its dep chain.
+        println!("cargo:rustc-link-lib=static=shaderc_combined");
+    } else {
+        println!("cargo:rustc-link-lib=dylib=vulkan");
+        println!("cargo:rustc-link-lib=dylib=shaderc_shared");
     }
 }
 

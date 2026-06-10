@@ -18,6 +18,12 @@ workspace = true
 # CUDA device runtime (`CudaDevice` and friends). Forwards to
 # metaltile-runtime/cuda so downstream tile projects only name the facade.
 cuda = ["metaltile-runtime/cuda"]
+# HIP / ROCm device runtime (`HipDevice` and friends). Forwards to
+# metaltile-runtime/hip so downstream tile projects only name the facade.
+hip = ["metaltile-runtime/hip"]
+# Vulkan device runtime (`VulkanDevice` and friends). Forwards to
+# metaltile-runtime/vulkan so downstream tile projects only name the facade.
+vulkan = ["metaltile-runtime/vulkan"]
 
 [dependencies]
 metaltile-core.workspace = true
